@@ -95,6 +95,13 @@ class SourceGroup {
                   begin_offset_(0),
                   end_offset_(0) { }
 
+#if !(defined(USING_V8_SHARED) || defined(V8_SHARED))
+  ~SourceGroup() {
+    delete next_semaphore_;
+    delete done_semaphore_;
+  }
+#endif  // USING_V8_SHARED
+
   void Begin(char** argv, int offset) {
     argv_ = const_cast<const char**>(argv);
     begin_offset_ = offset;
@@ -170,7 +177,7 @@ class SourceGroup {
   class IsolateThread : public v8::internal::Thread {
    public:
     explicit IsolateThread(SourceGroup* group)
-        : v8::internal::Thread(NULL, GetThreadOptions()), group_(group) {}
+        : v8::internal::Thread(GetThreadOptions()), group_(group) {}
 
     virtual void Run() {
       group_->ExecuteInThread();
@@ -211,6 +218,34 @@ class SourceGroup {
 
 
 static SourceGroup* isolate_sources = NULL;
+
+
+#ifdef COMPRESS_STARTUP_DATA_BZ2
+class BZip2Decompressor : public v8::StartupDataDecompressor {
+ public:
+  virtual ~BZip2Decompressor() { }
+
+ protected:
+  virtual int DecompressData(char* raw_data,
+                             int* raw_data_size,
+                             const char* compressed_data,
+                             int compressed_data_size) {
+    ASSERT_EQ(v8::StartupData::kBZip2,
+              v8::V8::GetCompressedStartupDataAlgorithm());
+    unsigned int decompressed_size = *raw_data_size;
+    int result =
+        BZ2_bzBuffToBuffDecompress(raw_data,
+                                   &decompressed_size,
+                                   const_cast<char*>(compressed_data),
+                                   compressed_data_size,
+                                   0, 1);
+    if (result == BZ_OK) {
+      *raw_data_size = decompressed_size;
+    }
+    return result;
+  }
+};
+#endif
 
 
 int RunMain(int argc, char* argv[]) {
@@ -303,29 +338,13 @@ int main(int argc, char* argv[]) {
   }
 
 #ifdef COMPRESS_STARTUP_DATA_BZ2
-  ASSERT_EQ(v8::StartupData::kBZip2,
-            v8::V8::GetCompressedStartupDataAlgorithm());
-  int compressed_data_count = v8::V8::GetCompressedStartupDataCount();
-  v8::StartupData* compressed_data = new v8::StartupData[compressed_data_count];
-  v8::V8::GetCompressedStartupData(compressed_data);
-  for (int i = 0; i < compressed_data_count; ++i) {
-    char* decompressed = new char[compressed_data[i].raw_size];
-    unsigned int decompressed_size = compressed_data[i].raw_size;
-    int result =
-        BZ2_bzBuffToBuffDecompress(decompressed,
-                                   &decompressed_size,
-                                   const_cast<char*>(compressed_data[i].data),
-                                   compressed_data[i].compressed_size,
-                                   0, 1);
-    if (result != BZ_OK) {
-      fprintf(stderr, "bzip error code: %d\n", result);
-      exit(1);
-    }
-    compressed_data[i].data = decompressed;
-    compressed_data[i].raw_size = decompressed_size;
+  BZip2Decompressor startup_data_decompressor;
+  int bz2_result = startup_data_decompressor.Decompress();
+  if (bz2_result != BZ_OK) {
+    fprintf(stderr, "bzip error code: %d\n", bz2_result);
+    exit(1);
   }
-  v8::V8::SetDecompressedStartupData(compressed_data);
-#endif  // COMPRESS_STARTUP_DATA_BZ2
+#endif
 
   v8::V8::SetFlagsFromCommandLine(&argc, argv, true);
   int result = 0;
@@ -347,13 +366,6 @@ int main(int argc, char* argv[]) {
     result = RunMain(argc, argv);
   }
   v8::V8::Dispose();
-
-#ifdef COMPRESS_STARTUP_DATA_BZ2
-  for (int i = 0; i < compressed_data_count; ++i) {
-    delete[] compressed_data[i].data;
-  }
-  delete[] compressed_data;
-#endif  // COMPRESS_STARTUP_DATA_BZ2
 
   return result;
 }
@@ -492,14 +504,42 @@ void ExternalArrayWeakCallback(v8::Persistent<v8::Value> object, void* data) {
 
 v8::Handle<v8::Value> CreateExternalArray(const v8::Arguments& args,
                                           v8::ExternalArrayType type,
-                                          int element_size) {
+                                          size_t element_size) {
+  assert(element_size == 1 ||
+         element_size == 2 ||
+         element_size == 4 ||
+         element_size == 8);
   if (args.Length() != 1) {
     return v8::ThrowException(
         v8::String::New("Array constructor needs one parameter."));
   }
-  int length = args[0]->Int32Value();
-  void* data = malloc(length * element_size);
-  memset(data, 0, length * element_size);
+  static const int kMaxLength = 0x3fffffff;
+  size_t length = 0;
+  if (args[0]->IsUint32()) {
+    length = args[0]->Uint32Value();
+  } else if (args[0]->IsNumber()) {
+    double raw_length = args[0]->NumberValue();
+    if (raw_length < 0) {
+      return v8::ThrowException(
+          v8::String::New("Array length must not be negative."));
+    }
+    if (raw_length > kMaxLength) {
+      return v8::ThrowException(
+          v8::String::New("Array length exceeds maximum length."));
+    }
+    length = static_cast<size_t>(raw_length);
+  } else {
+    return v8::ThrowException(
+        v8::String::New("Array length must be a number."));
+  }
+  if (length > static_cast<size_t>(kMaxLength)) {
+    return v8::ThrowException(
+        v8::String::New("Array length exceeds maximum length."));
+  }
+  void* data = calloc(length, element_size);
+  if (data == NULL) {
+    return v8::ThrowException(v8::String::New("Memory allocation failed."));
+  }
   v8::Handle<v8::Object> array = v8::Object::New();
   v8::Persistent<v8::Object> persistent_array =
       v8::Persistent<v8::Object>::New(array);

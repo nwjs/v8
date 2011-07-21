@@ -208,7 +208,7 @@ void fail(v8::PreParserData* data, const char* message, ...) {
     fflush(stderr);
   }
   exit(EXIT_FAILURE);
-};
+}
 
 
 bool IsFlag(const char* arg) {
@@ -290,12 +290,12 @@ ExceptionExpectation ParseExpectation(int argc, const char* argv[]) {
         arg_index++;
       } while (argc > arg_index && IsFlag(argv[arg_index]));
       if (argc > arg_index) {
-        expects.beg_pos = atoi(argv[arg_index]);
+        expects.beg_pos = atoi(argv[arg_index]);  // NOLINT
         do {
           arg_index++;
         } while (argc > arg_index && IsFlag(argv[arg_index]));
         if (argc > arg_index) {
-          expects.end_pos = atoi(argv[arg_index]);
+          expects.end_pos = atoi(argv[arg_index]);  // NOLINT
         }
       }
     }

@@ -181,20 +181,6 @@ void OS::Free(void* buf, const size_t length) {
 }
 
 
-#ifdef ENABLE_HEAP_PROTECTION
-
-void OS::Protect(void* address, size_t size) {
-  UNIMPLEMENTED();
-}
-
-
-void OS::Unprotect(void* address, size_t size, bool is_executable) {
-  UNIMPLEMENTED();
-}
-
-#endif
-
-
 void OS::Sleep(int milliseconds) {
   unsigned int ms = static_cast<unsigned int>(milliseconds);
   usleep(1000 * ms);
@@ -266,15 +252,12 @@ PosixMemoryMappedFile::~PosixMemoryMappedFile() {
 }
 
 
-#ifdef ENABLE_LOGGING_AND_PROFILING
 static unsigned StringToLong(char* buffer) {
   return static_cast<unsigned>(strtol(buffer, NULL, 16));  // NOLINT
 }
-#endif
 
 
 void OS::LogSharedLibraryAddresses() {
-#ifdef ENABLE_LOGGING_AND_PROFILING
   static const int MAP_LENGTH = 1024;
   int fd = open("/proc/self/maps", O_RDONLY);
   if (fd < 0) return;
@@ -311,7 +294,6 @@ void OS::LogSharedLibraryAddresses() {
     LOG(i::Isolate::Current(), SharedLibraryEvent(start_of_path, start, end));
   }
   close(fd);
-#endif
 }
 
 
@@ -398,17 +380,15 @@ class Thread::PlatformData : public Malloced {
 };
 
 
-Thread::Thread(Isolate* isolate, const Options& options)
+Thread::Thread(const Options& options)
     : data_(new PlatformData),
-      isolate_(isolate),
       stack_size_(options.stack_size) {
   set_name(options.name);
 }
 
 
-Thread::Thread(Isolate* isolate, const char* name)
+Thread::Thread(const char* name)
     : data_(new PlatformData),
-      isolate_(isolate),
       stack_size_(0) {
   set_name(name);
 }
@@ -426,7 +406,6 @@ static void* ThreadEntry(void* arg) {
   // one) so we initialize it here too.
   thread->data()->thread_ = pthread_self();
   ASSERT(thread->data()->thread_ != kNoThread);
-  Thread::SetThreadLocal(Isolate::isolate_key(), thread->isolate());
   thread->Run();
   return NULL;
 }
@@ -591,8 +570,6 @@ Semaphore* OS::CreateSemaphore(int count) {
 }
 
 
-#ifdef ENABLE_LOGGING_AND_PROFILING
-
 static pthread_t GetThreadID() {
   pthread_t thread_id = pthread_self();
   return thread_id;
@@ -660,7 +637,7 @@ class SignalSender : public Thread {
   };
 
   explicit SignalSender(int interval)
-      : Thread(NULL, "SignalSender"),
+      : Thread("SignalSender"),
         interval_(interval) {}
 
   static void AddActiveSampler(Sampler* sampler) {
@@ -687,8 +664,7 @@ class SignalSender : public Thread {
     ScopedLock lock(mutex_);
     SamplerRegistry::RemoveActiveSampler(sampler);
     if (SamplerRegistry::GetState() == SamplerRegistry::HAS_NO_SAMPLERS) {
-      RuntimeProfiler::WakeUpRuntimeProfilerThreadBeforeShutdown();
-      instance_->Join();
+      RuntimeProfiler::StopRuntimeProfilerThreadBeforeShutdown(instance_);
       delete instance_;
       instance_ = NULL;
 
@@ -821,6 +797,5 @@ void Sampler::Stop() {
   SetActive(false);
 }
 
-#endif  // ENABLE_LOGGING_AND_PROFILING
 
 } }  // namespace v8::internal

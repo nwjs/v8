@@ -30,7 +30,7 @@
     'use_system_v8%': 0,
     'msvs_use_common_release': 0,
     'gcc_version%': 'unknown',
-    'v8_compress_startup_data%': 'false',
+    'v8_compress_startup_data%': 'off',
     'v8_target_arch%': '<(target_arch)',
 
     # Setting 'v8_can_use_unaligned_accesses' to 'true' will allow the code
@@ -62,10 +62,7 @@
     ['use_system_v8==0', {
       'target_defaults': {
         'defines': [
-          'ENABLE_LOGGING_AND_PROFILING',
           'ENABLE_DEBUGGER_SUPPORT',
-          'ENABLE_VMSTATE_TRACKING',
-          'V8_FAST_TLS',
         ],
         'conditions': [
           ['OS!="mac"', {
@@ -232,6 +229,7 @@
       'targets': [
         {
           'target_name': 'v8',
+          'toolsets': ['host', 'target'],
           'conditions': [
             ['v8_use_snapshot=="true"', {
               'dependencies': ['v8_snapshot'],
@@ -281,9 +279,16 @@
         {
           'target_name': 'v8_snapshot',
           'type': '<(library)',
+          'toolsets': ['host', 'target'],
           'conditions': [
             ['component=="shared_library"', {
               'conditions': [
+                # The ARM assembler assumes the host is 32 bits, so force building
+                # 32-bit host tools.
+                ['v8_target_arch=="arm" and host_arch=="x64" and _toolset=="host"', {
+                  'cflags': ['-m32'],
+                  'ldflags': ['-m32'],
+                }],
                 ['OS=="win"', {
                   'defines': [
                     'BUILDING_V8_SHARED',
@@ -525,7 +530,6 @@
             '../../src/inspector.h',
             '../../src/interpreter-irregexp.cc',
             '../../src/interpreter-irregexp.h',
-            '../../src/json-parser.cc',
             '../../src/json-parser.h',
             '../../src/jsregexp.cc',
             '../../src/jsregexp.h',
@@ -639,10 +643,13 @@
             '../../src/v8.cc',
             '../../src/v8.h',
             '../../src/v8checks.h',
+            '../../src/v8conversions.cc',
+            '../../src/v8conversions.h',
             '../../src/v8globals.h',
             '../../src/v8memory.h',
             '../../src/v8threads.cc',
             '../../src/v8threads.h',
+            '../../src/v8utils.cc',
             '../../src/v8utils.h',
             '../../src/variables.cc',
             '../../src/variables.h',
@@ -902,6 +909,7 @@
                 '../../tools/js2c.py',
                 '<@(_outputs)',
                 'CORE',
+                '<(v8_compress_startup_data)',
                 '<@(library_files)'
               ],
             },
@@ -919,6 +927,7 @@
                 '../../tools/js2c.py',
                 '<@(_outputs)',
                 'EXPERIMENTAL',
+                '<(v8_compress_startup_data)',
                 '<@(experimental_library_files)'
               ],
             },
@@ -953,6 +962,7 @@
         {
           'target_name': 'v8_shell',
           'type': 'executable',
+          'toolsets': ['host'],
           'dependencies': [
             'v8'
           ],
@@ -963,6 +973,12 @@
             ['OS=="win"', {
               # This could be gotten by not setting chromium_code, if that's OK.
               'defines': ['_CRT_SECURE_NO_WARNINGS'],
+            }],
+            # The ARM assembler assumes the host is 32 bits, so force building
+            # 32-bit host tools.
+            ['v8_target_arch=="arm" and host_arch=="x64" and _toolset=="host"', {
+              'cflags': ['-m32'],
+              'ldflags': ['-m32'],
             }],
             ['v8_compress_startup_data=="bz2"', {
               'libraries': [
@@ -976,6 +992,7 @@
         {
           'target_name': 'v8',
           'type': 'settings',
+          'toolsets': ['host', 'target'],
           'link_settings': {
             'libraries': [
               '-lv8',
@@ -985,6 +1002,7 @@
         {
           'target_name': 'v8_shell',
           'type': 'none',
+          'toolsets': ['host'],
           'dependencies': [
             'v8'
           ],

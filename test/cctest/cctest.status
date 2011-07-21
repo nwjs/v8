@@ -30,9 +30,6 @@ prefix cctest
 test-api/Bug*: FAIL
 
 ##############################################################################
-# BUG(281): This test fails on some Linuxes.
-test-debug/DebuggerAgent: PASS, (PASS || FAIL) if $system == linux
-
 # BUG(382): Weird test. Can't guarantee that it never times out.
 test-api/ApplyInterruption: PASS || TIMEOUT
 
@@ -40,14 +37,6 @@ test-api/ApplyInterruption: PASS || TIMEOUT
 # they don't fail then test.py has failed.
 test-serialize/TestThatAlwaysFails: FAIL
 test-serialize/DependentTestThatAlwaysFails: FAIL
-
-##############################################################################
-# BUG(1354): Bad function name inference
-test-func-name-inference/FactoryHashmapConditional: FAIL
-test-func-name-inference/FactoryHashmapVariable: FAIL
-test-func-name-inference/FactoryHashmap: FAIL
-test-func-name-inference/MultipleAssignments: FAIL
-test-func-name-inference/PassedAsConstructorParameter: FAIL
 
 ##############################################################################
 [ $arch == arm ]
@@ -62,6 +51,7 @@ test-api/OutOfMemoryNested: SKIP
 test-log/ProfLazyMode: SKIP
 
 # BUG(945): Socket connect fails on ARM
+test-debug/DebuggerAgent: SKIP
 test-debug/DebuggerAgentProtocolOverflowHeader: SKIP
 test-sockets/Socket: SKIP
 

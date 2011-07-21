@@ -169,8 +169,6 @@ void CodeGenerator::PrintCode(Handle<Code> code, CompilationInfo* info) {
 #endif  // ENABLE_DISASSEMBLER
 }
 
-#ifdef ENABLE_LOGGING_AND_PROFILING
-
 static Vector<const char> kRegexp = CStrVector("regexp");
 
 bool CodeGenerator::ShouldGenerateLog(Expression* type) {
@@ -186,8 +184,6 @@ bool CodeGenerator::ShouldGenerateLog(Expression* type) {
   }
   return false;
 }
-
-#endif
 
 
 bool CodeGenerator::RecordPositions(MacroAssembler* masm,
@@ -209,9 +205,14 @@ void ArgumentsAccessStub::Generate(MacroAssembler* masm) {
     case READ_ELEMENT:
       GenerateReadElement(masm);
       break;
-    case NEW_NON_STRICT:
+    case NEW_NON_STRICT_FAST:
+      GenerateNewNonStrictFast(masm);
+      break;
+    case NEW_NON_STRICT_SLOW:
+      GenerateNewNonStrictSlow(masm);
+      break;
     case NEW_STRICT:
-      GenerateNewObject(masm);
+      GenerateNewStrict(masm);
       break;
   }
 }

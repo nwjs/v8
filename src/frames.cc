@@ -36,6 +36,8 @@
 #include "scopeinfo.h"
 #include "string-stream.h"
 
+#include "allocation-inl.h"
+
 namespace v8 {
 namespace internal {
 
@@ -346,7 +348,6 @@ void SafeStackFrameIterator::Reset() {
 // -------------------------------------------------------------------------
 
 
-#ifdef ENABLE_LOGGING_AND_PROFILING
 SafeStackTraceFrameIterator::SafeStackTraceFrameIterator(
     Isolate* isolate,
     Address fp, Address sp, Address low_bound, Address high_bound) :
@@ -362,7 +363,6 @@ void SafeStackTraceFrameIterator::Advance() {
     if (frame()->is_java_script()) return;
   }
 }
-#endif
 
 
 Code* StackFrame::GetSafepointData(Isolate* isolate,
@@ -371,7 +371,6 @@ Code* StackFrame::GetSafepointData(Isolate* isolate,
                                    unsigned* stack_slots) {
   PcToCodeCache::PcToCodeCacheEntry* entry =
       isolate->pc_to_code_cache()->GetCacheEntry(pc);
-  SafepointEntry cached_safepoint_entry = entry->safepoint_entry;
   if (!entry->safepoint_entry.is_valid()) {
     entry->safepoint_entry = entry->code->GetSafepointEntry(pc);
     ASSERT(entry->safepoint_entry.is_valid());
@@ -528,6 +527,17 @@ Address StandardFrame::GetExpressionAddress(int n) const {
 }
 
 
+Object* StandardFrame::GetExpression(Address fp, int index) {
+  return Memory::Object_at(GetExpressionAddress(fp, index));
+}
+
+
+Address StandardFrame::GetExpressionAddress(Address fp, int n) {
+  const int offset = StandardFrameConstants::kExpressionsOffset;
+  return fp + offset - n * kPointerSize;
+}
+
+
 int StandardFrame::ComputeExpressionsCount() const {
   const int offset =
       StandardFrameConstants::kExpressionsOffset + kPointerSize;
@@ -643,6 +653,16 @@ bool JavaScriptFrame::IsConstructor() const {
     fp = Memory::Address_at(fp + StandardFrameConstants::kCallerFPOffset);
   }
   return IsConstructFrame(fp);
+}
+
+
+int JavaScriptFrame::GetArgumentsLength() const {
+  // If there is an arguments adaptor frame get the arguments length from it.
+  if (has_adapted_arguments()) {
+    return Smi::cast(GetExpression(caller_fp(), 0))->value();
+  } else {
+    return GetNumberOfIncomingArguments();
+  }
 }
 
 
@@ -809,6 +829,22 @@ DeoptimizationInputData* OptimizedFrame::GetDeoptimizationData(
   ASSERT(*deopt_index != Safepoint::kNoDeoptimizationIndex);
 
   return DeoptimizationInputData::cast(code->deoptimization_data());
+}
+
+
+int OptimizedFrame::GetInlineCount() {
+  ASSERT(is_optimized());
+
+  int deopt_index = Safepoint::kNoDeoptimizationIndex;
+  DeoptimizationInputData* data = GetDeoptimizationData(&deopt_index);
+
+  TranslationIterator it(data->TranslationByteArray(),
+                         data->TranslationIndex(deopt_index)->value());
+  Translation::Opcode opcode = static_cast<Translation::Opcode>(it.Next());
+  ASSERT(opcode == Translation::BEGIN);
+  USE(opcode);
+  int frame_count = it.Next();
+  return frame_count;
 }
 
 

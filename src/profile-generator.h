@@ -28,8 +28,6 @@
 #ifndef V8_PROFILE_GENERATOR_H_
 #define V8_PROFILE_GENERATOR_H_
 
-#ifdef ENABLE_LOGGING_AND_PROFILING
-
 #include "allocation.h"
 #include "hashmap.h"
 #include "../include/v8-profiler.h"
@@ -638,8 +636,7 @@ class HeapSnapshotsCollection;
 class HeapSnapshot {
  public:
   enum Type {
-    kFull = v8::HeapSnapshot::kFull,
-    kAggregated = v8::HeapSnapshot::kAggregated
+    kFull = v8::HeapSnapshot::kFull
   };
 
   HeapSnapshot(HeapSnapshotsCollection* collection,
@@ -859,6 +856,8 @@ class HeapObjectsSet {
   void Clear();
   bool Contains(Object* object);
   void Insert(Object* obj);
+  const char* GetTag(Object* obj);
+  void SetTag(Object* obj, const char* tag);
 
  private:
   HashMap entries_;
@@ -920,6 +919,7 @@ class V8HeapExplorer : public HeapEntriesAllocator {
   void AddRootEntries(SnapshotFillerInterface* filler);
   int EstimateObjectsCount();
   bool IterateAndExtractReferences(SnapshotFillerInterface* filler);
+  void TagGlobalObjects();
 
   static HeapObject* const kInternalRootObject;
 
@@ -971,13 +971,16 @@ class V8HeapExplorer : public HeapEntriesAllocator {
   void SetRootShortcutReference(Object* child);
   void SetRootGcRootsReference();
   void SetGcRootsReference(Object* child);
+  void TagObject(Object* obj, const char* tag);
 
   HeapEntry* GetEntry(Object* obj);
 
+  Heap* heap_;
   HeapSnapshot* snapshot_;
   HeapSnapshotsCollection* collection_;
   SnapshottingProgressReportingInterface* progress_;
   SnapshotFillerInterface* filler_;
+  HeapObjectsSet objects_tags_;
 
   static HeapObject* const kGcRootsObject;
 
@@ -1120,7 +1123,5 @@ class HeapSnapshotJSONSerializer {
 String* GetConstructorNameForHeapProfile(JSObject* object);
 
 } }  // namespace v8::internal
-
-#endif  // ENABLE_LOGGING_AND_PROFILING
 
 #endif  // V8_PROFILE_GENERATOR_H_

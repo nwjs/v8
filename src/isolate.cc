@@ -85,13 +85,9 @@ void ThreadLocalTop::InitializeInternal() {
 #ifdef USE_SIMULATOR
   simulator_ = NULL;
 #endif
-#ifdef ENABLE_LOGGING_AND_PROFILING
   js_entry_sp_ = NULL;
   external_callback_ = NULL;
-#endif
-#ifdef ENABLE_VMSTATE_TRACKING
   current_vm_state_ = EXTERNAL;
-#endif
   try_catch_handler_address_ = NULL;
   context_ = NULL;
   thread_id_ = ThreadId::Invalid();
@@ -190,8 +186,8 @@ class PreallocatedMemoryThread: public Thread {
 
 
  private:
-  explicit PreallocatedMemoryThread(Isolate* isolate)
-      : Thread(isolate, "v8:PreallocMem"),
+  PreallocatedMemoryThread()
+      : Thread("v8:PreallocMem"),
         keep_running_(true),
         wait_for_ever_semaphore_(OS::CreateSemaphore(0)),
         data_ready_semaphore_(OS::CreateSemaphore(0)),
@@ -219,7 +215,7 @@ class PreallocatedMemoryThread: public Thread {
 
 void Isolate::PreallocatedMemoryThreadStart() {
   if (preallocated_memory_thread_ != NULL) return;
-  preallocated_memory_thread_ = new PreallocatedMemoryThread(this);
+  preallocated_memory_thread_ = new PreallocatedMemoryThread();
   preallocated_memory_thread_->Start();
 }
 
@@ -1304,6 +1300,7 @@ char* Isolate::RestoreThread(char* from) {
   if (RuntimeProfiler::IsEnabled() && current_vm_state() == JS) {
     RuntimeProfiler::IsolateEnteredJS(this);
   }
+  ASSERT(context() == NULL || context()->IsContext());
   return from + sizeof(ThreadLocalTop);
 }
 
@@ -1342,6 +1339,16 @@ void Isolate::ThreadDataTable::Remove(Isolate* isolate,
   PerIsolateThreadData* data = Lookup(isolate, thread_id);
   if (data != NULL) {
     Remove(data);
+  }
+}
+
+
+void Isolate::ThreadDataTable::RemoveAllThreads(Isolate* isolate) {
+  PerIsolateThreadData* data = list_;
+  while (data != NULL) {
+    PerIsolateThreadData* next = data->next_;
+    if (data->isolate() == isolate) Remove(data);
+    data = next;
   }
 }
 
@@ -1396,8 +1403,6 @@ Isolate::Isolate()
       ast_sentinels_(NULL),
       string_tracker_(NULL),
       regexp_stack_(NULL),
-      frame_element_constant_list_(0),
-      result_constant_list_(0),
       embedder_data_(NULL) {
   TRACE_ISOLATE(constructor);
 
@@ -1432,10 +1437,6 @@ Isolate::Isolate()
   debugger_ = NULL;
 #endif
 
-#ifdef ENABLE_LOGGING_AND_PROFILING
-  producer_heap_profile_ = NULL;
-#endif
-
   handle_scope_data_.Initialize();
 
 #define ISOLATE_INIT_EXECUTE(type, name, initial_value)                        \
@@ -1461,6 +1462,10 @@ void Isolate::TearDown() {
   SetIsolateThreadLocals(this, NULL);
 
   Deinit();
+
+  { ScopedLock lock(process_wide_mutex_);
+    thread_data_table_->RemoveAllThreads(this);
+  }
 
   if (!IsDefaultIsolate()) {
     delete this;
@@ -1519,11 +1524,6 @@ void Isolate::SetIsolateThreadLocals(Isolate* isolate,
 
 Isolate::~Isolate() {
   TRACE_ISOLATE(destructor);
-
-#ifdef ENABLE_LOGGING_AND_PROFILING
-  delete producer_heap_profile_;
-  producer_heap_profile_ = NULL;
-#endif
 
   delete unicode_cache_;
   unicode_cache_ = NULL;
@@ -1600,8 +1600,7 @@ bool Isolate::PreInit() {
   ASSERT(Isolate::Current() == this);
 #ifdef ENABLE_DEBUGGER_SUPPORT
   debug_ = new Debug(this);
-  debugger_ = new Debugger();
-  debugger_->isolate_ = this;
+  debugger_ = new Debugger(this);
 #endif
 
   memory_allocator_ = new MemoryAllocator();
@@ -1620,7 +1619,6 @@ bool Isolate::PreInit() {
 #define C(name) isolate_addresses_[Isolate::k_##name] =                        \
     reinterpret_cast<Address>(name());
   ISOLATE_ADDRESS_LIST(C)
-  ISOLATE_ADDRESS_LIST_PROF(C)
 #undef C
 
   string_tracker_ = new StringTracker();
@@ -1640,11 +1638,6 @@ bool Isolate::PreInit() {
   ast_sentinels_ = new AstSentinels();
   regexp_stack_ = new RegExpStack();
   regexp_stack_->isolate_ = this;
-
-#ifdef ENABLE_LOGGING_AND_PROFILING
-  producer_heap_profile_ = new ProducerHeapProfile();
-  producer_heap_profile_->isolate_ = this;
-#endif
 
   state_ = PREINITIALIZED;
   return true;
@@ -1729,10 +1722,10 @@ bool Isolate::Init(Deserializer* des) {
     return false;
   }
 
+  InitializeThreadLocal();
+
   bootstrapper_->Initialize(create_heap_objects);
   builtins_.Setup(create_heap_objects);
-
-  InitializeThreadLocal();
 
   // Only preallocate on the first initialization.
   if (FLAG_preallocate_message_memory && preallocated_message_space_ == NULL) {
@@ -1850,11 +1843,6 @@ void Isolate::Exit() {
 
   // Reinit the current thread for the isolate it was running before this one.
   SetIsolateThreadLocals(previous_isolate, previous_thread_data);
-}
-
-
-void Isolate::ResetEagerOptimizingData() {
-  compilation_cache_->ResetEagerOptimizingData();
 }
 
 

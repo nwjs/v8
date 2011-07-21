@@ -69,7 +69,6 @@ class InlineRuntimeFunctionsTable;
 class NoAllocationStringAllocator;
 class PcToCodeCache;
 class PreallocatedMemoryThread;
-class ProducerHeapProfile;
 class RegExpStack;
 class SaveContext;
 class UnicodeCache;
@@ -126,14 +125,8 @@ typedef ZoneList<Handle<Object> > ZoneObjectList;
   C(c_entry_fp_address)                    \
   C(context_address)                       \
   C(pending_exception_address)             \
-  C(external_caught_exception_address)
-
-#ifdef ENABLE_LOGGING_AND_PROFILING
-#define ISOLATE_ADDRESS_LIST_PROF(C)       \
+  C(external_caught_exception_address)     \
   C(js_entry_sp_address)
-#else
-#define ISOLATE_ADDRESS_LIST_PROF(C)
-#endif
 
 
 // Platform-independent, reliable thread identifier.
@@ -253,14 +246,9 @@ class ThreadLocalTop BASE_EMBEDDED {
 #endif
 #endif  // USE_SIMULATOR
 
-#ifdef ENABLE_LOGGING_AND_PROFILING
   Address js_entry_sp_;  // the stack pointer of the bottom js entry frame
   Address external_callback_;  // the external callback we're currently in
-#endif
-
-#ifdef ENABLE_VMSTATE_TRACKING
   StateTag current_vm_state_;
-#endif
 
   // Generated code scratch locations.
   int32_t formal_count_;
@@ -314,18 +302,6 @@ class HashMap;
 
 #endif
 
-#ifdef ENABLE_LOGGING_AND_PROFILING
-
-#define ISOLATE_LOGGING_INIT_LIST(V)                                           \
-  V(CpuProfiler*, cpu_profiler, NULL)                                          \
-  V(HeapProfiler*, heap_profiler, NULL)
-
-#else
-
-#define ISOLATE_LOGGING_INIT_LIST(V)
-
-#endif
-
 #define ISOLATE_INIT_ARRAY_LIST(V)                                             \
   /* SerializerDeserializer state. */                                          \
   V(Object*, serialize_partial_snapshot_cache, kPartialSnapshotCacheCapacity)  \
@@ -333,6 +309,8 @@ class HashMap;
   V(int, bad_char_shift_table, kUC16AlphabetSize)                              \
   V(int, good_suffix_shift_table, (kBMMaxShift + 1))                           \
   V(int, suffix_table, (kBMMaxShift + 1))                                      \
+  V(uint32_t, random_seed, 2)                                                  \
+  V(uint32_t, private_random_seed, 2)                                          \
   ISOLATE_INIT_DEBUG_ARRAY_LIST(V)
 
 typedef List<HeapObject*, PreallocatedStorage> DebugObjectCache;
@@ -372,8 +350,9 @@ typedef List<HeapObject*, PreallocatedStorage> DebugObjectCache;
   /* SafeStackFrameIterator activations count. */                              \
   V(int, safe_stack_iterator_counter, 0)                                       \
   V(uint64_t, enabled_cpu_features, 0)                                         \
+  V(CpuProfiler*, cpu_profiler, NULL)                                          \
+  V(HeapProfiler*, heap_profiler, NULL)                                        \
   ISOLATE_PLATFORM_INIT_LIST(V)                                                \
-  ISOLATE_LOGGING_INIT_LIST(V)                                                 \
   ISOLATE_DEBUGGER_INIT_LIST(V)
 
 class Isolate {
@@ -444,7 +423,6 @@ class Isolate {
   enum AddressId {
 #define C(name) k_##name,
     ISOLATE_ADDRESS_LIST(C)
-    ISOLATE_ADDRESS_LIST_PROF(C)
 #undef C
     k_isolate_address_count
   };
@@ -529,6 +507,7 @@ class Isolate {
   // Access to top context (where the current function object was created).
   Context* context() { return thread_local_top_.context_; }
   void set_context(Context* context) {
+    ASSERT(context == NULL || context->IsContext());
     thread_local_top_.context_ = context;
   }
   Context** context_address() { return &thread_local_top_.context_; }
@@ -594,7 +573,7 @@ class Isolate {
     return thread_local_top_.scheduled_exception_;
   }
   bool has_scheduled_exception() {
-    return !thread_local_top_.scheduled_exception_->IsTheHole();
+    return thread_local_top_.scheduled_exception_ != heap_.the_hole_value();
   }
   void clear_scheduled_exception() {
     thread_local_top_.scheduled_exception_ = heap_.the_hole_value();
@@ -618,7 +597,6 @@ class Isolate {
   }
   inline Address* handler_address() { return &thread_local_top_.handler_; }
 
-#ifdef ENABLE_LOGGING_AND_PROFILING
   // Bottom JS entry (see StackTracer::Trace in log.cc).
   static Address js_entry_sp(ThreadLocalTop* thread) {
     return thread->js_entry_sp_;
@@ -626,7 +604,6 @@ class Isolate {
   inline Address* js_entry_sp_address() {
     return &thread_local_top_.js_entry_sp_;
   }
-#endif
 
   // Generated code scratch locations.
   void* formal_count_address() { return &thread_local_top_.formal_count_; }
@@ -895,14 +872,6 @@ class Isolate {
     return &interp_canonicalize_mapping_;
   }
 
-  ZoneObjectList* frame_element_constant_list() {
-    return &frame_element_constant_list_;
-  }
-
-  ZoneObjectList* result_constant_list() {
-    return &result_constant_list_;
-  }
-
   void* PreallocatedStorageNew(size_t size);
   void PreallocatedStorageDelete(void* p);
   void PreallocatedStorageInit(size_t size);
@@ -913,12 +882,6 @@ class Isolate {
 #endif
 
   inline bool DebuggerHasBreakPoints();
-
-#ifdef ENABLE_LOGGING_AND_PROFILING
-  ProducerHeapProfile* producer_heap_profile() {
-    return producer_heap_profile_;
-  }
-#endif
 
 #ifdef DEBUG
   HistogramInfo* heap_histograms() { return heap_histograms_; }
@@ -957,22 +920,21 @@ class Isolate {
 
   static const int kJSRegexpStaticOffsetsVectorSize = 50;
 
-#ifdef ENABLE_LOGGING_AND_PROFILING
   Address external_callback() {
     return thread_local_top_.external_callback_;
   }
   void set_external_callback(Address callback) {
     thread_local_top_.external_callback_ = callback;
   }
-#endif
 
-#ifdef ENABLE_VMSTATE_TRACKING
   StateTag current_vm_state() {
     return thread_local_top_.current_vm_state_;
   }
 
   void SetCurrentVMState(StateTag state) {
     if (RuntimeProfiler::IsEnabled()) {
+      // Make sure thread local top is initialized.
+      ASSERT(thread_local_top_.isolate_ == this);
       StateTag current_state = thread_local_top_.current_vm_state_;
       if (current_state != JS && state == JS) {
         // Non-JS -> JS transition.
@@ -990,9 +952,6 @@ class Isolate {
     }
     thread_local_top_.current_vm_state_ = state;
   }
-#endif
-
-  void ResetEagerOptimizingData();
 
   void SetData(void* data) { embedder_data_ = data; }
   void* GetData() { return embedder_data_; }
@@ -1011,6 +970,7 @@ class Isolate {
     void Insert(PerIsolateThreadData* data);
     void Remove(Isolate* isolate, ThreadId thread_id);
     void Remove(PerIsolateThreadData* data);
+    void RemoveAllThreads(Isolate* isolate);
 
    private:
     PerIsolateThreadData* list_;
@@ -1157,8 +1117,6 @@ class Isolate {
       regexp_macro_assembler_canonicalize_;
   RegExpStack* regexp_stack_;
   unibrow::Mapping<unibrow::Ecma262Canonicalize> interp_canonicalize_mapping_;
-  ZoneObjectList frame_element_constant_list_;
-  ZoneObjectList result_constant_list_;
   void* embedder_data_;
 
 #if defined(V8_TARGET_ARCH_ARM) && !defined(__arm__) || \
@@ -1178,10 +1136,6 @@ class Isolate {
 #ifdef ENABLE_DEBUGGER_SUPPORT
   Debugger* debugger_;
   Debug* debug_;
-#endif
-
-#ifdef ENABLE_LOGGING_AND_PROFILING
-  ProducerHeapProfile* producer_heap_profile_;
 #endif
 
 #define GLOBAL_BACKING_STORE(type, name, initialvalue)                         \
@@ -1372,11 +1326,5 @@ inline void Context::mark_out_of_memory() {
 
 
 } }  // namespace v8::internal
-
-// TODO(isolates): Get rid of these -inl.h includes and place them only where
-//                 they're needed.
-#include "allocation-inl.h"
-#include "zone-inl.h"
-#include "frames-inl.h"
 
 #endif  // V8_ISOLATE_H_

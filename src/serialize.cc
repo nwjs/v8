@@ -284,7 +284,6 @@ void ExternalReferenceTable::PopulateTable(Isolate* isolate) {
   const char* AddressNames[] = {
 #define C(name) "Isolate::" #name,
     ISOLATE_ADDRESS_LIST(C)
-    ISOLATE_ADDRESS_LIST_PROF(C)
     NULL
 #undef C
   };
@@ -1017,10 +1016,11 @@ void Deserializer::ReadChunk(Object** current,
 
       case kNativesStringResource: {
         int index = source_->Get();
-        Vector<const char> source_vector = Natives::GetScriptSource(index);
+        Vector<const char> source_vector = Natives::GetRawScriptSource(index);
         NativesExternalStringResource* resource =
-            new NativesExternalStringResource(
-                isolate->bootstrapper(), source_vector.start());
+            new NativesExternalStringResource(isolate->bootstrapper(),
+                                              source_vector.start(),
+                                              source_vector.length());
         *current++ = reinterpret_cast<Object*>(resource);
         break;
       }

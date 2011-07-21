@@ -128,7 +128,9 @@ void Deoptimizer::DeoptimizeFunction(JSFunction* function) {
   Address instruction_start = function->code()->instruction_start();
   Address jump_table_address =
       instruction_start + function->code()->safepoint_table_offset();
+#ifdef DEBUG
   Address previous_pc = instruction_start;
+#endif
 
   SafepointTableDeoptimiztionEntryIterator deoptimizations(function->code());
   Address entry_pc = NULL;
@@ -157,12 +159,16 @@ void Deoptimizer::DeoptimizeFunction(JSFunction* function) {
       CodePatcher patcher(call_address, Assembler::kCallInstructionLength);
       patcher.masm()->Call(GetDeoptimizationEntry(deoptimization_index, LAZY),
                            RelocInfo::NONE);
+#ifdef DEBUG
       previous_pc = call_end_address;
+#endif
     } else {
       // Not room enough for a long Call instruction. Write a short call
       // instruction to a long jump placed elsewhere in the code.
+#ifdef DEBUG
       Address short_call_end_address =
           call_address + MacroAssembler::kShortCallInstructionLength;
+#endif
       ASSERT(next_pc >= short_call_end_address);
 
       // Write jump in jump-table.
@@ -177,7 +183,9 @@ void Deoptimizer::DeoptimizeFunction(JSFunction* function) {
       CodePatcher call_patcher(call_address,
                                MacroAssembler::kShortCallInstructionLength);
       call_patcher.masm()->call(jump_table_address);
+#ifdef DEBUG
       previous_pc = short_call_end_address;
+#endif
     }
 
     // Continue with next deoptimization entry.
@@ -316,7 +324,7 @@ void Deoptimizer::DoComputeOsrOutputFrame() {
   USE(height_in_bytes);
 
   unsigned fixed_size = ComputeFixedSize(function_);
-  unsigned input_frame_size = static_cast<unsigned>(input_->GetFrameSize());
+  unsigned input_frame_size = input_->GetFrameSize();
   ASSERT(fixed_size + height_in_bytes == input_frame_size);
 
   unsigned stack_slot_size = optimized_code_->stack_slots() * kPointerSize;
@@ -340,6 +348,9 @@ void Deoptimizer::DoComputeOsrOutputFrame() {
   output_ = new FrameDescription*[1];
   output_[0] = new(output_frame_size) FrameDescription(
       output_frame_size, function_);
+#ifdef DEBUG
+  output_[0]->SetKind(Code::OPTIMIZED_FUNCTION);
+#endif
 
   // Clear the incoming parameters in the optimized frame to avoid
   // confusing the garbage collector.
@@ -448,12 +459,15 @@ void Deoptimizer::DoComputeFrame(TranslationIterator* iterator,
   // The 'fixed' part of the frame consists of the incoming parameters and
   // the part described by JavaScriptFrameConstants.
   unsigned fixed_frame_size = ComputeFixedSize(function);
-  unsigned input_frame_size = static_cast<unsigned>(input_->GetFrameSize());
+  unsigned input_frame_size = input_->GetFrameSize();
   unsigned output_frame_size = height_in_bytes + fixed_frame_size;
 
   // Allocate and store the output frame description.
   FrameDescription* output_frame =
       new(output_frame_size) FrameDescription(output_frame_size, function);
+#ifdef DEBUG
+  output_frame->SetKind(Code::FUNCTION);
+#endif
 
   bool is_bottommost = (0 == frame_index);
   bool is_topmost = (output_count_ - 1 == frame_index);
@@ -584,7 +598,7 @@ void Deoptimizer::DoComputeFrame(TranslationIterator* iterator,
   output_frame->SetState(Smi::FromInt(state));
 
   // Set the continuation for the topmost frame.
-  if (is_topmost) {
+  if (is_topmost && bailout_type_ != DEBUGGER) {
     Code* continuation = (bailout_type_ == EAGER)
         ? isolate_->builtins()->builtin(Builtins::kNotifyDeoptimized)
         : isolate_->builtins()->builtin(Builtins::kNotifyLazyDeoptimized);
@@ -593,6 +607,26 @@ void Deoptimizer::DoComputeFrame(TranslationIterator* iterator,
   }
 
   if (output_count_ - 1 == frame_index) iterator->Done();
+}
+
+
+void Deoptimizer::FillInputFrame(Address tos, JavaScriptFrame* frame) {
+  // Set the register values. The values are not important as there are no
+  // callee saved registers in JavaScript frames, so all registers are
+  // spilled. Registers rbp and rsp are set to the correct values though.
+  for (int i = 0; i < Register::kNumRegisters; i++) {
+    input_->SetRegister(i, i * 4);
+  }
+  input_->SetRegister(rsp.code(), reinterpret_cast<intptr_t>(frame->sp()));
+  input_->SetRegister(rbp.code(), reinterpret_cast<intptr_t>(frame->fp()));
+  for (int i = 0; i < DoubleRegister::kNumAllocatableRegisters; i++) {
+    input_->SetDoubleRegister(i, 0.0);
+  }
+
+  // Fill the frame content from the actual data on the frame.
+  for (unsigned i = 0; i < input_->GetFrameSize(); i += kPointerSize) {
+    input_->SetFrameSlot(i, Memory::uint64_at(tos + i));
+  }
 }
 
 
@@ -617,7 +651,7 @@ void Deoptimizer::EntryGenerator::Generate() {
   // We push all registers onto the stack, even though we do not need
   // to restore all later.
   for (int i = 0; i < kNumberOfRegisters; i++) {
-    Register r = Register::toRegister(i);
+    Register r = Register::from_code(i);
     __ push(r);
   }
 
@@ -775,12 +809,12 @@ void Deoptimizer::EntryGenerator::Generate() {
 
   // Restore the registers from the stack.
   for (int i = kNumberOfRegisters - 1; i >= 0 ; i--) {
-    Register r = Register::toRegister(i);
+    Register r = Register::from_code(i);
     // Do not restore rsp, simply pop the value into the next register
     // and overwrite this afterwards.
     if (r.is(rsp)) {
       ASSERT(i > 0);
-      r = Register::toRegister(i - 1);
+      r = Register::from_code(i - 1);
     }
     __ pop(r);
   }

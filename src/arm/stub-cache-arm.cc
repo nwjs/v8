@@ -121,7 +121,7 @@ MUST_USE_RESULT static MaybeObject* GenerateDictionaryNegativeLookup(
 
   // Check that receiver is a JSObject.
   __ ldrb(scratch0, FieldMemOperand(map, Map::kInstanceTypeOffset));
-  __ cmp(scratch0, Operand(FIRST_JS_OBJECT_TYPE));
+  __ cmp(scratch0, Operand(FIRST_SPEC_OBJECT_TYPE));
   __ b(lt, miss_label);
 
   // Load properties array.
@@ -189,8 +189,7 @@ void StubCache::GenerateProbe(MacroAssembler* masm,
   ASSERT(!extra2.is(no_reg));
 
   // Check that the receiver isn't a smi.
-  __ tst(receiver, Operand(kSmiTagMask));
-  __ b(eq, &miss);
+  __ JumpIfSmi(receiver, &miss);
 
   // Get the map of the receiver and compute the hash.
   __ ldr(scratch, FieldMemOperand(name, String::kHashFieldOffset));
@@ -282,8 +281,7 @@ void StubCompiler::GenerateLoadArrayLength(MacroAssembler* masm,
                                            Register scratch,
                                            Label* miss_label) {
   // Check that the receiver isn't a smi.
-  __ tst(receiver, Operand(kSmiTagMask));
-  __ b(eq, miss_label);
+  __ JumpIfSmi(receiver, miss_label);
 
   // Check that the object is a JS array.
   __ CompareObjectType(receiver, scratch, scratch, JS_ARRAY_TYPE);
@@ -305,8 +303,7 @@ static void GenerateStringCheck(MacroAssembler* masm,
                                 Label* smi,
                                 Label* non_string_object) {
   // Check that the receiver isn't a smi.
-  __ tst(receiver, Operand(kSmiTagMask));
-  __ b(eq, smi);
+  __ JumpIfSmi(receiver, smi);
 
   // Check that the object is a string.
   __ ldr(scratch1, FieldMemOperand(receiver, HeapObject::kMapOffset));
@@ -381,8 +378,7 @@ void StubCompiler::GenerateStoreField(MacroAssembler* masm,
   Label exit;
 
   // Check that the receiver isn't a smi.
-  __ tst(receiver_reg, Operand(kSmiTagMask));
-  __ b(eq, miss_label);
+  __ JumpIfSmi(receiver_reg, miss_label);
 
   // Check that the map of the receiver hasn't changed.
   __ ldr(scratch, FieldMemOperand(receiver_reg, HeapObject::kMapOffset));
@@ -431,8 +427,7 @@ void StubCompiler::GenerateStoreField(MacroAssembler* masm,
     __ str(r0, FieldMemOperand(receiver_reg, offset));
 
     // Skip updating write barrier if storing a smi.
-    __ tst(r0, Operand(kSmiTagMask));
-    __ b(eq, &exit);
+    __ JumpIfSmi(r0, &exit);
 
     // Update the write barrier for the array address.
     // Pass the now unused name_reg as a scratch register.
@@ -445,8 +440,7 @@ void StubCompiler::GenerateStoreField(MacroAssembler* masm,
     __ str(r0, FieldMemOperand(scratch, offset));
 
     // Skip updating write barrier if storing a smi.
-    __ tst(r0, Operand(kSmiTagMask));
-    __ b(eq, &exit);
+    __ JumpIfSmi(r0, &exit);
 
     // Update the write barrier for the array address.
     // Ok to clobber receiver_reg and name_reg, since we return.
@@ -476,7 +470,8 @@ void StubCompiler::GenerateLoadMiss(MacroAssembler* masm, Code::Kind kind) {
 static void GenerateCallFunction(MacroAssembler* masm,
                                  Object* object,
                                  const ParameterCount& arguments,
-                                 Label* miss) {
+                                 Label* miss,
+                                 Code::ExtraICState extra_ic_state) {
   // ----------- S t a t e -------------
   //  -- r0: receiver
   //  -- r1: function to call
@@ -495,7 +490,10 @@ static void GenerateCallFunction(MacroAssembler* masm,
   }
 
   // Invoke the function.
-  __ InvokeFunction(r1, arguments, JUMP_FUNCTION);
+  CallKind call_kind = CallICBase::Contextual::decode(extra_ic_state)
+      ? CALL_AS_FUNCTION
+      : CALL_AS_METHOD;
+  __ InvokeFunction(r1, arguments, JUMP_FUNCTION, NullCallWrapper(), call_kind);
 }
 
 
@@ -625,10 +623,12 @@ class CallInterceptorCompiler BASE_EMBEDDED {
  public:
   CallInterceptorCompiler(StubCompiler* stub_compiler,
                           const ParameterCount& arguments,
-                          Register name)
+                          Register name,
+                          Code::ExtraICState extra_ic_state)
       : stub_compiler_(stub_compiler),
         arguments_(arguments),
-        name_(name) {}
+        name_(name),
+        extra_ic_state_(extra_ic_state) {}
 
   MaybeObject* Compile(MacroAssembler* masm,
                        JSObject* object,
@@ -756,8 +756,11 @@ class CallInterceptorCompiler BASE_EMBEDDED {
                                                       arguments_.immediate());
       if (result->IsFailure()) return result;
     } else {
+      CallKind call_kind = CallICBase::Contextual::decode(extra_ic_state_)
+          ? CALL_AS_FUNCTION
+          : CALL_AS_METHOD;
       __ InvokeFunction(optimization.constant_function(), arguments_,
-                        JUMP_FUNCTION);
+                        JUMP_FUNCTION, call_kind);
     }
 
     // Deferred code for fast API call case---clean preallocated space.
@@ -839,6 +842,7 @@ class CallInterceptorCompiler BASE_EMBEDDED {
   StubCompiler* stub_compiler_;
   const ParameterCount& arguments_;
   Register name_;
+  Code::ExtraICState extra_ic_state_;
 };
 
 
@@ -1155,8 +1159,7 @@ void StubCompiler::GenerateLoadField(JSObject* object,
                                      String* name,
                                      Label* miss) {
   // Check that the receiver isn't a smi.
-  __ tst(receiver, Operand(kSmiTagMask));
-  __ b(eq, miss);
+  __ JumpIfSmi(receiver, miss);
 
   // Check that the maps haven't changed.
   Register reg =
@@ -1177,8 +1180,7 @@ void StubCompiler::GenerateLoadConstant(JSObject* object,
                                         String* name,
                                         Label* miss) {
   // Check that the receiver isn't a smi.
-  __ tst(receiver, Operand(kSmiTagMask));
-  __ b(eq, miss);
+  __ JumpIfSmi(receiver, miss);
 
   // Check that the maps haven't changed.
   Register reg =
@@ -1202,8 +1204,7 @@ MaybeObject* StubCompiler::GenerateLoadCallback(JSObject* object,
                                                 String* name,
                                                 Label* miss) {
   // Check that the receiver isn't a smi.
-  __ tst(receiver, Operand(kSmiTagMask));
-  __ b(eq, miss);
+  __ JumpIfSmi(receiver, miss);
 
   // Check that the maps haven't changed.
   Register reg =
@@ -1416,8 +1417,7 @@ void CallStubCompiler::GenerateGlobalReceiverCheck(JSObject* object,
   // object which can only happen for contextual calls. In this case,
   // the receiver cannot be a smi.
   if (object != holder) {
-    __ tst(r0, Operand(kSmiTagMask));
-    __ b(eq, miss);
+    __ JumpIfSmi(r0, miss);
   }
 
   // Check that the maps haven't changed.
@@ -1439,8 +1439,7 @@ void CallStubCompiler::GenerateLoadFunctionFromCell(JSGlobalPropertyCell* cell,
     // the nice side effect that multiple closures based on the same
     // function can all use this call IC. Before we load through the
     // function, we have to verify that it still is a function.
-    __ tst(r1, Operand(kSmiTagMask));
-    __ b(eq, miss);
+    __ JumpIfSmi(r1, miss);
     __ CompareObjectType(r1, r3, r3, JS_FUNCTION_TYPE);
     __ b(ne, miss);
 
@@ -1485,14 +1484,13 @@ MaybeObject* CallStubCompiler::CompileCallField(JSObject* object,
   // Get the receiver of the function from the stack into r0.
   __ ldr(r0, MemOperand(sp, argc * kPointerSize));
   // Check that the receiver isn't a smi.
-  __ tst(r0, Operand(kSmiTagMask));
-  __ b(eq, &miss);
+  __ JumpIfSmi(r0, &miss);
 
   // Do the right check and compute the holder register.
   Register reg = CheckPrototypes(object, r0, holder, r1, r3, r4, name, &miss);
   GenerateFastPropertyLoad(masm(), r1, reg, holder, index);
 
-  GenerateCallFunction(masm(), object, arguments(), &miss);
+  GenerateCallFunction(masm(), object, arguments(), &miss, extra_ic_state_);
 
   // Handle call cache miss.
   __ bind(&miss);
@@ -1957,8 +1955,7 @@ MaybeObject* CallStubCompiler::CompileStringFromCharCodeCall(
     __ ldr(r1, MemOperand(sp, 1 * kPointerSize));
 
     STATIC_ASSERT(kSmiTag == 0);
-    __ tst(r1, Operand(kSmiTagMask));
-    __ b(eq, &miss);
+    __ JumpIfSmi(r1, &miss);
 
     CheckPrototypes(JSObject::cast(object), r1, holder, r0, r3, r4, name,
                     &miss);
@@ -1975,8 +1972,7 @@ MaybeObject* CallStubCompiler::CompileStringFromCharCodeCall(
   // Check the code is a smi.
   Label slow;
   STATIC_ASSERT(kSmiTag == 0);
-  __ tst(code, Operand(kSmiTagMask));
-  __ b(ne, &slow);
+  __ JumpIfNotSmi(code, &slow);
 
   // Convert the smi code to uint16.
   __ and_(code, code, Operand(Smi::FromInt(0xffff)));
@@ -1992,7 +1988,7 @@ MaybeObject* CallStubCompiler::CompileStringFromCharCodeCall(
   // Tail call the full function. We do not have to patch the receiver
   // because the function makes no use of it.
   __ bind(&slow);
-  __ InvokeFunction(function, arguments(), JUMP_FUNCTION);
+  __ InvokeFunction(function, arguments(), JUMP_FUNCTION, CALL_AS_METHOD);
 
   __ bind(&miss);
   // r2: function name.
@@ -2140,7 +2136,7 @@ MaybeObject* CallStubCompiler::CompileMathFloorCall(Object* object,
   __ bind(&slow);
   // Tail call the full function. We do not have to patch the receiver
   // because the function makes no use of it.
-  __ InvokeFunction(function, arguments(), JUMP_FUNCTION);
+  __ InvokeFunction(function, arguments(), JUMP_FUNCTION, CALL_AS_METHOD);
 
   __ bind(&miss);
   // r2: function name.
@@ -2178,8 +2174,7 @@ MaybeObject* CallStubCompiler::CompileMathAbsCall(Object* object,
     __ ldr(r1, MemOperand(sp, 1 * kPointerSize));
 
     STATIC_ASSERT(kSmiTag == 0);
-    __ tst(r1, Operand(kSmiTagMask));
-    __ b(eq, &miss);
+    __ JumpIfSmi(r1, &miss);
 
     CheckPrototypes(JSObject::cast(object), r1, holder, r0, r3, r4, name,
                     &miss);
@@ -2242,7 +2237,7 @@ MaybeObject* CallStubCompiler::CompileMathAbsCall(Object* object,
   // Tail call the full function. We do not have to patch the receiver
   // because the function makes no use of it.
   __ bind(&slow);
-  __ InvokeFunction(function, arguments(), JUMP_FUNCTION);
+  __ InvokeFunction(function, arguments(), JUMP_FUNCTION, CALL_AS_METHOD);
 
   __ bind(&miss);
   // r2: function name.
@@ -2282,8 +2277,7 @@ MaybeObject* CallStubCompiler::CompileFastApiCall(
   __ ldr(r1, MemOperand(sp, argc * kPointerSize));
 
   // Check that the receiver isn't a smi.
-  __ tst(r1, Operand(kSmiTagMask));
-  __ b(eq, &miss_before_stack_reserved);
+  __ JumpIfSmi(r1, &miss_before_stack_reserved);
 
   __ IncrementCounter(counters->call_const(), 1, r0, r3);
   __ IncrementCounter(counters->call_const_fast_api(), 1, r0, r3);
@@ -2337,8 +2331,7 @@ MaybeObject* CallStubCompiler::CompileCallConstant(Object* object,
 
   // Check that the receiver isn't a smi.
   if (check != NUMBER_CHECK) {
-    __ tst(r1, Operand(kSmiTagMask));
-    __ b(eq, &miss);
+    __ JumpIfSmi(r1, &miss);
   }
 
   // Make sure that it's okay not to patch the on stack receiver
@@ -2371,7 +2364,7 @@ MaybeObject* CallStubCompiler::CompileCallConstant(Object* object,
       } else {
         // Check that the object is a two-byte string or a symbol.
         __ CompareObjectType(r1, r3, r3, FIRST_NONSTRING_TYPE);
-        __ b(hs, &miss);
+        __ b(ge, &miss);
         // Check that the maps starting from the prototype haven't changed.
         GenerateDirectLoadGlobalFunctionPrototype(
             masm(), Context::STRING_FUNCTION_INDEX, r0, &miss);
@@ -2388,8 +2381,7 @@ MaybeObject* CallStubCompiler::CompileCallConstant(Object* object,
       } else {
         Label fast;
         // Check that the object is a smi or a heap number.
-        __ tst(r1, Operand(kSmiTagMask));
-        __ b(eq, &fast);
+        __ JumpIfSmi(r1, &fast);
         __ CompareObjectType(r1, r0, r0, HEAP_NUMBER_TYPE);
         __ b(ne, &miss);
         __ bind(&fast);
@@ -2430,7 +2422,10 @@ MaybeObject* CallStubCompiler::CompileCallConstant(Object* object,
       UNREACHABLE();
   }
 
-  __ InvokeFunction(function, arguments(), JUMP_FUNCTION);
+  CallKind call_kind = CallICBase::Contextual::decode(extra_ic_state_)
+      ? CALL_AS_FUNCTION
+      : CALL_AS_METHOD;
+  __ InvokeFunction(function, arguments(), JUMP_FUNCTION, call_kind);
 
   // Handle call cache miss.
   __ bind(&miss);
@@ -2463,7 +2458,7 @@ MaybeObject* CallStubCompiler::CompileCallInterceptor(JSObject* object,
   // Get the receiver from the stack.
   __ ldr(r1, MemOperand(sp, argc * kPointerSize));
 
-  CallInterceptorCompiler compiler(this, arguments(), r2);
+  CallInterceptorCompiler compiler(this, arguments(), r2, extra_ic_state_);
   MaybeObject* result = compiler.Compile(masm(),
                                          object,
                                          holder,
@@ -2483,7 +2478,7 @@ MaybeObject* CallStubCompiler::CompileCallInterceptor(JSObject* object,
   // Restore receiver.
   __ ldr(r0, MemOperand(sp, argc * kPointerSize));
 
-  GenerateCallFunction(masm(), object, arguments(), &miss);
+  GenerateCallFunction(masm(), object, arguments(), &miss, extra_ic_state_);
 
   // Handle call cache miss.
   __ bind(&miss);
@@ -2495,13 +2490,11 @@ MaybeObject* CallStubCompiler::CompileCallInterceptor(JSObject* object,
 }
 
 
-MaybeObject* CallStubCompiler::CompileCallGlobal(
-    JSObject* object,
-    GlobalObject* holder,
-    JSGlobalPropertyCell* cell,
-    JSFunction* function,
-    String* name,
-    Code::ExtraICState extra_ic_state) {
+MaybeObject* CallStubCompiler::CompileCallGlobal(JSObject* object,
+                                                 GlobalObject* holder,
+                                                 JSGlobalPropertyCell* cell,
+                                                 JSFunction* function,
+                                                 String* name) {
   // ----------- S t a t e -------------
   //  -- r2    : name
   //  -- lr    : return address
@@ -2543,7 +2536,7 @@ MaybeObject* CallStubCompiler::CompileCallGlobal(
   ASSERT(function->is_compiled());
   Handle<Code> code(function->code());
   ParameterCount expected(function->shared()->formal_parameter_count());
-  CallKind call_kind = CallICBase::Contextual::decode(extra_ic_state)
+  CallKind call_kind = CallICBase::Contextual::decode(extra_ic_state_)
       ? CALL_AS_FUNCTION
       : CALL_AS_METHOD;
   if (V8::UseCrankshaft()) {
@@ -2608,8 +2601,7 @@ MaybeObject* StoreStubCompiler::CompileStoreCallback(JSObject* object,
   Label miss;
 
   // Check that the object isn't a smi.
-  __ tst(r1, Operand(kSmiTagMask));
-  __ b(eq, &miss);
+  __ JumpIfSmi(r1, &miss);
 
   // Check that the map of the object hasn't changed.
   __ ldr(r3, FieldMemOperand(r1, HeapObject::kMapOffset));
@@ -2656,8 +2648,7 @@ MaybeObject* StoreStubCompiler::CompileStoreInterceptor(JSObject* receiver,
   Label miss;
 
   // Check that the object isn't a smi.
-  __ tst(r1, Operand(kSmiTagMask));
-  __ b(eq, &miss);
+  __ JumpIfSmi(r1, &miss);
 
   // Check that the map of the object hasn't changed.
   __ ldr(r3, FieldMemOperand(r1, HeapObject::kMapOffset));
@@ -2748,8 +2739,7 @@ MaybeObject* LoadStubCompiler::CompileLoadNonexistent(String* name,
   Label miss;
 
   // Check that receiver is not a smi.
-  __ tst(r0, Operand(kSmiTagMask));
-  __ b(eq, &miss);
+  __ JumpIfSmi(r0, &miss);
 
   // Check the maps of the full prototype chain.
   CheckPrototypes(object, r0, last, r3, r1, r4, name, &miss);
@@ -2893,8 +2883,7 @@ MaybeObject* LoadStubCompiler::CompileLoadGlobal(JSObject* object,
   // object which can only happen for contextual calls. In this case,
   // the receiver cannot be a smi.
   if (object != holder) {
-    __ tst(r0, Operand(kSmiTagMask));
-    __ b(eq, &miss);
+    __ JumpIfSmi(r0, &miss);
   }
 
   // Check that the map of the global has not changed.
@@ -3104,14 +3093,15 @@ MaybeObject* KeyedLoadStubCompiler::CompileLoadFunctionPrototype(String* name) {
 }
 
 
-MaybeObject* KeyedLoadStubCompiler::CompileLoadFastElement(Map* receiver_map) {
+MaybeObject* KeyedLoadStubCompiler::CompileLoadElement(Map* receiver_map) {
   // ----------- S t a t e -------------
   //  -- lr    : return address
   //  -- r0    : key
   //  -- r1    : receiver
   // -----------------------------------
-  MaybeObject* maybe_stub = KeyedLoadFastElementStub().TryGetCode();
   Code* stub;
+  JSObject::ElementsKind elements_kind = receiver_map->elements_kind();
+  MaybeObject* maybe_stub = KeyedLoadElementStub(elements_kind).TryGetCode();
   if (!maybe_stub->To(&stub)) return maybe_stub;
   __ DispatchMap(r1,
                  r2,
@@ -3195,8 +3185,7 @@ MaybeObject* KeyedStoreStubCompiler::CompileStoreField(JSObject* object,
 }
 
 
-MaybeObject* KeyedStoreStubCompiler::CompileStoreFastElement(
-    Map* receiver_map) {
+MaybeObject* KeyedStoreStubCompiler::CompileStoreElement(Map* receiver_map) {
   // ----------- S t a t e -------------
   //  -- r0    : value
   //  -- r1    : key
@@ -3204,10 +3193,11 @@ MaybeObject* KeyedStoreStubCompiler::CompileStoreFastElement(
   //  -- lr    : return address
   //  -- r3    : scratch
   // -----------------------------------
+  Code* stub;
+  JSObject::ElementsKind elements_kind = receiver_map->elements_kind();
   bool is_js_array = receiver_map->instance_type() == JS_ARRAY_TYPE;
   MaybeObject* maybe_stub =
-      KeyedStoreFastElementStub(is_js_array).TryGetCode();
-  Code* stub;
+      KeyedStoreElementStub(is_js_array, elements_kind).TryGetCode();
   if (!maybe_stub->To(&stub)) return maybe_stub;
   __ DispatchMap(r2,
                  r3,
@@ -3281,8 +3271,7 @@ MaybeObject* ConstructStubCompiler::CompileConstructStub(JSFunction* function) {
   // r1: constructor function
   // r7: undefined
   __ ldr(r2, FieldMemOperand(r1, JSFunction::kPrototypeOrInitialMapOffset));
-  __ tst(r2, Operand(kSmiTagMask));
-  __ b(eq, &generic_stub_call);
+  __ JumpIfSmi(r2, &generic_stub_call);
   __ CompareObjectType(r2, r3, r4, MAP_TYPE);
   __ b(ne, &generic_stub_call);
 
@@ -3399,82 +3388,86 @@ MaybeObject* ConstructStubCompiler::CompileConstructStub(JSFunction* function) {
 }
 
 
-MaybeObject* ExternalArrayLoadStubCompiler::CompileLoad(
-    JSObject*receiver, ExternalArrayType array_type) {
-  // ----------- S t a t e -------------
-  //  -- lr    : return address
-  //  -- r0    : key
-  //  -- r1    : receiver
-  // -----------------------------------
-  MaybeObject* maybe_stub =
-      KeyedLoadExternalArrayStub(array_type).TryGetCode();
-  Code* stub;
-  if (!maybe_stub->To(&stub)) return maybe_stub;
-  __ DispatchMap(r1,
-                 r2,
-                 Handle<Map>(receiver->map()),
-                 Handle<Code>(stub),
-                 DO_SMI_CHECK);
-
-  Handle<Code> ic = isolate()->builtins()->KeyedLoadIC_Miss();
-  __ Jump(ic, RelocInfo::CODE_TARGET);
-
-  // Return the generated code.
-  return GetCode();
-}
-
-
-MaybeObject* ExternalArrayStoreStubCompiler::CompileStore(
-    JSObject* receiver, ExternalArrayType array_type) {
-  // ----------- S t a t e -------------
-  //  -- r0    : value
-  //  -- r1    : name
-  //  -- r2    : receiver
-  //  -- lr    : return address
-  // -----------------------------------
-  MaybeObject* maybe_stub =
-      KeyedStoreExternalArrayStub(array_type).TryGetCode();
-  Code* stub;
-  if (!maybe_stub->To(&stub)) return maybe_stub;
-  __ DispatchMap(r2,
-                 r3,
-                 Handle<Map>(receiver->map()),
-                 Handle<Code>(stub),
-                 DO_SMI_CHECK);
-
-  Handle<Code> ic = isolate()->builtins()->KeyedStoreIC_Miss();
-  __ Jump(ic, RelocInfo::CODE_TARGET);
-
-  return GetCode();
-}
-
-
 #undef __
 #define __ ACCESS_MASM(masm)
 
 
-static bool IsElementTypeSigned(ExternalArrayType array_type) {
-  switch (array_type) {
-    case kExternalByteArray:
-    case kExternalShortArray:
-    case kExternalIntArray:
+void KeyedLoadStubCompiler::GenerateLoadDictionaryElement(
+    MacroAssembler* masm) {
+  // ---------- S t a t e --------------
+  //  -- lr     : return address
+  //  -- r0     : key
+  //  -- r1     : receiver
+  // -----------------------------------
+  Label slow, miss_force_generic;
+
+  Register key = r0;
+  Register receiver = r1;
+
+  __ JumpIfNotSmi(key, &miss_force_generic);
+  __ mov(r2, Operand(key, ASR, kSmiTagSize));
+  __ ldr(r4, FieldMemOperand(receiver, JSObject::kElementsOffset));
+  __ LoadFromNumberDictionary(&slow, r4, key, r0, r2, r3, r5);
+  __ Ret();
+
+  __ bind(&slow);
+  __ IncrementCounter(
+      masm->isolate()->counters()->keyed_load_external_array_slow(),
+      1, r2, r3);
+
+  // ---------- S t a t e --------------
+  //  -- lr     : return address
+  //  -- r0     : key
+  //  -- r1     : receiver
+  // -----------------------------------
+  Handle<Code> slow_ic =
+      masm->isolate()->builtins()->KeyedLoadIC_Slow();
+  __ Jump(slow_ic, RelocInfo::CODE_TARGET);
+
+  // Miss case, call the runtime.
+  __ bind(&miss_force_generic);
+
+  // ---------- S t a t e --------------
+  //  -- lr     : return address
+  //  -- r0     : key
+  //  -- r1     : receiver
+  // -----------------------------------
+
+  Handle<Code> miss_ic =
+      masm->isolate()->builtins()->KeyedLoadIC_MissForceGeneric();
+  __ Jump(miss_ic, RelocInfo::CODE_TARGET);
+}
+
+
+static bool IsElementTypeSigned(JSObject::ElementsKind elements_kind) {
+  switch (elements_kind) {
+    case JSObject::EXTERNAL_BYTE_ELEMENTS:
+    case JSObject::EXTERNAL_SHORT_ELEMENTS:
+    case JSObject::EXTERNAL_INT_ELEMENTS:
       return true;
 
-    case kExternalUnsignedByteArray:
-    case kExternalUnsignedShortArray:
-    case kExternalUnsignedIntArray:
+    case JSObject::EXTERNAL_UNSIGNED_BYTE_ELEMENTS:
+    case JSObject::EXTERNAL_UNSIGNED_SHORT_ELEMENTS:
+    case JSObject::EXTERNAL_UNSIGNED_INT_ELEMENTS:
+    case JSObject::EXTERNAL_PIXEL_ELEMENTS:
       return false;
 
-    default:
+    case JSObject::EXTERNAL_FLOAT_ELEMENTS:
+    case JSObject::EXTERNAL_DOUBLE_ELEMENTS:
+    case JSObject::FAST_ELEMENTS:
+    case JSObject::FAST_DOUBLE_ELEMENTS:
+    case JSObject::DICTIONARY_ELEMENTS:
+    case JSObject::NON_STRICT_ARGUMENTS_ELEMENTS:
       UNREACHABLE();
       return false;
   }
+  return false;
 }
 
 
 void KeyedLoadStubCompiler::GenerateLoadExternalArray(
     MacroAssembler* masm,
-    ExternalArrayType array_type) {
+    JSObject::ElementsKind elements_kind) {
   // ---------- S t a t e --------------
   //  -- lr     : return address
   //  -- r0     : key
@@ -3508,25 +3501,25 @@ void KeyedLoadStubCompiler::GenerateLoadExternalArray(
   ASSERT((kSmiTag == 0) && (kSmiTagSize == 1));
 
   Register value = r2;
-  switch (array_type) {
-    case kExternalByteArray:
+  switch (elements_kind) {
+    case JSObject::EXTERNAL_BYTE_ELEMENTS:
       __ ldrsb(value, MemOperand(r3, key, LSR, 1));
       break;
-    case kExternalPixelArray:
-    case kExternalUnsignedByteArray:
+    case JSObject::EXTERNAL_PIXEL_ELEMENTS:
+    case JSObject::EXTERNAL_UNSIGNED_BYTE_ELEMENTS:
       __ ldrb(value, MemOperand(r3, key, LSR, 1));
       break;
-    case kExternalShortArray:
+    case JSObject::EXTERNAL_SHORT_ELEMENTS:
       __ ldrsh(value, MemOperand(r3, key, LSL, 0));
       break;
-    case kExternalUnsignedShortArray:
+    case JSObject::EXTERNAL_UNSIGNED_SHORT_ELEMENTS:
       __ ldrh(value, MemOperand(r3, key, LSL, 0));
       break;
-    case kExternalIntArray:
-    case kExternalUnsignedIntArray:
+    case JSObject::EXTERNAL_INT_ELEMENTS:
+    case JSObject::EXTERNAL_UNSIGNED_INT_ELEMENTS:
       __ ldr(value, MemOperand(r3, key, LSL, 1));
       break;
-    case kExternalFloatArray:
+    case JSObject::EXTERNAL_FLOAT_ELEMENTS:
       if (CpuFeatures::IsSupported(VFP3)) {
         CpuFeatures::Scope scope(VFP3);
         __ add(r2, r3, Operand(key, LSL, 1));
@@ -3535,7 +3528,7 @@ void KeyedLoadStubCompiler::GenerateLoadExternalArray(
         __ ldr(value, MemOperand(r3, key, LSL, 1));
       }
       break;
-    case kExternalDoubleArray:
+    case JSObject::EXTERNAL_DOUBLE_ELEMENTS:
       if (CpuFeatures::IsSupported(VFP3)) {
         CpuFeatures::Scope scope(VFP3);
         __ add(r2, r3, Operand(key, LSL, 2));
@@ -3547,7 +3540,10 @@ void KeyedLoadStubCompiler::GenerateLoadExternalArray(
         __ ldr(r3, MemOperand(r4, Register::kSizeInBytes));
       }
       break;
-    default:
+    case JSObject::FAST_ELEMENTS:
+    case JSObject::FAST_DOUBLE_ELEMENTS:
+    case JSObject::DICTIONARY_ELEMENTS:
+    case JSObject::NON_STRICT_ARGUMENTS_ELEMENTS:
       UNREACHABLE();
       break;
   }
@@ -3561,7 +3557,7 @@ void KeyedLoadStubCompiler::GenerateLoadExternalArray(
   // d0: value (if VFP3 is supported)
   // r2/r3: value (if VFP3 is not supported)
 
-  if (array_type == kExternalIntArray) {
+  if (elements_kind == JSObject::EXTERNAL_INT_ELEMENTS) {
     // For the Int and UnsignedInt array types, we need to see whether
     // the value can be represented in a Smi. If not, we need to convert
     // it to a HeapNumber.
@@ -3605,7 +3601,7 @@ void KeyedLoadStubCompiler::GenerateLoadExternalArray(
       __ str(dst2, FieldMemOperand(r0, HeapNumber::kExponentOffset));
       __ Ret();
     }
-  } else if (array_type == kExternalUnsignedIntArray) {
+  } else if (elements_kind == JSObject::EXTERNAL_UNSIGNED_INT_ELEMENTS) {
     // The test is different for unsigned int values. Since we need
     // the value to be in the range of a positive smi, we can't
     // handle either of the top two bits being set in the value.
@@ -3670,7 +3666,7 @@ void KeyedLoadStubCompiler::GenerateLoadExternalArray(
       __ mov(r0, r4);
       __ Ret();
     }
-  } else if (array_type == kExternalFloatArray) {
+  } else if (elements_kind == JSObject::EXTERNAL_FLOAT_ELEMENTS) {
     // For the floating-point array type, we need to always allocate a
     // HeapNumber.
     if (CpuFeatures::IsSupported(VFP3)) {
@@ -3740,7 +3736,7 @@ void KeyedLoadStubCompiler::GenerateLoadExternalArray(
       __ mov(r0, r3);
       __ Ret();
     }
-  } else if (array_type == kExternalDoubleArray) {
+  } else if (elements_kind == JSObject::EXTERNAL_DOUBLE_ELEMENTS) {
     if (CpuFeatures::IsSupported(VFP3)) {
       CpuFeatures::Scope scope(VFP3);
       // Allocate a HeapNumber for the result. Don't use r0 and r1 as
@@ -3797,7 +3793,7 @@ void KeyedLoadStubCompiler::GenerateLoadExternalArray(
 
 void KeyedStoreStubCompiler::GenerateStoreExternalArray(
     MacroAssembler* masm,
-    ExternalArrayType array_type) {
+    JSObject::ElementsKind elements_kind) {
   // ---------- S t a t e --------------
   //  -- r0     : value
   //  -- r1     : key
@@ -3831,7 +3827,7 @@ void KeyedStoreStubCompiler::GenerateStoreExternalArray(
   // runtime for all other kinds of values.
   // r3: external array.
   // r4: key (integer).
-  if (array_type == kExternalPixelArray) {
+  if (elements_kind == JSObject::EXTERNAL_PIXEL_ELEMENTS) {
     // Double to pixel conversion is only implemented in the runtime for now.
     __ JumpIfNotSmi(value, &slow);
   } else {
@@ -3843,29 +3839,29 @@ void KeyedStoreStubCompiler::GenerateStoreExternalArray(
   // r3: base pointer of external storage.
   // r4: key (integer).
   // r5: value (integer).
-  switch (array_type) {
-    case kExternalPixelArray:
+  switch (elements_kind) {
+    case JSObject::EXTERNAL_PIXEL_ELEMENTS:
       // Clamp the value to [0..255].
       __ Usat(r5, 8, Operand(r5));
       __ strb(r5, MemOperand(r3, r4, LSL, 0));
       break;
-    case kExternalByteArray:
-    case kExternalUnsignedByteArray:
+    case JSObject::EXTERNAL_BYTE_ELEMENTS:
+    case JSObject::EXTERNAL_UNSIGNED_BYTE_ELEMENTS:
       __ strb(r5, MemOperand(r3, r4, LSL, 0));
       break;
-    case kExternalShortArray:
-    case kExternalUnsignedShortArray:
+    case JSObject::EXTERNAL_SHORT_ELEMENTS:
+    case JSObject::EXTERNAL_UNSIGNED_SHORT_ELEMENTS:
       __ strh(r5, MemOperand(r3, r4, LSL, 1));
       break;
-    case kExternalIntArray:
-    case kExternalUnsignedIntArray:
+    case JSObject::EXTERNAL_INT_ELEMENTS:
+    case JSObject::EXTERNAL_UNSIGNED_INT_ELEMENTS:
       __ str(r5, MemOperand(r3, r4, LSL, 2));
       break;
-    case kExternalFloatArray:
+    case JSObject::EXTERNAL_FLOAT_ELEMENTS:
       // Perform int-to-float conversion and store to memory.
       StoreIntAsFloat(masm, r3, r4, r5, r6, r7, r9);
       break;
-    case kExternalDoubleArray:
+    case JSObject::EXTERNAL_DOUBLE_ELEMENTS:
       __ add(r3, r3, Operand(r4, LSL, 3));
       // r3: effective address of the double element
       FloatingPointHelper::Destination destination;
@@ -3886,7 +3882,10 @@ void KeyedStoreStubCompiler::GenerateStoreExternalArray(
         __ str(r7, MemOperand(r3, Register::kSizeInBytes));
       }
       break;
-    default:
+    case JSObject::FAST_ELEMENTS:
+    case JSObject::FAST_DOUBLE_ELEMENTS:
+    case JSObject::DICTIONARY_ELEMENTS:
+    case JSObject::NON_STRICT_ARGUMENTS_ELEMENTS:
       UNREACHABLE();
       break;
   }
@@ -3894,7 +3893,7 @@ void KeyedStoreStubCompiler::GenerateStoreExternalArray(
   // Entry registers are intact, r0 holds the value which is the return value.
   __ Ret();
 
-  if (array_type != kExternalPixelArray) {
+  if (elements_kind != JSObject::EXTERNAL_PIXEL_ELEMENTS) {
     // r3: external array.
     // r4: index (integer).
     __ bind(&check_heap_number);
@@ -3912,7 +3911,7 @@ void KeyedStoreStubCompiler::GenerateStoreExternalArray(
     if (CpuFeatures::IsSupported(VFP3)) {
       CpuFeatures::Scope scope(VFP3);
 
-      if (array_type == kExternalFloatArray) {
+      if (elements_kind == JSObject::EXTERNAL_FLOAT_ELEMENTS) {
         // vldr requires offset to be a multiple of 4 so we can not
         // include -kHeapObjectTag into it.
         __ sub(r5, r0, Operand(kHeapObjectTag));
@@ -3920,7 +3919,7 @@ void KeyedStoreStubCompiler::GenerateStoreExternalArray(
         __ add(r5, r3, Operand(r4, LSL, 2));
         __ vcvt_f32_f64(s0, d0);
         __ vstr(s0, r5, 0);
-      } else if (array_type == kExternalDoubleArray) {
+      } else if (elements_kind == JSObject::EXTERNAL_DOUBLE_ELEMENTS) {
         __ sub(r5, r0, Operand(kHeapObjectTag));
         __ vldr(d0, r5, HeapNumber::kValueOffset);
         __ add(r5, r3, Operand(r4, LSL, 3));
@@ -3932,20 +3931,26 @@ void KeyedStoreStubCompiler::GenerateStoreExternalArray(
         __ vldr(d0, r5, HeapNumber::kValueOffset);
         __ EmitECMATruncate(r5, d0, s2, r6, r7, r9);
 
-        switch (array_type) {
-          case kExternalByteArray:
-          case kExternalUnsignedByteArray:
+        switch (elements_kind) {
+          case JSObject::EXTERNAL_BYTE_ELEMENTS:
+          case JSObject::EXTERNAL_UNSIGNED_BYTE_ELEMENTS:
             __ strb(r5, MemOperand(r3, r4, LSL, 0));
             break;
-          case kExternalShortArray:
-          case kExternalUnsignedShortArray:
+          case JSObject::EXTERNAL_SHORT_ELEMENTS:
+          case JSObject::EXTERNAL_UNSIGNED_SHORT_ELEMENTS:
             __ strh(r5, MemOperand(r3, r4, LSL, 1));
             break;
-          case kExternalIntArray:
-          case kExternalUnsignedIntArray:
+          case JSObject::EXTERNAL_INT_ELEMENTS:
+          case JSObject::EXTERNAL_UNSIGNED_INT_ELEMENTS:
             __ str(r5, MemOperand(r3, r4, LSL, 2));
             break;
-          default:
+          case JSObject::EXTERNAL_PIXEL_ELEMENTS:
+          case JSObject::EXTERNAL_FLOAT_ELEMENTS:
+          case JSObject::EXTERNAL_DOUBLE_ELEMENTS:
+          case JSObject::FAST_ELEMENTS:
+          case JSObject::FAST_DOUBLE_ELEMENTS:
+          case JSObject::DICTIONARY_ELEMENTS:
+          case JSObject::NON_STRICT_ARGUMENTS_ELEMENTS:
             UNREACHABLE();
             break;
         }
@@ -3959,7 +3964,7 @@ void KeyedStoreStubCompiler::GenerateStoreExternalArray(
       __ ldr(r5, FieldMemOperand(value, HeapNumber::kExponentOffset));
       __ ldr(r6, FieldMemOperand(value, HeapNumber::kMantissaOffset));
 
-      if (array_type == kExternalFloatArray) {
+      if (elements_kind == JSObject::EXTERNAL_FLOAT_ELEMENTS) {
         Label done, nan_or_infinity_or_zero;
         static const int kMantissaInHiWordShift =
             kBinary32MantissaBits - HeapNumber::kMantissaBitsInTopWord;
@@ -4011,14 +4016,14 @@ void KeyedStoreStubCompiler::GenerateStoreExternalArray(
         __ orr(r9, r9, Operand(r5, LSL, kMantissaInHiWordShift));
         __ orr(r5, r9, Operand(r6, LSR, kMantissaInLoWordShift));
         __ b(&done);
-      } else if (array_type == kExternalDoubleArray) {
+      } else if (elements_kind == JSObject::EXTERNAL_DOUBLE_ELEMENTS) {
         __ add(r7, r3, Operand(r4, LSL, 3));
         // r7: effective address of destination element.
         __ str(r6, MemOperand(r7, 0));
         __ str(r5, MemOperand(r7, Register::kSizeInBytes));
         __ Ret();
       } else {
-        bool is_signed_type = IsElementTypeSigned(array_type);
+        bool is_signed_type = IsElementTypeSigned(elements_kind);
         int meaningfull_bits = is_signed_type ? (kBitsPerInt - 1) : kBitsPerInt;
         int32_t min_value = is_signed_type ? 0x80000000 : 0x00000000;
 
@@ -4065,20 +4070,26 @@ void KeyedStoreStubCompiler::GenerateStoreExternalArray(
         __ rsb(r5, r5, Operand(0, RelocInfo::NONE), LeaveCC, ne);
 
         __ bind(&done);
-        switch (array_type) {
-          case kExternalByteArray:
-          case kExternalUnsignedByteArray:
+        switch (elements_kind) {
+          case JSObject::EXTERNAL_BYTE_ELEMENTS:
+          case JSObject::EXTERNAL_UNSIGNED_BYTE_ELEMENTS:
             __ strb(r5, MemOperand(r3, r4, LSL, 0));
             break;
-          case kExternalShortArray:
-          case kExternalUnsignedShortArray:
+          case JSObject::EXTERNAL_SHORT_ELEMENTS:
+          case JSObject::EXTERNAL_UNSIGNED_SHORT_ELEMENTS:
             __ strh(r5, MemOperand(r3, r4, LSL, 1));
             break;
-          case kExternalIntArray:
-          case kExternalUnsignedIntArray:
+          case JSObject::EXTERNAL_INT_ELEMENTS:
+          case JSObject::EXTERNAL_UNSIGNED_INT_ELEMENTS:
             __ str(r5, MemOperand(r3, r4, LSL, 2));
             break;
-          default:
+          case JSObject::EXTERNAL_PIXEL_ELEMENTS:
+          case JSObject::EXTERNAL_FLOAT_ELEMENTS:
+          case JSObject::EXTERNAL_DOUBLE_ELEMENTS:
+          case JSObject::FAST_ELEMENTS:
+          case JSObject::FAST_DOUBLE_ELEMENTS:
+          case JSObject::DICTIONARY_ELEMENTS:
+          case JSObject::NON_STRICT_ARGUMENTS_ELEMENTS:
             UNREACHABLE();
             break;
         }
@@ -4157,6 +4168,77 @@ void KeyedLoadStubCompiler::GenerateLoadFastElement(MacroAssembler* masm) {
 }
 
 
+void KeyedLoadStubCompiler::GenerateLoadFastDoubleElement(
+    MacroAssembler* masm) {
+  // ----------- S t a t e -------------
+  //  -- lr    : return address
+  //  -- r0    : key
+  //  -- r1    : receiver
+  // -----------------------------------
+  Label miss_force_generic, slow_allocate_heapnumber;
+
+  Register key_reg = r0;
+  Register receiver_reg = r1;
+  Register elements_reg = r2;
+  Register heap_number_reg = r2;
+  Register indexed_double_offset = r3;
+  Register scratch = r4;
+  Register scratch2 = r5;
+  Register scratch3 = r6;
+  Register heap_number_map = r7;
+
+  // This stub is meant to be tail-jumped to, the receiver must already
+  // have been verified by the caller to not be a smi.
+
+  // Check that the key is a smi.
+  __ JumpIfNotSmi(key_reg, &miss_force_generic);
+
+  // Get the elements array.
+  __ ldr(elements_reg,
+         FieldMemOperand(receiver_reg, JSObject::kElementsOffset));
+
+  // Check that the key is within bounds.
+  __ ldr(scratch, FieldMemOperand(elements_reg, FixedArray::kLengthOffset));
+  __ cmp(key_reg, Operand(scratch));
+  __ b(hs, &miss_force_generic);
+
+  // Load the upper word of the double in the fixed array and test for NaN.
+  __ add(indexed_double_offset, elements_reg,
+         Operand(key_reg, LSL, kDoubleSizeLog2 - kSmiTagSize));
+  uint32_t upper_32_offset = FixedArray::kHeaderSize + sizeof(kHoleNanLower32);
+  __ ldr(scratch, FieldMemOperand(indexed_double_offset, upper_32_offset));
+  __ cmp(scratch, Operand(kHoleNanUpper32));
+  __ b(&miss_force_generic, eq);
+
+  // Non-NaN. Allocate a new heap number and copy the double value into it.
+  __ LoadRoot(heap_number_map, Heap::kHeapNumberMapRootIndex);
+  __ AllocateHeapNumber(heap_number_reg, scratch2, scratch3,
+                        heap_number_map, &slow_allocate_heapnumber);
+
+  // Don't need to reload the upper 32 bits of the double, it's already in
+  // scratch.
+  __ str(scratch, FieldMemOperand(heap_number_reg,
+                                  HeapNumber::kExponentOffset));
+  __ ldr(scratch, FieldMemOperand(indexed_double_offset,
+                                  FixedArray::kHeaderSize));
+  __ str(scratch, FieldMemOperand(heap_number_reg,
+                                  HeapNumber::kMantissaOffset));
+
+  __ mov(r0, heap_number_reg);
+  __ Ret();
+
+  __ bind(&slow_allocate_heapnumber);
+  Handle<Code> slow_ic =
+      masm->isolate()->builtins()->KeyedLoadIC_Slow();
+  __ Jump(slow_ic, RelocInfo::CODE_TARGET);
+
+  __ bind(&miss_force_generic);
+  Handle<Code> miss_ic =
+      masm->isolate()->builtins()->KeyedLoadIC_MissForceGeneric();
+  __ Jump(miss_ic, RelocInfo::CODE_TARGET);
+}
+
+
 void KeyedStoreStubCompiler::GenerateStoreFastElement(MacroAssembler* masm,
                                                       bool is_js_array) {
   // ----------- S t a t e -------------
@@ -4179,7 +4261,7 @@ void KeyedStoreStubCompiler::GenerateStoreFastElement(MacroAssembler* masm,
   // have been verified by the caller to not be a smi.
 
   // Check that the key is a smi.
-  __ JumpIfNotSmi(r0, &miss_force_generic);
+  __ JumpIfNotSmi(key_reg, &miss_force_generic);
 
   // Get the elements array and make sure it is a fast element array, not 'cow'.
   __ ldr(elements_reg,
@@ -4213,6 +4295,125 @@ void KeyedStoreStubCompiler::GenerateStoreFastElement(MacroAssembler* masm,
   // Done.
   __ Ret();
 
+  __ bind(&miss_force_generic);
+  Handle<Code> ic =
+      masm->isolate()->builtins()->KeyedStoreIC_MissForceGeneric();
+  __ Jump(ic, RelocInfo::CODE_TARGET);
+}
+
+
+void KeyedStoreStubCompiler::GenerateStoreFastDoubleElement(
+    MacroAssembler* masm,
+    bool is_js_array) {
+  // ----------- S t a t e -------------
+  //  -- r0    : value
+  //  -- r1    : key
+  //  -- r2    : receiver
+  //  -- lr    : return address
+  //  -- r3    : scratch
+  //  -- r4    : scratch
+  //  -- r5    : scratch
+  // -----------------------------------
+  Label miss_force_generic, smi_value, is_nan, maybe_nan, have_double_value;
+
+  Register value_reg = r0;
+  Register key_reg = r1;
+  Register receiver_reg = r2;
+  Register scratch = r3;
+  Register elements_reg = r4;
+  Register mantissa_reg = r5;
+  Register exponent_reg = r6;
+  Register scratch4 = r7;
+
+  // This stub is meant to be tail-jumped to, the receiver must already
+  // have been verified by the caller to not be a smi.
+  __ JumpIfNotSmi(key_reg, &miss_force_generic);
+
+  __ ldr(elements_reg,
+         FieldMemOperand(receiver_reg, JSObject::kElementsOffset));
+
+  // Check that the key is within bounds.
+  if (is_js_array) {
+    __ ldr(scratch, FieldMemOperand(receiver_reg, JSArray::kLengthOffset));
+  } else {
+    __ ldr(scratch,
+           FieldMemOperand(elements_reg, FixedArray::kLengthOffset));
+  }
+  // Compare smis, unsigned compare catches both negative and out-of-bound
+  // indexes.
+  __ cmp(key_reg, scratch);
+  __ b(hs, &miss_force_generic);
+
+  // Handle smi values specially.
+  __ JumpIfSmi(value_reg, &smi_value);
+
+  // Ensure that the object is a heap number
+  __ CheckMap(value_reg,
+              scratch,
+              masm->isolate()->factory()->heap_number_map(),
+              &miss_force_generic,
+              DONT_DO_SMI_CHECK);
+
+  // Check for nan: all NaN values have a value greater (signed) than 0x7ff00000
+  // in the exponent.
+  __ mov(scratch, Operand(kNaNOrInfinityLowerBoundUpper32));
+  __ ldr(exponent_reg, FieldMemOperand(value_reg, HeapNumber::kExponentOffset));
+  __ cmp(exponent_reg, scratch);
+  __ b(ge, &maybe_nan);
+
+  __ ldr(mantissa_reg, FieldMemOperand(value_reg, HeapNumber::kMantissaOffset));
+
+  __ bind(&have_double_value);
+  __ add(scratch, elements_reg,
+         Operand(key_reg, LSL, kDoubleSizeLog2 - kSmiTagSize));
+  __ str(mantissa_reg, FieldMemOperand(scratch, FixedDoubleArray::kHeaderSize));
+  uint32_t offset = FixedDoubleArray::kHeaderSize + sizeof(kHoleNanLower32);
+  __ str(exponent_reg, FieldMemOperand(scratch, offset));
+  __ Ret();
+
+  __ bind(&maybe_nan);
+  // Could be NaN or Infinity. If fraction is not zero, it's NaN, otherwise
+  // it's an Infinity, and the non-NaN code path applies.
+  __ b(gt, &is_nan);
+  __ ldr(mantissa_reg, FieldMemOperand(value_reg, HeapNumber::kMantissaOffset));
+  __ cmp(mantissa_reg, Operand(0));
+  __ b(eq, &have_double_value);
+  __ bind(&is_nan);
+  // Load canonical NaN for storing into the double array.
+  uint64_t nan_int64 = BitCast<uint64_t>(
+      FixedDoubleArray::canonical_not_the_hole_nan_as_double());
+  __ mov(mantissa_reg, Operand(static_cast<uint32_t>(nan_int64)));
+  __ mov(exponent_reg, Operand(static_cast<uint32_t>(nan_int64 >> 32)));
+  __ jmp(&have_double_value);
+
+  __ bind(&smi_value);
+  __ add(scratch, elements_reg,
+         Operand(FixedDoubleArray::kHeaderSize - kHeapObjectTag));
+  __ add(scratch, scratch,
+         Operand(key_reg, LSL, kDoubleSizeLog2 - kSmiTagSize));
+  // scratch is now effective address of the double element
+
+  FloatingPointHelper::Destination destination;
+  if (CpuFeatures::IsSupported(VFP3)) {
+    destination = FloatingPointHelper::kVFPRegisters;
+  } else {
+    destination = FloatingPointHelper::kCoreRegisters;
+  }
+  __ SmiUntag(value_reg, value_reg);
+  FloatingPointHelper::ConvertIntToDouble(
+      masm, value_reg, destination,
+      d0, mantissa_reg, exponent_reg,  // These are: double_dst, dst1, dst2.
+      scratch4, s2);  // These are: scratch2, single_scratch.
+  if (destination == FloatingPointHelper::kVFPRegisters) {
+    CpuFeatures::Scope scope(VFP3);
+    __ vstr(d0, scratch, 0);
+  } else {
+    __ str(mantissa_reg, MemOperand(scratch, 0));
+    __ str(exponent_reg, MemOperand(scratch, Register::kSizeInBytes));
+  }
+  __ Ret();
+
+  // Handle store cache miss, replacing the ic with the generic stub.
   __ bind(&miss_force_generic);
   Handle<Code> ic =
       masm->isolate()->builtins()->KeyedStoreIC_MissForceGeneric();

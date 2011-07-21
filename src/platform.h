@@ -177,6 +177,9 @@ class OS {
   static FILE* FOpen(const char* path, const char* mode);
   static bool Remove(const char* path);
 
+  // Opens a temporary file, the file is auto removed on close.
+  static FILE* OpenTemporaryFile();
+
   // Log file open mode is platform-dependent due to line ends issues.
   static const char* const LogFileOpenMode;
 
@@ -203,14 +206,12 @@ class OS {
                         size_t* allocated,
                         bool is_executable);
   static void Free(void* address, const size_t size);
+
+  // Assign memory as a guard page so that access will cause an exception.
+  static void Guard(void* address, const size_t size);
+
   // Get the Alignment guaranteed by Allocate().
   static size_t AllocateAlignment();
-
-#ifdef ENABLE_HEAP_PROTECTION
-  // Protect/unprotect a block of memory by marking it read-only/writable.
-  static void Protect(void* address, size_t size);
-  static void Unprotect(void* address, size_t size, bool is_executable);
-#endif
 
   // Returns an indication of whether a pointer is in a space that
   // has been allocated by Allocate().  This method may conservatively
@@ -287,6 +288,10 @@ class OS {
   // of the CPU and the OS.  The bits in the answer correspond to the bit
   // positions indicated by the members of the CpuFeature enum from globals.h
   static uint64_t CpuFeaturesImpliedByPlatform();
+
+  // Maximum size of the virtual memory.  0 means there is no artificial
+  // limit.
+  static intptr_t MaxVirtualMemory();
 
   // Returns the double constant NAN
   static double nan_value();
@@ -384,9 +389,9 @@ class Thread {
     int stack_size;
   };
 
-  // Create new thread (with a value for storing in the TLS isolate field).
-  Thread(Isolate* isolate, const Options& options);
-  Thread(Isolate* isolate, const char* name);
+  // Create new thread.
+  explicit Thread(const Options& options);
+  explicit Thread(const char* name);
   virtual ~Thread();
 
   // Start new thread by calling the Run() method in the new thread.
@@ -433,7 +438,6 @@ class Thread {
   // A hint to the scheduler to let another thread run.
   static void YieldCPU();
 
-  Isolate* isolate() const { return isolate_; }
 
   // The thread name length is limited to 16 based on Linux's implementation of
   // prctl().
@@ -447,7 +451,6 @@ class Thread {
 
   PlatformData* data_;
 
-  Isolate* isolate_;
   char name_[kMaxThreadNameLength];
   int stack_size_;
 
@@ -601,7 +604,6 @@ class TickSample {
   bool has_external_callback : 1;
 };
 
-#ifdef ENABLE_LOGGING_AND_PROFILING
 class Sampler {
  public:
   // Initialize sampler.
@@ -659,8 +661,6 @@ class Sampler {
   DISALLOW_IMPLICIT_CONSTRUCTORS(Sampler);
 };
 
-
-#endif  // ENABLE_LOGGING_AND_PROFILING
 
 } }  // namespace v8::internal
 
