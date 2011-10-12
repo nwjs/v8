@@ -433,15 +433,7 @@ void MarkCompactCollector::CollectEvacuationCandidates(PagedSpace* space) {
   if (it.has_next()) it.next();  // Never compact the first page.
   while (it.has_next()) {
     Page* p = it.next();
-    bool evacuate = false;
-    if (FLAG_stress_compaction) {
-      int counter = space->heap()->ms_count();
-      uintptr_t page_number = reinterpret_cast<uintptr_t>(p) >> kPageSizeBits;
-      if ((counter & 1) == (page_number & 1)) evacuate = true;
-    } else {
-      if (space->IsFragmented(p)) evacuate = true;
-    }
-    if (evacuate) {
+    if (space->IsFragmented(p)) {
       AddEvacuationCandidate(p);
       count++;
     } else {
@@ -724,7 +716,6 @@ static inline HeapObject* ShortCircuitConsString(Object** p) {
   // except the maps for the object and its possible substrings might be
   // marked.
   HeapObject* object = HeapObject::cast(*p);
-  if (!FLAG_clever_optimizations) return object;
   Map* map = object->map();
   InstanceType type = map->instance_type();
   if ((type & kShortcutTypeMask) != kShortcutTypeTag) return object;
@@ -847,14 +838,10 @@ class StaticMarkingVisitor : public StaticVisitorBase {
     heap->mark_compact_collector()->MarkObject(cell, mark);
   }
 
-  static inline void VisitEmbeddedPointer(Heap* heap, RelocInfo* rinfo) {
-    ASSERT(rinfo->rmode() == RelocInfo::EMBEDDED_OBJECT);
-    // TODO(mstarzinger): We do not short-circuit cons strings here, verify
-    // that there can be no such embedded pointers and add assertion here.
-    HeapObject* object = HeapObject::cast(rinfo->target_object());
-    heap->mark_compact_collector()->RecordRelocSlot(rinfo, object);
-    MarkBit mark = Marking::MarkBitFrom(object);
-    heap->mark_compact_collector()->MarkObject(object, mark);
+  static inline void VisitEmbeddedPointer(Heap* heap, Code* host, Object** p) {
+    MarkObjectByPointer(heap->mark_compact_collector(),
+                        reinterpret_cast<Object**>(host),
+                        p);
   }
 
   static inline void VisitCodeTarget(Heap* heap, RelocInfo* rinfo) {
@@ -2462,11 +2449,8 @@ class PointersUpdatingVisitor: public ObjectVisitor {
     for (Object** p = start; p < end; p++) UpdatePointer(p);
   }
 
-  void VisitEmbeddedPointer(RelocInfo* rinfo) {
-    ASSERT(rinfo->rmode() == RelocInfo::EMBEDDED_OBJECT);
-    Object* target = rinfo->target_object();
-    VisitPointer(&target);
-    rinfo->set_target_object(target);
+  void VisitEmbeddedPointer(Code* host, Object** p) {
+    UpdatePointer(p);
   }
 
   void VisitCodeTarget(RelocInfo* rinfo) {
@@ -2778,11 +2762,6 @@ static inline void UpdateSlot(ObjectVisitor* v,
     case SlotsBuffer::JS_RETURN_SLOT: {
       RelocInfo rinfo(addr, RelocInfo::JS_RETURN, 0, NULL);
       if (rinfo.IsPatchedReturnSequence()) rinfo.Visit(v);
-      break;
-    }
-    case SlotsBuffer::EMBEDDED_OBJECT_SLOT: {
-      RelocInfo rinfo(addr, RelocInfo::EMBEDDED_OBJECT, 0, NULL);
-      rinfo.Visit(v);
       break;
     }
     default:
@@ -3718,8 +3697,6 @@ bool SlotsBuffer::AddTo(SlotsBufferAllocator* allocator,
 static inline SlotsBuffer::SlotType SlotTypeForRMode(RelocInfo::Mode rmode) {
   if (RelocInfo::IsCodeTarget(rmode)) {
     return SlotsBuffer::CODE_TARGET_SLOT;
-  } else if (RelocInfo::IsEmbeddedObject(rmode)) {
-    return SlotsBuffer::EMBEDDED_OBJECT_SLOT;
   } else if (RelocInfo::IsDebugBreakSlot(rmode)) {
     return SlotsBuffer::DEBUG_TARGET_SLOT;
   } else if (RelocInfo::IsJSReturn(rmode)) {
@@ -3730,8 +3707,9 @@ static inline SlotsBuffer::SlotType SlotTypeForRMode(RelocInfo::Mode rmode) {
 }
 
 
-void MarkCompactCollector::RecordRelocSlot(RelocInfo* rinfo, Object* target) {
-  Page* target_page = Page::FromAddress(reinterpret_cast<Address>(target));
+void MarkCompactCollector::RecordRelocSlot(RelocInfo* rinfo, Code* target) {
+  Page* target_page = Page::FromAddress(
+      reinterpret_cast<Address>(target));
   if (target_page->IsEvacuationCandidate() &&
       (rinfo->host() == NULL ||
        !ShouldSkipEvacuationSlotRecording(rinfo->host()))) {
@@ -3747,7 +3725,8 @@ void MarkCompactCollector::RecordRelocSlot(RelocInfo* rinfo, Object* target) {
 
 
 void MarkCompactCollector::RecordCodeEntrySlot(Address slot, Code* target) {
-  Page* target_page = Page::FromAddress(reinterpret_cast<Address>(target));
+  Page* target_page = Page::FromAddress(
+      reinterpret_cast<Address>(target));
   if (target_page->IsEvacuationCandidate() &&
       !ShouldSkipEvacuationSlotRecording(reinterpret_cast<Object**>(slot))) {
     if (!SlotsBuffer::AddTo(&slots_buffer_allocator_,

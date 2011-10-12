@@ -452,7 +452,7 @@ class MemoryChunk {
   // Manage live byte count (count of bytes known to be live,
   // because they are marked black).
   void ResetLiveBytes() {
-    if (FLAG_gc_verbose) {
+    if (FLAG_trace_live_byte_count) {
       PrintF("ResetLiveBytes:%p:%x->0\n",
              static_cast<void*>(this), live_byte_count_);
     }
@@ -460,7 +460,7 @@ class MemoryChunk {
   }
   void IncrementLiveBytes(int by) {
     ASSERT_LE(static_cast<unsigned>(live_byte_count_), size_);
-    if (FLAG_gc_verbose) {
+    if (FLAG_trace_live_byte_count) {
       printf("UpdateLiveBytes:%p:%x%c=%x->%x\n",
              static_cast<void*>(this), live_byte_count_,
              ((by < 0) ? '-' : '+'), ((by < 0) ? -by : by),
@@ -642,6 +642,7 @@ class Page : public MemoryChunk {
   // [page_addr + kObjectStartOffset .. page_addr + kPageSize].
   INLINE(static Page* FromAllocationTop(Address top)) {
     Page* p = FromAddress(top - kPointerSize);
+    ASSERT_PAGE_OFFSET(p->Offset(top));
     return p;
   }
 
@@ -665,6 +666,7 @@ class Page : public MemoryChunk {
   // Returns the offset of a given address to this page.
   INLINE(int Offset(Address a)) {
     int offset = static_cast<int>(a - address());
+    ASSERT_PAGE_OFFSET(offset);
     return offset;
   }
 
@@ -1739,6 +1741,7 @@ class NewSpacePage : public MemoryChunk {
         reinterpret_cast<Address>(reinterpret_cast<uintptr_t>(address_in_page) &
                                   ~Page::kPageAlignmentMask);
     NewSpacePage* page = reinterpret_cast<NewSpacePage*>(page_start);
+    ASSERT(page->InNewSpace());
     return page;
   }
 
@@ -1815,6 +1818,7 @@ class SemiSpace : public Space {
 
   // Returns the start address of the current page of the space.
   Address page_low() {
+    ASSERT(anchor_.next_page() != &anchor_);
     return current_page_->body();
   }
 
@@ -2080,7 +2084,7 @@ class NewSpace : public Space {
 
   // Return the current capacity of a semispace.
   intptr_t EffectiveCapacity() {
-    SLOW_ASSERT(to_space_.Capacity() == from_space_.Capacity());
+    ASSERT(to_space_.Capacity() == from_space_.Capacity());
     return (to_space_.Capacity() / Page::kPageSize) * Page::kObjectAreaSize;
   }
 
@@ -2096,9 +2100,10 @@ class NewSpace : public Space {
     return Capacity();
   }
 
-  // Return the available bytes without growing.
+  // Return the available bytes without growing or switching page in the
+  // active semispace.
   intptr_t Available() {
-    return Capacity() - Size();
+    return allocation_info_.limit - allocation_info_.top;
   }
 
   // Return the maximum capacity of a semispace.
@@ -2312,9 +2317,9 @@ class OldSpace : public PagedSpace {
 // For contiguous spaces, top should be in the space (or at the end) and limit
 // should be the end of the space.
 #define ASSERT_SEMISPACE_ALLOCATION_INFO(info, space) \
-  SLOW_ASSERT((space).page_low() <= (info).top             \
-              && (info).top <= (space).page_high()         \
-              && (info).limit <= (space).page_high())
+  ASSERT((space).page_low() <= (info).top             \
+         && (info).top <= (space).page_high()         \
+         && (info).limit <= (space).page_high())
 
 
 // -----------------------------------------------------------------------------

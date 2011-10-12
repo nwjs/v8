@@ -2311,7 +2311,7 @@ HGraph* HGraphBuilder::CreateGraph() {
     // Handle implicit declaration of the function name in named function
     // expressions before other declarations.
     if (scope->is_function_scope() && scope->function() != NULL) {
-      HandleDeclaration(scope->function(), CONST, NULL);
+      HandleDeclaration(scope->function(), Variable::CONST, NULL);
     }
     VisitDeclarations(scope->declarations());
     AddSimulate(AstNode::kDeclarationsId);
@@ -3141,7 +3141,7 @@ void HGraphBuilder::VisitVariableProxy(VariableProxy* expr) {
   ASSERT(current_block() != NULL);
   ASSERT(current_block()->HasPredecessor());
   Variable* variable = expr->var();
-  if (variable->mode() == LET) {
+  if (variable->mode() == Variable::LET) {
     return Bailout("reference to let variable");
   }
   switch (variable->location()) {
@@ -3188,7 +3188,7 @@ void HGraphBuilder::VisitVariableProxy(VariableProxy* expr) {
     case Variable::PARAMETER:
     case Variable::LOCAL: {
       HValue* value = environment()->Lookup(variable);
-      if (variable->mode() == CONST &&
+      if (variable->mode() == Variable::CONST &&
           value == graph()->GetConstantHole()) {
         return Bailout("reference to uninitialized const variable");
       }
@@ -3196,7 +3196,7 @@ void HGraphBuilder::VisitVariableProxy(VariableProxy* expr) {
     }
 
     case Variable::CONTEXT: {
-      if (variable->mode() == CONST) {
+      if (variable->mode() == Variable::CONST) {
         return Bailout("reference to const context slot");
       }
       HValue* context = BuildContextChainWalk(variable);
@@ -3663,7 +3663,7 @@ void HGraphBuilder::HandleCompoundAssignment(Assignment* expr) {
 
   if (proxy != NULL) {
     Variable* var = proxy->var();
-    if (var->mode() == CONST || var->mode() == LET)  {
+    if (var->mode() == Variable::CONST || var->mode() == Variable::LET)  {
       return Bailout("unsupported let or const compound assignment");
     }
 
@@ -3808,7 +3808,7 @@ void HGraphBuilder::VisitAssignment(Assignment* expr) {
     HandlePropertyAssignment(expr);
   } else if (proxy != NULL) {
     Variable* var = proxy->var();
-    if (var->mode() == CONST) {
+    if (var->mode() == Variable::CONST) {
       if (expr->op() != Token::INIT_CONST) {
         return Bailout("non-initializer assignment to const");
       }
@@ -3819,7 +3819,7 @@ void HGraphBuilder::VisitAssignment(Assignment* expr) {
       // variables (e.g. initialization inside a loop).
       HValue* old_value = environment()->Lookup(var);
       AddInstruction(new HUseConst(old_value));
-    } else if (var->mode() == LET) {
+    } else if (var->mode() == Variable::LET) {
       return Bailout("unsupported assignment to let");
     }
 
@@ -3847,7 +3847,7 @@ void HGraphBuilder::VisitAssignment(Assignment* expr) {
       }
 
       case Variable::CONTEXT: {
-        ASSERT(var->mode() != CONST);
+        ASSERT(var->mode() != Variable::CONST);
         // Bail out if we try to mutate a parameter value in a function using
         // the arguments object.  We do not (yet) correctly handle the
         // arguments property of the function.
@@ -4555,7 +4555,9 @@ bool HGraphBuilder::TryInline(Call* expr) {
   HEnvironment* env = environment();
   int current_level = 1;
   while (env->outer() != NULL) {
-    if (current_level == Compiler::kMaxInliningLevels) {
+    if (current_level == (FLAG_limit_inlining
+                          ? Compiler::kMaxInliningLevels
+                          : 2 * Compiler::kMaxInliningLevels)) {
       TraceInline(target, caller, "inline depth limit reached");
       return false;
     }
@@ -5401,7 +5403,7 @@ void HGraphBuilder::VisitCountOperation(CountOperation* expr) {
 
   if (proxy != NULL) {
     Variable* var = proxy->var();
-    if (var->mode() == CONST)  {
+    if (var->mode() == Variable::CONST)  {
       return Bailout("unsupported count operation with const");
     }
     // Argument of the count operation is a variable, not a property.
@@ -5789,65 +5791,35 @@ Representation HGraphBuilder::ToRepresentation(TypeInfo info) {
 
 
 void HGraphBuilder::HandleLiteralCompareTypeof(CompareOperation* expr,
-                                               HTypeof* typeof_expr,
+                                               Expression* sub_expr,
                                                Handle<String> check) {
-  HValue* value = typeof_expr->value();
+  CHECK_ALIVE(VisitForTypeOf(sub_expr));
+  HValue* value = Pop();
   HTypeofIsAndBranch* instr = new(zone()) HTypeofIsAndBranch(value, check);
   instr->set_position(expr->position());
-  ast_context()->ReturnControl(instr, expr->id());
-  typeof_expr->DeleteAndReplaceWith(NULL);
+  return ast_context()->ReturnControl(instr, expr->id());
 }
 
 
-static bool MatchLiteralCompareNil(HValue* left,
-                                   Token::Value op,
-                                   HValue* right,
-                                   Handle<Object> nil,
-                                   HValue** expr) {
-  if (left->IsConstant() &&
-      HConstant::cast(left)->handle().is_identical_to(nil) &&
-      Token::IsEqualityOp(op)) {
-    *expr = right;
+bool HGraphBuilder::TryLiteralCompare(CompareOperation* expr) {
+  Expression *sub_expr;
+  Handle<String> check;
+  if (expr->IsLiteralCompareTypeof(&sub_expr, &check)) {
+    HandleLiteralCompareTypeof(expr, sub_expr, check);
     return true;
   }
-  return false;
-}
 
-
-static bool MatchLiteralCompareTypeof(HValue* left,
-                                      Token::Value op,
-                                      HValue* right,
-                                      HTypeof** typeof_expr,
-                                      Handle<String>* check) {
-  if (left->IsTypeof() &&
-      Token::IsEqualityOp(op) &&
-      right->IsConstant() &&
-      HConstant::cast(right)->HasStringValue()) {
-    *typeof_expr = HTypeof::cast(left);
-    *check = Handle<String>::cast(HConstant::cast(right)->handle());
+  if (expr->IsLiteralCompareUndefined(&sub_expr)) {
+    HandleLiteralCompareNil(expr, sub_expr, kUndefinedValue);
     return true;
   }
+
+  if (expr->IsLiteralCompareNull(&sub_expr)) {
+    HandleLiteralCompareNil(expr, sub_expr, kNullValue);
+    return true;
+  }
+
   return false;
-}
-
-
-static bool IsLiteralCompareTypeof(HValue* left,
-                                   Token::Value op,
-                                   HValue* right,
-                                   HTypeof** typeof_expr,
-                                   Handle<String>* check) {
-  return MatchLiteralCompareTypeof(left, op, right, typeof_expr, check) ||
-      MatchLiteralCompareTypeof(right, op, left, typeof_expr, check);
-}
-
-
-static bool IsLiteralCompareNil(HValue* left,
-                                Token::Value op,
-                                HValue* right,
-                                Handle<Object> nil,
-                                HValue** expr) {
-  return MatchLiteralCompareNil(left, op, right, nil, expr) ||
-      MatchLiteralCompareNil(right, op, left, nil, expr);
 }
 
 
@@ -5868,9 +5840,11 @@ void HGraphBuilder::VisitCompareOperation(CompareOperation* expr) {
     return ast_context()->ReturnControl(instr, expr->id());
   }
 
+  // Check for special cases that compare against literals.
+  if (TryLiteralCompare(expr)) return;
+
   TypeInfo type_info = oracle()->CompareType(expr);
   // Check if this expression was ever executed according to type feedback.
-  // Note that for the special typeof/null/undefined cases we get unknown here.
   if (type_info.IsUninitialized()) {
     AddInstruction(new(zone()) HSoftDeoptimize);
     current_block()->MarkAsDeoptimizing();
@@ -5884,20 +5858,6 @@ void HGraphBuilder::VisitCompareOperation(CompareOperation* expr) {
   HValue* right = Pop();
   HValue* left = Pop();
   Token::Value op = expr->op();
-
-  HTypeof* typeof_expr = NULL;
-  Handle<String> check;
-  if (IsLiteralCompareTypeof(left, op, right, &typeof_expr, &check)) {
-    return HandleLiteralCompareTypeof(expr, typeof_expr, check);
-  }
-  HValue* sub_expr = NULL;
-  Factory* f = graph()->isolate()->factory();
-  if (IsLiteralCompareNil(left, op, right, f->undefined_value(), &sub_expr)) {
-    return HandleLiteralCompareNil(expr, sub_expr, kUndefinedValue);
-  }
-  if (IsLiteralCompareNil(left, op, right, f->null_value(), &sub_expr)) {
-    return HandleLiteralCompareNil(expr, sub_expr, kNullValue);
-  }
 
   if (op == Token::INSTANCEOF) {
     // Check to see if the rhs of the instanceof is a global function not
@@ -5987,11 +5947,13 @@ void HGraphBuilder::VisitCompareOperation(CompareOperation* expr) {
 
 
 void HGraphBuilder::HandleLiteralCompareNil(CompareOperation* expr,
-                                            HValue* value,
+                                            Expression* sub_expr,
                                             NilValue nil) {
   ASSERT(!HasStackOverflow());
   ASSERT(current_block() != NULL);
   ASSERT(current_block()->HasPredecessor());
+  CHECK_ALIVE(VisitForValue(sub_expr));
+  HValue* value = Pop();
   EqualityKind kind =
       expr->op() == Token::EQ_STRICT ? kStrictEquality : kNonStrictEquality;
   HIsNilAndBranch* instr = new(zone()) HIsNilAndBranch(value, kind, nil);
@@ -6015,9 +5977,9 @@ void HGraphBuilder::VisitDeclaration(Declaration* decl) {
 
 
 void HGraphBuilder::HandleDeclaration(VariableProxy* proxy,
-                                      VariableMode mode,
+                                      Variable::Mode mode,
                                       FunctionLiteral* function) {
-  if (mode == LET) return Bailout("unsupported let declaration");
+  if (mode == Variable::LET) return Bailout("unsupported let declaration");
   Variable* var = proxy->var();
   switch (var->location()) {
     case Variable::UNALLOCATED:
@@ -6025,9 +5987,9 @@ void HGraphBuilder::HandleDeclaration(VariableProxy* proxy,
     case Variable::PARAMETER:
     case Variable::LOCAL:
     case Variable::CONTEXT:
-      if (mode == CONST || function != NULL) {
+      if (mode == Variable::CONST || function != NULL) {
         HValue* value = NULL;
-        if (mode == CONST) {
+        if (mode == Variable::CONST) {
           value = graph()->GetConstantHole();
         } else {
           VisitForValue(function);

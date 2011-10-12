@@ -1300,6 +1300,7 @@ ACCESSORS(JSObject, properties, FixedArray, kPropertiesOffset)
 
 FixedArrayBase* JSObject::elements() {
   Object* array = READ_FIELD(this, kElementsOffset);
+  ASSERT(array->HasValidElements());
   return static_cast<FixedArrayBase*>(array);
 }
 
@@ -1739,11 +1740,7 @@ void FixedDoubleArray::Initialize(FixedDoubleArray* from) {
                 old_length * kDoubleSize);
   } else {
     for (int i = 0; i < old_length; ++i) {
-      if (from->is_the_hole(i)) {
-        set_the_hole(i);
-      } else {
-        set(i, from->get_scalar(i));
-      }
+      set(i, from->get_scalar(i));
     }
   }
   int offset = kHeaderSize + old_length * kDoubleSize;

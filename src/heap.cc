@@ -1443,9 +1443,9 @@ class ScavengingVisitor : public StaticVisitorBase {
                                     HeapObject** slot,
                                     HeapObject* object,
                                     int object_size) {
-    SLOW_ASSERT((size_restriction != SMALL) ||
-                (object_size <= Page::kMaxHeapObjectSize));
-    SLOW_ASSERT(object->Size() == object_size);
+    ASSERT((size_restriction != SMALL) ||
+           (object_size <= Page::kMaxHeapObjectSize));
+    ASSERT(object->Size() == object_size);
 
     Heap* heap = map->GetHeap();
     if (heap->ShouldBePromoted(object->address(), object_size)) {
@@ -1678,9 +1678,9 @@ void Heap::SelectScavengingVisitorsTable() {
 
 
 void Heap::ScavengeObjectSlow(HeapObject** p, HeapObject* object) {
-  SLOW_ASSERT(HEAP->InFromSpace(object));
+  ASSERT(HEAP->InFromSpace(object));
   MapWord first_word = object->map_word();
-  SLOW_ASSERT(!first_word.IsForwardingAddress());
+  ASSERT(!first_word.IsForwardingAddress());
   Map* map = first_word.ToMap();
   map->GetHeap()->DoScavengeObject(map, p, object);
 }
@@ -3688,14 +3688,12 @@ MaybeObject* Heap::AllocateGlobalObject(JSFunction* constructor) {
 MaybeObject* Heap::CopyJSObject(JSObject* source) {
   // Never used to copy functions.  If functions need to be copied we
   // have to be careful to clear the literals array.
-  SLOW_ASSERT(!source->IsJSFunction());
+  ASSERT(!source->IsJSFunction());
 
   // Make the clone.
   Map* map = source->map();
   int object_size = map->instance_size();
   Object* clone;
-
-  WriteBarrierMode wb_mode = UPDATE_WRITE_BARRIER;
 
   // If we're forced to always allocate, we use the general allocation
   // functions which may leave us with an object in old space.
@@ -3713,11 +3711,10 @@ MaybeObject* Heap::CopyJSObject(JSObject* source) {
                  JSObject::kHeaderSize,
                  (object_size - JSObject::kHeaderSize) / kPointerSize);
   } else {
-    wb_mode = SKIP_WRITE_BARRIER;
     { MaybeObject* maybe_clone = new_space_.AllocateRaw(object_size);
       if (!maybe_clone->ToObject(&clone)) return maybe_clone;
     }
-    SLOW_ASSERT(InNewSpace(clone));
+    ASSERT(InNewSpace(clone));
     // Since we know the clone is allocated in new space, we can copy
     // the contents without worrying about updating the write barrier.
     CopyBlock(HeapObject::cast(clone)->address(),
@@ -3725,8 +3722,7 @@ MaybeObject* Heap::CopyJSObject(JSObject* source) {
               object_size);
   }
 
-  SLOW_ASSERT(
-      JSObject::cast(clone)->GetElementsKind() == source->GetElementsKind());
+  ASSERT(JSObject::cast(clone)->GetElementsKind() == source->GetElementsKind());
   FixedArrayBase* elements = FixedArrayBase::cast(source->elements());
   FixedArray* properties = FixedArray::cast(source->properties());
   // Update elements if necessary.
@@ -3742,7 +3738,7 @@ MaybeObject* Heap::CopyJSObject(JSObject* source) {
       }
       if (!maybe_elem->ToObject(&elem)) return maybe_elem;
     }
-    JSObject::cast(clone)->set_elements(FixedArrayBase::cast(elem), wb_mode);
+    JSObject::cast(clone)->set_elements(FixedArrayBase::cast(elem));
   }
   // Update properties if necessary.
   if (properties->length() > 0) {
@@ -3750,7 +3746,7 @@ MaybeObject* Heap::CopyJSObject(JSObject* source) {
     { MaybeObject* maybe_prop = CopyFixedArray(properties);
       if (!maybe_prop->ToObject(&prop)) return maybe_prop;
     }
-    JSObject::cast(clone)->set_properties(FixedArray::cast(prop), wb_mode);
+    JSObject::cast(clone)->set_properties(FixedArray::cast(prop));
   }
   // Return the new clone.
   return clone;
@@ -4806,12 +4802,12 @@ void Heap::IterateAndMarkPointersToFromSpace(Address start,
                  HeapObject::cast(object));
         Object* new_object = *slot;
         if (InNewSpace(new_object)) {
-          SLOW_ASSERT(Heap::InToSpace(new_object));
-          SLOW_ASSERT(new_object->IsHeapObject());
+          ASSERT(Heap::InToSpace(new_object));
+          ASSERT(new_object->IsHeapObject());
           store_buffer_.EnterDirectlyIntoStoreBuffer(
               reinterpret_cast<Address>(slot));
         }
-        SLOW_ASSERT(!MarkCompactCollector::IsOnEvacuationCandidate(new_object));
+        ASSERT(!MarkCompactCollector::IsOnEvacuationCandidate(new_object));
       } else if (record_slots &&
                  MarkCompactCollector::IsOnEvacuationCandidate(object)) {
         mark_compact_collector()->RecordSlot(slot, slot, object);

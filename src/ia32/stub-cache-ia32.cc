@@ -2755,10 +2755,9 @@ MaybeObject* KeyedStoreStubCompiler::CompileStoreElement(Map* receiver_map) {
 }
 
 
-MaybeObject* KeyedStoreStubCompiler::CompileStorePolymorphic(
+MaybeObject* KeyedStoreStubCompiler::CompileStoreMegamorphic(
     MapList* receiver_maps,
-    CodeList* handler_stubs,
-    MapList* transitioned_maps) {
+    CodeList* handler_ics) {
   // ----------- S t a t e -------------
   //  -- eax    : value
   //  -- ecx    : key
@@ -2766,21 +2765,15 @@ MaybeObject* KeyedStoreStubCompiler::CompileStorePolymorphic(
   //  -- esp[0] : return address
   // -----------------------------------
   Label miss;
-  __ JumpIfSmi(edx, &miss, Label::kNear);
-  __ mov(edi, FieldOperand(edx, HeapObject::kMapOffset));
-  // ebx: receiver->map().
-  for (int i = 0; i < receiver_maps->length(); ++i) {
-    Handle<Map> map(receiver_maps->at(i));
-    __ cmp(edi, map);
-    if (transitioned_maps->at(i) == NULL) {
-      __ j(equal, Handle<Code>(handler_stubs->at(i)));
-    } else {
-      Label next_map;
-      __ j(not_equal, &next_map, Label::kNear);
-      __ mov(ebx, Immediate(Handle<Map>(transitioned_maps->at(i))));
-      __ jmp(Handle<Code>(handler_stubs->at(i)), RelocInfo::CODE_TARGET);
-      __ bind(&next_map);
-    }
+  __ JumpIfSmi(edx, &miss);
+
+  Register map_reg = ebx;
+  __ mov(map_reg, FieldOperand(edx, HeapObject::kMapOffset));
+  int receiver_count = receiver_maps->length();
+  for (int current = 0; current < receiver_count; ++current) {
+    Handle<Map> map(receiver_maps->at(current));
+    __ cmp(map_reg, map);
+    __ j(equal, Handle<Code>(handler_ics->at(current)));
   }
   __ bind(&miss);
   Handle<Code> miss_ic = isolate()->builtins()->KeyedStoreIC_Miss();
@@ -3220,7 +3213,7 @@ MaybeObject* KeyedLoadStubCompiler::CompileLoadElement(Map* receiver_map) {
 }
 
 
-MaybeObject* KeyedLoadStubCompiler::CompileLoadPolymorphic(
+MaybeObject* KeyedLoadStubCompiler::CompileLoadMegamorphic(
     MapList* receiver_maps,
     CodeList* handler_ics) {
   // ----------- S t a t e -------------
@@ -3913,7 +3906,7 @@ void KeyedStoreStubCompiler::GenerateStoreFastElement(
   //  -- edx    : receiver
   //  -- esp[0] : return address
   // -----------------------------------
-  Label miss_force_generic, transition_elements_kind;
+  Label miss_force_generic;
 
   // This stub is meant to be tail-jumped to, the receiver must already
   // have been verified by the caller to not be a smi.
@@ -3938,7 +3931,7 @@ void KeyedStoreStubCompiler::GenerateStoreFastElement(
   }
 
   if (elements_kind == FAST_SMI_ONLY_ELEMENTS) {
-    __ JumpIfNotSmi(eax, &transition_elements_kind);
+    __ JumpIfNotSmi(eax, &miss_force_generic);
     // ecx is a smi, use times_half_pointer_size instead of
     // times_pointer_size
     __ mov(FieldOperand(edi,
@@ -3968,11 +3961,6 @@ void KeyedStoreStubCompiler::GenerateStoreFastElement(
   Handle<Code> ic_force_generic =
       masm->isolate()->builtins()->KeyedStoreIC_MissForceGeneric();
   __ jmp(ic_force_generic, RelocInfo::CODE_TARGET);
-
-  // Handle transition to other elements kinds without using the generic stub.
-  __ bind(&transition_elements_kind);
-  Handle<Code> ic_miss = masm->isolate()->builtins()->KeyedStoreIC_Miss();
-  __ jmp(ic_miss, RelocInfo::CODE_TARGET);
 }
 
 
@@ -3985,7 +3973,7 @@ void KeyedStoreStubCompiler::GenerateStoreFastDoubleElement(
   //  -- edx    : receiver
   //  -- esp[0] : return address
   // -----------------------------------
-  Label miss_force_generic, transition_elements_kind;
+  Label miss_force_generic;
 
   // This stub is meant to be tail-jumped to, the receiver must already
   // have been verified by the caller to not be a smi.
@@ -4011,7 +3999,7 @@ void KeyedStoreStubCompiler::GenerateStoreFastDoubleElement(
                                  ecx,
                                  edx,
                                  xmm0,
-                                 &transition_elements_kind,
+                                 &miss_force_generic,
                                  true);
   __ ret(0);
 
@@ -4020,11 +4008,6 @@ void KeyedStoreStubCompiler::GenerateStoreFastDoubleElement(
   Handle<Code> ic_force_generic =
       masm->isolate()->builtins()->KeyedStoreIC_MissForceGeneric();
   __ jmp(ic_force_generic, RelocInfo::CODE_TARGET);
-
-  // Handle transition to other elements kinds without using the generic stub.
-  __ bind(&transition_elements_kind);
-  Handle<Code> ic_miss = masm->isolate()->builtins()->KeyedStoreIC_Miss();
-  __ jmp(ic_miss, RelocInfo::CODE_TARGET);
 }
 
 

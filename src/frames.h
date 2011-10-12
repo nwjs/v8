@@ -702,8 +702,6 @@ class JavaScriptFrameIteratorTemp BASE_EMBEDDED {
 
   inline explicit JavaScriptFrameIteratorTemp(Isolate* isolate);
 
-  inline JavaScriptFrameIteratorTemp(Isolate* isolate, ThreadLocalTop* top);
-
   // Skip frames until the frame with the given id is reached.
   explicit JavaScriptFrameIteratorTemp(StackFrame::Id id) { AdvanceToId(id); }
 

@@ -145,7 +145,7 @@ Handle<Object> Context::Lookup(Handle<String> name,
         scope_info = Handle<SerializedScopeInfo>(
             SerializedScopeInfo::cast(context->extension()), isolate);
       }
-      VariableMode mode;
+      Variable::Mode mode;
       int slot_index = scope_info->ContextSlotIndex(*name, &mode);
       ASSERT(slot_index < 0 || slot_index >= MIN_CONTEXT_SLOTS);
       if (slot_index >= 0) {
@@ -161,23 +161,23 @@ Handle<Object> Context::Lookup(Handle<String> name,
         // declared variables that were introduced through declaration nodes)
         // must not appear here.
         switch (mode) {
-          case INTERNAL:  // Fall through.
-          case VAR:
+          case Variable::INTERNAL:  // Fall through.
+          case Variable::VAR:
             *attributes = NONE;
             *binding_flags = MUTABLE_IS_INITIALIZED;
             break;
-          case LET:
+          case Variable::LET:
             *attributes = NONE;
             *binding_flags = MUTABLE_CHECK_INITIALIZED;
             break;
-          case CONST:
+          case Variable::CONST:
             *attributes = READ_ONLY;
             *binding_flags = IMMUTABLE_CHECK_INITIALIZED;
             break;
-          case DYNAMIC:
-          case DYNAMIC_GLOBAL:
-          case DYNAMIC_LOCAL:
-          case TEMPORARY:
+          case Variable::DYNAMIC:
+          case Variable::DYNAMIC_GLOBAL:
+          case Variable::DYNAMIC_LOCAL:
+          case Variable::TEMPORARY:
             UNREACHABLE();
             break;
         }
@@ -245,7 +245,7 @@ bool Context::GlobalIfNotShadowedByEval(Handle<String> name) {
     // Check non-parameter locals.
     Handle<SerializedScopeInfo> scope_info(
         context->closure()->shared()->scope_info());
-    VariableMode mode;
+    Variable::Mode mode;
     int index = scope_info->ContextSlotIndex(*name, &mode);
     ASSERT(index < 0 || index >= MIN_CONTEXT_SLOTS);
     if (index >= 0) return false;

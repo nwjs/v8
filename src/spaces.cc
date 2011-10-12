@@ -1909,24 +1909,11 @@ intptr_t FreeList::SumFreeLists() {
 
 bool NewSpace::ReserveSpace(int bytes) {
   // We can't reliably unpack a partial snapshot that needs more new space
-  // space than the minimum NewSpace size.  The limit can be set lower than
-  // the end of new space either because there is more space on the next page
-  // or because we have lowered the limit in order to get periodic incremental
-  // marking.  The most reliable way to ensure that there is linear space is
-  // to do the allocation, then rewind the limit.
+  // space than the minimum NewSpace size.
   ASSERT(bytes <= InitialCapacity());
-  MaybeObject* maybe = AllocateRawInternal(bytes);
-  Object* object = NULL;
-  if (!maybe->ToObject(&object)) return false;
-  HeapObject* allocation = HeapObject::cast(object);
+  Address limit = allocation_info_.limit;
   Address top = allocation_info_.top;
-  if ((top - bytes) == allocation->address()) {
-    allocation_info_.top = allocation->address();
-    return true;
-  }
-  // There may be a borderline case here where the allocation succeeded, but
-  // the limit and top have moved on to a new page.  In that case we try again.
-  return ReserveSpace(bytes);
+  return limit - top >= bytes;
 }
 
 

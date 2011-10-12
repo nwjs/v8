@@ -1031,9 +1031,6 @@ class Heap {
   }
   Object* global_contexts_list() { return global_contexts_list_; }
 
-  // Number of mark-sweeps.
-  int ms_count() { return ms_count_; }
-
   // Iterates over all roots in the heap.
   void IterateRoots(ObjectVisitor* v, VisitMode mode);
   // Iterates over all strong roots in the heap.
@@ -1246,18 +1243,16 @@ class Heap {
   }
 
   intptr_t OldGenPromotionLimit(intptr_t old_gen_size) {
-    const int divisor = FLAG_stress_compaction ? 10 : 3;
     intptr_t limit =
-        Max(old_gen_size + old_gen_size / divisor, kMinimumPromotionLimit);
+        Max(old_gen_size + old_gen_size / 3, kMinimumPromotionLimit);
     limit += new_space_.Capacity();
     limit *= old_gen_limit_factor_;
     return limit;
   }
 
   intptr_t OldGenAllocationLimit(intptr_t old_gen_size) {
-    const int divisor = FLAG_stress_compaction ? 8 : 2;
     intptr_t limit =
-        Max(old_gen_size + old_gen_size / divisor, kMinimumAllocationLimit);
+        Max(old_gen_size + old_gen_size / 2, kMinimumAllocationLimit);
     limit += new_space_.Capacity();
     limit *= old_gen_limit_factor_;
     return limit;

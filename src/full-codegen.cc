@@ -520,7 +520,7 @@ void FullCodeGenerator::VisitDeclarations(
       if (var->IsUnallocated()) {
         array->set(j++, *(var->name()));
         if (decl->fun() == NULL) {
-          if (var->mode() == CONST) {
+          if (var->mode() == Variable::CONST) {
             // In case this is const property use the hole.
             array->set_the_hole(j++);
           } else {

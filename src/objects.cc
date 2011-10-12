@@ -1097,7 +1097,7 @@ void HeapObject::HeapObjectShortPrint(StringStream* accumulator) {
   }
   switch (map()->instance_type()) {
     case MAP_TYPE:
-      accumulator->Add("<Map(elements=%u)>", Map::cast(this)->elements_kind());
+      accumulator->Add("<Map>");
       break;
     case FIXED_ARRAY_TYPE:
       accumulator->Add("<FixedArray[%u]>", FixedArray::cast(this)->length());
@@ -2163,116 +2163,13 @@ static MaybeObject* AddElementsTransitionMapToDescriptor(
 }
 
 
-String* Map::elements_transition_sentinel_name() {
-  return GetHeap()->empty_symbol();
-}
-
-
-Object* Map::GetDescriptorContents(String* sentinel_name,
-                                   bool* safe_to_add_transition) {
-  // Get the cached index for the descriptors lookup, or find and cache it.
-  DescriptorArray* descriptors = instance_descriptors();
-  DescriptorLookupCache* cache = GetIsolate()->descriptor_lookup_cache();
-  int index = cache->Lookup(descriptors, sentinel_name);
-  if (index == DescriptorLookupCache::kAbsent) {
-    index = descriptors->Search(sentinel_name);
-    cache->Update(descriptors, sentinel_name, index);
-  }
-  // If the transition already exists, return its descriptor.
-  if (index != DescriptorArray::kNotFound) {
-    PropertyDetails details(descriptors->GetDetails(index));
-    if (details.type() == ELEMENTS_TRANSITION) {
-      return descriptors->GetValue(index);
-    } else {
-      *safe_to_add_transition = false;
-    }
-  }
-  return NULL;
-}
-
-
-Map* Map::LookupElementsTransitionMap(ElementsKind elements_kind,
-                                      bool* safe_to_add_transition) {
-  // Special case: indirect SMI->FAST transition (cf. comment in
-  // AddElementsTransition()).
-  if (this->elements_kind() == FAST_SMI_ONLY_ELEMENTS &&
-      elements_kind == FAST_ELEMENTS) {
-    Map* double_map = this->LookupElementsTransitionMap(FAST_DOUBLE_ELEMENTS,
-                                                        safe_to_add_transition);
-    if (double_map == NULL) return double_map;
-    return double_map->LookupElementsTransitionMap(FAST_ELEMENTS,
-                                                   safe_to_add_transition);
-  }
-  Object* descriptor_contents = GetDescriptorContents(
-      elements_transition_sentinel_name(), safe_to_add_transition);
-  if (descriptor_contents != NULL) {
-    Map* maybe_transition_map =
-        GetElementsTransitionMapFromDescriptor(descriptor_contents,
-                                               elements_kind);
-    ASSERT(maybe_transition_map == NULL || maybe_transition_map->IsMap());
-    return maybe_transition_map;
-  }
-  return NULL;
-}
-
-
-MaybeObject* Map::AddElementsTransition(ElementsKind elements_kind,
-                                        Map* transitioned_map) {
-  // The map transition graph should be a tree, therefore the transition
-  // from SMI to FAST elements is not done directly, but by going through
-  // DOUBLE elements first.
-  if (this->elements_kind() == FAST_SMI_ONLY_ELEMENTS &&
-      elements_kind == FAST_ELEMENTS) {
-    bool safe_to_add = true;
-    Map* double_map = this->LookupElementsTransitionMap(
-        FAST_DOUBLE_ELEMENTS, &safe_to_add);
-    // This method is only called when safe_to_add_transition has been found
-    // to be true earlier.
-    ASSERT(safe_to_add);
-
-    if (double_map == NULL) {
-      MaybeObject* maybe_map = this->CopyDropTransitions();
-      if (!maybe_map->To(&double_map)) return maybe_map;
-      double_map->set_elements_kind(FAST_DOUBLE_ELEMENTS);
-      MaybeObject* maybe_double_transition = this->AddElementsTransition(
-          FAST_DOUBLE_ELEMENTS, double_map);
-      if (maybe_double_transition->IsFailure()) return maybe_double_transition;
-    }
-    return double_map->AddElementsTransition(FAST_ELEMENTS, transitioned_map);
-  }
-
-  bool safe_to_add_transition = true;
-  Object* descriptor_contents = GetDescriptorContents(
-      elements_transition_sentinel_name(), &safe_to_add_transition);
-  // This method is only called when safe_to_add_transition has been found
-  // to be true earlier.
-  ASSERT(safe_to_add_transition);
-  MaybeObject* maybe_new_contents =
-      AddElementsTransitionMapToDescriptor(descriptor_contents,
-                                           transitioned_map);
-  Object* new_contents;
-  if (!maybe_new_contents->ToObject(&new_contents)) {
-    return maybe_new_contents;
-  }
-
-  ElementsTransitionDescriptor desc(elements_transition_sentinel_name(),
-                                    new_contents);
-  Object* new_descriptors;
-  MaybeObject* maybe_new_descriptors =
-      instance_descriptors()->CopyInsert(&desc, KEEP_TRANSITIONS);
-  if (!maybe_new_descriptors->ToObject(&new_descriptors)) {
-    return maybe_new_descriptors;
-  }
-  set_instance_descriptors(DescriptorArray::cast(new_descriptors));
-  return this;
-}
-
-
-MaybeObject* JSObject::GetElementsTransitionMap(ElementsKind to_kind) {
+MaybeObject* JSObject::GetElementsTransitionMap(ElementsKind elements_kind) {
+  Heap* current_heap = GetHeap();
   Map* current_map = map();
-  ElementsKind from_kind = current_map->elements_kind();
+  DescriptorArray* descriptors = current_map->instance_descriptors();
+  String* elements_transition_sentinel_name = current_heap->empty_symbol();
 
-  if (from_kind == to_kind) return current_map;
+  if (current_map->elements_kind() == elements_kind) return current_map;
 
   // Only objects with FastProperties can have DescriptorArrays and can track
   // element-related maps. Also don't add descriptors to maps that are shared.
@@ -2280,32 +2177,58 @@ MaybeObject* JSObject::GetElementsTransitionMap(ElementsKind to_kind) {
       !current_map->IsUndefined() &&
       !current_map->is_shared();
 
-  // Prevent long chains of DICTIONARY -> FAST_ELEMENTS maps caused by objects
+  // Prevent long chains of DICTIONARY -> FAST_ELEMENTS maps cause by objects
   // with elements that switch back and forth between dictionary and fast
   // element mode.
-  if (from_kind == DICTIONARY_ELEMENTS && to_kind == FAST_ELEMENTS) {
+  if ((current_map->elements_kind() == DICTIONARY_ELEMENTS &&
+       elements_kind == FAST_ELEMENTS)) {
     safe_to_add_transition = false;
   }
 
+  Object* descriptor_contents = NULL;
   if (safe_to_add_transition) {
     // It's only safe to manipulate the descriptor array if it would be
     // safe to add a transition.
-    Map* maybe_transition_map = current_map->LookupElementsTransitionMap(
-        to_kind, &safe_to_add_transition);
-    if (maybe_transition_map != NULL) {
-      return maybe_transition_map;
+
+    // Check if the elements transition already exists.
+    DescriptorLookupCache* cache =
+        current_heap->isolate()->descriptor_lookup_cache();
+    int index = cache->Lookup(descriptors, elements_transition_sentinel_name);
+    if (index == DescriptorLookupCache::kAbsent) {
+      index = descriptors->Search(elements_transition_sentinel_name);
+      cache->Update(descriptors,
+                    elements_transition_sentinel_name,
+                    index);
+    }
+
+    // If the transition already exists, check the type. If there is a match,
+    // return it.
+    if (index != DescriptorArray::kNotFound) {
+      PropertyDetails details(PropertyDetails(descriptors->GetDetails(index)));
+      if (details.type() == ELEMENTS_TRANSITION) {
+        descriptor_contents = descriptors->GetValue(index);
+        Map* maybe_transition_map =
+            GetElementsTransitionMapFromDescriptor(descriptor_contents,
+                                                   elements_kind);
+        if (maybe_transition_map != NULL) {
+          ASSERT(maybe_transition_map->IsMap());
+          return maybe_transition_map;
+        }
+      } else {
+        safe_to_add_transition = false;
+      }
     }
   }
 
-  Map* new_map = NULL;
-
   // No transition to an existing map for the given ElementsKind. Make a new
   // one.
+  Object* obj;
   { MaybeObject* maybe_map = current_map->CopyDropTransitions();
-    if (!maybe_map->To(&new_map)) return maybe_map;
+    if (!maybe_map->ToObject(&obj)) return maybe_map;
   }
+  Map* new_map = Map::cast(obj);
 
-  new_map->set_elements_kind(to_kind);
+  new_map->set_elements_kind(elements_kind);
 
   // Only remember the map transition if the object's map is NOT equal to the
   // global object_function's map and there is not an already existing
@@ -2314,10 +2237,26 @@ MaybeObject* JSObject::GetElementsTransitionMap(ElementsKind to_kind) {
       (GetIsolate()->context()->global_context()->object_function()->map() !=
        map());
   if (allow_map_transition) {
-    MaybeObject* maybe_transition =
-        current_map->AddElementsTransition(to_kind, new_map);
-    if (maybe_transition->IsFailure()) return maybe_transition;
+    MaybeObject* maybe_new_contents =
+        AddElementsTransitionMapToDescriptor(descriptor_contents, new_map);
+    Object* new_contents;
+    if (!maybe_new_contents->ToObject(&new_contents)) {
+      return maybe_new_contents;
+    }
+
+    ElementsTransitionDescriptor desc(elements_transition_sentinel_name,
+                                      new_contents);
+    Object* new_descriptors;
+    MaybeObject* maybe_new_descriptors = descriptors->CopyInsert(
+        &desc,
+        KEEP_TRANSITIONS);
+    if (!maybe_new_descriptors->ToObject(&new_descriptors)) {
+      return maybe_new_descriptors;
+    }
+    descriptors = DescriptorArray::cast(new_descriptors);
+    current_map->set_instance_descriptors(descriptors);
   }
+
   return new_map;
 }
 
@@ -2507,7 +2446,6 @@ MUST_USE_RESULT MaybeObject* JSProxy::SetPropertyWithHandlerIfDefiningSetter(
   *found = true;  // except where defined otherwise...
   Isolate* isolate = GetHeap()->isolate();
   Handle<JSProxy> proxy(this);
-  Handle<Object> handler(this->handler());  // Trap might morph proxy.
   Handle<String> name(name_raw);
   Handle<Object> value(value_raw);
   Handle<Object> args[] = { name };
@@ -2531,9 +2469,7 @@ MUST_USE_RESULT MaybeObject* JSProxy::SetPropertyWithHandlerIfDefiningSetter(
     Handle<Object> configurable(v8::internal::GetProperty(desc, conf_name));
     ASSERT(!isolate->has_pending_exception());
     if (configurable->IsFalse()) {
-      Handle<String> trap =
-          isolate->factory()->LookupAsciiSymbol("getPropertyDescriptor");
-      Handle<Object> args[] = { handler, trap, name };
+      Handle<Object> args[] = { Handle<Object>(proxy->handler()), proxy, name };
       Handle<Object> error = isolate->factory()->NewTypeError(
           "proxy_prop_not_configurable", HandleVector(args, ARRAY_SIZE(args)));
       return isolate->Throw(*error);
@@ -2613,7 +2549,6 @@ MUST_USE_RESULT PropertyAttributes JSProxy::GetPropertyAttributeWithHandler(
   Isolate* isolate = GetIsolate();
   HandleScope scope(isolate);
   Handle<JSProxy> proxy(this);
-  Handle<Object> handler(this->handler());  // Trap might morph proxy.
   Handle<JSReceiver> receiver(receiver_raw);
   Handle<Object> name(name_raw);
 
@@ -2643,9 +2578,7 @@ MUST_USE_RESULT PropertyAttributes JSProxy::GetPropertyAttributeWithHandler(
   if (isolate->has_pending_exception()) return NONE;
 
   if (configurable->IsFalse()) {
-    Handle<String> trap =
-        isolate->factory()->LookupAsciiSymbol("getPropertyDescriptor");
-    Handle<Object> args[] = { handler, trap, name };
+    Handle<Object> args[] = { Handle<Object>(proxy->handler()), proxy, name };
     Handle<Object> error = isolate->factory()->NewTypeError(
         "proxy_prop_not_configurable", HandleVector(args, ARRAY_SIZE(args)));
     isolate->Throw(*error);
@@ -6776,7 +6709,7 @@ void Map::ClearNonLiveTransitions(Heap* heap, Object* real_prototype) {
       } else {
         ASSERT(object->IsFixedArray());
         ASSERT(details.type() == ELEMENTS_TRANSITION);
-        FixedArray* array = reinterpret_cast<FixedArray*>(object);
+        FixedArray* array = reinterpret_cast<FixedArray*>(contents->get(i));
         bool reachable_map_found = false;
         for (int j = 0; j < array->length(); ++j) {
           Map* target = reinterpret_cast<Map*>(array->get(j));
@@ -6790,7 +6723,7 @@ void Map::ClearNonLiveTransitions(Heap* heap, Object* real_prototype) {
             // Getter prototype() is read-only, set_prototype() has side
             // effects.
             *RawField(target, Map::kPrototypeOffset) = real_prototype;
-          } else if (target->IsMap()) {
+          } else {
             reachable_map_found = true;
           }
         }
@@ -7228,8 +7161,6 @@ bool SharedFunctionInfo::VerifyBailoutId(int id) {
 void SharedFunctionInfo::StartInobjectSlackTracking(Map* map) {
   ASSERT(!IsInobjectSlackTrackingInProgress());
 
-  if (!FLAG_clever_optimizations) return;
-
   // Only initiate the tracking the first time.
   if (live_objects_may_exist()) return;
   set_live_objects_may_exist(true);
@@ -7374,12 +7305,6 @@ void ObjectVisitor::VisitDebugTarget(RelocInfo* rinfo) {
   Object* old_target = target;
   VisitPointer(&target);
   CHECK_EQ(target, old_target);  // VisitPointer doesn't change Code* *target.
-}
-
-
-void ObjectVisitor::VisitEmbeddedPointer(RelocInfo* rinfo) {
-  ASSERT(rinfo->rmode() == RelocInfo::EMBEDDED_OBJECT);
-  VisitPointer(rinfo->target_object_address());
 }
 
 
@@ -12257,7 +12182,7 @@ int BreakPointInfo::GetBreakPointCount() {
   // Multiple break points.
   return FixedArray::cast(break_point_objects())->length();
 }
-#endif  // ENABLE_DEBUGGER_SUPPORT
+#endif
 
 
 } }  // namespace v8::internal

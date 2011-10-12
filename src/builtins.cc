@@ -435,7 +435,6 @@ static inline MaybeObject* EnsureJSArrayWithWritableFastElements(
 
 static inline bool IsJSArrayFastElementMovingAllowed(Heap* heap,
                                                      JSArray* receiver) {
-  if (!FLAG_clever_optimizations) return false;
   Context* global_context = heap->isolate()->context()->global_context();
   JSObject* array_proto =
       JSObject::cast(global_context->array_function()->prototype());

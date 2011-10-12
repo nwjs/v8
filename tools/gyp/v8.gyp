@@ -870,7 +870,7 @@
       'targets': [
         {
           'target_name': 'v8',
-          'type': 'none',
+          'type': 'settings',
           'conditions': [
             ['want_separate_host_toolset==1', {
               'toolsets': ['host', 'target'],

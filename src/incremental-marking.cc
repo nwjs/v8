@@ -117,12 +117,14 @@ class IncrementalMarkingMarkingVisitor : public ObjectVisitor {
         incremental_marking_(incremental_marking) {
   }
 
-  void VisitEmbeddedPointer(RelocInfo* rinfo) {
-    ASSERT(rinfo->rmode() == RelocInfo::EMBEDDED_OBJECT);
-    Object* target = rinfo->target_object();
-    if (target->NonFailureIsHeapObject()) {
-      heap_->mark_compact_collector()->RecordRelocSlot(rinfo, target);
-      MarkObject(target);
+  void VisitEmbeddedPointer(Code* host, Object** p) {
+    Object* obj = *p;
+    if (obj->NonFailureIsHeapObject()) {
+      heap_->mark_compact_collector()->RecordSlot(
+          reinterpret_cast<Object**>(host),
+          p,
+          obj);
+      MarkObject(obj);
     }
   }
 
@@ -344,7 +346,6 @@ bool IncrementalMarking::WorthActivating() {
 #endif
 
   return FLAG_incremental_marking &&
-      !Serializer::enabled() &&
       heap_->PromotedSpaceSize() > kActivationThreshold;
 }
 
@@ -739,8 +740,8 @@ void IncrementalMarking::Step(intptr_t allocated_bytes) {
       }
 
       MarkBit obj_mark_bit = Marking::MarkBitFrom(obj);
-      SLOW_ASSERT(Marking::IsGrey(obj_mark_bit) ||
-                  (obj->IsFiller() && Marking::IsWhite(obj_mark_bit)));
+      ASSERT(Marking::IsGrey(obj_mark_bit) ||
+             (obj->IsFiller() && Marking::IsWhite(obj_mark_bit)));
       Marking::MarkBlack(obj_mark_bit);
       MemoryChunk::IncrementLiveBytes(obj->address(), size);
     }
