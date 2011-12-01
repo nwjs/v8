@@ -88,12 +88,6 @@ static void GenerateLoadArrayFunction(MacroAssembler* masm, Register result) {
 }
 
 
-// This constant has the same value as JSArray::kPreallocatedArrayElements and
-// if JSArray::kPreallocatedArrayElements is changed handling of loop unfolding
-// below should be reconsidered.
-static const int kLoopUnfoldLimit = 4;
-
-
 // Allocate an empty JSArray. The allocated array is put into the result
 // register. An elements backing store is allocated with size initial_capacity
 // and filled with the hole values.
@@ -103,16 +97,19 @@ static void AllocateEmptyJSArray(MacroAssembler* masm,
                                  Register scratch1,
                                  Register scratch2,
                                  Register scratch3,
-                                 int initial_capacity,
                                  Label* gc_required) {
-  ASSERT(initial_capacity > 0);
+  const int initial_capacity = JSArray::kPreallocatedArrayElements;
+  STATIC_ASSERT(initial_capacity >= 0);
   // Load the initial map from the array function.
   __ lw(scratch1, FieldMemOperand(array_function,
                                   JSFunction::kPrototypeOrInitialMapOffset));
 
   // Allocate the JSArray object together with space for a fixed array with the
   // requested elements.
-  int size = JSArray::kSize + FixedArray::SizeFor(initial_capacity);
+  int size = JSArray::kSize;
+  if (initial_capacity > 0) {
+    size += FixedArray::SizeFor(initial_capacity);
+  }
   __ AllocateInNewSpace(size,
                         result,
                         scratch2,
@@ -131,6 +128,11 @@ static void AllocateEmptyJSArray(MacroAssembler* masm,
   __ mov(scratch3,  zero_reg);
   __ sw(scratch3, FieldMemOperand(result, JSArray::kLengthOffset));
 
+  if (initial_capacity == 0) {
+    __ sw(scratch1, FieldMemOperand(result, JSArray::kElementsOffset));
+    return;
+  }
+
   // Calculate the location of the elements array and set elements array member
   // of the JSArray.
   // result: JSObject
@@ -147,21 +149,31 @@ static void AllocateEmptyJSArray(MacroAssembler* masm,
   // scratch1: elements array (untagged)
   // scratch2: start of next object
   __ LoadRoot(scratch3, Heap::kFixedArrayMapRootIndex);
-  ASSERT_EQ(0 * kPointerSize, FixedArray::kMapOffset);
+  STATIC_ASSERT(0 * kPointerSize == FixedArray::kMapOffset);
   __ sw(scratch3, MemOperand(scratch1));
   __ Addu(scratch1, scratch1, kPointerSize);
   __ li(scratch3,  Operand(Smi::FromInt(initial_capacity)));
-  ASSERT_EQ(1 * kPointerSize, FixedArray::kLengthOffset);
+  STATIC_ASSERT(1 * kPointerSize == FixedArray::kLengthOffset);
   __ sw(scratch3, MemOperand(scratch1));
   __ Addu(scratch1, scratch1, kPointerSize);
 
-  // Fill the FixedArray with the hole value.
-  ASSERT_EQ(2 * kPointerSize, FixedArray::kHeaderSize);
-  ASSERT(initial_capacity <= kLoopUnfoldLimit);
+  // Fill the FixedArray with the hole value. Inline the code if short.
+  STATIC_ASSERT(2 * kPointerSize == FixedArray::kHeaderSize);
   __ LoadRoot(scratch3, Heap::kTheHoleValueRootIndex);
-  for (int i = 0; i < initial_capacity; i++) {
+  static const int kLoopUnfoldLimit = 4;
+  if (initial_capacity <= kLoopUnfoldLimit) {
+    for (int i = 0; i < initial_capacity; i++) {
+      __ sw(scratch3, MemOperand(scratch1, i * kPointerSize));
+    }
+  } else {
+    Label loop, entry;
+    __ Addu(scratch2, scratch1, Operand(initial_capacity * kPointerSize));
+    __ Branch(&entry);
+    __ bind(&loop);
     __ sw(scratch3, MemOperand(scratch1));
     __ Addu(scratch1, scratch1, kPointerSize);
+    __ bind(&entry);
+    __ Branch(&loop, lt, scratch1, Operand(scratch2));
   }
 }
 
@@ -177,7 +189,7 @@ static void AllocateEmptyJSArray(MacroAssembler* masm,
 // register elements_array_storage is scratched.
 static void AllocateJSArray(MacroAssembler* masm,
                             Register array_function,  // Array function.
-                            Register array_size,  // As a smi.
+                            Register array_size,  // As a smi, cannot be 0.
                             Register result,
                             Register elements_array_storage,
                             Register elements_array_end,
@@ -185,31 +197,18 @@ static void AllocateJSArray(MacroAssembler* masm,
                             Register scratch2,
                             bool fill_with_hole,
                             Label* gc_required) {
-  Label not_empty, allocated;
-
   // Load the initial map from the array function.
   __ lw(elements_array_storage,
          FieldMemOperand(array_function,
                          JSFunction::kPrototypeOrInitialMapOffset));
 
-  // Check whether an empty sized array is requested.
-  __ Branch(&not_empty, ne, array_size, Operand(zero_reg));
-
-  // If an empty array is requested allocate a small elements array anyway. This
-  // keeps the code below free of special casing for the empty array.
-  int size = JSArray::kSize +
-             FixedArray::SizeFor(JSArray::kPreallocatedArrayElements);
-  __ AllocateInNewSpace(size,
-                        result,
-                        elements_array_end,
-                        scratch1,
-                        gc_required,
-                        TAG_OBJECT);
-  __ Branch(&allocated);
+  if (FLAG_debug_code) {  // Assert that array size is not zero.
+    __ Assert(
+        ne, "array size is unexpectedly 0", array_size, Operand(zero_reg));
+  }
 
   // Allocate the JSArray object together with space for a FixedArray with the
   // requested number of elements.
-  __ bind(&not_empty);
   STATIC_ASSERT(kSmiTagSize == 1 && kSmiTag == 0);
   __ li(elements_array_end,
         (JSArray::kSize + FixedArray::kHeaderSize) / kPointerSize);
@@ -228,7 +227,6 @@ static void AllocateJSArray(MacroAssembler* masm,
   // result: JSObject
   // elements_array_storage: initial map
   // array_size: size of array (smi)
-  __ bind(&allocated);
   __ sw(elements_array_storage, FieldMemOperand(result, JSObject::kMapOffset));
   __ LoadRoot(elements_array_storage, Heap::kEmptyFixedArrayRootIndex);
   __ sw(elements_array_storage,
@@ -262,8 +260,6 @@ static void AllocateJSArray(MacroAssembler* masm,
   // the actual JSArray has length 0 and the size of the JSArray for non-empty
   // JSArrays. The length of a FixedArray is stored as a smi.
   STATIC_ASSERT(kSmiTag == 0);
-  __ li(at, Operand(Smi::FromInt(JSArray::kPreallocatedArrayElements)));
-  __ movz(array_size, at, array_size);
 
   ASSERT_EQ(1 * kPointerSize, FixedArray::kLengthOffset);
   __ sw(array_size, MemOperand(elements_array_storage));
@@ -312,18 +308,18 @@ static void AllocateJSArray(MacroAssembler* masm,
 static void ArrayNativeCode(MacroAssembler* masm,
                             Label* call_generic_code) {
   Counters* counters = masm->isolate()->counters();
-  Label argc_one_or_more, argc_two_or_more;
+  Label argc_one_or_more, argc_two_or_more, not_empty_array, empty_array;
 
   // Check for array construction with zero arguments or one.
   __ Branch(&argc_one_or_more, ne, a0, Operand(zero_reg));
   // Handle construction of an empty array.
+  __ bind(&empty_array);
   AllocateEmptyJSArray(masm,
                        a1,
                        a2,
                        a3,
                        t0,
                        t1,
-                       JSArray::kPreallocatedArrayElements,
                        call_generic_code);
   __ IncrementCounter(counters->array_function_native(), 1, a3, t0);
   // Setup return value, remove receiver from stack and return.
@@ -338,6 +334,12 @@ static void ArrayNativeCode(MacroAssembler* masm,
 
   STATIC_ASSERT(kSmiTag == 0);
   __ lw(a2, MemOperand(sp));  // Get the argument from the stack.
+  __ Branch(&not_empty_array, ne, a2, Operand(zero_reg));
+  __ Drop(1);  // Adjust stack.
+  __ mov(a0, zero_reg);  // Treat this as a call with argc of zero.
+  __ Branch(&empty_array);
+
+  __ bind(&not_empty_array);
   __ And(a3, a2, Operand(kIntptrSignBit | kSmiTagMask));
   __ Branch(call_generic_code, eq, a3, Operand(zero_reg));
 
@@ -626,8 +628,7 @@ void Builtins::Generate_JSConstructCall(MacroAssembler* masm) {
 
   Label slow, non_function_call;
   // Check that the function is not a smi.
-  __ And(t0, a1, Operand(kSmiTagMask));
-  __ Branch(&non_function_call, eq, t0, Operand(zero_reg));
+  __ JumpIfSmi(a1, &non_function_call);
   // Check that the function is a JSFunction.
   __ GetObjectType(a1, a2, a2);
   __ Branch(&slow, ne, a2, Operand(JS_FUNCTION_TYPE));
@@ -703,8 +704,7 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
       // Load the initial map and verify that it is in fact a map.
       // a1: constructor function
       __ lw(a2, FieldMemOperand(a1, JSFunction::kPrototypeOrInitialMapOffset));
-      __ And(t0, a2, Operand(kSmiTagMask));
-      __ Branch(&rt_call, eq, t0, Operand(zero_reg));
+      __ JumpIfSmi(a2, &rt_call);
       __ GetObjectType(a2, a3, t4);
       __ Branch(&rt_call, ne, t4, Operand(MAP_TYPE));
 
@@ -982,8 +982,7 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
     // sp[0]: receiver (newly allocated object)
     // sp[1]: constructor function
     // sp[2]: number of arguments (smi-tagged)
-    __ And(t0, v0, Operand(kSmiTagMask));
-    __ Branch(&use_receiver, eq, t0, Operand(zero_reg));
+    __ JumpIfSmi(v0, &use_receiver);
 
     // If the type of the result (stored in its map) is less than
     // FIRST_SPEC_OBJECT_TYPE, it is not an object in the ECMA sense.
@@ -1053,9 +1052,9 @@ static void Generate_JSEntryTrampolineHelper(MacroAssembler* masm,
     __ lw(cp, FieldMemOperand(a1, JSFunction::kContextOffset));
 
     // Set up the roots register.
-    ExternalReference roots_address =
-        ExternalReference::roots_address(masm->isolate());
-    __ li(s6, Operand(roots_address));
+    ExternalReference roots_array_start =
+        ExternalReference::roots_array_start(masm->isolate());
+    __ li(s6, Operand(roots_array_start));
 
     // Push the function and the receiver onto the stack.
     __ Push(a1, a2);
@@ -1174,24 +1173,93 @@ void Builtins::Generate_LazyRecompile(MacroAssembler* masm) {
 }
 
 
-// These functions are called from C++ but cannot be used in live code.
+static void Generate_NotifyDeoptimizedHelper(MacroAssembler* masm,
+                                             Deoptimizer::BailoutType type) {
+  {
+    FrameScope scope(masm, StackFrame::INTERNAL);
+    // Pass the function and deoptimization type to the runtime system.
+    __ li(a0, Operand(Smi::FromInt(static_cast<int>(type))));
+    __ push(a0);
+    __ CallRuntime(Runtime::kNotifyDeoptimized, 1);
+  }
+
+  // Get the full codegen state from the stack and untag it -> t2.
+  __ lw(t2, MemOperand(sp, 0 * kPointerSize));
+  __ SmiUntag(t2);
+  // Switch on the state.
+  Label with_tos_register, unknown_state;
+  __ Branch(&with_tos_register,
+            ne, t2, Operand(FullCodeGenerator::NO_REGISTERS));
+  __ Addu(sp, sp, Operand(1 * kPointerSize));  // Remove state.
+  __ Ret();
+
+  __ bind(&with_tos_register);
+  __ lw(v0, MemOperand(sp, 1 * kPointerSize));
+  __ Branch(&unknown_state, ne, t2, Operand(FullCodeGenerator::TOS_REG));
+
+  __ Addu(sp, sp, Operand(2 * kPointerSize));  // Remove state.
+  __ Ret();
+
+  __ bind(&unknown_state);
+  __ stop("no cases left");
+}
+
+
 void Builtins::Generate_NotifyDeoptimized(MacroAssembler* masm) {
-  __ Abort("Call to unimplemented function in builtins-mips.cc");
+  Generate_NotifyDeoptimizedHelper(masm, Deoptimizer::EAGER);
 }
 
 
 void Builtins::Generate_NotifyLazyDeoptimized(MacroAssembler* masm) {
-  __ Abort("Call to unimplemented function in builtins-mips.cc");
+  Generate_NotifyDeoptimizedHelper(masm, Deoptimizer::LAZY);
 }
 
 
 void Builtins::Generate_NotifyOSR(MacroAssembler* masm) {
-  __ Abort("Call to unimplemented function in builtins-mips.cc");
+  // For now, we are relying on the fact that Runtime::NotifyOSR
+  // doesn't do any garbage collection which allows us to save/restore
+  // the registers without worrying about which of them contain
+  // pointers. This seems a bit fragile.
+  RegList saved_regs =
+      (kJSCallerSaved | kCalleeSaved | ra.bit() | fp.bit()) & ~sp.bit();
+  __ MultiPush(saved_regs);
+  {
+    FrameScope scope(masm, StackFrame::INTERNAL);
+    __ CallRuntime(Runtime::kNotifyOSR, 0);
+  }
+  __ MultiPop(saved_regs);
+  __ Ret();
 }
 
 
 void Builtins::Generate_OnStackReplacement(MacroAssembler* masm) {
-  __ Abort("Call to unimplemented function in builtins-mips.cc");
+  CpuFeatures::TryForceFeatureScope scope(VFP3);
+  if (!CpuFeatures::IsSupported(FPU)) {
+    __ Abort("Unreachable code: Cannot optimize without FPU support.");
+    return;
+  }
+
+  // Lookup the function in the JavaScript frame and push it as an
+  // argument to the on-stack replacement function.
+  __ lw(a0, MemOperand(fp, JavaScriptFrameConstants::kFunctionOffset));
+  {
+    FrameScope scope(masm, StackFrame::INTERNAL);
+    __ push(a0);
+    __ CallRuntime(Runtime::kCompileForOnStackReplacement, 1);
+  }
+
+  // If the result was -1 it means that we couldn't optimize the
+  // function. Just return and continue in the unoptimized version.
+  __ Ret(eq, v0, Operand(Smi::FromInt(-1)));
+
+  // Untag the AST id and push it on the stack.
+  __ SmiUntag(v0);
+  __ push(v0);
+
+  // Generate the code for doing the frame-to-frame translation using
+  // the deoptimizer infrastructure.
+  Deoptimizer::EntryGenerator generator(masm, Deoptimizer::OSR);
+  generator.Generate();
 }
 
 
@@ -1213,8 +1281,7 @@ void Builtins::Generate_FunctionCall(MacroAssembler* masm) {
   __ sll(at, a0, kPointerSizeLog2);
   __ addu(at, sp, at);
   __ lw(a1, MemOperand(at));
-  __ And(at, a1, Operand(kSmiTagMask));
-  __ Branch(&non_function, eq, at, Operand(zero_reg));
+  __ JumpIfSmi(a1, &non_function);
   __ GetObjectType(a1, a2, a2);
   __ Branch(&slow, ne, a2, Operand(JS_FUNCTION_TYPE));
 
@@ -1393,8 +1460,7 @@ void Builtins::Generate_FunctionApply(MacroAssembler* masm) {
   const int kFunctionOffset =  4 * kPointerSize;
 
   {
-    FrameScope scope(masm, StackFrame::INTERNAL);
-
+    FrameScope frame_scope(masm, StackFrame::INTERNAL);
     __ lw(a0, MemOperand(fp, kFunctionOffset));  // Get the function.
     __ push(a0);
     __ lw(a0, MemOperand(fp, kArgsOffset));  // Get the args array.
@@ -1454,8 +1520,7 @@ void Builtins::Generate_FunctionApply(MacroAssembler* masm) {
     __ Branch(&push_receiver, ne, t3, Operand(zero_reg));
 
     // Compute the receiver in non-strict mode.
-    __ And(t3, a0, Operand(kSmiTagMask));
-    __ Branch(&call_to_object, eq, t3, Operand(zero_reg));
+    __ JumpIfSmi(a0, &call_to_object);
     __ LoadRoot(a1, Heap::kNullValueRootIndex);
     __ Branch(&use_global_receiver, eq, a0, Operand(a1));
     __ LoadRoot(a2, Heap::kUndefinedValueRootIndex);
@@ -1528,8 +1593,7 @@ void Builtins::Generate_FunctionApply(MacroAssembler* masm) {
     __ InvokeFunction(a1, actual, CALL_FUNCTION,
                       NullCallWrapper(), CALL_AS_METHOD);
 
-    scope.GenerateLeaveFrame();
-
+    frame_scope.GenerateLeaveFrame();
     __ Ret(USE_DELAY_SLOT);
     __ Addu(sp, sp, Operand(3 * kPointerSize));  // In delay slot.
 

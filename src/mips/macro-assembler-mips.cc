@@ -243,8 +243,7 @@ void MacroAssembler::RecordWrite(Register object,
 
   if (smi_check == INLINE_SMI_CHECK) {
     ASSERT_EQ(0, kSmiTag);
-    And(t8, value, Operand(kSmiTagMask));
-    Branch(&done, eq, t8, Operand(zero_reg));
+    JumpIfSmi(value, &done);
   }
 
   CheckPageFlag(value,
@@ -911,34 +910,21 @@ void MacroAssembler::Ins(Register rt,
                          uint16_t pos,
                          uint16_t size) {
   ASSERT(pos < 32);
-  ASSERT(pos + size < 32);
+  ASSERT(pos + size <= 32);
+  ASSERT(size != 0);
 
   if (mips32r2) {
     ins_(rt, rs, pos, size);
   } else {
     ASSERT(!rt.is(t8) && !rs.is(t8));
-
-    srl(t8, rt, pos + size);
-    // The left chunk from rt that needs to
-    // be saved is on the right side of t8.
-    sll(at, t8, pos + size);
-    // The 'at' register now contains the left chunk on
-    // the left (proper position) and zeroes.
-    sll(t8, rt, 32 - pos);
-    // t8 now contains the right chunk on the left and zeroes.
-    srl(t8, t8, 32 - pos);
-    // t8 now contains the right chunk on
-    // the right (proper position) and zeroes.
-    or_(rt, at, t8);
-    // rt now contains the left and right chunks from the original rt
-    // in their proper position and zeroes in the middle.
-    sll(t8, rs, 32 - size);
-    // t8 now contains the chunk from rs on the left and zeroes.
-    srl(t8, t8, 32 - size - pos);
-    // t8 now contains the original chunk from rs in
-    // the middle (proper position).
-    or_(rt, rt, t8);
-    // rt now contains the result of the ins instruction in R2 mode.
+    Subu(at, zero_reg, Operand(1));
+    srl(at, at, 32 - size);
+    and_(t8, rs, at);
+    sll(t8, t8, pos);
+    sll(at, at, pos);
+    nor(at, at, zero_reg);
+    and_(at, rt, at);
+    or_(rt, t8, at);
   }
 }
 
@@ -2558,60 +2544,50 @@ void MacroAssembler::DebugBreak() {
 // Exception handling.
 
 void MacroAssembler::PushTryHandler(CodeLocation try_location,
-                                    HandlerType type) {
+                                    HandlerType type,
+                                    int handler_index) {
   // Adjust this code if not the case.
   STATIC_ASSERT(StackHandlerConstants::kSize == 5 * kPointerSize);
   STATIC_ASSERT(StackHandlerConstants::kNextOffset == 0 * kPointerSize);
-  STATIC_ASSERT(StackHandlerConstants::kStateOffset == 1 * kPointerSize);
-  STATIC_ASSERT(StackHandlerConstants::kContextOffset == 2 * kPointerSize);
-  STATIC_ASSERT(StackHandlerConstants::kFPOffset == 3 * kPointerSize);
-  STATIC_ASSERT(StackHandlerConstants::kPCOffset == 4 * kPointerSize);
+  STATIC_ASSERT(StackHandlerConstants::kCodeOffset == 1 * kPointerSize);
+  STATIC_ASSERT(StackHandlerConstants::kStateOffset == 2 * kPointerSize);
+  STATIC_ASSERT(StackHandlerConstants::kContextOffset == 3 * kPointerSize);
+  STATIC_ASSERT(StackHandlerConstants::kFPOffset == 4 * kPointerSize);
 
-  // The return address is passed in register ra.
+  // For the JSEntry handler, we must preserve a0-a3 and s0.
+  // t1-t3 are available. We will build up the handler from the bottom by
+  // pushing on the stack. First compute the state.
+  unsigned state = StackHandler::OffsetField::encode(handler_index);
   if (try_location == IN_JAVASCRIPT) {
-    if (type == TRY_CATCH_HANDLER) {
-      li(t0, Operand(StackHandler::TRY_CATCH));
-    } else {
-      li(t0, Operand(StackHandler::TRY_FINALLY));
-    }
-    // Save the current handler as the next handler.
-    li(t2, Operand(ExternalReference(Isolate::kHandlerAddress, isolate())));
-    lw(t1, MemOperand(t2));
-
-    addiu(sp, sp, -StackHandlerConstants::kSize);
-    sw(ra, MemOperand(sp, StackHandlerConstants::kPCOffset));
-    sw(fp, MemOperand(sp, StackHandlerConstants::kFPOffset));
-    sw(cp, MemOperand(sp, StackHandlerConstants::kContextOffset));
-    sw(t0, MemOperand(sp, StackHandlerConstants::kStateOffset));
-    sw(t1, MemOperand(sp, StackHandlerConstants::kNextOffset));
-
-    // Link this handler as the new current one.
-    sw(sp, MemOperand(t2));
-
+    state |= (type == TRY_CATCH_HANDLER)
+        ? StackHandler::KindField::encode(StackHandler::TRY_CATCH)
+        : StackHandler::KindField::encode(StackHandler::TRY_FINALLY);
   } else {
-    // Must preserve a0-a3, and s0 (argv).
     ASSERT(try_location == IN_JS_ENTRY);
-    // The frame pointer does not point to a JS frame so we save NULL
-    // for fp. We expect the code throwing an exception to check fp
-    // before dereferencing it to restore the context.
-    li(t0, Operand(StackHandler::ENTRY));
-
-    // Save the current handler as the next handler.
-    li(t2, Operand(ExternalReference(Isolate::kHandlerAddress, isolate())));
-    lw(t1, MemOperand(t2));
-
-    ASSERT(Smi::FromInt(0) == 0);  // Used for no context.
-
-    addiu(sp, sp, -StackHandlerConstants::kSize);
-    sw(ra, MemOperand(sp, StackHandlerConstants::kPCOffset));
-    sw(zero_reg, MemOperand(sp, StackHandlerConstants::kFPOffset));
-    sw(zero_reg, MemOperand(sp, StackHandlerConstants::kContextOffset));
-    sw(t0, MemOperand(sp, StackHandlerConstants::kStateOffset));
-    sw(t1, MemOperand(sp, StackHandlerConstants::kNextOffset));
-
-    // Link this handler as the new current one.
-    sw(sp, MemOperand(t2));
+    state |= StackHandler::KindField::encode(StackHandler::ENTRY);
   }
+
+  // Set up the code object (t1) and the state (t2) for pushing.
+  li(t1, Operand(CodeObject()));
+  li(t2, Operand(state));
+
+  // Push the frame pointer, context, state, and code object.
+  if (try_location == IN_JAVASCRIPT) {
+    MultiPush(t1.bit() | t2.bit() | cp.bit() | fp.bit());
+  } else {
+    ASSERT_EQ(Smi::FromInt(0), 0);
+    // The second zero_reg indicates no context.
+    // The first zero_reg is the NULL frame pointer.
+    // The operands are reversed to match the order of MultiPush/Pop.
+    Push(zero_reg, zero_reg, t2, t1);
+  }
+
+  // Link the current handler as the next handler.
+  li(t2, Operand(ExternalReference(Isolate::kHandlerAddress, isolate())));
+  lw(t1, MemOperand(t2));
+  push(t1);
+  // Set this new handler as the current one.
+  sw(sp, MemOperand(t2));
 }
 
 
@@ -2624,19 +2600,36 @@ void MacroAssembler::PopTryHandler() {
 }
 
 
-void MacroAssembler::Throw(Register value) {
-  // v0 is expected to hold the exception.
-  Move(v0, value);
+void MacroAssembler::JumpToHandlerEntry() {
+  // Compute the handler entry address and jump to it.  The handler table is
+  // a fixed array of (smi-tagged) code offsets.
+  // v0 = exception, a1 = code object, a2 = state.
+  lw(a3, FieldMemOperand(a1, Code::kHandlerTableOffset));  // Handler table.
+  Addu(a3, a3, Operand(FixedArray::kHeaderSize - kHeapObjectTag));
+  srl(a2, a2, StackHandler::kKindWidth);  // Handler index.
+  sll(a2, a2, kPointerSizeLog2);
+  Addu(a2, a3, a2);
+  lw(a2, MemOperand(a2));  // Smi-tagged offset.
+  Addu(a1, a1, Operand(Code::kHeaderSize - kHeapObjectTag));  // Code start.
+  sra(t9, a2, kSmiTagSize);
+  Addu(t9, t9, a1);
+  Jump(t9);  // Jump.
+}
 
+
+void MacroAssembler::Throw(Register value) {
   // Adjust this code if not the case.
   STATIC_ASSERT(StackHandlerConstants::kSize == 5 * kPointerSize);
-  STATIC_ASSERT(StackHandlerConstants::kNextOffset == 0 * kPointerSize);
-  STATIC_ASSERT(StackHandlerConstants::kStateOffset == 1 * kPointerSize);
-  STATIC_ASSERT(StackHandlerConstants::kContextOffset == 2 * kPointerSize);
-  STATIC_ASSERT(StackHandlerConstants::kFPOffset == 3 * kPointerSize);
-  STATIC_ASSERT(StackHandlerConstants::kPCOffset == 4 * kPointerSize);
+  STATIC_ASSERT(StackHandlerConstants::kNextOffset == 0);
+  STATIC_ASSERT(StackHandlerConstants::kCodeOffset == 1 * kPointerSize);
+  STATIC_ASSERT(StackHandlerConstants::kStateOffset == 2 * kPointerSize);
+  STATIC_ASSERT(StackHandlerConstants::kContextOffset == 3 * kPointerSize);
+  STATIC_ASSERT(StackHandlerConstants::kFPOffset == 4 * kPointerSize);
 
-  // Drop the sp to the top of the handler.
+  // The exception is expected in v0.
+  Move(v0, value);
+
+  // Drop the stack pointer to the top of the top handler.
   li(a3, Operand(ExternalReference(Isolate::kHandlerAddress,
                                    isolate())));
   lw(sp, MemOperand(a3));
@@ -2645,44 +2638,19 @@ void MacroAssembler::Throw(Register value) {
   pop(a2);
   sw(a2, MemOperand(a3));
 
-  // Restore context and frame pointer, discard state (a3).
-  MultiPop(a3.bit() | cp.bit() | fp.bit());
+  // Get the code object (a1) and state (a2).  Restore the context and frame
+  // pointer.
+  MultiPop(a1.bit() | a2.bit() | cp.bit() | fp.bit());
 
   // If the handler is a JS frame, restore the context to the frame.
-  // (a3 == ENTRY) == (fp == 0) == (cp == 0), so we could test any
-  // of them.
+  // (kind == ENTRY) == (fp == 0) == (cp == 0), so we could test either fp
+  // or cp.
   Label done;
-  Branch(&done, eq, fp, Operand(zero_reg));
+  Branch(&done, eq, cp, Operand(zero_reg));
   sw(cp, MemOperand(fp, StandardFrameConstants::kContextOffset));
   bind(&done);
 
-#ifdef DEBUG
-  // When emitting debug_code, set ra as return address for the jump.
-  // 5 instructions: add: 1, pop: 2, jump: 2.
-  const int kOffsetRaInstructions = 5;
-  Label find_ra;
-
-  if (emit_debug_code()) {
-    // Compute ra for the Jump(t9).
-    const int kOffsetRaBytes = kOffsetRaInstructions * Assembler::kInstrSize;
-
-    // This branch-and-link sequence is needed to get the current PC on mips,
-    // saved to the ra register. Then adjusted for instruction count.
-    bal(&find_ra);  // bal exposes branch-delay.
-    nop();  // Branch delay slot nop.
-    bind(&find_ra);
-    addiu(ra, ra, kOffsetRaBytes);
-  }
-#endif
-
-  pop(t9);  // 2 instructions: lw, add sp.
-  Jump(t9);  // 2 instructions: jr, nop (in delay slot).
-
-  if (emit_debug_code()) {
-    // Make sure that the expected number of instructions were generated.
-    ASSERT_EQ(kOffsetRaInstructions,
-              InstructionsGeneratedSince(&find_ra));
-  }
+  JumpToHandlerEntry();
 }
 
 
@@ -2691,39 +2659,16 @@ void MacroAssembler::ThrowUncatchable(UncatchableExceptionType type,
   // Adjust this code if not the case.
   STATIC_ASSERT(StackHandlerConstants::kSize == 5 * kPointerSize);
   STATIC_ASSERT(StackHandlerConstants::kNextOffset == 0 * kPointerSize);
-  STATIC_ASSERT(StackHandlerConstants::kStateOffset == 1 * kPointerSize);
-  STATIC_ASSERT(StackHandlerConstants::kContextOffset == 2 * kPointerSize);
-  STATIC_ASSERT(StackHandlerConstants::kFPOffset == 3 * kPointerSize);
-  STATIC_ASSERT(StackHandlerConstants::kPCOffset == 4 * kPointerSize);
+  STATIC_ASSERT(StackHandlerConstants::kCodeOffset == 1 * kPointerSize);
+  STATIC_ASSERT(StackHandlerConstants::kStateOffset == 2 * kPointerSize);
+  STATIC_ASSERT(StackHandlerConstants::kContextOffset == 3 * kPointerSize);
+  STATIC_ASSERT(StackHandlerConstants::kFPOffset == 4 * kPointerSize);
 
-  // v0 is expected to hold the exception.
-  Move(v0, value);
-
-  // Drop sp to the top stack handler.
-  li(a3, Operand(ExternalReference(Isolate::kHandlerAddress, isolate())));
-  lw(sp, MemOperand(a3));
-
-  // Unwind the handlers until the ENTRY handler is found.
-  Label loop, done;
-  bind(&loop);
-  // Load the type of the current stack handler.
-  const int kStateOffset = StackHandlerConstants::kStateOffset;
-  lw(a2, MemOperand(sp, kStateOffset));
-  Branch(&done, eq, a2, Operand(StackHandler::ENTRY));
-  // Fetch the next handler in the list.
-  const int kNextOffset = StackHandlerConstants::kNextOffset;
-  lw(sp, MemOperand(sp, kNextOffset));
-  jmp(&loop);
-  bind(&done);
-
-  // Set the top handler address to next handler past the current ENTRY handler.
-  pop(a2);
-  sw(a2, MemOperand(a3));
-
+  // The exception is expected in v0.
   if (type == OUT_OF_MEMORY) {
     // Set external caught exception to false.
-    ExternalReference external_caught(
-           Isolate::kExternalCaughtExceptionAddress, isolate());
+    ExternalReference external_caught(Isolate::kExternalCaughtExceptionAddress,
+                                      isolate());
     li(a0, Operand(false, RelocInfo::NONE));
     li(a2, Operand(external_caught));
     sw(a0, MemOperand(a2));
@@ -2732,45 +2677,37 @@ void MacroAssembler::ThrowUncatchable(UncatchableExceptionType type,
     Failure* out_of_memory = Failure::OutOfMemoryException();
     li(v0, Operand(reinterpret_cast<int32_t>(out_of_memory)));
     li(a2, Operand(ExternalReference(Isolate::kPendingExceptionAddress,
-                                        isolate())));
+                                     isolate())));
     sw(v0, MemOperand(a2));
+  } else if (!value.is(v0)) {
+    mov(v0, value);
   }
 
-  // Stack layout at this point. See also StackHandlerConstants.
-  // sp ->   state (ENTRY)
-  //         cp
-  //         fp
-  //         ra
+  // Drop the stack pointer to the top of the top stack handler.
+  li(a3, Operand(ExternalReference(Isolate::kHandlerAddress, isolate())));
+  lw(sp, MemOperand(a3));
 
-  // Restore context and frame pointer, discard state (r2).
-  MultiPop(a2.bit() | cp.bit() | fp.bit());
+  // Unwind the handlers until the ENTRY handler is found.
+  Label fetch_next, check_kind;
+  jmp(&check_kind);
+  bind(&fetch_next);
+  lw(sp, MemOperand(sp, StackHandlerConstants::kNextOffset));
 
-#ifdef DEBUG
-  // When emitting debug_code, set ra as return address for the jump.
-  // 5 instructions: add: 1, pop: 2, jump: 2.
-  const int kOffsetRaInstructions = 5;
-  Label find_ra;
+  bind(&check_kind);
+  STATIC_ASSERT(StackHandler::ENTRY == 0);
+  lw(a2, MemOperand(sp, StackHandlerConstants::kStateOffset));
+  And(a2, a2, Operand(StackHandler::KindField::kMask));
+  Branch(&fetch_next, ne, a2, Operand(zero_reg));
 
-  if (emit_debug_code()) {
-    // Compute ra for the Jump(t9).
-    const int kOffsetRaBytes = kOffsetRaInstructions * Assembler::kInstrSize;
+  // Set the top handler address to next handler past the top ENTRY handler.
+  pop(a2);
+  sw(a2, MemOperand(a3));
 
-    // This branch-and-link sequence is needed to get the current PC on mips,
-    // saved to the ra register. Then adjusted for instruction count.
-    bal(&find_ra);  // bal exposes branch-delay slot.
-    nop();  // Branch delay slot nop.
-    bind(&find_ra);
-    addiu(ra, ra, kOffsetRaBytes);
-  }
-#endif
-  pop(t9);  // 2 instructions: lw, add sp.
-  Jump(t9);  // 2 instructions: jr, nop (in delay slot).
+  // Get the code object (a1) and state (a2).  Clear the context and frame
+  // pointer (0 was saved in the handler).
+  MultiPop(a1.bit() | a2.bit() | cp.bit() | fp.bit());
 
-  if (emit_debug_code()) {
-    // Make sure that the expected number of instructions were generated.
-    ASSERT_EQ(kOffsetRaInstructions,
-              InstructionsGeneratedSince(&find_ra));
-  }
+  JumpToHandlerEntry();
 }
 
 
@@ -2873,6 +2810,7 @@ void MacroAssembler::AllocateInNewSpace(Register object_size,
   ASSERT(!result.is(scratch1));
   ASSERT(!result.is(scratch2));
   ASSERT(!scratch1.is(scratch2));
+  ASSERT(!object_size.is(t9));
   ASSERT(!scratch1.is(t9) && !scratch2.is(t9) && !result.is(t9));
 
   // Check relative positions of allocation top and limit addresses.
@@ -3609,31 +3547,23 @@ void MacroAssembler::InvokeFunction(Register function,
 }
 
 
-void MacroAssembler::InvokeFunction(JSFunction* function,
+void MacroAssembler::InvokeFunction(Handle<JSFunction> function,
                                     const ParameterCount& actual,
                                     InvokeFlag flag,
                                     CallKind call_kind) {
   // You can't call a function without a valid frame.
   ASSERT(flag == JUMP_FUNCTION || has_frame());
 
-  ASSERT(function->is_compiled());
-
   // Get the function and setup the context.
-  li(a1, Operand(Handle<JSFunction>(function)));
+  li(a1, Operand(function));
   lw(cp, FieldMemOperand(a1, JSFunction::kContextOffset));
 
-  // Invoke the cached code.
-  Handle<Code> code(function->code());
   ParameterCount expected(function->shared()->formal_parameter_count());
-  if (V8::UseCrankshaft()) {
-    // TODO(kasperl): For now, we always call indirectly through the
-    // code field in the function to allow recompilation to take effect
-    // without changing any of the call sites.
-    lw(a3, FieldMemOperand(a1, JSFunction::kCodeEntryOffset));
-    InvokeCode(a3, expected, actual, flag, NullCallWrapper(), call_kind);
-  } else {
-    InvokeCode(code, expected, actual, RelocInfo::CODE_TARGET, flag, call_kind);
-  }
+  // We call indirectly through the code field in the function to
+  // allow recompilation to take effect without changing any of the
+  // call sites.
+  lw(a3, FieldMemOperand(a1, JSFunction::kCodeEntryOffset));
+  InvokeCode(a3, expected, actual, flag, NullCallWrapper(), call_kind);
 }
 
 
@@ -3674,13 +3604,24 @@ void MacroAssembler::IsObjectJSStringType(Register object,
 void MacroAssembler::TryGetFunctionPrototype(Register function,
                                              Register result,
                                              Register scratch,
-                                             Label* miss) {
+                                             Label* miss,
+                                             bool miss_on_bound_function) {
   // Check that the receiver isn't a smi.
   JumpIfSmi(function, miss);
 
   // Check that the function really is a function.  Load map into result reg.
   GetObjectType(function, result, scratch);
   Branch(miss, ne, scratch, Operand(JS_FUNCTION_TYPE));
+
+  if (miss_on_bound_function) {
+    lw(scratch,
+       FieldMemOperand(function, JSFunction::kSharedFunctionInfoOffset));
+    lw(scratch,
+       FieldMemOperand(scratch, SharedFunctionInfo::kCompilerHintsOffset));
+    And(scratch, scratch,
+        Operand(Smi::FromInt(1 << SharedFunctionInfo::kBoundFunction)));
+    Branch(miss, ne, scratch, Operand(zero_reg));
+  }
 
   // Make sure that the function has an instance prototype.
   Label non_instance;
@@ -3735,35 +3676,9 @@ void MacroAssembler::CallStub(CodeStub* stub, Condition cond,
 }
 
 
-MaybeObject* MacroAssembler::TryCallStub(CodeStub* stub, Condition cond,
-                                         Register r1, const Operand& r2) {
-  ASSERT(AllowThisStubCall(stub));  // Stub calls are not allowed in some stubs.
-  Object* result;
-  { MaybeObject* maybe_result = stub->TryGetCode();
-    if (!maybe_result->ToObject(&result)) return maybe_result;
-  }
-  Call(Handle<Code>(Code::cast(result)), RelocInfo::CODE_TARGET,
-      kNoASTId, cond, r1, r2);
-  return result;
-}
-
-
 void MacroAssembler::TailCallStub(CodeStub* stub) {
   ASSERT(allow_stub_calls_ || stub->CompilingCallsToThisStubIsGCSafe());
   Jump(stub->GetCode(), RelocInfo::CODE_TARGET);
-}
-
-
-MaybeObject* MacroAssembler::TryTailCallStub(CodeStub* stub,
-                                             Condition cond,
-                                             Register r1,
-                                             const Operand& r2) {
-  Object* result;
-  { MaybeObject* maybe_result = stub->TryGetCode();
-    if (!maybe_result->ToObject(&result)) return maybe_result;
-  }
-  Jump(Handle<Code>(Code::cast(result)), RelocInfo::CODE_TARGET, cond, r1, r2);
-  return result;
 }
 
 
@@ -3772,8 +3687,8 @@ static int AddressOffset(ExternalReference ref0, ExternalReference ref1) {
 }
 
 
-MaybeObject* MacroAssembler::TryCallApiFunctionAndReturn(
-    ExternalReference function, int stack_space) {
+void MacroAssembler::CallApiFunctionAndReturn(ExternalReference function,
+                                              int stack_space) {
   ExternalReference next_address =
       ExternalReference::handle_scope_next_address();
   const int kNextOffset = 0;
@@ -3844,11 +3759,10 @@ MaybeObject* MacroAssembler::TryCallApiFunctionAndReturn(
   Ret();
 
   bind(&promote_scheduled_exception);
-  MaybeObject* result = TryTailCallExternalReference(
-      ExternalReference(Runtime::kPromoteScheduledException, isolate()), 0, 1);
-  if (result->IsFailure()) {
-    return result;
-  }
+  TailCallExternalReference(
+      ExternalReference(Runtime::kPromoteScheduledException, isolate()),
+      0,
+      1);
 
   // HandleScope limit has changed. Delete allocated extensions.
   bind(&delete_allocated_handles);
@@ -3861,8 +3775,6 @@ MaybeObject* MacroAssembler::TryCallApiFunctionAndReturn(
       1);
   mov(v0, s0);
   jmp(&leave_exit_frame);
-
-  return result;
 }
 
 
@@ -4085,17 +3997,6 @@ void MacroAssembler::TailCallExternalReference(const ExternalReference& ext,
 }
 
 
-MaybeObject* MacroAssembler::TryTailCallExternalReference(
-    const ExternalReference& ext, int num_arguments, int result_size) {
-  // TODO(1236192): Most runtime routines don't need the number of
-  // arguments passed in because it is constant. At some point we
-  // should remove this need and make the runtime routine entry code
-  // smarter.
-  li(a0, num_arguments);
-  return TryJumpToExternalReference(ext);
-}
-
-
 void MacroAssembler::TailCallRuntime(Runtime::FunctionId fid,
                                      int num_arguments,
                                      int result_size) {
@@ -4109,14 +4010,6 @@ void MacroAssembler::JumpToExternalReference(const ExternalReference& builtin) {
   li(a1, Operand(builtin));
   CEntryStub stub(1);
   Jump(stub.GetCode(), RelocInfo::CODE_TARGET);
-}
-
-
-MaybeObject* MacroAssembler::TryJumpToExternalReference(
-    const ExternalReference& builtin) {
-  li(a1, Operand(builtin));
-  CEntryStub stub(1);
-  return TryTailCallStub(&stub);
 }
 
 
@@ -4524,8 +4417,7 @@ void MacroAssembler::JumpIfNotBothSmi(Register reg1,
   STATIC_ASSERT(kSmiTag == 0);
   ASSERT_EQ(1, kSmiTagMask);
   or_(at, reg1, reg2);
-  andi(at, at, kSmiTagMask);
-  Branch(on_not_both_smi, ne, at, Operand(zero_reg));
+  JumpIfNotSmi(at, on_not_both_smi);
 }
 
 
@@ -4536,8 +4428,7 @@ void MacroAssembler::JumpIfEitherSmi(Register reg1,
   ASSERT_EQ(1, kSmiTagMask);
   // Both Smi tags must be 1 (not Smi).
   and_(at, reg1, reg2);
-  andi(at, at, kSmiTagMask);
-  Branch(on_either_smi, eq, at, Operand(zero_reg));
+  JumpIfSmi(at, on_either_smi);
 }
 
 
@@ -4615,8 +4506,7 @@ void MacroAssembler::JumpIfNotBothSequentialAsciiStrings(Register first,
   // Check that neither is a smi.
   STATIC_ASSERT(kSmiTag == 0);
   And(scratch1, first, Operand(second));
-  And(scratch1, scratch1, Operand(kSmiTagMask));
-  Branch(failure, eq, scratch1, Operand(zero_reg));
+  JumpIfSmi(scratch1, failure);
   JumpIfNonSmisNotBothSequentialAsciiStrings(first,
                                              second,
                                              scratch1,

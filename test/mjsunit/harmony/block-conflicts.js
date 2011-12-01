@@ -29,6 +29,9 @@
 
 // Test for conflicting variable bindings.
 
+// TODO(ES6): properly activate extended mode
+"use strict";
+
 function CheckException(e) {
   var string = e.toString();
   assertTrue(string.indexOf("has already been declared") >= 0 ||
@@ -80,6 +83,11 @@ var letbinds = [ "let x",
                  "let x = function() {}",
                  "let x, y",
                  "let y, x",
+                 "const x = 0",
+                 "const x = undefined",
+                 "const x = function() {}",
+                 "const x = 2, y = 3",
+                 "const y = 4, x = 5",
                  ];
 var varbinds = [ "var x",
                  "var x = 0",

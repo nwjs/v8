@@ -30,6 +30,7 @@
 
 #include "allocation.h"
 #include "globals.h"
+#include "codegen.h"
 
 namespace v8 {
 namespace internal {
@@ -57,10 +58,9 @@ namespace internal {
   V(FastNewContext)                      \
   V(FastNewBlockContext)                 \
   V(FastCloneShallowArray)               \
-  V(RevertToNumber)                      \
+  V(FastCloneShallowObject)              \
   V(ToBoolean)                           \
   V(ToNumber)                            \
-  V(CounterOp)                           \
   V(ArgumentsAccess)                     \
   V(RegExpConstructResult)               \
   V(NumberToString)                      \
@@ -69,7 +69,9 @@ namespace internal {
   V(KeyedLoadElement)                    \
   V(KeyedStoreElement)                   \
   V(DebuggerStatement)                   \
-  V(StringDictionaryLookup)
+  V(StringDictionaryLookup)              \
+  V(ElementsTransitionAndStore)          \
+  V(StoreArrayLiteralElement)
 
 // List of code stubs only used on ARM platforms.
 #ifdef V8_TARGET_ARCH_ARM
@@ -117,11 +119,6 @@ class CodeStub BASE_EMBEDDED {
   // Retrieve the code for the stub. Generate the code if needed.
   Handle<Code> GetCode();
 
-  // Retrieve the code for the stub if already generated.  Do not
-  // generate the code if not already generated and instead return a
-  // retry after GC Failure object.
-  MUST_USE_RESULT MaybeObject* TryGetCode();
-
   static Major MajorKeyFromKey(uint32_t key) {
     return static_cast<Major>(MajorKeyBits::decode(key));
   }
@@ -159,14 +156,14 @@ class CodeStub BASE_EMBEDDED {
   // result in a traversable stack.
   virtual bool SometimesSetsUpAFrame() { return true; }
 
+  // Lookup the code in the (possibly custom) cache.
+  bool FindCodeInCache(Code** code_out);
+
  protected:
   static const int kMajorBits = 6;
   static const int kMinorBits = kBitsPerInt - kSmiTagSize - kMajorBits;
 
  private:
-  // Lookup the code in the (possibly custom) cache.
-  bool FindCodeInCache(Code** code_out);
-
   // Nonvirtual wrapper around the stub-specific Generate function.  Call
   // this function to set up the macro assembler and generate the code.
   void GenerateCode(MacroAssembler* masm);
@@ -179,11 +176,7 @@ class CodeStub BASE_EMBEDDED {
   void RecordCodeGeneration(Code* code, MacroAssembler* masm);
 
   // Finish the code object after it has been generated.
-  virtual void FinishCode(Code* code) { }
-
-  // Returns true if TryGetCode should fail if it failed
-  // to register newly generated stub in the stub cache.
-  virtual bool MustBeInStubCache() { return false; }
+  virtual void FinishCode(Handle<Code> code) { }
 
   // Activate newly generated stub. Is called after
   // registering stub in the stub cache.
@@ -306,16 +299,17 @@ class ToNumberStub: public CodeStub {
 
 class FastNewClosureStub : public CodeStub {
  public:
-  explicit FastNewClosureStub(StrictModeFlag strict_mode)
-    : strict_mode_(strict_mode) { }
+  explicit FastNewClosureStub(LanguageMode language_mode)
+    : language_mode_(language_mode) { }
 
   void Generate(MacroAssembler* masm);
 
  private:
   Major MajorKey() { return FastNewClosure; }
-  int MinorKey() { return strict_mode_; }
+  int MinorKey() { return language_mode_ == CLASSIC_MODE
+        ? kNonStrictMode : kStrictMode; }
 
-  StrictModeFlag strict_mode_;
+  LanguageMode language_mode_;
 };
 
 
@@ -362,14 +356,16 @@ class FastCloneShallowArrayStub : public CodeStub {
 
   enum Mode {
     CLONE_ELEMENTS,
-    COPY_ON_WRITE_ELEMENTS
+    CLONE_DOUBLE_ELEMENTS,
+    COPY_ON_WRITE_ELEMENTS,
+    CLONE_ANY_ELEMENTS
   };
 
   FastCloneShallowArrayStub(Mode mode, int length)
       : mode_(mode),
         length_((mode == COPY_ON_WRITE_ELEMENTS) ? 0 : length) {
-    ASSERT(length_ >= 0);
-    ASSERT(length_ <= kMaximumClonedLength);
+    ASSERT_GE(length_, 0);
+    ASSERT_LE(length_, kMaximumClonedLength);
   }
 
   void Generate(MacroAssembler* masm);
@@ -380,9 +376,29 @@ class FastCloneShallowArrayStub : public CodeStub {
 
   Major MajorKey() { return FastCloneShallowArray; }
   int MinorKey() {
-    ASSERT(mode_ == 0 || mode_ == 1);
-    return (length_ << 1) | mode_;
+    ASSERT(mode_ == 0 || mode_ == 1 || mode_ == 2 || mode_ == 3);
+    return length_ * 4 +  mode_;
   }
+};
+
+
+class FastCloneShallowObjectStub : public CodeStub {
+ public:
+  // Maximum number of properties in copied object.
+  static const int kMaximumClonedProperties = 6;
+
+  explicit FastCloneShallowObjectStub(int length) : length_(length) {
+    ASSERT_GE(length_, 0);
+    ASSERT_LE(length_, kMaximumClonedProperties);
+  }
+
+  void Generate(MacroAssembler* masm);
+
+ private:
+  int length_;
+
+  Major MajorKey() { return FastCloneShallowObject; }
+  int MinorKey() { return length_; }
 };
 
 
@@ -448,7 +464,9 @@ class ICCompareStub: public CodeStub {
   class OpField: public BitField<int, 0, 3> { };
   class StateField: public BitField<int, 3, 5> { };
 
-  virtual void FinishCode(Code* code) { code->set_compare_state(state_); }
+  virtual void FinishCode(Handle<Code> code) {
+    code->set_compare_state(state_);
+  }
 
   virtual CodeStub::Major MajorKey() { return CompareIC; }
   virtual int MinorKey();
@@ -551,7 +569,7 @@ class CompareStub: public CodeStub {
   int MinorKey();
 
   virtual int GetCodeKind() { return Code::COMPARE_IC; }
-  virtual void FinishCode(Code* code) {
+  virtual void FinishCode(Handle<Code> code) {
     code->set_compare_state(CompareIC::GENERIC);
   }
 
@@ -616,6 +634,10 @@ class JSEntryStub : public CodeStub {
  private:
   Major MajorKey() { return JSEntry; }
   int MinorKey() { return 0; }
+
+  virtual void FinishCode(Handle<Code> code);
+
+  int handler_offset_;
 };
 
 
@@ -692,7 +714,7 @@ class CallFunctionStub: public CodeStub {
 
   void Generate(MacroAssembler* masm);
 
-  virtual void FinishCode(Code* code);
+  virtual void FinishCode(Handle<Code> code);
 
   static void Clear(Heap* heap, Address address);
 
@@ -769,7 +791,6 @@ class StringCharCodeAtGenerator {
  public:
   StringCharCodeAtGenerator(Register object,
                             Register index,
-                            Register scratch,
                             Register result,
                             Label* receiver_not_string,
                             Label* index_not_number,
@@ -777,15 +798,11 @@ class StringCharCodeAtGenerator {
                             StringIndexFlags index_flags)
       : object_(object),
         index_(index),
-        scratch_(scratch),
         result_(result),
         receiver_not_string_(receiver_not_string),
         index_not_number_(index_not_number),
         index_out_of_range_(index_out_of_range),
         index_flags_(index_flags) {
-    ASSERT(!scratch_.is(object_));
-    ASSERT(!scratch_.is(index_));
-    ASSERT(!scratch_.is(result_));
     ASSERT(!result_.is(object_));
     ASSERT(!result_.is(index_));
   }
@@ -803,7 +820,6 @@ class StringCharCodeAtGenerator {
  private:
   Register object_;
   Register index_;
-  Register scratch_;
   Register result_;
 
   Label* receiver_not_string_;
@@ -866,8 +882,7 @@ class StringCharAtGenerator {
  public:
   StringCharAtGenerator(Register object,
                         Register index,
-                        Register scratch1,
-                        Register scratch2,
+                        Register scratch,
                         Register result,
                         Label* receiver_not_string,
                         Label* index_not_number,
@@ -875,13 +890,12 @@ class StringCharAtGenerator {
                         StringIndexFlags index_flags)
       : char_code_at_generator_(object,
                                 index,
-                                scratch1,
-                                scratch2,
+                                scratch,
                                 receiver_not_string,
                                 index_not_number,
                                 index_out_of_range,
                                 index_flags),
-        char_from_code_generator_(scratch2, result) {}
+        char_from_code_generator_(scratch, result) {}
 
   // Generates the fast case code. On the fallthrough path |result|
   // register contains the result.
@@ -1011,7 +1025,7 @@ class ToBooleanStub: public CodeStub {
   Major MajorKey() { return ToBoolean; }
   int MinorKey() { return (tos_.code() << NUMBER_OF_TYPES) | types_.ToByte(); }
 
-  virtual void FinishCode(Code* code) {
+  virtual void FinishCode(Handle<Code> code) {
     code->set_to_boolean_state(types_.ToByte());
   }
 
@@ -1023,6 +1037,56 @@ class ToBooleanStub: public CodeStub {
 
   Register tos_;
   Types types_;
+};
+
+
+class ElementsTransitionAndStoreStub : public CodeStub {
+ public:
+  ElementsTransitionAndStoreStub(ElementsKind from,
+                                 ElementsKind to,
+                                 bool is_jsarray,
+                                 StrictModeFlag strict_mode)
+      : from_(from),
+        to_(to),
+        is_jsarray_(is_jsarray),
+        strict_mode_(strict_mode) {}
+
+ private:
+  class FromBits:       public BitField<ElementsKind,    0, 8> {};
+  class ToBits:         public BitField<ElementsKind,    8, 8> {};
+  class IsJSArrayBits:  public BitField<bool,           16, 8> {};
+  class StrictModeBits: public BitField<StrictModeFlag, 24, 8> {};
+
+  Major MajorKey() { return ElementsTransitionAndStore; }
+  int MinorKey() {
+    return FromBits::encode(from_) |
+        ToBits::encode(to_) |
+        IsJSArrayBits::encode(is_jsarray_) |
+        StrictModeBits::encode(strict_mode_);
+  }
+
+  void Generate(MacroAssembler* masm);
+
+  ElementsKind from_;
+  ElementsKind to_;
+  bool is_jsarray_;
+  StrictModeFlag strict_mode_;
+
+  DISALLOW_COPY_AND_ASSIGN(ElementsTransitionAndStoreStub);
+};
+
+
+class StoreArrayLiteralElementStub : public CodeStub {
+ public:
+  explicit StoreArrayLiteralElementStub() {}
+
+ private:
+  Major MajorKey() { return StoreArrayLiteralElement; }
+  int MinorKey() { return 0; }
+
+  void Generate(MacroAssembler* masm);
+
+  DISALLOW_COPY_AND_ASSIGN(StoreArrayLiteralElementStub);
 };
 
 } }  // namespace v8::internal

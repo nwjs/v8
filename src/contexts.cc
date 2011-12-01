@@ -137,16 +137,17 @@ Handle<Object> Context::Lookup(Handle<String> name,
     if (context->IsFunctionContext() || context->IsBlockContext()) {
       // Use serialized scope information of functions and blocks to search
       // for the context index.
-      Handle<SerializedScopeInfo> scope_info;
+      Handle<ScopeInfo> scope_info;
       if (context->IsFunctionContext()) {
-        scope_info = Handle<SerializedScopeInfo>(
+        scope_info = Handle<ScopeInfo>(
             context->closure()->shared()->scope_info(), isolate);
       } else {
-        scope_info = Handle<SerializedScopeInfo>(
-            SerializedScopeInfo::cast(context->extension()), isolate);
+        scope_info = Handle<ScopeInfo>(
+            ScopeInfo::cast(context->extension()), isolate);
       }
       VariableMode mode;
-      int slot_index = scope_info->ContextSlotIndex(*name, &mode);
+      InitializationFlag init_flag;
+      int slot_index = scope_info->ContextSlotIndex(*name, &mode, &init_flag);
       ASSERT(slot_index < 0 || slot_index >= MIN_CONTEXT_SLOTS);
       if (slot_index >= 0) {
         if (FLAG_trace_contexts) {
@@ -168,11 +169,19 @@ Handle<Object> Context::Lookup(Handle<String> name,
             break;
           case LET:
             *attributes = NONE;
-            *binding_flags = MUTABLE_CHECK_INITIALIZED;
+            *binding_flags = (init_flag == kNeedsInitialization)
+                ? MUTABLE_CHECK_INITIALIZED : MUTABLE_IS_INITIALIZED;
             break;
           case CONST:
             *attributes = READ_ONLY;
-            *binding_flags = IMMUTABLE_CHECK_INITIALIZED;
+            *binding_flags = (init_flag == kNeedsInitialization)
+                ? IMMUTABLE_CHECK_INITIALIZED : IMMUTABLE_IS_INITIALIZED;
+            break;
+          case CONST_HARMONY:
+            *attributes = READ_ONLY;
+            *binding_flags = (init_flag == kNeedsInitialization)
+                ? IMMUTABLE_CHECK_INITIALIZED_HARMONY :
+                IMMUTABLE_IS_INITIALIZED_HARMONY;
             break;
           case DYNAMIC:
           case DYNAMIC_GLOBAL:
@@ -187,7 +196,8 @@ Handle<Object> Context::Lookup(Handle<String> name,
       // Check the slot corresponding to the intermediate context holding
       // only the function name variable.
       if (follow_context_chain && context->IsFunctionContext()) {
-        int function_index = scope_info->FunctionContextSlotIndex(*name);
+        VariableMode mode;
+        int function_index = scope_info->FunctionContextSlotIndex(*name, &mode);
         if (function_index >= 0) {
           if (FLAG_trace_contexts) {
             PrintF("=> found intermediate function in context slot %d\n",
@@ -195,7 +205,9 @@ Handle<Object> Context::Lookup(Handle<String> name,
           }
           *index = function_index;
           *attributes = READ_ONLY;
-          *binding_flags = IMMUTABLE_IS_INITIALIZED;
+          ASSERT(mode == CONST || mode == CONST_HARMONY);
+          *binding_flags = (mode == CONST)
+              ? IMMUTABLE_IS_INITIALIZED : IMMUTABLE_IS_INITIALIZED_HARMONY;
           return context;
         }
       }
@@ -225,68 +237,6 @@ Handle<Object> Context::Lookup(Handle<String> name,
     PrintF("=> no property/slot found\n");
   }
   return Handle<Object>::null();
-}
-
-
-bool Context::GlobalIfNotShadowedByEval(Handle<String> name) {
-  Context* context = this;
-
-  // Check that there is no local with the given name in contexts
-  // before the global context and check that there are no context
-  // extension objects (conservative check for with statements).
-  while (!context->IsGlobalContext()) {
-    // Check if the context is a catch or with context, or has introduced
-    // bindings by calling non-strict eval.
-    if (context->has_extension()) return false;
-
-    // Not a with context so it must be a function context.
-    ASSERT(context->IsFunctionContext());
-
-    // Check non-parameter locals.
-    Handle<SerializedScopeInfo> scope_info(
-        context->closure()->shared()->scope_info());
-    VariableMode mode;
-    int index = scope_info->ContextSlotIndex(*name, &mode);
-    ASSERT(index < 0 || index >= MIN_CONTEXT_SLOTS);
-    if (index >= 0) return false;
-
-    // Check parameter locals.
-    int param_index = scope_info->ParameterIndex(*name);
-    if (param_index >= 0) return false;
-
-    // Check context only holding the function name variable.
-    index = scope_info->FunctionContextSlotIndex(*name);
-    if (index >= 0) return false;
-    context = context->previous();
-  }
-
-  // No local or potential with statement found so the variable is
-  // global unless it is shadowed by an eval-introduced variable.
-  return true;
-}
-
-
-void Context::ComputeEvalScopeInfo(bool* outer_scope_calls_eval,
-                                   bool* outer_scope_calls_non_strict_eval) {
-  // Skip up the context chain checking all the function contexts to see
-  // whether they call eval.
-  Context* context = this;
-  while (!context->IsGlobalContext()) {
-    if (context->IsFunctionContext()) {
-      Handle<SerializedScopeInfo> scope_info(
-          context->closure()->shared()->scope_info());
-      if (scope_info->CallsEval()) {
-        *outer_scope_calls_eval = true;
-        if (!scope_info->IsStrictMode()) {
-          // No need to go further since the answers will not change from
-          // here.
-          *outer_scope_calls_non_strict_eval = true;
-          return;
-        }
-      }
-    }
-    context = context->previous();
-  }
 }
 
 

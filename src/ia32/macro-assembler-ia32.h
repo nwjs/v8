@@ -278,7 +278,7 @@ class MacroAssembler: public Assembler {
                       const CallWrapper& call_wrapper,
                       CallKind call_kind);
 
-  void InvokeFunction(JSFunction* function,
+  void InvokeFunction(Handle<JSFunction> function,
                       const ParameterCount& actual,
                       InvokeFlag flag,
                       const CallWrapper& call_wrapper,
@@ -451,9 +451,10 @@ class MacroAssembler: public Assembler {
   // ---------------------------------------------------------------------------
   // Exception handling
 
-  // Push a new try handler and link into try handler chain.  The return
-  // address must be pushed before calling this helper.
-  void PushTryHandler(CodeLocation try_location, HandlerType type);
+  // Push a new try handler and link it into try handler chain.
+  void PushTryHandler(CodeLocation try_location,
+                      HandlerType type,
+                      int handler_index);
 
   // Unlink the stack handler on top of the stack from the try handler chain.
   void PopTryHandler();
@@ -594,6 +595,9 @@ class MacroAssembler: public Assembler {
   // ---------------------------------------------------------------------------
   // Support functions.
 
+  // Check a boolean-bit of a Smi field.
+  void BooleanBitTest(Register object, int field_offset, int bit_index);
+
   // Check if result is zero and op is negative.
   void NegativeZeroTest(Register result, Register op, Label* then_label);
 
@@ -610,7 +614,8 @@ class MacroAssembler: public Assembler {
   void TryGetFunctionPrototype(Register function,
                                Register result,
                                Register scratch,
-                               Label* miss);
+                               Label* miss,
+                               bool miss_on_bound_function = false);
 
   // Generates code for reporting that an illegal operation has
   // occurred.
@@ -628,18 +633,8 @@ class MacroAssembler: public Assembler {
   // Call a code stub.  Generate the code if necessary.
   void CallStub(CodeStub* stub, unsigned ast_id = kNoASTId);
 
-  // Call a code stub and return the code object called.  Try to generate
-  // the code if necessary.  Do not perform a GC but instead return a retry
-  // after GC failure.
-  MUST_USE_RESULT MaybeObject* TryCallStub(CodeStub* stub);
-
   // Tail call a code stub (jump).  Generate the code if necessary.
   void TailCallStub(CodeStub* stub);
-
-  // Tail call a code stub (jump) and return the code object called.  Try to
-  // generate the code if necessary.  Do not perform a GC but instead return
-  // a retry after GC failure.
-  MUST_USE_RESULT MaybeObject* TryTailCallStub(CodeStub* stub);
 
   // Return from a code stub after popping its arguments.
   void StubReturn(int argc);
@@ -648,18 +643,8 @@ class MacroAssembler: public Assembler {
   void CallRuntime(const Runtime::Function* f, int num_arguments);
   void CallRuntimeSaveDoubles(Runtime::FunctionId id);
 
-  // Call a runtime function, returning the CodeStub object called.
-  // Try to generate the stub code if necessary.  Do not perform a GC
-  // but instead return a retry after GC failure.
-  MUST_USE_RESULT MaybeObject* TryCallRuntime(const Runtime::Function* f,
-                                              int num_arguments);
-
   // Convenience function: Same as above, but takes the fid instead.
   void CallRuntime(Runtime::FunctionId id, int num_arguments);
-
-  // Convenience function: Same as above, but takes the fid instead.
-  MUST_USE_RESULT MaybeObject* TryCallRuntime(Runtime::FunctionId id,
-                                              int num_arguments);
 
   // Convenience function: call an external reference.
   void CallExternalReference(ExternalReference ref, int num_arguments);
@@ -671,22 +656,10 @@ class MacroAssembler: public Assembler {
                                  int num_arguments,
                                  int result_size);
 
-  // Tail call of a runtime routine (jump). Try to generate the code if
-  // necessary. Do not perform a GC but instead return a retry after GC failure.
-  MUST_USE_RESULT MaybeObject* TryTailCallExternalReference(
-      const ExternalReference& ext, int num_arguments, int result_size);
-
   // Convenience function: tail call a runtime routine (jump).
   void TailCallRuntime(Runtime::FunctionId fid,
                        int num_arguments,
                        int result_size);
-
-  // Convenience function: tail call a runtime routine (jump). Try to generate
-  // the code if necessary. Do not perform a GC but instead return a retry after
-  // GC failure.
-  MUST_USE_RESULT MaybeObject* TryTailCallRuntime(Runtime::FunctionId fid,
-                                                  int num_arguments,
-                                                  int result_size);
 
   // Before calling a C-function from generated code, align arguments on stack.
   // After aligning the frame, arguments must be stored in esp[0], esp[4],
@@ -712,18 +685,14 @@ class MacroAssembler: public Assembler {
   // stores the pointer to the reserved slot into esi.
   void PrepareCallApiFunction(int argc);
 
-  // Calls an API function. Allocates HandleScope, extracts
-  // returned value from handle and propagates exceptions.
-  // Clobbers ebx, edi and caller-save registers. Restores context.
-  // On return removes stack_space * kPointerSize (GCed).
-  MaybeObject* TryCallApiFunctionAndReturn(ApiFunction* function,
-                                           int stack_space);
+  // Calls an API function.  Allocates HandleScope, extracts returned value
+  // from handle and propagates exceptions.  Clobbers ebx, edi and
+  // caller-save registers.  Restores context.  On return removes
+  // stack_space * kPointerSize (GCed).
+  void CallApiFunctionAndReturn(Address function_address, int stack_space);
 
   // Jump to a runtime routine.
   void JumpToExternalReference(const ExternalReference& ext);
-
-  MaybeObject* TryJumpToExternalReference(const ExternalReference& ext);
-
 
   // ---------------------------------------------------------------------------
   // Utilities
@@ -874,6 +843,10 @@ class MacroAssembler: public Assembler {
                           Register bitmap_reg,
                           Register mask_reg);
 
+  // Helper for throwing exceptions.  Compute a handler address and jump to
+  // it.  See the implementation for register usage.
+  void JumpToHandlerEntry();
+
   // Compute memory operands for safepoint stack slots.
   Operand SafepointRegisterSlot(Register reg);
   static int SafepointRegisterStackIndex(int reg_code);
@@ -908,26 +881,26 @@ class CodePatcher {
 // Static helper functions.
 
 // Generate an Operand for loading a field from an object.
-static inline Operand FieldOperand(Register object, int offset) {
+inline Operand FieldOperand(Register object, int offset) {
   return Operand(object, offset - kHeapObjectTag);
 }
 
 
 // Generate an Operand for loading an indexed field from an object.
-static inline Operand FieldOperand(Register object,
-                                   Register index,
-                                   ScaleFactor scale,
-                                   int offset) {
+inline Operand FieldOperand(Register object,
+                            Register index,
+                            ScaleFactor scale,
+                            int offset) {
   return Operand(object, index, scale, offset - kHeapObjectTag);
 }
 
 
-static inline Operand ContextOperand(Register context, int index) {
+inline Operand ContextOperand(Register context, int index) {
   return Operand(context, Context::SlotOffset(index));
 }
 
 
-static inline Operand GlobalObjectOperand() {
+inline Operand GlobalObjectOperand() {
   return ContextOperand(esi, Context::GLOBAL_INDEX);
 }
 

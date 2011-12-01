@@ -1,4 +1,4 @@
-// Copyright 2009 the V8 project authors. All rights reserved.
+// Copyright 2011 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -25,10 +25,12 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// Test that direct eval calls handle the case where eval has been
-// deleted correctly.
+// Flags: --allow-natives-syntax
 
-// See http://code.google.com/p/v8/issues/detail?id=221
-
-assertThrows('eval(delete eval)');
-
+var a = [];
+a[8192] = '';
+assertTrue(%HasDictionaryElements(a));
+var uc16 = '\u0094';
+var test = uc16;
+for (var i = 0; i < 13; i++) test += test;
+assertEquals(test, a.join(uc16));

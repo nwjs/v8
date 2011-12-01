@@ -116,25 +116,11 @@ DeoptimizedFrameInfo* Deoptimizer::DebuggerInspectableFrame(
   // Get the function and code from the frame.
   JSFunction* function = JSFunction::cast(frame->function());
   Code* code = frame->LookupCode();
-  Address code_start_address = code->instruction_start();
 
   // Locate the deoptimization point in the code. As we are at a call the
   // return address must be at a place in the code with deoptimization support.
-  int deoptimization_index = Safepoint::kNoDeoptimizationIndex;
-  // Scope this as the safe point constructor will disallow allocation.
-  {
-    SafepointTable table(code);
-    for (unsigned i = 0; i < table.length(); ++i) {
-      Address address = code_start_address + table.GetPcOffset(i);
-      if (address == frame->pc()) {
-        SafepointEntry safepoint_entry = table.GetEntry(i);
-        ASSERT(safepoint_entry.deoptimization_index() !=
-               Safepoint::kNoDeoptimizationIndex);
-        deoptimization_index = safepoint_entry.deoptimization_index();
-        break;
-      }
-    }
-  }
+  SafepointEntry safepoint_entry = code->GetSafepointEntry(frame->pc());
+  int deoptimization_index = safepoint_entry.deoptimization_index();
   ASSERT(deoptimization_index != Safepoint::kNoDeoptimizationIndex);
 
   // Always use the actual stack slots when calculating the fp to sp
@@ -882,10 +868,12 @@ bool Deoptimizer::DoOsrTranslateCommand(TranslationIterator* iterator,
       unsigned output_offset =
           output->GetOffsetFromSlotIndex(this, output_index);
       if (FLAG_trace_osr) {
-        PrintF("    [sp + %d] <- 0x%08" V8PRIxPTR " ; [sp + %d]\n",
+        PrintF("    [sp + %d] <- 0x%08" V8PRIxPTR " ; [sp + %d] ",
                output_offset,
                input_value,
                *input_offset);
+        reinterpret_cast<Object*>(input_value)->ShortPrint();
+        PrintF("\n");
       }
       output->SetFrameSlot(output_offset, input_value);
       break;
@@ -1007,7 +995,10 @@ void Deoptimizer::RevertStackCheckCode(Code* unoptimized_code,
   for (uint32_t i = 0; i < table_length; ++i) {
     uint32_t pc_offset = Memory::uint32_at(stack_check_cursor + kIntSize);
     Address pc_after = unoptimized_code->instruction_start() + pc_offset;
-    RevertStackCheckCodeAt(pc_after, check_code, replacement_code);
+    RevertStackCheckCodeAt(unoptimized_code,
+                           pc_after,
+                           check_code,
+                           replacement_code);
     stack_check_cursor += 2 * kIntSize;
   }
 }

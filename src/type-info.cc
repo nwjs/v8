@@ -360,6 +360,10 @@ TypeInfo TypeFeedbackOracle::SwitchType(CaseClause* clause) {
       return unknown;
     case CompareIC::SMIS:
       return TypeInfo::Smi();
+    case CompareIC::STRINGS:
+      return TypeInfo::String();
+    case CompareIC::SYMBOLS:
+      return TypeInfo::Symbol();
     case CompareIC::HEAP_NUMBERS:
       return TypeInfo::Number();
     case CompareIC::OBJECTS:
@@ -415,11 +419,20 @@ void TypeFeedbackOracle::CollectReceiverTypes(unsigned ast_id,
     ASSERT(Handle<Code>::cast(object)->ic_state() == MEGAMORPHIC);
   } else if (object->IsMap()) {
     types->Add(Handle<Map>::cast(object));
-  } else if (Handle<Code>::cast(object)->ic_state() == MEGAMORPHIC) {
+  } else if (FLAG_collect_megamorphic_maps_from_stub_cache &&
+      Handle<Code>::cast(object)->ic_state() == MEGAMORPHIC) {
     types->Reserve(4);
     ASSERT(object->IsCode());
     isolate_->stub_cache()->CollectMatchingMaps(types, *name, flags);
   }
+}
+
+
+static void AddMapIfMissing(Handle<Map> map, SmallMapList* list) {
+  for (int i = 0; i < list->length(); ++i) {
+    if (list->at(i).is_identical_to(map)) return;
+  }
+  list->Add(map);
 }
 
 
@@ -436,7 +449,7 @@ void TypeFeedbackOracle::CollectKeyedReceiverTypes(unsigned ast_id,
       RelocInfo* info = it.rinfo();
       Object* object = info->target_object();
       if (object->IsMap()) {
-        types->Add(Handle<Map>(Map::cast(object)));
+        AddMapIfMissing(Handle<Map>(Map::cast(object)), types);
       }
     }
   }
@@ -496,61 +509,56 @@ void TypeFeedbackOracle::RelocateRelocInfos(ZoneList<RelocInfo>* infos,
 
 void TypeFeedbackOracle::ProcessRelocInfos(ZoneList<RelocInfo>* infos) {
   for (int i = 0; i < infos->length(); i++) {
-    Address target_address = (*infos)[i].target_address();
+    RelocInfo reloc_entry = (*infos)[i];
+    Address target_address = reloc_entry.target_address();
     unsigned ast_id = static_cast<unsigned>((*infos)[i].data());
-    ProcessTargetAt(target_address, ast_id);
-  }
-}
-
-
-void TypeFeedbackOracle::ProcessTargetAt(Address target_address,
-                                         unsigned ast_id) {
-  Code* target = Code::GetCodeFromTargetAddress(target_address);
-  switch (target->kind()) {
-    case Code::LOAD_IC:
-    case Code::STORE_IC:
-    case Code::CALL_IC:
-    case Code::KEYED_CALL_IC:
-      if (target->ic_state() == MONOMORPHIC) {
-        if (target->kind() == Code::CALL_IC &&
-            target->check_type() != RECEIVER_MAP_CHECK) {
-          SetInfo(ast_id, Smi::FromInt(target->check_type()));
-        } else {
-          Object* map = target->FindFirstMap();
-          SetInfo(ast_id, map == NULL ? static_cast<Object*>(target) : map);
+    Code* target = Code::GetCodeFromTargetAddress(target_address);
+    switch (target->kind()) {
+      case Code::LOAD_IC:
+      case Code::STORE_IC:
+      case Code::CALL_IC:
+      case Code::KEYED_CALL_IC:
+        if (target->ic_state() == MONOMORPHIC) {
+          if (target->kind() == Code::CALL_IC &&
+              target->check_type() != RECEIVER_MAP_CHECK) {
+            SetInfo(ast_id, Smi::FromInt(target->check_type()));
+          } else {
+            Object* map = target->FindFirstMap();
+            SetInfo(ast_id, map == NULL ? static_cast<Object*>(target) : map);
+          }
+        } else if (target->ic_state() == MEGAMORPHIC) {
+          SetInfo(ast_id, target);
         }
-      } else if (target->ic_state() == MEGAMORPHIC) {
-        SetInfo(ast_id, target);
-      }
-      break;
+        break;
 
-    case Code::KEYED_LOAD_IC:
-    case Code::KEYED_STORE_IC:
-      if (target->ic_state() == MONOMORPHIC ||
-          target->ic_state() == MEGAMORPHIC) {
-        SetInfo(ast_id, target);
-      }
-      break;
-
-    case Code::UNARY_OP_IC:
-    case Code::BINARY_OP_IC:
-    case Code::COMPARE_IC:
-    case Code::TO_BOOLEAN_IC:
-      SetInfo(ast_id, target);
-      break;
-
-    case Code::STUB:
-      if (target->major_key() == CodeStub::CallFunction &&
-          target->has_function_cache()) {
-        Object* value = CallFunctionStub::GetCachedValue(target_address);
-        if (value->IsJSFunction()) {
-          SetInfo(ast_id, value);
+      case Code::KEYED_LOAD_IC:
+      case Code::KEYED_STORE_IC:
+        if (target->ic_state() == MONOMORPHIC ||
+            target->ic_state() == MEGAMORPHIC) {
+          SetInfo(ast_id, target);
         }
-      }
-      break;
+        break;
 
-    default:
-      break;
+      case Code::UNARY_OP_IC:
+      case Code::BINARY_OP_IC:
+      case Code::COMPARE_IC:
+      case Code::TO_BOOLEAN_IC:
+        SetInfo(ast_id, target);
+        break;
+
+      case Code::STUB:
+        if (target->major_key() == CodeStub::CallFunction &&
+            target->has_function_cache()) {
+          Object* value = CallFunctionStub::GetCachedValue(reloc_entry.pc());
+          if (value->IsJSFunction()) {
+            SetInfo(ast_id, value);
+          }
+        }
+        break;
+
+      default:
+        break;
+    }
   }
 }
 

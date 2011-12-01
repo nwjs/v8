@@ -126,7 +126,9 @@ void Range::AddConstant(int32_t value) {
   bool may_overflow = false;  // Overflow is ignored here.
   lower_ = AddWithoutOverflow(lower_, value, &may_overflow);
   upper_ = AddWithoutOverflow(upper_, value, &may_overflow);
+#ifdef DEBUG
   Verify();
+#endif
 }
 
 
@@ -173,7 +175,9 @@ bool Range::AddAndCheckOverflow(Range* other) {
   lower_ = AddWithoutOverflow(lower_, other->lower(), &may_overflow);
   upper_ = AddWithoutOverflow(upper_, other->upper(), &may_overflow);
   KeepOrder();
+#ifdef DEBUG
   Verify();
+#endif
   return may_overflow;
 }
 
@@ -183,7 +187,9 @@ bool Range::SubAndCheckOverflow(Range* other) {
   lower_ = SubWithoutOverflow(lower_, other->upper(), &may_overflow);
   upper_ = SubWithoutOverflow(upper_, other->lower(), &may_overflow);
   KeepOrder();
+#ifdef DEBUG
   Verify();
+#endif
   return may_overflow;
 }
 
@@ -197,9 +203,11 @@ void Range::KeepOrder() {
 }
 
 
+#ifdef DEBUG
 void Range::Verify() const {
   ASSERT(lower_ <= upper_);
 }
+#endif
 
 
 bool Range::MulAndCheckOverflow(Range* other) {
@@ -210,7 +218,9 @@ bool Range::MulAndCheckOverflow(Range* other) {
   int v4 = MulWithoutOverflow(upper_, other->upper(), &may_overflow);
   lower_ = Min(Min(v1, v2), Min(v3, v4));
   upper_ = Max(Max(v1, v2), Max(v3, v4));
+#ifdef DEBUG
   Verify();
+#endif
   return may_overflow;
 }
 
@@ -228,25 +238,6 @@ const char* HType::ToString() {
     case kJSArray: return "array";
     case kJSObject: return "object";
     case kUninitialized: return "uninitialized";
-  }
-  UNREACHABLE();
-  return "Unreachable code";
-}
-
-
-const char* HType::ToShortString() {
-  switch (type_) {
-    case kTagged: return "t";
-    case kTaggedPrimitive: return "p";
-    case kTaggedNumber: return "n";
-    case kSmi: return "m";
-    case kHeapNumber: return "h";
-    case kString: return "s";
-    case kBoolean: return "b";
-    case kNonPrimitive: return "r";
-    case kJSArray: return "a";
-    case kJSObject: return "o";
-    case kUninitialized: return "z";
   }
   UNREACHABLE();
   return "Unreachable code";
@@ -564,7 +555,7 @@ void HInstruction::InsertAfter(HInstruction* previous) {
   // followed by a simulate instruction, we need to insert after the
   // simulate instruction instead.
   HInstruction* next = previous->next_;
-  if (previous->HasSideEffects() && next != NULL) {
+  if (previous->HasObservableSideEffects() && next != NULL) {
     ASSERT(next->IsSimulate());
     previous = next;
     next = previous->next_;
@@ -587,11 +578,10 @@ void HInstruction::Verify() {
     HBasicBlock* other_block = other_operand->block();
     if (cur_block == other_block) {
       if (!other_operand->IsPhi()) {
-        HInstruction* cur = cur_block->first();
+        HInstruction* cur = this->previous();
         while (cur != NULL) {
-          ASSERT(cur != this);  // We should reach other_operand before!
           if (cur == other_operand) break;
-          cur = cur->next();
+          cur = cur->previous();
         }
         // Must reach other operand in the same block!
         ASSERT(cur == other_operand);
@@ -605,7 +595,7 @@ void HInstruction::Verify() {
 
   // Verify that instructions that may have side-effects are followed
   // by a simulate instruction.
-  if (HasSideEffects() && !IsOsrEntry()) {
+  if (HasObservableSideEffects() && !IsOsrEntry()) {
     ASSERT(next()->IsSimulate());
   }
 
@@ -783,9 +773,18 @@ void HHasInstanceTypeAndBranch::PrintDataTo(StringStream* stream) {
 
 void HTypeofIsAndBranch::PrintDataTo(StringStream* stream) {
   value()->PrintNameTo(stream);
-  stream->Add(" == ");
-  stream->Add(type_literal_->GetFlatContent().ToAsciiVector());
+  stream->Add(" == %o", *type_literal_);
   HControlInstruction::PrintDataTo(stream);
+}
+
+
+HValue* HConstant::Canonicalize() {
+  return HasNoUses() && !IsBlockEntry() ? NULL : this;
+}
+
+
+HValue* HTypeof::Canonicalize() {
+  return HasNoUses() && !IsBlockEntry() ? NULL : this;
 }
 
 
@@ -1138,15 +1137,16 @@ void HPhi::AddIndirectUsesTo(int* dest) {
 
 
 void HSimulate::PrintDataTo(StringStream* stream) {
-  stream->Add("id=%d ", ast_id());
-  if (pop_count_ > 0) stream->Add("pop %d", pop_count_);
+  stream->Add("id=%d", ast_id());
+  if (pop_count_ > 0) stream->Add(" pop %d", pop_count_);
   if (values_.length() > 0) {
     if (pop_count_ > 0) stream->Add(" /");
     for (int i = 0; i < values_.length(); ++i) {
-      if (!HasAssignedIndexAt(i)) {
-        stream->Add(" push ");
-      } else {
+      if (i > 0) stream->Add(",");
+      if (HasAssignedIndexAt(i)) {
         stream->Add(" var[%d] = ", GetAssignedIndexAt(i));
+      } else {
+        stream->Add(" push ");
       }
       values_[i]->PrintNameTo(stream);
     }
@@ -1227,7 +1227,10 @@ void HConstant::PrintDataTo(StringStream* stream) {
 
 
 bool HArrayLiteral::IsCopyOnWrite() const {
-  return constant_elements()->map() == HEAP->fixed_cow_array_map();
+  Handle<FixedArray> constant_elements = this->constant_elements();
+  FixedArrayBase* constant_elements_values =
+      FixedArrayBase::cast(constant_elements->get(1));
+  return constant_elements_values->map() == HEAP->fixed_cow_array_map();
 }
 
 
@@ -1240,28 +1243,17 @@ void HBinaryOperation::PrintDataTo(StringStream* stream) {
 }
 
 
-Range* HBitAnd::InferRange() {
+Range* HBitwise::InferRange() {
+  if (op() == Token::BIT_XOR) return HValue::InferRange();
   int32_t left_mask = (left()->range() != NULL)
       ? left()->range()->Mask()
       : 0xffffffff;
   int32_t right_mask = (right()->range() != NULL)
       ? right()->range()->Mask()
       : 0xffffffff;
-  int32_t result_mask = left_mask & right_mask;
-  return (result_mask >= 0)
-      ? new Range(0, result_mask)
-      : HValue::InferRange();
-}
-
-
-Range* HBitOr::InferRange() {
-  int32_t left_mask = (left()->range() != NULL)
-      ? left()->range()->Mask()
-      : 0xffffffff;
-  int32_t right_mask = (right()->range() != NULL)
-      ? right()->range()->Mask()
-      : 0xffffffff;
-  int32_t result_mask = left_mask | right_mask;
+  int32_t result_mask = (op() == Token::BIT_AND)
+      ? left_mask & right_mask
+      : left_mask | right_mask;
   return (result_mask >= 0)
       ? new Range(0, result_mask)
       : HValue::InferRange();
@@ -1333,6 +1325,13 @@ void HCompareGeneric::PrintDataTo(StringStream* stream) {
 }
 
 
+void HStringCompareAndBranch::PrintDataTo(StringStream* stream) {
+  stream->Add(Token::Name(token()));
+  stream->Add(" ");
+  HControlInstruction::PrintDataTo(stream);
+}
+
+
 void HCompareIDAndBranch::PrintDataTo(StringStream* stream) {
   stream->Add(Token::Name(token()));
   stream->Add(" ");
@@ -1392,7 +1391,7 @@ HLoadNamedFieldPolymorphic::HLoadNamedFieldPolymorphic(HValue* context,
        i < types->length() && types_.length() < kMaxLoadPolymorphism;
        ++i) {
     Handle<Map> map = types->at(i);
-    LookupResult lookup;
+    LookupResult lookup(map->GetIsolate());
     map->LookupInDescriptors(NULL, *name, &lookup);
     if (lookup.IsProperty()) {
       switch (lookup.type()) {
@@ -1445,14 +1444,14 @@ bool HLoadNamedFieldPolymorphic::DataEquals(HValue* value) {
 
 void HLoadNamedFieldPolymorphic::PrintDataTo(StringStream* stream) {
   object()->PrintNameTo(stream);
-  stream->Add(" .");
+  stream->Add(".");
   stream->Add(*String::cast(*name())->ToCString());
 }
 
 
 void HLoadNamedGeneric::PrintDataTo(StringStream* stream) {
   object()->PrintNameTo(stream);
-  stream->Add(" .");
+  stream->Add(".");
   stream->Add(*String::cast(*name())->ToCString());
 }
 
@@ -1549,10 +1548,10 @@ void HStoreNamedGeneric::PrintDataTo(StringStream* stream) {
 void HStoreNamedField::PrintDataTo(StringStream* stream) {
   object()->PrintNameTo(stream);
   stream->Add(".");
-  ASSERT(name()->IsString());
   stream->Add(*String::cast(*name())->ToCString());
   stream->Add(" = ");
   value()->PrintNameTo(stream);
+  stream->Add(" @%d%s", offset(), is_in_object() ? "[in-object]" : "");
   if (!transition().is_null()) {
     stream->Add(" (transition map %p)", *transition());
   }
@@ -1630,6 +1629,12 @@ void HStoreKeyedSpecializedArrayElement::PrintDataTo(
   key()->PrintNameTo(stream);
   stream->Add("] = ");
   value()->PrintNameTo(stream);
+}
+
+
+void HTransitionElementsKind::PrintDataTo(StringStream* stream) {
+  object()->PrintNameTo(stream);
+  stream->Add(" %p -> %p", *original_map(), *transitioned_map());
 }
 
 
@@ -1746,6 +1751,12 @@ HType HInstanceOfKnownGlobal::CalculateInferredType() {
 }
 
 
+HType HChange::CalculateInferredType() {
+  if (from().IsDouble() && to().IsTagged()) return HType::HeapNumber();
+  return type();
+}
+
+
 HType HBitwiseBinaryOperation::CalculateInferredType() {
   return HType::TaggedNumber();
 }
@@ -1761,21 +1772,6 @@ HType HAdd::CalculateInferredType() {
 }
 
 
-HType HBitAnd::CalculateInferredType() {
-  return HType::TaggedNumber();
-}
-
-
-HType HBitXor::CalculateInferredType() {
-  return HType::TaggedNumber();
-}
-
-
-HType HBitOr::CalculateInferredType() {
-  return HType::TaggedNumber();
-}
-
-
 HType HBitNot::CalculateInferredType() {
   return HType::TaggedNumber();
 }
@@ -1786,18 +1782,33 @@ HType HUnaryMathOperation::CalculateInferredType() {
 }
 
 
-HType HShl::CalculateInferredType() {
-  return HType::TaggedNumber();
+HType HStringCharFromCode::CalculateInferredType() {
+  return HType::String();
 }
 
 
-HType HShr::CalculateInferredType() {
-  return HType::TaggedNumber();
+HType HArrayLiteral::CalculateInferredType() {
+  return HType::JSArray();
 }
 
 
-HType HSar::CalculateInferredType() {
-  return HType::TaggedNumber();
+HType HObjectLiteralFast::CalculateInferredType() {
+  return HType::JSObject();
+}
+
+
+HType HObjectLiteralGeneric::CalculateInferredType() {
+  return HType::JSObject();
+}
+
+
+HType HRegExpLiteral::CalculateInferredType() {
+  return HType::JSObject();
+}
+
+
+HType HFunctionLiteral::CalculateInferredType() {
+  return HType::JSObject();
 }
 
 
@@ -1886,6 +1897,167 @@ HValue* HAdd::EnsureAndPropagateNotMinusZero(BitVector* visited) {
   }
   return NULL;
 }
+
+
+#define H_CONSTANT_INT32(val)                                                  \
+new(zone) HConstant(FACTORY->NewNumberFromInt(val, TENURED),                   \
+                    Representation::Integer32())
+#define H_CONSTANT_DOUBLE(val)                                                 \
+new(zone) HConstant(FACTORY->NewNumber(val, TENURED),                          \
+                    Representation::Double())
+
+#define DEFINE_NEW_H_SIMPLE_ARITHMETIC_INSTR(HInstr, op)                       \
+HInstruction* HInstr::New##HInstr(Zone* zone,                                  \
+                                  HValue* context,                             \
+                                  HValue* left,                                \
+                                  HValue* right) {                             \
+  if (left->IsConstant() && right->IsConstant()) {                             \
+    HConstant* c_left = HConstant::cast(left);                                 \
+    HConstant* c_right = HConstant::cast(right);                               \
+    if ((c_left->HasNumberValue() && c_right->HasNumberValue())) {             \
+      double double_res = c_left->DoubleValue() op c_right->DoubleValue();     \
+      if (TypeInfo::IsInt32Double(double_res)) {                               \
+        return H_CONSTANT_INT32(static_cast<int32_t>(double_res));             \
+      }                                                                        \
+      return H_CONSTANT_DOUBLE(double_res);                                    \
+    }                                                                          \
+  }                                                                            \
+  return new(zone) HInstr(context, left, right);                               \
+}
+
+
+DEFINE_NEW_H_SIMPLE_ARITHMETIC_INSTR(HAdd, +)
+DEFINE_NEW_H_SIMPLE_ARITHMETIC_INSTR(HMul, *)
+DEFINE_NEW_H_SIMPLE_ARITHMETIC_INSTR(HSub, -)
+
+#undef DEFINE_NEW_H_SIMPLE_ARITHMETIC_INSTR
+
+
+HInstruction* HMod::NewHMod(Zone* zone,
+                            HValue* context,
+                            HValue* left,
+                            HValue* right) {
+  if (left->IsConstant() && right->IsConstant()) {
+    HConstant* c_left = HConstant::cast(left);
+    HConstant* c_right = HConstant::cast(right);
+    if (c_left->HasInteger32Value() && c_right->HasInteger32Value()) {
+      int32_t dividend = c_left->Integer32Value();
+      int32_t divisor = c_right->Integer32Value();
+      if (divisor != 0) {
+        int32_t res = dividend % divisor;
+        if ((res == 0) && (dividend < 0)) {
+          return H_CONSTANT_DOUBLE(-0.0);
+        }
+        return H_CONSTANT_INT32(res);
+      }
+    }
+  }
+  return new(zone) HMod(context, left, right);
+}
+
+
+HInstruction* HDiv::NewHDiv(Zone* zone,
+                            HValue* context,
+                            HValue* left,
+                            HValue* right) {
+  // If left and right are constant values, try to return a constant value.
+  if (left->IsConstant() && right->IsConstant()) {
+    HConstant* c_left = HConstant::cast(left);
+    HConstant* c_right = HConstant::cast(right);
+    if ((c_left->HasNumberValue() && c_right->HasNumberValue())) {
+      if (c_right->DoubleValue() != 0) {
+        double double_res = c_left->DoubleValue() / c_right->DoubleValue();
+        if (TypeInfo::IsInt32Double(double_res)) {
+          return H_CONSTANT_INT32(static_cast<int32_t>(double_res));
+        }
+        return H_CONSTANT_DOUBLE(double_res);
+      }
+    }
+  }
+  return new(zone) HDiv(context, left, right);
+}
+
+
+HInstruction* HBitwise::NewHBitwise(Zone* zone,
+                                    Token::Value op,
+                                    HValue* context,
+                                    HValue* left,
+                                    HValue* right) {
+  if (left->IsConstant() && right->IsConstant()) {
+    HConstant* c_left = HConstant::cast(left);
+    HConstant* c_right = HConstant::cast(right);
+    if ((c_left->HasNumberValue() && c_right->HasNumberValue())) {
+      int32_t result;
+      int32_t v_left = c_left->NumberValueAsInteger32();
+      int32_t v_right = c_right->NumberValueAsInteger32();
+      switch (op) {
+        case Token::BIT_XOR:
+          result = v_left ^ v_right;
+          break;
+        case Token::BIT_AND:
+          result = v_left & v_right;
+          break;
+        case Token::BIT_OR:
+          result = v_left | v_right;
+          break;
+        default:
+          result = 0;  // Please the compiler.
+          UNREACHABLE();
+      }
+      return H_CONSTANT_INT32(result);
+    }
+  }
+  return new(zone) HBitwise(op, context, left, right);
+}
+
+
+#define DEFINE_NEW_H_BITWISE_INSTR(HInstr, result)                             \
+HInstruction* HInstr::New##HInstr(Zone* zone,                                  \
+                                  HValue* context,                             \
+                                  HValue* left,                                \
+                                  HValue* right) {                             \
+  if (left->IsConstant() && right->IsConstant()) {                             \
+    HConstant* c_left = HConstant::cast(left);                                 \
+    HConstant* c_right = HConstant::cast(right);                               \
+    if ((c_left->HasNumberValue() && c_right->HasNumberValue())) {             \
+      return H_CONSTANT_INT32(result);                                         \
+    }                                                                          \
+  }                                                                            \
+  return new(zone) HInstr(context, left, right);                               \
+}
+
+
+DEFINE_NEW_H_BITWISE_INSTR(HSar,
+c_left->NumberValueAsInteger32() >> (c_right->NumberValueAsInteger32() & 0x1f))
+DEFINE_NEW_H_BITWISE_INSTR(HShl,
+c_left->NumberValueAsInteger32() << (c_right->NumberValueAsInteger32() & 0x1f))
+
+#undef DEFINE_NEW_H_BITWISE_INSTR
+
+
+HInstruction* HShr::NewHShr(Zone* zone,
+                            HValue* context,
+                            HValue* left,
+                            HValue* right) {
+  if (left->IsConstant() && right->IsConstant()) {
+    HConstant* c_left = HConstant::cast(left);
+    HConstant* c_right = HConstant::cast(right);
+    if ((c_left->HasNumberValue() && c_right->HasNumberValue())) {
+      int32_t left_val = c_left->NumberValueAsInteger32();
+      int32_t right_val = c_right->NumberValueAsInteger32() & 0x1f;
+      if ((right_val == 0) && (left_val < 0)) {
+        return H_CONSTANT_DOUBLE(
+            static_cast<double>(static_cast<uint32_t>(left_val)));
+      }
+      return H_CONSTANT_INT32(static_cast<uint32_t>(left_val) >> right_val);
+    }
+  }
+  return new(zone) HShr(context, left, right);
+}
+
+
+#undef H_CONSTANT_INT32
+#undef H_CONSTANT_DOUBLE
 
 
 void HIn::PrintDataTo(StringStream* stream) {

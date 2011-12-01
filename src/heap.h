@@ -64,18 +64,31 @@ inline Heap* _inline_get_heap_();
   V(Oddball, null_value, NullValue)                                            \
   V(Oddball, true_value, TrueValue)                                            \
   V(Oddball, false_value, FalseValue)                                          \
-  V(Oddball, arguments_marker, ArgumentsMarker)                                \
-  V(Oddball, frame_alignment_marker, FrameAlignmentMarker)                     \
+  V(Map, global_property_cell_map, GlobalPropertyCellMap)                      \
+  V(Map, shared_function_info_map, SharedFunctionInfoMap)                      \
+  V(Map, meta_map, MetaMap)                                                    \
+  V(Map, ascii_symbol_map, AsciiSymbolMap)                                     \
+  V(Map, ascii_string_map, AsciiStringMap)                                     \
   V(Map, heap_number_map, HeapNumberMap)                                       \
   V(Map, global_context_map, GlobalContextMap)                                 \
   V(Map, fixed_array_map, FixedArrayMap)                                       \
-  V(Map, serialized_scope_info_map, SerializedScopeInfoMap)                    \
+  V(Map, code_map, CodeMap)                                                    \
+  V(Map, scope_info_map, ScopeInfoMap)                                         \
   V(Map, fixed_cow_array_map, FixedCOWArrayMap)                                \
   V(Map, fixed_double_array_map, FixedDoubleArrayMap)                          \
   V(Object, no_interceptor_result_sentinel, NoInterceptorResultSentinel)       \
-  V(Map, meta_map, MetaMap)                                                    \
   V(Map, hash_table_map, HashTableMap)                                         \
+  V(FixedArray, empty_fixed_array, EmptyFixedArray)                            \
+  V(ByteArray, empty_byte_array, EmptyByteArray)                               \
+  V(FixedDoubleArray, empty_fixed_double_array, EmptyFixedDoubleArray)         \
+  V(String, empty_string, EmptyString)                                         \
+  V(DescriptorArray, empty_descriptor_array, EmptyDescriptorArray)             \
   V(Smi, stack_limit, StackLimit)                                              \
+  V(Oddball, frame_alignment_marker, FrameAlignmentMarker)                     \
+  V(Oddball, arguments_marker, ArgumentsMarker)                                \
+  /* The first 32 roots above this line should be boring from a GC point of */ \
+  /* view.  This means they are never in new space and never on a page that */ \
+  /* is being compacted.                                                    */ \
   V(FixedArray, number_string_cache, NumberStringCache)                        \
   V(Object, instanceof_cache_function, InstanceofCacheFunction)                \
   V(Object, instanceof_cache_map, InstanceofCacheMap)                          \
@@ -83,19 +96,12 @@ inline Heap* _inline_get_heap_();
   V(FixedArray, single_character_string_cache, SingleCharacterStringCache)     \
   V(FixedArray, string_split_cache, StringSplitCache)                          \
   V(Object, termination_exception, TerminationException)                       \
-  V(FixedArray, empty_fixed_array, EmptyFixedArray)                            \
-  V(ByteArray, empty_byte_array, EmptyByteArray)                               \
-  V(FixedDoubleArray, empty_fixed_double_array, EmptyFixedDoubleArray)         \
-  V(String, empty_string, EmptyString)                                         \
-  V(DescriptorArray, empty_descriptor_array, EmptyDescriptorArray)             \
   V(Map, string_map, StringMap)                                                \
-  V(Map, ascii_string_map, AsciiStringMap)                                     \
   V(Map, symbol_map, SymbolMap)                                                \
   V(Map, cons_string_map, ConsStringMap)                                       \
   V(Map, cons_ascii_string_map, ConsAsciiStringMap)                            \
   V(Map, sliced_string_map, SlicedStringMap)                                   \
   V(Map, sliced_ascii_string_map, SlicedAsciiStringMap)                        \
-  V(Map, ascii_symbol_map, AsciiSymbolMap)                                     \
   V(Map, cons_symbol_map, ConsSymbolMap)                                       \
   V(Map, cons_ascii_symbol_map, ConsAsciiSymbolMap)                            \
   V(Map, external_symbol_map, ExternalSymbolMap)                               \
@@ -104,6 +110,16 @@ inline Heap* _inline_get_heap_();
   V(Map, external_string_map, ExternalStringMap)                               \
   V(Map, external_string_with_ascii_data_map, ExternalStringWithAsciiDataMap)  \
   V(Map, external_ascii_string_map, ExternalAsciiStringMap)                    \
+  V(Map, short_external_symbol_map, ShortExternalSymbolMap)                    \
+  V(Map,                                                                       \
+    short_external_symbol_with_ascii_data_map,                                 \
+    ShortExternalSymbolWithAsciiDataMap)                                       \
+  V(Map, short_external_ascii_symbol_map, ShortExternalAsciiSymbolMap)         \
+  V(Map, short_external_string_map, ShortExternalStringMap)                    \
+  V(Map,                                                                       \
+    short_external_string_with_ascii_data_map,                                 \
+    ShortExternalStringWithAsciiDataMap)                                       \
+  V(Map, short_external_ascii_string_map, ShortExternalAsciiStringMap)         \
   V(Map, undetectable_string_map, UndetectableStringMap)                       \
   V(Map, undetectable_ascii_string_map, UndetectableAsciiStringMap)            \
   V(Map, external_pixel_array_map, ExternalPixelArrayMap)                      \
@@ -120,10 +136,7 @@ inline Heap* _inline_get_heap_();
   V(Map, catch_context_map, CatchContextMap)                                   \
   V(Map, with_context_map, WithContextMap)                                     \
   V(Map, block_context_map, BlockContextMap)                                   \
-  V(Map, code_map, CodeMap)                                                    \
   V(Map, oddball_map, OddballMap)                                              \
-  V(Map, global_property_cell_map, GlobalPropertyCellMap)                      \
-  V(Map, shared_function_info_map, SharedFunctionInfoMap)                      \
   V(Map, message_object_map, JSMessageObjectMap)                               \
   V(Map, foreign_map, ForeignMap)                                              \
   V(HeapNumber, nan_value, NanValue)                                           \
@@ -279,24 +292,58 @@ class HeapDebugUtils;
 // by it's size to avoid dereferencing a map pointer for scanning.
 class PromotionQueue {
  public:
-  PromotionQueue() : front_(NULL), rear_(NULL) { }
+  explicit PromotionQueue(Heap* heap)
+      : front_(NULL),
+        rear_(NULL),
+        limit_(NULL),
+        emergency_stack_(0),
+        heap_(heap) { }
 
-  void Initialize(Address start_address) {
-    // Assumes that a NewSpacePage exactly fits a number of promotion queue
-    // entries (where each is a pair of intptr_t). This allows us to simplify
-    // the test fpr when to switch pages.
-    ASSERT((Page::kPageSize - MemoryChunk::kBodyOffset) % (2 * kPointerSize)
-           == 0);
-    ASSERT(NewSpacePage::IsAtEnd(start_address));
-    front_ = rear_ = reinterpret_cast<intptr_t*>(start_address);
+  void Initialize();
+
+  void Destroy() {
+    ASSERT(is_empty());
+    delete emergency_stack_;
+    emergency_stack_ = NULL;
   }
 
-  bool is_empty() { return front_ == rear_; }
+  inline void ActivateGuardIfOnTheSamePage();
+
+  Page* GetHeadPage() {
+    return Page::FromAllocationTop(reinterpret_cast<Address>(rear_));
+  }
+
+  void SetNewLimit(Address limit) {
+    if (!guard_) {
+      return;
+    }
+
+    ASSERT(GetHeadPage() == Page::FromAllocationTop(limit));
+    limit_ = reinterpret_cast<intptr_t*>(limit);
+
+    if (limit_ <= rear_) {
+      return;
+    }
+
+    RelocateQueueHead();
+  }
+
+  bool is_empty() {
+    return (front_ == rear_) &&
+        (emergency_stack_ == NULL || emergency_stack_->length() == 0);
+  }
 
   inline void insert(HeapObject* target, int size);
 
   void remove(HeapObject** target, int* size) {
     ASSERT(!is_empty());
+    if (front_ == rear_) {
+      Entry e = emergency_stack_->RemoveLast();
+      *target = e.obj_;
+      *size = e.size_;
+      return;
+    }
+
     if (NewSpacePage::IsAtStart(reinterpret_cast<Address>(front_))) {
       NewSpacePage* front_page =
           NewSpacePage::FromAddress(reinterpret_cast<Address>(front_));
@@ -315,6 +362,23 @@ class PromotionQueue {
   // The front of the queue is higher in the memory page chain than the rear.
   intptr_t* front_;
   intptr_t* rear_;
+  intptr_t* limit_;
+
+  bool guard_;
+
+  static const int kEntrySizeInWords = 2;
+
+  struct Entry {
+    Entry(HeapObject* obj, int size) : obj_(obj), size_(size) { }
+
+    HeapObject* obj_;
+    int size_;
+  };
+  List<Entry>* emergency_stack_;
+
+  Heap* heap_;
+
+  void RelocateQueueHead();
 
   DISALLOW_COPY_AND_ASSIGN(PromotionQueue);
 };
@@ -544,7 +608,7 @@ class Heap {
   MUST_USE_RESULT MaybeObject* AllocateCodeCache();
 
   // Allocates a serialized scope info.
-  MUST_USE_RESULT MaybeObject* AllocateSerializedScopeInfo(int length);
+  MUST_USE_RESULT MaybeObject* AllocateScopeInfo(int length);
 
   // Allocates an empty PolymorphicCodeCache.
   MUST_USE_RESULT MaybeObject* AllocatePolymorphicCodeCache();
@@ -734,7 +798,7 @@ class Heap {
   // Allocate a block context.
   MUST_USE_RESULT MaybeObject* AllocateBlockContext(JSFunction* function,
                                                     Context* previous,
-                                                    SerializedScopeInfo* info);
+                                                    ScopeInfo* info);
 
   // Allocates a new utility object in the old generation.
   MUST_USE_RESULT MaybeObject* AllocateStruct(InstanceType type);
@@ -783,13 +847,15 @@ class Heap {
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT inline MaybeObject* NumberFromInt32(int32_t value);
+  MUST_USE_RESULT inline MaybeObject* NumberFromInt32(
+      int32_t value, PretenureFlag pretenure = NOT_TENURED);
 
   // Converts an int into either a Smi or a HeapNumber object.
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT inline MaybeObject* NumberFromUint32(uint32_t value);
+  MUST_USE_RESULT inline MaybeObject* NumberFromUint32(
+      uint32_t value, PretenureFlag pretenure = NOT_TENURED);
 
   // Allocates a new foreign object.
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
@@ -1097,7 +1163,7 @@ class Heap {
   inline void SetLastScriptId(Object* last_script_id);
 
   // Generated code can embed this address to get access to the roots.
-  Object** roots_address() { return roots_; }
+  Object** roots_array_start() { return roots_; }
 
   Address* store_buffer_top_address() {
     return reinterpret_cast<Address*>(&roots_[kStoreBufferTopRootIndex]);
@@ -1251,7 +1317,8 @@ class Heap {
         Max(old_gen_size + old_gen_size / divisor, kMinimumPromotionLimit);
     limit += new_space_.Capacity();
     limit *= old_gen_limit_factor_;
-    return limit;
+    intptr_t halfway_to_the_max = (old_gen_size + max_old_generation_size_) / 2;
+    return Min(limit, halfway_to_the_max);
   }
 
   intptr_t OldGenAllocationLimit(intptr_t old_gen_size) {
@@ -1260,11 +1327,12 @@ class Heap {
         Max(old_gen_size + old_gen_size / divisor, kMinimumAllocationLimit);
     limit += new_space_.Capacity();
     limit *= old_gen_limit_factor_;
-    return limit;
+    intptr_t halfway_to_the_max = (old_gen_size + max_old_generation_size_) / 2;
+    return Min(limit, halfway_to_the_max);
   }
 
-  // Can be called when the embedding application is idle.
-  bool IdleNotification();
+  // Implements the corresponding V8 API function.
+  bool IdleNotification(int hint);
 
   // Declare all the root indices.
   enum RootListIndex {
@@ -1387,6 +1455,17 @@ class Heap {
     return &incremental_marking_;
   }
 
+  bool IsSweepingComplete() {
+    return old_data_space()->IsSweepingComplete() &&
+           old_pointer_space()->IsSweepingComplete();
+  }
+
+  bool AdvanceSweepers(int step_size) {
+    bool sweeping_complete = old_data_space()->AdvanceSweeper(step_size);
+    sweeping_complete &= old_pointer_space()->AdvanceSweeper(step_size);
+    return sweeping_complete;
+  }
+
   ExternalStringTable* external_string_table() {
     return &external_string_table_;
   }
@@ -1418,6 +1497,13 @@ class Heap {
   // Completely clear the Instanceof cache (to stop it keeping objects alive
   // around a GC).
   inline void CompletelyClearInstanceofCache();
+
+  // The roots that have an index less than this are always in old space.
+  static const int kOldSpaceRoots = 0x20;
+
+  bool idle_notification_will_schedule_next_gc() {
+    return idle_notification_will_schedule_next_gc_;
+  }
 
  private:
   Heap();
@@ -1474,7 +1560,10 @@ class Heap {
   int unflattened_strings_length_;
 
 #define ROOT_ACCESSOR(type, name, camel_name)                                  \
-  inline void set_##name(type* value) {                                 \
+  inline void set_##name(type* value) {                                        \
+    /* The deserializer makes use of the fact that these common roots are */   \
+    /* never in new space and never on a page that is being compacted.    */   \
+    ASSERT(k##camel_name##RootIndex >= kOldSpaceRoots || !InNewSpace(value));  \
     roots_[k##camel_name##RootIndex] = value;                                  \
   }
   ROOT_LIST(ROOT_ACCESSOR)
@@ -1494,6 +1583,10 @@ class Heap {
 
   HeapDebugUtils* debug_utils_;
 #endif  // DEBUG
+
+  // Indicates that the new space should be kept small due to high promotion
+  // rates caused by the mutator allocating a lot of long-lived objects.
+  bool new_space_high_promotion_mode_active_;
 
   // Limit that triggers a global GC on the next (normally caused) GC.  This
   // is checked when we have already decided to do a GC to help determine
@@ -1735,11 +1828,39 @@ class Heap {
     return survival_rate_trend() == INCREASING;
   }
 
+  bool IsDecreasingSurvivalTrend() {
+    return survival_rate_trend() == DECREASING;
+  }
+
   bool IsHighSurvivalRate() {
     return high_survival_rate_period_length_ > 0;
   }
 
   void SelectScavengingVisitorsTable();
+
+  void StartIdleRound() {
+    mark_sweeps_since_idle_round_started_ = 0;
+    ms_count_at_last_idle_notification_ = ms_count_;
+  }
+
+  void FinishIdleRound() {
+    mark_sweeps_since_idle_round_started_ = kMaxMarkSweepsInIdleRound;
+    scavenges_since_last_idle_round_ = 0;
+  }
+
+  bool EnoughGarbageSinceLastIdleRound() {
+    return (scavenges_since_last_idle_round_ >= kIdleScavengeThreshold);
+  }
+
+  bool WorthStartingGCWhenIdle() {
+    if (contexts_disposed_ > 0) {
+      return true;
+    }
+    return incremental_marking()->WorthActivating();
+  }
+
+  // Returns true if no more GC work is left.
+  bool IdleGlobalGC();
 
   static const int kInitialSymbolTableSize = 2048;
   static const int kInitialEvalCacheSize = 64;
@@ -1769,6 +1890,15 @@ class Heap {
   int number_idle_notifications_;
   unsigned int last_idle_notification_gc_count_;
   bool last_idle_notification_gc_count_init_;
+
+  bool idle_notification_will_schedule_next_gc_;
+  int mark_sweeps_since_idle_round_started_;
+  int ms_count_at_last_idle_notification_;
+  unsigned int gc_count_at_last_idle_gc_;
+  int scavenges_since_last_idle_round_;
+
+  static const int kMaxMarkSweepsInIdleRound = 7;
+  static const int kIdleScavengeThreshold = 5;
 
   // Shared state read by the scavenge collector and set by ScavengeObject.
   PromotionQueue promotion_queue_;
@@ -1954,7 +2084,6 @@ class HeapIterator BASE_EMBEDDED {
  public:
   enum HeapObjectsFiltering {
     kNoFiltering,
-    kFilterFreeListNodes,
     kFilterUnreachable
   };
 
@@ -2178,7 +2307,13 @@ class GCTracer BASE_EMBEDDED {
       MC_MARK,
       MC_SWEEP,
       MC_SWEEP_NEWSPACE,
-      MC_COMPACT,
+      MC_EVACUATE_PAGES,
+      MC_UPDATE_NEW_TO_NEW_POINTERS,
+      MC_UPDATE_ROOT_TO_NEW_POINTERS,
+      MC_UPDATE_OLD_TO_NEW_POINTERS,
+      MC_UPDATE_POINTERS_TO_EVACUATED,
+      MC_UPDATE_POINTERS_BETWEEN_EVACUATED,
+      MC_UPDATE_MISC_POINTERS,
       MC_FLUSH_CODE,
       kNumberOfScopes
     };

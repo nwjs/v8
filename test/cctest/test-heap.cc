@@ -667,23 +667,23 @@ TEST(JSArray) {
   Handle<JSObject> object = FACTORY->NewJSObject(function);
   Handle<JSArray> array = Handle<JSArray>::cast(object);
   // We just initialized the VM, no heap allocation failure yet.
-  Object* ok = array->Initialize(0)->ToObjectChecked();
+  array->Initialize(0)->ToObjectChecked();
 
   // Set array length to 0.
-  ok = array->SetElementsLength(Smi::FromInt(0))->ToObjectChecked();
+  array->SetElementsLength(Smi::FromInt(0))->ToObjectChecked();
   CHECK_EQ(Smi::FromInt(0), array->length());
   // Must be in fast mode.
   CHECK(array->HasFastTypeElements());
 
   // array[length] = name.
-  ok = array->SetElement(0, *name, kNonStrictMode, true)->ToObjectChecked();
+  array->SetElement(0, *name, kNonStrictMode, true)->ToObjectChecked();
   CHECK_EQ(Smi::FromInt(1), array->length());
   CHECK_EQ(array->GetElement(0), *name);
 
   // Set array length with larger than smi value.
   Handle<Object> length =
       FACTORY->NewNumberFromUint(static_cast<uint32_t>(Smi::kMaxValue) + 1);
-  ok = array->SetElementsLength(*length)->ToObjectChecked();
+  array->SetElementsLength(*length)->ToObjectChecked();
 
   uint32_t int_length = 0;
   CHECK(length->ToArrayIndex(&int_length));
@@ -691,8 +691,7 @@ TEST(JSArray) {
   CHECK(array->HasDictionaryElements());  // Must be in slow mode.
 
   // array[length] = name.
-  ok = array->SetElement(
-      int_length, *name, kNonStrictMode, true)->ToObjectChecked();
+  array->SetElement(int_length, *name, kNonStrictMode, true)->ToObjectChecked();
   uint32_t new_int_length = 0;
   CHECK(array->length()->ToArrayIndex(&new_int_length));
   CHECK_EQ(static_cast<double>(int_length), new_int_length - 1);
@@ -719,10 +718,8 @@ TEST(JSObjectCopy) {
   obj->SetProperty(
       *second, Smi::FromInt(2), NONE, kNonStrictMode)->ToObjectChecked();
 
-  Object* ok =
-      obj->SetElement(0, *first, kNonStrictMode, true)->ToObjectChecked();
-
-  ok = obj->SetElement(1, *second, kNonStrictMode, true)->ToObjectChecked();
+  obj->SetElement(0, *first, kNonStrictMode, true)->ToObjectChecked();
+  obj->SetElement(1, *second, kNonStrictMode, true)->ToObjectChecked();
 
   // Make the clone.
   Handle<JSObject> clone = Copy(obj);
@@ -740,8 +737,8 @@ TEST(JSObjectCopy) {
   clone->SetProperty(
       *second, Smi::FromInt(1), NONE, kNonStrictMode)->ToObjectChecked();
 
-  ok = clone->SetElement(0, *second, kNonStrictMode, true)->ToObjectChecked();
-  ok = clone->SetElement(1, *first, kNonStrictMode, true)->ToObjectChecked();
+  clone->SetElement(0, *second, kNonStrictMode, true)->ToObjectChecked();
+  clone->SetElement(1, *first, kNonStrictMode, true)->ToObjectChecked();
 
   CHECK_EQ(obj->GetElement(1), clone->GetElement(0));
   CHECK_EQ(obj->GetElement(0), clone->GetElement(1));
@@ -1223,6 +1220,19 @@ TEST(TestSizeOfObjectsVsHeapIteratorPrecision) {
 }
 
 
+static void FillUpNewSpace(NewSpace* new_space) {
+  // Fill up new space to the point that it is completely full. Make sure
+  // that the scavenger does not undo the filling.
+  v8::HandleScope scope;
+  AlwaysAllocateScope always_allocate;
+  intptr_t available = new_space->EffectiveCapacity() - new_space->Size();
+  intptr_t number_of_fillers = (available / FixedArray::SizeFor(1000)) - 10;
+  for (intptr_t i = 0; i < number_of_fillers; i++) {
+    CHECK(HEAP->InNewSpace(*FACTORY->NewFixedArray(1000, NOT_TENURED)));
+  }
+}
+
+
 TEST(GrowAndShrinkNewSpace) {
   InitializeVM();
   NewSpace* new_space = HEAP->new_space();
@@ -1234,18 +1244,8 @@ TEST(GrowAndShrinkNewSpace) {
   new_capacity = new_space->Capacity();
   CHECK(2 * old_capacity == new_capacity);
 
-  // Fill up new space to the point that it is completely full. Make sure
-  // that the scavenger does not undo the filling.
   old_capacity = new_space->Capacity();
-  {
-    v8::HandleScope scope;
-    AlwaysAllocateScope always_allocate;
-    intptr_t available = new_space->EffectiveCapacity() - new_space->Size();
-    intptr_t number_of_fillers = (available / FixedArray::SizeFor(1000)) - 10;
-    for (intptr_t i = 0; i < number_of_fillers; i++) {
-      CHECK(HEAP->InNewSpace(*FACTORY->NewFixedArray(1000, NOT_TENURED)));
-    }
-  }
+  FillUpNewSpace(new_space);
   new_capacity = new_space->Capacity();
   CHECK(old_capacity == new_capacity);
 
@@ -1272,4 +1272,48 @@ TEST(GrowAndShrinkNewSpace) {
   new_space->Shrink();
   new_capacity = new_space->Capacity();
   CHECK(old_capacity == new_capacity);
+}
+
+
+TEST(CollectingAllAvailableGarbageShrinksNewSpace) {
+  InitializeVM();
+  v8::HandleScope scope;
+  NewSpace* new_space = HEAP->new_space();
+  intptr_t old_capacity, new_capacity;
+  old_capacity = new_space->Capacity();
+  new_space->Grow();
+  new_capacity = new_space->Capacity();
+  CHECK(2 * old_capacity == new_capacity);
+  FillUpNewSpace(new_space);
+  HEAP->CollectAllAvailableGarbage();
+  new_capacity = new_space->Capacity();
+  CHECK(old_capacity == new_capacity);
+}
+
+
+TEST(IdleNotificationAdvancesIncrementalMarking) {
+  if (!FLAG_incremental_marking || !FLAG_incremental_marking_steps) return;
+  InitializeVM();
+  v8::HandleScope scope;
+  const char* source = "function binom(n, m) {"
+                       "  var C = [[1]];"
+                       "  for (var i = 1; i <= n; ++i) {"
+                       "    C[i] = [1];"
+                       "    for (var j = 1; j < i; ++j) {"
+                       "      C[i][j] = C[i-1][j-1] + C[i-1][j];"
+                       "    }"
+                       "    C[i][i] = 1;"
+                       "  }"
+                       "  return C[n][m];"
+                       "};"
+                       "binom(1000, 500)";
+  {
+    AlwaysAllocateScope aa_scope;
+    CompileRun(source);
+  }
+  intptr_t old_size = HEAP->SizeOfObjects();
+  bool no_idle_work = v8::V8::IdleNotification();
+  while (!v8::V8::IdleNotification()) ;
+  intptr_t new_size = HEAP->SizeOfObjects();
+  CHECK(no_idle_work || new_size < 3 * old_size / 4);
 }

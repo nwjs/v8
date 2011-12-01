@@ -245,54 +245,6 @@ void ExternalDoubleArray::ExternalDoubleArrayPrint(FILE* out) {
 }
 
 
-static void PrintElementsKind(FILE* out, ElementsKind kind) {
-  switch (kind) {
-    case FAST_SMI_ONLY_ELEMENTS:
-      PrintF(out, "FAST_SMI_ONLY_ELEMENTS");
-      break;
-    case FAST_ELEMENTS:
-      PrintF(out, "FAST_ELEMENTS");
-      break;
-    case FAST_DOUBLE_ELEMENTS:
-      PrintF(out, "FAST_DOUBLE_ELEMENTS");
-      break;
-    case DICTIONARY_ELEMENTS:
-      PrintF(out, "DICTIONARY_ELEMENTS");
-      break;
-    case NON_STRICT_ARGUMENTS_ELEMENTS:
-      PrintF(out, "NON_STRICT_ARGUMENTS_ELEMENTS");
-      break;
-    case EXTERNAL_BYTE_ELEMENTS:
-      PrintF(out, "EXTERNAL_BYTE_ELEMENTS");
-      break;
-    case EXTERNAL_UNSIGNED_BYTE_ELEMENTS:
-      PrintF(out, "EXTERNAL_UNSIGNED_BYTE_ELEMENTS");
-      break;
-    case EXTERNAL_SHORT_ELEMENTS:
-      PrintF(out, "EXTERNAL_SHORT_ELEMENTS");
-      break;
-    case EXTERNAL_UNSIGNED_SHORT_ELEMENTS:
-      PrintF(out, "EXTERNAL_UNSIGNED_SHORT_ELEMENTS");
-      break;
-    case EXTERNAL_INT_ELEMENTS:
-      PrintF(out, "EXTERNAL_INT_ELEMENTS");
-      break;
-    case EXTERNAL_UNSIGNED_INT_ELEMENTS:
-      PrintF(out, "EXTERNAL_UNSIGNED_INT_ELEMENTS");
-      break;
-    case EXTERNAL_FLOAT_ELEMENTS:
-      PrintF(out, "EXTERNAL_FLOAT_ELEMENTS");
-      break;
-    case EXTERNAL_DOUBLE_ELEMENTS:
-      PrintF(out, "EXTERNAL_DOUBLE_ELEMENTS");
-      break;
-    case EXTERNAL_PIXEL_ELEMENTS:
-      PrintF(out, "EXTERNAL_DOUBLE_ELEMENTS");
-      break;
-  }
-}
-
-
 void JSObject::PrintProperties(FILE* out) {
   if (HasFastProperties()) {
     DescriptorArray* descs = map()->instance_descriptors();
@@ -343,7 +295,9 @@ void JSObject::PrintProperties(FILE* out) {
         case NULL_DESCRIPTOR:
           PrintF(out, "(null descriptor)\n");
           break;
-        default:
+        case NORMAL:  // only in slow mode
+        case HANDLER:  // only in lookup results, not in descriptors
+        case INTERCEPTOR:  // only in lookup results, not in descriptors
           UNREACHABLE();
           break;
       }
@@ -492,6 +446,9 @@ static const char* TypeToString(InstanceType type) {
     case EXTERNAL_ASCII_SYMBOL_TYPE:
     case EXTERNAL_SYMBOL_WITH_ASCII_DATA_TYPE:
     case EXTERNAL_SYMBOL_TYPE: return "EXTERNAL_SYMBOL";
+    case SHORT_EXTERNAL_ASCII_SYMBOL_TYPE:
+    case SHORT_EXTERNAL_SYMBOL_WITH_ASCII_DATA_TYPE:
+    case SHORT_EXTERNAL_SYMBOL_TYPE: return "SHORT_EXTERNAL_SYMBOL";
     case ASCII_STRING_TYPE: return "ASCII_STRING";
     case STRING_TYPE: return "TWO_BYTE_STRING";
     case CONS_STRING_TYPE:
@@ -499,6 +456,9 @@ static const char* TypeToString(InstanceType type) {
     case EXTERNAL_ASCII_STRING_TYPE:
     case EXTERNAL_STRING_WITH_ASCII_DATA_TYPE:
     case EXTERNAL_STRING_TYPE: return "EXTERNAL_STRING";
+    case SHORT_EXTERNAL_ASCII_STRING_TYPE:
+    case SHORT_EXTERNAL_STRING_WITH_ASCII_DATA_TYPE:
+    case SHORT_EXTERNAL_STRING_TYPE: return "SHORT_EXTERNAL_STRING";
     case FIXED_ARRAY_TYPE: return "FIXED_ARRAY";
     case BYTE_ARRAY_TYPE: return "BYTE_ARRAY";
     case FREE_SPACE_TYPE: return "FREE_SPACE";
@@ -807,7 +767,7 @@ void Code::CodePrint(FILE* out) {
 
 
 void Foreign::ForeignPrint(FILE* out) {
-  PrintF(out, "foreign address : %p", address());
+  PrintF(out, "foreign address : %p", foreign_address());
 }
 
 

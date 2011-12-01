@@ -102,25 +102,25 @@ bool AreAliased(Register r1, Register r2, Register r3, Register r4);
 // -----------------------------------------------------------------------------
 // Static helper functions.
 
-static MemOperand ContextOperand(Register context, int index) {
+inline MemOperand ContextOperand(Register context, int index) {
   return MemOperand(context, Context::SlotOffset(index));
 }
 
 
-static inline MemOperand GlobalObjectOperand()  {
+inline MemOperand GlobalObjectOperand()  {
   return ContextOperand(cp, Context::GLOBAL_INDEX);
 }
 
 
 // Generate a MemOperand for loading a field from an object.
-static inline MemOperand FieldMemOperand(Register object, int offset) {
+inline MemOperand FieldMemOperand(Register object, int offset) {
   return MemOperand(object, offset - kHeapObjectTag);
 }
 
 
 // Generate a MemOperand for storing arguments 5..N on the stack
 // when calling CallCFunction().
-static inline MemOperand CFunctionArgumentOperand(int index) {
+inline MemOperand CFunctionArgumentOperand(int index) {
   ASSERT(index > kCArgSlotCount);
   // Argument 5 takes the slot just past the four Arg-slots.
   int offset = (index - 5) * kPointerSize + kCArgsSlotsSize;
@@ -812,7 +812,7 @@ class MacroAssembler: public Assembler {
                       const CallWrapper& call_wrapper,
                       CallKind call_kind);
 
-  void InvokeFunction(JSFunction* function,
+  void InvokeFunction(Handle<JSFunction> function,
                       const ParameterCount& actual,
                       InvokeFlag flag,
                       CallKind call_kind);
@@ -843,9 +843,9 @@ class MacroAssembler: public Assembler {
   // Exception handling.
 
   // Push a new try handler and link into try handler chain.
-  // The return address must be passed in register ra.
-  // Clobber t0, t1, t2.
-  void PushTryHandler(CodeLocation try_location, HandlerType type);
+  void PushTryHandler(CodeLocation try_location,
+                      HandlerType type,
+                      int handler_index);
 
   // Unlink the stack handler on top of the stack from the try handler chain.
   // Must preserve the result register.
@@ -887,7 +887,8 @@ class MacroAssembler: public Assembler {
   void TryGetFunctionPrototype(Register function,
                                Register result,
                                Register scratch,
-                               Label* miss);
+                               Label* miss,
+                               bool miss_on_bound_function = false);
 
   void GetObjectType(Register function,
                      Register map,
@@ -1041,26 +1042,8 @@ class MacroAssembler: public Assembler {
   void CallStub(CodeStub* stub, Condition cond = cc_always,
                 Register r1 = zero_reg, const Operand& r2 = Operand(zero_reg));
 
-  // Call a code stub and return the code object called.  Try to generate
-  // the code if necessary.  Do not perform a GC but instead return a retry
-  // after GC failure.
-  MUST_USE_RESULT MaybeObject* TryCallStub(CodeStub* stub,
-                                           Condition cond = cc_always,
-                                           Register r1 = zero_reg,
-                                           const Operand& r2 =
-                                               Operand(zero_reg));
-
   // Tail call a code stub (jump).
   void TailCallStub(CodeStub* stub);
-
-  // Tail call a code stub (jump) and return the code object called.  Try to
-  // generate the code if necessary.  Do not perform a GC but instead return
-  // a retry after GC failure.
-  MUST_USE_RESULT MaybeObject* TryTailCallStub(CodeStub* stub,
-                                               Condition cond = cc_always,
-                                               Register r1 = zero_reg,
-                                               const Operand& r2 =
-                                                   Operand(zero_reg));
 
   void CallJSExitStub(CodeStub* stub);
 
@@ -1081,12 +1064,6 @@ class MacroAssembler: public Assembler {
   void TailCallExternalReference(const ExternalReference& ext,
                                  int num_arguments,
                                  int result_size);
-
-  // Tail call of a runtime routine (jump). Try to generate the code if
-  // necessary. Do not perform a GC but instead return a retry after GC
-  // failure.
-  MUST_USE_RESULT MaybeObject* TryTailCallExternalReference(
-      const ExternalReference& ext, int num_arguments, int result_size);
 
   // Convenience function: tail call a runtime routine (jump).
   void TailCallRuntime(Runtime::FunctionId fid,
@@ -1138,15 +1115,14 @@ class MacroAssembler: public Assembler {
   void SetCallCDoubleArguments(DoubleRegister dreg1, DoubleRegister dreg2);
   void SetCallCDoubleArguments(DoubleRegister dreg, Register reg);
 
-  // Calls an API function. Allocates HandleScope, extracts returned value
-  // from handle and propagates exceptions. Restores context.
-  MaybeObject* TryCallApiFunctionAndReturn(ExternalReference function,
-                                           int stack_space);
+  // Calls an API function.  Allocates HandleScope, extracts returned value
+  // from handle and propagates exceptions.  Restores context.  stack_space
+  // - space to be unwound on exit (includes the call js arguments space and
+  // the additional space allocated for the fast call).
+  void CallApiFunctionAndReturn(ExternalReference function, int stack_space);
 
   // Jump to the builtin routine.
   void JumpToExternalReference(const ExternalReference& builtin);
-
-  MaybeObject* TryJumpToExternalReference(const ExternalReference& ext);
 
   // Invoke specified builtin JavaScript function. Adds an entry to
   // the unresolved list if the name does not resolve.
@@ -1404,6 +1380,10 @@ class MacroAssembler: public Assembler {
   inline void GetMarkBits(Register addr_reg,
                           Register bitmap_reg,
                           Register mask_reg);
+
+  // Helper for throwing exceptions.  Compute a handler address and jump to
+  // it.  See the implementation for register usage.
+  void JumpToHandlerEntry();
 
   // Compute memory operands for safepoint stack slots.
   static int SafepointRegisterStackIndex(int reg_code);

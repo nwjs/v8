@@ -491,7 +491,7 @@ TEST(MakingExternalStringConditions) {
   HEAP->CollectGarbage(i::NEW_SPACE);
   HEAP->CollectGarbage(i::NEW_SPACE);
 
-  uint16_t* two_byte_string = AsciiToTwoByteString("small");
+  uint16_t* two_byte_string = AsciiToTwoByteString("s1");
   Local<String> small_string = String::New(two_byte_string);
   i::DeleteArray(two_byte_string);
 
@@ -503,7 +503,7 @@ TEST(MakingExternalStringConditions) {
   // Old space strings should be accepted.
   CHECK(small_string->CanMakeExternal());
 
-  two_byte_string = AsciiToTwoByteString("small 2");
+  two_byte_string = AsciiToTwoByteString("small string 2");
   small_string = String::New(two_byte_string);
   i::DeleteArray(two_byte_string);
 
@@ -537,7 +537,7 @@ TEST(MakingExternalAsciiStringConditions) {
   HEAP->CollectGarbage(i::NEW_SPACE);
   HEAP->CollectGarbage(i::NEW_SPACE);
 
-  Local<String> small_string = String::New("small");
+  Local<String> small_string = String::New("s1");
   // We should refuse to externalize newly created small string.
   CHECK(!small_string->CanMakeExternal());
   // Trigger GCs so that the newly allocated string moves to old gen.
@@ -546,7 +546,7 @@ TEST(MakingExternalAsciiStringConditions) {
   // Old space strings should be accepted.
   CHECK(small_string->CanMakeExternal());
 
-  small_string = String::New("small 2");
+  small_string = String::New("small string 2");
   // We should refuse externalizing newly created small string.
   CHECK(!small_string->CanMakeExternal());
   for (int i = 0; i < 100; i++) {
@@ -1189,9 +1189,9 @@ THREADED_TEST(GlobalPrototype) {
   templ->Set("x", v8_num(200));
   templ->SetAccessor(v8_str("m"), GetM);
   LocalContext env(0, templ);
-  v8::Handle<v8::Object> obj = env->Global();
-  v8::Handle<Script> script = v8_compile("dummy()");
-  v8::Handle<Value> result = script->Run();
+  v8::Handle<v8::Object> obj(env->Global());
+  v8::Handle<Script> script(v8_compile("dummy()"));
+  v8::Handle<Value> result(script->Run());
   CHECK_EQ(13.4, result->NumberValue());
   CHECK_EQ(200, v8_compile("x")->Run()->Int32Value());
   CHECK_EQ(876, v8_compile("m")->Run()->Int32Value());
@@ -1765,7 +1765,7 @@ THREADED_TEST(DeepCrossLanguageRecursion) {
 
   env->Global()->Set(v8_str("depth"), v8::Integer::New(0));
   call_recursively_script = v8_compile("callScriptRecursively()");
-  v8::Handle<Value> result = call_recursively_script->Run();
+  v8::Handle<Value> result(call_recursively_script->Run());
   call_recursively_script = v8::Handle<Script>();
 
   env->Global()->Set(v8_str("depth"), v8::Integer::New(0));
@@ -4384,7 +4384,7 @@ THREADED_TEST(ExtensibleOnUndetectable) {
 
   source = v8_str("undetectable.y = 2000;");
   script = Script::Compile(source);
-  Local<Value> result = script->Run();
+  Local<Value> result(script->Run());
   ExpectBoolean("undetectable.y == undefined", true);
 }
 
@@ -4736,7 +4736,7 @@ THREADED_TEST(NativeFunctionDeclarationError) {
                                                     "native\nfunction foo();"));
   const char* extension_names[] = { name };
   v8::ExtensionConfiguration extensions(1, extension_names);
-  v8::Handle<Context> context = Context::New(&extensions);
+  v8::Handle<Context> context(Context::New(&extensions));
   ASSERT(context.IsEmpty());
 }
 
@@ -4750,7 +4750,7 @@ THREADED_TEST(NativeFunctionDeclarationErrorEscape) {
       "nativ\\u0065 function foo();"));
   const char* extension_names[] = { name };
   v8::ExtensionConfiguration extensions(1, extension_names);
-  v8::Handle<Context> context = Context::New(&extensions);
+  v8::Handle<Context> context(Context::New(&extensions));
   ASSERT(context.IsEmpty());
 }
 
@@ -4917,7 +4917,7 @@ TEST(RegexpOutOfMemory) {
   Local<Script> script =
       Script::Compile(String::New(js_code_causing_huge_string_flattening));
   last_location = NULL;
-  Local<Value> result = script->Run();
+  Local<Value> result(script->Run());
 
   CHECK(false);  // Should not return.
 }
@@ -5438,66 +5438,108 @@ static int StrNCmp16(uint16_t* a, uint16_t* b, int n) {
 
 
 THREADED_TEST(StringWrite) {
+  LocalContext context;
   v8::HandleScope scope;
   v8::Handle<String> str = v8_str("abcde");
   // abc<Icelandic eth><Unicode snowman>.
   v8::Handle<String> str2 = v8_str("abc\303\260\342\230\203");
+  const int kStride = 4;  // Must match stride in for loops in JS below.
+  CompileRun(
+      "var left = '';"
+      "for (var i = 0; i < 0xd800; i += 4) {"
+      "  left = left + String.fromCharCode(i);"
+      "}");
+  CompileRun(
+      "var right = '';"
+      "for (var i = 0; i < 0xd800; i += 4) {"
+      "  right = String.fromCharCode(i) + right;"
+      "}");
+  v8::Handle<v8::Object> global = Context::GetCurrent()->Global();
+  Handle<String> left_tree = global->Get(v8_str("left")).As<String>();
+  Handle<String> right_tree = global->Get(v8_str("right")).As<String>();
 
   CHECK_EQ(5, str2->Length());
+  CHECK_EQ(0xd800 / kStride, left_tree->Length());
+  CHECK_EQ(0xd800 / kStride, right_tree->Length());
 
   char buf[100];
-  char utf8buf[100];
+  char utf8buf[0xd800 * 3];
   uint16_t wbuf[100];
   int len;
   int charlen;
 
-  memset(utf8buf, 0x1, sizeof(utf8buf));
+  memset(utf8buf, 0x1, 1000);
   len = str2->WriteUtf8(utf8buf, sizeof(utf8buf), &charlen);
   CHECK_EQ(9, len);
   CHECK_EQ(5, charlen);
   CHECK_EQ(0, strcmp(utf8buf, "abc\303\260\342\230\203"));
 
-  memset(utf8buf, 0x1, sizeof(utf8buf));
+  memset(utf8buf, 0x1, 1000);
   len = str2->WriteUtf8(utf8buf, 8, &charlen);
   CHECK_EQ(8, len);
   CHECK_EQ(5, charlen);
   CHECK_EQ(0, strncmp(utf8buf, "abc\303\260\342\230\203\1", 9));
 
-  memset(utf8buf, 0x1, sizeof(utf8buf));
+  memset(utf8buf, 0x1, 1000);
   len = str2->WriteUtf8(utf8buf, 7, &charlen);
   CHECK_EQ(5, len);
   CHECK_EQ(4, charlen);
   CHECK_EQ(0, strncmp(utf8buf, "abc\303\260\1", 5));
 
-  memset(utf8buf, 0x1, sizeof(utf8buf));
+  memset(utf8buf, 0x1, 1000);
   len = str2->WriteUtf8(utf8buf, 6, &charlen);
   CHECK_EQ(5, len);
   CHECK_EQ(4, charlen);
   CHECK_EQ(0, strncmp(utf8buf, "abc\303\260\1", 5));
 
-  memset(utf8buf, 0x1, sizeof(utf8buf));
+  memset(utf8buf, 0x1, 1000);
   len = str2->WriteUtf8(utf8buf, 5, &charlen);
   CHECK_EQ(5, len);
   CHECK_EQ(4, charlen);
   CHECK_EQ(0, strncmp(utf8buf, "abc\303\260\1", 5));
 
-  memset(utf8buf, 0x1, sizeof(utf8buf));
+  memset(utf8buf, 0x1, 1000);
   len = str2->WriteUtf8(utf8buf, 4, &charlen);
   CHECK_EQ(3, len);
   CHECK_EQ(3, charlen);
   CHECK_EQ(0, strncmp(utf8buf, "abc\1", 4));
 
-  memset(utf8buf, 0x1, sizeof(utf8buf));
+  memset(utf8buf, 0x1, 1000);
   len = str2->WriteUtf8(utf8buf, 3, &charlen);
   CHECK_EQ(3, len);
   CHECK_EQ(3, charlen);
   CHECK_EQ(0, strncmp(utf8buf, "abc\1", 4));
 
-  memset(utf8buf, 0x1, sizeof(utf8buf));
+  memset(utf8buf, 0x1, 1000);
   len = str2->WriteUtf8(utf8buf, 2, &charlen);
   CHECK_EQ(2, len);
   CHECK_EQ(2, charlen);
   CHECK_EQ(0, strncmp(utf8buf, "ab\1", 3));
+
+  memset(utf8buf, 0x1, sizeof(utf8buf));
+  len = left_tree->Utf8Length();
+  int utf8_expected =
+      (0x80 + (0x800 - 0x80) * 2 + (0xd800 - 0x800) * 3) / kStride;
+  CHECK_EQ(utf8_expected, len);
+  len = left_tree->WriteUtf8(utf8buf, utf8_expected, &charlen);
+  CHECK_EQ(utf8_expected, len);
+  CHECK_EQ(0xd800 / kStride, charlen);
+  CHECK_EQ(0xed, static_cast<unsigned char>(utf8buf[utf8_expected - 3]));
+  CHECK_EQ(0x9f, static_cast<unsigned char>(utf8buf[utf8_expected - 2]));
+  CHECK_EQ(0xc0 - kStride,
+           static_cast<unsigned char>(utf8buf[utf8_expected - 1]));
+  CHECK_EQ(1, utf8buf[utf8_expected]);
+
+  memset(utf8buf, 0x1, sizeof(utf8buf));
+  len = right_tree->Utf8Length();
+  CHECK_EQ(utf8_expected, len);
+  len = right_tree->WriteUtf8(utf8buf, utf8_expected, &charlen);
+  CHECK_EQ(utf8_expected, len);
+  CHECK_EQ(0xd800 / kStride, charlen);
+  CHECK_EQ(0xed, static_cast<unsigned char>(utf8buf[0]));
+  CHECK_EQ(0x9f, static_cast<unsigned char>(utf8buf[1]));
+  CHECK_EQ(0xc0 - kStride, static_cast<unsigned char>(utf8buf[2]));
+  CHECK_EQ(1, utf8buf[utf8_expected]);
 
   memset(buf, 0x1, sizeof(buf));
   memset(wbuf, 0x1, sizeof(wbuf));
@@ -5653,7 +5695,7 @@ THREADED_TEST(ErrorConstruction) {
   v8::Handle<String> message = v8_str("message");
   v8::Handle<Value> range_error = v8::Exception::RangeError(foo);
   CHECK(range_error->IsObject());
-  v8::Handle<v8::Object> range_obj = range_error.As<v8::Object>();
+  v8::Handle<v8::Object> range_obj(range_error.As<v8::Object>());
   CHECK(range_error.As<v8::Object>()->Get(message)->Equals(foo));
   v8::Handle<Value> reference_error = v8::Exception::ReferenceError(foo);
   CHECK(reference_error->IsObject());
@@ -7223,7 +7265,7 @@ THREADED_TEST(CallKnownGlobalReceiver) {
     // Create new environment reusing the global object.
     LocalContext env(NULL, instance_template, global_object);
     env->Global()->Set(v8_str("foo"), foo);
-    Local<Value> value = Script::Compile(v8_str("foo()"))->Run();
+    Local<Value> value(Script::Compile(v8_str("foo()"))->Run());
   }
 }
 
@@ -7411,6 +7453,60 @@ THREADED_TEST(SetPrototype) {
 }
 
 
+// Getting property names of an object with a prototype chain that
+// triggers dictionary elements in GetLocalPropertyNames() shouldn't
+// crash the runtime.
+THREADED_TEST(Regress91517) {
+  i::FLAG_allow_natives_syntax = true;
+  v8::HandleScope handle_scope;
+  LocalContext context;
+
+  Local<v8::FunctionTemplate> t1 = v8::FunctionTemplate::New();
+  t1->SetHiddenPrototype(true);
+  t1->InstanceTemplate()->Set(v8_str("foo"), v8_num(1));
+  Local<v8::FunctionTemplate> t2 = v8::FunctionTemplate::New();
+  t2->SetHiddenPrototype(true);
+  t2->InstanceTemplate()->Set(v8_str("fuz1"), v8_num(2));
+  t2->InstanceTemplate()->Set(v8_str("objects"), v8::Object::New());
+  t2->InstanceTemplate()->Set(v8_str("fuz2"), v8_num(2));
+  Local<v8::FunctionTemplate> t3 = v8::FunctionTemplate::New();
+  t3->SetHiddenPrototype(true);
+  t3->InstanceTemplate()->Set(v8_str("boo"), v8_num(3));
+  Local<v8::FunctionTemplate> t4 = v8::FunctionTemplate::New();
+  t4->InstanceTemplate()->Set(v8_str("baz"), v8_num(4));
+
+  // Force dictionary-based properties.
+  i::ScopedVector<char> name_buf(1024);
+  for (int i = 1; i <= 1000; i++) {
+    i::OS::SNPrintF(name_buf, "sdf%d", i);
+    t2->InstanceTemplate()->Set(v8_str(name_buf.start()), v8_num(2));
+  }
+
+  Local<v8::Object> o1 = t1->GetFunction()->NewInstance();
+  Local<v8::Object> o2 = t2->GetFunction()->NewInstance();
+  Local<v8::Object> o3 = t3->GetFunction()->NewInstance();
+  Local<v8::Object> o4 = t4->GetFunction()->NewInstance();
+
+  // Create prototype chain of hidden prototypes.
+  CHECK(o4->SetPrototype(o3));
+  CHECK(o3->SetPrototype(o2));
+  CHECK(o2->SetPrototype(o1));
+
+  // Call the runtime version of GetLocalPropertyNames() on the natively
+  // created object through JavaScript.
+  context->Global()->Set(v8_str("obj"), o4);
+  CompileRun("var names = %GetLocalPropertyNames(obj);");
+
+  ExpectInt32("names.length", 1006);
+  ExpectTrue("names.indexOf(\"baz\") >= 0");
+  ExpectTrue("names.indexOf(\"boo\") >= 0");
+  ExpectTrue("names.indexOf(\"foo\") >= 0");
+  ExpectTrue("names.indexOf(\"fuz1\") >= 0");
+  ExpectTrue("names.indexOf(\"fuz2\") >= 0");
+  ExpectFalse("names[1005] == undefined");
+}
+
+
 THREADED_TEST(FunctionReadOnlyPrototype) {
   v8::HandleScope handle_scope;
   LocalContext context;
@@ -7494,7 +7590,7 @@ THREADED_TEST(Constructor) {
   Local<Function> cons = templ->GetFunction();
   context->Global()->Set(v8_str("Fun"), cons);
   Local<v8::Object> inst = cons->NewInstance();
-  i::Handle<i::JSObject> obj = v8::Utils::OpenHandle(*inst);
+  i::Handle<i::JSObject> obj(v8::Utils::OpenHandle(*inst));
   Local<Value> value = CompileRun("(new Fun()).constructor === Fun");
   CHECK(value->BooleanValue());
 }
@@ -7745,9 +7841,11 @@ THREADED_TEST(EvalAliasedDynamic) {
                            "  var bar = 2;"
                            "  with (x) { return eval('bar'); }"
                            "}"
-                           "f(this)"));
+                           "result4 = f(this)"));
   script->Run();
-  CHECK(try_catch.HasCaught());
+  CHECK(!try_catch.HasCaught());
+  CHECK_EQ(2, current->Global()->Get(v8_str("result4"))->Int32Value());
+
   try_catch.Reset();
 }
 
@@ -7963,7 +8061,7 @@ THREADED_TEST(CallAsFunction) {
   }
 
   { Local<v8::FunctionTemplate> t = v8::FunctionTemplate::New();
-    Local<ObjectTemplate> instance_template = t->InstanceTemplate();
+    Local<ObjectTemplate> instance_template(t->InstanceTemplate());
     Local<v8::Object> instance = t->GetFunction()->NewInstance();
     context->Global()->Set(v8_str("obj2"), instance);
     v8::TryCatch try_catch;
@@ -8068,7 +8166,7 @@ static int Recurse(int depth, int iterations) {
   v8::HandleScope scope;
   if (depth == 0) return CountHandles();
   for (int i = 0; i < iterations; i++) {
-    Local<v8::Number> n = v8::Integer::New(42);
+    Local<v8::Number> n(v8::Integer::New(42));
   }
   return Recurse(depth - 1, iterations);
 }
@@ -8082,7 +8180,7 @@ THREADED_TEST(HandleIteration) {
     v8::HandleScope scope1;
     CHECK_EQ(0, CountHandles());
     for (int i = 0; i < kIterations; i++) {
-      Local<v8::Number> n = v8::Integer::New(42);
+      Local<v8::Number> n(v8::Integer::New(42));
       CHECK_EQ(i + 1, CountHandles());
     }
 
@@ -8090,7 +8188,7 @@ THREADED_TEST(HandleIteration) {
     {
       v8::HandleScope scope2;
       for (int j = 0; j < kIterations; j++) {
-        Local<v8::Number> n = v8::Integer::New(42);
+        Local<v8::Number> n(v8::Integer::New(42));
         CHECK_EQ(j + 1 + kIterations, CountHandles());
       }
     }
@@ -8593,10 +8691,10 @@ THREADED_TEST(InterceptorStoreIC) {
                                  0, 0, 0, v8_str("data"));
   LocalContext context;
   context->Global()->Set(v8_str("o"), templ->NewInstance());
-  v8::Handle<Value> value = CompileRun(
+  v8::Handle<Value> value(CompileRun(
     "for (var i = 0; i < 1000; i++) {"
     "  o.x = 42;"
-    "}");
+    "}"));
 }
 
 
@@ -9022,11 +9120,11 @@ THREADED_TEST(InterceptorCallICFastApi_TrivialSignature) {
   v8::Handle<v8::Function> fun = fun_templ->GetFunction();
   GenerateSomeGarbage();
   context->Global()->Set(v8_str("o"), fun->NewInstance());
-  v8::Handle<Value> value = CompileRun(
+  v8::Handle<Value> value(CompileRun(
       "var result = 0;"
       "for (var i = 0; i < 100; i++) {"
       "  result = o.method(41);"
-      "}");
+      "}"));
   CHECK_EQ(42, context->Global()->Get(v8_str("result"))->Int32Value());
   CHECK_EQ(100, interceptor_call_count);
 }
@@ -9049,14 +9147,14 @@ THREADED_TEST(InterceptorCallICFastApi_SimpleSignature) {
   v8::Handle<v8::Function> fun = fun_templ->GetFunction();
   GenerateSomeGarbage();
   context->Global()->Set(v8_str("o"), fun->NewInstance());
-  v8::Handle<Value> value = CompileRun(
+  v8::Handle<Value> value(CompileRun(
       "o.foo = 17;"
       "var receiver = {};"
       "receiver.__proto__ = o;"
       "var result = 0;"
       "for (var i = 0; i < 100; i++) {"
       "  result = receiver.method(41);"
-      "}");
+      "}"));
   CHECK_EQ(42, context->Global()->Get(v8_str("result"))->Int32Value());
   CHECK_EQ(100, interceptor_call_count);
 }
@@ -9079,7 +9177,7 @@ THREADED_TEST(InterceptorCallICFastApi_SimpleSignature_Miss1) {
   v8::Handle<v8::Function> fun = fun_templ->GetFunction();
   GenerateSomeGarbage();
   context->Global()->Set(v8_str("o"), fun->NewInstance());
-  v8::Handle<Value> value = CompileRun(
+  v8::Handle<Value> value(CompileRun(
       "o.foo = 17;"
       "var receiver = {};"
       "receiver.__proto__ = o;"
@@ -9091,7 +9189,7 @@ THREADED_TEST(InterceptorCallICFastApi_SimpleSignature_Miss1) {
       "    saved_result = result;"
       "    receiver = {method: function(x) { return x - 1 }};"
       "  }"
-      "}");
+      "}"));
   CHECK_EQ(40, context->Global()->Get(v8_str("result"))->Int32Value());
   CHECK_EQ(42, context->Global()->Get(v8_str("saved_result"))->Int32Value());
   CHECK_GE(interceptor_call_count, 50);
@@ -9115,7 +9213,7 @@ THREADED_TEST(InterceptorCallICFastApi_SimpleSignature_Miss2) {
   v8::Handle<v8::Function> fun = fun_templ->GetFunction();
   GenerateSomeGarbage();
   context->Global()->Set(v8_str("o"), fun->NewInstance());
-  v8::Handle<Value> value = CompileRun(
+  v8::Handle<Value> value(CompileRun(
       "o.foo = 17;"
       "var receiver = {};"
       "receiver.__proto__ = o;"
@@ -9127,7 +9225,7 @@ THREADED_TEST(InterceptorCallICFastApi_SimpleSignature_Miss2) {
       "    saved_result = result;"
       "    o.method = function(x) { return x - 1 };"
       "  }"
-      "}");
+      "}"));
   CHECK_EQ(40, context->Global()->Get(v8_str("result"))->Int32Value());
   CHECK_EQ(42, context->Global()->Get(v8_str("saved_result"))->Int32Value());
   CHECK_GE(interceptor_call_count, 50);
@@ -9152,7 +9250,7 @@ THREADED_TEST(InterceptorCallICFastApi_SimpleSignature_Miss3) {
   GenerateSomeGarbage();
   context->Global()->Set(v8_str("o"), fun->NewInstance());
   v8::TryCatch try_catch;
-  v8::Handle<Value> value = CompileRun(
+  v8::Handle<Value> value(CompileRun(
       "o.foo = 17;"
       "var receiver = {};"
       "receiver.__proto__ = o;"
@@ -9164,7 +9262,7 @@ THREADED_TEST(InterceptorCallICFastApi_SimpleSignature_Miss3) {
       "    saved_result = result;"
       "    receiver = 333;"
       "  }"
-      "}");
+      "}"));
   CHECK(try_catch.HasCaught());
   CHECK_EQ(v8_str("TypeError: Object 333 has no method 'method'"),
            try_catch.Exception()->ToString());
@@ -9191,7 +9289,7 @@ THREADED_TEST(InterceptorCallICFastApi_SimpleSignature_TypeError) {
   GenerateSomeGarbage();
   context->Global()->Set(v8_str("o"), fun->NewInstance());
   v8::TryCatch try_catch;
-  v8::Handle<Value> value = CompileRun(
+  v8::Handle<Value> value(CompileRun(
       "o.foo = 17;"
       "var receiver = {};"
       "receiver.__proto__ = o;"
@@ -9203,7 +9301,7 @@ THREADED_TEST(InterceptorCallICFastApi_SimpleSignature_TypeError) {
       "    saved_result = result;"
       "    receiver = {method: receiver.method};"
       "  }"
-      "}");
+      "}"));
   CHECK(try_catch.HasCaught());
   CHECK_EQ(v8_str("TypeError: Illegal invocation"),
            try_catch.Exception()->ToString());
@@ -9220,16 +9318,16 @@ THREADED_TEST(CallICFastApi_TrivialSignature) {
                                 v8::Handle<v8::Signature>());
   v8::Handle<v8::ObjectTemplate> proto_templ = fun_templ->PrototypeTemplate();
   proto_templ->Set(v8_str("method"), method_templ);
-  v8::Handle<v8::ObjectTemplate> templ = fun_templ->InstanceTemplate();
+  v8::Handle<v8::ObjectTemplate> templ(fun_templ->InstanceTemplate());
   LocalContext context;
   v8::Handle<v8::Function> fun = fun_templ->GetFunction();
   GenerateSomeGarbage();
   context->Global()->Set(v8_str("o"), fun->NewInstance());
-  v8::Handle<Value> value = CompileRun(
+  v8::Handle<Value> value(CompileRun(
       "var result = 0;"
       "for (var i = 0; i < 100; i++) {"
       "  result = o.method(41);"
-      "}");
+      "}"));
 
   CHECK_EQ(42, context->Global()->Get(v8_str("result"))->Int32Value());
 }
@@ -9243,19 +9341,19 @@ THREADED_TEST(CallICFastApi_SimpleSignature) {
                                 v8::Signature::New(fun_templ));
   v8::Handle<v8::ObjectTemplate> proto_templ = fun_templ->PrototypeTemplate();
   proto_templ->Set(v8_str("method"), method_templ);
-  v8::Handle<v8::ObjectTemplate> templ = fun_templ->InstanceTemplate();
+  v8::Handle<v8::ObjectTemplate> templ(fun_templ->InstanceTemplate());
   LocalContext context;
   v8::Handle<v8::Function> fun = fun_templ->GetFunction();
   GenerateSomeGarbage();
   context->Global()->Set(v8_str("o"), fun->NewInstance());
-  v8::Handle<Value> value = CompileRun(
+  v8::Handle<Value> value(CompileRun(
       "o.foo = 17;"
       "var receiver = {};"
       "receiver.__proto__ = o;"
       "var result = 0;"
       "for (var i = 0; i < 100; i++) {"
       "  result = receiver.method(41);"
-      "}");
+      "}"));
 
   CHECK_EQ(42, context->Global()->Get(v8_str("result"))->Int32Value());
 }
@@ -9269,12 +9367,12 @@ THREADED_TEST(CallICFastApi_SimpleSignature_Miss1) {
                                 v8::Signature::New(fun_templ));
   v8::Handle<v8::ObjectTemplate> proto_templ = fun_templ->PrototypeTemplate();
   proto_templ->Set(v8_str("method"), method_templ);
-  v8::Handle<v8::ObjectTemplate> templ = fun_templ->InstanceTemplate();
+  v8::Handle<v8::ObjectTemplate> templ(fun_templ->InstanceTemplate());
   LocalContext context;
   v8::Handle<v8::Function> fun = fun_templ->GetFunction();
   GenerateSomeGarbage();
   context->Global()->Set(v8_str("o"), fun->NewInstance());
-  v8::Handle<Value> value = CompileRun(
+  v8::Handle<Value> value(CompileRun(
       "o.foo = 17;"
       "var receiver = {};"
       "receiver.__proto__ = o;"
@@ -9286,7 +9384,7 @@ THREADED_TEST(CallICFastApi_SimpleSignature_Miss1) {
       "    saved_result = result;"
       "    receiver = {method: function(x) { return x - 1 }};"
       "  }"
-      "}");
+      "}"));
   CHECK_EQ(40, context->Global()->Get(v8_str("result"))->Int32Value());
   CHECK_EQ(42, context->Global()->Get(v8_str("saved_result"))->Int32Value());
 }
@@ -9300,13 +9398,13 @@ THREADED_TEST(CallICFastApi_SimpleSignature_Miss2) {
                                 v8::Signature::New(fun_templ));
   v8::Handle<v8::ObjectTemplate> proto_templ = fun_templ->PrototypeTemplate();
   proto_templ->Set(v8_str("method"), method_templ);
-  v8::Handle<v8::ObjectTemplate> templ = fun_templ->InstanceTemplate();
+  v8::Handle<v8::ObjectTemplate> templ(fun_templ->InstanceTemplate());
   LocalContext context;
   v8::Handle<v8::Function> fun = fun_templ->GetFunction();
   GenerateSomeGarbage();
   context->Global()->Set(v8_str("o"), fun->NewInstance());
   v8::TryCatch try_catch;
-  v8::Handle<Value> value = CompileRun(
+  v8::Handle<Value> value(CompileRun(
       "o.foo = 17;"
       "var receiver = {};"
       "receiver.__proto__ = o;"
@@ -9318,7 +9416,7 @@ THREADED_TEST(CallICFastApi_SimpleSignature_Miss2) {
       "    saved_result = result;"
       "    receiver = 333;"
       "  }"
-      "}");
+      "}"));
   CHECK(try_catch.HasCaught());
   CHECK_EQ(v8_str("TypeError: Object 333 has no method 'method'"),
            try_catch.Exception()->ToString());
@@ -9346,7 +9444,7 @@ THREADED_TEST(InterceptorKeyedCallICKeyChange1) {
   templ->SetNamedPropertyHandler(NoBlockGetterX);
   LocalContext context;
   context->Global()->Set(v8_str("o"), templ->NewInstance());
-  v8::Handle<Value> value = CompileRun(
+  v8::Handle<Value> value(CompileRun(
     "proto = new Object();"
     "proto.y = function(x) { return x + 1; };"
     "proto.z = function(x) { return x - 1; };"
@@ -9356,7 +9454,7 @@ THREADED_TEST(InterceptorKeyedCallICKeyChange1) {
     "for (var i = 0; i < 10; i++) {"
     "  if (i == 5) { method = 'z'; };"
     "  result += o[method](41);"
-    "}");
+    "}"));
   CHECK_EQ(42*5 + 40*5, context->Global()->Get(v8_str("result"))->Int32Value());
 }
 
@@ -9372,7 +9470,7 @@ THREADED_TEST(InterceptorKeyedCallICKeyChange2) {
   context->Global()->Set(v8_str("proto1"), templ->NewInstance());
   keyed_call_ic_function =
       v8_compile("function f(x) { return x - 1; }; f")->Run();
-  v8::Handle<Value> value = CompileRun(
+  v8::Handle<Value> value(CompileRun(
     "o = new Object();"
     "proto2 = new Object();"
     "o.y = function(x) { return x + 1; };"
@@ -9384,7 +9482,7 @@ THREADED_TEST(InterceptorKeyedCallICKeyChange2) {
     "for (var i = 0; i < 10; i++) {"
     "  if (i == 5) { method = 'y'; };"
     "  result += o[method](41);"
-    "}");
+    "}"));
   CHECK_EQ(42*5 + 40*5, context->Global()->Get(v8_str("result"))->Int32Value());
 }
 
@@ -9397,7 +9495,7 @@ THREADED_TEST(InterceptorKeyedCallICKeyChangeOnGlobal) {
   templ->SetNamedPropertyHandler(NoBlockGetterX);
   LocalContext context;
   context->Global()->Set(v8_str("o"), templ->NewInstance());
-  v8::Handle<Value> value = CompileRun(
+  v8::Handle<Value> value(CompileRun(
     "function inc(x) { return x + 1; };"
     "inc(1);"
     "function dec(x) { return x - 1; };"
@@ -9410,7 +9508,7 @@ THREADED_TEST(InterceptorKeyedCallICKeyChangeOnGlobal) {
     "for (var i = 0; i < 10; i++) {"
     "  if (i == 5) { method = 'y'; };"
     "  result += o[method](41);"
-    "}");
+    "}"));
   CHECK_EQ(42*5 + 40*5, context->Global()->Get(v8_str("result"))->Int32Value());
 }
 
@@ -9423,7 +9521,7 @@ THREADED_TEST(InterceptorKeyedCallICFromGlobal) {
   LocalContext context;
   context->Global()->Set(v8_str("o"), templ_o->NewInstance());
 
-  v8::Handle<Value> value = CompileRun(
+  v8::Handle<Value> value(CompileRun(
     "function len(x) { return x.length; };"
     "o.__proto__ = this;"
     "var m = 'parseFloat';"
@@ -9434,7 +9532,7 @@ THREADED_TEST(InterceptorKeyedCallICFromGlobal) {
     "    saved_result = result;"
     "  };"
     "  result = o[m]('239');"
-    "}");
+    "}"));
   CHECK_EQ(3, context->Global()->Get(v8_str("result"))->Int32Value());
   CHECK_EQ(239, context->Global()->Get(v8_str("saved_result"))->Int32Value());
 }
@@ -9447,7 +9545,7 @@ THREADED_TEST(InterceptorKeyedCallICMapChangeBefore) {
   LocalContext context;
   context->Global()->Set(v8_str("proto"), templ_o->NewInstance());
 
-  v8::Handle<Value> value = CompileRun(
+  v8::Handle<Value> value(CompileRun(
     "var o = new Object();"
     "o.__proto__ = proto;"
     "o.method = function(x) { return x + 1; };"
@@ -9456,7 +9554,7 @@ THREADED_TEST(InterceptorKeyedCallICMapChangeBefore) {
     "for (var i = 0; i < 10; i++) {"
     "  if (i == 5) { o.method = function(x) { return x - 1; }; };"
     "  result += o[m](41);"
-    "}");
+    "}"));
   CHECK_EQ(42*5 + 40*5, context->Global()->Get(v8_str("result"))->Int32Value());
 }
 
@@ -9469,7 +9567,7 @@ THREADED_TEST(InterceptorKeyedCallICMapChangeAfter) {
   LocalContext context;
   context->Global()->Set(v8_str("o"), templ_o->NewInstance());
 
-  v8::Handle<Value> value = CompileRun(
+  v8::Handle<Value> value(CompileRun(
     "var proto = new Object();"
     "o.__proto__ = proto;"
     "proto.method = function(x) { return x + 1; };"
@@ -9478,7 +9576,7 @@ THREADED_TEST(InterceptorKeyedCallICMapChangeAfter) {
     "for (var i = 0; i < 10; i++) {"
     "  if (i == 5) { proto.method = function(x) { return x - 1; }; };"
     "  result += o[m](41);"
-    "}");
+    "}"));
   CHECK_EQ(42*5 + 40*5, context->Global()->Get(v8_str("result"))->Int32Value());
 }
 
@@ -10394,7 +10492,7 @@ THREADED_TEST(NestedHandleScopeAndContexts) {
   v8::Persistent<Context> env = Context::New();
   env->Enter();
   v8::Handle<Value> value = NestedScope(env);
-  v8::Handle<String> str = value->ToString();
+  v8::Handle<String> str(value->ToString());
   env->Exit();
   env.Dispose();
 }
@@ -10402,7 +10500,7 @@ THREADED_TEST(NestedHandleScopeAndContexts) {
 
 THREADED_TEST(ExternalAllocatedMemory) {
   v8::HandleScope outer;
-  v8::Persistent<Context> env = Context::New();
+  v8::Persistent<Context> env(Context::New());
   const int kSize = 1024*1024;
   CHECK_EQ(v8::V8::AdjustAmountOfExternalAllocatedMemory(kSize), kSize);
   CHECK_EQ(v8::V8::AdjustAmountOfExternalAllocatedMemory(-kSize), 0);
@@ -10740,7 +10838,7 @@ THREADED_TEST(AccessControlRepeatedContextCreation) {
   i::Handle<i::FunctionTemplateInfo> constructor(
       i::FunctionTemplateInfo::cast(internal_template->constructor()));
   CHECK(!constructor->access_check_info()->IsUndefined());
-  v8::Persistent<Context> context0 = Context::New(NULL, global_template);
+  v8::Persistent<Context> context0(Context::New(NULL, global_template));
   CHECK(!constructor->access_check_info()->IsUndefined());
 }
 
@@ -11440,6 +11538,7 @@ static void MorphAString(i::String* string,
 // Test that we can still flatten a string if the components it is built up
 // from have been turned into 16 bit strings in the mean time.
 THREADED_TEST(MorphCompositeStringTest) {
+  char utf_buffer[129];
   const char* c_string = "Now is the time for all good men"
                          " to come to the aid of the party";
   uint16_t* two_byte_string = AsciiToTwoByteString(c_string);
@@ -11467,6 +11566,17 @@ THREADED_TEST(MorphCompositeStringTest) {
 
     MorphAString(*v8::Utils::OpenHandle(*lhs), &ascii_resource, &uc16_resource);
     MorphAString(*v8::Utils::OpenHandle(*rhs), &ascii_resource, &uc16_resource);
+
+    // This should UTF-8 without flattening, since everything is ASCII.
+    Handle<String> cons = v8_compile("cons")->Run().As<String>();
+    CHECK_EQ(128, cons->Utf8Length());
+    int nchars = -1;
+    CHECK_EQ(129, cons->WriteUtf8(utf_buffer, -1, &nchars));
+    CHECK_EQ(128, nchars);
+    CHECK_EQ(0, strcmp(
+        utf_buffer,
+        "Now is the time for all good men to come to the aid of the party"
+        "Now is the time for all good men to come to the aid of the party"));
 
     // Now do some stuff to make sure the strings are flattened, etc.
     CompileRun(
@@ -12804,11 +12914,11 @@ static void ExternalArrayTestHelper(v8::ExternalArrayType array_type,
     const int kLargeElementCount = kXSize * kYSize * 4;
     ElementType* large_array_data =
         static_cast<ElementType*>(malloc(kLargeElementCount * element_size));
-    i::Handle<ExternalArrayClass> large_array =
+    i::Handle<ExternalArrayClass> large_array(
         i::Handle<ExternalArrayClass>::cast(
             FACTORY->NewExternalArray(kLargeElementCount,
-                                         array_type,
-                                         array_data));
+                                      array_type,
+                                      array_data)));
     v8::Handle<v8::Object> large_obj = v8::Object::New();
     // Set the elements to be the external array.
     large_obj->SetIndexedPropertiesToExternalArrayData(large_array_data,
@@ -13207,8 +13317,8 @@ TEST(CaptureStackTrace) {
     "}\n"
     "var x;eval('new foo();');";
   v8::Handle<v8::String> overview_src = v8::String::New(overview_source);
-  v8::Handle<Value> overview_result =
-      v8::Script::New(overview_src, origin)->Run();
+  v8::Handle<Value> overview_result(
+      v8::Script::New(overview_src, origin)->Run());
   ASSERT(!overview_result.IsEmpty());
   ASSERT(overview_result->IsObject());
 
@@ -13228,7 +13338,7 @@ TEST(CaptureStackTrace) {
   v8::ScriptOrigin detailed_origin(origin, line_offset, column_offset);
   v8::Handle<v8::Script> detailed_script(
       v8::Script::New(detailed_src, &detailed_origin));
-  v8::Handle<Value> detailed_result = detailed_script->Run();
+  v8::Handle<Value> detailed_result(detailed_script->Run());
   ASSERT(!detailed_result.IsEmpty());
   ASSERT(detailed_result->IsObject());
 }
@@ -13329,13 +13439,60 @@ TEST(SourceURLInStackTrace) {
 
 // Test that idle notification can be handled and eventually returns true.
 THREADED_TEST(IdleNotification) {
+  v8::HandleScope scope;
+  LocalContext env;
+  CompileRun("function binom(n, m) {"
+             "  var C = [[1]];"
+             "  for (var i = 1; i <= n; ++i) {"
+             "    C[i] = [1];"
+             "    for (var j = 1; j < i; ++j) {"
+             "      C[i][j] = C[i-1][j-1] + C[i-1][j];"
+             "    }"
+             "    C[i][i] = 1;"
+             "  }"
+             "  return C[n][m];"
+             "};"
+             "binom(1000, 500)");
   bool rv = false;
+  intptr_t old_size = HEAP->SizeOfObjects();
+  bool no_idle_work = v8::V8::IdleNotification();
   for (int i = 0; i < 100; i++) {
     rv = v8::V8::IdleNotification();
     if (rv)
       break;
   }
   CHECK(rv == true);
+  intptr_t new_size = HEAP->SizeOfObjects();
+  CHECK(no_idle_work || new_size < 3 * old_size / 4);
+}
+
+// Test that idle notification can be handled and eventually returns true.
+THREADED_TEST(IdleNotificationWithHint) {
+  v8::HandleScope scope;
+  LocalContext env;
+  CompileRun("function binom(n, m) {"
+             "  var C = [[1]];"
+             "  for (var i = 1; i <= n; ++i) {"
+             "    C[i] = [1];"
+             "    for (var j = 1; j < i; ++j) {"
+             "      C[i][j] = C[i-1][j-1] + C[i-1][j];"
+             "    }"
+             "    C[i][i] = 1;"
+             "  }"
+             "  return C[n][m];"
+             "};"
+             "binom(1000, 500)");
+  bool rv = false;
+  intptr_t old_size = HEAP->SizeOfObjects();
+  bool no_idle_work = v8::V8::IdleNotification(10);
+  for (int i = 0; i < 200; i++) {
+    rv = v8::V8::IdleNotification(10);
+    if (rv)
+      break;
+  }
+  CHECK(rv == true);
+  intptr_t new_size = HEAP->SizeOfObjects();
+  CHECK(no_idle_work || new_size < 3 * old_size / 4);
 }
 
 
@@ -13508,7 +13665,13 @@ THREADED_TEST(QuietSignalingNaNs) {
     } else {
       uint64_t stored_bits = DoubleToBits(stored_number);
       // Check if quiet nan (bits 51..62 all set).
+#if defined(V8_TARGET_ARCH_MIPS) && !defined(USE_SIMULATOR)
+      // Most significant fraction bit for quiet nan is set to 0
+      // on MIPS architecture. Allowed by IEEE-754.
+      CHECK_EQ(0xffe, static_cast<int>((stored_bits >> 51) & 0xfff));
+#else
       CHECK_EQ(0xfff, static_cast<int>((stored_bits >> 51) & 0xfff));
+#endif
     }
 
     // Check that Date::New preserves non-NaNs in the date range and
@@ -13521,7 +13684,13 @@ THREADED_TEST(QuietSignalingNaNs) {
     } else {
       uint64_t stored_bits = DoubleToBits(stored_date);
       // Check if quiet nan (bits 51..62 all set).
+#if defined(V8_TARGET_ARCH_MIPS) && !defined(USE_SIMULATOR)
+      // Most significant fraction bit for quiet nan is set to 0
+      // on MIPS architecture. Allowed by IEEE-754.
+      CHECK_EQ(0xffe, static_cast<int>((stored_bits >> 51) & 0xfff));
+#else
       CHECK_EQ(0xfff, static_cast<int>((stored_bits >> 51) & 0xfff));
+#endif
     }
   }
 }
@@ -13530,7 +13699,7 @@ THREADED_TEST(QuietSignalingNaNs) {
 static v8::Handle<Value> SpaghettiIncident(const v8::Arguments& args) {
   v8::HandleScope scope;
   v8::TryCatch tc;
-  v8::Handle<v8::String> str = args[0]->ToString();
+  v8::Handle<v8::String> str(args[0]->ToString());
   if (tc.HasCaught())
     return tc.ReThrow();
   return v8::Undefined();
@@ -13689,6 +13858,41 @@ THREADED_TEST(ScriptLineNumber) {
       env->Global()->Get(v8::String::New("g")));
   CHECK_EQ(0, f->GetScriptLineNumber());
   CHECK_EQ(2, g->GetScriptLineNumber());
+}
+
+
+THREADED_TEST(ScriptColumnNumber) {
+  v8::HandleScope scope;
+  LocalContext env;
+  v8::ScriptOrigin origin = v8::ScriptOrigin(v8::String::New("test"),
+      v8::Integer::New(3), v8::Integer::New(2));
+  v8::Handle<v8::String> script = v8::String::New(
+      "function foo() {}\n\n     function bar() {}");
+  v8::Script::Compile(script, &origin)->Run();
+  v8::Local<v8::Function> foo = v8::Local<v8::Function>::Cast(
+      env->Global()->Get(v8::String::New("foo")));
+  v8::Local<v8::Function> bar = v8::Local<v8::Function>::Cast(
+      env->Global()->Get(v8::String::New("bar")));
+  CHECK_EQ(14, foo->GetScriptColumnNumber());
+  CHECK_EQ(17, bar->GetScriptColumnNumber());
+}
+
+
+THREADED_TEST(FunctionGetScriptId) {
+  v8::HandleScope scope;
+  LocalContext env;
+  v8::ScriptOrigin origin = v8::ScriptOrigin(v8::String::New("test"),
+      v8::Integer::New(3), v8::Integer::New(2));
+  v8::Handle<v8::String> scriptSource = v8::String::New(
+      "function foo() {}\n\n     function bar() {}");
+  v8::Local<v8::Script> script(v8::Script::Compile(scriptSource, &origin));
+  script->Run();
+  v8::Local<v8::Function> foo = v8::Local<v8::Function>::Cast(
+      env->Global()->Get(v8::String::New("foo")));
+  v8::Local<v8::Function> bar = v8::Local<v8::Function>::Cast(
+      env->Global()->Get(v8::String::New("bar")));
+  CHECK_EQ(script->Id(), foo->GetScriptId());
+  CHECK_EQ(script->Id(), bar->GetScriptId());
 }
 
 
@@ -14793,7 +14997,7 @@ TEST(RegExp) {
 
   // RegExps are objects on which you can set properties.
   re->Set(v8_str("property"), v8::Integer::New(32));
-  v8::Handle<v8::Value> value = CompileRun("re.property");
+  v8::Handle<v8::Value> value(CompileRun("re.property"));
   ASSERT_EQ(32, value->Int32Value());
 
   v8::TryCatch try_catch;

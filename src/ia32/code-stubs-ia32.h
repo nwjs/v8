@@ -147,7 +147,7 @@ class UnaryOpStub: public CodeStub {
     return UnaryOpIC::ToState(operand_type_);
   }
 
-  virtual void FinishCode(Code* code) {
+  virtual void FinishCode(Handle<Code> code) {
     code->set_unary_op_type(operand_type_);
   }
 };
@@ -234,7 +234,7 @@ class BinaryOpStub: public CodeStub {
     return BinaryOpIC::ToState(operands_type_);
   }
 
-  virtual void FinishCode(Code* code) {
+  virtual void FinishCode(Handle<Code> code) {
     code->set_binary_op_type(operands_type_);
     code->set_binary_op_result_type(result_type_);
   }
@@ -421,13 +421,12 @@ class StringDictionaryLookupStub: public CodeStub {
 
   void Generate(MacroAssembler* masm);
 
-  MUST_USE_RESULT static MaybeObject* GenerateNegativeLookup(
-      MacroAssembler* masm,
-      Label* miss,
-      Label* done,
-      Register properties,
-      String* name,
-      Register r0);
+  static void GenerateNegativeLookup(MacroAssembler* masm,
+                                     Label* miss,
+                                     Label* done,
+                                     Register properties,
+                                     Handle<String> name,
+                                     Register r0);
 
   static void GeneratePositiveLookup(MacroAssembler* masm,
                                      Label* miss,
@@ -710,13 +709,6 @@ class RecordWriteStub: public CodeStub {
         AddressBits::encode(address_.code()) |
         RememberedSetActionBits::encode(remembered_set_action_) |
         SaveFPRegsModeBits::encode(save_fp_regs_mode_);
-  }
-
-  bool MustBeInStubCache() {
-    // All stubs must be registered in the stub cache
-    // otherwise IncrementalMarker would not be able to find
-    // and patch it.
-    return true;
   }
 
   void Activate(Code* code) {

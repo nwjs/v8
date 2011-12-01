@@ -48,16 +48,19 @@ AST_NODE_LIST(DECL_ACCEPT)
 // ----------------------------------------------------------------------------
 // Implementation of other node functionality.
 
-Assignment* ExpressionStatement::StatementAsSimpleAssignment() {
-  return (expression()->AsAssignment() != NULL &&
-          !expression()->AsAssignment()->is_compound())
-      ? expression()->AsAssignment()
-      : NULL;
+
+bool Expression::IsSmiLiteral() {
+  return AsLiteral() != NULL && AsLiteral()->handle()->IsSmi();
 }
 
 
-CountOperation* ExpressionStatement::StatementAsCountOperation() {
-  return expression()->AsCountOperation();
+bool Expression::IsStringLiteral() {
+  return AsLiteral() != NULL && AsLiteral()->handle()->IsString();
+}
+
+
+bool Expression::IsNullLiteral() {
+  return AsLiteral() != NULL && AsLiteral()->handle()->IsNull();
 }
 
 
@@ -66,7 +69,6 @@ VariableProxy::VariableProxy(Isolate* isolate, Variable* var)
       name_(var->name()),
       var_(NULL),  // Will be set by the call to BindTo.
       is_this_(var->is_this()),
-      inside_with_(false),
       is_trivial_(false),
       position_(RelocInfo::kNoPosition) {
   BindTo(var);
@@ -76,13 +78,11 @@ VariableProxy::VariableProxy(Isolate* isolate, Variable* var)
 VariableProxy::VariableProxy(Isolate* isolate,
                              Handle<String> name,
                              bool is_this,
-                             bool inside_with,
                              int position)
     : Expression(isolate),
       name_(name),
       var_(NULL),
       is_this_(is_this),
-      inside_with_(inside_with),
       is_trivial_(false),
       position_(position) {
   // Names must be canonicalized for fast equality checks.
@@ -154,6 +154,21 @@ Token::Value Assignment::binary_op() const {
 
 bool FunctionLiteral::AllowsLazyCompilation() {
   return scope()->AllowsLazyCompilation();
+}
+
+
+int FunctionLiteral::start_position() const {
+  return scope()->start_position();
+}
+
+
+int FunctionLiteral::end_position() const {
+  return scope()->end_position();
+}
+
+
+LanguageMode FunctionLiteral::language_mode() const {
+  return scope()->language_mode();
 }
 
 
@@ -468,7 +483,7 @@ bool FunctionLiteral::IsInlineable() const {
 
 
 bool ThisFunction::IsInlineable() const {
-  return false;
+  return true;
 }
 
 
@@ -695,6 +710,10 @@ void CaseClause::RecordTypeFeedback(TypeFeedbackOracle* oracle) {
   TypeInfo info = oracle->SwitchType(this);
   if (info.IsSmi()) {
     compare_type_ = SMI_ONLY;
+  } else if (info.IsSymbol()) {
+    compare_type_ = SYMBOL_ONLY;
+  } else if (info.IsNonSymbol()) {
+    compare_type_ = STRING_ONLY;
   } else if (info.IsNonPrimitive()) {
     compare_type_ = OBJECT_ONLY;
   } else {
@@ -723,7 +742,7 @@ bool Call::ComputeTarget(Handle<Map> type, Handle<String> name) {
     holder_ = Handle<JSObject>::null();
   }
   while (true) {
-    LookupResult lookup;
+    LookupResult lookup(type->GetIsolate());
     type->LookupInDescriptors(NULL, *name, &lookup);
     // If the function wasn't found directly in the map, we start
     // looking upwards through the prototype chain.
@@ -877,8 +896,6 @@ FOR_EACH_REG_EXP_TREE_TYPE(MAKE_TYPE_CASE)
   bool RegExp##Name::Is##Name() { return true; }
 FOR_EACH_REG_EXP_TREE_TYPE(MAKE_TYPE_CASE)
 #undef MAKE_TYPE_CASE
-
-RegExpEmpty RegExpEmpty::kInstance;
 
 
 static Interval ListCaptureRegisters(ZoneList<RegExpTree*>* children) {

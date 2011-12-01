@@ -44,12 +44,6 @@ int Deoptimizer::patch_size() {
 }
 
 
-void Deoptimizer::EnsureRelocSpaceForLazyDeoptimization(Handle<Code> code) {
-  // Nothing to do. No new relocation information is written for lazy
-  // deoptimization on ARM.
-}
-
-
 void Deoptimizer::DeoptimizeFunction(JSFunction* function) {
   HandleScope scope;
   AssertNoAllocation no_allocation;
@@ -58,59 +52,37 @@ void Deoptimizer::DeoptimizeFunction(JSFunction* function) {
 
   // Get the optimized code.
   Code* code = function->code();
+  Address code_start_address = code->instruction_start();
 
   // Invalidate the relocation information, as it will become invalid by the
   // code patching below, and is not needed any more.
   code->InvalidateRelocation();
 
-  // For each return after a safepoint insert an absolute call to the
-  // corresponding deoptimization entry.
-  unsigned last_pc_offset = 0;
-  SafepointTable table(function->code());
-  for (unsigned i = 0; i < table.length(); i++) {
-    unsigned pc_offset = table.GetPcOffset(i);
-    SafepointEntry safepoint_entry = table.GetEntry(i);
-    int deoptimization_index = safepoint_entry.deoptimization_index();
-    int gap_code_size = safepoint_entry.gap_code_size();
-    // Check that we did not shoot past next safepoint.
-    CHECK(pc_offset >= last_pc_offset);
+  // For each LLazyBailout instruction insert a call to the corresponding
+  // deoptimization entry.
+  DeoptimizationInputData* deopt_data =
+      DeoptimizationInputData::cast(code->deoptimization_data());
 #ifdef DEBUG
-    // Destroy the code which is not supposed to be run again.
-    int instructions = (pc_offset - last_pc_offset) / Assembler::kInstrSize;
-    CodePatcher destroyer(code->instruction_start() + last_pc_offset,
-                          instructions);
-    for (int x = 0; x < instructions; x++) {
-      destroyer.masm()->bkpt(0);
-    }
+  Address prev_call_address = NULL;
 #endif
-    last_pc_offset = pc_offset;
-    if (deoptimization_index != Safepoint::kNoDeoptimizationIndex) {
-      Address deoptimization_entry = Deoptimizer::GetDeoptimizationEntry(
-          deoptimization_index, Deoptimizer::LAZY);
-      last_pc_offset += gap_code_size;
-      int call_size_in_bytes = MacroAssembler::CallSize(deoptimization_entry,
-                                                        RelocInfo::NONE);
-      int call_size_in_words = call_size_in_bytes / Assembler::kInstrSize;
-      ASSERT(call_size_in_bytes % Assembler::kInstrSize == 0);
-      ASSERT(call_size_in_bytes <= patch_size());
-      CodePatcher patcher(code->instruction_start() + last_pc_offset,
-                          call_size_in_words);
-      patcher.masm()->Call(deoptimization_entry, RelocInfo::NONE);
-      last_pc_offset += call_size_in_bytes;
-    }
-  }
-
-
+  for (int i = 0; i < deopt_data->DeoptCount(); i++) {
+    if (deopt_data->Pc(i)->value() == -1) continue;
+    Address call_address = code_start_address + deopt_data->Pc(i)->value();
+    Address deopt_entry = GetDeoptimizationEntry(i, LAZY);
+    int call_size_in_bytes = MacroAssembler::CallSize(deopt_entry,
+                                                      RelocInfo::NONE);
+    int call_size_in_words = call_size_in_bytes / Assembler::kInstrSize;
+    ASSERT(call_size_in_bytes % Assembler::kInstrSize == 0);
+    ASSERT(call_size_in_bytes <= patch_size());
+    CodePatcher patcher(call_address, call_size_in_words);
+    patcher.masm()->Call(deopt_entry, RelocInfo::NONE);
+    ASSERT(prev_call_address == NULL ||
+           call_address >= prev_call_address + patch_size());
+    ASSERT(call_address + patch_size() <= code->instruction_end());
 #ifdef DEBUG
-  // Destroy the code which is not supposed to be run again.
-  int instructions =
-      (code->safepoint_table_offset() - last_pc_offset) / Assembler::kInstrSize;
-  CodePatcher destroyer(code->instruction_start() + last_pc_offset,
-                        instructions);
-  for (int x = 0; x < instructions; x++) {
-    destroyer.masm()->bkpt(0);
-  }
+    prev_call_address = call_address;
 #endif
+  }
 
   Isolate* isolate = code->GetIsolate();
 
@@ -132,11 +104,6 @@ void Deoptimizer::DeoptimizeFunction(JSFunction* function) {
     PrintF("[forced deoptimization: ");
     function->PrintName();
     PrintF(" / %x]\n", reinterpret_cast<uint32_t>(function));
-#ifdef DEBUG
-    if (FLAG_print_code) {
-      code->PrintLn();
-    }
-#endif
   }
 }
 
@@ -178,16 +145,13 @@ void Deoptimizer::PatchStackCheckCodeAt(Code* unoptimized_code,
   Memory::uint32_at(stack_check_address_pointer) =
       reinterpret_cast<uint32_t>(replacement_code->entry());
 
-  RelocInfo rinfo(pc_after - 2 * kInstrSize,
-                  RelocInfo::CODE_TARGET,
-                  0,
-                  unoptimized_code);
-  unoptimized_code->GetHeap()->incremental_marking()->RecordWriteIntoCode(
-      unoptimized_code, &rinfo, replacement_code);
+  unoptimized_code->GetHeap()->incremental_marking()->RecordCodeTargetPatch(
+      unoptimized_code, pc_after - 2 * kInstrSize, replacement_code);
 }
 
 
-void Deoptimizer::RevertStackCheckCodeAt(Address pc_after,
+void Deoptimizer::RevertStackCheckCodeAt(Code* unoptimized_code,
+                                         Address pc_after,
                                          Code* check_code,
                                          Code* replacement_code) {
   const int kInstrSize = Assembler::kInstrSize;
@@ -209,8 +173,8 @@ void Deoptimizer::RevertStackCheckCodeAt(Address pc_after,
   Memory::uint32_at(stack_check_address_pointer) =
       reinterpret_cast<uint32_t>(check_code->entry());
 
-  check_code->GetHeap()->incremental_marking()->
-      RecordCodeTargetPatch(pc_after - 2 * kInstrSize, check_code);
+  check_code->GetHeap()->incremental_marking()->RecordCodeTargetPatch(
+      unoptimized_code, pc_after - 2 * kInstrSize, check_code);
 }
 
 
@@ -727,7 +691,6 @@ void Deoptimizer::EntryGenerator::Generate() {
   __ ldr(r3, MemOperand(r2, FrameDescription::frame_size_offset()));
   __ bind(&inner_push_loop);
   __ sub(r3, r3, Operand(sizeof(uint32_t)));
-  // __ add(r6, r2, Operand(r3, LSL, 1));
   __ add(r6, r2, Operand(r3));
   __ ldr(r7, MemOperand(r6, FrameDescription::frame_content_offset()));
   __ push(r7);
@@ -761,8 +724,9 @@ void Deoptimizer::EntryGenerator::Generate() {
   __ pop(ip);  // remove lr
 
   // Set up the roots register.
-  ExternalReference roots_address = ExternalReference::roots_address(isolate);
-  __ mov(r10, Operand(roots_address));
+  ExternalReference roots_array_start =
+      ExternalReference::roots_array_start(isolate);
+  __ mov(r10, Operand(roots_array_start));
 
   __ pop(ip);  // remove pc
   __ pop(r7);  // get continuation, leave pc on stack

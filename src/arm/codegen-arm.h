@@ -29,7 +29,6 @@
 #define V8_ARM_CODEGEN_ARM_H_
 
 #include "ast.h"
-#include "code-stubs-arm.h"
 #include "ic-inl.h"
 
 namespace v8 {
@@ -73,6 +72,21 @@ class CodeGenerator: public AstVisitor {
   DISALLOW_COPY_AND_ASSIGN(CodeGenerator);
 };
 
+
+class StringCharLoadGenerator : public AllStatic {
+ public:
+  // Generates the code for handling different string types and loading the
+  // indexed character into |result|.  We expect |index| as untagged input and
+  // |result| as untagged output.
+  static void Generate(MacroAssembler* masm,
+                       Register string,
+                       Register index,
+                       Register result,
+                       Label* call_runtime);
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(StringCharLoadGenerator);
+};
 
 } }  // namespace v8::internal
 

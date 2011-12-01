@@ -74,6 +74,8 @@ class StringsStorage {
   inline const char* GetFunctionName(const char* name);
 
  private:
+  static const int kMaxNameSize = 1024;
+
   INLINE(static bool StringsMatch(void* key1, void* key2)) {
     return strcmp(reinterpret_cast<char*>(key1),
                   reinterpret_cast<char*>(key2)) == 0;
@@ -971,6 +973,7 @@ class V8HeapExplorer : public HeapEntriesAllocator {
                             HeapEntry* parent,
                             String* reference_name,
                             Object* child,
+                            const char* name_format_string = NULL,
                             int field_offset = -1);
   void SetPropertyShortcutReference(HeapObject* parent_obj,
                                     HeapEntry* parent,

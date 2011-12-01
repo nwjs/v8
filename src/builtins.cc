@@ -385,9 +385,6 @@ static bool ArrayPrototypeHasNoElements(Heap* heap,
   // This method depends on non writability of Object and Array prototype
   // fields.
   if (array_proto->elements() != heap->empty_fixed_array()) return false;
-  // Hidden prototype
-  array_proto = JSObject::cast(array_proto->GetPrototype());
-  ASSERT(array_proto->elements() == heap->empty_fixed_array());
   // Object.prototype
   Object* proto = array_proto->GetPrototype();
   if (proto == heap->null_value()) return false;
@@ -772,6 +769,14 @@ BUILTIN(ArraySlice) {
 
   // Set the length.
   result_array->set_length(Smi::FromInt(result_len));
+
+  // Set the ElementsKind.
+  ElementsKind elements_kind = JSObject::cast(receiver)->GetElementsKind();
+  if (IsMoreGeneralElementsKindTransition(result_array->GetElementsKind(),
+                                          elements_kind)) {
+    MaybeObject* maybe = result_array->TransitionElementsKind(elements_kind);
+    if (maybe->IsFailure()) return maybe;
+  }
   return result_array;
 }
 
@@ -865,6 +870,14 @@ BUILTIN(ArraySplice) {
 
     // Set the length.
     result_array->set_length(Smi::FromInt(actual_delete_count));
+
+    // Set the ElementsKind.
+    ElementsKind elements_kind = array->GetElementsKind();
+    if (IsMoreGeneralElementsKindTransition(result_array->GetElementsKind(),
+                                            elements_kind)) {
+      MaybeObject* maybe = result_array->TransitionElementsKind(elements_kind);
+      if (maybe->IsFailure()) return maybe;
+    }
   }
 
   int item_count = (n_arguments > 1) ? (n_arguments - 2) : 0;
@@ -1507,6 +1520,14 @@ static void Generate_KeyedStoreIC_NonStrictArguments(MacroAssembler* masm) {
   KeyedStoreIC::GenerateNonStrictArguments(masm);
 }
 
+static void Generate_TransitionElementsSmiToDouble(MacroAssembler* masm) {
+  KeyedStoreIC::GenerateTransitionElementsSmiToDouble(masm);
+}
+
+static void Generate_TransitionElementsDoubleToObject(MacroAssembler* masm) {
+  KeyedStoreIC::GenerateTransitionElementsDoubleToObject(masm);
+}
+
 #ifdef ENABLE_DEBUGGER_SUPPORT
 static void Generate_LoadIC_DebugBreak(MacroAssembler* masm) {
   Debug::GenerateLoadICDebugBreak(masm);
@@ -1538,8 +1559,8 @@ static void Generate_Return_DebugBreak(MacroAssembler* masm) {
 }
 
 
-static void Generate_StubNoRegisters_DebugBreak(MacroAssembler* masm) {
-  Debug::GenerateStubNoRegistersDebugBreak(masm);
+static void Generate_CallFunctionStub_DebugBreak(MacroAssembler* masm) {
+  Debug::GenerateCallFunctionStubDebugBreak(masm);
 }
 
 

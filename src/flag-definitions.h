@@ -100,7 +100,8 @@ private:
 DEFINE_bool(harmony_typeof, false, "enable harmony semantics for typeof")
 DEFINE_bool(harmony_scoping, false, "enable harmony block scoping")
 DEFINE_bool(harmony_proxies, false, "enable harmony proxies")
-DEFINE_bool(harmony_weakmaps, false, "enable harmony weak maps")
+DEFINE_bool(harmony_collections, false,
+            "enable harmony collections (sets, maps, and weak maps)")
 DEFINE_bool(harmony, false, "enable all harmony features")
 
 // Flags for experimental implementation features.
@@ -113,11 +114,7 @@ DEFINE_bool(clever_optimizations,
             "Optimize object size, Array shift, DOM strings and string +")
 
 // Flags for Crankshaft.
-#ifdef V8_TARGET_ARCH_MIPS
-  DEFINE_bool(crankshaft, false, "use crankshaft")
-#else
-  DEFINE_bool(crankshaft, true, "use crankshaft")
-#endif
+DEFINE_bool(crankshaft, true, "use crankshaft")
 DEFINE_string(hydrogen_filter, "", "hydrogen use/trace filter")
 DEFINE_bool(use_hydrogen, true, "use generated hydrogen for compilation")
 DEFINE_bool(build_lithium, true, "use lithium chunk builder")
@@ -131,6 +128,9 @@ DEFINE_bool(use_inlining, true, "use function inlining")
 DEFINE_bool(limit_inlining, true, "limit code size growth from inlining")
 DEFINE_bool(eliminate_empty_blocks, true, "eliminate empty blocks")
 DEFINE_bool(loop_invariant_code_motion, true, "loop invariant code motion")
+DEFINE_bool(collect_megamorphic_maps_from_stub_cache,
+            true,
+            "crankshaft harvests type feedback from stub cache")
 DEFINE_bool(hydrogen_stats, false, "print statistics for hydrogen")
 DEFINE_bool(trace_hydrogen, false, "trace generated hydrogen to file")
 DEFINE_bool(trace_inlining, false, "trace inlining decisions")
@@ -186,6 +186,8 @@ DEFINE_bool(expose_gc, false, "expose gc extension")
 DEFINE_bool(expose_externalize_string, false,
             "expose externalize string extension")
 DEFINE_int(stack_trace_limit, 10, "number of stack frames to capture")
+DEFINE_bool(builtins_in_stack_traces, false,
+            "show built-in functions in stack traces")
 DEFINE_bool(disable_native_files, false, "disable builtin natives files")
 
 // builtins-ia32.cc
@@ -319,11 +321,11 @@ DEFINE_bool(use_verbose_printer, true, "allows verbose printing")
 
 // parser.cc
 DEFINE_bool(allow_natives_syntax, false, "allow natives syntax")
-DEFINE_bool(strict_mode, true, "allow strict mode directives")
 
 // simulator-arm.cc and simulator-mips.cc
 DEFINE_bool(trace_sim, false, "Trace simulator execution")
-DEFINE_bool(check_icache, false, "Check icache flushes in ARM simulator")
+DEFINE_bool(check_icache, false,
+            "Check icache flushes in ARM and MIPS simulator")
 DEFINE_int(stop_sim_at, 0, "Simulator stop after x number of instructions")
 DEFINE_int(sim_stack_alignment, 8,
            "Stack alingment in bytes in simulator (4 or 8, 8 is default)")
@@ -430,7 +432,6 @@ DEFINE_bool(print_json_ast, false, "print source AST as JSON")
 DEFINE_bool(print_builtin_json_ast, false,
             "print source AST for builtins as JSON")
 DEFINE_string(stop_at, "", "function name where to insert a breakpoint")
-DEFINE_bool(verify_stack_height, false, "verify stack height tracing on ia32")
 
 // compiler.cc
 DEFINE_bool(print_builtin_scopes, false, "print scopes for builtins")
@@ -526,6 +527,9 @@ DEFINE_bool(ll_prof, false, "Enable low-level linux profiler.")
 #else
 #define FLAG FLAG_READONLY
 #endif
+
+// elements.cc
+DEFINE_bool(trace_elements_transitions, false, "trace elements transitions")
 
 // code-stubs.cc
 DEFINE_bool(print_code_stubs, false, "print code stubs")

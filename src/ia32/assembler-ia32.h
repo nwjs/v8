@@ -713,8 +713,6 @@ class Assembler : public AssemblerBase {
   void movzx_w(Register dst, const Operand& src);
 
   // Conditional moves
-  void cmov(Condition cc, Register dst, int32_t imm32);
-  void cmov(Condition cc, Register dst, Handle<Object> handle);
   void cmov(Condition cc, Register dst, Register src) {
     cmov(cc, dst, Operand(src));
   }
@@ -926,6 +924,7 @@ class Assembler : public AssemblerBase {
   void fchs();
   void fcos();
   void fsin();
+  void fptan();
   void fyl2x();
 
   void fadd(int i);

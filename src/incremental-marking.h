@@ -59,9 +59,11 @@ class IncrementalMarking {
 
   inline bool IsStopped() { return state() == STOPPED; }
 
-  inline bool IsMarking() { return state() >= MARKING; }
+  INLINE(bool IsMarking()) { return state() >= MARKING; }
 
   inline bool IsMarkingIncomplete() { return state() == MARKING; }
+
+  inline bool IsComplete() { return state() == COMPLETE; }
 
   bool WorthActivating();
 
@@ -96,11 +98,12 @@ class IncrementalMarking {
   static const intptr_t kAllocationMarkingFactorSpeedupInterval = 1024;
   // This is how much we increase the marking/allocating factor by.
   static const intptr_t kAllocationMarkingFactorSpeedup = 2;
-  static const intptr_t kMaxAllocationMarkingFactor = 1000000000;
+  static const intptr_t kMaxAllocationMarkingFactor = 1000;
 
   void OldSpaceStep(intptr_t allocated) {
     Step(allocated * kFastMarking / kInitialAllocationMarkingFactor);
   }
+
   void Step(intptr_t allocated);
 
   inline void RestartIfNotMarking() {
@@ -120,15 +123,23 @@ class IncrementalMarking {
                                                Object** slot,
                                                Isolate* isolate);
 
-  inline bool BaseRecordWrite(HeapObject* obj, Object** slot, Object* value);
-
-
-  inline void RecordWrite(HeapObject* obj, Object** slot, Object* value);
-  inline void RecordWriteIntoCode(HeapObject* obj,
+  INLINE(bool BaseRecordWrite(HeapObject* obj, Object** slot, Object* value));
+  INLINE(void RecordWrite(HeapObject* obj, Object** slot, Object* value));
+  INLINE(void RecordWriteIntoCode(HeapObject* obj,
                                   RelocInfo* rinfo,
-                                  Object* value);
+                                  Object* value));
+  INLINE(void RecordWriteOfCodeEntry(JSFunction* host,
+                                     Object** slot,
+                                     Code* value));
+
+
+  void RecordWriteSlow(HeapObject* obj, Object** slot, Object* value);
+  void RecordWriteIntoCodeSlow(HeapObject* obj,
+                               RelocInfo* rinfo,
+                               Object* value);
+  void RecordWriteOfCodeEntrySlow(JSFunction* host, Object** slot, Code* value);
+  void RecordCodeTargetPatch(Code* host, Address pc, HeapObject* value);
   void RecordCodeTargetPatch(Address pc, HeapObject* value);
-  void RecordWriteOfCodeEntry(JSFunction* host, Object** slot, Code* value);
 
   inline void RecordWrites(HeapObject* obj);
 
@@ -197,6 +208,16 @@ class IncrementalMarking {
     }
   }
 
+  void EnterNoMarkingScope() {
+    no_marking_scope_depth_++;
+  }
+
+  void LeaveNoMarkingScope() {
+    no_marking_scope_depth_--;
+  }
+
+  void UncommitMarkingDeque();
+
  private:
   void set_should_hurry(bool val) {
     should_hurry_ = val;
@@ -234,6 +255,7 @@ class IncrementalMarking {
   bool is_compacting_;
 
   VirtualMemory* marking_deque_memory_;
+  bool marking_deque_memory_committed_;
   MarkingDeque marking_deque_;
 
   int steps_count_;
@@ -246,7 +268,10 @@ class IncrementalMarking {
   int64_t bytes_rescanned_;
   bool should_hurry_;
   int allocation_marking_factor_;
+  intptr_t bytes_scanned_;
   intptr_t allocated_;
+
+  int no_marking_scope_depth_;
 
   DISALLOW_IMPLICIT_CONSTRUCTORS(IncrementalMarking);
 };

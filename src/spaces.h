@@ -459,7 +459,6 @@ class MemoryChunk {
     live_byte_count_ = 0;
   }
   void IncrementLiveBytes(int by) {
-    ASSERT_LE(static_cast<unsigned>(live_byte_count_), size_);
     if (FLAG_gc_verbose) {
       printf("UpdateLiveBytes:%p:%x%c=%x->%x\n",
              static_cast<void*>(this), live_byte_count_,
@@ -504,6 +503,10 @@ class MemoryChunk {
       (kObjectStartAlignment - (kBodyOffset - 1) % kObjectStartAlignment);
 
   size_t size() const { return size_; }
+
+  void set_size(size_t size) {
+    size_ = size;
+  }
 
   Executability executable() {
     return IsFlagSet(IS_EXECUTABLE) ? EXECUTABLE : NOT_EXECUTABLE;
@@ -642,7 +645,6 @@ class Page : public MemoryChunk {
   // [page_addr + kObjectStartOffset .. page_addr + kPageSize].
   INLINE(static Page* FromAllocationTop(Address top)) {
     Page* p = FromAddress(top - kPointerSize);
-    ASSERT_PAGE_OFFSET(p->Offset(top));
     return p;
   }
 
@@ -666,7 +668,6 @@ class Page : public MemoryChunk {
   // Returns the offset of a given address to this page.
   INLINE(int Offset(Address a)) {
     int offset = static_cast<int>(a - address());
-    ASSERT_PAGE_OFFSET(offset);
     return offset;
   }
 
@@ -1134,11 +1135,6 @@ class HeapObjectIterator: public ObjectIterator {
                          Address end,
                          PageMode mode,
                          HeapObjectCallback size_func);
-
-#ifdef DEBUG
-  // Verifies whether fields have valid values.
-  void Verify();
-#endif
 };
 
 
@@ -1355,8 +1351,6 @@ class FreeList BASE_EMBEDDED {
   // 'wasted_bytes'.  The size should be a non-zero multiple of the word size.
   MUST_USE_RESULT HeapObject* Allocate(int size_in_bytes);
 
-  void MarkNodes();
-
 #ifdef DEBUG
   void Zap();
   static intptr_t SumFreeList(FreeListNode* node);
@@ -1365,7 +1359,20 @@ class FreeList BASE_EMBEDDED {
   bool IsVeryLong();
 #endif
 
-  void CountFreeListItems(Page* p, intptr_t* sizes);
+  struct SizeStats {
+    intptr_t Total() {
+      return small_size_ + medium_size_ + large_size_ + huge_size_;
+    }
+
+    intptr_t small_size_;
+    intptr_t medium_size_;
+    intptr_t large_size_;
+    intptr_t huge_size_;
+  };
+
+  void CountFreeListItems(Page* p, SizeStats* sizes);
+
+  intptr_t EvictFreeListItems(Page* p);
 
  private:
   // The size range of blocks, in bytes.
@@ -1549,9 +1556,9 @@ class PagedSpace : public Space {
            !p->WasSweptPrecisely();
   }
 
-  void SetPagesToSweep(Page* first, Page* last) {
+  void SetPagesToSweep(Page* first) {
+    if (first == &anchor_) first = NULL;
     first_unswept_page_ = first;
-    last_unswept_page_ = last;
   }
 
   bool AdvanceSweeper(intptr_t bytes_to_sweep);
@@ -1563,17 +1570,22 @@ class PagedSpace : public Space {
   Page* FirstPage() { return anchor_.next_page(); }
   Page* LastPage() { return anchor_.prev_page(); }
 
-  bool IsFragmented(Page* p) {
-    intptr_t sizes[4];
-    free_list_.CountFreeListItems(p, sizes);
+  // Returns zero for pages that have so little fragmentation that it is not
+  // worth defragmenting them.  Otherwise a positive integer that gives an
+  // estimate of fragmentation on an arbitrary scale.
+  int Fragmentation(Page* p) {
+    FreeList::SizeStats sizes;
+    free_list_.CountFreeListItems(p, &sizes);
 
     intptr_t ratio;
     intptr_t ratio_threshold;
     if (identity() == CODE_SPACE) {
-      ratio = (sizes[1] * 10 + sizes[2] * 2) * 100 / Page::kObjectAreaSize;
+      ratio = (sizes.medium_size_ * 10 + sizes.large_size_ * 2) * 100 /
+          Page::kObjectAreaSize;
       ratio_threshold = 10;
     } else {
-      ratio = (sizes[0] * 5 + sizes[1]) * 100 / Page::kObjectAreaSize;
+      ratio = (sizes.small_size_ * 5 + sizes.medium_size_) * 100 /
+          Page::kObjectAreaSize;
       ratio_threshold = 15;
     }
 
@@ -1581,24 +1593,35 @@ class PagedSpace : public Space {
       PrintF("%p [%d]: %d (%.2f%%) %d (%.2f%%) %d (%.2f%%) %d (%.2f%%) %s\n",
              reinterpret_cast<void*>(p),
              identity(),
-             static_cast<int>(sizes[0]),
-             static_cast<double>(sizes[0] * 100) / Page::kObjectAreaSize,
-             static_cast<int>(sizes[1]),
-             static_cast<double>(sizes[1] * 100) / Page::kObjectAreaSize,
-             static_cast<int>(sizes[2]),
-             static_cast<double>(sizes[2] * 100) / Page::kObjectAreaSize,
-             static_cast<int>(sizes[3]),
-             static_cast<double>(sizes[3] * 100) / Page::kObjectAreaSize,
+             static_cast<int>(sizes.small_size_),
+             static_cast<double>(sizes.small_size_ * 100) /
+                 Page::kObjectAreaSize,
+             static_cast<int>(sizes.medium_size_),
+             static_cast<double>(sizes.medium_size_ * 100) /
+                 Page::kObjectAreaSize,
+             static_cast<int>(sizes.large_size_),
+             static_cast<double>(sizes.large_size_ * 100) /
+                 Page::kObjectAreaSize,
+             static_cast<int>(sizes.huge_size_),
+             static_cast<double>(sizes.huge_size_ * 100) /
+                 Page::kObjectAreaSize,
              (ratio > ratio_threshold) ? "[fragmented]" : "");
     }
 
-    return (ratio > ratio_threshold) ||
-        (FLAG_always_compact && sizes[3] != Page::kObjectAreaSize);
+    if (FLAG_always_compact && sizes.Total() != Page::kObjectAreaSize) {
+      return 1;
+    }
+    if (ratio <= ratio_threshold) return 0;  // Not fragmented.
+
+    return static_cast<int>(ratio - ratio_threshold);
   }
 
   void EvictEvacuationCandidatesFromFreeLists();
 
   bool CanExpand();
+
+  // Returns the number of total pages in this space.
+  int CountTotalPages();
 
  protected:
   // Maximum capacity of this space.
@@ -1625,10 +1648,10 @@ class PagedSpace : public Space {
   bool was_swept_conservatively_;
 
   Page* first_unswept_page_;
-  Page* last_unswept_page_;
 
   // Expands the space by allocating a fixed number of pages. Returns false if
-  // it cannot allocate requested number of pages from OS.
+  // it cannot allocate requested number of pages from OS, or if the hard heap
+  // size limit has been hit.
   bool Expand();
 
   // Generic fast case allocation function that tries linear allocation at the
@@ -1637,11 +1660,6 @@ class PagedSpace : public Space {
 
   // Slow path of AllocateRaw.  This function is space-dependent.
   MUST_USE_RESULT virtual HeapObject* SlowAllocateRaw(int size_in_bytes);
-
-#ifdef DEBUG
-  // Returns the number of total pages in this space.
-  int CountTotalPages();
-#endif
 
   friend class PageIterator;
 };
@@ -1741,7 +1759,6 @@ class NewSpacePage : public MemoryChunk {
         reinterpret_cast<Address>(reinterpret_cast<uintptr_t>(address_in_page) &
                                   ~Page::kPageAlignmentMask);
     NewSpacePage* page = reinterpret_cast<NewSpacePage*>(page_start);
-    ASSERT(page->InNewSpace());
     return page;
   }
 
@@ -1818,7 +1835,6 @@ class SemiSpace : public Space {
 
   // Returns the start address of the current page of the space.
   Address page_low() {
-    ASSERT(anchor_.next_page() != &anchor_);
     return current_page_->body();
   }
 
@@ -2084,7 +2100,7 @@ class NewSpace : public Space {
 
   // Return the current capacity of a semispace.
   intptr_t EffectiveCapacity() {
-    ASSERT(to_space_.Capacity() == from_space_.Capacity());
+    SLOW_ASSERT(to_space_.Capacity() == from_space_.Capacity());
     return (to_space_.Capacity() / Page::kPageSize) * Page::kObjectAreaSize;
   }
 
@@ -2100,10 +2116,9 @@ class NewSpace : public Space {
     return Capacity();
   }
 
-  // Return the available bytes without growing or switching page in the
-  // active semispace.
+  // Return the available bytes without growing.
   intptr_t Available() {
-    return allocation_info_.limit - allocation_info_.top;
+    return Capacity() - Size();
   }
 
   // Return the maximum capacity of a semispace.
@@ -2151,9 +2166,7 @@ class NewSpace : public Space {
   Address* allocation_top_address() { return &allocation_info_.top; }
   Address* allocation_limit_address() { return &allocation_info_.limit; }
 
-  MUST_USE_RESULT MaybeObject* AllocateRaw(int size_in_bytes) {
-    return AllocateRawInternal(size_in_bytes);
-  }
+  MUST_USE_RESULT INLINE(MaybeObject* AllocateRaw(int size_in_bytes));
 
   // Reset the allocation pointer to the beginning of the active semispace.
   void ResetAllocationInfo();
@@ -2279,8 +2292,7 @@ class NewSpace : public Space {
   HistogramInfo* allocated_histogram_;
   HistogramInfo* promoted_histogram_;
 
-  // Implementation of AllocateRaw.
-  MUST_USE_RESULT inline MaybeObject* AllocateRawInternal(int size_in_bytes);
+  MUST_USE_RESULT MaybeObject* SlowAllocateRaw(int size_in_bytes);
 
   friend class SemiSpaceIterator;
 
@@ -2317,9 +2329,9 @@ class OldSpace : public PagedSpace {
 // For contiguous spaces, top should be in the space (or at the end) and limit
 // should be the end of the space.
 #define ASSERT_SEMISPACE_ALLOCATION_INFO(info, space) \
-  ASSERT((space).page_low() <= (info).top             \
-         && (info).top <= (space).page_high()         \
-         && (info).limit <= (space).page_high())
+  SLOW_ASSERT((space).page_low() <= (info).top             \
+              && (info).top <= (space).page_high()         \
+              && (info).limit <= (space).page_high())
 
 
 // -----------------------------------------------------------------------------
@@ -2347,8 +2359,6 @@ class FixedSpace : public PagedSpace {
 
   // Prepares for a mark-compact GC.
   virtual void PrepareForMarkCompact();
-
-  void MarkFreeListNodes() { free_list_.MarkNodes(); }
 
  protected:
   void ResetFreeList() {
@@ -2447,7 +2457,7 @@ class CellSpace : public FixedSpace {
 
 class LargeObjectSpace : public Space {
  public:
-  LargeObjectSpace(Heap* heap, AllocationSpace id);
+  LargeObjectSpace(Heap* heap, intptr_t max_capacity, AllocationSpace id);
   virtual ~LargeObjectSpace() {}
 
   // Initializes internal data structures.
@@ -2517,6 +2527,7 @@ class LargeObjectSpace : public Space {
   bool SlowContains(Address addr) { return !FindObject(addr)->IsFailure(); }
 
  private:
+  intptr_t max_capacity_;
   // The head of the linked list of large object chunks.
   LargePage* first_page_;
   intptr_t size_;  // allocated bytes

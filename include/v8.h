@@ -1736,9 +1736,16 @@ class Function : public Object {
    * kLineOffsetNotFound if no information available.
    */
   V8EXPORT int GetScriptLineNumber() const;
+  /**
+   * Returns zero based column number of function body and
+   * kLineOffsetNotFound if no information available.
+   */
+  V8EXPORT int GetScriptColumnNumber() const;
+  V8EXPORT Handle<Value> GetScriptId() const;
   V8EXPORT ScriptOrigin GetScriptOrigin() const;
   static inline Function* Cast(Value* obj);
   V8EXPORT static const int kLineOffsetNotFound;
+
  private:
   V8EXPORT Function();
   V8EXPORT static void CheckCast(Value* obj);
@@ -3187,8 +3194,12 @@ class V8EXPORT V8 {
    * Returns true if the embedder should stop calling IdleNotification
    * until real work has been done.  This indicates that V8 has done
    * as much cleanup as it will be able to do.
+   *
+   * The hint argument specifies the amount of work to be done in the function
+   * on scale from 1 to 1000. There is no guarantee that the actual work will
+   * match the hint.
    */
-  static bool IdleNotification();
+  static bool IdleNotification(int hint = 1000);
 
   /**
    * Optional notification that the system is running low on memory.
@@ -3697,8 +3708,8 @@ class V8EXPORT ActivityControl {  // NOLINT
 
 namespace internal {
 
-static const int kApiPointerSize = sizeof(void*);  // NOLINT
-static const int kApiIntSize = sizeof(int);  // NOLINT
+const int kApiPointerSize = sizeof(void*);  // NOLINT
+const int kApiIntSize = sizeof(int);  // NOLINT
 
 // Tag information for HeapObject.
 const int kHeapObjectTag = 1;

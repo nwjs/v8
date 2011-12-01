@@ -61,7 +61,7 @@ class LCodeGen BASE_EMBEDDED {
         dynamic_frame_alignment_(false),
         deferred_(8),
         osr_pc_offset_(-1),
-        deoptimization_reloc_size(),
+        last_lazy_deopt_pc_(0),
         resolver_(this),
         expected_safepoint_kind_(Safepoint::kSimple) {
     PopulateDeoptimizationLiteralsWithInlinedFunctions();
@@ -101,8 +101,8 @@ class LCodeGen BASE_EMBEDDED {
   void DoDeferredStackCheck(LStackCheck* instr);
   void DoDeferredStringCharCodeAt(LStringCharCodeAt* instr);
   void DoDeferredStringCharFromCode(LStringCharFromCode* instr);
-  void DoDeferredLInstanceOfKnownGlobal(LInstanceOfKnownGlobal* instr,
-                                        Label* map_check);
+  void DoDeferredInstanceOfKnownGlobal(LInstanceOfKnownGlobal* instr,
+                                       Label* map_check);
 
   // Parallel move support.
   void DoParallelMove(LParallelMove* move);
@@ -131,8 +131,8 @@ class LCodeGen BASE_EMBEDDED {
   bool is_done() const { return status_ == DONE; }
   bool is_aborted() const { return status_ == ABORTED; }
 
-  int strict_mode_flag() const {
-    return info()->is_strict_mode() ? kStrictMode : kNonStrictMode;
+  StrictModeFlag strict_mode_flag() const {
+    return info()->is_classic_mode() ? kNonStrictMode : kStrictMode;
   }
   bool dynamic_frame_alignment() const { return dynamic_frame_alignment_; }
   void set_dynamic_frame_alignment(bool value) {
@@ -144,7 +144,6 @@ class LCodeGen BASE_EMBEDDED {
   HGraph* graph() const { return chunk_->graph(); }
 
   int GetNextEmittedBlock(int block);
-  LInstruction* GetNextInstruction();
 
   void EmitClassOfTest(Label* if_true,
                        Label* if_false,
@@ -210,10 +209,11 @@ class LCodeGen BASE_EMBEDDED {
 
   void LoadHeapObject(Register result, Handle<HeapObject> object);
 
-  void RegisterLazyDeoptimization(LInstruction* instr,
-                                  SafepointMode safepoint_mode);
+  void RecordSafepointWithLazyDeopt(LInstruction* instr,
+                                    SafepointMode safepoint_mode);
 
-  void RegisterEnvironmentForDeoptimization(LEnvironment* environment);
+  void RegisterEnvironmentForDeoptimization(LEnvironment* environment,
+                                            Safepoint::DeoptMode mode);
   void DeoptimizeIf(Condition cc, LEnvironment* environment);
 
   void AddToTranslation(Translation* translation,
@@ -227,6 +227,7 @@ class LCodeGen BASE_EMBEDDED {
   Register ToRegister(int index) const;
   XMMRegister ToDoubleRegister(int index) const;
   int ToInteger32(LConstantOperand* op) const;
+  double ToDouble(LConstantOperand* op) const;
   Operand BuildFastArrayOperand(LOperand* elements_pointer,
                                 LOperand* key,
                                 ElementsKind elements_kind,
@@ -240,6 +241,7 @@ class LCodeGen BASE_EMBEDDED {
   void DoMathSqrt(LUnaryMathOperation* instr);
   void DoMathPowHalf(LUnaryMathOperation* instr);
   void DoMathLog(LUnaryMathOperation* instr);
+  void DoMathTan(LUnaryMathOperation* instr);
   void DoMathCos(LUnaryMathOperation* instr);
   void DoMathSin(LUnaryMathOperation* instr);
 
@@ -247,21 +249,17 @@ class LCodeGen BASE_EMBEDDED {
   void RecordSafepoint(LPointerMap* pointers,
                        Safepoint::Kind kind,
                        int arguments,
-                       int deoptimization_index);
-  void RecordSafepoint(LPointerMap* pointers, int deoptimization_index);
-  void RecordSafepoint(int deoptimization_index);
+                       Safepoint::DeoptMode mode);
+  void RecordSafepoint(LPointerMap* pointers, Safepoint::DeoptMode mode);
+  void RecordSafepoint(Safepoint::DeoptMode mode);
   void RecordSafepointWithRegisters(LPointerMap* pointers,
                                     int arguments,
-                                    int deoptimization_index);
+                                    Safepoint::DeoptMode mode);
   void RecordPosition(int position);
-  int LastSafepointEnd() {
-    return static_cast<int>(safepoints_.GetPcAfterGap());
-  }
 
   static Condition TokenToCondition(Token::Value op, bool is_unsigned);
   void EmitGoto(int block);
   void EmitBranch(int left_block, int right_block, Condition cc);
-  void EmitCmpI(LOperand* left, LOperand* right);
   void EmitNumberUntagD(Register input,
                         XMMRegister result,
                         bool deoptimize_on_undefined,
@@ -270,8 +268,10 @@ class LCodeGen BASE_EMBEDDED {
   // Emits optimized code for typeof x == "y".  Modifies input register.
   // Returns the condition on which a final split to
   // true and false label should be made, to optimize fallthrough.
-  Condition EmitTypeofIs(Label* true_label, Label* false_label,
-                         Register input, Handle<String> type_name);
+  Condition EmitTypeofIs(Label* true_label,
+                         Label* false_label,
+                         Register input,
+                         Handle<String> type_name);
 
   // Emits optimized code for %_IsObject(x).  Preserves input register.
   // Returns the condition on which a final split to
@@ -281,6 +281,13 @@ class LCodeGen BASE_EMBEDDED {
                          Label* is_not_object,
                          Label* is_object);
 
+  // Emits optimized code for %_IsString(x).  Preserves input register.
+  // Returns the condition on which a final split to
+  // true and false label should be made, to optimize fallthrough.
+  Condition EmitIsString(Register input,
+                         Register temp1,
+                         Label* is_not_string);
+
   // Emits optimized code for %_IsConstructCall().
   // Caller should branch on equal condition.
   void EmitIsConstructCall(Register temp);
@@ -289,6 +296,15 @@ class LCodeGen BASE_EMBEDDED {
                                        Register object,
                                        Handle<Map> type,
                                        Handle<String> name);
+
+  // Emits optimized code to deep-copy the contents of statically known
+  // object graphs (e.g. object literal boilerplate).
+  void EmitDeepCopy(Handle<JSObject> object,
+                    Register result,
+                    Register source,
+                    int* offset);
+
+  void EnsureSpaceForLazyDeopt();
 
   LChunk* const chunk_;
   MacroAssembler* const masm_;
@@ -306,13 +322,7 @@ class LCodeGen BASE_EMBEDDED {
   TranslationBuffer translations_;
   ZoneList<LDeferredCode*> deferred_;
   int osr_pc_offset_;
-
-  struct DeoptimizationRelocSize {
-    int min_size;
-    int last_pc_offset;
-  };
-
-  DeoptimizationRelocSize deoptimization_reloc_size;
+  int last_lazy_deopt_pc_;
 
   // Builder that keeps track of safepoints in the code. The table
   // itself is emitted at the end of the generated code.

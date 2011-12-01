@@ -57,6 +57,12 @@ var renderingStartTime = void 0;
 var scene = void 0;
 var pausePlot = void 0;
 var splayTree = void 0;
+var numberOfFrames = 0;
+var sumOfSquaredPauses = 0;
+var benchmarkStartTime = void 0;
+var benchmarkTimeLimit = void 0;
+var autoScale = void 0;
+var pauseDistribution = [];
 
 
 function Point(x, y, z, payload) {
@@ -188,7 +194,7 @@ function ModifyPointsSet() {
 }
 
 
-function PausePlot(width, height, size) {
+function PausePlot(width, height, size, scale) {
   var canvas = document.createElement("canvas");
   canvas.width = this.width = width;
   canvas.height = this.height = height;
@@ -196,7 +202,14 @@ function PausePlot(width, height, size) {
 
   this.ctx = canvas.getContext('2d');
 
-  this.maxPause = 0;
+  if (typeof scale !== "number") {
+    this.autoScale = true;
+    this.maxPause = 0;
+  } else {
+    this.autoScale = false;
+    this.maxPause = scale;
+  }
+
   this.size = size;
 
   // Initialize cyclic buffer for pauses.
@@ -243,18 +256,21 @@ PausePlot.prototype.iteratePauses = function (f) {
 
 PausePlot.prototype.draw = function () {
   var first = null;
-  this.iteratePauses(function (i, v) {
-    if (first === null) {
-      first = v;
-    }
-    this.maxPause = Math.max(v, this.maxPause);
-  });
+
+  if (this.autoScale) {
+    this.iteratePauses(function (i, v) {
+      if (first === null) {
+        first = v;
+      }
+      this.maxPause = Math.max(v, this.maxPause);
+    });
+  }
 
   var dx = this.width / this.size;
   var dy = this.height / this.maxPause;
 
   this.ctx.save();
-  this.ctx.clearRect(0, 0, 480, 240);
+  this.ctx.clearRect(0, 0, this.width, this.height);
   this.ctx.beginPath();
   this.ctx.moveTo(1, dy * this.pauses[this.start]);
   var p = first;
@@ -343,9 +359,43 @@ Scene.prototype.draw = function () {
 };
 
 
+function updateStats(pause) {
+  numberOfFrames++;
+  if (pause > 20) {
+    sumOfSquaredPauses += (pause - 20) * (pause - 20);
+  }
+  pauseDistribution[Math.floor(pause / 10)] |= 0;
+  pauseDistribution[Math.floor(pause / 10)]++;
+}
+
+
+function renderStats() {
+  var msg = document.createElement("p");
+  msg.innerHTML = "Score " +
+    Math.round(numberOfFrames * 1000 / sumOfSquaredPauses);
+  var table = document.createElement("table");
+  table.align = "center";
+  for (var i = 0; i < pauseDistribution.length; i++) {
+    if (pauseDistribution[i] > 0) {
+      var row = document.createElement("tr");
+      var time = document.createElement("td");
+      var count = document.createElement("td");
+      time.innerHTML = i*10 + "-" + (i+1)*10 + "ms";
+      count.innerHTML = " => " + pauseDistribution[i];
+      row.appendChild(time);
+      row.appendChild(count);
+      table.appendChild(row);
+    }
+  }
+  div.appendChild(msg);
+  div.appendChild(table);
+}
+
+
 function render() {
   if (typeof renderingStartTime === 'undefined') {
     renderingStartTime = Date.now();
+    benchmarkStartTime = renderingStartTime;
   }
 
   ModifyPointsSet();
@@ -359,13 +409,68 @@ function render() {
 
   pausePlot.draw();
 
+  updateStats(pause);
+
   div.innerHTML =
       livePoints.count + "/" + dyingPoints.count + " " +
-      pause + "(max = " + pausePlot.maxPause + ") ms" ;
+      pause + "(max = " + pausePlot.maxPause + ") ms " +
+      numberOfFrames + " frames";
 
-  // Schedule next frame.
-  requestAnimationFrame(render);
+  if (renderingEndTime < benchmarkStartTime + benchmarkTimeLimit) {
+    // Schedule next frame.
+    requestAnimationFrame(render);
+  } else {
+    renderStats();
+  }
 }
+
+
+function Form() {
+  function create(tag) { return document.createElement(tag); }
+  function text(value) { return document.createTextNode(value); }
+
+  this.form = create("form");
+  this.form.setAttribute("action", "javascript:start()");
+
+  var table = create("table");
+  table.setAttribute("style", "margin-left: auto; margin-right: auto;");
+
+  function col(a) {
+    var td = create("td");
+    td.appendChild(a);
+    return td;
+  }
+
+  function row(a, b) {
+    var tr = create("tr");
+    tr.appendChild(col(a));
+    tr.appendChild(col(b));
+    return tr;
+  }
+
+  this.timelimit = create("input");
+  this.timelimit.setAttribute("value", "60");
+
+  table.appendChild(row(text("Time limit in seconds"), this.timelimit));
+
+  this.autoscale = create("input");
+  this.autoscale.setAttribute("type", "checkbox");
+  this.autoscale.setAttribute("checked", "true");
+  table.appendChild(row(text("Autoscale pauses plot"), this.autoscale));
+
+  var button = create("input");
+  button.setAttribute("type", "submit");
+  button.setAttribute("value", "Start");
+  this.form.appendChild(table);
+  this.form.appendChild(button);
+
+  document.body.appendChild(this.form);
+}
+
+
+Form.prototype.remove = function () {
+  document.body.removeChild(this.form);
+};
 
 
 function init() {
@@ -379,9 +484,15 @@ function init() {
   div = document.createElement("div");
   document.body.appendChild(div);
 
-  pausePlot = new PausePlot(480, 240, 160);
+  pausePlot = new PausePlot(480, autoScale ? 240 : 500, 160, autoScale ? void 0 : 500);
 }
 
+function start() {
+  benchmarkTimeLimit = form.timelimit.value * 1000;
+  autoScale = form.autoscale.checked;
+  form.remove();
+  init();
+  render();
+}
 
-init();
-render();
+var form = new Form();

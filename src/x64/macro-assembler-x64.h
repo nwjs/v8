@@ -50,14 +50,14 @@ enum AllocationFlags {
 // Default scratch register used by MacroAssembler (and other code that needs
 // a spare register). The register isn't callee save, and not used by the
 // function calling convention.
-static const Register kScratchRegister = { 10 };      // r10.
-static const Register kSmiConstantRegister = { 12 };  // r12 (callee save).
-static const Register kRootRegister = { 13 };         // r13 (callee save).
+const Register kScratchRegister = { 10 };      // r10.
+const Register kSmiConstantRegister = { 12 };  // r12 (callee save).
+const Register kRootRegister = { 13 };         // r13 (callee save).
 // Value of smi in kSmiConstantRegister.
-static const int kSmiConstantRegisterValue = 1;
+const int kSmiConstantRegisterValue = 1;
 // Actual value of root register is offset from the root array's start
 // to take advantage of negitive 8-bit displacement values.
-static const int kRootRegisterBias = 128;
+const int kRootRegisterBias = 128;
 
 // Convenience for platform-independent signatures.
 typedef Operand MemOperand;
@@ -256,8 +256,8 @@ class MacroAssembler: public Assembler {
 
   // Notify the garbage collector that we wrote a pointer into a fixed array.
   // |array| is the array being stored into, |value| is the
-  // object being stored.  |index| is the array index represented as a
-  // Smi. All registers are clobbered by the operation RecordWriteArray
+  // object being stored.  |index| is the array index represented as a non-smi.
+  // All registers are clobbered by the operation RecordWriteArray
   // filters out smis so it does not update the write barrier if the
   // value is a smi.
   void RecordWriteArray(
@@ -319,9 +319,9 @@ class MacroAssembler: public Assembler {
   void LoadFromSafepointRegisterSlot(Register dst, Register src);
 
   void InitializeRootRegister() {
-    ExternalReference roots_address =
-        ExternalReference::roots_address(isolate());
-    movq(kRootRegister, roots_address);
+    ExternalReference roots_array_start =
+        ExternalReference::roots_array_start(isolate());
+    movq(kRootRegister, roots_array_start);
     addq(kRootRegister, Immediate(kRootRegisterBias));
   }
 
@@ -357,7 +357,7 @@ class MacroAssembler: public Assembler {
                       const CallWrapper& call_wrapper,
                       CallKind call_kind);
 
-  void InvokeFunction(JSFunction* function,
+  void InvokeFunction(Handle<JSFunction> function,
                       const ParameterCount& actual,
                       InvokeFlag flag,
                       const CallWrapper& call_wrapper,
@@ -726,6 +726,7 @@ class MacroAssembler: public Assembler {
   void Push(Smi* smi);
   void Test(const Operand& dst, Smi* source);
 
+
   // ---------------------------------------------------------------------------
   // String macros.
 
@@ -770,6 +771,9 @@ class MacroAssembler: public Assembler {
 
   // Move if the registers are not identical.
   void Move(Register target, Register source);
+
+  // Bit-field support.
+  void TestBit(const Operand& dst, int bit_index);
 
   // Handle support
   void Move(Register dst, Handle<Object> source);
@@ -860,12 +864,12 @@ class MacroAssembler: public Assembler {
                                 Label::Distance distance = Label::kFar);
 
   // Check to see if maybe_number can be stored as a double in
-  // FastDoubleElements. If it can, store it at the index specified by key in
-  // the FastDoubleElements array elements, otherwise jump to fail.
-  // Note that key must not be smi-tagged.
+  // FastDoubleElements. If it can, store it at the index specified by index in
+  // the FastDoubleElements array elements, otherwise jump to fail.  Note that
+  // index must not be smi-tagged.
   void StoreNumberToDoubleElements(Register maybe_number,
                                    Register elements,
-                                   Register key,
+                                   Register index,
                                    XMMRegister xmm_scratch,
                                    Label* fail);
 
@@ -929,9 +933,10 @@ class MacroAssembler: public Assembler {
   // ---------------------------------------------------------------------------
   // Exception handling
 
-  // Push a new try handler and link into try handler chain.  The return
-  // address must be pushed before calling this helper.
-  void PushTryHandler(CodeLocation try_location, HandlerType type);
+  // Push a new try handler and link it into try handler chain.
+  void PushTryHandler(CodeLocation try_location,
+                      HandlerType type,
+                      int handler_index);
 
   // Unlink the stack handler on top of the stack from the try handler chain.
   void PopTryHandler();
@@ -1074,7 +1079,8 @@ class MacroAssembler: public Assembler {
   // clobbered.
   void TryGetFunctionPrototype(Register function,
                                Register result,
-                               Label* miss);
+                               Label* miss,
+                               bool miss_on_bound_function = false);
 
   // Generates code for reporting that an illegal operation has
   // occurred.
@@ -1102,18 +1108,8 @@ class MacroAssembler: public Assembler {
   // Call a code stub.
   void CallStub(CodeStub* stub, unsigned ast_id = kNoASTId);
 
-  // Call a code stub and return the code object called.  Try to generate
-  // the code if necessary.  Do not perform a GC but instead return a retry
-  // after GC failure.
-  MUST_USE_RESULT MaybeObject* TryCallStub(CodeStub* stub);
-
   // Tail call a code stub (jump).
   void TailCallStub(CodeStub* stub);
-
-  // Tail call a code stub (jump) and return the code object called.  Try to
-  // generate the code if necessary.  Do not perform a GC but instead return
-  // a retry after GC failure.
-  MUST_USE_RESULT MaybeObject* TryTailCallStub(CodeStub* stub);
 
   // Return from a code stub after popping its arguments.
   void StubReturn(int argc);
@@ -1124,18 +1120,8 @@ class MacroAssembler: public Assembler {
   // Call a runtime function and save the value of XMM registers.
   void CallRuntimeSaveDoubles(Runtime::FunctionId id);
 
-  // Call a runtime function, returning the CodeStub object called.
-  // Try to generate the stub code if necessary.  Do not perform a GC
-  // but instead return a retry after GC failure.
-  MUST_USE_RESULT MaybeObject* TryCallRuntime(const Runtime::Function* f,
-                                              int num_arguments);
-
   // Convenience function: Same as above, but takes the fid instead.
   void CallRuntime(Runtime::FunctionId id, int num_arguments);
-
-  // Convenience function: Same as above, but takes the fid instead.
-  MUST_USE_RESULT MaybeObject* TryCallRuntime(Runtime::FunctionId id,
-                                              int num_arguments);
 
   // Convenience function: call an external reference.
   void CallExternalReference(const ExternalReference& ext,
@@ -1148,38 +1134,26 @@ class MacroAssembler: public Assembler {
                                  int num_arguments,
                                  int result_size);
 
-  MUST_USE_RESULT MaybeObject* TryTailCallExternalReference(
-      const ExternalReference& ext, int num_arguments, int result_size);
-
   // Convenience function: tail call a runtime routine (jump).
   void TailCallRuntime(Runtime::FunctionId fid,
                        int num_arguments,
                        int result_size);
 
-  MUST_USE_RESULT  MaybeObject* TryTailCallRuntime(Runtime::FunctionId fid,
-                                                   int num_arguments,
-                                                   int result_size);
-
   // Jump to a runtime routine.
   void JumpToExternalReference(const ExternalReference& ext, int result_size);
 
-  // Jump to a runtime routine.
-  MaybeObject* TryJumpToExternalReference(const ExternalReference& ext,
-                                          int result_size);
-
-  // Prepares stack to put arguments (aligns and so on).
-  // WIN64 calling convention requires to put the pointer to the return value
-  // slot into rcx (rcx must be preserverd until TryCallApiFunctionAndReturn).
-  // Saves context (rsi). Clobbers rax. Allocates arg_stack_space * kPointerSize
+  // Prepares stack to put arguments (aligns and so on).  WIN64 calling
+  // convention requires to put the pointer to the return value slot into
+  // rcx (rcx must be preserverd until CallApiFunctionAndReturn).  Saves
+  // context (rsi).  Clobbers rax.  Allocates arg_stack_space * kPointerSize
   // inside the exit frame (not GCed) accessible via StackSpaceOperand.
   void PrepareCallApiFunction(int arg_stack_space);
 
-  // Calls an API function. Allocates HandleScope, extracts
-  // returned value from handle and propagates exceptions.
-  // Clobbers r14, r15, rbx and caller-save registers. Restores context.
-  // On return removes stack_space * kPointerSize (GCed).
-  MUST_USE_RESULT MaybeObject* TryCallApiFunctionAndReturn(
-      ApiFunction* function, int stack_space);
+  // Calls an API function.  Allocates HandleScope, extracts returned value
+  // from handle and propagates exceptions.  Clobbers r14, r15, rbx and
+  // caller-save registers.  Restores context.  On return removes
+  // stack_space * kPointerSize (GCed).
+  void CallApiFunctionAndReturn(Address function_address, int stack_space);
 
   // Before calling a C-function from generated code, align arguments on stack.
   // After aligning the frame, arguments must be stored in esp[0], esp[4],
@@ -1353,6 +1327,10 @@ class MacroAssembler: public Assembler {
                           Register bitmap_reg,
                           Register mask_reg);
 
+  // Helper for throwing exceptions.  Compute a handler address and jump to
+  // it.  See the implementation for register usage.
+  void JumpToHandlerEntry();
+
   // Compute memory operands for safepoint stack slots.
   Operand SafepointRegisterSlot(Register reg);
   static int SafepointRegisterStackIndex(int reg_code) {
@@ -1389,32 +1367,32 @@ class CodePatcher {
 // Static helper functions.
 
 // Generate an Operand for loading a field from an object.
-static inline Operand FieldOperand(Register object, int offset) {
+inline Operand FieldOperand(Register object, int offset) {
   return Operand(object, offset - kHeapObjectTag);
 }
 
 
 // Generate an Operand for loading an indexed field from an object.
-static inline Operand FieldOperand(Register object,
-                                   Register index,
-                                   ScaleFactor scale,
-                                   int offset) {
+inline Operand FieldOperand(Register object,
+                            Register index,
+                            ScaleFactor scale,
+                            int offset) {
   return Operand(object, index, scale, offset - kHeapObjectTag);
 }
 
 
-static inline Operand ContextOperand(Register context, int index) {
+inline Operand ContextOperand(Register context, int index) {
   return Operand(context, Context::SlotOffset(index));
 }
 
 
-static inline Operand GlobalObjectOperand() {
+inline Operand GlobalObjectOperand() {
   return ContextOperand(rsi, Context::GLOBAL_INDEX);
 }
 
 
 // Provides access to exit frame stack space (not GCed).
-static inline Operand StackSpaceOperand(int index) {
+inline Operand StackSpaceOperand(int index) {
 #ifdef _WIN64
   const int kShaddowSpace = 4;
   return Operand(rsp, (index + kShaddowSpace) * kPointerSize);

@@ -39,12 +39,12 @@ namespace internal {
 // Static helper functions
 
 // Generate a MemOperand for loading a field from an object.
-static inline MemOperand FieldMemOperand(Register object, int offset) {
+inline MemOperand FieldMemOperand(Register object, int offset) {
   return MemOperand(object, offset - kHeapObjectTag);
 }
 
 
-static inline Operand SmiUntagOperand(Register object) {
+inline Operand SmiUntagOperand(Register object) {
   return Operand(object, ASR, kSmiTagSize);
 }
 
@@ -320,8 +320,11 @@ class MacroAssembler: public Assembler {
   }
 
   // Push four registers.  Pushes leftmost register first (to highest address).
-  void Push(Register src1, Register src2,
-            Register src3, Register src4, Condition cond = al) {
+  void Push(Register src1,
+            Register src2,
+            Register src3,
+            Register src4,
+            Condition cond = al) {
     ASSERT(!src1.is(src2));
     ASSERT(!src2.is(src3));
     ASSERT(!src1.is(src3));
@@ -356,6 +359,57 @@ class MacroAssembler: public Assembler {
       ldm(ia_w, sp, src1.bit() | src2.bit(), cond);
     } else {
       ldr(src2, MemOperand(sp, 4, PostIndex), cond);
+      ldr(src1, MemOperand(sp, 4, PostIndex), cond);
+    }
+  }
+
+  // Pop three registers.  Pops rightmost register first (from lower address).
+  void Pop(Register src1, Register src2, Register src3, Condition cond = al) {
+    ASSERT(!src1.is(src2));
+    ASSERT(!src2.is(src3));
+    ASSERT(!src1.is(src3));
+    if (src1.code() > src2.code()) {
+      if (src2.code() > src3.code()) {
+        ldm(ia_w, sp, src1.bit() | src2.bit() | src3.bit(), cond);
+      } else {
+        ldr(src3, MemOperand(sp, 4, PostIndex), cond);
+        ldm(ia_w, sp, src1.bit() | src2.bit(), cond);
+      }
+    } else {
+      Pop(src2, src3, cond);
+      str(src1, MemOperand(sp, 4, PostIndex), cond);
+    }
+  }
+
+  // Pop four registers.  Pops rightmost register first (from lower address).
+  void Pop(Register src1,
+           Register src2,
+           Register src3,
+           Register src4,
+           Condition cond = al) {
+    ASSERT(!src1.is(src2));
+    ASSERT(!src2.is(src3));
+    ASSERT(!src1.is(src3));
+    ASSERT(!src1.is(src4));
+    ASSERT(!src2.is(src4));
+    ASSERT(!src3.is(src4));
+    if (src1.code() > src2.code()) {
+      if (src2.code() > src3.code()) {
+        if (src3.code() > src4.code()) {
+          ldm(ia_w,
+              sp,
+              src1.bit() | src2.bit() | src3.bit() | src4.bit(),
+              cond);
+        } else {
+          ldr(src4, MemOperand(sp, 4, PostIndex), cond);
+          ldm(ia_w, sp, src1.bit() | src2.bit() | src3.bit(), cond);
+        }
+      } else {
+        Pop(src3, src4, cond);
+        ldm(ia_w, sp, src1.bit() | src2.bit(), cond);
+      }
+    } else {
+      Pop(src2, src3, src4, cond);
       ldr(src1, MemOperand(sp, 4, PostIndex), cond);
     }
   }
@@ -466,7 +520,7 @@ class MacroAssembler: public Assembler {
                       const CallWrapper& call_wrapper,
                       CallKind call_kind);
 
-  void InvokeFunction(JSFunction* function,
+  void InvokeFunction(Handle<JSFunction> function,
                       const ParameterCount& actual,
                       InvokeFlag flag,
                       CallKind call_kind);
@@ -495,9 +549,9 @@ class MacroAssembler: public Assembler {
   // Exception handling
 
   // Push a new try handler and link into try handler chain.
-  // The return address must be passed in register lr.
-  // On exit, r0 contains TOS (code slot).
-  void PushTryHandler(CodeLocation try_location, HandlerType type);
+  void PushTryHandler(CodeLocation try_location,
+                      HandlerType type,
+                      int handler_index);
 
   // Unlink the stack handler on top of the stack from the try handler chain.
   // Must preserve the result register.
@@ -672,7 +726,8 @@ class MacroAssembler: public Assembler {
   void TryGetFunctionPrototype(Register function,
                                Register result,
                                Register scratch,
-                               Label* miss);
+                               Label* miss,
+                               bool miss_on_bound_function = false);
 
   // Compare object type for heap object.  heap_object contains a non-Smi
   // whose object type should be compared with the given type.  This both
@@ -871,19 +926,8 @@ class MacroAssembler: public Assembler {
   // Call a code stub.
   void CallStub(CodeStub* stub, Condition cond = al);
 
-  // Call a code stub and return the code object called.  Try to generate
-  // the code if necessary.  Do not perform a GC but instead return a retry
-  // after GC failure.
-  MUST_USE_RESULT MaybeObject* TryCallStub(CodeStub* stub, Condition cond = al);
-
   // Call a code stub.
   void TailCallStub(CodeStub* stub, Condition cond = al);
-
-  // Tail call a code stub (jump) and return the code object called.  Try to
-  // generate the code if necessary.  Do not perform a GC but instead return
-  // a retry after GC failure.
-  MUST_USE_RESULT MaybeObject* TryTailCallStub(CodeStub* stub,
-                                               Condition cond = al);
 
   // Call a runtime routine.
   void CallRuntime(const Runtime::Function* f, int num_arguments);
@@ -902,12 +946,6 @@ class MacroAssembler: public Assembler {
   void TailCallExternalReference(const ExternalReference& ext,
                                  int num_arguments,
                                  int result_size);
-
-  // Tail call of a runtime routine (jump). Try to generate the code if
-  // necessary. Do not perform a GC but instead return a retry after GC
-  // failure.
-  MUST_USE_RESULT MaybeObject* TryTailCallExternalReference(
-      const ExternalReference& ext, int num_arguments, int result_size);
 
   // Convenience function: tail call a runtime routine (jump).
   void TailCallRuntime(Runtime::FunctionId fid,
@@ -957,17 +995,14 @@ class MacroAssembler: public Assembler {
 
   void GetCFunctionDoubleResult(const DoubleRegister dst);
 
-  // Calls an API function. Allocates HandleScope, extracts returned value
-  // from handle and propagates exceptions. Restores context.
-  // stack_space - space to be unwound on exit (includes the call js
-  // arguments space and the additional space allocated for the fast call).
-  MaybeObject* TryCallApiFunctionAndReturn(ExternalReference function,
-                                           int stack_space);
+  // Calls an API function.  Allocates HandleScope, extracts returned value
+  // from handle and propagates exceptions.  Restores context.  stack_space
+  // - space to be unwound on exit (includes the call js arguments space and
+  // the additional space allocated for the fast call).
+  void CallApiFunctionAndReturn(ExternalReference function, int stack_space);
 
   // Jump to a runtime routine.
   void JumpToExternalReference(const ExternalReference& builtin);
-
-  MaybeObject* TryJumpToExternalReference(const ExternalReference& ext);
 
   // Invoke specified builtin JavaScript function. Adds an entry to
   // the unresolved list if the name does not resolve.
@@ -1208,6 +1243,10 @@ class MacroAssembler: public Assembler {
                           Register bitmap_reg,
                           Register mask_reg);
 
+  // Helper for throwing exceptions.  Compute a handler address and jump to
+  // it.  See the implementation for register usage.
+  void JumpToHandlerEntry();
+
   // Compute memory operands for safepoint stack slots.
   static int SafepointRegisterStackIndex(int reg_code);
   MemOperand SafepointRegisterSlot(Register reg);
@@ -1261,12 +1300,12 @@ class CodePatcher {
 // -----------------------------------------------------------------------------
 // Static helper functions.
 
-static MemOperand ContextOperand(Register context, int index) {
+inline MemOperand ContextOperand(Register context, int index) {
   return MemOperand(context, Context::SlotOffset(index));
 }
 
 
-static inline MemOperand GlobalObjectOperand()  {
+inline MemOperand GlobalObjectOperand()  {
   return ContextOperand(cp, Context::GLOBAL_INDEX);
 }
 

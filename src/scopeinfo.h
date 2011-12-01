@@ -35,72 +35,6 @@
 namespace v8 {
 namespace internal {
 
-// Scope information represents information about a functions's
-// scopes (currently only one, because we don't do any inlining)
-// and the allocation of the scope's variables. Scope information
-// is stored in a compressed form in FixedArray objects and is used
-// at runtime (stack dumps, deoptimization, etc.).
-//
-// Historical note: In other VMs built by this team, ScopeInfo was
-// usually called DebugInfo since the information was used (among
-// other things) for on-demand debugging (Self, Smalltalk). However,
-// DebugInfo seems misleading, since this information is primarily used
-// in debugging-unrelated contexts.
-
-// Forward defined as
-// template <class Allocator = FreeStoreAllocationPolicy> class ScopeInfo;
-template<class Allocator>
-class ScopeInfo BASE_EMBEDDED {
- public:
-  // Create a ScopeInfo instance from a scope.
-  explicit ScopeInfo(Scope* scope);
-
-  // Create a ScopeInfo instance from SerializedScopeInfo.
-  explicit ScopeInfo(SerializedScopeInfo* data);
-
-  // Creates a SerializedScopeInfo holding the serialized scope info.
-  Handle<SerializedScopeInfo> Serialize();
-
-  // --------------------------------------------------------------------------
-  // Lookup
-
-  Handle<String> function_name() const { return function_name_; }
-
-  Handle<String> parameter_name(int i) const { return parameters_[i]; }
-  int number_of_parameters() const { return parameters_.length(); }
-
-  Handle<String> stack_slot_name(int i) const { return stack_slots_[i]; }
-  int number_of_stack_slots() const { return stack_slots_.length(); }
-
-  Handle<String> context_slot_name(int i) const {
-    return context_slots_[i - Context::MIN_CONTEXT_SLOTS];
-  }
-  int number_of_context_slots() const {
-    int l = context_slots_.length();
-    return l == 0 ? 0 : l + Context::MIN_CONTEXT_SLOTS;
-  }
-
-  Handle<String> LocalName(int i) const;
-  int NumberOfLocals() const;
-
-  // --------------------------------------------------------------------------
-  // Debugging support
-
-#ifdef DEBUG
-  void Print();
-#endif
-
- private:
-  Handle<String> function_name_;
-  bool calls_eval_;
-  bool is_strict_mode_;
-  List<Handle<String>, Allocator > parameters_;
-  List<Handle<String>, Allocator > stack_slots_;
-  List<Handle<String>, Allocator > context_slots_;
-  List<VariableMode, Allocator > context_modes_;
-};
-
-
 // Cache for mapping (data, property name) into context slot index.
 // The cache contains both positive and negative results.
 // Slot index equals -1 means the property is absent.
@@ -111,12 +45,14 @@ class ContextSlotCache {
   // If absent, kNotFound is returned.
   int Lookup(Object* data,
              String* name,
-             VariableMode* mode);
+             VariableMode* mode,
+             InitializationFlag* init_flag);
 
   // Update an element in the cache.
   void Update(Object* data,
               String* name,
               VariableMode mode,
+              InitializationFlag init_flag,
               int slot_index);
 
   // Clear the cache.
@@ -139,6 +75,7 @@ class ContextSlotCache {
   void ValidateEntry(Object* data,
                      String* name,
                      VariableMode mode,
+                     InitializationFlag init_flag,
                      int slot_index);
 #endif
 
@@ -149,11 +86,17 @@ class ContextSlotCache {
   };
 
   struct Value {
-    Value(VariableMode mode, int index) {
+    Value(VariableMode mode,
+          InitializationFlag init_flag,
+          int index) {
       ASSERT(ModeField::is_valid(mode));
+      ASSERT(InitField::is_valid(init_flag));
       ASSERT(IndexField::is_valid(index));
-      value_ = ModeField::encode(mode) | IndexField::encode(index);
+      value_ = ModeField::encode(mode) |
+          IndexField::encode(index) |
+          InitField::encode(init_flag);
       ASSERT(mode == this->mode());
+      ASSERT(init_flag == this->initialization_flag());
       ASSERT(index == this->index());
     }
 
@@ -163,12 +106,18 @@ class ContextSlotCache {
 
     VariableMode mode() { return ModeField::decode(value_); }
 
+    InitializationFlag initialization_flag() {
+      return InitField::decode(value_);
+    }
+
     int index() { return IndexField::decode(value_); }
 
     // Bit fields in value_ (type, shift, size). Must be public so the
     // constants can be embedded in generated code.
-    class ModeField:  public BitField<VariableMode, 0, 3> {};
-    class IndexField: public BitField<int,          3, 32-3> {};
+    class ModeField:  public BitField<VariableMode,       0, 3> {};
+    class InitField:  public BitField<InitializationFlag, 3, 1> {};
+    class IndexField: public BitField<int,                4, 32-4> {};
+
    private:
     uint32_t value_;
   };

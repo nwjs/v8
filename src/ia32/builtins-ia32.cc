@@ -719,7 +719,6 @@ void Builtins::Generate_FunctionCall(MacroAssembler* masm) {
     __ test(edx, edx);
     __ j(zero, &function);
     __ Set(ebx, Immediate(0));
-    __ SetCallKind(ecx, CALL_AS_METHOD);
     __ cmp(edx, Immediate(1));
     __ j(not_equal, &non_proxy);
 
@@ -727,11 +726,13 @@ void Builtins::Generate_FunctionCall(MacroAssembler* masm) {
     __ push(edi);  // re-add proxy object as additional argument
     __ push(edx);
     __ inc(eax);
+    __ SetCallKind(ecx, CALL_AS_FUNCTION);
     __ GetBuiltinEntry(edx, Builtins::CALL_FUNCTION_PROXY);
     __ jmp(masm->isolate()->builtins()->ArgumentsAdaptorTrampoline(),
            RelocInfo::CODE_TARGET);
 
     __ bind(&non_proxy);
+    __ SetCallKind(ecx, CALL_AS_METHOD);
     __ GetBuiltinEntry(edx, Builtins::CALL_NON_FUNCTION);
     __ jmp(masm->isolate()->builtins()->ArgumentsAdaptorTrampoline(),
            RelocInfo::CODE_TARGET);
@@ -915,10 +916,6 @@ void Builtins::Generate_FunctionApply(MacroAssembler* masm) {
 }
 
 
-// Number of empty elements to allocate for an empty array.
-static const int kPreallocatedArrayElements = 4;
-
-
 // Allocate an empty JSArray. The allocated array is put into the result
 // register. If the parameter initial_capacity is larger than zero an elements
 // backing store is allocated with this size and filled with the hole values.
@@ -929,10 +926,9 @@ static void AllocateEmptyJSArray(MacroAssembler* masm,
                                  Register scratch1,
                                  Register scratch2,
                                  Register scratch3,
-                                 int initial_capacity,
                                  Label* gc_required) {
-  ASSERT(initial_capacity >= 0);
-
+  const int initial_capacity = JSArray::kPreallocatedArrayElements;
+  STATIC_ASSERT(initial_capacity >= 0);
   // Load the initial map from the array function.
   __ mov(scratch1, FieldOperand(array_function,
                                 JSFunction::kPrototypeOrInitialMapOffset));
@@ -990,7 +986,6 @@ static void AllocateEmptyJSArray(MacroAssembler* masm,
   // Fill the FixedArray with the hole value. Inline the code if short.
   // Reconsider loop unfolding if kPreallocatedArrayElements gets changed.
   static const int kLoopUnfoldLimit = 4;
-  STATIC_ASSERT(kPreallocatedArrayElements <= kLoopUnfoldLimit);
   if (initial_capacity <= kLoopUnfoldLimit) {
     // Use a scratch register here to have only one reloc info when unfolding
     // the loop.
@@ -1002,13 +997,17 @@ static void AllocateEmptyJSArray(MacroAssembler* masm,
     }
   } else {
     Label loop, entry;
+    __ mov(scratch2, Immediate(initial_capacity));
     __ jmp(&entry);
     __ bind(&loop);
-    __ mov(Operand(scratch1, 0), factory->the_hole_value());
-    __ add(scratch1, Immediate(kPointerSize));
+    __ mov(FieldOperand(scratch1,
+                        scratch2,
+                        times_pointer_size,
+                        FixedArray::kHeaderSize),
+           factory->the_hole_value());
     __ bind(&entry);
-    __ cmp(scratch1, scratch2);
-    __ j(below, &loop);
+    __ dec(scratch2);
+    __ j(not_sign, &loop);
   }
 }
 
@@ -1153,7 +1152,6 @@ static void ArrayNativeCode(MacroAssembler* masm,
                        ebx,
                        ecx,
                        edi,
-                       kPreallocatedArrayElements,
                        &prepare_generic_code_call);
   __ IncrementCounter(masm->isolate()->counters()->array_function_native(), 1);
   __ pop(ebx);
@@ -1182,7 +1180,7 @@ static void ArrayNativeCode(MacroAssembler* masm,
     __ mov(eax, Operand(esp, i * kPointerSize));
     __ mov(Operand(esp, (i + 1) * kPointerSize), eax);
   }
-  __ add(esp, Immediate(2 * kPointerSize));  // Drop two stack slots.
+  __ Drop(2);  // Drop two stack slots.
   __ push(Immediate(0));  // Treat this as a call with argc of zero.
   __ jmp(&empty_array);
 

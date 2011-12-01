@@ -40,12 +40,30 @@ namespace v8 {
 namespace internal {
 
 void PromotionQueue::insert(HeapObject* target, int size) {
+  if (emergency_stack_ != NULL) {
+    emergency_stack_->Add(Entry(target, size));
+    return;
+  }
+
   if (NewSpacePage::IsAtStart(reinterpret_cast<Address>(rear_))) {
     NewSpacePage* rear_page =
         NewSpacePage::FromAddress(reinterpret_cast<Address>(rear_));
     ASSERT(!rear_page->prev_page()->is_anchor());
     rear_ = reinterpret_cast<intptr_t*>(rear_page->prev_page()->body_limit());
+    ActivateGuardIfOnTheSamePage();
   }
+
+  if (guard_) {
+    ASSERT(GetHeadPage() ==
+           Page::FromAllocationTop(reinterpret_cast<Address>(limit_)));
+
+    if ((rear_ - 2) < limit_) {
+      RelocateQueueHead();
+      emergency_stack_->Add(Entry(target, size));
+      return;
+    }
+  }
+
   *(--rear_) = reinterpret_cast<intptr_t>(target);
   *(--rear_) = size;
   // Assert no overflow into live objects.
@@ -53,6 +71,13 @@ void PromotionQueue::insert(HeapObject* target, int size) {
   SemiSpace::AssertValidRange(HEAP->new_space()->top(),
                               reinterpret_cast<Address>(rear_));
 #endif
+}
+
+
+void PromotionQueue::ActivateGuardIfOnTheSamePage() {
+  guard_ = guard_ ||
+      heap_->new_space()->active_space()->current_page()->address() ==
+      GetHeadPage()->address();
 }
 
 
@@ -204,19 +229,21 @@ MaybeObject* Heap::AllocateRaw(int size_in_bytes,
 }
 
 
-MaybeObject* Heap::NumberFromInt32(int32_t value) {
+MaybeObject* Heap::NumberFromInt32(
+    int32_t value, PretenureFlag pretenure) {
   if (Smi::IsValid(value)) return Smi::FromInt(value);
   // Bypass NumberFromDouble to avoid various redundant checks.
-  return AllocateHeapNumber(FastI2D(value));
+  return AllocateHeapNumber(FastI2D(value), pretenure);
 }
 
 
-MaybeObject* Heap::NumberFromUint32(uint32_t value) {
+MaybeObject* Heap::NumberFromUint32(
+    uint32_t value, PretenureFlag pretenure) {
   if ((int32_t)value >= 0 && Smi::IsValid((int32_t)value)) {
     return Smi::FromInt((int32_t)value);
   }
   // Bypass NumberFromDouble to avoid various redundant checks.
-  return AllocateHeapNumber(FastUI2D(value));
+  return AllocateHeapNumber(FastUI2D(value), pretenure);
 }
 
 
@@ -231,10 +258,8 @@ void Heap::FinalizeExternalString(String* string) {
   // Dispose of the C++ object if it has not already been disposed.
   if (*resource_addr != NULL) {
     (*resource_addr)->Dispose();
+    *resource_addr = NULL;
   }
-
-  // Clear the resource pointer in the string.
-  *resource_addr = NULL;
 }
 
 
@@ -359,7 +384,6 @@ AllocationSpace Heap::TargetSpaceId(InstanceType type) {
 
 
 void Heap::CopyBlock(Address dst, Address src, int byte_size) {
-  ASSERT(IsAligned(byte_size, kPointerSize));
   CopyWords(reinterpret_cast<Object**>(dst),
             reinterpret_cast<Object**>(src),
             byte_size / kPointerSize);
@@ -572,11 +596,11 @@ void ExternalStringTable::Verify() {
 #ifdef DEBUG
   for (int i = 0; i < new_space_strings_.length(); ++i) {
     ASSERT(heap_->InNewSpace(new_space_strings_[i]));
-    ASSERT(new_space_strings_[i] != HEAP->raw_unchecked_null_value());
+    ASSERT(new_space_strings_[i] != HEAP->raw_unchecked_the_hole_value());
   }
   for (int i = 0; i < old_space_strings_.length(); ++i) {
     ASSERT(!heap_->InNewSpace(old_space_strings_[i]));
-    ASSERT(old_space_strings_[i] != HEAP->raw_unchecked_null_value());
+    ASSERT(old_space_strings_[i] != HEAP->raw_unchecked_the_hole_value());
   }
 #endif
 }
@@ -591,7 +615,9 @@ void ExternalStringTable::AddOldString(String* string) {
 
 void ExternalStringTable::ShrinkNewStrings(int position) {
   new_space_strings_.Rewind(position);
-  Verify();
+  if (FLAG_verify_heap) {
+    Verify();
+  }
 }
 
 

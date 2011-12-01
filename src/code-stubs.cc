@@ -119,7 +119,7 @@ Handle<Code> CodeStub::GetCode() {
     Handle<Code> new_object = factory->NewCode(
         desc, flags, masm.CodeObject(), NeedsImmovableCode());
     RecordCodeGeneration(*new_object, &masm);
-    FinishCode(*new_object);
+    FinishCode(new_object);
 
     // Update the dictionary and the root in Heap.
     Handle<NumberDictionary> dict =
@@ -136,47 +136,6 @@ Handle<Code> CodeStub::GetCode() {
 
   ASSERT(!NeedsImmovableCode() || heap->lo_space()->Contains(code));
   return Handle<Code>(code, isolate);
-}
-
-
-MaybeObject* CodeStub::TryGetCode() {
-  Code* code;
-  if (!FindCodeInCache(&code)) {
-    // Generate the new code.
-    MacroAssembler masm(Isolate::Current(), NULL, 256);
-    GenerateCode(&masm);
-    Heap* heap = masm.isolate()->heap();
-
-    // Create the code object.
-    CodeDesc desc;
-    masm.GetCode(&desc);
-
-    // Try to copy the generated code into a heap object.
-    Code::Flags flags = Code::ComputeFlags(
-        static_cast<Code::Kind>(GetCodeKind()),
-        GetICState());
-    Object* new_object;
-    { MaybeObject* maybe_new_object =
-          heap->CreateCode(desc, flags, masm.CodeObject());
-      if (!maybe_new_object->ToObject(&new_object)) return maybe_new_object;
-    }
-    code = Code::cast(new_object);
-    RecordCodeGeneration(code, &masm);
-    FinishCode(code);
-
-    // Try to update the code cache but do not fail if unable.
-    MaybeObject* maybe_new_object =
-        heap->code_stubs()->AtNumberPut(GetKey(), code);
-    if (maybe_new_object->ToObject(&new_object)) {
-      heap->public_set_code_stubs(NumberDictionary::cast(new_object));
-    } else if (MustBeInStubCache()) {
-      return maybe_new_object;
-    }
-
-    Activate(code);
-  }
-
-  return code;
 }
 
 
@@ -251,6 +210,14 @@ void InstanceofStub::PrintName(StringStream* stream) {
               args,
               inline_check,
               return_true_false_object);
+}
+
+
+void JSEntryStub::FinishCode(Handle<Code> code) {
+  Handle<FixedArray> handler_table =
+      code->GetIsolate()->factory()->NewFixedArray(1, TENURED);
+  handler_table->set(0, Smi::FromInt(handler_offset_));
+  code->set_handler_table(*handler_table);
 }
 
 
@@ -414,5 +381,30 @@ bool ToBooleanStub::Types::CanBeUndetectable() const {
       || Contains(ToBooleanStub::STRING);
 }
 
+
+void ElementsTransitionAndStoreStub::Generate(MacroAssembler* masm) {
+  Label fail;
+  if (!FLAG_trace_elements_transitions) {
+    if (to_ == FAST_ELEMENTS) {
+      if (from_ == FAST_SMI_ONLY_ELEMENTS) {
+        ElementsTransitionGenerator::GenerateSmiOnlyToObject(masm);
+      } else if (from_ == FAST_DOUBLE_ELEMENTS) {
+        ElementsTransitionGenerator::GenerateDoubleToObject(masm, &fail);
+      } else {
+        UNREACHABLE();
+      }
+      KeyedStoreStubCompiler::GenerateStoreFastElement(masm,
+                                                       is_jsarray_,
+                                                       FAST_ELEMENTS);
+    } else if (from_ == FAST_SMI_ONLY_ELEMENTS && to_ == FAST_DOUBLE_ELEMENTS) {
+      ElementsTransitionGenerator::GenerateSmiOnlyToDouble(masm, &fail);
+      KeyedStoreStubCompiler::GenerateStoreFastDoubleElement(masm, is_jsarray_);
+    } else {
+      UNREACHABLE();
+    }
+  }
+  masm->bind(&fail);
+  KeyedStoreIC::GenerateRuntimeSetProperty(masm, strict_mode_);
+}
 
 } }  // namespace v8::internal
