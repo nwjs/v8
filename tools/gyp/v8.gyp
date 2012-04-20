@@ -26,12 +26,17 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 {
+
   'includes': ['../../build/common.gypi'],
   'conditions': [
     ['use_system_v8==0', {
+      'variables': {
+        'component': 'shared_library',
+      },
       'targets': [
         {
           'target_name': 'v8',
+          #'type': 'shared_library',
           'dependencies_traverse': 1,
           'conditions': [
             ['want_separate_host_toolset==1', {

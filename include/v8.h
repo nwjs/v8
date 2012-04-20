@@ -457,13 +457,14 @@ class V8EXPORT HandleScope {
   // Faster version, uses HeapObject to obtain the current Isolate.
   static internal::Object** CreateHandle(internal::HeapObject* value);
 
+  void* operator new(size_t size);
+  void operator delete(void*, size_t);
+
  private:
   // Make it impossible to create heap-allocated or illegal handle
   // scopes by disallowing certain operations.
   HandleScope(const HandleScope&);
   void operator=(const HandleScope&);
-  void* operator new(size_t size);
-  void operator delete(void*, size_t);
 
   // This Data class is accessible internally as HandleScopeData through a
   // typedef in the ImplementationUtilities class.
