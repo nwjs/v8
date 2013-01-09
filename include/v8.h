@@ -1634,15 +1634,14 @@ class Object : public Value {
    * otherwise use a combination of GetInternalField, External::Cast and
    * External::Value.
    */
-  V8EXPORT V8_DEPRECATED(void* GetPointerFromInternalField(int index));
+  V8EXPORT void* GetPointerFromInternalField(int index);
 
   /**
    * Sets a native pointer in an internal field. Deprecated. If the pointer is
    * always 2-byte aligned, use SetAlignedPointerInInternalField instead,
    * otherwise use a combination of External::New and SetInternalField.
    */
-  V8_DEPRECATED(V8_INLINE(void SetPointerInInternalField(int index,
-                                                         void* value)));
+  V8_INLINE(void SetPointerInInternalField(int index, void* value));
 
   /**
    * Gets a 2-byte-aligned native pointer from an internal field. This field
