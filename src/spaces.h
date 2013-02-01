@@ -1776,7 +1776,7 @@ class PagedSpace : public Space {
   // Expands the space by allocating a fixed number of pages. Returns false if
   // it cannot allocate requested number of pages from OS, or if the hard heap
   // size limit has been hit.
-  bool Expand();
+  bool Expand(intptr_t size_hint);
 
   // Generic fast case allocation function that tries linear allocation at the
   // address denoted by top in allocation_info_.

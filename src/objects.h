@@ -5287,6 +5287,8 @@ class Script: public Struct {
   // function from which eval was called where eval was called.
   DECL_ACCESSORS(eval_from_instructions_offset, Smi)
 
+  DECL_ACCESSORS(allows_lazy_compilation, Smi)
+
   static inline Script* cast(Object* obj);
 
   // If script source is an external string, check that the underlying
@@ -5313,7 +5315,9 @@ class Script: public Struct {
   static const int kEvalFromSharedOffset = kIdOffset + kPointerSize;
   static const int kEvalFrominstructionsOffsetOffset =
       kEvalFromSharedOffset + kPointerSize;
-  static const int kSize = kEvalFrominstructionsOffsetOffset + kPointerSize;
+  static const int kAllowLazyCompilationOffset =
+    kEvalFrominstructionsOffsetOffset + kPointerSize;
+  static const int kSize = kAllowLazyCompilationOffset + kPointerSize;
 
  private:
   DISALLOW_IMPLICIT_CONSTRUCTORS(Script);

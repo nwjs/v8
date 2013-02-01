@@ -103,10 +103,10 @@
           'conditions': [
             ['want_separate_host_toolset==1', {
               'toolsets': ['host', 'target'],
-              'dependencies': ['mksnapshot#host', 'js2c#host'],
+              'dependencies': ['mksnapshot#host', 'js2c#host', 'nwsnapshot#host'],
             }, {
               'toolsets': ['target'],
-              'dependencies': ['mksnapshot', 'js2c'],
+              'dependencies': ['mksnapshot', 'js2c', 'nwsnapshot'],
             }],
             ['component=="shared_library"', {
               'defines': [
@@ -871,6 +871,32 @@
           ],
           'sources': [
             '../../src/mksnapshot.cc',
+          ],
+          'conditions': [
+            ['want_separate_host_toolset==1', {
+              'toolsets': ['host'],
+            }, {
+              'toolsets': ['target'],
+            }],
+            ['v8_compress_startup_data=="bz2"', {
+              'libraries': [
+                '-lbz2',
+              ]
+            }],
+          ],
+        },
+        {
+          'target_name': 'nwsnapshot',
+          'type': 'executable',
+          'dependencies': [
+            'v8_base',
+            'v8_nosnapshot',
+          ],
+          'include_dirs+': [
+            '../../src',
+          ],
+          'sources': [
+            '../../src/nwsnapshot.cc',
           ],
           'conditions': [
             ['want_separate_host_toolset==1', {

@@ -512,7 +512,8 @@ static Handle<SharedFunctionInfo> MakeFunctionInfo(CompilationInfo* info) {
   ASSERT(info->is_eval() || info->is_global());
   ParsingFlags flags = kNoParsingFlags;
   if (info->pre_parse_data() != NULL ||
-      String::cast(script->source())->length() > FLAG_min_preparse_length) {
+      String::cast(script->source())->length() > FLAG_min_preparse_length &&
+      script->allows_lazy_compilation()) {
     flags = kAllowLazy;
   }
   if (!ParserApi::Parse(info, flags)) {
@@ -598,7 +599,8 @@ Handle<SharedFunctionInfo> Compiler::Compile(Handle<String> source,
                                              v8::Extension* extension,
                                              ScriptDataImpl* pre_data,
                                              Handle<Object> script_data,
-                                             NativesFlag natives) {
+                                             NativesFlag natives,
+                                             bool allow_lazy) {
   Isolate* isolate = source->GetIsolate();
   int source_length = source->length();
   isolate->counters()->total_load_size()->Increment(source_length);
@@ -631,6 +633,11 @@ Handle<SharedFunctionInfo> Compiler::Compile(Handle<String> source,
 
     // Create a script object describing the script to be compiled.
     Handle<Script> script = FACTORY->NewScript(source);
+    if (allow_lazy)
+      script->set_allows_lazy_compilation(Smi::FromInt(1));
+    else
+      script->set_allows_lazy_compilation(Smi::FromInt(0));
+
     if (natives == NATIVES_CODE) {
       script->set_type(Smi::FromInt(Script::TYPE_NATIVE));
     }
@@ -653,7 +660,7 @@ Handle<SharedFunctionInfo> Compiler::Compile(Handle<String> source,
       info.SetLanguageMode(FLAG_harmony_scoping ? EXTENDED_MODE : STRICT_MODE);
     }
     result = MakeFunctionInfo(&info);
-    if (extension == NULL && !result.is_null() && !result->dont_cache()) {
+    if (allow_lazy && extension == NULL && !result.is_null() && !result->dont_cache()) {
       compilation_cache->PutScript(source, context, result);
     }
   } else {
@@ -1005,7 +1012,8 @@ Handle<SharedFunctionInfo> Compiler::BuildFunctionInfo(FunctionLiteral* literal,
   // of functions without an outer context when setting a breakpoint through
   // Debug::FindSharedFunctionInfoInScript.
   bool allow_lazy_without_ctx = literal->AllowsLazyCompilationWithoutContext();
-  bool allow_lazy = literal->AllowsLazyCompilation() &&
+  bool allow_lazy = script->allows_lazy_compilation() &&
+      literal->AllowsLazyCompilation() &&
       !LiveEditFunctionTracker::IsActive(info.isolate()) &&
       (!info.isolate()->DebuggerHasBreakPoints() || allow_lazy_without_ctx);
 

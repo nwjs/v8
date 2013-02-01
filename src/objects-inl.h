@@ -4079,6 +4079,7 @@ ACCESSORS(Script, line_ends, Object, kLineEndsOffset)
 ACCESSORS(Script, eval_from_shared, Object, kEvalFromSharedOffset)
 ACCESSORS_TO_SMI(Script, eval_from_instructions_offset,
                  kEvalFrominstructionsOffsetOffset)
+ACCESSORS_TO_SMI(Script, allows_lazy_compilation, kAllowLazyCompilationOffset)
 
 #ifdef ENABLE_DEBUGGER_SUPPORT
 ACCESSORS(DebugInfo, shared, SharedFunctionInfo, kSharedFunctionInfoIndex)

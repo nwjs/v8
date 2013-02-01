@@ -653,7 +653,8 @@ class V8EXPORT Script {
   static Local<Script> New(Handle<String> source,
                            ScriptOrigin* origin = NULL,
                            ScriptData* pre_data = NULL,
-                           Handle<String> script_data = Handle<String>());
+                           Handle<String> script_data = Handle<String>(),
+                           bool allow_lazy = true);
 
   /**
    * Compiles the specified script using the specified file name
@@ -666,7 +667,7 @@ class V8EXPORT Script {
    *   will use the currently entered context).
    */
   static Local<Script> New(Handle<String> source,
-                           Handle<Value> file_name);
+                           Handle<Value> file_name, bool allow_lazy = true);
 
   /**
    * Compiles the specified script (bound to current context).
@@ -3327,7 +3328,7 @@ class V8EXPORT V8 {
    * initialize from scratch.  This function is called implicitly if
    * you use the API without calling it first.
    */
-  static bool Initialize();
+  static bool Initialize(const char* nw_snapshot_file = NULL);
 
   /**
    * Allows the host application to provide a callback which can be used

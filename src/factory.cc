@@ -406,7 +406,7 @@ Handle<Script> Factory::NewScript(Handle<String> source) {
   script->set_line_ends(heap->undefined_value());
   script->set_eval_from_shared(heap->undefined_value());
   script->set_eval_from_instructions_offset(Smi::FromInt(0));
-
+  script->set_allows_lazy_compilation(Smi::FromInt(1));
   return script;
 }
 

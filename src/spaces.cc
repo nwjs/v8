@@ -869,13 +869,13 @@ bool PagedSpace::CanExpand() {
   return true;
 }
 
-bool PagedSpace::Expand() {
+bool PagedSpace::Expand(intptr_t size_hint) {
   if (!CanExpand()) return false;
 
   intptr_t size = AreaSize();
 
-  if (anchor_.next_page() == &anchor_) {
-    size = SizeOfFirstPage();
+  if (anchor_.next_page() == &anchor_ && size_hint < SizeOfFirstPage()) {
+     size = SizeOfFirstPage();
   }
 
   Page* p = heap()->isolate()->memory_allocator()->AllocatePage(
@@ -1906,7 +1906,7 @@ FreeListNode* FreeListNode::next() {
 FreeListNode** FreeListNode::next_address() {
   ASSERT(IsFreeListNode(this));
   if (map() == HEAP->raw_unchecked_free_space_map()) {
-    ASSERT(Size() >= kNextOffset + kPointerSize);
+    ASSERT(!map() || Size() >= kNextOffset + kPointerSize);
     return reinterpret_cast<FreeListNode**>(address() + kNextOffset);
   } else {
     return reinterpret_cast<FreeListNode**>(address() + kPointerSize);
@@ -2449,7 +2449,7 @@ HeapObject* PagedSpace::SlowAllocateRaw(int size_in_bytes) {
   }
 
   // Try to expand the space and allocate in the new next page.
-  if (Expand()) {
+  if (Expand(size_in_bytes)) {
     return free_list_.Allocate(size_in_bytes);
   }
 

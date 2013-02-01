@@ -726,7 +726,10 @@ void Heap::ReserveSpace(
         if (space == NEW_SPACE) {
           allocation = new_space()->AllocateRaw(sizes[space]);
         } else {
-          allocation = paged_space(space)->AllocateRaw(sizes[space]);
+          // if (space == OLD_POINTER_SPACE && sizes[space] > Page::kMaxNonCodeHeapObjectSize)
+          //   allocation = lo_space()->AllocateRaw(sizes[space], NOT_EXECUTABLE);
+          // else
+            allocation = paged_space(space)->AllocateRaw(sizes[space]);
         }
         FreeListNode* node;
         if (!allocation->To<FreeListNode>(&node)) {

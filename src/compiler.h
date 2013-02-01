@@ -481,7 +481,8 @@ class Compiler : public AllStatic {
                                             v8::Extension* extension,
                                             ScriptDataImpl* pre_data,
                                             Handle<Object> script_data,
-                                            NativesFlag is_natives_code);
+                                            NativesFlag is_natives_code,
+                                            bool allow_lazy = true);
 
   // Compile a String source within a context for Eval.
   static Handle<SharedFunctionInfo> CompileEval(Handle<String> source,
