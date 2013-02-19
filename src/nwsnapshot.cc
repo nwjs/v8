@@ -28,7 +28,9 @@
 #include <errno.h>
 #include <stdio.h>
 #include <signal.h>
+#ifndef _MSC_VER
 #include <unistd.h>
+#endif
 
 #include <string>
 
