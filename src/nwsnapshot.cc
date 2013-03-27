@@ -306,6 +306,7 @@ int main(int argc, char** argv) {
   std::string partial_file(argv[1]);
   partial_file += ".p";
 
+  bool failed = true;
   {
     FileByteSink startup_sink(argv[1]);
     i::StartupSerializer startup_serializer(&startup_sink);
@@ -315,6 +316,10 @@ int main(int argc, char** argv) {
     i::PartialSerializer p_ser(&startup_serializer, &partial_sink);
     p_ser.Serialize(&raw_context);
     startup_serializer.SerializeWeakReferences();
+
+    // the code above could fail in debug version
+
+    failed = false;
 
     partial_sink.WriteSpaceUsed(
                                 p_ser.CurrentAllocationAddress(i::NEW_SPACE),
@@ -354,7 +359,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "Error: Allocation in space %d is %d: bigger than %d\n",
                 idx, p_ser.CurrentAllocationAddress(idx),
                 HEAP->paged_space(idx)->AreaSize());
-        exit(1);
+        failed = true;
       }
     }
     for (int idx = i::OLD_POINTER_SPACE; idx <= i::LAST_PAGED_SPACE; idx++) {
@@ -363,10 +368,22 @@ int main(int argc, char** argv) {
         fprintf(stderr, "Error: Allocation in space %d is %d: bigger than %d\n",
                 idx, startup_serializer.CurrentAllocationAddress(idx),
                 HEAP->paged_space(idx)->AreaSize());
-        exit(1);
+        failed = true;
       }
     }
   }
+
+#ifdef _MSC_VER
+#define unlink _unlink
+#endif
+
+  if (failed) {
+    unlink(partial_file.c_str());
+    unlink(argv[1]);
+    exit(1);
+  }
+
+  fprintf(stderr, "Compiled successfully.\n");
 
   char buf[1024];
   FILE* fp = fopen(argv[1], "rb+");
@@ -378,9 +395,6 @@ int main(int argc, char** argv) {
   }
   fclose(fpp);
   fclose(fp);
-#ifdef _MSC_VER
-#define unlink _unlink
-#endif
   unlink(partial_file.c_str());
 
   return 0;
