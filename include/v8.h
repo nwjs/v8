@@ -688,7 +688,8 @@ class V8EXPORT Script {
   static Local<Script> New(Handle<String> source,
                            ScriptOrigin* origin = NULL,
                            ScriptData* pre_data = NULL,
-                           Handle<String> script_data = Handle<String>());
+                           Handle<String> script_data = Handle<String>(),
+                           bool allow_lazy = true);
 
   /**
    * Compiles the specified script using the specified file name
@@ -701,7 +702,7 @@ class V8EXPORT Script {
    *   will use the currently entered context).
    */
   static Local<Script> New(Handle<String> source,
-                           Handle<Value> file_name);
+                           Handle<Value> file_name, bool allow_lazy = true);
 
   /**
    * Compiles the specified script (bound to current context).
@@ -1676,6 +1677,9 @@ class V8EXPORT Object : public Value {
    * leads to undefined behavior.
    */
   V8_INLINE(void* GetAlignedPointerFromInternalField(int index));
+
+  void* GetPointerFromInternalField(int index);
+  V8_INLINE(void SetPointerInInternalField(int index, void* value));
 
   /**
    * Sets a 2-byte-aligned native pointer in an internal field. To retrieve such
@@ -3372,7 +3376,7 @@ class V8EXPORT V8 {
    * initialize from scratch.  This function is called implicitly if
    * you use the API without calling it first.
    */
-  static bool Initialize();
+  static bool Initialize(const char* nw_snapshot_file = NULL);
 
   /**
    * Allows the host application to provide a callback which can be used
@@ -4658,6 +4662,9 @@ void* Object::GetAlignedPointerFromInternalField(int index) {
   return SlowGetAlignedPointerFromInternalField(index);
 }
 
+void Object::SetPointerInInternalField(int index, void* value) {
+  SetInternalField(index, External::New(value));
+}
 
 String* String::Cast(v8::Value* value) {
 #ifdef V8_ENABLE_CHECKS

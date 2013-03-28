@@ -303,8 +303,8 @@ static inline bool EmptyCheck(const char* location, const v8::Data* obj) {
 // --- S t a t i c s ---
 
 
-static bool InitializeHelper() {
-  if (i::Snapshot::Initialize()) return true;
+static bool InitializeHelper(const char* nw_snapshot_file = NULL) {
+  if (i::Snapshot::Initialize(nw_snapshot_file)) return true;
   return i::V8::Initialize(NULL);
 }
 
@@ -1553,7 +1553,8 @@ ScriptData* ScriptData::New(const char* data, int length) {
 Local<Script> Script::New(v8::Handle<String> source,
                           v8::ScriptOrigin* origin,
                           v8::ScriptData* pre_data,
-                          v8::Handle<String> script_data) {
+                          v8::Handle<String> script_data,
+                          bool allow_lazy) {
   i::Isolate* isolate = i::Isolate::Current();
   ON_BAILOUT(isolate, "v8::Script::New()", return Local<Script>());
   LOG_API(isolate, "Script::New");
@@ -1595,7 +1596,8 @@ Local<Script> Script::New(v8::Handle<String> source,
                            NULL,
                            pre_data_impl,
                            Utils::OpenHandle(*script_data, true),
-                           i::NOT_NATIVES_CODE);
+                           i::NOT_NATIVES_CODE,
+                           allow_lazy);
     has_pending_exception = result.is_null();
     EXCEPTION_BAILOUT_CHECK(isolate, Local<Script>());
     raw_result = *result;
@@ -1606,9 +1608,10 @@ Local<Script> Script::New(v8::Handle<String> source,
 
 
 Local<Script> Script::New(v8::Handle<String> source,
-                          v8::Handle<Value> file_name) {
+                          v8::Handle<Value> file_name,
+                          bool allow_lazy) {
   ScriptOrigin origin(file_name);
-  return New(source, &origin);
+  return New(source, &origin, NULL, Handle<String>(), allow_lazy);
 }
 
 
@@ -4343,7 +4346,6 @@ void* v8::Object::SlowGetAlignedPointerFromInternalField(int index) {
   return DecodeSmiToAligned(obj->GetInternalField(index), location);
 }
 
-
 void v8::Object::SetAlignedPointerInInternalField(int index, void* value) {
   i::Handle<i::JSObject> obj = Utils::OpenHandle(this);
   const char* location = "v8::Object::SetAlignedPointerInInternalField()";
@@ -4360,16 +4362,23 @@ static void* ExternalValue(i::Object* obj) {
   return i::Foreign::cast(foreign)->foreign_address();
 }
 
+void* v8::Object::GetPointerFromInternalField(int index) {
+  i::Handle<i::JSObject> obj = Utils::OpenHandle(this);
+  const char* location = "v8::Object::GetPointerFromInternalField()";
+  if (!InternalFieldOK(obj, index, location)) return NULL;
+  return ExternalValue(obj->GetInternalField(index));
+}
+
 
 // --- E n v i r o n m e n t ---
 
 
-bool v8::V8::Initialize() {
+bool v8::V8::Initialize(const char* nw_snapshot_file) {
   i::Isolate* isolate = i::Isolate::UncheckedCurrent();
   if (isolate != NULL && isolate->IsInitialized()) {
     return true;
   }
-  return InitializeHelper();
+  return InitializeHelper(nw_snapshot_file);
 }
 
 
