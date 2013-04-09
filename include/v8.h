@@ -2031,6 +2031,9 @@ class V8EXPORT External : public Value {
   static Local<External> New(void* value);
   V8_INLINE(static External* Cast(Value* obj));
   void* Value() const;
+
+  V8_INLINE(static void* Unwrap(Handle<v8::Value> obj));
+  V8_INLINE(static Local<v8::Value> Wrap(void* value));
  private:
   static void CheckCast(v8::Value* obj);
 };
@@ -4951,6 +4954,14 @@ void* Context::GetAlignedPointerFromEmbedderData(int index) {
 #endif
 }
 
+Local<Value> External::Wrap(void* value) {
+  return External::New(value);
+}
+
+
+void* External::Unwrap(Handle<v8::Value> obj) {
+  return External::Cast(*obj)->Value();
+}
 
 /**
  * \example shell.cc
