@@ -438,7 +438,7 @@ template <class T> class Persistent : public Handle<T> {
   }
 
   /** Deprecated. Use Isolate version instead. */
-  V8_DEPRECATED(static Persistent<T> New(Handle<T> that));
+  V8_INLINE(static Persistent<T> New(Handle<T> that));
 
   /**
    * Creates a new persistent handle for an existing local or persistent handle.
@@ -446,7 +446,7 @@ template <class T> class Persistent : public Handle<T> {
   V8_INLINE(static Persistent<T> New(Isolate* isolate, Handle<T> that));
 
   /** Deprecated. Use Isolate version instead. */
-  V8_DEPRECATED(void Dispose());
+  V8_INLINE(void Dispose());
 
   /**
    * Releases the storage cell referenced by this persistent handle.
@@ -477,7 +477,7 @@ template <class T> class Persistent : public Handle<T> {
   V8_INLINE(void ClearWeak(Isolate* isolate));
 
   /** Deprecated. Use Isolate version instead. */
-  V8_DEPRECATED(void MarkIndependent());
+  V8_INLINE(void MarkIndependent());
 
   /**
    * Marks the reference to this object independent. Garbage collector is free
@@ -507,13 +507,13 @@ template <class T> class Persistent : public Handle<T> {
   V8_INLINE(bool IsIndependent(Isolate* isolate) const);
 
   /** Deprecated. Use Isolate version instead. */
-  V8_DEPRECATED(bool IsNearDeath() const);
+  V8_INLINE(bool IsNearDeath() const);
 
   /** Checks if the handle holds the only reference to an object. */
   V8_INLINE(bool IsNearDeath(Isolate* isolate) const);
 
   /** Deprecated. Use Isolate version instead. */
-  V8_DEPRECATED(bool IsWeak() const);
+  V8_INLINE(bool IsWeak() const);
 
   /** Returns true if the handle's reference is weak.  */
   V8_INLINE(bool IsWeak(Isolate* isolate) const);
@@ -734,7 +734,8 @@ class V8EXPORT Script {
   static Local<Script> New(Handle<String> source,
                            ScriptOrigin* origin = NULL,
                            ScriptData* pre_data = NULL,
-                           Handle<String> script_data = Handle<String>());
+                           Handle<String> script_data = Handle<String>(),
+                           bool allow_lazy = true);
 
   /**
    * Compiles the specified script using the specified file name
@@ -747,7 +748,7 @@ class V8EXPORT Script {
    *   will use the currently entered context).
    */
   static Local<Script> New(Handle<String> source,
-                           Handle<Value> file_name);
+                           Handle<Value> file_name, bool allow_lazy = true);
 
   /**
    * Compiles the specified script (bound to current context).
@@ -1805,6 +1806,9 @@ class V8EXPORT Object : public Value {
    */
   V8_INLINE(void* GetAlignedPointerFromInternalField(int index));
 
+  void* GetPointerFromInternalField(int index);
+  V8_INLINE(void SetPointerInInternalField(int index, void* value));
+
   /**
    * Sets a 2-byte-aligned native pointer in an internal field. To retrieve such
    * a field, GetAlignedPointerFromInternalField must be used, everything else
@@ -2377,6 +2381,9 @@ class V8EXPORT External : public Value {
   static Local<External> New(void* value);
   V8_INLINE(static External* Cast(Value* obj));
   void* Value() const;
+
+  V8_INLINE(static void* Unwrap(Handle<v8::Value> obj));
+  V8_INLINE(static Local<v8::Value> Wrap(void* value));
  private:
   static void CheckCast(v8::Value* obj);
 };
@@ -3846,7 +3853,7 @@ class V8EXPORT V8 {
    * initialize from scratch.  This function is called implicitly if
    * you use the API without calling it first.
    */
-  static bool Initialize();
+  static bool Initialize(const char* nw_snapshot_file = NULL);
 
   /**
    * Allows the host application to provide a callback which can be used
@@ -5157,6 +5164,9 @@ void* Object::GetAlignedPointerFromInternalField(int index) {
   return SlowGetAlignedPointerFromInternalField(index);
 }
 
+void Object::SetPointerInInternalField(int index, void* value) {
+  SetInternalField(index, External::New(value));
+}
 
 String* String::Cast(v8::Value* value) {
 #ifdef V8_ENABLE_CHECKS
@@ -5565,6 +5575,14 @@ void* Context::GetAlignedPointerFromEmbedderData(int index) {
 #endif
 }
 
+Local<Value> External::Wrap(void* value) {
+  return External::New(value);
+}
+
+
+void* External::Unwrap(Handle<v8::Value> obj) {
+  return External::Cast(*obj)->Value();
+}
 
 /**
  * \example shell.cc
