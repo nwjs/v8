@@ -6366,6 +6366,7 @@ class Script: public Struct {
   // script's level of privilege. V8 just passes this through. Encoded in
   // the 'flags' field.
   DECL_BOOLEAN_ACCESSORS(is_shared_cross_origin)
+  DECL_ACCESSORS(allows_lazy_compilation, Smi)
 
   static inline Script* cast(Object* obj);
 
@@ -6392,7 +6393,9 @@ class Script: public Struct {
       kEvalFromSharedOffset + kPointerSize;
   static const int kFlagsOffset =
       kEvalFrominstructionsOffsetOffset + kPointerSize;
-  static const int kSize = kFlagsOffset + kPointerSize;
+  static const int kAllowLazyCompilationOffset =
+    kEvalFrominstructionsOffsetOffset + kPointerSize;
+  static const int kSize = kAllowLazyCompilationOffset + kPointerSize;
 
  private:
   // Bit positions in the flags field.

@@ -1028,18 +1028,16 @@ bool PagedSpace::CanExpand() {
 
   // Are we going to exceed capacity for this space?
   if ((Capacity() + Page::kPageSize) > max_capacity_) return false;
-
   return true;
 }
 
-
-bool PagedSpace::Expand() {
+bool PagedSpace::Expand(intptr_t size_hint) {
   if (!CanExpand()) return false;
 
   intptr_t size = AreaSize();
 
-  if (anchor_.next_page() == &anchor_) {
-    size = SizeOfFirstPage();
+  if (anchor_.next_page() == &anchor_ && size_hint < SizeOfFirstPage()) {
+     size = SizeOfFirstPage();
   }
 
   Page* p = heap()->isolate()->memory_allocator()->AllocatePage(
@@ -2685,7 +2683,7 @@ HeapObject* PagedSpace::SlowAllocateRaw(int size_in_bytes) {
   }
 
   // Try to expand the space and allocate in the new next page.
-  if (Expand()) {
+  if (Expand(size_in_bytes)) {
     ASSERT(CountTotalPages() > 1 || size_in_bytes <= free_list_.available());
     return free_list_.Allocate(size_in_bytes);
   }

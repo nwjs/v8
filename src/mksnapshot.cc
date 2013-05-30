@@ -132,31 +132,31 @@ class CppByteSink : public PartialSnapshotSink {
       int cell_space_used,
       int property_cell_space_used) {
     fprintf(fp_,
-            "const int Snapshot::%snew_space_used_ = %d;\n",
+            "int Snapshot::%snew_space_used_ = %d;\n",
             prefix,
             new_space_used);
     fprintf(fp_,
-            "const int Snapshot::%spointer_space_used_ = %d;\n",
+            "int Snapshot::%spointer_space_used_ = %d;\n",
             prefix,
             pointer_space_used);
     fprintf(fp_,
-            "const int Snapshot::%sdata_space_used_ = %d;\n",
+            "int Snapshot::%sdata_space_used_ = %d;\n",
             prefix,
             data_space_used);
     fprintf(fp_,
-            "const int Snapshot::%scode_space_used_ = %d;\n",
+            "int Snapshot::%scode_space_used_ = %d;\n",
             prefix,
             code_space_used);
     fprintf(fp_,
-            "const int Snapshot::%smap_space_used_ = %d;\n",
+            "int Snapshot::%smap_space_used_ = %d;\n",
             prefix,
             map_space_used);
     fprintf(fp_,
-            "const int Snapshot::%scell_space_used_ = %d;\n",
+            "int Snapshot::%scell_space_used_ = %d;\n",
             prefix,
             cell_space_used);
     fprintf(fp_,
-            "const int Snapshot::%sproperty_cell_space_used_ = %d;\n",
+            "int Snapshot::%sproperty_cell_space_used_ = %d;\n",
             prefix,
             property_cell_space_used);
   }
@@ -164,14 +164,14 @@ class CppByteSink : public PartialSnapshotSink {
   void WritePartialSnapshot() {
     int length = partial_sink_.Position();
     fprintf(fp_, "};\n\n");
-    fprintf(fp_, "const int Snapshot::context_size_ = %d;\n",  length);
+    fprintf(fp_, "int Snapshot::context_size_ = %d;\n",  length);
 #ifdef COMPRESS_STARTUP_DATA_BZ2
     fprintf(fp_,
-            "const int Snapshot::context_raw_size_ = %d;\n",
+            "int Snapshot::context_raw_size_ = %d;\n",
             partial_sink_.raw_size());
 #else
     fprintf(fp_,
-            "const int Snapshot::context_raw_size_ = "
+            "int Snapshot::context_raw_size_ = "
             "Snapshot::context_size_;\n");
 #endif
     fprintf(fp_, "const byte Snapshot::context_data_[] = {\n");
