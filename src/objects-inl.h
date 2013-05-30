@@ -4523,6 +4523,7 @@ void Script::set_compilation_state(CompilationState state) {
       state == COMPILATION_STATE_COMPILED));
 }
 
+ACCESSORS_TO_SMI(Script, allows_lazy_compilation, kAllowLazyCompilationOffset)
 
 #ifdef ENABLE_DEBUGGER_SUPPORT
 ACCESSORS(DebugInfo, shared, SharedFunctionInfo, kSharedFunctionInfoIndex)

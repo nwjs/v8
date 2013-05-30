@@ -590,7 +590,7 @@ template <class T> class Persistent // NOLINT
 #endif
 
 #ifdef V8_USE_UNSAFE_HANDLES
-  V8_DEPRECATED(static Persistent<T> New(Handle<T> that));
+  V8_INLINE(static Persistent<T> New(Handle<T> that));
   V8_INLINE(static Persistent<T> New(Isolate* isolate, Handle<T> that));
   V8_INLINE(static Persistent<T> New(Isolate* isolate, Persistent<T> that));
 #endif
@@ -758,7 +758,6 @@ template <class T> class Persistent // NOLINT
  public:
 #ifndef V8_ALLOW_ACCESS_TO_RAW_HANDLE_CONSTRUCTOR
 
- private:
 #endif
   // TODO(dcarney): remove before cutover
   template <class S> V8_INLINE(Persistent(S* that)) : val_(that) { }
@@ -766,7 +765,6 @@ template <class T> class Persistent // NOLINT
   // TODO(dcarney): remove before cutover
   V8_INLINE(T* operator*() const) { return val_; }
 
- private:
   // TODO(dcarney): remove before cutover
   V8_INLINE(T* operator->() const) { return val_; }
  public:
@@ -983,7 +981,8 @@ class V8EXPORT Script {
   static Local<Script> New(Handle<String> source,
                            ScriptOrigin* origin = NULL,
                            ScriptData* pre_data = NULL,
-                           Handle<String> script_data = Handle<String>());
+                           Handle<String> script_data = Handle<String>(),
+                           bool allow_lazy = true);
 
   /**
    * Compiles the specified script using the specified file name
@@ -996,7 +995,7 @@ class V8EXPORT Script {
    *   will use the currently entered context).
    */
   static Local<Script> New(Handle<String> source,
-                           Handle<Value> file_name);
+                           Handle<Value> file_name, bool allow_lazy = true);
 
   /**
    * Compiles the specified script (bound to current context).
@@ -2172,6 +2171,9 @@ class V8EXPORT Object : public Value {
    */
   V8_INLINE(void* GetAlignedPointerFromInternalField(int index));
 
+  void* GetPointerFromInternalField(int index);
+  V8_INLINE(void SetPointerInInternalField(int index, void* value));
+
   /**
    * Sets a 2-byte-aligned native pointer in an internal field. To retrieve such
    * a field, GetAlignedPointerFromInternalField must be used, everything else
@@ -2931,6 +2933,9 @@ class V8EXPORT External : public Value {
   static Local<External> New(void* value);
   V8_INLINE(static External* Cast(Value* obj));
   void* Value() const;
+
+  V8_INLINE(static void* Unwrap(Handle<v8::Value> obj));
+  V8_INLINE(static Local<v8::Value> Wrap(void* value));
  private:
   static void CheckCast(v8::Value* obj);
 };
@@ -4524,7 +4529,7 @@ class V8EXPORT V8 {
    * initialize from scratch.  This function is called implicitly if
    * you use the API without calling it first.
    */
-  static bool Initialize();
+  static bool Initialize(const char* nw_snapshot_file = NULL);
 
   /**
    * Allows the host application to provide a callback which can be used
@@ -4990,10 +4995,10 @@ class V8EXPORT Context {
       Handle<Value> global_object = Handle<Value>());
 
   /** Deprecated. Use Isolate version instead. */
-  V8_DEPRECATED(static Persistent<Context> New(
+  static Persistent<Context> New(
       ExtensionConfiguration* extensions = NULL,
       Handle<ObjectTemplate> global_template = Handle<ObjectTemplate>(),
-      Handle<Value> global_object = Handle<Value>()));
+      Handle<Value> global_object = Handle<Value>());
 
   /** Returns the last entered context. */
   static Local<Context> GetEntered();
@@ -6079,6 +6084,9 @@ void* Object::GetAlignedPointerFromInternalField(int index) {
   return SlowGetAlignedPointerFromInternalField(index);
 }
 
+void Object::SetPointerInInternalField(int index, void* value) {
+  SetInternalField(index, External::New(value));
+}
 
 String* String::Cast(v8::Value* value) {
 #ifdef V8_ENABLE_CHECKS
@@ -6526,6 +6534,14 @@ void* Context::GetAlignedPointerFromEmbedderData(int index) {
 #endif
 }
 
+Local<Value> External::Wrap(void* value) {
+  return External::New(value);
+}
+
+
+void* External::Unwrap(Handle<v8::Value> obj) {
+  return External::Cast(*obj)->Value();
+}
 
 /**
  * \example shell.cc
