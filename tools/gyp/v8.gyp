@@ -117,19 +117,17 @@
               'toolsets': ['target'],
               'dependencies': ['mksnapshot.<(v8_target_arch)', 'js2c', 'nwsnapshot.<(v8_target_arch)'],
             }],
-            ['component=="shared_library"', {
-              'defines': [
+          ],
+          'defines': [
                 'V8_SHARED',
                 'BUILDING_V8_SHARED',
               ],
-              'direct_dependent_settings': {
+          'direct_dependent_settings': {
                 'defines': [
                   'V8_SHARED',
                   'USING_V8_SHARED',
                 ],
               },
-            }],
-          ],
           'dependencies': [
             'v8_base.<(v8_target_arch)',
           ],
@@ -203,6 +201,10 @@
           'include_dirs+': [
             '../../src',
           ],
+          'defines': [
+                'V8_SHARED',
+                'BUILDING_V8_SHARED',
+              ],
           'sources': [  ### gcmole(all) ###
             '../../src/accessors.cc',
             '../../src/accessors.h',
