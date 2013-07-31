@@ -212,17 +212,22 @@ int main(int argc, char** argv) {
     return !i::FLAG_help;
   }
   i::Serializer::Enable();
-  Persistent<Context> context = v8::Context::New();
+  Isolate* isolate = Isolate::GetCurrent();
+  Persistent<Context> context;
+  {
+    HandleScope handle_scope(isolate);
+    context.Reset(isolate, Context::New(isolate));
+  }
   if (context.IsEmpty()) {
     fprintf(stderr,
             "\nException thrown while compiling natives - see above.\n\n");
     exit(1);
   }
   if (i::FLAG_extra_code != NULL) {
-    context->Enter();
     // Capture 100 frames if anything happens.
     V8::SetCaptureStackTraceForUncaughtExceptions(true, 100);
-    HandleScope scope;
+    HandleScope scope(isolate);
+    v8::Context::Scope scope2(v8::Local<v8::Context>::New(isolate, context));
     const char* name = i::FLAG_extra_code;
     FILE* file = i::OS::FOpen(name, "rb");
     if (file == NULL) {
@@ -291,8 +296,6 @@ int main(int argc, char** argv) {
       i::Handle<i::Script> iscript(i::Script::cast(function_info->script()));
       iscript->set_source(isolate->heap()->undefined_value());
     }
-
-    context->Exit();
   }
   // Make sure all builtin scripts are cached.
   { HandleScope scope;
@@ -303,7 +306,7 @@ int main(int argc, char** argv) {
   // If we don't do this then we end up with a stray root pointing at the
   // context even after we have disposed of the context.
   HEAP->CollectAllGarbage(i::Heap::kNoGCFlags, "mksnapshot");
-  i::Object* raw_context = *(v8::Utils::OpenHandle(*context));
+  i::Object* raw_context = *v8::Utils::OpenPersistent(context);
   context.Dispose();
 
   std::string partial_file(argv[1]);

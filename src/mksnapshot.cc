@@ -199,7 +199,7 @@ class CppByteSink : public PartialSnapshotSink {
             prefix,
             cell_space_used);
     fprintf(fp_,
-            "const int Snapshot::%sproperty_cell_space_used_ = %d;\n",
+            "int Snapshot::%sproperty_cell_space_used_ = %d;\n",
             prefix,
             property_cell_space_used);
   }

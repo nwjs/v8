@@ -757,7 +757,6 @@ template <class T> class Persistent // NOLINT
  public:
 #ifndef V8_ALLOW_ACCESS_TO_RAW_HANDLE_CONSTRUCTOR
 
- private:
 #endif
   // TODO(dcarney): remove before cutover
   template <class S> V8_INLINE(Persistent(S* that)) : val_(that) { }
@@ -765,7 +764,6 @@ template <class T> class Persistent // NOLINT
   // TODO(dcarney): remove before cutover
   V8_INLINE(T* operator*() const) { return val_; }
 
- private:
   // TODO(dcarney): remove before cutover
   V8_INLINE(T* operator->() const) { return val_; }
  public:
@@ -4853,10 +4851,10 @@ class V8EXPORT Context {
       Handle<Value> global_object = Handle<Value>());
 
   /** Deprecated. Use Isolate version instead. */
-  V8_DEPRECATED(static Persistent<Context> New(
+  static Persistent<Context> New(
       ExtensionConfiguration* extensions = NULL,
       Handle<ObjectTemplate> global_template = Handle<ObjectTemplate>(),
-      Handle<Value> global_object = Handle<Value>()));
+      Handle<Value> global_object = Handle<Value>());
 
   /** Returns the last entered context. */
   static Local<Context> GetEntered();
