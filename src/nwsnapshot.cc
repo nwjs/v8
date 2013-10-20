@@ -200,8 +200,13 @@ void FileByteSink::WriteSpaceUsed(
 }
 
 int main(int argc, char** argv) {
+  V8::InitializeICU();
+
   // By default, log code create information in the snapshot.
   i::FLAG_log_code = true;
+
+  // Disable the i18n extension, as it doesn't support being snapshotted yet.
+  i::FLAG_enable_i18n = false;
 
   // Print the usage if an error occurs when parsing the command line
   // flags or if the help flag is set.
@@ -280,6 +285,7 @@ int main(int argc, char** argv) {
     }
     i::Isolate* isolate = i::Isolate::Current();
 
+#if 0
     {
       i::HandleScope scope(isolate);
       i::Handle<i::SharedFunctionInfo> function_info;
@@ -296,6 +302,7 @@ int main(int argc, char** argv) {
       i::Handle<i::Script> iscript(i::Script::cast(function_info->script()));
       iscript->set_source(isolate->heap()->undefined_value());
     }
+#endif
   }
   // Make sure all builtin scripts are cached.
   { HandleScope scope;
