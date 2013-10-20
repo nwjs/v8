@@ -606,6 +606,13 @@ class UnaryOpStub : public HydrogenCodeStub {
       Isolate* isolate,
       CodeStubInterfaceDescriptor* descriptor);
 
+  static void InitializeForIsolate(Isolate* isolate) {
+    UnaryOpStub stub(Token::SUB);
+    stub.InitializeInterfaceDescriptor(
+        isolate,
+        isolate->code_stub_interface_descriptor(CodeStub::UnaryOp));
+  }
+
   virtual Code::Kind GetCodeKind() const { return Code::UNARY_OP_IC; }
   virtual InlineCacheState GetICState() {
     if (state_.Contains(GENERIC)) {
