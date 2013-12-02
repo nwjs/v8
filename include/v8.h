@@ -213,6 +213,9 @@ class WeakReferenceCallbacks {
                             P* parameter);
 };
 
+typedef void (*WeakReferenceCallback)(Persistent<Value> object,
+                                      void* parameter);
+
 // --- Handles ---
 
 #define TYPE_CHECK(T, S)                                       \
@@ -652,6 +655,8 @@ template <class T> class Persistent // NOLINT
       Isolate* isolate,
       P* parameters,
       typename WeakReferenceCallbacks<T, P>::Revivable callback));
+
+  V8_INLINE(void MakeWeak(void* parameters, WeakReferenceCallback callback));
 
   V8_INLINE(void ClearWeak());
 
@@ -5745,6 +5750,13 @@ void Persistent<T>::MakeWeak(
   MakeWeak<P>(parameters, callback);
 }
 
+template <class T>
+void Persistent<T>::MakeWeak(void* parameters, WeakReferenceCallback callback) {
+  typedef typename WeakReferenceCallbacks<Value, void>::Revivable Revivable;
+  V8::MakeWeak(reinterpret_cast<internal::Object**>(**this),
+               parameters,
+               reinterpret_cast<Revivable>(callback));
+}
 
 template <class T>
 void Persistent<T>::ClearWeak() {
@@ -5883,7 +5895,7 @@ void ReturnValue<T>::Set(int32_t i) {
 template<typename T>
 void ReturnValue<T>::Set(uint32_t i) {
   TYPE_CHECK(T, Integer);
-  typedef internal::Internals I;
+  // typedef internal::Internals I;
   // Can't simply use INT32_MAX here for whatever reason.
   bool fits_into_int32_t = (i & (1 << 31)) == 0;
   if (V8_LIKELY(fits_into_int32_t)) {
