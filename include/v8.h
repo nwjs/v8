@@ -457,6 +457,8 @@ class WeakReferenceCallbacks {
                             P* parameter);
 };
 
+typedef void (*WeakReferenceCallback)(Persistent<Value> object,
+                                      void* parameter);
 
 /**
  * Default traits for Persistent. This class does not allow
@@ -660,6 +662,10 @@ template <class T, class M> class Persistent {
       V8_INLINE void MakeWeak(
           P* parameter,
           typename WeakReferenceCallbacks<T, P>::Revivable callback));
+
+  V8_DEPRECATED(
+      "Use SetWeak instead",
+      V8_INLINE void MakeWeak(void* parameters, WeakReferenceCallback callback));
 
   V8_INLINE void ClearWeak();
 
@@ -5747,6 +5753,14 @@ void Persistent<T, M>::MakeWeak(
   MakeWeak<T, P>(parameters, callback);
 }
 
+template <class T>
+void Persistent<T>::MakeWeak(void* parameters, WeakReferenceCallback callback) {
+  typedef typename WeakReferenceCallbacks<Value, void>::Revivable Revivable;
+   V8::MakeWeak(reinterpret_cast<internal::Object**>(**this),
+                parameters,
+                NULL,
+                reinterpret_cast<Revivable>(callback));
+}
 
 template <class T, class M>
 void Persistent<T, M>::ClearWeak() {
