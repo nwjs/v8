@@ -652,6 +652,18 @@ HandleScope::HandleScope(Isolate* isolate) {
   Initialize(isolate);
 }
 
+HandleScope::HandleScope() {
+  // copied from the isolate version
+  i::Isolate* internal_isolate = i::Isolate::Current();
+  API_ENTRY_CHECK(internal_isolate, "HandleScope::HandleScope");
+  v8::ImplementationUtilities::HandleScopeData* current =
+      internal_isolate->handle_scope_data();
+  isolate_ = internal_isolate;
+  prev_next_ = current->next;
+  prev_limit_ = current->limit;
+  is_closed_ = false;
+  current->level++;
+}
 
 void HandleScope::Initialize(Isolate* isolate) {
   i::Isolate* internal_isolate = reinterpret_cast<i::Isolate*>(isolate);
@@ -1254,7 +1266,6 @@ void FunctionTemplate::SetCallHandler(FunctionCallback callback,
   obj->set_data(*Utils::OpenHandle(*data));
   Utils::OpenHandle(this)->set_call_code(*obj);
 }
-
 
 static i::Handle<i::AccessorInfo> SetAccessorInfoProperties(
     i::Handle<i::AccessorInfo> obj,
@@ -5222,6 +5233,7 @@ Local<Context> v8::Context::New(
   return Utils::ToLocal(scope.CloseAndEscape(env));
 }
 
+#if 0
 Persistent<Context> v8::Context::New(
                                      v8::ExtensionConfiguration* extensions,
                                      v8::Handle<ObjectTemplate> global_template,
@@ -5238,7 +5250,7 @@ Persistent<Context> v8::Context::New(
   if (env.is_null()) return Persistent<Context>();
   return Persistent<Context>::New(external_isolate, Utils::ToLocal(env));
 }
-
+#endif
 
 void v8::Context::SetSecurityToken(Handle<Value> token) {
   i::Isolate* isolate = i::Isolate::Current();

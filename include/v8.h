@@ -123,7 +123,7 @@ template <class T> class Eternal;
 template<class T> class NonCopyablePersistentTraits;
 template<class T> class CopyablePersistentTraits;
 template<class T,
-         class M = CopyablePersistentTraits<T> > class Persistent;
+         class M = NonCopyablePersistentTraits<T> > class Persistent;
 template<class T, class P> class WeakCallbackObject;
 class FunctionTemplate;
 class ObjectTemplate;
@@ -449,7 +449,7 @@ class WeakCallbackData {
 // TODO(dcarney): Remove this class.
 template<typename T,
          typename P,
-         typename M = CopyablePersistentTraits<T> >
+         typename M = NonCopyablePersistentTraits<T> >
 class WeakReferenceCallbacks {
  public:
   typedef void (*Revivable)(Isolate* isolate,
@@ -488,7 +488,8 @@ class NonCopyablePersistentTraits {
  * This will clone the contents of storage cell, but not any of the flags, etc.
  */
 template<class T>
-struct CopyablePersistentTraits {
+class CopyablePersistentTraits {
+ public:
   typedef Persistent<T, CopyablePersistentTraits<T> > CopyablePersistent;
   static const bool kResetInDestructor = true;
   template<class S, class M>
@@ -609,9 +610,12 @@ template <class T, class M> class Persistent {
     return Persistent<S>::Cast(*this);
   }
 
-  V8_INLINE static Persistent<T> New(Handle<T> that);
-  V8_INLINE static Persistent<T> New(Isolate* isolate, Handle<T> that);
-  V8_INLINE static Persistent<T> New(Isolate* isolate, Persistent<T> that);
+  template <class S>
+  V8_INLINE static Persistent<S> New(Handle<S> that);
+  template <class S>
+  V8_INLINE static Persistent<S> New(Isolate* isolate, Handle<S> that);
+  template <class S>
+  V8_INLINE static Persistent<S> New(Isolate* isolate, Persistent<S> that);
 
   template <class S, class M2>
   V8_INLINE bool operator==(const Persistent<S, M2>& that) const {
@@ -667,7 +671,7 @@ template <class T, class M> class Persistent {
       "Use SetWeak instead",
       V8_INLINE void MakeWeak(void* parameters, WeakReferenceCallback callback));
 
-  V8_INLINE void ClearWeak();
+  V8_INLINE void ClearWeak(Isolate* isolate = NULL);
 
   /**
    * Marks the reference to this object independent. Garbage collector is free
@@ -756,6 +760,7 @@ template <class T, class M> class Persistent {
 class V8_EXPORT HandleScope {
  public:
   HandleScope(Isolate* isolate);
+  HandleScope();
 
   ~HandleScope();
 
@@ -778,7 +783,6 @@ class V8_EXPORT HandleScope {
   static internal::Object** CreateHandle(internal::HeapObject* heap_object,
                                          internal::Object* value);
 
-  V8_INLINE HandleScope() {}
   void Initialize(Isolate* isolate);
 
   // Make it hard to create heap-allocated or illegal handle scopes by
@@ -2192,7 +2196,7 @@ class V8_EXPORT Object : public Value {
   V8_INLINE void* GetAlignedPointerFromInternalField(int index);
 
   void* GetPointerFromInternalField(int index);
-  V8_INLINE(void SetPointerInInternalField(int index, void* value));
+  V8_INLINE void SetPointerInInternalField(int index, void* value);
 
   /**
    * Sets a 2-byte-aligned native pointer in an internal field. To retrieve such
@@ -2432,6 +2436,14 @@ class FunctionCallbackInfo {
   bool is_construct_call_;
 };
 
+class V8_EXPORT Arguments : public FunctionCallbackInfo<Value> {
+ private:
+   friend class internal::FunctionCallbackArguments;
+   V8_INLINE Arguments(internal::Object** implicit_args,
+                       internal::Object** values,
+                       int length,
+                       bool is_construct_call);
+};
 
 /**
  * The information passed to a property callback about the context
@@ -2463,7 +2475,7 @@ class PropertyCallbackInfo {
   internal::Object** args_;
 };
 
-
+typedef Handle<Value> (*InvocationCallback)(const Arguments& args);
 typedef void (*FunctionCallback)(const FunctionCallbackInfo<Value>& info);
 
 
@@ -3063,8 +3075,8 @@ class V8_EXPORT External : public Value {
   V8_INLINE static External* Cast(Value* obj);
   void* Value() const;
 
-  V8_INLINE(static void* Unwrap(Handle<v8::Value> obj));
-  V8_INLINE(static Local<v8::Value> Wrap(void* value));
+  V8_INLINE static void* Unwrap(Handle<v8::Value> obj);
+  V8_INLINE static Local<v8::Value> Wrap(void* value);
  private:
   static void CheckCast(v8::Value* obj);
 };
@@ -3371,6 +3383,10 @@ class V8_EXPORT FunctionTemplate : public Template {
 
   /** Returns the unique function instance in the current execution context.*/
   Local<Function> GetFunction();
+
+  V8_DEPRECATED("Don't use InvocationCallback",
+                void SetCallHandler(InvocationCallback callback,
+                                    Handle<Value> data = Handle<Value>()));
 
   /**
    * Set the call-handler callback for a FunctionTemplate.  This
@@ -5613,18 +5629,21 @@ Local<T> Eternal<T>::Get(Isolate* isolate) {
   return Local<T>(reinterpret_cast<T*>(*V8::GetEternal(isolate, index_)));
 }
 
-template <class T>
-Persistent<T> Persistent<T>::New(Handle<T> that) {
+template <class T, class M>
+template<class S>
+Persistent<S> Persistent<T, M>::New(Handle<S> that) {
   return New(Isolate::GetCurrent(), that.val_);
 }
 
-template <class T>
-Persistent<T> Persistent<T>::New(Isolate* isolate, Handle<T> that) {
+template <class T, class M>
+template<class S>
+Persistent<S> Persistent<T, M>::New(Isolate* isolate, Handle<S> that) {
   return New(Isolate::GetCurrent(), that.val_);
 }
 
-template <class T>
-Persistent<T> Persistent<T>::New(Isolate* isolate, Persistent<T> that) {
+template <class T, class M>
+template<class S>
+Persistent<S> Persistent<T, M>::New(Isolate* isolate, Persistent<S> that) {
   return New(Isolate::GetCurrent(), that.val_);
 }
 
@@ -5753,8 +5772,8 @@ void Persistent<T, M>::MakeWeak(
   MakeWeak<T, P>(parameters, callback);
 }
 
-template <class T>
-void Persistent<T>::MakeWeak(void* parameters, WeakReferenceCallback callback) {
+template <class T, class M>
+void Persistent<T, M>::MakeWeak(void* parameters, WeakReferenceCallback callback) {
   typedef typename WeakReferenceCallbacks<Value, void>::Revivable Revivable;
    V8::MakeWeak(reinterpret_cast<internal::Object**>(**this),
                 parameters,
@@ -5763,7 +5782,7 @@ void Persistent<T>::MakeWeak(void* parameters, WeakReferenceCallback callback) {
 }
 
 template <class T, class M>
-void Persistent<T, M>::ClearWeak() {
+void Persistent<T, M>::ClearWeak(Isolate* isolate) {
   V8::ClearWeak(reinterpret_cast<internal::Object**>(this->val_));
 }
 
@@ -5980,6 +5999,11 @@ bool FunctionCallbackInfo<T>::IsConstructCall() const {
   return is_construct_call_;
 }
 
+Arguments::Arguments(internal::Object** args,
+                      internal::Object** values,
+                      int length,
+                      bool is_construct_call)
+   : FunctionCallbackInfo<Value>(args, values, length, is_construct_call) { }
 
 template<typename T>
 int FunctionCallbackInfo<T>::Length() const {

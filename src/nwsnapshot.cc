@@ -205,9 +205,6 @@ int main(int argc, char** argv) {
   // By default, log code create information in the snapshot.
   i::FLAG_log_code = true;
 
-  // Disable the i18n extension, as it doesn't support being snapshotted yet.
-  i::FLAG_enable_i18n = false;
-
   // Print the usage if an error occurs when parsing the command line
   // flags or if the help flag is set.
   int result = i::FlagList::SetFlagsFromCommandLine(&argc, argv, true);
@@ -216,8 +213,11 @@ int main(int argc, char** argv) {
     i::FlagList::PrintHelp();
     return !i::FLAG_help;
   }
-  i::Serializer::Enable();
-  Isolate* isolate = Isolate::GetCurrent();
+  Isolate* isolate = v8::Isolate::New();
+  isolate->Enter();
+  i::Isolate* internal_isolate = reinterpret_cast<i::Isolate*>(isolate);
+  i::Serializer::Enable(internal_isolate);
+
   Persistent<Context> context;
   {
     HandleScope handle_scope(isolate);
@@ -312,7 +312,8 @@ int main(int argc, char** argv) {
   }
   // If we don't do this then we end up with a stray root pointing at the
   // context even after we have disposed of the context.
-  HEAP->CollectAllGarbage(i::Heap::kNoGCFlags, "mksnapshot");
+  internal_isolate->heap()->CollectAllGarbage(
+      i::Heap::kNoGCFlags, "mksnapshot");
   i::Object* raw_context = *v8::Utils::OpenPersistent(context);
   context.Dispose();
 
@@ -322,11 +323,11 @@ int main(int argc, char** argv) {
   bool failed = true;
   {
     FileByteSink startup_sink(argv[1]);
-    i::StartupSerializer startup_serializer(&startup_sink);
+    i::StartupSerializer startup_serializer(internal_isolate, &startup_sink);
     startup_serializer.SerializeStrongReferences();
 
     FileByteSink partial_sink(partial_file.c_str());
-    i::PartialSerializer p_ser(&startup_serializer, &partial_sink);
+    i::PartialSerializer p_ser(internal_isolate, &startup_serializer, &partial_sink);
     p_ser.Serialize(&raw_context);
     startup_serializer.SerializeWeakReferences();
 
@@ -369,20 +370,20 @@ int main(int argc, char** argv) {
                                 startup_serializer.CurrentAllocationAddress(i::CELL_SPACE));
 
     for (int idx = i::OLD_POINTER_SPACE; idx <= i::LAST_PAGED_SPACE; idx++) {
-      if (HEAP->paged_space(idx)->AreaSize() <
+      if (internal_isolate->heap()->paged_space(idx)->AreaSize() <
           p_ser.CurrentAllocationAddress(idx)) {
         fprintf(stderr, "Error: Allocation in space %d is %d: bigger than %d\n",
                 idx, p_ser.CurrentAllocationAddress(idx),
-                HEAP->paged_space(idx)->AreaSize());
+                internal_isolate->heap()->paged_space(idx)->AreaSize());
         failed = true;
       }
     }
     for (int idx = i::OLD_POINTER_SPACE; idx <= i::LAST_PAGED_SPACE; idx++) {
-      if (HEAP->paged_space(idx)->AreaSize() <
+      if (internal_isolate->heap()->paged_space(idx)->AreaSize() <
           startup_serializer.CurrentAllocationAddress(idx)) {
         fprintf(stderr, "Error: Allocation in space %d is %d: bigger than %d\n",
                 idx, startup_serializer.CurrentAllocationAddress(idx),
-                HEAP->paged_space(idx)->AreaSize());
+                internal_isolate->heap()->paged_space(idx)->AreaSize());
         failed = true;
       }
     }
