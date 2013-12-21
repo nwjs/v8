@@ -4039,12 +4039,14 @@ class V8_EXPORT Isolate {
    * Associate embedder-specific data with the isolate
    */
   V8_INLINE void SetData(void* data);
+  V8_INLINE void SetData2(void* data);
 
   /**
    * Retrieve embedder-specific data from the isolate.
    * Returns NULL if SetData has never been called.
    */
   V8_INLINE void* GetData();
+  V8_INLINE void* GetData2();
 
   /**
    * Get statistics about the heap memory usage.
@@ -5446,7 +5448,8 @@ class Internals {
   static const int kExternalAsciiRepresentationTag = 0x06;
 
   static const int kIsolateEmbedderDataOffset = 1 * kApiPointerSize;
-  static const int kIsolateRootsOffset = 3 * kApiPointerSize;
+  static const int kIsolateEmbedderData2Offset = 2 * kApiPointerSize;
+  static const int kIsolateRootsOffset = 4 * kApiPointerSize;
   static const int kUndefinedValueRootIndex = 5;
   static const int kNullValueRootIndex = 7;
   static const int kTrueValueRootIndex = 8;
@@ -5542,6 +5545,18 @@ class Internals {
   V8_INLINE static void* GetEmbedderData(v8::Isolate* isolate) {
     uint8_t* addr = reinterpret_cast<uint8_t*>(isolate) +
         kIsolateEmbedderDataOffset;
+    return *reinterpret_cast<void**>(addr);
+  }
+
+  V8_INLINE static void SetEmbedderData2(v8::Isolate* isolate, void* data) {
+    uint8_t* addr = reinterpret_cast<uint8_t*>(isolate) +
+        kIsolateEmbedderData2Offset;
+    *reinterpret_cast<void**>(addr) = data;
+  }
+
+  V8_INLINE static void* GetEmbedderData2(v8::Isolate* isolate) {
+    uint8_t* addr = reinterpret_cast<uint8_t*>(isolate) +
+        kIsolateEmbedderData2Offset;
     return *reinterpret_cast<void**>(addr);
   }
 
@@ -6508,6 +6523,17 @@ void Isolate::SetData(void* data) {
 void* Isolate::GetData() {
   typedef internal::Internals I;
   return I::GetEmbedderData(this);
+}
+
+void Isolate::SetData2(void* data) {
+  typedef internal::Internals I;
+  I::SetEmbedderData2(this, data);
+}
+
+
+void* Isolate::GetData2() {
+  typedef internal::Internals I;
+  return I::GetEmbedderData2(this);
 }
 
 

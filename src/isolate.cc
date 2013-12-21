@@ -1737,6 +1737,7 @@ void Isolate::ThreadDataTable::RemoveAllThreads(Isolate* isolate) {
 Isolate::Isolate()
     : state_(UNINITIALIZED),
       embedder_data_(NULL),
+      embedder_data2_(NULL),
       entry_stack_(NULL),
       stack_trace_nesting_level_(0),
       incomplete_message_(NULL),
@@ -2290,6 +2291,8 @@ bool Isolate::Init(Deserializer* des) {
 
   CHECK_EQ(static_cast<int>(OFFSET_OF(Isolate, embedder_data_)),
            Internals::kIsolateEmbedderDataOffset);
+  CHECK_EQ(static_cast<int>(OFFSET_OF(Isolate, embedder_data2_)),
+           Internals::kIsolateEmbedderData2Offset);
   CHECK_EQ(static_cast<int>(OFFSET_OF(Isolate, heap_.roots_)),
            Internals::kIsolateRootsOffset);
 

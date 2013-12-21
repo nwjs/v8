@@ -1065,6 +1065,9 @@ class Isolate {
   void SetData(void* data) { embedder_data_ = data; }
   void* GetData() { return embedder_data_; }
 
+  void SetData2(void* data) { embedder_data2_ = data; }
+  void* GetData2() { return embedder_data2_; }
+
   LookupResult* top_lookup_result() {
     return thread_local_top_.top_lookup_result_;
   }
@@ -1155,6 +1158,7 @@ class Isolate {
   // verified in Isolate::Init() using runtime checks.
   State state_;  // Will be padded to kApiPointerSize.
   void* embedder_data_;
+  void* embedder_data2_;
   Heap heap_;
 
   // The per-process lock should be acquired before the ThreadDataTable is
