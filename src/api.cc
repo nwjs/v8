@@ -6251,7 +6251,7 @@ Local<Integer> v8::Integer::NewFromUnsigned(uint32_t value, Isolate* isolate) {
 }
 
 
-#ifdef DEBUG
+#if 0
 v8::AssertNoGCScope::AssertNoGCScope(v8::Isolate* isolate) {
   disallow_heap_allocation_ = new i::DisallowHeapAllocation();
 }

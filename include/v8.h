@@ -457,7 +457,7 @@ class WeakReferenceCallbacks {
                             P* parameter);
 };
 
-typedef void (*WeakReferenceCallback)(Persistent<Value> object,
+typedef void (*WeakReferenceCallback)(Persistent<Value, NonCopyablePersistentTraits<Value> > object,
                                       void* parameter);
 
 /**
@@ -4385,7 +4385,7 @@ class V8_EXPORT PersistentHandleVisitor {  // NOLINT
  * be performed.
  */
 class V8_EXPORT AssertNoGCScope {
-#ifndef DEBUG
+#if 1
   // TODO(yangguo): remove isolate argument.
   V8_INLINE AssertNoGCScope(Isolate* isolate) {}
 #else
@@ -5449,7 +5449,11 @@ class Internals {
 
   static const int kIsolateEmbedderDataOffset = 1 * kApiPointerSize;
   static const int kIsolateEmbedderData2Offset = 2 * kApiPointerSize;
+#if V8_CC_MSVC
+  static const int kIsolateRootsOffset = 5 * kApiPointerSize;
+#else
   static const int kIsolateRootsOffset = 4 * kApiPointerSize;
+#endif
   static const int kUndefinedValueRootIndex = 5;
   static const int kNullValueRootIndex = 7;
   static const int kTrueValueRootIndex = 8;
