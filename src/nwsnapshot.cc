@@ -285,7 +285,7 @@ int main(int argc, char** argv) {
     }
     i::Isolate* isolate = i::Isolate::Current();
 
-#if 0
+#if 1
     {
       i::HandleScope scope(isolate);
       i::Handle<i::SharedFunctionInfo> function_info;
