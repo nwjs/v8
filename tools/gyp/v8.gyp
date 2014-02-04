@@ -96,6 +96,10 @@
         },
         {
           'type': 'none',
+          'defines': [
+            'V8_SHARED',
+            'BUILDING_V8_SHARED',
+          ],
         }],
       ],
       'direct_dependent_settings': {
@@ -871,6 +875,10 @@
             'V8_SHARED',
           ],
         }, {
+          'defines': [
+            'V8_SHARED',
+            'BUILDING_V8_SHARED',
+          ],
           'sources': [
             '../../src/defaults.cc',
           ],
