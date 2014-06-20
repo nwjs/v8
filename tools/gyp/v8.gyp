@@ -97,6 +97,10 @@
         },
         {
           'type': 'none',
+          'defines': [
+            'V8_SHARED',
+            'BUILDING_V8_SHARED',
+          ],
         }],
       ],
       'direct_dependent_settings': {
@@ -992,6 +996,11 @@
           'defines': [
             'BUILDING_V8_SHARED',
             'V8_SHARED',
+          ],
+        }, {
+          'defines': [
+            'V8_SHARED',
+            'BUILDING_V8_SHARED',
           ],
         }],
         ['v8_postmortem_support=="true"', {
