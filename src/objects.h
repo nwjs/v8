@@ -6595,6 +6595,7 @@ class Script: public Struct {
   // [flags]: Holds an exciting bitfield.
   DECL_ACCESSORS(flags, Smi)
 
+  DECL_ACCESSORS(allows_lazy_compilation, Smi)
   // [compilation_type]: how the the script was compiled. Encoded in the
   // 'flags' field.
   inline CompilationType compilation_type();
@@ -6635,7 +6636,9 @@ class Script: public Struct {
       kEvalFromSharedOffset + kPointerSize;
   static const int kFlagsOffset =
       kEvalFrominstructionsOffsetOffset + kPointerSize;
-  static const int kSize = kFlagsOffset + kPointerSize;
+  static const int kAllowLazyCompilationOffset =
+      kFlagsOffset + kPointerSize;
+  static const int kSize = kAllowLazyCompilationOffset + kPointerSize;
 
  private:
   // Bit positions in the flags field.

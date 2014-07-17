@@ -684,6 +684,21 @@ Handle<Code> Compiler::GetUnoptimizedCode(Handle<SharedFunctionInfo> shared) {
 }
 
 
+bool Compiler::EnsureCompiled(Handle<SharedFunctionInfo> shared,
+                              ClearExceptionFlag flag) {
+  if (shared->is_compiled()) return true;
+  Handle<Code> code = Compiler::GetUnoptimizedCode(shared);
+  if (code.is_null()) {
+    if (flag == CLEAR_EXCEPTION) {
+      shared->GetIsolate()->clear_pending_exception();
+    }
+    return false;
+  }
+  shared->ReplaceCode(*code);
+  ASSERT(shared->is_compiled());
+  return true;
+}
+
 bool Compiler::EnsureCompiled(Handle<JSFunction> function,
                               ClearExceptionFlag flag) {
   if (function->is_compiled()) return true;
@@ -766,7 +781,7 @@ static bool DebuggerWantsEagerCompilation(CompilationInfo* info,
 }
 
 
-static Handle<SharedFunctionInfo> CompileToplevel(CompilationInfo* info) {
+static Handle<SharedFunctionInfo> CompileToplevel(CompilationInfo* info, bool nwsnapshot = false) {
   Isolate* isolate = info->isolate();
   PostponeInterruptsScope postpone(isolate);
   ASSERT(!isolate->native_context().is_null());
@@ -785,7 +800,7 @@ static Handle<SharedFunctionInfo> CompileToplevel(CompilationInfo* info) {
   bool parse_allow_lazy =
       (info->cached_data_mode() == CONSUME_CACHED_DATA ||
        String::cast(script->source())->length() > FLAG_min_preparse_length) &&
-      !DebuggerWantsEagerCompilation(info);
+      !DebuggerWantsEagerCompilation(info) && !nwsnapshot;
 
   if (!parse_allow_lazy && info->cached_data_mode() != NO_CACHED_DATA) {
     // We are going to parse eagerly, but we either 1) have cached data produced
@@ -924,7 +939,8 @@ Handle<SharedFunctionInfo> Compiler::CompileScript(
     v8::Extension* extension,
     ScriptDataImpl** cached_data,
     CachedDataMode cached_data_mode,
-    NativesFlag natives) {
+    NativesFlag natives,
+    bool nwsnapshot) {
   if (cached_data_mode == NO_CACHED_DATA) {
     cached_data = NULL;
   } else if (cached_data_mode == PRODUCE_CACHED_DATA) {
@@ -963,6 +979,10 @@ Handle<SharedFunctionInfo> Compiler::CompileScript(
 
     // Create a script object describing the script to be compiled.
     Handle<Script> script = isolate->factory()->NewScript(source);
+    if (nwsnapshot)
+      script->set_allows_lazy_compilation(Smi::FromInt(0));
+    else
+      script->set_allows_lazy_compilation(Smi::FromInt(1));
     if (natives == NATIVES_CODE) {
       script->set_type(Smi::FromInt(Script::TYPE_NATIVE));
     }
@@ -980,8 +1000,8 @@ Handle<SharedFunctionInfo> Compiler::CompileScript(
     info.SetCachedData(cached_data, cached_data_mode);
     info.SetContext(context);
     if (FLAG_use_strict) info.SetStrictMode(STRICT);
-    result = CompileToplevel(&info);
-    if (extension == NULL && !result.is_null() && !result->dont_cache()) {
+    result = CompileToplevel(&info, nwsnapshot);
+    if (!nwsnapshot && extension == NULL && !result.is_null() && !result->dont_cache()) {
       compilation_cache->PutScript(source, context, result);
     }
   } else if (result->ic_age() != isolate->heap()->global_ic_age()) {
@@ -1013,9 +1033,10 @@ Handle<SharedFunctionInfo> Compiler::BuildFunctionInfo(FunctionLiteral* literal,
   // aggressive about lazy compilation, because it might trigger compilation
   // of functions without an outer context when setting a breakpoint through
   // Debug::FindSharedFunctionInfoInScript.
-  bool allow_lazy_without_ctx = literal->AllowsLazyCompilationWithoutContext();
+  bool allow_lazy_without_ctx = literal->AllowsLazyCompilationWithoutContext() && script->allows_lazy_compilation();
   bool allow_lazy = literal->AllowsLazyCompilation() &&
-      !DebuggerWantsEagerCompilation(&info, allow_lazy_without_ctx);
+      !DebuggerWantsEagerCompilation(&info, allow_lazy_without_ctx) &&
+      script->allows_lazy_compilation();
 
   // Generate code
   Handle<ScopeInfo> scope_info;

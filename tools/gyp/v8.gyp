@@ -117,6 +117,7 @@
           'toolsets': ['host', 'target'],
           'dependencies': [
             'mksnapshot.<(v8_target_arch)#host',
+            'nwsnapshot#host',
             'js2c#host',
             'generate_trig_table#host',
           ],
@@ -124,6 +125,7 @@
           'toolsets': ['target'],
           'dependencies': [
             'mksnapshot.<(v8_target_arch)',
+            'nwsnapshot',
             'js2c',
             'generate_trig_table',
           ],
@@ -1180,6 +1182,32 @@
       ],
       'sources': [
         '../../src/mksnapshot.cc',
+      ],
+      'conditions': [
+        ['want_separate_host_toolset==1', {
+          'toolsets': ['host'],
+        }, {
+          'toolsets': ['target'],
+        }],
+        ['v8_compress_startup_data=="bz2"', {
+          'libraries': [
+            '-lbz2',
+          ]
+        }],
+      ],
+    },
+    {
+      'target_name': 'nwsnapshot',
+      'type': 'executable',
+      'dependencies': [
+        'v8_base.<(v8_target_arch)',
+        'v8_nosnapshot.<(v8_target_arch)',
+      ],
+      'include_dirs+': [
+        '../../src',
+      ],
+      'sources': [
+        '../../src/nwsnapshot.cc',
       ],
       'conditions': [
         ['want_separate_host_toolset==1', {

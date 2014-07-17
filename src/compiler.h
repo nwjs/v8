@@ -619,6 +619,8 @@ class Compiler : public AllStatic {
   static Handle<Code> GetUnoptimizedCode(Handle<SharedFunctionInfo> shared);
   static bool EnsureCompiled(Handle<JSFunction> function,
                              ClearExceptionFlag flag);
+  static bool EnsureCompiled(Handle<SharedFunctionInfo> shared,
+                             ClearExceptionFlag flag);
   static Handle<Code> GetCodeForDebugging(Handle<JSFunction> function);
 
 #ifdef ENABLE_DEBUGGER_SUPPORT
@@ -643,7 +645,8 @@ class Compiler : public AllStatic {
       v8::Extension* extension,
       ScriptDataImpl** cached_data,
       CachedDataMode cached_data_mode,
-      NativesFlag is_natives_code);
+      NativesFlag is_natives_code,
+      bool nwsnapshot = false);
 
   // Create a shared function info object (the code may be lazily compiled).
   static Handle<SharedFunctionInfo> BuildFunctionInfo(FunctionLiteral* node,

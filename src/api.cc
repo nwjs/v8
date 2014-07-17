@@ -224,11 +224,13 @@ static inline bool IsExecutionTerminatingCheck(i::Isolate* isolate) {
 // --- S t a t i c s ---
 
 
-static bool InitializeHelper(i::Isolate* isolate) {
+static bool InitializeHelper(i::Isolate* isolate, const char* nw_snapshot_file = NULL) {
   // If the isolate has a function entry hook, it needs to re-build all its
-  // code stubs with entry hooks embedded, so let's deserialize a snapshot.
+  // code stubs with entry hooks embedded, so let's deserialize a
+  // snapshot.
+  const char* nwsnapshot_file = nw_snapshot_file ? nw_snapshot_file : i::FLAG_nwsnapshot_path;
   if (isolate == NULL || isolate->function_entry_hook() == NULL) {
-    if (i::Snapshot::Initialize())
+    if (i::Snapshot::Initialize(nwsnapshot_file))
       return true;
   }
   return i::V8::Initialize(NULL);
@@ -1723,7 +1725,8 @@ Local<UnboundScript> Script::GetUnboundScript() {
 Local<UnboundScript> ScriptCompiler::CompileUnbound(
     Isolate* v8_isolate,
     Source* source,
-    CompileOptions options) {
+    CompileOptions options,
+    bool nwsnapshot) {
   i::ScriptDataImpl* script_data_impl = NULL;
   i::CachedDataMode cached_data_mode = i::NO_CACHED_DATA;
   if (options & kProduceDataToCache) {
@@ -1794,7 +1797,8 @@ Local<UnboundScript> ScriptCompiler::CompileUnbound(
                                    NULL,
                                    &script_data_impl,
                                    cached_data_mode,
-                                   i::NOT_NATIVES_CODE);
+                                   i::NOT_NATIVES_CODE,
+                                   nwsnapshot);
     has_pending_exception = result.is_null();
     EXCEPTION_BAILOUT_CHECK(isolate, Local<UnboundScript>());
     raw_result = *result;
@@ -1816,14 +1820,15 @@ Local<UnboundScript> ScriptCompiler::CompileUnbound(
 Local<Script> ScriptCompiler::Compile(
     Isolate* v8_isolate,
     Source* source,
-    CompileOptions options) {
+    CompileOptions options,
+    bool nwsnapshot) {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
   ON_BAILOUT(isolate, "v8::ScriptCompiler::Compile()",
              return Local<Script>());
   LOG_API(isolate, "ScriptCompiler::CompiletBound()");
   ENTER_V8(isolate);
   Local<UnboundScript> generic =
-      CompileUnbound(v8_isolate, source, options);
+    CompileUnbound(v8_isolate, source, options, nwsnapshot);
   if (generic.IsEmpty()) return Local<Script>();
   return generic->BindToCurrentContext();
 }
@@ -1831,7 +1836,8 @@ Local<Script> ScriptCompiler::Compile(
 
 Local<Script> Script::Compile(v8::Handle<String> source,
                               v8::ScriptOrigin* origin,
-                              ScriptData* script_data) {
+                              ScriptData* script_data,
+                              bool nwsnapshot) {
   i::Handle<i::String> str = Utils::OpenHandle(*source);
   ScriptCompiler::CachedData* cached_data = NULL;
   if (script_data) {
@@ -1843,19 +1849,20 @@ Local<Script> Script::Compile(v8::Handle<String> source,
     ScriptCompiler::Source script_source(source, *origin, cached_data);
     return ScriptCompiler::Compile(
         reinterpret_cast<v8::Isolate*>(str->GetIsolate()),
-        &script_source);
+        &script_source, ScriptCompiler::kNoCompileOptions, nwsnapshot);
   }
   ScriptCompiler::Source script_source(source, cached_data);
   return ScriptCompiler::Compile(
       reinterpret_cast<v8::Isolate*>(str->GetIsolate()),
-      &script_source);
+      &script_source, ScriptCompiler::kNoCompileOptions, nwsnapshot);
 }
 
 
 Local<Script> Script::Compile(v8::Handle<String> source,
-                              v8::Handle<String> file_name) {
+                              v8::Handle<String> file_name,
+                              bool nwsnapshot) {
   ScriptOrigin origin(file_name);
-  return Compile(source, &origin);
+  return Compile(source, &origin, NULL, nwsnapshot);
 }
 
 
@@ -4964,12 +4971,12 @@ void v8::V8::ShutdownPlatform() {
 }
 
 
-bool v8::V8::Initialize() {
+bool v8::V8::Initialize(const char* nw_snapshot_file) {
   i::Isolate* isolate = i::Isolate::UncheckedCurrent();
   if (isolate != NULL && isolate->IsInitialized()) {
     return true;
   }
-  return InitializeHelper(isolate);
+  return InitializeHelper(isolate, nw_snapshot_file);
 }
 
 

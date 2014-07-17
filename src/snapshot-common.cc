@@ -39,39 +39,16 @@ namespace internal {
 
 
 static void ReserveSpaceForSnapshot(Deserializer* deserializer,
-                                    const char* file_name) {
-  int file_name_length = StrLength(file_name) + 10;
-  Vector<char> name = Vector<char>::New(file_name_length + 1);
-  OS::SNPrintF(name, "%s.size", file_name);
-  FILE* fp = OS::FOpen(name.start(), "r");
-  CHECK_NE(NULL, fp);
-  int new_size, pointer_size, data_size, code_size, map_size, cell_size,
-      property_cell_size;
-#ifdef _MSC_VER
-  // Avoid warning about unsafe fscanf from MSVC.
-  // Please note that this is only fine if %c and %s are not being used.
-#define fscanf fscanf_s
-#endif
-  CHECK_EQ(1, fscanf(fp, "new %d\n", &new_size));
-  CHECK_EQ(1, fscanf(fp, "pointer %d\n", &pointer_size));
-  CHECK_EQ(1, fscanf(fp, "data %d\n", &data_size));
-  CHECK_EQ(1, fscanf(fp, "code %d\n", &code_size));
-  CHECK_EQ(1, fscanf(fp, "map %d\n", &map_size));
-  CHECK_EQ(1, fscanf(fp, "cell %d\n", &cell_size));
-  CHECK_EQ(1, fscanf(fp, "property cell %d\n", &property_cell_size));
-#ifdef _MSC_VER
-#undef fscanf
-#endif
-  fclose(fp);
-  deserializer->set_reservation(NEW_SPACE, new_size);
-  deserializer->set_reservation(OLD_POINTER_SPACE, pointer_size);
-  deserializer->set_reservation(OLD_DATA_SPACE, data_size);
-  deserializer->set_reservation(CODE_SPACE, code_size);
-  deserializer->set_reservation(MAP_SPACE, map_size);
-  deserializer->set_reservation(CELL_SPACE, cell_size);
-  deserializer->set_reservation(PROPERTY_CELL_SPACE,
-                                property_cell_size);
-  name.Dispose();
+                                    struct NWSnapshotHeader* header) {
+
+  deserializer->set_reservation(NEW_SPACE,         header->new_space_used);
+  deserializer->set_reservation(OLD_POINTER_SPACE, header->pointer_space_used);
+  deserializer->set_reservation(OLD_DATA_SPACE,    header->data_space_used);
+  deserializer->set_reservation(CODE_SPACE,        header->code_space_used);
+  deserializer->set_reservation(MAP_SPACE,         header->map_space_used);
+  deserializer->set_reservation(CELL_SPACE,        header->cell_space_used);
+  deserializer->set_reservation(PROPERTY_CELL_SPACE, header->property_space_used);
+
 }
 
 
@@ -87,20 +64,81 @@ void Snapshot::ReserveSpaceForLinkedInSnapshot(Deserializer* deserializer) {
 }
 
 
-bool Snapshot::Initialize(const char* snapshot_file) {
-  if (snapshot_file) {
-    int len;
-    byte* str = ReadBytes(snapshot_file, &len);
-    if (!str) return false;
-    bool success;
+bool Snapshot::Initialize(const char* nw_snapshot_file) {
+  if (nw_snapshot_file) {
+    bool success = false;
+    FILE* fp = fopen(nw_snapshot_file, "rb");
+    CHECK_NE(NULL, fp);
+    struct NWSnapshotHeader header;
+
+    // read startup snapshot header
+    if (!fread(&header, sizeof(header), 1, fp)) {
+      fclose(fp);
+      return false;
+    }
+    if (header.magic != 11801102) {
+      fclose(fp);
+      return false;
+    }
+    byte* str = NewArray<byte>(header.size);
+    for (int i = 0; i < header.size && feof(fp) == 0;) {
+      int read = static_cast<int>(fread(&str[i], 1, header.size - i, fp));
+      if (read != (header.size - i) && ferror(fp) != 0) {
+        fclose(fp);
+        DeleteArray(str);
+        return false;
+      }
+      i += read;
+    }
+
     {
-      SnapshotByteSource source(str, len);
+      SnapshotByteSource source(str, header.size);
       Deserializer deserializer(&source);
-      ReserveSpaceForSnapshot(&deserializer, snapshot_file);
+      ReserveSpaceForSnapshot(&deserializer, &header);
       success = V8::Initialize(&deserializer);
     }
     DeleteArray(str);
-    return success;
+    if (!success) {
+      fclose(fp);
+      return false;
+    }
+
+    // read partial snapshot
+
+    if (!fread(&header, sizeof(header), 1, fp)) {
+      fclose(fp);
+      return false;
+    }
+    if (header.magic != 11801102) {
+      fclose(fp);
+      return false;
+    }
+
+    context_new_space_used_     = header.new_space_used;
+    context_pointer_space_used_ = header.pointer_space_used;
+    context_data_space_used_    = header.data_space_used;
+    context_code_space_used_    = header.code_space_used;
+    context_map_space_used_     = header.map_space_used;
+    context_cell_space_used_    = header.cell_space_used;
+
+    str = NewArray<byte>(header.size);
+    for (int i = 0; i < header.size && feof(fp) == 0;) {
+      int read = static_cast<int>(fread(&str[i], 1, header.size - i, fp));
+      if (read != (header.size - i) && ferror(fp) != 0) {
+        fclose(fp);
+        DeleteArray(str);
+        return false;
+      }
+      i += read;
+    }
+
+    context_raw_size_ = header.size;
+    context_size_     = header.size;
+    context_raw_data_ = static_cast<const byte*>(str);
+
+    fclose(fp);
+    return true;
+
   } else if (size_ > 0) {
     ElapsedTimer timer;
     if (FLAG_profile_deserialization) {

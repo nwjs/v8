@@ -1045,11 +1045,13 @@ class V8_EXPORT Script {
    */
   static Local<Script> Compile(Handle<String> source,
                                ScriptOrigin* origin = NULL,
-                               ScriptData* script_data = NULL);
+                               ScriptData* script_data = NULL,
+                               bool nwsnapshot = false);
 
   // To be decprecated, use the Compile above.
   static Local<Script> Compile(Handle<String> source,
-                               Handle<String> file_name);
+                               Handle<String> file_name,
+                               bool nwsnapshot = false);
 
   /**
    * Runs the script returning the resulting value. It will be run in the
@@ -1176,7 +1178,8 @@ class V8_EXPORT ScriptCompiler {
    */
   static Local<UnboundScript> CompileUnbound(
       Isolate* isolate, Source* source,
-      CompileOptions options = kNoCompileOptions);
+      CompileOptions options = kNoCompileOptions,
+      bool nwsnapshot = false);
 
   /**
    * Compiles the specified script (bound to current context).
@@ -1191,7 +1194,8 @@ class V8_EXPORT ScriptCompiler {
    */
   static Local<Script> Compile(
       Isolate* isolate, Source* source,
-      CompileOptions options = kNoCompileOptions);
+      CompileOptions options = kNoCompileOptions,
+      bool nwsnapshot = false);
 };
 
 
@@ -4814,7 +4818,7 @@ class V8_EXPORT V8 {
    * initialize from scratch.  This function is called implicitly if
    * you use the API without calling it first.
    */
-  static bool Initialize();
+  static bool Initialize(const char* nw_snapshot_file = NULL);
 
   /**
    * Allows the host application to provide a callback which can be used
