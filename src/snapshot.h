@@ -14,7 +14,7 @@ class Snapshot {
  public:
   // Initialize the VM from the internal snapshot. Returns false if no snapshot
   // could be found.
-  static bool Initialize();
+  static bool Initialize(const char* nw_snapshot_file = NULL);
 
   static bool HaveASnapshotToStartFrom();
 
@@ -41,24 +41,24 @@ class Snapshot {
   static const byte* raw_data_;
   static const byte context_data_[];
   static const byte* context_raw_data_;
-  static const int new_space_used_;
-  static const int pointer_space_used_;
-  static const int data_space_used_;
-  static const int code_space_used_;
-  static const int map_space_used_;
-  static const int cell_space_used_;
-  static const int property_cell_space_used_;
-  static const int context_new_space_used_;
-  static const int context_pointer_space_used_;
-  static const int context_data_space_used_;
-  static const int context_code_space_used_;
-  static const int context_map_space_used_;
-  static const int context_cell_space_used_;
-  static const int context_property_cell_space_used_;
+  static int new_space_used_;
+  static int pointer_space_used_;
+  static int data_space_used_;
+  static int code_space_used_;
+  static int map_space_used_;
+  static int cell_space_used_;
+  static int property_cell_space_used_;
+  static int context_new_space_used_;
+  static int context_pointer_space_used_;
+  static int context_data_space_used_;
+  static int context_code_space_used_;
+  static int context_map_space_used_;
+  static int context_cell_space_used_;
+  static int context_property_cell_space_used_;
   static const int size_;
   static const int raw_size_;
-  static const int context_size_;
-  static const int context_raw_size_;
+  static int context_size_;
+  static int context_raw_size_;
 
   static void ReserveSpaceForLinkedInSnapshot(Deserializer* deserializer);
 
@@ -68,6 +68,18 @@ class Snapshot {
 #ifdef V8_USE_EXTERNAL_STARTUP_DATA
 void SetSnapshotFromFile(StartupData* snapshot_blob);
 #endif
+
+ struct NWSnapshotHeader {
+   int magic;
+   int new_space_used;
+   int pointer_space_used;
+   int data_space_used;
+   int code_space_used;
+   int map_space_used;
+   int cell_space_used;
+   int property_space_used;
+   int size;
+ };
 
 } }  // namespace v8::internal
 

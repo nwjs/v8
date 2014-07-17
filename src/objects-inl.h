@@ -5408,6 +5408,7 @@ ACCESSORS(Script, eval_from_shared, Object, kEvalFromSharedOffset)
 ACCESSORS_TO_SMI(Script, eval_from_instructions_offset,
                  kEvalFrominstructionsOffsetOffset)
 ACCESSORS_TO_SMI(Script, flags, kFlagsOffset)
+ACCESSORS_TO_SMI(Script, allows_lazy_compilation, kAllowLazyCompilationOffset)
 BOOL_ACCESSORS(Script, flags, is_shared_cross_origin, kIsSharedCrossOriginBit)
 ACCESSORS(Script, source_url, Object, kSourceUrlOffset)
 ACCESSORS(Script, source_mapping_url, Object, kSourceMappingUrlOffset)

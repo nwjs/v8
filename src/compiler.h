@@ -672,6 +672,8 @@ class Compiler : public AllStatic {
                              ClearExceptionFlag flag);
   MUST_USE_RESULT static MaybeHandle<Code> GetCodeForDebugging(
       Handle<JSFunction> function);
+  static bool EnsureCompiled(Handle<SharedFunctionInfo> shared,
+                             ClearExceptionFlag flag);
 
   static void CompileForLiveEdit(Handle<Script> script);
 
@@ -689,7 +691,7 @@ class Compiler : public AllStatic {
       int column_offset, bool is_shared_cross_origin, Handle<Context> context,
       v8::Extension* extension, ScriptData** cached_data,
       ScriptCompiler::CompileOptions compile_options,
-      NativesFlag is_natives_code);
+      NativesFlag is_natives_code, bool nwsnapshot = false);
 
   // Create a shared function info object (the code may be lazily compiled).
   static Handle<SharedFunctionInfo> BuildFunctionInfo(FunctionLiteral* node,

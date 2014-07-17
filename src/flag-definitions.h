@@ -818,6 +818,8 @@ DEFINE_STRING(redirect_code_traces_to, NULL,
 DEFINE_BOOL(hydrogen_track_positions, false,
             "track source code positions when building IR")
 
+DEFINE_string(nwsnapshot_path, NULL, "nw snapshot path")
+
 //
 // Disassembler only flags
 //

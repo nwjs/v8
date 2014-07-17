@@ -14,6 +14,19 @@
 namespace v8 {
 namespace internal {
 
+static void ReserveSpaceForSnapshot(Deserializer* deserializer,
+                                    struct NWSnapshotHeader* header) {
+
+  deserializer->set_reservation(NEW_SPACE,         header->new_space_used);
+  deserializer->set_reservation(OLD_POINTER_SPACE, header->pointer_space_used);
+  deserializer->set_reservation(OLD_DATA_SPACE,    header->data_space_used);
+  deserializer->set_reservation(CODE_SPACE,        header->code_space_used);
+  deserializer->set_reservation(MAP_SPACE,         header->map_space_used);
+  deserializer->set_reservation(CELL_SPACE,        header->cell_space_used);
+  deserializer->set_reservation(PROPERTY_CELL_SPACE, header->property_space_used);
+
+}
+
 void Snapshot::ReserveSpaceForLinkedInSnapshot(Deserializer* deserializer) {
   deserializer->set_reservation(NEW_SPACE, new_space_used_);
   deserializer->set_reservation(OLD_POINTER_SPACE, pointer_space_used_);
@@ -26,9 +39,83 @@ void Snapshot::ReserveSpaceForLinkedInSnapshot(Deserializer* deserializer) {
 }
 
 
-bool Snapshot::Initialize() {
-  if (size_ > 0) {
-    base::ElapsedTimer timer;
+bool Snapshot::Initialize(const char* nw_snapshot_file) {
+  if (nw_snapshot_file) {
+    bool success = false;
+    FILE* fp = fopen(nw_snapshot_file, "rb");
+    CHECK_NE(NULL, fp);
+    struct NWSnapshotHeader header;
+
+    // read startup snapshot header
+    if (!fread(&header, sizeof(header), 1, fp)) {
+      fclose(fp);
+      return false;
+    }
+    if (header.magic != 11801102) {
+      fclose(fp);
+      return false;
+    }
+    byte* str = NewArray<byte>(header.size);
+    for (int i = 0; i < header.size && feof(fp) == 0;) {
+      int read = static_cast<int>(fread(&str[i], 1, header.size - i, fp));
+      if (read != (header.size - i) && ferror(fp) != 0) {
+        fclose(fp);
+        DeleteArray(str);
+        return false;
+      }
+      i += read;
+    }
+
+    {
+      SnapshotByteSource source(str, header.size);
+      Deserializer deserializer(&source);
+      ReserveSpaceForSnapshot(&deserializer, &header);
+      success = V8::Initialize(&deserializer);
+    }
+    DeleteArray(str);
+    if (!success) {
+      fclose(fp);
+      return false;
+    }
+
+    // read partial snapshot
+
+    if (!fread(&header, sizeof(header), 1, fp)) {
+      fclose(fp);
+      return false;
+    }
+    if (header.magic != 11801102) {
+      fclose(fp);
+      return false;
+    }
+
+    context_new_space_used_     = header.new_space_used;
+    context_pointer_space_used_ = header.pointer_space_used;
+    context_data_space_used_    = header.data_space_used;
+    context_code_space_used_    = header.code_space_used;
+    context_map_space_used_     = header.map_space_used;
+    context_cell_space_used_    = header.cell_space_used;
+
+    str = NewArray<byte>(header.size);
+    for (int i = 0; i < header.size && feof(fp) == 0;) {
+      int read = static_cast<int>(fread(&str[i], 1, header.size - i, fp));
+      if (read != (header.size - i) && ferror(fp) != 0) {
+        fclose(fp);
+        DeleteArray(str);
+        return false;
+      }
+      i += read;
+    }
+
+    context_raw_size_ = header.size;
+    context_size_     = header.size;
+    context_raw_data_ = static_cast<const byte*>(str);
+
+    fclose(fp);
+    return true;
+
+  } else if (size_ > 0) {
+    ElapsedTimer timer;
     if (FLAG_profile_deserialization) {
       timer.Start();
     }

@@ -173,17 +173,17 @@ class SnapshotWriter {
     fprintf(fp_, "const byte Snapshot::%sdata_[] = {\n", prefix);
     WriteSnapshotData(data_to_be_written);
     fprintf(fp_, "};\n");
-    fprintf(fp_, "const int Snapshot::%ssize_ = %d;\n", prefix,
+    fprintf(fp_, "int Snapshot::%ssize_ = %d;\n", prefix,
             data_to_be_written->length());
 
     if (data_to_be_written == &source_data) {
       fprintf(fp_, "const byte* Snapshot::%sraw_data_ = Snapshot::%sdata_;\n",
               prefix, prefix);
-      fprintf(fp_, "const int Snapshot::%sraw_size_ = Snapshot::%ssize_;\n",
+      fprintf(fp_, "int Snapshot::%sraw_size_ = Snapshot::%ssize_;\n",
               prefix, prefix);
     } else {
       fprintf(fp_, "const byte* Snapshot::%sraw_data_ = NULL;\n", prefix);
-      fprintf(fp_, "const int Snapshot::%sraw_size_ = %d;\n",
+      fprintf(fp_, "int Snapshot::%sraw_size_ = %d;\n",
               prefix, source_data.length());
     }
     fprintf(fp_, "\n");
@@ -202,7 +202,7 @@ class SnapshotWriter {
 
   void WriteSizeVar(const i::Serializer& ser, const char* prefix,
                     const char* name, int space) const {
-    fprintf(fp_, "const int Snapshot::%s%s_space_used_ = %d;\n",
+    fprintf(fp_, "int Snapshot::%s%s_space_used_ = %d;\n",
             prefix, name, ser.CurrentAllocationAddress(space));
   }
 

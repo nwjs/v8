@@ -6935,12 +6935,14 @@ class Script: public Struct {
   // [flags]: Holds an exciting bitfield.
   DECL_ACCESSORS(flags, Smi)
 
+<<<<<<< HEAD
   // [source_url]: sourceURL from magic comment
   DECL_ACCESSORS(source_url, Object)
 
   // [source_url]: sourceMappingURL magic comment
   DECL_ACCESSORS(source_mapping_url, Object)
 
+  DECL_ACCESSORS(allows_lazy_compilation, Smi)
   // [compilation_type]: how the the script was compiled. Encoded in the
   // 'flags' field.
   inline CompilationType compilation_type();
@@ -7000,7 +7002,9 @@ class Script: public Struct {
       kEvalFrominstructionsOffsetOffset + kPointerSize;
   static const int kSourceUrlOffset = kFlagsOffset + kPointerSize;
   static const int kSourceMappingUrlOffset = kSourceUrlOffset + kPointerSize;
-  static const int kSize = kSourceMappingUrlOffset + kPointerSize;
+  static const int kAllowLazyCompilationOffset =
+      kSourceMappingUrlOffset + kPointerSize;
+  static const int kSize = kAllowLazyCompilationOffset + kPointerSize;
 
  private:
   int GetLineNumberWithArray(int code_pos);
