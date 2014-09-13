@@ -4422,6 +4422,8 @@ class V8_EXPORT Isolate {
    */
   void SetEventLogger(LogEventCallback that);
 
+  void NWClearPendingException();
+
  private:
   template<class K, class V, class Traits> friend class PersistentValueMap;
 
