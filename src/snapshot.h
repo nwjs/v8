@@ -55,8 +55,8 @@ class Snapshot {
   static int context_map_space_used_;
   static int context_cell_space_used_;
   static int context_property_cell_space_used_;
-  static const int size_;
-  static const int raw_size_;
+  static int size_;
+  static int raw_size_;
   static int context_size_;
   static int context_raw_size_;
 

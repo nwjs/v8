@@ -1814,7 +1814,7 @@ Local<Script> Script::Compile(v8::Handle<String> source,
                               v8::Handle<String> file_name,
                               bool nwsnapshot) {
   ScriptOrigin origin(file_name);
-  return Compile(source, &origin, NULL, nwsnapshot);
+  return Compile(source, &origin, nwsnapshot);
 }
 
 

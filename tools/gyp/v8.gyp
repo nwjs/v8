@@ -1536,12 +1536,9 @@
     {
       'target_name': 'nwsnapshot',
       'type': 'executable',
-      'dependencies': [
-        'v8_base.<(v8_target_arch)',
-        'v8_nosnapshot.<(v8_target_arch)',
-      ],
+      'dependencies': ['v8_base', 'v8_nosnapshot', 'v8_libplatform'],
       'include_dirs+': [
-        '../../src',
+        '../..',
       ],
       'sources': [
         '../../src/nwsnapshot.cc',

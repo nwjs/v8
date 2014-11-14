@@ -6935,7 +6935,6 @@ class Script: public Struct {
   // [flags]: Holds an exciting bitfield.
   DECL_ACCESSORS(flags, Smi)
 
-<<<<<<< HEAD
   // [source_url]: sourceURL from magic comment
   DECL_ACCESSORS(source_url, Object)
 

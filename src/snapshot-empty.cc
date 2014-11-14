@@ -13,8 +13,8 @@ namespace internal {
 
 const byte Snapshot::data_[] = { 0 };
 const byte* Snapshot::raw_data_ = NULL;
-const int Snapshot::size_ = 0;
-const int Snapshot::raw_size_ = 0;
+int Snapshot::size_ = 0;
+int Snapshot::raw_size_ = 0;
 const byte Snapshot::context_data_[] = { 0 };
 const byte* Snapshot::context_raw_data_ = NULL;
 int Snapshot::context_size_ = 0;

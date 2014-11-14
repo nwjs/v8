@@ -739,15 +739,16 @@ MaybeHandle<Code> Compiler::GetUnoptimizedCode(
 bool Compiler::EnsureCompiled(Handle<SharedFunctionInfo> shared,
                               ClearExceptionFlag flag) {
   if (shared->is_compiled()) return true;
-  Handle<Code> code = Compiler::GetUnoptimizedCode(shared);
-  if (code.is_null()) {
+  MaybeHandle<Code> maybe_code = Compiler::GetUnoptimizedCode(shared);
+  Handle<Code> code;
+  if (!maybe_code.ToHandle(&code)) {
     if (flag == CLEAR_EXCEPTION) {
       shared->GetIsolate()->clear_pending_exception();
     }
     return false;
   }
   shared->ReplaceCode(*code);
-  ASSERT(shared->is_compiled());
+  DCHECK(shared->is_compiled());
   return true;
 }
 

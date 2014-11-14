@@ -34,16 +34,17 @@
 
 #include <string>
 
-#include "v8.h"
+#include "src/v8.h"
 
-#include "bootstrapper.h"
-#include "flags.h"
-#include "natives.h"
-#include "platform.h"
-#include "serialize.h"
-#include "snapshot.h"
-#include "list.h"
-#include "compiler.h"
+#include "include/libplatform/libplatform.h"
+#include "src/assembler.h"
+#include "src/base/platform/platform.h"
+#include "src/bootstrapper.h"
+#include "src/flags.h"
+#include "src/list.h"
+#include "src/natives.h"
+#include "src/serialize.h"
+#include "src/snapshot.h"
 
 using namespace v8;
 
@@ -98,7 +99,7 @@ class Compressor {
   virtual i::Vector<char>* output() = 0;
 };
 
-
+#if 0
 class PartialSnapshotSink : public i::SnapshotByteSink {
  public:
   PartialSnapshotSink() : data_(), raw_size_(-1) { }
@@ -134,6 +135,7 @@ class PartialSnapshotSink : public i::SnapshotByteSink {
   i::List<char> data_;
   int raw_size_;
 };
+#endif
 
 class FileByteSink : public i::SnapshotByteSink {
  public:
@@ -152,9 +154,9 @@ class FileByteSink : public i::SnapshotByteSink {
       fclose(fp_);
     }
   }
-  virtual void Put(int byte, const char* description) {
+  virtual void Put(i::byte b, const char* description) {
     if (fp_ != NULL) {
-      fputc(byte, fp_);
+      fputc(b, fp_);
     }
   }
   virtual int Position() {
@@ -202,6 +204,9 @@ void FileByteSink::WriteSpaceUsed(
 
 int main(int argc, char** argv) {
   V8::InitializeICU();
+  v8::Platform* platform = v8::platform::CreateDefaultPlatform();
+  v8::V8::InitializePlatform(platform);
+  i::CpuFeatures::Probe(true);
 
   // By default, log code create information in the snapshot.
   i::FLAG_log_code = true;
@@ -217,13 +222,14 @@ int main(int argc, char** argv) {
   Isolate* isolate = v8::Isolate::New();
   isolate->Enter();
   i::Isolate* internal_isolate = reinterpret_cast<i::Isolate*>(isolate);
-  i::Serializer::Enable(internal_isolate);
+    internal_isolate->enable_serializer();
 
   Persistent<Context> context;
   {
     HandleScope handle_scope(isolate);
     context.Reset(isolate, Context::New(isolate));
   }
+
   if (context.IsEmpty()) {
     fprintf(stderr,
             "\nException thrown while compiling natives - see above.\n\n");
@@ -235,7 +241,7 @@ int main(int argc, char** argv) {
     HandleScope scope(isolate);
     v8::Context::Scope cscope(v8::Local<v8::Context>::New(isolate, context));
     const char* name = i::FLAG_extra_code;
-    FILE* file = i::OS::FOpen(name, "rb");
+    FILE* file = v8::base::OS::FOpen(name, "rb");
     if (file == NULL) {
       fprintf(stderr, "Failed to open '%s': errno %d\n", name, errno);
       exit(1);
@@ -407,7 +413,7 @@ int main(int argc, char** argv) {
   fseek(fp, 0, SEEK_END);
   FILE* fpp = fopen(partial_file.c_str(), "rb");
   size_t nread = 0;
-  while (nread = fread(buf, 1, 1024, fpp)) {
+  while ((nread = fread(buf, 1, 1024, fpp)) != 0) {
     fwrite(buf, nread, 1, fp);
   }
   fclose(fpp);

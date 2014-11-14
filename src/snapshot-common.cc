@@ -115,7 +115,7 @@ bool Snapshot::Initialize(const char* nw_snapshot_file) {
     return true;
 
   } else if (size_ > 0) {
-    ElapsedTimer timer;
+    base::ElapsedTimer timer;
     if (FLAG_profile_deserialization) {
       timer.Start();
     }
