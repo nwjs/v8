@@ -6385,7 +6385,7 @@ v8::Local<Value> Isolate::ThrowException(v8::Local<v8::Value> value) {
 
 void Isolate::NWClearPendingException() {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(this);
-  isolate->clear_pending_exception();
+  isolate->nw_clear_pending_exception();
 }
 
 void Isolate::SetObjectGroupId(internal::Object** object, UniqueId id) {

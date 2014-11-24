@@ -561,6 +561,12 @@ class Isolate {
     thread_local_top_.pending_exception_ = heap_.the_hole_value();
   }
 
+  void nw_clear_pending_exception() {
+    DCHECK(!thread_local_top_.pending_exception_->IsException());
+    thread_local_top_.external_caught_exception_ = false;
+    thread_local_top_.pending_exception_ = heap_.the_hole_value();
+  }
+
   Object** pending_exception_address() {
     return &thread_local_top_.pending_exception_;
   }
