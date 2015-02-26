@@ -853,6 +853,7 @@ bool Compiler::Analyze(CompilationInfo* info) {
 
 
 bool Compiler::ParseAndAnalyze(CompilationInfo* info) {
+  if (info->script()->source() == info->isolate()->heap()->undefined_value()) return false;
   if (!Parser::Parse(info)) return false;
   return Compiler::Analyze(info);
 }
