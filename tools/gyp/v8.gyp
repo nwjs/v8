@@ -1736,6 +1736,25 @@
         ]
     },
     {
+      'target_name': 'nwsnapshot',
+      'type': 'executable',
+      'dependencies': ['v8_base', 'v8_nosnapshot', 'v8_libplatform'],
+      'include_dirs+': [
+        '../..',
+      ],
+      'sources': [
+        '../../src/nwsnapshot.cc',
+      ],
+      'conditions': [
+        ['v8_enable_i18n_support==1', {
+          'dependencies': [
+            '<(icu_gyp_path):icui18n',
+            '<(icu_gyp_path):icuuc',
+          ]
+        }],
+      ],
+    },
+    {
       'target_name': 'mksnapshot',
       'type': 'executable',
       'dependencies': ['v8_base', 'v8_nosnapshot', 'v8_libplatform'],

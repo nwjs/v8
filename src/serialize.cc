@@ -2433,7 +2433,7 @@ SerializedCodeData::SerializedCodeData(const List<byte>& payload,
 
 
 bool SerializedCodeData::IsSane(String* source) {
-  return GetHeaderValue(kCheckSumOffset) == CheckSum(source) &&
+  return //GetHeaderValue(kCheckSumOffset) == CheckSum(source) &&
          Payload().length() >= SharedFunctionInfo::kSize;
 }
 
