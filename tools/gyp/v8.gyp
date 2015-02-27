@@ -1736,14 +1736,14 @@
         ]
     },
     {
-      'target_name': 'nwsnapshot',
+      'target_name': 'nwjc',
       'type': 'executable',
       'dependencies': ['v8_base', 'v8_nosnapshot', 'v8_libplatform'],
       'include_dirs+': [
         '../..',
       ],
       'sources': [
-        '../../src/nwsnapshot.cc',
+        '../../src/nwjc.cc',
       ],
       'conditions': [
         ['v8_enable_i18n_support==1', {
