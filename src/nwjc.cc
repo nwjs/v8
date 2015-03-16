@@ -111,28 +111,24 @@ int main(int argc, char** argv) {
     }
     fclose(file);
     Local<String> source_str = String::NewFromUtf8(isolate, chars);
-    Local<String> filename = String::NewFromUtf8(isolate, argv[1]);
+
     TryCatch try_catch;
-
-    i::Isolate* iso = reinterpret_cast<i::Isolate*>(isolate);
-    i::Handle<i::String> orig_source = iso->factory()
-      ->NewStringFromUtf8(i::CStrVector(chars)).ToHandleChecked();
-
-    i::ScriptData* cache = NULL;
-    i::Handle<i::SharedFunctionInfo> orig = i::Compiler::CompileScript(
-            orig_source, i::Handle<i::String>(), 0, 0, false,
-            i::Handle<i::Context>(iso->native_context()), NULL, &cache,
-            v8::ScriptCompiler::kProduceCodeCache, i::NOT_NATIVES_CODE);
-
+    ScriptCompiler::Source script_source(source_str, ScriptOrigin(v8::Undefined(isolate)));
+    ScriptCompiler::CompileUnbound(isolate, &script_source,
+                                   v8::ScriptCompiler::kProduceCodeCache);
     if (try_catch.HasCaught()) {
       fprintf(stderr, "Failure compiling '%s' (see above)\n", argv[1]);
       exit(1);
     }
-    uint8_t* buffer = i::NewArray<uint8_t>(cache->length());
-    i::MemCopy(buffer, cache->data(), cache->length());
 
-    SnapshotWriter writer(argv[2]);
-    writer.WriteSnapshot(buffer, cache->length());
+    if (script_source.GetCachedData()) {
+      int length = script_source.GetCachedData()->length;
+      uint8_t* cache = new uint8_t[length];
+      memcpy(cache, script_source.GetCachedData()->data, length);
+
+      SnapshotWriter writer(argv[2]);
+      writer.WriteSnapshot(cache, length);
+    }
   }
 
   V8::Dispose();
