@@ -50,12 +50,19 @@
           'toolsets': ['target'],
         }],
         ['component=="shared_library"', {
-          'type': '<(component)',
           'sources': [
             # Note: on non-Windows we still build this file so that gyp
             # has some sources to link into the component.
             'v8dll-main.cc',
           ],
+          'direct_dependent_settings': {
+            'defines': [
+              'USING_V8_SHARED',
+            ],
+          },
+        }],
+        ['1==1', {
+          'type': '<(component)',
           'include_dirs': [
             '..',
           ],
@@ -66,7 +73,6 @@
           'direct_dependent_settings': {
             'defines': [
               'V8_SHARED',
-              'USING_V8_SHARED',
             ],
           },
           'target_conditions': [
@@ -161,7 +167,7 @@
             'js2c',
           ],
         }],
-        ['component=="shared_library"', {
+        ['1==1', {
           'defines': [
             'V8_SHARED',
             'BUILDING_V8_SHARED',
@@ -169,7 +175,6 @@
           'direct_dependent_settings': {
             'defines': [
               'V8_SHARED',
-              'USING_V8_SHARED',
             ],
           },
         }],
@@ -253,7 +258,7 @@
           'toolsets': ['target'],
           'dependencies': ['js2c'],
         }],
-        ['component=="shared_library"', {
+        ['1==1', {
           'defines': [
             'BUILDING_V8_SHARED',
             'V8_SHARED',
@@ -281,7 +286,7 @@
                 'natives_blob',
               ],
             }],
-            ['component=="shared_library"', {
+            ['1==1', {
               'defines': [
                 'V8_SHARED',
                 'BUILDING_V8_SHARED',
@@ -289,7 +294,6 @@
               'direct_dependent_settings': {
                 'defines': [
                   'V8_SHARED',
-                  'USING_V8_SHARED',
                 ],
               },
             }],
@@ -1588,7 +1592,7 @@
           # See http://crbug.com/485155.
           'msvs_shard': 4,
         }],
-        ['component=="shared_library"', {
+        ['1==1', {
           'defines': [
             'BUILDING_V8_SHARED',
             'V8_SHARED',
