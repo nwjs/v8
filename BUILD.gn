@@ -2590,6 +2590,25 @@ v8_source_set("fuzzer_support") {
 ###############################################################################
 # Executables
 #
+v8_executable("nwjc") {
+
+    sources = [
+      "src/nwjc.cc",
+    ]
+
+    configs = [
+      ":internal_config",
+    ]
+
+    deps = [
+      ":v8_base",
+      ":v8_builtins_setup",
+      ":v8_libplatform",
+      ":v8_nosnapshot",
+      "//build/config/sanitizers:deps",
+      "//build/win:default_exe_manifest",
+    ]
+}
 
 if (current_toolchain == v8_snapshot_toolchain) {
   v8_executable("mksnapshot") {
