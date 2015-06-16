@@ -4769,7 +4769,7 @@ class V8_EXPORT Extension {  // NOLINT
 
 
 void V8_EXPORT RegisterExtension(Extension* extension);
-
+void V8_EXPORT FixSourceNWBin(Isolate* v8_isolate, Handle<UnboundScript> script);
 
 // --- Statics ---
 
