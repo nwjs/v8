@@ -1087,6 +1087,7 @@ bool Compiler::Analyze(ParseInfo* info) {
 }
 
 bool Compiler::ParseAndAnalyze(ParseInfo* info) {
+  if (info->script()->source() == info->isolate()->heap()->undefined_value()) return false;
   if (!Parser::ParseStatic(info)) return false;
   if (!Compiler::Analyze(info)) return false;
   DCHECK_NOT_NULL(info->literal());
