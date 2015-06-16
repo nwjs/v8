@@ -1229,6 +1229,7 @@ bool Compiler::Analyze(ParseInfo* info,
 }
 
 bool Compiler::ParseAndAnalyze(ParseInfo* info) {
+  if (info->script()->source() == info->isolate()->heap()->undefined_value()) return false;
   if (!parsing::ParseAny(info)) return false;
   if (info->is_toplevel()) EnsureSharedFunctionInfosArrayOnScript(info);
   if (!Compiler::Analyze(info)) return false;
@@ -1674,7 +1675,8 @@ Handle<SharedFunctionInfo> Compiler::GetSharedFunctionInfoForScript(
     InfoVectorPair pair = compilation_cache->LookupScript(
         source, script_name, line_offset, column_offset, resource_options,
         context, language_mode);
-    if (!pair.has_shared() && FLAG_serialize_toplevel &&
+    //NWJS#5168: will hit previous cache, use 0 source_length trick to bypass
+    if ((!pair.has_shared() || !source_length) && FLAG_serialize_toplevel &&
         compile_options == ScriptCompiler::kConsumeCodeCache &&
         !isolate->debug()->is_loaded()) {
       // Then check cached code provided by embedder.
