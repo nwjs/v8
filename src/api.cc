@@ -8126,6 +8126,10 @@ bool Isolate::InContext() {
   return isolate->context() != NULL;
 }
 
+ArrayBuffer::Allocator* Isolate::array_buffer_allocator() {
+  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(this);
+  return isolate->array_buffer_allocator();
+}
 
 v8::Local<v8::Context> Isolate::GetCurrentContext() {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(this);
