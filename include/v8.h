@@ -5588,6 +5588,8 @@ class V8_EXPORT EmbedderHeapTracer {
  */
 class V8_EXPORT Isolate {
  public:
+  ArrayBuffer::Allocator* array_buffer_allocator();
+  
   /**
    * Initial configuration parameters for a new Isolate.
    */
