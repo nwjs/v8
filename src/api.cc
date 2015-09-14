@@ -8264,7 +8264,7 @@ void Testing::DeoptimizeAll() {
 }
 
 
-void FixSourceNWBin(Isolate* v8_isolate, Handle<UnboundScript> script) {
+void FixSourceNWBin(Isolate* v8_isolate, Local<UnboundScript> script) {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
   i::Handle<i::HeapObject> obj =
     i::Handle<i::HeapObject>::cast(v8::Utils::OpenHandle(*script));
