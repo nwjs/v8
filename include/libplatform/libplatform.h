@@ -25,7 +25,7 @@ enum class IdleTaskSupport { kDisabled, kEnabled };
  * tasks (IdleTasksEnabled will return true) and will rely on the embedder
  * calling v8::platform::RunIdleTasks to process the idle tasks.
  */
-V8_PLATFORM_EXPORT v8::Platform* CreateDefaultPlatform(
+V8_EXPORT2 v8::Platform* CreateDefaultPlatform(
     int thread_pool_size = 0,
     IdleTaskSupport idle_task_support = IdleTaskSupport::kDisabled);
 
@@ -37,8 +37,7 @@ V8_PLATFORM_EXPORT v8::Platform* CreateDefaultPlatform(
  * not block if no task is pending. The |platform| has to be created using
  * |CreateDefaultPlatform|.
  */
-V8_PLATFORM_EXPORT bool PumpMessageLoop(v8::Platform* platform,
-                                        v8::Isolate* isolate);
+bool V8_EXPORT2 PumpMessageLoop(v8::Platform* platform, v8::Isolate* isolate);
 
 /**
  * Runs pending idle tasks for at most |idle_time_in_seconds| seconds.
