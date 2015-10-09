@@ -33,7 +33,7 @@ enum class MessageLoopBehavior : bool {
  * If |tracing_controller| is nullptr, the default platform will create a
  * v8::platform::TracingController instance and use it.
  */
-V8_PLATFORM_EXPORT v8::Platform* CreateDefaultPlatform(
+V8_EXPORT2 v8::Platform* CreateDefaultPlatform(
     int thread_pool_size = 0,
     IdleTaskSupport idle_task_support = IdleTaskSupport::kDisabled,
     InProcessStackDumping in_process_stack_dumping =
@@ -48,11 +48,12 @@ V8_PLATFORM_EXPORT v8::Platform* CreateDefaultPlatform(
  * through the |behavior| parameter, this call does not block if no task is
  * pending. The |platform| has to be created using |CreateDefaultPlatform|.
  */
-V8_PLATFORM_EXPORT bool PumpMessageLoop(
+
+V8_EXPORT2 bool PumpMessageLoop(
     v8::Platform* platform, v8::Isolate* isolate,
     MessageLoopBehavior behavior = MessageLoopBehavior::kDoNotWait);
 
-V8_PLATFORM_EXPORT void EnsureEventLoopInitialized(v8::Platform* platform,
+V8_EXPORT2 void EnsureEventLoopInitialized(v8::Platform* platform,
                                                    v8::Isolate* isolate);
 
 /**
@@ -62,7 +63,7 @@ V8_PLATFORM_EXPORT void EnsureEventLoopInitialized(v8::Platform* platform,
  * This call does not block if no task is pending. The |platform| has to be
  * created using |CreateDefaultPlatform|.
  */
-V8_PLATFORM_EXPORT void RunIdleTasks(v8::Platform* platform,
+V8_EXPORT2 void RunIdleTasks(v8::Platform* platform,
                                      v8::Isolate* isolate,
                                      double idle_time_in_seconds);
 
@@ -73,7 +74,7 @@ V8_PLATFORM_EXPORT void RunIdleTasks(v8::Platform* platform,
  *
  * DEPRECATED: Will be removed soon.
  */
-V8_PLATFORM_EXPORT void SetTracingController(
+V8_EXPORT2 void SetTracingController(
     v8::Platform* platform,
     v8::platform::tracing::TracingController* tracing_controller);
 
