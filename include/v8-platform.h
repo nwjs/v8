@@ -9,6 +9,24 @@
 #include <stdint.h>
 #include <memory>
 #include <string>
+#include "v8config.h"
+
+#ifdef V8_OS_LINUX
+
+// Setup for Linux shared library export.
+#if V8_HAS_ATTRIBUTE_VISIBILITY && defined(V8_SHARED)
+# ifdef BUILDING_V8_SHARED
+#  define V8_EXPORT2 __attribute__ ((visibility("default")))
+# else
+#  define V8_EXPORT2
+# endif
+#else
+# define V8_EXPORT2
+#endif
+
+#else // V8_OS_LINUX
+#define V8_EXPORT2
+#endif  // V8_OS_WIN
 
 namespace v8 {
 
