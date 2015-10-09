@@ -19,8 +19,7 @@ namespace platform {
  * of zero is passed, a suitable default based on the current number of
  * processors online will be chosen.
  */
-v8::Platform* CreateDefaultPlatform(int thread_pool_size = 0);
-
+v8::Platform* V8_EXPORT2 CreateDefaultPlatform(int thread_pool_size = 0);
 
 /**
  * Pumps the message loop for the given isolate.
@@ -30,7 +29,7 @@ v8::Platform* CreateDefaultPlatform(int thread_pool_size = 0);
  * not block if no task is pending. The |platform| has to be created using
  * |CreateDefaultPlatform|.
  */
-bool PumpMessageLoop(v8::Platform* platform, v8::Isolate* isolate);
+bool V8_EXPORT2 PumpMessageLoop(v8::Platform* platform, v8::Isolate* isolate);
 
 /**
  * Attempts to set the tracing controller for the given platform.
