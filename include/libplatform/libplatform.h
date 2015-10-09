@@ -20,8 +20,8 @@ namespace platform {
  * of zero is passed, a suitable default based on the current number of
  * processors online will be chosen.
  */
-V8_PLATFORM_EXPORT v8::Platform* CreateDefaultPlatform(
-    int thread_pool_size = 0);
+
+v8::Platform* V8_EXPORT2 CreateDefaultPlatform(int thread_pool_size = 0);
 
 /**
  * Pumps the message loop for the given isolate.
@@ -31,8 +31,7 @@ V8_PLATFORM_EXPORT v8::Platform* CreateDefaultPlatform(
  * not block if no task is pending. The |platform| has to be created using
  * |CreateDefaultPlatform|.
  */
-V8_PLATFORM_EXPORT bool PumpMessageLoop(v8::Platform* platform,
-                                        v8::Isolate* isolate);
+bool V8_EXPORT2 PumpMessageLoop(v8::Platform* platform, v8::Isolate* isolate);
 
 /**
  * Runs pending idle tasks for at most |idle_time_in_seconds| seconds.
