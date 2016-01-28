@@ -57,6 +57,7 @@ void HeapProfiler::DefineWrapperClass(
 v8::RetainedObjectInfo* HeapProfiler::ExecuteWrapperClassCallback(
     uint16_t class_id, Object** wrapper) {
   if (wrapper_callbacks_.length() <= class_id) return NULL;
+  if (!wrapper_callbacks_[class_id]) return NULL;
   return wrapper_callbacks_[class_id](
       class_id, Utils::ToLocal(Handle<Object>(wrapper)));
 }
