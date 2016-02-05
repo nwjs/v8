@@ -17,7 +17,7 @@
 #include "src/list.h"
 #include "src/snapshot/natives.h"
 #include "src/snapshot/serialize.h"
-#include "src/preparse-data.h"
+#include "src/parsing/preparse-data.h"
 
 
 using namespace v8;
