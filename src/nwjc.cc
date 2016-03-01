@@ -127,7 +127,7 @@ int main(int argc, char** argv) {
     fclose(file);
     Local<String> source_str = String::NewFromUtf8(isolate, chars);
     Local<String> filename = String::NewFromUtf8(isolate, argv[1]);
-    TryCatch try_catch;
+    TryCatch try_catch(isolate);
 
     i::Isolate* iso = reinterpret_cast<i::Isolate*>(isolate);
     i::Handle<i::String> orig_source = iso->factory()
