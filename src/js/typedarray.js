@@ -267,7 +267,9 @@ function NAMEConstructor(arg1, arg2, arg3) {
       NAMEConstructByTypedArray(this, arg1);
     } else {
       var iteratorFn = arg1[iteratorSymbol];
-      if (IS_UNDEFINED(iteratorFn) || iteratorFn === ArrayValues) {
+      // The comparasion between iteratorFn and ArrayValues fail between contexts
+      // so a flag propery is used
+      if (IS_UNDEFINED(iteratorFn) || iteratorFn === ArrayValues || arg1['__nw_is_gta']) {
         NAMEConstructByArrayLike(this, arg1, arg1.length);
       } else {
         NAMEConstructByIterable(this, arg1, iteratorFn);
