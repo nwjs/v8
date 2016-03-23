@@ -252,7 +252,9 @@ function NAMEConstructor(arg1, arg2, arg3) {
       // path that seems to be an optimized version of what's below, but
       // in an observably different way.
       var iteratorFn = arg1[iteratorSymbol];
-      if (IS_UNDEFINED(iteratorFn) || iteratorFn === ArrayValues) {
+      // The comparasion between iteratorFn and ArrayValues fail between contexts
+      // so a flag propery is used
+      if (IS_UNDEFINED(iteratorFn) || iteratorFn === ArrayValues || arg1['__nw_is_gta']) {
         NAMEConstructByArrayLike(this, arg1);
       } else {
         NAMEConstructByIterable(this, arg1, iteratorFn);

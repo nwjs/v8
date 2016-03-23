@@ -139,6 +139,7 @@ utils.SetFunctionName(ArrayValues, 'values');
                   'entries', ArrayEntries, DONT_ENUM);
 %AddNamedProperty(GlobalTypedArray.prototype, 'values', ArrayValues, DONT_ENUM);
 %AddNamedProperty(GlobalTypedArray.prototype, 'keys', ArrayKeys, DONT_ENUM);
+%AddNamedProperty(GlobalTypedArray.prototype, '__nw_is_gta', 1, READ_ONLY | DONT_ENUM);
 %AddNamedProperty(GlobalTypedArray.prototype,
                   iteratorSymbol, ArrayValues, DONT_ENUM);
 
