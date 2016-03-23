@@ -158,6 +158,7 @@ utils.InstallFunctions(GlobalTypedArray.prototype, DONT_ENUM, [
 ]);
 %AddNamedProperty(GlobalTypedArray.prototype,
                   iteratorSymbol, TypedArrayValues, DONT_ENUM);
+%AddNamedProperty(GlobalTypedArray.prototype, '__nw_is_gta', 1, READ_ONLY | DONT_ENUM);
 
 // -------------------------------------------------------------------
 // Exports
