@@ -16,7 +16,8 @@
 #include "src/flags.h"
 #include "src/list.h"
 #include "src/snapshot/natives.h"
-#include "src/snapshot/serialize.h"
+#include "src/snapshot/partial-serializer.h"
+#include "src/snapshot/startup-serializer.h"
 #include "src/parsing/preparse-data.h"
 
 
@@ -135,7 +136,7 @@ int main(int argc, char** argv) {
 
     i::ScriptData* cache = NULL;
     i::Handle<i::SharedFunctionInfo> orig =
-      i::Compiler::CompileScript(orig_source, i::Handle<i::String>(), 0, 0, v8::ScriptOriginOptions(),
+      i::Compiler::GetSharedFunctionInfoForScript(orig_source, i::Handle<i::String>(), 0, 0, v8::ScriptOriginOptions(),
                                  i::Handle<i::Object>(),
             i::Handle<i::Context>(iso->native_context()), NULL, &cache,
                                  v8::ScriptCompiler::kProduceCodeCache, i::NOT_NATIVES_CODE, false);
