@@ -117,6 +117,15 @@ template("v8_header_set") {
   }
 }
 
+template("v8_static_lib") {
+  static_library(target_name) {
+    forward_variables_from(invoker, "*", [ "configs" ])
+    configs += invoker.configs
+    configs -= v8_remove_configs
+    configs += v8_add_configs
+  }
+}
+
 template("v8_executable") {
   executable(target_name) {
     forward_variables_from(invoker,
