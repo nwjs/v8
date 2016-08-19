@@ -1485,7 +1485,8 @@ Handle<SharedFunctionInfo> Compiler::GetSharedFunctionInfoForScript(
     maybe_result = compilation_cache->LookupScript(
         source, script_name, line_offset, column_offset, resource_options,
         context, language_mode);
-    if (maybe_result.is_null() && FLAG_serialize_toplevel &&
+    //NWJS#5168: will hit previous cache, use 0 source_length trick to bypass
+    if ((maybe_result.is_null() || !source_length) && FLAG_serialize_toplevel &&
         compile_options == ScriptCompiler::kConsumeCodeCache &&
         !isolate->debug()->is_loaded()) {
       // Then check cached code provided by embedder.
