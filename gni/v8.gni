@@ -89,8 +89,8 @@ template("v8_static_lib") {
   static_library(target_name) {
     forward_variables_from(invoker, "*", [ "configs" ])
     configs += invoker.configs
-    configs -= remove_configs
-    configs += add_configs
+    configs -= v8_remove_configs
+    configs += v8_add_configs
   }
 }
 
