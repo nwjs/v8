@@ -27,6 +27,7 @@
 
 {
   'variables': {
+    'icu_gyp_path': '../../third_party/icu/icu.gyp',
     'v8_code': 1,
     'v8_random_seed%': 314159265,
     'v8_vector_stores%': 0,
