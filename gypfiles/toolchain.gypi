@@ -29,6 +29,23 @@
 
 {
   'variables': {
+          'variables': {
+            'conditions': [
+              ['OS=="linux" or OS=="freebsd" or OS=="openbsd" or \
+                 OS=="netbsd" or OS=="mac" or OS=="qnx" or OS=="aix"', {
+                # This handles the Unix platforms we generally deal with.
+                # Anything else gets passed through, which probably won't work
+                # very well; such hosts should pass an explicit target_arch
+                # to gyp.
+                'host_arch%': '<!pymod_do_main(detect_host_arch)',
+              }, {
+                # OS!="linux" and OS!="freebsd" and OS!="openbsd" and
+                # OS!="netbsd" and OS!="mac" and OS!="aix"
+                'host_arch%': 'ia32',
+              }],
+            ],
+          },
+          'host_arch%': '<(host_arch)',
     'msvs_use_common_release': 0,
     'clang%': 0,
     'asan%': 0,
