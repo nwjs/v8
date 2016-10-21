@@ -2,8 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#pragma clang diagnostic push
+#if defined(__clang__)
 #pragma clang diagnostic ignored "-Wundefined-inline"
+#endif
 
 #include <errno.h>
 #include <signal.h>
@@ -161,5 +162,3 @@ int main(int argc, char** argv) {
   delete platform;
   return 0;
 }
-
-#pragma clang diagnostic pop
