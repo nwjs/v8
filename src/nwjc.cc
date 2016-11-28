@@ -117,12 +117,12 @@ int main(int argc, char** argv) {
     }
 
     fseek(file, 0, SEEK_END);
-    int size = ftell(file);
+    long size = ftell(file);
     rewind(file);
 
     char* chars = new char[size + 1];
     chars[size] = '\0';
-    for (int i = 0; i < size;) {
+    for (long i = 0; i < size;) {
       int read = static_cast<int>(fread(&chars[i], 1, size - i, file));
       if (read < 0) {
         fprintf(stderr, "Failed to read '%s': errno %d\n", argv[1], errno);
