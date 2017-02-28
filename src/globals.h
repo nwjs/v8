@@ -19,9 +19,9 @@
 
 // Setup for Windows shared library export.
 #ifdef BUILDING_V8_SHARED
-#define V8_EXPORT_PRIVATE __declspec(dllexport)
+#define V8_EXPORT_PRIVATE //__declspec(dllexport)
 #elif USING_V8_SHARED
-#define V8_EXPORT_PRIVATE __declspec(dllimport)
+#define V8_EXPORT_PRIVATE //__declspec(dllimport)
 #else
 #define V8_EXPORT_PRIVATE
 #endif  // BUILDING_V8_SHARED
@@ -31,7 +31,7 @@
 // Setup for Linux shared library export.
 #if V8_HAS_ATTRIBUTE_VISIBILITY
 #ifdef BUILDING_V8_SHARED
-#define V8_EXPORT_PRIVATE __attribute__((visibility("default")))
+#define V8_EXPORT_PRIVATE //__attribute__((visibility("default")))
 #else
 #define V8_EXPORT_PRIVATE
 #endif
