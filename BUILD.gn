@@ -2675,7 +2675,7 @@ v8_executable("nwjc") {
       ":v8_builtins_setup",
       ":v8_libplatform",
       ":v8_nosnapshot",
-      "//build/config/sanitizers:deps",
+      "//build/config:exe_and_shlib_deps",
       "//build/win:default_exe_manifest",
     ]
 }
