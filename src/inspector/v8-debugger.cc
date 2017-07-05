@@ -212,6 +212,7 @@ void V8Debugger::getCompiledScripts(
   for (size_t i = 0; i < scripts.Size(); ++i) {
     v8::Local<v8::debug::Script> script = scripts.Get(i);
     if (!script->WasCompiled()) continue;
+    if (!script->LineEnds().size()) continue;
     v8::Local<v8::Value> contextData;
     if (!script->ContextData().ToLocal(&contextData) || !contextData->IsInt32())
       continue;
