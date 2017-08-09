@@ -2529,7 +2529,7 @@ v8_static_lib("v8_libplatform") {
 
   configs = [ ":internal_config_base" ]
 
-  if (is_component_build) {
+  if (true) {
     defines = [ "BUILDING_V8_PLATFORM_SHARED" ]
   }
 
