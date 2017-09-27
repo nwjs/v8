@@ -171,7 +171,7 @@ config("internal_config_base") {
 # This config should be applied to code using the libplatform.
 config("libplatform_config") {
   include_dirs = [ "include" ]
-  if (is_component_build) {
+  if (false) {
     defines = [ "USING_V8_PLATFORM_SHARED" ]
   }
 }
@@ -199,6 +199,7 @@ config("external_config") {
     defines = [
       "V8_SHARED",
       "USING_V8_SHARED",
+      "USING_V8_PLATFORM_SHARED",
     ]
   } else {
     defines = [
