@@ -144,7 +144,7 @@ int main(int argc, char** argv) {
     i::Compiler::GetSharedFunctionInfoForScript(orig_source, i::Handle<i::String>(), 0, 0, v8::ScriptOriginOptions(),
                                  i::Handle<i::Object>(),
             i::Handle<i::Context>(iso->native_context()), NULL, &cache,
-                                 v8::ScriptCompiler::kProduceCodeCache, i::NOT_NATIVES_CODE);
+                                                v8::ScriptCompiler::kProduceCodeCache, i::NOT_NATIVES_CODE, i::Handle<i::FixedArray>());
 
     if (try_catch.HasCaught()) {
       fprintf(stderr, "Failure compiling '%s' (see above)\n", argv[1]);

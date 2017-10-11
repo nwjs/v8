@@ -2680,7 +2680,7 @@ v8_executable("nwjc") {
 
     deps = [
       ":v8_base",
-      ":v8_builtins_setup",
+      ":v8_init",
       ":v8_libplatform",
       ":v8_nosnapshot",
       "//build/config:exe_and_shlib_deps",
