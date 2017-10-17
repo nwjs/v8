@@ -20,7 +20,6 @@
 #include "src/factory.h"
 #include "src/isolate-inl.h"
 #include "src/flags.h"
-#include "src/list.h"
 #include "src/snapshot/natives.h"
 #include "src/snapshot/partial-serializer.h"
 #include "src/snapshot/startup-serializer.h"
@@ -82,7 +81,7 @@ int main(int argc, char** argv) {
 
   i::FLAG_logfile_per_isolate = false;
 
-  i::FLAG_serialize_toplevel = true;
+  //i::FLAG_serialize_toplevel = true;
   i::FLAG_lazy = false;
 
   // Print the usage if an error occurs when parsing the command line
