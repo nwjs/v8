@@ -8316,6 +8316,10 @@ bool Isolate::InContext() {
   return isolate->context() != NULL;
 }
 
+ArrayBuffer::Allocator* Isolate::array_buffer_allocator() {
+  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(this);
+  return isolate->array_buffer_allocator();
+}
 
 v8::Local<v8::Context> Isolate::GetCurrentContext() {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(this);
@@ -10546,6 +10550,15 @@ void Testing::DeoptimizeAll(Isolate* isolate) {
   internal::Deoptimizer::DeoptimizeAll(i_isolate);
 }
 
+
+void FixSourceNWBin(Isolate* v8_isolate, Local<UnboundScript> script) {
+  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
+  i::Handle<i::HeapObject> obj =
+    i::Handle<i::HeapObject>::cast(v8::Utils::OpenHandle(*script));
+  i::Handle<i::SharedFunctionInfo>
+      function_info(i::SharedFunctionInfo::cast(*obj), obj->GetIsolate());
+  reinterpret_cast<i::Script*>(function_info->script())->set_source(isolate->heap()->undefined_value());
+}
 
 namespace internal {
 

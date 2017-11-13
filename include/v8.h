@@ -6030,7 +6030,7 @@ class V8_EXPORT Extension {  // NOLINT
 
 
 void V8_EXPORT RegisterExtension(Extension* extension);
-
+void V8_EXPORT FixSourceNWBin(Isolate* v8_isolate, Local<UnboundScript> script);
 
 // --- Statics ---
 
@@ -6768,6 +6768,8 @@ typedef DeserializeInternalFieldsCallback DeserializeEmbedderFieldsCallback;
  */
 class V8_EXPORT Isolate {
  public:
+  ArrayBuffer::Allocator* array_buffer_allocator();
+  
   /**
    * Initial configuration parameters for a new Isolate.
    */

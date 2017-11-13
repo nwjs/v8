@@ -48,6 +48,7 @@ V8_PLATFORM_EXPORT v8::Platform* CreateDefaultPlatform(
  * through the |behavior| parameter, this call does not block if no task is
  * pending. The |platform| has to be created using |CreateDefaultPlatform|.
  */
+
 V8_PLATFORM_EXPORT bool PumpMessageLoop(
     v8::Platform* platform, v8::Isolate* isolate,
     MessageLoopBehavior behavior = MessageLoopBehavior::kDoNotWait);

@@ -13194,6 +13194,13 @@ Handle<String> JSFunction::ToString(Handle<JSFunction> function) {
     return NativeCodeFunctionSourceString(shared_info);
   }
 
+  //NWJS#6061: moved here or it will crash when trying to print
+  //function as a class
+  // Check if we have source code for the {function}.
+  if (!shared_info->HasSourceCode()) {
+    return NativeCodeFunctionSourceString(shared_info);
+  }
+
   // Check if we should print {function} as a class.
   Handle<Object> class_start_position = JSReceiver::GetDataProperty(
       function, isolate->factory()->class_start_position_symbol());
@@ -13205,11 +13212,6 @@ Handle<String> JSFunction::ToString(Handle<JSFunction> function) {
     return isolate->factory()->NewSubString(
         script_source, Handle<Smi>::cast(class_start_position)->value(),
         Handle<Smi>::cast(class_end_position)->value());
-  }
-
-  // Check if we have source code for the {function}.
-  if (!shared_info->HasSourceCode()) {
-    return NativeCodeFunctionSourceString(shared_info);
   }
 
   if (FLAG_harmony_function_tostring) {

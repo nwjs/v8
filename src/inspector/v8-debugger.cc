@@ -207,6 +207,7 @@ void V8Debugger::getCompiledScripts(
   for (size_t i = 0; i < scripts.Size(); ++i) {
     v8::Local<v8::debug::Script> script = scripts.Get(i);
     if (!script->WasCompiled()) continue;
+    if (!script->LineEnds().size()) continue;
     if (script->IsEmbedded()) {
       result.push_back(V8DebuggerScript::Create(m_isolate, script, false));
       continue;
@@ -726,6 +727,8 @@ void V8Debugger::setAsyncCallStackDepth(V8DebuggerAgentImpl* agent, int depth) {
   if (m_maxAsyncCallStackDepth == maxAsyncCallStackDepth) return;
   // TODO(dgozman): ideally, this should be per context group.
   m_maxAsyncCallStackDepth = maxAsyncCallStackDepth;
+  m_inspector->client()->maxAsyncCallStackDepthChanged(
+      m_maxAsyncCallStackDepth);
   if (!maxAsyncCallStackDepth) allAsyncTasksCanceled();
 }
 
