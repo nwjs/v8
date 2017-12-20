@@ -468,6 +468,10 @@ void v8::ArrayBuffer::Allocator::Free(void* data, size_t length,
       UNIMPLEMENTED();
       return;
     }
+    case AllocationMode::kNodeJS: {
+      free(data); //NWJS#6335: when nw run as node
+      return;
+    }
   }
 }
 
@@ -504,6 +508,10 @@ class ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
       }
       case v8::ArrayBuffer::Allocator::AllocationMode::kReservation: {
         base::OS::ReleaseRegion(data, length);
+        return;
+      }
+      case v8::ArrayBuffer::Allocator::AllocationMode::kNodeJS: {
+        free(data);
         return;
       }
     }
@@ -8052,6 +8060,9 @@ v8::ArrayBuffer::Contents v8::ArrayBuffer::Externalize() {
   return GetContents();
 }
 
+void v8::ArrayBuffer::set_nodejs(bool value) {
+  Utils::OpenHandle(this)->set_is_node_js(value);
+}
 
 v8::ArrayBuffer::Contents v8::ArrayBuffer::GetContents() {
   i::Handle<i::JSArrayBuffer> self = Utils::OpenHandle(this);
@@ -8061,7 +8072,7 @@ v8::ArrayBuffer::Contents v8::ArrayBuffer::GetContents() {
   contents.allocation_length_ = self->allocation_length();
   contents.allocation_mode_ = self->has_guard_region()
                                   ? Allocator::AllocationMode::kReservation
-                                  : Allocator::AllocationMode::kNormal;
+    : (self->is_node_js() ? Allocator::AllocationMode::kNodeJS : Allocator::AllocationMode::kNormal);
   contents.data_ = self->backing_store();
   contents.byte_length_ = byte_length;
   return contents;
@@ -8460,6 +8471,10 @@ bool Isolate::InContext() {
   return isolate->context() != NULL;
 }
 
+ArrayBuffer::Allocator* Isolate::array_buffer_allocator() {
+  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(this);
+  return isolate->array_buffer_allocator();
+}
 
 v8::Local<v8::Context> Isolate::GetCurrentContext() {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(this);
@@ -10785,6 +10800,15 @@ void Testing::DeoptimizeAll(Isolate* isolate) {
   internal::Deoptimizer::DeoptimizeAll(i_isolate);
 }
 
+
+void FixSourceNWBin(Isolate* v8_isolate, Local<UnboundScript> script) {
+  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
+  i::Handle<i::HeapObject> obj =
+    i::Handle<i::HeapObject>::cast(v8::Utils::OpenHandle(*script));
+  i::Handle<i::SharedFunctionInfo>
+      function_info(i::SharedFunctionInfo::cast(*obj), obj->GetIsolate());
+  reinterpret_cast<i::Script*>(function_info->script())->set_source(isolate->heap()->undefined_value());
+}
 
 namespace internal {
 
