@@ -4976,7 +4976,7 @@ void JSArrayBuffer::set_allocation_length(size_t value) {
 ArrayBuffer::Allocator::AllocationMode JSArrayBuffer::allocation_mode() const {
   using AllocationMode = ArrayBuffer::Allocator::AllocationMode;
   return has_guard_region() ? AllocationMode::kReservation
-                            : AllocationMode::kNormal;
+    : (is_node_js() ? AllocationMode::kNodeJS : AllocationMode::kNormal);
 }
 
 void JSArrayBuffer::set_bit_field(uint32_t bits) {
@@ -5039,6 +5039,14 @@ void JSArrayBuffer::set_has_guard_region(bool value) {
 
 bool JSArrayBuffer::is_growable() {
   return IsGrowable::decode(bit_field());
+}
+
+bool JSArrayBuffer::is_node_js() const {
+  return IsNodeJS::decode(bit_field());
+}
+
+void JSArrayBuffer::set_is_node_js(bool value) {
+  set_bit_field(IsNodeJS::update(bit_field(), value));
 }
 
 void JSArrayBuffer::set_is_growable(bool value) {

@@ -9,6 +9,37 @@
 #include <stdint.h>
 #include <memory>
 #include <string>
+#include "v8config.h"
+
+#ifdef V8_OS_WIN
+
+// Setup for Windows DLL export/import. When building the V8 DLL the
+// BUILDING_V8_SHARED needs to be defined. When building a program which uses
+// the V8 DLL USING_V8_SHARED needs to be defined. When either building the V8
+// static library or building a program which uses the V8 static library neither
+// BUILDING_V8_SHARED nor USING_V8_SHARED should be defined.
+#ifdef BUILDING_V8_SHARED
+# define V8_EXPORT __declspec(dllexport)
+#elif USING_V8_SHARED
+# define V8_EXPORT __declspec(dllimport)
+#else
+# define V8_EXPORT
+#endif  // BUILDING_V8_SHARED
+
+#else  // V8_OS_WIN
+
+// Setup for Linux shared library export.
+#if V8_HAS_ATTRIBUTE_VISIBILITY
+# ifdef BUILDING_V8_SHARED
+#  define V8_EXPORT __attribute__ ((visibility("default")))
+# else
+#  define V8_EXPORT
+# endif
+#else
+# define V8_EXPORT
+#endif
+
+#endif  // V8_OS_WIN
 
 namespace v8 {
 
@@ -34,6 +65,51 @@ class IdleTask {
  public:
   virtual ~IdleTask() = default;
   virtual void Run(double deadline_in_seconds) = 0;
+};
+
+/**
+ * A TaskRunner allows scheduling of tasks. The TaskRunner may still be used to
+ * post tasks after the isolate gets destructed, but these tasks may not get
+ * executed anymore. All tasks posted to a given TaskRunner will be invoked in
+ * sequence. Tasks can be posted from any thread.
+ */
+class TaskRunner {
+ public:
+  /**
+   * Schedules a task to be invoked by this TaskRunner. The TaskRunner
+   * implementation takes ownership of |task|.
+   */
+  virtual void PostTask(std::unique_ptr<Task> task) = 0;
+
+  /**
+   * Schedules a task to be invoked by this TaskRunner. The task is scheduled
+   * after the given number of seconds |delay_in_seconds|. The TaskRunner
+   * implementation takes ownership of |task|.
+   */
+  virtual void PostDelayedTask(std::unique_ptr<Task> task,
+                               double delay_in_seconds) = 0;
+
+  /**
+   * Schedules an idle task to be invoked by this TaskRunner. The task is
+   * scheduled when the embedder is idle. Requires that
+   * TaskRunner::SupportsIdleTasks(isolate) is true. Idle tasks may be reordered
+   * relative to other task types and may be starved for an arbitrarily long
+   * time if no idle time is available. The TaskRunner implementation takes
+   * ownership of |task|.
+   */
+  virtual void PostIdleTask(std::unique_ptr<IdleTask> task) = 0;
+
+  /**
+   * Returns true if idle tasks are enabled for this TaskRunner.
+   */
+  virtual bool IdleTasksEnabled() = 0;
+
+  TaskRunner() = default;
+  virtual ~TaskRunner() = default;
+
+ private:
+  TaskRunner(const TaskRunner&) = delete;
+  TaskRunner& operator=(const TaskRunner&) = delete;
 };
 
 /**
@@ -151,6 +227,28 @@ class Platform {
   virtual size_t NumberOfAvailableBackgroundThreads() { return 0; }
 
   /**
+   * Returns a TaskRunner which can be used to post a task on the foreground.
+   * This function should only be called from a foreground thread.
+   */
+  virtual std::shared_ptr<v8::TaskRunner> GetForegroundTaskRunner(
+      Isolate* isolate) {
+    // TODO(ahaas): Make this function abstract after it got implemented on all
+    // platforms.
+    return {};
+  }
+
+  /**
+   * Returns a TaskRunner which can be used to post a task on a background.
+   * This function should only be called from a foreground thread.
+   */
+  virtual std::shared_ptr<v8::TaskRunner> GetBackgroundTaskRunner(
+      Isolate* isolate) {
+    // TODO(ahaas): Make this function abstract after it got implemented on all
+    // platforms.
+    return {};
+  }
+
+  /**
    * Schedules a task to be invoked on a background thread. |expected_runtime|
    * indicates that the task will run a long time. The Platform implementation
    * takes ownership of |task|. There is no guarantee about order of execution
@@ -230,7 +328,7 @@ class Platform {
    * since epoch. Useful for implementing |CurrentClockTimeMillis| if
    * nothing special needed.
    */
-  static double SystemClockTimeMillis();
+  V8_EXPORT static double SystemClockTimeMillis();
 };
 
 }  // namespace v8
