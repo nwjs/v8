@@ -27,6 +27,7 @@
 
 {
   'variables': {
+    'icu_gyp_path': '../../third_party/icu/icu.gyp',
     'v8_code': 1,
     'v8_random_seed%': 314159265,
     'v8_vector_stores%': 0,
@@ -50,12 +51,19 @@
           'toolsets': ['target'],
         }],
         ['component=="shared_library"', {
-          'type': '<(component)',
           'sources': [
             # Note: on non-Windows we still build this file so that gyp
             # has some sources to link into the component.
             'v8dll-main.cc',
           ],
+          'direct_dependent_settings': {
+            'defines': [
+              'USING_V8_SHARED',
+            ],
+          },
+        }],
+        ['1==1', {
+          'type': '<(component)',
           'include_dirs': [
             '..',
           ],
@@ -64,7 +72,7 @@
           ],
           'direct_dependent_settings': {
             'defines': [
-              'USING_V8_SHARED',
+              'V8_SHARED',
             ],
           },
           'conditions': [
@@ -304,13 +312,13 @@
             'js2c',
           ],
         }],
-        ['component=="shared_library"', {
+        ['1==1', {
           'defines': [
             'BUILDING_V8_SHARED',
           ],
           'direct_dependent_settings': {
             'defines': [
-              'USING_V8_SHARED',
+              'V8_SHARED',
             ],
           },
         }],
@@ -395,7 +403,7 @@
           'toolsets': ['target'],
           'dependencies': ['js2c'],
         }],
-        ['component=="shared_library"', {
+        ['1==1', {
           'defines': [
             'BUILDING_V8_SHARED',
           ],
@@ -422,13 +430,13 @@
                 'natives_blob',
               ],
             }],
-            ['component=="shared_library"', {
+            ['1==1', {
               'defines': [
                 'BUILDING_V8_SHARED',
               ],
               'direct_dependent_settings': {
                 'defines': [
-                  'USING_V8_SHARED',
+                  'V8_SHARED',
                 ],
               },
             }],
@@ -1801,7 +1809,7 @@
             },
           },
         }],
-        ['component=="shared_library"', {
+        ['1==1', {
           'defines': [
             'BUILDING_V8_SHARED',
           ],
@@ -2497,6 +2505,30 @@
             ]
           }
         ]
+    },
+    {
+      'target_name': 'nwjc',
+      'type': 'executable',
+      'dependencies': ['v8_base', 'v8_nosnapshot', 'v8_libplatform'],
+      'include_dirs+': [
+        '..',
+      ],
+      'sources': [
+        'nwjc.cc',
+      ],
+      'conditions': [
+        ['v8_enable_i18n_support==1', {
+          'dependencies': [
+            '<(icu_gyp_path):icui18n',
+            '<(icu_gyp_path):icuuc',
+          ]
+        }],
+        ['want_separate_host_toolset==1', {
+          'toolsets': ['host'],
+        }, {
+          'toolsets': ['target'],
+        }],
+      ],
     },
     {
       'target_name': 'mksnapshot',
