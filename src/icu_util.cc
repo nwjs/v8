@@ -41,6 +41,10 @@ void free_icu_data_ptr() {
 }  // namespace
 #endif
 
+void* RawICUData() {
+  return (void*)g_icu_data_ptr;
+}
+
 bool InitializeICUDefaultLocation(const char* exec_path,
                                   const char* icu_data_file) {
 #if !defined(V8_INTL_SUPPORT)
