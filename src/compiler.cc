@@ -874,6 +874,7 @@ bool Compiler::Analyze(ParseInfo* parse_info,
 bool Compiler::ParseAndAnalyze(ParseInfo* parse_info,
                                Handle<SharedFunctionInfo> shared_info,
                                Isolate* isolate) {
+  if (parse_info->script()->source() == isolate->heap()->undefined_value()) return false;
   if (!parsing::ParseAny(parse_info, shared_info, isolate)) {
     return false;
   }
@@ -1526,7 +1527,8 @@ MaybeHandle<SharedFunctionInfo> Compiler::GetSharedFunctionInfoForScript(
     InfoVectorPair pair = compilation_cache->LookupScript(
         source, maybe_script_name, line_offset, column_offset, resource_options,
         context, language_mode);
-    if (can_consume_code_cache && !pair.has_shared()) {
+    if (can_consume_code_cache && (!pair.has_shared() || !source_length)) {
+    //NWJS#5168: will hit previous cache, use 0 source_length trick to bypass
       compile_timer.set_consuming_code_cache();
       // Then check cached code provided by embedder.
       HistogramTimerScope timer(isolate->counters()->compile_deserialize());
