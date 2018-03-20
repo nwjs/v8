@@ -1079,6 +1079,7 @@ DEFINE_STRING(startup_blob, nullptr,
 //
 
 DEFINE_BOOL(help, false, "Print usage message, including flags, on console")
+DEFINE_BOOL(nw_module, false, "Whether the input file is a module")
 DEFINE_BOOL(dump_counters, false, "Dump counters on exit")
 DEFINE_BOOL(dump_counters_nvp, false,
             "Dump counters as name-value pairs on exit")

@@ -88,7 +88,7 @@ void InitializeExternalStartupData(const char* directory_path) {
   char* snapshot;
   LoadFromFiles(
       base::RelativePath(&natives, directory_path, "natives_blob.bin"),
-      base::RelativePath(&snapshot, directory_path, "snapshot_blob.bin"));
+      base::RelativePath(&snapshot, directory_path, "v8_context_snapshot.bin"));
   free(natives);
   free(snapshot);
 #endif  // V8_USE_EXTERNAL_STARTUP_DATA
