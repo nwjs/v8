@@ -162,6 +162,9 @@ class JSArrayBuffer : public JSObject {
   inline bool is_neuterable();
   inline void set_is_neuterable(bool value);
 
+  inline bool is_node_js() const;
+  inline void set_is_node_js(bool value);
+
   inline bool was_neutered();
   inline void set_was_neutered(bool value);
 
@@ -245,6 +248,7 @@ class JSArrayBuffer : public JSObject {
   class IsShared : public BitField<bool, 4, 1> {};
   class HasGuardRegion : public BitField<bool, 5, 1> {};
   class IsGrowable : public BitField<bool, 6, 1> {};
+  class IsNodeJS : public BitField<bool, 7, 1> {};
 
  private:
   DISALLOW_IMPLICIT_CONSTRUCTORS(JSArrayBuffer);
