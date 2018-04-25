@@ -112,7 +112,8 @@ void ScopeIterator::TryParseAndRetrieveScopes(ScopeIterator::Option option) {
     // Inner function.
     info.reset(new ParseInfo(shared_info));
   }
-  if (parsing::ParseAny(info.get(), shared_info, isolate_) &&
+  bool has_source_code = shared_info->HasSourceCode();
+  if (has_source_code && parsing::ParseAny(info.get(), shared_info, isolate_) &&
       Rewriter::Rewrite(info.get())) {
     info->ast_value_factory()->Internalize(isolate_);
     DeclarationScope* scope = info->literal()->scope();
@@ -134,8 +135,8 @@ void ScopeIterator::TryParseAndRetrieveScopes(ScopeIterator::Option option) {
     // completely stack allocated scopes or stack allocated locals.
     // Or it could be due to stack overflow.
     // Silently fail by presenting an empty context chain.
-    CHECK(isolate_->has_pending_exception());
-    isolate_->clear_pending_exception();
+    if (isolate_->has_pending_exception())
+      isolate_->clear_pending_exception();
     context_ = Handle<Context>();
   }
   UnwrapEvaluationContext();
