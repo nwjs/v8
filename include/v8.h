@@ -1549,6 +1549,7 @@ class V8_EXPORT ScriptCompiler {
   static V8_WARN_UNUSED_RESULT MaybeLocal<Module> CompileModule(
       Isolate* isolate, Source* source);
 
+  static MaybeLocal<Module> CompileModuleWithCache(Isolate* isolate, Source* source);
   /**
    * Compile a function for a given context. This is equivalent to running
    *
@@ -3544,6 +3545,17 @@ class V8_EXPORT Object : public Value {
    */
   Isolate* GetIsolate();
 
+  /**
+   * If this object is a Set, Map, WeakSet or WeakMap, this returns a
+   * representation of the elements of this object as an array.
+   * If this object is a SetIterator or MapIterator, this returns all
+   * elements of the underlying collection, starting at the iterator's current
+   * position.
+   * For other types, this will return an empty MaybeLocal<Array> (without
+   * scheduling an exception).
+   */
+  MaybeLocal<Array> PreviewEntries(bool* is_key_value);
+
   static Local<Object> New(Isolate* isolate);
 
   V8_INLINE static Object* Cast(Value* obj);
@@ -4329,7 +4341,8 @@ class V8_EXPORT ArrayBuffer : public Object {
      * while kReservation is for larger allocations with the ability to set
      * access permissions.
      */
-    enum class AllocationMode { kNormal, kReservation };
+    enum class AllocationMode { kNormal, kReservation, kNodeJS };
+    virtual void Free(void* data, size_t length, AllocationMode mode);
 
     /**
      * malloc/free based convenience allocator.
@@ -4422,6 +4435,7 @@ class V8_EXPORT ArrayBuffer : public Object {
    */
   void Neuter();
 
+  void set_nodejs(bool);
   /**
    * Make this ArrayBuffer external. The pointer to underlying memory block
    * and byte length are returned as |Contents| structure. After ArrayBuffer
@@ -6113,7 +6127,8 @@ class V8_EXPORT Extension {  // NOLINT
 
 
 void V8_EXPORT RegisterExtension(Extension* extension);
-
+void V8_EXPORT FixSourceNWBin(Isolate* v8_isolate, Local<UnboundScript> script);
+void V8_EXPORT FixSourceNWBin(Isolate* v8_isolate, Local<Module> module);
 
 // --- Statics ---
 
@@ -6867,6 +6882,8 @@ typedef DeserializeInternalFieldsCallback DeserializeEmbedderFieldsCallback;
  */
 class V8_EXPORT Isolate {
  public:
+  ArrayBuffer::Allocator* array_buffer_allocator();
+  
   /**
    * Initial configuration parameters for a new Isolate.
    */
@@ -8043,6 +8060,7 @@ class V8_EXPORT V8 {
    */
   static bool InitializeICUDefaultLocation(const char* exec_path,
                                            const char* icu_data_file = nullptr);
+  static void* RawICUData();
 
   /**
    * Initialize the external startup data. The embedder only needs to
