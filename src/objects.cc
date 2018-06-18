@@ -13135,6 +13135,13 @@ Handle<String> JSFunction::ToString(Handle<JSFunction> function) {
     return NativeCodeFunctionSourceString(shared_info);
   }
 
+  //NWJS#6061: moved here or it will crash when trying to print
+  //function as a class
+  // Check if we have source code for the {function}.
+  if (!shared_info->HasSourceCode()) {
+    return NativeCodeFunctionSourceString(shared_info);
+  }
+
   // Check if we should print {function} as a class.
   Handle<Object> maybe_class_positions = JSReceiver::GetDataProperty(
       function, isolate->factory()->class_positions_symbol());
@@ -13146,11 +13153,6 @@ Handle<String> JSFunction::ToString(Handle<JSFunction> function) {
         String::cast(Script::cast(shared_info->script())->source()), isolate);
     return isolate->factory()->NewSubString(script_source, start_position,
                                             end_position);
-  }
-
-  // Check if we have source code for the {function}.
-  if (!shared_info->HasSourceCode()) {
-    return NativeCodeFunctionSourceString(shared_info);
   }
 
   if (FLAG_harmony_function_tostring) {
@@ -19148,6 +19150,9 @@ void JSArrayBuffer::FreeBackingStore(Isolate* isolate, Allocation allocation) {
     if (needs_free) {
       CHECK(FreePages(allocation.allocation_base, allocation.length));
     }
+  } else if (allocation.mode == ArrayBuffer::Allocator::AllocationMode::kNodeJS) {
+    isolate->array_buffer_allocator()->Free(allocation.allocation_base,
+                                            allocation.length, allocation.mode);
   } else {
     isolate->array_buffer_allocator()->Free(allocation.allocation_base,
                                             allocation.length);
@@ -19249,6 +19254,7 @@ Handle<JSArrayBuffer> JSTypedArray::MaterializeArrayBuffer(
       isolate->array_buffer_allocator()->AllocateUninitialized(
           fixed_typed_array->DataSize());
   buffer->set_is_external(false);
+  buffer->set_is_node_js(false);
   DCHECK(buffer->byte_length()->IsSmi() ||
          buffer->byte_length()->IsHeapNumber());
   DCHECK(NumberToInt32(buffer->byte_length()) == fixed_typed_array->DataSize());

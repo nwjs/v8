@@ -460,6 +460,11 @@ void V8::SetSnapshotDataBlob(StartupData* snapshot_blob) {
   i::V8::SetSnapshotBlob(snapshot_blob);
 }
 
+void v8::ArrayBuffer::Allocator::Free(void* data, size_t length,
+                                      AllocationMode mode) {
+  UNIMPLEMENTED();
+}
+
 namespace {
 
 class ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
@@ -2452,6 +2457,20 @@ MaybeLocal<Module> ScriptCompiler::CompileModule(Isolate* isolate,
   return ToApiHandle<Module>(i_isolate->factory()->NewModule(shared));
 }
 
+MaybeLocal<Module> ScriptCompiler::CompileModuleWithCache(Isolate* isolate,
+                                                          Source* source) {
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+
+  Utils::ApiCheck(source->GetResourceOptions().IsModule(),
+                  "v8::ScriptCompiler::CompileModule",
+                  "Invalid ScriptOrigin: is_module must be true");
+  auto maybe = CompileUnboundInternal(isolate, source, kConsumeCodeCache, kNoCacheNoReason);
+  Local<UnboundScript> unbound;
+  if (!maybe.ToLocal(&unbound)) return MaybeLocal<Module>();
+
+  i::Handle<i::SharedFunctionInfo> shared = Utils::OpenHandle(*unbound);
+  return ToApiHandle<Module>(i_isolate->factory()->NewModule(shared));
+}
 
 class IsIdentifierHelper {
  public:
@@ -6172,6 +6191,10 @@ bool v8::V8::InitializeICUDefaultLocation(const char* exec_path,
   return i::InitializeICUDefaultLocation(exec_path, icu_data_file);
 }
 
+void* v8::V8::RawICUData() {
+  return i::RawICUData();
+}
+
 void v8::V8::InitializeExternalStartupData(const char* directory_path) {
   i::InitializeExternalStartupData(directory_path);
 }
@@ -7710,6 +7733,9 @@ v8::ArrayBuffer::Contents v8::ArrayBuffer::Externalize() {
   return contents;
 }
 
+void v8::ArrayBuffer::set_nodejs(bool value) {
+  Utils::OpenHandle(this)->set_is_node_js(value);
+}
 
 v8::ArrayBuffer::Contents v8::ArrayBuffer::GetContents() {
   i::Handle<i::JSArrayBuffer> self = Utils::OpenHandle(this);
@@ -7719,7 +7745,7 @@ v8::ArrayBuffer::Contents v8::ArrayBuffer::GetContents() {
   contents.allocation_length_ = self->allocation_length();
   contents.allocation_mode_ = self->is_wasm_memory()
                                   ? Allocator::AllocationMode::kReservation
-                                  : Allocator::AllocationMode::kNormal;
+    : (self->is_node_js() ? Allocator::AllocationMode::kNodeJS : Allocator::AllocationMode::kNormal);
   contents.data_ = self->backing_store();
   contents.byte_length_ = byte_length;
   return contents;
@@ -8144,6 +8170,10 @@ bool Isolate::InContext() {
   return isolate->context() != nullptr;
 }
 
+ArrayBuffer::Allocator* Isolate::array_buffer_allocator() {
+  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(this);
+  return isolate->array_buffer_allocator();
+}
 
 v8::Local<v8::Context> Isolate::GetCurrentContext() {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(this);
@@ -9631,21 +9661,20 @@ int debug::EstimatedValueSize(Isolate* v8_isolate, v8::Local<v8::Value> value) {
   return i::Handle<i::HeapObject>::cast(object)->Size();
 }
 
-v8::MaybeLocal<v8::Array> debug::EntriesPreview(Isolate* v8_isolate,
-                                                v8::Local<v8::Value> value,
-                                                bool* is_key_value) {
-  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
-  ENTER_V8_NO_SCRIPT_NO_EXCEPTION(isolate);
-  if (value->IsMap()) {
+v8::MaybeLocal<v8::Array> v8::Object::PreviewEntries(bool* is_key_value) {
+  if (IsMap()) {
     *is_key_value = true;
-    return value.As<Map>()->AsArray();
+    return Map::Cast(this)->AsArray();
   }
-  if (value->IsSet()) {
+  if (IsSet()) {
     *is_key_value = false;
-    return value.As<Set>()->AsArray();
+    return Set::Cast(this)->AsArray();
   }
 
-  i::Handle<i::Object> object = Utils::OpenHandle(*value);
+  i::Handle<i::JSReceiver> object = Utils::OpenHandle(this);
+  i::Isolate* isolate = object->GetIsolate();
+  Isolate* v8_isolate = reinterpret_cast<Isolate*>(isolate);
+  ENTER_V8_NO_SCRIPT_NO_EXCEPTION(isolate);
   if (object->IsJSWeakCollection()) {
     *is_key_value = object->IsJSWeakMap();
     return Utils::ToLocal(i::JSWeakCollection::GetEntries(
@@ -10507,6 +10536,22 @@ void Testing::DeoptimizeAll(Isolate* isolate) {
   i::Deoptimizer::DeoptimizeAll(i_isolate);
 }
 
+
+void FixSourceNWBin(Isolate* v8_isolate, Local<UnboundScript> script) {
+  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
+  i::Handle<i::HeapObject> obj =
+    i::Handle<i::HeapObject>::cast(v8::Utils::OpenHandle(*script));
+  i::Handle<i::SharedFunctionInfo>
+      function_info(i::SharedFunctionInfo::cast(*obj), obj->GetIsolate());
+  reinterpret_cast<i::Script*>(function_info->script())->set_source(isolate->heap()->undefined_value());
+}
+
+void FixSourceNWBin(Isolate* v8_isolate, Local<Module> module) {
+  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
+  i::Handle<i::Module> obj =
+    i::Handle<i::Module>::cast(v8::Utils::OpenHandle(*module));
+  reinterpret_cast<i::Script*>(obj->script())->set_source(isolate->heap()->undefined_value());
+}
 
 namespace internal {
 
