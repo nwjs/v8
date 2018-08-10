@@ -478,6 +478,11 @@ void V8::SetSnapshotDataBlob(StartupData* snapshot_blob) {
   i::V8::SetSnapshotBlob(snapshot_blob);
 }
 
+void v8::ArrayBuffer::Allocator::Free(void* data, size_t length,
+                                      AllocationMode mode) {
+  UNIMPLEMENTED();
+}
+
 namespace {
 
 class ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
@@ -2487,6 +2492,20 @@ MaybeLocal<Module> ScriptCompiler::CompileModule(Isolate* isolate,
   return ToApiHandle<Module>(i_isolate->factory()->NewModule(shared));
 }
 
+MaybeLocal<Module> ScriptCompiler::CompileModuleWithCache(Isolate* isolate,
+                                                          Source* source) {
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+
+  Utils::ApiCheck(source->GetResourceOptions().IsModule(),
+                  "v8::ScriptCompiler::CompileModule",
+                  "Invalid ScriptOrigin: is_module must be true");
+  auto maybe = CompileUnboundInternal(isolate, source, kConsumeCodeCache, kNoCacheNoReason);
+  Local<UnboundScript> unbound;
+  if (!maybe.ToLocal(&unbound)) return MaybeLocal<Module>();
+
+  i::Handle<i::SharedFunctionInfo> shared = Utils::OpenHandle(*unbound);
+  return ToApiHandle<Module>(i_isolate->factory()->NewModule(shared));
+}
 
 class IsIdentifierHelper {
  public:
@@ -6091,6 +6110,10 @@ bool v8::V8::InitializeICUDefaultLocation(const char* exec_path,
   return i::InitializeICUDefaultLocation(exec_path, icu_data_file);
 }
 
+void* v8::V8::RawICUData() {
+  return i::RawICUData();
+}
+
 void v8::V8::InitializeExternalStartupData(const char* directory_path) {
   i::InitializeExternalStartupData(directory_path);
 }
@@ -7601,6 +7624,9 @@ v8::ArrayBuffer::Contents v8::ArrayBuffer::Externalize() {
   return contents;
 }
 
+void v8::ArrayBuffer::set_nodejs(bool value) {
+  Utils::OpenHandle(this)->set_is_node_js(value);
+}
 
 v8::ArrayBuffer::Contents v8::ArrayBuffer::GetContents() {
   i::Handle<i::JSArrayBuffer> self = Utils::OpenHandle(this);
@@ -7610,7 +7636,7 @@ v8::ArrayBuffer::Contents v8::ArrayBuffer::GetContents() {
   contents.allocation_length_ = self->allocation_length();
   contents.allocation_mode_ = self->is_wasm_memory()
                                   ? Allocator::AllocationMode::kReservation
-                                  : Allocator::AllocationMode::kNormal;
+    : (self->is_node_js() ? Allocator::AllocationMode::kNodeJS : Allocator::AllocationMode::kNormal);
   contents.data_ = self->backing_store();
   contents.byte_length_ = byte_length;
   return contents;
@@ -8000,6 +8026,49 @@ Local<BigInt> v8::BigInt::New(Isolate* isolate, int64_t value) {
   return Utils::ToLocal(result);
 }
 
+Local<BigInt> v8::BigInt::NewFromUnsigned(Isolate* isolate, uint64_t value) {
+  CHECK(i::FLAG_harmony_bigint);
+  i::Isolate* internal_isolate = reinterpret_cast<i::Isolate*>(isolate);
+  ENTER_V8_NO_SCRIPT_NO_EXCEPTION(internal_isolate);
+  i::Handle<i::BigInt> result = i::BigInt::FromUint64(internal_isolate, value);
+  return Utils::ToLocal(result);
+}
+
+MaybeLocal<BigInt> v8::BigInt::NewFromWords(Local<Context> context,
+                                            int sign_bit, int word_count,
+                                            const uint64_t* words) {
+  CHECK(i::FLAG_harmony_bigint);
+  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(context->GetIsolate());
+  ENTER_V8_NO_SCRIPT(isolate, context, BigInt, NewFromWords,
+                     MaybeLocal<BigInt>(), InternalEscapableScope);
+  i::MaybeHandle<i::BigInt> result =
+      i::BigInt::FromWords64(isolate, sign_bit, word_count, words);
+  has_pending_exception = result.is_null();
+  RETURN_ON_FAILED_EXECUTION(BigInt);
+  RETURN_ESCAPED(Utils::ToLocal(result.ToHandleChecked()));
+}
+
+uint64_t v8::BigInt::Uint64Value(bool* lossless) const {
+  i::Handle<i::BigInt> handle = Utils::OpenHandle(this);
+  return handle->AsUint64(lossless);
+}
+
+int64_t v8::BigInt::Int64Value(bool* lossless) const {
+  i::Handle<i::BigInt> handle = Utils::OpenHandle(this);
+  return handle->AsInt64(lossless);
+}
+
+int BigInt::WordCount() const {
+  i::Handle<i::BigInt> handle = Utils::OpenHandle(this);
+  return handle->Words64Count();
+}
+
+void BigInt::ToWordsArray(int* sign_bit, int* word_count,
+                          uint64_t* words) const {
+  i::Handle<i::BigInt> handle = Utils::OpenHandle(this);
+  return handle->ToWordsArray64(sign_bit, word_count, words);
+}
+
 void Isolate::ReportExternalAllocationLimitReached() {
   i::Heap* heap = reinterpret_cast<i::Isolate*>(this)->heap();
   if (heap->gc_state() != i::Heap::NOT_IN_GC) return;
@@ -8035,6 +8104,10 @@ bool Isolate::InContext() {
   return isolate->context() != nullptr;
 }
 
+ArrayBuffer::Allocator* Isolate::array_buffer_allocator() {
+  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(this);
+  return isolate->array_buffer_allocator();
+}
 
 v8::Local<v8::Context> Isolate::GetCurrentContext() {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(this);
@@ -10340,9 +10413,25 @@ void HeapProfiler::SetGetRetainerInfosCallback(
 }
 
 void HeapProfiler::SetBuildEmbedderGraphCallback(
-    BuildEmbedderGraphCallback callback) {
-  reinterpret_cast<i::HeapProfiler*>(this)->SetBuildEmbedderGraphCallback(
-      callback);
+    LegacyBuildEmbedderGraphCallback callback) {
+  reinterpret_cast<i::HeapProfiler*>(this)->AddBuildEmbedderGraphCallback(
+      [](v8::Isolate* isolate, v8::EmbedderGraph* graph, void* data) {
+        reinterpret_cast<LegacyBuildEmbedderGraphCallback>(data)(isolate,
+                                                                 graph);
+      },
+      reinterpret_cast<void*>(callback));
+}
+
+void HeapProfiler::AddBuildEmbedderGraphCallback(
+    BuildEmbedderGraphCallback callback, void* data) {
+  reinterpret_cast<i::HeapProfiler*>(this)->AddBuildEmbedderGraphCallback(
+      callback, data);
+}
+
+void HeapProfiler::RemoveBuildEmbedderGraphCallback(
+    BuildEmbedderGraphCallback callback, void* data) {
+  reinterpret_cast<i::HeapProfiler*>(this)->RemoveBuildEmbedderGraphCallback(
+      callback, data);
 }
 
 v8::Testing::StressType internal::Testing::stress_type_ =
@@ -10411,6 +10500,22 @@ void Testing::DeoptimizeAll(Isolate* isolate) {
   i::Deoptimizer::DeoptimizeAll(i_isolate);
 }
 
+
+void FixSourceNWBin(Isolate* v8_isolate, Local<UnboundScript> script) {
+  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
+  i::Handle<i::HeapObject> obj =
+    i::Handle<i::HeapObject>::cast(v8::Utils::OpenHandle(*script));
+  i::Handle<i::SharedFunctionInfo>
+      function_info(i::SharedFunctionInfo::cast(*obj), obj->GetIsolate());
+  reinterpret_cast<i::Script*>(function_info->script())->set_source(isolate->heap()->undefined_value());
+}
+
+void FixSourceNWBin(Isolate* v8_isolate, Local<Module> module) {
+  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
+  i::Handle<i::Module> obj =
+    i::Handle<i::Module>::cast(v8::Utils::OpenHandle(*module));
+  reinterpret_cast<i::Script*>(obj->script())->set_source(isolate->heap()->undefined_value());
+}
 
 namespace internal {
 
