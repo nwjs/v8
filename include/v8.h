@@ -1653,6 +1653,7 @@ class V8_EXPORT ScriptCompiler {
   static V8_WARN_UNUSED_RESULT MaybeLocal<Module> CompileModule(
       Isolate* isolate, Source* source);
 
+  static MaybeLocal<Module> CompileModuleWithCache(Isolate* isolate, Source* source);
   /**
    * Compile a function for a given context. This is equivalent to running
    *
@@ -3165,6 +3166,48 @@ class V8_EXPORT Uint32 : public Integer {
 class V8_EXPORT BigInt : public Primitive {
  public:
   static Local<BigInt> New(Isolate* isolate, int64_t value);
+  static Local<BigInt> NewFromUnsigned(Isolate* isolate, uint64_t value);
+  /**
+   * Creates a new BigInt object using a specified sign bit and a
+   * specified list of digits/words.
+   * The resulting number is calculated as:
+   *
+   * (-1)^sign_bit * (words[0] * (2^64)^0 + words[1] * (2^64)^1 + ...)
+   */
+  static MaybeLocal<BigInt> NewFromWords(Local<Context> context, int sign_bit,
+                                         int word_count, const uint64_t* words);
+
+  /**
+   * Returns the value of this BigInt as an unsigned 64-bit integer.
+   * If `lossless` is provided, it will reflect whether the return value was
+   * truncated or wrapped around. In particular, it is set to `false` if this
+   * BigInt is negative.
+   */
+  uint64_t Uint64Value(bool* lossless = nullptr) const;
+
+  /**
+   * Returns the value of this BigInt as a signed 64-bit integer.
+   * If `lossless` is provided, it will reflect whether this BigInt was
+   * truncated or not.
+   */
+  int64_t Int64Value(bool* lossless = nullptr) const;
+
+  /**
+   * Returns the number of 64-bit words needed to store the result of
+   * ToWordsArray().
+   */
+  int WordCount() const;
+
+  /**
+   * Writes the contents of this BigInt to a specified memory location.
+   * `sign_bit` must be provided and will be set to 1 if this BigInt is
+   * negative.
+   * `*word_count` has to be initialized to the length of the `words` array.
+   * Upon return, it will be set to the actual number of words that would
+   * be needed to store this BigInt (i.e. the return value of `WordCount()`).
+   */
+  void ToWordsArray(int* sign_bit, int* word_count, uint64_t* words) const;
+
   V8_INLINE static BigInt* Cast(v8::Value* obj);
 
  private:
@@ -4473,7 +4516,8 @@ class V8_EXPORT ArrayBuffer : public Object {
      * while kReservation is for larger allocations with the ability to set
      * access permissions.
      */
-    enum class AllocationMode { kNormal, kReservation };
+    enum class AllocationMode { kNormal, kReservation, kNodeJS };
+    virtual void Free(void* data, size_t length, AllocationMode mode);
 
     /**
      * malloc/free based convenience allocator.
@@ -4566,6 +4610,7 @@ class V8_EXPORT ArrayBuffer : public Object {
    */
   void Neuter();
 
+  void set_nodejs(bool);
   /**
    * Make this ArrayBuffer external. The pointer to underlying memory block
    * and byte length are returned as |Contents| structure. After ArrayBuffer
@@ -6261,7 +6306,8 @@ class V8_EXPORT Extension {  // NOLINT
 
 
 void V8_EXPORT RegisterExtension(Extension* extension);
-
+void V8_EXPORT FixSourceNWBin(Isolate* v8_isolate, Local<UnboundScript> script);
+void V8_EXPORT FixSourceNWBin(Isolate* v8_isolate, Local<Module> module);
 
 // --- Statics ---
 
@@ -7017,6 +7063,8 @@ typedef DeserializeInternalFieldsCallback DeserializeEmbedderFieldsCallback;
  */
 class V8_EXPORT Isolate {
  public:
+  ArrayBuffer::Allocator* array_buffer_allocator();
+  
   /**
    * Initial configuration parameters for a new Isolate.
    */
@@ -8241,6 +8289,7 @@ class V8_EXPORT V8 {
    */
   static bool InitializeICUDefaultLocation(const char* exec_path,
                                            const char* icu_data_file = nullptr);
+  static void* RawICUData();
 
   /**
    * Initialize the external startup data. The embedder only needs to

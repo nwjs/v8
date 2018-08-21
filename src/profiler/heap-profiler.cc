@@ -51,6 +51,7 @@ void HeapProfiler::DefineWrapperClass(
 v8::RetainedObjectInfo* HeapProfiler::ExecuteWrapperClassCallback(
     uint16_t class_id, Object** wrapper) {
   if (wrapper_callbacks_.size() <= class_id) return nullptr;
+  if (!wrapper_callbacks_[class_id]) return nullptr;
   return wrapper_callbacks_[class_id](
       class_id, Utils::ToLocal(Handle<Object>(wrapper)));
 }
@@ -69,16 +70,25 @@ v8::HeapProfiler::RetainerInfos HeapProfiler::GetRetainerInfos(
   return infos;
 }
 
-void HeapProfiler::SetBuildEmbedderGraphCallback(
-    v8::HeapProfiler::BuildEmbedderGraphCallback callback) {
-  build_embedder_graph_callback_ = callback;
+void HeapProfiler::AddBuildEmbedderGraphCallback(
+    v8::HeapProfiler::BuildEmbedderGraphCallback callback, void* data) {
+  build_embedder_graph_callbacks_.push_back({callback, data});
+}
+
+void HeapProfiler::RemoveBuildEmbedderGraphCallback(
+    v8::HeapProfiler::BuildEmbedderGraphCallback callback, void* data) {
+  auto it = std::find(build_embedder_graph_callbacks_.begin(),
+                      build_embedder_graph_callbacks_.end(),
+                      std::make_pair(callback, data));
+  if (it != build_embedder_graph_callbacks_.end())
+    build_embedder_graph_callbacks_.erase(it);
 }
 
 void HeapProfiler::BuildEmbedderGraph(Isolate* isolate,
                                       v8::EmbedderGraph* graph) {
-  if (build_embedder_graph_callback_ != nullptr)
-    build_embedder_graph_callback_(reinterpret_cast<v8::Isolate*>(isolate),
-                                   graph);
+  for (const auto& cb : build_embedder_graph_callbacks_) {
+    cb.first(reinterpret_cast<v8::Isolate*>(isolate), graph, cb.second);
+  }
 }
 
 HeapSnapshot* HeapProfiler::TakeSnapshot(
