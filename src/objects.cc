@@ -13470,6 +13470,13 @@ Handle<String> JSFunction::ToString(Handle<JSFunction> function) {
     return NativeCodeFunctionSourceString(shared_info);
   }
 
+  //NWJS#6061: moved here or it will crash when trying to print
+  //function as a class
+  // Check if we have source code for the {function}.
+  if (!shared_info->HasSourceCode()) {
+    return NativeCodeFunctionSourceString(shared_info);
+  }
+
   // Check if we should print {function} as a class.
   Handle<Object> maybe_class_positions = JSReceiver::GetDataProperty(
       function, isolate->factory()->class_positions_symbol());
@@ -13481,11 +13488,6 @@ Handle<String> JSFunction::ToString(Handle<JSFunction> function) {
         String::cast(Script::cast(shared_info->script())->source()), isolate);
     return isolate->factory()->NewSubString(script_source, start_position,
                                             end_position);
-  }
-
-  // Check if we have source code for the {function}.
-  if (!shared_info->HasSourceCode()) {
-    return NativeCodeFunctionSourceString(shared_info);
   }
 
   if (FLAG_harmony_function_tostring) {
@@ -18746,7 +18748,7 @@ void JSArrayBuffer::FreeBackingStoreFromMainThread() {
     return;
   }
   FreeBackingStore(GetIsolate(), {allocation_base(), allocation_length(),
-                                  backing_store(), is_wasm_memory()});
+        backing_store(), is_wasm_memory(), is_node_js()});
   // Zero out the backing store and allocation base to avoid dangling
   // pointers.
   set_backing_store(nullptr);
@@ -18760,6 +18762,9 @@ void JSArrayBuffer::FreeBackingStore(Isolate* isolate, Allocation allocation) {
     if (!memory_tracker->FreeMemoryIfIsWasmMemory(allocation.backing_store)) {
       CHECK(FreePages(allocation.allocation_base, allocation.length));
     }
+  } else if (allocation.is_nodejs) {
+    isolate->array_buffer_allocator()->Free(allocation.allocation_base,
+                                            allocation.length, ArrayBuffer::Allocator::AllocationMode::kNodeJS);
   } else {
     isolate->array_buffer_allocator()->Free(allocation.allocation_base,
                                             allocation.length);
@@ -18772,7 +18777,7 @@ void JSArrayBuffer::set_is_wasm_memory(bool is_wasm_memory) {
 
 void JSArrayBuffer::Setup(Handle<JSArrayBuffer> array_buffer, Isolate* isolate,
                           bool is_external, void* data, size_t byte_length,
-                          SharedFlag shared, bool is_wasm_memory) {
+                          SharedFlag shared, bool is_wasm_memory, bool is_node_js) {
   DCHECK_EQ(array_buffer->GetEmbedderFieldCount(),
             v8::ArrayBuffer::kEmbedderFieldCount);
   for (int i = 0; i < v8::ArrayBuffer::kEmbedderFieldCount; i++) {
@@ -18783,6 +18788,7 @@ void JSArrayBuffer::Setup(Handle<JSArrayBuffer> array_buffer, Isolate* isolate,
   array_buffer->set_is_neuterable(shared == SharedFlag::kNotShared);
   array_buffer->set_is_shared(shared == SharedFlag::kShared);
   array_buffer->set_is_wasm_memory(is_wasm_memory);
+  array_buffer->set_is_node_js(is_node_js);
 
   Handle<Object> heap_byte_length =
       isolate->factory()->NewNumberFromSize(byte_length);
@@ -18865,6 +18871,7 @@ Handle<JSArrayBuffer> JSTypedArray::MaterializeArrayBuffer(
         "JSTypedArray::MaterializeArrayBuffer");
   }
   buffer->set_is_external(false);
+  buffer->set_is_node_js(false);
   DCHECK(buffer->byte_length()->IsSmi() ||
          buffer->byte_length()->IsHeapNumber());
   DCHECK(NumberToInt32(buffer->byte_length()) == fixed_typed_array->DataSize());

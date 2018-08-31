@@ -160,6 +160,9 @@ class JSArrayBuffer : public JSObject {
   inline bool is_neuterable();
   inline void set_is_neuterable(bool value);
 
+  inline bool is_node_js() const;
+  inline void set_is_node_js(bool value);
+
   inline bool was_neutered();
   inline void set_was_neutered(bool value);
 
@@ -175,16 +178,17 @@ class JSArrayBuffer : public JSObject {
 
   struct Allocation {
     Allocation(void* allocation_base, size_t length, void* backing_store,
-               bool is_wasm_memory)
+               bool is_wasm_memory, bool is_nodejs)
         : allocation_base(allocation_base),
           length(length),
           backing_store(backing_store),
-          is_wasm_memory(is_wasm_memory) {}
+      is_wasm_memory(is_wasm_memory), is_nodejs(is_nodejs) {}
 
     void* allocation_base;
     size_t length;
     void* backing_store;
     bool is_wasm_memory;
+    bool is_nodejs;
   };
 
   // Returns whether the buffer is tracked by the WasmMemoryTracker.
@@ -203,7 +207,7 @@ class JSArrayBuffer : public JSObject {
   V8_EXPORT_PRIVATE static void Setup(
       Handle<JSArrayBuffer> array_buffer, Isolate* isolate, bool is_external,
       void* data, size_t allocated_length,
-      SharedFlag shared = SharedFlag::kNotShared, bool is_wasm_memory = false);
+      SharedFlag shared = SharedFlag::kNotShared, bool is_wasm_memory = false, bool is_node_js = false);
 
   // Returns false if array buffer contents could not be allocated.
   // In this case, |array_buffer| will not be set up.
@@ -243,6 +247,7 @@ class JSArrayBuffer : public JSObject {
   class IsShared : public BitField<bool, 4, 1> {};
   class IsGrowable : public BitField<bool, 5, 1> {};
   class IsWasmMemory : public BitField<bool, 6, 1> {};
+  class IsNodeJS : public BitField<bool, 7, 1> {};
 
  private:
   DISALLOW_IMPLICIT_CONSTRUCTORS(JSArrayBuffer);
