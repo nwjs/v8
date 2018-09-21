@@ -99,6 +99,14 @@ void JSArrayBuffer::set_is_neuterable(bool value) {
   set_bit_field(IsNeuterable::update(bit_field(), value));
 }
 
+bool JSArrayBuffer::is_node_js() const {
+  return IsNodeJS::decode(bit_field());
+}
+
+void JSArrayBuffer::set_is_node_js(bool value) {
+  set_bit_field(IsNodeJS::update(bit_field(), value));
+}
+
 bool JSArrayBuffer::was_neutered() { return WasNeutered::decode(bit_field()); }
 
 void JSArrayBuffer::set_was_neutered(bool value) {

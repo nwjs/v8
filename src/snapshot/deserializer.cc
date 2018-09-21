@@ -21,7 +21,7 @@ namespace v8 {
 namespace internal {
 
 template <class AllocatorT>
-void Deserializer<AllocatorT>::Initialize(Isolate* isolate) {
+void Deserializer<AllocatorT>::Initialize(Isolate* isolate, bool* result) {
   DCHECK_NULL(isolate_);
   DCHECK_NOT_NULL(isolate);
   isolate_ = isolate;
@@ -36,8 +36,13 @@ void Deserializer<AllocatorT>::Initialize(Isolate* isolate) {
     }
   }
 #endif  // DEBUG
-  CHECK_EQ(magic_number_,
+  bool ret =
+    (magic_number_ ==
            SerializedData::ComputeMagicNumber(external_reference_table_));
+  if (result)
+    *result = ret;
+  else
+    CHECK(ret);
 }
 
 template <class AllocatorT>
