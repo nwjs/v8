@@ -3933,7 +3933,6 @@ void v8::RegExp::CheckCast(v8::Value* that) {
                   "Could not convert to regular expression");
 }
 
-
 Maybe<bool> Value::BooleanValue(Local<Context> context) const {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(context->GetIsolate());
   return Just(Utils::OpenHandle(this)->BooleanValue(isolate));
@@ -5628,6 +5627,7 @@ static bool RecursivelySerializeToUtf8(i::String* current,
   }
   return true;
 }
+
 
 int String::WriteUtf8(Isolate* v8_isolate, char* buffer, int capacity,
                       int* nchars_ref, int options) const {
@@ -9062,6 +9062,9 @@ bool MicrotasksScope::IsRunningMicrotasks(Isolate* v8Isolate) {
   return isolate->IsRunningMicrotasks();
 }
 
+String::Utf8Value::Utf8Value(v8::Local<v8::Value> obj)
+  : Utf8Value(Isolate::GetCurrent(), obj) {}
+
 String::Utf8Value::Utf8Value(v8::Isolate* isolate, v8::Local<v8::Value> obj)
     : str_(nullptr), length_(0) {
   if (obj.IsEmpty()) return;
@@ -9080,6 +9083,9 @@ String::Utf8Value::Utf8Value(v8::Isolate* isolate, v8::Local<v8::Value> obj)
 String::Utf8Value::~Utf8Value() {
   i::DeleteArray(str_);
 }
+
+String::Value::Value(v8::Local<v8::Value> obj)
+  : Value(Isolate::GetCurrent(), obj) {}
 
 String::Value::Value(v8::Isolate* isolate, v8::Local<v8::Value> obj)
     : str_(nullptr), length_(0) {
