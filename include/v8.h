@@ -1001,6 +1001,10 @@ class V8_EXPORT PrimitiveArray {
   int Length() const;
   void Set(Isolate* isolate, int index, Local<Primitive> item);
   Local<Primitive> Get(Isolate* isolate, int index);
+
+  V8_DEPRECATED("Use Isolate version",
+                void Set(int index, Local<Primitive> item));
+  V8_DEPRECATED("Use Isolate version", Local<Primitive> Get(int index));
 };
 
 /**
@@ -1711,6 +1715,8 @@ class V8_EXPORT StackTrace {
   /**
    * Returns a StackFrame at a particular index.
    */
+  V8_DEPRECATED("Use Isolate version",
+                Local<StackFrame> GetFrame(uint32_t index) const);
   Local<StackFrame> GetFrame(Isolate* isolate, uint32_t index) const;
 
   /**
@@ -2424,6 +2430,11 @@ class V8_EXPORT Value : public Data {
   V8_DEPRECATE_SOON("Use maybe version",
                     Local<Int32> ToInt32(Isolate* isolate) const);
 
+  inline V8_DEPRECATED("Use maybe version", Local<Boolean> ToBoolean() const);
+  inline V8_DEPRECATED("Use maybe version", Local<String> ToString() const);
+  inline V8_DEPRECATED("Use maybe version", Local<Object> ToObject() const);
+  inline V8_DEPRECATED("Use maybe version", Local<Integer> ToInteger() const);
+
   /**
    * Attempts to convert a string to an array index.
    * Returns an empty handle if the conversion fails.
@@ -2443,7 +2454,14 @@ class V8_EXPORT Value : public Data {
       Local<Context> context) const;
   V8_WARN_UNUSED_RESULT Maybe<int32_t> Int32Value(Local<Context> context) const;
 
+  V8_DEPRECATED("Use maybe version", bool BooleanValue() const);
+  V8_DEPRECATED("Use maybe version", double NumberValue() const);
+  V8_DEPRECATED("Use maybe version", int64_t IntegerValue() const);
+  V8_DEPRECATED("Use maybe version", uint32_t Uint32Value() const);
+  V8_DEPRECATED("Use maybe version", int32_t Int32Value() const);
+
   /** JS == */
+  V8_DEPRECATED("Use maybe version", bool Equals(Local<Value> that) const);
   V8_WARN_UNUSED_RESULT Maybe<bool> Equals(Local<Context> context,
                                            Local<Value> that) const;
   bool StrictEquals(Local<Value> that) const;
@@ -2550,6 +2568,8 @@ class V8_EXPORT String : public Name {
    * Returns the number of bytes in the UTF-8 encoded
    * representation of this string.
    */
+  V8_DEPRECATED("Use Isolate version instead", int Utf8Length() const);
+
   int Utf8Length(Isolate* isolate) const;
 
   /**
@@ -2606,13 +2626,24 @@ class V8_EXPORT String : public Name {
   // 16-bit character codes.
   int Write(Isolate* isolate, uint16_t* buffer, int start = 0, int length = -1,
             int options = NO_OPTIONS) const;
+  V8_DEPRECATED("Use Isolate* version",
+                int Write(uint16_t* buffer, int start = 0, int length = -1,
+                          int options = NO_OPTIONS) const);
   // One byte characters.
   int WriteOneByte(Isolate* isolate, uint8_t* buffer, int start = 0,
                    int length = -1, int options = NO_OPTIONS) const;
+  V8_DEPRECATED("Use Isolate* version",
+                int WriteOneByte(uint8_t* buffer, int start = 0,
+                                 int length = -1, int options = NO_OPTIONS)
+                    const);
   // UTF-8 encoded characters.
   int WriteUtf8(Isolate* isolate, char* buffer, int length = -1,
                 int* nchars_ref = nullptr, int options = NO_OPTIONS) const;
 
+  V8_DEPRECATED("Use Isolate* version",
+                int WriteUtf8(char* buffer, int length = -1,
+                              int* nchars_ref = NULL, int options = NO_OPTIONS)
+                    const);
   /**
    * A zero length string.
    */
@@ -2813,6 +2844,9 @@ class V8_EXPORT String : public Name {
    */
   static Local<String> Concat(Isolate* isolate, Local<String> left,
                               Local<String> right);
+  static V8_DEPRECATED("Use Isolate* version",
+                       Local<String> Concat(Local<String> left,
+                                            Local<String> right));
 
   /**
    * Creates a new external string using the data defined in the given
@@ -5148,6 +5182,8 @@ class V8_EXPORT BooleanObject : public Object {
 class V8_EXPORT StringObject : public Object {
  public:
   static Local<Value> New(Isolate* isolate, Local<String> value);
+  static V8_DEPRECATED("Use Isolate* version",
+                       Local<Value> New(Local<String> value));
 
   Local<String> ValueOf() const;
 
@@ -10007,6 +10043,25 @@ template <class T> Value* Value::Cast(T* value) {
   return static_cast<Value*>(value);
 }
 
+Local<Boolean> Value::ToBoolean() const {
+  return ToBoolean(Isolate::GetCurrent()->GetCurrentContext())
+      .FromMaybe(Local<Boolean>());
+}
+
+Local<String> Value::ToString() const {
+  return ToString(Isolate::GetCurrent()->GetCurrentContext())
+      .FromMaybe(Local<String>());
+}
+
+Local<Object> Value::ToObject() const {
+  return ToObject(Isolate::GetCurrent()->GetCurrentContext())
+      .FromMaybe(Local<Object>());
+}
+
+Local<Integer> Value::ToInteger() const {
+  return ToInteger(Isolate::GetCurrent()->GetCurrentContext())
+      .FromMaybe(Local<Integer>());
+}
 
 Boolean* Boolean::Cast(v8::Value* value) {
 #ifdef V8_ENABLE_CHECKS
