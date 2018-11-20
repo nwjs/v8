@@ -53,7 +53,7 @@ class Deserializer : public SerializerDeserializer {
     off_heap_backing_stores_.push_back(nullptr);
   }
 
-  void Initialize(Isolate* isolate);
+  void Initialize(Isolate* isolate, bool* result = nullptr);
   void DeserializeDeferredObjects();
 
   // Deserializes into a single pointer and returns the resulting object.
