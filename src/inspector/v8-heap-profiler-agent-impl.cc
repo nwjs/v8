@@ -220,8 +220,21 @@ Response V8HeapProfilerAgentImpl::takeHeapSnapshot(Maybe<bool> reportProgress) {
     progress.reset(new HeapSnapshotProgress(&m_frontend));
 
   GlobalObjectNameResolver resolver(m_session);
+#ifdef __APPLE__
+    // exit the context we entered in g_uv_runloop_once or taking
+    // snapshot will fail.
+    v8::Isolate* isolate = v8::Isolate::GetCurrent();
+    v8::HandleScope handle_scope(isolate);
+    v8::Local<v8::Context> context = isolate->GetEnteredContext();
+    if (!context.IsEmpty())
+      context->Exit();
+#endif
   const v8::HeapSnapshot* snapshot =
       profiler->TakeHeapSnapshot(progress.get(), &resolver);
+#ifdef __APPLE__
+    if (!context.IsEmpty())
+      context->Enter();
+#endif
   if (!snapshot) return Response::Error("Failed to take heap snapshot");
   HeapSnapshotOutputStream stream(&m_frontend);
   snapshot->Serialize(&stream);

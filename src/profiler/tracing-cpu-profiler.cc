@@ -22,6 +22,7 @@ TracingCpuProfilerImpl::TracingCpuProfilerImpl(Isolate* isolate)
 
 TracingCpuProfilerImpl::~TracingCpuProfilerImpl() {
   StopProfiling();
+  if (V8::GetCurrentPlatform())
   V8::GetCurrentPlatform()->GetTracingController()->RemoveTraceStateObserver(
       this);
 }
