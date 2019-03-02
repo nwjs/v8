@@ -63,7 +63,7 @@ inspector_protocol_generate("protocol_generated_sources") {
 
 config("inspector_config") {
   visibility = [ ":*" ]  # Only targets in this file can depend on this.
-  if (is_component_build) {
+  if (true) {
     defines = [ "BUILDING_V8_SHARED" ]
   }
 }

@@ -58,7 +58,7 @@ void JSArrayBuffer::FreeBackingStoreFromMainThread() {
     return;
   }
   FreeBackingStore(GetIsolate(), {allocation_base(), allocation_length(),
-                                  backing_store(), is_wasm_memory()});
+        backing_store(), is_wasm_memory(), is_node_js()});
   // Zero out the backing store and allocation base to avoid dangling
   // pointers.
   set_backing_store(nullptr);
@@ -74,6 +74,9 @@ void JSArrayBuffer::FreeBackingStore(Isolate* isolate, Allocation allocation) {
       CHECK(FreePages(GetPlatformPageAllocator(), allocation.allocation_base,
                       allocation.length));
     }
+  } else if (allocation.is_nodejs) {
+    isolate->array_buffer_allocator()->Free(allocation.allocation_base, allocation.length,
+                                            ArrayBuffer::Allocator::AllocationMode::kNodeJS);
   } else {
     isolate->array_buffer_allocator()->Free(allocation.allocation_base,
                                             allocation.length);
@@ -82,7 +85,7 @@ void JSArrayBuffer::FreeBackingStore(Isolate* isolate, Allocation allocation) {
 
 void JSArrayBuffer::Setup(Handle<JSArrayBuffer> array_buffer, Isolate* isolate,
                           bool is_external, void* data, size_t byte_length,
-                          SharedFlag shared_flag, bool is_wasm_memory) {
+                          SharedFlag shared_flag, bool is_wasm_memory, bool is_node_js) {
   DCHECK_EQ(array_buffer->GetEmbedderFieldCount(),
             v8::ArrayBuffer::kEmbedderFieldCount);
   DCHECK_LE(byte_length, JSArrayBuffer::kMaxByteLength);
@@ -96,6 +99,8 @@ void JSArrayBuffer::Setup(Handle<JSArrayBuffer> array_buffer, Isolate* isolate,
   array_buffer->set_is_neuterable(shared_flag == SharedFlag::kNotShared);
   array_buffer->set_is_shared(shared_flag == SharedFlag::kShared);
   array_buffer->set_is_wasm_memory(is_wasm_memory);
+  array_buffer->set_is_node_js(is_node_js);
+
   // Initialize backing store at last to avoid handling of |JSArrayBuffers| that
   // are currently being constructed in the |ArrayBufferTracker|. The
   // registration method below handles the case of registering a buffer that has
@@ -172,6 +177,7 @@ Handle<JSArrayBuffer> JSTypedArray::MaterializeArrayBuffer(
         "JSTypedArray::MaterializeArrayBuffer");
   }
   buffer->set_is_external(false);
+  buffer->set_is_node_js(false);
   DCHECK_EQ(buffer->byte_length(),
             static_cast<uintptr_t>(fixed_typed_array->DataSize()));
   // Initialize backing store at last to avoid handling of |JSArrayBuffers| that

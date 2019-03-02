@@ -1101,6 +1101,7 @@ bool Compiler::Analyze(ParseInfo* parse_info) {
 bool Compiler::ParseAndAnalyze(ParseInfo* parse_info,
                                Handle<SharedFunctionInfo> shared_info,
                                Isolate* isolate) {
+  if (parse_info->script()->source() == ReadOnlyRoots(isolate).undefined_value()) return false;
   if (!parsing::ParseAny(parse_info, shared_info, isolate)) {
     return false;
   }
@@ -1714,7 +1715,9 @@ MaybeHandle<SharedFunctionInfo> Compiler::GetSharedFunctionInfoForScript(
         source, script_details.name_obj, script_details.line_offset,
         script_details.column_offset, origin_options, isolate->native_context(),
         language_mode);
-    if (!maybe_result.is_null()) {
+    //NWJS#5168: will hit previous cache, use 0 source_length trick to
+    //bypass and try to consume cache
+    if (!maybe_result.is_null() && source_length) {
       compile_timer.set_hit_isolate_cache();
     } else if (can_consume_code_cache) {
       compile_timer.set_consuming_code_cache();
