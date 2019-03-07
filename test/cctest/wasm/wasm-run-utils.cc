@@ -26,7 +26,7 @@ TestingModuleBuilder::TestingModuleBuilder(
       runtime_exception_support_(exception_support),
       lower_simd_(lower_simd) {
   WasmJs::Install(isolate_, true);
-  test_module_->globals_buffer_size = kMaxGlobalsSize;
+  test_module_->untagged_globals_buffer_size = kMaxGlobalsSize;
   memset(globals_data_, 0, sizeof(globals_data_));
 
   uint32_t maybe_import_index = 0;
@@ -44,9 +44,9 @@ TestingModuleBuilder::TestingModuleBuilder(
     // Manually compile an import wrapper and insert it into the instance.
     CodeSpaceMemoryModificationScope modification_scope(isolate_->heap());
     auto kind = compiler::GetWasmImportCallKind(maybe_import->js_function,
-                                                maybe_import->sig);
+                                                maybe_import->sig, false);
     auto import_wrapper = native_module_->import_wrapper_cache()->GetOrCompile(
-        isolate_, kind, maybe_import->sig);
+        isolate_->wasm_engine(), isolate_->counters(), kind, maybe_import->sig);
 
     ImportedFunctionEntry(instance_object_, maybe_import_index)
         .SetWasmToJs(isolate_, maybe_import->js_function, import_wrapper);
@@ -191,7 +191,7 @@ CompilationEnv TestingModuleBuilder::CreateCompilationEnv() {
   return {
       test_module_ptr_,
       trap_handler::IsTrapHandlerEnabled() ? kUseTrapHandler : kNoTrapHandler,
-      runtime_exception_support_, lower_simd()};
+      runtime_exception_support_, enabled_features_, lower_simd()};
 }
 
 const WasmGlobal* TestingModuleBuilder::AddGlobal(ValueType type) {
@@ -241,9 +241,8 @@ void TestBuildingGraphWithBuilder(compiler::WasmGraphBuilder* builder,
     }
 #endif
 
-    uint32_t pc = result.error_offset();
-    FATAL("Verification failed; pc = +%x, msg = %s", pc,
-          result.error_msg().c_str());
+    FATAL("Verification failed; pc = +%x, msg = %s", result.error().offset(),
+          result.error().message().c_str());
   }
   builder->LowerInt64();
   if (!CpuFeatures::SupportsWasmSimd128()) {
@@ -340,7 +339,7 @@ Handle<Code> WasmFunctionWrapper::GetWrapperCode() {
     auto call_descriptor =
         compiler::Linkage::GetSimplifiedCDescriptor(zone(), signature_, true);
 
-    if (kPointerSize == 4) {
+    if (kSystemPointerSize == 4) {
       size_t num_params = signature_->parameter_count();
       // One additional parameter for the pointer of the return value.
       Signature<MachineRepresentation>::Builder rep_builder(zone(), 1,
@@ -419,14 +418,15 @@ void WasmFunctionCompiler::Build(const byte* start, const byte* end) {
                          func_wire_bytes.start(), func_wire_bytes.end()};
   NativeModule* native_module =
       builder_->instance_object()->module_object()->native_module();
-  WasmCompilationUnit unit(isolate()->wasm_engine(), native_module,
-                           function_->func_index, tier);
+  WasmCompilationUnit unit(isolate()->wasm_engine(), function_->func_index,
+                           tier);
   WasmFeatures unused_detected_features;
-  unit.ExecuteCompilation(
+  WasmCompilationResult result = unit.ExecuteCompilation(
       &env, native_module->compilation_state()->GetWireBytesStorage(),
       isolate()->counters(), &unused_detected_features);
-  CHECK(!unit.failed());
-  if (WasmCode::ShouldBeLogged(isolate())) unit.result()->LogCode(isolate());
+  WasmCode* code = unit.Publish(std::move(result), native_module);
+  DCHECK_NOT_NULL(code);
+  if (WasmCode::ShouldBeLogged(isolate())) code->LogCode(isolate());
 }
 
 WasmFunctionCompiler::WasmFunctionCompiler(Zone* zone, FunctionSig* sig,

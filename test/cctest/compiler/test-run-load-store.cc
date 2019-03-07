@@ -7,8 +7,8 @@
 #include <limits>
 
 #include "src/base/bits.h"
+#include "src/base/overflowing-math.h"
 #include "src/base/utils/random-number-generator.h"
-#include "src/codegen.h"
 #include "src/objects-inl.h"
 #include "test/cctest/cctest.h"
 #include "test/cctest/compiler/codegen-tester.h"
@@ -90,7 +90,8 @@ void RunLoadStoreFloat32Offset(TestAlignment t) {
   float p2 = 0.0f;  // and stores directly into this location.
 
   FOR_INT32_INPUTS(i) {
-    int32_t magic = 0x2342AABB + *i * 3;
+    int32_t magic =
+        base::AddWithWraparound(0x2342AABB, base::MulWithWraparound(*i, 3));
     RawMachineAssemblerTester<int32_t> m;
     int32_t offset = *i;
     byte* from = reinterpret_cast<byte*>(&p1) - offset;
@@ -127,7 +128,8 @@ void RunLoadStoreFloat64Offset(TestAlignment t) {
   double p2 = 0;  // and stores directly into this location.
 
   FOR_INT32_INPUTS(i) {
-    int32_t magic = 0x2342AABB + *i * 3;
+    int32_t magic =
+        base::AddWithWraparound(0x2342AABB, base::MulWithWraparound(*i, 3));
     RawMachineAssemblerTester<int32_t> m;
     int32_t offset = *i;
     byte* from = reinterpret_cast<byte*>(&p1) - offset;
@@ -232,7 +234,7 @@ void RunLoadImmIndex(MachineType rep, TestAlignment t) {
     for (int i = 0; i < kNumElems; i++) {
       BufferedRawMachineAssemblerTester<CType> m;
       void* base_pointer = &buffer[0] - offset;
-#if V8_POINTER_COMPRESSION
+#ifdef V8_COMPRESS_POINTERS
       if (rep.IsTagged()) {
         // When pointer compression is enabled then we need to access only
         // the lower 32-bit of the tagged value while the buffer contains
@@ -253,6 +255,16 @@ void RunLoadImmIndex(MachineType rep, TestAlignment t) {
       CHECK_EQ(buffer[i], m.Call());
     }
   }
+}
+
+template <typename CType>
+CType NullValue() {
+  return CType{0};
+}
+
+template <>
+HeapObject NullValue<HeapObject>() {
+  return HeapObject();
 }
 
 template <typename CType>
@@ -287,7 +299,7 @@ void RunLoadStore(MachineType rep, TestAlignment t) {
     CHECK_EQ(OK, m.Call());
     CHECK_EQ(in_buffer[x], out_buffer[y]);
     for (int32_t z = 0; z < kNumElems; z++) {
-      if (z != y) CHECK_EQ(CType{0}, out_buffer[z]);
+      if (z != y) CHECK_EQ(NullValue<CType>(), out_buffer[z]);
     }
   }
 }
@@ -338,9 +350,9 @@ TEST(RunLoadImmIndex) {
   RunLoadImmIndex<uint32_t>(MachineType::Uint32(), TestAlignment::kAligned);
   RunLoadImmIndex<void*>(MachineType::Pointer(), TestAlignment::kAligned);
   RunLoadImmIndex<Smi>(MachineType::TaggedSigned(), TestAlignment::kAligned);
-  RunLoadImmIndex<HeapObject*>(MachineType::TaggedPointer(),
-                               TestAlignment::kAligned);
-  RunLoadImmIndex<Object*>(MachineType::AnyTagged(), TestAlignment::kAligned);
+  RunLoadImmIndex<HeapObject>(MachineType::TaggedPointer(),
+                              TestAlignment::kAligned);
+  RunLoadImmIndex<Object>(MachineType::AnyTagged(), TestAlignment::kAligned);
   RunLoadImmIndex<float>(MachineType::Float32(), TestAlignment::kAligned);
   RunLoadImmIndex<double>(MachineType::Float64(), TestAlignment::kAligned);
 #if V8_TARGET_ARCH_64_BIT
@@ -356,9 +368,9 @@ TEST(RunUnalignedLoadImmIndex) {
   RunLoadImmIndex<uint32_t>(MachineType::Uint32(), TestAlignment::kUnaligned);
   RunLoadImmIndex<void*>(MachineType::Pointer(), TestAlignment::kUnaligned);
   RunLoadImmIndex<Smi>(MachineType::TaggedSigned(), TestAlignment::kUnaligned);
-  RunLoadImmIndex<HeapObject*>(MachineType::TaggedPointer(),
-                               TestAlignment::kUnaligned);
-  RunLoadImmIndex<Object*>(MachineType::AnyTagged(), TestAlignment::kUnaligned);
+  RunLoadImmIndex<HeapObject>(MachineType::TaggedPointer(),
+                              TestAlignment::kUnaligned);
+  RunLoadImmIndex<Object>(MachineType::AnyTagged(), TestAlignment::kUnaligned);
   RunLoadImmIndex<float>(MachineType::Float32(), TestAlignment::kUnaligned);
   RunLoadImmIndex<double>(MachineType::Float64(), TestAlignment::kUnaligned);
 #if V8_TARGET_ARCH_64_BIT
@@ -376,9 +388,9 @@ TEST(RunLoadStore) {
   RunLoadStore<uint32_t>(MachineType::Uint32(), TestAlignment::kAligned);
   RunLoadStore<void*>(MachineType::Pointer(), TestAlignment::kAligned);
   RunLoadStore<Smi>(MachineType::TaggedSigned(), TestAlignment::kAligned);
-  RunLoadStore<HeapObject*>(MachineType::TaggedPointer(),
-                            TestAlignment::kAligned);
-  RunLoadStore<Object*>(MachineType::AnyTagged(), TestAlignment::kAligned);
+  RunLoadStore<HeapObject>(MachineType::TaggedPointer(),
+                           TestAlignment::kAligned);
+  RunLoadStore<Object>(MachineType::AnyTagged(), TestAlignment::kAligned);
   RunLoadStore<float>(MachineType::Float32(), TestAlignment::kAligned);
   RunLoadStore<double>(MachineType::Float64(), TestAlignment::kAligned);
 #if V8_TARGET_ARCH_64_BIT
@@ -393,9 +405,9 @@ TEST(RunUnalignedLoadStore) {
   RunLoadStore<uint32_t>(MachineType::Uint32(), TestAlignment::kUnaligned);
   RunLoadStore<void*>(MachineType::Pointer(), TestAlignment::kUnaligned);
   RunLoadStore<Smi>(MachineType::TaggedSigned(), TestAlignment::kUnaligned);
-  RunLoadStore<HeapObject*>(MachineType::TaggedPointer(),
-                            TestAlignment::kUnaligned);
-  RunLoadStore<Object*>(MachineType::AnyTagged(), TestAlignment::kUnaligned);
+  RunLoadStore<HeapObject>(MachineType::TaggedPointer(),
+                           TestAlignment::kUnaligned);
+  RunLoadStore<Object>(MachineType::AnyTagged(), TestAlignment::kUnaligned);
   RunLoadStore<float>(MachineType::Float32(), TestAlignment::kUnaligned);
   RunLoadStore<double>(MachineType::Float64(), TestAlignment::kUnaligned);
 #if V8_TARGET_ARCH_64_BIT
@@ -410,9 +422,9 @@ TEST(RunUnalignedLoadStoreUnalignedAccess) {
   RunUnalignedLoadStoreUnalignedAccess<uint32_t>(MachineType::Uint32());
   RunUnalignedLoadStoreUnalignedAccess<void*>(MachineType::Pointer());
   RunUnalignedLoadStoreUnalignedAccess<Smi>(MachineType::TaggedSigned());
-  RunUnalignedLoadStoreUnalignedAccess<HeapObject*>(
+  RunUnalignedLoadStoreUnalignedAccess<HeapObject>(
       MachineType::TaggedPointer());
-  RunUnalignedLoadStoreUnalignedAccess<Object*>(MachineType::AnyTagged());
+  RunUnalignedLoadStoreUnalignedAccess<Object>(MachineType::AnyTagged());
   RunUnalignedLoadStoreUnalignedAccess<float>(MachineType::Float32());
   RunUnalignedLoadStoreUnalignedAccess<double>(MachineType::Float64());
 #if V8_TARGET_ARCH_64_BIT

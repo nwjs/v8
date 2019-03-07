@@ -45,6 +45,11 @@ class DeclarationVisitor : public FileVisitor {
 
   void Visit(TypeDeclaration* decl);
 
+  void DeclareMethods(AggregateType* container,
+                      const std::vector<Declaration*>& methods);
+  void Visit(StructDeclaration* decl);
+  void Visit(ClassDeclaration* decl);
+
   void Visit(TypeAliasDeclaration* decl) {
     const Type* type = Declarations::GetType(decl->type);
     type->AddAlias(decl->name);
@@ -80,7 +85,7 @@ class DeclarationVisitor : public FileVisitor {
   void Visit(GenericDeclaration* decl);
   void Visit(SpecializationDeclaration* decl);
   void Visit(ExternConstDeclaration* decl);
-  void Visit(StructDeclaration* decl);
+  void Visit(CppIncludeDeclaration* decl);
 
   Signature MakeSpecializedSignature(const SpecializationKey& key);
   Callable* SpecializeImplicit(const SpecializationKey& key);

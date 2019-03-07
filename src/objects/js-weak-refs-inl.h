@@ -9,6 +9,7 @@
 
 #include "src/api-inl.h"
 #include "src/heap/heap-write-barrier-inl.h"
+#include "src/objects/microtask-inl.h"
 #include "src/objects/smi-inl.h"
 
 // Has to be the last include (doesn't have include guards):
@@ -17,7 +18,13 @@
 namespace v8 {
 namespace internal {
 
-ACCESSORS2(JSWeakFactory, native_context, Context, kNativeContextOffset)
+OBJECT_CONSTRUCTORS_IMPL(JSWeakCell, JSObject)
+OBJECT_CONSTRUCTORS_IMPL(JSWeakRef, JSObject)
+OBJECT_CONSTRUCTORS_IMPL(JSWeakFactory, JSObject)
+OBJECT_CONSTRUCTORS_IMPL(JSWeakFactoryCleanupIterator, JSObject)
+OBJECT_CONSTRUCTORS_IMPL(WeakFactoryCleanupJobTask, Microtask)
+
+ACCESSORS(JSWeakFactory, native_context, NativeContext, kNativeContextOffset)
 ACCESSORS(JSWeakFactory, cleanup, Object, kCleanupOffset)
 ACCESSORS(JSWeakFactory, active_cells, Object, kActiveCellsOffset)
 ACCESSORS(JSWeakFactory, cleared_cells, Object, kClearedCellsOffset)
@@ -33,6 +40,7 @@ ACCESSORS(JSWeakCell, prev, Object, kPrevOffset)
 CAST_ACCESSOR(JSWeakCell)
 
 CAST_ACCESSOR(JSWeakRef)
+ACCESSORS(JSWeakRef, target, Object, kTargetOffset)
 
 ACCESSORS(JSWeakFactoryCleanupIterator, factory, JSWeakFactory, kFactoryOffset)
 CAST_ACCESSOR(JSWeakFactoryCleanupIterator)
@@ -40,8 +48,8 @@ CAST_ACCESSOR(JSWeakFactoryCleanupIterator)
 ACCESSORS(WeakFactoryCleanupJobTask, factory, JSWeakFactory, kFactoryOffset)
 CAST_ACCESSOR(WeakFactoryCleanupJobTask)
 
-void JSWeakFactory::AddWeakCell(JSWeakCell* weak_cell) {
-  weak_cell->set_factory(this);
+void JSWeakFactory::AddWeakCell(JSWeakCell weak_cell) {
+  weak_cell->set_factory(*this);
   weak_cell->set_next(active_cells());
   if (active_cells()->IsJSWeakCell()) {
     JSWeakCell::cast(active_cells())->set_prev(weak_cell);
@@ -61,14 +69,14 @@ void JSWeakFactory::set_scheduled_for_cleanup(bool scheduled_for_cleanup) {
   set_flags(ScheduledForCleanupField::update(flags(), scheduled_for_cleanup));
 }
 
-JSWeakCell* JSWeakFactory::PopClearedCell(Isolate* isolate) {
-  JSWeakCell* weak_cell = JSWeakCell::cast(cleared_cells());
+JSWeakCell JSWeakFactory::PopClearedCell(Isolate* isolate) {
+  JSWeakCell weak_cell = JSWeakCell::cast(cleared_cells());
   DCHECK(weak_cell->prev()->IsUndefined(isolate));
   set_cleared_cells(weak_cell->next());
   weak_cell->set_next(ReadOnlyRoots(isolate).undefined_value());
 
   if (cleared_cells()->IsJSWeakCell()) {
-    JSWeakCell* cleared_cells_head = JSWeakCell::cast(cleared_cells());
+    JSWeakCell cleared_cells_head = JSWeakCell::cast(cleared_cells());
     DCHECK_EQ(cleared_cells_head->prev(), weak_cell);
     cleared_cells_head->set_prev(ReadOnlyRoots(isolate).undefined_value());
   } else {
@@ -79,54 +87,49 @@ JSWeakCell* JSWeakFactory::PopClearedCell(Isolate* isolate) {
 
 void JSWeakCell::Nullify(
     Isolate* isolate,
-    std::function<void(HeapObject* object, ObjectSlot slot, Object* target)>
+    std::function<void(HeapObject object, ObjectSlot slot, Object target)>
         gc_notify_updated_slot) {
   DCHECK(target()->IsJSReceiver());
   set_target(ReadOnlyRoots(isolate).undefined_value());
 
-  JSWeakFactory* weak_factory = JSWeakFactory::cast(factory());
+  JSWeakFactory weak_factory = JSWeakFactory::cast(factory());
   // Remove from the JSWeakCell from the "active_cells" list of its
   // JSWeakFactory and insert it into the "cleared" list.
   if (prev()->IsJSWeakCell()) {
-    DCHECK_NE(weak_factory->active_cells(), this);
-    JSWeakCell* prev_cell = JSWeakCell::cast(prev());
+    DCHECK_NE(weak_factory->active_cells(), *this);
+    JSWeakCell prev_cell = JSWeakCell::cast(prev());
     prev_cell->set_next(next());
-    gc_notify_updated_slot(
-        prev_cell, HeapObject::RawField(prev_cell, JSWeakCell::kNextOffset),
-        next());
+    gc_notify_updated_slot(prev_cell,
+                           prev_cell.RawField(JSWeakCell::kNextOffset), next());
   } else {
-    DCHECK_EQ(weak_factory->active_cells(), this);
+    DCHECK_EQ(weak_factory->active_cells(), *this);
     weak_factory->set_active_cells(next());
     gc_notify_updated_slot(
-        weak_factory,
-        HeapObject::RawField(weak_factory, JSWeakFactory::kActiveCellsOffset),
+        weak_factory, weak_factory.RawField(JSWeakFactory::kActiveCellsOffset),
         next());
   }
   if (next()->IsJSWeakCell()) {
-    JSWeakCell* next_cell = JSWeakCell::cast(next());
+    JSWeakCell next_cell = JSWeakCell::cast(next());
     next_cell->set_prev(prev());
-    gc_notify_updated_slot(
-        next_cell, HeapObject::RawField(next_cell, JSWeakCell::kPrevOffset),
-        prev());
+    gc_notify_updated_slot(next_cell,
+                           next_cell.RawField(JSWeakCell::kPrevOffset), prev());
   }
 
   set_prev(ReadOnlyRoots(isolate).undefined_value());
-  Object* cleared_head = weak_factory->cleared_cells();
+  Object cleared_head = weak_factory->cleared_cells();
   if (cleared_head->IsJSWeakCell()) {
-    JSWeakCell* cleared_head_cell = JSWeakCell::cast(cleared_head);
-    cleared_head_cell->set_prev(this);
-    gc_notify_updated_slot(
-        cleared_head_cell,
-        HeapObject::RawField(cleared_head_cell, JSWeakCell::kPrevOffset), this);
+    JSWeakCell cleared_head_cell = JSWeakCell::cast(cleared_head);
+    cleared_head_cell->set_prev(*this);
+    gc_notify_updated_slot(cleared_head_cell,
+                           cleared_head_cell.RawField(JSWeakCell::kPrevOffset),
+                           *this);
   }
   set_next(weak_factory->cleared_cells());
+  gc_notify_updated_slot(*this, RawField(JSWeakCell::kNextOffset), next());
+  weak_factory->set_cleared_cells(*this);
   gc_notify_updated_slot(
-      this, HeapObject::RawField(this, JSWeakCell::kNextOffset), next());
-  weak_factory->set_cleared_cells(this);
-  gc_notify_updated_slot(
-      weak_factory,
-      HeapObject::RawField(weak_factory, JSWeakFactory::kClearedCellsOffset),
-      this);
+      weak_factory, weak_factory.RawField(JSWeakFactory::kClearedCellsOffset),
+      *this);
 }
 
 void JSWeakCell::Clear(Isolate* isolate) {
@@ -138,19 +141,19 @@ void JSWeakCell::Clear(Isolate* isolate) {
   set_target(ReadOnlyRoots(isolate).undefined_value());
 
   if (factory()->IsJSWeakFactory()) {
-    JSWeakFactory* weak_factory = JSWeakFactory::cast(factory());
-    if (weak_factory->active_cells() == this) {
+    JSWeakFactory weak_factory = JSWeakFactory::cast(factory());
+    if (weak_factory->active_cells() == *this) {
       DCHECK(!prev()->IsJSWeakCell());
       weak_factory->set_active_cells(next());
-    } else if (weak_factory->cleared_cells() == this) {
+    } else if (weak_factory->cleared_cells() == *this) {
       DCHECK(!prev()->IsJSWeakCell());
       weak_factory->set_cleared_cells(next());
     } else if (prev()->IsJSWeakCell()) {
-      JSWeakCell* prev_cell = JSWeakCell::cast(prev());
+      JSWeakCell prev_cell = JSWeakCell::cast(prev());
       prev_cell->set_next(next());
     }
     if (next()->IsJSWeakCell()) {
-      JSWeakCell* next_cell = JSWeakCell::cast(next());
+      JSWeakCell next_cell = JSWeakCell::cast(next());
       next_cell->set_prev(prev());
     }
     set_prev(ReadOnlyRoots(isolate).undefined_value());

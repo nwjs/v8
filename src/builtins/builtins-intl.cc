@@ -182,10 +182,9 @@ Handle<JSFunction> CreateBoundFunction(Isolate* isolate,
  * NumberFormatConstrutor
  */
 template <class T>
-Object* LegacyFormatConstructor(BuiltinArguments args, Isolate* isolate,
-                                v8::Isolate::UseCounterFeature feature,
-                                Handle<Object> constructor,
-                                const char* method) {
+Object LegacyFormatConstructor(BuiltinArguments args, Isolate* isolate,
+                               v8::Isolate::UseCounterFeature feature,
+                               Handle<Object> constructor, const char* method) {
   isolate->CountUsage(feature);
   Handle<JSReceiver> new_target;
   // 1. If NewTarget is undefined, let newTarget be the active
@@ -264,9 +263,9 @@ Object* LegacyFormatConstructor(BuiltinArguments args, Isolate* isolate,
  * Segmenter
  */
 template <class T>
-Object* DisallowCallConstructor(BuiltinArguments args, Isolate* isolate,
-                                v8::Isolate::UseCounterFeature feature,
-                                const char* method) {
+Object DisallowCallConstructor(BuiltinArguments args, Isolate* isolate,
+                               v8::Isolate::UseCounterFeature feature,
+                               const char* method) {
   isolate->CountUsage(feature);
 
   // 1. If NewTarget is undefined, throw a TypeError exception.
@@ -301,7 +300,7 @@ Object* DisallowCallConstructor(BuiltinArguments args, Isolate* isolate,
  * Common code shared by Collator and V8BreakIterator
  */
 template <class T>
-Object* CallOrConstructConstructor(BuiltinArguments args, Isolate* isolate) {
+Object CallOrConstructConstructor(BuiltinArguments args, Isolate* isolate) {
   Handle<JSReceiver> new_target;
 
   if (args.new_target()->IsUndefined(isolate)) {
@@ -405,11 +404,6 @@ BUILTIN(NumberFormatInternalFormatNumber) {
   Handle<Object> number_obj;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, number_obj,
                                      Object::ToNumber(isolate, value));
-
-  // Spec treats -0 as 0.
-  if (number_obj->IsMinusZero()) {
-    number_obj = Handle<Smi>(Smi::zero(), isolate);
-  }
 
   double number = number_obj->Number();
   icu::NumberFormat* icu_number_format =
@@ -537,10 +531,9 @@ MaybeHandle<JSLocale> CreateLocale(Isolate* isolate,
   Handle<String> locale_string;
   // 8. If Type(tag) is Object and tag has an [[InitializedLocale]] internal
   // slot, then
-  if (tag->IsJSLocale() && Handle<JSLocale>::cast(tag)->locale()->IsString()) {
+  if (tag->IsJSLocale()) {
     // a. Let tag be tag.[[Locale]].
-    locale_string =
-        Handle<String>(Handle<JSLocale>::cast(tag)->locale(), isolate);
+    locale_string = JSLocale::ToString(isolate, Handle<JSLocale>::cast(tag));
   } else {  // 9. Else,
     // a. Let tag be ? ToString(tag).
     ASSIGN_RETURN_ON_EXCEPTION(isolate, locale_string,
@@ -589,26 +582,26 @@ BUILTIN(LocaleConstructor) {
 
 BUILTIN(LocalePrototypeMaximize) {
   HandleScope scope(isolate);
-  CHECK_RECEIVER(JSLocale, locale_holder, "Intl.Locale.prototype.maximize");
+  CHECK_RECEIVER(JSLocale, locale, "Intl.Locale.prototype.maximize");
   Handle<JSFunction> constructor(
       isolate->native_context()->intl_locale_function(), isolate);
+  Handle<String> locale_str = JSLocale::ToString(isolate, locale);
   RETURN_RESULT_OR_FAILURE(
-      isolate,
-      CreateLocale(isolate, constructor, constructor,
-                   JSLocale::Maximize(isolate, locale_holder->locale()),
-                   isolate->factory()->NewJSObjectWithNullProto()));
+      isolate, CreateLocale(isolate, constructor, constructor,
+                            JSLocale::Maximize(isolate, *locale_str),
+                            isolate->factory()->NewJSObjectWithNullProto()));
 }
 
 BUILTIN(LocalePrototypeMinimize) {
   HandleScope scope(isolate);
-  CHECK_RECEIVER(JSLocale, locale_holder, "Intl.Locale.prototype.minimize");
+  CHECK_RECEIVER(JSLocale, locale, "Intl.Locale.prototype.minimize");
   Handle<JSFunction> constructor(
       isolate->native_context()->intl_locale_function(), isolate);
+  Handle<String> locale_str = JSLocale::ToString(isolate, locale);
   RETURN_RESULT_OR_FAILURE(
-      isolate,
-      CreateLocale(isolate, constructor, constructor,
-                   JSLocale::Minimize(isolate, locale_holder->locale()),
-                   isolate->factory()->NewJSObjectWithNullProto()));
+      isolate, CreateLocale(isolate, constructor, constructor,
+                            JSLocale::Minimize(isolate, *locale_str),
+                            isolate->factory()->NewJSObjectWithNullProto()));
 }
 
 BUILTIN(RelativeTimeFormatSupportedLocalesOf) {
@@ -658,89 +651,79 @@ BUILTIN(RelativeTimeFormatPrototypeFormatToParts) {
 BUILTIN(LocalePrototypeLanguage) {
   HandleScope scope(isolate);
   // CHECK_RECEIVER will case locale_holder to JSLocale.
-  CHECK_RECEIVER(JSLocale, locale_holder, "Intl.Locale.prototype.language");
+  CHECK_RECEIVER(JSLocale, locale, "Intl.Locale.prototype.language");
 
-  return locale_holder->language();
+  return *JSLocale::Language(isolate, locale);
 }
 
 BUILTIN(LocalePrototypeScript) {
   HandleScope scope(isolate);
-  CHECK_RECEIVER(JSLocale, locale_holder, "Intl.Locale.prototype.script");
+  CHECK_RECEIVER(JSLocale, locale, "Intl.Locale.prototype.script");
 
-  return locale_holder->script();
+  return *JSLocale::Script(isolate, locale);
 }
 
 BUILTIN(LocalePrototypeRegion) {
   HandleScope scope(isolate);
-  CHECK_RECEIVER(JSLocale, locale_holder, "Intl.Locale.prototype.region");
+  CHECK_RECEIVER(JSLocale, locale, "Intl.Locale.prototype.region");
 
-  return locale_holder->region();
+  return *JSLocale::Region(isolate, locale);
 }
 
 BUILTIN(LocalePrototypeBaseName) {
   HandleScope scope(isolate);
-  CHECK_RECEIVER(JSLocale, locale_holder, "Intl.Locale.prototype.baseName");
+  CHECK_RECEIVER(JSLocale, locale, "Intl.Locale.prototype.baseName");
 
-  return locale_holder->base_name();
+  return *JSLocale::BaseName(isolate, locale);
 }
 
 BUILTIN(LocalePrototypeCalendar) {
   HandleScope scope(isolate);
-  CHECK_RECEIVER(JSLocale, locale_holder, "Intl.Locale.prototype.calendar");
+  CHECK_RECEIVER(JSLocale, locale, "Intl.Locale.prototype.calendar");
 
-  return locale_holder->calendar();
+  return *JSLocale::Calendar(isolate, locale);
 }
 
 BUILTIN(LocalePrototypeCaseFirst) {
   HandleScope scope(isolate);
-  CHECK_RECEIVER(JSLocale, locale_holder, "Intl.Locale.prototype.caseFirst");
+  CHECK_RECEIVER(JSLocale, locale, "Intl.Locale.prototype.caseFirst");
 
-  return *(locale_holder->CaseFirstAsString());
+  return *JSLocale::CaseFirst(isolate, locale);
 }
 
 BUILTIN(LocalePrototypeCollation) {
   HandleScope scope(isolate);
-  CHECK_RECEIVER(JSLocale, locale_holder, "Intl.Locale.prototype.collation");
+  CHECK_RECEIVER(JSLocale, locale, "Intl.Locale.prototype.collation");
 
-  return locale_holder->collation();
+  return *JSLocale::Collation(isolate, locale);
 }
 
 BUILTIN(LocalePrototypeHourCycle) {
   HandleScope scope(isolate);
-  CHECK_RECEIVER(JSLocale, locale_holder, "Intl.Locale.prototype.hourCycle");
+  CHECK_RECEIVER(JSLocale, locale, "Intl.Locale.prototype.hourCycle");
 
-  return *(locale_holder->HourCycleAsString());
+  return *JSLocale::HourCycle(isolate, locale);
 }
 
 BUILTIN(LocalePrototypeNumeric) {
   HandleScope scope(isolate);
-  CHECK_RECEIVER(JSLocale, locale_holder, "Intl.Locale.prototype.numeric");
+  CHECK_RECEIVER(JSLocale, locale, "Intl.Locale.prototype.numeric");
 
-  switch (locale_holder->numeric()) {
-    case JSLocale::Numeric::TRUE_VALUE:
-      return *(isolate->factory()->true_value());
-    case JSLocale::Numeric::FALSE_VALUE:
-      return *(isolate->factory()->false_value());
-    case JSLocale::Numeric::NOTSET:
-      return *(isolate->factory()->undefined_value());
-    case JSLocale::Numeric::COUNT:
-      UNREACHABLE();
-  }
+  return *JSLocale::Numeric(isolate, locale);
 }
 
 BUILTIN(LocalePrototypeNumberingSystem) {
   HandleScope scope(isolate);
-  CHECK_RECEIVER(JSLocale, locale_holder,
-                 "Intl.Locale.prototype.numberingSystem");
+  CHECK_RECEIVER(JSLocale, locale, "Intl.Locale.prototype.numberingSystem");
 
-  return locale_holder->numbering_system();
+  return *JSLocale::NumberingSystem(isolate, locale);
 }
 
 BUILTIN(LocalePrototypeToString) {
   HandleScope scope(isolate);
-  CHECK_RECEIVER(JSLocale, locale_holder, "Intl.Locale.prototype.toString");
+  CHECK_RECEIVER(JSLocale, locale, "Intl.Locale.prototype.toString");
 
-  return locale_holder->locale();
+  return *JSLocale::ToString(isolate, locale);
 }
 
 BUILTIN(RelativeTimeFormatConstructor) {
@@ -962,13 +945,13 @@ BUILTIN(SegmentIteratorPrototypePreceding) {
   return *isolate->factory()->ToBoolean(success.FromJust());
 }
 
-// ecma402 #sec-segment-iterator-prototype-position
-BUILTIN(SegmentIteratorPrototypePosition) {
-  const char* const method = "get %SegmentIteratorPrototype%.position";
+// ecma402 #sec-segment-iterator-prototype-index
+BUILTIN(SegmentIteratorPrototypeIndex) {
+  const char* const method = "get %SegmentIteratorPrototype%.index";
   HandleScope scope(isolate);
 
   CHECK_RECEIVER(JSSegmentIterator, segment_iterator, method);
-  return *JSSegmentIterator::Position(isolate, segment_iterator);
+  return *JSSegmentIterator::Index(isolate, segment_iterator);
 }
 
 BUILTIN(SegmenterConstructor) {

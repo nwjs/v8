@@ -59,7 +59,7 @@ class AstRawStringInternalizationKey : public StringTableKey {
   explicit AstRawStringInternalizationKey(const AstRawString* string)
       : StringTableKey(string->hash_field()), string_(string) {}
 
-  bool IsMatch(Object* other) override {
+  bool IsMatch(Object other) override {
     if (string_->is_one_byte())
       return String::cast(other)->IsOneByteEqualTo(string_->literal_bytes_);
     return String::cast(other)->IsTwoByteEqualTo(
@@ -232,7 +232,7 @@ AstRawString* AstValueFactory::GetTwoByteStringInternal(
 const AstRawString* AstValueFactory::GetString(Handle<String> literal) {
   AstRawString* result = nullptr;
   DisallowHeapAllocation no_gc;
-  String::FlatContent content = literal->GetFlatContent();
+  String::FlatContent content = literal->GetFlatContent(no_gc);
   if (content.IsOneByte()) {
     result = GetOneByteStringInternal(content.ToOneByteVector());
   } else {

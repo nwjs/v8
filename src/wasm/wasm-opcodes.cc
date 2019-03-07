@@ -158,12 +158,12 @@ const char* WasmOpcodes::OpcodeName(WasmOpcode opcode) {
     CASE_I64_OP(StoreMem32, "store32")
     CASE_S128_OP(StoreMem, "store128")
 
-    // Non-standard opcodes.
+    // Exception handling opcodes.
     CASE_OP(Try, "try")
+    CASE_OP(Catch, "catch")
     CASE_OP(Throw, "throw")
     CASE_OP(Rethrow, "rethrow")
-    CASE_OP(Catch, "catch")
-    CASE_OP(CatchAll, "catch_all")
+    CASE_OP(BrOnExn, "br_on_exn")
 
     // asm.js-only opcodes.
     CASE_F64_OP(Acos, "acos")
@@ -264,7 +264,7 @@ const char* WasmOpcodes::OpcodeName(WasmOpcode opcode) {
 
     // Atomic operations.
     CASE_OP(AtomicWake, "atomic_wake")
-    CASE_I32_OP(AtomicWait, "atomic_wait")
+    CASE_INT_OP(AtomicWait, "atomic_wait")
     CASE_UNSIGNED_ALL_OP(AtomicLoad, "atomic_load")
     CASE_UNSIGNED_ALL_OP(AtomicStore, "atomic_store")
     CASE_UNSIGNED_ALL_OP(AtomicAdd, "atomic_add")
@@ -381,11 +381,18 @@ std::ostream& operator<<(std::ostream& os, const FunctionSig& sig) {
   return os;
 }
 
-bool IsJSCompatibleSignature(const FunctionSig* sig) {
-  for (auto type : sig->all()) {
-    if (type == kWasmI64 || type == kWasmS128) return false;
+bool IsJSCompatibleSignature(const FunctionSig* sig, bool has_bigint_feature) {
+  if (sig->return_count() > 1) {
+    return false;
   }
-  return sig->return_count() <= 1;
+  for (auto type : sig->all()) {
+    if (!has_bigint_feature && type == kWasmI64) {
+      return false;
+    }
+
+    if (type == kWasmS128) return false;
+  }
+  return true;
 }
 
 namespace {
@@ -468,19 +475,7 @@ constexpr std::array<WasmOpcodeSig, 256> kAtomicExprSigTable =
 constexpr std::array<WasmOpcodeSig, 256> kNumericExprSigTable =
     base::make_array<256>(GetNumericOpcodeSigIndex{});
 
-// Computes a direct pointer to a cached signature for a simple opcode.
-struct GetSimpleOpcodeSig {
-  constexpr const FunctionSig* operator()(byte opcode) const {
-#define CASE(name, opc, sig) opcode == opc ? &kSig_##sig:
-    return FOREACH_SIMPLE_OPCODE(CASE) nullptr;
-#undef CASE
-  }
-};
-
 }  // namespace
-
-const std::array<const FunctionSig*, 256> kSimpleOpcodeSigs =
-    base::make_array<256>(GetSimpleOpcodeSig{});
 
 FunctionSig* WasmOpcodes::Signature(WasmOpcode opcode) {
   switch (opcode >> 8) {

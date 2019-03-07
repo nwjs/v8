@@ -939,14 +939,9 @@ PerIsolateData::RealmScope::~RealmScope() {
     Global<Context>& realm = data_->realms_[i];
     if (realm.IsEmpty()) continue;
     DisposeModuleEmbedderData(realm.Get(data_->isolate_));
-    // TODO(adamk): No need to reset manually, Globals reset when destructed.
-    realm.Reset();
   }
   data_->realm_count_ = 0;
   delete[] data_->realms_;
-  // TODO(adamk): No need to reset manually, Globals reset when destructed.
-  if (!data_->realm_shared_.IsEmpty())
-    data_->realm_shared_.Reset();
 }
 
 
@@ -1665,18 +1660,11 @@ Local<String> Shell::Stringify(Isolate* isolate, Local<Value> value) {
   v8::Local<v8::Context> context =
       v8::Local<v8::Context>::New(isolate, evaluation_context_);
   if (stringify_function_.IsEmpty()) {
-    int source_index = i::NativesCollection<i::D8>::GetIndex("d8");
-    i::Vector<const char> source_string =
-        i::NativesCollection<i::D8>::GetScriptSource(source_index);
-    i::Vector<const char> source_name =
-        i::NativesCollection<i::D8>::GetScriptName(source_index);
     Local<String> source =
-        String::NewFromUtf8(isolate, source_string.start(),
-                            NewStringType::kNormal, source_string.length())
+        String::NewFromUtf8(isolate, stringify_source_, NewStringType::kNormal)
             .ToLocalChecked();
     Local<String> name =
-        String::NewFromUtf8(isolate, source_name.start(),
-                            NewStringType::kNormal, source_name.length())
+        String::NewFromUtf8(isolate, "d8-stringify", NewStringType::kNormal)
             .ToLocalChecked();
     ScriptOrigin origin(name);
     Local<Script> script =
@@ -3013,7 +3001,7 @@ bool ProcessMessages(
     SealHandleScope shs(isolate);
     while (v8::platform::PumpMessageLoop(g_default_platform, isolate,
                                          behavior())) {
-      isolate->RunMicrotasks();
+      MicrotasksScope::PerformCheckpoint(isolate);
     }
     if (g_default_platform->IdleTasksEnabled(isolate)) {
       v8::platform::RunIdleTasks(g_default_platform, isolate,
@@ -3121,7 +3109,7 @@ class Serializer : public ValueSerializer::Delegate {
   }
 
   Maybe<uint32_t> GetWasmModuleTransferId(
-      Isolate* isolate, Local<WasmCompiledModule> module) override {
+      Isolate* isolate, Local<WasmModuleObject> module) override {
     DCHECK_NOT_NULL(data_);
     for (size_t index = 0; index < wasm_modules_.size(); ++index) {
       if (wasm_modules_[index] == module) {
@@ -3202,13 +3190,13 @@ class Serializer : public ValueSerializer::Delegate {
     for (const auto& global_array_buffer : array_buffers_) {
       Local<ArrayBuffer> array_buffer =
           Local<ArrayBuffer>::New(isolate_, global_array_buffer);
-      if (!array_buffer->IsNeuterable()) {
+      if (!array_buffer->IsDetachable()) {
         Throw(isolate_, "ArrayBuffer could not be transferred");
         return Nothing<bool>();
       }
 
       ArrayBuffer::Contents contents = MaybeExternalize(array_buffer);
-      array_buffer->Neuter();
+      array_buffer->Detach();
       data_->array_buffer_contents_.push_back(contents);
     }
 
@@ -3220,7 +3208,7 @@ class Serializer : public ValueSerializer::Delegate {
   std::unique_ptr<SerializationData> data_;
   std::vector<Global<ArrayBuffer>> array_buffers_;
   std::vector<Global<SharedArrayBuffer>> shared_array_buffers_;
-  std::vector<Global<WasmCompiledModule>> wasm_modules_;
+  std::vector<Global<WasmModuleObject>> wasm_modules_;
   std::vector<ExternalizedContents> externalized_contents_;
   size_t current_memory_usage_;
 
@@ -3264,14 +3252,14 @@ class Deserializer : public ValueDeserializer::Delegate {
     return MaybeLocal<SharedArrayBuffer>();
   }
 
-  MaybeLocal<WasmCompiledModule> GetWasmModuleFromId(
+  MaybeLocal<WasmModuleObject> GetWasmModuleFromId(
       Isolate* isolate, uint32_t transfer_id) override {
     DCHECK_NOT_NULL(data_);
     if (transfer_id < data_->transferrable_modules().size()) {
-      return WasmCompiledModule::FromTransferrableModule(
+      return WasmModuleObject::FromTransferrableModule(
           isolate_, data_->transferrable_modules().at(transfer_id));
     }
-    return MaybeLocal<WasmCompiledModule>();
+    return MaybeLocal<WasmModuleObject>();
   }
 
  private:

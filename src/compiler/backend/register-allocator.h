@@ -242,11 +242,7 @@ enum class UsePositionHintType : uint8_t {
   kUnresolved
 };
 
-static const int32_t kUnassignedRegister =
-    RegisterConfiguration::kMaxGeneralRegisters;
-
-static_assert(kUnassignedRegister <= RegisterConfiguration::kMaxFPRegisters,
-              "kUnassignedRegister too small");
+static const int32_t kUnassignedRegister = RegisterConfiguration::kMaxRegisters;
 
 // Representation of a use position.
 class V8_EXPORT_PRIVATE UsePosition final
@@ -304,6 +300,7 @@ class V8_EXPORT_PRIVATE UsePosition final
 class SpillRange;
 class RegisterAllocationData;
 class TopLevelLiveRange;
+class LiveRangeBundle;
 
 // Representation of SSA values' live ranges as a collection of (continuous)
 // intervals over the instruction ordering.
@@ -412,6 +409,8 @@ class V8_EXPORT_PRIVATE LiveRange : public NON_EXPORTED_BASE(ZoneObject) {
   bool ShouldBeAllocatedBefore(const LiveRange* other) const;
   bool CanCover(LifetimePosition position) const;
   bool Covers(LifetimePosition position) const;
+  LifetimePosition NextStartAfter(LifetimePosition position) const;
+  LifetimePosition NextEndAfter(LifetimePosition position) const;
   LifetimePosition FirstIntersection(LiveRange* other) const;
 
   void VerifyChildStructure() const {
@@ -426,6 +425,11 @@ class V8_EXPORT_PRIVATE LiveRange : public NON_EXPORTED_BASE(ZoneObject) {
 
   void Print(const RegisterConfiguration* config, bool with_children) const;
   void Print(bool with_children) const;
+
+  void set_bundle(LiveRangeBundle* bundle) { bundle_ = bundle; }
+  LiveRangeBundle* get_bundle() const { return bundle_; }
+  bool RegisterFromBundle(int* hint) const;
+  void UpdateBundleRegister(int reg) const;
 
  private:
   friend class TopLevelLiveRange;
@@ -463,8 +467,77 @@ class V8_EXPORT_PRIVATE LiveRange : public NON_EXPORTED_BASE(ZoneObject) {
   mutable UsePosition* current_hint_position_;
   // Cache the last position splintering stopped at.
   mutable UsePosition* splitting_pointer_;
+  LiveRangeBundle* bundle_ = nullptr;
 
   DISALLOW_COPY_AND_ASSIGN(LiveRange);
+};
+
+struct LiveRangeOrdering {
+  bool operator()(const LiveRange* left, const LiveRange* right) const {
+    return left->Start() < right->Start();
+  }
+};
+class LiveRangeBundle : public ZoneObject {
+ public:
+  void MergeSpillRanges();
+
+  int id() { return id_; }
+
+  int reg() { return reg_; }
+
+  void set_reg(int reg) {
+    DCHECK_EQ(reg_, kUnassignedRegister);
+    reg_ = reg;
+  }
+
+ private:
+  friend class BundleBuilder;
+
+  class Range {
+   public:
+    Range(int s, int e) : start(s), end(e) {}
+    Range(LifetimePosition s, LifetimePosition e)
+        : start(s.value()), end(e.value()) {}
+    int start;
+    int end;
+  };
+
+  struct RangeOrdering {
+    bool operator()(const Range left, const Range right) const {
+      return left.start < right.start;
+    }
+  };
+  bool UsesOverlap(UseInterval* interval) {
+    auto use = uses_.begin();
+    while (interval != nullptr && use != uses_.end()) {
+      if (use->end <= interval->start().value()) {
+        ++use;
+      } else if (interval->end().value() <= use->start) {
+        interval = interval->next();
+      } else {
+        return true;
+      }
+    }
+    return false;
+  }
+  void InsertUses(UseInterval* interval) {
+    while (interval != nullptr) {
+      auto done = uses_.insert({interval->start(), interval->end()});
+      USE(done);
+      DCHECK_EQ(done.second, 1);
+      interval = interval->next();
+    }
+  }
+  explicit LiveRangeBundle(Zone* zone, int id)
+      : ranges_(zone), uses_(zone), id_(id) {}
+
+  bool TryAddRange(LiveRange* range);
+  bool TryMerge(LiveRangeBundle* other);
+
+  ZoneSet<LiveRange*, LiveRangeOrdering> ranges_;
+  ZoneSet<Range, RangeOrdering> uses_;
+  int id_;
+  int reg_ = kUnassignedRegister;
 };
 
 class V8_EXPORT_PRIVATE TopLevelLiveRange final : public LiveRange {
@@ -608,6 +681,7 @@ class V8_EXPORT_PRIVATE TopLevelLiveRange final : public LiveRange {
     splinter->relative_id_ = GetNextChildId();
     splinter->set_spill_type(spill_type());
     splinter->SetSplinteredFrom(this);
+    if (bundle_ != nullptr) splinter->set_bundle(bundle_);
   }
 
   void MarkHasPreassignedSlot() { has_preassigned_slot_ = true; }
@@ -811,6 +885,9 @@ class RegisterAllocationData final : public ZoneObject {
   bool ExistsUseWithoutDefinition();
   bool RangesDefinedInDeferredStayInDeferred();
 
+  void MarkFixedUse(MachineRepresentation rep, int index);
+  bool HasFixedUse(MachineRepresentation rep, int index);
+
   void MarkAllocated(MachineRepresentation rep, int index);
 
   PhiMapValue* InitializePhiMap(const InstructionBlock* block,
@@ -843,6 +920,8 @@ class RegisterAllocationData final : public ZoneObject {
   DelayedReferences delayed_references_;
   BitVector* assigned_registers_;
   BitVector* assigned_double_registers_;
+  BitVector* fixed_register_use_;
+  BitVector* fixed_fp_register_use_;
   int virtual_register_count_;
   RangesWithPreassignedSlots preassigned_slot_ranges_;
 
@@ -866,7 +945,7 @@ class ConstraintBuilder final : public ZoneObject {
   Zone* allocation_zone() const { return data()->allocation_zone(); }
 
   InstructionOperand* AllocateFixed(UnallocatedOperand* operand, int pos,
-                                    bool is_tagged);
+                                    bool is_tagged, bool is_input);
   void MeetRegisterConstraints(const InstructionBlock* block);
   void MeetConstraintsBefore(int index);
   void MeetConstraintsAfter(int index);
@@ -943,6 +1022,19 @@ class LiveRangeBuilder final : public ZoneObject {
   ZoneMap<InstructionOperand*, UsePosition*> phi_hints_;
 
   DISALLOW_COPY_AND_ASSIGN(LiveRangeBuilder);
+};
+
+class BundleBuilder final : public ZoneObject {
+ public:
+  explicit BundleBuilder(RegisterAllocationData* data) : data_(data) {}
+
+  void BuildBundles();
+
+ private:
+  RegisterAllocationData* data() const { return data_; }
+  InstructionSequence* code() const { return data_->code(); }
+  RegisterAllocationData* data_;
+  int next_bundle_id_ = 0;
 };
 
 class RegisterAllocator : public ZoneObject {
@@ -1047,14 +1139,19 @@ class LinearScanAllocator final : public RegisterAllocator {
   ZoneVector<LiveRange*>::iterator ActiveToHandled(
       ZoneVector<LiveRange*>::iterator it);
   ZoneVector<LiveRange*>::iterator ActiveToInactive(
-      ZoneVector<LiveRange*>::iterator it);
+      ZoneVector<LiveRange*>::iterator it, LifetimePosition position);
   ZoneVector<LiveRange*>::iterator InactiveToHandled(
       ZoneVector<LiveRange*>::iterator it);
   ZoneVector<LiveRange*>::iterator InactiveToActive(
-      ZoneVector<LiveRange*>::iterator it);
+      ZoneVector<LiveRange*>::iterator it, LifetimePosition position);
+
+  void ForwardStateTo(LifetimePosition position);
 
   // Helper methods for allocating registers.
   bool TryReuseSpillForPhi(TopLevelLiveRange* range);
+  int PickRegisterThatIsAvailableLongest(
+      LiveRange* current, int hint_reg,
+      const Vector<LifetimePosition>& free_until_pos);
   bool TryAllocateFreeReg(LiveRange* range,
                           const Vector<LifetimePosition>& free_until_pos);
   bool TryAllocatePreferredReg(LiveRange* range,
@@ -1080,11 +1177,19 @@ class LinearScanAllocator final : public RegisterAllocator {
                          LifetimePosition until, LifetimePosition end);
 
   void SplitAndSpillIntersecting(LiveRange* range);
+
+  void PrintRangeRow(std::ostream& os, const TopLevelLiveRange* toplevel);
+
   void PrintRangeOverview(std::ostream& os);
 
   LiveRangeQueue unhandled_live_ranges_;
   ZoneVector<LiveRange*> active_live_ranges_;
   ZoneVector<LiveRange*> inactive_live_ranges_;
+
+  // Approximate at what position the set of ranges will change next.
+  // Used to avoid scanning for updates even if none are present.
+  LifetimePosition next_active_ranges_change_;
+  LifetimePosition next_inactive_ranges_change_;
 
 #ifdef DEBUG
   LifetimePosition allocation_finger_;

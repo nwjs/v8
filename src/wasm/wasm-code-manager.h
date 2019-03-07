@@ -45,8 +45,9 @@ class V8_EXPORT_PRIVATE DisjointAllocationPool final {
   explicit DisjointAllocationPool(base::AddressRegion region)
       : regions_({region}) {}
 
-  DisjointAllocationPool(DisjointAllocationPool&& other) = default;
-  DisjointAllocationPool& operator=(DisjointAllocationPool&& other) = default;
+  DisjointAllocationPool(DisjointAllocationPool&& other) V8_NOEXCEPT = default;
+  DisjointAllocationPool& operator=(DisjointAllocationPool&& other)
+      V8_NOEXCEPT = default;
 
   // Merge the parameter region into this object while preserving ordering of
   // the regions. The assumption is that the passed parameter is not
@@ -64,7 +65,7 @@ class V8_EXPORT_PRIVATE DisjointAllocationPool final {
  private:
   std::list<base::AddressRegion> regions_;
 
-  DISALLOW_COPY_AND_ASSIGN(DisjointAllocationPool)
+  DISALLOW_COPY_AND_ASSIGN(DisjointAllocationPool);
 };
 
 class V8_EXPORT_PRIVATE WasmCode final {
@@ -113,9 +114,12 @@ class V8_EXPORT_PRIVATE WasmCode final {
   NativeModule* native_module() const { return native_module_; }
   Tier tier() const { return tier_; }
   Address constant_pool() const;
+  Address code_comments() const;
   size_t constant_pool_offset() const { return constant_pool_offset_; }
   size_t safepoint_table_offset() const { return safepoint_table_offset_; }
   size_t handler_table_offset() const { return handler_table_offset_; }
+  size_t code_comments_offset() const { return code_comments_offset_; }
+  size_t unpadded_binary_size() const { return unpadded_binary_size_; }
   uint32_t stack_slots() const { return stack_slots_; }
   bool is_liftoff() const { return tier_ == kLiftoff; }
   bool contains(Address pc) const {
@@ -132,6 +136,7 @@ class V8_EXPORT_PRIVATE WasmCode final {
 
   void Validate() const;
   void Print(const char* name = nullptr) const;
+  void MaybePrint(const char* name = nullptr) const;
   void Disassemble(const char* name, std::ostream& os,
                    Address current_pc = kNullAddress) const;
 
@@ -151,7 +156,8 @@ class V8_EXPORT_PRIVATE WasmCode final {
   WasmCode(NativeModule* native_module, uint32_t index,
            Vector<byte> instructions, uint32_t stack_slots,
            size_t safepoint_table_offset, size_t handler_table_offset,
-           size_t constant_pool_offset,
+           size_t constant_pool_offset, size_t code_comments_offset,
+           size_t unpadded_binary_size,
            OwnedVector<trap_handler::ProtectedInstructionData>
                protected_instructions,
            OwnedVector<const byte> reloc_info,
@@ -166,11 +172,14 @@ class V8_EXPORT_PRIVATE WasmCode final {
         stack_slots_(stack_slots),
         safepoint_table_offset_(safepoint_table_offset),
         handler_table_offset_(handler_table_offset),
+        code_comments_offset_(code_comments_offset),
+        unpadded_binary_size_(unpadded_binary_size),
         protected_instructions_(std::move(protected_instructions)),
         tier_(tier) {
-    DCHECK_LE(safepoint_table_offset, instructions.size());
-    DCHECK_LE(constant_pool_offset, instructions.size());
-    DCHECK_LE(handler_table_offset, instructions.size());
+    DCHECK_LE(safepoint_table_offset, unpadded_binary_size);
+    DCHECK_LE(handler_table_offset, unpadded_binary_size);
+    DCHECK_LE(code_comments_offset, unpadded_binary_size);
+    DCHECK_LE(constant_pool_offset, unpadded_binary_size);
   }
 
   // Code objects that have been registered with the global trap handler within
@@ -196,6 +205,8 @@ class V8_EXPORT_PRIVATE WasmCode final {
   // conversions.
   size_t safepoint_table_offset_ = 0;
   size_t handler_table_offset_ = 0;
+  size_t code_comments_offset_ = 0;
+  size_t unpadded_binary_size_ = 0;
   intptr_t trap_handler_index_ = -1;
   OwnedVector<trap_handler::ProtectedInstructionData> protected_instructions_;
   Tier tier_;
@@ -226,7 +237,8 @@ class V8_EXPORT_PRIVATE NativeModule final {
   WasmCode* AddDeserializedCode(
       uint32_t index, Vector<const byte> instructions, uint32_t stack_slots,
       size_t safepoint_table_offset, size_t handler_table_offset,
-      size_t constant_pool_offset,
+      size_t constant_pool_offset, size_t code_comments_offset,
+      size_t unpadded_binary_size,
       OwnedVector<trap_handler::ProtectedInstructionData>
           protected_instructions,
       OwnedVector<const byte> reloc_info,
@@ -327,11 +339,11 @@ class V8_EXPORT_PRIVATE NativeModule final {
   UseTrapHandler use_trap_handler() const { return use_trap_handler_; }
   void set_lazy_compile_frozen(bool frozen) { lazy_compile_frozen_ = frozen; }
   bool lazy_compile_frozen() const { return lazy_compile_frozen_; }
-  Vector<const byte> wire_bytes() const { return wire_bytes_.as_vector(); }
+  Vector<const uint8_t> wire_bytes() const { return wire_bytes_->as_vector(); }
   const WasmModule* module() const { return module_.get(); }
   size_t committed_code_space() const { return committed_code_space_.load(); }
 
-  void SetWireBytes(OwnedVector<const byte> wire_bytes);
+  void SetWireBytes(OwnedVector<const uint8_t> wire_bytes);
 
   WasmCode* Lookup(Address) const;
 
@@ -366,6 +378,8 @@ class V8_EXPORT_PRIVATE NativeModule final {
                          uint32_t stack_slots, size_t safepoint_table_offset,
                          size_t handler_table_offset,
                          size_t constant_pool_offset,
+                         size_t code_comments_offset,
+                         size_t unpadded_binary_size,
                          OwnedVector<trap_handler::ProtectedInstructionData>,
                          OwnedVector<const byte> reloc_info,
                          OwnedVector<const byte> source_position_table,
@@ -413,7 +427,9 @@ class V8_EXPORT_PRIVATE NativeModule final {
   // AsyncCompileJob).
   std::shared_ptr<const WasmModule> module_;
 
-  OwnedVector<const byte> wire_bytes_;
+  // Wire bytes, held in a shared_ptr so they can be kept alive by the
+  // {WireBytesStorage}, held by background compile tasks.
+  std::shared_ptr<OwnedVector<const uint8_t>> wire_bytes_;
 
   WasmCode* runtime_stub_table_[WasmCode::kRuntimeStubCount] = {nullptr};
 
@@ -507,10 +523,14 @@ class V8_EXPORT_PRIVATE WasmCodeManager final {
   void FreeNativeModule(NativeModule*);
   void AssignRanges(Address start, Address end, NativeModule*);
   void AssignRangesAndAddModule(Address start, Address end, NativeModule*);
-  bool ShouldForceCriticalMemoryPressureNotification();
 
   WasmMemoryTracker* const memory_tracker_;
   std::atomic<size_t> remaining_uncommitted_code_space_;
+  // If the remaining uncommitted code space falls below
+  // {critical_uncommitted_code_space_}, then we trigger a GC before creating
+  // the next module. This value is initialized to 50% of the available code
+  // space on creation and after each GC.
+  std::atomic<size_t> critical_uncommitted_code_space_;
   mutable base::Mutex native_modules_mutex_;
 
   //////////////////////////////////////////////////////////////////////////////

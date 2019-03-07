@@ -147,16 +147,18 @@ class RegExpMacroAssemblerX64: public NativeRegExpMacroAssembler {
   static const int kLastCalleeSaveRegister = kBackup_rbx;
 #endif
 
-  static const int kSuccessfulCaptures = kLastCalleeSaveRegister - kPointerSize;
+  static const int kSuccessfulCaptures =
+      kLastCalleeSaveRegister - kSystemPointerSize;
   // When adding local variables remember to push space for them in
   // the frame in GetCode.
-  static const int kStringStartMinusOne = kSuccessfulCaptures - kPointerSize;
+  static const int kStringStartMinusOne =
+      kSuccessfulCaptures - kSystemPointerSize;
 
   // First register address. Following registers are below it on the stack.
-  static const int kRegisterZero = kStringStartMinusOne - kPointerSize;
+  static const int kRegisterZero = kStringStartMinusOne - kSystemPointerSize;
 
   // Initial size of code buffer.
-  static const size_t kRegExpCodeSize = 1024;
+  static const int kRegExpCodeSize = 1024;
 
   // Load a number of characters at the given offset from the
   // current position, into the current-character register.

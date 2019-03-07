@@ -500,6 +500,9 @@ class WasmModuleBuilder {
               section.emit_u8(byte_view[6]);
               section.emit_u8(byte_view[7]);
               break;
+            case kWasmAnyRef:
+              section.emit_u8(kExprRefNull);
+              break;
             }
           } else {
             // Emit a global-index initializer.
@@ -576,6 +579,13 @@ class WasmModuleBuilder {
             section.emit_u32v(index);
           }
         }
+      });
+    }
+
+    // If there are any passive data segments, add the DataCount section.
+    if (wasm.data_segments.some(seg => !seg.is_active)) {
+      binary.emit_section(kDataCountSectionCode, section => {
+        section.emit_u32v(wasm.data_segments.length);
       });
     }
 

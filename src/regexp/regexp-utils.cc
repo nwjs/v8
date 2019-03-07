@@ -131,7 +131,18 @@ Maybe<bool> RegExpUtils::IsRegExp(Isolate* isolate, Handle<Object> object) {
                             isolate->factory()->match_symbol()),
       Nothing<bool>());
 
-  if (!match->IsUndefined(isolate)) return Just(match->BooleanValue(isolate));
+  if (!match->IsUndefined(isolate)) {
+    const bool match_as_boolean = match->BooleanValue(isolate);
+
+    if (match_as_boolean && !object->IsJSRegExp()) {
+      isolate->CountUsage(v8::Isolate::kRegExpMatchIsTrueishOnNonJSRegExp);
+    } else if (!match_as_boolean && object->IsJSRegExp()) {
+      isolate->CountUsage(v8::Isolate::kRegExpMatchIsFalseishOnJSRegExp);
+    }
+
+    return Just(match_as_boolean);
+  }
+
   return Just(object->IsJSRegExp());
 }
 
@@ -142,14 +153,14 @@ bool RegExpUtils::IsUnmodifiedRegExp(Isolate* isolate, Handle<Object> obj) {
 
   if (!obj->IsJSReceiver()) return false;
 
-  JSReceiver* recv = JSReceiver::cast(*obj);
+  JSReceiver recv = JSReceiver::cast(*obj);
 
   // Check the receiver's map.
   Handle<JSFunction> regexp_function = isolate->regexp_function();
   if (recv->map() != regexp_function->initial_map()) return false;
 
   // Check the receiver's prototype's map.
-  Object* proto = recv->map()->prototype();
+  Object proto = recv->map()->prototype();
   if (!proto->IsJSReceiver()) return false;
 
   Handle<Map> initial_proto_initial_map = isolate->regexp_prototype_map();
@@ -176,7 +187,7 @@ bool RegExpUtils::IsUnmodifiedRegExp(Isolate* isolate, Handle<Object> obj) {
 
   // The smi check is required to omit ToLength(lastIndex) calls with possible
   // user-code execution on the fast path.
-  Object* last_index = JSRegExp::cast(recv)->last_index();
+  Object last_index = JSRegExp::cast(recv)->last_index();
   return last_index->IsSmi() && Smi::ToInt(last_index) >= 0;
 }
 

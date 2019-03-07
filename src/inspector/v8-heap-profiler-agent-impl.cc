@@ -225,7 +225,7 @@ Response V8HeapProfilerAgentImpl::takeHeapSnapshot(Maybe<bool> reportProgress) {
     // snapshot will fail.
     v8::Isolate* isolate = v8::Isolate::GetCurrent();
     v8::HandleScope handle_scope(isolate);
-    v8::Local<v8::Context> context = isolate->GetEnteredContext();
+    v8::Local<v8::Context> context = isolate->GetEnteredOrMicrotaskContext();
     if (!context.IsEmpty())
       context->Exit();
 #endif

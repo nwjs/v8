@@ -28,8 +28,8 @@ enum ModuleVariableEntryOffset {
 bool ScopeInfo::Equals(ScopeInfo other) const {
   if (length() != other->length()) return false;
   for (int index = 0; index < length(); ++index) {
-    Object* entry = get(index);
-    Object* other_entry = other->get(index);
+    Object entry = get(index);
+    Object other_entry = other->get(index);
     if (entry->IsSmi()) {
       if (entry != other_entry) return false;
     } else {
@@ -152,12 +152,12 @@ Handle<ScopeInfo> ScopeInfo::Create(Isolate* isolate, Zone* zone, Scope* scope,
   Handle<ScopeInfo> scope_info = factory->NewScopeInfo(length);
 
   bool has_simple_parameters = false;
-  bool asm_module = false;
+  bool is_asm_module = false;
   bool calls_sloppy_eval = false;
   if (scope->is_function_scope()) {
     DeclarationScope* function_scope = scope->AsDeclarationScope();
     has_simple_parameters = function_scope->has_simple_parameters();
-    asm_module = function_scope->asm_module();
+    is_asm_module = function_scope->is_asm_module();
   }
   FunctionKind function_kind = kNormalFunction;
   if (scope->is_declaration_scope()) {
@@ -175,11 +175,12 @@ Handle<ScopeInfo> ScopeInfo::Create(Isolate* isolate, Zone* zone, Scope* scope,
       HasNewTargetField::encode(has_new_target) |
       FunctionVariableField::encode(function_name_info) |
       HasInferredFunctionNameField::encode(has_inferred_function_name) |
-      AsmModuleField::encode(asm_module) |
+      IsAsmModuleField::encode(is_asm_module) |
       HasSimpleParametersField::encode(has_simple_parameters) |
       FunctionKindField::encode(function_kind) |
       HasOuterScopeInfoField::encode(has_outer_scope_info) |
-      IsDebugEvaluateScopeField::encode(scope->is_debug_evaluate_scope());
+      IsDebugEvaluateScopeField::encode(scope->is_debug_evaluate_scope()) |
+      ForceContextAllocationField::encode(scope->ForceContextForLanguageMode());
   scope_info->SetFlags(flags);
 
   scope_info->SetParameterCount(parameter_count);
@@ -267,7 +268,7 @@ Handle<ScopeInfo> ScopeInfo::Create(Isolate* isolate, Zone* zone, Scope* scope,
     DisallowHeapAllocation no_gc;
     Variable* var = scope->AsDeclarationScope()->function_var();
     int var_index = -1;
-    Object* name = Smi::kZero;
+    Object name = Smi::kZero;
     if (var != nullptr) {
       var_index = var->index();
       name = *var->name();
@@ -330,7 +331,7 @@ Handle<ScopeInfo> ScopeInfo::CreateForWithScope(
       LanguageModeField::encode(LanguageMode::kSloppy) |
       DeclarationScopeField::encode(false) |
       ReceiverVariableField::encode(NONE) | HasNewTargetField::encode(false) |
-      FunctionVariableField::encode(NONE) | AsmModuleField::encode(false) |
+      FunctionVariableField::encode(NONE) | IsAsmModuleField::encode(false) |
       HasSimpleParametersField::encode(true) |
       FunctionKindField::encode(kNormalFunction) |
       HasOuterScopeInfoField::encode(has_outer_scope_info) |
@@ -394,7 +395,7 @@ Handle<ScopeInfo> ScopeInfo::CreateForBootstrapping(Isolate* isolate,
       HasNewTargetField::encode(false) |
       FunctionVariableField::encode(is_empty_function ? UNUSED : NONE) |
       HasInferredFunctionNameField::encode(has_inferred_function_name) |
-      AsmModuleField::encode(false) | HasSimpleParametersField::encode(true) |
+      IsAsmModuleField::encode(false) | HasSimpleParametersField::encode(true) |
       FunctionKindField::encode(FunctionKind::kNormalFunction) |
       HasOuterScopeInfoField::encode(false) |
       IsDebugEvaluateScopeField::encode(false);
@@ -482,7 +483,9 @@ int ScopeInfo::ContextLength() const {
     int context_locals = ContextLocalCount();
     bool function_name_context_slot =
         FunctionVariableField::decode(Flags()) == CONTEXT;
-    bool has_context = context_locals > 0 || function_name_context_slot ||
+    bool force_context = ForceContextAllocationField::decode(Flags());
+    bool has_context = context_locals > 0 || force_context ||
+                       function_name_context_slot ||
                        scope_type() == WITH_SCOPE ||
                        (scope_type() == BLOCK_SCOPE && CallsSloppyEval() &&
                         is_declaration_scope()) ||
@@ -538,7 +541,7 @@ bool ScopeInfo::HasSharedFunctionName() const {
   return FunctionName() != SharedFunctionInfo::kNoSharedNameSentinel;
 }
 
-void ScopeInfo::SetFunctionName(Object* name) {
+void ScopeInfo::SetFunctionName(Object name) {
   DCHECK(HasFunctionName());
   DCHECK(name->IsString() || name == SharedFunctionInfo::kNoSharedNameSentinel);
   set(FunctionNameInfoIndex(), name);
@@ -570,18 +573,18 @@ void ScopeInfo::SetIsDebugEvaluateScope() {
 
 bool ScopeInfo::HasContext() const { return ContextLength() > 0; }
 
-Object* ScopeInfo::FunctionName() const {
+Object ScopeInfo::FunctionName() const {
   DCHECK(HasFunctionName());
   return get(FunctionNameInfoIndex());
 }
 
-Object* ScopeInfo::InferredFunctionName() const {
+Object ScopeInfo::InferredFunctionName() const {
   DCHECK(HasInferredFunctionName());
   return get(InferredFunctionNameIndex());
 }
 
 String ScopeInfo::FunctionDebugName() const {
-  Object* name = FunctionName();
+  Object name = FunctionName();
   if (name->IsString() && String::cast(name)->length() > 0) {
     return String::cast(name);
   }

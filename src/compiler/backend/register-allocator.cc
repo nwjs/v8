@@ -68,11 +68,13 @@ int GetByteWidth(MachineRepresentation rep) {
     case MachineRepresentation::kWord8:
     case MachineRepresentation::kWord16:
     case MachineRepresentation::kWord32:
+    case MachineRepresentation::kFloat32:
+      return kSystemPointerSize;
     case MachineRepresentation::kTaggedSigned:
     case MachineRepresentation::kTaggedPointer:
     case MachineRepresentation::kTagged:
-    case MachineRepresentation::kFloat32:
-      return kPointerSize;
+      // TODO(ishell): kTaggedSize once half size locations are supported.
+      return kSystemPointerSize;
     case MachineRepresentation::kWord64:
     case MachineRepresentation::kFloat64:
       return kDoubleSize;
@@ -550,6 +552,7 @@ void LiveRange::AdvanceLastProcessedMarker(
 LiveRange* LiveRange::SplitAt(LifetimePosition position, Zone* zone) {
   int new_id = TopLevel()->GetNextChildId();
   LiveRange* child = new (zone) LiveRange(new_id, representation(), TopLevel());
+  child->set_bundle(bundle_);
   // If we split, we do so because we're about to switch registers or move
   // to/from a slot, so there's no value in connecting hints.
   DetachAt(position, child, zone, DoNotConnectHints);
@@ -732,6 +735,22 @@ bool LiveRange::Covers(LifetimePosition position) const {
   return false;
 }
 
+LifetimePosition LiveRange::NextEndAfter(LifetimePosition position) const {
+  UseInterval* start_search = FirstSearchIntervalForPosition(position);
+  while (start_search->end() < position) {
+    start_search = start_search->next();
+  }
+  return start_search->end();
+}
+
+LifetimePosition LiveRange::NextStartAfter(LifetimePosition position) const {
+  UseInterval* start_search = FirstSearchIntervalForPosition(position);
+  while (start_search->start() < position) {
+    start_search = start_search->next();
+  }
+  return start_search->start();
+}
+
 LifetimePosition LiveRange::FirstIntersection(LiveRange* other) const {
   UseInterval* b = other->first_interval();
   if (b == nullptr) return LifetimePosition::Invalid();
@@ -769,6 +788,17 @@ void LiveRange::Print(const RegisterConfiguration* config,
 
 void LiveRange::Print(bool with_children) const {
   Print(RegisterConfiguration::Default(), with_children);
+}
+
+bool LiveRange::RegisterFromBundle(int* hint) const {
+  if (bundle_ == nullptr || bundle_->reg() == kUnassignedRegister) return false;
+  *hint = bundle_->reg();
+  return true;
+}
+
+void LiveRange::UpdateBundleRegister(int reg) const {
+  if (bundle_ == nullptr || bundle_->reg() != kUnassignedRegister) return;
+  bundle_->set_reg(reg);
 }
 
 struct TopLevelLiveRange::SpillMoveInsertionList : ZoneObject {
@@ -1178,49 +1208,61 @@ void PrintBlockRow(std::ostream& os, const InstructionBlocks& blocks) {
 }
 }  // namespace
 
+void LinearScanAllocator::PrintRangeRow(std::ostream& os,
+                                        const TopLevelLiveRange* toplevel) {
+  int position = 0;
+  os << std::setw(3) << toplevel->vreg()
+     << (toplevel->IsSplinter() ? "s:" : ": ");
+
+  for (const LiveRange* range = toplevel; range != nullptr;
+       range = range->next()) {
+    for (UseInterval* interval = range->first_interval(); interval != nullptr;
+         interval = interval->next()) {
+      LifetimePosition start = interval->start();
+      LifetimePosition end = interval->end();
+      CHECK_GE(start.value(), position);
+      for (; start.value() > position; position++) {
+        os << ' ';
+      }
+      int length = end.value() - start.value();
+      constexpr int kMaxPrefixLength = 32;
+      char buffer[kMaxPrefixLength];
+      int max_prefix_length = std::min(length + 1, kMaxPrefixLength);
+      int prefix;
+      if (range->spilled()) {
+        prefix = snprintf(buffer, max_prefix_length, "|ss");
+      } else {
+        const char* reg_name;
+        if (range->assigned_register() == kUnassignedRegister) {
+          reg_name = "???";
+        } else {
+          reg_name = RegisterName(range->assigned_register());
+        }
+        prefix = snprintf(buffer, max_prefix_length, "|%s", reg_name);
+      }
+      os << buffer;
+      position += std::min(prefix, max_prefix_length - 1);
+      CHECK_GE(end.value(), position);
+      const char line_style = range->spilled() ? '-' : '=';
+      for (; end.value() > position; position++) {
+        os << line_style;
+      }
+    }
+  }
+  os << '\n';
+}
+
 void LinearScanAllocator::PrintRangeOverview(std::ostream& os) {
+  PrintBlockRow(os, code()->instruction_blocks());
+  for (auto toplevel : data()->fixed_live_ranges()) {
+    if (toplevel == nullptr) continue;
+    PrintRangeRow(os, toplevel);
+  }
   int rowcount = 0;
   for (auto toplevel : data()->live_ranges()) {
     if (!CanProcessRange(toplevel)) continue;
     if (rowcount++ % 10 == 0) PrintBlockRow(os, code()->instruction_blocks());
-    int position = 0;
-    os << std::setw(3) << toplevel->vreg()
-       << (toplevel->IsSplinter() ? "s:" : ": ");
-    for (LiveRange* range = toplevel; range != nullptr; range = range->next()) {
-      for (UseInterval* interval = range->first_interval(); interval != nullptr;
-           interval = interval->next()) {
-        LifetimePosition start = interval->start();
-        LifetimePosition end = interval->end();
-        CHECK_GE(start.value(), position);
-        for (; start.value() > position; position++) {
-          os << ' ';
-        }
-        int length = end.value() - start.value();
-        constexpr int kMaxPrefixLength = 32;
-        char buffer[kMaxPrefixLength];
-        int max_prefix_length = std::min(length + 1, kMaxPrefixLength);
-        int prefix;
-        if (range->spilled()) {
-          prefix = snprintf(buffer, max_prefix_length, "|ss");
-        } else {
-          const char* reg_name;
-          if (range->assigned_register() == kUnassignedRegister) {
-            reg_name = "???";
-          } else {
-            reg_name = RegisterName(range->assigned_register());
-          }
-          prefix = snprintf(buffer, max_prefix_length, "|%s", reg_name);
-        }
-        os << buffer;
-        position += std::min(prefix, max_prefix_length - 1);
-        CHECK_GE(end.value(), position);
-        const char line_style = range->spilled() ? '-' : '=';
-        for (; end.value() > position; position++) {
-          os << line_style;
-        }
-      }
-    }
-    os << '\n';
+    PrintRangeRow(os, toplevel);
   }
 }
 
@@ -1383,6 +1425,11 @@ RegisterAllocationData::RegisterAllocationData(
       BitVector(this->config()->num_general_registers(), code_zone());
   assigned_double_registers_ = new (code_zone())
       BitVector(this->config()->num_double_registers(), code_zone());
+  fixed_register_use_ = new (code_zone())
+      BitVector(this->config()->num_general_registers(), code_zone());
+  fixed_fp_register_use_ = new (code_zone())
+      BitVector(this->config()->num_double_registers(), code_zone());
+
   this->frame()->SetAllocatedRegisters(assigned_registers_);
   this->frame()->SetAllocatedDoubleRegisters(assigned_double_registers_);
 }
@@ -1537,6 +1584,63 @@ SpillRange* RegisterAllocationData::CreateSpillRangeForLiveRange(
   return spill_range;
 }
 
+void RegisterAllocationData::MarkFixedUse(MachineRepresentation rep,
+                                          int index) {
+  switch (rep) {
+    case MachineRepresentation::kFloat32:
+    case MachineRepresentation::kSimd128:
+      if (kSimpleFPAliasing) {
+        fixed_fp_register_use_->Add(index);
+      } else {
+        int alias_base_index = -1;
+        int aliases = config()->GetAliases(
+            rep, index, MachineRepresentation::kFloat64, &alias_base_index);
+        DCHECK(aliases > 0 || (aliases == 0 && alias_base_index == -1));
+        while (aliases--) {
+          int aliased_reg = alias_base_index + aliases;
+          fixed_fp_register_use_->Add(aliased_reg);
+        }
+      }
+      break;
+    case MachineRepresentation::kFloat64:
+      fixed_fp_register_use_->Add(index);
+      break;
+    default:
+      DCHECK(!IsFloatingPoint(rep));
+      fixed_register_use_->Add(index);
+      break;
+  }
+}
+
+bool RegisterAllocationData::HasFixedUse(MachineRepresentation rep, int index) {
+  switch (rep) {
+    case MachineRepresentation::kFloat32:
+    case MachineRepresentation::kSimd128:
+      if (kSimpleFPAliasing) {
+        return fixed_fp_register_use_->Contains(index);
+      } else {
+        int alias_base_index = -1;
+        int aliases = config()->GetAliases(
+            rep, index, MachineRepresentation::kFloat64, &alias_base_index);
+        DCHECK(aliases > 0 || (aliases == 0 && alias_base_index == -1));
+        bool result = false;
+        while (aliases-- && !result) {
+          int aliased_reg = alias_base_index + aliases;
+          result |= fixed_fp_register_use_->Contains(aliased_reg);
+        }
+        return result;
+      }
+      break;
+    case MachineRepresentation::kFloat64:
+      return fixed_fp_register_use_->Contains(index);
+      break;
+    default:
+      DCHECK(!IsFloatingPoint(rep));
+      return fixed_register_use_->Contains(index);
+      break;
+  }
+}
+
 void RegisterAllocationData::MarkAllocated(MachineRepresentation rep,
                                            int index) {
   switch (rep) {
@@ -1575,7 +1679,7 @@ ConstraintBuilder::ConstraintBuilder(RegisterAllocationData* data)
     : data_(data) {}
 
 InstructionOperand* ConstraintBuilder::AllocateFixed(
-    UnallocatedOperand* operand, int pos, bool is_tagged) {
+    UnallocatedOperand* operand, int pos, bool is_tagged, bool is_input) {
   TRACE("Allocating fixed reg for op %d\n", operand->virtual_register());
   DCHECK(operand->HasFixedPolicy());
   InstructionOperand allocated;
@@ -1600,6 +1704,9 @@ InstructionOperand* ConstraintBuilder::AllocateFixed(
                                  operand->fixed_register_index());
   } else {
     UNREACHABLE();
+  }
+  if (is_input && allocated.IsAnyRegister()) {
+    data()->MarkFixedUse(rep, operand->fixed_register_index());
   }
   InstructionOperand::ReplaceWith(operand, &allocated);
   if (is_tagged) {
@@ -1642,7 +1749,7 @@ void ConstraintBuilder::MeetRegisterConstraintsForLastInstructionInBlock(
     TopLevelLiveRange* range = data()->GetOrCreateLiveRangeFor(output_vreg);
     bool assigned = false;
     if (output->HasFixedPolicy()) {
-      AllocateFixed(output, -1, false);
+      AllocateFixed(output, -1, false, false);
       // This value is produced on the stack, we never need to spill it.
       if (output->IsStackSlot()) {
         DCHECK(LocationOperand::cast(output)->index() <
@@ -1681,7 +1788,7 @@ void ConstraintBuilder::MeetConstraintsAfter(int instr_index) {
   // Handle fixed temporaries.
   for (size_t i = 0; i < first->TempCount(); i++) {
     UnallocatedOperand* temp = UnallocatedOperand::cast(first->TempAt(i));
-    if (temp->HasFixedPolicy()) AllocateFixed(temp, instr_index, false);
+    if (temp->HasFixedPolicy()) AllocateFixed(temp, instr_index, false, false);
   }
   // Handle constant/fixed output operands.
   for (size_t i = 0; i < first->OutputCount(); i++) {
@@ -1707,7 +1814,7 @@ void ConstraintBuilder::MeetConstraintsAfter(int instr_index) {
         data()->preassigned_slot_ranges().push_back(
             std::make_pair(range, first_output->GetSecondaryStorage()));
       }
-      AllocateFixed(first_output, instr_index, is_tagged);
+      AllocateFixed(first_output, instr_index, is_tagged, false);
 
       // This value is produced on the stack, we never need to spill it.
       if (first_output->IsStackSlot()) {
@@ -1744,7 +1851,7 @@ void ConstraintBuilder::MeetConstraintsBefore(int instr_index) {
       UnallocatedOperand input_copy(UnallocatedOperand::REGISTER_OR_SLOT,
                                     input_vreg);
       bool is_tagged = code()->IsReference(input_vreg);
-      AllocateFixed(cur_input, instr_index, is_tagged);
+      AllocateFixed(cur_input, instr_index, is_tagged, true);
       data()->AddGapMove(instr_index, Instruction::END, input_copy, *cur_input);
     }
   }
@@ -1765,6 +1872,7 @@ void ConstraintBuilder::MeetConstraintsBefore(int instr_index) {
         UnallocatedOperand(*cur_input, second_output->virtual_register());
     MoveOperands* gap_move = data()->AddGapMove(instr_index, Instruction::END,
                                                 input_copy, *cur_input);
+    DCHECK_NOT_NULL(gap_move);
     if (code()->IsReference(input_vreg) && !code()->IsReference(output_vreg)) {
       if (second->HasReferenceMap()) {
         RegisterAllocationData::DelayedReference delayed_reference = {
@@ -2509,6 +2617,99 @@ bool LiveRangeBuilder::NextIntervalStartsInDifferentBlocks(
   return block->rpo_number() < next_block->rpo_number();
 }
 
+void BundleBuilder::BuildBundles() {
+  TRACE("Build bundles\n");
+  // Process the blocks in reverse order.
+  for (int block_id = code()->InstructionBlockCount() - 1; block_id >= 0;
+       --block_id) {
+    InstructionBlock* block =
+        code()->InstructionBlockAt(RpoNumber::FromInt(block_id));
+    TRACE("Block B%d\n", block_id);
+    for (auto phi : block->phis()) {
+      LiveRange* out_range =
+          data()->GetOrCreateLiveRangeFor(phi->virtual_register());
+      LiveRangeBundle* out = out_range->get_bundle();
+      if (out == nullptr) {
+        out = new (data()->allocation_zone())
+            LiveRangeBundle(data()->allocation_zone(), next_bundle_id_++);
+        out->TryAddRange(out_range);
+      }
+      TRACE("Processing phi for v%d with %d:%d\n", phi->virtual_register(),
+            out_range->TopLevel()->vreg(), out_range->relative_id());
+      for (auto input : phi->operands()) {
+        LiveRange* input_range = data()->GetOrCreateLiveRangeFor(input);
+        TRACE("Input value v%d with range %d:%d\n", input,
+              input_range->TopLevel()->vreg(), input_range->relative_id());
+        LiveRangeBundle* input_bundle = input_range->get_bundle();
+        if (input_bundle != nullptr) {
+          TRACE("Merge\n");
+          if (out->TryMerge(input_bundle))
+            TRACE("Merged %d and %d to %d\n", phi->virtual_register(), input,
+                  out->id());
+        } else {
+          TRACE("Add\n");
+          if (out->TryAddRange(input_range))
+            TRACE("Added %d and %d to %d\n", phi->virtual_register(), input,
+                  out->id());
+        }
+      }
+    }
+    TRACE("Done block B%d\n", block_id);
+  }
+}
+
+bool LiveRangeBundle::TryAddRange(LiveRange* range) {
+  DCHECK_NULL(range->get_bundle());
+  // We may only add a new live range if its use intervals do not
+  // overlap with existing intervals in the bundle.
+  if (UsesOverlap(range->first_interval())) return false;
+  ranges_.insert(range);
+  range->set_bundle(this);
+  InsertUses(range->first_interval());
+  return true;
+}
+bool LiveRangeBundle::TryMerge(LiveRangeBundle* other) {
+  if (other == this) return true;
+
+  auto iter1 = uses_.begin();
+  auto iter2 = other->uses_.begin();
+
+  while (iter1 != uses_.end() && iter2 != other->uses_.end()) {
+    if (iter1->start > iter2->end) {
+      ++iter2;
+    } else if (iter2->start > iter1->end) {
+      ++iter1;
+    } else {
+      TRACE("No merge %d:%d %d:%d\n", iter1->start, iter1->end, iter2->start,
+            iter2->end);
+      return false;
+    }
+  }
+  // Uses are disjoint, merging is possible.
+  for (auto it = other->ranges_.begin(); it != other->ranges_.end(); ++it) {
+    (*it)->set_bundle(this);
+    InsertUses((*it)->first_interval());
+  }
+  ranges_.insert(other->ranges_.begin(), other->ranges_.end());
+  other->ranges_.clear();
+
+  return true;
+}
+
+void LiveRangeBundle::MergeSpillRanges() {
+  SpillRange* target = nullptr;
+  for (auto range : ranges_) {
+    if (range->TopLevel()->HasSpillRange()) {
+      SpillRange* current = range->TopLevel()->GetSpillRange();
+      if (target == nullptr) {
+        target = current;
+      } else if (target != current) {
+        target->TryMerge(current);
+      }
+    }
+  }
+}
+
 RegisterAllocator::RegisterAllocator(RegisterAllocationData* data,
                                      RegisterKind kind)
     : data_(data),
@@ -2705,13 +2906,11 @@ LinearScanAllocator::LinearScanAllocator(RegisterAllocationData* data,
     : RegisterAllocator(data, kind),
       unhandled_live_ranges_(local_zone),
       active_live_ranges_(local_zone),
-      inactive_live_ranges_(local_zone) {
+      inactive_live_ranges_(local_zone),
+      next_active_ranges_change_(LifetimePosition::Invalid()),
+      next_inactive_ranges_change_(LifetimePosition::Invalid()) {
   active_live_ranges().reserve(8);
   inactive_live_ranges().reserve(8);
-  // TryAllocateFreeReg and AllocateBlockedReg assume this
-  // when allocating local arrays.
-  DCHECK_GE(RegisterConfiguration::kMaxFPRegisters,
-            this->data()->config()->num_general_registers());
 }
 
 void LinearScanAllocator::AllocateRegisters() {
@@ -2765,29 +2964,7 @@ void LinearScanAllocator::AllocateRegisters() {
     if (current->IsTopLevel() && TryReuseSpillForPhi(current->TopLevel()))
       continue;
 
-    for (auto it = active_live_ranges().begin();
-         it != active_live_ranges().end();) {
-      LiveRange* cur_active = *it;
-      if (cur_active->End() <= position) {
-        it = ActiveToHandled(it);
-      } else if (!cur_active->Covers(position)) {
-        it = ActiveToInactive(it);
-      } else {
-        ++it;
-      }
-    }
-
-    for (auto it = inactive_live_ranges().begin();
-         it != inactive_live_ranges().end();) {
-      LiveRange* cur_inactive = *it;
-      if (cur_inactive->End() <= position) {
-        it = InactiveToHandled(it);
-      } else if (cur_inactive->Covers(position)) {
-        it = InactiveToActive(it);
-      } else {
-        ++it;
-      }
-    }
+    ForwardStateTo(position);
 
     DCHECK(!current->HasRegisterAssigned() && !current->spilled());
 
@@ -2825,21 +3002,26 @@ void LinearScanAllocator::SetLiveRangeAssignedRegister(LiveRange* range,
   data()->MarkAllocated(range->representation(), reg);
   range->set_assigned_register(reg);
   range->SetUseHints(reg);
+  range->UpdateBundleRegister(reg);
   if (range->IsTopLevel() && range->TopLevel()->is_phi()) {
     data()->GetPhiMapValueFor(range->TopLevel())->set_assigned_register(reg);
   }
 }
 
 void LinearScanAllocator::AddToActive(LiveRange* range) {
-  TRACE("Add live range %d:%d to active\n", range->TopLevel()->vreg(),
-        range->relative_id());
+  TRACE("Add live range %d:%d in %s to active\n", range->TopLevel()->vreg(),
+        range->relative_id(), RegisterName(range->assigned_register()));
   active_live_ranges().push_back(range);
+  next_active_ranges_change_ =
+      std::min(next_active_ranges_change_, range->NextEndAfter(range->Start()));
 }
 
 void LinearScanAllocator::AddToInactive(LiveRange* range) {
   TRACE("Add live range %d:%d to inactive\n", range->TopLevel()->vreg(),
         range->relative_id());
   inactive_live_ranges().push_back(range);
+  next_inactive_ranges_change_ = std::min(
+      next_inactive_ranges_change_, range->NextStartAfter(range->Start()));
 }
 
 void LinearScanAllocator::AddToUnhandled(LiveRange* range) {
@@ -2860,11 +3042,13 @@ ZoneVector<LiveRange*>::iterator LinearScanAllocator::ActiveToHandled(
 }
 
 ZoneVector<LiveRange*>::iterator LinearScanAllocator::ActiveToInactive(
-    const ZoneVector<LiveRange*>::iterator it) {
+    const ZoneVector<LiveRange*>::iterator it, LifetimePosition position) {
   LiveRange* range = *it;
   inactive_live_ranges().push_back(range);
   TRACE("Moving live range %d:%d from active to inactive\n",
         (range)->TopLevel()->vreg(), range->relative_id());
+  next_inactive_ranges_change_ =
+      std::min(next_inactive_ranges_change_, range->NextStartAfter(position));
   return active_live_ranges().erase(it);
 }
 
@@ -2876,12 +3060,51 @@ ZoneVector<LiveRange*>::iterator LinearScanAllocator::InactiveToHandled(
 }
 
 ZoneVector<LiveRange*>::iterator LinearScanAllocator::InactiveToActive(
-    ZoneVector<LiveRange*>::iterator it) {
+    ZoneVector<LiveRange*>::iterator it, LifetimePosition position) {
   LiveRange* range = *it;
   active_live_ranges().push_back(range);
   TRACE("Moving live range %d:%d from inactive to active\n",
         range->TopLevel()->vreg(), range->relative_id());
+  next_active_ranges_change_ =
+      std::min(next_active_ranges_change_, range->NextEndAfter(position));
   return inactive_live_ranges().erase(it);
+}
+
+void LinearScanAllocator::ForwardStateTo(LifetimePosition position) {
+  if (position >= next_active_ranges_change_) {
+    next_active_ranges_change_ = LifetimePosition::MaxPosition();
+    for (auto it = active_live_ranges().begin();
+         it != active_live_ranges().end();) {
+      LiveRange* cur_active = *it;
+      if (cur_active->End() <= position) {
+        it = ActiveToHandled(it);
+      } else if (!cur_active->Covers(position)) {
+        it = ActiveToInactive(it, position);
+      } else {
+        next_active_ranges_change_ = std::min(
+            next_active_ranges_change_, cur_active->NextEndAfter(position));
+        ++it;
+      }
+    }
+  }
+
+  if (position >= next_inactive_ranges_change_) {
+    next_inactive_ranges_change_ = LifetimePosition::MaxPosition();
+    for (auto it = inactive_live_ranges().begin();
+         it != inactive_live_ranges().end();) {
+      LiveRange* cur_inactive = *it;
+      if (cur_inactive->End() <= position) {
+        it = InactiveToHandled(it);
+      } else if (cur_inactive->Covers(position)) {
+        it = InactiveToActive(it, position);
+      } else {
+        next_inactive_ranges_change_ =
+            std::min(next_inactive_ranges_change_,
+                     cur_inactive->NextStartAfter(position));
+        ++it;
+      }
+    }
+  }
 }
 
 void LinearScanAllocator::GetFPRegisterSet(MachineRepresentation rep,
@@ -2920,8 +3143,10 @@ void LinearScanAllocator::FindFreeRegistersForRange(
     int cur_reg = cur_active->assigned_register();
     if (kSimpleFPAliasing || !check_fp_aliasing()) {
       positions[cur_reg] = LifetimePosition::GapFromInstructionIndex(0);
-      TRACE("Register %s is free until pos %d (1)\n", RegisterName(cur_reg),
-            LifetimePosition::GapFromInstructionIndex(0).value());
+      TRACE("Register %s is free until pos %d (1) due to %d\n",
+            RegisterName(cur_reg),
+            LifetimePosition::GapFromInstructionIndex(0).value(),
+            cur_active->TopLevel()->vreg());
     } else {
       int alias_base_index = -1;
       int aliases = data()->config()->GetAliases(
@@ -3000,9 +3225,8 @@ void LinearScanAllocator::FindFreeRegistersForRange(
 // - a phi. The same analysis as in the case of the input constraint applies.
 //
 void LinearScanAllocator::ProcessCurrentRange(LiveRange* current) {
-  LifetimePosition free_until_pos_buff[RegisterConfiguration::kMaxFPRegisters];
-  Vector<LifetimePosition> free_until_pos(
-      free_until_pos_buff, RegisterConfiguration::kMaxFPRegisters);
+  EmbeddedVector<LifetimePosition, RegisterConfiguration::kMaxRegisters>
+      free_until_pos;
   FindFreeRegistersForRange(current, free_until_pos);
   if (!TryAllocatePreferredReg(current, free_until_pos)) {
     if (current->TopLevel()->IsSplinter()) {
@@ -3020,7 +3244,8 @@ void LinearScanAllocator::ProcessCurrentRange(LiveRange* current) {
 bool LinearScanAllocator::TryAllocatePreferredReg(
     LiveRange* current, const Vector<LifetimePosition>& free_until_pos) {
   int hint_register;
-  if (current->FirstHintPosition(&hint_register) != nullptr) {
+  if (current->FirstHintPosition(&hint_register) != nullptr ||
+      current->RegisterFromBundle(&hint_register)) {
     TRACE(
         "Found reg hint %s (free until [%d) for live range %d:%d (end %d[).\n",
         RegisterName(hint_register), free_until_pos[hint_register].value(),
@@ -3039,8 +3264,9 @@ bool LinearScanAllocator::TryAllocatePreferredReg(
   return false;
 }
 
-bool LinearScanAllocator::TryAllocateFreeReg(
-    LiveRange* current, const Vector<LifetimePosition>& free_until_pos) {
+int LinearScanAllocator::PickRegisterThatIsAvailableLongest(
+    LiveRange* current, int hint_reg,
+    const Vector<LifetimePosition>& free_until_pos) {
   int num_regs = 0;  // used only for the call to GetFPRegisterSet.
   int num_codes = num_allocatable_registers();
   const int* codes = allocatable_register_codes();
@@ -3060,17 +3286,33 @@ bool LinearScanAllocator::TryAllocateFreeReg(
   // cloberred after the call except for the argument registers, which are
   // set before the call. Hence, the argument registers always get ignored,
   // as their available time is shorter.
-  int reg;
-  if (current->FirstHintPosition(&reg) == nullptr) {
-    reg = codes[0];
-  }
+  int reg = hint_reg == kUnassignedRegister ? codes[0] : hint_reg;
   for (int i = 0; i < num_codes; ++i) {
     int code = codes[i];
-    if (free_until_pos[code].ToInstructionIndex() >
-        free_until_pos[reg].ToInstructionIndex()) {
+    // Prefer registers that have no fixed uses to avoid blocking later hints.
+    // We use the first register that has no fixed uses to ensure we use
+    // byte addressable registers in ia32 first.
+    int candidate_free = free_until_pos[code].ToInstructionIndex();
+    int current_free = free_until_pos[reg].ToInstructionIndex();
+    if (candidate_free > current_free ||
+        (candidate_free == current_free && reg != hint_reg &&
+         data()->HasFixedUse(current->representation(), reg) &&
+         !data()->HasFixedUse(current->representation(), code))) {
       reg = code;
     }
   }
+  return reg;
+}
+
+bool LinearScanAllocator::TryAllocateFreeReg(
+    LiveRange* current, const Vector<LifetimePosition>& free_until_pos) {
+  // Compute register hint, if such exists.
+  int hint_reg = kUnassignedRegister;
+  current->FirstHintPosition(&hint_reg) != nullptr ||
+      current->RegisterFromBundle(&hint_reg);
+
+  int reg =
+      PickRegisterThatIsAvailableLongest(current, hint_reg, free_until_pos);
 
   LifetimePosition pos = free_until_pos[reg];
 
@@ -3108,22 +3350,15 @@ void LinearScanAllocator::AllocateBlockedReg(LiveRange* current) {
     return;
   }
 
-  int num_regs = num_registers();
-  int num_codes = num_allocatable_registers();
-  const int* codes = allocatable_register_codes();
   MachineRepresentation rep = current->representation();
-  if (!kSimpleFPAliasing && (rep == MachineRepresentation::kFloat32 ||
-                             rep == MachineRepresentation::kSimd128))
-    GetFPRegisterSet(rep, &num_regs, &num_codes, &codes);
 
   // use_pos keeps track of positions a register/alias is used at.
   // block_pos keeps track of positions where a register/alias is blocked
   // from.
-  LifetimePosition use_pos[RegisterConfiguration::kMaxFPRegisters];
-  LifetimePosition block_pos[RegisterConfiguration::kMaxFPRegisters];
-  for (int i = 0; i < num_regs; i++) {
-    use_pos[i] = block_pos[i] = LifetimePosition::MaxPosition();
-  }
+  EmbeddedVector<LifetimePosition, RegisterConfiguration::kMaxRegisters>
+      use_pos(LifetimePosition::MaxPosition());
+  EmbeddedVector<LifetimePosition, RegisterConfiguration::kMaxRegisters>
+      block_pos(LifetimePosition::MaxPosition());
 
   for (LiveRange* range : active_live_ranges()) {
     int cur_reg = range->assigned_register();
@@ -3204,13 +3439,11 @@ void LinearScanAllocator::AllocateBlockedReg(LiveRange* current) {
     }
   }
 
-  int reg = codes[0];
-  for (int i = 1; i < num_codes; ++i) {
-    int code = codes[i];
-    if (use_pos[code] > use_pos[reg]) {
-      reg = code;
-    }
-  }
+  // Compute register hint if it exists.
+  int hint_reg = kUnassignedRegister;
+  register_use->HintRegister(&hint_reg) ||
+      current->RegisterFromBundle(&hint_reg);
+  int reg = PickRegisterThatIsAvailableLongest(current, hint_reg, use_pos);
 
   if (use_pos[reg] < register_use->pos()) {
     // If there is a gap position before the next register use, we can
@@ -3327,13 +3560,14 @@ bool LinearScanAllocator::TryReuseSpillForPhi(TopLevelLiveRange* range) {
   if (!range->is_phi()) return false;
 
   DCHECK(!range->HasSpillOperand());
+  // Check how many operands belong to the same bundle as the output.
+  LiveRangeBundle* out_bundle = range->get_bundle();
   RegisterAllocationData::PhiMapValue* phi_map_value =
       data()->GetPhiMapValueFor(range);
   const PhiInstruction* phi = phi_map_value->phi();
   const InstructionBlock* block = phi_map_value->block();
   // Count the number of spilled operands.
   size_t spilled_count = 0;
-  LiveRange* first_op = nullptr;
   for (size_t i = 0; i < phi->operands().size(); i++) {
     int op = phi->operands()[i];
     LiveRange* op_range = data()->GetOrCreateLiveRangeFor(op);
@@ -3346,39 +3580,15 @@ bool LinearScanAllocator::TryReuseSpillForPhi(TopLevelLiveRange* range) {
     while (op_range != nullptr && !op_range->CanCover(pred_end)) {
       op_range = op_range->next();
     }
-    if (op_range != nullptr && op_range->spilled()) {
+    if (op_range != nullptr && op_range->spilled() &&
+        op_range->get_bundle() == out_bundle) {
       spilled_count++;
-      if (first_op == nullptr) {
-        first_op = op_range->TopLevel();
-      }
     }
   }
 
-  // Only continue if more than half of the operands are spilled.
+  // Only continue if more than half of the operands are spilled to the same
+  // slot (because part of same bundle).
   if (spilled_count * 2 <= phi->operands().size()) {
-    return false;
-  }
-
-  // Try to merge the spilled operands and count the number of merged spilled
-  // operands.
-  DCHECK_NOT_NULL(first_op);
-  SpillRange* first_op_spill = first_op->TopLevel()->GetSpillRange();
-  size_t num_merged = 1;
-  for (size_t i = 1; i < phi->operands().size(); i++) {
-    int op = phi->operands()[i];
-    TopLevelLiveRange* op_range = data()->live_ranges()[op];
-    if (!op_range->HasSpillRange()) continue;
-    SpillRange* op_spill = op_range->GetSpillRange();
-    if (op_spill == first_op_spill || first_op_spill->TryMerge(op_spill)) {
-      num_merged++;
-    }
-  }
-
-  // Only continue if enough operands could be merged to the
-  // same spill slot.
-  if (num_merged * 2 <= phi->operands().size() ||
-      AreUseIntervalsIntersecting(first_op_spill->interval(),
-                                  range->first_interval())) {
     return false;
   }
 
@@ -3388,21 +3598,9 @@ bool LinearScanAllocator::TryReuseSpillForPhi(TopLevelLiveRange* range) {
   if (next_pos.IsGapPosition()) next_pos = next_pos.NextStart();
   UsePosition* pos = range->NextUsePositionRegisterIsBeneficial(next_pos);
   if (pos == nullptr) {
-    SpillRange* spill_range =
-        range->TopLevel()->HasSpillRange()
-            ? range->TopLevel()->GetSpillRange()
-            : data()->AssignSpillRangeToLiveRange(range->TopLevel());
-    bool merged = first_op_spill->TryMerge(spill_range);
-    if (!merged) return false;
     Spill(range);
     return true;
   } else if (pos->pos() > range->Start().NextStart()) {
-    SpillRange* spill_range =
-        range->TopLevel()->HasSpillRange()
-            ? range->TopLevel()->GetSpillRange()
-            : data()->AssignSpillRangeToLiveRange(range->TopLevel());
-    bool merged = first_op_spill->TryMerge(spill_range);
-    if (!merged) return false;
     SpillBetween(range, range->Start(), pos->pos());
     return true;
   }
@@ -3474,6 +3672,11 @@ void SpillSlotLocator::LocateSpillSlots() {
 OperandAssigner::OperandAssigner(RegisterAllocationData* data) : data_(data) {}
 
 void OperandAssigner::AssignSpillSlots() {
+  for (auto range : data()->live_ranges()) {
+    if (range != nullptr && range->get_bundle() != nullptr) {
+      range->get_bundle()->MergeSpillRanges();
+    }
+  }
   ZoneVector<SpillRange*>& spill_ranges = data()->spill_ranges();
   // Merge disjoint spill ranges
   for (size_t i = 0; i < spill_ranges.size(); ++i) {

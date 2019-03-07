@@ -240,8 +240,8 @@ int RegExpImpl::AtomExecRaw(Isolate* isolate, Handle<JSRegExp> regexp,
   }
 
   for (int i = 0; i < output_size; i += 2) {
-    String::FlatContent needle_content = needle->GetFlatContent();
-    String::FlatContent subject_content = subject->GetFlatContent();
+    String::FlatContent needle_content = needle->GetFlatContent(no_gc);
+    String::FlatContent subject_content = subject->GetFlatContent(no_gc);
     DCHECK(needle_content.IsFlat());
     DCHECK(subject_content.IsFlat());
     // dispatch on type of strings
@@ -299,7 +299,7 @@ Handle<Object> RegExpImpl::AtomExec(Isolate* isolate, Handle<JSRegExp> re,
 bool RegExpImpl::EnsureCompiledIrregexp(Isolate* isolate, Handle<JSRegExp> re,
                                         Handle<String> sample_subject,
                                         bool is_one_byte) {
-  Object* compiled_code = re->DataAt(JSRegExp::code_index(is_one_byte));
+  Object compiled_code = re->DataAt(JSRegExp::code_index(is_one_byte));
 #ifdef V8_INTERPRETED_REGEXP
   if (compiled_code->IsByteArray()) return true;
 #else  // V8_INTERPRETED_REGEXP (RegExp native code)
@@ -315,7 +315,7 @@ bool RegExpImpl::CompileIrregexp(Isolate* isolate, Handle<JSRegExp> re,
   Zone zone(isolate->allocator(), ZONE_NAME);
   PostponeInterruptsScope postpone(isolate);
 #ifdef DEBUG
-  Object* entry = re->DataAt(JSRegExp::code_index(is_one_byte));
+  Object entry = re->DataAt(JSRegExp::code_index(is_one_byte));
   // When arriving here entry can only be a smi representing an uncompiled
   // regexp.
   DCHECK(entry->IsSmi());
@@ -410,7 +410,7 @@ int RegExpImpl::IrregexpPrepare(Isolate* isolate, Handle<JSRegExp> regexp,
   DCHECK(subject->IsFlat());
 
   // Check representation of the underlying storage.
-  bool is_one_byte = subject->IsOneByteRepresentationUnderneath();
+  bool is_one_byte = String::IsOneByteRepresentationUnderneath(*subject);
   if (!EnsureCompiledIrregexp(isolate, regexp, subject, is_one_byte)) return -1;
 
 #ifdef V8_INTERPRETED_REGEXP
@@ -436,7 +436,7 @@ int RegExpImpl::IrregexpExecRaw(Isolate* isolate, Handle<JSRegExp> regexp,
   DCHECK_LE(index, subject->length());
   DCHECK(subject->IsFlat());
 
-  bool is_one_byte = subject->IsOneByteRepresentationUnderneath();
+  bool is_one_byte = String::IsOneByteRepresentationUnderneath(*subject);
 
 #ifndef V8_INTERPRETED_REGEXP
   DCHECK(output_size >= (IrregexpNumberOfCaptures(*irregexp) + 1) * 2);
@@ -472,7 +472,7 @@ int RegExpImpl::IrregexpExecRaw(Isolate* isolate, Handle<JSRegExp> regexp,
     // being internal and external, and even between being Latin1 and UC16,
     // but the characters are always the same).
     IrregexpPrepare(isolate, regexp, subject);
-    is_one_byte = subject->IsOneByteRepresentationUnderneath();
+    is_one_byte = String::IsOneByteRepresentationUnderneath(*subject);
   } while (true);
   UNREACHABLE();
 #else  // V8_INTERPRETED_REGEXP
@@ -6699,6 +6699,8 @@ RegExpEngine::CompilationResult RegExpEngine::Compile(
 
   // Create the correct assembler for the architecture.
 #ifndef V8_INTERPRETED_REGEXP
+  DCHECK(!FLAG_jitless);
+
   // Native regexp implementation.
 
   NativeRegExpMacroAssembler::Mode mode =
@@ -6775,10 +6777,10 @@ bool RegExpEngine::TooMuchRegExpCode(Isolate* isolate, Handle<String> pattern) {
   return too_much;
 }
 
-Object* RegExpResultsCache::Lookup(Heap* heap, String key_string,
-                                   Object* key_pattern,
-                                   FixedArray* last_match_cache,
-                                   ResultsCacheType type) {
+Object RegExpResultsCache::Lookup(Heap* heap, String key_string,
+                                  Object key_pattern,
+                                  FixedArray* last_match_cache,
+                                  ResultsCacheType type) {
   FixedArray cache;
   if (!key_string->IsInternalizedString()) return Smi::kZero;
   if (type == STRING_SPLIT_SUBSTRINGS) {

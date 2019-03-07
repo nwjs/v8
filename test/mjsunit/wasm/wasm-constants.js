@@ -64,7 +64,8 @@ let kStartSectionCode = 8;       // Start function declaration
 let kElementSectionCode = 9;     // Elements section
 let kCodeSectionCode = 10;       // Function code
 let kDataSectionCode = 11;       // Data segments
-let kExceptionSectionCode = 13;  // Exception section (must appear before code section)
+let kExceptionSectionCode = 12;  // Exception section (between Global & Export)
+let kDataCountSectionCode = 13;  // Data segments
 
 // Name section types
 let kModuleNameCode = 0;
@@ -95,6 +96,7 @@ let kWasmF32 = 0x7d;
 let kWasmF64 = 0x7c;
 let kWasmS128  = 0x7b;
 let kWasmAnyRef = 0x6f;
+let kWasmAnyFunc = 0x70;
 let kWasmExceptRef = 0x68;
 
 let kExternalFunction = 0;
@@ -105,6 +107,7 @@ let kExternalException = 4;
 
 let kTableZero = 0;
 let kMemoryZero = 0;
+let kSegmentZero = 0;
 
 let kExceptionAttribute = 0;
 
@@ -143,8 +146,11 @@ let kSig_f_f = makeSig([kWasmF32], [kWasmF32]);
 let kSig_f_d = makeSig([kWasmF64], [kWasmF32]);
 let kSig_d_d = makeSig([kWasmF64], [kWasmF64]);
 let kSig_r_r = makeSig([kWasmAnyRef], [kWasmAnyRef]);
+let kSig_a_a = makeSig([kWasmAnyFunc], [kWasmAnyFunc]);
 let kSig_i_r = makeSig([kWasmAnyRef], [kWasmI32]);
 let kSig_v_r = makeSig([kWasmAnyRef], []);
+let kSig_v_a = makeSig([kWasmAnyFunc], []);
+let kSig_v_rr = makeSig([kWasmAnyRef, kWasmAnyRef], []);
 let kSig_r_v = makeSig([], [kWasmAnyRef]);
 
 function makeSig(params, results) {
@@ -182,7 +188,7 @@ let kExprTry = 0x06;
 let kExprCatch = 0x07;
 let kExprThrow = 0x08;
 let kExprRethrow = 0x09;
-let kExprCatchAll = 0x0a;
+let kExprBrOnExn = 0x0a;
 let kExprEnd = 0x0b;
 let kExprBr = 0x0c;
 let kExprBrIf = 0x0d;
@@ -358,10 +364,23 @@ let kExprI64SExtendI16 = 0xc3;
 let kExprI64SExtendI32 = 0xc4;
 
 // Prefix opcodes
+let kNumericPrefix = 0xfc;
+let kSimdPrefix = 0xfd;
 let kAtomicPrefix = 0xfe;
 
+// Numeric opcodes.
+let kExprMemoryInit = 0x08;
+let kExprMemoryDrop = 0x09;
+let kExprMemoryCopy = 0x0a;
+let kExprMemoryFill = 0x0b;
+let kExprTableInit = 0x0c;
+let kExprTableDrop = 0x0d;
+let kExprTableCopy = 0x0e;
+
+// Atomic opcodes.
 let kExprAtomicWake = 0x00;
 let kExprI32AtomicWait = 0x01;
+let kExprI64AtomicWait = 0x02;
 let kExprI32AtomicLoad = 0x10;
 let kExprI32AtomicLoad8U = 0x12;
 let kExprI32AtomicLoad16U = 0x13;
@@ -427,6 +446,9 @@ let kExprI64AtomicCompareExchange8U = 0x4c;
 let kExprI64AtomicCompareExchange16U = 0x4d;
 let kExprI64AtomicCompareExchange32U = 0x4e;
 
+// Simd opcodes.
+let kExprF32x4Min = 0x9e;
+
 let kTrapUnreachable          = 0;
 let kTrapMemOutOfBounds       = 1;
 let kTrapDivByZero            = 2;
@@ -437,6 +459,8 @@ let kTrapFuncInvalid          = 6;
 let kTrapFuncSigMismatch      = 7;
 let kTrapTypeError            = 8;
 let kTrapUnalignedAccess      = 9;
+let kTrapDataSegmentDropped   = 10;
+let kTrapElemSegmentDropped   = 11;
 
 let kTrapMsgs = [
   "unreachable",
@@ -448,7 +472,9 @@ let kTrapMsgs = [
   "invalid index into function table",
   "function signature mismatch",
   "wasm function signature contains illegal type",
-  "operation does not support unaligned accesses"
+  "operation does not support unaligned accesses",
+  "data segment has been dropped",
+  "element segment has been dropped"
 ];
 
 function assertTraps(trap, code) {

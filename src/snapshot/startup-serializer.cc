@@ -9,6 +9,7 @@
 #include "src/contexts.h"
 #include "src/global-handles.h"
 #include "src/objects-inl.h"
+#include "src/objects/foreign-inl.h"
 #include "src/objects/slots.h"
 #include "src/snapshot/read-only-serializer.h"
 #include "src/v8threads.h"
@@ -36,7 +37,7 @@ namespace {
 // serialization. This ensures that we only serialize the canonical version of
 // each builtin.
 // See also CreateOffHeapTrampolines().
-HeapObject* MaybeCanonicalizeBuiltin(Isolate* isolate, HeapObject* obj) {
+HeapObject MaybeCanonicalizeBuiltin(Isolate* isolate, HeapObject obj) {
   if (!obj->IsCode()) return obj;
 
   const int builtin_index = Code::cast(obj)->builtin_index();
@@ -47,7 +48,7 @@ HeapObject* MaybeCanonicalizeBuiltin(Isolate* isolate, HeapObject* obj) {
 
 }  // namespace
 
-void StartupSerializer::SerializeObject(HeapObject* obj, HowToCode how_to_code,
+void StartupSerializer::SerializeObject(HeapObject obj, HowToCode how_to_code,
                                         WhereToPoint where_to_point, int skip) {
   DCHECK(!obj->IsJSFunction());
 
@@ -72,12 +73,12 @@ void StartupSerializer::SerializeObject(HeapObject* obj, HowToCode how_to_code,
 
   if (use_simulator && obj->IsAccessorInfo()) {
     // Wipe external reference redirects in the accessor info.
-    AccessorInfo* info = AccessorInfo::cast(obj);
+    AccessorInfo info = AccessorInfo::cast(obj);
     Address original_address = Foreign::cast(info->getter())->foreign_address();
     Foreign::cast(info->js_getter())->set_foreign_address(original_address);
     accessor_infos_.push_back(info);
   } else if (use_simulator && obj->IsCallHandlerInfo()) {
-    CallHandlerInfo* info = CallHandlerInfo::cast(obj);
+    CallHandlerInfo info = CallHandlerInfo::cast(obj);
     Address original_address =
         Foreign::cast(info->callback())->foreign_address();
     Foreign::cast(info->js_callback())->set_foreign_address(original_address);
@@ -87,7 +88,7 @@ void StartupSerializer::SerializeObject(HeapObject* obj, HowToCode how_to_code,
         ReadOnlyRoots(isolate()).uninitialized_symbol());
   } else if (obj->IsSharedFunctionInfo()) {
     // Clear inferred name for native functions.
-    SharedFunctionInfo* shared = SharedFunctionInfo::cast(obj);
+    SharedFunctionInfo shared = SharedFunctionInfo::cast(obj);
     if (!shared->IsSubjectToDebugging() && shared->HasUncompiledData()) {
       shared->uncompiled_data()->set_inferred_name(
           ReadOnlyRoots(isolate()).empty_string());
@@ -107,9 +108,9 @@ void StartupSerializer::SerializeWeakReferencesAndDeferred() {
   // This comes right after serialization of the partial snapshot, where we
   // add entries to the partial snapshot cache of the startup snapshot. Add
   // one entry with 'undefined' to terminate the partial snapshot cache.
-  Object* undefined = ReadOnlyRoots(isolate()).undefined_value();
+  Object undefined = ReadOnlyRoots(isolate()).undefined_value();
   VisitRootPointer(Root::kPartialSnapshotCache, nullptr,
-                   ObjectSlot(&undefined));
+                   FullObjectSlot(&undefined));
   isolate()->heap()->IterateWeakRoots(this, VISIT_FOR_SERIALIZATION);
   SerializeDeferredObjects();
   Pad();
@@ -142,14 +143,14 @@ SerializedHandleChecker::SerializedHandleChecker(Isolate* isolate,
 }
 
 bool StartupSerializer::SerializeUsingReadOnlyObjectCache(
-    SnapshotByteSink* sink, HeapObject* obj, HowToCode how_to_code,
+    SnapshotByteSink* sink, HeapObject obj, HowToCode how_to_code,
     WhereToPoint where_to_point, int skip) {
   return read_only_serializer_->SerializeUsingReadOnlyObjectCache(
       sink, obj, how_to_code, where_to_point, skip);
 }
 
 void StartupSerializer::SerializeUsingPartialSnapshotCache(
-    SnapshotByteSink* sink, HeapObject* obj, HowToCode how_to_code,
+    SnapshotByteSink* sink, HeapObject obj, HowToCode how_to_code,
     WhereToPoint where_to_point, int skip) {
   FlushSkip(sink, skip);
 
@@ -166,9 +167,9 @@ void SerializedHandleChecker::AddToSet(FixedArray serialized) {
 
 void SerializedHandleChecker::VisitRootPointers(Root root,
                                                 const char* description,
-                                                ObjectSlot start,
-                                                ObjectSlot end) {
-  for (ObjectSlot p = start; p < end; ++p) {
+                                                FullObjectSlot start,
+                                                FullObjectSlot end) {
+  for (FullObjectSlot p = start; p < end; ++p) {
     if (serialized_.find(*p) != serialized_.end()) continue;
     PrintF("%s handle not serialized: ",
            root == Root::kGlobalHandles ? "global" : "eternal");

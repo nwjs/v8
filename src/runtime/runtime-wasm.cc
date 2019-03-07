@@ -26,7 +26,7 @@ namespace internal {
 
 namespace {
 
-WasmInstanceObject* GetWasmInstanceOnStackTop(Isolate* isolate) {
+WasmInstanceObject GetWasmInstanceOnStackTop(Isolate* isolate) {
   StackFrameIterator it(isolate, isolate->thread_local_top());
   // On top: C entry stub.
   DCHECK_EQ(StackFrame::EXIT, it.frame()->type());
@@ -55,6 +55,20 @@ class ClearThreadInWasmScope {
 };
 
 }  // namespace
+
+RUNTIME_FUNCTION(Runtime_WasmIsValidAnyFuncValue) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(1, args.length());
+  CONVERT_ARG_HANDLE_CHECKED(Object, function, 0);
+
+  if (function->IsNull(isolate)) {
+    return Smi::FromInt(true);
+  }
+  if (WasmExportedFunction::IsWasmExportedFunction(*function)) {
+    return Smi::FromInt(true);
+  }
+  return Smi::FromInt(false);
+}
 
 RUNTIME_FUNCTION(Runtime_WasmMemoryGrow) {
   HandleScope scope(isolate);
@@ -112,16 +126,14 @@ RUNTIME_FUNCTION(Runtime_WasmThrowCreate) {
   Handle<Object> tag(tag_raw, isolate);
   Handle<Object> exception = isolate->factory()->NewWasmRuntimeError(
       MessageTemplate::kWasmExceptionError);
-  CHECK(
-      !JSReceiver::SetProperty(isolate, exception,
-                               isolate->factory()->wasm_exception_tag_symbol(),
-                               tag, LanguageMode::kStrict)
-           .is_null());
+  CHECK(!Object::SetProperty(isolate, exception,
+                             isolate->factory()->wasm_exception_tag_symbol(),
+                             tag, LanguageMode::kStrict)
+             .is_null());
   Handle<FixedArray> values = isolate->factory()->NewFixedArray(size);
-  CHECK(!JSReceiver::SetProperty(
-             isolate, exception,
-             isolate->factory()->wasm_exception_values_symbol(), values,
-             LanguageMode::kStrict)
+  CHECK(!Object::SetProperty(isolate, exception,
+                             isolate->factory()->wasm_exception_values_symbol(),
+                             values, LanguageMode::kStrict)
              .is_null());
   return *exception;
 }
@@ -181,7 +193,7 @@ RUNTIME_FUNCTION(Runtime_WasmRunInterpreter) {
   // cast it back to the raw pointer.
   CHECK(!arg_buffer_obj->IsHeapObject());
   CHECK(arg_buffer_obj->IsSmi());
-  Address arg_buffer = reinterpret_cast<Address>(*arg_buffer_obj);
+  Address arg_buffer = arg_buffer_obj->ptr();
 
   ClearThreadInWasmScope wasm_flag;
 
@@ -254,7 +266,7 @@ RUNTIME_FUNCTION(Runtime_WasmCompileLazy) {
 
   Address entrypoint = wasm::CompileLazy(
       isolate, instance->module_object()->native_module(), func_index);
-  return reinterpret_cast<Object*>(entrypoint);
+  return Object(entrypoint);
 }
 
 // Should be called from within a handle scope
@@ -283,21 +295,92 @@ RUNTIME_FUNCTION(Runtime_WasmAtomicWake) {
   return FutexEmulation::Wake(array_buffer, address, count);
 }
 
+double WaitTimeoutInMs(double timeout_ns) {
+  return timeout_ns < 0
+             ? V8_INFINITY
+             : timeout_ns / (base::Time::kNanosecondsPerMicrosecond *
+                             base::Time::kMicrosecondsPerMillisecond);
+}
+
 RUNTIME_FUNCTION(Runtime_WasmI32AtomicWait) {
   HandleScope scope(isolate);
   DCHECK_EQ(4, args.length());
   CONVERT_ARG_HANDLE_CHECKED(WasmInstanceObject, instance, 0);
   CONVERT_NUMBER_CHECKED(uint32_t, address, Uint32, args[1]);
   CONVERT_NUMBER_CHECKED(int32_t, expected_value, Int32, args[2]);
-  CONVERT_DOUBLE_ARG_CHECKED(timeout, 3);
-  timeout = timeout < 0 ? V8_INFINITY
-                        : timeout / (base::Time::kNanosecondsPerMicrosecond *
-                                     base::Time::kMicrosecondsPerMillisecond);
+  CONVERT_DOUBLE_ARG_CHECKED(timeout_ns, 3);
+  double timeout_ms = WaitTimeoutInMs(timeout_ns);
   Handle<JSArrayBuffer> array_buffer =
       getSharedArrayBuffer(instance, isolate, address);
-  return FutexEmulation::Wait(isolate, array_buffer, address, expected_value,
-                              timeout);
+  return FutexEmulation::Wait32(isolate, array_buffer, address, expected_value,
+                                timeout_ms);
 }
 
+RUNTIME_FUNCTION(Runtime_WasmI64AtomicWait) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(5, args.length());
+  CONVERT_ARG_HANDLE_CHECKED(WasmInstanceObject, instance, 0);
+  CONVERT_NUMBER_CHECKED(uint32_t, address, Uint32, args[1]);
+  CONVERT_NUMBER_CHECKED(uint32_t, expected_value_high, Uint32, args[2]);
+  CONVERT_NUMBER_CHECKED(uint32_t, expected_value_low, Uint32, args[3]);
+  CONVERT_DOUBLE_ARG_CHECKED(timeout_ns, 4);
+  int64_t expected_value = (static_cast<uint64_t>(expected_value_high) << 32) |
+                           static_cast<uint64_t>(expected_value_low);
+  double timeout_ms = WaitTimeoutInMs(timeout_ns);
+  Handle<JSArrayBuffer> array_buffer =
+      getSharedArrayBuffer(instance, isolate, address);
+  return FutexEmulation::Wait64(isolate, array_buffer, address, expected_value,
+                                timeout_ms);
+}
+
+RUNTIME_FUNCTION(Runtime_WasmTableInit) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(5, args.length());
+  auto instance =
+      Handle<WasmInstanceObject>(GetWasmInstanceOnStackTop(isolate), isolate);
+  CONVERT_UINT32_ARG_CHECKED(table_index, 0);
+  CONVERT_UINT32_ARG_CHECKED(elem_segment_index, 1);
+  CONVERT_UINT32_ARG_CHECKED(dst, 2);
+  CONVERT_UINT32_ARG_CHECKED(src, 3);
+  CONVERT_UINT32_ARG_CHECKED(size, 4);
+
+  PrintF(
+      "TableInit(table_index=%u, elem_segment_index=%u, dst=%u, src=%u, "
+      "size=%u)\n",
+      table_index, elem_segment_index, dst, src, size);
+
+  USE(instance);
+  USE(table_index);
+  USE(elem_segment_index);
+  USE(dst);
+  USE(src);
+  USE(size);
+
+  UNREACHABLE();
+}
+
+RUNTIME_FUNCTION(Runtime_WasmTableCopy) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(4, args.length());
+  auto instance =
+      Handle<WasmInstanceObject>(GetWasmInstanceOnStackTop(isolate), isolate);
+  CONVERT_UINT32_ARG_CHECKED(table_index, 0);
+  CONVERT_UINT32_ARG_CHECKED(dst, 1);
+  CONVERT_UINT32_ARG_CHECKED(src, 2);
+  CONVERT_UINT32_ARG_CHECKED(count, 3);
+
+  bool oob = !WasmInstanceObject::CopyTableEntries(
+      isolate, instance, table_index, dst, src, count);
+  if (oob) {
+    // Handle out-of-bounds access here in the runtime call, rather
+    // than having the lower-level layers deal with JS exceptions.
+    DCHECK(isolate->context().is_null());
+    isolate->set_context(instance->native_context());
+    Handle<Object> error_obj = isolate->factory()->NewWasmRuntimeError(
+        MessageTemplate::kWasmTrapTableOutOfBounds);
+    return isolate->Throw(*error_obj);
+  }
+  return ReadOnlyRoots(isolate).undefined_value();
+}
 }  // namespace internal
 }  // namespace v8

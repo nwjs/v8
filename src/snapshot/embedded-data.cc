@@ -6,7 +6,6 @@
 
 #include "src/assembler-inl.h"
 #include "src/callable.h"
-#include "src/macro-assembler.h"
 #include "src/objects-inl.h"
 #include "src/snapshot/snapshot.h"
 
@@ -17,7 +16,7 @@ namespace internal {
 bool InstructionStream::PcIsOffHeap(Isolate* isolate, Address pc) {
   if (FLAG_embedded_builtins) {
     const Address start = reinterpret_cast<Address>(isolate->embedded_blob());
-    return IsInRange(pc, start, start + isolate->embedded_blob_size());
+    return start <= pc && pc < start + isolate->embedded_blob_size();
   } else {
     return false;
   }
@@ -138,7 +137,7 @@ void FinalizeEmbeddedCodeTargets(Isolate* isolate, EmbeddedData* blob) {
 
 #if defined(V8_TARGET_ARCH_X64) || defined(V8_TARGET_ARCH_ARM64) || \
     defined(V8_TARGET_ARCH_ARM) || defined(V8_TARGET_ARCH_MIPS) ||  \
-    defined(V8_TARGET_ARCH_IA32)
+    defined(V8_TARGET_ARCH_IA32) || defined(V8_TARGET_ARCH_S390)
     // On these platforms we emit relative builtin-to-builtin
     // jumps for isolate independent builtins in the snapshot. This fixes up the
     // relative jumps to the right offsets in the snapshot.

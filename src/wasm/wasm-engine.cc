@@ -7,10 +7,13 @@
 #include "src/code-tracer.h"
 #include "src/compilation-statistics.h"
 #include "src/objects-inl.h"
+#include "src/objects/heap-number.h"
 #include "src/objects/js-promise.h"
+#include "src/ostreams.h"
 #include "src/wasm/function-compiler.h"
 #include "src/wasm/module-compiler.h"
 #include "src/wasm/module-decoder.h"
+#include "src/wasm/module-instantiate.h"
 #include "src/wasm/streaming-decoder.h"
 #include "src/wasm/wasm-objects-inl.h"
 
@@ -19,7 +22,7 @@ namespace internal {
 namespace wasm {
 
 WasmEngine::WasmEngine()
-    : code_manager_(&memory_tracker_, kMaxWasmCodeMemory) {}
+    : code_manager_(&memory_tracker_, FLAG_wasm_max_code_space * MB) {}
 
 WasmEngine::~WasmEngine() {
   // All AsyncCompileJobs have been canceled.
@@ -91,7 +94,7 @@ MaybeHandle<WasmModuleObject> WasmEngine::SyncCompile(
       DecodeWasmModule(enabled, bytes.start(), bytes.end(), false, kWasmOrigin,
                        isolate->counters(), allocator());
   if (result.failed()) {
-    thrower->CompileFailed("Wasm decoding failed", result);
+    thrower->CompileFailed("Wasm decoding failed", result.error());
     return {};
   }
 
@@ -226,30 +229,30 @@ std::shared_ptr<StreamingDecoder> WasmEngine::StartStreamingCompilation(
   return job->CreateStreamingDecoder();
 }
 
-bool WasmEngine::CompileFunction(Isolate* isolate, NativeModule* native_module,
+void WasmEngine::CompileFunction(Isolate* isolate, NativeModule* native_module,
                                  uint32_t function_index, ExecutionTier tier) {
   // Note we assume that "one-off" compilations can discard detected features.
   WasmFeatures detected = kNoWasmFeatures;
-  return WasmCompilationUnit::CompileWasmFunction(
+  WasmCompilationUnit::CompileWasmFunction(
       isolate, native_module, &detected,
       &native_module->module()->functions[function_index], tier);
 }
 
 std::shared_ptr<NativeModule> WasmEngine::ExportNativeModule(
     Handle<WasmModuleObject> module_object) {
-  return module_object->managed_native_module()->get();
+  return module_object->shared_native_module();
 }
 
 Handle<WasmModuleObject> WasmEngine::ImportNativeModule(
     Isolate* isolate, std::shared_ptr<NativeModule> shared_module) {
-  Vector<const byte> wire_bytes = shared_module->wire_bytes();
+  ModuleWireBytes wire_bytes(shared_module->wire_bytes());
   const WasmModule* module = shared_module->module();
   Handle<Script> script =
       CreateWasmScript(isolate, wire_bytes, module->source_map_url);
   size_t code_size = shared_module->committed_code_space();
   Handle<WasmModuleObject> module_object = WasmModuleObject::New(
       isolate, std::move(shared_module), script, code_size);
-  CompileJsToWasmWrappers(isolate, module_object->native_module(),
+  CompileJsToWasmWrappers(isolate, module_object->native_module()->module(),
                           handle(module_object->export_wrappers(), isolate));
   return module_object;
 }
@@ -335,38 +338,27 @@ void WasmEngine::RemoveIsolate(Isolate* isolate) {
 
 namespace {
 
-struct WasmEnginePointerConstructTrait final {
-  static void Construct(void* raw_ptr) {
-    auto engine_ptr = reinterpret_cast<std::shared_ptr<WasmEngine>*>(raw_ptr);
-    *engine_ptr = std::shared_ptr<WasmEngine>();
-  }
-};
-
-// Holds the global shared pointer to the single {WasmEngine} that is intended
-// to be shared among Isolates within the same process. The {LazyStaticInstance}
-// here is required because {std::shared_ptr} has a non-trivial initializer.
-base::LazyStaticInstance<std::shared_ptr<WasmEngine>,
-                         WasmEnginePointerConstructTrait>::type
-    global_wasm_engine;
+DEFINE_LAZY_LEAKY_OBJECT_GETTER(std::shared_ptr<WasmEngine>,
+                                GetSharedWasmEngine);
 
 }  // namespace
 
 // static
 void WasmEngine::InitializeOncePerProcess() {
   if (!FLAG_wasm_shared_engine) return;
-  global_wasm_engine.Pointer()->reset(new WasmEngine());
+  *GetSharedWasmEngine() = std::make_shared<WasmEngine>();
 }
 
 // static
 void WasmEngine::GlobalTearDown() {
   if (!FLAG_wasm_shared_engine) return;
-  global_wasm_engine.Pointer()->reset();
+  GetSharedWasmEngine()->reset();
 }
 
 // static
 std::shared_ptr<WasmEngine> WasmEngine::GetWasmEngine() {
-  if (FLAG_wasm_shared_engine) return global_wasm_engine.Get();
-  return std::shared_ptr<WasmEngine>(new WasmEngine());
+  if (FLAG_wasm_shared_engine) return *GetSharedWasmEngine();
+  return std::make_shared<WasmEngine>();
 }
 
 // {max_mem_pages} is declared in wasm-limits.h.

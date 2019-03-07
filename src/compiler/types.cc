@@ -318,9 +318,9 @@ Type::bitset BitsetType::Lub(const MapRefLike& map) {
     case MODULE_TYPE:
     case MODULE_INFO_ENTRY_TYPE:
     case CELL_TYPE:
-    case PRE_PARSED_SCOPE_DATA_TYPE:
-    case UNCOMPILED_DATA_WITHOUT_PRE_PARSED_SCOPE_TYPE:
-    case UNCOMPILED_DATA_WITH_PRE_PARSED_SCOPE_TYPE:
+    case PREPARSE_DATA_TYPE:
+    case UNCOMPILED_DATA_WITHOUT_PREPARSE_DATA_TYPE:
+    case UNCOMPILED_DATA_WITH_PREPARSE_DATA_TYPE:
       return kOtherInternal;
 
     // Remaining instance types are unsupported for now. If any of them do
@@ -352,6 +352,7 @@ Type::bitset BitsetType::Lub(const MapRefLike& map) {
     case TUPLE2_TYPE:
     case TUPLE3_TYPE:
     case WASM_DEBUG_INFO_TYPE:
+    case WASM_EXCEPTION_TAG_TYPE:
     case WASM_EXPORTED_FUNCTION_DATA_TYPE:
     case LOAD_HANDLER_TYPE:
     case STORE_HANDLER_TYPE:

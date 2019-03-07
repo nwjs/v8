@@ -7,7 +7,7 @@
 #include "src/handles.h"
 #include "src/isolate.h"
 #include "src/objects-inl.h"
-#include "src/objects.h"
+#include "src/objects/heap-number-inl.h"
 #include "src/property-descriptor.h"
 #include "src/wasm/module-decoder.h"
 #include "src/wasm/wasm-engine.h"
@@ -51,7 +51,7 @@ std::shared_ptr<WasmModule> DecodeWasmModuleForTesting(
   if (decoding_result.failed()) {
     // Module verification failed. throw.
     thrower->CompileError("DecodeWasmModule failed: %s",
-                          decoding_result.error_msg().c_str());
+                          decoding_result.error().message().c_str());
   }
 
   return std::move(decoding_result).value();

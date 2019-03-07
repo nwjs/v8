@@ -18,13 +18,13 @@ struct AssemblerOptions;
 class OptimizedCompilationInfo;
 class OptimizedCompilationJob;
 class RegisterConfiguration;
-class JumpOptimizationInfo;
 
 namespace wasm {
 struct FunctionBody;
 class NativeModule;
 class WasmCode;
 class WasmEngine;
+struct WasmModule;
 }  // namespace wasm
 
 namespace compiler {
@@ -45,11 +45,11 @@ class Pipeline : public AllStatic {
                                                     bool has_script);
 
   // Run the pipeline for the WebAssembly compilation info.
-  static wasm::WasmCode* GenerateCodeForWasmFunction(
+  static void GenerateCodeForWasmFunction(
       OptimizedCompilationInfo* info, wasm::WasmEngine* wasm_engine,
       MachineGraph* mcgraph, CallDescriptor* call_descriptor,
       SourcePositionTable* source_positions, NodeOriginTable* node_origins,
-      wasm::FunctionBody function_body, wasm::NativeModule* native_module,
+      wasm::FunctionBody function_body, const wasm::WasmModule* module,
       int function_index);
 
   // Run the pipeline on a machine graph and generate code.
@@ -67,12 +67,11 @@ class Pipeline : public AllStatic {
       const AssemblerOptions& assembler_options,
       SourcePositionTable* source_positions = nullptr);
 
-  // Run the pipeline on a machine graph and generate code. The {schedule} must
-  // be valid, hence the given {graph} does not need to be schedulable.
+  // Run the pipeline on a machine graph and generate code.
   static MaybeHandle<Code> GenerateCodeForCodeStub(
       Isolate* isolate, CallDescriptor* call_descriptor, Graph* graph,
-      Schedule* schedule, Code::Kind kind, const char* debug_name,
-      uint32_t stub_key, int32_t builtin_index, JumpOptimizationInfo* jump_opt,
+      SourcePositionTable* source_positions, Code::Kind kind,
+      const char* debug_name, int32_t builtin_index,
       PoisoningMitigationLevel poisoning_level,
       const AssemblerOptions& options);
 

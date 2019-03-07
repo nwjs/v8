@@ -12,7 +12,6 @@
 #include "src/base/hashmap.h"
 #include "src/builtins/builtins-constructor.h"
 #include "src/builtins/builtins.h"
-#include "src/code-stubs.h"
 #include "src/contexts.h"
 #include "src/conversions-inl.h"
 #include "src/double.h"
@@ -65,15 +64,6 @@ void AstNode::Print(Isolate* isolate) {
 
 IterationStatement* AstNode::AsIterationStatement() {
   switch (node_type()) {
-    ITERATION_NODE_LIST(RETURN_NODE);
-    default:
-      return nullptr;
-  }
-}
-
-BreakableStatement* AstNode::AsBreakableStatement() {
-  switch (node_type()) {
-    BREAKABLE_NODE_LIST(RETURN_NODE);
     ITERATION_NODE_LIST(RETURN_NODE);
     default:
       return nullptr;
@@ -159,26 +149,6 @@ bool Expression::IsConciseMethodDefinition() const {
 
 bool Expression::IsAccessorFunctionDefinition() const {
   return IsFunctionLiteral() && IsAccessorFunction(AsFunctionLiteral()->kind());
-}
-
-bool Statement::IsJump() const {
-  switch (node_type()) {
-#define JUMP_NODE_LIST(V) \
-  V(Block)                \
-  V(ExpressionStatement)  \
-  V(ContinueStatement)    \
-  V(BreakStatement)       \
-  V(ReturnStatement)      \
-  V(IfStatement)
-#define GENERATE_CASE(Node) \
-  case k##Node:             \
-    return static_cast<const Node*>(this)->IsJump();
-    JUMP_NODE_LIST(GENERATE_CASE)
-#undef GENERATE_CASE
-#undef JUMP_NODE_LIST
-    default:
-      return false;
-  }
 }
 
 VariableProxy::VariableProxy(Variable* var, int start_position)

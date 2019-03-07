@@ -5,7 +5,6 @@
 #include "src/builtins/builtins-utils-inl.h"
 #include "src/builtins/builtins.h"
 #include "src/code-factory.h"
-#include "src/code-stub-assembler.h"
 #include "src/conversions.h"
 #include "src/counters.h"
 #include "src/date.h"
@@ -115,7 +114,7 @@ double ParseDateTimeString(Isolate* isolate, Handle<String> str) {
   Handle<FixedArray> tmp =
       isolate->factory()->NewFixedArray(DateParser::OUTPUT_SIZE);
   DisallowHeapAllocation no_gc;
-  String::FlatContent str_content = str->GetFlatContent();
+  String::FlatContent str_content = str->GetFlatContent(no_gc);
   bool result;
   if (str_content.IsOneByte()) {
     result = DateParser::Parse(isolate, str_content.ToOneByteVector(), *tmp);
@@ -181,8 +180,8 @@ void ToDateString(double time_val, Vector<char> str, DateCache* date_cache,
   UNREACHABLE();
 }
 
-Object* SetLocalDateValue(Isolate* isolate, Handle<JSDate> date,
-                          double time_val) {
+Object SetLocalDateValue(Isolate* isolate, Handle<JSDate> date,
+                         double time_val) {
   if (time_val >= -DateCache::kMaxTimeBeforeUTCInMs &&
       time_val <= DateCache::kMaxTimeBeforeUTCInMs) {
     time_val = isolate->date_cache()->ToUTC(static_cast<int64_t>(time_val));
@@ -940,8 +939,11 @@ BUILTIN(DatePrototypeSetYear) {
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, year,
                                      Object::ToNumber(isolate, year));
   double m = 0.0, dt = 1.0, y = year->Number();
-  if (0.0 <= y && y <= 99.0) {
-    y = 1900.0 + DoubleToInteger(y);
+  if (!std::isnan(y)) {
+    double y_int = DoubleToInteger(y);
+    if (0.0 <= y_int && y_int <= 99.0) {
+      y = 1900.0 + y_int;
+    }
   }
   int time_within_day = 0;
   if (!std::isnan(date->value()->Number())) {

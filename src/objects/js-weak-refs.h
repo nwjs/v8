@@ -15,6 +15,7 @@ namespace v8 {
 namespace internal {
 
 class JSWeakCell;
+class NativeContext;
 
 // WeakFactory object from the JS Weak Refs spec proposal:
 // https://github.com/tc39/proposal-weakrefs
@@ -24,7 +25,7 @@ class JSWeakFactory : public JSObject {
   DECL_VERIFIER(JSWeakFactory)
   DECL_CAST(JSWeakFactory)
 
-  DECL_ACCESSORS2(native_context, Context)
+  DECL_ACCESSORS(native_context, NativeContext)
   DECL_ACCESSORS(cleanup, Object)
   DECL_ACCESSORS(active_cells, Object)
   DECL_ACCESSORS(cleared_cells, Object)
@@ -35,7 +36,7 @@ class JSWeakFactory : public JSObject {
   DECL_INT_ACCESSORS(flags)
 
   // Adds a newly constructed JSWeakCell object into this JSWeakFactory.
-  inline void AddWeakCell(JSWeakCell* weak_cell);
+  inline void AddWeakCell(JSWeakCell weak_cell);
 
   // Returns true if the cleared_cells list is non-empty.
   inline bool NeedsCleanup() const;
@@ -45,25 +46,30 @@ class JSWeakFactory : public JSObject {
 
   // Get and remove the first cleared JSWeakCell from the cleared_cells
   // list. (Assumes there is one.)
-  inline JSWeakCell* PopClearedCell(Isolate* isolate);
+  inline JSWeakCell PopClearedCell(Isolate* isolate);
 
   // Constructs an iterator for the WeakCells in the cleared_cells list and
   // calls the user's cleanup function.
   static void Cleanup(Handle<JSWeakFactory> weak_factory, Isolate* isolate);
 
-  static const int kNativeContextOffset = JSObject::kHeaderSize;
-  static const int kCleanupOffset = kNativeContextOffset + kPointerSize;
-  static const int kActiveCellsOffset = kCleanupOffset + kPointerSize;
-  static const int kClearedCellsOffset = kActiveCellsOffset + kPointerSize;
-  static const int kNextOffset = kClearedCellsOffset + kPointerSize;
-  static const int kFlagsOffset = kNextOffset + kPointerSize;
-  static const int kSize = kFlagsOffset + kPointerSize;
+// Layout description.
+#define JS_WEAK_FACTORY_FIELDS(V)      \
+  V(kNativeContextOffset, kTaggedSize) \
+  V(kCleanupOffset, kTaggedSize)       \
+  V(kActiveCellsOffset, kTaggedSize)   \
+  V(kClearedCellsOffset, kTaggedSize)  \
+  V(kNextOffset, kTaggedSize)          \
+  V(kFlagsOffset, kTaggedSize)         \
+  /* Header size. */                   \
+  V(kSize, 0)
+
+  DEFINE_FIELD_OFFSET_CONSTANTS(JSObject::kHeaderSize, JS_WEAK_FACTORY_FIELDS)
+#undef JS_WEAK_FACTORY_FIELDS
 
   // Bitfields in flags.
   class ScheduledForCleanupField : public BitField<bool, 0, 1> {};
 
- private:
-  DISALLOW_IMPLICIT_CONSTRUCTORS(JSWeakFactory);
+  OBJECT_CONSTRUCTORS(JSWeakFactory, JSObject);
 };
 
 // WeakCell object from the JS Weak Refs spec proposal.
@@ -81,12 +87,18 @@ class JSWeakCell : public JSObject {
   DECL_ACCESSORS(prev, Object)
   DECL_ACCESSORS(next, Object)
 
-  static const int kFactoryOffset = JSObject::kHeaderSize;
-  static const int kTargetOffset = kFactoryOffset + kPointerSize;
-  static const int kHoldingsOffset = kTargetOffset + kPointerSize;
-  static const int kPrevOffset = kHoldingsOffset + kPointerSize;
-  static const int kNextOffset = kPrevOffset + kPointerSize;
-  static const int kSize = kNextOffset + kPointerSize;
+// Layout description.
+#define JS_WEAK_CELL_FIELDS(V)    \
+  V(kFactoryOffset, kTaggedSize)  \
+  V(kTargetOffset, kTaggedSize)   \
+  V(kHoldingsOffset, kTaggedSize) \
+  V(kPrevOffset, kTaggedSize)     \
+  V(kNextOffset, kTaggedSize)     \
+  /* Header size. */              \
+  V(kSize, 0)
+
+  DEFINE_FIELD_OFFSET_CONSTANTS(JSObject::kHeaderSize, JS_WEAK_CELL_FIELDS)
+#undef JS_WEAK_CELL_FIELDS
 
   class BodyDescriptor;
 
@@ -96,20 +108,28 @@ class JSWeakCell : public JSObject {
   // since it's disabled before GC.
   inline void Nullify(
       Isolate* isolate,
-      std::function<void(HeapObject* object, ObjectSlot slot, Object* target)>
+      std::function<void(HeapObject object, ObjectSlot slot, Object target)>
           gc_notify_updated_slot);
 
   inline void Clear(Isolate* isolate);
 
- private:
-  DISALLOW_IMPLICIT_CONSTRUCTORS(JSWeakCell);
+  OBJECT_CONSTRUCTORS(JSWeakCell, JSObject);
 };
 
-class JSWeakRef : public JSWeakCell {
+class JSWeakRef : public JSObject {
  public:
+  DECL_PRINTER(JSWeakRef)
+  DECL_VERIFIER(JSWeakRef)
   DECL_CAST(JSWeakRef)
- private:
-  DISALLOW_IMPLICIT_CONSTRUCTORS(JSWeakRef);
+
+  DECL_ACCESSORS(target, Object)
+
+  static const int kTargetOffset = JSObject::kHeaderSize;
+  static const int kSize = kTargetOffset + kPointerSize;
+
+  class BodyDescriptor;
+
+  OBJECT_CONSTRUCTORS(JSWeakRef, JSObject);
 };
 
 class WeakFactoryCleanupJobTask : public Microtask {
@@ -120,11 +140,17 @@ class WeakFactoryCleanupJobTask : public Microtask {
   DECL_VERIFIER(WeakFactoryCleanupJobTask)
   DECL_PRINTER(WeakFactoryCleanupJobTask)
 
-  static const int kFactoryOffset = Microtask::kHeaderSize;
-  static const int kSize = kFactoryOffset + kPointerSize;
+// Layout description.
+#define WEAK_FACTORY_CLEANUP_JOB_TASK_FIELDS(V) \
+  V(kFactoryOffset, kTaggedSize)                \
+  /* Total size. */                             \
+  V(kSize, 0)
 
- private:
-  DISALLOW_IMPLICIT_CONSTRUCTORS(WeakFactoryCleanupJobTask);
+  DEFINE_FIELD_OFFSET_CONSTANTS(Microtask::kHeaderSize,
+                                WEAK_FACTORY_CLEANUP_JOB_TASK_FIELDS)
+#undef WEAK_FACTORY_CLEANUP_JOB_TASK_FIELDS
+
+  OBJECT_CONSTRUCTORS(WeakFactoryCleanupJobTask, Microtask)
 };
 
 class JSWeakFactoryCleanupIterator : public JSObject {
@@ -135,11 +161,17 @@ class JSWeakFactoryCleanupIterator : public JSObject {
 
   DECL_ACCESSORS(factory, JSWeakFactory)
 
-  static const int kFactoryOffset = JSObject::kHeaderSize;
-  static const int kSize = kFactoryOffset + kPointerSize;
+// Layout description.
+#define JS_WEAK_FACTORY_CLEANUP_ITERATOR_FIELDS(V) \
+  V(kFactoryOffset, kTaggedSize)                   \
+  /* Header size. */                               \
+  V(kSize, 0)
 
- private:
-  DISALLOW_IMPLICIT_CONSTRUCTORS(JSWeakFactoryCleanupIterator);
+  DEFINE_FIELD_OFFSET_CONSTANTS(JSObject::kHeaderSize,
+                                JS_WEAK_FACTORY_CLEANUP_ITERATOR_FIELDS)
+#undef JS_WEAK_FACTORY_CLEANUP_ITERATOR_FIELDS
+
+  OBJECT_CONSTRUCTORS(JSWeakFactoryCleanupIterator, JSObject);
 };
 
 }  // namespace internal

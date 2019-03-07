@@ -115,6 +115,7 @@ namespace internal {
   V(TUPLE3_TYPE)                                                   \
   V(ARRAY_BOILERPLATE_DESCRIPTION_TYPE)                            \
   V(WASM_DEBUG_INFO_TYPE)                                          \
+  V(WASM_EXCEPTION_TAG_TYPE)                                       \
   V(WASM_EXPORTED_FUNCTION_DATA_TYPE)                              \
                                                                    \
   V(CALLABLE_TASK_TYPE)                                            \
@@ -163,7 +164,7 @@ namespace internal {
   V(FEEDBACK_CELL_TYPE)                                            \
   V(FEEDBACK_VECTOR_TYPE)                                          \
   V(LOAD_HANDLER_TYPE)                                             \
-  V(PRE_PARSED_SCOPE_DATA_TYPE)                                    \
+  V(PREPARSE_DATA_TYPE)                                            \
   V(PROPERTY_ARRAY_TYPE)                                           \
   V(PROPERTY_CELL_TYPE)                                            \
   V(SHARED_FUNCTION_INFO_TYPE)                                     \
@@ -171,8 +172,8 @@ namespace internal {
   V(SMALL_ORDERED_HASH_SET_TYPE)                                   \
   V(SMALL_ORDERED_NAME_DICTIONARY_TYPE)                            \
   V(STORE_HANDLER_TYPE)                                            \
-  V(UNCOMPILED_DATA_WITHOUT_PRE_PARSED_SCOPE_TYPE)                 \
-  V(UNCOMPILED_DATA_WITH_PRE_PARSED_SCOPE_TYPE)                    \
+  V(UNCOMPILED_DATA_WITHOUT_PREPARSE_DATA_TYPE)                    \
+  V(UNCOMPILED_DATA_WITH_PREPARSE_DATA_TYPE)                       \
   V(WEAK_ARRAY_LIST_TYPE)                                          \
                                                                    \
   V(JS_PROXY_TYPE)                                                 \
@@ -340,6 +341,7 @@ namespace internal {
   V(_, ARRAY_BOILERPLATE_DESCRIPTION_TYPE, ArrayBoilerplateDescription,       \
     array_boilerplate_description)                                            \
   V(_, WASM_DEBUG_INFO_TYPE, WasmDebugInfo, wasm_debug_info)                  \
+  V(_, WASM_EXCEPTION_TAG_TYPE, WasmExceptionTag, wasm_exception_tag)         \
   V(_, WASM_EXPORTED_FUNCTION_DATA_TYPE, WasmExportedFunctionData,            \
     wasm_exported_function_data)                                              \
   V(_, CALLABLE_TASK_TYPE, CallableTask, callable_task)                       \

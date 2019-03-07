@@ -8,6 +8,7 @@
 #include "src/objects/allocation-site.h"
 #include "src/objects/fixed-array.h"
 #include "src/objects/js-objects.h"
+#include "torque-generated/class-definitions-from-dsl.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -104,13 +105,7 @@ class JSArray : public JSObject {
   // Number of element slots to pre-allocate for an empty array.
   static const int kPreallocatedArrayElements = 4;
 
-  // Layout description.
-#define JS_ARRAY_FIELDS(V)      \
-  V(kLengthOffset, kTaggedSize) \
-  /* Header size. */            \
-  V(kSize, 0)
-
-  DEFINE_FIELD_OFFSET_CONSTANTS(JSObject::kHeaderSize, JS_ARRAY_FIELDS)
+  DEFINE_FIELD_OFFSET_CONSTANTS(JSObject::kHeaderSize, JSARRAY_FIELDS)
 #undef JS_ARRAY_FIELDS
 
   static const int kLengthDescriptorIndex = 0;
@@ -132,8 +127,7 @@ class JSArray : public JSObject {
   // Valid array indices range from +0 <= i < 2^32 - 1 (kMaxUInt32).
   static const uint32_t kMaxArrayIndex = kMaxUInt32 - 1;
 
- private:
-  DISALLOW_IMPLICIT_CONSTRUCTORS(JSArray);
+  OBJECT_CONSTRUCTORS(JSArray, JSObject);
 };
 
 Handle<Object> CacheInitialJSArrayMaps(Handle<Context> native_context,
@@ -191,8 +185,7 @@ class JSArrayIterator : public JSObject {
   DEFINE_FIELD_OFFSET_CONSTANTS(JSObject::kHeaderSize, JS_ARRAY_ITERATOR_FIELDS)
 #undef JS_ARRAY_ITERATOR_FIELDS
 
- private:
-  DISALLOW_IMPLICIT_CONSTRUCTORS(JSArrayIterator);
+  OBJECT_CONSTRUCTORS(JSArrayIterator, JSObject);
 };
 
 }  // namespace internal
