@@ -113,6 +113,8 @@ BIT_FIELD_ACCESSORS(JSArrayBuffer, bit_field, is_shared,
                     JSArrayBuffer::IsSharedBit)
 BIT_FIELD_ACCESSORS(JSArrayBuffer, bit_field, is_growable,
                     JSArrayBuffer::IsGrowableBit)
+BIT_FIELD_ACCESSORS(JSArrayBuffer, bit_field, is_node_js,
+                    JSArrayBuffer::IsNodeJSBit)
 
 size_t JSArrayBufferView::byte_offset() const {
   return READ_UINTPTR_FIELD(this, kByteOffsetOffset);

@@ -77,7 +77,7 @@ void Deserializer::UnalignedCopy(UnalignedSlot dest, Address value) {
   dest.Write(value);
 }
 
-void Deserializer::Initialize(Isolate* isolate) {
+void Deserializer::Initialize(Isolate* isolate, bool* result) {
   DCHECK_NULL(isolate_);
   DCHECK_NOT_NULL(isolate);
   isolate_ = isolate;
@@ -92,7 +92,12 @@ void Deserializer::Initialize(Isolate* isolate) {
     }
   }
 #endif  // DEBUG
-  CHECK_EQ(magic_number_, SerializedData::kMagicNumber);
+  bool ret =
+    (magic_number_ == SerializedData::kMagicNumber);
+  if (result)
+    *result = ret;
+  else
+    CHECK(ret);
 }
 
 void Deserializer::Rehash() {

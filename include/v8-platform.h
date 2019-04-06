@@ -10,6 +10,37 @@
 #include <stdlib.h>  // For abort.
 #include <memory>
 #include <string>
+#include "v8config.h"
+
+#ifdef V8_OS_WIN
+
+// Setup for Windows DLL export/import. When building the V8 DLL the
+// BUILDING_V8_SHARED needs to be defined. When building a program which uses
+// the V8 DLL USING_V8_SHARED needs to be defined. When either building the V8
+// static library or building a program which uses the V8 static library neither
+// BUILDING_V8_SHARED nor USING_V8_SHARED should be defined.
+#ifdef BUILDING_V8_SHARED
+# define V8_EXPORT __declspec(dllexport)
+#elif USING_V8_SHARED
+# define V8_EXPORT __declspec(dllimport)
+#else
+# define V8_EXPORT
+#endif  // BUILDING_V8_SHARED
+
+#else  // V8_OS_WIN
+
+// Setup for Linux shared library export.
+#if V8_HAS_ATTRIBUTE_VISIBILITY
+# ifdef BUILDING_V8_SHARED
+#  define V8_EXPORT __attribute__ ((visibility("default")))
+# else
+#  define V8_EXPORT
+# endif
+#else
+# define V8_EXPORT
+#endif
+
+#endif  // V8_OS_WIN
 
 #include "v8config.h"  // NOLINT(build/include)
 
@@ -430,7 +461,7 @@ class Platform {
    * since epoch. Useful for implementing |CurrentClockTimeMillis| if
    * nothing special needed.
    */
-  static double SystemClockTimeMillis();
+  V8_EXPORT static double SystemClockTimeMillis();
 };
 
 }  // namespace v8

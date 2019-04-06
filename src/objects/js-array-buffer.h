@@ -53,7 +53,8 @@ class JSArrayBuffer : public JSObject {
   V(WasDetachedBit, bool, 1, _)                \
   V(IsSharedBit, bool, 1, _)                   \
   V(IsGrowableBit, bool, 1, _)                 \
-  V(IsWasmMemoryBit, bool, 1, _)
+  V(IsWasmMemoryBit, bool, 1, _)               \
+  V(IsNodeJSBit, bool, 1, _)
   DEFINE_BIT_FIELDS(JS_ARRAY_BUFFER_BIT_FIELD_FIELDS)
 #undef JS_ARRAY_BUFFER_BIT_FIELD_FIELDS
 
@@ -67,6 +68,7 @@ class JSArrayBuffer : public JSObject {
 
   // [was_detached]: true if the buffer was previously detached.
   DECL_BOOLEAN_ACCESSORS(was_detached)
+  DECL_BOOLEAN_ACCESSORS(is_node_js)
 
   // [is_shared]: tells whether this is an ArrayBuffer or a SharedArrayBuffer.
   DECL_BOOLEAN_ACCESSORS(is_shared)
@@ -83,16 +85,17 @@ class JSArrayBuffer : public JSObject {
 
   struct Allocation {
     Allocation(void* allocation_base, size_t length, void* backing_store,
-               bool is_wasm_memory)
+               bool is_wasm_memory, bool is_nodejs)
         : allocation_base(allocation_base),
           length(length),
           backing_store(backing_store),
-          is_wasm_memory(is_wasm_memory) {}
+      is_wasm_memory(is_wasm_memory), is_nodejs(is_nodejs) {}
 
     void* allocation_base;
     size_t length;
     void* backing_store;
     bool is_wasm_memory;
+    bool is_nodejs;
   };
 
   void FreeBackingStoreFromMainThread();
@@ -102,7 +105,8 @@ class JSArrayBuffer : public JSObject {
       Handle<JSArrayBuffer> array_buffer, Isolate* isolate, bool is_external,
       void* data, size_t allocated_length,
       SharedFlag shared_flag = SharedFlag::kNotShared,
-      bool is_wasm_memory = false);
+      bool is_wasm_memory = false,
+      bool is_node_js = false);
 
   // Initialize the object as empty one to avoid confusing heap verifier if
   // the failure happened in the middle of JSArrayBuffer construction.

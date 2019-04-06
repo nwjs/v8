@@ -108,7 +108,7 @@ void LocalArrayBufferTracker::AddInternal(JSArrayBuffer buffer, size_t length) {
   auto ret = array_buffers_.insert(
       {buffer,
        {buffer->backing_store(), length, buffer->backing_store(),
-        buffer->is_wasm_memory()}});
+           buffer->is_wasm_memory(), buffer->is_node_js()}});
   USE(ret);
   // Check that we indeed inserted a new value and did not overwrite an existing
   // one (which would be a bug).
