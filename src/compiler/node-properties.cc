@@ -13,7 +13,6 @@
 #include "src/compiler/verifier.h"
 #include "src/handles-inl.h"
 #include "src/objects-inl.h"
-#include "src/zone/zone-handle-set.h"
 
 namespace v8 {
 namespace internal {
@@ -392,7 +391,7 @@ NodeProperties::InferReceiverMapsResult NodeProperties::InferReceiverMaps(
       case IrOpcode::kMapGuard: {
         Node* const object = GetValueInput(effect, 0);
         if (IsSame(receiver, object)) {
-          *maps_return = MapGuardMapsOf(effect->op()).maps();
+          *maps_return = MapGuardMapsOf(effect->op());
           return result;
         }
         break;
@@ -413,7 +412,8 @@ NodeProperties::InferReceiverMapsResult NodeProperties::InferReceiverMaps(
               mnewtarget.Ref(broker).IsJSFunction()) {
             JSFunctionRef original_constructor =
                 mnewtarget.Ref(broker).AsJSFunction();
-            if (original_constructor.has_initial_map()) {
+            if (original_constructor.map().has_prototype_slot() &&
+                original_constructor.has_initial_map()) {
               original_constructor.Serialize();
               MapRef initial_map = original_constructor.initial_map();
               if (initial_map.GetConstructor().equals(mtarget.Ref(broker))) {
@@ -508,20 +508,6 @@ NodeProperties::InferReceiverMapsResult NodeProperties::InferReceiverMaps(
     DCHECK_EQ(1, effect->op()->EffectInputCount());
     effect = NodeProperties::GetEffectInput(effect);
   }
-}
-
-// static
-MaybeHandle<Map> NodeProperties::GetMapWitness(JSHeapBroker* broker,
-                                               Node* node) {
-  ZoneHandleSet<Map> maps;
-  Node* receiver = NodeProperties::GetValueInput(node, 1);
-  Node* effect = NodeProperties::GetEffectInput(node);
-  NodeProperties::InferReceiverMapsResult result =
-      NodeProperties::InferReceiverMaps(broker, receiver, effect, &maps);
-  if (result == NodeProperties::kReliableReceiverMaps && maps.size() == 1) {
-    return maps[0];
-  }
-  return MaybeHandle<Map>();
 }
 
 // static

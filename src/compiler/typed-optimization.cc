@@ -727,7 +727,7 @@ Reduction TypedOptimization::ReduceSpeculativeNumberAdd(Node* node) {
     Node* const value =
         graph()->NewNode(simplified()->NumberAdd(), toNum_lhs, toNum_rhs);
     ReplaceWithValue(node, value);
-    return Replace(node);
+    return Replace(value);
   }
   return NoChange();
 }
@@ -747,8 +747,9 @@ Reduction TypedOptimization::ReduceJSToNumberInput(Node* input) {
   }
   if (input_type.IsHeapConstant()) {
     HeapObjectRef input_value = input_type.AsHeapConstant()->Ref();
-    if (input_value.map().oddball_type() != OddballType::kNone) {
-      return Replace(jsgraph()->Constant(input_value.OddballToNumber()));
+    double value;
+    if (input_value.OddballToNumber().To(&value)) {
+      return Replace(jsgraph()->Constant(value));
     }
   }
   if (input_type.Is(Type::Number())) {
@@ -795,7 +796,7 @@ Reduction TypedOptimization::ReduceSpeculativeNumberBinop(Node* node) {
         NumberOpFromSpeculativeNumberOp(simplified(), node->op()), toNum_lhs,
         toNum_rhs);
     ReplaceWithValue(node, value);
-    return Replace(node);
+    return Replace(value);
   }
   return NoChange();
 }
@@ -810,7 +811,7 @@ Reduction TypedOptimization::ReduceSpeculativeNumberComparison(Node* node) {
     Node* const value = graph()->NewNode(
         NumberOpFromSpeculativeNumberOp(simplified(), node->op()), lhs, rhs);
     ReplaceWithValue(node, value);
-    return Replace(node);
+    return Replace(value);
   }
   return NoChange();
 }
