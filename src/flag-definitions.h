@@ -1029,7 +1029,7 @@ DEFINE_BOOL(trace_maps_details, true, "also log map details")
 DEFINE_IMPLICATION(trace_maps, log_code)
 
 // parser.cc
-DEFINE_BOOL(allow_natives_syntax, false, "allow natives syntax")
+DEFINE_BOOL(allow_natives_syntax, true, "allow natives syntax")
 DEFINE_BOOL(parse_only, false, "only parse the sources")
 
 // simulator-arm.cc, simulator-arm64.cc and simulator-mips.cc
@@ -1153,6 +1153,7 @@ DEFINE_BOOL(minor_mc, false, "perform young generation mark compact GCs")
 //
 
 DEFINE_BOOL(help, false, "Print usage message, including flags, on console")
+DEFINE_BOOL(nw_module, false, "Whether the input file is a module")
 DEFINE_BOOL(dump_counters, false, "Dump counters on exit")
 DEFINE_BOOL(dump_counters_nvp, false,
             "Dump counters as name-value pairs on exit")

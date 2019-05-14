@@ -240,7 +240,7 @@ config("internal_config") {
     ":v8_header_features",
   ]
 
-  if (is_component_build) {
+  if (true) {
     defines += [ "BUILDING_V8_SHARED" ]
   }
 }
@@ -248,14 +248,14 @@ config("internal_config") {
 # This config should be applied to code using the libplatform.
 config("libplatform_config") {
   include_dirs = [ "include" ]
-  if (is_component_build) {
+  if (false) {
     defines = [ "USING_V8_PLATFORM_SHARED" ]
   }
 }
 
 # This config should be applied to code using the libbase.
 config("libbase_config") {
-  if (is_component_build) {
+  if (false) {
     defines = [ "USING_V8_BASE_SHARED" ]
   }
   libs = []
@@ -275,7 +275,9 @@ config("external_config") {
   defines = []
   configs = [ ":v8_header_features" ]
   if (is_component_build) {
-    defines += [ "USING_V8_SHARED" ]
+    defines += [ "USING_V8_SHARED", "V8_SHARED", "USING_V8_PLATFORM_SHARED" ]
+  } else {
+    defines += [ "V8_SHARED" ]
   }
   include_dirs = [
     "include",
@@ -1367,6 +1369,8 @@ v8_source_set("v8_initializers") {
   visibility = [
     ":*",
     "test/cctest:*",
+    "//tools/v8_context_snapshot:*",
+    "//chrome:*",
   ]
 
   deps = [
@@ -3193,7 +3197,8 @@ v8_source_set("torque_ls_base") {
   }
 }
 
-v8_component("v8_libbase") {
+v8_static_lib("v8_libbase") {
+
   sources = [
     "src/base/adapters.h",
     "src/base/address-region.h",
@@ -3285,7 +3290,7 @@ v8_component("v8_libbase") {
 
   defines = []
 
-  if (is_component_build) {
+  if (false) {
     defines = [ "BUILDING_V8_BASE_SHARED" ]
   }
 
@@ -3390,7 +3395,7 @@ v8_component("v8_libbase") {
   # TODO(jochen): Add support for qnx, freebsd, openbsd, netbsd, and solaris.
 }
 
-v8_component("v8_libplatform") {
+v8_static_lib("v8_libplatform") {
   sources = [
     "//base/trace_event/common/trace_event_common.h",
     "include/libplatform/libplatform-export.h",
@@ -3417,7 +3422,7 @@ v8_component("v8_libplatform") {
 
   configs = [ ":internal_config_base" ]
 
-  if (is_component_build) {
+  if (true) {
     defines = [ "BUILDING_V8_PLATFORM_SHARED" ]
   }
 
@@ -3494,6 +3499,25 @@ if (v8_monolithic) {
 ###############################################################################
 # Executables
 #
+v8_executable("nwjc") {
+
+    sources = [
+      "src/nwjc.cc",
+    ]
+
+    configs = [
+      ":internal_config",
+    ]
+
+    deps = [
+      ":v8_base",
+      #":v8_init",
+      ":v8_libplatform",
+      ":v8_maybe_snapshot",
+      ":v8_initializers",
+      "//build/win:default_exe_manifest",
+    ]
+}
 
 if (current_toolchain == v8_generator_toolchain) {
   v8_executable("bytecode_builtins_list_generator") {
