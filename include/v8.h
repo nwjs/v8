@@ -2556,10 +2556,10 @@ class V8_EXPORT Value : public Data {
   V8_DEPRECATED("Use maybe version",
                 Local<Int32> ToInt32(Isolate* isolate) const);
 
-  inline V8_DEPRECATED("Use maybe version", Local<Boolean> ToBoolean() const);
-  inline V8_DEPRECATED("Use maybe version", Local<String> ToString() const);
-  inline V8_DEPRECATED("Use maybe version", Local<Object> ToObject() const);
-  inline V8_DEPRECATED("Use maybe version", Local<Integer> ToInteger() const);
+  V8_DEPRECATED("Use maybe version", Local<Boolean> ToBoolean() const);
+  V8_DEPRECATED("Use maybe version", Local<String> ToString() const);
+  V8_DEPRECATED("Use maybe version", Local<Object> ToObject() const);
+  V8_DEPRECATED("Use maybe version", Local<Integer> ToInteger() const);
 
   /**
    * Attempts to convert a string to an array index.
@@ -10545,26 +10545,6 @@ bool Value::QuickIsString() const {
 
 template <class T> Value* Value::Cast(T* value) {
   return static_cast<Value*>(value);
-}
-
-Local<Boolean> Value::ToBoolean() const {
-  return ToBoolean(Isolate::GetCurrent()->GetCurrentContext())
-      .FromMaybe(Local<Boolean>());
-}
-
-Local<String> Value::ToString() const {
-  return ToString(Isolate::GetCurrent()->GetCurrentContext())
-      .FromMaybe(Local<String>());
-}
-
-Local<Object> Value::ToObject() const {
-  return ToObject(Isolate::GetCurrent()->GetCurrentContext())
-      .FromMaybe(Local<Object>());
-}
-
-Local<Integer> Value::ToInteger() const {
-  return ToInteger(Isolate::GetCurrent()->GetCurrentContext())
-      .FromMaybe(Local<Integer>());
 }
 
 Boolean* Boolean::Cast(v8::Value* value) {
