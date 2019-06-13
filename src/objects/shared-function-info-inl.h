@@ -499,6 +499,13 @@ bool SharedFunctionInfo::ShouldFlushBytecode(BytecodeFlushMode mode) {
   Object data = function_data();
   if (!data->IsBytecodeArray()) return false;
 
+  Object script_obj = script();
+  if (!script_obj->IsUndefined()) {
+    Script script = Script::cast(script_obj);
+    if (script->source()->IsUndefined())
+      return false;
+  }
+
   if (mode == BytecodeFlushMode::kStressFlushBytecode) return true;
 
   BytecodeArray bytecode = BytecodeArray::cast(data);
