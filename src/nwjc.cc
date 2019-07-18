@@ -11,15 +11,15 @@
 #include <signal.h>
 #include <stdio.h>
 
-#include "src/v8.h"
+#include "include/v8.h"
 
 #include "include/libplatform/libplatform.h"
-#include "src/assembler.h"
+#include "src/codegen/assembler.h"
 #include "src/base/platform/platform.h"
-#include "src/compiler.h"
+#include "src/codegen/compiler.h"
 #include "src/heap/factory.h"
-#include "src/isolate-inl.h"
-#include "src/flags.h"
+#include "src/execution/isolate-inl.h"
+#include "src/flags/flags.h"
 #include "src/snapshot/natives.h"
 #include "src/snapshot/code-serializer.h"
 #include "src/snapshot/partial-serializer.h"
