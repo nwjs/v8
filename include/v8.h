@@ -1574,9 +1574,9 @@ class V8_EXPORT Module : public Data {
       "Use the preceding SetSyntheticModuleExport with an Isolate parameter, "
       "instead of the one that follows.  The former will throw a runtime "
       "error if called for an export that doesn't exist (as per spec); "
-      "the latter will crash with a failed CHECK().",
+      "the latter will crash with a failed CHECK().")
   void SetSyntheticModuleExport(Local<String> export_name,
-                                Local<Value> export_value));
+                                Local<Value> export_value);
 };
 
 /**
