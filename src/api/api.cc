@@ -7651,6 +7651,32 @@ Local<ArrayBuffer> v8::ArrayBuffer::New(
   return Utils::ToLocal(obj);
 }
 
+std::unique_ptr<v8::BackingStore> v8::ArrayBuffer::NewBackingStore(
+    Isolate* isolate, size_t byte_length) {
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+  LOG_API(i_isolate, ArrayBuffer, NewBackingStore);
+  ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
+  std::unique_ptr<i::BackingStoreBase> backing_store =
+      i::BackingStore::Allocate(i_isolate, byte_length,
+                                i::SharedFlag::kNotShared,
+                                i::InitializedFlag::kZeroInitialized);
+  if (!backing_store) {
+    i::FatalProcessOutOfMemory(i_isolate, "v8::ArrayBuffer::NewBackingStore");
+  }
+  return std::unique_ptr<v8::BackingStore>(
+      static_cast<v8::BackingStore*>(backing_store.release()));
+}
+
+std::unique_ptr<v8::BackingStore> v8::ArrayBuffer::NewBackingStore(
+    void* data, size_t byte_length, BackingStoreDeleterCallback deleter,
+    void* deleter_data) {
+  std::unique_ptr<i::BackingStoreBase> backing_store =
+      i::BackingStore::WrapAllocation(data, byte_length, deleter, deleter_data,
+                                      i::SharedFlag::kNotShared);
+  return std::unique_ptr<v8::BackingStore>(
+      static_cast<v8::BackingStore*>(backing_store.release()));
+}
+
 //KEEP SYNC WITH THE UPSTREAM VERSION
 Local<ArrayBuffer> v8::ArrayBuffer::NewNode(Isolate* isolate, void* data,
                                         size_t byte_length,
@@ -7974,6 +8000,32 @@ Local<SharedArrayBuffer> v8::SharedArrayBuffer::New(
   i::Handle<i::JSArrayBuffer> buffer = SetupSharedArrayBuffer(
       isolate, contents.Data(), contents.ByteLength(), mode);
   return Utils::ToLocalShared(buffer);
+}
+
+std::unique_ptr<v8::BackingStore> v8::SharedArrayBuffer::NewBackingStore(
+    Isolate* isolate, size_t byte_length) {
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+  LOG_API(i_isolate, SharedArrayBuffer, NewBackingStore);
+  ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
+  std::unique_ptr<i::BackingStoreBase> backing_store =
+      i::BackingStore::Allocate(i_isolate, byte_length, i::SharedFlag::kShared,
+                                i::InitializedFlag::kZeroInitialized);
+  if (!backing_store) {
+    i::FatalProcessOutOfMemory(i_isolate,
+                               "v8::SharedArrayBuffer::NewBackingStore");
+  }
+  return std::unique_ptr<v8::BackingStore>(
+      static_cast<v8::BackingStore*>(backing_store.release()));
+}
+
+std::unique_ptr<v8::BackingStore> v8::SharedArrayBuffer::NewBackingStore(
+    void* data, size_t byte_length, BackingStoreDeleterCallback deleter,
+    void* deleter_data) {
+  std::unique_ptr<i::BackingStoreBase> backing_store =
+      i::BackingStore::WrapAllocation(data, byte_length, deleter, deleter_data,
+                                      i::SharedFlag::kShared);
+  return std::unique_ptr<v8::BackingStore>(
+      static_cast<v8::BackingStore*>(backing_store.release()));
 }
 
 Local<Symbol> v8::Symbol::New(Isolate* isolate, Local<String> name) {
@@ -8320,13 +8372,27 @@ Isolate* Isolate::Allocate() {
   return reinterpret_cast<Isolate*>(i::Isolate::New());
 }
 
+void Isolate::SetArrayBufferAllocatorShared(
+                                            std::shared_ptr<ArrayBuffer::Allocator> allocator) {
+  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(this);
+  CHECK_EQ(allocator.get(), isolate->array_buffer_allocator());
+  isolate->set_array_buffer_allocator_shared(std::move(allocator));
+}
+
 // static
 // This is separate so that tests can provide a different |isolate|.
 void Isolate::Initialize(Isolate* isolate,
                          const v8::Isolate::CreateParams& params) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
-  CHECK_NOT_NULL(params.array_buffer_allocator);
-  i_isolate->set_array_buffer_allocator(params.array_buffer_allocator);
+  if (auto allocator = params.array_buffer_allocator_shared) {
+    CHECK(params.array_buffer_allocator == nullptr ||
+          params.array_buffer_allocator == allocator.get());
+    i_isolate->set_array_buffer_allocator(allocator.get());
+    i_isolate->set_array_buffer_allocator_shared(std::move(allocator));
+  } else {
+    CHECK_NOT_NULL(params.array_buffer_allocator);
+    i_isolate->set_array_buffer_allocator(params.array_buffer_allocator);
+  }
   if (params.snapshot_blob != nullptr) {
     i_isolate->set_snapshot_blob(params.snapshot_blob);
   } else {
