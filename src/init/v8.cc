@@ -23,7 +23,6 @@
 #include "src/objects/elements.h"
 #include "src/objects/objects-inl.h"
 #include "src/profiler/heap-profiler.h"
-#include "src/snapshot/natives.h"
 #include "src/snapshot/snapshot.h"
 #include "src/tracing/tracing-category-observer.h"
 #include "src/wasm/wasm-engine.h"
@@ -38,7 +37,13 @@ V8_DECLARE_ONCE(init_natives_once);
 V8_DECLARE_ONCE(init_snapshot_once);
 #endif
 
+base::Thread::LocalStorageKey platform_tls_key_;
+
 v8::Platform* V8::platform_ = nullptr;
+
+void V8::SetTLSPlatform(v8::Platform* platform) {
+  base::Thread::SetThreadLocal(platform_tls_key_, platform);
+}
 
 bool V8::Initialize() {
   InitializeOncePerProcess();
@@ -108,7 +113,6 @@ void V8::InitializeOncePerProcessImpl() {
   if (FLAG_random_seed) SetRandomMmapSeed(FLAG_random_seed);
 
   Isolate::InitializeOncePerProcess();
-
 #if defined(USE_SIMULATOR)
   Simulator::InitializeOncePerProcess();
 #endif
@@ -127,6 +131,8 @@ void V8::InitializePlatform(v8::Platform* platform) {
   CHECK(!platform_);
   CHECK(platform);
   platform_ = platform;
+  platform_tls_key_ = base::Thread::CreateThreadLocalKey();
+  base::Thread::SetThreadLocal(platform_tls_key_, platform);
   v8::base::SetPrintStackTrace(platform_->GetStackTracePrinter());
   v8::tracing::TracingCategoryObserver::SetUp();
 }
@@ -139,7 +145,11 @@ void V8::ShutdownPlatform() {
 }
 
 v8::Platform* V8::GetCurrentPlatform() {
-  v8::Platform* platform = reinterpret_cast<v8::Platform*>(
+  v8::Platform* platform;
+  platform = reinterpret_cast<v8::Platform*>(base::Thread::GetThreadLocal(platform_tls_key_));
+  if (platform)
+    return platform;
+  platform = reinterpret_cast<v8::Platform*>(
       base::Relaxed_Load(reinterpret_cast<base::AtomicWord*>(&platform_)));
   DCHECK(platform);
   return platform;
@@ -148,14 +158,6 @@ v8::Platform* V8::GetCurrentPlatform() {
 void V8::SetPlatformForTesting(v8::Platform* platform) {
   base::Relaxed_Store(reinterpret_cast<base::AtomicWord*>(&platform_),
                       reinterpret_cast<base::AtomicWord>(platform));
-}
-
-void V8::SetNativesBlob(StartupData* natives_blob) {
-#ifdef V8_USE_EXTERNAL_STARTUP_DATA
-  base::CallOnce(&init_natives_once, &SetNativesFromFile, natives_blob);
-#else
-  UNREACHABLE();
-#endif
 }
 
 void V8::SetSnapshotBlob(StartupData* snapshot_blob) {

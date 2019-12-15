@@ -196,8 +196,7 @@ Scope::Scope(Zone* zone, ScopeType scope_type, Handle<ScopeInfo> scope_info)
   already_resolved_ = true;
 #endif
   set_language_mode(scope_info->language_mode());
-  num_heap_slots_ = scope_info->ContextLength();
-  DCHECK_LE(Context::MIN_CONTEXT_SLOTS, num_heap_slots_);
+  DCHECK_EQ(ContextHeaderLength(), num_heap_slots_);
   private_name_lookup_skips_outer_class_ =
       scope_info->PrivateNameLookupSkipsOuterClass();
   // We don't really need to use the preparsed scope data; this is just to
@@ -284,11 +283,6 @@ void Scope::SetDefaults() {
   start_position_ = kNoSourcePosition;
   end_position_ = kNoSourcePosition;
 
-  num_stack_slots_ = 0;
-  num_heap_slots_ = Context::MIN_CONTEXT_SLOTS;
-
-  set_language_mode(LanguageMode::kSloppy);
-
   calls_eval_ = false;
   sloppy_eval_can_extend_vars_ = false;
   scope_nonlinear_ = false;
@@ -303,6 +297,12 @@ void Scope::SetDefaults() {
   private_name_lookup_skips_outer_class_ = false;
 
   must_use_preparsed_scope_data_ = false;
+  is_repl_mode_scope_ = false;
+
+  num_stack_slots_ = 0;
+  num_heap_slots_ = ContextHeaderLength();
+
+  set_language_mode(LanguageMode::kSloppy);
 }
 
 bool Scope::HasSimpleParameters() {
@@ -363,6 +363,7 @@ Scope* Scope::DeserializeScopeChain(Isolate* isolate, Zone* zone,
       if (deserialization_mode == DeserializationMode::kIncludingVariables) {
         script_scope->SetScriptScopeInfo(handle(scope_info, isolate));
       }
+      if (scope_info.IsReplModeScope()) script_scope->set_is_repl_mode_scope();
       DCHECK(!scope_info.HasOuterScopeInfo());
       break;
     } else if (scope_info.scope_type() == FUNCTION_SCOPE) {
@@ -503,9 +504,9 @@ void DeclarationScope::HoistSloppyBlockFunctions(AstNodeFactory* factory) {
     // example, that does not prevent hoisting of the function in
     // `{ let e; try {} catch (e) { function e(){} } }`
     do {
-      var = query_scope->LookupInScopeOrScopeInfo(name);
-      if (var != nullptr && IsLexicalVariableMode(var->mode())) {
-        should_hoist = false;
+      var = query_scope->LookupInScopeOrScopeInfo(name, outer_scope_);
+      if (var != nullptr) {
+        should_hoist = !IsLexicalVariableMode(var->mode());
         break;
       }
       query_scope = query_scope->outer_scope();
@@ -547,10 +548,8 @@ void DeclarationScope::HoistSloppyBlockFunctions(AstNodeFactory* factory) {
 
 bool DeclarationScope::Analyze(ParseInfo* info) {
   RuntimeCallTimerScope runtimeTimer(
-      info->runtime_call_stats(),
-      info->on_background_thread()
-          ? RuntimeCallCounterId::kCompileBackgroundScopeAnalysis
-          : RuntimeCallCounterId::kCompileScopeAnalysis);
+      info->runtime_call_stats(), RuntimeCallCounterId::kCompileScopeAnalysis,
+      RuntimeCallStats::kThreadSpecific);
   DCHECK_NOT_NULL(info->literal());
   DeclarationScope* scope = info->literal()->scope();
 
@@ -583,6 +582,7 @@ bool DeclarationScope::Analyze(ParseInfo* info) {
   }
 
   if (!scope->AllocateVariables(info)) return false;
+  scope->GetScriptScope()->RewriteReplGlobalVariables();
 
 #ifdef DEBUG
   if (FLAG_print_scopes) {
@@ -1156,9 +1156,12 @@ Declaration* DeclarationScope::CheckConflictingVarDeclarations() {
     do {
       // There is a conflict if there exists a non-VAR binding up to the
       // declaration scope in which this sloppy-eval runs.
-      Variable* other_var =
-          current->LookupInScopeOrScopeInfo(decl->var()->raw_name());
-      if (other_var != nullptr && IsLexicalVariableMode(other_var->mode())) {
+      Variable* other_var = current->LookupInScopeOrScopeInfo(
+          decl->var()->raw_name(), outer_scope_);
+      if (other_var != nullptr) {
+        // If this is a VAR, then we know that it doesn't conflict with
+        // anything, so we can't conflict with anything either.
+        if (!IsLexicalVariableMode(other_var->mode())) return nullptr;
         DCHECK(!current->is_catch_scope());
         return decl;
       }
@@ -1331,6 +1334,14 @@ DeclarationScope* Scope::GetReceiverScope() {
   while (!scope->is_declaration_scope() ||
          (!scope->is_script_scope() &&
           !scope->AsDeclarationScope()->has_this_declaration())) {
+    scope = scope->outer_scope();
+  }
+  return scope->AsDeclarationScope();
+}
+
+DeclarationScope* Scope::GetScriptScope() {
+  Scope* scope = this;
+  while (!scope->is_script_scope()) {
     scope = scope->outer_scope();
   }
   return scope->AsDeclarationScope();
@@ -1552,6 +1563,17 @@ void DeclarationScope::AnalyzePartially(Parser* parser,
   unresolved_list_ = std::move(new_unresolved_list);
 }
 
+void DeclarationScope::RewriteReplGlobalVariables() {
+  DCHECK(is_script_scope());
+  if (!is_repl_mode_scope()) return;
+
+  for (VariableMap::Entry* p = variables_.Start(); p != nullptr;
+       p = variables_.Next(p)) {
+    Variable* var = reinterpret_cast<Variable*>(p->value);
+    var->RewriteLocationForRepl();
+  }
+}
+
 #ifdef DEBUG
 namespace {
 
@@ -1600,6 +1622,9 @@ void PrintLocation(Variable* var) {
       break;
     case VariableLocation::MODULE:
       PrintF("module");
+      break;
+    case VariableLocation::REPL_GLOBAL:
+      PrintF("repl global[%d]", var->index());
       break;
   }
 }
@@ -2149,7 +2174,6 @@ bool Scope::MustAllocateInContext(Variable* var) {
   return var->has_forced_context_allocation() || inner_scope_calls_eval_;
 }
 
-
 void Scope::AllocateStackSlot(Variable* var) {
   if (is_block_scope()) {
     outer_scope()->GetDeclarationScope()->AllocateStackSlot(var);
@@ -2285,7 +2309,7 @@ void Scope::AllocateVariablesRecursively() {
   this->ForEach([](Scope* scope) -> Iteration {
     DCHECK(!scope->already_resolved_);
     if (WasLazilyParsed(scope)) return Iteration::kContinue;
-    DCHECK_EQ(Context::MIN_CONTEXT_SLOTS, scope->num_heap_slots_);
+    DCHECK_EQ(scope->ContextHeaderLength(), scope->num_heap_slots_);
 
     // Allocate variables for this scope.
     // Parameters must be allocated first, if any.
@@ -2313,14 +2337,14 @@ void Scope::AllocateVariablesRecursively() {
 
     // If we didn't allocate any locals in the local context, then we only
     // need the minimal number of slots if we must have a context.
-    if (scope->num_heap_slots_ == Context::MIN_CONTEXT_SLOTS &&
+    if (scope->num_heap_slots_ == scope->ContextHeaderLength() &&
         !must_have_context) {
       scope->num_heap_slots_ = 0;
     }
 
     // Allocation done.
     DCHECK(scope->num_heap_slots_ == 0 ||
-           scope->num_heap_slots_ >= Context::MIN_CONTEXT_SLOTS);
+           scope->num_heap_slots_ >= scope->ContextHeaderLength());
     return Iteration::kDescend;
   });
 }
@@ -2425,7 +2449,7 @@ int Scope::ContextLocalCount() const {
       is_function_scope() ? AsDeclarationScope()->function_var() : nullptr;
   bool is_function_var_in_context =
       function != nullptr && function->IsContextSlot();
-  return num_heap_slots() - Context::MIN_CONTEXT_SLOTS -
+  return num_heap_slots() - ContextHeaderLength() -
          (is_function_var_in_context ? 1 : 0);
 }
 

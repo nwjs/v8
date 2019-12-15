@@ -20,7 +20,7 @@
 #include "src/heap/factory.h"
 #include "src/execution/isolate-inl.h"
 #include "src/flags/flags.h"
-#include "src/snapshot/natives.h"
+#include "src/snapshot/snapshot.h"
 #include "src/snapshot/code-serializer.h"
 #include "src/snapshot/partial-serializer.h"
 #include "src/snapshot/startup-serializer.h"
@@ -123,15 +123,16 @@ int main(int argc, char** argv) {
   v8::Isolate::CreateParams create_params;
   ArrayBufferAllocator array_buffer_allocator;
   create_params.array_buffer_allocator = &array_buffer_allocator;
-  v8::SnapshotCreator snapshot_creator;
-  v8::Isolate* isolate = snapshot_creator.GetIsolate(); //v8::Isolate::New(create_params);
+  v8::Isolate* isolate = v8::Isolate::New(create_params);
+  //v8::SnapshotCreator snapshot_creator(isolate);
+  //i::CreateSnapshotDataBlobInternal(v8::SnapshotCreator::FunctionCodeHandling::kClear, nullptr, isolate);
   {
     v8::Isolate::Scope isolate_scope(isolate);
     v8::HandleScope handle_scope(isolate);
     v8::Handle<v8::ObjectTemplate> global = v8::ObjectTemplate::New(isolate);
     v8::Local<v8::Context> context = v8::Context::New(isolate, NULL, global);
     v8::Context::Scope scope(context);
-    snapshot_creator.SetDefaultContext(context);
+    //snapshot_creator.SetDefaultContext(context);
 
     FILE* file = v8::base::OS::FOpen(argv[1], "rb");
     if (file == NULL) {

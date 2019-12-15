@@ -399,7 +399,7 @@ class Platform {
    * scheduling. The definition of "foreground" is opaque to V8.
    */
   V8_DEPRECATED("Use a taskrunner acquired by GetForegroundTaskRunner instead.")
-  virtual void CallOnForegroundThread(Isolate* isolate, Task* task) = 0;
+  virtual void CallOnForegroundThread(Isolate* isolate, Task* task) { abort(); }
 
   /**
    * Schedules a task to be invoked on a foreground thread wrt a specific
@@ -409,7 +409,9 @@ class Platform {
    */
   V8_DEPRECATED("Use a taskrunner acquired by GetForegroundTaskRunner instead.")
   virtual void CallDelayedOnForegroundThread(Isolate* isolate, Task* task,
-                                             double delay_in_seconds) = 0;
+                                             double delay_in_seconds) {
+    abort();
+  }
 
   /**
    * Schedules a task to be invoked on a foreground thread wrt a specific
@@ -421,16 +423,13 @@ class Platform {
    */
   V8_DEPRECATED("Use a taskrunner acquired by GetForegroundTaskRunner instead.")
   virtual void CallIdleOnForegroundThread(Isolate* isolate, IdleTask* task) {
-    // This must be overriden if |IdleTasksEnabled()|.
     abort();
   }
 
   /**
    * Returns true if idle tasks are enabled for the given |isolate|.
    */
-  virtual bool IdleTasksEnabled(Isolate* isolate) {
-    return false;
-  }
+  virtual bool IdleTasksEnabled(Isolate* isolate) { return false; }
 
   /**
    * Monotonically increasing time in seconds from an arbitrary fixed point in

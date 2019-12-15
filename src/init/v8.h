@@ -29,6 +29,7 @@ class V8 : public AllStatic {
                                                    const char* location,
                                                    bool is_heap_oom = false);
 
+  static void SetTLSPlatform(v8::Platform* platform);
   static void InitializePlatform(v8::Platform* platform);
   static void ShutdownPlatform();
   V8_EXPORT_PRIVATE static v8::Platform* GetCurrentPlatform();
@@ -36,7 +37,6 @@ class V8 : public AllStatic {
   // Should be used only for testing.
   V8_EXPORT_PRIVATE static void SetPlatformForTesting(v8::Platform* platform);
 
-  static void SetNativesBlob(StartupData* natives_blob);
   static void SetSnapshotBlob(StartupData* snapshot_blob);
 
  private:

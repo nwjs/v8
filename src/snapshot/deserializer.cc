@@ -22,7 +22,6 @@
 #include "src/objects/smi.h"
 #include "src/objects/string.h"
 #include "src/roots/roots.h"
-#include "src/snapshot/natives.h"
 #include "src/snapshot/snapshot.h"
 #include "src/tracing/trace-event.h"
 #include "src/tracing/traced-value.h"
@@ -107,6 +106,8 @@ void Deserializer::Synchronize(VisitorSynchronization::SyncTag tag) {
 }
 
 void Deserializer::DeserializeDeferredObjects() {
+  DisallowHeapAllocation no_gc;
+
   for (int code = source_.Get(); code != kSynchronize; code = source_.Get()) {
     switch (code) {
       case kAlignmentPrefix:
@@ -162,13 +163,6 @@ void Deserializer::LogScriptEvents(Script script) {
   LOG(isolate_,
       ScriptEvent(Logger::ScriptEventType::kDeserialize, script.id()));
   LOG(isolate_, ScriptDetails(script));
-  TRACE_EVENT_OBJECT_CREATED_WITH_ID(
-      TRACE_DISABLED_BY_DEFAULT("v8.compile"), "Script",
-      TRACE_ID_WITH_SCOPE("v8::internal::Script", script.id()));
-  TRACE_EVENT_OBJECT_SNAPSHOT_WITH_ID(
-      TRACE_DISABLED_BY_DEFAULT("v8.compile"), "Script",
-      TRACE_ID_WITH_SCOPE("v8::internal::Script", script.id()),
-      script.ToTracedValue());
 }
 
 StringTableInsertionKey::StringTableInsertionKey(String string)
@@ -196,8 +190,8 @@ namespace {
 
 String ForwardStringIfExists(Isolate* isolate, StringTableInsertionKey* key) {
   StringTable table = isolate->heap()->string_table();
-  int entry = table.FindEntry(isolate, key);
-  if (entry == kNotFound) return String();
+  InternalIndex entry = table.FindEntry(isolate, key);
+  if (entry.is_not_found()) return String();
 
   String canonical = String::cast(table.KeyAt(entry));
   DCHECK_NE(canonical, key->string());
@@ -209,6 +203,8 @@ String ForwardStringIfExists(Isolate* isolate, StringTableInsertionKey* key) {
 
 HeapObject Deserializer::PostProcessNewObject(HeapObject obj,
                                               SnapshotSpace space) {
+  DisallowHeapAllocation no_gc;
+
   if ((FLAG_rehash_snapshot && can_rehash_) || deserializing_user_code()) {
     if (obj.IsString()) {
       // Uninitialize hash field as we need to recompute the hash.
@@ -272,21 +268,13 @@ HeapObject Deserializer::PostProcessNewObject(HeapObject obj,
     call_handler_infos_.push_back(CallHandlerInfo::cast(obj));
 #endif
   } else if (obj.IsExternalString()) {
-    if (obj.map() == ReadOnlyRoots(isolate_).native_source_string_map()) {
-      ExternalOneByteString string = ExternalOneByteString::cast(obj);
-      DCHECK(string.is_uncached());
-      string.SetResource(
-          isolate_, NativesExternalStringResource::DecodeForDeserialization(
-                        string.resource()));
-    } else {
-      ExternalString string = ExternalString::cast(obj);
-      uint32_t index = string.resource_as_uint32();
-      Address address =
-          static_cast<Address>(isolate_->api_external_references()[index]);
-      string.set_address_as_resource(address);
-      isolate_->heap()->UpdateExternalString(string, 0,
-                                             string.ExternalPayloadSize());
-    }
+    ExternalString string = ExternalString::cast(obj);
+    uint32_t index = string.resource_as_uint32();
+    Address address =
+        static_cast<Address>(isolate_->api_external_references()[index]);
+    string.set_address_as_resource(address);
+    isolate_->heap()->UpdateExternalString(string, 0,
+                                           string.ExternalPayloadSize());
     isolate_->heap()->RegisterExternalString(String::cast(obj));
   } else if (obj.IsJSDataView()) {
     JSDataView data_view = JSDataView::cast(obj);
@@ -394,6 +382,8 @@ HeapObject Deserializer::ReadObject() {
 }
 
 HeapObject Deserializer::ReadObject(SnapshotSpace space) {
+  DisallowHeapAllocation no_gc;
+
   const int size = source_.GetInt() << kObjectAlignmentBits;
 
   Address address = allocator()->Allocate(space, size);
@@ -410,7 +400,8 @@ HeapObject Deserializer::ReadObject(SnapshotSpace space) {
 
 #ifdef DEBUG
   if (obj.IsCode()) {
-    DCHECK_EQ(space, SnapshotSpace::kCode);
+    DCHECK(space == SnapshotSpace::kCode ||
+           space == SnapshotSpace::kReadOnlyHeap);
   } else {
     DCHECK_NE(space, SnapshotSpace::kCode);
   }
@@ -483,7 +474,6 @@ void Deserializer::VisitInternalReference(Code host, RelocInfo* rinfo) {
 }
 
 void Deserializer::VisitOffHeapTarget(Code host, RelocInfo* rinfo) {
-  DCHECK(FLAG_embedded_builtins);
   byte data = source_.Get();
   CHECK_EQ(data, kOffHeapTarget);
 

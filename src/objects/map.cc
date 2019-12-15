@@ -287,6 +287,7 @@ VisitorId Map::GetVisitorId(Map map) {
     case JS_V8_BREAK_ITERATOR_TYPE:
     case JS_COLLATOR_TYPE:
     case JS_DATE_TIME_FORMAT_TYPE:
+    case JS_DISPLAY_NAMES_TYPE:
     case JS_LIST_FORMAT_TYPE:
     case JS_LOCALE_TYPE:
     case JS_NUMBER_FORMAT_TYPE:
@@ -1491,7 +1492,7 @@ Handle<Map> Map::Normalize(Isolate* isolate, Handle<Map> fast_map,
                       Map::kPrototypeValidityCellOffset + kTaggedSize);
         offset = kTransitionsOrPrototypeInfoOffset + kTaggedSize;
         DCHECK_EQ(fresh->raw_transitions(),
-                  MaybeObject::FromObject(Smi::kZero));
+                  MaybeObject::FromObject(Smi::zero()));
       }
       DCHECK_EQ(0, memcmp(reinterpret_cast<void*>(fresh->address() + offset),
                           reinterpret_cast<void*>(new_map->address() + offset),
@@ -1825,7 +1826,7 @@ void Map::InstallDescriptors(Isolate* isolate, Handle<Map> parent,
       CHECK(child->layout_descriptor().IsConsistentWithMap(*child));
     }
 #else
-    SLOW_DCHECK(child->layout_descriptor()->IsConsistentWithMap(*child));
+    SLOW_DCHECK(child->layout_descriptor().IsConsistentWithMap(*child));
 #endif
     child->set_visitor_id(Map::GetVisitorId(*child));
   }
@@ -2123,7 +2124,7 @@ Handle<Map> Map::TransitionToDataProperty(Isolate* isolate, Handle<Map> map,
                                           PropertyConstness constness,
                                           StoreOrigin store_origin) {
   RuntimeCallTimerScope stats_scope(
-      isolate, *map,
+      isolate,
       map->is_prototype_map()
           ? RuntimeCallCounterId::kPrototypeMap_TransitionToDataProperty
           : RuntimeCallCounterId::kMap_TransitionToDataProperty);
@@ -2638,7 +2639,7 @@ bool Map::IsPrototypeChainInvalidated(Map map) {
 void Map::SetPrototype(Isolate* isolate, Handle<Map> map,
                        Handle<HeapObject> prototype,
                        bool enable_prototype_setup_mode) {
-  RuntimeCallTimerScope stats_scope(isolate, *map,
+  RuntimeCallTimerScope stats_scope(isolate,
                                     RuntimeCallCounterId::kMap_SetPrototype);
 
   if (prototype->IsJSObject()) {

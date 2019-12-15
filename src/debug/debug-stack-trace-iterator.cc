@@ -117,10 +117,11 @@ v8::MaybeLocal<v8::Value> DebugStackTraceIterator::GetReceiver() const {
 }
 
 v8::Local<v8::Value> DebugStackTraceIterator::GetReturnValue() const {
-  DCHECK(!Done());
+  CHECK(!Done());
   if (frame_inspector_ && frame_inspector_->IsWasm()) {
     return v8::Local<v8::Value>();
   }
+  CHECK_NOT_NULL(iterator_.frame());
   bool is_optimized = iterator_.frame()->is_optimized();
   if (is_optimized || !is_top_frame_ ||
       !isolate_->debug()->IsBreakAtReturn(iterator_.javascript_frame())) {
@@ -158,12 +159,11 @@ std::unique_ptr<v8::debug::ScopeIterator>
 DebugStackTraceIterator::GetScopeIterator() const {
   DCHECK(!Done());
   StandardFrame* frame = iterator_.frame();
-  if (frame->is_wasm_interpreter_entry()) {
-    return std::unique_ptr<v8::debug::ScopeIterator>(new DebugWasmScopeIterator(
-        isolate_, iterator_.frame(), inlined_frame_index_));
+  if (frame->is_wasm()) {
+    return std::make_unique<DebugWasmScopeIterator>(isolate_, iterator_.frame(),
+                                                    inlined_frame_index_);
   }
-  return std::unique_ptr<v8::debug::ScopeIterator>(
-      new DebugScopeIterator(isolate_, frame_inspector_.get()));
+  return std::make_unique<DebugScopeIterator>(isolate_, frame_inspector_.get());
 }
 
 bool DebugStackTraceIterator::Restart() {
