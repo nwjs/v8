@@ -301,7 +301,7 @@ void ScopeIterator::TryParseAndRetrieveScopes(ReparseStrategy strategy) {
 }
 
 void ScopeIterator::UnwrapEvaluationContext() {
-  if (!context_->IsDebugEvaluateContext()) return;
+  if (context_->is_null() || !context_->IsDebugEvaluateContext()) return;
   Context current = *context_;
   do {
     Object wrapped = current.get(Context::WRAPPED_CONTEXT_INDEX);
