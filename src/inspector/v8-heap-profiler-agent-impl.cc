@@ -187,9 +187,10 @@ Response V8HeapProfilerAgentImpl::startTrackingHeapObjects(
 }
 
 Response V8HeapProfilerAgentImpl::stopTrackingHeapObjects(
-    Maybe<bool> reportProgress) {
+    Maybe<bool> reportProgress, Maybe<bool> treatGlobalObjectsAsRoots) {
   requestHeapStatsUpdate();
-  takeHeapSnapshot(std::move(reportProgress));
+  takeHeapSnapshot(std::move(reportProgress),
+                   std::move(treatGlobalObjectsAsRoots));
   stopTrackingHeapObjectsInternal();
   return Response::OK();
 }
@@ -211,7 +212,8 @@ Response V8HeapProfilerAgentImpl::disable() {
   return Response::OK();
 }
 
-Response V8HeapProfilerAgentImpl::takeHeapSnapshot(Maybe<bool> reportProgress) {
+Response V8HeapProfilerAgentImpl::takeHeapSnapshot(
+    Maybe<bool> reportProgress, Maybe<bool> treatGlobalObjectsAsRoots) {
   v8::HeapProfiler* profiler = m_isolate->GetHeapProfiler();
   if (!profiler) return Response::Error("Cannot access v8 heap profiler");
   std::unique_ptr<HeapSnapshotProgress> progress;
@@ -228,8 +230,8 @@ Response V8HeapProfilerAgentImpl::takeHeapSnapshot(Maybe<bool> reportProgress) {
     if (!context.IsEmpty())
       context->Exit();
 #endif
-  const v8::HeapSnapshot* snapshot =
-      profiler->TakeHeapSnapshot(progress.get(), &resolver);
+  const v8::HeapSnapshot* snapshot = profiler->TakeHeapSnapshot(
+      progress.get(), &resolver, treatGlobalObjectsAsRoots.fromMaybe(true));
 #ifdef __APPLE__
     if (!context.IsEmpty())
       context->Enter();
