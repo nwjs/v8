@@ -190,12 +190,12 @@ void CodeSerializer::SerializeObject(HeapObject obj) {
   // bytecode array stored within the InterpreterData, which is the important
   // information. On deserialization we'll create our code objects again, if
   // --interpreted-frames-native-stack is on. See v8:9122 for more context
-#ifndef V8_TARGET_ARCH_ARM
+#if !defined(V8_TARGET_ARCH_ARM) && !defined(V8_TARGET_ARCH_S390X)
   if (V8_UNLIKELY(FLAG_interpreted_frames_native_stack) &&
       obj.IsInterpreterData()) {
     obj = InterpreterData::cast(obj).bytecode_array();
   }
-#endif  // V8_TARGET_ARCH_ARM
+#endif  // !V8_TARGET_ARCH_ARM && !V8_TARGET_ARCH_S390X
 
   // Past this point we should not see any (context-specific) maps anymore.
   CHECK(!obj.IsMap());
@@ -215,7 +215,7 @@ void CodeSerializer::SerializeGeneric(HeapObject heap_object) {
   serializer.Serialize();
 }
 
-#ifndef V8_TARGET_ARCH_ARM
+#if !defined(V8_TARGET_ARCH_ARM) && !defined(V8_TARGET_ARCH_S390X)
 // NOTE(mmarchini): when FLAG_interpreted_frames_native_stack is on, we want to
 // create duplicates of InterpreterEntryTrampoline for the deserialized
 // functions, otherwise we'll call the builtin IET for those functions (which
@@ -255,7 +255,7 @@ void CreateInterpreterDataForDeserializedCode(Isolate* isolate,
                             column_num));
   }
 }
-#endif  // V8_TARGET_ARCH_ARM
+#endif  // !V8_TARGET_ARCH_ARM && !V8_TARGET_ARCH_S390X
 
 MaybeHandle<SharedFunctionInfo> CodeSerializer::Deserialize(
     Isolate* isolate, ScriptData* cached_data, Handle<String> source,
@@ -302,11 +302,11 @@ MaybeHandle<SharedFunctionInfo> CodeSerializer::Deserialize(
       isolate->is_profiling() ||
       isolate->code_event_dispatcher()->IsListeningToCodeEvents();
 
-#ifndef V8_TARGET_ARCH_ARM
+#if !defined(V8_TARGET_ARCH_ARM) && !defined(V8_TARGET_ARCH_S390X)
   if (V8_UNLIKELY(FLAG_interpreted_frames_native_stack))
     CreateInterpreterDataForDeserializedCode(isolate, result,
                                              log_code_creation);
-#endif  // V8_TARGET_ARCH_ARM
+#endif  // !V8_TARGET_ARCH_ARM && !V8_TARGET_ARCH_S390X
 
   bool needs_source_positions = isolate->NeedsSourcePositionsForProfiling();
 
@@ -324,7 +324,7 @@ MaybeHandle<SharedFunctionInfo> CodeSerializer::Deserialize(
                         result->StartPosition(), result->EndPosition(), *name));
     }
     if (log_code_creation) {
-      Script::InitLineEnds(script);
+      Script::InitLineEnds(isolate, script);
 
       SharedFunctionInfo::ScriptIterator iter(isolate, *script);
       for (SharedFunctionInfo info = iter.Next(); !info.is_null();
@@ -351,7 +351,7 @@ MaybeHandle<SharedFunctionInfo> CodeSerializer::Deserialize(
 
   if (needs_source_positions) {
     Handle<Script> script(Script::cast(result->script()), isolate);
-    Script::InitLineEnds(script);
+    Script::InitLineEnds(isolate, script);
   }
   return scope.CloseAndEscape(result);
 }

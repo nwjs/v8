@@ -5,6 +5,7 @@
 
 #if defined(__clang__)
 #pragma clang diagnostic ignored "-Wundefined-inline"
+#pragma clang diagnostic ignored "-Wunused-result"
 #endif
 
 #include <errno.h>
