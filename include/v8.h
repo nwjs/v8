@@ -5189,6 +5189,8 @@ class V8_EXPORT ArrayBuffer : public Object {
    */
   static Local<ArrayBuffer> New(Isolate* isolate,
                                 std::shared_ptr<BackingStore> backing_store);
+  static Local<ArrayBuffer> NewNode(Isolate* isolate,
+                                    std::shared_ptr<BackingStore> backing_store);
 
   /**
    * Returns a new standalone BackingStore that is allocated using the array

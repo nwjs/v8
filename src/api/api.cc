@@ -7730,6 +7730,26 @@ Local<ArrayBuffer> v8::ArrayBuffer::NewNode(Isolate* isolate, void* data,
   return Utils::ToLocal(obj);
 }
 
+Local<ArrayBuffer> v8::ArrayBuffer::NewNode(
+    Isolate* isolate, std::shared_ptr<BackingStore> backing_store) {
+  CHECK_IMPLIES(backing_store->ByteLength() != 0,
+                backing_store->Data() != nullptr);
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+  LOG_API(i_isolate, ArrayBuffer, New);
+  ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
+  std::shared_ptr<i::BackingStore> i_backing_store(
+      ToInternal(std::move(backing_store)));
+  Utils::ApiCheck(
+      !i_backing_store->is_shared(), "v8_ArrayBuffer_New",
+      "Cannot construct ArrayBuffer with a BackingStore of SharedArrayBuffer");
+  i_backing_store->set_nodejs(true);
+  i::Handle<i::JSArrayBuffer> obj =
+      i_isolate->factory()->NewJSArrayBuffer(std::move(i_backing_store));
+  obj->set_is_node_js(true);
+  return Utils::ToLocal(obj);
+}
+
+
 Local<ArrayBuffer> v8::ArrayBufferView::Buffer() {
   i::Handle<i::JSArrayBufferView> obj = Utils::OpenHandle(this);
   i::Handle<i::JSArrayBuffer> buffer;
