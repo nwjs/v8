@@ -23,7 +23,7 @@
 #include "src/flags/flags.h"
 #include "src/snapshot/snapshot.h"
 #include "src/snapshot/code-serializer.h"
-#include "src/snapshot/partial-serializer.h"
+#include "src/snapshot/context-serializer.h"
 #include "src/snapshot/startup-serializer.h"
 
 

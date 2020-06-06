@@ -38,6 +38,7 @@ static const char* const UNINITIALIZED_TYPE_STRING = "Uninitialized";
 static const char* const UNINITIALIZED_HEAP_OBJECT_TYPE_STRING =
     "UninitializedHeapObject";
 static const char* const RAWPTR_TYPE_STRING = "RawPtr";
+static const char* const EXTERNALPTR_TYPE_STRING = "ExternalPointer";
 static const char* const CONST_STRING_TYPE_STRING = "constexpr string";
 static const char* const STRING_TYPE_STRING = "String";
 static const char* const NUMBER_TYPE_STRING = "Number";
@@ -126,7 +127,6 @@ enum class ClassFlag {
   kIsShape = 1 << 5,
   kHasSameInstanceTypeAsParent = 1 << 6,
   kGenerateCppClassDefinitions = 1 << 7,
-  kHasIndexedField = 1 << 8,
   kHighestInstanceTypeWithinParent = 1 << 9,
   kLowestInstanceTypeWithinParent = 1 << 10,
   kUndefinedLayout = 1 << 11,
