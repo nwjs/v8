@@ -45,6 +45,7 @@ class BigInt;
 class BigIntObject;
 class Boolean;
 class BooleanObject;
+class CFunction;
 class Context;
 class Data;
 class Date;
@@ -127,7 +128,6 @@ template <ArgumentsType>
 class Arguments;
 template <typename T>
 class CustomArguments;
-class DeferredHandles;
 class FunctionCallbackArguments;
 class GlobalHandles;
 class Heap;
@@ -148,6 +148,10 @@ class StreamingDecoder;
 }  // namespace wasm
 
 }  // namespace internal
+
+namespace metrics {
+class Recorder;
+}  // namespace metrics
 
 namespace debug {
 class ConsoleCallArguments;
@@ -900,6 +904,23 @@ class TracedReferenceBase {
         const_cast<TracedReferenceBase<T>&>(*this));
   }
 
+ protected:
+  /**
+   * Update this reference in a thread-safe way
+   */
+  void SetSlotThreadSafe(T* new_val) {
+    reinterpret_cast<std::atomic<T*>*>(&val_)->store(new_val,
+                                                     std::memory_order_relaxed);
+  }
+
+  /**
+   * Get this reference in a thread-safe way
+   */
+  const T* GetSlotThreadSafe() const {
+    return reinterpret_cast<std::atomic<const T*> const*>(&val_)->load(
+        std::memory_order_relaxed);
+  }
+
  private:
   enum DestructionMode { kWithDestructor, kWithoutDestructor };
 
@@ -1151,6 +1172,14 @@ class TracedReference : public TracedReferenceBase<T> {
   V8_INLINE TracedReference<S>& As() const {
     return reinterpret_cast<TracedReference<S>&>(
         const_cast<TracedReference<T>&>(*this));
+  }
+
+  /**
+   * Returns true if this TracedReference is empty, i.e., has not been
+   * assigned an object. This version of IsEmpty is thread-safe.
+   */
+  bool IsEmptyThreadSafe() const {
+    return this->GetSlotThreadSafe() == nullptr;
   }
 };
 
@@ -6025,13 +6054,14 @@ class V8_EXPORT External : public Value {
   static void CheckCast(v8::Value* obj);
 };
 
-#define V8_INTRINSICS_LIST(F)                      \
-  F(ArrayProto_entries, array_entries_iterator)    \
-  F(ArrayProto_forEach, array_for_each_iterator)   \
-  F(ArrayProto_keys, array_keys_iterator)          \
-  F(ArrayProto_values, array_values_iterator)      \
-  F(ErrorPrototype, initial_error_prototype)       \
-  F(IteratorPrototype, initial_iterator_prototype) \
+#define V8_INTRINSICS_LIST(F)                                 \
+  F(ArrayProto_entries, array_entries_iterator)               \
+  F(ArrayProto_forEach, array_for_each_iterator)              \
+  F(ArrayProto_keys, array_keys_iterator)                     \
+  F(ArrayProto_values, array_values_iterator)                 \
+  F(AsyncIteratorPrototype, initial_async_iterator_prototype) \
+  F(ErrorPrototype, initial_error_prototype)                  \
+  F(IteratorPrototype, initial_iterator_prototype)            \
   F(ObjProto_valueOf, object_value_of_function)
 
 enum Intrinsic {
@@ -6378,7 +6408,6 @@ typedef bool (*AccessCheckCallback)(Local<Context> accessing_context,
                                     Local<Object> accessed_object,
                                     Local<Value> data);
 
-class CFunction;
 /**
  * A FunctionTemplate is used to create functions at runtime. There
  * can only be one function created from a FunctionTemplate in a
@@ -7293,8 +7322,7 @@ typedef MaybeLocal<Promise> (*HostImportModuleDynamicallyCallback)(
 
 /**
  * HostInitializeImportMetaObjectCallback is called the first time import.meta
- * is accessed for a module. Subsequent access will reuse the same value. The
- * callback must not throw.
+ * is accessed for a module. Subsequent access will reuse the same value.
  *
  * The method combines two implementation-defined abstract operations into one:
  * HostGetImportMetaProperties and HostFinalizeImportMeta.
@@ -8140,10 +8168,11 @@ enum class MeasureMemoryMode { kSummary, kDetailed };
 /**
  * Controls how promptly a memory measurement request is executed.
  * By default the measurement is folded with the next scheduled GC which may
- * happen after a while. The kEager starts increment GC right away and
- * is useful for testing.
+ * happen after a while and is forced after some timeout.
+ * The kEager mode starts incremental GC right away and is useful for testing.
+ * The kLazy mode does not force GC.
  */
-enum class MeasureMemoryExecution { kDefault, kEager };
+enum class MeasureMemoryExecution { kDefault, kEager, kLazy };
 
 /**
  * The delegate is used in Isolate::MeasureMemory API.
@@ -8466,8 +8495,8 @@ class V8_EXPORT Isolate {
     kFunctionTokenOffsetTooLongForToString = 49,
     kWasmSharedMemory = 50,
     kWasmThreadOpcodes = 51,
-    kAtomicsNotify = 52,
-    kAtomicsWake = 53,
+    kAtomicsNotify = 52,  // Unused.
+    kAtomicsWake = 53,    // Unused.
     kCollator = 54,
     kNumberFormat = 55,
     kDateTimeFormat = 56,
@@ -8805,8 +8834,7 @@ class V8_EXPORT Isolate {
    *   kept alive by JavaScript objects.
    * \returns the adjusted value.
    */
-  V8_INLINE int64_t
-      AdjustAmountOfExternalAllocatedMemory(int64_t change_in_bytes);
+  int64_t AdjustAmountOfExternalAllocatedMemory(int64_t change_in_bytes);
 
   /**
    * Returns the number of phantom handles without callbacks that were reset
@@ -9057,6 +9085,13 @@ class V8_EXPORT Isolate {
   void RequestInterrupt(InterruptCallback callback, void* data);
 
   /**
+   * Returns true if there is ongoing background work within V8 that will
+   * eventually post a foreground task, like asynchronous WebAssembly
+   * compilation.
+   */
+  bool HasPendingBackgroundTasks();
+
+  /**
    * Request garbage collection in this Isolate. It is only valid to call this
    * function if --expose_gc was specified.
    *
@@ -9191,6 +9226,18 @@ class V8_EXPORT Isolate {
    */
   void SetCreateHistogramFunction(CreateHistogramCallback);
   void SetAddHistogramSampleFunction(AddHistogramSampleCallback);
+
+  /**
+   * Enables the host application to provide a mechanism for recording
+   * event based metrics. In order to use this interface
+   *   include/v8-metrics.h
+   * needs to be included and the recorder needs to be derived from the
+   * Recorder base class defined there.
+   * This method can only be called once per isolate and must happen during
+   * isolate initialization before background threads are spawned.
+   */
+  void SetMetricsRecorder(
+      const std::shared_ptr<metrics::Recorder>& metrics_recorder);
 
   /**
    * Enables the host application to provide a mechanism for recording a
@@ -10146,8 +10193,6 @@ class V8_EXPORT TryCatch {
   /**
    * Returns the exception caught by this try/catch block.  If no exception has
    * been caught an empty handle is returned.
-   *
-   * The returned handle is valid until this TryCatch block has been destroyed.
    */
   Local<Value> Exception() const;
 
@@ -10169,9 +10214,6 @@ class V8_EXPORT TryCatch {
   /**
    * Returns the message associated with this exception.  If there is
    * no message associated an empty handle is returned.
-   *
-   * The returned handle is valid until this TryCatch block has been
-   * destroyed.
    */
   Local<v8::Message> Message() const;
 
@@ -10976,7 +11018,7 @@ template <class T>
 void TracedReferenceBase<T>::Reset() {
   if (IsEmpty()) return;
   V8::DisposeTracedGlobal(reinterpret_cast<internal::Address*>(val_));
-  val_ = nullptr;
+  SetSlotThreadSafe(nullptr);
 }
 
 template <class T>
@@ -11032,10 +11074,11 @@ template <class T>
 template <class S>
 void TracedReference<T>::Reset(Isolate* isolate, const Local<S>& other) {
   static_assert(std::is_base_of<T, S>::value, "type check");
-  Reset();
+  this->Reset();
   if (other.IsEmpty()) return;
-  this->val_ = this->New(isolate, other.val_, &this->val_,
-                         TracedReferenceBase<T>::kWithoutDestructor);
+  this->SetSlotThreadSafe(
+      this->New(isolate, other.val_, &this->val_,
+                TracedReferenceBase<T>::kWithoutDestructor));
 }
 
 template <class T>
@@ -12018,37 +12061,6 @@ MaybeLocal<T> Isolate::GetDataFromSnapshotOnce(size_t index) {
   T* data = reinterpret_cast<T*>(GetDataFromSnapshotOnce(index));
   if (data) internal::PerformCastCheck(data);
   return Local<T>(data);
-}
-
-int64_t Isolate::AdjustAmountOfExternalAllocatedMemory(
-    int64_t change_in_bytes) {
-  typedef internal::Internals I;
-  int64_t* external_memory = reinterpret_cast<int64_t*>(
-      reinterpret_cast<uint8_t*>(this) + I::kExternalMemoryOffset);
-  int64_t* external_memory_limit = reinterpret_cast<int64_t*>(
-      reinterpret_cast<uint8_t*>(this) + I::kExternalMemoryLimitOffset);
-  int64_t* external_memory_low_since_mc =
-      reinterpret_cast<int64_t*>(reinterpret_cast<uint8_t*>(this) +
-                                 I::kExternalMemoryLowSinceMarkCompactOffset);
-
-  // Embedders are weird: we see both over- and underflows here. Perform the
-  // addition with unsigned types to avoid undefined behavior.
-  const int64_t amount =
-      static_cast<int64_t>(static_cast<uint64_t>(change_in_bytes) +
-                           static_cast<uint64_t>(*external_memory));
-  *external_memory = amount;
-
-  if (amount < *external_memory_low_since_mc) {
-    *external_memory_low_since_mc = amount;
-    *external_memory_limit = amount + I::kExternalAllocationSoftLimit;
-  }
-
-  if (change_in_bytes <= 0) return *external_memory;
-
-  if (amount > *external_memory_limit) {
-    ReportExternalAllocationLimitReached();
-  }
-  return *external_memory;
 }
 
 Local<Value> Context::GetEmbedderData(int index) {
