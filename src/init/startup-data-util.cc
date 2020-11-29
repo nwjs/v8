@@ -82,16 +82,7 @@ void InitializeExternalStartupData(const char* directory_path) {
   }
 #endif
 #endif
-#ifdef __APPLE__
-#if V8_TARGET_ARCH_X64
-  const char* snapshot_name = "v8_context_snapshot.x86_64.bin";
-#else
-  const char* snapshot_name = "v8_context_snapshot.arm64.bin";
-#endif
-#else
-  const char* snapshot_name = "v8_context_snapshot.bin";
-#endif
-  std::unique_ptr<char[]> snapshot = base::RelativePath(directory_path, snapshot_name);
+  std::unique_ptr<char[]> snapshot = base::RelativePath(directory_path, "v8_context_snapshot.bin");
   LoadFromFile(snapshot.get());
 #endif  // V8_USE_EXTERNAL_STARTUP_DATA
 }
