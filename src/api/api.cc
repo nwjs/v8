@@ -11460,7 +11460,7 @@ void FixSourceNWBin(Isolate* v8_isolate, Local<Module> module) {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
   i::Handle<i::SourceTextModule> obj =
     i::Handle<i::SourceTextModule>::cast(v8::Utils::OpenHandle(*module));
-  i::Handle<i::Script> iscript(i::Script::cast(obj->GetScript()), isolate);
+  i::Handle<i::Script> iscript(i::Script::cast(obj->script()), isolate);
   iscript->set_source(i::ReadOnlyRoots(isolate).undefined_value());
 }
 
