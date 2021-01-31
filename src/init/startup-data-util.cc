@@ -10,6 +10,7 @@
 #include "src/base/file-utils.h"
 #include "src/base/logging.h"
 #include "src/base/platform/platform.h"
+#include "src/base/platform/wrappers.h"
 #include "src/flags/flags.h"
 #include "src/utils/utils.h"
 
@@ -42,7 +43,7 @@ void Load(const char* blob_file, v8::StartupData* startup_data,
 
   CHECK(blob_file);
 
-  FILE* file = fopen(blob_file, "rb");
+  FILE* file = base::Fopen(blob_file, "rb");
   if (!file) {
     PrintF(stderr, "Failed to open startup resource '%s'.\n", blob_file);
     return;
@@ -55,7 +56,7 @@ void Load(const char* blob_file, v8::StartupData* startup_data,
   startup_data->data = new char[startup_data->raw_size];
   int read_size = static_cast<int>(fread(const_cast<char*>(startup_data->data),
                                          1, startup_data->raw_size, file));
-  fclose(file);
+  base::Fclose(file);
 
   if (startup_data->raw_size == read_size) {
     (*setter_fn)(startup_data);
@@ -82,16 +83,7 @@ void InitializeExternalStartupData(const char* directory_path) {
   }
 #endif
 #endif
-#ifdef __APPLE__
-#if V8_TARGET_ARCH_X64
-  const char* snapshot_name = "v8_context_snapshot.x86_64.bin";
-#else
-  const char* snapshot_name = "v8_context_snapshot.arm64.bin";
-#endif
-#else
-  const char* snapshot_name = "v8_context_snapshot.bin";
-#endif
-  std::unique_ptr<char[]> snapshot = base::RelativePath(directory_path, snapshot_name);
+  std::unique_ptr<char[]> snapshot = base::RelativePath(directory_path, "v8_context_snapshot.bin");
   LoadFromFile(snapshot.get());
 #endif  // V8_USE_EXTERNAL_STARTUP_DATA
 }
