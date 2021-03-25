@@ -8496,7 +8496,6 @@ class V8_EXPORT Isolate {
 
   void SetArrayBufferAllocatorShared(
                                      std::shared_ptr<ArrayBuffer::Allocator> allocator);
-
   /**
    * Stack-allocated class which sets the isolate for all operations
    * executed within a local scope.

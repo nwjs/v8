@@ -43,8 +43,6 @@ ObjectDeserializer::DeserializeSharedFunctionInfoOffThread(
 
 MaybeHandle<HeapObject> ObjectDeserializer::Deserialize() {
   DCHECK(deserializing_user_code());
-  if (!valid_)
-    return MaybeHandle<HeapObject>();
   HandleScope scope(isolate());
   Handle<HeapObject> result;
   {
