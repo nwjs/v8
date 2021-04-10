@@ -333,6 +333,7 @@ MaybeHandle<SharedFunctionInfo> CodeSerializer::Deserialize(
   if (!maybe_result.ToHandle(&result)) {
     // Deserializing may fail if the reservations cannot be fulfilled.
     if (FLAG_profile_deserialization) PrintF("[Deserializing failed]\n");
+    cached_data->Reject();
     return MaybeHandle<SharedFunctionInfo>();
   }
 

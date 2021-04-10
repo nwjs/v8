@@ -821,7 +821,7 @@ TEST(GeneralizeDoubleFieldToTagged) {
       {PropertyConstness::kMutable, Representation::Double(), any_type},
       {PropertyConstness::kMutable, Representation::HeapObject(), value_type},
       {PropertyConstness::kMutable, Representation::Tagged(), any_type},
-      FLAG_unbox_double_fields ? kDeprecation : kFieldOwnerDependency);
+      kFieldOwnerDependency);
 }
 
 TEST(GeneralizeHeapObjectFieldToTagged) {
@@ -1237,25 +1237,25 @@ TEST(ReconfigureDataFieldAttribute_GeneralizeDoubleFieldToTagged) {
       {PropertyConstness::kConst, Representation::Double(), any_type},
       {PropertyConstness::kConst, Representation::HeapObject(), value_type},
       {PropertyConstness::kConst, Representation::Tagged(), any_type},
-      FLAG_unbox_double_fields ? kDeprecation : kFieldOwnerDependency);
+      kFieldOwnerDependency);
 
   TestReconfigureDataFieldAttribute_GeneralizeField(
       {PropertyConstness::kConst, Representation::Double(), any_type},
       {PropertyConstness::kMutable, Representation::HeapObject(), value_type},
       {PropertyConstness::kMutable, Representation::Tagged(), any_type},
-      FLAG_unbox_double_fields ? kDeprecation : kFieldOwnerDependency);
+      kFieldOwnerDependency);
 
   TestReconfigureDataFieldAttribute_GeneralizeField(
       {PropertyConstness::kMutable, Representation::Double(), any_type},
       {PropertyConstness::kConst, Representation::HeapObject(), value_type},
       {PropertyConstness::kMutable, Representation::Tagged(), any_type},
-      FLAG_unbox_double_fields ? kDeprecation : kFieldOwnerDependency);
+      kFieldOwnerDependency);
 
   TestReconfigureDataFieldAttribute_GeneralizeField(
       {PropertyConstness::kMutable, Representation::Double(), any_type},
       {PropertyConstness::kMutable, Representation::HeapObject(), value_type},
       {PropertyConstness::kMutable, Representation::Tagged(), any_type},
-      FLAG_unbox_double_fields ? kDeprecation : kFieldOwnerDependency);
+      kFieldOwnerDependency);
 }
 
 TEST(ReconfigureDataFieldAttribute_GeneralizeHeapObjFieldToHeapObj) {
@@ -2294,7 +2294,7 @@ TEST(ElementsKindTransitionFromMapOwningDescriptor) {
         {PropertyConstness::kMutable, Representation::Double(), any_type},
         {PropertyConstness::kMutable, Representation::HeapObject(), value_type},
         {PropertyConstness::kMutable, Representation::Tagged(), any_type},
-        FLAG_unbox_double_fields ? kDeprecation : kFieldOwnerDependency);
+        kFieldOwnerDependency);
   }
 }
 
@@ -2362,7 +2362,7 @@ TEST(ElementsKindTransitionFromMapNotOwningDescriptor) {
         {PropertyConstness::kMutable, Representation::Double(), any_type},
         {PropertyConstness::kMutable, Representation::HeapObject(), value_type},
         {PropertyConstness::kMutable, Representation::Tagged(), any_type},
-        FLAG_unbox_double_fields ? kDeprecation : kFieldOwnerDependency);
+        kFieldOwnerDependency);
   }
 }
 
@@ -2406,7 +2406,7 @@ TEST(PrototypeTransitionFromMapOwningDescriptor) {
       {PropertyConstness::kMutable, Representation::Double(), any_type},
       {PropertyConstness::kMutable, Representation::HeapObject(), value_type},
       {PropertyConstness::kMutable, Representation::Tagged(), any_type},
-      FLAG_unbox_double_fields ? kDeprecation : kFieldOwnerDependency);
+      kFieldOwnerDependency);
 }
 
 TEST(PrototypeTransitionFromMapNotOwningDescriptor) {
@@ -2460,7 +2460,7 @@ TEST(PrototypeTransitionFromMapNotOwningDescriptor) {
       {PropertyConstness::kMutable, Representation::Double(), any_type},
       {PropertyConstness::kMutable, Representation::HeapObject(), value_type},
       {PropertyConstness::kMutable, Representation::Tagged(), any_type},
-      FLAG_unbox_double_fields ? kDeprecation : kFieldOwnerDependency);
+      kFieldOwnerDependency);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

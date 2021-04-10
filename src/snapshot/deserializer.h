@@ -28,9 +28,10 @@ class Object;
 
 // Used for platforms with embedded constant pools to trigger deserialization
 // of objects found in code.
-#if defined(V8_TARGET_ARCH_MIPS) || defined(V8_TARGET_ARCH_MIPS64) || \
-    defined(V8_TARGET_ARCH_PPC) || defined(V8_TARGET_ARCH_S390) ||    \
-    defined(V8_TARGET_ARCH_PPC64) || V8_EMBEDDED_CONSTANT_POOL
+#if defined(V8_TARGET_ARCH_MIPS) || defined(V8_TARGET_ARCH_MIPS64) ||   \
+    defined(V8_TARGET_ARCH_PPC) || defined(V8_TARGET_ARCH_S390) ||      \
+    defined(V8_TARGET_ARCH_PPC64) || defined(V8_TARGET_ARCH_RISCV64) || \
+    V8_EMBEDDED_CONSTANT_POOL
 #define V8_CODE_EMBEDS_OBJECT_POINTER 1
 #else
 #define V8_CODE_EMBEDS_OBJECT_POINTER 0
@@ -129,6 +130,8 @@ class V8_EXPORT_PRIVATE Deserializer : public SerializerDeserializer {
   void Rehash();
 
   Handle<HeapObject> ReadObject();
+
+  bool valid_ = true;
 
  private:
   class RelocInfoVisitor;

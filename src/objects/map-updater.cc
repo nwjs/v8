@@ -46,11 +46,15 @@ PropertyDetails MapUpdater::GetDetails(InternalIndex descriptor) const {
   DCHECK(descriptor.is_found());
   if (descriptor == modified_descriptor_) {
     PropertyAttributes attributes = new_attributes_;
-    // If the original map was sealed or frozen, let us used the old
+    // If the original map was sealed or frozen, let's use the old
     // attributes so that we follow the same transition path as before.
     // Note that the user could not have changed the attributes because
-    // both seal and freeze make the properties non-configurable.
-    if (integrity_level_ == SEALED || integrity_level_ == FROZEN) {
+    // both seal and freeze make the properties non-configurable. An exception
+    // is transitioning from [[Writable]] = true to [[Writable]] = false (this
+    // is allowed for frozen and sealed objects). To support it, we use the new
+    // attributes if they have [[Writable]] == false.
+    if ((integrity_level_ == SEALED || integrity_level_ == FROZEN) &&
+        !(new_attributes_ & READ_ONLY)) {
       attributes = old_descriptors_->GetDetails(descriptor).attributes();
     }
     return PropertyDetails(new_kind_, attributes, new_location_, new_constness_,
@@ -810,17 +814,13 @@ MapUpdater::State MapUpdater::ConstructNewMap() {
         old_value, new_field_type, new_value);
   }
 
-  Handle<LayoutDescriptor> new_layout_descriptor =
-      LayoutDescriptor::New(isolate_, split_map, new_descriptors, old_nof_);
-
-  Handle<Map> new_map = Map::AddMissingTransitions(
-      isolate_, split_map, new_descriptors, new_layout_descriptor);
+  Handle<Map> new_map =
+      Map::AddMissingTransitions(isolate_, split_map, new_descriptors);
 
   // Deprecated part of the transition tree is no longer reachable, so replace
   // current instance descriptors in the "survived" part of the tree with
   // the new descriptors to maintain descriptors sharing invariant.
-  split_map->ReplaceDescriptors(isolate_, *new_descriptors,
-                                *new_layout_descriptor);
+  split_map->ReplaceDescriptors(isolate_, *new_descriptors);
 
   if (has_integrity_level_transition_) {
     target_map_ = new_map;
