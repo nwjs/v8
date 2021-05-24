@@ -28,7 +28,10 @@
 #include "src/numbers/conversions-inl.h"
 #include "src/objects/objects.h"
 #include "src/utils/address-map.h"
+
+#if V8_ENABLE_WEBASSEMBLY
 #include "src/wasm/value-type.h"
+#endif  // V8_ENABLE_WEBASSEMBLY
 
 namespace v8 {
 namespace internal {
@@ -1420,17 +1423,31 @@ class RepresentationSelector {
     return jsgraph_->simplified();
   }
 
-  void LowerToCheckedInt32Mul(Node* node, Truncation truncation,
-                              Type input0_type, Type input1_type) {
-    // If one of the inputs is positive and/or truncation is being applied,
-    // there is no need to return -0.
-    CheckForMinusZeroMode mz_mode =
-        truncation.IdentifiesZeroAndMinusZero() ||
-                IsSomePositiveOrderedNumber(input0_type) ||
-                IsSomePositiveOrderedNumber(input1_type)
-            ? CheckForMinusZeroMode::kDontCheckForMinusZero
-            : CheckForMinusZeroMode::kCheckForMinusZero;
-    ChangeOp(node, simplified()->CheckedInt32Mul(mz_mode));
+  template <Phase T>
+  void VisitForCheckedInt32Mul(Node* node, Truncation truncation,
+                               Type input0_type, Type input1_type,
+                               UseInfo input_use) {
+    DCHECK_EQ(node->opcode(), IrOpcode::kSpeculativeNumberMultiply);
+    // A -0 input is impossible or will cause a deopt.
+    DCHECK(BothInputsAre(node, Type::Signed32()) ||
+           !input_use.truncation().IdentifiesZeroAndMinusZero());
+
+    CheckForMinusZeroMode mz_mode;
+    Type restriction;
+    if (IsSomePositiveOrderedNumber(input0_type) ||
+        IsSomePositiveOrderedNumber(input1_type)) {
+      mz_mode = CheckForMinusZeroMode::kDontCheckForMinusZero;
+      restriction = Type::Signed32();
+    } else if (truncation.IdentifiesZeroAndMinusZero()) {
+      mz_mode = CheckForMinusZeroMode::kDontCheckForMinusZero;
+      restriction = Type::Signed32OrMinusZero();
+    } else {
+      mz_mode = CheckForMinusZeroMode::kCheckForMinusZero;
+      restriction = Type::Signed32();
+    }
+
+    VisitBinop<T>(node, input_use, MachineRepresentation::kWord32, restriction);
+    if (lower<T>()) ChangeOp(node, simplified()->CheckedInt32Mul(mz_mode));
   }
 
   void ChangeToInt32OverflowOp(Node* node) {
@@ -1618,12 +1635,22 @@ class RepresentationSelector {
         VisitBinop<T>(node, lhs_use, rhs_use, MachineRepresentation::kWord32);
         if (lower<T>()) DeferReplacement(node, lowering->Int32Mod(node));
       } else if (BothInputsAre(node, Type::Unsigned32OrMinusZeroOrNaN())) {
+        Type const restriction =
+            truncation.IdentifiesZeroAndMinusZero() &&
+                    TypeOf(node->InputAt(0)).Maybe(Type::MinusZero())
+                ? Type::Unsigned32OrMinusZero()
+                : Type::Unsigned32();
         VisitBinop<T>(node, lhs_use, rhs_use, MachineRepresentation::kWord32,
-                      Type::Unsigned32());
+                      restriction);
         if (lower<T>()) ChangeToUint32OverflowOp(node);
       } else {
+        Type const restriction =
+            truncation.IdentifiesZeroAndMinusZero() &&
+                    TypeOf(node->InputAt(0)).Maybe(Type::MinusZero())
+                ? Type::Signed32OrMinusZero()
+                : Type::Signed32();
         VisitBinop<T>(node, lhs_use, rhs_use, MachineRepresentation::kWord32,
-                      Type::Signed32());
+                      restriction);
         if (lower<T>()) ChangeToInt32OverflowOp(node);
       }
       return;
@@ -1809,6 +1836,7 @@ class RepresentationSelector {
     SetOutput<T>(node, MachineRepresentation::kTagged);
   }
 
+#if V8_ENABLE_WEBASSEMBLY
   static MachineType MachineTypeForWasmReturnType(wasm::ValueType type) {
     switch (type.kind()) {
       case wasm::kI32:
@@ -1907,6 +1935,7 @@ class RepresentationSelector {
     // The actual lowering of JSWasmCall nodes happens later, in the subsequent
     // "wasm-inlining" phase.
   }
+#endif  // V8_ENABLE_WEBASSEMBLY
 
   // Dispatching routine for visiting the node {node} with the usage {use}.
   // Depending on the operator, propagate new usage info to the inputs.
@@ -2254,22 +2283,16 @@ class RepresentationSelector {
         if (BothInputsAre(node, Type::Signed32())) {
           // If both inputs and feedback are int32, use the overflow op.
           if (hint == NumberOperationHint::kSignedSmall) {
-            VisitBinop<T>(node, UseInfo::TruncatingWord32(),
-                          MachineRepresentation::kWord32, Type::Signed32());
-            if (lower<T>()) {
-              LowerToCheckedInt32Mul(node, truncation, input0_type,
-                                     input1_type);
-            }
+            VisitForCheckedInt32Mul<T>(node, truncation, input0_type,
+                                       input1_type,
+                                       UseInfo::TruncatingWord32());
             return;
           }
         }
 
         if (hint == NumberOperationHint::kSignedSmall) {
-          VisitBinop<T>(node, CheckedUseInfoAsWord32FromHint(hint),
-                        MachineRepresentation::kWord32, Type::Signed32());
-          if (lower<T>()) {
-            LowerToCheckedInt32Mul(node, truncation, input0_type, input1_type);
-          }
+          VisitForCheckedInt32Mul<T>(node, truncation, input0_type, input1_type,
+                                     CheckedUseInfoAsWord32FromHint(hint));
           return;
         }
 
@@ -3836,9 +3859,11 @@ class RepresentationSelector {
       case IrOpcode::kJSToObject:
       case IrOpcode::kJSToString:
       case IrOpcode::kJSParseInt:
+#if V8_ENABLE_WEBASSEMBLY
         if (node->opcode() == IrOpcode::kJSWasmCall) {
           return VisitJSWasmCall<T>(node, lowering);
         }
+#endif  // V8_ENABLE_WEBASSEMBLY
         VisitInputs<T>(node);
         // Assume the output is tagged.
         return SetOutput<T>(node, MachineRepresentation::kTagged);
@@ -4002,7 +4027,6 @@ template <>
 void RepresentationSelector::SetOutput<RETYPE>(
     Node* node, MachineRepresentation representation, Type restriction_type) {
   NodeInfo* const info = GetInfo(node);
-  DCHECK(info->restriction_type().Is(restriction_type));
   DCHECK(restriction_type.Is(info->restriction_type()));
   info->set_output(representation);
 }
@@ -4012,7 +4036,6 @@ void RepresentationSelector::SetOutput<LOWER>(
     Node* node, MachineRepresentation representation, Type restriction_type) {
   NodeInfo* const info = GetInfo(node);
   DCHECK_EQ(info->representation(), representation);
-  DCHECK(info->restriction_type().Is(restriction_type));
   DCHECK(restriction_type.Is(info->restriction_type()));
   USE(info);
 }

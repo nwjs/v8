@@ -69,7 +69,8 @@ FunctionLiteral* Parser::DefaultConstructor(const AstRawString* name,
 
         args.Add(spread_args);
         Expression* super_call_ref = NewSuperCallReference(pos);
-        call = factory()->NewCall(super_call_ref, args, pos);
+        constexpr bool has_spread = true;
+        call = factory()->NewCall(super_call_ref, args, pos, has_spread);
       }
       body.Add(factory()->NewReturnStatement(call, pos));
     }
@@ -489,12 +490,14 @@ void Parser::DeserializeScopeChain(
 namespace {
 
 void MaybeResetCharacterStream(ParseInfo* info, FunctionLiteral* literal) {
+#if V8_ENABLE_WEBASSEMBLY
   // Don't reset the character stream if there is an asm.js module since it will
   // be used again by the asm-parser.
   if (info->contains_asm_module()) {
     if (FLAG_stress_validate_asm) return;
     if (literal != nullptr && literal->scope()->ContainsAsmModule()) return;
   }
+#endif  // V8_ENABLE_WEBASSEMBLY
   info->ResetCharacterStream();
 }
 
@@ -750,8 +753,8 @@ void Parser::ParseWrapped(Isolate* isolate, ParseInfo* info,
       kNoSourcePosition, FunctionSyntaxKind::kWrapped, LanguageMode::kSloppy,
       arguments_for_wrapped_function);
 
-  Statement* return_statement = factory()->NewReturnStatement(
-      function_literal, kNoSourcePosition, kNoSourcePosition);
+  Statement* return_statement =
+      factory()->NewReturnStatement(function_literal, kNoSourcePosition);
   body->Add(return_statement);
 }
 
@@ -1997,8 +2000,8 @@ void Parser::ParseAndRewriteAsyncGeneratorFunctionBody(
 
     Expression* reject_call = factory()->NewCallRuntime(
         Runtime::kInlineAsyncGeneratorReject, reject_args, kNoSourcePosition);
-    catch_block = IgnoreCompletion(
-        factory()->NewReturnStatement(reject_call, kNoSourcePosition));
+    catch_block = IgnoreCompletion(factory()->NewReturnStatement(
+        reject_call, kNoSourcePosition, kNoSourcePosition));
   }
 
   {
@@ -2865,8 +2868,8 @@ Block* Parser::BuildRejectPromiseOnException(Block* inner_block,
     reject_promise = factory()->NewCallRuntime(
         Runtime::kInlineAsyncFunctionReject, args, kNoSourcePosition);
   }
-  Block* catch_block = IgnoreCompletion(
-      factory()->NewReturnStatement(reject_promise, kNoSourcePosition));
+  Block* catch_block = IgnoreCompletion(factory()->NewReturnStatement(
+      reject_promise, kNoSourcePosition, kNoSourcePosition));
 
   // Treat the exception for REPL mode scripts as UNCAUGHT. This will
   // keep the corresponding JSMessageObject alive on the Isolate. The
@@ -3342,19 +3345,6 @@ Expression* Parser::CloseTemplateLiteral(TemplateLiteralState* state, int start,
   }
 }
 
-namespace {
-
-bool OnlyLastArgIsSpread(const ScopedPtrList<Expression>& args) {
-  for (int i = 0; i < args.length() - 1; i++) {
-    if (args.at(i)->IsSpread()) {
-      return false;
-    }
-  }
-  return args.at(args.length() - 1)->IsSpread();
-}
-
-}  // namespace
-
 ArrayLiteral* Parser::ArrayLiteralFromListWithSpread(
     const ScopedPtrList<Expression>& list) {
   // If there's only a single spread argument, a fast path using CallWithSpread
@@ -3371,58 +3361,6 @@ ArrayLiteral* Parser::ArrayLiteralFromListWithSpread(
   return factory()->NewArrayLiteral(list, first_spread, kNoSourcePosition);
 }
 
-Expression* Parser::SpreadCall(Expression* function,
-                               const ScopedPtrList<Expression>& args_list,
-                               int pos, Call::PossiblyEval is_possibly_eval,
-                               bool optional_chain) {
-  // Handle this case in BytecodeGenerator.
-  if (OnlyLastArgIsSpread(args_list) || function->IsSuperCallReference()) {
-    return factory()->NewCall(function, args_list, pos, Call::NOT_EVAL,
-                              optional_chain);
-  }
-
-  ScopedPtrList<Expression> args(pointer_buffer());
-  if (function->IsProperty()) {
-    // Method calls
-    if (function->AsProperty()->IsSuperAccess()) {
-      Expression* home = ThisExpression();
-      args.Add(function);
-      args.Add(home);
-    } else {
-      Variable* temp = NewTemporary(ast_value_factory()->empty_string());
-      VariableProxy* obj = factory()->NewVariableProxy(temp);
-      Assignment* assign_obj = factory()->NewAssignment(
-          Token::ASSIGN, obj, function->AsProperty()->obj(), kNoSourcePosition);
-      function =
-          factory()->NewProperty(assign_obj, function->AsProperty()->key(),
-                                 kNoSourcePosition, optional_chain);
-      args.Add(function);
-      obj = factory()->NewVariableProxy(temp);
-      args.Add(obj);
-    }
-  } else {
-    // Non-method calls
-    args.Add(function);
-    args.Add(factory()->NewUndefinedLiteral(kNoSourcePosition));
-  }
-  args.Add(ArrayLiteralFromListWithSpread(args_list));
-  return factory()->NewCallRuntime(Context::REFLECT_APPLY_INDEX, args, pos);
-}
-
-Expression* Parser::SpreadCallNew(Expression* function,
-                                  const ScopedPtrList<Expression>& args_list,
-                                  int pos) {
-  if (OnlyLastArgIsSpread(args_list)) {
-    // Handle in BytecodeGenerator.
-    return factory()->NewCallNew(function, args_list, pos);
-  }
-  ScopedPtrList<Expression> args(pointer_buffer());
-  args.Add(function);
-  args.Add(ArrayLiteralFromListWithSpread(args_list));
-
-  return factory()->NewCallRuntime(Context::REFLECT_CONSTRUCT_INDEX, args, pos);
-}
-
 void Parser::SetLanguageMode(Scope* scope, LanguageMode mode) {
   v8::Isolate::UseCounterFeature feature;
   if (is_sloppy(mode))
@@ -3435,6 +3373,7 @@ void Parser::SetLanguageMode(Scope* scope, LanguageMode mode) {
   scope->SetLanguageMode(mode);
 }
 
+#if V8_ENABLE_WEBASSEMBLY
 void Parser::SetAsmModule() {
   // Store the usage count; The actual use counter on the isolate is
   // incremented after parsing is done.
@@ -3443,6 +3382,7 @@ void Parser::SetAsmModule() {
   scope()->AsDeclarationScope()->set_is_asm_module();
   info_->set_contains_asm_module(true);
 }
+#endif  // V8_ENABLE_WEBASSEMBLY
 
 Expression* Parser::ExpressionListToExpression(
     const ScopedPtrList<Expression>& args) {
