@@ -735,7 +735,7 @@ void ScopeIterator::VisitScriptScope(const Visitor& visitor) const {
 
   // Skip the first script since that just declares 'this'.
   for (int context_index = 1;
-       context_index < script_contexts->synchronized_used(); context_index++) {
+       context_index < script_contexts->used(kAcquireLoad); context_index++) {
     Handle<Context> context = ScriptContextTable::GetContext(
         isolate_, script_contexts, context_index);
     Handle<ScopeInfo> scope_info(context->scope_info(), isolate_);
@@ -828,7 +828,6 @@ bool ScopeIterator::VisitLocals(const Visitor& visitor, Mode mode,
     switch (var->location()) {
       case VariableLocation::LOOKUP:
         UNREACHABLE();
-        break;
 
       case VariableLocation::REPL_GLOBAL:
         // REPL declared variables are ignored for now.
@@ -1060,14 +1059,9 @@ bool ScopeIterator::SetContextExtensionValue(Handle<String> variable_name,
 
 bool ScopeIterator::SetContextVariableValue(Handle<String> variable_name,
                                             Handle<Object> new_value) {
-  DisallowGarbageCollection no_gc;
-  VariableMode mode;
-  InitializationFlag flag;
-  MaybeAssignedFlag maybe_assigned_flag;
-  IsStaticFlag is_static_flag;
-  int slot_index =
-      ScopeInfo::ContextSlotIndex(context_->scope_info(), *variable_name, &mode,
-                                  &flag, &maybe_assigned_flag, &is_static_flag);
+  VariableLookupResult lookup_result;
+  int slot_index = ScopeInfo::ContextSlotIndex(context_->scope_info(),
+                                               *variable_name, &lookup_result);
   if (slot_index < 0) return false;
 
   context_->set(slot_index, *new_value);
@@ -1100,7 +1094,7 @@ bool ScopeIterator::SetScriptVariableValue(Handle<String> variable_name,
   Handle<ScriptContextTable> script_contexts(
       context_->global_object().native_context().script_context_table(),
       isolate_);
-  ScriptContextTable::LookupResult lookup_result;
+  VariableLookupResult lookup_result;
   if (ScriptContextTable::Lookup(isolate_, *script_contexts, *variable_name,
                                  &lookup_result)) {
     Handle<Context> script_context = ScriptContextTable::GetContext(

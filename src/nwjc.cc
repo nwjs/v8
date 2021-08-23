@@ -162,7 +162,7 @@ int main(int argc, char** argv) {
 
     i::Isolate* iso = reinterpret_cast<i::Isolate*>(isolate);
     i::Handle<i::String> orig_source = iso->factory()
-      ->NewStringFromUtf8(i::CStrVector(chars)).ToHandleChecked();
+      ->NewStringFromUtf8(base::CStrVector(chars)).ToHandleChecked();
 
     ScriptCompiler::CachedData* cache = NULL;
     i::MaybeHandle<i::SharedFunctionInfo> maybe_func = i::Compiler::GetSharedFunctionInfoForScript(iso, orig_source,
