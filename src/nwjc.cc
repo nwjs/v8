@@ -18,6 +18,7 @@
 #include "src/codegen/assembler.h"
 #include "src/base/platform/platform.h"
 #include "src/codegen/compiler.h"
+#include "src/codegen/script-details.h"
 #include "src/heap/factory.h"
 #include "src/execution/isolate-inl.h"
 #include "src/flags/flags.h"
@@ -165,9 +166,11 @@ int main(int argc, char** argv) {
       ->NewStringFromUtf8(base::CStrVector(chars)).ToHandleChecked();
 
     ScriptCompiler::CachedData* cache = NULL;
+    i::ScriptDetails script_details(iso->factory()->empty_string(),
+                                 v8::ScriptOriginOptions(false, false, false, i::FLAG_nw_module));
     i::MaybeHandle<i::SharedFunctionInfo> maybe_func = i::Compiler::GetSharedFunctionInfoForScript(iso, orig_source,
-                                                i::Compiler::ScriptDetails(),
-                                                v8::ScriptOriginOptions(false, false, false, i::FLAG_nw_module),
+                                                script_details,
+                                                                  //                                                v8::ScriptOriginOptions(false, false, false, i::FLAG_nw_module),
                                                 nullptr, nullptr,
                                                 v8::ScriptCompiler::kEagerCompile,
                                                 v8::ScriptCompiler::kNoCacheBecauseDeferredProduceCodeCache,
