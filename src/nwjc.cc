@@ -170,8 +170,6 @@ int main(int argc, char** argv) {
                                  v8::ScriptOriginOptions(false, false, false, i::FLAG_nw_module));
     i::MaybeHandle<i::SharedFunctionInfo> maybe_func = i::Compiler::GetSharedFunctionInfoForScript(iso, orig_source,
                                                 script_details,
-                                                                  //                                                v8::ScriptOriginOptions(false, false, false, i::FLAG_nw_module),
-                                                nullptr, nullptr,
                                                 v8::ScriptCompiler::kEagerCompile,
                                                 v8::ScriptCompiler::kNoCacheBecauseDeferredProduceCodeCache,
                                                 i::NOT_NATIVES_CODE);
