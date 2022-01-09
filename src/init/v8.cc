@@ -50,16 +50,13 @@ base::Thread::LocalStorageKey platform_tls_key_;
 
 v8::Platform* V8::platform_ = nullptr;
 
+void V8::Initialize() { base::CallOnce(&init_once, &InitializeOncePerProcess); }
+
 void V8::SetTLSPlatform(v8::Platform* platform) {
   base::Thread::SetThreadLocal(platform_tls_key_, platform);
 }
 
-bool V8::Initialize() {
-  InitializeOncePerProcess();
-  return true;
-}
-
-void V8::TearDown() {
+void V8::Dispose() {
 #if V8_ENABLE_WEBASSEMBLY
   wasm::WasmEngine::GlobalTearDown();
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -79,7 +76,7 @@ void V8::TearDown() {
     FLAG_##flag = false;                                                      \
   }
 
-void V8::InitializeOncePerProcessImpl() {
+void V8::InitializeOncePerProcess() {
   CHECK(platform_);
 
 #ifdef V8_VIRTUAL_MEMORY_CAGE
@@ -211,10 +208,6 @@ void V8::InitializeOncePerProcessImpl() {
   ExternalReferenceTable::InitializeOncePerProcess();
 }
 
-void V8::InitializeOncePerProcess() {
-  base::CallOnce(&init_once, &InitializeOncePerProcessImpl);
-}
-
 void V8::InitializePlatform(v8::Platform* platform) {
   CHECK(!platform_);
   CHECK(platform);
@@ -235,12 +228,12 @@ void V8::InitializePlatform(v8::Platform* platform) {
 bool V8::InitializeVirtualMemoryCage() {
   // Platform must have been initialized already.
   CHECK(platform_);
-  v8::PageAllocator* page_allocator = GetPlatformPageAllocator();
-  return GetProcessWideVirtualMemoryCage()->Initialize(page_allocator);
+  v8::VirtualAddressSpace* vas = GetPlatformVirtualAddressSpace();
+  return GetProcessWideVirtualMemoryCage()->Initialize(vas);
 }
 #endif
 
-void V8::ShutdownPlatform() {
+void V8::DisposePlatform() {
   CHECK(platform_);
 #if defined(V8_OS_WIN) && defined(V8_ENABLE_SYSTEM_INSTRUMENTATION)
   if (FLAG_enable_system_instrumentation) {

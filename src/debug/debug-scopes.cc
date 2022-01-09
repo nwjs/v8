@@ -272,9 +272,12 @@ void ScopeIterator::TryParseAndRetrieveScopes(ReparseStrategy strategy) {
            scope_info->scope_type() == FUNCTION_SCOPE);
   }
 
-  UnoptimizedCompileState compile_state(isolate_);
+  UnoptimizedCompileState compile_state;
 
-  info_ = std::make_unique<ParseInfo>(isolate_, flags, &compile_state);
+  reusable_compile_state_ =
+      std::make_unique<ReusableUnoptimizedCompileState>(isolate_);
+  info_ = std::make_unique<ParseInfo>(isolate_, flags, &compile_state,
+                                      reusable_compile_state_.get());
 
   bool has_source_code = shared_info->HasSourceCode();
   bool parse_result = false;
