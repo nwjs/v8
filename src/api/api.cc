@@ -3326,11 +3326,9 @@ Location StackFrame::GetLocation() const {
   i::Isolate* isolate = self->GetIsolate();
   i::Handle<i::Script> script(self->script(), isolate);
   i::Script::PositionInfo info;
-#if 0
-  CHECK(i::Script::GetPositionInfo(script,
+  i::Script::GetPositionInfo(script,
                                    i::StackFrameInfo::GetSourcePosition(self),
-                                   &info, i::Script::WITH_OFFSET));
-#endif
+                                   &info, i::Script::WITH_OFFSET);
   if (script->HasSourceURLComment()) {
     info.line -= script->line_offset();
     if (info.line == 0) {
