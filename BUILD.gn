@@ -474,7 +474,7 @@ if (v8_enable_shared_ro_heap == "") {
 }
 
 # Enable the v8 sandbox on 64-bit Chromium builds.
-if (build_with_chromium && v8_enable_pointer_compression_shared_cage) {
+if (false && build_with_chromium && v8_enable_pointer_compression_shared_cage) {
   v8_enable_sandbox = true
 }
 
