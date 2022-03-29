@@ -17,7 +17,6 @@
 #include "src/deoptimizer/deoptimizer.h"
 #include "src/execution/frames.h"
 #include "src/execution/isolate.h"
-#include "src/execution/runtime-profiler.h"
 #include "src/execution/simulator.h"
 #include "src/init/bootstrapper.h"
 #include "src/libsampler/sampler.h"
@@ -98,8 +97,10 @@ void V8::InitializePlatform(v8::Platform* platform) {
   CHECK(!platform_);
   CHECK_NOT_NULL(platform);
   platform_ = platform;
+
   platform_tls_key_ = base::Thread::CreateThreadLocalKey();
   base::Thread::SetThreadLocal(platform_tls_key_, platform);
+
   v8::base::SetPrintStackTrace(platform_->GetStackTracePrinter());
   v8::tracing::TracingCategoryObserver::SetUp();
 #if defined(V8_OS_WIN) && defined(V8_ENABLE_SYSTEM_INSTRUMENTATION)
