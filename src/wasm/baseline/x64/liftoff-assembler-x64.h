@@ -53,14 +53,15 @@ inline constexpr Condition ToCondition(LiftoffCondition liftoff_cond) {
 constexpr Register kScratchRegister2 = r11;
 static_assert(kScratchRegister != kScratchRegister2, "collision");
 static_assert((kLiftoffAssemblerGpCacheRegs &
-               Register::ListOf(kScratchRegister, kScratchRegister2)) == 0,
+               RegList{kScratchRegister, kScratchRegister2})
+                  .is_empty(),
               "scratch registers must not be used as cache registers");
 
 constexpr DoubleRegister kScratchDoubleReg2 = xmm14;
 static_assert(kScratchDoubleReg != kScratchDoubleReg2, "collision");
 static_assert((kLiftoffAssemblerFpCacheRegs &
-               DoubleRegister::ListOf(kScratchDoubleReg, kScratchDoubleReg2)) ==
-                  0,
+               DoubleRegList{kScratchDoubleReg, kScratchDoubleReg2})
+                  .is_empty(),
               "scratch registers must not be used as cache registers");
 
 // rbp-8 holds the stack marker, rbp-16 is the instance parameter.
@@ -871,7 +872,12 @@ void LiftoffAssembler::MoveStackValue(uint32_t dst_offset, uint32_t src_offset,
   DCHECK_NE(dst_offset, src_offset);
   Operand dst = liftoff::GetStackSlot(dst_offset);
   Operand src = liftoff::GetStackSlot(src_offset);
-  switch (element_size_log2(kind)) {
+  size_t size = element_size_log2(kind);
+  if (kind == kRef || kind == kOptRef || kind == kRtt) {
+    // Pointers are uncompressed on the stack!
+    size = kSystemPointerSizeLog2;
+  }
+  switch (size) {
     case 2:
       movl(kScratchRegister, src);
       movl(dst, kScratchRegister);
@@ -4053,15 +4059,14 @@ void LiftoffAssembler::PopRegisters(LiftoffRegList regs) {
   }
 }
 
-void LiftoffAssembler::RecordSpillsInSafepoint(Safepoint& safepoint,
-                                               LiftoffRegList all_spills,
-                                               LiftoffRegList ref_spills,
-                                               int spill_offset) {
+void LiftoffAssembler::RecordSpillsInSafepoint(
+    SafepointTableBuilder::Safepoint& safepoint, LiftoffRegList all_spills,
+    LiftoffRegList ref_spills, int spill_offset) {
   int spill_space_size = 0;
   while (!all_spills.is_empty()) {
     LiftoffRegister reg = all_spills.GetFirstRegSet();
     if (ref_spills.has(reg)) {
-      safepoint.DefinePointerSlot(spill_offset);
+      safepoint.DefineTaggedStackSlot(spill_offset);
     }
     all_spills.clear(reg);
     ++spill_offset;

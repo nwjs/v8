@@ -491,6 +491,7 @@ class Shell : public i::AllStatic {
                             ProcessMessageQueue process_message_queue);
   static bool ExecuteModule(Isolate* isolate, const char* file_name);
   static bool ExecuteWebSnapshot(Isolate* isolate, const char* file_name);
+  static bool LoadJSON(Isolate* isolate, const char* file_name);
   static void ReportException(Isolate* isolate, Local<Message> message,
                               Local<Value> exception);
   static void ReportException(Isolate* isolate, TryCatch* try_catch);
@@ -549,6 +550,9 @@ class Shell : public i::AllStatic {
 
   static void LogGetAndStop(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void TestVerifySourcePositions(
+      const v8::FunctionCallbackInfo<v8::Value>& args);
+
+  static void InstallConditionalFeatures(
       const v8::FunctionCallbackInfo<v8::Value>& args);
 
   static void AsyncHooksCreateHook(

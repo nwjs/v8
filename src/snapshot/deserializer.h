@@ -117,7 +117,7 @@ class Deserializer : public SerializerDeserializer {
   }
 
   bool deserializing_user_code() const { return deserializing_user_code_; }
-  bool can_rehash() const { return can_rehash_; }
+  bool should_rehash() const { return should_rehash_; }
 
   void Rehash();
 
@@ -186,6 +186,9 @@ class Deserializer : public SerializerDeserializer {
   // A helper function for ReadData for reading external references.
   inline Address ReadExternalReferenceCase();
 
+  // A helper function for reading external pointer tags.
+  ExternalPointerTag ReadExternalPointerTag();
+
   Handle<HeapObject> ReadObject(SnapshotSpace space_number);
   Handle<HeapObject> ReadMetaMap();
 
@@ -197,6 +200,9 @@ class Deserializer : public SerializerDeserializer {
   // Special handling for serialized code like hooking up internalized strings.
   void PostProcessNewObject(Handle<Map> map, Handle<HeapObject> obj,
                             SnapshotSpace space);
+  void PostProcessNewJSReceiver(Map map, Handle<JSReceiver> obj,
+                                JSReceiver raw_obj, InstanceType instance_type,
+                                SnapshotSpace space);
 
   HeapObject Allocate(AllocationType allocation, int size,
                       AllocationAlignment alignment);
@@ -247,7 +253,7 @@ class Deserializer : public SerializerDeserializer {
   bool next_reference_is_weak_ = false;
 
   // TODO(6593): generalize rehashing, and remove this flag.
-  bool can_rehash_;
+  const bool should_rehash_;
   std::vector<Handle<HeapObject>> to_rehash_;
 
 #ifdef DEBUG

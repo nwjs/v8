@@ -2340,12 +2340,12 @@ void LogDefinerCallsAndStopCallback(
   info.GetReturnValue().Set(name);
 }
 
-struct StoreOwnICInterceptorConfig {
+struct DefineNamedOwnICInterceptorConfig {
   std::string code;
   std::vector<std::string> intercepted_defines;
 };
 
-std::vector<StoreOwnICInterceptorConfig> configs{
+std::vector<DefineNamedOwnICInterceptorConfig> configs{
     {
         R"(
           class ClassWithNormalField extends Base {
@@ -2441,8 +2441,8 @@ std::vector<StoreOwnICInterceptorConfig> configs{
 };
 }  // namespace
 
-void CheckPropertyDefinerCallbackInStoreOwnIC(Local<Context> context,
-                                              bool stop) {
+void CheckPropertyDefinerCallbackInDefineNamedOwnIC(Local<Context> context,
+                                                    bool stop) {
   v8_compile(R"(
     class Base {
       constructor(arg) {
@@ -2491,25 +2491,17 @@ void CheckPropertyDefinerCallbackInStoreOwnIC(Local<Context> context,
   }
 }
 
-THREADED_TEST(PropertyDefinerCallbackInStoreOwnIC) {
+THREADED_TEST(PropertyDefinerCallbackInDefineNamedOwnIC) {
   {
     LocalContext env;
     v8::HandleScope scope(env->GetIsolate());
-    CheckPropertyDefinerCallbackInStoreOwnIC(env.local(), true);
+    CheckPropertyDefinerCallbackInDefineNamedOwnIC(env.local(), true);
   }
 
   {
     LocalContext env;
     v8::HandleScope scope(env->GetIsolate());
-    CheckPropertyDefinerCallbackInStoreOwnIC(env.local(), false);
-  }
-
-  {
-    i::FLAG_lazy_feedback_allocation = false;
-    i::FlagList::EnforceFlagImplications();
-    LocalContext env;
-    v8::HandleScope scope(env->GetIsolate());
-    CheckPropertyDefinerCallbackInStoreOwnIC(env.local(), true);
+    CheckPropertyDefinerCallbackInDefineNamedOwnIC(env.local(), false);
   }
 
   {
@@ -2517,7 +2509,15 @@ THREADED_TEST(PropertyDefinerCallbackInStoreOwnIC) {
     i::FlagList::EnforceFlagImplications();
     LocalContext env;
     v8::HandleScope scope(env->GetIsolate());
-    CheckPropertyDefinerCallbackInStoreOwnIC(env.local(), false);
+    CheckPropertyDefinerCallbackInDefineNamedOwnIC(env.local(), true);
+  }
+
+  {
+    i::FLAG_lazy_feedback_allocation = false;
+    i::FlagList::EnforceFlagImplications();
+    LocalContext env;
+    v8::HandleScope scope(env->GetIsolate());
+    CheckPropertyDefinerCallbackInDefineNamedOwnIC(env.local(), false);
   }
 }
 
