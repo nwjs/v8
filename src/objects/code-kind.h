@@ -57,10 +57,6 @@ inline constexpr bool CodeKindIsBaselinedJSFunction(CodeKind kind) {
   return kind == CodeKind::BASELINE;
 }
 
-inline constexpr bool CodeKindIsStaticallyCompiled(CodeKind kind) {
-  return kind == CodeKind::BYTECODE_HANDLER || kind == CodeKind::BUILTIN;
-}
-
 inline constexpr bool CodeKindIsUnoptimizedJSFunction(CodeKind kind) {
   STATIC_ASSERT(static_cast<int>(CodeKind::INTERPRETED_FUNCTION) + 1 ==
                 static_cast<int>(CodeKind::BASELINE));
@@ -100,7 +96,7 @@ inline constexpr bool CodeKindCanTierUp(CodeKind kind) {
 // TODO(jgruber): Rename or remove this predicate. Currently it means 'is this
 // kind stored either in the FeedbackVector cache, or in the OSR cache?'.
 inline constexpr bool CodeKindIsStoredInOptimizedCodeCache(CodeKind kind) {
-  return kind == CodeKind::TURBOFAN;
+  return kind == CodeKind::MAGLEV || kind == CodeKind::TURBOFAN;
 }
 
 inline CodeKind CodeKindForTopTier() { return CodeKind::TURBOFAN; }

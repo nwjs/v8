@@ -287,6 +287,10 @@ class V8_EXPORT Isolate {
      * Callbacks to invoke in case of fatal or OOM errors.
      */
     FatalErrorCallback fatal_error_callback = nullptr;
+    LegacyOOMErrorCallback legacy_oom_error_callback = nullptr;
+    V8_DEPRECATED(
+        "Use legacy_oom_error_callback; OOMErrorCallback will be changed soon "
+        "(https://crbug.com/1323177)")
     OOMErrorCallback oom_error_callback = nullptr;
 
     /**
@@ -303,16 +307,18 @@ class V8_EXPORT Isolate {
    */
   class V8_EXPORT V8_NODISCARD Scope {
    public:
-    explicit Scope(Isolate* isolate) : isolate_(isolate) { isolate->Enter(); }
+    explicit Scope(Isolate* isolate) : v8_isolate_(isolate) {
+      v8_isolate_->Enter();
+    }
 
-    ~Scope() { isolate_->Exit(); }
+    ~Scope() { v8_isolate_->Exit(); }
 
     // Prevent copying of Scope objects.
     Scope(const Scope&) = delete;
     Scope& operator=(const Scope&) = delete;
 
    private:
-    Isolate* const isolate_;
+    Isolate* const v8_isolate_;
   };
 
   /**
@@ -333,7 +339,7 @@ class V8_EXPORT Isolate {
 
    private:
     OnFailure on_failure_;
-    Isolate* isolate_;
+    v8::Isolate* v8_isolate_;
 
     bool was_execution_allowed_assert_;
     bool was_execution_allowed_throws_;
@@ -355,7 +361,7 @@ class V8_EXPORT Isolate {
         const AllowJavascriptExecutionScope&) = delete;
 
    private:
-    Isolate* isolate_;
+    Isolate* v8_isolate_;
     bool was_execution_allowed_assert_;
     bool was_execution_allowed_throws_;
     bool was_execution_allowed_dump_;
@@ -378,7 +384,7 @@ class V8_EXPORT Isolate {
         const SuppressMicrotaskExecutionScope&) = delete;
 
    private:
-    internal::Isolate* const isolate_;
+    internal::Isolate* const i_isolate_;
     internal::MicrotaskQueue* const microtask_queue_;
     internal::Address previous_stack_height_;
 
@@ -391,7 +397,7 @@ class V8_EXPORT Isolate {
    */
   class V8_EXPORT V8_NODISCARD SafeForTerminationScope {
    public:
-    explicit SafeForTerminationScope(v8::Isolate* isolate);
+    explicit SafeForTerminationScope(v8::Isolate* v8_isolate);
     ~SafeForTerminationScope();
 
     // Prevent copying of Scope objects.
@@ -399,7 +405,7 @@ class V8_EXPORT Isolate {
     SafeForTerminationScope& operator=(const SafeForTerminationScope&) = delete;
 
    private:
-    internal::Isolate* isolate_;
+    internal::Isolate* i_isolate_;
     bool prev_value_;
   };
 
@@ -638,9 +644,6 @@ class V8_EXPORT Isolate {
    * This specifies the callback called by the upcoming dynamic
    * import() language feature to load modules.
    */
-  V8_DEPRECATED("Use HostImportModuleDynamicallyCallback")
-  void SetHostImportModuleDynamicallyCallback(
-      HostImportModuleDynamicallyWithImportAssertionsCallback callback);
   void SetHostImportModuleDynamicallyCallback(
       HostImportModuleDynamicallyCallback callback);
 
@@ -845,6 +848,9 @@ class V8_EXPORT Isolate {
    * Returns the number of phantom handles without callbacks that were reset
    * by the garbage collector since the last call to this function.
    */
+  V8_DEPRECATE_SOON(
+      "Information cannot be relied on anymore as internal representation may "
+      "change.")
   size_t NumberOfPhantomHandleResetsSinceLastCall();
 
   /**
@@ -1475,7 +1481,7 @@ class V8_EXPORT Isolate {
   void SetFatalErrorHandler(FatalErrorCallback that);
 
   /** Set the callback to invoke in case of OOM errors. */
-  void SetOOMErrorHandler(OOMErrorCallback that);
+  void SetOOMErrorHandler(LegacyOOMErrorCallback that);
 
   /**
    * Add a callback to invoke in case the heap size is close to the heap limit.
@@ -1604,6 +1610,9 @@ class V8_EXPORT Isolate {
    * Iterates through all the persistent handles in the current isolate's heap
    * that have class_ids.
    */
+  V8_DEPRECATE_SOON(
+      "Information cannot be relied on anymore as internal representation may "
+      "change.")
   void VisitHandlesWithClassIds(PersistentHandleVisitor* visitor);
 
   /**
@@ -1611,6 +1620,9 @@ class V8_EXPORT Isolate {
    * that have class_ids and are weak to be marked as inactive if there is no
    * pending activity for the handle.
    */
+  V8_DEPRECATE_SOON(
+      "Information cannot be relied on anymore as internal representation may "
+      "change.")
   void VisitWeakHandles(PersistentHandleVisitor* visitor);
 
   /**

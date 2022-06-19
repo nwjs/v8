@@ -235,11 +235,11 @@ Response V8HeapProfilerAgentImpl::startTrackingHeapObjects(
 
 Response V8HeapProfilerAgentImpl::stopTrackingHeapObjects(
     Maybe<bool> reportProgress, Maybe<bool> treatGlobalObjectsAsRoots,
-    Maybe<bool> captureNumericValue) {
+    Maybe<bool> captureNumericValue, Maybe<bool> exposeInternals) {
   requestHeapStatsUpdate();
   takeHeapSnapshot(std::move(reportProgress),
                    std::move(treatGlobalObjectsAsRoots),
-                   std::move(captureNumericValue));
+                   std::move(captureNumericValue), std::move(exposeInternals));
   stopTrackingHeapObjectsInternal();
   return Response::Success();
 }
@@ -263,7 +263,7 @@ Response V8HeapProfilerAgentImpl::disable() {
 
 Response V8HeapProfilerAgentImpl::takeHeapSnapshot(
     Maybe<bool> reportProgress, Maybe<bool> treatGlobalObjectsAsRoots,
-    Maybe<bool> captureNumericValue) {
+    Maybe<bool> captureNumericValue, Maybe<bool> exposeInternals) {
   v8::HeapProfiler* profiler = m_isolate->GetHeapProfiler();
   if (!profiler) return Response::ServerError("Cannot access v8 heap profiler");
   std::unique_ptr<HeapSnapshotProgress> progress;
@@ -271,6 +271,20 @@ Response V8HeapProfilerAgentImpl::takeHeapSnapshot(
     progress.reset(new HeapSnapshotProgress(&m_frontend));
 
   GlobalObjectNameResolver resolver(m_session);
+  v8::HeapProfiler::HeapSnapshotOptions options;
+  options.global_object_name_resolver = &resolver;
+  options.control = progress.get();
+  options.snapshot_mode =
+      exposeInternals.fromMaybe(false) ||
+              // Not treating global objects as roots results into exposing
+              // internals.
+              !treatGlobalObjectsAsRoots.fromMaybe(true)
+          ? v8::HeapProfiler::HeapSnapshotMode::kExposeInternals
+          : v8::HeapProfiler::HeapSnapshotMode::kRegular;
+  options.numerics_mode =
+      captureNumericValue.fromMaybe(false)
+          ? v8::HeapProfiler::NumericsMode::kExposeNumericValues
+          : v8::HeapProfiler::NumericsMode::kHideNumericValues;
 #ifdef __APPLE__
     // exit the context we entered in g_uv_runloop_once or taking
     // snapshot will fail.
@@ -280,9 +294,7 @@ Response V8HeapProfilerAgentImpl::takeHeapSnapshot(
     if (!context.IsEmpty())
       context->Exit();
 #endif
-  const v8::HeapSnapshot* snapshot = profiler->TakeHeapSnapshot(
-      progress.get(), &resolver, treatGlobalObjectsAsRoots.fromMaybe(true),
-      captureNumericValue.fromMaybe(false));
+  const v8::HeapSnapshot* snapshot = profiler->TakeHeapSnapshot(options);
 #ifdef __APPLE__
     if (!context.IsEmpty())
       context->Enter();

@@ -161,6 +161,11 @@ class JSReceiver : public TorqueGeneratedJSReceiver<JSReceiver, HeapObject> {
       Isolate* isolate, Handle<JSReceiver> object, Handle<Object> key,
       PropertyDescriptor* desc, Maybe<ShouldThrow> should_throw);
 
+  // Check if private name property can be store on the object. It will return
+  // false with an error when it cannot.
+  V8_WARN_UNUSED_RESULT static bool CheckPrivateNameStore(LookupIterator* it,
+                                                          bool is_define);
+
   // Check if a data property can be created on the object. It will fail with
   // an error when it cannot.
   V8_WARN_UNUSED_RESULT static Maybe<bool> CheckIfCanDefine(
@@ -289,14 +294,14 @@ class JSReceiver : public TorqueGeneratedJSReceiver<JSReceiver, HeapObject> {
 
   // ES6 [[OwnPropertyKeys]] (modulo return type)
   V8_WARN_UNUSED_RESULT static inline MaybeHandle<FixedArray> OwnPropertyKeys(
-      Handle<JSReceiver> object);
+      Isolate* isolate, Handle<JSReceiver> object);
 
   V8_WARN_UNUSED_RESULT static MaybeHandle<FixedArray> GetOwnValues(
-      Handle<JSReceiver> object, PropertyFilter filter,
+      Isolate* isolate, Handle<JSReceiver> object, PropertyFilter filter,
       bool try_fast_path = true);
 
   V8_WARN_UNUSED_RESULT static MaybeHandle<FixedArray> GetOwnEntries(
-      Handle<JSReceiver> object, PropertyFilter filter,
+      Isolate* isolate, Handle<JSReceiver> object, PropertyFilter filter,
       bool try_fast_path = true);
 
   static const int kHashMask = PropertyArray::HashField::kMask;

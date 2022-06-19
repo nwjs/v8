@@ -48,6 +48,9 @@ MaybeHandle<Object> Runtime::GetObjectProperty(
       LookupIterator(isolate, receiver, lookup_key, lookup_start_object);
 
   MaybeHandle<Object> result = Object::GetProperty(&it);
+  if (result.is_null()) {
+    return result;
+  }
   if (is_found) *is_found = it.IsFound();
 
   if (!it.IsFound() && key->IsSymbol() &&
@@ -207,20 +210,12 @@ bool DeleteObjectPropertyFast(Isolate* isolate, Handle<JSReceiver> receiver,
       receiver->SetProperties(ReadOnlyRoots(isolate).empty_fixed_array());
     } else {
       ClearField(isolate, JSObject::cast(*receiver), index);
-      // We must clear any recorded slot for the deleted property, because
-      // subsequent object modifications might put a raw double there.
-      // Slot clearing is the reason why this entire function cannot currently
-      // be implemented in the DeleteProperty stub.
       if (index.is_inobject()) {
         // We need to clear the recorded slot in this case because in-object
         // slack tracking might not be finished. This ensures that we don't
         // have recorded slots in free space.
         isolate->heap()->ClearRecordedSlot(*receiver,
                                            receiver->RawField(index.offset()));
-        if (!FLAG_enable_third_party_heap) {
-          MemoryChunk* chunk = MemoryChunk::FromHeapObject(*receiver);
-          chunk->InvalidateRecordedSlots(*receiver);
-        }
       }
     }
   }
@@ -292,7 +287,7 @@ RUNTIME_FUNCTION(Runtime_ObjectKeys) {
   Handle<FixedArray> keys;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
       isolate, keys,
-      KeyAccumulator::GetKeys(receiver, KeyCollectionMode::kOwnOnly,
+      KeyAccumulator::GetKeys(isolate, receiver, KeyCollectionMode::kOwnOnly,
                               ENUMERABLE_STRINGS,
                               GetKeysConversion::kConvertToString));
   return *keys;
@@ -314,7 +309,7 @@ RUNTIME_FUNCTION(Runtime_ObjectGetOwnPropertyNames) {
   Handle<FixedArray> keys;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
       isolate, keys,
-      KeyAccumulator::GetKeys(receiver, KeyCollectionMode::kOwnOnly,
+      KeyAccumulator::GetKeys(isolate, receiver, KeyCollectionMode::kOwnOnly,
                               SKIP_SYMBOLS,
                               GetKeysConversion::kConvertToString));
   return *keys;
@@ -336,13 +331,13 @@ RUNTIME_FUNCTION(Runtime_ObjectGetOwnPropertyNamesTryFast) {
   if (nod != 0 && map->NumberOfEnumerableProperties() == nod) {
     ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
         isolate, keys,
-        KeyAccumulator::GetKeys(receiver, KeyCollectionMode::kOwnOnly,
+        KeyAccumulator::GetKeys(isolate, receiver, KeyCollectionMode::kOwnOnly,
                                 ENUMERABLE_STRINGS,
                                 GetKeysConversion::kConvertToString));
   } else {
     ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
         isolate, keys,
-        KeyAccumulator::GetKeys(receiver, KeyCollectionMode::kOwnOnly,
+        KeyAccumulator::GetKeys(isolate, receiver, KeyCollectionMode::kOwnOnly,
                                 SKIP_SYMBOLS,
                                 GetKeysConversion::kConvertToString));
   }
@@ -572,15 +567,9 @@ MaybeHandle<Object> Runtime::SetObjectProperty(
   PropertyKey lookup_key(isolate, key, &success);
   if (!success) return MaybeHandle<Object>();
   LookupIterator it(isolate, object, lookup_key);
-
-  if (!it.IsFound() && key->IsSymbol() &&
-      Symbol::cast(*key).is_private_name()) {
-    Handle<Object> name_string(Symbol::cast(*key).description(), isolate);
-    DCHECK(name_string->IsString());
-    THROW_NEW_ERROR(isolate,
-                    NewTypeError(MessageTemplate::kInvalidPrivateMemberWrite,
-                                 name_string, object),
-                    Object);
+  if (key->IsSymbol() && Symbol::cast(*key).is_private_name() &&
+      !JSReceiver::CheckPrivateNameStore(&it, false)) {
+    return MaybeHandle<Object>();
   }
 
   MAYBE_RETURN_NULL(
@@ -589,10 +578,11 @@ MaybeHandle<Object> Runtime::SetObjectProperty(
   return value;
 }
 
-MaybeHandle<Object> Runtime::DefineObjectOwnProperty(
-    Isolate* isolate, Handle<Object> object, Handle<Object> key,
-    Handle<Object> value, StoreOrigin store_origin,
-    Maybe<ShouldThrow> should_throw) {
+MaybeHandle<Object> Runtime::DefineObjectOwnProperty(Isolate* isolate,
+                                                     Handle<Object> object,
+                                                     Handle<Object> key,
+                                                     Handle<Object> value,
+                                                     StoreOrigin store_origin) {
   if (object->IsNullOrUndefined(isolate)) {
     THROW_NEW_ERROR(
         isolate,
@@ -607,20 +597,15 @@ MaybeHandle<Object> Runtime::DefineObjectOwnProperty(
   LookupIterator it(isolate, object, lookup_key, LookupIterator::OWN);
 
   if (key->IsSymbol() && Symbol::cast(*key).is_private_name()) {
-    Handle<Symbol> private_symbol = Handle<Symbol>::cast(key);
-    if (it.IsFound()) {
-      Handle<Object> name_string(private_symbol->description(), isolate);
-      DCHECK(name_string->IsString());
-      MessageTemplate message =
-          private_symbol->is_private_brand()
-              ? MessageTemplate::kInvalidPrivateBrandReinitialization
-              : MessageTemplate::kInvalidPrivateFieldReinitialization;
-      THROW_NEW_ERROR(isolate, NewTypeError(message, name_string), Object);
-    } else {
-      MAYBE_RETURN_NULL(JSReceiver::AddPrivateField(&it, value, should_throw));
+    if (!JSReceiver::CheckPrivateNameStore(&it, true)) {
+      return MaybeHandle<Object>();
     }
+    DCHECK(!it.IsFound());
+    MAYBE_RETURN_NULL(
+        JSReceiver::AddPrivateField(&it, value, Nothing<ShouldThrow>()));
   } else {
-    MAYBE_RETURN_NULL(JSReceiver::CreateDataProperty(&it, value, should_throw));
+    MAYBE_RETURN_NULL(
+        JSReceiver::CreateDataProperty(&it, value, Nothing<ShouldThrow>()));
   }
 
   return value;
@@ -660,8 +645,8 @@ RUNTIME_FUNCTION(Runtime_ObjectValues) {
   Handle<FixedArray> values;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
       isolate, values,
-      JSReceiver::GetOwnValues(receiver, PropertyFilter::ENUMERABLE_STRINGS,
-                               true));
+      JSReceiver::GetOwnValues(isolate, receiver,
+                               PropertyFilter::ENUMERABLE_STRINGS, true));
   return *isolate->factory()->NewJSArrayWithElements(values);
 }
 
@@ -674,8 +659,8 @@ RUNTIME_FUNCTION(Runtime_ObjectValuesSkipFastPath) {
   Handle<FixedArray> value;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
       isolate, value,
-      JSReceiver::GetOwnValues(receiver, PropertyFilter::ENUMERABLE_STRINGS,
-                               false));
+      JSReceiver::GetOwnValues(isolate, receiver,
+                               PropertyFilter::ENUMERABLE_STRINGS, false));
   return *isolate->factory()->NewJSArrayWithElements(value);
 }
 
@@ -688,8 +673,8 @@ RUNTIME_FUNCTION(Runtime_ObjectEntries) {
   Handle<FixedArray> entries;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
       isolate, entries,
-      JSReceiver::GetOwnEntries(receiver, PropertyFilter::ENUMERABLE_STRINGS,
-                                true));
+      JSReceiver::GetOwnEntries(isolate, receiver,
+                                PropertyFilter::ENUMERABLE_STRINGS, true));
   return *isolate->factory()->NewJSArrayWithElements(entries);
 }
 
@@ -702,8 +687,8 @@ RUNTIME_FUNCTION(Runtime_ObjectEntriesSkipFastPath) {
   Handle<FixedArray> entries;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
       isolate, entries,
-      JSReceiver::GetOwnEntries(receiver, PropertyFilter::ENUMERABLE_STRINGS,
-                                false));
+      JSReceiver::GetOwnEntries(isolate, receiver,
+                                PropertyFilter::ENUMERABLE_STRINGS, false));
   return *isolate->factory()->NewJSArrayWithElements(entries);
 }
 
@@ -1027,8 +1012,8 @@ RUNTIME_FUNCTION(Runtime_GetOwnPropertyKeys) {
   Handle<FixedArray> keys;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
       isolate, keys,
-      KeyAccumulator::GetKeys(object, KeyCollectionMode::kOwnOnly, filter,
-                              GetKeysConversion::kConvertToString));
+      KeyAccumulator::GetKeys(isolate, object, KeyCollectionMode::kOwnOnly,
+                              filter, GetKeysConversion::kConvertToString));
 
   return *isolate->factory()->NewJSArrayWithElements(keys);
 }

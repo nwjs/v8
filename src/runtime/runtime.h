@@ -108,6 +108,7 @@ namespace internal {
 
 #define FOR_EACH_INTRINSIC_COMPILER(F, I) \
   F(CompileOptimizedOSR, 0, 1)            \
+  F(TraceOptimizedOSREntry, 0, 1)         \
   F(CompileLazy, 1, 1)                    \
   F(CompileBaseline, 1, 1)                \
   F(CompileMaglev_Concurrent, 1, 1)       \
@@ -277,7 +278,8 @@ namespace internal {
 #define FOR_EACH_INTRINSIC_MODULE(F, I)    \
   F(DynamicImportCall, -1 /* [2, 3] */, 1) \
   I(GetImportMetaObject, 0, 1)             \
-  F(GetModuleNamespace, 1, 1)
+  F(GetModuleNamespace, 1, 1)              \
+  F(GetModuleNamespaceExport, 2, 1)
 
 #define FOR_EACH_INTRINSIC_NUMBERS(F, I) \
   F(ArrayBufferMaxByteLength, 0, 1)      \
@@ -440,7 +442,8 @@ namespace internal {
   F(ThrowConstAssignError, 0, 1)
 
 #define FOR_EACH_INTRINSIC_SHADOW_REALM(F, I) \
-  F(ShadowRealmWrappedFunctionCreate, 2, 1)
+  F(ShadowRealmWrappedFunctionCreate, 2, 1)   \
+  F(ShadowRealmImportValue, 1, 1)
 
 #define FOR_EACH_INTRINSIC_STRINGS(F, I)  \
   F(FlattenString, 1, 1)                  \
@@ -467,6 +470,9 @@ namespace internal {
   F(CreatePrivateSymbol, -1 /* <= 1 */, 1) \
   F(SymbolDescriptiveString, 1, 1)         \
   F(SymbolIsPrivate, 1, 1)
+
+#define FOR_EACH_INTRINSIC_TEMPORAL(F, I) \
+  F(IsInvalidTemporalCalendarField, 2, 1)
 
 #define FOR_EACH_INTRINSIC_TEST(F, I)         \
   F(Abort, 1, 1)                              \
@@ -568,8 +574,6 @@ namespace internal {
   F(TurbofanStaticAssert, 1, 1)               \
   F(TypedArraySpeciesProtector, 0, 1)         \
   F(WaitForBackgroundOptimization, 0, 1)      \
-  F(WebSnapshotDeserialize, -1, 1)            \
-  F(WebSnapshotSerialize, -1, 1)              \
   I(DeoptimizeNow, 0, 1)
 
 #define FOR_EACH_INTRINSIC_TYPEDARRAY(F, I)    \
@@ -702,6 +706,7 @@ namespace internal {
   FOR_EACH_INTRINSIC_SHADOW_REALM(F, I)             \
   FOR_EACH_INTRINSIC_STRINGS(F, I)                  \
   FOR_EACH_INTRINSIC_SYMBOL(F, I)                   \
+  FOR_EACH_INTRINSIC_TEMPORAL(F, I)                 \
   FOR_EACH_INTRINSIC_TEST(F, I)                     \
   FOR_EACH_INTRINSIC_TYPEDARRAY(F, I)               \
   IF_WASM(FOR_EACH_INTRINSIC_WASM, F, I)            \
@@ -821,10 +826,9 @@ class Runtime : public AllStatic {
   // private field definition), this method throws if the field already exists
   // on object.
   V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeHandle<Object>
-  DefineObjectOwnProperty(
-      Isolate* isolate, Handle<Object> object, Handle<Object> key,
-      Handle<Object> value, StoreOrigin store_origin,
-      Maybe<ShouldThrow> should_throw = Nothing<ShouldThrow>());
+  DefineObjectOwnProperty(Isolate* isolate, Handle<Object> object,
+                          Handle<Object> key, Handle<Object> value,
+                          StoreOrigin store_origin);
 
   // When "receiver" is not passed, it defaults to "lookup_start_object".
   V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeHandle<Object>
