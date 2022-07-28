@@ -260,8 +260,8 @@ class JSArrayBufferView
 
   static constexpr int kEndOfTaggedFieldsOffset = kByteOffsetOffset;
 
-  STATIC_ASSERT(IsAligned(kByteOffsetOffset, kUIntptrSize));
-  STATIC_ASSERT(IsAligned(kByteLengthOffset, kUIntptrSize));
+  static_assert(IsAligned(kByteOffsetOffset, kUIntptrSize));
+  static_assert(IsAligned(kByteLengthOffset, kUIntptrSize));
 
   TQ_OBJECT_CONSTRUCTORS(JSArrayBufferView)
 };
@@ -354,8 +354,8 @@ class JSTypedArray
   DECL_VERIFIER(JSTypedArray)
 
   // TODO(v8:9287): Re-enable when GCMole stops mixing 32/64 bit configs.
-  // STATIC_ASSERT(IsAligned(kLengthOffset, kTaggedSize));
-  // STATIC_ASSERT(IsAligned(kExternalPointerOffset, kTaggedSize));
+  // static_assert(IsAligned(kLengthOffset, kTaggedSize));
+  // static_assert(IsAligned(kExternalPointerOffset, kTaggedSize));
 
   static const int kSizeWithEmbedderFields =
       kHeaderSize +
@@ -401,7 +401,7 @@ class JSDataView
   DECL_VERIFIER(JSDataView)
 
   // TODO(v8:9287): Re-enable when GCMole stops mixing 32/64 bit configs.
-  // STATIC_ASSERT(IsAligned(kDataPointerOffset, kTaggedSize));
+  // static_assert(IsAligned(kDataPointerOffset, kTaggedSize));
 
   static const int kSizeWithEmbedderFields =
       kHeaderSize +

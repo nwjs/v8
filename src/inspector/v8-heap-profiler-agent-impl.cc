@@ -271,6 +271,15 @@ Response V8HeapProfilerAgentImpl::takeHeapSnapshot(
     progress.reset(new HeapSnapshotProgress(&m_frontend));
 
   GlobalObjectNameResolver resolver(m_session);
+#ifdef __APPLE__
+    // exit the context we entered in g_uv_runloop_once or taking
+    // snapshot will fail.
+    v8::Isolate* isolate = v8::Isolate::GetCurrent();
+    v8::HandleScope handle_scope(isolate);
+    v8::Local<v8::Context> context = isolate->GetEnteredOrMicrotaskContext();
+    if (!context.IsEmpty())
+      context->Exit();
+#endif
   v8::HeapProfiler::HeapSnapshotOptions options;
   options.global_object_name_resolver = &resolver;
   options.control = progress.get();
@@ -285,15 +294,6 @@ Response V8HeapProfilerAgentImpl::takeHeapSnapshot(
       captureNumericValue.fromMaybe(false)
           ? v8::HeapProfiler::NumericsMode::kExposeNumericValues
           : v8::HeapProfiler::NumericsMode::kHideNumericValues;
-#ifdef __APPLE__
-    // exit the context we entered in g_uv_runloop_once or taking
-    // snapshot will fail.
-    v8::Isolate* isolate = v8::Isolate::GetCurrent();
-    v8::HandleScope handle_scope(isolate);
-    v8::Local<v8::Context> context = isolate->GetEnteredOrMicrotaskContext();
-    if (!context.IsEmpty())
-      context->Exit();
-#endif
   const v8::HeapSnapshot* snapshot = profiler->TakeHeapSnapshot(options);
 #ifdef __APPLE__
     if (!context.IsEmpty())

@@ -39,6 +39,7 @@ class BaselineCompilerTask {
       : shared_function_info_(handles->NewHandle(sfi)),
         bytecode_(handles->NewHandle(sfi.GetBytecodeArray(isolate))) {
     DCHECK(sfi.is_compiled());
+    shared_function_info_->set_is_sparkplug_compiling(true);
   }
 
   BaselineCompilerTask(const BaselineCompilerTask&) V8_NOEXCEPT = delete;
@@ -61,6 +62,7 @@ class BaselineCompilerTask {
 
   // Executed in the main thread.
   void Install(Isolate* isolate) {
+    shared_function_info_->set_is_sparkplug_compiling(false);
     Handle<Code> code;
     if (!maybe_code_.ToHandle(&code)) return;
     if (FLAG_print_code) {
@@ -257,6 +259,8 @@ void BaselineBatchCompiler::EnqueueFunction(Handle<JSFunction> function) {
   // Early return if the function is compiled with baseline already or it is not
   // suitable for baseline compilation.
   if (shared->HasBaselineCode()) return;
+  // If we're already compiling this function, return.
+  if (shared->is_sparkplug_compiling()) return;
   if (!CanCompileWithBaseline(isolate_, *shared)) return;
 
   // Immediately compile the function if batch compilation is disabled.
@@ -283,7 +287,7 @@ void BaselineBatchCompiler::EnqueueFunction(Handle<JSFunction> function) {
     PrintF(trace_scope.file(),
            " with estimated size %d (current budget: %d/%d)\n", estimated_size,
            estimated_instruction_size_,
-           FLAG_baseline_batch_compilation_threshold);
+           FLAG_baseline_batch_compilation_threshold.value());
   }
   if (ShouldCompileBatch()) {
     if (FLAG_trace_baseline_batch_compilation) {
@@ -398,6 +402,10 @@ BaselineBatchCompiler::~BaselineBatchCompiler() {
 }
 
 void BaselineBatchCompiler::InstallBatch() { UNREACHABLE(); }
+
+void BaselineBatchCompiler::EnqueueFunction(Handle<JSFunction> function) {
+  UNREACHABLE();
+}
 
 }  // namespace baseline
 }  // namespace internal

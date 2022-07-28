@@ -285,12 +285,10 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
                                SaveFPRegsMode fp_mode);
 
   void CallRecordWriteStubSaveRegisters(
-      Register object, Operand offset,
-      RememberedSetAction remembered_set_action, SaveFPRegsMode fp_mode,
+      Register object, Operand offset, SaveFPRegsMode fp_mode,
       StubCallMode mode = StubCallMode::kCallBuiltinPointer);
   void CallRecordWriteStub(
-      Register object, Register slot_address,
-      RememberedSetAction remembered_set_action, SaveFPRegsMode fp_mode,
+      Register object, Register slot_address, SaveFPRegsMode fp_mode,
       StubCallMode mode = StubCallMode::kCallBuiltinPointer);
 
   // For a given |object| and |offset|:
@@ -418,7 +416,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
 #undef DEFINE_INSTRUCTION3
 
   void SmiTag(Register dst, Register src) {
-    STATIC_ASSERT(kSmiTag == 0);
+    static_assert(kSmiTag == 0);
     if (SmiValuesAre32Bits()) {
       slli_d(dst, src, 32);
     } else {
@@ -856,19 +854,15 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
   // stored.
   // The offset is the offset from the start of the object, not the offset from
   // the tagged HeapObject pointer. For use with FieldOperand(reg, off).
-  void RecordWriteField(
-      Register object, int offset, Register value, RAStatus ra_status,
-      SaveFPRegsMode save_fp,
-      RememberedSetAction remembered_set_action = RememberedSetAction::kEmit,
-      SmiCheck smi_check = SmiCheck::kInline);
+  void RecordWriteField(Register object, int offset, Register value,
+                        RAStatus ra_status, SaveFPRegsMode save_fp,
+                        SmiCheck smi_check = SmiCheck::kInline);
 
   // For a given |object| notify the garbage collector that the slot at |offset|
   // has been written.  |value| is the object being stored.
-  void RecordWrite(
-      Register object, Operand offset, Register value, RAStatus ra_status,
-      SaveFPRegsMode save_fp,
-      RememberedSetAction remembered_set_action = RememberedSetAction::kEmit,
-      SmiCheck smi_check = SmiCheck::kInline);
+  void RecordWrite(Register object, Operand offset, Register value,
+                   RAStatus ra_status, SaveFPRegsMode save_fp,
+                   SmiCheck smi_check = SmiCheck::kInline);
 
   // ---------------------------------------------------------------------------
   // Pseudo-instructions.
@@ -1082,6 +1076,19 @@ void TurboAssembler::GenerateSwitchTable(Register index, size_t case_count,
     b(GetLabelFunction(index));
   }
 }
+
+struct MoveCycleState {
+  // List of scratch registers reserved for pending moves in a move cycle, and
+  // which should therefore not be used as a temporary location by
+  // {MoveToTempLocation}.
+  RegList scratch_regs;
+  DoubleRegList scratch_fpregs;
+  // Available scratch registers during the move cycle resolution scope.
+  base::Optional<UseScratchRegisterScope> temps;
+  // Scratch register picked by {MoveToTempLocation}.
+  base::Optional<Register> scratch_reg;
+  base::Optional<DoubleRegister> scratch_fpreg;
+};
 
 #define ACCESS_MASM(masm) masm->
 
