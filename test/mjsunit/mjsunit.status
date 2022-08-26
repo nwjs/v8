@@ -47,18 +47,9 @@
   # https://crbug.com/v8/11544
   'temporal/calendar-week-of-year': [FAIL],
   'temporal/duration-add': [FAIL],
-  'temporal/duration-to-json': [FAIL],
-  'temporal/instant-add': [FAIL],
   'temporal/instant-constructor': [FAIL],
-  'temporal/instant-from-epoch-microseconds': [FAIL],
   'temporal/instant-from-epoch-milliseconds': [FAIL],
-  'temporal/instant-from-epoch-nanoseconds': [FAIL],
   'temporal/instant-from-epoch-seconds': [FAIL],
-  'temporal/instant-subtract': [FAIL],
-  'temporal/instant-to-json': [FAIL],
-  'temporal/instant-toJSON': [FAIL],
-  'temporal/plain-date-time-add': [FAIL],
-  'temporal/plain-date-time-subtract': [FAIL],
   'temporal/plain-date-time-to-json': [FAIL],
   'temporal/plain-date-to-plain-date-time': [FAIL],
   'temporal/plain-date-with': [FAIL],
@@ -78,9 +69,6 @@
   # https://crbug.com/v8/7775
   'allocation-site-info': [SKIP],
 
-  # BUG(v8:8169)
-  'external-backing-store-gc': [SKIP],
-
   # BUG(v8:10197)
   'regress/regress-748069': [SKIP],
 
@@ -90,6 +78,7 @@
 
   # BUG(v8:9506): slow tests.
   'wasm/shared-memory-worker-explicit-gc-stress': [PASS, SLOW],
+  'wasm/shared-memory-worker-gc': [PASS, SLOW],
   'wasm/shared-memory-worker-gc-stress': [PASS, SLOW],
 
   # https://crbug.com/1129854
@@ -232,11 +221,6 @@
   # Needs deterministic test helpers for concurrent maglev tiering.
   # TODO(jgruber,v8:7700): Implement ASAP.
   'maglev/18': [SKIP],
-
-  # Stress variants cause operators that are currently still unsupported by
-  # TurboShaft.
-  # TODO(v8:12783)
-  'turboshaft/simple': [PASS, NO_VARIANTS],
 }],  # ALWAYS
 
 ##############################################################################
@@ -297,10 +281,6 @@
   'regress/wasm/regress-1010272': [SKIP],
   'wasm/atomics-stress': [SKIP],
   'wasm/atomics64-stress': [SKIP],
-
-  # Slow tests which times out in debug mode.
-  'typedarray-growablesharedarraybuffer-array-methods': [PASS, ['mode == debug', SKIP]],
-  'typedarray-resizablearraybuffer-array-methods': [PASS, ['mode == debug', SKIP]],
 }],  # simulator_run
 
 ##############################################################################
@@ -709,6 +689,13 @@
 
   # BUG(v8:12920): Breaks on TSAN.
   'regress/regress-crbug-620253': [SKIP],
+
+  # Skip tests that require a large amount of virtual address space (inside the
+  # sandbox if that is enabled) if tsan is enabled.
+  'regress/wasm/regress-1010272': [SKIP],
+  'wasm/many-memories': [SKIP],
+  'wasm/multiple-code-spaces': [SKIP],
+  'wasm/shared-memory-worker-gc-stress': [SKIP],
 }],  # 'tsan == True'
 
 ##############################################################################
@@ -1106,15 +1093,14 @@
 
 ##############################################################################
 ['gc_fuzzer or deopt_fuzzer', {
-    # BUG(v8:12013) Skipped until we remove flakes on NumFuzz.
-    'compiler/concurrent-inlining-1': [SKIP],
-    'compiler/inlined-call-polymorphic': [SKIP],
+    # BUG(v8:12725) Skipped until issue is fixed to reduce noise on alerts.
+    'ignition/regress-672027': [SKIP],
+
+    # BUG(v8:12358) Skipped until we make progress on NumFuzz.
+    'compiler/regress-crbug-1211215': [SKIP],
 
     # BUG(v8:11656) Skipped until we make progress on NumFuzz.
     'baseline/test-osr': [SKIP],
-
-    # BUG(v8:12826) Skipped until we remove flakes on NumFuzz.
-    'turboshaft/simple': [SKIP],
 
     # BUG(v8:12842) Skipped until we remove flakes on NumFuzz.
     'compiler/regress-1224277': [SKIP],
@@ -1430,6 +1416,11 @@
   # Investigate (IsFixedArrayBase).
   'regress/regress-786784': [SKIP],
   'regress/regress-v8-9656': [SKIP],
+  # TODO(v8:13038): the following tests cause GC during deserialization of
+  # backing stores for huge typed arrays.
+  'regress/regress-10931': [SKIP],
+  'regress/regress-948307': [SKIP],
+  'regress/regress-crbug-1057653': [SKIP],
   # Investigate (segfault).
   'regress/regress-crbug-397662': [SKIP],
   # Script referenced only through context-dependent SourceTextModule
@@ -1527,6 +1518,7 @@
   'regress/wasm/regress-1289678': [SKIP],
   'regress/wasm/regress-1290079': [SKIP],
   'regress/wasm/regress-1299183': [SKIP],
+  'regress/wasm/regress-crbug-1338980': [SKIP],
 }],  # no_simd_hardware == True
 
 ##############################################################################
@@ -1546,6 +1538,12 @@
 ['variant == no_lfa or variant == stress_concurrent_inlining', {
   'baseline/*': [SKIP],
 }],  # variant == no_lfa or variant == stress_concurrent_inlining
+
+##############################################################################
+['variant == stress_concurrent_inlining', {
+  # Flaky under this variant, skipping per https://crbug.com/v8/12267#c4
+  'compiler/inlined-call-polymorphic': [SKIP],
+}],  # variant == stress_concurrent_inlining
 
 ##############################################################################
 ['variant == experimental_regexp', {
@@ -1713,11 +1711,17 @@
 
 ##############################################################################
 ['arch != x64', {
-  # Tests that include types only supported on x64.
-  'compiler/fast-api-sequences-x64': [SKIP],
   # Stack switching is only supported on x64.
   'wasm/stack-switching': [SKIP],
 }],  # arch != x64
+
+##############################################################################
+['arch != x64 and arch != arm64 and arch != loong64 and arch != mips64', {
+  # Tests that include types only supported on x64/arm64.
+  'compiler/fast-api-sequences-x64': [SKIP],
+  'compiler/fast-api-annotations': [SKIP],
+
+}],  # arch != x64 and arch != arm64
 
 ##############################################################################
 # Skip failing tests in google3

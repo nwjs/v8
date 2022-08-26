@@ -79,6 +79,13 @@ class V8_NODISCARD SharedStringAccessGuardIfNeeded {
     // Don't acquire the lock for the main thread.
     if (!local_heap || local_heap->is_main_thread()) return nullptr;
 
+#ifdef V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE
+    // We don't need to guard when the string is in RO space. When compressing
+    // pointers in a per-Isolate cage, GetIsolateFromHeapObject always returns
+    // an Isolate, even for objects in RO space, so manually check.
+    if (ReadOnlyHeap::Contains(str)) return nullptr;
+#endif
+
     Isolate* isolate;
     if (!GetIsolateFromHeapObject(str, &isolate)) {
       // If we can't get the isolate from the String, it must be read-only.
@@ -359,6 +366,10 @@ class SequentialStringKey final : public StringTableKey {
     if (sizeof(Char) == 1) {
       internalized_string_ = isolate->factory()->NewOneByteInternalizedString(
           base::Vector<const uint8_t>::cast(chars_), raw_hash_field());
+    } else if (convert_) {
+      internalized_string_ =
+          isolate->factory()->NewOneByteInternalizedStringFromTwoByte(
+              base::Vector<const uint16_t>::cast(chars_), raw_hash_field());
     } else {
       internalized_string_ = isolate->factory()->NewTwoByteInternalizedString(
           base::Vector<const uint16_t>::cast(chars_), raw_hash_field());
@@ -1083,22 +1094,22 @@ bool ExternalString::is_uncached() const {
 }
 
 void ExternalString::AllocateExternalPointerEntries(Isolate* isolate) {
-  InitExternalPointerField(kResourceOffset, isolate,
-                           kExternalStringResourceTag);
+  InitExternalPointerField<kExternalStringResourceTag>(kResourceOffset,
+                                                       isolate);
   if (is_uncached()) return;
-  InitExternalPointerField(kResourceDataOffset, isolate,
-                           kExternalStringResourceDataTag);
+  InitExternalPointerField<kExternalStringResourceDataTag>(kResourceDataOffset,
+                                                           isolate);
 }
 
 DEF_GETTER(ExternalString, resource_as_address, Address) {
   Isolate* isolate = GetIsolateForSandbox(*this);
-  return ReadExternalPointerField(kResourceOffset, isolate,
-                                  kExternalStringResourceTag);
+  return ReadExternalPointerField<kExternalStringResourceTag>(kResourceOffset,
+                                                              isolate);
 }
 
 void ExternalString::set_address_as_resource(Isolate* isolate, Address value) {
-  WriteExternalPointerField(kResourceOffset, isolate, value,
-                            kExternalStringResourceTag);
+  WriteExternalPointerField<kExternalStringResourceTag>(kResourceOffset,
+                                                        isolate, value);
   if (IsExternalOneByteString()) {
     ExternalOneByteString::cast(*this).update_data_cache(isolate);
   } else {
@@ -1120,16 +1131,16 @@ void ExternalString::SetResourceRefForSerialization(uint32_t ref) {
 }
 
 void ExternalString::DisposeResource(Isolate* isolate) {
-  Address value = ReadExternalPointerField(kResourceOffset, isolate,
-                                           kExternalStringResourceTag);
+  Address value = ReadExternalPointerField<kExternalStringResourceTag>(
+      kResourceOffset, isolate);
   v8::String::ExternalStringResourceBase* resource =
       reinterpret_cast<v8::String::ExternalStringResourceBase*>(value);
 
   // Dispose of the C++ object if it has not already been disposed.
   if (resource != nullptr) {
     resource->Dispose();
-    WriteExternalPointerField(kResourceOffset, isolate, kNullAddress,
-                              kExternalStringResourceTag);
+    WriteExternalPointerField<kExternalStringResourceTag>(
+        kResourceOffset, isolate, kNullAddress);
   }
 }
 
@@ -1149,10 +1160,9 @@ void ExternalOneByteString::update_data_cache(Isolate* isolate) {
     if (resource(isolate)->IsCacheable())
       mutable_resource(isolate)->UpdateDataCache();
   } else {
-    WriteExternalPointerField(
+    WriteExternalPointerField<kExternalStringResourceDataTag>(
         kResourceDataOffset, isolate,
-        reinterpret_cast<Address>(resource(isolate)->data()),
-        kExternalStringResourceDataTag);
+        reinterpret_cast<Address>(resource(isolate)->data()));
   }
 }
 
@@ -1167,9 +1177,8 @@ void ExternalOneByteString::SetResource(
 
 void ExternalOneByteString::set_resource(
     Isolate* isolate, const ExternalOneByteString::Resource* resource) {
-  WriteExternalPointerField(kResourceOffset, isolate,
-                            reinterpret_cast<Address>(resource),
-                            kExternalStringResourceTag);
+  WriteExternalPointerField<kExternalStringResourceTag>(
+      kResourceOffset, isolate, reinterpret_cast<Address>(resource));
   if (resource != nullptr) update_data_cache(isolate);
 }
 
@@ -1221,10 +1230,9 @@ void ExternalTwoByteString::update_data_cache(Isolate* isolate) {
     if (resource(isolate)->IsCacheable())
       mutable_resource(isolate)->UpdateDataCache();
   } else {
-    WriteExternalPointerField(
+    WriteExternalPointerField<kExternalStringResourceDataTag>(
         kResourceDataOffset, isolate,
-        reinterpret_cast<Address>(resource(isolate)->data()),
-        kExternalStringResourceDataTag);
+        reinterpret_cast<Address>(resource(isolate)->data()));
   }
 }
 
@@ -1239,9 +1247,8 @@ void ExternalTwoByteString::SetResource(
 
 void ExternalTwoByteString::set_resource(
     Isolate* isolate, const ExternalTwoByteString::Resource* resource) {
-  WriteExternalPointerField(kResourceOffset, isolate,
-                            reinterpret_cast<Address>(resource),
-                            kExternalStringResourceTag);
+  WriteExternalPointerField<kExternalStringResourceTag>(
+      kResourceOffset, isolate, reinterpret_cast<Address>(resource));
   if (resource != nullptr) update_data_cache(isolate);
 }
 

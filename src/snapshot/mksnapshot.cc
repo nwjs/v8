@@ -10,17 +10,14 @@
 
 #include "include/libplatform/libplatform.h"
 #include "include/v8-initialization.h"
+#include "src/base/platform/elapsed-timer.h"
 #include "src/base/platform/platform.h"
 #include "src/base/platform/wrappers.h"
-#include "src/base/sanitizer/msan.h"
 #include "src/base/vector.h"
-#include "src/codegen/assembler-arch.h"
-#include "src/codegen/source-position-table.h"
+#include "src/codegen/cpu-features.h"
 #include "src/flags/flags.h"
-#include "src/snapshot/context-serializer.h"
 #include "src/snapshot/embedded/embedded-file-writer.h"
 #include "src/snapshot/snapshot.h"
-#include "src/snapshot/startup-serializer.h"
 
 namespace {
 
@@ -246,11 +243,6 @@ int main(int argc, char** argv) {
   v8::V8::InitializeICUDefaultLocation(argv[0]);
   std::unique_ptr<v8::Platform> platform = v8::platform::NewDefaultPlatform();
   v8::V8::InitializePlatform(platform.get());
-#ifdef V8_ENABLE_SANDBOX
-  if (!v8::V8::InitializeSandbox()) {
-    FATAL("Could not initialize the sandbox");
-  }
-#endif
   v8::V8::Initialize();
 
   {

@@ -15,8 +15,8 @@
 
 #include "include/v8-metrics.h"
 #include "src/base/optional.h"
+#include "src/base/platform/time.h"
 #include "src/common/globals.h"
-#include "src/logging/metrics.h"
 #include "src/tasks/cancelable-task.h"
 #include "src/wasm/compilation-environment.h"
 #include "src/wasm/wasm-features.h"

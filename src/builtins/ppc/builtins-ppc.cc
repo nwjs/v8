@@ -81,7 +81,6 @@ void Generate_OSREntry(MacroAssembler* masm, Register entry_address,
 
 void ResetBytecodeAge(MacroAssembler* masm, Register bytecode_array,
                       Register scratch) {
-  static_assert(BytecodeArray::kNoAgeBytecodeAge == 0);
   DCHECK(!AreAliased(bytecode_array, scratch));
   __ mov(scratch, Operand(0));
   __ StoreU16(
@@ -212,6 +211,7 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
              MemOperand(fp, InterpreterFrameConstants::kBytecodeArrayFromFp));
   // Save the accumulator register, since it's clobbered by the below call.
   __ Push(kInterpreterAccumulatorRegister);
+  __ Push(code_obj);
   {
     Register arg_reg_1 = r3;
     Register arg_reg_2 = r4;
@@ -223,6 +223,7 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
     __ PrepareCallCFunction(4, 0, ip);
     __ CallCFunction(get_baseline_pc, 3, 0);
   }
+  __ Pop(code_obj);
   __ AddS64(code_obj, code_obj, kReturnRegister0);
   __ Pop(kInterpreterAccumulatorRegister);
 
@@ -2937,14 +2938,9 @@ void Builtins::Generate_WasmCompileLazy(MacroAssembler* masm) {
              simd_regs.Count());
 
     __ MultiPush(gp_regs);
-    __ MultiPushF64AndV128(fp_regs, simd_regs);
+    __ MultiPushF64AndV128(fp_regs, simd_regs, ip, r0);
 
-    // Push the Wasm instance for loading the jump table address after the
-    // runtime call.
-    __ Push(kWasmInstanceRegister);
-
-    // Push the Wasm instance again as an explicit argument to the runtime
-    // function.
+    // Push the Wasm instance as an explicit argument to the runtime function.
     __ Push(kWasmInstanceRegister);
     // Push the function index as second argument.
     __ Push(kWasmCompileLazyFuncIndexRegister);
@@ -2954,19 +2950,21 @@ void Builtins::Generate_WasmCompileLazy(MacroAssembler* masm) {
     __ CallRuntime(Runtime::kWasmCompileLazy, 2);
     // The runtime function returns the jump table slot offset as a Smi. Use
     // that to compute the jump target in r11.
-    __ Pop(kWasmInstanceRegister);
+    __ SmiUntag(kReturnRegister0);
+    __ mr(r11, kReturnRegister0);
+
+    // Restore registers.
+    __ MultiPopF64AndV128(fp_regs, simd_regs, ip, r0);
+    __ MultiPop(gp_regs);
+
+    // After the instance register has been restored, we can add the jump table
+    // start to the jump table offset already stored in r8.
     __ LoadU64(
-        r11,
+        ip,
         MemOperand(kWasmInstanceRegister,
                    WasmInstanceObject::kJumpTableStartOffset - kHeapObjectTag),
         r0);
-    __ SmiUntag(kReturnRegister0);
-    __ AddS64(r11, r11, kReturnRegister0);
-    // r11 now holds the jump table slot where we want to jump to in the end.
-
-    // Restore registers.
-    __ MultiPopF64AndV128(fp_regs, simd_regs);
-    __ MultiPop(gp_regs);
+    __ AddS64(r11, r11, ip);
   }
 
   // Finally, jump to the jump table slot for the function.
@@ -2982,7 +2980,8 @@ void Builtins::Generate_WasmDebugBreak(MacroAssembler* masm) {
     // them after the runtime call.
     __ MultiPush(WasmDebugBreakFrameConstants::kPushedGpRegs);
     __ MultiPushF64AndV128(WasmDebugBreakFrameConstants::kPushedFpRegs,
-                           WasmDebugBreakFrameConstants::kPushedSimd128Regs);
+                           WasmDebugBreakFrameConstants::kPushedSimd128Regs, ip,
+                           r0);
 
     // Initialize the JavaScript context with 0. CEntry will use it to
     // set the current context on the isolate.
@@ -2991,7 +2990,8 @@ void Builtins::Generate_WasmDebugBreak(MacroAssembler* masm) {
 
     // Restore registers.
     __ MultiPopF64AndV128(WasmDebugBreakFrameConstants::kPushedFpRegs,
-                          WasmDebugBreakFrameConstants::kPushedSimd128Regs);
+                          WasmDebugBreakFrameConstants::kPushedSimd128Regs, ip,
+                          r0);
     __ MultiPop(WasmDebugBreakFrameConstants::kPushedGpRegs);
   }
   __ Ret();
@@ -3013,6 +3013,11 @@ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
 }
 
 void Builtins::Generate_WasmResume(MacroAssembler* masm) {
+  // TODO(v8:12191): Implement for this platform.
+  __ Trap();
+}
+
+void Builtins::Generate_WasmReject(MacroAssembler* masm) {
   // TODO(v8:12191): Implement for this platform.
   __ Trap();
 }
@@ -3653,10 +3658,8 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
   ExternalReference thunk_ref =
       ExternalReference::invoke_accessor_getter_callback();
 
-  __ LoadTaggedPointerField(
-      scratch, FieldMemOperand(callback, AccessorInfo::kJsGetterOffset), r0);
   __ LoadU64(api_function_address,
-             FieldMemOperand(scratch, Foreign::kForeignAddressOffset), r0);
+             FieldMemOperand(callback, AccessorInfo::kJsGetterOffset), r0);
 
   // +3 is to skip prolog, return address and name handle.
   MemOperand return_value_operand(

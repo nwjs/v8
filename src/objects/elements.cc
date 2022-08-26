@@ -19,6 +19,7 @@
 #include "src/objects/hash-table-inl.h"
 #include "src/objects/js-array-buffer-inl.h"
 #include "src/objects/js-array-inl.h"
+#include "src/objects/js-shared-array-inl.h"
 #include "src/objects/keys.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/slots-atomic-inl.h"
@@ -123,6 +124,7 @@ enum Where { AT_START, AT_END };
   V(FastPackedFrozenObjectElementsAccessor, PACKED_FROZEN_ELEMENTS,           \
     FixedArray)                                                               \
   V(FastHoleyFrozenObjectElementsAccessor, HOLEY_FROZEN_ELEMENTS, FixedArray) \
+  V(SharedArrayElementsAccessor, SHARED_ARRAY_ELEMENTS, FixedArray)           \
   V(DictionaryElementsAccessor, DICTIONARY_ELEMENTS, NumberDictionary)        \
   V(FastSloppyArgumentsElementsAccessor, FAST_SLOPPY_ARGUMENTS_ELEMENTS,      \
     FixedArray)                                                               \
@@ -647,6 +649,43 @@ class ElementsAccessorBase : public InternalElementsAccessor {
                                 InternalIndex entry) {
     return handle(BackingStore::cast(backing_store).get(entry.as_int()),
                   isolate);
+  }
+
+  Handle<Object> GetAtomic(Isolate* isolate, Handle<JSObject> holder,
+                           InternalIndex entry, SeqCstAccessTag tag) final {
+    return Subclass::GetAtomicInternalImpl(isolate, holder, entry, tag);
+  }
+
+  static Handle<Object> GetAtomicInternalImpl(Isolate* isolate,
+                                              Handle<JSObject> holder,
+                                              InternalIndex entry,
+                                              SeqCstAccessTag tag) {
+    UNREACHABLE();
+  }
+
+  void SetAtomic(Handle<JSObject> holder, InternalIndex entry, Object value,
+                 SeqCstAccessTag tag) final {
+    Subclass::SetAtomicInternalImpl(holder, entry, value, tag);
+  }
+
+  static void SetAtomicInternalImpl(Handle<JSObject> holder,
+                                    InternalIndex entry, Object value,
+                                    SeqCstAccessTag tag) {
+    UNREACHABLE();
+  }
+
+  Handle<Object> SwapAtomic(Isolate* isolate, Handle<JSObject> holder,
+                            InternalIndex entry, Object value,
+                            SeqCstAccessTag tag) final {
+    return Subclass::SwapAtomicInternalImpl(isolate, holder, entry, value, tag);
+  }
+
+  static Handle<Object> SwapAtomicInternalImpl(Isolate* isolate,
+                                               Handle<JSObject> holder,
+                                               InternalIndex entry,
+                                               Object value,
+                                               SeqCstAccessTag tag) {
+    UNREACHABLE();
   }
 
   void Set(Handle<JSObject> holder, InternalIndex entry, Object value) final {
@@ -1180,18 +1219,17 @@ class ElementsAccessorBase : public InternalElementsAccessor {
   }
 
   MaybeHandle<FixedArray> PrependElementIndices(
-      Handle<JSObject> object, Handle<FixedArrayBase> backing_store,
-      Handle<FixedArray> keys, GetKeysConversion convert,
-      PropertyFilter filter) final {
-    return Subclass::PrependElementIndicesImpl(object, backing_store, keys,
-                                               convert, filter);
+      Isolate* isolate, Handle<JSObject> object,
+      Handle<FixedArrayBase> backing_store, Handle<FixedArray> keys,
+      GetKeysConversion convert, PropertyFilter filter) final {
+    return Subclass::PrependElementIndicesImpl(isolate, object, backing_store,
+                                               keys, convert, filter);
   }
 
   static MaybeHandle<FixedArray> PrependElementIndicesImpl(
-      Handle<JSObject> object, Handle<FixedArrayBase> backing_store,
-      Handle<FixedArray> keys, GetKeysConversion convert,
-      PropertyFilter filter) {
-    Isolate* isolate = object->GetIsolate();
+      Isolate* isolate, Handle<JSObject> object,
+      Handle<FixedArrayBase> backing_store, Handle<FixedArray> keys,
+      GetKeysConversion convert, PropertyFilter filter) {
     uint32_t nof_property_keys = keys->length();
     size_t initial_list_length =
         Subclass::GetMaxNumberOfEntries(*object, *backing_store);
@@ -2524,6 +2562,7 @@ class FastSmiOrObjectElementsAccessor
       case HOLEY_FROZEN_ELEMENTS:
       case HOLEY_SEALED_ELEMENTS:
       case HOLEY_NONEXTENSIBLE_ELEMENTS:
+      case SHARED_ARRAY_ELEMENTS:
         CopyObjectToObjectElements(isolate, from, from_kind, from_start, to,
                                    to_kind, to_start, copy_size);
         break;
@@ -2809,6 +2848,37 @@ class FastPackedSealedObjectElementsAccessor
           FastPackedSealedObjectElementsAccessor,
           ElementsKindTraits<PACKED_SEALED_ELEMENTS>> {};
 
+class SharedArrayElementsAccessor
+    : public FastSealedObjectElementsAccessor<
+          SharedArrayElementsAccessor,
+          ElementsKindTraits<SHARED_ARRAY_ELEMENTS>> {
+ public:
+  static Handle<Object> GetAtomicInternalImpl(Isolate* isolate,
+                                              Handle<JSObject> holder,
+                                              InternalIndex entry,
+                                              SeqCstAccessTag tag) {
+    return handle(
+        BackingStore::cast(holder->elements()).get(entry.as_int(), tag),
+        isolate);
+  }
+
+  static void SetAtomicInternalImpl(Handle<JSObject> holder,
+                                    InternalIndex entry, Object value,
+                                    SeqCstAccessTag tag) {
+    BackingStore::cast(holder->elements()).set(entry.as_int(), value, tag);
+  }
+
+  static Handle<Object> SwapAtomicInternalImpl(Isolate* isolate,
+                                               Handle<JSObject> holder,
+                                               InternalIndex entry,
+                                               Object value,
+                                               SeqCstAccessTag tag) {
+    return handle(
+        BackingStore::cast(holder->elements()).swap(entry.as_int(), value, tag),
+        isolate);
+  }
+};
+
 class FastHoleySealedObjectElementsAccessor
     : public FastSealedObjectElementsAccessor<
           FastHoleySealedObjectElementsAccessor,
@@ -2949,6 +3019,7 @@ class FastDoubleElementsAccessor
       case HOLEY_FROZEN_ELEMENTS:
       case HOLEY_SEALED_ELEMENTS:
       case HOLEY_NONEXTENSIBLE_ELEMENTS:
+      case SHARED_ARRAY_ELEMENTS:
         CopyObjectToDoubleElements(from, from_start, to, to_start, copy_size);
         break;
       case DICTIONARY_ELEMENTS:

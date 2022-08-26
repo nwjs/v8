@@ -858,7 +858,7 @@ static void ReplaceClosureCodeWithOptimizedCode(MacroAssembler* masm,
   __ Move(scratch1, optimized_code);  // Write barrier clobbers scratch1 below.
   __ RecordWriteField(closure, JSFunction::kCodeOffset, scratch1,
                       kRAHasNotBeenSaved, SaveFPRegsMode::kIgnore,
-                      RememberedSetAction::kOmit, SmiCheck::kOmit);
+                      SmiCheck::kOmit);
 }
 
 static void LeaveInterpreterFrame(MacroAssembler* masm, Register scratch1,
@@ -1106,7 +1106,6 @@ static void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
 
 namespace {
 void ResetBytecodeAge(MacroAssembler* masm, Register bytecode_array) {
-  static_assert(BytecodeArray::kNoAgeBytecodeAge == 0);
   __ Sh(zero_reg,
         FieldMemOperand(bytecode_array, BytecodeArray::kBytecodeAgeOffset));
 }
@@ -3130,6 +3129,11 @@ void Builtins::Generate_WasmResume(MacroAssembler* masm) {
   __ Trap();
 }
 
+void Builtins::Generate_WasmReject(MacroAssembler* masm) {
+  // TODO(v8:12191): Implement for this platform.
+  __ Trap();
+}
+
 void Builtins::Generate_WasmOnStackReplace(MacroAssembler* masm) {
   // Only needed on x64.
   __ Trap();
@@ -3452,10 +3456,8 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
   ExternalReference thunk_ref =
       ExternalReference::invoke_accessor_getter_callback();
 
-  __ LoadTaggedPointerField(
-      scratch, FieldMemOperand(callback, AccessorInfo::kJsGetterOffset));
   __ Ld(api_function_address,
-        FieldMemOperand(scratch, Foreign::kForeignAddressOffset));
+        FieldMemOperand(callback, AccessorInfo::kJsGetterOffset));
 
   // +3 is to skip prolog, return address and name handle.
   MemOperand return_value_operand(

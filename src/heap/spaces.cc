@@ -140,7 +140,7 @@ size_t Page::ShrinkToHighWaterMark() {
   // Ensure that no objects will be allocated on this page.
   DCHECK_EQ(0u, AvailableInFreeList());
 
-  // Ensure that slot sets are empty. Otherwise the buckets for the shrinked
+  // Ensure that slot sets are empty. Otherwise the buckets for the shrunk
   // area would not be freed when deallocating this page.
   DCHECK_NULL(slot_set<OLD_TO_NEW>());
   DCHECK_NULL(slot_set<OLD_TO_OLD>());
@@ -173,8 +173,7 @@ void Page::CreateBlackArea(Address start, Address end) {
   DCHECK_EQ(Page::FromAddress(start), this);
   DCHECK_LT(start, end);
   DCHECK_EQ(Page::FromAddress(end - 1), this);
-  IncrementalMarking::MarkingState* marking_state =
-      heap()->incremental_marking()->marking_state();
+  MarkingState* marking_state = heap()->incremental_marking()->marking_state();
   marking_state->bitmap(this)->SetRange(AddressToMarkbitIndex(start),
                                         AddressToMarkbitIndex(end));
   marking_state->IncrementLiveBytes(this, static_cast<intptr_t>(end - start));
@@ -185,7 +184,7 @@ void Page::CreateBlackAreaBackground(Address start, Address end) {
   DCHECK_EQ(Page::FromAddress(start), this);
   DCHECK_LT(start, end);
   DCHECK_EQ(Page::FromAddress(end - 1), this);
-  IncrementalMarking::AtomicMarkingState* marking_state =
+  AtomicMarkingState* marking_state =
       heap()->incremental_marking()->atomic_marking_state();
   marking_state->bitmap(this)->SetRange(AddressToMarkbitIndex(start),
                                         AddressToMarkbitIndex(end));
@@ -198,8 +197,7 @@ void Page::DestroyBlackArea(Address start, Address end) {
   DCHECK_EQ(Page::FromAddress(start), this);
   DCHECK_LT(start, end);
   DCHECK_EQ(Page::FromAddress(end - 1), this);
-  IncrementalMarking::MarkingState* marking_state =
-      heap()->incremental_marking()->marking_state();
+  MarkingState* marking_state = heap()->incremental_marking()->marking_state();
   marking_state->bitmap(this)->ClearRange(AddressToMarkbitIndex(start),
                                           AddressToMarkbitIndex(end));
   marking_state->IncrementLiveBytes(this, -static_cast<intptr_t>(end - start));
@@ -210,7 +208,7 @@ void Page::DestroyBlackAreaBackground(Address start, Address end) {
   DCHECK_EQ(Page::FromAddress(start), this);
   DCHECK_LT(start, end);
   DCHECK_EQ(Page::FromAddress(end - 1), this);
-  IncrementalMarking::AtomicMarkingState* marking_state =
+  AtomicMarkingState* marking_state =
       heap()->incremental_marking()->atomic_marking_state();
   marking_state->bitmap(this)->ClearRange(AddressToMarkbitIndex(start),
                                           AddressToMarkbitIndex(end));
@@ -222,16 +220,16 @@ void Page::DestroyBlackAreaBackground(Address start, Address end) {
 // PagedSpace implementation
 
 void Space::AddAllocationObserver(AllocationObserver* observer) {
-  allocation_counter_.AddAllocationObserver(observer);
+  allocation_counter_->AddAllocationObserver(observer);
 }
 
 void Space::RemoveAllocationObserver(AllocationObserver* observer) {
-  allocation_counter_.RemoveAllocationObserver(observer);
+  allocation_counter_->RemoveAllocationObserver(observer);
 }
 
-void Space::PauseAllocationObservers() { allocation_counter_.Pause(); }
+void Space::PauseAllocationObservers() { allocation_counter_->Pause(); }
 
-void Space::ResumeAllocationObservers() { allocation_counter_.Resume(); }
+void Space::ResumeAllocationObservers() { allocation_counter_->Resume(); }
 
 Address SpaceWithLinearArea::ComputeLimit(Address start, Address end,
                                           size_t min_size) const {
@@ -242,13 +240,13 @@ Address SpaceWithLinearArea::ComputeLimit(Address start, Address end,
     return start + min_size;
   }
 
-  if (SupportsAllocationObserver() && allocation_counter_.IsActive()) {
+  if (SupportsAllocationObserver() && allocation_counter_->IsActive()) {
     // Ensure there are no unaccounted allocations.
     DCHECK_EQ(allocation_info_->start(), allocation_info_->top());
 
     // Generated code may allocate inline from the linear allocation area for.
     // To make sure we can observe these allocations, we use a lower ©limit.
-    size_t step = allocation_counter_.NextBytes();
+    size_t step = allocation_counter_->NextBytes();
     DCHECK_NE(step, 0);
     size_t rounded_step =
         RoundSizeDownToObjectAlignment(static_cast<int>(step - 1));
@@ -332,7 +330,7 @@ LocalAllocationBuffer& LocalAllocationBuffer::operator=(
 }
 
 void SpaceWithLinearArea::AddAllocationObserver(AllocationObserver* observer) {
-  if (!allocation_counter_.IsStepInProgress()) {
+  if (!allocation_counter_->IsStepInProgress()) {
     AdvanceAllocationObservers();
     Space::AddAllocationObserver(observer);
     UpdateInlineAllocationLimit(0);
@@ -343,7 +341,7 @@ void SpaceWithLinearArea::AddAllocationObserver(AllocationObserver* observer) {
 
 void SpaceWithLinearArea::RemoveAllocationObserver(
     AllocationObserver* observer) {
-  if (!allocation_counter_.IsStepInProgress()) {
+  if (!allocation_counter_->IsStepInProgress()) {
     AdvanceAllocationObservers();
     Space::RemoveAllocationObserver(observer);
     UpdateInlineAllocationLimit(0);
@@ -366,8 +364,8 @@ void SpaceWithLinearArea::ResumeAllocationObservers() {
 void SpaceWithLinearArea::AdvanceAllocationObservers() {
   if (allocation_info_->top() &&
       allocation_info_->start() != allocation_info_->top()) {
-    allocation_counter_.AdvanceAllocationObservers(allocation_info_->top() -
-                                                   allocation_info_->start());
+    allocation_counter_->AdvanceAllocationObservers(allocation_info_->top() -
+                                                    allocation_info_->start());
     MarkLabStartInitialized();
   }
 }
@@ -399,9 +397,9 @@ void SpaceWithLinearArea::InvokeAllocationObservers(
   DCHECK(size_in_bytes == aligned_size_in_bytes ||
          aligned_size_in_bytes == allocation_size);
 
-  if (!SupportsAllocationObserver() || !allocation_counter_.IsActive()) return;
+  if (!SupportsAllocationObserver() || !allocation_counter_->IsActive()) return;
 
-  if (allocation_size >= allocation_counter_.NextBytes()) {
+  if (allocation_size >= allocation_counter_->NextBytes()) {
     // Only the first object in a LAB should reach the next step.
     DCHECK_EQ(soon_object, allocation_info_->start() + aligned_size_in_bytes -
                                size_in_bytes);
@@ -425,8 +423,8 @@ void SpaceWithLinearArea::InvokeAllocationObservers(
 #endif
 
     // Run AllocationObserver::Step through the AllocationCounter.
-    allocation_counter_.InvokeAllocationObservers(soon_object, size_in_bytes,
-                                                  allocation_size);
+    allocation_counter_->InvokeAllocationObservers(soon_object, size_in_bytes,
+                                                   allocation_size);
 
     // Ensure that start/top/limit didn't change.
     DCHECK_EQ(saved_allocation_info.start(), allocation_info_->start());
@@ -434,9 +432,9 @@ void SpaceWithLinearArea::InvokeAllocationObservers(
     DCHECK_EQ(saved_allocation_info.limit(), allocation_info_->limit());
   }
 
-  DCHECK_IMPLIES(allocation_counter_.IsActive(),
+  DCHECK_IMPLIES(allocation_counter_->IsActive(),
                  (allocation_info_->limit() - allocation_info_->start()) <
-                     allocation_counter_.NextBytes());
+                     allocation_counter_->NextBytes());
 }
 
 #if DEBUG

@@ -70,7 +70,8 @@ int TurboAssembler::RequiredStackSizeForCallerSaved(SaveFPRegsMode fp_mode,
   return bytes;
 }
 
-int TurboAssembler::PushCallerSaved(SaveFPRegsMode fp_mode, Register exclusion1,
+int TurboAssembler::PushCallerSaved(SaveFPRegsMode fp_mode, Register scratch1,
+                                    Register scratch2, Register exclusion1,
                                     Register exclusion2, Register exclusion3) {
   int bytes = 0;
 
@@ -80,18 +81,21 @@ int TurboAssembler::PushCallerSaved(SaveFPRegsMode fp_mode, Register exclusion1,
   bytes += list.Count() * kSystemPointerSize;
 
   if (fp_mode == SaveFPRegsMode::kSave) {
-    MultiPushF64AndV128(kCallerSavedDoubles, kCallerSavedSimd128s);
+    MultiPushF64AndV128(kCallerSavedDoubles, kCallerSavedSimd128s, scratch1,
+                        scratch2);
     bytes += kStackSavedSavedFPSizeInBytes;
   }
 
   return bytes;
 }
 
-int TurboAssembler::PopCallerSaved(SaveFPRegsMode fp_mode, Register exclusion1,
+int TurboAssembler::PopCallerSaved(SaveFPRegsMode fp_mode, Register scratch1,
+                                   Register scratch2, Register exclusion1,
                                    Register exclusion2, Register exclusion3) {
   int bytes = 0;
   if (fp_mode == SaveFPRegsMode::kSave) {
-    MultiPopF64AndV128(kCallerSavedDoubles, kCallerSavedSimd128s);
+    MultiPopF64AndV128(kCallerSavedDoubles, kCallerSavedSimd128s, scratch1,
+                       scratch2);
     bytes += kStackSavedSavedFPSizeInBytes;
   }
 
@@ -440,7 +444,7 @@ void TurboAssembler::MultiPushDoubles(DoubleRegList dregs, Register location) {
   }
 }
 
-void TurboAssembler::MultiPushV128(Simd128RegList simd_regs,
+void TurboAssembler::MultiPushV128(Simd128RegList simd_regs, Register scratch,
                                    Register location) {
   int16_t num_to_push = simd_regs.Count();
   int16_t stack_offset = num_to_push * kSimd128Size;
@@ -450,8 +454,7 @@ void TurboAssembler::MultiPushV128(Simd128RegList simd_regs,
     if ((simd_regs.bits() & (1 << i)) != 0) {
       Simd128Register simd_reg = Simd128Register::from_code(i);
       stack_offset -= kSimd128Size;
-      li(ip, Operand(stack_offset));
-      StoreSimd128(simd_reg, MemOperand(location, ip));
+      StoreSimd128(simd_reg, MemOperand(location, stack_offset), scratch);
     }
   }
 }
@@ -469,14 +472,14 @@ void TurboAssembler::MultiPopDoubles(DoubleRegList dregs, Register location) {
   addi(location, location, Operand(stack_offset));
 }
 
-void TurboAssembler::MultiPopV128(Simd128RegList simd_regs, Register location) {
+void TurboAssembler::MultiPopV128(Simd128RegList simd_regs, Register scratch,
+                                  Register location) {
   int16_t stack_offset = 0;
 
   for (int16_t i = 0; i < Simd128Register::kNumRegisters; i++) {
     if ((simd_regs.bits() & (1 << i)) != 0) {
       Simd128Register simd_reg = Simd128Register::from_code(i);
-      li(ip, Operand(stack_offset));
-      LoadSimd128(simd_reg, MemOperand(location, ip));
+      LoadSimd128(simd_reg, MemOperand(location, stack_offset), scratch);
       stack_offset += kSimd128Size;
     }
   }
@@ -485,6 +488,7 @@ void TurboAssembler::MultiPopV128(Simd128RegList simd_regs, Register location) {
 
 void TurboAssembler::MultiPushF64AndV128(DoubleRegList dregs,
                                          Simd128RegList simd_regs,
+                                         Register scratch1, Register scratch2,
                                          Register location) {
   MultiPushDoubles(dregs);
 #if V8_ENABLE_WEBASSEMBLY
@@ -496,11 +500,11 @@ void TurboAssembler::MultiPushF64AndV128(DoubleRegList dregs,
     // sure to also save them when Simd is enabled.
     // Check the comments under crrev.com/c/2645694 for more details.
     Label push_empty_simd, simd_pushed;
-    Move(ip, ExternalReference::supports_wasm_simd_128_address());
-    LoadU8(ip, MemOperand(ip), r0);
-    cmpi(ip, Operand::Zero());  // If > 0 then simd is available.
+    Move(scratch1, ExternalReference::supports_wasm_simd_128_address());
+    LoadU8(scratch1, MemOperand(scratch1), scratch2);
+    cmpi(scratch1, Operand::Zero());  // If > 0 then simd is available.
     ble(&push_empty_simd);
-    MultiPushV128(simd_regs);
+    MultiPushV128(simd_regs, scratch1);
     b(&simd_pushed);
     bind(&push_empty_simd);
     // We still need to allocate empty space on the stack even if we
@@ -510,7 +514,7 @@ void TurboAssembler::MultiPushF64AndV128(DoubleRegList dregs,
     bind(&simd_pushed);
   } else {
     if (CpuFeatures::SupportsWasmSimd128()) {
-      MultiPushV128(simd_regs);
+      MultiPushV128(simd_regs, scratch1);
     } else {
       addi(sp, sp,
            Operand(-static_cast<int8_t>(simd_regs.Count()) * kSimd128Size));
@@ -521,17 +525,18 @@ void TurboAssembler::MultiPushF64AndV128(DoubleRegList dregs,
 
 void TurboAssembler::MultiPopF64AndV128(DoubleRegList dregs,
                                         Simd128RegList simd_regs,
+                                        Register scratch1, Register scratch2,
                                         Register location) {
 #if V8_ENABLE_WEBASSEMBLY
   bool generating_bultins =
       isolate() && isolate()->IsGeneratingEmbeddedBuiltins();
   if (generating_bultins) {
     Label pop_empty_simd, simd_popped;
-    Move(ip, ExternalReference::supports_wasm_simd_128_address());
-    LoadU8(ip, MemOperand(ip), r0);
-    cmpi(ip, Operand::Zero());  // If > 0 then simd is available.
+    Move(scratch1, ExternalReference::supports_wasm_simd_128_address());
+    LoadU8(scratch1, MemOperand(scratch1), scratch2);
+    cmpi(scratch1, Operand::Zero());  // If > 0 then simd is available.
     ble(&pop_empty_simd);
-    MultiPopV128(simd_regs);
+    MultiPopV128(simd_regs, scratch1);
     b(&simd_popped);
     bind(&pop_empty_simd);
     addi(sp, sp,
@@ -539,7 +544,7 @@ void TurboAssembler::MultiPopF64AndV128(DoubleRegList dregs,
     bind(&simd_popped);
   } else {
     if (CpuFeatures::SupportsWasmSimd128()) {
-      MultiPopV128(simd_regs);
+      MultiPopV128(simd_regs, scratch1);
     } else {
       addi(sp, sp,
            Operand(static_cast<int8_t>(simd_regs.Count()) * kSimd128Size));
@@ -595,14 +600,6 @@ void TurboAssembler::StoreTaggedField(const Register& value,
     StoreU32(value, dst_field_operand, scratch);
     RecordComment("]");
   } else {
-    // TODO(miladfarca): move this block into StoreU64.
-    if (CpuFeatures::IsSupported(PPC_10_PLUS)) {
-      if (dst_field_operand.rb() == no_reg &&
-          is_int34(dst_field_operand.offset())) {
-        pstd(value, dst_field_operand);
-        return;
-      }
-    }
     StoreU64(value, dst_field_operand, scratch);
   }
 }
@@ -3203,6 +3200,57 @@ void MacroAssembler::AndSmiLiteral(Register dst, Register src, Smi smi,
     }                                                   \
   }
 
+#define GenerateMemoryOperationRR(reg, mem, op)                \
+  {                                                            \
+    if (mem.offset() == 0) {                                   \
+      if (mem.rb() != no_reg)                                  \
+        op(reg, mem);                                          \
+      else                                                     \
+        op(reg, MemOperand(r0, mem.ra()));                     \
+    } else if (is_int16(mem.offset())) {                       \
+      if (mem.rb() != no_reg)                                  \
+        addi(scratch, mem.rb(), Operand(mem.offset()));        \
+      else                                                     \
+        mov(scratch, Operand(mem.offset()));                   \
+      op(reg, MemOperand(mem.ra(), scratch));                  \
+    } else {                                                   \
+      mov(scratch, Operand(mem.offset()));                     \
+      if (mem.rb() != no_reg) add(scratch, scratch, mem.rb()); \
+      op(reg, MemOperand(mem.ra(), scratch));                  \
+    }                                                          \
+  }
+
+#define GenerateMemoryOperationPrefixed(reg, mem, ri_op, rip_op, rr_op)       \
+  {                                                                           \
+    int64_t offset = mem.offset();                                            \
+                                                                              \
+    if (mem.rb() == no_reg) {                                                 \
+      if (is_int16(offset)) {                                                 \
+        ri_op(reg, mem);                                                      \
+      } else if (is_int34(offset) && CpuFeatures::IsSupported(PPC_10_PLUS)) { \
+        rip_op(reg, mem);                                                     \
+      } else {                                                                \
+        /* cannot use d-form */                                               \
+        CHECK_NE(scratch, no_reg);                                            \
+        mov(scratch, Operand(offset));                                        \
+        rr_op(reg, MemOperand(mem.ra(), scratch));                            \
+      }                                                                       \
+    } else {                                                                  \
+      if (offset == 0) {                                                      \
+        rr_op(reg, mem);                                                      \
+      } else if (is_int16(offset)) {                                          \
+        CHECK_NE(scratch, no_reg);                                            \
+        addi(scratch, mem.rb(), Operand(offset));                             \
+        rr_op(reg, MemOperand(mem.ra(), scratch));                            \
+      } else {                                                                \
+        CHECK_NE(scratch, no_reg);                                            \
+        mov(scratch, Operand(offset));                                        \
+        add(scratch, scratch, mem.rb());                                      \
+        rr_op(reg, MemOperand(mem.ra(), scratch));                            \
+      }                                                                       \
+    }                                                                         \
+  }
+
 #define GenerateMemoryOperationWithAlign(reg, mem, ri_op, rr_op) \
   {                                                              \
     int64_t offset = mem.offset();                               \
@@ -3233,11 +3281,41 @@ void MacroAssembler::AndSmiLiteral(Register dst, Register src, Smi smi,
     }                                                            \
   }
 
+#define GenerateMemoryOperationWithAlignPrefixed(reg, mem, ri_op, rip_op,     \
+                                                 rr_op)                       \
+  {                                                                           \
+    int64_t offset = mem.offset();                                            \
+    int misaligned = (offset & 3);                                            \
+                                                                              \
+    if (mem.rb() == no_reg) {                                                 \
+      if (is_int16(offset) && !misaligned) {                                  \
+        ri_op(reg, mem);                                                      \
+      } else if (is_int34(offset) && CpuFeatures::IsSupported(PPC_10_PLUS)) { \
+        rip_op(reg, mem);                                                     \
+      } else {                                                                \
+        /* cannot use d-form */                                               \
+        CHECK_NE(scratch, no_reg);                                            \
+        mov(scratch, Operand(offset));                                        \
+        rr_op(reg, MemOperand(mem.ra(), scratch));                            \
+      }                                                                       \
+    } else {                                                                  \
+      if (offset == 0) {                                                      \
+        rr_op(reg, mem);                                                      \
+      } else if (is_int16(offset)) {                                          \
+        CHECK_NE(scratch, no_reg);                                            \
+        addi(scratch, mem.rb(), Operand(offset));                             \
+        rr_op(reg, MemOperand(mem.ra(), scratch));                            \
+      } else {                                                                \
+        CHECK_NE(scratch, no_reg);                                            \
+        mov(scratch, Operand(offset));                                        \
+        add(scratch, scratch, mem.rb());                                      \
+        rr_op(reg, MemOperand(mem.ra(), scratch));                            \
+      }                                                                       \
+    }                                                                         \
+  }
+
 #define MEM_OP_WITH_ALIGN_LIST(V) \
-  V(LoadS32, lwa, lwax)           \
-  V(LoadU64, ld, ldx)             \
   V(LoadU64WithUpdate, ldu, ldux) \
-  V(StoreU64, std, stdx)          \
   V(StoreU64WithUpdate, stdu, stdux)
 
 #define MEM_OP_WITH_ALIGN_FUNCTION(name, ri_op, rr_op)           \
@@ -3249,18 +3327,21 @@ MEM_OP_WITH_ALIGN_LIST(MEM_OP_WITH_ALIGN_FUNCTION)
 #undef MEM_OP_WITH_ALIGN_LIST
 #undef MEM_OP_WITH_ALIGN_FUNCTION
 
+#define MEM_OP_WITH_ALIGN_PREFIXED_LIST(V) \
+  V(LoadS32, lwa, plwa, lwax)              \
+  V(LoadU64, ld, pld, ldx)                 \
+  V(StoreU64, std, pstd, stdx)
+
+#define MEM_OP_WITH_ALIGN_PREFIXED_FUNCTION(name, ri_op, rip_op, rr_op)       \
+  void TurboAssembler::name(Register reg, const MemOperand& mem,              \
+                            Register scratch) {                               \
+    GenerateMemoryOperationWithAlignPrefixed(reg, mem, ri_op, rip_op, rr_op); \
+  }
+MEM_OP_WITH_ALIGN_PREFIXED_LIST(MEM_OP_WITH_ALIGN_PREFIXED_FUNCTION)
+#undef MEM_OP_WITH_ALIGN_PREFIXED_LIST
+#undef MEM_OP_WITH_ALIGN_PREFIXED_FUNCTION
+
 #define MEM_OP_LIST(V)                                 \
-  V(LoadU32, Register, lwz, lwzx)                      \
-  V(LoadS16, Register, lha, lhax)                      \
-  V(LoadU16, Register, lhz, lhzx)                      \
-  V(LoadU8, Register, lbz, lbzx)                       \
-  V(StoreU32, Register, stw, stwx)                     \
-  V(StoreU16, Register, sth, sthx)                     \
-  V(StoreU8, Register, stb, stbx)                      \
-  V(LoadF64, DoubleRegister, lfd, lfdx)                \
-  V(LoadF32, DoubleRegister, lfs, lfsx)                \
-  V(StoreF64, DoubleRegister, stfd, stfdx)             \
-  V(StoreF32, DoubleRegister, stfs, stfsx)             \
   V(LoadF64WithUpdate, DoubleRegister, lfdu, lfdux)    \
   V(LoadF32WithUpdate, DoubleRegister, lfsu, lfsux)    \
   V(StoreF64WithUpdate, DoubleRegister, stfdu, stfdux) \
@@ -3275,41 +3356,33 @@ MEM_OP_LIST(MEM_OP_FUNCTION)
 #undef MEM_OP_LIST
 #undef MEM_OP_FUNCTION
 
+#define MEM_OP_PREFIXED_LIST(V)                   \
+  V(LoadU32, Register, lwz, plwz, lwzx)           \
+  V(LoadS16, Register, lha, plha, lhax)           \
+  V(LoadU16, Register, lhz, plhz, lhzx)           \
+  V(LoadU8, Register, lbz, plbz, lbzx)            \
+  V(StoreU32, Register, stw, pstw, stwx)          \
+  V(StoreU16, Register, sth, psth, sthx)          \
+  V(StoreU8, Register, stb, pstb, stbx)           \
+  V(LoadF64, DoubleRegister, lfd, plfd, lfdx)     \
+  V(LoadF32, DoubleRegister, lfs, plfs, lfsx)     \
+  V(StoreF64, DoubleRegister, stfd, pstfd, stfdx) \
+  V(StoreF32, DoubleRegister, stfs, pstfs, stfsx)
+
+#define MEM_OP_PREFIXED_FUNCTION(name, result_t, ri_op, rip_op, rr_op) \
+  void TurboAssembler::name(result_t reg, const MemOperand& mem,       \
+                            Register scratch) {                        \
+    GenerateMemoryOperationPrefixed(reg, mem, ri_op, rip_op, rr_op);   \
+  }
+MEM_OP_PREFIXED_LIST(MEM_OP_PREFIXED_FUNCTION)
+#undef MEM_OP_PREFIXED_LIST
+#undef MEM_OP_PREFIXED_FUNCTION
+
 void TurboAssembler::LoadS8(Register dst, const MemOperand& mem,
                             Register scratch) {
   LoadU8(dst, mem, scratch);
   extsb(dst, dst);
 }
-
-void TurboAssembler::LoadSimd128(Simd128Register src, const MemOperand& mem) {
-  DCHECK(mem.rb().is_valid());
-  lxvx(src, mem);
-}
-
-void TurboAssembler::StoreSimd128(Simd128Register src, const MemOperand& mem) {
-  DCHECK(mem.rb().is_valid());
-  stxvx(src, mem);
-}
-
-#define GenerateMemoryLEOperation(reg, mem, op)                \
-  {                                                            \
-    if (mem.offset() == 0) {                                   \
-      if (mem.rb() != no_reg)                                  \
-        op(reg, mem);                                          \
-      else                                                     \
-        op(reg, MemOperand(r0, mem.ra()));                     \
-    } else if (is_int16(mem.offset())) {                       \
-      if (mem.rb() != no_reg)                                  \
-        addi(scratch, mem.rb(), Operand(mem.offset()));        \
-      else                                                     \
-        mov(scratch, Operand(mem.offset()));                   \
-      op(reg, MemOperand(mem.ra(), scratch));                  \
-    } else {                                                   \
-      mov(scratch, Operand(mem.offset()));                     \
-      if (mem.rb() != no_reg) add(scratch, scratch, mem.rb()); \
-      op(reg, MemOperand(mem.ra(), scratch));                  \
-    }                                                          \
-  }
 
 #define MEM_LE_OP_LIST(V) \
   V(LoadU64, ldbrx)       \
@@ -3323,7 +3396,7 @@ void TurboAssembler::StoreSimd128(Simd128Register src, const MemOperand& mem) {
 #define MEM_LE_OP_FUNCTION(name, op)                                 \
   void TurboAssembler::name##LE(Register reg, const MemOperand& mem, \
                                 Register scratch) {                  \
-    GenerateMemoryLEOperation(reg, mem, op);                         \
+    GenerateMemoryOperationRR(reg, mem, op);                         \
   }
 #else
 #define MEM_LE_OP_FUNCTION(name, op)                                 \
@@ -3400,6 +3473,38 @@ void TurboAssembler::StoreF32LE(DoubleRegister dst, const MemOperand& mem,
   StoreU32LE(scratch, mem, scratch2);
 #else
   StoreF32(dst, mem, scratch);
+#endif
+}
+
+// Simd Support.
+void TurboAssembler::LoadSimd128(Simd128Register dst, const MemOperand& mem,
+                                 Register scratch) {
+  GenerateMemoryOperationRR(dst, mem, lxvx);
+}
+
+void TurboAssembler::StoreSimd128(Simd128Register src, const MemOperand& mem,
+                                  Register scratch) {
+  GenerateMemoryOperationRR(src, mem, stxvx);
+}
+
+void TurboAssembler::LoadSimd128LE(Simd128Register dst, const MemOperand& mem,
+                                   Register scratch) {
+#ifdef V8_TARGET_BIG_ENDIAN
+  LoadSimd128(dst, mem, scratch);
+  xxbrq(dst, dst);
+#else
+  LoadSimd128(dst, mem, scratch);
+#endif
+}
+
+void TurboAssembler::StoreSimd128LE(Simd128Register src, const MemOperand& mem,
+                                    Register scratch1,
+                                    Simd128Register scratch2) {
+#ifdef V8_TARGET_BIG_ENDIAN
+  xxbrq(scratch2, src);
+  StoreSimd128(scratch2, mem, scratch1);
+#else
+  StoreSimd128(src, mem, scratch1);
 #endif
 }
 
@@ -3534,40 +3639,19 @@ void TurboAssembler::SwapSimd128(Simd128Register src, Simd128Register dst,
 void TurboAssembler::SwapSimd128(Simd128Register src, MemOperand dst,
                                  Simd128Register scratch) {
   DCHECK(src != scratch);
-  // push v0, to be used as scratch
-  addi(sp, sp, Operand(-kSimd128Size));
-  StoreSimd128(v0, MemOperand(r0, sp));
-  mov(ip, Operand(dst.offset()));
-  LoadSimd128(v0, MemOperand(dst.ra(), ip));
-  StoreSimd128(src, MemOperand(dst.ra(), ip));
-  vor(src, v0, v0);
-  // restore v0
-  LoadSimd128(v0, MemOperand(r0, sp));
-  addi(sp, sp, Operand(kSimd128Size));
+  LoadSimd128(scratch, dst, ip);
+  StoreSimd128(src, dst, ip);
+  vor(src, scratch, scratch);
 }
 
 void TurboAssembler::SwapSimd128(MemOperand src, MemOperand dst,
-                                 Simd128Register scratch) {
-  // push v0 and v1, to be used as scratch
-  addi(sp, sp, Operand(2 * -kSimd128Size));
-  StoreSimd128(v0, MemOperand(r0, sp));
-  li(ip, Operand(kSimd128Size));
-  StoreSimd128(v1, MemOperand(ip, sp));
+                                 Simd128Register scratch1,
+                                 Simd128Register scratch2) {
+  LoadSimd128(scratch1, src, ip);
+  LoadSimd128(scratch2, dst, ip);
 
-  mov(ip, Operand(src.offset()));
-  LoadSimd128(v0, MemOperand(src.ra(), ip));
-  mov(ip, Operand(dst.offset()));
-  LoadSimd128(v1, MemOperand(dst.ra(), ip));
-
-  StoreSimd128(v0, MemOperand(dst.ra(), ip));
-  mov(ip, Operand(src.offset()));
-  StoreSimd128(v1, MemOperand(src.ra(), ip));
-
-  // restore v0 and v1
-  LoadSimd128(v0, MemOperand(r0, sp));
-  li(ip, Operand(kSimd128Size));
-  LoadSimd128(v1, MemOperand(ip, sp));
-  addi(sp, sp, Operand(2 * kSimd128Size));
+  StoreSimd128(scratch1, dst, ip);
+  StoreSimd128(scratch2, src, ip);
 }
 
 void TurboAssembler::ByteReverseU16(Register dst, Register val,

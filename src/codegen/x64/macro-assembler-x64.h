@@ -152,8 +152,12 @@ class V8_EXPORT_PRIVATE TurboAssembler
   void Cvtqui2sd(XMMRegister dst, Operand src);
   void Cvttsd2uiq(Register dst, Operand src, Label* fail = nullptr);
   void Cvttsd2uiq(Register dst, XMMRegister src, Label* fail = nullptr);
+  void Cvttsd2ui(Register dst, Operand src, Label* fail = nullptr);
+  void Cvttsd2ui(Register dst, XMMRegister src, Label* fail = nullptr);
   void Cvttss2uiq(Register dst, Operand src, Label* fail = nullptr);
   void Cvttss2uiq(Register dst, XMMRegister src, Label* fail = nullptr);
+  void Cvttss2ui(Register dst, Operand src, Label* fail = nullptr);
+  void Cvttss2ui(Register dst, XMMRegister src, Label* fail = nullptr);
 
   // cvtsi2sd and cvtsi2ss instructions only write to the low 64/32-bit of dst
   // register, which hinders register renaming and makes dependence chains
@@ -503,9 +507,6 @@ class V8_EXPORT_PRIVATE TurboAssembler
 #endif
   }
 
-  void MaybeSaveRegisters(RegList registers);
-  void MaybeRestoreRegisters(RegList registers);
-
   void CallEphemeronKeyBarrier(Register object, Register slot_address,
                                SaveFPRegsMode fp_mode);
 
@@ -530,25 +531,25 @@ class V8_EXPORT_PRIVATE TurboAssembler
   // Calculate how much stack space (in bytes) are required to store caller
   // registers excluding those specified in the arguments.
   int RequiredStackSizeForCallerSaved(SaveFPRegsMode fp_mode,
-                                      Register exclusion1 = no_reg,
-                                      Register exclusion2 = no_reg,
-                                      Register exclusion3 = no_reg) const;
+                                      Register exclusion = no_reg) const;
 
   // PushCallerSaved and PopCallerSaved do not arrange the registers in any
   // particular order so they are not useful for calls that can cause a GC.
-  // The caller can exclude up to 3 registers that do not need to be saved and
+  // The caller can exclude a register that does not need to be saved and
   // restored.
 
   // Push caller saved registers on the stack, and return the number of bytes
   // stack pointer is adjusted.
-  int PushCallerSaved(SaveFPRegsMode fp_mode, Register exclusion1 = no_reg,
-                      Register exclusion2 = no_reg,
-                      Register exclusion3 = no_reg);
+  int PushCallerSaved(SaveFPRegsMode fp_mode, Register exclusion = no_reg);
   // Restore caller saved registers from the stack, and return the number of
   // bytes stack pointer is adjusted.
-  int PopCallerSaved(SaveFPRegsMode fp_mode, Register exclusion1 = no_reg,
-                     Register exclusion2 = no_reg,
-                     Register exclusion3 = no_reg);
+  int PopCallerSaved(SaveFPRegsMode fp_mode, Register exclusion = no_reg);
+
+  int PushAll(RegList registers);
+  int PopAll(RegList registers);
+
+  int PushAll(DoubleRegList registers);
+  int PopAll(DoubleRegList registers);
 
   // Compute the start of the generated instruction stream from the current PC.
   // This is an alternative to embedding the {CodeObject} handle as a reference.

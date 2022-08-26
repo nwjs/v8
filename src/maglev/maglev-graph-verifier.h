@@ -63,6 +63,10 @@ class MaglevGraphVerifier {
       case Opcode::kConstant:
       case Opcode::kConstantGapMove:
       case Opcode::kCreateEmptyArrayLiteral:
+      case Opcode::kCreateArrayLiteral:
+      case Opcode::kCreateShallowArrayLiteral:
+      case Opcode::kCreateObjectLiteral:
+      case Opcode::kCreateShallowObjectLiteral:
       case Opcode::kDeopt:
       case Opcode::kFloat64Constant:
       case Opcode::kGapMove:
@@ -75,6 +79,8 @@ class MaglevGraphVerifier {
       case Opcode::kRegisterInput:
       case Opcode::kRootConstant:
       case Opcode::kSmiConstant:
+      case Opcode::kIncreaseInterruptBudget:
+      case Opcode::kReduceInterruptBudget:
         // No input.
         DCHECK_EQ(node->input_count(), 0);
         break;
@@ -86,14 +92,22 @@ class MaglevGraphVerifier {
       case Opcode::kLoadDoubleField:
       case Opcode::kLoadGlobal:
       case Opcode::kLoadTaggedField:
-      // TODO(victorgomes): Can we check that the input is actually a map?
+      // TODO(victorgomes): Can we check that the input is actually a receiver?
+      case Opcode::kCheckHeapObject:
       case Opcode::kCheckMaps:
+      case Opcode::kCheckMapsWithMigration:
+      case Opcode::kCheckSmi:
+      case Opcode::kCheckString:
+      case Opcode::kCheckedInternalizedString:
       // TODO(victorgomes): Can we check that the input is Boolean?
       case Opcode::kBranchIfToBooleanTrue:
-      case Opcode::kBranchIfTrue:
+      case Opcode::kBranchIfRootConstant:
       case Opcode::kCheckedFloat64Unbox:
-      case Opcode::kCreateObjectLiteral:
-      case Opcode::kCreateShallowObjectLiteral:
+      case Opcode::kCreateFunctionContext:
+      case Opcode::kCreateClosure:
+      case Opcode::kFastCreateClosure:
+      case Opcode::kLogicalNot:
+      case Opcode::kTestUndetectable:
       case Opcode::kReturn:
         DCHECK_EQ(node->input_count(), 1);
         CheckValueInputIs(node, 0, ValueRepresentation::kTagged);
@@ -127,8 +141,11 @@ class MaglevGraphVerifier {
       case Opcode::kGenericLessThan:
       case Opcode::kGenericLessThanOrEqual:
       case Opcode::kGenericStrictEqual:
+      case Opcode::kTaggedEqual:
       // TODO(victorgomes): Can we check that first input is an Object?
-      case Opcode::kStoreField:
+      case Opcode::kStoreTaggedFieldNoWriteBarrier:
+      // TODO(victorgomes): Can we check that second input is a Smi?
+      case Opcode::kStoreTaggedFieldWithWriteBarrier:
       case Opcode::kLoadNamedGeneric:
         DCHECK_EQ(node->input_count(), 2);
         CheckValueInputIs(node, 0, ValueRepresentation::kTagged);
@@ -136,10 +153,21 @@ class MaglevGraphVerifier {
         break;
       case Opcode::kSetNamedGeneric:
       case Opcode::kDefineNamedOwnGeneric:
+      case Opcode::kGetKeyedGeneric:
+      case Opcode::kTestInstanceOf:
         DCHECK_EQ(node->input_count(), 3);
         CheckValueInputIs(node, 0, ValueRepresentation::kTagged);
         CheckValueInputIs(node, 1, ValueRepresentation::kTagged);
         CheckValueInputIs(node, 2, ValueRepresentation::kTagged);
+        break;
+      case Opcode::kSetKeyedGeneric:
+      case Opcode::kDefineKeyedOwnGeneric:
+      case Opcode::kStoreInArrayLiteralGeneric:
+        DCHECK_EQ(node->input_count(), 4);
+        CheckValueInputIs(node, 0, ValueRepresentation::kTagged);
+        CheckValueInputIs(node, 1, ValueRepresentation::kTagged);
+        CheckValueInputIs(node, 2, ValueRepresentation::kTagged);
+        CheckValueInputIs(node, 3, ValueRepresentation::kTagged);
         break;
       case Opcode::kInt32AddWithOverflow:
       case Opcode::kInt32SubtractWithOverflow:
@@ -163,6 +191,11 @@ class MaglevGraphVerifier {
         DCHECK_EQ(node->input_count(), 2);
         CheckValueInputIs(node, 0, ValueRepresentation::kInt32);
         CheckValueInputIs(node, 1, ValueRepresentation::kInt32);
+        break;
+      case Opcode::kBranchIfReferenceCompare:
+        DCHECK_EQ(node->input_count(), 2);
+        CheckValueInputIs(node, 0, ValueRepresentation::kTagged);
+        CheckValueInputIs(node, 1, ValueRepresentation::kTagged);
         break;
       case Opcode::kFloat64Add:
       case Opcode::kFloat64Subtract:

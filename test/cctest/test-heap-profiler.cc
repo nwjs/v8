@@ -38,10 +38,9 @@
 #include "src/base/optional.h"
 #include "src/base/strings.h"
 #include "src/codegen/assembler-inl.h"
-#include "src/common/allow-deprecated.h"
 #include "src/debug/debug.h"
+#include "src/handles/global-handles.h"
 #include "src/heap/heap-inl.h"
-#include "src/init/v8.h"
 #include "src/objects/objects-inl.h"
 #include "src/profiler/allocation-tracker.h"
 #include "src/profiler/heap-profiler.h"
@@ -1651,7 +1650,9 @@ class EmbedderGraphBuilder : public v8::PersistentHandleVisitor {
   static void BuildEmbedderGraph(v8::Isolate* isolate, v8::EmbedderGraph* graph,
                                  void* data) {
     EmbedderGraphBuilder builder(isolate, graph);
-    isolate->VisitHandlesWithClassIds(&builder);
+    reinterpret_cast<i::Isolate*>(isolate)
+        ->global_handles()
+        ->IterateAllRootsForTesting(&builder);
   }
 
   END_ALLOW_USE_DEPRECATED()
@@ -1678,8 +1679,6 @@ class EmbedderGraphBuilder : public v8::PersistentHandleVisitor {
         graph_->AddEdge(node, group);
         graph_->AddEdge(group, node);
       }
-    } else {
-      UNREACHABLE();
     }
   }
 
@@ -2444,14 +2443,6 @@ TEST(AccessorInfo) {
   const v8::HeapGraphNode* name = GetProperty(
       env->GetIsolate(), length_accessor, v8::HeapGraphEdge::kInternal, "name");
   CHECK(name);
-  const v8::HeapGraphNode* getter =
-      GetProperty(env->GetIsolate(), length_accessor,
-                  v8::HeapGraphEdge::kInternal, "getter");
-  CHECK(getter);
-  const v8::HeapGraphNode* setter =
-      GetProperty(env->GetIsolate(), length_accessor,
-                  v8::HeapGraphEdge::kInternal, "setter");
-  CHECK(setter);
 }
 
 TEST(JSGeneratorObject) {

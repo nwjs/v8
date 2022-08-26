@@ -35,11 +35,9 @@
 #include "src/base/enum-set.h"
 #include "src/codegen/register-configuration.h"
 #include "src/debug/debug-interface.h"
-#include "src/execution/isolate.h"
+#include "src/execution/isolate-inl.h"
 #include "src/execution/simulator.h"
-#include "src/flags/flags.h"
 #include "src/heap/factory.h"
-#include "src/init/v8.h"
 #include "src/objects/js-function.h"
 #include "src/objects/objects.h"
 #include "src/zone/accounting-allocator.h"
@@ -729,6 +727,9 @@ class TestPlatform : public v8::Platform {
   void CallDelayedOnWorkerThread(std::unique_ptr<v8::Task> task,
                                  double delay_in_seconds) override;
   std::unique_ptr<v8::JobHandle> PostJob(
+      v8::TaskPriority priority,
+      std::unique_ptr<v8::JobTask> job_task) override;
+  std::unique_ptr<v8::JobHandle> CreateJob(
       v8::TaskPriority priority,
       std::unique_ptr<v8::JobTask> job_task) override;
   double MonotonicallyIncreasingTime() override;

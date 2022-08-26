@@ -7,9 +7,8 @@
 #include <iomanip>
 
 #include "src/compiler/js-heap-broker.h"
-#include "src/handles/handles-inl.h"
+#include "src/numbers/conversions-inl.h"
 #include "src/objects/instance-type.h"
-#include "src/objects/objects-inl.h"
 #include "src/objects/turbofan-types.h"
 #include "src/utils/ostreams.h"
 
@@ -263,6 +262,7 @@ Type::bitset BitsetType::Lub(const MapRefLike& map) {
     case JS_WEAK_SET_TYPE:
     case JS_PROMISE_TYPE:
     case JS_SHADOW_REALM_TYPE:
+    case JS_SHARED_ARRAY_TYPE:
     case JS_SHARED_STRUCT_TYPE:
     case JS_ATOMICS_MUTEX_TYPE:
     case JS_TEMPORAL_CALENDAR_TYPE:
@@ -285,6 +285,7 @@ Type::bitset BitsetType::Lub(const MapRefLike& map) {
     case WASM_SUSPENDER_OBJECT_TYPE:
     case WASM_TABLE_OBJECT_TYPE:
     case WASM_TAG_OBJECT_TYPE:
+    case WASM_EXCEPTION_PACKAGE_TYPE:
     case WASM_VALUE_OBJECT_TYPE:
 #endif  // V8_ENABLE_WEBASSEMBLY
     case WEAK_CELL_TYPE:

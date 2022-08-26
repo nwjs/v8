@@ -45,7 +45,6 @@
 #include "src/codegen/optimized-compilation-info.h"
 #include "src/common/globals.h"
 #include "src/compiler/pipeline.h"
-#include "src/debug/debug.h"
 #include "src/flags/flags.h"
 #include "src/objects/objects-inl.h"
 #include "src/trap-handler/trap-handler.h"
@@ -119,10 +118,12 @@ void CcTest::Run(const char* snapshot_directory) {
     platform = std::move(underlying_default_platform);
   }
   v8::V8::InitializePlatform(platform.get());
-#ifdef V8_ENABLE_SANDBOX
-  CHECK(v8::V8::InitializeSandbox());
-#endif
   cppgc::InitializeProcess(platform->GetPageAllocator());
+
+  // Allow changing flags in cctests.
+  // TODO(12887): Fix tests to avoid changing flag values after initialization.
+  i::FLAG_freeze_flags_after_init = false;
+
   v8::V8::Initialize();
   v8::V8::InitializeExternalStartupData(snapshot_directory);
 
@@ -496,6 +497,11 @@ void TestPlatform::CallDelayedOnWorkerThread(std::unique_ptr<v8::Task> task,
 std::unique_ptr<v8::JobHandle> TestPlatform::PostJob(
     v8::TaskPriority priority, std::unique_ptr<v8::JobTask> job_task) {
   return CcTest::default_platform()->PostJob(priority, std::move(job_task));
+}
+
+std::unique_ptr<v8::JobHandle> TestPlatform::CreateJob(
+    v8::TaskPriority priority, std::unique_ptr<v8::JobTask> job_task) {
+  return CcTest::default_platform()->CreateJob(priority, std::move(job_task));
 }
 
 double TestPlatform::MonotonicallyIncreasingTime() {

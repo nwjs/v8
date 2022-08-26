@@ -31,6 +31,7 @@
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/wasm/baseline/liftoff-assembler-defs.h"
 #include "src/wasm/object-access.h"
+#include "src/wasm/stacks.h"
 #include "src/wasm/wasm-constants.h"
 #include "src/wasm/wasm-linkage.h"
 #include "src/wasm/wasm-objects.h"
@@ -1134,7 +1135,6 @@ static void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
 namespace {
 
 void ResetBytecodeAge(MacroAssembler* masm, Register bytecode_array) {
-  static_assert(BytecodeArray::kNoAgeBytecodeAge == 0);
   __ movw(FieldOperand(bytecode_array, BytecodeArray::kBytecodeAgeOffset),
           Immediate(0));
 }
@@ -2839,12 +2839,7 @@ void Builtins::Generate_WasmCompileLazy(MacroAssembler* masm) {
       offset += kSimd128Size;
     }
 
-    // Push the Wasm instance for loading the jump table address after the
-    // runtime call.
-    __ Push(kWasmInstanceRegister);
-
-    // Push the Wasm instance again as an explicit argument to the runtime
-    // function.
+    // Push the Wasm instance as an explicit argument to the runtime function.
     __ Push(kWasmInstanceRegister);
     // Push the function index as second argument.
     __ Push(r15);
@@ -2854,13 +2849,8 @@ void Builtins::Generate_WasmCompileLazy(MacroAssembler* masm) {
     __ CallRuntime(Runtime::kWasmCompileLazy, 2);
     // The runtime function returns the jump table slot offset as a Smi. Use
     // that to compute the jump target in r15.
-    __ Pop(kWasmInstanceRegister);
-    __ movq(r15, MemOperand(kWasmInstanceRegister,
-                            wasm::ObjectAccess::ToTagged(
-                                WasmInstanceObject::kJumpTableStartOffset)));
     __ SmiUntag(kReturnRegister0);
-    __ addq(r15, kReturnRegister0);
-    // r15 now holds the jump table slot where we want to jump to in the end.
+    __ movq(r15, kReturnRegister0);
 
     // Restore registers.
     for (DoubleRegister reg : base::Reversed(wasm::kFpParamRegisters)) {
@@ -2872,6 +2862,11 @@ void Builtins::Generate_WasmCompileLazy(MacroAssembler* masm) {
     for (Register reg : base::Reversed(wasm::kGpParamRegisters)) {
       __ Pop(reg);
     }
+    // After the instance register has been restored, we can add the jump table
+    // start to the jump table offset already stored in r15.
+    __ addq(r15, MemOperand(kWasmInstanceRegister,
+                            wasm::ObjectAccess::ToTagged(
+                                WasmInstanceObject::kJumpTableStartOffset)));
   }
 
   // Finally, jump to the jump table slot for the function.
@@ -2927,7 +2922,8 @@ void PrepareForBuiltinCall(MacroAssembler* masm, MemOperand GCScanSlotPlace,
                            Register current_int_param_slot,
                            Register current_float_param_slot,
                            Register valuetypes_array_ptr,
-                           Register wasm_instance, Register function_data) {
+                           Register wasm_instance, Register function_data,
+                           Register original_fp) {
   // Pushes and puts the values in order onto the stack before builtin calls for
   // the GenericJSToWasmWrapper.
   __ Move(GCScanSlotPlace, GCScanSlotCount);
@@ -2938,6 +2934,10 @@ void PrepareForBuiltinCall(MacroAssembler* masm, MemOperand GCScanSlotPlace,
   __ pushq(valuetypes_array_ptr);
   __ pushq(wasm_instance);
   __ pushq(function_data);
+  if (original_fp != rbp) {
+    // For stack-switching only: keep the pointer to the parent stack alive.
+    __ pushq(original_fp);
+  }
   // We had to prepare the parameters for the Call: we have to put the context
   // into rsi.
   __ LoadAnyTaggedField(
@@ -2951,9 +2951,13 @@ void RestoreAfterBuiltinCall(MacroAssembler* masm, Register function_data,
                              Register valuetypes_array_ptr,
                              Register current_float_param_slot,
                              Register current_int_param_slot,
-                             Register param_limit, Register current_param) {
+                             Register param_limit, Register current_param,
+                             Register original_fp) {
   // Pop and load values from the stack in order into the registers after
   // builtin calls for the GenericJSToWasmWrapper.
+  if (original_fp != rbp) {
+    __ popq(original_fp);
+  }
   __ popq(function_data);
   __ popq(wasm_instance);
   __ popq(valuetypes_array_ptr);
@@ -2997,23 +3001,21 @@ void SaveState(MacroAssembler* masm, Register active_continuation, Register tmp,
 
 // Returns the new continuation in rax.
 void AllocateContinuation(MacroAssembler* masm, Register function_data,
-                          Register wasm_instance) {
-  Register suspender = kScratchRegister;
-  __ LoadAnyTaggedField(
-      suspender,
-      FieldOperand(function_data, WasmExportedFunctionData::kSuspenderOffset));
+                          Register wasm_instance, Register suspender) {
   MemOperand GCScanSlotPlace =
       MemOperand(rbp, BuiltinWasmWrapperConstants::kGCScanSlotCountOffset);
   __ Move(GCScanSlotPlace, 3);
   __ Push(wasm_instance);
   __ Push(function_data);
   __ Push(suspender);  // Argument.
-  __ Move(kContextRegister, Smi::zero());
+  __ LoadAnyTaggedField(
+      kContextRegister,
+      MemOperand(wasm_instance, wasm::ObjectAccess::ToTagged(
+                                    WasmInstanceObject::kNativeContextOffset)));
   __ CallRuntime(Runtime::kWasmAllocateContinuation);
   __ Pop(function_data);
   __ Pop(wasm_instance);
   static_assert(kReturnRegister0 == rax);
-  suspender = no_reg;
 }
 
 void LoadTargetJumpBuffer(MacroAssembler* masm, Register target_continuation) {
@@ -3080,28 +3082,32 @@ void ReloadParentContinuation(MacroAssembler* masm, Register wasm_instance,
   __ Pop(return_reg);
 }
 
-void RestoreParentSuspender(MacroAssembler* masm) {
-  Register suspender = kScratchRegister;
+void RestoreParentSuspender(MacroAssembler* masm, Register tmp1,
+                            Register tmp2) {
+  Register suspender = tmp1;
   __ LoadRoot(suspender, RootIndex::kActiveSuspender);
+  __ StoreTaggedSignedField(
+      FieldOperand(suspender, WasmSuspenderObject::kStateOffset),
+      Smi::FromInt(WasmSuspenderObject::kInactive));
   __ LoadAnyTaggedField(
       suspender, FieldOperand(suspender, WasmSuspenderObject::kParentOffset));
   __ CompareRoot(suspender, RootIndex::kUndefinedValue);
   Label undefined;
   __ j(equal, &undefined, Label::kNear);
 #ifdef DEBUG
-  // Check that the parent suspender is inactive.
+  // Check that the parent suspender is active.
   Label parent_inactive;
-  Register state = rbx;
+  Register state = tmp2;
   __ LoadTaggedSignedField(
       state, FieldOperand(suspender, WasmSuspenderObject::kStateOffset));
-  __ SmiCompare(state, Smi::FromInt(WasmSuspenderObject::Inactive));
+  __ SmiCompare(state, Smi::FromInt(WasmSuspenderObject::kActive));
   __ j(equal, &parent_inactive, Label::kNear);
   __ Trap();
   __ bind(&parent_inactive);
 #endif
   __ StoreTaggedSignedField(
       FieldOperand(suspender, WasmSuspenderObject::kStateOffset),
-      Smi::FromInt(WasmSuspenderObject::State::Active));
+      Smi::FromInt(WasmSuspenderObject::kActive));
   __ bind(&undefined);
   __ movq(masm->RootAsOperand(RootIndex::kActiveSuspender), suspender);
 }
@@ -3218,8 +3224,14 @@ void GenericJSToWasmWrapperHelper(MacroAssembler* masm, bool stack_switch) {
     Register active_continuation = rbx;
     __ LoadRoot(active_continuation, RootIndex::kActiveContinuation);
     SaveState(masm, active_continuation, rcx, &suspend);
-    AllocateContinuation(masm, function_data, wasm_instance);
-    Register target_continuation = rax; /* fixed */
+    Register suspender = rax;
+    constexpr int kReceiverOnStackSize = kSystemPointerSize;
+    constexpr int kFirstParamOffset =
+        kFPOnStackSize + kPCOnStackSize + kReceiverOnStackSize;
+    __ movq(suspender, MemOperand(rbp, kFirstParamOffset));
+    AllocateContinuation(masm, function_data, wasm_instance, suspender);
+    suspender = no_reg;
+    Register target_continuation = rax;  // fixed
     // Save the old stack's rbp in r9, and use it to access the parameters in
     // the parent frame.
     // We also distribute the spill slots across the two stacks as needed by
@@ -3484,10 +3496,10 @@ void GenericJSToWasmWrapperHelper(MacroAssembler* masm, bool stack_switch) {
   __ movq(param, MemOperand(original_fp, current_param, times_1, 0));
   __ movl(valuetype,
           Operand(valuetypes_array_ptr, wasm::ValueType::bit_field_offset()));
-  // Extract the ValueKind of the type, to check for kRef and kOptRef.
+  // Extract the ValueKind of the type, to check for kRef and kRefNull.
   __ andl(valuetype, Immediate(wasm::kWasmValueKindBitsMask));
   Label move_ref_to_slot;
-  __ cmpq(valuetype, Immediate(wasm::ValueKind::kOptRef));
+  __ cmpq(valuetype, Immediate(wasm::ValueKind::kRefNull));
   __ j(equal, &move_ref_to_slot);
   __ cmpq(valuetype, Immediate(wasm::ValueKind::kRef));
   __ j(equal, &move_ref_to_slot);
@@ -3742,7 +3754,7 @@ void GenericJSToWasmWrapperHelper(MacroAssembler* masm, bool stack_switch) {
   __ bind(&return_done);
   if (stack_switch) {
     ReloadParentContinuation(masm, wasm_instance, return_reg, rbx, rcx);
-    RestoreParentSuspender(masm);
+    RestoreParentSuspender(masm, rbx, rcx);
   }
   __ bind(&suspend);
   // No need to process the return value if the stack is suspended, there is a
@@ -3796,7 +3808,8 @@ void GenericJSToWasmWrapperHelper(MacroAssembler* masm, bool stack_switch) {
   PrepareForBuiltinCall(masm, MemOperand(rbp, kGCScanSlotCountOffset),
                         kBuiltinCallGCScanSlotCount, current_param, param_limit,
                         current_int_param_slot, current_float_param_slot,
-                        valuetypes_array_ptr, wasm_instance, function_data);
+                        valuetypes_array_ptr, wasm_instance, function_data,
+                        original_fp);
 
   Label param_kWasmI32_not_smi;
   Label param_kWasmI64;
@@ -3827,7 +3840,8 @@ void GenericJSToWasmWrapperHelper(MacroAssembler* masm, bool stack_switch) {
   __ movq(MemOperand(rbp, kHasRefTypesOffset), Immediate(1));
   RestoreAfterBuiltinCall(masm, function_data, wasm_instance,
                           valuetypes_array_ptr, current_float_param_slot,
-                          current_int_param_slot, param_limit, current_param);
+                          current_int_param_slot, param_limit, current_param,
+                          original_fp);
   __ jmp(&param_conversion_done);
 
   __ int3();
@@ -3839,7 +3853,8 @@ void GenericJSToWasmWrapperHelper(MacroAssembler* masm, bool stack_switch) {
   __ AssertZeroExtended(param);
   RestoreAfterBuiltinCall(masm, function_data, wasm_instance,
                           valuetypes_array_ptr, current_float_param_slot,
-                          current_int_param_slot, param_limit, current_param);
+                          current_int_param_slot, param_limit, current_param,
+                          original_fp);
   __ movq(MemOperand(current_int_param_slot, 0), param);
   __ subq(current_int_param_slot, Immediate(kSystemPointerSize));
   __ jmp(&param_conversion_done);
@@ -3848,7 +3863,8 @@ void GenericJSToWasmWrapperHelper(MacroAssembler* masm, bool stack_switch) {
   __ Call(BUILTIN_CODE(masm->isolate(), BigIntToI64), RelocInfo::CODE_TARGET);
   RestoreAfterBuiltinCall(masm, function_data, wasm_instance,
                           valuetypes_array_ptr, current_float_param_slot,
-                          current_int_param_slot, param_limit, current_param);
+                          current_int_param_slot, param_limit, current_param,
+                          original_fp);
   __ movq(MemOperand(current_int_param_slot, 0), param);
   __ subq(current_int_param_slot, Immediate(kSystemPointerSize));
   __ jmp(&param_conversion_done);
@@ -3858,7 +3874,8 @@ void GenericJSToWasmWrapperHelper(MacroAssembler* masm, bool stack_switch) {
           RelocInfo::CODE_TARGET);
   RestoreAfterBuiltinCall(masm, function_data, wasm_instance,
                           valuetypes_array_ptr, current_float_param_slot,
-                          current_int_param_slot, param_limit, current_param);
+                          current_int_param_slot, param_limit, current_param,
+                          original_fp);
   // Clear higher bits.
   __ Xorpd(xmm1, xmm1);
   // Truncate float64 to float32.
@@ -3872,7 +3889,8 @@ void GenericJSToWasmWrapperHelper(MacroAssembler* masm, bool stack_switch) {
           RelocInfo::CODE_TARGET);
   RestoreAfterBuiltinCall(masm, function_data, wasm_instance,
                           valuetypes_array_ptr, current_float_param_slot,
-                          current_int_param_slot, param_limit, current_param);
+                          current_int_param_slot, param_limit, current_param,
+                          original_fp);
   __ Movsd(MemOperand(current_float_param_slot, 0), xmm0);
   __ subq(current_float_param_slot, Immediate(kSystemPointerSize));
   __ jmp(&param_conversion_done);
@@ -4034,10 +4052,14 @@ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
   FillJumpBuffer(masm, jmpbuf, &resume);
   __ StoreTaggedSignedField(
       FieldOperand(suspender, WasmSuspenderObject::kStateOffset),
-      Smi::FromInt(WasmSuspenderObject::Suspended));
+      Smi::FromInt(WasmSuspenderObject::kSuspended));
   jmpbuf = no_reg;
   // live: [rax, rbx, rcx]
 
+  Register suspender_continuation = rdx;
+  __ LoadAnyTaggedField(
+      suspender_continuation,
+      FieldOperand(suspender, WasmSuspenderObject::kContinuationOffset));
 #ifdef DEBUG
   // -------------------------------------------
   // Check that the suspender's continuation is the active continuation.
@@ -4045,10 +4067,6 @@ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
   // TODO(thibaudm): Once we add core stack-switching instructions, this check
   // will not hold anymore: it's possible that the active continuation changed
   // (due to an internal switch), so we have to update the suspender.
-  Register suspender_continuation = rdx;
-  __ LoadAnyTaggedField(
-      suspender_continuation,
-      FieldOperand(suspender, WasmSuspenderObject::kContinuationOffset));
   __ cmpq(suspender_continuation, continuation);
   Label ok;
   __ j(equal, &ok);
@@ -4060,11 +4078,9 @@ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
   // Update roots.
   // -------------------------------------------
   Register caller = rcx;
-  __ LoadAnyTaggedField(
-      caller,
-      FieldOperand(suspender, WasmSuspenderObject::kContinuationOffset));
-  __ LoadAnyTaggedField(
-      caller, FieldOperand(caller, WasmContinuationObject::kParentOffset));
+  __ LoadAnyTaggedField(caller,
+                        FieldOperand(suspender_continuation,
+                                     WasmContinuationObject::kParentOffset));
   __ movq(masm->RootAsOperand(RootIndex::kActiveContinuation), caller);
   Register parent = rdx;
   __ LoadAnyTaggedField(
@@ -4101,8 +4117,12 @@ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
   __ ret(0);
 }
 
-// Resume the suspender stored in the closure.
-void Builtins::Generate_WasmResume(MacroAssembler* masm) {
+namespace {
+// Resume the suspender stored in the closure. We generate two variants of this
+// builtin: the onFulfilled variant resumes execution at the saved PC and
+// forwards the value, the onRejected variant throws the value.
+
+void Generate_WasmResumeHelper(MacroAssembler* masm, wasm::OnResume on_resume) {
   __ EnterFrame(StackFrame::STACK_SWITCH);
 
   Register param_count = rax;
@@ -4135,16 +4155,17 @@ void Builtins::Generate_WasmResume(MacroAssembler* masm) {
   __ LoadAnyTaggedField(
       function_data,
       FieldOperand(sfi, SharedFunctionInfo::kFunctionDataOffset));
-  Register suspender = rax;
+  // The write barrier uses a fixed register for the host object (rdi). The next
+  // barrier is on the suspender, so load it in rdi directly.
+  Register suspender = rdi;
   __ LoadAnyTaggedField(
-      suspender,
-      FieldOperand(function_data, WasmOnFulfilledData::kSuspenderOffset));
+      suspender, FieldOperand(function_data, WasmResumeData::kSuspenderOffset));
   // Check the suspender state.
   Label suspender_is_suspended;
   Register state = rdx;
   __ LoadTaggedSignedField(
       state, FieldOperand(suspender, WasmSuspenderObject::kStateOffset));
-  __ SmiCompare(state, Smi::FromInt(WasmSuspenderObject::Suspended));
+  __ SmiCompare(state, Smi::FromInt(WasmSuspenderObject::kSuspended));
   __ j(equal, &suspender_is_suspended);
   __ Trap();  // TODO(thibaudm): Throw a wasm trap.
   closure = no_reg;
@@ -4157,7 +4178,7 @@ void Builtins::Generate_WasmResume(MacroAssembler* masm) {
   Label suspend;
   Register active_continuation = r9;
   __ LoadRoot(active_continuation, RootIndex::kActiveContinuation);
-  Register current_jmpbuf = rdi;
+  Register current_jmpbuf = rax;
   __ LoadAnyTaggedField(
       current_jmpbuf,
       FieldOperand(active_continuation, WasmContinuationObject::kJmpbufOffset));
@@ -4169,16 +4190,28 @@ void Builtins::Generate_WasmResume(MacroAssembler* masm) {
   current_jmpbuf = no_reg;
 
   // -------------------------------------------
-  // Set suspender's parent to active continuation.
+  // Set the suspender and continuation parents and update the roots
   // -------------------------------------------
+  Register active_suspender = rcx;
+  Register slot_address = WriteBarrierDescriptor::SlotAddressRegister();
+  // Check that the fixed register isn't one that is already in use.
+  DCHECK(slot_address == rbx || slot_address == r8);
+  __ LoadRoot(active_suspender, RootIndex::kActiveSuspender);
+  __ StoreTaggedField(
+      FieldOperand(suspender, WasmSuspenderObject::kParentOffset),
+      active_suspender);
+  __ RecordWriteField(suspender, WasmSuspenderObject::kParentOffset,
+                      active_suspender, slot_address, SaveFPRegsMode::kIgnore);
   __ StoreTaggedSignedField(
       FieldOperand(suspender, WasmSuspenderObject::kStateOffset),
-      Smi::FromInt(WasmSuspenderObject::Active));
-  Register target_continuation = rdi;
+      Smi::FromInt(WasmSuspenderObject::kActive));
+  __ movq(masm->RootAsOperand(RootIndex::kActiveSuspender), suspender);
+
+  Register target_continuation = suspender;
   __ LoadAnyTaggedField(
       target_continuation,
       FieldOperand(suspender, WasmSuspenderObject::kContinuationOffset));
-  Register slot_address = WriteBarrierDescriptor::SlotAddressRegister();
+  suspender = no_reg;
   __ StoreTaggedField(
       FieldOperand(target_continuation, WasmContinuationObject::kParentOffset),
       active_continuation);
@@ -4186,14 +4219,8 @@ void Builtins::Generate_WasmResume(MacroAssembler* masm) {
       target_continuation, WasmContinuationObject::kParentOffset,
       active_continuation, slot_address, SaveFPRegsMode::kIgnore);
   active_continuation = no_reg;
-
-  // -------------------------------------------
-  // Update roots.
-  // -------------------------------------------
   __ movq(masm->RootAsOperand(RootIndex::kActiveContinuation),
           target_continuation);
-  __ movq(masm->RootAsOperand(RootIndex::kActiveSuspender), suspender);
-  suspender = no_reg;
 
   MemOperand GCScanSlotPlace =
       MemOperand(rbp, BuiltinWasmWrapperConstants::kGCScanSlotCountOffset);
@@ -4206,7 +4233,7 @@ void Builtins::Generate_WasmResume(MacroAssembler* masm) {
   // -------------------------------------------
   // Load state from target jmpbuf (longjmp).
   // -------------------------------------------
-  Register target_jmpbuf = target_continuation;
+  Register target_jmpbuf = rdi;
   __ LoadAnyTaggedField(
       target_jmpbuf,
       FieldOperand(target_continuation, WasmContinuationObject::kJmpbufOffset));
@@ -4217,11 +4244,30 @@ void Builtins::Generate_WasmResume(MacroAssembler* masm) {
   // Move resolved value to return register.
   __ movq(kReturnRegister0, Operand(rbp, 3 * kSystemPointerSize));
   __ Move(GCScanSlotPlace, 0);
-  LoadJumpBuffer(masm, target_jmpbuf, true);
+  if (on_resume == wasm::OnResume::kThrow) {
+    // Switch to the continuation's stack without restoring the PC.
+    LoadJumpBuffer(masm, target_jmpbuf, false);
+    // Forward the onRejected value to kThrow.
+    __ pushq(kReturnRegister0);
+    __ CallRuntime(Runtime::kThrow);
+  } else {
+    // Resume the continuation normally.
+    LoadJumpBuffer(masm, target_jmpbuf, true);
+  }
   __ Trap();
   __ bind(&suspend);
   __ LeaveFrame(StackFrame::STACK_SWITCH);
-  __ ret(3);
+  // Pop receiver + parameter.
+  __ ret(2 * kSystemPointerSize);
+}
+}  // namespace
+
+void Builtins::Generate_WasmResume(MacroAssembler* masm) {
+  Generate_WasmResumeHelper(masm, wasm::OnResume::kContinue);
+}
+
+void Builtins::Generate_WasmReject(MacroAssembler* masm) {
+  Generate_WasmResumeHelper(masm, wasm::OnResume::kThrow);
 }
 
 void Builtins::Generate_WasmOnStackReplace(MacroAssembler* masm) {
@@ -4825,12 +4871,10 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
   // but not accessor_info_arg or name_arg
   DCHECK(api_function_address != accessor_info_arg);
   DCHECK(api_function_address != name_arg);
-  __ LoadTaggedPointerField(
-      scratch, FieldOperand(callback, AccessorInfo::kJsGetterOffset));
   __ LoadExternalPointerField(
       api_function_address,
-      FieldOperand(scratch, Foreign::kForeignAddressOffset),
-      kForeignForeignAddressTag, kScratchRegister);
+      FieldOperand(callback, AccessorInfo::kJsGetterOffset),
+      kAccessorInfoJsGetterTag, kScratchRegister);
 
   // +3 is to skip prolog, return address and name handle.
   Operand return_value_operand(

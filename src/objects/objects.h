@@ -95,6 +95,7 @@
 //         - JSSegments            // If V8_INTL_SUPPORT enabled.
 //         - JSSegmentIterator     // If V8_INTL_SUPPORT enabled.
 //         - JSV8BreakIterator     // If V8_INTL_SUPPORT enabled.
+//         - WasmExceptionPackage
 //         - WasmTagObject
 //         - WasmGlobalObject
 //         - WasmInstanceObject
@@ -730,14 +731,17 @@ class Object : public TaggedImpl<HeapObjectReferenceType::STRONG, Address> {
   //
   // ExternalPointer_t field accessors.
   //
+  template <ExternalPointerTag tag>
+  inline void InitExternalPointerField(size_t offset, Isolate* isolate);
+  template <ExternalPointerTag tag>
   inline void InitExternalPointerField(size_t offset, Isolate* isolate,
-                                       ExternalPointerTag tag);
-  inline void InitExternalPointerField(size_t offset, Isolate* isolate,
-                                       Address value, ExternalPointerTag tag);
-  inline Address ReadExternalPointerField(size_t offset, Isolate* isolate,
-                                          ExternalPointerTag tag) const;
+                                       Address value);
+  template <ExternalPointerTag tag>
+  inline Address ReadExternalPointerField(size_t offset,
+                                          Isolate* isolate) const;
+  template <ExternalPointerTag tag>
   inline void WriteExternalPointerField(size_t offset, Isolate* isolate,
-                                        Address value, ExternalPointerTag tag);
+                                        Address value);
 
   // If the receiver is the JSGlobalObject, the store was contextual. In case
   // the property did not exist yet on the global object itself, we have to
@@ -755,6 +759,7 @@ class Object : public TaggedImpl<HeapObjectReferenceType::STRONG, Address> {
   // - HeapNumbers in the shared old space
   // - Strings for which String::IsShared() is true
   // - JSSharedStructs
+  // - JSSharedArrays
   inline bool IsShared() const;
 
   // Returns an equivalent value that's safe to share across Isolates if

@@ -18,25 +18,18 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
   let array2 = builder.addArray(kWasmI32, true, array1);
 
   builder.addFunction("main", kSig_v_v)
-      .addLocals(wasmOptRefType(struct1), 1)
-      .addLocals(wasmOptRefType(array1), 1)
+      .addLocals(wasmRefNullType(struct1), 1)
+      .addLocals(wasmRefNullType(array1), 1)
       .addBody([
-        // Check that we can create a struct with explicit RTT...
-        kGCPrefix, kExprRttCanon, struct2, kGCPrefix,
-        kExprStructNewDefaultWithRtt, struct2,
+        // Check that we can create a struct with implicit RTT.
+        kGCPrefix, kExprStructNewDefault, struct2,
         // ...and upcast it.
         kExprLocalSet, 0,
-        // Check that we can create a struct with implicit RTT.
-        kGCPrefix, kExprStructNewDefault, struct2, kExprLocalSet, 0,
-        // Check that we can create an array with explicit RTT...
-        kExprI32Const, 10,  // length
-        kGCPrefix, kExprRttCanon, array2,
-        kGCPrefix, kExprArrayNewDefaultWithRtt, array2,
-        // ...and upcast it.
-        kExprLocalSet, 1,
         // Check that we can create an array with implicit RTT.
         kExprI32Const, 10,  // length
-        kGCPrefix, kExprArrayNewDefault, array2, kExprLocalSet, 1])
+        kGCPrefix, kExprArrayNewDefault, array2,
+        // ...and upcast it.
+        kExprLocalSet, 1])
       .exportFunc();
 
   // This test is only interested in type checking.
@@ -54,10 +47,11 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
       /subtyping depth is greater than allowed/);
 })();
 
-(function TestArrayInitFromDataStatic() {
+(function TestArrayNewDataStatic() {
   print(arguments.callee.name);
   let builder = new WasmModuleBuilder();
   builder.setNominal();
+  builder.setEarlyDataCountSection();
   let array_type_index = builder.addArray(kWasmI16, true);
 
   let dummy_byte = 0xff;
@@ -70,9 +64,9 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
   let global = builder.addGlobal(
     wasmRefType(array_type_index), true,
-    WasmInitExpr.ArrayInitFromDataStatic(
-      array_type_index, data_segment,
-      [WasmInitExpr.I32Const(1), WasmInitExpr.I32Const(2)], builder));
+    [...wasmI32Const(1), ...wasmI32Const(2),
+     kGCPrefix, kExprArrayNewDataStatic, array_type_index, data_segment],
+    builder);
 
   builder.addFunction("global_get", kSig_i_i)
     .addBody([
@@ -85,7 +79,7 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
   builder.addFunction("init_from_data", kSig_i_iii)
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1,
-      kGCPrefix, kExprArrayInitFromDataStatic,
+      kGCPrefix, kExprArrayNewDataStatic,
       array_type_index, data_segment,
       kExprLocalGet, 2,
       kGCPrefix, kExprArrayGetS, array_type_index])
@@ -113,10 +107,11 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
   assertTraps(kTrapDataSegmentOutOfBounds, () => init(1, 2, 0));
 })();
 
-(function TestArrayInitFromData() {
+(function TestArrayNewData() {
   print(arguments.callee.name);
   let builder = new WasmModuleBuilder();
   builder.setNominal();
+  builder.setEarlyDataCountSection();
   let array_type_index = builder.addArray(kWasmI16, true);
 
   let dummy_byte = 0xff;
@@ -129,11 +124,9 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
   let global = builder.addGlobal(
     wasmRefType(array_type_index), true,
-    WasmInitExpr.ArrayInitFromData(
-      array_type_index, data_segment,
-      [WasmInitExpr.I32Const(1), WasmInitExpr.I32Const(2),
-       WasmInitExpr.RttCanon(array_type_index)],
-      builder));
+    [...wasmI32Const(1), ...wasmI32Const(2),
+     kGCPrefix, kExprArrayNewDataStatic, array_type_index, data_segment],
+    builder);
 
   builder.addFunction("global_get", kSig_i_i)
     .addBody([
@@ -146,8 +139,7 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
   builder.addFunction("init_from_data", kSig_i_iii)
     .addBody([
       kExprLocalGet, 0, kExprLocalGet, 1,
-      kGCPrefix, kExprRttCanon, array_type_index,
-      kGCPrefix, kExprArrayInitFromData, array_type_index, data_segment,
+      kGCPrefix, kExprArrayNewDataStatic, array_type_index, data_segment,
       kExprLocalGet, 2,
       kGCPrefix, kExprArrayGetS, array_type_index])
     .exportFunc();

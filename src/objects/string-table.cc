@@ -433,6 +433,9 @@ namespace {
 void SetInternalizedReference(Isolate* isolate, String string,
                               String internalized) {
   // TODO(v8:12007): Support external strings.
+  DCHECK(!string.IsThinString());
+  DCHECK(internalized.IsInternalizedString());
+  DCHECK(!internalized.HasForwardingIndex());
   if ((string.IsShared() || FLAG_always_use_string_forwarding_table) &&
       !string.IsExternalString()) {
     uint32_t field = string.raw_hash_field();
@@ -440,6 +443,9 @@ void SetInternalizedReference(Isolate* isolate, String string,
     // Using the hash field for the integer index is more beneficial than
     // using it to store the forwarding index to the internalized string.
     if (Name::IsIntegerIndex(field)) return;
+    // Check one last time if we already have a forwarding index to prevent
+    // too many copies of the string in the forwarding table.
+    if (Name::IsForwardingIndex(field)) return;
 
     const int forwarding_index =
         isolate->string_forwarding_table()->Add(isolate, string, internalized);
@@ -448,6 +454,14 @@ void SetInternalizedReference(Isolate* isolate, String string,
                                      String::HashFieldType::kForwardingIndex),
         kReleaseStore);
   } else {
+    if (V8_UNLIKELY(FLAG_always_use_string_forwarding_table)) {
+      // It is possible that the string has a forwarding index (the string was
+      // externalized after it had its forwarding index set). Overwrite the
+      // hash field to avoid having a ThinString with a forwarding index.
+      DCHECK(string.IsExternalString());
+      string.set_raw_hash_field(internalized.raw_hash_field());
+    }
+    DCHECK(!string.HasForwardingIndex());
     string.MakeThin(isolate, internalized);
   }
 }
@@ -484,27 +498,24 @@ Handle<String> StringTable::LookupString(Isolate* isolate,
   //
   // For lookup hits, we use the StringForwardingTable for shared strings to
   // delay the transition into a ThinString to the next stop-the-world GC.
+  Handle<String> result = String::Flatten(isolate, string);
+  if (!result->IsInternalizedString()) {
+    result->EnsureHash();
+    uint32_t raw_hash_field = result->raw_hash_field(kAcquireLoad);
 
-  string = String::Flatten(isolate, string);
-  if (string->IsInternalizedString()) return string;
-
-  string->EnsureHash();
-  uint32_t raw_hash_field = string->raw_hash_field(kAcquireLoad);
-
-  if (String::IsForwardingIndex(raw_hash_field)) {
-    const int index = String::HashBits::decode(raw_hash_field);
-    return handle(
-        isolate->string_forwarding_table()->GetForwardString(isolate, index),
-        isolate);
+    if (String::IsForwardingIndex(raw_hash_field)) {
+      const int index = String::HashBits::decode(raw_hash_field);
+      result = handle(
+          isolate->string_forwarding_table()->GetForwardString(isolate, index),
+          isolate);
+    } else {
+      InternalizedStringKey key(result, raw_hash_field);
+      result = LookupKey(isolate, &key);
+    }
   }
-
-  InternalizedStringKey key(string, raw_hash_field);
-  Handle<String> result = LookupKey(isolate, &key);
-
-  if (!string->IsInternalizedString()) {
+  if (*string != *result && !string->IsThinString()) {
     SetInternalizedReference(isolate, *string, *result);
   }
-
   return result;
 }
 
@@ -1064,6 +1075,7 @@ int StringForwardingTable::Add(Isolate* isolate, String string,
 
 String StringForwardingTable::GetForwardString(Isolate* isolate,
                                                int index) const {
+  CHECK_LT(index, Size());
   uint32_t index_in_block;
   const uint32_t block = BlockForIndex(index, &index_in_block);
   Block* data =

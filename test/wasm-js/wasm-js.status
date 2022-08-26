@@ -9,16 +9,12 @@
   'wpt/idlharness': [SKIP],
   # Failing WPT tests
   'wpt/exception/getArg.tentative': [FAIL],
-  'wpt/exception/toString.tentative': [FAIL],
   'wpt/exception/type.tentative': [FAIL],
   'wpt/function/constructor.tentative': [FAIL],
   'wpt/function/table.tentative': [FAIL],
   'wpt/function/type.tentative': [FAIL],
   'wpt/global/type.tentative': [FAIL],
   'wpt/table/type.tentative': [FAIL],
-
-  # TODO(v8:12864): Failing spec test after update
-  'wpt/global/constructor': [FAIL],
 
   # Outdated proposal tests.
   'proposals/js-types/table/get-set': [FAIL],

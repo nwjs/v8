@@ -162,9 +162,10 @@ class JSReceiver : public TorqueGeneratedJSReceiver<JSReceiver, HeapObject> {
       PropertyDescriptor* desc, Maybe<ShouldThrow> should_throw);
 
   // Check if private name property can be store on the object. It will return
-  // false with an error when it cannot.
-  V8_WARN_UNUSED_RESULT static bool CheckPrivateNameStore(LookupIterator* it,
-                                                          bool is_define);
+  // false with an error when it cannot but didn't throw, or a Nothing if
+  // it throws.
+  V8_WARN_UNUSED_RESULT static Maybe<bool> CheckPrivateNameStore(
+      LookupIterator* it, bool is_define);
 
   // Check if a data property can be created on the object. It will fail with
   // an error when it cannot.
@@ -382,6 +383,7 @@ class JSObject : public TorqueGeneratedJSObject<JSObject, JSReceiver> {
   DECL_GETTER(HasPackedElements, bool)
   DECL_GETTER(HasAnyNonextensibleElements, bool)
   DECL_GETTER(HasSealedElements, bool)
+  DECL_GETTER(HasSharedArrayElements, bool)
   DECL_GETTER(HasNonextensibleElements, bool)
 
   DECL_GETTER(HasTypedArrayOrRabGsabTypedArrayElements, bool)
@@ -909,6 +911,8 @@ class JSExternalObject
   inline void set_value(Isolate* isolate, void* value);
 
   static constexpr int kEndOfTaggedFieldsOffset = JSObject::kHeaderSize;
+
+  DECL_PRINTER(JSExternalObject)
 
   class BodyDescriptor;
 

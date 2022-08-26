@@ -15,7 +15,6 @@
 // Clients of this interface shouldn't depend on lots of compiler internals.
 // Do not include anything from src/compiler here!
 #include "src/base/small-vector.h"
-#include "src/objects/js-function.h"
 #include "src/runtime/runtime.h"
 #include "src/wasm/function-body-decoder.h"
 #include "src/wasm/function-compiler.h"
@@ -55,7 +54,7 @@ class WasmCode;
 class WasmFeatures;
 class WireBytesStorage;
 enum class LoadTransformationKind : uint8_t;
-enum Suspend : bool { kSuspend = false, kNoSuspend = true };
+enum Suspend : bool;
 }  // namespace wasm
 
 namespace compiler {
@@ -112,7 +111,7 @@ constexpr WasmImportCallKind kDefaultImportCallKind =
 struct WasmImportData {
   WasmImportCallKind kind;
   Handle<JSReceiver> callable;
-  Handle<HeapObject> suspender;
+  wasm::Suspend suspend;
 };
 // Resolves which import call wrapper is required for the given JS callable.
 // Returns the kind of wrapper needed, the ultimate target callable, and the
@@ -135,7 +134,7 @@ wasm::WasmCode* CompileWasmCapiCallWrapper(wasm::NativeModule*,
 // Compiles a wrapper to call a Fast API function from Wasm.
 wasm::WasmCode* CompileWasmJSFastCallWrapper(wasm::NativeModule*,
                                              const wasm::FunctionSig*,
-                                             Handle<JSFunction> target);
+                                             Handle<JSReceiver> callable);
 
 // Returns an TurbofanCompilationJob object for a JS to Wasm wrapper.
 std::unique_ptr<TurbofanCompilationJob> NewJSToWasmCompilationJob(
@@ -272,6 +271,7 @@ class WasmGraphBuilder {
   Node* RefNull();
   Node* RefFunc(uint32_t function_index);
   Node* RefAsNonNull(Node* arg, wasm::WasmCodePosition position);
+  Node* TraceInstruction(uint32_t mark_id);
   Node* Int32Constant(int32_t value);
   Node* Int64Constant(int64_t value);
   Node* Float32Constant(float value);
@@ -343,25 +343,22 @@ class WasmGraphBuilder {
   // In all six call-related public functions, we pass a signature based on the
   // real arguments for this call. This signature gets stored in the Call node
   // and will later help us generate better code if this call gets inlined.
-  Node* CallDirect(uint32_t index, wasm::FunctionSig* real_sig,
-                   base::Vector<Node*> args, base::Vector<Node*> rets,
-                   wasm::WasmCodePosition position);
+  Node* CallDirect(uint32_t index, base::Vector<Node*> args,
+                   base::Vector<Node*> rets, wasm::WasmCodePosition position);
   Node* CallIndirect(uint32_t table_index, uint32_t sig_index,
-                     wasm::FunctionSig* real_sig, base::Vector<Node*> args,
-                     base::Vector<Node*> rets, wasm::WasmCodePosition position);
-  Node* CallRef(const wasm::FunctionSig* real_sig, base::Vector<Node*> args,
+                     base::Vector<Node*> args, base::Vector<Node*> rets,
+                     wasm::WasmCodePosition position);
+  Node* CallRef(const wasm::FunctionSig* sig, base::Vector<Node*> args,
                 base::Vector<Node*> rets, CheckForNull null_check,
                 wasm::WasmCodePosition position);
 
-  Node* ReturnCall(uint32_t index, const wasm::FunctionSig* real_sig,
-                   base::Vector<Node*> args, wasm::WasmCodePosition position);
+  Node* ReturnCall(uint32_t index, base::Vector<Node*> args,
+                   wasm::WasmCodePosition position);
   Node* ReturnCallIndirect(uint32_t table_index, uint32_t sig_index,
-                           wasm::FunctionSig* real_sig,
                            base::Vector<Node*> args,
                            wasm::WasmCodePosition position);
-  Node* ReturnCallRef(const wasm::FunctionSig* real_sig,
-                      base::Vector<Node*> args, CheckForNull null_check,
-                      wasm::WasmCodePosition position);
+  Node* ReturnCallRef(const wasm::FunctionSig* sig, base::Vector<Node*> args,
+                      CheckForNull null_check, wasm::WasmCodePosition position);
 
   void CompareToInternalFunctionAtIndex(Node* func_ref, uint32_t function_index,
                                         Node** success_control,
@@ -499,11 +496,11 @@ class WasmGraphBuilder {
   void ArrayCopy(Node* dst_array, Node* dst_index, CheckForNull dst_null_check,
                  Node* src_array, Node* src_index, CheckForNull src_null_check,
                  Node* length, wasm::WasmCodePosition position);
-  Node* ArrayInit(const wasm::ArrayType* type, Node* rtt,
-                  base::Vector<Node*> elements);
-  Node* ArrayInitFromData(const wasm::ArrayType* type, uint32_t data_segment,
-                          Node* offset, Node* length, Node* rtt,
-                          wasm::WasmCodePosition position);
+  Node* ArrayNewFixed(const wasm::ArrayType* type, Node* rtt,
+                      base::Vector<Node*> elements);
+  Node* ArrayNewSegment(const wasm::ArrayType* type, uint32_t data_segment,
+                        Node* offset, Node* length, Node* rtt,
+                        wasm::WasmCodePosition position);
   Node* I31New(Node* input);
   Node* I31GetS(Node* input);
   Node* I31GetU(Node* input);
@@ -538,8 +535,70 @@ class WasmGraphBuilder {
   void BrOnI31(Node* object, Node* rtt, WasmTypeCheckConfig config,
                Node** match_control, Node** match_effect,
                Node** no_match_control, Node** no_match_effect);
-  Node* StringNewWtf8(uint32_t memory, Node* offset, Node* size);
+  Node* StringNewWtf8(uint32_t memory, wasm::StringRefWtf8Policy policy,
+                      Node* offset, Node* size);
+  Node* StringNewWtf8Array(wasm::StringRefWtf8Policy policy, Node* array,
+                           Node* start, Node* end);
   Node* StringNewWtf16(uint32_t memory, Node* offset, Node* size);
+  Node* StringNewWtf16Array(Node* array, Node* start, Node* end);
+  Node* StringConst(uint32_t index);
+  Node* StringMeasureUtf8(Node* string, CheckForNull null_check,
+                          wasm::WasmCodePosition position);
+  Node* StringMeasureWtf8(Node* string, CheckForNull null_check,
+                          wasm::WasmCodePosition position);
+  Node* StringMeasureWtf16(Node* string, CheckForNull null_check,
+                           wasm::WasmCodePosition position);
+  Node* StringEncodeWtf8(uint32_t memory, wasm::StringRefWtf8Policy policy,
+                         Node* string, CheckForNull null_check, Node* offset,
+                         wasm::WasmCodePosition position);
+  Node* StringEncodeWtf8Array(wasm::StringRefWtf8Policy policy, Node* string,
+                              CheckForNull string_null_check, Node* array,
+                              CheckForNull array_null_check, Node* start,
+                              wasm::WasmCodePosition position);
+  Node* StringEncodeWtf16(uint32_t memory, Node* string,
+                          CheckForNull null_check, Node* offset,
+                          wasm::WasmCodePosition position);
+  Node* StringEncodeWtf16Array(Node* string, CheckForNull string_null_check,
+                               Node* array, CheckForNull array_null_check,
+                               Node* start, wasm::WasmCodePosition position);
+  Node* StringConcat(Node* head, CheckForNull head_null_check, Node* tail,
+                     CheckForNull tail_null_check,
+                     wasm::WasmCodePosition position);
+  Node* StringEqual(Node* a, CheckForNull a_null_check, Node* b,
+                    CheckForNull b_null_check, wasm::WasmCodePosition position);
+  Node* StringIsUSVSequence(Node* str, CheckForNull null_check,
+                            wasm::WasmCodePosition position);
+  Node* StringAsWtf8(Node* str, CheckForNull null_check,
+                     wasm::WasmCodePosition position);
+  Node* StringViewWtf8Advance(Node* view, CheckForNull null_check, Node* pos,
+                              Node* bytes, wasm::WasmCodePosition position);
+  void StringViewWtf8Encode(uint32_t memory, wasm::StringRefWtf8Policy policy,
+                            Node* view, CheckForNull null_check, Node* addr,
+                            Node* pos, Node* bytes, Node** next_pos,
+                            Node** bytes_written,
+                            wasm::WasmCodePosition position);
+  Node* StringViewWtf8Slice(Node* view, CheckForNull null_check, Node* pos,
+                            Node* bytes, wasm::WasmCodePosition position);
+  Node* StringViewWtf16GetCodeUnit(Node* string, CheckForNull null_check,
+                                   Node* offset,
+                                   wasm::WasmCodePosition position);
+  Node* StringViewWtf16Encode(uint32_t memory, Node* string,
+                              CheckForNull null_check, Node* offset,
+                              Node* start, Node* length,
+                              wasm::WasmCodePosition position);
+  Node* StringViewWtf16Slice(Node* string, CheckForNull null_check, Node* start,
+                             Node* end, wasm::WasmCodePosition position);
+  Node* StringAsIter(Node* str, CheckForNull null_check,
+                     wasm::WasmCodePosition position);
+  Node* StringViewIterNext(Node* view, CheckForNull null_check,
+                           wasm::WasmCodePosition position);
+  Node* StringViewIterAdvance(Node* view, CheckForNull null_check,
+                              Node* codepoints,
+                              wasm::WasmCodePosition position);
+  Node* StringViewIterRewind(Node* view, CheckForNull null_check,
+                             Node* codepoints, wasm::WasmCodePosition position);
+  Node* StringViewIterSlice(Node* view, CheckForNull null_check,
+                            Node* codepoints, wasm::WasmCodePosition position);
   Node* IsNull(Node* object);
   Node* TypeGuard(Node* value, wasm::ValueType type);
 
@@ -559,9 +618,6 @@ class WasmGraphBuilder {
                                     wasm::Decoder* decoder);
 
   void RemoveBytecodePositionDecorator();
-
-  static const wasm::FunctionSig* Int64LoweredSig(Zone* zone,
-                                                  const wasm::FunctionSig* sig);
 
   void StoreCallCount(Node* call, int count);
   void ReserveCallCounts(size_t num_call_instructions);
@@ -593,8 +649,9 @@ class WasmGraphBuilder {
                                                      wasm::WasmCodePosition,
                                                      EnforceBoundsCheck);
 
-  Node* CheckBoundsAndAlignment(int8_t access_size, Node* index,
-                                uint64_t offset, wasm::WasmCodePosition);
+  std::pair<Node*, BoundsCheckResult> CheckBoundsAndAlignment(
+      int8_t access_size, Node* index, uint64_t offset, wasm::WasmCodePosition,
+      EnforceBoundsCheck);
 
   const Operator* GetSafeLoadOperator(int offset, wasm::ValueType type);
   const Operator* GetSafeStoreOperator(int offset, wasm::ValueType type);
@@ -618,8 +675,7 @@ class WasmGraphBuilder {
                                  Node** ift_sig_ids, Node** ift_targets,
                                  Node** ift_instances);
   Node* BuildIndirectCall(uint32_t table_index, uint32_t sig_index,
-                          wasm::FunctionSig* real_sig, base::Vector<Node*> args,
-                          base::Vector<Node*> rets,
+                          base::Vector<Node*> args, base::Vector<Node*> rets,
                           wasm::WasmCodePosition position,
                           IsReturnCall continuation);
   Node* BuildWasmCall(const wasm::FunctionSig* sig, base::Vector<Node*> args,
@@ -637,9 +693,9 @@ class WasmGraphBuilder {
                         base::Vector<Node*> rets,
                         wasm::WasmCodePosition position, Node* func_index,
                         IsReturnCall continuation);
-  Node* BuildCallRef(const wasm::FunctionSig* real_sig,
-                     base::Vector<Node*> args, base::Vector<Node*> rets,
-                     CheckForNull null_check, IsReturnCall continuation,
+  Node* BuildCallRef(const wasm::FunctionSig* sig, base::Vector<Node*> args,
+                     base::Vector<Node*> rets, CheckForNull null_check,
+                     IsReturnCall continuation,
                      wasm::WasmCodePosition position);
 
   Node* BuildF32CopySign(Node* left, Node* right);
@@ -840,6 +896,9 @@ V8_EXPORT_PRIVATE CallDescriptor* GetWasmCallDescriptor(
 
 V8_EXPORT_PRIVATE CallDescriptor* GetI32WasmCallDescriptor(
     Zone* zone, const CallDescriptor* call_descriptor);
+
+V8_EXPORT_PRIVATE const wasm::FunctionSig* GetI32Sig(
+    Zone* zone, const wasm::FunctionSig* sig);
 
 AssemblerOptions WasmAssemblerOptions();
 AssemblerOptions WasmStubAssemblerOptions();

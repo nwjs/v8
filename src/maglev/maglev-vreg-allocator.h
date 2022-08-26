@@ -39,7 +39,7 @@ class MaglevVregAllocator {
 
 #define DEF_PROCESS_NODE(NAME)                             \
   void Process(NAME* node, const ProcessingState& state) { \
-    node->AllocateVreg(&state_, state);                    \
+    node->AllocateVreg(&state_);                           \
   }
   NODE_BASE_LIST(DEF_PROCESS_NODE)
 #undef DEF_PROCESS_NODE

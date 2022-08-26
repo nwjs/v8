@@ -6,8 +6,6 @@
 #define V8_API_API_ARGUMENTS_H_
 
 #include "include/v8-template.h"
-#include "src/api/api.h"
-#include "src/debug/debug.h"
 #include "src/execution/isolate.h"
 #include "src/objects/slots.h"
 #include "src/objects/visitors.h"
@@ -187,9 +185,8 @@ class FunctionCallbackArguments
   static const int kIsolateIndex = T::kIsolateIndex;
   static const int kNewTargetIndex = T::kNewTargetIndex;
 
-  FunctionCallbackArguments(Isolate* isolate, Object data, HeapObject callee,
-                            Object holder, HeapObject new_target, Address* argv,
-                            int argc);
+  FunctionCallbackArguments(Isolate* isolate, Object data, Object holder,
+                            HeapObject new_target, Address* argv, int argc);
 
   /*
    * The following Call function wraps the calling of all callbacks to handle

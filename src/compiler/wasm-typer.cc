@@ -9,7 +9,6 @@
 #include "src/compiler/node-matchers.h"
 #include "src/compiler/node-properties.h"
 #include "src/compiler/opcodes.h"
-#include "src/compiler/simplified-operator.h"
 #include "src/utils/utils.h"
 #include "src/wasm/object-access.h"
 #include "src/wasm/wasm-objects.h"
@@ -91,15 +90,9 @@ Reduction WasmTyper::Reduce(Node* node) {
           NodeProperties::GetType(NodeProperties::GetValueInput(node, 1))
               .AsWasm();
       wasm::ValueType to_type =
-          wasm::ValueType::Ref(rtt_type.type.ref_index(), wasm::kNullable);
+          wasm::ValueType::RefNull(rtt_type.type.ref_index());
       computed_type = wasm::Intersection(object_type.type, to_type,
                                          object_type.module, rtt_type.module);
-      if (object_type.type.is_nullable() && computed_type.type.is_bottom()) {
-        // In this case, the value can only be null; we still cannot type it as
-        // bottom.
-        // TODO(manoskouk): Improve when we have nullref.
-        computed_type.type = to_type;
-      }
       break;
     }
     case IrOpcode::kAssertNotNull: {
@@ -112,9 +105,9 @@ Reduction WasmTyper::Reduce(Node* node) {
         // AssertNotNull: Reverse the order of these operations, as this will
         // unlock more optimizations later.
         // We are implementing this in the typer so we can retype the nodes.
-        if (control->opcode() == IrOpcode::kWasmTypeCast && effect == object &&
-            control == object &&
-            !NodeProperties::GetType(object).AsWasm().type.is_bottom()) {
+        while (control->opcode() == IrOpcode::kWasmTypeCast &&
+               effect == object && control == object &&
+               !NodeProperties::GetType(object).AsWasm().type.is_bottom()) {
           Node* initial_object = NodeProperties::GetValueInput(object, 0);
           Node* previous_control = NodeProperties::GetControlInput(object);
           Node* previous_effect = NodeProperties::GetEffectInput(object);
@@ -125,11 +118,14 @@ Reduction WasmTyper::Reduce(Node* node) {
                              previous_effect);
           node->ReplaceInput(NodeProperties::FirstControlIndex(node),
                              previous_control);
-          // We do not replace {object}'s effect input to {node} because {node}
-          // has no effect output.
           object->ReplaceInput(NodeProperties::FirstValueIndex(object), node);
+          object->ReplaceInput(NodeProperties::FirstEffectIndex(object), node);
           object->ReplaceInput(NodeProperties::FirstControlIndex(object), node);
+          Revisit(node);
           Revisit(object);
+          object = initial_object;
+          control = previous_control;
+          effect = previous_effect;
         }
       }
 
@@ -210,6 +206,14 @@ Reduction WasmTyper::Reduce(Node* node) {
       // Do not modify if we are retrieving the array length.
       if (object_type.type.is_reference_to(wasm::HeapType::kArray) &&
           m.Is(wasm::ObjectAccess::ToTagged(WasmArray::kLengthOffset))) {
+        return NoChange();
+      }
+      // Do not modify if we are retrieving anything from a string or a view on
+      // a string.
+      if (object_type.type.is_reference_to(wasm::HeapType::kString) ||
+          object_type.type.is_reference_to(wasm::HeapType::kStringViewWtf8) ||
+          object_type.type.is_reference_to(wasm::HeapType::kStringViewWtf16) ||
+          object_type.type.is_reference_to(wasm::HeapType::kStringViewIter)) {
         return NoChange();
       }
       uint32_t ref_index = object_type.type.ref_index();

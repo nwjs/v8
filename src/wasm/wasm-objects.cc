@@ -6,17 +6,12 @@
 
 #include "src/base/iterator.h"
 #include "src/base/vector.h"
-#include "src/codegen/assembler-inl.h"
-#include "src/codegen/code-factory.h"
 #include "src/compiler/wasm-compiler.h"
-#include "src/debug/debug-interface.h"
+#include "src/debug/debug.h"
 #include "src/logging/counters.h"
-#include "src/objects/debug-objects-inl.h"
 #include "src/objects/managed-inl.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/shared-function-info.h"
-#include "src/objects/struct-inl.h"
-#include "src/trap-handler/trap-handler.h"
 #include "src/utils/utils.h"
 #include "src/wasm/code-space-access.h"
 #include "src/wasm/jump-table-assembler.h"
@@ -31,6 +26,9 @@
 #include "src/wasm/wasm-objects-inl.h"
 #include "src/wasm/wasm-subtyping.h"
 #include "src/wasm/wasm-value.h"
+
+// Needs to be last so macros do not get undefined.
+#include "src/objects/object-macros.h"
 
 #define TRACE_IFT(...)              \
   do {                              \
@@ -816,16 +814,7 @@ void SetInstanceMemory(Handle<WasmInstanceObject> instance,
 }  // namespace
 
 MaybeHandle<WasmMemoryObject> WasmMemoryObject::New(
-    Isolate* isolate, MaybeHandle<JSArrayBuffer> maybe_buffer, int maximum) {
-  Handle<JSArrayBuffer> buffer;
-  if (!maybe_buffer.ToHandle(&buffer)) {
-    // If no buffer was provided, create a zero-length one.
-    auto backing_store =
-        BackingStore::AllocateWasmMemory(isolate, 0, 0, SharedFlag::kNotShared);
-    if (!backing_store) return {};
-    buffer = isolate->factory()->NewJSArrayBuffer(std::move(backing_store));
-  }
-
+    Isolate* isolate, Handle<JSArrayBuffer> buffer, int maximum) {
   Handle<JSFunction> memory_ctor(
       isolate->native_context()->wasm_memory_constructor(), isolate);
 
@@ -1101,7 +1090,7 @@ FunctionTargetAndRef::FunctionTargetAndRef(
 
 void ImportedFunctionEntry::SetWasmToJs(
     Isolate* isolate, Handle<JSReceiver> callable,
-    const wasm::WasmCode* wasm_to_js_wrapper, Handle<HeapObject> suspender) {
+    const wasm::WasmCode* wasm_to_js_wrapper, wasm::Suspend suspend) {
   TRACE_IFT("Import callable 0x%" PRIxPTR "[%d] = {callable=0x%" PRIxPTR
             ", target=%p}\n",
             instance_->ptr(), index_, callable->ptr(),
@@ -1109,7 +1098,7 @@ void ImportedFunctionEntry::SetWasmToJs(
   DCHECK(wasm_to_js_wrapper->kind() == wasm::WasmCode::kWasmToJsWrapper ||
          wasm_to_js_wrapper->kind() == wasm::WasmCode::kWasmToCapiWrapper);
   Handle<WasmApiFunctionRef> ref =
-      isolate->factory()->NewWasmApiFunctionRef(callable, suspender);
+      isolate->factory()->NewWasmApiFunctionRef(callable, suspend, instance_);
   instance_->imported_function_refs().set(index_, *ref);
   instance_->imported_function_targets()[index_] =
       wasm_to_js_wrapper->instruction_start();
@@ -1213,7 +1202,8 @@ Handle<WasmInstanceObject> WasmInstanceObject::New(
       isolate->heap()->OldSpaceAllocationLimitAddress());
   instance->set_old_allocation_top_address(
       isolate->heap()->OldSpaceAllocationTopAddress());
-  instance->set_globals_start(nullptr);
+  instance->set_globals_start(
+      reinterpret_cast<byte*>(EmptyBackingStoreBuffer()));
   instance->set_indirect_function_table_size(0);
   instance->set_indirect_function_table_refs(
       ReadOnlyRoots(isolate).empty_fixed_array());
@@ -1355,11 +1345,9 @@ bool WasmInstanceObject::CopyTableEntries(Isolate* isolate,
 }
 
 // static
-bool WasmInstanceObject::InitTableEntries(Isolate* isolate,
-                                          Handle<WasmInstanceObject> instance,
-                                          uint32_t table_index,
-                                          uint32_t segment_index, uint32_t dst,
-                                          uint32_t src, uint32_t count) {
+base::Optional<MessageTemplate> WasmInstanceObject::InitTableEntries(
+    Isolate* isolate, Handle<WasmInstanceObject> instance, uint32_t table_index,
+    uint32_t segment_index, uint32_t dst, uint32_t src, uint32_t count) {
   // Note that this implementation just calls through to module instantiation.
   // This is intentional, so that the runtime only depends on the object
   // methods, and not the module instantiation logic.
@@ -1416,7 +1404,8 @@ WasmInstanceObject::GetOrCreateWasmInternalFunction(
   }
   auto external = Handle<WasmExternalFunction>::cast(WasmExportedFunction::New(
       isolate, instance, function_index,
-      static_cast<int>(function.sig->parameter_count()), wrapper));
+      static_cast<int>(function.sig->parameter_count()), wrapper,
+      wasm::kNoSuspend));
   result =
       WasmInternalFunction::FromExternal(external, isolate).ToHandleChecked();
 
@@ -1475,13 +1464,9 @@ void WasmInstanceObject::ImportWasmJSFunctionIntoTable(
                            ->shared()
                            .internal_formal_parameter_count_without_receiver();
     }
-    wasm::Suspend suspend =
-        resolved.suspender.is_null() || resolved.suspender->IsUndefined()
-            ? wasm::kNoSuspend
-            : wasm::kSuspend;
     // TODO(manoskouk): Reuse js_function->wasm_to_js_wrapper_code().
     wasm::WasmCompilationResult result = compiler::CompileWasmImportCallWrapper(
-        &env, kind, sig, false, expected_arity, suspend);
+        &env, kind, sig, false, expected_arity, resolved.suspend);
     wasm::CodeSpaceWriteScope write_scope(native_module);
     std::unique_ptr<wasm::WasmCode> wasm_code = native_module->AddCode(
         result.func_index, result.code_desc, result.frame_slot_count,
@@ -1499,9 +1484,9 @@ void WasmInstanceObject::ImportWasmJSFunctionIntoTable(
   }
 
   // Update the dispatch table.
-  Handle<HeapObject> suspender = handle(js_function->GetSuspender(), isolate);
+  wasm::Suspend suspend = js_function->GetSuspend();
   Handle<WasmApiFunctionRef> ref =
-      isolate->factory()->NewWasmApiFunctionRef(callable, suspender);
+      isolate->factory()->NewWasmApiFunctionRef(callable, suspend, instance);
   WasmIndirectFunctionTable::cast(
       instance->indirect_function_tables().get(table_index))
       .Set(entry_index, sig_id, call_target, *ref);
@@ -1576,7 +1561,7 @@ wasm::WasmValue WasmStruct::GetFieldValue(uint32_t index) {
     FOREACH_WASMVALUE_CTYPES(CASE_TYPE)
 #undef CASE_TYPE
     case wasm::kRef:
-    case wasm::kOptRef: {
+    case wasm::kRefNull: {
       Handle<Object> ref(TaggedField<Object>::load(*this, field_offset),
                          GetIsolateFromWritableObject(*this));
       return wasm::WasmValue(ref, field_type);
@@ -1605,7 +1590,7 @@ wasm::WasmValue WasmArray::GetElement(uint32_t index) {
     FOREACH_WASMVALUE_CTYPES(CASE_TYPE)
 #undef CASE_TYPE
     case wasm::kRef:
-    case wasm::kOptRef: {
+    case wasm::kRefNull: {
       Handle<Object> ref(TaggedField<Object>::load(*this, element_offset),
                          GetIsolateFromWritableObject(*this));
       return wasm::WasmValue(ref, element_type);
@@ -1617,6 +1602,13 @@ wasm::WasmValue WasmArray::GetElement(uint32_t index) {
     case wasm::kBottom:
       UNREACHABLE();
   }
+}
+
+void WasmArray::SetTaggedElement(uint32_t index, Handle<Object> value,
+                                 WriteBarrierMode mode) {
+  DCHECK(type()->element_type().is_reference());
+  TaggedField<Object>::store(*this, element_offset(index), *value);
+  CONDITIONAL_WRITE_BARRIER(*this, element_offset(index), *value, mode);
 }
 
 // static
@@ -1692,8 +1684,9 @@ Handle<WasmExceptionPackage> WasmExceptionPackage::New(
 Handle<WasmExceptionPackage> WasmExceptionPackage::New(
     Isolate* isolate, Handle<WasmExceptionTag> exception_tag,
     Handle<FixedArray> values) {
-  Handle<JSObject> exception = isolate->factory()->NewWasmExceptionError(
-      MessageTemplate::kWasmExceptionError);
+  Handle<JSFunction> exception_cons(
+      isolate->native_context()->wasm_exception_constructor(), isolate);
+  Handle<JSObject> exception = isolate->factory()->NewJSObject(exception_cons);
   CHECK(!Object::SetProperty(isolate, exception,
                              isolate->factory()->wasm_exception_tag_symbol(),
                              exception_tag, StoreOrigin::kMaybeKeyed,
@@ -1806,18 +1799,25 @@ Handle<WasmSuspenderObject> WasmSuspenderObject::New(Isolate* isolate) {
   // which it will wrap the imports/exports, allocate in old space too.
   auto suspender = Handle<WasmSuspenderObject>::cast(
       isolate->factory()->NewJSObject(suspender_cons, AllocationType::kOld));
-  suspender->set_state(Inactive);
+  suspender->set_state(kInactive);
   // Instantiate the callable object which resumes this Suspender. This will be
   // used implicitly as the onFulfilled callback of the returned JS promise.
-  Handle<WasmOnFulfilledData> function_data =
-      isolate->factory()->NewWasmOnFulfilledData(suspender);
-  Handle<SharedFunctionInfo> shared =
-      isolate->factory()->NewSharedFunctionInfoForWasmOnFulfilled(
-          function_data);
+  Handle<WasmResumeData> resume_data = isolate->factory()->NewWasmResumeData(
+      suspender, wasm::OnResume::kContinue);
+  Handle<SharedFunctionInfo> resume_sfi =
+      isolate->factory()->NewSharedFunctionInfoForWasmResume(resume_data);
   Handle<Context> context(isolate->native_context());
   Handle<JSObject> resume =
-      Factory::JSFunctionBuilder{isolate, shared, context}.Build();
+      Factory::JSFunctionBuilder{isolate, resume_sfi, context}.Build();
+
+  Handle<WasmResumeData> reject_data =
+      isolate->factory()->NewWasmResumeData(suspender, wasm::OnResume::kThrow);
+  Handle<SharedFunctionInfo> reject_sfi =
+      isolate->factory()->NewSharedFunctionInfoForWasmResume(reject_data);
+  Handle<JSObject> reject =
+      Factory::JSFunctionBuilder{isolate, reject_sfi, context}.Build();
   suspender->set_resume(*resume);
+  suspender->set_reject(*reject);
   return suspender;
 }
 
@@ -1859,7 +1859,7 @@ uint32_t WasmExceptionPackage::GetEncodedSize(const wasm::WasmTag* tag) {
         encoded_size += 8;
         break;
       case wasm::kRef:
-      case wasm::kOptRef:
+      case wasm::kRefNull:
         encoded_size += 1;
         break;
       case wasm::kRtt:
@@ -1936,7 +1936,7 @@ int WasmExportedFunction::function_index() {
 
 Handle<WasmExportedFunction> WasmExportedFunction::New(
     Isolate* isolate, Handle<WasmInstanceObject> instance, int func_index,
-    int arity, Handle<CodeT> export_wrapper) {
+    int arity, Handle<CodeT> export_wrapper, wasm::Suspend suspend) {
   DCHECK(
       CodeKind::JS_TO_WASM_FUNCTION == export_wrapper->kind() ||
       (export_wrapper->is_builtin() &&
@@ -1965,7 +1965,8 @@ Handle<WasmExportedFunction> WasmExportedFunction::New(
   Handle<WasmExportedFunctionData> function_data =
       factory->NewWasmExportedFunctionData(
           export_wrapper, instance, call_target, ref, func_index,
-          reinterpret_cast<Address>(sig), wasm::kGenericWrapperBudget, rtt);
+          reinterpret_cast<Address>(sig), wasm::kGenericWrapperBudget, rtt,
+          suspend);
 
   MaybeHandle<String> maybe_name;
   bool is_asm_js_module = instance->module_object().is_asm_js();
@@ -2063,7 +2064,7 @@ bool WasmJSFunction::IsWasmJSFunction(Object object) {
 Handle<WasmJSFunction> WasmJSFunction::New(Isolate* isolate,
                                            const wasm::FunctionSig* sig,
                                            Handle<JSReceiver> callable,
-                                           Handle<HeapObject> suspender) {
+                                           wasm::Suspend suspend) {
   DCHECK_LE(sig->all().size(), kMaxInt);
   int sig_size = static_cast<int>(sig->all().size());
   int return_count = static_cast<int>(sig->return_count());
@@ -2093,7 +2094,7 @@ Handle<WasmJSFunction> WasmJSFunction::New(Isolate* isolate,
   Handle<Map> rtt = factory->wasm_internal_function_map();
   Handle<WasmJSFunctionData> function_data = factory->NewWasmJSFunctionData(
       call_target, callable, return_count, parameter_count, serialized_sig,
-      wrapper_code, rtt, suspender);
+      wrapper_code, rtt, suspend);
 
   if (wasm::WasmFeatures::FromIsolate(isolate).has_typed_funcref()) {
     using CK = compiler::WasmImportCallKind;
@@ -2109,9 +2110,6 @@ Handle<WasmJSFunction> WasmJSFunction::New(Isolate* isolate,
     }
     // TODO(wasm): Think about caching and sharing the wasm-to-JS wrappers per
     // signature instead of compiling a new one for every instantiation.
-    wasm::Suspend suspend =
-        suspender.is_null() ? wasm::kNoSuspend : wasm::kSuspend;
-    DCHECK_IMPLIES(!suspender.is_null(), !suspender->IsUndefined());
     Handle<CodeT> wasm_to_js_wrapper_code =
         ToCodeT(compiler::CompileWasmToJSWrapper(isolate, sig, kind,
                                                  expected_arity, suspend)
@@ -2144,10 +2142,11 @@ JSReceiver WasmJSFunction::GetCallable() const {
                               .callable());
 }
 
-HeapObject WasmJSFunction::GetSuspender() const {
-  return WasmApiFunctionRef::cast(
-             shared().wasm_js_function_data().internal().ref())
-      .suspender();
+wasm::Suspend WasmJSFunction::GetSuspend() const {
+  return static_cast<wasm::Suspend>(
+      WasmApiFunctionRef::cast(
+          shared().wasm_js_function_data().internal().ref())
+          .suspend());
 }
 
 const wasm::FunctionSig* WasmJSFunction::GetSignature(Zone* zone) {
@@ -2166,20 +2165,22 @@ bool WasmJSFunction::MatchesSignatureForSuspend(const wasm::FunctionSig* sig) {
   DCHECK_LE(sig->all().size(), kMaxInt);
   int sig_size = static_cast<int>(sig->all().size());
   int parameter_count = static_cast<int>(sig->parameter_count());
-  int return_count = static_cast<int>(sig->return_count());
   DisallowHeapAllocation no_alloc;
   WasmJSFunctionData function_data = shared().wasm_js_function_data();
-  if (parameter_count != function_data.serialized_parameter_count()) {
+  // The suspender parameter is not forwarded to the JS function so the
+  // parameter count should differ by one.
+  if (parameter_count != function_data.serialized_parameter_count() + 1) {
     return false;
   }
   if (sig_size == 0) return true;  // Prevent undefined behavior.
-  // This function is only called for functions wrapped by a
-  // WebAssembly.Suspender object, so the return type has to be externref.
+  // This function is only called for functions wrapped by
+  // WebAssembly.suspendOnReturnedPromise, so the return type has to be
+  // externref.
   CHECK_EQ(function_data.serialized_return_count(), 1);
   CHECK_EQ(function_data.serialized_signature().get(0), wasm::kWasmAnyRef);
-  const wasm::ValueType* expected = sig->all().begin();
-  return function_data.serialized_signature().matches(
-      1, expected + return_count, parameter_count);
+  const wasm::ValueType* expected = sig->parameters().begin() + 1;
+  return function_data.serialized_signature().matches(1, expected,
+                                                      parameter_count - 1);
 }
 
 // TODO(9495): Update this if function type variance is introduced.
@@ -2269,7 +2270,7 @@ bool TypecheckJSObject(Isolate* isolate, const WasmModule* module,
                        const char** error_message) {
   DCHECK(expected.is_reference());
   switch (expected.kind()) {
-    case kOptRef:
+    case kRefNull:
       if (value->IsNull(isolate)) {
         HeapType::Representation repr = expected.heap_representation();
         switch (repr) {
@@ -2361,8 +2362,7 @@ bool TypecheckJSObject(Isolate* isolate, const WasmModule* module,
               const WasmModule* exporting_module = function.instance().module();
               ValueType real_type = ValueType::Ref(
                   exporting_module->functions[function.function_index()]
-                      .sig_index,
-                  kNonNullable);
+                      .sig_index);
               if (!IsSubtypeOf(real_type, expected, exporting_module, module)) {
                 *error_message =
                     "assigned exported function has to be a subtype of the "
@@ -2439,4 +2439,5 @@ bool TypecheckJSObject(Isolate* isolate, const WasmModule* module,
 }  // namespace internal
 }  // namespace v8
 
+#include "src/objects/object-macros-undef.h"
 #undef TRACE_IFT

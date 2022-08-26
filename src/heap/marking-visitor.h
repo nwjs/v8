@@ -130,7 +130,6 @@ class MarkingStateBase {
 // - ConcreteVisitor::retaining_path_mode method,
 // - ConcreteVisitor::RecordSlot method,
 // - ConcreteVisitor::RecordRelocSlot method,
-// - ConcreteVisitor::SynchronizePageAccess method,
 // - ConcreteVisitor::VisitJSObjectSubclass method,
 // - ConcreteVisitor::VisitLeftTrimmableArray method.
 // These methods capture the difference between the concurrent and main thread
@@ -155,10 +154,12 @@ class MarkingVisitorBase : public HeapVisitor<int, ConcreteVisitor> {
         is_embedder_tracing_enabled_(is_embedder_tracing_enabled),
         should_keep_ages_unchanged_(should_keep_ages_unchanged),
         is_shared_heap_(heap->IsShared())
-#ifdef V8_SANDBOXED_EXTERNAL_POINTERS
+#ifdef V8_ENABLE_SANDBOX
         ,
-        external_pointer_table_(&heap->isolate()->external_pointer_table())
-#endif  // V8_SANDBOXED_EXTERNAL_POINTERS
+        external_pointer_table_(&heap->isolate()->external_pointer_table()),
+        shared_external_pointer_table_(
+            &heap->isolate()->shared_external_pointer_table())
+#endif  // V8_ENABLE_SANDBOX
   {
   }
 
@@ -209,12 +210,14 @@ class MarkingVisitorBase : public HeapVisitor<int, ConcreteVisitor> {
     // reconstructed after GC.
   }
 
-  V8_INLINE void VisitExternalPointer(HeapObject host,
-                                      ExternalPointer_t ptr) final {
-#ifdef V8_SANDBOXED_EXTERNAL_POINTERS
-    uint32_t index = ptr >> kExternalPointerIndexShift;
-    external_pointer_table_->Mark(index);
-#endif  // V8_SANDBOXED_EXTERNAL_POINTERS
+  V8_INLINE void VisitExternalPointer(HeapObject host, ExternalPointerSlot slot,
+                                      ExternalPointerTag tag) final;
+  void SynchronizePageAccess(HeapObject heap_object) {
+#ifdef THREAD_SANITIZER
+    // This is needed because TSAN does not process the memory fence
+    // emitted after page initialization.
+    BasicMemoryChunk::FromHeapObject(heap_object)->SynchronizedHeapLoad();
+#endif
   }
 
  protected:
@@ -284,9 +287,10 @@ class MarkingVisitorBase : public HeapVisitor<int, ConcreteVisitor> {
   const bool is_embedder_tracing_enabled_;
   const bool should_keep_ages_unchanged_;
   const bool is_shared_heap_;
-#ifdef V8_SANDBOXED_EXTERNAL_POINTERS
+#ifdef V8_ENABLE_SANDBOX
   ExternalPointerTable* const external_pointer_table_;
-#endif  // V8_SANDBOXED_EXTERNAL_POINTERS
+  ExternalPointerTable* const shared_external_pointer_table_;
+#endif  // V8_ENABLE_SANDBOX
 };
 
 }  // namespace internal

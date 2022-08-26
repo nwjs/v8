@@ -381,9 +381,9 @@ namespace internal {
   /* ES6 #sec-array.prototype.pop */                                           \
   CPP(ArrayPop)                                                                \
   TFJ(ArrayPrototypePop, kDontAdaptArgumentsSentinel)                          \
-  /* ES6 #sec-array.prototype.groupby */                                       \
-  CPP(ArrayPrototypeGroupBy)                                                   \
-  CPP(ArrayPrototypeGroupByToMap)                                              \
+  /* ES6 #sec-array.prototype.group */                                         \
+  CPP(ArrayPrototypeGroup)                                                     \
+  CPP(ArrayPrototypeGroupToMap)                                                \
   /* ES6 #sec-array.prototype.push */                                          \
   CPP(ArrayPush)                                                               \
   TFJ(ArrayPrototypePush, kDontAdaptArgumentsSentinel)                         \
@@ -419,6 +419,8 @@ namespace internal {
   CPP(ArrayBufferPrototypeSlice)                                               \
   /* https://tc39.es/proposal-resizablearraybuffer/ */                         \
   CPP(ArrayBufferPrototypeResize)                                              \
+  /* proposal-resizablearraybuffer/#sec-arraybuffer.prototype.transfer */      \
+  CPP(ArrayBufferPrototypeTransfer)                                            \
                                                                                \
   /* AsyncFunction */                                                          \
   TFS(AsyncFunctionEnter, kClosure, kReceiver)                                 \
@@ -855,6 +857,7 @@ namespace internal {
   ASM(RegExpExperimentalTrampoline, CCall)                                     \
                                                                                \
   /* Set */                                                                    \
+  TFS(FindOrderedHashSetEntry, kTable, kKey)                                   \
   TFJ(SetConstructor, kDontAdaptArgumentsSentinel)                             \
   TFJ(SetPrototypeHas, kJSArgcReceiverSlots + 1, kReceiver, kKey)              \
   TFJ(SetPrototypeAdd, kJSArgcReceiverSlots + 1, kReceiver, kKey)              \
@@ -888,12 +891,12 @@ namespace internal {
   /* https://tc39.es/proposal-resizablearraybuffer/ */                         \
   CPP(SharedArrayBufferPrototypeGrow)                                          \
                                                                                \
-  TFJ(AtomicsLoad, kJSArgcReceiverSlots + 2, kReceiver, kArrayOrSharedStruct,  \
+  TFJ(AtomicsLoad, kJSArgcReceiverSlots + 2, kReceiver, kArrayOrSharedObject,  \
       kIndexOrFieldName)                                                       \
-  TFJ(AtomicsStore, kJSArgcReceiverSlots + 3, kReceiver, kArrayOrSharedStruct, \
+  TFJ(AtomicsStore, kJSArgcReceiverSlots + 3, kReceiver, kArrayOrSharedObject, \
       kIndexOrFieldName, kValue)                                               \
   TFJ(AtomicsExchange, kJSArgcReceiverSlots + 3, kReceiver,                    \
-      kArrayOrSharedStruct, kIndexOrFieldName, kValue)                         \
+      kArrayOrSharedObject, kIndexOrFieldName, kValue)                         \
   TFJ(AtomicsCompareExchange, kJSArgcReceiverSlots + 4, kReceiver, kArray,     \
       kIndex, kOldValue, kNewValue)                                            \
   TFJ(AtomicsAdd, kJSArgcReceiverSlots + 3, kReceiver, kArray, kIndex, kValue) \
@@ -966,6 +969,7 @@ namespace internal {
   IF_WASM(ASM, WasmReturnPromiseOnSuspend, WasmDummy)                          \
   IF_WASM(ASM, WasmSuspend, WasmSuspend)                                       \
   IF_WASM(ASM, WasmResume, WasmDummy)                                          \
+  IF_WASM(ASM, WasmReject, WasmDummy)                                          \
   IF_WASM(ASM, WasmCompileLazy, WasmDummy)                                     \
   IF_WASM(ASM, WasmDebugBreak, WasmDummy)                                      \
   IF_WASM(ASM, WasmOnStackReplace, WasmDummy)                                  \
@@ -996,6 +1000,7 @@ namespace internal {
   /* JS Structs and friends */                                                 \
   CPP(SharedStructTypeConstructor)                                             \
   CPP(SharedStructConstructor)                                                 \
+  CPP(SharedArrayConstructor)                                                  \
   CPP(AtomicsMutexConstructor)                                                 \
   CPP(AtomicsMutexLock)                                                        \
   CPP(AtomicsMutexTryLock)                                                     \

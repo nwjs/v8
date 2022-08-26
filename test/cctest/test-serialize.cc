@@ -32,23 +32,17 @@
 #include "include/v8-function.h"
 #include "include/v8-locker.h"
 #include "src/api/api-inl.h"
-#include "src/codegen/assembler-inl.h"
 #include "src/codegen/compilation-cache.h"
 #include "src/codegen/compiler.h"
-#include "src/codegen/macro-assembler-inl.h"
 #include "src/codegen/script-details.h"
 #include "src/common/assert-scope.h"
-#include "src/debug/debug.h"
 #include "src/heap/heap-inl.h"
+#include "src/heap/parked-scope.h"
 #include "src/heap/read-only-heap.h"
 #include "src/heap/safepoint.h"
 #include "src/heap/spaces.h"
-#include "src/init/bootstrapper.h"
-#include "src/init/v8.h"
-#include "src/interpreter/interpreter.h"
 #include "src/numbers/hash-seed-inl.h"
 #include "src/objects/js-array-buffer-inl.h"
-#include "src/objects/js-array-inl.h"
 #include "src/objects/js-regexp-inl.h"
 #include "src/objects/objects-inl.h"
 #include "src/runtime/runtime.h"
@@ -1811,19 +1805,20 @@ TEST(CodeSerializerPromotedToCompilationCache) {
   CompileScriptAndProduceCache(isolate, src, default_script_details, &cache,
                                v8::ScriptCompiler::kNoCompileOptions);
 
-  DisallowCompilation no_compile_expected(isolate);
-  Handle<SharedFunctionInfo> copy =
-      CompileScript(isolate, src, default_script_details, cache,
-                    v8::ScriptCompiler::kConsumeCodeCache);
+  Handle<SharedFunctionInfo> copy;
+  {
+    DisallowCompilation no_compile_expected(isolate);
+    copy = CompileScript(isolate, src, default_script_details, cache,
+                         v8::ScriptCompiler::kConsumeCodeCache);
+  }
 
   {
     ScriptDetails script_details(src);
     script_details.host_defined_options =
         default_script_details.host_defined_options;
-    MaybeHandle<SharedFunctionInfo> shared =
-        isolate->compilation_cache()->LookupScript(src, script_details,
-                                                   LanguageMode::kSloppy);
-    CHECK_EQ(*shared.ToHandleChecked(), *copy);
+    auto lookup_result = isolate->compilation_cache()->LookupScript(
+        src, script_details, LanguageMode::kSloppy);
+    CHECK_EQ(*lookup_result.toplevel_sfi().ToHandleChecked(), *copy);
   }
 
   {
@@ -1837,10 +1832,9 @@ TEST(CodeSerializerPromotedToCompilationCache) {
             default_host_defined_option_1_string);
     host_defined_options->set(1, *host_defined_option_1);
     script_details.host_defined_options = host_defined_options;
-    MaybeHandle<SharedFunctionInfo> shared =
-        isolate->compilation_cache()->LookupScript(src, script_details,
-                                                   LanguageMode::kSloppy);
-    CHECK_EQ(*shared.ToHandleChecked(), *copy);
+    auto lookup_result = isolate->compilation_cache()->LookupScript(
+        src, script_details, LanguageMode::kSloppy);
+    CHECK_EQ(*lookup_result.toplevel_sfi().ToHandleChecked(), *copy);
   }
 
   {
@@ -1849,49 +1843,48 @@ TEST(CodeSerializerPromotedToCompilationCache) {
         isolate->factory()->NewStringFromAsciiChecked(source));
     script_details.host_defined_options =
         default_script_details.host_defined_options;
-    MaybeHandle<SharedFunctionInfo> shared =
-        isolate->compilation_cache()->LookupScript(src, script_details,
-                                                   LanguageMode::kSloppy);
-    CHECK_EQ(*shared.ToHandleChecked(), *copy);
+    auto lookup_result = isolate->compilation_cache()->LookupScript(
+        src, script_details, LanguageMode::kSloppy);
+    CHECK_EQ(*lookup_result.toplevel_sfi().ToHandleChecked(), *copy);
   }
 
   {
     // Lookup with different name string should fail:
     ScriptDetails script_details(
         isolate->factory()->NewStringFromAsciiChecked("other"));
-    MaybeHandle<SharedFunctionInfo> shared =
-        isolate->compilation_cache()->LookupScript(src, script_details,
-                                                   LanguageMode::kSloppy);
-    CHECK(shared.is_null());
+    auto lookup_result = isolate->compilation_cache()->LookupScript(
+        src, script_details, LanguageMode::kSloppy);
+    CHECK(lookup_result.script().is_null() &&
+          lookup_result.toplevel_sfi().is_null());
   }
 
   {
     // Lookup with different position should fail:
     ScriptDetails script_details(src);
     script_details.line_offset = 0xFF;
-    MaybeHandle<SharedFunctionInfo> shared =
-        isolate->compilation_cache()->LookupScript(src, script_details,
-                                                   LanguageMode::kSloppy);
-    CHECK(shared.is_null());
+    auto lookup_result = isolate->compilation_cache()->LookupScript(
+        src, script_details, LanguageMode::kSloppy);
+    CHECK(lookup_result.script().is_null() &&
+          lookup_result.toplevel_sfi().is_null());
   }
 
   {
     // Lookup with different position should fail:
     ScriptDetails script_details(src);
     script_details.column_offset = 0xFF;
-    MaybeHandle<SharedFunctionInfo> shared =
-        isolate->compilation_cache()->LookupScript(src, script_details,
-                                                   LanguageMode::kSloppy);
-    CHECK(shared.is_null());
+    auto lookup_result = isolate->compilation_cache()->LookupScript(
+        src, script_details, LanguageMode::kSloppy);
+    CHECK(lookup_result.script().is_null() &&
+          lookup_result.toplevel_sfi().is_null());
   }
 
   {
     // Lookup with different language mode should fail:
     ScriptDetails script_details(src);
-    MaybeHandle<SharedFunctionInfo> shared =
-        isolate->compilation_cache()->LookupScript(src, script_details,
-                                                   LanguageMode::kStrict);
-    CHECK(shared.is_null());
+    auto lookup_result = isolate->compilation_cache()->LookupScript(
+        src, script_details, LanguageMode::kStrict);
+    CHECK(lookup_result.script().is_null() &&
+          lookup_result.toplevel_sfi().is_null());
   }
 
   {
@@ -1899,20 +1892,49 @@ TEST(CodeSerializerPromotedToCompilationCache) {
     ScriptOriginOptions origin_options(false, true);
     CHECK_NE(ScriptOriginOptions().Flags(), origin_options.Flags());
     ScriptDetails script_details(src, origin_options);
-    MaybeHandle<SharedFunctionInfo> shared =
-        isolate->compilation_cache()->LookupScript(src, script_details,
-                                                   LanguageMode::kSloppy);
-    CHECK(shared.is_null());
+    auto lookup_result = isolate->compilation_cache()->LookupScript(
+        src, script_details, LanguageMode::kSloppy);
+    CHECK(lookup_result.script().is_null() &&
+          lookup_result.toplevel_sfi().is_null());
   }
 
   {
     // Lookup with different host_defined_options should fail:
     ScriptDetails script_details(src);
     script_details.host_defined_options = isolate->factory()->NewFixedArray(5);
-    MaybeHandle<SharedFunctionInfo> shared =
-        isolate->compilation_cache()->LookupScript(src, script_details,
-                                                   LanguageMode::kSloppy);
-    CHECK(shared.is_null());
+    auto lookup_result = isolate->compilation_cache()->LookupScript(
+        src, script_details, LanguageMode::kSloppy);
+    CHECK(lookup_result.script().is_null() &&
+          lookup_result.toplevel_sfi().is_null());
+  }
+
+  // Compile the script again with different options.
+  ScriptDetails alternative_script_details(src);
+  Handle<SharedFunctionInfo> alternative_toplevel_sfi =
+      Compiler::GetSharedFunctionInfoForScript(
+          isolate, src, alternative_script_details,
+          ScriptCompiler::kNoCompileOptions, ScriptCompiler::kNoCacheNoReason,
+          NOT_NATIVES_CODE)
+          .ToHandleChecked();
+  CHECK_NE(*copy, *alternative_toplevel_sfi);
+
+  {
+    // The original script can still be found.
+    ScriptDetails script_details(src);
+    script_details.host_defined_options =
+        default_script_details.host_defined_options;
+    auto lookup_result = isolate->compilation_cache()->LookupScript(
+        src, script_details, LanguageMode::kSloppy);
+    CHECK_EQ(*lookup_result.toplevel_sfi().ToHandleChecked(), *copy);
+  }
+
+  {
+    // The new script can also be found.
+    ScriptDetails script_details(src);
+    auto lookup_result = isolate->compilation_cache()->LookupScript(
+        src, script_details, LanguageMode::kSloppy);
+    CHECK_EQ(*lookup_result.toplevel_sfi().ToHandleChecked(),
+             *alternative_toplevel_sfi);
   }
 
   delete cache;
@@ -2836,6 +2858,31 @@ TEST(Regress503552) {
   v8::ScriptCompiler::CachedData* cache_data =
       CodeSerializer::Serialize(shared);
   delete cache_data;
+}
+
+UNINITIALIZED_TEST(SnapshotCreatorBlobNotCreated) {
+  DisableAlwaysOpt();
+  DisableEmbeddedBlobRefcounting();
+  {
+    v8::SnapshotCreator creator;
+    v8::Isolate* isolate = creator.GetIsolate();
+    {
+      v8::HandleScope handle_scope(isolate);
+      v8::Local<v8::Context> context = v8::Context::New(isolate);
+      v8::Context::Scope context_scope(context);
+      v8::TryCatch try_catch(isolate);
+      v8::Local<v8::String> code = v8_str("throw new Error('test');");
+      CHECK(v8::Script::Compile(context, code)
+                .ToLocalChecked()
+                ->Run(context)
+                .IsEmpty());
+      CHECK(try_catch.HasCaught());
+    }
+    // SnapshotCreator should be destroyed just fine even when no
+    // blob is created.
+  }
+
+  FreeCurrentEmbeddedBlob();
 }
 
 UNINITIALIZED_TEST(SnapshotCreatorMultipleContexts) {
@@ -5012,7 +5059,13 @@ UNINITIALIZED_TEST(SharedStrings) {
   CheckObjectsAreInSharedHeap(i_isolate1);
   CheckObjectsAreInSharedHeap(i_isolate2);
 
-  isolate1->Dispose();
+  {
+    // Because both isolate1 and isolate2 are considered running on the main
+    // thread, one must be parked to avoid deadlock in the shared heap
+    // verification that may happen on client heap disposal.
+    ParkedScope parked(i_isolate2->main_thread_local_isolate());
+    isolate1->Dispose();
+  }
   isolate2->Dispose();
   Isolate::Delete(reinterpret_cast<Isolate*>(shared_isolate));
 

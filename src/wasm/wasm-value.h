@@ -13,7 +13,6 @@
 #include "src/handles/handles.h"
 #include "src/utils/boxed-float.h"
 #include "src/wasm/value-type.h"
-#include "src/zone/zone-containers.h"
 
 namespace v8 {
 namespace internal {
@@ -199,7 +198,7 @@ class WasmValue {
         }
         return stream.str();
       }
-      case kOptRef:
+      case kRefNull:
       case kRef:
       case kRtt:
         return "Handle [" + std::to_string(to_ref().address()) + "]";
@@ -207,6 +206,13 @@ class WasmValue {
       case kBottom:
         UNREACHABLE();
     }
+  }
+
+  bool zero_byte_representation() {
+    DCHECK(type().is_numeric());
+    uint32_t byte_count = type().value_kind_size();
+    return static_cast<uint32_t>(std::count(
+               bit_pattern_, bit_pattern_ + byte_count, 0)) == byte_count;
   }
 
  private:

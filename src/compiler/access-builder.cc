@@ -5,11 +5,8 @@
 #include "src/compiler/access-builder.h"
 
 #include "src/compiler/type-cache.h"
-#include "src/execution/frames.h"
 #include "src/handles/handles-inl.h"
-#include "src/heap/heap.h"
 #include "src/objects/arguments.h"
-#include "src/objects/cell.h"
 #include "src/objects/contexts.h"
 #include "src/objects/heap-number.h"
 #include "src/objects/js-collection.h"
@@ -761,9 +758,7 @@ FieldAccess AccessBuilder::ForExternalStringResourceData() {
       kNoWriteBarrier,
       ConstFieldInfo::None(),
       false,
-#ifdef V8_SANDBOXED_EXTERNAL_POINTERS
       kExternalStringResourceDataTag,
-#endif
   };
   return access;
 }
@@ -1090,6 +1085,16 @@ ElementAccess AccessBuilder::ForTypedArrayElement(ExternalArrayType type,
       UNIMPLEMENTED();
   }
   UNREACHABLE();
+}
+
+// static
+ElementAccess AccessBuilder::ForJSForInCacheArrayElement(ForInMode mode) {
+  ElementAccess access = {
+      kTaggedBase, FixedArray::kHeaderSize,
+      (mode == ForInMode::kGeneric ? Type::String()
+                                   : Type::InternalizedString()),
+      MachineType::AnyTagged(), kFullWriteBarrier};
+  return access;
 }
 
 // static

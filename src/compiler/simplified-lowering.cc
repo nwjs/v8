@@ -7,9 +7,8 @@
 #include <limits>
 
 #include "include/v8-fast-api-calls.h"
-#include "src/base/bits.h"
 #include "src/base/small-vector.h"
-#include "src/codegen/code-factory.h"
+#include "src/codegen/callable.h"
 #include "src/codegen/machine-type.h"
 #include "src/codegen/tick-counter.h"
 #include "src/compiler/access-builder.h"
@@ -30,7 +29,6 @@
 #include "src/compiler/type-cache.h"
 #include "src/numbers/conversions-inl.h"
 #include "src/objects/objects.h"
-#include "src/utils/address-map.h"
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/wasm/value-type.h"
@@ -1317,11 +1315,12 @@ class RepresentationSelector {
       return MachineType(rep, MachineSemantic::kInt64);
     }
     MachineType machine_type(rep, DeoptValueSemanticOf(type));
-    DCHECK(machine_type.representation() != MachineRepresentation::kWord32 ||
-           machine_type.semantic() == MachineSemantic::kInt32 ||
-           machine_type.semantic() == MachineSemantic::kUint32);
-    DCHECK(machine_type.representation() != MachineRepresentation::kBit ||
-           type.Is(Type::Boolean()));
+    DCHECK_IMPLIES(
+        machine_type.representation() == MachineRepresentation::kWord32,
+        machine_type.semantic() == MachineSemantic::kInt32 ||
+            machine_type.semantic() == MachineSemantic::kUint32);
+    DCHECK_IMPLIES(machine_type.representation() == MachineRepresentation::kBit,
+                   type.Is(Type::Boolean()));
     return machine_type;
   }
 
@@ -1892,6 +1891,11 @@ class RepresentationSelector {
                                         FeedbackSource const& feedback) {
     switch (type.GetSequenceType()) {
       case CTypeInfo::SequenceType::kScalar: {
+        // TODO(mslekova): Add clamp.
+        if (uint8_t(type.GetFlags()) &
+            uint8_t(CTypeInfo::Flags::kEnforceRangeBit)) {
+          return UseInfo::CheckedNumberAsFloat64(kIdentifyZeros, feedback);
+        }
         switch (type.GetType()) {
           case CTypeInfo::Type::kVoid:
             UNREACHABLE();
@@ -4022,6 +4026,11 @@ class RepresentationSelector {
         }
         return;
       }
+
+      case IrOpcode::kFindOrderedHashSetEntry:
+        VisitBinop<T>(node, UseInfo::AnyTagged(),
+                      MachineRepresentation::kTaggedSigned);
+        return;
 
       case IrOpcode::kFastApiCall: {
         VisitFastApiCall<T>(node, lowering);

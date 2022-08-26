@@ -11,7 +11,6 @@
 #include "src/handles/global-handles.h"
 #include "src/logging/log.h"
 #include "src/objects/objects.h"
-#include "src/snapshot/embedded/embedded-data.h"
 #include "src/snapshot/serializer-deserializer.h"
 #include "src/snapshot/snapshot-source-sink.h"
 #include "src/snapshot/snapshot.h"
@@ -447,13 +446,14 @@ class Serializer::ObjectSerializer : public ObjectVisitor {
                      MaybeObjectSlot end) override;
   void VisitCodePointer(HeapObject host, CodeObjectSlot slot) override;
   void VisitEmbeddedPointer(Code host, RelocInfo* target) override;
-  void VisitExternalReference(Foreign host, Address* p) override;
   void VisitExternalReference(Code host, RelocInfo* rinfo) override;
-  void VisitExternalPointer(HeapObject host, ExternalPointer_t ptr) override;
   void VisitInternalReference(Code host, RelocInfo* rinfo) override;
   void VisitCodeTarget(Code host, RelocInfo* target) override;
   void VisitRuntimeEntry(Code host, RelocInfo* reloc) override;
   void VisitOffHeapTarget(Code host, RelocInfo* target) override;
+
+  void VisitExternalPointer(HeapObject host, ExternalPointerSlot slot,
+                            ExternalPointerTag tag) override;
 
   Isolate* isolate() { return isolate_; }
 

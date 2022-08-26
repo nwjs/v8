@@ -99,9 +99,6 @@ namespace internal {
   /* Backtracks observed in a single regexp interpreter execution */           \
   /* The maximum of 100M backtracks takes roughly 2 seconds on my machine. */  \
   HR(regexp_backtracks, V8.RegExpBacktracks, 1, 100000000, 50)                 \
-  /* See the CagedMemoryAllocationOutcome enum in backing-store.cc */          \
-  HR(caged_memory_allocation_outcome, V8.CagedMemoryAllocationOutcome, 0, 2,   \
-     3)                                                                        \
   /* number of times a cache event is triggered for a wasm module */           \
   HR(wasm_cache_count, V8.WasmCacheCount, 0, 100, 101)                         \
   SANDBOXED_HISTOGRAM_LIST(HR)
@@ -278,13 +275,16 @@ namespace internal {
 // lines) rather than one macro (of length about 80 lines) to work around
 // this problem.  Please avoid using recursive macros of this length when
 // possible.
-#define STATS_COUNTER_LIST_1(SC)                          \
-  /* Global Handle Count*/                                \
-  SC(global_handles, V8.GlobalHandles)                    \
-  SC(alive_after_last_gc, V8.AliveAfterLastGC)            \
-  SC(compilation_cache_hits, V8.CompilationCacheHits)     \
-  SC(compilation_cache_misses, V8.CompilationCacheMisses) \
-  SC(objs_since_last_young, V8.ObjsSinceLastYoung)        \
+#define STATS_COUNTER_LIST_1(SC)                                     \
+  /* Global Handle Count*/                                           \
+  SC(global_handles, V8.GlobalHandles)                               \
+  SC(alive_after_last_gc, V8.AliveAfterLastGC)                       \
+  SC(compilation_cache_hits, V8.CompilationCacheHits)                \
+  SC(compilation_cache_misses, V8.CompilationCacheMisses)            \
+  /* Number of times the cache contained a reusable Script but not   \
+     the root SharedFunctionInfo */                                  \
+  SC(compilation_cache_partial_hits, V8.CompilationCachePartialHits) \
+  SC(objs_since_last_young, V8.ObjsSinceLastYoung)                   \
   SC(objs_since_last_full, V8.ObjsSinceLastFull)
 
 #define STATS_COUNTER_LIST_2(SC)                                               \

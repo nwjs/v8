@@ -11,6 +11,7 @@
 #include "src/base/macros.h"
 #include "src/base/platform/mutex.h"
 #include "src/common/globals.h"
+#include "src/heap/allocation-observer.h"
 #include "src/heap/heap.h"
 #include "src/heap/spaces.h"
 #include "src/logging/log.h"
@@ -42,7 +43,7 @@ class SemiSpace final : public Space {
   static void Swap(SemiSpace* from, SemiSpace* to);
 
   SemiSpace(Heap* heap, SemiSpaceId semispace)
-      : Space(heap, NEW_SPACE, new NoFreeList()),
+      : Space(heap, NEW_SPACE, new NoFreeList(), &allocation_counter_),
         current_capacity_(0),
         target_capacity_(0),
         maximum_capacity_(0),
@@ -89,7 +90,7 @@ class SemiSpace final : public Space {
 
   bool AdvancePage() {
     Page* next_page = current_page_->next_page();
-    // We cannot expand if we reached the target capcity. Note
+    // We cannot expand if we reached the target capacity. Note
     // that we need to account for the next page already for this check as we
     // could potentially fill the whole page after advancing.
     if (next_page == nullptr || (current_capacity_ == target_capacity_)) {
@@ -209,6 +210,8 @@ class SemiSpace final : public Space {
 
   Page* current_page_;
 
+  AllocationCounter allocation_counter_;
+
   friend class SemiSpaceNewSpace;
   friend class SemiSpaceObjectIterator;
 };
@@ -301,9 +304,9 @@ class NewSpace : NON_EXPORTED_BASE(public SpaceWithLinearArea) {
                   Address current_address) const;
 #endif
 
-#ifdef V8_ENABLE_CONSERVATIVE_STACK_SCANNING
+#ifdef V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
   virtual void ClearUnusedObjectStartBitmaps() = 0;
-#endif  // V8_ENABLE_CONSERVATIVE_STACK_SCANNING
+#endif  // V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
 
   virtual iterator begin() = 0;
   virtual iterator end() = 0;
@@ -331,6 +334,7 @@ class NewSpace : NON_EXPORTED_BASE(public SpaceWithLinearArea) {
 
   base::Mutex mutex_;
 
+  AllocationCounter allocation_counter_;
   LinearAreaOriginalData linear_area_original_data_;
 
   ParkedAllocationBuffersVector parked_allocation_buffers_;
@@ -477,9 +481,9 @@ class V8_EXPORT_PRIVATE SemiSpaceNewSpace final : public NewSpace {
   void Print() override { to_space_.Print(); }
 #endif
 
-#ifdef V8_ENABLE_CONSERVATIVE_STACK_SCANNING
+#ifdef V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
   void ClearUnusedObjectStartBitmaps() override;
-#endif  // V8_ENABLE_CONSERVATIVE_STACK_SCANNING
+#endif  // V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
 
   Page* first_page() final { return to_space_.first_page(); }
   Page* last_page() final { return to_space_.last_page(); }

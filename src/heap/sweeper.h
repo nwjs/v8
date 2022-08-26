@@ -18,7 +18,7 @@ namespace v8 {
 namespace internal {
 
 class InvalidatedSlotsCleanup;
-class MajorNonAtomicMarkingState;
+class NonAtomicMarkingState;
 class Page;
 class PagedSpaceBase;
 class Space;
@@ -74,7 +74,7 @@ class Sweeper {
   enum AddPageMode { REGULAR, READD_TEMPORARY_REMOVED_PAGE };
   enum class SweepingMode { kEagerDuringGC, kLazyOrConcurrent };
 
-  Sweeper(Heap* heap, MajorNonAtomicMarkingState* marking_state);
+  Sweeper(Heap* heap, NonAtomicMarkingState* marking_state);
 
   bool sweeping_in_progress() const { return sweeping_in_progress_; }
 
@@ -88,8 +88,6 @@ class Sweeper {
                         SweepingMode sweeping_mode);
 
   void EnsurePageIsSwept(Page* page);
-
-  void ScheduleIncrementalSweepingTask();
 
   int RawSweep(Page* p, FreeSpaceTreatmentMode free_space_treatment_mode,
                SweepingMode sweeping_mode, const base::MutexGuard& page_guard);
@@ -109,7 +107,6 @@ class Sweeper {
   Page* GetSweptPageSafe(PagedSpaceBase* space);
 
  private:
-  class IncrementalSweeperTask;
   class SweeperJob;
 
   static const int kNumberOfSweepingSpaces =
@@ -164,10 +161,6 @@ class Sweeper {
   // are no more pages to sweep in the given space.
   bool ConcurrentSweepSpace(AllocationSpace identity, JobDelegate* delegate);
 
-  // Sweeps incrementally one page from the given space. Returns true if
-  // there are no more pages to sweep in the given space.
-  bool IncrementalSweepSpace(AllocationSpace identity);
-
   Page* GetSweepingPageSafe(AllocationSpace space);
   bool TryRemoveSweepingPageSafe(AllocationSpace space, Page* page);
 
@@ -184,13 +177,12 @@ class Sweeper {
   }
 
   Heap* const heap_;
-  MajorNonAtomicMarkingState* marking_state_;
+  NonAtomicMarkingState* marking_state_;
   std::unique_ptr<JobHandle> job_handle_;
   base::Mutex mutex_;
   base::ConditionVariable cv_page_swept_;
   SweptList swept_list_[kNumberOfSweepingSpaces];
   SweepingList sweeping_list_[kNumberOfSweepingSpaces];
-  bool incremental_sweeper_pending_;
   // Main thread can finalize sweeping, while background threads allocation slow
   // path checks this flag to see whether it could support concurrent sweeping.
   std::atomic<bool> sweeping_in_progress_;

@@ -11,11 +11,9 @@
 #include "src/base/lazy-instance.h"
 #include "src/base/logging.h"
 #include "src/base/page-allocator.h"
-#include "src/base/platform/platform.h"
 #include "src/base/platform/wrappers.h"
 #include "src/base/sanitizer/lsan-page-allocator.h"
 #include "src/base/sanitizer/lsan-virtual-address-space.h"
-#include "src/base/vector.h"
 #include "src/base/virtual-address-space.h"
 #include "src/flags/flags.h"
 #include "src/init/v8.h"
@@ -98,14 +96,8 @@ v8::VirtualAddressSpace* GetPlatformVirtualAddressSpace() {
 
 #ifdef V8_ENABLE_SANDBOX
 v8::PageAllocator* GetSandboxPageAllocator() {
-  // TODO(chromium:1218005) remove this code once the cage is no longer
-  // optional.
-  if (GetProcessWideSandbox()->is_disabled()) {
-    return GetPlatformPageAllocator();
-  } else {
-    CHECK(GetProcessWideSandbox()->is_initialized());
-    return GetProcessWideSandbox()->page_allocator();
-  }
+  CHECK(GetProcessWideSandbox()->is_initialized());
+  return GetProcessWideSandbox()->page_allocator();
 }
 #endif
 
@@ -186,10 +178,6 @@ size_t AllocatePageSize() {
 }
 
 size_t CommitPageSize() { return GetPlatformPageAllocator()->CommitPageSize(); }
-
-void SetRandomMmapSeed(int64_t seed) {
-  GetPlatformPageAllocator()->SetRandomMmapSeed(seed);
-}
 
 void* GetRandomMmapAddr() {
   return GetPlatformPageAllocator()->GetRandomMmapAddr();
@@ -403,13 +391,17 @@ bool VirtualMemoryCage::InitReservation(
     base_ = reservation_.address() + params.base_bias_size;
     CHECK_EQ(reservation_.size(), params.reservation_size);
   } else {
-    // Otherwise, we need to try harder by first overreserving
-    // in hopes of finding a correctly aligned address within the larger
-    // reservation.
+    // Otherwise, we need to try harder by first overreserving in hopes of
+    // finding a correctly aligned address within the larger reservation.
+    size_t bias_size = RoundUp(params.base_bias_size, allocate_page_size);
     Address hint =
-        RoundDown(params.requested_start_hint,
+        RoundDown(params.requested_start_hint + bias_size,
                   RoundUp(params.base_alignment, allocate_page_size)) -
-        RoundUp(params.base_bias_size, allocate_page_size);
+        bias_size;
+    // Alignments requring overreserving more than twice the requested size
+    // are not supported (they are too expensive and shouldn't be necessary
+    // in the first place).
+    DCHECK_LE(params.base_alignment, params.reservation_size);
     const int kMaxAttempts = 4;
     for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
       // Reserve a region of twice the size so that there is an aligned address

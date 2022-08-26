@@ -97,18 +97,15 @@
   # BUG(v8:8739). Wasm interpreter does not create proper stack traces.
   'test-wasm-stack/RunWasmInterpreter_CollectDetailedWasmStack_WasmError': [SKIP],
 
-  # https://crbug.com/v8/8919
-  'test-platform/StackAlignment': [PASS, ['not is_clang', SKIP]],
-
   # Test that misuse of PopAndReturn does not compile.
   'test-code-stub-assembler/PopAndReturnFromJSBuiltinWithStackParameters' : [FAIL],
   'test-code-stub-assembler/PopAndReturnFromTFCBuiltinWithStackParameters' : [FAIL],
 
   # These tests are supposed to fail in a slow DCHECK, skip them otherwise.
   'test-local-handles/DereferenceLocalHandleFailsWhenDisallowed': [SKIP, ['mode == debug', FAIL]],
-  'test-persistent-handles/DereferencePersistentHandleFailsWhenDisallowed': [SKIP, ['mode == debug', FAIL]],
 
   # Slow tests.
+  'test-api/InternalFieldsSubclassing': [PASS, SLOW],
   'test-debug/CallFunctionInDebugger': [PASS, ['mode == debug', SLOW]],
   'test-heap-profiler/ManyLocalsInSharedContext': [PASS, SLOW],
   'test-jump-table-assembler/JumpTablePatchingStress': [PASS, SLOW],
@@ -135,15 +132,10 @@
   'test-strings/Traverse': [PASS, HEAVY],
   'test-swiss-name-dictionary-csa/DeleteAtBoundaries': [PASS, HEAVY],
   'test-swiss-name-dictionary-csa/SameH2': [PASS, HEAVY],
-
-  'test-intl/StringLocaleCompareFastPath': [['mode != release', SKIP], SLOW, NO_VARIANTS],
 }],  # ALWAYS
 
 ##############################################################################
 ['mode == debug', {
-  'test-persistent-handles/NewPersistentHandleFailsWhenParked': [FAIL],
-  'test-persistent-handles/NewPersistentHandleFailsWhenParkedExplicit': [FAIL],
-
   # BUG(v8:10996): Flaky on Linux64 - debug
   'test-cpu-profiler/StartProfilingAfterOsr': [SKIP],
 }],
@@ -511,9 +503,6 @@
 }],  # 'arch == ppc or arch == ppc64 or arch == s390 or arch == s390x'
 
 ['arch == ppc64', {
-  # https://crbug.com/v8/8766
-  'test-bytecode-generator/WideRegisters': [SKIP],
-
   # SIMD / Liftoff not fully implemented yet
   'test-run-wasm-simd-liftoff/*': [SKIP],
   'test-gc/RunWasmLiftoff_RefTrivialCasts': [SKIP],
@@ -523,6 +512,9 @@
 ##############################################################################
 ['variant == stress_incremental_marking', {
   'test-heap-profiler/SamplingHeapProfiler': [SKIP],
+
+  # BUG(https://crbug.com/v8/12999): Very slow test.
+  'test-api/InternalFieldsSubclassing': [PASS, ['mode == debug and arch == ia32', SKIP]],
 }],  # variant == stress_incremental_marking
 
 ##############################################################################
@@ -673,7 +665,6 @@
 
   # --interpreted-frames-native-stack tests
   'test-serialize/CodeSerializerOnePlusOneWithInterpretedFramesNativeStack': [SKIP],
-  'test-interpreter/InterpreterWithNativeStack': [SKIP],
 
   # Crashes on native arm.
   'test-macro-assembler-arm/ExtractLane': [PASS, ['arch == arm and not simulator_run', SKIP]],
@@ -995,8 +986,6 @@
   'test-embedder-tracing/V8RegisteringEmbedderReference': [SKIP],
   'test-external-string-tracker/ExternalString_ExternalBackingStoreSizeIncreasesAfterExternalization': [SKIP],
   'test-external-string-tracker/ExternalString_ExternalBackingStoreSizeIncreasesMarkCompact': [SKIP],
-  'test-factory/Factory_CodeBuilder_BuildOOM': [SKIP],
-  'test-factory/Factory_CodeBuilder_TryBuildOOM': [SKIP],
   'test-global-handles/FinalizerDiesAndKeepsPhantomAliveOnMarkCompact': [SKIP],
   'test-global-handles/FinalizerWeakness': [SKIP],
   'test-global-handles/GCFromWeakCallbacks': [SKIP],
@@ -1176,10 +1165,6 @@
   'test-run-wasm-relaxed-simd/RunWasm_F32x4Qfms_liftoff': [SKIP],
   'test-run-wasm-relaxed-simd/RunWasm_F64x2Qfma_liftoff': [SKIP],
   'test-run-wasm-relaxed-simd/RunWasm_F64x2Qfms_liftoff': [SKIP],
-  'test-run-wasm-relaxed-simd/RunWasm_I32x4RelaxedTruncF32x4S_liftoff': [SKIP],
-  'test-run-wasm-relaxed-simd/RunWasm_I32x4RelaxedTruncF32x4U_liftoff': [SKIP],
-  'test-run-wasm-relaxed-simd/RunWasm_I32x4RelaxedTruncF64x2SZero_liftoff': [SKIP],
-  'test-run-wasm-relaxed-simd/RunWasm_I32x4RelaxedTruncF64x2UZero_liftoff': [SKIP],
 }],
 
 ]

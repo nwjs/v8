@@ -6,22 +6,17 @@
 
 #include "src/snapshot/snapshot.h"
 
-#include "src/base/platform/platform.h"
 #include "src/common/assert-scope.h"
-#include "src/execution/isolate-inl.h"
+#include "src/heap/parked-scope.h"
 #include "src/heap/safepoint.h"
 #include "src/init/bootstrapper.h"
 #include "src/logging/runtime-call-stats-scope.h"
-#include "src/objects/code-kind.h"
 #include "src/objects/js-regexp-inl.h"
 #include "src/snapshot/context-deserializer.h"
 #include "src/snapshot/context-serializer.h"
-#include "src/snapshot/read-only-deserializer.h"
 #include "src/snapshot/read-only-serializer.h"
-#include "src/snapshot/shared-heap-deserializer.h"
 #include "src/snapshot/shared-heap-serializer.h"
 #include "src/snapshot/snapshot-utils.h"
-#include "src/snapshot/startup-deserializer.h"
 #include "src/snapshot/startup-serializer.h"
 #include "src/utils/memcopy.h"
 #include "src/utils/version.h"
@@ -355,6 +350,10 @@ void Snapshot::SerializeDeserializeAndVerifyForTesting(
 #endif  // VERIFY_HEAP
   }
   new_isolate->Exit();
+  // The shared heap is verified on Heap teardown, which performs a global
+  // safepoint. Both isolate and new_isolate are running in the same thread, so
+  // park isolate before deleting new_isolate to avoid deadlock.
+  ParkedScope parked(isolate->main_thread_local_isolate());
   Isolate::Delete(new_isolate);
 }
 

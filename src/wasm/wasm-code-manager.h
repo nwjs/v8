@@ -19,14 +19,13 @@
 #include "src/base/address-region.h"
 #include "src/base/bit-field.h"
 #include "src/base/macros.h"
-#include "src/base/optional.h"
+#include "src/base/platform/memory-protection-key.h"
 #include "src/base/vector.h"
 #include "src/builtins/builtins.h"
 #include "src/handles/handles.h"
 #include "src/tasks/operations-barrier.h"
 #include "src/trap-handler/trap-handler.h"
 #include "src/wasm/compilation-environment.h"
-#include "src/wasm/memory-protection-key.h"
 #include "src/wasm/wasm-features.h"
 #include "src/wasm/wasm-limits.h"
 #include "src/wasm/wasm-module-sourcemap.h"
@@ -42,6 +41,7 @@ class Isolate;
 namespace wasm {
 
 class DebugInfo;
+class NamesProvider;
 class NativeModule;
 struct WasmCompilationResult;
 class WasmEngine;
@@ -118,13 +118,37 @@ struct WasmModule;
   V(WasmAllocateArray_Uninitialized)     \
   V(WasmArrayCopy)                       \
   V(WasmArrayCopyWithChecks)             \
-  V(WasmArrayInitFromData)               \
+  V(WasmArrayNewSegment)                 \
   V(WasmAllocateStructWithRtt)           \
   V(WasmSubtypeCheck)                    \
   V(WasmOnStackReplace)                  \
   V(WasmSuspend)                         \
   V(WasmStringNewWtf8)                   \
-  V(WasmStringNewWtf16)
+  V(WasmStringNewWtf16)                  \
+  V(WasmStringConst)                     \
+  V(WasmStringMeasureUtf8)               \
+  V(WasmStringMeasureWtf8)               \
+  V(WasmStringEncodeWtf8)                \
+  V(WasmStringEncodeWtf16)               \
+  V(WasmStringConcat)                    \
+  V(WasmStringEqual)                     \
+  V(WasmStringIsUSVSequence)             \
+  V(WasmStringViewWtf16GetCodeUnit)      \
+  V(WasmStringViewWtf16Encode)           \
+  V(WasmStringViewWtf16Slice)            \
+  V(WasmStringNewWtf8Array)              \
+  V(WasmStringNewWtf16Array)             \
+  V(WasmStringEncodeWtf8Array)           \
+  V(WasmStringEncodeWtf16Array)          \
+  V(WasmStringAsWtf8)                    \
+  V(WasmStringViewWtf8Advance)           \
+  V(WasmStringViewWtf8Encode)            \
+  V(WasmStringViewWtf8Slice)             \
+  V(WasmStringAsIter)                    \
+  V(WasmStringViewIterNext)              \
+  V(WasmStringViewIterAdvance)           \
+  V(WasmStringViewIterRewind)            \
+  V(WasmStringViewIterSlice)
 
 // Sorted, disjoint and non-overlapping memory regions. A region is of the
 // form [start, end). So there's no [start, end), [end, other_end),
@@ -561,11 +585,6 @@ class WasmCodeAllocator {
   Counters* counters() const { return async_counters_.get(); }
 
  private:
-  // Sentinel value to be used for {AllocateForCodeInRegion} for specifying no
-  // restriction on the region to allocate in.
-  static constexpr base::AddressRegion kUnrestrictedRegion{
-      kNullAddress, std::numeric_limits<size_t>::max()};
-
   void InsertIntoWritableRegions(base::AddressRegion region,
                                  bool switch_to_writable);
 
@@ -835,6 +854,9 @@ class V8_EXPORT_PRIVATE NativeModule final {
   // Get or create the debug info for this NativeModule.
   DebugInfo* GetDebugInfo();
 
+  // Get or create the NamesProvider. Requires {HasWireBytes()}.
+  NamesProvider* GetNamesProvider();
+
   uint32_t* tiering_budget_array() { return tiering_budgets_.get(); }
 
   Counters* counters() const { return code_allocator_.counters(); }
@@ -865,6 +887,8 @@ class V8_EXPORT_PRIVATE NativeModule final {
       base::Vector<const byte> source_position_table, WasmCode::Kind kind,
       ExecutionTier tier, ForDebugging for_debugging,
       base::Vector<uint8_t> code_space, const JumpTablesRef& jump_tables_ref);
+
+  WasmCode* CreateEmptyJumpTableLocked(int jump_table_size);
 
   WasmCode* CreateEmptyJumpTableInRegionLocked(int jump_table_size,
                                                base::AddressRegion);
@@ -977,6 +1001,8 @@ class V8_EXPORT_PRIVATE NativeModule final {
   // Further accesses to the {DebugInfo} do not need to be protected by the
   // mutex.
   std::unique_ptr<DebugInfo> debug_info_;
+
+  std::unique_ptr<NamesProvider> names_provider_;
 
   TieringState tiering_state_ = kTieredUp;
 

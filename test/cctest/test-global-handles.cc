@@ -28,7 +28,6 @@
 #include "include/v8-function.h"
 #include "include/v8-locker.h"
 #include "src/api/api-inl.h"
-#include "src/common/allow-deprecated.h"
 #include "src/execution/isolate.h"
 #include "src/handles/global-handles.h"
 #include "src/heap/factory.h"
@@ -301,11 +300,11 @@ TEST(PhantomHandlesWithoutCallbacks) {
     g2.Reset(isolate, v8::Object::New(isolate));
     g2.SetWeak();
   }
-
-  CHECK_EQ(0u, isolate->NumberOfPhantomHandleResetsSinceLastCall());
+  CHECK(!g1.IsEmpty());
+  CHECK(!g2.IsEmpty());
   CcTest::CollectAllAvailableGarbage();
-  CHECK_EQ(2u, isolate->NumberOfPhantomHandleResetsSinceLastCall());
-  CHECK_EQ(0u, isolate->NumberOfPhantomHandleResetsSinceLastCall());
+  CHECK(g1.IsEmpty());
+  CHECK(g2.IsEmpty());
 }
 
 END_ALLOW_USE_DEPRECATED()

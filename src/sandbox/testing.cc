@@ -14,8 +14,15 @@
 #include "src/objects/templates.h"
 #include "src/sandbox/sandbox.h"
 
+#ifdef V8_OS_LINUX
+#include <signal.h>
+#include <unistd.h>
+#endif  // V8_OS_LINUX
+
 namespace v8 {
 namespace internal {
+
+#ifdef V8_ENABLE_SANDBOX
 
 #ifdef V8_EXPOSE_MEMORY_CORRUPTION_API
 
@@ -166,9 +173,13 @@ void InstallConstructor(Isolate* isolate, Handle<JSObject> holder,
 
 }  // namespace
 
-// static
-void MemoryCorruptionApi::Install(Isolate* isolate) {
+void SandboxTesting::InstallMemoryCorruptionApi(Isolate* isolate) {
   CHECK(GetProcessWideSandbox()->is_initialized());
+
+#ifndef V8_EXPOSE_MEMORY_CORRUPTION_API
+#error "This function should not be available in any shipping build "          \
+       "where it could potentially be abused to facilitate exploitation."
+#endif
 
   Factory* factory = isolate->factory();
 
@@ -189,6 +200,115 @@ void MemoryCorruptionApi::Install(Isolate* isolate) {
 }
 
 #endif  // V8_EXPOSE_MEMORY_CORRUPTION_API
+
+namespace {
+
+#ifdef V8_OS_LINUX
+void PrintToStderr(const char* output) {
+  // NOTE: This code MUST be async-signal safe.
+  // NO malloc or stdio is allowed here.
+  ssize_t return_val = write(STDERR_FILENO, output, strlen(output));
+  USE(return_val);
+}
+
+// Signal handler checking whether a memory access violation happened inside or
+// outside of the sandbox address space. If inside, the signal is ignored and
+// the process terminated normally, in the latter case the original signal
+// handler is restored and the signal delivered again.
+struct sigaction g_old_sigbus_handler, g_old_sigsegv_handler;
+void SandboxSignalHandler(int signal, siginfo_t* info, void* void_context) {
+  // NOTE: This code MUST be async-signal safe.
+  // NO malloc or stdio is allowed here.
+
+  if (signal == SIGABRT) {
+    // SIGABRT typically indicates a failed CHECK which is harmless.
+    PrintToStderr("Caught harmless signal (SIGABRT). Exiting process...\n");
+    _exit(0);
+  }
+
+  Address faultaddr = reinterpret_cast<Address>(info->si_addr);
+
+  if (GetProcessWideSandbox()->Contains(faultaddr)) {
+    // Access violation happened inside the sandbox.
+    PrintToStderr(
+        "Caught harmless memory access violaton (inside sandbox address "
+        "space). Exiting process...\n");
+    _exit(0);
+  }
+
+  if (faultaddr < 0x1000) {
+    // Nullptr dereferences are harmless as nothing can be mapped there. We use
+    // the typical page size (which is also the default value of mmap_min_addr
+    // on Linux) to determine what counts as a nullptr dereference here.
+    PrintToStderr(
+        "Caught harmless memory access violaton (nullptr dereference). Exiting "
+        "process...\n");
+    _exit(0);
+  }
+
+  if (info->si_code == SI_KERNEL && faultaddr == 0) {
+    // This combination appears to indicate a crash at a non-canonical address
+    // on Linux. Crashes at non-canonical addresses are for example caused by
+    // failed external pointer type checks. Memory accesses that _always_ land
+    // at a non-canonical address are not exploitable and so these are filtered
+    // out here. However, testcases need to be written with this in mind and
+    // must cause crashes at valid addresses.
+    PrintToStderr(
+        "Caught harmless memory access violaton (non-canonical address). "
+        "Exiting process...\n");
+    _exit(0);
+  }
+
+  if (info->si_code == SEGV_ACCERR) {
+    // This indicates an access to a (valid) mapping but with insufficient
+    // permissions (e.g. accessing a region mapped with PROT_NONE). Some
+    // mechanisms (e.g. the lookup of external pointers in an
+    // ExternalPointerTable) omit bounds checks and instead guarantee that any
+    // out-of-bounds access will land in a PROT_NONE mapping. Memory accesses
+    // that _always_ cause such a permission violation are not exploitable and
+    // so these crashes are filtered out here. However, testcases need to be
+    // written with this in mind and must access other memory ranges.
+    PrintToStderr(
+        "Caught harmless memory access violaton (memory permission violation). "
+        "Exiting process...\n");
+    _exit(0);
+  }
+
+  // Otherwise it's a sandbox violation, so restore the original signal
+  // handler, then return from this handler. The faulting instruction will be
+  // re-executed and will again trigger the access violation, but now the
+  // signal will be handled by the original signal handler.
+  //
+  // Should any of the sigaction calls below ever fail, the default signal
+  // handler will be invoked (due to SA_RESETHAND) and will terminate the
+  // process, so there's no need to attempt to handle that condition.
+  sigaction(SIGBUS, &g_old_sigbus_handler, nullptr);
+  sigaction(SIGSEGV, &g_old_sigsegv_handler, nullptr);
+}
+#endif  // V8_OS_LINUX
+
+}  // namespace
+
+void SandboxTesting::InstallSandboxCrashFilter() {
+  CHECK(GetProcessWideSandbox()->is_initialized());
+#ifdef V8_OS_LINUX
+  struct sigaction action;
+  memset(&action, 0, sizeof(action));
+  action.sa_flags = SA_RESETHAND | SA_SIGINFO;
+  action.sa_sigaction = &SandboxSignalHandler;
+  sigemptyset(&action.sa_mask);
+
+  bool success = true;
+  success &= (sigaction(SIGABRT, &action, nullptr) == 0);
+  success &= (sigaction(SIGBUS, &action, &g_old_sigbus_handler) == 0);
+  success &= (sigaction(SIGSEGV, &action, &g_old_sigsegv_handler) == 0);
+  CHECK(success);
+#else
+  FATAL("The sandbox crash filter is currently only available on Linux");
+#endif  // V8_OS_LINUX
+}
+
+#endif  // V8_ENABLE_SANDBOX
 
 }  // namespace internal
 }  // namespace v8

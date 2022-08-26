@@ -573,17 +573,16 @@ TQ_OBJECT_CONSTRUCTORS_IMPL(JSExternalObject)
 DEF_GETTER(JSExternalObject, value, void*) {
   Isolate* isolate = GetIsolateForSandbox(*this);
   return reinterpret_cast<void*>(
-      ReadExternalPointerField(kValueOffset, isolate, kExternalObjectValueTag));
+      ReadExternalPointerField<kExternalObjectValueTag>(kValueOffset, isolate));
 }
 
 void JSExternalObject::AllocateExternalPointerEntries(Isolate* isolate) {
-  InitExternalPointerField(kValueOffset, isolate, kExternalObjectValueTag);
+  InitExternalPointerField<kExternalObjectValueTag>(kValueOffset, isolate);
 }
 
 void JSExternalObject::set_value(Isolate* isolate, void* value) {
-  WriteExternalPointerField(kValueOffset, isolate,
-                            reinterpret_cast<Address>(value),
-                            kExternalObjectValueTag);
+  WriteExternalPointerField<kExternalObjectValueTag>(
+      kValueOffset, isolate, reinterpret_cast<Address>(value));
 }
 
 DEF_GETTER(JSGlobalObject, native_context_unchecked, Object) {
@@ -696,6 +695,10 @@ DEF_GETTER(JSObject, HasAnyNonextensibleElements, bool) {
 
 DEF_GETTER(JSObject, HasSealedElements, bool) {
   return IsSealedElementsKind(GetElementsKind(cage_base));
+}
+
+DEF_GETTER(JSObject, HasSharedArrayElements, bool) {
+  return GetElementsKind(cage_base) == SHARED_ARRAY_ELEMENTS;
 }
 
 DEF_GETTER(JSObject, HasNonextensibleElements, bool) {

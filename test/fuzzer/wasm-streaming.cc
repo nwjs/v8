@@ -8,7 +8,6 @@
 #include "include/v8-isolate.h"
 #include "src/api/api-inl.h"
 #include "src/flags/flags.h"
-#include "src/libplatform/default-platform.h"
 #include "src/wasm/streaming-decoder.h"
 #include "src/wasm/wasm-engine.h"
 #include "src/wasm/wasm-objects-inl.h"
@@ -19,17 +18,16 @@ namespace v8::internal::wasm {
 
 // Some properties of the compilation result to check. Extend if needed.
 struct CompilationResult {
-  MOVE_ONLY_WITH_DEFAULT_CONSTRUCTORS(CompilationResult);
-
   bool failed = false;
-  base::OwnedVector<const char> error_message;
+  std::string error_message;
 
   // If successful:
   uint32_t imported_functions = 0;
   uint32_t declared_functions = 0;
 
-  static CompilationResult ForFailure(base::Vector<const char> error_message) {
-    return {true, base::OwnedVector<const char>::Of(error_message)};
+  static CompilationResult ForFailure(std::string error_message) {
+    DCHECK(!error_message.empty());
+    return {true, std::move(error_message)};
   }
 
   static CompilationResult ForSuccess(const WasmModule* module) {
@@ -42,7 +40,7 @@ struct CompilationResult {
 
 class TestResolver : public CompilationResultResolver {
  public:
-  TestResolver(i::Isolate* isolate) : isolate_(isolate) {}
+  explicit TestResolver(i::Isolate* isolate) : isolate_(isolate) {}
 
   void OnCompilationSucceeded(i::Handle<i::WasmModuleObject> module) override {
     done_ = true;
@@ -107,8 +105,7 @@ CompilationResult CompileStreaming(v8_fuzzer::FuzzerSupport* support,
     }
 
     if (resolver->failed()) {
-      return CompilationResult::ForFailure(
-          base::VectorOf(resolver->error_message()));
+      return CompilationResult::ForFailure(resolver->error_message());
     }
 
     result = CompilationResult::ForSuccess(resolver->native_module()->module());
@@ -136,8 +133,7 @@ CompilationResult CompileSync(Isolate* isolate, WasmFeatures enabled_features,
            ->SyncCompile(isolate, enabled_features, &thrower,
                          ModuleWireBytes{data})
            .ToHandle(&module_object)) {
-    auto result =
-        CompilationResult::ForFailure(base::CStrVector(thrower.error_msg()));
+    auto result = CompilationResult::ForFailure(thrower.error_msg());
     thrower.Reset();
     return result;
   }
@@ -160,6 +156,9 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   // the flag by itself.
   fuzzer::OneTimeEnableStagedWasmFeatures(isolate);
 
+  // Limit the maximum module size to avoid OOM.
+  FLAG_wasm_max_module_size = 256 * KB;
+
   WasmFeatures enabled_features = i::wasm::WasmFeatures::FromIsolate(i_isolate);
 
   base::Vector<const uint8_t> data_vec{data, size - 1};
@@ -173,8 +172,8 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
 
   if (streaming_result.failed != sync_result.failed) {
     const char* error_msg = streaming_result.failed
-                                ? streaming_result.error_message.begin()
-                                : sync_result.error_message.begin();
+                                ? streaming_result.error_message.c_str()
+                                : sync_result.error_message.c_str();
     FATAL(
         "Streaming compilation did%s fail, sync compilation did%s. "
         "Error message: %s\n",

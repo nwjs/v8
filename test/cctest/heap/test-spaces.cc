@@ -36,6 +36,7 @@
 #include "src/base/platform/platform.h"
 #include "src/common/globals.h"
 #include "src/heap/factory.h"
+#include "src/heap/heap.h"
 #include "src/heap/large-spaces.h"
 #include "src/heap/memory-allocator.h"
 #include "src/heap/memory-chunk.h"
@@ -159,6 +160,7 @@ static unsigned int PseudorandomAreaSize() {
 TEST(MemoryChunk) {
   Isolate* isolate = CcTest::i_isolate();
   Heap* heap = isolate->heap();
+  SafepointScope safepoint(heap);
 
   v8::PageAllocator* page_allocator = GetPlatformPageAllocator();
   size_t area_size;
@@ -334,6 +336,9 @@ TEST(OldLargeObjectSpace) {
   // incremental marker.
   FLAG_incremental_marking = false;
   FLAG_max_heap_size = 20;
+  // This test doesn't expect GCs caused by concurrent allocations in the
+  // background thread.
+  FLAG_stress_concurrent_allocation = false;
 
   OldLargeObjectSpace* lo = CcTest::heap()->lo_space();
   CHECK_NOT_NULL(lo);
@@ -911,13 +916,7 @@ TEST(ReadOnlySpaceMetrics_AlignedAllocations) {
   int object_size =
       static_cast<int>(MemoryAllocator::GetCommitPageSize() - kApiTaggedSize);
 
-// TODO(v8:8875): Pointer compression does not enable aligned memory allocation
-// yet.
-#ifdef V8_COMPRESS_POINTERS
-  int alignment = kInt32Size;
-#else
-  int alignment = kDoubleSize;
-#endif
+  int alignment = USE_ALLOCATION_ALIGNMENT_BOOL ? kDoubleSize : kTaggedSize;
 
   HeapObject object =
       faked_space->AllocateRaw(object_size, kDoubleAligned).ToObjectChecked();

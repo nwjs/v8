@@ -95,7 +95,7 @@ HeapObject LargeObjectSpaceObjectIterator::Next() {
 // OldLargeObjectSpace
 
 LargeObjectSpace::LargeObjectSpace(Heap* heap, AllocationSpace id)
-    : Space(heap, id, new NoFreeList()),
+    : Space(heap, id, new NoFreeList(), &allocation_counter_),
       size_(0),
       page_count_(0),
       objects_size_(0),
@@ -202,7 +202,7 @@ LargePage* LargeObjectSpace::AllocateLargePage(int object_size,
   DCHECK_GE(page->area_size(), static_cast<size_t>(object_size));
 
   {
-    base::MutexGuard guard(&allocation_mutex_);
+    base::RecursiveMutexGuard guard(&allocation_mutex_);
     AddPage(page, object_size);
   }
 
@@ -220,7 +220,7 @@ size_t LargeObjectSpace::CommittedPhysicalMemory() const {
 }
 
 LargePage* CodeLargeObjectSpace::FindPage(Address a) {
-  base::MutexGuard guard(&allocation_mutex_);
+  base::RecursiveMutexGuard guard(&allocation_mutex_);
   const Address key = BasicMemoryChunk::FromAddress(a)->address();
   auto it = chunk_map_.find(key);
   if (it != chunk_map_.end()) {
@@ -500,7 +500,6 @@ AllocationResult NewLargeObjectSpace::AllocateRaw(int object_size) {
   page->SetFlag(MemoryChunk::TO_PAGE);
   UpdatePendingObject(result);
   if (FLAG_minor_mc) {
-    page->AllocateYoungGenerationBitmap();
     heap()
         ->minor_mark_compact_collector()
         ->non_atomic_marking_state()

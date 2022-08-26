@@ -706,12 +706,12 @@ TEST(BytecodeArrayAging) {
       factory->NewBytecodeArray(kRawBytesSize, kRawBytes, kFrameSize,
                                 kParameterCount, factory->empty_fixed_array());
 
-  CHECK_EQ(BytecodeArray::kFirstBytecodeAge, array->bytecode_age());
+  CHECK_EQ(0, array->bytecode_age());
   array->MakeOlder();
-  CHECK_EQ(BytecodeArray::kQuadragenarianBytecodeAge, array->bytecode_age());
-  array->set_bytecode_age(BytecodeArray::kLastBytecodeAge);
+  CHECK_EQ(1, array->bytecode_age());
+  array->set_bytecode_age(FLAG_bytecode_old_age);
   array->MakeOlder();
-  CHECK_EQ(BytecodeArray::kLastBytecodeAge, array->bytecode_age());
+  CHECK_EQ(FLAG_bytecode_old_age, array->bytecode_age());
 }
 
 static const char* not_so_random_string_table[] = {
@@ -1053,7 +1053,11 @@ static int ObjectsFoundInHeap(Heap* heap, Handle<Object> objs[], int size) {
   for (HeapObject obj = iterator.Next(); !obj.is_null();
        obj = iterator.Next()) {
     for (int i = 0; i < size; i++) {
-      if (*objs[i] == obj) {
+      // V8_EXTERNAL_CODE_SPACE specific: we might be comparing Code object
+      // with non-Code object here and it might produce false positives because
+      // operator== for tagged values compares only lower 32 bits when pointer
+      // compression is enabled.
+      if (objs[i]->ptr() == obj.ptr()) {
         found_count++;
       }
     }
@@ -1470,7 +1474,7 @@ TEST(TestUseOfIncrementalBarrierOnCompileLazy) {
   CHECK(g_function->is_compiled());
 }
 
-TEST(CompilationCacheCachingBehavior) {
+void CompilationCacheCachingBehavior(bool retain_script) {
   // If we do not have the compilation cache turned off, this test is invalid.
   if (!FLAG_compilation_cache) {
     return;
@@ -1479,16 +1483,20 @@ TEST(CompilationCacheCachingBehavior) {
   Isolate* isolate = CcTest::i_isolate();
   Factory* factory = isolate->factory();
   CompilationCache* compilation_cache = isolate->compilation_cache();
-  LanguageMode language_mode = construct_language_mode(FLAG_use_strict);
+  LanguageMode language_mode = LanguageMode::kSloppy;
 
   v8::HandleScope outer_scope(CcTest::isolate());
-  const char* raw_source =
-      "function foo() {"
-      "  var x = 42;"
-      "  var y = 42;"
-      "  var z = x + y;"
-      "};"
-      "foo();";
+  const char* raw_source = retain_script ? "function foo() {"
+                                           "  var x = 42;"
+                                           "  var y = 42;"
+                                           "  var z = x + y;"
+                                           "};"
+                                           "foo();"
+                                         : "(function foo() {"
+                                           "  var x = 42;"
+                                           "  var y = 42;"
+                                           "  var z = x + y;"
+                                           "})();";
   Handle<String> source = factory->InternalizeUtf8String(raw_source);
 
   {
@@ -1501,9 +1509,9 @@ TEST(CompilationCacheCachingBehavior) {
     v8::HandleScope scope(CcTest::isolate());
     ScriptDetails script_details(Handle<Object>(),
                                  v8::ScriptOriginOptions(true, false));
-    MaybeHandle<SharedFunctionInfo> cached_script =
+    auto lookup_result =
         compilation_cache->LookupScript(source, script_details, language_mode);
-    CHECK(!cached_script.is_null());
+    CHECK(!lookup_result.toplevel_sfi().is_null());
   }
 
   // Check that the code cache entry survives at least one GC.
@@ -1512,12 +1520,13 @@ TEST(CompilationCacheCachingBehavior) {
     v8::HandleScope scope(CcTest::isolate());
     ScriptDetails script_details(Handle<Object>(),
                                  v8::ScriptOriginOptions(true, false));
-    MaybeHandle<SharedFunctionInfo> cached_script =
+    auto lookup_result =
         compilation_cache->LookupScript(source, script_details, language_mode);
-    CHECK(!cached_script.is_null());
+    CHECK(!lookup_result.toplevel_sfi().is_null());
 
     // Progress code age until it's old and ready for GC.
-    Handle<SharedFunctionInfo> shared = cached_script.ToHandleChecked();
+    Handle<SharedFunctionInfo> shared =
+        lookup_result.toplevel_sfi().ToHandleChecked();
     CHECK(shared->HasBytecodeArray());
     const int kAgingThreshold = 6;
     for (int i = 0; i < kAgingThreshold; i++) {
@@ -1532,10 +1541,248 @@ TEST(CompilationCacheCachingBehavior) {
     // Ensure code aging cleared the entry from the cache.
     ScriptDetails script_details(Handle<Object>(),
                                  v8::ScriptOriginOptions(true, false));
-    MaybeHandle<SharedFunctionInfo> cached_script =
+    auto lookup_result =
         compilation_cache->LookupScript(source, script_details, language_mode);
-    CHECK(cached_script.is_null());
+    CHECK(lookup_result.toplevel_sfi().is_null());
+    CHECK_EQ(retain_script, !lookup_result.script().is_null());
   }
+}
+
+TEST(CompilationCacheCachingBehaviorDiscardScript) {
+  CompilationCacheCachingBehavior(false);
+}
+
+TEST(CompilationCacheCachingBehaviorRetainScript) {
+  CompilationCacheCachingBehavior(true);
+}
+
+namespace {
+
+template <typename T>
+Handle<SharedFunctionInfo> GetSharedFunctionInfo(
+    v8::Local<T> function_or_script) {
+  Handle<JSFunction> i_function =
+      Handle<JSFunction>::cast(v8::Utils::OpenHandle(*function_or_script));
+  return handle(i_function->shared(), CcTest::i_isolate());
+}
+
+template <typename T>
+void AgeBytecode(v8::Local<T> function_or_script) {
+  Handle<SharedFunctionInfo> shared = GetSharedFunctionInfo(function_or_script);
+  CHECK(shared->HasBytecodeArray());
+  const int kAgingThreshold = 6;
+  for (int i = 0; i < kAgingThreshold; i++) {
+    shared->GetBytecodeArray(CcTest::i_isolate()).MakeOlder();
+  }
+}
+
+void CompilationCacheRegeneration(bool retain_root_sfi, bool flush_root_sfi,
+                                  bool flush_eager_sfi) {
+  // If the compilation cache is turned off, this test is invalid.
+  if (!FLAG_compilation_cache) {
+    return;
+  }
+
+  // TODO(v8:12808): Remove this check once background compilation is capable of
+  // reusing an existing Script.
+  if (flush_root_sfi && FLAG_stress_background_compile) {
+    return;
+  }
+
+  // Some flags can prevent bytecode flushing, which affects this test.
+  bool flushing_disabled = !FLAG_flush_bytecode ||
+                           (FLAG_always_sparkplug && !FLAG_flush_baseline_code);
+
+  CcTest::InitializeVM();
+  Isolate* isolate = CcTest::i_isolate();
+
+  const char* source =
+      "({"
+      "  lazyFunction: function () {"
+      "    var x = 42;"
+      "    var y = 42;"
+      "    var z = x + y;"
+      "  },"
+      "  eagerFunction: (function () {"
+      "    var x = 43;"
+      "    var y = 43;"
+      "    var z = x + y;"
+      "  })"
+      "})";
+
+  v8::Global<v8::Script> outer_function;
+  v8::Global<v8::Function> lazy_function;
+  v8::Global<v8::Function> eager_function;
+
+  {
+    v8::HandleScope scope(CcTest::isolate());
+    v8::Local<v8::Context> context =
+        v8::Isolate::GetCurrent()->GetCurrentContext();
+    v8::Local<v8::Script> script = v8_compile(v8_str(source));
+    outer_function.Reset(CcTest::isolate(), script);
+
+    // Even though the script has not executed, it should already be parsed.
+    Handle<SharedFunctionInfo> script_sfi = GetSharedFunctionInfo(script);
+    CHECK(script_sfi->is_compiled());
+
+    v8::Local<v8::Value> result = script->Run(context).ToLocalChecked();
+
+    // Now that the script has run, we can get references to the inner
+    // functions, and verify that the eager parsing heuristics are behaving as
+    // expected.
+    v8::Local<v8::Object> result_obj =
+        result->ToObject(context).ToLocalChecked();
+    v8::Local<v8::Value> lazy_function_value =
+        result_obj->GetRealNamedProperty(context, v8_str("lazyFunction"))
+            .ToLocalChecked();
+    CHECK(lazy_function_value->IsFunction());
+    CHECK(!GetSharedFunctionInfo(lazy_function_value)->is_compiled());
+    lazy_function.Reset(CcTest::isolate(),
+                        lazy_function_value.As<v8::Function>());
+    v8::Local<v8::Value> eager_function_value =
+        result_obj->GetRealNamedProperty(context, v8_str("eagerFunction"))
+            .ToLocalChecked();
+    CHECK(eager_function_value->IsFunction());
+    eager_function.Reset(CcTest::isolate(),
+                         eager_function_value.As<v8::Function>());
+    CHECK(GetSharedFunctionInfo(eager_function_value)->is_compiled());
+  }
+
+  {
+    v8::HandleScope scope(CcTest::isolate());
+
+    // Progress code age until it's old and ready for GC.
+    if (flush_root_sfi) {
+      v8::Local<v8::Script> outer_function_value =
+          outer_function.Get(CcTest::isolate());
+      AgeBytecode(outer_function_value);
+    }
+    if (flush_eager_sfi) {
+      v8::Local<v8::Function> eager_function_value =
+          eager_function.Get(CcTest::isolate());
+      AgeBytecode(eager_function_value);
+    }
+    if (!retain_root_sfi) {
+      outer_function.Reset();
+    }
+  }
+
+  CcTest::CollectAllGarbage();
+
+  if (FLAG_stress_incremental_marking) {
+    // If incremental marking could have started before the bytecode was aged,
+    // then we need a second collection to evict the cache entries.
+    CcTest::CollectAllGarbage();
+  }
+
+  // The root SharedFunctionInfo can be retained either by a Global in this
+  // function or by the compilation cache.
+  bool root_sfi_should_still_exist = retain_root_sfi || !flush_root_sfi;
+
+  {
+    v8::HandleScope scope(CcTest::isolate());
+
+    // The lazy function should still not be compiled.
+    Handle<SharedFunctionInfo> lazy_sfi =
+        GetSharedFunctionInfo(lazy_function.Get(CcTest::isolate()));
+    CHECK(!lazy_sfi->is_compiled());
+
+    // The eager function may have had its bytecode flushed.
+    Handle<SharedFunctionInfo> eager_sfi =
+        GetSharedFunctionInfo(eager_function.Get(CcTest::isolate()));
+    CHECK_EQ(!flush_eager_sfi || flushing_disabled, eager_sfi->is_compiled());
+
+    // Check whether the root SharedFunctionInfo is still reachable from the
+    // Script.
+    Handle<Script> script(Script::cast(lazy_sfi->script()), isolate);
+    bool root_sfi_still_exists = false;
+    MaybeObject maybe_root_sfi =
+        script->shared_function_infos().Get(kFunctionLiteralIdTopLevel);
+    if (HeapObject sfi_or_undefined;
+        maybe_root_sfi.GetHeapObject(&sfi_or_undefined)) {
+      root_sfi_still_exists = !sfi_or_undefined.IsUndefined();
+    }
+    CHECK_EQ(root_sfi_should_still_exist, root_sfi_still_exists);
+  }
+
+  {
+    // Run the script again and check that no SharedFunctionInfos were
+    // duplicated, and that the expected ones were compiled.
+    v8::HandleScope scope(CcTest::isolate());
+    v8::Local<v8::Context> context =
+        v8::Isolate::GetCurrent()->GetCurrentContext();
+    v8::Local<v8::Script> script = v8_compile(v8_str(source));
+
+    // The script should be compiled by now.
+    Handle<SharedFunctionInfo> script_sfi = GetSharedFunctionInfo(script);
+    CHECK(script_sfi->is_compiled());
+
+    // This compilation should not have created a new root SharedFunctionInfo if
+    // one already existed.
+    if (retain_root_sfi) {
+      Handle<SharedFunctionInfo> old_script_sfi =
+          GetSharedFunctionInfo(outer_function.Get(CcTest::isolate()));
+      CHECK_EQ(*old_script_sfi, *script_sfi);
+    }
+
+    Handle<SharedFunctionInfo> old_lazy_sfi =
+        GetSharedFunctionInfo(lazy_function.Get(CcTest::isolate()));
+    CHECK(!old_lazy_sfi->is_compiled());
+
+    // The only way for the eager function to be uncompiled at this point is if
+    // it was flushed but the root function was not.
+    Handle<SharedFunctionInfo> old_eager_sfi =
+        GetSharedFunctionInfo(eager_function.Get(CcTest::isolate()));
+    CHECK_EQ(!(flush_eager_sfi && !flush_root_sfi) || flushing_disabled,
+             old_eager_sfi->is_compiled());
+
+    v8::Local<v8::Value> result = script->Run(context).ToLocalChecked();
+
+    // Check that both functions reused the existing SharedFunctionInfos.
+    v8::Local<v8::Object> result_obj =
+        result->ToObject(context).ToLocalChecked();
+    v8::Local<v8::Value> lazy_function_value =
+        result_obj->GetRealNamedProperty(context, v8_str("lazyFunction"))
+            .ToLocalChecked();
+    CHECK(lazy_function_value->IsFunction());
+    Handle<SharedFunctionInfo> lazy_sfi =
+        GetSharedFunctionInfo(lazy_function_value);
+    CHECK_EQ(*old_lazy_sfi, *lazy_sfi);
+    v8::Local<v8::Value> eager_function_value =
+        result_obj->GetRealNamedProperty(context, v8_str("eagerFunction"))
+            .ToLocalChecked();
+    CHECK(eager_function_value->IsFunction());
+    Handle<SharedFunctionInfo> eager_sfi =
+        GetSharedFunctionInfo(eager_function_value);
+    CHECK_EQ(*old_eager_sfi, *eager_sfi);
+  }
+}
+
+}  // namespace
+
+TEST(CompilationCacheRegeneration0) {
+  CompilationCacheRegeneration(false, false, false);
+}
+TEST(CompilationCacheRegeneration1) {
+  CompilationCacheRegeneration(false, false, true);
+}
+TEST(CompilationCacheRegeneration2) {
+  CompilationCacheRegeneration(false, true, false);
+}
+TEST(CompilationCacheRegeneration3) {
+  CompilationCacheRegeneration(false, true, true);
+}
+TEST(CompilationCacheRegeneration4) {
+  CompilationCacheRegeneration(true, false, false);
+}
+TEST(CompilationCacheRegeneration5) {
+  CompilationCacheRegeneration(true, false, true);
+}
+TEST(CompilationCacheRegeneration6) {
+  CompilationCacheRegeneration(true, true, false);
+}
+TEST(CompilationCacheRegeneration7) {
+  CompilationCacheRegeneration(true, true, true);
 }
 
 static void OptimizeEmptyFunction(const char* name) {
@@ -2351,13 +2598,14 @@ TEST(InstanceOfStubWriteBarrier) {
 
   CHECK(f->HasAttachedOptimizedCode());
 
-  IncrementalMarking::MarkingState* marking_state = marking->marking_state();
+  MarkingState* marking_state = marking->marking_state();
 
   const double kStepSizeInMs = 100;
   while (!marking_state->IsBlack(f->code()) && !marking->IsStopped()) {
     // Discard any pending GC requests otherwise we will get GC when we enter
     // code below.
-    marking->Step(kStepSizeInMs, IncrementalMarking::NO_GC_VIA_STACK_GUARD,
+    marking->Step(kStepSizeInMs,
+                  IncrementalMarking::CompletionAction::kGCViaTask,
                   StepOrigin::kV8);
   }
 
@@ -2452,14 +2700,13 @@ TEST(IdleNotificationFinishMarking) {
 
   const double kStepSizeInMs = 100;
   do {
-    marking->Step(kStepSizeInMs, IncrementalMarking::NO_GC_VIA_STACK_GUARD,
+    marking->Step(kStepSizeInMs,
+                  IncrementalMarking::CompletionAction::kGCViaTask,
                   StepOrigin::kV8);
   } while (!CcTest::heap()
                 ->mark_compact_collector()
                 ->local_marking_worklists()
                 ->IsEmpty());
-
-  marking->SetWeakClosureWasOverApproximatedForTesting(true);
 
   // The next idle notification has to finish incremental marking.
   const double kLongIdleTime = 1000.0;
@@ -3023,7 +3270,7 @@ static void AddPropertyTo(int gc_count, Handle<JSObject> object,
   Factory* factory = isolate->factory();
   Handle<String> prop_name = factory->InternalizeUtf8String(property_name);
   Handle<Smi> twenty_three(Smi::FromInt(23), isolate);
-  FLAG_gc_interval = gc_count;
+  HeapAllocator::SetAllocationGcInterval(gc_count);
   FLAG_gc_global = true;
   FLAG_retain_maps_for_n_gc = 0;
   CcTest::heap()->set_allocation_timeout(gc_count);
@@ -3892,8 +4139,7 @@ TEST(IncrementalMarkingStepMakesBigProgressWithLargeObjects) {
         i::Heap::kNoGCFlags, i::GarbageCollectionReason::kTesting);
   }
   heap::SimulateIncrementalMarking(CcTest::heap());
-  CHECK(marking->IsComplete() ||
-        marking->IsReadyToOverApproximateWeakClosure());
+  CHECK(marking->IsComplete());
 }
 
 
@@ -4825,7 +5071,7 @@ TEST(AddInstructionChangesNewSpacePromotion) {
   FLAG_allow_natives_syntax = true;
   FLAG_expose_gc = true;
   FLAG_stress_compaction = true;
-  FLAG_gc_interval = 1000;
+  HeapAllocator::SetAllocationGcInterval(1000);
   CcTest::InitializeVM();
   if (!FLAG_allocation_site_pretenuring) return;
   v8::HandleScope scope(CcTest::isolate());
@@ -5210,8 +5456,6 @@ TEST(RetainedMapsCleanup) {
 }
 
 TEST(PreprocessStackTrace) {
-  // Do not automatically trigger early GC.
-  FLAG_gc_interval = -1;
   CcTest::InitializeVM();
   v8::HandleScope scope(CcTest::isolate());
   v8::TryCatch try_catch(CcTest::isolate());
@@ -5240,7 +5484,6 @@ TEST(PreprocessStackTrace) {
     CHECK(!element->IsCode());
   }
 }
-
 
 void AllocateInSpace(Isolate* isolate, size_t bytes, AllocationSpace space) {
   CHECK_LE(FixedArray::kHeaderSize, bytes);
@@ -5675,7 +5918,7 @@ TEST(Regress598319) {
 
   CHECK(heap->lo_space()->Contains(arr.get()));
   IncrementalMarking* marking = heap->incremental_marking();
-  IncrementalMarking::MarkingState* marking_state = marking->marking_state();
+  MarkingState* marking_state = marking->marking_state();
   CHECK(marking_state->IsWhite(arr.get()));
   for (int i = 0; i < arr.get().length(); i++) {
     HeapObject arr_value = HeapObject::cast(arr.get().get(i));
@@ -5701,7 +5944,7 @@ TEST(Regress598319) {
   const double kSmallStepSizeInMs = 0.1;
   while (!marking->IsComplete()) {
     marking->Step(kSmallStepSizeInMs,
-                  i::IncrementalMarking::NO_GC_VIA_STACK_GUARD,
+                  i::IncrementalMarking::CompletionAction::kGCViaTask,
                   StepOrigin::kV8);
     ProgressBar& progress_bar = page->ProgressBar();
     if (progress_bar.IsEnabled() && progress_bar.Value() > 0) {
@@ -5718,17 +5961,15 @@ TEST(Regress598319) {
     }
   }
 
+  SafepointScope safepoint_scope(heap);
+  MarkingBarrier::PublishAll(heap);
+
   // Finish marking with bigger steps to speed up test.
   const double kLargeStepSizeInMs = 1000;
-  while (!marking->IsComplete()) {
-    marking->Step(kLargeStepSizeInMs,
-                  i::IncrementalMarking::NO_GC_VIA_STACK_GUARD,
-                  StepOrigin::kV8);
-    if (marking->IsReadyToOverApproximateWeakClosure()) {
-      SafepointScope safepoint_scope(heap);
-      MarkingBarrier::PublishAll(heap);
-      marking->FinalizeIncrementally();
-    }
+  while (marking->Step(kLargeStepSizeInMs,
+                       i::IncrementalMarking::CompletionAction::kGCViaTask,
+                       StepOrigin::kV8) !=
+         StepResult::kWaitingForFinalization) {
   }
   CHECK(marking->IsComplete());
 
@@ -5816,12 +6057,9 @@ TEST(Regress615489) {
   }
   const double kStepSizeInMs = 100;
   while (!marking->IsComplete()) {
-    marking->Step(kStepSizeInMs, i::IncrementalMarking::NO_GC_VIA_STACK_GUARD,
+    marking->Step(kStepSizeInMs,
+                  i::IncrementalMarking::CompletionAction::kGCViaTask,
                   StepOrigin::kV8);
-    if (marking->IsReadyToOverApproximateWeakClosure()) {
-      SafepointScope safepoint_scope(heap);
-      marking->FinalizeIncrementally();
-    }
   }
   CHECK(marking->IsComplete());
   intptr_t size_before = heap->SizeOfObjects();
@@ -5879,12 +6117,9 @@ TEST(Regress631969) {
   const double kStepSizeInMs = 100;
   IncrementalMarking* marking = heap->incremental_marking();
   while (!marking->IsComplete()) {
-    marking->Step(kStepSizeInMs, i::IncrementalMarking::NO_GC_VIA_STACK_GUARD,
+    marking->Step(kStepSizeInMs,
+                  i::IncrementalMarking::CompletionAction::kGCViaTask,
                   StepOrigin::kV8);
-    if (marking->IsReadyToOverApproximateWeakClosure()) {
-      SafepointScope safepoint_scope(heap);
-      marking->FinalizeIncrementally();
-    }
   }
 
   {
@@ -5927,7 +6162,7 @@ TEST(LeftTrimFixedArrayInBlackArea) {
   Handle<FixedArray> array =
       isolate->factory()->NewFixedArray(50, AllocationType::kOld);
   CHECK(heap->old_space()->Contains(*array));
-  IncrementalMarking::MarkingState* marking_state = marking->marking_state();
+  MarkingState* marking_state = marking->marking_state();
   CHECK(marking_state->IsBlack(*array));
 
   // Now left trim the allocated black area. A filler has to be installed
@@ -5973,8 +6208,7 @@ TEST(ContinuousLeftTrimFixedArrayInBlackArea) {
   Address start_address = array->address();
   Address end_address = start_address + array->Size();
   Page* page = Page::FromAddress(start_address);
-  IncrementalMarking::NonAtomicMarkingState* marking_state =
-      marking->non_atomic_marking_state();
+  NonAtomicMarkingState* marking_state = marking->non_atomic_marking_state();
   CHECK(marking_state->IsBlack(*array));
   CHECK(marking_state->bitmap(page)->AllBitsSetInRange(
       page->AddressToMarkbitIndex(start_address),
@@ -6043,8 +6277,7 @@ TEST(ContinuousRightTrimFixedArrayInBlackArea) {
   Address start_address = array->address();
   Address end_address = start_address + array->Size();
   Page* page = Page::FromAddress(start_address);
-  IncrementalMarking::NonAtomicMarkingState* marking_state =
-      marking->non_atomic_marking_state();
+  NonAtomicMarkingState* marking_state = marking->non_atomic_marking_state();
   CHECK(marking_state->IsBlack(*array));
 
   CHECK(marking_state->bitmap(page)->AllBitsSetInRange(
@@ -6496,7 +6729,8 @@ HEAP_TEST(Regress670675) {
     if (marking->IsStopped()) break;
     double deadline = heap->MonotonicallyIncreasingTimeInMs() + 1;
     marking->AdvanceWithDeadline(
-        deadline, IncrementalMarking::GC_VIA_STACK_GUARD, StepOrigin::kV8);
+        deadline, IncrementalMarking::CompletionAction::kGcViaStackGuard,
+        StepOrigin::kV8);
   }
   DCHECK(marking->IsStopped());
 }
@@ -7099,7 +7333,7 @@ TEST(Regress978156) {
         "collector cctest", GCTracer::MarkingType::kIncremental);
     marking->Start(i::GarbageCollectionReason::kTesting);
   }
-  IncrementalMarking::MarkingState* marking_state = marking->marking_state();
+  MarkingState* marking_state = marking->marking_state();
   // 6. Mark the filler black to access its two markbits. This triggers
   // an out-of-bounds access of the marking bitmap in a bad case.
   marking_state->WhiteToGrey(filler);

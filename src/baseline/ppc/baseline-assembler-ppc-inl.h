@@ -135,12 +135,23 @@ inline bool IsSignedCondition(Condition cond) {
 
 #define __ assm->
 // ppc helper
+template <int width = 64>
 static void JumpIfHelper(MacroAssembler* assm, Condition cc, Register lhs,
                          Register rhs, Label* target) {
-  if (IsSignedCondition(cc)) {
-    __ CmpS64(lhs, rhs);
+  static_assert(width == 64 || width == 32,
+                "only support 64 and 32 bit compare");
+  if (width == 64) {
+    if (IsSignedCondition(cc)) {
+      __ CmpS64(lhs, rhs);
+    } else {
+      __ CmpU64(lhs, rhs);
+    }
   } else {
-    __ CmpU64(lhs, rhs);
+    if (IsSignedCondition(cc)) {
+      __ CmpS32(lhs, rhs);
+    } else {
+      __ CmpU32(lhs, rhs);
+    }
   }
   __ b(AsMasmCondition(cc), target);
 }
@@ -163,7 +174,6 @@ MemOperand BaselineAssembler::FeedbackVectorOperand() {
 }
 
 void BaselineAssembler::Bind(Label* label) { __ bind(label); }
-void BaselineAssembler::BindWithoutJumpTarget(Label* label) { __ bind(label); }
 
 void BaselineAssembler::JumpTarget() {
   // NOP on arm.
@@ -259,7 +269,7 @@ void BaselineAssembler::JumpIfObjectType(Condition cc, Register object,
   ScratchRegisterScope temps(this);
   Register type = temps.AcquireScratch();
   __ LoadMap(map, object);
-  __ LoadU16(type, FieldMemOperand(map, Map::kInstanceTypeOffset));
+  __ LoadU16(type, FieldMemOperand(map, Map::kInstanceTypeOffset), r0);
   JumpIf(cc, type, Operand(instance_type), target);
 }
 
@@ -274,7 +284,7 @@ void BaselineAssembler::JumpIfInstanceType(Condition cc, Register map,
     __ CompareObjectType(map, type, type, MAP_TYPE);
     __ Assert(eq, AbortReason::kUnexpectedValue);
   }
-  __ LoadU16(type, FieldMemOperand(map, Map::kInstanceTypeOffset));
+  __ LoadU16(type, FieldMemOperand(map, Map::kInstanceTypeOffset), r0);
   JumpIf(cc, type, Operand(instance_type), target);
 }
 
@@ -284,7 +294,7 @@ void BaselineAssembler::JumpIfPointer(Condition cc, Register value,
   ASM_CODE_COMMENT(masm_);
   ScratchRegisterScope temps(this);
   Register tmp = temps.AcquireScratch();
-  __ LoadU64(tmp, operand);
+  __ LoadU64(tmp, operand, r0);
   JumpIfHelper(masm_, cc, value, tmp, target);
 }
 
@@ -308,16 +318,16 @@ void BaselineAssembler::JumpIfTagged(Condition cc, Register value,
                                      MemOperand operand, Label* target,
                                      Label::Distance) {
   ASM_CODE_COMMENT(masm_);
-  __ LoadU64(r0, operand);
-  JumpIfHelper(masm_, cc, value, r0, target);
+  __ LoadTaggedPointerField(ip, operand, r0);
+  JumpIfHelper<COMPRESS_POINTERS_BOOL ? 32 : 64>(masm_, cc, value, ip, target);
 }
 
 void BaselineAssembler::JumpIfTagged(Condition cc, MemOperand operand,
                                      Register value, Label* target,
                                      Label::Distance) {
   ASM_CODE_COMMENT(masm_);
-  __ LoadU64(r0, operand);
-  JumpIfHelper(masm_, cc, r0, value, target);
+  __ LoadTaggedPointerField(ip, operand, r0);
+  JumpIfHelper<COMPRESS_POINTERS_BOOL ? 32 : 64>(masm_, cc, value, ip, target);
 }
 
 void BaselineAssembler::JumpIfByte(Condition cc, Register value, int32_t byte,
@@ -338,7 +348,7 @@ void BaselineAssembler::Move(Register output, TaggedIndex value) {
 
 void BaselineAssembler::Move(MemOperand output, Register source) {
   ASM_CODE_COMMENT(masm_);
-  __ StoreU64(source, output);
+  __ StoreU64(source, output, r0);
 }
 
 void BaselineAssembler::Move(Register output, ExternalReference reference) {
@@ -704,7 +714,11 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
 
 inline void EnsureAccumulatorPreservedScope::AssertEqualToAccumulator(
     Register reg) {
-  assembler_->masm()->CmpU64(reg, kInterpreterAccumulatorRegister);
+  if (COMPRESS_POINTERS_BOOL) {
+    assembler_->masm()->CmpU32(reg, kInterpreterAccumulatorRegister);
+  } else {
+    assembler_->masm()->CmpU64(reg, kInterpreterAccumulatorRegister);
+  }
   assembler_->masm()->Assert(eq, AbortReason::kUnexpectedValue);
 }
 

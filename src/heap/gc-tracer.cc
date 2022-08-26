@@ -88,10 +88,15 @@ const char* GCTracer::Event::TypeName(bool short_name) const {
 GCTracer::RecordGCPhasesInfo::RecordGCPhasesInfo(Heap* heap,
                                                  GarbageCollector collector) {
   if (Heap::IsYoungGenerationCollector(collector)) {
-    mode_ = Mode::Scavenger;
     type_timer_ = nullptr;
     type_priority_timer_ = nullptr;
-    trace_event_name_ = "V8.GCScavenger";
+    if (!FLAG_minor_mc) {
+      mode_ = Mode::Scavenger;
+      trace_event_name_ = "V8.GCScavenger";
+    } else {
+      mode_ = Mode::None;
+      trace_event_name_ = "V8.GCMinorMC";
+    }
   } else {
     DCHECK_EQ(GarbageCollector::MARK_COMPACTOR, collector);
     Counters* counters = heap->isolate()->counters();
@@ -907,7 +912,6 @@ void GCTracer::PrintNVP() const {
           "sweep.old=%.1f "
           "incremental=%.1f "
           "incremental.finalize=%.1f "
-          "incremental.finalize.body=%.1f "
           "incremental.finalize.external.prologue=%.1f "
           "incremental.finalize.external.epilogue=%.1f "
           "incremental.layout_change=%.1f "
@@ -916,8 +920,6 @@ void GCTracer::PrintNVP() const {
           "incremental.embedder_prologue=%.1f "
           "incremental.embedder_tracing=%.1f "
           "incremental_wrapper_tracing_longest_step=%.1f "
-          "incremental_finalize_longest_step=%.1f "
-          "incremental_finalize_steps_count=%d "
           "incremental_longest_step=%.1f "
           "incremental_steps_count=%d "
           "incremental_marking_throughput=%.f "
@@ -994,7 +996,6 @@ void GCTracer::PrintNVP() const {
           current_scope(Scope::MC_SWEEP_OLD),
           current_scope(Scope::MC_INCREMENTAL),
           current_scope(Scope::MC_INCREMENTAL_FINALIZE),
-          current_scope(Scope::MC_INCREMENTAL_FINALIZE_BODY),
           current_scope(Scope::MC_INCREMENTAL_EXTERNAL_PROLOGUE),
           current_scope(Scope::MC_INCREMENTAL_EXTERNAL_EPILOGUE),
           current_scope(Scope::MC_INCREMENTAL_LAYOUT_CHANGE),
@@ -1004,8 +1005,6 @@ void GCTracer::PrintNVP() const {
           current_scope(Scope::MC_INCREMENTAL_EMBEDDER_TRACING),
           incremental_scope(Scope::MC_INCREMENTAL_EMBEDDER_TRACING)
               .longest_step,
-          incremental_scope(Scope::MC_INCREMENTAL_FINALIZE_BODY).longest_step,
-          incremental_scope(Scope::MC_INCREMENTAL_FINALIZE_BODY).steps,
           incremental_scope(Scope::MC_INCREMENTAL).longest_step,
           incremental_scope(Scope::MC_INCREMENTAL).steps,
           IncrementalMarkingSpeedInBytesPerMillisecond(),
@@ -1393,13 +1392,17 @@ void CopyTimeMetrics(
     ::v8::metrics::GarbageCollectionPhases& metrics,
     const cppgc::internal::MetricRecorder::GCCycle::IncrementalPhases&
         cppgc_metrics) {
-  DCHECK_NE(-1, cppgc_metrics.mark_duration_us);
+  // Allow for uninitialized values (-1), in case incremental marking/sweeping
+  // were not used.
+  DCHECK_LE(-1, cppgc_metrics.mark_duration_us);
   metrics.mark_wall_clock_duration_in_us = cppgc_metrics.mark_duration_us;
-  DCHECK_NE(-1, cppgc_metrics.sweep_duration_us);
+  DCHECK_LE(-1, cppgc_metrics.sweep_duration_us);
   metrics.sweep_wall_clock_duration_in_us = cppgc_metrics.sweep_duration_us;
+  // The total duration is initialized, even if both incremental
+  // marking and sweeping were not used.
   metrics.total_wall_clock_duration_in_us =
-      metrics.mark_wall_clock_duration_in_us +
-      metrics.sweep_wall_clock_duration_in_us;
+      std::max(INT64_C(0), metrics.mark_wall_clock_duration_in_us) +
+      std::max(INT64_C(0), metrics.sweep_wall_clock_duration_in_us);
 }
 
 void CopyTimeMetrics(
@@ -1579,10 +1582,19 @@ void GCTracer::ReportFullCycleToRecorder() {
   event.total.sweep_wall_clock_duration_in_us =
       static_cast<int64_t>((sweeping_duration + sweeping_background_duration) *
                            base::Time::kMicrosecondsPerMillisecond);
-  event.main_thread_incremental.mark_wall_clock_duration_in_us =
-      incremental_marking;
+  if (current_.type == Event::INCREMENTAL_MARK_COMPACTOR) {
+    event.main_thread_incremental.mark_wall_clock_duration_in_us =
+        static_cast<int64_t>(incremental_marking *
+                             base::Time::kMicrosecondsPerMillisecond);
+  } else {
+    DCHECK_EQ(0, incremental_marking);
+    event.main_thread_incremental.mark_wall_clock_duration_in_us = -1;
+  }
+  // TODO(chromium:1154636): We always report the value of incremental sweeping,
+  // even if it is zero.
   event.main_thread_incremental.sweep_wall_clock_duration_in_us =
-      incremental_sweeping;
+      static_cast<int64_t>(incremental_sweeping *
+                           base::Time::kMicrosecondsPerMillisecond);
 
   // TODO(chromium:1154636): Populate the following:
   // - event.objects

@@ -32,21 +32,22 @@ class RegisterFrameState {
                 "RegisterFrameState should be used only for Register and "
                 "DoubleRegister.");
 
-  using RegList = RegListBase<RegisterT>;
+  using RegTList = RegListBase<RegisterT>;
 
-  static constexpr RegList kAllocatableRegisters =
+  static constexpr RegTList kAllocatableRegisters =
       AllocatableRegisters<RegisterT>::kRegisters;
-  static constexpr RegList kEmptyRegList = {};
+  static constexpr RegTList kEmptyRegList = {};
 
-  RegList empty() const { return kEmptyRegList; }
-  RegList free() const { return free_; }
-  RegList used() const {
+  RegTList empty() const { return kEmptyRegList; }
+  RegTList free() const { return free_; }
+  RegTList unblocked_free() const { return free_ - blocked_; }
+  RegTList used() const {
     // Only allocatable registers should be free.
     DCHECK_EQ(free_, free_ & kAllocatableRegisters);
     return kAllocatableRegisters ^ free_;
   }
 
-  bool FreeIsEmpty() const { return free_ == kEmptyRegList; }
+  bool UnblockedFreeIsEmpty() const { return unblocked_free().is_empty(); }
 
   template <typename Function>
   void ForEachUsedRegister(Function&& f) const {
@@ -55,18 +56,26 @@ class RegisterFrameState {
     }
   }
 
-  RegisterT TakeFirstFree() { return free_.PopFirst(); }
   void RemoveFromFree(RegisterT reg) { free_.clear(reg); }
   void AddToFree(RegisterT reg) { free_.set(reg); }
+  void AddToFree(RegTList list) { free_ |= list; }
 
   void FreeRegistersUsedBy(ValueNode* node) {
-    RegList list = node->ClearRegisters<RegisterT>();
+    RegTList list = node->ClearRegisters<RegisterT>();
     DCHECK_EQ(free_ & list, kEmptyRegList);
     free_ |= list;
   }
 
   void SetValue(RegisterT reg, ValueNode* node) {
     DCHECK(!free_.has(reg));
+    DCHECK(!blocked_.has(reg));
+    values_[reg.code()] = node;
+    block(reg);
+    node->AddRegister(reg);
+  }
+  void SetValueWithoutBlocking(RegisterT reg, ValueNode* node) {
+    DCHECK(!free_.has(reg));
+    DCHECK(!blocked_.has(reg));
     values_[reg.code()] = node;
     node->AddRegister(reg);
   }
@@ -76,12 +85,19 @@ class RegisterFrameState {
     DCHECK_NOT_NULL(node);
     return node;
   }
+  RegTList blocked() const { return blocked_; }
+  void block(RegisterT reg) { blocked_.set(reg); }
+  void unblock(RegisterT reg) { blocked_.clear(reg); }
+  bool is_blocked(RegisterT reg) { return blocked_.has(reg); }
+  void clear_blocked() { blocked_ = kEmptyRegList; }
 
-  compiler::InstructionOperand TryAllocateRegister(ValueNode* node);
+  compiler::AllocatedOperand ChooseInputRegister(ValueNode* node);
+  compiler::AllocatedOperand AllocateRegister(ValueNode* node);
 
  private:
   ValueNode* values_[RegisterT::kNumRegisters];
-  RegList free_ = kAllocatableRegisters;
+  RegTList free_ = kAllocatableRegisters;
+  RegTList blocked_ = kEmptyRegList;
 };
 
 class StraightForwardRegisterAllocator {
@@ -91,12 +107,8 @@ class StraightForwardRegisterAllocator {
   ~StraightForwardRegisterAllocator();
 
  private:
-  enum class AllocationStage { kAtStart, kAtEnd };
-
   RegisterFrameState<Register> general_registers_;
   RegisterFrameState<DoubleRegister> double_registers_;
-  RegList free_general_registers_before_node_;
-  DoubleRegList free_double_registers_before_node_;
 
   struct SpillSlotInfo {
     SpillSlotInfo(uint32_t slot_index, NodeIdT freed_at_position)
@@ -113,8 +125,8 @@ class StraightForwardRegisterAllocator {
   SpillSlots untagged_;
   SpillSlots tagged_;
 
-  void ComputePostDominatingHoles(Graph* graph);
-  void AllocateRegisters(Graph* graph);
+  void ComputePostDominatingHoles();
+  void AllocateRegisters();
 
   void PrintLiveRegs() const;
 
@@ -132,7 +144,8 @@ class StraightForwardRegisterAllocator {
   void AssignFixedInput(Input& input);
   void AssignArbitraryRegisterInput(Input& input);
   void AssignInputs(NodeBase* node);
-  void AssignTemporaries(NodeBase* node);
+  void AssignFixedTemporaries(NodeBase* node);
+  void AssignArbitraryTemporaries(NodeBase* node);
   void TryAllocateToInput(Phi* phi);
 
   void VerifyInputs(NodeBase* node);
@@ -150,45 +163,60 @@ class StraightForwardRegisterAllocator {
   void SpillAndClearRegisters(RegisterFrameState<RegisterT>& registers);
   void SpillAndClearRegisters();
 
+  void SaveRegisterSnapshot(NodeBase* node);
+
   void FreeRegistersUsedBy(ValueNode* node);
   template <typename RegisterT>
-  void FreeSomeRegister(RegisterFrameState<RegisterT>& registers,
-                        AllocationStage stage);
-  void FreeSomeGeneralRegister(AllocationStage stage);
-  void FreeSomeDoubleRegister(AllocationStage stage);
+  RegisterT FreeUnblockedRegister();
+  template <typename RegisterT>
+  RegisterT PickRegisterToFree(RegListBase<RegisterT> reserved);
+
+  template <typename RegisterT>
+  RegisterFrameState<RegisterT>& GetRegisterFrameState() {
+    if constexpr (std::is_same<RegisterT, Register>::value) {
+      return general_registers_;
+    } else {
+      return double_registers_;
+    }
+  }
+
+  template <typename RegisterT>
+  void DropRegisterValueAtEnd(RegisterT reg);
+  template <typename RegisterT>
+  void EnsureFreeRegisterAtEnd();
+  compiler::AllocatedOperand AllocateRegisterAtEnd(ValueNode* node);
 
   template <typename RegisterT>
   void DropRegisterValue(RegisterFrameState<RegisterT>& registers,
-                         RegisterT reg, AllocationStage stage);
-  void DropRegisterValue(Register reg, AllocationStage stage);
-  void DropRegisterValue(DoubleRegister reg, AllocationStage stage);
+                         RegisterT reg);
+  void DropRegisterValue(Register reg);
+  void DropRegisterValue(DoubleRegister reg);
 
-  compiler::AllocatedOperand AllocateRegister(ValueNode* node,
-                                              AllocationStage stage);
+  compiler::AllocatedOperand AllocateRegister(ValueNode* node);
 
   template <typename RegisterT>
   compiler::AllocatedOperand ForceAllocate(
-      RegisterFrameState<RegisterT>& registers, RegisterT reg, ValueNode* node,
-      AllocationStage stage);
-  compiler::AllocatedOperand ForceAllocate(Register reg, ValueNode* node,
-                                           AllocationStage stage);
-  compiler::AllocatedOperand ForceAllocate(DoubleRegister reg, ValueNode* node,
-                                           AllocationStage stage);
-  compiler::AllocatedOperand ForceAllocate(const Input& input, ValueNode* node,
-                                           AllocationStage stage);
+      RegisterFrameState<RegisterT>& registers, RegisterT reg, ValueNode* node);
+  compiler::AllocatedOperand ForceAllocate(Register reg, ValueNode* node);
+  compiler::AllocatedOperand ForceAllocate(DoubleRegister reg, ValueNode* node);
+  compiler::AllocatedOperand ForceAllocate(const Input& input, ValueNode* node);
 
   template <typename Function>
   void ForEachMergePointRegisterState(
       MergePointRegisterState& merge_point_state, Function&& f);
 
   void InitializeRegisterValues(MergePointRegisterState& target_state);
-  void EnsureInRegister(MergePointRegisterState& target_state,
-                        ValueNode* incoming);
+#ifdef DEBUG
+  bool IsInRegister(MergePointRegisterState& target_state, ValueNode* incoming);
+#endif
 
   void InitializeBranchTargetRegisterValues(ControlNode* source,
                                             BasicBlock* target);
-  void InitializeConditionalBranchRegisters(ConditionalControlNode* source,
-                                            BasicBlock* target);
+  void InitializeEmptyBlockRegisterValues(ControlNode* source,
+                                          BasicBlock* target);
+  void InitializeBranchTargetPhis(int predecessor_id, BasicBlock* target);
+  void InitializeConditionalBranchTarget(ConditionalControlNode* source,
+                                         BasicBlock* target);
   void MergeRegisterValues(ControlNode* control, BasicBlock* target,
                            int predecessor_id);
 
@@ -198,6 +226,7 @@ class StraightForwardRegisterAllocator {
 
   MaglevCompilationInfo* compilation_info_;
   std::unique_ptr<MaglevPrintingVisitor> printing_visitor_;
+  Graph* graph_;
   BlockConstIterator block_it_;
   NodeIterator node_it_;
   // The current node, whether a Node in the body or the ControlNode.

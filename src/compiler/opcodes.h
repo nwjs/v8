@@ -425,6 +425,7 @@
   V(FastApiCall)                        \
   V(FindOrderedHashMapEntry)            \
   V(FindOrderedHashMapEntryForInt32Key) \
+  V(FindOrderedHashSetEntry)            \
   V(InitializeImmutableInObject)        \
   V(LoadDataViewElement)                \
   V(LoadElement)                        \
@@ -730,6 +731,8 @@
   V(TryTruncateFloat64ToInt64)           \
   V(TryTruncateFloat32ToUint64)          \
   V(TryTruncateFloat64ToUint64)          \
+  V(TryTruncateFloat64ToInt32)           \
+  V(TryTruncateFloat64ToUint32)          \
   V(ChangeInt32ToFloat64)                \
   V(BitcastWord32ToWord64)               \
   V(ChangeInt32ToInt64)                  \
@@ -776,7 +779,8 @@
   V(SignExtendWord8ToInt64)              \
   V(SignExtendWord16ToInt64)             \
   V(SignExtendWord32ToInt64)             \
-  V(StackPointerGreaterThan)
+  V(StackPointerGreaterThan)             \
+  V(TraceInstruction)
 
 #define MACHINE_SIMD_OP_LIST(V)  \
   V(F64x2Splat)                  \
@@ -1173,6 +1177,19 @@ class V8_EXPORT_PRIVATE IrOpcode {
   static bool IsFeedbackCollectingOpcode(int16_t value) {
     DCHECK(0 <= value && value <= kLast);
     return IsFeedbackCollectingOpcode(static_cast<IrOpcode::Value>(value));
+  }
+
+  static bool isAtomicOpOpcode(Value value) {
+    switch (value) {
+    #define CASE(Name, ...) \
+      case k##Name:         \
+        return true;
+      MACHINE_ATOMIC_OP_LIST(CASE)
+      default:
+        return false;
+    #undef CASE
+    }
+    UNREACHABLE();
   }
 };
 

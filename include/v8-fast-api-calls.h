@@ -544,7 +544,7 @@ struct FastApiCallbackOptions {
    * returned instance may be filled with mock data.
    */
   static FastApiCallbackOptions CreateForTesting(Isolate* isolate) {
-    return {false, {0}};
+    return {false, {0}, nullptr};
   }
 
   /**
@@ -568,6 +568,11 @@ struct FastApiCallbackOptions {
     uintptr_t data_ptr;
     v8::Value data;
   };
+
+  /**
+   * When called from WebAssembly, a view of the calling module's memory.
+   */
+  FastApiTypedArray<uint8_t>* const wasm_memory;
 };
 
 namespace internal {
@@ -800,6 +805,16 @@ class CFunctionBuilderWithFunction {
     // template parameter pack Flags.
     return ArgImpl<N, Flags...>(
         std::make_index_sequence<sizeof...(ArgBuilders)>());
+  }
+
+  // Provided for testing purposes.
+  template <typename Ret, typename... Args>
+  auto Patch(Ret (*patching_func)(Args...)) {
+    static_assert(
+        sizeof...(Args) == sizeof...(ArgBuilders),
+        "The patching function must have the same number of arguments.");
+    fn_ = reinterpret_cast<void*>(patching_func);
+    return *this;
   }
 
   auto Build() {

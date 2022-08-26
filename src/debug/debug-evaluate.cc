@@ -7,6 +7,7 @@
 #include "src/builtins/accessors.h"
 #include "src/codegen/assembler-inl.h"
 #include "src/codegen/compiler.h"
+#include "src/codegen/reloc-info.h"
 #include "src/codegen/script-details.h"
 #include "src/common/globals.h"
 #include "src/debug/debug-frames.h"
@@ -18,7 +19,6 @@
 #include "src/interpreter/bytecodes.h"
 #include "src/objects/code-inl.h"
 #include "src/objects/contexts.h"
-#include "src/snapshot/snapshot.h"
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/debug/debug-wasm-objects.h"
@@ -1107,6 +1107,7 @@ static bool TransitivelyCalledBuiltinHasNoSideEffect(Builtin caller,
     case Builtin::kExtractFastJSArray:
     case Builtin::kFastNewObject:
     case Builtin::kFindOrderedHashMapEntry:
+    case Builtin::kFindOrderedHashSetEntry:
     case Builtin::kFlatMapIntoArray:
     case Builtin::kFlattenIntoArray:
     case Builtin::kGetProperty:

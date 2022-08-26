@@ -252,7 +252,7 @@ Address MemoryAllocator::AllocateAlignedMemory(
   DCHECK_LT(area_size, chunk_size);
 
   VirtualMemory reservation(page_allocator, chunk_size, hint, alignment);
-  if (!reservation.IsReserved()) return HandleAllocationFailure();
+  if (!reservation.IsReserved()) return HandleAllocationFailure(executable);
 
   // We cannot use the last chunk in the address space because we would
   // overflow when comparing top and limit if this chunk is used for a
@@ -264,7 +264,7 @@ Address MemoryAllocator::AllocateAlignedMemory(
 
     // Retry reserve virtual memory.
     reservation = VirtualMemory(page_allocator, chunk_size, hint, alignment);
-    if (!reservation.IsReserved()) return HandleAllocationFailure();
+    if (!reservation.IsReserved()) return HandleAllocationFailure(executable);
   }
 
   Address base = reservation.address();
@@ -273,7 +273,7 @@ Address MemoryAllocator::AllocateAlignedMemory(
     const size_t aligned_area_size = ::RoundUp(area_size, GetCommitPageSize());
     if (!SetPermissionsOnExecutableMemoryChunk(&reservation, base,
                                                aligned_area_size, chunk_size)) {
-      return HandleAllocationFailure();
+      return HandleAllocationFailure(executable);
     }
   } else {
     // No guard page between page header and object area. This allows us to make
@@ -286,7 +286,7 @@ Address MemoryAllocator::AllocateAlignedMemory(
                                    PageAllocator::kReadWrite)) {
       UpdateAllocatedSpaceLimits(base, base + commit_size);
     } else {
-      return HandleAllocationFailure();
+      return HandleAllocationFailure(executable);
     }
   }
 
@@ -294,11 +294,13 @@ Address MemoryAllocator::AllocateAlignedMemory(
   return base;
 }
 
-Address MemoryAllocator::HandleAllocationFailure() {
+Address MemoryAllocator::HandleAllocationFailure(Executability executable) {
   Heap* heap = isolate_->heap();
   if (!heap->deserialization_complete()) {
     heap->FatalProcessOutOfMemory(
-        "MemoryChunk allocation failed during deserialization.");
+        executable == EXECUTABLE
+            ? "Executable MemoryChunk allocation failed during deserialization."
+            : "MemoryChunk allocation failed during deserialization.");
   }
   return kNullAddress;
 }
@@ -416,8 +418,14 @@ void MemoryAllocator::PartialFreeMemory(BasicMemoryChunk* chunk,
     DCHECK_EQ(0, chunk->area_end() % static_cast<Address>(page_size));
     DCHECK_EQ(chunk->address() + chunk->size(),
               chunk->area_end() + MemoryChunkLayout::CodePageGuardSize());
-    reservation->SetPermissions(chunk->area_end(), page_size,
-                                PageAllocator::kNoAccess);
+
+    if (V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT && !isolate_->jitless()) {
+      DCHECK(isolate_->RequiresCodeRange());
+      reservation->DiscardSystemPages(chunk->area_end(), page_size);
+    } else {
+      reservation->SetPermissions(chunk->area_end(), page_size,
+                                  PageAllocator::kNoAccess);
+    }
   }
   // On e.g. Windows, a reservation may be larger than a page and releasing
   // partially starting at |start_free| will also release the potentially
@@ -686,10 +694,10 @@ bool MemoryAllocator::SetPermissionsOnExecutableMemoryChunk(VirtualMemory* vm,
   const Address code_area = start + code_area_offset;
   const Address post_guard_page = start + chunk_size - guard_size;
 
-  bool jitless = unmapper_.heap_->isolate()->jitless();
+  bool jitless = isolate_->jitless();
 
   if (V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT && !jitless) {
-    DCHECK(unmapper_.heap_->isolate()->RequiresCodeRange());
+    DCHECK(isolate_->RequiresCodeRange());
     // Commit the header, from start to pre-code guard page.
     // We have to commit it as executable becase otherwise we'll not be able
     // to change permissions to anything else.

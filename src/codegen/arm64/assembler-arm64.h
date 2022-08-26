@@ -209,6 +209,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // Insert the smallest number of zero bytes possible to align the pc offset
   // to a mulitple of m. m must be a power of 2 (>= 2).
   void DataAlign(int m);
+
   // Aligns code to something that's optimal for a jump target for the platform.
   void CodeTargetAlign();
   void LoopHeaderAlign() { CodeTargetAlign(); }
@@ -2636,8 +2637,21 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   }
 
   void GrowBuffer();
-  V8_INLINE void CheckBufferSpace();
-  void CheckBuffer();
+
+  void CheckBufferSpace() {
+    DCHECK_LT(pc_, buffer_start_ + buffer_->size());
+    if (V8_UNLIKELY(buffer_space() < kGap)) {
+      GrowBuffer();
+    }
+  }
+
+  void CheckBuffer() {
+    CheckBufferSpace();
+    if (pc_offset() >= next_veneer_pool_check_) {
+      CheckVeneerPool(false, true);
+    }
+    constpool_.MaybeCheck();
+  }
 
   // Emission of the veneer pools may be blocked in some code sequences.
   int veneer_pool_blocked_nesting_;  // Block emission if this is not zero.

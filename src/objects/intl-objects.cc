@@ -1488,6 +1488,13 @@ MaybeHandle<String> Intl::NumberToLocaleString(Isolate* isolate,
       isolate);
   Handle<JSNumberFormat> number_format;
   // 2. Let numberFormat be ? Construct(%NumberFormat%, « locales, options »).
+  StackLimitCheck stack_check(isolate);
+  // New<JSNumberFormat>() requires a lot of stack space.
+  const int kStackSpaceRequiredForNewJSNumberFormat = 16 * KB;
+  if (stack_check.JsHasOverflowed(kStackSpaceRequiredForNewJSNumberFormat)) {
+    isolate->StackOverflow();
+    return MaybeHandle<String>();
+  }
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, number_format,
       New<JSNumberFormat>(isolate, constructor, locales, options, method_name),
@@ -2737,6 +2744,9 @@ Handle<String> Intl::NumberFieldToType(Isolate* isolate,
     case UNUM_MEASURE_UNIT_FIELD:
       return isolate->factory()->unit_string();
 
+    case UNUM_APPROXIMATELY_SIGN_FIELD:
+      return isolate->factory()->approximatelySign_string();
+
     default:
       UNREACHABLE();
   }
@@ -2889,28 +2899,6 @@ int32_t Intl::GetTimeZoneIndex(Isolate* isolate, Handle<String> identifier) {
   CHECK(U_SUCCESS(status));
   // We should not reach here, the !IsValidTimeZoneName should return earlier
   UNREACHABLE();
-}
-
-// #sec-tointlmathematicalvalue
-MaybeHandle<Object> Intl::ToIntlMathematicalValueAsNumberBigIntOrString(
-    Isolate* isolate, Handle<Object> input) {
-  if (input->IsNumber() || input->IsBigInt()) return input;  // Shortcut.
-  // TODO(ftang) revisit the following after the resolution of
-  // https://github.com/tc39/proposal-intl-numberformat-v3/pull/82
-  if (input->IsOddball()) {
-    return Oddball::ToNumber(isolate, Handle<Oddball>::cast(input));
-  }
-  if (input->IsSymbol()) {
-    THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kSymbolToNumber),
-                    Object);
-  }
-  ASSIGN_RETURN_ON_EXCEPTION(
-      isolate, input,
-      JSReceiver::ToPrimitive(isolate, Handle<JSReceiver>::cast(input),
-                              ToPrimitiveHint::kNumber),
-      Object);
-  if (input->IsString()) UNIMPLEMENTED();
-  return input;
 }
 
 Intl::FormatRangeSourceTracker::FormatRangeSourceTracker() {

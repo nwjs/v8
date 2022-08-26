@@ -41,6 +41,7 @@
 #include "src/debug/debug-frames.h"
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/debug/debug-wasm-objects.h"
+#include "src/wasm/stacks.h"
 #endif  // V8_ENABLE_WEBASSEMBLY
 #include "src/debug/debug.h"
 #include "src/deoptimizer/deoptimizer.h"
@@ -101,6 +102,7 @@
 #include "src/snapshot/embedded/embedded-file-writer-interface.h"
 #include "src/snapshot/read-only-deserializer.h"
 #include "src/snapshot/shared-heap-deserializer.h"
+#include "src/snapshot/snapshot.h"
 #include "src/snapshot/startup-deserializer.h"
 #include "src/strings/string-builder-inl.h"
 #include "src/strings/string-stream.h"
@@ -128,6 +130,10 @@
 #include "src/wasm/wasm-module.h"
 #include "src/wasm/wasm-objects.h"
 #endif  // V8_ENABLE_WEBASSEMBLY
+
+#if defined(V8_OS_WIN) && defined(V8_ENABLE_SYSTEM_INSTRUMENTATION)
+#include "src/diagnostics/system-jit-win.h"
+#endif
 
 #if defined(V8_OS_WIN64)
 #include "src/diagnostics/unwinding-info-win64.h"
@@ -1860,6 +1866,7 @@ class SetThreadInWasmFlagScope {
 Object Isolate::UnwindAndFindHandler() {
   // TODO(v8:12676): Fix gcmole failures in this function.
   DisableGCMole no_gcmole;
+  DisallowGarbageCollection no_gc;
 #if V8_ENABLE_WEBASSEMBLY
   // Create the {SetThreadInWasmFlagScope} first in this function so that its
   // destructor gets called after all the other destructors. It is important
@@ -1900,9 +1907,55 @@ Object Isolate::UnwindAndFindHandler() {
   bool catchable_by_js = is_catchable_by_javascript(exception);
   int visited_frames = 0;
 
+#if V8_ENABLE_WEBASSEMBLY
+  // Iterate the chain of stack segments for wasm stack switching.
+  WasmContinuationObject current_stack;
+  if (FLAG_experimental_wasm_stack_switching) {
+    current_stack =
+        WasmContinuationObject::cast(root(RootIndex::kActiveContinuation));
+  }
+#endif
+
   // Compute handler and stack unwinding information by performing a full walk
   // over the stack and dispatching according to the frame type.
   for (StackFrameIterator iter(this);; iter.Advance(), visited_frames++) {
+#if V8_ENABLE_WEBASSEMBLY
+    if (FLAG_experimental_wasm_stack_switching && iter.done()) {
+      // We reached the end of the current stack segment. Follow the linked-list
+      // of stacks to find the next frame, and perform the implicit stack
+      // switch.
+      auto stack = Managed<wasm::StackMemory>::cast(current_stack.stack());
+      // Mark this stack as empty.
+      stack.get()->jmpbuf()->sp = 0x0;
+      HeapObject parent = current_stack.parent();
+      DCHECK(!parent.IsUndefined());
+      current_stack = WasmContinuationObject::cast(parent);
+      wasm::StackMemory* parent_stack =
+          Managed<wasm::StackMemory>::cast(current_stack.stack()).get().get();
+      iter.Reset(thread_local_top(), parent_stack);
+
+      // Update the continuation and suspender state.
+      roots_table().slot(RootIndex::kActiveContinuation).store(current_stack);
+      WasmSuspenderObject suspender =
+          WasmSuspenderObject::cast(root(RootIndex::kActiveSuspender));
+      if (!suspender.parent().IsUndefined()) {
+        suspender.set_state(WasmSuspenderObject::State::kInactive);
+        auto parent_suspender = WasmSuspenderObject::cast(suspender.parent());
+        parent_suspender.set_state(WasmSuspenderObject::State::kActive);
+        // For now, assume that a suspender contains a single continuation.
+        // TODO(thibaudm): When core stack-switching is added, only update the
+        // suspender when we exit its outermost stack.
+        DCHECK_EQ(current_stack, parent_suspender.continuation());
+      }
+      roots_table().slot(RootIndex::kActiveSuspender).store(suspender.parent());
+      if (FLAG_trace_wasm_stack_switching) {
+        PrintF("Switch to stack #%d (unwind)\n", parent_stack->id());
+      }
+      uintptr_t limit =
+          reinterpret_cast<uintptr_t>(parent_stack->jmpbuf()->stack_limit);
+      stack_guard()->SetStackLimit(limit);
+    }
+#endif
     // Handler must exist.
     DCHECK(!iter.done());
 
@@ -2189,17 +2242,18 @@ HandlerTable::CatchPrediction PredictException(JavaScriptFrame* frame) {
       // tables on the unoptimized code objects.
       std::vector<FrameSummary> summaries;
       frame->Summarize(&summaries);
+      PtrComprCageBase cage_base(frame->isolate());
       for (size_t i = summaries.size(); i != 0; i--) {
         const FrameSummary& summary = summaries[i - 1];
         Handle<AbstractCode> code = summary.AsJavaScript().abstract_code();
-        if (code->IsCode() && code->kind() == CodeKind::BUILTIN) {
+        if (code->kind(cage_base) == CodeKind::BUILTIN) {
           prediction = code->GetCode().GetBuiltinCatchPrediction();
           if (prediction == HandlerTable::UNCAUGHT) continue;
           return prediction;
         }
 
         // Must have been constructed from a bytecode array.
-        CHECK_EQ(CodeKind::INTERPRETED_FUNCTION, code->kind());
+        CHECK_EQ(CodeKind::INTERPRETED_FUNCTION, code->kind(cage_base));
         int code_offset = summary.code_offset();
         HandlerTable table(code->GetBytecodeArray());
         int index = table.LookupRange(code_offset, nullptr, &prediction);
@@ -3301,6 +3355,21 @@ Isolate::Isolate(std::unique_ptr<i::IsolateAllocator> isolate_allocator,
 }
 
 void Isolate::CheckIsolateLayout() {
+#ifdef V8_ENABLE_SANDBOX
+  CHECK_EQ(static_cast<int>(OFFSET_OF(ExternalPointerTable, buffer_)),
+           Internals::kExternalPointerTableBufferOffset);
+  CHECK_EQ(static_cast<int>(OFFSET_OF(ExternalPointerTable, capacity_)),
+           Internals::kExternalPointerTableCapacityOffset);
+  CHECK_EQ(static_cast<int>(OFFSET_OF(ExternalPointerTable, freelist_head_)),
+           Internals::kExternalPointerTableFreelistHeadOffset);
+  CHECK_EQ(static_cast<int>(OFFSET_OF(ExternalPointerTable, mutex_)),
+           Internals::kExternalPointerTableMutexOffset);
+  CHECK_EQ(static_cast<int>(sizeof(ExternalPointerTable)),
+           Internals::kExternalPointerTableSize);
+  CHECK_EQ(static_cast<int>(sizeof(ExternalPointerTable)),
+           ExternalPointerTable::kSize);
+#endif
+
   CHECK_EQ(OFFSET_OF(Isolate, isolate_data_), 0);
   CHECK_EQ(static_cast<int>(OFFSET_OF(Isolate, isolate_data_.embedder_data_)),
            Internals::kIsolateEmbedderDataOffset);
@@ -3317,6 +3386,11 @@ void Isolate::CheckIsolateLayout() {
            Internals::kIsolateLongTaskStatsCounterOffset);
   CHECK_EQ(static_cast<int>(OFFSET_OF(Isolate, isolate_data_.stack_guard_)),
            Internals::kIsolateStackGuardOffset);
+#ifdef V8_ENABLE_SANDBOX
+  CHECK_EQ(static_cast<int>(
+               OFFSET_OF(Isolate, isolate_data_.external_pointer_table_)),
+           Internals::kIsolateExternalPointerTableOffset);
+#endif
   CHECK_EQ(static_cast<int>(OFFSET_OF(Isolate, isolate_data_.roots_table_)),
            Internals::kIsolateRootsOffset);
 
@@ -3325,15 +3399,6 @@ void Isolate::CheckIsolateLayout() {
                 Builtins::kBuiltinTier0Count * kSystemPointerSize);
   static_assert(Internals::kBuiltinTier0EntryTableSize ==
                 Builtins::kBuiltinTier0Count * kSystemPointerSize);
-
-#ifdef V8_SANDBOXED_EXTERNAL_POINTERS
-  CHECK_EQ(static_cast<int>(OFFSET_OF(ExternalPointerTable, buffer_)),
-           Internals::kExternalPointerTableBufferOffset);
-  CHECK_EQ(static_cast<int>(OFFSET_OF(ExternalPointerTable, capacity_)),
-           Internals::kExternalPointerTableCapacityOffset);
-  CHECK_EQ(static_cast<int>(OFFSET_OF(ExternalPointerTable, freelist_head_)),
-           Internals::kExternalPointerTableFreelistHeadOffset);
-#endif
 }
 
 void Isolate::ClearSerializerData() {
@@ -3341,12 +3406,15 @@ void Isolate::ClearSerializerData() {
   external_reference_map_ = nullptr;
 }
 
-bool Isolate::LogObjectRelocation() {
-  return FLAG_verify_predictable || v8_file_logger()->is_logging() ||
-         is_profiling() || v8_file_logger()->is_listening_to_code_events() ||
-         (heap_profiler() != nullptr &&
-          heap_profiler()->is_tracking_object_moves()) ||
-         heap()->has_heap_object_allocation_tracker();
+// When profiling status changes, call this function to update the single bool
+// cache.
+void Isolate::UpdateLogObjectRelocation() {
+  log_object_relocation_ = FLAG_verify_predictable ||
+                           v8_file_logger()->is_logging() || is_profiling() ||
+                           v8_file_logger()->is_listening_to_code_events() ||
+                           (heap_profiler() != nullptr &&
+                            heap_profiler()->is_tracking_object_moves()) ||
+                           heap()->has_heap_object_allocation_tracker();
 }
 
 void Isolate::Deinit() {
@@ -3438,6 +3506,10 @@ void Isolate::Deinit() {
     DetachFromSharedIsolate();
   }
 
+  // Since there are no other threads left, we can lock this mutex without any
+  // ceremony. This signals to the tear down code that we are in a safepoint.
+  base::RecursiveMutexGuard safepoint(&heap_.safepoint()->local_heaps_mutex_);
+
   ReleaseSharedPtrs();
 
   builtins_.TearDown();
@@ -3469,6 +3541,12 @@ void Isolate::Deinit() {
   FILE* logfile = v8_file_logger_->TearDownAndGetLogFile();
   if (logfile != nullptr) base::Fclose(logfile);
 
+#if defined(V8_OS_WIN) && defined(V8_ENABLE_SYSTEM_INSTRUMENTATION)
+  if (i::FLAG_enable_system_instrumentation) {
+    ETWJITInterface::RemoveIsolate(this);
+  }
+#endif  // defined(V8_OS_WIN)
+
 #if V8_ENABLE_WEBASSEMBLY
   wasm::GetWasmEngine()->RemoveIsolate(this);
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -3495,9 +3573,14 @@ void Isolate::Deinit() {
 
   ClearSerializerData();
 
-#ifdef V8_SANDBOXED_EXTERNAL_POINTERS
+#ifdef V8_ENABLE_SANDBOX
   external_pointer_table().TearDown();
-#endif  // V8_SANDBOXED_EXTERNAL_POINTERS
+  if (owns_shareable_data()) {
+    shared_external_pointer_table().TearDown();
+    delete isolate_data_.shared_external_pointer_table_;
+    isolate_data_.shared_external_pointer_table_ = nullptr;
+  }
+#endif  // V8_ENABLE_SANDBOX
 
   {
     base::MutexGuard lock_guard(&thread_data_table_mutex_);
@@ -3889,6 +3972,12 @@ class BigIntPlatform : public bigint::Platform {
  private:
   Isolate* isolate_;
 };
+
+void ResetBeforeGC(v8::Isolate* v8_isolate, v8::GCType gc_type,
+                   v8::GCCallbackFlags flags, void* data) {
+  Isolate* isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
+  isolate->compilation_cache()->MarkCompactPrologue();
+}
 }  // namespace
 
 VirtualMemoryCage* Isolate::GetPtrComprCodeCageForTesting() {
@@ -4045,13 +4134,27 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
 
   isolate_data_.external_reference_table()->Init(this);
 
-#ifdef V8_SANDBOXED_EXTERNAL_POINTERS
+#ifdef V8_ENABLE_SANDBOX
   external_pointer_table().Init(this);
-#endif  // V8_SANDBOXED_EXTERNAL_POINTERS
+  if (owns_shareable_data()) {
+    isolate_data_.shared_external_pointer_table_ = new ExternalPointerTable();
+    shared_external_pointer_table().Init(this);
+  } else {
+    DCHECK_NOT_NULL(shared_isolate());
+    isolate_data_.shared_external_pointer_table_ =
+        shared_isolate()->isolate_data_.shared_external_pointer_table_;
+  }
+#endif  // V8_ENABLE_SANDBOX
 
 #if V8_ENABLE_WEBASSEMBLY
   wasm::GetWasmEngine()->AddIsolate(this);
 #endif  // V8_ENABLE_WEBASSEMBLY
+
+#if defined(V8_OS_WIN) && defined(V8_ENABLE_SYSTEM_INSTRUMENTATION)
+  if (i::FLAG_enable_system_instrumentation) {
+    ETWJITInterface::AddIsolate(this);
+  }
+#endif  // defined(V8_OS_WIN)
 
   if (setup_delegate_ == nullptr) {
     setup_delegate_ = new SetupIsolateDelegate(create_heap_objects);
@@ -4128,7 +4231,6 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
     CodePageCollectionMemoryModificationScope modification_scope(heap());
 
     if (create_heap_objects) {
-      heap_.read_only_space()->ClearStringPaddingIfNeeded();
       read_only_heap_->OnCreateHeapObjectsComplete(this);
     } else {
       SharedHeapDeserializer shared_heap_deserializer(
@@ -4245,6 +4347,9 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
         .store(*continuation);
   }
 #endif
+
+  heap()->AddGCPrologueCallback(ResetBeforeGC, kGCTypeMarkSweepCompact,
+                                nullptr);
 
   initialized_ = true;
 
@@ -5583,7 +5688,9 @@ LocalHeap* Isolate::main_thread_local_heap() {
 
 LocalHeap* Isolate::CurrentLocalHeap() {
   LocalHeap* local_heap = LocalHeap::Current();
-  return local_heap ? local_heap : main_thread_local_heap();
+  if (local_heap) return local_heap;
+  DCHECK_EQ(ThreadId::Current(), thread_id());
+  return main_thread_local_heap();
 }
 
 // |chunk| is either a Page or an executable LargePage.
@@ -5673,39 +5780,71 @@ void Isolate::DetachFromSharedIsolate() {
 #endif  // DEBUG
 }
 
-#ifdef V8_SANDBOXED_EXTERNAL_POINTERS
-ExternalPointer_t Isolate::EncodeWaiterQueueNodeAsExternalPointer(
-    Address node) {
+#ifdef V8_ENABLE_SANDBOX
+ExternalPointerHandle
+Isolate::InsertWaiterQueueNodeIntoSharedExternalPointerTable(Address node) {
   DCHECK_NE(kNullAddress, node);
-  Isolate* shared = shared_isolate();
-  uint32_t index;
-  ExternalPointer_t ext;
+  ExternalPointerHandle handle;
   if (waiter_queue_node_external_pointer_.IsJust()) {
-    ext = waiter_queue_node_external_pointer_.FromJust();
-    index = ext >> kExternalPointerIndexShift;
+    handle = waiter_queue_node_external_pointer_.FromJust();
   } else {
-    index = shared->external_pointer_table().Allocate();
-    ext = index << kExternalPointerIndexShift;
-    waiter_queue_node_external_pointer_ = Just(ext);
+    handle = shared_external_pointer_table().Allocate();
+    waiter_queue_node_external_pointer_ = Just(handle);
   }
-  DCHECK_NE(0, index);
-  shared->external_pointer_table().Set(index, node, kWaiterQueueNodeTag);
-  return ext;
+  DCHECK_NE(0, handle);
+  shared_external_pointer_table().Set(handle, node, kWaiterQueueNodeTag);
+  return handle;
 }
-#endif  // V8_SANDBOXED_EXTERNAL_POINTERS
+#endif  // V8_ENABLE_SANDBOX
+
+namespace {
+class DefaultWasmAsyncResolvePromiseTask : public v8::Task {
+ public:
+  DefaultWasmAsyncResolvePromiseTask(v8::Isolate* isolate,
+                                     v8::Local<v8::Context> context,
+                                     v8::Local<v8::Promise::Resolver> resolver,
+                                     v8::Local<v8::Value> result,
+                                     WasmAsyncSuccess success)
+      : isolate_(isolate),
+        context_(isolate, context),
+        resolver_(isolate, resolver),
+        result_(isolate, result),
+        success_(success) {}
+
+  void Run() override {
+    v8::HandleScope scope(isolate_);
+    MicrotasksScope microtasks_scope(isolate_,
+                                     MicrotasksScope::kDoNotRunMicrotasks);
+    v8::Local<v8::Context> context = context_.Get(isolate_);
+    v8::Local<v8::Promise::Resolver> resolver = resolver_.Get(isolate_);
+    v8::Local<v8::Value> result = result_.Get(isolate_);
+
+    if (success_ == WasmAsyncSuccess::kSuccess) {
+      CHECK(resolver->Resolve(context, result).FromJust());
+    } else {
+      CHECK(resolver->Reject(context, result).FromJust());
+    }
+  }
+
+ private:
+  v8::Isolate* isolate_;
+  v8::Global<v8::Context> context_;
+  v8::Global<v8::Promise::Resolver> resolver_;
+  v8::Global<v8::Value> result_;
+  WasmAsyncSuccess success_;
+};
+}  // namespace
 
 void DefaultWasmAsyncResolvePromiseCallback(
     v8::Isolate* isolate, v8::Local<v8::Context> context,
-    v8::Local<v8::Promise::Resolver> resolver,
-    v8::Local<v8::Value> compilation_result, WasmAsyncSuccess success) {
-  MicrotasksScope microtasks_scope(isolate,
-                                   MicrotasksScope::kDoNotRunMicrotasks);
-
-  if (success == WasmAsyncSuccess::kSuccess) {
-    CHECK(resolver->Resolve(context, compilation_result).FromJust());
-  } else {
-    CHECK(resolver->Reject(context, compilation_result).FromJust());
-  }
+    v8::Local<v8::Promise::Resolver> resolver, v8::Local<v8::Value> result,
+    WasmAsyncSuccess success) {
+  // We have to resolve the promise in a separate task which is not a cancelable
+  // task, to avoid a deadlock when {quit()} is called in the then-handler of
+  // the result promise.
+  V8::GetCurrentPlatform()->GetForegroundTaskRunner(isolate)->PostTask(
+      std::make_unique<DefaultWasmAsyncResolvePromiseTask>(
+          isolate, context, resolver, result, success));
 }
 
 }  // namespace internal

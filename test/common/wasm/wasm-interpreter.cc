@@ -1401,6 +1401,10 @@ class WasmInterpreterInternals {
     CommitPc(pc);
   }
 
+  void DoTrap(MessageTemplate message, pc_t pc) {
+    DoTrap(WasmOpcodes::MessageIdToTrapReason(message), pc);
+  }
+
   // Check if there is room for a function's activation.
   void EnsureStackSpaceForCall(InterpreterCode* code) {
     EnsureStackSpace(code->side_table->max_stack_height_ +
@@ -1436,7 +1440,7 @@ class WasmInterpreterInternals {
     break;
         FOREACH_WASMVALUE_CTYPES(CASE_TYPE)
 #undef CASE_TYPE
-        case kOptRef: {
+        case kRefNull: {
           val = WasmValue(isolate_->factory()->null_value(), p);
           break;
         }
@@ -1897,11 +1901,16 @@ class WasmInterpreterInternals {
         auto src = Pop().to<uint32_t>();
         auto dst = Pop().to<uint32_t>();
         HandleScope scope(isolate_);  // Avoid leaking handles.
-        bool ok = WasmInstanceObject::InitTableEntries(
-            instance_object_->GetIsolate(), instance_object_, imm.table.index,
-            imm.element_segment.index, dst, src, size);
-        if (!ok) DoTrap(kTrapTableOutOfBounds, pc);
-        return ok;
+        base::Optional<MessageTemplate> opt_error =
+            WasmInstanceObject::InitTableEntries(
+                instance_object_->GetIsolate(), instance_object_,
+                imm.table.index, imm.element_segment.index, dst, src, size);
+        if (opt_error.has_value()) {
+          DoTrap(opt_error.value(), pc);
+          return false;
+        }
+
+        return true;
       }
       case kExprElemDrop: {
         IndexImmediate<Decoder::kNoValidation> imm(decoder, code->at(pc + *len),
@@ -3196,7 +3205,7 @@ class WasmInterpreterInternals {
           break;
         }
         case kRef:
-        case kOptRef:
+        case kRefNull:
         case kRtt:
           encoded_values->set(encoded_index++, *value.to_ref());
           break;
@@ -3283,7 +3292,7 @@ class WasmInterpreterInternals {
           break;
         }
         case kRef:
-        case kOptRef:
+        case kRefNull:
         case kRtt: {
           Handle<Object> ref(encoded_values->get(encoded_index++), isolate_);
           value = WasmValue(ref, sig->GetParam(i));
@@ -3511,7 +3520,7 @@ class WasmInterpreterInternals {
               WasmFeatures::All(), &decoder, code->at(pc + 1), module());
           len = 1 + imm.length;
           Push(WasmValue(isolate_->factory()->null_value(),
-                         ValueType::Ref(imm.type, kNullable)));
+                         ValueType::RefNull(imm.type)));
           break;
         }
         case kExprRefFunc: {
@@ -3659,7 +3668,7 @@ class WasmInterpreterInternals {
             FOREACH_WASMVALUE_CTYPES(CASE_TYPE)
 #undef CASE_TYPE
             case kRef:
-            case kOptRef:
+            case kRefNull:
             case kRtt: {
               // TODO(7748): Type checks or DCHECKs for ref types?
               HandleScope handle_scope(isolate_);  // Avoid leaking handles.
@@ -4069,7 +4078,7 @@ class WasmInterpreterInternals {
         case kVoid:
           PrintF("void");
           break;
-        case kOptRef:
+        case kRefNull:
           if (val.to_ref()->IsNull()) {
             PrintF("ref:null");
             break;

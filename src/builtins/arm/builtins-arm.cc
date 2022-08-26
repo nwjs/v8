@@ -1067,7 +1067,6 @@ namespace {
 
 void ResetBytecodeAge(MacroAssembler* masm, Register bytecode_array,
                       Register scratch) {
-  static_assert(BytecodeArray::kNoAgeBytecodeAge == 0);
   DCHECK(!AreAliased(bytecode_array, scratch));
   __ mov(scratch, Operand(0));
   __ strh(scratch,
@@ -2696,12 +2695,7 @@ void Builtins::Generate_WasmCompileLazy(MacroAssembler* masm) {
     __ stm(db_w, sp, gp_regs);
     __ vstm(db_w, sp, lowest_fp_reg, highest_fp_reg);
 
-    // Push the Wasm instance for loading the jump table address after the
-    // runtime call.
-    __ push(kWasmInstanceRegister);
-
-    // Push the Wasm instance again as an explicit argument to the runtime
-    // function.
+    // Push the Wasm instance as an explicit argument to the runtime function.
     __ push(kWasmInstanceRegister);
     // Push the function index as second argument.
     __ push(kWasmCompileLazyFuncIndexRegister);
@@ -2711,16 +2705,18 @@ void Builtins::Generate_WasmCompileLazy(MacroAssembler* masm) {
     __ CallRuntime(Runtime::kWasmCompileLazy, 2);
     // The runtime function returns the jump table slot offset as a Smi. Use
     // that to compute the jump target in r8.
-    __ pop(kWasmInstanceRegister);
-    __ ldr(r8, MemOperand(
-                   kWasmInstanceRegister,
-                   WasmInstanceObject::kJumpTableStartOffset - kHeapObjectTag));
-    __ add(r8, r8, Operand::SmiUntag(kReturnRegister0));
-    // r8 now holds the jump table slot where we want to jump to in the end.
+    __ mov(r8, Operand::SmiUntag(kReturnRegister0));
 
     // Restore registers.
     __ vldm(ia_w, sp, lowest_fp_reg, highest_fp_reg);
     __ ldm(ia_w, sp, gp_regs);
+
+    // After the instance register has been restored, we can add the jump table
+    // start to the jump table offset already stored in r8.
+    __ ldr(r9, MemOperand(
+                   kWasmInstanceRegister,
+                   WasmInstanceObject::kJumpTableStartOffset - kHeapObjectTag));
+    __ add(r8, r8, r9);
   }
 
   // Finally, jump to the jump table slot for the function.
@@ -2780,6 +2776,11 @@ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
 }
 
 void Builtins::Generate_WasmResume(MacroAssembler* masm) {
+  // TODO(v8:12191): Implement for this platform.
+  __ Trap();
+}
+
+void Builtins::Generate_WasmReject(MacroAssembler* masm) {
   // TODO(v8:12191): Implement for this platform.
   __ Trap();
 }
@@ -3311,9 +3312,8 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
   ExternalReference thunk_ref =
       ExternalReference::invoke_accessor_getter_callback();
 
-  __ ldr(scratch, FieldMemOperand(callback, AccessorInfo::kJsGetterOffset));
   __ ldr(api_function_address,
-         FieldMemOperand(scratch, Foreign::kForeignAddressOffset));
+         FieldMemOperand(callback, AccessorInfo::kJsGetterOffset));
 
   // +3 is to skip prolog, return address and name handle.
   MemOperand return_value_operand(

@@ -12,14 +12,13 @@
 #include <vector>
 
 #include "include/libplatform/libplatform.h"
+#include "include/v8-exception.h"
 #include "include/v8-initialization.h"
 #include "include/v8-local-handle.h"
 #include "include/v8-snapshot.h"
 #include "src/base/platform/platform.h"
 #include "src/base/small-vector.h"
-#include "src/base/vector.h"
 #include "src/flags/flags.h"
-#include "src/heap/read-only-heap.h"
 #include "src/utils/utils.h"
 #include "test/inspector/frontend-channel.h"
 #include "test/inspector/isolate-data.h"
@@ -795,11 +794,6 @@ int InspectorTestMain(int argc, char* argv[]) {
   v8::V8::InitializeICUDefaultLocation(argv[0]);
   std::unique_ptr<Platform> platform(platform::NewDefaultPlatform());
   v8::V8::InitializePlatform(platform.get());
-#ifdef V8_ENABLE_SANDBOX
-  if (!v8::V8::InitializeSandbox()) {
-    FATAL("Could not initialize the sandbox");
-  }
-#endif
   FLAG_abort_on_contradictory_flags = true;
   v8::V8::SetFlagsFromCommandLine(&argc, argv, true);
   v8::V8::InitializeExternalStartupData(argv[0]);

@@ -12,6 +12,7 @@
 #include "include/v8-traced-handle.h"
 #include "src/api/api-inl.h"
 #include "src/base/compiler-specific.h"
+#include "src/base/logging.h"
 #include "src/base/sanitizer/asan.h"
 #include "src/common/globals.h"
 #include "src/execution/vm-state-inl.h"
@@ -330,6 +331,7 @@ class NodeBase {
   Object object() const { return Object(object_); }
   FullObjectSlot location() { return FullObjectSlot(&object_); }
   Handle<Object> handle() { return Handle<Object>(&object_); }
+  Address raw_object() const { return object_; }
 
   uint8_t index() const { return index_; }
   void set_index(uint8_t value) { index_ = value; }
@@ -1001,11 +1003,13 @@ void GlobalHandles::CopyTracedReference(const Address* const* from,
                                         Address** to) {
   DCHECK_NOT_NULL(*from);
   DCHECK_NULL(*to);
-  const TracedNode* node = TracedNode::FromLocation(*from);
+  const TracedNode* from_node = TracedNode::FromLocation(*from);
+  // TODO(chromium:1322114): Temporary sanity check.
+  CHECK_NE(kGlobalHandleZapValue, from_node->raw_object());
   GlobalHandles* global_handles =
-      GlobalHandles::From(const_cast<TracedNode*>(node));
+      GlobalHandles::From(const_cast<TracedNode*>(from_node));
   Handle<Object> o = global_handles->CreateTraced(
-      node->object(), reinterpret_cast<Address*>(to),
+      from_node->object(), reinterpret_cast<Address*>(to),
       GlobalHandleStoreMode::kAssigningStore);
   SetSlotThreadSafe(to, o.location());
   TracedNode::Verify(global_handles, from);
@@ -1060,6 +1064,8 @@ void GlobalHandles::MoveTracedReference(Address** from, Address** to) {
     // Move involving a stack slot.
     if (!to_node) {
       DCHECK(global_handles);
+      // TODO(chromium:1322114): Temporary sanity check.
+      CHECK_NE(kGlobalHandleZapValue, from_node->raw_object());
       Handle<Object> o = global_handles->CreateTraced(
           from_node->object(), reinterpret_cast<Address*>(to),
           GlobalHandleStoreMode::kAssigningStore, to_on_stack);
@@ -1070,6 +1076,8 @@ void GlobalHandles::MoveTracedReference(Address** from, Address** to) {
       DCHECK(to_node->markbit());
     } else {
       DCHECK(to_node->IsInUse());
+      // TODO(chromium:1322114): Temporary sanity check.
+      CHECK_NE(kGlobalHandleZapValue, from_node->raw_object());
       to_node->CopyObjectReference(*from_node);
       if (!to_node->is_on_stack() && !to_node->is_in_young_list() &&
           ObjectInYoungGeneration(to_node->object())) {
@@ -1087,6 +1095,12 @@ void GlobalHandles::MoveTracedReference(Address** from, Address** to) {
     SetSlotThreadSafe(from, nullptr);
   } else {
     // Pure heap move.
+    DCHECK_IMPLIES(*to, to_node->IsInUse());
+    // TODO(chromium:1322114): Temporary sanity checks.
+    CHECK_NE(kGlobalHandleZapValue, from_node->raw_object());
+    if (*to) {
+      CHECK_NE(kGlobalHandleZapValue, to_node->raw_object());
+    }
     DestroyTracedReference(*to);
     SetSlotThreadSafe(to, *from);
     to_node = from_node;
@@ -1191,7 +1205,6 @@ V8_INLINE bool GlobalHandles::ResetWeakNodeIfDead(
   switch (node->weakness_type()) {
     case WeaknessType::kNoCallback:
       node->ResetPhantomHandle();
-      ++number_of_phantom_handle_resets_;
       break;
     case WeaknessType::kCallback:
       V8_FALLTHROUGH;
@@ -1215,7 +1228,6 @@ void GlobalHandles::IterateWeakRootsForPhantomHandles(
       // The handle itself is unreachable. We can clear it even if the target V8
       // object is alive.
       node->ResetPhantomHandle();
-      ++number_of_phantom_handle_resets_;
       continue;
     }
     // Clear the markbit for the next GC.
@@ -1224,7 +1236,6 @@ void GlobalHandles::IterateWeakRootsForPhantomHandles(
     // Detect nodes with unreachable target objects.
     if (should_reset_handle(isolate()->heap(), node->location())) {
       node->ResetPhantomHandle();
-      ++number_of_phantom_handle_resets_;
     }
   }
 }
@@ -1289,7 +1300,6 @@ void GlobalHandles::ProcessWeakYoungObjects(
       v8::Value* value = ToApi<v8::Value>(node->handle());
       handler->ResetRoot(
           *reinterpret_cast<v8::TracedReference<v8::Value>*>(&value));
-      ++number_of_phantom_handle_resets_;
       // We cannot check whether a node is in use here as the reset behavior
       // depends on whether incremental marking is running when reclaiming
       // young objects.
@@ -1523,11 +1533,10 @@ void GlobalHandles::ApplyPersistentHandleVisitor(
       node->wrapper_class_id());
 }
 
-DISABLE_CFI_PERF
-void GlobalHandles::IterateAllRootsWithClassIds(
+void GlobalHandles::IterateAllRootsForTesting(
     v8::PersistentHandleVisitor* visitor) {
   for (Node* node : *regular_nodes_) {
-    if (node->IsWeakOrStrongRetainer() && node->has_wrapper_class_id()) {
+    if (node->IsWeakOrStrongRetainer()) {
       ApplyPersistentHandleVisitor(visitor, node);
     }
   }
@@ -1541,26 +1550,6 @@ void GlobalHandles::IterateTracedNodes(
       v8::Value* value = ToApi<v8::Value>(node->handle());
       visitor->VisitTracedReference(
           *reinterpret_cast<v8::TracedReference<v8::Value>*>(&value));
-    }
-  }
-}
-
-DISABLE_CFI_PERF
-void GlobalHandles::IterateAllYoungRootsWithClassIds(
-    v8::PersistentHandleVisitor* visitor) {
-  for (Node* node : young_nodes_) {
-    if (node->IsWeakOrStrongRetainer() && node->has_wrapper_class_id()) {
-      ApplyPersistentHandleVisitor(visitor, node);
-    }
-  }
-}
-
-DISABLE_CFI_PERF
-void GlobalHandles::IterateYoungWeakRootsWithClassIds(
-    v8::PersistentHandleVisitor* visitor) {
-  for (Node* node : young_nodes_) {
-    if (node->has_wrapper_class_id() && node->IsWeak()) {
-      ApplyPersistentHandleVisitor(visitor, node);
     }
   }
 }

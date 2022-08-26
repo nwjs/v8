@@ -42,10 +42,6 @@ class V8 : public AllStatic {
   [[noreturn]] V8_EXPORT_PRIVATE static void FatalProcessOutOfMemory(
       Isolate* isolate, const char* location, const char* detail);
 
-#ifdef V8_ENABLE_SANDBOX
-  static bool InitializeSandbox();
-#endif
-
   static void SetTLSPlatform(v8::Platform* platform);
   static void InitializePlatform(v8::Platform* platform);
   static void DisposePlatform();

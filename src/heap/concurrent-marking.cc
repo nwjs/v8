@@ -289,7 +289,7 @@ class ConcurrentMarkingVisitor final
       DCHECK(!HasWeakHeapObjectTag(object));
       if (!object.IsHeapObject()) continue;
       HeapObject heap_object = HeapObject::cast(object);
-      concrete_visitor()->SynchronizePageAccess(heap_object);
+      SynchronizePageAccess(heap_object);
       BasicMemoryChunk* target_page =
           BasicMemoryChunk::FromHeapObject(heap_object);
       if (!is_shared_heap_ && target_page->InSharedHeap()) continue;
@@ -335,14 +335,6 @@ class ConcurrentMarkingVisitor final
       data.typed_slots.reset(new TypedSlots());
     }
     data.typed_slots->Insert(info.slot_type, info.offset);
-  }
-
-  void SynchronizePageAccess(HeapObject heap_object) {
-#ifdef THREAD_SANITIZER
-    // This is needed because TSAN does not process the memory fence
-    // emitted after page initialization.
-    BasicMemoryChunk::FromHeapObject(heap_object)->SynchronizedHeapLoad();
-#endif
   }
 
   ConcurrentMarkingState* marking_state() { return &marking_state_; }
@@ -449,6 +441,17 @@ ConcurrentMarking::ConcurrentMarking(Heap* heap,
   // Concurrent marking requires atomic object field writes.
   CHECK(!FLAG_concurrent_marking);
 #endif
+  int max_tasks;
+  if (FLAG_concurrent_marking_max_worker_num == 0) {
+    max_tasks = V8::GetCurrentPlatform()->NumberOfWorkerThreads();
+  } else {
+    max_tasks = FLAG_concurrent_marking_max_worker_num;
+  }
+
+  task_state_.reserve(max_tasks + 1);
+  for (int i = 0; i <= max_tasks; ++i) {
+    task_state_.emplace_back(std::make_unique<TaskState>());
+  }
 }
 
 void ConcurrentMarking::Run(JobDelegate* delegate,
@@ -458,7 +461,7 @@ void ConcurrentMarking::Run(JobDelegate* delegate,
   size_t kBytesUntilInterruptCheck = 64 * KB;
   int kObjectsUntilInterruptCheck = 1000;
   uint8_t task_id = delegate->GetTaskId() + 1;
-  TaskState* task_state = &task_state_[task_id];
+  TaskState* task_state = task_state_[task_id].get();
   auto* cpp_heap = CppHeap::From(heap_->cpp_heap());
   MarkingWorklists::Local local_marking_worklists(
       marking_worklists_, cpp_heap
@@ -585,7 +588,7 @@ size_t ConcurrentMarking::GetMaxConcurrency(size_t worker_count) {
   for (auto& worklist : marking_worklists_->context_worklists())
     marking_items += worklist.worklist->Size();
   return std::min<size_t>(
-      kMaxTasks,
+      task_state_.size() - 1,
       worker_count +
           std::max<size_t>({marking_items,
                             weak_objects_->discovered_ephemerons.Size(),
@@ -645,17 +648,17 @@ bool ConcurrentMarking::IsStopped() {
 
 void ConcurrentMarking::FlushNativeContexts(NativeContextStats* main_stats) {
   DCHECK(!job_handle_ || !job_handle_->IsValid());
-  for (int i = 1; i <= kMaxTasks; i++) {
-    main_stats->Merge(task_state_[i].native_context_stats);
-    task_state_[i].native_context_stats.Clear();
+  for (size_t i = 1; i < task_state_.size(); i++) {
+    main_stats->Merge(task_state_[i]->native_context_stats);
+    task_state_[i]->native_context_stats.Clear();
   }
 }
 
 void ConcurrentMarking::FlushMemoryChunkData(
-    MajorNonAtomicMarkingState* marking_state) {
+    NonAtomicMarkingState* marking_state) {
   DCHECK(!job_handle_ || !job_handle_->IsValid());
-  for (int i = 1; i <= kMaxTasks; i++) {
-    MemoryChunkDataMap& memory_chunk_data = task_state_[i].memory_chunk_data;
+  for (size_t i = 1; i < task_state_.size(); i++) {
+    MemoryChunkDataMap& memory_chunk_data = task_state_[i]->memory_chunk_data;
     for (auto& pair : memory_chunk_data) {
       // ClearLiveness sets the live bytes to zero.
       // Pages with zero live bytes might be already unmapped.
@@ -670,16 +673,16 @@ void ConcurrentMarking::FlushMemoryChunkData(
       }
     }
     memory_chunk_data.clear();
-    task_state_[i].marked_bytes = 0;
+    task_state_[i]->marked_bytes = 0;
   }
   total_marked_bytes_ = 0;
 }
 
 void ConcurrentMarking::ClearMemoryChunkData(MemoryChunk* chunk) {
   DCHECK(!job_handle_ || !job_handle_->IsValid());
-  for (int i = 1; i <= kMaxTasks; i++) {
-    auto it = task_state_[i].memory_chunk_data.find(chunk);
-    if (it != task_state_[i].memory_chunk_data.end()) {
+  for (size_t i = 1; i < task_state_.size(); i++) {
+    auto it = task_state_[i]->memory_chunk_data.find(chunk);
+    if (it != task_state_[i]->memory_chunk_data.end()) {
       it->second.live_bytes = 0;
       it->second.typed_slots.reset();
     }
@@ -688,9 +691,9 @@ void ConcurrentMarking::ClearMemoryChunkData(MemoryChunk* chunk) {
 
 size_t ConcurrentMarking::TotalMarkedBytes() {
   size_t result = 0;
-  for (int i = 1; i <= kMaxTasks; i++) {
+  for (size_t i = 1; i < task_state_.size(); i++) {
     result +=
-        base::AsAtomicWord::Relaxed_Load<size_t>(&task_state_[i].marked_bytes);
+        base::AsAtomicWord::Relaxed_Load<size_t>(&task_state_[i]->marked_bytes);
   }
   result += total_marked_bytes_;
   return result;

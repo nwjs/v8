@@ -1038,9 +1038,7 @@ static void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
 }
 
 namespace {
-void ResetBytecodeAge(MacroAssembler* masm,
-                                 Register bytecode_array) {
-  static_assert(BytecodeArray::kNoAgeBytecodeAge == 0);
+void ResetBytecodeAge(MacroAssembler* masm, Register bytecode_array) {
   __ sh(zero_reg,
         FieldMemOperand(bytecode_array, BytecodeArray::kBytecodeAgeOffset));
 }
@@ -3302,9 +3300,8 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
   ExternalReference thunk_ref =
       ExternalReference::invoke_accessor_getter_callback();
 
-  __ lw(scratch, FieldMemOperand(callback, AccessorInfo::kJsGetterOffset));
   __ lw(api_function_address,
-        FieldMemOperand(scratch, Foreign::kForeignAddressOffset));
+        FieldMemOperand(callback, AccessorInfo::kJsGetterOffset));
 
   // +3 is to skip prolog, return address and name handle.
   MemOperand return_value_operand(

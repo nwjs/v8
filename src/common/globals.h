@@ -145,10 +145,15 @@ const size_t kShortBuiltinCallsOldSpaceSizeThreshold = size_t{2} * GB;
 
 #ifdef V8_EXTERNAL_CODE_SPACE
 #define V8_EXTERNAL_CODE_SPACE_BOOL true
+// This flag enables the mode when V8 does not create trampoline Code objects
+// for builtins. It should be enough to have only CodeDataContainer objects.
+// TODO(v8:11880): remove the flag one the Code-less builtins mode works.
+#define V8_REMOVE_BUILTINS_CODE_OBJECTS false
 class CodeDataContainer;
 using CodeT = CodeDataContainer;
 #else
 #define V8_EXTERNAL_CODE_SPACE_BOOL false
+#define V8_REMOVE_BUILTINS_CODE_OBJECTS false
 class Code;
 using CodeT = Code;
 #endif
@@ -397,13 +402,20 @@ constexpr int kPointerSizeLog2 = kSystemPointerSizeLog2;
 static_assert(kPointerSize == (1 << kPointerSizeLog2));
 #endif
 
+#ifdef V8_COMPRESS_POINTERS_8GB
+// To support 8GB heaps, all alocations are aligned to at least 8 bytes.
+#define V8_COMPRESS_POINTERS_8GB_BOOL true
+#else
+#define V8_COMPRESS_POINTERS_8GB_BOOL false
+#endif
+
 // This type defines raw storage type for external (or off-V8 heap) pointers
 // stored on V8 heap.
-constexpr int kExternalPointerSize = sizeof(ExternalPointer_t);
+constexpr int kExternalPointerSlotSize = sizeof(ExternalPointer_t);
 #ifdef V8_SANDBOXED_EXTERNAL_POINTERS
-static_assert(kExternalPointerSize == kTaggedSize);
+static_assert(kExternalPointerSlotSize == kTaggedSize);
 #else
-static_assert(kExternalPointerSize == kSystemPointerSize);
+static_assert(kExternalPointerSlotSize == kSystemPointerSize);
 #endif
 
 constexpr int kEmbedderDataSlotSize = kSystemPointerSize;
@@ -932,17 +944,11 @@ enum AllocationAlignment {
   kDoubleUnaligned
 };
 
-#ifdef V8_HOST_ARCH_32_BIT
-#define USE_ALLOCATION_ALIGNMENT_BOOL true
-#else
-#ifdef V8_COMPRESS_POINTERS
 // TODO(ishell, v8:8875): Consider using aligned allocations once the
 // allocation alignment inconsistency is fixed. For now we keep using
-// unaligned access since both x64 and arm64 architectures (where pointer
-// compression is supported) allow unaligned access to doubles and full words.
-#endif  // V8_COMPRESS_POINTERS
+// tagged aligned (not double aligned) access since all our supported platforms
+// allow tagged-aligned access to doubles and full words.
 #define USE_ALLOCATION_ALIGNMENT_BOOL false
-#endif  // V8_HOST_ARCH_32_BIT
 
 enum class AccessMode { ATOMIC, NON_ATOMIC };
 
@@ -1800,7 +1806,7 @@ enum IsolateAddressId {
   V(TrapFloatUnrepresentable)      \
   V(TrapFuncSigMismatch)           \
   V(TrapDataSegmentOutOfBounds)    \
-  V(TrapElemSegmentDropped)        \
+  V(TrapElementSegmentOutOfBounds) \
   V(TrapTableOutOfBounds)          \
   V(TrapRethrowNull)               \
   V(TrapNullDereference)           \

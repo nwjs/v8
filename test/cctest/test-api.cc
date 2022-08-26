@@ -55,34 +55,25 @@
 #include "src/base/platform/platform.h"
 #include "src/base/strings.h"
 #include "src/codegen/compilation-cache.h"
-#include "src/common/allow-deprecated.h"
 #include "src/compiler/globals.h"
-#include "src/debug/debug.h"
-#include "src/execution/arguments.h"
 #include "src/execution/execution.h"
 #include "src/execution/futex-emulation.h"
 #include "src/execution/protectors-inl.h"
-#include "src/execution/vm-state.h"
 #include "src/handles/global-handles.h"
-#include "src/heap/evacuation-allocator.h"
 #include "src/heap/heap-inl.h"
 #include "src/heap/incremental-marking.h"
 #include "src/logging/metrics.h"
 #include "src/objects/feedback-vector-inl.h"
 #include "src/objects/feedback-vector.h"
 #include "src/objects/hash-table-inl.h"
-#include "src/objects/js-array-buffer-inl.h"
 #include "src/objects/js-array-inl.h"
 #include "src/objects/js-promise-inl.h"
 #include "src/objects/lookup.h"
 #include "src/objects/map-updater.h"
-#include "src/objects/module-inl.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/string-inl.h"
 #include "src/objects/synthetic-module-inl.h"
 #include "src/profiler/cpu-profiler.h"
-#include "src/profiler/symbolizer.h"
-#include "src/strings/unicode-inl.h"
 #include "src/utils/utils.h"
 #include "test/cctest/heap/heap-tester.h"
 #include "test/cctest/heap/heap-utils.h"
@@ -4395,8 +4386,7 @@ TEST(GlobalValueMap) {
   TestGlobalValueMap<WeakMap>();
 }
 
-
-TEST(PersistentValueVector) {
+TEST(VectorOfGlobals) {
   LocalContext env;
   v8::Isolate* isolate = env->GetIsolate();
   v8::internal::GlobalHandles* global_handles =
@@ -4404,40 +4394,39 @@ TEST(PersistentValueVector) {
   size_t handle_count = global_handles->handles_count();
   HandleScope scope(isolate);
 
-  v8::PersistentValueVector<v8::Object> vector(isolate);
+  std::vector<v8::Global<v8::Object>> vector;
 
   Local<v8::Object> obj1 = v8::Object::New(isolate);
   Local<v8::Object> obj2 = v8::Object::New(isolate);
   v8::Global<v8::Object> obj3(isolate, v8::Object::New(isolate));
 
-  CHECK(vector.IsEmpty());
-  CHECK_EQ(0, static_cast<int>(vector.Size()));
+  CHECK(vector.empty());
+  CHECK_EQ(0, static_cast<int>(vector.size()));
 
-  vector.ReserveCapacity(3);
-  CHECK(vector.IsEmpty());
+  vector.reserve(3);
+  CHECK(vector.empty());
 
-  vector.Append(obj1);
-  vector.Append(obj2);
-  vector.Append(obj1);
-  vector.Append(obj3.Pass());
-  vector.Append(obj1);
+  vector.emplace_back(isolate, obj1);
+  vector.emplace_back(isolate, obj2);
+  vector.emplace_back(isolate, obj1);
+  vector.emplace_back(obj3.Pass());
+  vector.emplace_back(isolate, obj1);
 
-  CHECK(!vector.IsEmpty());
-  CHECK_EQ(5, static_cast<int>(vector.Size()));
+  CHECK(!vector.empty());
+  CHECK_EQ(5, static_cast<int>(vector.size()));
   CHECK(obj3.IsEmpty());
-  CHECK(obj1->Equals(env.local(), vector.Get(0)).FromJust());
-  CHECK(obj1->Equals(env.local(), vector.Get(2)).FromJust());
-  CHECK(obj1->Equals(env.local(), vector.Get(4)).FromJust());
-  CHECK(obj2->Equals(env.local(), vector.Get(1)).FromJust());
+  CHECK(obj1->Equals(env.local(), vector[0].Get(isolate)).FromJust());
+  CHECK(obj1->Equals(env.local(), vector[2].Get(isolate)).FromJust());
+  CHECK(obj1->Equals(env.local(), vector[4].Get(isolate)).FromJust());
+  CHECK(obj2->Equals(env.local(), vector[1].Get(isolate)).FromJust());
 
   CHECK_EQ(5 + handle_count, global_handles->handles_count());
 
-  vector.Clear();
-  CHECK(vector.IsEmpty());
-  CHECK_EQ(0, static_cast<int>(vector.Size()));
+  vector.clear();
+  CHECK(vector.empty());
+  CHECK_EQ(0, static_cast<int>(vector.size()));
   CHECK_EQ(handle_count, global_handles->handles_count());
 }
-
 
 THREADED_TEST(GlobalHandleUpcast) {
   v8::Isolate* isolate = CcTest::isolate();
@@ -13354,35 +13343,6 @@ TEST(DontLeakGlobalObjects) {
   }
 }
 
-
-TEST(CopyablePersistent) {
-  LocalContext context;
-  v8::Isolate* isolate = context->GetIsolate();
-  i::GlobalHandles* globals =
-      reinterpret_cast<i::Isolate*>(isolate)->global_handles();
-  size_t initial_handles = globals->handles_count();
-  using CopyableObject =
-      v8::Persistent<v8::Object, v8::CopyablePersistentTraits<v8::Object>>;
-  {
-    CopyableObject handle1;
-    {
-      v8::HandleScope scope(isolate);
-      handle1.Reset(isolate, v8::Object::New(isolate));
-    }
-    CHECK_EQ(initial_handles + 1, globals->handles_count());
-    CopyableObject  handle2;
-    handle2 = handle1;
-    CHECK(handle1 == handle2);
-    CHECK_EQ(initial_handles + 2, globals->handles_count());
-    CopyableObject handle3(handle2);
-    CHECK(handle1 == handle3);
-    CHECK_EQ(initial_handles + 3, globals->handles_count());
-  }
-  // Verify autodispose
-  CHECK_EQ(initial_handles, globals->handles_count());
-}
-
-
 static void WeakApiCallback(
     const v8::WeakCallbackInfo<Persistent<v8::Object>>& data) {
   data.GetParameter()->Reset();
@@ -13574,13 +13534,9 @@ static int move_events = 0;
 static bool FunctionNameIs(const char* expected,
                            const v8::JitCodeEvent* event) {
   // Log lines for functions are of the general form:
-  // "LazyCompile:<type><function_name>" or Function:<type><function_name>,
+  // "JS:<type><function_name>" or Function:<type><function_name>,
   // where the type is one of "*", "~" or "".
-  static const char* kPreamble = "Function:";
-  if (i::FLAG_lazy &&
-      event->code_type != v8::JitCodeEvent::CodeType::WASM_CODE) {
-    kPreamble = "LazyCompile:";
-  }
+  static const char* kPreamble = "JS:";
   static size_t kPreambleLen = strlen(kPreamble);
 
   if (event->name.len < kPreambleLen ||
@@ -16600,7 +16556,16 @@ static void GetStackLimitCallback(
 // Given a size, returns an address that is that far from the current
 // top of stack.
 static uint32_t* ComputeStackLimit(uint32_t size) {
+  // Disable the gcc error which (very correctly) notes that this is an
+  // out-of-bounds access.
+#if V8_CC_GNU
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
+#endif  // V8_CC_GNU
   uint32_t* answer = &size - (size / sizeof(size));
+#if V8_CC_GNU
+#pragma GCC diagnostic pop
+#endif  // V8_CC_GNU
   // If the size is very large and the stack is very near the bottom of
   // memory then the calculation above may wrap around and give an address
   // that is above the (downwards-growing) stack.  In that case we return
@@ -18812,51 +18777,6 @@ TEST(DontDeleteCellLoadIC) {
     ExpectString("readCell()", "new_second");
   }
 }
-
-
-class Visitor42 : public v8::PersistentHandleVisitor {
- public:
-  explicit Visitor42(v8::Persistent<v8::Object>* object)
-      : counter_(0), object_(object) { }
-
-  void VisitPersistentHandle(Persistent<Value>* value,
-                             uint16_t class_id) override {
-    if (class_id != 42) return;
-    CHECK_EQ(42, value->WrapperClassId());
-    v8::Isolate* isolate = CcTest::isolate();
-    v8::HandleScope handle_scope(isolate);
-    v8::Local<v8::Value> handle = v8::Local<v8::Value>::New(isolate, *value);
-    v8::Local<v8::Value> object = v8::Local<v8::Object>::New(isolate, *object_);
-    CHECK(handle->IsObject());
-    CHECK(Local<Object>::Cast(handle)
-              ->Equals(isolate->GetCurrentContext(), object)
-              .FromJust());
-    ++counter_;
-  }
-
-  int counter_;
-  v8::Persistent<v8::Object>* object_;
-};
-
-START_ALLOW_USE_DEPRECATED()
-
-TEST(PersistentHandleVisitor) {
-  LocalContext context;
-  v8::Isolate* isolate = context->GetIsolate();
-  v8::HandleScope scope(isolate);
-  v8::Persistent<v8::Object> object(isolate, v8::Object::New(isolate));
-  CHECK_EQ(0, object.WrapperClassId());
-  object.SetWrapperClassId(42);
-  CHECK_EQ(42, object.WrapperClassId());
-
-  Visitor42 visitor(&object);
-  isolate->VisitHandlesWithClassIds(&visitor);
-  CHECK_EQ(1, visitor.counter_);
-
-  object.Reset();
-}
-
-END_ALLOW_USE_DEPRECATED()
 
 TEST(WrapperClassId) {
   LocalContext context;
@@ -23855,23 +23775,25 @@ TEST(StreamingWithHarmonyScopes) {
   delete[] full_source;
 }
 
-// Regression test for crbug.com/v8/12668. Verifies that after a streamed script
-// is inserted into the isolate script cache, a non-streamed script with
-// identical origin can reuse that data.
-TEST(StreamingWithIsolateScriptCache) {
+namespace {
+void StreamingWithIsolateScriptCache(bool run_gc) {
+  i::FLAG_expose_gc = true;
   const char* chunks[] = {"'use strict'; (function test() { return 13; })",
                           nullptr};
   const char* full_source = chunks[0];
   v8::Isolate* isolate = CcTest::isolate();
+  auto i_isolate = reinterpret_cast<i::Isolate*>(isolate);
   v8::HandleScope scope(isolate);
   v8::ScriptOrigin origin(isolate, v8_str("http://foo.com"), 0, 0, false, -1,
                           v8::Local<v8::Value>(), false, false, false);
+  v8::Local<Value> first_function_untyped;
   i::Handle<i::JSFunction> first_function;
   i::Handle<i::JSFunction> second_function;
 
   // Run the script using streaming.
   {
     LocalContext env;
+    v8::EscapableHandleScope inner_scope(isolate);
 
     v8::ScriptCompiler::StreamedSource source(
         std::make_unique<TestSourceStream>(chunks),
@@ -23886,13 +23808,38 @@ TEST(StreamingWithIsolateScriptCache) {
                                     origin)
             .ToLocalChecked();
     v8::Local<Value> result(script->Run(env.local()).ToLocalChecked());
-    first_function =
-        i::Handle<i::JSFunction>::cast(v8::Utils::OpenHandle(*result));
+    first_function_untyped = inner_scope.Escape(result);
+
+    if (run_gc) {
+      // Age the top-level bytecode for the script to encourage the Isolate
+      // script cache to evict it. However, there are still active Handles
+      // referring to functions in that script, so the script itself should stay
+      // alive and reachable via the Isolate script cache.
+      i::Handle<i::JSFunction> script_function =
+          i::Handle<i::JSFunction>::cast(v8::Utils::OpenHandle(*script));
+      i::Handle<i::BytecodeArray> script_bytecode(
+          script_function->shared().GetBytecodeArray(i_isolate), i_isolate);
+      for (int i = 0; i < 5; ++i) {
+        script_bytecode->MakeOlder();
+      }
+    }
   }
+
+  first_function = i::Handle<i::JSFunction>::cast(
+      v8::Utils::OpenHandle(*first_function_untyped));
 
   // Run the same script in another Context without streaming.
   {
     LocalContext env;
+
+    if (run_gc) {
+      // Perform garbage collection, which should remove the top-level
+      // SharedFunctionInfo from the Isolate script cache. However, the
+      // corresponding Script is still reachable and therefore still present in
+      // the Isolate script cache.
+      CompileRun("gc();");
+    }
+
     v8::ScriptCompiler::Source script_source(v8_str(full_source), origin);
     Local<Script> script =
         v8::ScriptCompiler::Compile(env.local(), &script_source)
@@ -23905,6 +23852,26 @@ TEST(StreamingWithIsolateScriptCache) {
   // The functions created by both copies of the script should refer to the same
   // SharedFunctionInfo instance due to the isolate script cache.
   CHECK_EQ(first_function->shared(), second_function->shared());
+}
+}  // namespace
+
+// Regression test for crbug.com/v8/12668. Verifies that after a streamed script
+// is inserted into the isolate script cache, a non-streamed script with
+// identical origin can reuse that data.
+TEST(StreamingWithIsolateScriptCache) {
+  StreamingWithIsolateScriptCache(false);
+}
+
+// Variant of the above test which evicts the root SharedFunctionInfo from the
+// Isolate script cache but still reuses the same Script.
+TEST(StreamingWithIsolateScriptCacheClearingRootSFI) {
+  // TODO(v8:12808): Remove this check once background compilation is capable of
+  // reusing an existing Script.
+  if (v8::internal::FLAG_stress_background_compile) {
+    return;
+  }
+
+  StreamingWithIsolateScriptCache(true);
 }
 
 TEST(CodeCache) {
@@ -24181,9 +24148,11 @@ TEST(CreateSyntheticModule) {
 }
 
 TEST(CreateSyntheticModuleGC) {
+#ifdef V8_ENABLE_ALLOCATION_TIMEOUT
   // Try to make sure that CreateSyntheticModule() deals well with a GC
   // happening during its execution.
-  i::FLAG_gc_interval = 10;
+  i::HeapAllocator::SetAllocationGcInterval(10);
+#endif
   i::FLAG_inline_new = false;
 
   LocalContext env;
@@ -24445,6 +24414,122 @@ TEST(ImportFromSyntheticModuleThrow) {
 
   CHECK_EQ(module->GetStatus(), Module::kErrored);
   CHECK(try_catch.HasCaught());
+}
+
+namespace {
+
+v8::MaybeLocal<Module> ModuleEvaluateTerminateExecutionResolveCallback(
+    Local<Context> context, Local<String> specifier,
+    Local<FixedArray> import_assertions, Local<Module> referrer) {
+  v8::Isolate* isolate = context->GetIsolate();
+
+  Local<String> url = v8_str("www.test.com");
+  Local<String> source_text = v8_str("await Promise.resolve();");
+  v8::ScriptOrigin origin(isolate, url, 0, 0, false, -1, Local<v8::Value>(),
+                          false, false, true);
+  v8::ScriptCompiler::Source source(source_text, origin);
+  Local<Module> module =
+      v8::ScriptCompiler::CompileModule(isolate, &source).ToLocalChecked();
+  module
+      ->InstantiateModule(context,
+                          ModuleEvaluateTerminateExecutionResolveCallback)
+      .ToChecked();
+
+  CHECK_EQ(module->GetStatus(), Module::kInstantiated);
+  return module;
+}
+
+void ModuleEvaluateTerminateExecution(
+    const v8::FunctionCallbackInfo<v8::Value>& args) {
+  v8::Isolate::GetCurrent()->TerminateExecution();
+}
+}  // namespace
+
+TEST(ModuleEvaluateTerminateExecution) {
+  LocalContext env;
+  v8::Isolate* isolate = env->GetIsolate();
+  v8::Isolate::Scope iscope(isolate);
+  v8::HandleScope scope(isolate);
+  v8::Local<v8::Context> context = v8::Context::New(isolate);
+  v8::Context::Scope cscope(context);
+
+  v8::Local<v8::Function> terminate_execution =
+      v8::Function::New(context, ModuleEvaluateTerminateExecution,
+                        v8_str("terminate_execution"))
+          .ToLocalChecked();
+  context->Global()
+      ->Set(context, v8_str("terminate_execution"), terminate_execution)
+      .FromJust();
+
+  Local<String> url = v8_str("www.test.com");
+  Local<String> source_text = v8_str(
+      "terminate_execution();"
+      "await Promise.resolve();");
+  v8::ScriptOrigin origin(isolate, url, 0, 0, false, -1, Local<v8::Value>(),
+                          false, false, true);
+  v8::ScriptCompiler::Source source(source_text, origin);
+  Local<Module> module =
+      v8::ScriptCompiler::CompileModule(isolate, &source).ToLocalChecked();
+  module
+      ->InstantiateModule(context,
+                          ModuleEvaluateTerminateExecutionResolveCallback)
+      .ToChecked();
+
+  CHECK_EQ(module->GetStatus(), Module::kInstantiated);
+  TryCatch try_catch(isolate);
+  v8::MaybeLocal<Value> completion_value = module->Evaluate(context);
+  CHECK(completion_value.IsEmpty());
+
+  CHECK_EQ(module->GetStatus(), Module::kErrored);
+  CHECK(try_catch.HasCaught());
+  CHECK(try_catch.HasTerminated());
+}
+
+TEST(ModuleEvaluateImportTerminateExecution) {
+  LocalContext env;
+  v8::Isolate* isolate = env->GetIsolate();
+  v8::Isolate::Scope iscope(isolate);
+  v8::HandleScope scope(isolate);
+  v8::Local<v8::Context> context = v8::Context::New(isolate);
+  v8::Context::Scope cscope(context);
+
+  v8::Local<v8::Function> terminate_execution =
+      v8::Function::New(context, ModuleEvaluateTerminateExecution,
+                        v8_str("terminate_execution"))
+          .ToLocalChecked();
+  context->Global()
+      ->Set(context, v8_str("terminate_execution"), terminate_execution)
+      .FromJust();
+
+  Local<String> url = v8_str("www.test.com");
+  Local<String> source_text = v8_str(
+      "import './synthetic.module';"
+      "terminate_execution();"
+      "await Promise.resolve();");
+  v8::ScriptOrigin origin(isolate, url, 0, 0, false, -1, Local<v8::Value>(),
+                          false, false, true);
+  v8::ScriptCompiler::Source source(source_text, origin);
+  Local<Module> module =
+      v8::ScriptCompiler::CompileModule(isolate, &source).ToLocalChecked();
+  module
+      ->InstantiateModule(context,
+                          ModuleEvaluateTerminateExecutionResolveCallback)
+      .ToChecked();
+
+  CHECK_EQ(module->GetStatus(), Module::kInstantiated);
+  TryCatch try_catch(isolate);
+  v8::MaybeLocal<Value> completion_value = module->Evaluate(context);
+  Local<v8::Promise> promise(
+      Local<v8::Promise>::Cast(completion_value.ToLocalChecked()));
+  CHECK_EQ(promise->State(), v8::Promise::kPending);
+  isolate->PerformMicrotaskCheckpoint();
+
+  // The exception thrown by terminate execution is not catchable by JavaScript
+  // so the promise can not be settled.
+  CHECK_EQ(promise->State(), v8::Promise::kPending);
+  CHECK_EQ(module->GetStatus(), Module::kEvaluated);
+  CHECK(try_catch.HasCaught());
+  CHECK(try_catch.HasTerminated());
 }
 
 // Tests that the code cache does not confuse the same source code compiled as a
@@ -27639,7 +27724,8 @@ struct BasicApiChecker {
   }
   static Ret FastCallbackNoFallback(v8::Local<v8::Object> receiver,
                                     Value argument) {
-    v8::FastApiCallbackOptions options = {false, {0}};
+    v8::FastApiCallbackOptions options =
+        v8::FastApiCallbackOptions::CreateForTesting(v8::Isolate::GetCurrent());
     return Impl::FastCallback(receiver, argument, options);
   }
 
@@ -27674,7 +27760,8 @@ template <typename Value, typename Impl, typename Ret,
           typename = std::enable_if_t<!std::is_void<Ret>::value>>
 static v8::AnyCType FastCallbackNoFallbackWrapper(v8::AnyCType receiver,
                                                   v8::AnyCType argument) {
-  v8::FastApiCallbackOptions options = {false, {0}};
+  v8::FastApiCallbackOptions options =
+      v8::FastApiCallbackOptions::CreateForTesting(v8::Isolate::GetCurrent());
   v8::AnyCType ret = PrimitiveToMixedType<Ret>(Impl::FastCallback(
       receiver.object_value, PrimitiveFromMixedType<Value>(argument), options));
   return ret;
@@ -27691,7 +27778,8 @@ template <typename Value, typename Impl, typename Ret,
           typename = std::enable_if_t<std::is_void<Ret>::value>>
 static void FastCallbackNoFallbackWrapper(v8::AnyCType receiver,
                                           v8::AnyCType argument) {
-  v8::FastApiCallbackOptions options = {false, {0}};
+  v8::FastApiCallbackOptions options =
+      v8::FastApiCallbackOptions::CreateForTesting(v8::Isolate::GetCurrent());
   return Impl::FastCallback(receiver.object_value,
                             PrimitiveFromMixedType<Value>(argument), options);
 }
@@ -29404,4 +29492,23 @@ TEST(EmbedderInstanceTypes) {
   Local<Value> res =
       env->Global()->Get(env.local(), v8_str("x")).ToLocalChecked();
   CHECK_EQ(1, res->ToInt32(env.local()).ToLocalChecked()->Value());
+}
+
+UNINITIALIZED_TEST(IsolateCreateParamsIsMovableAndCopyable) {
+  // A struct with deprecated fields will trigger a deprecation warning when
+  // using the copy or move constructor (without special care), see
+  // https://crbug.com/v8/13092.
+  // Test that we can use the move- and copy constructor of
+  // Isolate::CreateParams.
+
+  v8::Isolate::CreateParams params;
+  // Use move constructor.
+  v8::Isolate::CreateParams params2{std::move(params)};
+  // Use copy constructor.
+  v8::Isolate::CreateParams params3{params2};
+
+  // Use move assignment.
+  params = std::move(params2);
+  // Use copy assignment.
+  params = params2;
 }

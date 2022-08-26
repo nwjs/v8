@@ -331,6 +331,9 @@ class V8_EXPORT CpuProfilingOptions {
       unsigned max_samples = kNoSampleLimit, int sampling_interval_us = 0,
       MaybeLocal<Context> filter_context = MaybeLocal<Context>());
 
+  CpuProfilingOptions(CpuProfilingOptions&&) = default;
+  CpuProfilingOptions& operator=(CpuProfilingOptions&&) = default;
+
   CpuProfilingMode mode() const { return mode_; }
   unsigned max_samples() const { return max_samples_; }
   int sampling_interval_us() const { return sampling_interval_us_; }
@@ -344,7 +347,7 @@ class V8_EXPORT CpuProfilingOptions {
   CpuProfilingMode mode_;
   unsigned max_samples_;
   int sampling_interval_us_;
-  CopyablePersistentTraits<Context>::CopyablePersistent filter_context_;
+  Global<Context> filter_context_;
 };
 
 /**
@@ -1160,18 +1163,18 @@ struct HeapStatsUpdate {
   uint32_t size;  // New value of size field for the interval with this index.
 };
 
-#define CODE_EVENTS_LIST(V) \
-  V(Builtin)                \
-  V(Callback)               \
-  V(Eval)                   \
-  V(Function)               \
-  V(InterpretedFunction)    \
-  V(Handler)                \
-  V(BytecodeHandler)        \
-  V(LazyCompile)            \
-  V(RegExp)                 \
-  V(Script)                 \
-  V(Stub)                   \
+#define CODE_EVENTS_LIST(V)                          \
+  V(Builtin)                                         \
+  V(Callback)                                        \
+  V(Eval)                                            \
+  V(Function)                                        \
+  V(InterpretedFunction)                             \
+  V(Handler)                                         \
+  V(BytecodeHandler)                                 \
+  V(LazyCompile) /* Unused, use kFunction instead */ \
+  V(RegExp)                                          \
+  V(Script)                                          \
+  V(Stub)                                            \
   V(Relocation)
 
 /**

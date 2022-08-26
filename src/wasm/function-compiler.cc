@@ -4,16 +4,13 @@
 
 #include "src/wasm/function-compiler.h"
 
-#include "src/base/platform/time.h"
-#include "src/base/strings.h"
 #include "src/codegen/compiler.h"
-#include "src/codegen/macro-assembler-inl.h"
 #include "src/codegen/optimized-compilation-info.h"
 #include "src/compiler/wasm-compiler.h"
-#include "src/diagnostics/code-tracer.h"
+#include "src/handles/handles-inl.h"
 #include "src/logging/counters-scopes.h"
 #include "src/logging/log.h"
-#include "src/utils/ostreams.h"
+#include "src/objects/code-inl.h"
 #include "src/wasm/baseline/liftoff-compiler.h"
 #include "src/wasm/wasm-code-manager.h"
 #include "src/wasm/wasm-debug.h"
@@ -248,7 +245,7 @@ Handle<CodeT> JSToWasmWrapperCompilationUnit::Finalize() {
       isolate_->is_profiling()) {
     Handle<String> name = isolate_->factory()->NewStringFromAsciiChecked(
         job_->compilation_info()->GetDebugName().get());
-    PROFILE(isolate_, CodeCreateEvent(LogEventListener::STUB_TAG,
+    PROFILE(isolate_, CodeCreateEvent(LogEventListener::CodeTag::kStub,
                                       Handle<AbstractCode>::cast(code), name));
   }
   return ToCodeT(code, isolate_);

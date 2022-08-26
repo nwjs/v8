@@ -145,6 +145,11 @@ int OffHeapUnwindingInfoSize(HeapObject code, Builtin builtin) {
   return d.UnwindingInfoSizeOf(builtin);
 }
 
+int OffHeapStackSlots(HeapObject code, Builtin builtin) {
+  EmbeddedData d = EmbeddedDataWithMaybeRemappedEmbeddedBuiltins(code);
+  return d.StackSlotsOf(builtin);
+}
+
 void Code::ClearEmbeddedObjects(Heap* heap) {
   HeapObject undefined = ReadOnlyRoots(heap).undefined_value();
   int mode_mask = RelocInfo::EmbeddedObjectModeMask();
@@ -215,7 +220,15 @@ void Code::RelocateFromDesc(ByteArray reloc_info, Heap* heap,
 }
 
 SafepointEntry Code::GetSafepointEntry(Isolate* isolate, Address pc) {
+  DCHECK(!is_maglevved());
   SafepointTable table(isolate, pc, *this);
+  return table.FindEntry(pc);
+}
+
+MaglevSafepointEntry Code::GetMaglevSafepointEntry(Isolate* isolate,
+                                                   Address pc) {
+  DCHECK(is_maglevved());
+  MaglevSafepointTable table(isolate, pc, *this);
   return table.FindEntry(pc);
 }
 
@@ -237,8 +250,7 @@ Address CodeDataContainer::OffHeapInstructionStart(Isolate* isolate,
 Address Code::OffHeapInstructionEnd(Isolate* isolate, Address pc) const {
   DCHECK(is_off_heap_trampoline());
   EmbeddedData d = EmbeddedData::GetEmbeddedDataForPC(isolate, pc);
-  return d.InstructionStartOfBuiltin(builtin_id()) +
-         d.InstructionSizeOfBuiltin(builtin_id());
+  return d.InstructionEndOf(builtin_id());
 }
 
 #ifdef V8_EXTERNAL_CODE_SPACE
@@ -246,20 +258,34 @@ Address CodeDataContainer::OffHeapInstructionEnd(Isolate* isolate,
                                                  Address pc) const {
   DCHECK(is_off_heap_trampoline());
   EmbeddedData d = EmbeddedData::GetEmbeddedDataForPC(isolate, pc);
-  return d.InstructionStartOfBuiltin(builtin_id()) +
-         d.InstructionSizeOfBuiltin(builtin_id());
+  return d.InstructionEndOf(builtin_id());
 }
-#endif
+#endif  // V8_EXTERNAL_CODE_SPACE
+
+bool Code::OffHeapBuiltinContains(Isolate* isolate, Address pc) const {
+  DCHECK(is_off_heap_trampoline());
+  EmbeddedData d = EmbeddedData::GetEmbeddedDataForPC(isolate, pc);
+  return d.BuiltinContains(builtin_id(), pc);
+}
+
+#ifdef V8_EXTERNAL_CODE_SPACE
+bool CodeDataContainer::OffHeapBuiltinContains(Isolate* isolate,
+                                               Address pc) const {
+  DCHECK(is_off_heap_trampoline());
+  EmbeddedData d = EmbeddedData::GetEmbeddedDataForPC(isolate, pc);
+  return d.BuiltinContains(builtin_id(), pc);
+}
+#endif  // V8_EXTERNAL_CODE_SPACE
 
 // TODO(cbruni): Move to BytecodeArray
-int AbstractCode::SourcePosition(int offset) {
-  CHECK_NE(kind(), CodeKind::BASELINE);
-  Object maybe_table = SourcePositionTableInternal();
+int AbstractCode::SourcePosition(PtrComprCageBase cage_base, int offset) {
+  CHECK_NE(kind(cage_base), CodeKind::BASELINE);
+  Object maybe_table = SourcePositionTableInternal(cage_base);
   if (maybe_table.IsException()) return kNoSourcePosition;
 
   ByteArray source_position_table = ByteArray::cast(maybe_table);
   // Subtract one because the current PC is one instruction after the call site.
-  if (IsCode()) offset--;
+  if (IsCode(cage_base)) offset--;
   int position = 0;
   for (SourcePositionTableIterator iterator(
            source_position_table, SourcePositionTableIterator::kJavaScriptOnly,
@@ -272,13 +298,14 @@ int AbstractCode::SourcePosition(int offset) {
 }
 
 // TODO(cbruni): Move to BytecodeArray
-int AbstractCode::SourceStatementPosition(int offset) {
-  CHECK_NE(kind(), CodeKind::BASELINE);
+int AbstractCode::SourceStatementPosition(PtrComprCageBase cage_base,
+                                          int offset) {
+  CHECK_NE(kind(cage_base), CodeKind::BASELINE);
   // First find the closest position.
-  int position = SourcePosition(offset);
+  int position = SourcePosition(cage_base, offset);
   // Now find the closest statement position before the position.
   int statement_position = 0;
-  for (SourcePositionTableIterator it(SourcePositionTableInternal());
+  for (SourcePositionTableIterator it(SourcePositionTableInternal(cage_base));
        !it.done(); it.Advance()) {
     if (it.is_statement()) {
       int p = it.source_position().ScriptOffset();
@@ -591,8 +618,13 @@ void Code::Disassemble(const char* name, std::ostream& os, Isolate* isolate,
   os << "\n";
 
   if (uses_safepoint_table()) {
-    SafepointTable table(isolate, current_pc, *this);
-    table.Print(os);
+    if (is_maglevved()) {
+      MaglevSafepointTable table(isolate, current_pc, *this);
+      table.Print(os);
+    } else {
+      SafepointTable table(isolate, current_pc, *this);
+      table.Print(os);
+    }
     os << "\n";
   }
 
@@ -713,28 +745,27 @@ void BytecodeArray::MakeOlder() {
   // The word must be completely within the byte code array.
   Address age_addr = address() + kBytecodeAgeOffset;
   DCHECK_LE(RoundDown(age_addr, kTaggedSize) + kTaggedSize, address() + Size());
-  Age age = bytecode_age();
-  if (age < kLastBytecodeAge) {
+  uint16_t age = bytecode_age();
+  if (age < FLAG_bytecode_old_age) {
     static_assert(kBytecodeAgeSize == kUInt16Size);
     base::AsAtomic16::Relaxed_CompareAndSwap(
         reinterpret_cast<base::Atomic16*>(age_addr), age, age + 1);
   }
 
-  DCHECK_GE(bytecode_age(), kFirstBytecodeAge);
-  DCHECK_LE(bytecode_age(), kLastBytecodeAge);
+  DCHECK_LE(bytecode_age(), FLAG_bytecode_old_age);
 }
 
 bool BytecodeArray::IsOld() const {
-  return bytecode_age() >= kIsOldBytecodeAge;
+  return bytecode_age() >= FLAG_bytecode_old_age;
 }
 
-DependentCode DependentCode::GetDependentCode(Handle<HeapObject> object) {
-  if (object->IsMap()) {
-    return Handle<Map>::cast(object)->dependent_code();
-  } else if (object->IsPropertyCell()) {
-    return Handle<PropertyCell>::cast(object)->dependent_code();
-  } else if (object->IsAllocationSite()) {
-    return Handle<AllocationSite>::cast(object)->dependent_code();
+DependentCode DependentCode::GetDependentCode(HeapObject object) {
+  if (object.IsMap()) {
+    return Map::cast(object).dependent_code();
+  } else if (object.IsPropertyCell()) {
+    return PropertyCell::cast(object).dependent_code();
+  } else if (object.IsAllocationSite()) {
+    return AllocationSite::cast(object).dependent_code();
   }
   UNREACHABLE();
 }
@@ -775,7 +806,7 @@ void DependentCode::InstallDependency(Isolate* isolate, Handle<Code> code,
     PrintDependencyGroups(groups);
     StdoutStream{} << "]\n";
   }
-  Handle<DependentCode> old_deps(DependentCode::GetDependentCode(object),
+  Handle<DependentCode> old_deps(DependentCode::GetDependentCode(*object),
                                  isolate);
   Handle<DependentCode> new_deps =
       InsertWeakCode(isolate, old_deps, groups, code);
@@ -881,7 +912,7 @@ int DependentCode::FillEntryFromBack(int index, int length) {
   return index;  // No non-cleared entry found.
 }
 
-void DependentCode::DeoptimizeDependentCodeGroup(
+void DependentCode::DeoptimizeDependencyGroups(
     Isolate* isolate, DependentCode::DependencyGroups groups) {
   DisallowGarbageCollection no_gc_scope;
   bool marked_something = MarkCodeForDeoptimization(groups);

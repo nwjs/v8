@@ -37,9 +37,10 @@ class WithDefaultPlatformMixin : public TMixin {
         0, v8::platform::IdleTaskSupport::kEnabled);
     CHECK_NOT_NULL(platform_.get());
     v8::V8::InitializePlatform(platform_.get());
-#ifdef V8_ENABLE_SANDBOX
-    CHECK(v8::V8::InitializeSandbox());
-#endif  // V8_ENABLE_SANDBOX
+    // Allow changing flags in unit tests.
+    // TODO(12887): Fix tests to avoid changing flag values after
+    // initialization.
+    i::FLAG_freeze_flags_after_init = false;
     v8::V8::Initialize();
   }
 
@@ -487,6 +488,93 @@ class TestTransitionsAccessor : public TransitionsAccessor {
 
   TransitionArray transitions() { return TransitionsAccessor::transitions(); }
 };
+
+// Helper class that allows to write tests in a slot size independent manner.
+// Use helper.slot(X) to get X'th slot identifier.
+class FeedbackVectorHelper {
+ public:
+  explicit FeedbackVectorHelper(Handle<FeedbackVector> vector)
+      : vector_(vector) {
+    int slot_count = vector->length();
+    slots_.reserve(slot_count);
+    FeedbackMetadataIterator iter(vector->metadata());
+    while (iter.HasNext()) {
+      FeedbackSlot slot = iter.Next();
+      slots_.push_back(slot);
+    }
+  }
+
+  Handle<FeedbackVector> vector() { return vector_; }
+
+  // Returns slot identifier by numerical index.
+  FeedbackSlot slot(int index) const { return slots_[index]; }
+
+  // Returns the number of slots in the feedback vector.
+  int slot_count() const { return static_cast<int>(slots_.size()); }
+
+ private:
+  Handle<FeedbackVector> vector_;
+  std::vector<FeedbackSlot> slots_;
+};
+
+template <typename Spec>
+Handle<FeedbackVector> NewFeedbackVector(Isolate* isolate, Spec* spec) {
+  Handle<FeedbackMetadata> metadata = FeedbackMetadata::New(isolate, spec);
+  Handle<SharedFunctionInfo> shared =
+      isolate->factory()->NewSharedFunctionInfoForBuiltin(
+          isolate->factory()->empty_string(), Builtin::kIllegal);
+  // Set the raw feedback metadata to circumvent checks that we are not
+  // overwriting existing metadata.
+  shared->set_raw_outer_scope_info_or_feedback_metadata(*metadata);
+  Handle<ClosureFeedbackCellArray> closure_feedback_cell_array =
+      ClosureFeedbackCellArray::New(isolate, shared);
+  IsCompiledScope is_compiled_scope(shared->is_compiled_scope(isolate));
+  return FeedbackVector::New(isolate, shared, closure_feedback_cell_array,
+                             &is_compiled_scope);
+}
+#ifdef V8_CC_GNU
+
+#if V8_HOST_ARCH_X64
+#define GET_STACK_POINTER_TO(sp_addr) \
+  __asm__ __volatile__("mov %%rsp, %0" : "=g"(sp_addr))
+#elif V8_HOST_ARCH_IA32
+#define GET_STACK_POINTER_TO(sp_addr) \
+  __asm__ __volatile__("mov %%esp, %0" : "=g"(sp_addr))
+#elif V8_HOST_ARCH_ARM
+#define GET_STACK_POINTER_TO(sp_addr) \
+  __asm__ __volatile__("str sp, %0" : "=g"(sp_addr))
+#elif V8_HOST_ARCH_ARM64
+#define GET_STACK_POINTER_TO(sp_addr) \
+  __asm__ __volatile__("mov x16, sp; str x16, %0" : "=g"(sp_addr))
+#elif V8_HOST_ARCH_MIPS
+#define GET_STACK_POINTER_TO(sp_addr) \
+  __asm__ __volatile__("sw $sp, %0" : "=g"(sp_addr))
+#elif V8_HOST_ARCH_MIPS64
+#define GET_STACK_POINTER_TO(sp_addr) \
+  __asm__ __volatile__("sd $sp, %0" : "=g"(sp_addr))
+#elif defined(__s390x__) || defined(_ARCH_S390X)
+#define GET_STACK_POINTER_TO(sp_addr) \
+  __asm__ __volatile__("stg %%r15, %0" : "=m"(sp_addr))
+#elif defined(__s390__) || defined(_ARCH_S390)
+#define GET_STACK_POINTER_TO(sp_addr) \
+  __asm__ __volatile__("st 15, %0" : "=m"(sp_addr))
+#elif defined(__PPC64__) || defined(_ARCH_PPC64)
+#define GET_STACK_POINTER_TO(sp_addr) \
+  __asm__ __volatile__("std 1, %0" : "=m"(sp_addr))
+#elif defined(__PPC__) || defined(_ARCH_PPC)
+#define GET_STACK_POINTER_TO(sp_addr) \
+  __asm__ __volatile__("stw 1, %0" : "=m"(sp_addr))
+#elif V8_TARGET_ARCH_RISCV64
+#define GET_STACK_POINTER_TO(sp_addr) \
+  __asm__ __volatile__("add %0, sp, x0" : "=r"(sp_addr))
+#elif V8_HOST_ARCH_LOONG64
+#define GET_STACK_POINTER_TO(sp_addr) \
+  __asm__ __volatile__("st.d $sp, %0" : "=m"(sp_addr))
+#else
+#error Host architecture was not detected as supported by v8
+#endif
+
+#endif  // V8_CC_GNU
 
 }  // namespace internal
 }  // namespace v8

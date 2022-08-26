@@ -9,8 +9,6 @@
 #include "include/v8-profiler.h"
 #include "src/api/api-inl.h"
 #include "src/base/numbers/double.h"
-#include "src/base/platform/mutex.h"
-#include "src/codegen/assembler-inl.h"
 #include "src/codegen/compiler.h"
 #include "src/codegen/pending-optimization-table.h"
 #include "src/compiler-dispatcher/lazy-compile-dispatcher.h"
@@ -25,16 +23,11 @@
 #include "src/heap/heap-inl.h"  // For ToBoolean. TODO(jkummerow): Drop.
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/ic/stub-cache.h"
-#include "src/logging/counters.h"
-#include "src/objects/heap-object-inl.h"
-#include "src/objects/js-array-inl.h"
 #include "src/objects/js-function-inl.h"
 #include "src/objects/js-regexp-inl.h"
-#include "src/objects/managed-inl.h"
 #include "src/objects/smi.h"
 #include "src/profiler/heap-snapshot-generator.h"
 #include "src/regexp/regexp.h"
-#include "src/runtime/runtime-utils.h"
 #include "src/snapshot/snapshot.h"
 #include "src/web-snapshot/web-snapshot.h"
 
@@ -141,6 +134,34 @@ RUNTIME_FUNCTION(Runtime_ConstructSlicedString) {
       isolate->factory()->NewSubString(string, index, string->length());
   CHECK(sliced_string->IsSlicedString());
   return *sliced_string;
+}
+
+RUNTIME_FUNCTION(Runtime_ConstructInternalizedString) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(1, args.length());
+  Handle<String> string = args.at<String>(0);
+  CHECK(string->IsOneByteRepresentation());
+  Handle<String> internalized = isolate->factory()->InternalizeString(string);
+  CHECK(string->IsInternalizedString());
+  return *internalized;
+}
+
+RUNTIME_FUNCTION(Runtime_ConstructThinString) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(1, args.length());
+  Handle<String> string = args.at<String>(0);
+  CHECK(string->IsOneByteRepresentation());
+  if (!string->IsConsString()) {
+    const bool kIsOneByte = true;
+    string =
+        isolate->factory()->NewConsString(isolate->factory()->empty_string(),
+                                          string, string->length(), kIsOneByte);
+  }
+  CHECK(string->IsConsString());
+  Handle<String> internalized = isolate->factory()->InternalizeString(string);
+  CHECK_NE(*internalized, *string);
+  CHECK(string->IsThinString());
+  return *string;
 }
 
 RUNTIME_FUNCTION(Runtime_DeoptimizeFunction) {
@@ -685,11 +706,15 @@ RUNTIME_FUNCTION(Runtime_NeverOptimizeFunction) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
   Handle<Object> function_object = args.at(0);
-  if (!function_object->IsJSFunction()) return CrashUnlessFuzzing(isolate);
+  PtrComprCageBase cage_base(isolate);
+  if (!function_object->IsJSFunction(cage_base)) {
+    return CrashUnlessFuzzing(isolate);
+  }
   Handle<JSFunction> function = Handle<JSFunction>::cast(function_object);
-  Handle<SharedFunctionInfo> sfi(function->shared(), isolate);
-  if (sfi->abstract_code(isolate).kind() != CodeKind::INTERPRETED_FUNCTION &&
-      sfi->abstract_code(isolate).kind() != CodeKind::BUILTIN) {
+  Handle<SharedFunctionInfo> sfi(function->shared(cage_base), isolate);
+  CodeKind code_kind = sfi->abstract_code(isolate).kind(cage_base);
+  if (code_kind != CodeKind::INTERPRETED_FUNCTION &&
+      code_kind != CodeKind::BUILTIN) {
     return CrashUnlessFuzzing(isolate);
   }
   // Make sure to finish compilation if there is a parallel lazy compilation in
@@ -884,12 +909,12 @@ RUNTIME_FUNCTION(Runtime_SetAllocationTimeout) {
   SealHandleScope shs(isolate);
   DCHECK(args.length() == 2 || args.length() == 3);
 #ifdef V8_ENABLE_ALLOCATION_TIMEOUT
+  CONVERT_INT32_ARG_FUZZ_SAFE(interval, 0);
+  HeapAllocator::SetAllocationGcInterval(interval);
   CONVERT_INT32_ARG_FUZZ_SAFE(timeout, 1);
   isolate->heap()->set_allocation_timeout(timeout);
 #endif
 #ifdef DEBUG
-  CONVERT_INT32_ARG_FUZZ_SAFE(interval, 0);
-  FLAG_gc_interval = interval;
   if (args.length() == 3) {
     // Enable/disable inline allocation if requested.
     CONVERT_BOOLEAN_ARG_FUZZ_SAFE(inline_allocation, 2);
@@ -1248,8 +1273,8 @@ RUNTIME_FUNCTION(Runtime_TraceExit) {
 RUNTIME_FUNCTION(Runtime_HaveSameMap) {
   SealHandleScope shs(isolate);
   DCHECK_EQ(2, args.length());
-  auto obj1 = JSObject::cast(args[0]);
-  auto obj2 = JSObject::cast(args[1]);
+  auto obj1 = HeapObject::cast(args[0]);
+  auto obj2 = HeapObject::cast(args[1]);
   return isolate->heap()->ToBoolean(obj1.map() == obj2.map());
 }
 
@@ -1547,19 +1572,19 @@ RUNTIME_FUNCTION(Runtime_EnableCodeLoggingForTesting) {
   // {true} on {is_listening_to_code_events()}. Feel free to add assertions to
   // any method to further test the code logging callbacks.
   class NoopListener final : public LogEventListener {
-    void CodeCreateEvent(LogEventsAndTags tag, Handle<AbstractCode> code,
+    void CodeCreateEvent(CodeTag tag, Handle<AbstractCode> code,
                          const char* name) final {}
-    void CodeCreateEvent(LogEventsAndTags tag, Handle<AbstractCode> code,
+    void CodeCreateEvent(CodeTag tag, Handle<AbstractCode> code,
                          Handle<Name> name) final {}
-    void CodeCreateEvent(LogEventsAndTags tag, Handle<AbstractCode> code,
+    void CodeCreateEvent(CodeTag tag, Handle<AbstractCode> code,
                          Handle<SharedFunctionInfo> shared,
                          Handle<Name> script_name) final {}
-    void CodeCreateEvent(LogEventsAndTags tag, Handle<AbstractCode> code,
+    void CodeCreateEvent(CodeTag tag, Handle<AbstractCode> code,
                          Handle<SharedFunctionInfo> shared,
                          Handle<Name> script_name, int line, int column) final {
     }
 #if V8_ENABLE_WEBASSEMBLY
-    void CodeCreateEvent(LogEventsAndTags tag, const wasm::WasmCode* code,
+    void CodeCreateEvent(CodeTag tag, const wasm::WasmCode* code,
                          wasm::WasmName name, const char* source_url,
                          int code_offset, int script_id) final {}
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -1633,6 +1658,13 @@ RUNTIME_FUNCTION(Runtime_IsSharedString) {
   Handle<HeapObject> obj = args.at<HeapObject>(0);
   return isolate->heap()->ToBoolean(obj->IsString() &&
                                     Handle<String>::cast(obj)->IsShared());
+}
+
+RUNTIME_FUNCTION(Runtime_IsInternalizedString) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(1, args.length());
+  Handle<HeapObject> obj = args.at<HeapObject>(0);
+  return isolate->heap()->ToBoolean(obj->IsInternalizedString());
 }
 
 RUNTIME_FUNCTION(Runtime_SharedGC) {

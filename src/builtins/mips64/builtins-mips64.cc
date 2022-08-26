@@ -1047,7 +1047,6 @@ static void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
 
 namespace {
 void ResetBytecodeAge(MacroAssembler* masm, Register bytecode_array) {
-  static_assert(BytecodeArray::kNoAgeBytecodeAge == 0);
   __ Sh(zero_reg,
         FieldMemOperand(bytecode_array, BytecodeArray::kBytecodeAgeOffset));
 }
@@ -1822,6 +1821,25 @@ void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source,
   // If the code object is null, just return to the caller.
   __ Ret(eq, maybe_target_code, Operand(Smi::zero()));
   __ bind(&jump_to_optimized_code);
+  DCHECK_EQ(maybe_target_code, a0);  // Already in the right spot.
+
+  // OSR entry tracing.
+  {
+    Label next;
+    __ li(a1, ExternalReference::address_of_FLAG_trace_osr());
+    __ Lbu(a1, MemOperand(a1));
+    __ Branch(&next, eq, a1, Operand(zero_reg));
+
+    {
+      FrameScope scope(masm, StackFrame::INTERNAL);
+      __ Push(a0);  // Preserve the code object.
+      __ CallRuntime(Runtime::kTraceOptimizedOSREntry, 0);
+      __ Pop(a0);
+    }
+
+    __ bind(&next);
+  }
+
   if (source == OsrSourceTier::kInterpreter) {
     // Drop the handler frame that is be sitting on top of the actual
     // JavaScript frame. This is the case then OSR is triggered from bytecode.
@@ -2816,6 +2834,11 @@ void Builtins::Generate_WasmResume(MacroAssembler* masm) {
   __ Trap();
 }
 
+void Builtins::Generate_WasmReject(MacroAssembler* masm) {
+  // TODO(v8:12191): Implement for this platform.
+  __ Trap();
+}
+
 void Builtins::Generate_WasmOnStackReplace(MacroAssembler* masm) {
   // Only needed on x64.
   __ Trap();
@@ -3391,9 +3414,8 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
   ExternalReference thunk_ref =
       ExternalReference::invoke_accessor_getter_callback();
 
-  __ Ld(scratch, FieldMemOperand(callback, AccessorInfo::kJsGetterOffset));
   __ Ld(api_function_address,
-        FieldMemOperand(scratch, Foreign::kForeignAddressOffset));
+        FieldMemOperand(callback, AccessorInfo::kJsGetterOffset));
 
   // +3 is to skip prolog, return address and name handle.
   MemOperand return_value_operand(

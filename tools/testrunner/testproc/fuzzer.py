@@ -138,6 +138,15 @@ class Fuzzer(object):
 
 # TODO(majeski): Allow multiple subtests to run at once.
 class FuzzerProc(base.TestProcProducer):
+  @staticmethod
+  def create(options):
+    return FuzzerProc(
+        options.fuzzer_rng(),
+        options.fuzzer_tests_count(),
+        options.fuzzer_configs(),
+        options.combine_tests,
+    )
+
   def __init__(self, rng, count, fuzzers, disable_analysis=False):
     """
     Args:
@@ -148,17 +157,11 @@ class FuzzerProc(base.TestProcProducer):
         set, processor passes None as analysis result to fuzzers
     """
     super(FuzzerProc, self).__init__('Fuzzer')
-
     self._rng = rng
     self._count = count
     self._fuzzer_configs = fuzzers
     self._disable_analysis = disable_analysis
     self._gens = {}
-
-  def setup(self, requirement=base.DROP_RESULT):
-    # Fuzzer is optimized to not store the results
-    assert requirement == base.DROP_RESULT
-    super(FuzzerProc, self).setup(requirement)
 
   def _next_test(self, test):
     if self.is_stopped:

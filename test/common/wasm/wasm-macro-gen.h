@@ -7,8 +7,6 @@
 
 #include "src/wasm/wasm-opcodes.h"
 
-#include "src/zone/zone-containers.h"
-
 #define U32_LE(v)                                    \
   static_cast<byte>(v), static_cast<byte>((v) >> 8), \
       static_cast<byte>((v) >> 16), static_cast<byte>((v) >> 24)
@@ -113,8 +111,8 @@
 
 #define WASM_HEAP_TYPE(heap_type) static_cast<byte>((heap_type).code() & 0x7f)
 
-#define WASM_REF_TYPE(type)                       \
-  (type).kind() == kRef ? kRefCode : kOptRefCode, \
+#define WASM_REF_TYPE(type)                        \
+  (type).kind() == kRef ? kRefCode : kRefNullCode, \
       WASM_HEAP_TYPE((type).heap_type())
 
 #define WASM_BLOCK(...) kExprBlock, kVoidCode, __VA_ARGS__, kExprEnd
@@ -504,12 +502,8 @@ inline uint16_t ExtractPrefixedOpcodeBytes(WasmOpcode opcode) {
 #define WASM_GC_OP(op) kGCPrefix, static_cast<byte>(op)
 #define WASM_STRUCT_NEW(index, ...) \
   __VA_ARGS__, WASM_GC_OP(kExprStructNew), static_cast<byte>(index)
-#define WASM_STRUCT_NEW_WITH_RTT(index, ...) \
-  __VA_ARGS__, WASM_GC_OP(kExprStructNewWithRtt), static_cast<byte>(index)
 #define WASM_STRUCT_NEW_DEFAULT(index) \
   WASM_GC_OP(kExprStructNewDefault), static_cast<byte>(index)
-#define WASM_STRUCT_NEW_DEFAULT_WITH_RTT(index, rtt) \
-  rtt, WASM_GC_OP(kExprStructNewDefaultWithRtt), static_cast<byte>(index)
 #define WASM_STRUCT_GET(typeidx, fieldidx, struct_obj)                \
   struct_obj, WASM_GC_OP(kExprStructGet), static_cast<byte>(typeidx), \
       static_cast<byte>(fieldidx)
@@ -527,21 +521,15 @@ inline uint16_t ExtractPrefixedOpcodeBytes(WasmOpcode opcode) {
 #define WASM_REF_IS_NULL(val) val, kExprRefIsNull
 #define WASM_REF_AS_NON_NULL(val) val, kExprRefAsNonNull
 #define WASM_REF_EQ(lhs, rhs) lhs, rhs, kExprRefEq
-#define WASM_REF_TEST(ref, rtt) ref, rtt, WASM_GC_OP(kExprRefTest)
 #define WASM_REF_TEST_STATIC(ref, typeidx) \
   ref, WASM_GC_OP(kExprRefTestStatic), static_cast<byte>(typeidx)
-#define WASM_REF_CAST(ref, rtt) ref, rtt, WASM_GC_OP(kExprRefCast)
 #define WASM_REF_CAST_STATIC(ref, typeidx) \
   ref, WASM_GC_OP(kExprRefCastStatic), static_cast<byte>(typeidx)
 // Takes a reference value from the value stack to allow sequences of
 // conditional branches.
-#define WASM_BR_ON_CAST(depth, rtt) \
-  rtt, WASM_GC_OP(kExprBrOnCast), static_cast<byte>(depth)
 #define WASM_BR_ON_CAST_STATIC(depth, typeidx)               \
   WASM_GC_OP(kExprBrOnCastStatic), static_cast<byte>(depth), \
       static_cast<byte>(typeidx)
-#define WASM_BR_ON_CAST_FAIL(depth, rtt) \
-  rtt, WASM_GC_OP(kExprBrOnCastFail), static_cast<byte>(depth)
 #define WASM_BR_ON_CAST_STATIC_FAIL(depth, typeidx)              \
   WASM_GC_OP(kExprBrOnCastStaticFail), static_cast<byte>(depth), \
       static_cast<byte>(typeidx)
@@ -572,13 +560,8 @@ inline uint16_t ExtractPrefixedOpcodeBytes(WasmOpcode opcode) {
 
 #define WASM_ARRAY_NEW(index, default_value, length) \
   default_value, length, WASM_GC_OP(kExprArrayNew), static_cast<byte>(index)
-#define WASM_ARRAY_NEW_WITH_RTT(index, default_value, length, rtt) \
-  default_value, length, rtt, WASM_GC_OP(kExprArrayNewWithRtt),    \
-      static_cast<byte>(index)
 #define WASM_ARRAY_NEW_DEFAULT(index, length) \
   length, WASM_GC_OP(kExprArrayNewDefault), static_cast<byte>(index)
-#define WASM_ARRAY_NEW_DEFAULT_WITH_RTT(index, length, rtt) \
-  length, rtt, WASM_GC_OP(kExprArrayNewDefaultWithRtt), static_cast<byte>(index)
 #define WASM_ARRAY_GET(typeidx, array, index) \
   array, index, WASM_GC_OP(kExprArrayGet), static_cast<byte>(typeidx)
 #define WASM_ARRAY_GET_U(typeidx, array, index) \
@@ -594,11 +577,8 @@ inline uint16_t ExtractPrefixedOpcodeBytes(WasmOpcode opcode) {
   dst_array, dst_index, src_array, src_index, length,                      \
       WASM_GC_OP(kExprArrayCopy), static_cast<byte>(dst_idx),              \
       static_cast<byte>(src_idx)
-#define WASM_ARRAY_INIT(index, length, ...)                          \
-  __VA_ARGS__, WASM_GC_OP(kExprArrayInit), static_cast<byte>(index), \
-      static_cast<byte>(length)
-#define WASM_ARRAY_INIT_STATIC(index, length, ...)                         \
-  __VA_ARGS__, WASM_GC_OP(kExprArrayInitStatic), static_cast<byte>(index), \
+#define WASM_ARRAY_NEW_FIXED_STATIC(index, length, ...)                        \
+  __VA_ARGS__, WASM_GC_OP(kExprArrayNewFixedStatic), static_cast<byte>(index), \
       static_cast<byte>(length)
 
 #define WASM_RTT(typeidx) kRttCode, U32V_1(typeidx)
@@ -628,21 +608,6 @@ inline uint16_t ExtractPrefixedOpcodeBytes(WasmOpcode opcode) {
 
 #define WASM_RETURN_CALL_REF(func_ref, ...) \
   __VA_ARGS__, func_ref, kExprReturnCallRef
-
-// shift locals by 1; let (locals[0]: local_type) = value in ...
-#define WASM_LET_1_V(local_type, value, ...)                                 \
-  value, kExprLet, kVoidCode, U32V_1(1), U32V_1(1), local_type, __VA_ARGS__, \
-      kExprEnd
-#define WASM_LET_1_I(local_type, value, ...)                                \
-  value, kExprLet, kI32Code, U32V_1(1), U32V_1(1), local_type, __VA_ARGS__, \
-      kExprEnd
-// shift locals by 2;
-// let (locals[0]: local_type_1) = value_1,
-//     (locals[1]: local_type_2) = value_2
-// in ...
-#define WASM_LET_2_I(local_type_1, value_1, local_type_2, value_2, ...)     \
-  value_1, value_2, kExprLet, kI32Code, U32V_1(2), U32V_1(1), local_type_1, \
-      U32V_1(1), local_type_2, __VA_ARGS__, kExprEnd
 
 #define WASM_NOT(x) x, kExprI32Eqz
 #define WASM_SEQ(...) __VA_ARGS__

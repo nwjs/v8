@@ -8,8 +8,6 @@
 #include "include/v8-platform.h"
 #include "src/base/address-region.h"
 #include "src/base/compiler-specific.h"
-#include "src/base/platform/platform.h"
-#include "src/common/globals.h"
 #include "src/init/v8.h"
 
 namespace v8 {
@@ -132,10 +130,6 @@ V8_EXPORT_PRIVATE size_t AllocatePageSize();
 
 // Gets the granularity at which the permissions and release calls can be made.
 V8_EXPORT_PRIVATE size_t CommitPageSize();
-
-// Sets the random seed so that GetRandomMmapAddr() will generate repeatable
-// sequences of random mmap addresses.
-V8_EXPORT_PRIVATE void SetRandomMmapSeed(int64_t seed);
 
 // Generate a random address to be used for hinting allocation calls.
 V8_EXPORT_PRIVATE void* GetRandomMmapAddr();

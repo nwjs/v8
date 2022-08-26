@@ -75,7 +75,6 @@ constexpr int32_t kHighWordOffset = 4;
 
 constexpr int kInstanceOffset = 2 * kSystemPointerSize;
 constexpr int kFeedbackVectorOffset = 3 * kSystemPointerSize;
-constexpr int kTierupBudgetOffset = 4 * kSystemPointerSize;
 
 inline MemOperand GetStackSlot(int offset) { return MemOperand(fp, -offset); }
 
@@ -93,7 +92,7 @@ inline void Load(LiftoffAssembler* assm, LiftoffRegister dst, Register base,
   switch (kind) {
     case kI32:
     case kRef:
-    case kOptRef:
+    case kRefNull:
     case kRtt:
       assm->lw(dst.gp(), src);
       break;
@@ -119,7 +118,7 @@ inline void Store(LiftoffAssembler* assm, Register base, int32_t offset,
   MemOperand dst(base, offset);
   switch (kind) {
     case kI32:
-    case kOptRef:
+    case kRefNull:
     case kRef:
     case kRtt:
       assm->Usw(src.gp(), dst);
@@ -144,7 +143,7 @@ inline void Store(LiftoffAssembler* assm, Register base, int32_t offset,
 inline void push(LiftoffAssembler* assm, LiftoffRegister reg, ValueKind kind) {
   switch (kind) {
     case kI32:
-    case kOptRef:
+    case kRefNull:
     case kRef:
     case kRtt:
       assm->push(reg.gp());
@@ -422,7 +421,7 @@ void LiftoffAssembler::AbortCompilation() {}
 
 // static
 constexpr int LiftoffAssembler::StaticStackFrameSize() {
-  return liftoff::kTierupBudgetOffset;
+  return liftoff::kFeedbackVectorOffset;
 }
 
 int LiftoffAssembler::SlotSizeForType(ValueKind kind) {
@@ -811,7 +810,7 @@ void LiftoffAssembler::Spill(int offset, LiftoffRegister reg, ValueKind kind) {
   switch (kind) {
     case kI32:
     case kRef:
-    case kOptRef:
+    case kRefNull:
     case kRtt:
       sw(reg.gp(), dst);
       break;
@@ -836,7 +835,7 @@ void LiftoffAssembler::Spill(int offset, WasmValue value) {
   switch (value.type().kind()) {
     case kI32:
     case kRef:
-    case kOptRef: {
+    case kRefNull: {
       LiftoffRegister tmp = GetUnusedRegister(kGpReg, {});
       TurboAssembler::li(tmp.gp(), Operand(value.to_i32()));
       sw(tmp.gp(), dst);
@@ -866,7 +865,7 @@ void LiftoffAssembler::Fill(LiftoffRegister reg, int offset, ValueKind kind) {
   switch (kind) {
     case kI32:
     case kRef:
-    case kOptRef:
+    case kRefNull:
       lw(reg.gp(), src);
       break;
     case kI64:
@@ -1598,9 +1597,9 @@ void LiftoffAssembler::emit_i32_cond_jumpi(LiftoffCondition liftoff_cond,
   TurboAssembler::Branch(label, cond, lhs, Operand(imm));
 }
 
-void LiftoffAssembler::emit_i32_subi_jump_negative(Register value,
-                                                   int subtrahend,
-                                                   Label* result_negative) {
+void LiftoffAssembler::emit_i32_subi_jump_negative(
+    Register value, int subtrahend, Label* result_negative,
+    const FreezeCacheState& frozen) {
   TurboAssembler::Subu(value, value, Operand(subtrahend));
   TurboAssembler::Branch(result_negative, less, value, Operand(zero_reg));
 }

@@ -101,6 +101,9 @@ class JSFunction : public TorqueGeneratedJSFunction<
   inline Context context();
   DECL_RELAXED_GETTER(context, Context)
   inline bool has_context() const;
+  using TorqueGeneratedClass::context;
+  using TorqueGeneratedClass::set_context;
+  DECL_RELEASE_ACQUIRE_ACCESSORS(context, Context)
   inline JSGlobalProxy global_proxy();
   inline NativeContext native_context();
   inline int length();
@@ -209,8 +212,8 @@ class JSFunction : public TorqueGeneratedJSFunction<
   // Functions related to feedback vector. feedback_vector() can be used once
   // the function has feedback vectors allocated. feedback vectors may not be
   // available after compile when lazily allocating feedback vectors.
-  inline FeedbackVector feedback_vector() const;
-  inline bool has_feedback_vector() const;
+  DECL_GETTER(feedback_vector, FeedbackVector)
+  DECL_GETTER(has_feedback_vector, bool)
   V8_EXPORT_PRIVATE static void EnsureFeedbackVector(
       Isolate* isolate, Handle<JSFunction> function,
       IsCompiledScope* compiled_scope);

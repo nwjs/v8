@@ -20,11 +20,9 @@
 #include "src/compiler/operator-properties.h"
 #include "src/compiler/operator.h"
 #include "src/compiler/schedule.h"
-#include "src/compiler/simplified-operator.h"
 #include "src/compiler/state-values-utils.h"
 #include "src/compiler/type-cache.h"
 #include "src/utils/bit-vector.h"
-#include "src/utils/ostreams.h"
 
 namespace v8 {
 namespace internal {
@@ -1251,6 +1249,10 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
       CheckValueInputIs(node, 1, Type::Signed32());
       CheckTypeIs(node, Type::SignedSmall());
       break;
+    case IrOpcode::kFindOrderedHashSetEntry:
+      CheckValueInputIs(node, 0, Type::Any());
+      CheckTypeIs(node, Type::SignedSmall());
+      break;
     case IrOpcode::kArgumentsLength:
     case IrOpcode::kRestLength:
       CheckTypeIs(node, TypeCache::Get()->kArgumentsLengthType);
@@ -1827,6 +1829,8 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
     case IrOpcode::kTryTruncateFloat64ToInt64:
     case IrOpcode::kTryTruncateFloat32ToUint64:
     case IrOpcode::kTryTruncateFloat64ToUint64:
+    case IrOpcode::kTryTruncateFloat64ToInt32:
+    case IrOpcode::kTryTruncateFloat64ToUint32:
     case IrOpcode::kFloat64ExtractLowWord32:
     case IrOpcode::kFloat64ExtractHighWord32:
     case IrOpcode::kFloat64InsertLowWord32:
@@ -1881,6 +1885,7 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
     case IrOpcode::kSignExtendWord32ToInt64:
     case IrOpcode::kStaticAssert:
     case IrOpcode::kStackPointerGreaterThan:
+    case IrOpcode::kTraceInstruction:
 
 #define SIMD_MACHINE_OP_CASE(Name) case IrOpcode::k##Name:
       MACHINE_SIMD_OP_LIST(SIMD_MACHINE_OP_CASE)

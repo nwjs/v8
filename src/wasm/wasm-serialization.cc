@@ -4,15 +4,12 @@
 
 #include "src/wasm/wasm-serialization.h"
 
-#include "src/base/platform/wrappers.h"
+#include "src/codegen/assembler-arch.h"
 #include "src/codegen/assembler-inl.h"
-#include "src/codegen/external-reference-table.h"
-#include "src/objects/objects-inl.h"
-#include "src/objects/objects.h"
+#include "src/debug/debug.h"
 #include "src/runtime/runtime.h"
-#include "src/snapshot/code-serializer.h"
+#include "src/snapshot/snapshot-data.h"
 #include "src/utils/ostreams.h"
-#include "src/utils/utils.h"
 #include "src/utils/version.h"
 #include "src/wasm/code-space-access.h"
 #include "src/wasm/function-compiler.h"
@@ -599,6 +596,7 @@ class DeserializeCodeTask : public JobTask {
         deserializer_->CopyAndRelocate(unit);
       }
       publish_queue_.Add(std::move(batch));
+      ResetPKUPermissionsForThreadSpawning pku_reset_scope;
       delegate->NotifyConcurrencyIncrease();
     }
   }
@@ -681,6 +679,7 @@ bool NativeModuleDeserializer::Read(Reader* reader) {
       reloc_queue.Add(std::move(batch));
       DCHECK(batch.empty());
       batch_size = 0;
+      ResetPKUPermissionsForThreadSpawning pku_reset_scope;
       job_handle->NotifyConcurrencyIncrease();
     }
   }
@@ -692,6 +691,7 @@ bool NativeModuleDeserializer::Read(Reader* reader) {
 
   if (!batch.empty()) {
     reloc_queue.Add(std::move(batch));
+    ResetPKUPermissionsForThreadSpawning pku_reset_scope;
     job_handle->NotifyConcurrencyIncrease();
   }
 

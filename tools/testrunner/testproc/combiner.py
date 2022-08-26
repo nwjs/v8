@@ -7,6 +7,13 @@ from collections import defaultdict
 from . import base
 
 class CombinerProc(base.TestProc):
+  @staticmethod
+  def create(options):
+    if not options.combine_tests:
+      return None
+    return CombinerProc(options.fuzzer_rng(), options.combine_min, options.combine_max,
+                        options.tests_count)
+
   def __init__(self, rng, min_group_size, max_group_size, count):
     """
     Args:
@@ -16,7 +23,7 @@ class CombinerProc(base.TestProc):
       count: how many tests to generate. 0 means infinite running
     """
     super(CombinerProc, self).__init__()
-
+    self._requirement = base.DROP_RESULT
     self._rng = rng
     self._min_size = min_group_size
     self._max_size = max_group_size
@@ -30,12 +37,6 @@ class CombinerProc(base.TestProc):
 
     # {suite name: instance of TestCombiner}
     self._combiners = {}
-
-  def setup(self, requirement=base.DROP_RESULT):
-    # Combiner is not able to pass results (even as None) to the previous
-    # processor.
-    assert requirement == base.DROP_RESULT
-    self._next_proc.setup(base.DROP_RESULT)
 
   def next_test(self, test):
     group_key = self._get_group_key(test)

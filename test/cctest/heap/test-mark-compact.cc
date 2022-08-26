@@ -227,7 +227,7 @@ HEAP_TEST(DoNotEvacuatePinnedPages) {
 }
 
 HEAP_TEST(ObjectStartBitmap) {
-#ifdef V8_ENABLE_CONSERVATIVE_STACK_SCANNING
+#ifdef V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
   CcTest::InitializeVM();
   Isolate* isolate = CcTest::i_isolate();
   v8::HandleScope sc(CcTest::isolate());
@@ -303,7 +303,7 @@ HEAP_TEST(ObjectStartBitmap) {
     }
     CHECK(page2->object_start_bitmap()->CheckBit(obj2.address()));
   }
-#endif
+#endif  // V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
 }
 
 // TODO(1600): compaction of map space is temporary removed from GC.
@@ -471,7 +471,7 @@ TEST(Regress5829) {
   heap->CreateFillerObjectAt(old_end - kTaggedSize, kTaggedSize);
   heap->old_space()->FreeLinearAllocationArea();
   Page* page = Page::FromAddress(array->address());
-  IncrementalMarking::MarkingState* marking_state = marking->marking_state();
+  MarkingState* marking_state = marking->marking_state();
   for (auto object_and_size :
        LiveObjectRange<kGreyObjects>(page, marking_state->bitmap(page))) {
     CHECK(!object_and_size.first.IsFreeSpaceOrFiller());

@@ -13,6 +13,12 @@ if (v8_enable_google_benchmark) {
     ]
   }
 
+  # TODO(crbug.com/1344570): Remove once third_party/google_benchmark no longer
+  # uses std::wstring_convert.
+  config("benchmark_suppress_warnings") {
+    cflags = ["-Wno-deprecated-declarations"]
+  }
+
   source_set("google_benchmark") {
     testonly = true
 
@@ -63,6 +69,10 @@ if (v8_enable_google_benchmark) {
     ]
 
     all_dependent_configs = [ ":benchmark_config" ]
+
+    configs += [
+      ":benchmark_suppress_warnings",
+    ]
 
     defines = [
       # Tell google_benchmark to always use standard regular expressions.

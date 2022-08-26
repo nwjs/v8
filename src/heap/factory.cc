@@ -69,6 +69,8 @@
 #include "src/roots/roots.h"
 #include "src/strings/unicode-inl.h"
 #if V8_ENABLE_WEBASSEMBLY
+#include "src/wasm/module-instantiate.h"
+#include "src/wasm/wasm-result.h"
 #include "src/wasm/wasm-value.h"
 #endif
 
@@ -699,36 +701,166 @@ MaybeHandle<String> Factory::NewStringFromOneByte(
   return result;
 }
 
-MaybeHandle<String> Factory::NewStringFromUtf8(
-    const base::Vector<const char>& string, AllocationType allocation) {
-  base::Vector<const uint8_t> utf8_data =
-      base::Vector<const uint8_t>::cast(string);
-  Utf8Decoder decoder(utf8_data);
+namespace {
+void ThrowInvalidEncodedStringBytes(Isolate* isolate, MessageTemplate message) {
+#if V8_ENABLE_WEBASSEMBLY
+  DCHECK(message == MessageTemplate::kWasmTrapStringInvalidWtf8 ||
+         message == MessageTemplate::kWasmTrapStringInvalidUtf8);
+  Handle<JSObject> error_obj = isolate->factory()->NewWasmRuntimeError(message);
+  JSObject::AddProperty(isolate, error_obj,
+                        isolate->factory()->wasm_uncatchable_symbol(),
+                        isolate->factory()->true_value(), NONE);
+  isolate->Throw(*error_obj);
+#else
+  // The default in JS-land is to use Utf8Variant::kLossyUtf8, which never
+  // throws an error, so if there is no WebAssembly compiled in we'll never get
+  // here.
+  UNREACHABLE();
+#endif  // V8_ENABLE_WEBASSEMBLY
+}
 
-  if (decoder.utf16_length() == 0) return empty_string();
+template <typename Decoder, typename PeekBytes>
+MaybeHandle<String> NewStringFromBytes(Isolate* isolate, PeekBytes peek_bytes,
+                                       AllocationType allocation,
+                                       MessageTemplate message) {
+  Decoder decoder(peek_bytes());
+  if (decoder.is_invalid()) {
+    ThrowInvalidEncodedStringBytes(isolate, message);
+    return MaybeHandle<String>();
+  }
+
+  if (decoder.utf16_length() == 0) return isolate->factory()->empty_string();
 
   if (decoder.is_one_byte()) {
+    if (decoder.utf16_length() == 1) {
+      uint8_t codepoint;
+      decoder.Decode(&codepoint, peek_bytes());
+      return isolate->factory()->LookupSingleCharacterStringFromCode(codepoint);
+    }
     // Allocate string.
     Handle<SeqOneByteString> result;
-    ASSIGN_RETURN_ON_EXCEPTION(
-        isolate(), result,
-        NewRawOneByteString(decoder.utf16_length(), allocation), String);
+    ASSIGN_RETURN_ON_EXCEPTION(isolate, result,
+                               isolate->factory()->NewRawOneByteString(
+                                   decoder.utf16_length(), allocation),
+                               String);
 
     DisallowGarbageCollection no_gc;
-    decoder.Decode(result->GetChars(no_gc), utf8_data);
+    decoder.Decode(result->GetChars(no_gc), peek_bytes());
     return result;
   }
 
   // Allocate string.
   Handle<SeqTwoByteString> result;
-  ASSIGN_RETURN_ON_EXCEPTION(
-      isolate(), result,
-      NewRawTwoByteString(decoder.utf16_length(), allocation), String);
+  ASSIGN_RETURN_ON_EXCEPTION(isolate, result,
+                             isolate->factory()->NewRawTwoByteString(
+                                 decoder.utf16_length(), allocation),
+                             String);
 
   DisallowGarbageCollection no_gc;
-  decoder.Decode(result->GetChars(no_gc), utf8_data);
+  decoder.Decode(result->GetChars(no_gc), peek_bytes());
   return result;
 }
+
+template <typename PeekBytes>
+MaybeHandle<String> NewStringFromUtf8Variant(Isolate* isolate,
+                                             PeekBytes peek_bytes,
+                                             unibrow::Utf8Variant utf8_variant,
+                                             AllocationType allocation) {
+  switch (utf8_variant) {
+    case unibrow::Utf8Variant::kLossyUtf8:
+      return NewStringFromBytes<Utf8Decoder>(isolate, peek_bytes, allocation,
+                                             MessageTemplate::kNone);
+#if V8_ENABLE_WEBASSEMBLY
+    case unibrow::Utf8Variant::kUtf8:
+      return NewStringFromBytes<StrictUtf8Decoder>(
+          isolate, peek_bytes, allocation,
+          MessageTemplate::kWasmTrapStringInvalidUtf8);
+    case unibrow::Utf8Variant::kWtf8:
+      return NewStringFromBytes<Wtf8Decoder>(
+          isolate, peek_bytes, allocation,
+          MessageTemplate::kWasmTrapStringInvalidWtf8);
+#endif
+  }
+}
+
+}  // namespace
+
+MaybeHandle<String> Factory::NewStringFromUtf8(
+    const base::Vector<const uint8_t>& string,
+    unibrow::Utf8Variant utf8_variant, AllocationType allocation) {
+  auto peek_bytes = [&]() -> base::Vector<const uint8_t> { return string; };
+  return NewStringFromUtf8Variant(isolate(), peek_bytes, utf8_variant,
+                                  allocation);
+}
+
+MaybeHandle<String> Factory::NewStringFromUtf8(
+    const base::Vector<const char>& string, AllocationType allocation) {
+  return NewStringFromUtf8(base::Vector<const uint8_t>::cast(string),
+                           unibrow::Utf8Variant::kLossyUtf8, allocation);
+}
+
+#if V8_ENABLE_WEBASSEMBLY
+MaybeHandle<String> Factory::NewStringFromUtf8(
+    Handle<WasmArray> array, uint32_t start, uint32_t end,
+    unibrow::Utf8Variant utf8_variant, AllocationType allocation) {
+  DCHECK_EQ(sizeof(uint8_t), array->type()->element_type().value_kind_size());
+  DCHECK_LE(start, end);
+  DCHECK_LE(end, array->length());
+  auto peek_bytes = [&]() -> base::Vector<const uint8_t> {
+    const uint8_t* contents =
+        reinterpret_cast<const uint8_t*>(array->ElementAddress(0));
+    return {contents + start, end - start};
+  };
+  return NewStringFromUtf8Variant(isolate(), peek_bytes, utf8_variant,
+                                  allocation);
+}
+
+MaybeHandle<String> Factory::NewStringFromUtf8(
+    Handle<ByteArray> array, uint32_t start, uint32_t end,
+    unibrow::Utf8Variant utf8_variant, AllocationType allocation) {
+  DCHECK_LE(start, end);
+  DCHECK_LE(end, array->length());
+  auto peek_bytes = [&]() -> base::Vector<const uint8_t> {
+    const uint8_t* contents =
+        reinterpret_cast<const uint8_t*>(array->GetDataStartAddress());
+    return {contents + start, end - start};
+  };
+  return NewStringFromUtf8Variant(isolate(), peek_bytes, utf8_variant,
+                                  allocation);
+}
+
+namespace {
+struct Wtf16Decoder {
+  int length_;
+  bool is_one_byte_;
+  explicit Wtf16Decoder(const base::Vector<const uint16_t>& data)
+      : length_(data.length()),
+        is_one_byte_(String::IsOneByte(data.begin(), length_)) {}
+  bool is_invalid() const { return false; }
+  bool is_one_byte() const { return is_one_byte_; }
+  int utf16_length() const { return length_; }
+  template <typename Char>
+  void Decode(Char* out, const base::Vector<const uint16_t>& data) {
+    CopyChars(out, data.begin(), length_);
+  }
+};
+}  // namespace
+
+MaybeHandle<String> Factory::NewStringFromUtf16(Handle<WasmArray> array,
+                                                uint32_t start, uint32_t end,
+                                                AllocationType allocation) {
+  DCHECK_EQ(sizeof(uint16_t), array->type()->element_type().value_kind_size());
+  DCHECK_LE(start, end);
+  DCHECK_LE(end, array->length());
+  auto peek_bytes = [&]() -> base::Vector<const uint16_t> {
+    const uint16_t* contents =
+        reinterpret_cast<const uint16_t*>(array->ElementAddress(0));
+    return {contents + start, end - start};
+  };
+  return NewStringFromBytes<Wtf16Decoder>(isolate(), peek_bytes, allocation,
+                                          MessageTemplate::kNone);
+}
+#endif  // V8_ENABLE_WEBASSEMBLY
 
 MaybeHandle<String> Factory::NewStringFromUtf8SubString(
     Handle<SeqOneByteString> str, int begin, int length,
@@ -819,64 +951,37 @@ MaybeHandle<String> Factory::NewStringFromTwoByte(
                               allocation);
 }
 
-namespace {
-
-inline void WriteOneByteData(Handle<String> s, uint8_t* chars, int len) {
-  DCHECK(s->length() == len);
-  String::WriteToFlat(*s, chars, 0, len);
+#if V8_ENABLE_WEBASSEMBLY
+MaybeHandle<String> Factory::NewStringFromTwoByteLittleEndian(
+    const base::Vector<const base::uc16>& str, AllocationType allocation) {
+#if defined(V8_TARGET_LITTLE_ENDIAN)
+  return NewStringFromTwoByte(str, allocation);
+#elif defined(V8_TARGET_BIG_ENDIAN)
+  // TODO(12868): Duplicate the guts of NewStringFromTwoByte, so that
+  // copying and transcoding the data can be done in a single pass.
+  UNIMPLEMENTED();
+#else
+#error Unknown endianness
+#endif
 }
-
-inline void WriteTwoByteData(Handle<String> s, uint16_t* chars, int len) {
-  DCHECK(s->length() == len);
-  String::WriteToFlat(*s, chars, 0, len);
-}
-
-}  // namespace
-
-template <bool is_one_byte, typename T>
-Handle<String> Factory::AllocateInternalizedStringImpl(T t, int chars,
-                                                       uint32_t hash_field) {
-  DCHECK_LE(0, chars);
-  DCHECK_GE(String::kMaxLength, chars);
-
-  // Compute map and object size.
-  int size;
-  Map map;
-  if (is_one_byte) {
-    map = *one_byte_internalized_string_map();
-    size = SeqOneByteString::SizeFor(chars);
-  } else {
-    map = *internalized_string_map();
-    size = SeqTwoByteString::SizeFor(chars);
-  }
-
-  String result = String::cast(AllocateRawWithImmortalMap(
-      size,
-      RefineAllocationTypeForInPlaceInternalizableString(
-          CanAllocateInReadOnlySpace() ? AllocationType::kReadOnly
-                                       : AllocationType::kOld,
-          map),
-      map));
-  DisallowGarbageCollection no_gc;
-  result.set_length(chars);
-  result.set_raw_hash_field(hash_field);
-  DCHECK_EQ(size, result.Size());
-
-  if (is_one_byte) {
-    WriteOneByteData(t, SeqOneByteString::cast(result).GetChars(no_gc), chars);
-  } else {
-    WriteTwoByteData(t, SeqTwoByteString::cast(result).GetChars(no_gc), chars);
-  }
-  return handle(result, isolate());
-}
+#endif  // V8_ENABLE_WEBASSEMBLY
 
 Handle<String> Factory::NewInternalizedStringImpl(Handle<String> string,
-                                                  int chars,
+                                                  int len,
                                                   uint32_t hash_field) {
   if (string->IsOneByteRepresentation()) {
-    return AllocateInternalizedStringImpl<true>(string, chars, hash_field);
+    Handle<SeqOneByteString> result =
+        AllocateRawOneByteInternalizedString(len, hash_field);
+    DisallowGarbageCollection no_gc;
+    String::WriteToFlat(*string, result->GetChars(no_gc), 0, len);
+    return result;
   }
-  return AllocateInternalizedStringImpl<false>(string, chars, hash_field);
+
+  Handle<SeqTwoByteString> result =
+      AllocateRawTwoByteInternalizedString(len, hash_field);
+  DisallowGarbageCollection no_gc;
+  String::WriteToFlat(*string, result->GetChars(no_gc), 0, len);
+  return result;
 }
 
 StringTransitionStrategy Factory::ComputeInternalizationStrategyForString(
@@ -1360,18 +1465,19 @@ Handle<AliasedArgumentsEntry> Factory::NewAliasedArgumentsEntry(
 }
 
 Handle<AccessorInfo> Factory::NewAccessorInfo() {
-  auto info =
-      NewStructInternal<AccessorInfo>(ACCESSOR_INFO_TYPE, AllocationType::kOld);
+  AccessorInfo info =
+      AccessorInfo::cast(New(accessor_info_map(), AllocationType::kOld));
   DisallowGarbageCollection no_gc;
   info.set_name(*empty_string(), SKIP_WRITE_BARRIER);
+  info.set_data(*undefined_value(), SKIP_WRITE_BARRIER);
   info.set_flags(0);  // Must clear the flags, it was initialized as undefined.
   info.set_is_sloppy(true);
   info.set_initial_property_attributes(NONE);
 
-  // Clear some other fields that should not be undefined.
-  info.set_getter(Smi::zero(), SKIP_WRITE_BARRIER);
-  info.set_setter(Smi::zero(), SKIP_WRITE_BARRIER);
-  info.set_js_getter(Smi::zero(), SKIP_WRITE_BARRIER);
+  // Initializes setter, getter and js_getter fields.
+  info.AllocateExternalPointerEntries(isolate());
+  info.clear_padding();
+
   return handle(info, isolate());
 }
 
@@ -1494,45 +1600,45 @@ Handle<WasmTypeInfo> Factory::NewWasmTypeInfo(
   // (2) The object visitors need to read the WasmTypeInfo to find tagged
   //     fields in Wasm structs; in the middle of a GC cycle that's only
   //     safe to do if the WTI is in old space.
-  // The supertypes list is constant after initialization, so we pretenure
-  // that too. The subtypes list, however, is expected to grow (and hence be
-  // replaced), so we don't pretenure it.
-  Handle<FixedArray> supertypes;
+  std::vector<Handle<Object>> supertypes;
   if (opt_parent.is_null()) {
-    supertypes = NewFixedArray(wasm::kMinimumSupertypeArraySize);
-    for (int i = 0; i < supertypes->length(); i++) {
-      supertypes->set(i, *undefined_value());
-    }
+    supertypes.resize(wasm::kMinimumSupertypeArraySize, undefined_value());
   } else {
-    Handle<FixedArray> parent_supertypes =
-        handle(opt_parent->wasm_type_info().supertypes(), isolate());
-    int last_defined_index = parent_supertypes->length() - 1;
-    while (last_defined_index >= 0 &&
-           parent_supertypes->get(last_defined_index).IsUndefined()) {
-      last_defined_index--;
+    Handle<WasmTypeInfo> parent_type_info =
+        handle(opt_parent->wasm_type_info(), isolate());
+    int first_undefined_index = -1;
+    for (int i = 0; i < parent_type_info->supertypes_length(); i++) {
+      Handle<Object> supertype =
+          handle(parent_type_info->supertypes(i), isolate());
+      if (supertype->IsUndefined() && first_undefined_index == -1) {
+        first_undefined_index = i;
+      }
+      supertypes.emplace_back(supertype);
     }
-    if (last_defined_index == parent_supertypes->length() - 1) {
-      supertypes = CopyArrayAndGrow(parent_supertypes, 1, AllocationType::kOld);
+    if (first_undefined_index >= 0) {
+      supertypes[first_undefined_index] = opt_parent;
     } else {
-      supertypes = CopyFixedArray(parent_supertypes);
+      supertypes.emplace_back(opt_parent);
     }
-    supertypes->set(last_defined_index + 1, *opt_parent);
   }
   Map map = *wasm_type_info_map();
   WasmTypeInfo result = WasmTypeInfo::cast(AllocateRawWithImmortalMap(
-      map.instance_size(), AllocationType::kOld, map));
+      WasmTypeInfo::SizeFor(static_cast<int>(supertypes.size())),
+      AllocationType::kOld, map));
   DisallowGarbageCollection no_gc;
+  result.set_supertypes_length(static_cast<int>(supertypes.size()));
+  for (size_t i = 0; i < supertypes.size(); i++) {
+    result.set_supertypes(static_cast<int>(i), *supertypes[i]);
+  }
   result.AllocateExternalPointerEntries(isolate());
   result.set_foreign_address(isolate(), type_address);
-  result.set_supertypes(*supertypes);
-  result.set_subtypes(ReadOnlyRoots(isolate()).empty_array_list());
-  result.set_instance_size(instance_size_bytes);
   result.set_instance(*instance);
   return handle(result, isolate());
 }
 
 Handle<WasmApiFunctionRef> Factory::NewWasmApiFunctionRef(
-    Handle<JSReceiver> callable, Handle<HeapObject> suspender) {
+    Handle<JSReceiver> callable, wasm::Suspend suspend,
+    Handle<WasmInstanceObject> instance) {
   Map map = *wasm_api_function_ref_map();
   auto result = WasmApiFunctionRef::cast(AllocateRawWithImmortalMap(
       map.instance_size(), AllocationType::kOld, map));
@@ -1544,10 +1650,11 @@ Handle<WasmApiFunctionRef> Factory::NewWasmApiFunctionRef(
   } else {
     result.set_callable(*undefined_value());
   }
-  if (!suspender.is_null()) {
-    result.set_suspender(*suspender);
+  result.set_suspend(suspend);
+  if (!instance.is_null()) {
+    result.set_instance(*instance);
   } else {
-    result.set_suspender(*undefined_value());
+    result.set_instance(*undefined_value());
   }
   return handle(result, isolate());
 }
@@ -1570,8 +1677,9 @@ Handle<WasmInternalFunction> Factory::NewWasmInternalFunction(
 Handle<WasmJSFunctionData> Factory::NewWasmJSFunctionData(
     Address opt_call_target, Handle<JSReceiver> callable, int return_count,
     int parameter_count, Handle<PodArray<wasm::ValueType>> serialized_sig,
-    Handle<CodeT> wrapper_code, Handle<Map> rtt, Handle<HeapObject> suspender) {
-  Handle<WasmApiFunctionRef> ref = NewWasmApiFunctionRef(callable, suspender);
+    Handle<CodeT> wrapper_code, Handle<Map> rtt, wasm::Suspend suspend) {
+  Handle<WasmApiFunctionRef> ref =
+      NewWasmApiFunctionRef(callable, suspend, Handle<WasmInstanceObject>());
   Handle<WasmInternalFunction> internal =
       NewWasmInternalFunction(opt_call_target, ref, rtt);
   Map map = *wasm_js_function_data_map();
@@ -1584,24 +1692,26 @@ Handle<WasmJSFunctionData> Factory::NewWasmJSFunctionData(
   result.set_serialized_return_count(return_count);
   result.set_serialized_parameter_count(parameter_count);
   result.set_serialized_signature(*serialized_sig);
+  result.set_suspend(suspend);
   return handle(result, isolate());
 }
 
-Handle<WasmOnFulfilledData> Factory::NewWasmOnFulfilledData(
-    Handle<WasmSuspenderObject> suspender) {
-  Map map = *wasm_onfulfilled_data_map();
-  WasmOnFulfilledData result =
-      WasmOnFulfilledData::cast(AllocateRawWithImmortalMap(
-          map.instance_size(), AllocationType::kOld, map));
+Handle<WasmResumeData> Factory::NewWasmResumeData(
+    Handle<WasmSuspenderObject> suspender, wasm::OnResume on_resume) {
+  Map map = *wasm_resume_data_map();
+  WasmResumeData result = WasmResumeData::cast(AllocateRawWithImmortalMap(
+      map.instance_size(), AllocationType::kOld, map));
   DisallowGarbageCollection no_gc;
   result.set_suspender(*suspender);
+  result.set_on_resume(static_cast<int>(on_resume));
   return handle(result, isolate());
 }
 
 Handle<WasmExportedFunctionData> Factory::NewWasmExportedFunctionData(
     Handle<CodeT> export_wrapper, Handle<WasmInstanceObject> instance,
     Address call_target, Handle<Object> ref, int func_index,
-    Address sig_address, int wrapper_budget, Handle<Map> rtt) {
+    Address sig_address, int wrapper_budget, Handle<Map> rtt,
+    wasm::Suspend suspend) {
   Handle<Foreign> sig_foreign = NewForeign(sig_address);
   Handle<WasmInternalFunction> internal =
       NewWasmInternalFunction(call_target, Handle<HeapObject>::cast(ref), rtt);
@@ -1624,7 +1734,7 @@ Handle<WasmExportedFunctionData> Factory::NewWasmExportedFunctionData(
       *BUILTIN_CODE(isolate(), Illegal),
       V8_EXTERNAL_CODE_SPACE_BOOL ? UPDATE_WRITE_BARRIER : SKIP_WRITE_BARRIER);
   result.set_packed_args_size(0);
-  result.set_suspender(*undefined_value());
+  result.set_suspend(suspend);
   return handle(result, isolate());
 }
 
@@ -1632,8 +1742,8 @@ Handle<WasmCapiFunctionData> Factory::NewWasmCapiFunctionData(
     Address call_target, Handle<Foreign> embedder_data,
     Handle<CodeT> wrapper_code, Handle<Map> rtt,
     Handle<PodArray<wasm::ValueType>> serialized_sig) {
-  Handle<WasmApiFunctionRef> ref =
-      NewWasmApiFunctionRef(Handle<JSReceiver>(), Handle<HeapObject>());
+  Handle<WasmApiFunctionRef> ref = NewWasmApiFunctionRef(
+      Handle<JSReceiver>(), wasm::kNoSuspend, Handle<WasmInstanceObject>());
   Handle<WasmInternalFunction> internal =
       NewWasmInternalFunction(call_target, ref, rtt);
   Map map = *wasm_capi_function_data_map();
@@ -1645,6 +1755,36 @@ Handle<WasmCapiFunctionData> Factory::NewWasmCapiFunctionData(
   result.set_wrapper_code(*wrapper_code);
   result.set_embedder_data(*embedder_data);
   result.set_serialized_signature(*serialized_sig);
+  return handle(result, isolate());
+}
+
+Handle<WasmArray> Factory::NewWasmArray(const wasm::ArrayType* type,
+                                        uint32_t length,
+                                        wasm::WasmValue initial_value,
+                                        Handle<Map> map) {
+  HeapObject raw =
+      AllocateRaw(WasmArray::SizeFor(*map, length), AllocationType::kYoung);
+  DisallowGarbageCollection no_gc;
+  raw.set_map_after_allocation(*map);
+  WasmArray result = WasmArray::cast(raw);
+  result.set_raw_properties_or_hash(*empty_fixed_array(), kRelaxedStore);
+  result.set_length(length);
+  if (type->element_type().is_numeric()) {
+    if (initial_value.zero_byte_representation()) {
+      memset(reinterpret_cast<void*>(result.ElementAddress(0)), 0,
+             length * type->element_type().value_kind_size());
+    } else {
+      wasm::WasmValue packed = initial_value.Packed(type->element_type());
+      for (uint32_t i = 0; i < length; i++) {
+        Address address = result.ElementAddress(i);
+        packed.CopyTo(reinterpret_cast<byte*>(address));
+      }
+    }
+  } else {
+    for (uint32_t i = 0; i < length; i++) {
+      result.SetTaggedElement(i, initial_value.to_ref());
+    }
+  }
   return handle(result, isolate());
 }
 
@@ -1668,8 +1808,7 @@ Handle<WasmArray> Factory::NewWasmArrayFromElements(
     }
   } else {
     for (uint32_t i = 0; i < length; i++) {
-      int offset = result.element_offset(i);
-      TaggedField<Object>::store(result, offset, *elements[i].to_ref());
+      result.SetTaggedElement(i, elements[i].to_ref());
     }
   }
   return handle(result, isolate());
@@ -1696,10 +1835,45 @@ Handle<WasmArray> Factory::NewWasmArrayFromMemory(uint32_t length,
   return handle(result, isolate());
 }
 
+Handle<Object> Factory::NewWasmArrayFromElementSegment(
+    Handle<WasmInstanceObject> instance, const wasm::WasmElemSegment* segment,
+    uint32_t start_offset, uint32_t length, Handle<Map> map) {
+  wasm::ValueType element_type = WasmArray::type(*map)->element_type();
+  DCHECK(element_type.is_reference());
+  HeapObject raw =
+      AllocateRaw(WasmArray::SizeFor(*map, length), AllocationType::kYoung);
+  {
+    DisallowGarbageCollection no_gc;
+    raw.set_map_after_allocation(*map);
+    WasmArray result = WasmArray::cast(raw);
+    result.set_raw_properties_or_hash(*empty_fixed_array(), kRelaxedStore);
+    result.set_length(length);
+    // We have to initialize the elements to a default value, because we might
+    // allocate new objects while computing the elements below.
+    for (uint32_t i = 0; i < length; i++) {
+      result.SetTaggedElement(i, undefined_value(), SKIP_WRITE_BARRIER);
+    }
+  }
+
+  Handle<WasmArray> result = handle(WasmArray::cast(raw), isolate());
+
+  AccountingAllocator allocator;
+  Zone zone(&allocator, ZONE_NAME);
+  for (uint32_t i = 0; i < length; i++) {
+    wasm::ValueOrError maybe_element = wasm::EvaluateConstantExpression(
+        &zone, segment->entries[start_offset + i], element_type, isolate(),
+        instance);
+    if (wasm::is_error(maybe_element)) {
+      return handle(Smi::FromEnum(wasm::to_error(maybe_element)), isolate());
+    }
+    result->SetTaggedElement(i, wasm::to_value(maybe_element).to_ref());
+  }
+  return result;
+}
+
 Handle<WasmStruct> Factory::NewWasmStruct(const wasm::StructType* type,
                                           wasm::WasmValue* args,
                                           Handle<Map> map) {
-  DCHECK_EQ(WasmStruct::Size(type), map->wasm_type_info().instance_size());
   HeapObject raw = AllocateRaw(WasmStruct::Size(type), AllocationType::kYoung);
   raw.set_map_after_allocation(*map);
   WasmStruct result = WasmStruct::cast(raw);
@@ -1728,8 +1902,8 @@ Handle<SharedFunctionInfo> Factory::NewSharedFunctionInfoForWasmJSFunction(
   return NewSharedFunctionInfo(name, data, Builtin::kNoBuiltinId);
 }
 
-Handle<SharedFunctionInfo> Factory::NewSharedFunctionInfoForWasmOnFulfilled(
-    Handle<WasmOnFulfilledData> data) {
+Handle<SharedFunctionInfo> Factory::NewSharedFunctionInfoForWasmResume(
+    Handle<WasmResumeData> data) {
   return NewSharedFunctionInfo({}, data, Builtin::kNoBuiltinId);
 }
 
@@ -1853,7 +2027,8 @@ Handle<Map> Factory::NewMap(InstanceType type, int instance_size,
   DCHECK_IMPLIES(InstanceTypeChecker::IsJSObject(type) &&
                      !Map::CanHaveFastTransitionableElementsKind(type),
                  IsDictionaryElementsKind(elements_kind) ||
-                     IsTerminalElementsKind(elements_kind));
+                     IsTerminalElementsKind(elements_kind) ||
+                     IsSharedArrayElementsKind(elements_kind));
   DCHECK(allocation_type == AllocationType::kMap ||
          allocation_type == AllocationType::kSharedMap);
   HeapObject result = allocator()->AllocateRawWith<HeapAllocator::kRetryOrFail>(
@@ -2244,7 +2419,6 @@ DEFINE_ERROR(TypeError, type_error)
 DEFINE_ERROR(WasmCompileError, wasm_compile_error)
 DEFINE_ERROR(WasmLinkError, wasm_link_error)
 DEFINE_ERROR(WasmRuntimeError, wasm_runtime_error)
-DEFINE_ERROR(WasmExceptionError, wasm_exception_error)
 #undef DEFINE_ERROR
 
 Handle<JSObject> Factory::NewFunctionPrototype(Handle<JSFunction> function) {
@@ -2574,7 +2748,8 @@ Handle<JSObject> Factory::NewJSObjectFromMapInternal(
   DCHECK(js_obj.HasFastElements() ||
          js_obj.HasTypedArrayOrRabGsabTypedArrayElements() ||
          js_obj.HasFastStringWrapperElements() ||
-         js_obj.HasFastArgumentsElements() || js_obj.HasDictionaryElements());
+         js_obj.HasFastArgumentsElements() || js_obj.HasDictionaryElements() ||
+         js_obj.HasSharedArrayElements());
   return handle(js_obj, isolate());
 }
 
@@ -2938,31 +3113,15 @@ void Factory::TypeAndSizeForElementsKind(ElementsKind kind,
   }
 }
 
-namespace {
-
-void ForFixedTypedArray(ExternalArrayType array_type, size_t* element_size,
-                        ElementsKind* element_kind) {
-  switch (array_type) {
-#define TYPED_ARRAY_CASE(Type, type, TYPE, ctype) \
-  case kExternal##Type##Array:                    \
-    *element_size = sizeof(ctype);                \
-    *element_kind = TYPE##_ELEMENTS;              \
-    return;
-
-    TYPED_ARRAYS(TYPED_ARRAY_CASE)
-#undef TYPED_ARRAY_CASE
-  }
-  UNREACHABLE();
-}
-
-}  // namespace
-
 Handle<JSArrayBufferView> Factory::NewJSArrayBufferView(
     Handle<Map> map, Handle<FixedArrayBase> elements,
     Handle<JSArrayBuffer> buffer, size_t byte_offset, size_t byte_length) {
-  CHECK_LE(byte_length, buffer->byte_length());
-  CHECK_LE(byte_offset, buffer->byte_length());
-  CHECK_LE(byte_offset + byte_length, buffer->byte_length());
+  if (!IsRabGsabTypedArrayElementsKind(map->elements_kind())) {
+    CHECK_LE(byte_length, buffer->GetByteLength());
+    CHECK_LE(byte_offset, buffer->GetByteLength());
+    CHECK_LE(byte_offset + byte_length, buffer->GetByteLength());
+  }
+
   Handle<JSArrayBufferView> array_buffer_view = Handle<JSArrayBufferView>::cast(
       NewJSObjectFromMap(map, AllocationType::kYoung));
   DisallowGarbageCollection no_gc;
@@ -2985,28 +3144,17 @@ Handle<JSTypedArray> Factory::NewJSTypedArray(ExternalArrayType type,
                                               size_t length) {
   size_t element_size;
   ElementsKind elements_kind;
-  ForFixedTypedArray(type, &element_size, &elements_kind);
+  JSTypedArray::ForFixedTypedArray(type, &element_size, &elements_kind);
   size_t byte_length = length * element_size;
 
   CHECK_LE(length, JSTypedArray::kMaxLength);
   CHECK_EQ(length, byte_length / element_size);
   CHECK_EQ(0, byte_offset % ElementsKindToByteSize(elements_kind));
 
-  Handle<Map> map;
-  switch (elements_kind) {
-#define TYPED_ARRAY_FUN(Type, type, TYPE, ctype)                              \
-  case TYPE##_ELEMENTS:                                                       \
-    map =                                                                     \
-        handle(isolate()->native_context()->type##_array_fun().initial_map(), \
-               isolate());                                                    \
-    break;
-
-    TYPED_ARRAYS(TYPED_ARRAY_FUN)
-#undef TYPED_ARRAY_FUN
-
-    default:
-      UNREACHABLE();
-  }
+  Handle<Map> map(
+      isolate()->raw_native_context().TypedArrayElementsKindToCtorMap(
+          elements_kind),
+      isolate());
   Handle<JSTypedArray> typed_array =
       Handle<JSTypedArray>::cast(NewJSArrayBufferView(
           map, empty_byte_array(), buffer, byte_offset, byte_length));
@@ -3089,16 +3237,11 @@ MaybeHandle<JSBoundFunction> Factory::NewJSBoundFunction(
 Handle<JSProxy> Factory::NewJSProxy(Handle<JSReceiver> target,
                                     Handle<JSReceiver> handler) {
   // Allocate the proxy object.
-  Handle<Map> map;
-  if (target->IsCallable()) {
-    if (target->IsConstructor()) {
-      map = Handle<Map>(isolate()->proxy_constructor_map());
-    } else {
-      map = Handle<Map>(isolate()->proxy_callable_map());
-    }
-  } else {
-    map = Handle<Map>(isolate()->proxy_map());
-  }
+  Handle<Map> map = target->IsCallable()
+                        ? target->IsConstructor()
+                              ? isolate()->proxy_constructor_map()
+                              : isolate()->proxy_callable_map()
+                        : isolate()->proxy_map();
   DCHECK(map->prototype().IsNull(isolate()));
   JSProxy result = JSProxy::cast(New(map, AllocationType::kYoung));
   DisallowGarbageCollection no_gc;
@@ -3917,10 +4060,9 @@ Handle<CallHandlerInfo> Factory::NewCallHandlerInfo(bool has_no_side_effect) {
                         : side_effect_call_handler_info_map();
   CallHandlerInfo info = CallHandlerInfo::cast(New(map, AllocationType::kOld));
   DisallowGarbageCollection no_gc;
-  Object undefined_value = read_only_roots().undefined_value();
-  info.set_callback(undefined_value, SKIP_WRITE_BARRIER);
-  info.set_js_callback(undefined_value, SKIP_WRITE_BARRIER);
-  info.set_data(undefined_value, SKIP_WRITE_BARRIER);
+  info.set_data(*undefined_value(), SKIP_WRITE_BARRIER);
+  // Initializes both callback and js_callback fields.
+  info.AllocateExternalPointerEntries(isolate());
   return handle(info, isolate());
 }
 
@@ -3987,7 +4129,7 @@ Handle<JSFunction> Factory::JSFunctionBuilder::BuildRaw(Handle<Code> code) {
   function.initialize_properties(isolate);
   function.initialize_elements();
   function.set_shared(*sfi_, mode);
-  function.set_context(*context_, mode);
+  function.set_context(*context_, kReleaseStore, mode);
   function.set_raw_feedback_cell(*feedback_cell, mode);
   function.set_code(*code, kReleaseStore, mode);
   if (function.has_prototype_slot()) {

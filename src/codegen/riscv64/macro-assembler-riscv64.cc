@@ -142,7 +142,6 @@ int MacroAssembler::SafepointRegisterStackIndex(int reg_code) {
 void MacroAssembler::RecordWriteField(Register object, int offset,
                                       Register value, RAStatus ra_status,
                                       SaveFPRegsMode save_fp,
-                                      RememberedSetAction remembered_set_action,
                                       SmiCheck smi_check) {
   DCHECK(!AreAliased(object, value));
   // First, check if a write barrier is even needed. The tests below
@@ -171,7 +170,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
   }
 
   RecordWrite(object, Operand(offset - kHeapObjectTag), value, ra_status,
-              save_fp, remembered_set_action, SmiCheck::kOmit);
+              save_fp, SmiCheck::kOmit);
 
   bind(&done);
 }
@@ -209,10 +208,10 @@ void TurboAssembler::CallEphemeronKeyBarrier(Register object,
   MaybeRestoreRegisters(registers);
 }
 
-void TurboAssembler::CallRecordWriteStubSaveRegisters(
-    Register object, Register slot_address,
-    RememberedSetAction remembered_set_action, SaveFPRegsMode fp_mode,
-    StubCallMode mode) {
+void TurboAssembler::CallRecordWriteStubSaveRegisters(Register object,
+                                                      Register slot_address,
+                                                      SaveFPRegsMode fp_mode,
+                                                      StubCallMode mode) {
   DCHECK(!AreAliased(object, slot_address));
   RegList registers =
       WriteBarrierDescriptor::ComputeSavedRegisters(object, slot_address);
@@ -227,26 +226,23 @@ void TurboAssembler::CallRecordWriteStubSaveRegisters(
   Pop(slot_address_parameter);
   Pop(object_parameter);
 
-  CallRecordWriteStub(object_parameter, slot_address_parameter,
-                      remembered_set_action, fp_mode, mode);
+  CallRecordWriteStub(object_parameter, slot_address_parameter, fp_mode, mode);
 
   MaybeRestoreRegisters(registers);
 }
 
-void TurboAssembler::CallRecordWriteStub(
-    Register object, Register slot_address,
-    RememberedSetAction remembered_set_action, SaveFPRegsMode fp_mode,
-    StubCallMode mode) {
+void TurboAssembler::CallRecordWriteStub(Register object, Register slot_address,
+                                         SaveFPRegsMode fp_mode,
+                                         StubCallMode mode) {
   // Use CallRecordWriteStubSaveRegisters if the object and slot registers
   // need to be caller saved.
   DCHECK_EQ(WriteBarrierDescriptor::ObjectRegister(), object);
   DCHECK_EQ(WriteBarrierDescriptor::SlotAddressRegister(), slot_address);
   if (mode == StubCallMode::kCallWasmRuntimeStub) {
-    auto wasm_target =
-        wasm::WasmCode::GetRecordWriteStub(remembered_set_action, fp_mode);
+    auto wasm_target = wasm::WasmCode::GetRecordWriteStub(fp_mode);
     Call(wasm_target, RelocInfo::WASM_STUB_CALL);
   } else {
-    auto builtin = Builtins::GetRecordWriteStub(remembered_set_action, fp_mode);
+    auto builtin = Builtins::GetRecordWriteStub(fp_mode);
     if (options().inline_offheap_trampolines) {
       // Inline the trampoline. //qj
       RecordCommentForOffHeapTrampoline(builtin);
@@ -269,9 +265,7 @@ void TurboAssembler::CallRecordWriteStub(
 // tag is shifted away.
 void MacroAssembler::RecordWrite(Register object, Operand offset,
                                  Register value, RAStatus ra_status,
-                                 SaveFPRegsMode fp_mode,
-                                 RememberedSetAction remembered_set_action,
-                                 SmiCheck smi_check) {
+                                 SaveFPRegsMode fp_mode, SmiCheck smi_check) {
   DCHECK(!AreAliased(object, value));
 
   if (FLAG_debug_code) {
@@ -284,9 +278,7 @@ void MacroAssembler::RecordWrite(Register object, Operand offset,
            Operand(value));
   }
 
-  if ((remembered_set_action == RememberedSetAction::kOmit &&
-       !FLAG_incremental_marking) ||
-      FLAG_disable_write_barriers) {
+  if (FLAG_disable_write_barriers) {
     return;
   }
 
@@ -325,7 +317,7 @@ void MacroAssembler::RecordWrite(Register object, Operand offset,
   // TODO(cbruni): Turn offset into int.
   DCHECK(offset.IsImmediate());
   Add64(slot_address, object, offset);
-  CallRecordWriteStub(object, slot_address, remembered_set_action, fp_mode);
+  CallRecordWriteStub(object, slot_address, fp_mode);
   if (ra_status == kRAHasNotBeenSaved) {
     pop(ra);
   }
@@ -2414,6 +2406,7 @@ void TurboAssembler::InsertLowWordF64(FPURegister dst, Register src_low) {
 }
 
 void TurboAssembler::LoadFPRImmediate(FPURegister dst, uint32_t src) {
+  ASM_CODE_COMMENT(this);
   // Handle special values first.
   if (src == base::bit_cast<uint32_t>(0.0f) && has_single_zero_reg_set_) {
     if (dst != kDoubleRegZero) fmv_s(dst, kDoubleRegZero);
@@ -2423,19 +2416,24 @@ void TurboAssembler::LoadFPRImmediate(FPURegister dst, uint32_t src) {
   } else {
     if (dst == kDoubleRegZero) {
       DCHECK(src == base::bit_cast<uint32_t>(0.0f));
-      fmv_w_x(dst, zero_reg);
+      fcvt_s_w(dst, zero_reg);
       has_single_zero_reg_set_ = true;
       has_double_zero_reg_set_ = false;
     } else {
       UseScratchRegisterScope temps(this);
       Register scratch = temps.Acquire();
-      li(scratch, Operand(static_cast<int32_t>(src)));
-      fmv_w_x(dst, scratch);
+      if (src == base::bit_cast<uint32_t>(0.0f)) {
+        fcvt_s_w(dst, zero_reg);
+      } else {
+        li(scratch, Operand(static_cast<int32_t>(src)));
+        fmv_w_x(dst, scratch);
+      }
     }
   }
 }
 
 void TurboAssembler::LoadFPRImmediate(FPURegister dst, uint64_t src) {
+  ASM_CODE_COMMENT(this);
   // Handle special values first.
   if (src == base::bit_cast<uint64_t>(0.0) && has_double_zero_reg_set_) {
     if (dst != kDoubleRegZero) fmv_d(dst, kDoubleRegZero);
@@ -2445,14 +2443,18 @@ void TurboAssembler::LoadFPRImmediate(FPURegister dst, uint64_t src) {
   } else {
     if (dst == kDoubleRegZero) {
       DCHECK(src == base::bit_cast<uint64_t>(0.0));
-      fmv_d_x(dst, zero_reg);
+      fcvt_d_l(dst, zero_reg);
       has_double_zero_reg_set_ = true;
       has_single_zero_reg_set_ = false;
     } else {
       UseScratchRegisterScope temps(this);
       Register scratch = temps.Acquire();
-      li(scratch, Operand(src));
-      fmv_d_x(dst, scratch);
+      if (src == base::bit_cast<uint64_t>(0.0)) {
+        fcvt_d_l(dst, zero_reg);
+      } else {
+        li(scratch, Operand(src));
+        fmv_d_x(dst, scratch);
+      }
     }
   }
 }
@@ -3632,7 +3634,12 @@ void TurboAssembler::FPUCanonicalizeNaN(const DoubleRegister dst,
   // Subtracting 0.0 preserves all inputs except for signalling NaNs, which
   // become quiet NaNs. We use fsub rather than fadd because fsub preserves -0.0
   // inputs: -0.0 + 0.0 = 0.0, but -0.0 - 0.0 = -0.0.
-  fsub_d(dst, src, kDoubleRegZero);
+  if (IsDoubleZeroRegSet()) {
+    fsub_d(dst, src, kDoubleRegZero);
+  } else {
+    LoadFPRImmediate(kDoubleRegZero, 0.0);
+    fsub_d(dst, src, kDoubleRegZero);
+  }
 }
 
 void TurboAssembler::MovFromFloatResult(const DoubleRegister dst) {

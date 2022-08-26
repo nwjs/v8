@@ -6,6 +6,7 @@
 #define V8_MAGLEV_MAGLEV_IR_H_
 
 #include "src/base/bit-field.h"
+#include "src/base/logging.h"
 #include "src/base/macros.h"
 #include "src/base/small-vector.h"
 #include "src/base/threaded-list.h"
@@ -15,6 +16,7 @@
 #include "src/common/operation.h"
 #include "src/compiler/backend/instruction.h"
 #include "src/compiler/heap-refs.h"
+#include "src/deoptimizer/deoptimize-reason.h"
 #include "src/interpreter/bytecode-register.h"
 #include "src/maglev/maglev-compilation-unit.h"
 #include "src/objects/smi.h"
@@ -117,8 +119,13 @@ class CompactInterpreterFrameState;
   V(Call)                         \
   V(Construct)                    \
   V(CreateEmptyArrayLiteral)      \
+  V(CreateArrayLiteral)           \
+  V(CreateShallowArrayLiteral)    \
   V(CreateObjectLiteral)          \
   V(CreateShallowObjectLiteral)   \
+  V(CreateFunctionContext)        \
+  V(CreateClosure)                \
+  V(FastCreateClosure)            \
   V(InitialValue)                 \
   V(LoadTaggedField)              \
   V(LoadDoubleField)              \
@@ -126,13 +133,22 @@ class CompactInterpreterFrameState;
   V(LoadNamedGeneric)             \
   V(SetNamedGeneric)              \
   V(DefineNamedOwnGeneric)        \
+  V(StoreInArrayLiteralGeneric)   \
+  V(GetKeyedGeneric)              \
+  V(SetKeyedGeneric)              \
+  V(DefineKeyedOwnGeneric)        \
   V(Phi)                          \
   V(RegisterInput)                \
   V(CheckedSmiTag)                \
   V(CheckedSmiUntag)              \
+  V(CheckedInternalizedString)    \
   V(ChangeInt32ToFloat64)         \
   V(Float64Box)                   \
   V(CheckedFloat64Unbox)          \
+  V(LogicalNot)                   \
+  V(TaggedEqual)                  \
+  V(TestInstanceOf)               \
+  V(TestUndetectable)             \
   CONSTANT_VALUE_NODE_LIST(V)     \
   INT32_OPERATIONS_NODE_LIST(V)   \
   FLOAT64_OPERATIONS_NODE_LIST(V) \
@@ -142,15 +158,23 @@ class CompactInterpreterFrameState;
   V(ConstantGapMove)          \
   V(GapMove)
 
-#define NODE_LIST(V)    \
-  V(CheckMaps)          \
-  V(StoreField)         \
-  GAP_MOVE_NODE_LIST(V) \
+#define NODE_LIST(V)                  \
+  V(CheckMaps)                        \
+  V(CheckSmi)                         \
+  V(CheckHeapObject)                  \
+  V(CheckString)                      \
+  V(CheckMapsWithMigration)           \
+  V(StoreTaggedFieldNoWriteBarrier)   \
+  V(StoreTaggedFieldWithWriteBarrier) \
+  V(IncreaseInterruptBudget)          \
+  V(ReduceInterruptBudget)            \
+  GAP_MOVE_NODE_LIST(V)               \
   VALUE_NODE_LIST(V)
 
 #define CONDITIONAL_CONTROL_NODE_LIST(V) \
-  V(BranchIfTrue)                        \
+  V(BranchIfRootConstant)                \
   V(BranchIfToBooleanTrue)               \
+  V(BranchIfReferenceCompare)            \
   V(BranchIfInt32Compare)                \
   V(BranchIfFloat64Compare)
 
@@ -270,6 +294,12 @@ class OpProperties {
   constexpr ValueRepresentation value_representation() const {
     return kValueRepresentationBits::decode(bitfield_);
   }
+  constexpr bool is_conversion() const {
+    return kIsConversionBit::decode(bitfield_);
+  }
+  constexpr bool needs_register_snapshot() const {
+    return kNeedsRegisterSnapshotBit::decode(bitfield_);
+  }
   constexpr bool is_pure() const {
     return (bitfield_ | kPureMask) == kPureValue;
   }
@@ -312,11 +342,23 @@ class OpProperties {
     return OpProperties(
         kValueRepresentationBits::encode(ValueRepresentation::kFloat64));
   }
+  static constexpr OpProperties ConversionNode() {
+    return OpProperties(kIsConversionBit::encode(true));
+  }
+  static constexpr OpProperties NeedsRegisterSnapshot() {
+    return OpProperties(kNeedsRegisterSnapshotBit::encode(true));
+  }
   static constexpr OpProperties JSCall() {
     return Call() | NonMemorySideEffects() | LazyDeopt();
   }
   static constexpr OpProperties AnySideEffects() {
     return Reading() | Writing() | NonMemorySideEffects();
+  }
+  static constexpr OpProperties DeferredCall() {
+    // Operations with a deferred call need a snapshot of register state,
+    // because they need to be able to push registers to save them, and annotate
+    // the safepoint with information about which registers are tagged.
+    return NeedsRegisterSnapshot();
   }
 
   constexpr explicit OpProperties(uint32_t bitfield) : bitfield_(bitfield) {}
@@ -331,6 +373,8 @@ class OpProperties {
   using kNonMemorySideEffectsBit = kCanWriteBit::Next<bool, 1>;
   using kValueRepresentationBits =
       kNonMemorySideEffectsBit::Next<ValueRepresentation, 2>;
+  using kIsConversionBit = kValueRepresentationBits::Next<bool, 1>;
+  using kNeedsRegisterSnapshotBit = kIsConversionBit::Next<bool, 1>;
 
   static const uint32_t kPureMask = kCanReadBit::kMask | kCanWriteBit::kMask |
                                     kNonMemorySideEffectsBit::kMask;
@@ -341,7 +385,7 @@ class OpProperties {
   const uint32_t bitfield_;
 
  public:
-  static const size_t kSize = kValueRepresentationBits::kLastUsedBit + 1;
+  static const size_t kSize = kNeedsRegisterSnapshotBit::kLastUsedBit + 1;
 };
 
 class ValueLocation {
@@ -437,11 +481,18 @@ class DeoptInfo {
   int translation_index = -1;
 };
 
+struct RegisterSnapshot {
+  RegList live_registers;
+  RegList live_tagged_registers;
+  DoubleRegList live_double_registers;
+};
+
 class EagerDeoptInfo : public DeoptInfo {
  public:
   EagerDeoptInfo(Zone* zone, const MaglevCompilationUnit& compilation_unit,
                  CheckpointedInterpreterState checkpoint)
       : DeoptInfo(zone, compilation_unit, checkpoint) {}
+  DeoptimizeReason reason = DeoptimizeReason::kUnknown;
 };
 
 class LazyDeoptInfo : public DeoptInfo {
@@ -473,24 +524,41 @@ struct opcode_of_helper;
 NODE_BASE_LIST(DEF_OPCODE_OF)
 #undef DEF_OPCODE_OF
 
+template <typename T>
+T* ObjectPtrBeforeAddress(void* address) {
+  char* address_as_char_ptr = reinterpret_cast<char*>(address);
+  char* object_ptr_as_char_ptr = address_as_char_ptr - sizeof(T);
+  return reinterpret_cast<T*>(object_ptr_as_char_ptr);
+}
+
+template <typename T>
+const T* ObjectPtrBeforeAddress(const void* address) {
+  const char* address_as_char_ptr = reinterpret_cast<const char*>(address);
+  const char* object_ptr_as_char_ptr = address_as_char_ptr - sizeof(T);
+  return reinterpret_cast<const T*>(object_ptr_as_char_ptr);
+}
+
 }  // namespace detail
 
 class NodeBase : public ZoneObject {
  private:
   // Bitfield specification.
-  using OpcodeField = base::BitField<Opcode, 0, 7>;
+  using OpcodeField = base::BitField64<Opcode, 0, 7>;
   static_assert(OpcodeField::is_valid(kLastOpcode));
   using OpPropertiesField =
       OpcodeField::Next<OpProperties, OpProperties::kSize>;
-  using InputCountField = OpPropertiesField::Next<uint16_t, 16>;
+  using InputCountField = OpPropertiesField::Next<size_t, 17>;
+  using NumTemporariesNeededField = InputCountField::Next<uint8_t, 2>;
 
  protected:
   // Subclasses may use the remaining bitfield bits.
   template <class T, int size>
-  using NextBitField = InputCountField::Next<T, size>;
+  using NextBitField = NumTemporariesNeededField::Next<T, size>;
 
   template <class T>
   static constexpr Opcode opcode_of = detail::opcode_of_helper<T>::value;
+
+  static constexpr int kMaxInputs = InputCountField::kMax;
 
  public:
   template <class Derived, typename... Args>
@@ -513,11 +581,11 @@ class NodeBase : public ZoneObject {
                       CheckpointedInterpreterState checkpoint, Args&&... args) {
     Derived* node = New<Derived>(zone, std::forward<Args>(args)...);
     if constexpr (Derived::kProperties.can_eager_deopt()) {
-      new (node->eager_deopt_info_address())
+      new (node->eager_deopt_info())
           EagerDeoptInfo(zone, compilation_unit, checkpoint);
     } else {
       static_assert(Derived::kProperties.can_lazy_deopt());
-      new (node->lazy_deopt_info_address())
+      new (node->lazy_deopt_info())
           LazyDeoptInfo(zone, compilation_unit, checkpoint);
     }
     return node;
@@ -535,9 +603,9 @@ class NodeBase : public ZoneObject {
   static constexpr OpProperties kProperties =
       OpProperties::Pure() | OpProperties::TaggedValue();
 
-  constexpr Opcode opcode() const { return OpcodeField::decode(bit_field_); }
+  constexpr Opcode opcode() const { return OpcodeField::decode(bitfield_); }
   constexpr OpProperties properties() const {
-    return OpPropertiesField::decode(bit_field_);
+    return OpPropertiesField::decode(bitfield_);
   }
 
   template <class T>
@@ -559,21 +627,27 @@ class NodeBase : public ZoneObject {
   }
 
   constexpr bool has_inputs() const { return input_count() > 0; }
-  constexpr uint16_t input_count() const {
-    return InputCountField::decode(bit_field_);
+  constexpr int input_count() const {
+    static_assert(InputCountField::kMax <= kMaxInt);
+    return static_cast<int>(InputCountField::decode(bitfield_));
   }
 
-  Input& input(int index) { return *input_address(index); }
-  const Input& input(int index) const { return *input_address(index); }
+  Input& input(int index) {
+    DCHECK_LT(index, input_count());
+    return *(input_base() - index);
+  }
+  const Input& input(int index) const {
+    DCHECK_LT(index, input_count());
+    return *(input_base() - index);
+  }
 
   // Input iterators, use like:
   //
   //  for (Input& input : *node) { ... }
-  auto begin() { return std::make_reverse_iterator(input_address(-1)); }
-  auto end() {
-    return std::make_reverse_iterator(input_address(input_count() - 1));
-  }
+  auto begin() { return std::make_reverse_iterator(&input(-1)); }
+  auto end() { return std::make_reverse_iterator(&input(input_count() - 1)); }
 
+  constexpr bool has_id() const { return id_ != kInvalidNodeId; }
   constexpr NodeIdT id() const {
     DCHECK_NE(id_, kInvalidNodeId);
     return id_;
@@ -584,7 +658,9 @@ class NodeBase : public ZoneObject {
     id_ = id;
   }
 
-  int num_temporaries_needed() const { return num_temporaries_needed_; }
+  uint8_t num_temporaries_needed() const {
+    return NumTemporariesNeededField::decode(bitfield_);
+  }
 
   RegList temporaries() const { return temporaries_; }
 
@@ -595,49 +671,65 @@ class NodeBase : public ZoneObject {
   EagerDeoptInfo* eager_deopt_info() {
     DCHECK(properties().can_eager_deopt());
     DCHECK(!properties().can_lazy_deopt());
-    return (
-        reinterpret_cast<EagerDeoptInfo*>(input_address(input_count() - 1)) -
-        1);
+    return detail::ObjectPtrBeforeAddress<EagerDeoptInfo>(last_input_address());
   }
 
   const EagerDeoptInfo* eager_deopt_info() const {
     DCHECK(properties().can_eager_deopt());
     DCHECK(!properties().can_lazy_deopt());
-    return (reinterpret_cast<const EagerDeoptInfo*>(
-                input_address(input_count() - 1)) -
-            1);
+    return detail::ObjectPtrBeforeAddress<EagerDeoptInfo>(last_input_address());
   }
 
   LazyDeoptInfo* lazy_deopt_info() {
     DCHECK(properties().can_lazy_deopt());
     DCHECK(!properties().can_eager_deopt());
-    return (reinterpret_cast<LazyDeoptInfo*>(input_address(input_count() - 1)) -
-            1);
+    return detail::ObjectPtrBeforeAddress<LazyDeoptInfo>(last_input_address());
   }
 
   const LazyDeoptInfo* lazy_deopt_info() const {
     DCHECK(properties().can_lazy_deopt());
     DCHECK(!properties().can_eager_deopt());
-    return (reinterpret_cast<const LazyDeoptInfo*>(
-                input_address(input_count() - 1)) -
-            1);
+    return detail::ObjectPtrBeforeAddress<LazyDeoptInfo>(last_input_address());
+  }
+
+  const RegisterSnapshot& register_snapshot() const {
+    DCHECK(properties().needs_register_snapshot());
+    DCHECK(!properties().can_lazy_deopt());
+
+    if (properties().can_eager_deopt()) {
+      return *detail::ObjectPtrBeforeAddress<RegisterSnapshot>(
+          eager_deopt_info());
+    } else {
+      return *detail::ObjectPtrBeforeAddress<RegisterSnapshot>(
+          last_input_address());
+    }
+  }
+
+  void set_register_snapshot(RegisterSnapshot snapshot) {
+    DCHECK(properties().needs_register_snapshot());
+    DCHECK(!properties().can_lazy_deopt());
+
+    if (properties().can_eager_deopt()) {
+      *detail::ObjectPtrBeforeAddress<RegisterSnapshot>(eager_deopt_info()) =
+          snapshot;
+    } else {
+      *detail::ObjectPtrBeforeAddress<RegisterSnapshot>(last_input_address()) =
+          snapshot;
+    }
   }
 
  protected:
-  explicit NodeBase(uint32_t bitfield) : bit_field_(bitfield) {}
+  explicit NodeBase(uint64_t bitfield) : bitfield_(bitfield) {}
 
-  Input* input_address(int index) {
-    DCHECK_LT(index, input_count());
-    return reinterpret_cast<Input*>(this) - (index + 1);
+  Input* input_base() { return detail::ObjectPtrBeforeAddress<Input>(this); }
+  const Input* input_base() const {
+    return detail::ObjectPtrBeforeAddress<Input>(this);
   }
+  Input* last_input_address() { return &input(input_count() - 1); }
+  const Input* last_input_address() const { return &input(input_count() - 1); }
 
-  const Input* input_address(int index) const {
-    DCHECK_LT(index, input_count());
-    return reinterpret_cast<const Input*>(this) - (index + 1);
-  }
-
-  void set_input(int index, ValueNode* input) {
-    new (input_address(index)) Input(input);
+  void set_input(int index, ValueNode* node) {
+    new (&input(index)) Input(node);
   }
 
   // For nodes that don't have data past the input, allow trimming the input
@@ -647,35 +739,21 @@ class NodeBase : public ZoneObject {
     DCHECK_EQ(opcode(), Opcode::kPhi);
     DCHECK(!properties().can_lazy_deopt());
     DCHECK(!properties().can_eager_deopt());
-    bit_field_ = InputCountField::update(bit_field_, input_count() - 1);
+    bitfield_ = InputCountField::update(bitfield_, input_count() - 1);
   }
 
   // Specify that there need to be a certain number of registers free (i.e.
   // useable as scratch registers) on entry into this node.
   //
-  // Includes any registers requested by RequireSpecificTemporary.
-  void set_temporaries_needed(int value) {
-    DCHECK_EQ(num_temporaries_needed_, 0);
-    num_temporaries_needed_ = value;
+  // Does not include any registers requested by RequireSpecificTemporary.
+  void set_temporaries_needed(uint8_t value) {
+    DCHECK_EQ(num_temporaries_needed(), 0);
+    bitfield_ = NumTemporariesNeededField::update(bitfield_, value);
   }
 
   // Require that a specific register is free (and therefore clobberable) by the
   // entry into this node.
   void RequireSpecificTemporary(Register reg) { temporaries_.set(reg); }
-
-  EagerDeoptInfo* eager_deopt_info_address() {
-    DCHECK(properties().can_eager_deopt());
-    DCHECK(!properties().can_lazy_deopt());
-    return reinterpret_cast<EagerDeoptInfo*>(input_address(input_count() - 1)) -
-           1;
-  }
-
-  LazyDeoptInfo* lazy_deopt_info_address() {
-    DCHECK(!properties().can_eager_deopt());
-    DCHECK(properties().can_lazy_deopt());
-    return reinterpret_cast<LazyDeoptInfo*>(input_address(input_count() - 1)) -
-           1;
-  }
 
  private:
   template <class Derived, typename... Args>
@@ -687,15 +765,23 @@ class NodeBase : public ZoneObject {
         "that we cannot have both lazy and eager deopts on a node. If we ever "
         "need this, we have to update accessors to check node->properties() "
         "for which deopts are active.");
-    const size_t size_before_node =
-        input_count * sizeof(Input) +
+    constexpr size_t size_before_inputs = RoundUp<alignof(Input)>(
+        (Derived::kProperties.needs_register_snapshot()
+             ? sizeof(RegisterSnapshot)
+             : 0) +
         (Derived::kProperties.can_eager_deopt() ? sizeof(EagerDeoptInfo) : 0) +
-        (Derived::kProperties.can_lazy_deopt() ? sizeof(LazyDeoptInfo) : 0);
+        (Derived::kProperties.can_lazy_deopt() ? sizeof(LazyDeoptInfo) : 0));
+
+    static_assert(IsAligned(size_before_inputs, alignof(Input)));
+    const size_t size_before_node =
+        size_before_inputs + input_count * sizeof(Input);
+
+    DCHECK(IsAligned(size_before_inputs, alignof(Derived)));
     const size_t size = size_before_node + sizeof(Derived);
     intptr_t raw_buffer =
         reinterpret_cast<intptr_t>(zone->Allocate<NodeWithInlineInputs>(size));
     void* node_buffer = reinterpret_cast<void*>(raw_buffer + size_before_node);
-    uint32_t bitfield = OpcodeField::encode(opcode_of<Derived>) |
+    uint64_t bitfield = OpcodeField::encode(opcode_of<Derived>) |
                         OpPropertiesField::encode(Derived::kProperties) |
                         InputCountField::encode(input_count);
     Derived* node =
@@ -703,11 +789,8 @@ class NodeBase : public ZoneObject {
     return node;
   }
 
-  uint32_t bit_field_;
-
- private:
+  uint64_t bitfield_;
   NodeIdT id_ = kInvalidNodeId;
-  uint8_t num_temporaries_needed_ = 0;
   RegList temporaries_;
 
   NodeBase() = delete;
@@ -776,6 +859,7 @@ class ValueNode : public Node {
   bool is_spilled() const { return spill_or_hint_.IsAnyStackSlot(); }
 
   void SetNoSpillOrHint();
+  void SetConstantLocation();
 
   /* For constants only. */
   void LoadToRegister(MaglevCodeGenState*, Register);
@@ -796,9 +880,14 @@ class ValueNode : public Node {
   }
 
   compiler::AllocatedOperand spill_slot() const {
-    DCHECK_EQ(state_, kSpillOrHint);
     DCHECK(is_spilled());
-    return compiler::AllocatedOperand::cast(spill_or_hint_);
+    return compiler::AllocatedOperand::cast(loadable_slot());
+  }
+
+  compiler::InstructionOperand loadable_slot() const {
+    DCHECK_EQ(state_, kSpillOrHint);
+    DCHECK(is_loadable());
+    return spill_or_hint_;
   }
 
   void mark_use(NodeIdT id, InputLocation* input_location) {
@@ -886,6 +975,17 @@ class ValueNode : public Node {
     return double_registers_with_result_.has(reg);
   }
 
+  template <typename T>
+  RegListBase<T> result_registers() {
+    if constexpr (std::is_same<T, DoubleRegister>::value) {
+      DCHECK(use_double_register());
+      return double_registers_with_result_;
+    } else {
+      DCHECK(!use_double_register());
+      return registers_with_result_;
+    }
+  }
+
   compiler::InstructionOperand allocation() const {
     if (has_register()) {
       return compiler::AllocatedOperand(compiler::LocationOperand::REGISTER,
@@ -897,7 +997,7 @@ class ValueNode : public Node {
   }
 
  protected:
-  explicit ValueNode(uint32_t bitfield)
+  explicit ValueNode(uint64_t bitfield)
       : Node(bitfield),
         last_uses_next_use_id_(&next_use_)
 #ifdef DEBUG
@@ -970,7 +1070,7 @@ class NodeT : public Node {
   const OpProperties& properties() const { return Derived::kProperties; }
 
  protected:
-  explicit NodeT(uint32_t bitfield) : Node(bitfield) {
+  explicit NodeT(uint64_t bitfield) : Node(bitfield) {
     DCHECK_EQ(NodeBase::opcode(), opcode_of<Derived>);
   }
 };
@@ -984,11 +1084,11 @@ class FixedInputNodeT : public NodeT<Derived> {
   constexpr bool has_inputs() const { return input_count() > 0; }
   constexpr uint16_t input_count() const { return kInputCount; }
   auto end() {
-    return std::make_reverse_iterator(this->input_address(input_count() - 1));
+    return std::make_reverse_iterator(&this->input(input_count() - 1));
   }
 
  protected:
-  explicit FixedInputNodeT(uint32_t bitfield) : NodeT<Derived>(bitfield) {
+  explicit FixedInputNodeT(uint64_t bitfield) : NodeT<Derived>(bitfield) {
     DCHECK_EQ(NodeBase::input_count(), kInputCount);
   }
 };
@@ -1002,7 +1102,7 @@ class ValueNodeT : public ValueNode {
   const OpProperties& properties() const { return Derived::kProperties; }
 
  protected:
-  explicit ValueNodeT(uint32_t bitfield) : ValueNode(bitfield) {
+  explicit ValueNodeT(uint64_t bitfield) : ValueNode(bitfield) {
     DCHECK_EQ(NodeBase::opcode(), opcode_of<Derived>);
   }
 };
@@ -1016,11 +1116,11 @@ class FixedInputValueNodeT : public ValueNodeT<Derived> {
   constexpr bool has_inputs() const { return input_count() > 0; }
   constexpr uint16_t input_count() const { return kInputCount; }
   auto end() {
-    return std::make_reverse_iterator(this->input_address(input_count() - 1));
+    return std::make_reverse_iterator(&this->input(input_count() - 1));
   }
 
  protected:
-  explicit FixedInputValueNodeT(uint32_t bitfield)
+  explicit FixedInputValueNodeT(uint64_t bitfield)
       : ValueNodeT<Derived>(bitfield) {
     DCHECK_EQ(NodeBase::input_count(), kInputCount);
   }
@@ -1039,11 +1139,11 @@ class UnaryWithFeedbackNode : public FixedInputValueNodeT<1, Derived> {
   compiler::FeedbackSource feedback() const { return feedback_; }
 
  protected:
-  explicit UnaryWithFeedbackNode(uint32_t bitfield,
+  explicit UnaryWithFeedbackNode(uint64_t bitfield,
                                  const compiler::FeedbackSource& feedback)
       : Base(bitfield), feedback_(feedback) {}
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 
@@ -1065,27 +1165,27 @@ class BinaryWithFeedbackNode : public FixedInputValueNodeT<2, Derived> {
   compiler::FeedbackSource feedback() const { return feedback_; }
 
  protected:
-  BinaryWithFeedbackNode(uint32_t bitfield,
+  BinaryWithFeedbackNode(uint64_t bitfield,
                          const compiler::FeedbackSource& feedback)
       : Base(bitfield), feedback_(feedback) {}
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 
   const compiler::FeedbackSource feedback_;
 };
 
-#define DEF_OPERATION_NODE(Name, Super, OpName)                            \
-  class Name : public Super<Name, Operation::k##OpName> {                  \
-    using Base = Super<Name, Operation::k##OpName>;                        \
-                                                                           \
-   public:                                                                 \
-    Name(uint32_t bitfield, const compiler::FeedbackSource& feedback)      \
-        : Base(bitfield, feedback) {}                                      \
-    void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&); \
-    void GenerateCode(MaglevCodeGenState*, const ProcessingState&);        \
-    void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}         \
+#define DEF_OPERATION_NODE(Name, Super, OpName)                       \
+  class Name : public Super<Name, Operation::k##OpName> {             \
+    using Base = Super<Name, Operation::k##OpName>;                   \
+                                                                      \
+   public:                                                            \
+    Name(uint64_t bitfield, const compiler::FeedbackSource& feedback) \
+        : Base(bitfield, feedback) {}                                 \
+    void AllocateVreg(MaglevVregAllocationState*);                    \
+    void GenerateCode(MaglevCodeGenState*, const ProcessingState&);   \
+    void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}    \
   };
 
 #define DEF_UNARY_WITH_FEEDBACK_NODE(Name) \
@@ -1114,22 +1214,22 @@ class Int32BinaryWithOverflowNode : public FixedInputValueNodeT<2, Derived> {
   Input& right_input() { return Node::input(kRightIndex); }
 
  protected:
-  explicit Int32BinaryWithOverflowNode(uint32_t bitfield) : Base(bitfield) {}
+  explicit Int32BinaryWithOverflowNode(uint64_t bitfield) : Base(bitfield) {}
 
   // void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
   // void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 };
 
-#define DEF_OPERATION_NODE(Name, Super, OpName)                            \
-  class Name : public Super<Name, Operation::k##OpName> {                  \
-    using Base = Super<Name, Operation::k##OpName>;                        \
-                                                                           \
-   public:                                                                 \
-    explicit Name(uint32_t bitfield) : Base(bitfield) {}                   \
-    void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&); \
-    void GenerateCode(MaglevCodeGenState*, const ProcessingState&);        \
-    void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}         \
+#define DEF_OPERATION_NODE(Name, Super, OpName)                     \
+  class Name : public Super<Name, Operation::k##OpName> {           \
+    using Base = Super<Name, Operation::k##OpName>;                 \
+                                                                    \
+   public:                                                          \
+    explicit Name(uint64_t bitfield) : Base(bitfield) {}            \
+    void AllocateVreg(MaglevVregAllocationState*);                  \
+    void GenerateCode(MaglevCodeGenState*, const ProcessingState&); \
+    void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}  \
   };
 
 #define DEF_INT32_BINARY_WITH_OVERFLOW_NODE(Name)                            \
@@ -1148,7 +1248,8 @@ class Int32BinaryNode : public FixedInputValueNodeT<2, Derived> {
   using Base = FixedInputValueNodeT<2, Derived>;
 
  public:
-  static constexpr OpProperties kProperties = OpProperties::Int32();
+  static constexpr OpProperties kProperties =
+      OpProperties::EagerDeopt() | OpProperties::Int32();
 
   static constexpr int kLeftIndex = 0;
   static constexpr int kRightIndex = 1;
@@ -1156,20 +1257,20 @@ class Int32BinaryNode : public FixedInputValueNodeT<2, Derived> {
   Input& right_input() { return Node::input(kRightIndex); }
 
  protected:
-  explicit Int32BinaryNode(uint32_t bitfield) : Base(bitfield) {}
+  explicit Int32BinaryNode(uint64_t bitfield) : Base(bitfield) {}
 
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 };
 
-#define DEF_OPERATION_NODE(Name, Super, OpName)                            \
-  class Name : public Super<Name, Operation::k##OpName> {                  \
-    using Base = Super<Name, Operation::k##OpName>;                        \
-                                                                           \
-   public:                                                                 \
-    explicit Name(uint32_t bitfield) : Base(bitfield) {}                   \
-    void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&); \
-    void GenerateCode(MaglevCodeGenState*, const ProcessingState&);        \
-    void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}         \
+#define DEF_OPERATION_NODE(Name, Super, OpName)                     \
+  class Name : public Super<Name, Operation::k##OpName> {           \
+    using Base = Super<Name, Operation::k##OpName>;                 \
+                                                                    \
+   public:                                                          \
+    explicit Name(uint64_t bitfield) : Base(bitfield) {}            \
+    void AllocateVreg(MaglevVregAllocationState*);                  \
+    void GenerateCode(MaglevCodeGenState*, const ProcessingState&); \
+    void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}  \
   };
 
 #define DEF_INT32_BINARY_NODE(Name) \
@@ -1196,22 +1297,22 @@ class Int32CompareNode : public FixedInputValueNodeT<2, Derived> {
   Input& right_input() { return Node::input(kRightIndex); }
 
  protected:
-  explicit Int32CompareNode(uint32_t bitfield) : Base(bitfield) {}
+  explicit Int32CompareNode(uint64_t bitfield) : Base(bitfield) {}
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 };
 
-#define DEF_OPERATION_NODE(Name, Super, OpName)                            \
-  class Name : public Super<Name, Operation::k##OpName> {                  \
-    using Base = Super<Name, Operation::k##OpName>;                        \
-                                                                           \
-   public:                                                                 \
-    explicit Name(uint32_t bitfield) : Base(bitfield) {}                   \
-    void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&); \
-    void GenerateCode(MaglevCodeGenState*, const ProcessingState&);        \
-    void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}         \
+#define DEF_OPERATION_NODE(Name, Super, OpName)                     \
+  class Name : public Super<Name, Operation::k##OpName> {           \
+    using Base = Super<Name, Operation::k##OpName>;                 \
+                                                                    \
+   public:                                                          \
+    explicit Name(uint64_t bitfield) : Base(bitfield) {}            \
+    void AllocateVreg(MaglevVregAllocationState*);                  \
+    void GenerateCode(MaglevCodeGenState*, const ProcessingState&); \
+    void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}  \
   };
 
 #define DEF_INT32_COMPARE_NODE(Name) \
@@ -1239,20 +1340,20 @@ class Float64BinaryNode : public FixedInputValueNodeT<2, Derived> {
   Input& right_input() { return Node::input(kRightIndex); }
 
  protected:
-  explicit Float64BinaryNode(uint32_t bitfield) : Base(bitfield) {}
+  explicit Float64BinaryNode(uint64_t bitfield) : Base(bitfield) {}
 
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 };
 
-#define DEF_OPERATION_NODE(Name, Super, OpName)                            \
-  class Name : public Super<Name, Operation::k##OpName> {                  \
-    using Base = Super<Name, Operation::k##OpName>;                        \
-                                                                           \
-   public:                                                                 \
-    explicit Name(uint32_t bitfield) : Base(bitfield) {}                   \
-    void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&); \
-    void GenerateCode(MaglevCodeGenState*, const ProcessingState&);        \
-    void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}         \
+#define DEF_OPERATION_NODE(Name, Super, OpName)                     \
+  class Name : public Super<Name, Operation::k##OpName> {           \
+    using Base = Super<Name, Operation::k##OpName>;                 \
+                                                                    \
+   public:                                                          \
+    explicit Name(uint64_t bitfield) : Base(bitfield) {}            \
+    void AllocateVreg(MaglevVregAllocationState*);                  \
+    void GenerateCode(MaglevCodeGenState*, const ProcessingState&); \
+    void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}  \
   };
 
 #define DEF_FLOAT64_BINARY_NODE(Name) \
@@ -1282,22 +1383,22 @@ class Float64CompareNode : public FixedInputValueNodeT<2, Derived> {
   Input& right_input() { return Node::input(kRightIndex); }
 
  protected:
-  explicit Float64CompareNode(uint32_t bitfield) : Base(bitfield) {}
+  explicit Float64CompareNode(uint64_t bitfield) : Base(bitfield) {}
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 };
 
-#define DEF_OPERATION_NODE(Name, Super, OpName)                            \
-  class Name : public Super<Name, Operation::k##OpName> {                  \
-    using Base = Super<Name, Operation::k##OpName>;                        \
-                                                                           \
-   public:                                                                 \
-    explicit Name(uint32_t bitfield) : Base(bitfield) {}                   \
-    void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&); \
-    void GenerateCode(MaglevCodeGenState*, const ProcessingState&);        \
-    void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}         \
+#define DEF_OPERATION_NODE(Name, Super, OpName)                     \
+  class Name : public Super<Name, Operation::k##OpName> {           \
+    using Base = Super<Name, Operation::k##OpName>;                 \
+                                                                    \
+   public:                                                          \
+    explicit Name(uint64_t bitfield) : Base(bitfield) {}            \
+    void AllocateVreg(MaglevVregAllocationState*);                  \
+    void GenerateCode(MaglevCodeGenState*, const ProcessingState&); \
+    void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}  \
   };
 
 #define DEF_FLOAT64_COMPARE_NODE(Name) \
@@ -1316,13 +1417,14 @@ class CheckedSmiTag : public FixedInputValueNodeT<1, CheckedSmiTag> {
   using Base = FixedInputValueNodeT<1, CheckedSmiTag>;
 
  public:
-  explicit CheckedSmiTag(uint32_t bitfield) : Base(bitfield) {}
+  explicit CheckedSmiTag(uint64_t bitfield) : Base(bitfield) {}
 
-  static constexpr OpProperties kProperties = OpProperties::EagerDeopt();
+  static constexpr OpProperties kProperties =
+      OpProperties::EagerDeopt() | OpProperties::ConversionNode();
 
   Input& input() { return Node::input(0); }
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 };
@@ -1331,14 +1433,15 @@ class CheckedSmiUntag : public FixedInputValueNodeT<1, CheckedSmiUntag> {
   using Base = FixedInputValueNodeT<1, CheckedSmiUntag>;
 
  public:
-  explicit CheckedSmiUntag(uint32_t bitfield) : Base(bitfield) {}
+  explicit CheckedSmiUntag(uint64_t bitfield) : Base(bitfield) {}
 
-  static constexpr OpProperties kProperties =
-      OpProperties::EagerDeopt() | OpProperties::Int32();
+  static constexpr OpProperties kProperties = OpProperties::EagerDeopt() |
+                                              OpProperties::Int32() |
+                                              OpProperties::ConversionNode();
 
   Input& input() { return Node::input(0); }
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 };
@@ -1349,14 +1452,14 @@ class Int32Constant : public FixedInputValueNodeT<0, Int32Constant> {
  public:
   using OutputRegister = Register;
 
-  explicit Int32Constant(uint32_t bitfield, int32_t value)
+  explicit Int32Constant(uint64_t bitfield, int32_t value)
       : Base(bitfield), value_(value) {}
 
   static constexpr OpProperties kProperties = OpProperties::Int32();
 
   int32_t value() const { return value_; }
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
@@ -1373,14 +1476,14 @@ class Float64Constant : public FixedInputValueNodeT<0, Float64Constant> {
  public:
   using OutputRegister = DoubleRegister;
 
-  explicit Float64Constant(uint32_t bitfield, double value)
+  explicit Float64Constant(uint64_t bitfield, double value)
       : Base(bitfield), value_(value) {}
 
   static constexpr OpProperties kProperties = OpProperties::Float64();
 
   double value() const { return value_; }
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
@@ -1396,13 +1499,14 @@ class Float64Box : public FixedInputValueNodeT<1, Float64Box> {
   using Base = FixedInputValueNodeT<1, Float64Box>;
 
  public:
-  explicit Float64Box(uint32_t bitfield) : Base(bitfield) {}
+  explicit Float64Box(uint64_t bitfield) : Base(bitfield) {}
 
-  static constexpr OpProperties kProperties = OpProperties::Call();
+  static constexpr OpProperties kProperties =
+      OpProperties::Call() | OpProperties::ConversionNode();
 
   Input& input() { return Node::input(0); }
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 };
@@ -1412,13 +1516,14 @@ class ChangeInt32ToFloat64
   using Base = FixedInputValueNodeT<1, ChangeInt32ToFloat64>;
 
  public:
-  explicit ChangeInt32ToFloat64(uint32_t bitfield) : Base(bitfield) {}
+  explicit ChangeInt32ToFloat64(uint64_t bitfield) : Base(bitfield) {}
 
-  static constexpr OpProperties kProperties = OpProperties::Float64();
+  static constexpr OpProperties kProperties =
+      OpProperties::Float64() | OpProperties::ConversionNode();
 
   Input& input() { return Node::input(0); }
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 };
@@ -1428,14 +1533,73 @@ class CheckedFloat64Unbox
   using Base = FixedInputValueNodeT<1, CheckedFloat64Unbox>;
 
  public:
-  explicit CheckedFloat64Unbox(uint32_t bitfield) : Base(bitfield) {}
+  explicit CheckedFloat64Unbox(uint64_t bitfield) : Base(bitfield) {}
 
-  static constexpr OpProperties kProperties =
-      OpProperties::EagerDeopt() | OpProperties::Float64();
+  static constexpr OpProperties kProperties = OpProperties::EagerDeopt() |
+                                              OpProperties::Float64() |
+                                              OpProperties::ConversionNode();
 
   Input& input() { return Node::input(0); }
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
+  void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+};
+
+class LogicalNot : public FixedInputValueNodeT<1, LogicalNot> {
+  using Base = FixedInputValueNodeT<1, LogicalNot>;
+
+ public:
+  explicit LogicalNot(uint64_t bitfield) : Base(bitfield) {}
+
+  Input& value() { return Node::input(0); }
+
+  void AllocateVreg(MaglevVregAllocationState*);
+  void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+};
+
+class TaggedEqual : public FixedInputValueNodeT<2, TaggedEqual> {
+  using Base = FixedInputValueNodeT<2, TaggedEqual>;
+
+ public:
+  explicit TaggedEqual(uint64_t bitfield) : Base(bitfield) {}
+
+  Input& lhs() { return Node::input(0); }
+  Input& rhs() { return Node::input(1); }
+
+  void AllocateVreg(MaglevVregAllocationState*);
+  void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+};
+
+class TestInstanceOf : public FixedInputValueNodeT<3, TestInstanceOf> {
+  using Base = FixedInputValueNodeT<3, TestInstanceOf>;
+
+ public:
+  explicit TestInstanceOf(uint64_t bitfield) : Base(bitfield) {}
+
+  // The implementation currently calls runtime.
+  static constexpr OpProperties kProperties = OpProperties::JSCall();
+
+  Input& context() { return input(0); }
+  Input& object() { return input(1); }
+  Input& callable() { return input(2); }
+
+  void AllocateVreg(MaglevVregAllocationState*);
+  void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+};
+
+class TestUndetectable : public FixedInputValueNodeT<1, TestUndetectable> {
+  using Base = FixedInputValueNodeT<1, TestUndetectable>;
+
+ public:
+  explicit TestUndetectable(uint64_t bitfield) : Base(bitfield) {}
+
+  Input& value() { return Node::input(0); }
+
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 };
@@ -1444,12 +1608,12 @@ class InitialValue : public FixedInputValueNodeT<0, InitialValue> {
   using Base = FixedInputValueNodeT<0, InitialValue>;
 
  public:
-  explicit InitialValue(uint32_t bitfield, interpreter::Register source)
+  explicit InitialValue(uint64_t bitfield, interpreter::Register source)
       : Base(bitfield), source_(source) {}
 
   interpreter::Register source() const { return source_; }
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
@@ -1461,12 +1625,12 @@ class RegisterInput : public FixedInputValueNodeT<0, RegisterInput> {
   using Base = FixedInputValueNodeT<0, RegisterInput>;
 
  public:
-  explicit RegisterInput(uint32_t bitfield, Register input)
+  explicit RegisterInput(uint64_t bitfield, Register input)
       : Base(bitfield), input_(input) {}
 
   Register input() const { return input_; }
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
@@ -1480,12 +1644,12 @@ class SmiConstant : public FixedInputValueNodeT<0, SmiConstant> {
  public:
   using OutputRegister = Register;
 
-  explicit SmiConstant(uint32_t bitfield, Smi value)
+  explicit SmiConstant(uint64_t bitfield, Smi value)
       : Base(bitfield), value_(value) {}
 
   Smi value() const { return value_; }
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
@@ -1502,10 +1666,10 @@ class Constant : public FixedInputValueNodeT<0, Constant> {
  public:
   using OutputRegister = Register;
 
-  explicit Constant(uint32_t bitfield, const compiler::HeapObjectRef& object)
+  explicit Constant(uint64_t bitfield, const compiler::HeapObjectRef& object)
       : Base(bitfield), object_(object) {}
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
@@ -1522,12 +1686,12 @@ class RootConstant : public FixedInputValueNodeT<0, RootConstant> {
  public:
   using OutputRegister = Register;
 
-  explicit RootConstant(uint32_t bitfield, RootIndex index)
+  explicit RootConstant(uint64_t bitfield, RootIndex index)
       : Base(bitfield), index_(index) {}
 
   RootIndex index() const { return index_; }
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
@@ -1543,7 +1707,7 @@ class CreateEmptyArrayLiteral
   using Base = FixedInputValueNodeT<0, CreateEmptyArrayLiteral>;
 
  public:
-  explicit CreateEmptyArrayLiteral(uint32_t bitfield,
+  explicit CreateEmptyArrayLiteral(uint64_t bitfield,
                                    const compiler::FeedbackSource& feedback)
       : Base(bitfield), feedback_(feedback) {}
 
@@ -1552,93 +1716,324 @@ class CreateEmptyArrayLiteral
   // The implementation currently calls runtime.
   static constexpr OpProperties kProperties = OpProperties::Call();
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 
  private:
   const compiler::FeedbackSource feedback_;
+};
+
+class CreateArrayLiteral : public FixedInputValueNodeT<0, CreateArrayLiteral> {
+  using Base = FixedInputValueNodeT<0, CreateArrayLiteral>;
+
+ public:
+  explicit CreateArrayLiteral(uint64_t bitfield,
+                              const compiler::HeapObjectRef& constant_elements,
+                              const compiler::FeedbackSource& feedback,
+                              int flags)
+      : Base(bitfield),
+        constant_elements_(constant_elements),
+        feedback_(feedback),
+        flags_(flags) {}
+
+  compiler::HeapObjectRef constant_elements() { return constant_elements_; }
+  compiler::FeedbackSource feedback() const { return feedback_; }
+  int flags() const { return flags_; }
+
+  // The implementation currently calls runtime.
+  static constexpr OpProperties kProperties = OpProperties::Call();
+
+  void AllocateVreg(MaglevVregAllocationState*);
+  void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+
+ private:
+  const compiler::HeapObjectRef constant_elements_;
+  const compiler::FeedbackSource feedback_;
+  const int flags_;
+};
+
+class CreateShallowArrayLiteral
+    : public FixedInputValueNodeT<0, CreateShallowArrayLiteral> {
+  using Base = FixedInputValueNodeT<0, CreateShallowArrayLiteral>;
+
+ public:
+  explicit CreateShallowArrayLiteral(
+      uint64_t bitfield, const compiler::HeapObjectRef& constant_elements,
+      const compiler::FeedbackSource& feedback, int flags)
+      : Base(bitfield),
+        constant_elements_(constant_elements),
+        feedback_(feedback),
+        flags_(flags) {}
+
+  compiler::HeapObjectRef constant_elements() { return constant_elements_; }
+  compiler::FeedbackSource feedback() const { return feedback_; }
+  int flags() const { return flags_; }
+
+  // The implementation currently calls runtime.
+  static constexpr OpProperties kProperties = OpProperties::Call();
+
+  void AllocateVreg(MaglevVregAllocationState*);
+  void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+
+ private:
+  const compiler::HeapObjectRef constant_elements_;
+  const compiler::FeedbackSource feedback_;
+  const int flags_;
 };
 
 class CreateObjectLiteral
-    : public FixedInputValueNodeT<1, CreateObjectLiteral> {
-  using Base = FixedInputValueNodeT<1, CreateObjectLiteral>;
+    : public FixedInputValueNodeT<0, CreateObjectLiteral> {
+  using Base = FixedInputValueNodeT<0, CreateObjectLiteral>;
 
  public:
-  explicit CreateObjectLiteral(uint32_t bitfield, int flags,
-                               const compiler::FeedbackSource& feedback)
-      : Base(bitfield), flags_(flags), feedback_(feedback) {}
+  explicit CreateObjectLiteral(
+      uint64_t bitfield,
+      const compiler::ObjectBoilerplateDescriptionRef& boilerplate_descriptor,
+      const compiler::FeedbackSource& feedback, int flags)
+      : Base(bitfield),
+        boilerplate_descriptor_(boilerplate_descriptor),
+        feedback_(feedback),
+        flags_(flags) {}
 
-  static constexpr int kObjectBoilerplateDescription = 0;
-  Input& boilerplate_descriptor() {
-    return input(kObjectBoilerplateDescription);
+  compiler::ObjectBoilerplateDescriptionRef boilerplate_descriptor() {
+    return boilerplate_descriptor_;
   }
-
-  int flags() const { return flags_; }
   compiler::FeedbackSource feedback() const { return feedback_; }
+  int flags() const { return flags_; }
 
   // The implementation currently calls runtime.
   static constexpr OpProperties kProperties = OpProperties::Call();
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 
  private:
-  const int flags_;
+  const compiler::ObjectBoilerplateDescriptionRef boilerplate_descriptor_;
   const compiler::FeedbackSource feedback_;
+  const int flags_;
 };
 
 class CreateShallowObjectLiteral
-    : public FixedInputValueNodeT<1, CreateShallowObjectLiteral> {
-  using Base = FixedInputValueNodeT<1, CreateShallowObjectLiteral>;
+    : public FixedInputValueNodeT<0, CreateShallowObjectLiteral> {
+  using Base = FixedInputValueNodeT<0, CreateShallowObjectLiteral>;
 
  public:
-  explicit CreateShallowObjectLiteral(uint32_t bitfield, int flags,
-                                      const compiler::FeedbackSource& feedback)
-      : Base(bitfield), flags_(flags), feedback_(feedback) {}
+  explicit CreateShallowObjectLiteral(
+      uint64_t bitfield,
+      const compiler::ObjectBoilerplateDescriptionRef& boilerplate_descriptor,
+      const compiler::FeedbackSource& feedback, int flags)
+      : Base(bitfield),
+        boilerplate_descriptor_(boilerplate_descriptor),
+        feedback_(feedback),
+        flags_(flags) {}
 
   // TODO(victorgomes): We should not need a boilerplate descriptor in
   // CreateShallowObjectLiteral.
-  static constexpr int kObjectBoilerplateDescription = 0;
-  Input& boilerplate_descriptor() {
-    return input(kObjectBoilerplateDescription);
+  compiler::ObjectBoilerplateDescriptionRef boilerplate_descriptor() {
+    return boilerplate_descriptor_;
   }
-
-  int flags() const { return flags_; }
   compiler::FeedbackSource feedback() const { return feedback_; }
+  int flags() const { return flags_; }
 
   // The implementation currently calls runtime.
   static constexpr OpProperties kProperties = OpProperties::Call();
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 
  private:
-  const int flags_;
+  const compiler::ObjectBoilerplateDescriptionRef boilerplate_descriptor_;
   const compiler::FeedbackSource feedback_;
+  const int flags_;
+};
+
+class CreateFunctionContext
+    : public FixedInputValueNodeT<1, CreateFunctionContext> {
+  using Base = FixedInputValueNodeT<1, CreateFunctionContext>;
+
+ public:
+  explicit CreateFunctionContext(uint64_t bitfield,
+                                 compiler::ScopeInfoRef scope_info,
+                                 uint32_t slot_count)
+      : Base(bitfield), scope_info_(scope_info), slot_count_(slot_count) {}
+
+  compiler::ScopeInfoRef scope_info() const { return scope_info_; }
+  uint32_t slot_count() const { return slot_count_; }
+
+  Input& context() { return input(0); }
+
+  // The implementation currently calls runtime.
+  static constexpr OpProperties kProperties = OpProperties::Call();
+
+  void AllocateVreg(MaglevVregAllocationState*);
+  void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
+
+ private:
+  const compiler::ScopeInfoRef scope_info_;
+  const uint32_t slot_count_;
+};
+
+class FastCreateClosure : public FixedInputValueNodeT<1, FastCreateClosure> {
+  using Base = FixedInputValueNodeT<1, FastCreateClosure>;
+
+ public:
+  explicit FastCreateClosure(
+      uint64_t bitfield, compiler::SharedFunctionInfoRef shared_function_info,
+      compiler::FeedbackCellRef feedback_cell)
+      : Base(bitfield),
+        shared_function_info_(shared_function_info),
+        feedback_cell_(feedback_cell) {}
+
+  compiler::SharedFunctionInfoRef shared_function_info() const {
+    return shared_function_info_;
+  }
+  compiler::FeedbackCellRef feedback_cell() const { return feedback_cell_; }
+
+  Input& context() { return input(0); }
+
+  // The implementation currently calls runtime.
+  static constexpr OpProperties kProperties = OpProperties::Call();
+
+  void AllocateVreg(MaglevVregAllocationState*);
+  void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
+
+ private:
+  const compiler::SharedFunctionInfoRef shared_function_info_;
+  const compiler::FeedbackCellRef feedback_cell_;
+};
+
+class CreateClosure : public FixedInputValueNodeT<1, CreateClosure> {
+  using Base = FixedInputValueNodeT<1, CreateClosure>;
+
+ public:
+  explicit CreateClosure(uint64_t bitfield,
+                         compiler::SharedFunctionInfoRef shared_function_info,
+                         compiler::FeedbackCellRef feedback_cell,
+                         bool pretenured)
+      : Base(bitfield),
+        shared_function_info_(shared_function_info),
+        feedback_cell_(feedback_cell),
+        pretenured_(pretenured) {}
+
+  compiler::SharedFunctionInfoRef shared_function_info() const {
+    return shared_function_info_;
+  }
+  compiler::FeedbackCellRef feedback_cell() const { return feedback_cell_; }
+  bool pretenured() const { return pretenured_; }
+
+  Input& context() { return input(0); }
+
+  // The implementation currently calls runtime.
+  static constexpr OpProperties kProperties = OpProperties::Call();
+
+  void AllocateVreg(MaglevVregAllocationState*);
+  void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
+
+ private:
+  const compiler::SharedFunctionInfoRef shared_function_info_;
+  const compiler::FeedbackCellRef feedback_cell_;
+  const bool pretenured_;
 };
 
 class CheckMaps : public FixedInputNodeT<1, CheckMaps> {
   using Base = FixedInputNodeT<1, CheckMaps>;
 
  public:
-  explicit CheckMaps(uint32_t bitfield, const compiler::MapRef& map)
-      : Base(bitfield), map_(map) {}
+  explicit CheckMaps(uint64_t bitfield, const compiler::MapRef& map)
+      : Base(bitfield), map_(map) {
+    DCHECK(!map.is_migration_target());
+  }
 
-  // TODO(verwaest): This just calls in deferred code, so probably we'll need to
-  // mark that to generate stack maps. Mark as call so we at least clear the
-  // registers since we currently don't properly spill either.
-  static constexpr OpProperties kProperties =
-      OpProperties::EagerDeopt() | OpProperties::Call();
+  static constexpr OpProperties kProperties = OpProperties::EagerDeopt();
 
   compiler::MapRef map() const { return map_; }
 
-  static constexpr int kActualMapIndex = 0;
-  Input& actual_map_input() { return input(kActualMapIndex); }
+  static constexpr int kReceiverIndex = 0;
+  Input& receiver_input() { return input(kReceiverIndex); }
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
+  void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
+
+ private:
+  const compiler::MapRef map_;
+};
+class CheckSmi : public FixedInputNodeT<1, CheckSmi> {
+  using Base = FixedInputNodeT<1, CheckSmi>;
+
+ public:
+  explicit CheckSmi(uint64_t bitfield) : Base(bitfield) {}
+
+  static constexpr OpProperties kProperties = OpProperties::EagerDeopt();
+
+  static constexpr int kReceiverIndex = 0;
+  Input& receiver_input() { return input(kReceiverIndex); }
+
+  void AllocateVreg(MaglevVregAllocationState*);
+  void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
+};
+
+class CheckHeapObject : public FixedInputNodeT<1, CheckHeapObject> {
+  using Base = FixedInputNodeT<1, CheckHeapObject>;
+
+ public:
+  explicit CheckHeapObject(uint64_t bitfield) : Base(bitfield) {}
+
+  static constexpr OpProperties kProperties = OpProperties::EagerDeopt();
+
+  static constexpr int kReceiverIndex = 0;
+  Input& receiver_input() { return input(kReceiverIndex); }
+
+  void AllocateVreg(MaglevVregAllocationState*);
+  void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
+};
+
+class CheckString : public FixedInputNodeT<1, CheckString> {
+  using Base = FixedInputNodeT<1, CheckString>;
+
+ public:
+  explicit CheckString(uint64_t bitfield) : Base(bitfield) {}
+
+  static constexpr OpProperties kProperties = OpProperties::EagerDeopt();
+
+  static constexpr int kReceiverIndex = 0;
+  Input& receiver_input() { return input(kReceiverIndex); }
+
+  void AllocateVreg(MaglevVregAllocationState*);
+  void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
+};
+
+class CheckMapsWithMigration
+    : public FixedInputNodeT<1, CheckMapsWithMigration> {
+  using Base = FixedInputNodeT<1, CheckMapsWithMigration>;
+
+ public:
+  explicit CheckMapsWithMigration(uint64_t bitfield,
+                                  const compiler::MapRef& map)
+      : Base(bitfield), map_(map) {
+    DCHECK(map.is_migration_target());
+  }
+
+  static constexpr OpProperties kProperties =
+      OpProperties::EagerDeopt() | OpProperties::DeferredCall();
+
+  compiler::MapRef map() const { return map_; }
+
+  static constexpr int kReceiverIndex = 0;
+  Input& receiver_input() { return input(kReceiverIndex); }
+
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
@@ -1646,11 +2041,32 @@ class CheckMaps : public FixedInputNodeT<1, CheckMaps> {
   const compiler::MapRef map_;
 };
 
+class CheckedInternalizedString
+    : public FixedInputValueNodeT<1, CheckedInternalizedString> {
+  using Base = FixedInputValueNodeT<1, CheckedInternalizedString>;
+
+ public:
+  explicit CheckedInternalizedString(uint64_t bitfield) : Base(bitfield) {
+    CHECK_EQ(properties().value_representation(), ValueRepresentation::kTagged);
+  }
+
+  static constexpr OpProperties kProperties = OpProperties::EagerDeopt() |
+                                              OpProperties::TaggedValue() |
+                                              OpProperties::ConversionNode();
+
+  static constexpr int kObjectIndex = 0;
+  Input& object_input() { return Node::input(kObjectIndex); }
+
+  void AllocateVreg(MaglevVregAllocationState*);
+  void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {};
+};
+
 class LoadTaggedField : public FixedInputValueNodeT<1, LoadTaggedField> {
   using Base = FixedInputValueNodeT<1, LoadTaggedField>;
 
  public:
-  explicit LoadTaggedField(uint32_t bitfield, int offset)
+  explicit LoadTaggedField(uint64_t bitfield, int offset)
       : Base(bitfield), offset_(offset) {}
 
   static constexpr OpProperties kProperties = OpProperties::Reading();
@@ -1660,7 +2076,7 @@ class LoadTaggedField : public FixedInputValueNodeT<1, LoadTaggedField> {
   static constexpr int kObjectIndex = 0;
   Input& object_input() { return input(kObjectIndex); }
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
@@ -1672,7 +2088,7 @@ class LoadDoubleField : public FixedInputValueNodeT<1, LoadDoubleField> {
   using Base = FixedInputValueNodeT<1, LoadDoubleField>;
 
  public:
-  explicit LoadDoubleField(uint32_t bitfield, int offset)
+  explicit LoadDoubleField(uint64_t bitfield, int offset)
       : Base(bitfield), offset_(offset) {}
 
   static constexpr OpProperties kProperties =
@@ -1683,7 +2099,7 @@ class LoadDoubleField : public FixedInputValueNodeT<1, LoadDoubleField> {
   static constexpr int kObjectIndex = 0;
   Input& object_input() { return input(kObjectIndex); }
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
@@ -1691,56 +2107,87 @@ class LoadDoubleField : public FixedInputValueNodeT<1, LoadDoubleField> {
   const int offset_;
 };
 
-class StoreField : public FixedInputNodeT<2, StoreField> {
-  using Base = FixedInputNodeT<2, StoreField>;
+class StoreTaggedFieldNoWriteBarrier
+    : public FixedInputNodeT<2, StoreTaggedFieldNoWriteBarrier> {
+  using Base = FixedInputNodeT<2, StoreTaggedFieldNoWriteBarrier>;
 
  public:
-  explicit StoreField(uint32_t bitfield, int handler)
-      : Base(bitfield), handler_(handler) {}
+  explicit StoreTaggedFieldNoWriteBarrier(uint64_t bitfield, int offset)
+      : Base(bitfield), offset_(offset) {}
 
   static constexpr OpProperties kProperties = OpProperties::Writing();
 
-  int handler() const { return handler_; }
+  int offset() const { return offset_; }
 
   static constexpr int kObjectIndex = 0;
   static constexpr int kValueIndex = 1;
   Input& object_input() { return input(kObjectIndex); }
   Input& value_input() { return input(kValueIndex); }
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
  private:
-  const int handler_;
+  const int offset_;
+};
+
+class StoreTaggedFieldWithWriteBarrier
+    : public FixedInputNodeT<2, StoreTaggedFieldWithWriteBarrier> {
+  using Base = FixedInputNodeT<2, StoreTaggedFieldWithWriteBarrier>;
+
+ public:
+  explicit StoreTaggedFieldWithWriteBarrier(uint64_t bitfield, int offset)
+      : Base(bitfield), offset_(offset) {}
+
+  static constexpr OpProperties kProperties =
+      OpProperties::Writing() | OpProperties::DeferredCall();
+
+  int offset() const { return offset_; }
+
+  static constexpr int kObjectIndex = 0;
+  static constexpr int kValueIndex = 1;
+  Input& object_input() { return input(kObjectIndex); }
+  Input& value_input() { return input(kValueIndex); }
+
+  void AllocateVreg(MaglevVregAllocationState*);
+  void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
+
+ private:
+  const int offset_;
 };
 
 class LoadGlobal : public FixedInputValueNodeT<1, LoadGlobal> {
   using Base = FixedInputValueNodeT<1, LoadGlobal>;
 
  public:
-  explicit LoadGlobal(uint32_t bitfield, const compiler::NameRef& name)
-      : Base(bitfield), name_(name) {}
+  explicit LoadGlobal(uint64_t bitfield, const compiler::NameRef& name,
+                      const compiler::FeedbackSource& feedback)
+      : Base(bitfield), name_(name), feedback_(feedback) {}
 
   // The implementation currently calls runtime.
   static constexpr OpProperties kProperties = OpProperties::JSCall();
 
-  Input& context() { return input(0); }
   const compiler::NameRef& name() const { return name_; }
+  compiler::FeedbackSource feedback() const { return feedback_; }
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  Input& context() { return input(0); }
+
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
  private:
   const compiler::NameRef name_;
+  const compiler::FeedbackSource feedback_;
 };
 
 class LoadNamedGeneric : public FixedInputValueNodeT<2, LoadNamedGeneric> {
   using Base = FixedInputValueNodeT<2, LoadNamedGeneric>;
 
  public:
-  explicit LoadNamedGeneric(uint32_t bitfield, const compiler::NameRef& name,
+  explicit LoadNamedGeneric(uint64_t bitfield, const compiler::NameRef& name,
                             const compiler::FeedbackSource& feedback)
       : Base(bitfield), name_(name), feedback_(feedback) {}
 
@@ -1755,7 +2202,7 @@ class LoadNamedGeneric : public FixedInputValueNodeT<2, LoadNamedGeneric> {
   Input& context() { return input(kContextIndex); }
   Input& object_input() { return input(kObjectIndex); }
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
@@ -1768,7 +2215,7 @@ class SetNamedGeneric : public FixedInputValueNodeT<3, SetNamedGeneric> {
   using Base = FixedInputValueNodeT<3, SetNamedGeneric>;
 
  public:
-  explicit SetNamedGeneric(uint32_t bitfield, const compiler::NameRef& name,
+  explicit SetNamedGeneric(uint64_t bitfield, const compiler::NameRef& name,
                            const compiler::FeedbackSource& feedback)
       : Base(bitfield), name_(name), feedback_(feedback) {}
 
@@ -1785,7 +2232,7 @@ class SetNamedGeneric : public FixedInputValueNodeT<3, SetNamedGeneric> {
   Input& object_input() { return input(kObjectIndex); }
   Input& value_input() { return input(kValueIndex); }
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
@@ -1799,7 +2246,7 @@ class DefineNamedOwnGeneric
   using Base = FixedInputValueNodeT<3, DefineNamedOwnGeneric>;
 
  public:
-  explicit DefineNamedOwnGeneric(uint32_t bitfield,
+  explicit DefineNamedOwnGeneric(uint64_t bitfield,
                                  const compiler::NameRef& name,
                                  const compiler::FeedbackSource& feedback)
       : Base(bitfield), name_(name), feedback_(feedback) {}
@@ -1817,7 +2264,7 @@ class DefineNamedOwnGeneric
   Input& object_input() { return input(kObjectIndex); }
   Input& value_input() { return input(kValueIndex); }
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
@@ -1826,18 +2273,138 @@ class DefineNamedOwnGeneric
   const compiler::FeedbackSource feedback_;
 };
 
+class StoreInArrayLiteralGeneric
+    : public FixedInputValueNodeT<4, StoreInArrayLiteralGeneric> {
+  using Base = FixedInputValueNodeT<4, StoreInArrayLiteralGeneric>;
+
+ public:
+  explicit StoreInArrayLiteralGeneric(uint64_t bitfield,
+                                      const compiler::FeedbackSource& feedback)
+      : Base(bitfield), feedback_(feedback) {}
+
+  // The implementation currently calls runtime.
+  static constexpr OpProperties kProperties = OpProperties::JSCall();
+
+  compiler::FeedbackSource feedback() const { return feedback_; }
+
+  static constexpr int kContextIndex = 0;
+  static constexpr int kObjectIndex = 1;
+  static constexpr int kNameIndex = 2;
+  static constexpr int kValueIndex = 3;
+  Input& context() { return input(kContextIndex); }
+  Input& object_input() { return input(kObjectIndex); }
+  Input& name_input() { return input(kNameIndex); }
+  Input& value_input() { return input(kValueIndex); }
+
+  void AllocateVreg(MaglevVregAllocationState*);
+  void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+
+ private:
+  const compiler::FeedbackSource feedback_;
+};
+
+class GetKeyedGeneric : public FixedInputValueNodeT<3, GetKeyedGeneric> {
+  using Base = FixedInputValueNodeT<3, GetKeyedGeneric>;
+
+ public:
+  explicit GetKeyedGeneric(uint64_t bitfield,
+                           const compiler::FeedbackSource& feedback)
+      : Base(bitfield), feedback_(feedback) {}
+
+  // The implementation currently calls runtime.
+  static constexpr OpProperties kProperties = OpProperties::JSCall();
+
+  compiler::FeedbackSource feedback() const { return feedback_; }
+
+  static constexpr int kContextIndex = 0;
+  static constexpr int kObjectIndex = 1;
+  static constexpr int kKeyIndex = 2;
+  Input& context() { return input(kContextIndex); }
+  Input& object_input() { return input(kObjectIndex); }
+  Input& key_input() { return input(kKeyIndex); }
+
+  void AllocateVreg(MaglevVregAllocationState*);
+  void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+
+ private:
+  const compiler::FeedbackSource feedback_;
+};
+
+class SetKeyedGeneric : public FixedInputValueNodeT<4, SetKeyedGeneric> {
+  using Base = FixedInputValueNodeT<4, SetKeyedGeneric>;
+
+ public:
+  explicit SetKeyedGeneric(uint64_t bitfield,
+                           const compiler::FeedbackSource& feedback)
+      : Base(bitfield), feedback_(feedback) {}
+
+  // The implementation currently calls runtime.
+  static constexpr OpProperties kProperties = OpProperties::JSCall();
+
+  compiler::FeedbackSource feedback() const { return feedback_; }
+
+  static constexpr int kContextIndex = 0;
+  static constexpr int kObjectIndex = 1;
+  static constexpr int kKeyIndex = 2;
+  static constexpr int kValueIndex = 3;
+  Input& context() { return input(kContextIndex); }
+  Input& object_input() { return input(kObjectIndex); }
+  Input& key_input() { return input(kKeyIndex); }
+  Input& value_input() { return input(kValueIndex); }
+
+  void AllocateVreg(MaglevVregAllocationState*);
+  void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+
+ private:
+  const compiler::FeedbackSource feedback_;
+};
+
+class DefineKeyedOwnGeneric
+    : public FixedInputValueNodeT<4, DefineKeyedOwnGeneric> {
+  using Base = FixedInputValueNodeT<4, DefineKeyedOwnGeneric>;
+
+ public:
+  explicit DefineKeyedOwnGeneric(uint64_t bitfield,
+                                 const compiler::FeedbackSource& feedback)
+      : Base(bitfield), feedback_(feedback) {}
+
+  // The implementation currently calls runtime.
+  static constexpr OpProperties kProperties = OpProperties::JSCall();
+
+  compiler::FeedbackSource feedback() const { return feedback_; }
+
+  static constexpr int kContextIndex = 0;
+  static constexpr int kObjectIndex = 1;
+  static constexpr int kKeyIndex = 2;
+  static constexpr int kValueIndex = 3;
+  Input& context() { return input(kContextIndex); }
+  Input& object_input() { return input(kObjectIndex); }
+  Input& key_input() { return input(kKeyIndex); }
+  Input& value_input() { return input(kValueIndex); }
+
+  void AllocateVreg(MaglevVregAllocationState*);
+  void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+
+ private:
+  const compiler::FeedbackSource feedback_;
+};
+
 class GapMove : public FixedInputNodeT<0, GapMove> {
   using Base = FixedInputNodeT<0, GapMove>;
 
  public:
-  GapMove(uint32_t bitfield, compiler::AllocatedOperand source,
+  GapMove(uint64_t bitfield, compiler::AllocatedOperand source,
           compiler::AllocatedOperand target)
       : Base(bitfield), source_(source), target_(target) {}
 
   compiler::AllocatedOperand source() const { return source_; }
   compiler::AllocatedOperand target() const { return target_; }
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
@@ -1850,14 +2417,14 @@ class ConstantGapMove : public FixedInputNodeT<0, ConstantGapMove> {
   using Base = FixedInputNodeT<0, ConstantGapMove>;
 
  public:
-  ConstantGapMove(uint32_t bitfield, ValueNode* node,
+  ConstantGapMove(uint64_t bitfield, ValueNode* node,
                   compiler::AllocatedOperand target)
       : Base(bitfield), node_(node), target_(target) {}
 
   compiler::AllocatedOperand target() const { return target_; }
   ValueNode* node() const { return node_; }
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
@@ -1877,7 +2444,7 @@ class Phi : public ValueNodeT<Phi> {
   using List = base::ThreadedList<Phi>;
 
   // TODO(jgruber): More intuitive constructors, if possible.
-  Phi(uint32_t bitfield, interpreter::Register owner, int merge_offset)
+  Phi(uint64_t bitfield, interpreter::Register owner, int merge_offset)
       : Base(bitfield), owner_(owner), merge_offset_(merge_offset) {}
 
   interpreter::Register owner() const { return owner_; }
@@ -1886,7 +2453,7 @@ class Phi : public ValueNodeT<Phi> {
   using Node::reduce_input_count;
   using Node::set_input;
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void AllocateVregInPostProcess(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
@@ -1910,9 +2477,13 @@ class Call : public ValueNodeT<Call> {
   static constexpr int kContextIndex = 1;
   static constexpr int kFixedInputCount = 2;
 
+  // We need enough inputs to have these fixed inputs plus the maximum arguments
+  // to a function call.
+  static_assert(kMaxInputs >= kFixedInputCount + Code::kMaxArguments);
+
   // This ctor is used when for variable input counts.
   // Inputs must be initialized manually.
-  Call(uint32_t bitfield, ConvertReceiverMode mode, ValueNode* function,
+  Call(uint64_t bitfield, ConvertReceiverMode mode, ValueNode* function,
        ValueNode* context)
       : Base(bitfield), receiver_mode_(mode) {
     set_input(kFunctionIndex, function);
@@ -1931,7 +2502,7 @@ class Call : public ValueNodeT<Call> {
     set_input(i + kFixedInputCount, node);
   }
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 
@@ -1949,9 +2520,13 @@ class Construct : public ValueNodeT<Construct> {
   static constexpr int kContextIndex = 2;
   static constexpr int kFixedInputCount = 3;
 
+  // We need enough inputs to have these fixed inputs plus the maximum arguments
+  // to a function call.
+  static_assert(kMaxInputs >= kFixedInputCount + Code::kMaxArguments);
+
   // This ctor is used when for variable input counts.
   // Inputs must be initialized manually.
-  Construct(uint32_t bitfield, ValueNode* function, ValueNode* new_target,
+  Construct(uint64_t bitfield, ValueNode* function, ValueNode* new_target,
             ValueNode* context)
       : Base(bitfield) {
     set_input(kFunctionIndex, function);
@@ -1973,9 +2548,50 @@ class Construct : public ValueNodeT<Construct> {
     set_input(i + kFixedInputCount, node);
   }
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+};
+
+class IncreaseInterruptBudget
+    : public FixedInputNodeT<0, IncreaseInterruptBudget> {
+  using Base = FixedInputNodeT<0, IncreaseInterruptBudget>;
+
+ public:
+  explicit IncreaseInterruptBudget(uint64_t bitfield, int amount)
+      : Base(bitfield), amount_(amount) {
+    DCHECK_GT(amount, 0);
+  }
+
+  int amount() const { return amount_; }
+
+  void AllocateVreg(MaglevVregAllocationState*);
+  void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
+
+ private:
+  const int amount_;
+};
+
+class ReduceInterruptBudget : public FixedInputNodeT<0, ReduceInterruptBudget> {
+  using Base = FixedInputNodeT<0, ReduceInterruptBudget>;
+
+ public:
+  explicit ReduceInterruptBudget(uint64_t bitfield, int amount)
+      : Base(bitfield), amount_(amount) {
+    DCHECK_GT(amount, 0);
+  }
+
+  static constexpr OpProperties kProperties = OpProperties::DeferredCall();
+
+  int amount() const { return amount_; }
+
+  void AllocateVreg(MaglevVregAllocationState*);
+  void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
+
+ private:
+  const int amount_;
 };
 
 // Represents either a direct BasicBlock pointer, or an entry in a list of
@@ -2103,10 +2719,10 @@ class UnconditionalControlNode : public ControlNode {
   void set_predecessor_id(int id) { predecessor_id_ = id; }
 
  protected:
-  explicit UnconditionalControlNode(uint32_t bitfield,
+  explicit UnconditionalControlNode(uint64_t bitfield,
                                     BasicBlockRef* target_refs)
       : ControlNode(bitfield), target_(target_refs) {}
-  explicit UnconditionalControlNode(uint32_t bitfield, BasicBlock* target)
+  explicit UnconditionalControlNode(uint64_t bitfield, BasicBlock* target)
       : ControlNode(bitfield), target_(target) {}
 
  private:
@@ -2125,17 +2741,17 @@ class UnconditionalControlNodeT : public UnconditionalControlNode {
   constexpr bool has_inputs() const { return input_count() > 0; }
   constexpr uint16_t input_count() const { return kInputCount; }
   auto end() {
-    return std::make_reverse_iterator(input_address(input_count() - 1));
+    return std::make_reverse_iterator(&this->input(input_count() - 1));
   }
 
  protected:
-  explicit UnconditionalControlNodeT(uint32_t bitfield,
+  explicit UnconditionalControlNodeT(uint64_t bitfield,
                                      BasicBlockRef* target_refs)
       : UnconditionalControlNode(bitfield, target_refs) {
     DCHECK_EQ(NodeBase::opcode(), opcode_of<Derived>);
     DCHECK_EQ(NodeBase::input_count(), kInputCount);
   }
-  explicit UnconditionalControlNodeT(uint32_t bitfield, BasicBlock* target)
+  explicit UnconditionalControlNodeT(uint64_t bitfield, BasicBlock* target)
       : UnconditionalControlNode(bitfield, target) {
     DCHECK_EQ(NodeBase::opcode(), opcode_of<Derived>);
     DCHECK_EQ(NodeBase::input_count(), kInputCount);
@@ -2144,7 +2760,7 @@ class UnconditionalControlNodeT : public UnconditionalControlNode {
 
 class ConditionalControlNode : public ControlNode {
  public:
-  ConditionalControlNode(uint32_t bitfield, BasicBlockRef* if_true_refs,
+  ConditionalControlNode(uint64_t bitfield, BasicBlockRef* if_true_refs,
                          BasicBlockRef* if_false_refs)
       : ControlNode(bitfield),
         if_true_(if_true_refs),
@@ -2169,11 +2785,11 @@ class ConditionalControlNodeT : public ConditionalControlNode {
   constexpr bool has_inputs() const { return input_count() > 0; }
   constexpr uint16_t input_count() const { return kInputCount; }
   auto end() {
-    return std::make_reverse_iterator(input_address(input_count() - 1));
+    return std::make_reverse_iterator(&this->input(input_count() - 1));
   }
 
  protected:
-  explicit ConditionalControlNodeT(uint32_t bitfield,
+  explicit ConditionalControlNodeT(uint64_t bitfield,
                                    BasicBlockRef* if_true_refs,
                                    BasicBlockRef* if_false_refs)
       : ConditionalControlNode(bitfield, if_true_refs, if_false_refs) {
@@ -2186,47 +2802,35 @@ class Jump : public UnconditionalControlNodeT<Jump> {
   using Base = UnconditionalControlNodeT<Jump>;
 
  public:
-  Jump(uint32_t bitfield, BasicBlockRef* target_refs,
-       base::Optional<uint32_t> relative_jump_bytecode_offset = {})
-      : Base(bitfield, target_refs),
-        relative_jump_bytecode_offset_(relative_jump_bytecode_offset) {}
+  Jump(uint64_t bitfield, BasicBlockRef* target_refs)
+      : Base(bitfield, target_refs) {}
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
-
- private:
-  // For maintaining the interrupt_budget.
-  const base::Optional<uint32_t> relative_jump_bytecode_offset_;
 };
 
 class JumpLoop : public UnconditionalControlNodeT<JumpLoop> {
   using Base = UnconditionalControlNodeT<JumpLoop>;
 
  public:
-  explicit JumpLoop(uint32_t bitfield, BasicBlock* target,
-                    uint32_t relative_jump_bytecode_offset, int32_t loop_depth,
+  explicit JumpLoop(uint64_t bitfield, BasicBlock* target, int32_t loop_depth,
                     FeedbackSlot feedback_slot)
       : Base(bitfield, target),
-        relative_jump_bytecode_offset_(relative_jump_bytecode_offset),
         loop_depth_(loop_depth),
         feedback_slot_(feedback_slot) {}
 
-  explicit JumpLoop(uint32_t bitfield, BasicBlockRef* ref,
-                    uint32_t relative_jump_bytecode_offset, int32_t loop_depth,
+  explicit JumpLoop(uint64_t bitfield, BasicBlockRef* ref, int32_t loop_depth,
                     FeedbackSlot feedback_slot)
       : Base(bitfield, ref),
-        relative_jump_bytecode_offset_(relative_jump_bytecode_offset),
         loop_depth_(loop_depth),
         feedback_slot_(feedback_slot) {}
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 
  private:
-  // For maintaining the interrupt_budget.
-  const uint32_t relative_jump_bytecode_offset_;
   // For OSR.
   const int32_t loop_depth_;
   const FeedbackSlot feedback_slot_;
@@ -2236,11 +2840,11 @@ class JumpToInlined : public UnconditionalControlNodeT<JumpToInlined> {
   using Base = UnconditionalControlNodeT<JumpToInlined>;
 
  public:
-  explicit JumpToInlined(uint32_t bitfield, BasicBlockRef* target_refs,
+  explicit JumpToInlined(uint64_t bitfield, BasicBlockRef* target_refs,
                          MaglevCompilationUnit* unit)
       : Base(bitfield, target_refs), unit_(unit) {}
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
@@ -2254,67 +2858,65 @@ class JumpFromInlined : public UnconditionalControlNodeT<JumpFromInlined> {
   using Base = UnconditionalControlNodeT<JumpFromInlined>;
 
  public:
-  explicit JumpFromInlined(
-      uint32_t bitfield, BasicBlockRef* target_refs,
-      base::Optional<uint32_t> relative_jump_bytecode_offset = {})
-      : Base(bitfield, target_refs),
-        relative_jump_bytecode_offset_(relative_jump_bytecode_offset) {}
+  explicit JumpFromInlined(uint64_t bitfield, BasicBlockRef* target_refs)
+      : Base(bitfield, target_refs) {}
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
-
- private:
-  // For maintaining the interrupt_budget.
-  const base::Optional<uint32_t> relative_jump_bytecode_offset_;
 };
 
 class Return : public ControlNode {
  public:
-  explicit Return(uint32_t bitfield,
-                  base::Optional<uint32_t> relative_jump_bytecode_offset = {})
-      : ControlNode(bitfield),
-        relative_jump_bytecode_offset_(relative_jump_bytecode_offset) {
+  explicit Return(uint64_t bitfield) : ControlNode(bitfield) {
     DCHECK_EQ(NodeBase::opcode(), opcode_of<Return>);
   }
 
   Input& value_input() { return input(0); }
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
-
- private:
-  // For maintaining the interrupt_budget.
-  const base::Optional<uint32_t> relative_jump_bytecode_offset_;
 };
 
 class Deopt : public ControlNode {
  public:
-  explicit Deopt(uint32_t bitfield) : ControlNode(bitfield) {
+  explicit Deopt(uint64_t bitfield, DeoptimizeReason reason)
+      : ControlNode(bitfield), reason_(reason) {
     DCHECK_EQ(NodeBase::opcode(), opcode_of<Deopt>);
   }
 
   static constexpr OpProperties kProperties = OpProperties::EagerDeopt();
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  DeoptimizeReason reason() const { return reason_; }
+
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
-  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
+
+ private:
+  DeoptimizeReason reason_;
 };
 
-class BranchIfTrue : public ConditionalControlNodeT<1, BranchIfTrue> {
-  using Base = ConditionalControlNodeT<1, BranchIfTrue>;
+class BranchIfRootConstant
+    : public ConditionalControlNodeT<1, BranchIfRootConstant> {
+  using Base = ConditionalControlNodeT<1, BranchIfRootConstant>;
 
  public:
-  explicit BranchIfTrue(uint32_t bitfield, BasicBlockRef* if_true_refs,
-                        BasicBlockRef* if_false_refs)
-      : Base(bitfield, if_true_refs, if_false_refs) {}
+  explicit BranchIfRootConstant(uint64_t bitfield, BasicBlockRef* if_true_refs,
+                                BasicBlockRef* if_false_refs,
+                                RootIndex root_index)
+      : Base(bitfield, if_true_refs, if_false_refs), root_index_(root_index) {}
 
+  RootIndex root_index() { return root_index_; }
   Input& condition_input() { return input(0); }
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+
+ private:
+  RootIndex root_index_;
 };
 
 class BranchIfToBooleanTrue
@@ -2322,7 +2924,7 @@ class BranchIfToBooleanTrue
   using Base = ConditionalControlNodeT<1, BranchIfToBooleanTrue>;
 
  public:
-  explicit BranchIfToBooleanTrue(uint32_t bitfield, BasicBlockRef* if_true_refs,
+  explicit BranchIfToBooleanTrue(uint64_t bitfield, BasicBlockRef* if_true_refs,
                                  BasicBlockRef* if_false_refs)
       : Base(bitfield, if_true_refs, if_false_refs) {}
 
@@ -2330,7 +2932,7 @@ class BranchIfToBooleanTrue
 
   Input& condition_input() { return input(0); }
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 };
@@ -2345,12 +2947,12 @@ class BranchIfInt32Compare
   Input& left_input() { return NodeBase::input(kLeftIndex); }
   Input& right_input() { return NodeBase::input(kRightIndex); }
 
-  explicit BranchIfInt32Compare(uint32_t bitfield, Operation operation,
+  explicit BranchIfInt32Compare(uint64_t bitfield, Operation operation,
                                 BasicBlockRef* if_true_refs,
                                 BasicBlockRef* if_false_refs)
       : Base(bitfield, if_true_refs, if_false_refs), operation_(operation) {}
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
@@ -2368,12 +2970,35 @@ class BranchIfFloat64Compare
   Input& left_input() { return NodeBase::input(kLeftIndex); }
   Input& right_input() { return NodeBase::input(kRightIndex); }
 
-  explicit BranchIfFloat64Compare(uint32_t bitfield, Operation operation,
+  explicit BranchIfFloat64Compare(uint64_t bitfield, Operation operation,
                                   BasicBlockRef* if_true_refs,
                                   BasicBlockRef* if_false_refs)
       : Base(bitfield, if_true_refs, if_false_refs), operation_(operation) {}
 
-  void AllocateVreg(MaglevVregAllocationState*, const ProcessingState&);
+  void AllocateVreg(MaglevVregAllocationState*);
+  void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
+
+ private:
+  Operation operation_;
+};
+
+class BranchIfReferenceCompare
+    : public ConditionalControlNodeT<2, BranchIfReferenceCompare> {
+  using Base = ConditionalControlNodeT<2, BranchIfReferenceCompare>;
+
+ public:
+  static constexpr int kLeftIndex = 0;
+  static constexpr int kRightIndex = 1;
+  Input& left_input() { return NodeBase::input(kLeftIndex); }
+  Input& right_input() { return NodeBase::input(kRightIndex); }
+
+  explicit BranchIfReferenceCompare(uint64_t bitfield, Operation operation,
+                                    BasicBlockRef* if_true_refs,
+                                    BasicBlockRef* if_false_refs)
+      : Base(bitfield, if_true_refs, if_false_refs), operation_(operation) {}
+
+  void AllocateVreg(MaglevVregAllocationState*);
   void GenerateCode(MaglevCodeGenState*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 

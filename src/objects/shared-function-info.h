@@ -40,6 +40,7 @@ class Signature;
 class WasmCapiFunctionData;
 class WasmExportedFunctionData;
 class WasmJSFunctionData;
+class WasmResumeData;
 
 namespace wasm {
 struct WasmModule;
@@ -326,18 +327,17 @@ class SharedFunctionInfo
   inline bool is_class_constructor() const;
   inline FunctionTemplateInfo get_api_func_data() const;
   inline void set_api_func_data(FunctionTemplateInfo data);
-  inline bool HasBytecodeArray() const;
+  DECL_GETTER(HasBytecodeArray, bool)
   template <typename IsolateT>
   inline BytecodeArray GetBytecodeArray(IsolateT* isolate) const;
 
   inline void set_bytecode_array(BytecodeArray bytecode);
-  inline CodeT InterpreterTrampoline() const;
-  inline bool HasInterpreterData() const;
-  inline InterpreterData interpreter_data() const;
+  DECL_GETTER(InterpreterTrampoline, CodeT)
+  DECL_GETTER(HasInterpreterData, bool)
+  DECL_GETTER(interpreter_data, InterpreterData)
   inline void set_interpreter_data(InterpreterData interpreter_data);
-  inline bool HasBaselineCode() const;
-  inline CodeT baseline_code(AcquireLoadTag) const;
-  inline void set_baseline_code(CodeT baseline_code, ReleaseStoreTag);
+  DECL_GETTER(HasBaselineCode, bool)
+  DECL_RELEASE_ACQUIRE_ACCESSORS(baseline_code, CodeT)
   inline void FlushBaselineCode();
   inline BytecodeArray GetActiveBytecodeArray() const;
   inline void SetActiveBytecodeArray(BytecodeArray bytecode);
@@ -347,7 +347,7 @@ class SharedFunctionInfo
   inline bool HasWasmExportedFunctionData() const;
   inline bool HasWasmJSFunctionData() const;
   inline bool HasWasmCapiFunctionData() const;
-  inline bool HasWasmOnFulfilledData() const;
+  inline bool HasWasmResumeData() const;
   inline AsmWasmData asm_wasm_data() const;
   inline void set_asm_wasm_data(AsmWasmData data);
 
@@ -355,6 +355,7 @@ class SharedFunctionInfo
   wasm_exported_function_data() const;
   WasmJSFunctionData wasm_js_function_data() const;
   WasmCapiFunctionData wasm_capi_function_data() const;
+  WasmResumeData wasm_resume_data() const;
 
   inline const wasm::WasmModule* wasm_module() const;
   inline const wasm::FunctionSig* wasm_function_signature() const;

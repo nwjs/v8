@@ -34,10 +34,7 @@
 #include "src/codegen/macro-assembler.h"
 #include "src/deoptimizer/deoptimizer.h"
 #include "src/execution/simulator.h"
-#include "src/init/v8.h"
-#include "src/objects/heap-number.h"
 #include "src/objects/objects-inl.h"
-#include "src/utils/ostreams.h"
 #include "test/cctest/cctest.h"
 #include "test/cctest/compiler/value-helper.h"
 #include "test/cctest/test-helper-riscv64.h"
@@ -1007,15 +1004,15 @@ TEST(Sltu) {
 
 template <typename T, typename Inputs, typename Results>
 static void GenerateMacroFloat32MinMax(MacroAssembler& masm) {
-  T a = T::from_code(4);  // f4
-  T b = T::from_code(6);  // f6
-  T c = T::from_code(8);  // f8
+  T a = T::from_code(5);  // ft5
+  T b = T::from_code(6);  // ft6
+  T c = T::from_code(7);  // ft7
 
 #define FLOAT_MIN_MAX(fminmax, res, x, y, res_field)        \
   __ LoadFloat(x, MemOperand(a0, offsetof(Inputs, src1_))); \
   __ LoadFloat(y, MemOperand(a0, offsetof(Inputs, src2_))); \
   __ fminmax(res, x, y);                                    \
-  __ StoreFloat(a, MemOperand(a1, offsetof(Results, res_field)))
+  __ StoreFloat(res, MemOperand(a1, offsetof(Results, res_field)))
 
   // a = min(b, c);
   FLOAT_MIN_MAX(Float32Min, a, b, c, min_abc_);
@@ -1107,15 +1104,15 @@ TEST(macro_float_minmax_f32) {
 
 template <typename T, typename Inputs, typename Results>
 static void GenerateMacroFloat64MinMax(MacroAssembler& masm) {
-  T a = T::from_code(4);  // f4
-  T b = T::from_code(6);  // f6
-  T c = T::from_code(8);  // f8
+  T a = T::from_code(5);  // ft5
+  T b = T::from_code(6);  // ft6
+  T c = T::from_code(7);  // ft7
 
 #define FLOAT_MIN_MAX(fminmax, res, x, y, res_field)         \
   __ LoadDouble(x, MemOperand(a0, offsetof(Inputs, src1_))); \
   __ LoadDouble(y, MemOperand(a0, offsetof(Inputs, src2_))); \
   __ fminmax(res, x, y);                                     \
-  __ StoreDouble(a, MemOperand(a1, offsetof(Results, res_field)))
+  __ StoreDouble(res, MemOperand(a1, offsetof(Results, res_field)))
 
   // a = min(b, c);
   FLOAT_MIN_MAX(Float64Min, a, b, c, min_abc_);

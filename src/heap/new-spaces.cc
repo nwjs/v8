@@ -25,7 +25,6 @@ Page* SemiSpace::InitializePage(MemoryChunk* chunk) {
   page->SetYoungGenerationPageFlags(heap()->incremental_marking()->IsMarking());
   page->list_node().Initialize();
   if (FLAG_minor_mc) {
-    page->AllocateYoungGenerationBitmap();
     heap()
         ->minor_mark_compact_collector()
         ->non_atomic_marking_state()
@@ -76,7 +75,7 @@ bool SemiSpace::EnsureCurrentCapacity() {
     }
 
     // Add more pages if we have less than expected_pages.
-    IncrementalMarking::NonAtomicMarkingState* marking_state =
+    NonAtomicMarkingState* marking_state =
         heap()->incremental_marking()->non_atomic_marking_state();
     while (actual_pages < expected_pages) {
       actual_pages++;
@@ -181,7 +180,7 @@ bool SemiSpace::GrowTo(size_t new_capacity) {
   DCHECK(IsAligned(delta, AllocatePageSize()));
   const int delta_pages = static_cast<int>(delta / Page::kPageSize);
   DCHECK(last_page());
-  IncrementalMarking::NonAtomicMarkingState* marking_state =
+  NonAtomicMarkingState* marking_state =
       heap()->incremental_marking()->non_atomic_marking_state();
   for (int pages_added = 0; pages_added < delta_pages; pages_added++) {
     Page* new_page = heap()->memory_allocator()->AllocatePage(
@@ -237,8 +236,6 @@ void SemiSpace::FixPagesFlags(Page::MainThreadFlags flags,
       page->ClearFlag(MemoryChunk::FROM_PAGE);
       page->SetFlag(MemoryChunk::TO_PAGE);
       page->ClearFlag(MemoryChunk::NEW_SPACE_BELOW_AGE_MARK);
-      heap()->incremental_marking()->non_atomic_marking_state()->SetLiveBytes(
-          page, 0);
     } else {
       page->SetFlag(MemoryChunk::FROM_PAGE);
       page->ClearFlag(MemoryChunk::TO_PAGE);
@@ -405,7 +402,7 @@ void SemiSpace::Verify() const {
     CHECK_EQ(external_backing_store_bytes[t], ExternalBackingStoreBytes(t));
   }
 }
-#endif
+#endif  // VERIFY_HEAP
 
 #ifdef DEBUG
 void SemiSpace::AssertValidRange(Address start, Address end) {
@@ -446,7 +443,8 @@ void SemiSpaceObjectIterator::Initialize(Address start, Address end) {
 // NewSpace implementation
 
 NewSpace::NewSpace(Heap* heap, LinearAllocationArea* allocation_info)
-    : SpaceWithLinearArea(heap, NEW_SPACE, new NoFreeList(), allocation_info,
+    : SpaceWithLinearArea(heap, NEW_SPACE, new NoFreeList(),
+                          &allocation_counter_, allocation_info,
                           linear_area_original_data_) {}
 
 void NewSpace::ResetParkedAllocationBuffers() {
@@ -566,11 +564,11 @@ void NewSpace::VerifyImpl(Isolate* isolate, const Page* current_page,
              ExternalBackingStoreBytes(ExternalBackingStoreType::kArrayBuffer));
   }
 
-#ifdef V8_ENABLED_CONSERVATIVE_STACK_SCANNING
+#ifdef V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
   page->object_start_bitmap()->Verify();
-#endif
+#endif  // V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
 }
-#endif
+#endif  // VERIFY_HEAP
 
 void NewSpace::PromotePageToOldSpace(Page* page) {
   DCHECK(page->InYoungGeneration());
@@ -682,7 +680,7 @@ void SemiSpaceNewSpace::ResetLinearAllocationArea() {
   to_space_.Reset();
   UpdateLinearAllocationArea();
   // Clear all mark-bits in the to-space.
-  IncrementalMarking::NonAtomicMarkingState* marking_state =
+  NonAtomicMarkingState* marking_state =
       heap()->incremental_marking()->non_atomic_marking_state();
   for (Page* p : to_space_) {
     marking_state->ClearLiveness(p);
@@ -717,7 +715,7 @@ bool SemiSpaceNewSpace::AddFreshPage() {
     return false;
   }
 
-  // We park unused allocation buffer space of allocations happenting from the
+  // We park unused allocation buffer space of allocations happening from the
   // mutator.
   if (FLAG_allocation_buffer_parking && heap()->gc_state() == Heap::NOT_IN_GC &&
       remaining_in_page >= kAllocationBufferParkingThreshold) {
@@ -741,7 +739,7 @@ bool SemiSpaceNewSpace::AddParkedAllocationBuffer(
     if (size_in_bytes + filler_size <= parked_size) {
       parked_allocation_buffers_.erase(it);
       Page* page = Page::FromAddress(start);
-      // We move a page with a parked allocaiton to the end of the pages list
+      // We move a page with a parked allocation to the end of the pages list
       // to maintain the invariant that the last page is the used one.
       to_space_.MovePageToTheEnd(page);
       UpdateLinearAllocationArea(start);
@@ -783,16 +781,16 @@ void SemiSpaceNewSpace::Verify(Isolate* isolate) const {
   from_space_.Verify();
   to_space_.Verify();
 }
-#endif
+#endif  // VERIFY_HEAP
 
-#ifdef V8_ENABLE_CONSERVATIVE_STACK_SCANNING
+#ifdef V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
 void SemiSpaceNewSpace::ClearUnusedObjectStartBitmaps() {
   if (!IsFromSpaceCommitted()) return;
   for (Page* page : PageRange(from_space().first_page(), nullptr)) {
     page->object_start_bitmap()->Clear();
   }
 }
-#endif  // V8_ENABLE_CONSERVATIVE_STACK_SCANNING
+#endif  // V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
 
 bool SemiSpaceNewSpace::ShouldBePromoted(Address address) const {
   Page* page = Page::FromAddress(address);

@@ -12,7 +12,6 @@
 #include "src/objects/js-array-inl.h"
 #include "src/objects/js-function-inl.h"
 #include "src/objects/objects-inl.h"
-#include "src/zone/zone-handle-set.h"
 
 namespace v8 {
 namespace internal {
@@ -115,6 +114,12 @@ class PendingDependencies final {
 
   void Register(Handle<HeapObject> object,
                 DependentCode::DependencyGroup group) {
+    // Code, which are per-local Isolate, cannot depend on objects in the shared
+    // heap. Shared heap dependencies are designed to never invalidate
+    // assumptions. E.g., maps for shared structs do not have transitions or
+    // change the shape of their fields. See
+    // DependentCode::DeoptimizeDependencyGroups for corresponding DCHECK.
+    if (object->InSharedWritableHeap()) return;
     deps_[object] |= group;
   }
 

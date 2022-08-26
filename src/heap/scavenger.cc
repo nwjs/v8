@@ -25,6 +25,7 @@
 #include "src/objects/embedder-data-array-inl.h"
 #include "src/objects/js-array-buffer-inl.h"
 #include "src/objects/objects-body-descriptors-inl.h"
+#include "src/objects/slots.h"
 #include "src/objects/transitions-inl.h"
 #include "src/utils/utils-inl.h"
 
@@ -248,6 +249,47 @@ void ScavengerCollector::JobTask::ConcurrentScavengePages(
 ScavengerCollector::ScavengerCollector(Heap* heap)
     : isolate_(heap->isolate()), heap_(heap) {}
 
+namespace {
+
+// Helper class for updating weak global handles. There's no additional scavenge
+// processing required here as this phase runs after actual scavenge.
+class GlobalHandlesWeakRootsUpdatingVisitor final : public RootVisitor {
+ public:
+  void VisitRootPointer(Root root, const char* description,
+                        FullObjectSlot p) final {
+    UpdatePointer(p);
+  }
+  void VisitRootPointers(Root root, const char* description,
+                         FullObjectSlot start, FullObjectSlot end) final {
+    for (FullObjectSlot p = start; p < end; ++p) {
+      UpdatePointer(p);
+    }
+  }
+
+ private:
+  void UpdatePointer(FullObjectSlot p) {
+    Object object = *p;
+    DCHECK(!HasWeakHeapObjectTag(object));
+    // The object may be in the old generation as global handles over
+    // approximates the list of young nodes. This checks also bails out for
+    // Smis.
+    if (!Heap::InYoungGeneration(object)) return;
+
+    HeapObject heap_object = HeapObject::cast(object);
+    // TODO(chromium:1336158): Turn the following CHECKs into DCHECKs after
+    // flushing out potential issues.
+    CHECK(Heap::InFromPage(heap_object));
+    MapWord first_word = heap_object.map_word(kRelaxedLoad);
+    CHECK(first_word.IsForwardingAddress());
+    HeapObject dest = first_word.ToForwardingAddress();
+    HeapObjectReference::Update(FullHeapObjectSlot(p), dest);
+    CHECK_IMPLIES(Heap::InYoungGeneration(dest),
+                  Heap::InToPage(dest) || Heap::IsLargeObject(dest));
+  }
+};
+
+}  // namespace
+
 // Remove this crashkey after chromium:1010312 is fixed.
 class V8_NODISCARD ScopedFullHeapCrashKey {
  public:
@@ -287,7 +329,7 @@ void ScavengerCollector::CollectGarbage() {
     filter_scope.FilterOldSpaceSweepingPages(
         [](Page* page) { return !page->ContainsSlots<OLD_TO_NEW>(); });
 
-    const bool is_logging = isolate_->LogObjectRelocation();
+    const bool is_logging = isolate_->log_object_relocation();
     for (int i = 0; i < num_scavenge_tasks; ++i) {
       scavengers.emplace_back(
           new Scavenger(this, heap_, is_logging, &empty_chunks, &copied_list,
@@ -351,10 +393,9 @@ void ScavengerCollector::CollectGarbage() {
       // Scavenge weak global handles.
       TRACE_GC(heap_->tracer(),
                GCTracer::Scope::SCAVENGER_SCAVENGE_WEAK_GLOBAL_HANDLES_PROCESS);
+      GlobalHandlesWeakRootsUpdatingVisitor visitor;
       isolate_->global_handles()->ProcessWeakYoungObjects(
-          &root_scavenge_visitor, &IsUnscavengedHeapObjectSlot);
-      DCHECK(copied_list.IsEmpty());
-      DCHECK(promotion_list.IsEmpty());
+          &visitor, &IsUnscavengedHeapObjectSlot);
     }
 
     {
@@ -485,7 +526,7 @@ void ScavengerCollector::SweepArrayBufferExtensions() {
 
 void ScavengerCollector::HandleSurvivingNewLargeObjects() {
   const bool is_compacting = heap_->incremental_marking()->IsCompacting();
-  MajorAtomicMarkingState* marking_state =
+  AtomicMarkingState* marking_state =
       heap_->incremental_marking()->atomic_marking_state();
 
   for (SurvivingNewLargeObjectMapEntry update_info :

@@ -887,7 +887,7 @@ inline WasmValueType GetWasmValueType(wasm::ValueType type) {
     TYPE_CASE(F64)
     TYPE_CASE(S128)
     TYPE_CASE(Ref)
-    TYPE_CASE(OptRef)
+    TYPE_CASE(RefNull)
 
     case wasm::kRtt:
       // Rtt values are not supposed to be made available to JavaScript side.
@@ -1110,8 +1110,7 @@ Handle<Object> LoadIC::ComputeHandler(LookupIterator* lookup) {
         return LoadHandler::LoadSlow(isolate());
       }
 
-      if (v8::ToCData<Address>(info->getter()) == kNullAddress ||
-          !holder->HasFastProperties() ||
+      if (!info->has_getter() || !holder->HasFastProperties() ||
           (info->is_sloppy() && !receiver->IsJSReceiver())) {
         TRACE_HANDLER_STATS(isolate(), LoadIC_SlowStub);
         return LoadHandler::LoadSlow(isolate());
@@ -1853,8 +1852,11 @@ MaybeHandle<Object> StoreIC::Store(Handle<Object> object, Handle<Name> name,
   if (name->IsPrivate()) {
     if (name->IsPrivateName()) {
       DCHECK(!IsDefineNamedOwnIC());
-      if (!JSReceiver::CheckPrivateNameStore(&it, IsDefineKeyedOwnIC())) {
-        return MaybeHandle<Object>();
+      Maybe<bool> can_store =
+          JSReceiver::CheckPrivateNameStore(&it, IsDefineKeyedOwnIC());
+      MAYBE_RETURN_NULL(can_store);
+      if (!can_store.FromJust()) {
+        return isolate()->factory()->undefined_value();
       }
     }
 
@@ -1878,8 +1880,9 @@ MaybeHandle<Object> StoreIC::Store(Handle<Object> object, Handle<Name> name,
       !Handle<JSObject>::cast(object)->HasNamedInterceptor()) {
     Maybe<bool> can_define = JSReceiver::CheckIfCanDefine(
         isolate(), &it, value, Nothing<ShouldThrow>());
-    if (can_define.IsNothing() || !can_define.FromJust()) {
-      return MaybeHandle<Object>();
+    MAYBE_RETURN_NULL(can_define);
+    if (!can_define.FromJust()) {
+      return isolate()->factory()->undefined_value();
     }
   }
 
@@ -2024,7 +2027,7 @@ MaybeObjectHandle StoreIC::ComputeHandler(LookupIterator* lookup) {
       Handle<Object> accessors = lookup->GetAccessors();
       if (accessors->IsAccessorInfo()) {
         Handle<AccessorInfo> info = Handle<AccessorInfo>::cast(accessors);
-        if (v8::ToCData<Address>(info->setter()) == kNullAddress) {
+        if (!info->has_setter()) {
           set_slow_stub_reason("setter == kNullAddress");
           TRACE_HANDLER_STATS(isolate(), StoreIC_SlowStub);
           return MaybeObjectHandle(StoreHandler::StoreSlow(isolate()));

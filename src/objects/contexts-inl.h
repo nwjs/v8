@@ -268,20 +268,21 @@ Map Context::GetInitialJSArrayMap(ElementsKind kind) const {
 
 DEF_GETTER(NativeContext, microtask_queue, MicrotaskQueue*) {
   Isolate* isolate = GetIsolateForSandbox(*this);
-  return reinterpret_cast<MicrotaskQueue*>(ReadExternalPointerField(
-      kMicrotaskQueueOffset, isolate, kNativeContextMicrotaskQueueTag));
+  return reinterpret_cast<MicrotaskQueue*>(
+      ReadExternalPointerField<kNativeContextMicrotaskQueueTag>(
+          kMicrotaskQueueOffset, isolate));
 }
 
 void NativeContext::AllocateExternalPointerEntries(Isolate* isolate) {
-  InitExternalPointerField(kMicrotaskQueueOffset, isolate,
-                           kNativeContextMicrotaskQueueTag);
+  InitExternalPointerField<kNativeContextMicrotaskQueueTag>(
+      kMicrotaskQueueOffset, isolate);
 }
 
 void NativeContext::set_microtask_queue(Isolate* isolate,
                                         MicrotaskQueue* microtask_queue) {
-  WriteExternalPointerField(kMicrotaskQueueOffset, isolate,
-                            reinterpret_cast<Address>(microtask_queue),
-                            kNativeContextMicrotaskQueueTag);
+  WriteExternalPointerField<kNativeContextMicrotaskQueueTag>(
+      kMicrotaskQueueOffset, isolate,
+      reinterpret_cast<Address>(microtask_queue));
 }
 
 void NativeContext::synchronized_set_script_context_table(
@@ -293,6 +294,28 @@ void NativeContext::synchronized_set_script_context_table(
 ScriptContextTable NativeContext::synchronized_script_context_table() const {
   return ScriptContextTable::cast(
       get(SCRIPT_CONTEXT_TABLE_INDEX, kAcquireLoad));
+}
+
+Map NativeContext::TypedArrayElementsKindToCtorMap(
+    ElementsKind element_kind) const {
+  int ctor_index = Context::FIRST_FIXED_TYPED_ARRAY_FUN_INDEX + element_kind -
+                   ElementsKind::FIRST_FIXED_TYPED_ARRAY_ELEMENTS_KIND;
+  Map map = Map::cast(JSFunction::cast(get(ctor_index)).initial_map());
+  DCHECK_EQ(map.elements_kind(), element_kind);
+  DCHECK(InstanceTypeChecker::IsJSTypedArray(map.instance_type()));
+  return map;
+}
+
+Map NativeContext::TypedArrayElementsKindToRabGsabCtorMap(
+    ElementsKind element_kind) const {
+  int ctor_index = Context::FIRST_RAB_GSAB_TYPED_ARRAY_MAP_INDEX +
+                   element_kind -
+                   ElementsKind::FIRST_FIXED_TYPED_ARRAY_ELEMENTS_KIND;
+  Map map = Map::cast(get(ctor_index));
+  DCHECK_EQ(map.elements_kind(),
+            GetCorrespondingRabGsabElementsKind(element_kind));
+  DCHECK(InstanceTypeChecker::IsJSTypedArray(map.instance_type()));
+  return map;
 }
 
 void NativeContext::SetOptimizedCodeListHead(Object head) {

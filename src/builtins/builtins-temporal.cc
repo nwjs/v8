@@ -38,112 +38,29 @@ namespace internal {
         JSTemporal##T::NowISO(isolate, args.atOrUndefined(isolate, 1))); \
   }
 
-/* Temporal #sec-temporal.plaindate.prototype.until */
-TO_BE_IMPLEMENTED(TemporalPlainDatePrototypeUntil)
-/* Temporal #sec-temporal.plaindate.prototype.since */
-TO_BE_IMPLEMENTED(TemporalPlainDatePrototypeSince)
-
-/* Temporal.PlaneTime */
-/* Temporal #sec-temporal.plaintime.prototype.until */
-TO_BE_IMPLEMENTED(TemporalPlainTimePrototypeUntil)
-/* Temporal #sec-temporal.plaintime.prototype.since */
-TO_BE_IMPLEMENTED(TemporalPlainTimePrototypeSince)
-/* Temporal #sec-temporal.plaintime.prototype.round */
-TO_BE_IMPLEMENTED(TemporalPlainTimePrototypeRound)
-
 /* Temporal.PlaneDateTime */
 /* Temporal #sec-temporal.plaindatetime.prototype.until */
 TO_BE_IMPLEMENTED(TemporalPlainDateTimePrototypeUntil)
 /* Temporal #sec-temporal.plaindatetime.prototype.since */
 TO_BE_IMPLEMENTED(TemporalPlainDateTimePrototypeSince)
-/* Temporal #sec-temporal.plaindatetime.prototype.round */
-TO_BE_IMPLEMENTED(TemporalPlainDateTimePrototypeRound)
-/* Temporal #sec-temporal.plaindatetime.prototype.tostring */
-TO_BE_IMPLEMENTED(TemporalPlainDateTimePrototypeToString)
 
 /* Temporal.ZonedDateTime */
-/* Temporal #sec-temporal.zoneddatetime.from */
-TO_BE_IMPLEMENTED(TemporalZonedDateTimeFrom)
-/* Temporal #sec-temporal.zoneddatetime.compare */
-TO_BE_IMPLEMENTED(TemporalZonedDateTimeCompare)
-/* Temporal #sec-temporal.zoneddatetime.prototype.with */
-TO_BE_IMPLEMENTED(TemporalZonedDateTimePrototypeWith)
-/* Temporal #sec-temporal.zoneddatetime.prototype.withplaindate */
-TO_BE_IMPLEMENTED(TemporalZonedDateTimePrototypeWithPlainDate)
 /* Temporal #sec-temporal.zoneddatetime.prototype.until */
 TO_BE_IMPLEMENTED(TemporalZonedDateTimePrototypeUntil)
 /* Temporal #sec-temporal.zoneddatetime.prototype.since */
 TO_BE_IMPLEMENTED(TemporalZonedDateTimePrototypeSince)
-/* Temporal #sec-temporal.zoneddatetime.prototype.round */
-TO_BE_IMPLEMENTED(TemporalZonedDateTimePrototypeRound)
-/* Temporal #sec-temporal.zoneddatetime.prototype.equals */
-TO_BE_IMPLEMENTED(TemporalZonedDateTimePrototypeEquals)
-/* Temporal #sec-temporal.zoneddatetime.prototype.tostring */
-TO_BE_IMPLEMENTED(TemporalZonedDateTimePrototypeToString)
-/* Temporal #sec-temporal.zonedddatetimeprototype.tojson */
-TO_BE_IMPLEMENTED(TemporalZonedDateTimePrototypeToJSON)
 
 /* Temporal.Duration */
 /* Temporal #sec-temporal.duration.compare */
 TO_BE_IMPLEMENTED(TemporalDurationCompare)
-/* Temporal #sec-temporal.duration.prototype.add */
-TO_BE_IMPLEMENTED(TemporalDurationPrototypeAdd)
-/* Temporal #sec-temporal.duration.prototype.subtract */
-TO_BE_IMPLEMENTED(TemporalDurationPrototypeSubtract)
 /* Temporal #sec-temporal.duration.prototype.round */
 TO_BE_IMPLEMENTED(TemporalDurationPrototypeRound)
 /* Temporal #sec-temporal.duration.prototype.total */
 TO_BE_IMPLEMENTED(TemporalDurationPrototypeTotal)
-/* Temporal #sec-temporal.duration.prototype.tolocalestring */
-TO_BE_IMPLEMENTED(TemporalDurationPrototypeToLocaleString)
-/* Temporal #sec-temporal.duration.prototype.tostring */
-TO_BE_IMPLEMENTED(TemporalDurationPrototypeToString)
-
-/* Temporal.Instant */
-/* Temporal #sec-temporal.instant.prototype.add */
-TO_BE_IMPLEMENTED(TemporalInstantPrototypeAdd)
-/* Temporal #sec-temporal.instant.prototype.subtract */
-TO_BE_IMPLEMENTED(TemporalInstantPrototypeSubtract)
-/* Temporal #sec-temporal.instant.prototype.until */
-TO_BE_IMPLEMENTED(TemporalInstantPrototypeUntil)
-/* Temporal #sec-temporal.instant.prototype.since */
-TO_BE_IMPLEMENTED(TemporalInstantPrototypeSince)
-/* Temporal #sec-temporal.instant.prototype.round */
-TO_BE_IMPLEMENTED(TemporalInstantPrototypeRound)
-/* Temporal #sec-temporal.instant.prototype.tolocalestring */
-TO_BE_IMPLEMENTED(TemporalInstantPrototypeToLocaleString)
-/* Temporal #sec-temporal.instant.prototype.tostring */
-TO_BE_IMPLEMENTED(TemporalInstantPrototypeToString)
-/* Temporal #sec-temporal.instant.tojson */
-TO_BE_IMPLEMENTED(TemporalInstantPrototypeToJSON)
-
-/* Temporal.PlainYearMonth */
-/* Temporal #sec-temporal.plainyearmonth.compare */
-TO_BE_IMPLEMENTED(TemporalPlainYearMonthCompare)
-/* Temporal #sec-temporal.plainyearmonth.prototype.add */
-TO_BE_IMPLEMENTED(TemporalPlainYearMonthPrototypeAdd)
-/* Temporal #sec-temporal.plainyearmonth.prototype.subtract */
-TO_BE_IMPLEMENTED(TemporalPlainYearMonthPrototypeSubtract)
-/* Temporal #sec-temporal.plainyearmonth.prototype.until */
-TO_BE_IMPLEMENTED(TemporalPlainYearMonthPrototypeUntil)
-/* Temporal #sec-temporal.plainyearmonth.prototype.since */
-TO_BE_IMPLEMENTED(TemporalPlainYearMonthPrototypeSince)
-/* Temporal #sec-temporal.plainyearmonth.prototype.equals */
-TO_BE_IMPLEMENTED(TemporalPlainYearMonthPrototypeEquals)
-
-/* Temporal.PlainMonthDay */
-/* There is no compare for PlainMonthDay. See
- * https://github.com/tc39/proposal-temporal/issues/1547 */
-/* Temporal #sec-temporal.plainmonthday.prototype.equals */
-TO_BE_IMPLEMENTED(TemporalPlainMonthDayPrototypeEquals)
 
 /* Temporal.Calendar */
 /* Temporal #sec-temporal.calendar.prototype.weekofyear */
 TO_BE_IMPLEMENTED(TemporalCalendarPrototypeWeekOfYear)
-
-/* Temporal.ZonedDateTime */
-/* Temporal #sec-temporal.zoneddatetime.prototype.tolocalestring */
-TO_BE_IMPLEMENTED(TemporalZonedDateTimePrototypeToLocaleString)
 
 #define TEMPORAL_CONSTRUCTOR1(T)                                              \
   BUILTIN(Temporal##T##Constructor) {                                         \
@@ -292,8 +209,8 @@ TO_BE_IMPLEMENTED(TemporalZonedDateTimePrototypeToLocaleString)
 #define TEMPORAL_GET_BY_INVOKE_CALENDAR_METHOD(T, METHOD, name)              \
   BUILTIN(Temporal##T##Prototype##METHOD) {                                  \
     HandleScope scope(isolate);                                              \
-    /* 2. Perform ? RequireInternalSlot(temporalDate, [[InitializedTemporal  \
-     * #T]]). */                                                             \
+    /* 2. Perform ? RequireInternalSlot(temporalDate, */                     \
+    /*    [[InitializedTemporal#T]]). */                                     \
     CHECK_RECEIVER(JSTemporal##T, date_like,                                 \
                    "get Temporal." #T ".prototype." #name);                  \
     /* 3. Let calendar be temporalDate.[[Calendar]]. */                      \
@@ -352,6 +269,8 @@ TEMPORAL_PROTOTYPE_METHOD2(PlainDate, Subtract, subtract)
 TEMPORAL_PROTOTYPE_METHOD1(PlainDate, WithCalendar, withCalendar)
 TEMPORAL_PROTOTYPE_METHOD2(PlainDate, With, with)
 TEMPORAL_PROTOTYPE_METHOD0(PlainDate, GetISOFields, getISOFields)
+TEMPORAL_PROTOTYPE_METHOD2(PlainDate, Since, since)
+TEMPORAL_PROTOTYPE_METHOD2(PlainDate, Until, until)
 TEMPORAL_PROTOTYPE_METHOD1(PlainDate, ToPlainDateTime, toPlainDateTime)
 TEMPORAL_PROTOTYPE_METHOD1(PlainDate, ToZonedDateTime, toZonedDateTime)
 TEMPORAL_PROTOTYPE_METHOD1(PlainDate, Equals, equals)
@@ -387,10 +306,13 @@ TEMPORAL_PROTOTYPE_METHOD1(PlainTime, Equals, equals)
 TEMPORAL_PROTOTYPE_METHOD1(PlainTime, Add, add)
 TEMPORAL_PROTOTYPE_METHOD1(PlainTime, Subtract, subtract)
 TEMPORAL_PROTOTYPE_METHOD0(PlainTime, GetISOFields, getISOFields)
+TEMPORAL_PROTOTYPE_METHOD1(PlainTime, Round, round)
+TEMPORAL_PROTOTYPE_METHOD2(PlainTime, Since, since)
 TEMPORAL_PROTOTYPE_METHOD1(PlainTime, ToPlainDateTime, toPlainDateTime)
 TEMPORAL_PROTOTYPE_METHOD0(PlainTime, ToJSON, toJSON)
 TEMPORAL_PROTOTYPE_METHOD2(PlainTime, ToLocaleString, toLocaleString)
 TEMPORAL_PROTOTYPE_METHOD1(PlainTime, ToString, toString)
+TEMPORAL_PROTOTYPE_METHOD2(PlainTime, Until, until)
 TEMPORAL_PROTOTYPE_METHOD2(PlainTime, With, with)
 TEMPORAL_VALUE_OF(PlainTime)
 
@@ -443,11 +365,13 @@ TEMPORAL_PROTOTYPE_METHOD0(PlainDateTime, GetISOFields, getISOFields)
 TEMPORAL_PROTOTYPE_METHOD1(PlainDateTime, WithPlainDate, withPlainDate)
 TEMPORAL_PROTOTYPE_METHOD2(PlainDateTime, With, with)
 TEMPORAL_PROTOTYPE_METHOD2(PlainDateTime, Add, add)
+TEMPORAL_PROTOTYPE_METHOD1(PlainDateTime, Round, round)
 TEMPORAL_PROTOTYPE_METHOD2(PlainDateTime, Subtract, subtract)
 TEMPORAL_PROTOTYPE_METHOD0(PlainDateTime, ToPlainDate, toPlainDate)
 TEMPORAL_PROTOTYPE_METHOD0(PlainDateTime, ToPlainTime, toPlainTime)
 TEMPORAL_PROTOTYPE_METHOD0(PlainDateTime, ToJSON, toJSON)
 TEMPORAL_PROTOTYPE_METHOD2(PlainDateTime, ToLocaleString, toLocaleString)
+TEMPORAL_PROTOTYPE_METHOD1(PlainDateTime, ToString, toString)
 TEMPORAL_VALUE_OF(PlainDateTime)
 
 // PlainYearMonth
@@ -471,13 +395,19 @@ TEMPORAL_GET_BY_INVOKE_CALENDAR_METHOD(PlainYearMonth, MonthsInYear,
                                        monthsInYear)
 TEMPORAL_GET_BY_INVOKE_CALENDAR_METHOD(PlainYearMonth, InLeapYear, inLeapYear)
 TEMPORAL_METHOD2(PlainYearMonth, From)
+TEMPORAL_METHOD2(PlainYearMonth, Compare)
+TEMPORAL_PROTOTYPE_METHOD2(PlainYearMonth, Add, add)
+TEMPORAL_PROTOTYPE_METHOD2(PlainYearMonth, Subtract, subtract)
+TEMPORAL_PROTOTYPE_METHOD1(PlainYearMonth, Equals, equals)
 TEMPORAL_PROTOTYPE_METHOD2(PlainYearMonth, With, with)
 TEMPORAL_PROTOTYPE_METHOD1(PlainYearMonth, ToPlainDate, toPlainDate)
 TEMPORAL_PROTOTYPE_METHOD0(PlainYearMonth, GetISOFields, getISOFields)
 TEMPORAL_VALUE_OF(PlainYearMonth)
+TEMPORAL_PROTOTYPE_METHOD2(PlainYearMonth, Since, since)
 TEMPORAL_PROTOTYPE_METHOD2(PlainYearMonth, ToLocaleString, toLocaleString)
 TEMPORAL_PROTOTYPE_METHOD0(PlainYearMonth, ToJSON, toJSON)
 TEMPORAL_PROTOTYPE_METHOD1(PlainYearMonth, ToString, toString)
+TEMPORAL_PROTOTYPE_METHOD2(PlainYearMonth, Until, until)
 
 // PlainMonthDay
 BUILTIN(TemporalPlainMonthDayConstructor) {
@@ -494,6 +424,7 @@ TEMPORAL_GET(PlainMonthDay, Calendar, calendar)
 TEMPORAL_GET_BY_FORWARD_CALENDAR(PlainMonthDay, MonthCode, monthCode)
 TEMPORAL_GET_BY_FORWARD_CALENDAR(PlainMonthDay, Day, day)
 TEMPORAL_METHOD2(PlainMonthDay, From)
+TEMPORAL_PROTOTYPE_METHOD1(PlainMonthDay, Equals, equals)
 TEMPORAL_PROTOTYPE_METHOD2(PlainMonthDay, With, with)
 TEMPORAL_PROTOTYPE_METHOD1(PlainMonthDay, ToPlainDate, toPlainDate)
 TEMPORAL_PROTOTYPE_METHOD0(PlainMonthDay, GetISOFields, getISOFields)
@@ -557,6 +488,8 @@ BUILTIN(TemporalZonedDateTimeConstructor) {
                    args.atOrUndefined(isolate, 2),    // time_zone_like
                    args.atOrUndefined(isolate, 3)));  // calendar_like
 }
+TEMPORAL_METHOD2(ZonedDateTime, From)
+TEMPORAL_METHOD2(ZonedDateTime, Compare)
 TEMPORAL_GET(ZonedDateTime, Calendar, calendar)
 TEMPORAL_GET(ZonedDateTime, TimeZone, time_zone)
 TEMPORAL_ZONED_DATE_TIME_GET_BY_FORWARD_TIME_ZONE_AND_CALENDAR(Year)
@@ -587,12 +520,16 @@ TEMPORAL_ZONED_DATE_TIME_GET_BY_FORWARD_TIME_ZONE_AND_CALENDAR(DaysInMonth)
 TEMPORAL_ZONED_DATE_TIME_GET_BY_FORWARD_TIME_ZONE_AND_CALENDAR(DaysInYear)
 TEMPORAL_ZONED_DATE_TIME_GET_BY_FORWARD_TIME_ZONE_AND_CALENDAR(MonthsInYear)
 TEMPORAL_ZONED_DATE_TIME_GET_BY_FORWARD_TIME_ZONE_AND_CALENDAR(InLeapYear)
+TEMPORAL_PROTOTYPE_METHOD1(ZonedDateTime, Equals, equals)
 TEMPORAL_PROTOTYPE_METHOD0(ZonedDateTime, HoursInDay, hoursInDay)
+TEMPORAL_PROTOTYPE_METHOD2(ZonedDateTime, With, with)
 TEMPORAL_PROTOTYPE_METHOD1(ZonedDateTime, WithCalendar, withCalendar)
+TEMPORAL_PROTOTYPE_METHOD1(ZonedDateTime, WithPlainDate, withPlainDate)
 TEMPORAL_PROTOTYPE_METHOD1(ZonedDateTime, WithPlainTime, withPlainTime)
 TEMPORAL_PROTOTYPE_METHOD1(ZonedDateTime, WithTimeZone, withTimeZone)
 TEMPORAL_PROTOTYPE_METHOD0(ZonedDateTime, ToPlainYearMonth, toPlainYearMonth)
 TEMPORAL_PROTOTYPE_METHOD0(ZonedDateTime, ToPlainMonthDay, toPlainMonthDay)
+TEMPORAL_PROTOTYPE_METHOD1(ZonedDateTime, Round, round)
 TEMPORAL_PROTOTYPE_METHOD2(ZonedDateTime, Add, add)
 TEMPORAL_PROTOTYPE_METHOD2(ZonedDateTime, Subtract, subtract)
 TEMPORAL_PROTOTYPE_METHOD0(ZonedDateTime, GetISOFields, getISOFields)
@@ -600,9 +537,12 @@ TEMPORAL_PROTOTYPE_METHOD0(ZonedDateTime, OffsetNanoseconds, offsetNanoseconds)
 TEMPORAL_PROTOTYPE_METHOD0(ZonedDateTime, Offset, offset)
 TEMPORAL_PROTOTYPE_METHOD0(ZonedDateTime, StartOfDay, startOfDay)
 TEMPORAL_PROTOTYPE_METHOD0(ZonedDateTime, ToInstant, toInstant)
+TEMPORAL_PROTOTYPE_METHOD0(ZonedDateTime, ToJSON, toJSON)
 TEMPORAL_PROTOTYPE_METHOD0(ZonedDateTime, ToPlainDate, toPlainDate)
 TEMPORAL_PROTOTYPE_METHOD0(ZonedDateTime, ToPlainTime, toPlainTime)
 TEMPORAL_PROTOTYPE_METHOD0(ZonedDateTime, ToPlainDateTime, toPlainDateTime)
+TEMPORAL_PROTOTYPE_METHOD2(ZonedDateTime, ToLocaleString, toLocaleString)
+TEMPORAL_PROTOTYPE_METHOD1(ZonedDateTime, ToString, toString)
 TEMPORAL_VALUE_OF(ZonedDateTime)
 
 // Duration
@@ -638,8 +578,12 @@ TEMPORAL_PROTOTYPE_METHOD0(Duration, Sign, sign)
 TEMPORAL_PROTOTYPE_METHOD0(Duration, Blank, blank)
 TEMPORAL_PROTOTYPE_METHOD0(Duration, Negated, negated)
 TEMPORAL_PROTOTYPE_METHOD0(Duration, Abs, abs)
+TEMPORAL_PROTOTYPE_METHOD2(Duration, Add, add)
+TEMPORAL_PROTOTYPE_METHOD2(Duration, Subtract, subtract)
 TEMPORAL_VALUE_OF(Duration)
 TEMPORAL_PROTOTYPE_METHOD0(Duration, ToJSON, toJSON)
+TEMPORAL_PROTOTYPE_METHOD2(Duration, ToLocaleString, toLocaleString)
+TEMPORAL_PROTOTYPE_METHOD1(Duration, ToString, toString)
 
 // Instant
 TEMPORAL_CONSTRUCTOR1(Instant)
@@ -658,8 +602,16 @@ TEMPORAL_GET_NUMBER_AFTER_DIVID(Instant, EpochMilliseconds, nanoseconds,
                                 1000000, epochMilliseconds)
 TEMPORAL_GET_BIGINT_AFTER_DIVID(Instant, EpochMicroseconds, nanoseconds, 1000,
                                 epochMicroseconds)
+TEMPORAL_PROTOTYPE_METHOD1(Instant, Add, add)
+TEMPORAL_PROTOTYPE_METHOD1(Instant, Round, round)
+TEMPORAL_PROTOTYPE_METHOD2(Instant, Since, since)
+TEMPORAL_PROTOTYPE_METHOD1(Instant, Subtract, subtract)
+TEMPORAL_PROTOTYPE_METHOD0(Instant, ToJSON, toJSON)
+TEMPORAL_PROTOTYPE_METHOD2(Instant, ToLocaleString, toLocaleString)
+TEMPORAL_PROTOTYPE_METHOD1(Instant, ToString, toString)
 TEMPORAL_PROTOTYPE_METHOD1(Instant, ToZonedDateTime, toZonedDateTime)
 TEMPORAL_PROTOTYPE_METHOD1(Instant, ToZonedDateTimeISO, toZonedDateTimeISO)
+TEMPORAL_PROTOTYPE_METHOD2(Instant, Until, until)
 
 // Calendar
 TEMPORAL_CONSTRUCTOR1(Calendar)

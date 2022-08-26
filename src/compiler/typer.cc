@@ -19,7 +19,6 @@
 #include "src/compiler/operation-typer.h"
 #include "src/compiler/simplified-operator.h"
 #include "src/compiler/type-cache.h"
-#include "src/init/bootstrapper.h"
 #include "src/objects/objects-inl.h"
 
 namespace v8 {
@@ -2371,6 +2370,10 @@ Type Typer::Visitor::TypeFindOrderedHashMapEntry(Node* node) {
 }
 
 Type Typer::Visitor::TypeFindOrderedHashMapEntryForInt32Key(Node* node) {
+  return Type::Range(-1.0, FixedArray::kMaxLength, zone());
+}
+
+Type Typer::Visitor::TypeFindOrderedHashSetEntry(Node* node) {
   return Type::Range(-1.0, FixedArray::kMaxLength, zone());
 }
 

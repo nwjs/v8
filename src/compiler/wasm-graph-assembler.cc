@@ -215,12 +215,6 @@ Node* WasmGraphAssembler::LoadWasmTypeInfo(Node* map) {
                                  wasm::ObjectAccess::ToTagged(offset));
 }
 
-Node* WasmGraphAssembler::LoadSupertypes(Node* wasm_type_info) {
-  return LoadImmutableFromObject(
-      MachineType::TaggedPointer(), wasm_type_info,
-      wasm::ObjectAccess::ToTagged(WasmTypeInfo::kSupertypesOffset));
-}
-
 // FixedArrays.
 
 Node* WasmGraphAssembler::LoadFixedArrayLengthAsSmi(Node* fixed_array) {
@@ -365,11 +359,11 @@ Node* WasmGraphAssembler::Null() {
 }
 
 Node* WasmGraphAssembler::IsNull(Node* object) {
-  return AddNode(graph()->NewNode(simplified_.IsNull(), object));
+  return AddNode(graph()->NewNode(simplified_.IsNull(), object, control()));
 }
 
 Node* WasmGraphAssembler::IsNotNull(Node* object) {
-  return AddNode(graph()->NewNode(simplified_.IsNotNull(), object));
+  return AddNode(graph()->NewNode(simplified_.IsNotNull(), object, control()));
 }
 
 Node* WasmGraphAssembler::AssertNotNull(Node* object) {

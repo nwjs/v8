@@ -4,11 +4,7 @@
 
 #include "src/wasm/wasm-module-builder.h"
 
-#include "src/base/memory.h"
 #include "src/codegen/signature.h"
-#include "src/handles/handles.h"
-#include "src/init/v8.h"
-#include "src/objects/objects-inl.h"
 #include "src/wasm/function-body-decoder.h"
 #include "src/wasm/leb-helper.h"
 #include "src/wasm/wasm-constants.h"
@@ -506,7 +502,7 @@ void WriteInitializerExpressionWithEnd(ZoneBuffer* buffer,
           buffer->write_u8(kExprF64Const);
           buffer->write_f64(0.);
           break;
-        case kOptRef:
+        case kRefNull:
           buffer->write_u8(kExprRefNull);
           buffer->write_i32v(type.heap_type().code());
           break;
@@ -557,25 +553,41 @@ void WriteInitializerExpressionWithEnd(ZoneBuffer* buffer,
       buffer->write_u8(static_cast<uint8_t>(opcode));
       buffer->write_u32v(init.immediate().index);
       break;
-    case WasmInitExpr::kArrayInit:
-    case WasmInitExpr::kArrayInitStatic:
-      static_assert((kExprArrayInit >> 8) == kGCPrefix);
-      static_assert((kExprArrayInitStatic >> 8) == kGCPrefix);
+    case WasmInitExpr::kArrayNewFixed:
+    case WasmInitExpr::kArrayNewFixedStatic: {
+      static_assert((kExprArrayNewFixed >> 8) == kGCPrefix);
+      static_assert((kExprArrayNewFixedStatic >> 8) == kGCPrefix);
+      bool is_static = init.kind() == WasmInitExpr::kArrayNewFixedStatic;
       for (const WasmInitExpr& operand : *init.operands()) {
         WriteInitializerExpressionWithEnd(buffer, operand, kWasmBottom);
       }
       buffer->write_u8(kGCPrefix);
-      buffer->write_u8(static_cast<uint8_t>(
-          init.kind() == WasmInitExpr::kArrayInit ? kExprArrayInit
-                                                  : kExprArrayInitStatic));
+      buffer->write_u8(static_cast<uint8_t>(is_static ? kExprArrayNewFixedStatic
+                                                      : kExprArrayNewFixed));
       buffer->write_u32v(init.immediate().index);
-      buffer->write_u32v(static_cast<uint32_t>(init.operands()->size() - 1));
+      buffer->write_u32v(
+          static_cast<uint32_t>(init.operands()->size() - (is_static ? 0 : 1)));
+      break;
+    }
+    case WasmInitExpr::kI31New:
+      WriteInitializerExpressionWithEnd(buffer, (*init.operands())[0],
+                                        kWasmI32);
+      static_assert((kExprI31New >> 8) == kGCPrefix);
+
+      buffer->write_u8(kGCPrefix);
+      buffer->write_u8(static_cast<uint8_t>(kExprI31New));
+
       break;
     case WasmInitExpr::kRttCanon:
       static_assert((kExprRttCanon >> 8) == kGCPrefix);
       buffer->write_u8(kGCPrefix);
       buffer->write_u8(static_cast<uint8_t>(kExprRttCanon));
       buffer->write_i32v(static_cast<int32_t>(init.immediate().index));
+      break;
+    case WasmInitExpr::kStringConst:
+      buffer->write_u8(kGCPrefix);
+      buffer->write_u8(static_cast<uint8_t>(kExprStringConst));
+      buffer->write_u32v(init.immediate().index);
       break;
   }
 }
@@ -865,7 +877,7 @@ void WasmModuleBuilder::WriteTo(ZoneBuffer* buffer) const {
 
     for (auto segment : data_segments_) {
       buffer->write_u8(0);              // linear memory segment
-      buffer->write_u8(kExprI32Const);  // initializer expression for dest
+      buffer->write_u8(kExprI32Const);  // constant expression for dest
       buffer->write_u32v(segment.dest);
       buffer->write_u8(kExprEnd);
       buffer->write_u32v(static_cast<uint32_t>(segment.data.size()));

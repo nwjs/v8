@@ -247,7 +247,7 @@ Handle<BytecodeArray> FactoryBase<Impl>::NewBytecodeArray(
   instance.set_parameter_count(parameter_count);
   instance.set_incoming_new_target_or_generator_register(
       interpreter::Register::invalid_value());
-  instance.set_bytecode_age(BytecodeArray::kNoAgeBytecodeAge);
+  instance.set_bytecode_age(0);
   instance.set_constant_pool(*constant_pool);
   instance.set_handler_table(read_only_roots().empty_byte_array(),
                              SKIP_WRITE_BARRIER);
@@ -642,6 +642,19 @@ Handle<SeqTwoByteString> FactoryBase<Impl>::NewTwoByteInternalizedString(
   DisallowGarbageCollection no_gc;
   MemCopy(result->GetChars(no_gc, SharedStringAccessGuardIfNeeded::NotNeeded()),
           str.begin(), str.length() * base::kUC16Size);
+  return result;
+}
+
+template <typename Impl>
+Handle<SeqOneByteString>
+FactoryBase<Impl>::NewOneByteInternalizedStringFromTwoByte(
+    const base::Vector<const base::uc16>& str, uint32_t raw_hash_field) {
+  Handle<SeqOneByteString> result =
+      AllocateRawOneByteInternalizedString(str.length(), raw_hash_field);
+  DisallowGarbageCollection no_gc;
+  CopyChars(
+      result->GetChars(no_gc, SharedStringAccessGuardIfNeeded::NotNeeded()),
+      str.begin(), str.length());
   return result;
 }
 

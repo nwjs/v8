@@ -488,12 +488,14 @@ void EmitFpOrNeonUnop(TurboAssembler* tasm, Fn fn, Instruction* instr,
 #define ASSEMBLE_ATOMIC_LOAD_INTEGER(asm_instr, reg)                   \
   do {                                                                 \
     __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1)); \
+    EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());  \
     __ asm_instr(i.Output##reg(), i.TempRegister(0));                  \
   } while (0)
 
 #define ASSEMBLE_ATOMIC_STORE_INTEGER(asm_instr, reg)                  \
   do {                                                                 \
     __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1)); \
+    EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());  \
     __ asm_instr(i.Input##reg(2), i.TempRegister(0));                  \
   } while (0)
 
@@ -502,6 +504,7 @@ void EmitFpOrNeonUnop(TurboAssembler* tasm, Fn fn, Instruction* instr,
     Label exchange;                                                          \
     __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));       \
     __ Bind(&exchange);                                                      \
+    EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());        \
     __ load_instr(i.Output##reg(), i.TempRegister(0));                       \
     __ store_instr(i.TempRegister32(1), i.Input##reg(2), i.TempRegister(0)); \
     __ Cbnz(i.TempRegister32(1), &exchange);                                 \
@@ -514,6 +517,7 @@ void EmitFpOrNeonUnop(TurboAssembler* tasm, Fn fn, Instruction* instr,
     Label exit;                                                                \
     __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));         \
     __ Bind(&compareExchange);                                                 \
+    EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());          \
     __ load_instr(i.Output##reg(), i.TempRegister(0));                         \
     __ Cmp(i.Output##reg(), Operand(i.Input##reg(2), ext));                    \
     __ B(ne, &exit);                                                           \
@@ -527,6 +531,7 @@ void EmitFpOrNeonUnop(TurboAssembler* tasm, Fn fn, Instruction* instr,
     Label binop;                                                             \
     __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));       \
     __ Bind(&binop);                                                         \
+    EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());        \
     __ load_instr(i.Output##reg(), i.TempRegister(0));                       \
     __ bin_instr(i.Temp##reg(1), i.Output##reg(), Operand(i.Input##reg(2))); \
     __ store_instr(i.TempRegister32(2), i.Temp##reg(1), i.TempRegister(0));  \
@@ -1721,6 +1726,13 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
     case kArm64Float64ToInt32:
       __ Fcvtzs(i.OutputRegister32(), i.InputDoubleRegister(0));
+      if (i.OutputCount() > 1) {
+        // Check for inputs below INT32_MIN and NaN.
+        __ Fcmp(i.InputDoubleRegister(0), static_cast<double>(INT32_MIN));
+        __ Cset(i.OutputRegister(1).W(), ge);
+        __ Fcmp(i.InputDoubleRegister(0), static_cast<double>(INT32_MAX) + 1);
+        __ CmovX(i.OutputRegister(1), xzr, ge);
+      }
       break;
     case kArm64Float32ToUint32: {
       __ Fcvtzu(i.OutputRegister32(), i.InputFloat32Register(0));
@@ -1735,6 +1747,12 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
     case kArm64Float64ToUint32:
       __ Fcvtzu(i.OutputRegister32(), i.InputDoubleRegister(0));
+      if (i.OutputCount() > 1) {
+        __ Fcmp(i.InputDoubleRegister(0), -1.0);
+        __ Cset(i.OutputRegister(1).W(), gt);
+        __ Fcmp(i.InputDoubleRegister(0), static_cast<double>(UINT32_MAX) + 1);
+        __ CmovX(i.OutputRegister(1), xzr, ge);
+      }
       break;
     case kArm64Float32ToInt64:
       __ Fcvtzs(i.OutputRegister64(), i.InputFloat32Register(0));

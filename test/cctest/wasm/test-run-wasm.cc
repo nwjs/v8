@@ -2116,7 +2116,7 @@ static void TestBuildGraphForSimpleExpression(WasmOpcode opcode) {
 
 TEST(Build_Wasm_SimpleExprs) {
 // Test that the decoder can build a graph for all supported simple expressions.
-#define GRAPH_BUILD_TEST(name, opcode, sig) \
+#define GRAPH_BUILD_TEST(name, ...) \
   TestBuildGraphForSimpleExpression(kExpr##name);
 
   FOREACH_SIMPLE_OPCODE(GRAPH_BUILD_TEST);
@@ -3673,7 +3673,7 @@ WASM_EXEC_TEST(IndirectNullTyped) {
   FunctionSig sig(1, 0, &kWasmI32);
   byte sig_index = r.builder().AddSignature(&sig);
   r.builder().AddIndirectFunctionTable(nullptr, 1,
-                                       ValueType::Ref(sig_index, kNullable));
+                                       ValueType::RefNull(sig_index));
 
   BUILD(r, WASM_CALL_INDIRECT(sig_index, WASM_I32V(0)));
 

@@ -5,6 +5,7 @@
 #include "src/inspector/v8-debugger-agent-impl.h"
 
 #include <algorithm>
+#include <memory>
 
 #include "../../third_party/inspector_protocol/crdtp/json.h"
 #include "include/v8-context.h"
@@ -442,6 +443,7 @@ Response V8DebuggerAgentImpl::disable() {
   }
   m_breakpointIdToDebuggerBreakpointIds.clear();
   m_debuggerBreakpointIdToBreakpointId.clear();
+  m_wasmDisassemblies.clear();
   m_debugger->setAsyncCallStackDepth(this, 0);
   clearBreakDetails();
   m_skipAllPauses = false;
@@ -1002,12 +1004,30 @@ Response V8DebuggerAgentImpl::searchInContent(
   return Response::Success();
 }
 
+namespace {
+const char* buildStatus(v8::debug::LiveEditResult::Status status) {
+  switch (status) {
+    case v8::debug::LiveEditResult::OK:
+      return protocol::Debugger::SetScriptSource::StatusEnum::Ok;
+    case v8::debug::LiveEditResult::COMPILE_ERROR:
+      return protocol::Debugger::SetScriptSource::StatusEnum::CompileError;
+    case v8::debug::LiveEditResult::BLOCKED_BY_ACTIVE_FUNCTION:
+      return protocol::Debugger::SetScriptSource::StatusEnum::
+          BlockedByActiveFunction;
+    case v8::debug::LiveEditResult::BLOCKED_BY_RUNNING_GENERATOR:
+      return protocol::Debugger::SetScriptSource::StatusEnum::
+          BlockedByActiveGenerator;
+  }
+}
+}  // namespace
+
 Response V8DebuggerAgentImpl::setScriptSource(
     const String16& scriptId, const String16& newContent, Maybe<bool> dryRun,
+    Maybe<bool> allowTopFrameEditing,
     Maybe<protocol::Array<protocol::Debugger::CallFrame>>* newCallFrames,
     Maybe<bool>* stackChanged,
     Maybe<protocol::Runtime::StackTrace>* asyncStackTrace,
-    Maybe<protocol::Runtime::StackTraceId>* asyncStackTraceId,
+    Maybe<protocol::Runtime::StackTraceId>* asyncStackTraceId, String16* status,
     Maybe<protocol::Runtime::ExceptionDetails>* optOutCompileError) {
   if (!enabled()) return Response::ServerError(kDebuggerNotEnabled);
 
@@ -1023,10 +1043,13 @@ Response V8DebuggerAgentImpl::setScriptSource(
   v8::HandleScope handleScope(m_isolate);
   v8::Local<v8::Context> context = inspected->context();
   v8::Context::Scope contextScope(context);
+  const bool allowTopFrameLiveEditing = allowTopFrameEditing.fromMaybe(false);
 
   v8::debug::LiveEditResult result;
-  it->second->setSource(newContent, dryRun.fromMaybe(false), &result);
-  if (result.status != v8::debug::LiveEditResult::OK) {
+  it->second->setSource(newContent, dryRun.fromMaybe(false),
+                        allowTopFrameLiveEditing, &result);
+  *status = buildStatus(result.status);
+  if (result.status == v8::debug::LiveEditResult::COMPILE_ERROR) {
     *optOutCompileError =
         protocol::Runtime::ExceptionDetails::create()
             .setExceptionId(m_inspector->nextExceptionId())
@@ -1037,15 +1060,17 @@ Response V8DebuggerAgentImpl::setScriptSource(
                                                         : 0)
             .build();
     return Response::Success();
-  } else {
-    *stackChanged = result.stack_changed;
   }
-  std::unique_ptr<Array<CallFrame>> callFrames;
-  Response response = currentCallFrames(&callFrames);
-  if (!response.IsSuccess()) return response;
-  *newCallFrames = std::move(callFrames);
-  *asyncStackTrace = currentAsyncStackTrace();
-  *asyncStackTraceId = currentExternalStackTrace();
+
+  if (result.restart_top_frame_required) {
+    CHECK(allowTopFrameLiveEditing);
+    // Nothing could have happened to the JS stack since the live edit so
+    // restarting the top frame is guaranteed to be successful.
+    CHECK(m_debugger->restartFrame(m_session->contextGroupId(),
+                                   /* callFrameOrdinal */ 0));
+    m_session->releaseObjectGroup(kBacktraceObjectGroup);
+  }
+
   return Response::Success();
 }
 
@@ -1106,6 +1131,145 @@ Response V8DebuggerAgentImpl::getScriptSource(
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
   return Response::Success();
+}
+
+struct DisassemblyChunk {
+  DisassemblyChunk() = default;
+  DisassemblyChunk(const DisassemblyChunk& other) = delete;
+  DisassemblyChunk& operator=(const DisassemblyChunk& other) = delete;
+  DisassemblyChunk(DisassemblyChunk&& other) V8_NOEXCEPT = default;
+  DisassemblyChunk& operator=(DisassemblyChunk&& other) V8_NOEXCEPT = default;
+
+  std::vector<String16> lines;
+  std::vector<int> lineOffsets;
+
+  void Reserve(size_t size) {
+    lines.reserve(size);
+    lineOffsets.reserve(size);
+  }
+};
+
+class DisassemblyCollectorImpl final : public v8::debug::DisassemblyCollector {
+ public:
+  DisassemblyCollectorImpl() = default;
+
+  void ReserveLineCount(size_t count) override {
+    if (count == 0) return;
+    size_t num_chunks = (count + kLinesPerChunk - 1) / kLinesPerChunk;
+    chunks_.resize(num_chunks);
+    for (size_t i = 0; i < num_chunks - 1; i++) {
+      chunks_[i].Reserve(kLinesPerChunk);
+    }
+    size_t last = num_chunks - 1;
+    size_t last_size = count % kLinesPerChunk;
+    if (last_size == 0) last_size = kLinesPerChunk;
+    chunks_[last].Reserve(last_size);
+  }
+
+  void AddLine(const char* src, size_t length,
+               uint32_t bytecode_offset) override {
+    chunks_[writing_chunk_index_].lines.emplace_back(src, length);
+    chunks_[writing_chunk_index_].lineOffsets.push_back(
+        static_cast<int>(bytecode_offset));
+    if (chunks_[writing_chunk_index_].lines.size() == kLinesPerChunk) {
+      writing_chunk_index_++;
+    }
+    total_number_of_lines_++;
+  }
+
+  size_t total_number_of_lines() { return total_number_of_lines_; }
+
+  bool HasNextChunk() { return reading_chunk_index_ < chunks_.size(); }
+  DisassemblyChunk NextChunk() {
+    return std::move(chunks_[reading_chunk_index_++]);
+  }
+
+ private:
+  // For a large Ritz module, the average is about 50 chars per line,
+  // so (with 2-byte String16 chars) this should give approximately 20 MB
+  // per chunk.
+  static constexpr size_t kLinesPerChunk = 200'000;
+
+  size_t writing_chunk_index_ = 0;
+  size_t reading_chunk_index_ = 0;
+  size_t total_number_of_lines_ = 0;
+  std::vector<DisassemblyChunk> chunks_;
+};
+
+Response V8DebuggerAgentImpl::disassembleWasmModule(
+    const String16& in_scriptId, Maybe<String16>* out_streamId,
+    int* out_totalNumberOfLines,
+    std::unique_ptr<protocol::Array<int>>* out_functionBodyOffsets,
+    std::unique_ptr<protocol::Debugger::WasmDisassemblyChunk>* out_chunk) {
+#if V8_ENABLE_WEBASSEMBLY
+  if (!enabled()) return Response::ServerError(kDebuggerNotEnabled);
+  ScriptsMap::iterator it = m_scripts.find(in_scriptId);
+  if (it == m_scripts.end()) {
+    return Response::InvalidParams("No script for id: " + in_scriptId.utf8());
+  }
+  V8DebuggerScript* script = it->second.get();
+  if (script->getLanguage() != V8DebuggerScript::Language::WebAssembly) {
+    return Response::InvalidParams("Script with id " + in_scriptId.utf8() +
+                                   " is not WebAssembly");
+  }
+  std::unique_ptr<DisassemblyCollectorImpl> collector =
+      std::make_unique<DisassemblyCollectorImpl>();
+  script->Disassemble(collector.get());
+  *out_totalNumberOfLines =
+      static_cast<int>(collector->total_number_of_lines());
+  std::vector<int> functionBodyOffsets;
+  script->GetAllFunctionStarts(functionBodyOffsets);
+  *out_functionBodyOffsets =
+      std::make_unique<protocol::Array<int>>(std::move(functionBodyOffsets));
+  // Even an empty module would disassemble to "(module)", never to zero lines.
+  DCHECK(collector->HasNextChunk());
+  DisassemblyChunk chunk(collector->NextChunk());
+  *out_chunk = protocol::Debugger::WasmDisassemblyChunk::create()
+                   .setBytecodeOffsets(std::make_unique<protocol::Array<int>>(
+                       std::move(chunk.lineOffsets)))
+                   .setLines(std::make_unique<protocol::Array<String16>>(
+                       std::move(chunk.lines)))
+                   .build();
+  if (collector->HasNextChunk()) {
+    String16 streamId = String16::fromInteger(m_nextWasmDisassemblyStreamId++);
+    *out_streamId = streamId;
+    m_wasmDisassemblies[streamId] = std::move(collector);
+  }
+  return Response::Success();
+#else
+  return Response::ServerError("WebAssembly is disabled");
+#endif  // V8_ENABLE_WEBASSEMBLY
+}
+Response V8DebuggerAgentImpl::nextWasmDisassemblyChunk(
+    const String16& in_streamId,
+    std::unique_ptr<protocol::Debugger::WasmDisassemblyChunk>* out_chunk) {
+#if V8_ENABLE_WEBASSEMBLY
+  if (!enabled()) return Response::ServerError(kDebuggerNotEnabled);
+  auto it = m_wasmDisassemblies.find(in_streamId);
+  if (it == m_wasmDisassemblies.end()) {
+    return Response::InvalidParams("No chunks available for stream " +
+                                   in_streamId.utf8());
+  }
+  if (it->second->HasNextChunk()) {
+    DisassemblyChunk chunk(it->second->NextChunk());
+    *out_chunk = protocol::Debugger::WasmDisassemblyChunk::create()
+                     .setBytecodeOffsets(std::make_unique<protocol::Array<int>>(
+                         std::move(chunk.lineOffsets)))
+                     .setLines(std::make_unique<protocol::Array<String16>>(
+                         std::move(chunk.lines)))
+                     .build();
+  } else {
+    *out_chunk =
+        protocol::Debugger::WasmDisassemblyChunk::create()
+            .setBytecodeOffsets(std::make_unique<protocol::Array<int>>())
+            .setLines(std::make_unique<protocol::Array<String16>>())
+            .build();
+    m_wasmDisassemblies.erase(it);
+  }
+  return Response::Success();
+#else
+  return Response::ServerError("WebAssembly is disabled");
+#endif  // V8_ENABLE_WEBASSEMBLY
 }
 
 Response V8DebuggerAgentImpl::getWasmBytecode(const String16& scriptId,

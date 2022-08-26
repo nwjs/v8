@@ -8,7 +8,6 @@
 #include "src/debug/debug-evaluate.h"
 #include "src/debug/debug-scope-iterator.h"
 #include "src/debug/debug.h"
-#include "src/debug/liveedit.h"
 #include "src/execution/frames-inl.h"
 #include "src/execution/isolate.h"
 
@@ -152,6 +151,13 @@ v8::Local<v8::Function> DebugStackTraceIterator::GetFunction() const {
   DCHECK(!Done());
   if (!frame_inspector_->IsJavaScript()) return v8::Local<v8::Function>();
   return Utils::ToLocal(frame_inspector_->GetFunction());
+}
+
+Handle<SharedFunctionInfo> DebugStackTraceIterator::GetSharedFunctionInfo()
+    const {
+  DCHECK(!Done());
+  if (!frame_inspector_->IsJavaScript()) return Handle<SharedFunctionInfo>();
+  return handle(frame_inspector_->GetFunction()->shared(), isolate_);
 }
 
 std::unique_ptr<v8::debug::ScopeIterator>

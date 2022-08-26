@@ -7,8 +7,11 @@
 #include "src/base/hashmap.h"
 #include "src/codegen/code-desc.h"
 #include "src/codegen/register.h"
+#include "src/codegen/reglist.h"
 #include "src/codegen/safepoint-table.h"
+#include "src/codegen/source-position.h"
 #include "src/codegen/x64/register-x64.h"
+#include "src/common/globals.h"
 #include "src/deoptimizer/translation-array.h"
 #include "src/execution/frame-constants.h"
 #include "src/interpreter/bytecode-register.h"
@@ -31,17 +34,7 @@ namespace maglev {
 
 namespace {
 
-template <typename T, size_t... Is>
-std::array<T, sizeof...(Is)> repeat(T value, std::index_sequence<Is...>) {
-  return {((void)Is, value)...};
-}
-
-template <size_t N, typename T>
-std::array<T, N> repeat(T value) {
-  return repeat<T>(value, std::make_index_sequence<N>());
-}
-
-using RegisterMoves = std::array<Register, Register::kNumRegisters>;
+using RegisterMoves = std::array<RegList, Register::kNumRegisters>;
 using RegisterReloads = std::array<ValueNode*, Register::kNumRegisters>;
 
 class MaglevCodeGeneratingNodeProcessor {
@@ -69,28 +62,52 @@ class MaglevCodeGeneratingNodeProcessor {
     // LoadTieringStateAndJumpIfNeedsProcessing and
     // MaybeOptimizeCodeOrTailCallOptimizedCodeSlot.
 
-    // Extend rsp by the size of the frame.
     code_gen_state_->set_untagged_slots(graph->untagged_stack_slots());
     code_gen_state_->set_tagged_slots(graph->tagged_stack_slots());
-    __ subq(rsp,
-            Immediate(code_gen_state_->stack_slots() * kSystemPointerSize));
 
     // Initialize stack slots.
-    // TODO(jgruber): Update logic once the register allocator is further along.
-    {
+    if (graph->tagged_stack_slots() > 0) {
       ASM_CODE_COMMENT_STRING(masm(), "Initializing stack slots");
+      // TODO(leszeks): Consider filling with xmm + movdqa instead.
       __ Move(rax, Immediate(0));
-      __ Move(rcx, Immediate(code_gen_state_->stack_slots()));
-      __ leaq(rdi, code_gen_state_->TopOfStack());
-      __ repstosq();
+
+      // Magic value. Experimentally, an unroll size of 8 doesn't seem any worse
+      // than fully unrolled pushes.
+      const int kLoopUnrollSize = 8;
+      int tagged_slots = graph->tagged_stack_slots();
+      if (tagged_slots < 2 * kLoopUnrollSize) {
+        // If the frame is small enough, just unroll the frame fill completely.
+        for (int i = 0; i < tagged_slots; ++i) {
+          __ pushq(rax);
+        }
+      } else {
+        // Extract the first few slots to round to the unroll size.
+        int first_slots = tagged_slots % kLoopUnrollSize;
+        for (int i = 0; i < first_slots; ++i) {
+          __ pushq(rax);
+        }
+        __ Move(rbx, Immediate(tagged_slots / kLoopUnrollSize));
+        // We enter the loop unconditionally, so make sure we need to loop at
+        // least once.
+        DCHECK_GT(tagged_slots / kLoopUnrollSize, 0);
+        Label loop;
+        __ bind(&loop);
+        for (int i = 0; i < kLoopUnrollSize; ++i) {
+          __ pushq(rax);
+        }
+        __ decl(rbx);
+        __ j(greater, &loop);
+      }
+    }
+    if (graph->untagged_stack_slots() > 0) {
+      // Extend rsp by the size of the remaining untagged part of the frame, no
+      // need to initialise these.
+      __ subq(rsp,
+              Immediate(graph->untagged_stack_slots() * kSystemPointerSize));
     }
 
-    // We don't emit proper safepoint data yet; instead, define a single
-    // safepoint at the end of the code object.
-    // TODO(v8:7700): Add better safepoint handling when we support stack reuse.
-    SafepointTableBuilder::Safepoint safepoint =
-        safepoint_table_builder()->DefineSafepoint(masm());
-    code_gen_state_->DefineSafepointStackSlots(safepoint);
+    // Define a single safepoint at the end of the code object.
+    safepoint_table_builder()->DefineSafepoint(masm());
   }
 
   void PostProcessGraph(MaglevCompilationInfo*, Graph*) {}
@@ -112,6 +129,15 @@ class MaglevCodeGeneratingNodeProcessor {
       ss << "--   " << graph_labeller()->NodeId(node) << ": "
          << PrintNode(graph_labeller(), node);
       __ RecordComment(ss.str());
+    }
+
+    if (FLAG_debug_code) {
+      __ movq(kScratchRegister, rbp);
+      __ subq(kScratchRegister, rsp);
+      __ cmpq(kScratchRegister,
+              Immediate(code_gen_state_->stack_slots() * kSystemPointerSize +
+                        StandardFrameConstants::kFixedFrameSizeFromFp));
+      __ Assert(equal, AbortReason::kStackAccessBelowStackPointer);
     }
 
     // Emit Phi moves before visiting the control node.
@@ -146,47 +172,54 @@ class MaglevCodeGeneratingNodeProcessor {
     }
   }
 
-  void EmitSingleParallelMove(Register source, Register target,
+  void EmitSingleParallelMove(Register source, RegList targets,
                               RegisterMoves& moves) {
-    DCHECK(!moves[target.code()].is_valid());
-    __ movq(target, source);
-    moves[source.code()] = Register::no_reg();
+    for (Register target : targets) {
+      DCHECK(moves[target.code()].is_empty());
+      __ movq(target, source);
+    }
+    moves[source.code()] = kEmptyRegList;
   }
 
   bool RecursivelyEmitParallelMoveChain(Register chain_start, Register source,
-                                        Register target, RegisterMoves& moves) {
-    if (target == chain_start) {
+                                        RegList targets, RegisterMoves& moves) {
+    if (targets.has(chain_start)) {
       // The target of this move is the start of the move chain -- this
       // means that there is a cycle, and we have to break it by moving
       // the chain start into a temporary.
 
       __ RecordComment("--   * Cycle");
-      EmitSingleParallelMove(target, kScratchRegister, moves);
-      EmitSingleParallelMove(source, target, moves);
+      EmitSingleParallelMove(chain_start, {kScratchRegister}, moves);
+      EmitSingleParallelMove(source, targets, moves);
       return true;
     }
-    bool is_cycle = false;
-    if (moves[target.code()].is_valid()) {
-      is_cycle = RecursivelyEmitParallelMoveChain(chain_start, target,
-                                                  moves[target.code()], moves);
-    } else {
-      __ RecordComment("--   * Chain start");
+    bool has_cycle = false;
+    for (Register target : targets) {
+      if (!moves[target.code()].is_empty()) {
+        bool is_cycle = RecursivelyEmitParallelMoveChain(
+            chain_start, target, moves[target.code()], moves);
+        // There can only be one cycle in a connected graph.
+        DCHECK_IMPLIES(has_cycle, !is_cycle);
+        has_cycle |= is_cycle;
+      } else {
+        __ RecordComment("--   * Chain start");
+      }
     }
-    if (is_cycle && source == chain_start) {
-      EmitSingleParallelMove(kScratchRegister, target, moves);
+    if (has_cycle && source == chain_start) {
+      EmitSingleParallelMove(kScratchRegister, targets, moves);
       __ RecordComment("--   * end cycle");
     } else {
-      EmitSingleParallelMove(source, target, moves);
+      EmitSingleParallelMove(source, targets, moves);
     }
-    return is_cycle;
+    return has_cycle;
   }
 
   void EmitParallelMoveChain(Register source, RegisterMoves& moves) {
-    Register target = moves[source.code()];
-    if (!target.is_valid()) return;
+    RegList targets = moves[source.code()];
+    if (targets.is_empty()) return;
 
-    DCHECK_NE(source, target);
-    RecursivelyEmitParallelMoveChain(source, source, target, moves);
+    DCHECK(!targets.has(source));
+    RecursivelyEmitParallelMoveChain(source, source, targets, moves);
   }
 
   void EmitRegisterReload(ValueNode* node, Register target) {
@@ -203,8 +236,8 @@ class MaglevCodeGeneratingNodeProcessor {
       // move in the set of parallel register moves, to be resolved later.
       Register source_reg = ToRegister(source);
       if (target_reg != source_reg) {
-        DCHECK(!register_moves[source_reg.code()].is_valid());
-        register_moves[source_reg.code()] = target_reg;
+        DCHECK(!register_moves[source_reg.code()].has(target_reg));
+        register_moves[source_reg.code()].set(target_reg);
       }
     } else {
       // For register loads from memory, don't emit the move yet, but instead
@@ -249,16 +282,14 @@ class MaglevCodeGeneratingNodeProcessor {
     // moves. Note that the mapping is:
     //
     //     register_moves[source] = target.
-    RegisterMoves register_moves =
-        repeat<Register::kNumRegisters>(Register::no_reg());
+    RegisterMoves register_moves = {};
 
     // Save registers restored from a memory location in an array, so that we
     // can execute them after the parallel moves have read the register values.
     // Note that the mapping is:
     //
     //     register_reloads[target] = node.
-    ValueNode* n = nullptr;
-    RegisterReloads register_reloads = repeat<Register::kNumRegisters>(n);
+    RegisterReloads register_reloads = {};
 
     __ RecordComment("--   Gap moves:");
 
@@ -311,7 +342,7 @@ class MaglevCodeGeneratingNodeProcessor {
   MaglevGraphLabeller* graph_labeller() const {
     return code_gen_state_->graph_labeller();
   }
-  SafepointTableBuilder* safepoint_table_builder() const {
+  MaglevSafepointTableBuilder* safepoint_table_builder() const {
     return code_gen_state_->safepoint_table_builder();
   }
 
@@ -332,7 +363,9 @@ class MaglevCodeGeneratorImpl final {
   static constexpr int kOptimizedOutConstantIndex = 0;
 
   MaglevCodeGeneratorImpl(MaglevCompilationInfo* compilation_info, Graph* graph)
-      : safepoint_table_builder_(compilation_info->zone()),
+      : safepoint_table_builder_(compilation_info->zone(),
+                                 graph->tagged_stack_slots(),
+                                 graph->untagged_stack_slots()),
         translation_array_builder_(compilation_info->zone()),
         code_gen_state_(compilation_info, safepoint_table_builder()),
         processor_(compilation_info, &code_gen_state_),
@@ -385,8 +418,11 @@ class MaglevCodeGeneratorImpl final {
     for (EagerDeoptInfo* deopt_info : code_gen_state_.eager_deopts()) {
       EmitEagerDeopt(deopt_info);
 
+      // TODO(leszeks): Record source positions.
+      __ RecordDeoptReason(deopt_info->reason, 0, SourcePosition::Unknown(),
+                           deopt_index);
       __ bind(&deopt_info->deopt_entry_label);
-      __ CallForDeoptimization(Builtin::kDeoptimizationEntry_Eager, 0,
+      __ CallForDeoptimization(Builtin::kDeoptimizationEntry_Eager, deopt_index,
                                &deopt_info->deopt_entry_label,
                                DeoptimizeKind::kEager, nullptr, nullptr);
       deopt_index++;
@@ -398,7 +434,7 @@ class MaglevCodeGeneratorImpl final {
       EmitLazyDeopt(deopt_info);
 
       __ bind(&deopt_info->deopt_entry_label);
-      __ CallForDeoptimization(Builtin::kDeoptimizationEntry_Lazy, 0,
+      __ CallForDeoptimization(Builtin::kDeoptimizationEntry_Lazy, deopt_index,
                                &deopt_info->deopt_entry_label,
                                DeoptimizeKind::kLazy, nullptr, nullptr);
 
@@ -563,8 +599,8 @@ class MaglevCodeGeneratorImpl final {
     }
 
     // TODO(leszeks): The input locations array happens to be in the same order
-    // as parameters+locals+accumulator are accessed here. We should make this
-    // clearer and guard against this invariant failing.
+    // as parameters+context+locals+accumulator are accessed here. We should
+    // make this clearer and guard against this invariant failing.
     const InputLocation* input_location = input_locations;
 
     // Parameters
@@ -585,9 +621,9 @@ class MaglevCodeGeneratorImpl final {
     }
 
     // Context
-    int context_index =
-        DeoptStackSlotIndexFromFPOffset(StandardFrameConstants::kContextOffset);
-    translation_array_builder_.StoreStackSlot(context_index);
+    ValueNode* value = checkpoint_state->context(compilation_unit);
+    EmitDeoptFrameSingleValue(value, *input_location);
+    input_location++;
 
     // Locals
     {
@@ -633,8 +669,7 @@ class MaglevCodeGeneratorImpl final {
     // Final alignment before starting on the metadata section.
     masm()->Align(Code::kMetadataAlignment);
 
-    safepoint_table_builder()->Emit(masm(),
-                                    stack_slot_count_with_fixed_frame());
+    safepoint_table_builder()->Emit(masm());
   }
 
   MaybeHandle<Code> BuildCodeObject() {
@@ -734,7 +769,7 @@ class MaglevCodeGeneratorImpl final {
     return code_gen_state_.compilation_info()->isolate();
   }
   MacroAssembler* masm() { return code_gen_state_.masm(); }
-  SafepointTableBuilder* safepoint_table_builder() {
+  MaglevSafepointTableBuilder* safepoint_table_builder() {
     return &safepoint_table_builder_;
   }
   TranslationArrayBuilder* translation_array_builder() {
@@ -750,7 +785,7 @@ class MaglevCodeGeneratorImpl final {
     return *res.entry;
   }
 
-  SafepointTableBuilder safepoint_table_builder_;
+  MaglevSafepointTableBuilder safepoint_table_builder_;
   TranslationArrayBuilder translation_array_builder_;
   MaglevCodeGenState code_gen_state_;
   GraphProcessor<MaglevCodeGeneratingNodeProcessor> processor_;

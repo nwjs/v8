@@ -10,11 +10,9 @@
 #ifdef V8_RUNTIME_CALL_STATS
 
 #include "src/base/atomic-utils.h"
-#include "src/base/optional.h"
-#include "src/base/platform/elapsed-timer.h"
+#include "src/base/platform/platform.h"
 #include "src/base/platform/time.h"
 #include "src/builtins/builtins-definitions.h"
-#include "src/debug/debug-interface.h"
 #include "src/execution/thread-id.h"
 #include "src/init/heap-symbols.h"
 #include "src/logging/tracing-flags.h"
@@ -489,15 +487,18 @@ class RuntimeCallTimer final {
   V(UpdateProtector)                           \
   V(WebSnapshotDeserialize)                    \
   V(WebSnapshotDeserialize_Arrays)             \
+  V(WebSnapshotDeserialize_ArrayBuffers)       \
   V(WebSnapshotDeserialize_BuiltinObjects)     \
   V(WebSnapshotDeserialize_Classes)            \
   V(WebSnapshotDeserialize_Contexts)           \
+  V(WebSnapshotDeserialize_DataViews)          \
   V(WebSnapshotDeserialize_Exports)            \
   V(WebSnapshotDeserialize_Functions)          \
   V(WebSnapshotDeserialize_Maps)               \
   V(WebSnapshotDeserialize_Objects)            \
   V(WebSnapshotDeserialize_Strings)            \
   V(WebSnapshotDeserialize_Symbols)            \
+  V(WebSnapshotDeserialize_TypedArrays)        \
   V(WrappedFunctionLengthGetter)               \
   V(WrappedFunctionNameGetter)
 

@@ -2,29 +2,21 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/ast/prettyprinter.h"
 #include "src/base/macros.h"
 #include "src/builtins/builtins.h"
 #include "src/common/globals.h"
 #include "src/common/message-template.h"
-#include "src/debug/debug.h"
 #include "src/execution/arguments-inl.h"
 #include "src/execution/frames.h"
 #include "src/execution/isolate-inl.h"
 #include "src/execution/messages.h"
 #include "src/handles/maybe-handles.h"
 #include "src/heap/heap-inl.h"  // For ToBoolean. TODO(jkummerow): Drop.
-#include "src/heap/memory-chunk.h"
-#include "src/init/bootstrapper.h"
-#include "src/logging/counters.h"
-#include "src/objects/hash-table-inl.h"
-#include "src/objects/js-array-inl.h"
 #include "src/objects/map-updater.h"
 #include "src/objects/property-descriptor-object.h"
 #include "src/objects/property-descriptor.h"
 #include "src/objects/property-details.h"
 #include "src/objects/swiss-name-dictionary-inl.h"
-#include "src/runtime/runtime-utils.h"
 #include "src/runtime/runtime.h"
 
 namespace v8 {
@@ -567,9 +559,12 @@ MaybeHandle<Object> Runtime::SetObjectProperty(
   PropertyKey lookup_key(isolate, key, &success);
   if (!success) return MaybeHandle<Object>();
   LookupIterator it(isolate, object, lookup_key);
-  if (key->IsSymbol() && Symbol::cast(*key).is_private_name() &&
-      !JSReceiver::CheckPrivateNameStore(&it, false)) {
-    return MaybeHandle<Object>();
+  if (key->IsSymbol() && Symbol::cast(*key).is_private_name()) {
+    Maybe<bool> can_store = JSReceiver::CheckPrivateNameStore(&it, false);
+    MAYBE_RETURN_NULL(can_store);
+    if (!can_store.FromJust()) {
+      return isolate->factory()->undefined_value();
+    }
   }
 
   MAYBE_RETURN_NULL(
@@ -597,10 +592,15 @@ MaybeHandle<Object> Runtime::DefineObjectOwnProperty(Isolate* isolate,
   LookupIterator it(isolate, object, lookup_key, LookupIterator::OWN);
 
   if (key->IsSymbol() && Symbol::cast(*key).is_private_name()) {
-    if (!JSReceiver::CheckPrivateNameStore(&it, true)) {
-      return MaybeHandle<Object>();
+    Maybe<bool> can_store = JSReceiver::CheckPrivateNameStore(&it, true);
+    MAYBE_RETURN_NULL(can_store);
+    // If the state is ACCESS_CHECK, the faliled access check callback
+    // is configured but it did't throw.
+    DCHECK_IMPLIES(it.IsFound(), it.state() == LookupIterator::ACCESS_CHECK &&
+                                     !can_store.FromJust());
+    if (!can_store.FromJust()) {
+      return isolate->factory()->undefined_value();
     }
-    DCHECK(!it.IsFound());
     MAYBE_RETURN_NULL(
         JSReceiver::AddPrivateField(&it, value, Nothing<ShouldThrow>()));
   } else {

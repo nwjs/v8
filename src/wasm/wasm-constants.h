@@ -42,7 +42,7 @@ enum ValueTypeCode : uint8_t {
   // TODO(7748): For backwards compatibility only, remove when able.
   kAnyRefCodeAlias = 0x6e,
   kEqRefCode = 0x6d,
-  kOptRefCode = 0x6c,
+  kRefNullCode = 0x6c,
   kRefCode = 0x6b,
   kI31RefCode = 0x6a,
   // TODO(7748): Only here for backwards compatibility, remove when able.
@@ -50,10 +50,11 @@ enum ValueTypeCode : uint8_t {
   kRttCode = 0x68,
   kDataRefCode = 0x67,
   kArrayRefCode = 0x66,
-  kStringRefCode = 0x65,
-  kStringViewWtf8Code = 0x64,
-  kStringViewWtf16Code = 0x63,
-  kStringViewIterCode = 0x62,
+  kNoneCode = 0x65,
+  kStringRefCode = 0x64,
+  kStringViewWtf8Code = 0x63,
+  kStringViewWtf16Code = 0x62,
+  kStringViewIterCode = 0x61,
 };
 
 // Binary encoding of type definitions.
@@ -116,6 +117,7 @@ enum SectionCode : int8_t {
   kSourceMappingURLSectionCode,   // Source Map URL section
   kDebugInfoSectionCode,          // DWARF section .debug_info
   kExternalDebugInfoSectionCode,  // Section encoding the external symbol path
+  kInstTraceSectionCode,          // Instruction trace section
   kCompilationHintsSectionCode,   // Compilation hints section
   kBranchHintsSectionCode,        // Branch hints section
 
@@ -143,7 +145,9 @@ enum NameSectionKindCode : uint8_t {
   kElementSegmentCode = 8,
   kDataSegmentCode = 9,
   // https://github.com/WebAssembly/gc/issues/193
-  kFieldCode = 10
+  kFieldCode = 10,
+  // https://github.com/WebAssembly/exception-handling/pull/213
+  kTagCode = 11,
 };
 
 // What to do when treating a stringref as WTF-8 and we see an isolated
@@ -151,7 +155,8 @@ enum NameSectionKindCode : uint8_t {
 enum StringRefWtf8Policy : uint8_t {
   kWtf8PolicyReject = 0,   // Strict UTF-8; no isolated surrogates allowed.
   kWtf8PolicyAccept = 1,   // Follow WTF-8 encoding of isolates surrogates.
-  kWtf8PolicyReplace = 2,  // Replace isolated surrogates with U+FFFD.
+  kWtf8PolicyReplace = 2,  // Replace isolated surrogates and decoding errors
+                           // with U+FFFD.
   kLastWtf8Policy = kWtf8PolicyReplace
 };
 
@@ -190,7 +195,7 @@ constexpr uint32_t kMinimumSupertypeArraySize = 3;
 constexpr int kMaxPolymorphism = 4;
 
 #if V8_TARGET_ARCH_X64
-constexpr int32_t kOSRTargetOffset = 5 * kSystemPointerSize;
+constexpr int32_t kOSRTargetOffset = 4 * kSystemPointerSize;
 #endif
 
 }  // namespace wasm

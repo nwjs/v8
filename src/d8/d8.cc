@@ -46,6 +46,7 @@
 #include "src/debug/debug-interface.h"
 #include "src/deoptimizer/deoptimizer.h"
 #include "src/diagnostics/basic-block-profiler.h"
+#include "src/execution/microtask-queue.h"
 #include "src/execution/v8threads.h"
 #include "src/execution/vm-state-inl.h"
 #include "src/flags/flags.h"
@@ -62,6 +63,7 @@
 #include "src/parsing/parsing.h"
 #include "src/parsing/scanner-character-streams.h"
 #include "src/profiler/profile-generator.h"
+#include "src/sandbox/testing.h"
 #include "src/snapshot/snapshot.h"
 #include "src/tasks/cancelable-task.h"
 #include "src/utils/ostreams.h"
@@ -485,7 +487,9 @@ base::OnceType Shell::quit_once_ = V8_ONCE_INIT;
 
 ScriptCompiler::CachedData* Shell::LookupCodeCache(Isolate* isolate,
                                                    Local<Value> source) {
-  base::MutexGuard lock_guard(cached_code_mutex_.Pointer());
+  i::ParkedMutexGuard lock_guard(
+      reinterpret_cast<i::Isolate*>(isolate)->main_thread_local_isolate(),
+      cached_code_mutex_.Pointer());
   CHECK(source->IsString());
   v8::String::Utf8Value key(isolate, source);
   DCHECK(*key);
@@ -503,7 +507,9 @@ ScriptCompiler::CachedData* Shell::LookupCodeCache(Isolate* isolate,
 
 void Shell::StoreInCodeCache(Isolate* isolate, Local<Value> source,
                              const ScriptCompiler::CachedData* cache_data) {
-  base::MutexGuard lock_guard(cached_code_mutex_.Pointer());
+  i::ParkedMutexGuard lock_guard(
+      reinterpret_cast<i::Isolate*>(isolate)->main_thread_local_isolate(),
+      cached_code_mutex_.Pointer());
   CHECK(source->IsString());
   if (cache_data == nullptr) return;
   v8::String::Utf8Value key(isolate, source);
@@ -1454,7 +1460,10 @@ bool Shell::ExecuteModule(Isolate* isolate, const char* file_name) {
 
   // Loop until module execution finishes
   Local<Promise> result_promise(result.As<Promise>());
-  while (result_promise->State() == Promise::kPending) {
+  while (result_promise->State() == Promise::kPending &&
+         reinterpret_cast<i::Isolate*>(isolate)
+                 ->default_microtask_queue()
+                 ->size() > 0) {
     Shell::CompleteMessageLoop(isolate);
   }
 
@@ -1469,6 +1478,14 @@ bool Shell::ExecuteModule(Isolate* isolate, const char* file_name) {
       DCHECK_EQ(try_catch.Exception(), result_promise->Result());
     }
     ReportException(isolate, &try_catch);
+    return false;
+  }
+
+  std::vector<std::tuple<Local<Module>, Local<Message>>> stalled =
+      root_module->GetStalledTopLevelAwaitMessage(isolate);
+  if (stalled.size() > 0) {
+    Local<Message> message = std::get<1>(stalled[0]);
+    ReportException(isolate, message, v8::Exception::Error(message->Get()));
     return false;
   }
 
@@ -2421,6 +2438,9 @@ Local<String> Shell::ReadFromStdin(Isolate* isolate) {
   char buffer[kBufferSize];
   Local<String> accumulator = String::NewFromUtf8Literal(isolate, "");
   int length;
+  // Flush stdout before reading stdin, as stdout isn't guaranteed to be flushed
+  // automatically.
+  fflush(stdout);
   while (true) {
     // Continue reading if the line ends with an escape '\\' or the line has
     // not been fully read into the buffer yet (does not end with '\n').
@@ -2651,7 +2671,9 @@ void Shell::WorkerNew(const v8::FunctionCallbackInfo<v8::Value>& args) {
   {
     // Don't allow workers to create more workers if the main thread
     // is waiting for existing running workers to terminate.
-    base::MutexGuard lock_guard(workers_mutex_.Pointer());
+    i::ParkedMutexGuard lock_guard(
+        reinterpret_cast<i::Isolate*>(isolate)->main_thread_local_isolate(),
+        workers_mutex_.Pointer());
     if (!allow_new_workers_) return;
 
     String::Utf8Value script(isolate, source);
@@ -2669,7 +2691,7 @@ void Shell::WorkerNew(const v8::FunctionCallbackInfo<v8::Value>& args) {
     i::Handle<i::Object> managed = i::Managed<Worker>::FromSharedPtr(
         i_isolate, kWorkerSizeEstimate, worker);
     args.Holder()->SetInternalField(0, Utils::ToLocal(managed));
-    if (!Worker::StartWorkerThread(std::move(worker))) {
+    if (!Worker::StartWorkerThread(isolate, std::move(worker))) {
       isolate->ThrowError("Can't start thread");
       return;
     }
@@ -2710,7 +2732,7 @@ void Shell::WorkerGetMessage(const v8::FunctionCallbackInfo<v8::Value>& args) {
     return;
   }
 
-  std::unique_ptr<SerializationData> data = worker->GetMessage();
+  std::unique_ptr<SerializationData> data = worker->GetMessage(isolate);
   if (data) {
     Local<Value> value;
     if (Shell::DeserializeValue(isolate, std::move(data)).ToLocal(&value)) {
@@ -2738,7 +2760,9 @@ void Shell::WorkerTerminateAndWait(
     return;
   }
 
-  worker->TerminateAndWaitForThread();
+  i::ParkedScope parked(
+      reinterpret_cast<i::Isolate*>(isolate)->main_thread_local_isolate());
+  worker->TerminateAndWaitForThread(parked);
 }
 
 void Shell::QuitOnce(v8::FunctionCallbackInfo<v8::Value>* args) {
@@ -3007,11 +3031,15 @@ Local<String> Shell::Stringify(Isolate* isolate, Local<Value> value) {
 
 void Shell::NodeTypeCallback(const v8::FunctionCallbackInfo<v8::Value>& args) {
   v8::Isolate* isolate = args.GetIsolate();
-  // TODO(mslekova): Enable this once we have signature check in TF.
+
+  // HasInstance does a slow prototype chain lookup, and this function is used
+  // for micro benchmarks too.
+#ifdef DEBUG
   PerIsolateData* data = PerIsolateData::Get(isolate);
   if (!data->GetDomNodeCtor()->HasInstance(args.This())) {
     isolate->ThrowError("Calling .nodeType on wrong instance type.");
   }
+#endif
 
   args.GetReturnValue().Set(v8::Number::New(isolate, 1));
 }
@@ -3066,6 +3094,39 @@ Local<FunctionTemplate> Shell::CreateNodeTemplates(
   return div_element;
 }
 
+static bool D8AccessCheckCallback(Local<Context> accessing_context,
+                                  Local<Object> accessed_object,
+                                  Local<Value> data) {
+  return Isolate::GetCurrent()
+      ->GetCurrentContext()
+      ->GetSecurityToken()
+      ->StrictEquals(
+          accessed_object->GetCreationContextChecked()->GetSecurityToken());
+}
+
+static void AccessNamedGetter(Local<Name> property,
+                              const PropertyCallbackInfo<Value>& info) {}
+static void AccessNamedSetter(Local<Name> property, Local<Value> value,
+                              const PropertyCallbackInfo<Value>& info) {}
+static void AccessNamedQuery(Local<Name> property,
+                             const PropertyCallbackInfo<Integer>& info) {}
+static void AccessNamedDeleter(Local<Name> property,
+                               const PropertyCallbackInfo<Boolean>& info) {}
+static void AccessNamedEnumerator(const PropertyCallbackInfo<Array>& info) {}
+static void AccessIndexedGetter(uint32_t index,
+                                const PropertyCallbackInfo<Value>& info) {}
+
+static void AccessIndexedSetter(uint32_t index, Local<Value> value,
+                                const PropertyCallbackInfo<Value>& info) {}
+
+static void AccessIndexedQuery(uint32_t index,
+                               const PropertyCallbackInfo<Integer>& info) {}
+
+static void AccessIndexedDeleter(uint32_t index,
+                                 const PropertyCallbackInfo<Boolean>& info) {}
+
+static void AccessIndexedEnumerator(const PropertyCallbackInfo<Array>& info) {}
+
 Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
   Local<ObjectTemplate> global_template = ObjectTemplate::New(isolate);
   global_template->Set(Symbol::GetToStringTag(isolate),
@@ -3117,6 +3178,18 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
   if (i::FLAG_expose_async_hooks) {
     global_template->Set(isolate, "async_hooks",
                          Shell::CreateAsyncHookTemplate(isolate));
+  }
+
+  if (options.throw_on_failed_access_check ||
+      options.noop_on_failed_access_check) {
+    global_template->SetAccessCheckCallbackAndHandler(
+        D8AccessCheckCallback,
+        v8::NamedPropertyHandlerConfiguration(
+            AccessNamedGetter, AccessNamedSetter, AccessNamedQuery,
+            AccessNamedDeleter, AccessNamedEnumerator),
+        v8::IndexedPropertyHandlerConfiguration(
+            AccessIndexedGetter, AccessIndexedSetter, AccessIndexedQuery,
+            AccessIndexedDeleter, AccessIndexedEnumerator));
   }
 
   return global_template;
@@ -3387,6 +3460,11 @@ void Shell::PromiseRejectCallback(v8::PromiseRejectMessage data) {
   isolate_data->AddUnhandledPromise(promise, message, exception);
 }
 
+static void ThrowOnFailedAccessCheck(Local<Object> host, v8::AccessType type,
+                                     Local<Value> data) {
+  Isolate::GetCurrent()->ThrowError("Error in failed access check callback");
+}
+
 void Shell::Initialize(Isolate* isolate, D8Console* console,
                        bool isOnMainThread) {
   isolate->SetPromiseRejectCallback(PromiseRejectCallback);
@@ -3409,6 +3487,13 @@ void Shell::Initialize(Isolate* isolate, D8Console* console,
       Shell::HostInitializeImportMetaObject);
   isolate->SetHostCreateShadowRealmContextCallback(
       Shell::HostCreateShadowRealmContext);
+
+  if (options.throw_on_failed_access_check) {
+    isolate->SetFailedAccessCheckCallbackFunction(ThrowOnFailedAccessCheck);
+  } else if (options.noop_on_failed_access_check) {
+    isolate->SetFailedAccessCheckCallbackFunction(
+        [](Local<Object> host, v8::AccessType type, Local<Value> data) {});
+  }
 
 #ifdef V8_FUZZILLI
   // Let the parent process (Fuzzilli) know we are ready.
@@ -3439,7 +3524,9 @@ Local<String> Shell::WasmLoadSourceMapCallback(Isolate* isolate,
 
 Local<Context> Shell::CreateEvaluationContext(Isolate* isolate) {
   // This needs to be a critical section since this is not thread-safe
-  base::MutexGuard lock_guard(context_mutex_.Pointer());
+  i::ParkedMutexGuard lock_guard(
+      reinterpret_cast<i::Isolate*>(isolate)->main_thread_local_isolate(),
+      context_mutex_.Pointer());
   // Initialize the global objects
   Local<ObjectTemplate> global_template = CreateGlobalTemplate(isolate);
   EscapableHandleScope handle_scope(isolate);
@@ -3584,6 +3671,7 @@ void Shell::WriteLcovData(v8::Isolate* isolate, const char* file) {
 }
 
 void Shell::OnExit(v8::Isolate* isolate, bool dispose) {
+  platform::NotifyIsolateShutdown(g_default_platform, isolate);
   isolate->Dispose();
   if (shared_isolate) {
     i::Isolate::Delete(reinterpret_cast<i::Isolate*>(shared_isolate));
@@ -4168,9 +4256,8 @@ void SourceGroup::ExecuteInThread() {
 
   for (int i = 0; i < Shell::options.stress_runs; ++i) {
     {
-      i::ParkedScope parked_scope(
+      next_semaphore_.ParkedWait(
           reinterpret_cast<i::Isolate*>(isolate)->main_thread_local_isolate());
-      next_semaphore_.Wait();
     }
     {
       Isolate::Scope iscope(isolate);
@@ -4203,12 +4290,13 @@ void SourceGroup::StartExecuteInThread() {
   next_semaphore_.Signal();
 }
 
-void SourceGroup::WaitForThread() {
+void SourceGroup::WaitForThread(const i::ParkedScope& parked) {
   if (thread_ == nullptr) return;
-  done_semaphore_.Wait();
+  done_semaphore_.ParkedWait(parked);
 }
 
-void SourceGroup::JoinThread() {
+void SourceGroup::JoinThread(const i::ParkedScope& parked) {
+  USE(parked);
   if (thread_ == nullptr) return;
   thread_->Join();
 }
@@ -4253,7 +4341,8 @@ Worker::~Worker() {
 
 bool Worker::is_running() const { return state_.load() == State::kRunning; }
 
-bool Worker::StartWorkerThread(std::shared_ptr<Worker> worker) {
+bool Worker::StartWorkerThread(Isolate* requester,
+                               std::shared_ptr<Worker> worker) {
   auto expected = State::kReady;
   CHECK(
       worker->state_.compare_exchange_strong(expected, State::kPrepareRunning));
@@ -4261,7 +4350,8 @@ bool Worker::StartWorkerThread(std::shared_ptr<Worker> worker) {
   worker->thread_ = thread;
   if (!thread->Start()) return false;
   // Wait until the worker is ready to receive messages.
-  worker->started_semaphore_.Wait();
+  worker->started_semaphore_.ParkedWait(
+      reinterpret_cast<i::Isolate*>(requester)->main_thread_local_isolate());
   Shell::AddRunningWorker(std::move(worker));
   return true;
 }
@@ -4318,18 +4408,20 @@ class TerminateTask : public i::CancelableTask {
   std::shared_ptr<Worker> worker_;
 };
 
-std::unique_ptr<SerializationData> Worker::GetMessage() {
+std::unique_ptr<SerializationData> Worker::GetMessage(Isolate* requester) {
   std::unique_ptr<SerializationData> result;
   while (!out_queue_.Dequeue(&result)) {
     // If the worker is no longer running, and there are no messages in the
     // queue, don't expect any more messages from it.
     if (!is_running()) break;
-    out_semaphore_.Wait();
+    out_semaphore_.ParkedWait(
+        reinterpret_cast<i::Isolate*>(requester)->main_thread_local_isolate());
   }
   return result;
 }
 
-void Worker::TerminateAndWaitForThread() {
+void Worker::TerminateAndWaitForThread(const i::ParkedScope& parked) {
+  USE(parked);
   Terminate();
   {
     base::MutexGuard lock_guard(&worker_mutex_);
@@ -4646,8 +4738,7 @@ bool Shell::SetOptions(int argc, char* argv[]) {
             ShellOptions::CodeCacheOptions::kProduceCache;
       } else if (strncmp(value, "=none", 6) == 0) {
         options.compile_options = v8::ScriptCompiler::kNoCompileOptions;
-        options.code_cache_options =
-            ShellOptions::CodeCacheOptions::kNoProduceCache;
+        options.code_cache_options = ShellOptions::kNoProduceCache;
       } else if (strncmp(value, "=after-execute", 15) == 0) {
         options.compile_options = v8::ScriptCompiler::kNoCompileOptions;
         options.code_cache_options =
@@ -4765,6 +4856,17 @@ bool Shell::SetOptions(int argc, char* argv[]) {
     } else if (strcmp(argv[i], "--expose-fast-api") == 0) {
       options.expose_fast_api = true;
       argv[i] = nullptr;
+#if V8_ENABLE_SANDBOX
+    } else if (strcmp(argv[i], "--enable-sandbox-crash-filter") == 0) {
+      options.enable_sandbox_crash_filter = true;
+      argv[i] = nullptr;
+#endif  // V8_ENABLE_SANDBOX
+    } else if (strcmp(argv[i], "--throw-on-failed-access-check") == 0) {
+      options.throw_on_failed_access_check = true;
+      argv[i] = nullptr;
+    } else if (strcmp(argv[i], "--noop-on-failed-access-check") == 0) {
+      options.noop_on_failed_access_check = true;
+      argv[i] = nullptr;
     } else {
 #ifdef V8_TARGET_OS_WIN
       PreProcessUnicodeFilenameArg(argv, i);
@@ -4775,6 +4877,13 @@ bool Shell::SetOptions(int argc, char* argv[]) {
   if (options.stress_opt && no_always_turbofan &&
       check_d8_flag_contradictions) {
     FATAL("Flag --no-always-turbofan is incompatible with --stress-opt.");
+  }
+
+  if (options.throw_on_failed_access_check &&
+      options.noop_on_failed_access_check && check_d8_flag_contradictions) {
+    FATAL(
+        "Flag --throw-on-failed-access-check is incompatible with "
+        "--noop-on-failed-access-check.");
   }
 
   const char* usage =
@@ -4884,12 +4993,12 @@ int Shell::RunMain(Isolate* isolate, bool last_run) {
 
   for (int i = 1; i < options.num_isolates; ++i) {
     if (last_run) {
-      options.isolate_sources[i].JoinThread();
+      options.isolate_sources[i].JoinThread(parked);
     } else {
-      options.isolate_sources[i].WaitForThread();
+      options.isolate_sources[i].WaitForThread(parked);
     }
   }
-  WaitForRunningWorkers();
+  WaitForRunningWorkers(parked);
   if (Shell::unhandled_promise_rejections_.load() > 0) {
     printf("%i pending unhandled Promise rejection(s) detected.\n",
            Shell::unhandled_promise_rejections_.load());
@@ -5375,7 +5484,7 @@ void Shell::RemoveRunningWorker(const std::shared_ptr<Worker>& worker) {
   if (it != running_workers_.end()) running_workers_.erase(it);
 }
 
-void Shell::WaitForRunningWorkers() {
+void Shell::WaitForRunningWorkers(const i::ParkedScope& parked) {
   // Make a copy of running_workers_, because we don't want to call
   // Worker::Terminate while holding the workers_mutex_ lock. Otherwise, if a
   // worker is about to create a new Worker, it would deadlock.
@@ -5387,7 +5496,7 @@ void Shell::WaitForRunningWorkers() {
   }
 
   for (auto& worker : workers_copy) {
-    worker->TerminateAndWaitForThread();
+    worker->TerminateAndWaitForThread(parked);
   }
 
   // Now that all workers are terminated, we can re-enable Worker creation.
@@ -5492,11 +5601,15 @@ int Shell::Main(int argc, char* argv[]) {
     V8::SetFlagsFromString("--redirect-code-traces-to=code.asm");
   }
   v8::V8::InitializePlatform(g_platform.get());
-#ifdef V8_ENABLE_SANDBOX
-  if (!v8::V8::InitializeSandbox()) {
-    FATAL("Could not initialize the sandbox");
+
+  // Disable flag freezing if we are producing a code cache, because for that we
+  // modify FLAG_hash_seed (below).
+  // Also --stress-opt modifies flags between runs.
+  if (options.code_cache_options != ShellOptions::kNoProduceCache ||
+      options.stress_opt) {
+    i::FLAG_freeze_flags_after_init = false;
   }
-#endif
+
   v8::V8::Initialize();
   if (options.snapshot_blob) {
     v8::V8::InitializeExternalStartupDataFromFile(options.snapshot_blob);
@@ -5544,6 +5657,15 @@ int Shell::Main(int argc, char* argv[]) {
     create_params.create_histogram_callback = CreateHistogram;
     create_params.add_histogram_sample_callback = AddHistogramSample;
   }
+
+#ifdef V8_ENABLE_SANDBOX
+  if (options.enable_sandbox_crash_filter) {
+    // Note: this must happen before the Wasm trap handler is installed, so
+    // that the Wasm trap handler is invoked first (and can handle Wasm OOB
+    // accesses), then forwards all "real" crashes to the sandbox crash filter.
+    i::SandboxTesting::InstallSandboxCrashFilter();
+  }
+#endif
 
 #if V8_ENABLE_WEBASSEMBLY
   if (V8_TRAP_HANDLER_SUPPORTED && options.wasm_trap_handler) {
@@ -5609,8 +5731,8 @@ int Shell::Main(int argc, char* argv[]) {
       CpuProfiler* cpu_profiler;
       if (options.cpu_profiler) {
         cpu_profiler = CpuProfiler::New(isolate);
-        CpuProfilingOptions profile_options;
-        cpu_profiler->StartProfiling(String::Empty(isolate), profile_options);
+        cpu_profiler->StartProfiling(String::Empty(isolate),
+                                     CpuProfilingOptions{});
       }
 
       if (options.stress_opt) {
@@ -5632,8 +5754,7 @@ int Shell::Main(int argc, char* argv[]) {
           bool last_run = i == options.stress_runs - 1;
           result = RunMain(isolate, last_run);
         }
-      } else if (options.code_cache_options !=
-                 ShellOptions::CodeCacheOptions::kNoProduceCache) {
+      } else if (options.code_cache_options != ShellOptions::kNoProduceCache) {
         {
           // Park the main thread here in case the new isolate wants to perform
           // a shared GC to prevent a deadlock.
@@ -5668,8 +5789,7 @@ int Shell::Main(int argc, char* argv[]) {
                    v8::ScriptCompiler::kNoCompileOptions);
         options.compile_options.Overwrite(
             v8::ScriptCompiler::kConsumeCodeCache);
-        options.code_cache_options.Overwrite(
-            ShellOptions::CodeCacheOptions::kNoProduceCache);
+        options.code_cache_options.Overwrite(ShellOptions::kNoProduceCache);
 
         printf("============ Run: Consume code cache ============\n");
         // Second run to consume the cache in current isolate

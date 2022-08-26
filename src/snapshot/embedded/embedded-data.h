@@ -127,8 +127,11 @@ class EmbeddedData final {
     data_ = nullptr;
   }
 
+  inline bool BuiltinContains(Builtin builtin, Address pc) const;
+
   // TODO(ishell): rename XyzOfBuiltin() to XyzOf().
   inline Address InstructionStartOfBuiltin(Builtin builtin) const;
+  inline Address InstructionEndOf(Builtin builtin) const;
   inline uint32_t InstructionSizeOfBuiltin(Builtin builtin) const;
 
   inline Address InstructionStartOfBytecodeHandlers() const;
@@ -151,6 +154,8 @@ class EmbeddedData final {
 
   inline Address UnwindingInfoStartOf(Builtin builtin) const;
   inline uint32_t UnwindingInfoSizeOf(Builtin builtin) const;
+
+  inline uint32_t StackSlotsOf(Builtin builtin) const;
 
   uint32_t AddressForHashing(Address addr) {
     DCHECK(IsInCodeRange(addr));
@@ -197,6 +202,8 @@ class EmbeddedData final {
 #endif
     uint32_t code_comments_offset_offset;
     uint32_t unwinding_info_offset_offset;
+
+    uint32_t stack_slots;
   };
   static_assert(offsetof(LayoutDescription, instruction_offset) ==
                 0 * kUInt32Size);
@@ -215,13 +222,15 @@ class EmbeddedData final {
                 6 * kUInt32Size);
   static_assert(offsetof(LayoutDescription, unwinding_info_offset_offset) ==
                 7 * kUInt32Size);
-  static_assert(sizeof(LayoutDescription) == 8 * kUInt32Size);
+  static_assert(offsetof(LayoutDescription, stack_slots) == 8 * kUInt32Size);
+  static_assert(sizeof(LayoutDescription) == 9 * kUInt32Size);
 #else
   static_assert(offsetof(LayoutDescription, code_comments_offset_offset) ==
                 5 * kUInt32Size);
   static_assert(offsetof(LayoutDescription, unwinding_info_offset_offset) ==
                 6 * kUInt32Size);
-  static_assert(sizeof(LayoutDescription) == 7 * kUInt32Size);
+  static_assert(offsetof(LayoutDescription, stack_slots) == 7 * kUInt32Size);
+  static_assert(sizeof(LayoutDescription) == 8 * kUInt32Size);
 #endif
 
   // The layout of the blob is as follows:

@@ -6,12 +6,8 @@
 
 #include "src/codegen/assembler-inl.h"
 #include "src/codegen/callable.h"
-#include "src/codegen/interface-descriptors-inl.h"
-#include "src/objects/objects-inl.h"
 #include "src/snapshot/embedded/embedded-data-inl.h"
 #include "src/snapshot/snapshot-utils.h"
-#include "src/snapshot/snapshot.h"
-#include "v8-internal.h"
 
 namespace v8 {
 namespace internal {
@@ -316,6 +312,9 @@ EmbeddedData EmbeddedData::FromIsolate(Isolate* isolate) {
           raw_data_size + static_cast<uint32_t>(code.code_comments_offset());
       layout_desc.unwinding_info_offset_offset =
           raw_data_size + static_cast<uint32_t>(code.unwinding_info_offset());
+      layout_desc.stack_slots = static_cast<uint32_t>(code.stack_slots());
+
+      CHECK_EQ(code.deoptimization_data().length(), 0);
     }
     // Align the start of each section.
     raw_code_size += PadAndAlignCode(instruction_size);

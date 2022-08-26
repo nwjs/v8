@@ -58,7 +58,10 @@ class WebSnapshotSerializerDeserializer {
     SYMBOL_ID,
     EXTERNAL_ID,
     BUILTIN_OBJECT_ID,
-    IN_PLACE_STRING_ID
+    IN_PLACE_STRING_ID,
+    ARRAY_BUFFER_ID,
+    TYPED_ARRAY_ID,
+    DATA_VIEW_ID
   };
 
   enum SymbolType : uint8_t {
@@ -69,20 +72,44 @@ class WebSnapshotSerializerDeserializer {
 
   enum ElementsType : uint8_t { kDense = 0, kSparse = 1 };
 
+  enum TypedArrayType : uint8_t {
+    kInt8Array,
+    kUint8Array,
+    kUint8ClampedArray,
+    kInt16Array,
+    kUint16Array,
+    kInt32Array,
+    kUint32Array,
+    kFloat32Array,
+    kFloat64Array,
+    kBigInt64Array,
+    kBigUint64Array,
+  };
+
+  static inline ExternalArrayType TypedArrayTypeToExternalArrayType(
+      TypedArrayType type);
+  static inline TypedArrayType ExternalArrayTypeToTypedArrayType(
+      ExternalArrayType type);
+
   static constexpr uint8_t kMagicNumber[4] = {'+', '+', '+', ';'};
 
   enum ContextType : uint8_t { FUNCTION, BLOCK };
 
   enum PropertyAttributesType : uint8_t { DEFAULT, CUSTOM };
 
-  uint32_t FunctionKindToFunctionFlags(FunctionKind kind);
-  FunctionKind FunctionFlagsToFunctionKind(uint32_t flags);
-  bool IsFunctionOrMethod(uint32_t flags);
-  bool IsConstructor(uint32_t flags);
+  uint8_t FunctionKindToFunctionFlags(FunctionKind kind);
+  FunctionKind FunctionFlagsToFunctionKind(uint8_t flags);
+  bool IsFunctionOrMethod(uint8_t flags);
+  bool IsConstructor(uint8_t flags);
 
-  uint32_t GetDefaultAttributeFlags();
-  uint32_t AttributesToFlags(PropertyDetails details);
-  PropertyAttributes FlagsToAttributes(uint32_t flags);
+  uint8_t GetDefaultAttributeFlags();
+  uint8_t AttributesToFlags(PropertyDetails details);
+  PropertyAttributes FlagsToAttributes(uint8_t flags);
+
+  uint8_t ArrayBufferViewKindToFlags(
+      Handle<JSArrayBufferView> array_buffer_view);
+
+  uint8_t ArrayBufferKindToFlags(Handle<JSArrayBuffer> array_buffer);
 
   // The maximum count of items for each value type (strings, objects etc.)
   static constexpr uint32_t kMaxItemCount =
@@ -107,15 +134,29 @@ class WebSnapshotSerializerDeserializer {
   Isolate* isolate_;
   const char* error_message_ = nullptr;
 
+  // Encode JSArrayBufferFlags, including was_detached, is_shared, is_resizable.
+  // DetachedBitField indicates whether the ArrayBuffer was detached.
+  using DetachedBitField = base::BitField<bool, 0, 1, uint8_t>;
+  // SharedBitField indicates whether the ArrayBuffer is SharedArrayBuffer.
+  using SharedBitField = DetachedBitField::Next<bool, 1>;
+  // ResizableBitField indicates whether the ArrayBuffer is ResizableArrayBuffer
+  // or GrowableSharedArrayBuffer.
+  using ResizableBitField = SharedBitField::Next<bool, 1>;
+
+  // Encode JSArrayBufferViewFlags, including is_length_tracking, see
+  // https://github.com/tc39/proposal-resizablearraybuffer.
+  // LengthTrackingBitField indicates whether the ArrayBufferView should track
+  // the length of the backing buffer, that is whether the ArrayBufferView is
+  // constructed without the specified length argument.
+  using LengthTrackingBitField = base::BitField<bool, 0, 1, uint8_t>;
+
  private:
   WebSnapshotSerializerDeserializer(const WebSnapshotSerializerDeserializer&) =
       delete;
   WebSnapshotSerializerDeserializer& operator=(
       const WebSnapshotSerializerDeserializer&) = delete;
 
-  // Keep most common function kinds in the 7 least significant bits to make the
-  // flags fit in 1 byte.
-  using AsyncFunctionBitField = base::BitField<bool, 0, 1>;
+  using AsyncFunctionBitField = base::BitField<bool, 0, 1, uint8_t>;
   using GeneratorFunctionBitField = AsyncFunctionBitField::Next<bool, 1>;
   using ArrowFunctionBitField = GeneratorFunctionBitField::Next<bool, 1>;
   using MethodBitField = ArrowFunctionBitField::Next<bool, 1>;
@@ -124,7 +165,7 @@ class WebSnapshotSerializerDeserializer {
   using DefaultConstructorBitField = ClassConstructorBitField::Next<bool, 1>;
   using DerivedConstructorBitField = DefaultConstructorBitField::Next<bool, 1>;
 
-  using ReadOnlyBitField = base::BitField<bool, 0, 1>;
+  using ReadOnlyBitField = base::BitField<bool, 0, 1, uint8_t>;
   using ConfigurableBitField = ReadOnlyBitField::Next<bool, 1>;
   using EnumerableBitField = ConfigurableBitField::Next<bool, 1>;
 };
@@ -174,6 +215,18 @@ class V8_EXPORT WebSnapshotSerializer
     return static_cast<uint32_t>(array_ids_.size());
   }
 
+  uint32_t array_buffer_count() const {
+    return static_cast<uint32_t>(array_buffer_ids_.size());
+  }
+
+  uint32_t typed_array_count() const {
+    return static_cast<uint32_t>(typed_array_ids_.size());
+  }
+
+  uint32_t data_view_count() const {
+    return static_cast<uint32_t>(data_view_ids_.size());
+  }
+
   uint32_t object_count() const {
     return static_cast<uint32_t>(object_ids_.size());
   }
@@ -216,6 +269,9 @@ class V8_EXPORT WebSnapshotSerializer
   void DiscoverContextAndPrototype(Handle<JSFunction> function);
   void DiscoverContext(Handle<Context> context);
   void DiscoverArray(Handle<JSArray> array);
+  void DiscoverTypedArray(Handle<JSTypedArray> typed_array);
+  void DiscoverDataView(Handle<JSDataView> data_view);
+  void DiscoverArrayBuffer(Handle<JSArrayBuffer> array_buffer);
   void DiscoverElements(Handle<JSObject> object);
   void DiscoverObject(Handle<JSObject> object);
   bool DiscoverIfBuiltinObject(Handle<HeapObject> object);
@@ -243,6 +299,11 @@ class V8_EXPORT WebSnapshotSerializer
   void SerializeArray(Handle<JSArray> array);
   void SerializeElements(Handle<JSObject> object, ValueSerializer& serializer);
   void SerializeObject(Handle<JSObject> object);
+  void SerializeArrayBufferView(Handle<JSArrayBufferView> array_buffer_view,
+                                ValueSerializer& serializer);
+  void SerializeArrayBuffer(Handle<JSArrayBuffer> array_buffer);
+  void SerializeTypedArray(Handle<JSTypedArray> typed_array);
+  void SerializeDataView(Handle<JSDataView> data_view);
 
   void SerializeExport(Handle<Object> object, Handle<String> export_name);
   void WriteValue(Handle<Object> object, ValueSerializer& serializer);
@@ -257,6 +318,9 @@ class V8_EXPORT WebSnapshotSerializer
   uint32_t GetClassId(JSFunction function);
   uint32_t GetContextId(Context context);
   uint32_t GetArrayId(JSArray array);
+  uint32_t GetTypedArrayId(JSTypedArray typed_array);
+  uint32_t GetDataViewId(JSDataView data_view);
+  uint32_t GetArrayBufferId(JSArrayBuffer array_buffer);
   uint32_t GetObjectId(JSObject object);
   bool GetExternalId(HeapObject object, uint32_t* id = nullptr);
   // Returns index into builtin_object_name_strings_.
@@ -271,6 +335,9 @@ class V8_EXPORT WebSnapshotSerializer
   ValueSerializer function_serializer_;
   ValueSerializer class_serializer_;
   ValueSerializer array_serializer_;
+  ValueSerializer typed_array_serializer_;
+  ValueSerializer array_buffer_serializer_;
+  ValueSerializer data_view_serializer_;
   ValueSerializer object_serializer_;
   ValueSerializer export_serializer_;
 
@@ -282,6 +349,9 @@ class V8_EXPORT WebSnapshotSerializer
   Handle<ArrayList> functions_;
   Handle<ArrayList> classes_;
   Handle<ArrayList> arrays_;
+  Handle<ArrayList> typed_arrays_;
+  Handle<ArrayList> array_buffers_;
+  Handle<ArrayList> data_views_;
   Handle<ArrayList> objects_;
 
   // IndexMap to keep track of explicitly blocked external objects and
@@ -299,6 +369,9 @@ class V8_EXPORT WebSnapshotSerializer
   ObjectCacheIndexMap function_ids_;
   ObjectCacheIndexMap class_ids_;
   ObjectCacheIndexMap array_ids_;
+  ObjectCacheIndexMap typed_array_ids_;
+  ObjectCacheIndexMap array_buffer_ids_;
+  ObjectCacheIndexMap data_view_ids_;
   ObjectCacheIndexMap object_ids_;
   uint32_t export_count_ = 0;
 
@@ -402,11 +475,14 @@ class V8_EXPORT WebSnapshotDeserializer
                                     bool has_inlined_local_names);
   Handle<JSFunction> CreateJSFunction(int index, uint32_t start,
                                       uint32_t length, uint32_t parameter_count,
-                                      uint32_t flags, uint32_t context_id);
+                                      uint8_t flags, uint32_t context_id);
   void DeserializeFunctionData(uint32_t count, uint32_t current_count);
   void DeserializeFunctions();
   void DeserializeClasses();
   void DeserializeArrays();
+  void DeserializeArrayBuffers();
+  void DeserializeTypedArrays();
+  void DeserializeDataViews();
   void DeserializeObjects();
   void DeserializeObjectElements(Handle<JSObject> object,
                                  bool map_from_snapshot);
@@ -416,6 +492,7 @@ class V8_EXPORT WebSnapshotDeserializer
   void DeserializeObjectPrototypeForFunction(Handle<JSFunction> function);
   void SetPrototype(Handle<Map> map, Handle<Object> prototype);
   void DeserializeFunctionProperties(Handle<JSFunction> function);
+  bool ReadCount(uint32_t& count);
 
   bool IsInitialFunctionPrototype(Object prototype);
 
@@ -441,6 +518,12 @@ class V8_EXPORT WebSnapshotDeserializer
   Object ReadSymbol();
   std::tuple<Object, bool> ReadArray(Handle<HeapObject> container,
                                      uint32_t container_index);
+  std::tuple<Object, bool> ReadArrayBuffer(Handle<HeapObject> container,
+                                           uint32_t container_index);
+  std::tuple<Object, bool> ReadTypedArray(Handle<HeapObject> container,
+                                          uint32_t container_index);
+  std::tuple<Object, bool> ReadDataView(Handle<HeapObject> container,
+                                        uint32_t container_index);
   std::tuple<Object, bool> ReadObject(Handle<HeapObject> container,
                                       uint32_t container_index);
   std::tuple<Object, bool> ReadFunction(Handle<HeapObject> container,
@@ -494,6 +577,15 @@ class V8_EXPORT WebSnapshotDeserializer
   Handle<FixedArray> arrays_handle_;
   FixedArray arrays_;
 
+  Handle<FixedArray> array_buffers_handle_;
+  FixedArray array_buffers_;
+
+  Handle<FixedArray> typed_arrays_handle_;
+  FixedArray typed_arrays_;
+
+  Handle<FixedArray> data_views_handle_;
+  FixedArray data_views_;
+
   Handle<FixedArray> objects_handle_;
   FixedArray objects_;
 
@@ -526,6 +618,12 @@ class V8_EXPORT WebSnapshotDeserializer
   uint32_t current_class_count_ = 0;
   uint32_t array_count_ = 0;
   uint32_t current_array_count_ = 0;
+  uint32_t array_buffer_count_ = 0;
+  uint32_t current_array_buffer_count_ = 0;
+  uint32_t typed_array_count_ = 0;
+  uint32_t current_typed_array_count_ = 0;
+  uint32_t data_view_count_ = 0;
+  uint32_t current_data_view_count_ = 0;
   uint32_t object_count_ = 0;
   uint32_t current_object_count_ = 0;
 

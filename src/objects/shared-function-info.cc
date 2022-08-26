@@ -108,8 +108,13 @@ CodeT SharedFunctionInfo::GetCode() const {
   if (data.IsWasmCapiFunctionData()) {
     return wasm_capi_function_data().wrapper_code();
   }
-  if (data.IsWasmOnFulfilledData()) {
-    return isolate->builtins()->code(Builtin::kWasmResume);
+  if (data.IsWasmResumeData()) {
+    if (static_cast<wasm::OnResume>(wasm_resume_data().on_resume()) ==
+        wasm::OnResume::kContinue) {
+      return isolate->builtins()->code(Builtin::kWasmResume);
+    } else {
+      return isolate->builtins()->code(Builtin::kWasmReject);
+    }
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
   if (data.IsUncompiledData()) {
@@ -146,6 +151,11 @@ WasmJSFunctionData SharedFunctionInfo::wasm_js_function_data() const {
 WasmCapiFunctionData SharedFunctionInfo::wasm_capi_function_data() const {
   DCHECK(HasWasmCapiFunctionData());
   return WasmCapiFunctionData::cast(function_data(kAcquireLoad));
+}
+
+WasmResumeData SharedFunctionInfo::wasm_resume_data() const {
+  DCHECK(HasWasmResumeData());
+  return WasmResumeData::cast(function_data(kAcquireLoad));
 }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
@@ -473,8 +483,10 @@ void SharedFunctionInfo::DisableOptimization(BailoutReason reason) {
             kRelaxedStore);
   // Code should be the lazy compilation stub or else interpreted.
   Isolate* isolate = GetIsolate();
-  DCHECK(abstract_code(isolate).kind() == CodeKind::INTERPRETED_FUNCTION ||
-         abstract_code(isolate).kind() == CodeKind::BUILTIN);
+  if constexpr (DEBUG_BOOL) {
+    CodeKind kind = abstract_code(isolate).kind(isolate);
+    CHECK(kind == CodeKind::INTERPRETED_FUNCTION || kind == CodeKind::BUILTIN);
+  }
   PROFILE(isolate, CodeDisableOptEvent(handle(abstract_code(isolate), isolate),
                                        handle(*this, isolate)));
   if (FLAG_trace_opt) {

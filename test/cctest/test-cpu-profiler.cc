@@ -40,20 +40,16 @@
 #include "src/base/strings.h"
 #include "src/codegen/compilation-cache.h"
 #include "src/codegen/source-position-table.h"
-#include "src/deoptimizer/deoptimizer.h"
+#include "src/deoptimizer/deoptimize-reason.h"
 #include "src/execution/embedder-state.h"
 #include "src/heap/spaces.h"
 #include "src/init/v8.h"
-#include "src/libplatform/default-platform.h"
-#include "src/libplatform/tracing/trace-event-listener.h"
 #include "src/libsampler/sampler.h"
 #include "src/logging/log.h"
 #include "src/objects/objects-inl.h"
-#include "src/profiler/cpu-profiler-inl.h"
+#include "src/profiler/cpu-profiler.h"
 #include "src/profiler/profiler-listener.h"
 #include "src/profiler/symbolizer.h"
-#include "src/profiler/tracing-cpu-profiler.h"
-#include "src/tracing/trace-event.h"
 #include "src/utils/utils.h"
 #include "test/cctest/cctest.h"
 #include "test/cctest/heap/heap-utils.h"
@@ -62,6 +58,7 @@
 
 #ifdef V8_USE_PERFETTO
 #include "protos/perfetto/trace/trace.pb.h"
+#include "src/libplatform/tracing/trace-event-listener.h"
 #endif
 
 namespace v8 {
@@ -192,35 +189,37 @@ TEST(CodeEvents) {
   // Enqueue code creation events.
   const char* aaa_str = "aaa";
   i::Handle<i::String> aaa_name = factory->NewStringFromAsciiChecked(aaa_str);
-  profiler_listener.CodeCreateEvent(i::V8FileLogger::FUNCTION_TAG, aaa_code,
-                                    aaa_name);
-  profiler_listener.CodeCreateEvent(i::V8FileLogger::BUILTIN_TAG, comment_code,
-                                    "comment");
-  profiler_listener.CodeCreateEvent(i::V8FileLogger::BUILTIN_TAG, comment2_code,
-                                    "comment2");
+  profiler_listener.CodeCreateEvent(i::LogEventListener::CodeTag::kFunction,
+                                    aaa_code, aaa_name);
+  profiler_listener.CodeCreateEvent(i::LogEventListener::CodeTag::kBuiltin,
+                                    comment_code, "comment");
+  profiler_listener.CodeCreateEvent(i::LogEventListener::CodeTag::kBuiltin,
+                                    comment2_code, "comment2");
   profiler_listener.CodeMoveEvent(*comment2_code, *moved_code);
 
+  PtrComprCageBase cage_base(isolate);
   // Enqueue a tick event to enable code events processing.
-  EnqueueTickSampleEvent(processor, aaa_code->InstructionStart());
+  EnqueueTickSampleEvent(processor, aaa_code->InstructionStart(cage_base));
 
   isolate->v8_file_logger()->RemoveLogEventListener(&profiler_listener);
   processor->StopSynchronously();
 
   // Check the state of the symbolizer.
   CodeEntry* aaa =
-      symbolizer->code_map()->FindEntry(aaa_code->InstructionStart());
+      symbolizer->code_map()->FindEntry(aaa_code->InstructionStart(cage_base));
   CHECK(aaa);
   CHECK_EQ(0, strcmp(aaa_str, aaa->name()));
 
-  CodeEntry* comment =
-      symbolizer->code_map()->FindEntry(comment_code->InstructionStart());
+  CodeEntry* comment = symbolizer->code_map()->FindEntry(
+      comment_code->InstructionStart(cage_base));
   CHECK(comment);
   CHECK_EQ(0, strcmp("comment", comment->name()));
 
-  CHECK(!symbolizer->code_map()->FindEntry(comment2_code->InstructionStart()));
+  CHECK(!symbolizer->code_map()->FindEntry(
+      comment2_code->InstructionStart(cage_base)));
 
-  CodeEntry* comment2 =
-      symbolizer->code_map()->FindEntry(moved_code->InstructionStart());
+  CodeEntry* comment2 = symbolizer->code_map()->FindEntry(
+      moved_code->InstructionStart(cage_base));
   CHECK(comment2);
   CHECK_EQ(0, strcmp("comment2", comment2->name()));
 }
@@ -257,22 +256,23 @@ TEST(TickEvents) {
                                      *code_observer->weak_code_registry());
   isolate->v8_file_logger()->AddLogEventListener(&profiler_listener);
 
-  profiler_listener.CodeCreateEvent(i::V8FileLogger::BUILTIN_TAG, frame1_code,
-                                    "bbb");
-  profiler_listener.CodeCreateEvent(i::V8FileLogger::STUB_TAG, frame2_code,
-                                    "ccc");
-  profiler_listener.CodeCreateEvent(i::V8FileLogger::BUILTIN_TAG, frame3_code,
-                                    "ddd");
+  profiler_listener.CodeCreateEvent(i::LogEventListener::CodeTag::kBuiltin,
+                                    frame1_code, "bbb");
+  profiler_listener.CodeCreateEvent(i::LogEventListener::CodeTag::kStub,
+                                    frame2_code, "ccc");
+  profiler_listener.CodeCreateEvent(i::LogEventListener::CodeTag::kBuiltin,
+                                    frame3_code, "ddd");
 
-  EnqueueTickSampleEvent(processor, frame1_code->raw_instruction_start());
+  PtrComprCageBase cage_base(isolate);
+  EnqueueTickSampleEvent(processor, frame1_code->InstructionStart(cage_base));
   EnqueueTickSampleEvent(processor,
-                         frame2_code->raw_instruction_start() +
-                             frame2_code->raw_instruction_size() / 2,
-                         frame1_code->raw_instruction_start() +
-                             frame1_code->raw_instruction_size() / 2);
-  EnqueueTickSampleEvent(processor, frame3_code->raw_instruction_end() - 1,
-                         frame2_code->raw_instruction_end() - 1,
-                         frame1_code->raw_instruction_end() - 1);
+                         frame2_code->InstructionStart(cage_base) +
+                             frame2_code->InstructionSize(cage_base) / 2,
+                         frame1_code->InstructionStart(cage_base) +
+                             frame1_code->InstructionSize(cage_base) / 2);
+  EnqueueTickSampleEvent(processor, frame3_code->InstructionEnd(cage_base) - 1,
+                         frame2_code->InstructionEnd(cage_base) - 1,
+                         frame1_code->InstructionEnd(cage_base) - 1);
 
   isolate->v8_file_logger()->RemoveLogEventListener(&profiler_listener);
   processor->StopSynchronously();
@@ -321,7 +321,7 @@ TEST(CodeMapClearedBetweenProfilesWithLazyLogging) {
   // Create code between profiles. This should not be logged yet.
   i::Handle<i::AbstractCode> code2(CreateCode(isolate, &env), isolate);
 
-  CHECK(!code_map->FindEntry(code2->InstructionStart()));
+  CHECK(!code_map->FindEntry(code2->InstructionStart(isolate)));
 }
 
 TEST(CodeMapNotClearedBetweenProfilesWithEagerLogging) {
@@ -339,32 +339,35 @@ TEST(CodeMapNotClearedBetweenProfilesWithEagerLogging) {
   CpuProfile* profile = profiler.StopProfiling("");
   CHECK(profile);
 
+  PtrComprCageBase cage_base(isolate);
   // Check that our code is still in the code map.
   CodeMap* code_map = profiler.code_map_for_test();
-  CodeEntry* code1_entry = code_map->FindEntry(code1->InstructionStart());
+  CodeEntry* code1_entry =
+      code_map->FindEntry(code1->InstructionStart(cage_base));
   CHECK(code1_entry);
   CHECK_EQ(0, strcmp("function_1", code1_entry->name()));
 
   profiler.DeleteProfile(profile);
 
   // We should still have an entry in kEagerLogging mode.
-  code1_entry = code_map->FindEntry(code1->InstructionStart());
+  code1_entry = code_map->FindEntry(code1->InstructionStart(cage_base));
   CHECK(code1_entry);
   CHECK_EQ(0, strcmp("function_1", code1_entry->name()));
 
   // Create code between profiles. This should be logged too.
   i::Handle<i::AbstractCode> code2(CreateCode(isolate, &env), isolate);
-  CHECK(code_map->FindEntry(code2->InstructionStart()));
+  CHECK(code_map->FindEntry(code2->InstructionStart(cage_base)));
 
   profiler.StartProfiling("");
   CpuProfile* profile2 = profiler.StopProfiling("");
   CHECK(profile2);
 
   // Check that we still have code map entries for both code objects.
-  code1_entry = code_map->FindEntry(code1->InstructionStart());
+  code1_entry = code_map->FindEntry(code1->InstructionStart(cage_base));
   CHECK(code1_entry);
   CHECK_EQ(0, strcmp("function_1", code1_entry->name()));
-  CodeEntry* code2_entry = code_map->FindEntry(code2->InstructionStart());
+  CodeEntry* code2_entry =
+      code_map->FindEntry(code2->InstructionStart(cage_base));
   CHECK(code2_entry);
   CHECK_EQ(0, strcmp("function_2", code2_entry->name()));
 
@@ -372,10 +375,10 @@ TEST(CodeMapNotClearedBetweenProfilesWithEagerLogging) {
 
   // Check that we still have code map entries for both code objects, even after
   // the last profile is deleted.
-  code1_entry = code_map->FindEntry(code1->InstructionStart());
+  code1_entry = code_map->FindEntry(code1->InstructionStart(cage_base));
   CHECK(code1_entry);
   CHECK_EQ(0, strcmp("function_1", code1_entry->name()));
-  code2_entry = code_map->FindEntry(code2->InstructionStart());
+  code2_entry = code_map->FindEntry(code2->InstructionStart(cage_base));
   CHECK(code2_entry);
   CHECK_EQ(0, strcmp("function_2", code2_entry->name()));
 }
@@ -418,14 +421,17 @@ TEST(Issue1398) {
                                      *code_observer->code_entries(),
                                      *code_observer->weak_code_registry());
 
-  profiler_listener.CodeCreateEvent(i::V8FileLogger::BUILTIN_TAG, code, "bbb");
+  profiler_listener.CodeCreateEvent(i::LogEventListener::CodeTag::kBuiltin,
+                                    code, "bbb");
 
+  PtrComprCageBase cage_base(isolate);
   v8::internal::TickSample sample;
-  sample.pc = reinterpret_cast<void*>(code->InstructionStart());
+  sample.pc = reinterpret_cast<void*>(code->InstructionStart(cage_base));
   sample.tos = nullptr;
   sample.frames_count = TickSample::kMaxFramesCount;
   for (unsigned i = 0; i < sample.frames_count; ++i) {
-    sample.stack[i] = reinterpret_cast<void*>(code->InstructionStart());
+    sample.stack[i] =
+        reinterpret_cast<void*>(code->InstructionStart(cage_base));
   }
   sample.timestamp = base::TimeTicks::Now();
   processor->AddSample(sample);
@@ -1282,7 +1288,7 @@ static void TickLines(bool optimize) {
         !CcTest::i_isolate()->use_optimizer());
   i::Handle<i::AbstractCode> code(func->abstract_code(isolate), isolate);
   CHECK(!code->is_null());
-  i::Address code_address = code->raw_instruction_start();
+  i::Address code_address = code->InstructionStart(isolate);
   CHECK_NE(code_address, kNullAddress);
 
   CodeEntryStorage storage;
@@ -1310,9 +1316,9 @@ static void TickLines(bool optimize) {
   i::Handle<i::String> str = factory->NewStringFromAsciiChecked(func_name);
   int line = 1;
   int column = 1;
-  profiler_listener.CodeCreateEvent(i::V8FileLogger::FUNCTION_TAG, code,
-                                    handle(func->shared(), isolate), str, line,
-                                    column);
+  profiler_listener.CodeCreateEvent(i::LogEventListener::CodeTag::kFunction,
+                                    code, handle(func->shared(), isolate), str,
+                                    line, column);
 
   // Enqueue a tick event to enable code events processing.
   EnqueueTickSampleEvent(processor, code_address);

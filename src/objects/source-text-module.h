@@ -55,9 +55,10 @@ class SourceTextModule
   static int ExportIndex(int cell_index);
 
   // Used by builtins to fulfill or reject the promise associated
-  // with async SourceTextModules.
-  static void AsyncModuleExecutionFulfilled(Isolate* isolate,
-                                            Handle<SourceTextModule> module);
+  // with async SourceTextModules. Return Nothing if the execution is
+  // terminated.
+  static Maybe<bool> AsyncModuleExecutionFulfilled(
+      Isolate* isolate, Handle<SourceTextModule> module);
   static void AsyncModuleExecutionRejected(Isolate* isolate,
                                            Handle<SourceTextModule> module,
                                            Handle<Object> exception);
@@ -82,6 +83,10 @@ class SourceTextModule
     kModule = Context::MIN_CONTEXT_SLOTS,
     kContextLength,
   };
+
+  V8_EXPORT_PRIVATE
+  std::vector<std::tuple<Handle<SourceTextModule>, Handle<JSMessageObject>>>
+  GetStalledTopLevelAwaitMessage(Isolate* isolate);
 
  private:
   friend class Factory;
@@ -207,11 +212,16 @@ class SourceTextModule
   static V8_WARN_UNUSED_RESULT MaybeHandle<Object> ExecuteModule(
       Isolate* isolate, Handle<SourceTextModule> module);
 
-  // Implementation of spec ExecuteAsyncModule.
-  static void ExecuteAsyncModule(Isolate* isolate,
-                                 Handle<SourceTextModule> module);
+  // Implementation of spec ExecuteAsyncModule. Return Nothing if the execution
+  // is been terminated.
+  static V8_WARN_UNUSED_RESULT Maybe<bool> ExecuteAsyncModule(
+      Isolate* isolate, Handle<SourceTextModule> module);
 
   static void Reset(Isolate* isolate, Handle<SourceTextModule> module);
+
+  V8_EXPORT_PRIVATE void InnerGetStalledTopLevelAwaitModule(
+      Isolate* isolate, UnorderedModuleSet* visited,
+      std::vector<Handle<SourceTextModule>>* result);
 
   TQ_OBJECT_CONSTRUCTORS(SourceTextModule)
 };

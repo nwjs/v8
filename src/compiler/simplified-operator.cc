@@ -10,11 +10,10 @@
 #include "src/compiler/opcodes.h"
 #include "src/compiler/operator.h"
 #include "src/compiler/types.h"
-#include "src/handles/handles-inl.h"
+#include "src/handles/handles-inl.h"  // for operator<<
 #include "src/objects/feedback-cell.h"
 #include "src/objects/map.h"
 #include "src/objects/name.h"
-#include "src/objects/objects-inl.h"
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/compiler/wasm-compiler-definitions.h"
@@ -951,6 +950,13 @@ struct SimplifiedOperatorGlobalCache final {
   FindOrderedHashMapEntryForInt32KeyOperator
       kFindOrderedHashMapEntryForInt32Key;
 
+  struct FindOrderedHashSetEntryOperator final : public Operator {
+    FindOrderedHashSetEntryOperator()
+        : Operator(IrOpcode::kFindOrderedHashSetEntry, Operator::kEliminatable,
+                   "FindOrderedHashSetEntry", 2, 1, 1, 1, 1, 0) {}
+  };
+  FindOrderedHashSetEntryOperator kFindOrderedHashSetEntry;
+
   template <CheckForMinusZeroMode kMode>
   struct ChangeFloat64ToTaggedOperator final
       : public Operator1<CheckForMinusZeroMode> {
@@ -1147,16 +1153,18 @@ struct SimplifiedOperatorGlobalCache final {
   LoadStackArgumentOperator kLoadStackArgument;
 
 #if V8_ENABLE_WEBASSEMBLY
+  // Note: The following two operators have a control input solely to find the
+  // typing context from the control path in wasm-gc-operator-reducer.
   struct IsNullOperator final : public Operator {
     IsNullOperator()
-        : Operator(IrOpcode::kIsNull, Operator::kPure, "IsNull", 1, 0, 0, 1, 0,
+        : Operator(IrOpcode::kIsNull, Operator::kPure, "IsNull", 1, 0, 1, 1, 0,
                    0) {}
   };
   IsNullOperator kIsNull;
 
   struct IsNotNullOperator final : public Operator {
-    explicit IsNotNullOperator()
-        : Operator(IrOpcode::kIsNotNull, Operator::kPure, "IsNotNull", 1, 0, 0,
+    IsNotNullOperator()
+        : Operator(IrOpcode::kIsNotNull, Operator::kPure, "IsNotNull", 1, 0, 1,
                    1, 0, 0) {}
   };
   IsNotNullOperator kIsNotNull;
@@ -1173,7 +1181,7 @@ struct SimplifiedOperatorGlobalCache final {
         : Operator(
               IrOpcode::kAssertNotNull,
               Operator::kNoWrite | Operator::kNoThrow | Operator::kIdempotent,
-              "AssertNotNull", 1, 1, 1, 1, 0, 1) {}
+              "AssertNotNull", 1, 1, 1, 1, 1, 1) {}
   };
   AssertNotNullOperator kAssertNotNull;
 #endif
@@ -1229,10 +1237,19 @@ SimplifiedOperatorBuilder::SimplifiedOperatorBuilder(Zone* zone)
 PURE_OP_LIST(GET_FROM_CACHE)
 EFFECT_DEPENDENT_OP_LIST(GET_FROM_CACHE)
 CHECKED_OP_LIST(GET_FROM_CACHE)
-GET_FROM_CACHE(FindOrderedHashMapEntry)
 GET_FROM_CACHE(FindOrderedHashMapEntryForInt32Key)
 GET_FROM_CACHE(LoadFieldByIndex)
 #undef GET_FROM_CACHE
+
+const Operator* SimplifiedOperatorBuilder::FindOrderedCollectionEntry(
+    CollectionKind collection_kind) {
+  switch (collection_kind) {
+    case CollectionKind::kMap:
+      return &cache_.kFindOrderedHashMapEntry;
+    case CollectionKind::kSet:
+      return &cache_.kFindOrderedHashSetEntry;
+  }
+}
 
 #define GET_FROM_CACHE_WITH_FEEDBACK(Name, value_input_count,               \
                                      value_output_count)                    \
@@ -2002,12 +2019,6 @@ const Operator* SimplifiedOperatorBuilder::FastApiCall(
       IrOpcode::kFastApiCall, Operator::kNoThrow, "FastApiCall",
       value_input_count, 1, 1, 1, 1, 0,
       FastApiCallParameters(c_functions, feedback, descriptor));
-}
-
-int FastApiCallNode::FastCallExtraInputCount() const {
-  const CFunctionInfo* signature = Parameters().c_functions()[0].signature;
-  CHECK_NOT_NULL(signature);
-  return kEffectAndControlInputCount + (signature->HasOptions() ? 1 : 0);
 }
 
 int FastApiCallNode::FastCallArgumentCount() const {

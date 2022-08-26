@@ -20,6 +20,7 @@
 #include "include/v8-snapshot.h"
 #include "src/base/macros.h"
 #include "src/base/platform/mutex.h"
+#include "src/base/platform/platform-posix.h"
 #include "src/builtins/builtins.h"
 #include "src/common/globals.h"
 #include "src/debug/interface-types.h"
@@ -39,9 +40,6 @@
 #include "src/objects/debug-objects.h"
 #include "src/objects/js-objects.h"
 #include "src/runtime/runtime.h"
-#include "src/sandbox/external-pointer-table.h"
-#include "src/sandbox/sandbox.h"
-#include "src/strings/unicode.h"
 #include "src/utils/allocation.h"
 
 #ifdef DEBUG
@@ -406,6 +404,14 @@ class StackMemory;
 
 #define MAYBE_RETURN_NULL(call) MAYBE_RETURN(call, MaybeHandle<Object>())
 
+#define MAYBE_RETURN_ON_EXCEPTION_VALUE(isolate, call, value) \
+  do {                                                        \
+    if ((call).IsNothing()) {                                 \
+      DCHECK((isolate)->has_pending_exception());             \
+      return value;                                           \
+    }                                                         \
+  } while (false)
+
 #define MAYBE_ASSIGN_RETURN_ON_EXCEPTION_VALUE(isolate, dst, call, value) \
   do {                                                                    \
     if (!(call).To(&dst)) {                                               \
@@ -688,7 +694,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   void ClearSerializerData();
 
-  bool LogObjectRelocation();
+  void UpdateLogObjectRelocation();
 
   // Initializes the current thread to run this Isolate.
   // Not thread-safe. Multiple threads should not Enter/Exit the same isolate
@@ -1353,6 +1359,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
       CollectSourcePositionsForAllBytecodeArrays();
     }
     is_profiling_.store(enabled, std::memory_order_relaxed);
+    UpdateLogObjectRelocation();
   }
 
   Logger* logger() const { return logger_; }
@@ -1943,7 +1950,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   LocalHeap* main_thread_local_heap();
   LocalHeap* CurrentLocalHeap();
 
-#ifdef V8_SANDBOXED_EXTERNAL_POINTERS
+#ifdef V8_ENABLE_SANDBOX
   ExternalPointerTable& external_pointer_table() {
     return isolate_data_.external_pointer_table_;
   }
@@ -1956,11 +1963,25 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     return reinterpret_cast<Address>(&isolate_data_.external_pointer_table_);
   }
 
-  Maybe<ExternalPointer_t> GetWaiterQueueNodeExternalPointer() const {
+  ExternalPointerTable& shared_external_pointer_table() {
+    return *isolate_data_.shared_external_pointer_table_;
+  }
+
+  const ExternalPointerTable& shared_external_pointer_table() const {
+    return *isolate_data_.shared_external_pointer_table_;
+  }
+
+  Address shared_external_pointer_table_address_address() {
+    return reinterpret_cast<Address>(
+        &isolate_data_.shared_external_pointer_table_);
+  }
+
+  Maybe<ExternalPointerHandle> GetWaiterQueueNodeExternalPointer() const {
     return waiter_queue_node_external_pointer_;
   }
 
-  ExternalPointer_t EncodeWaiterQueueNodeAsExternalPointer(Address node);
+  ExternalPointerHandle InsertWaiterQueueNodeIntoSharedExternalPointerTable(
+      Address node);
 #endif
 
   struct PromiseHookFields {
@@ -1981,10 +2002,17 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     DCHECK_NULL(shared_isolate_);
     DCHECK(!attached_to_shared_isolate_);
     shared_isolate_ = shared_isolate;
+    owns_shareable_data_ = false;
   }
 
   GlobalSafepoint* global_safepoint() const { return global_safepoint_.get(); }
 
+  bool owns_shareable_data() { return owns_shareable_data_; }
+
+  bool log_object_relocation() const { return log_object_relocation_; }
+
+  // TODO(pthier): Unify with owns_shareable_data() once the flag
+  // --shared-string-table is removed.
   bool OwnsStringTables() { return !FLAG_shared_string_table || is_shared(); }
 
 #if USE_SIMULATOR
@@ -2067,11 +2095,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   static void SetIsolateThreadLocals(Isolate* isolate,
                                      PerIsolateThreadData* data);
-
-  void MarkCompactPrologue(bool is_compacting,
-                           ThreadLocalTop* archived_thread_data);
-  void MarkCompactEpilogue(bool is_compacting,
-                           ThreadLocalTop* archived_thread_data);
 
   void FillCache();
 
@@ -2255,6 +2278,12 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // favor memory over runtime performance.
   bool memory_savings_mode_active_ = false;
 
+  // Indicates wether the isolate owns shareable data.
+  // Only false for client isolates attached to a shared isolate.
+  bool owns_shareable_data_ = true;
+
+  bool log_object_relocation_ = false;
+
 #ifdef V8_EXTERNAL_CODE_SPACE
   // Base address of the pointer compression cage containing external code
   // space, when external code space is enabled.
@@ -2344,9 +2373,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   std::shared_ptr<CompilationStatistics> turbo_statistics_;
   std::shared_ptr<metrics::Recorder> metrics_recorder_;
   uintptr_t last_recorder_context_id_ = 0;
-  std::unordered_map<
-      uintptr_t,
-      Persistent<v8::Context, v8::CopyablePersistentTraits<v8::Context>>>
+  std::unordered_map<uintptr_t, v8::Global<v8::Context>>
       recorder_context_id_map_;
 
   size_t last_long_task_stats_counter_ = 0;
@@ -2424,11 +2451,11 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // isolates or when no shared isolate is used.
   Isolate* shared_isolate_ = nullptr;
 
-#ifdef V8_SANDBOXED_EXTERNAL_POINTERS
-  // A pointer to Isolate's main thread's WaiterQueueNode. It is used to wait
-  // for JS-exposed mutex or condition variable.
-  Maybe<ExternalPointer_t> waiter_queue_node_external_pointer_ =
-      Nothing<ExternalPointer_t>();
+#ifdef V8_ENABLE_SANDBOX
+  // The external pointer handle to the Isolate's main thread's WaiterQueueNode.
+  // It is used to wait for JS-exposed mutex or condition variable.
+  Maybe<ExternalPointerHandle> waiter_queue_node_external_pointer_ =
+      Nothing<ExternalPointerHandle>();
 #endif
 
 #if DEBUG

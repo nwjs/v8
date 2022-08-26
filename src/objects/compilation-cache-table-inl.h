@@ -50,12 +50,10 @@ void CompilationCacheTable::SetEvalFeedbackValueAt(InternalIndex entry,
 // the Script. The corresponding value can be either the root SharedFunctionInfo
 // or undefined. The purpose of storing the root SharedFunctionInfo as the value
 // is to keep it alive, not to save a lookup on the Script. A newly added entry
-// always contains the root SharedFunctionInfo.
-//
-// TODO(v8:12808): After the root SharedFunctionInfo has aged sufficiently, it
-// should be replaced with undefined. In this way, all strong references to
-// large objects are dropped, but there is still a way to get the Script if it
-// happens to still be alive.
+// always contains the root SharedFunctionInfo. After the root
+// SharedFunctionInfo has aged sufficiently, it is replaced with undefined. In
+// this way, all strong references to large objects are dropped, but there is
+// still a way to get the Script if it happens to still be alive.
 class ScriptCacheKey : public HashTableKey {
  public:
   enum Index {
@@ -64,9 +62,15 @@ class ScriptCacheKey : public HashTableKey {
     kEnd,
   };
 
-  explicit ScriptCacheKey(Handle<String> source);
+  ScriptCacheKey(Handle<String> source, const ScriptDetails* script_details,
+                 Isolate* isolate);
+  ScriptCacheKey(Handle<String> source, MaybeHandle<Object> name,
+                 int line_offset, int column_offset,
+                 v8::ScriptOriginOptions origin_options,
+                 MaybeHandle<Object> host_defined_options, Isolate* isolate);
 
   bool IsMatch(Object other) override;
+  bool MatchesOrigin(Script script);
 
   Handle<Object> AsHandle(Isolate* isolate, Handle<SharedFunctionInfo> shared);
 
@@ -89,6 +93,12 @@ class ScriptCacheKey : public HashTableKey {
 
  private:
   Handle<String> source_;
+  MaybeHandle<Object> name_;
+  int line_offset_;
+  int column_offset_;
+  v8::ScriptOriginOptions origin_options_;
+  MaybeHandle<Object> host_defined_options_;
+  Isolate* isolate_;
 };
 
 uint32_t CompilationCacheShape::RegExpHash(String string, Smi flags) {
@@ -129,16 +139,6 @@ uint32_t CompilationCacheShape::HashForObject(ReadOnlyRoots roots,
   if (object.IsWeakFixedArray()) {
     uint32_t result = static_cast<uint32_t>(Smi::ToInt(
         WeakFixedArray::cast(object).Get(ScriptCacheKey::kHash).ToSmi()));
-#ifdef DEBUG
-    base::Optional<String> script_key =
-        ScriptCacheKey::SourceFromObject(object);
-    if (script_key) {
-      uint32_t source_hash;
-      if (script_key->TryGetHash(&source_hash)) {
-        DCHECK_EQ(result, source_hash);
-      }
-    }
-#endif
     return result;
   }
 

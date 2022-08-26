@@ -9,10 +9,7 @@
 #endif
 
 #include "src/api/api-inl.h"
-#include "src/ast/modules.h"
 #include "src/base/optional.h"
-#include "src/base/platform/platform.h"
-#include "src/codegen/code-factory.h"
 #include "src/compiler/compilation-dependencies.h"
 #include "src/compiler/js-heap-broker.h"
 #include "src/execution/protectors-inl.h"
@@ -1061,6 +1058,7 @@ bool MapRef::CanInlineElementAccess() const {
   if (has_indexed_interceptor()) return false;
   ElementsKind kind = elements_kind();
   if (IsFastElementsKind(kind)) return true;
+  if (IsSharedArrayElementsKind(kind)) return true;
   if (IsTypedArrayElementsKind(kind) && kind != BIGUINT64_ELEMENTS &&
       kind != BIGINT64_ELEMENTS) {
     return true;
@@ -1678,9 +1676,7 @@ bool StringRef::IsExternalString() const {
   return object()->IsExternalString();
 }
 
-Address CallHandlerInfoRef::callback() const {
-  return v8::ToCData<Address>(object()->callback());
-}
+Address CallHandlerInfoRef::callback() const { return object()->callback(); }
 
 ZoneVector<Address> FunctionTemplateInfoRef::c_functions() const {
   return GetCFunctions(FixedArray::cast(object()->GetCFunctionOverloads()),

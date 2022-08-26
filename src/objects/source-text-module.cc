@@ -749,14 +749,14 @@ MaybeHandle<Object> SourceTextModule::Evaluate(
   return capability;
 }
 
-void SourceTextModule::AsyncModuleExecutionFulfilled(
+Maybe<bool> SourceTextModule::AsyncModuleExecutionFulfilled(
     Isolate* isolate, Handle<SourceTextModule> module) {
   // 1. If module.[[Status]] is evaluated, then
   if (module->status() == kErrored) {
     // a. Assert: module.[[EvaluationError]] is not empty.
     DCHECK(!module->exception().IsTheHole(isolate));
     // b. Return.
-    return;
+    return Just(true);
   }
   // 3. Assert: module.[[AsyncEvaluating]] is true.
   DCHECK(module->IsAsyncEvaluating());
@@ -812,7 +812,9 @@ void SourceTextModule::AsyncModuleExecutionFulfilled(
     } else if (m->async()) {
       //  ii. Otherwise, if m.[[Async]] is *true*, then
       //   a. Perform ! ExecuteAsyncModule(m).
-      ExecuteAsyncModule(isolate, m);
+      // The execution may have been terminated and can not be resumed, so just
+      // raise the exception.
+      MAYBE_RETURN(ExecuteAsyncModule(isolate, m), Nothing<bool>());
     } else {
       //  iii. Otherwise,
       //   a. Let _result_ be m.ExecuteModule().
@@ -846,6 +848,7 @@ void SourceTextModule::AsyncModuleExecutionFulfilled(
   }
 
   // 10. Return undefined.
+  return Just(true);
 }
 
 void SourceTextModule::AsyncModuleExecutionRejected(
@@ -905,8 +908,9 @@ void SourceTextModule::AsyncModuleExecutionRejected(
   }
 }
 
-void SourceTextModule::ExecuteAsyncModule(Isolate* isolate,
-                                          Handle<SourceTextModule> module) {
+// static
+Maybe<bool> SourceTextModule::ExecuteAsyncModule(
+    Isolate* isolate, Handle<SourceTextModule> module) {
   // 1. Assert: module.[[Status]] is "evaluating" or "evaluated".
   CHECK(module->status() == kEvaluating || module->status() == kEvaluated);
 
@@ -961,9 +965,17 @@ void SourceTextModule::ExecuteAsyncModule(Isolate* isolate,
   // Note: In V8 we have broken module.ExecuteModule into
   // ExecuteModule for synchronous module execution and
   // InnerExecuteAsyncModule for asynchronous execution.
-  InnerExecuteAsyncModule(isolate, module, capability).ToHandleChecked();
+  MaybeHandle<Object> ret =
+      InnerExecuteAsyncModule(isolate, module, capability);
+  if (ret.is_null()) {
+    // The evaluation of async module can not throwing a JavaScript observable
+    // exception.
+    DCHECK(isolate->is_execution_termination_pending());
+    return Nothing<bool>();
+  }
 
   // 13. Return.
+  return Just<bool>(true);
 }
 
 MaybeHandle<Object> SourceTextModule::InnerExecuteAsyncModule(
@@ -1150,8 +1162,11 @@ MaybeHandle<Object> SourceTextModule::InnerModuleEvaluation(
 
     // c. If module.[[PendingAsyncDependencies]] is 0,
     //    perform ! ExecuteAsyncModule(_module_).
+    // The execution may have been terminated and can not be resumed, so just
+    // raise the exception.
     if (!module->HasPendingAsyncDependencies()) {
-      SourceTextModule::ExecuteAsyncModule(isolate, module);
+      MAYBE_RETURN(SourceTextModule::ExecuteAsyncModule(isolate, module),
+                   MaybeHandle<Object>());
     }
   } else {
     // 15. Otherwise, perform ? module.ExecuteModule().
@@ -1184,6 +1199,60 @@ void SourceTextModule::Reset(Isolate* isolate,
   module->set_requested_modules(*requested_modules);
   module->set_dfs_index(-1);
   module->set_dfs_ancestor_index(-1);
+}
+
+std::vector<std::tuple<Handle<SourceTextModule>, Handle<JSMessageObject>>>
+SourceTextModule::GetStalledTopLevelAwaitMessage(Isolate* isolate) {
+  Zone zone(isolate->allocator(), ZONE_NAME);
+  UnorderedModuleSet visited(&zone);
+  std::vector<std::tuple<Handle<SourceTextModule>, Handle<JSMessageObject>>>
+      result;
+  std::vector<Handle<SourceTextModule>> stalled_modules;
+  InnerGetStalledTopLevelAwaitModule(isolate, &visited, &stalled_modules);
+  size_t stalled_modules_size = stalled_modules.size();
+  if (stalled_modules_size == 0) return result;
+
+  result.reserve(stalled_modules_size);
+  for (size_t i = 0; i < stalled_modules_size; ++i) {
+    Handle<SourceTextModule> found = stalled_modules[i];
+    CHECK(found->code().IsJSGeneratorObject());
+    Handle<JSGeneratorObject> code(JSGeneratorObject::cast(found->code()),
+                                   isolate);
+    Handle<SharedFunctionInfo> shared(found->GetSharedFunctionInfo(), isolate);
+    Handle<Object> script(shared->script(), isolate);
+    MessageLocation location = MessageLocation(Handle<Script>::cast(script),
+                                               shared, code->code_offset());
+    Handle<JSMessageObject> message = MessageHandler::MakeMessageObject(
+        isolate, MessageTemplate::kTopLevelAwaitStalled, &location,
+        isolate->factory()->null_value(), Handle<FixedArray>());
+    result.push_back(std::make_tuple(found, message));
+  }
+  return result;
+}
+
+void SourceTextModule::InnerGetStalledTopLevelAwaitModule(
+    Isolate* isolate, UnorderedModuleSet* visited,
+    std::vector<Handle<SourceTextModule>>* result) {
+  DisallowGarbageCollection no_gc;
+  // If it's a module that is waiting for no other modules but itself,
+  // it's what we are looking for. Add it to the results.
+  if (!HasPendingAsyncDependencies() && IsAsyncEvaluating()) {
+    result->push_back(handle(*this, isolate));
+    return;
+  }
+  // The module isn't what we are looking for, continue looking in the graph.
+  FixedArray requested = requested_modules();
+  int length = requested.length();
+  for (int i = 0; i < length; ++i) {
+    Module requested_module = Module::cast(requested.get(i));
+    if (requested_module.IsSourceTextModule() &&
+        visited->insert(handle(requested_module, isolate)).second) {
+      SourceTextModule source_text_module =
+          SourceTextModule::cast(requested_module);
+      source_text_module.InnerGetStalledTopLevelAwaitModule(isolate, visited,
+                                                            result);
+    }
+  }
 }
 
 }  // namespace internal

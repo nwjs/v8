@@ -10,6 +10,7 @@
 #define V8_CODEGEN_PPC_MACRO_ASSEMBLER_PPC_H_
 
 #include "src/base/numbers/double.h"
+#include "src/base/platform/platform.h"
 #include "src/codegen/bailout-reason.h"
 #include "src/codegen/ppc/assembler-ppc.h"
 #include "src/common/globals.h"
@@ -142,7 +143,6 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
 
   void LoadDoubleLiteral(DoubleRegister result, base::Double value,
                          Register scratch);
-  void LoadSimd128(Simd128Register dst, const MemOperand& mem);
 
   // load a literal signed int value <value> to GPR <dst>
   void LoadIntLiteral(Register dst, int value);
@@ -559,12 +559,16 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   void MultiPushDoubles(DoubleRegList dregs, Register location = sp);
   void MultiPopDoubles(DoubleRegList dregs, Register location = sp);
 
-  void MultiPushV128(Simd128RegList dregs, Register location = sp);
-  void MultiPopV128(Simd128RegList dregs, Register location = sp);
+  void MultiPushV128(Simd128RegList dregs, Register scratch,
+                     Register location = sp);
+  void MultiPopV128(Simd128RegList dregs, Register scratch,
+                    Register location = sp);
 
   void MultiPushF64AndV128(DoubleRegList dregs, Simd128RegList simd_regs,
+                           Register scratch1, Register scratch2,
                            Register location = sp);
   void MultiPopF64AndV128(DoubleRegList dregs, Simd128RegList simd_regs,
+                          Register scratch1, Register scratch2,
                           Register location = sp);
 
   // Calculate how much stack space (in bytes) are required to store caller
@@ -576,12 +580,14 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
 
   // Push caller saved registers on the stack, and return the number of bytes
   // stack pointer is adjusted.
-  int PushCallerSaved(SaveFPRegsMode fp_mode, Register exclusion1 = no_reg,
+  int PushCallerSaved(SaveFPRegsMode fp_mode, Register scratch1,
+                      Register scratch2, Register exclusion1 = no_reg,
                       Register exclusion2 = no_reg,
                       Register exclusion3 = no_reg);
   // Restore caller saved registers from the stack, and return the number of
   // bytes stack pointer is adjusted.
-  int PopCallerSaved(SaveFPRegsMode fp_mode, Register exclusion1 = no_reg,
+  int PopCallerSaved(SaveFPRegsMode fp_mode, Register scratch1,
+                     Register scratch2, Register exclusion1 = no_reg,
                      Register exclusion2 = no_reg,
                      Register exclusion3 = no_reg);
 
@@ -609,7 +615,8 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
                    Simd128Register scratch);
   void SwapSimd128(Simd128Register src, MemOperand dst,
                    Simd128Register scratch);
-  void SwapSimd128(MemOperand src, MemOperand dst, Simd128Register scratch);
+  void SwapSimd128(MemOperand src, MemOperand dst, Simd128Register scratch1,
+                   Simd128Register scratch2);
 
   void ByteReverseU16(Register dst, Register val, Register scratch);
   void ByteReverseU32(Register dst, Register val, Register scratch);
@@ -769,7 +776,10 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   void Move(Register dst, ExternalReference reference);
   void Move(Register dst, Register src, Condition cond = al);
   void Move(DoubleRegister dst, DoubleRegister src);
-  void Move(Register dst, const MemOperand& src) { LoadU64(dst, src); }
+  void Move(Register dst, const MemOperand& src) {
+    // TODO: use scratch register scope instead of r0
+    LoadU64(dst, src, r0);
+  }
 
   void SmiUntag(Register dst, const MemOperand& src, RCBit rc = LeaveRC,
                 Register scratch = no_reg);
@@ -1020,8 +1030,6 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   void StoreF64WithUpdate(DoubleRegister src, const MemOperand& mem,
                           Register scratch = no_reg);
 
-  void StoreSimd128(Simd128Register src, const MemOperand& mem);
-
   void LoadU64(Register dst, const MemOperand& mem, Register scratch = no_reg);
   void LoadU32(Register dst, const MemOperand& mem, Register scratch = no_reg);
   void LoadS32(Register dst, const MemOperand& mem, Register scratch = no_reg);
@@ -1059,6 +1067,16 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
                   Register scratch2);
   void StoreF64LE(DoubleRegister src, const MemOperand& mem, Register scratch,
                   Register scratch2);
+
+  // Simd Support.
+  void LoadSimd128(Simd128Register dst, const MemOperand& mem,
+                   Register scratch);
+  void StoreSimd128(Simd128Register src, const MemOperand& mem,
+                    Register scratch);
+  void LoadSimd128LE(Simd128Register dst, const MemOperand& mem,
+                     Register scratch);
+  void StoreSimd128LE(Simd128Register src, const MemOperand& mem,
+                      Register scratch1, Simd128Register scratch2);
 
  private:
   static const int kSmiShift = kSmiTagSize + kSmiShiftSize;

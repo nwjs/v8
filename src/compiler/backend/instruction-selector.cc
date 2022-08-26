@@ -95,7 +95,7 @@ InstructionSelector::InstructionSelector(
   }
 }
 
-bool InstructionSelector::SelectInstructions() {
+base::Optional<BailoutReason> InstructionSelector::SelectInstructions() {
   // Mark the inputs of all phis in loop headers as used.
   BasicBlockVector* blocks = schedule()->rpo_order();
   for (auto const block : *blocks) {
@@ -114,7 +114,8 @@ bool InstructionSelector::SelectInstructions() {
   // Visit each basic block in post order.
   for (auto i = blocks->rbegin(); i != blocks->rend(); ++i) {
     VisitBlock(*i);
-    if (instruction_selection_failed()) return false;
+    if (instruction_selection_failed())
+      return BailoutReason::kCodeGenerationFailed;
   }
 
   // Schedule the selected instructions.
@@ -145,7 +146,7 @@ bool InstructionSelector::SelectInstructions() {
 #if DEBUG
   sequence()->ValidateSSA();
 #endif
-  return true;
+  return base::nullopt;
 }
 
 void InstructionSelector::StartBlock(RpoNumber rpo) {
@@ -1366,6 +1367,12 @@ void InstructionSelector::VisitNode(Node* node) {
   tick_counter_->TickAndMaybeEnterSafepoint();
   DCHECK_NOT_NULL(schedule()->block(node));  // should only use scheduled nodes.
   switch (node->opcode()) {
+    case IrOpcode::kTraceInstruction:
+#if V8_TARGET_ARCH_X64
+      return VisitTraceInstruction(node);
+#else
+      return;
+#endif
     case IrOpcode::kStart:
     case IrOpcode::kLoop:
     case IrOpcode::kEnd:
@@ -1655,6 +1662,10 @@ void InstructionSelector::VisitNode(Node* node) {
       return MarkAsWord64(node), VisitTryTruncateFloat32ToUint64(node);
     case IrOpcode::kTryTruncateFloat64ToUint64:
       return MarkAsWord64(node), VisitTryTruncateFloat64ToUint64(node);
+    case IrOpcode::kTryTruncateFloat64ToInt32:
+      return MarkAsWord32(node), VisitTryTruncateFloat64ToInt32(node);
+    case IrOpcode::kTryTruncateFloat64ToUint32:
+      return MarkAsWord32(node), VisitTryTruncateFloat64ToUint32(node);
     case IrOpcode::kBitcastWord32ToWord64:
       return MarkAsWord64(node), VisitBitcastWord32ToWord64(node);
     case IrOpcode::kChangeInt32ToInt64:
@@ -2627,6 +2638,14 @@ void InstructionSelector::VisitTryTruncateFloat64ToUint64(Node* node) {
   UNIMPLEMENTED();
 }
 
+void InstructionSelector::VisitTryTruncateFloat64ToInt32(Node* node) {
+  UNIMPLEMENTED();
+}
+
+void InstructionSelector::VisitTryTruncateFloat64ToUint32(Node* node) {
+  UNIMPLEMENTED();
+}
+
 void InstructionSelector::VisitTruncateInt64ToInt32(Node* node) {
   UNIMPLEMENTED();
 }
@@ -2910,6 +2929,8 @@ void InstructionSelector::VisitProjection(Node* node) {
     case IrOpcode::kTryTruncateFloat64ToInt64:
     case IrOpcode::kTryTruncateFloat32ToUint64:
     case IrOpcode::kTryTruncateFloat64ToUint64:
+    case IrOpcode::kTryTruncateFloat64ToInt32:
+    case IrOpcode::kTryTruncateFloat64ToUint32:
     case IrOpcode::kInt32PairAdd:
     case IrOpcode::kInt32PairSub:
     case IrOpcode::kInt32PairMul:

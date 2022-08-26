@@ -82,6 +82,7 @@ class V8DebuggerScript {
   void setSourceURL(const String16&);
   virtual void setSourceMappingURL(const String16&) = 0;
   virtual void setSource(const String16& source, bool preview,
+                         bool allowTopFrameLiveEditing,
                          v8::debug::LiveEditResult* result) = 0;
 
   virtual bool getPossibleBreakpoints(
@@ -104,6 +105,9 @@ class V8DebuggerScript {
   getDebugSymbolsType() const = 0;
   virtual v8::Maybe<String16> getExternalDebugSymbolsURL() const = 0;
   void removeWasmBreakpoint(int id);
+  virtual void GetAllFunctionStarts(std::vector<int>& starts) const = 0;
+  virtual void Disassemble(
+      v8::debug::DisassemblyCollector* collector) const = 0;
 #endif  // V8_ENABLE_WEBASSEMBLY
 
  protected:

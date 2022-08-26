@@ -24,6 +24,7 @@
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/debug/debug-wasm-objects-inl.h"
+#include "src/wasm/wasm-disassembler.h"
 #include "src/wasm/wasm-engine.h"
 #endif  // V8_ENABLE_WEBASSEMBLY
 
@@ -63,36 +64,61 @@ v8_inspector::V8Inspector* GetInspector(Isolate* isolate) {
   return i_isolate->inspector();
 }
 
-Local<String> GetBigIntDescription(Isolate* isolate, Local<BigInt> bigint) {
-  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
-  ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
-  i::Handle<i::BigInt> i_bigint = Utils::OpenHandle(*bigint);
+namespace {
+
+i::Handle<i::String> GetBigIntStringPresentationHandle(
+    i::Isolate* i_isolate, i::Handle<i::BigInt> i_bigint) {
   // For large BigInts computing the decimal string representation
   // can take a long time, so we go with hexadecimal in that case.
   int radix = (i_bigint->Words64Count() > 100 * 1000) ? 16 : 10;
-  i::Handle<i::String> string =
+  i::Handle<i::String> string_value =
       i::BigInt::ToString(i_isolate, i_bigint, radix, i::kDontThrow)
           .ToHandleChecked();
   if (radix == 16) {
     if (i_bigint->IsNegative()) {
-      string = i_isolate->factory()
-                   ->NewConsString(
-                       i_isolate->factory()->NewStringFromAsciiChecked("-0x"),
-                       i_isolate->factory()->NewProperSubString(
-                           string, 1, string->length() - 1))
-                   .ToHandleChecked();
-    } else {
-      string =
+      string_value =
           i_isolate->factory()
               ->NewConsString(
-                  i_isolate->factory()->NewStringFromAsciiChecked("0x"), string)
+                  i_isolate->factory()->NewStringFromAsciiChecked("-0x"),
+                  i_isolate->factory()->NewProperSubString(
+                      string_value, 1, string_value->length() - 1))
+              .ToHandleChecked();
+    } else {
+      string_value =
+          i_isolate->factory()
+              ->NewConsString(
+                  i_isolate->factory()->NewStringFromAsciiChecked("0x"),
+                  string_value)
               .ToHandleChecked();
     }
   }
+  return string_value;
+}
+
+}  // namespace
+
+Local<String> GetBigIntStringValue(Isolate* isolate, Local<BigInt> bigint) {
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+  ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
+  i::Handle<i::BigInt> i_bigint = Utils::OpenHandle(*bigint);
+
+  i::Handle<i::String> string_value =
+      GetBigIntStringPresentationHandle(i_isolate, i_bigint);
+  return Utils::ToLocal(string_value);
+}
+
+Local<String> GetBigIntDescription(Isolate* isolate, Local<BigInt> bigint) {
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+  ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
+  i::Handle<i::BigInt> i_bigint = Utils::OpenHandle(*bigint);
+
+  i::Handle<i::String> string_value =
+      GetBigIntStringPresentationHandle(i_isolate, i_bigint);
+
   i::Handle<i::String> description =
       i_isolate->factory()
           ->NewConsString(
-              string,
+              string_value,
               i_isolate->factory()->LookupSingleCharacterStringFromCode('n'))
           .ToHandleChecked();
   return Utils::ToLocal(description);
@@ -500,8 +526,9 @@ MaybeLocal<String> Script::SourceMappingURL() const {
 
 MaybeLocal<String> Script::GetSha256Hash() const {
   i::Handle<i::Script> script = Utils::OpenHandle(this);
+  i::Isolate* isolate = script->GetIsolate();
   i::Handle<i::String> value =
-      script->GetScriptHash(/* forceForInspector: */ true);
+      i::Script::GetScriptHash(isolate, script, /* forceForInspector: */ true);
   return Utils::ToLocal(value);
 }
 
@@ -668,11 +695,13 @@ Location Script::GetSourceLocation(int offset) const {
 }
 
 bool Script::SetScriptSource(Local<String> newSource, bool preview,
+                             bool allow_top_frame_live_editing,
                              LiveEditResult* result) const {
   i::Handle<i::Script> script = Utils::OpenHandle(this);
   i::Isolate* isolate = script->GetIsolate();
   return isolate->debug()->SetScriptSource(
-      script, Utils::OpenHandle(*newSource), preview, result);
+      script, Utils::OpenHandle(*newSource), preview,
+      allow_top_frame_live_editing, result);
 }
 
 bool Script::SetBreakpoint(Local<String> condition, Location* location,
@@ -818,6 +847,37 @@ int WasmScript::GetContainingFunction(int byte_offset) const {
   return i::wasm::GetContainingWasmFunction(module, byte_offset);
 }
 
+void WasmScript::GetAllFunctionStarts(std::vector<int>& starts) const {
+  i::DisallowGarbageCollection no_gc;
+  i::Handle<i::Script> script = Utils::OpenHandle(this);
+  DCHECK_EQ(i::Script::TYPE_WASM, script->type());
+  i::wasm::NativeModule* native_module = script->wasm_native_module();
+  const i::wasm::WasmModule* module = native_module->module();
+  size_t num_functions = module->functions.size();
+  starts.resize(num_functions + 1);
+  for (size_t i = 0; i < num_functions; i++) {
+    const i::wasm::WasmFunction& f = module->functions[i];
+    starts[i] = f.code.offset();
+  }
+  if (num_functions > 0) {
+    starts[num_functions] =
+        module->functions[num_functions - 1].code.end_offset();
+  } else {
+    starts[0] = 0;
+  }
+}
+
+void WasmScript::Disassemble(DisassemblyCollector* collector) {
+  i::DisallowGarbageCollection no_gc;
+  i::Handle<i::Script> script = Utils::OpenHandle(this);
+  DCHECK_EQ(i::Script::TYPE_WASM, script->type());
+  i::wasm::NativeModule* native_module = script->wasm_native_module();
+  const i::wasm::WasmModule* module = native_module->module();
+  i::wasm::ModuleWireBytes wire_bytes(native_module->wire_bytes());
+  i::wasm::Disassemble(module, wire_bytes, native_module->GetNamesProvider(),
+                       collector);
+}
+
 uint32_t WasmScript::GetFunctionHash(int function_index) {
   i::DisallowGarbageCollection no_gc;
   i::Handle<i::Script> script = Utils::OpenHandle(this);
@@ -872,7 +932,7 @@ int Location::GetColumnNumber() const {
 bool Location::IsEmpty() const { return is_empty_; }
 
 void GetLoadedScripts(Isolate* v8_isolate,
-                      PersistentValueVector<Script>& scripts) {
+                      std::vector<v8::Global<Script>>& scripts) {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(isolate);
   {
@@ -891,7 +951,7 @@ void GetLoadedScripts(Isolate* v8_isolate,
       if (!script.HasValidSource()) continue;
       i::HandleScope handle_scope(isolate);
       i::Handle<i::Script> script_handle(script, isolate);
-      scripts.Append(ToApiHandle<Script>(script_handle));
+      scripts.emplace_back(v8_isolate, ToApiHandle<Script>(script_handle));
     }
   }
 }
@@ -1140,7 +1200,7 @@ v8::MaybeLocal<v8::Value> EvaluateGlobalForTesting(
 
 void QueryObjects(v8::Local<v8::Context> v8_context,
                   QueryObjectPredicate* predicate,
-                  PersistentValueVector<v8::Object>* objects) {
+                  std::vector<v8::Global<v8::Object>>* objects) {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(v8_context->GetIsolate());
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(isolate);
   isolate->heap_profiler()->QueryObjects(Utils::OpenHandle(*v8_context),
@@ -1148,7 +1208,7 @@ void QueryObjects(v8::Local<v8::Context> v8_context,
 }
 
 void GlobalLexicalScopeNames(v8::Local<v8::Context> v8_context,
-                             v8::PersistentValueVector<v8::String>* names) {
+                             std::vector<v8::Global<v8::String>>* names) {
   i::Handle<i::Context> context = Utils::OpenHandle(*v8_context);
   i::Isolate* isolate = context->GetIsolate();
   i::Handle<i::ScriptContextTable> table(
@@ -1161,7 +1221,8 @@ void GlobalLexicalScopeNames(v8::Local<v8::Context> v8_context,
     i::Handle<i::ScopeInfo> scope_info(script_context->scope_info(), isolate);
     for (auto it : i::ScopeInfo::IterateLocalNames(scope_info)) {
       if (i::ScopeInfo::VariableIsSynthetic(it->name())) continue;
-      names->Append(Utils::ToLocal(handle(it->name(), isolate)));
+      names->emplace_back(reinterpret_cast<Isolate*>(isolate),
+                          Utils::ToLocal(handle(it->name(), isolate)));
     }
   }
 }

@@ -55,7 +55,7 @@ TQ_OBJECT_CONSTRUCTORS_IMPL(WasmStruct)
 TQ_OBJECT_CONSTRUCTORS_IMPL(WasmArray)
 TQ_OBJECT_CONSTRUCTORS_IMPL(WasmContinuationObject)
 TQ_OBJECT_CONSTRUCTORS_IMPL(WasmSuspenderObject)
-TQ_OBJECT_CONSTRUCTORS_IMPL(WasmOnFulfilledData)
+TQ_OBJECT_CONSTRUCTORS_IMPL(WasmResumeData)
 
 CAST_ACCESSOR(WasmInstanceObject)
 
@@ -207,8 +207,8 @@ PRIMITIVE_ACCESSORS(WasmInstanceObject, old_allocation_top_address, Address*,
                     kOldAllocationTopAddressOffset)
 PRIMITIVE_ACCESSORS(WasmInstanceObject, imported_function_targets, Address*,
                     kImportedFunctionTargetsOffset)
-PRIMITIVE_ACCESSORS(WasmInstanceObject, globals_start, byte*,
-                    kGlobalsStartOffset)
+SANDBOXED_POINTER_ACCESSORS(WasmInstanceObject, globals_start, byte*,
+                            kGlobalsStartOffset)
 PRIMITIVE_ACCESSORS(WasmInstanceObject, imported_mutable_globals, Address*,
                     kImportedMutableGlobalsOffset)
 PRIMITIVE_ACCESSORS(WasmInstanceObject, indirect_function_table_size, uint32_t,
@@ -368,7 +368,7 @@ Handle<Object> WasmObject::ReadValueAt(Isolate* isolate, Handle<HeapObject> obj,
       UNREACHABLE();
 
     case wasm::kRef:
-    case wasm::kOptRef: {
+    case wasm::kRefNull: {
       ObjectSlot slot(field_address);
       return handle(slot.load(isolate), isolate);
     }
@@ -399,7 +399,7 @@ MaybeHandle<Object> WasmObject::ToWasmValue(Isolate* isolate,
       return BigInt::FromObject(isolate, value);
 
     case wasm::kRef:
-    case wasm::kOptRef: {
+    case wasm::kRefNull: {
       // TODO(v8:11804): implement ref type check
       UNREACHABLE();
     }
@@ -477,7 +477,7 @@ void WasmObject::WriteValueAt(Isolate* isolate, Handle<HeapObject> obj,
       break;
     }
     case wasm::kRef:
-    case wasm::kOptRef:
+    case wasm::kRefNull:
       // TODO(v8:11804): implement
       UNREACHABLE();
 
@@ -627,15 +627,6 @@ void WasmArray::EncodeElementSizeInMap(int element_size, Map map) {
 
 // static
 int WasmArray::DecodeElementSizeFromMap(Map map) { return map.WasmByte1(); }
-
-void WasmTypeInfo::clear_foreign_address(Isolate* isolate) {
-#ifdef V8_SANDBOXED_EXTERNAL_POINTERS
-  // Due to the type-specific pointer tags for external pointers, we need to
-  // allocate an entry in the table here even though it will just store nullptr.
-  AllocateExternalPointerEntries(isolate);
-#endif
-  set_foreign_address(isolate, 0);
-}
 
 #include "src/objects/object-macros-undef.h"
 

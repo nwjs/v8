@@ -265,9 +265,16 @@ class ActivationsFinder : public ThreadVisitor {
             code.marked_for_deoptimization()) {
           codes_->erase(code);
           // Obtain the trampoline to the deoptimizer call.
-          SafepointEntry safepoint =
-              code.GetSafepointEntry(isolate, it.frame()->pc());
-          int trampoline_pc = safepoint.trampoline_pc();
+          int trampoline_pc;
+          if (code.is_maglevved()) {
+            MaglevSafepointEntry safepoint =
+                code.GetMaglevSafepointEntry(isolate, it.frame()->pc());
+            trampoline_pc = safepoint.trampoline_pc();
+          } else {
+            SafepointEntry safepoint =
+                code.GetSafepointEntry(isolate, it.frame()->pc());
+            trampoline_pc = safepoint.trampoline_pc();
+          }
           DCHECK_IMPLIES(code == topmost_, safe_to_deopt_);
           static_assert(SafepointEntry::kNoTrampolinePC == -1);
           CHECK_GE(trampoline_pc, 0);
@@ -311,11 +318,18 @@ void Deoptimizer::DeoptimizeMarkedCodeForContext(NativeContext native_context) {
       JSFunction function =
           static_cast<OptimizedFrame*>(it.frame())->function();
       TraceFoundActivation(isolate, function);
-      SafepointEntry safepoint =
-          code.GetSafepointEntry(isolate, it.frame()->pc());
+      bool safe_if_deopt_triggered;
+      if (code.is_maglevved()) {
+        MaglevSafepointEntry safepoint =
+            code.GetMaglevSafepointEntry(isolate, it.frame()->pc());
+        safe_if_deopt_triggered = safepoint.has_deoptimization_index();
+      } else {
+        SafepointEntry safepoint =
+            code.GetSafepointEntry(isolate, it.frame()->pc());
+        safe_if_deopt_triggered = safepoint.has_deoptimization_index();
+      }
 
       // Deopt is checked when we are patching addresses on stack.
-      bool safe_if_deopt_triggered = safepoint.has_deoptimization_index();
       bool is_builtin_code = code.kind() == CodeKind::BUILTIN;
       DCHECK(topmost_optimized_code.is_null() || safe_if_deopt_triggered ||
              is_builtin_code);
@@ -513,7 +527,7 @@ Deoptimizer::Deoptimizer(Isolate* isolate, JSFunction function,
   unsigned size = ComputeInputFrameSize();
   const int parameter_count =
       function.shared().internal_formal_parameter_count_with_receiver();
-  input_ = new (size) FrameDescription(size, parameter_count);
+  input_ = new (size) FrameDescription(size, parameter_count, isolate_);
 
   DCHECK_EQ(deopt_exit_index_, kFixedExitSizeMarker);
   // Calculate the deopt exit index from return address.
@@ -984,7 +998,7 @@ void Deoptimizer::DoComputeUnoptimizedFrame(TranslatedFrame* translated_frame,
 
   // Allocate and store the output frame description.
   FrameDescription* output_frame = new (output_frame_size)
-      FrameDescription(output_frame_size, parameters_count);
+      FrameDescription(output_frame_size, parameters_count, isolate());
   FrameWriter frame_writer(this, output_frame, verbose_trace_scope());
 
   CHECK(frame_index >= 0 && frame_index < output_count_);
@@ -1220,7 +1234,7 @@ void Deoptimizer::DoComputeUnoptimizedFrame(TranslatedFrame* translated_frame,
     // Only the pc of the topmost frame needs to be signed since it is
     // authenticated at the end of the DeoptimizationEntry builtin.
     const intptr_t top_most_pc = PointerAuthentication::SignAndCheckPC(
-        pc, frame_writer.frame()->GetTop());
+        isolate(), pc, frame_writer.frame()->GetTop());
     output_frame->SetPc(top_most_pc);
   } else {
     output_frame->SetPc(pc);
@@ -1285,7 +1299,8 @@ void Deoptimizer::DoComputeInlinedExtraArguments(
 
   // Allocate and store the output frame description.
   FrameDescription* output_frame = new (output_frame_size) FrameDescription(
-      output_frame_size, JSParameterCount(argument_count_without_receiver));
+      output_frame_size, JSParameterCount(argument_count_without_receiver),
+      isolate());
   // The top address of the frame is computed from the previous frame's top and
   // this frame's size.
   const intptr_t top_address =
@@ -1347,7 +1362,7 @@ void Deoptimizer::DoComputeConstructStubFrame(TranslatedFrame* translated_frame,
 
   // Allocate and store the output frame description.
   FrameDescription* output_frame = new (output_frame_size)
-      FrameDescription(output_frame_size, parameters_count);
+      FrameDescription(output_frame_size, parameters_count, isolate());
   FrameWriter frame_writer(this, output_frame, verbose_trace_scope());
 
   // Construct stub can not be topmost.
@@ -1451,7 +1466,7 @@ void Deoptimizer::DoComputeConstructStubFrame(TranslatedFrame* translated_frame,
     // Only the pc of the topmost frame needs to be signed since it is
     // authenticated at the end of the DeoptimizationEntry builtin.
     output_frame->SetPc(PointerAuthentication::SignAndCheckPC(
-        pc_value, frame_writer.frame()->GetTop()));
+        isolate(), pc_value, frame_writer.frame()->GetTop()));
   } else {
     output_frame->SetPc(pc_value);
   }
@@ -1695,8 +1710,8 @@ void Deoptimizer::DoComputeBuiltinContinuation(
            frame_info.stack_parameter_count(), output_frame_size);
   }
 
-  FrameDescription* output_frame = new (output_frame_size)
-      FrameDescription(output_frame_size, frame_info.stack_parameter_count());
+  FrameDescription* output_frame = new (output_frame_size) FrameDescription(
+      output_frame_size, frame_info.stack_parameter_count(), isolate());
   output_[frame_index] = output_frame;
   FrameWriter frame_writer(this, output_frame, verbose_trace_scope());
 
@@ -1912,6 +1927,7 @@ void Deoptimizer::DoComputeBuiltinContinuation(
     // Only the pc of the topmost frame needs to be signed since it is
     // authenticated at the end of the DeoptimizationEntry builtin.
     const intptr_t top_most_pc = PointerAuthentication::SignAndCheckPC(
+        isolate(),
         static_cast<intptr_t>(continue_to_builtin.InstructionStart()),
         frame_writer.frame()->GetTop());
     output_frame->SetPc(top_most_pc);
@@ -2041,7 +2057,7 @@ int Deoptimizer::ComputeSourcePositionFromBytecodeArray(
     BytecodeOffset bytecode_offset) {
   DCHECK(shared.HasBytecodeArray());
   return AbstractCode::cast(shared.GetBytecodeArray(isolate))
-      .SourcePosition(bytecode_offset.ToInt());
+      .SourcePosition(isolate, bytecode_offset.ToInt());
 }
 
 }  // namespace internal

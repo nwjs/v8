@@ -54,7 +54,7 @@
 // for MODE_META, so there is no impact on the flags interface.
 #elif defined(FLAG_MODE_DEFINE_DEFAULTS)
 #define FLAG_FULL(ftype, ctype, nam, def, cmt) \
-  static constexpr FlagValue<ctype> FLAGDEFAULT_##nam{def};
+  static constexpr ctype FLAGDEFAULT_##nam{def};
 
 // We want to write entries into our meta data table, for internal parsing and
 // printing / etc in the flag parser code.  We only do this for writable flags.
@@ -80,9 +80,9 @@
 #define DEFINE_GENERIC_IMPLICATION(whenflag, statement) \
   if (FLAG_##whenflag) statement;
 
-#define DEFINE_NEG_VALUE_IMPLICATION(whenflag, thenflag, value)                \
-  changed |= TriggerImplication(!FLAG_##whenflag, #whenflag, &FLAG_##thenflag, \
-                                value, false);
+#define DEFINE_NEG_VALUE_IMPLICATION(whenflag, thenflag, value)  \
+  changed |= TriggerImplication(!FLAG_##whenflag, "!" #whenflag, \
+                                &FLAG_##thenflag, value, false);
 
 // We apply a generic macro to the flags.
 #elif defined(FLAG_MODE_APPLY)
@@ -178,7 +178,7 @@
 #define ENABLE_CONTROL_FLOW_INTEGRITY_BOOL false
 #endif
 
-#if V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_PPC64 || \
+#if (V8_TARGET_ARCH_PPC64 && COMPRESS_POINTERS_BOOL) || \
     (V8_TARGET_ARCH_S390X && COMPRESS_POINTERS_BOOL)
 // TODO(v8:11421): Enable Sparkplug for these architectures.
 #define ENABLE_SPARKPLUG false
@@ -289,14 +289,13 @@ DEFINE_BOOL(harmony_shipping, true, "enable all shipped harmony features")
     "harmony ResizableArrayBuffer / GrowableSharedArrayBuffer")                \
   V(harmony_temporal, "Temporal")                                              \
   V(harmony_shadow_realm, "harmony ShadowRealm")                               \
-  V(harmony_struct, "harmony structs and shared structs")                      \
+  V(harmony_struct, "harmony structs, shared structs, and shared arrays")      \
   V(harmony_change_array_by_copy, "harmony change-Array-by-copy")
 
 #ifdef V8_INTL_SUPPORT
-#define HARMONY_INPROGRESS(V)                             \
-  HARMONY_INPROGRESS_BASE(V)                              \
-  V(harmony_intl_best_fit_matcher, "Intl BestFitMatcher") \
-  V(harmony_intl_number_format_v3, "Intl.NumberFormat v3")
+#define HARMONY_INPROGRESS(V) \
+  HARMONY_INPROGRESS_BASE(V)  \
+  V(harmony_intl_best_fit_matcher, "Intl BestFitMatcher")
 #else
 #define HARMONY_INPROGRESS(V) HARMONY_INPROGRESS_BASE(V)
 #endif
@@ -306,7 +305,9 @@ DEFINE_BOOL(harmony_shipping, true, "enable all shipped harmony features")
   V(harmony_array_grouping, "harmony array grouping")
 
 #ifdef V8_INTL_SUPPORT
-#define HARMONY_STAGED(V) HARMONY_STAGED_BASE(V)
+#define HARMONY_STAGED(V) \
+  HARMONY_STAGED_BASE(V)  \
+  V(harmony_intl_number_format_v3, "Intl.NumberFormat v3")
 #else
 #define HARMONY_STAGED(V) HARMONY_STAGED_BASE(V)
 #endif
@@ -476,6 +477,24 @@ DEFINE_BOOL_READONLY(conservative_stack_scanning,
                      V8_ENABLE_CONSERVATIVE_STACK_SCANNING_BOOL,
                      "use conservative stack scanning")
 
+#ifdef V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
+#define V8_ENABLE_INNER_POINTER_RESOLUTION_OSB_BOOL true
+#else
+#define V8_ENABLE_INNER_POINTER_RESOLUTION_OSB_BOOL false
+#endif
+DEFINE_BOOL_READONLY(inner_pointer_resolution_osb,
+                     V8_ENABLE_INNER_POINTER_RESOLUTION_OSB_BOOL,
+                     "use object start bitmap for IPR")
+
+#ifdef V8_ENABLE_INNER_POINTER_RESOLUTION_MB
+#define V8_ENABLE_INNER_POINTER_RESOLUTION_MB_BOOL true
+#else
+#define V8_ENABLE_INNER_POINTER_RESOLUTION_MB_BOOL false
+#endif
+DEFINE_BOOL_READONLY(inner_pointer_resolution_mb,
+                     V8_ENABLE_INNER_POINTER_RESOLUTION_MB_BOOL,
+                     "use marking bitmap for IPR")
+
 #ifdef V8_ENABLE_FUTURE
 #define FUTURE_BOOL true
 #else
@@ -490,6 +509,8 @@ DEFINE_BOOL(future, FUTURE_BOOL,
 DEFINE_BOOL(maglev, false, "enable the maglev optimizing compiler")
 DEFINE_BOOL(maglev_inlining, false,
             "enable inlining in the maglev optimizing compiler")
+DEFINE_BOOL(maglev_reuse_stack_slots, false,
+            "reuse stack slots in the maglev optimizing compiler")
 #else
 #define V8_ENABLE_MAGLEV_BOOL false
 DEFINE_BOOL_READONLY(maglev, false, "enable the maglev optimizing compiler")
@@ -528,6 +549,13 @@ DEFINE_WEAK_VALUE_IMPLICATION(max_opt < 2, maglev, false)
 DEFINE_WEAK_VALUE_IMPLICATION(max_opt < 1, sparkplug, false)
 #endif  // ENABLE_SPARKPLUG
         //
+
+// Flag to select wasm trace mark type
+DEFINE_STRING(
+    wasm_trace_native, nullptr,
+    "Select which native code sequence to use for wasm trace instruction: "
+    "default or cpuid")
+
 // Flags for jitless
 DEFINE_BOOL(jitless, V8_LITE_BOOL,
             "Disable runtime allocation of executable memory.")
@@ -697,7 +725,8 @@ DEFINE_BOOL(always_sparkplug, false, "directly tier up to Sparkplug code")
 #if ENABLE_SPARKPLUG
 DEFINE_IMPLICATION(always_sparkplug, sparkplug)
 DEFINE_BOOL(baseline_batch_compilation, true, "batch compile Sparkplug code")
-#if defined(V8_OS_DARWIN) && defined(V8_HOST_ARCH_ARM64)
+#if defined(V8_OS_DARWIN) && defined(V8_HOST_ARCH_ARM64) && \
+    !V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT
 // M1 requires W^X.
 DEFINE_BOOL_READONLY(concurrent_sparkplug, false,
                      "compile Sparkplug code in a background thread")
@@ -745,10 +774,6 @@ DEFINE_BOOL(
 // (enabled by --shared-string-table) are not supported using a single shared
 // forwarding table.
 DEFINE_NEG_IMPLICATION(shared_string_table, always_use_string_forwarding_table)
-// TOOD(pthier): The code behind this flag is not going to ship.
-// We enable it behind --future to get performance numbers and coverage from
-// bots.
-DEFINE_WEAK_IMPLICATION(future, always_use_string_forwarding_table)
 
 DEFINE_BOOL(write_code_using_rwx, true,
             "flip permissions to rwx to write page instead of rw")
@@ -877,7 +902,7 @@ DEFINE_VALUE_IMPLICATION(stress_inline, max_inlined_bytecode_size_cumulative,
                          999999)
 DEFINE_VALUE_IMPLICATION(stress_inline, max_inlined_bytecode_size_absolute,
                          999999)
-DEFINE_VALUE_IMPLICATION(stress_inline, min_inlining_frequency, 0)
+DEFINE_VALUE_IMPLICATION(stress_inline, min_inlining_frequency, 0.)
 DEFINE_IMPLICATION(stress_inline, polymorphic_inlining)
 DEFINE_BOOL(trace_turbo_inlining, false, "trace TurboFan inlining")
 DEFINE_BOOL(turbo_inline_array_builtins, true,
@@ -925,7 +950,7 @@ DEFINE_BOOL(turbo_rewrite_far_jumps, true,
 DEFINE_BOOL(
     stress_gc_during_compilation, false,
     "simulate GC/compiler thread race related to https://crbug.com/v8/8520")
-DEFINE_BOOL(turbo_fast_api_calls, false, "enable fast API calls from TurboFan")
+DEFINE_BOOL(turbo_fast_api_calls, true, "enable fast API calls from TurboFan")
 DEFINE_BOOL(turbo_compress_translation_arrays, false,
             "compress translation arrays (experimental)")
 DEFINE_WEAK_IMPLICATION(future, turbo_inline_js_wasm_calls)
@@ -956,7 +981,7 @@ DEFINE_BOOL(turboshaft_trace_reduction, false,
 DEFINE_BOOL(optimize_for_size, false,
             "Enables optimizations which favor memory size over execution "
             "speed")
-DEFINE_VALUE_IMPLICATION(optimize_for_size, max_semi_space_size, 1)
+DEFINE_VALUE_IMPLICATION(optimize_for_size, max_semi_space_size, size_t{1})
 
 // Flags for WebAssembly.
 #if V8_ENABLE_WEBASSEMBLY
@@ -982,11 +1007,13 @@ DEFINE_BOOL(wasm_async_compilation, true,
 DEFINE_NEG_IMPLICATION(single_threaded, wasm_async_compilation)
 DEFINE_BOOL(wasm_test_streaming, false,
             "use streaming compilation instead of async compilation for tests")
-DEFINE_UINT(wasm_max_mem_pages, v8::internal::wasm::kV8MaxWasmMemoryPages,
+DEFINE_BOOL(wasm_native_module_cache_enabled, true,
+            "enable the native module cache")
+DEFINE_UINT(wasm_max_mem_pages, wasm::kV8MaxWasmMemoryPages,
             "maximum number of 64KiB memory pages per wasm memory")
-DEFINE_UINT(wasm_max_table_size, v8::internal::wasm::kV8MaxWasmTableSize,
+DEFINE_UINT(wasm_max_table_size, wasm::kV8MaxWasmTableSize,
             "maximum table size of a wasm instance")
-DEFINE_UINT(wasm_max_code_space, v8::internal::kMaxWasmCodeMB,
+DEFINE_UINT(wasm_max_code_space, kMaxWasmCodeMB,
             "maximum committed code space for wasm (in MB)")
 DEFINE_BOOL(wasm_tier_up, true,
             "enable tier up to the optimizing compiler (requires --liftoff to "
@@ -1144,8 +1171,8 @@ DEFINE_BOOL(stress_wasm_code_gc, false,
 DEFINE_INT(wasm_max_initial_code_space_reservation, 0,
            "maximum size of the initial wasm code space reservation (in MB)")
 
-DEFINE_BOOL(experimental_wasm_allow_huge_modules, false,
-            "allow wasm modules bigger than 1GB, but below ~2GB")
+DEFINE_SIZE_T(wasm_max_module_size, wasm::kV8MaxWasmModuleSize,
+              "maximum allowed size of wasm modules")
 
 DEFINE_BOOL(trace_wasm, false, "trace wasm function calls")
 
@@ -1198,10 +1225,16 @@ DEFINE_BOOL(separate_gc_phases, false,
 DEFINE_BOOL(global_gc_scheduling, true,
             "enable GC scheduling based on global memory")
 DEFINE_BOOL(gc_global, false, "always perform global GCs")
+
+// TODO(12950): The next two flags only have an effect if
+// V8_ENABLE_ALLOCATION_TIMEOUT is set, so we should only define them in that
+// config. That currently breaks Node's parallel/test-domain-error-types test
+// though.
 DEFINE_INT(random_gc_interval, 0,
            "Collect garbage after random(0, X) allocations. It overrides "
            "gc_interval.")
 DEFINE_INT(gc_interval, -1, "garbage collect after <n> allocations")
+
 DEFINE_INT(retain_maps_for_n_gc, 2,
            "keeps maps alive for <n> old space garbage collections")
 DEFINE_BOOL(trace_gc, false,
@@ -1281,6 +1314,9 @@ DEFINE_BOOL(write_protect_code_memory, true, "write protect code memory")
 #endif
 DEFINE_BOOL(concurrent_marking, V8_CONCURRENT_MARKING_BOOL,
             "use concurrent marking")
+DEFINE_INT(
+    concurrent_marking_max_worker_num, 7,
+    "max worker number of concurrent marking, 0 for NumberOfWorkerThreads")
 DEFINE_BOOL(concurrent_array_buffer_sweeping, true,
             "concurrently sweep array buffers")
 DEFINE_BOOL(stress_concurrent_allocation, false,
@@ -1378,6 +1414,7 @@ DEFINE_BOOL(flush_baseline_code, false,
             "flush of baseline code when it has not been executed recently")
 DEFINE_BOOL(flush_bytecode, true,
             "flush of bytecode when it has not been executed recently")
+DEFINE_INT(bytecode_old_age, 5, "number of gcs before we flush code")
 DEFINE_BOOL(stress_flush_code, false, "stress code flushing")
 DEFINE_BOOL(trace_flush_bytecode, false, "trace bytecode flushing")
 DEFINE_BOOL(use_marking_progress_bar, true,
@@ -1409,6 +1446,9 @@ DEFINE_BOOL(
 // These flags will be removed after experiments. Do not rely on them.
 DEFINE_BOOL(gc_experiment_less_compaction, false,
             "less compaction in non-memory reducing mode")
+
+DEFINE_INT(gc_memory_reducer_start_delay_ms, 8000,
+           "Delay before memory reducer start")
 
 DEFINE_BOOL(disable_abortjs, false, "disables AbortJS runtime function")
 
@@ -1503,6 +1543,10 @@ DEFINE_BOOL(stress_background_compile, false,
             "stress test parsing on background")
 DEFINE_BOOL(concurrent_cache_deserialization, true,
             "enable deserializing code caches on background")
+DEFINE_BOOL(
+    merge_background_deserialized_script_with_compilation_cache, false,
+    "After deserializing code cache data on a background thread, merge it into "
+    "an existing Script if one is found in the Isolate compilation cache")
 DEFINE_BOOL(disable_old_api_accessors, false,
             "Disable old-style API accessors whose setters trigger through the "
             "prototype chain")
@@ -1620,6 +1664,12 @@ DEFINE_BOOL(hard_abort, true, "abort by crashing")
 
 DEFINE_BOOL(experimental_async_stack_tagging_api, false,
             "enable experimental async stacks tagging API")
+DEFINE_BOOL(experimental_value_unavailable, false,
+            "enable experimental <value unavailable> in scopes")
+
+DEFINE_BOOL(
+    live_edit_top_frame, true,
+    "enable support for live-editing the top-most function on the stack")
 
 // disassembler
 DEFINE_BOOL(log_colour, ENABLE_LOG_COLOUR,
@@ -1863,7 +1913,7 @@ DEFINE_BOOL(
     "Fuzzers use this flag to signal that they are ... fuzzing. This causes "
     "intrinsics to fail silently (e.g. return undefined) on invalid usage.")
 
-DEFINE_BOOL(freeze_flags_after_init, false,
+DEFINE_BOOL(freeze_flags_after_init, true,
             "Disallow changes to flag values after initializing V8")
 
 // mksnapshot.cc
@@ -1898,6 +1948,7 @@ DEFINE_NEG_NEG_IMPLICATION(text_is_readable, partial_constant_pool)
 DEFINE_BOOL(trace_minor_mc_parallel_marking, false,
             "trace parallel marking for the young generation")
 DEFINE_BOOL(minor_mc, false, "perform young generation mark compact GCs")
+DEFINE_IMPLICATION(minor_mc, separate_gc_phases)
 
 //
 // Dev shell flags
@@ -2204,8 +2255,10 @@ DEFINE_NEG_IMPLICATION(predictable, parallel_compile_tasks_for_lazy)
 DEFINE_BOOL(predictable_gc_schedule, false,
             "Predictable garbage collection schedule. Fixes heap growing, "
             "idle, and memory reducing behavior.")
-DEFINE_VALUE_IMPLICATION(predictable_gc_schedule, min_semi_space_size, 4)
-DEFINE_VALUE_IMPLICATION(predictable_gc_schedule, max_semi_space_size, 4)
+DEFINE_VALUE_IMPLICATION(predictable_gc_schedule, min_semi_space_size,
+                         size_t{4})
+DEFINE_VALUE_IMPLICATION(predictable_gc_schedule, max_semi_space_size,
+                         size_t{4})
 DEFINE_VALUE_IMPLICATION(predictable_gc_schedule, heap_growing_percent, 30)
 DEFINE_NEG_IMPLICATION(predictable_gc_schedule, memory_reducer)
 

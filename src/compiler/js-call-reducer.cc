@@ -6,8 +6,6 @@
 
 #include <functional>
 
-#include "src/api/api-inl.h"
-#include "src/base/cpu.h"
 #include "src/base/small-vector.h"
 #include "src/builtins/builtins-promise.h"
 #include "src/builtins/builtins-utils.h"
@@ -27,20 +25,13 @@
 #include "src/compiler/map-inference.h"
 #include "src/compiler/node-matchers.h"
 #include "src/compiler/opcodes.h"
-#include "src/compiler/property-access-builder.h"
 #include "src/compiler/simplified-operator.h"
 #include "src/compiler/state-values-utils.h"
 #include "src/compiler/type-cache.h"
 #include "src/ic/call-optimization.h"
-#include "src/logging/counters.h"
-#include "src/objects/arguments-inl.h"
-#include "src/objects/feedback-vector-inl.h"
-#include "src/objects/js-array-buffer-inl.h"
-#include "src/objects/js-array-inl.h"
 #include "src/objects/js-function.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/ordered-hash-table.h"
-#include "src/objects/string-inl.h"
 
 #ifdef V8_INTL_SUPPORT
 #include "src/objects/intl-objects.h"
@@ -4869,6 +4860,8 @@ Reduction JSCallReducer::ReduceJSCall(Node* node,
       return ReduceMapPrototypeGet(node);
     case Builtin::kMapPrototypeHas:
       return ReduceMapPrototypeHas(node);
+    case Builtin::kSetPrototypeHas:
+      return ReduceSetPrototypeHas(node);
     case Builtin::kRegExpPrototypeTest:
       return ReduceRegExpPrototypeTest(node);
     case Builtin::kReturnReceiver:
@@ -7486,7 +7479,8 @@ Reduction JSCallReducer::ReduceMapPrototypeGet(Node* node) {
       effect, control);
 
   Node* entry = effect = graph()->NewNode(
-      simplified()->FindOrderedHashMapEntry(), table, key, effect, control);
+      simplified()->FindOrderedCollectionEntry(CollectionKind::kMap), table,
+      key, effect, control);
 
   Node* check = graph()->NewNode(simplified()->NumberEqual(), entry,
                                  jsgraph()->MinusOneConstant());
@@ -7514,35 +7508,6 @@ Reduction JSCallReducer::ReduceMapPrototypeGet(Node* node) {
   return Replace(value);
 }
 
-Reduction JSCallReducer::ReduceMapPrototypeHas(Node* node) {
-  // We only optimize if we have target, receiver and key parameters.
-  JSCallNode n(node);
-  if (n.ArgumentCount() != 1) return NoChange();
-  Node* receiver = NodeProperties::GetValueInput(node, 1);
-  Effect effect{NodeProperties::GetEffectInput(node)};
-  Control control{NodeProperties::GetControlInput(node)};
-  Node* key = NodeProperties::GetValueInput(node, 2);
-
-  MapInference inference(broker(), receiver, effect);
-  if (!inference.HaveMaps() || !inference.AllOfInstanceTypesAre(JS_MAP_TYPE)) {
-    return NoChange();
-  }
-
-  Node* table = effect = graph()->NewNode(
-      simplified()->LoadField(AccessBuilder::ForJSCollectionTable()), receiver,
-      effect, control);
-
-  Node* index = effect = graph()->NewNode(
-      simplified()->FindOrderedHashMapEntry(), table, key, effect, control);
-
-  Node* value = graph()->NewNode(simplified()->NumberEqual(), index,
-                                 jsgraph()->MinusOneConstant());
-  value = graph()->NewNode(simplified()->BooleanNot(), value);
-
-  ReplaceWithValue(node, value, effect, control);
-  return Replace(value);
-}
-
 namespace {
 
 InstanceType InstanceTypeForCollectionKind(CollectionKind kind) {
@@ -7556,6 +7521,47 @@ InstanceType InstanceTypeForCollectionKind(CollectionKind kind) {
 }
 
 }  // namespace
+
+Reduction JSCallReducer::ReduceCollectionPrototypeHas(
+    Node* node, CollectionKind collection_kind) {
+  // We only optimize if we have target, receiver and key parameters.
+  JSCallNode n(node);
+  if (n.ArgumentCount() != 1) return NoChange();
+  Node* receiver = NodeProperties::GetValueInput(node, 1);
+  Effect effect{NodeProperties::GetEffectInput(node)};
+  Control control{NodeProperties::GetControlInput(node)};
+  Node* key = NodeProperties::GetValueInput(node, 2);
+  InstanceType instance_type = InstanceTypeForCollectionKind(collection_kind);
+
+  MapInference inference(broker(), receiver, effect);
+  if (!inference.HaveMaps() ||
+      !inference.AllOfInstanceTypesAre(instance_type)) {
+    return NoChange();
+  }
+
+  Node* table = effect = graph()->NewNode(
+      simplified()->LoadField(AccessBuilder::ForJSCollectionTable()), receiver,
+      effect, control);
+
+  Node* index = effect = graph()->NewNode(
+      simplified()->FindOrderedCollectionEntry(collection_kind), table, key,
+      effect, control);
+
+  Node* value = graph()->NewNode(simplified()->NumberEqual(), index,
+                                 jsgraph()->MinusOneConstant());
+  value = graph()->NewNode(simplified()->BooleanNot(), value);
+
+  ReplaceWithValue(node, value, effect, control);
+  return Replace(value);
+}
+
+Reduction JSCallReducer::ReduceMapPrototypeHas(Node* node) {
+  return ReduceCollectionPrototypeHas(node, CollectionKind::kMap);
+}
+
+Reduction JSCallReducer::ReduceSetPrototypeHas(Node* node) {
+  return ReduceCollectionPrototypeHas(node, CollectionKind::kSet);
+}
 
 Reduction JSCallReducer::ReduceCollectionIteration(
     Node* node, CollectionKind collection_kind, IterationKind iteration_kind) {
@@ -7927,12 +7933,23 @@ Reduction JSCallReducer::ReduceArrayBufferViewAccessor(
 
   CHECK(inference.RelyOnMapsViaStability(dependencies()));
 
+  const bool depended_on_detaching_protector =
+      dependencies()->DependOnArrayBufferDetachingProtector();
+  if (!depended_on_detaching_protector && instance_type == JS_DATA_VIEW_TYPE) {
+    // DataView prototype accessors throw on detached ArrayBuffers instead of
+    // return 0, so skip the optimization.
+    //
+    // TODO(turbofan): Ideally we would bail out if the buffer is actually
+    // detached.
+    return inference.NoChange();
+  }
+
   // Load the {receiver}s field.
   Node* value = effect = graph()->NewNode(simplified()->LoadField(access),
                                           receiver, effect, control);
 
   // See if we can skip the detaching check.
-  if (!dependencies()->DependOnArrayBufferDetachingProtector()) {
+  if (!depended_on_detaching_protector) {
     // Check whether {receiver}s JSArrayBuffer was detached.
     Node* buffer = effect = graph()->NewNode(
         simplified()->LoadField(AccessBuilder::ForJSArrayBufferViewBuffer()),

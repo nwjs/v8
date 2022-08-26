@@ -15,6 +15,7 @@
 #include "src/base/platform/mutex.h"
 #include "src/common/globals.h"
 #include "src/flags/flags.h"
+#include "src/heap/allocation-observer.h"
 #include "src/heap/allocation-stats.h"
 #include "src/heap/memory-chunk-layout.h"
 #include "src/heap/memory-chunk.h"
@@ -91,7 +92,8 @@ class V8_EXPORT_PRIVATE PagedSpaceBase
   // Creates a space with an id.
   PagedSpaceBase(
       Heap* heap, AllocationSpace id, Executability executable,
-      FreeList* free_list, LinearAllocationArea* allocation_info,
+      FreeList* free_list, AllocationCounter* allocation_counter,
+      LinearAllocationArea* allocation_info,
       LinearAreaOriginalData& linear_area_original_data,
       CompactionSpaceKind compaction_space_kind = CompactionSpaceKind::kNone);
 
@@ -150,10 +152,8 @@ class V8_EXPORT_PRIVATE PagedSpaceBase
   // Allocate the requested number of bytes in the space from a background
   // thread.
   V8_WARN_UNUSED_RESULT base::Optional<std::pair<Address, size_t>>
-  RawRefillLabBackground(LocalHeap* local_heap, size_t min_size_in_bytes,
-                         size_t max_size_in_bytes,
-                         AllocationAlignment alignment,
-                         AllocationOrigin origin);
+  RawAllocateBackground(LocalHeap* local_heap, size_t min_size_in_bytes,
+                        size_t max_size_in_bytes, AllocationOrigin origin);
 
   size_t Free(Address start, size_t size_in_bytes, SpaceAccountingMode mode) {
     if (size_in_bytes == 0) return 0;
@@ -387,7 +387,6 @@ class V8_EXPORT_PRIVATE PagedSpaceBase
   V8_WARN_UNUSED_RESULT base::Optional<std::pair<Address, size_t>>
   TryAllocationFromFreeListBackground(size_t min_size_in_bytes,
                                       size_t max_size_in_bytes,
-                                      AllocationAlignment alignment,
                                       AllocationOrigin origin);
 
   V8_WARN_UNUSED_RESULT bool TryExpand(int size_in_bytes,
@@ -425,10 +424,12 @@ class V8_EXPORT_PRIVATE PagedSpace : public PagedSpaceBase {
       Heap* heap, AllocationSpace id, Executability executable,
       FreeList* free_list, LinearAllocationArea* allocation_info,
       CompactionSpaceKind compaction_space_kind = CompactionSpaceKind::kNone)
-      : PagedSpaceBase(heap, id, executable, free_list, allocation_info,
-                       linear_area_original_data_, compaction_space_kind) {}
+      : PagedSpaceBase(heap, id, executable, free_list, &allocation_counter_,
+                       allocation_info, linear_area_original_data_,
+                       compaction_space_kind) {}
 
  private:
+  AllocationCounter allocation_counter_;
   LinearAreaOriginalData linear_area_original_data_;
 };
 

@@ -8,23 +8,18 @@
 #include <queue>
 
 #include "src/api/api-inl.h"
-#include "src/asmjs/asm-js.h"
 #include "src/base/enum-set.h"
 #include "src/base/optional.h"
 #include "src/base/platform/mutex.h"
 #include "src/base/platform/semaphore.h"
 #include "src/base/platform/time.h"
-#include "src/base/utils/random-number-generator.h"
 #include "src/compiler/wasm-compiler.h"
+#include "src/debug/debug.h"
 #include "src/handles/global-handles-inl.h"
 #include "src/heap/heap-inl.h"  // For CodePageCollectionMemoryModificationScope.
 #include "src/logging/counters-scopes.h"
 #include "src/logging/metrics.h"
-#include "src/objects/property-descriptor.h"
-#include "src/tasks/task-utils.h"
 #include "src/tracing/trace-event.h"
-#include "src/trap-handler/trap-handler.h"
-#include "src/utils/identity-map.h"
 #include "src/wasm/assembler-buffer-cache.h"
 #include "src/wasm/code-space-access.h"
 #include "src/wasm/module-decoder.h"
@@ -1430,8 +1425,10 @@ void TriggerTierUp(WasmInstanceObject instance, int func_index) {
   const WasmModule* module = native_module->module();
   int priority;
   {
-    // TODO(clemensb): Try to avoid the MutexGuard here.
     base::MutexGuard mutex_guard(&module->type_feedback.mutex);
+    int array_index =
+        wasm::declared_function_index(instance.module(), func_index);
+    instance.tiering_budget_array()[array_index] = FLAG_wasm_tiering_budget;
     int& stored_priority =
         module->type_feedback.feedback_for_function[func_index].tierup_priority;
     if (stored_priority < kMaxInt) ++stored_priority;
@@ -2816,18 +2813,17 @@ bool AsyncStreamingProcessor::ProcessCodeSectionHeader(
   before_code_section_ = false;
   TRACE_STREAMING("Start the code section with %d functions...\n",
                   num_functions);
-  decoder_.StartCodeSection();
+  prefix_hash_ = base::hash_combine(prefix_hash_,
+                                    static_cast<uint32_t>(code_section_length));
   if (!decoder_.CheckFunctionsCount(static_cast<uint32_t>(num_functions),
                                     functions_mismatch_error_offset)) {
     FinishAsyncCompileJobWithError(decoder_.FinishDecoding(false).error());
     return false;
   }
 
-  decoder_.set_code_section(code_section_start,
-                            static_cast<uint32_t>(code_section_length));
+  decoder_.StartCodeSection({static_cast<uint32_t>(code_section_start),
+                             static_cast<uint32_t>(code_section_length)});
 
-  prefix_hash_ = base::hash_combine(prefix_hash_,
-                                    static_cast<uint32_t>(code_section_length));
   if (!GetWasmEngine()->GetStreamingCompilationOwnership(prefix_hash_)) {
     // Known prefix, wait until the end of the stream and check the cache.
     prefix_cache_hit_ = true;
@@ -3408,6 +3404,7 @@ void CompilationStateImpl::CommitCompilationUnits(
     compilation_unit_queues_.AddUnits(baseline_units, top_tier_units,
                                       native_module_->module());
   }
+  ResetPKUPermissionsForThreadSpawning pku_reset_scope;
   compile_job_->NotifyConcurrencyIncrease();
 }
 
@@ -3419,6 +3416,10 @@ void CompilationStateImpl::CommitTopTierCompilationUnit(
 void CompilationStateImpl::AddTopTierPriorityCompilationUnit(
     WasmCompilationUnit unit, size_t priority) {
   compilation_unit_queues_.AddTopTierPriorityUnit(unit, priority);
+  // We should not have a {CodeSpaceWriteScope} open at this point, as
+  // {NotifyConcurrencyIncrease} can spawn new threads which could inherit PKU
+  // permissions (which would be a security issue).
+  DCHECK(!CodeSpaceWriteScope::IsInScope());
   compile_job_->NotifyConcurrencyIncrease();
 }
 

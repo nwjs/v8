@@ -22,6 +22,15 @@ if (is_fuchsia) {
   }
 }
 
+config("gcc_warnings_not_errors") {
+  if (!is_clang && !is_win) {
+    cflags = [
+      # Turn off warning as errors due to false positives in googletest.
+      "-Wno-error",
+    ]
+  }
+}
+
 v8_executable("v8_heap_base_unittests") {
   testonly = true
 
@@ -50,6 +59,7 @@ v8_source_set("v8_heap_base_unittests_sources") {
   configs = [
     "../..:external_config",
     "../..:internal_config_base",
+    ":gcc_warnings_not_errors",
   ]
 
   deps = [
@@ -150,6 +160,7 @@ v8_source_set("cppgc_unittests_sources") {
     "../..:external_config",
     "../..:internal_config_base",
     "../..:cppgc_base_config",
+    ":gcc_warnings_not_errors",
   ]
 
   deps = [
@@ -192,6 +203,7 @@ v8_executable("unittests") {
   data_deps = [ "../../tools:v8_testrunner" ]
 
   data = [
+    "interpreter/bytecode_expectations/",
     "testcfg.py",
     "unittests.status",
   ]
@@ -223,6 +235,7 @@ v8_source_set("unittests_sources") {
     "api/v8-script-unittest.cc",
     "base/address-region-unittest.cc",
     "base/atomic-utils-unittest.cc",
+    "base/atomicops-unittest.cc",
     "base/bignum-dtoa-unittest.cc",
     "base/bignum-unittest.cc",
     "base/bits-unittest.cc",
@@ -260,6 +273,7 @@ v8_source_set("unittests_sources") {
     "codegen/code-pages-unittest.cc",
     "codegen/code-stub-assembler-unittest.cc",
     "codegen/code-stub-assembler-unittest.h",
+    "codegen/factory-unittest.cc",
     "codegen/register-configuration-unittest.cc",
     "codegen/source-position-table-unittest.cc",
     "compiler-dispatcher/compiler-dispatcher-unittest.cc",
@@ -329,10 +343,12 @@ v8_source_set("unittests_sources") {
     "date/date-cache-unittest.cc",
     "date/date-unittest.cc",
     "debug/debug-property-iterator-unittest.cc",
+    "deoptimizer/deoptimization-unittest.cc",
     "diagnostics/eh-frame-iterator-unittest.cc",
     "diagnostics/eh-frame-writer-unittest.cc",
     "diagnostics/gdb-jit-unittest.cc",
     "execution/microtask-queue-unittest.cc",
+    "execution/thread-termination-unittest.cc",
     "execution/threads-unittest.cc",
     "flags/flag-definitions-unittest.cc",
     "gay-fixed.cc",
@@ -362,6 +378,7 @@ v8_source_set("unittests_sources") {
     "heap/list-unittest.cc",
     "heap/local-factory-unittest.cc",
     "heap/local-heap-unittest.cc",
+    "heap/marking-inner-pointer-resolution-unittest.cc",
     "heap/marking-unittest.cc",
     "heap/marking-worklist-unittest.cc",
     "heap/memory-reducer-unittest.cc",
@@ -377,6 +394,9 @@ v8_source_set("unittests_sources") {
     "interpreter/bytecode-array-random-iterator-unittest.cc",
     "interpreter/bytecode-array-writer-unittest.cc",
     "interpreter/bytecode-decoder-unittest.cc",
+    "interpreter/bytecode-expectations-printer.cc",
+    "interpreter/bytecode-expectations-printer.h",
+    "interpreter/bytecode-generator-unittest.cc",
     "interpreter/bytecode-node-unittest.cc",
     "interpreter/bytecode-operands-unittest.cc",
     "interpreter/bytecode-register-allocator-unittest.cc",
@@ -387,6 +407,13 @@ v8_source_set("unittests_sources") {
     "interpreter/constant-array-builder-unittest.cc",
     "interpreter/interpreter-assembler-unittest.cc",
     "interpreter/interpreter-assembler-unittest.h",
+    "interpreter/interpreter-intrinsics-unittest.cc",
+    "interpreter/interpreter-tester.cc",
+    "interpreter/interpreter-tester.h",
+    "interpreter/interpreter-unittest.cc",
+    "interpreter/source-position-matcher.cc",
+    "interpreter/source-position-matcher.h",
+    "interpreter/source-positions-unittest.cc",
     "js-atomics/js-atomics-mutex-unittest.cc",
     "libplatform/default-job-unittest.cc",
     "libplatform/default-platform-unittest.cc",
@@ -411,7 +438,11 @@ v8_source_set("unittests_sources") {
     "objects/concurrent-script-context-table-unittest.cc",
     "objects/concurrent-string-unittest.cc",
     "objects/concurrent-transition-array-unittest.cc",
+    "objects/dictionary-unittest.cc",
     "objects/elements-kind-unittest.cc",
+    "objects/global-object-unittest.cc",
+    "objects/hashcode-unittest.cc",
+    "objects/intl-unittest.cc",
     "objects/managed-unittest.cc",
     "objects/modules-unittest.cc",
     "objects/object-unittest.cc",
@@ -454,6 +485,7 @@ v8_source_set("unittests_sources") {
     "utils/allocation-unittest.cc",
     "utils/bit-vector-unittest.cc",
     "utils/detachable-vector-unittest.cc",
+    "utils/identity-map-unittest.cc",
     "utils/locked-queue-unittest.cc",
     "utils/sparse-bit-vector-unittest.cc",
     "utils/utils-unittest.cc",
@@ -485,6 +517,7 @@ v8_source_set("unittests_sources") {
       "wasm/module-decoder-unittest.cc",
       "wasm/simd-shuffle-unittest.cc",
       "wasm/streaming-decoder-unittest.cc",
+      "wasm/string-builder-unittest.cc",
       "wasm/subtyping-unittest.cc",
       "wasm/wasm-code-manager-unittest.cc",
       "wasm/wasm-compiler-unittest.cc",
@@ -494,12 +527,23 @@ v8_source_set("unittests_sources") {
     ]
   }
 
+  if (v8_enable_wasm_simd256_revec) {
+    sources += [ "compiler/linear-scheduler-unittest.cc" ]
+  }
+
   if (v8_enable_wasm_gdb_remote_debugging) {
     sources += [ "wasm/wasm-gdbserver-unittest.cc" ]
   }
 
-  if (v8_enable_conservative_stack_scanning) {
+  if (v8_enable_inner_pointer_resolution_osb) {
     sources += [ "heap/object-start-bitmap-unittest.cc" ]
+  }
+
+  if (v8_enable_i18n_support) {
+    defines = [ "V8_INTL_SUPPORT" ]
+    public_deps = [ "//third_party/icu" ]
+  } else {
+    sources -= [ "objects/intl-unittest.cc" ]
   }
 
   if (v8_current_cpu == "arm") {
@@ -512,6 +556,7 @@ v8_source_set("unittests_sources") {
     sources += [
       "assembler/disasm-arm64-unittest.cc",
       "assembler/turbo-assembler-arm64-unittest.cc",
+      "codegen/pointer-auth-arm64-unittest.cc",
       "compiler/arm64/instruction-selector-arm64-unittest.cc",
     ]
   } else if (v8_current_cpu == "x86") {
@@ -587,6 +632,7 @@ v8_source_set("unittests_sources") {
     "../..:cppgc_base_config",
     "../..:external_config",
     "../..:internal_config_base",
+    ":gcc_warnings_not_errors",
   ]
 
   deps = [
@@ -621,4 +667,28 @@ v8_source_set("unittests_sources") {
 
     sources += [ "avoid-windows-h-includes.cc" ]
   }
+}
+
+v8_executable("generate-bytecode-expectations") {
+  testonly = true
+
+  sources = [
+    "interpreter/bytecode-expectations-printer.cc",
+    "interpreter/bytecode-expectations-printer.h",
+    "interpreter/generate-bytecode-expectations.cc",
+  ]
+
+  configs = [
+    "../..:external_config",
+    "../..:internal_config_base",
+  ]
+
+  deps = [
+    "../..:v8",
+    "../..:v8_libbase",
+    "../..:v8_libplatform",
+    "//build/win:default_exe_manifest",
+  ]
+
+  data = [ "interpreter/bytecode_expectations/" ]
 }

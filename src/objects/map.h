@@ -33,8 +33,10 @@ enum InstanceType : uint16_t;
   V(FixedDoubleArray)
 
 #define POINTER_VISITOR_ID_LIST(V)      \
+  V(AccessorInfo)                       \
   V(AllocationSite)                     \
   V(BytecodeArray)                      \
+  V(CallHandlerInfo)                    \
   V(Cell)                               \
   V(Code)                               \
   V(CodeDataContainer)                  \
@@ -45,6 +47,7 @@ enum InstanceType : uint16_t;
   V(FreeSpace)                          \
   V(JSApiObject)                        \
   V(JSArrayBuffer)                      \
+  V(JSAtomicsMutex)                     \
   V(JSDataView)                         \
   V(JSExternalObject)                   \
   V(JSFinalizationRegistry)             \
@@ -81,7 +84,7 @@ enum InstanceType : uint16_t;
   IF_WASM(V, WasmInstanceObject)        \
   IF_WASM(V, WasmInternalFunction)      \
   IF_WASM(V, WasmJSFunctionData)        \
-  IF_WASM(V, WasmOnFulfilledData)       \
+  IF_WASM(V, WasmResumeData)            \
   IF_WASM(V, WasmStruct)                \
   IF_WASM(V, WasmSuspenderObject)       \
   IF_WASM(V, WasmTypeInfo)              \
@@ -236,6 +239,8 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
   // (only used for JSObject in fast mode, for the other kinds of objects it
   // is equal to the instance size).
   inline int UsedInstanceSize() const;
+
+  inline bool HasOutOfObjectProperties() const;
 
   // Tells how many unused property fields (in-object or out-of object) are
   // available in the instance (only used for JSObject in fast mode).
@@ -426,6 +431,7 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
   inline bool has_nonextensible_elements() const;
   inline bool has_sealed_elements() const;
   inline bool has_frozen_elements() const;
+  inline bool has_shared_array_elements() const;
 
   // Weakly checks whether a map is detached from all transition trees. If this
   // returns true, the map is guaranteed to be detached. If it returns false,
@@ -500,8 +506,6 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
 
   FieldCounts GetFieldCounts() const;
   int NumberOfFields(ConcurrencyMode cmode) const;
-
-  bool HasOutOfObjectProperties() const;
 
   // TODO(ishell): candidate with JSObject::MigrateToMap().
   bool InstancesNeedRewriting(Map target, ConcurrencyMode cmode) const;

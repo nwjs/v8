@@ -10,7 +10,21 @@
 
   # This tests only the type system, no point in running several variants.
   'TypesTest.*': [PASS, NO_VARIANTS],
+
+  # https://crbug.com/v8/8919
+  'PlatformTest.StackAlignment': [PASS, ['not is_clang', SKIP]],
+
+  # These tests are supposed to fail in a slow DCHECK, skip them otherwise.
+  'PersistentHandlesTest.DereferencePersistentHandleFailsWhenDisallowed': [SKIP, ['mode == debug', FAIL]],
+
+  'IntlTest.StringLocaleCompareFastPath': [['mode != release', SKIP], SLOW, NO_VARIANTS],
 }],  # ALWAYS
+
+##############################################################################
+['mode == debug', {
+  'PersistentHandlesTest.NewPersistentHandleFailsWhenParked': [FAIL],
+  'PersistentHandlesTest.NewPersistentHandleFailsWhenParkedExplicit': [FAIL],
+}],
 
 ##############################################################################
 ['system == macos and asan', {
@@ -58,11 +72,6 @@
 ['system == aix', {
   # PASE does not support detecting physical memory size
   'SysInfoTest.AmountOfPhysicalMemory': [SKIP],
-  # intermittent crashes when tests are ran with test-runner.
-  'LogTest.LogAccessorCallbacks': [SKIP],
-  'LogTest.BuiltinsNotLoggedAsLazyCompile': [SKIP],
-  'LogTest.LogCallbacks': [SKIP],
-  'LogTest.Issue539892': [SKIP],
 }],  # system == aix
 
 ##############################################################################
@@ -71,13 +80,10 @@
   'HeapStatisticsCollectorTest.BriefStatisticsWithDiscardingOnNormalPage': [SKIP],
   'HeapStatisticsCollectorTest.DetailedStatisticsWithDiscardingOnNormalPage': [SKIP],
   'SweeperTest.DiscardingNormalPageMemory': [SKIP],
-}],  # arch == ppc64
 
-##############################################################################
-['no_js_shared_memory', {
-  # Tests that require shared cage implemented.
-  'JSAtomicsMutexTest.Contention': [SKIP],
-}],  # no_js_shared_memory
+  # https://crbug.com/v8/8766
+  'BytecodeGeneratorTest.WideRegisters': [SKIP],
+}],  # arch == ppc64
 
 ##############################################################################
 ['system == windows and asan', {
@@ -102,10 +108,6 @@
   # Tests that need to run sequentially (e.g. due to memory consumption).
   'MachineOperatorReducerTest.Word32EqualWithShiftedMaskedValueAndConstant': [PASS, HEAVY],
   'SequentialUnmapperTest.UnmapOnTeardown': [PASS, HEAVY],
-
-  #https://crbug.com/v8/12638
-  # Test seems super flaky, disabling for now
-  'SandboxTest.PartiallyReservedSandboxPageAllocation':[SKIP],
 }],  # tsan == True
 
 ##############################################################################
@@ -152,6 +154,7 @@
   'LogExternalInterpretedFramesNativeStackTest.ExternalLogEventListenerWithInterpretedFramesNativeStack': [SKIP],
   'LogInterpretedFramesNativeStackTest.LogInterpretedFramesNativeStack': [SKIP],
   'LogInterpretedFramesNativeStackWithSerializationTest.LogInterpretedFramesNativeStackWithSerialization': [SKIP],
+  'InterpreterTest.InterpreterWithNativeStack': [SKIP],
 }], # jitless
 
 ################################################################################
@@ -198,6 +201,10 @@
   # Access chunk metadata
   'RootsTest.TestHeapRootsNotReadOnly': [SKIP],
   'RootsTest.TestReadOnlyRoots': [SKIP],
+
+  # Expects OOM
+  'FactoryCodeBuilderOOMTest.Factory_CodeBuilder_BuildOOM': [SKIP],
+  'FactoryCodeBuilderOOMTest.Factory_CodeBuilder_TryBuildOOM': [SKIP],
 }], # third_party_heap
 
 ##############################################################################

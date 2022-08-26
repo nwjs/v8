@@ -177,8 +177,8 @@ DISALLOWED_FLAGS = [
   # TODO(https://crbug.com/1324097): Enable once maglev is more stable.
   '--maglev',
 
-  # The flag is unpredictably chatty.
-  '--no-use-map-space',
+  # Bails out when sorting, leading to differences in sorted output.
+  '--multi-mapped-mock-allocator',
 ]
 
 

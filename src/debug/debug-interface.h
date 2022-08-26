@@ -50,6 +50,9 @@ int GetContextId(Local<Context> context);
 void SetInspector(Isolate* isolate, v8_inspector::V8Inspector*);
 v8_inspector::V8Inspector* GetInspector(Isolate* isolate);
 
+// Returns a debug string representation of the bigint without tailing `n`.
+Local<String> GetBigIntStringValue(Isolate* isolate, Local<BigInt> bigint);
+
 // Returns a debug string representation of the bigint.
 Local<String> GetBigIntDescription(Isolate* isolate, Local<BigInt> bigint);
 
@@ -162,6 +165,7 @@ struct LiveEditResult {
   bool stack_changed = false;
   // Available only for OK.
   v8::Local<v8::debug::Script> script;
+  bool restart_top_frame_required = false;
   // Fields below are available only for COMPILE_ERROR.
   v8::Local<v8::String> message;
   int line_number = -1;
@@ -222,6 +226,7 @@ class V8_EXPORT_PRIVATE Script {
       GetSourceOffsetMode mode = GetSourceOffsetMode::kStrict) const;
   v8::debug::Location GetSourceLocation(int offset) const;
   bool SetScriptSource(v8::Local<v8::String> newSource, bool preview,
+                       bool allow_top_frame_live_editing,
                        LiveEditResult* result) const;
   bool SetBreakpoint(v8::Local<v8::String> condition, debug::Location* location,
                      BreakpointId* id) const;
@@ -230,6 +235,13 @@ class V8_EXPORT_PRIVATE Script {
   void RemoveWasmBreakpoint(BreakpointId id);
 #endif  // V8_ENABLE_WEBASSEMBLY
   bool SetInstrumentationBreakpoint(BreakpointId* id) const;
+};
+
+class DisassemblyCollector {
+ public:
+  virtual void ReserveLineCount(size_t count) = 0;
+  virtual void AddLine(const char* src, size_t length,
+                       uint32_t bytecode_offset) = 0;
 };
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -246,6 +258,11 @@ class WasmScript : public Script {
 
   std::pair<int, int> GetFunctionRange(int function_index) const;
   int GetContainingFunction(int byte_offset) const;
+  // For N functions, {starts} will have N+1 entries: the last is the offset of
+  // the first byte after the end of the last function.
+  void GetAllFunctionStarts(std::vector<int>& starts) const;
+
+  void Disassemble(DisassemblyCollector* collector);
 
   uint32_t GetFunctionHash(int function_index);
 
@@ -254,8 +271,8 @@ class WasmScript : public Script {
 };
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-V8_EXPORT_PRIVATE void GetLoadedScripts(Isolate* isolate,
-                                        PersistentValueVector<Script>& scripts);
+V8_EXPORT_PRIVATE void GetLoadedScripts(
+    Isolate* isolate, std::vector<v8::Global<Script>>& scripts);
 
 MaybeLocal<UnboundScript> CompileInspectorScript(Isolate* isolate,
                                                  Local<String> source);
@@ -553,17 +570,18 @@ class QueryObjectPredicate {
 
 void QueryObjects(v8::Local<v8::Context> context,
                   QueryObjectPredicate* predicate,
-                  v8::PersistentValueVector<v8::Object>* objects);
+                  std::vector<v8::Global<v8::Object>>* objects);
 
 void GlobalLexicalScopeNames(v8::Local<v8::Context> context,
-                             v8::PersistentValueVector<v8::String>* names);
+                             std::vector<v8::Global<v8::String>>* names);
 
 void SetReturnValue(v8::Isolate* isolate, v8::Local<v8::Value> value);
 
 enum class NativeAccessorType {
   None = 0,
   HasGetter = 1 << 0,
-  HasSetter = 1 << 1
+  HasSetter = 1 << 1,
+  IsValueUnavailable = 1 << 2
 };
 
 int64_t GetNextRandomInt64(v8::Isolate* isolate);

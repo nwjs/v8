@@ -24,6 +24,13 @@ SafepointTable::SafepointTable(Isolate* isolate, Address pc, Code code)
     : SafepointTable(code.InstructionStart(isolate, pc),
                      code.SafepointTableAddress()) {}
 
+#ifdef V8_EXTERNAL_CODE_SPACE
+SafepointTable::SafepointTable(Isolate* isolate, Address pc,
+                               CodeDataContainer code)
+    : SafepointTable(code.InstructionStart(isolate, pc),
+                     code.SafepointTableAddress()) {}
+#endif  // V8_EXTERNAL_CODE_SPACE
+
 #if V8_ENABLE_WEBASSEMBLY
 SafepointTable::SafepointTable(const wasm::WasmCode* code)
     : SafepointTable(
@@ -166,7 +173,7 @@ void SafepointTableBuilder::Emit(Assembler* assembler, int tagged_slots_size) {
   // Make sure the safepoint table is properly aligned. Pad with nops.
   assembler->Align(Code::kMetadataAlignment);
   assembler->RecordComment(";;; Safepoint table.");
-  safepoint_table_offset_ = assembler->pc_offset();
+  set_safepoint_table_offset(assembler->pc_offset());
 
   // Compute the required sizes of the fields.
   int used_register_indexes = 0;
@@ -203,10 +210,10 @@ void SafepointTableBuilder::Emit(Assembler* assembler, int tagged_slots_size) {
   // Add a CHECK to ensure we never overflow the space in the bitfield, even for
   // huge functions which might not be covered by tests.
   CHECK(SafepointTable::RegisterIndexesSizeField::is_valid(
-            register_indexes_size) &&
-        SafepointTable::PcSizeField::is_valid(pc_size) &&
-        SafepointTable::DeoptIndexSizeField::is_valid(deopt_index_size) &&
-        SafepointTable::TaggedSlotsBytesField::is_valid(tagged_slots_bytes));
+      register_indexes_size));
+  CHECK(SafepointTable::PcSizeField::is_valid(pc_size));
+  CHECK(SafepointTable::DeoptIndexSizeField::is_valid(deopt_index_size));
+  CHECK(SafepointTable::TaggedSlotsBytesField::is_valid(tagged_slots_bytes));
 
   uint32_t entry_configuration =
       SafepointTable::HasDeoptDataField::encode(has_deopt_data) |
