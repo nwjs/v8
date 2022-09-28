@@ -45,7 +45,9 @@ void UnifiedHeapMarkingState::MarkAndPush(
   Object object = BasicTracedReferenceExtractor::GetObjectForMarking(reference);
   if (!object.IsHeapObject()) {
     // The embedder is not aware of whether numbers are materialized as heap
-    // objects are just passed around as Smis.
+    // objects are just passed around as Smis. This branch also filters out
+    // intentionally passed `Smi::zero()` that indicate that there's no object
+    // to mark.
     return;
   }
   HeapObject heap_object = HeapObject::cast(object);

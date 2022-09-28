@@ -11,17 +11,19 @@ import { InstructionsPhase } from "./phases/instructions-phase";
 import { SchedulePhase } from "./phases/schedule-phase";
 import { SequencePhase } from "./phases/sequence-phase";
 import { BytecodeOrigin } from "./origin";
-import { Source } from "./source";
+import { BytecodeSource, BytecodeSourceData, Source } from "./source";
 import { NodeLabel } from "./node-label";
+import { TurboshaftCustomDataPhase } from "./phases/turboshaft-custom-data-phase";
 import { TurboshaftGraphPhase } from "./phases/turboshaft-graph-phase/turboshaft-graph-phase";
 
 export type GenericPosition = SourcePosition | BytecodePosition;
-export type GenericPhase = GraphPhase | TurboshaftGraphPhase | DisassemblyPhase
-  | InstructionsPhase | SchedulePhase | SequencePhase;
+export type GenericPhase = GraphPhase | TurboshaftGraphPhase | TurboshaftCustomDataPhase
+  | DisassemblyPhase | InstructionsPhase | SchedulePhase | SequencePhase;
 
 export class SourceResolver {
   nodePositionMap: Array<GenericPosition>;
   sources: Array<Source>;
+  bytecodeSources: Map<number, BytecodeSource>;
   inlinings: Array<InliningPosition>;
   inliningsMap: Map<string, InliningPosition>;
   positionToNodes: Map<string, Array<string>>;
@@ -36,6 +38,8 @@ export class SourceResolver {
     this.nodePositionMap = new Array<GenericPosition>();
     // Maps source ids to source objects.
     this.sources = new Array<Source>();
+    // Maps bytecode source ids to bytecode source objects.
+    this.bytecodeSources = new Map<number, BytecodeSource>();
     // Maps inlining ids to inlining objects.
     this.inlinings = new Array<InliningPosition>();
     // Maps source position keys to inlinings.
@@ -95,6 +99,22 @@ export class SourceResolver {
     }
   }
 
+  public setBytecodeSources(bytecodeSourcesJson): void {
+    if (!bytecodeSourcesJson) return;
+    for (const [sourceId, source] of Object.entries<any>(bytecodeSourcesJson)) {
+      const bytecodeSource = source.bytecodeSource;
+      const data = new Array<BytecodeSourceData>();
+
+      for (const bytecode of Object.values<BytecodeSourceData>(bytecodeSource.data)) {
+        data.push(new BytecodeSourceData(bytecode.offset, bytecode.disassembly));
+      }
+
+      const numSourceId = Number(sourceId);
+      this.bytecodeSources.set(numSourceId, new BytecodeSource(source.sourceId, source.functionName,
+        data, bytecodeSource.constantPool));
+    }
+  }
+
   public setNodePositionMap(mapJson): void {
     if (!mapJson) return;
     if (typeof mapJson[0] !== "object") {
@@ -129,6 +149,7 @@ export class SourceResolver {
 
   public parsePhases(phasesJson): void {
     const nodeLabelMap = new Array<NodeLabel>();
+    let lastTurboshaftGraphPhase: TurboshaftGraphPhase = null;
     for (const [, genericPhase] of Object.entries<GenericPhase>(phasesJson)) {
       switch (genericPhase.type) {
         case PhaseType.Disassembly:
@@ -179,6 +200,13 @@ export class SourceResolver {
             castedTurboshaftGraph.data);
           this.phaseNames.set(turboshaftGraphPhase.name, this.phases.length);
           this.phases.push(turboshaftGraphPhase);
+          lastTurboshaftGraphPhase = turboshaftGraphPhase;
+          break;
+        case PhaseType.TurboshaftCustomData:
+          const castedCustomData = camelize(genericPhase) as TurboshaftCustomDataPhase;
+          const customDataPhase = new TurboshaftCustomDataPhase(castedCustomData.name,
+            castedCustomData.dataTarget, castedCustomData.data);
+          lastTurboshaftGraphPhase?.customData?.addCustomData(customDataPhase);
           break;
         default:
           throw "Unsupported phase type";
@@ -257,6 +285,10 @@ export class SourceResolver {
 
   public getPhase(phaseId: number): GenericPhase {
     return this.phases[phaseId];
+  }
+
+  public getPhaseNameById(phaseId: number): string {
+    return this.getPhase(phaseId).name;
   }
 
   public getPhaseIdByName(phaseName: string): number {

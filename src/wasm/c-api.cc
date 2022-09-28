@@ -84,7 +84,7 @@ ValKind V8ValueTypeToWasm(i::wasm::ValueType v8_valtype) {
       switch (v8_valtype.heap_representation()) {
         case i::wasm::HeapType::kFunc:
           return FUNCREF;
-        case i::wasm::HeapType::kAny:
+        case i::wasm::HeapType::kExtern:
           return ANYREF;
         default:
           // TODO(wasm+): support new value types
@@ -109,7 +109,7 @@ i::wasm::ValueType WasmValKindToV8(ValKind kind) {
     case FUNCREF:
       return i::wasm::kWasmFuncRef;
     case ANYREF:
-      return i::wasm::kWasmAnyRef;
+      return i::wasm::kWasmExternRef;
     default:
       // TODO(wasm+): support new value types
       UNREACHABLE();
@@ -1670,7 +1670,7 @@ auto Func::call(const Val args[], Val results[]) const -> own<Trap> {
       instance->module()->functions[function_index].sig;
   PrepareFunctionData(isolate, function_data, sig, instance->module());
   i::Handle<i::CodeT> wrapper_code(function_data->c_wrapper_code(), isolate);
-  i::Address call_target = function_data->internal().foreign_address();
+  i::Address call_target = function_data->internal().call_target(isolate);
 
   i::wasm::CWasmArgumentsPacker packer(function_data->packed_args_size());
   PushArgs(sig, args, &packer, store);
@@ -1930,7 +1930,7 @@ auto Table::make(Store* store_abs, const TableType* type, const Ref* ref)
       break;
     case ANYREF:
       // See Engine::make().
-      i_type = i::wasm::kWasmAnyRef;
+      i_type = i::wasm::kWasmExternRef;
       break;
     default:
       UNREACHABLE();
@@ -1976,7 +1976,7 @@ auto Table::type() const -> own<TableType> {
     case i::wasm::HeapType::kFunc:
       kind = FUNCREF;
       break;
-    case i::wasm::HeapType::kAny:
+    case i::wasm::HeapType::kExtern:
       kind = ANYREF;
       break;
     default:
@@ -2059,11 +2059,11 @@ auto Memory::make(Store* store_abs, const MemoryType* type) -> own<Memory> {
   uint32_t minimum = limits.min;
   // The max_mem_pages limit is only spec'ed for JS embeddings, so we'll
   // directly use the maximum pages limit here.
-  if (minimum > i::wasm::kSpecMaxMemoryPages) return nullptr;
+  if (minimum > i::wasm::kSpecMaxMemory32Pages) return nullptr;
   uint32_t maximum = limits.max;
   if (maximum != Limits(0).max) {
     if (maximum < minimum) return nullptr;
-    if (maximum > i::wasm::kSpecMaxMemoryPages) return nullptr;
+    if (maximum > i::wasm::kSpecMaxMemory32Pages) return nullptr;
   }
   // TODO(wasm+): Support shared memory.
   i::SharedFlag shared = i::SharedFlag::kNotShared;

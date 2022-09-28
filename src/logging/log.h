@@ -95,7 +95,7 @@ class ExistingCodeLogger {
   void LogExistingFunction(
       Handle<SharedFunctionInfo> shared, Handle<AbstractCode> code,
       LogEventListener::CodeTag tag = LogEventListener::CodeTag::kFunction);
-  void LogCodeObject(Object object);
+  void LogCodeObject(AbstractCode object);
 
  private:
   Isolate* isolate_;
@@ -235,13 +235,6 @@ class V8FileLogger : public LogEventListener {
 
   V8_EXPORT_PRIVATE void TimerEvent(v8::LogEventStatus se, const char* name);
 
-  void BasicBlockCounterEvent(const char* name, int block_id, uint32_t count);
-
-  void BasicBlockBranchEvent(const char* name, int true_block_id,
-                             int false_block_id);
-
-  void BuiltinHashEvent(const char* name, int hash);
-
   static void EnterExternal(Isolate* isolate);
   static void LeaveExternal(Isolate* isolate);
 
@@ -351,7 +344,7 @@ class V8FileLogger : public LogEventListener {
 #ifdef ENABLE_GDB_JIT_INTERFACE
   std::unique_ptr<JitLogger> gdb_jit_logger_;
 #endif
-#if defined(V8_OS_WIN) && defined(V8_ENABLE_SYSTEM_INSTRUMENTATION)
+#if defined(V8_OS_WIN) && defined(V8_ENABLE_ETW_STACK_WALKING)
   std::unique_ptr<JitLogger> etw_jit_logger_;
 #endif
   std::set<int> logged_source_code_;

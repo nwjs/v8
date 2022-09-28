@@ -214,11 +214,11 @@ MemoryChunk* MemoryChunkIterator::Next() {
 
 AllocationResult SpaceWithLinearArea::AllocateFastUnaligned(
     int size_in_bytes, AllocationOrigin origin) {
-  if (!allocation_info_->CanIncrementTop(size_in_bytes)) {
+  if (!allocation_info_.CanIncrementTop(size_in_bytes)) {
     return AllocationResult::Failure();
   }
   HeapObject obj =
-      HeapObject::FromAddress(allocation_info_->IncrementTop(size_in_bytes));
+      HeapObject::FromAddress(allocation_info_.IncrementTop(size_in_bytes));
 
   MSAN_ALLOCATED_UNINITIALIZED_MEMORY(obj.address(), size_in_bytes);
 
@@ -228,15 +228,15 @@ AllocationResult SpaceWithLinearArea::AllocateFastUnaligned(
 AllocationResult SpaceWithLinearArea::AllocateFastAligned(
     int size_in_bytes, int* result_aligned_size_in_bytes,
     AllocationAlignment alignment, AllocationOrigin origin) {
-  Address top = allocation_info_->top();
+  Address top = allocation_info_.top();
   int filler_size = Heap::GetFillToAlign(top, alignment);
   int aligned_size_in_bytes = size_in_bytes + filler_size;
 
-  if (!allocation_info_->CanIncrementTop(aligned_size_in_bytes)) {
+  if (!allocation_info_.CanIncrementTop(aligned_size_in_bytes)) {
     return AllocationResult::Failure();
   }
   HeapObject obj = HeapObject::FromAddress(
-      allocation_info_->IncrementTop(aligned_size_in_bytes));
+      allocation_info_.IncrementTop(aligned_size_in_bytes));
   if (result_aligned_size_in_bytes)
     *result_aligned_size_in_bytes = aligned_size_in_bytes;
 
@@ -256,7 +256,8 @@ AllocationResult SpaceWithLinearArea::AllocateRaw(int size_in_bytes,
 
   AllocationResult result;
 
-  if (USE_ALLOCATION_ALIGNMENT_BOOL && alignment != kTaggedAligned) {
+  if (V8_COMPRESS_POINTERS_8GB_BOOL ||
+      (USE_ALLOCATION_ALIGNMENT_BOOL && alignment != kTaggedAligned)) {
     result = AllocateFastAligned(size_in_bytes, nullptr, alignment, origin);
   } else {
     result = AllocateFastUnaligned(size_in_bytes, origin);
@@ -276,7 +277,7 @@ AllocationResult SpaceWithLinearArea::AllocateRawUnaligned(
   }
 
   DCHECK_EQ(max_aligned_size, size_in_bytes);
-  DCHECK_LE(allocation_info_->start(), allocation_info_->top());
+  DCHECK_LE(allocation_info_.start(), allocation_info_.top());
 
   AllocationResult result = AllocateFastUnaligned(size_in_bytes, origin);
   DCHECK(!result.IsFailure());
@@ -300,7 +301,7 @@ AllocationResult SpaceWithLinearArea::AllocateRawAligned(
   }
 
   DCHECK_GE(max_aligned_size, size_in_bytes);
-  DCHECK_LE(allocation_info_->start(), allocation_info_->top());
+  DCHECK_LE(allocation_info_.start(), allocation_info_.top());
 
   int aligned_size_in_bytes;
 
@@ -322,7 +323,8 @@ AllocationResult SpaceWithLinearArea::AllocateRawAligned(
 AllocationResult SpaceWithLinearArea::AllocateRawSlow(
     int size_in_bytes, AllocationAlignment alignment, AllocationOrigin origin) {
   AllocationResult result =
-      USE_ALLOCATION_ALIGNMENT_BOOL && alignment != kTaggedAligned
+      V8_COMPRESS_POINTERS_8GB_BOOL ||
+              (USE_ALLOCATION_ALIGNMENT_BOOL && alignment != kTaggedAligned)
           ? AllocateRawAligned(size_in_bytes, alignment, origin)
           : AllocateRawUnaligned(size_in_bytes, origin);
   return result;

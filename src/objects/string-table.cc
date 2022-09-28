@@ -435,7 +435,7 @@ void SetInternalizedReference(Isolate* isolate, String string,
   // TODO(v8:12007): Support external strings.
   DCHECK(!string.IsThinString());
   DCHECK(internalized.IsInternalizedString());
-  DCHECK(!internalized.HasForwardingIndex());
+  DCHECK(!internalized.HasForwardingIndex(kAcquireLoad));
   if ((string.IsShared() || FLAG_always_use_string_forwarding_table) &&
       !string.IsExternalString()) {
     uint32_t field = string.raw_hash_field();
@@ -443,15 +443,14 @@ void SetInternalizedReference(Isolate* isolate, String string,
     // Using the hash field for the integer index is more beneficial than
     // using it to store the forwarding index to the internalized string.
     if (Name::IsIntegerIndex(field)) return;
-    // Check one last time if we already have a forwarding index to prevent
-    // too many copies of the string in the forwarding table.
-    if (Name::IsForwardingIndex(field)) return;
+    // Check one last time if we already have an internalized forwarding index
+    // to prevent too many copies of the string in the forwarding table.
+    if (Name::IsInternalizedForwardingIndex(field)) return;
 
     const int forwarding_index =
         isolate->string_forwarding_table()->Add(isolate, string, internalized);
     string.set_raw_hash_field(
-        String::CreateHashFieldValue(forwarding_index,
-                                     String::HashFieldType::kForwardingIndex),
+        String::CreateInternalizedForwardingIndex(forwarding_index),
         kReleaseStore);
   } else {
     if (V8_UNLIKELY(FLAG_always_use_string_forwarding_table)) {
@@ -461,7 +460,7 @@ void SetInternalizedReference(Isolate* isolate, String string,
       DCHECK(string.IsExternalString());
       string.set_raw_hash_field(internalized.raw_hash_field());
     }
-    DCHECK(!string.HasForwardingIndex());
+    DCHECK(!string.HasForwardingIndex(kAcquireLoad));
     string.MakeThin(isolate, internalized);
   }
 }
@@ -482,7 +481,7 @@ Handle<String> StringTable::LookupString(Isolate* isolate,
   //  - String::Flatten is not threadsafe but is only called on non-shared
   //    strings, since non-flat strings are not shared.
   //
-  //  - String::ComputeAndSetHash is threadsafe on flat strings. This is safe
+  //  - String::ComputeAndSetRawHash is threadsafe on flat strings. This is safe
   //    because the characters are immutable and the same hash will be
   //    computed. The hash field is set with relaxed memory order. A thread that
   //    doesn't see the hash may do redundant work but will not be incorrect.
@@ -500,15 +499,18 @@ Handle<String> StringTable::LookupString(Isolate* isolate,
   // delay the transition into a ThinString to the next stop-the-world GC.
   Handle<String> result = String::Flatten(isolate, string);
   if (!result->IsInternalizedString()) {
-    result->EnsureHash();
     uint32_t raw_hash_field = result->raw_hash_field(kAcquireLoad);
 
-    if (String::IsForwardingIndex(raw_hash_field)) {
-      const int index = String::HashBits::decode(raw_hash_field);
+    if (String::IsInternalizedForwardingIndex(raw_hash_field)) {
+      const int index =
+          String::ForwardingIndexValueBits::decode(raw_hash_field);
       result = handle(
           isolate->string_forwarding_table()->GetForwardString(isolate, index),
           isolate);
     } else {
+      if (!Name::IsHashFieldComputed(raw_hash_field)) {
+        raw_hash_field = result->EnsureRawHash();
+      }
       InternalizedStringKey key(result, raw_hash_field);
       result = LookupKey(isolate, &key);
     }
@@ -689,8 +691,9 @@ Address StringTable::Data::TryStringToIndexOrLookupExisting(Isolate* isolate,
 
   // First check if the string constains a forwarding index.
   uint32_t raw_hash_field = source.raw_hash_field(kAcquireLoad);
-  if (Name::IsForwardingIndex(raw_hash_field) && is_source_hash_usable) {
-    const int index = Name::HashBits::decode(raw_hash_field);
+  if (Name::IsInternalizedForwardingIndex(raw_hash_field) &&
+      is_source_hash_usable) {
+    const int index = Name::ForwardingIndexValueBits::decode(raw_hash_field);
     String internalized =
         isolate->string_forwarding_table()->GetForwardString(isolate, index);
     return internalized.ptr();
@@ -852,6 +855,14 @@ class StringForwardingTable::Block {
     return String::cast(Get(isolate, IndexOfForwardString(index)));
   }
 
+  uint32_t GetRawHash(Isolate* isolate, int index) const {
+    DCHECK_LT(index, capacity());
+    String internalized = GetForwardString(isolate, index);
+    uint32_t raw_hash = internalized.raw_hash_field();
+    DCHECK(Name::IsHashFieldComputed(raw_hash));
+    return raw_hash;
+  }
+
   void IterateElements(RootVisitor* visitor, int up_to_index) {
     OffHeapObjectSlot first_slot = slot(0);
     OffHeapObjectSlot end_slot = slot(IndexOfOriginalString(up_to_index));
@@ -928,6 +939,8 @@ void StringForwardingTable::Block::UpdateAfterEvacuation(Isolate* isolate) {
 
 void StringForwardingTable::Block::UpdateAfterEvacuation(Isolate* isolate,
                                                          int up_to_index) {
+  // This is only used for Scavenger.
+  DCHECK(!FLAG_minor_mc);
   DCHECK(FLAG_always_use_string_forwarding_table);
   for (int index = 0; index < up_to_index; ++index) {
     Object original = Get(isolate, IndexOfOriginalString(index));
@@ -1089,6 +1102,15 @@ Address StringForwardingTable::GetForwardStringAddress(Isolate* isolate,
   return isolate->string_forwarding_table()
       ->GetForwardString(isolate, index)
       .ptr();
+}
+
+uint32_t StringForwardingTable::GetRawHash(Isolate* isolate, int index) const {
+  CHECK_LT(index, Size());
+  uint32_t index_in_block;
+  const uint32_t block = BlockForIndex(index, &index_in_block);
+  Block* data =
+      blocks_.load(std::memory_order_acquire)->LoadBlock(block, kAcquireLoad);
+  return data->GetRawHash(isolate, index_in_block);
 }
 
 void StringForwardingTable::IterateElements(RootVisitor* visitor) {

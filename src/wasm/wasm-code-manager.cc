@@ -12,7 +12,6 @@
 #include "src/base/build_config.h"
 #include "src/base/iterator.h"
 #include "src/base/macros.h"
-#include "src/base/platform/memory-protection-key.h"
 #include "src/base/platform/platform.h"
 #include "src/base/small-vector.h"
 #include "src/base/string-format.h"
@@ -20,6 +19,7 @@
 #include "src/codegen/assembler-inl.h"
 #include "src/codegen/macro-assembler-inl.h"
 #include "src/codegen/macro-assembler.h"
+#include "src/common/code-memory-access.h"
 #include "src/common/globals.h"
 #include "src/diagnostics/disassembler.h"
 #include "src/logging/counters.h"
@@ -517,10 +517,9 @@ int WasmCode::GetSourcePositionBefore(int offset) {
 constexpr size_t WasmCodeAllocator::kMaxCodeSpaceSize;
 
 WasmCodeAllocator::WasmCodeAllocator(std::shared_ptr<Counters> async_counters)
-    : protect_code_memory_(
-          !V8_HAS_PTHREAD_JIT_WRITE_PROTECT &&
-          FLAG_wasm_write_protect_code_memory &&
-          !GetWasmCodeManager()->MemoryProtectionKeysEnabled()),
+    : protect_code_memory_(!V8_HAS_PTHREAD_JIT_WRITE_PROTECT &&
+                           FLAG_wasm_write_protect_code_memory &&
+                           !WasmCodeManager::MemoryProtectionKeysEnabled()),
       async_counters_(std::move(async_counters)) {
   owned_code_space_.reserve(4);
 }
@@ -610,13 +609,6 @@ size_t OverheadPerCodeSpace(uint32_t num_declared_functions) {
 size_t ReservationSize(size_t code_size_estimate, int num_declared_functions,
                        size_t total_reserved) {
   size_t overhead = OverheadPerCodeSpace(num_declared_functions);
-  // If this is the first code space, we also need space for the lazy
-  // compilation jump table (except if both dynamic tiering and lazy compilation
-  // are disabled via flags, which we chose to ignore here).
-  if (total_reserved == 0) {
-    overhead += JumpTableAssembler::SizeForNumberOfLazyFunctions(
-        num_declared_functions);
-  }
 
   // Reserve the maximum of
   //   a) needed size + overhead (this is the minimum needed)
@@ -1726,6 +1718,20 @@ void NativeModule::UpdateCPUDuration(size_t cpu_duration, ExecutionTier tier) {
   }
 }
 
+void NativeModule::AddLazyCompilationTimeSample(int64_t sample_in_micro_sec) {
+  num_lazy_compilations_.fetch_add(1, std::memory_order_relaxed);
+  sum_lazy_compilation_time_in_micro_sec_.fetch_add(sample_in_micro_sec,
+                                                    std::memory_order_relaxed);
+  int64_t max =
+      max_lazy_compilation_time_in_micro_sec_.load(std::memory_order_relaxed);
+  while (sample_in_micro_sec > max &&
+         !max_lazy_compilation_time_in_micro_sec_.compare_exchange_weak(
+             max, sample_in_micro_sec, std::memory_order_relaxed,
+             std::memory_order_relaxed)) {
+    // Repeat until we set the new maximum sucessfully.
+  }
+}
+
 void NativeModule::TransferNewOwnedCodeLocked() const {
   allocation_mutex_.AssertHeld();
   DCHECK(!new_owned_code_.empty());
@@ -1779,19 +1785,6 @@ WasmCode* NativeModule::Lookup(Address pc) const {
   return candidate;
 }
 
-uint32_t NativeModule::GetJumpTableOffset(uint32_t func_index) const {
-  uint32_t slot_idx = declared_function_index(module(), func_index);
-  return JumpTableAssembler::JumpSlotIndexToOffset(slot_idx);
-}
-
-Address NativeModule::GetCallTargetForFunction(uint32_t func_index) const {
-  // Return the jump table slot for that function index.
-  DCHECK_NOT_NULL(main_jump_table_);
-  uint32_t slot_offset = GetJumpTableOffset(func_index);
-  DCHECK_LT(slot_offset, main_jump_table_->instructions().size());
-  return main_jump_table_->instruction_start() + slot_offset;
-}
-
 NativeModule::JumpTablesRef NativeModule::FindJumpTablesForRegionLocked(
     base::AddressRegion code_region) const {
   allocation_mutex_.AssertHeld();
@@ -1832,7 +1825,7 @@ NativeModule::JumpTablesRef NativeModule::FindJumpTablesForRegionLocked(
 Address NativeModule::GetNearCallTargetForFunction(
     uint32_t func_index, const JumpTablesRef& jump_tables) const {
   DCHECK(jump_tables.is_valid());
-  uint32_t slot_offset = GetJumpTableOffset(func_index);
+  uint32_t slot_offset = JumpTableOffset(module(), func_index);
   return jump_tables.jump_table_start + slot_offset;
 }
 
@@ -1894,18 +1887,11 @@ NativeModule::~NativeModule() {
 
 WasmCodeManager::WasmCodeManager()
     : max_committed_code_space_(FLAG_wasm_max_code_space * MB),
-      critical_committed_code_space_(max_committed_code_space_ / 2),
-      memory_protection_key_(base::MemoryProtectionKey::AllocateKey()) {
-  // Ensure that RwxMemoryWriteScope and other dependent scopes (in particular,
-  // wasm::CodeSpaceWriteScope) are allowed to be used.
-  CHECK(RwxMemoryWriteScope::IsAllowed());
-}
+      critical_committed_code_space_(max_committed_code_space_ / 2) {}
 
 WasmCodeManager::~WasmCodeManager() {
   // No more committed code space.
   DCHECK_EQ(0, total_committed_code_space_.load());
-
-  base::MemoryProtectionKey::FreeKey(memory_protection_key_);
 }
 
 #if defined(V8_OS_WIN64)
@@ -1955,14 +1941,19 @@ void WasmCodeManager::Commit(base::AddressRegion region) {
   // open when calling this method.
   PageAllocator::Permission permission = PageAllocator::kReadWriteExecute;
 
-  bool success;
+  bool success = false;
   if (MemoryProtectionKeysEnabled()) {
+#if V8_HAS_PKU_JIT_WRITE_PROTECT
     TRACE_HEAP(
-        "Setting rwx permissions and memory protection key %d for 0x%" PRIxPTR
+        "Setting rwx permissions and memory protection key for 0x%" PRIxPTR
         ":0x%" PRIxPTR "\n",
-        memory_protection_key_, region.begin(), region.end());
+        region.begin(), region.end());
     success = base::MemoryProtectionKey::SetPermissionsAndKey(
-        GetPlatformPageAllocator(), region, permission, memory_protection_key_);
+        GetPlatformPageAllocator(), region, permission,
+        RwxMemoryWriteScope::memory_protection_key());
+#else
+    UNREACHABLE();
+#endif  // V8_HAS_PKU_JIT_WRITE_PROTECT
   } else {
     TRACE_HEAP("Setting rwx permissions for 0x%" PRIxPTR ":0x%" PRIxPTR "\n",
                region.begin(), region.end());
@@ -2162,52 +2153,41 @@ size_t WasmCodeManager::EstimateNativeModuleMetaDataSize(
          far_jump_table_size;
 }
 
-void WasmCodeManager::SetThreadWritable(bool writable) {
-  DCHECK(MemoryProtectionKeysEnabled());
-
-  auto permissions = writable ? base::MemoryProtectionKey::kNoRestrictions
-                              : base::MemoryProtectionKey::kDisableWrite;
-
-  // When switching to writable we should not already be writable. Otherwise
-  // this points at a problem with counting writers, or with wrong
-  // initialization (globally or per thread).
-  DCHECK_IMPLIES(writable, !MemoryProtectionKeyWritable());
-
-  TRACE_HEAP("Setting memory protection key %d to writable: %d.\n",
-             memory_protection_key_, writable);
-  base::MemoryProtectionKey::SetPermissionsForKey(memory_protection_key_,
-                                                  permissions);
+// static
+bool WasmCodeManager::HasMemoryProtectionKeySupport() {
+#if V8_HAS_PKU_JIT_WRITE_PROTECT
+  return RwxMemoryWriteScope::IsSupported();
+#else
+  return false;
+#endif  // V8_HAS_PKU_JIT_WRITE_PROTECT
 }
 
-bool WasmCodeManager::HasMemoryProtectionKeySupport() const {
-  return memory_protection_key_ !=
-         base::MemoryProtectionKey::kNoMemoryProtectionKey;
-}
-
-bool WasmCodeManager::MemoryProtectionKeysEnabled() const {
+// static
+bool WasmCodeManager::MemoryProtectionKeysEnabled() {
   return HasMemoryProtectionKeySupport() && FLAG_wasm_memory_protection_keys;
 }
 
-bool WasmCodeManager::MemoryProtectionKeyWritable() const {
-  return base::MemoryProtectionKey::GetKeyPermission(memory_protection_key_) ==
-         base::MemoryProtectionKey::kNoRestrictions;
+// static
+bool WasmCodeManager::MemoryProtectionKeyWritable() {
+#if V8_HAS_PKU_JIT_WRITE_PROTECT
+  return RwxMemoryWriteScope::IsPKUWritable();
+#else
+  return false;
+#endif  // V8_HAS_PKU_JIT_WRITE_PROTECT
 }
 
-void WasmCodeManager::InitializeMemoryProtectionKeyPermissionsIfSupported()
-    const {
+// static
+void WasmCodeManager::InitializeMemoryProtectionKeyPermissionsIfSupported() {
   if (!HasMemoryProtectionKeySupport()) return;
   // The default permission is {kDisableAccess}. Switch from that to
   // {kDisableWrite}. Leave other permissions untouched, as the thread did
   // already use the memory protection key in that case.
-  if (base::MemoryProtectionKey::GetKeyPermission(memory_protection_key_) ==
-      base::MemoryProtectionKey::kDisableAccess) {
-    base::MemoryProtectionKey::SetPermissionsForKey(
-        memory_protection_key_, base::MemoryProtectionKey::kDisableWrite);
-  }
+  RwxMemoryWriteScope initialize_permission_scope(
+      "For initialization if PKU is in kNoAccess permission case.");
 }
 
 base::AddressRegion WasmCodeManager::AllocateAssemblerBufferSpace(int size) {
-#if defined(V8_OS_LINUX) && defined(V8_HOST_ARCH_X64)
+#if V8_HAS_PKU_JIT_WRITE_PROTECT
   if (MemoryProtectionKeysEnabled()) {
     auto* page_allocator = GetPlatformPageAllocator();
     size_t page_size = page_allocator->AllocatePageSize();
@@ -2227,23 +2207,23 @@ base::AddressRegion WasmCodeManager::AllocateAssemblerBufferSpace(int size) {
         base::AddressRegionOf(reinterpret_cast<uint8_t*>(mapped), size);
     CHECK(base::MemoryProtectionKey::SetPermissionsAndKey(
         page_allocator, region, PageAllocator::kReadWrite,
-        memory_protection_key_));
+        RwxMemoryWriteScope::memory_protection_key()));
     return region;
   }
-#endif  // defined(V8_OS_LINUX) && defined(V8_HOST_ARCH_X64)
+#endif  // V8_HAS_PKU_JIT_WRITE_PROTECT
   DCHECK(!MemoryProtectionKeysEnabled());
   return base::AddressRegionOf(new uint8_t[size], size);
 }
 
 void WasmCodeManager::FreeAssemblerBufferSpace(base::AddressRegion region) {
-#if defined(V8_OS_LINUX) && defined(V8_HOST_ARCH_X64)
+#if V8_HAS_PKU_JIT_WRITE_PROTECT
   if (MemoryProtectionKeysEnabled()) {
     auto* page_allocator = GetPlatformPageAllocator();
     FreePages(page_allocator, reinterpret_cast<void*>(region.begin()),
               region.size());
     return;
   }
-#endif  // defined(V8_OS_LINUX) && defined(V8_HOST_ARCH_X64)
+#endif  // V8_HAS_PKU_JIT_WRITE_PROTECT
   DCHECK(!MemoryProtectionKeysEnabled());
   delete[] reinterpret_cast<uint8_t*>(region.begin());
 }

@@ -208,7 +208,7 @@
 #define WASM_SELECT_D(tval, fval, cond) \
   tval, fval, cond, kExprSelectWithType, U32V_1(1), kF64Code
 #define WASM_SELECT_R(tval, fval, cond) \
-  tval, fval, cond, kExprSelectWithType, U32V_1(1), kAnyRefCode
+  tval, fval, cond, kExprSelectWithType, U32V_1(1), kExternRefCode
 #define WASM_SELECT_A(tval, fval, cond) \
   tval, fval, cond, kExprSelectWithType, U32V_1(1), kFuncRefCode
 
@@ -534,23 +534,19 @@ inline uint16_t ExtractPrefixedOpcodeBytes(WasmOpcode opcode) {
   WASM_GC_OP(kExprBrOnCastStaticFail), static_cast<byte>(depth), \
       static_cast<byte>(typeidx)
 
-#define WASM_REF_IS_FUNC(ref) ref, WASM_GC_OP(kExprRefIsFunc)
+#define WASM_GC_INTERNALIZE(extern) extern, WASM_GC_OP(kExprExternInternalize)
+
 #define WASM_REF_IS_DATA(ref) ref, WASM_GC_OP(kExprRefIsData)
 #define WASM_REF_IS_ARRAY(ref) ref, WASM_GC_OP(kExprRefIsArray)
 #define WASM_REF_IS_I31(ref) ref, WASM_GC_OP(kExprRefIsI31)
-#define WASM_REF_AS_FUNC(ref) ref, WASM_GC_OP(kExprRefAsFunc)
 #define WASM_REF_AS_DATA(ref) ref, WASM_GC_OP(kExprRefAsData)
 #define WASM_REF_AS_ARRAY(ref) ref, WASM_GC_OP(kExprRefAsArray)
 #define WASM_REF_AS_I31(ref) ref, WASM_GC_OP(kExprRefAsI31)
-#define WASM_BR_ON_FUNC(depth) \
-  WASM_GC_OP(kExprBrOnFunc), static_cast<byte>(depth)
 #define WASM_BR_ON_ARRAY(depth) \
   WASM_GC_OP(kExprBrOnArray), static_cast<byte>(depth)
 #define WASM_BR_ON_DATA(depth) \
   WASM_GC_OP(kExprBrOnData), static_cast<byte>(depth)
 #define WASM_BR_ON_I31(depth) WASM_GC_OP(kExprBrOnI31), static_cast<byte>(depth)
-#define WASM_BR_ON_NON_FUNC(depth) \
-  WASM_GC_OP(kExprBrOnNonFunc), static_cast<byte>(depth)
 #define WASM_BR_ON_NON_ARRAY(depth) \
   WASM_GC_OP(kExprBrOnNonArray), static_cast<byte>(depth)
 #define WASM_BR_ON_NON_DATA(depth) \
@@ -580,10 +576,6 @@ inline uint16_t ExtractPrefixedOpcodeBytes(WasmOpcode opcode) {
 #define WASM_ARRAY_NEW_FIXED_STATIC(index, length, ...)                        \
   __VA_ARGS__, WASM_GC_OP(kExprArrayNewFixedStatic), static_cast<byte>(index), \
       static_cast<byte>(length)
-
-#define WASM_RTT(typeidx) kRttCode, U32V_1(typeidx)
-#define WASM_RTT_CANON(typeidx) \
-  WASM_GC_OP(kExprRttCanon), static_cast<byte>(typeidx)
 
 #define WASM_I31_NEW(val) val, WASM_GC_OP(kExprI31New)
 #define WASM_I31_GET_S(val) val, WASM_GC_OP(kExprI31GetS)

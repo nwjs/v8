@@ -130,6 +130,15 @@ for (let i = 0; i < 100; i++) {
 // double add_all_<TYPE>_typed_array(bool /*should_fallback*/, FastApiTypedArray<TYPE>)
 
 (function () {
+  function uint8_test() {
+    let typed_array = new Uint8Array([1, 2, 3]);
+    return fast_c_api.add_all_uint8_typed_array(false /* should_fallback */,
+      typed_array);
+  }
+  ExpectFastCall(uint8_test, 6);
+})();
+
+(function () {
   function int32_test() {
     let typed_array = new Int32Array([-42, 1, 2, 3]);
     return fast_c_api.add_all_int32_typed_array(false /* should_fallback */,
@@ -262,6 +271,25 @@ for (let i = 0; i < 100; i++) {
   ExpectFastCall(int32_test, 0);
 })();
 
+(function () {
+  function uint8_test() {
+    let typed_array = new Uint8Array(0);
+    return fast_c_api.add_all_uint8_typed_array(false /* should_fallback */,
+      typed_array);
+  }
+  ExpectFastCall(uint8_test, 0);
+})();
+
+// Values out of [0, 255] range are properly truncated.
+(function() {
+  function uint8_test() {
+    let typed_array = new Uint8Array([0, 256, -1]);
+    return fast_c_api.add_all_uint8_typed_array(false /* should_fallback */,
+      typed_array);
+  }
+  ExpectFastCall(uint8_test, 255);
+})();
+
 // Invalid argument types instead of a TypedArray.
 (function () {
   function invalid_test(arg) {
@@ -289,4 +317,19 @@ for (let i = 0; i < 100; i++) {
   %OptimizeFunctionOnNextCall(null_test);
 
   assert_throws_and_optimized(null_test, null);
+})();
+
+// Passing `null` instead of a TypedArray in a non-overloaded function.
+(function () {
+  function invalid_value() {
+    const arr = new Array(2);
+    Object.defineProperty(Array.prototype, 1, {
+      get() {
+        throw new 'get is called.';
+      }
+    });
+
+    fast_c_api.add_all_sequence(false /* should_fallback */, arr);
+  }
+  assertThrows(() => invalid_value());
 })();

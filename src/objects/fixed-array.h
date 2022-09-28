@@ -50,7 +50,7 @@ namespace internal {
   V(SCRIPT_LIST_SUB_TYPE)                        \
   V(SERIALIZED_OBJECTS_SUB_TYPE)                 \
   V(SHARED_FUNCTION_INFOS_SUB_TYPE)              \
-  V(SINGLE_CHARACTER_STRING_CACHE_SUB_TYPE)      \
+  V(SINGLE_CHARACTER_STRING_TABLE_SUB_TYPE)      \
   V(SLOW_TEMPLATE_INSTANTIATIONS_CACHE_SUB_TYPE) \
   V(STRING_SPLIT_CACHE_SUB_TYPE)                 \
   V(TEMPLATE_INFO_SUB_TYPE)                      \
@@ -422,6 +422,9 @@ class WeakArrayList
   // duplicates.
   V8_EXPORT_PRIVATE bool RemoveOne(const MaybeObjectHandle& value);
 
+  // Searches the array (linear time) and returns whether it contains the value.
+  V8_EXPORT_PRIVATE bool Contains(MaybeObject value);
+
   class Iterator;
 
  private:
@@ -455,9 +458,9 @@ class WeakArrayList::Iterator {
 // underlying FixedArray starting at kFirstIndex.
 class ArrayList : public TorqueGeneratedArrayList<ArrayList, FixedArray> {
  public:
-  V8_EXPORT_PRIVATE static Handle<ArrayList> Add(Isolate* isolate,
-                                                 Handle<ArrayList> array,
-                                                 Handle<Object> obj);
+  V8_EXPORT_PRIVATE static Handle<ArrayList> Add(
+      Isolate* isolate, Handle<ArrayList> array, Handle<Object> obj,
+      AllocationType allocation = AllocationType::kYoung);
   V8_EXPORT_PRIVATE static Handle<ArrayList> Add(Isolate* isolate,
                                                  Handle<ArrayList> array,
                                                  Handle<Object> obj1,
@@ -502,8 +505,9 @@ class ArrayList : public TorqueGeneratedArrayList<ArrayList, FixedArray> {
   DECL_VERIFIER(ArrayList)
 
  private:
-  static Handle<ArrayList> EnsureSpace(Isolate* isolate,
-                                       Handle<ArrayList> array, int length);
+  static Handle<ArrayList> EnsureSpace(
+      Isolate* isolate, Handle<ArrayList> array, int length,
+      AllocationType allocation = AllocationType::kYoung);
   TQ_OBJECT_CONSTRUCTORS(ArrayList)
 };
 

@@ -522,7 +522,7 @@ struct TargetAndInstance {
 
 macro GetTargetAndInstance(funcref: WasmInternalFunction): TargetAndInstance {
   const ref = funcref.ref;
-  let target = funcref.foreign_address_ptr;
+  let target = funcref.call_target_ptr;
   if (Signed(target) == IntPtrConstant(0)) {
     target = GetCodeEntry(funcref.code);
   }
@@ -738,7 +738,7 @@ const kWasmValueTypeBitFieldOffset:
 
 macro IsWord16WasmArrayMap(map: Map): bool {
   const arrayTypePtr: RawPtr<int32> = %RawDownCast<RawPtr<int32>>(
-      WasmTypeInfo(map).foreign_address_ptr + kWasmArrayTypeRepOffset +
+      WasmTypeInfo(map).native_type_ptr + kWasmArrayTypeRepOffset +
       kWasmValueTypeBitFieldOffset);
   const arrayTypeRef: &int32 =
       torque_internal::unsafe::NewOffHeapReference(arrayTypePtr);
@@ -922,7 +922,7 @@ builtin WasmStringEncodeWtf16Array(
 }
 builtin WasmStringConcat(a: String, b: String): String {
   const context = LoadContextFromFrame();
-  return a + b;
+  tail StringAdd_CheckNone(a, b);
 }
 builtin WasmStringEqual(a: String, b: String): int32 {
   if (TaggedEqual(a, b)) return 1;
@@ -1153,5 +1153,15 @@ builtin WasmStringViewIterSlice(
   return (start == end) ?
       kEmptyString :
       string::SubString(string, Convert<uintptr>(start), Convert<uintptr>(end));
+}
+
+transitioning builtin WasmExternInternalize(implicit context: Context)(
+    externObject: JSAny): JSAny {
+  const innerObject =
+      WasmGetOwnProperty(externObject, WasmWrappedObjectSymbolConstant());
+  if (innerObject == Undefined) {
+    return externObject;
+  }
+  return innerObject;
 }
 }

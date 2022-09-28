@@ -23,6 +23,10 @@ template <typename T>
 class Handle;
 class Heap;
 class Isolate;
+class Factory;
+template <typename Impl>
+class FactoryBase;
+class LocalFactory;
 class Map;
 class PropertyCell;
 class ReadOnlyHeap;
@@ -122,6 +126,7 @@ class Symbol;
   IF_WASM(V, Map, wasm_js_function_data_map, WasmJSFunctionDataMap)            \
   IF_WASM(V, Map, wasm_resume_data_map, WasmResumeDataMap)                     \
   IF_WASM(V, Map, wasm_type_info_map, WasmTypeInfoMap)                         \
+  IF_WASM(V, Map, wasm_continuation_object_map, WasmContinuationObjectMap)     \
   V(Map, weak_fixed_array_map, WeakFixedArrayMap)                              \
   V(Map, weak_array_list_map, WeakArrayListMap)                                \
   V(Map, ephemeron_hash_table_map, EphemeronHashTableMap)                      \
@@ -194,6 +199,8 @@ class Symbol;
   V(HeapNumber, infinity_value, InfinityValue)                                 \
   V(HeapNumber, minus_zero_value, MinusZeroValue)                              \
   V(HeapNumber, minus_infinity_value, MinusInfinityValue)                      \
+  /* Table of strings of one-byte single characters */                         \
+  V(FixedArray, single_character_string_table, SingleCharacterStringTable)     \
   /* Marker for self-references during code-generation */                      \
   V(HeapObject, self_reference_marker, SelfReferenceMarker)                    \
   /* Marker for basic-block usage counters array during code-generation */     \
@@ -243,7 +250,6 @@ class Symbol;
   V(PropertyCell, set_iterator_protector, SetIteratorProtector)                \
   V(PropertyCell, string_iterator_protector, StringIteratorProtector)          \
   /* Caches */                                                                 \
-  V(FixedArray, single_character_string_cache, SingleCharacterStringCache)     \
   V(FixedArray, string_split_cache, StringSplitCache)                          \
   V(FixedArray, regexp_multiple_cache, RegExpMultipleCache)                    \
   /* Indirection lists for isolate-independent builtins */                     \
@@ -319,8 +325,6 @@ class Symbol;
   V(HeapObject, current_microtask, CurrentMicrotask)                        \
   /* KeepDuringJob set for JS WeakRefs */                                   \
   V(HeapObject, weak_refs_keep_during_job, WeakRefsKeepDuringJob)           \
-  V(HeapObject, interpreter_entry_trampoline_for_profiling,                 \
-    InterpreterEntryTrampolineForProfiling)                                 \
   V(Object, pending_optimize_for_test_bytecode,                             \
     PendingOptimizeForTestBytecode)                                         \
   V(ArrayList, basic_block_profiling_data, BasicBlockProfilingData)         \
@@ -566,6 +570,8 @@ class RootsTable {
   friend class Isolate;
   friend class Heap;
   friend class Factory;
+  friend class FactoryBase<Factory>;
+  friend class FactoryBase<LocalFactory>;
   friend class PointerCompressedReadOnlyArtifacts;
   friend class ReadOnlyHeap;
   friend class ReadOnlyRoots;

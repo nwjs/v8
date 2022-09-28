@@ -28,6 +28,8 @@
 #include "src/common/globals.h"
 #include "src/heap/allocation-observer.h"
 #include "src/heap/allocation-result.h"
+#include "src/heap/base/stack.h"
+#include "src/heap/gc-callbacks.h"
 #include "src/heap/heap-allocator.h"
 #include "src/init/heap-symbols.h"
 #include "src/objects/allocation-site.h"
@@ -51,6 +53,12 @@ class ClassNameAsHeapObjectNameScope;
 }  // namespace internal
 }  // namespace cppgc
 
+namespace heap {
+namespace base {
+class Stack;
+}  // namespace base
+}  // namespace heap
+
 namespace v8 {
 
 namespace debug {
@@ -60,6 +68,7 @@ using OutOfMemoryCallback = void (*)(void* data);
 namespace internal {
 
 namespace heap {
+
 class HeapTester;
 class TestMemoryAllocatorScope;
 }  // namespace heap
@@ -110,7 +119,6 @@ class ObjectIterator;
 class ObjectStats;
 class Page;
 class PagedSpace;
-class PromoteYoungGenerationGC;
 class ReadOnlyHeap;
 class RootVisitor;
 class RwxMemoryWriteScope;
@@ -505,8 +513,7 @@ class Heap {
                                                         HeapObject value);
 
   V8_EXPORT_PRIVATE static void SharedHeapBarrierSlow(HeapObject object,
-                                                      Address slot,
-                                                      HeapObject value);
+                                                      Address slot);
   V8_EXPORT_PRIVATE inline void RecordEphemeronKeyWrite(
       EphemeronHashTable table, Address key_slot);
   V8_EXPORT_PRIVATE static void EphemeronKeyWriteBarrierFromCode(
@@ -831,8 +838,8 @@ class Heap {
   void ReplaceReadOnlySpace(SharedReadOnlySpace* shared_ro_space);
 
   // Sets up the heap memory without creating any objects.
-  void SetUpSpaces(LinearAllocationArea* new_allocation_info,
-                   LinearAllocationArea* old_allocation_info);
+  void SetUpSpaces(LinearAllocationArea& new_allocation_info,
+                   LinearAllocationArea& old_allocation_info);
 
   // Prepares the heap, setting up for deserialization.
   void InitializeMainThreadLocalHeap(LocalHeap* main_thread_local_heap);
@@ -872,6 +879,7 @@ class Heap {
   MapSpace* map_space() { return map_space_; }
   inline PagedSpace* space_for_maps();
   OldLargeObjectSpace* lo_space() { return lo_space_; }
+  OldLargeObjectSpace* shared_lo_space() { return shared_lo_space_; }
   CodeLargeObjectSpace* code_lo_space() { return code_lo_space_; }
   NewLargeObjectSpace* new_lo_space() { return new_lo_space_; }
   ReadOnlySpace* read_only_space() { return read_only_space_; }
@@ -939,6 +947,8 @@ class Heap {
   MUTABLE_ROOT_LIST(ROOT_ACCESSOR)
 #undef ROOT_ACCESSOR
 
+  V8_INLINE FixedArray single_character_string_table();
+
   V8_INLINE void SetRootMaterializedObjects(FixedArray objects);
   V8_INLINE void SetRootScriptList(Object value);
   V8_INLINE void SetRootNoScriptSharedFunctionInfos(Object value);
@@ -953,14 +963,6 @@ class Heap {
 
   void SetBuiltinsConstantsTable(FixedArray cache);
   void SetDetachedContexts(WeakArrayList detached_contexts);
-
-  // A full copy of the interpreter entry trampoline, used as a template to
-  // create copies of the builtin at runtime. The copies are used to create
-  // better profiling information for ticks in bytecode execution. Note that
-  // this is always a copy of the full builtin, i.e. not the off-heap
-  // trampoline.
-  // See also: FLAG_interpreted_frames_native_stack.
-  void SetInterpreterEntryTrampolineForProfiling(Code code);
 
   void EnqueueDirtyJSFinalizationRegistry(
       JSFinalizationRegistry finalization_registry,
@@ -1073,9 +1075,7 @@ class Heap {
   // ===========================================================================
 
   // Used for query incremental marking status in generated code.
-  Address* IsMarkingFlagAddress() {
-    return reinterpret_cast<Address*>(&is_marking_flag_);
-  }
+  bool* IsMarkingFlagAddress();
 
   void ClearRecordedSlot(HeapObject object, ObjectSlot slot);
   void ClearRecordedSlotRange(Address start, Address end);
@@ -1204,11 +1204,16 @@ class Heap {
 
   const cppgc::EmbedderStackState* overriden_stack_state() const;
 
+  V8_EXPORT_PRIVATE void SetStackStart(void* stack_start);
+
+  ::heap::base::Stack& stack();
+
   // ===========================================================================
   // Embedder roots optimizations. =============================================
   // ===========================================================================
 
-  V8_EXPORT_PRIVATE void SetEmbedderRootsHandler(EmbedderRootsHandler* handler);
+  V8_EXPORT_PRIVATE
+  void SetEmbedderRootsHandler(EmbedderRootsHandler* handler);
 
   EmbedderRootsHandler* GetEmbedderRootsHandler() const;
 
@@ -1594,8 +1599,18 @@ class Heap {
   // Stack frame support. ======================================================
   // ===========================================================================
 
-  // Returns the Code object for a given interior pointer.
-  CodeLookupResult GcSafeFindCodeForInnerPointer(Address inner_pointer);
+  // Searches for compiled code or embedded builtins code object by given
+  // interior pointer.
+  // Crashes process on unsuccessful lookup if {die_on_unsuccessful_lookup}
+  // is true. All code lookups made by GC must succeed.
+  CodeLookupResult GcSafeFindCodeForInnerPointer(
+      Address inner_pointer, bool die_on_unsuccessful_lookup = true);
+
+  // Same as GcSafeFindCodeForInnerPointer() but it doesn't crash the process
+  // on unsuccessful lookup.
+  // It's intended to be used only from gdb's 'jco' macro.
+  CodeLookupResult GcSafeFindCodeForInnerPointerForPrinting(
+      Address inner_pointer);
 
   // Returns true if {addr} is contained within {code} and false otherwise.
   // Mostly useful for debugging.
@@ -1747,18 +1762,6 @@ class Heap {
     RootIndex index;
   };
 
-  struct GCCallbackTuple {
-    GCCallbackTuple(v8::Isolate::GCCallbackWithData callback, GCType gc_type,
-                    void* data)
-        : callback(callback), gc_type(gc_type), data(data) {}
-
-    bool operator==(const GCCallbackTuple& other) const;
-
-    v8::Isolate::GCCallbackWithData callback;
-    GCType gc_type;
-    void* data;
-  };
-
   static const int kInitialEvalCacheSize = 64;
   static const int kInitialNumberStringCacheSize = 256;
 
@@ -1907,8 +1910,6 @@ class Heap {
 
   bool InvokeNearHeapLimitCallback();
 
-  void ComputeFastPromotionMode();
-
   void InvokeIncrementalMarkingPrologueCallbacks();
   void InvokeIncrementalMarkingEpilogueCallbacks();
 
@@ -1947,7 +1948,6 @@ class Heap {
 
   // Performs a minor collection in new generation.
   void Scavenge();
-  void PromoteYoungGeneration();
 
   void UpdateYoungReferencesInExternalStringTable(
       ExternalStringTableUpdaterCallback updater_func);
@@ -2139,9 +2139,7 @@ class Heap {
 
   bool IsStressingScavenge();
 
-  void SetIsMarkingFlag(bool value) {
-    is_marking_flag_ = static_cast<uint8_t>(value);
-  }
+  void SetIsMarkingFlag(bool value);
 
   ExternalMemoryAccounting external_memory_;
 
@@ -2210,6 +2208,7 @@ class Heap {
   ReadOnlySpace* read_only_space_ = nullptr;
 
   OldSpace* shared_old_space_ = nullptr;
+  OldLargeObjectSpace* shared_lo_space_ = nullptr;
   MapSpace* shared_map_space_ = nullptr;
 
   std::unique_ptr<ConcurrentAllocator> shared_old_allocator_;
@@ -2219,10 +2218,6 @@ class Heap {
   Space* space_[LAST_SPACE + 1];
 
   LocalHeap* main_thread_local_heap_ = nullptr;
-
-  // List for tracking ArrayBufferExtensions
-  ArrayBufferExtension* old_array_buffer_extensions_ = nullptr;
-  ArrayBufferExtension* young_array_buffer_extensions_ = nullptr;
 
   // Determines whether code space is write-protected. This is essentially a
   // race-free copy of the {FLAG_write_protect_code_memory} flag.
@@ -2287,8 +2282,8 @@ class Heap {
   // Weak list tails.
   Object dirty_js_finalization_registries_list_tail_;
 
-  std::vector<GCCallbackTuple> gc_epilogue_callbacks_;
-  std::vector<GCCallbackTuple> gc_prologue_callbacks_;
+  GCCallbacks<v8::Isolate, AllowGarbageCollection> gc_prologue_callbacks_;
+  GCCallbacks<v8::Isolate, AllowGarbageCollection> gc_epilogue_callbacks_;
 
   GetExternallyAllocatedMemoryInBytesCallback external_memory_callback_;
 
@@ -2320,7 +2315,6 @@ class Heap {
   std::unique_ptr<MarkCompactCollector> mark_compact_collector_;
   std::unique_ptr<MinorMarkCompactCollector> minor_mark_compact_collector_;
   std::unique_ptr<ScavengerCollector> scavenger_collector_;
-  std::unique_ptr<PromoteYoungGenerationGC> promote_young_generation_gc_;
   std::unique_ptr<ArrayBufferSweeper> array_buffer_sweeper_;
 
   std::unique_ptr<MemoryAllocator> memory_allocator_;
@@ -2337,6 +2331,7 @@ class Heap {
   std::unique_ptr<LocalEmbedderHeapTracer> local_embedder_heap_tracer_;
   std::unique_ptr<AllocationTrackerForDebugging>
       allocation_tracker_for_debugging_;
+  std::unique_ptr<::heap::base::Stack> stack_;
 
   // This object controls virtual space reserved for code on the V8 heap. This
   // is only valid for 64-bit architectures where kRequiresCodeRange.
@@ -2383,9 +2378,6 @@ class Heap {
 
   char trace_ring_buffer_[kTraceRingBufferSize];
 
-  // Used as boolean.
-  uint8_t is_marking_flag_ = 0;
-
   // If it's not full then the data is from 0 to ring_buffer_end_.  If it's
   // full then the data is from ring_buffer_end_ to the end of the buffer and
   // from 0 to ring_buffer_end_.
@@ -2425,8 +2417,6 @@ class Heap {
 
   int max_regular_code_object_size_ = 0;
 
-  bool fast_promotion_mode_ = false;
-
   // Used for testing purposes.
   bool force_oom_ = false;
   bool force_gc_on_next_allocation_ = false;
@@ -2458,6 +2448,7 @@ class Heap {
   friend class EvacuateVisitorBase;
   friend class GCCallbacksScope;
   friend class GCTracer;
+  friend class GlobalHandleMarkingVisitor;
   friend class HeapAllocator;
   friend class HeapObjectIterator;
   friend class ScavengeTaskObserver;
@@ -2480,7 +2471,6 @@ class Heap {
   friend class ObjectStatsCollector;
   friend class Page;
   friend class PagedSpaceBase;
-  friend class PromoteYoungGenerationGC;
   friend class ReadOnlyRoots;
   friend class Scavenger;
   friend class ScavengerCollector;

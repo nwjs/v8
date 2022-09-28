@@ -347,7 +347,7 @@ void PostProcessExternalString(ExternalString string, Isolate* isolate) {
   uint32_t index = string.GetResourceRefForDeserialization();
   Address address =
       static_cast<Address>(isolate->api_external_references()[index]);
-  string.AllocateExternalPointerEntries(isolate);
+  string.InitExternalPointerFields(isolate);
   string.set_address_as_resource(isolate, address);
   isolate->heap()->UpdateExternalString(string, 0,
                                         string.ExternalPayloadSize());
@@ -358,15 +358,12 @@ void PostProcessExternalString(ExternalString string, Isolate* isolate) {
 
 template <typename IsolateT>
 void Deserializer<IsolateT>::PostProcessNewJSReceiver(
-    Map map, Handle<JSReceiver> obj, JSReceiver raw_obj,
-    InstanceType instance_type, SnapshotSpace space) {
-  DisallowGarbageCollection no_gc;
-  DCHECK_EQ(*obj, raw_obj);
-  DCHECK_EQ(raw_obj.map(), map);
+    Map map, Handle<JSReceiver> obj, InstanceType instance_type,
+    SnapshotSpace space) {
   DCHECK_EQ(map.instance_type(), instance_type);
 
   if (InstanceTypeChecker::IsJSDataView(instance_type)) {
-    auto data_view = JSDataView::cast(raw_obj);
+    auto data_view = JSDataView::cast(*obj);
     auto buffer = JSArrayBuffer::cast(data_view.buffer());
     if (buffer.was_detached()) {
       // Directly set the data pointer to point to the EmptyBackingStoreBuffer.
@@ -381,7 +378,9 @@ void Deserializer<IsolateT>::PostProcessNewJSReceiver(
           reinterpret_cast<uint8_t*>(backing_store) + data_view.byte_offset());
     }
   } else if (InstanceTypeChecker::IsJSTypedArray(instance_type)) {
-    auto typed_array = JSTypedArray::cast(raw_obj);
+    auto typed_array = JSTypedArray::cast(*obj);
+    // Note: ByteArray objects must not be deferred s.t. they are
+    // available here for is_on_heap(). See also: CanBeDeferred.
     // Fixup typed array pointers.
     if (typed_array.is_on_heap()) {
       typed_array.AddExternalPointerCompensationForDeserialization(
@@ -397,7 +396,7 @@ void Deserializer<IsolateT>::PostProcessNewJSReceiver(
                                     typed_array.byte_offset());
     }
   } else if (InstanceTypeChecker::IsJSArrayBuffer(instance_type)) {
-    auto buffer = JSArrayBuffer::cast(raw_obj);
+    auto buffer = JSArrayBuffer::cast(*obj);
     uint32_t store_index = buffer.GetBackingStoreRefForDeserialization();
     if (store_index == kEmptyBackingStoreRefSentinel) {
       buffer.set_backing_store(main_thread_isolate(),
@@ -470,7 +469,10 @@ void Deserializer<IsolateT>::PostProcessNewObject(Handle<Map> map,
         // to |ObjectDeserializer::CommitPostProcessedObjects()|.
         new_allocation_sites_.push_back(Handle<AllocationSite>::cast(obj));
       } else {
-        DCHECK(CanBeDeferred(*obj));
+        // We dont defer ByteArray because JSTypedArray needs the base_pointer
+        // ByteArray immediately if it's on heap.
+        DCHECK(CanBeDeferred(*obj) ||
+               InstanceTypeChecker::IsByteArray(instance_type));
       }
     }
   }
@@ -486,9 +488,20 @@ void Deserializer<IsolateT>::PostProcessNewObject(Handle<Map> map,
              InstanceTypeChecker::IsCodeDataContainer(instance_type)) {
     auto code_data_container = CodeDataContainer::cast(raw_obj);
     code_data_container.set_code_cage_base(isolate()->code_cage_base());
-    code_data_container.AllocateExternalPointerEntries(main_thread_isolate());
-    code_data_container.UpdateCodeEntryPoint(main_thread_isolate(),
-                                             code_data_container.code());
+    code_data_container.init_code_entry_point(main_thread_isolate(),
+                                              kNullAddress);
+#ifdef V8_EXTERNAL_CODE_SPACE
+    if (V8_REMOVE_BUILTINS_CODE_OBJECTS &&
+        code_data_container.is_off_heap_trampoline()) {
+      Address entry = OffHeapInstructionStart(code_data_container,
+                                              code_data_container.builtin_id());
+      code_data_container.SetEntryPointForOffHeapBuiltin(main_thread_isolate(),
+                                                         entry);
+    } else {
+      code_data_container.UpdateCodeEntryPoint(main_thread_isolate(),
+                                               code_data_container.code());
+    }
+#endif
   } else if (InstanceTypeChecker::IsMap(instance_type)) {
     if (FLAG_log_maps) {
       // Keep track of all seen Maps to log them later since they might be only
@@ -507,16 +520,17 @@ void Deserializer<IsolateT>::PostProcessNewObject(Handle<Map> map,
     PostProcessExternalString(ExternalString::cast(raw_obj),
                               main_thread_isolate());
   } else if (InstanceTypeChecker::IsJSReceiver(instance_type)) {
+    // PostProcessNewJSReceiver may trigger GC.
+    no_gc.Release();
     return PostProcessNewJSReceiver(raw_map, Handle<JSReceiver>::cast(obj),
-                                    JSReceiver::cast(raw_obj), instance_type,
-                                    space);
+                                    instance_type, space);
   } else if (InstanceTypeChecker::IsDescriptorArray(instance_type)) {
     DCHECK(InstanceTypeChecker::IsStrongDescriptorArray(instance_type));
     Handle<DescriptorArray> descriptors = Handle<DescriptorArray>::cast(obj);
     new_descriptor_arrays_.push_back(descriptors);
   } else if (InstanceTypeChecker::IsNativeContext(instance_type)) {
-    NativeContext::cast(raw_obj).AllocateExternalPointerEntries(
-        main_thread_isolate());
+    NativeContext::cast(raw_obj).init_microtask_queue(main_thread_isolate(),
+                                                      nullptr);
   } else if (InstanceTypeChecker::IsScript(instance_type)) {
     LogScriptEvents(Script::cast(*obj));
   }
@@ -1137,10 +1151,10 @@ int Deserializer<IsolateT>::ReadSingleBytecodeData(byte data,
                 &initial_pages, &max_pages);
         DCHECK(result.FromJust());
         USE(result);
-        constexpr bool kIsWasmMemory = false;
         backing_store = BackingStore::TryAllocateAndPartiallyCommitMemory(
             main_thread_isolate(), byte_length, max_byte_length, page_size,
-            initial_pages, max_pages, kIsWasmMemory, SharedFlag::kNotShared);
+            initial_pages, max_pages, WasmMemoryFlag::kNotWasm,
+            SharedFlag::kNotShared);
       }
       CHECK_NOT_NULL(backing_store);
       source_.CopyRaw(backing_store->buffer_start(), byte_length);

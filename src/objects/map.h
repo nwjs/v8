@@ -47,13 +47,13 @@ enum InstanceType : uint16_t;
   V(FreeSpace)                          \
   V(JSApiObject)                        \
   V(JSArrayBuffer)                      \
-  V(JSAtomicsMutex)                     \
   V(JSDataView)                         \
   V(JSExternalObject)                   \
   V(JSFinalizationRegistry)             \
   V(JSFunction)                         \
   V(JSObject)                           \
   V(JSObjectFast)                       \
+  V(JSSynchronizationPrimitive)         \
   V(JSTypedArray)                       \
   V(JSWeakRef)                          \
   V(JSWeakCollection)                   \
@@ -88,6 +88,7 @@ enum InstanceType : uint16_t;
   IF_WASM(V, WasmStruct)                \
   IF_WASM(V, WasmSuspenderObject)       \
   IF_WASM(V, WasmTypeInfo)              \
+  IF_WASM(V, WasmContinuationObject)    \
   V(WeakCell)
 
 #define TORQUE_VISITOR_ID_LIST(V)     \
@@ -534,11 +535,17 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
       Isolate* isolate, Handle<Map> old_map, InternalIndex descriptor_number,
       PropertyConstness constness, Handle<Object> value);
 
+  V8_EXPORT_PRIVATE static Handle<Map> Normalize(
+      Isolate* isolate, Handle<Map> map, ElementsKind new_elements_kind,
+      PropertyNormalizationMode mode, bool use_cache, const char* reason);
   V8_EXPORT_PRIVATE static Handle<Map> Normalize(Isolate* isolate,
                                                  Handle<Map> map,
                                                  ElementsKind new_elements_kind,
                                                  PropertyNormalizationMode mode,
-                                                 const char* reason);
+                                                 const char* reason) {
+    const bool kUseCache = true;
+    return Normalize(isolate, map, new_elements_kind, mode, kUseCache, reason);
+  }
 
   inline static Handle<Map> Normalize(Isolate* isolate, Handle<Map> fast_map,
                                       PropertyNormalizationMode mode,

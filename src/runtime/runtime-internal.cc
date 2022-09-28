@@ -83,6 +83,12 @@ RUNTIME_FUNCTION(Runtime_ThrowSymbolAsyncIteratorInvalid) {
       isolate, NewTypeError(MessageTemplate::kSymbolAsyncIteratorInvalid));
 }
 
+RUNTIME_FUNCTION(Runtime_TerminateExecution) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(0, args.length());
+  return isolate->TerminateExecution();
+}
+
 #define THROW_ERROR(isolate, args, call)                               \
   HandleScope scope(isolate);                                          \
   DCHECK_LE(1, args.length());                                         \
@@ -552,6 +558,27 @@ RUNTIME_FUNCTION(Runtime_IncrementUseCounter) {
   int counter = args.smi_value_at(0);
   isolate->CountUsage(static_cast<v8::Isolate::UseCounterFeature>(counter));
   return ReadOnlyRoots(isolate).undefined_value();
+}
+
+RUNTIME_FUNCTION(Runtime_GetAndResetTurboProfilingData) {
+  HandleScope scope(isolate);
+  DCHECK_LE(args.length(), 2);
+  if (!BasicBlockProfiler::Get()->HasData(isolate)) {
+    THROW_NEW_ERROR_RETURN_FAILURE(
+        isolate,
+        NewTypeError(
+            MessageTemplate::kInvalid,
+            isolate->factory()->NewStringFromAsciiChecked("Runtime Call"),
+            isolate->factory()->NewStringFromAsciiChecked(
+                "V8 was not built with v8_enable_builtins_profiling=true")));
+  }
+
+  std::stringstream stats_stream;
+  BasicBlockProfiler::Get()->Log(isolate, stats_stream);
+  Handle<String> result =
+      isolate->factory()->NewStringFromAsciiChecked(stats_stream.str().c_str());
+  BasicBlockProfiler::Get()->ResetCounts(isolate);
+  return *result;
 }
 
 RUNTIME_FUNCTION(Runtime_GetAndResetRuntimeCallStats) {

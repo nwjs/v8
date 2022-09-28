@@ -5,7 +5,7 @@
 import { Source } from "../source";
 import { GenericPosition, SourceResolver } from "../source-resolver";
 import { SelectionBroker } from "../selection/selection-broker";
-import { View } from "./view";
+import { CodeMode, View } from "./view";
 import { SelectionMap } from "../selection/selection-map";
 import { ViewElements } from "../common/view-elements";
 import { ClearableHandler, SourcePositionSelectionHandler } from "../selection/selection-handler";
@@ -17,11 +17,6 @@ interface PR {
 
 declare global {
   const PR: PR;
-}
-
-export enum CodeMode {
-  MainSource = "main function",
-  InlinedSource = "inlined function"
 }
 
 export class CodeView extends View {
@@ -216,8 +211,8 @@ export class CodeView extends View {
   }
 
   private getHtmlCodeLines(): NodeListOf<HTMLElement> {
-    const ordereList = this.divNode.querySelector(`#${this.getCodeHtmlElementName()} ol`);
-    return ordereList.childNodes as NodeListOf<HTMLElement>;
+    const orderList = this.divNode.querySelector(`#${this.getCodeHtmlElementName()} ol`);
+    return orderList.childNodes as NodeListOf<HTMLElement>;
   }
 
   private onSelectLine(lineNumber: number, doClear: boolean) {

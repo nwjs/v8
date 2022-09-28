@@ -48,7 +48,9 @@
 #elif V8_TARGET_ARCH_S390X
 #include "src/baseline/s390/baseline-compiler-s390-inl.h"
 #elif V8_TARGET_ARCH_RISCV64
-#include "src/baseline/riscv64/baseline-compiler-riscv64-inl.h"
+#include "src/baseline/riscv/baseline-compiler-riscv-inl.h"
+#elif V8_TARGET_ARCH_RISCV32
+#include "src/baseline/riscv/baseline-compiler-riscv-inl.h"
 #elif V8_TARGET_ARCH_MIPS64
 #include "src/baseline/mips64/baseline-compiler-mips64-inl.h"
 #elif V8_TARGET_ARCH_MIPS
@@ -244,6 +246,16 @@ void MoveArgumentsForBuiltin(BaselineAssembler* masm, Args... args) {
 }  // namespace detail
 
 namespace {
+
+AssemblerOptions BaselineAssemblerOptions(Isolate* isolate) {
+  AssemblerOptions options = AssemblerOptions::Default(isolate);
+  options.builtin_call_jump_mode =
+      isolate->is_short_builtin_calls_enabled()
+          ? BuiltinCallJumpMode::kPCRelative
+          : kFallbackBuiltinCallJumpModeForBaseline;
+  return options;
+}
+
 // Rough upper-bound estimate. Copying the data is most likely more expensive
 // than pre-allocating a large enough buffer.
 #ifdef V8_TARGET_ARCH_IA32
@@ -270,13 +282,16 @@ BaselineCompiler::BaselineCompiler(
       stats_(local_isolate->runtime_call_stats()),
       shared_function_info_(shared_function_info),
       bytecode_(bytecode),
-      masm_(local_isolate->GetMainThreadIsolateUnsafe(),
-            CodeObjectRequired::kNo, AllocateBuffer(bytecode)),
+      masm_(
+          local_isolate->GetMainThreadIsolateUnsafe(),
+          BaselineAssemblerOptions(local_isolate->GetMainThreadIsolateUnsafe()),
+          CodeObjectRequired::kNo, AllocateBuffer(bytecode)),
       basm_(&masm_),
       iterator_(bytecode_),
       zone_(local_isolate->allocator(), ZONE_NAME),
-      labels_(zone_.NewArray<BaselineLabels*>(bytecode_->length())) {
-  MemsetPointer(labels_, nullptr, bytecode_->length());
+      labels_(zone_.NewArray<BaselineLabelPointer>(bytecode_->length())) {
+  MemsetPointer(reinterpret_cast<Address*>(labels_), Address{0},
+                bytecode_->length());
 
   // Empirically determined expected size of the offset table at the 95th %ile,
   // based on the size of the bytecode, to be:
@@ -297,6 +312,12 @@ BaselineCompiler::BaselineCompiler(
 void BaselineCompiler::GenerateCode() {
   {
     RCS_BASELINE_SCOPE(PreVisit);
+    // Mark exception handlers as valid indirect jump targets. This is required
+    // when CFI is enabled, to allow indirect jumps into baseline code.
+    HandlerTable table(*bytecode_);
+    for (int i = 0; i < table.NumberOfRangeEntries(); ++i) {
+      labels_[table.GetRangeHandler(i)].MarkAsIndirectJumpTarget();
+    }
     for (; !iterator_.done(); iterator_.Advance()) {
       PreVisitSingleBytecode();
     }
@@ -436,7 +457,8 @@ void BaselineCompiler::AddPosition() {
 void BaselineCompiler::PreVisitSingleBytecode() {
   switch (iterator().current_bytecode()) {
     case interpreter::Bytecode::kJumpLoop:
-      EnsureLabels(iterator().GetJumpTargetOffset());
+      EnsureLabel(iterator().GetJumpTargetOffset(),
+                  MarkAsIndirectJumpTarget::kYes);
       break;
 
     // TODO(leszeks): Update the max_call_args as part of the main bytecode
@@ -468,21 +490,13 @@ void BaselineCompiler::PreVisitSingleBytecode() {
 
 void BaselineCompiler::VisitSingleBytecode() {
   int offset = iterator().current_offset();
-  if (labels_[offset]) {
-    // Bind labels for this offset that have already been linked to a
-    // jump (i.e. forward jumps, excluding jump tables).
-    for (auto&& label : labels_[offset]->linked) {
-      __ Bind(&label->label);
-    }
-#ifdef DEBUG
-    labels_[offset]->linked.Clear();
-#endif
-    __ Bind(&labels_[offset]->unlinked);
+  BaselineLabelPointer label = labels_[offset];
+  if (label.GetPointer()) __ Bind(label.GetPointer());
+  // Mark position as valid jump target unconditionnaly when the deoptimizer can
+  // jump to baseline code. This is required when CFI is enabled.
+  if (FLAG_deopt_to_baseline || label.IsIndirectJumpTarget()) {
+    __ JumpTarget();
   }
-
-  // Mark position as valid jump target. This is required for the deoptimizer
-  // and exception handling, when CFI is enabled.
-  __ JumpTarget();
 
 #ifdef V8_CODE_COMMENTS
   std::ostringstream str;
@@ -619,9 +633,7 @@ void BaselineCompiler::UpdateInterruptBudgetAndDoInterpreterJumpIfNotRoot(
 
 Label* BaselineCompiler::BuildForwardJumpLabel() {
   int target_offset = iterator().GetJumpTargetOffset();
-  ThreadedLabel* threaded_label = zone_.New<ThreadedLabel>();
-  EnsureLabels(target_offset)->linked.Add(threaded_label);
-  return &threaded_label->label;
+  return EnsureLabel(target_offset);
 }
 
 template <Builtin kBuiltin, typename... Args>
@@ -727,12 +739,9 @@ void BaselineCompiler::VisitLdaContextSlot() {
   BaselineAssembler::ScratchRegisterScope scratch_scope(&basm_);
   Register context = scratch_scope.AcquireScratch();
   LoadRegister(context, 0);
-  int depth = Uint(2);
-  for (; depth > 0; --depth) {
-    __ LoadTaggedPointerField(context, context, Context::kPreviousOffset);
-  }
-  __ LoadTaggedAnyField(kInterpreterAccumulatorRegister, context,
-                        Context::OffsetOfElementAt(Index(1)));
+  uint32_t index = Index(1);
+  uint32_t depth = Uint(2);
+  __ LdaContextSlot(context, index, depth);
 }
 
 void BaselineCompiler::VisitLdaImmutableContextSlot() { VisitLdaContextSlot(); }
@@ -755,13 +764,9 @@ void BaselineCompiler::VisitStaContextSlot() {
   DCHECK(!AreAliased(value, context, kInterpreterAccumulatorRegister));
   __ Move(value, kInterpreterAccumulatorRegister);
   LoadRegister(context, 0);
-  int depth = Uint(2);
-  for (; depth > 0; --depth) {
-    __ LoadTaggedPointerField(context, context, Context::kPreviousOffset);
-  }
-  __ StoreTaggedFieldWithWriteBarrier(
-      context, Context::OffsetOfElementAt(iterator().GetIndexOperand(1)),
-      value);
+  uint32_t index = Index(1);
+  uint32_t depth = Uint(2);
+  __ StaContextSlot(context, value, index, depth);
 }
 
 void BaselineCompiler::VisitStaCurrentContextSlot() {
@@ -871,26 +876,9 @@ void BaselineCompiler::VisitLdaModuleVariable() {
   BaselineAssembler::ScratchRegisterScope scratch_scope(&basm_);
   Register scratch = scratch_scope.AcquireScratch();
   __ LoadContext(scratch);
-  int depth = Uint(1);
-  for (; depth > 0; --depth) {
-    __ LoadTaggedPointerField(scratch, scratch, Context::kPreviousOffset);
-  }
-  __ LoadTaggedPointerField(scratch, scratch, Context::kExtensionOffset);
   int cell_index = Int(0);
-  if (cell_index > 0) {
-    __ LoadTaggedPointerField(scratch, scratch,
-                              SourceTextModule::kRegularExportsOffset);
-    // The actual array index is (cell_index - 1).
-    cell_index -= 1;
-  } else {
-    __ LoadTaggedPointerField(scratch, scratch,
-                              SourceTextModule::kRegularImportsOffset);
-    // The actual array index is (-cell_index - 1).
-    cell_index = -cell_index - 1;
-  }
-  __ LoadFixedArrayElement(scratch, scratch, cell_index);
-  __ LoadTaggedAnyField(kInterpreterAccumulatorRegister, scratch,
-                        Cell::kValueOffset);
+  int depth = Uint(1);
+  __ LdaModuleVariable(scratch, cell_index, depth);
 }
 
 void BaselineCompiler::VisitStaModuleVariable() {
@@ -908,17 +896,7 @@ void BaselineCompiler::VisitStaModuleVariable() {
   __ Move(value, kInterpreterAccumulatorRegister);
   __ LoadContext(scratch);
   int depth = Uint(1);
-  for (; depth > 0; --depth) {
-    __ LoadTaggedPointerField(scratch, scratch, Context::kPreviousOffset);
-  }
-  __ LoadTaggedPointerField(scratch, scratch, Context::kExtensionOffset);
-  __ LoadTaggedPointerField(scratch, scratch,
-                            SourceTextModule::kRegularExportsOffset);
-
-  // The actual array index is (cell_index - 1).
-  cell_index -= 1;
-  __ LoadFixedArrayElement(scratch, scratch, cell_index);
-  __ StoreTaggedFieldWithWriteBarrier(scratch, Cell::kValueOffset, value);
+  __ StaModuleVariable(scratch, value, cell_index, depth);
 }
 
 void BaselineCompiler::VisitSetNamedProperty() {
@@ -1537,8 +1515,7 @@ void BaselineCompiler::VisitTestUndetectable() {
   __ JumpIfSmi(kInterpreterAccumulatorRegister, &is_smi, Label::kNear);
 
   Register map_bit_field = kInterpreterAccumulatorRegister;
-  __ LoadMap(map_bit_field, kInterpreterAccumulatorRegister);
-  __ LoadWord8Field(map_bit_field, map_bit_field, Map::kBitFieldOffset);
+  __ LoadMapBitField(map_bit_field, kInterpreterAccumulatorRegister);
   __ TestAndBranch(map_bit_field, Map::Bits1::IsUndetectableBit::kMask,
                    Condition::kZero, &not_undetectable, Label::kNear);
 
@@ -1581,8 +1558,8 @@ void BaselineCompiler::VisitTestTypeOf() {
       Label is_smi, is_heap_number;
       __ JumpIfSmi(kInterpreterAccumulatorRegister, &is_smi, Label::kNear);
       __ JumpIfObjectType(Condition::kEqual, kInterpreterAccumulatorRegister,
-                          HEAP_NUMBER_TYPE, scratch_scope.AcquireScratch(),
-                          &is_heap_number, Label::kNear);
+                          HEAP_NUMBER_TYPE, &scratch_scope, &is_heap_number,
+                          Label::kNear);
 
       __ LoadRoot(kInterpreterAccumulatorRegister, RootIndex::kFalseValue);
       __ Jump(&done, Label::kNear);
@@ -1598,8 +1575,7 @@ void BaselineCompiler::VisitTestTypeOf() {
       static_assert(INTERNALIZED_STRING_TYPE == FIRST_TYPE);
       __ JumpIfObjectType(Condition::kGreaterThanEqual,
                           kInterpreterAccumulatorRegister, FIRST_NONSTRING_TYPE,
-                          scratch_scope.AcquireScratch(), &bad_instance_type,
-                          Label::kNear);
+                          &scratch_scope, &bad_instance_type, Label::kNear);
 
       __ LoadRoot(kInterpreterAccumulatorRegister, RootIndex::kTrueValue);
       __ Jump(&done, Label::kNear);
@@ -1613,8 +1589,8 @@ void BaselineCompiler::VisitTestTypeOf() {
       Label is_smi, bad_instance_type;
       __ JumpIfSmi(kInterpreterAccumulatorRegister, &is_smi, Label::kNear);
       __ JumpIfObjectType(Condition::kNotEqual, kInterpreterAccumulatorRegister,
-                          SYMBOL_TYPE, scratch_scope.AcquireScratch(),
-                          &bad_instance_type, Label::kNear);
+                          SYMBOL_TYPE, &scratch_scope, &bad_instance_type,
+                          Label::kNear);
 
       __ LoadRoot(kInterpreterAccumulatorRegister, RootIndex::kTrueValue);
       __ Jump(&done, Label::kNear);
@@ -1643,8 +1619,8 @@ void BaselineCompiler::VisitTestTypeOf() {
       Label is_smi, bad_instance_type;
       __ JumpIfSmi(kInterpreterAccumulatorRegister, &is_smi, Label::kNear);
       __ JumpIfObjectType(Condition::kNotEqual, kInterpreterAccumulatorRegister,
-                          BIGINT_TYPE, scratch_scope.AcquireScratch(),
-                          &bad_instance_type, Label::kNear);
+                          BIGINT_TYPE, &scratch_scope, &bad_instance_type,
+                          Label::kNear);
 
       __ LoadRoot(kInterpreterAccumulatorRegister, RootIndex::kTrueValue);
       __ Jump(&done, Label::kNear);
@@ -1664,8 +1640,7 @@ void BaselineCompiler::VisitTestTypeOf() {
 
       // All other undetectable maps are typeof undefined.
       Register map_bit_field = kInterpreterAccumulatorRegister;
-      __ LoadMap(map_bit_field, kInterpreterAccumulatorRegister);
-      __ LoadWord8Field(map_bit_field, map_bit_field, Map::kBitFieldOffset);
+      __ LoadMapBitField(map_bit_field, kInterpreterAccumulatorRegister);
       __ TestAndBranch(map_bit_field, Map::Bits1::IsUndetectableBit::kMask,
                        Condition::kZero, &not_undetectable, Label::kNear);
 
@@ -1684,8 +1659,7 @@ void BaselineCompiler::VisitTestTypeOf() {
 
       // Check if the map is callable but not undetectable.
       Register map_bit_field = kInterpreterAccumulatorRegister;
-      __ LoadMap(map_bit_field, kInterpreterAccumulatorRegister);
-      __ LoadWord8Field(map_bit_field, map_bit_field, Map::kBitFieldOffset);
+      __ LoadMapBitField(map_bit_field, kInterpreterAccumulatorRegister);
       __ TestAndBranch(map_bit_field, Map::Bits1::IsCallableBit::kMask,
                        Condition::kZero, &not_callable, Label::kNear);
       __ TestAndBranch(map_bit_field, Map::Bits1::IsUndetectableBit::kMask,
@@ -1941,7 +1915,7 @@ void BaselineCompiler::VisitJumpLoop() {
   }
 
   __ Bind(&osr_not_armed);
-  Label* label = &labels_[iterator().GetJumpTargetOffset()]->unlinked;
+  Label* label = labels_[iterator().GetJumpTargetOffset()].GetPointer();
   int weight = iterator().GetRelativeJumpTargetOffset() -
                iterator().current_bytecode_size_without_prefix();
   // We can pass in the same label twice since it's a back edge and thus already
@@ -2068,8 +2042,7 @@ void BaselineCompiler::VisitJumpIfJSReceiver() {
   __ JumpIfSmi(kInterpreterAccumulatorRegister, &is_smi, Label::kNear);
 
   __ JumpIfObjectType(Condition::kLessThan, kInterpreterAccumulatorRegister,
-                      FIRST_JS_RECEIVER_TYPE, scratch_scope.AcquireScratch(),
-                      &dont_jump);
+                      FIRST_JS_RECEIVER_TYPE, &scratch_scope, &dont_jump);
   UpdateInterruptBudgetAndDoInterpreterJump();
 
   __ Bind(&is_smi);
@@ -2088,7 +2061,7 @@ void BaselineCompiler::VisitSwitchOnSmiNoFeedback() {
   std::unique_ptr<Label*[]> labels = std::make_unique<Label*[]>(offsets.size());
   for (interpreter::JumpTableTargetOffset offset : offsets) {
     labels[offset.case_value - case_value_base] =
-        &EnsureLabels(offset.target_offset)->unlinked;
+        EnsureLabel(offset.target_offset);
   }
   Register case_value = scratch_scope.AcquireScratch();
   __ SmiUntag(case_value, kInterpreterAccumulatorRegister);
@@ -2206,8 +2179,7 @@ void BaselineCompiler::VisitThrowIfNotSuperConstructor() {
   Register reg = scratch_scope.AcquireScratch();
   LoadRegister(reg, 0);
   Register map_bit_field = scratch_scope.AcquireScratch();
-  __ LoadMap(map_bit_field, reg);
-  __ LoadWord8Field(map_bit_field, map_bit_field, Map::kBitFieldOffset);
+  __ LoadMapBitField(map_bit_field, reg);
   __ TestAndBranch(map_bit_field, Map::Bits1::IsConstructorBit::kMask,
                    Condition::kNotZero, &done, Label::kNear);
 
@@ -2226,8 +2198,8 @@ void BaselineCompiler::VisitSwitchOnGeneratorState() {
   __ JumpIfRoot(generator_object, RootIndex::kUndefinedValue, &fallthrough);
 
   Register continuation = scratch_scope.AcquireScratch();
-  __ LoadTaggedAnyField(continuation, generator_object,
-                        JSGeneratorObject::kContinuationOffset);
+  __ LoadTaggedSignedFieldAndUntag(continuation, generator_object,
+                                   JSGeneratorObject::kContinuationOffset);
   __ StoreTaggedSignedField(
       generator_object, JSGeneratorObject::kContinuationOffset,
       Smi::FromInt(JSGeneratorObject::kGeneratorExecuting));
@@ -2246,9 +2218,8 @@ void BaselineCompiler::VisitSwitchOnGeneratorState() {
     std::unique_ptr<Label*[]> labels =
         std::make_unique<Label*[]>(offsets.size());
     for (interpreter::JumpTableTargetOffset offset : offsets) {
-      labels[offset.case_value] = &EnsureLabels(offset.target_offset)->unlinked;
+      labels[offset.case_value] = EnsureLabel(offset.target_offset);
     }
-    __ SmiUntag(continuation);
     __ Switch(continuation, 0, labels.get(), offsets.size());
     // We should never fall through this switch.
     // TODO(v8:11429,leszeks): Maybe remove the fallthrough check in the Switch?

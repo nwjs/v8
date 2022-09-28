@@ -199,7 +199,7 @@ class SafepointTableBuilder : public SafepointTableBuilderBase {
       // Note it is only valid to specify stack slots here that are *not* in
       // the fixed part of the frame (e.g. argc, target, context, stored rbp,
       // return address). Frame iteration handles the fixed part of the frame
-      // with custom code, see CommonFrame::IterateCompiledFrame.
+      // with custom code, see Turbofan::Iterate.
       entry_->stack_indexes->Add(index, table_->zone_);
       table_->UpdateMinMaxStackIndex(index);
     }
@@ -238,9 +238,9 @@ class SafepointTableBuilder : public SafepointTableBuilderBase {
 
   void UpdateMinMaxStackIndex(int index) {
 #ifdef DEBUG
-    max_stack_index_ = std::max(max_stack_index_, index);
+    if (index > max_stack_index_) max_stack_index_ = index;
 #endif  // DEBUG
-    min_stack_index_ = std::min(min_stack_index_, index);
+    if (index < min_stack_index_) min_stack_index_ = index;
   }
 
   int min_stack_index() const {

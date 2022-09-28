@@ -15,6 +15,7 @@
 #include "src/base/logging.h"
 #include "src/base/small-vector.h"
 #include "src/base/vector.h"
+#include "src/compiler/node-origin-table.h"
 #include "src/compiler/turboshaft/graph.h"
 #include "src/compiler/turboshaft/operations.h"
 
@@ -64,11 +65,11 @@ struct LivenessAnalyzer : AnalyzerBase {
 
   template <bool is_loop>
   void ProcessBlock(const Block& block, uint32_t* unprocessed_count) {
-    auto op_range = graph.operations(block);
+    auto op_range = graph.OperationIndices(block);
     for (auto it = op_range.end(); it != op_range.begin();) {
       --it;
-      OpIndex index = it.Index();
-      const Operation& op = *it;
+      OpIndex index = *it;
+      const Operation& op = graph.Get(index);
       if (op.properties().is_required_when_unused) {
         op_used[index.id()] = true;
       } else if (!OpIsUsed(index)) {
@@ -95,24 +96,26 @@ struct LivenessAnalyzer : AnalyzerBase {
   }
 };
 
+enum class VisitOrder { kAsEmitted, kDominator };
+
 template <class Analyzer, class Assembler>
 class OptimizationPhase {
  private:
   struct Impl;
 
  public:
-  enum class VisitOrder { kNatural, kDominator };
-  static void Run(Graph* input, Zone* phase_zone,
-                  VisitOrder visit_order = VisitOrder::kNatural) {
-    Impl phase{*input, phase_zone, visit_order};
+  static void Run(Graph* input, Zone* phase_zone, NodeOriginTable* origins,
+                  VisitOrder visit_order = VisitOrder::kAsEmitted) {
+    Impl phase{*input, phase_zone, origins, visit_order};
     if (FLAG_turboshaft_trace_reduction) {
       phase.template Run<true>();
     } else {
       phase.template Run<false>();
     }
   }
-  static void RunWithoutTracing(Graph* input, Zone* phase_zone,
-                                VisitOrder visit_order = VisitOrder::kNatural) {
+  static void RunWithoutTracing(
+      Graph* input, Zone* phase_zone,
+      VisitOrder visit_order = VisitOrder::kAsEmitted) {
     Impl phase{*input, phase_zone, visit_order};
     phase.template Run<false>();
   }
@@ -122,6 +125,7 @@ template <class Analyzer, class Assembler>
 struct OptimizationPhase<Analyzer, Assembler>::Impl {
   Graph& input_graph;
   Zone* phase_zone;
+  compiler::NodeOriginTable* origins;
   VisitOrder visit_order;
 
   Analyzer analyzer{input_graph, phase_zone};
@@ -146,14 +150,28 @@ struct OptimizationPhase<Analyzer, Assembler>::Impl {
     if (visit_order == VisitOrder::kDominator) {
       RunDominatorOrder<trace_reduction>();
     } else {
-      RunNaturalOrder<trace_reduction>();
+      RunAsEmittedOrder<trace_reduction>();
+    }
+
+    if (!input_graph.source_positions().empty()) {
+      for (OpIndex index : assembler.graph().AllOperationIndices()) {
+        OpIndex origin = assembler.graph().operation_origins()[index];
+        assembler.graph().source_positions()[index] =
+            input_graph.source_positions()[origin];
+      }
+    }
+    if (origins) {
+      for (OpIndex index : assembler.graph().AllOperationIndices()) {
+        OpIndex origin = assembler.graph().operation_origins()[index];
+        origins->SetNodeOrigin(index.id(), origin.id());
+      }
     }
 
     input_graph.SwapWithCompanion();
   }
 
   template <bool trace_reduction>
-  void RunNaturalOrder() {
+  void RunAsEmittedOrder() {
     for (const Block& input_block : input_graph.blocks()) {
       VisitBlock<trace_reduction>(input_block);
     }
@@ -179,23 +197,19 @@ struct OptimizationPhase<Analyzer, Assembler>::Impl {
 
   template <bool trace_reduction>
   void VisitBlock(const Block& input_block) {
+    assembler.EnterBlock(input_block);
     current_input_block = &input_block;
     if constexpr (trace_reduction) {
       std::cout << PrintAsBlockHeader{input_block} << "\n";
     }
     if (!assembler.Bind(MapToNewGraph(input_block.index()))) {
       if constexpr (trace_reduction) TraceBlockUnreachable();
+      assembler.ExitBlock(input_block);
       return;
     }
     assembler.current_block()->SetDeferred(input_block.IsDeferred());
-    auto op_range = input_graph.operations(input_block);
-    for (auto it = op_range.begin(); it != op_range.end(); ++it) {
-      const Operation& op = *it;
-      OpIndex index = it.Index();
-      if (V8_UNLIKELY(!input_graph.source_positions().empty())) {
-        assembler.SetCurrentSourcePosition(
-            input_graph.source_positions()[index]);
-      }
+    for (OpIndex index : input_graph.OperationIndices(input_block)) {
+      assembler.SetCurrentOrigin(index);
       OpIndex first_output_index = assembler.graph().next_operation_index();
       USE(first_output_index);
       if constexpr (trace_reduction) TraceReductionStart(index);
@@ -203,6 +217,7 @@ struct OptimizationPhase<Analyzer, Assembler>::Impl {
         if constexpr (trace_reduction) TraceOperationUnused();
         continue;
       }
+      const Operation& op = input_graph.Get(index);
       OpIndex new_index;
       if (input_block.IsLoop() && op.Is<PhiOp>()) {
         const PhiOp& phi = op.Cast<PhiOp>();
@@ -226,6 +241,7 @@ struct OptimizationPhase<Analyzer, Assembler>::Impl {
       }
       op_mapping[index.id()] = new_index;
     }
+    assembler.ExitBlock(input_block);
     if constexpr (trace_reduction) TraceBlockFinished();
   }
 
@@ -306,7 +322,7 @@ struct OptimizationPhase<Analyzer, Assembler>::Impl {
     // need to skip phi inputs that belong to control predecessors that have no
     // equivalent in the new graph.
 
-    // When iterating the graph in kNatural order (ie, going through all of
+    // When iterating the graph in kAsEmitted order (ie, going through all of
     // the blocks in linear order), we assume that the order of control
     // predecessors did not change. In kDominator order, the order of control
     // predecessor might or might not change.

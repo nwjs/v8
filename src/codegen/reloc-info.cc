@@ -309,10 +309,11 @@ bool RelocInfo::OffHeapTargetIsCodedSpecially() {
 #if defined(V8_TARGET_ARCH_ARM) || defined(V8_TARGET_ARCH_ARM64) || \
     defined(V8_TARGET_ARCH_X64)
   return false;
-#elif defined(V8_TARGET_ARCH_IA32) || defined(V8_TARGET_ARCH_MIPS) || \
-    defined(V8_TARGET_ARCH_MIPS64) || defined(V8_TARGET_ARCH_PPC) ||  \
-    defined(V8_TARGET_ARCH_PPC64) || defined(V8_TARGET_ARCH_S390) ||  \
-    defined(V8_TARGET_ARCH_RISCV64) || defined(V8_TARGET_ARCH_LOONG64)
+#elif defined(V8_TARGET_ARCH_IA32) || defined(V8_TARGET_ARCH_MIPS) ||     \
+    defined(V8_TARGET_ARCH_MIPS64) || defined(V8_TARGET_ARCH_PPC) ||      \
+    defined(V8_TARGET_ARCH_PPC64) || defined(V8_TARGET_ARCH_S390) ||      \
+    defined(V8_TARGET_ARCH_RISCV64) || defined(V8_TARGET_ARCH_LOONG64) || \
+    defined(V8_TARGET_ARCH_RISCV32)
   return true;
 #endif
 }
@@ -348,11 +349,18 @@ void RelocInfo::set_target_address(Address target,
          IsWasmCall(rmode_));
   Assembler::set_target_address_at(pc_, constant_pool_, target,
                                    icache_flush_mode);
-  if (write_barrier_mode == UPDATE_WRITE_BARRIER && !host().is_null() &&
-      IsCodeTargetMode(rmode_) && !FLAG_disable_write_barriers) {
+  if (!host().is_null() && IsCodeTargetMode(rmode_) &&
+      !FLAG_disable_write_barriers) {
     Code target_code = Code::GetCodeFromTargetAddress(target);
-    WriteBarrier::Marking(host(), this, target_code);
+    WriteBarrierForCode(host(), this, target_code, write_barrier_mode);
   }
+}
+
+void RelocInfo::set_off_heap_target_address(Address target,
+                                            ICacheFlushMode icache_flush_mode) {
+  DCHECK(IsCodeTargetMode(rmode_));
+  Assembler::set_target_address_at(pc_, constant_pool_, target,
+                                   icache_flush_mode);
 }
 
 bool RelocInfo::HasTargetAddressAddress() const {

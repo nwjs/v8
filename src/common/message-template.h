@@ -41,9 +41,9 @@ namespace internal {
   T(AwaitNotInDebugEvaluate,                                                   \
     "await can not be used when evaluating code "                              \
     "while paused in the debugger")                                            \
-  T(AtomicsMutexLockNotAllowed,                                                \
-    "Atomics.Mutex.lock cannot be called in this context")                     \
-  T(AtomicsWaitNotAllowed, "Atomics.wait cannot be called in this context")    \
+  T(AtomicsMutexNotOwnedByCurrentThread,                                       \
+    "Atomics.Mutex is not owned by the current agent")                         \
+  T(AtomicsOperationNotAllowed, "% cannot be called in this context")          \
   T(BadRoundingType, "RoundingType is not fractionDigits")                     \
   T(BadSortComparisonFunction,                                                 \
     "The comparison function must be either a function or undefined")          \
@@ -120,7 +120,11 @@ namespace internal {
   T(InvalidUnit, "Invalid unit argument for %() '%'")                          \
   T(IterableYieldedNonString, "Iterable yielded % which is not a string")      \
   T(IteratorResultNotAnObject, "Iterator result % is not an object")           \
-  T(IteratorSymbolNonCallable, "Found non-callable @@iterator")                \
+  T(SpreadIteratorSymbolNonCallable,                                           \
+    "Spread syntax requires ...iterable[Symbol.iterator] to be a function")    \
+  T(FirstArgumentIteratorSymbolNonCallable,                                    \
+    "% requires that the property of the first argument, "                     \
+    "items[Symbol.iterator], when exists, be a function")                      \
   T(IteratorValueNotAnObject, "Iterator value % is not an entry object")       \
   T(LanguageID, "Language ID should be string or object.")                     \
   T(LocaleNotEmpty,                                                            \
@@ -652,7 +656,6 @@ namespace internal {
   T(WasmTrapStringOffsetOutOfBounds, "string offset out of bounds")            \
   T(WasmTrapStringIsolatedSurrogate,                                           \
     "Failed to encode string as UTF-8: contains unpaired surrogate")           \
-  T(WasmTrapReentrantSuspender, "re-entering an active/suspended suspender")   \
   T(WasmExceptionError, "wasm exception")                                      \
   /* Asm.js validation related */                                              \
   T(AsmJsInvalid, "Invalid asm.js: %")                                         \

@@ -53,7 +53,6 @@
 
   # We do not yet shrink weak maps after they have been emptied by the GC
   'test-weakmaps/Shrinking': [FAIL],
-  'test-weaksets/WeakSet_Shrinking': [FAIL],
 
   # Boot up memory use is bloated in debug mode.
   'test-mark-compact/BootUpMemoryUse': [PASS, ['mode == debug', FAIL]],
@@ -100,9 +99,6 @@
   # Test that misuse of PopAndReturn does not compile.
   'test-code-stub-assembler/PopAndReturnFromJSBuiltinWithStackParameters' : [FAIL],
   'test-code-stub-assembler/PopAndReturnFromTFCBuiltinWithStackParameters' : [FAIL],
-
-  # These tests are supposed to fail in a slow DCHECK, skip them otherwise.
-  'test-local-handles/DereferenceLocalHandleFailsWhenDisallowed': [SKIP, ['mode == debug', FAIL]],
 
   # Slow tests.
   'test-api/InternalFieldsSubclassing': [PASS, SLOW],
@@ -409,7 +405,7 @@
 }],  # 'mips_arch_variant == r6'
 
 ##############################################################################
-['arch == riscv64', {
+['arch == riscv64 or (arch == riscv32)', {
   # this test is unstable, sometimes fail when running w/ other tests.
   'test-cpu-profiler/CrossScriptInliningCallerLineNumbers2': [SKIP],
 
@@ -434,7 +430,7 @@
 }],  # 'arch == riscv64'
 
 ##############################################################################
-['arch == riscv64 and simulator_run', {
+['((arch == riscv64) or (arch == riscv32)) and simulator_run', {
 
   # Pass but take too long with the simulator.
   'test-api/Threading*': [PASS, SLOW],
@@ -442,6 +438,7 @@
   'test-heap-profiler/ManyLocalsInSharedContext': [PASS, SLOW],
 
 }],  # 'arch == riscv64 and simulator_run'
+
 
 ##############################################################################
 ['arch == loong64', {
@@ -554,8 +551,6 @@
   'test-api/WasmI32AtomicWaitCallback': [SKIP],
   'test-api/WasmI64AtomicWaitCallback': [SKIP],
   'test-api/WasmSetJitCodeEventHandler': [SKIP],
-  'test-api-wasm/WasmStreaming*': [SKIP],
-  'test-api-wasm/WasmCompileToWasmModuleObject': [SKIP],
   'test-backing-store/Run_WasmModule_Buffer_Externalized_Regression_UseAfterFree': [SKIP],
   'test-c-wasm-entry/*': [SKIP],
   'test-compilation-cache/*': [SKIP],
@@ -597,7 +592,6 @@
   'test-code-stub-assembler/*': [SKIP],
   'test-debug-helper/GetObjectProperties': [SKIP],
   'test-js-context-specialization/*': [SKIP],
-  'test-macro-assembler-x64/EmbeddedObj': [SKIP],
   'test-multiple-return/*': [SKIP],
   'test-run-bytecode-graph-builder/*': [SKIP],
   'test-run-calls-to-external-references/*': [SKIP],
@@ -842,7 +836,6 @@
   # Performs GC or expects OOM
   'test-alloc/StressHandles': [SKIP],
   'test-alloc/StressJS': [SKIP],
-  'test-api-wasm/WasmStreamingCallback': [SKIP],
   'test-api/DontLeakGlobalObjects': [SKIP],
   'test-api/ExternalInternalizedStringCollectedAtGC': [SKIP],
   'test-api/ExternalStringWithDisposeHandling': [SKIP],
@@ -1114,8 +1107,6 @@
   'test-weak-references/WeakReferencesBasic': [SKIP],
   'test-weakmaps/WeakMapsWithChainedEntries': [SKIP],
   'test-weakmaps/Weakness': [SKIP],
-  'test-weaksets/WeakSet_Weakness': [SKIP],
-  'test-web-snapshots/SFIDeduplicationAfterBytecodeFlushing': [SKIP],
   # Timeout (too many GCs)
   'test-heap/Regress8014': [SKIP],
   'test-accessors/HandleScopePop': [SKIP],
@@ -1123,10 +1114,6 @@
 
 ################################################################################
 ['variant == always_sparkplug', {
-  # SFI deduplication tests check compilation state, which always_sparkplug
-  # can break.
-  'test-web-snapshots/SFIDeduplication*': [SKIP],
-
   # %ObserveNode tests rely on TurboFan.
   'test-calls-with-arraylike-or-spread/*': [SKIP],
 }],

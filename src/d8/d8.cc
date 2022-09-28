@@ -70,6 +70,10 @@
 #include "src/utils/utils.h"
 #include "src/web-snapshot/web-snapshot.h"
 
+#if V8_OS_POSIX
+#include <signal.h>
+#endif  // V8_OS_POSIX
+
 #ifdef V8_FUZZILLI
 #include "src/d8/cov.h"
 #endif  // V8_FUZZILLI
@@ -4832,12 +4836,16 @@ bool Shell::SetOptions(int argc, char* argv[]) {
       DCHECK(options.fuzzy_module_file_extensions);
       options.fuzzy_module_file_extensions = false;
       argv[i] = nullptr;
+#if defined(V8_ENABLE_ETW_STACK_WALKING)
+    } else if (strcmp(argv[i], "--enable-etw-stack-walking") == 0) {
+      options.enable_etw_stack_walking = true;
+      // This needs to be manually triggered for JIT ETW events to work.
+      i::FLAG_enable_etw_stack_walking = true;
 #if defined(V8_ENABLE_SYSTEM_INSTRUMENTATION)
     } else if (strcmp(argv[i], "--enable-system-instrumentation") == 0) {
       options.enable_system_instrumentation = true;
       options.trace_enabled = true;
-      // This needs to be manually triggered for JIT ETW events to work.
-      i::FLAG_enable_system_instrumentation = true;
+#endif
 #if defined(V8_OS_WIN)
       // Guard this bc the flag has a lot of overhead and is not currently used
       // by macos
@@ -5511,11 +5519,37 @@ bool HasFlagThatRequiresSharedIsolate() {
   return i::FLAG_shared_string_table || i::FLAG_harmony_struct;
 }
 
+#ifdef V8_OS_POSIX
+void d8_sigterm_handler(int signal, siginfo_t* info, void* context) {
+  // Dump stacktraces when terminating d8 instances with SIGTERM.
+  // SIGKILL is not intercepted.
+  if (signal == SIGTERM) {
+    FATAL("d8: Received SIGTERM signal (likely due to a TIMEOUT)\n");
+  } else {
+    UNREACHABLE();
+  }
+}
+#endif  // V8_OS_POSIX
+
+void d8_install_sigterm_handler() {
+#ifdef V8_OS_POSIX
+  CHECK(!i::FLAG_fuzzing);
+  struct sigaction sa;
+  sa.sa_sigaction = d8_sigterm_handler;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = 0;
+  if (sigaction(SIGTERM, &sa, NULL) == -1) {
+    FATAL("Could not install SIGTERM handler");
+  }
+#endif  // V8_OS_POSIX
+}
+
 }  // namespace
 
 int Shell::Main(int argc, char* argv[]) {
   v8::base::EnsureConsoleOutput();
   if (!SetOptions(argc, argv)) return 1;
+  if (!i::FLAG_fuzzing) d8_install_sigterm_handler();
 
   v8::V8::InitializeICUDefaultLocation(argv[0], options.icu_data_file);
 
@@ -5537,7 +5571,7 @@ int Shell::Main(int argc, char* argv[]) {
   if (options.trace_enabled && !i::FLAG_verify_predictable) {
     tracing = std::make_unique<platform::tracing::TracingController>();
 
-    if (!options.enable_system_instrumentation) {
+    if (!options.enable_etw_stack_walking) {
       const char* trace_path =
           options.trace_path ? options.trace_path : "v8_trace.json";
       trace_file.open(trace_path);
@@ -5644,7 +5678,9 @@ int Shell::Main(int argc, char* argv[]) {
   }
   create_params.array_buffer_allocator = Shell::array_buffer_allocator;
 #ifdef ENABLE_VTUNE_JIT_INTERFACE
-  create_params.code_event_handler = vTune::GetVtuneCodeEventHandler();
+  if (i::FLAG_enable_vtunejit) {
+    create_params.code_event_handler = vTune::GetVtuneCodeEventHandler();
+  }
 #endif
   create_params.constraints.ConfigureDefaults(
       base::SysInfo::AmountOfPhysicalMemory(),

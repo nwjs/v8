@@ -33,10 +33,8 @@ AllocationResult ConcurrentAllocator::AllocateRaw(int size_in_bytes,
   }
 
   AllocationResult result;
-  // TODO(v8:12547): We cannot use USE_ALLOCATION_ALIGNMENT_BOOL here as
-  // JSAtomicsMutex has alignment restrictions that are not optional and is
-  // allocated using ConcurrentAllocator in the shared heap.
-  if (alignment != kTaggedAligned) {
+  if (V8_COMPRESS_POINTERS_8GB_BOOL ||
+      (USE_ALLOCATION_ALIGNMENT_BOOL && alignment != kTaggedAligned)) {
     result = lab_.AllocateRawAligned(size_in_bytes, alignment);
   } else {
     result = lab_.AllocateRawUnaligned(size_in_bytes);

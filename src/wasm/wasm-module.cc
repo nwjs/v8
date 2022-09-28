@@ -11,6 +11,7 @@
 #include "src/compiler/wasm-compiler.h"
 #include "src/objects/js-array-inl.h"
 #include "src/objects/objects.h"
+#include "src/wasm/jump-table-assembler.h"
 #include "src/wasm/module-decoder.h"
 #include "src/wasm/wasm-code-manager.h"
 #include "src/wasm/wasm-init-expr.h"
@@ -19,9 +20,7 @@
 #include "src/wasm/wasm-result.h"
 #include "src/wasm/wasm-subtyping.h"
 
-namespace v8 {
-namespace internal {
-namespace wasm {
+namespace v8::internal::wasm {
 
 template <class Value>
 void AdaptiveMap<Value>::FinishInitialization() {
@@ -86,7 +85,8 @@ int GetExportWrapperIndex(const WasmModule* module, const FunctionSig* sig,
 
 int GetExportWrapperIndex(const WasmModule* module, uint32_t sig_index,
                           bool is_import) {
-  uint32_t canonical_sig_index = module->canonicalized_type_ids[sig_index];
+  uint32_t canonical_sig_index =
+      module->per_module_canonical_type_ids[sig_index];
   return GetExportWrapperIndexInternal(module, canonical_sig_index, is_import);
 }
 
@@ -649,7 +649,8 @@ size_t EstimateStoredSize(const WasmModule* module) {
          (module->signature_zone ? module->signature_zone->allocation_size()
                                  : 0) +
          VectorSize(module->types) +
-         VectorSize(module->canonicalized_type_ids) +
+         VectorSize(module->per_module_canonical_type_ids) +
+         VectorSize(module->isorecursive_canonical_type_ids) +
          VectorSize(module->functions) + VectorSize(module->data_segments) +
          VectorSize(module->tables) + VectorSize(module->import_table) +
          VectorSize(module->export_table) + VectorSize(module->tags) +
@@ -676,6 +677,9 @@ size_t PrintSignature(base::Vector<char> buffer, const wasm::FunctionSig* sig,
   return old_size - buffer.size();
 }
 
-}  // namespace wasm
-}  // namespace internal
-}  // namespace v8
+int JumpTableOffset(const WasmModule* module, int func_index) {
+  return JumpTableAssembler::JumpSlotIndexToOffset(
+      declared_function_index(module, func_index));
+}
+
+}  // namespace v8::internal::wasm

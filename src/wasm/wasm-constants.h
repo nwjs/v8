@@ -37,17 +37,17 @@ enum ValueTypeCode : uint8_t {
   kI16Code = 0x79,
   // Current reference types
   kFuncRefCode = 0x70,
-  kAnyRefCode = 0x6f,  // aka externref
+  // TODO(7784): Switch to official opcodes once they are aligned with the
+  // stringref proposal for nofunc and noextern.
+  kNoExternCode = 0x69,
+  kNoFuncCode = 0x68,
+  kExternRefCode = 0x6f,
   // typed-funcref and GC proposal types
-  // TODO(7748): For backwards compatibility only, remove when able.
-  kAnyRefCodeAlias = 0x6e,
+  kAnyRefCode = 0x6e,
   kEqRefCode = 0x6d,
   kRefNullCode = 0x6c,
   kRefCode = 0x6b,
   kI31RefCode = 0x6a,
-  // TODO(7748): Only here for backwards compatibility, remove when able.
-  kRttWithDepthCode = 0x69,
-  kRttCode = 0x68,
   kDataRefCode = 0x67,
   kArrayRefCode = 0x66,
   kNoneCode = 0x65,
@@ -61,9 +61,6 @@ enum ValueTypeCode : uint8_t {
 constexpr uint8_t kWasmFunctionTypeCode = 0x60;
 constexpr uint8_t kWasmStructTypeCode = 0x5f;
 constexpr uint8_t kWasmArrayTypeCode = 0x5e;
-constexpr uint8_t kWasmFunctionNominalCode = 0x5d;
-constexpr uint8_t kWasmStructNominalCode = 0x5c;
-constexpr uint8_t kWasmArrayNominalCode = 0x5b;
 constexpr uint8_t kWasmSubtypeCode = 0x50;
 constexpr uint8_t kWasmRecursiveTypeGroupCode = 0x4f;
 

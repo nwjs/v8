@@ -181,14 +181,13 @@ Builtin AbstractCode::builtin_id(PtrComprCageBase cage_base) {
   }
 }
 
-bool AbstractCode::is_interpreter_trampoline_builtin(
-    PtrComprCageBase cage_base) {
+bool AbstractCode::is_off_heap_trampoline(PtrComprCageBase cage_base) {
   InstanceType instance_type = map(cage_base).instance_type();
   if (InstanceTypeChecker::IsCode(instance_type)) {
-    return GetCode().is_interpreter_trampoline_builtin();
+    return GetCode().is_off_heap_trampoline();
   } else if (V8_REMOVE_BUILTINS_CODE_OBJECTS &&
              InstanceTypeChecker::IsCodeDataContainer(instance_type)) {
-    return GetCodeT().is_interpreter_trampoline_builtin();
+    return GetCodeT().is_off_heap_trampoline();
   } else {
     DCHECK(InstanceTypeChecker::IsBytecodeArray(instance_type));
     return false;
@@ -230,6 +229,20 @@ CodeT AbstractCode::GetCodeT() {
 
 BytecodeArray AbstractCode::GetBytecodeArray() {
   return BytecodeArray::cast(*this);
+}
+
+Code AbstractCode::ToCode(PtrComprCageBase cage_base) {
+  InstanceType instance_type = map(cage_base).instance_type();
+  if (InstanceTypeChecker::IsCode(instance_type)) {
+    return GetCode();
+  } else if (V8_REMOVE_BUILTINS_CODE_OBJECTS &&
+             InstanceTypeChecker::IsCodeDataContainer(instance_type)) {
+    CodeT codet = GetCodeT();
+    DCHECK(!codet.is_off_heap_trampoline());
+    return FromCodeT(codet);
+  } else {
+    UNREACHABLE();
+  }
 }
 
 CodeT AbstractCode::ToCodeT(PtrComprCageBase cage_base) {
@@ -399,6 +412,8 @@ inline MaybeHandle<CodeT> ToCodeT(MaybeHandle<Code> maybe_code,
 
 inline Code FromCodeT(CodeT code) {
 #ifdef V8_EXTERNAL_CODE_SPACE
+  DCHECK_IMPLIES(V8_REMOVE_BUILTINS_CODE_OBJECTS,
+                 !code.is_off_heap_trampoline());
   return code.code();
 #else
   return code;
@@ -407,6 +422,8 @@ inline Code FromCodeT(CodeT code) {
 
 inline Code FromCodeT(CodeT code, RelaxedLoadTag) {
 #ifdef V8_EXTERNAL_CODE_SPACE
+  DCHECK_IMPLIES(V8_REMOVE_BUILTINS_CODE_OBJECTS,
+                 !code.is_off_heap_trampoline());
   return code.code(kRelaxedLoad);
 #else
   return code;
@@ -419,6 +436,13 @@ inline Handle<Code> FromCodeT(Handle<CodeT> code, Isolate* isolate) {
 #else
   return code;
 #endif
+}
+
+inline AbstractCode ToAbstractCode(CodeT code) {
+  if (V8_REMOVE_BUILTINS_CODE_OBJECTS) {
+    return AbstractCode::cast(code);
+  }
+  return AbstractCode::cast(FromCodeT(code));
 }
 
 inline Handle<AbstractCode> ToAbstractCode(Handle<CodeT> code,
@@ -437,25 +461,80 @@ inline CodeDataContainer CodeDataContainerFromCodeT(CodeT code) {
 #endif
 }
 
-CodeKind CodeLookupResult::kind() const {
+#ifdef V8_EXTERNAL_CODE_SPACE
+#define CODE_LOOKUP_RESULT_FWD_ACCESSOR(name, Type)                 \
+  Type CodeLookupResult::name() const {                             \
+    DCHECK(IsFound());                                              \
+    return IsCode() ? code().name() : code_data_container().name(); \
+  }
+#else
+#define CODE_LOOKUP_RESULT_FWD_ACCESSOR(name, Type) \
+  Type CodeLookupResult::name() const {             \
+    DCHECK(IsFound());                              \
+    return code().name();                           \
+  }
+#endif
+
+CODE_LOOKUP_RESULT_FWD_ACCESSOR(kind, CodeKind)
+CODE_LOOKUP_RESULT_FWD_ACCESSOR(builtin_id, Builtin)
+CODE_LOOKUP_RESULT_FWD_ACCESSOR(has_tagged_outgoing_params, bool)
+CODE_LOOKUP_RESULT_FWD_ACCESSOR(has_handler_table, bool)
+CODE_LOOKUP_RESULT_FWD_ACCESSOR(is_baseline_trampoline_builtin, bool)
+CODE_LOOKUP_RESULT_FWD_ACCESSOR(is_interpreter_trampoline_builtin, bool)
+CODE_LOOKUP_RESULT_FWD_ACCESSOR(is_baseline_leave_frame_builtin, bool)
+CODE_LOOKUP_RESULT_FWD_ACCESSOR(is_maglevved, bool)
+CODE_LOOKUP_RESULT_FWD_ACCESSOR(is_turbofanned, bool)
+CODE_LOOKUP_RESULT_FWD_ACCESSOR(is_optimized_code, bool)
+CODE_LOOKUP_RESULT_FWD_ACCESSOR(stack_slots, int)
+CODE_LOOKUP_RESULT_FWD_ACCESSOR(GetBuiltinCatchPrediction,
+                                HandlerTable::CatchPrediction)
+
+#undef CODE_LOOKUP_RESULT_FWD_ACCESSOR
+
+int CodeLookupResult::GetOffsetFromInstructionStart(Isolate* isolate,
+                                                    Address pc) const {
   DCHECK(IsFound());
 #ifdef V8_EXTERNAL_CODE_SPACE
-  return IsCode() ? code().kind() : code_data_container().kind();
-#else
-  return code().kind();
+  if (IsCodeDataContainer()) {
+    return code_data_container().GetOffsetFromInstructionStart(isolate, pc);
+  }
 #endif
+  return code().GetOffsetFromInstructionStart(isolate, pc);
 }
 
-Builtin CodeLookupResult::builtin_id() const {
+SafepointEntry CodeLookupResult::GetSafepointEntry(Isolate* isolate,
+                                                   Address pc) const {
   DCHECK(IsFound());
 #ifdef V8_EXTERNAL_CODE_SPACE
-  return IsCode() ? code().builtin_id() : code_data_container().builtin_id();
-#else
-  return code().builtin_id();
+  if (IsCodeDataContainer()) {
+    return code_data_container().GetSafepointEntry(isolate, pc);
+  }
 #endif
+  return code().GetSafepointEntry(isolate, pc);
+}
+
+MaglevSafepointEntry CodeLookupResult::GetMaglevSafepointEntry(
+    Isolate* isolate, Address pc) const {
+  DCHECK(IsFound());
+#ifdef V8_EXTERNAL_CODE_SPACE
+  if (IsCodeDataContainer()) {
+    return code_data_container().GetMaglevSafepointEntry(isolate, pc);
+  }
+#endif
+  return code().GetMaglevSafepointEntry(isolate, pc);
+}
+
+AbstractCode CodeLookupResult::ToAbstractCode() const {
+  DCHECK(IsFound());
+  if (V8_REMOVE_BUILTINS_CODE_OBJECTS) {
+    return IsCodeDataContainer() ? AbstractCode::cast(code_data_container())
+                                 : AbstractCode::cast(code());
+  }
+  return AbstractCode::cast(ToCode());
 }
 
 Code CodeLookupResult::ToCode() const {
+  DCHECK(IsFound());
 #ifdef V8_EXTERNAL_CODE_SPACE
   return IsCode() ? code() : FromCodeT(code_data_container());
 #else
@@ -607,6 +686,16 @@ int Code::GetOffsetFromInstructionStart(Isolate* isolate, Address pc) const {
   return static_cast<int>(offset);
 }
 
+#ifdef V8_EXTERNAL_CODE_SPACE
+int CodeDataContainer::GetOffsetFromInstructionStart(Isolate* isolate,
+                                                     Address pc) const {
+  Address instruction_start = InstructionStart(isolate, pc);
+  Address offset = pc - instruction_start;
+  DCHECK_LE(offset, InstructionSize());
+  return static_cast<int>(offset);
+}
+#endif
+
 Address Code::raw_metadata_end() const {
   return raw_metadata_start() + raw_metadata_size();
 }
@@ -720,13 +809,6 @@ bool CodeDataContainer::has_constant_pool() const {
 }
 #endif
 
-int Code::code_comments_size() const {
-  DCHECK_GE(unwinding_info_offset() - code_comments_offset(), 0);
-  return unwinding_info_offset() - code_comments_offset();
-}
-
-bool Code::has_code_comments() const { return code_comments_size() > 0; }
-
 ByteArray Code::unchecked_relocation_info() const {
   PtrComprCageBase cage_base = main_cage_base();
   return ByteArray::unchecked_cast(
@@ -745,6 +827,26 @@ int Code::relocation_size() const {
   return unchecked_relocation_info().length();
 }
 
+#ifdef V8_EXTERNAL_CODE_SPACE
+byte* CodeDataContainer::relocation_start() const {
+  return V8_UNLIKELY(is_off_heap_trampoline())
+             ? nullptr  // Off heap trampolines do not have reloc info.
+             : code().relocation_start();
+}
+
+byte* CodeDataContainer::relocation_end() const {
+  return V8_UNLIKELY(is_off_heap_trampoline())
+             ? nullptr  // Off heap trampolines do not have reloc info.
+             : code().relocation_end();
+}
+
+int CodeDataContainer::relocation_size() const {
+  return V8_UNLIKELY(is_off_heap_trampoline())
+             ? 0  // Off heap trampolines do not have reloc info.
+             : code().relocation_size();
+}
+#endif
+
 Address Code::entry() const { return raw_instruction_start(); }
 
 bool Code::contains(Isolate* isolate, Address inner_pointer) {
@@ -758,13 +860,11 @@ bool Code::contains(Isolate* isolate, Address inner_pointer) {
 
 #ifdef V8_EXTERNAL_CODE_SPACE
 bool CodeDataContainer::contains(Isolate* isolate, Address inner_pointer) {
-  if (is_off_heap_trampoline() &&
-      OffHeapBuiltinContains(isolate, inner_pointer)) {
-    return true;
+  if (is_off_heap_trampoline()) {
+    if (OffHeapBuiltinContains(isolate, inner_pointer)) return true;
+    if (V8_REMOVE_BUILTINS_CODE_OBJECTS) return false;
   }
-  Code code = this->code();
-  return (code.address() <= inner_pointer) &&
-         (inner_pointer < code.address() + code.CodeSize());
+  return code().contains(isolate, inner_pointer);
 }
 #endif  // V8_EXTERNAL_CODE_SPACE
 
@@ -896,10 +996,20 @@ inline bool Code::checks_tiering_state() const {
          (CodeKindCanDeoptimize(kind()) && marked_for_deoptimization());
 }
 
-inline bool Code::has_tagged_outgoing_params() const {
-  return kind() != CodeKind::JS_TO_WASM_FUNCTION &&
-         kind() != CodeKind::C_WASM_ENTRY && kind() != CodeKind::WASM_FUNCTION;
+inline constexpr bool CodeKindHasTaggedOutgoingParams(CodeKind kind) {
+  return kind != CodeKind::JS_TO_WASM_FUNCTION &&
+         kind != CodeKind::C_WASM_ENTRY && kind != CodeKind::WASM_FUNCTION;
 }
+
+inline bool Code::has_tagged_outgoing_params() const {
+  return CodeKindHasTaggedOutgoingParams(kind());
+}
+
+#ifdef V8_EXTERNAL_CODE_SPACE
+inline bool CodeDataContainer::has_tagged_outgoing_params() const {
+  return CodeKindHasTaggedOutgoingParams(kind());
+}
+#endif
 
 inline bool Code::is_turbofanned() const {
   const uint32_t flags = RELAXED_READ_UINT32_FIELD(*this, kFlagsOffset);
@@ -987,6 +1097,7 @@ inline void Code::set_is_promise_rejection(bool value) {
 }
 
 inline bool Code::is_off_heap_trampoline() const {
+  if (V8_REMOVE_BUILTINS_CODE_OBJECTS) return false;
   const uint32_t flags = RELAXED_READ_UINT32_FIELD(*this, kFlagsOffset);
   return IsOffHeapTrampoline::decode(flags);
 }
@@ -1158,16 +1269,49 @@ Address CodeDataContainer::constant_pool() const {
 }
 #endif
 
+Address Code::raw_code_comments() const {
+  return raw_metadata_start() + code_comments_offset();
+}
+
 Address Code::code_comments() const {
   return V8_UNLIKELY(is_off_heap_trampoline())
              ? OffHeapCodeCommentsAddress(*this, builtin_id())
-             : raw_metadata_start() + code_comments_offset();
+             : raw_code_comments();
+}
+
+int Code::code_comments_size() const {
+  DCHECK_GE(unwinding_info_offset() - code_comments_offset(), 0);
+  return unwinding_info_offset() - code_comments_offset();
+}
+
+bool Code::has_code_comments() const { return code_comments_size() > 0; }
+
+#ifdef V8_EXTERNAL_CODE_SPACE
+Address CodeDataContainer::code_comments() const {
+  return V8_UNLIKELY(is_off_heap_trampoline())
+             ? OffHeapCodeCommentsAddress(*this, builtin_id())
+             : code().code_comments();
+}
+
+int CodeDataContainer::code_comments_size() const {
+  return V8_UNLIKELY(is_off_heap_trampoline())
+             ? OffHeapCodeCommentsSize(*this, builtin_id())
+             : code().code_comments_size();
+}
+
+bool CodeDataContainer::has_code_comments() const {
+  return code_comments_size() > 0;
+}
+#endif
+
+Address Code::raw_unwinding_info_start() const {
+  return raw_metadata_start() + unwinding_info_offset();
 }
 
 Address Code::unwinding_info_start() const {
   return V8_UNLIKELY(is_off_heap_trampoline())
              ? OffHeapUnwindingInfoAddress(*this, builtin_id())
-             : raw_metadata_start() + unwinding_info_offset();
+             : raw_unwinding_info_start();
 }
 
 Address Code::unwinding_info_end() const {
@@ -1182,6 +1326,33 @@ int Code::unwinding_info_size() const {
 }
 
 bool Code::has_unwinding_info() const { return unwinding_info_size() > 0; }
+
+#ifdef V8_EXTERNAL_CODE_SPACE
+Address CodeDataContainer::unwinding_info_start() const {
+  return V8_UNLIKELY(is_off_heap_trampoline())
+             ? OffHeapUnwindingInfoAddress(*this, builtin_id())
+             : code().raw_unwinding_info_start();
+}
+
+Address CodeDataContainer::unwinding_info_end() const {
+  return V8_UNLIKELY(is_off_heap_trampoline())
+             ? OffHeapMetadataEnd(*this, builtin_id())
+             : code().raw_metadata_end();
+}
+
+int CodeDataContainer::unwinding_info_size() const {
+  return V8_UNLIKELY(is_off_heap_trampoline())
+             ? OffHeapUnwindingInfoSize(*this, builtin_id())
+             : code().unwinding_info_size();
+
+  DCHECK_GE(unwinding_info_end(), unwinding_info_start());
+  return static_cast<int>(unwinding_info_end() - unwinding_info_start());
+}
+
+bool CodeDataContainer::has_unwinding_info() const {
+  return unwinding_info_size() > 0;
+}
+#endif
 
 Code Code::GetCodeFromTargetAddress(Address address) {
   {
@@ -1272,7 +1443,7 @@ Object CodeDataContainer::raw_code(PtrComprCageBase cage_base) const {
 
 void CodeDataContainer::set_raw_code(Object value, WriteBarrierMode mode) {
   CHECK(V8_EXTERNAL_CODE_SPACE_BOOL);
-  TaggedField<Object, kCodeOffset>::store(*this, value);
+  TaggedField<Object, kCodeOffset>::Release_Store(*this, value);
   CONDITIONAL_WRITE_BARRIER(*this, kCodeOffset, value, mode);
 }
 
@@ -1333,17 +1504,15 @@ void CodeDataContainer::set_code_cage_base(Address code_cage_base,
 #endif
 }
 
-void CodeDataContainer::AllocateExternalPointerEntries(Isolate* isolate) {
-  CHECK(V8_EXTERNAL_CODE_SPACE_BOOL);
-  InitExternalPointerField<kCodeEntryPointTag>(kCodeEntryPointOffset, isolate);
-}
-
 Code CodeDataContainer::code() const {
   PtrComprCageBase cage_base = code_cage_base();
   return CodeDataContainer::code(cage_base);
 }
 Code CodeDataContainer::code(PtrComprCageBase cage_base) const {
   CHECK(V8_EXTERNAL_CODE_SPACE_BOOL);
+#ifdef V8_EXTERNAL_CODE_SPACE
+  DCHECK_IMPLIES(V8_REMOVE_BUILTINS_CODE_OBJECTS, !is_off_heap_trampoline());
+#endif
   return Code::cast(raw_code(cage_base));
 }
 
@@ -1365,6 +1534,13 @@ DEF_GETTER(CodeDataContainer, code_entry_point, Address) {
                                                       isolate);
 }
 
+void CodeDataContainer::init_code_entry_point(Isolate* isolate,
+                                              Address initial_value) {
+  CHECK(V8_EXTERNAL_CODE_SPACE_BOOL);
+  InitExternalPointerField<kCodeEntryPointTag>(kCodeEntryPointOffset, isolate,
+                                               initial_value);
+}
+
 void CodeDataContainer::set_code_entry_point(Isolate* isolate, Address value) {
   CHECK(V8_EXTERNAL_CODE_SPACE_BOOL);
   WriteExternalPointerField<kCodeEntryPointTag>(kCodeEntryPointOffset, isolate,
@@ -1376,6 +1552,15 @@ void CodeDataContainer::SetCodeAndEntryPoint(Isolate* isolate_for_sandbox,
   CHECK(V8_EXTERNAL_CODE_SPACE_BOOL);
   set_raw_code(code, mode);
   set_code_entry_point(isolate_for_sandbox, code.InstructionStart());
+}
+
+void CodeDataContainer::SetEntryPointForOffHeapBuiltin(
+    Isolate* isolate_for_sandbox, Address entry) {
+  CHECK(V8_REMOVE_BUILTINS_CODE_OBJECTS);
+#ifdef V8_EXTERNAL_CODE_SPACE
+  DCHECK(is_off_heap_trampoline());
+#endif
+  set_code_entry_point(isolate_for_sandbox, entry);
 }
 
 void CodeDataContainer::UpdateCodeEntryPoint(Isolate* isolate_for_sandbox,
@@ -1445,6 +1630,12 @@ bool CodeDataContainer::is_off_heap_trampoline() const {
   return IsOffHeapTrampoline::decode(flags(kRelaxedLoad));
 }
 
+void CodeDataContainer::set_is_off_heap_trampoline_for_hash(bool value) {
+  uint16_t flags_value = flags(kRelaxedLoad);
+  flags_value = IsOffHeapTrampoline::update(flags_value, value);
+  set_flags(flags_value, kRelaxedStore);
+}
+
 bool CodeDataContainer::is_optimized_code() const {
   return CodeKindIsOptimizedJSFunction(kind());
 }
@@ -1469,15 +1660,19 @@ inline bool CodeDataContainer::is_baseline_leave_frame_builtin() const {
 #define DEF_PRIMITIVE_FORWARDING_CDC_GETTER(name, type) \
   type CodeDataContainer::name() const { return FromCodeT(*this).name(); }
 
-#define DEF_FORWARDING_CDC_GETTER(name, type) \
-  DEF_GETTER(CodeDataContainer, name, type) { \
-    return FromCodeT(*this).name(cage_base);  \
+#define DEF_FORWARDING_CDC_GETTER(name, type, result_if_off_heap) \
+  DEF_GETTER(CodeDataContainer, name, type) {                     \
+    if (is_off_heap_trampoline()) {                               \
+      return GetReadOnlyRoots().result_if_off_heap();             \
+    }                                                             \
+    return FromCodeT(*this).name(cage_base);                      \
   }
 
-DEF_FORWARDING_CDC_GETTER(deoptimization_data, FixedArray)
-DEF_FORWARDING_CDC_GETTER(bytecode_or_interpreter_data, HeapObject)
-DEF_FORWARDING_CDC_GETTER(source_position_table, ByteArray)
-DEF_FORWARDING_CDC_GETTER(bytecode_offset_table, ByteArray)
+DEF_FORWARDING_CDC_GETTER(deoptimization_data, FixedArray, empty_fixed_array)
+DEF_FORWARDING_CDC_GETTER(bytecode_or_interpreter_data, HeapObject,
+                          empty_fixed_array)
+DEF_FORWARDING_CDC_GETTER(source_position_table, ByteArray, empty_byte_array)
+DEF_FORWARDING_CDC_GETTER(bytecode_offset_table, ByteArray, empty_byte_array)
 
 #undef DEF_PRIMITIVE_FORWARDING_CDC_GETTER
 #undef DEF_FORWARDING_CDC_GETTER

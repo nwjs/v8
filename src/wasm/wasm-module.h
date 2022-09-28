@@ -508,8 +508,8 @@ struct V8_EXPORT_PRIVATE WasmModule {
     uint32_t canonical_id = type.kind == TypeDefinition::kFunction
                                 ? signature_map.FindOrInsert(*type.function_sig)
                                 : 0;
-    canonicalized_type_ids.push_back(canonical_id);
-    // Canonical type will be computed later.
+    per_module_canonical_type_ids.push_back(canonical_id);
+    // Isorecursive canonical type will be computed later.
     isorecursive_canonical_type_ids.push_back(kNoSuperType);
   }
 
@@ -563,7 +563,7 @@ struct V8_EXPORT_PRIVATE WasmModule {
   std::vector<TypeDefinition> types;  // by type index
   // TODO(7748): Unify the following two arrays.
   // Maps each type index to a canonical index for purposes of call_indirect.
-  std::vector<uint32_t> canonicalized_type_ids;
+  std::vector<uint32_t> per_module_canonical_type_ids;
   // Maps each type index to its global (cross-module) canonical index as per
   // isorecursive type canonicalization.
   std::vector<uint32_t> isorecursive_canonical_type_ids;
@@ -607,7 +607,7 @@ struct WasmTable {
   static bool IsValidTableType(ValueType type, const WasmModule* module) {
     if (!type.is_object_reference()) return false;
     HeapType heap_type = type.heap_type();
-    return heap_type == HeapType::kFunc || heap_type == HeapType::kAny ||
+    return heap_type == HeapType::kFunc || heap_type == HeapType::kExtern ||
            heap_type == HeapType::kString ||
            heap_type == HeapType::kStringViewWtf8 ||
            heap_type == HeapType::kStringViewWtf16 ||
@@ -750,6 +750,9 @@ inline int declared_function_index(const WasmModule* module, int func_index) {
   DCHECK_GT(module->num_declared_functions, declared_idx);
   return declared_idx;
 }
+
+// Translate from function index to jump table offset.
+int JumpTableOffset(const WasmModule* module, int func_index);
 
 // TruncatedUserString makes it easy to output names up to a certain length, and
 // output a truncation followed by '...' if they exceed a limit.

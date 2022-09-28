@@ -235,12 +235,10 @@ class OutOfLineTruncateDoubleToI final : public OutOfLineCode {
     // For balance.
     if (false) {
 #endif  // V8_ENABLE_WEBASSEMBLY
-    } else if (tasm()->options().inline_offheap_trampolines) {
+    } else {
       // With embedded builtins we do not need the isolate here. This allows
       // the call to be generated asynchronously.
       __ CallBuiltin(Builtin::kDoubleToI);
-    } else {
-      __ Call(BUILTIN_CODE(isolate_, DoubleToI), RelocInfo::CODE_TARGET);
     }
     __ movl(result_, MemOperand(rsp, 0));
     __ addq(rsp, Immediate(kDoubleSize));
@@ -283,9 +281,10 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
     if (COMPRESS_POINTERS_BOOL) {
       __ DecompressTaggedPointer(value_, value_);
     }
-    __ CheckPageFlag(value_, scratch0_,
-                     MemoryChunk::kPointersToHereAreInterestingMask, zero,
-                     exit());
+    __ CheckPageFlag(
+        value_, scratch0_,
+        MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask, zero,
+        exit());
     __ leaq(scratch1_, operand_);
 
     SaveFPRegsMode const save_fp_mode = frame()->DidAllocateDoubleRegisters()

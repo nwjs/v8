@@ -8,6 +8,7 @@
 #include "src/baseline/baseline-assembler.h"
 #include "src/codegen/arm64/macro-assembler-arm64-inl.h"
 #include "src/codegen/interface-descriptors.h"
+#include "src/objects/literal-objects-inl.h"
 
 namespace v8 {
 namespace internal {
@@ -122,43 +123,6 @@ void BaselineAssembler::JumpIfImmediate(Condition cc, Register left, int right,
   JumpIf(cc, left, Immediate(right), target, distance);
 }
 
-void BaselineAssembler::CallBuiltin(Builtin builtin) {
-  if (masm()->options().short_builtin_calls) {
-    // Generate pc-relative call.
-    __ CallBuiltin(builtin);
-  } else {
-    ScratchRegisterScope temps(this);
-    Register temp = temps.AcquireScratch();
-    __ LoadEntryFromBuiltin(builtin, temp);
-    __ Call(temp);
-  }
-}
-
-void BaselineAssembler::TailCallBuiltin(Builtin builtin) {
-  if (masm()->options().short_builtin_calls) {
-    // Generate pc-relative call.
-    __ TailCallBuiltin(builtin);
-  } else {
-    // The control flow integrity (CFI) feature allows us to "sign" code entry
-    // points as a target for calls, jumps or both. Arm64 has special
-    // instructions for this purpose, so-called "landing pads" (see
-    // TurboAssembler::CallTarget(), TurboAssembler::JumpTarget() and
-    // TurboAssembler::JumpOrCallTarget()). Currently, we generate "Call"
-    // landing pads for CPP builtins. In order to allow tail calling to those
-    // builtins we have to use a workaround.
-    // x17 is used to allow using "Call" (i.e. `bti c`) rather than "Jump" (i.e.
-    // `bti j`) landing pads for the tail-called code.
-    Register temp = x17;
-
-    // Make sure we're don't use this register as a temporary.
-    UseScratchRegisterScope temps(masm());
-    temps.Exclude(temp);
-
-    __ LoadEntryFromBuiltin(builtin, temp);
-    __ Jump(temp);
-  }
-}
-
 void BaselineAssembler::TestAndBranch(Register value, int mask, Condition cc,
                                       Label* target, Label::Distance) {
   __ Tst(value, Immediate(mask));
@@ -178,6 +142,13 @@ void BaselineAssembler::JumpIfObjectType(Condition cc, Register object,
   __ LoadMap(map, object);
   __ Ldrh(type, FieldMemOperand(map, Map::kInstanceTypeOffset));
   JumpIf(cc, type, instance_type, target);
+}
+void BaselineAssembler::JumpIfObjectType(Condition cc, Register object,
+                                         InstanceType instance_type,
+                                         ScratchRegisterScope* scratch_scope,
+                                         Label* target, Label::Distance) {
+  JumpIfObjectType(cc, object, instance_type, scratch_scope->AcquireScratch(),
+                   target);
 }
 void BaselineAssembler::JumpIfInstanceType(Condition cc, Register map,
                                            InstanceType instance_type,
@@ -435,6 +406,13 @@ void BaselineAssembler::LoadTaggedSignedField(Register output, Register source,
   __ LoadTaggedSignedField(output, FieldMemOperand(source, offset));
 }
 
+void BaselineAssembler::LoadTaggedSignedFieldAndUntag(Register output,
+                                                      Register source,
+                                                      int offset) {
+  LoadTaggedSignedField(output, source, offset);
+  SmiUntag(output);
+}
+
 void BaselineAssembler::LoadTaggedAnyField(Register output, Register source,
                                            int offset) {
   __ LoadAnyTaggedField(output, FieldMemOperand(source, offset));
@@ -542,6 +520,67 @@ void BaselineAssembler::AddToInterruptBudgetAndJumpIfNotExceeded(
   __ Str(interrupt_budget,
          FieldMemOperand(feedback_cell, FeedbackCell::kInterruptBudgetOffset));
   if (skip_interrupt_label) __ B(ge, skip_interrupt_label);
+}
+
+void BaselineAssembler::LdaContextSlot(Register context, uint32_t index,
+                                       uint32_t depth) {
+  for (; depth > 0; --depth) {
+    LoadTaggedPointerField(context, context, Context::kPreviousOffset);
+  }
+  LoadTaggedAnyField(kInterpreterAccumulatorRegister, context,
+                     Context::OffsetOfElementAt(index));
+}
+
+void BaselineAssembler::StaContextSlot(Register context, Register value,
+                                       uint32_t index, uint32_t depth) {
+  for (; depth > 0; --depth) {
+    LoadTaggedPointerField(context, context, Context::kPreviousOffset);
+  }
+  StoreTaggedFieldWithWriteBarrier(context, Context::OffsetOfElementAt(index),
+                                   value);
+}
+
+void BaselineAssembler::LdaModuleVariable(Register context, int cell_index,
+                                          uint32_t depth) {
+  for (; depth > 0; --depth) {
+    LoadTaggedPointerField(context, context, Context::kPreviousOffset);
+  }
+  LoadTaggedPointerField(context, context, Context::kExtensionOffset);
+  if (cell_index > 0) {
+    LoadTaggedPointerField(context, context,
+                           SourceTextModule::kRegularExportsOffset);
+    // The actual array index is (cell_index - 1).
+    cell_index -= 1;
+  } else {
+    LoadTaggedPointerField(context, context,
+                           SourceTextModule::kRegularImportsOffset);
+    // The actual array index is (-cell_index - 1).
+    cell_index = -cell_index - 1;
+  }
+  LoadFixedArrayElement(context, context, cell_index);
+  LoadTaggedAnyField(kInterpreterAccumulatorRegister, context,
+                     Cell::kValueOffset);
+}
+
+void BaselineAssembler::StaModuleVariable(Register context, Register value,
+                                          int cell_index, uint32_t depth) {
+  for (; depth > 0; --depth) {
+    LoadTaggedPointerField(context, context, Context::kPreviousOffset);
+  }
+  LoadTaggedPointerField(context, context, Context::kExtensionOffset);
+  LoadTaggedPointerField(context, context,
+                         SourceTextModule::kRegularExportsOffset);
+
+  // The actual array index is (cell_index - 1).
+  cell_index -= 1;
+  LoadFixedArrayElement(context, context, cell_index);
+  StoreTaggedFieldWithWriteBarrier(context, Cell::kValueOffset, value);
+}
+
+void BaselineAssembler::LoadMapBitField(Register map_bit_field,
+                                        Register object) {
+  LoadMap(map_bit_field, object);
+  LoadWord8Field(map_bit_field, map_bit_field, Map::kBitFieldOffset);
 }
 
 void BaselineAssembler::AddSmi(Register lhs, Smi rhs) {

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # vim:fenc=utf-8:shiftwidth=2
 
 # Copyright 2018 the V8 project authors. All rights reserved.
@@ -51,7 +51,7 @@ AUTO_EXCLUDE_PATTERNS = [
     # platform-specific headers
     '\\b{}\\b'.format(p)
     for p in ('win', 'win32', 'ia32', 'x64', 'arm', 'arm64', 'mips', 'mips64',
-              's390', 'ppc', 'riscv64', 'loong64')
+              's390', 'ppc', 'riscv', 'riscv64', 'riscv32', 'loong64')
 ]
 
 args = None

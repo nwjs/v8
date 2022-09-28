@@ -437,6 +437,7 @@ static void SerializeContext(base::Vector<const byte>* startup_blob_out,
   v8_isolate->Dispose();
 }
 
+#ifdef SNAPSHOT_COMPRESSION
 UNINITIALIZED_TEST(SnapshotCompression) {
   DisableAlwaysOpt();
   base::Vector<const byte> startup_blob;
@@ -457,6 +458,7 @@ UNINITIALIZED_TEST(SnapshotCompression) {
   shared_space_blob.Dispose();
   context_blob.Dispose();
 }
+#endif  // SNAPSHOT_COMPRESSION
 
 UNINITIALIZED_TEST(ContextSerializerContext) {
   DisableAlwaysOpt();
@@ -778,9 +780,9 @@ UNINITIALIZED_TEST(CustomSnapshotDataBlobStringNotInternalized) {
   DisableAlwaysOpt();
   const char* source1 =
       R"javascript(
-      // String would be internalized if it came from a literal so create "A"
+      // String would be internalized if it came from a literal so create "AB"
       // via a function call.
-      var global = String.fromCharCode(65);
+      var global = String.fromCharCode(65, 66);
       function f() { return global; }
       )javascript";
 
@@ -801,7 +803,7 @@ UNINITIALIZED_TEST(CustomSnapshotDataBlobStringNotInternalized) {
     v8::Local<v8::Value> result = CompileRun("f()").As<v8::Value>();
     CHECK(result->IsString());
     i::String str = *v8::Utils::OpenHandle(*result.As<v8::String>());
-    CHECK_EQ(std::string(str.ToCString().get()), "A");
+    CHECK_EQ(std::string(str.ToCString().get()), "AB");
     CHECK(!str.IsInternalizedString());
     CHECK(!i::ReadOnlyHeap::Contains(str));
   }
@@ -1764,14 +1766,12 @@ void TestCodeSerializerOnePlusOneImpl(bool verify_builtins_count = true) {
 TEST(CodeSerializerOnePlusOne) { TestCodeSerializerOnePlusOneImpl(); }
 
 // See bug v8:9122
-#ifndef V8_TARGET_ARCH_ARM
 TEST(CodeSerializerOnePlusOneWithInterpretedFramesNativeStack) {
   FLAG_interpreted_frames_native_stack = true;
   // We pass false because this test will create IET copies (which are
   // builtins).
   TestCodeSerializerOnePlusOneImpl(false);
 }
-#endif
 
 TEST(CodeSerializerOnePlusOneWithDebugger) {
   v8::HandleScope scope(CcTest::isolate());
@@ -2105,7 +2105,7 @@ TEST(CodeSerializerLargeCodeObjectWithIncrementalMarking) {
   heap::ForceEvacuationCandidate(ec_page);
   heap::SimulateIncrementalMarking(heap, false);
   IncrementalMarking* marking = heap->incremental_marking();
-  marking->StartBlackAllocationForTesting();
+  CHECK(marking->black_allocation());
   CHECK(marking->IsCompacting());
   CHECK(MarkCompactCollector::IsOnEvacuationCandidate(*moving_object));
 
@@ -3344,6 +3344,9 @@ UNINITIALIZED_TEST(SnapshotCreatorDuplicateFunctions) {
   FreeCurrentEmbeddedBlob();
 }
 
+#ifndef V8_SHARED_RO_HEAP
+// We do not support building multiple snapshots when read-only heap is shared.
+
 TEST(SnapshotCreatorNoExternalReferencesCustomFail1) {
   DisableAlwaysOpt();
   v8::StartupData blob = CreateSnapshotWithDefaultAndCustom();
@@ -3393,6 +3396,8 @@ TEST(SnapshotCreatorNoExternalReferencesCustomFail2) {
   }
   delete[] blob.data;
 }
+
+#endif  // V8_SHARED_RO_HEAP
 
 UNINITIALIZED_TEST(SnapshotCreatorUnknownExternalReferences) {
   DisableAlwaysOpt();
@@ -4966,6 +4971,46 @@ UNINITIALIZED_TEST(SnapshotCreatorAnonClassWithKeep) {
   v8::StartupData blob =
       creator.CreateBlob(v8::SnapshotCreator::FunctionCodeHandling::kKeep);
 
+  delete[] blob.data;
+}
+
+UNINITIALIZED_TEST(SnapshotCreatorDontDeferByteArrayForTypedArray) {
+  DisableAlwaysOpt();
+  v8::StartupData blob;
+  {
+    v8::SnapshotCreator creator;
+    v8::Isolate* isolate = creator.GetIsolate();
+    {
+      v8::HandleScope handle_scope(isolate);
+
+      v8::Local<v8::Context> context = v8::Context::New(isolate);
+      v8::Context::Scope context_scope(context);
+      CompileRun(
+          "const z = new Uint8Array(1);\n"
+          "class A { \n"
+          "  static x() { \n"
+          "  } \n"
+          "} \n"
+          "class B extends A {} \n"
+          "B.foo = ''; \n"
+          "class C extends B {} \n"
+          "class D extends C {} \n"
+          "class E extends B {} \n"
+          "function F() {} \n"
+          "Object.setPrototypeOf(F, D); \n");
+      creator.SetDefaultContext(context);
+    }
+
+    blob =
+        creator.CreateBlob(v8::SnapshotCreator::FunctionCodeHandling::kClear);
+    CHECK(blob.raw_size > 0 && blob.data != nullptr);
+  }
+  {
+    SnapshotCreator creator(nullptr, &blob);
+    v8::Isolate* isolate = creator.GetIsolate();
+    v8::HandleScope scope(isolate);
+    USE(v8::Context::New(isolate));
+  }
   delete[] blob.data;
 }
 

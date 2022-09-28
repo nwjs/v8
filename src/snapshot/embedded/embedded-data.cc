@@ -223,10 +223,11 @@ void FinalizeEmbeddedCodeTargets(Isolate* isolate, EmbeddedData* blob) {
     RelocIterator on_heap_it(code, kRelocMask);
     RelocIterator off_heap_it(blob, code, kRelocMask);
 
-#if defined(V8_TARGET_ARCH_X64) || defined(V8_TARGET_ARCH_ARM64) || \
-    defined(V8_TARGET_ARCH_ARM) || defined(V8_TARGET_ARCH_MIPS) ||  \
-    defined(V8_TARGET_ARCH_IA32) || defined(V8_TARGET_ARCH_S390) || \
-    defined(V8_TARGET_ARCH_RISCV64) || defined(V8_TARGET_ARCH_LOONG64)
+#if defined(V8_TARGET_ARCH_X64) || defined(V8_TARGET_ARCH_ARM64) ||       \
+    defined(V8_TARGET_ARCH_ARM) || defined(V8_TARGET_ARCH_MIPS) ||        \
+    defined(V8_TARGET_ARCH_IA32) || defined(V8_TARGET_ARCH_S390) ||       \
+    defined(V8_TARGET_ARCH_RISCV64) || defined(V8_TARGET_ARCH_LOONG64) || \
+    defined(V8_TARGET_ARCH_RISCV32)
     // On these platforms we emit relative builtin-to-builtin
     // jumps for isolate independent builtins in the snapshot. This fixes up the
     // relative jumps to the right offsets in the snapshot.
@@ -240,9 +241,8 @@ void FinalizeEmbeddedCodeTargets(Isolate* isolate, EmbeddedData* blob) {
       CHECK(Builtins::IsIsolateIndependentBuiltin(target));
 
       // Do not emit write-barrier for off-heap writes.
-      off_heap_it.rinfo()->set_target_address(
-          blob->InstructionStartOfBuiltin(target.builtin_id()),
-          SKIP_WRITE_BARRIER);
+      off_heap_it.rinfo()->set_off_heap_target_address(
+          blob->InstructionStartOfBuiltin(target.builtin_id()));
 
       on_heap_it.next();
       off_heap_it.next();
@@ -255,6 +255,20 @@ void FinalizeEmbeddedCodeTargets(Isolate* isolate, EmbeddedData* blob) {
     CHECK(on_heap_it.done());
     CHECK(off_heap_it.done());
 #endif
+  }
+}
+
+void EnsureRelocatable(CodeT codet) {
+  Code code = FromCodeT(codet);
+  if (code.relocation_size() == 0) return;
+
+  // On some architectures (arm) the builtin might have a non-empty reloc
+  // info containing a CONST_POOL entry. These entries don't have to be
+  // updated when Code object is relocated, so it's safe to drop the reloc
+  // info alltogether. If it wasn't the case then we'd have to store it
+  // in the metadata.
+  for (RelocIterator it(code); !it.done(); it.next()) {
+    CHECK_EQ(it.rinfo()->rmode(), RelocInfo::CONST_POOL);
   }
 }
 
@@ -367,6 +381,9 @@ EmbeddedData EmbeddedData::FromIsolate(Isolate* isolate) {
     std::memcpy(dst, reinterpret_cast<uint8_t*>(code.raw_metadata_start()),
                 code.raw_metadata_size());
   }
+  CHECK_IMPLIES(
+      kMaxPCRelativeCodeRangeInMB,
+      static_cast<size_t>(raw_code_size) <= kMaxPCRelativeCodeRangeInMB * MB);
 
   // .. and the variable-size code section.
   uint8_t* const raw_code_start = blob_code + RawCodeOffset();
@@ -405,6 +422,27 @@ EmbeddedData EmbeddedData::FromIsolate(Isolate* isolate) {
     DCHECK_EQ(code_hash, d.CreateEmbeddedBlobCodeHash());
     DCHECK_EQ(code_hash, d.EmbeddedBlobCodeHash());
   }
+
+  if (DEBUG_BOOL) {
+    for (Builtin builtin = Builtins::kFirst; builtin <= Builtins::kLast;
+         ++builtin) {
+      Code code = FromCodeT(builtins->code(builtin));
+
+      CHECK_EQ(d.InstructionSizeOfBuiltin(builtin), code.InstructionSize());
+      CHECK_EQ(d.MetadataSizeOfBuiltin(builtin), code.MetadataSize());
+
+      CHECK_EQ(d.SafepointTableSizeOf(builtin), code.safepoint_table_size());
+      CHECK_EQ(d.HandlerTableSizeOf(builtin), code.handler_table_size());
+      CHECK_EQ(d.ConstantPoolSizeOf(builtin), code.constant_pool_size());
+      CHECK_EQ(d.CodeCommentsSizeOf(builtin), code.code_comments_size());
+      CHECK_EQ(d.UnwindingInfoSizeOf(builtin), code.unwinding_info_size());
+      CHECK_EQ(d.StackSlotsOf(builtin), code.stack_slots());
+    }
+  }
+  // Ensure that InterpreterEntryTrampolineForProfiling is relocatable.
+  // See FLAG_interpreted_frames_native_stack for details.
+  EnsureRelocatable(
+      builtins->code(Builtin::kInterpreterEntryTrampolineForProfiling));
 
   if (FLAG_serialization_statistics) d.PrintStatistics();
 

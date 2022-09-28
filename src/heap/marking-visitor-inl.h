@@ -146,12 +146,11 @@ void MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitExternalPointer(
     HeapObject host, ExternalPointerSlot slot, ExternalPointerTag tag) {
 #ifdef V8_ENABLE_SANDBOX
   if (IsSandboxedExternalPointerType(tag)) {
-    ExternalPointerHandle handle = slot.load_handle();
-    if (IsSharedExternalPointerType(tag)) {
-      shared_external_pointer_table_->Mark(handle);
-    } else {
-      external_pointer_table_->Mark(handle);
-    }
+    ExternalPointerHandle handle = slot.Relaxed_LoadHandle();
+    ExternalPointerTable* table = IsSharedExternalPointerType(tag)
+                                      ? shared_external_pointer_table_
+                                      : external_pointer_table_;
+    table->Mark(handle, slot.address());
   }
 #endif  // V8_ENABLE_SANDBOX
 }
@@ -570,6 +569,45 @@ int MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitTransitionArray(
   TransitionArray::BodyDescriptor::IterateBody(map, array, size, this);
   local_weak_objects_->transition_arrays_local.Push(array);
   return size;
+}
+
+template <typename ConcreteVisitor, typename MarkingState>
+YoungGenerationMarkingVisitorBase<ConcreteVisitor, MarkingState>::
+    YoungGenerationMarkingVisitorBase(Isolate* isolate,
+                                      MarkingWorklists::Local* worklists_local)
+    : NewSpaceVisitor<ConcreteVisitor>(isolate),
+      worklists_local_(worklists_local) {}
+
+template <typename ConcreteVisitor, typename MarkingState>
+int YoungGenerationMarkingVisitorBase<
+    ConcreteVisitor, MarkingState>::VisitJSArrayBuffer(Map map,
+                                                       JSArrayBuffer object) {
+  if (!concrete_visitor()->ShouldVisit(object)) return 0;
+  object.YoungMarkExtension();
+  int size = JSArrayBuffer::BodyDescriptor::SizeOf(map, object);
+  JSArrayBuffer::BodyDescriptor::IterateBody(map, object, size, this);
+  return size;
+}
+
+template <typename ConcreteVisitor, typename MarkingState>
+void YoungGenerationMarkingVisitorBase<ConcreteVisitor, MarkingState>::
+    MarkObjectViaMarkingWorklist(HeapObject object) {
+  if (concrete_visitor()->marking_state()->WhiteToGrey(object)) {
+    worklists_local_->Push(object);
+  }
+}
+
+template <typename ConcreteVisitor, typename MarkingState>
+template <typename TSlot>
+void YoungGenerationMarkingVisitorBase<
+    ConcreteVisitor, MarkingState>::VisitPointerImpl(HeapObject host,
+                                                     TSlot slot) {
+  typename TSlot::TObject target = *slot;
+  if (Heap::InYoungGeneration(target)) {
+    // Treat weak references as strong.
+    HeapObject target_object = target.GetHeapObject();
+    MarkObjectViaMarkingWorklist(target_object);
+  }
 }
 
 }  // namespace internal

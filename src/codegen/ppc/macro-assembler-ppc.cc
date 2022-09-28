@@ -34,6 +34,8 @@
 #include "src/codegen/ppc/macro-assembler-ppc.h"
 #endif
 
+#define __ ACCESS_MASM(masm)
+
 namespace v8 {
 namespace internal {
 
@@ -164,28 +166,8 @@ void TurboAssembler::Jump(Handle<Code> code, RelocInfo::Mode rmode,
                  Builtins::IsIsolateIndependentBuiltin(*code));
 
   Builtin builtin = Builtin::kNoBuiltinId;
-  bool target_is_builtin =
-      isolate()->builtins()->IsBuiltinHandle(code, &builtin);
-
-  if (root_array_available_ && options().isolate_independent_code) {
-    Label skip;
-    Register scratch = ip;
-    int offset = IsolateData::BuiltinEntrySlotOffset(code->builtin_id());
-    LoadU64(scratch, MemOperand(kRootRegister, offset), r0);
-    if (cond != al) b(NegateCondition(cond), &skip, cr);
-    Jump(scratch);
-    bind(&skip);
-    return;
-  } else if (options().inline_offheap_trampolines && target_is_builtin) {
-    // Inline the trampoline.
-    Label skip;
-    RecordCommentForOffHeapTrampoline(builtin);
-    // Use ip directly instead of using UseScratchRegisterScope, as we do
-    // not preserve scratch registers across calls.
-    mov(ip, Operand(BuiltinEntry(builtin), RelocInfo::OFF_HEAP_TARGET));
-    if (cond != al) b(NegateCondition(cond), &skip, cr);
-    Jump(ip);
-    bind(&skip);
+  if (isolate()->builtins()->IsBuiltinHandle(code, &builtin)) {
+    TailCallBuiltin(builtin, cond, cr);
     return;
   }
   int32_t target_index = AddCodeTarget(code);
@@ -246,23 +228,9 @@ void TurboAssembler::Call(Handle<Code> code, RelocInfo::Mode rmode,
   DCHECK(RelocInfo::IsCodeTarget(rmode));
   DCHECK_IMPLIES(options().isolate_independent_code,
                  Builtins::IsIsolateIndependentBuiltin(*code));
-  DCHECK_IMPLIES(options().use_pc_relative_calls_and_jumps,
-                 Builtins::IsIsolateIndependentBuiltin(*code));
 
   Builtin builtin = Builtin::kNoBuiltinId;
-  bool target_is_builtin =
-      isolate()->builtins()->IsBuiltinHandle(code, &builtin);
-
-  if (root_array_available_ && options().isolate_independent_code) {
-    Label skip;
-    int offset = IsolateData::BuiltinEntrySlotOffset(code->builtin_id());
-    LoadU64(ip, MemOperand(kRootRegister, offset));
-    if (cond != al) b(NegateCondition(cond), &skip);
-    Call(ip);
-    bind(&skip);
-    return;
-  } else if (options().inline_offheap_trampolines && target_is_builtin) {
-    // Inline the trampoline.
+  if (isolate()->builtins()->IsBuiltinHandle(code, &builtin)) {
     CallBuiltin(builtin, cond);
     return;
   }
@@ -273,21 +241,86 @@ void TurboAssembler::Call(Handle<Code> code, RelocInfo::Mode rmode,
 
 void TurboAssembler::CallBuiltin(Builtin builtin, Condition cond) {
   ASM_CODE_COMMENT_STRING(this, CommentForOffHeapTrampoline("call", builtin));
-  DCHECK(Builtins::IsBuiltinId(builtin));
   // Use ip directly instead of using UseScratchRegisterScope, as we do not
   // preserve scratch registers across calls.
-  mov(ip, Operand(BuiltinEntry(builtin), RelocInfo::OFF_HEAP_TARGET));
-  Label skip;
-  if (cond != al) b(NegateCondition(cond), &skip);
-  Call(ip);
-  bind(&skip);
+  switch (options().builtin_call_jump_mode) {
+    case BuiltinCallJumpMode::kAbsolute: {
+      Label skip;
+      mov(ip, Operand(BuiltinEntry(builtin), RelocInfo::OFF_HEAP_TARGET));
+      if (cond != al) b(NegateCondition(cond), &skip);
+      Call(ip);
+      bind(&skip);
+      break;
+    }
+    case BuiltinCallJumpMode::kPCRelative:
+      UNREACHABLE();
+    case BuiltinCallJumpMode::kIndirect: {
+      Label skip;
+      LoadU64(ip, EntryFromBuiltinAsOperand(builtin));
+      if (cond != al) b(NegateCondition(cond), &skip);
+      Call(ip);
+      bind(&skip);
+      break;
+    }
+    case BuiltinCallJumpMode::kForMksnapshot: {
+      if (options().use_pc_relative_calls_and_jumps_for_mksnapshot) {
+        Handle<Code> code = isolate()->builtins()->code_handle(builtin);
+        int32_t code_target_index = AddCodeTarget(code);
+        Call(static_cast<Address>(code_target_index), RelocInfo::CODE_TARGET,
+             cond);
+      } else {
+        Label skip;
+        LoadU64(ip, EntryFromBuiltinAsOperand(builtin));
+        if (cond != al) b(NegateCondition(cond), &skip);
+        Call(ip);
+        bind(&skip);
+      }
+      break;
+    }
+  }
 }
 
-void TurboAssembler::TailCallBuiltin(Builtin builtin) {
+void TurboAssembler::TailCallBuiltin(Builtin builtin, Condition cond,
+                                     CRegister cr) {
   ASM_CODE_COMMENT_STRING(this,
                           CommentForOffHeapTrampoline("tail call", builtin));
-  mov(ip, Operand(BuiltinEntry(builtin), RelocInfo::OFF_HEAP_TARGET));
-  Jump(ip);
+  // Use ip directly instead of using UseScratchRegisterScope, as we do not
+  // preserve scratch registers across calls.
+  switch (options().builtin_call_jump_mode) {
+    case BuiltinCallJumpMode::kAbsolute: {
+      Label skip;
+      mov(ip, Operand(BuiltinEntry(builtin), RelocInfo::OFF_HEAP_TARGET));
+      if (cond != al) b(NegateCondition(cond), &skip, cr);
+      Jump(ip);
+      bind(&skip);
+      break;
+    }
+    case BuiltinCallJumpMode::kPCRelative:
+      UNREACHABLE();
+    case BuiltinCallJumpMode::kIndirect: {
+      Label skip;
+      LoadU64(ip, EntryFromBuiltinAsOperand(builtin));
+      if (cond != al) b(NegateCondition(cond), &skip, cr);
+      Jump(ip);
+      bind(&skip);
+      break;
+    }
+    case BuiltinCallJumpMode::kForMksnapshot: {
+      if (options().use_pc_relative_calls_and_jumps_for_mksnapshot) {
+        Handle<Code> code = isolate()->builtins()->code_handle(builtin);
+        int32_t code_target_index = AddCodeTarget(code);
+        Jump(static_cast<intptr_t>(code_target_index), RelocInfo::CODE_TARGET,
+             cond, cr);
+      } else {
+        Label skip;
+        LoadU64(ip, EntryFromBuiltinAsOperand(builtin));
+        if (cond != al) b(NegateCondition(cond), &skip, cr);
+        Jump(ip);
+        bind(&skip);
+      }
+      break;
+    }
+  }
 }
 
 void TurboAssembler::Drop(int count) {
@@ -772,17 +805,7 @@ void TurboAssembler::CallRecordWriteStub(Register object, Register slot_address,
 #endif
   } else {
     auto builtin_index = Builtins::GetRecordWriteStub(fp_mode);
-    if (options().inline_offheap_trampolines) {
-      RecordCommentForOffHeapTrampoline(builtin_index);
-      // Use ip directly instead of using UseScratchRegisterScope, as we do
-      // not preserve scratch registers across calls.
-      mov(ip, Operand(BuiltinEntry(builtin_index), RelocInfo::OFF_HEAP_TARGET));
-      Call(ip);
-    } else {
-      Handle<Code> code_target =
-          isolate()->builtins()->code_handle(builtin_index);
-      Call(code_target, RelocInfo::CODE_TARGET);
-    }
+    CallBuiltin(builtin_index, al);
   }
 }
 
@@ -813,7 +836,8 @@ void MacroAssembler::RecordWrite(Register object, Register slot_address,
 
   CheckPageFlag(value,
                 value,  // Used as scratch.
-                MemoryChunk::kPointersToHereAreInterestingMask, eq, &done);
+                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+                eq, &done);
   CheckPageFlag(object,
                 value,  // Used as scratch.
                 MemoryChunk::kPointersFromHereAreInterestingMask, eq, &done);
@@ -1973,6 +1997,146 @@ void TurboAssembler::TryInlineTruncateDoubleToI(Register result,
   beq(done);
 }
 
+namespace {
+
+void TailCallOptimizedCodeSlot(MacroAssembler* masm,
+                               Register optimized_code_entry,
+                               Register scratch) {
+  // ----------- S t a t e -------------
+  //  -- r3 : actual argument count
+  //  -- r6 : new target (preserved for callee if needed, and caller)
+  //  -- r4 : target function (preserved for callee if needed, and caller)
+  // -----------------------------------
+  DCHECK(!AreAliased(r4, r6, optimized_code_entry, scratch));
+
+  Register closure = r4;
+  Label heal_optimized_code_slot;
+
+  // If the optimized code is cleared, go to runtime to update the optimization
+  // marker field.
+  __ LoadWeakValue(optimized_code_entry, optimized_code_entry,
+                   &heal_optimized_code_slot);
+
+  // Check if the optimized code is marked for deopt. If it is, call the
+  // runtime to clear it.
+  {
+    UseScratchRegisterScope temps(masm);
+    __ TestCodeTIsMarkedForDeoptimization(optimized_code_entry, temps.Acquire(),
+                                          scratch);
+    __ bne(&heal_optimized_code_slot, cr0);
+  }
+
+  // Optimized code is good, get it into the closure and link the closure
+  // into the optimized functions list, then tail call the optimized code.
+  __ ReplaceClosureCodeWithOptimizedCode(optimized_code_entry, closure, scratch,
+                                         r8);
+  static_assert(kJavaScriptCallCodeStartRegister == r5, "ABI mismatch");
+  __ LoadCodeObjectEntry(r5, optimized_code_entry);
+  __ Jump(r5);
+
+  // Optimized code slot contains deoptimized code or code is cleared and
+  // optimized code marker isn't updated. Evict the code, update the marker
+  // and re-enter the closure's code.
+  __ bind(&heal_optimized_code_slot);
+  __ GenerateTailCallToReturnedCode(Runtime::kHealOptimizedCodeSlot);
+}
+
+}  // namespace
+
+#ifdef V8_ENABLE_DEBUG_CODE
+void MacroAssembler::AssertFeedbackVector(Register object, Register scratch) {
+  if (FLAG_debug_code) {
+    CompareObjectType(object, scratch, scratch, FEEDBACK_VECTOR_TYPE);
+    Assert(eq, AbortReason::kExpectedFeedbackVector);
+  }
+}
+#endif  // V8_ENABLE_DEBUG_CODE
+
+// Optimized code is good, get it into the closure and link the closure
+// into the optimized functions list, then tail call the optimized code.
+void MacroAssembler::ReplaceClosureCodeWithOptimizedCode(
+    Register optimized_code, Register closure, Register scratch1,
+    Register slot_address) {
+  DCHECK(!AreAliased(optimized_code, closure, scratch1, slot_address));
+  DCHECK_EQ(closure, kJSFunctionRegister);
+  DCHECK(!AreAliased(optimized_code, closure));
+  // Store code entry in the closure.
+  StoreTaggedField(optimized_code,
+                   FieldMemOperand(closure, JSFunction::kCodeOffset), r0);
+  // Write barrier clobbers scratch1 below.
+  Register value = scratch1;
+  mr(value, optimized_code);
+
+  RecordWriteField(closure, JSFunction::kCodeOffset, value, slot_address,
+                   kLRHasNotBeenSaved, SaveFPRegsMode::kIgnore,
+                   SmiCheck::kOmit);
+}
+
+void MacroAssembler::GenerateTailCallToReturnedCode(
+    Runtime::FunctionId function_id) {
+  // ----------- S t a t e -------------
+  //  -- r3 : actual argument count
+  //  -- r4 : target function (preserved for callee)
+  //  -- r6 : new target (preserved for callee)
+  // -----------------------------------
+  {
+    FrameAndConstantPoolScope scope(this, StackFrame::INTERNAL);
+    // Push a copy of the target function, the new target and the actual
+    // argument count.
+    // Push function as parameter to the runtime call.
+    SmiTag(kJavaScriptCallArgCountRegister);
+    Push(kJavaScriptCallTargetRegister, kJavaScriptCallNewTargetRegister,
+         kJavaScriptCallArgCountRegister, kJavaScriptCallTargetRegister);
+
+    CallRuntime(function_id, 1);
+    mr(r5, r3);
+
+    // Restore target function, new target and actual argument count.
+    Pop(kJavaScriptCallTargetRegister, kJavaScriptCallNewTargetRegister,
+        kJavaScriptCallArgCountRegister);
+    SmiUntag(kJavaScriptCallArgCountRegister);
+  }
+  static_assert(kJavaScriptCallCodeStartRegister == r5, "ABI mismatch");
+  JumpCodeObject(r5);
+}
+
+// Read off the optimization state in the feedback vector and check if there
+// is optimized code or a tiering state that needs to be processed.
+void MacroAssembler::LoadTieringStateAndJumpIfNeedsProcessing(
+    Register optimization_state, Register feedback_vector,
+    Label* has_optimized_code_or_state) {
+  ASM_CODE_COMMENT(this);
+  DCHECK(!AreAliased(optimization_state, feedback_vector));
+  LoadU16(optimization_state,
+          FieldMemOperand(feedback_vector, FeedbackVector::kFlagsOffset));
+  CHECK(is_uint16(
+      FeedbackVector::kHasOptimizedCodeOrTieringStateIsAnyRequestMask));
+  mov(r0,
+      Operand(FeedbackVector::kHasOptimizedCodeOrTieringStateIsAnyRequestMask));
+  AndU32(r0, optimization_state, r0, SetRC);
+  bne(has_optimized_code_or_state, cr0);
+}
+
+void MacroAssembler::MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+    Register optimization_state, Register feedback_vector) {
+  DCHECK(!AreAliased(optimization_state, feedback_vector));
+  Label maybe_has_optimized_code;
+  // Check if optimized code is available
+  TestBitMask(optimization_state, FeedbackVector::kTieringStateIsAnyRequestMask,
+              r0);
+  beq(&maybe_has_optimized_code, cr0);
+
+  GenerateTailCallToReturnedCode(Runtime::kCompileOptimized);
+
+  bind(&maybe_has_optimized_code);
+  Register optimized_code_entry = optimization_state;
+  LoadAnyTaggedField(optimized_code_entry,
+                     FieldMemOperand(feedback_vector,
+                                     FeedbackVector::kMaybeOptimizedCodeOffset),
+                     r0);
+  TailCallOptimizedCodeSlot(this, optimized_code_entry, r9);
+}
+
 void MacroAssembler::CallRuntime(const Runtime::Function* f, int num_arguments,
                                  SaveFPRegsMode save_doubles) {
   // All parameters are on the stack.  r3 has the return value after call.
@@ -2058,10 +2222,6 @@ void MacroAssembler::EmitDecrementCounter(StatsCounter* counter, int value,
   }
 }
 
-void TurboAssembler::Assert(Condition cond, AbortReason reason, CRegister cr) {
-  if (FLAG_debug_code) Check(cond, reason, cr);
-}
-
 void TurboAssembler::Check(Condition cond, AbortReason reason, CRegister cr) {
   Label L;
   b(cond, &L, cr);
@@ -2096,14 +2256,20 @@ void TurboAssembler::Abort(AbortReason reason) {
 
   LoadSmiLiteral(r4, Smi::FromInt(static_cast<int>(reason)));
 
-  // Disable stub call restrictions to always allow calls to abort.
-  if (!has_frame_) {
+  {
     // We don't actually want to generate a pile of code for this, so just
     // claim there is a stack frame, without generating one.
     FrameScope scope(this, StackFrame::NO_FRAME_TYPE);
-    Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
-  } else {
-    Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
+    if (root_array_available()) {
+      // Generate an indirect call via builtins entry table here in order to
+      // ensure that the interpreter_entry_return_pc_offset is the same for
+      // InterpreterEntryTrampoline and InterpreterEntryTrampolineForProfiling
+      // when FLAG_debug_code is enabled.
+      LoadEntryFromBuiltin(Builtin::kAbort, ip);
+      Call(ip);
+    } else {
+      Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
+    }
   }
   // will not return here
 }
@@ -2120,6 +2286,11 @@ void MacroAssembler::LoadNativeContextSlot(Register dst, int index) {
       FieldMemOperand(dst, Map::kConstructorOrBackPointerOrNativeContextOffset),
       r0);
   LoadTaggedPointerField(dst, MemOperand(dst, Context::SlotOffset(index)), r0);
+}
+
+#ifdef V8_ENABLE_DEBUG_CODE
+void TurboAssembler::Assert(Condition cond, AbortReason reason, CRegister cr) {
+  if (FLAG_debug_code) Check(cond, reason, cr);
 }
 
 void TurboAssembler::AssertNotSmi(Register object) {
@@ -2203,22 +2374,12 @@ void MacroAssembler::AssertGeneratorObject(Register object) {
   LoadMap(map, object);
 
   // Check if JSGeneratorObject
-  Label do_check;
   Register instance_type = object;
-  CompareInstanceType(map, instance_type, JS_GENERATOR_OBJECT_TYPE);
-  beq(&do_check);
-
-  // Check if JSAsyncFunctionObject (See MacroAssembler::CompareInstanceType)
-  cmpi(instance_type, Operand(JS_ASYNC_FUNCTION_OBJECT_TYPE));
-  beq(&do_check);
-
-  // Check if JSAsyncGeneratorObject (See MacroAssembler::CompareInstanceType)
-  cmpi(instance_type, Operand(JS_ASYNC_GENERATOR_OBJECT_TYPE));
-
-  bind(&do_check);
+  CompareInstanceTypeRange(map, instance_type, FIRST_JS_GENERATOR_OBJECT_TYPE,
+                           LAST_JS_GENERATOR_OBJECT_TYPE);
   // Restore generator object to register and perform assertion
   pop(object);
-  Check(eq, AbortReason::kOperandIsNotAGeneratorObject);
+  Check(le, AbortReason::kOperandIsNotAGeneratorObject);
 }
 
 void MacroAssembler::AssertUndefinedOrAllocationSite(Register object,
@@ -2234,6 +2395,7 @@ void MacroAssembler::AssertUndefinedOrAllocationSite(Register object,
     bind(&done_checking);
   }
 }
+#endif  // V8_ENABLE_DEBUG_CODE
 
 static const int kRegisterPassedArguments = 8;
 
@@ -3508,6 +3670,193 @@ void TurboAssembler::StoreSimd128LE(Simd128Register src, const MemOperand& mem,
 #endif
 }
 
+void TurboAssembler::F64x2Splat(Simd128Register dst, DoubleRegister src,
+                                Register scratch) {
+  constexpr int lane_width_in_bytes = 8;
+  MovDoubleToInt64(scratch, src);
+  mtvsrd(dst, scratch);
+  vinsertd(dst, dst, Operand(1 * lane_width_in_bytes));
+}
+
+void TurboAssembler::F32x4Splat(Simd128Register dst, DoubleRegister src,
+                                DoubleRegister scratch1, Register scratch2) {
+  MovFloatToInt(scratch2, src, scratch1);
+  mtvsrd(dst, scratch2);
+  vspltw(dst, dst, Operand(1));
+}
+
+void TurboAssembler::I64x2Splat(Simd128Register dst, Register src) {
+  constexpr int lane_width_in_bytes = 8;
+  mtvsrd(dst, src);
+  vinsertd(dst, dst, Operand(1 * lane_width_in_bytes));
+}
+
+void TurboAssembler::I32x4Splat(Simd128Register dst, Register src) {
+  mtvsrd(dst, src);
+  vspltw(dst, dst, Operand(1));
+}
+
+void TurboAssembler::I16x8Splat(Simd128Register dst, Register src) {
+  mtvsrd(dst, src);
+  vsplth(dst, dst, Operand(3));
+}
+
+void TurboAssembler::I8x16Splat(Simd128Register dst, Register src) {
+  mtvsrd(dst, src);
+  vspltb(dst, dst, Operand(7));
+}
+
+void TurboAssembler::F64x2ExtractLane(DoubleRegister dst, Simd128Register src,
+                                      uint8_t imm_lane_idx,
+                                      Simd128Register scratch1,
+                                      Register scratch2) {
+  constexpr int lane_width_in_bytes = 8;
+  vextractd(scratch1, src, Operand((1 - imm_lane_idx) * lane_width_in_bytes));
+  mfvsrd(scratch2, scratch1);
+  MovInt64ToDouble(dst, scratch2);
+}
+
+void TurboAssembler::F32x4ExtractLane(DoubleRegister dst, Simd128Register src,
+                                      uint8_t imm_lane_idx,
+                                      Simd128Register scratch1,
+                                      Register scratch2, Register scratch3) {
+  constexpr int lane_width_in_bytes = 4;
+  vextractuw(scratch1, src, Operand((3 - imm_lane_idx) * lane_width_in_bytes));
+  mfvsrd(scratch2, scratch1);
+  MovIntToFloat(dst, scratch2, scratch3);
+}
+
+void TurboAssembler::I64x2ExtractLane(Register dst, Simd128Register src,
+                                      uint8_t imm_lane_idx,
+                                      Simd128Register scratch) {
+  constexpr int lane_width_in_bytes = 8;
+  vextractd(scratch, src, Operand((1 - imm_lane_idx) * lane_width_in_bytes));
+  mfvsrd(dst, scratch);
+}
+
+void TurboAssembler::I32x4ExtractLane(Register dst, Simd128Register src,
+                                      uint8_t imm_lane_idx,
+                                      Simd128Register scratch) {
+  constexpr int lane_width_in_bytes = 4;
+  vextractuw(scratch, src, Operand((3 - imm_lane_idx) * lane_width_in_bytes));
+  mfvsrd(dst, scratch);
+}
+
+void TurboAssembler::I16x8ExtractLaneU(Register dst, Simd128Register src,
+                                       uint8_t imm_lane_idx,
+                                       Simd128Register scratch) {
+  constexpr int lane_width_in_bytes = 2;
+  vextractuh(scratch, src, Operand((7 - imm_lane_idx) * lane_width_in_bytes));
+  mfvsrd(dst, scratch);
+}
+
+void TurboAssembler::I16x8ExtractLaneS(Register dst, Simd128Register src,
+                                       uint8_t imm_lane_idx,
+                                       Simd128Register scratch) {
+  I16x8ExtractLaneU(dst, src, imm_lane_idx, scratch);
+  extsh(dst, dst);
+}
+
+void TurboAssembler::I8x16ExtractLaneU(Register dst, Simd128Register src,
+                                       uint8_t imm_lane_idx,
+                                       Simd128Register scratch) {
+  vextractub(scratch, src, Operand(15 - imm_lane_idx));
+  mfvsrd(dst, scratch);
+}
+
+void TurboAssembler::I8x16ExtractLaneS(Register dst, Simd128Register src,
+                                       uint8_t imm_lane_idx,
+                                       Simd128Register scratch) {
+  I8x16ExtractLaneU(dst, src, imm_lane_idx, scratch);
+  extsb(dst, dst);
+}
+
+void TurboAssembler::F64x2ReplaceLane(Simd128Register dst, Simd128Register src1,
+                                      DoubleRegister src2, uint8_t imm_lane_idx,
+                                      Register scratch1,
+                                      Simd128Register scratch2) {
+  constexpr int lane_width_in_bytes = 8;
+  if (src1 != dst) {
+    vor(dst, src1, src1);
+  }
+  MovDoubleToInt64(scratch1, src2);
+  if (CpuFeatures::IsSupported(PPC_10_PLUS)) {
+    vinsd(dst, scratch1, Operand((1 - imm_lane_idx) * lane_width_in_bytes));
+  } else {
+    mtvsrd(scratch2, scratch1);
+    vinsertd(dst, scratch2, Operand((1 - imm_lane_idx) * lane_width_in_bytes));
+  }
+}
+
+void TurboAssembler::F32x4ReplaceLane(Simd128Register dst, Simd128Register src1,
+                                      DoubleRegister src2, uint8_t imm_lane_idx,
+                                      Register scratch1,
+                                      DoubleRegister scratch2,
+                                      Simd128Register scratch3) {
+  constexpr int lane_width_in_bytes = 4;
+  if (src1 != dst) {
+    vor(dst, src1, src1);
+  }
+  MovFloatToInt(scratch1, src2, scratch2);
+  if (CpuFeatures::IsSupported(PPC_10_PLUS)) {
+    vinsw(dst, scratch1, Operand((3 - imm_lane_idx) * lane_width_in_bytes));
+  } else {
+    mtvsrd(scratch3, scratch1);
+    vinsertw(dst, scratch3, Operand((3 - imm_lane_idx) * lane_width_in_bytes));
+  }
+}
+
+void TurboAssembler::I64x2ReplaceLane(Simd128Register dst, Simd128Register src1,
+                                      Register src2, uint8_t imm_lane_idx,
+                                      Simd128Register scratch) {
+  constexpr int lane_width_in_bytes = 8;
+  if (src1 != dst) {
+    vor(dst, src1, src1);
+  }
+  if (CpuFeatures::IsSupported(PPC_10_PLUS)) {
+    vinsd(dst, src2, Operand((1 - imm_lane_idx) * lane_width_in_bytes));
+  } else {
+    mtvsrd(scratch, src2);
+    vinsertd(dst, scratch, Operand((1 - imm_lane_idx) * lane_width_in_bytes));
+  }
+}
+
+void TurboAssembler::I32x4ReplaceLane(Simd128Register dst, Simd128Register src1,
+                                      Register src2, uint8_t imm_lane_idx,
+                                      Simd128Register scratch) {
+  constexpr int lane_width_in_bytes = 4;
+  if (src1 != dst) {
+    vor(dst, src1, src1);
+  }
+  if (CpuFeatures::IsSupported(PPC_10_PLUS)) {
+    vinsw(dst, src2, Operand((3 - imm_lane_idx) * lane_width_in_bytes));
+  } else {
+    mtvsrd(scratch, src2);
+    vinsertw(dst, scratch, Operand((3 - imm_lane_idx) * lane_width_in_bytes));
+  }
+}
+
+void TurboAssembler::I16x8ReplaceLane(Simd128Register dst, Simd128Register src1,
+                                      Register src2, uint8_t imm_lane_idx,
+                                      Simd128Register scratch) {
+  constexpr int lane_width_in_bytes = 2;
+  if (src1 != dst) {
+    vor(dst, src1, src1);
+  }
+  mtvsrd(scratch, src2);
+  vinserth(dst, scratch, Operand((7 - imm_lane_idx) * lane_width_in_bytes));
+}
+
+void TurboAssembler::I8x16ReplaceLane(Simd128Register dst, Simd128Register src1,
+                                      Register src2, uint8_t imm_lane_idx,
+                                      Simd128Register scratch) {
+  if (src1 != dst) {
+    vor(dst, src1, src1);
+  }
+  mtvsrd(scratch, src2);
+  vinsertb(dst, scratch, Operand(15 - imm_lane_idx));
+}
+
 Register GetRegisterThatIsNotOneOf(Register reg1, Register reg2, Register reg3,
                                    Register reg4, Register reg5,
                                    Register reg6) {
@@ -3959,5 +4308,7 @@ void TurboAssembler::ReverseBitsInSingleByteU64(Register dst, Register src,
 
 }  // namespace internal
 }  // namespace v8
+
+#undef __
 
 #endif  // V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_PPC64

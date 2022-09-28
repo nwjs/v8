@@ -25,8 +25,8 @@
 #include "src/compiler/backend/ppc/instruction-codes-ppc.h"
 #elif V8_TARGET_ARCH_S390
 #include "src/compiler/backend/s390/instruction-codes-s390.h"
-#elif V8_TARGET_ARCH_RISCV64
-#include "src/compiler/backend/riscv64/instruction-codes-riscv64.h"
+#elif V8_TARGET_ARCH_RISCV32 || V8_TARGET_ARCH_RISCV64
+#include "src/compiler/backend/riscv/instruction-codes-riscv.h"
 #else
 #define TARGET_ARCH_OPCODE_LIST(V)
 #define TARGET_ADDRESSING_MODE_LIST(V)
@@ -198,7 +198,7 @@ V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os,
   V(None)                       \
   TARGET_ADDRESSING_MODE_LIST(V)
 
-enum AddressingMode {
+enum AddressingMode : uint8_t {
 #define DECLARE_ADDRESSING_MODE(Name) kMode_##Name,
   ADDRESSING_MODE_LIST(DECLARE_ADDRESSING_MODE)
 #undef DECLARE_ADDRESSING_MODE
@@ -309,7 +309,7 @@ using MiscField = base::BitField<int, 22, 10>;
 // LaneSizeField and AccessModeField are helper types to encode/decode a lane
 // size, an access mode, or both inside the overlapping MiscField.
 using LaneSizeField = base::BitField<int, 22, 8>;
-using AccessModeField = base::BitField<MemoryAccessMode, 30, 2>;
+using AccessModeField = base::BitField<MemoryAccessMode, 30, 1>;
 // TODO(turbofan): {HasMemoryAccessMode} is currently only used to guard
 // decoding (in CodeGenerator and InstructionScheduler). Encoding (in
 // InstructionSelector) is not yet guarded. There are in fact instructions for

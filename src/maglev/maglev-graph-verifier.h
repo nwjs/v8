@@ -28,6 +28,21 @@ std::ostream& operator<<(std::ostream& os, const ValueRepresentation& repr) {
   return os;
 }
 
+namespace {
+ValueRepresentation ToValueRepresentation(MachineType type) {
+  switch (type.representation()) {
+    case MachineRepresentation::kTagged:
+    case MachineRepresentation::kTaggedSigned:
+    case MachineRepresentation::kTaggedPointer:
+      return ValueRepresentation::kTagged;
+    case MachineRepresentation::kFloat64:
+      return ValueRepresentation::kFloat64;
+    default:
+      return ValueRepresentation::kInt32;
+  }
+}
+}  // namespace
+
 class Graph;
 
 // TODO(victorgomes): Currently it only verifies the inputs for all ValueNodes
@@ -60,16 +75,20 @@ class MaglevGraphVerifier {
 
   void Process(NodeBase* node, const ProcessingState& state) {
     switch (node->opcode()) {
+      case Opcode::kAbort:
       case Opcode::kConstant:
       case Opcode::kConstantGapMove:
       case Opcode::kCreateEmptyArrayLiteral:
+      case Opcode::kCreateEmptyObjectLiteral:
       case Opcode::kCreateArrayLiteral:
       case Opcode::kCreateShallowArrayLiteral:
       case Opcode::kCreateObjectLiteral:
       case Opcode::kCreateShallowObjectLiteral:
+      case Opcode::kCreateRegExpLiteral:
       case Opcode::kDeopt:
       case Opcode::kFloat64Constant:
       case Opcode::kGapMove:
+      case Opcode::kGetSecondReturnedValue:
       case Opcode::kInitialValue:
       case Opcode::kInt32Constant:
       case Opcode::kJump:
@@ -97,21 +116,34 @@ class MaglevGraphVerifier {
       case Opcode::kCheckMaps:
       case Opcode::kCheckMapsWithMigration:
       case Opcode::kCheckSmi:
+      case Opcode::kCheckNumber:
       case Opcode::kCheckString:
+      case Opcode::kCheckSymbol:
       case Opcode::kCheckedInternalizedString:
       // TODO(victorgomes): Can we check that the input is Boolean?
       case Opcode::kBranchIfToBooleanTrue:
       case Opcode::kBranchIfRootConstant:
+      case Opcode::kBranchIfUndefinedOrNull:
+      case Opcode::kBranchIfJSReceiver:
       case Opcode::kCheckedFloat64Unbox:
       case Opcode::kCreateFunctionContext:
       case Opcode::kCreateClosure:
       case Opcode::kFastCreateClosure:
+      case Opcode::kGeneratorRestoreRegister:
+      case Opcode::kGetTemplateObject:
       case Opcode::kLogicalNot:
+      case Opcode::kSetPendingMessage:
+      case Opcode::kToBooleanLogicalNot:
       case Opcode::kTestUndetectable:
+      case Opcode::kTestTypeOf:
+      case Opcode::kThrowReferenceErrorIfHole:
+      case Opcode::kThrowSuperNotCalledIfHole:
+      case Opcode::kThrowSuperAlreadyCalledIfNotHole:
       case Opcode::kReturn:
         DCHECK_EQ(node->input_count(), 1);
         CheckValueInputIs(node, 0, ValueRepresentation::kTagged);
         break;
+      case Opcode::kSwitch:
       case Opcode::kCheckedSmiTag:
       case Opcode::kChangeInt32ToFloat64:
         DCHECK_EQ(node->input_count(), 1);
@@ -121,6 +153,7 @@ class MaglevGraphVerifier {
         DCHECK_EQ(node->input_count(), 1);
         CheckValueInputIs(node, 0, ValueRepresentation::kFloat64);
         break;
+      case Opcode::kForInPrepare:
       case Opcode::kGenericAdd:
       case Opcode::kGenericBitwiseAnd:
       case Opcode::kGenericBitwiseOr:
@@ -141,16 +174,26 @@ class MaglevGraphVerifier {
       case Opcode::kGenericLessThan:
       case Opcode::kGenericLessThanOrEqual:
       case Opcode::kGenericStrictEqual:
+      case Opcode::kGetIterator:
       case Opcode::kTaggedEqual:
+      case Opcode::kTaggedNotEqual:
+      case Opcode::kStoreGlobal:
       // TODO(victorgomes): Can we check that first input is an Object?
       case Opcode::kStoreTaggedFieldNoWriteBarrier:
       // TODO(victorgomes): Can we check that second input is a Smi?
       case Opcode::kStoreTaggedFieldWithWriteBarrier:
       case Opcode::kLoadNamedGeneric:
+      case Opcode::kThrowIfNotSuperConstructor:
+      case Opcode::kToName:
+      case Opcode::kToNumberOrNumeric:
+      case Opcode::kToObject:
+      case Opcode::kToString:
         DCHECK_EQ(node->input_count(), 2);
         CheckValueInputIs(node, 0, ValueRepresentation::kTagged);
         CheckValueInputIs(node, 1, ValueRepresentation::kTagged);
         break;
+      case Opcode::kDeleteProperty:
+      case Opcode::kLoadNamedFromSuperGeneric:
       case Opcode::kSetNamedGeneric:
       case Opcode::kDefineNamedOwnGeneric:
       case Opcode::kGetKeyedGeneric:
@@ -213,13 +256,49 @@ class MaglevGraphVerifier {
         CheckValueInputIs(node, 1, ValueRepresentation::kFloat64);
         break;
       case Opcode::kCall:
+      case Opcode::kCallRuntime:
+      case Opcode::kCallWithSpread:
       case Opcode::kConstruct:
+      case Opcode::kConstructWithSpread:
+      case Opcode::kGeneratorStore:
+      case Opcode::kForInNext:
       case Opcode::kPhi:
         // All inputs should be tagged.
         for (int i = 0; i < node->input_count(); i++) {
           CheckValueInputIs(node, i, ValueRepresentation::kTagged);
         }
         break;
+      case Opcode::kCallBuiltin: {
+        CallBuiltin* call_builtin = node->Cast<CallBuiltin>();
+        auto descriptor =
+            Builtins::CallInterfaceDescriptorFor(call_builtin->builtin());
+        int count = call_builtin->input_count();
+        // Verify context.
+        if (descriptor.HasContextParameter()) {
+          CheckValueInputIs(call_builtin, count - 1,
+                            ValueRepresentation::kTagged);
+          count--;
+        }
+
+// {all_input_count} includes the feedback slot and vector.
+#ifdef DEBUG
+        int all_input_count = count + (call_builtin->has_feedback() ? 2 : 0);
+        if (descriptor.AllowVarArgs()) {
+          DCHECK_GE(all_input_count, descriptor.GetParameterCount());
+        } else {
+          DCHECK_EQ(all_input_count, descriptor.GetParameterCount());
+        }
+#endif
+        int i = 0;
+        // Check the rest of inputs.
+        for (; i < count; ++i) {
+          MachineType type = i < descriptor.GetParameterCount()
+                                 ? descriptor.GetParameterType(i)
+                                 : MachineType::AnyTagged();
+          CheckValueInputIs(call_builtin, i, ToValueRepresentation(type));
+        }
+        break;
+      }
     }
   }
 

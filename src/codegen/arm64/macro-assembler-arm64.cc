@@ -35,6 +35,8 @@
 #include "src/codegen/arm64/macro-assembler-arm64.h"
 #endif
 
+#define __ ACCESS_MASM(masm)
+
 namespace v8 {
 namespace internal {
 
@@ -1325,6 +1327,139 @@ void MacroAssembler::PopCalleeSavedRegisters() {
     ldp(d14, d15, tos);
 }
 
+namespace {
+
+void TailCallOptimizedCodeSlot(MacroAssembler* masm,
+                               Register optimized_code_entry,
+                               Register scratch) {
+  // ----------- S t a t e -------------
+  //  -- x0 : actual argument count
+  //  -- x3 : new target (preserved for callee if needed, and caller)
+  //  -- x1 : target function (preserved for callee if needed, and caller)
+  // -----------------------------------
+  ASM_CODE_COMMENT(masm);
+  DCHECK(!AreAliased(x1, x3, optimized_code_entry, scratch));
+
+  Register closure = x1;
+  Label heal_optimized_code_slot;
+
+  // If the optimized code is cleared, go to runtime to update the optimization
+  // marker field.
+  __ LoadWeakValue(optimized_code_entry, optimized_code_entry,
+                   &heal_optimized_code_slot);
+
+  // Check if the optimized code is marked for deopt. If it is, call the
+  // runtime to clear it.
+  __ AssertCodeT(optimized_code_entry);
+  __ JumpIfCodeTIsMarkedForDeoptimization(optimized_code_entry, scratch,
+                                          &heal_optimized_code_slot);
+
+  // Optimized code is good, get it into the closure and link the closure into
+  // the optimized functions list, then tail call the optimized code.
+  __ ReplaceClosureCodeWithOptimizedCode(optimized_code_entry, closure);
+  static_assert(kJavaScriptCallCodeStartRegister == x2, "ABI mismatch");
+  __ Move(x2, optimized_code_entry);
+  __ JumpCodeTObject(x2);
+
+  // Optimized code slot contains deoptimized code or code is cleared and
+  // optimized code marker isn't updated. Evict the code, update the marker
+  // and re-enter the closure's code.
+  __ bind(&heal_optimized_code_slot);
+  __ GenerateTailCallToReturnedCode(Runtime::kHealOptimizedCodeSlot);
+}
+
+}  // namespace
+
+#ifdef V8_ENABLE_DEBUG_CODE
+void MacroAssembler::AssertFeedbackVector(Register object, Register scratch) {
+  if (FLAG_debug_code) {
+    CompareObjectType(object, scratch, scratch, FEEDBACK_VECTOR_TYPE);
+    Assert(eq, AbortReason::kExpectedFeedbackVector);
+  }
+}
+#endif  // V8_ENABLE_DEBUG_CODE
+
+void MacroAssembler::ReplaceClosureCodeWithOptimizedCode(
+    Register optimized_code, Register closure) {
+  ASM_CODE_COMMENT(this);
+  DCHECK(!AreAliased(optimized_code, closure));
+  // Store code entry in the closure.
+  AssertCodeT(optimized_code);
+  StoreTaggedField(optimized_code,
+                   FieldMemOperand(closure, JSFunction::kCodeOffset));
+  RecordWriteField(closure, JSFunction::kCodeOffset, optimized_code,
+                   kLRHasNotBeenSaved, SaveFPRegsMode::kIgnore,
+                   SmiCheck::kOmit);
+}
+
+void MacroAssembler::GenerateTailCallToReturnedCode(
+    Runtime::FunctionId function_id) {
+  ASM_CODE_COMMENT(this);
+  // ----------- S t a t e -------------
+  //  -- x0 : actual argument count
+  //  -- x1 : target function (preserved for callee)
+  //  -- x3 : new target (preserved for callee)
+  // -----------------------------------
+  {
+    FrameScope scope(this, StackFrame::INTERNAL);
+    // Push a copy of the target function, the new target and the actual
+    // argument count.
+    SmiTag(kJavaScriptCallArgCountRegister);
+    Push(kJavaScriptCallTargetRegister, kJavaScriptCallNewTargetRegister,
+         kJavaScriptCallArgCountRegister, padreg);
+    // Push another copy as a parameter to the runtime call.
+    PushArgument(kJavaScriptCallTargetRegister);
+
+    CallRuntime(function_id, 1);
+    Mov(x2, x0);
+
+    // Restore target function, new target and actual argument count.
+    Pop(padreg, kJavaScriptCallArgCountRegister,
+        kJavaScriptCallNewTargetRegister, kJavaScriptCallTargetRegister);
+    SmiUntag(kJavaScriptCallArgCountRegister);
+  }
+
+  static_assert(kJavaScriptCallCodeStartRegister == x2, "ABI mismatch");
+  JumpCodeTObject(x2);
+}
+
+// Read off the optimization state in the feedback vector and check if there
+// is optimized code or a tiering state that needs to be processed.
+void MacroAssembler::LoadTieringStateAndJumpIfNeedsProcessing(
+    Register optimization_state, Register feedback_vector,
+    Label* has_optimized_code_or_state) {
+  ASM_CODE_COMMENT(this);
+  DCHECK(!AreAliased(optimization_state, feedback_vector));
+  Ldrh(optimization_state,
+       FieldMemOperand(feedback_vector, FeedbackVector::kFlagsOffset));
+  TestAndBranchIfAnySet(
+      optimization_state,
+      FeedbackVector::kHasOptimizedCodeOrTieringStateIsAnyRequestMask,
+      has_optimized_code_or_state);
+}
+
+void MacroAssembler::MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+    Register optimization_state, Register feedback_vector) {
+  ASM_CODE_COMMENT(this);
+  DCHECK(!AreAliased(optimization_state, feedback_vector));
+  Label maybe_has_optimized_code;
+  // Check if optimized code is available.
+  TestAndBranchIfAllClear(optimization_state,
+                          FeedbackVector::kTieringStateIsAnyRequestMask,
+                          &maybe_has_optimized_code);
+
+  GenerateTailCallToReturnedCode(Runtime::kCompileOptimized);
+
+  bind(&maybe_has_optimized_code);
+  Register optimized_code_entry = x7;
+  LoadAnyTaggedField(
+      optimized_code_entry,
+      FieldMemOperand(feedback_vector,
+                      FeedbackVector::kMaybeOptimizedCodeOffset));
+  TailCallOptimizedCodeSlot(this, optimized_code_entry, x4);
+}
+
+#ifdef V8_ENABLE_DEBUG_CODE
 void TurboAssembler::AssertSpAligned() {
   if (!FLAG_debug_code) return;
   ASM_CODE_COMMENT(this);
@@ -1337,6 +1472,163 @@ void TurboAssembler::AssertSpAligned() {
   Tst(temp, 15);
   Check(eq, AbortReason::kUnexpectedStackPointer);
 }
+
+void TurboAssembler::AssertFPCRState(Register fpcr) {
+  if (!FLAG_debug_code) return;
+  ASM_CODE_COMMENT(this);
+  Label unexpected_mode, done;
+  UseScratchRegisterScope temps(this);
+  if (fpcr.IsNone()) {
+    fpcr = temps.AcquireX();
+    Mrs(fpcr, FPCR);
+  }
+
+  // Settings left to their default values:
+  //   - Assert that flush-to-zero is not set.
+  Tbnz(fpcr, FZ_offset, &unexpected_mode);
+  //   - Assert that the rounding mode is nearest-with-ties-to-even.
+  static_assert(FPTieEven == 0);
+  Tst(fpcr, RMode_mask);
+  B(eq, &done);
+
+  Bind(&unexpected_mode);
+  Abort(AbortReason::kUnexpectedFPCRMode);
+
+  Bind(&done);
+}
+
+void TurboAssembler::AssertSmi(Register object, AbortReason reason) {
+  if (!FLAG_debug_code) return;
+  ASM_CODE_COMMENT(this);
+  static_assert(kSmiTag == 0);
+  Tst(object, kSmiTagMask);
+  Check(eq, reason);
+}
+
+void MacroAssembler::AssertNotSmi(Register object, AbortReason reason) {
+  if (!FLAG_debug_code) return;
+  ASM_CODE_COMMENT(this);
+  static_assert(kSmiTag == 0);
+  Tst(object, kSmiTagMask);
+  Check(ne, reason);
+}
+
+void MacroAssembler::AssertCodeT(Register object) {
+  if (!FLAG_debug_code) return;
+  ASM_CODE_COMMENT(this);
+  AssertNotSmi(object, AbortReason::kOperandIsNotACodeT);
+
+  UseScratchRegisterScope temps(this);
+  Register temp = temps.AcquireX();
+
+  CompareObjectType(object, temp, temp, CODET_TYPE);
+  Check(eq, AbortReason::kOperandIsNotACodeT);
+}
+
+void MacroAssembler::AssertConstructor(Register object) {
+  if (!FLAG_debug_code) return;
+  ASM_CODE_COMMENT(this);
+  AssertNotSmi(object, AbortReason::kOperandIsASmiAndNotAConstructor);
+
+  UseScratchRegisterScope temps(this);
+  Register temp = temps.AcquireX();
+
+  LoadMap(temp, object);
+  Ldrb(temp, FieldMemOperand(temp, Map::kBitFieldOffset));
+  Tst(temp, Operand(Map::Bits1::IsConstructorBit::kMask));
+
+  Check(ne, AbortReason::kOperandIsNotAConstructor);
+}
+
+void MacroAssembler::AssertFunction(Register object) {
+  if (!FLAG_debug_code) return;
+  ASM_CODE_COMMENT(this);
+  AssertNotSmi(object, AbortReason::kOperandIsASmiAndNotAFunction);
+
+  UseScratchRegisterScope temps(this);
+  Register temp = temps.AcquireX();
+  LoadMap(temp, object);
+  CompareInstanceTypeRange(temp, temp, FIRST_JS_FUNCTION_TYPE,
+                           LAST_JS_FUNCTION_TYPE);
+  Check(ls, AbortReason::kOperandIsNotAFunction);
+}
+
+void MacroAssembler::AssertCallableFunction(Register object) {
+  if (!FLAG_debug_code) return;
+  ASM_CODE_COMMENT(this);
+  AssertNotSmi(object, AbortReason::kOperandIsASmiAndNotAFunction);
+
+  UseScratchRegisterScope temps(this);
+  Register temp = temps.AcquireX();
+  LoadMap(temp, object);
+  CompareInstanceTypeRange(temp, temp, FIRST_CALLABLE_JS_FUNCTION_TYPE,
+                           LAST_CALLABLE_JS_FUNCTION_TYPE);
+  Check(ls, AbortReason::kOperandIsNotACallableFunction);
+}
+
+void MacroAssembler::AssertBoundFunction(Register object) {
+  if (!FLAG_debug_code) return;
+  ASM_CODE_COMMENT(this);
+  AssertNotSmi(object, AbortReason::kOperandIsASmiAndNotABoundFunction);
+
+  UseScratchRegisterScope temps(this);
+  Register temp = temps.AcquireX();
+
+  CompareObjectType(object, temp, temp, JS_BOUND_FUNCTION_TYPE);
+  Check(eq, AbortReason::kOperandIsNotABoundFunction);
+}
+
+void MacroAssembler::AssertGeneratorObject(Register object) {
+  if (!FLAG_debug_code) return;
+  ASM_CODE_COMMENT(this);
+  AssertNotSmi(object, AbortReason::kOperandIsASmiAndNotAGeneratorObject);
+
+  // Load map
+  UseScratchRegisterScope temps(this);
+  Register temp = temps.AcquireX();
+  LoadMap(temp, object);
+
+  // Load instance type and check if JSGeneratorObject
+  CompareInstanceTypeRange(temp, temp, FIRST_JS_GENERATOR_OBJECT_TYPE,
+                           LAST_JS_GENERATOR_OBJECT_TYPE);
+  // Restore generator object to register and perform assertion
+  Check(ls, AbortReason::kOperandIsNotAGeneratorObject);
+}
+
+void MacroAssembler::AssertUndefinedOrAllocationSite(Register object) {
+  if (!FLAG_debug_code) return;
+  ASM_CODE_COMMENT(this);
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.AcquireX();
+  Label done_checking;
+  AssertNotSmi(object);
+  JumpIfRoot(object, RootIndex::kUndefinedValue, &done_checking);
+  LoadMap(scratch, object);
+  CompareInstanceType(scratch, scratch, ALLOCATION_SITE_TYPE);
+  Assert(eq, AbortReason::kExpectedUndefinedOrCell);
+  Bind(&done_checking);
+}
+
+void TurboAssembler::AssertPositiveOrZero(Register value) {
+  if (!FLAG_debug_code) return;
+  ASM_CODE_COMMENT(this);
+  Label done;
+  int sign_bit = value.Is64Bits() ? kXSignBit : kWSignBit;
+  Tbz(value, sign_bit, &done);
+  Abort(AbortReason::kUnexpectedNegativeValue);
+  Bind(&done);
+}
+
+void TurboAssembler::Assert(Condition cond, AbortReason reason) {
+  if (FLAG_debug_code) {
+    Check(cond, reason);
+  }
+}
+
+void TurboAssembler::AssertUnreachable(AbortReason reason) {
+  if (FLAG_debug_code) Abort(reason);
+}
+#endif  // V8_ENABLE_DEBUG_CODE
 
 void TurboAssembler::CopySlots(int dst, Register src, Register slot_count) {
   DCHECK(!src.IsZero());
@@ -1434,30 +1726,6 @@ void TurboAssembler::SlotAddress(Register dst, Register slot_offset) {
   Add(dst, sp, Operand(slot_offset, LSL, kSystemPointerSizeLog2));
 }
 
-void TurboAssembler::AssertFPCRState(Register fpcr) {
-  if (!FLAG_debug_code) return;
-  ASM_CODE_COMMENT(this);
-  Label unexpected_mode, done;
-  UseScratchRegisterScope temps(this);
-  if (fpcr.IsNone()) {
-    fpcr = temps.AcquireX();
-    Mrs(fpcr, FPCR);
-  }
-
-    // Settings left to their default values:
-    //   - Assert that flush-to-zero is not set.
-    Tbnz(fpcr, FZ_offset, &unexpected_mode);
-    //   - Assert that the rounding mode is nearest-with-ties-to-even.
-    static_assert(FPTieEven == 0);
-    Tst(fpcr, RMode_mask);
-    B(eq, &done);
-
-    Bind(&unexpected_mode);
-    Abort(AbortReason::kUnexpectedFPCRMode);
-
-    Bind(&done);
-}
-
 void TurboAssembler::CanonicalizeNaN(const VRegister& dst,
                                      const VRegister& src) {
   AssertFPCRState();
@@ -1533,138 +1801,6 @@ void TurboAssembler::Swap(VRegister lhs, VRegister rhs) {
   Mov(temp, rhs);
   Mov(rhs, lhs);
   Mov(lhs, temp);
-}
-
-void TurboAssembler::AssertSmi(Register object, AbortReason reason) {
-  if (!FLAG_debug_code) return;
-  ASM_CODE_COMMENT(this);
-  static_assert(kSmiTag == 0);
-  Tst(object, kSmiTagMask);
-  Check(eq, reason);
-}
-
-void MacroAssembler::AssertNotSmi(Register object, AbortReason reason) {
-  if (!FLAG_debug_code) return;
-  ASM_CODE_COMMENT(this);
-  static_assert(kSmiTag == 0);
-  Tst(object, kSmiTagMask);
-  Check(ne, reason);
-}
-
-void MacroAssembler::AssertCodeT(Register object) {
-  if (!FLAG_debug_code) return;
-  ASM_CODE_COMMENT(this);
-  AssertNotSmi(object, AbortReason::kOperandIsNotACodeT);
-
-  UseScratchRegisterScope temps(this);
-  Register temp = temps.AcquireX();
-
-  CompareObjectType(object, temp, temp, CODET_TYPE);
-  Check(eq, AbortReason::kOperandIsNotACodeT);
-}
-
-void MacroAssembler::AssertConstructor(Register object) {
-  if (!FLAG_debug_code) return;
-  ASM_CODE_COMMENT(this);
-  AssertNotSmi(object, AbortReason::kOperandIsASmiAndNotAConstructor);
-
-  UseScratchRegisterScope temps(this);
-  Register temp = temps.AcquireX();
-
-  LoadMap(temp, object);
-  Ldrb(temp, FieldMemOperand(temp, Map::kBitFieldOffset));
-  Tst(temp, Operand(Map::Bits1::IsConstructorBit::kMask));
-
-  Check(ne, AbortReason::kOperandIsNotAConstructor);
-}
-
-void MacroAssembler::AssertFunction(Register object) {
-  if (!FLAG_debug_code) return;
-  ASM_CODE_COMMENT(this);
-  AssertNotSmi(object, AbortReason::kOperandIsASmiAndNotAFunction);
-
-  UseScratchRegisterScope temps(this);
-  Register temp = temps.AcquireX();
-  LoadMap(temp, object);
-  CompareInstanceTypeRange(temp, temp, FIRST_JS_FUNCTION_TYPE,
-                           LAST_JS_FUNCTION_TYPE);
-  Check(ls, AbortReason::kOperandIsNotAFunction);
-}
-
-void MacroAssembler::AssertCallableFunction(Register object) {
-  if (!FLAG_debug_code) return;
-  ASM_CODE_COMMENT(this);
-  AssertNotSmi(object, AbortReason::kOperandIsASmiAndNotAFunction);
-
-  UseScratchRegisterScope temps(this);
-  Register temp = temps.AcquireX();
-  LoadMap(temp, object);
-  CompareInstanceTypeRange(temp, temp, FIRST_CALLABLE_JS_FUNCTION_TYPE,
-                           LAST_CALLABLE_JS_FUNCTION_TYPE);
-  Check(ls, AbortReason::kOperandIsNotACallableFunction);
-}
-
-void MacroAssembler::AssertBoundFunction(Register object) {
-  if (!FLAG_debug_code) return;
-  ASM_CODE_COMMENT(this);
-  AssertNotSmi(object, AbortReason::kOperandIsASmiAndNotABoundFunction);
-
-  UseScratchRegisterScope temps(this);
-  Register temp = temps.AcquireX();
-
-  CompareObjectType(object, temp, temp, JS_BOUND_FUNCTION_TYPE);
-  Check(eq, AbortReason::kOperandIsNotABoundFunction);
-}
-
-void MacroAssembler::AssertGeneratorObject(Register object) {
-  if (!FLAG_debug_code) return;
-  ASM_CODE_COMMENT(this);
-  AssertNotSmi(object, AbortReason::kOperandIsASmiAndNotAGeneratorObject);
-
-  // Load map
-  UseScratchRegisterScope temps(this);
-  Register temp = temps.AcquireX();
-  LoadMap(temp, object);
-
-  Label do_check;
-  // Load instance type and check if JSGeneratorObject
-  CompareInstanceType(temp, temp, JS_GENERATOR_OBJECT_TYPE);
-  B(eq, &do_check);
-
-  // Check if JSAsyncFunctionObject
-  Cmp(temp, JS_ASYNC_FUNCTION_OBJECT_TYPE);
-  B(eq, &do_check);
-
-  // Check if JSAsyncGeneratorObject
-  Cmp(temp, JS_ASYNC_GENERATOR_OBJECT_TYPE);
-
-  bind(&do_check);
-  // Restore generator object to register and perform assertion
-  Check(eq, AbortReason::kOperandIsNotAGeneratorObject);
-}
-
-void MacroAssembler::AssertUndefinedOrAllocationSite(Register object) {
-  if (!FLAG_debug_code) return;
-  ASM_CODE_COMMENT(this);
-  UseScratchRegisterScope temps(this);
-  Register scratch = temps.AcquireX();
-  Label done_checking;
-  AssertNotSmi(object);
-  JumpIfRoot(object, RootIndex::kUndefinedValue, &done_checking);
-  LoadMap(scratch, object);
-  CompareInstanceType(scratch, scratch, ALLOCATION_SITE_TYPE);
-  Assert(eq, AbortReason::kExpectedUndefinedOrCell);
-  Bind(&done_checking);
-}
-
-void TurboAssembler::AssertPositiveOrZero(Register value) {
-  if (!FLAG_debug_code) return;
-  ASM_CODE_COMMENT(this);
-  Label done;
-  int sign_bit = value.Is64Bits() ? kXSignBit : kWSignBit;
-  Tbz(value, sign_bit, &done);
-  Abort(AbortReason::kUnexpectedNegativeValue);
-  Bind(&done);
 }
 
 void MacroAssembler::CallRuntime(const Runtime::Function* f, int num_arguments,
@@ -1904,18 +2040,14 @@ void TurboAssembler::Jump(Handle<CodeT> code, RelocInfo::Mode rmode,
                           Condition cond) {
   DCHECK(RelocInfo::IsCodeTarget(rmode));
   DCHECK_IMPLIES(options().isolate_independent_code,
-                 Builtins::IsIsolateIndependentBuiltin(FromCodeT(*code)));
+                 Builtins::IsIsolateIndependentBuiltin(*code));
 
-  if (options().inline_offheap_trampolines) {
-    Builtin builtin = Builtin::kNoBuiltinId;
-    if (isolate()->builtins()->IsBuiltinHandle(code, &builtin)) {
-      // Inline the trampoline.
-      CHECK_EQ(cond, Condition::al);  // Implement if necessary.
-      TailCallBuiltin(builtin);
-      return;
-    }
+  Builtin builtin = Builtin::kNoBuiltinId;
+  if (isolate()->builtins()->IsBuiltinHandle(code, &builtin)) {
+    TailCallBuiltin(builtin, cond);
+    return;
   }
-
+  DCHECK(RelocInfo::IsCodeTarget(rmode));
   if (CanUseNearCallOrJump(rmode)) {
     EmbeddedObjectIndex index = AddEmbeddedObject(code);
     DCHECK(is_int32(index));
@@ -1950,19 +2082,18 @@ void TurboAssembler::Call(Address target, RelocInfo::Mode rmode) {
 
 void TurboAssembler::Call(Handle<CodeT> code, RelocInfo::Mode rmode) {
   DCHECK_IMPLIES(options().isolate_independent_code,
-                 Builtins::IsIsolateIndependentBuiltin(FromCodeT(*code)));
+                 Builtins::IsIsolateIndependentBuiltin(*code));
   BlockPoolsScope scope(this);
 
-  if (options().inline_offheap_trampolines) {
-    Builtin builtin = Builtin::kNoBuiltinId;
-    if (isolate()->builtins()->IsBuiltinHandle(code, &builtin)) {
-      // Inline the trampoline.
-      CallBuiltin(builtin);
-      return;
-    }
+  Builtin builtin = Builtin::kNoBuiltinId;
+  if (isolate()->builtins()->IsBuiltinHandle(code, &builtin)) {
+    CallBuiltin(builtin);
+    return;
   }
 
   DCHECK(FromCodeT(*code).IsExecutable());
+  DCHECK(RelocInfo::IsCodeTarget(rmode));
+
   if (CanUseNearCallOrJump(rmode)) {
     EmbeddedObjectIndex index = AddEmbeddedObject(code);
     DCHECK(is_int32(index));
@@ -2021,43 +2152,83 @@ void TurboAssembler::CallBuiltinByIndex(Register builtin_index) {
 }
 
 void TurboAssembler::CallBuiltin(Builtin builtin) {
-  ASM_CODE_COMMENT(this);
-  DCHECK(Builtins::IsBuiltinId(builtin));
-  RecordCommentForOffHeapTrampoline(builtin);
-  CHECK_NE(builtin, Builtin::kNoBuiltinId);
-  if (options().short_builtin_calls) {
-    Call(BuiltinEntry(builtin), RelocInfo::RUNTIME_ENTRY);
-
-  } else {
-    UseScratchRegisterScope temps(this);
-    Register scratch = temps.AcquireX();
-    Ldr(scratch, Operand(BuiltinEntry(builtin), RelocInfo::OFF_HEAP_TARGET));
-    Call(scratch);
+  ASM_CODE_COMMENT_STRING(this, CommentForOffHeapTrampoline("call", builtin));
+  switch (options().builtin_call_jump_mode) {
+    case BuiltinCallJumpMode::kAbsolute: {
+      UseScratchRegisterScope temps(this);
+      Register scratch = temps.AcquireX();
+      Ldr(scratch, Operand(BuiltinEntry(builtin), RelocInfo::OFF_HEAP_TARGET));
+      Call(scratch);
+      break;
+    }
+    case BuiltinCallJumpMode::kPCRelative:
+      Call(BuiltinEntry(builtin), RelocInfo::RUNTIME_ENTRY);
+      break;
+    case BuiltinCallJumpMode::kIndirect: {
+      UseScratchRegisterScope temps(this);
+      Register scratch = temps.AcquireX();
+      LoadEntryFromBuiltin(builtin, scratch);
+      Call(scratch);
+      break;
+    }
+    case BuiltinCallJumpMode::kForMksnapshot: {
+      if (options().use_pc_relative_calls_and_jumps_for_mksnapshot) {
+        Handle<CodeT> code = isolate()->builtins()->code_handle(builtin);
+        EmbeddedObjectIndex index = AddEmbeddedObject(code);
+        DCHECK(is_int32(index));
+        near_call(static_cast<int32_t>(index), RelocInfo::CODE_TARGET);
+      } else {
+        UseScratchRegisterScope temps(this);
+        Register scratch = temps.AcquireX();
+        LoadEntryFromBuiltin(builtin, scratch);
+        Call(scratch);
+      }
+      break;
+    }
   }
 }
 
-void TurboAssembler::TailCallBuiltin(Builtin builtin) {
-  ASM_CODE_COMMENT(this);
-  DCHECK(Builtins::IsBuiltinId(builtin));
-  RecordCommentForOffHeapTrampoline(builtin);
-  CHECK_NE(builtin, Builtin::kNoBuiltinId);
-  if (options().short_builtin_calls) {
-    Jump(BuiltinEntry(builtin), RelocInfo::RUNTIME_ENTRY);
+void TurboAssembler::TailCallBuiltin(Builtin builtin, Condition cond) {
+  ASM_CODE_COMMENT_STRING(this,
+                          CommentForOffHeapTrampoline("tail call", builtin));
 
-  } else {
-    // The control flow integrity (CFI) feature allows us to "sign" code entry
-    // points as a target for calls, jumps or both. Arm64 has special
-    // instructions for this purpose, so-called "landing pads" (see
-    // TurboAssembler::CallTarget(), TurboAssembler::JumpTarget() and
-    // TurboAssembler::JumpOrCallTarget()). Currently, we generate "Call"
-    // landing pads for CPP builtins. In order to allow tail calling to those
-    // builtins we have to use a workaround.
-    // x17 is used to allow using "Call" (i.e. `bti c`) rather than "Jump"
-    // (i.e. `bti j`) landing pads for the tail-called code.
-    Register temp = x17;
+  // The control flow integrity (CFI) feature allows us to "sign" code entry
+  // points as a target for calls, jumps or both. Arm64 has special
+  // instructions for this purpose, so-called "landing pads" (see
+  // TurboAssembler::CallTarget(), TurboAssembler::JumpTarget() and
+  // TurboAssembler::JumpOrCallTarget()). Currently, we generate "Call"
+  // landing pads for CPP builtins. In order to allow tail calling to those
+  // builtins we have to use a workaround.
+  // x17 is used to allow using "Call" (i.e. `bti c`) rather than "Jump"
+  // (i.e. `bti j`) landing pads for the tail-called code.
+  Register temp = x17;
 
-    Ldr(temp, Operand(BuiltinEntry(builtin), RelocInfo::OFF_HEAP_TARGET));
-    Jump(temp);
+  switch (options().builtin_call_jump_mode) {
+    case BuiltinCallJumpMode::kAbsolute: {
+      Ldr(temp, Operand(BuiltinEntry(builtin), RelocInfo::OFF_HEAP_TARGET));
+      Jump(temp, cond);
+      break;
+    }
+    case BuiltinCallJumpMode::kPCRelative:
+      Jump(BuiltinEntry(builtin), RelocInfo::RUNTIME_ENTRY, cond);
+      break;
+    case BuiltinCallJumpMode::kIndirect: {
+      LoadEntryFromBuiltin(builtin, temp);
+      Jump(temp, cond);
+      break;
+    }
+    case BuiltinCallJumpMode::kForMksnapshot: {
+      if (options().use_pc_relative_calls_and_jumps_for_mksnapshot) {
+        Handle<CodeT> code = isolate()->builtins()->code_handle(builtin);
+        EmbeddedObjectIndex index = AddEmbeddedObject(code);
+        DCHECK(is_int32(index));
+        JumpHelper(static_cast<int64_t>(index), RelocInfo::CODE_TARGET, cond);
+      } else {
+        LoadEntryFromBuiltin(builtin, temp);
+        Jump(temp, cond);
+      }
+      break;
+    }
   }
 }
 
@@ -2618,10 +2789,8 @@ void TurboAssembler::TruncateDoubleToI(Isolate* isolate, Zone* zone,
   // For balance.
   if (false) {
 #endif  // V8_ENABLE_WEBASSEMBLY
-  } else if (options().inline_offheap_trampolines) {
-    CallBuiltin(Builtin::kDoubleToI);
   } else {
-    Call(BUILTIN_CODE(isolate, DoubleToI), RelocInfo::CODE_TARGET);
+    CallBuiltin(Builtin::kDoubleToI);
   }
   Ldr(result, MemOperand(sp, 0));
 
@@ -3260,12 +3429,7 @@ void TurboAssembler::CallRecordWriteStub(Register object, Register slot_address,
 #endif
   } else {
     Builtin builtin = Builtins::GetRecordWriteStub(fp_mode);
-    if (options().inline_offheap_trampolines) {
-      CallBuiltin(builtin);
-    } else {
-      Handle<CodeT> code_target = isolate()->builtins()->code_handle(builtin);
-      Call(code_target, RelocInfo::CODE_TARGET);
-    }
+    CallBuiltin(builtin);
   }
 }
 
@@ -3337,8 +3501,9 @@ void MacroAssembler::RecordWrite(Register object, Operand offset,
     DCHECK_EQ(0, kSmiTag);
     JumpIfSmi(value, &done);
   }
-  CheckPageFlag(value, MemoryChunk::kPointersToHereAreInterestingMask, ne,
-                &done);
+  CheckPageFlag(value,
+                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+                ne, &done);
 
   CheckPageFlag(object, MemoryChunk::kPointersFromHereAreInterestingMask, ne,
                 &done);
@@ -3359,16 +3524,6 @@ void MacroAssembler::RecordWrite(Register object, Operand offset,
   if (FLAG_debug_code) Mov(slot_address, Operand(kZapValue));
 
   Bind(&done);
-}
-
-void TurboAssembler::Assert(Condition cond, AbortReason reason) {
-  if (FLAG_debug_code) {
-    Check(cond, reason);
-  }
-}
-
-void TurboAssembler::AssertUnreachable(AbortReason reason) {
-  if (FLAG_debug_code) Abort(reason);
 }
 
 void TurboAssembler::Check(Condition cond, AbortReason reason) {
@@ -3413,13 +3568,22 @@ void TurboAssembler::Abort(AbortReason reason) {
 
   Mov(x1, Smi::FromInt(static_cast<int>(reason)));
 
-  if (!has_frame_) {
+  {
     // We don't actually want to generate a pile of code for this, so just
     // claim there is a stack frame, without generating one.
     FrameScope scope(this, StackFrame::NO_FRAME_TYPE);
-    Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
-  } else {
-    Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
+    if (root_array_available()) {
+      // Generate an indirect call via builtins entry table here in order to
+      // ensure that the interpreter_entry_return_pc_offset is the same for
+      // InterpreterEntryTrampoline and InterpreterEntryTrampolineForProfiling
+      // when FLAG_debug_code is enabled.
+      UseScratchRegisterScope temps(this);
+      Register scratch = temps.AcquireX();
+      LoadEntryFromBuiltin(Builtin::kAbort, scratch);
+      Call(scratch);
+    } else {
+      Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
+    }
   }
 
   TmpList()->set_bits(old_tmp_list);
@@ -3783,5 +3947,7 @@ void TurboAssembler::I64x2AllTrue(Register dst, VRegister src) {
 
 }  // namespace internal
 }  // namespace v8
+
+#undef __
 
 #endif  // V8_TARGET_ARCH_ARM64

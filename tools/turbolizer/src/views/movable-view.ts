@@ -16,12 +16,13 @@ import { TurboshaftGraph } from "../turboshaft-graph";
 import { Graph } from "../graph";
 import { TurboshaftGraphNode } from "../phases/turboshaft-graph-phase/turboshaft-graph-node";
 import { GraphNode } from "../phases/graph-phase/graph-node";
+import { SelectionStorage } from "../selection/selection-storage";
 
 export abstract class MovableView<GraphType extends Graph | TurboshaftGraph> extends PhaseView {
   phaseName: string;
   graph: GraphType;
   broker: SelectionBroker;
-  showPhaseByName: (name: string, selection: Set<any>) => void;
+  showPhaseByName: (name: string, selection: SelectionStorage) => void;
   toolbox: HTMLElement;
   state: MovableViewState;
   nodeSelectionHandler: NodeSelectionHandler & ClearableHandler;
@@ -29,12 +30,14 @@ export abstract class MovableView<GraphType extends Graph | TurboshaftGraph> ext
   graphElement: d3.Selection<any, any, any, any>;
   svg: d3.Selection<any, any, any, any>;
   panZoom: d3.ZoomBehavior<SVGElement, any>;
+  hoveredNodeIdentifier: string;
 
   public abstract updateGraphVisibility(): void;
   public abstract svgKeyDown(): void;
 
   constructor(idOrContainer: string | HTMLElement, broker: SelectionBroker,
-              showPhaseByName: (name: string) => void, toolbox: HTMLElement) {
+              showPhaseByName: (name: string, selection: SelectionStorage) => void,
+              toolbox: HTMLElement) {
     super(idOrContainer);
     this.broker = broker;
     this.showPhaseByName = showPhaseByName;
@@ -224,7 +227,7 @@ export abstract class MovableView<GraphType extends Graph | TurboshaftGraph> ext
     }
   }
 
-  protected showVisible() {
+  protected showVisible(): void {
     this.updateGraphVisibility();
     this.viewWholeGraph();
     this.focusOnSvg();
@@ -247,6 +250,13 @@ export abstract class MovableView<GraphType extends Graph | TurboshaftGraph> ext
       }
       return false;
     })];
+  }
+
+  protected createImgToggleInput(id: string, title: string, initState: boolean, onClick):
+    HTMLElement {
+    const input = this.createImgInput(id, title, onClick);
+    input.classList.toggle("button-input-toggled", initState);
+    return input;
   }
 
   private deleteContent(): void {
@@ -280,13 +290,6 @@ export abstract class MovableView<GraphType extends Graph | TurboshaftGraph> ext
     input.addEventListener("click", onClick);
     return input;
   }
-
-  private createImgToggleInput(id: string, title: string, initState: boolean, onClick):
-    HTMLElement {
-    const input = this.createImgInput(id, title, onClick);
-    input.classList.toggle("button-input-toggled", initState);
-    return input;
-  }
 }
 
 export class MovableViewState {
@@ -309,12 +312,12 @@ export class MovableViewState {
     storageSetItem("toggle-types", value);
   }
 
-  public get showProperties(): boolean {
-    return storageGetItem("toggle-properties", false);
+  public get showCustomData(): boolean {
+    return storageGetItem("toggle-custom-data", false);
   }
 
-  public set showProperties(value: boolean) {
-    storageSetItem("toggle-properties", value);
+  public set showCustomData(value: boolean) {
+    storageSetItem("toggle-custom-data", value);
   }
 
   public get cacheLayout(): boolean {

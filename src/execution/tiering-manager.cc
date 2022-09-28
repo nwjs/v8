@@ -263,7 +263,10 @@ void TieringManager::MaybeOptimizeFrame(JSFunction function,
 
   const bool is_marked_for_any_optimization =
       (static_cast<uint32_t>(tiering_state) & kNoneOrInProgressMask) != 0;
-  if (is_marked_for_any_optimization || function.HasAvailableOptimizedCode()) {
+  // TODO(v8:7700): Change the condition below for Maglev OSR once it is
+  // implemented.
+  if (is_marked_for_any_optimization ||
+      function.HasAvailableCodeKind(CodeKind::TURBOFAN)) {
     // OSR kicks in only once we've previously decided to tier up, but we are
     // still in the unoptimized frame (this implies a long-running loop).
     if (SmallEnoughForOSR(isolate_, function)) {
@@ -276,7 +279,7 @@ void TieringManager::MaybeOptimizeFrame(JSFunction function,
   }
 
   DCHECK(!is_marked_for_any_optimization &&
-         !function.HasAvailableOptimizedCode());
+         !function.HasAvailableCodeKind(CodeKind::TURBOFAN));
   OptimizationDecision d = ShouldOptimize(function, code_kind);
   if (d.should_optimize()) Optimize(function, d);
 }
@@ -372,7 +375,7 @@ void TieringManager::OnInterruptTick(Handle<JSFunction> function) {
   // compile request and fulfillment, which doesn't work with strictly linear
   // tiering.
   if (CanCompileWithBaseline(isolate_, function->shared()) &&
-      !function->ActiveTierIsBaseline()) {
+      function->ActiveTierIsIgnition()) {
     if (FLAG_baseline_batch_compilation) {
       isolate_->baseline_batch_compiler()->EnqueueFunction(function);
     } else {
@@ -381,6 +384,7 @@ void TieringManager::OnInterruptTick(Handle<JSFunction> function) {
       Compiler::CompileBaseline(isolate_, function, Compiler::CLEAR_EXCEPTION,
                                 &is_compiled_scope);
     }
+    function->shared().set_sparkplug_compiled(true);
   }
 
   // We only tier up beyond sparkplug if we already had a feedback vector.

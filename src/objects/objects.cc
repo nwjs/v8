@@ -651,7 +651,8 @@ MaybeHandle<Object> Object::ConvertToIndex(Isolate* isolate,
   return js_len;
 }
 
-bool Object::BooleanValue(Isolate* isolate) {
+template <typename IsolateT>
+bool Object::BooleanValue(IsolateT* isolate) {
   if (IsSmi()) return Smi::ToInt(*this) != 0;
   DCHECK(IsHeapObject());
   if (IsBoolean()) return IsTrue(isolate);
@@ -662,6 +663,8 @@ bool Object::BooleanValue(Isolate* isolate) {
   if (IsBigInt()) return BigInt::cast(*this).ToBoolean();
   return true;
 }
+template bool Object::BooleanValue(Isolate*);
+template bool Object::BooleanValue(LocalIsolate*);
 
 Object Object::ToBoolean(Isolate* isolate) {
   if (IsBoolean()) return *this;
@@ -1324,8 +1327,8 @@ bool Object::ToInt32(int32_t* value) {
 
 // static
 Handle<TemplateList> TemplateList::New(Isolate* isolate, int size) {
-  Handle<FixedArray> list =
-      isolate->factory()->NewFixedArray(kLengthIndex + size);
+  Handle<FixedArray> list = isolate->factory()->NewFixedArray(
+      kLengthIndex + size, AllocationType::kOld);
   list->set(kLengthIndex, Smi::zero());
   return Handle<TemplateList>::cast(list);
 }
@@ -2043,6 +2046,19 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
       os << "<ScopeInfo";
       if (!scope.IsEmpty()) os << " " << scope.scope_type();
       os << ">";
+      break;
+    }
+    case CODE_DATA_CONTAINER_TYPE: {
+#ifdef V8_EXTERNAL_CODE_SPACE
+      CodeDataContainer code = CodeDataContainer::cast(*this);
+      os << "<CodeDataContainer " << CodeKindToString(code.kind());
+      if (code.is_builtin()) {
+        os << " " << Builtins::name(code.builtin_id());
+      }
+      os << ">";
+#else
+      os << "<CodeDataContainer>";
+#endif  // V8_EXTERNAL_CODE_SPACE
       break;
     }
     case CODE_TYPE: {
@@ -4031,9 +4047,10 @@ void FixedArray::CopyTo(int pos, FixedArray dest, int dest_pos, int len) const {
 
 // static
 Handle<ArrayList> ArrayList::Add(Isolate* isolate, Handle<ArrayList> array,
-                                 Handle<Object> obj) {
+                                 Handle<Object> obj,
+                                 AllocationType allocation) {
   int length = array->Length();
-  array = EnsureSpace(isolate, array, length + 1);
+  array = EnsureSpace(isolate, array, length + 1, allocation);
   // Check that GC didn't remove elements from the array.
   DCHECK_EQ(array->Length(), length);
   {
@@ -4098,14 +4115,15 @@ Handle<FixedArray> ArrayList::Elements(Isolate* isolate,
 namespace {
 
 Handle<FixedArray> EnsureSpaceInFixedArray(Isolate* isolate,
-                                           Handle<FixedArray> array,
-                                           int length) {
+                                           Handle<FixedArray> array, int length,
+                                           AllocationType allocation) {
   int capacity = array->length();
   if (capacity < length) {
     int new_capacity = length;
     new_capacity = new_capacity + std::max(new_capacity / 2, 2);
     int grow_by = new_capacity - capacity;
-    array = isolate->factory()->CopyFixedArrayAndGrow(array, grow_by);
+    array =
+        isolate->factory()->CopyFixedArrayAndGrow(array, grow_by, allocation);
   }
   return array;
 }
@@ -4114,10 +4132,11 @@ Handle<FixedArray> EnsureSpaceInFixedArray(Isolate* isolate,
 
 // static
 Handle<ArrayList> ArrayList::EnsureSpace(Isolate* isolate,
-                                         Handle<ArrayList> array, int length) {
+                                         Handle<ArrayList> array, int length,
+                                         AllocationType allocation) {
   DCHECK_LT(0, length);
-  auto new_array = Handle<ArrayList>::cast(
-      EnsureSpaceInFixedArray(isolate, array, kFirstIndex + length));
+  auto new_array = Handle<ArrayList>::cast(EnsureSpaceInFixedArray(
+      isolate, array, kFirstIndex + length, allocation));
   DCHECK_EQ(array->Length(), new_array->Length());
   return new_array;
 }
@@ -4282,6 +4301,13 @@ bool WeakArrayList::RemoveOne(const MaybeObjectHandle& value) {
   return false;
 }
 
+bool WeakArrayList::Contains(MaybeObject value) {
+  for (int i = 0; i < length(); ++i) {
+    if (Get(i) == value) return true;
+  }
+  return false;
+}
+
 // static
 Handle<WeakArrayList> PrototypeUsers::Add(Isolate* isolate,
                                           Handle<WeakArrayList> array,
@@ -4392,8 +4418,9 @@ Handle<RegExpMatchInfo> RegExpMatchInfo::ReserveCaptures(
   int capture_register_count =
       JSRegExp::RegistersForCaptureCount(capture_count);
   const int required_length = kFirstCaptureIndex + capture_register_count;
-  Handle<RegExpMatchInfo> result = Handle<RegExpMatchInfo>::cast(
-      EnsureSpaceInFixedArray(isolate, match_info, required_length));
+  Handle<RegExpMatchInfo> result =
+      Handle<RegExpMatchInfo>::cast(EnsureSpaceInFixedArray(
+          isolate, match_info, required_length, AllocationType::kYoung));
   result->SetNumberOfCaptureRegisters(capture_register_count);
   return result;
 }
@@ -4510,6 +4537,21 @@ void DescriptorArray::Sort() {
     }
   }
   DCHECK(IsSortedNoDuplicates());
+}
+
+void DescriptorArray::CheckNameCollisionDuringInsertion(Descriptor* desc,
+                                                        uint32_t desc_hash,
+                                                        int insertion_index) {
+  DCHECK_GE(insertion_index, 0);
+  DCHECK_LE(insertion_index, number_of_all_descriptors());
+
+  if (insertion_index <= 0) return;
+
+  for (int i = insertion_index; i > 0; --i) {
+    Name current_key = GetSortedKey(i - 1);
+    if (current_key.hash() != desc_hash) return;
+    CHECK(current_key != *desc->GetKey());
+  }
 }
 
 int16_t DescriptorArray::UpdateNumberOfMarkedDescriptors(

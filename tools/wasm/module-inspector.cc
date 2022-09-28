@@ -21,7 +21,7 @@
 #endif
 
 int PrintHelp(char** argv) {
-  std::cerr << "Usage: Specify an action and a module name in any order.\n"
+  std::cerr << "Usage: Specify an action and a module in any order.\n"
             << "The action can be any of:\n"
 
             << " --help\n"
@@ -33,19 +33,28 @@ int PrintHelp(char** argv) {
             << " --section-stats\n"
             << "     Show information about sections in the given module\n"
 
+            << " --instruction-stats\n"
+            << "     Show information about instructions in the given module\n"
+
             << " --single-wat FUNC_INDEX\n"
-            << "     Dump function FUNC_INDEX in .wat format\n"
+            << "     Print function FUNC_INDEX in .wat format\n"
 
             << " --full-wat\n"
-            << "     Dump full module in .wat format\n"
+            << "     Print full module in .wat format\n"
 
             << " --single-hexdump FUNC_INDEX\n"
-            << "     Dump function FUNC_INDEX in annotated hex format\n"
+            << "     Print function FUNC_INDEX in annotated hex format\n"
 
             << " --full-hexdump\n"
-            << "     Dump full module in annotated hex format\n"
+            << "     Print full module in annotated hex format\n"
 
-            << "The module name must be a file name.\n";
+            << " --strip\n"
+            << "     Dump the module, in binary format, without its Name"
+            << " section (requires using -o as well)\n"
+
+            << "\n"
+            << " -o OUTFILE or --output OUTFILE\n"
+            << "     Send output to OUTFILE instead of <stdout>\n";
   return 1;
 }
 
@@ -68,6 +77,135 @@ char* PrintHexBytesCore(char* ptr, uint32_t num_bytes, const byte* start) {
   }
   return ptr;
 }
+
+// Computes the number of decimal digits required to print {value}.
+int GetNumDigits(uint32_t value) {
+  int digits = 1;
+  for (uint32_t compare = 10; value >= compare; compare *= 10) digits++;
+  return digits;
+}
+
+class InstructionStatistics {
+ public:
+  void Record(WasmOpcode opcode, uint32_t size) {
+    Entry& entry = entries[opcode];
+    entry.opcode = opcode;
+    entry.count++;
+    entry.total_size += size;
+  }
+
+  void RecordImmediate(WasmOpcode opcode, int imm_value) {
+    OpcodeImmediates& map = immediates[opcode];
+    map[imm_value]++;
+  }
+
+  void RecordCodeSize(size_t chunk) { total_code_size_ += chunk; }
+
+  void RecordLocals(uint32_t count, uint32_t size) {
+    locals_count_ += count;
+    locals_size_ += size;
+  }
+
+  void WriteTo(std::ostream& out) {
+    // Sort by number of occurrences.
+    std::vector<Entry> sorted;
+    sorted.reserve(entries.size());
+    for (const auto& e : entries) sorted.push_back(e.second);
+    std::sort(sorted.begin(), sorted.end(),
+              [](const Entry& a, const Entry& b) { return a.count > b.count; });
+
+    // Prepare column widths.
+    int longest_mnemo = 0;
+    for (const Entry& e : sorted) {
+      int s = static_cast<int>(strlen(WasmOpcodes::OpcodeName(e.opcode)));
+      if (s > longest_mnemo) longest_mnemo = s;
+    }
+    constexpr int kSpacing = 2;
+    longest_mnemo =
+        std::max(longest_mnemo, static_cast<int>(strlen("Instruction"))) +
+        kSpacing;
+    uint32_t highest_count = sorted[0].count;
+    int count_digits = GetNumDigits(highest_count);
+    count_digits = std::max(count_digits, static_cast<int>(strlen("count")));
+
+    // Print headline.
+    out << std::setw(longest_mnemo) << std::left << "Instruction";
+    out << std::setw(count_digits) << std::right << "count";
+    out << std::setw(kSpacing) << " ";
+    out << std::setw(8) << "tot.size";
+    out << std::setw(kSpacing) << " ";
+    out << std::setw(8) << "avg.size";
+    out << std::setw(kSpacing) << " ";
+    out << std::setw(8) << "% of code\n";
+
+    // Print instruction counts.
+    auto PrintLine = [&](const char* name, uint32_t count,
+                         uint32_t total_size) {
+      out << std::setw(longest_mnemo) << std::left << name;
+      out << std::setw(count_digits) << std::right << count;
+      out << std::setw(kSpacing) << " ";
+      out << std::setw(8) << total_size;
+      out << std::setw(kSpacing) << " ";
+      out << std::fixed << std::setprecision(2) << std::setw(8)
+          << static_cast<double>(total_size) / count;
+      out << std::setw(kSpacing) << " ";
+      out << std::fixed << std::setprecision(1) << std::setw(8)
+          << 100.0 * total_size / this->total_code_size_ << "%\n";
+    };
+    for (const Entry& e : sorted) {
+      PrintLine(WasmOpcodes::OpcodeName(e.opcode), e.count, e.total_size);
+    }
+    out << "\n";
+    PrintLine("locals", locals_count_, locals_size_);
+
+    // Print most common immediate values.
+    for (const auto& imm : immediates) {
+      WasmOpcode opcode = imm.first;
+      out << "\nMost common immediates for " << WasmOpcodes::OpcodeName(opcode)
+          << ":\n";
+      std::vector<std::pair<int, int>> counts;
+      counts.reserve(imm.second.size());
+      for (const auto& pair : imm.second) {
+        counts.push_back(std::make_pair(pair.first, pair.second));
+      }
+      std::sort(counts.begin(), counts.end(),
+                [](const std::pair<int, uint32_t>& a,
+                   const std::pair<int, uint32_t>& b) {
+                  return a.second > b.second;
+                });
+      constexpr int kImmLen = 9;  // Length of "Immediate".
+      int count_len = std::max(GetNumDigits(counts[0].second),
+                               static_cast<int>(strlen("count")));
+      // How many most-common values to show.
+      size_t print_top = std::min(size_t{10}, counts.size());
+      out << std::setw(kImmLen) << "Immediate";
+      out << std::setw(kSpacing) << " ";
+      out << std::setw(count_len) << "count"
+          << "\n";
+      for (size_t i = 0; i < print_top; i++) {
+        out << std::setw(kImmLen) << counts[i].first;
+        out << std::setw(kSpacing) << " ";
+        out << std::setw(count_len) << counts[i].second << "\n";
+      }
+    }
+  }
+
+ private:
+  struct Entry {
+    WasmOpcode opcode;
+    uint32_t count = 0;
+    uint32_t total_size = 0;
+  };
+
+  // First: immediate value, second: count.
+  using OpcodeImmediates = std::map<int, uint32_t>;
+
+  std::unordered_map<WasmOpcode, Entry> entries;
+  std::map<WasmOpcode, OpcodeImmediates> immediates;
+  size_t total_code_size_ = 0;
+  uint32_t locals_count_ = 0;
+  uint32_t locals_size_ = 0;
+};
 
 // A variant of FunctionBodyDisassembler that can produce "annotated hex dump"
 // format, e.g.:
@@ -194,15 +332,50 @@ class ExtendedFunctionDis : public FunctionBodyDisassembler {
       memset(ptr, ' ', (fill_to_minimum - num_bytes) * kCharsPerByte);
     }
   }
+
+  void CollectInstructionStats(InstructionStatistics& stats) {
+    uint32_t locals_length;
+    DecodeLocals(pc_, &locals_length);
+    if (failed()) return;
+    stats.RecordLocals(num_locals(), locals_length);
+    consume_bytes(locals_length);
+    while (pc_ < end_) {
+      WasmOpcode opcode = GetOpcode();
+      if (opcode == kExprI32Const) {
+        ImmI32Immediate<Decoder::kNoValidation> imm(this, pc_ + 1);
+        stats.RecordImmediate(opcode, imm.value);
+      } else if (opcode == kExprLocalGet || opcode == kExprGlobalGet) {
+        IndexImmediate<Decoder::kNoValidation> imm(this, pc_ + 1, "");
+        stats.RecordImmediate(opcode, static_cast<int>(imm.index));
+      }
+      uint32_t length = WasmDecoder::OpcodeLength(this, pc_);
+      stats.Record(opcode, length);
+      pc_ += length;
+    }
+  }
 };
 
 // A variant of ModuleDisassembler that produces "annotated hex dump" format,
 // e.g.:
 //     0x01, 0x70, 0x00,  // table count 1: funcref no maximum
+class HexDumpModuleDis;
+class DumpingModuleDecoder : public ModuleDecoderTemplate<HexDumpModuleDis> {
+ public:
+  DumpingModuleDecoder(const ModuleWireBytes wire_bytes,
+                       HexDumpModuleDis* module_dis)
+      : ModuleDecoderTemplate<HexDumpModuleDis>(
+            WasmFeatures::All(), wire_bytes.start(), wire_bytes.end(),
+            kWasmOrigin, *module_dis) {}
+
+  void onFirstError() override {
+    // Pretend we've reached the end of the section, but contrary to the
+    // superclass implementation do so without moving {pc_}, so whatever
+    // bytes caused the failure can still be dumped correctly.
+    end_ = pc_;
+  }
+};
 class HexDumpModuleDis {
  public:
-  using DumpingModuleDecoder = ModuleDecoderTemplate<HexDumpModuleDis>;
-
   HexDumpModuleDis(MultiLineStringBuilder& out, const WasmModule* module,
                    NamesProvider* names, const ModuleWireBytes wire_bytes,
                    AccountingAllocator* allocator)
@@ -211,35 +384,39 @@ class HexDumpModuleDis {
         names_(names),
         wire_bytes_(wire_bytes),
         allocator_(allocator),
-        zone_(allocator, "disassembler") {
-    for (const WasmImport& import : module->import_table) {
-      switch (import.kind) {
-        // clang-format off
-        case kExternalFunction:                       break;
-        case kExternalTable:    next_table_index_++;  break;
-        case kExternalMemory:                         break;
-        case kExternalGlobal:   next_global_index_++; break;
-        case kExternalTag:      next_tag_index_++;    break;
-          // clang-format on
-      }
-    }
-  }
+        zone_(allocator, "disassembler") {}
 
   // Public entrypoint.
   void PrintModule() {
-    constexpr bool verify_functions = false;
-    DumpingModuleDecoder decoder(WasmFeatures::All(), wire_bytes_.start(),
-                                 wire_bytes_.end(), kWasmOrigin, *this);
+    DumpingModuleDecoder decoder(wire_bytes_, this);
     decoder_ = &decoder;
+
+    // If the module failed validation, create fakes to allow us to print
+    // what we can.
+    std::unique_ptr<WasmModule> fake_module;
+    std::unique_ptr<NamesProvider> names_provider;
+    if (!names_) {
+      fake_module.reset(
+          new WasmModule(std::make_unique<Zone>(allocator_, "fake module")));
+      names_provider.reset(
+          new NamesProvider(fake_module.get(), wire_bytes_.module_bytes()));
+      names_ = names_provider.get();
+    }
+
     out_ << "[";
     out_.NextLine(0);
+    constexpr bool verify_functions = false;
     decoder.DecodeModule(nullptr, allocator_, verify_functions);
     out_ << "]";
 
     if (total_bytes_ != wire_bytes_.length()) {
       std::cerr << "WARNING: OUTPUT INCOMPLETE. Disassembled " << total_bytes_
                 << " out of " << wire_bytes_.length() << " bytes.\n";
-      // TODO(jkummerow): Would it be helpful to DCHECK here?
+    }
+
+    // For cleanliness, reset {names_} if it's pointing at a fake.
+    if (names_ == names_provider.get()) {
+      names_ = nullptr;
     }
   }
 
@@ -345,7 +522,7 @@ class HexDumpModuleDis {
   // We don't care about offsets, but we can use these hooks to provide
   // helpful indexing comments in long lists.
   void TypeOffset(uint32_t offset) {
-    if (module_->types.size() > 3) {
+    if (!module_ || module_->types.size() > 3) {
       description_ << "type #" << next_type_index_ << " ";
       names_->PrintTypeName(description_, next_type_index_);
       next_type_index_++;
@@ -355,14 +532,20 @@ class HexDumpModuleDis {
     description_ << "import #" << next_import_index_++;
     NextLine();
   }
+  void ImportsDone() {
+    const WasmModule* module = decoder_->shared_module().get();
+    next_table_index_ = static_cast<uint32_t>(module->tables.size());
+    next_global_index_ = static_cast<uint32_t>(module->globals.size());
+    next_tag_index_ = static_cast<uint32_t>(module->tags.size());
+  }
   void TableOffset(uint32_t offset) {
-    if (module_->tables.size() > 3) {
+    if (!module_ || module_->tables.size() > 3) {
       description_ << "table #" << next_table_index_++;
     }
   }
   void MemoryOffset(uint32_t offset) {}
   void TagOffset(uint32_t offset) {
-    if (module_->tags.size() > 3) {
+    if (!module_ || module_->tags.size() > 3) {
       description_ << "tag #" << next_tag_index_++ << ":";
     }
   }
@@ -371,13 +554,13 @@ class HexDumpModuleDis {
   }
   void StartOffset(uint32_t offset) {}
   void ElementOffset(uint32_t offset) {
-    if (module_->elem_segments.size() > 3) {
+    if (!module_ || module_->elem_segments.size() > 3) {
       description_ << "segment #" << next_segment_index_++;
       NextLine();
     }
   }
   void DataOffset(uint32_t offset) {
-    if (module_->data_segments.size() > 3) {
+    if (!module_ || module_->data_segments.size() > 3) {
       description_ << "data segment #" << next_data_segment_index_++;
       NextLine();
     }
@@ -390,7 +573,9 @@ class HexDumpModuleDis {
     WasmFeatures detected;
     auto sig = FixedSizeSignature<ValueType>::Returns(expected_type);
     uint32_t offset = decoder_->pc_offset();
-    ExtendedFunctionDis d(&zone_, module_, 0, &detected, &sig, start, end,
+    const WasmModule* module = module_;
+    if (!module) module = decoder_->shared_module().get();
+    ExtendedFunctionDis d(&zone_, module, 0, &detected, &sig, start, end,
                           offset, names_);
     d.HexdumpConstantExpression(out_);
     total_bytes_ += static_cast<size_t>(end - start);
@@ -400,7 +585,9 @@ class HexDumpModuleDis {
     const byte* end = start + func->code.length();
     WasmFeatures detected;
     uint32_t offset = static_cast<uint32_t>(start - decoder_->start());
-    ExtendedFunctionDis d(&zone_, module_, func->func_index, &detected,
+    const WasmModule* module = module_;
+    if (!module) module = decoder_->shared_module().get();
+    ExtendedFunctionDis d(&zone_, module, func->func_index, &detected,
                           func->sig, start, end, offset, names_);
     d.HexDump(out_, FunctionBodyDisassembler::kSkipHeader);
     total_bytes_ += func->code.length();
@@ -446,9 +633,6 @@ class HexDumpModuleDis {
       }
     }
   }
-
-  // TODO(jkummerow): Consider using an OnFirstError() override to offer
-  // help when decoding fails.
 
  private:
   static constexpr uint32_t kDontCareAboutOffsets = 0;
@@ -542,87 +726,118 @@ class HexDumpModuleDis {
 
 class FormatConverter {
  public:
-  explicit FormatConverter(std::string path) {
-    if (!LoadFile(path)) return;
+  enum Status { kNotReady, kIoInitialized, kModuleReady };
+
+  explicit FormatConverter(const char* input, const char* output)
+      : output_(output), out_(output_.get()) {
+    if (!output_.ok()) return;
+    if (!LoadFile(input)) return;
     base::Vector<const byte> wire_bytes(raw_bytes_.data(), raw_bytes_.size());
     wire_bytes_ = ModuleWireBytes({raw_bytes_.data(), raw_bytes_.size()});
+    status_ = kIoInitialized;
     ModuleResult result =
         DecodeWasmModuleForDisassembler(start(), end(), &allocator_);
     if (result.failed()) {
       WasmError error = result.error();
       std::cerr << "Decoding error: " << error.message() << " at offset "
                 << error.offset() << "\n";
-      // TODO(jkummerow): Show some disassembly.
       return;
     }
-    ok_ = true;
+    status_ = kModuleReady;
     module_ = result.value();
     names_provider_ =
         std::make_unique<NamesProvider>(module_.get(), wire_bytes);
   }
 
-  bool ok() const { return ok_; }
+  Status status() const { return status_; }
 
   void ListFunctions() {
-    DCHECK(ok_);
+    DCHECK_EQ(status_, kModuleReady);
     const WasmModule* m = module();
     uint32_t num_functions = static_cast<uint32_t>(m->functions.size());
-    std::cout << "There are " << num_functions << " functions ("
-              << m->num_imported_functions << " imported, "
-              << m->num_declared_functions
-              << " locally defined); the following have names:\n";
+    out_ << "There are " << num_functions << " functions ("
+         << m->num_imported_functions << " imported, "
+         << m->num_declared_functions
+         << " locally defined); the following have names:\n";
     for (uint32_t i = 0; i < num_functions; i++) {
       StringBuilder sb;
       names()->PrintFunctionName(sb, i);
       if (sb.length() == 0) continue;
       std::string name(sb.start(), sb.length());
-      std::cout << i << " " << name << "\n";
+      out_ << i << " " << name << "\n";
     }
   }
 
   void SectionStats() {
-    DCHECK(ok_);
+    DCHECK_EQ(status_, kModuleReady);
     Decoder decoder(start(), end());
-    static constexpr int kModuleHeaderSize = 8;
     decoder.consume_bytes(kModuleHeaderSize, "module header");
 
     uint32_t module_size = static_cast<uint32_t>(end() - start());
-    int digits = 2;
-    for (uint32_t comparator = 100; module_size >= comparator;
-         comparator *= 10) {
-      digits++;
-    }
+    int digits = GetNumDigits(module_size);
     size_t kMinNameLength = 8;
     // 18 = kMinNameLength + strlen(" section: ").
-    std::cout << std::setw(18) << std::left << "Module size: ";
-    std::cout << std::setw(digits) << std::right << module_size << " bytes\n";
+    out_ << std::setw(18) << std::left << "Module size: ";
+    out_ << std::setw(digits) << std::right << module_size << " bytes\n";
     NoTracer no_tracer;
     for (WasmSectionIterator it(&decoder, no_tracer); it.more();
          it.advance(true)) {
       const char* name = SectionName(it.section_code());
       size_t name_len = strlen(name);
-      std::cout << SectionName(it.section_code()) << " section: ";
-      for (; name_len < kMinNameLength; name_len++) std::cout << " ";
+      out_ << SectionName(it.section_code()) << " section: ";
+      for (; name_len < kMinNameLength; name_len++) out_ << " ";
 
       uint32_t length = it.section_length();
-      std::cout << std::setw(name_len > kMinNameLength ? 0 : digits) << length
-                << " bytes / ";
+      out_ << std::setw(name_len > kMinNameLength ? 0 : digits) << length
+           << " bytes / ";
 
-      std::cout << std::fixed << std::setprecision(1) << std::setw(4)
-                << 100.0 * length / module_size;
-      std::cout << "% of total\n";
+      out_ << std::fixed << std::setprecision(1) << std::setw(4)
+           << 100.0 * length / module_size;
+      out_ << "% of total\n";
     }
   }
 
-  void DisassembleFunction(uint32_t func_index, MultiLineStringBuilder& out,
-                           OutputMode mode) {
-    DCHECK(ok_);
+  void Strip() {
+    DCHECK_EQ(status_, kModuleReady);
+    Decoder decoder(start(), end());
+    out_.write(reinterpret_cast<const char*>(decoder.pc()), kModuleHeaderSize);
+    decoder.consume_bytes(kModuleHeaderSize);
+    NoTracer no_tracer;
+    for (WasmSectionIterator it(&decoder, no_tracer); it.more();
+         it.advance(true)) {
+      if (it.section_code() == kNameSectionCode) continue;
+      out_.write(reinterpret_cast<const char*>(it.section_start()),
+                 it.section_length());
+    }
+  }
+
+  void InstructionStats() {
+    DCHECK_EQ(status_, kModuleReady);
+    Zone zone(&allocator_, "disassembler");
+    InstructionStatistics stats;
+    for (uint32_t i = module()->num_imported_functions;
+         i < module()->functions.size(); i++) {
+      const WasmFunction* func = &module()->functions[i];
+      WasmFeatures detected;
+      base::Vector<const byte> code = wire_bytes_.GetFunctionBytes(func);
+      ExtendedFunctionDis d(&zone, module(), i, &detected, func->sig,
+                            code.begin(), code.end(), func->code.offset(),
+                            names());
+      d.CollectInstructionStats(stats);
+      stats.RecordCodeSize(code.size());
+    }
+    stats.WriteTo(out_);
+  }
+
+  void DisassembleFunction(uint32_t func_index, OutputMode mode) {
+    DCHECK_EQ(status_, kModuleReady);
+    MultiLineStringBuilder sb;
     if (func_index >= module()->functions.size()) {
-      out << "Invalid function index!\n";
+      sb << "Invalid function index!\n";
       return;
     }
     if (func_index < module()->num_imported_functions) {
-      out << "Can't disassemble imported functions!\n";
+      sb << "Can't disassemble imported functions!\n";
       return;
     }
     const WasmFunction* func = &module()->functions[func_index];
@@ -634,39 +849,72 @@ class FormatConverter {
                           code.begin(), code.end(), func->code.offset(),
                           names());
     if (mode == OutputMode::kWat) {
-      d.DecodeAsWat(out, {0, 1});
+      d.DecodeAsWat(sb, {0, 1});
     } else if (mode == OutputMode::kHexDump) {
-      d.HexDump(out, FunctionBodyDisassembler::kPrintHeader);
+      d.HexDump(sb, FunctionBodyDisassembler::kPrintHeader);
     }
 
     // Print any types that were used by the function.
-    out.NextLine(0);
-    ModuleDisassembler md(out, module(), names(), wire_bytes_,
-                          ModuleDisassembler::kSkipByteOffsets, &allocator_);
+    sb.NextLine(0);
+    ModuleDisassembler md(sb, module(), names(), wire_bytes_, &allocator_);
     for (uint32_t type_index : d.used_types()) {
       md.PrintTypeDefinition(type_index, {0, 1},
                              NamesProvider::kIndexAsComment);
     }
+    sb.WriteTo(out_);
   }
 
-  void WatForModule(MultiLineStringBuilder& out) {
-    DCHECK(ok_);
-    ModuleDisassembler md(out, module(), names(), wire_bytes_,
-                          ModuleDisassembler::kSkipByteOffsets, &allocator_);
+  void WatForModule() {
+    DCHECK_EQ(status_, kModuleReady);
+    MultiLineStringBuilder sb;
+    ModuleDisassembler md(sb, module(), names(), wire_bytes_, &allocator_);
     md.PrintModule({0, 2});
+    sb.WriteTo(out_);
   }
 
-  void HexdumpForModule(MultiLineStringBuilder& out) {
-    DCHECK(ok_);
-    HexDumpModuleDis md(out, module(), names(), wire_bytes_, &allocator_);
+  void HexdumpForModule() {
+    DCHECK_NE(status_, kNotReady);
+    DCHECK_IMPLIES(status_ == kIoInitialized,
+                   module() == nullptr && names() == nullptr);
+    MultiLineStringBuilder sb;
+    HexDumpModuleDis md(sb, module(), names(), wire_bytes_, &allocator_);
     md.PrintModule();
+    sb.WriteTo(out_);
   }
 
  private:
-  byte* start() { return raw_bytes_.data(); }
-  byte* end() { return start() + raw_bytes_.size(); }
-  const WasmModule* module() { return module_.get(); }
-  NamesProvider* names() { return names_provider_.get(); }
+  static constexpr int kModuleHeaderSize = 8;
+
+  class Output {
+   public:
+    explicit Output(const char* filename) {
+      if (strcmp(filename, "-") == 0) {
+        mode_ = kStdout;
+      } else {
+        mode_ = kFile;
+        filestream_.emplace(filename, std::ios::out | std::ios::binary);
+        if (!filestream_->is_open()) {
+          std::cerr << "Failed to open " << filename << " for writing!\n";
+          mode_ = kError;
+        }
+      }
+    }
+
+    ~Output() {
+      if (mode_ == kFile) filestream_->close();
+    }
+
+    bool ok() { return mode_ != kError; }
+
+    std::ostream& get() {
+      return mode_ == kFile ? filestream_.value() : std::cout;
+    }
+
+   private:
+    enum Mode { kFile, kStdout, kError };
+    base::Optional<std::ofstream> filestream_;
+    Mode mode_;
+  };
 
   bool LoadFile(std::string path) {
     if (path == "-") return LoadFileFromStream(std::cin);
@@ -794,8 +1042,15 @@ class FormatConverter {
     }
   }
 
+  byte* start() { return raw_bytes_.data(); }
+  byte* end() { return start() + raw_bytes_.size(); }
+  const WasmModule* module() { return module_.get(); }
+  NamesProvider* names() { return names_provider_.get(); }
+
   AccountingAllocator allocator_;
-  bool ok_{false};
+  Output output_;
+  std::ostream& out_;
+  Status status_{kNotReady};
   std::vector<byte> raw_bytes_;
   ModuleWireBytes wire_bytes_{{}};
   std::shared_ptr<WasmModule> module_;
@@ -815,59 +1070,20 @@ enum class Action {
   kHelp,
   kListFunctions,
   kSectionStats,
+  kInstructionStats,
   kFullWat,
   kFullHexdump,
   kSingleWat,
   kSingleHexdump,
+  kStrip,
 };
 
 struct Options {
-  const char* filename = nullptr;
+  const char* input = nullptr;
+  const char* output = nullptr;
   Action action = Action::kUnset;
   int func_index = -1;
 };
-
-void ListFunctions(const Options& options) {
-  FormatConverter fc(options.filename);
-  if (fc.ok()) fc.ListFunctions();
-}
-
-void SectionStats(const Options& options) {
-  FormatConverter fc(options.filename);
-  if (fc.ok()) fc.SectionStats();
-}
-
-void WatForFunction(const Options& options) {
-  FormatConverter fc(options.filename);
-  if (!fc.ok()) return;
-  MultiLineStringBuilder sb;
-  fc.DisassembleFunction(options.func_index, sb, OutputMode::kWat);
-  sb.DumpToStdout();
-}
-
-void HexdumpForFunction(const Options& options) {
-  FormatConverter fc(options.filename);
-  if (!fc.ok()) return;
-  MultiLineStringBuilder sb;
-  fc.DisassembleFunction(options.func_index, sb, OutputMode::kHexDump);
-  sb.DumpToStdout();
-}
-
-void WatForModule(const Options& options) {
-  FormatConverter fc(options.filename);
-  if (!fc.ok()) return;
-  MultiLineStringBuilder sb;
-  fc.WatForModule(sb);
-  sb.DumpToStdout();
-}
-
-void HexdumpForModule(const Options& options) {
-  FormatConverter fc(options.filename);
-  if (!fc.ok()) return;
-  MultiLineStringBuilder sb;
-  fc.HexdumpForModule(sb);
-  sb.DumpToStdout();
-}
 
 bool ParseInt(char* s, int* out) {
   char* end;
@@ -891,6 +1107,8 @@ int ParseOptions(int argc, char** argv, Options* options) {
       options->action = Action::kListFunctions;
     } else if (strcmp(argv[i], "--section-stats") == 0) {
       options->action = Action::kSectionStats;
+    } else if (strcmp(argv[i], "--instruction-stats") == 0) {
+      options->action = Action::kInstructionStats;
     } else if (strcmp(argv[i], "--full-wat") == 0) {
       options->action = Action::kFullWat;
     } else if (strcmp(argv[i], "--full-hexdump") == 0) {
@@ -910,19 +1128,46 @@ int ParseOptions(int argc, char** argv, Options* options) {
       }
     } else if (strncmp(argv[i], "--single-hexdump=", 17) == 0) {
       if (!ParseInt(argv[i] + 17, &options->func_index)) return PrintHelp(argv);
-    } else if (options->filename != nullptr) {
+    } else if (strcmp(argv[i], "--strip") == 0) {
+      options->action = Action::kStrip;
+    } else if (strcmp(argv[i], "-o") == 0) {
+      if (i == argc - 1) return PrintHelp(argv);
+      options->output = argv[++i];
+    } else if (strncmp(argv[i], "-o=", 3) == 0) {
+      options->output = argv[i] + 3;
+    } else if (strcmp(argv[i], "--output") == 0) {
+      if (i == argc - 1) return PrintHelp(argv);
+      options->output = argv[++i];
+    } else if (strncmp(argv[i], "--output=", 9) == 0) {
+      options->output = argv[i] + 9;
+    } else if (options->input != nullptr) {
       return PrintHelp(argv);
     } else {
-      options->filename = argv[i];
+      options->input = argv[i];
     }
   }
+
 #if V8_OS_POSIX
   // When piping data into wami, specifying the input as "-" is optional.
-  if (options->filename == nullptr && !isatty(STDIN_FILENO)) {
-    options->filename = "-";
+  if (options->input == nullptr && !isatty(STDIN_FILENO)) {
+    options->input = "-";
   }
 #endif
-  if (options->action == Action::kUnset || options->filename == nullptr) {
+
+  if (options->output == nullptr) {
+    // Refuse to send binary data to the terminal.
+    if (options->action == Action::kStrip) {
+#if V8_OS_POSIX
+      // Piping binary output to another command is okay.
+      if (isatty(STDOUT_FILENO)) return PrintHelp(argv);
+#else
+      return PrintHelp(argv);
+#endif
+    }
+    options->output = "-";  // Default output: stdout.
+  }
+
+  if (options->action == Action::kUnset || options->input == nullptr) {
     return PrintHelp(argv);
   }
   return 0;
@@ -931,6 +1176,11 @@ int ParseOptions(int argc, char** argv, Options* options) {
 int main(int argc, char** argv) {
   Options options;
   if (ParseOptions(argc, argv, &options) != 0) return 1;
+  if (options.action == Action::kHelp) {
+    PrintHelp(argv);
+    return 0;
+  }
+
   // Bootstrap the basics.
   v8::V8::InitializeICUDefaultLocation(argv[0]);
   v8::V8::InitializeExternalStartupData(argv[0]);
@@ -938,17 +1188,42 @@ int main(int argc, char** argv) {
   v8::V8::InitializePlatform(platform.get());
   v8::V8::Initialize();
 
+  FormatConverter fc(options.input, options.output);
+  if (fc.status() == FormatConverter::kNotReady) return 1;
+  // Allow hex dumping invalid modules.
+  if (fc.status() != FormatConverter::kModuleReady &&
+      options.action != Action::kFullHexdump) {
+    std::cerr << "Consider using --full-hexdump to learn more.\n";
+    return 1;
+  }
   switch (options.action) {
-    // clang-format off
-    case Action::kHelp:          PrintHelp(argv);             break;
-    case Action::kListFunctions: ListFunctions(options);      break;
-    case Action::kSectionStats:  SectionStats(options);       break;
-    case Action::kSingleWat:     WatForFunction(options);     break;
-    case Action::kSingleHexdump: HexdumpForFunction(options); break;
-    case Action::kFullWat:       WatForModule(options);       break;
-    case Action::kFullHexdump:   HexdumpForModule(options);   break;
-    case Action::kUnset:         UNREACHABLE();
-      // clang-format on
+    case Action::kListFunctions:
+      fc.ListFunctions();
+      break;
+    case Action::kSectionStats:
+      fc.SectionStats();
+      break;
+    case Action::kInstructionStats:
+      fc.InstructionStats();
+      break;
+    case Action::kSingleWat:
+      fc.DisassembleFunction(options.func_index, OutputMode::kWat);
+      break;
+    case Action::kSingleHexdump:
+      fc.DisassembleFunction(options.func_index, OutputMode::kHexDump);
+      break;
+    case Action::kFullWat:
+      fc.WatForModule();
+      break;
+    case Action::kFullHexdump:
+      fc.HexdumpForModule();
+      break;
+    case Action::kStrip:
+      fc.Strip();
+      break;
+    case Action::kHelp:
+    case Action::kUnset:
+      UNREACHABLE();
   }
 
   v8::V8::Dispose();

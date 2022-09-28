@@ -9,6 +9,7 @@
 #include "src/common/globals.h"
 #include "src/heap/heap.h"
 #include "src/heap/new-spaces.h"
+#include "src/heap/paged-spaces-inl.h"
 #include "src/heap/spaces-inl.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/tagged-impl.h"
@@ -67,7 +68,7 @@ V8_INLINE bool SemiSpaceNewSpace::EnsureAllocation(
 
   AdvanceAllocationObservers();
 
-  Address old_top = allocation_info_->top();
+  Address old_top = allocation_info_.top();
   Address high = to_space_.page_high();
   int filler_size = Heap::GetFillToAlign(old_top, alignment);
   int aligned_size_in_bytes = size_in_bytes + filler_size;
@@ -81,7 +82,7 @@ V8_INLINE bool SemiSpaceNewSpace::EnsureAllocation(
         return false;
     }
 
-    old_top = allocation_info_->top();
+    old_top = allocation_info_.top();
     high = to_space_.page_high();
     filler_size = Heap::GetFillToAlign(old_top, alignment);
     aligned_size_in_bytes = size_in_bytes + filler_size;
@@ -93,8 +94,22 @@ V8_INLINE bool SemiSpaceNewSpace::EnsureAllocation(
 
   DCHECK(old_top + aligned_size_in_bytes <= high);
   UpdateInlineAllocationLimit(aligned_size_in_bytes);
-  DCHECK_EQ(allocation_info_->start(), allocation_info_->top());
+  DCHECK_EQ(allocation_info_.start(), allocation_info_.top());
   DCHECK_SEMISPACE_ALLOCATION_INFO(allocation_info_, to_space_);
+  return true;
+}
+
+// -----------------------------------------------------------------------------
+// PagedSpaceForNewSpace
+
+V8_INLINE bool PagedSpaceForNewSpace::EnsureAllocation(
+    int size_in_bytes, AllocationAlignment alignment, AllocationOrigin origin,
+    int* out_max_aligned_size) {
+  if (!PagedSpaceBase::EnsureAllocation(size_in_bytes, alignment, origin,
+                                        out_max_aligned_size)) {
+    return false;
+  }
+  allocated_linear_areas_ += limit() - top();
   return true;
 }
 

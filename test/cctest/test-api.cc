@@ -680,9 +680,8 @@ TEST(MakingExternalStringConditions) {
   if (!v8::internal::FLAG_single_generation) {
     // We should refuse to externalize new space strings.
     CHECK(!local_string->CanMakeExternal());
-    // Trigger GCs so that the newly allocated string moves to old gen.
-    CcTest::CollectGarbage(i::NEW_SPACE);  // in survivor space now
-    CcTest::CollectGarbage(i::NEW_SPACE);  // in old gen now
+    // Trigger full GC so that the newly allocated string moves to old gen.
+    CcTest::CollectGarbage(i::OLD_SPACE);
   }
   // Old space strings should be accepted.
   CHECK(local_string->CanMakeExternal());
@@ -708,21 +707,18 @@ TEST(MakingExternalOneByteStringConditions) {
   Local<String> tiny_local_string = v8_str("s");
   Local<String> local_string = v8_str("s1234");
 
+  // Single-character strings should not be externalized because they
+  // are always in the RO-space.
+  CHECK(!tiny_local_string->CanMakeExternal());
   if (!v8::internal::FLAG_single_generation) {
     // We should refuse to externalize new space strings.
     CHECK(!local_string->CanMakeExternal());
-    // Trigger GCs so that the newly allocated string moves to old gen.
-    CcTest::CollectGarbage(i::NEW_SPACE);  // in survivor space now
-    CcTest::CollectGarbage(i::NEW_SPACE);  // in old gen now
+    // Trigger full GC so that the newly allocated string moves to old gen.
+    CcTest::CollectGarbage(i::OLD_SPACE);
+    CHECK(!tiny_local_string->CanMakeExternal());
   }
   // Old space strings should be accepted.
   CHECK(local_string->CanMakeExternal());
-
-  // Tiny strings are not in-place externalizable when pointer compression is
-  // enabled, but they are if sandboxed external pointers are enabled.
-  CHECK_EQ(V8_SANDBOXED_EXTERNAL_POINTERS_BOOL ||
-               i::kTaggedSize == i::kSystemPointerSize,
-           tiny_local_string->CanMakeExternal());
 }
 
 
@@ -17770,48 +17766,6 @@ void EpilogueCallbackNew(v8::Isolate* isolate, v8::GCType,
   ++*static_cast<int*>(data);
 }
 
-void PrologueCallbackAlloc(v8::Isolate* isolate,
-                           v8::GCType,
-                           v8::GCCallbackFlags flags) {
-  v8::HandleScope scope(isolate);
-
-  CHECK_EQ(flags, v8::kNoGCCallbackFlags);
-  CHECK_EQ(gc_callbacks_isolate, isolate);
-  ++prologue_call_count_alloc;
-
-  if (!v8::internal::FLAG_single_generation) {
-    // Simulate full heap to see if we will reenter this callback
-    i::heap::SimulateFullSpace(CcTest::heap()->new_space());
-  }
-
-  Local<Object> obj = Object::New(isolate);
-  CHECK(!obj.IsEmpty());
-
-  CcTest::PreciseCollectAllGarbage();
-}
-
-
-void EpilogueCallbackAlloc(v8::Isolate* isolate,
-                           v8::GCType,
-                           v8::GCCallbackFlags flags) {
-  v8::HandleScope scope(isolate);
-
-  CHECK_EQ(flags, v8::kNoGCCallbackFlags);
-  CHECK_EQ(gc_callbacks_isolate, isolate);
-  ++epilogue_call_count_alloc;
-
-  if (!v8::internal::FLAG_single_generation) {
-    // Simulate full heap to see if we will reenter this callback
-    i::heap::SimulateFullSpace(CcTest::heap()->new_space());
-  }
-
-  Local<Object> obj = Object::New(isolate);
-  CHECK(!obj.IsEmpty());
-
-  CcTest::PreciseCollectAllGarbage();
-}
-
-
 TEST(GCCallbacksOld) {
   LocalContext context;
 
@@ -17892,52 +17846,6 @@ TEST(GCCallbacksWithData) {
   CHECK_EQ(2, epilogue1);
   CHECK_EQ(2, prologue2);
   CHECK_EQ(2, epilogue2);
-}
-
-TEST(GCCallbacks) {
-  // For SimulateFullSpace in PrologueCallbackAlloc and EpilogueCallbackAlloc.
-  i::FLAG_stress_concurrent_allocation = false;
-  LocalContext context;
-  v8::Isolate* isolate = context->GetIsolate();
-  gc_callbacks_isolate = isolate;
-  isolate->AddGCPrologueCallback(PrologueCallback);
-  isolate->AddGCEpilogueCallback(EpilogueCallback);
-  CHECK_EQ(0, prologue_call_count);
-  CHECK_EQ(0, epilogue_call_count);
-  CcTest::CollectAllGarbage();
-  CHECK_EQ(1, prologue_call_count);
-  CHECK_EQ(1, epilogue_call_count);
-  isolate->AddGCPrologueCallback(PrologueCallbackSecond);
-  isolate->AddGCEpilogueCallback(EpilogueCallbackSecond);
-  CcTest::CollectAllGarbage();
-  CHECK_EQ(2, prologue_call_count);
-  CHECK_EQ(2, epilogue_call_count);
-  CHECK_EQ(1, prologue_call_count_second);
-  CHECK_EQ(1, epilogue_call_count_second);
-  isolate->RemoveGCPrologueCallback(PrologueCallback);
-  isolate->RemoveGCEpilogueCallback(EpilogueCallback);
-  CcTest::CollectAllGarbage();
-  CHECK_EQ(2, prologue_call_count);
-  CHECK_EQ(2, epilogue_call_count);
-  CHECK_EQ(2, prologue_call_count_second);
-  CHECK_EQ(2, epilogue_call_count_second);
-  isolate->RemoveGCPrologueCallback(PrologueCallbackSecond);
-  isolate->RemoveGCEpilogueCallback(EpilogueCallbackSecond);
-  CcTest::CollectAllGarbage();
-  CHECK_EQ(2, prologue_call_count);
-  CHECK_EQ(2, epilogue_call_count);
-  CHECK_EQ(2, prologue_call_count_second);
-  CHECK_EQ(2, epilogue_call_count_second);
-
-  CHECK_EQ(0, prologue_call_count_alloc);
-  CHECK_EQ(0, epilogue_call_count_alloc);
-  isolate->AddGCPrologueCallback(PrologueCallbackAlloc);
-  isolate->AddGCEpilogueCallback(EpilogueCallbackAlloc);
-  CcTest::PreciseCollectAllGarbage();
-  CHECK_EQ(1, prologue_call_count_alloc);
-  CHECK_EQ(1, epilogue_call_count_alloc);
-  isolate->RemoveGCPrologueCallback(PrologueCallbackAlloc);
-  isolate->RemoveGCEpilogueCallback(EpilogueCallbackAlloc);
 }
 
 namespace {
@@ -28133,7 +28041,7 @@ void CheckFastCallsWithConstructor() {
   CHECK_NOT_NULL(fast_calls_error_message);
   CHECK_EQ(
       0, strcmp(fast_calls_error_message,
-                "Fast API calls are not supported for constructor functions."));
+                "Fast API calls are not supported for constructor functions"));
   CHECK_NOT_NULL(fast_calls_error_location);
   CHECK_EQ(0, strcmp(fast_calls_error_location, "FunctionTemplate::New"));
 
@@ -28146,7 +28054,7 @@ void CheckFastCallsWithConstructor() {
   CHECK_NOT_NULL(fast_calls_error_message);
   CHECK_EQ(
       0, strcmp(fast_calls_error_message,
-                "Fast API calls are not supported for constructor functions."));
+                "Fast API calls are not supported for constructor functions"));
   CHECK_NOT_NULL(fast_calls_error_location);
   CHECK_EQ(0, strcmp(fast_calls_error_location,
                      "FunctionTemplate::NewWithCFunctionOverloads"));
@@ -29494,21 +29402,34 @@ TEST(EmbedderInstanceTypes) {
   CHECK_EQ(1, res->ToInt32(env.local()).ToLocalChecked()->Value());
 }
 
-UNINITIALIZED_TEST(IsolateCreateParamsIsMovableAndCopyable) {
+template <typename T>
+void TestCopyAndMoveConstructionAndAssignment() {
   // A struct with deprecated fields will trigger a deprecation warning when
   // using the copy or move constructor (without special care), see
   // https://crbug.com/v8/13092.
-  // Test that we can use the move- and copy constructor of
-  // Isolate::CreateParams.
 
-  v8::Isolate::CreateParams params;
+  T orig;
   // Use move constructor.
-  v8::Isolate::CreateParams params2{std::move(params)};
+  T moved{std::move(orig)};
   // Use copy constructor.
-  v8::Isolate::CreateParams params3{params2};
+  T copied{moved};
 
   // Use move assignment.
-  params = std::move(params2);
+  orig = std::move(moved);
   // Use copy assignment.
-  params = params2;
+  orig = copied;
+}
+
+UNINITIALIZED_TEST(IsolateCreateParamsIsMovableAndCopyable) {
+  // Test that we can use the move- and copy constructor of
+  // Isolate::CreateParams.
+  TestCopyAndMoveConstructionAndAssignment<v8::Isolate::CreateParams>();
+}
+
+UNINITIALIZED_TEST(OOMDetailsAreMovableAndCopyable) {
+  TestCopyAndMoveConstructionAndAssignment<v8::OOMDetails>();
+}
+
+UNINITIALIZED_TEST(JitCodeEventIsMovableAndCopyable) {
+  TestCopyAndMoveConstructionAndAssignment<v8::JitCodeEvent>();
 }

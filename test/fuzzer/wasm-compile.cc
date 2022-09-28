@@ -126,7 +126,9 @@ ValueType GetValueTypeHelper(DataRange* data, bool liftoff_as_reference,
   const bool nullable =
       (allow_non_nullable == kAllowNonNullables) ? data->get<bool>() : true;
   if (nullable) {
-    types.insert(types.end(), {kWasmI31Ref, kWasmFuncRef});
+    types.insert(types.end(),
+                 {kWasmI31Ref, kWasmFuncRef, kWasmExternRef, kWasmNullRef,
+                  kWasmNullExternRef, kWasmNullFuncRef});
   }
   if (include_generics == kIncludeGenerics) {
     types.insert(types.end(), {kWasmDataRef, kWasmAnyRef, kWasmEqRef});
@@ -862,8 +864,10 @@ class WasmGenerator {
       bool can_be_defaultable = std::all_of(
           struct_gen->fields().begin(), struct_gen->fields().end(),
           [](ValueType type) -> bool { return type.is_defaultable(); });
-
-      if (new_default && can_be_defaultable) {
+      bool is_mutable = std::all_of(
+          struct_gen->mutabilities().begin(), struct_gen->mutabilities().end(),
+          [](bool mutability) -> bool { return mutability; });
+      if (new_default && can_be_defaultable && is_mutable) {
         builder_->EmitWithPrefix(kExprStructNewDefault);
         builder_->EmitU32V(index);
       } else {
@@ -962,7 +966,7 @@ class WasmGenerator {
     table_op<kVoid>({kWasmI32, kWasmFuncRef, kWasmI32}, data, kExprTableFill);
   }
   void table_copy(DataRange* data) {
-    ValueType needed_type = data->get<bool>() ? kWasmFuncRef : kWasmAnyRef;
+    ValueType needed_type = data->get<bool>() ? kWasmFuncRef : kWasmExternRef;
     int table_count = builder_->builder()->NumTables();
     ZoneVector<uint32_t> table(builder_->builder()->zone());
     for (int i = 0; i < table_count; i++) {
@@ -2092,29 +2096,24 @@ void WasmGenerator::GenerateRef(HeapType type, DataRange* data,
       // frequencies for dataref is D, for funcref F, and for i31ref and falling
       // back to anyref 2.
       const uint8_t num_data_types = num_structs_ + num_arrays_;
-      const uint8_t num_function_types = functions_.size();
       const uint8_t emit_i31ref = 2;
       const uint8_t fallback_to_anyref = 2;
-      uint8_t random =
-          data->get<uint8_t>() % (num_data_types + num_function_types +
-                                  emit_i31ref + fallback_to_anyref);
+      uint8_t random = data->get<uint8_t>() %
+                       (num_data_types + emit_i31ref + fallback_to_anyref);
       // We have to compute this first so in case GenerateOneOf fails
       // we will continue to fall back on an alternative that is guaranteed
       // to generate a value of the wanted type.
       // In order to know which alternative to fall back to in case
       // GenerateOneOf failed, the random variable is recomputed.
-      if (random >= num_data_types + num_function_types + emit_i31ref) {
+      if (random >= num_data_types + emit_i31ref) {
         DCHECK(liftoff_as_reference_);
         if (GenerateOneOf(alternatives_func_any, type, data, nullability)) {
           return;
         }
-        random = data->get<uint8_t>() %
-                 (num_data_types + num_function_types + emit_i31ref);
+        random = data->get<uint8_t>() % (num_data_types + emit_i31ref);
       }
       if (random < num_data_types) {
         GenerateRef(HeapType(HeapType::kData), data, nullability);
-      } else if (random < num_data_types + num_function_types) {
-        GenerateRef(HeapType(HeapType::kFunc), data, nullability);
       } else {
         GenerateRef(HeapType(HeapType::kI31), data, nullability);
       }
@@ -2205,8 +2204,16 @@ void WasmGenerator::GenerateRef(HeapType type, DataRange* data,
       builder_->EmitWithPrefix(kExprI31New);
       return;
     }
+    case HeapType::kExtern:
+    case HeapType::kNoExtern:
+    case HeapType::kNoFunc:
+    case HeapType::kNone:
+      DCHECK(nullability == Nullability::kNullable);
+      ref_null(type, data);
+      return;
     default:
       // Indexed type.
+      DCHECK(type.is_index());
       DCHECK(liftoff_as_reference_);
       GenerateOneOf(alternatives_indexed_type, type, data, nullability);
       return;
@@ -2562,7 +2569,7 @@ class WasmCompileFuzzer : public WasmExecutionFuzzer {
       // other table indices.
       // TODO(11954): Support typed function tables.
       bool use_funcref = i == 0 || range.get<bool>();
-      ValueType type = use_funcref ? kWasmFuncRef : kWasmAnyRef;
+      ValueType type = use_funcref ? kWasmFuncRef : kWasmExternRef;
       uint32_t table_index = builder.AddTable(type, min_size, max_size);
       if (type == kWasmFuncRef) {
         // For function tables, initialize them with functions from the program.

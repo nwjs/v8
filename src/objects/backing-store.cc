@@ -81,7 +81,11 @@ base::AddressRegion GetReservedRegion(bool has_guard_regions,
 
 size_t GetReservationSize(bool has_guard_regions, size_t byte_capacity) {
 #if V8_TARGET_ARCH_64_BIT && V8_ENABLE_WEBASSEMBLY
-  if (has_guard_regions) return kFullGuardSize;
+  if (has_guard_regions) {
+    static_assert(kFullGuardSize > size_t{4} * GB);
+    DCHECK_LE(byte_capacity, size_t{4} * GB);
+    return kFullGuardSize;
+  }
 #else
   DCHECK(!has_guard_regions);
 #endif
@@ -321,33 +325,10 @@ void BackingStore::SetAllocatorFromIsolate(Isolate* isolate) {
   }
 }
 
-#if V8_ENABLE_WEBASSEMBLY
-// Allocate a backing store for a Wasm memory. Always use the page allocator
-// and add guard regions.
-std::unique_ptr<BackingStore> BackingStore::TryAllocateWasmMemory(
-    Isolate* isolate, size_t initial_pages, size_t maximum_pages,
-    SharedFlag shared) {
-  // Compute size of reserved memory.
-  size_t engine_max_pages = wasm::max_mem_pages();
-  maximum_pages = std::min(engine_max_pages, maximum_pages);
-
-  auto result = TryAllocateAndPartiallyCommitMemory(
-      isolate, initial_pages * wasm::kWasmPageSize,
-      maximum_pages * wasm::kWasmPageSize, wasm::kWasmPageSize, initial_pages,
-      maximum_pages, true, shared);
-  // Shared Wasm memories need an anchor for the memory object list.
-  if (result && shared == SharedFlag::kShared) {
-    result->type_specific_data_.shared_wasm_memory_data =
-        new SharedWasmMemoryData();
-  }
-  return result;
-}
-#endif  // V8_ENABLE_WEBASSEMBLY
-
 std::unique_ptr<BackingStore> BackingStore::TryAllocateAndPartiallyCommitMemory(
     Isolate* isolate, size_t byte_length, size_t max_byte_length,
     size_t page_size, size_t initial_pages, size_t maximum_pages,
-    bool is_wasm_memory, SharedFlag shared) {
+    WasmMemoryFlag wasm_memory, SharedFlag shared) {
   // Enforce engine limitation on the maximum number of pages.
   if (maximum_pages > std::numeric_limits<size_t>::max() / page_size) {
     return nullptr;
@@ -359,10 +340,11 @@ std::unique_ptr<BackingStore> BackingStore::TryAllocateAndPartiallyCommitMemory(
   TRACE_BS("BSw:try   %zu pages, %zu max\n", initial_pages, maximum_pages);
 
 #if V8_ENABLE_WEBASSEMBLY
-  bool guards = is_wasm_memory && trap_handler::IsTrapHandlerEnabled();
+  bool guards = wasm_memory == WasmMemoryFlag::kWasmMemory32 &&
+                trap_handler::IsTrapHandlerEnabled();
 #else
-  CHECK(!is_wasm_memory);
-  bool guards = false;
+  CHECK_EQ(WasmMemoryFlag::kNotWasm, wasm_memory);
+  constexpr bool guards = false;
 #endif  // V8_ENABLE_WEBASSEMBLY
 
   // For accounting purposes, whether a GC was necessary.
@@ -435,6 +417,7 @@ std::unique_ptr<BackingStore> BackingStore::TryAllocateAndPartiallyCommitMemory(
   RecordStatus(isolate, did_retry ? AllocationStatus::kSuccessAfterRetry
                                   : AllocationStatus::kSuccess);
 
+  const bool is_wasm_memory = wasm_memory != WasmMemoryFlag::kNotWasm;
   ResizableFlag resizable =
       is_wasm_memory ? ResizableFlag::kNotResizable : ResizableFlag::kResizable;
 
@@ -463,41 +446,49 @@ std::unique_ptr<BackingStore> BackingStore::TryAllocateAndPartiallyCommitMemory(
 // and add guard regions.
 std::unique_ptr<BackingStore> BackingStore::AllocateWasmMemory(
     Isolate* isolate, size_t initial_pages, size_t maximum_pages,
-    SharedFlag shared) {
+    WasmMemoryFlag wasm_memory, SharedFlag shared) {
   // Wasm pages must be a multiple of the allocation page size.
   DCHECK_EQ(0, wasm::kWasmPageSize % AllocatePageSize());
+  DCHECK_LE(initial_pages, maximum_pages);
 
-  // Enforce engine limitation on the maximum number of pages.
-  if (initial_pages > wasm::max_mem_pages()) return nullptr;
+  DCHECK(wasm_memory == WasmMemoryFlag::kWasmMemory32 ||
+         wasm_memory == WasmMemoryFlag::kWasmMemory64);
 
-  auto backing_store =
-      TryAllocateWasmMemory(isolate, initial_pages, maximum_pages, shared);
-  if (maximum_pages == initial_pages) {
-    // If initial pages, and maximum are equal, nothing more to do return early.
-    return backing_store;
-  }
+  auto TryAllocate = [isolate, initial_pages, wasm_memory,
+                      shared](size_t maximum_pages) {
+    auto result = TryAllocateAndPartiallyCommitMemory(
+        isolate, initial_pages * wasm::kWasmPageSize,
+        maximum_pages * wasm::kWasmPageSize, wasm::kWasmPageSize, initial_pages,
+        maximum_pages, wasm_memory, shared);
+    if (result && shared == SharedFlag::kShared) {
+      result->type_specific_data_.shared_wasm_memory_data =
+          new SharedWasmMemoryData();
+    }
+    return result;
+  };
+  auto backing_store = TryAllocate(maximum_pages);
+  if (!backing_store && maximum_pages - initial_pages >= 4) {
+    // Retry with smaller maximum pages at each retry.
+    auto delta = (maximum_pages - initial_pages) / 4;
+    size_t sizes[] = {maximum_pages - delta, maximum_pages - 2 * delta,
+                      maximum_pages - 3 * delta, initial_pages};
 
-  // Retry with smaller maximum pages at each retry.
-  const int kAllocationTries = 3;
-  auto delta = (maximum_pages - initial_pages) / (kAllocationTries + 1);
-  size_t sizes[] = {maximum_pages - delta, maximum_pages - 2 * delta,
-                    maximum_pages - 3 * delta, initial_pages};
-
-  for (size_t i = 0; i < arraysize(sizes) && !backing_store; i++) {
-    backing_store =
-        TryAllocateWasmMemory(isolate, initial_pages, sizes[i], shared);
+    for (size_t reduced_maximum_pages : sizes) {
+      backing_store = TryAllocate(reduced_maximum_pages);
+      if (backing_store) break;
+    }
   }
   return backing_store;
 }
 
-std::unique_ptr<BackingStore> BackingStore::CopyWasmMemory(Isolate* isolate,
-                                                           size_t new_pages,
-                                                           size_t max_pages) {
+std::unique_ptr<BackingStore> BackingStore::CopyWasmMemory(
+    Isolate* isolate, size_t new_pages, size_t max_pages,
+    WasmMemoryFlag wasm_memory) {
   // Note that we could allocate uninitialized to save initialization cost here,
   // but since Wasm memories are allocated by the page allocator, the zeroing
   // cost is already built-in.
   auto new_backing_store = BackingStore::AllocateWasmMemory(
-      isolate, new_pages, max_pages,
+      isolate, new_pages, max_pages, wasm_memory,
       is_shared() ? SharedFlag::kShared : SharedFlag::kNotShared);
 
   if (!new_backing_store ||

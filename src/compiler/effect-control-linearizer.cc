@@ -174,6 +174,7 @@ class EffectControlLinearizer {
   Node* LowerStringLessThanOrEqual(Node* node);
   Node* LowerBigIntAdd(Node* node, Node* frame_state);
   Node* LowerBigIntSubtract(Node* node, Node* frame_state);
+  Node* LowerBigIntMultiply(Node* node, Node* frame_state);
   Node* LowerBigIntNegate(Node* node);
   Node* LowerCheckFloat64Hole(Node* node, Node* frame_state);
   Node* LowerCheckNotTaggedHole(Node* node, Node* frame_state);
@@ -1236,6 +1237,9 @@ bool EffectControlLinearizer::TryWireInStateEffect(Node* node,
       break;
     case IrOpcode::kBigIntSubtract:
       result = LowerBigIntSubtract(node, frame_state);
+      break;
+    case IrOpcode::kBigIntMultiply:
+      result = LowerBigIntMultiply(node, frame_state);
       break;
     case IrOpcode::kBigIntNegate:
       result = LowerBigIntNegate(node);
@@ -4037,7 +4041,6 @@ Node* EffectControlLinearizer::LowerStringFromSingleCharCode(Node* node) {
   Node* code = __ Word32And(value, __ Uint32Constant(0xFFFF));
 
   auto if_not_one_byte = __ MakeDeferredLabel();
-  auto cache_miss = __ MakeDeferredLabel();
   auto done = __ MakeLabel(MachineRepresentation::kTagged);
 
   // Check if the {code} is a one byte character
@@ -4045,46 +4048,19 @@ Node* EffectControlLinearizer::LowerStringFromSingleCharCode(Node* node) {
       code, __ Uint32Constant(String::kMaxOneByteCharCode));
   __ GotoIfNot(check1, &if_not_one_byte);
   {
-    // Load the isolate wide single character string cache.
-    Node* cache = __ HeapConstant(factory()->single_character_string_cache());
+    // Load the isolate wide single character string table.
+    Node* table = __ HeapConstant(factory()->single_character_string_table());
 
-    // Compute the {cache} index for {code}.
+    // Compute the {table} index for {code}.
     Node* index = machine()->Is32() ? code : __ ChangeUint32ToUint64(code);
 
-    // Check if we have an entry for the {code} in the single character string
-    // cache already.
+    // Load the string for the {code} from the single character string
+    // table.
     Node* entry =
-        __ LoadElement(AccessBuilder::ForFixedArrayElement(), cache, index);
+        __ LoadElement(AccessBuilder::ForFixedArrayElement(), table, index);
 
-    Node* check2 = __ TaggedEqual(entry, __ UndefinedConstant());
-    __ GotoIf(check2, &cache_miss);
-
-    // Use the {entry} from the {cache}.
+    // Use the {entry} from the {table}.
     __ Goto(&done, entry);
-
-    __ Bind(&cache_miss);
-    {
-      // Allocate a new SeqOneByteString for {code}.
-      Node* vtrue2 =
-          __ Allocate(AllocationType::kYoung,
-                      __ IntPtrConstant(SeqOneByteString::SizeFor(1)));
-      __ StoreField(AccessBuilder::ForMap(), vtrue2,
-                    __ HeapConstant(factory()->one_byte_string_map()));
-      __ StoreField(AccessBuilder::ForNameRawHashField(), vtrue2,
-                    __ Int32Constant(Name::kEmptyHashField));
-      __ StoreField(AccessBuilder::ForStringLength(), vtrue2,
-                    __ Int32Constant(1));
-      __ Store(
-          StoreRepresentation(MachineRepresentation::kWord8, kNoWriteBarrier),
-          vtrue2,
-          __ IntPtrConstant(SeqOneByteString::kHeaderSize - kHeapObjectTag),
-          code);
-
-      // Remember it in the {cache}.
-      __ StoreElement(AccessBuilder::ForFixedArrayElement(), cache, index,
-                      vtrue2);
-      __ Goto(&done, vtrue2);
-    }
   }
 
   __ Bind(&if_not_one_byte);
@@ -4156,7 +4132,6 @@ Node* EffectControlLinearizer::LowerStringFromSingleCodePoint(Node* node) {
 
   auto if_not_single_code = __ MakeDeferredLabel();
   auto if_not_one_byte = __ MakeDeferredLabel();
-  auto cache_miss = __ MakeDeferredLabel();
   auto done = __ MakeLabel(MachineRepresentation::kTagged);
 
   // Check if the {code} is a single code unit
@@ -4169,46 +4144,19 @@ Node* EffectControlLinearizer::LowerStringFromSingleCodePoint(Node* node) {
         code, __ Uint32Constant(String::kMaxOneByteCharCode));
     __ GotoIfNot(check1, &if_not_one_byte);
     {
-      // Load the isolate wide single character string cache.
-      Node* cache = __ HeapConstant(factory()->single_character_string_cache());
+      // Load the isolate wide single character string table.
+      Node* table = __ HeapConstant(factory()->single_character_string_table());
 
-      // Compute the {cache} index for {code}.
+      // Compute the {table} index for {code}.
       Node* index = machine()->Is32() ? code : __ ChangeUint32ToUint64(code);
 
-      // Check if we have an entry for the {code} in the single character string
-      // cache already.
+      // Load the string for the {code} from the single character string
+      // table.
       Node* entry =
-          __ LoadElement(AccessBuilder::ForFixedArrayElement(), cache, index);
+          __ LoadElement(AccessBuilder::ForFixedArrayElement(), table, index);
 
-      Node* check2 = __ TaggedEqual(entry, __ UndefinedConstant());
-      __ GotoIf(check2, &cache_miss);
-
-      // Use the {entry} from the {cache}.
+      // Use the {entry} from the {table}.
       __ Goto(&done, entry);
-
-      __ Bind(&cache_miss);
-      {
-        // Allocate a new SeqOneByteString for {code}.
-        Node* vtrue2 =
-            __ Allocate(AllocationType::kYoung,
-                        __ IntPtrConstant(SeqOneByteString::SizeFor(1)));
-        __ StoreField(AccessBuilder::ForMap(), vtrue2,
-                      __ HeapConstant(factory()->one_byte_string_map()));
-        __ StoreField(AccessBuilder::ForNameRawHashField(), vtrue2,
-                      __ Int32Constant(Name::kEmptyHashField));
-        __ StoreField(AccessBuilder::ForStringLength(), vtrue2,
-                      __ Int32Constant(1));
-        __ Store(
-            StoreRepresentation(MachineRepresentation::kWord8, kNoWriteBarrier),
-            vtrue2,
-            __ IntPtrConstant(SeqOneByteString::kHeaderSize - kHeapObjectTag),
-            code);
-
-        // Remember it in the {cache}.
-        __ StoreElement(AccessBuilder::ForFixedArrayElement(), cache, index,
-                        vtrue2);
-        __ Goto(&done, vtrue2);
-      }
     }
 
     __ Bind(&if_not_one_byte);
@@ -4393,6 +4341,50 @@ Node* EffectControlLinearizer::LowerBigIntSubtract(Node* node,
   // Check for exception sentinel: Smi is returned to signal BigIntTooBig.
   __ DeoptimizeIf(DeoptimizeReason::kBigIntTooBig, FeedbackSource{},
                   ObjectIsSmi(value), frame_state);
+
+  return value;
+}
+
+Node* EffectControlLinearizer::LowerBigIntMultiply(Node* node,
+                                                   Node* frame_state) {
+  Node* lhs = node->InputAt(0);
+  Node* rhs = node->InputAt(1);
+
+  Callable const callable =
+      Builtins::CallableFor(isolate(), Builtin::kBigIntMultiplyNoThrow);
+  auto call_descriptor = Linkage::GetStubCallDescriptor(
+      graph()->zone(), callable.descriptor(),
+      callable.descriptor().GetStackParameterCount(), CallDescriptor::kNoFlags,
+      Operator::kFoldable | Operator::kNoThrow);
+  Node* value = __ Call(call_descriptor, __ HeapConstant(callable.code()), lhs,
+                        rhs, __ NoContextConstant());
+
+  auto if_termreq = __ MakeDeferredLabel();
+  auto done = __ MakeLabel();
+
+  // Check for exception sentinel: Smi 1 is returned to signal
+  // TerminationRequested.
+  __ GotoIf(__ TaggedEqual(value, __ SmiConstant(1)), &if_termreq);
+
+  // Check for exception sentinel: Smi 0 is returned to signal
+  // BigIntTooBig.
+  __ DeoptimizeIf(DeoptimizeReason::kBigIntTooBig, FeedbackSource{},
+                  ObjectIsSmi(value), frame_state);
+  __ Goto(&done);
+
+  __ Bind(&if_termreq);
+  {
+    Runtime::FunctionId id = Runtime::kTerminateExecution;
+    auto call_descriptor = Linkage::GetRuntimeCallDescriptor(
+        graph()->zone(), id, 0, Operator::kNoDeopt,
+        CallDescriptor::kNeedsFrameState);
+    __ Call(call_descriptor, __ CEntryStubConstant(1),
+            __ ExternalConstant(ExternalReference::Create(id)),
+            __ Int32Constant(0), __ NoContextConstant(), frame_state);
+    __ Goto(&done);
+  }
+
+  __ Bind(&done);
 
   return value;
 }
@@ -5195,6 +5187,7 @@ Node* EffectControlLinearizer::LowerFastApiCall(Node* node) {
                 c_call_result, CheckForMinusZeroMode::kCheckForMinusZero);
           case CTypeInfo::Type::kV8Value:
           case CTypeInfo::Type::kApiObject:
+          case CTypeInfo::Type::kUint8:
             UNREACHABLE();
           case CTypeInfo::Type::kAny:
             return ChangeFloat64ToTagged(

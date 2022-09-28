@@ -6,6 +6,7 @@
 #define V8_MAGLEV_MAGLEV_GRAPH_BUILDER_H_
 
 #include <cmath>
+#include <iomanip>
 #include <map>
 #include <type_traits>
 
@@ -17,8 +18,11 @@
 #include "src/compiler/js-heap-broker.h"
 #include "src/deoptimizer/deoptimize-reason.h"
 #include "src/interpreter/bytecode-array-iterator.h"
+#include "src/interpreter/bytecode-decoder.h"
 #include "src/interpreter/bytecode-register.h"
+#include "src/interpreter/interpreter-intrinsics.h"
 #include "src/maglev/maglev-graph-labeller.h"
+#include "src/maglev/maglev-graph-printer.h"
 #include "src/maglev/maglev-graph.h"
 #include "src/maglev/maglev-ir.h"
 #include "src/utils/memcopy.h"
@@ -49,23 +53,17 @@ class MaglevGraphBuilder {
 
   void StartPrologue();
   void SetArgument(int i, ValueNode* value);
+  ValueNode* GetArgument(int i) const;
   void BuildRegisterFrameInitialization();
   BasicBlock* EndPrologue();
 
   void BuildBody() {
     for (iterator_.Reset(); !iterator_.done(); iterator_.Advance()) {
       VisitSingleBytecode();
-      // TODO(v8:7700): Clean up after all bytecodes are supported.
-      if (found_unsupported_bytecode()) break;
     }
   }
 
   Graph* graph() const { return graph_; }
-
-  // TODO(v8:7700): Clean up after all bytecodes are supported.
-  bool found_unsupported_bytecode() const {
-    return found_unsupported_bytecode_;
-  }
 
  private:
   BasicBlock* CreateEmptyBlock(int offset, BasicBlock* predecessor) {
@@ -117,6 +115,11 @@ class MaglevGraphBuilder {
     if (has_graph_labeller()) {
       for (Phi* phi : *merge_states_[offset]->phis()) {
         graph_labeller()->RegisterNode(phi);
+        if (FLAG_trace_maglev_graph_building) {
+          std::cout << "  " << phi << "  "
+                    << PrintNodeLabel(graph_labeller(), phi) << ": "
+                    << PrintNode(graph_labeller(), phi) << std::endl;
+        }
       }
     }
   }
@@ -183,6 +186,10 @@ class MaglevGraphBuilder {
         merge_state->Merge(*compilation_unit_, current_interpreter_frame_,
                            graph()->last_block(), offset);
       }
+      if (FLAG_trace_maglev_graph_building) {
+        std::cout << "== New block (merge) ==" << std::endl;
+      }
+
       ProcessMergePoint(offset);
       StartNewBlock(offset);
     } else if (V8_UNLIKELY(current_block_ == nullptr)) {
@@ -202,6 +209,12 @@ class MaglevGraphBuilder {
       return;
     }
     DCHECK_NOT_NULL(current_block_);
+    if (FLAG_trace_maglev_graph_building) {
+      std::cout << std::setw(4) << iterator_.current_offset() << " : ";
+      interpreter::BytecodeDecoder::Decode(std::cout,
+                                           iterator_.current_address());
+      std::cout << std::endl;
+    }
 #ifdef DEBUG
     // Clear new nodes for the next VisitFoo
     new_nodes_.clear();
@@ -220,6 +233,11 @@ class MaglevGraphBuilder {
   BYTECODE_LIST(BYTECODE_VISITOR)
 #undef BYTECODE_VISITOR
 
+#define DECLARE_VISITOR(name, ...) \
+  void VisitIntrinsic##name(interpreter::RegisterList args);
+  INTRINSICS_LIST(DECLARE_VISITOR)
+#undef DECLARE_VISITOR
+
   template <typename NodeT>
   NodeT* AddNode(NodeT* node) {
     if (node->properties().is_required_when_unused()) {
@@ -227,6 +245,11 @@ class MaglevGraphBuilder {
     }
     current_block_->nodes().Add(node);
     if (has_graph_labeller()) graph_labeller()->RegisterNode(node);
+    if (FLAG_trace_maglev_graph_building) {
+      std::cout << "  " << node << "  "
+                << PrintNodeLabel(graph_labeller(), node) << ": "
+                << PrintNode(graph_labeller(), node) << std::endl;
+    }
 #ifdef DEBUG
     new_nodes_.insert(node);
 #endif
@@ -257,6 +280,74 @@ class MaglevGraphBuilder {
     } else {
       return NodeBase::New<NodeT>(zone(), std::forward<Args>(args)...);
     }
+  }
+
+  template <Builtin kBuiltin>
+  CallBuiltin* BuildCallBuiltin(std::initializer_list<ValueNode*> inputs) {
+    using Descriptor = typename CallInterfaceDescriptorFor<kBuiltin>::type;
+    CallBuiltin* call_builtin;
+    if constexpr (Descriptor::HasContextParameter()) {
+      call_builtin =
+          CreateNewNode<CallBuiltin>(inputs.size() + 1, kBuiltin, GetContext());
+    } else {
+      call_builtin = CreateNewNode<CallBuiltin>(inputs.size(), kBuiltin);
+    }
+    int arg_index = 0;
+    for (auto* input : inputs) {
+      call_builtin->set_arg(arg_index++, input);
+    }
+    return AddNode(call_builtin);
+  }
+
+  template <Builtin kBuiltin>
+  CallBuiltin* BuildCallBuiltin(
+      std::initializer_list<ValueNode*> inputs,
+      compiler::FeedbackSource& feedback,
+      CallBuiltin::FeedbackSlotType slot_type = CallBuiltin::kTaggedIndex) {
+    CallBuiltin* call_builtin = BuildCallBuiltin<kBuiltin>(inputs);
+    call_builtin->set_feedback(feedback, slot_type);
+#ifdef DEBUG
+    // Check that the last parameters are kSlot and kVector.
+    using Descriptor = typename CallInterfaceDescriptorFor<kBuiltin>::type;
+    int slot_index = call_builtin->InputCountWithoutContext();
+    int vector_index = slot_index + 1;
+    DCHECK_EQ(slot_index, Descriptor::kSlot);
+    // TODO(victorgomes): Rename all kFeedbackVector parameters in the builtins
+    // to kVector.
+    DCHECK_EQ(vector_index, Descriptor::kVector);
+    // Also check that the builtin does not allow var args.
+    DCHECK_EQ(Descriptor::kAllowVarArgs, false);
+#endif  // DEBUG
+    return call_builtin;
+  }
+
+  void BuildLoadGlobal(compiler::NameRef name,
+                       compiler::FeedbackSource& feedback_source,
+                       TypeofMode typeof_mode);
+
+  CallRuntime* BuildCallRuntime(Runtime::FunctionId function_id,
+                                std::initializer_list<ValueNode*> inputs) {
+    CallRuntime* call_runtime = CreateNewNode<CallRuntime>(
+        inputs.size() + CallRuntime::kFixedInputCount, function_id,
+        GetContext());
+    int arg_index = 0;
+    for (auto* input : inputs) {
+      call_runtime->set_arg(arg_index++, input);
+    }
+    return AddNode(call_runtime);
+  }
+
+  void BuildAbort(AbortReason reason) {
+    // Create a block rather than calling finish, since we don't yet know the
+    // next block's offset before the loop skipping the rest of the bytecodes.
+    BasicBlock* block = CreateBlock<Abort>({}, reason);
+    ResolveJumpsToBlockAtOffset(block, block_offset_);
+    MarkBytecodeDead();
+  }
+
+  ValueNode* GetClosure() const {
+    return current_interpreter_frame_.get(
+        interpreter::Register::function_closure());
   }
 
   ValueNode* GetContext() const {
@@ -311,6 +402,11 @@ class MaglevGraphBuilder {
     return it->second;
   }
 
+  RootConstant* GetBooleanConstant(bool value) {
+    return GetRootConstant(value ? RootIndex::kTrueValue
+                                 : RootIndex::kFalseValue);
+  }
+
   Int32Constant* GetInt32Constant(int constant) {
     auto it = graph_->int32().find(constant);
     if (it == graph_->int32().end()) {
@@ -348,6 +444,18 @@ class MaglevGraphBuilder {
     if (has_graph_labeller()) graph_labeller()->RegisterNode(node);
     graph_->AddConstant(node);
     return node;
+  }
+
+  bool IsConstantNodeTheHole(ValueNode* value) {
+    DCHECK(IsConstantNode(value->opcode()));
+    if (RootConstant* constant = value->TryCast<RootConstant>()) {
+      return constant->index() == RootIndex::kTheHoleValue;
+    }
+    if (Constant* constant = value->TryCast<Constant>()) {
+      return constant->IsTheHole();
+    }
+    // The other constants nodes cannot be TheHole.
+    return false;
   }
 
   // Move an existing ValueNode between two registers. You can pass
@@ -496,11 +604,33 @@ class MaglevGraphBuilder {
     return GetFloat64(iterator_.GetRegisterOperand(operand_index));
   }
 
+  ValueNode* LoadFixedArrayElement(ValueNode* node, int index) {
+    return AddNewNode<LoadTaggedField>({node},
+                                       FixedArray::OffsetOfElementAt(index));
+  }
+
   template <typename NodeT>
   void SetAccumulator(NodeT* node) {
     // Accumulator stores are equivalent to stores to the virtual accumulator
     // register.
     StoreRegister(interpreter::Register::virtual_accumulator(), node);
+  }
+
+  ValueNode* GetSecondValue(ValueNode* result) {
+    // GetSecondReturnedValue must be added just after a node that calls a
+    // builtin that expects 2 returned values. It simply binds kReturnRegister1
+    // to a value node. Since the previous node must have been a builtin
+    // call, the register is available in the register allocator. No gap moves
+    // would be emitted between these two nodes.
+    if (result->opcode() == Opcode::kCallRuntime) {
+      DCHECK_EQ(result->Cast<CallRuntime>()->ReturnCount(), 2);
+    } else {
+      DCHECK_EQ(result->opcode(), Opcode::kForInPrepare);
+    }
+    // {result} must be the last node in the current block.
+    DCHECK(current_block_->nodes().Contains(result));
+    DCHECK_EQ(result->NextNode(), nullptr);
+    return AddNewNode<GetSecondReturnedValue>({});
   }
 
   template <typename NodeT>
@@ -513,6 +643,19 @@ class MaglevGraphBuilder {
     }
     MarkAsLazyDeoptResult(value, target);
     current_interpreter_frame_.set(target, value);
+  }
+
+  void StoreRegisterPair(interpreter::Register target, CallRuntime* value) {
+    DCHECK_EQ(value->ReturnCount(), 2);
+
+    DCHECK_NE(0, new_nodes_.count(value));
+    MarkAsLazyDeoptResult(value, target, value->ReturnCount());
+    current_interpreter_frame_.set(target, value);
+
+    ValueNode* second_value = GetSecondValue(value);
+    DCHECK_NE(0, new_nodes_.count(second_value));
+    current_interpreter_frame_.set(interpreter::Register(target.index() + 1),
+                                   second_value);
   }
 
   CheckpointedInterpreterState GetLatestCheckpointedState() {
@@ -542,13 +685,15 @@ class MaglevGraphBuilder {
 
   template <typename NodeT>
   void MarkAsLazyDeoptResult(NodeT* value,
-                             interpreter::Register result_location) {
+                             interpreter::Register result_location,
+                             int result_size = 1) {
     DCHECK_EQ(NodeT::kProperties.can_lazy_deopt(),
               value->properties().can_lazy_deopt());
     if constexpr (NodeT::kProperties.can_lazy_deopt()) {
       DCHECK(result_location.is_valid());
       DCHECK(!value->lazy_deopt_info()->result_location.is_valid());
       value->lazy_deopt_info()->result_location = result_location;
+      value->lazy_deopt_info()->result_size = result_size;
     }
   }
 
@@ -582,8 +727,9 @@ class MaglevGraphBuilder {
   template <typename ControlNodeT, typename... Args>
   BasicBlock* CreateBlock(std::initializer_list<ValueNode*> control_inputs,
                           Args&&... args) {
-    current_block_->set_control_node(CreateNewNode<ControlNodeT>(
-        control_inputs, std::forward<Args>(args)...));
+    ControlNode* control_node = CreateNewNode<ControlNodeT>(
+        control_inputs, std::forward<Args>(args)...);
+    current_block_->set_control_node(control_node);
 
     BasicBlock* block = current_block_;
     current_block_ = nullptr;
@@ -591,6 +737,13 @@ class MaglevGraphBuilder {
     graph()->Add(block);
     if (has_graph_labeller()) {
       graph_labeller()->RegisterBasicBlock(block);
+      if (FLAG_trace_maglev_graph_building) {
+        bool kSkipTargets = true;
+        std::cout << "  " << control_node << "  "
+                  << PrintNodeLabel(graph_labeller(), control_node) << ": "
+                  << PrintNode(graph_labeller(), control_node, kSkipTargets)
+                  << std::endl;
+      }
     }
     return block;
   }
@@ -622,6 +775,9 @@ class MaglevGraphBuilder {
     DCHECK_NULL(current_block_);
     if (std::is_base_of<ConditionalControlNode, ControlNodeT>::value) {
       if (NumPredecessors(next_block_offset) == 1) {
+        if (FLAG_trace_maglev_graph_building) {
+          std::cout << "== New block (single fallthrough) ==" << std::endl;
+        }
         StartNewBlock(next_block_offset);
       } else {
         MergeIntoFrameState(block, next_block_offset);
@@ -707,6 +863,8 @@ class MaglevGraphBuilder {
   void BuildBranchIfToBooleanTrue(ValueNode* node, int true_target,
                                   int false_target);
 
+  void BuildToNumberOrToNumeric(Object::Conversion mode);
+
   void CalculatePredecessorCounts() {
     // Add 1 after the end of the bytecode so we can always write to the offset
     // after the last bytecode.
@@ -766,6 +924,7 @@ class MaglevGraphBuilder {
   LocalIsolate* local_isolate() const { return local_isolate_; }
   Zone* zone() const { return compilation_unit_->zone(); }
   int parameter_count() const { return compilation_unit_->parameter_count(); }
+  int parameter_count_without_receiver() { return parameter_count() - 1; }
   int register_count() const { return compilation_unit_->register_count(); }
   bool has_graph_labeller() const {
     return compilation_unit_->has_graph_labeller();
@@ -800,12 +959,6 @@ class MaglevGraphBuilder {
   MergePointInterpreterFrameState** merge_states_;
 
   InterpreterFrameState current_interpreter_frame_;
-
-  // Allow marking some bytecodes as unsupported during graph building, so that
-  // we can test maglev incrementally.
-  // TODO(v8:7700): Clean up after all bytecodes are supported.
-  bool found_unsupported_bytecode_ = false;
-  bool this_field_will_be_unused_once_all_bytecodes_are_supported_;
 
 #ifdef DEBUG
   std::unordered_set<Node*> new_nodes_;

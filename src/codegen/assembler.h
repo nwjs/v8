@@ -148,6 +148,28 @@ class HeapObjectRequest {
 
 enum class CodeObjectRequired { kNo, kYes };
 
+enum class BuiltinCallJumpMode {
+  // The builtin entry point address is embedded into the instruction stream as
+  // an absolute address.
+  kAbsolute,
+  // Generate builtin calls/jumps using PC-relative instructions. This mode
+  // assumes that the target is guaranteed to be within the
+  // kMaxPCRelativeCodeRangeInMB distance.
+  kPCRelative,
+  // Generate builtin calls/jumps as an indirect instruction which loads the
+  // target address from the builtins entry point table.
+  kIndirect,
+  // Same as kPCRelative but used only for generating embedded builtins.
+  // Currently we use RelocInfo::RUNTIME_ENTRY for generating kPCRelative but
+  // it's not supported yet for mksnapshot yet because of various reasons:
+  // 1) we encode the target as an offset from the code range which is not
+  // always available (32-bit architectures don't have it),
+  // 2) serialization of RelocInfo::RUNTIME_ENTRY is not implemented yet.
+  // TODO(v8:11527): Address the resons above and remove the kForMksnapshot in
+  // favor of kPCRelative or kIndirect.
+  kForMksnapshot,
+};
+
 struct V8_EXPORT_PRIVATE AssemblerOptions {
   // Recording reloc info for external references and off-heap targets is
   // needed whenever code is serialized, e.g. into the snapshot or as a Wasm
@@ -167,21 +189,21 @@ struct V8_EXPORT_PRIVATE AssemblerOptions {
   // root array.
   // (macro assembler feature).
   bool isolate_independent_code = false;
-  // Enables the use of isolate-independent builtins through an off-heap
-  // trampoline. (macro assembler feature).
-  bool inline_offheap_trampolines = true;
-  // Enables generation of pc-relative calls to builtins if the off-heap
-  // builtins are guaranteed to be within the reach of pc-relative call or jump
-  // instructions. For example, when the bultins code is re-embedded into the
-  // code range.
-  bool short_builtin_calls = false;
+
+  // Defines how builtin calls and tail calls should be generated.
+  BuiltinCallJumpMode builtin_call_jump_mode = BuiltinCallJumpMode::kAbsolute;
+  // Mksnapshot ensures that the code range is small enough to guarantee that
+  // PC-relative call/jump instructions can be used for builtin to builtin
+  // calls/tail calls. The embedded builtins blob generator also ensures that.
+  // However, there are serializer tests, where we force isolate creation at
+  // runtime and at this point, Code space isn't restricted to a size s.t.
+  // PC-relative calls may be used. So, we fall back to an indirect mode.
+  // TODO(v8:11527): remove once kForMksnapshot is removed.
+  bool use_pc_relative_calls_and_jumps_for_mksnapshot = false;
+
   // On some platforms, all code is created within a certain address range in
   // the process, and the base of this code range is configured here.
   Address code_range_base = 0;
-  // Enable pc-relative calls/jumps on platforms that support it. When setting
-  // this flag, the code range must be small enough to fit all offsets into
-  // the instruction immediates.
-  bool use_pc_relative_calls_and_jumps = false;
   // Enables the collection of information useful for the generation of unwind
   // info. This is useful in some platform (Win64) where the unwind info depends
   // on a function prologue/epilogue.
@@ -475,6 +497,17 @@ class V8_EXPORT_PRIVATE V8_NODISCARD CpuFeatureScope {
 #else
 #define ASM_CODE_COMMENT(asm)
 #define ASM_CODE_COMMENT_STRING(asm, ...)
+#endif
+
+// Use this macro to mark functions that are only defined if
+// V8_ENABLE_DEBUG_CODE is set, and are a no-op otherwise.
+// Use like:
+//   void AssertMyCondition() NOOP_UNLESS_DEBUG_CODE;
+#ifdef V8_ENABLE_DEBUG_CODE
+#define NOOP_UNLESS_DEBUG_CODE
+#else
+#define NOOP_UNLESS_DEBUG_CODE \
+  { static_assert(FLAG_debug_code.value() == false); }
 #endif
 
 }  // namespace internal

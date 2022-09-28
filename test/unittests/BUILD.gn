@@ -75,7 +75,7 @@ v8_source_set("v8_heap_base_unittests_sources") {
 if (cppgc_is_standalone) {
   v8_executable("cppgc_unittests") {
     testonly = true
-    if (v8_current_cpu == "riscv64") {
+    if (v8_current_cpu == "riscv64" || v8_current_cpu == "riscv32") {
       libs = [ "atomic" ]
     }
 
@@ -224,8 +224,10 @@ v8_source_set("unittests_sources") {
     "../../testing/gtest-support.h",
     "api/access-check-unittest.cc",
     "api/accessor-unittest.cc",
+    "api/api-icu-unittest.cc",
     "api/deserialize-unittest.cc",
     "api/exception-unittest.cc",
+    "api/gc-callbacks-unittest.cc",
     "api/interceptor-unittest.cc",
     "api/isolate-unittest.cc",
     "api/remote-object-unittest.cc",
@@ -369,6 +371,7 @@ v8_source_set("unittests_sources") {
     "heap/embedder-tracing-unittest.cc",
     "heap/gc-idle-time-handler-unittest.cc",
     "heap/gc-tracer-unittest.cc",
+    "heap/global-safepoint-unittest.cc",
     "heap/heap-controller-unittest.cc",
     "heap/heap-unittest.cc",
     "heap/heap-utils.cc",
@@ -377,12 +380,14 @@ v8_source_set("unittests_sources") {
     "heap/lab-unittest.cc",
     "heap/list-unittest.cc",
     "heap/local-factory-unittest.cc",
+    "heap/local-handles-unittest.cc",
     "heap/local-heap-unittest.cc",
     "heap/marking-inner-pointer-resolution-unittest.cc",
     "heap/marking-unittest.cc",
     "heap/marking-worklist-unittest.cc",
     "heap/memory-reducer-unittest.cc",
     "heap/object-stats-unittest.cc",
+    "heap/page-promotion-unittest.cc",
     "heap/persistent-handles-unittest.cc",
     "heap/progressbar-unittest.cc",
     "heap/safepoint-unittest.cc",
@@ -414,7 +419,7 @@ v8_source_set("unittests_sources") {
     "interpreter/source-position-matcher.cc",
     "interpreter/source-position-matcher.h",
     "interpreter/source-positions-unittest.cc",
-    "js-atomics/js-atomics-mutex-unittest.cc",
+    "js-atomics/js-atomics-synchronization-primitive-unittest.cc",
     "libplatform/default-job-unittest.cc",
     "libplatform/default-platform-unittest.cc",
     "libplatform/default-worker-threads-task-runner-unittest.cc",
@@ -452,6 +457,7 @@ v8_source_set("unittests_sources") {
     "objects/symbols-unittest.cc",
     "objects/value-serializer-unittest.cc",
     "objects/weakarraylist-unittest.cc",
+    "objects/weaksets-unittest.cc",
     "parser/ast-value-unittest.cc",
     "parser/decls-unittest.cc",
     "parser/parse-decision-unittest.cc",
@@ -490,6 +496,7 @@ v8_source_set("unittests_sources") {
     "utils/sparse-bit-vector-unittest.cc",
     "utils/utils-unittest.cc",
     "utils/version-unittest.cc",
+    "web-snapshot/web-snapshot-unittest.cc",
     "zone/zone-allocator-unittest.cc",
     "zone/zone-chunk-list-unittest.cc",
     "zone/zone-unittest.cc",
@@ -502,6 +509,7 @@ v8_source_set("unittests_sources") {
   if (v8_enable_webassembly) {
     sources += [
       "../../test/common/wasm/wasm-macro-gen.h",
+      "api/api-wasm-unittest.cc",
       "asmjs/asm-scanner-unittest.cc",
       "asmjs/asm-types-unittest.cc",
       "compiler/int64-lowering-unittest.cc",
@@ -578,13 +586,20 @@ v8_source_set("unittests_sources") {
     ]
   } else if (v8_current_cpu == "riscv64") {
     sources += [
-      "assembler/disasm-riscv64-unittest.cc",
-      "assembler/turbo-assembler-riscv64-unittest.cc",
+      "assembler/disasm-riscv-unittest.cc",
+      "assembler/turbo-assembler-riscv-unittest.cc",
       "compiler/riscv64/instruction-selector-riscv64-unittest.cc",
+    ]
+  } else if (v8_current_cpu == "riscv32") {
+    sources += [
+      "assembler/disasm-riscv-unittest.cc",
+      "assembler/turbo-assembler-riscv-unittest.cc",
+      "compiler/riscv32/instruction-selector-riscv32-unittest.cc",
     ]
   } else if (v8_current_cpu == "x64") {
     sources += [
       "assembler/disasm-x64-unittest.cc",
+      "assembler/macro-assembler-x64-unittest.cc",
       "assembler/turbo-assembler-x64-unittest.cc",
       "compiler/x64/instruction-selector-x64-unittest.cc",
     ]

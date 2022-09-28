@@ -8,6 +8,7 @@
 #include "src/execution/protectors.h"
 #include "src/heap/factory.h"
 #include "src/heap/heap-inl.h"
+#include "src/heap/new-spaces.h"
 #include "src/ic/handler-configuration.h"
 #include "src/init/heap-symbols.h"
 #include "src/init/setup-isolate.h"
@@ -74,6 +75,12 @@ bool SetupIsolateDelegate::SetupHeapInternal(Heap* heap) {
 bool Heap::CreateHeapObjects() {
   // Create initial maps.
   if (!CreateInitialMaps()) return false;
+  if (FLAG_minor_mc && new_space()) {
+    PagedNewSpace::From(new_space())
+        ->paged_space()
+        ->free_list()
+        ->RepairLists(this);
+  }
   CreateApiObjects();
 
   // Create initial objects
@@ -521,6 +528,8 @@ bool Heap::CreateInitialMaps() {
             wasm_resume_data)
     IF_WASM(ALLOCATE_MAP, WASM_TYPE_INFO_TYPE, kVariableSizeSentinel,
             wasm_type_info)
+    IF_WASM(ALLOCATE_MAP, WASM_CONTINUATION_OBJECT_TYPE,
+            WasmContinuationObject::kSize, wasm_continuation_object)
 
     ALLOCATE_MAP(WEAK_CELL_TYPE, WeakCell::kSize, weak_cell)
 
@@ -686,9 +695,17 @@ void Heap::CreateInitialObjects() {
 
   set_weak_refs_keep_during_job(roots.undefined_value());
 
-  // Allocate cache for single character one byte strings.
-  set_single_character_string_cache(*factory->NewFixedArray(
-      String::kMaxOneByteCharCode + 1, AllocationType::kOld));
+  // Allocate and initialize table for single character one byte strings.
+  int table_size = String::kMaxOneByteCharCode + 1;
+  set_single_character_string_table(
+      *factory->NewFixedArray(table_size, AllocationType::kReadOnly));
+  for (int i = 0; i < table_size; ++i) {
+    uint8_t code = static_cast<uint8_t>(i);
+    Handle<String> str =
+        factory->InternalizeString(base::Vector<const uint8_t>(&code, 1));
+    DCHECK(ReadOnlyHeap::Contains(*str));
+    single_character_string_table().set(i, *str);
+  }
 
   for (unsigned i = 0; i < arraysize(constant_string_table); i++) {
     Handle<String> str =
@@ -752,8 +769,6 @@ void Heap::CreateInitialObjects() {
   // Initialize marker objects used during compilation.
   set_self_reference_marker(*factory->NewSelfReferenceMarker());
   set_basic_block_counters_marker(*factory->NewBasicBlockCountersMarker());
-
-  set_interpreter_entry_trampoline_for_profiling(roots.undefined_value());
 
   {
     HandleScope handle_scope(isolate());

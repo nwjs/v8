@@ -162,8 +162,8 @@
 #endif  // V8_OS_WIN64
 #endif  // V8_OS_WIN
 
-#if defined(V8_OS_WIN) && defined(V8_ENABLE_SYSTEM_INSTRUMENTATION)
-#include "src/diagnostics/system-jit-win.h"
+#if defined(V8_OS_WIN) && defined(V8_ENABLE_ETW_STACK_WALKING)
+#include "src/diagnostics/etw-jit-win.h"
 #endif
 
 // Has to be the last include (doesn't have include guards):
@@ -171,13 +171,6 @@
 
 namespace v8 {
 
-// Redefine LegacyOOMErrorCallback here for internal usage. We still need to
-// support it but it is deprecated so would trigger warnings.
-// TODO(chromium:1323177): Remove this.
-using DeprecatedLegacyOOMErrorCallback = void (*)(const char* location,
-                                                  bool is_heap_oom);
-
-static DeprecatedLegacyOOMErrorCallback g_legacy_oom_error_callback = nullptr;
 static OOMErrorCallback g_oom_error_callback = nullptr;
 namespace {
 
@@ -225,17 +218,6 @@ static ScriptOrigin GetScriptOriginForScript(i::Isolate* i_isolate,
   return origin;
 }
 
-Local<PrimitiveArray> ScriptOrigin::HostDefinedOptions() const {
-  // TODO(cbruni, chromium:1244145): remove once migrated to the context.
-  Utils::ApiCheck(!host_defined_options_->IsFixedArray(),
-                  "ScriptOrigin::HostDefinedOptions",
-                  "HostDefinedOptions is not a PrimitiveArray, please use "
-                  "ScriptOrigin::GetHostDefinedOptions()");
-  i::Handle<i::FixedArray> options =
-      Utils::OpenHandle(*host_defined_options_.As<FixedArray>());
-  return Utils::PrimitiveArrayToLocal(options);
-}
-
 // --- E x c e p t i o n   B e h a v i o r ---
 
 // When V8 cannot allocate memory FatalProcessOutOfMemory is called. The default
@@ -260,9 +242,6 @@ void i::V8::FatalProcessOutOfMemory(i::Isolate* i_isolate, const char* location,
     // Give the embedder a chance to handle the condition. If it doesn't,
     // just crash.
     if (g_oom_error_callback) g_oom_error_callback(location, details);
-    if (g_legacy_oom_error_callback) {
-      g_legacy_oom_error_callback(location, details.is_heap_oom);
-    }
     FATAL("Fatal process out of memory: %s", location);
     UNREACHABLE();
   }
@@ -338,9 +317,6 @@ void i::V8::FatalProcessOutOfMemory(i::Isolate* i_isolate, const char* location,
   }
   Utils::ReportOOMFailure(i_isolate, location, details);
   if (g_oom_error_callback) g_oom_error_callback(location, details);
-  if (g_legacy_oom_error_callback) {
-    g_legacy_oom_error_callback(location, details.is_heap_oom);
-  }
   // If the fatal error handler returns, we stop execution.
   FATAL("API fatal error handler returned after process out of memory");
 }
@@ -372,8 +348,6 @@ void Utils::ReportOOMFailure(i::Isolate* i_isolate, const char* location,
                              const OOMDetails& details) {
   if (auto oom_callback = i_isolate->oom_behavior()) {
     oom_callback(location, details);
-  } else if (auto legacy_oom_callback = i_isolate->legacy_oom_behavior()) {
-    legacy_oom_callback(location, details.is_heap_oom);
   } else {
     // TODO(wfh): Remove this fallback once Blink is setting OOM handler. See
     // crbug.com/614440.
@@ -383,7 +357,9 @@ void Utils::ReportOOMFailure(i::Isolate* i_isolate, const char* location,
                            details.is_heap_oom ? "javascript" : "process",
                            location);
 #ifdef V8_FUZZILLI
-      exit(0);
+      // Ignore OOM crashes for fuzzing but exit with an error such that
+      // samples are discarded by Fuzzilli.
+      exit(1);
 #else
       base::OS::Abort();
 #endif  // V8_FUZZILLI
@@ -640,10 +616,10 @@ StartupData SnapshotCreator::CreateBlob(
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
   Utils::ApiCheck(!data->created_, "v8::SnapshotCreator::CreateBlob",
                   "CreateBlob() cannot be called more than once on the same "
-                  "SnapshotCreator.");
+                  "SnapshotCreator");
   Utils::ApiCheck(
       !data->default_context_.IsEmpty(), "v8::SnapshotCreator::CreateBlob",
-      "CreateBlob() cannot be called before the default context is set.");
+      "CreateBlob() cannot be called before the default context is set");
   const int num_additional_contexts = static_cast<int>(data->contexts_.size());
   const int num_contexts = num_additional_contexts + 1;  // The default context.
 
@@ -945,17 +921,17 @@ Value* Eternalize(Isolate* v8_isolate, Value* value) {
 }
 
 void FromJustIsNothing() {
-  Utils::ApiCheck(false, "v8::FromJust", "Maybe value is Nothing.");
+  Utils::ApiCheck(false, "v8::FromJust", "Maybe value is Nothing");
 }
 
 void ToLocalEmpty() {
-  Utils::ApiCheck(false, "v8::ToLocalChecked", "Empty MaybeLocal.");
+  Utils::ApiCheck(false, "v8::ToLocalChecked", "Empty MaybeLocal");
 }
 
 void InternalFieldOutOfBounds(int index) {
   Utils::ApiCheck(0 <= index && index < kInternalFieldsInWeakCallback,
                   "WeakCallbackInfo::GetInternalField",
-                  "Internal field out of bounds.");
+                  "Internal field out of bounds");
 }
 
 }  // namespace api_internal
@@ -1417,7 +1393,7 @@ Local<FunctionTemplate> FunctionTemplate::New(
   if (!Utils::ApiCheck(
           !c_function || behavior == ConstructorBehavior::kThrow,
           "FunctionTemplate::New",
-          "Fast API calls are not supported for constructor functions.")) {
+          "Fast API calls are not supported for constructor functions")) {
     return Local<FunctionTemplate>();
   }
 
@@ -1426,7 +1402,7 @@ Local<FunctionTemplate> FunctionTemplate::New(
             instance_type >= i::Internals::kFirstJSApiObjectType &&
                 instance_type <= i::Internals::kLastJSApiObjectType,
             "FunctionTemplate::New",
-            "instance_type is outside the range of valid JSApiObject types.")) {
+            "instance_type is outside the range of valid JSApiObject types")) {
       return Local<FunctionTemplate>();
     }
   }
@@ -1453,7 +1429,7 @@ Local<FunctionTemplate> FunctionTemplate::NewWithCFunctionOverloads(
           c_function_overloads.size() == 0 ||
               behavior == ConstructorBehavior::kThrow,
           "FunctionTemplate::NewWithCFunctionOverloads",
-          "Fast API calls are not supported for constructor functions.")) {
+          "Fast API calls are not supported for constructor functions")) {
     return Local<FunctionTemplate>();
   }
 
@@ -2134,7 +2110,7 @@ MaybeLocal<Value> Script::Run(Local<Context> context,
   i::AggregatingHistogramTimerScope histogram_timer(
       i_isolate->counters()->compile_lazy());
 
-#if defined(V8_OS_WIN) && defined(V8_ENABLE_SYSTEM_INSTRUMENTATION)
+#if defined(V8_OS_WIN) && defined(V8_ENABLE_ETW_STACK_WALKING)
   // In case ETW has been activated, tasks to log existing code are
   // created. But in case the task runner does not run those before
   // starting to execute code (as it happens in d8, that will run
@@ -2143,7 +2119,7 @@ MaybeLocal<Value> Script::Run(Local<Context> context,
   //
   // To avoid this, on running scripts check first if JIT code log is
   // pending and generate immediately.
-  if (i::FLAG_enable_system_instrumentation) {
+  if (i::FLAG_enable_etw_stack_walking) {
     i::ETWJITInterface::MaybeSetHandlerNow(i_isolate);
   }
 #endif
@@ -2211,10 +2187,6 @@ Local<Value> ScriptOrModule::GetResourceName() {
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
   i::Handle<i::Object> val(obj->resource_name(), i_isolate);
   return ToApiHandle<Value>(val);
-}
-
-Local<PrimitiveArray> ScriptOrModule::GetHostDefinedOptions() {
-  return HostDefinedOptions().As<PrimitiveArray>();
 }
 
 Local<Data> ScriptOrModule::HostDefinedOptions() {
@@ -2293,8 +2265,8 @@ void v8::PrimitiveArray::CheckCast(v8::Data* that) {
   i::Handle<i::Object> obj = Utils::OpenHandle(that);
   Utils::ApiCheck(
       obj->IsFixedArray(), "v8::PrimitiveArray::Cast",
-      "Value is not a PrimitiveArray. This is a temporary issue, v8::Data and "
-      "v8::PrimitiveArray will not be compatible in the future.");
+      "Value is not a PrimitiveArray; this is a temporary issue, v8::Data and "
+      "v8::PrimitiveArray will not be compatible in the future");
 }
 
 int FixedArray::Length() const {
@@ -2702,6 +2674,7 @@ V8_WARN_UNUSED_RESULT MaybeLocal<Function> ScriptCompiler::CompileFunction(
                                  options, no_cache_reason, nullptr);
 }
 
+#ifdef V8_SCRIPTORMODULE_LEGACY_LIFETIME
 // static
 MaybeLocal<Function> ScriptCompiler::CompileFunctionInContext(
     Local<Context> context, Source* source, size_t arguments_count,
@@ -2713,6 +2686,7 @@ MaybeLocal<Function> ScriptCompiler::CompileFunctionInContext(
       context, source, arguments_count, arguments, context_extension_count,
       context_extensions, options, no_cache_reason, script_or_module_out);
 }
+#endif  // V8_SCRIPTORMODULE_LEGACY_LIFETIME
 
 MaybeLocal<Function> ScriptCompiler::CompileFunctionInternal(
     Local<Context> v8_context, Source* source, size_t arguments_count,
@@ -2958,7 +2932,7 @@ ScriptCompiler::CachedData* ScriptCompiler::CreateCodeCacheForFunction(
   DCHECK_NO_SCRIPT_NO_EXCEPTION(shared->GetIsolate());
   Utils::ApiCheck(shared->is_wrapped(),
                   "v8::ScriptCompiler::CreateCodeCacheForFunction",
-                  "Expected SharedFunctionInfo with wrapped source code.");
+                  "Expected SharedFunctionInfo with wrapped source code");
   return i::CodeSerializer::Serialize(shared);
 }
 
@@ -5571,6 +5545,35 @@ Local<v8::Value> Function::GetBoundFunction() const {
   return v8::Undefined(reinterpret_cast<v8::Isolate*>(self->GetIsolate()));
 }
 
+bool Function::Experimental_IsNopFunction() const {
+  auto self = Utils::OpenHandle(this);
+  if (!self->IsJSFunction()) return false;
+  i::SharedFunctionInfo sfi = i::JSFunction::cast(*self).shared();
+  i::Isolate* i_isolate = sfi.GetIsolate();
+  i::IsCompiledScope is_compiled_scope(sfi.is_compiled_scope(i_isolate));
+  if (!is_compiled_scope.is_compiled() &&
+      !i::Compiler::Compile(i_isolate, i::handle(sfi, i_isolate),
+                            i::Compiler::CLEAR_EXCEPTION, &is_compiled_scope)) {
+    return false;
+  }
+  DCHECK(is_compiled_scope.is_compiled());
+  // Since |sfi| can be GC'ed, we get it again.
+  sfi = i::JSFunction::cast(*self).shared();
+  if (!sfi.HasBytecodeArray()) return false;
+  i::Handle<i::BytecodeArray> bytecode_array(sfi.GetBytecodeArray(i_isolate),
+                                             i_isolate);
+  i::interpreter::BytecodeArrayIterator it(bytecode_array, 0);
+  if (it.current_bytecode() != i::interpreter::Bytecode::kLdaUndefined) {
+    return false;
+  }
+  it.Advance();
+  DCHECK(!it.done());
+  if (it.current_bytecode() != i::interpreter::Bytecode::kReturn) return false;
+  it.Advance();
+  DCHECK(it.done());
+  return true;
+}
+
 MaybeLocal<String> v8::Function::FunctionProtoToString(Local<Context> context) {
   PREPARE_FOR_EXECUTION(context, Function, FunctionProtoToString, String);
   auto self = Utils::OpenHandle(this);
@@ -6183,21 +6186,11 @@ void v8::Object::SetAlignedPointerInInternalField(int index, void* value) {
   if (!InternalFieldOK(obj, index, location)) return;
 
   i::DisallowGarbageCollection no_gc;
-
-  // There's no need to invalidate slots as embedder fields are always
-  // tagged.
-  obj->GetHeap()->NotifyObjectLayoutChange(*obj, no_gc,
-                                           i::InvalidateRecordedSlots::kNo);
-
   Utils::ApiCheck(i::EmbedderDataSlot(i::JSObject::cast(*obj), index)
                       .store_aligned_pointer(obj->GetIsolate(), value),
                   location, "Unaligned pointer");
   DCHECK_EQ(value, GetAlignedPointerFromInternalField(index));
   internal::WriteBarrier::MarkingFromInternalFields(i::JSObject::cast(*obj));
-
-#ifdef VERIFY_HEAP
-  obj->GetHeap()->VerifyObjectLayoutChange(*obj, obj->map());
-#endif  // VERIFY_HEAP
 }
 
 void v8::Object::SetAlignedPointerInInternalFields(int argc, int indices[],
@@ -6205,11 +6198,6 @@ void v8::Object::SetAlignedPointerInInternalFields(int argc, int indices[],
   i::Handle<i::JSReceiver> obj = Utils::OpenHandle(this);
 
   i::DisallowGarbageCollection no_gc;
-  // There's no need to invalidate slots as embedder fields are always
-  // tagged.
-  obj->GetHeap()->NotifyObjectLayoutChange(*obj, no_gc,
-                                           i::InvalidateRecordedSlots::kNo);
-
   const char* location = "v8::Object::SetAlignedPointerInInternalFields()";
   i::JSObject js_obj = i::JSObject::cast(*obj);
   int nof_embedder_fields = js_obj.GetEmbedderFieldCount();
@@ -6226,10 +6214,6 @@ void v8::Object::SetAlignedPointerInInternalFields(int argc, int indices[],
     DCHECK_EQ(value, GetAlignedPointerFromInternalField(index));
   }
   internal::WriteBarrier::MarkingFromInternalFields(js_obj);
-
-#ifdef VERIFY_HEAP
-  obj->GetHeap()->VerifyObjectLayoutChange(*obj, obj->map());
-#endif  // VERIFY_HEAP
 }
 
 // --- E n v i r o n m e n t ---
@@ -6335,11 +6319,6 @@ void v8::V8::SetFatalMemoryErrorCallback(
   g_oom_error_callback = oom_error_callback;
 }
 
-void v8::V8::SetFatalMemoryErrorCallback(
-    v8::LegacyOOMErrorCallback legacy_oom_error_callback) {
-  g_legacy_oom_error_callback = legacy_oom_error_callback;
-}
-
 void v8::V8::SetEntropySource(EntropySource entropy_source) {
   base::RandomNumberGenerator::SetEntropySource(entropy_source);
 }
@@ -6420,7 +6399,7 @@ const char* v8::V8::GetVersion() { return i::Version::GetVersion(); }
 VirtualAddressSpace* v8::V8::GetSandboxAddressSpace() {
   Utils::ApiCheck(i::GetProcessWideSandbox()->is_initialized(),
                   "v8::V8::GetSandboxAddressSpace",
-                  "The sandbox must be initialized first.");
+                  "The sandbox must be initialized first");
   return i::GetProcessWideSandbox()->address_space();
 }
 
@@ -6435,14 +6414,14 @@ size_t v8::V8::GetSandboxSizeInBytes() {
 size_t v8::V8::GetSandboxReservationSizeInBytes() {
   Utils::ApiCheck(i::GetProcessWideSandbox()->is_initialized(),
                   "v8::V8::GetSandboxReservationSizeInBytes",
-                  "The sandbox must be initialized first.");
+                  "The sandbox must be initialized first");
   return i::GetProcessWideSandbox()->reservation_size();
 }
 
 bool v8::V8::IsSandboxConfiguredSecurely() {
   Utils::ApiCheck(i::GetProcessWideSandbox()->is_initialized(),
                   "v8::V8::IsSandoxConfiguredSecurely",
-                  "The sandbox must be initialized first.");
+                  "The sandbox must be initialized first");
   // The sandbox is (only) configured insecurely if it is a partially reserved
   // sandbox, since in that case unrelated memory mappings may end up inside
   // the sandbox address space where they could be corrupted by an attacker.
@@ -6659,13 +6638,13 @@ MaybeLocal<Object> v8::Context::NewRemoteContext(
       EnsureConstructor(i_isolate, *global_template);
   Utils::ApiCheck(global_constructor->needs_access_check(),
                   "v8::Context::NewRemoteContext",
-                  "Global template needs to have access checks enabled.");
+                  "Global template needs to have access checks enabled");
   i::Handle<i::AccessCheckInfo> access_check_info = i::handle(
       i::AccessCheckInfo::cast(global_constructor->GetAccessCheckInfo()),
       i_isolate);
   Utils::ApiCheck(access_check_info->named_interceptor() != i::Object(),
                   "v8::Context::NewRemoteContext",
-                  "Global template needs to have access check handlers.");
+                  "Global template needs to have access check handlers");
   i::Handle<i::JSObject> global_proxy = CreateEnvironment<i::JSGlobalProxy>(
       i_isolate, nullptr, global_template, global_object, 0,
       DeserializeInternalFieldsCallback(), nullptr);
@@ -6930,12 +6909,12 @@ MaybeLocal<v8::Object> FunctionTemplate::NewRemoteInstance() {
       EnsureConstructor(i_isolate, *InstanceTemplate());
   Utils::ApiCheck(constructor->needs_access_check(),
                   "v8::FunctionTemplate::NewRemoteInstance",
-                  "InstanceTemplate needs to have access checks enabled.");
+                  "InstanceTemplate needs to have access checks enabled");
   i::Handle<i::AccessCheckInfo> access_check_info = i::handle(
       i::AccessCheckInfo::cast(constructor->GetAccessCheckInfo()), i_isolate);
   Utils::ApiCheck(access_check_info->named_interceptor() != i::Object(),
                   "v8::FunctionTemplate::NewRemoteInstance",
-                  "InstanceTemplate needs to have access check handlers.");
+                  "InstanceTemplate needs to have access check handlers");
   i::Handle<i::JSObject> object;
   if (!i::ApiNatives::InstantiateRemoteObject(
            Utils::OpenHandle(*InstanceTemplate()))
@@ -7527,7 +7506,7 @@ MaybeLocal<v8::RegExp> v8::RegExp::NewWithBacktrackLimit(
     uint32_t backtrack_limit) {
   Utils::ApiCheck(i::Smi::IsValid(backtrack_limit),
                   "v8::RegExp::NewWithBacktrackLimit",
-                  "backtrack_limit is too large or too small.");
+                  "backtrack_limit is too large or too small");
   Utils::ApiCheck(backtrack_limit != i::JSRegExp::kNoBacktrackLimit,
                   "v8::RegExp::NewWithBacktrackLimit",
                   "Must set backtrack_limit");
@@ -8129,7 +8108,7 @@ MaybeLocal<WasmModuleObject> WasmModuleObject::Compile(
       Utils::ToLocal(maybe_compiled.ToHandleChecked()));
 #else
   Utils::ApiCheck(false, "WasmModuleObject::Compile",
-                  "WebAssembly support is not enabled.");
+                  "WebAssembly support is not enabled");
   UNREACHABLE();
 #endif  // V8_ENABLE_WEBASSEMBLY
 }
@@ -8451,7 +8430,7 @@ std::unique_ptr<v8::BackingStore> v8::SharedArrayBuffer::NewBackingStore(
   Utils::ApiCheck(
       byte_length <= i::JSArrayBuffer::kMaxByteLength,
       "v8::SharedArrayBuffer::NewBackingStore",
-      "Cannot construct SharedArrayBuffer, requested length is too big.");
+      "Cannot construct SharedArrayBuffer, requested length is too big");
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
   std::unique_ptr<i::BackingStoreBase> backing_store =
       i::BackingStore::Allocate(i_isolate, byte_length, i::SharedFlag::kShared,
@@ -8909,8 +8888,6 @@ void Isolate::Initialize(Isolate* v8_isolate,
 #endif
   if (params.oom_error_callback) {
     v8_isolate->SetOOMErrorHandler(params.oom_error_callback);
-  } else if (params.legacy_oom_error_callback) {
-    v8_isolate->SetOOMErrorHandler(params.legacy_oom_error_callback);
   }
 #if __clang__
 #pragma clang diagnostic pop
@@ -8994,7 +8971,7 @@ Isolate* Isolate::New(const Isolate::CreateParams& params) {
 void Isolate::Dispose() {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
   if (!Utils::ApiCheck(!i_isolate->IsInUse(), "v8::Isolate::Dispose()",
-                       "Disposing the isolate that is entered by a thread.")) {
+                       "Disposing the isolate that is entered by a thread")) {
     return;
   }
   i::Isolate::Delete(i_isolate);
@@ -9612,7 +9589,7 @@ JSEntryStubs Isolate::GetJSEntryStubs() {
        {i::Builtin::kJSRunMicrotasksEntry,
         &entry_stubs.js_run_microtasks_entry_stub}}};
   for (auto& pair : stubs) {
-    i::Code js_entry = FromCodeT(i_isolate->builtins()->code(pair.first));
+    i::CodeT js_entry = i_isolate->builtins()->code(pair.first);
     pair.second->code.start =
         reinterpret_cast<const void*>(js_entry.InstructionStart());
     pair.second->code.length_in_bytes = js_entry.InstructionSize();
@@ -9652,8 +9629,6 @@ size_t Isolate::CopyCodePages(size_t capacity, MemoryRange* code_pages_out) {
 
 CALLBACK_SETTER(FatalErrorHandler, FatalErrorCallback, exception_behavior)
 CALLBACK_SETTER(OOMErrorHandler, OOMErrorCallback, oom_behavior)
-CALLBACK_SETTER(OOMErrorHandler, DeprecatedLegacyOOMErrorCallback,
-                legacy_oom_behavior)
 CALLBACK_SETTER(ModifyCodeGenerationFromStringsCallback,
                 ModifyCodeGenerationFromStringsCallback2,
                 modify_code_gen_callback2)
@@ -9687,13 +9662,17 @@ void Isolate::InstallConditionalFeatures(Local<Context> context) {
   v8::HandleScope handle_scope(this);
   v8::Context::Scope context_scope(context);
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
+  if (i_isolate->is_execution_terminating()) return;
   i_isolate->InstallConditionalFeatures(Utils::OpenHandle(*context));
 #if V8_ENABLE_WEBASSEMBLY
-  if (i::FLAG_expose_wasm) {
+  if (i::FLAG_expose_wasm && !i_isolate->has_pending_exception()) {
     i::WasmJs::InstallConditionalFeatures(i_isolate,
                                           Utils::OpenHandle(*context));
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
+  if (i_isolate->has_pending_exception()) {
+    i_isolate->OptionalRescheduleException(false);
+  }
 }
 
 void Isolate::AddNearHeapLimitCallback(v8::NearHeapLimitCallback callback,
@@ -10577,7 +10556,7 @@ void HeapProfiler::SetGetDetachednessCallback(GetDetachednessCallback callback,
 void EmbedderHeapTracer::SetStackStart(void* stack_start) {
   CHECK(v8_isolate_);
   reinterpret_cast<i::Isolate*>(v8_isolate_)
-      ->global_handles()
+      ->heap()
       ->SetStackStart(stack_start);
 }
 

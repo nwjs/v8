@@ -19,29 +19,6 @@
 namespace v8 {
 namespace internal {
 
-namespace {
-
-Object CompileOptimized(Isolate* isolate, Handle<JSFunction> function,
-                        CodeKind target_kind, ConcurrencyMode mode) {
-  // As a pre- and post-condition of CompileOptimized, the function *must* be
-  // compiled, i.e. the installed Code object must not be CompileLazy.
-  IsCompiledScope is_compiled_scope(function->shared(), isolate);
-  DCHECK(is_compiled_scope.is_compiled());
-
-  StackLimitCheck check(isolate);
-  // Concurrent optimization runs on another thread, thus no additional gap.
-  const int gap =
-      IsConcurrent(mode) ? 0 : kStackSpaceRequiredForCompilation * KB;
-  if (check.JsHasOverflowed(gap)) return isolate->StackOverflow();
-
-  Compiler::CompileOptimized(isolate, function, mode, target_kind);
-
-  DCHECK(function->is_compiled());
-  return function->code();
-}
-
-}  // namespace
-
 RUNTIME_FUNCTION(Runtime_CompileLazy) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
@@ -84,36 +61,51 @@ RUNTIME_FUNCTION(Runtime_InstallBaselineCode) {
   return baseline_code;
 }
 
-RUNTIME_FUNCTION(Runtime_CompileMaglev_Concurrent) {
+RUNTIME_FUNCTION(Runtime_CompileOptimized) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
   Handle<JSFunction> function = args.at<JSFunction>(0);
-  return CompileOptimized(isolate, function, CodeKind::MAGLEV,
-                          ConcurrencyMode::kConcurrent);
-}
 
-RUNTIME_FUNCTION(Runtime_CompileMaglev_Synchronous) {
-  HandleScope scope(isolate);
-  DCHECK_EQ(1, args.length());
-  Handle<JSFunction> function = args.at<JSFunction>(0);
-  return CompileOptimized(isolate, function, CodeKind::MAGLEV,
-                          ConcurrencyMode::kSynchronous);
-}
+  CodeKind target_kind;
+  ConcurrencyMode mode;
+  DCHECK(function->has_feedback_vector());
+  switch (function->tiering_state()) {
+    case TieringState::kRequestMaglev_Synchronous:
+      target_kind = CodeKind::MAGLEV;
+      mode = ConcurrencyMode::kSynchronous;
+      break;
+    case TieringState::kRequestMaglev_Concurrent:
+      target_kind = CodeKind::MAGLEV;
+      mode = ConcurrencyMode::kConcurrent;
+      break;
+    case TieringState::kRequestTurbofan_Synchronous:
+      target_kind = CodeKind::TURBOFAN;
+      mode = ConcurrencyMode::kSynchronous;
+      break;
+    case TieringState::kRequestTurbofan_Concurrent:
+      target_kind = CodeKind::TURBOFAN;
+      mode = ConcurrencyMode::kConcurrent;
+      break;
+    case TieringState::kNone:
+    case TieringState::kInProgress:
+      UNREACHABLE();
+  }
 
-RUNTIME_FUNCTION(Runtime_CompileTurbofan_Concurrent) {
-  HandleScope scope(isolate);
-  DCHECK_EQ(1, args.length());
-  Handle<JSFunction> function = args.at<JSFunction>(0);
-  return CompileOptimized(isolate, function, CodeKind::TURBOFAN,
-                          ConcurrencyMode::kConcurrent);
-}
+  // As a pre- and post-condition of CompileOptimized, the function *must* be
+  // compiled, i.e. the installed Code object must not be CompileLazy.
+  IsCompiledScope is_compiled_scope(function->shared(), isolate);
+  DCHECK(is_compiled_scope.is_compiled());
 
-RUNTIME_FUNCTION(Runtime_CompileTurbofan_Synchronous) {
-  HandleScope scope(isolate);
-  DCHECK_EQ(1, args.length());
-  Handle<JSFunction> function = args.at<JSFunction>(0);
-  return CompileOptimized(isolate, function, CodeKind::TURBOFAN,
-                          ConcurrencyMode::kSynchronous);
+  StackLimitCheck check(isolate);
+  // Concurrent optimization runs on another thread, thus no additional gap.
+  const int gap =
+      IsConcurrent(mode) ? 0 : kStackSpaceRequiredForCompilation * KB;
+  if (check.JsHasOverflowed(gap)) return isolate->StackOverflow();
+
+  Compiler::CompileOptimized(isolate, function, mode, target_kind);
+
+  DCHECK(function->is_compiled());
+  return function->code();
 }
 
 RUNTIME_FUNCTION(Runtime_HealOptimizedCodeSlot) {
@@ -277,7 +269,7 @@ void DeoptAllOsrLoopsContainingDeoptExit(Isolate* isolate, JSFunction function,
   if (it.done()) return;
   for (size_t i = 0, size = osr_codes.size(); i < size; i++) {
     // Deoptimize type b osr'd loops
-    Deoptimizer::DeoptimizeFunction(function, FromCodeT(osr_codes[i]));
+    Deoptimizer::DeoptimizeFunction(function, osr_codes[i]);
   }
   // Visit after the first loop-with-deopt is found
   int last_deopt_in_range_loop_jump_target;
@@ -295,7 +287,7 @@ void DeoptAllOsrLoopsContainingDeoptExit(Isolate* isolate, JSFunction function,
     last_deopt_in_range_loop_jump_target = it.GetJumpTargetOffset();
     if (TryGetOptimizedOsrCode(isolate, vector, it, &code)) {
       // Deoptimize type c osr'd loops
-      Deoptimizer::DeoptimizeFunction(function, FromCodeT(code));
+      Deoptimizer::DeoptimizeFunction(function, code);
     }
     // We've reached nesting level 0, i.e. the current JumpLoop concludes a
     // top-level loop.
@@ -310,7 +302,7 @@ void DeoptAllOsrLoopsContainingDeoptExit(Isolate* isolate, JSFunction function,
     if (it.current_bytecode() != interpreter::Bytecode::kJumpLoop) continue;
     if (TryGetOptimizedOsrCode(isolate, vector, it, &code)) {
       // Deoptimize type a osr'd loops
-      Deoptimizer::DeoptimizeFunction(function, FromCodeT(code));
+      Deoptimizer::DeoptimizeFunction(function, code);
     }
   }
 }
@@ -368,11 +360,11 @@ RUNTIME_FUNCTION(Runtime_NotifyDeoptimized) {
   // the loop should pay for the deoptimization costs.
   const BytecodeOffset osr_offset = optimized_code->osr_offset();
   if (osr_offset.IsNone()) {
-    Deoptimizer::DeoptimizeFunction(*function, *optimized_code);
+    Deoptimizer::DeoptimizeFunction(*function, ToCodeT(*optimized_code));
     DeoptAllOsrLoopsContainingDeoptExit(isolate, *function, deopt_exit_offset);
   } else if (DeoptExitIsInsideOsrLoop(isolate, *function, deopt_exit_offset,
                                       osr_offset)) {
-    Deoptimizer::DeoptimizeFunction(*function, *optimized_code);
+    Deoptimizer::DeoptimizeFunction(*function, ToCodeT(*optimized_code));
   }
 
   return ReadOnlyRoots(isolate).undefined_value();
@@ -405,9 +397,9 @@ RUNTIME_FUNCTION(Runtime_CompileOptimizedOSR) {
   UnoptimizedFrame* frame = UnoptimizedFrame::cast(it.frame());
 
   DCHECK_IMPLIES(frame->is_interpreted(),
-                 frame->LookupCode().is_interpreter_trampoline_builtin());
+                 frame->LookupCodeT().is_interpreter_trampoline_builtin());
   DCHECK_IMPLIES(frame->is_baseline(),
-                 frame->LookupCode().kind() == CodeKind::BASELINE);
+                 frame->LookupCodeT().kind() == CodeKind::BASELINE);
   DCHECK(frame->function().shared().HasBytecodeArray());
 
   // Determine the entry point for which this OSR request has been fired.

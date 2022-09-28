@@ -382,7 +382,8 @@ class Object : public TaggedImpl<HeapObjectReferenceType::STRONG, Address> {
   inline bool HasValidElements();
 
   // ECMA-262 9.2.
-  V8_EXPORT_PRIVATE bool BooleanValue(Isolate* isolate);
+  template <typename IsolateT>
+  V8_EXPORT_PRIVATE bool BooleanValue(IsolateT* isolate);
   Object ToBoolean(Isolate* isolate);
 
   // ES6 section 7.2.11 Abstract Relational Comparison
@@ -546,7 +547,7 @@ class Object : public TaggedImpl<HeapObjectReferenceType::STRONG, Address> {
       Maybe<ShouldThrow> should_throw);
   V8_WARN_UNUSED_RESULT static Maybe<bool> SetDataProperty(
       LookupIterator* it, Handle<Object> value);
-  V8_WARN_UNUSED_RESULT static Maybe<bool> AddDataProperty(
+  V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static Maybe<bool> AddDataProperty(
       LookupIterator* it, Handle<Object> value, PropertyAttributes attributes,
       Maybe<ShouldThrow> should_throw, StoreOrigin store_origin,
       EnforceDefineSemantics semantics = EnforceDefineSemantics::kSet);
@@ -731,8 +732,6 @@ class Object : public TaggedImpl<HeapObjectReferenceType::STRONG, Address> {
   //
   // ExternalPointer_t field accessors.
   //
-  template <ExternalPointerTag tag>
-  inline void InitExternalPointerField(size_t offset, Isolate* isolate);
   template <ExternalPointerTag tag>
   inline void InitExternalPointerField(size_t offset, Isolate* isolate,
                                        Address value);

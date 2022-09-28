@@ -52,13 +52,14 @@ export function alignUp(raw: number, multiple: number): number {
   return Math.floor((raw + multiple - 1) / multiple) * multiple;
 }
 
-export function measureText(text: string): { width: number, height: number } {
+export function measureText(text: string, coefficient: number = 1):
+  { width: number, height: number } {
   const textMeasure = document.getElementById("text-measure");
   if (textMeasure instanceof SVGTSpanElement) {
     textMeasure.textContent = text;
     return {
-      width: textMeasure.getBBox().width,
-      height: textMeasure.getBBox().height,
+      width: textMeasure.getBBox().width * coefficient,
+      height: textMeasure.getBBox().height * coefficient,
     };
   }
   return { width: 0, height: 0 };
@@ -88,4 +89,14 @@ export function storageSetItem(key: string, value: any): void {
 
 export function storageSetIfIsNotExist(key: string, toSet: any): void {
   if (storageGetItem(key, null, false) === null) storageSetItem(key, toSet);
+}
+
+export function copyToClipboard(text: string): void {
+  if (!text || text.length == 0) return;
+  navigator.clipboard.writeText(text);
+}
+
+export function getNumericCssValue(varName: string): number {
+  const propertyValue = getComputedStyle(document.body).getPropertyValue(varName);
+  return parseFloat(propertyValue.match(/[+-]?\d+(\.\d+)?/g)[0]);
 }

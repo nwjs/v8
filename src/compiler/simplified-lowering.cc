@@ -1898,6 +1898,7 @@ class RepresentationSelector {
         }
         switch (type.GetType()) {
           case CTypeInfo::Type::kVoid:
+          case CTypeInfo::Type::kUint8:
             UNREACHABLE();
           case CTypeInfo::Type::kBool:
             return UseInfo::Bool();
@@ -2000,7 +2001,7 @@ class RepresentationSelector {
       case wasm::kI32:
         return UseInfo::CheckedNumberOrOddballAsWord32(feedback);
       case wasm::kI64:
-        return UseInfo::AnyTagged();
+        return UseInfo::CheckedBigIntTruncatingWord64(feedback);
       case wasm::kF32:
       case wasm::kF64:
         // For Float32, TruncateFloat64ToFloat32 will be inserted later in
@@ -3220,6 +3221,24 @@ class RepresentationSelector {
                         MachineRepresentation::kTaggedPointer);
           if (lower<T>()) {
             ChangeOp(node, lowering->simplified()->BigIntSubtract());
+          }
+        }
+        return;
+      }
+      case IrOpcode::kSpeculativeBigIntMultiply: {
+        if (truncation.IsUsedAsWord64()) {
+          VisitBinop<T>(
+              node, UseInfo::CheckedBigIntTruncatingWord64(FeedbackSource{}),
+              MachineRepresentation::kWord64);
+          if (lower<T>()) {
+            ChangeToPureOp(node, lowering->machine()->Int64Mul());
+          }
+        } else {
+          VisitBinop<T>(node,
+                        UseInfo::CheckedBigIntAsTaggedPointer(FeedbackSource{}),
+                        MachineRepresentation::kTaggedPointer);
+          if (lower<T>()) {
+            ChangeOp(node, lowering->simplified()->BigIntMultiply());
           }
         }
         return;

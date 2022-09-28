@@ -6,10 +6,7 @@ import * as C from "./common/constants";
 import { TurboshaftGraph } from "./turboshaft-graph";
 import { GraphStateType } from "./phases/phase";
 import { LayoutOccupation } from "./layout-occupation";
-import {
-  TurboshaftGraphBlock,
-  TurboshaftGraphBlockType
-} from "./phases/turboshaft-graph-phase/turboshaft-graph-block";
+import { TurboshaftGraphBlock } from "./phases/turboshaft-graph-phase/turboshaft-graph-block";
 
 export class TurboshaftGraphLayout {
   graph: TurboshaftGraph;
@@ -24,10 +21,10 @@ export class TurboshaftGraphLayout {
     this.maxRank = 0;
   }
 
-  public rebuild(showProperties: boolean): void {
+  public rebuild(showCustomData: boolean): void {
     switch (this.graph.graphPhase.stateType) {
       case GraphStateType.NeedToFullRebuild:
-        this.fullRebuild(showProperties);
+        this.fullRebuild(showCustomData);
         break;
       case GraphStateType.Cached:
         this.cachedRebuild();
@@ -38,7 +35,7 @@ export class TurboshaftGraphLayout {
     this.graph.graphPhase.rendered = true;
   }
 
-  private fullRebuild(showProperties: boolean): void {
+  private fullRebuild(showCustomData: boolean): void {
     this.startTime = performance.now();
     this.maxRank = 0;
     this.visitOrderWithinRank = 0;
@@ -46,13 +43,11 @@ export class TurboshaftGraphLayout {
     const blocks = this.initBlocks();
     this.initWorkList(blocks);
 
-    let visited = new Array<boolean>();
-    blocks.forEach((block: TurboshaftGraphBlock) => this.dfsFindRankLate(visited, block));
-    visited = new Array<boolean>();
+    const visited = new Array<boolean>();
     blocks.forEach((block: TurboshaftGraphBlock) => this.dfsRankOrder(visited, block));
 
-    const rankSets = this.getRankSets(showProperties);
-    this.placeBlocks(rankSets, showProperties);
+    const rankSets = this.getRankSets(showCustomData);
+    this.placeBlocks(rankSets, showCustomData);
     this.calculateBackEdgeNumbers();
     this.graph.graphPhase.stateType = GraphStateType.Cached;
   }
@@ -90,24 +85,21 @@ export class TurboshaftGraphLayout {
   }
 
   private initWorkList(blocks: Array<TurboshaftGraphBlock>): void {
-    const workList: Array<TurboshaftGraphBlock> = blocks.slice();
+    const workList = blocks.slice();
     while (workList.length != 0) {
-      const block: TurboshaftGraphBlock = workList.pop();
+      const block = workList.pop();
       let changed = false;
       if (block.rank == C.MAX_RANK_SENTINEL) {
         block.rank = 1;
         changed = true;
       }
-      let begin = 0;
       let end = block.inputs.length;
-      if (block.type == TurboshaftGraphBlockType.Merge && block.inputs.length > 0) {
-        begin = block.inputs.length - 1;
-      } else if (block.hasBackEdges()) {
+      if (block.hasBackEdges()) {
         end = 1;
       }
-      for (let l = begin; l < end; ++l) {
+      for (let l = 0; l < end; ++l) {
         const input = block.inputs[l].source;
-        if (input.visible && input.rank >= block.rank) {
+        if (input.rank >= block.rank) {
           block.rank = input.rank + 1;
           changed = true;
         }
@@ -127,27 +119,6 @@ export class TurboshaftGraphLayout {
     }
   }
 
-  private dfsFindRankLate(visited: Array<boolean>, block: TurboshaftGraphBlock): void {
-    if (visited[block.id]) return;
-    visited[block.id] = true;
-    const originalRank = block.rank;
-    let newRank = block.rank;
-    let isFirstInput = true;
-    for (const outputEdge of block.outputs) {
-      const output = outputEdge.target;
-      this.dfsFindRankLate(visited, output);
-      const outputRank = output.rank;
-      if (output.visible && (isFirstInput || outputRank <= newRank) &&
-        (outputRank > originalRank)) {
-        newRank = outputRank - 1;
-      }
-      isFirstInput = false;
-    }
-    if (block.type != TurboshaftGraphBlockType.Merge) {
-      block.rank = newRank;
-    }
-  }
-
   private dfsRankOrder(visited: Array<boolean>, block: TurboshaftGraphBlock): void {
     if (visited[block.id]) return;
     visited[block.id] = true;
@@ -162,36 +133,29 @@ export class TurboshaftGraphLayout {
     }
   }
 
-  private getRankSets(showProperties: boolean): Array<Array<TurboshaftGraphBlock>> {
-    const rankMaxBlockHeight = new Array<number>();
-    for (const block of this.graph.blocks()) {
-      rankMaxBlockHeight[block.rank] = Math.max(rankMaxBlockHeight[block.rank] ?? 0,
-        block.getHeight(showProperties));
-    }
-
+  private getRankSets(showCustomData: boolean): Array<Array<TurboshaftGraphBlock>> {
+    const ranksMaxBlockHeight = this.graph.getRanksMaxBlockHeight(showCustomData);
     const rankSets = new Array<Array<TurboshaftGraphBlock>>();
     for (const block of this.graph.blocks()) {
-      block.y = rankMaxBlockHeight.slice(1, block.rank).reduce<number>((accumulator, current) => {
+      block.y = ranksMaxBlockHeight.slice(1, block.rank).reduce<number>((accumulator, current) => {
         return accumulator + current;
-      }, block.rank * (C.TURBOSHAFT_BLOCK_ROW_SEPARATION + 2 * C.DEFAULT_NODE_BUBBLE_RADIUS));
-      if (block.visible) {
-        if (!rankSets[block.rank]) {
-          rankSets[block.rank] = new Array<TurboshaftGraphBlock>(block);
-        } else {
-          rankSets[block.rank].push(block);
-        }
+      }, block.getRankIndent());
+      if (!rankSets[block.rank]) {
+        rankSets[block.rank] = new Array<TurboshaftGraphBlock>(block);
+      } else {
+        rankSets[block.rank].push(block);
       }
     }
     return rankSets;
   }
 
-  private placeBlocks(rankSets: Array<Array<TurboshaftGraphBlock>>, showProperties: boolean): void {
+  private placeBlocks(rankSets: Array<Array<TurboshaftGraphBlock>>, showCustomData: boolean): void {
     // Iterate backwards from highest to lowest rank, placing blocks so that they
     // spread out from the "center" as much as possible while still being
     // compact and not overlapping live input lines.
     rankSets.reverse().forEach((rankSet: Array<TurboshaftGraphBlock>) => {
       for (const block of rankSet) {
-        this.layoutOccupation.clearOutputs(block, showProperties);
+        this.layoutOccupation.clearOutputs(block, showCustomData);
       }
 
       this.traceOccupation("After clearing outputs");
@@ -199,16 +163,12 @@ export class TurboshaftGraphLayout {
       let placedCount = 0;
       rankSet = rankSet.sort((a: TurboshaftGraphBlock, b: TurboshaftGraphBlock) => a.compare(b));
       for (const block of rankSet) {
-        if (block.visible) {
-          block.x = this.layoutOccupation.occupy(block);
-          const blockWidth = block.getWidth();
-          this.trace(`Block ${block.id} is placed between [${block.x}, ${block.x + blockWidth})`);
-          const staggeredFlooredI = Math.floor(placedCount++ % 3);
-          const delta = C.MINIMUM_EDGE_SEPARATION * staggeredFlooredI;
-          block.outputApproach += delta;
-        } else {
-          block.x = 0;
-        }
+        block.x = this.layoutOccupation.occupy(block);
+        const blockWidth = block.getWidth();
+        this.trace(`Block ${block.id} is placed between [${block.x}, ${block.x + blockWidth})`);
+        const staggeredFlooredI = Math.floor(placedCount++ % 3);
+        const delta = C.MINIMUM_EDGE_SEPARATION * staggeredFlooredI;
+        block.outputApproach += delta;
       }
 
       this.traceOccupation("Before clearing blocks");
@@ -218,7 +178,7 @@ export class TurboshaftGraphLayout {
       this.traceOccupation("After clearing blocks");
 
       for (const block of rankSet) {
-        this.layoutOccupation.occupyInputs(block, showProperties);
+        this.layoutOccupation.occupyInputs(block, showCustomData);
       }
 
       this.traceOccupation("After occupying inputs and determining bounding box");

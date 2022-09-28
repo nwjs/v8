@@ -9,6 +9,8 @@
 #include "src/base/logging.h"
 #include "src/base/platform/elapsed-timer.h"
 #include "src/base/platform/platform.h"
+#include "src/baseline/baseline-batch-compiler.h"
+#include "src/codegen/background-merge-task.h"
 #include "src/common/globals.h"
 #include "src/handles/maybe-handles.h"
 #include "src/handles/persistent-handles.h"
@@ -239,12 +241,10 @@ void CodeSerializer::SerializeObjectImpl(Handle<HeapObject> obj) {
   // bytecode array stored within the InterpreterData, which is the important
   // information. On deserialization we'll create our code objects again, if
   // --interpreted-frames-native-stack is on. See v8:9122 for more context
-#ifndef V8_TARGET_ARCH_ARM
   if (V8_UNLIKELY(FLAG_interpreted_frames_native_stack) &&
       obj->IsInterpreterData()) {
     obj = handle(InterpreterData::cast(*obj).bytecode_array(), isolate());
   }
-#endif  // V8_TARGET_ARCH_ARM
 
   // Past this point we should not see any (context-specific) maps anymore.
   CHECK(!InstanceTypeChecker::IsMap(instance_type));
@@ -269,7 +269,6 @@ void CodeSerializer::SerializeGeneric(Handle<HeapObject> heap_object) {
 
 namespace {
 
-#ifndef V8_TARGET_ARCH_ARM
 // NOTE(mmarchini): when FLAG_interpreted_frames_native_stack is on, we want to
 // create duplicates of InterpreterEntryTrampoline for the deserialized
 // functions, otherwise we'll call the builtin IET for those functions (which
@@ -289,8 +288,9 @@ void CreateInterpreterDataForDeserializedCode(Isolate* isolate,
     if (!is_compiled.is_compiled()) continue;
     DCHECK(shared_info.HasBytecodeArray());
     Handle<SharedFunctionInfo> info = handle(shared_info, isolate);
-    Handle<Code> code = isolate->factory()->CopyCode(Handle<Code>::cast(
-        isolate->factory()->interpreter_entry_trampoline_for_profiling()));
+
+    Handle<Code> code =
+        Builtins::CreateInterpreterEntryTrampolineForProfiling(isolate);
 
     Handle<InterpreterData> interpreter_data =
         Handle<InterpreterData>::cast(isolate->factory()->NewStruct(
@@ -315,7 +315,6 @@ void CreateInterpreterDataForDeserializedCode(Isolate* isolate,
                             info, name_handle, line_num, column_num));
   }
 }
-#endif  // V8_TARGET_ARCH_ARM
 
 class StressOffThreadDeserializeThread final : public base::Thread {
  public:
@@ -356,11 +355,10 @@ void FinalizeDeserialization(Isolate* isolate,
       isolate->is_profiling() ||
       isolate->logger()->is_listening_to_code_events();
 
-#ifndef V8_TARGET_ARCH_ARM
-  if (V8_UNLIKELY(FLAG_interpreted_frames_native_stack))
+  if (V8_UNLIKELY(FLAG_interpreted_frames_native_stack)) {
     CreateInterpreterDataForDeserializedCode(isolate, result,
                                              log_code_creation);
-#endif  // V8_TARGET_ARCH_ARM
+  }
 
   bool needs_source_positions = isolate->NeedsSourcePositionsForProfiling();
 
@@ -412,6 +410,21 @@ void FinalizeDeserialization(Isolate* isolate,
   }
 }
 
+void BaselineBatchCompileIfSparkplugCompiled(Isolate* isolate, Script script) {
+  // Here is main thread, we trigger early baseline compilation only in
+  // concurrent sparkplug and baseline batch compilation mode which consumes
+  // little main thread execution time.
+  if (FLAG_concurrent_sparkplug && FLAG_baseline_batch_compilation) {
+    SharedFunctionInfo::ScriptIterator iter(isolate, script);
+    for (SharedFunctionInfo info = iter.Next(); !info.is_null();
+         info = iter.Next()) {
+      if (info.sparkplug_compiled() && CanCompileWithBaseline(isolate, info)) {
+        isolate->baseline_batch_compiler()->EnqueueSFI(info);
+      }
+    }
+  }
+}
+
 }  // namespace
 
 MaybeHandle<SharedFunctionInfo> CodeSerializer::Deserialize(
@@ -454,7 +467,8 @@ MaybeHandle<SharedFunctionInfo> CodeSerializer::Deserialize(
     cached_data->Reject();
     return MaybeHandle<SharedFunctionInfo>();
   }
-
+  BaselineBatchCompileIfSparkplugCompiled(isolate,
+                                          Script::cast(result->script()));
   if (FLAG_profile_deserialization) {
     double ms = timer.Elapsed().InMillisecondsF();
     int length = cached_data->length();
@@ -464,6 +478,25 @@ MaybeHandle<SharedFunctionInfo> CodeSerializer::Deserialize(
   FinalizeDeserialization(isolate, result, timer);
 
   return scope.CloseAndEscape(result);
+}
+
+Handle<Script> CodeSerializer::OffThreadDeserializeData::GetOnlyScript(
+    LocalHeap* heap) {
+  std::unique_ptr<PersistentHandles> previous_persistent_handles =
+      heap->DetachPersistentHandles();
+  heap->AttachPersistentHandles(std::move(persistent_handles));
+
+  DCHECK_EQ(scripts.size(), 1);
+  // Make a non-persistent handle to return.
+  Handle<Script> script = handle(*scripts[0], heap);
+  DCHECK_EQ(*script, maybe_result.ToHandleChecked()->script());
+
+  persistent_handles = heap->DetachPersistentHandles();
+  if (previous_persistent_handles) {
+    heap->AttachPersistentHandles(std::move(previous_persistent_handles));
+  }
+
+  return script;
 }
 
 CodeSerializer::OffThreadDeserializeData
@@ -497,7 +530,8 @@ CodeSerializer::StartDeserializeOffThread(LocalIsolate* local_isolate,
 MaybeHandle<SharedFunctionInfo> CodeSerializer::FinishOffThreadDeserialize(
     Isolate* isolate, OffThreadDeserializeData&& data,
     AlignedCachedData* cached_data, Handle<String> source,
-    ScriptOriginOptions origin_options) {
+    ScriptOriginOptions origin_options,
+    BackgroundMergeTask* background_merge_task) {
   base::ElapsedTimer timer;
   if (FLAG_profile_deserialization || FLAG_log_function_events) timer.Start();
 
@@ -544,23 +578,33 @@ MaybeHandle<SharedFunctionInfo> CodeSerializer::FinishOffThreadDeserialize(
   DCHECK(data.persistent_handles->Contains(result.location()));
   result = handle(*result, isolate);
 
-  // Fix up the source on the script. This should be the only deserialized
-  // script, and the off-thread deserializer should have set its source to
-  // the empty string.
-  DCHECK_EQ(data.scripts.size(), 1);
-  DCHECK_EQ(result->script(), *data.scripts[0]);
-  DCHECK_EQ(Script::cast(result->script()).source(),
-            ReadOnlyRoots(isolate).empty_string());
-  Script::cast(result->script()).set_source(*source);
+  if (background_merge_task &&
+      background_merge_task->HasPendingForegroundWork()) {
+    Handle<Script> script = handle(Script::cast(result->script()), isolate);
+    result = background_merge_task->CompleteMergeInForeground(isolate, script);
+    DCHECK(Script::cast(result->script()).source().StrictEquals(*source));
+    DCHECK(isolate->factory()->script_list()->Contains(
+        MaybeObject::MakeWeak(MaybeObject::FromObject(result->script()))));
+  } else {
+    // Fix up the source on the script. This should be the only deserialized
+    // script, and the off-thread deserializer should have set its source to
+    // the empty string.
+    DCHECK_EQ(data.scripts.size(), 1);
+    DCHECK_EQ(result->script(), *data.scripts[0]);
+    DCHECK_EQ(Script::cast(result->script()).source(),
+              ReadOnlyRoots(isolate).empty_string());
+    Script::cast(result->script()).set_source(*source);
 
-  // Fix up the script list to include the newly deserialized script.
-  Handle<WeakArrayList> list = isolate->factory()->script_list();
-  for (Handle<Script> script : data.scripts) {
-    DCHECK(data.persistent_handles->Contains(script.location()));
-    list =
-        WeakArrayList::AddToEnd(isolate, list, MaybeObjectHandle::Weak(script));
+    // Fix up the script list to include the newly deserialized script.
+    Handle<WeakArrayList> list = isolate->factory()->script_list();
+    for (Handle<Script> script : data.scripts) {
+      BaselineBatchCompileIfSparkplugCompiled(isolate, *script);
+      DCHECK(data.persistent_handles->Contains(script.location()));
+      list = WeakArrayList::AddToEnd(isolate, list,
+                                     MaybeObjectHandle::Weak(script));
+    }
+    isolate->heap()->SetRootScriptList(*list);
   }
-  isolate->heap()->SetRootScriptList(*list);
 
   if (FLAG_profile_deserialization) {
     double ms = timer.Elapsed().InMillisecondsF();

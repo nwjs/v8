@@ -4522,6 +4522,8 @@ void Genesis::InitializeGlobal_harmony_change_array_by_copy() {
 
     SimpleInstallFunction(isolate_, array_prototype, "toReversed",
                           Builtin::kArrayPrototypeToReversed, 0, true);
+    SimpleInstallFunction(isolate_, array_prototype, "toSorted",
+                          Builtin::kArrayPrototypeToSorted, 1, false);
     SimpleInstallFunction(isolate_, array_prototype, "toSpliced",
                           Builtin::kArrayPrototypeToSpliced, 2, false);
     SimpleInstallFunction(isolate_, array_prototype, "with",
@@ -4533,6 +4535,7 @@ void Genesis::InitializeGlobal_harmony_change_array_by_copy() {
             .ToHandleChecked());
 
     InstallTrueValuedProperty(isolate_, unscopables, "toReversed");
+    InstallTrueValuedProperty(isolate_, unscopables, "toSorted");
     InstallTrueValuedProperty(isolate_, unscopables, "toSpliced");
   }
 
@@ -4541,8 +4544,6 @@ void Genesis::InitializeGlobal_harmony_change_array_by_copy() {
                                isolate());
     SimpleInstallFunction(isolate_, prototype, "toReversed",
                           Builtin::kTypedArrayPrototypeToReversed, 0, true);
-    SimpleInstallFunction(isolate_, prototype, "toSpliced",
-                          Builtin::kTypedArrayPrototypeToSpliced, 2, false);
     SimpleInstallFunction(isolate_, prototype, "with",
                           Builtin::kTypedArrayPrototypeWith, 2, true);
   }
@@ -4665,8 +4666,10 @@ void Genesis::InitializeGlobal_harmony_struct() {
                           DONT_ENUM);
   }
 
+  // TODO(v8:12547): Make a single canonical copy of the Mutex and Condition
+  // maps.
+
   {  // Atomics.Mutex
-    // TODO(syg): Make a single canonical copy of the map.
     Handle<String> mutex_str =
         isolate()->factory()->InternalizeUtf8String("Mutex");
     Handle<JSFunction> mutex_fun = CreateSharedObjectConstructor(
@@ -4684,6 +4687,27 @@ void Genesis::InitializeGlobal_harmony_struct() {
                           Builtin::kAtomicsMutexLock, 2, true);
     SimpleInstallFunction(isolate(), mutex_fun, "tryLock",
                           Builtin::kAtomicsMutexTryLock, 2, true);
+  }
+
+  {  // Atomics.Condition
+    Handle<String> condition_str =
+        isolate()->factory()->InternalizeUtf8String("Condition");
+    Handle<JSFunction> condition_fun = CreateSharedObjectConstructor(
+        isolate(), condition_str, JS_ATOMICS_CONDITION_TYPE,
+        JSAtomicsCondition::kHeaderSize, TERMINAL_FAST_ELEMENTS_KIND,
+        Builtin::kAtomicsConditionConstructor);
+    condition_fun->shared().set_internal_formal_parameter_count(
+        JSParameterCount(0));
+    condition_fun->shared().set_length(0);
+    native_context()->set_js_atomics_condition_map(
+        condition_fun->initial_map());
+    JSObject::AddProperty(isolate(), isolate()->atomics_object(), condition_str,
+                          condition_fun, DONT_ENUM);
+
+    SimpleInstallFunction(isolate(), condition_fun, "wait",
+                          Builtin::kAtomicsConditionWait, 2, false);
+    SimpleInstallFunction(isolate(), condition_fun, "notify",
+                          Builtin::kAtomicsConditionNotify, 2, false);
   }
 }
 
@@ -5478,19 +5502,9 @@ void Genesis::InitializeGlobal_harmony_temporal() {
 void Genesis::InitializeGlobal_harmony_intl_number_format_v3() {
   if (!FLAG_harmony_intl_number_format_v3) return;
 
-  Handle<JSObject> intl = Handle<JSObject>::cast(
-      JSReceiver::GetProperty(
-          isolate(),
-          Handle<JSReceiver>(native_context()->global_object(), isolate()),
-          factory()->InternalizeUtf8String("Intl"))
-          .ToHandleChecked());
-
   {
-    Handle<JSFunction> number_format_constructor = Handle<JSFunction>::cast(
-        JSReceiver::GetProperty(
-            isolate(), Handle<JSReceiver>(JSReceiver::cast(*intl), isolate()),
-            factory()->InternalizeUtf8String("NumberFormat"))
-            .ToHandleChecked());
+    Handle<JSFunction> number_format_constructor =
+        isolate()->intl_number_format_function();
 
     Handle<JSObject> prototype(
         JSObject::cast(number_format_constructor->prototype()), isolate());
@@ -5502,11 +5516,8 @@ void Genesis::InitializeGlobal_harmony_intl_number_format_v3() {
                           false);
   }
   {
-    Handle<JSFunction> plural_rules_constructor = Handle<JSFunction>::cast(
-        JSReceiver::GetProperty(
-            isolate(), Handle<JSReceiver>(JSReceiver::cast(*intl), isolate()),
-            factory()->InternalizeUtf8String("PluralRules"))
-            .ToHandleChecked());
+    Handle<JSFunction> plural_rules_constructor =
+        isolate()->intl_plural_rules_function();
 
     Handle<JSObject> prototype(
         JSObject::cast(plural_rules_constructor->prototype()), isolate());

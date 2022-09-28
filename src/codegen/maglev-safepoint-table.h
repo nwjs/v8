@@ -63,15 +63,16 @@ class MaglevSafepointTable {
   // The isolate and pc arguments are used for figuring out whether pc
   // belongs to the embedded or un-embedded code blob.
   explicit MaglevSafepointTable(Isolate* isolate, Address pc, Code code);
-
+#ifdef V8_EXTERNAL_CODE_SPACE
+  explicit MaglevSafepointTable(Isolate* isolate, Address pc,
+                                CodeDataContainer code);
+#endif
   MaglevSafepointTable(const MaglevSafepointTable&) = delete;
   MaglevSafepointTable& operator=(const MaglevSafepointTable&) = delete;
 
   int length() const { return length_; }
 
   int byte_size() const { return kHeaderSize + length_ * entry_size(); }
-
-  int find_return_pc(int pc_offset);
 
   MaglevSafepointEntry GetEntry(int index) const {
     DCHECK_GT(length_, index);
@@ -227,9 +228,6 @@ class MaglevSafepointTableBuilder : public SafepointTableBuilderBase {
                                int deopt_index);
 
  private:
-  // Remove consecutive identical entries.
-  void RemoveDuplicates();
-
   const uint32_t num_tagged_slots_;
   const uint32_t num_untagged_slots_;
   ZoneChunkList<EntryBuilder> entries_;

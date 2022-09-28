@@ -15,9 +15,11 @@
   'PlatformTest.StackAlignment': [PASS, ['not is_clang', SKIP]],
 
   # These tests are supposed to fail in a slow DCHECK, skip them otherwise.
+  'LocalHandlesTest.DereferenceLocalHandleFailsWhenDisallowed': [SKIP, ['mode == debug', FAIL]],
   'PersistentHandlesTest.DereferencePersistentHandleFailsWhenDisallowed': [SKIP, ['mode == debug', FAIL]],
 
   'IntlTest.StringLocaleCompareFastPath': [['mode != release', SKIP], SLOW, NO_VARIANTS],
+  'WeakSetsTest.WeakSet_Shrinking': [FAIL],
 }],  # ALWAYS
 
 ##############################################################################
@@ -66,6 +68,9 @@
 ['not has_webassembly or variant == jitless', {
   'ValueSerializerTestWithSharedArrayBufferClone.RoundTripWebAssemblyMemory': [SKIP],
   'ValueSerializerTestWithWasm.*': [SKIP],
+  'ApiWasmTest.WasmStreaming*': [SKIP],
+  'ApiWasmTest.WasmCompileToWasmModuleObject': [SKIP],
+  'ApiWasmTest.WasmStreamingCallback': [SKIP],
 }],  # not has_webassembly or variant == jitless
 
 ##############################################################################
@@ -108,6 +113,16 @@
   # Tests that need to run sequentially (e.g. due to memory consumption).
   'MachineOperatorReducerTest.Word32EqualWithShiftedMaskedValueAndConstant': [PASS, HEAVY],
   'SequentialUnmapperTest.UnmapOnTeardown': [PASS, HEAVY],
+
+  # https://crbug.com/v8/12997
+  # These skips should be removed after tsan errors in libsampler are fixed.
+  'LogMapsCodeTest.LogMapsDetailsCode': [SKIP],
+  'LogMapsTest.LogMapsDetailsStartup': [SKIP],
+  'LogMapsTest.LogMapsDetailsContexts': [SKIP],
+
+  # https://crbug.com/v8/13185
+  # Test sets a flag that's read in another thread by the GC.
+  'HeapTest.GrowAndShrinkNewSpace': [SKIP],
 }],  # tsan == True
 
 ##############################################################################
@@ -135,7 +150,7 @@
 }],
 
 ################################################################################
-['is_clang == False and arch == riscv64',{
+['is_clang == False and (arch == riscv64 or arch == riscv32)',{
   'LoggingTest.SourceLocation':[SKIP]  # issue-174
 }],
 
@@ -190,6 +205,8 @@
   'UnifiedHeapDetachedTest.AllocationBeforeConfigureHeap': [SKIP],
   'UnifiedHeapTest.FindingV8ToBlinkReference': [SKIP],
   'ManagedTest.GCCausesDestruction': [SKIP],
+  'WeakSetsTest.WeakSet_Weakness': [SKIP],
+  'WebSnapshotTest.SFIDeduplicationAfterBytecodeFlushing': [SKIP],
 
   # CodeRange tests
   'CodePagesTest.LargeCodeObjectWithSignalHandler': [SKIP],
@@ -207,6 +224,13 @@
   'FactoryCodeBuilderOOMTest.Factory_CodeBuilder_TryBuildOOM': [SKIP],
 }], # third_party_heap
 
+################################################################################
+['variant == always_sparkplug', {
+  # SFI deduplication tests check compilation state, which always_sparkplug
+  # can break.
+  'WebSnapshotTest.SFIDeduplication*': [SKIP],
+}],
+
 ##############################################################################
 ['byteorder == big', {
   # Peephole optimization not supported on big-endian machines.
@@ -217,6 +241,7 @@
 ['lite_mode or variant == jitless', {
 
   # Tests that generate code at runtime.
+  'MacroAssemblerX64Test.EmbeddedObj': [SKIP],
   'RegExpTest.MacroAssemblernativeAtStart': [SKIP],
   'RegExpTest.MacroAssemblerNativeBackReferenceLATIN1': [SKIP],
   'RegExpTest.MacroAssemblerNativeBackReferenceUC16': [SKIP],

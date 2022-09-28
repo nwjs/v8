@@ -5,7 +5,6 @@
 #include "src/wasm/wasm-engine.h"
 
 #include "src/base/functional.h"
-#include "src/base/platform/memory-protection-key.h"
 #include "src/base/platform/time.h"
 #include "src/common/globals.h"
 #include "src/debug/debug.h"
@@ -1021,7 +1020,7 @@ void WasmEngine::AddIsolate(Isolate* isolate) {
   // In that case, the current thread might still have the default permissions
   // for the memory protection key (== no access). Thus initialize the
   // permissions now.
-  GetWasmCodeManager()->InitializeMemoryProtectionKeyPermissionsIfSupported();
+  WasmCodeManager::InitializeMemoryProtectionKeyPermissionsIfSupported();
 
   // Install sampling GC callback.
   // TODO(v8:7424): For now we sample module sizes in a GC callback. This will
@@ -1182,7 +1181,7 @@ std::shared_ptr<NativeModule> WasmEngine::NewNativeModule(
     isolate_info->pku_support_sampled = true;
     auto* histogram =
         isolate->counters()->wasm_memory_protection_keys_support();
-    bool has_mpk = GetWasmCodeManager()->HasMemoryProtectionKeySupport();
+    bool has_mpk = WasmCodeManager::HasMemoryProtectionKeySupport();
     histogram->AddSample(has_mpk ? 1 : 0);
   }
 
@@ -1620,7 +1619,6 @@ GlobalWasmState* global_wasm_state = nullptr;
 
 // static
 void WasmEngine::InitializeOncePerProcess() {
-  base::MemoryProtectionKey::InitializeMemoryProtectionKeySupport();
   DCHECK_NULL(global_wasm_state);
   global_wasm_state = new GlobalWasmState();
 }
@@ -1645,12 +1643,21 @@ WasmCodeManager* GetWasmCodeManager() {
 }
 
 // {max_mem_pages} is declared in wasm-limits.h.
-uint32_t max_mem_pages() {
+uint32_t max_mem32_pages() {
   static_assert(
-      kV8MaxWasmMemoryPages * kWasmPageSize <= JSArrayBuffer::kMaxByteLength,
+      kV8MaxWasmMemory32Pages * kWasmPageSize <= JSArrayBuffer::kMaxByteLength,
       "Wasm memories must not be bigger than JSArrayBuffers");
-  static_assert(kV8MaxWasmMemoryPages <= kMaxUInt32);
-  return std::min(uint32_t{kV8MaxWasmMemoryPages},
+  static_assert(kV8MaxWasmMemory32Pages <= kMaxUInt32);
+  return std::min(uint32_t{kV8MaxWasmMemory32Pages},
+                  FLAG_wasm_max_mem_pages.value());
+}
+
+uint32_t max_mem64_pages() {
+  static_assert(
+      kV8MaxWasmMemory64Pages * kWasmPageSize <= JSArrayBuffer::kMaxByteLength,
+      "Wasm memories must not be bigger than JSArrayBuffers");
+  static_assert(kV8MaxWasmMemory64Pages <= kMaxUInt32);
+  return std::min(uint32_t{kV8MaxWasmMemory64Pages},
                   FLAG_wasm_max_mem_pages.value());
 }
 

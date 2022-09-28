@@ -150,7 +150,7 @@ void CompileJumpTableThunk(Address thunk, Address jump_target) {
   __ lw(scratch, MemOperand(scratch, 0));
   __ Branch(&exit, ne, scratch, Operand(zero_reg));
   __ Jump(jump_target, RelocInfo::NO_INFO);
-#elif V8_TARGET_ARCH_RISCV64
+#elif V8_TARGET_ARCH_RISCV64 || V8_TARGET_ARCH_RISCV32
   __ li(scratch, Operand(stop_bit_address, RelocInfo::NO_INFO));
   __ Lw(scratch, MemOperand(scratch, 0));
   __ Branch(&exit, ne, scratch, Operand(zero_reg));
@@ -254,7 +254,6 @@ TEST(JumpTablePatchingStress) {
 
   std::bitset<kAvailableBufferSlots> used_thunk_slots;
   buffer->MakeWritableAndExecutable();
-  RwxMemoryWriteScopeForTesting rwx_write_scope;
 
   // Iterate through jump-table slots to hammer at different alignments within
   // the jump-table, thereby increasing stress for variable-length ISAs.
@@ -265,6 +264,7 @@ TEST(JumpTablePatchingStress) {
     std::vector<std::unique_ptr<TestingAssemblerBuffer>> thunk_buffers;
     std::vector<Address> patcher_thunks;
     {
+      RwxMemoryWriteScopeForTesting rwx_write_scope;
       // Patch the jump table slot to jump to itself. This will later be patched
       // by the patchers.
       Address slot_addr =

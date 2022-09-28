@@ -1495,6 +1495,15 @@ void JSAtomicsMutex::JSAtomicsMutexPrint(std::ostream& os) {
   JSObjectPrintBody(os, *this);
 }
 
+void JSAtomicsCondition::JSAtomicsConditionPrint(std::ostream& os) {
+  JSObjectPrintHeader(os, *this, "JSAtomicsCondition");
+  Isolate* isolate = GetIsolateFromWritableObject(*this);
+  os << "\n - isolate: " << isolate;
+  if (isolate->is_shared()) os << " (shared)";
+  os << "\n - state: " << this->state();
+  JSObjectPrintBody(os, *this);
+}
+
 void JSWeakMap::JSWeakMapPrint(std::ostream& os) {
   JSObjectPrintHeader(os, *this, "JSWeakMap");
   os << "\n - table: " << Brief(table());
@@ -1747,12 +1756,17 @@ void Code::CodePrint(std::ostream& os) {
 
 void CodeDataContainer::CodeDataContainerPrint(std::ostream& os) {
   PrintHeader(os, "CodeDataContainer");
-  os << "\n - kind_specific_flags: " << kind_specific_flags(kRelaxedLoad);
-  if (V8_EXTERNAL_CODE_SPACE_BOOL) {
-    os << "\n - code: " << Brief(code());
-    os << "\n - code_entry_point: "
-       << reinterpret_cast<void*>(code_entry_point());
+#ifdef V8_EXTERNAL_CODE_SPACE
+  os << "\n - kind: " << CodeKindToString(kind());
+  if (is_builtin()) {
+    os << "\n - builtin: " << Builtins::name(builtin_id());
   }
+  os << "\n - is_off_heap_trampoline: " << is_off_heap_trampoline();
+  os << "\n - code: " << Brief(raw_code());
+  os << "\n - code_entry_point: "
+     << reinterpret_cast<void*>(code_entry_point());
+#endif  // V8_EXTERNAL_CODE_SPACE
+  os << "\n - kind_specific_flags: " << kind_specific_flags(kRelaxedLoad);
   os << "\n";
 }
 
@@ -1847,7 +1861,7 @@ void AsmWasmData::AsmWasmDataPrint(std::ostream& os) {
 
 void WasmTypeInfo::WasmTypeInfoPrint(std::ostream& os) {
   PrintHeader(os, "WasmTypeInfo");
-  os << "\n - type address: " << reinterpret_cast<void*>(foreign_address());
+  os << "\n - type address: " << reinterpret_cast<void*>(native_type());
   // TODO(manoskouk): Print supertype info.
   os << "\n - supertypes: ";
   for (int i = 0; i < supertypes_length(); i++) {
@@ -2013,6 +2027,8 @@ void WasmInstanceObject::WasmInstanceObjectPrint(std::ostream& os) {
   PRINT_WASM_INSTANCE_FIELD(indirect_function_table_size, +);
   PRINT_WASM_INSTANCE_FIELD(indirect_function_table_sig_ids, to_void_ptr);
   PRINT_WASM_INSTANCE_FIELD(indirect_function_table_targets, to_void_ptr);
+  PRINT_WASM_INSTANCE_FIELD(isorecursive_canonical_types,
+                            reinterpret_cast<const uint32_t*>);
   PRINT_WASM_INSTANCE_FIELD(jump_table_start, to_void_ptr);
   PRINT_WASM_INSTANCE_FIELD(data_segment_starts, to_void_ptr);
   PRINT_WASM_INSTANCE_FIELD(data_segment_sizes, to_void_ptr);
@@ -2031,6 +2047,7 @@ void WasmInstanceObject::WasmInstanceObjectPrint(std::ostream& os) {
 void WasmFunctionData::WasmFunctionDataPrint(std::ostream& os) {
   os << "\n - internal: " << Brief(internal());
   os << "\n - wrapper_code: " << Brief(TorqueGeneratedClass::wrapper_code());
+  os << "\n - js_promise_flags: " << js_promise_flags();
 }
 
 void WasmExportedFunctionData::WasmExportedFunctionDataPrint(std::ostream& os) {
@@ -2040,7 +2057,6 @@ void WasmExportedFunctionData::WasmExportedFunctionDataPrint(std::ostream& os) {
   os << "\n - function_index: " << function_index();
   os << "\n - signature: " << Brief(signature());
   os << "\n - wrapper_budget: " << wrapper_budget();
-  os << "\n - suspend: " << suspend();
   os << "\n";
 }
 
@@ -2070,7 +2086,8 @@ void WasmApiFunctionRef::WasmApiFunctionRefPrint(std::ostream& os) {
 
 void WasmInternalFunction::WasmInternalFunctionPrint(std::ostream& os) {
   PrintHeader(os, "WasmInternalFunction");
-  os << "\n - call target: " << reinterpret_cast<void*>(foreign_address());
+  Isolate* isolate = GetIsolateForSandbox(*this);
+  os << "\n - call target: " << reinterpret_cast<void*>(call_target(isolate));
   os << "\n - ref: " << Brief(ref());
   os << "\n - external: " << Brief(external());
   os << "\n - code: " << Brief(code());
@@ -2941,10 +2958,9 @@ V8_EXPORT_PRIVATE extern void _v8_internal_Print_Code(void* object) {
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-  if (!isolate->heap()->InSpaceSlow(address, i::CODE_SPACE) &&
-      !isolate->heap()->InSpaceSlow(address, i::CODE_LO_SPACE) &&
-      !i::OffHeapInstructionStream::PcIsOffHeap(isolate, address) &&
-      !i::ReadOnlyHeap::Contains(address)) {
+  i::CodeLookupResult lookup_result =
+      isolate->heap()->GcSafeFindCodeForInnerPointerForPrinting(address);
+  if (!lookup_result.IsFound()) {
     i::PrintF(
         "%p is not within the current isolate's code, read_only or embedded "
         "spaces\n",
@@ -2952,19 +2968,20 @@ V8_EXPORT_PRIVATE extern void _v8_internal_Print_Code(void* object) {
     return;
   }
 
-  i::CodeLookupResult lookup_result = isolate->FindCodeObject(address);
-  if (!lookup_result.IsFound()) {
-    i::PrintF("No code object found containing %p\n", object);
-    return;
-  }
-
-  i::Code code = lookup_result.ToCode();
-
 #ifdef ENABLE_DISASSEMBLER
   i::StdoutStream os;
-  code.Disassemble(nullptr, os, isolate, address);
+  if (lookup_result.IsCodeDataContainer()) {
+    i::CodeT code = i::CodeT::cast(lookup_result.code_data_container());
+    code.Disassemble(nullptr, os, isolate, address);
+  } else {
+    lookup_result.code().Disassemble(nullptr, os, isolate, address);
+  }
 #else   // ENABLE_DISASSEMBLER
-  code.Print();
+  if (lookup_result.IsCodeDataContainer()) {
+    lookup_result.code_data_container().Print();
+  } else {
+    lookup_result.code().Print();
+  }
 #endif  // ENABLE_DISASSEMBLER
 }
 

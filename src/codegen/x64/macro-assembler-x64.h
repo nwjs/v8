@@ -228,11 +228,11 @@ class V8_EXPORT_PRIVATE TurboAssembler
   Condition CheckSmi(Operand src);
 
   // Abort execution if argument is a smi, enabled via --debug-code.
-  void AssertNotSmi(Register object);
+  void AssertNotSmi(Register object) NOOP_UNLESS_DEBUG_CODE;
 
   // Abort execution if argument is not a smi, enabled via --debug-code.
-  void AssertSmi(Register object);
-  void AssertSmi(Operand object);
+  void AssertSmi(Register object) NOOP_UNLESS_DEBUG_CODE;
+  void AssertSmi(Operand object) NOOP_UNLESS_DEBUG_CODE;
 
   // Test-and-jump functions. Typically combines a check function
   // above with a conditional jump.
@@ -280,11 +280,15 @@ class V8_EXPORT_PRIVATE TurboAssembler
     j(less, dest);
   }
 
+  void Switch(Register scrach, Register reg, int case_base_value,
+              Label** labels, int num_labels);
+
 #ifdef V8_MAP_PACKING
   void UnpackMapWord(Register r);
 #endif
 
   void LoadMap(Register destination, Register object);
+  void LoadMap(TaggedRegister destination, Register object);
 
   void Move(Register dst, intptr_t x) {
     if (x == 0) {
@@ -355,9 +359,11 @@ class V8_EXPORT_PRIVATE TurboAssembler
 
   // Convert smi to word-size sign-extended value.
   void SmiUntag(Register reg);
+  void SmiUntagUnsigned(Register reg);
   // Requires dst != src
   void SmiUntag(Register dst, Register src);
   void SmiUntag(Register dst, Operand src);
+  void SmiUntagUnsigned(Register dst, Operand src);
 
   // Convert smi to 32-bit value.
   void SmiToInt32(Register reg);
@@ -454,15 +460,19 @@ class V8_EXPORT_PRIVATE TurboAssembler
 
   // Calls Abort(msg) if the condition cc is not satisfied.
   // Use --debug_code to enable.
-  void Assert(Condition cc, AbortReason reason);
+  void Assert(Condition cc, AbortReason reason) NOOP_UNLESS_DEBUG_CODE;
 
   // Like Assert(), but without condition.
   // Use --debug_code to enable.
-  void AssertUnreachable(AbortReason reason);
+  void AssertUnreachable(AbortReason reason) NOOP_UNLESS_DEBUG_CODE;
 
   // Abort execution if a 64 bit register containing a 32 bit payload does not
   // have zeros in the top 32 bits, enabled via --debug-code.
-  void AssertZeroExtended(Register reg);
+  void AssertZeroExtended(Register reg) NOOP_UNLESS_DEBUG_CODE;
+
+  // Abort execution if the signed bit of smi register with pointer compression
+  // is not zero, enabled via --debug-code.
+  void AssertSignedBitOfSmiIsZero(Register smi) NOOP_UNLESS_DEBUG_CODE;
 
   // Like Assert(), but always enabled.
   void Check(Condition cc, AbortReason reason);
@@ -548,8 +558,10 @@ class V8_EXPORT_PRIVATE TurboAssembler
   int PushAll(RegList registers);
   int PopAll(RegList registers);
 
-  int PushAll(DoubleRegList registers);
-  int PopAll(DoubleRegList registers);
+  int PushAll(DoubleRegList registers,
+              int stack_slot_size = kStackSavedSavedFPSize);
+  int PopAll(DoubleRegList registers,
+             int stack_slot_size = kStackSavedSavedFPSize);
 
   // Compute the start of the generated instruction stream from the current PC.
   // This is an alternative to embedding the {CodeObject} handle as a reference.
@@ -572,12 +584,21 @@ class V8_EXPORT_PRIVATE TurboAssembler
   // compression is enabled.
   void LoadTaggedPointerField(Register destination, Operand field_operand);
 
+  // Loads a field containing a HeapObject but does not decompress it when
+  // pointer compression is enabled.
+  void LoadTaggedPointerField(TaggedRegister destination,
+                              Operand field_operand);
+
   // Loads a field containing a Smi and decompresses it if pointer compression
   // is enabled.
   void LoadTaggedSignedField(Register destination, Operand field_operand);
 
   // Loads a field containing any tagged value and decompresses it if necessary.
   void LoadAnyTaggedField(Register destination, Operand field_operand);
+
+  // Loads a field containing any tagged value but does not decompress it when
+  // pointer compression is enabled.
+  void LoadAnyTaggedField(TaggedRegister destination, Operand field_operand);
 
   // Loads a field containing a HeapObject, decompresses it if necessary and
   // pushes full pointer to the stack. When pointer compression is enabled,
@@ -591,6 +612,7 @@ class V8_EXPORT_PRIVATE TurboAssembler
 
   // Loads a field containing smi value and untags it.
   void SmiUntagField(Register dst, Operand src);
+  void SmiUntagFieldUnsigned(Register dst, Operand src);
 
   // Compresses tagged value if necessary and stores it to given on-heap
   // location.
@@ -791,10 +813,13 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
   // Incoming register is heap_object and outgoing register is map.
   // They may be the same register, and may be kScratchRegister.
   void CmpObjectType(Register heap_object, InstanceType type, Register map);
+  void CmpObjectType(Register heap_object, InstanceType type,
+                     TaggedRegister map);
 
   // Compare instance type for map.
   // Always use unsigned comparisons: above and below, not less and greater.
   void CmpInstanceType(Register map, InstanceType type);
+  void CmpInstanceType(TaggedRegister map, InstanceType type);
 
   // Compare instance type ranges for a map (low and high inclusive)
   // Always use unsigned comparisons: below_equal for a positive result.
@@ -814,30 +839,44 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
   void TestCodeTIsMarkedForDeoptimization(Register codet, Register scratch);
   Immediate ClearedValue() const;
 
+  // Tiering support.
+  void AssertFeedbackVector(Register object) NOOP_UNLESS_DEBUG_CODE;
+  void ReplaceClosureCodeWithOptimizedCode(Register optimized_code,
+                                           Register closure, Register scratch1,
+                                           Register slot_address);
+  void GenerateTailCallToReturnedCode(Runtime::FunctionId function_id,
+                                      JumpMode jump_mode = JumpMode::kJump);
+  void LoadTieringStateAndJumpIfNeedsProcessing(
+      Register optimization_state, Register feedback_vector,
+      Label* has_optimized_code_or_state);
+  void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+      Register optimization_state, Register feedback_vector, Register closure,
+      JumpMode jump_mode = JumpMode::kJump);
+
   // Abort execution if argument is not a CodeT, enabled via --debug-code.
-  void AssertCodeT(Register object);
+  void AssertCodeT(Register object) NOOP_UNLESS_DEBUG_CODE;
 
   // Abort execution if argument is not a Constructor, enabled via --debug-code.
-  void AssertConstructor(Register object);
+  void AssertConstructor(Register object) NOOP_UNLESS_DEBUG_CODE;
 
   // Abort execution if argument is not a JSFunction, enabled via --debug-code.
-  void AssertFunction(Register object);
+  void AssertFunction(Register object) NOOP_UNLESS_DEBUG_CODE;
 
   // Abort execution if argument is not a callable JSFunction, enabled via
   // --debug-code.
-  void AssertCallableFunction(Register object);
+  void AssertCallableFunction(Register object) NOOP_UNLESS_DEBUG_CODE;
 
   // Abort execution if argument is not a JSBoundFunction,
   // enabled via --debug-code.
-  void AssertBoundFunction(Register object);
+  void AssertBoundFunction(Register object) NOOP_UNLESS_DEBUG_CODE;
 
   // Abort execution if argument is not a JSGeneratorObject (or subclass),
   // enabled via --debug-code.
-  void AssertGeneratorObject(Register object);
+  void AssertGeneratorObject(Register object) NOOP_UNLESS_DEBUG_CODE;
 
   // Abort execution if argument is not undefined or an AllocationSite, enabled
   // via --debug-code.
-  void AssertUndefinedOrAllocationSite(Register object);
+  void AssertUndefinedOrAllocationSite(Register object) NOOP_UNLESS_DEBUG_CODE;
 
   // ---------------------------------------------------------------------------
   // Exception handling
@@ -934,6 +973,17 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
 // Generate an Operand for loading a field from an object.
 inline Operand FieldOperand(Register object, int offset) {
   return Operand(object, offset - kHeapObjectTag);
+}
+
+// Generate an Operand for loading a field from an object. Object pointer is a
+// compressed pointer when pointer compression is enabled.
+inline Operand FieldOperand(TaggedRegister object, int offset) {
+  if (COMPRESS_POINTERS_BOOL) {
+    return Operand(kPtrComprCageBaseRegister, object.reg(),
+                   ScaleFactor::times_1, offset - kHeapObjectTag);
+  } else {
+    return Operand(object.reg(), offset - kHeapObjectTag);
+  }
 }
 
 // Generate an Operand for loading an indexed field from an object.

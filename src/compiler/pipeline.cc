@@ -84,6 +84,7 @@
 #include "src/compiler/turboshaft/graph.h"
 #include "src/compiler/turboshaft/optimization-phase.h"
 #include "src/compiler/turboshaft/recreate-schedule.h"
+#include "src/compiler/turboshaft/value-numbering-assembler.h"
 #include "src/compiler/type-narrowing-reducer.h"
 #include "src/compiler/typed-optimization.h"
 #include "src/compiler/typer.h"
@@ -1352,8 +1353,9 @@ struct GraphBuilderPhase {
         data->broker(), temp_zone, closure.shared(),
         closure.raw_feedback_cell(data->dependencies()),
         data->info()->osr_offset(), data->jsgraph(), frequency,
-        data->source_positions(), SourcePosition::kNotInlined,
-        data->info()->code_kind(), flags, &data->info()->tick_counter(),
+        data->source_positions(), data->node_origins(),
+        SourcePosition::kNotInlined, data->info()->code_kind(),
+        flags, &data->info()->tick_counter(),
         ObserveNodeInfo{data->observe_node_manager(),
                         data->info()->node_observer()});
   }
@@ -1401,7 +1403,8 @@ struct InliningPhase {
         data->dependencies(), temp_zone, info->zone());
     JSInliningHeuristic inlining(
         &graph_reducer, temp_zone, data->info(), data->jsgraph(),
-        data->broker(), data->source_positions(), JSInliningHeuristic::kJSOnly);
+        data->broker(), data->source_positions(), data->node_origins(),
+        JSInliningHeuristic::kJSOnly);
 
     JSIntrinsicLowering intrinsic_lowering(&graph_reducer, data->jsgraph(),
                                            data->broker());
@@ -1442,6 +1445,7 @@ struct JSWasmInliningPhase {
     JSInliningHeuristic inlining(&graph_reducer, temp_zone, data->info(),
                                  data->jsgraph(), data->broker(),
                                  data->source_positions(),
+                                 data->node_origins(),
                                  JSInliningHeuristic::kWasmOnly);
     AddReducer(data, &graph_reducer, &dead_code_elimination);
     AddReducer(data, &graph_reducer, &common_reducer);
@@ -2035,9 +2039,9 @@ struct BuildTurboshaftPhase {
     Schedule* schedule = data->schedule();
     data->reset_schedule();
     data->CreateTurboshaftGraph();
-    return turboshaft::BuildGraph(schedule, data->graph_zone(), temp_zone,
-                                  &data->turboshaft_graph(),
-                                  data->source_positions());
+    return turboshaft::BuildGraph(
+        schedule, data->graph_zone(), temp_zone, &data->turboshaft_graph(),
+        data->source_positions(), data->node_origins());
   }
 };
 
@@ -2045,9 +2049,10 @@ struct OptimizeTurboshaftPhase {
   DECL_PIPELINE_PHASE_CONSTANTS(OptimizeTurboshaft)
 
   void Run(PipelineData* data, Zone* temp_zone) {
-    turboshaft::OptimizationPhase<
-        turboshaft::LivenessAnalyzer,
-        turboshaft::Assembler>::Run(&data->turboshaft_graph(), temp_zone);
+    turboshaft::OptimizationPhase<turboshaft::LivenessAnalyzer,
+                                  turboshaft::ValueNumberingAssembler>::
+        Run(&data->turboshaft_graph(), temp_zone, data->node_origins(),
+            turboshaft::VisitOrder::kDominator);
   }
 };
 
@@ -2057,7 +2062,8 @@ struct TurboshaftRecreateSchedulePhase {
   void Run(PipelineData* data, Zone* temp_zone, Linkage* linkage) {
     auto result = turboshaft::RecreateSchedule(
         data->turboshaft_graph(), linkage->GetIncomingDescriptor(),
-        data->graph_zone(), temp_zone, data->source_positions());
+        data->graph_zone(), temp_zone, data->source_positions(),
+        data->node_origins());
     data->set_graph(result.graph);
     data->set_schedule(result.schedule);
   }
@@ -2591,10 +2597,22 @@ struct PrintTurboshaftGraphPhase {
       UnparkedScopeIfNeeded scope(data->broker());
       AllowHandleDereference allow_deref;
 
-      TurboJsonFile json_of(data->info(), std::ios_base::app);
-      json_of << "{\"name\":\"" << phase
-              << "\",\"type\":\"turboshaft_graph\",\"data\":"
-              << AsJSON(data->turboshaft_graph(), temp_zone) << "},\n";
+      {
+        TurboJsonFile json_of(data->info(), std::ios_base::app);
+        json_of << "{\"name\":\"" << phase
+                << "\",\"type\":\"turboshaft_graph\",\"data\":"
+                << AsJSON(data->turboshaft_graph(), data->node_origins(),
+                          temp_zone)
+                << "},\n";
+      }
+      PrintTurboshaftCustomDataPerOperation(
+          data->info(), "Properties", data->turboshaft_graph(),
+          [](std::ostream& stream, const turboshaft::Graph& graph,
+             turboshaft::OpIndex index) -> bool {
+            const auto& op = graph.Get(index);
+            op.PrintOptions(stream);
+            return true;
+          });
     }
 
     if (data->info()->trace_turbo_graph()) {
@@ -3114,7 +3132,11 @@ MaybeHandle<Code> Pipeline::GenerateCodeForCodeStub(
 
   if (profile_data != nullptr &&
       profile_data->hash() != graph_hash_before_scheduling) {
-    PrintF("Rejected profile data for %s due to function change\n", debug_name);
+    if (FLAG_warn_about_builtin_profile_data) {
+      PrintF("Rejected profile data for %s due to function change\n",
+             debug_name);
+      PrintF("Please use tools/builtins-pgo/generate.py to refresh it.\n");
+    }
     profile_data = nullptr;
     data.set_profile_data(profile_data);
   }
@@ -3326,6 +3348,11 @@ void Pipeline::GenerateCodeForWasmFunction(
       pipeline.Run<WasmGCOptimizationPhase>(module);
       pipeline.RunPrintAndVerify(WasmGCOptimizationPhase::phase_name(), true);
     }
+  }
+
+  // These proposals use gc nodes.
+  if (FLAG_experimental_wasm_gc || FLAG_experimental_wasm_typed_funcref ||
+      FLAG_experimental_wasm_stringref) {
     pipeline.Run<WasmGCLoweringPhase>();
     pipeline.RunPrintAndVerify(WasmGCLoweringPhase::phase_name(), true);
   }
@@ -3652,7 +3679,7 @@ bool PipelineImpl::SelectInstructions(Linkage* linkage) {
     } else {
       source_position_output << "{}";
     }
-    source_position_output << ",\n\"NodeOrigins\" : ";
+    source_position_output << ",\n\"nodeOrigins\" : ";
     data_->node_origins()->PrintJson(source_position_output);
     data_->set_source_position_output(source_position_output.str());
   }
@@ -3834,6 +3861,8 @@ MaybeHandle<Code> PipelineImpl::FinalizeCode(bool retire_broker) {
     json_of << "\"nodePositions\":";
     json_of << data->source_position_output() << ",\n";
     JsonPrintAllSourceWithPositions(json_of, data->info(), isolate());
+    json_of << ",\n";
+    JsonPrintAllBytecodeSources(json_of, data->info());
     json_of << "\n}";
   }
   if (info()->trace_turbo_json() || info()->trace_turbo_graph()) {

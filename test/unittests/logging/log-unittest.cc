@@ -551,8 +551,6 @@ TEST_F(LogAllTest, LogAll) {
   }
 }
 
-#ifndef V8_TARGET_ARCH_ARM
-
 class LogInterpretedFramesNativeStackTest : public LogTest {
  public:
   static void SetUpTestSuite() {
@@ -671,7 +669,6 @@ TEST_F(LogInterpretedFramesNativeStackWithSerializationTest,
   } while (!has_cache);
   delete cache;
 }
-#endif  // V8_TARGET_ARCH_ARM
 
 class LogExternalLogEventListenerTest : public TestWithIsolate {
  public:
@@ -1214,9 +1211,7 @@ TEST_F(LogTest, BuiltinsNotLoggedAsLazyCompile) {
     logger.StopLogging();
 
     i::Isolate* i_isolate = logger.i_isolate();
-    i::Handle<i::Code> builtin = FromCodeT(
-        i_isolate->builtins()->code_handle(i::Builtin::kBooleanConstructor),
-        i_isolate);
+    i::Handle<i::CodeT> builtin = BUILTIN_CODE(i_isolate, BooleanConstructor);
     v8::base::EmbeddedVector<char, 100> buffer;
 
     // Should only be logged as "Builtin" with a name, never as "Function".

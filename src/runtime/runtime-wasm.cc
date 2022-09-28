@@ -106,8 +106,10 @@ class V8_NODISCARD ClearThreadInWasmScope {
   Isolate* isolate_;
 };
 
-Object ThrowWasmError(Isolate* isolate, MessageTemplate message) {
-  Handle<JSObject> error_obj = isolate->factory()->NewWasmRuntimeError(message);
+Object ThrowWasmError(Isolate* isolate, MessageTemplate message,
+                      Handle<Object> arg0 = Handle<Object>()) {
+  Handle<JSObject> error_obj =
+      isolate->factory()->NewWasmRuntimeError(message, arg0);
   JSObject::AddProperty(isolate, error_obj,
                         isolate->factory()->wasm_uncatchable_symbol(),
                         isolate->factory()->true_value(), NONE);
@@ -219,35 +221,22 @@ RUNTIME_FUNCTION(Runtime_WasmStackGuard) {
 }
 
 RUNTIME_FUNCTION(Runtime_WasmCompileLazy) {
-  // The parameters of the called function we are going to compile have been
-  // spilled on the stack. Some of these parameters may be references. As we
-  // don't know which parameters are references, we have to make sure that no GC
-  // is triggered during the compilation of the function.
-  base::Optional<DisallowGarbageCollection> no_gc(base::in_place);
   ClearThreadInWasmScope wasm_flag(isolate);
   HandleScope scope(isolate);
-  DCHECK_EQ(2, args.length());
-  // TODO(jkummerow): This can be an unhandlified object once
-  // {wasm::CompileLazy()} no longer allocates even when speculative inlining
-  // is enabled.
+  DCHECK_EQ(3, args.length());
   Handle<WasmInstanceObject> instance(WasmInstanceObject::cast(args[0]),
                                       isolate);
   int func_index = args.smi_value_at(1);
-
-#ifdef DEBUG
-  FrameFinder<WasmCompileLazyFrame> frame_finder(isolate);
-  DCHECK_EQ(*instance, frame_finder.frame()->wasm_instance());
-#endif
+  wasm::NativeModule** native_module_stack_slot =
+      reinterpret_cast<wasm::NativeModule**>(args.address_of_arg_at(2));
+  *native_module_stack_slot = nullptr;
 
   DCHECK(isolate->context().is_null());
   isolate->set_context(instance->native_context());
-  bool success = wasm::CompileLazy(isolate, instance, func_index);
+  bool success = wasm::CompileLazy(isolate, instance, func_index,
+                                   native_module_stack_slot);
   if (!success) {
     {
-      // Compilation of function failed. We have to allocate the exception
-      // object. This allocation may trigger a GC, but that's okay, because the
-      // parameters on the stack will not be used anymore anyways.
-      no_gc.reset();
       wasm::ThrowLazyCompilationError(
           isolate, instance->module_object().native_module(), func_index);
     }
@@ -255,8 +244,7 @@ RUNTIME_FUNCTION(Runtime_WasmCompileLazy) {
     return ReadOnlyRoots{isolate}.exception();
   }
 
-  wasm::NativeModule* native_module = instance->module_object().native_module();
-  return Smi::FromInt(native_module->GetJumpTableOffset(func_index));
+  return Smi::FromInt(wasm::JumpTableOffset(instance->module(), func_index));
 }
 
 namespace {
@@ -384,7 +372,9 @@ RUNTIME_FUNCTION(Runtime_WasmI32AtomicWait) {
 
   // Trap if memory is not shared, or wait is not allowed on the isolate
   if (!array_buffer->is_shared() || !isolate->allow_atomics_wait()) {
-    return ThrowWasmError(isolate, MessageTemplate::kAtomicsWaitNotAllowed);
+    return ThrowWasmError(
+        isolate, MessageTemplate::kAtomicsOperationNotAllowed,
+        isolate->factory()->NewStringFromAsciiChecked("Atomics.wait"));
   }
   return FutexEmulation::WaitWasm32(isolate, array_buffer, offset,
                                     expected_value, timeout_ns.AsInt64());
@@ -407,7 +397,9 @@ RUNTIME_FUNCTION(Runtime_WasmI64AtomicWait) {
 
   // Trap if memory is not shared, or if wait is not allowed on the isolate
   if (!array_buffer->is_shared() || !isolate->allow_atomics_wait()) {
-    return ThrowWasmError(isolate, MessageTemplate::kAtomicsWaitNotAllowed);
+    return ThrowWasmError(
+        isolate, MessageTemplate::kAtomicsOperationNotAllowed,
+        isolate->factory()->NewStringFromAsciiChecked("Atomics.wait"));
   }
   return FutexEmulation::WaitWasm64(isolate, array_buffer, offset,
                                     expected_value.AsInt64(),
@@ -731,8 +723,8 @@ RUNTIME_FUNCTION(Runtime_WasmArrayNewSegment) {
   uint32_t length = args.positive_smi_value_at(3);
   Handle<Map> rtt(Map::cast(args[4]), isolate);
 
-  wasm::ArrayType* type = reinterpret_cast<wasm::ArrayType*>(
-      rtt->wasm_type_info().foreign_address());
+  wasm::ArrayType* type =
+      reinterpret_cast<wasm::ArrayType*>(rtt->wasm_type_info().native_type());
 
   uint32_t element_size = type->element_type().value_kind_size();
   // This check also implies no overflow.
@@ -797,21 +789,12 @@ void SyncStackLimit(Isolate* isolate) {
 }
 }  // namespace
 
-// Allocate a new continuation, and prepare for stack switching by updating the
+// Allocate a new suspender, and prepare for stack switching by updating the
 // active continuation, active suspender and stack limit.
-RUNTIME_FUNCTION(Runtime_WasmAllocateContinuation) {
+RUNTIME_FUNCTION(Runtime_WasmAllocateSuspender) {
   CHECK(FLAG_experimental_wasm_stack_switching);
   HandleScope scope(isolate);
-  if (!args[0].IsWasmSuspenderObject()) {
-    return ThrowWasmError(isolate, MessageTemplate::kWasmTrapJSTypeError);
-  }
-  Handle<WasmSuspenderObject> suspender =
-      handle(WasmSuspenderObject::cast(args[0]), isolate);
-
-  if (suspender->state() != WasmSuspenderObject::kInactive) {
-    return ThrowWasmError(isolate,
-                          MessageTemplate::kWasmTrapReentrantSuspender);
-  }
+  Handle<WasmSuspenderObject> suspender = WasmSuspenderObject::New(isolate);
 
   // Update the continuation state.
   auto parent = handle(WasmContinuationObject::cast(
@@ -833,7 +816,7 @@ RUNTIME_FUNCTION(Runtime_WasmAllocateContinuation) {
   active_suspender_slot.store(*suspender);
 
   SyncStackLimit(isolate);
-  return *target;
+  return *suspender;
 }
 
 // Update the stack limit after a stack switch, and preserve pending interrupts.

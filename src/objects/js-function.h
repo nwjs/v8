@@ -152,6 +152,8 @@ class JSFunction : public TorqueGeneratedJSFunction<
   // been already deoptimized but its code() still needs to be unlinked, which
   // will happen on its next activation.
 
+  bool HasAvailableHigherTierCodeThan(CodeKind kind) const;
+
   // True, iff any generated code kind is attached/available to this function.
   V8_EXPORT_PRIVATE bool HasAttachedOptimizedCode() const;
   bool HasAvailableOptimizedCode() const;
@@ -279,7 +281,7 @@ class JSFunction : public TorqueGeneratedJSFunction<
       Handle<JSReceiver> new_target);
 
   // Like GetDerivedMap, but returns a map with a RAB / GSAB ElementsKind.
-  static V8_WARN_UNUSED_RESULT Handle<Map> GetDerivedRabGsabMap(
+  static V8_WARN_UNUSED_RESULT MaybeHandle<Map> GetDerivedRabGsabMap(
       Isolate* isolate, Handle<JSFunction> constructor,
       Handle<JSReceiver> new_target);
 

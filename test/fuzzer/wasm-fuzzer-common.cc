@@ -174,6 +174,12 @@ void InterpretAndExecuteModule(i::Isolate* isolate,
                                {})  // no imports & memory
              .ToHandle(&instance)) {
       DCHECK(thrower.error());
+      // The only reason to fail the second instantiation should be OOM. Make
+      // this a proper OOM crash so that ClusterFuzz categorizes it as such.
+      if (strstr(thrower.error_msg(), "Out of memory")) {
+        V8::FatalProcessOutOfMemory(isolate, "Wasm fuzzer second instantiation",
+                                    thrower.error_msg());
+      }
       FATAL("Second instantiation failed unexpectedly: %s",
             thrower.error_msg());
     }
@@ -232,6 +238,14 @@ std::string HeapTypeToJSByteEncoding(HeapType heap_type) {
       return "kArrayRefCode";
     case HeapType::kAny:
       return "kAnyRefCode";
+    case HeapType::kExtern:
+      return "kExternRefCode";
+    case HeapType::kNone:
+      return "kNullRefCode";
+    case HeapType::kNoFunc:
+      return "kNullFuncRefCode";
+    case HeapType::kNoExtern:
+      return "kNullExternRefCode";
     case HeapType::kBottom:
       UNREACHABLE();
     default:
@@ -251,8 +265,16 @@ std::string HeapTypeToConstantName(HeapType heap_type) {
       return "kWasmDataRef";
     case HeapType::kArray:
       return "kWasmArrayRef";
+    case HeapType::kExtern:
+      return "kWasmExternRef";
     case HeapType::kAny:
       return "kWasmAnyRef";
+    case HeapType::kNone:
+      return "kWasmNullRef";
+    case HeapType::kNoFunc:
+      return "kWasmNullFuncRef";
+    case HeapType::kNoExtern:
+      return "kWasmNullExternRef";
     case HeapType::kBottom:
       UNREACHABLE();
     default:
@@ -282,6 +304,8 @@ std::string ValueTypeToConstantName(ValueType type) {
           return "kWasmFuncRef";
         case HeapType::kEq:
           return "kWasmEqRef";
+        case HeapType::kExtern:
+          return "kWasmExternRef";
         case HeapType::kAny:
           return "kWasmAnyRef";
         case HeapType::kBottom:
@@ -393,9 +417,9 @@ class InitExprInterface {
   }
 
   // The following operations assume non-rtt versions of the instructions.
-  void StructNewWithRtt(FullDecoder* decoder,
-                        const StructIndexImmediate<validate>& imm,
-                        const Value& rtt, const Value args[], Value* result) {
+  void StructNew(FullDecoder* decoder,
+                 const StructIndexImmediate<validate>& imm, const Value& rtt,
+                 const Value args[], Value* result) {
     os_ << "kGCPrefix, kExprStructNew, " << index(imm.index);
   }
 
@@ -405,10 +429,9 @@ class InitExprInterface {
     os_ << "kGCPrefix, kExprStructNewDefault, " << index(imm.index);
   }
 
-  void ArrayNewWithRtt(FullDecoder* decoder,
-                       const ArrayIndexImmediate<validate>& imm,
-                       const Value& length, const Value& initial_value,
-                       const Value& rtt, Value* result) {
+  void ArrayNew(FullDecoder* decoder, const ArrayIndexImmediate<validate>& imm,
+                const Value& length, const Value& initial_value,
+                const Value& rtt, Value* result) {
     os_ << "kGCPrefix, kExprArrayNew, " << index(imm.index);
   }
 
@@ -444,7 +467,7 @@ class InitExprInterface {
 
   void StringConst(FullDecoder* decoder,
                    const StringConstImmediate<validate>& imm, Value* result) {
-    os_ << "kGCPrefix, kExprStringConst, " << index(imm.index);
+    os_ << "...GCInstr(kExprStringConst), " << index(imm.index);
   }
 
   void DoReturn(FullDecoder* decoder, uint32_t /*drop_values*/) { os_ << "]"; }

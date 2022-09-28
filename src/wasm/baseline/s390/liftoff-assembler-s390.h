@@ -296,7 +296,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
                                           Register offset_reg,
                                           int32_t offset_imm,
                                           LiftoffRegister src,
-                                          LiftoffRegList pinned,
+                                          LiftoffRegList /* pinned */,
                                           SkipWriteBarrier skip_write_barrier) {
   MemOperand dst_op =
       MemOperand(dst_addr, offset_reg == no_reg ? r0 : offset_reg, offset_imm);
@@ -327,15 +327,18 @@ void LiftoffAssembler::Load(LiftoffRegister dst, Register src_addr,
                             LoadType type, uint32_t* protected_load_pc,
                             bool is_load_mem, bool i64_offset) {
   UseScratchRegisterScope temps(this);
+  if (offset_reg != no_reg && !i64_offset) {
+    // Clear the upper 32 bits of the 64 bit offset register.
+    llgfr(ip, offset_reg);
+    offset_reg = ip;
+  }
   if (!is_int20(offset_imm)) {
-    mov(ip, Operand(offset_imm));
     if (offset_reg != no_reg) {
-      if (!i64_offset) {
-        // Clear the upper 32 bits of the 64 bit offset register.
-        llgfr(r0, offset_reg);
-        offset_reg = r0;
-      }
-      AddS64(ip, offset_reg);
+      mov(r0, Operand(offset_imm));
+      AddS64(r0, offset_reg);
+      mov(ip, r0);
+    } else {
+      mov(ip, Operand(offset_imm));
     }
     offset_reg = ip;
     offset_imm = 0;
@@ -418,12 +421,21 @@ void LiftoffAssembler::Load(LiftoffRegister dst, Register src_addr,
 
 void LiftoffAssembler::Store(Register dst_addr, Register offset_reg,
                              uintptr_t offset_imm, LiftoffRegister src,
-                             StoreType type, LiftoffRegList pinned,
-                             uint32_t* protected_store_pc, bool is_store_mem) {
+                             StoreType type, LiftoffRegList /* pinned */,
+                             uint32_t* protected_store_pc, bool is_store_mem,
+                             bool i64_offset) {
+  if (offset_reg != no_reg && !i64_offset) {
+    // Clear the upper 32 bits of the 64 bit offset register.
+    llgfr(ip, offset_reg);
+    offset_reg = ip;
+  }
   if (!is_int20(offset_imm)) {
-    mov(ip, Operand(offset_imm));
     if (offset_reg != no_reg) {
-      AddS64(ip, offset_reg);
+      mov(r0, Operand(offset_imm));
+      AddS64(r0, offset_reg);
+      mov(ip, r0);
+    } else {
+      mov(ip, Operand(offset_imm));
     }
     offset_reg = ip;
     offset_imm = 0;
@@ -488,13 +500,14 @@ void LiftoffAssembler::Store(Register dst_addr, Register offset_reg,
 
 void LiftoffAssembler::AtomicLoad(LiftoffRegister dst, Register src_addr,
                                   Register offset_reg, uintptr_t offset_imm,
-                                  LoadType type, LiftoffRegList pinned) {
+                                  LoadType type, LiftoffRegList /* pinned */) {
   Load(dst, src_addr, offset_reg, offset_imm, type, nullptr, true);
 }
 
 void LiftoffAssembler::AtomicStore(Register dst_addr, Register offset_reg,
                                    uintptr_t offset_imm, LiftoffRegister src,
-                                   StoreType type, LiftoffRegList pinned) {
+                                   StoreType type,
+                                   LiftoffRegList /* pinned */) {
   if (!is_int20(offset_imm)) {
     mov(ip, Operand(offset_imm));
     if (offset_reg != no_reg) {

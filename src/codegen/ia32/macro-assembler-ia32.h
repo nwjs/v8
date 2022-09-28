@@ -107,11 +107,11 @@ class V8_EXPORT_PRIVATE TurboAssembler
 
   // Calls Abort(msg) if the condition cc is not satisfied.
   // Use --debug_code to enable.
-  void Assert(Condition cc, AbortReason reason);
+  void Assert(Condition cc, AbortReason reason) NOOP_UNLESS_DEBUG_CODE;
 
   // Like Assert(), but without condition.
   // Use --debug_code to enable.
-  void AssertUnreachable(AbortReason reason);
+  void AssertUnreachable(AbortReason reason) NOOP_UNLESS_DEBUG_CODE;
 
   // Like Assert(), but always enabled.
   void Check(Condition cc, AbortReason reason);
@@ -156,6 +156,7 @@ class V8_EXPORT_PRIVATE TurboAssembler
   void LoadEntryFromBuiltinIndex(Register builtin_index);
   void CallBuiltinByIndex(Register builtin_index);
   void CallBuiltin(Builtin builtin);
+  void TailCallBuiltin(Builtin builtin);
 
   void LoadCodeObjectEntry(Register destination, Register code_object);
   void CallCodeObject(Register code_object);
@@ -553,33 +554,48 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
   void TestCodeTIsMarkedForDeoptimization(Register codet, Register scratch);
   Immediate ClearedValue() const;
 
+  // Tiering support.
+  void AssertFeedbackVector(Register object,
+                            Register scratch) NOOP_UNLESS_DEBUG_CODE;
+  void ReplaceClosureCodeWithOptimizedCode(Register optimized_code,
+                                           Register closure, Register scratch1,
+                                           Register slot_address);
+  void GenerateTailCallToReturnedCode(Runtime::FunctionId function_id);
+  void LoadTieringStateAndJumpIfNeedsProcessing(
+      Register optimization_state, XMMRegister saved_feedback_vector,
+      Label* has_optimized_code_or_state);
+  void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+      Register optimization_state, XMMRegister saved_feedback_vector);
+
   // Abort execution if argument is not a smi, enabled via --debug-code.
-  void AssertSmi(Register object);
+  void AssertSmi(Register object) NOOP_UNLESS_DEBUG_CODE;
 
   // Abort execution if argument is a smi, enabled via --debug-code.
-  void AssertNotSmi(Register object);
+  void AssertNotSmi(Register object) NOOP_UNLESS_DEBUG_CODE;
 
   // Abort execution if argument is not a JSFunction, enabled via --debug-code.
-  void AssertFunction(Register object, Register scratch);
+  void AssertFunction(Register object, Register scratch) NOOP_UNLESS_DEBUG_CODE;
 
   // Abort execution if argument is not a callable JSFunction, enabled via
   // --debug-code.
-  void AssertCallableFunction(Register object, Register scratch);
+  void AssertCallableFunction(Register object,
+                              Register scratch) NOOP_UNLESS_DEBUG_CODE;
 
   // Abort execution if argument is not a Constructor, enabled via --debug-code.
-  void AssertConstructor(Register object);
+  void AssertConstructor(Register object) NOOP_UNLESS_DEBUG_CODE;
 
   // Abort execution if argument is not a JSBoundFunction,
   // enabled via --debug-code.
-  void AssertBoundFunction(Register object);
+  void AssertBoundFunction(Register object) NOOP_UNLESS_DEBUG_CODE;
 
   // Abort execution if argument is not a JSGeneratorObject (or subclass),
   // enabled via --debug-code.
-  void AssertGeneratorObject(Register object);
+  void AssertGeneratorObject(Register object) NOOP_UNLESS_DEBUG_CODE;
 
   // Abort execution if argument is not undefined or an AllocationSite, enabled
   // via --debug-code.
-  void AssertUndefinedOrAllocationSite(Register object, Register scratch);
+  void AssertUndefinedOrAllocationSite(Register object,
+                                       Register scratch) NOOP_UNLESS_DEBUG_CODE;
 
   // ---------------------------------------------------------------------------
   // Exception handling

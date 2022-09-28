@@ -33,6 +33,7 @@ class NoTracer {
   // Hooks for extracting byte offsets of things.
   void TypeOffset(uint32_t offset) {}
   void ImportOffset(uint32_t offset) {}
+  void ImportsDone() {}
   void TableOffset(uint32_t offset) {}
   void MemoryOffset(uint32_t offset) {}
   void TagOffset(uint32_t offset) {}
@@ -296,6 +297,10 @@ class WasmSectionIterator {
     }
   }
 };
+
+// Add an explicit template deduction guide for {WasmSectionIterator}.
+template <class T>
+WasmSectionIterator(Decoder*, T&) -> WasmSectionIterator<T>;
 
 // The main logic for decoding the bytes of a module.
 template <class Tracer>
@@ -593,9 +598,6 @@ class ModuleDecoderTemplate : public Decoder {
       case kWasmFunctionTypeCode:    return "func";
       case kWasmStructTypeCode:      return "struct";
       case kWasmArrayTypeCode:       return "array";
-      case kWasmFunctionNominalCode: return "function-nominal";
-      case kWasmStructNominalCode:   return "struct-nominal";
-      case kWasmArrayNominalCode:    return "array-nominal";
       default:                       return "unknown";
         // clang-format on
     }
@@ -618,13 +620,6 @@ class ModuleDecoderTemplate : public Decoder {
         const ArrayType* type = consume_array(module_->signature_zone.get());
         return {type, kNoSuperType};
       }
-      case kWasmFunctionNominalCode:
-      case kWasmArrayNominalCode:
-      case kWasmStructNominalCode:
-        tracer_.NextLine();
-        errorf(pc() - 1,
-               "mixing nominal and isorecursive types is not allowed");
-        return {};
       default:
         tracer_.NextLine();
         errorf(pc() - 1, "unknown type form: %d", kind);
@@ -639,67 +634,6 @@ class ModuleDecoderTemplate : public Decoder {
       return false;
     }
     return true;
-  }
-
-  TypeDefinition consume_nominal_type_definition() {
-    DCHECK(enabled_features_.has_gc());
-    size_t num_types = module_->types.size();
-    uint8_t kind = consume_u8(" kind: ", tracer_);
-    tracer_.Description(TypeKindName(kind));
-    switch (kind) {
-      case kWasmFunctionNominalCode: {
-        const FunctionSig* sig = consume_sig(module_->signature_zone.get());
-        uint32_t super_index = kNoSuperType;
-        HeapType super_type = consume_super_type();
-        if (super_type.is_index()) {
-          super_index = super_type.representation();
-        } else if (V8_UNLIKELY(super_type != HeapType::kFunc)) {
-          errorf(pc() - 1, "type %zu: invalid supertype %d", num_types,
-                 super_type.code());
-          return {};
-        }
-        return {sig, super_index};
-      }
-      case kWasmStructNominalCode: {
-        const StructType* type = consume_struct(module_->signature_zone.get());
-        uint32_t super_index = kNoSuperType;
-        HeapType super_type = consume_super_type();
-        if (super_type.is_index()) {
-          super_index = super_type.representation();
-        } else if (V8_UNLIKELY(super_type != HeapType::kData)) {
-          errorf(pc() - 1, "type %zu: invalid supertype %d", num_types,
-                 super_type.code());
-          return {};
-        }
-        return {type, super_index};
-      }
-      case kWasmArrayNominalCode: {
-        const ArrayType* type = consume_array(module_->signature_zone.get());
-        uint32_t super_index = kNoSuperType;
-        HeapType super_type = consume_super_type();
-        if (super_type.is_index()) {
-          super_index = super_type.representation();
-        } else if (V8_UNLIKELY(super_type != HeapType::kData)) {
-          errorf(pc() - 1, "type %zu: invalid supertype %d", num_types,
-                 super_type.code());
-          return {};
-        }
-        return {type, super_index};
-      }
-      case kWasmFunctionTypeCode:
-      case kWasmArrayTypeCode:
-      case kWasmStructTypeCode:
-      case kWasmSubtypeCode:
-      case kWasmRecursiveTypeGroupCode:
-        tracer_.NextLine();
-        errorf(pc() - 1,
-               "mixing nominal and isorecursive types is not allowed");
-        return {};
-      default:
-        tracer_.NextLine();
-        errorf(pc() - 1, "unknown type form: %d", kind);
-        return {};
-    }
   }
 
   TypeDefinition consume_subtype_definition() {
@@ -757,9 +691,6 @@ class ModuleDecoderTemplate : public Decoder {
           case kWasmStructTypeCode:
           case kWasmSubtypeCode:
           case kWasmRecursiveTypeGroupCode:
-          case kWasmFunctionNominalCode:
-          case kWasmStructNominalCode:
-          case kWasmArrayNominalCode:
             errorf(
                 "Unknown type code 0x%02x, enable with --experimental-wasm-gc",
                 opcode);
@@ -773,62 +704,37 @@ class ModuleDecoderTemplate : public Decoder {
       return;
     }
 
-    if (types_count > 0) {
-      uint8_t first_type_opcode = this->read_u8<Decoder::kFullValidation>(pc());
-      if (first_type_opcode == kWasmFunctionNominalCode ||
-          first_type_opcode == kWasmStructNominalCode ||
-          first_type_opcode == kWasmArrayNominalCode) {
-        // wasm-gc nominal type section decoding.
-        // In a nominal module, all types belong in the same recursive group. We
-        // use the type vector's capacity to mark the end of the current
-        // recursive group.
-        module_->types.reserve(types_count);
-        for (uint32_t i = 0; ok() && i < types_count; ++i) {
-          TRACE("DecodeType[%d] module+%d\n", i,
-                static_cast<int>(pc_ - start_));
+    for (uint32_t i = 0; ok() && i < types_count; ++i) {
+      TRACE("DecodeType[%d] module+%d\n", i, static_cast<int>(pc_ - start_));
+      uint8_t kind = read_u8<Decoder::kFullValidation>(pc(), "type kind");
+      if (kind == kWasmRecursiveTypeGroupCode) {
+        consume_bytes(1, "rec. group definition", tracer_);
+        tracer_.NextLine();
+        uint32_t group_size =
+            consume_count("recursive group size", kV8MaxWasmTypes);
+        if (module_->types.size() + group_size > kV8MaxWasmTypes) {
+          errorf(pc(), "Type definition count exceeds maximum %zu",
+                 kV8MaxWasmTypes);
+          return;
+        }
+        // Reserve space for the current recursive group, so we are
+        // allowed to reference its elements.
+        module_->types.reserve(module_->types.size() + group_size);
+        for (uint32_t j = 0; j < group_size; j++) {
           tracer_.TypeOffset(pc_offset());
-          TypeDefinition type = consume_nominal_type_definition();
+          TypeDefinition type = consume_subtype_definition();
           if (ok()) module_->add_type(type);
         }
         if (ok() && FLAG_wasm_type_canonicalization) {
-          type_canon->AddRecursiveGroup(module_.get(), types_count);
+          type_canon->AddRecursiveGroup(module_.get(), group_size);
         }
       } else {
-        // wasm-gc isorecursive type section decoding.
-        for (uint32_t i = 0; ok() && i < types_count; ++i) {
-          TRACE("DecodeType[%d] module+%d\n", i,
-                static_cast<int>(pc_ - start_));
-          uint8_t kind = read_u8<Decoder::kFullValidation>(pc(), "type kind");
-          if (kind == kWasmRecursiveTypeGroupCode) {
-            consume_bytes(1, "rec. group definition", tracer_);
-            tracer_.NextLine();
-            uint32_t group_size =
-                consume_count("recursive group size", kV8MaxWasmTypes);
-            if (module_->types.size() + group_size > kV8MaxWasmTypes) {
-              errorf(pc(), "Type definition count exceeds maximum %zu",
-                     kV8MaxWasmTypes);
-              return;
-            }
-            // Reserve space for the current recursive group, so we are
-            // allowed to reference its elements.
-            module_->types.reserve(module_->types.size() + group_size);
-            for (uint32_t j = 0; j < group_size; j++) {
-              tracer_.TypeOffset(pc_offset());
-              TypeDefinition type = consume_subtype_definition();
-              if (ok()) module_->add_type(type);
-            }
-            if (ok() && FLAG_wasm_type_canonicalization) {
-              type_canon->AddRecursiveGroup(module_.get(), group_size);
-            }
-          } else {
-            tracer_.TypeOffset(pc_offset());
-            TypeDefinition type = consume_subtype_definition();
-            if (ok()) {
-              module_->add_type(type);
-              if (FLAG_wasm_type_canonicalization) {
-                type_canon->AddRecursiveGroup(module_.get(), 1);
-              }
-            }
+        tracer_.TypeOffset(pc_offset());
+        TypeDefinition type = consume_subtype_definition();
+        if (ok()) {
+          module_->add_type(type);
+          if (FLAG_wasm_type_canonicalization) {
+            type_canon->AddRecursiveGroup(module_.get(), 1);
           }
         }
       }
@@ -842,14 +748,9 @@ class ModuleDecoderTemplate : public Decoder {
       // {consume_super_type} has checked this.
       DCHECK_LT(explicit_super, module_->types.size());
       int depth = GetSubtypingDepth(module, i);
+      DCHECK_GE(depth, 0);
       if (depth > static_cast<int>(kV8MaxRttSubtypingDepth)) {
         errorf("type %d: subtyping depth is greater than allowed", i);
-        continue;
-      }
-      // TODO(7748): Replace this with a DCHECK once we reject inheritance
-      // cycles for nominal modules.
-      if (depth == -1) {
-        errorf("type %d: cyclic inheritance", i);
         continue;
       }
       if (!ValidSubtypeDefinition(i, explicit_super, module, module)) {
@@ -908,7 +809,7 @@ class ModuleDecoderTemplate : public Decoder {
           WasmTable* table = &module_->tables.back();
           table->imported = true;
           const byte* type_position = pc();
-          ValueType type = consume_reference_type();
+          ValueType type = consume_value_type();
           if (!WasmTable::IsValidTableType(type, module_.get())) {
             errorf(type_position, "Invalid table type %s", type.name().c_str());
             break;
@@ -927,10 +828,12 @@ class ModuleDecoderTemplate : public Decoder {
           if (!AddMemory(module_.get())) break;
           uint8_t flags = validate_memory_flags(&module_->has_shared_memory,
                                                 &module_->is_memory64);
-          consume_resizable_limits(
-              "memory", "pages", kSpecMaxMemoryPages, &module_->initial_pages,
-              &module_->has_maximum_pages, kSpecMaxMemoryPages,
-              &module_->maximum_pages, flags);
+          uint32_t max_pages = module_->is_memory64 ? kSpecMaxMemory64Pages
+                                                    : kSpecMaxMemory32Pages;
+          consume_resizable_limits("memory", "pages", max_pages,
+                                   &module_->initial_pages,
+                                   &module_->has_maximum_pages, max_pages,
+                                   &module_->maximum_pages, flags);
           break;
         }
         case kExternalGlobal: {
@@ -964,6 +867,7 @@ class ModuleDecoderTemplate : public Decoder {
           break;
       }
     }
+    tracer_.ImportsDone();
   }
 
   void DecodeFunctionSection() {
@@ -1005,20 +909,37 @@ class ModuleDecoderTemplate : public Decoder {
       module_->tables.emplace_back();
       WasmTable* table = &module_->tables.back();
       const byte* type_position = pc();
-      ValueType table_type = consume_reference_type();
+
+      bool has_initializer = false;
+      if (enabled_features_.has_typed_funcref() &&
+          read_u8<Decoder::kFullValidation>(
+              pc(), "table-with-initializer byte") == 0x40) {
+        consume_bytes(1, "table-with-initializer byte");
+        has_initializer = true;
+      }
+
+      ValueType table_type = consume_value_type();
       if (!WasmTable::IsValidTableType(table_type, module_.get())) {
         error(type_position,
               "Currently, only externref and function references are allowed "
               "as table types");
         continue;
       }
+      if (!has_initializer && !table_type.is_defaultable()) {
+        errorf(type_position,
+               "Table of non-defaultable table %s needs initial value",
+               table_type.name().c_str());
+        continue;
+      }
       table->type = table_type;
+
       uint8_t flags = validate_table_flags("table elements");
       consume_resizable_limits(
           "table elements", "elements", std::numeric_limits<uint32_t>::max(),
           &table->initial_size, &table->has_maximum_size,
           std::numeric_limits<uint32_t>::max(), &table->maximum_size, flags);
-      if (!table_type.is_defaultable()) {
+
+      if (has_initializer) {
         table->initial_value = consume_init_expr(module_.get(), table_type);
       }
     }
@@ -1032,9 +953,11 @@ class ModuleDecoderTemplate : public Decoder {
       if (!AddMemory(module_.get())) break;
       uint8_t flags = validate_memory_flags(&module_->has_shared_memory,
                                             &module_->is_memory64);
-      consume_resizable_limits("memory", "pages", kSpecMaxMemoryPages,
+      uint32_t max_pages =
+          module_->is_memory64 ? kSpecMaxMemory64Pages : kSpecMaxMemory32Pages;
+      consume_resizable_limits("memory", "pages", max_pages,
                                &module_->initial_pages,
-                               &module_->has_maximum_pages, kSpecMaxMemoryPages,
+                               &module_->has_maximum_pages, max_pages,
                                &module_->maximum_pages, flags);
     }
   }
@@ -1218,8 +1141,9 @@ class ModuleDecoderTemplate : public Decoder {
     std::vector<std::pair<uint32_t, uint32_t>> inst_traces;
 
     for (uint32_t i = 0; ok() && i < functions_count; ++i) {
+      int function_index = module_->num_imported_functions + i;
       tracer_.Description("function #");
-      tracer_.FunctionName(module_->num_imported_functions + i);
+      tracer_.FunctionName(function_index);
       tracer_.NextLine();
       const byte* pos = pc();
       uint32_t size = consume_u32v("body size", tracer_);
@@ -1233,7 +1157,7 @@ class ModuleDecoderTemplate : public Decoder {
       uint32_t offset = pc_offset();
       consume_bytes(size, "function body");
       if (failed()) break;
-      DecodeFunctionBody(i, size, offset, verify_functions);
+      DecodeFunctionBody(function_index, size, offset, verify_functions);
 
       // Now that the function has been decoded, we can compute module offsets.
       for (; inst_traces_it != this->inst_traces_.end() &&
@@ -1278,8 +1202,7 @@ class ModuleDecoderTemplate : public Decoder {
 
   void DecodeFunctionBody(uint32_t index, uint32_t length, uint32_t offset,
                           bool verify_functions) {
-    WasmFunction* function =
-        &module_->functions[index + module_->num_imported_functions];
+    WasmFunction* function = &module_->functions[index];
     function->code = {offset, length};
     tracer_.FunctionBody(function, pc_ - (pc_offset() - offset));
     if (verify_functions) {
@@ -1755,7 +1678,7 @@ class ModuleDecoderTemplate : public Decoder {
       }
       // Shift the offset by the remaining section payload
       offset += section_iter.payload_length();
-      if (!section_iter.more()) break;
+      if (!section_iter.more() || !ok()) break;
       section_iter.advance(true);
     }
 
@@ -2077,8 +2000,8 @@ class ModuleDecoderTemplate : public Decoder {
     if (initial_64 > max_initial) {
       errorf(pos,
              "initial %s size (%" PRIu64
-             " %s) is larger than implementation limit (%u)",
-             name, initial_64, units, max_initial);
+             " %s) is larger than implementation limit (%u %s)",
+             name, initial_64, units, max_initial, units);
     }
     *initial = static_cast<uint32_t>(initial_64);
     tracer_.Description(*initial);
@@ -2091,8 +2014,8 @@ class ModuleDecoderTemplate : public Decoder {
       if (maximum_64 > max_maximum) {
         errorf(pos,
                "maximum %s size (%" PRIu64
-               " %s) is larger than implementation limit (%u)",
-               name, maximum_64, units, max_maximum);
+               " %s) is larger than implementation limit (%u %s)",
+               name, maximum_64, units, max_maximum, units);
       }
       if (maximum_64 < *initial) {
         errorf(pos,
@@ -2270,16 +2193,6 @@ class ModuleDecoderTemplate : public Decoder {
     }
   }
 
-  // Reads a reference type for tables and element segment headers.
-  ValueType consume_reference_type() {
-    const byte* position = pc();
-    ValueType result = consume_value_type();
-    if (!result.is_reference()) {
-      error(position, "expected reference type");
-    }
-    return result;
-  }
-
   const FunctionSig* consume_sig(Zone* zone) {
     tracer_.NextLine();
     // Parse parameter types.
@@ -2292,6 +2205,7 @@ class ModuleDecoderTemplate : public Decoder {
       tracer_.NextLineIfFull();
     }
     tracer_.NextLineIfNonEmpty();
+    if (failed()) return nullptr;
 
     // Parse return types.
     std::vector<ValueType> returns;
@@ -2397,7 +2311,7 @@ class ModuleDecoderTemplate : public Decoder {
       table_index = consume_u32v(", table index", tracer_);
       tracer_.Description(table_index);
     }
-    if (is_active && table_index >= module_->tables.size()) {
+    if (V8_UNLIKELY(is_active && table_index >= module_->tables.size())) {
       errorf(pos, "out of bounds%s table index %u",
              has_table_index ? " implicit" : "", table_index);
       return {};
@@ -2419,10 +2333,15 @@ class ModuleDecoderTemplate : public Decoder {
         is_active && !(flag & kHasTableIndexOrIsDeclarativeMask);
     ValueType type;
     if (element_type == WasmElemSegment::kExpressionElements) {
-      if (!backwards_compatible_mode) tracer_.Description(" element type:");
-      type =
-          backwards_compatible_mode ? kWasmFuncRef : consume_reference_type();
-      if (is_active && !IsSubtypeOf(type, table_type, this->module_.get())) {
+      if (backwards_compatible_mode) {
+        type = kWasmFuncRef;
+      } else {
+        tracer_.Description(" element type:");
+        type = consume_value_type();
+        if (type == kWasmBottom) return {};
+      }
+      if (V8_UNLIKELY(is_active &&
+                      !IsSubtypeOf(type, table_type, this->module_.get()))) {
         errorf(pos,
                "Element segment of type %s is not a subtype of referenced "
                "table %u (of type %s)",
@@ -2434,7 +2353,8 @@ class ModuleDecoderTemplate : public Decoder {
         // We have to check that there is an element kind of type Function. All
         // other element kinds are not valid yet.
         uint8_t val = consume_u8(" element type: function", tracer_);
-        if (static_cast<ImportExportKindCode>(val) != kExternalFunction) {
+        if (V8_UNLIKELY(static_cast<ImportExportKindCode>(val) !=
+                        kExternalFunction)) {
           errorf(pos, "illegal element kind 0x%x. Must be 0x%x", val,
                  kExternalFunction);
           return {};
@@ -2447,7 +2367,8 @@ class ModuleDecoderTemplate : public Decoder {
         type = table_type;
         // Active segments with function indices must reference a function
         // table. TODO(7748): Add support for anyref tables when we have them.
-        if (!IsSubtypeOf(table_type, kWasmFuncRef, this->module_.get())) {
+        if (V8_UNLIKELY(
+                !IsSubtypeOf(table_type, kWasmFuncRef, this->module_.get()))) {
           errorf(pos,
                  "An active element segment with function indices as elements "
                  "must reference a table of %s. Instead, table %u of type %s "

@@ -324,6 +324,7 @@ VisitorId Map::GetVisitorId(Map map) {
 #endif  // V8_ENABLE_WEBASSEMBLY
     case JS_BOUND_FUNCTION_TYPE:
     case JS_WRAPPED_FUNCTION_TYPE: {
+      // Is GetEmbedderFieldCount(map) > 0 for Atomics.Mutex?
       const bool has_raw_data_fields =
           COMPRESS_POINTERS_BOOL && JSObject::GetEmbedderFieldCount(map) > 0;
       return has_raw_data_fields ? kVisitJSObject : kVisitJSObjectFast;
@@ -337,14 +338,15 @@ VisitorId Map::GetVisitorId(Map map) {
     case JS_WEAK_REF_TYPE:
       return kVisitJSWeakRef;
 
-    case JS_ATOMICS_MUTEX_TYPE:
-      return kVisitJSAtomicsMutex;
-
     case WEAK_CELL_TYPE:
       return kVisitWeakCell;
 
     case JS_FINALIZATION_REGISTRY_TYPE:
       return kVisitJSFinalizationRegistry;
+
+    case JS_ATOMICS_MUTEX_TYPE:
+    case JS_ATOMICS_CONDITION_TYPE:
+      return kVisitJSSynchronizationPrimitive;
 
     case FILLER_TYPE:
     case FOREIGN_TYPE:
@@ -389,6 +391,8 @@ VisitorId Map::GetVisitorId(Map map) {
       return kVisitWasmArray;
     case WASM_STRUCT_TYPE:
       return kVisitWasmStruct;
+    case WASM_CONTINUATION_OBJECT_TYPE:
+      return kVisitWasmContinuationObject;
     case WASM_TYPE_INFO_TYPE:
       return kVisitWasmTypeInfo;
     case WASM_INTERNAL_FUNCTION_TYPE:
@@ -1182,13 +1186,15 @@ Handle<Map> Map::RawCopy(Isolate* isolate, Handle<Map> src_handle,
 
 Handle<Map> Map::Normalize(Isolate* isolate, Handle<Map> fast_map,
                            ElementsKind new_elements_kind,
-                           PropertyNormalizationMode mode, const char* reason) {
+                           PropertyNormalizationMode mode, bool use_cache,
+                           const char* reason) {
   DCHECK(!fast_map->is_dictionary_map());
 
   Handle<Object> maybe_cache(isolate->native_context()->normalized_map_cache(),
                              isolate);
-  bool use_cache =
-      !fast_map->is_prototype_map() && !maybe_cache->IsUndefined(isolate);
+  if (fast_map->is_prototype_map() || maybe_cache->IsUndefined(isolate)) {
+    use_cache = false;
+  }
   Handle<NormalizedMapCache> cache;
   if (use_cache) cache = Handle<NormalizedMapCache>::cast(maybe_cache);
 

@@ -101,7 +101,20 @@
 
    # SIMD is not fully implemented yet.
    'simd*': [SKIP],
-}],  # 'arch == riscv64
+}],  # 'arch == riscv64'
+
+
+
+['arch == riscv32', {
+   # These tests need larger stack size on simulator.
+   'skip-stack-guard-page': '--sim-stack-size=8192',
+   'proposals/tail-call/skip-stack-guard-page': '--sim-stack-size=8192',
+
+   # SIMD is not fully implemented yet.
+   'simd*': [SKIP],
+
+   'func': ['variant == stress', SKIP],
+}],  # 'arch == riscv32'
 
 ['arch == ppc or arch == ppc64', {
   # These tests fail because ppc float min and max doesn't convert sNaN to qNaN.
@@ -156,7 +169,8 @@
 ##############################################################################
 # Skip tests that require a large amount of virtual address space (inside the
 # sandbox if that is enabled) if tsan is enabled.
-['tsan == True', {
+['tsan == True or variant == stress', {
+  # https://crbug.com/v8/13195
   'memory_copy': [SKIP],
 }],
 

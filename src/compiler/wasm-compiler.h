@@ -474,17 +474,17 @@ class WasmGraphBuilder {
   Node* TableSize(uint32_t table_index);
   void TableFill(uint32_t table_index, Node* start, Node* value, Node* count);
 
-  Node* StructNewWithRtt(uint32_t struct_index, const wasm::StructType* type,
-                         Node* rtt, base::Vector<Node*> fields);
+  Node* StructNew(uint32_t struct_index, const wasm::StructType* type,
+                  Node* rtt, base::Vector<Node*> fields);
   Node* StructGet(Node* struct_object, const wasm::StructType* struct_type,
                   uint32_t field_index, CheckForNull null_check, bool is_signed,
                   wasm::WasmCodePosition position);
   void StructSet(Node* struct_object, const wasm::StructType* struct_type,
                  uint32_t field_index, Node* value, CheckForNull null_check,
                  wasm::WasmCodePosition position);
-  Node* ArrayNewWithRtt(uint32_t array_index, const wasm::ArrayType* type,
-                        Node* length, Node* initial_value, Node* rtt,
-                        wasm::WasmCodePosition position);
+  Node* ArrayNew(uint32_t array_index, const wasm::ArrayType* type,
+                 Node* length, Node* initial_value, Node* rtt,
+                 wasm::WasmCodePosition position);
   Node* ArrayGet(Node* array_object, const wasm::ArrayType* type, Node* index,
                  CheckForNull null_check, bool is_signed,
                  wasm::WasmCodePosition position);
@@ -502,8 +502,10 @@ class WasmGraphBuilder {
                         Node* offset, Node* length, Node* rtt,
                         wasm::WasmCodePosition position);
   Node* I31New(Node* input);
-  Node* I31GetS(Node* input);
-  Node* I31GetU(Node* input);
+  Node* I31GetS(Node* input, CheckForNull null_check,
+                wasm::WasmCodePosition position);
+  Node* I31GetU(Node* input, CheckForNull null_check,
+                wasm::WasmCodePosition position);
   Node* RttCanon(uint32_t type_index);
 
   Node* RefTest(Node* object, Node* rtt, WasmTypeCheckConfig config);
@@ -516,12 +518,6 @@ class WasmGraphBuilder {
   Node* RefAsData(Node* object, bool object_can_be_null,
                   wasm::WasmCodePosition position);
   void BrOnData(Node* object, Node* rtt, WasmTypeCheckConfig config,
-                Node** match_control, Node** match_effect,
-                Node** no_match_control, Node** no_match_effect);
-  Node* RefIsFunc(Node* object, bool object_can_be_null);
-  Node* RefAsFunc(Node* object, bool object_can_be_null,
-                  wasm::WasmCodePosition position);
-  void BrOnFunc(Node* object, Node* rtt, WasmTypeCheckConfig config,
                 Node** match_control, Node** match_effect,
                 Node** no_match_control, Node** no_match_effect);
   Node* RefIsArray(Node* object, bool object_can_be_null);

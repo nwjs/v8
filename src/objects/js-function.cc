@@ -4,6 +4,7 @@
 
 #include "src/objects/js-function.h"
 
+#include "src/baseline/baseline-batch-compiler.h"
 #include "src/codegen/compiler.h"
 #include "src/diagnostics/code-tracer.h"
 #include "src/execution/isolate.h"
@@ -62,6 +63,14 @@ CodeKinds JSFunction::GetAvailableCodeKinds() const {
 bool JSFunction::HasAttachedOptimizedCode() const {
   CodeKinds result = GetAttachedCodeKinds();
   return (result & kOptimizedJSFunctionCodeKindsMask) != 0;
+}
+
+bool JSFunction::HasAvailableHigherTierCodeThan(CodeKind kind) const {
+  const int kind_as_int_flag = static_cast<int>(CodeKindToCodeKindFlag(kind));
+  DCHECK(base::bits::IsPowerOfTwo(kind_as_int_flag));
+  // Smear right - any higher present bit means we have a higher tier available.
+  const int mask = kind_as_int_flag | (kind_as_int_flag - 1);
+  return (GetAvailableCodeKinds() & static_cast<CodeKinds>(~mask)) != 0;
 }
 
 bool JSFunction::HasAvailableOptimizedCode() const {
@@ -607,13 +616,27 @@ void JSFunction::InitializeFeedbackCell(
       // We also need a feedback vector for certain log events, collecting type
       // profile and more precise code coverage.
       FLAG_log_function_events || !isolate->is_best_effort_code_coverage() ||
-      isolate->is_collecting_type_profile();
+      isolate->is_collecting_type_profile() ||
+      function->shared().sparkplug_compiled();
 
   if (needs_feedback_vector) {
     CreateAndAttachFeedbackVector(isolate, function, is_compiled_scope);
   } else {
     EnsureClosureFeedbackCellArray(function,
                                    reset_budget_for_feedback_allocation);
+  }
+  // TODO(jgruber): Unduplicate these conditions from tiering-manager.cc.
+  if (function->shared().sparkplug_compiled() &&
+      CanCompileWithBaseline(isolate, function->shared()) &&
+      function->ActiveTierIsIgnition()) {
+    if (FLAG_baseline_batch_compilation) {
+      isolate->baseline_batch_compiler()->EnqueueFunction(function);
+    } else {
+      IsCompiledScope is_compiled_scope(
+          function->shared().is_compiled_scope(isolate));
+      Compiler::CompileBaseline(isolate, function, Compiler::CLEAR_EXCEPTION,
+                                &is_compiled_scope);
+    }
   }
 }
 
@@ -1067,11 +1090,14 @@ int TypedArrayElementsKindToRabGsabCtorIndex(ElementsKind elements_kind) {
 
 }  // namespace
 
-Handle<Map> JSFunction::GetDerivedRabGsabMap(Isolate* isolate,
-                                             Handle<JSFunction> constructor,
-                                             Handle<JSReceiver> new_target) {
-  Handle<Map> map =
-      GetDerivedMap(isolate, constructor, new_target).ToHandleChecked();
+MaybeHandle<Map> JSFunction::GetDerivedRabGsabMap(
+    Isolate* isolate, Handle<JSFunction> constructor,
+    Handle<JSReceiver> new_target) {
+  MaybeHandle<Map> maybe_map = GetDerivedMap(isolate, constructor, new_target);
+  Handle<Map> map;
+  if (!maybe_map.ToHandle(&map)) {
+    return MaybeHandle<Map>();
+  }
   {
     DisallowHeapAllocation no_alloc;
     NativeContext context = isolate->context().native_context();

@@ -668,7 +668,8 @@ class JSWeakCollection::BodyDescriptorImpl final : public BodyDescriptorBase {
   }
 };
 
-class JSAtomicsMutex::BodyDescriptor final : public BodyDescriptorBase {
+class JSSynchronizationPrimitive::BodyDescriptor final
+    : public BodyDescriptorBase {
  public:
   static bool IsValidSlot(Map map, HeapObject obj, int offset) {
     if (offset < kEndOfTaggedFieldsOffset) return true;
@@ -680,7 +681,6 @@ class JSAtomicsMutex::BodyDescriptor final : public BodyDescriptorBase {
   static inline void IterateBody(Map map, HeapObject obj, int object_size,
                                  ObjectVisitor* v) {
     IteratePointers(obj, kPropertiesOrHashOffset, kEndOfTaggedFieldsOffset, v);
-    IterateJSObjectBodyImpl(map, obj, kHeaderSize, object_size, v);
   }
 
   static inline int SizeOf(Map map, HeapObject object) {
@@ -713,10 +713,11 @@ class WasmTypeInfo::BodyDescriptor final : public BodyDescriptorBase {
   template <typename ObjectVisitor>
   static inline void IterateBody(Map map, HeapObject obj, int object_size,
                                  ObjectVisitor* v) {
-    Foreign::BodyDescriptor::IterateBody<ObjectVisitor>(map, obj, object_size,
-                                                        v);
     IteratePointer(obj, kInstanceOffset, v);
     IteratePointers(obj, kSupertypesOffset, SizeOf(map, obj), v);
+
+    v->VisitExternalPointer(obj, obj.RawExternalPointerField(kNativeTypeOffset),
+                            kWasmTypeInfoNativeTypeTag);
   }
 
   static inline int SizeOf(Map map, HeapObject object) {
@@ -750,8 +751,8 @@ class WasmInternalFunction::BodyDescriptor final : public BodyDescriptorBase {
   template <typename ObjectVisitor>
   static inline void IterateBody(Map map, HeapObject obj, int object_size,
                                  ObjectVisitor* v) {
-    Foreign::BodyDescriptor::IterateBody<ObjectVisitor>(map, obj, object_size,
-                                                        v);
+    v->VisitExternalPointer(obj, obj.RawExternalPointerField(kCallTargetOffset),
+                            kWasmInternalFunctionCallTargetTag);
     IteratePointers(obj, kStartOfStrongFieldsOffset, kEndOfStrongFieldsOffset,
                     v);
   }
@@ -809,6 +810,24 @@ class WasmArray::BodyDescriptor final : public BodyDescriptorBase {
   static inline int SizeOf(Map map, HeapObject object) {
     return WasmArray::SizeFor(map, WasmArray::cast(object).length());
   }
+};
+
+class WasmContinuationObject::BodyDescriptor final : public BodyDescriptorBase {
+ public:
+  static bool IsValidSlot(Map map, HeapObject obj, int offset) {
+    UNREACHABLE();
+  }
+
+  template <typename ObjectVisitor>
+  static inline void IterateBody(Map map, HeapObject obj, int object_size,
+                                 ObjectVisitor* v) {
+    IteratePointers(obj, kStartOfStrongFieldsOffset, kEndOfStrongFieldsOffset,
+                    v);
+    v->VisitExternalPointer(obj, obj.RawExternalPointerField(kJmpbufOffset),
+                            kWasmContinuationJmpbufTag);
+  }
+
+  static inline int SizeOf(Map map, HeapObject object) { return kSize; }
 };
 
 class WasmStruct::BodyDescriptor final : public BodyDescriptorBase {
@@ -1174,6 +1193,8 @@ auto BodyDescriptorApply(InstanceType type, Args&&... args) {
       return CALL_APPLY(WasmJSFunctionData);
     case WASM_RESUME_DATA_TYPE:
       return CALL_APPLY(WasmResumeData);
+    case WASM_CONTINUATION_OBJECT_TYPE:
+      return CALL_APPLY(WasmContinuationObject);
     case WASM_STRUCT_TYPE:
       return CALL_APPLY(WasmStruct);
     case WASM_TYPE_INFO_TYPE:
@@ -1289,7 +1310,8 @@ auto BodyDescriptorApply(InstanceType type, Args&&... args) {
     case JS_PROXY_TYPE:
       return CALL_APPLY(JSProxy);
     case JS_ATOMICS_MUTEX_TYPE:
-      return CALL_APPLY(JSAtomicsMutex);
+    case JS_ATOMICS_CONDITION_TYPE:
+      return CALL_APPLY(JSSynchronizationPrimitive);
     case FOREIGN_TYPE:
       return CALL_APPLY(Foreign);
     case MAP_TYPE:

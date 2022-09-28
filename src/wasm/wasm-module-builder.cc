@@ -88,16 +88,20 @@ void WasmFunctionBuilder::EmitCode(const byte* code, uint32_t code_size) {
   body_.write(code, code_size);
 }
 
-void WasmFunctionBuilder::Emit(WasmOpcode opcode) { body_.write_u8(opcode); }
+void WasmFunctionBuilder::Emit(WasmOpcode opcode) {
+  DCHECK_LE(opcode, 0xFF);
+  body_.write_u8(opcode);
+}
 
 void WasmFunctionBuilder::EmitWithPrefix(WasmOpcode opcode) {
-  DCHECK_NE(0, opcode & 0xff00);
-  body_.write_u8(opcode >> 8);
-  if ((opcode >> 8) == WasmOpcode::kSimdPrefix) {
-    // SIMD opcodes are LEB encoded
-    body_.write_u32v(opcode & 0xff);
+  DCHECK_GT(opcode, 0xFF);
+  if (opcode > 0xFFFF) {
+    DCHECK_EQ(kSimdPrefix, opcode >> 12);
+    body_.write_u8(kSimdPrefix);
+    body_.write_u32v(opcode & 0xFFF);
   } else {
-    body_.write_u8(opcode);
+    body_.write_u8(opcode >> 8);      // Prefix.
+    body_.write_u32v(opcode & 0xff);  // LEB encoded tail.
   }
 }
 
@@ -522,27 +526,19 @@ void WriteInitializerExpressionWithEnd(ZoneBuffer* buffer,
       break;
     }
     case WasmInitExpr::kStructNew:
-    case WasmInitExpr::kStructNewWithRtt:
     case WasmInitExpr::kStructNewDefault:
-    case WasmInitExpr::kStructNewDefaultWithRtt:
       static_assert((kExprStructNew >> 8) == kGCPrefix);
-      static_assert((kExprStructNewWithRtt >> 8) == kGCPrefix);
       static_assert((kExprStructNewDefault >> 8) == kGCPrefix);
-      static_assert((kExprStructNewDefaultWithRtt >> 8) == kGCPrefix);
+      static_assert((kExprStructNew & 0x80) == 0);
+      static_assert((kExprStructNewDefault & 0x80) == 0);
       for (const WasmInitExpr& operand : *init.operands()) {
         WriteInitializerExpressionWithEnd(buffer, operand, kWasmBottom);
       }
       buffer->write_u8(kGCPrefix);
       WasmOpcode opcode;
       switch (init.kind()) {
-        case WasmInitExpr::kStructNewWithRtt:
-          opcode = kExprStructNewWithRtt;
-          break;
         case WasmInitExpr::kStructNew:
           opcode = kExprStructNew;
-          break;
-        case WasmInitExpr::kStructNewDefaultWithRtt:
-          opcode = kExprStructNewDefaultWithRtt;
           break;
         case WasmInitExpr::kStructNewDefault:
           opcode = kExprStructNewDefault;
@@ -553,40 +549,31 @@ void WriteInitializerExpressionWithEnd(ZoneBuffer* buffer,
       buffer->write_u8(static_cast<uint8_t>(opcode));
       buffer->write_u32v(init.immediate().index);
       break;
-    case WasmInitExpr::kArrayNewFixed:
     case WasmInitExpr::kArrayNewFixedStatic: {
-      static_assert((kExprArrayNewFixed >> 8) == kGCPrefix);
       static_assert((kExprArrayNewFixedStatic >> 8) == kGCPrefix);
-      bool is_static = init.kind() == WasmInitExpr::kArrayNewFixedStatic;
+      static_assert((kExprArrayNewFixedStatic & 0x80) == 0);
       for (const WasmInitExpr& operand : *init.operands()) {
         WriteInitializerExpressionWithEnd(buffer, operand, kWasmBottom);
       }
       buffer->write_u8(kGCPrefix);
-      buffer->write_u8(static_cast<uint8_t>(is_static ? kExprArrayNewFixedStatic
-                                                      : kExprArrayNewFixed));
+      buffer->write_u8(static_cast<uint8_t>(kExprArrayNewFixedStatic));
       buffer->write_u32v(init.immediate().index);
-      buffer->write_u32v(
-          static_cast<uint32_t>(init.operands()->size() - (is_static ? 0 : 1)));
+      buffer->write_u32v(static_cast<uint32_t>(init.operands()->size()));
       break;
     }
     case WasmInitExpr::kI31New:
       WriteInitializerExpressionWithEnd(buffer, (*init.operands())[0],
                                         kWasmI32);
       static_assert((kExprI31New >> 8) == kGCPrefix);
+      static_assert((kExprI31New & 0x80) == 0);
 
       buffer->write_u8(kGCPrefix);
       buffer->write_u8(static_cast<uint8_t>(kExprI31New));
 
       break;
-    case WasmInitExpr::kRttCanon:
-      static_assert((kExprRttCanon >> 8) == kGCPrefix);
-      buffer->write_u8(kGCPrefix);
-      buffer->write_u8(static_cast<uint8_t>(kExprRttCanon));
-      buffer->write_i32v(static_cast<int32_t>(init.immediate().index));
-      break;
     case WasmInitExpr::kStringConst:
       buffer->write_u8(kGCPrefix);
-      buffer->write_u8(static_cast<uint8_t>(kExprStringConst));
+      buffer->write_u32v(kExprStringConst & 0xFF);
       buffer->write_u32v(init.immediate().index);
       break;
   }

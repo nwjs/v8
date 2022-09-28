@@ -23,6 +23,7 @@
 #include "src/heap/heap-inl.h"  // For ToBoolean. TODO(jkummerow): Drop.
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/ic/stub-cache.h"
+#include "src/objects/js-atomics-synchronization-inl.h"
 #include "src/objects/js-function-inl.h"
 #include "src/objects/js-regexp-inl.h"
 #include "src/objects/smi.h"
@@ -448,11 +449,47 @@ RUNTIME_FUNCTION(Runtime_BenchMaglev) {
 }
 #endif  // V8_ENABLE_MAGLEV
 
+RUNTIME_FUNCTION(Runtime_ActiveTierIsIgnition) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(args.length(), 1);
+  Handle<JSFunction> function = args.at<JSFunction>(0);
+  return isolate->heap()->ToBoolean(function->ActiveTierIsIgnition());
+}
+
+RUNTIME_FUNCTION(Runtime_ActiveTierIsSparkplug) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(args.length(), 1);
+  Handle<JSFunction> function = args.at<JSFunction>(0);
+  return isolate->heap()->ToBoolean(function->ActiveTierIsBaseline());
+}
+
 RUNTIME_FUNCTION(Runtime_ActiveTierIsMaglev) {
   HandleScope scope(isolate);
   DCHECK_EQ(args.length(), 1);
   Handle<JSFunction> function = args.at<JSFunction>(0);
   return isolate->heap()->ToBoolean(function->ActiveTierIsMaglev());
+}
+
+RUNTIME_FUNCTION(Runtime_ActiveTierIsTurbofan) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(args.length(), 1);
+  Handle<JSFunction> function = args.at<JSFunction>(0);
+  return isolate->heap()->ToBoolean(function->ActiveTierIsTurbofan());
+}
+
+RUNTIME_FUNCTION(Runtime_IsSparkplugEnabled) {
+  DCHECK_EQ(args.length(), 0);
+  return isolate->heap()->ToBoolean(FLAG_sparkplug);
+}
+
+RUNTIME_FUNCTION(Runtime_IsMaglevEnabled) {
+  DCHECK_EQ(args.length(), 0);
+  return isolate->heap()->ToBoolean(FLAG_maglev);
+}
+
+RUNTIME_FUNCTION(Runtime_IsTurbofanEnabled) {
+  DCHECK_EQ(args.length(), 0);
+  return isolate->heap()->ToBoolean(FLAG_turbofan);
 }
 
 #ifdef V8_ENABLE_MAGLEV
@@ -1660,6 +1697,14 @@ RUNTIME_FUNCTION(Runtime_IsSharedString) {
                                     Handle<String>::cast(obj)->IsShared());
 }
 
+RUNTIME_FUNCTION(Runtime_IsInPlaceInternalizableString) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(1, args.length());
+  Handle<HeapObject> obj = args.at<HeapObject>(0);
+  return isolate->heap()->ToBoolean(
+      obj->IsString() && String::IsInPlaceInternalizable(String::cast(*obj)));
+}
+
 RUNTIME_FUNCTION(Runtime_IsInternalizedString) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
@@ -1671,6 +1716,13 @@ RUNTIME_FUNCTION(Runtime_SharedGC) {
   SealHandleScope scope(isolate);
   isolate->heap()->CollectSharedGarbage(GarbageCollectionReason::kTesting);
   return ReadOnlyRoots(isolate).undefined_value();
+}
+
+RUNTIME_FUNCTION(Runtime_AtomicsConditionNumWaitersForTesting) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(1, args.length());
+  Handle<JSAtomicsCondition> cv = args.at<JSAtomicsCondition>(0);
+  return cv->NumWaitersForTesting(isolate);
 }
 
 }  // namespace internal

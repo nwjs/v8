@@ -803,6 +803,7 @@ class LiftoffAssembler : public TurboAssembler {
       emit_i32_sari(dst.gp(), dst.gp(), kSmiTagSize);
     }
   }
+  // Warning: may clobber {dst} on some architectures!
   inline void IncrementSmi(LiftoffRegister dst, int offset);
   inline void Load(LiftoffRegister dst, Register src_addr, Register offset_reg,
                    uintptr_t offset_imm, LoadType type,
@@ -812,7 +813,7 @@ class LiftoffAssembler : public TurboAssembler {
                     uintptr_t offset_imm, LiftoffRegister src, StoreType type,
                     LiftoffRegList pinned,
                     uint32_t* protected_store_pc = nullptr,
-                    bool is_store_mem = false);
+                    bool is_store_mem = false, bool i64_offset = false);
   inline void AtomicLoad(LiftoffRegister dst, Register src_addr,
                          Register offset_reg, uintptr_t offset_imm,
                          LoadType type, LiftoffRegList pinned);
@@ -1874,7 +1875,9 @@ bool CheckCompatibleStackSlotTypes(ValueKind a, ValueKind b);
 #elif V8_TARGET_ARCH_S390
 #include "src/wasm/baseline/s390/liftoff-assembler-s390.h"
 #elif V8_TARGET_ARCH_RISCV64
-#include "src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h"
+#include "src/wasm/baseline/riscv/liftoff-assembler-riscv64.h"
+#elif V8_TARGET_ARCH_RISCV32
+#include "src/wasm/baseline/riscv/liftoff-assembler-riscv32.h"
 #else
 #error Unsupported architecture.
 #endif

@@ -15,6 +15,7 @@
 #include "src/execution/frames.h"
 #include "src/execution/protectors.h"
 #include "src/heap/heap-inl.h"  // For MemoryChunk. TODO(jkummerow): Drop.
+#include "src/heap/heap.h"
 #include "src/heap/memory-chunk.h"
 #include "src/logging/counters.h"
 #include "src/numbers/integer-literal-inl.h"
@@ -23,16 +24,13 @@
 #include "src/objects/descriptor-array.h"
 #include "src/objects/function-kind.h"
 #include "src/objects/heap-number.h"
+#include "src/objects/heap-object.h"
 #include "src/objects/instance-type.h"
 #include "src/objects/js-generator.h"
 #include "src/objects/oddball.h"
 #include "src/objects/ordered-hash-table-inl.h"
 #include "src/objects/property-cell.h"
 #include "src/roots/roots.h"
-
-#if V8_ENABLE_WEBASSEMBLY
-#include "src/wasm/wasm-objects.h"
-#endif  // V8_ENABLE_WEBASSEMBLY
 
 namespace v8 {
 namespace internal {
@@ -1347,7 +1345,10 @@ TNode<HeapObject> CodeStubAssembler::AllocateRawDoubleAligned(
 // unaligned access since both x64 and arm64 architectures (where pointer
 // compression is supported) allow unaligned access to doubles and full words.
 #endif  // V8_COMPRESS_POINTERS
-  // Allocation on 64 bit machine is naturally double aligned
+  if (V8_COMPRESS_POINTERS_8GB_BOOL) {
+    return AllocateRaw(size_in_bytes, flags | AllocationFlag::kDoubleAlignment,
+                       top_address, limit_address);
+  }
   return AllocateRaw(size_in_bytes, flags & ~AllocationFlag::kDoubleAlignment,
                      top_address, limit_address);
 #else
@@ -1416,7 +1417,8 @@ TNode<HeapObject> CodeStubAssembler::Allocate(TNode<IntPtrT> size_in_bytes,
       IntPtrAdd(ReinterpretCast<IntPtrT>(top_address),
                 IntPtrConstant(kSystemPointerSize));
 
-  if (flags & AllocationFlag::kDoubleAlignment) {
+  if (V8_COMPRESS_POINTERS_8GB_BOOL ||
+      (flags & AllocationFlag::kDoubleAlignment)) {
     return AllocateRawDoubleAligned(size_in_bytes, flags,
                                     ReinterpretCast<RawPtrT>(top_address),
                                     ReinterpretCast<RawPtrT>(limit_address));
@@ -4018,10 +4020,14 @@ CodeStubAssembler::AllocateUninitializedJSArrayWithElements(
       base_size += AllocationMemento::kSize;
     }
 
-    const int elements_offset = base_size;
+    const int elements_offset =
+        V8_COMPRESS_POINTERS_8GB_BOOL
+            ? RoundUp<kObjectAlignment8GbHeap>(base_size)
+            : base_size;
+    const int unaligned_elements_offset = base_size;
 
     // Compute space for elements
-    base_size += FixedArray::kHeaderSize;
+    base_size = elements_offset + FixedArray::kHeaderSize;
     TNode<IntPtrT> size = ElementOffsetFromIndex(capacity, kind, base_size);
 
     // For very large arrays in which the requested allocation exceeds the
@@ -4058,6 +4064,11 @@ CodeStubAssembler::AllocateUninitializedJSArrayWithElements(
     // Fold all objects into a single new space allocation.
     array =
         AllocateUninitializedJSArray(array_map, length, allocation_site, size);
+    if (V8_COMPRESS_POINTERS_8GB_BOOL &&
+        elements_offset != unaligned_elements_offset) {
+      StoreObjectFieldNoWriteBarrier(array.value(), unaligned_elements_offset,
+                                     OnePointerFillerMapConstant());
+    }
     elements = InnerAllocateElements(this, array.value(), elements_offset);
 
     StoreObjectFieldNoWriteBarrier(array.value(), JSObject::kElementsOffset,
@@ -6109,6 +6120,11 @@ void CodeStubAssembler::ThrowTypeError(TNode<Context> context,
   Unreachable();
 }
 
+void CodeStubAssembler::TerminateExecution(TNode<Context> context) {
+  CallRuntime(Runtime::kTerminateExecution, context);
+  Unreachable();
+}
+
 TNode<HeapObject> CodeStubAssembler::GetPendingMessage() {
   TNode<ExternalReference> pending_message = ExternalConstant(
       ExternalReference::address_of_pending_message(isolate()));
@@ -7067,34 +7083,15 @@ TNode<String> CodeStubAssembler::StringFromSingleCharCode(TNode<Int32T> code) {
   BIND(&if_codeisonebyte);
   {
     // Load the isolate wide single character string cache.
-    TNode<FixedArray> cache = SingleCharacterStringCacheConstant();
+    TNode<FixedArray> cache = SingleCharacterStringTableConstant();
     TNode<IntPtrT> code_index = Signed(ChangeUint32ToWord(code));
 
-    // Check if we have an entry for the {code} in the single character string
-    // cache already.
-    Label if_entryisundefined(this, Label::kDeferred),
-        if_entryisnotundefined(this);
     TNode<Object> entry = UnsafeLoadFixedArrayElement(cache, code_index);
-    Branch(IsUndefined(entry), &if_entryisundefined, &if_entryisnotundefined);
+    CSA_DCHECK(this, Word32BinaryNot(IsUndefined(entry)));
 
-    BIND(&if_entryisundefined);
-    {
-      // Allocate a new SeqOneByteString for {code} and store it in the {cache}.
-      TNode<String> result = AllocateSeqOneByteString(1);
-      StoreNoWriteBarrier(
-          MachineRepresentation::kWord8, result,
-          IntPtrConstant(SeqOneByteString::kHeaderSize - kHeapObjectTag), code);
-      StoreFixedArrayElement(cache, code_index, result);
-      var_result = result;
-      Goto(&if_done);
-    }
-
-    BIND(&if_entryisnotundefined);
-    {
-      // Return the entry from the {cache}.
-      var_result = CAST(entry);
-      Goto(&if_done);
-    }
+    // Return the entry from the {cache}.
+    var_result = CAST(entry);
+    Goto(&if_done);
   }
 
   BIND(&if_codeistwobyte);
@@ -8081,9 +8078,11 @@ void CodeStubAssembler::TryToName(TNode<Object> key, Label* if_keyisindex,
                                THIN_ONE_BYTE_STRING_TYPE),
              &if_thinstring);
 
-      // Check if the hash field encodes a string forwarding index.
-      GotoIf(IsEqualInWord32<Name::HashFieldTypeBits>(
-                 raw_hash_field, Name::HashFieldType::kForwardingIndex),
+      // Check if the hash field encodes an internalized string forwarding
+      // index.
+      GotoIf(IsBothEqualInWord32<Name::HashFieldTypeBits,
+                                 Name::IsInternalizedForwardingIndexBit>(
+                 raw_hash_field, Name::HashFieldType::kForwardingIndex, true),
              &if_forwarding_index);
 
       // Finally, check if |key| is internalized.
@@ -8109,8 +8108,9 @@ void CodeStubAssembler::TryToName(TNode<Object> key, Label* if_keyisindex,
         TNode<Object> result = CAST(CallCFunction(
             function, MachineType::AnyTagged(),
             std::make_pair(MachineType::Pointer(), isolate_ptr),
-            std::make_pair(MachineType::Int32(),
-                           DecodeWord32<Name::HashBits>(raw_hash_field))));
+            std::make_pair(
+                MachineType::Int32(),
+                DecodeWord32<Name::ForwardingIndexValueBits>(raw_hash_field))));
 
         *var_unique = CAST(result);
         Goto(if_keyisunique);

@@ -338,6 +338,9 @@ struct IsValidExternalReferenceType<Result (Class::*)(Args...)> {
 FUNCTION_REFERENCE(write_barrier_marking_from_code_function,
                    WriteBarrier::MarkingFromCode)
 
+FUNCTION_REFERENCE(shared_barrier_from_code_function,
+                   WriteBarrier::SharedFromCode)
+
 FUNCTION_REFERENCE(insert_remembered_set_function,
                    Heap::InsertIntoRememberedSetFromCode)
 
@@ -757,7 +760,7 @@ ExternalReference ExternalReference::invoke_accessor_getter_callback() {
 #define re_stack_check_func RegExpMacroAssemblerLOONG64::CheckStackGuardState
 #elif V8_TARGET_ARCH_S390
 #define re_stack_check_func RegExpMacroAssemblerS390::CheckStackGuardState
-#elif V8_TARGET_ARCH_RISCV64
+#elif V8_TARGET_ARCH_RISCV32 || V8_TARGET_ARCH_RISCV64
 #define re_stack_check_func RegExpMacroAssemblerRISCV::CheckStackGuardState
 #else
 UNREACHABLE();
@@ -1030,6 +1033,9 @@ FUNCTION_REFERENCE(mutable_big_int_absolute_compare_function,
 
 FUNCTION_REFERENCE(mutable_big_int_absolute_sub_and_canonicalize_function,
                    MutableBigInt_AbsoluteSubAndCanonicalize)
+
+FUNCTION_REFERENCE(mutable_big_int_absolute_mul_and_canonicalize_function,
+                   MutableBigInt_AbsoluteMulAndCanonicalize)
 
 FUNCTION_REFERENCE(check_object_type, CheckObjectType)
 

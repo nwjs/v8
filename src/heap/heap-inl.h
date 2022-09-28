@@ -63,6 +63,7 @@ T ForwardingAddress(T heap_obj) {
   if (map_word.IsForwardingAddress()) {
     return T::cast(map_word.ToForwardingAddress());
   } else if (Heap::InFromPage(heap_obj)) {
+    DCHECK(!FLAG_minor_mc);
     return T();
   } else {
     return heap_obj;
@@ -132,6 +133,11 @@ RootsTable& Heap::roots_table() { return isolate()->roots_table(); }
   }
 MUTABLE_ROOT_LIST(ROOT_ACCESSOR)
 #undef ROOT_ACCESSOR
+
+FixedArray Heap::single_character_string_table() {
+  return FixedArray::cast(
+      Object(roots_table()[RootIndex::kSingleCharacterStringTable]));
+}
 
 #define ROOT_ACCESSOR(type, name, CamelName)                                   \
   void Heap::set_##name(type value) {                                          \
@@ -388,9 +394,8 @@ AllocationMemento Heap::FindAllocationMemento(Map map, HeapObject object) {
       // another object of at least word size (the header map word) following
       // it, so suffices to compare ptr and top here.
       top = NewSpaceTop();
-      DCHECK(memento_address == top ||
-             memento_address + HeapObject::kHeaderSize <= top ||
-             !Page::OnSamePage(memento_address, top - 1));
+      DCHECK(memento_address >= new_space()->limit() ||
+             memento_address + AllocationMemento::kSize <= top);
       if ((memento_address != top) && memento_candidate.IsValid()) {
         return memento_candidate;
       }
@@ -406,8 +411,9 @@ void Heap::UpdateAllocationSite(Map map, HeapObject object,
   DCHECK_NE(pretenuring_feedback, &global_pretenuring_feedback_);
 #ifdef DEBUG
   BasicMemoryChunk* chunk = BasicMemoryChunk::FromHeapObject(object);
-  DCHECK_IMPLIES(chunk->IsToPage(),
-                 chunk->IsFlagSet(MemoryChunk::PAGE_NEW_NEW_PROMOTION));
+  DCHECK_IMPLIES(
+      chunk->IsToPage(),
+      FLAG_minor_mc || chunk->IsFlagSet(MemoryChunk::PAGE_NEW_NEW_PROMOTION));
   DCHECK_IMPLIES(!chunk->InYoungGeneration(),
                  chunk->IsFlagSet(MemoryChunk::PAGE_NEW_OLD_PROMOTION));
 #endif

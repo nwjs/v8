@@ -132,6 +132,7 @@ class ZoneForwardList;
   V(JSAsyncFromSyncIterator)                    \
   V(JSAsyncFunctionObject)                      \
   V(JSAsyncGeneratorObject)                     \
+  V(JSAtomicsCondition)                         \
   V(JSAtomicsMutex)                             \
   V(JSBoundFunction)                            \
   V(JSCollection)                               \
@@ -167,6 +168,7 @@ class ZoneForwardList;
   V(JSSharedStruct)                             \
   V(JSSpecialObject)                            \
   V(JSStringIterator)                           \
+  V(JSSynchronizationPrimitive)                 \
   V(JSTemporalCalendar)                         \
   V(JSTemporalDuration)                         \
   V(JSTemporalInstant)                          \
@@ -264,6 +266,7 @@ class ZoneForwardList;
   IF_WASM(V, WasmTableObject)                   \
   IF_WASM(V, WasmValueObject)                   \
   IF_WASM(V, WasmSuspenderObject)               \
+  IF_WASM(V, WasmContinuationObject)            \
   V(WeakFixedArray)                             \
   V(WeakArrayList)                              \
   V(WeakCell)                                   \

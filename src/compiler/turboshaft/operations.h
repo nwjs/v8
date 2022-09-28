@@ -5,6 +5,7 @@
 #ifndef V8_COMPILER_TURBOSHAFT_OPERATIONS_H_
 #define V8_COMPILER_TURBOSHAFT_OPERATIONS_H_
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -135,11 +136,29 @@ class OpIndex {
     DCHECK_EQ(offset_ % sizeof(OperationStorageSlot), 0);
     return offset_ / sizeof(OperationStorageSlot) / kSlotsPerId;
   }
-  uint32_t offset() const { return offset_; }
+  uint32_t offset() const {
+    DCHECK_EQ(offset_ % sizeof(OperationStorageSlot), 0);
+    return offset_;
+  }
 
   bool valid() const { return *this != Invalid(); }
 
   static constexpr OpIndex Invalid() { return OpIndex(); }
+
+  // Encode a sea-of-nodes node id in the `OpIndex` type.
+  // Only used for node origins that actually point to sea-of-nodes graph nodes.
+  static OpIndex EncodeTurbofanNodeId(uint32_t id) {
+    OpIndex result = OpIndex(id * sizeof(OperationStorageSlot));
+    result.offset_ += kTurbofanNodeIdFlag;
+    return result;
+  }
+  uint32_t DecodeTurbofanNodeId() const {
+    DCHECK(IsTurbofanNodeId());
+    return offset_ / sizeof(OperationStorageSlot);
+  }
+  bool IsTurbofanNodeId() const {
+    return offset_ % sizeof(OperationStorageSlot) == kTurbofanNodeIdFlag;
+  }
 
   bool operator==(OpIndex other) const { return offset_ == other.offset_; }
   bool operator!=(OpIndex other) const { return offset_ != other.offset_; }
@@ -150,6 +169,8 @@ class OpIndex {
 
  private:
   uint32_t offset_;
+
+  static constexpr uint32_t kTurbofanNodeIdFlag = 1;
 };
 
 V8_INLINE size_t hash_value(OpIndex op) { return op.id(); }
@@ -200,6 +221,10 @@ struct OpProperties {
       !(can_read || can_write || can_abort || is_block_terminator);
   const bool is_required_when_unused =
       can_write || can_abort || is_block_terminator;
+  // Nodes that don't read, write and aren't block terminators can be eliminated
+  // via value numbering.
+  const bool can_be_eliminated =
+      !(can_read || can_write || is_block_terminator);
 
   constexpr OpProperties(bool can_read, bool can_write, bool can_abort,
                          bool is_block_terminator)
@@ -386,14 +411,13 @@ struct OperationT : Operation {
     this->inputs().OverwriteWith(inputs);
   }
 
-  bool operator==(const Derived& other) const {
-    const Derived& derived = *static_cast<const Derived*>(this);
-    return derived.inputs() == other.inputs() &&
-           derived.options() == other.options();
+  bool operator==(const Base& other) const {
+    return derived_this().inputs() == other.derived_this().inputs() &&
+           derived_this().options() == other.derived_this().options();
   }
   size_t hash_value() const {
-    const Derived& derived = *static_cast<const Derived*>(this);
-    return base::hash_combine(opcode, derived.inputs(), derived.options());
+    return base::hash_combine(opcode, derived_this().inputs(),
+                              derived_this().options());
   }
 
   void PrintOptions(std::ostream& os) const {
@@ -1031,10 +1055,20 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
       case Kind::kTaggedIndex:
         return storage.integral == other.storage.integral;
       case Kind::kFloat32:
-        return storage.float32 == other.storage.float32;
+        // Using a bit_cast to uint32_t in order to return false when comparing
+        // +0 and -0.
+        return base::bit_cast<uint32_t>(storage.float32) ==
+                   base::bit_cast<uint32_t>(other.storage.float32) ||
+               (std::isnan(storage.float32) &&
+                std::isnan(other.storage.float32));
       case Kind::kFloat64:
       case Kind::kNumber:
-        return storage.float64 == other.storage.float64;
+        // Using a bit_cast to uint64_t in order to return false when comparing
+        // +0 and -0.
+        return base::bit_cast<uint64_t>(storage.float64) ==
+                   base::bit_cast<uint64_t>(other.storage.float64) ||
+               (std::isnan(storage.float64) &&
+                std::isnan(other.storage.float64));
       case Kind::kExternal:
         return storage.external.address() == other.storage.external.address();
       case Kind::kHeapObject:

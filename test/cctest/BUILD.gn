@@ -148,7 +148,6 @@ v8_source_set("cctest_sources") {
     "heap/test-iterators.cc",
     "heap/test-mark-compact.cc",
     "heap/test-memory-measurement.cc",
-    "heap/test-page-promotion.cc",
     "heap/test-shared-heap.cc",
     "heap/test-spaces.cc",
     "heap/test-unmapper.cc",
@@ -167,7 +166,6 @@ v8_source_set("cctest_sources") {
     "test-accessors.cc",
     "test-allocation.cc",
     "test-api-array-buffer.cc",
-    "test-api-icu.cc",
     "test-api-interceptors.cc",
     "test-api-stack-traces.cc",
     "test-api-typed-array.cc",
@@ -193,7 +191,6 @@ v8_source_set("cctest_sources") {
     "test-inspector.cc",
     "test-js-weak-refs.cc",
     "test-liveedit.cc",
-    "test-local-handles.cc",
     "test-lockers.cc",
     "test-mementos.cc",
     "test-orderedhashtable.cc",
@@ -221,8 +218,6 @@ v8_source_set("cctest_sources") {
     "test-utils.cc",
     "test-verifiers.cc",
     "test-weakmaps.cc",
-    "test-weaksets.cc",
-    "test-web-snapshots.cc",
     "torque/test-torque.cc",
     "trace-extension.cc",
     "trace-extension.h",
@@ -283,7 +278,6 @@ v8_source_set("cctest_sources") {
     sources += [  ### gcmole(arch:x64) ###
       "test-assembler-x64.cc",
       "test-log-stack-tracer.cc",
-      "test-macro-assembler-x64.cc",
     ]
     if (is_win) {
       sources += [ "test-stack-unwinding-win64.cc" ]
@@ -298,6 +292,13 @@ v8_source_set("cctest_sources") {
       "test-helper-riscv64.cc",
       "test-macro-assembler-riscv64.cc",
       "test-simple-riscv64.cc",
+    ]
+  } else if (v8_current_cpu == "riscv32") {
+    sources += [  ### gcmole(arch:riscv32) ###
+      "test-assembler-riscv32.cc",
+      "test-helper-riscv32.cc",
+      "test-macro-assembler-riscv32.cc",
+      "test-simple-riscv32.cc",
     ]
   } else if (v8_current_cpu == "loong64") {
     sources += [  ### gcmole(arch:loong64) ###
@@ -335,7 +336,6 @@ v8_source_set("cctest_sources") {
 
       # test-run-native-calls uses wasm's LinkageAllocator.
       "compiler/test-run-native-calls.cc",
-      "test-api-wasm.cc",
       "test-js-to-wasm.cc",
       "wasm/test-backing-store.cc",
       "wasm/test-c-wasm-entry.cc",
@@ -397,7 +397,8 @@ v8_source_set("cctest_sources") {
       v8_current_cpu == "s390" || v8_current_cpu == "s390x" ||
       v8_current_cpu == "mips" || v8_current_cpu == "mips64" ||
       v8_current_cpu == "mipsel" || v8_current_cpu == "mipsel64" ||
-      v8_current_cpu == "riscv64" || v8_current_cpu == "loong64") {
+      v8_current_cpu == "riscv64" || v8_current_cpu == "loong64" ||
+      v8_current_cpu == "riscv32") {
     # Disable fmadd/fmsub so that expected results match generated code in
     # RunFloat64MulAndFloat64Add1 and friends.
     if (!is_win) {

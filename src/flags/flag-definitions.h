@@ -29,25 +29,22 @@
 #define DEFINE_NEG_NEG_IMPLICATION(whenflag, thenflag) \
   DEFINE_NEG_VALUE_IMPLICATION(whenflag, thenflag, false)
 
-// We want to declare the names of the variables for the header file.  Normally
-// this will just be an extern declaration, but for a readonly flag we let the
-// compiler make better optimizations by giving it the value.
+// With FLAG_MODE_DECLARE we declare the fields in the {FlagValues} struct.
+// Read-only flags are static constants instead of fields.
 #if defined(FLAG_MODE_DECLARE)
-#define FLAG_FULL(ftype, ctype, nam, def, cmt) \
-  V8_EXPORT_PRIVATE extern FlagValue<ctype> FLAG_##nam;
+#define FLAG_FULL(ftype, ctype, nam, def, cmt) FlagValue<ctype> nam{def};
 #define FLAG_READONLY(ftype, ctype, nam, def, cmt) \
-  static constexpr FlagValue<ctype> FLAG_##nam{def};
+  static constexpr FlagValue<ctype> nam{def};
 
-// We want to supply the actual storage and value for the flag variable in the
-// .cc file.  We only do this for writable flags.
-#elif defined(FLAG_MODE_DEFINE)
-#ifdef USING_V8_SHARED
+// Define a {FLAG_foo} alias per flag, pointing to {v8_flags.foo}.
+// This allows to still use the old and deprecated syntax for accessing flag
+// values. This will be removed after v10.7.
+// TODO(clemensb): Remove this after v10.7.
+#elif defined(FLAG_MODE_DEFINE_GLOBAL_ALIASES)
 #define FLAG_FULL(ftype, ctype, nam, def, cmt) \
-  V8_EXPORT_PRIVATE extern FlagValue<ctype> FLAG_##nam;
-#else
-#define FLAG_FULL(ftype, ctype, nam, def, cmt) \
-  V8_EXPORT_PRIVATE FlagValue<ctype> FLAG_##nam{def};
-#endif
+  inline auto& FLAG_##nam = v8_flags.nam;
+#define FLAG_READONLY(ftype, ctype, nam, def, cmt) \
+  inline auto constexpr& FLAG_##nam = v8_flags.nam;
 
 // We need to define all of our default values so that the Flag structure can
 // access them by pointer.  These are just used internally inside of one .cc,
@@ -60,29 +57,29 @@
 // printing / etc in the flag parser code.  We only do this for writable flags.
 #elif defined(FLAG_MODE_META)
 #define FLAG_FULL(ftype, ctype, nam, def, cmt) \
-  {Flag::TYPE_##ftype, #nam, &FLAG_##nam, &FLAGDEFAULT_##nam, cmt, false},
-#define FLAG_ALIAS(ftype, ctype, alias, nam)                     \
-  {Flag::TYPE_##ftype,  #alias, &FLAG_##nam, &FLAGDEFAULT_##nam, \
-    "alias for --" #nam, false},
+  {Flag::TYPE_##ftype, #nam, &v8_flags.nam, &FLAGDEFAULT_##nam, cmt, false},
+#define FLAG_ALIAS(ftype, ctype, alias, nam)                       \
+  {Flag::TYPE_##ftype,  #alias, &v8_flags.nam, &FLAGDEFAULT_##nam, \
+   "alias for --" #nam, false},  // NOLINT(whitespace/indent)
 
 // We produce the code to set flags when it is implied by another flag.
 #elif defined(FLAG_MODE_DEFINE_IMPLICATIONS)
-#define DEFINE_VALUE_IMPLICATION(whenflag, thenflag, value)                   \
-  changed |= TriggerImplication(FLAG_##whenflag, #whenflag, &FLAG_##thenflag, \
-                                value, false);
+#define DEFINE_VALUE_IMPLICATION(whenflag, thenflag, value)   \
+  changed |= TriggerImplication(v8_flags.whenflag, #whenflag, \
+                                &v8_flags.thenflag, value, false);
 
 // A weak implication will be overwritten by a normal implication or by an
 // explicit flag.
-#define DEFINE_WEAK_VALUE_IMPLICATION(whenflag, thenflag, value)              \
-  changed |= TriggerImplication(FLAG_##whenflag, #whenflag, &FLAG_##thenflag, \
-                                value, true);
+#define DEFINE_WEAK_VALUE_IMPLICATION(whenflag, thenflag, value) \
+  changed |= TriggerImplication(v8_flags.whenflag, #whenflag,    \
+                                &v8_flags.thenflag, value, true);
 
 #define DEFINE_GENERIC_IMPLICATION(whenflag, statement) \
-  if (FLAG_##whenflag) statement;
+  if (v8_flags.whenflag) statement;
 
-#define DEFINE_NEG_VALUE_IMPLICATION(whenflag, thenflag, value)  \
-  changed |= TriggerImplication(!FLAG_##whenflag, "!" #whenflag, \
-                                &FLAG_##thenflag, value, false);
+#define DEFINE_NEG_VALUE_IMPLICATION(whenflag, thenflag, value)    \
+  changed |= TriggerImplication(!v8_flags.whenflag, "!" #whenflag, \
+                                &v8_flags.thenflag, value, false);
 
 // We apply a generic macro to the flags.
 #elif defined(FLAG_MODE_APPLY)
@@ -285,8 +282,6 @@ DEFINE_BOOL(harmony_shipping, true, "enable all shipped harmony features")
   V(harmony_weak_refs_with_cleanup_some,                                       \
     "harmony weak references with FinalizationRegistry.prototype.cleanupSome") \
   V(harmony_import_assertions, "harmony import assertions")                    \
-  V(harmony_rab_gsab,                                                          \
-    "harmony ResizableArrayBuffer / GrowableSharedArrayBuffer")                \
   V(harmony_temporal, "Temporal")                                              \
   V(harmony_shadow_realm, "harmony ShadowRealm")                               \
   V(harmony_struct, "harmony structs, shared structs, and shared arrays")      \
@@ -301,13 +296,13 @@ DEFINE_BOOL(harmony_shipping, true, "enable all shipped harmony features")
 #endif
 
 // Features that are complete (but still behind the --harmony flag).
-#define HARMONY_STAGED_BASE(V) \
-  V(harmony_array_grouping, "harmony array grouping")
+#define HARMONY_STAGED_BASE(V)                        \
+  V(harmony_array_grouping, "harmony array grouping") \
+  V(harmony_rab_gsab,                                 \
+    "harmony ResizableArrayBuffer / GrowableSharedArrayBuffer")
 
 #ifdef V8_INTL_SUPPORT
-#define HARMONY_STAGED(V) \
-  HARMONY_STAGED_BASE(V)  \
-  V(harmony_intl_number_format_v3, "Intl.NumberFormat v3")
+#define HARMONY_STAGED(V) HARMONY_STAGED_BASE(V)
 #else
 #define HARMONY_STAGED(V) HARMONY_STAGED_BASE(V)
 #endif
@@ -321,7 +316,9 @@ DEFINE_BOOL(harmony_shipping, true, "enable all shipped harmony features")
   V(harmony_array_find_last, "harmony array find last helpers")
 
 #ifdef V8_INTL_SUPPORT
-#define HARMONY_SHIPPING(V) HARMONY_SHIPPING_BASE(V)
+#define HARMONY_SHIPPING(V) \
+  HARMONY_SHIPPING_BASE(V)  \
+  V(harmony_intl_number_format_v3, "Intl.NumberFormat v3")
 #else
 #define HARMONY_SHIPPING(V) HARMONY_SHIPPING_BASE(V)
 #endif
@@ -520,6 +517,7 @@ DEFINE_STRING(maglev_filter, "*", "optimization filter for the maglev compiler")
 DEFINE_BOOL(maglev_break_on_entry, false, "insert an int3 on maglev entries")
 DEFINE_BOOL(print_maglev_graph, false, "print maglev graph")
 DEFINE_BOOL(print_maglev_code, false, "print maglev code")
+DEFINE_BOOL(trace_maglev_graph_building, false, "trace maglev graph building")
 DEFINE_BOOL(trace_maglev_regalloc, false, "trace maglev register allocation")
 
 #if ENABLE_SPARKPLUG
@@ -576,10 +574,7 @@ DEFINE_NEG_IMPLICATION(jitless, always_sparkplug)
 DEFINE_NEG_IMPLICATION(jitless, maglev)
 #endif  // V8_ENABLE_MAGLEV
 
-#ifndef V8_TARGET_ARCH_ARM
-// Unsupported on arm. See https://crbug.com/v8/8713.
 DEFINE_NEG_IMPLICATION(jitless, interpreted_frames_native_stack)
-#endif
 
 DEFINE_BOOL(assert_types, false,
             "generate runtime type assertions to test the typer")
@@ -651,12 +646,12 @@ DEFINE_INT(interrupt_budget_for_maglev, 40 * KB,
            "interrupt budget which should be used for the profiler counter")
 
 // Tiering: Turbofan.
-DEFINE_INT(interrupt_budget, 132 * KB,
+DEFINE_INT(interrupt_budget, 66 * KB,
            "interrupt budget which should be used for the profiler counter")
 DEFINE_INT(ticks_before_optimization, 3,
            "the number of times we have to go through the interrupt budget "
            "before considering this function for optimization")
-DEFINE_INT(bytecode_size_allowance_per_tick, 1100,
+DEFINE_INT(bytecode_size_allowance_per_tick, 150,
            "increases the number of ticks required for optimization by "
            "bytecode.length/X")
 DEFINE_INT(
@@ -923,9 +918,14 @@ DEFINE_BOOL(turbo_profiling_verbose, false,
             "enable basic block profiling in TurboFan, and include each "
             "function's schedule and disassembly in the output")
 DEFINE_IMPLICATION(turbo_profiling_verbose, turbo_profiling)
-DEFINE_BOOL(turbo_profiling_log_builtins, false,
-            "emit data about basic block usage in builtins to v8.log (requires "
-            "that V8 was built with v8_enable_builtins_profiling=true)")
+DEFINE_STRING(
+    turbo_profiling_output, nullptr,
+    "emit data about basic block usage in builtins to this file "
+    "(requires that V8 was built with v8_enable_builtins_profiling=true)")
+
+DEFINE_BOOL(
+    warn_about_builtin_profile_data, false,
+    "flag for mksnapshot, emit warnings when applying builtin profile data")
 DEFINE_BOOL(turbo_verify_allocation, DEBUG_BOOL,
             "verify register allocation in TurboFan")
 DEFINE_BOOL(turbo_move_optimization, true, "optimize gap moves in TurboFan")
@@ -951,10 +951,14 @@ DEFINE_BOOL(
     stress_gc_during_compilation, false,
     "simulate GC/compiler thread race related to https://crbug.com/v8/8520")
 DEFINE_BOOL(turbo_fast_api_calls, true, "enable fast API calls from TurboFan")
+#ifdef V8_USE_ZLIB
 DEFINE_BOOL(turbo_compress_translation_arrays, false,
             "compress translation arrays (experimental)")
-DEFINE_WEAK_IMPLICATION(future, turbo_inline_js_wasm_calls)
-DEFINE_BOOL(turbo_inline_js_wasm_calls, false, "inline JS->Wasm calls")
+#else
+DEFINE_BOOL_READONLY(turbo_compress_translation_arrays, false,
+                     "compress translation arrays (experimental)")
+#endif  // V8_USE_ZLIB
+DEFINE_BOOL(turbo_inline_js_wasm_calls, true, "inline JS->Wasm calls")
 DEFINE_BOOL(turbo_use_mid_tier_regalloc_for_huge_functions, true,
             "fall back to the mid-tier register allocator for huge functions")
 DEFINE_BOOL(turbo_force_mid_tier_regalloc, false,
@@ -1009,7 +1013,8 @@ DEFINE_BOOL(wasm_test_streaming, false,
             "use streaming compilation instead of async compilation for tests")
 DEFINE_BOOL(wasm_native_module_cache_enabled, true,
             "enable the native module cache")
-DEFINE_UINT(wasm_max_mem_pages, wasm::kV8MaxWasmMemoryPages,
+// The actual value used at runtime is clamped to kV8MaxWasmMemory{32,64}Pages.
+DEFINE_UINT(wasm_max_mem_pages, kMaxUInt32,
             "maximum number of 64KiB memory pages per wasm memory")
 DEFINE_UINT(wasm_max_table_size, wasm::kV8MaxWasmTableSize,
             "maximum table size of a wasm instance")
@@ -1155,6 +1160,7 @@ DEFINE_BOOL(asm_wasm_lazy_compilation, false,
 DEFINE_IMPLICATION(validate_asm, asm_wasm_lazy_compilation)
 DEFINE_BOOL(wasm_lazy_compilation, false,
             "enable lazy compilation for all wasm modules")
+DEFINE_WEAK_IMPLICATION(future, wasm_lazy_compilation)
 // Write protect code causes too much overhead for lazy compilation.
 DEFINE_WEAK_NEG_IMPLICATION(wasm_lazy_compilation,
                             wasm_write_protect_code_memory)
@@ -1459,8 +1465,6 @@ DEFINE_BOOL(randomize_all_allocations, false,
 DEFINE_BOOL(manual_evacuation_candidates_selection, false,
             "Test mode only flag. It allows an unit test to select evacuation "
             "candidates pages (requires --stress_compaction).")
-DEFINE_BOOL(fast_promotion_new_space, false,
-            "fast promote new space on high survival rates")
 
 DEFINE_BOOL(clear_free_memory, false, "initialize free memory with 0")
 
@@ -1509,7 +1513,7 @@ DEFINE_STRING(sim_arm64_optional_features, "none",
               "enable optional features on the simulator for testing: none or "
               "all")
 
-#if defined(V8_TARGET_ARCH_RISCV64)
+#if defined(V8_TARGET_ARCH_RISCV32) || defined(V8_TARGET_ARCH_RISCV64)
 DEFINE_BOOL(riscv_trap_to_simulator_debugger, false,
             "enable simulator trap to debugger")
 DEFINE_BOOL(riscv_debug, false, "enable debug prints")
@@ -1580,6 +1584,11 @@ DEFINE_STRING(expose_cputracemark_as, nullptr,
 DEFINE_BOOL(enable_vtune_domain_support, true, "enable vtune domain support")
 #endif  // ENABLE_VTUNE_TRACEMARK
 
+#ifdef ENABLE_VTUNE_JIT_INTERFACE
+DEFINE_BOOL(enable_vtunejit, true, "enable vtune jit interface")
+DEFINE_NEG_IMPLICATION(enable_vtunejit, compact_code_space)
+#endif  // ENABLE_VTUNE_JIT_INTERFACE
+
 // builtins.cc
 DEFINE_BOOL(allow_unsafe_function_constructor, false,
             "allow invoking the function constructor without security checks")
@@ -1625,6 +1634,8 @@ DEFINE_BOOL(always_turbofan, false, "always try to optimize functions")
 DEFINE_IMPLICATION(always_turbofan, turbofan)
 DEFINE_BOOL(always_osr, false, "always try to OSR functions")
 DEFINE_BOOL(prepare_always_turbofan, false, "prepare for turning on always opt")
+DEFINE_BOOL(deopt_to_baseline, ENABLE_SPARKPLUG,
+            "deoptimize to baseline code when available")
 
 DEFINE_BOOL(trace_serializer, false, "print code serializer trace")
 #ifdef DEBUG
@@ -1662,7 +1673,7 @@ DEFINE_BOOL(
     "print debug messages for side-effect-free debug-evaluate for testing")
 DEFINE_BOOL(hard_abort, true, "abort by crashing")
 
-DEFINE_BOOL(experimental_async_stack_tagging_api, false,
+DEFINE_BOOL(experimental_async_stack_tagging_api, true,
             "enable experimental async stacks tagging API")
 DEFINE_BOOL(experimental_value_unavailable, false,
             "enable experimental <value unavailable> in scopes")
@@ -1933,7 +1944,7 @@ DEFINE_BOOL(target_is_simulator, false,
             "Instruct mksnapshot that the target is meant to run in the "
             "simulator and it can generate simulator-specific instructions. "
             "(mksnapshot only)")
-DEFINE_STRING(turbo_profiling_log_file, nullptr,
+DEFINE_STRING(turbo_profiling_input, nullptr,
               "Path of the input file containing basic block counters for "
               "builtins. (mksnapshot only)")
 
@@ -2177,25 +2188,16 @@ DEFINE_BOOL(vtune_prof_annotate_wasm, false,
 
 DEFINE_BOOL(win64_unwinding_info, true, "Enable unwinding info for Windows/x64")
 
-#ifdef V8_TARGET_ARCH_ARM
-// Unsupported on arm. See https://crbug.com/v8/8713.
-DEFINE_BOOL_READONLY(
-    interpreted_frames_native_stack, false,
-    "Show interpreted frames on the native stack (useful for external "
-    "profilers).")
-#else
 DEFINE_BOOL(interpreted_frames_native_stack, false,
             "Show interpreted frames on the native stack (useful for external "
             "profilers).")
-#endif
 
-DEFINE_BOOL(enable_system_instrumentation, false,
-            "Enable platform-specific profiling.")
+DEFINE_BOOL(enable_etw_stack_walking, false,
+            "Enable etw stack walking for windows")
 // Don't move code objects.
-DEFINE_NEG_IMPLICATION(enable_system_instrumentation, compact_code_space)
+DEFINE_NEG_IMPLICATION(enable_etw_stack_walking, compact_code_space)
 #ifndef V8_TARGET_ARCH_ARM
-DEFINE_IMPLICATION(enable_system_instrumentation,
-                   interpreted_frames_native_stack)
+DEFINE_IMPLICATION(enable_etw_stack_walking, interpreted_frames_native_stack)
 #endif
 
 //
@@ -2344,7 +2346,7 @@ DEFINE_BOOL(enable_embedded_constant_pool, V8_EMBEDDED_CONSTANT_POOL,
 #undef DEFINE_ALIAS_FLOAT
 
 #undef FLAG_MODE_DECLARE
-#undef FLAG_MODE_DEFINE
+#undef FLAG_MODE_DEFINE_GLOBAL_ALIASES
 #undef FLAG_MODE_DEFINE_DEFAULTS
 #undef FLAG_MODE_META
 #undef FLAG_MODE_DEFINE_IMPLICATIONS

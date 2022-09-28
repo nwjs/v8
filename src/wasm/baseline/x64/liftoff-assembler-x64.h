@@ -80,17 +80,18 @@ constexpr Operand kInstanceOperand = GetStackSlot(kInstanceOffset);
 
 constexpr Operand kOSRTargetSlot = GetStackSlot(kOSRTargetOffset);
 
-inline Operand GetMemOp(LiftoffAssembler* assm, Register addr, Register offset,
-                        uintptr_t offset_imm) {
+inline Operand GetMemOp(LiftoffAssembler* assm, Register addr,
+                        Register offset_reg, uintptr_t offset_imm) {
   if (is_uint31(offset_imm)) {
     int32_t offset_imm32 = static_cast<int32_t>(offset_imm);
-    return offset == no_reg ? Operand(addr, offset_imm32)
-                            : Operand(addr, offset, times_1, offset_imm32);
+    return offset_reg == no_reg
+               ? Operand(addr, offset_imm32)
+               : Operand(addr, offset_reg, times_1, offset_imm32);
   }
   // Offset immediate does not fit in 31 bits.
   Register scratch = kScratchRegister;
   assm->TurboAssembler::Move(scratch, offset_imm);
-  if (offset != no_reg) assm->addq(scratch, offset);
+  if (offset_reg != no_reg) assm->addq(scratch, offset_reg);
   return Operand(addr, scratch, times_1, 0);
 }
 
@@ -382,9 +383,7 @@ void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
                                          Register offset_reg,
                                          int32_t offset_imm) {
   DCHECK_GE(offset_imm, 0);
-  if (FLAG_debug_code && offset_reg != no_reg) {
-    AssertZeroExtended(offset_reg);
-  }
+  if (offset_reg != no_reg) AssertZeroExtended(offset_reg);
   Operand src_op = liftoff::GetMemOp(this, src_addr, offset_reg,
                                      static_cast<uint32_t>(offset_imm));
   LoadTaggedPointerField(dst, src_op);
@@ -434,17 +433,15 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
 
 void LiftoffAssembler::AtomicLoad(LiftoffRegister dst, Register src_addr,
                                   Register offset_reg, uintptr_t offset_imm,
-                                  LoadType type, LiftoffRegList pinned) {
+                                  LoadType type, LiftoffRegList /* pinned */) {
   Load(dst, src_addr, offset_reg, offset_imm, type, nullptr, true);
 }
 
 void LiftoffAssembler::Load(LiftoffRegister dst, Register src_addr,
                             Register offset_reg, uintptr_t offset_imm,
                             LoadType type, uint32_t* protected_load_pc,
-                            bool is_load_mem, bool i64_offset) {
-  if (offset_reg != no_reg && !i64_offset) {
-    AssertZeroExtended(offset_reg);
-  }
+                            bool /* is_load_mem */, bool i64_offset) {
+  if (offset_reg != no_reg && !i64_offset) AssertZeroExtended(offset_reg);
   Operand src_op = liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm);
   if (protected_load_pc) *protected_load_pc = pc_offset();
   switch (type.value()) {
@@ -493,7 +490,9 @@ void LiftoffAssembler::Load(LiftoffRegister dst, Register src_addr,
 void LiftoffAssembler::Store(Register dst_addr, Register offset_reg,
                              uintptr_t offset_imm, LiftoffRegister src,
                              StoreType type, LiftoffRegList /* pinned */,
-                             uint32_t* protected_store_pc, bool is_store_mem) {
+                             uint32_t* protected_store_pc,
+                             bool /* is_store_mem */, bool i64_offset) {
+  if (offset_reg != no_reg && !i64_offset) AssertZeroExtended(offset_reg);
   Operand dst_op = liftoff::GetMemOp(this, dst_addr, offset_reg, offset_imm);
   if (protected_store_pc) *protected_store_pc = pc_offset();
   switch (type.value()) {
@@ -526,7 +525,8 @@ void LiftoffAssembler::Store(Register dst_addr, Register offset_reg,
 
 void LiftoffAssembler::AtomicStore(Register dst_addr, Register offset_reg,
                                    uintptr_t offset_imm, LiftoffRegister src,
-                                   StoreType type, LiftoffRegList pinned) {
+                                   StoreType type,
+                                   LiftoffRegList /* pinned */) {
   Operand dst_op = liftoff::GetMemOp(this, dst_addr, offset_reg, offset_imm);
   Register src_reg = src.gp();
   if (cache_state()->is_used(src)) {

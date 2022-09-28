@@ -79,6 +79,8 @@ class V8_EXPORT_PRIVATE GlobalHandles final {
   static void CopyTracedReference(const Address* const* from, Address** to);
   static void DestroyTracedReference(Address* location);
   static void MarkTraced(Address* location);
+  static Object MarkTracedConservatively(Address* inner_location,
+                                         Address* traced_node_block_base);
 
   V8_INLINE static Object Acquire(Address* location);
 
@@ -92,9 +94,6 @@ class V8_EXPORT_PRIVATE GlobalHandles final {
   template <typename T>
   inline Handle<T> Create(T value);
 
-  Handle<Object> CreateTraced(Object value, Address* slot,
-                              GlobalHandleStoreMode store_mode,
-                              bool is_on_stack);
   Handle<Object> CreateTraced(Object value, Address* slot,
                               GlobalHandleStoreMode store_mode);
   Handle<Object> CreateTraced(Address value, Address* slot,
@@ -110,12 +109,11 @@ class V8_EXPORT_PRIVATE GlobalHandles final {
       GarbageCollector collector, const v8::GCCallbackFlags gc_callback_flags);
 
   void IterateStrongRoots(RootVisitor* v);
-  void IterateStrongStackRoots(RootVisitor* v);
   void IterateWeakRoots(RootVisitor* v);
   void IterateAllRoots(RootVisitor* v);
   void IterateAllYoungRoots(RootVisitor* v);
 
-  // Iterates over all traces handles represented by TracedGlobal.
+  // Iterates over all traces handles represented by `v8::TracedReferenceBase`.
   void IterateTracedNodes(
       v8::EmbedderHeapTracer::TracedGlobalHandleVisitor* visitor);
 
@@ -155,14 +153,11 @@ class V8_EXPORT_PRIVATE GlobalHandles final {
 
   size_t TotalSize() const;
   size_t UsedSize() const;
-
   // Number of global handles.
   size_t handles_count() const;
 
-  void SetStackStart(void* stack_start);
-  void NotifyEmptyEmbedderStack();
-  void CleanupOnStackReferencesBelowCurrentStackPosition();
-  size_t NumberOfOnStackHandlesForTesting();
+  using NodeBounds = std::vector<std::pair<const void*, const void*>>;
+  NodeBounds GetTracedNodeBounds() const;
 
   void IterateAllRootsForTesting(v8::PersistentHandleVisitor* v);
 
@@ -180,7 +175,6 @@ class V8_EXPORT_PRIVATE GlobalHandles final {
   class NodeSpace;
   class PendingPhantomCallback;
   class TracedNode;
-  class OnStackTracedNodeSpace;
 
   static GlobalHandles* From(const TracedNode*);
 
@@ -208,12 +202,9 @@ class V8_EXPORT_PRIVATE GlobalHandles final {
 
   std::unique_ptr<NodeSpace<TracedNode>> traced_nodes_;
   std::vector<TracedNode*> traced_young_nodes_;
-  std::unique_ptr<OnStackTracedNodeSpace> on_stack_nodes_;
 
   std::vector<std::pair<Node*, PendingPhantomCallback>>
       regular_pending_phantom_callbacks_;
-  std::vector<std::pair<TracedNode*, PendingPhantomCallback>>
-      traced_pending_phantom_callbacks_;
   std::vector<PendingPhantomCallback> second_pass_callbacks_;
   bool second_pass_callbacks_task_posted_ = false;
 };

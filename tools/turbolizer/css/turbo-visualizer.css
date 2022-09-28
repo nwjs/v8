@@ -1,3 +1,9 @@
+:root {
+  --tspan-font-size: 500%;
+  --history-tspan-font-size: 120%;
+  --history-item-tspan-font-size: 100%;
+}
+
 .visible-transition {
   transition-delay: 0s;
   transition-duration: 1s;
@@ -70,6 +76,11 @@ ol.linenums {
   -webkit-padding-start: 8px;
 }
 
+ol.linenums.constants {
+  margin-top: 3px;
+  color: #298f45;
+}
+
 .line-number {
   display: inline-block;
   min-width: 3ex;
@@ -91,6 +102,10 @@ ol.linenums {
   background-color: #FFFF33 !important;
 }
 
+.linenums li > span {
+  user-select: text;
+}
+
 li.selected .line-number {
   background-color: #FFFF33;
 }
@@ -100,7 +115,7 @@ li.selected .line-number {
   display: block;
 }
 
-.source-container {
+.source-container, .bytecode-source-container {
   border-bottom: 2px solid #AAAAAA;
 }
 
@@ -155,6 +170,7 @@ body {
   display: flex;
   flex-direction: row;
   width: 100vw;
+  height: 100vh;
 }
 
 p {
@@ -347,8 +363,11 @@ input:hover,
   display: inline-flex;
 }
 
-.viewpane {
+#multiview {
   height: 100vh;
+}
+
+.viewpane {
   background-color: #FFFFFF;
   display: flex;
   flex-direction: column;
@@ -413,7 +432,7 @@ input:hover,
 }
 
 tspan {
-  font-size: 500%;
+  font-size: var(--tspan-font-size);
   font-family: sans-serif;
 }
 
@@ -750,4 +769,39 @@ div.highlight-gap-instructions [data-instruction-kind="deoptimization-exits"] {
 
 div.highlight-gap-instructions [data-instruction-kind].selected {
   background-color: yellow;
+}
+
+svg.history-svg-container {
+  position: absolute;
+  z-index: 20;
+  border-radius: 10px;
+  background: #f1f1f1;
+}
+
+svg.history-svg-container .history-label tspan {
+  font-size: var(--history-tspan-font-size);
+  fill: #494848;
+}
+
+svg.history-svg-container .close-button {
+  fill: red;
+  cursor: pointer;
+}
+
+svg.history-svg-container .history-content-scroll {
+  fill: #a09c9c;
+  stroke: none;
+}
+
+svg.history-svg-container .history-item tspan {
+  font-size: var(--history-item-tspan-font-size);
+}
+
+svg.history-svg-container .history-item-record tspan:hover {
+  fill: #606060;
+  cursor: pointer;
+}
+
+svg.history-svg-container .current-history-item tspan {
+  font-weight: bold;
 }

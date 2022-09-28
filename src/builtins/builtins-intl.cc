@@ -137,46 +137,21 @@ BUILTIN(DateTimeFormatPrototypeFormatToParts) {
       Handle<JSDateTimeFormat>::cast(date_format_holder);
 
   Handle<Object> x = args.atOrUndefined(isolate, 1);
-  if (x->IsUndefined(isolate)) {
-    x = factory->NewNumber(JSDate::CurrentTimeValue(isolate));
-  } else {
-    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, x,
-                                       Object::ToNumber(isolate, args.at(1)));
-  }
-
-  double date_value = DateCache::TimeClip(x->Number());
-  if (std::isnan(date_value)) {
-    THROW_NEW_ERROR_RETURN_FAILURE(
-        isolate, NewRangeError(MessageTemplate::kInvalidTimeValue));
-  }
-
   RETURN_RESULT_OR_FAILURE(isolate, JSDateTimeFormat::FormatToParts(
-                                        isolate, dtf, date_value, false));
+                                        isolate, dtf, x, false, method_name));
 }
 
 // Common code for DateTimeFormatPrototypeFormtRange(|ToParts)
 template <class T, MaybeHandle<T> (*F)(Isolate*, Handle<JSDateTimeFormat>,
-                                       double, double)>
+                                       Handle<Object>, Handle<Object>,
+                                       const char* const)>
 V8_WARN_UNUSED_RESULT Object DateTimeFormatRange(
     BuiltinArguments args, Isolate* isolate, const char* const method_name) {
   // 1. Let dtf be this value.
-  // 2. If Type(dtf) is not Object, throw a TypeError exception.
-  CHECK_RECEIVER(JSObject, date_format_holder, method_name);
+  // 2. Perform ? RequireInternalSlot(dtf, [[InitializedDateTimeFormat]]).
+  CHECK_RECEIVER(JSDateTimeFormat, dtf, method_name);
 
-  Factory* factory = isolate->factory();
-
-  // 3. If dtf does not have an [[InitializedDateTimeFormat]] internal slot,
-  //    throw a TypeError exception.
-  if (!date_format_holder->IsJSDateTimeFormat()) {
-    THROW_NEW_ERROR_RETURN_FAILURE(
-        isolate, NewTypeError(MessageTemplate::kIncompatibleMethodReceiver,
-                              factory->NewStringFromAsciiChecked(method_name),
-                              date_format_holder));
-  }
-  Handle<JSDateTimeFormat> dtf =
-      Handle<JSDateTimeFormat>::cast(date_format_holder);
-
-  // 4. If startDate is undefined or endDate is undefined, throw a TypeError
+  // 3. If startDate is undefined or endDate is undefined, throw a TypeError
   // exception.
   Handle<Object> start_date = args.atOrUndefined(isolate, 1);
   Handle<Object> end_date = args.atOrUndefined(isolate, 2);
@@ -184,25 +159,12 @@ V8_WARN_UNUSED_RESULT Object DateTimeFormatRange(
     THROW_NEW_ERROR_RETURN_FAILURE(
         isolate, NewTypeError(MessageTemplate::kInvalidTimeValue));
   }
-  // 5. Let x be ? ToNumber(startDate).
-  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, start_date,
-                                     Object::ToNumber(isolate, start_date));
-  double x = start_date->Number();
 
-  // 6. Let y be ? ToNumber(endDate).
-  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, end_date,
-                                     Object::ToNumber(isolate, end_date));
-  double y = end_date->Number();
-  // 7. If x is greater than y, throw a RangeError exception.
-  if (x > y) {
-    THROW_NEW_ERROR_RETURN_FAILURE(
-        isolate, NewRangeError(MessageTemplate::kInvalidTimeValue));
-  }
-
-  // 8. Return ? FormatDateTimeRange(dtf, x, y)
+  // 4. Return ? FormatDateTimeRange(dtf, startDate, endDate)
   // OR
-  // 8. Return ? FormatDateTimeRangeToParts(dtf, x, y).
-  RETURN_RESULT_OR_FAILURE(isolate, F(isolate, dtf, x, y));
+  // 4. Return ? FormatDateTimeRangeToParts(dtf, startDate, endDate).
+  RETURN_RESULT_OR_FAILURE(isolate,
+                           F(isolate, dtf, start_date, end_date, method_name));
 }
 
 BUILTIN(DateTimeFormatPrototypeFormatRange) {
@@ -602,7 +564,8 @@ BUILTIN(DateTimeFormatInternalFormat) {
   Handle<Object> date = args.atOrUndefined(isolate, 1);
 
   RETURN_RESULT_OR_FAILURE(isolate, JSDateTimeFormat::DateTimeFormat(
-                                        isolate, date_format_holder, date));
+                                        isolate, date_format_holder, date,
+                                        "DateTime Format Functions"));
 }
 
 BUILTIN(IntlGetCanonicalLocales) {
@@ -983,8 +946,6 @@ BUILTIN(PluralRulesPrototypeSelectRange) {
                                      Object::ToNumber(isolate, end));
 
   // 6. Return ! ResolvePluralRange(pr, x, y).
-  // Inside ResolvePluralRange
-  // 5. If x is NaN or y is NaN, throw a RangeError exception.
   if (x->IsNaN()) {
     THROW_NEW_ERROR_RETURN_FAILURE(
         isolate, NewRangeError(MessageTemplate::kInvalid,
@@ -996,16 +957,9 @@ BUILTIN(PluralRulesPrototypeSelectRange) {
                                isolate->factory()->endRange_string(), y));
   }
 
-  // 6. If x > y, throw a RangeError exception.
-  double x_double = x->Number();
-  double y_double = y->Number();
-  if (x_double > y_double) {
-    THROW_NEW_ERROR_RETURN_FAILURE(
-        isolate, NewRangeError(MessageTemplate::kInvalid, x, y));
-  }
   RETURN_RESULT_OR_FAILURE(
       isolate, JSPluralRules::ResolvePluralRange(isolate, plural_rules,
-                                                 x_double, y_double));
+                                                 x->Number(), y->Number()));
 }
 
 BUILTIN(PluralRulesSupportedLocalesOf) {

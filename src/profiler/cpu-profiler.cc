@@ -412,7 +412,7 @@ void ProfilerCodeObserver::LogBuiltins() {
        ++builtin) {
     CodeEventsContainer evt_rec(CodeEventRecord::Type::kReportBuiltin);
     ReportBuiltinEventRecord* rec = &evt_rec.ReportBuiltinEventRecord_;
-    Code code = FromCodeT(builtins->code(builtin));
+    CodeT code = builtins->code(builtin);
     rec->instruction_start = code.InstructionStart();
     rec->instruction_size = code.InstructionSize();
     rec->builtin = builtin;
@@ -568,7 +568,7 @@ void CpuProfiler::DisableLogging() {
   code_observer_->ClearCodeMap();
 }
 
-base::TimeDelta CpuProfiler::ComputeSamplingInterval() const {
+base::TimeDelta CpuProfiler::ComputeSamplingInterval() {
   return profiles_->GetCommonSamplingInterval();
 }
 

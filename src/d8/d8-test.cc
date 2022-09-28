@@ -255,11 +255,15 @@ class FastCApiObject {
 
     Type sum = 0;
     for (uint32_t i = 0; i < length; ++i) {
-      v8::Local<v8::Value> element =
-          seq_arg
-              ->Get(isolate->GetCurrentContext(),
-                    v8::Integer::NewFromUnsigned(isolate, i))
-              .ToLocalChecked();
+      v8::MaybeLocal<v8::Value> maybe_element =
+          seq_arg->Get(isolate->GetCurrentContext(),
+                       v8::Integer::NewFromUnsigned(isolate, i));
+      if (maybe_element.IsEmpty()) {
+        isolate->ThrowError("invalid element in JSArray");
+        return;
+      }
+
+      v8::Local<v8::Value> element = maybe_element.ToLocalChecked();
       if (element->IsNumber()) {
         double value = element->ToNumber(isolate->GetCurrentContext())
                            .ToLocalChecked()
@@ -277,6 +281,12 @@ class FastCApiObject {
 #ifdef V8_USE_SIMULATOR_WITH_GENERIC_C_CALLS
   template <typename T>
   static const FastApiTypedArray<T>* AnyCTypeToTypedArray(AnyCType arg);
+
+  template <>
+  const FastApiTypedArray<uint8_t>* AnyCTypeToTypedArray<uint8_t>(
+      AnyCType arg) {
+    return arg.uint8_ta_value;
+  }
 
   template <>
   const FastApiTypedArray<int32_t>* AnyCTypeToTypedArray<int32_t>(
@@ -333,7 +343,6 @@ class FastCApiObject {
     FastCApiObject* self = UnwrapObject(receiver);
     CHECK_SELF_OR_FALLBACK(0);
     self->fast_call_count_++;
-
     if (should_fallback) {
       options.fallback = true;
       return 0;
@@ -369,12 +378,15 @@ class FastCApiObject {
     size_t length = typed_array_arg->Length();
 
     void* data = typed_array_arg->Buffer()->GetBackingStore()->Data();
-    if (typed_array_arg->IsInt32Array() || typed_array_arg->IsUint32Array() ||
+    if (typed_array_arg->IsUint8Array() || typed_array_arg->IsInt32Array() ||
+        typed_array_arg->IsUint32Array() ||
         typed_array_arg->IsBigInt64Array() ||
         typed_array_arg->IsBigUint64Array()) {
       int64_t sum = 0;
       for (unsigned i = 0; i < length; ++i) {
-        if (typed_array_arg->IsInt32Array()) {
+        if (typed_array_arg->IsUint8Array()) {
+          sum += static_cast<uint8_t*>(data)[i];
+        } else if (typed_array_arg->IsInt32Array()) {
           sum += static_cast<int32_t*>(data)[i];
         } else if (typed_array_arg->IsUint32Array()) {
           sum += static_cast<uint32_t*>(data)[i];
@@ -892,6 +904,18 @@ Local<FunctionTemplate> Shell::CreateTestFastCApiTemplate(Isolate* isolate) {
             isolate, FastCApiObject::AddAllSequenceSlowCallback, Local<Value>(),
             signature, 1, ConstructorBehavior::kThrow,
             SideEffectType::kHasSideEffect, &add_all_seq_c_func));
+
+    CFunction add_all_uint8_typed_array_c_func = CFunction::Make(
+        FastCApiObject::AddAllTypedArrayFastCallback<uint8_t>
+            V8_IF_USE_SIMULATOR(
+                FastCApiObject::AddAllTypedArrayFastCallbackPatch<uint8_t>));
+
+    api_obj_ctor->PrototypeTemplate()->Set(
+        isolate, "add_all_uint8_typed_array",
+        FunctionTemplate::New(
+            isolate, FastCApiObject::AddAllTypedArraySlowCallback,
+            Local<Value>(), signature, 1, ConstructorBehavior::kThrow,
+            SideEffectType::kHasSideEffect, &add_all_uint8_typed_array_c_func));
 
     CFunction add_all_int32_typed_array_c_func = CFunction::Make(
         FastCApiObject::AddAllTypedArrayFastCallback<int32_t>

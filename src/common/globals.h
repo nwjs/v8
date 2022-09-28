@@ -58,6 +58,9 @@ namespace internal {
 #if (V8_TARGET_ARCH_RISCV64 && !V8_HOST_ARCH_RISCV64)
 #define USE_SIMULATOR 1
 #endif
+#if (V8_TARGET_ARCH_RISCV32 && !V8_HOST_ARCH_RISCV32)
+#define USE_SIMULATOR 1
+#endif
 #if (V8_TARGET_ARCH_LOONG64 && !V8_HOST_ARCH_LOONG64)
 #define USE_SIMULATOR 1
 #endif
@@ -335,7 +338,7 @@ constexpr bool kPlatformRequiresCodeRange = false;
 constexpr size_t kMaximalCodeRangeSize = 0 * MB;
 constexpr size_t kMinimumCodeRangeSize = 0 * MB;
 constexpr size_t kMinExpectedOSPageSize = 64 * KB;  // OS page on PPC Linux
-#elif V8_TARGET_ARCH_MIPS
+#elif V8_TARGET_ARCH_MIPS || V8_TARGET_ARCH_RISCV32
 constexpr bool kPlatformRequiresCodeRange = false;
 constexpr size_t kMaximalCodeRangeSize = 2048LL * MB;
 constexpr size_t kMinimumCodeRangeSize = 0 * MB;
@@ -649,6 +652,18 @@ constexpr intptr_t kSmiSignMask = static_cast<intptr_t>(
 constexpr int kObjectAlignmentBits = kTaggedSizeLog2;
 constexpr intptr_t kObjectAlignment = 1 << kObjectAlignmentBits;
 constexpr intptr_t kObjectAlignmentMask = kObjectAlignment - 1;
+
+// Object alignment for 8GB pointer compressed heap.
+constexpr intptr_t kObjectAlignment8GbHeap = 8;
+constexpr intptr_t kObjectAlignment8GbHeapMask = kObjectAlignment8GbHeap - 1;
+
+#ifdef V8_COMPRESS_POINTERS_8GB
+static_assert(
+    kObjectAlignment8GbHeap == 2 * kTaggedSize,
+    "When the 8GB heap is enabled, all allocations should be aligned to twice "
+    "the size of a tagged value. This enables aligning allocations by just "
+    "adding kTaggedSize to an unaligned address.");
+#endif
 
 // Desired alignment for system pointers.
 constexpr intptr_t kPointerAlignment = (1 << kSystemPointerSizeLog2);

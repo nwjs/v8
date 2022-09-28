@@ -124,6 +124,10 @@ bool Object::IsNullOrUndefined(Isolate* isolate) const {
   return IsNullOrUndefined(ReadOnlyRoots(isolate));
 }
 
+bool Object::IsNullOrUndefined(LocalIsolate* local_isolate) const {
+  return IsNullOrUndefined(ReadOnlyRoots(local_isolate));
+}
+
 bool Object::IsNullOrUndefined(ReadOnlyRoots roots) const {
   return IsNull(roots) || IsUndefined(roots);
 }
@@ -342,16 +346,6 @@ DEF_GETTER(HeapObject, IsDependentCode, bool) {
 
 DEF_GETTER(HeapObject, IsOSROptimizedCodeCache, bool) {
   return IsWeakFixedArray(cage_base);
-}
-
-bool HeapObject::IsAbstractCode() const {
-  // TODO(v8:11880): Either make AbstractCode be ByteArray|CodeT or
-  // ensure this version is not called for hot code.
-  PtrComprCageBase cage_base = GetPtrComprCageBaseSlow(*this);
-  return HeapObject::IsAbstractCode(cage_base);
-}
-bool HeapObject::IsAbstractCode(PtrComprCageBase cage_base) const {
-  return IsBytecodeArray(cage_base) || IsCode(cage_base);
 }
 
 DEF_GETTER(HeapObject, IsStringWrapper, bool) {
@@ -669,11 +663,6 @@ void Object::WriteSandboxedPointerField(size_t offset, Isolate* isolate,
 }
 
 template <ExternalPointerTag tag>
-void Object::InitExternalPointerField(size_t offset, Isolate* isolate) {
-  i::InitExternalPointerField<tag>(field_address(offset), isolate);
-}
-
-template <ExternalPointerTag tag>
 void Object::InitExternalPointerField(size_t offset, Isolate* isolate,
                                       Address value) {
   i::InitExternalPointerField<tag>(field_address(offset), isolate, value);
@@ -855,7 +844,7 @@ void HeapObject::set_map(Map value, MemoryOrder order, VerificationMode mode) {
 #ifndef V8_DISABLE_WRITE_BARRIERS
   if (!value.is_null()) {
     if (emit_write_barrier == EmitWriteBarrier::kYes) {
-      WriteBarrier::Marking(*this, map_slot(), value);
+      CombinedWriteBarrier(*this, map_slot(), value, UPDATE_WRITE_BARRIER);
     } else {
       DCHECK_EQ(emit_write_barrier, EmitWriteBarrier::kNo);
       SLOW_DCHECK(!WriteBarrier::IsRequired(*this, value));
@@ -870,7 +859,7 @@ void HeapObject::set_map_after_allocation(Map value, WriteBarrierMode mode) {
 #ifndef V8_DISABLE_WRITE_BARRIERS
   if (mode != SKIP_WRITE_BARRIER) {
     DCHECK(!value.is_null());
-    WriteBarrier::Marking(*this, map_slot(), value);
+    CombinedWriteBarrier(*this, map_slot(), value, mode);
   } else {
     SLOW_DCHECK(!WriteBarrier::IsRequired(*this, value));
   }
@@ -1183,6 +1172,7 @@ bool Object::IsShared() const {
     case JS_SHARED_ARRAY_TYPE:
     case JS_SHARED_STRUCT_TYPE:
     case JS_ATOMICS_MUTEX_TYPE:
+    case JS_ATOMICS_CONDITION_TYPE:
       DCHECK(object.InSharedHeap());
       return true;
     case INTERNALIZED_STRING_TYPE:

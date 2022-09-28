@@ -32,8 +32,8 @@
 #include "src/baseline/ppc/baseline-assembler-ppc-inl.h"
 #elif V8_TARGET_ARCH_S390X
 #include "src/baseline/s390/baseline-assembler-s390-inl.h"
-#elif V8_TARGET_ARCH_RISCV64
-#include "src/baseline/riscv64/baseline-assembler-riscv64-inl.h"
+#elif V8_TARGET_ARCH_RISCV32 || V8_TARGET_ARCH_RISCV64
+#include "src/baseline/riscv/baseline-assembler-riscv-inl.h"
 #elif V8_TARGET_ARCH_MIPS64
 #include "src/baseline/mips64/baseline-assembler-mips64-inl.h"
 #elif V8_TARGET_ARCH_MIPS
@@ -64,6 +64,16 @@ void BaselineAssembler::Trap() { __ Trap(); }
 void BaselineAssembler::DebugBreak() { __ DebugBreak(); }
 void BaselineAssembler::CallRuntime(Runtime::FunctionId function, int nargs) {
   __ CallRuntime(function, nargs);
+}
+
+void BaselineAssembler::CallBuiltin(Builtin builtin) {
+  // BaselineAssemblerOptions defines how builtin calls are generated.
+  __ CallBuiltin(builtin);
+}
+
+void BaselineAssembler::TailCallBuiltin(Builtin builtin) {
+  // BaselineAssemblerOptions defines how builtin tail calls are generated.
+  __ TailCallBuiltin(builtin);
 }
 
 MemOperand BaselineAssembler::ContextOperand() {

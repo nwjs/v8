@@ -160,9 +160,7 @@ class WasmGraphBuildingInterface {
     while (index < num_locals) {
       ValueType type = decoder->local_type(index);
       TFNode* node;
-      if ((decoder->enabled_.has_nn_locals() ||
-           decoder->enabled_.has_unsafe_nn_locals()) &&
-          !type.is_defaultable()) {
+      if (!type.is_defaultable()) {
         DCHECK(type.is_reference());
         // TODO(jkummerow): Consider using "the hole" instead, to make any
         // illegal uses more obvious.
@@ -1073,17 +1071,17 @@ class WasmGraphBuildingInterface {
     builder_->TableFill(imm.index, start.node, value.node, count.node);
   }
 
-  void StructNewWithRtt(FullDecoder* decoder,
-                        const StructIndexImmediate<validate>& imm,
-                        const Value& rtt, const Value args[], Value* result) {
+  void StructNew(FullDecoder* decoder,
+                 const StructIndexImmediate<validate>& imm, const Value& rtt,
+                 const Value args[], Value* result) {
     uint32_t field_count = imm.struct_type->field_count();
     NodeVector arg_nodes(field_count);
     for (uint32_t i = 0; i < field_count; i++) {
       arg_nodes[i] = args[i].node;
     }
-    SetAndTypeNode(
-        result, builder_->StructNewWithRtt(imm.index, imm.struct_type, rtt.node,
-                                           base::VectorOf(arg_nodes)));
+    SetAndTypeNode(result,
+                   builder_->StructNew(imm.index, imm.struct_type, rtt.node,
+                                       base::VectorOf(arg_nodes)));
   }
   void StructNewDefault(FullDecoder* decoder,
                         const StructIndexImmediate<validate>& imm,
@@ -1095,9 +1093,9 @@ class WasmGraphBuildingInterface {
       arg_nodes[i] = builder_->SetType(builder_->DefaultValue(field_type),
                                        field_type.Unpacked());
     }
-    SetAndTypeNode(
-        result, builder_->StructNewWithRtt(imm.index, imm.struct_type, rtt.node,
-                                           base::VectorOf(arg_nodes)));
+    SetAndTypeNode(result,
+                   builder_->StructNew(imm.index, imm.struct_type, rtt.node,
+                                       base::VectorOf(arg_nodes)));
   }
 
   void StructGet(FullDecoder* decoder, const Value& struct_object,
@@ -1118,14 +1116,12 @@ class WasmGraphBuildingInterface {
                         NullCheckFor(struct_object.type), decoder->position());
   }
 
-  void ArrayNewWithRtt(FullDecoder* decoder,
-                       const ArrayIndexImmediate<validate>& imm,
-                       const Value& length, const Value& initial_value,
-                       const Value& rtt, Value* result) {
-    SetAndTypeNode(result,
-                   builder_->ArrayNewWithRtt(imm.index, imm.array_type,
-                                             length.node, initial_value.node,
-                                             rtt.node, decoder->position()));
+  void ArrayNew(FullDecoder* decoder, const ArrayIndexImmediate<validate>& imm,
+                const Value& length, const Value& initial_value,
+                const Value& rtt, Value* result) {
+    SetAndTypeNode(result, builder_->ArrayNew(imm.index, imm.array_type,
+                                              length.node, initial_value.node,
+                                              rtt.node, decoder->position()));
     // array.new_with_rtt introduces a loop. Therefore, we have to mark the
     // immediately nesting loop (if any) as non-innermost.
     if (!loop_infos_.empty()) loop_infos_.back().can_be_innermost = false;
@@ -1136,9 +1132,9 @@ class WasmGraphBuildingInterface {
                        const Value& length, const Value& rtt, Value* result) {
     // This will be set in {builder_}.
     TFNode* initial_value = nullptr;
-    SetAndTypeNode(result, builder_->ArrayNewWithRtt(
-                               imm.index, imm.array_type, length.node,
-                               initial_value, rtt.node, decoder->position()));
+    SetAndTypeNode(result, builder_->ArrayNew(imm.index, imm.array_type,
+                                              length.node, initial_value,
+                                              rtt.node, decoder->position()));
   }
 
   void ArrayGet(FullDecoder* decoder, const Value& array_obj,
@@ -1199,11 +1195,15 @@ class WasmGraphBuildingInterface {
   }
 
   void I31GetS(FullDecoder* decoder, const Value& input, Value* result) {
-    SetAndTypeNode(result, builder_->I31GetS(input.node));
+    SetAndTypeNode(result,
+                   builder_->I31GetS(input.node, NullCheckFor(input.type),
+                                     decoder->position()));
   }
 
   void I31GetU(FullDecoder* decoder, const Value& input, Value* result) {
-    SetAndTypeNode(result, builder_->I31GetU(input.node));
+    SetAndTypeNode(result,
+                   builder_->I31GetU(input.node, NullCheckFor(input.type),
+                                     decoder->position()));
   }
 
   void RttCanon(FullDecoder* decoder, uint32_t type_index, Value* result) {
@@ -1304,32 +1304,6 @@ class WasmGraphBuildingInterface {
   void BrOnNonData(FullDecoder* decoder, const Value& object,
                    Value* value_on_fallthrough, uint32_t br_depth) {
     BrOnCastAbs<&compiler::WasmGraphBuilder::BrOnData>(
-        decoder, object, Value{nullptr, kWasmBottom}, value_on_fallthrough,
-        br_depth, false);
-  }
-
-  void RefIsFunc(FullDecoder* decoder, const Value& object, Value* result) {
-    SetAndTypeNode(result,
-                   builder_->RefIsFunc(object.node, object.type.is_nullable()));
-  }
-
-  void RefAsFunc(FullDecoder* decoder, const Value& object, Value* result) {
-    TFNode* cast_object = builder_->RefAsFunc(
-        object.node, object.type.is_nullable(), decoder->position());
-    TFNode* rename = builder_->TypeGuard(cast_object, result->type);
-    SetAndTypeNode(result, rename);
-  }
-
-  void BrOnFunc(FullDecoder* decoder, const Value& object,
-                Value* value_on_branch, uint32_t br_depth) {
-    BrOnCastAbs<&compiler::WasmGraphBuilder::BrOnFunc>(
-        decoder, object, Value{nullptr, kWasmBottom}, value_on_branch, br_depth,
-        true);
-  }
-
-  void BrOnNonFunc(FullDecoder* decoder, const Value& object,
-                   Value* value_on_fallthrough, uint32_t br_depth) {
-    BrOnCastAbs<&compiler::WasmGraphBuilder::BrOnFunc>(
         decoder, object, Value{nullptr, kWasmBottom}, value_on_fallthrough,
         br_depth, false);
   }

@@ -83,40 +83,6 @@ class CompileImportWrapperJob final : public JobTask {
   WasmImportWrapperCache::ModificationScope* const cache_scope_;
 };
 
-Handle<DescriptorArray> CreateStructDescriptorArray(
-    Isolate* isolate, const wasm::StructType* type) {
-  if (type->field_count() == 0) {
-    return isolate->factory()->empty_descriptor_array();
-  }
-  uint32_t field_count = type->field_count();
-  static_assert(kV8MaxWasmStructFields <= kMaxNumberOfDescriptors,
-                "Bigger numbers of struct fields require different approach");
-  Handle<DescriptorArray> descriptors =
-      isolate->factory()->NewDescriptorArray(field_count);
-
-  // TODO(ishell): cache Wasm field type in FieldType value.
-  MaybeObject any_type = MaybeObject::FromObject(FieldType::Any());
-  DCHECK(any_type->IsSmi());
-
-  base::EmbeddedVector<char, 128> name_buffer;
-  for (uint32_t i = 0; i < field_count; i++) {
-    // TODO(ishell): consider introducing a cache of first N internalized field
-    // names similar to LookupSingleCharacterStringFromCode().
-    SNPrintF(name_buffer, "$field%d", i);
-    Handle<String> name =
-        isolate->factory()->InternalizeUtf8String(name_buffer.begin());
-
-    PropertyAttributes attributes = type->mutability(i) ? SEALED : FROZEN;
-    PropertyDetails details(
-        PropertyKind::kData, attributes, PropertyLocation::kField,
-        PropertyConstness::kMutable,  // Don't track constness
-        Representation::WasmValue(), static_cast<int>(i));
-    descriptors->Set(InternalIndex(i), *name, any_type, details);
-  }
-  descriptors->Sort();
-  return descriptors;
-}
-
 Handle<DescriptorArray> CreateArrayDescriptorArray(
     Isolate* isolate, const wasm::ArrayType* type) {
   uint32_t kDescriptorsCount = 1;
@@ -153,13 +119,11 @@ Handle<Map> CreateStructMap(Isolate* isolate, const WasmModule* module,
   Handle<WasmTypeInfo> type_info = isolate->factory()->NewWasmTypeInfo(
       reinterpret_cast<Address>(type), opt_rtt_parent, real_instance_size,
       instance);
-  Handle<DescriptorArray> descriptors =
-      CreateStructDescriptorArray(isolate, type);
   Handle<Map> map = isolate->factory()->NewMap(
       instance_type, map_instance_size, elements_kind, inobject_properties);
   map->set_wasm_type_info(*type_info);
-  map->SetInstanceDescriptors(isolate, *descriptors,
-                              descriptors->number_of_descriptors());
+  map->SetInstanceDescriptors(isolate,
+                              *isolate->factory()->empty_descriptor_array(), 0);
   map->set_is_extensible(false);
   WasmStruct::EncodeInstanceSizeInMap(real_instance_size, *map);
   return map;
@@ -405,7 +369,7 @@ class InstanceBuilder {
   // and globals.
   void ProcessExports(Handle<WasmInstanceObject> instance);
 
-  void InitializeNonDefaultableTables(Handle<WasmInstanceObject> instance);
+  void SetTableInitialValues(Handle<WasmInstanceObject> instance);
 
   void LoadTableSegments(Handle<WasmInstanceObject> instance);
 
@@ -413,6 +377,69 @@ class InstanceBuilder {
   // imported, those tags will be re-used.
   void InitializeTags(Handle<WasmInstanceObject> instance);
 };
+
+namespace {
+class ReportLazyCompilationTimesTask : public v8::Task {
+ public:
+  ReportLazyCompilationTimesTask(std::weak_ptr<Counters> counters,
+                                 std::weak_ptr<NativeModule> native_module,
+                                 int delay_in_seconds)
+      : counters_(std::move(counters)),
+        native_module_(std::move(native_module)),
+        delay_in_seconds_(delay_in_seconds) {}
+
+  void Run() final {
+    std::shared_ptr<NativeModule> native_module = native_module_.lock();
+    if (!native_module) return;
+    std::shared_ptr<Counters> counters = counters_.lock();
+    if (!counters) return;
+    int num_compilations = native_module->num_lazy_compilations();
+    // If no compilations happened, we don't add samples. Experiments showed
+    // many cases of num_compilations == 0, and adding these cases would make
+    // other cases less visible.
+    if (!num_compilations) return;
+    if (delay_in_seconds_ == 5) {
+      counters->wasm_num_lazy_compilations_5sec()->AddSample(num_compilations);
+      counters->wasm_sum_lazy_compilation_time_5sec()->AddSample(
+          static_cast<int>(native_module->sum_lazy_compilation_time_in_ms()));
+      counters->wasm_max_lazy_compilation_time_5sec()->AddSample(
+          static_cast<int>(native_module->max_lazy_compilation_time_in_ms()));
+      return;
+    }
+    if (delay_in_seconds_ == 20) {
+      counters->wasm_num_lazy_compilations_20sec()->AddSample(num_compilations);
+      counters->wasm_sum_lazy_compilation_time_20sec()->AddSample(
+          static_cast<int>(native_module->sum_lazy_compilation_time_in_ms()));
+      counters->wasm_max_lazy_compilation_time_20sec()->AddSample(
+          static_cast<int>(native_module->max_lazy_compilation_time_in_ms()));
+      return;
+    }
+    if (delay_in_seconds_ == 60) {
+      counters->wasm_num_lazy_compilations_60sec()->AddSample(num_compilations);
+      counters->wasm_sum_lazy_compilation_time_60sec()->AddSample(
+          static_cast<int>(native_module->sum_lazy_compilation_time_in_ms()));
+      counters->wasm_max_lazy_compilation_time_60sec()->AddSample(
+          static_cast<int>(native_module->max_lazy_compilation_time_in_ms()));
+      return;
+    }
+    if (delay_in_seconds_ == 120) {
+      counters->wasm_num_lazy_compilations_120sec()->AddSample(
+          num_compilations);
+      counters->wasm_sum_lazy_compilation_time_120sec()->AddSample(
+          static_cast<int>(native_module->sum_lazy_compilation_time_in_ms()));
+      counters->wasm_max_lazy_compilation_time_120sec()->AddSample(
+          static_cast<int>(native_module->max_lazy_compilation_time_in_ms()));
+      return;
+    }
+    UNREACHABLE();
+  }
+
+ private:
+  std::weak_ptr<Counters> counters_;
+  std::weak_ptr<NativeModule> native_module_;
+  int delay_in_seconds_;
+};
+}  // namespace
 
 MaybeHandle<WasmInstanceObject> InstantiateToInstanceObject(
     Isolate* isolate, ErrorThrower* thrower,
@@ -423,8 +450,35 @@ MaybeHandle<WasmInstanceObject> InstantiateToInstanceObject(
   InstanceBuilder builder(isolate, context_id, thrower, module_object, imports,
                           memory_buffer);
   auto instance = builder.Build();
-  if (!instance.is_null() && builder.ExecuteStartFunction()) {
-    return instance;
+  if (!instance.is_null()) {
+    // Post tasks for lazy compilation metrics before we call the start function
+    if (FLAG_wasm_lazy_compilation &&
+        module_object->native_module()
+            ->ShouldLazyCompilationMetricsBeReported()) {
+      V8::GetCurrentPlatform()->CallDelayedOnWorkerThread(
+          std::make_unique<ReportLazyCompilationTimesTask>(
+              isolate->async_counters(), module_object->shared_native_module(),
+              5),
+          5.0);
+      V8::GetCurrentPlatform()->CallDelayedOnWorkerThread(
+          std::make_unique<ReportLazyCompilationTimesTask>(
+              isolate->async_counters(), module_object->shared_native_module(),
+              20),
+          20.0);
+      V8::GetCurrentPlatform()->CallDelayedOnWorkerThread(
+          std::make_unique<ReportLazyCompilationTimesTask>(
+              isolate->async_counters(), module_object->shared_native_module(),
+              60),
+          60.0);
+      V8::GetCurrentPlatform()->CallDelayedOnWorkerThread(
+          std::make_unique<ReportLazyCompilationTimesTask>(
+              isolate->async_counters(), module_object->shared_native_module(),
+              120),
+          120.0);
+    }
+    if (builder.ExecuteStartFunction()) {
+      return instance;
+    }
   }
   DCHECK(isolate->has_pending_exception() || thrower->error());
   return {};
@@ -601,6 +655,10 @@ MaybeHandle<WasmInstanceObject> InstanceBuilder::Build() {
   //--------------------------------------------------------------------------
   // Set up table storage space.
   //--------------------------------------------------------------------------
+  if (FLAG_wasm_type_canonicalization) {
+    instance->set_isorecursive_canonical_types(
+        module_->isorecursive_canonical_type_ids.data());
+  }
   int table_count = static_cast<int>(module_->tables.size());
   {
     for (int i = 0; i < table_count; i++) {
@@ -618,7 +676,7 @@ MaybeHandle<WasmInstanceObject> InstanceBuilder::Build() {
     for (int i = module_->num_imported_tables; i < table_count; i++) {
       const WasmTable& table = module_->tables[i];
       // Initialize tables with null for now. We will initialize non-defaultable
-      // tables later, in {InitializeNonDefaultableTables}.
+      // tables later, in {SetTableInitialValues}.
       Handle<WasmTableObject> table_obj = WasmTableObject::New(
           isolate_, instance, table.type, table.initial_size,
           table.has_maximum_size, table.maximum_size, nullptr,
@@ -730,7 +788,7 @@ MaybeHandle<WasmInstanceObject> InstanceBuilder::Build() {
   // Initialize non-defaultable tables.
   //--------------------------------------------------------------------------
   if (FLAG_experimental_wasm_typed_funcref) {
-    InitializeNonDefaultableTables(instance);
+    SetTableInitialValues(instance);
   }
 
   //--------------------------------------------------------------------------
@@ -775,8 +833,7 @@ MaybeHandle<WasmInstanceObject> InstanceBuilder::Build() {
     // function. Use CWasmEntry instead.
     start_function_ = WasmExportedFunction::New(
         isolate_, instance, start_index,
-        static_cast<int>(function.sig->parameter_count()), wrapper_code,
-        kNoSuspend);
+        static_cast<int>(function.sig->parameter_count()), wrapper_code);
 
     if (function.imported) {
       ImportedFunctionEntry entry(instance, module_->start_function_index);
@@ -1196,18 +1253,20 @@ bool InstanceBuilder::InitializeImportedIndirectFunctionTable(
 
     Handle<WasmInstanceObject> target_instance =
         maybe_target_instance.ToHandleChecked();
-    const FunctionSig* sig = target_instance->module_object()
-                                 .module()
-                                 ->functions[function_index]
-                                 .sig;
+    const WasmModule* target_module = target_instance->module_object().module();
+    const WasmFunction& function = target_module->functions[function_index];
 
-    // Look up the signature's canonical id. If there is no canonical
-    // id, then the signature does not appear at all in this module,
-    // so putting {-1} in the table will cause checks to always fail.
+    // Look up the signature's canonical id. In the case of
+    // !FLAG_wasm_type_canonicalization, if there is no canonical id, then the
+    // signature does not appear at all in this module, so putting {-1} in the
+    // table will cause checks to always fail.
     FunctionTargetAndRef entry(target_instance, function_index);
+    uint32_t canonicalized_sig_index =
+        FLAG_wasm_type_canonicalization
+            ? target_module->isorecursive_canonical_type_ids[function.sig_index]
+            : module_->signature_map.Find(*function.sig);
     instance->GetIndirectFunctionTable(isolate_, table_index)
-        ->Set(i, module_->signature_map.Find(*sig), entry.call_target(),
-              *entry.ref());
+        ->Set(i, canonicalized_sig_index, entry.call_target(), *entry.ref());
   }
   return true;
 }
@@ -1566,7 +1625,7 @@ void InstanceBuilder::CompileImportWrappers(
 
   auto compile_job_task = std::make_unique<CompileImportWrapperJob>(
       isolate_->counters(), native_module, &import_wrapper_queue, &cache_scope);
-  auto compile_job = V8::GetCurrentPlatform()->PostJob(
+  auto compile_job = V8::GetCurrentPlatform()->CreateJob(
       TaskPriority::kUserVisible, std::move(compile_job_task));
 
   // Wait for the job to finish, while contributing in this thread.
@@ -1686,9 +1745,13 @@ bool InstanceBuilder::AllocateMemory() {
                     ? SharedFlag::kShared
                     : SharedFlag::kNotShared;
 
-  if (!WasmMemoryObject::New(isolate_, initial_pages, maximum_pages, shared)
+  auto mem_type = module_->is_memory64 ? WasmMemoryFlag::kWasmMemory64
+                                       : WasmMemoryFlag::kWasmMemory32;
+  if (!WasmMemoryObject::New(isolate_, initial_pages, maximum_pages, shared,
+                             mem_type)
            .ToHandle(&memory_object_)) {
-    thrower_->RangeError("Out of memory: wasm memory");
+    thrower_->RangeError(
+        "Out of memory: Cannot allocate Wasm memory for new instance");
     return false;
   }
   memory_buffer_ =
@@ -1907,12 +1970,12 @@ V8_INLINE void SetFunctionTableNullEntry(Isolate* isolate,
 }
 }  // namespace
 
-void InstanceBuilder::InitializeNonDefaultableTables(
+void InstanceBuilder::SetTableInitialValues(
     Handle<WasmInstanceObject> instance) {
   for (int table_index = 0;
        table_index < static_cast<int>(module_->tables.size()); ++table_index) {
     const WasmTable& table = module_->tables[table_index];
-    if (!table.type.is_defaultable()) {
+    if (table.initial_value.is_set()) {
       auto table_object = handle(
           WasmTableObject::cast(instance->tables().get(table_index)), isolate_);
       bool is_function_table = IsSubtypeOf(table.type, kWasmFuncRef, module_);
@@ -1940,8 +2003,8 @@ void InstanceBuilder::InitializeNonDefaultableTables(
                                to_value(result).to_ref());
         }
       }
+    }
   }
-}
 }
 
 namespace {

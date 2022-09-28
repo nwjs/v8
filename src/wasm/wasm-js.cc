@@ -244,16 +244,6 @@ i::wasm::ModuleWireBytes GetFirstArgumentAsBytes(
   return i::wasm::ModuleWireBytes(start, start + length);
 }
 
-i::MaybeHandle<i::JSFunction> GetFirstArgumentAsJSFunction(
-    const v8::FunctionCallbackInfo<v8::Value>& args, ErrorThrower* thrower) {
-  i::Handle<i::Object> arg0 = Utils::OpenHandle(*args[0]);
-  if (!arg0->IsJSFunction()) {
-    thrower->TypeError("Argument 0 must be a function");
-    return {};
-  }
-  return i::Handle<i::JSFunction>::cast(arg0);
-}
-
 namespace {
 i::MaybeHandle<i::JSReceiver> ImportsAsMaybeReceiver(Local<Value> ffi) {
   if (ffi->IsUndefined()) return {};
@@ -1188,8 +1178,7 @@ void WebAssemblyTable(const v8::FunctionCallbackInfo<v8::Value>& args) {
       // and anyfunc just becomes an alias for "funcref".
       type = i::wasm::kWasmFuncRef;
     } else if (string->StringEquals(v8_str(isolate, "externref"))) {
-      // externref is known as anyref as of wasm-gc.
-      type = i::wasm::kWasmAnyRef;
+      type = i::wasm::kWasmExternRef;
     } else if (enabled_features.has_stringref() &&
                string->StringEquals(v8_str(isolate, "stringref"))) {
       type = i::wasm::kWasmStringRef;
@@ -1290,16 +1279,19 @@ void WebAssemblyMemory(const v8::FunctionCallbackInfo<v8::Value>& args) {
   Local<Context> context = isolate->GetCurrentContext();
   Local<v8::Object> descriptor = Local<Object>::Cast(args[0]);
 
+  // TODO(clemensb): The JS API spec is not updated for memory64 yet; fix this
+  // code once it is.
   int64_t initial = 0;
   if (!GetInitialOrMinimumProperty(isolate, &thrower, context, descriptor,
-                                   &initial, 0, i::wasm::kSpecMaxMemoryPages)) {
+                                   &initial, 0,
+                                   i::wasm::kSpecMaxMemory32Pages)) {
     return;
   }
   // The descriptor's 'maximum'.
   int64_t maximum = i::WasmMemoryObject::kNoMaximum;
   if (!GetOptionalIntegerProperty(isolate, &thrower, context, descriptor,
                                   v8_str(isolate, "maximum"), nullptr, &maximum,
-                                  initial, i::wasm::kSpecMaxMemoryPages)) {
+                                  initial, i::wasm::kSpecMaxMemory32Pages)) {
     return;
   }
 
@@ -1382,7 +1374,7 @@ bool GetValueType(Isolate* isolate, MaybeLocal<Value> maybe,
   } else if (string->StringEquals(v8_str(isolate, "f64"))) {
     *type = i::wasm::kWasmF64;
   } else if (string->StringEquals(v8_str(isolate, "externref"))) {
-    *type = i::wasm::kWasmAnyRef;
+    *type = i::wasm::kWasmExternRef;
   } else if (enabled_features.has_type_reflection() &&
              string->StringEquals(v8_str(isolate, "funcref"))) {
     // The type reflection proposal renames "anyfunc" to "funcref", and makes
@@ -1397,6 +1389,9 @@ bool GetValueType(Isolate* isolate, MaybeLocal<Value> maybe,
   } else if (enabled_features.has_stringref() &&
              string->StringEquals(v8_str(isolate, "stringref"))) {
     *type = i::wasm::kWasmStringRef;
+  } else if (enabled_features.has_gc() &&
+             string->StringEquals(v8_str(isolate, "anyref"))) {
+    *type = i::wasm::kWasmAnyRef;
   } else {
     // Unrecognized type.
     *type = i::wasm::kWasmVoid;
@@ -1548,7 +1543,7 @@ void WebAssemblyGlobal(const v8::FunctionCallbackInfo<v8::Value>& args) {
     case i::wasm::kRef:
     case i::wasm::kRefNull: {
       switch (type.heap_representation()) {
-        case i::wasm::HeapType::kAny: {
+        case i::wasm::HeapType::kExtern: {
           if (args.Length() < 2) {
             // When no initial value is provided, we have to use the WebAssembly
             // default value 'null', and not the JS default value 'undefined'.
@@ -1596,6 +1591,7 @@ void WebAssemblyGlobal(const v8::FunctionCallbackInfo<v8::Value>& args) {
         case internal::wasm::HeapType::kI31:
         case internal::wasm::HeapType::kData:
         case internal::wasm::HeapType::kArray:
+        case internal::wasm::HeapType::kAny:
         case internal::wasm::HeapType::kStringViewWtf8:
         case internal::wasm::HeapType::kStringViewWtf16:
         case internal::wasm::HeapType::kStringViewIter:
@@ -1751,6 +1747,8 @@ void EncodeExceptionValues(v8::Isolate* isolate,
   auto values = arg.As<Object>();
   for (int i = 0; i < signature->length(); ++i) {
     MaybeLocal<Value> maybe_value = values->Get(context, i);
+    i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+    if (i_isolate->has_scheduled_exception()) return;
     Local<Value> value = maybe_value.ToLocalChecked();
     i::wasm::ValueType type = signature->get(i);
     switch (type.kind()) {
@@ -1784,6 +1782,7 @@ void EncodeExceptionValues(v8::Isolate* isolate,
       case i::wasm::kRefNull:
         switch (type.heap_representation()) {
           case i::wasm::HeapType::kFunc:
+          case i::wasm::HeapType::kExtern:
           case i::wasm::HeapType::kAny:
           case i::wasm::HeapType::kEq:
           case i::wasm::HeapType::kI31:
@@ -1880,6 +1879,76 @@ void WebAssemblyException(const v8::FunctionCallbackInfo<v8::Value>& args) {
       Utils::ToLocal(i::Handle<i::Object>::cast(runtime_exception)));
 }
 
+namespace {
+bool HasJSPromiseIntegrationFlag(Isolate* isolate, Local<Object> usage_obj,
+                                 ErrorThrower* thrower, const char* flag_name) {
+  Local<Context> context = isolate->GetCurrentContext();
+  Local<String> flag_str = v8_str(isolate, flag_name);
+  Local<String> first_str = v8_str(isolate, "first");
+  Local<String> last_str = v8_str(isolate, "last");
+  Local<String> none_str = v8_str(isolate, "none");
+  v8::MaybeLocal<v8::Value> maybe_flag = usage_obj->Get(context, flag_str);
+  v8::Local<Value> flag_value;
+  v8::Local<String> flag_value_str;
+  if (maybe_flag.ToLocal(&flag_value) && !flag_value->IsUndefined() &&
+      flag_value->ToString(context).ToLocal(&flag_value_str)) {
+    if (!flag_value_str->StringEquals(first_str) &&
+        !flag_value_str->StringEquals(last_str) &&
+        !flag_value_str->StringEquals(none_str)) {
+      thrower->TypeError(
+          "JS Promise Integration: Expected suspender "
+          "position to be \"first\", \"last\" or \"none\"");
+      return false;
+    } else if (flag_value_str->StringEquals(last_str)) {
+      // TODO(thibaudm): Support the "last" position.
+      UNIMPLEMENTED();
+    } else if (flag_value_str->StringEquals(first_str)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Given {inner_sig}: [ti*] -> [to*]
+// {outer_sig} must be: [externref ti*] -> [to*]
+bool IsSuspendingSignature(const i::wasm::FunctionSig* inner_sig,
+                           const i::wasm::FunctionSig* outer_sig) {
+  if (inner_sig->parameter_count() + 1 != outer_sig->parameter_count()) {
+    return false;
+  }
+  if (inner_sig->return_count() != outer_sig->return_count()) {
+    return false;
+  }
+  if (outer_sig->GetParam(0) != i::wasm::kWasmExternRef) return false;
+  for (size_t i = 1; i < outer_sig->parameter_count(); ++i) {
+    if (outer_sig->GetParam(i) != inner_sig->GetParam(i - 1)) return false;
+  }
+  for (size_t i = 0; i < outer_sig->return_count(); ++i) {
+    if (outer_sig->GetReturn(i) != inner_sig->GetReturn(i)) return false;
+  }
+  return true;
+}
+
+// Given {inner_sig}: externref ti* -> to
+// {outer_sig} must be: ti* -> externref
+bool IsPromisingSignature(const i::wasm::FunctionSig* inner_sig,
+                          const i::wasm::FunctionSig* outer_sig) {
+  if (inner_sig->parameter_count() != outer_sig->parameter_count() + 1) {
+    return false;
+  }
+  if (inner_sig->return_count() != 1 || outer_sig->return_count() != 1) {
+    return false;
+  }
+  if (inner_sig->GetParam(0) != i::wasm::kWasmExternRef) return false;
+  for (size_t i = 0; i < outer_sig->parameter_count(); ++i) {
+    if (outer_sig->GetParam(i) != inner_sig->GetParam(i + 1)) return false;
+  }
+  if (outer_sig->GetReturn(0) != i::wasm::kWasmExternRef) return false;
+  return true;
+}
+
+}  // namespace
+
 // WebAssembly.Function
 void WebAssemblyFunction(const v8::FunctionCallbackInfo<v8::Value>& args) {
   v8::Isolate* isolate = args.GetIsolate();
@@ -1974,7 +2043,35 @@ void WebAssemblyFunction(const v8::FunctionCallbackInfo<v8::Value>& args) {
 
   i::Handle<i::JSReceiver> callable =
       Utils::OpenHandle(*args[1].As<Function>());
-  if (i::WasmExportedFunction::IsWasmExportedFunction(*callable)) {
+
+  i::wasm::Suspend suspend = i::wasm::kNoSuspend;
+  i::wasm::Promise promise = i::wasm::kNoPromise;
+  if (i::FLAG_experimental_wasm_stack_switching) {
+    // Optional third argument for JS Promise Integration.
+    if (!args[2]->IsNullOrUndefined() && !args[2]->IsObject()) {
+      thrower.TypeError(
+          "Expected argument 3 to be an object with a "
+          "'suspending' or 'promising' property");
+      return;
+    }
+    if (args[2]->IsObject()) {
+      Local<Object> usage_obj = Local<Object>::Cast(args[2]);
+      if (HasJSPromiseIntegrationFlag(isolate, usage_obj, &thrower,
+                                      "suspending")) {
+        suspend = i::wasm::kSuspend;
+      }
+      if (HasJSPromiseIntegrationFlag(isolate, usage_obj, &thrower,
+                                      "promising")) {
+        promise = i::wasm::kPromise;
+      }
+    }
+  }
+
+  bool is_wasm_exported_function =
+      i::WasmExportedFunction::IsWasmExportedFunction(*callable);
+  bool is_wasm_js_function = i::WasmJSFunction::IsWasmJSFunction(*callable);
+
+  if (is_wasm_exported_function && !suspend && !promise) {
     if (*i::Handle<i::WasmExportedFunction>::cast(callable)->sig() == *sig) {
       args.GetReturnValue().Set(Utils::ToLocal(callable));
       return;
@@ -1986,7 +2083,7 @@ void WebAssemblyFunction(const v8::FunctionCallbackInfo<v8::Value>& args) {
     return;
   }
 
-  if (i::WasmJSFunction::IsWasmJSFunction(*callable)) {
+  if (is_wasm_js_function && !suspend && !promise) {
     if (i::Handle<i::WasmJSFunction>::cast(callable)->MatchesSignature(sig)) {
       args.GetReturnValue().Set(Utils::ToLocal(callable));
       return;
@@ -1998,8 +2095,49 @@ void WebAssemblyFunction(const v8::FunctionCallbackInfo<v8::Value>& args) {
     return;
   }
 
+  if (is_wasm_exported_function && suspend) {
+    // TODO(thibaudm): Support wasm-to-wasm calls with suspending behavior, and
+    // also with combined promising+suspending behavior.
+    UNIMPLEMENTED();
+  }
+  if (is_wasm_exported_function && promise) {
+    auto wasm_exported_function = i::WasmExportedFunction::cast(*callable);
+    i::SharedFunctionInfo sfi = wasm_exported_function.shared();
+    i::WasmExportedFunctionData data = sfi.wasm_exported_function_data();
+    if (!IsPromisingSignature(data.sig(), sig)) {
+      thrower.TypeError("Incompatible signature for promising function");
+      return;
+    }
+    i::Handle<i::WasmInstanceObject> instance(
+        i::WasmInstanceObject::cast(data.internal().ref()), i_isolate);
+    int func_index = data.function_index();
+    i::Handle<i::CodeT> wrapper =
+        BUILTIN_CODE(i_isolate, WasmReturnPromiseOnSuspend);
+    i::Handle<i::JSFunction> result = i::WasmExportedFunction::New(
+        i_isolate, instance, func_index,
+        static_cast<int>(data.sig()->parameter_count()), wrapper);
+    args.GetReturnValue().Set(Utils::ToLocal(result));
+    return;
+  }
+  if (is_wasm_js_function && promise) {
+    // TODO(thibaudm): This case has no practical use. The generated suspender
+    // would be unusable since the stack would always contain at least one JS
+    // frame. But for now the spec would require us to add specific JS-to-JS and
+    // wasm-to-JS wrappers to support this case. Leave this unimplemented for
+    // now.
+    UNIMPLEMENTED();
+  }
+  if (is_wasm_js_function && suspend) {
+    auto wasm_js_function = i::WasmJSFunction::cast(*callable);
+    const i::wasm::FunctionSig* inner_sig =
+        wasm_js_function.GetSignature(&zone);
+    if (!IsSuspendingSignature(inner_sig, sig)) {
+      thrower.TypeError("Incompatible signature for suspending function");
+      return;
+    }
+  }
   i::Handle<i::JSFunction> result =
-      i::WasmJSFunction::New(i_isolate, sig, callable, i::wasm::kNoSuspend);
+      i::WasmJSFunction::New(i_isolate, sig, callable, suspend);
   args.GetReturnValue().Set(Utils::ToLocal(result));
 }
 
@@ -2020,37 +2158,23 @@ void WebAssemblyFunctionType(const v8::FunctionCallbackInfo<v8::Value>& args) {
     i::Handle<i::WasmExportedFunctionData> data =
         handle(sfi->wasm_exported_function_data(), i_isolate);
     sig = wasm_exported_function->sig();
-    if (data->suspend()) {
-      // If this export is suspendable, the function returns a
+    if (i::WasmFunctionData::PromiseField::decode(data->js_promise_flags())) {
+      // If this export is "promising", the first parameter of the original
+      // function is an externref (suspender) which does not appear in the
+      // wrapper function's signature. The wrapper function also returns a
       // promise as an externref instead of the original return type.
       size_t param_count = sig->parameter_count();
       DCHECK_GE(param_count, 1);
-      DCHECK_EQ(sig->GetParam(0), i::wasm::kWasmAnyRef);
-      i::wasm::FunctionSig::Builder builder(&zone, 1, param_count);
-      for (size_t i = 0; i < param_count; ++i) {
+      DCHECK_EQ(sig->GetParam(0), i::wasm::kWasmExternRef);
+      i::wasm::FunctionSig::Builder builder(&zone, 1, param_count - 1);
+      for (size_t i = 1; i < param_count; ++i) {
         builder.AddParam(sig->GetParam(i));
       }
-      builder.AddReturn(i::wasm::kWasmAnyRef);
+      builder.AddReturn(i::wasm::kWasmExternRef);
       sig = builder.Build();
     }
   } else if (i::WasmJSFunction::IsWasmJSFunction(*arg0)) {
     sig = i::Handle<i::WasmJSFunction>::cast(arg0)->GetSignature(&zone);
-    auto wasm_js_function = i::Handle<i::WasmJSFunction>::cast(arg0);
-    if (wasm_js_function->shared().wasm_js_function_data().suspend()) {
-      // If this function is the result of calling
-      // WebAssembly.suspendOnReturnedPromise(), it takes an extra suspender
-      // parameter which will be consumed by the wasm-to-JS wrapper.
-      size_t param_count = sig->parameter_count();
-      i::wasm::FunctionSig::Builder builder(&zone, 1, param_count + 1);
-      builder.AddParam(internal::wasm::kWasmAnyRef);
-      for (size_t i = 0; i < param_count; ++i) {
-        builder.AddParam(sig->GetParam(i));
-      }
-      DCHECK_EQ(1, sig->return_count());
-      DCHECK_EQ(i::wasm::kWasmAnyRef, sig->GetReturn(0));
-      builder.AddReturn(i::wasm::kWasmAnyRef);
-      sig = builder.Build();
-    }
   } else {
     thrower.TypeError("Argument 0 must be a WebAssembly.Function");
     return;
@@ -2219,7 +2343,9 @@ void WebAssemblyTableSet(const v8::FunctionCallbackInfo<v8::Value>& args) {
   }
 
   i::Handle<i::Object> external_element;
-  bool is_external = i::WasmInternalFunction::FromExternal(element, i_isolate)
+  // TODO(7748): Make sure externref tables don't convert any values.
+  bool is_external = table_object->type() != i::wasm::kWasmExternRef &&
+                     i::WasmInternalFunction::FromExternal(element, i_isolate)
                          .ToHandle(&external_element);
 
   i::WasmTableObject::Set(i_isolate, table_object, index,
@@ -2404,6 +2530,7 @@ void WebAssemblyExceptionGetArg(
       case i::wasm::kRefNull:
         switch (signature.get(i).heap_representation()) {
           case i::wasm::HeapType::kFunc:
+          case i::wasm::HeapType::kExtern:
           case i::wasm::HeapType::kAny:
           case i::wasm::HeapType::kEq:
           case i::wasm::HeapType::kI31:
@@ -2466,6 +2593,7 @@ void WebAssemblyExceptionGetArg(
     case i::wasm::kRefNull:
       switch (signature.get(index).heap_representation()) {
         case i::wasm::HeapType::kFunc:
+        case i::wasm::HeapType::kExtern:
         case i::wasm::HeapType::kAny:
         case i::wasm::HeapType::kEq:
         case i::wasm::HeapType::kI31:
@@ -2548,7 +2676,7 @@ void WebAssemblyGlobalGetValueCommon(
     case i::wasm::kRef:
     case i::wasm::kRefNull:
       switch (receiver->type().heap_representation()) {
-        case i::wasm::HeapType::kAny:
+        case i::wasm::HeapType::kExtern:
         case i::wasm::HeapType::kString:
           return_value.Set(Utils::ToLocal(receiver->GetRef()));
           break;
@@ -2576,6 +2704,7 @@ void WebAssemblyGlobalGetValueCommon(
         case i::wasm::HeapType::kI31:
         case i::wasm::HeapType::kData:
         case i::wasm::HeapType::kArray:
+        case i::wasm::HeapType::kAny:
         case i::wasm::HeapType::kEq:
         default:
           // TODO(7748): Implement these.
@@ -2653,7 +2782,7 @@ void WebAssemblyGlobalSetValue(
     case i::wasm::kRef:
     case i::wasm::kRefNull:
       switch (receiver->type().heap_representation()) {
-        case i::wasm::HeapType::kAny:
+        case i::wasm::HeapType::kExtern:
           receiver->SetExternRef(Utils::OpenHandle(*args[0]));
           break;
         case i::wasm::HeapType::kFunc: {
@@ -2697,6 +2826,7 @@ void WebAssemblyGlobalSetValue(
         case i::wasm::HeapType::kI31:
         case i::wasm::HeapType::kData:
         case i::wasm::HeapType::kArray:
+        case i::wasm::HeapType::kAny:
         case i::wasm::HeapType::kEq:
         default:
           // TODO(7748): Implement these.
@@ -2727,87 +2857,6 @@ void WebAssemblyGlobalType(const v8::FunctionCallbackInfo<v8::Value>& args) {
   args.GetReturnValue().Set(Utils::ToLocal(type));
 }
 
-// WebAssembly.returnPromiseOnSuspend(WebAssembly.Function) ->
-// WebAssembly.Function
-void WebAssemblyReturnPromiseOnSuspend(
-    const v8::FunctionCallbackInfo<v8::Value>& args) {
-  Isolate* isolate = args.GetIsolate();
-  HandleScope scope(isolate);
-  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
-  ScheduledErrorThrower thrower(i_isolate,
-                                "WebAssembly.returnPromiseOnSuspend()");
-  if (args.Length() == 0) {
-    thrower.TypeError("Argument 0 is required");
-    return;
-  }
-  auto maybe_function = GetFirstArgumentAsJSFunction(args, &thrower);
-  if (thrower.error()) return;
-  i::Handle<i::JSFunction> function = maybe_function.ToHandleChecked();
-  i::SharedFunctionInfo sfi = function->shared();
-  if (!sfi.HasWasmExportedFunctionData()) {
-    thrower.TypeError("Argument 0 must be a wasm function");
-  }
-  i::WasmExportedFunctionData data = sfi.wasm_exported_function_data();
-  if (data.sig()->return_count() != 1) {
-    thrower.TypeError(
-        "Expected a WebAssembly.Function with exactly one return type");
-  }
-  if (data.sig()->parameter_count() == 0 ||
-      data.sig()->GetParam(0) != internal::wasm::kWasmAnyRef) {
-    thrower.TypeError("Expected at least one parameter of type %s",
-                      i::wasm::kWasmAnyRef.name().c_str());
-  }
-  if (thrower.error()) return;
-  int index = data.function_index();
-  i::Handle<i::WasmInstanceObject> instance(
-      i::WasmInstanceObject::cast(data.internal().ref()), i_isolate);
-  i::Handle<i::CodeT> wrapper =
-      BUILTIN_CODE(i_isolate, WasmReturnPromiseOnSuspend);
-  // Upcast to JSFunction to re-use the existing ToLocal helper below.
-  i::Handle<i::JSFunction> result =
-      i::Handle<i::WasmExternalFunction>::cast(i::WasmExportedFunction::New(
-          i_isolate, instance, index,
-          static_cast<int>(data.sig()->parameter_count()), wrapper,
-          internal::wasm::kSuspend));
-  args.GetReturnValue().Set(Utils::ToLocal(result));
-}
-
-// WebAssembly.suspendOnReturnedPromise(Function) -> Function
-void WebAssemblySuspendOnReturnedPromise(
-    const v8::FunctionCallbackInfo<v8::Value>& args) {
-  v8::Isolate* isolate = args.GetIsolate();
-  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
-  HandleScope scope(isolate);
-  ScheduledErrorThrower thrower(i_isolate,
-                                "WebAssembly.suspendOnReturnedPromise()");
-  if (!args[0]->IsObject()) {
-    thrower.TypeError("Argument 0 must be a WebAssembly.Function");
-    return;
-  }
-  i::Zone zone(i_isolate->allocator(), ZONE_NAME);
-  const i::wasm::FunctionSig* sig;
-  i::Handle<i::Object> arg0 = Utils::OpenHandle(*args[0]);
-
-  if (i::WasmExportedFunction::IsWasmExportedFunction(*arg0)) {
-    // TODO(thibaudm): Suspend on wrapped wasm-to-wasm calls too.
-    UNIMPLEMENTED();
-  } else if (!i::WasmJSFunction::IsWasmJSFunction(*arg0)) {
-    thrower.TypeError("Argument 0 must be a WebAssembly.Function");
-    return;
-  }
-  sig = i::Handle<i::WasmJSFunction>::cast(arg0)->GetSignature(&zone);
-  if (sig->return_count() != 1 || sig->GetReturn(0) != i::wasm::kWasmAnyRef) {
-    thrower.TypeError("Expected a WebAssembly.Function with return type %s",
-                      i::wasm::kWasmAnyRef.name().c_str());
-    return;
-  }
-
-  auto callable = handle(
-      i::Handle<i::WasmJSFunction>::cast(arg0)->GetCallable(), i_isolate);
-  i::Handle<i::JSFunction> result =
-      i::WasmJSFunction::New(i_isolate, sig, callable, i::wasm::kSuspend);
-  args.GetReturnValue().Set(Utils::ToLocal(result));
-}
 }  // namespace
 
 // TODO(titzer): we use the API to create the function template because the
@@ -3105,10 +3154,6 @@ void WasmJs::Install(Isolate* isolate, bool exposed_on_global_object) {
     SetupConstructor(isolate, suspender_constructor,
                      i::WASM_SUSPENDER_OBJECT_TYPE,
                      WasmSuspenderObject::kHeaderSize, "WebAssembly.Suspender");
-    InstallFunc(isolate, webassembly, "returnPromiseOnSuspend",
-                WebAssemblyReturnPromiseOnSuspend, 1);
-    InstallFunc(isolate, webassembly, "suspendOnReturnedPromise",
-                WebAssemblySuspendOnReturnedPromise, 1);
   }
 
   // Setup Function

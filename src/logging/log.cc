@@ -56,8 +56,8 @@
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 #if V8_OS_WIN
-#if defined(V8_ENABLE_SYSTEM_INSTRUMENTATION)
-#include "src/diagnostics/system-jit-win.h"
+#if defined(V8_ENABLE_ETW_STACK_WALKING)
+#include "src/diagnostics/etw-jit-win.h"
 #endif
 #endif  // V8_OS_WIN
 
@@ -128,9 +128,8 @@ const char* ComputeMarker(SharedFunctionInfo shared, AbstractCode code) {
   // We record interpreter trampoline builtin copies as having the
   // "interpreted" marker.
   if (FLAG_interpreted_frames_native_stack && kind == CodeKind::BUILTIN &&
-      code.GetCode().is_interpreter_trampoline_builtin() &&
-      ToCodeT(code.GetCode()) !=
-          *BUILTIN_CODE(shared.GetIsolate(), InterpreterEntryTrampoline)) {
+      !code.is_off_heap_trampoline(cage_base)) {
+    DCHECK_EQ(code.builtin_id(cage_base), Builtin::kInterpreterEntryTrampoline);
     kind = CodeKind::INTERPRETED_FUNCTION;
   }
   if (shared.optimization_disabled() &&
@@ -449,6 +448,7 @@ ExternalLogEventListener::~ExternalLogEventListener() {
 void ExternalLogEventListener::LogExistingCode() {
   HandleScope scope(isolate_);
   ExistingCodeLogger logger(isolate_, this);
+  logger.LogBuiltins();
   logger.LogCodeObjects();
   logger.LogCompiledFunctions();
 }
@@ -702,6 +702,8 @@ void LowLevelLogger::LogCodeInfo() {
   const char arch[] = "s390";
 #elif V8_TARGET_ARCH_RISCV64
   const char arch[] = "riscv64";
+#elif V8_TARGET_ARCH_RISCV32
+  const char arch[] = "riscv32";
 #else
   const char arch[] = "unknown";
 #endif
@@ -1205,32 +1207,6 @@ void V8FileLogger::TimerEvent(v8::LogEventStatus se, const char* name) {
   msg.WriteToLogFile();
 }
 
-void V8FileLogger::BasicBlockCounterEvent(const char* name, int block_id,
-                                          uint32_t count) {
-  if (!FLAG_turbo_profiling_log_builtins) return;
-  MSG_BUILDER();
-  msg << ProfileDataFromFileConstants::kBlockCounterMarker << kNext << name
-      << kNext << block_id << kNext << count;
-  msg.WriteToLogFile();
-}
-
-void V8FileLogger::BasicBlockBranchEvent(const char* name, int true_block_id,
-                                         int false_block_id) {
-  if (!FLAG_turbo_profiling_log_builtins) return;
-  MSG_BUILDER();
-  msg << ProfileDataFromFileConstants::kBlockHintMarker << kNext << name
-      << kNext << true_block_id << kNext << false_block_id;
-  msg.WriteToLogFile();
-}
-
-void V8FileLogger::BuiltinHashEvent(const char* name, int hash) {
-  if (!FLAG_turbo_profiling_log_builtins) return;
-  MSG_BUILDER();
-  msg << ProfileDataFromFileConstants::kBuiltinHashMarker << kNext << name
-      << kNext << hash;
-  msg.WriteToLogFile();
-}
-
 bool V8FileLogger::is_logging() {
   // Disable logging while the CPU profiler is running.
   if (isolate_->is_profiling()) return false;
@@ -1383,6 +1359,11 @@ void V8FileLogger::LogCodeDisassemble(Handle<AbstractCode> code) {
     if (code->IsCode(cage_base)) {
 #ifdef ENABLE_DISASSEMBLER
       Code::cast(*code).Disassemble(nullptr, stream, isolate_);
+#endif
+    } else if (V8_REMOVE_BUILTINS_CODE_OBJECTS &&
+               code->IsCodeDataContainer(cage_base)) {
+#ifdef ENABLE_DISASSEMBLER
+      CodeT::cast(*code).Disassemble(nullptr, stream, isolate_);
 #endif
     } else {
       BytecodeArray::cast(*code).Disassemble(stream);
@@ -2113,8 +2094,8 @@ bool V8FileLogger::SetUp(Isolate* isolate) {
   }
 #endif  // ENABLE_GDB_JIT_INTERFACE
 
-#if defined(V8_OS_WIN) && defined(V8_ENABLE_SYSTEM_INSTRUMENTATION)
-  if (i::FLAG_enable_system_instrumentation) {
+#if defined(V8_OS_WIN) && defined(V8_ENABLE_ETW_STACK_WALKING)
+  if (i::FLAG_enable_etw_stack_walking) {
     etw_jit_logger_ =
         std::make_unique<JitLogger>(isolate, i::ETWJITInterface::EventHandler);
     AddLogEventListener(etw_jit_logger_.get());
@@ -2165,8 +2146,8 @@ void V8FileLogger::SetCodeEventHandler(uint32_t options,
     AddLogEventListener(jit_logger_.get());
     if (options & kJitCodeEventEnumExisting) {
       HandleScope scope(isolate_);
-      LogCodeObjects();
       LogBuiltins();
+      LogCodeObjects();
       LogCompiledFunctions();
     }
   }
@@ -2230,12 +2211,13 @@ void V8FileLogger::UpdateIsLogging(bool value) {
   isolate_->UpdateLogObjectRelocation();
 }
 
-void ExistingCodeLogger::LogCodeObject(Object object) {
+void ExistingCodeLogger::LogCodeObject(AbstractCode object) {
   HandleScope scope(isolate_);
-  Handle<AbstractCode> abstract_code(AbstractCode::cast(object), isolate_);
+  Handle<AbstractCode> abstract_code(object, isolate_);
   CodeTag tag = CodeTag::kStub;
   const char* description = "Unknown code from before profiling";
-  switch (abstract_code->kind(isolate_)) {
+  PtrComprCageBase cage_base(isolate_);
+  switch (abstract_code->kind(cage_base)) {
     case CodeKind::INTERPRETED_FUNCTION:
     case CodeKind::TURBOFAN:
     case CodeKind::BASELINE:
@@ -2251,17 +2233,18 @@ void ExistingCodeLogger::LogCodeObject(Object object) {
       break;
     case CodeKind::BYTECODE_HANDLER:
       description =
-          isolate_->builtins()->name(abstract_code->GetCode().builtin_id());
+          isolate_->builtins()->name(abstract_code->builtin_id(cage_base));
       tag = CodeTag::kBytecodeHandler;
       break;
     case CodeKind::BUILTIN:
-      if (Code::cast(object).is_interpreter_trampoline_builtin() &&
-          ToCodeT(Code::cast(object)) !=
-              *BUILTIN_CODE(isolate_, InterpreterEntryTrampoline)) {
+      if (!abstract_code->is_off_heap_trampoline(cage_base)) {
+        DCHECK_EQ(abstract_code->builtin_id(cage_base),
+                  Builtin::kInterpreterEntryTrampoline);
+        // We treat interpreter trampoline builtin copies as
+        // INTERPRETED_FUNCTION, which are logged using LogCompiledFunctions.
         return;
       }
-      description =
-          isolate_->builtins()->name(abstract_code->GetCode().builtin_id());
+      description = Builtins::name(abstract_code->builtin_id(cage_base));
       tag = CodeTag::kBuiltin;
       break;
     case CodeKind::WASM_FUNCTION:
@@ -2296,21 +2279,35 @@ void ExistingCodeLogger::LogCodeObjects() {
   Heap* heap = isolate_->heap();
   HeapObjectIterator iterator(heap);
   DisallowGarbageCollection no_gc;
+  PtrComprCageBase cage_base(isolate_);
   for (HeapObject obj = iterator.Next(); !obj.is_null();
        obj = iterator.Next()) {
-    if (obj.IsCode()) LogCodeObject(obj);
-    if (obj.IsBytecodeArray()) LogCodeObject(obj);
+    InstanceType instance_type = obj.map(cage_base).instance_type();
+    if (V8_REMOVE_BUILTINS_CODE_OBJECTS) {
+      // In this case AbstactCode is Code|CodeDataContainer|BytecodeArray but
+      // we want to log code objects only once, thus we ignore Code objects
+      // which will be logged via corresponding CodeDataContainer.
+      if (InstanceTypeChecker::IsCodeT(instance_type) ||
+          InstanceTypeChecker::IsBytecodeArray(instance_type)) {
+        LogCodeObject(AbstractCode::cast(obj));
+      }
+    } else {
+      // In this case AbstactCode is Code|BytecodeArray.
+      if (InstanceTypeChecker::IsCode(instance_type) ||
+          InstanceTypeChecker::IsBytecodeArray(instance_type)) {
+        LogCodeObject(AbstractCode::cast(obj));
+      }
+    }
   }
 }
 
 void ExistingCodeLogger::LogBuiltins() {
-  Builtins* builtins = isolate_->builtins();
-  DCHECK(builtins->is_initialized());
-  for (Builtin builtin = Builtins::kFirst; builtin <= Builtins::kLast;
-       ++builtin) {
-    Code code = FromCodeT(builtins->code(builtin));
-    LogCodeObject(code);
-  }
+  DCHECK(isolate_->builtins()->is_initialized());
+  // The main "copy" of used builtins are logged by LogCodeObjects() while
+  // iterating CodeT objects.
+  // TODO(v8:11880): Log other copies of remapped builtins once we
+  // decide to remap them multiple times into the code range (for example
+  // for arm64).
 }
 
 void ExistingCodeLogger::LogCompiledFunctions() {

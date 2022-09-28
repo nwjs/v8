@@ -38,26 +38,6 @@ namespace internal {
         JSTemporal##T::NowISO(isolate, args.atOrUndefined(isolate, 1))); \
   }
 
-/* Temporal.PlaneDateTime */
-/* Temporal #sec-temporal.plaindatetime.prototype.until */
-TO_BE_IMPLEMENTED(TemporalPlainDateTimePrototypeUntil)
-/* Temporal #sec-temporal.plaindatetime.prototype.since */
-TO_BE_IMPLEMENTED(TemporalPlainDateTimePrototypeSince)
-
-/* Temporal.ZonedDateTime */
-/* Temporal #sec-temporal.zoneddatetime.prototype.until */
-TO_BE_IMPLEMENTED(TemporalZonedDateTimePrototypeUntil)
-/* Temporal #sec-temporal.zoneddatetime.prototype.since */
-TO_BE_IMPLEMENTED(TemporalZonedDateTimePrototypeSince)
-
-/* Temporal.Duration */
-/* Temporal #sec-temporal.duration.compare */
-TO_BE_IMPLEMENTED(TemporalDurationCompare)
-/* Temporal #sec-temporal.duration.prototype.round */
-TO_BE_IMPLEMENTED(TemporalDurationPrototypeRound)
-/* Temporal #sec-temporal.duration.prototype.total */
-TO_BE_IMPLEMENTED(TemporalDurationPrototypeTotal)
-
 /* Temporal.Calendar */
 /* Temporal #sec-temporal.calendar.prototype.weekofyear */
 TO_BE_IMPLEMENTED(TemporalCalendarPrototypeWeekOfYear)
@@ -366,12 +346,14 @@ TEMPORAL_PROTOTYPE_METHOD1(PlainDateTime, WithPlainDate, withPlainDate)
 TEMPORAL_PROTOTYPE_METHOD2(PlainDateTime, With, with)
 TEMPORAL_PROTOTYPE_METHOD2(PlainDateTime, Add, add)
 TEMPORAL_PROTOTYPE_METHOD1(PlainDateTime, Round, round)
+TEMPORAL_PROTOTYPE_METHOD2(PlainDateTime, Since, since)
 TEMPORAL_PROTOTYPE_METHOD2(PlainDateTime, Subtract, subtract)
 TEMPORAL_PROTOTYPE_METHOD0(PlainDateTime, ToPlainDate, toPlainDate)
 TEMPORAL_PROTOTYPE_METHOD0(PlainDateTime, ToPlainTime, toPlainTime)
 TEMPORAL_PROTOTYPE_METHOD0(PlainDateTime, ToJSON, toJSON)
 TEMPORAL_PROTOTYPE_METHOD2(PlainDateTime, ToLocaleString, toLocaleString)
 TEMPORAL_PROTOTYPE_METHOD1(PlainDateTime, ToString, toString)
+TEMPORAL_PROTOTYPE_METHOD2(PlainDateTime, Until, until)
 TEMPORAL_VALUE_OF(PlainDateTime)
 
 // PlainYearMonth
@@ -535,6 +517,7 @@ TEMPORAL_PROTOTYPE_METHOD2(ZonedDateTime, Subtract, subtract)
 TEMPORAL_PROTOTYPE_METHOD0(ZonedDateTime, GetISOFields, getISOFields)
 TEMPORAL_PROTOTYPE_METHOD0(ZonedDateTime, OffsetNanoseconds, offsetNanoseconds)
 TEMPORAL_PROTOTYPE_METHOD0(ZonedDateTime, Offset, offset)
+TEMPORAL_PROTOTYPE_METHOD2(ZonedDateTime, Since, since)
 TEMPORAL_PROTOTYPE_METHOD0(ZonedDateTime, StartOfDay, startOfDay)
 TEMPORAL_PROTOTYPE_METHOD0(ZonedDateTime, ToInstant, toInstant)
 TEMPORAL_PROTOTYPE_METHOD0(ZonedDateTime, ToJSON, toJSON)
@@ -543,6 +526,7 @@ TEMPORAL_PROTOTYPE_METHOD0(ZonedDateTime, ToPlainTime, toPlainTime)
 TEMPORAL_PROTOTYPE_METHOD0(ZonedDateTime, ToPlainDateTime, toPlainDateTime)
 TEMPORAL_PROTOTYPE_METHOD2(ZonedDateTime, ToLocaleString, toLocaleString)
 TEMPORAL_PROTOTYPE_METHOD1(ZonedDateTime, ToString, toString)
+TEMPORAL_PROTOTYPE_METHOD2(ZonedDateTime, Until, until)
 TEMPORAL_VALUE_OF(ZonedDateTime)
 
 // Duration
@@ -562,6 +546,14 @@ BUILTIN(TemporalDurationConstructor) {
                    args.atOrUndefined(isolate, 9),     // microseconds
                    args.atOrUndefined(isolate, 10)));  // nanoseconds
 }
+
+BUILTIN(TemporalDurationCompare) {
+  HandleScope scope(isolate);
+  RETURN_RESULT_OR_FAILURE(isolate, JSTemporalDuration::Compare(
+                                        isolate, args.atOrUndefined(isolate, 1),
+                                        args.atOrUndefined(isolate, 2),
+                                        args.atOrUndefined(isolate, 3)));
+}
 TEMPORAL_METHOD1(Duration, From)
 TEMPORAL_GET(Duration, Years, years)
 TEMPORAL_GET(Duration, Months, months)
@@ -573,6 +565,8 @@ TEMPORAL_GET(Duration, Seconds, seconds)
 TEMPORAL_GET(Duration, Milliseconds, milliseconds)
 TEMPORAL_GET(Duration, Microseconds, microseconds)
 TEMPORAL_GET(Duration, Nanoseconds, nanoseconds)
+TEMPORAL_PROTOTYPE_METHOD1(Duration, Round, round)
+TEMPORAL_PROTOTYPE_METHOD1(Duration, Total, total)
 TEMPORAL_PROTOTYPE_METHOD1(Duration, With, with)
 TEMPORAL_PROTOTYPE_METHOD0(Duration, Sign, sign)
 TEMPORAL_PROTOTYPE_METHOD0(Duration, Blank, blank)

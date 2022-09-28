@@ -35,6 +35,7 @@
 #include "src/base/macros.h"
 #include "src/base/platform/platform.h"
 #include "src/common/globals.h"
+#include "src/heap/allocation-result.h"
 #include "src/heap/factory.h"
 #include "src/heap/heap.h"
 #include "src/heap/large-spaces.h"
@@ -218,7 +219,7 @@ TEST(MemoryAllocator) {
   LinearAllocationArea allocation_info;
 
   int total_pages = 0;
-  OldSpace faked_space(heap, &allocation_info);
+  OldSpace faked_space(heap, allocation_info);
   CHECK(!faked_space.first_page());
   CHECK(!faked_space.last_page());
   Page* first_page = memory_allocator->AllocatePage(
@@ -302,7 +303,7 @@ TEST(SemiSpaceNewSpace) {
   std::unique_ptr<SemiSpaceNewSpace> new_space =
       std::make_unique<SemiSpaceNewSpace>(
           heap, CcTest::heap()->InitialSemiSpaceSize(),
-          CcTest::heap()->InitialSemiSpaceSize(), &allocation_info);
+          CcTest::heap()->InitialSemiSpaceSize(), allocation_info);
   CHECK(new_space->MaximumCapacity());
 
   while (new_space->Available() >= kMaxRegularHeapObjectSize) {
@@ -315,13 +316,42 @@ TEST(SemiSpaceNewSpace) {
   memory_allocator->unmapper()->EnsureUnmappingCompleted();
 }
 
+TEST(PagedNewSpace) {
+  if (FLAG_single_generation) return;
+  Isolate* isolate = CcTest::i_isolate();
+  Heap* heap = isolate->heap();
+  TestMemoryAllocatorScope test_allocator_scope(isolate, heap->MaxReserved());
+  MemoryAllocator* memory_allocator = test_allocator_scope.allocator();
+  LinearAllocationArea allocation_info;
+
+  std::unique_ptr<PagedNewSpace> new_space = std::make_unique<PagedNewSpace>(
+      heap, CcTest::heap()->InitialSemiSpaceSize(),
+      CcTest::heap()->InitialSemiSpaceSize(), allocation_info);
+  CHECK(new_space->MaximumCapacity());
+  CHECK(new_space->EnsureCurrentCapacity());
+  CHECK_LT(0, new_space->TotalCapacity());
+
+  AllocationResult allocation_result;
+  size_t successful_allocations = 0;
+  while (!(allocation_result = new_space->AllocateRaw(kMaxRegularHeapObjectSize,
+                                                      kTaggedAligned))
+              .IsFailure()) {
+    successful_allocations++;
+    CHECK(new_space->Contains(allocation_result.ToObjectChecked()));
+  }
+  CHECK_LT(0, successful_allocations);
+
+  new_space.reset();
+  memory_allocator->unmapper()->EnsureUnmappingCompleted();
+}
+
 TEST(OldSpace) {
   Isolate* isolate = CcTest::i_isolate();
   Heap* heap = isolate->heap();
   TestMemoryAllocatorScope test_allocator_scope(isolate, heap->MaxReserved());
   LinearAllocationArea allocation_info;
 
-  OldSpace* s = new OldSpace(heap, &allocation_info);
+  OldSpace* s = new OldSpace(heap, allocation_info);
   CHECK_NOT_NULL(s);
 
   while (s->Available() > 0) {
@@ -832,7 +862,7 @@ TEST(NoMemoryForNewPage) {
   TestMemoryAllocatorScope test_allocator_scope(isolate, 0, &failing_allocator);
   MemoryAllocator* memory_allocator = test_allocator_scope.allocator();
   LinearAllocationArea allocation_info;
-  OldSpace faked_space(heap, &allocation_info);
+  OldSpace faked_space(heap, allocation_info);
   Page* page = memory_allocator->AllocatePage(
       MemoryAllocator::AllocationMode::kRegular,
       static_cast<PagedSpace*>(&faked_space), NOT_EXECUTABLE);

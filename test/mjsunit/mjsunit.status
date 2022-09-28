@@ -46,13 +46,6 @@
   # Temporal tests to be implemented
   # https://crbug.com/v8/11544
   'temporal/calendar-week-of-year': [FAIL],
-  'temporal/duration-add': [FAIL],
-  'temporal/instant-constructor': [FAIL],
-  'temporal/instant-from-epoch-milliseconds': [FAIL],
-  'temporal/instant-from-epoch-seconds': [FAIL],
-  'temporal/plain-date-time-to-json': [FAIL],
-  'temporal/plain-date-to-plain-date-time': [FAIL],
-  'temporal/plain-date-with': [FAIL],
 
   ##############################################################################
   # Open bugs.
@@ -169,11 +162,11 @@
   'wasm/compare-exchange64-stress': [PASS, SLOW, NO_VARIANTS],
 
   # Very slow on ARM, MIPS, RISCV and LOONG, contains no architecture dependent code.
-  'unicode-case-overoptimization0': [PASS, NO_VARIANTS, ['arch in (arm, arm64, mipsel, mips64el, mips64, mips, riscv64, loong64)', SKIP]],
-  'unicode-case-overoptimization1': [PASS, NO_VARIANTS, ['arch in (arm, arm64, mipsel, mips64el, mips64, mips, riscv64, loong64)', SKIP]],
-  'regress/regress-3976': [PASS, NO_VARIANTS, ['arch in (arm, arm64, mipsel, mips64el, mips64, mips, riscv64, loong64)', SKIP]],
-  'regress/regress-crbug-482998': [PASS, NO_VARIANTS, ['arch in (arm, arm64, mipsel, mips64el, mips, riscv64, loong64)', SKIP]],
-  'regress/regress-740784': [PASS, NO_VARIANTS, ['arch in (arm, arm64, mipsel, mips64el, mips, riscv64, loong64)', SKIP]],
+  'unicode-case-overoptimization0': [PASS, NO_VARIANTS, ['arch in (arm, arm64, mipsel, mips64el, mips64, mips, riscv64, riscv32, loong64)', SKIP]],
+  'unicode-case-overoptimization1': [PASS, NO_VARIANTS, ['arch in (arm, arm64, mipsel, mips64el, mips64, mips, riscv64, riscv32, loong64)', SKIP]],
+  'regress/regress-3976': [PASS, NO_VARIANTS, ['arch in (arm, arm64, mipsel, mips64el, mips64, mips, riscv64, riscv32, loong64)', SKIP]],
+  'regress/regress-crbug-482998': [PASS, NO_VARIANTS, ['arch in (arm, arm64, mipsel, mips64el, mips, riscv64, riscv32, loong64)', SKIP]],
+  'regress/regress-740784': [PASS, NO_VARIANTS, ['arch in (arm, arm64, mipsel, mips64el, mips, riscv64,riscv32, loong64)', SKIP]],
 
   # TODO(bmeurer): Flaky timeouts (sometimes <1s, sometimes >3m).
   'unicodelctest': [PASS, NO_VARIANTS],
@@ -424,7 +417,10 @@
   'regress/regress-1078913': [SKIP],
 
   # Baseline incompatible with jitless
-  'baseline/*': [SKIP]
+  'baseline/*': [SKIP],
+
+  # BUG(https://crbug.com/v8/13107).
+  'regress/regress-1018871': [PASS, ['tsan', SKIP]],
 }],  # 'lite_mode or variant == jitless'
 
 ##############################################################################
@@ -488,12 +484,13 @@
 
 ##############################################################################
 # 32-bit platforms
-['arch in (ia32, arm, mips, mipsel)', {
+['arch in (ia32, arm, mips, mipsel, riscv32)', {
   # Needs >2GB of available contiguous memory.
   'wasm/grow-huge-memory': [SKIP],
   'wasm/huge-memory': [SKIP],
   'wasm/huge-typedarray': [SKIP],
-}],  # 'arch in (ia32, arm, mips, mipsel)'
+  'wasm/bigint-opt': [SKIP],
+}],  # 'arch in (ia32, arm, mips, mipsel, riscv32)'
 
 ##############################################################################
 ['arch == arm64', {
@@ -857,7 +854,7 @@
 }],  # 'arch == loong64'
 
 ##############################################################################
-['arch == riscv64', {
+['arch == riscv64 or arch == riscv32', {
 
   # Slow tests which times out in debug mode.
   'try': [PASS, ['mode == debug', SKIP]],
@@ -923,8 +920,11 @@
   'wasm/exceptions-simd': [SKIP],
   'wasm/simd-*': [SKIP],
 
-}],  # 'arch == riscv64'
+}],  # 'arch == riscv64 or arch == riscv32'
 
+[ 'arch == riscv32' , {
+'wasm/compare-exchange64-stress':[SKIP],
+}], # 'arch == riscv32'
 
 ##############################################################################
 ['system == macos', {
@@ -1106,6 +1106,9 @@
     'compiler/regress-1224277': [SKIP],
     'regress/regress-1220974': [SKIP],
     'regress/regress-992389': [SKIP],
+
+    # BUG(v8:13153) Skipped until issue is fixed to reduce noise on alerts.
+    'regress/regress-1034322': [SKIP],
 }], # gc_fuzzer or deopt_fuzzer
 
 ##############################################################################
@@ -1352,6 +1355,10 @@
   # which in turn can lead to different deopt behavior.
   'compiler/number-abs': [SKIP],
   'compiler/number-toboolean': [SKIP],
+  # Type assertions block the propagation of word64 truncation useinfo,
+  # leading to differences in representation selection.
+  'compiler/bigint-multiply-truncate': [SKIP],
+  'wasm/bigint-opt': [SKIP]
 }],  # variant == assert_types
 
 ##############################################################################
@@ -1426,6 +1433,9 @@
   # Script referenced only through context-dependent SourceTextModule
   # https://bugs.chromium.org/p/v8/issues/detail?id=11073
   'tools/processor': [SKIP],
+
+  # https://crbug.com/v8/13181
+  'maglev/get-template-object': [SKIP],
 }],  # variant == stress_snapshot and arch == x64
 
 ##############################################################################
@@ -1528,7 +1538,7 @@
 
 ##############################################################################
 # TODO(v8:11421): Port baseline compiler to other architectures.
-['arch not in (x64, arm64, ia32, arm, mips64el, mipsel, riscv64, loong64, s390x) or (arch == s390x and pointer_compression)', {
+['arch not in (x64, arm64, ia32, arm, mips64el, mipsel, riscv64, riscv32, loong64, s390x) or (arch == s390x and pointer_compression)', {
   'baseline/*': [SKIP],
   'regress/regress-1242306': [SKIP],
 }],
@@ -1537,6 +1547,7 @@
 # Skip baseline for no-lazy-feedback-allocation
 ['variant == no_lfa or variant == stress_concurrent_inlining', {
   'baseline/*': [SKIP],
+  'wasm/bigint-opt': [SKIP],
 }],  # variant == no_lfa or variant == stress_concurrent_inlining
 
 ##############################################################################
@@ -1555,6 +1566,7 @@
   # These tests rely on allocation site tracking which only works in the young generation.
   'array-constructor-feedback': [SKIP],
   'wasm/generic-wrapper': [SKIP],
+  'wasm/stack-switching-export': [SKIP],
   'regress/regress-trap-allocation-memento': [SKIP],
   'regress/regress-crbug-1151890': [SKIP],
   'regress/regress-crbug-1163184': [SKIP],
@@ -1573,6 +1585,9 @@
   'default-nospec': [SKIP],
   'es6/collections-constructor-*': [SKIP],
   'es6/map-constructor-entry-side-effect*': [SKIP],
+
+  'shared-memory/shared-string-promotion-minor': [SKIP],
+  'shared-memory/shared-string-promotion-major': [SKIP],
 }], # single_generation
 
 ################################################################################
@@ -1713,6 +1728,7 @@
 ['arch != x64', {
   # Stack switching is only supported on x64.
   'wasm/stack-switching': [SKIP],
+  'wasm/stack-switching-export': [SKIP],
 }],  # arch != x64
 
 ##############################################################################
@@ -1785,5 +1801,11 @@
 ['no_js_shared_memory', {
   'shared-memory/*': [SKIP],
 }],  # 'no_js_shared_memory'
+
+##############################################################################
+['variant == always_sparkplug', {
+  # Tests that rely on turbofan
+  'wasm/bigint-opt': [SKIP],
+}], # variant == always_sparkplug
 
 ]

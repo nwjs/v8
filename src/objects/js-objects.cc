@@ -2362,6 +2362,19 @@ void JSObject::EnsureWritableFastElements(Handle<JSObject> object) {
   object->set_elements(*writable_elems);
 }
 
+// For FATAL in JSObject::GetHeaderSize
+static const char* NonAPIInstanceTypeToString(InstanceType instance_type) {
+  DCHECK(!InstanceTypeChecker::IsJSApiObject(instance_type));
+  switch (instance_type) {
+#define WRITE_TYPE(TYPE) \
+  case TYPE:             \
+    return #TYPE;
+    INSTANCE_TYPE_LIST(WRITE_TYPE)
+#undef WRITE_TYPE
+  }
+  UNREACHABLE();
+}
+
 int JSObject::GetHeaderSize(InstanceType type,
                             bool function_has_prototype_slot) {
   switch (type) {
@@ -2461,6 +2474,8 @@ int JSObject::GetHeaderSize(InstanceType type,
       return JSSharedStruct::kHeaderSize;
     case JS_ATOMICS_MUTEX_TYPE:
       return JSAtomicsMutex::kHeaderSize;
+    case JS_ATOMICS_CONDITION_TYPE:
+      return JSAtomicsCondition::kHeaderSize;
     case JS_TEMPORAL_CALENDAR_TYPE:
       return JSTemporalCalendar::kHeaderSize;
     case JS_TEMPORAL_DURATION_TYPE:
@@ -2535,9 +2550,7 @@ int JSObject::GetHeaderSize(InstanceType type,
       if (InstanceTypeChecker::IsJSApiObject(type)) {
         return JSObject::kHeaderSize;
       }
-      std::stringstream ss;
-      ss << type;
-      FATAL("unexpected instance type: %s\n", ss.str().c_str());
+      FATAL("unexpected instance type: %s\n", NonAPIInstanceTypeToString(type));
     }
   }
 }
@@ -3679,12 +3692,12 @@ Maybe<PropertyAttributes> JSObject::GetPropertyAttributesWithInterceptor(
 void JSObject::NormalizeProperties(Isolate* isolate, Handle<JSObject> object,
                                    PropertyNormalizationMode mode,
                                    int expected_additional_properties,
-                                   const char* reason) {
+                                   bool use_cache, const char* reason) {
   if (!object->HasFastProperties()) return;
 
   Handle<Map> map(object->map(), isolate);
-  Handle<Map> new_map =
-      Map::Normalize(isolate, map, map->elements_kind(), mode, reason);
+  Handle<Map> new_map = Map::Normalize(isolate, map, map->elements_kind(), mode,
+                                       use_cache, reason);
 
   JSObject::MigrateToMap(isolate, object, new_map,
                          expected_additional_properties);
@@ -4745,20 +4758,41 @@ void JSObject::OptimizeAsPrototype(Handle<JSObject> object,
                                    bool enable_setup_mode) {
   Isolate* isolate = object->GetIsolate();
   if (object->IsJSGlobalObject()) return;
-  if (enable_setup_mode && PrototypeBenefitsFromNormalization(object)) {
-    // First normalize to ensure all JSFunctions are DATA_CONSTANT.
-    JSObject::NormalizeProperties(isolate, object, KEEP_INOBJECT_PROPERTIES, 0,
-                                  "NormalizeAsPrototype");
-  }
-  if (object->map().is_prototype_map()) {
+  if (object->map(isolate).is_prototype_map()) {
+    if (enable_setup_mode && PrototypeBenefitsFromNormalization(object)) {
+      // This is the only way PrototypeBenefitsFromNormalization can be true:
+      DCHECK(!object->map(isolate).should_be_fast_prototype_map());
+      // First normalize to ensure all JSFunctions are DATA_CONSTANT.
+      constexpr bool kUseCache = true;
+      JSObject::NormalizeProperties(isolate, object, KEEP_INOBJECT_PROPERTIES,
+                                    0, kUseCache, "NormalizeAsPrototype");
+    }
     if (!V8_DICT_PROPERTY_CONST_TRACKING_BOOL &&
-        object->map().should_be_fast_prototype_map() &&
+        object->map(isolate).should_be_fast_prototype_map() &&
         !object->HasFastProperties()) {
       JSObject::MigrateSlowToFast(object, 0, "OptimizeAsPrototype");
     }
   } else {
-    Handle<Map> new_map =
-        Map::Copy(isolate, handle(object->map(), isolate), "CopyAsPrototype");
+    Handle<Map> new_map;
+    if (enable_setup_mode && PrototypeBenefitsFromNormalization(object)) {
+#if DEBUG
+      Handle<Map> old_map = handle(object->map(isolate), isolate);
+#endif  // DEBUG
+      // First normalize to ensure all JSFunctions are DATA_CONSTANT. Don't use
+      // the cache, since we're going to use the normalized version directly,
+      // without making a copy.
+      constexpr bool kUseCache = false;
+      JSObject::NormalizeProperties(isolate, object, KEEP_INOBJECT_PROPERTIES,
+                                    0, kUseCache,
+                                    "NormalizeAndCopyAsPrototype");
+      // A new map was created.
+      DCHECK_NE(*old_map, object->map(isolate));
+
+      new_map = handle(object->map(isolate), isolate);
+    } else {
+      new_map =
+          Map::Copy(isolate, handle(object->map(), isolate), "CopyAsPrototype");
+    }
     new_map->set_is_prototype_map(true);
 
     // Replace the pointer to the exact constructor with the Object function
@@ -4799,8 +4833,9 @@ void JSObject::OptimizeAsPrototype(Handle<JSObject> object,
 #ifdef DEBUG
   bool should_be_dictionary = V8_DICT_PROPERTY_CONST_TRACKING_BOOL &&
                               enable_setup_mode && !object->IsJSGlobalProxy() &&
-                              !object->GetIsolate()->bootstrapper()->IsActive();
-  DCHECK_IMPLIES(should_be_dictionary, object->map().is_dictionary_map());
+                              !isolate->bootstrapper()->IsActive();
+  DCHECK_IMPLIES(should_be_dictionary,
+                 object->map(isolate).is_dictionary_map());
 #endif
 }
 
@@ -5073,6 +5108,8 @@ Maybe<bool> JSObject::SetPrototype(Isolate* isolate, Handle<JSObject> object,
   // Set the new prototype of the object.
 
   isolate->UpdateNoElementsProtectorOnSetPrototype(real_receiver);
+  isolate->UpdateTypedArraySpeciesLookupChainProtectorOnSetPrototype(
+      real_receiver);
 
   Handle<Map> new_map =
       Map::TransitionToPrototype(isolate, map, Handle<HeapObject>::cast(value));

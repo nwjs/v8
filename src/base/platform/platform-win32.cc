@@ -19,7 +19,7 @@
 
 // This has to come after windows.h.
 #include <VersionHelpers.h>
-#include <dbghelp.h>   // For SymLoadModule64 and al.
+#include <dbghelp.h>  // For SymLoadModule64 and al.
 #include <mmsystem.h>  // For timeGetTime().
 #include <tlhelp32.h>  // For Module32First and al.
 
@@ -1013,6 +1013,15 @@ bool OS::SetPermissions(void* address, size_t size, MemoryPermission access) {
   if (!result) CheckIsOOMError(GetLastError());
 
   return result != nullptr;
+}
+
+void OS::SetDataReadOnly(void* address, size_t size) {
+  DCHECK_EQ(0, reinterpret_cast<uintptr_t>(address) % CommitPageSize());
+  DCHECK_EQ(0, size % CommitPageSize());
+
+  unsigned long old_protection;
+  CHECK(VirtualProtect(address, size, PAGE_READONLY, &old_protection));
+  CHECK_EQ(PAGE_READWRITE, old_protection);
 }
 
 // static

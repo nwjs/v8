@@ -131,7 +131,7 @@ void Serializer::SerializeObject(Handle<HeapObject> obj) {
   if (obj->IsThinString(isolate())) {
     obj = handle(ThinString::cast(*obj).actual(isolate()), isolate());
   } else if (obj->IsCodeT(isolate())) {
-    Code code = FromCodeT(CodeT::cast(*obj));
+    CodeT code = CodeT::cast(*obj);
     if (code.kind() == CodeKind::BASELINE) {
       // For now just serialize the BytecodeArray instead of baseline code.
       // TODO(v8:11429,pthier): Handle Baseline code in cases we want to
@@ -940,6 +940,13 @@ void Serializer::ObjectSerializer::VisitCodePointer(HeapObject host,
   PtrComprCageBase code_cage_base(isolate());
 #endif
   Object contents = slot.load(code_cage_base);
+  if (contents.IsSmi()) {
+    // The contents of the CodeObjectSlot being a Smi means that the host
+    // CodeDataContainer corresponds to Code-less embedded builtin trampoline,
+    // the value will be serialized as a Smi.
+    DCHECK_EQ(contents, Smi::zero());
+    return;
+  }
   DCHECK(HAS_STRONG_HEAP_OBJECT_TAG(contents.ptr()));
   DCHECK(contents.IsCode());
 

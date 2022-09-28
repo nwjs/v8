@@ -2,6 +2,7 @@
 // this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "src/base/bit-field.h"
 #if !V8_ENABLE_WEBASSEMBLY
 #error This header should only be included if WebAssembly is enabled.
 #endif  // !V8_ENABLE_WEBASSEMBLY
@@ -76,6 +77,7 @@ class V8_EXPORT_PRIVATE FunctionTargetAndRef {
 
 namespace wasm {
 enum Suspend : bool { kSuspend = true, kNoSuspend = false };
+enum Promise : bool { kPromise = true, kNoPromise = false };
 enum class OnResume : int { kContinue, kThrow };
 }  // namespace wasm
 
@@ -259,12 +261,13 @@ class WasmMemoryObject
   inline bool has_maximum_pages();
 
   V8_EXPORT_PRIVATE static MaybeHandle<WasmMemoryObject> New(
-      Isolate* isolate, Handle<JSArrayBuffer> buffer, int maximum);
+      Isolate* isolate, Handle<JSArrayBuffer> buffer, int maximum,
+      WasmMemoryFlag memory_type = WasmMemoryFlag::kWasmMemory32);
 
-  V8_EXPORT_PRIVATE static MaybeHandle<WasmMemoryObject> New(Isolate* isolate,
-                                                             int initial,
-                                                             int maximum,
-                                                             SharedFlag shared);
+  V8_EXPORT_PRIVATE static MaybeHandle<WasmMemoryObject> New(
+      Isolate* isolate, int initial, int maximum,
+      SharedFlag shared = SharedFlag::kNotShared,
+      WasmMemoryFlag memory_type = WasmMemoryFlag::kWasmMemory32);
 
   static constexpr int kNoMaximum = -1;
 
@@ -348,6 +351,7 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
   DECL_PRIMITIVE_ACCESSORS(new_allocation_top_address, Address*)
   DECL_PRIMITIVE_ACCESSORS(old_allocation_limit_address, Address*)
   DECL_PRIMITIVE_ACCESSORS(old_allocation_top_address, Address*)
+  DECL_PRIMITIVE_ACCESSORS(isorecursive_canonical_types, const uint32_t*)
   DECL_PRIMITIVE_ACCESSORS(imported_function_targets, Address*)
   DECL_SANDBOXED_POINTER_ACCESSORS(globals_start, byte*)
   DECL_PRIMITIVE_ACCESSORS(imported_mutable_globals, Address*)
@@ -382,6 +386,7 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
   V(kMemoryStartOffset, kSystemPointerSize)                               \
   V(kMemorySizeOffset, kSizetSize)                                        \
   V(kStackLimitAddressOffset, kSystemPointerSize)                         \
+  V(kIsorecursiveCanonicalTypesOffset, kSystemPointerSize)                \
   V(kImportedFunctionTargetsOffset, kSystemPointerSize)                   \
   V(kIndirectFunctionTableTargetsOffset, kSystemPointerSize)              \
   V(kIndirectFunctionTableSigIdsOffset, kSystemPointerSize)               \
@@ -604,7 +609,7 @@ class WasmExportedFunction : public JSFunction {
 
   V8_EXPORT_PRIVATE static Handle<WasmExportedFunction> New(
       Isolate* isolate, Handle<WasmInstanceObject> instance, int func_index,
-      int arity, Handle<CodeT> export_wrapper, wasm::Suspend suspend);
+      int arity, Handle<CodeT> export_wrapper);
 
   Address GetWasmCallTarget();
 
@@ -638,8 +643,6 @@ class WasmJSFunction : public JSFunction {
   // that lifetime of the signature is hence directly coupled to the zone.
   const wasm::FunctionSig* GetSignature(Zone* zone);
   bool MatchesSignature(const wasm::FunctionSig* sig);
-  // Special typing rule for imports wrapped by a Suspender.
-  bool MatchesSignatureForSuspend(const wasm::FunctionSig* sig);
 
   DECL_CAST(WasmJSFunction)
   OBJECT_CONSTRUCTORS(WasmJSFunction, JSFunction);
@@ -709,6 +712,9 @@ class WasmFunctionData
 
   using BodyDescriptor = FlexibleBodyDescriptor<kStartOfStrongFieldsOffset>;
 
+  using SuspendField = base::BitField<wasm::Suspend, 0, 1>;
+  using PromiseField = base::BitField<wasm::Promise, 1, 1>;
+
   TQ_OBJECT_CONSTRUCTORS(WasmFunctionData)
 };
 
@@ -744,12 +750,14 @@ class WasmApiFunctionRef
 
 class WasmInternalFunction
     : public TorqueGeneratedWasmInternalFunction<WasmInternalFunction,
-                                                 Foreign> {
+                                                 HeapObject> {
  public:
   // Returns a handle to the corresponding WasmInternalFunction if {external} is
   // a WasmExternalFunction, or an empty handle otherwise.
   static MaybeHandle<WasmInternalFunction> FromExternal(Handle<Object> external,
                                                         Isolate* isolate);
+
+  DECL_EXTERNAL_POINTER_ACCESSORS(call_target, Address);
 
   // Dispatched behavior.
   DECL_PRINTER(WasmInternalFunction)
@@ -893,8 +901,11 @@ class AsmWasmData : public TorqueGeneratedAsmWasmData<AsmWasmData, Struct> {
   TQ_OBJECT_CONSTRUCTORS(AsmWasmData)
 };
 
-class WasmTypeInfo : public TorqueGeneratedWasmTypeInfo<WasmTypeInfo, Foreign> {
+class WasmTypeInfo
+    : public TorqueGeneratedWasmTypeInfo<WasmTypeInfo, HeapObject> {
  public:
+  DECL_EXTERNAL_POINTER_ACCESSORS(native_type, Address);
+
   DECL_PRINTER(WasmTypeInfo)
 
   class BodyDescriptor;
@@ -1009,21 +1020,25 @@ class WasmArray : public TorqueGeneratedWasmArray<WasmArray, WasmObject> {
 // A wasm delimited continuation.
 class WasmContinuationObject
     : public TorqueGeneratedWasmContinuationObject<WasmContinuationObject,
-                                                   Struct> {
+                                                   HeapObject> {
  public:
   static Handle<WasmContinuationObject> New(
-      Isolate* isolate, std::unique_ptr<wasm::StackMemory> stack);
+      Isolate* isolate, std::unique_ptr<wasm::StackMemory> stack,
+      AllocationType allocation_type = AllocationType::kYoung);
   static Handle<WasmContinuationObject> New(
       Isolate* isolate, Handle<WasmContinuationObject> parent);
 
+  DECL_EXTERNAL_POINTER_ACCESSORS(jmpbuf, Address);
+
   DECL_PRINTER(WasmContinuationObject)
 
-  using BodyDescriptor = StructBodyDescriptor;
+  class BodyDescriptor;
 
  private:
   static Handle<WasmContinuationObject> New(
       Isolate* isolate, std::unique_ptr<wasm::StackMemory> stack,
-      Handle<HeapObject> parent);
+      Handle<HeapObject> parent,
+      AllocationType allocation_type = AllocationType::kYoung);
 
   TQ_OBJECT_CONSTRUCTORS(WasmContinuationObject)
 };

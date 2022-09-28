@@ -174,6 +174,7 @@ namespace internal {
   /* InterpreterEntryTrampoline dispatches to the interpreter to run a */      \
   /* JSFunction in the form of bytecodes */                                    \
   ASM(InterpreterEntryTrampoline, JSTrampoline)                                \
+  ASM(InterpreterEntryTrampolineForProfiling, JSTrampoline)                    \
   ASM(InterpreterPushArgsThenCall, InterpreterPushArgsThenCall)                \
   ASM(InterpreterPushUndefinedAndArgsThenCall, InterpreterPushArgsThenCall)    \
   ASM(InterpreterPushArgsThenCallWithFinalSpread, InterpreterPushArgsThenCall) \
@@ -1004,6 +1005,9 @@ namespace internal {
   CPP(AtomicsMutexConstructor)                                                 \
   CPP(AtomicsMutexLock)                                                        \
   CPP(AtomicsMutexTryLock)                                                     \
+  CPP(AtomicsConditionConstructor)                                             \
+  CPP(AtomicsConditionWait)                                                    \
+  CPP(AtomicsConditionNotify)                                                  \
                                                                                \
   /* AsyncGenerator */                                                         \
                                                                                \

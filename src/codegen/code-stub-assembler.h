@@ -33,6 +33,10 @@
 #include "src/roots/roots.h"
 #include "torque-generated/exported-macros-assembler.h"
 
+#if V8_ENABLE_WEBASSEMBLY
+#include "src/wasm/wasm-objects.h"
+#endif  // V8_ENABLE_WEBASSEMBLY
+
 namespace v8 {
 namespace internal {
 
@@ -116,8 +120,8 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
   V(ShadowRealmImportValueFulfilledSFI,                                        \
     shadow_realm_import_value_fulfilled_sfi,                                   \
     ShadowRealmImportValueFulfilledSFI)                                        \
-  V(SingleCharacterStringCache, single_character_string_cache,                 \
-    SingleCharacterStringCache)                                                \
+  V(SingleCharacterStringTable, single_character_string_table,                 \
+    SingleCharacterStringTable)                                                \
   V(StringIteratorProtector, string_iterator_protector,                        \
     StringIteratorProtector)                                                   \
   V(TypedArraySpeciesProtector, typed_array_species_protector,                 \
@@ -1155,6 +1159,20 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                          ExternalString::kResourceDataOffset,
                                          kExternalStringResourceDataTag);
   }
+
+#if V8_ENABLE_WEBASSEMBLY
+  TNode<RawPtrT> LoadWasmInternalFunctionCallTargetPtr(
+      TNode<WasmInternalFunction> object) {
+    return LoadExternalPointerFromObject(
+        object, WasmInternalFunction::kCallTargetOffset,
+        kWasmInternalFunctionCallTargetTag);
+  }
+
+  TNode<RawPtrT> LoadWasmTypeInfoNativeTypePtr(TNode<WasmTypeInfo> object) {
+    return LoadExternalPointerFromObject(
+        object, WasmTypeInfo::kNativeTypeOffset, kWasmTypeInfoNativeTypeTag);
+  }
+#endif  // V8_ENABLE_WEBASSEMBLY
 
   TNode<RawPtrT> LoadJSTypedArrayExternalPointerPtr(
       TNode<JSTypedArray> holder) {
@@ -2516,6 +2534,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                       base::Optional<TNode<Object>> arg1 = base::nullopt,
                       base::Optional<TNode<Object>> arg2 = base::nullopt);
 
+  void TerminateExecution(TNode<Context> context);
+
   TNode<HeapObject> GetPendingMessage();
   void SetPendingMessage(TNode<HeapObject> message);
   TNode<BoolT> IsExecutionTerminating();
@@ -2935,6 +2955,19 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
     TNode<Word32T> masked_word32 =
         Word32And(word32, Int32Constant(BitField::kMask));
     return Word32Equal(masked_word32, Int32Constant(BitField::encode(value)));
+  }
+
+  // Checks if two values of non-overlapping bitfields are both set.
+  template <typename BitField1, typename BitField2>
+  TNode<BoolT> IsBothEqualInWord32(TNode<Word32T> word32,
+                                   typename BitField1::FieldType value1,
+                                   typename BitField2::FieldType value2) {
+    static_assert((BitField1::kMask & BitField2::kMask) == 0);
+    TNode<Word32T> combined_masked_word32 =
+        Word32And(word32, Int32Constant(BitField1::kMask | BitField2::kMask));
+    TNode<Int32T> combined_value =
+        Int32Constant(BitField1::encode(value1) | BitField2::encode(value2));
+    return Word32Equal(combined_masked_word32, combined_value);
   }
 
   // Returns true if the bit field |BitField| in |word32| is not equal to a

@@ -220,6 +220,11 @@ class MarkingVisitorBase : public HeapVisitor<int, ConcreteVisitor> {
 #endif
   }
 
+  bool is_shared_heap() { return is_shared_heap_; }
+
+  // Marks the object grey and pushes it on the marking work list.
+  V8_INLINE void MarkObject(HeapObject host, HeapObject obj);
+
  protected:
   ConcreteVisitor* concrete_visitor() {
     return static_cast<ConcreteVisitor*>(this);
@@ -259,8 +264,6 @@ class MarkingVisitorBase : public HeapVisitor<int, ConcreteVisitor> {
   // list and visits its header. Returns the size of the descriptor array
   // if it was successully marked as black.
   V8_INLINE int MarkDescriptorArrayBlack(DescriptorArray descriptors);
-  // Marks the object grey and pushes it on the marking work list.
-  V8_INLINE void MarkObject(HeapObject host, HeapObject obj);
 
   V8_INLINE void AddStrongReferenceForReferenceSummarizer(HeapObject host,
                                                           HeapObject obj) {
@@ -291,6 +294,73 @@ class MarkingVisitorBase : public HeapVisitor<int, ConcreteVisitor> {
   ExternalPointerTable* const external_pointer_table_;
   ExternalPointerTable* const shared_external_pointer_table_;
 #endif  // V8_ENABLE_SANDBOX
+};
+
+template <typename ConcreteVisitor, typename MarkingState>
+class YoungGenerationMarkingVisitorBase
+    : public NewSpaceVisitor<ConcreteVisitor> {
+ public:
+  YoungGenerationMarkingVisitorBase(Isolate* isolate,
+                                    MarkingWorklists::Local* worklists_local);
+
+  V8_INLINE void VisitPointers(HeapObject host, ObjectSlot start,
+                               ObjectSlot end) final {
+    VisitPointersImpl(host, start, end);
+  }
+
+  V8_INLINE void VisitPointers(HeapObject host, MaybeObjectSlot start,
+                               MaybeObjectSlot end) final {
+    VisitPointersImpl(host, start, end);
+  }
+
+  V8_INLINE void VisitCodePointer(HeapObject host,
+                                  CodeObjectSlot slot) override {
+    CHECK(V8_EXTERNAL_CODE_SPACE_BOOL);
+    // Code slots never appear in new space because CodeDataContainers, the
+    // only object that can contain code pointers, are always allocated in
+    // the old space.
+    UNREACHABLE();
+  }
+
+  V8_INLINE void VisitPointer(HeapObject host, ObjectSlot slot) final {
+    VisitPointerImpl(host, slot);
+  }
+
+  V8_INLINE void VisitPointer(HeapObject host, MaybeObjectSlot slot) final {
+    VisitPointerImpl(host, slot);
+  }
+
+  V8_INLINE void VisitCodeTarget(Code host, RelocInfo* rinfo) final {
+    // Code objects are not expected in new space.
+    UNREACHABLE();
+  }
+
+  V8_INLINE void VisitEmbeddedPointer(Code host, RelocInfo* rinfo) final {
+    // Code objects are not expected in new space.
+    UNREACHABLE();
+  }
+
+  V8_INLINE int VisitJSArrayBuffer(Map map, JSArrayBuffer object);
+
+ protected:
+  ConcreteVisitor* concrete_visitor() {
+    return static_cast<ConcreteVisitor*>(this);
+  }
+
+  inline void MarkObjectViaMarkingWorklist(HeapObject object);
+
+ private:
+  template <typename TSlot>
+  V8_INLINE void VisitPointersImpl(HeapObject host, TSlot start, TSlot end) {
+    for (TSlot slot = start; slot < end; ++slot) {
+      VisitPointer(host, slot);
+    }
+  }
+
+  template <typename TSlot>
+  void VisitPointerImpl(HeapObject host, TSlot slot);
+
+  MarkingWorklists::Local* worklists_local_;
 };
 
 }  // namespace internal

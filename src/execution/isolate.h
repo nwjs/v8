@@ -40,6 +40,7 @@
 #include "src/objects/debug-objects.h"
 #include "src/objects/js-objects.h"
 #include "src/runtime/runtime.h"
+#include "src/sandbox/external-pointer.h"
 #include "src/utils/allocation.h"
 
 #ifdef DEBUG
@@ -487,16 +488,9 @@ V8_EXPORT_PRIVATE void FreeCurrentEmbeddedBlob();
 
 using DebugObjectCache = std::vector<Handle<HeapObject>>;
 
-// Redefine LegacyOOMErrorCallback here for internal usage. We still need to
-// support it but it is deprecated so would trigger warnings.
-// TODO(chromium:1323177): Remove this.
-using DeprecatedLegacyOOMErrorCallback = void (*)(const char* location,
-                                                  bool is_heap_oom);
-
 #define ISOLATE_INIT_LIST(V)                                                  \
   /* Assembler state. */                                                      \
   V(FatalErrorCallback, exception_behavior, nullptr)                          \
-  V(DeprecatedLegacyOOMErrorCallback, legacy_oom_behavior, nullptr)           \
   V(OOMErrorCallback, oom_behavior, nullptr)                                  \
   V(LogEventCallback, event_logger, nullptr)                                  \
   V(AllowCodeGenerationFromStringsCallback, allow_code_gen_callback, nullptr) \
@@ -1504,6 +1498,8 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   void UpdateNoElementsProtectorOnSetPrototype(Handle<JSObject> object) {
     UpdateNoElementsProtectorOnSetElement(object);
   }
+  void UpdateTypedArraySpeciesLookupChainProtectorOnSetPrototype(
+      Handle<JSObject> object);
   void UpdateNoElementsProtectorOnNormalizeElements(Handle<JSObject> object) {
     UpdateNoElementsProtectorOnSetElement(object);
   }
@@ -1950,7 +1946,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   LocalHeap* main_thread_local_heap();
   LocalHeap* CurrentLocalHeap();
 
-#ifdef V8_ENABLE_SANDBOX
+#ifdef V8_COMPRESS_POINTERS
   ExternalPointerTable& external_pointer_table() {
     return isolate_data_.external_pointer_table_;
   }
@@ -1976,13 +1972,13 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
         &isolate_data_.shared_external_pointer_table_);
   }
 
-  Maybe<ExternalPointerHandle> GetWaiterQueueNodeExternalPointer() const {
-    return waiter_queue_node_external_pointer_;
+  ExternalPointerHandle* GetWaiterQueueNodeExternalPointerHandleLocation() {
+    return &waiter_queue_node_external_pointer_handle_;
   }
 
   ExternalPointerHandle InsertWaiterQueueNodeIntoSharedExternalPointerTable(
       Address node);
-#endif
+#endif  // V8_COMPRESS_POINTERS
 
   struct PromiseHookFields {
     using HasContextPromiseHook = base::BitField<bool, 0, 1>;
@@ -2451,11 +2447,11 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // isolates or when no shared isolate is used.
   Isolate* shared_isolate_ = nullptr;
 
-#ifdef V8_ENABLE_SANDBOX
+#ifdef V8_COMPRESS_POINTERS
   // The external pointer handle to the Isolate's main thread's WaiterQueueNode.
   // It is used to wait for JS-exposed mutex or condition variable.
-  Maybe<ExternalPointerHandle> waiter_queue_node_external_pointer_ =
-      Nothing<ExternalPointerHandle>();
+  ExternalPointerHandle waiter_queue_node_external_pointer_handle_ =
+      kNullExternalPointerHandle;
 #endif
 
 #if DEBUG
