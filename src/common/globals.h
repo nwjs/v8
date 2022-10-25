@@ -46,9 +46,6 @@ namespace internal {
 #if (V8_TARGET_ARCH_PPC64 && !V8_HOST_ARCH_PPC64)
 #define USE_SIMULATOR 1
 #endif
-#if (V8_TARGET_ARCH_MIPS && !V8_HOST_ARCH_MIPS)
-#define USE_SIMULATOR 1
-#endif
 #if (V8_TARGET_ARCH_MIPS64 && !V8_HOST_ARCH_MIPS64)
 #define USE_SIMULATOR 1
 #endif
@@ -66,12 +63,89 @@ namespace internal {
 #endif
 #endif
 
+#if USE_SIMULATOR
+#define USE_SIMULATOR_BOOL true
+#else
+#define USE_SIMULATOR_BOOL false
+#endif
+
 // Determine whether the architecture uses an embedded constant pool
 // (contiguous constant pool embedded in code object).
 #if V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_PPC64
 #define V8_EMBEDDED_CONSTANT_POOL true
 #else
 #define V8_EMBEDDED_CONSTANT_POOL false
+#endif
+
+#ifdef DEBUG
+#define DEBUG_BOOL true
+#else
+#define DEBUG_BOOL false
+#endif
+
+#ifdef V8_MAP_PACKING
+#define V8_MAP_PACKING_BOOL true
+#else
+#define V8_MAP_PACKING_BOOL false
+#endif
+
+#ifdef V8_COMPRESS_POINTERS
+#define COMPRESS_POINTERS_BOOL true
+#else
+#define COMPRESS_POINTERS_BOOL false
+#endif
+
+#if COMPRESS_POINTERS_BOOL && V8_TARGET_ARCH_X64
+#define DECOMPRESS_POINTER_BY_ADDRESSING_MODE true
+#else
+#define DECOMPRESS_POINTER_BY_ADDRESSING_MODE false
+#endif
+
+#ifdef V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE
+#define COMPRESS_POINTERS_IN_ISOLATE_CAGE_BOOL true
+#else
+#define COMPRESS_POINTERS_IN_ISOLATE_CAGE_BOOL false
+#endif
+
+#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+#define COMPRESS_POINTERS_IN_SHARED_CAGE_BOOL true
+#else
+#define COMPRESS_POINTERS_IN_SHARED_CAGE_BOOL false
+#endif
+
+#if defined(V8_SHARED_RO_HEAP) &&      \
+    (!defined(V8_COMPRESS_POINTERS) || \
+     defined(V8_COMPRESS_POINTERS_IN_SHARED_CAGE))
+#define V8_CAN_CREATE_SHARED_HEAP_BOOL true
+#else
+#define V8_CAN_CREATE_SHARED_HEAP_BOOL false
+#endif
+
+#ifdef V8_ENABLE_SANDBOX
+#define V8_ENABLE_SANDBOX_BOOL true
+#else
+#define V8_ENABLE_SANDBOX_BOOL false
+#endif
+
+// D8's MultiMappedAllocator is only available on Linux, and only if the sandbox
+// is not enabled.
+#if V8_OS_LINUX && !V8_ENABLE_SANDBOX_BOOL
+#define MULTI_MAPPED_ALLOCATOR_AVAILABLE true
+#else
+#define MULTI_MAPPED_ALLOCATOR_AVAILABLE false
+#endif
+
+#ifdef V8_ENABLE_CONTROL_FLOW_INTEGRITY
+#define ENABLE_CONTROL_FLOW_INTEGRITY_BOOL true
+#else
+#define ENABLE_CONTROL_FLOW_INTEGRITY_BOOL false
+#endif
+
+#if (V8_TARGET_ARCH_S390X && COMPRESS_POINTERS_BOOL)
+// TODO(v8:11421): Enable Sparkplug for these architectures.
+#define ENABLE_SPARKPLUG false
+#else
+#define ENABLE_SPARKPLUG true
 #endif
 
 #if V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_ARM64
@@ -151,7 +225,7 @@ const size_t kShortBuiltinCallsOldSpaceSizeThreshold = size_t{2} * GB;
 // This flag enables the mode when V8 does not create trampoline Code objects
 // for builtins. It should be enough to have only CodeDataContainer objects.
 // TODO(v8:11880): remove the flag one the Code-less builtins mode works.
-#define V8_REMOVE_BUILTINS_CODE_OBJECTS false
+#define V8_REMOVE_BUILTINS_CODE_OBJECTS true
 class CodeDataContainer;
 using CodeT = CodeDataContainer;
 #else
@@ -199,6 +273,14 @@ using CodeT = Code;
 #define V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT true
 #else
 #define V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT false
+#endif
+
+// TODO(v8:13023): enable PKU support when we have a test coverage
+#if V8_HAS_PKU_JIT_WRITE_PROTECT && \
+    !(defined(V8_COMPRESS_POINTERS) && !defined(V8_EXTERNAL_CODE_SPACE))
+#define V8_HEAP_USE_PKU_JIT_WRITE_PROTECT false
+#else
+#define V8_HEAP_USE_PKU_JIT_WRITE_PROTECT false
 #endif
 
 // Determine whether tagged pointers are 8 bytes (used in Torque layouts for
@@ -313,11 +395,16 @@ constexpr size_t kMaximalCodeRangeSize = 512 * MB;
 constexpr size_t kMinExpectedOSPageSize = 64 * KB;  // OS page on PPC Linux
 #elif V8_TARGET_ARCH_ARM64
 constexpr size_t kMaximalCodeRangeSize =
-    V8_EXTERNAL_CODE_SPACE_BOOL ? 256 * MB : 128 * MB;
+    (COMPRESS_POINTERS_BOOL && !V8_EXTERNAL_CODE_SPACE_BOOL) ? 128 * MB
+                                                             : 256 * MB;
+constexpr size_t kMinExpectedOSPageSize = 4 * KB;  // OS page.
+#elif V8_TARGET_ARCH_X64
+constexpr size_t kMaximalCodeRangeSize =
+    (COMPRESS_POINTERS_BOOL && !V8_EXTERNAL_CODE_SPACE_BOOL) ? 128 * MB
+                                                             : 512 * MB;
 constexpr size_t kMinExpectedOSPageSize = 4 * KB;  // OS page.
 #else
-constexpr size_t kMaximalCodeRangeSize =
-    V8_EXTERNAL_CODE_SPACE_BOOL ? 512 * MB : 128 * MB;
+constexpr size_t kMaximalCodeRangeSize = 128 * MB;
 constexpr size_t kMinExpectedOSPageSize = 4 * KB;  // OS page.
 #endif
 #if V8_OS_WIN
@@ -338,7 +425,7 @@ constexpr bool kPlatformRequiresCodeRange = false;
 constexpr size_t kMaximalCodeRangeSize = 0 * MB;
 constexpr size_t kMinimumCodeRangeSize = 0 * MB;
 constexpr size_t kMinExpectedOSPageSize = 64 * KB;  // OS page on PPC Linux
-#elif V8_TARGET_ARCH_MIPS || V8_TARGET_ARCH_RISCV32
+#elif V8_TARGET_ARCH_RISCV32
 constexpr bool kPlatformRequiresCodeRange = false;
 constexpr size_t kMaximalCodeRangeSize = 2048LL * MB;
 constexpr size_t kMinimumCodeRangeSize = 0 * MB;
@@ -415,7 +502,7 @@ static_assert(kPointerSize == (1 << kPointerSizeLog2));
 // This type defines raw storage type for external (or off-V8 heap) pointers
 // stored on V8 heap.
 constexpr int kExternalPointerSlotSize = sizeof(ExternalPointer_t);
-#ifdef V8_SANDBOXED_EXTERNAL_POINTERS
+#ifdef V8_ENABLE_SANDBOX
 static_assert(kExternalPointerSlotSize == kTaggedSize);
 #else
 static_assert(kExternalPointerSlotSize == kSystemPointerSize);
@@ -657,14 +744,6 @@ constexpr intptr_t kObjectAlignmentMask = kObjectAlignment - 1;
 constexpr intptr_t kObjectAlignment8GbHeap = 8;
 constexpr intptr_t kObjectAlignment8GbHeapMask = kObjectAlignment8GbHeap - 1;
 
-#ifdef V8_COMPRESS_POINTERS_8GB
-static_assert(
-    kObjectAlignment8GbHeap == 2 * kTaggedSize,
-    "When the 8GB heap is enabled, all allocations should be aligned to twice "
-    "the size of a tagged value. This enables aligning allocations by just "
-    "adding kTaggedSize to an unaligned address.");
-#endif
-
 // Desired alignment for system pointers.
 constexpr intptr_t kPointerAlignment = (1 << kSystemPointerSizeLog2);
 constexpr intptr_t kPointerAlignmentMask = kPointerAlignment - 1;
@@ -894,18 +973,20 @@ enum AllocationSpace {
   OLD_SPACE,      // Old generation regular object space.
   CODE_SPACE,     // Old generation code object space, marked executable.
   MAP_SPACE,      // Old generation map object space, non-movable.
+  NEW_SPACE,      // Young generation space for regular objects collected
+                  // with Scavenger/MinorMC.
   LO_SPACE,       // Old generation large object space.
   CODE_LO_SPACE,  // Old generation large code object space.
   NEW_LO_SPACE,   // Young generation large object space.
-  NEW_SPACE,  // Young generation semispaces for regular objects collected with
-              // Scavenger.
 
   FIRST_SPACE = RO_SPACE,
-  LAST_SPACE = NEW_SPACE,
+  LAST_SPACE = NEW_LO_SPACE,
   FIRST_MUTABLE_SPACE = OLD_SPACE,
-  LAST_MUTABLE_SPACE = NEW_SPACE,
+  LAST_MUTABLE_SPACE = NEW_LO_SPACE,
   FIRST_GROWABLE_PAGED_SPACE = OLD_SPACE,
-  LAST_GROWABLE_PAGED_SPACE = MAP_SPACE
+  LAST_GROWABLE_PAGED_SPACE = MAP_SPACE,
+  FIRST_SWEEPABLE_SPACE = OLD_SPACE,
+  LAST_SWEEPABLE_SPACE = NEW_SPACE
 };
 constexpr int kSpaceTagSize = 4;
 static_assert(FIRST_SPACE == 0);
@@ -1275,9 +1356,7 @@ enum AllocationSiteMode {
 enum class AllocationSiteUpdateMode { kUpdate, kCheckOnly };
 
 // The mips architecture prior to revision 5 has inverted encoding for sNaN.
-#if (V8_TARGET_ARCH_MIPS && !defined(_MIPS_ARCH_MIPS32R6) &&           \
-     (!defined(USE_SIMULATOR) || !defined(_MIPS_TARGET_SIMULATOR))) || \
-    (V8_TARGET_ARCH_MIPS64 && !defined(_MIPS_ARCH_MIPS64R6) &&         \
+#if (V8_TARGET_ARCH_MIPS64 && !defined(_MIPS_ARCH_MIPS64R6) && \
      (!defined(USE_SIMULATOR) || !defined(_MIPS_TARGET_SIMULATOR)))
 constexpr uint32_t kHoleNanUpper32 = 0xFFFF7FFF;
 constexpr uint32_t kHoleNanLower32 = 0xFFFF7FFF;

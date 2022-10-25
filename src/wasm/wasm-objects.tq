@@ -14,9 +14,9 @@ extern class WasmInstanceObject extends JSObject;
 // Represents the context of a function that is defined through the JS or C
 // APIs. Corresponds to the WasmInstanceObject passed to a Wasm function
 // reference.
-// TODO(manoskouk): If V8_SANDBOXED_EXTERNAL_POINTERS, we cannot encode the
-// isolate_root as a sandboxed pointer, because that would require having access
-// to the isolate root in the first place.
+// TODO(manoskouk): If V8_ENABLE_SANDBOX, we cannot encode the isolate_root as
+// a sandboxed pointer, because that would require having access to the isolate
+// root in the first place.
 extern class WasmApiFunctionRef extends HeapObject {
   isolate_root: RawPtr;
   native_context: NativeContext;
@@ -30,8 +30,6 @@ extern class WasmApiFunctionRef extends HeapObject {
 // This is the representation that is used internally by wasm to represent
 // function references.
 extern class WasmInternalFunction extends HeapObject {
-  // The call target. Tagged with the kWasmInternalFunctionCallTargetTag
-  call_target: ExternalPointer;
   // This is the "reference" value that must be passed along in the "instance"
   // register when calling the given function. It is either the target instance
   // (for wasm functions), or a WasmApiFunctionRef object (for functions defined
@@ -44,6 +42,8 @@ extern class WasmInternalFunction extends HeapObject {
   // This field is used when the call target is null.
   @if(V8_EXTERNAL_CODE_SPACE) code: CodeDataContainer;
   @ifnot(V8_EXTERNAL_CODE_SPACE) code: Code;
+  // The call target. Tagged with the kWasmInternalFunctionCallTargetTag
+  call_target: ExternalPointer;
 }
 
 extern operator '.call_target_ptr' macro LoadWasmInternalFunctionCallTargetPtr(
@@ -65,13 +65,13 @@ extern class WasmExportedFunctionData extends WasmFunctionData {
   // where the function is defined -- for the latter see WasmFunctionData::ref).
   instance: WasmInstanceObject;
   function_index: Smi;
-  signature: Foreign;
   wrapper_budget: Smi;
-  // The remaining fields are for fast calling from C++. The contract is
+  // The next two fields are for fast calling from C++. The contract is
   // that they are lazily populated, and either all will be present or none.
   @if(V8_EXTERNAL_CODE_SPACE) c_wrapper_code: CodeDataContainer;
   @ifnot(V8_EXTERNAL_CODE_SPACE) c_wrapper_code: Code;
   packed_args_size: Smi;
+  sig: ExternalPointer;  // wasm::FunctionSig*
 }
 
 extern class WasmJSFunctionData extends WasmFunctionData {
@@ -189,6 +189,9 @@ extern class WasmTypeInfo extends HeapObject {
   // and introduce a new link from here to just that zone using a Managed<...>.
   // Details: https://bit.ly/2UxD4hW
   native_type: ExternalPointer;
+  type_index: uint32;
+  @if(TAGGED_SIZE_8_BYTES) optional_padding: uint32;
+  @ifnot(TAGGED_SIZE_8_BYTES) optional_padding: void;
   instance: WasmInstanceObject;
   const supertypes_length: Smi;
   supertypes[supertypes_length]: Object;

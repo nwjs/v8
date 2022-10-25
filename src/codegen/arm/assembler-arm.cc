@@ -45,7 +45,6 @@
 #include "src/codegen/assembler-inl.h"
 #include "src/codegen/machine-type.h"
 #include "src/codegen/macro-assembler.h"
-#include "src/codegen/string-constants.h"
 #include "src/deoptimizer/deoptimizer.h"
 #include "src/objects/objects-inl.h"
 
@@ -59,7 +58,7 @@ static const unsigned kArmv8 = kArmv7WithSudiv | (1u << ARMv8);
 
 static unsigned CpuFeaturesFromCommandLine() {
   unsigned result;
-  const char* arm_arch = FLAG_arm_arch;
+  const char* arm_arch = v8_flags.arm_arch;
   if (strcmp(arm_arch, "armv8") == 0) {
     result = kArmv8;
   } else if (strcmp(arm_arch, "armv7+sudiv") == 0) {
@@ -82,12 +81,12 @@ static unsigned CpuFeaturesFromCommandLine() {
   // If any of the old (deprecated) flags are specified, print a warning, but
   // otherwise try to respect them for now.
   // TODO(jbramley): When all the old bots have been updated, remove this.
-  base::Optional<bool> maybe_enable_armv7 = FLAG_enable_armv7;
-  base::Optional<bool> maybe_enable_vfp3 = FLAG_enable_vfp3;
-  base::Optional<bool> maybe_enable_32dregs = FLAG_enable_32dregs;
-  base::Optional<bool> maybe_enable_neon = FLAG_enable_neon;
-  base::Optional<bool> maybe_enable_sudiv = FLAG_enable_sudiv;
-  base::Optional<bool> maybe_enable_armv8 = FLAG_enable_armv8;
+  base::Optional<bool> maybe_enable_armv7 = v8_flags.enable_armv7;
+  base::Optional<bool> maybe_enable_vfp3 = v8_flags.enable_vfp3;
+  base::Optional<bool> maybe_enable_32dregs = v8_flags.enable_32dregs;
+  base::Optional<bool> maybe_enable_neon = v8_flags.enable_neon;
+  base::Optional<bool> maybe_enable_sudiv = v8_flags.enable_sudiv;
+  base::Optional<bool> maybe_enable_armv8 = v8_flags.enable_armv8;
   if (maybe_enable_armv7.has_value() || maybe_enable_vfp3.has_value() ||
       maybe_enable_32dregs.has_value() || maybe_enable_neon.has_value() ||
       maybe_enable_sudiv.has_value() || maybe_enable_armv8.has_value()) {
@@ -398,15 +397,8 @@ Operand Operand::EmbeddedNumber(double value) {
   int32_t smi;
   if (DoubleToSmiInteger(value, &smi)) return Operand(Smi::FromInt(smi));
   Operand result(0, RelocInfo::FULL_EMBEDDED_OBJECT);
-  result.is_heap_object_request_ = true;
-  result.value_.heap_object_request = HeapObjectRequest(value);
-  return result;
-}
-
-Operand Operand::EmbeddedStringConstant(const StringConstantBase* str) {
-  Operand result(0, RelocInfo::FULL_EMBEDDED_OBJECT);
-  result.is_heap_object_request_ = true;
-  result.value_.heap_object_request = HeapObjectRequest(str);
+  result.is_heap_number_request_ = true;
+  result.value_.heap_number_request = HeapNumberRequest(value);
   return result;
 }
 
@@ -463,22 +455,12 @@ void NeonMemOperand::SetAlignment(int align) {
   }
 }
 
-void Assembler::AllocateAndInstallRequestedHeapObjects(Isolate* isolate) {
-  DCHECK_IMPLIES(isolate == nullptr, heap_object_requests_.empty());
-  for (auto& request : heap_object_requests_) {
-    Handle<HeapObject> object;
-    switch (request.kind()) {
-      case HeapObjectRequest::kHeapNumber:
-        object = isolate->factory()->NewHeapNumber<AllocationType::kOld>(
+void Assembler::AllocateAndInstallRequestedHeapNumbers(Isolate* isolate) {
+  DCHECK_IMPLIES(isolate == nullptr, heap_number_requests_.empty());
+  for (auto& request : heap_number_requests_) {
+    Handle<HeapObject> object =
+        isolate->factory()->NewHeapNumber<AllocationType::kOld>(
             request.heap_number());
-        break;
-      case HeapObjectRequest::kStringConstant: {
-        const StringConstantBase* str = request.string();
-        CHECK_NOT_NULL(str);
-        object = str->AllocateStringConstant(isolate);
-        break;
-      }
-    }
     Address pc = reinterpret_cast<Address>(buffer_start_) + request.offset();
     Memory<Address>(constant_pool_entry_address(pc, 0 /* unused */)) =
         object.address();
@@ -585,7 +567,7 @@ void Assembler::GetCode(Isolate* isolate, CodeDesc* desc,
 
   int code_comments_size = WriteCodeComments();
 
-  AllocateAndInstallRequestedHeapObjects(isolate);
+  AllocateAndInstallRequestedHeapNumbers(isolate);
 
   // Set up code descriptor.
   // TODO(jgruber): Reconsider how these offsets and sizes are maintained up to
@@ -1214,8 +1196,8 @@ void Assembler::Move32BitImmediate(Register rd, const Operand& x,
     }
   } else {
     int32_t immediate;
-    if (x.IsHeapObjectRequest()) {
-      RequestHeapObject(x.heap_object_request());
+    if (x.IsHeapNumberRequest()) {
+      RequestHeapNumber(x.heap_number_request());
       immediate = 0;
     } else {
       immediate = x.immediate();

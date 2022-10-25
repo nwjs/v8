@@ -20,6 +20,7 @@
 #include "src/common/ptr-compr-inl.h"
 #include "src/handles/handles-inl.h"
 #include "src/heap/factory.h"
+#include "src/heap/heap-verifier.h"
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/heap/read-only-heap-inl.h"
 #include "src/numbers/conversions-inl.h"
@@ -102,7 +103,7 @@ IS_TYPE_FUNCTION_DEF(CodeT)
     return Is##Type(ReadOnlyRoots(isolate));                     \
   }                                                              \
   bool Object::Is##Type(ReadOnlyRoots roots) const {             \
-    return *this == roots.Value();                               \
+    return SafeEquals(roots.Value());                            \
   }                                                              \
   bool Object::Is##Type() const {                                \
     return IsHeapObject() && HeapObject::cast(*this).Is##Type(); \
@@ -829,17 +830,15 @@ void HeapObject::set_map(Map value, MemoryOrder order, VerificationMode mode) {
   // background threads.
   DCHECK_IMPLIES(mode != VerificationMode::kSafeMapTransition,
                  !LocalHeap::Current());
-#ifdef VERIFY_HEAP
-  if (FLAG_verify_heap && !value.is_null()) {
+  if (v8_flags.verify_heap && !value.is_null()) {
     Heap* heap = GetHeapFromWritableObject(*this);
     if (mode == VerificationMode::kSafeMapTransition) {
-      heap->VerifySafeMapTransition(*this, value);
+      HeapVerifier::VerifySafeMapTransition(heap, *this, value);
     } else {
       DCHECK_EQ(mode, VerificationMode::kPotentialLayoutChange);
-      heap->VerifyObjectLayoutChange(*this, value);
+      HeapVerifier::VerifyObjectLayoutChange(heap, *this, value);
     }
   }
-#endif
   set_map_word(MapWord::FromMap(value), order);
 #ifndef V8_DISABLE_WRITE_BARRIERS
   if (!value.is_null()) {
@@ -1177,7 +1176,7 @@ bool Object::IsShared() const {
       return true;
     case INTERNALIZED_STRING_TYPE:
     case ONE_BYTE_INTERNALIZED_STRING_TYPE:
-      if (FLAG_shared_string_table) {
+      if (v8_flags.shared_string_table) {
         DCHECK(object.InSharedHeap());
         return true;
       }

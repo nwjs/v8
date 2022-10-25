@@ -5,7 +5,6 @@
 #ifndef V8_WASM_BASELINE_MIPS64_LIFTOFF_ASSEMBLER_MIPS64_H_
 #define V8_WASM_BASELINE_MIPS64_LIFTOFF_ASSEMBLER_MIPS64_H_
 
-#include "src/base/platform/wrappers.h"
 #include "src/codegen/machine-type.h"
 #include "src/heap/memory-chunk.h"
 #include "src/wasm/baseline/liftoff-assembler.h"
@@ -80,24 +79,27 @@ inline MemOperand GetInstanceOperand() { return GetStackSlot(kInstanceOffset); }
 template <typename T>
 inline MemOperand GetMemOp(LiftoffAssembler* assm, Register addr,
                            Register offset, T offset_imm,
-                           bool i64_offset = false) {
-  if (!i64_offset && offset != no_reg) {
-    assm->Dext(kScratchReg2, offset, 0, 32);
-    offset = kScratchReg2;
+                           bool i64_offset = false, unsigned shift_amount = 0) {
+  if (offset != no_reg) {
+    if (!i64_offset) {
+      assm->Dext(kScratchReg, offset, 0, 32);
+      offset = kScratchReg;
+    }
+    if (shift_amount != 0) {
+      assm->Dlsa(kScratchReg, addr, offset, shift_amount);
+    } else {
+      assm->daddu(kScratchReg, offset, addr);
+    }
+    addr = kScratchReg;
   }
   if (is_int31(offset_imm)) {
     int32_t offset_imm32 = static_cast<int32_t>(offset_imm);
-    if (offset == no_reg) return MemOperand(addr, offset_imm32);
-    assm->daddu(kScratchReg, addr, offset);
-    return MemOperand(kScratchReg, offset_imm32);
+    return MemOperand(addr, offset_imm32);
+  } else {
+    assm->li(kScratchReg2, Operand(offset_imm));
+    assm->daddu(kScratchReg2, addr, kScratchReg2);
+    return MemOperand(kScratchReg2, 0);
   }
-  // Offset immediate does not fit in 31 bits.
-  assm->li(kScratchReg, offset_imm);
-  assm->daddu(kScratchReg, kScratchReg, addr);
-  if (offset != no_reg) {
-    assm->daddu(kScratchReg, kScratchReg, offset);
-  }
-  return MemOperand(kScratchReg, 0);
 }
 
 inline void Load(LiftoffAssembler* assm, LiftoffRegister dst, MemOperand src,
@@ -378,7 +380,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
   // check in the condition code.
   RecordComment("OOL: stack check for large frame");
   Label continuation;
-  if (frame_size < FLAG_stack_size * 1024) {
+  if (frame_size < v8_flags.stack_size * 1024) {
     Register stack_limit = kScratchReg;
     Ld(stack_limit,
        FieldMemOperand(kWasmInstanceRegister,
@@ -391,7 +393,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
   Call(wasm::WasmCode::kWasmStackOverflow, RelocInfo::WASM_STUB_CALL);
   // The call will not return; just define an empty safepoint.
   safepoint_table_builder->DefineSafepoint(this);
-  if (FLAG_debug_code) stop();
+  if (v8_flags.debug_code) stop();
 
   bind(&continuation);
 
@@ -486,9 +488,11 @@ void LiftoffAssembler::ResetOSRTarget() {}
 
 void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
                                          Register offset_reg,
-                                         int32_t offset_imm) {
+                                         int32_t offset_imm, bool needs_shift) {
   static_assert(kTaggedSize == kInt64Size);
-  MemOperand src_op = liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm);
+  unsigned shift_amount = !needs_shift ? 0 : 3;
+  MemOperand src_op = liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm,
+                                        false, shift_amount);
   Ld(dst, src_op);
 }
 
@@ -509,7 +513,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
   MemOperand dst_op = liftoff::GetMemOp(this, dst_addr, offset_reg, offset_imm);
   Sd(src.gp(), dst_op);
 
-  if (skip_write_barrier || FLAG_disable_write_barriers) return;
+  if (skip_write_barrier || v8_flags.disable_write_barriers) return;
 
   Label write_barrier;
   Label exit;
@@ -531,9 +535,11 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
 void LiftoffAssembler::Load(LiftoffRegister dst, Register src_addr,
                             Register offset_reg, uintptr_t offset_imm,
                             LoadType type, uint32_t* protected_load_pc,
-                            bool is_load_mem, bool i64_offset) {
-  MemOperand src_op =
-      liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm, i64_offset);
+                            bool is_load_mem, bool i64_offset,
+                            bool needs_shift) {
+  unsigned shift_amount = needs_shift ? type.size_log_2() : 0;
+  MemOperand src_op = liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm,
+                                        i64_offset, shift_amount);
 
   if (protected_load_pc) *protected_load_pc = pc_offset();
   switch (type.value()) {
@@ -1101,6 +1107,11 @@ void LiftoffAssembler::FillStackSlotsWithZero(int start, int size) {
 
     Pop(a1, a0);
   }
+}
+
+void LiftoffAssembler::LoadSpillAddress(Register dst, int offset,
+                                        ValueKind /* kind */) {
+  Dsubu(dst, fp, Operand(offset));
 }
 
 void LiftoffAssembler::emit_i64_clz(LiftoffRegister dst, LiftoffRegister src) {
@@ -3564,7 +3575,7 @@ void LiftoffAssembler::CallTrapCallbackForTesting() {
 }
 
 void LiftoffAssembler::AssertUnreachable(AbortReason reason) {
-  if (FLAG_debug_code) Abort(reason);
+  if (v8_flags.debug_code) Abort(reason);
 }
 
 void LiftoffAssembler::PushRegisters(LiftoffRegList regs) {

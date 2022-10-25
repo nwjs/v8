@@ -101,7 +101,7 @@ void RelocInfo::set_target_object(Heap* heap, HeapObject target,
   if (icache_flush_mode != SKIP_ICACHE_FLUSH) {
     FlushInstructionCache(pc_, sizeof(Address));
   }
-  if (!host().is_null() && !FLAG_disable_write_barriers) {
+  if (!host().is_null() && !v8_flags.disable_write_barriers) {
     WriteBarrierForCode(host(), this, target, write_barrier_mode);
   }
 }
@@ -129,6 +129,8 @@ Address RelocInfo::target_internal_reference_address() {
   DCHECK(rmode_ == INTERNAL_REFERENCE);
   return pc_;
 }
+
+Builtin RelocInfo::target_builtin_at(Assembler* origin) { UNREACHABLE(); }
 
 Address RelocInfo::target_runtime_entry(Assembler* origin) {
   DCHECK(IsRuntimeEntry(rmode_));
@@ -195,8 +197,8 @@ void Assembler::emit(const Immediate& x) {
     return;
   }
   if (!RelocInfo::IsNoInfo(x.rmode_)) RecordRelocInfo(x.rmode_);
-  if (x.is_heap_object_request()) {
-    RequestHeapObject(x.heap_object_request());
+  if (x.is_heap_number_request()) {
+    RequestHeapNumber(x.heap_number_request());
     emit(0);
     return;
   }

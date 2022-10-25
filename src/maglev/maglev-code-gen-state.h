@@ -8,7 +8,6 @@
 #include "src/codegen/assembler.h"
 #include "src/codegen/label.h"
 #include "src/codegen/machine-type.h"
-#include "src/codegen/macro-assembler.h"
 #include "src/codegen/maglev-safepoint-table.h"
 #include "src/common/globals.h"
 #include "src/compiler/backend/instruction.h"
@@ -21,11 +20,11 @@ namespace internal {
 namespace maglev {
 
 class InterpreterFrameState;
+class MaglevAssembler;
 
 class DeferredCodeInfo {
  public:
-  virtual void Generate(MaglevCodeGenState* code_gen_state,
-                        Label* return_label) = 0;
+  virtual void Generate(MaglevAssembler* masm, Label* return_label) = 0;
   Label deferred_code_label;
   Label return_label;
 };
@@ -35,8 +34,7 @@ class MaglevCodeGenState {
   MaglevCodeGenState(MaglevCompilationInfo* compilation_info,
                      MaglevSafepointTableBuilder* safepoint_table_builder)
       : compilation_info_(compilation_info),
-        safepoint_table_builder_(safepoint_table_builder),
-        masm_(isolate(), CodeObjectRequired::kNo) {}
+        safepoint_table_builder_(safepoint_table_builder) {}
 
   void set_tagged_slots(int slots) { tagged_slots_ = slots; }
   void set_untagged_slots(int slots) { untagged_slots_ = slots; }
@@ -55,7 +53,9 @@ class MaglevCodeGenState {
   const std::vector<LazyDeoptInfo*>& lazy_deopts() const {
     return lazy_deopts_;
   }
-  inline void DefineLazyDeoptPoint(LazyDeoptInfo* info);
+
+  void PushHandlerInfo(NodeBase* node) { handlers_.push_back(node); }
+  const std::vector<NodeBase*>& handlers() const { return handlers_; }
 
   compiler::NativeContextRef native_context() const {
     return broker()->target_native_context();
@@ -65,67 +65,24 @@ class MaglevCodeGenState {
   MaglevGraphLabeller* graph_labeller() const {
     return compilation_info_->graph_labeller();
   }
-  MacroAssembler* masm() { return &masm_; }
   int stack_slots() const { return untagged_slots_ + tagged_slots_; }
+  int tagged_slots() const { return tagged_slots_; }
   MaglevSafepointTableBuilder* safepoint_table_builder() const {
     return safepoint_table_builder_;
   }
   MaglevCompilationInfo* compilation_info() const { return compilation_info_; }
 
-  // TODO(v8:7700): Clean up after all code paths are supported.
-  void set_found_unsupported_code_paths(bool val) {
-    found_unsupported_code_paths_ = val;
-  }
-  bool found_unsupported_code_paths() const {
-    return found_unsupported_code_paths_;
-  }
-
-  inline int GetFramePointerOffsetForStackSlot(
-      const compiler::AllocatedOperand& operand) {
-    int index = operand.index();
-    if (operand.representation() != MachineRepresentation::kTagged) {
-      index += tagged_slots_;
-    }
-    return GetFramePointerOffsetForStackSlot(index);
-  }
-
-  inline MemOperand GetStackSlot(const compiler::AllocatedOperand& operand) {
-    return MemOperand(rbp, GetFramePointerOffsetForStackSlot(operand));
-  }
-
-  inline MemOperand ToMemOperand(const compiler::InstructionOperand& operand) {
-    return GetStackSlot(compiler::AllocatedOperand::cast(operand));
-  }
-
-  inline MemOperand ToMemOperand(const ValueLocation& location) {
-    return ToMemOperand(location.operand());
-  }
-
-  inline MemOperand TopOfStack() {
-    return MemOperand(rbp,
-                      GetFramePointerOffsetForStackSlot(stack_slots() - 1));
-  }
-
  private:
-  inline constexpr int GetFramePointerOffsetForStackSlot(int index) {
-    return StandardFrameConstants::kExpressionsOffset -
-           index * kSystemPointerSize;
-  }
-
   MaglevCompilationInfo* const compilation_info_;
   MaglevSafepointTableBuilder* const safepoint_table_builder_;
 
-  MacroAssembler masm_;
   std::vector<DeferredCodeInfo*> deferred_code_;
   std::vector<EagerDeoptInfo*> eager_deopts_;
   std::vector<LazyDeoptInfo*> lazy_deopts_;
+  std::vector<NodeBase*> handlers_;
+
   int untagged_slots_ = 0;
   int tagged_slots_ = 0;
-
-  // Allow marking some codegen paths as unsupported, so that we can test maglev
-  // incrementally.
-  // TODO(v8:7700): Clean up after all code paths are supported.
-  bool found_unsupported_code_paths_ = false;
 };
 
 // Some helpers for codegen.
@@ -161,12 +118,6 @@ inline Register ToRegister(const ValueLocation& location) {
 
 inline DoubleRegister ToDoubleRegister(const ValueLocation& location) {
   return ToDoubleRegister(location.operand());
-}
-
-inline void MaglevCodeGenState::DefineLazyDeoptPoint(LazyDeoptInfo* info) {
-  info->deopting_call_return_pc = masm()->pc_offset_for_safepoint();
-  PushLazyDeopt(info);
-  safepoint_table_builder()->DefineSafepoint(masm());
 }
 
 }  // namespace maglev

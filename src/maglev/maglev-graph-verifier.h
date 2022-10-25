@@ -49,14 +49,15 @@ class Graph;
 // are expected to be tagged/untagged. Add more verification later.
 class MaglevGraphVerifier {
  public:
-  void PreProcessGraph(MaglevCompilationInfo* compilation_info, Graph* graph) {
+  explicit MaglevGraphVerifier(MaglevCompilationInfo* compilation_info) {
     if (compilation_info->has_graph_labeller()) {
       graph_labeller_ = compilation_info->graph_labeller();
     }
   }
 
-  void PostProcessGraph(MaglevCompilationInfo*, Graph* graph) {}
-  void PreProcessBasicBlock(MaglevCompilationInfo*, BasicBlock* block) {}
+  void PreProcessGraph(Graph* graph) {}
+  void PostProcessGraph(Graph* graph) {}
+  void PreProcessBasicBlock(BasicBlock* block) {}
 
   void CheckValueInputIs(NodeBase* node, int i, ValueRepresentation expected) {
     ValueNode* input = node->input(i).node();
@@ -94,6 +95,7 @@ class MaglevGraphVerifier {
       case Opcode::kJump:
       case Opcode::kJumpFromInlined:
       case Opcode::kJumpLoop:
+      case Opcode::kJumpLoopPrologue:
       case Opcode::kJumpToInlined:
       case Opcode::kRegisterInput:
       case Opcode::kRootConstant:
@@ -174,6 +176,10 @@ class MaglevGraphVerifier {
       case Opcode::kGenericLessThan:
       case Opcode::kGenericLessThanOrEqual:
       case Opcode::kGenericStrictEqual:
+      case Opcode::kCheckJSArrayBounds:
+      case Opcode::kCheckJSObjectElementsBounds:
+      case Opcode::kLoadTaggedElement:
+      case Opcode::kLoadDoubleElement:
       case Opcode::kGetIterator:
       case Opcode::kTaggedEqual:
       case Opcode::kTaggedNotEqual:
@@ -212,6 +218,7 @@ class MaglevGraphVerifier {
         CheckValueInputIs(node, 2, ValueRepresentation::kTagged);
         CheckValueInputIs(node, 3, ValueRepresentation::kTagged);
         break;
+      case Opcode::kAssertInt32:
       case Opcode::kInt32AddWithOverflow:
       case Opcode::kInt32SubtractWithOverflow:
       case Opcode::kInt32MultiplyWithOverflow:

@@ -175,6 +175,7 @@ class CcTest {
   static void CollectAllGarbage(i::Isolate* isolate = nullptr);
   static void CollectAllAvailableGarbage(i::Isolate* isolate = nullptr);
   static void PreciseCollectAllGarbage(i::Isolate* isolate = nullptr);
+  static void CollectSharedGarbage(i::Isolate* isolate = nullptr);
 
   static i::Handle<i::String> MakeString(const char* str);
   static i::Handle<i::String> MakeName(const char* str, int suffix);
@@ -772,7 +773,7 @@ class SimulatorHelper {
     state->sp = reinterpret_cast<void*>(simulator_->sp());
     state->fp = reinterpret_cast<void*>(simulator_->fp());
     state->lr = reinterpret_cast<void*>(simulator_->lr());
-#elif V8_TARGET_ARCH_MIPS || V8_TARGET_ARCH_MIPS64
+#elif V8_TARGET_ARCH_MIPS64
     state->pc = reinterpret_cast<void*>(simulator_->get_pc());
     state->sp = reinterpret_cast<void*>(
         simulator_->get_register(v8::internal::Simulator::sp));

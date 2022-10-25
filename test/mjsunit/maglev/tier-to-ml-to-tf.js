@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
-// Flags: --allow-natives-syntax --maglev --no-stress-opt
+// Flags: --allow-natives-syntax --maglev
 // Flags: --no-baseline-batch-compilation
 
 function f(x) {
@@ -13,7 +13,7 @@ function f(x) {
   return y;
 }
 
-let keep_going = 100000;  // A counter to avoid test hangs on failure.
+let keep_going = 10000000;  // A counter to avoid test hangs on failure.
 
 function g() {
   // Test that normal tiering (without OptimizeFooOnNextCall) works.

@@ -185,15 +185,19 @@ namespace internal {
       InterpreterPushArgsThenConstruct)                                        \
   ASM(InterpreterEnterAtBytecode, Void)                                        \
   ASM(InterpreterEnterAtNextBytecode, Void)                                    \
-  ASM(InterpreterOnStackReplacement, InterpreterOnStackReplacement)            \
+  ASM(InterpreterOnStackReplacement, OnStackReplacement)                       \
                                                                                \
   /* Baseline Compiler */                                                      \
   ASM(BaselineOutOfLinePrologue, BaselineOutOfLinePrologue)                    \
-  ASM(BaselineOnStackReplacement, BaselineOnStackReplacement)                  \
+  ASM(BaselineOutOfLinePrologueDeopt, Void)                                    \
+  ASM(BaselineOnStackReplacement, OnStackReplacement)                          \
   ASM(BaselineLeaveFrame, BaselineLeaveFrame)                                  \
   ASM(BaselineOrInterpreterEnterAtBytecode, Void)                              \
   ASM(BaselineOrInterpreterEnterAtNextBytecode, Void)                          \
   ASM(InterpreterOnStackReplacement_ToBaseline, Void)                          \
+                                                                               \
+  /* Maglev Compiler */                                                        \
+  ASM(MaglevOnStackReplacement, OnStackReplacement)                            \
                                                                                \
   /* Code life-cycle */                                                        \
   TFC(CompileLazy, JSTrampoline)                                               \
@@ -651,7 +655,9 @@ namespace internal {
   TFH(DefineKeyedOwnICBaseline, StoreBaseline)                                 \
   TFH(StoreInArrayLiteralIC, StoreWithVector)                                  \
   TFH(StoreInArrayLiteralICBaseline, StoreBaseline)                            \
+  TFH(LookupContextTrampoline, LookupTrampoline)                               \
   TFH(LookupContextBaseline, LookupBaseline)                                   \
+  TFH(LookupContextInsideTypeofTrampoline, LookupTrampoline)                   \
   TFH(LookupContextInsideTypeofBaseline, LookupBaseline)                       \
   TFH(LoadGlobalIC, LoadGlobalWithVector)                                      \
   TFH(LoadGlobalICInsideTypeof, LoadGlobalWithVector)                          \
@@ -659,7 +665,9 @@ namespace internal {
   TFH(LoadGlobalICBaseline, LoadGlobalBaseline)                                \
   TFH(LoadGlobalICInsideTypeofTrampoline, LoadGlobal)                          \
   TFH(LoadGlobalICInsideTypeofBaseline, LoadGlobalBaseline)                    \
+  TFH(LookupGlobalICTrampoline, LookupTrampoline)                              \
   TFH(LookupGlobalICBaseline, LookupBaseline)                                  \
+  TFH(LookupGlobalICInsideTypeofTrampoline, LookupTrampoline)                  \
   TFH(LookupGlobalICInsideTypeofBaseline, LookupBaseline)                      \
   TFH(CloneObjectIC, CloneObjectWithVector)                                    \
   TFH(CloneObjectICBaseline, CloneObjectBaseline)                              \
@@ -1086,6 +1094,7 @@ namespace internal {
   TFS(CreateDataProperty, kReceiver, kKey, kValue)                             \
   ASM(MemCopyUint8Uint8, CCall)                                                \
   ASM(MemMove, CCall)                                                          \
+  TFC(FindNonDefaultConstructor, FindNonDefaultConstructor)                    \
                                                                                \
   /* Trace */                                                                  \
   CPP(IsTraceCategoryEnabled)                                                  \

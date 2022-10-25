@@ -34,9 +34,9 @@
 #include "src/zone/accounting-allocator.h"
 #include "src/zone/zone.h"
 #include "test/cctest/cctest.h"
-#include "test/cctest/compiler/call-tester.h"
 #include "test/cctest/compiler/graph-and-builders.h"
-#include "test/cctest/compiler/value-helper.h"
+#include "test/common/call-tester.h"
+#include "test/common/value-helper.h"
 #include "test/common/wasm/flag-utils.h"
 #include "test/common/wasm/wasm-interpreter.h"
 
@@ -138,7 +138,7 @@ class TestingModuleBuilder {
     DCHECK_EQ(test_module_->types.size(),
               test_module_->per_module_canonical_type_ids.size());
     test_module_->add_signature(sig, kNoSuperType);
-    if (FLAG_wasm_type_canonicalization) {
+    if (v8_flags.wasm_type_canonicalization) {
       GetTypeCanonicalizer()->AddRecursiveGroup(test_module_.get(), 1);
       instance_object_->set_isorecursive_canonical_types(
           test_module_->isorecursive_canonical_type_ids.data());

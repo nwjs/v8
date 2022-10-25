@@ -5,7 +5,6 @@
 #ifndef V8_WASM_BASELINE_ARM64_LIFTOFF_ASSEMBLER_ARM64_H_
 #define V8_WASM_BASELINE_ARM64_LIFTOFF_ASSEMBLER_ARM64_H_
 
-#include "src/base/platform/wrappers.h"
 #include "src/base/v8-fallthrough.h"
 #include "src/heap/memory-chunk.h"
 #include "src/wasm/baseline/liftoff-assembler.h"
@@ -131,15 +130,16 @@ template <typename T>
 inline MemOperand GetMemOp(LiftoffAssembler* assm,
                            UseScratchRegisterScope* temps, Register addr,
                            Register offset, T offset_imm,
-                           bool i64_offset = false) {
+                           bool i64_offset = false, unsigned shift_amount = 0) {
   if (!offset.is_valid()) return MemOperand(addr.X(), offset_imm);
   Register effective_addr = addr.X();
   if (offset_imm) {
     effective_addr = temps->AcquireX();
     assm->Add(effective_addr, addr.X(), offset_imm);
   }
-  return i64_offset ? MemOperand(effective_addr, offset.X())
-                    : MemOperand(effective_addr, offset.W(), UXTW);
+  return i64_offset
+             ? MemOperand(effective_addr, offset.X(), LSL, shift_amount)
+             : MemOperand(effective_addr, offset.W(), UXTW, shift_amount);
 }
 
 // Compute the effective address (sum of |addr|, |offset| (if given) and
@@ -351,7 +351,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
   // check in the condition code.
   RecordComment("OOL: stack check for large frame");
   Label continuation;
-  if (frame_size < FLAG_stack_size * 1024) {
+  if (frame_size < v8_flags.stack_size * 1024) {
     UseScratchRegisterScope temps(this);
     Register stack_limit = temps.AcquireX();
     Ldr(stack_limit,
@@ -366,7 +366,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
   Call(wasm::WasmCode::kWasmStackOverflow, RelocInfo::WASM_STUB_CALL);
   // The call will not return; just define an empty safepoint.
   safepoint_table_builder->DefineSafepoint(this);
-  if (FLAG_debug_code) Brk(0);
+  if (v8_flags.debug_code) Brk(0);
 
   bind(&continuation);
 
@@ -470,10 +470,11 @@ void LiftoffAssembler::ResetOSRTarget() {}
 
 void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
                                          Register offset_reg,
-                                         int32_t offset_imm) {
+                                         int32_t offset_imm, bool needs_shift) {
   UseScratchRegisterScope temps(this);
-  MemOperand src_op =
-      liftoff::GetMemOp(this, &temps, src_addr, offset_reg, offset_imm);
+  unsigned shift_amount = !needs_shift ? 0 : COMPRESS_POINTERS_BOOL ? 2 : 3;
+  MemOperand src_op = liftoff::GetMemOp(this, &temps, src_addr, offset_reg,
+                                        offset_imm, false, shift_amount);
   LoadTaggedPointerField(dst, src_op);
 }
 
@@ -504,7 +505,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
   }
   StoreTaggedField(src.gp(), MemOperand(dst_addr.X(), offset_op));
 
-  if (skip_write_barrier || FLAG_disable_write_barriers) return;
+  if (skip_write_barrier || v8_flags.disable_write_barriers) return;
 
   // The write barrier.
   Label write_barrier;
@@ -527,10 +528,12 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
 void LiftoffAssembler::Load(LiftoffRegister dst, Register src_addr,
                             Register offset_reg, uintptr_t offset_imm,
                             LoadType type, uint32_t* protected_load_pc,
-                            bool /* is_load_mem */, bool i64_offset) {
+                            bool /* is_load_mem */, bool i64_offset,
+                            bool needs_shift) {
   UseScratchRegisterScope temps(this);
+  unsigned shift_amount = needs_shift ? type.size_log_2() : 0;
   MemOperand src_op = liftoff::GetMemOp(this, &temps, src_addr, offset_reg,
-                                        offset_imm, i64_offset);
+                                        offset_imm, i64_offset, shift_amount);
   if (protected_load_pc) *protected_load_pc = pc_offset();
   switch (type.value()) {
     case LoadType::kI32Load8U:
@@ -1028,6 +1031,11 @@ void LiftoffAssembler::FillStackSlotsWithZero(int start, int size) {
     str(wzr, MemOperand(address_reg, kSystemPointerSize / 2, PostIndex));
     cbnz(count_reg, &loop);
   }
+}
+
+void LiftoffAssembler::LoadSpillAddress(Register dst, int offset,
+                                        ValueKind /* kind */) {
+  Sub(dst, fp, offset);
 }
 
 #define I32_BINOP(name, instruction)                             \

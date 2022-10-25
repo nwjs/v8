@@ -11,6 +11,7 @@
 #include "include/v8-date.h"
 #include "include/v8-debug.h"
 #include "include/v8-embedder-heap.h"
+#include "include/v8-isolate.h"
 #include "include/v8-local-handle.h"
 #include "include/v8-memory-span.h"
 #include "include/v8-promise.h"
@@ -610,9 +611,8 @@ bool SetFunctionBreakpoint(v8::Local<v8::Function> function,
 
 v8::Platform* GetCurrentPlatform();
 
-void ForceGarbageCollection(
-    v8::Isolate* isolate,
-    v8::EmbedderHeapTracer::EmbedderStackState embedder_stack_state);
+void ForceGarbageCollection(v8::Isolate* isolate,
+                            v8::StackState embedder_stack_state);
 
 class V8_NODISCARD PostponeInterruptsScope {
  public:
@@ -732,6 +732,8 @@ AccessorPair* AccessorPair::Cast(v8::Value* value) {
 MaybeLocal<Message> GetMessageFromPromise(Local<Promise> promise);
 
 bool isExperimentalAsyncStackTaggingApiEnabled();
+
+void RecordAsyncStackTaggingCreateTaskCall(v8::Isolate* isolate);
 
 }  // namespace debug
 }  // namespace v8

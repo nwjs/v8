@@ -36,8 +36,8 @@ V8_INLINE void InitExternalPointerField(Address field_address, Isolate* isolate,
 #ifdef V8_ENABLE_SANDBOX
   if (IsSandboxedExternalPointerType(tag)) {
     ExternalPointerTable& table = GetExternalPointerTable<tag>(isolate);
-    ExternalPointerHandle handle = table.AllocateEntry();
-    table.Set(handle, value, tag);
+    ExternalPointerHandle handle =
+        table.AllocateAndInitializeEntry(isolate, value, tag);
     // Use a Release_Store to ensure that the store of the pointer into the
     // table is not reordered after the store of the handle. Otherwise, other
     // threads may access an uninitialized table entry and crash.
@@ -75,6 +75,30 @@ V8_INLINE void WriteExternalPointerField(Address field_address,
     auto location = reinterpret_cast<ExternalPointerHandle*>(field_address);
     ExternalPointerHandle handle = base::AsAtomic32::Relaxed_Load(location);
     GetExternalPointerTable<tag>(isolate).Set(handle, value, tag);
+    return;
+  }
+#endif  // V8_ENABLE_SANDBOX
+  WriteMaybeUnalignedValue<Address>(field_address, value);
+}
+
+template <ExternalPointerTag tag>
+V8_INLINE void WriteLazilyInitializedExternalPointerField(Address field_address,
+                                                          Isolate* isolate,
+                                                          Address value) {
+#ifdef V8_ENABLE_SANDBOX
+  if (IsSandboxedExternalPointerType(tag)) {
+    // See comment above for why this uses a Relaxed_Load and Release_Store.
+    ExternalPointerTable& table = GetExternalPointerTable<tag>(isolate);
+    auto location = reinterpret_cast<ExternalPointerHandle*>(field_address);
+    ExternalPointerHandle handle = base::AsAtomic32::Relaxed_Load(location);
+    if (handle == kNullExternalPointerHandle) {
+      // Field has not been initialized yet.
+      ExternalPointerHandle handle =
+          table.AllocateAndInitializeEntry(isolate, value, tag);
+      base::AsAtomic32::Release_Store(location, handle);
+    } else {
+      table.Set(handle, value, tag);
+    }
     return;
   }
 #endif  // V8_ENABLE_SANDBOX

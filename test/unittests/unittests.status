@@ -5,21 +5,33 @@
 [
 
 [ALWAYS, {
+  'IntlTest.StringLocaleCompareFastPath': [['mode != release', SKIP], SLOW, NO_VARIANTS],
+
   # BUG(5193). The cpu profiler tests are notoriously flaky.
   'SamplerTest.LibSamplerCollectSample': [SKIP],
 
   # This tests only the type system, no point in running several variants.
   'TypesTest.*': [PASS, NO_VARIANTS],
 
-  # https://crbug.com/v8/8919
-  'PlatformTest.StackAlignment': [PASS, ['not is_clang', SKIP]],
-
   # These tests are supposed to fail in a slow DCHECK, skip them otherwise.
   'LocalHandlesTest.DereferenceLocalHandleFailsWhenDisallowed': [SKIP, ['mode == debug', FAIL]],
   'PersistentHandlesTest.DereferencePersistentHandleFailsWhenDisallowed': [SKIP, ['mode == debug', FAIL]],
 
-  'IntlTest.StringLocaleCompareFastPath': [['mode != release', SKIP], SLOW, NO_VARIANTS],
+  # https://crbug.com/v8/8919
+  'PlatformTest.StackAlignment': [PASS, ['not is_clang', SKIP]],
+
+  # We do not yet shrink weak maps after they have been emptied by the GC
+  'WeakMapsTest.Shrinking': [FAIL],
+
   'WeakSetsTest.WeakSet_Shrinking': [FAIL],
+
+  # This tests only that the preparser and parser agree, so there is no point in
+  # running several variants. Note that this still takes ages, because there
+  # are actually 13 * 38 * 5 * 128 = 316160 individual tests hidden here.
+  'ParsingTest.ParserSync': [PASS, NO_VARIANTS],
+
+  # Slow tests.
+  'ParsingTest.ObjectRestNegativeTestSlow': [PASS, ['mode == debug', SKIP]],
 }],  # ALWAYS
 
 ##############################################################################
@@ -91,6 +103,12 @@
 }],  # arch == ppc64
 
 ##############################################################################
+['arch == mips64el', {
+  # TODO(mips-team): mips64 do not allocate odd register in liftoff.
+  'WasmRegisterTest.SpreadSetBitsToAdjacentFpRegs': [SKIP],
+}],  # 'arch == mips64'
+
+##############################################################################
 ['system == windows and asan', {
   # BUG(893437).
   'Torque*': [SKIP],
@@ -104,6 +122,12 @@
   'Torque.ConditionalFields': [SKIP],
   'Torque.UsingUnderscorePrefixedIdentifierError': [SKIP],
 }],  # system == windows and arch == x64 and mode == release
+
+##############################################################################
+['asan == True', {
+  # Skip tests not suitable for ASAN.
+  'AssemblerX64.AssemblerX64XchglOperations': [SKIP],
+}],  # 'asan == True'
 
 ['tsan == True', {
   # https://crbug.com/v8/9380
@@ -119,10 +143,6 @@
   'LogMapsCodeTest.LogMapsDetailsCode': [SKIP],
   'LogMapsTest.LogMapsDetailsStartup': [SKIP],
   'LogMapsTest.LogMapsDetailsContexts': [SKIP],
-
-  # https://crbug.com/v8/13185
-  # Test sets a flag that's read in another thread by the GC.
-  'HeapTest.GrowAndShrinkNewSpace': [SKIP],
 }],  # tsan == True
 
 ##############################################################################
@@ -201,10 +221,19 @@
 
   # Performs GC
   'APIExceptionTest.ExceptionMessageDoesNotKeepContextAlive': [SKIP],
+  'GlobalHandlesTest.FinalizerDiesAndKeepsPhantomAliveOnMarkCompact': [SKIP],
+  'GlobalHandlesTest.FinalizerWeakness': [SKIP],
+  'GlobalHandlesTest.GCFromWeakCallbacks': [SKIP],
+  'GlobalHandlesTest.PhantomHandlesWithoutCallbacks': [SKIP],
+  'GlobalHandlesTest.SecondPassPhantomCallbacks': [SKIP],
+  'GlobalHandlesTest.WeakHandleToUnmodifiedJSApiObjectDiesOnMarkCompact': [SKIP],
+  'GlobalHandlesTest.WeakHandleToUnmodifiedJSObjectDiesOnMarkCompact': [SKIP],
   'LocalHeapTest.GCEpilogue': [SKIP],
   'UnifiedHeapDetachedTest.AllocationBeforeConfigureHeap': [SKIP],
   'UnifiedHeapTest.FindingV8ToBlinkReference': [SKIP],
   'ManagedTest.GCCausesDestruction': [SKIP],
+  'WeakMapsTest.WeakMapsWithChainedEntries': [SKIP],
+  'WeakMapsTest.Weakness': [SKIP],
   'WeakSetsTest.WeakSet_Weakness': [SKIP],
   'WebSnapshotTest.SFIDeduplicationAfterBytecodeFlushing': [SKIP],
 
@@ -241,6 +270,7 @@
 ['lite_mode or variant == jitless', {
 
   # Tests that generate code at runtime.
+  'CodePagesTest.*': [SKIP],
   'MacroAssemblerX64Test.EmbeddedObj': [SKIP],
   'RegExpTest.MacroAssemblernativeAtStart': [SKIP],
   'RegExpTest.MacroAssemblerNativeBackReferenceLATIN1': [SKIP],
@@ -254,13 +284,17 @@
   'RegExpTest.MacroAssemblerNativeSuccess': [SKIP],
   'RegExpTest.MacroAssemblerStackOverflow': [SKIP],
   'RegExpTest.Graph': [SKIP],
+  'SloppyEqualityTest.*' : [SKIP],
   'DisasmX64Test.*': [SKIP],
+  'RunJSBranchesTest.*': [SKIP],
+  'RunJSCallsTest.*': [SKIP],
+  'RunJSExceptionsTest.*': [SKIP],
+  'RunJSObjectsTest.*': [SKIP],
+  'RunJSOpsTest.*': [SKIP],
+  'RunTailCallsTest.*': [SKIP],
 
   # Tests generated irregexp code.
   'RegExpTestWithContext.RegExpInterruptReentrantExecution': [SKIP],
-
-  # Tests that generate code at runtime.
-  'CodePagesTest.*': [SKIP],
 }], # lite_mode or variant == jitless
 
 ##############################################################################
@@ -280,6 +314,8 @@
   'BignumDtoaTest.*': [SKIP],
   'DtoaTest.*': [SKIP],
   'DeclsTest.*': [SKIP],
+  'GlobalHandlesTest.*': [SKIP],
+  'ParsingTest/*': [SKIP],
 }],  # variant == no_wasm_traps
 
 ##############################################################################

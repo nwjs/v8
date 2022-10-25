@@ -100,6 +100,10 @@ class BasicBlock {
   }
   bool has_state() const { return !is_empty_block() && state_ != nullptr; }
 
+  bool is_exception_handler_block() const {
+    return has_state() && state_->is_exception_handler();
+  }
+
  private:
   bool is_empty_block_ = false;
   Node::List nodes_;

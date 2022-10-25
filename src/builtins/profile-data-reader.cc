@@ -46,7 +46,7 @@ EnsureInitProfileData() {
 
   if (initialized) return *data.get();
   initialized = true;
-  const char* filename = FLAG_turbo_profiling_input;
+  const char* filename = v8_flags.turbo_profiling_input;
   if (filename == nullptr) return *data.get();
   std::ifstream file(filename);
   CHECK_WITH_MSG(file.good(), "Can't read log file");
@@ -100,13 +100,6 @@ EnsureInitProfileData() {
   for (const auto& pair : *data.get()) {
     // Every function is required to have a hash in the log.
     CHECK(pair.second.hash_has_value());
-  }
-  if (data.get()->size() == 0) {
-    PrintF(
-        "No branch hints were found in log file.\n"
-        "See the description of v8_builtins_profiling_log_file in BUILD.gn\n"
-        "for instructions on how to produce hints from a profiled v8.log "
-        "file\n");
   }
 
   return *data.get();

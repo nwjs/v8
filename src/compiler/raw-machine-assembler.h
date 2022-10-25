@@ -192,7 +192,8 @@ class V8_EXPORT_PRIVATE RawMachineAssembler {
     AddNode(simplified()->StoreField(FieldAccess(
                 BaseTaggedness::kTaggedBase, offset, MaybeHandle<Name>(),
                 MaybeHandle<Map>(), Type::Any(),
-                MachineType::TypeForRepresentation(rep), write_barrier)),
+                MachineType::TypeForRepresentation(rep), write_barrier,
+                "OptimizedStoreField")),
             object, value);
   }
   void OptimizedStoreMap(Node* object, Node* value,
@@ -333,6 +334,10 @@ class V8_EXPORT_PRIVATE RawMachineAssembler {
       return AddNode(machine()->Word32AtomicPairCompareExchange(), base, index,
                      old_value, old_value_high, new_value, new_value_high);
     }
+  }
+
+  Node* MemoryBarrier(AtomicMemoryOrder order) {
+    return AddNode(machine()->MemoryBarrier(order));
   }
 
   // Arithmetic Operations.

@@ -155,19 +155,11 @@ void BaselineAssembler::JumpIfObjectType(Condition cc, Register object,
   __ CmpObjectType(object, instance_type, map);
   __ j(AsMasmCondition(cc), target, distance);
 }
-void BaselineAssembler::JumpIfObjectType(Condition cc, Register object,
-                                         InstanceType instance_type,
-                                         ScratchRegisterScope* scratch_scope,
-                                         Label* target,
-                                         Label::Distance distance) {
-  JumpIfObjectType(cc, object, instance_type, scratch_scope->AcquireScratch(),
-                   target, distance);
-}
 void BaselineAssembler::JumpIfInstanceType(Condition cc, Register map,
                                            InstanceType instance_type,
                                            Label* target,
                                            Label::Distance distance) {
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     __ movd(xmm0, eax);
     __ AssertNotSmi(map);
     __ CmpObjectType(map, MAP_TYPE, eax);
@@ -493,12 +485,6 @@ void BaselineAssembler::StaModuleVariable(Register context, Register value,
   StoreTaggedFieldWithWriteBarrier(context, Cell::kValueOffset, value);
 }
 
-void BaselineAssembler::LoadMapBitField(Register map_bit_field,
-                                        Register object) {
-  LoadMap(map_bit_field, object);
-  LoadWord8Field(map_bit_field, map_bit_field, Map::kBitFieldOffset);
-}
-
 void BaselineAssembler::AddSmi(Register lhs, Smi rhs) {
   if (rhs.value() == 0) return;
   __ add(lhs, Immediate(rhs));
@@ -551,7 +537,7 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
 
     __ LoadContext(kContextRegister);
     __ Push(MemOperand(ebp, InterpreterFrameConstants::kFunctionOffset));
-    __ CallRuntime(Runtime::kBytecodeBudgetInterrupt, 1);
+    __ CallRuntime(Runtime::kBytecodeBudgetInterrupt_Sparkplug, 1);
 
     __ Pop(kInterpreterAccumulatorRegister, params_size);
     __ masm()->SmiUntag(params_size);
@@ -591,7 +577,7 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
 inline void EnsureAccumulatorPreservedScope::AssertEqualToAccumulator(
     Register reg) {
   assembler_->masm()->cmp(reg, kInterpreterAccumulatorRegister);
-  assembler_->masm()->Assert(equal, AbortReason::kUnexpectedValue);
+  assembler_->masm()->Assert(equal, AbortReason::kAccumulatorClobbered);
 }
 
 }  // namespace baseline

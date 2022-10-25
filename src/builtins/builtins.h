@@ -299,7 +299,7 @@ class Builtins {
     // The position independent version of InterpreterEntryTrampoline used as
     // a template to create copies of the builtin at runtime. The copies are
     // used to create better profiling information for ticks in bytecode
-    // execution. See FLAG_interpreted_frames_native_stack for details.
+    // execution. See v8_flags.interpreted_frames_native_stack for details.
     kForProfiling
   };
   static void Generate_InterpreterEntryTrampoline(
@@ -348,6 +348,7 @@ V8_INLINE constexpr bool IsBaselineTrampolineBuiltin(Builtin builtin_id) {
   // is not a builtin.
   return builtin_id != Builtin::kNoBuiltinId &&
          (builtin_id == Builtin::kBaselineOutOfLinePrologue ||
+          builtin_id == Builtin::kBaselineOutOfLinePrologueDeopt ||
           builtin_id == Builtin::kBaselineOrInterpreterEnterAtBytecode ||
           builtin_id == Builtin::kBaselineOrInterpreterEnterAtNextBytecode);
 }

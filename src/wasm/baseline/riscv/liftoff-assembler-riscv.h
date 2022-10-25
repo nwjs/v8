@@ -5,7 +5,6 @@
 #ifndef V8_WASM_BASELINE_RISCV_LIFTOFF_ASSEMBLER_RISCV_H_
 #define V8_WASM_BASELINE_RISCV_LIFTOFF_ASSEMBLER_RISCV_H_
 
-#include "src/base/platform/wrappers.h"
 #include "src/heap/memory-chunk.h"
 #include "src/wasm/baseline/liftoff-assembler.h"
 #include "src/wasm/wasm-objects.h"
@@ -129,7 +128,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
   // check in the condition code.
   RecordComment("OOL: stack check for large frame");
   Label continuation;
-  if (frame_size < FLAG_stack_size * 1024) {
+  if (frame_size < v8_flags.stack_size * 1024) {
     Register stack_limit = kScratchReg;
     LoadWord(stack_limit,
              FieldMemOperand(kWasmInstanceRegister,
@@ -142,7 +141,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
   Call(wasm::WasmCode::kWasmStackOverflow, RelocInfo::WASM_STUB_CALL);
   // The call will not return; just define an empty safepoint.
   safepoint_table_builder->DefineSafepoint(this);
-  if (FLAG_debug_code) stop();
+  if (v8_flags.debug_code) stop();
 
   bind(&continuation);
 
@@ -156,6 +155,11 @@ void LiftoffAssembler::PatchPrepareStackFrame(
   int func_start_offset = offset + 2 * kInstrSize;
   imm32 = func_start_offset - pc_offset();
   GenPCRelativeJump(kScratchReg, imm32);
+}
+
+void LiftoffAssembler::LoadSpillAddress(Register dst, int offset,
+                                        ValueKind /* kind */) {
+  SubWord(dst, fp, offset);
 }
 
 void LiftoffAssembler::FinishCode() { ForceConstantPoolEmissionWithoutJump(); }
@@ -2089,7 +2093,7 @@ void LiftoffAssembler::CallTrapCallbackForTesting() {
 }
 
 void LiftoffAssembler::AssertUnreachable(AbortReason reason) {
-  if (FLAG_debug_code) Abort(reason);
+  if (v8_flags.debug_code) Abort(reason);
 }
 
 void LiftoffAssembler::PushRegisters(LiftoffRegList regs) {

@@ -151,7 +151,7 @@ void ConstantExpressionInterface::StringConst(
       isolate_->factory()
           ->NewStringFromUtf8(string_bytes, unibrow::Utf8Variant::kWtf8)
           .ToHandleChecked();
-  result->runtime_value = WasmValue(string, kWasmStringRef);
+  result->runtime_value = WasmValue(string, kWasmStringRef.AsNonNull());
 }
 
 namespace {
@@ -264,7 +264,7 @@ void ConstantExpressionInterface::ArrayNewSegment(
     }
 
     Address source =
-        instance_->data_segment_starts()[segment_imm.index] + offset;
+        instance_->data_segment_starts().get(segment_imm.index) + offset;
     Handle<WasmArray> array_value = isolate_->factory()->NewWasmArrayFromMemory(
         length, Handle<Map>::cast(rtt.runtime_value.to_ref()), source);
     result->runtime_value = WasmValue(array_value, result_type);

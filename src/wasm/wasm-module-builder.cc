@@ -344,7 +344,7 @@ uint32_t WasmModuleBuilder::IncreaseTableMinSize(uint32_t table_index,
                                                  uint32_t count) {
   DCHECK_LT(table_index, tables_.size());
   uint32_t old_min_size = tables_[table_index].min_size;
-  if (count > FLAG_wasm_max_table_size - old_min_size) {
+  if (count > v8_flags.wasm_max_table_size - old_min_size) {
     return std::numeric_limits<uint32_t>::max();
   }
   tables_[table_index].min_size = old_min_size + count;
@@ -549,14 +549,14 @@ void WriteInitializerExpressionWithEnd(ZoneBuffer* buffer,
       buffer->write_u8(static_cast<uint8_t>(opcode));
       buffer->write_u32v(init.immediate().index);
       break;
-    case WasmInitExpr::kArrayNewFixedStatic: {
-      static_assert((kExprArrayNewFixedStatic >> 8) == kGCPrefix);
-      static_assert((kExprArrayNewFixedStatic & 0x80) == 0);
+    case WasmInitExpr::kArrayNewFixed: {
+      static_assert((kExprArrayNewFixed >> 8) == kGCPrefix);
+      static_assert((kExprArrayNewFixed & 0x80) == 0);
       for (const WasmInitExpr& operand : *init.operands()) {
         WriteInitializerExpressionWithEnd(buffer, operand, kWasmBottom);
       }
       buffer->write_u8(kGCPrefix);
-      buffer->write_u8(static_cast<uint8_t>(kExprArrayNewFixedStatic));
+      buffer->write_u8(static_cast<uint8_t>(kExprArrayNewFixed));
       buffer->write_u32v(init.immediate().index);
       buffer->write_u32v(static_cast<uint32_t>(init.operands()->size()));
       break;

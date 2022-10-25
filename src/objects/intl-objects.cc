@@ -230,7 +230,6 @@ icu::StringPiece ToICUStringPiece(Isolate* isolate, Handle<String> string,
   if (!flat.IsOneByte()) return icu::StringPiece();
 
   int32_t length = string->length();
-  DCHECK_LT(offset, length);
   const char* char_buffer =
       reinterpret_cast<const char*>(flat.ToOneByteVector().begin());
   if (!String::IsAscii(char_buffer, length)) {
@@ -1418,10 +1417,8 @@ int Intl::CompareStrings(Isolate* isolate, const icu::Collator& icu_collator,
     return UCollationResult::UCOL_EQUAL;
   }
 
-  // Early return for empty strings.
-  if (string1->length() == 0 || string2->length() == 0) {
-    return ToUCollationResult(string1->length() - string2->length());
-  }
+  // We cannot return early for 0-length strings because of Unicode
+  // ignorable characters. See also crbug.com/1347690.
 
   string1 = String::Flatten(isolate, string1);
   string2 = String::Flatten(isolate, string2);
@@ -1569,7 +1566,7 @@ Maybe<Intl::NumberFormatDigitOptions> Intl::SetNumberFormatDigitOptions(
   // 10. Set intlObj.[[MinimumIntegerDigits]] to mnid.
   digit_options.minimum_integer_digits = mnid;
 
-  if (FLAG_harmony_intl_number_format_v3) {
+  if (v8_flags.harmony_intl_number_format_v3) {
     // 11. Let roundingPriority be ? GetOption(options, "roundingPriority",
     // "string", « "auto", "morePrecision", "lessPrecision" », "auto").
 
@@ -2008,7 +2005,7 @@ MaybeHandle<JSObject> SupportedLocales(
   //    a. Let supportedLocales be BestFitSupportedLocales(availableLocales,
   //       requestedLocales).
   if (matcher == Intl::MatcherOption::kBestFit &&
-      FLAG_harmony_intl_best_fit_matcher) {
+      v8_flags.harmony_intl_best_fit_matcher) {
     supported_locales =
         BestFitSupportedLocales(isolate, available_locales, requested_locales);
   } else {
@@ -2448,7 +2445,7 @@ Maybe<Intl::ResolvedLocale> Intl::ResolveLocale(
     const std::set<std::string>& relevant_extension_keys) {
   std::string locale;
   if (matcher == Intl::MatcherOption::kBestFit &&
-      FLAG_harmony_intl_best_fit_matcher) {
+      v8_flags.harmony_intl_best_fit_matcher) {
     locale = BestFitMatcher(isolate, available_locales, requested_locales);
   } else {
     locale = LookupMatcher(isolate, available_locales, requested_locales);
@@ -2639,8 +2636,8 @@ void ICUTimezoneCache::Clear(TimeZoneDetection time_zone_detection) {
 }
 
 base::TimezoneCache* Intl::CreateTimeZoneCache() {
-  return FLAG_icu_timezone_data ? new ICUTimezoneCache()
-                                : base::OS::CreateTimezoneCache();
+  return v8_flags.icu_timezone_data ? new ICUTimezoneCache()
+                                    : base::OS::CreateTimezoneCache();
 }
 
 Maybe<Intl::MatcherOption> Intl::GetLocaleMatcher(Isolate* isolate,
@@ -2822,37 +2819,18 @@ bool IsUnicodeStringValidTimeZoneName(const icu::UnicodeString& id) {
 }
 }  // namespace
 
-Handle<String> Intl::CanonicalizeTimeZoneID(Isolate* isolate,
-                                            const icu::UnicodeString& id) {
+MaybeHandle<String> Intl::CanonicalizeTimeZoneName(Isolate* isolate,
+                                                   Handle<String> identifier) {
   UErrorCode status = U_ZERO_ERROR;
-  icu::UnicodeString canonical;
-  icu::TimeZone::getCanonicalID(id, canonical, status);
-  CHECK(U_SUCCESS(status));
-  // In CLDR (http://unicode.org/cldr/trac/ticket/9943), Etc/UTC is made
-  // a separate timezone ID from Etc/GMT even though they're still the same
-  // timezone. We have Etc/UTC because 'UTC', 'Etc/Universal',
-  // 'Etc/Zulu' and others are turned to 'Etc/UTC' by ICU. Etc/GMT comes
-  // from Etc/GMT0, Etc/GMT+0, Etc/GMT-0, Etc/Greenwich.
-  // ecma402#sec-canonicalizetimezonename step 3
-  if (canonical == UNICODE_STRING_SIMPLE("Etc/UTC") ||
-      canonical == UNICODE_STRING_SIMPLE("Etc/GMT")) {
-    return isolate->factory()->UTC_string();
-  }
-  return Intl::ToString(isolate, canonical).ToHandleChecked();
-}
-
-Handle<String> Intl::CanonicalizeTimeZoneName(Isolate* isolate,
-                                              Handle<String> identifier) {
   std::string time_zone =
       JSDateTimeFormat::CanonicalizeTimeZoneID(identifier->ToCString().get());
-  return CanonicalizeTimeZoneID(
-      isolate, icu::UnicodeString(time_zone.c_str(), -1, US_INV));
-}
+  icu::UnicodeString time_zone_ustring =
+      icu::UnicodeString(time_zone.c_str(), -1, US_INV);
+  icu::UnicodeString canonical;
+  icu::TimeZone::getCanonicalID(time_zone_ustring, canonical, status);
+  CHECK(U_SUCCESS(status));
 
-Handle<String> Intl::TimeZoneId(Isolate* isolate, const icu::TimeZone& tz) {
-  icu::UnicodeString time_zone;
-  tz.getID(time_zone);
-  return Intl::CanonicalizeTimeZoneID(isolate, time_zone);
+  return JSDateTimeFormat::TimeZoneIdToString(isolate, canonical);
 }
 
 bool Intl::IsValidTimeZoneName(Isolate* isolate, Handle<String> id) {
@@ -2961,8 +2939,17 @@ Handle<String> Intl::SourceString(Isolate* isolate, FormatRangeSource source) {
 }
 
 Handle<String> Intl::DefaultTimeZone(Isolate* isolate) {
-  std::unique_ptr<icu::TimeZone> tz(icu::TimeZone::createDefault());
-  return TimeZoneId(isolate, *tz);
+  icu::UnicodeString id;
+  {
+    std::unique_ptr<icu::TimeZone> tz(icu::TimeZone::createDefault());
+    tz->getID(id);
+  }
+  UErrorCode status = U_ZERO_ERROR;
+  icu::UnicodeString canonical;
+  icu::TimeZone::getCanonicalID(id, canonical, status);
+  DCHECK(U_SUCCESS(status));
+  return JSDateTimeFormat::TimeZoneIdToString(isolate, canonical)
+      .ToHandleChecked();
 }
 
 namespace {

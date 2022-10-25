@@ -386,6 +386,10 @@ class V8_EXPORT_PRIVATE BytecodeArrayBuilder final {
   // throws a TypeError exception.
   BytecodeArrayBuilder& GetSuperConstructor(Register out);
 
+  BytecodeArrayBuilder& FindNonDefaultConstructor(Register this_function,
+                                                  Register new_target,
+                                                  RegisterList output);
+
   // Deletes property from an object. This expects that accumulator contains
   // the key to be deleted and the register contains a reference to the object.
   BytecodeArrayBuilder& Delete(Register object, LanguageMode language_mode);
@@ -489,6 +493,10 @@ class V8_EXPORT_PRIVATE BytecodeArrayBuilder final {
   // Allocates a new jump table of given |size| and |case_value_base| in the
   // constant pool.
   BytecodeJumpTable* AllocateJumpTable(int size, int case_value_base);
+
+  BytecodeRegisterOptimizer* GetRegisterOptimizer() {
+    return register_optimizer_;
+  }
 
   // Gets a constant pool entry.
   size_t GetConstantPoolEntry(const AstRawString* raw_string);

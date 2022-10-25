@@ -51,16 +51,8 @@
   # works as intended.
   'test-api/DisallowJavascriptExecutionScope': [FAIL],
 
-  # We do not yet shrink weak maps after they have been emptied by the GC
-  'test-weakmaps/Shrinking': [FAIL],
-
   # Boot up memory use is bloated in debug mode.
   'test-mark-compact/BootUpMemoryUse': [PASS, ['mode == debug', FAIL]],
-
-  # This tests only that the preparser and parser agree, so there is no point in
-  # running several variants. Note that this still takes ages, because there
-  # are actually 13 * 38 * 5 * 128 = 316160 individual tests hidden here.
-  'test-parsing/ParserSync': [PASS, NO_VARIANTS],
 
   # This tests API threading, no point in running several variants.
   'test-api/Threading*': [PASS, SLOW, NO_VARIANTS],
@@ -107,7 +99,6 @@
   'test-jump-table-assembler/JumpTablePatchingStress': [PASS, SLOW],
   'test-strings/StringOOM*': [PASS, ['mode == debug', SKIP]],
   'test-serialize/CustomSnapshotDataBlobImmortalImmovableRoots': [PASS, ['mode == debug', SKIP]],
-  'test-parsing/ObjectRestNegativeTestSlow': [PASS, ['mode == debug', SKIP]],
 
   # Tests that need to run sequentially (e.g. due to memory consumption).
   'test-accessors/HandleScopePop': [PASS, HEAVY],
@@ -211,7 +202,6 @@
 
   # %ObserveNode tests rely on TurboFan.
   'test-calls-with-arraylike-or-spread/*': [SKIP],
-  'test-sloppy-equality/*' : [SKIP],
   'test-js-to-wasm/*': [SKIP],
   'test-verify-type/*': [SKIP],
 }],  # variant == nooptimization
@@ -219,7 +209,6 @@
 ##############################################################################
 ['asan == True', {
   # Skip tests not suitable for ASAN.
-  'test-assembler-x64/AssemblerX64XchglOperations': [SKIP],
 
   # BUG(v8:7587): Strange breakage on Mac.
   'test-log-stack-tracer/PureJSStackTrace': [SKIP],
@@ -330,29 +319,6 @@
 }],  # 'arch == arm'
 
 ##############################################################################
-['arch == mipsel or arch == mips', {
-  # TODO(mips-team): Improve code-size on large RegExp's.
-  'test-heap/TestSizeOfRegExpCode':  [SKIP],
-
-  # BUG(1075): Unresolved crashes on MIPS also.
-  'test-serialize/StartupSerializerOnce': [SKIP],
-  'test-serialize/StartupSerializerTwice': [SKIP],
-  'test-serialize/StartupSerializerOnceRunScript': [SKIP],
-  'test-serialize/StartupSerializerTwiceRunScript': [SKIP],
-}],  # 'arch == mipsel or arch == mips'
-
-##############################################################################
-['arch == mips', {
-  # Too slow with TF.
-  'test-api/ExternalArrays': [PASS, NO_VARIANTS],
-
-  # TODO(mips-team): Currently fails on mips board.
-  'test-parsing/TooManyArguments': [SKIP],
-  'test-api/Threading5': [SKIP],
-  'test-api/Threading6': [SKIP],
-}],  # 'arch == mips'
-
-##############################################################################
 ['arch == mips64', {
   # TODO(mips-team): Currently fails on mips64 board.
   'test-run-wasm/RunWasmLiftoff_I32Binop*': [SKIP],
@@ -377,21 +343,21 @@
 }],  # 'arch == mips64el or arch == mips64'
 
 ##############################################################################
-['(arch == mipsel or arch == mips64el or arch == mips or arch == mips64) and not simd_mips', {
+['(arch == mips64el or arch == mips64) and not simd_mips', {
   # Skip tests that fail on MIPS architectures which don't support SIMD,
   # because lowering mechanism doesn't work properly
   'test-run-wasm-simd/RunWasm_ReductionTest4_compiled': [SKIP],
   'test-run-wasm-simd/RunWasm_ReductionTest8_compiled': [SKIP],
   'test-run-wasm-simd/RunWasm_ReductionTest16_compiled': [SKIP],
   'test-run-wasm-simd-liftoff/*': [SKIP],
-}],  # '(arch == mipsel or arch == mips64el or arch == mips or arch == mips64) and not simd_mips'
+}],  # '(arch == mips64el or arch == mips64) and not simd_mips'
 
-['(arch == mipsel or arch == mips64el or arch == mips or arch == mips64) and not simd_mips', {
+['(arch == mips64el or arch == mips64) and not simd_mips', {
   'test-gc/RunWasmLiftoff_RefTrivialCasts': [SKIP],
   'test-gc/RunWasmTurbofan_RefTrivialCasts': [SKIP],
   'test-run-wasm/RunWasmLiftoff_Select_s128_parameters': [SKIP],
   'test-run-wasm/RunWasmTurbofan_Select_s128_parameters': [SKIP],
-}],  # '(arch == mipsel or arch == mips64el or arch == mips or arch == mips64) and not simd_mips'
+}],  # '(arch == mips64el or arch == mips64) and not simd_mips'
 
 ##############################################################################
 ['mips_arch_variant == r6', {
@@ -502,6 +468,7 @@
 ['arch == ppc64', {
   # SIMD / Liftoff not fully implemented yet
   'test-run-wasm-simd-liftoff/*': [SKIP],
+  'test-run-wasm-relaxed-simd/*': [SKIP],
   'test-gc/RunWasmLiftoff_RefTrivialCasts': [SKIP],
   'test-gc/RunWasmLiftoff_RefTrivialCastsStatic': [SKIP],
 }],
@@ -523,7 +490,6 @@
   'test-bignum-dtoa/*': [SKIP],
   'test-cpu-profiler/*': [SKIP],
   'test-debug/*': [SKIP],
-  'test-global-handles/*': [SKIP],
   'test-heap-profiler/*': [SKIP],
   'test-heap/*': [SKIP],
   'test-inobject-slack-tracking/*': [SKIP],
@@ -532,7 +498,6 @@
   'test-serialize/*': [SKIP],
   'test-strings/*': [SKIP],
   'test-field-type-tracking/*': [SKIP],
-  'test-parsing/*': [SKIP],
   'test-page-promotion/*': [SKIP],
   'test-gap-resolver/*': [SKIP],
   'test-dtoa/*': [SKIP],
@@ -580,7 +545,6 @@
   'test-heap/IncrementalMarkingStepMakesBigProgressWithLargeObjects': [SKIP],
 
   # Tests that generate code at runtime.
-  'test-codegen/*': [SKIP],
   'test-accessor-assembler/*': [SKIP],
   'test-assembler-*': [SKIP],
   'test-atomic-load-store-codegen/*': [SKIP],
@@ -595,22 +559,15 @@
   'test-multiple-return/*': [SKIP],
   'test-run-bytecode-graph-builder/*': [SKIP],
   'test-run-calls-to-external-references/*': [SKIP],
-  'test-run-deopt/*': [SKIP],
   'test-run-intrinsics/*': [SKIP],
-  'test-run-jsbranches/*': [SKIP],
-  'test-run-jscalls/*': [SKIP],
-  'test-run-jsexceptions/*': [SKIP],
-  'test-run-jsobjects/*': [SKIP],
-  'test-run-jsops/*': [SKIP],
+
   'test-run-load-store/*': [SKIP],
   'test-run-machops/*': [SKIP],
   'test-run-native-calls/*': [SKIP],
   'test-run-stackcheck/*': [SKIP],
-  'test-run-tail-calls/*': [SKIP],
   'test-run-unwinding-info/*': [SKIP],
   'test-run-variables/*': [SKIP],
   'test-serialize/*': [SKIP],
-  'test-sloppy-equality/*' : [SKIP],
   'test-swiss-name-dictionary-csa/*': [SKIP],
   'test-torque/*': [SKIP],
   'test-unwinder-code-pages/PCIsInV8_LargeCodeObject_CodePagesAPI': [SKIP],
@@ -979,13 +936,6 @@
   'test-embedder-tracing/V8RegisteringEmbedderReference': [SKIP],
   'test-external-string-tracker/ExternalString_ExternalBackingStoreSizeIncreasesAfterExternalization': [SKIP],
   'test-external-string-tracker/ExternalString_ExternalBackingStoreSizeIncreasesMarkCompact': [SKIP],
-  'test-global-handles/FinalizerDiesAndKeepsPhantomAliveOnMarkCompact': [SKIP],
-  'test-global-handles/FinalizerWeakness': [SKIP],
-  'test-global-handles/GCFromWeakCallbacks': [SKIP],
-  'test-global-handles/PhantomHandlesWithoutCallbacks': [SKIP],
-  'test-global-handles/SecondPassPhantomCallbacks': [SKIP],
-  'test-global-handles/WeakHandleToUnmodifiedJSApiObjectDiesOnMarkCompact': [SKIP],
-  'test-global-handles/WeakHandleToUnmodifiedJSObjectDiesOnMarkCompact': [SKIP],
   'test-heap-profiler/HeapSnapshotDeleteDuringTakeSnapshot': [SKIP],
   'test-heap-profiler/HeapSnapshotObjectsStats': [SKIP],
   'test-heap-profiler/SamplingHeapProfilerPretenuredInlineAllocations': [SKIP],
@@ -1105,8 +1055,6 @@
   'test-weak-references/WeakArrayListBasic': [SKIP],
   'test-weak-references/WeakArraysBasic': [SKIP],
   'test-weak-references/WeakReferencesBasic': [SKIP],
-  'test-weakmaps/WeakMapsWithChainedEntries': [SKIP],
-  'test-weakmaps/Weakness': [SKIP],
   # Timeout (too many GCs)
   'test-heap/Regress8014': [SKIP],
   'test-accessors/HandleScopePop': [SKIP],
@@ -1125,10 +1073,9 @@
 
 ################################################################################
 ['variant == stress', {
-  # The 'stress' variants sets the '--stress-opt' d8 flag, which executes 2 runs
-  # in debug mode and 5 runs in release mode. Hence the module will be cached
-  # between runs, and the correct caching behavior cannot be observed anymore in
-  # the later runs.
+  # The 'stress' variants sets the '--no-liftoff' flag, which means that Wasm
+  # compiles directly to TurboFan. This makes the cache no longer incremental,
+  # and these tests don't make sense.
   'test-streaming-compilation/AsyncTestIncrementalCaching': [SKIP],
   'test-streaming-compilation/SingleThreadedTestIncrementalCaching': [SKIP],
 }],

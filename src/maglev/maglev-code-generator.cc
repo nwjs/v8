@@ -8,6 +8,8 @@
 
 #include "src/base/hashmap.h"
 #include "src/codegen/code-desc.h"
+#include "src/codegen/interface-descriptors-inl.h"
+#include "src/codegen/interface-descriptors.h"
 #include "src/codegen/register.h"
 #include "src/codegen/reglist.h"
 #include "src/codegen/safepoint-table.h"
@@ -17,6 +19,7 @@
 #include "src/deoptimizer/translation-array.h"
 #include "src/execution/frame-constants.h"
 #include "src/interpreter/bytecode-register.h"
+#include "src/maglev/maglev-assembler-inl.h"
 #include "src/maglev/maglev-code-gen-state.h"
 #include "src/maglev/maglev-compilation-unit.h"
 #include "src/maglev/maglev-graph-labeller.h"
@@ -91,17 +94,15 @@ class ParallelMoveResolver {
       RegisterTHelper<RegisterT>::kAllocatableRegisters;
 
  public:
-  explicit ParallelMoveResolver(MaglevCodeGenState* code_gen_state)
-      : code_gen_state_(code_gen_state) {}
+  explicit ParallelMoveResolver(MaglevAssembler* masm) : masm_(masm) {}
 
   void RecordMove(ValueNode* source_node, compiler::InstructionOperand source,
                   compiler::AllocatedOperand target) {
     if (target.IsRegister()) {
       RecordMoveToRegister(source_node, source, ToRegisterT<RegisterT>(target));
     } else {
-      RecordMoveToStackSlot(
-          source_node, source,
-          code_gen_state_->GetFramePointerOffsetForStackSlot(target));
+      RecordMoveToStackSlot(source_node, source,
+                            masm_->GetFramePointerOffsetForStackSlot(target));
     }
   }
 
@@ -116,7 +117,7 @@ class ParallelMoveResolver {
       ValueNode* materializing_register_move =
           materializing_register_moves_[reg.code()];
       if (materializing_register_move) {
-        materializing_register_move->LoadToRegister(code_gen_state_, reg);
+        materializing_register_move->LoadToRegister(masm_, reg);
       }
     }
     // Emit stack moves until the move set is empty -- each EmitMoveChain will
@@ -126,7 +127,7 @@ class ParallelMoveResolver {
       StartEmitMoveChain(moves_from_stack_slot_.begin()->first);
     }
     for (auto [stack_slot, node] : materializing_stack_slot_moves_) {
-      node->LoadToRegister(code_gen_state_, kScratchRegT);
+      node->LoadToRegister(masm_, kScratchRegT);
       EmitStackMove(stack_slot, kScratchRegT);
     }
   }
@@ -217,7 +218,7 @@ class ParallelMoveResolver {
         moves_from_register_[source_reg.code()].registers.set(target_reg);
       }
     } else if (source.IsAnyStackSlot()) {
-      uint32_t source_slot = code_gen_state_->GetFramePointerOffsetForStackSlot(
+      uint32_t source_slot = masm_->GetFramePointerOffsetForStackSlot(
           compiler::AllocatedOperand::cast(source));
       moves_from_stack_slot_[source_slot].registers.set(target_reg);
     } else {
@@ -238,7 +239,7 @@ class ParallelMoveResolver {
       moves_from_register_[source_reg.code()].stack_slots.push_back(
           target_slot);
     } else if (source.IsAnyStackSlot()) {
-      uint32_t source_slot = code_gen_state_->GetFramePointerOffsetForStackSlot(
+      uint32_t source_slot = masm_->GetFramePointerOffsetForStackSlot(
           compiler::AllocatedOperand::cast(source));
       if (source_slot != target_slot) {
         moves_from_stack_slot_[source_slot].stack_slots.push_back(target_slot);
@@ -403,9 +404,9 @@ class ParallelMoveResolver {
     __ movq(MemOperand(rbp, stack_slot), kScratchRegister);
   }
 
-  MacroAssembler* masm() { return code_gen_state_->masm(); }
+  MacroAssembler* masm() const { return masm_; }
 
-  MaglevCodeGenState* code_gen_state_;
+  MaglevAssembler* const masm_;
 
   // Keep moves to/from registers and stack slots separate -- there are a fixed
   // number of registers but an infinite number of stack slots, so the register
@@ -429,12 +430,213 @@ class ParallelMoveResolver {
   bool scratch_has_cycle_start_ = false;
 };
 
+class ExceptionHandlerTrampolineBuilder {
+ public:
+  explicit ExceptionHandlerTrampolineBuilder(MaglevAssembler* masm)
+      : masm_(masm) {}
+
+  void EmitTrampolineFor(NodeBase* node) {
+    DCHECK(node->properties().can_throw());
+
+    ExceptionHandlerInfo* handler_info = node->exception_handler_info();
+    DCHECK(handler_info->HasExceptionHandler());
+
+    BasicBlock* block = handler_info->catch_block.block_ptr();
+    LazyDeoptInfo* deopt_info = node->lazy_deopt_info();
+
+    __ bind(&handler_info->trampoline_entry);
+    ClearState();
+    // TODO(v8:7700): Handle inlining.
+    RecordMoves(deopt_info->unit, block, deopt_info->state.register_frame);
+    // We do moves that need to materialise values first, since we might need to
+    // call a builtin to create a HeapNumber, and therefore we would need to
+    // spill all registers.
+    DoMaterialiseMoves();
+    // Move the rest, we will not call HeapNumber anymore.
+    DoDirectMoves();
+    // Jump to the catch block.
+    __ jmp(block->label());
+  }
+
+ private:
+  MaglevAssembler* const masm_;
+  using Move = std::pair<const ValueLocation&, ValueNode*>;
+  base::SmallVector<Move, 16> direct_moves_;
+  base::SmallVector<Move, 16> materialisation_moves_;
+  bool save_accumulator_ = false;
+
+  MacroAssembler* masm() const { return masm_; }
+
+  void ClearState() {
+    direct_moves_.clear();
+    materialisation_moves_.clear();
+    save_accumulator_ = false;
+  }
+
+  void RecordMoves(const MaglevCompilationUnit& unit, BasicBlock* block,
+                   const CompactInterpreterFrameState* register_frame) {
+    for (Phi* phi : *block->phis()) {
+      DCHECK_EQ(phi->input_count(), 0);
+      if (!phi->has_valid_live_range()) continue;
+      if (phi->owner() == interpreter::Register::virtual_accumulator()) {
+        // If the accumulator is live, then it is the exception object located
+        // at kReturnRegister0. This is also the first phi in the list.
+        DCHECK_EQ(phi->result().AssignedGeneralRegister(), kReturnRegister0);
+        save_accumulator_ = true;
+        continue;
+      }
+      ValueNode* value = register_frame->GetValueOf(phi->owner(), unit);
+      DCHECK_NOT_NULL(value);
+      switch (value->properties().value_representation()) {
+        case ValueRepresentation::kTagged:
+          // All registers should have been spilled due to the call.
+          DCHECK(!value->allocation().IsRegister());
+          direct_moves_.emplace_back(phi->result(), value);
+          break;
+        case ValueRepresentation::kInt32:
+          if (value->allocation().IsConstant()) {
+            direct_moves_.emplace_back(phi->result(), value);
+          } else {
+            materialisation_moves_.emplace_back(phi->result(), value);
+          }
+          break;
+        case ValueRepresentation::kFloat64:
+          materialisation_moves_.emplace_back(phi->result(), value);
+          break;
+      }
+    }
+  }
+
+  void DoMaterialiseMoves() {
+    if (materialisation_moves_.size() == 0) return;
+    if (save_accumulator_) {
+      __ Push(kReturnRegister0);
+    }
+    for (auto it = materialisation_moves_.begin();
+         it < materialisation_moves_.end(); it++) {
+      switch (it->second->properties().value_representation()) {
+        case ValueRepresentation::kInt32: {
+          EmitMoveInt32ToReturnValue0(it->second);
+          break;
+        }
+        case ValueRepresentation::kFloat64:
+          EmitMoveFloat64ToReturnValue0(it->second);
+          break;
+        case ValueRepresentation::kTagged:
+          UNREACHABLE();
+      }
+      if (it->first.operand().IsStackSlot()) {
+        // If the target is in a stack sot, we can immediately move
+        // the result to it.
+        __ movq(ToMemOperand(it->first), kReturnRegister0);
+      } else {
+        // We spill the result to the stack, in order to be able to call the
+        // NewHeapNumber builtin again, however we don't need to push the result
+        // of the last one.
+        if (it != materialisation_moves_.end() - 1) {
+          __ Push(kReturnRegister0);
+        }
+      }
+    }
+    // If the last move target is a register, the result should be in
+    // kReturnValue0, so so we emit a simple move. Otherwise it has already been
+    // moved.
+    const ValueLocation& last_move_target =
+        materialisation_moves_.rbegin()->first;
+    if (last_move_target.operand().IsRegister()) {
+      __ Move(last_move_target.AssignedGeneralRegister(), kReturnRegister0);
+    }
+    // And then pop the rest.
+    for (auto it = materialisation_moves_.rbegin() + 1;
+         it < materialisation_moves_.rend(); it++) {
+      if (it->first.operand().IsRegister()) {
+        __ Pop(it->first.AssignedGeneralRegister());
+      }
+    }
+    if (save_accumulator_) {
+      __ Pop(kReturnRegister0);
+    }
+  }
+
+  void DoDirectMoves() {
+    for (auto& [target, value] : direct_moves_) {
+      if (value->allocation().IsConstant()) {
+        if (Int32Constant* constant = value->TryCast<Int32Constant>()) {
+          EmitMove(target, Smi::FromInt(constant->value()));
+        } else {
+          // Int32 and Float64 constants should have already been dealt with.
+          DCHECK_EQ(value->properties().value_representation(),
+                    ValueRepresentation::kTagged);
+          EmitConstantLoad(target, value);
+        }
+      } else {
+        EmitMove(target, ToMemOperand(value));
+      }
+    }
+  }
+
+  void EmitMoveInt32ToReturnValue0(ValueNode* value) {
+    // We consider Int32Constants together with tagged values.
+    DCHECK(!value->allocation().IsConstant());
+    using D = NewHeapNumberDescriptor;
+    Label done;
+    __ movq(kReturnRegister0, ToMemOperand(value));
+    __ addl(kReturnRegister0, kReturnRegister0);
+    __ j(no_overflow, &done);
+    // If we overflow, instead of bailing out (deopting), we change
+    // representation to a HeapNumber.
+    __ Cvtlsi2sd(D::GetDoubleRegisterParameter(D::kValue), ToMemOperand(value));
+    __ CallBuiltin(Builtin::kNewHeapNumber);
+    __ bind(&done);
+  }
+
+  void EmitMoveFloat64ToReturnValue0(ValueNode* value) {
+    using D = NewHeapNumberDescriptor;
+    if (Float64Constant* constant = value->TryCast<Float64Constant>()) {
+      __ Move(D::GetDoubleRegisterParameter(D::kValue), constant->value());
+    } else {
+      __ Movsd(D::GetDoubleRegisterParameter(D::kValue), ToMemOperand(value));
+    }
+    __ CallBuiltin(Builtin::kNewHeapNumber);
+  }
+
+  MemOperand ToMemOperand(ValueNode* node) {
+    DCHECK(node->allocation().IsAnyStackSlot());
+    return masm_->ToMemOperand(node->allocation());
+  }
+
+  MemOperand ToMemOperand(const ValueLocation& location) {
+    DCHECK(location.operand().IsStackSlot());
+    return masm_->ToMemOperand(location.operand());
+  }
+
+  template <typename Operand>
+  void EmitMove(const ValueLocation& dst, Operand src) {
+    if (dst.operand().IsRegister()) {
+      __ Move(dst.AssignedGeneralRegister(), src);
+    } else {
+      __ Move(kScratchRegister, src);
+      __ movq(ToMemOperand(dst), kScratchRegister);
+    }
+  }
+
+  void EmitConstantLoad(const ValueLocation& dst, ValueNode* value) {
+    DCHECK(value->allocation().IsConstant());
+    if (dst.operand().IsRegister()) {
+      value->LoadToRegister(masm_, dst.AssignedGeneralRegister());
+    } else {
+      value->LoadToRegister(masm_, kScratchRegister);
+      __ movq(ToMemOperand(dst), kScratchRegister);
+    }
+  }
+};
+
 class MaglevCodeGeneratingNodeProcessor {
  public:
-  explicit MaglevCodeGeneratingNodeProcessor(MaglevCodeGenState* code_gen_state)
-      : code_gen_state_(code_gen_state) {}
+  explicit MaglevCodeGeneratingNodeProcessor(MaglevAssembler* masm)
+      : masm_(masm) {}
 
-  void PreProcessGraph(MaglevCompilationInfo*, Graph* graph) {
+  void PreProcessGraph(Graph* graph) {
     if (FLAG_maglev_break_on_entry) {
       __ int3();
     }
@@ -447,7 +649,7 @@ class MaglevCodeGeneratingNodeProcessor {
     {
       // Scratch registers. Don't clobber regs related to the calling
       // convention (e.g. kJavaScriptCallArgCountRegister).
-      Register optimization_state = rcx;
+      Register flags = rcx;
       Register feedback_vector = r9;
 
       // Load the feedback vector.
@@ -458,17 +660,16 @@ class MaglevCodeGeneratingNodeProcessor {
           feedback_vector, FieldOperand(feedback_vector, Cell::kValueOffset));
       __ AssertFeedbackVector(feedback_vector);
 
-      Label has_optimized_code_or_state, next;
-      __ LoadTieringStateAndJumpIfNeedsProcessing(
-          optimization_state, feedback_vector, &has_optimized_code_or_state);
+      Label flags_need_processing, next;
+      __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
+          flags, feedback_vector, CodeKind::MAGLEV, &flags_need_processing);
       __ jmp(&next);
 
-      __ bind(&has_optimized_code_or_state);
+      __ bind(&flags_need_processing);
       {
         ASM_CODE_COMMENT_STRING(masm(), "Optimized marker check");
         __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
-            optimization_state, feedback_vector, kJSFunctionRegister,
-            JumpMode::kJump);
+            flags, feedback_vector, kJSFunctionRegister, JumpMode::kJump);
         __ Trap();
       }
 
@@ -484,8 +685,26 @@ class MaglevCodeGeneratingNodeProcessor {
     __ Push(kJSFunctionRegister);              // Callee's JS function.
     __ Push(kJavaScriptCallArgCountRegister);  // Actual argument count.
 
-    code_gen_state_->set_untagged_slots(graph->untagged_stack_slots());
-    code_gen_state_->set_tagged_slots(graph->tagged_stack_slots());
+    code_gen_state()->set_untagged_slots(graph->untagged_stack_slots());
+    code_gen_state()->set_tagged_slots(graph->tagged_stack_slots());
+
+    {
+      ASM_CODE_COMMENT_STRING(masm(), " Stack/interrupt check");
+      // Stack check. This folds the checks for both the interrupt stack limit
+      // check and the real stack limit into one by just checking for the
+      // interrupt limit. The interrupt limit is either equal to the real stack
+      // limit or tighter. By ensuring we have space until that limit after
+      // building the frame we can quickly precheck both at once.
+      __ Move(kScratchRegister, rsp);
+      // TODO(leszeks): Include a max call argument size here.
+      __ subq(kScratchRegister,
+              Immediate(code_gen_state()->stack_slots() * kSystemPointerSize));
+      __ cmpq(kScratchRegister,
+              __ StackLimitAsOperand(StackLimitKind::kInterruptStackLimit));
+
+      __ j(below, &deferred_call_stack_guard_);
+      __ bind(&deferred_call_stack_guard_return_);
+    }
 
     // Initialize stack slots.
     if (graph->tagged_stack_slots() > 0) {
@@ -529,9 +748,22 @@ class MaglevCodeGeneratingNodeProcessor {
     }
   }
 
-  void PostProcessGraph(MaglevCompilationInfo*, Graph*) {}
+  void PostProcessGraph(Graph*) {
+    __ int3();
+    __ bind(&deferred_call_stack_guard_);
+    ASM_CODE_COMMENT_STRING(masm(), "Stack/interrupt call");
+    // Save any registers that can be referenced by RegisterInput.
+    // TODO(leszeks): Only push those that are used by the graph.
+    __ PushAll(RegisterInput::kAllowedRegisters);
+    // Push the frame size
+    __ Push(Immediate(
+        Smi::FromInt(code_gen_state()->stack_slots() * kSystemPointerSize)));
+    __ CallRuntime(Runtime::kStackGuardWithGap, 1);
+    __ PopAll(RegisterInput::kAllowedRegisters);
+    __ jmp(&deferred_call_stack_guard_return_);
+  }
 
-  void PreProcessBasicBlock(MaglevCompilationInfo*, BasicBlock* block) {
+  void PreProcessBasicBlock(BasicBlock* block) {
     if (FLAG_code_comments) {
       std::stringstream ss;
       ss << "-- Block b" << graph_labeller()->BlockId(block);
@@ -554,7 +786,7 @@ class MaglevCodeGeneratingNodeProcessor {
       __ movq(kScratchRegister, rbp);
       __ subq(kScratchRegister, rsp);
       __ cmpq(kScratchRegister,
-              Immediate(code_gen_state_->stack_slots() * kSystemPointerSize +
+              Immediate(code_gen_state()->stack_slots() * kSystemPointerSize +
                         StandardFrameConstants::kFixedFrameSizeFromFp));
       __ Assert(equal, AbortReason::kStackAccessBelowStackPointer);
     }
@@ -565,7 +797,7 @@ class MaglevCodeGeneratingNodeProcessor {
                            state);
     }
 
-    node->GenerateCode(code_gen_state_, state);
+    node->GenerateCode(masm(), state);
 
     if (std::is_base_of<ValueNode, NodeT>::value) {
       ValueNode* value_node = node->template Cast<ValueNode>();
@@ -576,10 +808,10 @@ class MaglevCodeGeneratingNodeProcessor {
         if (!source.IsAnyStackSlot()) {
           if (FLAG_code_comments) __ RecordComment("--   Spill:");
           if (source.IsRegister()) {
-            __ movq(code_gen_state_->GetStackSlot(value_node->spill_slot()),
+            __ movq(masm()->GetStackSlot(value_node->spill_slot()),
                     ToRegister(source));
           } else {
-            __ Movsd(code_gen_state_->GetStackSlot(value_node->spill_slot()),
+            __ Movsd(masm()->GetStackSlot(value_node->spill_slot()),
                      ToDoubleRegister(source));
           }
         } else {
@@ -603,8 +835,8 @@ class MaglevCodeGeneratingNodeProcessor {
 
     // TODO(leszeks): Move these to fields, to allow their data structure
     // allocations to be reused. Will need some sort of state resetting.
-    ParallelMoveResolver<Register> register_moves(code_gen_state_);
-    ParallelMoveResolver<DoubleRegister> double_register_moves(code_gen_state_);
+    ParallelMoveResolver<Register> register_moves(masm_);
+    ParallelMoveResolver<DoubleRegister> double_register_moves(masm_);
 
     // Remember what registers were assigned to by a Phi, to avoid clobbering
     // them with RegisterMoves.
@@ -689,17 +921,22 @@ class MaglevCodeGeneratingNodeProcessor {
     double_register_moves.EmitMoves();
   }
 
-  Isolate* isolate() const { return code_gen_state_->isolate(); }
-  MacroAssembler* masm() const { return code_gen_state_->masm(); }
+  Isolate* isolate() const { return masm_->isolate(); }
+  MaglevAssembler* masm() const { return masm_; }
+  MaglevCodeGenState* code_gen_state() const {
+    return masm()->code_gen_state();
+  }
   MaglevGraphLabeller* graph_labeller() const {
-    return code_gen_state_->graph_labeller();
+    return code_gen_state()->graph_labeller();
   }
   MaglevSafepointTableBuilder* safepoint_table_builder() const {
-    return code_gen_state_->safepoint_table_builder();
+    return code_gen_state()->safepoint_table_builder();
   }
 
  private:
-  MaglevCodeGenState* code_gen_state_;
+  MaglevAssembler* const masm_;
+  Label deferred_call_stack_guard_;
+  Label deferred_call_stack_guard_return_;
 };
 
 }  // namespace
@@ -717,12 +954,12 @@ class MaglevCodeGeneratorImpl final {
                                  graph->tagged_stack_slots(),
                                  graph->untagged_stack_slots()),
         code_gen_state_(compilation_info, safepoint_table_builder()),
-        processor_(compilation_info, &code_gen_state_),
+        masm_(&code_gen_state_),
+        processor_(&masm_),
         graph_(graph) {}
 
   MaybeHandle<Code> Generate() {
     EmitCode();
-    if (code_gen_state_.found_unsupported_code_paths()) return {};
     EmitMetadata();
     return BuildCodeObject();
   }
@@ -731,13 +968,14 @@ class MaglevCodeGeneratorImpl final {
     processor_.ProcessGraph(graph_);
     EmitDeferredCode();
     EmitDeopts();
+    EmitExceptionHandlersTrampolines();
   }
 
   void EmitDeferredCode() {
     for (DeferredCodeInfo* deferred_code : code_gen_state_.deferred_code()) {
       __ RecordComment("-- Deferred block");
       __ bind(&deferred_code->deferred_code_label);
-      deferred_code->Generate(&code_gen_state_, &deferred_code->return_label);
+      deferred_code->Generate(masm(), &deferred_code->return_label);
       __ Trap();
     }
   }
@@ -776,18 +1014,34 @@ class MaglevCodeGeneratorImpl final {
     }
   }
 
+  void EmitExceptionHandlersTrampolines() {
+    if (code_gen_state_.handlers().size() == 0) return;
+    ExceptionHandlerTrampolineBuilder builder(masm());
+    __ RecordComment("-- Exception handlers trampolines");
+    for (NodeBase* node : code_gen_state_.handlers()) {
+      builder.EmitTrampolineFor(node);
+    }
+  }
+
   void EmitMetadata() {
     // Final alignment before starting on the metadata section.
     masm()->Align(Code::kMetadataAlignment);
 
     safepoint_table_builder()->Emit(masm());
+
+    // Exception handler table.
+    handler_table_offset_ = HandlerTable::EmitReturnTableStart(masm());
+    for (NodeBase* node : code_gen_state_.handlers()) {
+      ExceptionHandlerInfo* info = node->exception_handler_info();
+      HandlerTable::EmitReturnEntry(masm(), info->pc_offset,
+                                    info->trampoline_entry.pos());
+    }
   }
 
   MaybeHandle<Code> BuildCodeObject() {
     CodeDesc desc;
-    static constexpr int kNoHandlerTableOffset = 0;
     masm()->GetCode(isolate(), &desc, safepoint_table_builder(),
-                    kNoHandlerTableOffset);
+                    handler_table_offset_);
     return Factory::CodeBuilder{isolate(), desc, CodeKind::MAGLEV}
         .set_stack_slots(stack_slot_count_with_fixed_frame())
         .set_deoptimization_data(GenerateDeoptimizationData())
@@ -810,70 +1064,81 @@ class MaglevCodeGeneratorImpl final {
         code_gen_state_.compilation_info()
             ->translation_array_builder()
             .ToTranslationArray(isolate()->factory());
+    {
+      DisallowGarbageCollection no_gc;
+      auto raw_data = *data;
 
-    data->SetTranslationByteArray(*translation_array);
-    // TODO(leszeks): Fix with the real inlined function count.
-    data->SetInlinedFunctionCount(Smi::zero());
-    // TODO(leszeks): Support optimization IDs
-    data->SetOptimizationId(Smi::zero());
+      raw_data.SetTranslationByteArray(*translation_array);
+      // TODO(leszeks): Fix with the real inlined function count.
+      raw_data.SetInlinedFunctionCount(Smi::zero());
+      // TODO(leszeks): Support optimization IDs
+      raw_data.SetOptimizationId(Smi::zero());
 
-    DCHECK_NE(deopt_exit_start_offset_, -1);
-    data->SetDeoptExitStart(Smi::FromInt(deopt_exit_start_offset_));
-    data->SetEagerDeoptCount(Smi::FromInt(eager_deopt_count));
-    data->SetLazyDeoptCount(Smi::FromInt(lazy_deopt_count));
+      DCHECK_NE(deopt_exit_start_offset_, -1);
+      raw_data.SetDeoptExitStart(Smi::FromInt(deopt_exit_start_offset_));
+      raw_data.SetEagerDeoptCount(Smi::FromInt(eager_deopt_count));
+      raw_data.SetLazyDeoptCount(Smi::FromInt(lazy_deopt_count));
 
-    data->SetSharedFunctionInfo(*code_gen_state_.compilation_info()
-                                     ->toplevel_compilation_unit()
-                                     ->shared_function_info()
-                                     .object());
+      raw_data.SetSharedFunctionInfo(*code_gen_state_.compilation_info()
+                                          ->toplevel_compilation_unit()
+                                          ->shared_function_info()
+                                          .object());
+    }
 
     IdentityMap<int, base::DefaultAllocationPolicy>& deopt_literals =
         code_gen_state_.compilation_info()->deopt_literals();
     Handle<DeoptimizationLiteralArray> literals =
         isolate()->factory()->NewDeoptimizationLiteralArray(
             deopt_literals.size() + 1);
-    IdentityMap<int, base::DefaultAllocationPolicy>::IteratableScope iterate(
-        &deopt_literals);
-    for (auto it = iterate.begin(); it != iterate.end(); ++it) {
-      literals->set(*it.entry(), it.key());
-    }
-    // Add the bytecode to the deopt literals to make sure it's held strongly.
-    // TODO(leszeks): Do this for inlined functions too.
-    literals->set(deopt_literals.size(), *code_gen_state_.compilation_info()
-                                              ->toplevel_compilation_unit()
-                                              ->bytecode()
-                                              .object());
-    data->SetLiteralArray(*literals);
-
     // TODO(leszeks): Fix with the real inlining positions.
     Handle<PodArray<InliningPosition>> inlining_positions =
         PodArray<InliningPosition>::New(isolate(), 0);
-    data->SetInliningPositions(*inlining_positions);
+    DisallowGarbageCollection no_gc;
+
+    auto raw_literals = *literals;
+    auto raw_data = *data;
+    IdentityMap<int, base::DefaultAllocationPolicy>::IteratableScope iterate(
+        &deopt_literals);
+    for (auto it = iterate.begin(); it != iterate.end(); ++it) {
+      raw_literals.set(*it.entry(), it.key());
+    }
+    // Add the bytecode to the deopt literals to make sure it's held strongly.
+    // TODO(leszeks): Do this for inlined functions too.
+    raw_literals.set(deopt_literals.size(), *code_gen_state_.compilation_info()
+                                                 ->toplevel_compilation_unit()
+                                                 ->bytecode()
+                                                 .object());
+    raw_data.SetLiteralArray(raw_literals);
+
+    // TODO(leszeks): Fix with the real inlining positions.
+    raw_data.SetInliningPositions(*inlining_positions);
 
     // TODO(leszeks): Fix once we have OSR.
     BytecodeOffset osr_offset = BytecodeOffset::None();
-    data->SetOsrBytecodeOffset(Smi::FromInt(osr_offset.ToInt()));
-    data->SetOsrPcOffset(Smi::FromInt(-1));
+    raw_data.SetOsrBytecodeOffset(Smi::FromInt(osr_offset.ToInt()));
+    raw_data.SetOsrPcOffset(Smi::FromInt(-1));
 
     // Populate deoptimization entries.
     int i = 0;
     for (EagerDeoptInfo* deopt_info : code_gen_state_.eager_deopts()) {
       DCHECK_NE(deopt_info->translation_index, -1);
-      data->SetBytecodeOffset(i, deopt_info->state.bytecode_position);
-      data->SetTranslationIndex(i, Smi::FromInt(deopt_info->translation_index));
-      data->SetPc(i, Smi::FromInt(deopt_info->deopt_entry_label.pos()));
+      raw_data.SetBytecodeOffset(i, deopt_info->state.bytecode_position);
+      raw_data.SetTranslationIndex(i,
+                                   Smi::FromInt(deopt_info->translation_index));
+      raw_data.SetPc(i, Smi::FromInt(deopt_info->deopt_entry_label.pos()));
 #ifdef DEBUG
-      data->SetNodeId(i, Smi::FromInt(i));
+      raw_data.SetNodeId(i, Smi::FromInt(i));
 #endif  // DEBUG
       i++;
     }
     for (LazyDeoptInfo* deopt_info : code_gen_state_.lazy_deopts()) {
       DCHECK_NE(deopt_info->translation_index, -1);
-      data->SetBytecodeOffset(i, deopt_info->state.bytecode_position);
-      data->SetTranslationIndex(i, Smi::FromInt(deopt_info->translation_index));
-      data->SetPc(i, Smi::FromInt(deopt_info->deopt_entry_label.pos()));
+      raw_data.SetBytecodeOffset(i, deopt_info->state.bytecode_position);
+      raw_data.SetTranslationIndex(i,
+                                   Smi::FromInt(deopt_info->translation_index));
+      raw_data.SetPc(i, Smi::FromInt(deopt_info->deopt_entry_label.pos()));
 #ifdef DEBUG
-      data->SetNodeId(i, Smi::FromInt(i));
+      raw_data.SetNodeId(i, Smi::FromInt(i));
 #endif  // DEBUG
       i++;
     }
@@ -889,17 +1154,19 @@ class MaglevCodeGeneratorImpl final {
   Isolate* isolate() const {
     return code_gen_state_.compilation_info()->isolate();
   }
-  MacroAssembler* masm() { return code_gen_state_.masm(); }
+  MaglevAssembler* masm() { return &masm_; }
   MaglevSafepointTableBuilder* safepoint_table_builder() {
     return &safepoint_table_builder_;
   }
 
   MaglevSafepointTableBuilder safepoint_table_builder_;
   MaglevCodeGenState code_gen_state_;
+  MaglevAssembler masm_;
   GraphProcessor<MaglevCodeGeneratingNodeProcessor> processor_;
   Graph* const graph_;
 
   int deopt_exit_start_offset_ = -1;
+  int handler_table_offset_ = 0;
 };
 
 // static

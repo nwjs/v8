@@ -2,7 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --experimental-wasm-gc --no-liftoff --no-wasm-inlining
+// Flags: --experimental-wasm-gc
+// Flags: --no-liftoff --no-wasm-speculative-inlining --no-wasm-inlining
 
 d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
@@ -23,12 +24,12 @@ builder.addFunction('main', sig_index)
   .addBody([
     // Cast to sub1 and write field 0.
     kExprLocalGet, 0,
-    kGCPrefix, kExprRefCastStatic, sub1,
+    kGCPrefix, kExprRefCast, sub1,
     kExprI32Const, 42,
     kGCPrefix, kExprStructSet, sub1, 0,
     // Cast to sub2 and read field 0.
     kExprLocalGet, 0,
-    kGCPrefix, kExprRefCastStatic, sub2,
+    kGCPrefix, kExprRefCast, sub2,
     kGCPrefix, kExprStructGet, sub2, 0])
   .exportFunc();
 

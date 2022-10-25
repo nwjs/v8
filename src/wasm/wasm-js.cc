@@ -80,18 +80,6 @@ class WasmStreaming::WasmStreamingImpl {
     return true;
   }
 
-  START_ALLOW_USE_DEPRECATED()
-  void SetClient(std::shared_ptr<Client> client) {
-    streaming_decoder_->SetMoreFunctionsCanBeSerializedCallback(
-        [client, streaming_decoder = streaming_decoder_](
-            const std::shared_ptr<i::wasm::NativeModule>& native_module) {
-          base::Vector<const char> url = streaming_decoder->url();
-          client->OnModuleCompiled(
-              CompiledWasmModule{native_module, url.begin(), url.size()});
-        });
-  }
-  END_ALLOW_USE_DEPRECATED()
-
   void SetMoreFunctionsCanBeSerializedCallback(
       std::function<void(CompiledWasmModule)> callback) {
     streaming_decoder_->SetMoreFunctionsCanBeSerializedCallback(
@@ -138,11 +126,6 @@ void WasmStreaming::Abort(MaybeLocal<Value> exception) {
 bool WasmStreaming::SetCompiledModuleBytes(const uint8_t* bytes, size_t size) {
   TRACE_EVENT0("v8.wasm", "wasm.SetCompiledModuleBytes");
   return impl_->SetCompiledModuleBytes(base::VectorOf(bytes, size));
-}
-
-void WasmStreaming::SetClient(std::shared_ptr<Client> client) {
-  TRACE_EVENT0("v8.wasm", "wasm.WasmStreaming.SetClient");
-  impl_->SetClient(client);
 }
 
 void WasmStreaming::SetMoreFunctionsCanBeSerializedCallback(
@@ -1133,11 +1116,13 @@ bool GetInitialOrMinimumProperty(v8::Isolate* isolate, ErrorThrower* thrower,
 namespace {
 i::Handle<i::Object> DefaultReferenceValue(i::Isolate* isolate,
                                            i::wasm::ValueType type) {
-  if (type == i::wasm::kWasmFuncRef) {
-    return isolate->factory()->null_value();
-  }
   if (type.is_reference()) {
-    return isolate->factory()->undefined_value();
+    // Use undefined for JS type (externref) but null for wasm types as wasm
+    // does not know undefined.
+    if (type.heap_representation() == i::wasm::HeapType::kExtern) {
+      return isolate->factory()->undefined_value();
+    }
+    return isolate->factory()->null_value();
   }
   UNREACHABLE();
 }
@@ -1182,7 +1167,20 @@ void WebAssemblyTable(const v8::FunctionCallbackInfo<v8::Value>& args) {
     } else if (enabled_features.has_stringref() &&
                string->StringEquals(v8_str(isolate, "stringref"))) {
       type = i::wasm::kWasmStringRef;
+    } else if (enabled_features.has_gc() &&
+               string->StringEquals(v8_str(isolate, "anyref"))) {
+      type = i::wasm::kWasmAnyRef;
+    } else if (enabled_features.has_gc() &&
+               string->StringEquals(v8_str(isolate, "eqref"))) {
+      type = i::wasm::kWasmEqRef;
+    } else if (enabled_features.has_gc() &&
+               string->StringEquals(v8_str(isolate, "dataref"))) {
+      type = i::wasm::kWasmDataRef;
+    } else if (enabled_features.has_gc() &&
+               string->StringEquals(v8_str(isolate, "arrayref"))) {
+      type = i::wasm::kWasmArrayRef;
     } else {
+      // TODO(7748): Add "i31ref".
       thrower.TypeError(
           "Descriptor property 'element' must be a WebAssembly reference type");
       return;
@@ -1226,16 +1224,15 @@ void WebAssemblyTable(const v8::FunctionCallbackInfo<v8::Value>& args) {
 
   if (initial > 0 && args.Length() >= 2 && !args[1]->IsUndefined()) {
     i::Handle<i::Object> element = Utils::OpenHandle(*args[1]);
-    if (!i::WasmTableObject::IsValidElement(i_isolate, table_obj, element)) {
+    const char* error_message;
+    if (!i::WasmTableObject::JSToWasmElement(i_isolate, table_obj, element,
+                                             &error_message)
+             .ToHandle(&element)) {
       thrower.TypeError(
-          "Argument 2 must be undefined, null, or a value of type compatible "
-          "with the type of the new table.");
+          "Argument 2 must be undefined or a value of type compatible "
+          "with the type of the new table: %s.",
+          error_message);
       return;
-    }
-    // TODO(7748): Generalize this if other table types are allowed.
-    if (type == i::wasm::kWasmFuncRef && !element->IsNull()) {
-      element = i::WasmInternalFunction::FromExternal(element, i_isolate)
-                    .ToHandleChecked();
     }
     for (uint32_t index = 0; index < static_cast<uint32_t>(initial); ++index) {
       i::WasmTableObject::Set(i_isolate, table_obj, index, element);
@@ -1392,8 +1389,15 @@ bool GetValueType(Isolate* isolate, MaybeLocal<Value> maybe,
   } else if (enabled_features.has_gc() &&
              string->StringEquals(v8_str(isolate, "anyref"))) {
     *type = i::wasm::kWasmAnyRef;
+  } else if (enabled_features.has_gc() &&
+             string->StringEquals(v8_str(isolate, "dataref"))) {
+    *type = i::wasm::kWasmDataRef;
+  } else if (enabled_features.has_gc() &&
+             string->StringEquals(v8_str(isolate, "arrayref"))) {
+    *type = i::wasm::kWasmArrayRef;
   } else {
     // Unrecognized type.
+    // TODO(7748): Add "i31ref".
     *type = i::wasm::kWasmVoid;
   }
   return true;
@@ -1438,7 +1442,6 @@ bool ToF64(Local<v8::Value> value, Local<Context> context, double* f64_value) {
   }
   return true;
 }
-
 }  // namespace
 
 // WebAssembly.Global
@@ -1541,64 +1544,24 @@ void WebAssemblyGlobal(const v8::FunctionCallbackInfo<v8::Value>& args) {
       break;
     }
     case i::wasm::kRef:
-    case i::wasm::kRefNull: {
-      switch (type.heap_representation()) {
-        case i::wasm::HeapType::kExtern: {
-          if (args.Length() < 2) {
-            // When no initial value is provided, we have to use the WebAssembly
-            // default value 'null', and not the JS default value 'undefined'.
-            global_obj->SetExternRef(i_isolate->factory()->null_value());
-            break;
-          }
-          global_obj->SetExternRef(Utils::OpenHandle(*value));
-          break;
-        }
-        case i::wasm::HeapType::kFunc: {
-          if (args.Length() < 2) {
-            // When no initial value is provided, we have to use the WebAssembly
-            // default value 'null', and not the JS default value 'undefined'.
-            global_obj->SetFuncRef(i_isolate,
-                                   i_isolate->factory()->null_value());
-            break;
-          }
-
-          if (!global_obj->SetFuncRef(i_isolate, Utils::OpenHandle(*value))) {
-            thrower.TypeError(
-                "The value of funcref globals must be null or an "
-                "exported function");
-          }
-          break;
-        }
-        case i::wasm::HeapType::kString: {
-          if (args.Length() < 2) {
-            thrower.TypeError(
-                "Missing initial value when creating stringref global");
-            break;
-          }
-
-          DCHECK_EQ(type.nullability(), i::wasm::kNullable);
-          if (!value->IsNull() && !value->IsString()) {
-            thrower.TypeError(
-                "The value of stringref globals must be null or a string");
-          }
-
-          global_obj->SetStringRef(Utils::OpenHandle(*value));
-          break;
-        }
-        case internal::wasm::HeapType::kBottom:
-          UNREACHABLE();
-        case i::wasm::HeapType::kEq:
-        case internal::wasm::HeapType::kI31:
-        case internal::wasm::HeapType::kData:
-        case internal::wasm::HeapType::kArray:
-        case internal::wasm::HeapType::kAny:
-        case internal::wasm::HeapType::kStringViewWtf8:
-        case internal::wasm::HeapType::kStringViewWtf16:
-        case internal::wasm::HeapType::kStringViewIter:
-        default:
-          // TODO(7748): Implement these.
-          UNIMPLEMENTED();
+      if (args.Length() < 2) {
+        thrower.TypeError("Non-defaultable global needs initial value");
+        break;
       }
+      V8_FALLTHROUGH;
+    case i::wasm::kRefNull: {
+      // We need the wasm default value {null} over {undefined}.
+      i::Handle<i::Object> value_handle =
+          (args.Length() < 2) ? i_isolate->factory()->null_value()
+                              : Utils::OpenHandle(*value);
+      const char* error_message;
+      if (!i::wasm::JSToWasmObject(i_isolate, nullptr, value_handle, type,
+                                   &error_message)
+               .ToHandle(&value_handle)) {
+        thrower.TypeError("%s", error_message);
+        break;
+      }
+      global_obj->SetRef(value_handle);
       break;
     }
     case i::wasm::kRtt:
@@ -1929,14 +1892,14 @@ bool IsSuspendingSignature(const i::wasm::FunctionSig* inner_sig,
   return true;
 }
 
-// Given {inner_sig}: externref ti* -> to
-// {outer_sig} must be: ti* -> externref
+// Given {inner_sig}: externref [ti*] -> [to*]
+// {outer_sig} must be: [ti*] -> [externref]
 bool IsPromisingSignature(const i::wasm::FunctionSig* inner_sig,
                           const i::wasm::FunctionSig* outer_sig) {
   if (inner_sig->parameter_count() != outer_sig->parameter_count() + 1) {
     return false;
   }
-  if (inner_sig->return_count() != 1 || outer_sig->return_count() != 1) {
+  if (outer_sig->return_count() != 1) {
     return false;
   }
   if (inner_sig->GetParam(0) != i::wasm::kWasmExternRef) return false;
@@ -2046,7 +2009,7 @@ void WebAssemblyFunction(const v8::FunctionCallbackInfo<v8::Value>& args) {
 
   i::wasm::Suspend suspend = i::wasm::kNoSuspend;
   i::wasm::Promise promise = i::wasm::kNoPromise;
-  if (i::FLAG_experimental_wasm_stack_switching) {
+  if (i::v8_flags.experimental_wasm_stack_switching) {
     // Optional third argument for JS Promise Integration.
     if (!args[2]->IsNullOrUndefined() && !args[2]->IsObject()) {
       thrower.TypeError(
@@ -2242,25 +2205,23 @@ void WebAssemblyTableGrow(const v8::FunctionCallbackInfo<v8::Value>& args) {
 
   if (args.Length() >= 2 && !args[1]->IsUndefined()) {
     init_value = Utils::OpenHandle(*args[1]);
-    if (!i::WasmTableObject::IsValidElement(i_isolate, receiver, init_value)) {
-      thrower.TypeError("Argument 1 must be a valid type for the table");
+    const char* error_message;
+    if (!i::WasmTableObject::JSToWasmElement(i_isolate, receiver, init_value,
+                                             &error_message)
+             .ToHandle(&init_value)) {
+      thrower.TypeError("Argument 1 is invalid: %s", error_message);
       return;
     }
+  } else if (receiver->type().is_non_nullable()) {
+    thrower.TypeError(
+        "Argument 1 must be specified for non-nullable element type");
+    return;
   } else {
     init_value = DefaultReferenceValue(i_isolate, receiver->type());
   }
 
-  // TODO(7748): Generalize this if other table types are allowed.
-  bool has_function_type =
-      receiver->type() == i::wasm::kWasmFuncRef || receiver->type().has_index();
-  if (has_function_type && !init_value->IsNull()) {
-    init_value = i::WasmInternalFunction::FromExternal(init_value, i_isolate)
-                     .ToHandleChecked();
-  }
-
   int old_size =
       i::WasmTableObject::Grow(i_isolate, receiver, grow_by, init_value);
-
   if (old_size < 0) {
     thrower.RangeError("failed to grow table by %u", grow_by);
     return;
@@ -2268,6 +2229,83 @@ void WebAssemblyTableGrow(const v8::FunctionCallbackInfo<v8::Value>& args) {
   v8::ReturnValue<v8::Value> return_value = args.GetReturnValue();
   return_value.Set(old_size);
 }
+
+namespace {
+void WasmObjectToJSReturnValue(v8::ReturnValue<v8::Value>& return_value,
+                               i::Handle<i::Object> value,
+                               i::wasm::HeapType::Representation repr,
+                               const i::wasm::WasmModule* module,
+                               i::Isolate* isolate,
+                               ScheduledErrorThrower* thrower) {
+  switch (repr) {
+    case i::wasm::HeapType::kExtern:
+    case i::wasm::HeapType::kString:
+    // TODO(7748): Make sure i31ref is compatible with Smi, or transform here.
+    case i::wasm::HeapType::kI31:
+      return_value.Set(Utils::ToLocal(value));
+      return;
+    case i::wasm::HeapType::kFunc: {
+      if (!value->IsNull()) {
+        DCHECK(value->IsWasmInternalFunction());
+        value =
+            handle(i::Handle<i::WasmInternalFunction>::cast(value)->external(),
+                   isolate);
+      }
+      return_value.Set(Utils::ToLocal(value));
+      return;
+    }
+    case i::wasm::HeapType::kStringViewWtf8:
+      thrower->TypeError("stringview_wtf8 has no JS representation");
+      return;
+    case i::wasm::HeapType::kStringViewWtf16:
+      thrower->TypeError("stringview_wtf16 has no JS representation");
+      return;
+    case i::wasm::HeapType::kStringViewIter:
+      thrower->TypeError("stringview_iter has no JS representation");
+      return;
+    case i::wasm::HeapType::kBottom:
+      UNREACHABLE();
+    case i::wasm::HeapType::kData:
+    case i::wasm::HeapType::kArray:
+    case i::wasm::HeapType::kEq:
+    case i::wasm::HeapType::kAny: {
+      if (!i::v8_flags.wasm_gc_js_interop && value->IsWasmObject()) {
+        // Transform wasm object into JS-compliant representation.
+        i::Handle<i::JSObject> wrapper =
+            isolate->factory()->NewJSObject(isolate->object_function());
+        i::JSObject::AddProperty(
+            isolate, wrapper, isolate->factory()->wasm_wrapped_object_symbol(),
+            value, i::NONE);
+        value = wrapper;
+      }
+      return_value.Set(Utils::ToLocal(value));
+      return;
+    }
+    default:
+      if (module->has_signature(repr)) {
+        if (!value->IsNull()) {
+          DCHECK(value->IsWasmInternalFunction());
+          value = handle(
+              i::Handle<i::WasmInternalFunction>::cast(value)->external(),
+              isolate);
+        }
+        return_value.Set(Utils::ToLocal(value));
+        return;
+      }
+      if (!i::v8_flags.wasm_gc_js_interop && value->IsWasmObject()) {
+        // Transform wasm object into JS-compliant representation.
+        i::Handle<i::JSObject> wrapper =
+            isolate->factory()->NewJSObject(isolate->object_function());
+        i::JSObject::AddProperty(
+            isolate, wrapper, isolate->factory()->wasm_wrapped_object_symbol(),
+            value, i::NONE);
+        value = wrapper;
+      }
+      return_value.Set(Utils::ToLocal(value));
+      return;
+  }
+}
+}  // namespace
 
 // WebAssembly.Table.get(num) -> any
 void WebAssemblyTableGet(const v8::FunctionCallbackInfo<v8::Value>& args) {
@@ -2302,14 +2340,15 @@ void WebAssemblyTableGet(const v8::FunctionCallbackInfo<v8::Value>& args) {
 
   i::Handle<i::Object> result =
       i::WasmTableObject::Get(i_isolate, receiver, index);
-  if (result->IsWasmInternalFunction()) {
-    result =
-        handle(i::Handle<i::WasmInternalFunction>::cast(result)->external(),
-               i_isolate);
-  }
 
   v8::ReturnValue<v8::Value> return_value = args.GetReturnValue();
-  return_value.Set(Utils::ToLocal(result));
+  const i::wasm::WasmModule* module =
+      receiver->instance().IsWasmInstanceObject()
+          ? i::WasmInstanceObject::cast(receiver->instance()).module()
+          : nullptr;
+  WasmObjectToJSReturnValue(return_value, result,
+                            receiver->type().heap_representation(), module,
+                            i_isolate, &thrower);
 }
 
 // WebAssembly.Table.set(num, any)
@@ -2331,25 +2370,26 @@ void WebAssemblyTableSet(const v8::FunctionCallbackInfo<v8::Value>& args) {
     return;
   }
 
-  i::Handle<i::Object> element =
-      args.Length() >= 2
-          ? Utils::OpenHandle(*args[1])
-          : DefaultReferenceValue(i_isolate, table_object->type());
-
-  if (!i::WasmTableObject::IsValidElement(i_isolate, table_object, element)) {
-    thrower.TypeError("Argument 1 is invalid for table of type %s",
+  i::Handle<i::Object> element;
+  if (args.Length() >= 2) {
+    element = Utils::OpenHandle(*args[1]);
+  } else if (table_object->type().is_defaultable()) {
+    element = DefaultReferenceValue(i_isolate, table_object->type());
+  } else {
+    thrower.TypeError("Table of non-defaultable type %s needs explicit element",
                       table_object->type().name().c_str());
     return;
   }
 
-  i::Handle<i::Object> external_element;
-  // TODO(7748): Make sure externref tables don't convert any values.
-  bool is_external = table_object->type() != i::wasm::kWasmExternRef &&
-                     i::WasmInternalFunction::FromExternal(element, i_isolate)
-                         .ToHandle(&external_element);
+  const char* error_message;
+  if (!i::WasmTableObject::JSToWasmElement(i_isolate, table_object, element,
+                                           &error_message)
+           .ToHandle(&element)) {
+    thrower.TypeError("Argument 1 is invalid for table: %s", error_message);
+    return;
+  }
 
-  i::WasmTableObject::Set(i_isolate, table_object, index,
-                          is_external ? external_element : element);
+  i::WasmTableObject::Set(i_isolate, table_object, index, element);
 }
 
 // WebAssembly.Table.type() -> TableType
@@ -2674,43 +2714,16 @@ void WebAssemblyGlobalGetValueCommon(
       thrower.TypeError("Can't get the value of s128 WebAssembly.Global");
       break;
     case i::wasm::kRef:
-    case i::wasm::kRefNull:
-      switch (receiver->type().heap_representation()) {
-        case i::wasm::HeapType::kExtern:
-        case i::wasm::HeapType::kString:
-          return_value.Set(Utils::ToLocal(receiver->GetRef()));
-          break;
-        case i::wasm::HeapType::kFunc: {
-          i::Handle<i::Object> result = receiver->GetRef();
-          if (result->IsWasmInternalFunction()) {
-            result = handle(
-                i::Handle<i::WasmInternalFunction>::cast(result)->external(),
-                i_isolate);
-          }
-          return_value.Set(Utils::ToLocal(result));
-          break;
-        }
-        case i::wasm::HeapType::kStringViewWtf8:
-          thrower.TypeError("stringview_wtf8 has no JS representation");
-          break;
-        case i::wasm::HeapType::kStringViewWtf16:
-          thrower.TypeError("stringview_wtf16 has no JS representation");
-          break;
-        case i::wasm::HeapType::kStringViewIter:
-          thrower.TypeError("stringview_iter has no JS representation");
-          break;
-        case i::wasm::HeapType::kBottom:
-          UNREACHABLE();
-        case i::wasm::HeapType::kI31:
-        case i::wasm::HeapType::kData:
-        case i::wasm::HeapType::kArray:
-        case i::wasm::HeapType::kAny:
-        case i::wasm::HeapType::kEq:
-        default:
-          // TODO(7748): Implement these.
-          UNIMPLEMENTED();
-      }
+    case i::wasm::kRefNull: {
+      const i::wasm::WasmModule* module =
+          receiver->instance().IsWasmInstanceObject()
+              ? i::WasmInstanceObject::cast(receiver->instance()).module()
+              : nullptr;
+      WasmObjectToJSReturnValue(return_value, receiver->GetRef(),
+                                receiver->type().heap_representation(), module,
+                                i_isolate, &thrower);
       break;
+    }
     case i::wasm::kRtt:
       UNIMPLEMENTED();  // TODO(7748): Implement.
     case i::wasm::kI8:
@@ -2780,62 +2793,23 @@ void WebAssemblyGlobalSetValue(
       thrower.TypeError("Can't set the value of s128 WebAssembly.Global");
       break;
     case i::wasm::kRef:
-    case i::wasm::kRefNull:
-      switch (receiver->type().heap_representation()) {
-        case i::wasm::HeapType::kExtern:
-          receiver->SetExternRef(Utils::OpenHandle(*args[0]));
-          break;
-        case i::wasm::HeapType::kFunc: {
-          if (!receiver->SetFuncRef(i_isolate, Utils::OpenHandle(*args[0]))) {
-            thrower.TypeError(
-                "value of an funcref reference must be either null or an "
-                "exported function");
-          }
-          break;
-        }
-        case i::wasm::HeapType::kString: {
-          if (!args[0]->IsString()) {
-            if (args[0]->IsNull()) {
-              if (receiver->type().nullability() == i::wasm::kNonNullable) {
-                thrower.TypeError(
-                    "Can't set non-nullable stringref global to null");
-                break;
-              }
-            } else {
-              thrower.TypeError(
-                  receiver->type().nullability() == i::wasm::kNonNullable
-                      ? "Non-nullable stringref global can only hold a string"
-                      : "Stringref global can only hold null or a string");
-              break;
-            }
-          }
-          receiver->SetStringRef(Utils::OpenHandle(*args[0]));
-          break;
-        }
-        case i::wasm::HeapType::kStringViewWtf8:
-          thrower.TypeError("stringview_wtf8 has no JS representation");
-          break;
-        case i::wasm::HeapType::kStringViewWtf16:
-          thrower.TypeError("stringview_wtf16 has no JS representation");
-          break;
-        case i::wasm::HeapType::kStringViewIter:
-          thrower.TypeError("stringview_iter has no JS representation");
-          break;
-        case i::wasm::HeapType::kBottom:
-          UNREACHABLE();
-        case i::wasm::HeapType::kI31:
-        case i::wasm::HeapType::kData:
-        case i::wasm::HeapType::kArray:
-        case i::wasm::HeapType::kAny:
-        case i::wasm::HeapType::kEq:
-        default:
-          // TODO(7748): Implement these.
-          UNIMPLEMENTED();
+    case i::wasm::kRefNull: {
+      const i::wasm::WasmModule* module =
+          receiver->instance().IsWasmInstanceObject()
+              ? i::WasmInstanceObject::cast(receiver->instance()).module()
+              : nullptr;
+      i::Handle<i::Object> value = Utils::OpenHandle(*args[0]);
+      const char* error_message;
+      if (!i::wasm::JSToWasmObject(i_isolate, module, value, receiver->type(),
+                                   &error_message)
+               .ToHandle(&value)) {
+        thrower.TypeError("%s", error_message);
+        return;
       }
-      break;
+      receiver->SetRef(value);
+      return;
+    }
     case i::wasm::kRtt:
-      // TODO(7748): Implement.
-      UNIMPLEMENTED();
     case i::wasm::kI8:
     case i::wasm::kI16:
     case i::wasm::kBottom:
@@ -3020,7 +2994,7 @@ void WasmJs::Install(Isolate* isolate, bool exposed_on_global_object) {
 
   // TODO(tebbi): Put this behind its own flag once --wasm-gc-js-interop gets
   // closer to shipping.
-  if (FLAG_wasm_gc_js_interop) {
+  if (v8_flags.wasm_gc_js_interop) {
     SimpleInstallFunction(
         isolate, webassembly, "experimentalConvertArrayToString",
         Builtin::kExperimentalWasmConvertArrayToString, 0, true);
@@ -3029,7 +3003,7 @@ void WasmJs::Install(Isolate* isolate, bool exposed_on_global_object) {
         Builtin::kExperimentalWasmConvertStringToArray, 0, true);
   }
 
-  if (FLAG_wasm_test_streaming) {
+  if (v8_flags.wasm_test_streaming) {
     isolate->set_wasm_streaming_callback(WasmStreamingCallbackForTesting);
   }
 

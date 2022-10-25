@@ -756,9 +756,7 @@ void RemoveBreakpoint(Isolate* v8_isolate, BreakpointId id) {
 
 Platform* GetCurrentPlatform() { return i::V8::GetCurrentPlatform(); }
 
-void ForceGarbageCollection(
-    Isolate* isolate,
-    EmbedderHeapTracer::EmbedderStackState embedder_stack_state) {
+void ForceGarbageCollection(Isolate* isolate, StackState embedder_stack_state) {
   i::EmbedderStackStateScope stack_scope(
       reinterpret_cast<i::Isolate*>(isolate)->heap(),
       i::EmbedderStackStateScope::kImplicitThroughTask, embedder_stack_state);
@@ -1434,6 +1432,11 @@ MaybeLocal<Message> GetMessageFromPromise(Local<Promise> p) {
 
 bool isExperimentalAsyncStackTaggingApiEnabled() {
   return v8::internal::FLAG_experimental_async_stack_tagging_api;
+}
+
+void RecordAsyncStackTaggingCreateTaskCall(v8::Isolate* v8_isolate) {
+  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
+  isolate->CountUsage(v8::Isolate::kAsyncStackTaggingCreateTaskCall);
 }
 
 std::unique_ptr<PropertyIterator> PropertyIterator::Create(

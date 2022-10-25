@@ -778,12 +778,12 @@ struct StructProxy : NamedDebugProxy<StructProxy, kStructProxy, FixedArray> {
   static const int kTypeIndexIndex = 2;
   static const int kLength = 3;
 
-  static Handle<JSObject> Create(Isolate* isolate, const wasm::WasmValue& value,
+  static Handle<JSObject> Create(Isolate* isolate, Handle<WasmStruct> value,
                                  Handle<WasmModuleObject> module) {
     Handle<FixedArray> data = isolate->factory()->NewFixedArray(kLength);
-    data->set(kObjectIndex, *value.to_ref());
+    data->set(kObjectIndex, *value);
     data->set(kModuleIndex, *module);
-    int struct_type_index = value.type().ref_index();
+    int struct_type_index = value->map().wasm_type_info().type_index();
     data->set(kTypeIndexIndex, Smi::FromInt(struct_type_index));
     return NamedDebugProxy::Create(isolate, data);
   }
@@ -820,14 +820,14 @@ struct ArrayProxy : IndexedDebugProxy<ArrayProxy, kArrayProxy, FixedArray> {
   static const int kModuleIndex = 1;
   static const int kLength = 2;
 
-  static Handle<JSObject> Create(Isolate* isolate, const wasm::WasmValue& value,
+  static Handle<JSObject> Create(Isolate* isolate, Handle<WasmArray> value,
                                  Handle<WasmModuleObject> module) {
     Handle<FixedArray> data = isolate->factory()->NewFixedArray(kLength);
-    data->set(kObjectIndex, *value.to_ref());
+    data->set(kObjectIndex, *value);
     data->set(kModuleIndex, *module);
     Handle<JSObject> proxy = IndexedDebugProxy::Create(
         isolate, data, false /* leave map extensible */);
-    uint32_t length = WasmArray::cast(*value.to_ref()).length();
+    uint32_t length = value->length();
     Handle<Object> length_obj = isolate->factory()->NewNumberFromUint(length);
     Object::SetProperty(isolate, proxy, isolate->factory()->length_string(),
                         length_obj, StoreOrigin::kNamed,
@@ -908,9 +908,23 @@ Handle<WasmValueObject> WasmValueObject::New(
       t = GetRefTypeName(isolate, value.type(), module_object->native_module());
       Handle<Object> ref = value.to_ref();
       if (ref->IsWasmStruct()) {
-        v = StructProxy::Create(isolate, value, module_object);
+        WasmTypeInfo type_info = ref->GetHeapObject().map().wasm_type_info();
+        wasm::ValueType type = wasm::ValueType::FromIndex(
+            wasm::ValueKind::kRef, type_info.type_index());
+        t = GetRefTypeName(
+            isolate, type,
+            type_info.instance().module_object().native_module());
+        v = StructProxy::Create(isolate, Handle<WasmStruct>::cast(ref),
+                                module_object);
       } else if (ref->IsWasmArray()) {
-        v = ArrayProxy::Create(isolate, value, module_object);
+        WasmTypeInfo type_info = ref->GetHeapObject().map().wasm_type_info();
+        wasm::ValueType type = wasm::ValueType::FromIndex(
+            wasm::ValueKind::kRef, type_info.type_index());
+        t = GetRefTypeName(
+            isolate, type,
+            type_info.instance().module_object().native_module());
+        v = ArrayProxy::Create(isolate, Handle<WasmArray>::cast(ref),
+                               module_object);
       } else if (ref->IsWasmInternalFunction()) {
         v = handle(Handle<WasmInternalFunction>::cast(ref)->external(),
                    isolate);
@@ -1022,11 +1036,12 @@ Handle<ArrayList> AddWasmTableObjectInternalProperties(
   Handle<FixedArray> entries = isolate->factory()->NewFixedArray(length);
   for (int i = 0; i < length; ++i) {
     Handle<Object> entry = WasmTableObject::Get(isolate, table, i);
-    if (entry->IsWasmInternalFunction()) {
-      entry = handle(Handle<WasmInternalFunction>::cast(entry)->external(),
-                     isolate);
-    }
-    entries->set(i, *entry);
+    wasm::WasmValue wasm_value(entry, table->type());
+    Handle<WasmModuleObject> module(
+        WasmInstanceObject::cast(table->instance()).module_object(), isolate);
+    Handle<Object> debug_value =
+        WasmValueObject::New(isolate, wasm_value, module);
+    entries->set(i, *debug_value);
   }
   Handle<JSArray> final_entries = isolate->factory()->NewJSArrayWithElements(
       entries, i::PACKED_ELEMENTS, length);

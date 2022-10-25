@@ -29,6 +29,7 @@ class ItemParallelJob;
 class LargeObjectSpace;
 class LargePage;
 class MigrationObserver;
+class PagedNewSpace;
 class ReadOnlySpace;
 class RecordMigratedSlotVisitor;
 class UpdatingItem;
@@ -155,31 +156,24 @@ class LiveObjectRange {
 
 class LiveObjectVisitor : AllStatic {
  public:
-  enum IterationMode {
-    kKeepMarking,
-    kClearMarkbits,
-  };
-
   // Visits black objects on a MemoryChunk until the Visitor returns |false| for
-  // an object. If IterationMode::kClearMarkbits is passed the markbits and
-  // slots for visited objects are cleared for each successfully visited object.
+  // an object.
   template <class Visitor, typename MarkingState>
   static bool VisitBlackObjects(MemoryChunk* chunk, MarkingState* state,
-                                Visitor* visitor, IterationMode iteration_mode,
-                                HeapObject* failed_object);
+                                Visitor* visitor, HeapObject* failed_object);
 
   // Visits black objects on a MemoryChunk. The visitor is not allowed to fail
   // visitation for an object.
   template <class Visitor, typename MarkingState>
   static void VisitBlackObjectsNoFail(MemoryChunk* chunk, MarkingState* state,
-                                      Visitor* visitor,
-                                      IterationMode iteration_mode);
+                                      Visitor* visitor);
 
   template <typename MarkingState>
   static void RecomputeLiveBytes(MemoryChunk* chunk, MarkingState* state);
 };
 
 enum class AlwaysPromoteYoung { kYes, kNo };
+enum class MemoryReductionMode { kNone, kShouldReduceMemory };
 enum PageEvacuationMode { NEW_TO_NEW, NEW_TO_OLD };
 enum class RememberedSetUpdatingMode { ALL, OLD_TO_NEW_ONLY };
 
@@ -294,7 +288,7 @@ class MainMarkingVisitor final
   MarkingState* marking_state() { return marking_state_; }
 
   TraceRetainingPathMode retaining_path_mode() {
-    return (V8_UNLIKELY(FLAG_track_retaining_path))
+    return (V8_UNLIKELY(v8_flags.track_retaining_path))
                ? TraceRetainingPathMode::kEnabled
                : TraceRetainingPathMode::kDisabled;
   }
@@ -589,6 +583,7 @@ class MarkCompactCollector final : public CollectorBase {
   // Mark all objects that are directly referenced from one of the clients
   // heaps.
   void MarkObjectsFromClientHeaps();
+  void MarkObjectsFromClientHeap(Isolate* client);
 
   // Updates pointers to shared objects from client heaps.
   void UpdatePointersInClientHeaps();
@@ -629,8 +624,8 @@ class MarkCompactCollector final : public CollectorBase {
   // heap object.
   static bool IsUnmarkedHeapObject(Heap* heap, FullObjectSlot p);
 
-  // Retain dying maps for `FLAG_retain_maps_for_n_gc` garbage collections to
-  // increase chances of reusing of map transition tree in future.
+  // Retain dying maps for `v8_flags.retain_maps_for_n_gc` garbage collections
+  // to increase chances of reusing of map transition tree in future.
   void RetainMaps();
 
   // Clear non-live references in weak cells, transition and descriptor arrays,
@@ -683,6 +678,7 @@ class MarkCompactCollector final : public CollectorBase {
   // up other pages for sweeping. Does not start sweeper tasks.
   void Sweep();
   void StartSweepSpace(PagedSpace* space);
+  void StartSweepNewSpace();
   void SweepLargeSpace(LargeObjectSpace* space);
 
   void EvacuatePrologue();
@@ -693,7 +689,7 @@ class MarkCompactCollector final : public CollectorBase {
 
   void ReleaseEvacuationCandidates();
   // Returns number of aborted pages.
-  size_t PostProcessEvacuationCandidates();
+  size_t PostProcessAbortedEvacuationCandidates();
   void ReportAbortedEvacuationCandidateDueToOOM(Address failed_start,
                                                 Page* page);
   void ReportAbortedEvacuationCandidateDueToFlags(Address failed_start,
@@ -811,10 +807,8 @@ class MinorMarkCompactCollector final : public CollectorBase {
 
   void Finish() final;
 
-  bool sweeping_in_progress() const final {
-    // TODO(v8:13012): Fix this once sweeping is implemented.
-    return false;
-  }
+  Sweeper* sweeper() { return sweeper_.get(); }
+  bool sweeping_in_progress() const { return sweeper_->sweeping_in_progress(); }
 
   void VisitObject(HeapObject obj) final;
 
@@ -831,18 +825,15 @@ class MinorMarkCompactCollector final : public CollectorBase {
   void TraceFragmentation();
   void ClearNonLiveReferences();
 
+  void Sweep();
+  void StartSweepNewSpace();
+
   void EvacuatePrologue();
   void EvacuateEpilogue();
   void Evacuate();
   void EvacuatePagesInParallel();
   void UpdatePointersAfterEvacuation();
-
-  std::unique_ptr<UpdatingItem> CreateToSpaceUpdatingItem(MemoryChunk* chunk,
-                                                          Address start,
-                                                          Address end);
-
-  int CollectToSpaceUpdatingItems(
-      std::vector<std::unique_ptr<UpdatingItem>>* items);
+  void FinishConcurrentMarking();
 
   void SweepArrayBufferExtensions();
 
@@ -852,6 +843,8 @@ class MinorMarkCompactCollector final : public CollectorBase {
   std::vector<Page*> new_space_evacuation_pages_;
   std::vector<Page*> promoted_pages_;
   std::vector<LargePage*> promoted_large_pages_;
+
+  std::unique_ptr<Sweeper> sweeper_;
 
   friend class YoungGenerationMarkingTask;
   friend class YoungGenerationMarkingJob;

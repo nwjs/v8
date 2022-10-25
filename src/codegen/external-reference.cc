@@ -41,7 +41,6 @@
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 #ifdef V8_INTL_SUPPORT
-#include "src/base/platform/wrappers.h"
 #include "src/base/strings.h"
 #include "src/objects/intl-objects.h"
 #endif  // V8_INTL_SUPPORT
@@ -364,11 +363,20 @@ ExternalReference::runtime_function_table_address_for_unittests(
 }
 
 // static
-Address ExternalReference::Redirect(Address address, Type type) {
+Address ExternalReference::Redirect(Address external_function, Type type) {
 #ifdef USE_SIMULATOR
-  return SimulatorBase::RedirectExternalReference(address, type);
+  return SimulatorBase::RedirectExternalReference(external_function, type);
 #else
-  return address;
+  return external_function;
+#endif
+}
+
+// static
+Address ExternalReference::UnwrapRedirection(Address redirection_trampoline) {
+#ifdef USE_SIMULATOR
+  return SimulatorBase::UnwrapRedirection(redirection_trampoline);
+#else
+  return redirection_trampoline;
 #endif
 }
 
@@ -500,6 +508,11 @@ ExternalReference ExternalReference::heap_is_marking_flag_address(
   return ExternalReference(isolate->heap()->IsMarkingFlagAddress());
 }
 
+ExternalReference ExternalReference::heap_is_minor_marking_flag_address(
+    Isolate* isolate) {
+  return ExternalReference(isolate->heap()->IsMinorMarkingFlagAddress());
+}
+
 ExternalReference ExternalReference::new_space_allocation_top_address(
     Isolate* isolate) {
   return ExternalReference(isolate->heap()->NewSpaceAllocationTopAddress());
@@ -558,17 +571,22 @@ ExternalReference ExternalReference::address_of_min_int() {
 
 ExternalReference
 ExternalReference::address_of_mock_arraybuffer_allocator_flag() {
-  return ExternalReference(&FLAG_mock_arraybuffer_allocator);
+  return ExternalReference(&v8_flags.mock_arraybuffer_allocator);
 }
 
-// TODO(jgruber): Update the other extrefs pointing at FLAG_ addresses to be
+ExternalReference
+ExternalReference::address_of_FLAG_harmony_regexp_unicode_sets() {
+  return ExternalReference(&v8_flags.harmony_regexp_unicode_sets);
+}
+
+// TODO(jgruber): Update the other extrefs pointing at v8_flags. addresses to be
 // called address_of_FLAG_foo (easier grep-ability).
-ExternalReference ExternalReference::address_of_FLAG_trace_osr() {
-  return ExternalReference(&FLAG_trace_osr);
+ExternalReference ExternalReference::address_of_log_or_trace_osr() {
+  return ExternalReference(&v8_flags.log_or_trace_osr);
 }
 
 ExternalReference ExternalReference::address_of_builtin_subclassing_flag() {
-  return ExternalReference(&FLAG_builtin_subclassing);
+  return ExternalReference(&v8_flags.builtin_subclassing);
 }
 
 ExternalReference ExternalReference::address_of_runtime_stats_flag() {
@@ -576,7 +594,7 @@ ExternalReference ExternalReference::address_of_runtime_stats_flag() {
 }
 
 ExternalReference ExternalReference::address_of_shared_string_table_flag() {
-  return ExternalReference(&FLAG_shared_string_table);
+  return ExternalReference(&v8_flags.shared_string_table);
 }
 
 ExternalReference ExternalReference::address_of_load_from_stack_count(
@@ -688,7 +706,7 @@ ExternalReference ExternalReference::supports_cetss_address() {
 
 ExternalReference
 ExternalReference::address_of_enable_experimental_regexp_engine() {
-  return ExternalReference(&FLAG_enable_experimental_regexp_engine);
+  return ExternalReference(&v8_flags.enable_experimental_regexp_engine);
 }
 
 namespace {
@@ -724,10 +742,6 @@ ExternalReference ExternalReference::thread_in_wasm_flag_address_address(
   return ExternalReference(isolate->thread_in_wasm_flag_address_address());
 }
 
-ExternalReference ExternalReference::is_profiling_address(Isolate* isolate) {
-  return ExternalReference(isolate->is_profiling_address());
-}
-
 ExternalReference ExternalReference::invoke_function_callback() {
   Address thunk_address = FUNCTION_ADDR(&InvokeFunctionCallback);
   ExternalReference::Type thunk_type = ExternalReference::PROFILING_API_CALL;
@@ -752,8 +766,6 @@ ExternalReference ExternalReference::invoke_accessor_getter_callback() {
 #define re_stack_check_func RegExpMacroAssemblerARM::CheckStackGuardState
 #elif V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_PPC64
 #define re_stack_check_func RegExpMacroAssemblerPPC::CheckStackGuardState
-#elif V8_TARGET_ARCH_MIPS
-#define re_stack_check_func RegExpMacroAssemblerMIPS::CheckStackGuardState
 #elif V8_TARGET_ARCH_MIPS64
 #define re_stack_check_func RegExpMacroAssemblerMIPS::CheckStackGuardState
 #elif V8_TARGET_ARCH_LOONG64
@@ -1037,6 +1049,18 @@ FUNCTION_REFERENCE(mutable_big_int_absolute_sub_and_canonicalize_function,
 FUNCTION_REFERENCE(mutable_big_int_absolute_mul_and_canonicalize_function,
                    MutableBigInt_AbsoluteMulAndCanonicalize)
 
+FUNCTION_REFERENCE(mutable_big_int_absolute_div_and_canonicalize_function,
+                   MutableBigInt_AbsoluteDivAndCanonicalize)
+
+FUNCTION_REFERENCE(mutable_big_int_bitwise_and_pp_and_canonicalize_function,
+                   MutableBigInt_BitwiseAndPosPosAndCanonicalize)
+
+FUNCTION_REFERENCE(mutable_big_int_bitwise_and_nn_and_canonicalize_function,
+                   MutableBigInt_BitwiseAndNegNegAndCanonicalize)
+
+FUNCTION_REFERENCE(mutable_big_int_bitwise_and_pn_and_canonicalize_function,
+                   MutableBigInt_BitwiseAndPosNegAndCanonicalize)
+
 FUNCTION_REFERENCE(check_object_type, CheckObjectType)
 
 #ifdef V8_INTL_SUPPORT
@@ -1158,6 +1182,10 @@ ExternalReference ExternalReference::stack_is_iterable_address(
     Isolate* isolate) {
   return ExternalReference(
       isolate->isolate_data()->stack_is_iterable_address());
+}
+
+ExternalReference ExternalReference::is_profiling_address(Isolate* isolate) {
+  return ExternalReference(isolate->isolate_data()->is_profiling_address());
 }
 
 FUNCTION_REFERENCE(call_enqueue_microtask_function,
@@ -1413,7 +1441,7 @@ bool operator!=(ExternalReference lhs, ExternalReference rhs) {
 }
 
 size_t hash_value(ExternalReference reference) {
-  if (FLAG_predictable) {
+  if (v8_flags.predictable) {
     // Avoid ASLR non-determinism in predictable mode. For this, just take the
     // lowest 12 bit corresponding to a 4K page size.
     return base::hash<Address>()(reference.address() & 0xfff);

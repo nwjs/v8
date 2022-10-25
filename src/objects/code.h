@@ -255,7 +255,7 @@ class CodeDataContainer : public HeapObject {
   V(kCodeCageBaseUpper32BitsOffset,                                 \
     V8_EXTERNAL_CODE_SPACE_BOOL ? kTaggedSize : 0)                  \
   V(kCodeEntryPointOffset,                                          \
-    V8_EXTERNAL_CODE_SPACE_BOOL ? kExternalPointerSlotSize : 0)     \
+    V8_EXTERNAL_CODE_SPACE_BOOL ? kSystemPointerSize : 0)           \
   V(kFlagsOffset, V8_EXTERNAL_CODE_SPACE_BOOL ? kUInt16Size : 0)    \
   V(kBuiltinIdOffset, V8_EXTERNAL_CODE_SPACE_BOOL ? kInt16Size : 0) \
   V(kKindSpecificFlagsOffset, kInt32Size)                           \
@@ -729,7 +729,7 @@ class Code : public HeapObject {
   /* Offsets describing inline metadata tables, relative to MetadataStart. */ \
   V(kHandlerTableOffsetOffset, kIntSize)                                      \
   V(kConstantPoolOffsetOffset,                                                \
-    FLAG_enable_embedded_constant_pool.value() ? kIntSize : 0)                \
+    v8_flags.enable_embedded_constant_pool.value() ? kIntSize : 0)            \
   V(kCodeCommentsOffsetOffset, kIntSize)                                      \
   V(kUnwindingInfoOffsetOffset, kInt32Size)                                   \
   V(kUnalignedHeaderSize, 0)                                                  \
@@ -761,7 +761,7 @@ class Code : public HeapObject {
   static constexpr int kHeaderPaddingSize = 8;
 #elif V8_TARGET_ARCH_PPC64
   static constexpr int kHeaderPaddingSize =
-      FLAG_enable_embedded_constant_pool.value()
+      v8_flags.enable_embedded_constant_pool.value()
           ? (COMPRESS_POINTERS_BOOL ? 4 : 48)
           : (COMPRESS_POINTERS_BOOL ? 8 : 52);
 #elif V8_TARGET_ARCH_S390X
@@ -980,7 +980,7 @@ class CodeLookupResult {
 #ifdef V8_EXTERNAL_CODE_SPACE
            && code_data_container_ == other.code_data_container_
 #endif
-        ;
+        ;  // NOLINT(whitespace/semicolon)
   }
   bool operator!=(const CodeLookupResult& other) const {
     return !operator==(other);
@@ -1093,10 +1093,20 @@ class AbstractCode : public HeapObject {
   inline CodeT GetCodeT();
   inline BytecodeArray GetBytecodeArray();
 
-  OBJECT_CONSTRUCTORS(AbstractCode, HeapObject);
+  // AbstractCode might be represented by both Code and non-Code objects and
+  // thus regular comparison of tagged values might not be correct when
+  // V8_EXTERNAL_CODE_SPACE is enabled. SafeEquals() must be used instead.
+  constexpr bool operator==(AbstractCode other) const {
+    return SafeEquals(other);
+  }
+  constexpr bool operator!=(AbstractCode other) const {
+    return !SafeEquals(other);
+  }
 
  private:
   inline ByteArray SourcePositionTableInternal(PtrComprCageBase cage_base);
+
+  OBJECT_CONSTRUCTORS(AbstractCode, HeapObject);
 };
 
 // Dependent code is conceptually the list of {Code, DependencyGroup} tuples
@@ -1271,6 +1281,9 @@ class BytecodeArray
   V8_EXPORT_PRIVATE void PrintJson(std::ostream& os);
   V8_EXPORT_PRIVATE void Disassemble(std::ostream& os);
 
+  V8_EXPORT_PRIVATE static void Disassemble(Handle<BytecodeArray> handle,
+                                            std::ostream& os);
+
   void CopyBytecodesTo(BytecodeArray to);
 
   // Bytecode aging
@@ -1379,7 +1392,7 @@ class DeoptimizationData : public FixedArray {
 
 #undef DECL_ENTRY_ACCESSORS
 
-  inline BytecodeOffset GetBytecodeOffset(int i);
+  inline BytecodeOffset GetBytecodeOffset(int i) const;
 
   inline void SetBytecodeOffset(int i, BytecodeOffset value);
 

@@ -42,9 +42,9 @@ using base::ReadUnalignedValue;
 using base::WriteLittleEndianValue;
 using base::WriteUnalignedValue;
 
-#define TRACE(...)                                        \
-  do {                                                    \
-    if (FLAG_trace_wasm_interpreter) PrintF(__VA_ARGS__); \
+#define TRACE(...)                                            \
+  do {                                                        \
+    if (v8_flags.trace_wasm_interpreter) PrintF(__VA_ARGS__); \
   } while (false)
 
 #if V8_TARGET_BIG_ENDIAN
@@ -1703,7 +1703,7 @@ class WasmInterpreterInternals {
     Push(result);
     *len += imm.length;
 
-    if (FLAG_trace_wasm_memory) {
+    if (v8_flags.trace_wasm_memory) {
       MemoryTracingInfo info(imm.offset + index, false, rep);
       TraceMemoryOperation({}, &info, code->function->func_index,
                            static_cast<int>(pc),
@@ -1735,7 +1735,7 @@ class WasmInterpreterInternals {
     WriteLittleEndianValue<mtype>(addr, converter<mtype, ctype>{}(val));
     *len += imm.length;
 
-    if (FLAG_trace_wasm_memory) {
+    if (v8_flags.trace_wasm_memory) {
       MemoryTracingInfo info(imm.offset + index, true, rep);
       TraceMemoryOperation({}, &info, code->function->func_index,
                            static_cast<int>(pc),
@@ -1836,15 +1836,15 @@ class WasmInterpreterInternals {
         uint64_t dst = ToMemType(Pop());
         Address dst_addr;
         uint64_t src_max =
-            instance_object_->data_segment_sizes()[imm.data_segment.index];
+            instance_object_->data_segment_sizes().get(imm.data_segment.index);
         if (!BoundsCheckMemRange(dst, &size, &dst_addr) ||
             !base::IsInBounds(src, size, src_max)) {
           DoTrap(kTrapMemOutOfBounds, pc);
           return false;
         }
-        Address src_addr =
-            instance_object_->data_segment_starts()[imm.data_segment.index] +
-            src;
+        Address src_addr = instance_object_->data_segment_starts().get(
+                               imm.data_segment.index) +
+                           src;
         std::memmove(reinterpret_cast<void*>(dst_addr),
                      reinterpret_cast<void*>(src_addr), size);
         return true;
@@ -1856,7 +1856,7 @@ class WasmInterpreterInternals {
         // validation.
         DCHECK_LT(imm.index, module()->num_declared_data_segments);
         *len += imm.length;
-        instance_object_->data_segment_sizes()[imm.index] = 0;
+        instance_object_->data_segment_sizes().set(imm.index, 0);
         return true;
       }
       case kExprMemoryCopy: {
@@ -1916,7 +1916,7 @@ class WasmInterpreterInternals {
         IndexImmediate<Decoder::kNoValidation> imm(decoder, code->at(pc + *len),
                                                    "element segment index");
         *len += imm.length;
-        instance_object_->dropped_elem_segments()[imm.index] = 1;
+        instance_object_->dropped_elem_segments().set(imm.index, 1);
         return true;
       }
       case kExprTableCopy: {
@@ -3130,9 +3130,9 @@ class WasmInterpreterInternals {
                     pc_t* limit) V8_WARN_UNUSED_RESULT {
     // The goal of this stack check is not to prevent actual stack overflows,
     // but to simulate stack overflows during the execution of compiled code.
-    // That is why this function uses FLAG_stack_size, even though the value
+    // That is why this function uses v8_flags.stack_size, even though the value
     // stack actually lies in zone memory.
-    const size_t stack_size_limit = FLAG_stack_size * KB;
+    const size_t stack_size_limit = v8_flags.stack_size * KB;
     // Sum up the value stack size and the control stack size.
     const size_t current_stack_size = (sp_ - stack_.get()) * sizeof(*sp_) +
                                       frames_.size() * sizeof(frames_[0]);
@@ -4039,7 +4039,7 @@ class WasmInterpreterInternals {
 
   void TraceValueStack() {
 #ifdef DEBUG
-    if (!FLAG_trace_wasm_interpreter) return;
+    if (!v8_flags.trace_wasm_interpreter) return;
     HandleScope handle_scope(isolate_);  // Avoid leaking handles.
     Frame* top = frames_.size() > 0 ? &frames_.back() : nullptr;
     sp_t sp = top ? top->sp : 0;
@@ -4103,7 +4103,7 @@ class WasmInterpreterInternals {
                                   uint32_t sig_index) {
     HandleScope handle_scope(isolate_);  // Avoid leaking handles.
     uint32_t expected_sig_id;
-    if (FLAG_wasm_type_canonicalization) {
+    if (v8_flags.wasm_type_canonicalization) {
       expected_sig_id = module()->isorecursive_canonical_type_ids[sig_index];
     } else {
       expected_sig_id = module()->per_module_canonical_type_ids[sig_index];

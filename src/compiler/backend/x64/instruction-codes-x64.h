@@ -334,6 +334,8 @@ namespace compiler {
   V(X64I16x8ExtAddPairwiseI8x16S)                    \
   V(X64I16x8ExtAddPairwiseI8x16U)                    \
   V(X64I16x8Q15MulRSatS)                             \
+  V(X64I16x8RelaxedQ15MulRS)                         \
+  V(X64I16x8DotI8x16I7x16S)                          \
   V(X64I8x16Splat)                                   \
   V(X64I8x16ExtractLaneS)                            \
   V(X64I8x16SConvertI16x8)                           \
@@ -420,26 +422,28 @@ namespace compiler {
 // N = index register * N for N in {1, 2, 4, 8}
 // I = immediate displacement (32-bit signed integer)
 
-#define TARGET_ADDRESSING_MODE_LIST(V) \
-  V(MR)   /* [%r1            ] */      \
-  V(MRI)  /* [%r1         + K] */      \
-  V(MR1)  /* [%r1 + %r2*1    ] */      \
-  V(MR2)  /* [%r1 + %r2*2    ] */      \
-  V(MR4)  /* [%r1 + %r2*4    ] */      \
-  V(MR8)  /* [%r1 + %r2*8    ] */      \
-  V(MR1I) /* [%r1 + %r2*1 + K] */      \
-  V(MR2I) /* [%r1 + %r2*2 + K] */      \
-  V(MR4I) /* [%r1 + %r2*4 + K] */      \
-  V(MR8I) /* [%r1 + %r2*8 + K] */      \
-  V(M1)   /* [      %r2*1    ] */      \
-  V(M2)   /* [      %r2*2    ] */      \
-  V(M4)   /* [      %r2*4    ] */      \
-  V(M8)   /* [      %r2*8    ] */      \
-  V(M1I)  /* [      %r2*1 + K] */      \
-  V(M2I)  /* [      %r2*2 + K] */      \
-  V(M4I)  /* [      %r2*4 + K] */      \
-  V(M8I)  /* [      %r2*8 + K] */      \
-  V(Root) /* [%root       + K] */
+#define TARGET_ADDRESSING_MODE_LIST(V)   \
+  V(MR)   /* [%r1            ] */        \
+  V(MRI)  /* [%r1         + K] */        \
+  V(MR1)  /* [%r1 + %r2*1    ] */        \
+  V(MR2)  /* [%r1 + %r2*2    ] */        \
+  V(MR4)  /* [%r1 + %r2*4    ] */        \
+  V(MR8)  /* [%r1 + %r2*8    ] */        \
+  V(MR1I) /* [%r1 + %r2*1 + K] */        \
+  V(MR2I) /* [%r1 + %r2*2 + K] */        \
+  V(MR4I) /* [%r1 + %r2*4 + K] */        \
+  V(MR8I) /* [%r1 + %r2*8 + K] */        \
+  V(M1)   /* [      %r2*1    ] */        \
+  V(M2)   /* [      %r2*2    ] */        \
+  V(M4)   /* [      %r2*4    ] */        \
+  V(M8)   /* [      %r2*8    ] */        \
+  V(M1I)  /* [      %r2*1 + K] */        \
+  V(M2I)  /* [      %r2*2 + K] */        \
+  V(M4I)  /* [      %r2*4 + K] */        \
+  V(M8I)  /* [      %r2*8 + K] */        \
+  V(Root) /* [%root       + K] */        \
+  V(MCR)  /* [%compressed_base + %r1] */ \
+  V(MCRI) /* [%compressed_base + %r1 + K] */
 
 }  // namespace compiler
 }  // namespace internal

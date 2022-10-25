@@ -28,6 +28,12 @@ class IsCompiledScope;
 
 enum class UpdateFeedbackMode { kOptionalFeedback, kGuaranteedFeedback };
 
+// Which feedback slots to clear in Clear().
+enum class ClearBehavior {
+  kDefault,
+  kClearAll,  // .. also ForIn, CompareOp, BinaryOp.
+};
+
 enum class FeedbackSlotKind : uint8_t {
   // This kind means that the slot points to the middle of other slot
   // which occupies more than one feedback vector element.
@@ -206,10 +212,17 @@ class FeedbackVector
                                       HeapObject>::maybe_optimized_code;
   DECL_RELEASE_ACQUIRE_WEAK_ACCESSORS(maybe_optimized_code)
 
-  static constexpr uint32_t kTieringStateIsAnyRequestMask =
-      kNoneOrInProgressMask << TieringStateBits::kShift;
-  static constexpr uint32_t kHasOptimizedCodeOrTieringStateIsAnyRequestMask =
-      MaybeHasOptimizedCodeBit::kMask | kTieringStateIsAnyRequestMask;
+  static constexpr uint32_t kFlagsMaybeHasTurbofanCode =
+      FeedbackVector::MaybeHasTurbofanCodeBit::kMask;
+  static constexpr uint32_t kFlagsMaybeHasMaglevCode =
+      FeedbackVector::MaybeHasMaglevCodeBit::kMask;
+  static constexpr uint32_t kFlagsHasAnyOptimizedCode =
+      FeedbackVector::MaybeHasMaglevCodeBit::kMask |
+      FeedbackVector::MaybeHasTurbofanCodeBit::kMask;
+  static constexpr uint32_t kFlagsTieringStateIsAnyRequested =
+      kNoneOrInProgressMask << FeedbackVector::TieringStateBits::kShift;
+  static constexpr uint32_t kFlagsLogNextExecution =
+      FeedbackVector::LogNextExecutionBit::kMask;
 
   inline bool is_empty() const;
 
@@ -249,11 +262,17 @@ class FeedbackVector
   inline CodeT optimized_code() const;
   // Whether maybe_optimized_code contains a cached Code object.
   inline bool has_optimized_code() const;
+
+  inline bool log_next_execution() const;
+  inline void set_log_next_execution(bool value = true);
   // Similar to above, but represented internally as a bit that can be
   // efficiently checked by generated code. May lag behind the actual state of
   // the world, thus 'maybe'.
-  inline bool maybe_has_optimized_code() const;
-  inline void set_maybe_has_optimized_code(bool value);
+  inline bool maybe_has_maglev_code() const;
+  inline void set_maybe_has_maglev_code(bool value);
+  inline bool maybe_has_turbofan_code() const;
+  inline void set_maybe_has_turbofan_code(bool value);
+
   void SetOptimizedCode(CodeT code);
   void EvictOptimizedCodeMarkedForDeoptimization(SharedFunctionInfo shared,
                                                  const char* reason);
@@ -344,7 +363,14 @@ class FeedbackVector
   void FeedbackSlotPrint(std::ostream& os, FeedbackSlot slot);
 
   // Clears the vector slots. Return true if feedback has changed.
-  bool ClearSlots(Isolate* isolate);
+  bool ClearSlots(Isolate* isolate) {
+    return ClearSlots(isolate, ClearBehavior::kDefault);
+  }
+  // As above, but clears *all* slots - even those that we usually keep (e.g.:
+  // BinaryOp feedback).
+  bool ClearAllSlotsForTesting(Isolate* isolate) {
+    return ClearSlots(isolate, ClearBehavior::kClearAll);
+  }
 
   // The object that indicates an uninitialized cache.
   static inline Handle<Symbol> UninitializedSentinel(Isolate* isolate);
@@ -371,6 +397,8 @@ class FeedbackVector
   TQ_OBJECT_CONSTRUCTORS(FeedbackVector)
 
  private:
+  bool ClearSlots(Isolate* isolate, ClearBehavior behavior);
+
   static void AddToVectorsForProfilingTools(Isolate* isolate,
                                             Handle<FeedbackVector> vector);
 
@@ -794,11 +822,11 @@ class V8_EXPORT_PRIVATE FeedbackNexus final {
 
   bool IsCleared() const {
     InlineCacheState state = ic_state();
-    return !FLAG_use_ic || state == InlineCacheState::UNINITIALIZED;
+    return !v8_flags.use_ic || state == InlineCacheState::UNINITIALIZED;
   }
 
   // Clear() returns true if the state of the underlying vector was changed.
-  bool Clear();
+  bool Clear(ClearBehavior behavior);
   void ConfigureUninitialized();
   // ConfigureMegamorphic() returns true if the state of the underlying vector
   // was changed. Extra feedback is cleared if the 0 parameter version is used.

@@ -492,8 +492,41 @@ int FractionalSecondDigitsFromPattern(const std::string& pattern) {
   }
   return result;
 }
-
 }  // namespace
+
+MaybeHandle<String> JSDateTimeFormat::TimeZoneIdToString(
+    Isolate* isolate, const icu::UnicodeString& id) {
+  // In CLDR (http://unicode.org/cldr/trac/ticket/9943), Etc/UTC is made
+  // a separate timezone ID from Etc/GMT even though they're still the same
+  // timezone. We have Etc/UTC because 'UTC', 'Etc/Universal',
+  // 'Etc/Zulu' and others are turned to 'Etc/UTC' by ICU. Etc/GMT comes
+  // from Etc/GMT0, Etc/GMT+0, Etc/GMT-0, Etc/Greenwich.
+  // ecma402#sec-canonicalizetimezonename step 3
+  if (id == UNICODE_STRING_SIMPLE("Etc/UTC") ||
+      id == UNICODE_STRING_SIMPLE("Etc/GMT")) {
+    return isolate->factory()->UTC_string();
+  }
+  return Intl::ToString(isolate, id);
+}
+
+Handle<Object> JSDateTimeFormat::TimeZoneId(Isolate* isolate,
+                                            const icu::TimeZone& tz) {
+  Factory* factory = isolate->factory();
+  icu::UnicodeString time_zone;
+  tz.getID(time_zone);
+  UErrorCode status = U_ZERO_ERROR;
+  icu::UnicodeString canonical_time_zone;
+  icu::TimeZone::getCanonicalID(time_zone, canonical_time_zone, status);
+  if (U_FAILURE(status)) {
+    // Somehow on Windows we will reach here.
+    return factory->undefined_value();
+  }
+  Handle<String> timezone_value;
+  ASSIGN_RETURN_ON_EXCEPTION_VALUE(
+      isolate, timezone_value, TimeZoneIdToString(isolate, canonical_time_zone),
+      Handle<Object>());
+  return timezone_value;
+}
 
 namespace {
 Handle<String> GetCalendar(Isolate* isolate,
@@ -526,8 +559,8 @@ Handle<String> GetCalendar(Isolate* isolate,
 
 Handle<Object> GetTimeZone(Isolate* isolate,
                            const icu::SimpleDateFormat& simple_date_format) {
-  return Intl::TimeZoneId(isolate,
-                          simple_date_format.getCalendar()->getTimeZone());
+  return JSDateTimeFormat::TimeZoneId(
+      isolate, simple_date_format.getCalendar()->getTimeZone());
 }
 }  // namespace
 
@@ -1406,7 +1439,7 @@ MaybeHandle<String> JSDateTimeFormat::DateTimeFormat(
     Handle<Object> date, const char* method_name) {
   // 2. Assert: Type(dtf) is Object and dtf has an [[InitializedDateTimeFormat]]
   // internal slot.
-  if (FLAG_harmony_temporal) {
+  if (v8_flags.harmony_temporal) {
     return FormatDateTimeWithTemporalSupport(isolate, date_time_format, date,
                                              method_name);
   }
@@ -2737,7 +2770,7 @@ MaybeHandle<JSArray> JSDateTimeFormat::FormatToParts(
     Isolate* isolate, Handle<JSDateTimeFormat> date_time_format,
     Handle<Object> x, bool output_source, const char* method_name) {
   Factory* factory = isolate->factory();
-  if (FLAG_harmony_temporal) {
+  if (v8_flags.harmony_temporal) {
     return FormatToPartsWithTemporalSupport(isolate, date_time_format, x,
                                             output_source, method_name);
   }
@@ -3098,7 +3131,7 @@ MaybeHandle<String> JSDateTimeFormat::FormatRange(
     Handle<Object> x, Handle<Object> y, const char* method_name) {
   // Track newer feature formateRange and formatRangeToParts
   isolate->CountUsage(v8::Isolate::UseCounterFeature::kDateTimeFormatRange);
-  if (FLAG_harmony_temporal) {
+  if (v8_flags.harmony_temporal) {
     // For Temporal enable support
     return FormatRangeCommonWithTemporalSupport<
         String, FormattedToString, FormatMillisecondsByKindToString>(
@@ -3114,7 +3147,7 @@ MaybeHandle<JSArray> JSDateTimeFormat::FormatRangeToParts(
     Handle<Object> x, Handle<Object> y, const char* method_name) {
   // Track newer feature formateRange and formatRangeToParts
   isolate->CountUsage(v8::Isolate::UseCounterFeature::kDateTimeFormatRange);
-  if (FLAG_harmony_temporal) {
+  if (v8_flags.harmony_temporal) {
     // For Temporal enable support
     return FormatRangeCommonWithTemporalSupport<
         JSArray, FormattedDateIntervalToJSArray,

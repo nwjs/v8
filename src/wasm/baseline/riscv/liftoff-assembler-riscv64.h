@@ -5,7 +5,6 @@
 #ifndef V8_WASM_BASELINE_RISCV_LIFTOFF_ASSEMBLER_RISCV64_H_
 #define V8_WASM_BASELINE_RISCV_LIFTOFF_ASSEMBLER_RISCV64_H_
 
-#include "src/base/platform/wrappers.h"
 #include "src/heap/memory-chunk.h"
 #include "src/wasm/baseline/liftoff-assembler.h"
 #include "src/wasm/baseline/riscv/liftoff-assembler-riscv.h"
@@ -47,7 +46,9 @@ namespace liftoff {
 
 inline MemOperand GetMemOp(LiftoffAssembler* assm, Register addr,
                            Register offset, uintptr_t offset_imm,
-                           bool i64_offset = false) {
+                           bool i64_offset = false, unsigned shift_amount = 0) {
+  DCHECK_NE(addr, kScratchReg2);
+  DCHECK_NE(offset, kScratchReg2);
   if (!i64_offset && offset != no_reg) {
     // extract bit[0:31] without sign extend
     assm->ExtractBits(kScratchReg2, offset, 0, 32, false);
@@ -56,18 +57,25 @@ inline MemOperand GetMemOp(LiftoffAssembler* assm, Register addr,
   if (is_uint31(offset_imm)) {
     int32_t offset_imm32 = static_cast<int32_t>(offset_imm);
     if (offset == no_reg) return MemOperand(addr, offset_imm32);
-    assm->Add64(kScratchReg2, addr, offset);
+    if (shift_amount != 0) {
+      assm->CalcScaledAddress(kScratchReg2, addr, offset, shift_amount);
+    } else {
+      assm->Add64(kScratchReg2, offset, addr);
+    }
     return MemOperand(kScratchReg2, offset_imm32);
   }
   // Offset immediate does not fit in 31 bits.
   assm->li(kScratchReg2, offset_imm);
   assm->Add64(kScratchReg2, kScratchReg2, addr);
   if (offset != no_reg) {
-    assm->Add64(kScratchReg2, kScratchReg2, offset);
+    if (shift_amount != 0) {
+      assm->CalcScaledAddress(kScratchReg2, kScratchReg2, offset, shift_amount);
+    } else {
+      assm->Add64(kScratchReg2, kScratchReg2, offset);
+    }
   }
   return MemOperand(kScratchReg2, 0);
 }
-
 inline void Load(LiftoffAssembler* assm, LiftoffRegister dst, MemOperand src,
                  ValueKind kind) {
   switch (kind) {
@@ -166,9 +174,12 @@ void LiftoffAssembler::LoadConstant(LiftoffRegister reg, WasmValue value,
 
 void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
                                          Register offset_reg,
-                                         int32_t offset_imm) {
-  MemOperand src_op = liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm);
-  LoadTaggedPointerField(dst, src_op);
+                                         int32_t offset_imm, bool needs_shift) {
+  static_assert(kTaggedSize == kInt64Size);
+  unsigned shift_amount = !needs_shift ? 0 : 3;
+  MemOperand src_op = liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm,
+                                        false, shift_amount);
+  Ld(dst, src_op);
 }
 
 void LiftoffAssembler::LoadFullPointer(Register dst, Register src_addr,
@@ -187,7 +198,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
   MemOperand dst_op = liftoff::GetMemOp(this, dst_addr, offset_reg, offset_imm);
   StoreTaggedField(src.gp(), dst_op);
 
-  if (skip_write_barrier || FLAG_disable_write_barriers) return;
+  if (skip_write_barrier || v8_flags.disable_write_barriers) return;
 
   Label write_barrier;
   Label exit;
@@ -208,9 +219,11 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
 void LiftoffAssembler::Load(LiftoffRegister dst, Register src_addr,
                             Register offset_reg, uintptr_t offset_imm,
                             LoadType type, uint32_t* protected_load_pc,
-                            bool is_load_mem, bool i64_offset) {
-  MemOperand src_op =
-      liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm, i64_offset);
+                            bool is_load_mem, bool i64_offset,
+                            bool needs_shift) {
+  unsigned shift_amount = needs_shift ? type.size_log_2() : 0;
+  MemOperand src_op = liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm,
+                                        i64_offset, shift_amount);
 
   if (protected_load_pc) *protected_load_pc = pc_offset();
   switch (type.value()) {

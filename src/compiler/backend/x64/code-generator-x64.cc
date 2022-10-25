@@ -151,6 +151,20 @@ class X64OperandConverter : public InstructionOperandConverter {
         int32_t disp = InputInt32(NextOffset(offset));
         return Operand(base, disp);
       }
+      case kMode_MCR: {
+        Register base = kPtrComprCageBaseRegister;
+        Register index = InputRegister(NextOffset(offset));
+        ScaleFactor scale = static_cast<ScaleFactor>(0);
+        int32_t disp = 0;
+        return Operand(base, index, scale, disp);
+      }
+      case kMode_MCRI: {
+        Register base = kPtrComprCageBaseRegister;
+        Register index = InputRegister(NextOffset(offset));
+        ScaleFactor scale = static_cast<ScaleFactor>(0);
+        int32_t disp = InputInt32(NextOffset(offset));
+        return Operand(base, index, scale, disp);
+      }
       case kMode_None:
         UNREACHABLE();
     }
@@ -3632,6 +3646,17 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                           i.InputSimd128Register(1), kScratchDoubleReg);
       break;
     }
+    case kX64I16x8RelaxedQ15MulRS: {
+      __ Pmulhrsw(i.OutputSimd128Register(), i.InputSimd128Register(0),
+                  i.InputSimd128Register(1));
+      break;
+    }
+    case kX64I16x8DotI8x16I7x16S: {
+      __ I16x8DotI8x16I7x16S(i.OutputSimd128Register(),
+                             i.InputSimd128Register(0),
+                             i.InputSimd128Register(1));
+      break;
+    }
     case kX64I8x16Splat: {
       XMMRegister dst = i.OutputSimd128Register();
       if (HasRegisterInput(instr, 0)) {
@@ -3839,7 +3864,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
     case kX64I32x4ExtMulLowI16x8S: {
       __ I32x4ExtMul(i.OutputSimd128Register(), i.InputSimd128Register(0),
-                     i.InputSimd128Register(1), kScratchDoubleReg, /*low=*/true,
+                     i.InputSimd128Register(1), kScratchDoubleReg,
+                     /*low=*/true,
                      /*is_signed=*/true);
       break;
     }
@@ -3852,7 +3878,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
     case kX64I32x4ExtMulLowI16x8U: {
       __ I32x4ExtMul(i.OutputSimd128Register(), i.InputSimd128Register(0),
-                     i.InputSimd128Register(1), kScratchDoubleReg, /*low=*/true,
+                     i.InputSimd128Register(1), kScratchDoubleReg,
+                     /*low=*/true,
                      /*is_signed=*/false);
       break;
     }
@@ -5154,11 +5181,6 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
         }
         break;
       }
-      case Constant::kDelayedStringConstant: {
-        const StringConstantBase* src_constant = src.ToDelayedStringConstant();
-        __ MoveStringConstant(dst, src_constant);
-        break;
-      }
       case Constant::kRpoNumber:
         UNREACHABLE();  // TODO(dcarney): load of labels on x64.
     }
@@ -5189,7 +5211,17 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
   switch (MoveType::InferMove(source, destination)) {
     case MoveType::kRegisterToRegister:
       if (source->IsRegister()) {
-        __ movq(g.ToRegister(destination), g.ToRegister(source));
+        MachineRepresentation src_rep =
+            LocationOperand::cast(source)->representation();
+        MachineRepresentation dest_rep =
+            LocationOperand::cast(destination)->representation();
+        if (dest_rep == MachineRepresentation::kWord32 &&
+            src_rep == MachineRepresentation::kWord32) {
+          DCHECK(destination->IsRegister());
+          __ movl(g.ToRegister(destination), g.ToRegister(source));
+        } else {
+          __ movq(g.ToRegister(destination), g.ToRegister(source));
+        }
       } else {
         DCHECK(source->IsFPRegister());
         __ Movapd(g.ToDoubleRegister(destination), g.ToDoubleRegister(source));

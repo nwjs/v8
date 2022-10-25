@@ -732,7 +732,8 @@ TNode<HeapObject> RegExpBuiltinsAssembler::RegExpExecInternal(
     TNode<ExternalReference> pending_exception_address =
         ExternalConstant(ExternalReference::Create(
             IsolateAddressId::kPendingExceptionAddress, isolate()));
-    CSA_DCHECK(this, IsTheHole(Load<Object>(pending_exception_address)));
+    TNode<Object> pending_exception = LoadFullTagged(pending_exception_address);
+    CSA_DCHECK(this, IsTheHole(pending_exception));
 #endif  // DEBUG
     CallRuntime(Runtime::kThrowStackOverflow, context);
     Unreachable();
@@ -1099,6 +1100,10 @@ TNode<String> RegExpBuiltinsAssembler::FlagsGetter(TNode<Context> context,
         "linear",
         ExternalReference::address_of_enable_experimental_regexp_engine(),
         JSRegExp::kLinear);
+    CASE_FOR_FLAG(
+        "unicodeSets",
+        ExternalReference::address_of_FLAG_harmony_regexp_unicode_sets(),
+        JSRegExp::kUnicodeSets);
 #undef CASE_FOR_FLAG
   }
 

@@ -96,7 +96,7 @@ HeapBase::HeapBase(
     std::shared_ptr<cppgc::Platform> platform,
     const std::vector<std::unique_ptr<CustomSpaceBase>>& custom_spaces,
     StackSupport stack_support, MarkingType marking_support,
-    SweepingType sweeping_support)
+    SweepingType sweeping_support, GarbageCollector& garbage_collector)
     : raw_heap_(this, custom_spaces),
       platform_(std::move(platform)),
       oom_handler_(std::make_unique<FatalOutOfMemoryHandler>(this)),
@@ -111,7 +111,8 @@ HeapBase::HeapBase(
       prefinalizer_handler_(std::make_unique<PreFinalizerHandler>(*this)),
       compactor_(raw_heap_),
       object_allocator_(raw_heap_, *page_backend_, *stats_collector_,
-                        *prefinalizer_handler_),
+                        *prefinalizer_handler_, *oom_handler_,
+                        garbage_collector),
       sweeper_(*this),
       strong_persistent_region_(*oom_handler_.get()),
       weak_persistent_region_(*oom_handler_.get()),
@@ -146,9 +147,8 @@ std::unique_ptr<PageBackend> HeapBase::InitializePageBackend(
     PageAllocator& allocator, FatalOutOfMemoryHandler& oom_handler) {
 #if defined(CPPGC_CAGED_HEAP)
   auto& caged_heap = CagedHeap::Instance();
-  return std::make_unique<PageBackend>(caged_heap.normal_page_allocator(),
-                                       caged_heap.large_page_allocator(),
-                                       oom_handler);
+  return std::make_unique<PageBackend>(
+      caged_heap.page_allocator(), caged_heap.page_allocator(), oom_handler);
 #else   // !CPPGC_CAGED_HEAP
   return std::make_unique<PageBackend>(allocator, allocator, oom_handler);
 #endif  // !CPPGC_CAGED_HEAP
@@ -274,7 +274,7 @@ void HeapBase::Terminate() {
         }();
   } while (more_termination_gcs_needed);
 
-  object_allocator().Terminate();
+  object_allocator().ResetLinearAllocationBuffers();
   disallow_gc_scope_++;
 
   CHECK_EQ(0u, strong_persistent_region_.NodesInUse());

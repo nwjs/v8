@@ -5,7 +5,6 @@
 #include "src/base/bits.h"
 #include "src/base/enum-set.h"
 #include "src/base/iterator.h"
-#include "src/base/platform/wrappers.h"
 #include "src/codegen/machine-type.h"
 #include "src/compiler/backend/instruction-selector-impl.h"
 #include "src/compiler/node-matchers.h"
@@ -2274,6 +2273,7 @@ void InstructionSelector::VisitFloat64InsertHighWord32(Node* node) {
 }
 
 void InstructionSelector::VisitMemoryBarrier(Node* node) {
+  // Use DMB ISH for both acquire-release and sequentially consistent barriers.
   ArmOperandGenerator g(this);
   Emit(kArmDmbIsh, g.NoOutput());
 }

@@ -724,7 +724,7 @@ class NativeContext : public Context {
                      ReleaseStoreTag);
 
   // [microtask_queue]: pointer to the MicrotaskQueue object.
-  DECL_EXTERNAL_POINTER_ACCESSORS(microtask_queue, MicrotaskQueue*);
+  DECL_EXTERNAL_POINTER_ACCESSORS(microtask_queue, MicrotaskQueue*)
 
   inline void synchronized_set_script_context_table(
       ScriptContextTable script_context_table);
@@ -784,8 +784,10 @@ class NativeContext : public Context {
   void IncrementErrorsThrown();
   int GetErrorsThrown();
 
+#ifdef V8_ENABLE_JAVASCRIPT_PROMISE_HOOKS
   void RunPromiseHook(PromiseHookType type, Handle<JSPromise> promise,
                       Handle<Object> parent);
+#endif
 
  private:
   static_assert(OffsetOfElementAt(EMBEDDER_DATA_INDEX) ==

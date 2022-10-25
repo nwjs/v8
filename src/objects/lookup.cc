@@ -554,7 +554,7 @@ void LookupIterator::ReconfigureDataProperty(Handle<Object> value,
   WriteDataValue(value, true);
 
 #if VERIFY_HEAP
-  if (FLAG_verify_heap) {
+  if (v8_flags.verify_heap) {
     holder->HeapObjectVerify(isolate());
   }
 #endif
@@ -660,7 +660,7 @@ void LookupIterator::ApplyTransitionToDataProperty(
     // configuration can produce valid transition handler maps.
     Handle<Object> validity_cell =
         Map::GetOrCreatePrototypeChainValidityCell(transition, isolate());
-    transition->set_prototype_validity_cell(*validity_cell);
+    transition->set_prototype_validity_cell(*validity_cell, kRelaxedStore);
   }
 
   if (!receiver->IsJSProxy(isolate_)) {
@@ -799,7 +799,7 @@ void LookupIterator::TransitionToAccessorProperty(
   TransitionToAccessorPair(pair, attributes);
 
 #if VERIFY_HEAP
-  if (FLAG_verify_heap) {
+  if (v8_flags.verify_heap) {
     receiver->JSObjectVerify(isolate());
   }
 #endif

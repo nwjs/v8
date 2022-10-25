@@ -10,8 +10,8 @@
 
 #include "src/codegen/assembler-inl.h"
 #include "test/cctest/cctest.h"
-#include "test/cctest/compiler/value-helper.h"
 #include "test/cctest/wasm/wasm-run-utils.h"
+#include "test/common/value-helper.h"
 #include "test/common/wasm/test-signatures.h"
 #include "test/common/wasm/wasm-interpreter.h"
 #include "test/common/wasm/wasm-macro-gen.h"
@@ -157,7 +157,7 @@ static T factorial(T v) {
 TEST(Run_Wasm_returnCallFactorial) {
   EXPERIMENTAL_FLAG_SCOPE(return_call);
   // Run in bounded amount of stack - 8kb.
-  FlagScope<int32_t> stack_size(&v8::internal::FLAG_stack_size, 8);
+  FlagScope<int32_t> stack_size(&v8::internal::v8_flags.stack_size, 8);
 
   WasmRunner<uint32_t, int32_t> r(TestExecutionTier::kInterpreter);
 

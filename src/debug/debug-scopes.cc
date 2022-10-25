@@ -26,7 +26,8 @@ ScopeIterator::ScopeIterator(Isolate* isolate, FrameInspector* frame_inspector,
     : isolate_(isolate),
       frame_inspector_(frame_inspector),
       function_(frame_inspector_->GetFunction()),
-      script_(frame_inspector_->GetScript()) {
+      script_(frame_inspector_->GetScript()),
+      locals_(StringSet::New(isolate)) {
   if (!frame_inspector->GetContext()->IsContext()) {
     // Optimized frame, context or function cannot be materialized. Give up.
     return;
@@ -56,7 +57,9 @@ Handle<Object> ScopeIterator::GetFunctionDebugName() const {
 }
 
 ScopeIterator::ScopeIterator(Isolate* isolate, Handle<JSFunction> function)
-    : isolate_(isolate), context_(function->context(), isolate) {
+    : isolate_(isolate),
+      context_(function->context(), isolate),
+      locals_(StringSet::New(isolate)) {
   if (!function->shared().IsSubjectToDebugging()) {
     context_ = Handle<Context>();
     return;
@@ -71,7 +74,8 @@ ScopeIterator::ScopeIterator(Isolate* isolate,
       generator_(generator),
       function_(generator->function(), isolate),
       context_(generator->context(), isolate),
-      script_(Script::cast(function_->shared().script()), isolate) {
+      script_(Script::cast(function_->shared().script()), isolate),
+      locals_(StringSet::New(isolate)) {
   CHECK(function_->shared().IsSubjectToDebugging());
   TryParseAndRetrieveScopes(ReparseStrategy::kFunctionLiteral);
 }
@@ -375,53 +379,70 @@ bool ScopeIterator::DeclaresLocals(Mode mode) const {
 }
 
 bool ScopeIterator::HasContext() const {
-  return !InInnerScope() || NeedsAndHasContext();
+  return !InInnerScope() || NeedsContext();
 }
 
-bool ScopeIterator::NeedsAndHasContext() const {
-  if (!current_scope_->NeedsContext()) return false;
-  // Generally, if a scope needs a context, then we can assume that it has a
-  // context. However, the stack check during function entry happens before the
-  // function has a chance to create and push its own context, so we must check
-  // for the case where the function is executing in its parent context. This
-  // case is only possible in function scopes; top-level code (modules and
-  // non-module scripts) begin execution in the context they need and don't have
-  // a separate step to push the correct context.
-  return !(current_scope_ == closure_scope_ &&
-           current_scope_->is_function_scope() && !function_.is_null() &&
-           function_->context() == *context_);
+bool ScopeIterator::NeedsContext() const {
+  const bool needs_context = current_scope_->NeedsContext();
+
+  // We try very hard to ensure that a function's context is already
+  // available when we pause right at the beginning of that function.
+  // This can be tricky when we pause via stack check or via
+  // `BreakOnNextFunctionCall`, which happens normally in the middle of frame
+  // construction and we have to "step into" the function first.
+  //
+  // We check this by ensuring that the current context is not the closure
+  // context should the function need one. In that case the function has already
+  // pushed the context and we are good.
+  CHECK_IMPLIES(needs_context && current_scope_ == closure_scope_ &&
+                    current_scope_->is_function_scope() &&
+                    !function_->is_null(),
+                function_->context() != *context_);
+
+  return needs_context;
 }
 
-void ScopeIterator::AdvanceOneScope() {
-  if (NeedsAndHasContext()) {
-    DCHECK(!context_->previous().is_null());
-    context_ = handle(context_->previous(), isolate_);
-  }
-  DCHECK(current_scope_->outer_scope() != nullptr);
+bool ScopeIterator::AdvanceOneScope() {
+  if (!current_scope_ || !current_scope_->outer_scope()) return false;
+
   current_scope_ = current_scope_->outer_scope();
+  CollectLocalsFromCurrentScope();
+  return true;
 }
 
-void ScopeIterator::AdvanceToNonHiddenScope() {
+void ScopeIterator::AdvanceOneContext() {
+  DCHECK(!context_->IsNativeContext());
+  DCHECK(!context_->previous().is_null());
+  context_ = handle(context_->previous(), isolate_);
+
+  // The locals blocklist is always associated with a context. So when we
+  // move one context up, we also reset the locals_ blocklist.
+  locals_ = StringSet::New(isolate_);
+}
+
+void ScopeIterator::AdvanceScope() {
+  DCHECK(InInnerScope());
+
   do {
-    AdvanceOneScope();
+    if (NeedsContext()) {
+      // current_scope_ needs a context so moving one scope up requires us to
+      // also move up one context.
+      AdvanceOneContext();
+    }
+
+    CHECK(AdvanceOneScope());
   } while (current_scope_->is_hidden());
 }
 
 void ScopeIterator::AdvanceContext() {
-  DCHECK(!context_->IsNativeContext());
-  context_ = handle(context_->previous(), isolate_);
+  AdvanceOneContext();
 
   // While advancing one context, we need to advance at least one
   // scope, but until we hit the next scope that actually requires
   // a context. All the locals collected along the way build the
   // blocklist for debug-evaluate for this context.
-  locals_ = StringSet::New(isolate_);
-  do {
-    if (!current_scope_ || !current_scope_->outer_scope()) break;
-
-    current_scope_ = current_scope_->outer_scope();
-    CollectLocalsFromCurrentScope();
-  } while (!NeedsAndHasContext());
+  while (AdvanceOneScope() && !NeedsContext()) {
+  }
 }
 
 void ScopeIterator::Next() {
@@ -450,14 +471,16 @@ void ScopeIterator::Next() {
     AdvanceContext();
   } else {
     DCHECK_NOT_NULL(current_scope_);
-    AdvanceToNonHiddenScope();
+    AdvanceScope();
 
     if (leaving_closure) {
       DCHECK(current_scope_ != closure_scope_);
-      // Edge case when we just go past {closure_scope_}. This case
-      // already needs to start collecting locals for the blocklist.
-      locals_ = StringSet::New(isolate_);
-      CollectLocalsFromCurrentScope();
+      // If the current_scope_ doesn't need a context, we advance the scopes
+      // and collect the blocklist along the way until we find the scope
+      // that should match `context_`.
+      // But only do this if we have complete scope information.
+      while (!NeedsContext() && AdvanceOneScope()) {
+      }
     }
   }
 
@@ -472,29 +495,28 @@ ScopeIterator::ScopeType ScopeIterator::Type() const {
   if (InInnerScope()) {
     switch (current_scope_->scope_type()) {
       case FUNCTION_SCOPE:
-        DCHECK_IMPLIES(NeedsAndHasContext(),
-                       context_->IsFunctionContext() ||
-                           context_->IsDebugEvaluateContext());
+        DCHECK_IMPLIES(NeedsContext(), context_->IsFunctionContext() ||
+                                           context_->IsDebugEvaluateContext());
         return ScopeTypeLocal;
       case MODULE_SCOPE:
-        DCHECK_IMPLIES(NeedsAndHasContext(), context_->IsModuleContext());
+        DCHECK_IMPLIES(NeedsContext(), context_->IsModuleContext());
         return ScopeTypeModule;
       case SCRIPT_SCOPE:
-        DCHECK_IMPLIES(NeedsAndHasContext(), context_->IsScriptContext() ||
-                                                 context_->IsNativeContext());
+        DCHECK_IMPLIES(NeedsContext(), context_->IsScriptContext() ||
+                                           context_->IsNativeContext());
         return ScopeTypeScript;
       case WITH_SCOPE:
-        DCHECK_IMPLIES(NeedsAndHasContext(), context_->IsWithContext());
+        DCHECK_IMPLIES(NeedsContext(), context_->IsWithContext());
         return ScopeTypeWith;
       case CATCH_SCOPE:
         DCHECK(context_->IsCatchContext());
         return ScopeTypeCatch;
       case BLOCK_SCOPE:
       case CLASS_SCOPE:
-        DCHECK_IMPLIES(NeedsAndHasContext(), context_->IsBlockContext());
+        DCHECK_IMPLIES(NeedsContext(), context_->IsBlockContext());
         return ScopeTypeBlock;
       case EVAL_SCOPE:
-        DCHECK_IMPLIES(NeedsAndHasContext(), context_->IsEvalContext());
+        DCHECK_IMPLIES(NeedsContext(), context_->IsEvalContext());
         return ScopeTypeEval;
     }
     UNREACHABLE();
@@ -628,7 +650,7 @@ bool ScopeIterator::SetVariableValue(Handle<String> name,
         DCHECK_EQ(ScopeTypeLocal, Type());
         if (SetLocalVariableValue(name, value)) return true;
         // There may not be an associated context since we're InInnerScope().
-        if (!NeedsAndHasContext()) return false;
+        if (!NeedsContext()) return false;
       } else {
         DCHECK_EQ(ScopeTypeClosure, Type());
         if (SetContextVariableValue(name, value)) return true;
@@ -674,7 +696,7 @@ void ScopeIterator::DebugPrint() {
 
     case ScopeIterator::ScopeTypeLocal: {
       os << "Local:\n";
-      if (NeedsAndHasContext()) {
+      if (NeedsContext()) {
         context_->Print(os);
         if (context_->has_extension()) {
           Handle<HeapObject> extension(context_->extension(), isolate_);
@@ -864,7 +886,8 @@ bool ScopeIterator::VisitLocals(const Visitor& visitor, Mode mode,
                 current_scope_->AsDeclarationScope()->arguments() == var) {
               continue;
             }
-          } else if (value->IsUndefined(isolate_) &&
+          } else if (IsLexicalVariableMode(var->mode()) &&
+                     value->IsUndefined(isolate_) &&
                      GetSourcePosition() != kNoSourcePosition &&
                      GetSourcePosition() <= var->initializer_position()) {
             // Variables that are `undefined` could also mean an elided hole

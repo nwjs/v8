@@ -27,9 +27,9 @@
 #include "src/wasm/wasm-subtyping.h"
 #include "src/wasm/wasm-value.h"
 
-#define TRACE(...)                                      \
-  do {                                                  \
-    if (FLAG_trace_wasm_instances) PrintF(__VA_ARGS__); \
+#define TRACE(...)                                          \
+  do {                                                      \
+    if (v8_flags.trace_wasm_instances) PrintF(__VA_ARGS__); \
   } while (false)
 
 namespace v8 {
@@ -58,7 +58,7 @@ class CompileImportWrapperJob final : public JobTask {
 
   size_t GetMaxConcurrency(size_t worker_count) const override {
     size_t flag_limit = static_cast<size_t>(
-        std::max(1, FLAG_wasm_num_compilation_tasks.value()));
+        std::max(1, v8_flags.wasm_num_compilation_tasks.value()));
     // Add {worker_count} to the queue size because workers might still be
     // processing units that have already been popped from the queue.
     return std::min(flag_limit, worker_count + queue_->size());
@@ -118,7 +118,7 @@ Handle<Map> CreateStructMap(Isolate* isolate, const WasmModule* module,
   const ElementsKind elements_kind = TERMINAL_FAST_ELEMENTS_KIND;
   Handle<WasmTypeInfo> type_info = isolate->factory()->NewWasmTypeInfo(
       reinterpret_cast<Address>(type), opt_rtt_parent, real_instance_size,
-      instance);
+      instance, struct_index);
   Handle<Map> map = isolate->factory()->NewMap(
       instance_type, map_instance_size, elements_kind, inobject_properties);
   map->set_wasm_type_info(*type_info);
@@ -141,7 +141,7 @@ Handle<Map> CreateArrayMap(Isolate* isolate, const WasmModule* module,
   const ElementsKind elements_kind = TERMINAL_FAST_ELEMENTS_KIND;
   Handle<WasmTypeInfo> type_info = isolate->factory()->NewWasmTypeInfo(
       reinterpret_cast<Address>(type), opt_rtt_parent, cached_instance_size,
-      instance);
+      instance, array_index);
   // TODO(ishell): get canonical descriptor array for WasmArrays from roots.
   Handle<DescriptorArray> descriptors =
       CreateArrayDescriptorArray(isolate, type);
@@ -165,8 +165,9 @@ Handle<Map> CreateFuncRefMap(Isolate* isolate, const WasmModule* module,
           .instance_size();
   const InstanceType instance_type = WASM_INTERNAL_FUNCTION_TYPE;
   const ElementsKind elements_kind = TERMINAL_FAST_ELEMENTS_KIND;
+  constexpr uint32_t kNoIndex = ~0u;
   Handle<WasmTypeInfo> type_info = isolate->factory()->NewWasmTypeInfo(
-      kNullAddress, opt_rtt_parent, instance_size, instance);
+      kNullAddress, opt_rtt_parent, instance_size, instance, kNoIndex);
   Handle<Map> map = isolate->factory()->NewMap(
       instance_type, instance_size, elements_kind, inobject_properties);
   map->set_wasm_type_info(*type_info);
@@ -183,7 +184,7 @@ void CreateMapForType(Isolate* isolate, const WasmModule* module,
   uint32_t canonical_type_index =
       module->isorecursive_canonical_type_ids[type_index];
 
-  if (FLAG_wasm_type_canonicalization) {
+  if (v8_flags.wasm_type_canonicalization) {
     // Try to find the canonical map for this type in the isolate store.
     canonical_rtts = handle(isolate->heap()->wasm_canonical_rtts(), isolate);
     DCHECK_GT(static_cast<uint32_t>(canonical_rtts->length()),
@@ -219,7 +220,7 @@ void CreateMapForType(Isolate* isolate, const WasmModule* module,
       map = CreateFuncRefMap(isolate, module, rtt_parent, instance);
       break;
   }
-  if (FLAG_wasm_type_canonicalization) {
+  if (v8_flags.wasm_type_canonicalization) {
     canonical_rtts->Set(canonical_type_index, HeapObjectReference::Weak(*map));
   }
   maps->set(type_index, *map);
@@ -451,8 +452,9 @@ MaybeHandle<WasmInstanceObject> InstantiateToInstanceObject(
                           memory_buffer);
   auto instance = builder.Build();
   if (!instance.is_null()) {
-    // Post tasks for lazy compilation metrics before we call the start function
-    if (FLAG_wasm_lazy_compilation &&
+    // Post tasks for lazy compilation metrics before we call the start
+    // function.
+    if (v8_flags.wasm_lazy_compilation &&
         module_object->native_module()
             ->ShouldLazyCompilationMetricsBeReported()) {
       V8::GetCurrentPlatform()->CallDelayedOnWorkerThread(
@@ -655,7 +657,7 @@ MaybeHandle<WasmInstanceObject> InstanceBuilder::Build() {
   //--------------------------------------------------------------------------
   // Set up table storage space.
   //--------------------------------------------------------------------------
-  if (FLAG_wasm_type_canonicalization) {
+  if (v8_flags.wasm_type_canonicalization) {
     instance->set_isorecursive_canonical_types(
         module_->isorecursive_canonical_type_ids.data());
   }
@@ -663,11 +665,11 @@ MaybeHandle<WasmInstanceObject> InstanceBuilder::Build() {
   {
     for (int i = 0; i < table_count; i++) {
       const WasmTable& table = module_->tables[i];
-      if (table.initial_size > FLAG_wasm_max_table_size) {
+      if (table.initial_size > v8_flags.wasm_max_table_size) {
         thrower_->RangeError(
             "initial table size (%u elements) is larger than implementation "
             "limit (%u elements)",
-            table.initial_size, FLAG_wasm_max_table_size.value());
+            table.initial_size, v8_flags.wasm_max_table_size.value());
         return {};
       }
     }
@@ -717,7 +719,7 @@ MaybeHandle<WasmInstanceObject> InstanceBuilder::Build() {
   // list.
   //--------------------------------------------------------------------------
   if (enabled_.has_gc()) {
-    if (FLAG_wasm_type_canonicalization &&
+    if (v8_flags.wasm_type_canonicalization &&
         module_->isorecursive_canonical_type_ids.size() > 0) {
       uint32_t maximum_canonical_type_index =
           *std::max_element(module_->isorecursive_canonical_type_ids.begin(),
@@ -738,7 +740,7 @@ MaybeHandle<WasmInstanceObject> InstanceBuilder::Build() {
   //--------------------------------------------------------------------------
   // Allocate type feedback vectors for functions.
   //--------------------------------------------------------------------------
-  if (FLAG_wasm_speculative_inlining) {
+  if (v8_flags.wasm_speculative_inlining) {
     int num_functions = static_cast<int>(module_->num_declared_functions);
     Handle<FixedArray> vectors =
         isolate_->factory()->NewFixedArray(num_functions, AllocationType::kOld);
@@ -748,7 +750,7 @@ MaybeHandle<WasmInstanceObject> InstanceBuilder::Build() {
       int slots =
           base::Relaxed_Load(&module_->functions[func_index].feedback_slots);
       if (slots == 0) continue;
-      if (FLAG_trace_wasm_speculative_inlining) {
+      if (v8_flags.trace_wasm_speculative_inlining) {
         PrintF("[Function %d (declared %d): allocating %d feedback slots]\n",
                func_index, i, slots);
       }
@@ -787,7 +789,7 @@ MaybeHandle<WasmInstanceObject> InstanceBuilder::Build() {
   //--------------------------------------------------------------------------
   // Initialize non-defaultable tables.
   //--------------------------------------------------------------------------
-  if (FLAG_experimental_wasm_typed_funcref) {
+  if (v8_flags.experimental_wasm_typed_funcref) {
     SetTableInitialValues(instance);
   }
 
@@ -1257,12 +1259,12 @@ bool InstanceBuilder::InitializeImportedIndirectFunctionTable(
     const WasmFunction& function = target_module->functions[function_index];
 
     // Look up the signature's canonical id. In the case of
-    // !FLAG_wasm_type_canonicalization, if there is no canonical id, then the
-    // signature does not appear at all in this module, so putting {-1} in the
-    // table will cause checks to always fail.
+    // !v8_flags.wasm_type_canonicalization, if there is no canonical id, then
+    // the signature does not appear at all in this module, so putting {-1} in
+    // the table will cause checks to always fail.
     FunctionTargetAndRef entry(target_instance, function_index);
     uint32_t canonicalized_sig_index =
-        FLAG_wasm_type_canonicalization
+        v8_flags.wasm_type_canonicalization
             ? target_module->isorecursive_canonical_type_ids[function.sig_index]
             : module_->signature_map.Find(*function.sig);
     instance->GetIndirectFunctionTable(isolate_, table_index)
@@ -1419,7 +1421,6 @@ bool InstanceBuilder::ProcessImportedWasmGlobalObject(
   if (global.mutability) {
     DCHECK_LT(global.index, module_->num_imported_mutable_globals);
     Handle<Object> buffer;
-    Address address_or_offset;
     if (global.type.is_reference()) {
       static_assert(sizeof(global_object->offset()) <= sizeof(Address),
                     "The offset into the globals buffer does not fit into "
@@ -1427,17 +1428,19 @@ bool InstanceBuilder::ProcessImportedWasmGlobalObject(
       buffer = handle(global_object->tagged_buffer(), isolate_);
       // For externref globals we use a relative offset, not an absolute
       // address.
-      address_or_offset = static_cast<Address>(global_object->offset());
+      instance->imported_mutable_globals().set_int(
+          global.index * kSystemPointerSize, global_object->offset());
     } else {
       buffer = handle(global_object->untagged_buffer(), isolate_);
       // It is safe in this case to store the raw pointer to the buffer
       // since the backing store of the JSArrayBuffer will not be
       // relocated.
-      address_or_offset = reinterpret_cast<Address>(raw_buffer_ptr(
+      Address address = reinterpret_cast<Address>(raw_buffer_ptr(
           Handle<JSArrayBuffer>::cast(buffer), global_object->offset()));
+      instance->imported_mutable_globals().set_sandboxed_pointer(
+          global.index * kSystemPointerSize, address);
     }
     instance->imported_mutable_globals_buffers().set(global.index, *buffer);
-    instance->imported_mutable_globals()[global.index] = address_or_offset;
     return true;
   }
 
@@ -1532,16 +1535,14 @@ bool InstanceBuilder::ProcessImportedGlobal(Handle<WasmInstanceObject> instance,
 
   if (global.type.is_reference()) {
     const char* error_message;
-    if (!wasm::TypecheckJSObject(isolate_, module_, value, global.type,
-                                 &error_message)) {
+    Handle<Object> wasm_value;
+    if (!wasm::JSToWasmObject(isolate_, module_, value, global.type,
+                              &error_message)
+             .ToHandle(&wasm_value)) {
       ReportLinkError(error_message, global_index, module_name, import_name);
       return false;
     }
-    if (IsSubtypeOf(global.type, kWasmFuncRef, module_) && !value->IsNull()) {
-      value =
-          WasmInternalFunction::FromExternal(value, isolate_).ToHandleChecked();
-    }
-    WriteGlobalValue(global, WasmValue(value, global.type));
+    WriteGlobalValue(global, WasmValue(wasm_value, global.type));
     return true;
   }
 
@@ -1864,16 +1865,15 @@ void InstanceBuilder::ProcessExports(Handle<WasmInstanceObject> instance) {
                 FixedArray::cast(buffers_array->get(global.index)), isolate_);
             // For externref globals we store the relative offset in the
             // imported_mutable_globals array instead of an absolute address.
-            Address addr = instance->imported_mutable_globals()[global.index];
-            DCHECK_LE(addr, static_cast<Address>(
-                                std::numeric_limits<uint32_t>::max()));
-            offset = static_cast<uint32_t>(addr);
+            offset = instance->imported_mutable_globals().get_int(
+                global.index * kSystemPointerSize);
           } else {
             untagged_buffer =
                 handle(JSArrayBuffer::cast(buffers_array->get(global.index)),
                        isolate_);
             Address global_addr =
-                instance->imported_mutable_globals()[global.index];
+                instance->imported_mutable_globals().get_sandboxed_pointer(
+                    global.index * kSystemPointerSize);
 
             size_t buffer_size = untagged_buffer->byte_length();
             Address backing_store =
@@ -2024,7 +2024,7 @@ base::Optional<MessageTemplate> LoadElemSegmentImpl(
   }
   if (!base::IsInBounds<uint64_t>(
           src, count,
-          instance->dropped_elem_segments()[segment_index] == 0
+          instance->dropped_elem_segments().get(segment_index) == 0
               ? elem_segment.entries.size()
               : 0)) {
     return {MessageTemplate::kWasmTrapElementSegmentOutOfBounds};
@@ -2080,7 +2080,7 @@ void InstanceBuilder::LoadTableSegments(Handle<WasmInstanceObject> instance) {
         table_index, segment_index, dst, src, count);
     // Set the active segments to being already dropped, since table.init on
     // a dropped passive segment and an active segment have the same behavior.
-    instance->dropped_elem_segments()[segment_index] = 1;
+    instance->dropped_elem_segments().set(segment_index, 1);
     if (opt_error.has_value()) {
       thrower_->RuntimeError(
           "%s", MessageFormatter::TemplateString(opt_error.value()));

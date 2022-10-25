@@ -335,7 +335,9 @@
 #define SIMPLIFIED_BIGINT_BINOP_LIST(V) \
   V(BigIntAdd)                          \
   V(BigIntSubtract)                     \
-  V(BigIntMultiply)
+  V(BigIntMultiply)                     \
+  V(BigIntDivide)                       \
+  V(BigIntBitwiseAnd)
 
 #define SIMPLIFIED_SPECULATIVE_NUMBER_BINOP_LIST(V) \
   V(SpeculativeNumberAdd)                           \
@@ -421,7 +423,6 @@
   V(ConvertReceiver)                    \
   V(ConvertTaggedHoleToUndefined)       \
   V(DateNow)                            \
-  V(DelayedStringConstant)              \
   V(EnsureWritableFastElements)         \
   V(FastApiCall)                        \
   V(FindOrderedHashMapEntry)            \
@@ -501,7 +502,9 @@
 #define SIMPLIFIED_SPECULATIVE_BIGINT_BINOP_LIST(V) \
   V(SpeculativeBigIntAdd)                           \
   V(SpeculativeBigIntSubtract)                      \
-  V(SpeculativeBigIntMultiply)
+  V(SpeculativeBigIntMultiply)                      \
+  V(SpeculativeBigIntDivide)                        \
+  V(SpeculativeBigIntBitwiseAnd)
 
 #define SIMPLIFIED_SPECULATIVE_BIGINT_UNOP_LIST(V) \
   V(SpeculativeBigIntAsIntN)                       \
@@ -516,7 +519,8 @@
   V(RttCanon)                      \
   V(WasmTypeCast)                  \
   V(WasmTypeCheck)                 \
-  V(WasmExternInternalize)
+  V(WasmExternInternalize)         \
+  V(WasmExternExternalize)
 
 #define SIMPLIFIED_OP_LIST(V)                 \
   SIMPLIFIED_CHANGE_OP_LIST(V)                \

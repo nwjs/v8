@@ -28,7 +28,6 @@
 #include "include/libplatform/libplatform.h"
 #include "include/v8-initialization.h"
 #include "src/api/api-inl.h"
-#include "src/base/platform/wrappers.h"
 #include "src/builtins/builtins.h"
 #include "src/compiler/wasm-compiler.h"
 #include "src/objects/call-site-info-inl.h"
@@ -1859,10 +1858,16 @@ auto Global::get() const -> Val {
       return Val(v8_global->GetF64());
     case i::wasm::kRef:
     case i::wasm::kRefNull: {
-      // TODO(7748): Make sure this works for all heap types.
+      // TODO(7748): Handle types other than funcref and externref if needed.
       StoreImpl* store = impl(this)->store();
       i::HandleScope scope(store->i_isolate());
-      return Val(V8RefValueToWasm(store, v8_global->GetRef()));
+      i::Handle<i::Object> result = v8_global->GetRef();
+      if (result->IsWasmInternalFunction()) {
+        result =
+            handle(i::Handle<i::WasmInternalFunction>::cast(result)->external(),
+                   v8_global->GetIsolate());
+      }
+      return Val(V8RefValueToWasm(store, result));
     }
     case i::wasm::kRtt:
     case i::wasm::kS128:
@@ -1888,14 +1893,16 @@ void Global::set(const Val& val) {
     case F64:
       return v8_global->SetF64(val.f64());
     case ANYREF:
-      return v8_global->SetExternRef(
+      return v8_global->SetRef(
           WasmRefToV8(impl(this)->store()->i_isolate(), val.ref()));
     case FUNCREF: {
       i::Isolate* isolate = impl(this)->store()->i_isolate();
-      bool result =
-          v8_global->SetFuncRef(isolate, WasmRefToV8(isolate, val.ref()));
-      DCHECK(result);
-      USE(result);
+      auto external = WasmRefToV8(impl(this)->store()->i_isolate(), val.ref());
+      const char* error_message;
+      auto internal = i::wasm::JSToWasmObject(isolate, nullptr, external,
+                                              v8_global->type(), &error_message)
+                          .ToHandleChecked();
+      v8_global->SetRef(internal);
       return;
     }
     default:
@@ -1985,6 +1992,7 @@ auto Table::type() const -> own<TableType> {
   return TableType::make(ValType::make(kind), Limits(min, max));
 }
 
+// TODO(7748): Handle types other than funcref and externref if needed.
 auto Table::get(size_t index) const -> own<Ref> {
   i::Handle<i::WasmTableObject> table = impl(this)->v8_object();
   if (index >= static_cast<size_t>(table->current_length())) return own<Ref>();
@@ -1992,8 +2000,6 @@ auto Table::get(size_t index) const -> own<Ref> {
   i::HandleScope handle_scope(isolate);
   i::Handle<i::Object> result =
       i::WasmTableObject::Get(isolate, table, static_cast<uint32_t>(index));
-  // TODO(jkummerow): If we support both JavaScript and the C-API at the same
-  // time, we need to handle Smis and other JS primitives here.
   if (result->IsWasmInternalFunction()) {
     result = handle(
         i::Handle<i::WasmInternalFunction>::cast(result)->external(), isolate);
@@ -2008,13 +2014,13 @@ auto Table::set(size_t index, const Ref* ref) -> bool {
   i::Isolate* isolate = table->GetIsolate();
   i::HandleScope handle_scope(isolate);
   i::Handle<i::Object> obj = WasmRefToV8(isolate, ref);
-  // TODO(7748): Generalize the condition if other table types are allowed.
-  // TODO(12868): Enforce type restrictions for stringref tables.
-  if ((table->type() == i::wasm::kWasmFuncRef || table->type().has_index()) &&
-      !obj->IsNull()) {
-    obj = i::WasmInternalFunction::FromExternal(obj, isolate).ToHandleChecked();
-  }
-  i::WasmTableObject::Set(isolate, table, static_cast<uint32_t>(index), obj);
+  const char* error_message;
+  i::Handle<i::Object> obj_as_wasm =
+      i::wasm::JSToWasmObject(isolate, nullptr, obj, table->type(),
+                              &error_message)
+          .ToHandleChecked();
+  i::WasmTableObject::Set(isolate, table, static_cast<uint32_t>(index),
+                          obj_as_wasm);
   return true;
 }
 
@@ -2028,13 +2034,13 @@ auto Table::grow(size_t delta, const Ref* ref) -> bool {
   i::Isolate* isolate = table->GetIsolate();
   i::HandleScope scope(isolate);
   i::Handle<i::Object> obj = WasmRefToV8(isolate, ref);
-  // TODO(7748): Generalize the condition if other table types are allowed.
-  if ((table->type() == i::wasm::kWasmFuncRef || table->type().has_index()) &&
-      !obj->IsNull()) {
-    obj = i::WasmInternalFunction::FromExternal(obj, isolate).ToHandleChecked();
-  }
-  int result = i::WasmTableObject::Grow(isolate, table,
-                                        static_cast<uint32_t>(delta), obj);
+  const char* error_message;
+  i::Handle<i::Object> obj_as_wasm =
+      i::wasm::JSToWasmObject(isolate, nullptr, obj, table->type(),
+                              &error_message)
+          .ToHandleChecked();
+  int result = i::WasmTableObject::Grow(
+      isolate, table, static_cast<uint32_t>(delta), obj_as_wasm);
   return result >= 0;
 }
 

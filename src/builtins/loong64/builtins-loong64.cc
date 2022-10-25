@@ -317,7 +317,7 @@ static void GetSharedFunctionInfoBytecodeOrBaseline(MacroAssembler* masm,
   Label done;
 
   __ GetObjectType(sfi_data, scratch1, scratch1);
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     Label not_baseline;
     __ Branch(&not_baseline, ne, scratch1, Operand(CODET_TYPE));
     AssertCodeIsBaseline(masm, sfi_data, scratch1);
@@ -409,7 +409,7 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
   }
 
   // Underlying function needs to have bytecode available.
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     Label is_baseline;
     __ Ld_d(a3, FieldMemOperand(a4, JSFunction::kSharedFunctionInfoOffset));
     __ Ld_d(a3, FieldMemOperand(a3, SharedFunctionInfo::kFunctionDataOffset));
@@ -924,15 +924,15 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
     __ AssertFeedbackVector(feedback_vector, scratch);
   }
   // Check for an tiering state.
-  Label has_optimized_code_or_state;
-  Register optimization_state = no_reg;
+  Label flags_need_processing;
+  Register flags = no_reg;
   {
     UseScratchRegisterScope temps(masm);
-    optimization_state = temps.Acquire();
-    // optimization_state will be used only in |has_optimized_code_or_state|
+    flags = temps.Acquire();
+    // flags will be used only in |flags_need_processing|
     // and outside it can be reused.
-    __ LoadTieringStateAndJumpIfNeedsProcessing(
-        optimization_state, feedback_vector, &has_optimized_code_or_state);
+    __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
+        flags, feedback_vector, CodeKind::BASELINE, &flags_need_processing);
   }
   {
     UseScratchRegisterScope temps(masm);
@@ -1014,16 +1014,15 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
   // TODO(v8:11429): Document this frame setup better.
   __ Ret();
 
-  __ bind(&has_optimized_code_or_state);
+  __ bind(&flags_need_processing);
   {
     ASM_CODE_COMMENT_STRING(masm, "Optimized marker check");
     UseScratchRegisterScope temps(masm);
-    temps.Exclude(optimization_state);
-    // Ensure the optimization_state is not allocated again.
+    temps.Exclude(flags);
+    // Ensure the flags is not allocated again.
     // Drop the frame created by the baseline call.
     __ Pop(ra, fp);
-    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(optimization_state,
-                                                    feedback_vector);
+    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
     __ Trap();
   }
 
@@ -1040,6 +1039,26 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
   }
   __ Ret();
   temps.Exclude({s1, s2});
+}
+
+// static
+void Builtins::Generate_BaselineOutOfLinePrologueDeopt(MacroAssembler* masm) {
+  // We're here because we got deopted during BaselineOutOfLinePrologue's stack
+  // check. Undo all its frame creation and call into the interpreter instead.
+
+  // Drop bytecode offset (was the feedback vector but got replaced during
+  // deopt) and bytecode array.
+  __ Drop(2);
+
+  // Context, closure, argc.
+  __ Pop(kContextRegister, kJavaScriptCallTargetRegister,
+         kJavaScriptCallArgCountRegister);
+
+  // Drop frame pointer
+  __ LeaveFrame(StackFrame::BASELINE);
+
+  // Enter the interpreter.
+  __ TailCallBuiltin(Builtin::kInterpreterEntryTrampoline);
 }
 
 // Generate code for entering a JS function with the interpreter.
@@ -1094,10 +1113,11 @@ void Builtins::Generate_InterpreterEntryTrampoline(
   __ Branch(&push_stack_frame, ne, a4, Operand(FEEDBACK_VECTOR_TYPE));
 
   // Check the tiering state.
-  Label has_optimized_code_or_state;
-  Register optimization_state = a4;
-  __ LoadTieringStateAndJumpIfNeedsProcessing(
-      optimization_state, feedback_vector, &has_optimized_code_or_state);
+  Label flags_need_processing;
+  Register flags = a4;
+  __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
+      flags, feedback_vector, CodeKind::INTERPRETED_FUNCTION,
+      &flags_need_processing);
 
   {
     UseScratchRegisterScope temps(masm);
@@ -1254,9 +1274,8 @@ void Builtins::Generate_InterpreterEntryTrampoline(
 
   __ jmp(&after_stack_check_interrupt);
 
-  __ bind(&has_optimized_code_or_state);
-  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(optimization_state,
-                                                  feedback_vector);
+  __ bind(&flags_need_processing);
+  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
 
   __ bind(&is_baseline);
   {
@@ -1274,8 +1293,8 @@ void Builtins::Generate_InterpreterEntryTrampoline(
     __ Branch(&install_baseline_code, ne, t0, Operand(FEEDBACK_VECTOR_TYPE));
 
     // Check for an tiering state.
-    __ LoadTieringStateAndJumpIfNeedsProcessing(
-        optimization_state, feedback_vector, &has_optimized_code_or_state);
+    __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
+        flags, feedback_vector, CodeKind::BASELINE, &flags_need_processing);
 
     // Load the baseline code into the closure.
     __ Move(a2, kInterpreterBytecodeArrayRegister);
@@ -1471,7 +1490,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
   __ Ld_d(kInterpreterBytecodeArrayRegister,
           MemOperand(fp, InterpreterFrameConstants::kBytecodeArrayFromFp));
 
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     // Check function data field is actually a BytecodeArray object.
     __ SmiTst(kInterpreterBytecodeArrayRegister, kScratchReg);
     __ Assert(ne,
@@ -1487,7 +1506,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
   __ SmiUntag(kInterpreterBytecodeOffsetRegister,
               MemOperand(fp, InterpreterFrameConstants::kBytecodeOffsetFromFp));
 
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     Label okay;
     __ Branch(&okay, ge, kInterpreterBytecodeOffsetRegister,
               Operand(BytecodeArray::kHeaderSize - kHeapObjectTag));
@@ -1682,14 +1701,14 @@ void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source,
   // OSR entry tracing.
   {
     Label next;
-    __ li(a1, ExternalReference::address_of_FLAG_trace_osr());
+    __ li(a1, ExternalReference::address_of_log_or_trace_osr());
     __ Ld_bu(a1, MemOperand(a1, 0));
     __ Branch(&next, eq, a1, Operand(zero_reg));
 
     {
       FrameScope scope(masm, StackFrame::INTERNAL);
       __ Push(a0);  // Preserve the code object.
-      __ CallRuntime(Runtime::kTraceOptimizedOSREntry, 0);
+      __ CallRuntime(Runtime::kLogOrTraceOptimizedOSREntry, 0);
       __ Pop(a0);
     }
 
@@ -1723,14 +1742,14 @@ void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source,
 }  // namespace
 
 void Builtins::Generate_InterpreterOnStackReplacement(MacroAssembler* masm) {
-  using D = InterpreterOnStackReplacementDescriptor;
+  using D = OnStackReplacementDescriptor;
   static_assert(D::kParameterCount == 1);
   OnStackReplacement(masm, OsrSourceTier::kInterpreter,
                      D::MaybeTargetCodeRegister());
 }
 
 void Builtins::Generate_BaselineOnStackReplacement(MacroAssembler* masm) {
-  using D = BaselineOnStackReplacementDescriptor;
+  using D = OnStackReplacementDescriptor;
   static_assert(D::kParameterCount == 1);
 
   __ Ld_d(kContextRegister,
@@ -1998,7 +2017,7 @@ void Builtins::Generate_CallOrConstructVarargs(MacroAssembler* masm,
   //  -- a4 : len (number of elements to push from args)
   //  -- a3 : new.target (for [[Construct]])
   // -----------------------------------
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     // Allow a2 to be a FixedArray, or a FixedDoubleArray if a4 == 0.
     Label ok, fail;
     __ AssertNotSmi(a2);
@@ -2736,7 +2755,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
 
   // Check that there is no pending exception, otherwise we
   // should have returned the exception sentinel.
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     Label okay;
     ExternalReference pending_exception_address = ExternalReference::Create(
         IsolateAddressId::kPendingExceptionAddress, masm->isolate());
@@ -2969,26 +2988,6 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
 
   DCHECK(function_address == a1 || function_address == a2);
 
-  Label profiler_enabled, end_profiler_check;
-  __ li(t7, ExternalReference::is_profiling_address(isolate));
-  __ Ld_b(t7, MemOperand(t7, 0));
-  __ Branch(&profiler_enabled, ne, t7, Operand(zero_reg));
-  __ li(t7, ExternalReference::address_of_runtime_stats_flag());
-  __ Ld_w(t7, MemOperand(t7, 0));
-  __ Branch(&profiler_enabled, ne, t7, Operand(zero_reg));
-  {
-    // Call the api function directly.
-    __ mov(t7, function_address);
-    __ Branch(&end_profiler_check);
-  }
-
-  __ bind(&profiler_enabled);
-  {
-    // Additional parameter is the address of the actual callback.
-    __ li(t7, thunk_ref);
-  }
-  __ bind(&end_profiler_check);
-
   // Allocate HandleScope in callee-save registers.
   __ li(s5, next_address);
   __ Ld_d(s0, MemOperand(s5, kNextOffset));
@@ -2997,7 +2996,20 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
   __ Add_w(s2, s2, Operand(1));
   __ St_w(s2, MemOperand(s5, kLevelOffset));
 
+  Label profiler_enabled, done_api_call;
+  __ li(t7, ExternalReference::is_profiling_address(isolate));
+  __ Ld_b(t7, MemOperand(t7, 0));
+  __ Branch(&profiler_enabled, ne, t7, Operand(zero_reg));
+#ifdef V8_RUNTIME_CALL_STATS
+  __ li(t7, ExternalReference::address_of_runtime_stats_flag());
+  __ Ld_w(t7, MemOperand(t7, 0));
+  __ Branch(&profiler_enabled, ne, t7, Operand(zero_reg));
+#endif  // V8_RUNTIME_CALL_STATS
+
+  // Call the api function directly.
+  __ mov(t7, function_address);
   __ StoreReturnAddressAndCall(t7);
+  __ bind(&done_api_call);
 
   Label promote_scheduled_exception;
   Label delete_allocated_handles;
@@ -3011,7 +3023,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
   // No more valid handles (the result handle was the last one). Restore
   // previous handle scope.
   __ St_d(s0, MemOperand(s5, kNextOffset));
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     __ Ld_w(a1, MemOperand(s5, kLevelOffset));
     __ Check(eq, AbortReason::kUnexpectedLevelAfterReturnFromApiCall, a1,
              Operand(s2));
@@ -3044,6 +3056,13 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
   __ Branch(&promote_scheduled_exception, ne, a4, Operand(a5));
 
   __ Ret();
+
+  // Call the api function via thunk wrapper.
+  __ bind(&profiler_enabled);
+  // Additional parameter is the address of the actual callback.
+  __ li(t7, thunk_ref);
+  __ StoreReturnAddressAndCall(t7);
+  __ Branch(&done_api_call);
 
   // Re-throw by promoting a scheduled exception.
   __ bind(&promote_scheduled_exception);
@@ -3248,8 +3267,9 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
   ExternalReference thunk_ref =
       ExternalReference::invoke_accessor_getter_callback();
 
-  __ Ld_d(api_function_address,
-          FieldMemOperand(callback, AccessorInfo::kJsGetterOffset));
+  __ Ld_d(
+      api_function_address,
+      FieldMemOperand(callback, AccessorInfo::kMaybeRedirectedGetterOffset));
 
   // +3 is to skip prolog, return address and name handle.
   MemOperand return_value_operand(
@@ -3273,7 +3293,7 @@ void Builtins::Generate_DirectCEntry(MacroAssembler* masm) {
   __ Ld_d(ra, MemOperand(sp, 0));  // Return to calling code.
 
   // TODO(LOONG_dev): LOONG64 Check this assert.
-  if (FLAG_debug_code && FLAG_enable_slow_asserts) {
+  if (v8_flags.debug_code && v8_flags.enable_slow_asserts) {
     // In case of an error the return address may point to a memory area
     // filled with kZapValue by the GC. Dereference the address and check for
     // this.
@@ -3368,7 +3388,7 @@ void Generate_DeoptimizationEntry(MacroAssembler* masm,
     if ((saved_regs.bits() & (1 << i)) != 0) {
       __ Ld_d(a2, MemOperand(sp, i * kPointerSize));
       __ St_d(a2, MemOperand(a1, offset));
-    } else if (FLAG_debug_code) {
+    } else if (v8_flags.debug_code) {
       __ li(a2, Operand(kDebugZapValue));
       __ St_d(a2, MemOperand(a1, offset));
     }
@@ -3525,12 +3545,12 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
 
     // Start with baseline code.
     __ bind(&start_with_baseline);
-  } else if (FLAG_debug_code) {
+  } else if (v8_flags.debug_code) {
     __ GetObjectType(code_obj, t2, t2);
     __ Assert(eq, AbortReason::kExpectedBaselineData, t2, Operand(CODET_TYPE));
   }
 
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     AssertCodeIsBaseline(masm, code_obj, t2);
   }
 

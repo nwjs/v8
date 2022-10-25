@@ -392,7 +392,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
   DCHECK(IsAligned(offset, kTaggedSize));
 
   lea(slot_address, FieldOperand(object, offset));
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     Label ok;
     test_b(slot_address, Immediate(kTaggedSize - 1));
     j(zero, &ok, Label::kNear);
@@ -406,7 +406,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
 
   // Clobber clobbered input registers when running with the debug-code flag
   // turned on to provoke errors.
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     mov(value, Immediate(base::bit_cast<int32_t>(kZapValue)));
     mov(slot_address, Immediate(base::bit_cast<int32_t>(kZapValue)));
   }
@@ -502,11 +502,11 @@ void MacroAssembler::RecordWrite(Register object, Register slot_address,
   DCHECK(!AreAliased(object, value, slot_address));
   AssertNotSmi(object);
 
-  if (FLAG_disable_write_barriers) {
+  if (v8_flags.disable_write_barriers) {
     return;
   }
 
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     ASM_CODE_COMMENT_STRING(this, "Verify slot_address");
     Label ok;
     cmp(value, Operand(slot_address, 0));
@@ -540,7 +540,7 @@ void MacroAssembler::RecordWrite(Register object, Register slot_address,
 
   // Clobber clobbered registers when running with the debug-code flag
   // turned on to provoke errors.
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     ASM_CODE_COMMENT_STRING(this, "Clobber slot_address and value");
     mov(slot_address, Immediate(base::bit_cast<int32_t>(kZapValue)));
     mov(value, Immediate(base::bit_cast<int32_t>(kZapValue)));
@@ -770,7 +770,7 @@ void TailCallOptimizedCodeSlot(MacroAssembler* masm,
 
 #ifdef V8_ENABLE_DEBUG_CODE
 void MacroAssembler::AssertFeedbackVector(Register object, Register scratch) {
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     CmpObjectType(object, FEEDBACK_VECTOR_TYPE, scratch);
     Assert(equal, AbortReason::kExpectedFeedbackVector);
   }
@@ -821,43 +821,51 @@ void MacroAssembler::GenerateTailCallToReturnedCode(
   JumpCodeObject(ecx);
 }
 
-// Read off the optimization state in the feedback vector and check if there
+// Read off the flags in the feedback vector and check if there
 // is optimized code or a tiering state that needs to be processed.
-// Registers optimization_state and feedback_vector must be aliased.
-void MacroAssembler::LoadTieringStateAndJumpIfNeedsProcessing(
-    Register optimization_state, XMMRegister saved_feedback_vector,
-    Label* has_optimized_code_or_state) {
+// Registers flags and feedback_vector must be aliased.
+void MacroAssembler::LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
+    Register flags, XMMRegister saved_feedback_vector,
+    CodeKind current_code_kind, Label* flags_need_processing) {
   ASM_CODE_COMMENT(this);
-  Register feedback_vector = optimization_state;
+  DCHECK(CodeKindCanTierUp(current_code_kind));
+  Register feedback_vector = flags;
 
   // Store feedback_vector. We may need it if we need to load the optimize code
   // slot entry.
   movd(saved_feedback_vector, feedback_vector);
-  mov_w(optimization_state,
-        FieldOperand(feedback_vector, FeedbackVector::kFlagsOffset));
+  mov_w(flags, FieldOperand(feedback_vector, FeedbackVector::kFlagsOffset));
 
   // Check if there is optimized code or a tiering state that needes to be
   // processed.
-  test_w(optimization_state,
-         Immediate(
-             FeedbackVector::kHasOptimizedCodeOrTieringStateIsAnyRequestMask));
-  j(not_zero, has_optimized_code_or_state);
+  uint32_t kFlagsMask = FeedbackVector::kFlagsTieringStateIsAnyRequested |
+                        FeedbackVector::kFlagsMaybeHasTurbofanCode |
+                        FeedbackVector::kFlagsLogNextExecution;
+  if (current_code_kind != CodeKind::MAGLEV) {
+    kFlagsMask |= FeedbackVector::kFlagsMaybeHasMaglevCode;
+  }
+  test_w(flags, Immediate(kFlagsMask));
+  j(not_zero, flags_need_processing);
 }
 
 void MacroAssembler::MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
-    Register optimization_state, XMMRegister saved_feedback_vector) {
+    Register flags, XMMRegister saved_feedback_vector) {
   ASM_CODE_COMMENT(this);
-  Label maybe_has_optimized_code;
+  Label maybe_has_optimized_code, maybe_needs_logging;
   // Check if optimized code is available.
-  test(optimization_state,
-       Immediate(FeedbackVector::kTieringStateIsAnyRequestMask));
-  j(zero, &maybe_has_optimized_code);
+  test(flags, Immediate(FeedbackVector::kFlagsTieringStateIsAnyRequested));
+  j(zero, &maybe_needs_logging);
 
   GenerateTailCallToReturnedCode(Runtime::kCompileOptimized);
 
+  bind(&maybe_needs_logging);
+  test(flags, Immediate(FeedbackVector::LogNextExecutionBit::kMask));
+  j(zero, &maybe_has_optimized_code);
+  GenerateTailCallToReturnedCode(Runtime::kFunctionLogNextExecution);
+
   bind(&maybe_has_optimized_code);
-  Register optimized_code_entry = optimization_state;
-  Register feedback_vector = optimization_state;
+  Register optimized_code_entry = flags;
+  Register feedback_vector = flags;
   movd(feedback_vector, saved_feedback_vector);  // Restore feedback vector.
   mov(optimized_code_entry,
       FieldOperand(feedback_vector, FeedbackVector::kMaybeOptimizedCodeOffset));
@@ -866,7 +874,7 @@ void MacroAssembler::MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
 
 #ifdef V8_ENABLE_DEBUG_CODE
 void MacroAssembler::AssertSmi(Register object) {
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     ASM_CODE_COMMENT(this);
     test(object, Immediate(kSmiTagMask));
     Check(equal, AbortReason::kOperandIsNotASmi);
@@ -874,7 +882,7 @@ void MacroAssembler::AssertSmi(Register object) {
 }
 
 void MacroAssembler::AssertConstructor(Register object) {
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     ASM_CODE_COMMENT(this);
     test(object, Immediate(kSmiTagMask));
     Check(not_equal, AbortReason::kOperandIsASmiAndNotAConstructor);
@@ -888,7 +896,7 @@ void MacroAssembler::AssertConstructor(Register object) {
 }
 
 void MacroAssembler::AssertFunction(Register object, Register scratch) {
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     ASM_CODE_COMMENT(this);
     test(object, Immediate(kSmiTagMask));
     Check(not_equal, AbortReason::kOperandIsASmiAndNotAFunction);
@@ -902,7 +910,7 @@ void MacroAssembler::AssertFunction(Register object, Register scratch) {
 }
 
 void MacroAssembler::AssertCallableFunction(Register object, Register scratch) {
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     ASM_CODE_COMMENT(this);
     test(object, Immediate(kSmiTagMask));
     Check(not_equal, AbortReason::kOperandIsASmiAndNotAFunction);
@@ -917,7 +925,7 @@ void MacroAssembler::AssertCallableFunction(Register object, Register scratch) {
 }
 
 void MacroAssembler::AssertBoundFunction(Register object) {
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     ASM_CODE_COMMENT(this);
     test(object, Immediate(kSmiTagMask));
     Check(not_equal, AbortReason::kOperandIsASmiAndNotABoundFunction);
@@ -929,7 +937,7 @@ void MacroAssembler::AssertBoundFunction(Register object) {
 }
 
 void MacroAssembler::AssertGeneratorObject(Register object) {
-  if (!FLAG_debug_code) return;
+  if (!v8_flags.debug_code) return;
   ASM_CODE_COMMENT(this);
 
   test(object, Immediate(kSmiTagMask));
@@ -952,7 +960,7 @@ void MacroAssembler::AssertGeneratorObject(Register object) {
 
 void MacroAssembler::AssertUndefinedOrAllocationSite(Register object,
                                                      Register scratch) {
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     ASM_CODE_COMMENT(this);
     Label done_checking;
     AssertNotSmi(object);
@@ -966,7 +974,7 @@ void MacroAssembler::AssertUndefinedOrAllocationSite(Register object,
 }
 
 void MacroAssembler::AssertNotSmi(Register object) {
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     ASM_CODE_COMMENT(this);
     test(object, Immediate(kSmiTagMask));
     Check(not_equal, AbortReason::kOperandIsASmi);
@@ -974,11 +982,11 @@ void MacroAssembler::AssertNotSmi(Register object) {
 }
 
 void TurboAssembler::Assert(Condition cc, AbortReason reason) {
-  if (FLAG_debug_code) Check(cc, reason);
+  if (v8_flags.debug_code) Check(cc, reason);
 }
 
 void TurboAssembler::AssertUnreachable(AbortReason reason) {
-  if (FLAG_debug_code) Abort(reason);
+  if (v8_flags.debug_code) Abort(reason);
 }
 #endif  // V8_ENABLE_DEBUG_CODE
 
@@ -1076,7 +1084,7 @@ void TurboAssembler::EnterFrame(StackFrame::Type type) {
 
 void TurboAssembler::LeaveFrame(StackFrame::Type type) {
   ASM_CODE_COMMENT(this);
-  if (FLAG_debug_code && !StackFrame::IsJavaScript(type)) {
+  if (v8_flags.debug_code && !StackFrame::IsJavaScript(type)) {
     cmp(Operand(ebp, CommonFrameConstants::kContextOrFrameTypeOffset),
         Immediate(StackFrame::TypeToMarker(type)));
     Check(equal, AbortReason::kStackFrameTypesMustMatch);
@@ -1627,7 +1635,7 @@ void TurboAssembler::Move(Register dst, Register src) {
 }
 
 void TurboAssembler::Move(Register dst, const Immediate& src) {
-  if (!src.is_heap_object_request() && src.is_zero()) {
+  if (!src.is_heap_number_request() && src.is_zero()) {
     xor_(dst, dst);  // Shorter than mov of 32-bit immediate 0.
   } else if (src.is_external_reference()) {
     LoadAddress(dst, src.external_reference());
@@ -1641,7 +1649,7 @@ void TurboAssembler::Move(Operand dst, const Immediate& src) {
   // stack.
   if (root_array_available() && options().isolate_independent_code) {
     if (src.is_embedded_object() || src.is_external_reference() ||
-        src.is_heap_object_request()) {
+        src.is_heap_number_request()) {
       Push(src);
       pop(dst);
       return;
@@ -1812,7 +1820,7 @@ void MacroAssembler::LoadWeakValue(Register in_out, Label* target_if_cleared) {
 void MacroAssembler::EmitIncrementCounter(StatsCounter* counter, int value,
                                           Register scratch) {
   DCHECK_GT(value, 0);
-  if (FLAG_native_code_counters && counter->Enabled()) {
+  if (v8_flags.native_code_counters && counter->Enabled()) {
     ASM_CODE_COMMENT(this);
     Operand operand =
         ExternalReferenceAsOperand(ExternalReference::Create(counter), scratch);
@@ -1827,7 +1835,7 @@ void MacroAssembler::EmitIncrementCounter(StatsCounter* counter, int value,
 void MacroAssembler::EmitDecrementCounter(StatsCounter* counter, int value,
                                           Register scratch) {
   DCHECK_GT(value, 0);
-  if (FLAG_native_code_counters && counter->Enabled()) {
+  if (v8_flags.native_code_counters && counter->Enabled()) {
     ASM_CODE_COMMENT(this);
     Operand operand =
         ExternalReferenceAsOperand(ExternalReference::Create(counter), scratch);
@@ -1863,7 +1871,7 @@ void TurboAssembler::CheckStackAlignment() {
 }
 
 void TurboAssembler::Abort(AbortReason reason) {
-  if (FLAG_code_comments) {
+  if (v8_flags.code_comments) {
     const char* msg = GetAbortReason(reason);
     RecordComment("Abort message: ");
     RecordComment(msg);
@@ -1894,7 +1902,7 @@ void TurboAssembler::Abort(AbortReason reason) {
       // Generate an indirect call via builtins entry table here in order to
       // ensure that the interpreter_entry_return_pc_offset is the same for
       // InterpreterEntryTrampoline and InterpreterEntryTrampolineForProfiling
-      // when FLAG_debug_code is enabled.
+      // when v8_flags.debug_code is enabled.
       Call(EntryFromBuiltinAsOperand(Builtin::kAbort));
     } else {
       Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
@@ -1933,7 +1941,7 @@ void TurboAssembler::CallCFunction(Register function, int num_arguments) {
   DCHECK_LE(num_arguments, kMaxCParameters);
   DCHECK(has_frame());
   // Check stack alignment.
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     CheckStackAlignment();
   }
 

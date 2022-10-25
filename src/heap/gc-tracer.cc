@@ -78,6 +78,7 @@ const char* GCTracer::Event::TypeName(bool short_name) const {
     case INCREMENTAL_MARK_COMPACTOR:
       return (short_name) ? "ms" : "Mark-sweep";
     case MINOR_MARK_COMPACTOR:
+    case INCREMENTAL_MINOR_MARK_COMPACTOR:
       return (short_name) ? "mmc" : "Minor Mark-Compact";
     case START:
       return (short_name) ? "st" : "Start";
@@ -90,7 +91,7 @@ GCTracer::RecordGCPhasesInfo::RecordGCPhasesInfo(Heap* heap,
   if (Heap::IsYoungGenerationCollector(collector)) {
     type_timer_ = nullptr;
     type_priority_timer_ = nullptr;
-    if (!FLAG_minor_mc) {
+    if (!v8_flags.minor_mc) {
       mode_ = Mode::Scavenger;
       trace_event_name_ = "V8.GCScavenger";
     } else {
@@ -275,7 +276,9 @@ void GCTracer::StartCycle(GarbageCollector collector,
       type = Event::SCAVENGER;
       break;
     case GarbageCollector::MINOR_MARK_COMPACTOR:
-      type = Event::MINOR_MARK_COMPACTOR;
+      type = marking == MarkingType::kIncremental
+                 ? Event::INCREMENTAL_MINOR_MARK_COMPACTOR
+                 : Event::MINOR_MARK_COMPACTOR;
       break;
     case GarbageCollector::MARK_COMPACTOR:
       type = marking == MarkingType::kIncremental
@@ -302,7 +305,9 @@ void GCTracer::StartCycle(GarbageCollector collector,
       break;
     case MarkingType::kIncremental:
       // The current event will be updated later.
-      DCHECK(!Heap::IsYoungGenerationCollector(collector));
+      DCHECK_IMPLIES(Heap::IsYoungGenerationCollector(collector),
+                     (v8_flags.minor_mc &&
+                      collector == GarbageCollector::MINOR_MARK_COMPACTOR));
       DCHECK(!IsInObservablePause());
       break;
   }
@@ -397,15 +402,15 @@ void GCTracer::UpdateStatistics(GarbageCollector collector) {
 
   heap_->UpdateTotalGCTime(duration);
 
-  if (FLAG_trace_gc_ignore_scavenger && is_young) return;
+  if (v8_flags.trace_gc_ignore_scavenger && is_young) return;
 
-  if (FLAG_trace_gc_nvp) {
+  if (v8_flags.trace_gc_nvp) {
     PrintNVP();
   } else {
     Print();
   }
 
-  if (FLAG_trace_gc) {
+  if (v8_flags.trace_gc) {
     heap_->PrintShortHeapStatistics();
   }
 
@@ -472,7 +477,7 @@ void GCTracer::StopCycle(GarbageCollector collector) {
     heap_->isolate()->counters()->mark_compact_reason()->AddSample(
         static_cast<int>(current_.gc_reason));
 
-    if (FLAG_trace_gc_freelists) {
+    if (v8_flags.trace_gc_freelists) {
       PrintIsolate(heap_->isolate(),
                    "FreeLists statistics before collection:\n");
       heap_->PrintFreeListsStats();
@@ -506,25 +511,25 @@ void GCTracer::StopYoungCycleIfNeeded() {
 }
 
 void GCTracer::NotifySweepingCompleted() {
-#ifdef VERIFY_HEAP
-  // If heap verification is enabled, sweeping finalization can also be
-  // triggered from inside a full GC cycle's atomic pause.
-  DCHECK((current_.type == Event::MARK_COMPACTOR ||
-          current_.type == Event::INCREMENTAL_MARK_COMPACTOR) &&
-         (current_.state == Event::State::SWEEPING ||
-          (FLAG_verify_heap && current_.state == Event::State::ATOMIC)));
-#else
-  DCHECK(IsSweepingInProgress());
-#endif
+  if (v8_flags.verify_heap) {
+    // If heap verification is enabled, sweeping finalization can also be
+    // triggered from inside a full GC cycle's atomic pause.
+    DCHECK((current_.type == Event::MARK_COMPACTOR ||
+            current_.type == Event::INCREMENTAL_MARK_COMPACTOR) &&
+           (current_.state == Event::State::SWEEPING ||
+            (v8_flags.verify_heap && current_.state == Event::State::ATOMIC)));
+  } else {
+    DCHECK(IsSweepingInProgress());
+  }
 
   // Stop a full GC cycle only when both v8 and cppgc (if available) GCs have
   // finished sweeping. This method is invoked by v8.
-  if (FLAG_trace_gc_freelists) {
+  if (v8_flags.trace_gc_freelists) {
     PrintIsolate(heap_->isolate(),
                  "FreeLists statistics after sweeping completed:\n");
     heap_->PrintFreeListsStats();
   }
-  if (FLAG_trace_allocations_origins) {
+  if (v8_flags.trace_allocations_origins) {
     heap_->new_space()->PrintAllocationsOrigins();
     heap_->old_space()->PrintAllocationsOrigins();
     heap_->code_space()->PrintAllocationsOrigins();
@@ -640,7 +645,7 @@ void GCTracer::AddIncrementalSweepingStep(double duration) {
 }
 
 void GCTracer::Output(const char* format, ...) const {
-  if (FLAG_trace_gc) {
+  if (v8_flags.trace_gc) {
     va_list arguments;
     va_start(arguments, format);
     base::OS::VPrint(format, arguments);
@@ -822,7 +827,6 @@ void GCTracer::PrintNVP() const {
           "evacuate=%.2f "
           "evacuate.copy=%.2f "
           "evacuate.update_pointers=%.2f "
-          "evacuate.update_pointers.to_new_roots=%.2f "
           "evacuate.update_pointers.slots=%.2f "
           "background.mark=%.2f "
           "background.evacuate.copy=%.2f "
@@ -845,7 +849,6 @@ void GCTracer::PrintNVP() const {
           current_scope(Scope::MINOR_MC_EVACUATE),
           current_scope(Scope::MINOR_MC_EVACUATE_COPY),
           current_scope(Scope::MINOR_MC_EVACUATE_UPDATE_POINTERS),
-          current_scope(Scope::MINOR_MC_EVACUATE_UPDATE_POINTERS_TO_NEW_ROOTS),
           current_scope(Scope::MINOR_MC_EVACUATE_UPDATE_POINTERS_SLOTS),
           current_scope(Scope::MINOR_MC_BACKGROUND_MARKING),
           current_scope(Scope::MINOR_MC_BACKGROUND_EVACUATE_COPY),

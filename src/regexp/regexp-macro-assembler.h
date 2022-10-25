@@ -6,6 +6,7 @@
 #define V8_REGEXP_REGEXP_MACRO_ASSEMBLER_H_
 
 #include "src/base/strings.h"
+#include "src/objects/fixed-array.h"
 #include "src/regexp/regexp-ast.h"
 #include "src/regexp/regexp.h"
 
@@ -29,6 +30,7 @@ class RegExpMacroAssembler {
   // The implementation must be able to handle at least:
   static constexpr int kMaxRegisterCount = (1 << 16);
   static constexpr int kMaxRegister = kMaxRegisterCount - 1;
+  static constexpr int kMaxCaptures = (kMaxRegister - 1) / 2;
   static constexpr int kMaxCPOffset = (1 << 15) - 1;
   static constexpr int kMinCPOffset = -(1 << 15);
 
@@ -350,7 +352,7 @@ class NativeRegExpMacroAssembler: public RegExpMacroAssembler {
                      const byte* input_end, int* output, int output_size,
                      Isolate* isolate, JSRegExp regexp);
 
-  ZoneUnorderedMap<uint32_t, Handle<ByteArray>> range_array_cache_;
+  ZoneUnorderedMap<uint32_t, Handle<FixedUInt16Array>> range_array_cache_;
 };
 
 }  // namespace internal

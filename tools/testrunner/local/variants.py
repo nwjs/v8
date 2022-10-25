@@ -15,8 +15,8 @@ ALL_VARIANT_FLAGS = {
     "experimental_regexp": [["--default-to-experimental-regexp-engine"]],
     "jitless": [["--jitless"]],
     "sparkplug": [["--sparkplug"]],
-    # TODO(v8:v8:7700): Support concurrent compilation and remove flag.
-    "maglev": [["--maglev", "--no-concurrent-recompilation"]],
+    "maglev": [["--maglev"]],
+    "stress_maglev": [["--maglev", "--stress-maglev"]],
     "turboshaft": [["--turboshaft"]],
     "concurrent_sparkplug": [["--concurrent-sparkplug", "--sparkplug"]],
     "always_sparkplug": [["--always-sparkplug", "--sparkplug"]],
@@ -31,7 +31,7 @@ ALL_VARIANT_FLAGS = {
     "nooptimization": [["--no-turbofan", "--liftoff", "--no-wasm-tier-up"]],
     "slow_path": [["--force-slow-path"]],
     "stress": [[
-        "--stress-opt", "--no-liftoff", "--stress-lazy-source-positions",
+        "--no-liftoff", "--stress-lazy-source-positions",
         "--no-wasm-generic-wrapper", "--no-wasm-lazy-compilation"
     ]],
     "stress_concurrent_allocation": [["--stress-concurrent-allocation"]],
@@ -75,20 +75,14 @@ INCOMPATIBLE_FLAGS_PER_VARIANT = {
     # stress_snapshot.
     "stress_snapshot": ["--expose-fast-api"],
     "stress": [
-        "--always-turbofan", "--no-always-turbofan",
-        "--max-inlined-bytecode-size=*",
-        "--max-inlined-bytecode-size-cumulative=*", "--stress-inline",
         "--liftoff-only", "--wasm-speculative-inlining",
         "--wasm-dynamic-tiering"
     ],
-    "sparkplug": ["--jitless"],
+    "sparkplug": ["--jitless", "--no-sparkplug"],
     "concurrent_sparkplug": ["--jitless"],
-    # TODO(v8:v8:7700): Support concurrent compilation and remove incompatible flags.
-    "maglev": [
-        "--jitless", "--concurrent-recompilation",
-        "--stress-concurrent-inlining"
-    ],
-    "always_sparkplug": ["--jitless"],
+    "maglev": ["--jitless"],
+    "stress_maglev": ["--jitless"],
+    "always_sparkplug": ["--jitless", "--no-sparkplug"],
     "code_serializer": [
         "--cache=after-execute", "--cache=full-code-cache", "--cache=none"
     ],

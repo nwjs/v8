@@ -134,9 +134,6 @@ class StraightForwardRegisterAllocator {
   void UpdateUse(ValueNode* node, InputLocation* input_location);
   void UpdateUse(const EagerDeoptInfo& deopt_info);
   void UpdateUse(const LazyDeoptInfo& deopt_info);
-  void UpdateUse(const MaglevCompilationUnit& unit,
-                 const CheckpointedInterpreterState* state,
-                 InputLocation* input_locations, int& index);
 
   void AllocateControlNode(ControlNode* node, BasicBlock* block);
   void AllocateNode(Node* node);
@@ -206,6 +203,7 @@ class StraightForwardRegisterAllocator {
   void ForEachMergePointRegisterState(
       MergePointRegisterState& merge_point_state, Function&& f);
 
+  void ClearRegisterValues();
   void InitializeRegisterValues(MergePointRegisterState& target_state);
 #ifdef DEBUG
   bool IsInRegister(MergePointRegisterState& target_state, ValueNode* incoming);

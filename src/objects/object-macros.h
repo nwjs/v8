@@ -270,19 +270,27 @@
 #define RELAXED_ACCESSORS(holder, name, type, offset) \
   RELAXED_ACCESSORS_CHECKED(holder, name, type, offset, true)
 
-#define RELEASE_ACQUIRE_ACCESSORS_CHECKED2(holder, name, type, offset,      \
-                                           get_condition, set_condition)    \
+#define RELEASE_ACQUIRE_GETTER_CHECKED(holder, name, type, offset,          \
+                                       get_condition)                       \
   DEF_ACQUIRE_GETTER(holder, name, type) {                                  \
     type value = TaggedField<type, offset>::Acquire_Load(cage_base, *this); \
     DCHECK(get_condition);                                                  \
     return value;                                                           \
-  }                                                                         \
-  void holder::set_##name(type value, ReleaseStoreTag,                      \
-                          WriteBarrierMode mode) {                          \
-    DCHECK(set_condition);                                                  \
-    TaggedField<type, offset>::Release_Store(*this, value);                 \
-    CONDITIONAL_WRITE_BARRIER(*this, offset, value, mode);                  \
   }
+
+#define RELEASE_ACQUIRE_SETTER_CHECKED(holder, name, type, offset, \
+                                       set_condition)              \
+  void holder::set_##name(type value, ReleaseStoreTag,             \
+                          WriteBarrierMode mode) {                 \
+    DCHECK(set_condition);                                         \
+    TaggedField<type, offset>::Release_Store(*this, value);        \
+    CONDITIONAL_WRITE_BARRIER(*this, offset, value, mode);         \
+  }
+
+#define RELEASE_ACQUIRE_ACCESSORS_CHECKED2(holder, name, type, offset,      \
+                                           get_condition, set_condition)    \
+  RELEASE_ACQUIRE_GETTER_CHECKED(holder, name, type, offset, get_condition) \
+  RELEASE_ACQUIRE_SETTER_CHECKED(holder, name, type, offset, set_condition)
 
 #define RELEASE_ACQUIRE_ACCESSORS_CHECKED(holder, name, type, offset,       \
                                           condition)                        \
@@ -398,11 +406,11 @@
                 kRelaxedStore);                                      \
   }
 
-#define DECL_EXTERNAL_POINTER_ACCESSORS(name, type)                 \
-  inline type name() const;                                         \
-  inline type name(i::Isolate* isolate_for_sandbox) const;          \
-  inline void init_##name(i::Isolate* isolate, type initial_value); \
-  inline void set_##name(i::Isolate* isolate, type value);
+#define DECL_EXTERNAL_POINTER_ACCESSORS(name, type)                       \
+  inline type name() const;                                               \
+  inline type name(i::Isolate* isolate_for_sandbox) const;                \
+  inline void init_##name(i::Isolate* isolate, const type initial_value); \
+  inline void set_##name(i::Isolate* isolate, const type value);
 
 #define EXTERNAL_POINTER_ACCESSORS(holder, name, type, offset, tag)         \
   type holder::name() const {                                               \
@@ -417,20 +425,20 @@
         Object::ReadExternalPointerField<tag>(offset, isolate_for_sandbox); \
     return reinterpret_cast<type>(reinterpret_cast<C2440*>(result));        \
   }                                                                         \
-  void holder::init_##name(i::Isolate* isolate, type initial_value) {       \
+  void holder::init_##name(i::Isolate* isolate, const type initial_value) { \
     /* This is a workaround for MSVC error C2440 not allowing  */           \
     /* reinterpret casts to the same type. */                               \
     struct C2440 {};                                                        \
-    Address the_value =                                                     \
-        reinterpret_cast<Address>(reinterpret_cast<C2440*>(initial_value)); \
+    Address the_value = reinterpret_cast<Address>(                          \
+        reinterpret_cast<const C2440*>(initial_value));                     \
     Object::InitExternalPointerField<tag>(offset, isolate, the_value);      \
   }                                                                         \
-  void holder::set_##name(i::Isolate* isolate, type value) {                \
+  void holder::set_##name(i::Isolate* isolate, const type value) {          \
     /* This is a workaround for MSVC error C2440 not allowing  */           \
     /* reinterpret casts to the same type. */                               \
     struct C2440 {};                                                        \
     Address the_value =                                                     \
-        reinterpret_cast<Address>(reinterpret_cast<C2440*>(value));         \
+        reinterpret_cast<Address>(reinterpret_cast<const C2440*>(value));   \
     Object::WriteExternalPointerField<tag>(offset, isolate, the_value);     \
   }
 

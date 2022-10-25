@@ -57,27 +57,6 @@ bool PagedSpaceBase::Contains(Object o) const {
   return Page::FromAddress(o.ptr())->owner() == this;
 }
 
-void PagedSpaceBase::UnlinkFreeListCategories(Page* page) {
-  DCHECK_EQ(this, page->owner());
-  page->ForAllFreeListCategories([this](FreeListCategory* category) {
-    free_list()->RemoveCategory(category);
-  });
-}
-
-size_t PagedSpaceBase::RelinkFreeListCategories(Page* page) {
-  DCHECK_EQ(this, page->owner());
-  size_t added = 0;
-  page->ForAllFreeListCategories([this, &added](FreeListCategory* category) {
-    added += category->available();
-    category->Relink(free_list());
-  });
-
-  DCHECK_IMPLIES(!page->IsFlagSet(Page::NEVER_ALLOCATE_ON_PAGE),
-                 page->AvailableInFreeList() ==
-                     page->AvailableInFreeListFromAllocatedBytes());
-  return added;
-}
-
 bool PagedSpaceBase::TryFreeLast(Address object_address, int object_size) {
   if (allocation_info_.top() != kNullAddress) {
     return allocation_info_.DecrementTopIfAdjacent(object_address, object_size);
@@ -100,13 +79,7 @@ V8_INLINE bool PagedSpaceBase::EnsureAllocation(int size_in_bytes,
 
   // We don't know exactly how much filler we need to align until space is
   // allocated, so assume the worst case.
-  // TODO(teodutu): remove the need for this special case by ensuring that the
-  // allocation top stays properly aligned after allocations.
-  if (V8_COMPRESS_POINTERS_8GB_BOOL && executable_ == EXECUTABLE) {
-    DCHECK(IsAligned(allocation_info_.top(), kCodeAlignment));
-  } else {
-    size_in_bytes += Heap::GetMaximumFillToAlign(alignment);
-  }
+  size_in_bytes += Heap::GetMaximumFillToAlign(alignment);
   if (out_max_aligned_size) {
     *out_max_aligned_size = size_in_bytes;
   }

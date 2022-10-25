@@ -12,12 +12,13 @@
 #include "include/v8-wasm.h"
 #include "src/api/api-inl.h"
 #include "src/base/logging.h"
-#include "src/base/platform/wrappers.h"
+#include "src/base/platform/memory.h"
 #include "src/execution/isolate.h"
 #include "src/flags/flags.h"
 #include "src/handles/global-handles-inl.h"
 #include "src/handles/handles-inl.h"
 #include "src/handles/maybe-handles-inl.h"
+#include "src/handles/shared-object-conveyor-handles.h"
 #include "src/heap/factory.h"
 #include "src/numbers/conversions.h"
 #include "src/objects/heap-number-inl.h"
@@ -261,7 +262,6 @@ ValueSerializer::ValueSerializer(Isolate* isolate,
                                  v8::ValueSerializer::Delegate* delegate)
     : isolate_(isolate),
       delegate_(delegate),
-      supports_shared_values_(delegate && delegate->SupportsSharedValues()),
       zone_(isolate->allocator(), ZONE_NAME),
       id_map_(isolate->heap(), ZoneAllocationPolicy(&zone_)),
       array_buffer_transfer_map_(isolate->heap(),
@@ -469,11 +469,7 @@ Maybe<bool> ValueSerializer::WriteObject(Handle<Object> object) {
     }
     default:
       if (InstanceTypeChecker::IsString(instance_type)) {
-        auto string = Handle<String>::cast(object);
-        if (FLAG_shared_string_table && supports_shared_values_) {
-          return WriteSharedObject(String::Share(isolate_, string));
-        }
-        WriteString(string);
+        WriteString(Handle<String>::cast(object));
         return ThrowIfOutOfMemory();
       } else if (InstanceTypeChecker::IsJSReceiver(instance_type)) {
         return WriteJSReceiver(Handle<JSReceiver>::cast(object));
@@ -1100,18 +1096,31 @@ Maybe<bool> ValueSerializer::WriteWasmMemory(Handle<WasmMemoryObject> object) {
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 Maybe<bool> ValueSerializer::WriteSharedObject(Handle<HeapObject> object) {
-  DCHECK(object->IsShared());
-  DCHECK(supports_shared_values_);
-  DCHECK_NOT_NULL(delegate_);
-  DCHECK(delegate_->SupportsSharedValues());
+  if (!delegate_ || isolate_->shared_isolate() == nullptr) {
+    return ThrowDataCloneError(MessageTemplate::kDataCloneError, object);
+  }
 
-  v8::Isolate* v8_isolate = reinterpret_cast<v8::Isolate*>(isolate_);
-  Maybe<uint32_t> index =
-      delegate_->GetSharedValueId(v8_isolate, Utils::ToLocal(object));
-  RETURN_VALUE_IF_SCHEDULED_EXCEPTION(isolate_, Nothing<bool>());
+  DCHECK(object->IsShared());
+
+  // The first time a shared object is serialized, a new conveyor is made. This
+  // conveyor is used for every shared object in this serialization and
+  // subsequent deserialization sessions. The embedder owns the lifetime of the
+  // conveyor.
+  if (!shared_object_conveyor_) {
+    v8::Isolate* v8_isolate = reinterpret_cast<v8::Isolate*>(isolate_);
+    v8::SharedValueConveyor v8_conveyor(v8_isolate);
+    shared_object_conveyor_ = v8_conveyor.private_.get();
+    if (!delegate_->AdoptSharedValueConveyor(v8_isolate,
+                                             std::move(v8_conveyor))) {
+      shared_object_conveyor_ = nullptr;
+      RETURN_VALUE_IF_SCHEDULED_EXCEPTION(isolate_, Nothing<bool>());
+      return Nothing<bool>();
+    }
+  }
 
   WriteTag(SerializationTag::kSharedObject);
-  WriteVarint(index.FromJust());
+  WriteVarint(shared_object_conveyor_->Persist(*object));
+
   return ThrowIfOutOfMemory();
 }
 
@@ -1193,7 +1202,6 @@ ValueDeserializer::ValueDeserializer(Isolate* isolate,
       delegate_(delegate),
       position_(data.begin()),
       end_(data.end()),
-      supports_shared_values_(delegate && delegate->SupportsSharedValues()),
       id_map_(isolate->global_handles()->Create(
           ReadOnlyRoots(isolate_).empty_fixed_array())) {}
 
@@ -1203,11 +1211,11 @@ ValueDeserializer::ValueDeserializer(Isolate* isolate, const uint8_t* data,
       delegate_(nullptr),
       position_(data),
       end_(data + size),
-      supports_shared_values_(false),
       id_map_(isolate->global_handles()->Create(
           ReadOnlyRoots(isolate_).empty_fixed_array())) {}
 
 ValueDeserializer::~ValueDeserializer() {
+  DCHECK_LE(position_, end_);
   GlobalHandles::Destroy(id_map_.location());
 
   Handle<Object> transfer_map_handle;
@@ -1220,7 +1228,8 @@ Maybe<bool> ValueDeserializer::ReadHeader() {
   if (position_ < end_ &&
       *position_ == static_cast<uint8_t>(SerializationTag::kVersion)) {
     ReadTag().ToChecked();
-    if (!ReadVarint<uint32_t>().To(&version_) || version_ > kLatestVersion) {
+    if (!ReadVarintLoop<uint32_t>().To(&version_) ||
+        version_ > kLatestVersion) {
       isolate_->Throw(*isolate_->factory()->NewError(
           MessageTemplate::kDataCloneDeserializationVersionError));
       return Nothing<bool>();
@@ -1272,7 +1281,11 @@ Maybe<T> ValueDeserializer::ReadVarint() {
   // DCHECK code to make sure the manually unrolled loop yields the exact
   // same end state and result.
   auto previous_position = position_;
-  T expected_value = ReadVarintLoop<T>().ToChecked();
+  Maybe<T> maybe_expected_value = ReadVarintLoop<T>();
+  if (FLAG_fuzzing && maybe_expected_value.IsNothing()) {
+    return maybe_expected_value;
+  }
+  T expected_value = maybe_expected_value.ToChecked();
   auto expected_position = position_;
   position_ = previous_position;
 #endif  // DEBUG
@@ -1323,7 +1336,10 @@ Maybe<T> ValueDeserializer::ReadVarintLoop() {
       value |= static_cast<T>(byte & 0x7F) << shift;
       shift += 7;
     } else {
-      DCHECK(!has_another_byte);
+      // We allow arbitrary data to be deserialized when fuzzing.
+      // Since {value} is not modified in this branch we can safely skip the
+      // DCHECK when fuzzing.
+      DCHECK_IMPLIES(!v8_flags.fuzzing, !has_another_byte);
     }
     position_++;
   } while (has_another_byte);
@@ -1550,11 +1566,9 @@ MaybeHandle<Object> ValueDeserializer::ReadObjectInternal() {
     case SerializationTag::kHostObject:
       return ReadHostObject();
     case SerializationTag::kSharedObject:
-      if (version_ >= 15 && supports_shared_values_) {
-        return ReadSharedObject();
-      }
-      // If the delegate doesn't support shared values (e.g. older version, or
-      // is for deserializing from storage), treat the tag as unknown.
+      if (version_ >= 15) return ReadSharedObject();
+      // If the data doesn't support shared values because it is from an older
+      // version, treat the tag as unknown.
       V8_FALLTHROUGH;
     default:
       // Before there was an explicit tag for host objects, all unknown tags
@@ -1648,8 +1662,9 @@ bool ValueDeserializer::ReadExpectedString(Handle<String> expected) {
     return {};
   }
   // Length is also checked in ReadRawBytes.
-  DCHECK_LE(byte_length,
-            static_cast<uint32_t>(std::numeric_limits<int32_t>::max()));
+  DCHECK_IMPLIES(!FLAG_fuzzing,
+                 byte_length <= static_cast<uint32_t>(
+                                    std::numeric_limits<int32_t>::max()));
   if (!ReadRawBytes(byte_length).To(&bytes)) {
     position_ = original_position;
     return false;
@@ -1870,7 +1885,7 @@ MaybeHandle<JSRegExp> ValueDeserializer::ReadJSRegExp() {
   // Ensure the deserialized flags are valid.
   uint32_t bad_flags_mask = static_cast<uint32_t>(-1) << JSRegExp::kFlagCount;
   // kLinear is accepted only with the appropriate flag.
-  if (!FLAG_enable_experimental_regexp_engine) {
+  if (!v8_flags.enable_experimental_regexp_engine) {
     bad_flags_mask |= JSRegExp::kLinear;
   }
   if ((raw_flags & bad_flags_mask) ||
@@ -2082,7 +2097,7 @@ bool ValueDeserializer::ValidateAndSetJSArrayBufferViewFlags(
   // serialized_flags doesn't contain spurious 1-bits.
 
   if (is_backed_by_rab || is_length_tracking) {
-    if (!FLAG_harmony_rab_gsab) {
+    if (!v8_flags.harmony_rab_gsab) {
       return false;
     }
     if (!buffer.is_resizable()) {
@@ -2233,23 +2248,47 @@ MaybeHandle<WasmMemoryObject> ValueDeserializer::ReadWasmMemory() {
 }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
+namespace {
+
+// Throws a generic "deserialization failed" exception by default, unless a more
+// specific exception has already been thrown.
+void ThrowDeserializationExceptionIfNonePending(Isolate* isolate) {
+  if (!isolate->has_pending_exception()) {
+    isolate->Throw(*isolate->factory()->NewError(
+        MessageTemplate::kDataCloneDeserializationError));
+  }
+  DCHECK(isolate->has_pending_exception());
+}
+
+}  // namespace
+
 MaybeHandle<HeapObject> ValueDeserializer::ReadSharedObject() {
   STACK_CHECK(isolate_, MaybeHandle<HeapObject>());
   DCHECK_GE(version_, 15);
-  DCHECK(supports_shared_values_);
-  DCHECK_NOT_NULL(delegate_);
-  DCHECK(delegate_->SupportsSharedValues());
-  v8::Isolate* v8_isolate = reinterpret_cast<v8::Isolate*>(isolate_);
-  uint32_t shared_value_id;
-  Local<Value> shared_value;
-  if (!ReadVarint<uint32_t>().To(&shared_value_id) ||
-      !delegate_->GetSharedValueFromId(v8_isolate, shared_value_id)
-           .ToLocal(&shared_value)) {
+
+  uint32_t shared_object_id;
+  if (!ReadVarint<uint32_t>().To(&shared_object_id)) {
     RETURN_EXCEPTION_IF_SCHEDULED_EXCEPTION(isolate_, HeapObject);
     return MaybeHandle<HeapObject>();
   }
-  Handle<HeapObject> shared_object =
-      Handle<HeapObject>::cast(Utils::OpenHandle(*shared_value));
+
+  if (!delegate_) {
+    ThrowDeserializationExceptionIfNonePending(isolate_);
+    return MaybeHandle<HeapObject>();
+  }
+
+  if (shared_object_conveyor_ == nullptr) {
+    const v8::SharedValueConveyor* conveyor = delegate_->GetSharedValueConveyor(
+        reinterpret_cast<v8::Isolate*>(isolate_));
+    if (!conveyor) {
+      RETURN_EXCEPTION_IF_SCHEDULED_EXCEPTION(isolate_, HeapObject);
+      return MaybeHandle<HeapObject>();
+    }
+    shared_object_conveyor_ = conveyor->private_.get();
+  }
+
+  Handle<HeapObject> shared_object(
+      shared_object_conveyor_->GetPersisted(shared_object_id), isolate_);
   DCHECK(shared_object->IsShared());
   return shared_object;
 }
@@ -2357,6 +2396,10 @@ Maybe<uint32_t> ValueDeserializer::ReadJSObjectProperties(
       // (though generalization may be required), store the property value so
       // that we can copy them all at once. Otherwise, stop transitioning.
       if (transitioning) {
+        // Deserializaton of |value| might have deprecated current |target|,
+        // ensure we are working with the up-to-date version.
+        target = Map::Update(isolate_, target);
+
         InternalIndex descriptor(properties.size());
         PropertyDetails details =
             target->instance_descriptors(isolate_).GetDetails(descriptor);
@@ -2481,20 +2524,6 @@ static Maybe<bool> SetPropertiesFromKeyValuePairs(Isolate* isolate,
   }
   return Just(true);
 }
-
-namespace {
-
-// Throws a generic "deserialization failed" exception by default, unless a more
-// specific exception has already been thrown.
-void ThrowDeserializationExceptionIfNonePending(Isolate* isolate) {
-  if (!isolate->has_pending_exception()) {
-    isolate->Throw(*isolate->factory()->NewError(
-        MessageTemplate::kDataCloneDeserializationError));
-  }
-  DCHECK(isolate->has_pending_exception());
-}
-
-}  // namespace
 
 MaybeHandle<Object>
 ValueDeserializer::ReadObjectUsingEntireBufferForLegacyFormat() {

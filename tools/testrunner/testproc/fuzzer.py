@@ -17,8 +17,11 @@ EXTRA_FLAGS = [
     (0.1, '--force-slow-path'),
     (0.2, '--future'),
     (0.1, '--interrupt-budget=100'),
+    # TODO(almuthanna): enable again when the FYI bots are greener
+    # (0.1, '--interrupt-budget-for-maglev=100'),
     (0.1, '--liftoff'),
     (0.1, '--maglev'),
+    (0.1, '--minor-mc'),
     (0.2, '--no-analyze-environment-liveness'),
     # TODO(machenbach): Enable when it doesn't collide with crashing on missing
     # simd features.
@@ -243,10 +246,11 @@ class FuzzerProc(base.TestProcProducer):
       i += 1
 
   def _try_send_next_test(self, test):
-    if not self.is_stopped:
-      for subtest in self._gens[test.procid]:
-        if self._send_test(subtest):
-          return True
+    for subtest in self._gens[test.procid]:
+      if self._send_test(subtest):
+        return True
+      elif self.is_stopped:
+        return False
 
     del self._gens[test.procid]
     return False
@@ -319,17 +323,18 @@ class CompactionFuzzer(Fuzzer):
 class InterruptBudgetFuzzer(Fuzzer):
   def create_flags_generator(self, rng, test, analysis_value):
     while True:
-      # Half with half without lazy feedback allocation. The first flag
+      # Half with, half without lazy feedback allocation. The first flag
       # overwrites potential flag negations from the extra flags list.
       flag1 = rng.choice(
-          '--lazy-feedback-allocation', '--no-lazy-feedback-allocation')
-      # For most code paths, only one of the flags below has a meaning
-      # based on the flag above.
+          ['--lazy-feedback-allocation', '--no-lazy-feedback-allocation'])
       flag2 = '--interrupt-budget=%d' % rng.randint(0, 135168)
-      flag3 = '--interrupt-budget-for-feedback-allocation=%d' % rng.randint(
+      flag3 = '--interrupt-budget-for-maglev=%d' % rng.randint(0, 40960)
+      flag4 = '--interrupt-budget-for-feedback-allocation=%d' % rng.randint(
           0, 940)
+      flag5 = '--interrupt-budget-factor-for-feedback-allocation=%d' % rng.randint(
+          1, 8)
 
-      yield [flag1, flag2, flag3]
+      yield [flag1, flag2, flag3, flag4, flag5]
 
 
 class StackSizeFuzzer(Fuzzer):
@@ -388,15 +393,15 @@ class DeoptFuzzer(Fuzzer):
 
 
 FUZZERS = {
-  'compaction': (None, CompactionFuzzer),
-  'delay': (None, TaskDelayFuzzer),
-  'deopt': (DeoptAnalyzer, DeoptFuzzer),
-  'gc_interval': (GcIntervalAnalyzer, GcIntervalFuzzer),
-  'interrupt': InterruptBudgetFuzzer,
-  'marking': (MarkingAnalyzer, MarkingFuzzer),
-  'scavenge': (ScavengeAnalyzer, ScavengeFuzzer),
-  'stack': (None, StackSizeFuzzer),
-  'threads': (None, ThreadPoolSizeFuzzer),
+    'compaction': (None, CompactionFuzzer),
+    'delay': (None, TaskDelayFuzzer),
+    'deopt': (DeoptAnalyzer, DeoptFuzzer),
+    'gc_interval': (GcIntervalAnalyzer, GcIntervalFuzzer),
+    'interrupt': (None, InterruptBudgetFuzzer),
+    'marking': (MarkingAnalyzer, MarkingFuzzer),
+    'scavenge': (ScavengeAnalyzer, ScavengeFuzzer),
+    'stack': (None, StackSizeFuzzer),
+    'threads': (None, ThreadPoolSizeFuzzer),
 }
 
 

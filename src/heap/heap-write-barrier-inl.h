@@ -11,6 +11,7 @@
 #include "src/common/code-memory-access-inl.h"
 #include "src/common/globals.h"
 #include "src/heap/heap-write-barrier.h"
+#include "src/heap/marking-barrier.h"
 #include "src/objects/code.h"
 #include "src/objects/compressed-slots-inl.h"
 #include "src/objects/fixed-array.h"
@@ -27,7 +28,6 @@ V8_EXPORT_PRIVATE void Heap_CombinedGenerationalAndSharedBarrierSlow(
     HeapObject object, Address slot, HeapObject value);
 V8_EXPORT_PRIVATE void Heap_CombinedGenerationalAndSharedEphemeronBarrierSlow(
     EphemeronHashTable table, Address slot, HeapObject value);
-V8_EXPORT_PRIVATE void Heap_WriteBarrierForCodeSlow(Code host);
 
 V8_EXPORT_PRIVATE void Heap_GenerationalBarrierForCodeSlow(Code host,
                                                            RelocInfo* rinfo,
@@ -152,10 +152,6 @@ inline void WriteBarrierForCode(Code host, RelocInfo* rinfo, HeapObject value,
   WriteBarrier::Marking(host, rinfo, value);
 }
 
-inline void WriteBarrierForCode(Code host) {
-  Heap_WriteBarrierForCodeSlow(host);
-}
-
 inline void CombinedWriteBarrier(HeapObject host, ObjectSlot slot, Object value,
                                  WriteBarrierMode mode) {
   if (mode == SKIP_WRITE_BARRIER) {
@@ -228,7 +224,7 @@ inline void GenerationalBarrierForCode(Code host, RelocInfo* rinfo,
 
 inline WriteBarrierMode GetWriteBarrierModeForObject(
     HeapObject object, const DisallowGarbageCollection* promise) {
-  if (FLAG_disable_write_barriers) return SKIP_WRITE_BARRIER;
+  if (v8_flags.disable_write_barriers) return SKIP_WRITE_BARRIER;
   DCHECK(Heap_PageFlagsAreConsistent(object));
   heap_internals::MemoryChunk* chunk =
       heap_internals::MemoryChunk::FromHeapObject(object);
@@ -240,7 +236,7 @@ inline WriteBarrierMode GetWriteBarrierModeForObject(
 inline bool ObjectInYoungGeneration(Object object) {
   // TODO(rong): Fix caller of this function when we deploy
   // v8_use_third_party_heap.
-  if (FLAG_single_generation) return false;
+  if (v8_flags.single_generation) return false;
   if (object.IsSmi()) return false;
   return heap_internals::MemoryChunk::FromHeapObject(HeapObject::cast(object))
       ->InYoungGeneration();
@@ -359,6 +355,12 @@ void WriteBarrier::MarkingFromInternalFields(JSObject host) {
   if (V8_ENABLE_THIRD_PARTY_HEAP_BOOL) return;
   auto heap = GetHeapIfMarking(host);
   if (!heap) return;
+  if (CurrentMarkingBarrier(heap.value())->is_minor()) {
+    // TODO(v8:13012): We do not currently mark Oilpan objects while MinorMC is
+    // active. Once Oilpan uses a generational GC with incremental marking and
+    // unified heap, this barrier will be needed again.
+    return;
+  }
   MarkingSlowFromInternalFields(*heap, host);
 }
 

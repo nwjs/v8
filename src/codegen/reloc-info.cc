@@ -309,11 +309,10 @@ bool RelocInfo::OffHeapTargetIsCodedSpecially() {
 #if defined(V8_TARGET_ARCH_ARM) || defined(V8_TARGET_ARCH_ARM64) || \
     defined(V8_TARGET_ARCH_X64)
   return false;
-#elif defined(V8_TARGET_ARCH_IA32) || defined(V8_TARGET_ARCH_MIPS) ||     \
-    defined(V8_TARGET_ARCH_MIPS64) || defined(V8_TARGET_ARCH_PPC) ||      \
-    defined(V8_TARGET_ARCH_PPC64) || defined(V8_TARGET_ARCH_S390) ||      \
-    defined(V8_TARGET_ARCH_RISCV64) || defined(V8_TARGET_ARCH_LOONG64) || \
-    defined(V8_TARGET_ARCH_RISCV32)
+#elif defined(V8_TARGET_ARCH_IA32) || defined(V8_TARGET_ARCH_MIPS64) || \
+    defined(V8_TARGET_ARCH_PPC) || defined(V8_TARGET_ARCH_PPC64) ||     \
+    defined(V8_TARGET_ARCH_S390) || defined(V8_TARGET_ARCH_RISCV64) ||  \
+    defined(V8_TARGET_ARCH_LOONG64) || defined(V8_TARGET_ARCH_RISCV32)
   return true;
 #endif
 }
@@ -345,12 +344,12 @@ void RelocInfo::set_wasm_stub_call_address(Address address,
 void RelocInfo::set_target_address(Address target,
                                    WriteBarrierMode write_barrier_mode,
                                    ICacheFlushMode icache_flush_mode) {
-  DCHECK(IsCodeTargetMode(rmode_) || IsRuntimeEntry(rmode_) ||
-         IsWasmCall(rmode_));
+  DCHECK(IsCodeTargetMode(rmode_) || IsNearBuiltinEntry(rmode_) ||
+         IsRuntimeEntry(rmode_) || IsWasmCall(rmode_));
   Assembler::set_target_address_at(pc_, constant_pool_, target,
                                    icache_flush_mode);
   if (!host().is_null() && IsCodeTargetMode(rmode_) &&
-      !FLAG_disable_write_barriers) {
+      !v8_flags.disable_write_barriers) {
     Code target_code = Code::GetCodeFromTargetAddress(target);
     WriteBarrierForCode(host(), this, target_code, write_barrier_mode);
   }
@@ -416,6 +415,8 @@ const char* RelocInfo::RelocModeName(RelocInfo::Mode rmode) {
       return "encoded internal reference";
     case OFF_HEAP_TARGET:
       return "off heap target";
+    case NEAR_BUILTIN_ENTRY:
+      return "near builtin entry";
     case DEOPT_SCRIPT_OFFSET:
       return "deopt script offset";
     case DEOPT_INLINING_ID:
@@ -522,6 +523,13 @@ void RelocInfo::Verify(Isolate* isolate) {
     }
     case OFF_HEAP_TARGET: {
       Address addr = target_off_heap_target();
+      CHECK_NE(addr, kNullAddress);
+      CHECK(Builtins::IsBuiltinId(
+          OffHeapInstructionStream::TryLookupCode(isolate, addr)));
+      break;
+    }
+    case NEAR_BUILTIN_ENTRY: {
+      Address addr = target_address();
       CHECK_NE(addr, kNullAddress);
       CHECK(Builtins::IsBuiltinId(
           OffHeapInstructionStream::TryLookupCode(isolate, addr)));

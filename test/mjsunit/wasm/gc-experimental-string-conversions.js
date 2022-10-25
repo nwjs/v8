@@ -10,18 +10,18 @@ var builder = new WasmModuleBuilder();
 
 let i16Array = builder.addArray(kWasmI16, true);
 
-builder.addFunction('getHelloArray', makeSig([], [kWasmAnyRef]))
+builder.addFunction('getHelloArray', makeSig([], [kWasmArrayRef]))
     .addBody([
       ...wasmI32Const(72), ...wasmI32Const(69), ...wasmI32Const(76),
       ...wasmI32Const(76), ...wasmI32Const(79),
-      kGCPrefix, kExprArrayNewFixedStatic, i16Array, 5
+      kGCPrefix, kExprArrayNewFixed, i16Array, 5
     ])
     .exportFunc();
 
-builder.addFunction('getChar', makeSig([kWasmAnyRef, kWasmI32], [kWasmI32]))
+builder.addFunction('getChar', makeSig([kWasmArrayRef, kWasmI32], [kWasmI32]))
     .addBody([
       kExprLocalGet, 0, kGCPrefix, kExprRefAsData, kGCPrefix,
-      kExprRefCastStatic, i16Array, kExprLocalGet, 1, kGCPrefix, kExprArrayGetS,
+      kExprRefCast, i16Array, kExprLocalGet, 1, kGCPrefix, kExprArrayGetS,
       i16Array
     ])
     .exportFunc();

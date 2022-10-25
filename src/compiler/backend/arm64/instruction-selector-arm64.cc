@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 #include "src/base/bits.h"
-#include "src/base/platform/wrappers.h"
 #include "src/codegen/assembler-inl.h"
 #include "src/codegen/machine-type.h"
 #include "src/common/globals.h"
@@ -1669,8 +1668,17 @@ void EmitInt32MulWithOverflow(InstructionSelector* selector, Node* node,
   Int32BinopMatcher m(node);
   InstructionOperand result = g.DefineAsRegister(node);
   InstructionOperand left = g.UseRegister(m.left().node());
-  InstructionOperand right = g.UseRegister(m.right().node());
-  selector->Emit(kArm64Smull, result, left, right);
+
+  if (m.right().HasResolvedValue() &&
+      base::bits::IsPowerOfTwo(m.right().ResolvedValue())) {
+    // Sign extend the bottom 32 bits and shift left.
+    int32_t shift = base::bits::WhichPowerOfTwo(m.right().ResolvedValue());
+    selector->Emit(kArm64Sbfiz, result, left, g.TempImmediate(shift),
+                   g.TempImmediate(32));
+  } else {
+    InstructionOperand right = g.UseRegister(m.right().node());
+    selector->Emit(kArm64Smull, result, left, right);
+  }
 
   InstructionCode opcode =
       kArm64Cmp | AddressingModeField::encode(kMode_Operand2_R_SXTW);
@@ -2013,6 +2021,8 @@ void InstructionSelector::VisitChangeInt32ToInt64(Node* node) {
         immediate_mode = kLoadStoreImm16;
         break;
       case MachineRepresentation::kWord32:
+      case MachineRepresentation::kTaggedSigned:
+      case MachineRepresentation::kTagged:
         opcode = kArm64Ldrsw;
         immediate_mode = kLoadStoreImm32;
         break;
@@ -3380,6 +3390,7 @@ void InstructionSelector::VisitFloat64Mul(Node* node) {
 }
 
 void InstructionSelector::VisitMemoryBarrier(Node* node) {
+  // Use DMB ISH for both acquire-release and sequentially consistent barriers.
   Arm64OperandGenerator g(this);
   Emit(kArm64DmbIsh, g.NoOutput());
 }

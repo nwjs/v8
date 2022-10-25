@@ -19,6 +19,7 @@
 #include "src/base/macros.h"
 #include "src/base/utils/random-number-generator.h"
 #include "src/handles/handles.h"
+#include "src/heap/parked-scope.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/objects.h"
 #include "src/zone/accounting-allocator.h"
@@ -44,7 +45,7 @@ class WithDefaultPlatformMixin : public TMixin {
     v8::V8::Initialize();
   }
 
-  ~WithDefaultPlatformMixin() {
+  virtual ~WithDefaultPlatformMixin() {
     CHECK_NOT_NULL(platform_.get());
     v8::V8::Dispose();
     v8::V8::DisposePlatform();
@@ -56,11 +57,15 @@ class WithDefaultPlatformMixin : public TMixin {
   std::unique_ptr<v8::Platform> platform_;
 };
 
+template <typename TMixin>
+class WithJSSharedMemoryFeatureFlagsMixin : public TMixin {
+ public:
+  WithJSSharedMemoryFeatureFlagsMixin() { i::FLAG_harmony_struct = true; }
+};
+
 using CounterMap = std::map<std::string, int>;
 
 enum CountersMode { kNoCounters, kEnableCounters };
-
-enum IsolateSharedMode { kStandaloneIsolate, kSharedIsolate, kClientIsolate };
 
 // RAII-like Isolate instance wrapper.
 //
@@ -68,9 +73,7 @@ enum IsolateSharedMode { kStandaloneIsolate, kSharedIsolate, kClientIsolate };
 // all client Isolates.
 class IsolateWrapper final {
  public:
-  IsolateWrapper(CountersMode counters_mode,
-                 IsolateSharedMode shared_mode = kStandaloneIsolate,
-                 v8::Isolate* shared_isolate_if_client = nullptr);
+  explicit IsolateWrapper(CountersMode counters_mode);
 
   ~IsolateWrapper();
   IsolateWrapper(const IsolateWrapper&) = delete;
@@ -90,43 +93,12 @@ class IsolateWrapper final {
 template <typename TMixin, CountersMode kCountersMode = kNoCounters>
 class WithIsolateMixin : public TMixin {
  public:
-  WithIsolateMixin() : isolate_wrapper_(kCountersMode, kStandaloneIsolate) {}
+  WithIsolateMixin() : isolate_wrapper_(kCountersMode) {}
 
   v8::Isolate* v8_isolate() const { return isolate_wrapper_.isolate(); }
 
  private:
   v8::IsolateWrapper isolate_wrapper_;
-};
-
-// Warning: This is not a drop-in replacement for WithIsolateMixin!
-//
-// Users of WithMaybeSharedIsolateMixin, including TEST_F tests and classes that
-// mix this class in, must explicit check IsJSSharedMemorySupported() before
-// calling v8_isolate(). Creating shared Isolates is not supported on all build
-// configurations.
-template <typename TMixin, CountersMode kCountersMode = kNoCounters>
-class WithMaybeSharedIsolateMixin : public TMixin {
- public:
-  WithMaybeSharedIsolateMixin() {
-    if (IsJSSharedMemorySupported()) {
-      isolate_wrapper_.emplace(kCountersMode, kSharedIsolate);
-    }
-  }
-
-  bool IsJSSharedMemorySupported() const {
-    DCHECK_IMPLIES(
-        internal::ReadOnlyHeap::IsReadOnlySpaceShared(),
-        !COMPRESS_POINTERS_BOOL || COMPRESS_POINTERS_IN_SHARED_CAGE_BOOL);
-    return internal::ReadOnlyHeap::IsReadOnlySpaceShared();
-  }
-
-  v8::Isolate* v8_isolate() const {
-    DCHECK(IsJSSharedMemorySupported());
-    return isolate_wrapper_->isolate();
-  }
-
- private:
-  base::Optional<v8::IsolateWrapper> isolate_wrapper_;
 };
 
 template <typename TMixin>
@@ -187,28 +159,47 @@ class WithIsolateScopeMixin : public TMixin {
         .ToLocalChecked();
   }
 
-  void CollectGarbage(i::AllocationSpace space) {
-    i_isolate()->heap()->CollectGarbage(space,
-                                        i::GarbageCollectionReason::kTesting);
+  void CollectGarbage(i::AllocationSpace space, i::Isolate* isolate = nullptr) {
+    i::Isolate* iso = isolate ? isolate : i_isolate();
+    iso->heap()->CollectGarbage(space, i::GarbageCollectionReason::kTesting,
+                                kNoGCCallbackFlags);
   }
 
-  void CollectAllGarbage() {
-    i_isolate()->heap()->CollectAllGarbage(
-        i::Heap::kNoGCFlags, i::GarbageCollectionReason::kTesting);
+  void CollectAllGarbage(i::Isolate* isolate = nullptr) {
+    i::Isolate* iso = isolate ? isolate : i_isolate();
+    iso->heap()->CollectAllGarbage(i::Heap::kNoGCFlags,
+                                   i::GarbageCollectionReason::kTesting,
+                                   kNoGCCallbackFlags);
   }
 
-  void CollectAllAvailableGarbage() {
-    i_isolate()->heap()->CollectAllAvailableGarbage(
+  void CollectAllAvailableGarbage(i::Isolate* isolate = nullptr) {
+    i::Isolate* iso = isolate ? isolate : i_isolate();
+    iso->heap()->CollectAllAvailableGarbage(
         i::GarbageCollectionReason::kTesting);
   }
 
-  void PreciseCollectAllGarbage() {
-    i_isolate()->heap()->PreciseCollectAllGarbage(
-        i::Heap::kNoGCFlags, i::GarbageCollectionReason::kTesting);
+  void PreciseCollectAllGarbage(i::Isolate* isolate = nullptr) {
+    i::Isolate* iso = isolate ? isolate : i_isolate();
+    iso->heap()->PreciseCollectAllGarbage(i::Heap::kNoGCFlags,
+                                          i::GarbageCollectionReason::kTesting,
+                                          kNoGCCallbackFlags);
   }
 
   v8::Local<v8::String> NewString(const char* string) {
     return v8::String::NewFromUtf8(this->v8_isolate(), string).ToLocalChecked();
+  }
+
+  void EmptyMessageQueues() {
+    while (v8::platform::PumpMessageLoop(internal::V8::GetCurrentPlatform(),
+                                         this->v8_isolate())) {
+    }
+  }
+
+  void ExpectString(const char* code, const char* expected) {
+    v8::Local<v8::Value> result = RunJS(code);
+    CHECK(result->IsString());
+    v8::String::Utf8Value utf8(v8::Isolate::GetCurrent(), result);
+    CHECK_EQ(0, strcmp(expected, *utf8));
   }
 
  private:
@@ -400,6 +391,14 @@ using TestWithIsolateAndZone =                 //
                     WithDefaultPlatformMixin<  //
                         ::testing::Test>>>>>;
 
+using TestWithContextAndZone =                 //
+    WithZoneMixin<                             //
+        WithContextMixin<                      //
+            WithIsolateScopeMixin<             //
+                WithIsolateMixin<              //
+                    WithDefaultPlatformMixin<  //
+                        ::testing::Test>>>>>;
+
 using TestWithNativeContext =                  //
     WithInternalIsolateMixin<                  //
         WithContextMixin<                      //
@@ -426,10 +425,25 @@ using TestWithNativeContextAndZone =               //
                         WithDefaultPlatformMixin<  //
                             ::testing::Test>>>>>>;
 
-using TestWithSharedIsolate =                       //
-    WithMaybeSharedIsolateMixin<                    //
-        WithDefaultPlatformMixin<::testing::Test>,  //
-        kNoCounters>;
+using TestJSSharedMemoryWithPlatform =        //
+    WithDefaultPlatformMixin<                 //
+        WithJSSharedMemoryFeatureFlagsMixin<  //
+            ::testing::Test>>;
+
+// Using this will FATAL when !V8_CAN_CREATE_SHARED_HEAP_BOOL
+using TestJSSharedMemoryWithIsolate =  //
+    WithInternalIsolateMixin<          //
+        WithIsolateScopeMixin<         //
+            WithIsolateMixin<          //
+                TestJSSharedMemoryWithPlatform>>>;
+
+// Using this will FATAL when !V8_CAN_CREATE_SHARED_HEAP_BOOL
+using TestJSSharedMemoryWithNativeContext =  //
+    WithInternalIsolateMixin<                //
+        WithContextMixin<                    //
+            WithIsolateScopeMixin<           //
+                WithIsolateMixin<            //
+                    TestJSSharedMemoryWithPlatform>>>>;
 
 class V8_NODISCARD SaveFlags {
  public:
@@ -532,6 +546,20 @@ Handle<FeedbackVector> NewFeedbackVector(Isolate* isolate, Spec* spec) {
   return FeedbackVector::New(isolate, shared, closure_feedback_cell_array,
                              &is_compiled_scope);
 }
+
+class ParkingThread : public v8::base::Thread {
+ public:
+  explicit ParkingThread(const Options& options) : v8::base::Thread(options) {}
+
+  void ParkedJoin(const ParkedScope& scope) {
+    USE(scope);
+    Join();
+  }
+
+ private:
+  using v8::base::Thread::Join;
+};
+
 #ifdef V8_CC_GNU
 
 #if V8_HOST_ARCH_X64

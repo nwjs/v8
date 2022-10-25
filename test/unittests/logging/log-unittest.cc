@@ -1125,13 +1125,13 @@ TEST_F(LogTest, ConsoleTimeEvents) {
 class LogFunctionEventsTest : public LogTest {
  public:
   static void SetUpTestSuite() {
-    i::FLAG_log_function_events = true;
+    i::v8_flags.log_function_events = true;
     LogTest::SetUpTestSuite();
   }
 };
 
 TEST_F(LogFunctionEventsTest, LogFunctionEvents) {
-  // Always opt and stress opt will break the fine-grained log order.
+  // --always-turbofan will break the fine-grained log order.
   if (i::FLAG_always_turbofan) return;
 
   {

@@ -231,9 +231,6 @@ class Arm64OperandConverter final : public InstructionOperandConverter {
       case Constant::kCompressedHeapObject:  // Fall through.
       case Constant::kHeapObject:
         return Operand(constant.ToHeapObject());
-      case Constant::kDelayedStringConstant:
-        return Operand::EmbeddedStringConstant(
-            constant.ToDelayedStringConstant());
       case Constant::kRpoNumber:
         UNREACHABLE();  // TODO(dcarney): RPO immediates on arm64.
     }
@@ -1476,6 +1473,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArm64Ubfiz32:
       __ Ubfiz(i.OutputRegister32(), i.InputRegister32(0), i.InputInt5(1),
                i.InputInt5(2));
+      break;
+    case kArm64Sbfiz:
+      __ Sbfiz(i.OutputRegister(), i.InputRegister(0), i.InputInt6(1),
+               i.InputInt6(2));
       break;
     case kArm64Bfi:
       __ Bfi(i.OutputRegister(), i.InputRegister(1), i.InputInt6(2),

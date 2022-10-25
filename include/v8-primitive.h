@@ -20,6 +20,7 @@ class String;
 namespace internal {
 class ExternalString;
 class ScopedExternalStringLock;
+class StringForwardingTable;
 }  // namespace internal
 
 /**
@@ -284,6 +285,7 @@ class V8_EXPORT String : public Name {
    private:
     friend class internal::ExternalString;
     friend class v8::String;
+    friend class internal::StringForwardingTable;
     friend class internal::ScopedExternalStringLock;
   };
 

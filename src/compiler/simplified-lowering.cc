@@ -1980,12 +1980,12 @@ class RepresentationSelector {
     switch (type.kind()) {
       case wasm::kI32:
         return MachineType::Int32();
+      case wasm::kI64:
+        return MachineType::Int64();
       case wasm::kF32:
         return MachineType::Float32();
       case wasm::kF64:
         return MachineType::Float64();
-      case wasm::kI64:
-        // Not used for i64, see VisitJSWasmCall().
       default:
         UNREACHABLE();
     }
@@ -2055,17 +2055,11 @@ class RepresentationSelector {
     ProcessRemainingInputs<T>(node, NodeProperties::FirstEffectIndex(node));
 
     if (wasm_signature->return_count() == 1) {
-      if (wasm_signature->GetReturn().kind() == wasm::kI64) {
-        // Conversion between negative int64 and BigInt not supported yet.
-        // Do not bypass the type conversion when the result type is i64.
-        SetOutput<T>(node, MachineRepresentation::kTagged);
-      } else {
-        MachineType return_type =
-            MachineTypeForWasmReturnType(wasm_signature->GetReturn());
-        SetOutput<T>(
-            node, return_type.representation(),
-            JSWasmCallNode::TypeForWasmReturnType(wasm_signature->GetReturn()));
-      }
+      MachineType return_type =
+          MachineTypeForWasmReturnType(wasm_signature->GetReturn());
+      SetOutput<T>(
+          node, return_type.representation(),
+          JSWasmCallNode::TypeForWasmReturnType(wasm_signature->GetReturn()));
     } else {
       DCHECK_EQ(wasm_signature->return_count(), 0);
       SetOutput<T>(node, MachineRepresentation::kTagged);
@@ -2161,7 +2155,6 @@ class RepresentationSelector {
         return;
       }
       case IrOpcode::kHeapConstant:
-      case IrOpcode::kDelayedStringConstant:
         return VisitLeaf<T>(node, MachineRepresentation::kTaggedPointer);
       case IrOpcode::kPointerConstant: {
         VisitLeaf<T>(node, MachineType::PointerRepresentation());
@@ -3240,6 +3233,33 @@ class RepresentationSelector {
           if (lower<T>()) {
             ChangeOp(node, lowering->simplified()->BigIntMultiply());
           }
+        }
+        return;
+      }
+      case IrOpcode::kSpeculativeBigIntBitwiseAnd: {
+        if (truncation.IsUsedAsWord64()) {
+          VisitBinop<T>(
+              node, UseInfo::CheckedBigIntTruncatingWord64(FeedbackSource{}),
+              MachineRepresentation::kWord64);
+          if (lower<T>()) {
+            ChangeToPureOp(node, lowering->machine()->Word64And());
+          }
+        } else {
+          VisitBinop<T>(node,
+                        UseInfo::CheckedBigIntAsTaggedPointer(FeedbackSource{}),
+                        MachineRepresentation::kTaggedPointer);
+          if (lower<T>()) {
+            ChangeOp(node, lowering->simplified()->BigIntBitwiseAnd());
+          }
+        }
+        return;
+      }
+      case IrOpcode::kSpeculativeBigIntDivide: {
+        VisitBinop<T>(node,
+                      UseInfo::CheckedBigIntAsTaggedPointer(FeedbackSource{}),
+                      MachineRepresentation::kTaggedPointer);
+        if (lower<T>()) {
+          ChangeOp(node, lowering->simplified()->BigIntDivide());
         }
         return;
       }

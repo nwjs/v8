@@ -178,10 +178,10 @@ declare_args() {
   #
   # To do profile-guided optimizations of builtins:
   # 1. Build with v8_enable_builtins_profiling = true
-  # 2. Run your chosen workload with the --turbo-profiling-log-builtins flag.
+  # 2. Run your chosen workload with the --turbo-profiling-output flag.
   #    For Chrome, the invocation might look like this:
   #      chrome --no-sandbox --disable-extensions
-  #        --js-flags="--turbo-profiler-output=v8.builtins.pgo"
+  #        --js-flags="--turbo-profiling-output=v8.builtins.pgo"
   #        "http://localhost/test-suite"
   # 3. Run tools/builtins-pgo/get_hints.py to produce the branch hints,
   #    selecting min_count and threshold_ratio as you wish.
@@ -307,14 +307,6 @@ declare_args() {
   # Sets -DV8_ENABLE_SANDBOX.
   v8_enable_sandbox = false
 
-  # Enable sandboxing for all external pointers. Requires v8_enable_sandbox.
-  # Sets -DV8_SANDBOXED_EXTERNAL_POINTERS.
-  v8_enable_sandboxed_external_pointers = false
-
-  # Enable sandboxed pointers. Requires v8_enable_sandbox.
-  # Sets -DV8_SANDBOXED_POINTERS.
-  v8_enable_sandboxed_pointers = false
-
   # Enable all available sandbox features. Implies v8_enable_sandbox.
   v8_enable_sandbox_future = false
 
@@ -426,6 +418,21 @@ if (v8_enable_pointer_compression == "") {
   v8_enable_pointer_compression =
       v8_current_cpu == "arm64" || v8_current_cpu == "x64"
 }
+
+# Toggle pointer compression for correctness fuzzing when building the
+# clang_x64_pointer_compression toolchain. We'll correctness-compare the
+# default build with the clang_x64_pointer_compression build.
+if (v8_multi_arch_build &&
+    rebase_path(get_label_info(":d8", "root_out_dir"), root_build_dir) ==
+    "clang_x64_pointer_compression") {
+  v8_enable_pointer_compression = !v8_enable_pointer_compression
+}
+
+# Ensure the sandbox is on/off in the same way as pointer compression for
+# correctness fuzzing builds.
+if (v8_multi_arch_build) {
+  v8_enable_sandbox = v8_enable_pointer_compression
+}
 if (v8_enable_pointer_compression_shared_cage == "") {
   v8_enable_pointer_compression_shared_cage = v8_enable_pointer_compression
 }
@@ -489,23 +496,6 @@ assert(!v8_enable_trace_ignition || v8_enable_trace_unoptimized,
 assert(!v8_enable_trace_baseline_exec || v8_enable_trace_unoptimized,
        "Baseline tracing requires unoptimized tracing to be enabled.")
 
-# Toggle pointer compression for correctness fuzzing when building the
-# clang_x64_pointer_compression toolchain. We'll correctness-compare the
-# default build with the clang_x64_pointer_compression build.
-if (v8_multi_arch_build &&
-    rebase_path(get_label_info(":d8", "root_out_dir"), root_build_dir) ==
-    "clang_x64_pointer_compression") {
-  v8_enable_pointer_compression = !v8_enable_pointer_compression
-  v8_enable_pointer_compression_shared_cage = v8_enable_pointer_compression
-  v8_enable_external_code_space = v8_enable_pointer_compression
-}
-
-# Ensure the sandbox is on/off in the same way as pointer compression for
-# correctness fuzzing builds.
-if (v8_multi_arch_build) {
-  v8_enable_sandbox = v8_enable_pointer_compression
-}
-
 # Check if it is a Chromium build and activate PAC/BTI if needed.
 # TODO(cavalcantii): have a single point of integration with PAC/BTI flags.
 if (build_with_chromium && v8_current_cpu == "arm64" &&
@@ -536,15 +526,8 @@ if (v8_enable_sandbox == "") {
       v8_enable_external_code_space && target_os != "fuchsia"
 }
 
-# Enable sandboxed pointers when the sandbox is enabled.
-if (v8_enable_sandbox) {
-  v8_enable_sandboxed_pointers = false
-}
-
 # Enable all available sandbox features if sandbox future is enabled.
 if (v8_enable_sandbox_future) {
-  v8_enable_sandboxed_pointers = true
-  v8_enable_sandboxed_external_pointers = true
   v8_enable_sandbox = true
 }
 
@@ -578,12 +561,6 @@ assert(!v8_enable_sandbox || v8_enable_pointer_compression_shared_cage,
 
 assert(!v8_enable_sandbox || v8_enable_external_code_space,
        "The sandbox requires the external code space")
-
-assert(!v8_enable_sandboxed_pointers || v8_enable_sandbox,
-       "Sandboxed pointers require the sandbox")
-
-assert(!v8_enable_sandboxed_external_pointers || v8_enable_sandbox,
-       "Sandboxed external pointers require the sandbox")
 
 assert(!v8_expose_memory_corruption_api || v8_enable_sandbox,
        "The Memory Corruption API requires the sandbox")
@@ -768,8 +745,6 @@ external_v8_defines = [
   "V8_31BIT_SMIS_ON_64BIT_ARCH",
   "V8_COMPRESS_ZONES",
   "V8_ENABLE_SANDBOX",
-  "V8_SANDBOXED_POINTERS",
-  "V8_SANDBOXED_EXTERNAL_POINTERS",
   "V8_DEPRECATION_WARNINGS",
   "V8_IMMINENT_DEPRECATION_WARNINGS",
   "V8_NO_ARGUMENTS_ADAPTOR",
@@ -799,12 +774,6 @@ if (v8_enable_zone_compression) {
 }
 if (v8_enable_sandbox) {
   enabled_external_v8_defines += [ "V8_ENABLE_SANDBOX" ]
-}
-if (v8_enable_sandboxed_pointers) {
-  enabled_external_v8_defines += [ "V8_SANDBOXED_POINTERS" ]
-}
-if (v8_enable_sandboxed_external_pointers) {
-  enabled_external_v8_defines += [ "V8_SANDBOXED_EXTERNAL_POINTERS" ]
 }
 if (v8_deprecation_warnings) {
   enabled_external_v8_defines += [ "V8_DEPRECATION_WARNINGS" ]
@@ -856,13 +825,10 @@ if (cppgc_enable_caged_heap) {
   # Always enable young generation compile time flag if caged heap is enabled.
   cppgc_enable_young_generation = true
 
-  if (is_linux || (is_mac && v8_current_cpu != "arm64") || is_win ||
-      is_chromeos || is_android) {
-    # Enable on all platforms but M1 and Fuchsia.
-    # TODO(1325007): Fix MotionMark regressions on M1.
-    # TODO(1325007): Address binary size increase on Fuchsia.
-    cppgc_enable_pointer_compression = true
-  }
+  # Pointer compression regresses binary size on Fuchsia by about 300K.
+  # However, the change improves Oilpan memory by 15-20% (2-4% of PMF),
+  # which is beneficial for memory-impoverished platforms.
+  cppgc_enable_pointer_compression = true
 }
 if (cppgc_enable_young_generation) {
   enabled_external_cppgc_defines += [ "CPPGC_YOUNG_GENERATION" ]
@@ -1157,47 +1123,9 @@ config("toolchain") {
     }
   }
 
-  # Mips64el/mipsel simulators.
-  if (target_is_simulator &&
-      (v8_current_cpu == "mipsel" || v8_current_cpu == "mips64el")) {
+  # Mips64el simulators.
+  if (target_is_simulator && v8_current_cpu == "mips64el") {
     defines += [ "_MIPS_TARGET_SIMULATOR" ]
-  }
-
-  if (v8_current_cpu == "mipsel" || v8_current_cpu == "mips") {
-    defines += [ "V8_TARGET_ARCH_MIPS" ]
-    if (v8_can_use_fpu_instructions) {
-      defines += [ "CAN_USE_FPU_INSTRUCTIONS" ]
-    }
-    if (v8_use_mips_abi_hardfloat) {
-      defines += [
-        "__mips_hard_float=1",
-        "CAN_USE_FPU_INSTRUCTIONS",
-      ]
-    } else {
-      defines += [ "__mips_soft_float=1" ]
-    }
-    if (mips_arch_variant == "r6") {
-      defines += [
-        "_MIPS_ARCH_MIPS32R6",
-        "FPU_MODE_FP64",
-      ]
-      if (mips_use_msa) {
-        defines += [ "_MIPS_MSA" ]
-      }
-    } else if (mips_arch_variant == "r2") {
-      defines += [ "_MIPS_ARCH_MIPS32R2" ]
-      if (mips_fpu_mode == "fp64") {
-        defines += [ "FPU_MODE_FP64" ]
-      } else if (mips_fpu_mode == "fpxx") {
-        defines += [ "FPU_MODE_FPXX" ]
-      } else if (mips_fpu_mode == "fp32") {
-        defines += [ "FPU_MODE_FP32" ]
-      }
-    } else if (mips_arch_variant == "r1") {
-      defines += [ "FPU_MODE_FP32" ]
-    }
-
-    # TODO(infra): Add support for mips_arch_variant rx and loongson.
   }
 
   if (v8_current_cpu == "mips64el" || v8_current_cpu == "mips64") {
@@ -1373,6 +1301,7 @@ config("toolchain") {
   if (is_clang) {
     cflags += [
       "-Wmissing-field-initializers",
+      "-Wunreachable-code",
 
       # Google3 enables this warning, so we should also enable it to find issue
       # earlier. See https://reviews.llvm.org/D56731 for details about this
@@ -1382,11 +1311,6 @@ config("toolchain") {
       # TODO(v8:12245): Fix shadowing instances and remove.
       "-Wno-shadow",
     ]
-
-    if (v8_current_cpu != "mips" && v8_current_cpu != "mipsel") {
-      # We exclude MIPS because the IsMipsArchVariant macro causes trouble.
-      cflags += [ "-Wunreachable-code" ]
-    }
 
     if (v8_current_cpu == "x64" || v8_current_cpu == "arm64" ||
         v8_current_cpu == "mips64el" || v8_current_cpu == "riscv64") {
@@ -1647,8 +1571,7 @@ if (is_android && enable_java_templates) {
     if (v8_use_external_startup_data) {
       deps = [ "//v8" ]
       renaming_sources = [ "$root_out_dir/snapshot_blob.bin" ]
-      if (current_cpu == "arm" || current_cpu == "x86" ||
-          current_cpu == "mipsel") {
+      if (current_cpu == "arm" || current_cpu == "x86") {
         renaming_destinations = [ "snapshot_blob_32.bin" ]
       } else {
         renaming_destinations = [ "snapshot_blob_64.bin" ]
@@ -2306,10 +2229,11 @@ template("run_mksnapshot") {
     }
 
     if (v8_enable_fast_mksnapshot) {
-      args += [
-        "--no-turbo-rewrite-far-jumps",
-        "--no-turbo-verify-allocation",
-      ]
+      args += [ "--no-turbo-verify-allocation" ]
+
+      if (v8_current_cpu == "x86" || v8_current_cpu == "x64") {
+        args += [ "--no-turbo-rewrite-far-jumps" ]
+      }
 
       if (v8_enable_debugging_features && v8_enable_slow_dchecks) {
         # mksnapshot only accepts this flag if ENABLE_SLOW_DCHECKS is defined.
@@ -2377,8 +2301,7 @@ action("v8_dump_build_config") {
     "v8_enable_cet_shadow_stack=$v8_enable_cet_shadow_stack",
   ]
 
-  if (v8_current_cpu == "mips" || v8_current_cpu == "mipsel" ||
-      v8_current_cpu == "mips64" || v8_current_cpu == "mips64el") {
+  if (v8_current_cpu == "mips64" || v8_current_cpu == "mips64el") {
     args += [
       "mips_arch_variant=\"$mips_arch_variant\"",
       "mips_use_msa=$mips_use_msa",
@@ -2552,11 +2475,6 @@ v8_source_set("v8_initializers") {
     sources += [
       ### gcmole(arch:arm64) ###
       "src/builtins/arm64/builtins-arm64.cc",
-    ]
-  } else if (v8_current_cpu == "mips" || v8_current_cpu == "mipsel") {
-    sources += [
-      ### gcmole(arch:mipsel) ###
-      "src/builtins/mips/builtins-mips.cc",
     ]
   } else if (v8_current_cpu == "mips64" || v8_current_cpu == "mips64el") {
     sources += [
@@ -2879,7 +2797,6 @@ v8_header_set("v8_internal_headers") {
     "src/codegen/signature.h",
     "src/codegen/source-position-table.h",
     "src/codegen/source-position.h",
-    "src/codegen/string-constants.h",
     "src/codegen/tick-counter.h",
     "src/codegen/tnode.h",
     "src/codegen/turbo-assembler.h",
@@ -3017,6 +2934,7 @@ v8_header_set("v8_internal_headers") {
     "src/compiler/turboshaft/assembler.h",
     "src/compiler/turboshaft/decompression-optimization.h",
     "src/compiler/turboshaft/deopt-data.h",
+    "src/compiler/turboshaft/fast-hash.h",
     "src/compiler/turboshaft/graph-builder.h",
     "src/compiler/turboshaft/graph-visualizer.h",
     "src/compiler/turboshaft/graph.h",
@@ -3024,6 +2942,7 @@ v8_header_set("v8_internal_headers") {
     "src/compiler/turboshaft/optimization-phase.h",
     "src/compiler/turboshaft/recreate-schedule.h",
     "src/compiler/turboshaft/sidetable.h",
+    "src/compiler/turboshaft/utils.h",
     "src/compiler/turboshaft/value-numbering-assembler.h",
     "src/compiler/type-cache.h",
     "src/compiler/type-narrowing-reducer.h",
@@ -3115,6 +3034,7 @@ v8_header_set("v8_internal_headers") {
     "src/handles/maybe-handles-inl.h",
     "src/handles/maybe-handles.h",
     "src/handles/persistent-handles.h",
+    "src/handles/shared-object-conveyor-handles.h",
     "src/heap/allocation-observer.h",
     "src/heap/allocation-result.h",
     "src/heap/allocation-stats.h",
@@ -3442,6 +3362,8 @@ v8_header_set("v8_internal_headers") {
     "src/objects/source-text-module-inl.h",
     "src/objects/source-text-module.h",
     "src/objects/string-comparator.h",
+    "src/objects/string-forwarding-table-inl.h",
+    "src/objects/string-forwarding-table.h",
     "src/objects/string-inl.h",
     "src/objects/string-set-inl.h",
     "src/objects/string-set.h",
@@ -3638,6 +3560,8 @@ v8_header_set("v8_internal_headers") {
 
   if (v8_enable_maglev) {
     sources += [
+      "src/maglev/maglev-assembler-inl.h",
+      "src/maglev/maglev-assembler.h",
       "src/maglev/maglev-basic-block.h",
       "src/maglev/maglev-code-gen-state.h",
       "src/maglev/maglev-code-generator.h",
@@ -3652,6 +3576,7 @@ v8_header_set("v8_internal_headers") {
       "src/maglev/maglev-graph-verifier.h",
       "src/maglev/maglev-graph.h",
       "src/maglev/maglev-interpreter-frame-state.h",
+      "src/maglev/maglev-ir-inl.h",
       "src/maglev/maglev-ir.h",
       "src/maglev/maglev-regalloc-data.h",
       "src/maglev/maglev-regalloc.h",
@@ -3930,22 +3855,6 @@ v8_header_set("v8_internal_headers") {
     if (is_win) {
       sources += [ "src/diagnostics/unwinding-info-win64.h" ]
     }
-  } else if (v8_current_cpu == "mips" || v8_current_cpu == "mipsel") {
-    sources += [  ### gcmole(arch:mipsel) ###
-      "src/baseline/mips/baseline-assembler-mips-inl.h",
-      "src/baseline/mips/baseline-compiler-mips-inl.h",
-      "src/codegen/mips/assembler-mips-inl.h",
-      "src/codegen/mips/assembler-mips.h",
-      "src/codegen/mips/constants-mips.h",
-      "src/codegen/mips/macro-assembler-mips.h",
-      "src/codegen/mips/register-mips.h",
-      "src/codegen/mips/reglist-mips.h",
-      "src/compiler/backend/mips/instruction-codes-mips.h",
-      "src/execution/mips/frame-constants-mips.h",
-      "src/execution/mips/simulator-mips.h",
-      "src/regexp/mips/regexp-macro-assembler-mips.h",
-      "src/wasm/baseline/mips/liftoff-assembler-mips.h",
-    ]
   } else if (v8_current_cpu == "mips64" || v8_current_cpu == "mips64el") {
     sources += [  ### gcmole(arch:mips64el) ###
       "src/baseline/mips64/baseline-assembler-mips64-inl.h",
@@ -4450,7 +4359,6 @@ v8_source_set("v8_base_without_compiler") {
     "src/codegen/safepoint-table.cc",
     "src/codegen/source-position-table.cc",
     "src/codegen/source-position.cc",
-    "src/codegen/string-constants.cc",
     "src/codegen/tick-counter.cc",
     "src/codegen/tnode.cc",
     "src/codegen/turbo-assembler.cc",
@@ -4518,6 +4426,7 @@ v8_source_set("v8_base_without_compiler") {
     "src/handles/handles.cc",
     "src/handles/local-handles.cc",
     "src/handles/persistent-handles.cc",
+    "src/handles/shared-object-conveyor-handles.cc",
     "src/heap/allocation-observer.cc",
     "src/heap/array-buffer-sweeper.cc",
     "src/heap/base-space.cc",
@@ -4545,6 +4454,7 @@ v8_source_set("v8_base_without_compiler") {
     "src/heap/heap-allocator.cc",
     "src/heap/heap-controller.cc",
     "src/heap/heap-layout-tracer.cc",
+    "src/heap/heap-verifier.cc",
     "src/heap/heap-write-barrier.cc",
     "src/heap/heap.cc",
     "src/heap/incremental-marking-job.cc",
@@ -4670,6 +4580,7 @@ v8_source_set("v8_base_without_compiler") {
     "src/objects/simd.cc",
     "src/objects/source-text-module.cc",
     "src/objects/string-comparator.cc",
+    "src/objects/string-forwarding-table.cc",
     "src/objects/string-table.cc",
     "src/objects/string.cc",
     "src/objects/swiss-name-dictionary.cc",
@@ -4828,6 +4739,7 @@ v8_source_set("v8_base_without_compiler") {
       "src/maglev/maglev-concurrent-dispatcher.cc",
       "src/maglev/maglev-graph-builder.cc",
       "src/maglev/maglev-graph-printer.cc",
+      "src/maglev/maglev-interpreter-frame-state.cc",
       "src/maglev/maglev-ir.cc",
       "src/maglev/maglev-regalloc.cc",
       "src/maglev/maglev.cc",
@@ -4865,6 +4777,7 @@ v8_source_set("v8_base_without_compiler") {
       "src/wasm/names-provider.cc",
       "src/wasm/signature-map.cc",
       "src/wasm/simd-shuffle.cc",
+      "src/wasm/stacks.cc",
       "src/wasm/streaming-decoder.cc",
       "src/wasm/sync-streaming-decoder.cc",
       "src/wasm/value-type.cc",
@@ -5033,23 +4946,6 @@ v8_source_set("v8_base_without_compiler") {
     if (is_win) {
       sources += [ "src/diagnostics/unwinding-info-win64.cc" ]
     }
-  } else if (v8_current_cpu == "mips" || v8_current_cpu == "mipsel") {
-    sources += [  ### gcmole(arch:mipsel) ###
-      "src/codegen/mips/assembler-mips.cc",
-      "src/codegen/mips/constants-mips.cc",
-      "src/codegen/mips/cpu-mips.cc",
-      "src/codegen/mips/interface-descriptors-mips-inl.h",
-      "src/codegen/mips/macro-assembler-mips.cc",
-      "src/compiler/backend/mips/code-generator-mips.cc",
-      "src/compiler/backend/mips/instruction-scheduler-mips.cc",
-      "src/compiler/backend/mips/instruction-selector-mips.cc",
-      "src/deoptimizer/mips/deoptimizer-mips.cc",
-      "src/diagnostics/mips/disasm-mips.cc",
-      "src/diagnostics/mips/unwinder-mips.cc",
-      "src/execution/mips/frame-constants-mips.cc",
-      "src/execution/mips/simulator-mips.cc",
-      "src/regexp/mips/regexp-macro-assembler-mips.cc",
-    ]
   } else if (v8_current_cpu == "mips64" || v8_current_cpu == "mips64el") {
     sources += [  ### gcmole(arch:mips64el) ###
       "src/codegen/mips64/assembler-mips64.cc",
@@ -5275,8 +5171,7 @@ v8_source_set("v8_base_without_compiler") {
 
   # Platforms that don't have CAS support need to link atomic library
   # to implement atomic memory access
-  if (v8_current_cpu == "mips" || v8_current_cpu == "mipsel" ||
-      v8_current_cpu == "mips64" || v8_current_cpu == "mips64el" ||
+  if (v8_current_cpu == "mips64" || v8_current_cpu == "mips64el" ||
       v8_current_cpu == "ppc" || v8_current_cpu == "ppc64" ||
       v8_current_cpu == "s390" || v8_current_cpu == "s390x" ||
       v8_current_cpu == "riscv64" || v8_current_cpu == "riscv32") {
@@ -5450,6 +5345,7 @@ v8_static_lib("v8_libbase") {
     "src/base/bounds.h",
     "src/base/build_config.h",
     "src/base/compiler-specific.h",
+    "src/base/container-utils.h",
     "src/base/cpu.cc",
     "src/base/cpu.h",
     "src/base/debug/stack_trace.cc",
@@ -5464,7 +5360,6 @@ v8_static_lib("v8_libbase") {
     "src/base/file-utils.h",
     "src/base/flags.h",
     "src/base/free_deleter.h",
-    "src/base/functional.cc",
     "src/base/functional.h",
     "src/base/hashmap-entry.h",
     "src/base/hashmap.h",
@@ -5505,6 +5400,7 @@ v8_static_lib("v8_libbase") {
     "src/base/platform/elapsed-timer.h",
     "src/base/platform/memory-protection-key.cc",
     "src/base/platform/memory-protection-key.h",
+    "src/base/platform/memory.h",
     "src/base/platform/mutex.cc",
     "src/base/platform/mutex.h",
     "src/base/platform/platform.h",
@@ -5666,7 +5562,7 @@ v8_static_lib("v8_libbase") {
     data_deps += [ "//build/win:runtime_libs" ]
   }
 
-  if (v8_current_cpu == "mips" || v8_current_cpu == "mips64") {
+  if (v8_current_cpu == "mips64") {
     # Add runtime libs for mips.
     data += [
       "tools/mips_toolchain/sysroot/usr/lib/",
@@ -5674,8 +5570,7 @@ v8_static_lib("v8_libbase") {
     ]
   }
 
-  if (is_ubsan && (v8_current_cpu == "x86" || v8_current_cpu == "arm" ||
-                   v8_current_cpu == "mips")) {
+  if (is_ubsan && (v8_current_cpu == "x86" || v8_current_cpu == "arm")) {
     # Special UBSan 32-bit requirement.
     sources += [ "src/base/ubsan.cc" ]
   }
@@ -5855,8 +5750,6 @@ v8_source_set("v8_heap_base") {
       sources += [ "src/heap/base/asm/ppc/push_registers_asm.cc" ]
     } else if (current_cpu == "s390x") {
       sources += [ "src/heap/base/asm/s390/push_registers_asm.cc" ]
-    } else if (current_cpu == "mipsel") {
-      sources += [ "src/heap/base/asm/mips/push_registers_asm.cc" ]
     } else if (current_cpu == "mips64el") {
       sources += [ "src/heap/base/asm/mips64/push_registers_asm.cc" ]
     } else if (current_cpu == "loong64") {
@@ -6433,18 +6326,25 @@ group("v8_archive") {
 # TODO(dglazkov): Remove the "!build_with_chromium" condition once this clause
 # is removed from Chromium.
 if (is_fuchsia && !build_with_chromium) {
-  import("//build/config/fuchsia/rules.gni")
+  import("//build/config/fuchsia/generate_runner_scripts.gni")
+  import("//third_party/fuchsia-sdk/sdk/build/component.gni")
+  import("//third_party/fuchsia-sdk/sdk/build/package.gni")
 
-  cr_fuchsia_package("d8_fuchsia_pkg") {
+  fuchsia_component("d8_component") {
     testonly = true
-    binary = ":d8"
-    manifest = "gni/v8.cmx"
-    package_name_override = "d8"
+    manifest = "gni/v8.cml"
+    data_deps = [ ":d8" ]
+  }
+
+  fuchsia_package("d8_pkg") {
+    testonly = true
+    package_name = "d8"
+    deps = [ ":d8_component" ]
   }
 
   fuchsia_package_installer("d8_fuchsia") {
     testonly = true
-    package = ":d8_fuchsia_pkg"
+    package = ":d8_pkg"
     package_name = "d8"
   }
 }

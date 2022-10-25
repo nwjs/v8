@@ -1589,6 +1589,8 @@ void Genesis::InitializeGlobal(Handle<JSGlobalObject> global_object,
                           Builtin::kObjectGetOwnPropertyNames, 1, true);
     SimpleInstallFunction(isolate_, object_function, "getOwnPropertySymbols",
                           Builtin::kObjectGetOwnPropertySymbols, 1, false);
+    SimpleInstallFunction(isolate_, object_function, "hasOwn",
+                          Builtin::kObjectHasOwn, 2, true);
     SimpleInstallFunction(isolate_, object_function, "is", Builtin::kObjectIs,
                           2, true);
     SimpleInstallFunction(isolate_, object_function, "preventExtensions",
@@ -4549,6 +4551,20 @@ void Genesis::InitializeGlobal_harmony_change_array_by_copy() {
   }
 }
 
+void Genesis::InitializeGlobal_harmony_regexp_unicode_sets() {
+  if (!FLAG_harmony_regexp_unicode_sets) return;
+
+  Handle<JSFunction> regexp_fun(native_context()->regexp_function(), isolate());
+  Handle<JSObject> regexp_prototype(
+      JSObject::cast(regexp_fun->instance_prototype()), isolate());
+  SimpleInstallGetter(isolate(), regexp_prototype,
+                      factory()->unicodeSets_string(),
+                      Builtin::kRegExpPrototypeUnicodeSetsGetter, true);
+
+  // Store regexp prototype map again after change.
+  native_context()->set_regexp_prototype_map(regexp_prototype->map());
+}
+
 void Genesis::InitializeGlobal_harmony_shadow_realm() {
   if (!FLAG_harmony_shadow_realm) return;
   Factory* factory = isolate()->factory();
@@ -4764,14 +4780,6 @@ void Genesis::InitializeGlobal_harmony_array_grouping() {
 
   InstallTrueValuedProperty(isolate_, unscopables, "group");
   InstallTrueValuedProperty(isolate_, unscopables, "groupToMap");
-}
-
-void Genesis::InitializeGlobal_harmony_object_has_own() {
-  if (!FLAG_harmony_object_has_own) return;
-
-  Handle<JSFunction> object_function = isolate_->object_function();
-  SimpleInstallFunction(isolate_, object_function, "hasOwn",
-                        Builtin::kObjectHasOwn, 2, true);
 }
 
 void Genesis::InitializeGlobal_harmony_sharedarraybuffer() {

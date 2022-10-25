@@ -10,8 +10,8 @@
 #include "src/objects/map-inl.h"
 #include "src/objects/name.h"
 #include "src/objects/primitive-heap-object-inl.h"
+#include "src/objects/string-forwarding-table.h"
 #include "src/objects/string-inl.h"
-#include "src/objects/string-table.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -208,7 +208,7 @@ void Name::set_raw_hash_field_if_empty(uint32_t hash) {
   // failure case.
   DCHECK_IMPLIES(result != kEmptyHashField,
                  (String::cast(*this).IsShared() ||
-                  FLAG_always_use_string_forwarding_table) &&
+                  v8_flags.always_use_string_forwarding_table) &&
                      (result == hash || IsForwardingIndex(hash)));
 }
 

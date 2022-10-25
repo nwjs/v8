@@ -40,6 +40,7 @@ class StatsCounter;
   V(address_of_jslimit, "StackGuard::address_of_jslimit()")                    \
   V(address_of_real_jslimit, "StackGuard::address_of_real_jslimit()")          \
   V(heap_is_marking_flag_address, "heap_is_marking_flag_address")              \
+  V(heap_is_minor_marking_flag_address, "heap_is_minor_marking_flag_address")  \
   V(new_space_allocation_top_address, "Heap::NewSpaceAllocationTopAddress()")  \
   V(new_space_allocation_limit_address,                                        \
     "Heap::NewSpaceAllocationLimitAddress()")                                  \
@@ -60,7 +61,7 @@ class StatsCounter;
     "Debug::hook_on_function_call_address()")                                  \
   V(runtime_function_table_address,                                            \
     "Runtime::runtime_function_table_address()")                               \
-  V(is_profiling_address, "Isolate::is_profiling")                             \
+  V(is_profiling_address, "IsolateData::is_profiling")                         \
   V(debug_suspended_generator_address,                                         \
     "Debug::step_suspended_generator_address()")                               \
   V(fast_c_call_caller_fp_address,                                             \
@@ -95,8 +96,10 @@ class StatsCounter;
 
 #define EXTERNAL_REFERENCE_LIST(V)                                             \
   V(abort_with_reason, "abort_with_reason")                                    \
-  V(address_of_FLAG_trace_osr, "FLAG_trace_osr")                               \
-  V(address_of_builtin_subclassing_flag, "FLAG_builtin_subclassing")           \
+  V(address_of_log_or_trace_osr, "v8_flags.log_or_trace_osr")                  \
+  V(address_of_FLAG_harmony_regexp_unicode_sets,                               \
+    "v8_flags.harmony_regexp_unicdoe_sets")                                    \
+  V(address_of_builtin_subclassing_flag, "v8_flags.builtin_subclassing")       \
   V(address_of_double_abs_constant, "double_absolute_constant")                \
   V(address_of_double_neg_constant, "double_negate_constant")                  \
   V(address_of_enable_experimental_regexp_engine,                              \
@@ -105,10 +108,10 @@ class StatsCounter;
   V(address_of_float_neg_constant, "float_negate_constant")                    \
   V(address_of_min_int, "LDoubleConstant::min_int")                            \
   V(address_of_mock_arraybuffer_allocator_flag,                                \
-    "FLAG_mock_arraybuffer_allocator")                                         \
+    "v8_flags.mock_arraybuffer_allocator")                                     \
   V(address_of_one_half, "LDoubleConstant::one_half")                          \
   V(address_of_runtime_stats_flag, "TracingFlags::runtime_stats")              \
-  V(address_of_shared_string_table_flag, "FLAG_shared_string_table")           \
+  V(address_of_shared_string_table_flag, "v8_flags.shared_string_table")       \
   V(address_of_the_hole_nan, "the_hole_nan")                                   \
   V(address_of_uint32_bias, "uint32_bias")                                     \
   V(baseline_pc_for_bytecode_offset, "BaselinePCForBytecodeOffset")            \
@@ -177,6 +180,14 @@ class StatsCounter;
     "MutableBigInt_AbsoluteSubAndCanonicalize")                                \
   V(mutable_big_int_absolute_mul_and_canonicalize_function,                    \
     "MutableBigInt_AbsoluteMulAndCanonicalize")                                \
+  V(mutable_big_int_absolute_div_and_canonicalize_function,                    \
+    "MutableBigInt_AbsoluteDivAndCanonicalize")                                \
+  V(mutable_big_int_bitwise_and_pp_and_canonicalize_function,                  \
+    "MutableBigInt_BitwiseAndPosPosAndCanonicalize")                           \
+  V(mutable_big_int_bitwise_and_nn_and_canonicalize_function,                  \
+    "MutableBigInt_BitwiseAndNegNegAndCanonicalize")                           \
+  V(mutable_big_int_bitwise_and_pn_and_canonicalize_function,                  \
+    "MutableBigInt_BitwiseAndPosNegAndCanonicalize")                           \
   V(new_deoptimizer_function, "Deoptimizer::New()")                            \
   V(orderedhashmap_gethash_raw, "orderedhashmap_gethash_raw")                  \
   V(printf_function, "printf")                                                 \
@@ -446,14 +457,22 @@ class ExternalReference {
 
   Address address() const { return address_; }
 
+  // Creates a redirection trampoline for given C function and signature for
+  // simulated builds.
+  // Returns the same address otherwise.
+  static Address Redirect(Address external_function,
+                          Type type = ExternalReference::BUILTIN_CALL);
+
+  // Returns C function associated with given redirection trampoline for
+  // simulated builds.
+  // Returns the same address otherwise.
+  static Address UnwrapRedirection(Address redirection_trampoline);
+
  private:
   explicit ExternalReference(Address address) : address_(address) {}
 
   explicit ExternalReference(void* address)
       : address_(reinterpret_cast<Address>(address)) {}
-
-  static Address Redirect(Address address_arg,
-                          Type type = ExternalReference::BUILTIN_CALL);
 
   Address address_;
 };

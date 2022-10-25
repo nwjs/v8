@@ -5,7 +5,6 @@
 #ifndef V8_WASM_BASELINE_X64_LIFTOFF_ASSEMBLER_X64_H_
 #define V8_WASM_BASELINE_X64_LIFTOFF_ASSEMBLER_X64_H_
 
-#include "src/base/platform/wrappers.h"
 #include "src/base/v8-fallthrough.h"
 #include "src/codegen/assembler.h"
 #include "src/codegen/cpu-features.h"
@@ -81,18 +80,19 @@ constexpr Operand kInstanceOperand = GetStackSlot(kInstanceOffset);
 constexpr Operand kOSRTargetSlot = GetStackSlot(kOSRTargetOffset);
 
 inline Operand GetMemOp(LiftoffAssembler* assm, Register addr,
-                        Register offset_reg, uintptr_t offset_imm) {
+                        Register offset_reg, uintptr_t offset_imm,
+                        ScaleFactor scale_factor = times_1) {
   if (is_uint31(offset_imm)) {
     int32_t offset_imm32 = static_cast<int32_t>(offset_imm);
     return offset_reg == no_reg
                ? Operand(addr, offset_imm32)
-               : Operand(addr, offset_reg, times_1, offset_imm32);
+               : Operand(addr, offset_reg, scale_factor, offset_imm32);
   }
   // Offset immediate does not fit in 31 bits.
   Register scratch = kScratchRegister;
   assm->TurboAssembler::Move(scratch, offset_imm);
   if (offset_reg != no_reg) assm->addq(scratch, offset_reg);
-  return Operand(addr, scratch, times_1, 0);
+  return Operand(addr, scratch, scale_factor, 0);
 }
 
 inline void Load(LiftoffAssembler* assm, LiftoffRegister dst, Operand src,
@@ -260,7 +260,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
   // check in the condition code.
   RecordComment("OOL: stack check for large frame");
   Label continuation;
-  if (frame_size < FLAG_stack_size * 1024) {
+  if (frame_size < v8_flags.stack_size * 1024) {
     movq(kScratchRegister,
          FieldOperand(kWasmInstanceRegister,
                       WasmInstanceObject::kRealStackLimitAddressOffset));
@@ -381,11 +381,15 @@ void LiftoffAssembler::ResetOSRTarget() {
 
 void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
                                          Register offset_reg,
-                                         int32_t offset_imm) {
+                                         int32_t offset_imm, bool needs_shift) {
   DCHECK_GE(offset_imm, 0);
   if (offset_reg != no_reg) AssertZeroExtended(offset_reg);
-  Operand src_op = liftoff::GetMemOp(this, src_addr, offset_reg,
-                                     static_cast<uint32_t>(offset_imm));
+  ScaleFactor scale_factor = !needs_shift             ? times_1
+                             : COMPRESS_POINTERS_BOOL ? times_4
+                                                      : times_8;
+  Operand src_op =
+      liftoff::GetMemOp(this, src_addr, offset_reg,
+                        static_cast<uint32_t>(offset_imm), scale_factor);
   LoadTaggedPointerField(dst, src_op);
 }
 
@@ -407,7 +411,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
                                      static_cast<uint32_t>(offset_imm));
   StoreTaggedField(dst_op, src.gp());
 
-  if (skip_write_barrier || FLAG_disable_write_barriers) return;
+  if (skip_write_barrier || v8_flags.disable_write_barriers) return;
 
   Register scratch = pinned.set(GetUnusedRegister(kGpReg, pinned)).gp();
   Label write_barrier;
@@ -440,9 +444,14 @@ void LiftoffAssembler::AtomicLoad(LiftoffRegister dst, Register src_addr,
 void LiftoffAssembler::Load(LiftoffRegister dst, Register src_addr,
                             Register offset_reg, uintptr_t offset_imm,
                             LoadType type, uint32_t* protected_load_pc,
-                            bool /* is_load_mem */, bool i64_offset) {
+                            bool /* is_load_mem */, bool i64_offset,
+                            bool needs_shift) {
   if (offset_reg != no_reg && !i64_offset) AssertZeroExtended(offset_reg);
-  Operand src_op = liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm);
+  static_assert(times_4 == 2);
+  ScaleFactor scale_factor =
+      needs_shift ? static_cast<ScaleFactor>(type.size_log_2()) : times_1;
+  Operand src_op =
+      liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm, scale_factor);
   if (protected_load_pc) *protected_load_pc = pc_offset();
   switch (type.value()) {
     case LoadType::kI32Load8U:
@@ -1007,6 +1016,11 @@ void LiftoffAssembler::FillStackSlotsWithZero(int start, int size) {
     popq(rcx);
     popq(rax);
   }
+}
+
+void LiftoffAssembler::LoadSpillAddress(Register dst, int offset,
+                                        ValueKind /* kind */) {
+  leaq(dst, liftoff::GetStackSlot(offset));
 }
 
 void LiftoffAssembler::emit_trace_instruction(uint32_t markid) {
@@ -3234,13 +3248,18 @@ void LiftoffAssembler::emit_i16x8_q15mulr_sat_s(LiftoffRegister dst,
 void LiftoffAssembler::emit_i16x8_relaxed_q15mulr_s(LiftoffRegister dst,
                                                     LiftoffRegister src1,
                                                     LiftoffRegister src2) {
-  bailout(kRelaxedSimd, "emit_i16x8_relaxed_q15mulr_s");
+  if (CpuFeatures::IsSupported(AVX) || dst == src1) {
+    Pmulhrsw(dst.fp(), src1.fp(), src2.fp());
+  } else {
+    movdqa(dst.fp(), src1.fp());
+    pmulhrsw(dst.fp(), src2.fp());
+  }
 }
 
 void LiftoffAssembler::emit_i16x8_dot_i8x16_i7x16_s(LiftoffRegister dst,
                                                     LiftoffRegister lhs,
                                                     LiftoffRegister rhs) {
-  bailout(kSimd, "emit_i16x8_dot_i8x16_i7x16_s");
+  I16x8DotI8x16I7x16S(dst.fp(), lhs.fp(), rhs.fp());
 }
 
 void LiftoffAssembler::emit_i32x4_dot_i8x16_i7x16_add_s(LiftoffRegister dst,

@@ -17,7 +17,7 @@ V8_INLINE bool EquivalentIndices(uint32_t index1, uint32_t index2,
                                  const WasmModule* module1,
                                  const WasmModule* module2) {
   DCHECK(index1 != index2 || module1 != module2);
-  if (!FLAG_wasm_type_canonicalization) return false;
+  if (!v8_flags.wasm_type_canonicalization) return false;
   return module1->isorecursive_canonical_type_ids[index1] ==
          module2->isorecursive_canonical_type_ids[index2];
 }
@@ -219,12 +219,13 @@ V8_NOINLINE V8_EXPORT_PRIVATE bool IsHeapSubtypeOfImpl(
       return super_heap == HeapType::kArray || super_heap == HeapType::kData ||
              super_heap == HeapType::kEq || super_heap == HeapType::kAny;
     case HeapType::kString:
+      // stringref is a subtype of anyref under wasm-gc.
+      return sub_heap == super_heap ||
+             (v8_flags.experimental_wasm_gc && super_heap == HeapType::kAny);
     case HeapType::kStringViewWtf8:
     case HeapType::kStringViewWtf16:
     case HeapType::kStringViewIter:
-      // stringref is a subtype of anyref (aka externref) under wasm-gc.
-      return sub_heap == super_heap ||
-             (FLAG_experimental_wasm_gc && super_heap == HeapType::kAny);
+      return sub_heap == super_heap;
     case HeapType::kBottom:
       UNREACHABLE();
     case HeapType::kNone:
@@ -289,7 +290,7 @@ V8_NOINLINE V8_EXPORT_PRIVATE bool IsHeapSubtypeOfImpl(
   // equality; here we catch (ref $x) being a subtype of (ref null $x).
   if (sub_module == super_module && sub_index == super_index) return true;
 
-  if (FLAG_wasm_type_canonicalization) {
+  if (v8_flags.wasm_type_canonicalization) {
     return GetTypeCanonicalizer()->IsCanonicalSubtype(sub_index, super_index,
                                                       sub_module, super_module);
   } else {
@@ -478,6 +479,9 @@ HeapType::Representation CommonAncestorWithGeneric(HeapType heap1,
                                                          : HeapType::kNoExtern;
     case HeapType::kExtern:
       return HeapType::kExtern;
+    case HeapType::kString:
+    case HeapType::kStringViewIter:
+      return heap1 == heap2 ? heap1.representation() : HeapType::kBottom;
     default:
       UNREACHABLE();
   }

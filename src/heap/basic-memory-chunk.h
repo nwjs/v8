@@ -76,9 +76,10 @@ class BasicMemoryChunk {
     PAGE_NEW_NEW_PROMOTION = 1u << 11,
 
     // This flag is intended to be used for testing. Works only when both
-    // FLAG_stress_compaction and FLAG_manual_evacuation_candidates_selection
-    // are set. It forces the page to become an evacuation candidate at next
-    // candidates selection cycle.
+    // v8_flags.stress_compaction and
+    // v8_flags.manual_evacuation_candidates_selection are set. It forces the
+    // page to become an evacuation candidate at next candidates selection
+    // cycle.
     FORCE_EVACUATION_CANDIDATE_FOR_TESTING = 1u << 12,
 
     // This flag is intended to be used for testing.
@@ -95,11 +96,6 @@ class BasicMemoryChunk {
     // |COMPACTION_WAS_ABORTED|: Indicates that the compaction in this page
     //   has been aborted and needs special handling by the sweeper.
     COMPACTION_WAS_ABORTED = 1u << 16,
-
-    // |COMPACTION_WAS_ABORTED_FOR_TESTING|: During stress testing evacuation
-    // on pages is sometimes aborted. The flag is used to avoid repeatedly
-    // triggering on the same page.
-    COMPACTION_WAS_ABORTED_FOR_TESTING = 1u << 17,
 
     NEW_SPACE_BELOW_AGE_MARK = 1u << 18,
 

@@ -56,7 +56,16 @@ Flag* FindFlagByName(const char* name);
 // Helper struct for printing normalized flag names.
 struct FlagName {
   const char* name;
-  bool negated = false;
+  bool negated;
+
+  constexpr FlagName(const char* name, bool negated)
+      : name(name), negated(negated) {
+    DCHECK_NE('\0', name[0]);
+    DCHECK_NE('!', name[0]);
+  }
+
+  constexpr explicit FlagName(const char* name)
+      : FlagName(name[0] == '!' ? name + 1 : name, name[0] == '!') {}
 };
 
 std::ostream& operator<<(std::ostream& os, FlagName flag_name) {
@@ -227,8 +236,9 @@ struct Flag {
     }
     if (ShouldCheckFlagContradictions()) {
       static constexpr const char kHint[] =
-          "To fix this, it might be necessary to specify additional "
-          "contradictory flags in tools/testrunner/local/variants.py.";
+          "If a test variant caused this, it might be necessary to specify "
+          "additional contradictory flags in "
+          "tools/testrunner/local/variants.py.";
       struct FatalError : public std::ostringstream {
         // MSVC complains about non-returning destructor; disable that.
         MSVC_SUPPRESS_WARNING(4722)
@@ -769,7 +779,13 @@ int FlagList::SetFlagsFromString(const char* str, size_t len) {
 
 // static
 void FlagList::FreezeFlags() {
+  // Disallow changes via the API by setting {flags_frozen}.
   flags_frozen.store(true, std::memory_order_relaxed);
+  // Also memory-protect the memory that holds the flag values. This makes it
+  // impossible for attackers to overwrite values, except if they find a way to
+  // first unprotect the memory again.
+  // Note that for string flags we only protect the pointer itself, but not the
+  // string storage. TODO(12887): Fix this.
   base::OS::SetDataReadOnly(&v8_flags, sizeof(v8_flags));
 }
 
@@ -846,10 +862,7 @@ class ImplicationProcessor {
       return false;
     }
     if (V8_UNLIKELY(num_iterations_ >= kMaxNumIterations)) {
-      cycle_ << "\n"
-             << (premise_name[0] == '!' ? FlagName{premise_name + 1, true}
-                                        : FlagName{premise_name})
-             << " -> ";
+      cycle_ << "\n" << FlagName{premise_name} << " -> ";
       if constexpr (std::is_same_v<T, bool>) {
         cycle_ << FlagName{conclusion_flag->name(), !value};
       } else {

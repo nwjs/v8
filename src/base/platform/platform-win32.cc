@@ -20,6 +20,7 @@
 // This has to come after windows.h.
 #include <VersionHelpers.h>
 #include <dbghelp.h>  // For SymLoadModule64 and al.
+#include <malloc.h>   // For _msize()
 #include <mmsystem.h>  // For timeGetTime().
 #include <tlhelp32.h>  // For Module32First and al.
 

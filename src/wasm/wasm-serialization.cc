@@ -28,7 +28,7 @@ namespace wasm {
 
 namespace {
 constexpr uint8_t kLazyFunction = 2;
-constexpr uint8_t kLiftoffFunction = 3;
+constexpr uint8_t kEagerFunction = 3;
 constexpr uint8_t kTurboFanFunction = 4;
 
 // TODO(bbudge) Try to unify the various implementations of readers and writers
@@ -50,7 +50,7 @@ class Writer {
     DCHECK_GE(current_size(), sizeof(T));
     WriteUnalignedValue(reinterpret_cast<Address>(current_location()), value);
     pos_ += sizeof(T);
-    if (FLAG_trace_wasm_serialization) {
+    if (v8_flags.trace_wasm_serialization) {
       StdoutStream{} << "wrote: " << static_cast<size_t>(value)
                      << " sized: " << sizeof(T) << std::endl;
     }
@@ -62,7 +62,7 @@ class Writer {
       memcpy(current_location(), v.begin(), v.size());
       pos_ += v.size();
     }
-    if (FLAG_trace_wasm_serialization) {
+    if (v8_flags.trace_wasm_serialization) {
       StdoutStream{} << "wrote vector of " << v.size() << " elements"
                      << std::endl;
     }
@@ -94,7 +94,7 @@ class Reader {
     T value =
         ReadUnalignedValue<T>(reinterpret_cast<Address>(current_location()));
     pos_ += sizeof(T);
-    if (FLAG_trace_wasm_serialization) {
+    if (v8_flags.trace_wasm_serialization) {
       StdoutStream{} << "read: " << static_cast<size_t>(value)
                      << " sized: " << sizeof(T) << std::endl;
     }
@@ -106,7 +106,7 @@ class Reader {
     DCHECK_GE(current_size(), size);
     base::Vector<const byte> bytes{pos_, size * sizeof(T)};
     pos_ += size * sizeof(T);
-    if (FLAG_trace_wasm_serialization) {
+    if (v8_flags.trace_wasm_serialization) {
       StdoutStream{} << "read vector of " << size << " elements of size "
                      << sizeof(T) << " (total size " << size * sizeof(T) << ")"
                      << std::endl;
@@ -340,17 +340,17 @@ void NativeModuleSerializer::WriteCode(const WasmCode* code, Writer* writer) {
   // non-relocatable constants.
   if (code->tier() != ExecutionTier::kTurbofan) {
     // We check if the function has been executed already. If so, we serialize
-    // it as {kLiftoffFunction} so that upon deserialization the function will
-    // get compiled with Liftoff eagerly. If the function has not been executed
-    // yet, we serialize it as {kLazyFunction}, and the function will not get
-    // compiled upon deserialization.
+    // it as {kEagerFunction} so that upon deserialization the function will
+    // get eagerly compiled with Liftoff (if enabled). If the function has not
+    // been executed yet, we serialize it as {kLazyFunction}, and the function
+    // will not get compiled upon deserialization.
     NativeModule* native_module = code->native_module();
     uint32_t budget =
         native_module->tiering_budget_array()[declared_function_index(
             native_module->module(), code->index())];
-    writer->Write(budget == static_cast<uint32_t>(FLAG_wasm_tiering_budget)
+    writer->Write(budget == static_cast<uint32_t>(v8_flags.wasm_tiering_budget)
                       ? kLazyFunction
-                      : kLiftoffFunction);
+                      : kEagerFunction);
     return;
   }
 
@@ -380,9 +380,9 @@ void NativeModuleSerializer::WriteCode(const WasmCode* code, Writer* writer) {
   writer->WriteVector(code->reloc_info());
   writer->WriteVector(code->source_positions());
   writer->WriteVector(code->protected_instructions_data());
-#if V8_TARGET_ARCH_MIPS || V8_TARGET_ARCH_MIPS64 || V8_TARGET_ARCH_ARM || \
-    V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_PPC64 || V8_TARGET_ARCH_S390X || \
-    V8_TARGET_ARCH_RISCV32 || V8_TARGET_ARCH_RISCV64
+#if V8_TARGET_ARCH_MIPS64 || V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_PPC ||      \
+    V8_TARGET_ARCH_PPC64 || V8_TARGET_ARCH_S390X || V8_TARGET_ARCH_RISCV32 || \
+    V8_TARGET_ARCH_RISCV64
   // On platforms that don't support misaligned word stores, copy to an aligned
   // buffer if necessary so we can relocate the serialized code.
   std::unique_ptr<byte[]> aligned_buffer;
@@ -552,8 +552,8 @@ class V8_EXPORT_PRIVATE NativeModuleDeserializer {
     return base::VectorOf(lazy_functions_);
   }
 
-  base::Vector<const int> liftoff_functions() {
-    return base::VectorOf(liftoff_functions_);
+  base::Vector<const int> eager_functions() {
+    return base::VectorOf(eager_functions_);
   }
 
  private:
@@ -574,7 +574,7 @@ class V8_EXPORT_PRIVATE NativeModuleDeserializer {
   base::Vector<byte> current_code_space_;
   NativeModule::JumpTablesRef current_jump_tables_;
   std::vector<int> lazy_functions_;
-  std::vector<int> liftoff_functions_;
+  std::vector<int> eager_functions_;
 };
 
 class DeserializeCodeTask : public JobTask {
@@ -714,8 +714,8 @@ DeserializationUnit NativeModuleDeserializer::ReadCode(int fn_index,
     lazy_functions_.push_back(fn_index);
     return {};
   }
-  if (code_kind == kLiftoffFunction) {
-    liftoff_functions_.push_back(fn_index);
+  if (code_kind == kEagerFunction) {
+    eager_functions_.push_back(fn_index);
     return {};
   }
 
@@ -872,7 +872,7 @@ MaybeHandle<WasmModuleObject> DeserializeNativeModule(
   auto shared_native_module = wasm_engine->MaybeGetNativeModule(
       module->origin, owned_wire_bytes.as_vector(), isolate);
   if (shared_native_module == nullptr) {
-    const bool dynamic_tiering = FLAG_wasm_dynamic_tiering;
+    const bool dynamic_tiering = v8_flags.wasm_dynamic_tiering;
     const bool include_liftoff = !dynamic_tiering;
     size_t code_size_estimate =
         wasm::WasmCodeManager::EstimateNativeModuleCodeSize(
@@ -896,7 +896,7 @@ MaybeHandle<WasmModuleObject> DeserializeNativeModule(
       return {};
     }
     shared_native_module->compilation_state()->InitializeAfterDeserialization(
-        deserializer.lazy_functions(), deserializer.liftoff_functions());
+        deserializer.lazy_functions(), deserializer.eager_functions());
     wasm_engine->UpdateNativeModuleCache(error, &shared_native_module, isolate);
   }
 

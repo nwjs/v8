@@ -11,8 +11,8 @@
 #include "src/wasm/code-space-access.h"
 #include "src/wasm/wasm-opcodes-inl.h"
 #include "test/cctest/cctest.h"
-#include "test/cctest/compiler/value-helper.h"
 #include "test/cctest/wasm/wasm-run-utils.h"
+#include "test/common/value-helper.h"
 #include "test/common/wasm/test-signatures.h"
 #include "test/common/wasm/wasm-macro-gen.h"
 
@@ -2514,7 +2514,7 @@ class IsolateScope {
 UNINITIALIZED_WASM_EXEC_TEST(ReturnCall_Factorial) {
   EXPERIMENTAL_FLAG_SCOPE(return_call);
   // Run in bounded amount of stack - 8kb.
-  FlagScope<int32_t> stack_size(&v8::internal::FLAG_stack_size, 8);
+  FlagScope<int32_t> stack_size(&v8::internal::v8_flags.stack_size, 8);
 
   IsolateScope isolate_scope;
   LocalContext current(isolate_scope.isolate());
@@ -2552,7 +2552,7 @@ UNINITIALIZED_WASM_EXEC_TEST(ReturnCall_Factorial) {
 UNINITIALIZED_WASM_EXEC_TEST(ReturnCall_MutualFactorial) {
   EXPERIMENTAL_FLAG_SCOPE(return_call);
   // Run in bounded amount of stack - 8kb.
-  FlagScope<int32_t> stack_size(&v8::internal::FLAG_stack_size, 8);
+  FlagScope<int32_t> stack_size(&v8::internal::v8_flags.stack_size, 8);
 
   IsolateScope isolate_scope;
   LocalContext current(isolate_scope.isolate());
@@ -2599,7 +2599,7 @@ UNINITIALIZED_WASM_EXEC_TEST(ReturnCall_MutualFactorial) {
 UNINITIALIZED_WASM_EXEC_TEST(ReturnCall_IndirectFactorial) {
   EXPERIMENTAL_FLAG_SCOPE(return_call);
   // Run in bounded amount of stack - 8kb.
-  FlagScope<int32_t> stack_size(&v8::internal::FLAG_stack_size, 8);
+  FlagScope<int32_t> stack_size(&v8::internal::v8_flags.stack_size, 8);
 
   IsolateScope isolate_scope;
   LocalContext current(isolate_scope.isolate());
@@ -2648,7 +2648,7 @@ UNINITIALIZED_WASM_EXEC_TEST(ReturnCall_IndirectFactorial) {
 UNINITIALIZED_WASM_EXEC_TEST(ReturnCall_Sum) {
   EXPERIMENTAL_FLAG_SCOPE(return_call);
   // Run in bounded amount of stack - 8kb.
-  FlagScope<int32_t> stack_size(&v8::internal::FLAG_stack_size, 8);
+  FlagScope<int32_t> stack_size(&v8::internal::v8_flags.stack_size, 8);
 
   IsolateScope isolate_scope;
   LocalContext current(isolate_scope.isolate());
@@ -2690,7 +2690,7 @@ UNINITIALIZED_WASM_EXEC_TEST(ReturnCall_Sum) {
 UNINITIALIZED_WASM_EXEC_TEST(ReturnCall_Bounce_Sum) {
   EXPERIMENTAL_FLAG_SCOPE(return_call);
   // Run in bounded amount of stack - 8kb.
-  FlagScope<int32_t> stack_size(&v8::internal::FLAG_stack_size, 8);
+  FlagScope<int32_t> stack_size(&v8::internal::v8_flags.stack_size, 8);
 
   IsolateScope isolate_scope;
   LocalContext current(isolate_scope.isolate());

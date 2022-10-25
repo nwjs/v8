@@ -228,6 +228,8 @@ namespace interpreter {
   /* GetSuperConstructor operator */                                           \
   V(GetSuperConstructor, ImplicitRegisterUse::kReadAccumulator,                \
     OperandType::kRegOut)                                                      \
+  V(FindNonDefaultConstructor, ImplicitRegisterUse::kNone, OperandType::kReg,  \
+    OperandType::kReg, OperandType::kRegOutPair)                               \
                                                                                \
   /* Call operations */                                                        \
   V(CallAnyReceiver, ImplicitRegisterUse::kWriteAccumulator,                   \
@@ -300,7 +302,7 @@ namespace interpreter {
                                                                                \
   /* Literals */                                                               \
   V(CreateRegExpLiteral, ImplicitRegisterUse::kWriteAccumulator,               \
-    OperandType::kIdx, OperandType::kIdx, OperandType::kFlag8)                 \
+    OperandType::kIdx, OperandType::kIdx, OperandType::kFlag16)                \
   V(CreateArrayLiteral, ImplicitRegisterUse::kWriteAccumulator,                \
     OperandType::kIdx, OperandType::kIdx, OperandType::kFlag8)                 \
   V(CreateArrayFromIterable, ImplicitRegisterUse::kReadWriteAccumulator)       \

@@ -32,7 +32,6 @@ namespace internal {
   V(ArraySingleArgumentConstructor)                  \
   V(AsyncFunctionStackParameter)                     \
   V(BaselineLeaveFrame)                              \
-  V(BaselineOnStackReplacement)                      \
   V(BaselineOutOfLinePrologue)                       \
   V(BigIntToI32Pair)                                 \
   V(BigIntToI64)                                     \
@@ -73,6 +72,7 @@ namespace internal {
   V(CopyDataPropertiesWithExcludedPropertiesOnStack) \
   V(CppBuiltinAdaptor)                               \
   V(FastNewObject)                                   \
+  V(FindNonDefaultConstructor)                       \
   V(ForInPrepare)                                    \
   V(GetIteratorStackParameter)                       \
   V(GetProperty)                                     \
@@ -82,7 +82,6 @@ namespace internal {
   V(InterpreterCEntry1)                              \
   V(InterpreterCEntry2)                              \
   V(InterpreterDispatch)                             \
-  V(InterpreterOnStackReplacement)                   \
   V(InterpreterPushArgsThenCall)                     \
   V(InterpreterPushArgsThenConstruct)                \
   V(JSTrampoline)                                    \
@@ -101,9 +100,11 @@ namespace internal {
   V(LoadWithReceiverAndVector)                       \
   V(LoadWithReceiverBaseline)                        \
   V(LoadWithVector)                                  \
+  V(LookupTrampoline)                                \
   V(LookupBaseline)                                  \
   V(NewHeapNumber)                                   \
   V(NoContext)                                       \
+  V(OnStackReplacement)                              \
   V(RestartFrameTrampoline)                          \
   V(ResumeGenerator)                                 \
   V(ResumeGeneratorBaseline)                         \
@@ -843,6 +844,16 @@ class LoadGlobalBaselineDescriptor
   DECLARE_DESCRIPTOR(LoadGlobalBaselineDescriptor)
 
   static constexpr auto registers();
+};
+
+class LookupTrampolineDescriptor
+    : public StaticCallInterfaceDescriptor<LookupTrampolineDescriptor> {
+ public:
+  DEFINE_PARAMETERS(kName, kDepth, kSlot)
+  DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(),  // kName
+                         MachineType::AnyTagged(),  // kDepth
+                         MachineType::AnyTagged())  // kSlot
+  DECLARE_DESCRIPTOR(LookupTrampolineDescriptor)
 };
 
 class LookupBaselineDescriptor
@@ -1722,26 +1733,12 @@ class BaselineLeaveFrameDescriptor
   static constexpr inline auto registers();
 };
 
-class InterpreterOnStackReplacementDescriptor
-    : public StaticCallInterfaceDescriptor<
-          InterpreterOnStackReplacementDescriptor> {
+class OnStackReplacementDescriptor
+    : public StaticCallInterfaceDescriptor<OnStackReplacementDescriptor> {
  public:
   DEFINE_PARAMETERS(kMaybeTargetCode)
   DEFINE_PARAMETER_TYPES(MachineType::AnyTagged())  // kMaybeTargetCode
-  DECLARE_DESCRIPTOR(InterpreterOnStackReplacementDescriptor)
-
-  static constexpr inline Register MaybeTargetCodeRegister();
-
-  static constexpr inline auto registers();
-};
-
-class BaselineOnStackReplacementDescriptor
-    : public StaticCallInterfaceDescriptor<
-          BaselineOnStackReplacementDescriptor> {
- public:
-  DEFINE_PARAMETERS_NO_CONTEXT(kMaybeTargetCode)
-  DEFINE_PARAMETER_TYPES(MachineType::AnyTagged())  // kMaybeTargetCode
-  DECLARE_DESCRIPTOR(BaselineOnStackReplacementDescriptor)
+  DECLARE_DESCRIPTOR(OnStackReplacementDescriptor)
 
   static constexpr inline Register MaybeTargetCodeRegister();
 
@@ -1818,6 +1815,19 @@ class InterpreterCEntry2Descriptor
   DECLARE_DESCRIPTOR(InterpreterCEntry2Descriptor)
 
   static constexpr auto registers();
+};
+
+class FindNonDefaultConstructorDescriptor
+    : public StaticCallInterfaceDescriptor<
+          FindNonDefaultConstructorDescriptor> {
+ public:
+  DEFINE_RESULT_AND_PARAMETERS(2, kThisFunction, kNewTarget)
+  DEFINE_RESULT_AND_PARAMETER_TYPES(
+      MachineType::AnyTagged(),  // result 1 (true / false)
+      MachineType::AnyTagged(),  // result 2 (constructor_or_instance)
+      MachineType::AnyTagged(),  // kThisFunction
+      MachineType::AnyTagged())  // kNewTarget
+  DECLARE_DESCRIPTOR(FindNonDefaultConstructorDescriptor)
 };
 
 class ForInPrepareDescriptor

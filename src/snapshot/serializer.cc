@@ -43,7 +43,7 @@ Serializer::Serializer(Isolate* isolate, Snapshot::SerializerFlags flags)
 #endif
 {
 #ifdef OBJECT_PRINT
-  if (FLAG_serialization_statistics) {
+  if (v8_flags.serialization_statistics) {
     for (int space = 0; space < kNumberOfSnapshotSpaces; ++space) {
       // Value-initialized to 0.
       instance_type_count_[space] = std::make_unique<int[]>(kInstanceTypes);
@@ -58,7 +58,7 @@ void Serializer::PopStack() { stack_.Pop(); }
 #endif
 
 void Serializer::CountAllocation(Map map, int size, SnapshotSpace space) {
-  DCHECK(FLAG_serialization_statistics);
+  DCHECK(v8_flags.serialization_statistics);
 
   const int space_number = static_cast<int>(space);
   allocation_size_[space_number] += size;
@@ -78,7 +78,7 @@ int Serializer::TotalAllocationSize() const {
 }
 
 void Serializer::OutputStatistics(const char* name) {
-  if (!FLAG_serialization_statistics) return;
+  if (!v8_flags.serialization_statistics) return;
 
   PrintF("%s:\n", name);
 
@@ -113,7 +113,7 @@ void Serializer::OutputStatistics(const char* name) {
 }
 
 void Serializer::SerializeDeferredObjects() {
-  if (FLAG_trace_serializer) {
+  if (v8_flags.trace_serializer) {
     PrintF("Serializing deferred objects\n");
   }
   WHILE_WITH_HANDLE_SCOPE(isolate(), !deferred_objects_.empty(), {
@@ -188,7 +188,7 @@ bool Serializer::SerializeHotObject(HeapObject obj) {
   int index = hot_objects_.Find(obj);
   if (index == HotObjectsList::kNotFound) return false;
   DCHECK(index >= 0 && index < kHotObjectCount);
-  if (FLAG_trace_serializer) {
+  if (v8_flags.trace_serializer) {
     PrintF(" Encoding hot object %d:", index);
     obj.ShortPrint();
     PrintF("\n");
@@ -206,14 +206,14 @@ bool Serializer::SerializeBackReference(HeapObject obj) {
   // offset fromthe start of the deserialized objects or as an offset
   // backwards from thecurrent allocation pointer.
   if (reference->is_attached_reference()) {
-    if (FLAG_trace_serializer) {
+    if (v8_flags.trace_serializer) {
       PrintF(" Encoding attached reference %d\n",
              reference->attached_reference_index());
     }
     PutAttachedReference(*reference);
   } else {
     DCHECK(reference->is_back_reference());
-    if (FLAG_trace_serializer) {
+    if (v8_flags.trace_serializer) {
       PrintF(" Encoding back reference to: ");
       obj.ShortPrint();
       PrintF("\n");
@@ -244,7 +244,7 @@ void Serializer::PutRoot(RootIndex root) {
   DisallowGarbageCollection no_gc;
   int root_index = static_cast<int>(root);
   HeapObject object = HeapObject::cast(isolate()->root(root));
-  if (FLAG_trace_serializer) {
+  if (v8_flags.trace_serializer) {
     PrintF(" Encoding root %d:", root_index);
     object.ShortPrint();
     PrintF("\n");
@@ -417,7 +417,7 @@ void Serializer::ObjectSerializer::SerializePrologue(SnapshotSpace space,
         CodeNameEvent(object_->address(), sink_->Position(), code_name));
   }
 
-  if (map == *object_) {
+  if (map.SafeEquals(*object_)) {
     DCHECK_EQ(*object_, ReadOnlyRoots(isolate()).meta_map());
     DCHECK_EQ(space, SnapshotSpace::kReadOnlyHeap);
     sink_->Put(kNewMetaMap, "NewMetaMap");
@@ -450,7 +450,7 @@ void Serializer::ObjectSerializer::SerializePrologue(SnapshotSpace space,
     serializer_->ResolvePendingObject(*object_);
   }
 
-  if (FLAG_serialization_statistics) {
+  if (v8_flags.serialization_statistics) {
     serializer_->CountAllocation(object_->map(), size, space);
   }
 
@@ -595,13 +595,13 @@ void Serializer::ObjectSerializer::SerializeExternalString() {
   if (serializer_->external_reference_encoder_.TryEncode(resource).To(
           &reference)) {
     DCHECK(reference.is_from_api());
-#ifdef V8_SANDBOXED_EXTERNAL_POINTERS
+#ifdef V8_ENABLE_SANDBOX
     uint32_t external_pointer_entry =
         string->GetResourceRefForDeserialization();
 #endif
     string->SetResourceRefForSerialization(reference.index());
     SerializeObject();
-#ifdef V8_SANDBOXED_EXTERNAL_POINTERS
+#ifdef V8_ENABLE_SANDBOX
     string->SetResourceRefForSerialization(external_pointer_entry);
 #else
     string->set_address_as_resource(isolate(), resource);
@@ -707,7 +707,7 @@ void Serializer::ObjectSerializer::Serialize() {
     if ((recursion.ExceedsMaximum() && CanBeDeferred(raw)) ||
         serializer_->MustBeDeferred(raw)) {
       DCHECK(CanBeDeferred(raw));
-      if (FLAG_trace_serializer) {
+      if (v8_flags.trace_serializer) {
         PrintF(" Deferring heap object: ");
         object_->ShortPrint();
         PrintF("\n");
@@ -720,7 +720,7 @@ void Serializer::ObjectSerializer::Serialize() {
       return;
     }
 
-    if (FLAG_trace_serializer) {
+    if (v8_flags.trace_serializer) {
       PrintF(" Encoding heap object: ");
       object_->ShortPrint();
       PrintF("\n");
@@ -826,7 +826,7 @@ void Serializer::ObjectSerializer::SerializeDeferred() {
       serializer_->reference_map()->LookupReference(object_);
 
   if (back_reference != nullptr) {
-    if (FLAG_trace_serializer) {
+    if (v8_flags.trace_serializer) {
       PrintF(" Deferred heap object ");
       object_->ShortPrint();
       PrintF(" was already serialized\n");
@@ -834,7 +834,7 @@ void Serializer::ObjectSerializer::SerializeDeferred() {
     return;
   }
 
-  if (FLAG_trace_serializer) {
+  if (v8_flags.trace_serializer) {
     PrintF(" Encoding deferred heap object\n");
   }
   Serialize();
@@ -907,10 +907,11 @@ void Serializer::ObjectSerializer::VisitPointers(HeapObject host,
       if (repeat_end < end &&
           serializer_->root_index_map()->Lookup(*obj, &root_index) &&
           RootsTable::IsImmortalImmovable(root_index) &&
-          *current == *repeat_end) {
+          current.load(cage_base) == repeat_end.load(cage_base)) {
         DCHECK_EQ(reference_type, HeapObjectReferenceType::STRONG);
         DCHECK(!Heap::InYoungGeneration(*obj));
-        while (repeat_end < end && *repeat_end == *current) {
+        while (repeat_end < end &&
+               repeat_end.load(cage_base) == current.load(cage_base)) {
           repeat_end++;
         }
         int repeat_count = static_cast<int>(repeat_end - current);
@@ -1133,6 +1134,9 @@ void Serializer::ObjectSerializer::VisitOffHeapTarget(Code host,
                                                       RelocInfo* rinfo) {
   static_assert(EmbeddedData::kTableSize == Builtins::kBuiltinCount);
 
+  // Currently we don't serialize code that contains near builtin entries.
+  CHECK_NE(rinfo->rmode(), RelocInfo::NEAR_BUILTIN_ENTRY);
+
   Address addr = rinfo->target_off_heap_target();
   CHECK_NE(kNullAddress, addr);
 
@@ -1234,7 +1238,7 @@ void Serializer::ObjectSerializer::OutputRawData(Address up_to) {
       // snapshot deterministic.
       CHECK_EQ(CodeDataContainer::kCodeCageBaseUpper32BitsOffset + kTaggedSize,
                CodeDataContainer::kCodeEntryPointOffset);
-      static byte field_value[kTaggedSize + kExternalPointerSlotSize] = {0};
+      static byte field_value[kTaggedSize + kSystemPointerSize] = {0};
       OutputRawWithCustomField(
           sink_, object_start, base, bytes_to_output,
           CodeDataContainer::kCodeCageBaseUpper32BitsOffset,

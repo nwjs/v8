@@ -15,9 +15,9 @@
 #include "src/objects/objects-inl.h"
 #include "src/objects/smi.h"
 #include "test/cctest/cctest.h"
-#include "test/cctest/compiler/code-assembler-tester.h"
+#include "test/cctest/compiler/codegen-tester.h"
 #include "test/cctest/compiler/function-tester.h"
-#include "test/cctest/compiler/test-codegen.h"
+#include "test/common/code-assembler-tester.h"
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/compiler/wasm-compiler.h"
@@ -301,9 +301,7 @@ void PrintStateValue(std::ostream& os, Isolate* isolate, Handle<Object> value,
   os << ")";
 }
 
-bool TestSimd128Moves() {
-  return CpuFeatures::SupportsWasmSimd128();
-}
+bool TestSimd128Moves() { return CpuFeatures::SupportsWasmSimd128(); }
 
 }  // namespace
 

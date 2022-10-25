@@ -787,7 +787,7 @@ bool CodeDataContainer::has_handler_table() const {
 
 int Code::constant_pool_size() const {
   const int size = code_comments_offset() - constant_pool_offset();
-  if (!FLAG_enable_embedded_constant_pool) {
+  if (!v8_flags.enable_embedded_constant_pool) {
     DCHECK_EQ(size, 0);
     return 0;
   }
@@ -1232,7 +1232,7 @@ bool CodeDataContainer::is_wasm_code() const {
 #endif
 
 int Code::constant_pool_offset() const {
-  if (!FLAG_enable_embedded_constant_pool) {
+  if (!v8_flags.enable_embedded_constant_pool) {
     // Redirection needed since the field doesn't exist in this case.
     return code_comments_offset();
   }
@@ -1240,7 +1240,7 @@ int Code::constant_pool_offset() const {
 }
 
 void Code::set_constant_pool_offset(int value) {
-  if (!FLAG_enable_embedded_constant_pool) {
+  if (!v8_flags.enable_embedded_constant_pool) {
     // Redirection needed since the field doesn't exist in this case.
     return;
   }
@@ -1529,22 +1529,16 @@ Code CodeDataContainer::code(PtrComprCageBase cage_base,
 
 DEF_GETTER(CodeDataContainer, code_entry_point, Address) {
   CHECK(V8_EXTERNAL_CODE_SPACE_BOOL);
-  Isolate* isolate = GetIsolateForSandbox(*this);
-  return ReadExternalPointerField<kCodeEntryPointTag>(kCodeEntryPointOffset,
-                                                      isolate);
+  return ReadField<Address>(kCodeEntryPointOffset);
 }
 
-void CodeDataContainer::init_code_entry_point(Isolate* isolate,
-                                              Address initial_value) {
-  CHECK(V8_EXTERNAL_CODE_SPACE_BOOL);
-  InitExternalPointerField<kCodeEntryPointTag>(kCodeEntryPointOffset, isolate,
-                                               initial_value);
+void CodeDataContainer::init_code_entry_point(Isolate* isolate, Address value) {
+  set_code_entry_point(isolate, value);
 }
 
 void CodeDataContainer::set_code_entry_point(Isolate* isolate, Address value) {
   CHECK(V8_EXTERNAL_CODE_SPACE_BOOL);
-  WriteExternalPointerField<kCodeEntryPointTag>(kCodeEntryPointOffset, isolate,
-                                                value);
+  WriteField<Address>(kCodeEntryPointOffset, value);
 }
 
 void CodeDataContainer::SetCodeAndEntryPoint(Isolate* isolate_for_sandbox,
@@ -1815,7 +1809,7 @@ DEFINE_DEOPT_ENTRY_ACCESSORS(Pc, Smi)
 DEFINE_DEOPT_ENTRY_ACCESSORS(NodeId, Smi)
 #endif  // DEBUG
 
-BytecodeOffset DeoptimizationData::GetBytecodeOffset(int i) {
+BytecodeOffset DeoptimizationData::GetBytecodeOffset(int i) const {
   return BytecodeOffset(BytecodeOffsetRaw(i).value());
 }
 

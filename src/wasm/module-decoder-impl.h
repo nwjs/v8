@@ -9,6 +9,7 @@
 #ifndef V8_WASM_MODULE_DECODER_IMPL_H_
 #define V8_WASM_MODULE_DECODER_IMPL_H_
 
+#include "src/base/platform/wrappers.h"
 #include "src/logging/counters.h"
 #include "src/strings/unicode.h"
 #include "src/utils/ostreams.h"
@@ -23,9 +24,9 @@ namespace v8 {
 namespace internal {
 namespace wasm {
 
-#define TRACE(...)                                    \
-  do {                                                \
-    if (FLAG_trace_wasm_decoder) PrintF(__VA_ARGS__); \
+#define TRACE(...)                                        \
+  do {                                                    \
+    if (v8_flags.trace_wasm_decoder) PrintF(__VA_ARGS__); \
   } while (false)
 
 class NoTracer {
@@ -334,17 +335,18 @@ class ModuleDecoderTemplate : public Decoder {
 
   void DumpModule(const base::Vector<const byte> module_bytes) {
     std::string path;
-    if (FLAG_dump_wasm_module_path) {
-      path = FLAG_dump_wasm_module_path;
+    if (v8_flags.dump_wasm_module_path) {
+      path = v8_flags.dump_wasm_module_path;
       if (path.size() &&
           !base::OS::isDirectorySeparator(path[path.size() - 1])) {
         path += base::OS::DirectorySeparator();
       }
     }
-    // File are named `HASH.{ok,failed}.wasm`.
-    size_t hash = base::hash_range(module_bytes.begin(), module_bytes.end());
+    // File are named `<hash>.{ok,failed}.wasm`.
+    // Limit the hash to 8 characters (32 bits).
+    uint32_t hash = static_cast<uint32_t>(GetWireBytesHash(module_bytes));
     base::EmbeddedVector<char, 32> buf;
-    SNPrintF(buf, "%016zx.%s.wasm", hash, ok() ? "ok" : "failed");
+    SNPrintF(buf, "%08x.%s.wasm", hash, ok() ? "ok" : "failed");
     path += buf.begin();
     size_t rv = 0;
     if (FILE* file = base::OS::FOpen(path.c_str(), "wb")) {
@@ -682,7 +684,7 @@ class ModuleDecoderTemplate : public Decoder {
             const FunctionSig* sig = consume_sig(module_->signature_zone.get());
             if (!ok()) break;
             module_->add_signature(sig, kNoSuperType);
-            if (FLAG_wasm_type_canonicalization) {
+            if (v8_flags.wasm_type_canonicalization) {
               type_canon->AddRecursiveGroup(module_.get(), 1);
             }
             break;
@@ -725,7 +727,7 @@ class ModuleDecoderTemplate : public Decoder {
           TypeDefinition type = consume_subtype_definition();
           if (ok()) module_->add_type(type);
         }
-        if (ok() && FLAG_wasm_type_canonicalization) {
+        if (ok() && v8_flags.wasm_type_canonicalization) {
           type_canon->AddRecursiveGroup(module_.get(), group_size);
         }
       } else {
@@ -733,7 +735,7 @@ class ModuleDecoderTemplate : public Decoder {
         TypeDefinition type = consume_subtype_definition();
         if (ok()) {
           module_->add_type(type);
-          if (FLAG_wasm_type_canonicalization) {
+          if (v8_flags.wasm_type_canonicalization) {
             type_canon->AddRecursiveGroup(module_.get(), 1);
           }
         }
@@ -810,7 +812,7 @@ class ModuleDecoderTemplate : public Decoder {
           table->imported = true;
           const byte* type_position = pc();
           ValueType type = consume_value_type();
-          if (!WasmTable::IsValidTableType(type, module_.get())) {
+          if (!type.is_object_reference()) {
             errorf(type_position, "Invalid table type %s", type.name().c_str());
             break;
           }
@@ -919,10 +921,8 @@ class ModuleDecoderTemplate : public Decoder {
       }
 
       ValueType table_type = consume_value_type();
-      if (!WasmTable::IsValidTableType(table_type, module_.get())) {
-        error(type_position,
-              "Currently, only externref and function references are allowed "
-              "as table types");
+      if (!table_type.is_object_reference()) {
+        error(type_position, "Only reference types can be used as table types");
         continue;
       }
       if (!has_initializer && !table_type.is_defaultable()) {
@@ -1102,7 +1102,7 @@ class ModuleDecoderTemplate : public Decoder {
 
   void DecodeElementSection() {
     uint32_t segment_count =
-        consume_count("segment count", FLAG_wasm_max_table_size);
+        consume_count("segment count", v8_flags.wasm_max_table_size);
 
     for (uint32_t i = 0; i < segment_count; ++i) {
       tracer_.ElementOffset(pc_offset());
@@ -1682,7 +1682,7 @@ class ModuleDecoderTemplate : public Decoder {
       section_iter.advance(true);
     }
 
-    if (FLAG_dump_wasm_module) DumpModule(orig_bytes);
+    if (v8_flags.dump_wasm_module) DumpModule(orig_bytes);
 
     if (decoder.failed()) {
       return decoder.toResult<std::shared_ptr<WasmModule>>(nullptr);
@@ -1827,7 +1827,7 @@ class ModuleDecoderTemplate : public Decoder {
   void VerifyFunctionBody(AccountingAllocator* allocator, uint32_t func_num,
                           const ModuleWireBytes& wire_bytes,
                           const WasmModule* module, WasmFunction* function) {
-    if (FLAG_trace_wasm_decoder) {
+    if (v8_flags.trace_wasm_decoder) {
       WasmFunctionName func_name(function,
                                  wire_bytes.GetNameOrNull(function, module));
       StdoutStream{} << "Verifying wasm function " << func_name << std::endl;

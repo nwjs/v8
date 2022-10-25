@@ -89,7 +89,7 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
     builder.addFunction("test_import", kSig_i_ii)
       .addBody([kExprLocalGet, 0, kExprLocalGet, 1, kExprGlobalGet, 0,
-                kExprCallRef])
+                kExprCallRef, sig_index])
       .exportFunc();
 
     return builder.instantiate({imports: {
@@ -162,7 +162,7 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
       kGCPrefix, kExprStructGet, composite_struct_index, 0])
     .exportFunc();
 
-  builder.addFunction("field_2_default", makeSig([], [kWasmAnyRef]))
+  builder.addFunction("field_2_default", makeSig([], [kWasmDataRef]))
     .addBody([
       kExprGlobalGet, global_default.index,
       kGCPrefix, kExprStructGet, composite_struct_index, 1])
@@ -200,7 +200,7 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
   var global = builder.addGlobal(
       wasmRefType(array_index), false,
       [kExprGlobalGet, global0.index, ...wasmI32Const(element1_value),
-       kGCPrefix, kExprArrayNewFixedStatic, array_index, 2]);
+       kGCPrefix, kExprArrayNewFixed, array_index, 2]);
 
   builder.addFunction("get_element", kSig_i_i)
     .addBody([
@@ -235,7 +235,7 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
       [kExprGlobalGet, global0.index, kExprRefNull, struct_index,
        ...wasmI32Const(element2_value),
        kGCPrefix, kExprStructNew, struct_index,
-       kGCPrefix, kExprArrayNewFixedStatic, array_index, 3]);
+       kGCPrefix, kExprArrayNewFixed, array_index, 3]);
 
   builder.addFunction("element0", kSig_i_v)
     .addBody([
@@ -245,7 +245,7 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
       kGCPrefix, kExprStructGet, struct_index, 0])
     .exportFunc();
 
-  builder.addFunction("element1", makeSig([], [kWasmAnyRef]))
+  builder.addFunction("element1", makeSig([], [kWasmDataRef]))
     .addBody([
       kExprGlobalGet, global.index,
       kExprI32Const, 1,
@@ -345,7 +345,7 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
       wasmRefType(array_index), true,
       [...values.flatMap(
         value => [...wasmI32Const(value), kGCPrefix, kExprI31New]),
-       kGCPrefix, kExprArrayNewFixedStatic, array_index, 5]);
+       kGCPrefix, kExprArrayNewFixed, array_index, 5]);
 
   for (signed of [true, false]) {
     builder.addFunction(`get_${signed ? "s" : "u"}`, kSig_i_i)

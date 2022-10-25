@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 
 from contextlib import contextmanager
+import logging
 import os
 import re
 import signal
@@ -42,11 +43,22 @@ def handle_sigterm(process, abort_fun, enabled):
   """
   # Variable to communicate with the signal handler.
   abort_occured = [False]
-  def handler(signum, frame):
-    abort_fun(process, abort_occured)
 
   if enabled:
-    previous = signal.signal(signal.SIGTERM, handler)
+    # TODO(https://crbug.com/v8/13113): There is a race condition on
+    # signal handler registration. In rare cases, the SIGTERM for stopping
+    # a worker might be caught right after a long running process has been
+    # started (or logic that starts it isn't interrupted), but before the
+    # registration of the abort_fun. In this case, process.communicate will
+    # block until the process is done.
+    previous = signal.getsignal(signal.SIGTERM)
+    def handler(signum, frame):
+      abort_fun(process, abort_occured)
+      if previous and callable(previous):
+        # Call default signal handler. If this command is called from a worker
+        # process, its signal handler will gracefully stop processing.
+        previous(signum, frame)
+    signal.signal(signal.SIGTERM, handler)
   try:
     yield
   finally:
@@ -145,13 +157,10 @@ class BaseCommand(object):
     started_as = self.to_string(relative=True)
     process_text = 'process %d started as:\n  %s\n' % (process.pid, started_as)
     try:
-      print('Attempting to kill ' + process_text)
-      sys.stdout.flush()
+      logging.warning('Attempting to kill %s', process_text)
       self._kill_process(process)
-    except OSError as e:
-      print(e)
-      print('Unruly ' + process_text)
-      sys.stdout.flush()
+    except OSError:
+      logging.exception('Unruly %s', process_text)
 
   def __str__(self):
     return self.to_string()
@@ -216,11 +225,10 @@ def taskkill_windows(process, verbose=False, force=True):
   )
   stdout, stderr = tk.communicate()
   if verbose:
-    print('Taskkill results for %d' % process.pid)
-    print(stdout)
-    print(stderr)
-    print('Return code: %d' % tk.returncode)
-    sys.stdout.flush()
+    logging.info('Taskkill results for %d', process.pid)
+    logging.info(stdout.decode('utf-8', errors='ignore'))
+    logging.info(stderr.decode('utf-8', errors='ignore'))
+    logging.info('Return code: %d', tk.returncode)
 
 
 class WindowsCommand(BaseCommand):

@@ -66,11 +66,19 @@ bool JSFunction::HasAttachedOptimizedCode() const {
 }
 
 bool JSFunction::HasAvailableHigherTierCodeThan(CodeKind kind) const {
+  return HasAvailableHigherTierCodeThanWithFilter(kind,
+                                                  kJSFunctionCodeKindsMask);
+}
+
+bool JSFunction::HasAvailableHigherTierCodeThanWithFilter(
+    CodeKind kind, CodeKinds filter_mask) const {
   const int kind_as_int_flag = static_cast<int>(CodeKindToCodeKindFlag(kind));
   DCHECK(base::bits::IsPowerOfTwo(kind_as_int_flag));
   // Smear right - any higher present bit means we have a higher tier available.
   const int mask = kind_as_int_flag | (kind_as_int_flag - 1);
-  return (GetAvailableCodeKinds() & static_cast<CodeKinds>(~mask)) != 0;
+  const CodeKinds masked_available_kinds =
+      GetAvailableCodeKinds() & filter_mask;
+  return (masked_available_kinds & static_cast<CodeKinds>(~mask)) != 0;
 }
 
 bool JSFunction::HasAvailableOptimizedCode() const {
@@ -202,14 +210,14 @@ void JSFunction::MarkForOptimization(Isolate* isolate, CodeKind target_kind,
 
   if (IsConcurrent(mode)) {
     if (IsInProgress(tiering_state())) {
-      if (FLAG_trace_concurrent_recompilation) {
+      if (v8_flags.trace_concurrent_recompilation) {
         PrintF("  ** Not marking ");
         ShortPrint();
         PrintF(" -- already in optimization queue.\n");
       }
       return;
     }
-    if (FLAG_trace_concurrent_recompilation) {
+    if (v8_flags.trace_concurrent_recompilation) {
       PrintF("  ** Marking ");
       ShortPrint();
       PrintF(" for concurrent %s recompilation.\n",
@@ -574,7 +582,7 @@ void JSFunction::CreateAndAttachFeedbackVector(
   EnsureClosureFeedbackCellArray(function, false);
   Handle<ClosureFeedbackCellArray> closure_feedback_cell_array =
       handle(function->closure_feedback_cell_array(), isolate);
-  Handle<HeapObject> feedback_vector = FeedbackVector::New(
+  Handle<FeedbackVector> feedback_vector = FeedbackVector::New(
       isolate, shared, closure_feedback_cell_array, compiled_scope);
   // EnsureClosureFeedbackCellArray should handle the special case where we need
   // to allocate a new feedback cell. Please look at comment in that function
@@ -583,6 +591,9 @@ void JSFunction::CreateAndAttachFeedbackVector(
          isolate->heap()->many_closures_cell());
   function->raw_feedback_cell().set_value(*feedback_vector, kReleaseStore);
   function->SetInterruptBudget(isolate);
+
+  DCHECK_EQ(v8_flags.log_function_events,
+            feedback_vector->log_next_execution());
 }
 
 // static
@@ -612,10 +623,11 @@ void JSFunction::InitializeFeedbackCell(
   }
 
   const bool needs_feedback_vector =
-      !FLAG_lazy_feedback_allocation || FLAG_always_turbofan ||
+      !v8_flags.lazy_feedback_allocation || v8_flags.always_turbofan ||
       // We also need a feedback vector for certain log events, collecting type
       // profile and more precise code coverage.
-      FLAG_log_function_events || !isolate->is_best_effort_code_coverage() ||
+      v8_flags.log_function_events ||
+      !isolate->is_best_effort_code_coverage() ||
       isolate->is_collecting_type_profile() ||
       function->shared().sparkplug_compiled();
 
@@ -629,7 +641,7 @@ void JSFunction::InitializeFeedbackCell(
   if (function->shared().sparkplug_compiled() &&
       CanCompileWithBaseline(isolate, function->shared()) &&
       function->ActiveTierIsIgnition()) {
-    if (FLAG_baseline_batch_compilation) {
+    if (v8_flags.baseline_batch_compilation) {
       isolate->baseline_batch_compiler()->EnqueueFunction(function);
     } else {
       IsCompiledScope is_compiled_scope(
@@ -739,7 +751,7 @@ void JSFunction::SetInitialMap(Isolate* isolate, Handle<JSFunction> function,
   }
   map->SetConstructor(*constructor);
   function->set_prototype_or_initial_map(*map, kReleaseStore);
-  if (FLAG_log_maps) {
+  if (v8_flags.log_maps) {
     LOG(isolate, MapEvent("InitialMap", Handle<Map>(), map, "",
                           SharedFunctionInfo::DebugName(
                               handle(function->shared(), isolate))));
@@ -1354,14 +1366,14 @@ void JSFunction::CalculateInstanceSizeHelper(InstanceType instance_type,
            static_cast<unsigned>(JSObject::kMaxInstanceSize));
 }
 
-void JSFunction::ClearTypeFeedbackInfo() {
+void JSFunction::ClearAllTypeFeedbackInfoForTesting() {
   ResetIfCodeFlushed();
   if (has_feedback_vector()) {
     FeedbackVector vector = feedback_vector();
     Isolate* isolate = GetIsolate();
-    if (vector.ClearSlots(isolate)) {
+    if (vector.ClearAllSlotsForTesting(isolate)) {
       IC::OnFeedbackChanged(isolate, vector, FeedbackSlot::Invalid(),
-                            "ClearTypeFeedbackInfo");
+                            "ClearAllTypeFeedbackInfoForTesting");
     }
   }
 }

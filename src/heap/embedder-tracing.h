@@ -21,6 +21,8 @@ namespace internal {
 class Heap;
 class JSObject;
 
+START_ALLOW_USE_DEPRECATED()
+
 class V8_EXPORT_PRIVATE DefaultEmbedderRootsHandler final
     : public EmbedderRootsHandler {
  public:
@@ -108,8 +110,18 @@ class V8_EXPORT_PRIVATE LocalEmbedderHeapTracer final {
   bool IsRemoteTracingDone();
 
   bool ShouldFinalizeIncrementalMarking() {
-    return !FLAG_incremental_marking_wrappers || !InUse() ||
-           (IsRemoteTracingDone() && embedder_worklist_empty_);
+    // Covers cases where no remote tracer is in use or the flags for
+    // incremental marking have been disabled.
+    if (!SupportsIncrementalEmbedderSteps()) return true;
+
+    return IsRemoteTracingDone() && embedder_worklist_empty_;
+  }
+
+  bool SupportsIncrementalEmbedderSteps() const {
+    if (!InUse()) return false;
+
+    return cpp_heap_ ? v8_flags.cppheap_incremental_marking
+                     : v8_flags.incremental_marking_wrappers;
   }
 
   void SetEmbedderWorklistEmpty(bool is_empty) {
@@ -219,6 +231,8 @@ class V8_EXPORT_PRIVATE LocalEmbedderHeapTracer final {
 
   friend class EmbedderStackStateScope;
 };
+
+END_ALLOW_USE_DEPRECATED()
 
 }  // namespace internal
 }  // namespace v8

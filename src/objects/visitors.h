@@ -18,7 +18,6 @@ class CodeDataContainer;
 
 #define ROOT_ID_LIST(V)                                 \
   V(kStringTable, "(Internalized strings)")             \
-  V(kStringForwardingTable, "(Forwarded strings)")      \
   V(kExternalStringsTable, "(External strings)")        \
   V(kReadOnlyRootList, "(Read-only roots)")             \
   V(kStrongRootList, "(Strong roots)")                  \
@@ -175,7 +174,8 @@ class ObjectVisitor {
   // Visits an (encoded) internal reference.
   virtual void VisitInternalReference(Code host, RelocInfo* rinfo) {}
 
-  // Visits an off-heap target in the instruction stream.
+  // Visits an off-heap target or near builtin entry in the instruction stream.
+  // TODO(ishell): rename to VisitBuiltinEntry.
   virtual void VisitOffHeapTarget(Code host, RelocInfo* rinfo) {}
 
   // Visits the relocation info using the given iterator.

@@ -410,6 +410,11 @@ class String : public TorqueGeneratedString<String, Name> {
       int* length_output = nullptr);
 
   // Externalization.
+  template <typename T>
+  bool MarkForExternalizationDuringGC(Isolate* isolate, T* resource);
+  template <typename T>
+  EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE)
+  void MakeExternalDuringGC(Isolate* isolate, T* resource);
   V8_EXPORT_PRIVATE bool MakeExternal(
       v8::String::ExternalStringResource* resource);
   V8_EXPORT_PRIVATE bool MakeExternal(
@@ -911,6 +916,7 @@ class ExternalString
       kResourceOffset + FIELD_SIZE(kResourceOffset);
 
   inline void InitExternalPointerFields(Isolate* isolate);
+  inline void VisitExternalPointers(ObjectVisitor* visitor) const;
 
   // Return whether the external string data pointer is not cached.
   inline bool is_uncached() const;

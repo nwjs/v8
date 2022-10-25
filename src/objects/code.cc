@@ -48,7 +48,7 @@ inline EmbeddedData EmbeddedDataWithMaybeRemappedEmbeddedBuiltins(
   // shared CodeRange. When short builtin calls are enabled, there is a single
   // copy of the re-embedded builtins in the shared CodeRange, so use that if
   // it's present.
-  if (FLAG_jitless) return EmbeddedData::FromBlob();
+  if (v8_flags.jitless) return EmbeddedData::FromBlob();
   CodeRange* code_range = CodeRange::GetProcessWideCodeRange().get();
   return (code_range && code_range->embedded_blob_code_copy() != nullptr)
              ? EmbeddedData::FromBlob(code_range)
@@ -207,6 +207,14 @@ void Code::RelocateFromDesc(ByteArray reloc_info, Heap* heap,
       Code code = FromCodeT(CodeT::cast(*p));
       it.rinfo()->set_target_address(code.raw_instruction_start(),
                                      UPDATE_WRITE_BARRIER, SKIP_ICACHE_FLUSH);
+    } else if (RelocInfo::IsNearBuiltinEntry(mode)) {
+      // Rewrite builtin IDs to PC-relative offset to the builtin entry point.
+      Builtin builtin = it.rinfo()->target_builtin_at(origin);
+      Address p =
+          heap->isolate()->builtin_entry_table()[Builtins::ToInt(builtin)];
+      it.rinfo()->set_target_address(p, UPDATE_WRITE_BARRIER,
+                                     SKIP_ICACHE_FLUSH);
+      DCHECK_EQ(p, it.rinfo()->target_address());
     } else if (RelocInfo::IsRuntimeEntry(mode)) {
       Address p = it.rinfo()->target_runtime_entry(origin);
       it.rinfo()->set_target_runtime_entry(p, UPDATE_WRITE_BARRIER,
@@ -365,6 +373,7 @@ bool Code::IsIsolateIndependent(Isolate* isolate) {
                  RelocInfo::ModeMask(RelocInfo::EXTERNAL_REFERENCE) |
                  RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE) |
                  RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE_ENCODED) |
+                 RelocInfo::ModeMask(RelocInfo::NEAR_BUILTIN_ENTRY) |
                  RelocInfo::ModeMask(RelocInfo::RUNTIME_ENTRY) |
                  RelocInfo::ModeMask(RelocInfo::WASM_CALL) |
                  RelocInfo::ModeMask(RelocInfo::WASM_STUB_CALL)));
@@ -372,11 +381,10 @@ bool Code::IsIsolateIndependent(Isolate* isolate) {
 #if defined(V8_TARGET_ARCH_PPC) || defined(V8_TARGET_ARCH_PPC64) || \
     defined(V8_TARGET_ARCH_MIPS64)
   return RelocIterator(*this, kModeMask).done();
-#elif defined(V8_TARGET_ARCH_X64) || defined(V8_TARGET_ARCH_ARM64) ||     \
-    defined(V8_TARGET_ARCH_ARM) || defined(V8_TARGET_ARCH_MIPS) ||        \
-    defined(V8_TARGET_ARCH_S390) || defined(V8_TARGET_ARCH_IA32) ||       \
-    defined(V8_TARGET_ARCH_RISCV64) || defined(V8_TARGET_ARCH_LOONG64) || \
-    defined(V8_TARGET_ARCH_RISCV32)
+#elif defined(V8_TARGET_ARCH_X64) || defined(V8_TARGET_ARCH_ARM64) ||  \
+    defined(V8_TARGET_ARCH_ARM) || defined(V8_TARGET_ARCH_S390) ||     \
+    defined(V8_TARGET_ARCH_IA32) || defined(V8_TARGET_ARCH_RISCV64) || \
+    defined(V8_TARGET_ARCH_LOONG64) || defined(V8_TARGET_ARCH_RISCV32)
   for (RelocIterator it(*this, kModeMask); !it.done(); it.next()) {
     // On these platforms we emit relative builtin-to-builtin
     // jumps for isolate independent builtins in the snapshot. They are later
@@ -500,7 +508,7 @@ void DeoptimizationData::DeoptimizationDataPrint(std::ostream& os) {
 #else   // DEBUG
     os << " index  bytecode-offset    pc";
 #endif  // DEBUG
-    if (FLAG_print_code_verbose) os << "  commands";
+    if (v8_flags.print_code_verbose) os << "  commands";
     os << "\n";
   }
   for (int i = 0; i < deopt_count; i++) {
@@ -513,7 +521,7 @@ void DeoptimizationData::DeoptimizationDataPrint(std::ostream& os) {
     print_pc(os, Pc(i).value());
     os << std::setw(2);
 
-    if (!FLAG_print_code_verbose) {
+    if (!v8_flags.print_code_verbose) {
       os << "\n";
       continue;
     }
@@ -731,11 +739,9 @@ void BytecodeArray::PrintJson(std::ostream& os) {
   if (constant_pool_lenght > 0) {
     os << ", \"constantPool\": [";
     for (int i = 0; i < constant_pool_lenght; i++) {
-      HeapObject heapObject = HeapObject::cast(constant_pool().get(i));
+      Object object = constant_pool().get(i);
       if (i > 0) os << ", ";
-      os << "\"";
-      heapObject.HeapObjectShortPrint(os);
-      os << "\"";
+      os << "\"" << object << "\"";
     }
     os << "]";
   }
@@ -745,19 +751,26 @@ void BytecodeArray::PrintJson(std::ostream& os) {
 
 void BytecodeArray::Disassemble(std::ostream& os) {
   DisallowGarbageCollection no_gc;
-
-  os << "Parameter count " << parameter_count() << "\n";
-  os << "Register count " << register_count() << "\n";
-  os << "Frame size " << frame_size() << "\n";
-  os << "Bytecode age: " << bytecode_age() << "\n";
-
-  Address base_address = GetFirstBytecodeAddress();
-  SourcePositionTableIterator source_positions(SourcePositionTable());
-
   // Storage for backing the handle passed to the iterator. This handle won't be
   // updated by the gc, but that's ok because we've disallowed GCs anyway.
   BytecodeArray handle_storage = *this;
   Handle<BytecodeArray> handle(reinterpret_cast<Address*>(&handle_storage));
+  Disassemble(handle, os);
+}
+
+// static
+void BytecodeArray::Disassemble(Handle<BytecodeArray> handle,
+                                std::ostream& os) {
+  DisallowGarbageCollection no_gc;
+
+  os << "Parameter count " << handle->parameter_count() << "\n";
+  os << "Register count " << handle->register_count() << "\n";
+  os << "Frame size " << handle->frame_size() << "\n";
+  os << "Bytecode age: " << handle->bytecode_age() << "\n";
+
+  Address base_address = handle->GetFirstBytecodeAddress();
+  SourcePositionTableIterator source_positions(handle->SourcePositionTable());
+
   interpreter::BytecodeArrayIterator iterator(handle);
   while (!iterator.done()) {
     if (!source_positions.done() &&
@@ -796,22 +809,22 @@ void BytecodeArray::Disassemble(std::ostream& os) {
     iterator.Advance();
   }
 
-  os << "Constant pool (size = " << constant_pool().length() << ")\n";
+  os << "Constant pool (size = " << handle->constant_pool().length() << ")\n";
 #ifdef OBJECT_PRINT
-  if (constant_pool().length() > 0) {
-    constant_pool().Print(os);
+  if (handle->constant_pool().length() > 0) {
+    handle->constant_pool().Print(os);
   }
 #endif
 
-  os << "Handler Table (size = " << handler_table().length() << ")\n";
+  os << "Handler Table (size = " << handle->handler_table().length() << ")\n";
 #ifdef ENABLE_DISASSEMBLER
-  if (handler_table().length() > 0) {
-    HandlerTable table(*this);
+  if (handle->handler_table().length() > 0) {
+    HandlerTable table(*handle);
     table.HandlerTableRangePrint(os);
   }
 #endif
 
-  ByteArray source_position_table = SourcePositionTable();
+  ByteArray source_position_table = handle->SourcePositionTable();
   os << "Source Position Table (size = " << source_position_table.length()
      << ")\n";
 #ifdef OBJECT_PRINT
@@ -835,17 +848,17 @@ void BytecodeArray::MakeOlder() {
   Address age_addr = address() + kBytecodeAgeOffset;
   DCHECK_LE(RoundDown(age_addr, kTaggedSize) + kTaggedSize, address() + Size());
   uint16_t age = bytecode_age();
-  if (age < FLAG_bytecode_old_age) {
+  if (age < v8_flags.bytecode_old_age) {
     static_assert(kBytecodeAgeSize == kUInt16Size);
     base::AsAtomic16::Relaxed_CompareAndSwap(
         reinterpret_cast<base::Atomic16*>(age_addr), age, age + 1);
   }
 
-  DCHECK_LE(bytecode_age(), FLAG_bytecode_old_age);
+  DCHECK_LE(bytecode_age(), v8_flags.bytecode_old_age);
 }
 
 bool BytecodeArray::IsOld() const {
-  return bytecode_age() >= FLAG_bytecode_old_age;
+  return bytecode_age() >= v8_flags.bytecode_old_age;
 }
 
 DependentCode DependentCode::GetDependentCode(HeapObject object) {
@@ -889,7 +902,7 @@ void PrintDependencyGroups(DependentCode::DependencyGroups groups) {
 void DependentCode::InstallDependency(Isolate* isolate, Handle<Code> code,
                                       Handle<HeapObject> object,
                                       DependencyGroups groups) {
-  if (V8_UNLIKELY(FLAG_trace_compilation_dependencies)) {
+  if (V8_UNLIKELY(v8_flags.trace_compilation_dependencies)) {
     StdoutStream{} << "Installing dependency of [" << code->GetHeapObject()
                    << "] on [" << object << "] in groups [";
     PrintDependencyGroups(groups);

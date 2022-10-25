@@ -153,6 +153,9 @@ class JSFunction : public TorqueGeneratedJSFunction<
   // will happen on its next activation.
 
   bool HasAvailableHigherTierCodeThan(CodeKind kind) const;
+  // As above but only considers available code kinds passing the filter mask.
+  bool HasAvailableHigherTierCodeThanWithFilter(CodeKind kind,
+                                                CodeKinds filter_mask) const;
 
   // True, iff any generated code kind is attached/available to this function.
   V8_EXPORT_PRIVATE bool HasAttachedOptimizedCode() const;
@@ -240,8 +243,9 @@ class JSFunction : public TorqueGeneratedJSFunction<
                                      IsCompiledScope* compiled_scope,
                                      bool reset_budget_for_feedback_allocation);
 
-  // Unconditionally clear the type feedback vector.
-  void ClearTypeFeedbackInfo();
+  // Unconditionally clear the type feedback vector, even those that we usually
+  // keep (e.g.: BinaryOp feedback).
+  void ClearAllTypeFeedbackInfoForTesting();
 
   // Resets function to clear compiled data after bytecode has been flushed.
   inline bool NeedsResetDueToFlushedBytecode();

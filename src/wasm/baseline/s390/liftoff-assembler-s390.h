@@ -5,7 +5,6 @@
 #ifndef V8_WASM_BASELINE_S390_LIFTOFF_ASSEMBLER_S390_H_
 #define V8_WASM_BASELINE_S390_LIFTOFF_ASSEMBLER_S390_H_
 
-#include "src/base/platform/wrappers.h"
 #include "src/base/v8-fallthrough.h"
 #include "src/codegen/assembler.h"
 #include "src/heap/memory-chunk.h"
@@ -164,7 +163,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
   // check in the condition code.
   RecordComment("OOL: stack check for large frame");
   Label continuation;
-  if (frame_size < FLAG_stack_size * 1024) {
+  if (frame_size < v8_flags.stack_size * 1024) {
     Register stack_limit = ip;
     LoadU64(stack_limit,
             FieldMemOperand(kWasmInstanceRegister,
@@ -179,7 +178,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
   Call(wasm::WasmCode::kWasmStackOverflow, RelocInfo::WASM_STUB_CALL);
   // The call will not return; just define an empty safepoint.
   safepoint_table_builder->DefineSafepoint(this);
-  if (FLAG_debug_code) stop();
+  if (v8_flags.debug_code) stop();
 
   bind(&continuation);
 
@@ -279,8 +278,13 @@ void LiftoffAssembler::ResetOSRTarget() {}
 
 void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
                                          Register offset_reg,
-                                         int32_t offset_imm) {
+                                         int32_t offset_imm, bool needs_shift) {
   CHECK(is_int20(offset_imm));
+  unsigned shift_amount = !needs_shift ? 0 : COMPRESS_POINTERS_BOOL ? 2 : 3;
+  if (offset_reg != no_reg && shift_amount != 0) {
+    ShiftLeftU64(ip, offset_reg, Operand(shift_amount));
+    offset_reg = ip;
+  }
   LoadTaggedPointerField(
       dst,
       MemOperand(src_addr, offset_reg == no_reg ? r0 : offset_reg, offset_imm));
@@ -302,7 +306,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
       MemOperand(dst_addr, offset_reg == no_reg ? r0 : offset_reg, offset_imm);
   StoreTaggedField(src.gp(), dst_op);
 
-  if (skip_write_barrier || FLAG_disable_write_barriers) return;
+  if (skip_write_barrier || v8_flags.disable_write_barriers) return;
 
   Label write_barrier;
   Label exit;
@@ -325,11 +329,17 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
 void LiftoffAssembler::Load(LiftoffRegister dst, Register src_addr,
                             Register offset_reg, uintptr_t offset_imm,
                             LoadType type, uint32_t* protected_load_pc,
-                            bool is_load_mem, bool i64_offset) {
+                            bool is_load_mem, bool i64_offset,
+                            bool needs_shift) {
   UseScratchRegisterScope temps(this);
   if (offset_reg != no_reg && !i64_offset) {
     // Clear the upper 32 bits of the 64 bit offset register.
     llgfr(ip, offset_reg);
+    offset_reg = ip;
+  }
+  unsigned shift_amount = needs_shift ? type.size_log_2() : 0;
+  if (offset_reg != no_reg && shift_amount != 0) {
+    ShiftLeftU64(ip, offset_reg, Operand(shift_amount));
     offset_reg = ip;
   }
   if (!is_int20(offset_imm)) {
@@ -1540,6 +1550,12 @@ void LiftoffAssembler::FillStackSlotsWithZero(int start, int size) {
   }
 
   pop(r0);
+}
+
+void LiftoffAssembler::LoadSpillAddress(Register dst, int offset,
+                                        ValueKind kind) {
+  if (kind == kI32) offset = offset + stack_bias;
+  SubS64(dst, fp, Operand(offset));
 }
 
 #define SIGN_EXT(r) lgfr(r, r)

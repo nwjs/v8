@@ -212,7 +212,7 @@ std::ostream& operator<<(std::ostream& os, PropertyCellType type) {
 Handle<FieldType> Object::OptimalType(Isolate* isolate,
                                       Representation representation) {
   if (representation.IsNone()) return FieldType::None(isolate);
-  if (FLAG_track_field_types) {
+  if (v8_flags.track_field_types) {
     if (representation.IsHeapObject() && IsHeapObject()) {
       // We can track only JavaScript objects with stable maps.
       Handle<Map> map(HeapObject::cast(*this).map(), isolate);
@@ -1473,27 +1473,6 @@ MaybeHandle<Object> Object::GetPropertyWithAccessor(LookupIterator* it) {
   return isolate->factory()->undefined_value();
 }
 
-// static
-Address AccessorInfo::redirect(Address address, AccessorComponent component) {
-  ApiFunction fun(address);
-  DCHECK_EQ(ACCESSOR_GETTER, component);
-  ExternalReference::Type type = ExternalReference::DIRECT_GETTER_CALL;
-  return ExternalReference::Create(&fun, type).address();
-}
-
-Address AccessorInfo::redirected_getter() const {
-  Address accessor = getter();
-  if (accessor == kNullAddress) return kNullAddress;
-  return redirect(accessor, ACCESSOR_GETTER);
-}
-
-Address CallHandlerInfo::redirected_callback() const {
-  Address address = callback();
-  ApiFunction fun(address);
-  ExternalReference::Type type = ExternalReference::DIRECT_API_CALL;
-  return ExternalReference::Create(&fun, type).address();
-}
-
 Maybe<bool> Object::SetPropertyWithAccessor(
     LookupIterator* it, Handle<Object> value,
     Maybe<ShouldThrow> maybe_should_throw) {
@@ -1665,7 +1644,7 @@ bool Object::SameValueZero(Object other) {
 MaybeHandle<Object> Object::ArraySpeciesConstructor(
     Isolate* isolate, Handle<Object> original_array) {
   Handle<Object> default_species = isolate->array_function();
-  if (!FLAG_builtin_subclassing) return default_species;
+  if (!v8_flags.builtin_subclassing) return default_species;
   if (original_array->IsJSArray() &&
       Handle<JSArray>::cast(original_array)->HasArrayPrototype(isolate) &&
       Protectors::IsArraySpeciesLookupChainIntact(isolate)) {
@@ -2144,7 +2123,6 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
       CallHandlerInfo info = CallHandlerInfo::cast(*this);
       os << "<CallHandlerInfo ";
       os << "callback= " << reinterpret_cast<void*>(info.callback());
-      os << ", js_callback= " << reinterpret_cast<void*>(info.js_callback());
       os << ", data= " << Brief(info.data());
       if (info.IsSideEffectFreeCallHandlerInfo()) {
         os << ", side_effect_free= true>";
@@ -2867,7 +2845,7 @@ Maybe<bool> Object::SetDataProperty(LookupIterator* it, Handle<Object> value) {
     }
 
 #if VERIFY_HEAP
-  if (FLAG_verify_heap) {
+  if (v8_flags.verify_heap) {
     receiver->HeapObjectVerify(isolate);
   }
 #endif
@@ -2953,9 +2931,9 @@ Maybe<bool> Object::TransitionAndWriteDataProperty(
   it->WriteDataValue(value, true);
 
 #if VERIFY_HEAP
-    if (FLAG_verify_heap) {
-      receiver->HeapObjectVerify(it->isolate());
-    }
+  if (v8_flags.verify_heap) {
+    receiver->HeapObjectVerify(it->isolate());
+  }
 #endif
 
     return Just(true);
@@ -2966,6 +2944,8 @@ MaybeHandle<Object> Object::ShareSlow(Isolate* isolate,
                                       ShouldThrow throw_if_cannot_be_shared) {
   // Use Object::Share() if value might already be shared.
   DCHECK(!value->IsShared());
+
+  SharedObjectSafePublishGuard publish_guard;
 
   if (value->IsString()) {
     return String::Share(isolate, Handle<String>::cast(value));
@@ -4001,18 +3981,25 @@ bool DescriptorArray::IsEqualUpTo(DescriptorArray desc, int nof_descriptors) {
 Handle<FixedArray> FixedArray::SetAndGrow(Isolate* isolate,
                                           Handle<FixedArray> array, int index,
                                           Handle<Object> value) {
-  if (index < array->length()) {
+  int src_length = array->length();
+  if (index < src_length) {
     array->set(index, *value);
     return array;
   }
-  int capacity = array->length();
+  int capacity = src_length;
   do {
     capacity = JSObject::NewElementsCapacity(capacity);
   } while (capacity <= index);
   Handle<FixedArray> new_array = isolate->factory()->NewFixedArray(capacity);
-  array->CopyTo(0, *new_array, 0, array->length());
-  new_array->FillWithHoles(array->length(), new_array->length());
-  new_array->set(index, *value);
+
+  DisallowGarbageCollection no_gc;
+  auto raw_src = *array;
+  auto raw_dst = *new_array;
+  raw_src.CopyTo(0, raw_dst, 0, src_length);
+  DCHECK_EQ(raw_dst.length(), capacity);
+  raw_dst.FillWithHoles(src_length, capacity);
+  raw_dst.set(index, *value);
+
   return new_array;
 }
 
@@ -4579,8 +4566,11 @@ int16_t DescriptorArray::UpdateNumberOfMarkedDescriptors(
 Handle<AccessorPair> AccessorPair::Copy(Isolate* isolate,
                                         Handle<AccessorPair> pair) {
   Handle<AccessorPair> copy = isolate->factory()->NewAccessorPair();
-  copy->set_getter(pair->getter());
-  copy->set_setter(pair->setter());
+  DisallowGarbageCollection no_gc;
+  auto raw_src = *pair;
+  auto raw_copy = *copy;
+  raw_copy.set_getter(raw_src.getter());
+  raw_copy.set_setter(raw_src.setter());
   return copy;
 }
 
@@ -5132,8 +5122,9 @@ MaybeHandle<SharedFunctionInfo> Script::FindSharedFunctionInfo(
     Handle<Script> script, IsolateT* isolate,
     FunctionLiteral* function_literal) {
   int function_literal_id = function_literal->function_literal_id();
-  if V8_UNLIKELY (script->type() == Script::TYPE_WEB_SNAPSHOT &&
-                  function_literal_id >= script->shared_function_info_count()) {
+  if (V8_UNLIKELY(script->type() == Script::TYPE_WEB_SNAPSHOT &&
+                  function_literal_id >=
+                      script->shared_function_info_count())) {
     return FindWebSnapshotSharedFunctionInfo(script, isolate, function_literal);
   }
 
@@ -5347,7 +5338,7 @@ AllocationType AllocationSite::GetAllocationType() const {
 }
 
 bool AllocationSite::IsNested() {
-  DCHECK(FLAG_trace_track_allocation_sites);
+  DCHECK(v8_flags.trace_track_allocation_sites);
   Object current = boilerplate().GetHeap()->allocation_sites_list();
   while (current.IsAllocationSite()) {
     AllocationSite current_site = AllocationSite::cast(current);
@@ -5483,6 +5474,14 @@ Handle<Object> JSPromise::Fulfill(Handle<JSPromise> promise,
                                   Handle<Object> value) {
   Isolate* const isolate = promise->GetIsolate();
 
+#ifdef V8_ENABLE_JAVASCRIPT_PROMISE_HOOKS
+  if (isolate->HasContextPromiseHooks()) {
+    isolate->raw_native_context().RunPromiseHook(
+        PromiseHookType::kResolve, promise,
+        isolate->factory()->undefined_value());
+  }
+#endif
+
   // 1. Assert: The value of promise.[[PromiseState]] is "pending".
   CHECK_EQ(Promise::kPending, promise->status());
 
@@ -5562,8 +5561,8 @@ MaybeHandle<Object> JSPromise::Resolve(Handle<JSPromise> promise,
   DCHECK(
       !reinterpret_cast<v8::Isolate*>(isolate)->GetCurrentContext().IsEmpty());
 
-  isolate->RunAllPromiseHooks(PromiseHookType::kResolve, promise,
-                              isolate->factory()->undefined_value());
+  isolate->RunPromiseHook(PromiseHookType::kResolve, promise,
+                          isolate->factory()->undefined_value());
 
   // 7. If SameValue(resolution, promise) is true, then
   if (promise.is_identical_to(resolution)) {
@@ -5800,10 +5799,11 @@ Handle<Derived> HashTable<Derived, Shape>::NewInternal(
   Handle<FixedArray> array = factory->NewFixedArrayWithMap(
       Derived::GetMap(ReadOnlyRoots(isolate)), length, allocation);
   Handle<Derived> table = Handle<Derived>::cast(array);
-
-  table->SetNumberOfElements(0);
-  table->SetNumberOfDeletedElements(0);
-  table->SetCapacity(capacity);
+  DisallowGarbageCollection no_gc;
+  auto raw_table = *table;
+  raw_table.SetNumberOfElements(0);
+  raw_table.SetNumberOfDeletedElements(0);
+  raw_table.SetCapacity(capacity);
   return table;
 }
 

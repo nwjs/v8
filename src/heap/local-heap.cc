@@ -64,7 +64,10 @@ LocalHeap::LocalHeap(Heap* heap, ThreadKind kind,
       WriteBarrier::SetForThread(marking_barrier_.get());
       if (heap_->incremental_marking()->IsMarking()) {
         marking_barrier_->Activate(
-            heap_->incremental_marking()->IsCompacting());
+            heap_->incremental_marking()->IsCompacting(),
+            heap_->incremental_marking()->IsMinorMarking()
+                ? MarkingBarrierType::kMinor
+                : MarkingBarrierType::kMajor);
       }
     }
   });

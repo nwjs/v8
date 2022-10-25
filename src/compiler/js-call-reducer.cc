@@ -1194,6 +1194,7 @@ TNode<String> JSCallReducerAssembler::ReduceStringPrototypeSubstring() {
 
 TNode<Boolean> JSCallReducerAssembler::ReduceStringPrototypeStartsWith(
     const StringRef& search_element_string) {
+  DCHECK(search_element_string.IsContentAccessible());
   TNode<Object> receiver = ReceiverInput();
   TNode<Object> start = ArgumentOrZero(1);
 
@@ -1204,7 +1205,7 @@ TNode<Boolean> JSCallReducerAssembler::ReduceStringPrototypeStartsWith(
   TNode<Number> zero = ZeroConstant();
   TNode<Number> clamped_start = NumberMin(NumberMax(start_smi, zero), length);
 
-  int search_string_length = search_element_string.length().value();
+  int search_string_length = search_element_string.length();
   DCHECK(search_string_length <= JSCallReducer::kMaxInlineMatchSequence);
 
   auto out = MakeLabel(MachineRepresentation::kTagged);
@@ -4117,25 +4118,25 @@ JSCallReducer::ReduceCallOrConstructWithArrayLikeOrSpreadOfCreateArguments(
       case IrOpcode::kJSCallWithArrayLike: {
         // Ignore uses as argumentsList input to calls with array like.
         JSCallWithArrayLikeNode n(user);
-        if (n.Argument(0) == arguments_list) continue;
+        if (edge.index() == n.ArgumentIndex(0)) continue;
         break;
       }
       case IrOpcode::kJSConstructWithArrayLike: {
         // Ignore uses as argumentsList input to calls with array like.
         JSConstructWithArrayLikeNode n(user);
-        if (n.Argument(0) == arguments_list) continue;
+        if (edge.index() == n.ArgumentIndex(0)) continue;
         break;
       }
       case IrOpcode::kJSCallWithSpread: {
         // Ignore uses as spread input to calls with spread.
         JSCallWithSpreadNode n(user);
-        if (n.LastArgument() == arguments_list) continue;
+        if (edge.index() == n.LastArgumentIndex()) continue;
         break;
       }
       case IrOpcode::kJSConstructWithSpread: {
         // Ignore uses as spread input to construct with spread.
         JSConstructWithSpreadNode n(user);
-        if (n.LastArgument() == arguments_list) continue;
+        if (edge.index() == n.LastArgumentIndex()) continue;
         break;
       }
       default:
@@ -6660,17 +6661,15 @@ Reduction JSCallReducer::ReduceStringPrototypeStartsWith(Node* node) {
     ObjectRef target_ref = search_element_matcher.Ref(broker());
     if (!target_ref.IsString()) return NoChange();
     StringRef search_element_string = target_ref.AsString();
-    if (search_element_string.length().has_value()) {
-      int length = search_element_string.length().value();
-      // If search_element's length is less or equal than
-      // kMaxInlineMatchSequence, we inline the entire
-      // matching sequence.
-      if (length <= kMaxInlineMatchSequence) {
-        JSCallReducerAssembler a(this, node);
-        Node* subgraph =
-            a.ReduceStringPrototypeStartsWith(search_element_string);
-        return ReplaceWithSubgraph(&a, subgraph);
-      }
+    if (!search_element_string.IsContentAccessible()) return NoChange();
+    int length = search_element_string.length();
+    // If search_element's length is less or equal than
+    // kMaxInlineMatchSequence, we inline the entire
+    // matching sequence.
+    if (length <= kMaxInlineMatchSequence) {
+      JSCallReducerAssembler a(this, node);
+      Node* subgraph = a.ReduceStringPrototypeStartsWith(search_element_string);
+      return ReplaceWithSubgraph(&a, subgraph);
     }
   }
 

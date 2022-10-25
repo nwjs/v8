@@ -149,7 +149,8 @@ struct WasmModule;
   V(WasmStringViewIterAdvance)           \
   V(WasmStringViewIterRewind)            \
   V(WasmStringViewIterSlice)             \
-  V(WasmExternInternalize)
+  V(WasmExternInternalize)               \
+  V(WasmExternExternalize)
 
 // Sorted, disjoint and non-overlapping memory regions. A region is of the
 // form [start, end). So there's no [start, end), [end, other_end),
@@ -1106,10 +1107,6 @@ class V8_EXPORT_PRIVATE WasmCodeManager final {
   // current thread.
   // Can only be called if {HasMemoryProtectionKeySupport()} is {true}.
   static bool MemoryProtectionKeyWritable();
-
-  // Initialize the current thread's permissions for the memory protection key,
-  // if we have support.
-  static void InitializeMemoryProtectionKeyPermissionsIfSupported();
 
   // Allocate new memory for assembler buffers, potentially protected by PKU.
   base::AddressRegion AllocateAssemblerBufferSpace(int size);

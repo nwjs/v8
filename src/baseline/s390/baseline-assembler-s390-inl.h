@@ -246,21 +246,13 @@ void BaselineAssembler::JumpIfObjectType(Condition cc, Register object,
   JumpIf(cc, type, Operand(instance_type), target);
 }
 
-void BaselineAssembler::JumpIfObjectType(Condition cc, Register object,
-                                         InstanceType instance_type,
-                                         ScratchRegisterScope* scratch_scope,
-                                         Label* target, Label::Distance) {
-  JumpIfObjectType(cc, object, instance_type, scratch_scope->AcquireScratch(),
-                   target);
-}
-
 void BaselineAssembler::JumpIfInstanceType(Condition cc, Register map,
                                            InstanceType instance_type,
                                            Label* target, Label::Distance) {
   ASM_CODE_COMMENT(masm_);
   ScratchRegisterScope temps(this);
   Register type = temps.AcquireScratch();
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     __ AssertNotSmi(map);
     __ CompareObjectType(map, type, type, MAP_TYPE);
     __ Assert(eq, AbortReason::kUnexpectedValue);
@@ -295,11 +287,20 @@ void BaselineAssembler::JumpIfSmi(Condition cc, Register lhs, Register rhs,
   JumpIfHelper(masm_, cc, lhs, rhs, target);
 }
 
+constexpr static int stack_bias = 4;
+
 void BaselineAssembler::JumpIfTagged(Condition cc, Register value,
                                      MemOperand operand, Label* target,
                                      Label::Distance) {
   ASM_CODE_COMMENT(masm_);
-  __ LoadTaggedPointerField(ip, operand, r0);
+  DCHECK(operand.rb() == fp || operand.rx() == fp);
+  if (COMPRESS_POINTERS_BOOL) {
+    MemOperand addr =
+        MemOperand(operand.rx(), operand.rb(), operand.offset() + stack_bias);
+    __ LoadTaggedPointerField(ip, addr, r0);
+  } else {
+    __ LoadTaggedPointerField(ip, operand, r0);
+  }
   JumpIfHelper<COMPRESS_POINTERS_BOOL ? 32 : 64>(masm_, cc, value, ip, target);
 }
 
@@ -307,7 +308,14 @@ void BaselineAssembler::JumpIfTagged(Condition cc, MemOperand operand,
                                      Register value, Label* target,
                                      Label::Distance) {
   ASM_CODE_COMMENT(masm_);
-  __ LoadTaggedPointerField(ip, operand, r0);
+  DCHECK(operand.rb() == fp || operand.rx() == fp);
+  if (COMPRESS_POINTERS_BOOL) {
+    MemOperand addr =
+        MemOperand(operand.rx(), operand.rb(), operand.offset() + stack_bias);
+    __ LoadTaggedPointerField(ip, addr, r0);
+  } else {
+    __ LoadTaggedPointerField(ip, operand, r0);
+  }
   JumpIfHelper<COMPRESS_POINTERS_BOOL ? 32 : 64>(masm_, cc, ip, value, target);
 }
 void BaselineAssembler::JumpIfByte(Condition cc, Register value, int32_t byte,
@@ -655,12 +663,6 @@ void BaselineAssembler::StaModuleVariable(Register context, Register value,
   StoreTaggedFieldWithWriteBarrier(context, Cell::kValueOffset, value);
 }
 
-void BaselineAssembler::LoadMapBitField(Register map_bit_field,
-                                        Register object) {
-  LoadMap(map_bit_field, object);
-  LoadWord8Field(map_bit_field, map_bit_field, Map::kBitFieldOffset);
-}
-
 void BaselineAssembler::AddSmi(Register lhs, Smi rhs) {
   if (rhs.value() == 0) return;
   __ LoadSmiLiteral(r0, rhs);
@@ -725,7 +727,7 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
       __ LoadContext(kContextRegister);
       __ LoadFunction(kJSFunctionRegister);
       __ Push(kJSFunctionRegister);
-      __ CallRuntime(Runtime::kBytecodeBudgetInterrupt, 1);
+      __ CallRuntime(Runtime::kBytecodeBudgetInterrupt_Sparkplug, 1);
 
       __ Pop(kInterpreterAccumulatorRegister, params_size);
       __ masm()->SmiUntag(params_size);
@@ -766,7 +768,7 @@ inline void EnsureAccumulatorPreservedScope::AssertEqualToAccumulator(
   } else {
     assembler_->masm()->CmpU64(reg, kInterpreterAccumulatorRegister);
   }
-  assembler_->masm()->Assert(eq, AbortReason::kUnexpectedValue);
+  assembler_->masm()->Assert(eq, AbortReason::kAccumulatorClobbered);
 }
 
 }  // namespace baseline

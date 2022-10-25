@@ -59,7 +59,7 @@ class WasmInliner final : public AdvancedReducer {
   void Finalize() final;
 
   static bool graph_size_allows_inlining(size_t graph_size) {
-    return graph_size < FLAG_wasm_inlining_budget;
+    return graph_size < v8_flags.wasm_inlining_budget;
   }
 
  private:
@@ -111,6 +111,7 @@ class WasmInliner final : public AdvancedReducer {
                       LexicographicOrdering>
       inlining_candidates_;
   std::unordered_set<Node*> seen_;
+  std::unordered_map<uint32_t, int> function_inlining_count_;
 };
 
 }  // namespace compiler

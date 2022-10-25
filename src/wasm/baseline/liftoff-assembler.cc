@@ -7,7 +7,7 @@
 #include <sstream>
 
 #include "src/base/optional.h"
-#include "src/base/platform/wrappers.h"
+#include "src/base/platform/memory.h"
 #include "src/codegen/assembler-inl.h"
 #include "src/codegen/macro-assembler-inl.h"
 #include "src/compiler/linkage.h"
@@ -769,9 +769,13 @@ bool SlotInterference(const VarState& a, const VarState& b) {
 }
 
 bool SlotInterference(const VarState& a, base::Vector<const VarState> v) {
-  return std::any_of(v.begin(), v.end(), [&a](const VarState& b) {
-    return SlotInterference(a, b);
-  });
+  // Check the first 16 entries in {v}, then increase the step size to avoid
+  // quadratic runtime on huge stacks. This logic checks 41 of the first 100
+  // slots, 77 of the first 1000 and 115 of the first 10000.
+  for (size_t idx = 0, end = v.size(); idx < end; idx += 1 + idx / 16) {
+    if (SlotInterference(a, v[idx])) return true;
+  }
+  return false;
 }
 }  // namespace
 #endif
@@ -884,7 +888,7 @@ void LiftoffAssembler::MergeStackWith(CacheState& target, uint32_t arity,
         target.cached_mem_start, instance,
         ObjectAccess::ToTagged(WasmInstanceObject::kMemoryStartOffset),
         sizeof(size_t));
-#ifdef V8_SANDBOXED_POINTERS
+#ifdef V8_ENABLE_SANDBOX
     DecodeSandboxedPointer(target.cached_mem_start);
 #endif
   }
@@ -1270,6 +1274,14 @@ void LiftoffAssembler::MoveToReturnLocations(
 #endif
 }
 
+#if DEBUG
+void LiftoffRegList::Print() const {
+  std::ostringstream os;
+  os << *this << "\n";
+  PrintF("%s", os.str().c_str());
+}
+#endif
+
 #ifdef ENABLE_SLOW_DCHECKS
 bool LiftoffAssembler::ValidateCacheState() const {
   uint32_t register_use_count[kAfterMaxLiftoffRegCode] = {0};
@@ -1333,6 +1345,10 @@ LiftoffRegister LiftoffAssembler::SpillAdjacentFpRegisters(
   if (last_fp.fp().code() % 2 == 0) {
     pinned.set(last_fp);
   }
+  // If half of an adjacent pair is pinned, consider the whole pair pinned.
+  // Otherwise the code below would potentially spill the pinned register
+  // (after first spilling the unpinned half of the pair).
+  pinned = pinned.SpreadSetBitsToAdjacentFpRegs();
 
   // We can try to optimize the spilling here:
   // 1. Try to get a free fp register, either:

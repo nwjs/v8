@@ -100,9 +100,6 @@ class V8_EXPORT V8 {
     const int kBuildConfiguration =
         (internal::PointerCompressionIsEnabled() ? kPointerCompression : 0) |
         (internal::SmiValuesAre31Bits() ? k31BitSmis : 0) |
-        (internal::SandboxedExternalPointersAreEnabled()
-             ? kSandboxedExternalPointers
-             : 0) |
         (internal::SandboxIsEnabled() ? kSandbox : 0);
     return Initialize(kBuildConfiguration);
   }
@@ -188,23 +185,6 @@ class V8_EXPORT V8 {
 
 #if defined(V8_ENABLE_SANDBOX)
   /**
-   * Initializes the V8 sandbox.
-   *
-   * This must be invoked after the platform was initialized but before V8 is
-   * initialized. The sandbox is torn down during platform shutdown.
-   * Returns true on success, false otherwise.
-   *
-   * TODO(saelo) Once it is no longer optional to initialize the sandbox when
-   * compiling with V8_ENABLE_SANDBOX, the sandbox initialization will likely
-   * happen as part of V8::Initialize, at which point this function should be
-   * removed.
-   */
-  V8_DEPRECATE_SOON(
-      "Sandbox initialization now happens during V8::Initialize. Calling this "
-      "function is no longer necessary.")
-  static bool InitializeSandbox();
-
-  /**
    * Returns true if the sandbox is configured securely.
    *
    * If V8 cannot create a regular sandbox during initialization, for example
@@ -227,8 +207,6 @@ class V8_EXPORT V8 {
    * and so in particular the contents of pages allocagted in this virtual
    * address space, arbitrarily and concurrently. Due to this, it is
    * recommended to to only place pure data buffers in them.
-   *
-   * This function must only be called after initializing the sandbox.
    */
   static VirtualAddressSpace* GetSandboxAddressSpace();
 
@@ -237,9 +215,6 @@ class V8_EXPORT V8 {
    *
    * This represents the size of the address space that V8 can directly address
    * and in which it allocates its objects.
-   *
-   * If the sandbox has not been initialized, or if the initialization failed,
-   * this returns zero.
    */
   static size_t GetSandboxSizeInBytes();
 
@@ -296,8 +271,7 @@ class V8_EXPORT V8 {
   enum BuildConfigurationFeatures {
     kPointerCompression = 1 << 0,
     k31BitSmis = 1 << 1,
-    kSandboxedExternalPointers = 1 << 2,
-    kSandbox = 1 << 3,
+    kSandbox = 1 << 2,
   };
 
   /**

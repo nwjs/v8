@@ -64,7 +64,7 @@ Handle<String> String::SlowFlatten(Isolate* isolate, Handle<ConsString> cons,
     // When the ConsString had a forwarding index, it is possible that it was
     // transitioned to a ThinString (and eventually shortcutted to
     // InternalizedString) during GC.
-    if (V8_UNLIKELY(FLAG_always_use_string_forwarding_table &&
+    if (V8_UNLIKELY(v8_flags.always_use_string_forwarding_table &&
                     !cons->IsConsString())) {
       DCHECK(cons->IsInternalizedString() || cons->IsThinString());
       return String::Flatten(isolate, cons, allocation);
@@ -80,7 +80,7 @@ Handle<String> String::SlowFlatten(Isolate* isolate, Handle<ConsString> cons,
     // When the ConsString had a forwarding index, it is possible that it was
     // transitioned to a ThinString (and eventually shortcutted to
     // InternalizedString) during GC.
-    if (V8_UNLIKELY(FLAG_always_use_string_forwarding_table &&
+    if (V8_UNLIKELY(v8_flags.always_use_string_forwarding_table &&
                     !cons->IsConsString())) {
       DCHECK(cons->IsInternalizedString() || cons->IsThinString());
       return String::Flatten(isolate, cons, allocation);
@@ -89,14 +89,18 @@ Handle<String> String::SlowFlatten(Isolate* isolate, Handle<ConsString> cons,
     WriteToFlat(*cons, flat->GetChars(no_gc), 0, length);
     result = flat;
   }
-  cons->set_first(*result);
-  cons->set_second(ReadOnlyRoots(isolate).empty_string());
+  {
+    DisallowGarbageCollection no_gc;
+    auto raw_cons = *cons;
+    raw_cons.set_first(*result);
+    raw_cons.set_second(ReadOnlyRoots(isolate).empty_string());
+  }
   DCHECK(result->IsFlat());
   return result;
 }
 
 Handle<String> String::SlowShare(Isolate* isolate, Handle<String> source) {
-  DCHECK(FLAG_shared_string_table);
+  DCHECK(v8_flags.shared_string_table);
   Handle<String> flat = Flatten(isolate, source, AllocationType::kSharedOld);
 
   // Do not recursively call Share, so directly compute the sharing strategy for
@@ -179,6 +183,18 @@ Map ComputeThinStringMap(IsolateT* isolate, StringShape from_string_shape,
   return one_byte ? roots.thin_one_byte_string_map() : roots.thin_string_map();
 }
 
+void InitExternalPointerFieldsDuringExternalization(String string, Map new_map,
+                                                    Isolate* isolate) {
+  string.InitExternalPointerField<kExternalStringResourceTag>(
+      ExternalString::kResourceOffset, isolate, kNullAddress);
+  bool is_uncached = (new_map.instance_type() & kUncachedExternalStringMask) ==
+                     kUncachedExternalStringTag;
+  if (!is_uncached) {
+    string.InitExternalPointerField<kExternalStringResourceDataTag>(
+        ExternalString::kResourceDataOffset, isolate, kNullAddress);
+  }
+}
+
 }  // namespace
 
 template <typename IsolateT>
@@ -192,21 +208,29 @@ void String::MakeThin(IsolateT* isolate, String internalized) {
 
   DCHECK(!initial_shape.IsThin());
 
-  // Check that shared strings cannot transition to ThinStrings directly without
-  // having a forwarding index. If the string is transitioned during
-  // deserialization, the string hasn't escaped the thread yet so the direct
-  // transition is OK.
-  DCHECK_IMPLIES(
-      initial_shape.IsShared() && !isolate->has_active_deserializer(),
-      HasForwardingIndex(kAcquireLoad));
+#ifdef DEBUG
+  // Check that shared strings can only transition to ThinStrings on the main
+  // thread when no other thread is active.
+  // The exception is during serialization, as no strings have escaped the
+  // thread yet.
+  if (initial_shape.IsShared() && !isolate->has_active_deserializer()) {
+    isolate->AsIsolate()->global_safepoint()->AssertActive();
+  }
+#endif
 
   bool has_pointers = initial_shape.IsIndirect();
   int old_size = SizeFromMap(initial_map);
   Map target_map = ComputeThinStringMap(isolate, initial_shape,
                                         internalized.IsOneByteRepresentation());
   if (initial_shape.IsExternal()) {
-    // TODO(v8:12007): Support external strings.
-    DCHECK(!initial_shape.IsShared());
+    // Notify GC about the layout change before the transition to avoid
+    // concurrent marking from observing any in-between state (e.g.
+    // ExternalString map where the resource external pointer is overwritten
+    // with a tagged pointer).
+    // ExternalString -> ThinString transitions can only happen on the
+    // main-thread.
+    isolate->AsIsolate()->heap()->NotifyObjectLayoutChange(
+        *this, no_gc, InvalidateRecordedSlots::kYes, ThinString::kSize);
     MigrateExternalString(isolate->AsIsolate(), *this, internalized);
   }
 
@@ -215,7 +239,11 @@ void String::MakeThin(IsolateT* isolate, String internalized) {
   // ThinString.
   ThinString thin = ThinString::unchecked_cast(*this);
   thin.set_actual(internalized);
-  set_map_safe_transition(target_map, kReleaseStore);
+  if (initial_shape.IsExternal()) {
+    set_map(target_map, kReleaseStore);
+  } else {
+    set_map_safe_transition(target_map, kReleaseStore);
+  }
 
   DCHECK_GE(old_size, ThinString::kSize);
   int size_delta = old_size - ThinString::kSize;
@@ -237,6 +265,139 @@ template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) void String::MakeThin(
 template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) void String::MakeThin(
     LocalIsolate* isolate, String internalized);
 
+template <typename T>
+bool String::MarkForExternalizationDuringGC(Isolate* isolate, T* resource) {
+  uint32_t raw_hash = raw_hash_field(kAcquireLoad);
+  if (IsExternalForwardingIndex(raw_hash)) return false;
+  if (IsInternalizedForwardingIndex(raw_hash)) {
+    const int forwarding_index = ForwardingIndexValueBits::decode(raw_hash);
+    if (!isolate->string_forwarding_table()->TryUpdateExternalResource(
+            forwarding_index, resource)) {
+      // The external resource was concurrently updated by another thread.
+      return false;
+    }
+    raw_hash = Name::IsExternalForwardingIndexBit::update(raw_hash, true);
+    set_raw_hash_field(raw_hash, kReleaseStore);
+    return true;
+  }
+  // We need to store the hash in the forwarding table, as all non-external
+  // shared strings are in-place internalizable. In case the string gets
+  // internalized, we have to ensure that we can get the hash from the
+  // forwarding table to satisfy the invariant that all internalized strings
+  // have a computed hash value.
+  if (!IsHashFieldComputed(raw_hash)) {
+    raw_hash = EnsureRawHash();
+  }
+  DCHECK(IsHashFieldComputed(raw_hash));
+  int forwarding_index =
+      isolate->string_forwarding_table()->AddExternalResourceAndHash(
+          *this, resource, raw_hash);
+  set_raw_hash_field(String::CreateExternalForwardingIndex(forwarding_index),
+                     kReleaseStore);
+
+  return true;
+}
+
+namespace {
+
+template <bool is_one_byte>
+Map ComputeExternalStringMap(Isolate* isolate, String string, int size) {
+  ReadOnlyRoots roots(isolate);
+  StringShape shape(string, isolate);
+  const bool is_internalized = shape.IsInternalized();
+  const bool is_shared = shape.IsShared();
+  if constexpr (is_one_byte) {
+    if (size < ExternalString::kSizeOfAllExternalStrings) {
+      if (is_internalized) {
+        return roots.uncached_external_one_byte_internalized_string_map();
+      } else {
+        return is_shared ? roots.shared_uncached_external_one_byte_string_map()
+                         : roots.uncached_external_one_byte_string_map();
+      }
+    } else {
+      if (is_internalized) {
+        return roots.external_one_byte_internalized_string_map();
+      } else {
+        return is_shared ? roots.shared_external_one_byte_string_map()
+                         : roots.external_one_byte_string_map();
+      }
+    }
+  } else {
+    if (size < ExternalString::kSizeOfAllExternalStrings) {
+      if (is_internalized) {
+        return roots.uncached_external_internalized_string_map();
+      } else {
+        return is_shared ? roots.shared_uncached_external_string_map()
+                         : roots.uncached_external_string_map();
+      }
+    } else {
+      if (is_internalized) {
+        return roots.external_internalized_string_map();
+      } else {
+        return is_shared ? roots.shared_external_string_map()
+                         : roots.external_string_map();
+      }
+    }
+  }
+}
+
+}  // namespace
+
+template <typename T>
+void String::MakeExternalDuringGC(Isolate* isolate, T* resource) {
+  isolate->heap()->safepoint()->AssertActive();
+  DCHECK_NE(isolate->heap()->gc_state(), Heap::NOT_IN_GC);
+
+  constexpr bool is_one_byte =
+      std::is_base_of_v<v8::String::ExternalOneByteStringResource, T>;
+  int size = this->Size();  // Byte size of the original string.
+  DCHECK_GE(size, ExternalString::kUncachedSize);
+
+  // Morph the string to an external string by replacing the map and
+  // reinitializing the fields.  This won't work if the space the existing
+  // string occupies is too small for a regular external string.  Instead, we
+  // resort to an uncached external string instead, omitting the field caching
+  // the address of the backing store.  When we encounter uncached external
+  // strings in generated code, we need to bailout to runtime.
+  Map new_map = ComputeExternalStringMap<is_one_byte>(isolate, *this, size);
+
+  // Byte size of the external String object.
+  int new_size = this->SizeFromMap(new_map);
+
+  // Shared strings are never indirect or large.
+  DCHECK(!isolate->heap()->IsLargeObject(*this));
+  DCHECK(!StringShape(*this).IsIndirect());
+
+  isolate->heap()->NotifyObjectSizeChange(*this, size, new_size,
+                                          ClearRecordedSlots::kNo);
+
+  // The external pointer slots must be initialized before the new map is
+  // installed. Otherwise, a GC marking thread may see the new map before the
+  // slots are initialized and attempt to mark the (invalid) external pointers
+  // table entries as alive.
+  InitExternalPointerFieldsDuringExternalization(*this, new_map, isolate);
+
+  // We are storing the new map using release store after creating a filler in
+  // the NotifyObjectSizeChange call for the left-over space to avoid races with
+  // the sweeper thread.
+  this->set_map(new_map, kReleaseStore);
+
+  if constexpr (is_one_byte) {
+    ExternalOneByteString self = ExternalOneByteString::cast(*this);
+    self.SetResource(isolate, resource);
+  } else {
+    ExternalTwoByteString self = ExternalTwoByteString::cast(*this);
+    self.SetResource(isolate, resource);
+  }
+  isolate->heap()->RegisterExternalString(*this);
+}
+
+template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) void String::
+    MakeExternalDuringGC(Isolate* isolate,
+                         v8::String::ExternalOneByteStringResource*);
+template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) void String::
+    MakeExternalDuringGC(Isolate* isolate, v8::String::ExternalStringResource*);
+
 bool String::MakeExternal(v8::String::ExternalStringResource* resource) {
   // Disallow garbage collection to avoid possible GC vs string access deadlock.
   DisallowGarbageCollection no_gc;
@@ -246,7 +407,7 @@ bool String::MakeExternal(v8::String::ExternalStringResource* resource) {
   DCHECK(this->SupportsExternalization());
   DCHECK(resource->IsCacheable());
 #ifdef ENABLE_SLOW_DCHECKS
-  if (FLAG_enable_slow_asserts) {
+  if (v8_flags.enable_slow_asserts) {
     // Assert that the resource and the string are equivalent.
     DCHECK(static_cast<size_t>(this->length()) == resource->length());
     base::ScopedVector<base::uc16> smart_chars(this->length());
@@ -262,6 +423,9 @@ bool String::MakeExternal(v8::String::ExternalStringResource* resource) {
   // string.
   if (IsReadOnlyHeapObject(*this)) return false;
   Isolate* isolate = GetIsolateFromWritableObject(*this);
+  if (IsShared(isolate)) {
+    return MarkForExternalizationDuringGC(isolate, resource);
+  }
   bool is_internalized = this->IsInternalizedString();
   bool has_pointers = StringShape(*this).IsIndirect();
 
@@ -273,18 +437,8 @@ bool String::MakeExternal(v8::String::ExternalStringResource* resource) {
   // resort to an uncached external string instead, omitting the field caching
   // the address of the backing store.  When we encounter uncached external
   // strings in generated code, we need to bailout to runtime.
-  Map new_map;
-  ReadOnlyRoots roots(isolate);
-  if (size < ExternalString::kSizeOfAllExternalStrings) {
-    if (is_internalized) {
-      new_map = roots.uncached_external_internalized_string_map();
-    } else {
-      new_map = roots.uncached_external_string_map();
-    }
-  } else {
-    new_map = is_internalized ? roots.external_internalized_string_map()
-                              : roots.external_string_map();
-  }
+  constexpr bool is_one_byte = false;
+  Map new_map = ComputeExternalStringMap<is_one_byte>(isolate, *this, size);
 
   // Byte size of the external String object.
   int new_size = this->SizeFromMap(new_map);
@@ -304,12 +458,18 @@ bool String::MakeExternal(v8::String::ExternalStringResource* resource) {
     DCHECK(!has_pointers);
   }
 
-  // We are storing the new map using release store after creating a filler for
-  // the left-over space to avoid races with the sweeper thread.
+  // The external pointer slots must be initialized before the new map is
+  // installed. Otherwise, a GC marking thread may see the new map before the
+  // slots are initialized and attempt to mark the (invalid) external pointers
+  // table entries as alive.
+  InitExternalPointerFieldsDuringExternalization(*this, new_map, isolate);
+
+  // We are storing the new map using release store after creating a filler in
+  // the NotifyObjectSizeChange call for the left-over space to avoid races with
+  // the sweeper thread.
   this->set_map(new_map, kReleaseStore);
 
   ExternalTwoByteString self = ExternalTwoByteString::cast(*this);
-  self.InitExternalPointerFields(isolate);
   self.SetResource(isolate, resource);
   isolate->heap()->RegisterExternalString(*this);
   // Force regeneration of the hash value.
@@ -326,7 +486,7 @@ bool String::MakeExternal(v8::String::ExternalOneByteStringResource* resource) {
   DCHECK(this->SupportsExternalization());
   DCHECK(resource->IsCacheable());
 #ifdef ENABLE_SLOW_DCHECKS
-  if (FLAG_enable_slow_asserts) {
+  if (v8_flags.enable_slow_asserts) {
     // Assert that the resource and the string are equivalent.
     DCHECK(static_cast<size_t>(this->length()) == resource->length());
     if (this->IsTwoByteRepresentation()) {
@@ -347,6 +507,9 @@ bool String::MakeExternal(v8::String::ExternalOneByteStringResource* resource) {
   // string.
   if (IsReadOnlyHeapObject(*this)) return false;
   Isolate* isolate = GetIsolateFromWritableObject(*this);
+  if (IsShared(isolate)) {
+    return MarkForExternalizationDuringGC(isolate, resource);
+  }
   bool is_internalized = this->IsInternalizedString();
   bool has_pointers = StringShape(*this).IsIndirect();
 
@@ -358,17 +521,8 @@ bool String::MakeExternal(v8::String::ExternalOneByteStringResource* resource) {
   // resort to an uncached external string instead, omitting the field caching
   // the address of the backing store.  When we encounter uncached external
   // strings in generated code, we need to bailout to runtime.
-  Map new_map;
-  ReadOnlyRoots roots(isolate);
-  if (size < ExternalString::kSizeOfAllExternalStrings) {
-    new_map = is_internalized
-                  ? roots.uncached_external_one_byte_internalized_string_map()
-                  : roots.uncached_external_one_byte_string_map();
-  } else {
-    new_map = is_internalized
-                  ? roots.external_one_byte_internalized_string_map()
-                  : roots.external_one_byte_string_map();
-  }
+  constexpr bool is_one_byte = true;
+  Map new_map = ComputeExternalStringMap<is_one_byte>(isolate, *this, size);
 
   if (!isolate->heap()->IsLargeObject(*this)) {
     // Byte size of the external String object.
@@ -388,12 +542,18 @@ bool String::MakeExternal(v8::String::ExternalOneByteStringResource* resource) {
     DCHECK(!has_pointers);
   }
 
-  // We are storing the new map using release store after creating a filler for
-  // the left-over space to avoid races with the sweeper thread.
+  // The external pointer slots must be initialized before the new map is
+  // installed. Otherwise, a GC marking thread may see the new map before the
+  // slots are initialized and attempt to mark the (invalid) external pointers
+  // table entries as alive.
+  InitExternalPointerFieldsDuringExternalization(*this, new_map, isolate);
+
+  // We are storing the new map using release store after creating a filler in
+  // the NotifyObjectSizeChange call for the left-over space to avoid races with
+  // the sweeper thread.
   this->set_map(new_map, kReleaseStore);
 
   ExternalOneByteString self = ExternalOneByteString::cast(*this);
-  self.InitExternalPointerFields(isolate);
   self.SetResource(isolate, resource);
   isolate->heap()->RegisterExternalString(*this);
   // Force regeneration of the hash value.
@@ -415,10 +575,6 @@ bool String::SupportsExternalization() {
   if (StringShape(*this).IsExternal()) {
     return false;
   }
-
-  // External strings in the shared heap conflicts with the heap sandbox at the
-  // moment. Disable it until supported.
-  if (InSharedHeap()) return false;
 
 #ifdef V8_COMPRESS_POINTERS
   // Small strings may not be in-place externalizable.
@@ -914,7 +1070,7 @@ bool String::SlowEquals(
   uint32_t other_hash;
   if (TryGetHash(&this_hash) && other.TryGetHash(&other_hash)) {
 #ifdef ENABLE_SLOW_DCHECKS
-    if (FLAG_enable_slow_asserts) {
+    if (v8_flags.enable_slow_asserts) {
       if (this_hash != other_hash) {
         bool found_difference = false;
         for (int i = 0; i < len; i++) {
@@ -974,7 +1130,7 @@ bool String::SlowEquals(Isolate* isolate, Handle<String> one,
   uint32_t two_hash;
   if (one->TryGetHash(&one_hash) && two->TryGetHash(&two_hash)) {
 #ifdef ENABLE_SLOW_DCHECKS
-    if (FLAG_enable_slow_asserts) {
+    if (v8_flags.enable_slow_asserts) {
       if (one_hash != two_hash) {
         bool found_difference = false;
         for (int i = 0; i < one_length; i++) {
@@ -1509,7 +1665,7 @@ uint32_t String::ComputeAndSetRawHash(
   // ComputeAndSetRawHash in parallel. Since only flat strings are in-place
   // internalizable and their contents do not change, the result hash is the
   // same. The raw hash field is stored with relaxed ordering.
-  DCHECK_IMPLIES(!FLAG_shared_string_table, !HasHashCode());
+  DCHECK_IMPLIES(!v8_flags.shared_string_table, !HasHashCode());
 
   // Store the hash code in the object.
   uint64_t seed = HashSeed(GetReadOnlyRoots());
@@ -1545,7 +1701,7 @@ uint32_t String::ComputeAndSetRawHash(
                                  access_guard);
   set_raw_hash_field_if_empty(raw_hash_field);
   // Check the hash code is there (or a forwarding index if the string was
-  // internalized in parallel).
+  // internalized/externalized in parallel).
   DCHECK(HasHashCode() || HasForwardingIndex(kAcquireLoad));
   // Ensure that the hash value of 0 is never computed.
   DCHECK_NE(HashBits::decode(raw_hash_field), 0);

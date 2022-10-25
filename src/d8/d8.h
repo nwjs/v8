@@ -17,6 +17,7 @@
 #include "include/v8-array-buffer.h"
 #include "include/v8-isolate.h"
 #include "include/v8-script.h"
+#include "include/v8-value-serializer.h"
 #include "src/base/once.h"
 #include "src/base/platform/time.h"
 #include "src/base/platform/wrappers.h"
@@ -149,11 +150,9 @@ class SerializationData {
   const std::vector<CompiledWasmModule>& compiled_wasm_modules() {
     return compiled_wasm_modules_;
   }
-  const std::vector<v8::Global<v8::Value>>& shared_values() {
-    return shared_values_;
+  const base::Optional<v8::SharedValueConveyor>& shared_value_conveyor() {
+    return shared_value_conveyor_;
   }
-
-  void ClearSharedValuesUnderLockIfNeeded();
 
  private:
   struct DataDeleter {
@@ -165,7 +164,7 @@ class SerializationData {
   std::vector<std::shared_ptr<v8::BackingStore>> backing_stores_;
   std::vector<std::shared_ptr<v8::BackingStore>> sab_backing_stores_;
   std::vector<CompiledWasmModule> compiled_wasm_modules_;
-  std::vector<v8::Global<v8::Value>> shared_values_;
+  base::Optional<v8::SharedValueConveyor> shared_value_conveyor_;
 
  private:
   friend class Serializer;
@@ -415,7 +414,6 @@ class ShellOptions {
   DisallowReassignment<bool> wait_for_background_tasks = {
       "wait-for-background-tasks", true};
   DisallowReassignment<bool> simulate_errors = {"simulate-errors", false};
-  DisallowReassignment<bool> stress_opt = {"stress-opt", false};
   DisallowReassignment<int> stress_runs = {"stress-runs", 1};
   DisallowReassignment<bool> interactive_shell = {"shell", false};
   bool test_shell = false;
@@ -583,6 +581,9 @@ class Shell : public i::AllStatic {
 
   static void SetPromiseHooks(const v8::FunctionCallbackInfo<v8::Value>& args);
 
+  static void EnableDebugger(const v8::FunctionCallbackInfo<v8::Value>& args);
+  static void DisableDebugger(const v8::FunctionCallbackInfo<v8::Value>& args);
+
   static void SerializerSerialize(
       const v8::FunctionCallbackInfo<v8::Value>& args);
   static void SerializerDeserialize(
@@ -687,7 +688,6 @@ class Shell : public i::AllStatic {
   static const char* kPrompt;
   static ShellOptions options;
   static ArrayBuffer::Allocator* array_buffer_allocator;
-  static Isolate* shared_isolate;
 
   static void SetWaitUntilDone(Isolate* isolate, bool value);
   static void NotifyStartStreamingTask(Isolate* isolate);

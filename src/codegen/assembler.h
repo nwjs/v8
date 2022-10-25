@@ -70,7 +70,6 @@ class Isolate;
 class SCTableReference;
 class SourcePosition;
 class StatsCounter;
-class StringConstantBase;
 
 // -----------------------------------------------------------------------------
 // Optimization for far-jmp like instructions that can be replaced by shorter.
@@ -103,23 +102,11 @@ class JumpOptimizationInfo {
   size_t hash_code_ = 0u;
 };
 
-class HeapObjectRequest {
+class HeapNumberRequest {
  public:
-  explicit HeapObjectRequest(double heap_number, int offset = -1);
-  explicit HeapObjectRequest(const StringConstantBase* string, int offset = -1);
+  explicit HeapNumberRequest(double heap_number, int offset = -1);
 
-  enum Kind { kHeapNumber, kStringConstant };
-  Kind kind() const { return kind_; }
-
-  double heap_number() const {
-    DCHECK_EQ(kind(), kHeapNumber);
-    return value_.heap_number;
-  }
-
-  const StringConstantBase* string() const {
-    DCHECK_EQ(kind(), kStringConstant);
-    return value_.string;
-  }
+  double heap_number() const { return value_; }
 
   // The code buffer offset at the time of the request.
   int offset() const {
@@ -133,13 +120,7 @@ class HeapObjectRequest {
   }
 
  private:
-  Kind kind_;
-
-  union {
-    double heap_number;
-    const StringConstantBase* string;
-  } value_;
-
+  double value_;
   int offset_;
 };
 
@@ -209,7 +190,7 @@ struct V8_EXPORT_PRIVATE AssemblerOptions {
   // on a function prologue/epilogue.
   bool collect_win64_unwind_info = false;
   // Whether to emit code comments.
-  bool emit_code_comments = FLAG_code_comments;
+  bool emit_code_comments = v8_flags.code_comments;
 
   static AssemblerOptions Default(Isolate* isolate);
   static AssemblerOptions DefaultForOffHeapTrampoline(Isolate* isolate);
@@ -264,7 +245,7 @@ class V8_EXPORT_PRIVATE AssemblerBase : public Malloced {
   }
 
   bool is_constant_pool_available() const {
-    if (FLAG_enable_embedded_constant_pool) {
+    if (v8_flags.enable_embedded_constant_pool) {
       // We need to disable constant pool here for embeded builtins
       // because the metadata section is not adjacent to instructions
       return constant_pool_available_ && !options().isolate_independent_code;
@@ -290,8 +271,7 @@ class V8_EXPORT_PRIVATE AssemblerBase : public Malloced {
   int pc_offset() const { return static_cast<int>(pc_ - buffer_start_); }
 
   int pc_offset_for_safepoint() {
-#if defined(V8_TARGET_ARCH_MIPS) || defined(V8_TARGET_ARCH_MIPS64) || \
-    defined(V8_TARGET_ARCH_LOONG64)
+#if defined(V8_TARGET_ARCH_MIPS64) || defined(V8_TARGET_ARCH_LOONG64)
     // MIPS and LOONG need to use their own implementation to avoid trampoline's
     // influence.
     UNREACHABLE();
@@ -325,7 +305,7 @@ class V8_EXPORT_PRIVATE AssemblerBase : public Malloced {
   V8_INLINE void RecordComment(const char* comment) {
     // Set explicit dependency on --code-comments for dead-code elimination in
     // release builds.
-    if (!FLAG_code_comments) return;
+    if (!v8_flags.code_comments) return;
     if (options().emit_code_comments) {
       code_comments_writer_.Add(pc_offset(), std::string(comment));
     }
@@ -334,7 +314,7 @@ class V8_EXPORT_PRIVATE AssemblerBase : public Malloced {
   V8_INLINE void RecordComment(std::string comment) {
     // Set explicit dependency on --code-comments for dead-code elimination in
     // release builds.
-    if (!FLAG_code_comments) return;
+    if (!v8_flags.code_comments) return;
     if (options().emit_code_comments) {
       code_comments_writer_.Add(pc_offset(), std::move(comment));
     }
@@ -345,10 +325,10 @@ class V8_EXPORT_PRIVATE AssemblerBase : public Malloced {
    public:
     explicit CodeComment(Assembler* assembler, const std::string& comment)
         : assembler_(assembler) {
-      if (FLAG_code_comments) Open(comment);
+      if (v8_flags.code_comments) Open(comment);
     }
     ~CodeComment() {
-      if (FLAG_code_comments) Close();
+      if (v8_flags.code_comments) Close();
     }
     static const int kIndentWidth = 2;
 
@@ -388,13 +368,13 @@ class V8_EXPORT_PRIVATE AssemblerBase : public Malloced {
   std::unique_ptr<AssemblerBuffer> buffer_;
   // Cached from {buffer_->start()}, for faster access.
   byte* buffer_start_;
-  std::forward_list<HeapObjectRequest> heap_object_requests_;
+  std::forward_list<HeapNumberRequest> heap_number_requests_;
   // The program counter, which points into the buffer above and moves forward.
   // TODO(jkummerow): This should probably have type {Address}.
   byte* pc_;
 
   void set_constant_pool_available(bool available) {
-    if (FLAG_enable_embedded_constant_pool) {
+    if (v8_flags.enable_embedded_constant_pool) {
       constant_pool_available_ = available;
     } else {
       // Embedded constant pool not supported on this architecture.
@@ -402,18 +382,19 @@ class V8_EXPORT_PRIVATE AssemblerBase : public Malloced {
     }
   }
 
-  // {RequestHeapObject} records the need for a future heap number allocation,
+  // {RequestHeapNumber} records the need for a future heap number allocation,
   // code stub generation or string allocation. After code assembly, each
-  // platform's {Assembler::AllocateAndInstallRequestedHeapObjects} will
+  // platform's {Assembler::AllocateAndInstallRequestedHeapNumbers} will
   // allocate these objects and place them where they are expected (determined
   // by the pc offset associated with each request).
-  void RequestHeapObject(HeapObjectRequest request);
+  void RequestHeapNumber(HeapNumberRequest request);
 
   bool ShouldRecordRelocInfo(RelocInfo::Mode rmode) const {
     DCHECK(!RelocInfo::IsNoInfo(rmode));
     if (options().disable_reloc_info_for_patching) return false;
     if (RelocInfo::IsOnlyForSerializer(rmode) &&
-        !options().record_reloc_info_for_serialization && !FLAG_debug_code) {
+        !options().record_reloc_info_for_serialization &&
+        !v8_flags.debug_code) {
       return false;
     }
 #ifndef ENABLE_DISASSEMBLER
@@ -502,12 +483,12 @@ class V8_EXPORT_PRIVATE V8_NODISCARD CpuFeatureScope {
 // Use this macro to mark functions that are only defined if
 // V8_ENABLE_DEBUG_CODE is set, and are a no-op otherwise.
 // Use like:
-//   void AssertMyCondition() NOOP_UNLESS_DEBUG_CODE;
+//   void AssertMyCondition() NOOP_UNLESS_DEBUG_CODE
 #ifdef V8_ENABLE_DEBUG_CODE
-#define NOOP_UNLESS_DEBUG_CODE
+#define NOOP_UNLESS_DEBUG_CODE ;
 #else
 #define NOOP_UNLESS_DEBUG_CODE \
-  { static_assert(FLAG_debug_code.value() == false); }
+  { static_assert(v8_flags.debug_code.value() == false); }
 #endif
 
 }  // namespace internal

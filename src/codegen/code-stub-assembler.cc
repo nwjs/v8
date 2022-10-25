@@ -15,7 +15,6 @@
 #include "src/execution/frames.h"
 #include "src/execution/protectors.h"
 #include "src/heap/heap-inl.h"  // For MemoryChunk. TODO(jkummerow): Drop.
-#include "src/heap/heap.h"
 #include "src/heap/memory-chunk.h"
 #include "src/logging/counters.h"
 #include "src/numbers/integer-literal-inl.h"
@@ -24,7 +23,6 @@
 #include "src/objects/descriptor-array.h"
 #include "src/objects/function-kind.h"
 #include "src/objects/heap-number.h"
-#include "src/objects/heap-object.h"
 #include "src/objects/instance-type.h"
 #include "src/objects/js-generator.h"
 #include "src/objects/oddball.h"
@@ -38,27 +36,27 @@ namespace internal {
 CodeStubAssembler::CodeStubAssembler(compiler::CodeAssemblerState* state)
     : compiler::CodeAssembler(state),
       TorqueGeneratedExportedMacrosAssembler(state) {
-  if (DEBUG_BOOL && FLAG_csa_trap_on_node != nullptr) {
+  if (DEBUG_BOOL && v8_flags.csa_trap_on_node != nullptr) {
     HandleBreakOnNode();
   }
 }
 
 void CodeStubAssembler::HandleBreakOnNode() {
-  // FLAG_csa_trap_on_node should be in a form "STUB,NODE" where STUB is a
+  // v8_flags.csa_trap_on_node should be in a form "STUB,NODE" where STUB is a
   // string specifying the name of a stub and NODE is number specifying node id.
   const char* name = state()->name();
   size_t name_length = strlen(name);
-  if (strncmp(FLAG_csa_trap_on_node, name, name_length) != 0) {
+  if (strncmp(v8_flags.csa_trap_on_node, name, name_length) != 0) {
     // Different name.
     return;
   }
-  size_t option_length = strlen(FLAG_csa_trap_on_node);
+  size_t option_length = strlen(v8_flags.csa_trap_on_node);
   if (option_length < name_length + 2 ||
-      FLAG_csa_trap_on_node[name_length] != ',') {
+      v8_flags.csa_trap_on_node[name_length] != ',') {
     // Option is too short.
     return;
   }
-  const char* start = &FLAG_csa_trap_on_node[name_length + 1];
+  const char* start = &v8_flags.csa_trap_on_node[name_length + 1];
   char* end;
   int node_id = static_cast<int>(strtol(start, &end, 10));
   if (start == end) {
@@ -72,7 +70,7 @@ void CodeStubAssembler::Dcheck(const BranchGenerator& branch,
                                const char* message, const char* file, int line,
                                std::initializer_list<ExtraNode> extra_nodes) {
 #if defined(DEBUG)
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     Check(branch, message, file, line, extra_nodes);
   }
 #endif
@@ -82,7 +80,7 @@ void CodeStubAssembler::Dcheck(const NodeGenerator<BoolT>& condition_body,
                                const char* message, const char* file, int line,
                                std::initializer_list<ExtraNode> extra_nodes) {
 #if defined(DEBUG)
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     Check(condition_body, message, file, line, extra_nodes);
   }
 #endif
@@ -92,7 +90,7 @@ void CodeStubAssembler::Dcheck(TNode<Word32T> condition_node,
                                const char* message, const char* file, int line,
                                std::initializer_list<ExtraNode> extra_nodes) {
 #if defined(DEBUG)
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     Check(condition_node, message, file, line, extra_nodes);
   }
 #endif
@@ -1345,10 +1343,7 @@ TNode<HeapObject> CodeStubAssembler::AllocateRawDoubleAligned(
 // unaligned access since both x64 and arm64 architectures (where pointer
 // compression is supported) allow unaligned access to doubles and full words.
 #endif  // V8_COMPRESS_POINTERS
-  if (V8_COMPRESS_POINTERS_8GB_BOOL) {
-    return AllocateRaw(size_in_bytes, flags | AllocationFlag::kDoubleAlignment,
-                       top_address, limit_address);
-  }
+  // Allocation on 64 bit machine is naturally double aligned
   return AllocateRaw(size_in_bytes, flags & ~AllocationFlag::kDoubleAlignment,
                      top_address, limit_address);
 #else
@@ -1367,7 +1362,7 @@ TNode<HeapObject> CodeStubAssembler::AllocateInNewSpace(
 TNode<HeapObject> CodeStubAssembler::Allocate(TNode<IntPtrT> size_in_bytes,
                                               AllocationFlags flags) {
   Comment("Allocate");
-  if (FLAG_single_generation) flags |= AllocationFlag::kPretenured;
+  if (v8_flags.single_generation) flags |= AllocationFlag::kPretenured;
   bool const new_space = !(flags & AllocationFlag::kPretenured);
   bool const allow_large_objects =
       flags & AllocationFlag::kAllowLargeObjectAllocation;
@@ -1417,8 +1412,7 @@ TNode<HeapObject> CodeStubAssembler::Allocate(TNode<IntPtrT> size_in_bytes,
       IntPtrAdd(ReinterpretCast<IntPtrT>(top_address),
                 IntPtrConstant(kSystemPointerSize));
 
-  if (V8_COMPRESS_POINTERS_8GB_BOOL ||
-      (flags & AllocationFlag::kDoubleAlignment)) {
+  if (flags & AllocationFlag::kDoubleAlignment) {
     return AllocateRawDoubleAligned(size_in_bytes, flags,
                                     ReinterpretCast<RawPtrT>(top_address),
                                     ReinterpretCast<RawPtrT>(limit_address));
@@ -1506,18 +1500,18 @@ void CodeStubAssembler::BranchIfToBooleanIsTrue(TNode<Object> value,
 
 TNode<RawPtrT> CodeStubAssembler::LoadSandboxedPointerFromObject(
     TNode<HeapObject> object, TNode<IntPtrT> field_offset) {
-#ifdef V8_SANDBOXED_POINTERS
+#ifdef V8_ENABLE_SANDBOX
   return ReinterpretCast<RawPtrT>(
       LoadObjectField<SandboxedPtrT>(object, field_offset));
 #else
   return LoadObjectField<RawPtrT>(object, field_offset);
-#endif  // V8_SANDBOXED_POINTERS
+#endif  // V8_ENABLE_SANDBOX
 }
 
 void CodeStubAssembler::StoreSandboxedPointerToObject(TNode<HeapObject> object,
                                                       TNode<IntPtrT> offset,
                                                       TNode<RawPtrT> pointer) {
-#ifdef V8_SANDBOXED_POINTERS
+#ifdef V8_ENABLE_SANDBOX
   TNode<SandboxedPtrT> sbx_ptr = ReinterpretCast<SandboxedPtrT>(pointer);
 
   // Ensure pointer points into the sandbox.
@@ -1533,11 +1527,11 @@ void CodeStubAssembler::StoreSandboxedPointerToObject(TNode<HeapObject> object,
   StoreObjectFieldNoWriteBarrier<SandboxedPtrT>(object, offset, sbx_ptr);
 #else
   StoreObjectFieldNoWriteBarrier<RawPtrT>(object, offset, pointer);
-#endif  // V8_SANDBOXED_POINTERS
+#endif  // V8_ENABLE_SANDBOX
 }
 
 TNode<RawPtrT> CodeStubAssembler::EmptyBackingStoreBufferConstant() {
-#ifdef V8_SANDBOXED_POINTERS
+#ifdef V8_ENABLE_SANDBOX
   // TODO(chromium:1218005) consider creating a LoadSandboxedPointerConstant()
   // if more of these constants are required later on.
   TNode<ExternalReference> empty_backing_store_buffer =
@@ -1545,7 +1539,7 @@ TNode<RawPtrT> CodeStubAssembler::EmptyBackingStoreBufferConstant() {
   return Load<RawPtrT>(empty_backing_store_buffer);
 #else
   return ReinterpretCast<RawPtrT>(IntPtrConstant(0));
-#endif  // V8_SANDBOXED_POINTERS
+#endif  // V8_ENABLE_SANDBOX
 }
 
 #ifdef V8_ENABLE_SANDBOX
@@ -2073,10 +2067,22 @@ TNode<BoolT> CodeStubAssembler::IsStrong(TNode<MaybeObject> value) {
                      Int32Constant(kHeapObjectTag));
 }
 
+TNode<BoolT> CodeStubAssembler::IsStrong(TNode<HeapObjectReference> value) {
+  return IsNotSetWord32(
+      TruncateIntPtrToInt32(BitcastTaggedToWordForTagAndSmiBits(value)),
+      kHeapObjectReferenceTagMask);
+}
+
 TNode<HeapObject> CodeStubAssembler::GetHeapObjectIfStrong(
     TNode<MaybeObject> value, Label* if_not_strong) {
   GotoIfNot(IsStrong(value), if_not_strong);
   return CAST(value);
+}
+
+TNode<HeapObject> CodeStubAssembler::GetHeapObjectIfStrong(
+    TNode<HeapObjectReference> value, Label* if_not_strong) {
+  GotoIfNot(IsStrong(value), if_not_strong);
+  return ReinterpretCast<HeapObject>(value);
 }
 
 TNode<BoolT> CodeStubAssembler::IsWeakOrCleared(TNode<MaybeObject> value) {
@@ -2084,6 +2090,13 @@ TNode<BoolT> CodeStubAssembler::IsWeakOrCleared(TNode<MaybeObject> value) {
                                    BitcastTaggedToWordForTagAndSmiBits(value)),
                                Int32Constant(kHeapObjectTagMask)),
                      Int32Constant(kWeakHeapObjectTag));
+}
+
+TNode<BoolT> CodeStubAssembler::IsWeakOrCleared(
+    TNode<HeapObjectReference> value) {
+  return IsSetWord32(
+      TruncateIntPtrToInt32(BitcastTaggedToWordForTagAndSmiBits(value)),
+      kHeapObjectReferenceTagMask);
 }
 
 TNode<BoolT> CodeStubAssembler::IsCleared(TNode<MaybeObject> value) {
@@ -2241,7 +2254,7 @@ CodeStubAssembler::LoadFixedArrayElement<IntPtrT>(TNode<FixedArray>,
 void CodeStubAssembler::FixedArrayBoundsCheck(TNode<FixedArrayBase> array,
                                               TNode<Smi> index,
                                               int additional_offset) {
-  if (!FLAG_fixed_array_bounds_checks) return;
+  if (!v8_flags.fixed_array_bounds_checks) return;
   DCHECK(IsAligned(additional_offset, kTaggedSize));
   TNode<Smi> effective_index;
   Smi constant_index;
@@ -2259,7 +2272,7 @@ void CodeStubAssembler::FixedArrayBoundsCheck(TNode<FixedArrayBase> array,
 void CodeStubAssembler::FixedArrayBoundsCheck(TNode<FixedArrayBase> array,
                                               TNode<IntPtrT> index,
                                               int additional_offset) {
-  if (!FLAG_fixed_array_bounds_checks) return;
+  if (!v8_flags.fixed_array_bounds_checks) return;
   DCHECK(IsAligned(additional_offset, kTaggedSize));
   // IntPtrAdd does constant-folding automatically.
   TNode<IntPtrT> effective_index =
@@ -2747,6 +2760,13 @@ TNode<BoolT> CodeStubAssembler::LoadScopeInfoHasExtensionField(
   return IsSetWord<ScopeInfo::HasContextExtensionSlotBit>(value);
 }
 
+TNode<BoolT> CodeStubAssembler::LoadScopeInfoClassScopeHasPrivateBrand(
+    TNode<ScopeInfo> scope_info) {
+  TNode<IntPtrT> value =
+      LoadAndUntagObjectField(scope_info, ScopeInfo::kFlagsOffset);
+  return IsSetWord<ScopeInfo::ClassScopeHasPrivateBrandBit>(value);
+}
+
 void CodeStubAssembler::StoreContextElementNoWriteBarrier(
     TNode<Context> context, int slot_index, TNode<Object> value) {
   int offset = Context::SlotOffset(slot_index);
@@ -2837,8 +2857,7 @@ TNode<Map> CodeStubAssembler::LoadJSArrayElementsMap(
       LoadContextElement(native_context, Context::ArrayMapIndex(kind)));
 }
 
-TNode<BoolT> CodeStubAssembler::IsGeneratorFunction(
-    TNode<JSFunction> function) {
+TNode<Uint32T> CodeStubAssembler::LoadFunctionKind(TNode<JSFunction> function) {
   const TNode<SharedFunctionInfo> shared_function_info =
       LoadObjectField<SharedFunctionInfo>(
           function, JSFunction::kSharedFunctionInfoOffset);
@@ -2847,6 +2866,12 @@ TNode<BoolT> CodeStubAssembler::IsGeneratorFunction(
       DecodeWord32<SharedFunctionInfo::FunctionKindBits>(
           LoadObjectField<Uint32T>(shared_function_info,
                                    SharedFunctionInfo::kFlagsOffset));
+  return function_kind;
+}
+
+TNode<BoolT> CodeStubAssembler::IsGeneratorFunction(
+    TNode<JSFunction> function) {
+  const TNode<Uint32T> function_kind = LoadFunctionKind(function);
 
   // See IsGeneratorFunction(FunctionKind kind).
   return IsInRange(
@@ -4020,14 +4045,10 @@ CodeStubAssembler::AllocateUninitializedJSArrayWithElements(
       base_size += AllocationMemento::kSize;
     }
 
-    const int elements_offset =
-        V8_COMPRESS_POINTERS_8GB_BOOL
-            ? RoundUp<kObjectAlignment8GbHeap>(base_size)
-            : base_size;
-    const int unaligned_elements_offset = base_size;
+    const int elements_offset = base_size;
 
     // Compute space for elements
-    base_size = elements_offset + FixedArray::kHeaderSize;
+    base_size += FixedArray::kHeaderSize;
     TNode<IntPtrT> size = ElementOffsetFromIndex(capacity, kind, base_size);
 
     // For very large arrays in which the requested allocation exceeds the
@@ -4064,11 +4085,6 @@ CodeStubAssembler::AllocateUninitializedJSArrayWithElements(
     // Fold all objects into a single new space allocation.
     array =
         AllocateUninitializedJSArray(array_map, length, allocation_site, size);
-    if (V8_COMPRESS_POINTERS_8GB_BOOL &&
-        elements_offset != unaligned_elements_offset) {
-      StoreObjectFieldNoWriteBarrier(array.value(), unaligned_elements_offset,
-                                     OnePointerFillerMapConstant());
-    }
     elements = InnerAllocateElements(this, array.value(), elements_offset);
 
     StoreObjectFieldNoWriteBarrier(array.value(), JSObject::kElementsOffset,
@@ -5367,7 +5383,7 @@ void CodeStubAssembler::InitializeAllocationMemento(
   StoreMapNoWriteBarrier(memento, RootIndex::kAllocationMementoMap);
   StoreObjectFieldNoWriteBarrier(
       memento, AllocationMemento::kAllocationSiteOffset, allocation_site);
-  if (FLAG_allocation_site_pretenuring) {
+  if (v8_flags.allocation_site_pretenuring) {
     TNode<Int32T> count = LoadObjectField<Int32T>(
         allocation_site, AllocationSite::kPretenureCreateCountOffset);
 
@@ -7166,7 +7182,7 @@ TNode<String> ToDirectStringAssembler::TryToDirect(Label* if_bailout) {
   // Sliced string. Fetch parent and correct start index by offset.
   BIND(&if_issliced);
   {
-    if (!FLAG_string_slices || (flags_ & kDontUnpackSlicedStrings)) {
+    if (!v8_flags.string_slices || (flags_ & kDontUnpackSlicedStrings)) {
       Goto(if_bailout);
     } else {
       const TNode<String> string = var_string_.value();
@@ -7968,7 +7984,7 @@ TNode<WordT> CodeStubAssembler::UpdateWord(TNode<WordT> word,
 }
 
 void CodeStubAssembler::SetCounter(StatsCounter* counter, int value) {
-  if (FLAG_native_code_counters && counter->Enabled()) {
+  if (v8_flags.native_code_counters && counter->Enabled()) {
     TNode<ExternalReference> counter_address =
         ExternalConstant(ExternalReference::Create(counter));
     StoreNoWriteBarrier(MachineRepresentation::kWord32, counter_address,
@@ -7978,7 +7994,7 @@ void CodeStubAssembler::SetCounter(StatsCounter* counter, int value) {
 
 void CodeStubAssembler::IncrementCounter(StatsCounter* counter, int delta) {
   DCHECK_GT(delta, 0);
-  if (FLAG_native_code_counters && counter->Enabled()) {
+  if (v8_flags.native_code_counters && counter->Enabled()) {
     TNode<ExternalReference> counter_address =
         ExternalConstant(ExternalReference::Create(counter));
     // This operation has to be exactly 32-bit wide in case the external
@@ -7992,7 +8008,7 @@ void CodeStubAssembler::IncrementCounter(StatsCounter* counter, int delta) {
 
 void CodeStubAssembler::DecrementCounter(StatsCounter* counter, int delta) {
   DCHECK_GT(delta, 0);
-  if (FLAG_native_code_counters && counter->Enabled()) {
+  if (v8_flags.native_code_counters && counter->Enabled()) {
     TNode<ExternalReference> counter_address =
         ExternalConstant(ExternalReference::Create(counter));
     // This operation has to be exactly 32-bit wide in case the external
@@ -13714,6 +13730,72 @@ TNode<HeapObject> CodeStubAssembler::GetSuperConstructor(
   return LoadMapPrototype(map);
 }
 
+void CodeStubAssembler::FindNonDefaultConstructor(
+    TNode<Context> context, TNode<JSFunction> this_function,
+    TVariable<Object>& constructor, Label* found_default_base_ctor,
+    Label* found_something_else) {
+  Label loop(this, &constructor);
+
+  constructor = GetSuperConstructor(this_function);
+
+  // Disable the optimization if the debugger is active, so that we can still
+  // put breakpoints into default constructors.
+  GotoIf(IsDebugActive(), found_something_else);
+
+  // Disable the optimization if the array iterator has been changed. V8 uses
+  // the array iterator for the spread in default ctors, even though it
+  // shouldn't, according to the spec. This ensures that omitting default ctors
+  // doesn't change the behavior. See crbug.com/v8/13249.
+  GotoIf(IsArrayIteratorProtectorCellInvalid(), found_something_else);
+
+  Goto(&loop);
+
+  BIND(&loop);
+  {
+    // We know constructor can't be a SMI, since it's a prototype. If it's not a
+    // JSFunction, the error will be thrown by the ThrowIfNotSuperConstructor
+    // which follows this bytecode.
+    GotoIfNot(IsJSFunction(CAST(constructor.value())), found_something_else);
+
+    // If there are class fields, bail out. TODO(v8:13091): Handle them here.
+    TNode<Oddball> has_class_fields =
+        HasProperty(context, constructor.value(), ClassFieldsSymbolConstant(),
+                    kHasProperty);
+    GotoIf(IsTrue(has_class_fields), found_something_else);
+
+    // If there are private methods, bail out. TODO(v8:13091): Handle them here.
+    TNode<Context> function_context =
+        LoadJSFunctionContext(CAST(constructor.value()));
+    TNode<ScopeInfo> scope_info = LoadScopeInfo(function_context);
+    GotoIf(LoadScopeInfoClassScopeHasPrivateBrand(scope_info),
+           found_something_else);
+
+    const TNode<Uint32T> function_kind =
+        LoadFunctionKind(CAST(constructor.value()));
+    // A default base ctor -> stop the search.
+    GotoIf(Word32Equal(
+               function_kind,
+               static_cast<uint32_t>(FunctionKind::kDefaultBaseConstructor)),
+           found_default_base_ctor);
+
+    // Something else than a default derived ctor (e.g., a non-default base
+    // ctor, a non-default derived ctor, or a normal function) -> stop the
+    // search.
+    GotoIfNot(Word32Equal(function_kind,
+                          static_cast<uint32_t>(
+                              FunctionKind::kDefaultDerivedConstructor)),
+              found_something_else);
+
+    constructor = GetSuperConstructor(CAST(constructor.value()));
+
+    Goto(&loop);
+  }
+  // We don't need to re-check the proctector, since the loop cannot call into
+  // user code. Even if GetSuperConstructor returns a Proxy, we will throw since
+  // it's not a constructor, and not invoke [[GetPrototypeOf]] on it.
+  // TODO(v8:13091): make sure this is still valid after we handle class fields.
+}
+
 TNode<JSReceiver> CodeStubAssembler::SpeciesConstructor(
     TNode<Context> context, TNode<Object> object,
     TNode<JSReceiver> default_constructor) {
@@ -14832,9 +14914,8 @@ TNode<CodeT> CodeStubAssembler::GetSharedFunctionInfoCode(
 TNode<RawPtrT> CodeStubAssembler::GetCodeEntry(TNode<CodeT> code) {
 #ifdef V8_EXTERNAL_CODE_SPACE
   TNode<CodeDataContainer> cdc = CodeDataContainerFromCodeT(code);
-  return LoadExternalPointerFromObject(
-      cdc, IntPtrConstant(CodeDataContainer::kCodeEntryPointOffset),
-      kCodeEntryPointTag);
+  return LoadObjectField<RawPtrT>(
+      cdc, IntPtrConstant(CodeDataContainer::kCodeEntryPointOffset));
 #else
   TNode<IntPtrT> object = BitcastTaggedToWord(code);
   return ReinterpretCast<RawPtrT>(

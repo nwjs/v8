@@ -4,8 +4,10 @@
 # found in the LICENSE file.
 
 import collections
+import logging
 import os
 import signal
+import threading
 import traceback
 
 from contextlib import contextmanager
@@ -24,8 +26,6 @@ def setup_testing():
   del Process
   from queue import Queue
   from threading import Thread as Process
-  # Monkeypatch threading Queue to look like multiprocessing Queue.
-  Queue.cancel_join_thread = lambda self: None
   # Monkeypatch os.kill and add fake pid property on Thread.
   os.kill = lambda *args: None
   Process.pid = property(lambda self: None)
@@ -65,25 +65,33 @@ def Worker(fn, work_queue, done_queue,
   """Worker to be run in a child process.
   The worker stops when the poison pill "STOP" is reached.
   """
+  # Install a default signal handler for SIGTERM that stops the processing
+  # loop below on the next occasion. The job function "fn" is supposed to
+  # register their own handler to avoid blocking, but still chain to this
+  # handler on SIGTERM to terminate the loop quickly.
+  stop = [False]
+  def handler(signum, frame):
+    stop[0] = True
+  signal.signal(signal.SIGTERM, handler)
+
   try:
     kwargs = {}
     if process_context_fn and process_context_args is not None:
       kwargs.update(process_context=process_context_fn(*process_context_args))
     for args in iter(work_queue.get, "STOP"):
+      if stop[0]:
+        # SIGINT, SIGTERM or internal hard timeout caught outside the execution
+        # of "fn".
+        break
       try:
         done_queue.put(NormalResult(fn(*args, **kwargs)))
       except AbortException:
-        # SIGINT, SIGTERM or internal hard timeout.
+        # SIGINT, SIGTERM or internal hard timeout caught during execution of
+        # "fn".
         break
       except Exception as e:
-        traceback.print_exc()
-        print(">>> EXCEPTION: %s" % e)
+        logging.exception('Unhandled error during worker execution.')
         done_queue.put(ExceptionResult(e))
-    # When we reach here on normal tear down, all items have been pulled from
-    # the done_queue before and this should have no effect. On fast abort, it's
-    # possible that a fast worker left items on the done_queue in memory, which
-    # will never be pulled. This call purges those to avoid a deadlock.
-    done_queue.cancel_join_thread()
   except KeyboardInterrupt:
     assert False, 'Unreachable'
 
@@ -97,6 +105,36 @@ def without_sig():
   finally:
     signal.signal(signal.SIGINT, int_handler)
     signal.signal(signal.SIGTERM, term_handler)
+
+
+@contextmanager
+def drain_queue_async(queue):
+  """Drains a queue in a background thread until the wrapped code unblocks.
+
+  This can be used to unblock joining a child process that might still write
+  to the queue. The join should be wrapped by this context manager.
+  """
+  keep_running = True
+
+  def empty_queue():
+    elem_count = 0
+    while keep_running:
+      try:
+        while True:
+          queue.get(True, 0.1)
+          elem_count += 1
+          if elem_count < 200:
+            logging.info('Drained an element from queue.')
+      except Empty:
+        pass
+      except:
+        logging.exception('Error draining queue.')
+
+  emptier = threading.Thread(target=empty_queue)
+  emptier.start()
+  yield
+  keep_running = False
+  emptier.join()
 
 
 class ContextPool():
@@ -232,6 +270,7 @@ class DefaultExecutionPool(ContextPool):
           except:
             # TODO(machenbach): Handle a few known types of internal errors
             # gracefully, e.g. missing test files.
+            logging.exception('Internal error in a worker process.')
             internal_error = True
             continue
           finally:
@@ -245,14 +284,13 @@ class DefaultExecutionPool(ContextPool):
         self.advance(gen)
     except KeyboardInterrupt:
       assert False, 'Unreachable'
-    except Exception as e:
-      traceback.print_exc()
-      print(">>> EXCEPTION: %s" % e)
+    except Exception:
+      logging.exception('Unhandled error during pool execution.')
     finally:
       self._terminate()
 
     if internal_error:
-      raise Exception("Internal error in a worker process.")
+      raise Exception('Internal error in a worker process.')
 
   def _advance_more(self, gen):
     while self.processing_count < self.num_workers * self.BUFFER_FACTOR:
@@ -309,24 +347,18 @@ class DefaultExecutionPool(ContextPool):
       # per worker to make them stop.
       self.work_queue.put("STOP")
 
+    # Send a SIGTERM to all workers. They will gracefully terminate their
+    # processing loop and if the signal is caught during job execution they
+    # will try to terminate the ongoing test processes quickly.
     if self.abort_now:
       self._terminate_processes()
 
     self.notify("Joining workers")
-    for p in self.processes:
-      p.join()
+    with drain_queue_async(self.done_queue):
+      for p in self.processes:
+        p.join()
 
-    # Drain the queues to prevent stderr chatter when queues are garbage
-    # collected.
-    self.notify("Draining queues")
-    try:
-      while True: self.work_queue.get(False)
-    except:
-      pass
-    try:
-      while True: self.done_queue.get(False)
-    except:
-      pass
+    self.notify("Pool terminated")
 
   def _get_result_from_queue(self):
     """Attempts to get the next result from the queue.

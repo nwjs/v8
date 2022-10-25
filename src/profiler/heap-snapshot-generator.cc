@@ -78,7 +78,7 @@ class HeapEntryVerifier {
     // property getter that bypasses the property array and accessor info. At
     // this point, we must check for those indirect references.
     for (size_t level = 0; level < 3; ++level) {
-      const std::unordered_set<HeapObject, Object::Hasher>& indirect =
+      const UnorderedHeapObjectSet& indirect =
           GetIndirectStrongReferences(level);
       if (indirect.find(target) != indirect.end()) {
         return;
@@ -132,14 +132,16 @@ class HeapEntryVerifier {
   }
 
  private:
-  const std::unordered_set<HeapObject, Object::Hasher>&
-  GetIndirectStrongReferences(size_t level) {
+  using UnorderedHeapObjectSet =
+      std::unordered_set<HeapObject, Object::Hasher, Object::KeyEqualSafe>;
+
+  const UnorderedHeapObjectSet& GetIndirectStrongReferences(size_t level) {
     CHECK_GE(indirect_strong_references_.size(), level);
 
     if (indirect_strong_references_.size() == level) {
       // Expansion is needed.
       indirect_strong_references_.resize(level + 1);
-      const std::unordered_set<HeapObject, Object::Hasher>& previous =
+      const UnorderedHeapObjectSet& previous =
           level == 0 ? reference_summary_.strong_references()
                      : indirect_strong_references_[level - 1];
       for (HeapObject obj : previous) {
@@ -183,8 +185,7 @@ class HeapEntryVerifier {
   // Objects transitively retained by the primary object. The objects in the set
   // at index i are retained by the primary object via a chain of i+1
   // intermediate objects.
-  std::vector<std::unordered_set<HeapObject, Object::Hasher>>
-      indirect_strong_references_;
+  std::vector<UnorderedHeapObjectSet> indirect_strong_references_;
 };
 #endif
 
@@ -1468,8 +1469,8 @@ void V8HeapExplorer::ExtractMapReferences(HeapEntry* entry, Map map) {
   TagObject(map.dependent_code(), "(dependent code)");
   SetInternalReference(entry, "dependent_code", map.dependent_code(),
                        Map::kDependentCodeOffset);
-  TagObject(map.prototype_validity_cell(), "(prototype validity cell)",
-            HeapEntry::kObjectShape);
+  TagObject(map.prototype_validity_cell(kRelaxedLoad),
+            "(prototype validity cell)", HeapEntry::kObjectShape);
 }
 
 void V8HeapExplorer::ExtractSharedFunctionInfoReferences(
@@ -2124,10 +2125,15 @@ bool V8HeapExplorer::IterateAndExtractReferences(
 }
 
 bool V8HeapExplorer::IsEssentialObject(Object object) {
+  if (!object.IsHeapObject()) return false;
+  // Avoid comparing Code objects with non-Code objects below.
+  if (V8_EXTERNAL_CODE_SPACE_BOOL &&
+      IsCodeSpaceObject(HeapObject::cast(object))) {
+    return true;
+  }
   Isolate* isolate = heap_->isolate();
   ReadOnlyRoots roots(isolate);
-  return object.IsHeapObject() && !object.IsOddball(isolate) &&
-         object != roots.empty_byte_array() &&
+  return !object.IsOddball(isolate) && object != roots.empty_byte_array() &&
          object != roots.empty_fixed_array() &&
          object != roots.empty_weak_fixed_array() &&
          object != roots.empty_descriptor_array() &&
@@ -2721,7 +2727,7 @@ bool HeapSnapshotGenerator::GenerateSnapshot() {
 #ifdef VERIFY_HEAP
   Heap* debug_heap = heap_;
   if (FLAG_verify_heap) {
-    debug_heap->Verify();
+    HeapVerifier::VerifyHeap(debug_heap);
   }
 #endif
 
@@ -2729,7 +2735,7 @@ bool HeapSnapshotGenerator::GenerateSnapshot() {
 
 #ifdef VERIFY_HEAP
   if (FLAG_verify_heap) {
-    debug_heap->Verify();
+    HeapVerifier::VerifyHeap(debug_heap);
   }
 #endif
 

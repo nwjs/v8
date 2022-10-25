@@ -89,9 +89,6 @@ class IA32OperandConverter : public InstructionOperandConverter {
         return Immediate(constant.ToHeapObject());
       case Constant::kCompressedHeapObject:
         break;
-      case Constant::kDelayedStringConstant:
-        return Immediate::EmbeddedStringConstant(
-            constant.ToDelayedStringConstant());
       case Constant::kInt64:
         break;
       case Constant::kRpoNumber:
@@ -2085,6 +2082,17 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kIA32I16x8Q15MulRSatS: {
       __ I16x8Q15MulRSatS(i.OutputSimd128Register(), i.InputSimd128Register(0),
                           i.InputSimd128Register(1), kScratchDoubleReg);
+      break;
+    }
+    case kIA32I16x8RelaxedQ15MulRS: {
+      __ Pmulhrsw(i.OutputSimd128Register(), i.InputSimd128Register(0),
+                  i.InputSimd128Register(1));
+      break;
+    }
+    case kIA32I16x8DotI8x16I7x16S: {
+      __ I16x8DotI8x16I7x16S(i.OutputSimd128Register(),
+                             i.InputSimd128Register(0),
+                             i.InputSimd128Register(1));
       break;
     }
     case kIA32F32x4Splat: {

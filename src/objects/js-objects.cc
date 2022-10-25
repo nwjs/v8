@@ -544,6 +544,14 @@ String JSReceiver::class_name() {
   if (IsJSWeakMap()) return roots.WeakMap_string();
   if (IsJSWeakSet()) return roots.WeakSet_string();
   if (IsJSGlobalProxy()) return roots.global_string();
+  if (IsShared()) {
+    if (IsJSSharedStruct()) return roots.SharedStruct_string();
+    if (IsJSSharedArray()) return roots.SharedArray_string();
+    if (IsJSAtomicsMutex()) return roots.AtomicsMutex_string();
+    if (IsJSAtomicsCondition()) return roots.AtomicsCondition_string();
+    // Other shared values are primitives.
+    UNREACHABLE();
+  }
 
   return roots.Object_string();
 }
@@ -2817,7 +2825,7 @@ void JSObject::JSObjectShortPrint(StringStream* accumulator) {
       } else {
         accumulator->Add("<JSFunction");
       }
-      if (FLAG_trace_file_names) {
+      if (v8_flags.trace_file_names) {
         Object source_name = Script::cast(function.shared().script()).name();
         if (source_name.IsString()) {
           String str = String::cast(source_name);
@@ -2845,6 +2853,12 @@ void JSObject::JSObjectShortPrint(StringStream* accumulator) {
       accumulator->Add("<JS AsyncGenerator>");
       break;
     }
+    case JS_SHARED_ARRAY_TYPE:
+      accumulator->Add("<JSSharedArray>");
+      break;
+    case JS_SHARED_STRUCT_TYPE:
+      accumulator->Add("<JSSharedStruct>");
+      break;
 
     // All other JSObjects are rather similar to each other (JSObject,
     // JSGlobalProxy, JSGlobalObject, JSUndetectable, JSPrimitiveWrapper).
@@ -2978,7 +2992,7 @@ void JSObject::UpdatePrototypeUserRegistration(Handle<Map> old_map,
   bool was_registered = JSObject::UnregisterPrototypeUser(old_map, isolate);
   new_map->set_prototype_info(old_map->prototype_info(), kReleaseStore);
   old_map->set_prototype_info(Smi::zero(), kReleaseStore);
-  if (FLAG_trace_prototype_users) {
+  if (v8_flags.trace_prototype_users) {
     PrintF("Moving prototype_info %p from map %p to map %p.\n",
            reinterpret_cast<void*>(new_map->prototype_info().ptr()),
            reinterpret_cast<void*>(old_map->ptr()),
@@ -3331,7 +3345,7 @@ void MigrateFastToSlow(Isolate* isolate, Handle<JSObject> object,
   }
 
 #ifdef DEBUG
-  if (FLAG_trace_normalization) {
+  if (v8_flags.trace_normalization) {
     StdoutStream os;
     os << "Object properties have been normalized:\n";
     object->Print(os);
@@ -3466,11 +3480,11 @@ void JSObject::MigrateInstance(Isolate* isolate, Handle<JSObject> object) {
   Handle<Map> map = Map::Update(isolate, original_map);
   map->set_is_migration_target(true);
   JSObject::MigrateToMap(isolate, object, map);
-  if (FLAG_trace_migration) {
+  if (v8_flags.trace_migration) {
     object->PrintInstanceMigration(stdout, *original_map, *map);
   }
 #if VERIFY_HEAP
-  if (FLAG_verify_heap) {
+  if (v8_flags.verify_heap) {
     object->JSObjectVerify(isolate);
   }
 #endif
@@ -3485,11 +3499,11 @@ bool JSObject::TryMigrateInstance(Isolate* isolate, Handle<JSObject> object) {
     return false;
   }
   JSObject::MigrateToMap(isolate, object, new_map);
-  if (FLAG_trace_migration && *original_map != object->map()) {
+  if (v8_flags.trace_migration && *original_map != object->map()) {
     object->PrintInstanceMigration(stdout, *original_map, object->map());
   }
 #if VERIFY_HEAP
-  if (FLAG_verify_heap) {
+  if (v8_flags.verify_heap) {
     object->JSObjectVerify(isolate);
   }
 #endif
@@ -3784,7 +3798,7 @@ void JSObject::MigrateSlowToFast(Handle<JSObject> object,
     object->SetProperties(ReadOnlyRoots(isolate).empty_fixed_array());
     // Check that it really works.
     DCHECK(object->HasFastProperties());
-    if (FLAG_log_maps) {
+    if (v8_flags.log_maps) {
       LOG(isolate, MapEvent("SlowToFast", old_map, new_map, reason));
     }
     return;
@@ -3895,7 +3909,7 @@ void JSObject::MigrateSlowToFast(Handle<JSObject> object,
     new_map->SetOutOfObjectUnusedPropertyFields(unused_property_fields);
   }
 
-  if (FLAG_log_maps) {
+  if (v8_flags.log_maps) {
     LOG(isolate, MapEvent("SlowToFast", old_map, new_map, reason));
   }
   // Transform the object.
@@ -3963,7 +3977,7 @@ Handle<NumberDictionary> JSObject::NormalizeElements(Handle<JSObject> object) {
   }
 
 #ifdef DEBUG
-  if (FLAG_trace_normalization) {
+  if (v8_flags.trace_normalization) {
     StdoutStream os;
     os << "Object elements have been normalized:\n";
     object->Print(os);
@@ -4100,7 +4114,7 @@ bool TestElementsIntegrityLevel(JSObject object, PropertyAttributes level) {
         NumberDictionary::cast(object.elements()), object.GetReadOnlyRoots(),
         level);
   }
-  if (IsTypedArrayElementsKind(kind)) {
+  if (IsTypedArrayOrRabGsabTypedArrayElementsKind(kind)) {
     if (level == FROZEN && JSArrayBufferView::cast(object).byte_length() > 0) {
       return false;  // TypedArrays with elements can't be frozen.
     }
@@ -4330,7 +4344,7 @@ Maybe<bool> JSObject::PreventExtensionsWithTransition(
   // elements kind change in one go. If seal or freeze with Smi or Double
   // elements kind, we will transition to Object elements kind first to make
   // sure of valid element access.
-  if (FLAG_enable_sealed_frozen_elements_kind) {
+  if (v8_flags.enable_sealed_frozen_elements_kind) {
     switch (object->map().elements_kind()) {
       case PACKED_SMI_ELEMENTS:
       case PACKED_DOUBLE_ELEMENTS:
@@ -4880,7 +4894,7 @@ void JSObject::LazyRegisterPrototypeUser(Handle<Map> user, Isolate* isolate) {
     if (!maybe_registry.is_identical_to(new_array)) {
       proto_info->set_prototype_users(*new_array);
     }
-    if (FLAG_trace_prototype_users) {
+    if (v8_flags.trace_prototype_users) {
       PrintF("Registering %p as a user of prototype %p (map=%p).\n",
              reinterpret_cast<void*>(current_user->ptr()),
              reinterpret_cast<void*>(proto->ptr()),
@@ -4921,7 +4935,7 @@ bool JSObject::UnregisterPrototypeUser(Handle<Map> user, Isolate* isolate) {
       WeakArrayList::cast(proto_info->prototype_users()), isolate);
   DCHECK_EQ(prototype_users->Get(slot), HeapObjectReference::Weak(*user));
   PrototypeUsers::MarkSlotEmpty(*prototype_users, slot);
-  if (FLAG_trace_prototype_users) {
+  if (v8_flags.trace_prototype_users) {
     PrintF("Unregistering %p as a user of prototype %p.\n",
            reinterpret_cast<void*>(user->ptr()),
            reinterpret_cast<void*>(prototype->ptr()));
@@ -4936,11 +4950,11 @@ namespace {
 // before jumping here.
 void InvalidateOnePrototypeValidityCellInternal(Map map) {
   DCHECK(map.is_prototype_map());
-  if (FLAG_trace_prototype_users) {
+  if (v8_flags.trace_prototype_users) {
     PrintF("Invalidating prototype map %p 's cell\n",
            reinterpret_cast<void*>(map.ptr()));
   }
-  Object maybe_cell = map.prototype_validity_cell();
+  Object maybe_cell = map.prototype_validity_cell(kRelaxedLoad);
   if (maybe_cell.IsCell()) {
     // Just set the value; the cell will be replaced lazily.
     Cell cell = Cell::cast(maybe_cell);
@@ -5142,7 +5156,7 @@ void JSObject::EnsureCanContainElements(Handle<JSObject> object,
 
 void JSObject::ValidateElements(JSObject object) {
 #ifdef ENABLE_SLOW_DCHECKS
-  if (FLAG_enable_slow_asserts) {
+  if (v8_flags.enable_slow_asserts) {
     object.GetElementsAccessor()->Validate(object);
   }
 #endif
@@ -5203,7 +5217,7 @@ static ElementsKind BestFittingFastElementsKind(JSObject object) {
       Object value = dictionary.ValueAt(i);
       if (!value.IsNumber()) return HOLEY_ELEMENTS;
       if (!value.IsSmi()) {
-        if (!FLAG_unbox_double_arrays) return HOLEY_ELEMENTS;
+        if (!v8_flags.unbox_double_arrays) return HOLEY_ELEMENTS;
         kind = HOLEY_DOUBLE_ELEMENTS;
       }
     }
@@ -5324,7 +5338,7 @@ void JSObject::TransitionElementsKind(Handle<JSObject> object,
     // only requires a map change.
     Handle<Map> new_map = GetElementsTransitionMap(object, to_kind);
     JSObject::MigrateToMap(isolate, object, new_map);
-    if (FLAG_trace_elements_transitions) {
+    if (v8_flags.trace_elements_transitions) {
       Handle<FixedArrayBase> elms(object->elements(), isolate);
       PrintElementsTransition(stdout, object, from_kind, elms, to_kind, elms);
     }
@@ -5475,8 +5489,8 @@ MaybeHandle<JSDate> JSDate::New(Handle<JSFunction> constructor,
 
 // static
 double JSDate::CurrentTimeValue(Isolate* isolate) {
-  if (FLAG_log_internal_timer_events) LOG(isolate, CurrentTimeEvent());
-  if (FLAG_correctness_fuzzer_suppressions) return 4.2;
+  if (v8_flags.log_internal_timer_events) LOG(isolate, CurrentTimeEvent());
+  if (v8_flags.correctness_fuzzer_suppressions) return 4.2;
 
   // According to ECMA-262, section 15.9.1, page 117, the precision of
   // the number in a Date object representing a particular instant in

@@ -3,29 +3,36 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-from datetime import datetime, timedelta
-from pathlib import Path
+from datetime import datetime
+from datetime import timedelta
 import optparse
 import os
-import psutil
+from pathlib import Path
 import shlex
+import shutil
 import signal
 import subprocess
+import sys
 import time
+
+import psutil
 
 # ==============================================================================
 
-usage = """Usage: %prog $D8_BIN [OPTION]... -- [D8_OPTION]... [FILE]
+usage = """Usage: %prog [OPTION]... $D8_BIN [D8_OPTION]... [FILE]
 
 This script runs linux-perf with custom V8 logging to get support to resolve
 JS function names.
 
 The perf data is written to OUT_DIR separate by renderer process.
 
-See http://v8.dev//linux-perf for more detailed instructions.
-See $D8_BIN --help for more options
+See https://v8.dev/docs/linux-perf for more detailed instructions.
+See $D8_BIN --help for more flags/options
 """
 parser = optparse.OptionParser(usage=usage)
+# Stop parsing options after D8_BIN
+parser.disable_interspersed_args()
+
 parser.add_option(
     '--perf-data-dir',
     default=None,
@@ -103,7 +110,7 @@ if options.perf_data_dir is None:
   options.perf_data_dir = Path.cwd()
 else:
   options.perf_data_dir = Path(options.perf_data_dir).absolute()
-
+options.perf_data_dir.mkdir(parents=True, exist_ok=True)
 if not options.perf_data_dir.is_dir():
   parser.error(f"--perf-data-dir={options.perf_data_dir} "
                "is not an directory or does not exist.")
@@ -208,12 +215,11 @@ else:
 # ==============================================================================
 log("POST PROCESSING: Injecting JS symbols")
 
-
 def inject_v8_symbols(perf_dat_file):
   output_file = perf_dat_file.with_suffix(".data.jitted")
   cmd = [
-      "perf", "inject", "--jit", f"--input={perf_dat_file}",
-      f"--output={output_file}"
+      "perf", "inject", "--jit", f"--input={perf_dat_file.absolute()}",
+      f"--output={output_file.absolute()}"
   ]
   try:
     subprocess.check_call(cmd)
@@ -222,7 +228,6 @@ def inject_v8_symbols(perf_dat_file):
     print(shlex.join(cmd))
     return None
   return output_file
-
 
 result = inject_v8_symbols(perf_data_file)
 if result is None:
@@ -233,5 +238,31 @@ log(f"RESULTS in '{options.perf_data_dir}'")
 BYTES_TO_MIB = 1 / 1024 / 1024
 print(f"{result.name:67}{(result.stat().st_size*BYTES_TO_MIB):10.2f}MiB")
 
+# ==============================================================================
+if not shutil.which('gcertstatus'):
+  log("ANALYSIS")
+  print(f"perf report --input='{result}'")
+  print(f"pprof '{result}'")
+  exit(0)
+
 log("PPROF")
-print(f"pprof -flame {result}")
+has_gcert = False
+try:
+  print("# Checking gcert status for googlers")
+  subprocess.check_call("gcertstatus >&/dev/null || gcert", shell=True)
+  has_gcert = True
+
+  cmd = [
+      "pprof", "-flame", f"-add_comment={shlex.join(sys.argv)}",
+      str(result.absolute())
+  ]
+  print("# Processing and uploading to pprofresult")
+  url = subprocess.check_output(cmd).decode('utf-8').strip()
+  print(url)
+except subprocess.CalledProcessError as e:
+  if has_gcert:
+    raise Exception("Could not generate pprof results") from e
+  print("# Please run `gcert` for generating pprof results")
+  print(f"pprof -flame {result}")
+except KeyboardInterrupt:
+  exit(1)

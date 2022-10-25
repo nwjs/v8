@@ -23,7 +23,7 @@ bool Operand::is_reg() const { return rm_.is_valid(); }
 
 int64_t Operand::immediate() const {
   DCHECK(!is_reg());
-  DCHECK(!IsHeapObjectRequest());
+  DCHECK(!IsHeapNumberRequest());
   return value_.immediate;
 }
 
@@ -120,7 +120,7 @@ void RelocInfo::set_target_object(Heap* heap, HeapObject target,
     Assembler::set_target_address_at(pc_, constant_pool_, target.ptr(),
                                      icache_flush_mode);
   }
-  if (!host().is_null() && !FLAG_disable_write_barriers) {
+  if (!host().is_null() && !v8_flags.disable_write_barriers) {
     WriteBarrierForCode(host(), this, target, write_barrier_mode);
   }
 }
@@ -158,6 +158,8 @@ Handle<Code> Assembler::relative_code_target_object_handle_at(
                       ((code_target_index >> 10) & kImm16Mask);
   return GetCodeTarget(code_target_index);
 }
+
+Builtin RelocInfo::target_builtin_at(Assembler* origin) { UNREACHABLE(); }
 
 Address RelocInfo::target_runtime_entry(Assembler* origin) {
   DCHECK(IsRuntimeEntry(rmode_));

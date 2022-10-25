@@ -280,6 +280,10 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {
     case UNCACHED_EXTERNAL_ONE_BYTE_STRING_TYPE:
     case SHARED_STRING_TYPE:
     case SHARED_ONE_BYTE_STRING_TYPE:
+    case SHARED_EXTERNAL_STRING_TYPE:
+    case SHARED_EXTERNAL_ONE_BYTE_STRING_TYPE:
+    case SHARED_UNCACHED_EXTERNAL_STRING_TYPE:
+    case SHARED_UNCACHED_EXTERNAL_ONE_BYTE_STRING_TYPE:
     case SHARED_THIN_STRING_TYPE:
     case SHARED_THIN_ONE_BYTE_STRING_TYPE:
     case JS_LAST_DUMMY_API_OBJECT_TYPE:
@@ -847,7 +851,10 @@ void AccessorInfo::AccessorInfoPrint(std::ostream& os) {
      << SideEffectType2String(setter_side_effect_type());
   os << "\n - initial_attributes: " << initial_property_attributes();
   os << "\n - getter: " << reinterpret_cast<void*>(getter());
-  os << "\n - js_getter: " << reinterpret_cast<void*>(js_getter());
+  if (USE_SIMULATOR_BOOL) {
+    os << "\n - maybe_redirected_getter: "
+       << reinterpret_cast<void*>(maybe_redirected_getter());
+  }
   os << "\n - setter: " << reinterpret_cast<void*>(setter());
   os << '\n';
 }
@@ -1219,7 +1226,8 @@ void FeedbackVector::FeedbackVectorPrint(std::ostream& os) {
     os << "\n - no optimized code";
   }
   os << "\n - tiering state: " << tiering_state();
-  os << "\n - maybe has optimized code: " << maybe_has_optimized_code();
+  os << "\n - maybe has maglev code: " << maybe_has_maglev_code();
+  os << "\n - maybe has turbofan code: " << maybe_has_turbofan_code();
   os << "\n - invocation count: " << invocation_count();
   os << "\n - profiler ticks: " << profiler_ticks();
   os << "\n - closure feedback cell array: ";
@@ -1257,9 +1265,6 @@ void FeedbackNexus::Print(std::ostream& os) {
     case FeedbackSlotKind::kDefineKeyedOwn:
     case FeedbackSlotKind::kHasKeyed:
     case FeedbackSlotKind::kInstanceOf:
-    case FeedbackSlotKind::kLoadGlobalInsideTypeof:
-    case FeedbackSlotKind::kLoadGlobalNotInsideTypeof:
-    case FeedbackSlotKind::kLoadKeyed:
     case FeedbackSlotKind::kDefineKeyedOwnPropertyInLiteral:
     case FeedbackSlotKind::kStoreGlobalSloppy:
     case FeedbackSlotKind::kStoreGlobalStrict:
@@ -1272,6 +1277,20 @@ void FeedbackNexus::Print(std::ostream& os) {
       os << InlineCacheState2String(ic_state());
       break;
     }
+    case FeedbackSlotKind::kLoadGlobalInsideTypeof:
+    case FeedbackSlotKind::kLoadGlobalNotInsideTypeof: {
+      os << InlineCacheState2String(ic_state());
+      if (ic_state() == InlineCacheState::MONOMORPHIC) {
+        os << "\n   ";
+        if (GetFeedback().GetHeapObjectOrSmi().IsPropertyCell()) {
+          os << Brief(GetFeedback());
+        } else {
+          LoadHandler::PrintHandler(GetFeedback().GetHeapObjectOrSmi(), os);
+        }
+      }
+      break;
+    }
+    case FeedbackSlotKind::kLoadKeyed:
     case FeedbackSlotKind::kLoadProperty: {
       os << InlineCacheState2String(ic_state());
       if (ic_state() == InlineCacheState::MONOMORPHIC) {
@@ -1954,13 +1973,39 @@ void WasmArray::WasmArrayPrint(std::ostream& os) {
       PrintTypedArrayElements(os, reinterpret_cast<int16_t*>(data_ptr), len,
                               true);
       break;
-    case wasm::kS128:
     case wasm::kRef:
-    case wasm::kRefNull:
-    case wasm::kRtt:
-      os << "\n   Printing elements of this type is unimplemented, sorry";
-      // TODO(7748): Implement.
+    case wasm::kRefNull: {
+      os << "\n - elements:";
+      constexpr uint32_t kWasmArrayMaximumPrintedElements = 5;
+      for (uint32_t i = 0;
+           i < std::min(this->length(), kWasmArrayMaximumPrintedElements);
+           i++) {
+        os << "\n   " << static_cast<int>(i) << " - "
+           << Brief(TaggedField<Object>::load(*this, this->element_offset(i)));
+      }
+      if (this->length() > kWasmArrayMaximumPrintedElements) os << "\n   ...";
       break;
+    }
+    case wasm::kS128: {
+      os << "\n - elements:";
+      constexpr uint32_t kWasmArrayMaximumPrintedElements = 5;
+      for (uint32_t i = 0;
+           i < std::min(this->length(), kWasmArrayMaximumPrintedElements);
+           i++) {
+        os << "\n   " << static_cast<int>(i) << " - 0x" << std::hex;
+#ifdef V8_TARGET_BIG_ENDIAN
+        for (int j = 0; j < kSimd128Size; j++) {
+#else
+        for (int j = kSimd128Size - 1; j >= 0; j--) {
+#endif
+          os << reinterpret_cast<byte*>(this->ElementAddress(i))[j];
+        }
+        os << std::dec;
+      }
+      if (this->length() > kWasmArrayMaximumPrintedElements) os << "\n   ...";
+      break;
+    }
+    case wasm::kRtt:
     case wasm::kBottom:
     case wasm::kVoid:
       UNREACHABLE();
@@ -2007,7 +2052,6 @@ void WasmInstanceObject::WasmInstanceObjectPrint(std::ostream& os) {
   PRINT_OPTIONAL_WASM_INSTANCE_FIELD(indirect_function_tables, Brief);
   PRINT_WASM_INSTANCE_FIELD(imported_function_refs, Brief);
   PRINT_OPTIONAL_WASM_INSTANCE_FIELD(indirect_function_table_refs, Brief);
-  PRINT_OPTIONAL_WASM_INSTANCE_FIELD(managed_native_allocations, Brief);
   PRINT_OPTIONAL_WASM_INSTANCE_FIELD(tags_table, Brief);
   PRINT_OPTIONAL_WASM_INSTANCE_FIELD(wasm_internal_functions, Brief);
   PRINT_WASM_INSTANCE_FIELD(managed_object_maps, Brief);
@@ -2021,18 +2065,18 @@ void WasmInstanceObject::WasmInstanceObjectPrint(std::ostream& os) {
   PRINT_WASM_INSTANCE_FIELD(new_allocation_top_address, to_void_ptr);
   PRINT_WASM_INSTANCE_FIELD(old_allocation_limit_address, to_void_ptr);
   PRINT_WASM_INSTANCE_FIELD(old_allocation_top_address, to_void_ptr);
-  PRINT_WASM_INSTANCE_FIELD(imported_function_targets, to_void_ptr);
+  PRINT_WASM_INSTANCE_FIELD(imported_function_targets, Brief);
   PRINT_WASM_INSTANCE_FIELD(globals_start, to_void_ptr);
-  PRINT_WASM_INSTANCE_FIELD(imported_mutable_globals, to_void_ptr);
+  PRINT_WASM_INSTANCE_FIELD(imported_mutable_globals, Brief);
   PRINT_WASM_INSTANCE_FIELD(indirect_function_table_size, +);
   PRINT_WASM_INSTANCE_FIELD(indirect_function_table_sig_ids, to_void_ptr);
   PRINT_WASM_INSTANCE_FIELD(indirect_function_table_targets, to_void_ptr);
   PRINT_WASM_INSTANCE_FIELD(isorecursive_canonical_types,
                             reinterpret_cast<const uint32_t*>);
   PRINT_WASM_INSTANCE_FIELD(jump_table_start, to_void_ptr);
-  PRINT_WASM_INSTANCE_FIELD(data_segment_starts, to_void_ptr);
-  PRINT_WASM_INSTANCE_FIELD(data_segment_sizes, to_void_ptr);
-  PRINT_WASM_INSTANCE_FIELD(dropped_elem_segments, to_void_ptr);
+  PRINT_WASM_INSTANCE_FIELD(data_segment_starts, Brief);
+  PRINT_WASM_INSTANCE_FIELD(data_segment_sizes, Brief);
+  PRINT_WASM_INSTANCE_FIELD(dropped_elem_segments, Brief);
   PRINT_WASM_INSTANCE_FIELD(hook_on_function_call_address, to_void_ptr);
   PRINT_WASM_INSTANCE_FIELD(tiering_budget_array, to_void_ptr);
   PRINT_WASM_INSTANCE_FIELD(break_on_entry, static_cast<int>);
@@ -2053,9 +2097,10 @@ void WasmFunctionData::WasmFunctionDataPrint(std::ostream& os) {
 void WasmExportedFunctionData::WasmExportedFunctionDataPrint(std::ostream& os) {
   PrintHeader(os, "WasmExportedFunctionData");
   WasmFunctionDataPrint(os);
+  Isolate* isolate = GetIsolateForSandbox(*this);
   os << "\n - instance: " << Brief(instance());
   os << "\n - function_index: " << function_index();
-  os << "\n - signature: " << Brief(signature());
+  os << "\n - signature: " << reinterpret_cast<void*>(sig(isolate));
   os << "\n - wrapper_budget: " << wrapper_budget();
   os << "\n";
 }
@@ -2191,7 +2236,10 @@ void StoreHandler::StoreHandlerPrint(std::ostream& os) {
 void CallHandlerInfo::CallHandlerInfoPrint(std::ostream& os) {
   PrintHeader(os, "CallHandlerInfo");
   os << "\n - callback: " << reinterpret_cast<void*>(callback());
-  os << "\n - js_callback: " << reinterpret_cast<void*>(js_callback());
+  if (USE_SIMULATOR_BOOL) {
+    os << "\n - maybe_redirected_callback: "
+       << reinterpret_cast<void*>(maybe_redirected_callback());
+  }
   os << "\n - data: " << Brief(data());
   os << "\n - side_effect_free: "
      << (IsSideEffectFreeCallHandlerInfo() ? "true" : "false");
@@ -2551,31 +2599,6 @@ void PreparseData::PreparseDataPrint(std::ostream& os) {
   os << "\n";
 }
 
-template <HeapObjectReferenceType kRefType, typename StorageType>
-void TaggedImpl<kRefType, StorageType>::Print() {
-  StdoutStream os;
-  this->Print(os);
-  os << std::flush;
-}
-
-template <HeapObjectReferenceType kRefType, typename StorageType>
-void TaggedImpl<kRefType, StorageType>::Print(std::ostream& os) {
-  Smi smi;
-  HeapObject heap_object;
-  if (ToSmi(&smi)) {
-    smi.SmiPrint(os);
-  } else if (IsCleared()) {
-    os << "[cleared]";
-  } else if (GetHeapObjectIfWeak(&heap_object)) {
-    os << "[weak] ";
-    heap_object.HeapObjectPrint(os);
-  } else if (GetHeapObjectIfStrong(&heap_object)) {
-    heap_object.HeapObjectPrint(os);
-  } else {
-    UNREACHABLE();
-  }
-}
-
 void HeapNumber::HeapNumberPrint(std::ostream& os) {
   HeapNumberShortPrint(os);
   os << "\n";
@@ -2687,7 +2710,8 @@ void Map::MapPrint(std::ostream& os) {
   } else {
     os << "\n - back pointer: " << Brief(GetBackPointer());
   }
-  os << "\n - prototype_validity cell: " << Brief(prototype_validity_cell());
+  os << "\n - prototype_validity cell: "
+     << Brief(prototype_validity_cell(kRelaxedLoad));
   os << "\n - instance descriptors " << (owns_descriptors() ? "(own) " : "")
      << "#" << NumberOfOwnDescriptors() << ": "
      << Brief(instance_descriptors());

@@ -45,19 +45,35 @@ class V8_NODISCARD SharedStringAccessGuardIfNeeded {
   // Slow version which gets the isolate from the String.
   explicit SharedStringAccessGuardIfNeeded(String str) {
     Isolate* isolate = GetIsolateIfNeeded(str);
-    if (isolate != nullptr)
+    if (isolate != nullptr) {
       mutex_guard.emplace(isolate->internalized_string_access());
+    }
   }
 
   static SharedStringAccessGuardIfNeeded NotNeeded() {
     return SharedStringAccessGuardIfNeeded();
   }
 
-#ifdef DEBUG
-  static bool IsNeeded(String str) {
-    return GetIsolateIfNeeded(str) != nullptr;
+  static bool IsNeeded(String str, LocalIsolate* local_isolate) {
+    return IsNeeded(local_isolate) && IsNeeded(str, false);
   }
-#endif
+
+  static bool IsNeeded(String str, bool check_local_heap = true) {
+    if (check_local_heap) {
+      LocalHeap* local_heap = LocalHeap::Current();
+      if (!local_heap || local_heap->is_main_thread()) {
+        // Don't acquire the lock for the main thread.
+        return false;
+      }
+    }
+
+    if (ReadOnlyHeap::Contains(str)) {
+      // Don't acquire lock for strings in ReadOnlySpace.
+      return false;
+    }
+
+    return true;
+  }
 
   static bool IsNeeded(LocalIsolate* local_isolate) {
     // TODO(leszeks): Remove the nullptr check for local_isolate.
@@ -75,16 +91,7 @@ class V8_NODISCARD SharedStringAccessGuardIfNeeded {
 
   // Returns the Isolate from the String if we need it for the lock.
   static Isolate* GetIsolateIfNeeded(String str) {
-    LocalHeap* local_heap = LocalHeap::Current();
-    // Don't acquire the lock for the main thread.
-    if (!local_heap || local_heap->is_main_thread()) return nullptr;
-
-#ifdef V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE
-    // We don't need to guard when the string is in RO space. When compressing
-    // pointers in a per-Isolate cage, GetIsolateFromHeapObject always returns
-    // an Isolate, even for objects in RO space, so manually check.
-    if (ReadOnlyHeap::Contains(str)) return nullptr;
-#endif
+    if (!IsNeeded(str)) return nullptr;
 
     Isolate* isolate;
     if (!GetIsolateFromHeapObject(str, &isolate)) {
@@ -181,9 +188,9 @@ bool StringShape::IsUncachedExternal() const {
 
 bool StringShape::IsShared() const {
   // TODO(v8:12007): Set is_shared to true on internalized string when
-  // FLAG_shared_string_table is removed.
+  // v8_flags.shared_string_table is removed.
   return (type_ & kSharedStringMask) == kSharedStringTag ||
-         (FLAG_shared_string_table && IsInternalized());
+         (v8_flags.shared_string_table && IsInternalized());
 }
 
 StringRepresentationTag StringShape::representation_tag() const {
@@ -774,7 +781,7 @@ String::FlatContent String::GetFlatContent(
 }
 
 Handle<String> String::Share(Isolate* isolate, Handle<String> string) {
-  DCHECK(FLAG_shared_string_table);
+  DCHECK(v8_flags.shared_string_table);
   MaybeHandle<Map> new_map;
   switch (
       isolate->factory()->ComputeSharingStrategyForString(string, &new_map)) {
@@ -1099,6 +1106,15 @@ void ExternalString::InitExternalPointerFields(Isolate* isolate) {
   if (is_uncached()) return;
   InitExternalPointerField<kExternalStringResourceDataTag>(
       kResourceDataOffset, isolate, kNullAddress);
+}
+
+void ExternalString::VisitExternalPointers(ObjectVisitor* visitor) const {
+  visitor->VisitExternalPointer(*this, RawExternalPointerField(kResourceOffset),
+                                kExternalStringResourceTag);
+  if (is_uncached()) return;
+  visitor->VisitExternalPointer(*this,
+                                RawExternalPointerField(kResourceDataOffset),
+                                kExternalStringResourceDataTag);
 }
 
 DEF_GETTER(ExternalString, resource_as_address, Address) {
@@ -1474,6 +1490,8 @@ bool String::IsInPlaceInternalizable(InstanceType instance_type) {
     case SHARED_ONE_BYTE_STRING_TYPE:
     case EXTERNAL_STRING_TYPE:
     case EXTERNAL_ONE_BYTE_STRING_TYPE:
+    case SHARED_EXTERNAL_STRING_TYPE:
+    case SHARED_EXTERNAL_ONE_BYTE_STRING_TYPE:
       return true;
     default:
       return false;

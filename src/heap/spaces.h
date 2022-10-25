@@ -188,7 +188,10 @@ class V8_EXPORT_PRIVATE Space : public BaseSpace {
 
   FreeList* free_list() { return free_list_.get(); }
 
-  Address FirstPageAddress() const { return first_page()->address(); }
+  Address FirstPageAddress() const {
+    DCHECK_NOT_NULL(first_page());
+    return first_page()->address();
+  }
 
 #ifdef DEBUG
   virtual void Print() = 0;
@@ -285,7 +288,7 @@ class Page : public MemoryChunk {
     }
   }
 
-  size_t AvailableInFreeList();
+  V8_EXPORT_PRIVATE size_t AvailableInFreeList();
 
   size_t AvailableInFreeListFromAllocatedBytes() {
     DCHECK_GE(area_size(), wasted_memory() + allocated_bytes());

@@ -149,7 +149,7 @@ void OffHeapInstructionStream::CreateOffHeapOffHeapInstructionStream(
   // in the binary) and what we are currently setting up here (where the blob is
   // on the native heap).
   std::memcpy(allocated_code_bytes, d.code(), d.code_size());
-  if (FLAG_experimental_flush_embedded_blob_icache) {
+  if (v8_flags.experimental_flush_embedded_blob_icache) {
     FlushInstructionCache(allocated_code_bytes, d.code_size());
   }
   CHECK(SetPermissions(page_allocator, allocated_code_bytes,
@@ -223,11 +223,10 @@ void FinalizeEmbeddedCodeTargets(Isolate* isolate, EmbeddedData* blob) {
     RelocIterator on_heap_it(code, kRelocMask);
     RelocIterator off_heap_it(blob, code, kRelocMask);
 
-#if defined(V8_TARGET_ARCH_X64) || defined(V8_TARGET_ARCH_ARM64) ||       \
-    defined(V8_TARGET_ARCH_ARM) || defined(V8_TARGET_ARCH_MIPS) ||        \
-    defined(V8_TARGET_ARCH_IA32) || defined(V8_TARGET_ARCH_S390) ||       \
-    defined(V8_TARGET_ARCH_RISCV64) || defined(V8_TARGET_ARCH_LOONG64) || \
-    defined(V8_TARGET_ARCH_RISCV32)
+#if defined(V8_TARGET_ARCH_X64) || defined(V8_TARGET_ARCH_ARM64) ||    \
+    defined(V8_TARGET_ARCH_ARM) || defined(V8_TARGET_ARCH_IA32) ||     \
+    defined(V8_TARGET_ARCH_S390) || defined(V8_TARGET_ARCH_RISCV64) || \
+    defined(V8_TARGET_ARCH_LOONG64) || defined(V8_TARGET_ARCH_RISCV32)
     // On these platforms we emit relative builtin-to-builtin
     // jumps for isolate independent builtins in the snapshot. This fixes up the
     // relative jumps to the right offsets in the snapshot.
@@ -440,11 +439,11 @@ EmbeddedData EmbeddedData::FromIsolate(Isolate* isolate) {
     }
   }
   // Ensure that InterpreterEntryTrampolineForProfiling is relocatable.
-  // See FLAG_interpreted_frames_native_stack for details.
+  // See v8_flags.interpreted_frames_native_stack for details.
   EnsureRelocatable(
       builtins->code(Builtin::kInterpreterEntryTrampolineForProfiling));
 
-  if (FLAG_serialization_statistics) d.PrintStatistics();
+  if (v8_flags.serialization_statistics) d.PrintStatistics();
 
   return d;
 }
@@ -463,13 +462,13 @@ size_t EmbeddedData::CreateEmbeddedBlobDataHash() const {
 }
 
 size_t EmbeddedData::CreateEmbeddedBlobCodeHash() const {
-  CHECK(FLAG_text_is_readable);
+  CHECK(v8_flags.text_is_readable);
   base::Vector<const byte> payload(code_, code_size_);
   return Checksum(payload);
 }
 
 void EmbeddedData::PrintStatistics() const {
-  DCHECK(FLAG_serialization_statistics);
+  DCHECK(v8_flags.serialization_statistics);
 
   constexpr int kCount = Builtins::kBuiltinCount;
   int sizes[kCount];

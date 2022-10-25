@@ -125,8 +125,14 @@ void BaselineAssembler::JumpIfImmediate(Condition cc, Register left, int right,
 
 void BaselineAssembler::TestAndBranch(Register value, int mask, Condition cc,
                                       Label* target, Label::Distance) {
-  __ Tst(value, Immediate(mask));
-  __ B(AsMasmCondition(cc), target);
+  if (cc == Condition::kZero) {
+    __ TestAndBranchIfAllClear(value, mask, target);
+  } else if (cc == Condition::kNotZero) {
+    __ TestAndBranchIfAnySet(value, mask, target);
+  } else {
+    __ Tst(value, Immediate(mask));
+    __ B(AsMasmCondition(cc), target);
+  }
 }
 
 void BaselineAssembler::JumpIf(Condition cc, Register lhs, const Operand& rhs,
@@ -143,19 +149,12 @@ void BaselineAssembler::JumpIfObjectType(Condition cc, Register object,
   __ Ldrh(type, FieldMemOperand(map, Map::kInstanceTypeOffset));
   JumpIf(cc, type, instance_type, target);
 }
-void BaselineAssembler::JumpIfObjectType(Condition cc, Register object,
-                                         InstanceType instance_type,
-                                         ScratchRegisterScope* scratch_scope,
-                                         Label* target, Label::Distance) {
-  JumpIfObjectType(cc, object, instance_type, scratch_scope->AcquireScratch(),
-                   target);
-}
 void BaselineAssembler::JumpIfInstanceType(Condition cc, Register map,
                                            InstanceType instance_type,
                                            Label* target, Label::Distance) {
   ScratchRegisterScope temps(this);
   Register type = temps.AcquireScratch();
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     __ AssertNotSmi(map);
     __ CompareObjectType(map, type, type, MAP_TYPE);
     __ Assert(eq, AbortReason::kUnexpectedValue);
@@ -577,12 +576,6 @@ void BaselineAssembler::StaModuleVariable(Register context, Register value,
   StoreTaggedFieldWithWriteBarrier(context, Cell::kValueOffset, value);
 }
 
-void BaselineAssembler::LoadMapBitField(Register map_bit_field,
-                                        Register object) {
-  LoadMap(map_bit_field, object);
-  LoadWord8Field(map_bit_field, map_bit_field, Map::kBitFieldOffset);
-}
-
 void BaselineAssembler::AddSmi(Register lhs, Smi rhs) {
   if (SmiValuesAre31Bits()) {
     __ Add(lhs.W(), lhs.W(), Immediate(rhs));
@@ -649,7 +642,7 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
     __ LoadContext(kContextRegister);
     __ LoadFunction(kJSFunctionRegister);
     __ masm()->PushArgument(kJSFunctionRegister);
-    __ CallRuntime(Runtime::kBytecodeBudgetInterrupt, 1);
+    __ CallRuntime(Runtime::kBytecodeBudgetInterrupt_Sparkplug, 1);
 
     __ masm()->Pop(kInterpreterAccumulatorRegister, params_size);
     __ masm()->SmiUntag(params_size);
@@ -684,7 +677,7 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
 inline void EnsureAccumulatorPreservedScope::AssertEqualToAccumulator(
     Register reg) {
   assembler_->masm()->CmpTagged(reg, kInterpreterAccumulatorRegister);
-  assembler_->masm()->Assert(eq, AbortReason::kUnexpectedValue);
+  assembler_->masm()->Assert(eq, AbortReason::kAccumulatorClobbered);
 }
 
 }  // namespace baseline

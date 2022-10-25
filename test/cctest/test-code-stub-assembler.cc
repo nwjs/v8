@@ -17,6 +17,7 @@
 #include "src/debug/debug.h"
 #include "src/execution/isolate.h"
 #include "src/heap/heap-inl.h"
+#include "src/heap/heap-verifier.h"
 #include "src/numbers/hash-seed-inl.h"
 #include "src/objects/js-array-inl.h"
 #include "src/objects/js-promise-inl.h"
@@ -27,8 +28,8 @@
 #include "src/objects/transitions-inl.h"
 #include "src/strings/char-predicates.h"
 #include "test/cctest/cctest-utils.h"
-#include "test/cctest/compiler/code-assembler-tester.h"
 #include "test/cctest/compiler/function-tester.h"
+#include "test/common/code-assembler-tester.h"
 
 namespace v8 {
 namespace internal {
@@ -1877,7 +1878,7 @@ TEST(AllocateJSObjectFromMap) {
       CHECK_EQ(result->elements(), *empty_fixed_array);
       CHECK(result->HasFastProperties());
 #ifdef VERIFY_HEAP
-      isolate->heap()->Verify();
+      HeapVerifier::VerifyHeap(isolate->heap());
 #endif
     }
   }
@@ -1906,7 +1907,64 @@ TEST(AllocateJSObjectFromMap) {
     }
     CHECK(!result->HasFastProperties());
 #ifdef VERIFY_HEAP
-    isolate->heap()->Verify();
+    HeapVerifier::VerifyHeap(isolate->heap());
+#endif
+  }
+}
+
+TEST(AllocationFoldingCSA) {
+  Isolate* isolate(CcTest::InitIsolateOnce());
+
+  const int kNumParams = 1;
+  const int kNumArrays = 7;
+  CodeAssemblerTester asm_tester(isolate, kNumParams + 1,
+                                 CodeKind::FOR_TESTING);  // Include receiver.
+  CodeStubAssembler m(asm_tester.state());
+
+  {
+    TNode<IntPtrT> length = m.SmiUntag(m.Parameter<Smi>(1));
+    TNode<FixedArray> result = m.UncheckedCast<FixedArray>(m.AllocateFixedArray(
+        PACKED_ELEMENTS, length, CodeStubAssembler::AllocationFlag::kNone));
+    for (int i = 1; i <= kNumArrays; ++i) {
+      int array_length = i * kTaggedSize;
+      TNode<ByteArray> array =
+          m.AllocateByteArray(m.UintPtrConstant(array_length));
+      m.StoreFixedArrayElement(result, i - 1, array);
+    }
+    m.Return(result);
+  }
+
+  FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
+
+  {
+    auto fixed_array_length = Handle<Smi>(Smi::FromInt(kNumArrays), isolate);
+    Handle<FixedArray> result =
+        Handle<FixedArray>::cast(ft.Call(fixed_array_length).ToHandleChecked());
+    CHECK_EQ(result->length(), kNumArrays);
+    if (V8_COMPRESS_POINTERS_8GB_BOOL) {
+      CHECK(IsAligned(result->address(), kObjectAlignment8GbHeap));
+    } else {
+      CHECK(IsAligned(result->address(), kTaggedSize));
+    }
+    ByteArray prev_array;
+    for (int i = 1; i <= kNumArrays; ++i) {
+      ByteArray current_array = ByteArray::cast(result->get(i - 1));
+      if (V8_COMPRESS_POINTERS_8GB_BOOL) {
+        CHECK(IsAligned(current_array.address(), kObjectAlignment8GbHeap));
+      } else {
+        CHECK(IsAligned(current_array.address(), kTaggedSize));
+      }
+      CHECK_EQ(current_array.length(), i * kTaggedSize);
+      if (i != 1) {
+        // TODO(v8:13070): Align prev_array.AllocatedSize() to the allocation
+        // size.
+        CHECK_EQ(prev_array.address() + prev_array.AllocatedSize(),
+                 current_array.address());
+      }
+      prev_array = current_array;
+    }
+#ifdef VERIFY_HEAP
+    HeapVerifier::VerifyHeap(isolate->heap());
 #endif
   }
 }
@@ -3803,7 +3861,7 @@ TEST(SmallOrderedHashMapAllocate) {
     capacity = capacity << 1;
   }
 #ifdef VERIFY_HEAP
-  isolate->heap()->Verify();
+  HeapVerifier::VerifyHeap(isolate->heap());
 #endif
 }
 
@@ -3841,7 +3899,7 @@ TEST(SmallOrderedHashSetAllocate) {
     capacity = capacity << 1;
   }
 #ifdef VERIFY_HEAP
-  isolate->heap()->Verify();
+  HeapVerifier::VerifyHeap(isolate->heap());
 #endif
 }
 

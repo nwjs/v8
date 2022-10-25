@@ -78,6 +78,7 @@ Handle<CodeDataContainer> FactoryBase<Impl>::NewCodeDataContainer(
     int flags, AllocationType allocation) {
   Map map = read_only_roots().code_data_container_map();
   int size = map.instance_size();
+  DCHECK_NE(allocation, AllocationType::kYoung);
   CodeDataContainer data_container = CodeDataContainer::cast(
       AllocateRawWithImmortalMap(size, allocation, map));
   DisallowGarbageCollection no_gc;
@@ -444,7 +445,7 @@ Handle<SharedFunctionInfo> FactoryBase<Impl>::NewSharedFunctionInfo(
   raw.set_kind(kind);
 
 #ifdef VERIFY_HEAP
-  if (FLAG_verify_heap) raw.SharedFunctionInfoVerify(isolate());
+  if (v8_flags.verify_heap) raw.SharedFunctionInfoVerify(isolate());
 #endif  // VERIFY_HEAP
   return shared;
 }
@@ -1006,7 +1007,7 @@ Handle<SharedFunctionInfo> FactoryBase<Impl>::NewSharedFunctionInfo() {
   shared.Init(read_only_roots(), unique_id);
 
 #ifdef VERIFY_HEAP
-  if (FLAG_verify_heap) shared.SharedFunctionInfoVerify(isolate());
+  if (v8_flags.verify_heap) shared.SharedFunctionInfoVerify(isolate());
 #endif  // VERIFY_HEAP
   return handle(shared, isolate());
 }
@@ -1090,7 +1091,7 @@ HeapObject FactoryBase<Impl>::AllocateRawArray(int size,
   if (!V8_ENABLE_THIRD_PARTY_HEAP_BOOL &&
       (size >
        isolate()->heap()->AsHeap()->MaxRegularHeapObjectSize(allocation)) &&
-      FLAG_use_marking_progress_bar) {
+      v8_flags.use_marking_progress_bar) {
     LargePage::FromHeapObject(result)->ProgressBar().Enable();
   }
   return result;
@@ -1206,9 +1207,11 @@ MaybeHandle<Map> FactoryBase<Impl>::GetInPlaceInternalizedStringMap(
     case SHARED_ONE_BYTE_STRING_TYPE:
       map = read_only_roots().one_byte_internalized_string_map_handle();
       break;
+    case SHARED_EXTERNAL_STRING_TYPE:
     case EXTERNAL_STRING_TYPE:
       map = read_only_roots().external_internalized_string_map_handle();
       break;
+    case SHARED_EXTERNAL_ONE_BYTE_STRING_TYPE:
     case EXTERNAL_ONE_BYTE_STRING_TYPE:
       map =
           read_only_roots().external_one_byte_internalized_string_map_handle();
@@ -1229,7 +1232,7 @@ FactoryBase<Impl>::RefineAllocationTypeForInPlaceInternalizableString(
   DCHECK(InstanceTypeChecker::IsInternalizedString(instance_type) ||
          String::IsInPlaceInternalizable(instance_type));
 #endif
-  if (FLAG_single_generation && allocation == AllocationType::kYoung) {
+  if (v8_flags.single_generation && allocation == AllocationType::kYoung) {
     allocation = AllocationType::kOld;
   }
   if (allocation != AllocationType::kOld) return allocation;

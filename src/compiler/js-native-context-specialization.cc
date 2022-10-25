@@ -4,24 +4,31 @@
 
 #include "src/compiler/js-native-context-specialization.h"
 
+#include "src/base/logging.h"
 #include "src/base/optional.h"
 #include "src/builtins/accessors.h"
 #include "src/codegen/code-factory.h"
-#include "src/codegen/string-constants.h"
+#include "src/common/globals.h"
 #include "src/compiler/access-builder.h"
 #include "src/compiler/access-info.h"
 #include "src/compiler/allocation-builder-inl.h"
 #include "src/compiler/allocation-builder.h"
 #include "src/compiler/compilation-dependencies.h"
 #include "src/compiler/js-graph.h"
+#include "src/compiler/js-heap-broker.h"
 #include "src/compiler/js-operator.h"
 #include "src/compiler/linkage.h"
 #include "src/compiler/map-inference.h"
 #include "src/compiler/node-matchers.h"
 #include "src/compiler/property-access-builder.h"
+#include "src/compiler/simplified-operator.h"
 #include "src/compiler/type-cache.h"
+#include "src/handles/handles.h"
+#include "src/heap/factory.h"
+#include "src/heap/heap-write-barrier-inl.h"
 #include "src/objects/feedback-vector.h"
 #include "src/objects/heap-number.h"
+#include "src/objects/string.h"
 
 namespace v8 {
 namespace internal {
@@ -118,16 +125,17 @@ Reduction JSNativeContextSpecialization::Reduce(Node* node) {
   return NoChange();
 }
 
+// If {node} is a HeapConstant<String>, return the String's length. If {node} is
+// a number, return the maximum size that a stringified number can have.
+// Otherwise, we can't easily convert {node} into a String, and we return
+// nullopt.
 // static
 base::Optional<size_t> JSNativeContextSpecialization::GetMaxStringLength(
     JSHeapBroker* broker, Node* node) {
-  if (node->opcode() == IrOpcode::kDelayedStringConstant) {
-    return StringConstantBaseOf(node->op())->GetMaxStringConstantLength();
-  }
-
   HeapObjectMatcher matcher(node);
   if (matcher.HasResolvedValue() && matcher.Ref(broker).IsString()) {
     StringRef input = matcher.Ref(broker).AsString();
+    if (!input.IsContentAccessible()) return base::nullopt;
     return input.length();
   }
 
@@ -144,11 +152,10 @@ base::Optional<size_t> JSNativeContextSpecialization::GetMaxStringLength(
 Reduction JSNativeContextSpecialization::ReduceJSToString(Node* node) {
   DCHECK_EQ(IrOpcode::kJSToString, node->opcode());
   Node* const input = node->InputAt(0);
-  Reduction reduction;
 
   HeapObjectMatcher matcher(input);
   if (matcher.HasResolvedValue() && matcher.Ref(broker()).IsString()) {
-    reduction = Changed(input);  // JSToString(x:string) => x
+    Reduction reduction = Changed(input);  // JSToString(x:string) => x
     ReplaceWithValue(node, reduction.replacement());
     return reduction;
   }
@@ -159,46 +166,50 @@ Reduction JSNativeContextSpecialization::ReduceJSToString(Node* node) {
   // regressions and the stronger optimization should be re-implemented.
   NumberMatcher number_matcher(input);
   if (number_matcher.HasResolvedValue()) {
-    const StringConstantBase* base = shared_zone()->New<NumberToStringConstant>(
-        number_matcher.ResolvedValue());
-    reduction =
-        Replace(graph()->NewNode(common()->DelayedStringConstant(base)));
-    ReplaceWithValue(node, reduction.replacement());
-    return reduction;
+    Handle<Object> num_obj =
+        broker()
+            ->local_isolate_or_isolate()
+            ->factory()
+            ->NewNumber<AllocationType::kOld>(number_matcher.ResolvedValue());
+    Handle<String> num_str =
+        broker()->local_isolate_or_isolate()->factory()->NumberToString(
+            num_obj);
+    Node* reduced = graph()->NewNode(
+        common()->HeapConstant(broker()->CanonicalPersistentHandle(num_str)));
+
+    ReplaceWithValue(node, reduced);
+    return Replace(reduced);
   }
 
   return NoChange();
 }
 
-base::Optional<const StringConstantBase*>
-JSNativeContextSpecialization::CreateDelayedStringConstant(Node* node) {
-  if (node->opcode() == IrOpcode::kDelayedStringConstant) {
-    return StringConstantBaseOf(node->op());
+// Return a String from {node}, which should be either a HeapConstant<String>
+// (in which case we return the String), or a number (in which case we convert
+// it to a String).
+Handle<String> JSNativeContextSpecialization::CreateStringConstant(Node* node) {
+  DCHECK(IrOpcode::IsConstantOpcode(node->opcode()));
+  NumberMatcher number_matcher(node);
+  if (number_matcher.HasResolvedValue()) {
+    Handle<Object> num_obj =
+        broker()
+            ->local_isolate_or_isolate()
+            ->factory()
+            ->NewNumber<AllocationType::kOld>(number_matcher.ResolvedValue());
+    return broker()->local_isolate_or_isolate()->factory()->NumberToString(
+        num_obj);
   } else {
-    NumberMatcher number_matcher(node);
-    if (number_matcher.HasResolvedValue()) {
-      return shared_zone()->New<NumberToStringConstant>(
-          number_matcher.ResolvedValue());
+    HeapObjectMatcher matcher(node);
+    if (matcher.HasResolvedValue() && matcher.Ref(broker()).IsString()) {
+      return matcher.Ref(broker()).AsString().object();
     } else {
-      HeapObjectMatcher matcher(node);
-      if (matcher.HasResolvedValue() && matcher.Ref(broker()).IsString()) {
-        StringRef s = matcher.Ref(broker()).AsString();
-        if (!s.length().has_value()) return base::nullopt;
-        return shared_zone()->New<StringLiteral>(
-            s.object(), static_cast<size_t>(s.length().value()));
-      } else {
-        UNREACHABLE();
-      }
+      UNREACHABLE();
     }
   }
 }
 
 namespace {
 bool IsStringConstant(JSHeapBroker* broker, Node* node) {
-  if (node->opcode() == IrOpcode::kDelayedStringConstant) {
-    return true;
-  }
-
   HeapObjectMatcher matcher(node);
   return matcher.HasResolvedValue() && matcher.Ref(broker).IsString();
 }
@@ -310,6 +321,94 @@ Reduction JSNativeContextSpecialization::ReduceJSAsyncFunctionResolve(
   return Replace(promise);
 }
 
+namespace {
+
+// Concatenates {left} and {right}. The result is fairly similar to creating a
+// new ConsString with {left} and {right} and then flattening it, which we don't
+// do because String::Flatten does not support background threads. Rather than
+// implementing a full String::Flatten for background threads, we prefered to
+// implement this Concatenate function, which, unlike String::Flatten, doesn't
+// need to replace ConsStrings by ThinStrings.
+Handle<String> Concatenate(Handle<String> left, Handle<String> right,
+                           JSHeapBroker* broker) {
+  if (left->length() == 0) return right;
+  if (right->length() == 0) return left;
+
+  // Repeated concatenations have a quadratic cost (eg, "s+=a;s+=b;s+=c;...").
+  // Rather than doing static analysis to determine how many concatenations we
+  // there are and how many uses the result of each concatenation have, we
+  // generate ConsString when the result of the concatenation would have more
+  // than {kConstantStringFlattenMaxSize} characters, and flattened SeqString
+  // otherwise.
+  // TODO(dmercadier): ideally, we would like to get rid of this constant, and
+  // always flatten. This requires some care to avoid the quadratic worst-case.
+  constexpr int32_t kConstantStringFlattenMaxSize = 100;
+
+  int32_t length = left->length() + right->length();
+  if (length > kConstantStringFlattenMaxSize) {
+    // The generational write-barrier doesn't work in background threads, so,
+    // if {left} or {right} are in the young generation, we would have to copy
+    // them to the local heap (which is old) before creating the (old)
+    // ConsString. But, copying a ConsString instead of flattening it to a
+    // SeqString makes no sense here (since flattening would be faster and use
+    // less memory). Thus, if one of {left} or {right} is a young string, we'll
+    // build a SeqString rather than a ConsString, regardless of {length}.
+    // TODO(dmercadier, dinfuehr): always build a ConsString here once the
+    // generational write-barrier supports background threads.
+    if (!LocalHeap::Current() ||
+        (!ObjectInYoungGeneration(*left) && !ObjectInYoungGeneration(*right))) {
+      return broker->local_isolate_or_isolate()
+          ->factory()
+          ->NewConsString(left, right, AllocationType::kOld)
+          .ToHandleChecked();
+    }
+  }
+
+  // If one of the string is not in readonly space, then we need a
+  // SharedStringAccessGuardIfNeeded before accessing its content.
+  bool require_guard = SharedStringAccessGuardIfNeeded::IsNeeded(
+                           *left, broker->local_isolate_or_isolate()) ||
+                       SharedStringAccessGuardIfNeeded::IsNeeded(
+                           *right, broker->local_isolate_or_isolate());
+  SharedStringAccessGuardIfNeeded access_guard(
+      require_guard ? broker->local_isolate_or_isolate() : nullptr);
+
+  if (left->IsOneByteRepresentation() && right->IsOneByteRepresentation()) {
+    // {left} and {right} are 1-byte ==> the result will be 1-byte.
+    Handle<SeqOneByteString> flat =
+        broker->local_isolate_or_isolate()
+            ->factory()
+            ->NewRawOneByteString(length, AllocationType::kOld)
+            .ToHandleChecked();
+    DisallowGarbageCollection no_gc;
+    String::WriteToFlat(*left, flat->GetChars(no_gc, access_guard), 0,
+                        left->length(), GetPtrComprCageBase(*left),
+                        access_guard);
+    String::WriteToFlat(
+        *right, flat->GetChars(no_gc, access_guard) + left->length(), 0,
+        right->length(), GetPtrComprCageBase(*right), access_guard);
+    return flat;
+  } else {
+    // One (or both) of {left} and {right} is 2-byte ==> the result will be
+    // 2-byte.
+    Handle<SeqTwoByteString> flat =
+        broker->local_isolate_or_isolate()
+            ->factory()
+            ->NewRawTwoByteString(length, AllocationType::kOld)
+            .ToHandleChecked();
+    DisallowGarbageCollection no_gc;
+    String::WriteToFlat(*left, flat->GetChars(no_gc, access_guard), 0,
+                        left->length(), GetPtrComprCageBase(*left),
+                        access_guard);
+    String::WriteToFlat(
+        *right, flat->GetChars(no_gc, access_guard) + left->length(), 0,
+        right->length(), GetPtrComprCageBase(*right), access_guard);
+    return flat;
+  }
+}
+
+}  // namespace
+
 Reduction JSNativeContextSpecialization::ReduceJSAdd(Node* node) {
   // TODO(turbofan): This has to run together with the inlining and
   // native context specialization to be able to leverage the string
@@ -322,24 +421,19 @@ Reduction JSNativeContextSpecialization::ReduceJSAdd(Node* node) {
 
   base::Optional<size_t> lhs_len = GetMaxStringLength(broker(), lhs);
   base::Optional<size_t> rhs_len = GetMaxStringLength(broker(), rhs);
-  if (!lhs_len || !rhs_len) {
-    return NoChange();
-  }
+  if (!lhs_len || !rhs_len) return NoChange();
 
-  // Fold into DelayedStringConstant if at least one of the parameters is a
-  // string constant and the addition won't throw due to too long result.
+  // Fold if at least one of the parameters is a string constant and the
+  // addition won't throw due to too long result.
   if (*lhs_len + *rhs_len <= String::kMaxLength &&
       (IsStringConstant(broker(), lhs) || IsStringConstant(broker(), rhs))) {
-    base::Optional<const StringConstantBase*> left =
-        CreateDelayedStringConstant(lhs);
-    if (!left.has_value()) return NoChange();
-    base::Optional<const StringConstantBase*> right =
-        CreateDelayedStringConstant(rhs);
-    if (!right.has_value()) return NoChange();
-    const StringConstantBase* cons =
-        shared_zone()->New<StringCons>(left.value(), right.value());
+    Handle<String> left = CreateStringConstant(lhs);
+    Handle<String> right = CreateStringConstant(rhs);
 
-    Node* reduced = graph()->NewNode(common()->DelayedStringConstant(cons));
+    Handle<String> concatenated = Concatenate(left, right, broker());
+    Node* reduced = graph()->NewNode(common()->HeapConstant(
+        broker()->CanonicalPersistentHandle(concatenated)));
+
     ReplaceWithValue(node, reduced);
     return Replace(reduced);
   }
@@ -751,7 +845,7 @@ FieldAccess ForPropertyCellValue(MachineRepresentation representation,
   MachineType r = MachineType::TypeForRepresentation(representation);
   FieldAccess access = {
       kTaggedBase, PropertyCell::kValueOffset, name.object(), map, type, r,
-      kind};
+      kind, "PropertyCellValue"};
   return access;
 }
 
@@ -896,8 +990,7 @@ Reduction JSNativeContextSpecialization::ReduceGlobalAccess(
             jsgraph()->Constant(property_cell), effect, control);
       }
     }
-  } else {
-    DCHECK_EQ(AccessMode::kStore, access_mode);
+  } else if (access_mode == AccessMode::kStore) {
     DCHECK_EQ(receiver, lookup_start_object);
     DCHECK(!property_details.IsReadOnly());
     switch (property_details.cell_type()) {
@@ -965,6 +1058,8 @@ Reduction JSNativeContextSpecialization::ReduceGlobalAccess(
       case PropertyCellType::kInTransition:
         UNREACHABLE();
     }
+  } else {
+    return NoChange();
   }
 
   ReplaceWithValue(node, value, effect, control);
@@ -1507,8 +1602,7 @@ Reduction JSNativeContextSpecialization::ReduceJSLoadNamed(Node* node) {
     } else if (object.IsString() &&
                name.equals(MakeRef(broker(), factory()->length_string()))) {
       // Constant-fold "length" property on constant strings.
-      if (!object.AsString().length().has_value()) return NoChange();
-      Node* value = jsgraph()->Constant(object.AsString().length().value());
+      Node* value = jsgraph()->Constant(object.AsString().length());
       ReplaceWithValue(node, value);
       return Replace(value);
     }
@@ -2091,9 +2185,7 @@ Reduction JSNativeContextSpecialization::ReduceElementLoadFromHeapConstant(
   if (receiver_ref.IsString()) {
     DCHECK_NE(access_mode, AccessMode::kHas);
     // Ensure that {key} is less than {receiver} length.
-    if (!receiver_ref.AsString().length().has_value()) return NoChange();
-    Node* length =
-        jsgraph()->Constant(receiver_ref.AsString().length().value());
+    Node* length = jsgraph()->Constant(receiver_ref.AsString().length());
 
     // Load the single character string from {receiver} or yield
     // undefined if the {key} is out of bounds (depending on the
@@ -2594,6 +2686,7 @@ JSNativeContextSpecialization::BuildPropertyStore(
         field_type,
         MachineType::TypeForRepresentation(field_representation),
         kFullWriteBarrier,
+        "BuildPropertyStore",
         access_info.GetConstFieldInfo(),
         access_mode == AccessMode::kStoreInLiteral};
 
@@ -2627,6 +2720,7 @@ JSNativeContextSpecialization::BuildPropertyStore(
               Type::OtherInternal(),
               MachineType::TaggedPointer(),
               kPointerWriteBarrier,
+              "BuildPropertyStore",
               access_info.GetConstFieldInfo(),
               access_mode == AccessMode::kStoreInLiteral};
           storage = effect =

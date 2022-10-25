@@ -16,6 +16,7 @@
 #include "src/objects/foreign.h"
 #include "src/objects/js-function.h"
 #include "src/objects/js-objects.h"
+#include "src/objects/objects-body-descriptors.h"
 #include "src/objects/objects.h"
 #include "src/objects/struct.h"
 #include "src/wasm/module-instantiate.h"
@@ -192,9 +193,14 @@ class WasmTableObject
   static bool IsInBounds(Isolate* isolate, Handle<WasmTableObject> table,
                          uint32_t entry_index);
 
-  static bool IsValidElement(Isolate* isolate, Handle<WasmTableObject> table,
-                             Handle<Object> entry);
+  // Thin wrapper around {JsToWasmObject}.
+  static MaybeHandle<Object> JSToWasmElement(Isolate* isolate,
+                                             Handle<WasmTableObject> table,
+                                             Handle<Object> entry,
+                                             const char** error_message);
 
+  // This function will not handle JS objects; i.e., {entry} needs to be in wasm
+  // representation.
   V8_EXPORT_PRIVATE static void Set(Isolate* isolate,
                                     Handle<WasmTableObject> table,
                                     uint32_t index, Handle<Object> entry);
@@ -308,9 +314,8 @@ class WasmGlobalObject
   inline void SetI64(int64_t value);
   inline void SetF32(float value);
   inline void SetF64(double value);
-  inline void SetExternRef(Handle<Object> value);
-  inline bool SetFuncRef(Isolate* isolate, Handle<Object> value);
-  inline void SetStringRef(Handle<Object> value);
+  // {value} must be an object in Wasm representation.
+  inline void SetRef(Handle<Object> value);
 
  private:
   // This function returns the address of the global's data in the
@@ -336,8 +341,9 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
   DECL_OPTIONAL_ACCESSORS(tables, FixedArray)
   DECL_OPTIONAL_ACCESSORS(indirect_function_tables, FixedArray)
   DECL_ACCESSORS(imported_function_refs, FixedArray)
+  DECL_ACCESSORS(imported_mutable_globals, ByteArray)
+  DECL_ACCESSORS(imported_function_targets, FixedAddressArray)
   DECL_OPTIONAL_ACCESSORS(indirect_function_table_refs, FixedArray)
-  DECL_OPTIONAL_ACCESSORS(managed_native_allocations, Foreign)
   DECL_OPTIONAL_ACCESSORS(tags_table, FixedArray)
   DECL_OPTIONAL_ACCESSORS(wasm_internal_functions, FixedArray)
   DECL_ACCESSORS(managed_object_maps, FixedArray)
@@ -352,18 +358,16 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
   DECL_PRIMITIVE_ACCESSORS(old_allocation_limit_address, Address*)
   DECL_PRIMITIVE_ACCESSORS(old_allocation_top_address, Address*)
   DECL_PRIMITIVE_ACCESSORS(isorecursive_canonical_types, const uint32_t*)
-  DECL_PRIMITIVE_ACCESSORS(imported_function_targets, Address*)
   DECL_SANDBOXED_POINTER_ACCESSORS(globals_start, byte*)
-  DECL_PRIMITIVE_ACCESSORS(imported_mutable_globals, Address*)
   DECL_PRIMITIVE_ACCESSORS(indirect_function_table_size, uint32_t)
   DECL_PRIMITIVE_ACCESSORS(indirect_function_table_sig_ids, uint32_t*)
   DECL_PRIMITIVE_ACCESSORS(indirect_function_table_targets, Address*)
   DECL_PRIMITIVE_ACCESSORS(jump_table_start, Address)
-  DECL_PRIMITIVE_ACCESSORS(data_segment_starts, Address*)
-  DECL_PRIMITIVE_ACCESSORS(data_segment_sizes, uint32_t*)
-  DECL_PRIMITIVE_ACCESSORS(dropped_elem_segments, byte*)
   DECL_PRIMITIVE_ACCESSORS(hook_on_function_call_address, Address)
   DECL_PRIMITIVE_ACCESSORS(tiering_budget_array, uint32_t*)
+  DECL_ACCESSORS(data_segment_starts, FixedAddressArray)
+  DECL_ACCESSORS(data_segment_sizes, FixedUInt32Array)
+  DECL_ACCESSORS(dropped_elem_segments, FixedUInt8Array)
   DECL_PRIMITIVE_ACCESSORS(break_on_entry, uint8_t)
 
   // Clear uninitialized padding space. This ensures that the snapshot content
@@ -380,6 +384,8 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
   /* Less than system pointer sized fields come first. */                 \
   V(kImportedFunctionRefsOffset, kTaggedSize)                             \
   V(kIndirectFunctionTableRefsOffset, kTaggedSize)                        \
+  V(kImportedMutableGlobalsOffset, kTaggedSize)                           \
+  V(kImportedFunctionTargetsOffset, kTaggedSize)                          \
   V(kIndirectFunctionTableSizeOffset, kUInt32Size)                        \
   /* Optional padding to align system pointer size fields */              \
   V(kOptionalPaddingOffset, POINTER_SIZE_PADDING(kOptionalPaddingOffset)) \
@@ -387,11 +393,9 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
   V(kMemorySizeOffset, kSizetSize)                                        \
   V(kStackLimitAddressOffset, kSystemPointerSize)                         \
   V(kIsorecursiveCanonicalTypesOffset, kSystemPointerSize)                \
-  V(kImportedFunctionTargetsOffset, kSystemPointerSize)                   \
   V(kIndirectFunctionTableTargetsOffset, kSystemPointerSize)              \
   V(kIndirectFunctionTableSigIdsOffset, kSystemPointerSize)               \
   V(kGlobalsStartOffset, kSystemPointerSize)                              \
-  V(kImportedMutableGlobalsOffset, kSystemPointerSize)                    \
   V(kIsolateRootOffset, kSystemPointerSize)                               \
   V(kJumpTableStartOffset, kSystemPointerSize)                            \
   /* End of often-accessed fields. */                                     \
@@ -401,12 +405,12 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
   V(kOldAllocationLimitAddressOffset, kSystemPointerSize)                 \
   V(kOldAllocationTopAddressOffset, kSystemPointerSize)                   \
   V(kRealStackLimitAddressOffset, kSystemPointerSize)                     \
-  V(kDataSegmentStartsOffset, kSystemPointerSize)                         \
-  V(kDataSegmentSizesOffset, kSystemPointerSize)                          \
-  V(kDroppedElemSegmentsOffset, kSystemPointerSize)                       \
   V(kHookOnFunctionCallAddressOffset, kSystemPointerSize)                 \
   V(kTieringBudgetArrayOffset, kSystemPointerSize)                        \
   /* Less than system pointer size aligned fields are below. */           \
+  V(kDataSegmentStartsOffset, kTaggedSize)                                \
+  V(kDataSegmentSizesOffset, kTaggedSize)                                 \
+  V(kDroppedElemSegmentsOffset, kTaggedSize)                              \
   V(kModuleObjectOffset, kTaggedSize)                                     \
   V(kExportsObjectOffset, kTaggedSize)                                    \
   V(kNativeContextOffset, kTaggedSize)                                    \
@@ -416,7 +420,6 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
   V(kImportedMutableGlobalsBuffersOffset, kTaggedSize)                    \
   V(kTablesOffset, kTaggedSize)                                           \
   V(kIndirectFunctionTablesOffset, kTaggedSize)                           \
-  V(kManagedNativeAllocationsOffset, kTaggedSize)                         \
   V(kTagsTableOffset, kTaggedSize)                                        \
   V(kWasmInternalFunctionsOffset, kTaggedSize)                            \
   V(kManagedObjectMapsOffset, kTaggedSize)                                \
@@ -453,11 +456,15 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
       kImportedMutableGlobalsBuffersOffset,
       kTablesOffset,
       kIndirectFunctionTablesOffset,
-      kManagedNativeAllocationsOffset,
       kTagsTableOffset,
       kWasmInternalFunctionsOffset,
       kManagedObjectMapsOffset,
-      kFeedbackVectorsOffset};
+      kFeedbackVectorsOffset,
+      kImportedMutableGlobalsOffset,
+      kImportedFunctionTargetsOffset,
+      kDataSegmentStartsOffset,
+      kDataSegmentSizesOffset,
+      kDroppedElemSegmentsOffset};
 
   const wasm::WasmModule* module();
 
@@ -710,7 +717,8 @@ class WasmFunctionData
 
   DECL_PRINTER(WasmFunctionData)
 
-  using BodyDescriptor = FlexibleBodyDescriptor<kStartOfStrongFieldsOffset>;
+  using BodyDescriptor = FixedBodyDescriptor<kStartOfStrongFieldsOffset,
+                                             kEndOfStrongFieldsOffset, kSize>;
 
   using SuspendField = base::BitField<wasm::Suspend, 0, 1>;
   using PromiseField = base::BitField<wasm::Promise, 1, 1>;
@@ -725,14 +733,13 @@ class WasmExportedFunctionData
     : public TorqueGeneratedWasmExportedFunctionData<WasmExportedFunctionData,
                                                      WasmFunctionData> {
  public:
-  inline wasm::FunctionSig* sig() const;
+  DECL_EXTERNAL_POINTER_ACCESSORS(sig, wasm::FunctionSig*)
 
   // Dispatched behavior.
   DECL_PRINTER(WasmExportedFunctionData)
   DECL_VERIFIER(WasmExportedFunctionData)
 
-  using BodyDescriptor =
-      FlexibleBodyDescriptor<WasmFunctionData::kStartOfStrongFieldsOffset>;
+  class BodyDescriptor;
 
   TQ_OBJECT_CONSTRUCTORS(WasmExportedFunctionData)
 };
@@ -757,7 +764,7 @@ class WasmInternalFunction
   static MaybeHandle<WasmInternalFunction> FromExternal(Handle<Object> external,
                                                         Isolate* isolate);
 
-  DECL_EXTERNAL_POINTER_ACCESSORS(call_target, Address);
+  DECL_EXTERNAL_POINTER_ACCESSORS(call_target, Address)
 
   // Dispatched behavior.
   DECL_PRINTER(WasmInternalFunction)
@@ -904,7 +911,7 @@ class AsmWasmData : public TorqueGeneratedAsmWasmData<AsmWasmData, Struct> {
 class WasmTypeInfo
     : public TorqueGeneratedWasmTypeInfo<WasmTypeInfo, HeapObject> {
  public:
-  DECL_EXTERNAL_POINTER_ACCESSORS(native_type, Address);
+  DECL_EXTERNAL_POINTER_ACCESSORS(native_type, Address)
 
   DECL_PRINTER(WasmTypeInfo)
 
@@ -1024,11 +1031,13 @@ class WasmContinuationObject
  public:
   static Handle<WasmContinuationObject> New(
       Isolate* isolate, std::unique_ptr<wasm::StackMemory> stack,
+      wasm::JumpBuffer::StackState state,
       AllocationType allocation_type = AllocationType::kYoung);
   static Handle<WasmContinuationObject> New(
-      Isolate* isolate, Handle<WasmContinuationObject> parent);
+      Isolate* isolate, wasm::JumpBuffer::StackState state,
+      Handle<WasmContinuationObject> parent);
 
-  DECL_EXTERNAL_POINTER_ACCESSORS(jmpbuf, Address);
+  DECL_EXTERNAL_POINTER_ACCESSORS(jmpbuf, Address)
 
   DECL_PRINTER(WasmContinuationObject)
 
@@ -1037,7 +1046,7 @@ class WasmContinuationObject
  private:
   static Handle<WasmContinuationObject> New(
       Isolate* isolate, std::unique_ptr<wasm::StackMemory> stack,
-      Handle<HeapObject> parent,
+      wasm::JumpBuffer::StackState state, Handle<HeapObject> parent,
       AllocationType allocation_type = AllocationType::kYoung);
 
   TQ_OBJECT_CONSTRUCTORS(WasmContinuationObject)
@@ -1058,9 +1067,12 @@ class WasmSuspenderObject
 #undef DECL_OPTIONAL_ACCESSORS
 
 namespace wasm {
-bool TypecheckJSObject(Isolate* isolate, const WasmModule* module,
-                       Handle<Object> value, ValueType expected,
-                       const char** error_message);
+// Takes a {value} in the JS representation and typechecks it according to
+// {expected}. If the typecheck succeeds, returns the wasm representation of the
+// object; otherwise, returns the empty handle.
+MaybeHandle<Object> JSToWasmObject(Isolate* isolate, const WasmModule* module,
+                                   Handle<Object> value, ValueType expected,
+                                   const char** error_message);
 }  // namespace wasm
 
 }  // namespace internal

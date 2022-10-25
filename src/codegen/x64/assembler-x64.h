@@ -455,6 +455,11 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
       ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED);
   static inline int32_t relative_target_offset(Address target, Address pc);
 
+  // During code generation builtin targets in PC-relative call/jump
+  // instructions are temporarily encoded as builtin ID until the generated
+  // code is moved into the code space.
+  static inline Builtin target_builtin_at(Address pc);
+
   // This sets the branch destination (which is in the instruction on x64).
   // This is for calls and branches within generated code.
   inline static void deserialization_set_special_target_at(
@@ -588,8 +593,6 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // the embedded object gets already recorded correctly when emitting the dummy
   // move.
   void movq_heap_number(Register dst, double value);
-
-  void movq_string(Register dst, const StringConstantBase* str);
 
   // Loads a 64-bit immediate into a register, potentially using the constant
   // pool.
@@ -2555,7 +2558,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 
   bool is_optimizable_farjmp(int idx);
 
-  void AllocateAndInstallRequestedHeapObjects(Isolate* isolate);
+  void AllocateAndInstallRequestedHeapNumbers(Isolate* isolate);
 
   int WriteCodeComments();
 

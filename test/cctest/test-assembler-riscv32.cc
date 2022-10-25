@@ -38,8 +38,8 @@
 #include "src/init/v8.h"
 #include "src/utils/utils.h"
 #include "test/cctest/cctest.h"
-#include "test/cctest/compiler/value-helper.h"
 #include "test/cctest/test-helper-riscv32.h"
+#include "test/common/value-helper.h"
 
 namespace v8 {
 namespace internal {
@@ -2068,9 +2068,7 @@ UTEST_RVV_VF_VV_FORM_WITH_OP(vfdiv_vv, /)
       }                                                                        \
       __ instr_name(v0, v2, fa1);                                              \
       __ li(t1, Operand(int64_t(result)));                                     \
-      __ li(t2, Operand(int64_t(&result[n / 2])));                             \
       __ vs(v0, t1, 0, VSew::E64);                                             \
-      __ vs(v1, t2, 0, VSew::E64);                                             \
     };                                                                         \
     for (float rs1_fval : compiler::ValueHelper::GetVector<float>()) {         \
       for (float rs2_fval : compiler::ValueHelper::GetVector<float>()) {       \

@@ -6,7 +6,6 @@
 
 #include "src/base/logging.h"
 #include "src/base/platform/platform.h"
-#include "src/base/platform/wrappers.h"
 #include "src/common/globals.h"
 #include "src/heap/basic-memory-chunk.h"
 #include "src/heap/code-object-registry.h"
@@ -75,7 +74,7 @@ void MemoryChunk::SetReadable() {
 }
 
 void MemoryChunk::SetReadAndExecutable() {
-  DCHECK(!FLAG_jitless);
+  DCHECK(!v8_flags.jitless);
   DecrementWriteUnprotectCounterAndMaybeSetPermissions(
       PageAllocator::kReadExecute);
 }
@@ -104,7 +103,7 @@ void MemoryChunk::SetCodeModificationPermissions() {
 }
 
 void MemoryChunk::SetDefaultCodePermissions() {
-  if (FLAG_jitless) {
+  if (v8_flags.jitless) {
     SetReadable();
   } else {
     SetReadAndExecutable();
@@ -117,7 +116,7 @@ PageAllocator::Permission DefaultWritableCodePermissions() {
   DCHECK(!V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT);
   // On MacOS on ARM64 RWX permissions are allowed to be set only when
   // fast W^X is enabled (see V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT).
-  return V8_HAS_PTHREAD_JIT_WRITE_PROTECT || FLAG_jitless
+  return V8_HAS_PTHREAD_JIT_WRITE_PROTECT || v8_flags.jitless
              ? PageAllocator::kReadWrite
              : PageAllocator::kReadWriteExecute;
 }

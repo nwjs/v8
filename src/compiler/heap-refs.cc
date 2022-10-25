@@ -1037,6 +1037,22 @@ ObjectData* JSHeapBroker::TryGetOrCreateData(Handle<Object> object,
 HEAP_BROKER_OBJECT_LIST(DEFINE_IS_AND_AS)
 #undef DEFINE_IS_AND_AS
 
+bool ObjectRef::IsCodeT() const {
+#ifdef V8_EXTERNAL_CODE_SPACE
+  return IsCodeDataContainer();
+#else
+  return IsCode();
+#endif
+}
+
+CodeTRef ObjectRef::AsCodeT() const {
+#ifdef V8_EXTERNAL_CODE_SPACE
+  return AsCodeDataContainer();
+#else
+  return AsCode();
+#endif
+}
+
 bool ObjectRef::IsSmi() const { return data()->is_smi(); }
 
 int ObjectRef::AsSmi() const {
@@ -1276,8 +1292,12 @@ bool StringRef::SupportedStringKind() const {
   return IsInternalizedString() || object()->IsThinString();
 }
 
+bool StringRef::IsContentAccessible() const {
+  return data_->kind() != kNeverSerializedHeapObject || SupportedStringKind();
+}
+
 base::Optional<Handle<String>> StringRef::ObjectIfContentAccessible() {
-  if (data_->kind() == kNeverSerializedHeapObject && !SupportedStringKind()) {
+  if (!IsContentAccessible()) {
     TRACE_BROKER_MISSING(
         broker(),
         "content for kNeverSerialized unsupported string kind " << *this);
@@ -1287,21 +1307,12 @@ base::Optional<Handle<String>> StringRef::ObjectIfContentAccessible() {
   }
 }
 
-base::Optional<int> StringRef::length() const {
-  if (data_->kind() == kNeverSerializedHeapObject && !SupportedStringKind()) {
-    TRACE_BROKER_MISSING(
-        broker(),
-        "length for kNeverSerialized unsupported string kind " << *this);
-    return base::nullopt;
-  } else {
-    return object()->length(kAcquireLoad);
-  }
-}
+int StringRef::length() const { return object()->length(kAcquireLoad); }
 
 base::Optional<uint16_t> StringRef::GetFirstChar() const { return GetChar(0); }
 
 base::Optional<uint16_t> StringRef::GetChar(int index) const {
-  if (data_->kind() == kNeverSerializedHeapObject && !SupportedStringKind()) {
+  if (!IsContentAccessible()) {
     TRACE_BROKER_MISSING(
         broker(),
         "get char for kNeverSerialized unsupported string kind " << *this);
@@ -1318,7 +1329,7 @@ base::Optional<uint16_t> StringRef::GetChar(int index) const {
 }
 
 base::Optional<double> StringRef::ToNumber() {
-  if (data_->kind() == kNeverSerializedHeapObject && !SupportedStringKind()) {
+  if (!IsContentAccessible()) {
     TRACE_BROKER_MISSING(
         broker(),
         "number for kNeverSerialized unsupported string kind " << *this);

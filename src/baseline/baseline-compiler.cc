@@ -53,8 +53,6 @@
 #include "src/baseline/riscv/baseline-compiler-riscv-inl.h"
 #elif V8_TARGET_ARCH_MIPS64
 #include "src/baseline/mips64/baseline-compiler-mips64-inl.h"
-#elif V8_TARGET_ARCH_MIPS
-#include "src/baseline/mips/baseline-compiler-mips-inl.h"
 #elif V8_TARGET_ARCH_LOONG64
 #include "src/baseline/loong64/baseline-compiler-loong64-inl.h"
 #else
@@ -402,8 +400,11 @@ int32_t BaselineCompiler::Int(int operand_index) {
 uint32_t BaselineCompiler::Index(int operand_index) {
   return iterator().GetIndexOperand(operand_index);
 }
-uint32_t BaselineCompiler::Flag(int operand_index) {
-  return iterator().GetFlagOperand(operand_index);
+uint32_t BaselineCompiler::Flag8(int operand_index) {
+  return iterator().GetFlag8Operand(operand_index);
+}
+uint32_t BaselineCompiler::Flag16(int operand_index) {
+  return iterator().GetFlag16Operand(operand_index);
 }
 uint32_t BaselineCompiler::RegisterCount(int operand_index) {
   return iterator().GetRegisterCountOperand(operand_index);
@@ -420,8 +421,11 @@ Smi BaselineCompiler::IndexAsSmi(int operand_index) {
 Smi BaselineCompiler::IntAsSmi(int operand_index) {
   return Smi::FromInt(Int(operand_index));
 }
-Smi BaselineCompiler::FlagAsSmi(int operand_index) {
-  return Smi::FromInt(Flag(operand_index));
+Smi BaselineCompiler::Flag8AsSmi(int operand_index) {
+  return Smi::FromInt(Flag8(operand_index));
+}
+Smi BaselineCompiler::Flag16AsSmi(int operand_index) {
+  return Smi::FromInt(Flag16(operand_index));
 }
 
 MemOperand BaselineCompiler::FeedbackVector() {
@@ -494,13 +498,13 @@ void BaselineCompiler::VisitSingleBytecode() {
   if (label.GetPointer()) __ Bind(label.GetPointer());
   // Mark position as valid jump target unconditionnaly when the deoptimizer can
   // jump to baseline code. This is required when CFI is enabled.
-  if (FLAG_deopt_to_baseline || label.IsIndirectJumpTarget()) {
+  if (v8_flags.deopt_to_baseline || label.IsIndirectJumpTarget()) {
     __ JumpTarget();
   }
 
 #ifdef V8_CODE_COMMENTS
   std::ostringstream str;
-  if (FLAG_code_comments) {
+  if (v8_flags.code_comments) {
     iterator().PrintTo(str);
   }
   ASM_CODE_COMMENT_STRING(&masm_, str.str());
@@ -521,7 +525,7 @@ void BaselineCompiler::VisitSingleBytecode() {
     // isn't registered as writing to it. We can't do this for jumps or switches
     // though, since the control flow would not match the control flow of this
     // scope.
-    if (FLAG_debug_code &&
+    if (v8_flags.debug_code &&
         !interpreter::Bytecodes::WritesAccumulator(bytecode) &&
         !interpreter::Bytecodes::IsJump(bytecode) &&
         !interpreter::Bytecodes::IsSwitch(bytecode)) {
@@ -545,7 +549,7 @@ void BaselineCompiler::VisitSingleBytecode() {
 }
 
 void BaselineCompiler::VerifyFrame() {
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     ASM_CODE_COMMENT(&masm_);
     __ RecordComment(" -- Verify frame size");
     VerifyFrameSize();
@@ -570,7 +574,7 @@ void BaselineCompiler::VerifyFrame() {
 
 #ifdef V8_TRACE_UNOPTIMIZED
 void BaselineCompiler::TraceBytecode(Runtime::FunctionId function_id) {
-  if (!FLAG_trace_baseline_exec) return;
+  if (!v8_flags.trace_baseline_exec) return;
   ASM_CODE_COMMENT_STRING(&masm_,
                           function_id == Runtime::kTraceUnoptimizedBytecodeEntry
                               ? "Trace bytecode entry"
@@ -600,7 +604,7 @@ void BaselineCompiler::UpdateInterruptBudgetAndJumpToLabel(
 
     if (weight < 0) {
       SaveAccumulatorScope accumulator_scope(&basm_);
-      CallRuntime(Runtime::kBytecodeBudgetInterruptWithStackCheck,
+      CallRuntime(Runtime::kBytecodeBudgetInterruptWithStackCheck_Sparkplug,
                   __ FunctionOperand());
     }
   }
@@ -808,7 +812,7 @@ void BaselineCompiler::VisitLdaLookupGlobalSlotInsideTypeof() {
 }
 
 void BaselineCompiler::VisitStaLookupSlot() {
-  uint32_t flags = Flag(1);
+  uint32_t flags = Flag8(1);
   Runtime::FunctionId function_id;
   if (flags & interpreter::StoreLookupSlotFlags::LanguageModeBit::kMask) {
     function_id = Runtime::kStoreLookupSlot_Strict;
@@ -958,7 +962,7 @@ void BaselineCompiler::VisitDefineKeyedOwnPropertyInLiteral() {
               RegisterOperand(0),               // object
               RegisterOperand(1),               // name
               kInterpreterAccumulatorRegister,  // value
-              FlagAsSmi(2),                     // flags
+              Flag8AsSmi(2),                    // flags
               FeedbackVector(),                 // feedback vector
               IndexAsTagged(3));                // slot
 }
@@ -1152,6 +1156,13 @@ void BaselineCompiler::VisitGetSuperConstructor() {
   Register prototype = scratch_scope.AcquireScratch();
   __ LoadPrototype(prototype, kInterpreterAccumulatorRegister);
   StoreRegister(0, prototype);
+}
+
+void BaselineCompiler::VisitFindNonDefaultConstructor() {
+  SaveAccumulatorScope accumulator_scope(&basm_);
+  CallBuiltin<Builtin::kFindNonDefaultConstructor>(RegisterOperand(0),
+                                                   RegisterOperand(1));
+  StoreRegisterPair(2, kReturnRegister0, kReturnRegister1);
 }
 
 namespace {
@@ -1515,7 +1526,8 @@ void BaselineCompiler::VisitTestUndetectable() {
   __ JumpIfSmi(kInterpreterAccumulatorRegister, &is_smi, Label::kNear);
 
   Register map_bit_field = kInterpreterAccumulatorRegister;
-  __ LoadMapBitField(map_bit_field, kInterpreterAccumulatorRegister);
+  __ LoadMap(map_bit_field, kInterpreterAccumulatorRegister);
+  __ LoadWord8Field(map_bit_field, map_bit_field, Map::kBitFieldOffset);
   __ TestAndBranch(map_bit_field, Map::Bits1::IsUndetectableBit::kMask,
                    Condition::kZero, &not_undetectable, Label::kNear);
 
@@ -1550,7 +1562,7 @@ void BaselineCompiler::VisitTestTypeOf() {
   BaselineAssembler::ScratchRegisterScope scratch_scope(&basm_);
 
   auto literal_flag =
-      static_cast<interpreter::TestTypeOfFlags::LiteralFlag>(Flag(0));
+      static_cast<interpreter::TestTypeOfFlags::LiteralFlag>(Flag8(0));
 
   Label done;
   switch (literal_flag) {
@@ -1558,8 +1570,8 @@ void BaselineCompiler::VisitTestTypeOf() {
       Label is_smi, is_heap_number;
       __ JumpIfSmi(kInterpreterAccumulatorRegister, &is_smi, Label::kNear);
       __ JumpIfObjectType(Condition::kEqual, kInterpreterAccumulatorRegister,
-                          HEAP_NUMBER_TYPE, &scratch_scope, &is_heap_number,
-                          Label::kNear);
+                          HEAP_NUMBER_TYPE, scratch_scope.AcquireScratch(),
+                          &is_heap_number, Label::kNear);
 
       __ LoadRoot(kInterpreterAccumulatorRegister, RootIndex::kFalseValue);
       __ Jump(&done, Label::kNear);
@@ -1575,7 +1587,8 @@ void BaselineCompiler::VisitTestTypeOf() {
       static_assert(INTERNALIZED_STRING_TYPE == FIRST_TYPE);
       __ JumpIfObjectType(Condition::kGreaterThanEqual,
                           kInterpreterAccumulatorRegister, FIRST_NONSTRING_TYPE,
-                          &scratch_scope, &bad_instance_type, Label::kNear);
+                          scratch_scope.AcquireScratch(), &bad_instance_type,
+                          Label::kNear);
 
       __ LoadRoot(kInterpreterAccumulatorRegister, RootIndex::kTrueValue);
       __ Jump(&done, Label::kNear);
@@ -1589,8 +1602,8 @@ void BaselineCompiler::VisitTestTypeOf() {
       Label is_smi, bad_instance_type;
       __ JumpIfSmi(kInterpreterAccumulatorRegister, &is_smi, Label::kNear);
       __ JumpIfObjectType(Condition::kNotEqual, kInterpreterAccumulatorRegister,
-                          SYMBOL_TYPE, &scratch_scope, &bad_instance_type,
-                          Label::kNear);
+                          SYMBOL_TYPE, scratch_scope.AcquireScratch(),
+                          &bad_instance_type, Label::kNear);
 
       __ LoadRoot(kInterpreterAccumulatorRegister, RootIndex::kTrueValue);
       __ Jump(&done, Label::kNear);
@@ -1619,8 +1632,8 @@ void BaselineCompiler::VisitTestTypeOf() {
       Label is_smi, bad_instance_type;
       __ JumpIfSmi(kInterpreterAccumulatorRegister, &is_smi, Label::kNear);
       __ JumpIfObjectType(Condition::kNotEqual, kInterpreterAccumulatorRegister,
-                          BIGINT_TYPE, &scratch_scope, &bad_instance_type,
-                          Label::kNear);
+                          BIGINT_TYPE, scratch_scope.AcquireScratch(),
+                          &bad_instance_type, Label::kNear);
 
       __ LoadRoot(kInterpreterAccumulatorRegister, RootIndex::kTrueValue);
       __ Jump(&done, Label::kNear);
@@ -1640,7 +1653,8 @@ void BaselineCompiler::VisitTestTypeOf() {
 
       // All other undetectable maps are typeof undefined.
       Register map_bit_field = kInterpreterAccumulatorRegister;
-      __ LoadMapBitField(map_bit_field, kInterpreterAccumulatorRegister);
+      __ LoadMap(map_bit_field, kInterpreterAccumulatorRegister);
+      __ LoadWord8Field(map_bit_field, map_bit_field, Map::kBitFieldOffset);
       __ TestAndBranch(map_bit_field, Map::Bits1::IsUndetectableBit::kMask,
                        Condition::kZero, &not_undetectable, Label::kNear);
 
@@ -1659,7 +1673,8 @@ void BaselineCompiler::VisitTestTypeOf() {
 
       // Check if the map is callable but not undetectable.
       Register map_bit_field = kInterpreterAccumulatorRegister;
-      __ LoadMapBitField(map_bit_field, kInterpreterAccumulatorRegister);
+      __ LoadMap(map_bit_field, kInterpreterAccumulatorRegister);
+      __ LoadWord8Field(map_bit_field, map_bit_field, Map::kBitFieldOffset);
       __ TestAndBranch(map_bit_field, Map::Bits1::IsCallableBit::kMask,
                        Condition::kZero, &not_callable, Label::kNear);
       __ TestAndBranch(map_bit_field, Map::Bits1::IsUndetectableBit::kMask,
@@ -1746,11 +1761,11 @@ void BaselineCompiler::VisitCreateRegExpLiteral() {
       FeedbackVector(),         // feedback vector
       IndexAsTagged(1),         // slot
       Constant<HeapObject>(0),  // pattern
-      FlagAsSmi(2));            // flags
+      Flag16AsSmi(2));          // flags
 }
 
 void BaselineCompiler::VisitCreateArrayLiteral() {
-  uint32_t flags = Flag(2);
+  uint32_t flags = Flag8(2);
   int32_t flags_raw = static_cast<int32_t>(
       interpreter::CreateArrayLiteralFlags::FlagsBits::decode(flags));
   if (flags &
@@ -1780,7 +1795,7 @@ void BaselineCompiler::VisitCreateEmptyArrayLiteral() {
 }
 
 void BaselineCompiler::VisitCreateObjectLiteral() {
-  uint32_t flags = Flag(2);
+  uint32_t flags = Flag8(2);
   int32_t flags_raw = static_cast<int32_t>(
       interpreter::CreateObjectLiteralFlags::FlagsBits::decode(flags));
   if (flags &
@@ -1804,7 +1819,7 @@ void BaselineCompiler::VisitCreateEmptyObjectLiteral() {
 }
 
 void BaselineCompiler::VisitCloneObject() {
-  uint32_t flags = Flag(1);
+  uint32_t flags = Flag8(1);
   int32_t raw_flags =
       interpreter::CreateObjectLiteralFlags::FlagsBits::decode(flags);
   CallBuiltin<Builtin::kCloneObjectICBaseline>(
@@ -1829,7 +1844,7 @@ void BaselineCompiler::VisitCreateClosure() {
   LoadClosureFeedbackArray(feedback_cell);
   __ LoadFixedArrayElement(feedback_cell, feedback_cell, Index(1));
 
-  uint32_t flags = Flag(2);
+  uint32_t flags = Flag8(2);
   if (interpreter::CreateClosureFlags::FastNewClosureBit::decode(flags)) {
     CallBuiltin<Builtin::kFastNewClosureBaseline>(
         Constant<SharedFunctionInfo>(0), feedback_cell);
@@ -1896,7 +1911,7 @@ void BaselineCompiler::VisitCreateRestParameter() {
 
 void BaselineCompiler::VisitJumpLoop() {
   Label osr_armed, osr_not_armed;
-  using D = BaselineOnStackReplacementDescriptor;
+  using D = OnStackReplacementDescriptor;
   Register feedback_vector = Register::no_reg();
   Register osr_state = Register::no_reg();
   const int loop_depth = iterator().GetImmediateOperand(1);
@@ -2042,7 +2057,8 @@ void BaselineCompiler::VisitJumpIfJSReceiver() {
   __ JumpIfSmi(kInterpreterAccumulatorRegister, &is_smi, Label::kNear);
 
   __ JumpIfObjectType(Condition::kLessThan, kInterpreterAccumulatorRegister,
-                      FIRST_JS_RECEIVER_TYPE, &scratch_scope, &dont_jump);
+                      FIRST_JS_RECEIVER_TYPE, scratch_scope.AcquireScratch(),
+                      &dont_jump);
   UpdateInterruptBudgetAndDoInterpreterJump();
 
   __ Bind(&is_smi);
@@ -2179,7 +2195,8 @@ void BaselineCompiler::VisitThrowIfNotSuperConstructor() {
   Register reg = scratch_scope.AcquireScratch();
   LoadRegister(reg, 0);
   Register map_bit_field = scratch_scope.AcquireScratch();
-  __ LoadMapBitField(map_bit_field, reg);
+  __ LoadMap(map_bit_field, reg);
+  __ LoadWord8Field(map_bit_field, map_bit_field, Map::kBitFieldOffset);
   __ TestAndBranch(map_bit_field, Map::Bits1::IsConstructorBit::kMask,
                    Condition::kNotZero, &done, Label::kNear);
 

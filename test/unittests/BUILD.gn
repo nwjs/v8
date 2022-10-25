@@ -5,18 +5,24 @@
 import("../../gni/v8.gni")
 
 if (is_fuchsia) {
-  import("//build/config/fuchsia/rules.gni")
+  import("//build/config/fuchsia/generate_runner_scripts.gni")
+  import("//third_party/fuchsia-sdk/sdk/build/component.gni")
+  import("//third_party/fuchsia-sdk/sdk/build/package.gni")
 
-  cr_fuchsia_package("v8_unittests_pkg") {
+  fuchsia_component("v8_unittests_component") {
     testonly = true
-    binary = ":unittests"
-    manifest = "../../gni/v8.cmx"
-    package_name_override = "v8_unittests"
+    data_deps = [ ":unittests" ]
+    manifest = "v8_unittests.cml"
+  }
+
+  fuchsia_package("v8_unittests_pkg") {
+    testonly = true
+    package_name = "v8_unittests"
+    deps = [ ":v8_unittests_component" ]
   }
 
   fuchsia_test_runner("v8_unittests_fuchsia") {
     testonly = true
-    use_cfv2 = false
     package = ":v8_unittests_pkg"
     package_name = "v8_unittests"
   }
@@ -186,6 +192,7 @@ v8_executable("unittests") {
   }
 
   deps = [
+    ":inspector_unittests_sources",
     ":unittests_sources",
     ":v8_heap_base_unittests_sources",
     "../..:v8_for_testing",
@@ -219,9 +226,15 @@ v8_source_set("unittests_sources") {
   testonly = true
 
   sources = [
-    "../../test/common/assembler-tester.h",
     "../../testing/gmock-support.h",
     "../../testing/gtest-support.h",
+    "../common/assembler-tester.h",
+    "../common/c-signature.h",
+    "../common/call-tester.h",
+    "../common/code-assembler-tester.h",
+    "../common/node-observer-tester.h",
+    "../common/value-helper.cc",
+    "../common/value-helper.h",
     "api/access-check-unittest.cc",
     "api/accessor-unittest.cc",
     "api/api-icu-unittest.cc",
@@ -288,6 +301,9 @@ v8_source_set("unittests_sources") {
     "compiler/branch-elimination-unittest.cc",
     "compiler/bytecode-analysis-unittest.cc",
     "compiler/checkpoint-elimination-unittest.cc",
+    "compiler/codegen-tester.cc",
+    "compiler/codegen-tester.h",
+    "compiler/codegen-unittest.cc",
     "compiler/common-operator-reducer-unittest.cc",
     "compiler/common-operator-unittest.cc",
     "compiler/compiler-test-utils.h",
@@ -301,6 +317,8 @@ v8_source_set("unittests_sources") {
     "compiler/diamond-unittest.cc",
     "compiler/effect-control-linearizer-unittest.cc",
     "compiler/frame-unittest.cc",
+    "compiler/function-tester.cc",
+    "compiler/function-tester.h",
     "compiler/graph-reducer-unittest.cc",
     "compiler/graph-reducer-unittest.h",
     "compiler/graph-trimmer-unittest.cc",
@@ -330,12 +348,20 @@ v8_source_set("unittests_sources") {
     "compiler/regalloc/mid-tier-register-allocator-unittest.cc",
     "compiler/regalloc/move-optimizer-unittest.cc",
     "compiler/regalloc/register-allocator-unittest.cc",
+    "compiler/run-deopt-unittest.cc",
+    "compiler/run-jsbranches-unittest.cc",
+    "compiler/run-jscalls-unittest.cc",
+    "compiler/run-jsexceptions-unittest.cc",
+    "compiler/run-jsobjects-unittest.cc",
+    "compiler/run-jsops-unittest.cc",
+    "compiler/run-tail-calls-unittest.cc",
     "compiler/schedule-unittest.cc",
     "compiler/scheduler-rpo-unittest.cc",
     "compiler/scheduler-unittest.cc",
     "compiler/simplified-lowering-unittest.cc",
     "compiler/simplified-operator-reducer-unittest.cc",
     "compiler/simplified-operator-unittest.cc",
+    "compiler/sloppy-equality-unittest.cc",
     "compiler/state-values-utils-unittest.cc",
     "compiler/typed-optimization-unittest.cc",
     "compiler/typer-unittest.cc",
@@ -371,6 +397,7 @@ v8_source_set("unittests_sources") {
     "heap/embedder-tracing-unittest.cc",
     "heap/gc-idle-time-handler-unittest.cc",
     "heap/gc-tracer-unittest.cc",
+    "heap/global-handles-unittest.cc",
     "heap/global-safepoint-unittest.cc",
     "heap/heap-controller-unittest.cc",
     "heap/heap-unittest.cc",
@@ -391,6 +418,7 @@ v8_source_set("unittests_sources") {
     "heap/persistent-handles-unittest.cc",
     "heap/progressbar-unittest.cc",
     "heap/safepoint-unittest.cc",
+    "heap/shared-heap-unittest.cc",
     "heap/slot-set-unittest.cc",
     "heap/spaces-unittest.cc",
     "heap/unmapper-unittest.cc",
@@ -445,6 +473,7 @@ v8_source_set("unittests_sources") {
     "objects/concurrent-transition-array-unittest.cc",
     "objects/dictionary-unittest.cc",
     "objects/elements-kind-unittest.cc",
+    "objects/feedback-vector-unittest.cc",
     "objects/global-object-unittest.cc",
     "objects/hashcode-unittest.cc",
     "objects/intl-unittest.cc",
@@ -457,13 +486,18 @@ v8_source_set("unittests_sources") {
     "objects/symbols-unittest.cc",
     "objects/value-serializer-unittest.cc",
     "objects/weakarraylist-unittest.cc",
+    "objects/weakmaps-unittest.cc",
     "objects/weaksets-unittest.cc",
     "parser/ast-value-unittest.cc",
     "parser/decls-unittest.cc",
     "parser/parse-decision-unittest.cc",
+    "parser/parsing-unittest.cc",
     "parser/preparser-unittest.cc",
     "parser/scanner-streams-unittest.cc",
     "parser/scanner-unittest.cc",
+    "parser/scope-test-helper.h",
+    "parser/unicode-helpers.cc",
+    "parser/unicode-helpers.h",
     "profiler/circular-queue-unittest.cc",
     "profiler/strings-storage-unittest.cc",
     "regexp/regexp-unittest.cc",
@@ -477,6 +511,7 @@ v8_source_set("unittests_sources") {
     "strings/unicode-unittest.cc",
     "tasks/background-compile-task-unittest.cc",
     "tasks/cancelable-tasks-unittest.cc",
+    "temporal/temporal-parser-unittest.cc",
     "test-helpers.cc",
     "test-helpers.h",
     "test-utils.cc",
@@ -563,6 +598,7 @@ v8_source_set("unittests_sources") {
   } else if (v8_current_cpu == "arm64") {
     sources += [
       "assembler/disasm-arm64-unittest.cc",
+      "assembler/macro-assembler-arm64-unittest.cc",
       "assembler/turbo-assembler-arm64-unittest.cc",
       "codegen/pointer-auth-arm64-unittest.cc",
       "compiler/arm64/instruction-selector-arm64-unittest.cc",
@@ -572,11 +608,6 @@ v8_source_set("unittests_sources") {
       "assembler/disasm-ia32-unittest.cc",
       "assembler/turbo-assembler-ia32-unittest.cc",
       "compiler/ia32/instruction-selector-ia32-unittest.cc",
-    ]
-  } else if (v8_current_cpu == "mips" || v8_current_cpu == "mipsel") {
-    sources += [
-      "assembler/turbo-assembler-mips-unittest.cc",
-      "compiler/mips/instruction-selector-mips-unittest.cc",
     ]
   } else if (v8_current_cpu == "mips64" || v8_current_cpu == "mips64el") {
     sources += [
@@ -598,6 +629,7 @@ v8_source_set("unittests_sources") {
     ]
   } else if (v8_current_cpu == "x64") {
     sources += [
+      "assembler/assembler-x64-unittest.cc",
       "assembler/disasm-x64-unittest.cc",
       "assembler/macro-assembler-x64-unittest.cc",
       "assembler/turbo-assembler-x64-unittest.cc",
@@ -682,6 +714,24 @@ v8_source_set("unittests_sources") {
 
     sources += [ "avoid-windows-h-includes.cc" ]
   }
+}
+
+v8_source_set("inspector_unittests_sources") {
+  testonly = true
+
+  sources = [ "inspector/inspector-unittest.cc" ]
+
+  configs = [
+    "../..:external_config",
+    "../..:internal_config_base",
+    ":gcc_warnings_not_errors",
+  ]
+
+  deps = [
+    "../..:v8_for_testing",
+    "//testing/gmock",
+    "//testing/gtest",
+  ]
 }
 
 v8_executable("generate-bytecode-expectations") {

@@ -168,21 +168,6 @@ enum CWasmEntryParameters {
 V8_EXPORT_PRIVATE Handle<CodeT> CompileCWasmEntry(
     Isolate*, const wasm::FunctionSig*, const wasm::WasmModule* module);
 
-class JSWasmCallData {
- public:
-  explicit JSWasmCallData(const wasm::FunctionSig* wasm_signature);
-
-  bool arg_needs_conversion(size_t index) const {
-    DCHECK_LT(index, arg_needs_conversion_.size());
-    return arg_needs_conversion_[index];
-  }
-  bool result_needs_conversion() const { return result_needs_conversion_; }
-
- private:
-  bool result_needs_conversion_;
-  std::vector<bool> arg_needs_conversion_;
-};
-
 // Values from the instance object are cached between Wasm-level function calls.
 // This struct allows the SSA environment handling this cache to be defined
 // and manipulated in wasm-compiler.{h,cc} instead of inside the Wasm decoder.
@@ -531,9 +516,9 @@ class WasmGraphBuilder {
   void BrOnI31(Node* object, Node* rtt, WasmTypeCheckConfig config,
                Node** match_control, Node** match_effect,
                Node** no_match_control, Node** no_match_effect);
-  Node* StringNewWtf8(uint32_t memory, wasm::StringRefWtf8Policy policy,
+  Node* StringNewWtf8(uint32_t memory, unibrow::Utf8Variant variant,
                       Node* offset, Node* size);
-  Node* StringNewWtf8Array(wasm::StringRefWtf8Policy policy, Node* array,
+  Node* StringNewWtf8Array(unibrow::Utf8Variant variant, Node* array,
                            Node* start, Node* end);
   Node* StringNewWtf16(uint32_t memory, Node* offset, Node* size);
   Node* StringNewWtf16Array(Node* array, Node* start, Node* end);
@@ -544,10 +529,10 @@ class WasmGraphBuilder {
                           wasm::WasmCodePosition position);
   Node* StringMeasureWtf16(Node* string, CheckForNull null_check,
                            wasm::WasmCodePosition position);
-  Node* StringEncodeWtf8(uint32_t memory, wasm::StringRefWtf8Policy policy,
+  Node* StringEncodeWtf8(uint32_t memory, unibrow::Utf8Variant variant,
                          Node* string, CheckForNull null_check, Node* offset,
                          wasm::WasmCodePosition position);
-  Node* StringEncodeWtf8Array(wasm::StringRefWtf8Policy policy, Node* string,
+  Node* StringEncodeWtf8Array(unibrow::Utf8Variant variant, Node* string,
                               CheckForNull string_null_check, Node* array,
                               CheckForNull array_null_check, Node* start,
                               wasm::WasmCodePosition position);
@@ -568,7 +553,7 @@ class WasmGraphBuilder {
                      wasm::WasmCodePosition position);
   Node* StringViewWtf8Advance(Node* view, CheckForNull null_check, Node* pos,
                               Node* bytes, wasm::WasmCodePosition position);
-  void StringViewWtf8Encode(uint32_t memory, wasm::StringRefWtf8Policy policy,
+  void StringViewWtf8Encode(uint32_t memory, unibrow::Utf8Variant variant,
                             Node* view, CheckForNull null_check, Node* addr,
                             Node* pos, Node* bytes, Node** next_pos,
                             Node** bytes_written,
@@ -883,8 +868,7 @@ V8_EXPORT_PRIVATE void BuildInlinedJSToWasmWrapper(
     Zone* zone, MachineGraph* mcgraph, const wasm::FunctionSig* signature,
     const wasm::WasmModule* module, Isolate* isolate,
     compiler::SourcePositionTable* spt, StubCallMode stub_mode,
-    wasm::WasmFeatures features, const JSWasmCallData* js_wasm_call_data,
-    Node* frame_state);
+    wasm::WasmFeatures features, Node* frame_state);
 
 V8_EXPORT_PRIVATE CallDescriptor* GetWasmCallDescriptor(
     Zone* zone, const wasm::FunctionSig* signature,

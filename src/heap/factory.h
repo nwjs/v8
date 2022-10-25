@@ -623,7 +623,8 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   Handle<WasmTypeInfo> NewWasmTypeInfo(Address type_address,
                                        Handle<Map> opt_parent,
                                        int instance_size_bytes,
-                                       Handle<WasmInstanceObject> instance);
+                                       Handle<WasmInstanceObject> instance,
+                                       uint32_t type_index);
   Handle<WasmInternalFunction> NewWasmInternalFunction(Address opt_call_target,
                                                        Handle<HeapObject> ref,
                                                        Handle<Map> rtt);
@@ -634,7 +635,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   Handle<WasmExportedFunctionData> NewWasmExportedFunctionData(
       Handle<CodeT> export_wrapper, Handle<WasmInstanceObject> instance,
       Address call_target, Handle<Object> ref, int func_index,
-      Address sig_address, int wrapper_budget, Handle<Map> rtt,
+      const wasm::FunctionSig* sig, int wrapper_budget, Handle<Map> rtt,
       wasm::Promise promise);
   Handle<WasmApiFunctionRef> NewWasmApiFunctionRef(
       Handle<JSReceiver> callable, wasm::Suspend suspend,
@@ -869,6 +870,15 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   HeapObject NewForTest(Handle<Map> map, AllocationType allocation) {
     return New(map, allocation);
   }
+
+  Handle<JSSharedStruct> NewJSSharedStruct(Handle<JSFunction> constructor);
+
+  Handle<JSSharedArray> NewJSSharedArray(Handle<JSFunction> constructor,
+                                         int length);
+
+  Handle<JSAtomicsMutex> NewJSAtomicsMutex();
+
+  Handle<JSAtomicsCondition> NewJSAtomicsCondition();
 
   // Helper class for creating JSFunction objects.
   class V8_EXPORT_PRIVATE JSFunctionBuilder final {

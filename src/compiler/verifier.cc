@@ -968,6 +968,8 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
     case IrOpcode::kSpeculativeBigIntAdd:
     case IrOpcode::kSpeculativeBigIntSubtract:
     case IrOpcode::kSpeculativeBigIntMultiply:
+    case IrOpcode::kSpeculativeBigIntDivide:
+    case IrOpcode::kSpeculativeBigIntBitwiseAnd:
       CheckTypeIs(node, Type::BigInt());
       break;
     case IrOpcode::kSpeculativeBigIntNegate:
@@ -981,6 +983,8 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
     case IrOpcode::kBigIntAdd:
     case IrOpcode::kBigIntSubtract:
     case IrOpcode::kBigIntMultiply:
+    case IrOpcode::kBigIntDivide:
+    case IrOpcode::kBigIntBitwiseAnd:
       CheckValueInputIs(node, 0, Type::BigInt());
       CheckValueInputIs(node, 1, Type::BigInt());
       CheckTypeIs(node, Type::BigInt());
@@ -1274,9 +1278,6 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
       CheckValueInputIs(node, 0, TypeCache::Get()->kStringLengthType);
       CheckValueInputIs(node, 1, Type::String());
       CheckValueInputIs(node, 2, Type::String());
-      CheckTypeIs(node, Type::String());
-      break;
-    case IrOpcode::kDelayedStringConstant:
       CheckTypeIs(node, Type::String());
       break;
     case IrOpcode::kAllocate:
@@ -1663,6 +1664,7 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
     case IrOpcode::kIsNotNull:
     case IrOpcode::kAssertNotNull:
     case IrOpcode::kWasmExternInternalize:
+    case IrOpcode::kWasmExternExternalize:
       // TODO(manoskouk): What are the constraints here?
       break;
 #endif  // V8_ENABLE_WEBASSEMBLY

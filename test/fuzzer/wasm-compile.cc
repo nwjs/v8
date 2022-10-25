@@ -651,7 +651,7 @@ class WasmGenerator {
         builder_->EmitByte(0);  // Table index.
       } else {
         GenerateRef(HeapType(sig_index), data);
-        builder_->Emit(kExprReturnCallRef);
+        builder_->EmitWithU32V(kExprReturnCallRef, sig_index);
       }
       return;
     } else {
@@ -666,7 +666,7 @@ class WasmGenerator {
         builder_->EmitByte(0);  // Table index.
       } else {
         GenerateRef(HeapType(sig_index), data);
-        builder_->Emit(kExprCallRef);
+        builder_->EmitWithU32V(kExprCallRef, sig_index);
       }
     }
     if (sig->return_count() == 0 && wanted_kind != kWasmVoid) {
@@ -1051,7 +1051,6 @@ class WasmGenerator {
       DCHECK(builder_->builder()->IsArrayType(array_index));
       GenerateRef(HeapType(array_index), data);
       builder_->EmitWithPrefix(kExprArrayLen);
-      builder_->EmitU32V(array_index);
     } else {
       Generate(kWasmI32, data);
     }
@@ -2410,7 +2409,7 @@ WasmInitExpr GenerateInitExpr(Zone* zone, WasmModuleBuilder* builder,
             elements->push_back(GenerateInitExpr(
                 zone, builder, builder->GetArrayType(index)->element_type(),
                 num_struct_and_array_types));
-            return WasmInitExpr::ArrayNewFixedStatic(index, elements);
+            return WasmInitExpr::ArrayNewFixed(index, elements);
           }
           if (builder->IsSignature(index)) {
             // Transform from signature index to function index.

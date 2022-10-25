@@ -23,6 +23,9 @@
 #include "src/heap/heap-inl.h"  // For ToBoolean. TODO(jkummerow): Drop.
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/ic/stub-cache.h"
+#ifdef V8_ENABLE_MAGLEV
+#include "src/maglev/maglev-concurrent-dispatcher.h"
+#endif  // V8_ENABLE_MAGLEV
 #include "src/objects/js-atomics-synchronization-inl.h"
 #include "src/objects/js-function-inl.h"
 #include "src/objects/js-regexp-inl.h"
@@ -492,6 +495,13 @@ RUNTIME_FUNCTION(Runtime_IsTurbofanEnabled) {
   return isolate->heap()->ToBoolean(FLAG_turbofan);
 }
 
+RUNTIME_FUNCTION(Runtime_CurrentFrameIsTurbofan) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(args.length(), 0);
+  JavaScriptFrameIterator it(isolate);
+  return isolate->heap()->ToBoolean(it.frame()->is_turbofan());
+}
+
 #ifdef V8_ENABLE_MAGLEV
 RUNTIME_FUNCTION(Runtime_OptimizeMaglevOnNextCall) {
   HandleScope scope(isolate);
@@ -587,6 +597,13 @@ void FinalizeOptimization(Isolate* isolate) {
   isolate->optimizing_compile_dispatcher()->AwaitCompileTasks();
   isolate->optimizing_compile_dispatcher()->InstallOptimizedFunctions();
   isolate->optimizing_compile_dispatcher()->set_finalize(true);
+
+#if V8_ENABLE_MAGLEV
+  if (isolate->maglev_concurrent_dispatcher()->is_enabled()) {
+    isolate->maglev_concurrent_dispatcher()->AwaitCompileJobs();
+    isolate->maglev_concurrent_dispatcher()->FinalizeFinishedJobs();
+  }
+#endif  // V8_ENABLE_MAGLEV
 }
 
 BytecodeOffset OffsetOfNextJumpLoop(Isolate* isolate, UnoptimizedFrame* frame) {
@@ -704,8 +721,7 @@ RUNTIME_FUNCTION(Runtime_OptimizeOsr) {
 
     // Queue the job.
     auto unused_result = Compiler::CompileOptimizedOSR(
-        isolate, function, osr_offset, UnoptimizedFrame::cast(it.frame()),
-        ConcurrencyMode::kConcurrent);
+        isolate, function, osr_offset, ConcurrencyMode::kConcurrent);
     USE(unused_result);
 
     // Finalize again to finish the queued job. The next call into
@@ -873,6 +889,11 @@ RUNTIME_FUNCTION(Runtime_WaitForBackgroundOptimization) {
   DCHECK_EQ(0, args.length());
   if (isolate->concurrent_recompilation_enabled()) {
     isolate->optimizing_compile_dispatcher()->AwaitCompileTasks();
+#if V8_ENABLE_MAGLEV
+    if (isolate->maglev_concurrent_dispatcher()->is_enabled()) {
+      isolate->maglev_concurrent_dispatcher()->AwaitCompileJobs();
+    }
+#endif  // V8_ENABLE_MAGLEV
   }
   return ReadOnlyRoots(isolate).undefined_value();
 }
@@ -931,7 +952,7 @@ RUNTIME_FUNCTION(Runtime_ClearFunctionFeedback) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
   Handle<JSFunction> function = args.at<JSFunction>(0);
-  function->ClearTypeFeedbackInfo();
+  function->ClearAllTypeFeedbackInfoForTesting();
   return ReadOnlyRoots(isolate).undefined_value();
 }
 

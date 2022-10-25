@@ -112,8 +112,6 @@ class JSAtomicsMutex
   DECL_PRINTER(JSAtomicsMutex)
   EXPORT_DECL_VERIFIER(JSAtomicsMutex)
 
-  V8_EXPORT_PRIVATE static Handle<JSAtomicsMutex> Create(Isolate* isolate);
-
   // Lock the mutex, blocking if it's currently owned by another thread.
   static inline void Lock(Isolate* requester, Handle<JSAtomicsMutex> mutex);
 
@@ -127,6 +125,7 @@ class JSAtomicsMutex
   TQ_OBJECT_CONSTRUCTORS(JSAtomicsMutex)
 
  private:
+  friend class Factory;
   friend class detail::WaiterQueueNode;
 
   // There are 2 lock bits: whether the lock itself is locked, and whether the
@@ -146,8 +145,9 @@ class JSAtomicsMutex
 
   inline std::atomic<int32_t>* AtomicOwnerThreadIdPtr();
 
-  bool TryLockExplicit(std::atomic<StateT>* state, StateT& expected);
-  bool TryLockWaiterQueueExplicit(std::atomic<StateT>* state, StateT& expected);
+  static bool TryLockExplicit(std::atomic<StateT>* state, StateT& expected);
+  static bool TryLockWaiterQueueExplicit(std::atomic<StateT>* state,
+                                         StateT& expected);
 
   V8_EXPORT_PRIVATE static void LockSlowPath(Isolate* requester,
                                              Handle<JSAtomicsMutex> mutex,
@@ -181,8 +181,6 @@ class JSAtomicsCondition
   DECL_PRINTER(JSAtomicsCondition)
   EXPORT_DECL_VERIFIER(JSAtomicsCondition)
 
-  V8_EXPORT_PRIVATE static Handle<JSAtomicsCondition> Create(Isolate* isolate);
-
   V8_EXPORT_PRIVATE static bool WaitFor(
       Isolate* requester, Handle<JSAtomicsCondition> cv,
       Handle<JSAtomicsMutex> mutex, base::Optional<base::TimeDelta> timeout);
@@ -197,6 +195,7 @@ class JSAtomicsCondition
   TQ_OBJECT_CONSTRUCTORS(JSAtomicsCondition)
 
  private:
+  friend class Factory;
   friend class detail::WaiterQueueNode;
 
   // There is 1 lock bit: whether the waiter queue is locked.
@@ -207,7 +206,14 @@ class JSAtomicsCondition
   static constexpr StateT kLockBitsMask = (1 << kLockBitsSize) - 1;
   static constexpr StateT kWaiterQueueHeadMask = ~kLockBitsMask;
 
-  bool TryLockWaiterQueueExplicit(std::atomic<StateT>* state, StateT& expected);
+  static bool TryLockWaiterQueueExplicit(std::atomic<StateT>* state,
+                                         StateT& expected);
+
+  using DequeueAction =
+      std::function<detail::WaiterQueueNode*(detail::WaiterQueueNode**)>;
+  static detail::WaiterQueueNode* DequeueExplicit(
+      Isolate* requester, std::atomic<StateT>* state,
+      const DequeueAction& dequeue_action);
 };
 
 }  // namespace internal
