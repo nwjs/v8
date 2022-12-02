@@ -88,6 +88,7 @@ class WasmGraphBuildingInterface {
   struct TryInfo : public ZoneObject {
     SsaEnv* catch_env;
     TFNode* exception = nullptr;
+    bool first_catch = true;
 
     bool might_throw() const { return exception != nullptr; }
 
@@ -936,6 +937,10 @@ class WasmGraphBuildingInterface {
 
     TFNode* exception = block->try_info->exception;
     SetEnv(block->try_info->catch_env);
+    if (block->try_info->first_catch) {
+      LoadContextIntoSsa(ssa_env_, decoder);
+      block->try_info->first_catch = false;
+    }
 
     TFNode* if_catch = nullptr;
     TFNode* if_no_catch = nullptr;
@@ -1013,6 +1018,9 @@ class WasmGraphBuildingInterface {
     }
 
     SetEnv(block->try_info->catch_env);
+    if (block->try_info->first_catch) {
+      LoadContextIntoSsa(ssa_env_, decoder);
+    }
   }
 
   void AtomicOp(FullDecoder* decoder, WasmOpcode opcode,
@@ -1226,10 +1234,12 @@ class WasmGraphBuildingInterface {
 
   WasmTypeCheckConfig ComputeWasmTypeCheckConfig(ValueType object_type,
                                                  ValueType rtt_type,
-                                                 const WasmModule* module) {
+                                                 const WasmModule* module,
+                                                 bool null_succeeds) {
     WasmTypeCheckConfig result;
     result.object_can_be_null = object_type.is_nullable();
     DCHECK(object_type.is_object_reference());  // Checked by validation.
+    result.null_succeeds = null_succeeds;
     // In the bottom case, the result is irrelevant.
     result.rtt_depth = rtt_type.is_bottom()
                            ? 0 /* unused */
@@ -1239,16 +1249,24 @@ class WasmGraphBuildingInterface {
   }
 
   void RefTest(FullDecoder* decoder, const Value& object, const Value& rtt,
-               Value* result) {
-    WasmTypeCheckConfig config =
-        ComputeWasmTypeCheckConfig(object.type, rtt.type, decoder->module_);
+               Value* result, bool null_succeeds) {
+    WasmTypeCheckConfig config = ComputeWasmTypeCheckConfig(
+        object.type, rtt.type, decoder->module_, null_succeeds);
     SetAndTypeNode(result, builder_->RefTest(object.node, rtt.node, config));
+  }
+
+  void RefTestAbstract(FullDecoder* decoder, const Value& object,
+                       wasm::HeapType type, Value* result, bool null_succeeds) {
+    SetAndTypeNode(result,
+                   builder_->RefTestAbstract(object.node, type, null_succeeds));
   }
 
   void RefCast(FullDecoder* decoder, const Value& object, const Value& rtt,
                Value* result) {
-    WasmTypeCheckConfig config =
-        ComputeWasmTypeCheckConfig(object.type, rtt.type, decoder->module_);
+    // TODO(mliedtke): Should be a parameter for generic ref.cast instructions.
+    const bool null_succeeds = false;
+    WasmTypeCheckConfig config = ComputeWasmTypeCheckConfig(
+        object.type, rtt.type, decoder->module_, null_succeeds);
     TFNode* cast_node = v8_flags.experimental_wasm_assume_ref_cast_succeeds
                             ? builder_->TypeGuard(object.node, result->type)
                             : builder_->RefCast(object.node, rtt.node, config,
@@ -1262,8 +1280,11 @@ class WasmGraphBuildingInterface {
   void BrOnCastAbs(FullDecoder* decoder, const Value& object, const Value& rtt,
                    Value* forwarding_value, uint32_t br_depth,
                    bool branch_on_match) {
-    WasmTypeCheckConfig config =
-        ComputeWasmTypeCheckConfig(object.type, rtt.type, decoder->module_);
+    // TODO(mliedtke): Should be a parameter for generic br_on_cast
+    // instructions.
+    const bool null_succeeds = false;
+    WasmTypeCheckConfig config = ComputeWasmTypeCheckConfig(
+        object.type, rtt.type, decoder->module_, null_succeeds);
     SsaEnv* branch_env = Split(decoder->zone(), ssa_env_);
     SsaEnv* no_branch_env = Steal(decoder->zone(), ssa_env_);
     no_branch_env->SetNotMerged();
@@ -1294,9 +1315,18 @@ class WasmGraphBuildingInterface {
         decoder, object, rtt, value_on_fallthrough, br_depth, false);
   }
 
-  void RefIsData(FullDecoder* decoder, const Value& object, Value* result) {
+  void RefIsEq(FullDecoder* decoder, const Value& object, Value* result) {
+    bool null_succeeds = false;
     SetAndTypeNode(result,
-                   builder_->RefIsData(object.node, object.type.is_nullable()));
+                   builder_->RefIsEq(object.node, object.type.is_nullable(),
+                                     null_succeeds));
+  }
+
+  void RefIsData(FullDecoder* decoder, const Value& object, Value* result) {
+    bool null_succeeds = false;
+    SetAndTypeNode(result,
+                   builder_->RefIsData(object.node, object.type.is_nullable(),
+                                       null_succeeds));
   }
 
   void RefAsData(FullDecoder* decoder, const Value& object, Value* result) {
@@ -1321,8 +1351,10 @@ class WasmGraphBuildingInterface {
   }
 
   void RefIsArray(FullDecoder* decoder, const Value& object, Value* result) {
-    SetAndTypeNode(
-        result, builder_->RefIsArray(object.node, object.type.is_nullable()));
+    bool null_succeeds = false;
+    SetAndTypeNode(result,
+                   builder_->RefIsArray(object.node, object.type.is_nullable(),
+                                        null_succeeds));
   }
 
   void RefAsArray(FullDecoder* decoder, const Value& object, Value* result) {
@@ -1347,7 +1379,8 @@ class WasmGraphBuildingInterface {
   }
 
   void RefIsI31(FullDecoder* decoder, const Value& object, Value* result) {
-    SetAndTypeNode(result, builder_->RefIsI31(object.node));
+    bool null_succeeds = false;
+    SetAndTypeNode(result, builder_->RefIsI31(object.node, null_succeeds));
   }
 
   void RefAsI31(FullDecoder* decoder, const Value& object, Value* result) {
@@ -1685,7 +1718,6 @@ class WasmGraphBuildingInterface {
 
     TFNode* if_success = nullptr;
     TFNode* if_exception = nullptr;
-    // TODO(manoskouk): Can we assign a wasm type to the exception value?
     if (!builder_->ThrowsException(node, &if_success, &if_exception)) {
       return node;
     }
@@ -2073,7 +2105,6 @@ class WasmGraphBuildingInterface {
         }
       }
       if (exception_value != nullptr) {
-        // TODO(manoskouk): Can we assign a wasm type to the exception value?
         *exception_value = builder_->LoopExitValue(
             *exception_value, MachineRepresentation::kWord32);
       }

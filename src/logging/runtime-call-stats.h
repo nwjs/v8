@@ -278,6 +278,8 @@ class RuntimeCallTimer final {
   V(Uint32Array_New)                                       \
   V(Uint8Array_New)                                        \
   V(Uint8ClampedArray_New)                                 \
+  V(UnboundModuleScript_GetSourceMappingURL)               \
+  V(UnboundModuleScript_GetSourceURL)                      \
   V(UnboundScript_GetColumnNumber)                         \
   V(UnboundScript_GetId)                                   \
   V(UnboundScript_GetLineNumber)                           \
@@ -366,6 +368,7 @@ class RuntimeCallTimer final {
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, Scheduling)                      \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, SelectInstructions)              \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, SimplifiedLowering)              \
+  ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, SimplifyLoops)                   \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, StoreStoreElimination)           \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TraceScheduleAndVerify)          \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, BuildTurboshaft)                 \
