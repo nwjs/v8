@@ -715,7 +715,7 @@ bool DeclarationScope::Analyze(ParseInfo* info) {
   scope->GetScriptScope()->RewriteReplGlobalVariables();
 
 #ifdef DEBUG
-  if (FLAG_print_scopes) {
+  if (v8_flags.print_scopes) {
     PrintF("Global scope:\n");
     scope->Print();
   }
@@ -929,6 +929,7 @@ void Scope::Snapshot::Reparent(DeclarationScope* new_parent) {
   // Move eval calls since Snapshot's creation into new_parent.
   if (outer_scope_->calls_eval_) {
     new_parent->RecordEvalCall();
+    outer_scope_->calls_eval_ = false;
     declaration_scope_->sloppy_eval_can_extend_vars_ = false;
   }
 }
@@ -1754,7 +1755,7 @@ void DeclarationScope::AnalyzePartially(Parser* parser,
   }
 
 #ifdef DEBUG
-  if (FLAG_print_scopes) {
+  if (v8_flags.print_scopes) {
     PrintF("Inner function scope:\n");
     Print();
   }

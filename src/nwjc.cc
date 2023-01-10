@@ -95,24 +95,24 @@ class SnapshotWriter {
 
 int main(int argc, char** argv) {
   // By default, log code create information in the snapshot.
-  i::FLAG_log_code = true;
+  i::v8_flags.log_code = true;
 
   // Omit from the snapshot natives for features that can be turned off
   // at runtime.
-  i::FLAG_harmony_shipping = true;
+  i::v8_flags.harmony_shipping = true;
 
-  i::FLAG_logfile_per_isolate = false;
+  i::v8_flags.logfile_per_isolate = false;
 
   //i::FLAG_serialize_toplevel = true;
-  i::FLAG_lazy = false;
+  i::v8_flags.lazy = false;
 
   // Print the usage if an error occurs when parsing the command line
   // flags or if the help flag is set.
   int result = i::FlagList::SetFlagsFromCommandLine(&argc, argv, true);
-  if (result > 0 || argc != 3 || i::FLAG_help) {
+  if (result > 0 || argc != 3 || i::v8_flags.help) {
     ::printf("Usage: %s [flag] ... jsfile outfile\n", argv[0]);
     i::FlagList::PrintHelp();
-    return !i::FLAG_help;
+    return !i::v8_flags.help;
   }
 
   i::CpuFeatures::Probe(true);
@@ -167,7 +167,7 @@ int main(int argc, char** argv) {
 
     ScriptCompiler::CachedData* cache = NULL;
     i::ScriptDetails script_details(iso->factory()->empty_string(),
-                                 v8::ScriptOriginOptions(false, false, false, i::FLAG_nw_module));
+                                 v8::ScriptOriginOptions(false, false, false, i::v8_flags.nw_module));
     i::MaybeHandle<i::SharedFunctionInfo> maybe_func = i::Compiler::GetSharedFunctionInfoForScript(iso, orig_source,
                                                 script_details,
                                                 v8::ScriptCompiler::kEagerCompile,
