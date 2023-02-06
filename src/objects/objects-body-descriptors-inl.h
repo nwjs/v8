@@ -36,6 +36,7 @@
 #include "src/objects/torque-defined-classes-inl.h"
 #include "src/objects/transitions.h"
 #include "src/objects/turbofan-types-inl.h"
+#include "src/objects/turboshaft-types-inl.h"
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/wasm/wasm-objects-inl.h"
@@ -387,6 +388,8 @@ class JSArrayBuffer::BodyDescriptor final : public BodyDescriptorBase {
     // JSArrayBuffer instances contain raw data that the GC does not know about.
     IteratePointers(obj, kPropertiesOrHashOffset, kEndOfTaggedFieldsOffset, v);
     IterateJSObjectBodyImpl(map, obj, kHeaderSize, object_size, v);
+    v->VisitExternalPointer(map, obj.RawExternalPointerField(kExtensionOffset),
+                            kArrayBufferExtensionTag);
   }
 
   static inline int SizeOf(Map map, HeapObject object) {
@@ -1049,17 +1052,16 @@ class CodeDataContainer::BodyDescriptor final : public BodyDescriptorBase {
  public:
   static bool IsValidSlot(Map map, HeapObject obj, int offset) {
     return offset >= HeapObject::kHeaderSize &&
-           offset <= CodeDataContainer::kPointerFieldsWeakEndOffset;
+           offset <= CodeDataContainer::kPointerFieldsStrongEndOffset;
   }
 
   template <typename ObjectVisitor>
   static inline void IterateBody(Map map, HeapObject obj, int object_size,
                                  ObjectVisitor* v) {
-    IteratePointers(obj, HeapObject::kHeaderSize,
-                    CodeDataContainer::kPointerFieldsStrongEndOffset, v);
-    IterateCustomWeakPointers(
-        obj, CodeDataContainer::kPointerFieldsStrongEndOffset,
-        CodeDataContainer::kPointerFieldsWeakEndOffset, v);
+    // No strong pointers to iterate.
+    static_assert(
+        static_cast<int>(HeapObject::kHeaderSize) ==
+        static_cast<int>(CodeDataContainer::kPointerFieldsStrongEndOffset));
 
     if (V8_EXTERNAL_CODE_SPACE_BOOL) {
       v->VisitCodePointer(obj, obj.RawCodeField(kCodeOffset));

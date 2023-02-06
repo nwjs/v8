@@ -4405,7 +4405,7 @@ void TurboAssembler::CallBuiltin(Builtin builtin) {
       break;
     }
     case BuiltinCallJumpMode::kPCRelative:
-      Call(BuiltinEntry(builtin), RelocInfo::NEAR_BUILTIN_ENTRY);
+      near_call(static_cast<int>(builtin), RelocInfo::NEAR_BUILTIN_ENTRY);
       break;
     case BuiltinCallJumpMode::kIndirect: {
       LoadEntryFromBuiltin(builtin, t6);
@@ -4439,7 +4439,7 @@ void TurboAssembler::TailCallBuiltin(Builtin builtin) {
       break;
     }
     case BuiltinCallJumpMode::kPCRelative:
-      Jump(BuiltinEntry(builtin), RelocInfo::NEAR_BUILTIN_ENTRY);
+      near_jump(static_cast<int>(builtin), RelocInfo::NEAR_BUILTIN_ENTRY);
       break;
     case BuiltinCallJumpMode::kIndirect: {
       LoadEntryFromBuiltin(builtin, t6);
@@ -4475,6 +4475,7 @@ MemOperand TurboAssembler::EntryFromBuiltinAsOperand(Builtin builtin) {
 }
 
 void TurboAssembler::PatchAndJump(Address target) {
+  BlockTrampolinePoolScope block_trampoline_pool(this);
   UseScratchRegisterScope temps(this);
   Register scratch = temps.Acquire();
   auipc(scratch, 0);  // Load PC into scratch
@@ -6170,17 +6171,9 @@ Register GetRegisterThatIsNotOneOf(Register reg1, Register reg2, Register reg3,
 }
 
 void TurboAssembler::ComputeCodeStartAddress(Register dst) {
-  // This push on ra and the pop below together ensure that we restore the
-  // register ra, which is needed while computing the code start address.
-  push(ra);
-
-  auipc(ra, 0);
-  addi(ra, ra, kInstrSize * 2);  // ra = address of li
-  int pc = pc_offset();
-  li(dst, Operand(pc));
-  SubWord(dst, ra, dst);
-
-  pop(ra);  // Restore ra
+  auto pc = -pc_offset();
+  auipc(dst, 0);
+  if(pc != 0) SubWord(dst, dst, pc);
 }
 
 void TurboAssembler::CallForDeoptimization(Builtin target, int, Label* exit,
