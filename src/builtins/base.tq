@@ -229,7 +229,7 @@ type RawPtr generates 'TNode<RawPtrT>' constexpr 'Address';
 type RawPtr<To: type> extends RawPtr;
 type ExternalPointer
     generates 'TNode<ExternalPointerT>' constexpr 'ExternalPointer_t';
-extern class Code extends HeapObject;
+extern class InstructionStream extends HeapObject;
 type BuiltinPtr extends Smi generates 'TNode<BuiltinPtr>';
 
 type Number = Smi|HeapNumber;
@@ -488,6 +488,8 @@ const kFixedDoubleArrayMaxLength:
     constexpr int31 generates 'FixedDoubleArray::kMaxLength';
 const kObjectAlignmentMask: constexpr intptr
     generates 'kObjectAlignmentMask';
+const kObjectAlignment: constexpr intptr
+    generates 'kObjectAlignment';
 const kMinAddedElementsCapacity:
     constexpr int31 generates 'JSObject::kMinAddedElementsCapacity';
 const kMaxFastArrayLength:

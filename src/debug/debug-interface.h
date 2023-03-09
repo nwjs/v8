@@ -316,7 +316,7 @@ V8_EXPORT_PRIVATE void SetDebugDelegate(Isolate* isolate,
                                         DebugDelegate* listener);
 
 #if V8_ENABLE_WEBASSEMBLY
-V8_EXPORT_PRIVATE void TierDownAllModulesPerIsolate(Isolate* isolate);
+V8_EXPORT_PRIVATE void EnterDebuggingForIsolate(Isolate* isolate);
 V8_EXPORT_PRIVATE void LeaveDebuggingForIsolate(Isolate* isolate);
 #endif  // V8_ENABLE_WEBASSEMBLY
 
@@ -678,8 +678,6 @@ AccessorPair* AccessorPair::Cast(v8::Value* value) {
 }
 
 MaybeLocal<Message> GetMessageFromPromise(Local<Promise> promise);
-
-bool isExperimentalRemoveInternalScopesPropertyEnabled();
 
 void RecordAsyncStackTaggingCreateTaskCall(v8::Isolate* isolate);
 

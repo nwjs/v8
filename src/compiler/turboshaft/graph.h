@@ -9,6 +9,7 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <tuple>
 #include <type_traits>
 
 #include "src/base/iterator.h"
@@ -311,6 +312,7 @@ class Block : public RandomAccessStackDominatorNode<Block> {
   }
 
   // Returns the index of {target} in the predecessors of the current Block.
+  // If {target} is not a direct predecessor, returns -1.
   int GetPredecessorIndex(const Block* target) const {
     int pred_count = 0;
     int pred_reverse_index = -1;
@@ -322,7 +324,69 @@ class Block : public RandomAccessStackDominatorNode<Block> {
       }
       pred_count++;
     }
-    DCHECK_NE(pred_reverse_index, -1);
+    if (pred_reverse_index == -1) {
+      return -1;
+    }
+    return pred_count - pred_reverse_index - 1;
+  }
+
+  // Returns the index of {target} in the predecessors of the current Block
+  // and if target is not in the list of predecessors, recursively traverses
+  // the predecessor graph up.
+  int GetAnyPredecessorIndex(const Block* target, Zone* zone) const {
+    int pred_count = 0;
+    int pred_reverse_index = -1;
+    // The tuple contains (predecessor, index_in_successor, successor).
+    ZoneQueue<std::tuple<const Block*, int, const Block*>> to_visit(zone);
+    for (Block* pred = last_predecessor_; pred != nullptr;
+         pred = pred->neighboring_predecessor_) {
+      if (pred == target) {
+        DCHECK_EQ(pred_reverse_index, -1);
+        pred_reverse_index = pred_count;
+      } else {
+        to_visit.push(std::make_tuple(pred, pred_count, this));
+      }
+      pred_count++;
+    }
+    if (pred_reverse_index != -1) {
+      // The target was found in the predecessors list.
+      return pred_count - pred_reverse_index - 1;
+    }
+
+    const Block* current = nullptr;
+    int pred_index = -1;
+    const Block* successor = nullptr;
+    // The target is not a direct predecessor of the current block.
+    while (!to_visit.empty()) {
+      std::tie(current, pred_index, successor) = to_visit.front();
+      to_visit.pop();
+      if (current == target) {
+        DCHECK_EQ(pred_reverse_index, -1);
+        pred_reverse_index = pred_index;
+        break;
+      } else {
+        int pred_count = 0;
+        for (Block* pred = current->last_predecessor_; pred != nullptr;
+             pred = pred->neighboring_predecessor_) {
+          to_visit.push(std::make_tuple(pred, pred_count, current));
+          pred_count++;
+        }
+      }
+    }
+    if (pred_reverse_index == -1) {
+      // Target was not found by the BFS above.
+      return -1;
+    }
+
+    // The target was found in the predecessors list, we need to reconstruct
+    // the predecessors count for the current (found) Block's successor.
+    DCHECK_NOT_NULL(current);
+    DCHECK_NOT_NULL(successor);
+    pred_count = 0;
+    for (Block* pred = successor->last_predecessor_; pred != nullptr;
+         pred = pred->neighboring_predecessor_) {
+      pred_count++;
+    }
     return pred_count - pred_reverse_index - 1;
   }
 
@@ -475,6 +539,14 @@ class Graph {
   }
 
   OpIndex Index(const Operation& op) const { return operations_.Index(op); }
+  BlockIndex BlockOf(OpIndex index) const {
+    auto it = std::upper_bound(
+        bound_blocks_.begin(), bound_blocks_.end(), index,
+        [](OpIndex value, const Block* b) { return value < b->begin_; });
+    DCHECK_NE(it, bound_blocks_.begin());
+    --it;
+    return (*it)->index();
+  }
 
   OpIndex NextIndex(const OpIndex idx) const { return operations_.Next(idx); }
   OpIndex PreviousIndex(const OpIndex idx) const {

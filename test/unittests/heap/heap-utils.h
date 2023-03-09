@@ -97,26 +97,6 @@ class WithHeapInternals : public TMixin, HeapInternalsBase {
   }
 };
 
-START_ALLOW_USE_DEPRECATED()
-
-class V8_NODISCARD TemporaryEmbedderHeapTracerScope {
- public:
-  TemporaryEmbedderHeapTracerScope(v8::Isolate* isolate,
-                                   v8::EmbedderHeapTracer* tracer)
-      : isolate_(isolate) {
-    isolate_->SetEmbedderHeapTracer(tracer);
-  }
-
-  ~TemporaryEmbedderHeapTracerScope() {
-    isolate_->SetEmbedderHeapTracer(nullptr);
-  }
-
- private:
-  v8::Isolate* const isolate_;
-};
-
-END_ALLOW_USE_DEPRECATED()
-
 using TestWithHeapInternals =                  //
     WithHeapInternals<                         //
         WithInternalIsolateMixin<              //
@@ -161,6 +141,8 @@ bool IsNewObjectInCorrectGeneration(v8::Isolate* isolate,
   auto tmp = global.Get(isolate);
   return IsNewObjectInCorrectGeneration(*v8::Utils::OpenHandle(*tmp));
 }
+
+void FinalizeGCIfRunning(Isolate* isolate);
 
 }  // namespace internal
 }  // namespace v8

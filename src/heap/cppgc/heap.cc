@@ -166,9 +166,8 @@ void Heap::FinalizeGarbageCollection(StackState stack_state) {
   DCHECK(!in_no_gc_scope());
   CHECK(!in_disallow_gc_scope());
   config_.stack_state = stack_state;
+  stack()->SetMarkerToCurrentStackPosition();
   in_atomic_pause_ = true;
-
-  stack()->SaveContext();
 
 #if defined(CPPGC_YOUNG_GENERATION)
   // Check if the young generation was enabled. We must enable young generation
@@ -196,8 +195,6 @@ void Heap::FinalizeGarbageCollection(StackState stack_state) {
   DCHECK_EQ(0u, bytes_allocated_in_prefinalizers);
 #endif
   USE(bytes_allocated_in_prefinalizers);
-
-  stack()->ClearContext();
 
 #if defined(CPPGC_YOUNG_GENERATION)
   ResetRememberedSet();

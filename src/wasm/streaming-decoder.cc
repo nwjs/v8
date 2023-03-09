@@ -262,7 +262,7 @@ void AsyncStreamingDecoder::Finish(bool can_use_compiled_module) {
   TRACE_STREAMING("Finish\n");
   // {Finish} cannot be called after {Finish}, {Abort}, {Fail}, or
   // {NotifyCompilationDiscarded}.
-  DCHECK_EQ(processor_ == nullptr, failed_processor_ != nullptr);
+  CHECK_EQ(processor_ == nullptr, failed_processor_ != nullptr);
   if (ok() && deserializing()) {
     // Try to deserialize the module from wire bytes and module bytes.
     if (can_use_compiled_module &&

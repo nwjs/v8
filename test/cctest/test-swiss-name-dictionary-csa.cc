@@ -266,8 +266,7 @@ Handle<Code> CSATestRunner::create_find_entry(Isolate* isolate) {
   // TODO(v8:11330): Remove once CSA implementation has a fallback for
   // non-SSSE3/AVX configurations.
   if (!IsEnabled()) {
-    return FromCodeT(isolate->builtins()->code_handle(Builtin::kIllegal),
-                     isolate);
+    return isolate->builtins()->code_handle(Builtin::kIllegal);
   }
   static_assert(kFindEntryParams == 2);  // (table, key)
   compiler::CodeAssemblerTester asm_tester(isolate,
@@ -342,8 +341,7 @@ Handle<Code> CSATestRunner::create_delete(Isolate* isolate) {
   // TODO(v8:11330): Remove once CSA implementation has a fallback for
   // non-SSSE3/AVX configurations.
   if (!IsEnabled()) {
-    return FromCodeT(isolate->builtins()->code_handle(Builtin::kIllegal),
-                     isolate);
+    return isolate->builtins()->code_handle(Builtin::kIllegal);
   }
   static_assert(kDeleteParams == 2);  // (table, entry)
   compiler::CodeAssemblerTester asm_tester(isolate,
@@ -369,8 +367,7 @@ Handle<Code> CSATestRunner::create_add(Isolate* isolate) {
   // TODO(v8:11330): Remove once CSA implementation has a fallback for
   // non-SSSE3/AVX configurations.
   if (!IsEnabled()) {
-    return FromCodeT(isolate->builtins()->code_handle(Builtin::kIllegal),
-                     isolate);
+    return isolate->builtins()->code_handle(Builtin::kIllegal);
   }
   static_assert(kAddParams == 4);  // (table, key, value, details)
   compiler::CodeAssemblerTester asm_tester(isolate,

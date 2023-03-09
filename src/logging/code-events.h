@@ -88,17 +88,19 @@ class LogEventListener {
   virtual void RegExpCodeCreateEvent(Handle<AbstractCode> code,
                                      Handle<String> source) = 0;
   // Not handlified as this happens during GC. No allocation allowed.
-  virtual void CodeMoveEvent(AbstractCode from, AbstractCode to) = 0;
+  virtual void CodeMoveEvent(InstructionStream from, InstructionStream to) = 0;
+  virtual void BytecodeMoveEvent(BytecodeArray from, BytecodeArray to) = 0;
   virtual void SharedFunctionInfoMoveEvent(Address from, Address to) = 0;
   virtual void NativeContextMoveEvent(Address from, Address to) = 0;
   virtual void CodeMovingGCEvent() = 0;
   virtual void CodeDisableOptEvent(Handle<AbstractCode> code,
                                    Handle<SharedFunctionInfo> shared) = 0;
-  virtual void CodeDeoptEvent(Handle<Code> code, DeoptimizeKind kind,
-                              Address pc, int fp_to_sp_delta) = 0;
+  virtual void CodeDeoptEvent(Handle<InstructionStream> code,
+                              DeoptimizeKind kind, Address pc,
+                              int fp_to_sp_delta) = 0;
   // These events can happen when 1. an assumption made by optimized code fails
   // or 2. a weakly embedded object dies.
-  virtual void CodeDependencyChangeEvent(Handle<Code> code,
+  virtual void CodeDependencyChangeEvent(Handle<InstructionStream> code,
                                          Handle<SharedFunctionInfo> shared,
                                          const char* reason) = 0;
   // Called during GC shortly after any weak references to code objects are
@@ -204,10 +206,16 @@ class Logger {
       listener->RegExpCodeCreateEvent(code, source);
     }
   }
-  void CodeMoveEvent(AbstractCode from, AbstractCode to) {
+  void CodeMoveEvent(InstructionStream from, InstructionStream to) {
     base::MutexGuard guard(&mutex_);
     for (auto listener : listeners_) {
       listener->CodeMoveEvent(from, to);
+    }
+  }
+  void BytecodeMoveEvent(BytecodeArray from, BytecodeArray to) {
+    base::MutexGuard guard(&mutex_);
+    for (auto listener : listeners_) {
+      listener->BytecodeMoveEvent(from, to);
     }
   }
   void SharedFunctionInfoMoveEvent(Address from, Address to) {
@@ -235,14 +243,14 @@ class Logger {
       listener->CodeDisableOptEvent(code, shared);
     }
   }
-  void CodeDeoptEvent(Handle<Code> code, DeoptimizeKind kind, Address pc,
-                      int fp_to_sp_delta) {
+  void CodeDeoptEvent(Handle<InstructionStream> code, DeoptimizeKind kind,
+                      Address pc, int fp_to_sp_delta) {
     base::MutexGuard guard(&mutex_);
     for (auto listener : listeners_) {
       listener->CodeDeoptEvent(code, kind, pc, fp_to_sp_delta);
     }
   }
-  void CodeDependencyChangeEvent(Handle<Code> code,
+  void CodeDependencyChangeEvent(Handle<InstructionStream> code,
                                  Handle<SharedFunctionInfo> sfi,
                                  const char* reason) {
     base::MutexGuard guard(&mutex_);

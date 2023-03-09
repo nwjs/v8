@@ -48,6 +48,9 @@ Handle<WasmModuleObject> CompileReferenceModule(
   native_module =
       GetWasmEngine()->NewNativeModule(isolate, enabled_features, module, 0);
   native_module->SetWireBytes(base::OwnedVector<uint8_t>::Of(wire_bytes));
+  // The module is known to be valid as this point (it was compiled by the
+  // caller before).
+  module->set_all_functions_validated();
 
   // Compile all functions with Liftoff.
   WasmCodeRefScope code_ref_scope;
@@ -125,7 +128,7 @@ void ExecuteAgainstReference(Isolate* isolate,
       compiled_args.begin(), &exception_ref);
   // Reached max steps, do not try to execute the test module as it might
   // never terminate.
-  if (max_steps == 0) return;
+  if (max_steps < 0) return;
   // If there is nondeterminism, we cannot guarantee the behavior of the test
   // module, and in particular it may not terminate.
   if (nondeterminism != 0) return;

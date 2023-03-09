@@ -84,7 +84,7 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
 (function RefTestFuncRef() {
   print(arguments.callee.name);
   let builder = new WasmModuleBuilder();
-  let sigSuper = builder.addType(makeSig([kWasmI32], []));
+  let sigSuper = builder.addType(makeSig([kWasmI32], []), kNoSuperType, false);
   let sigSub = builder.addType(makeSig([kWasmI32], []), sigSuper);
 
   builder.addFunction('fctSuper', sigSuper).addBody([]).exportFunc();
@@ -125,7 +125,7 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
 (function RefCastFuncRef() {
   print(arguments.callee.name);
   let builder = new WasmModuleBuilder();
-  let sigSuper = builder.addType(makeSig([kWasmI32], []));
+  let sigSuper = builder.addType(makeSig([kWasmI32], []), kNoSuperType, false);
   let sigSub = builder.addType(makeSig([kWasmI32], []), sigSuper);
 
   builder.addFunction('fctSuper', sigSuper).addBody([]).exportFunc();
@@ -206,7 +206,7 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
 (function BrOnCastFuncRef() {
   print(arguments.callee.name);
   let builder = new WasmModuleBuilder();
-  let sigSuper = builder.addType(makeSig([kWasmI32], []));
+  let sigSuper = builder.addType(makeSig([kWasmI32], []), kNoSuperType, false);
   let sigSub = builder.addType(makeSig([kWasmI32], []), sigSuper);
 
   builder.addFunction('fctSuper', sigSuper).addBody([]).exportFunc();
@@ -252,6 +252,20 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
       kExprBlock, kFuncRefCode,
         kExprLocalGet, 0,
         kGCPrefix, kExprBrOnCastFail, 0, typeCode,
+        kExprI32Const, 0,
+        kExprReturn,
+      kExprEnd,
+      kExprDrop,
+      kExprI32Const, 1,
+      kExprReturn,
+    ]).exportFunc();
+
+    builder.addFunction(`brOnCastFailNull_${name}`,
+      makeSig([kWasmFuncRef], [kWasmI32]))
+    .addBody([
+      kExprBlock, kWasmRef, kFuncRefCode,
+        kExprLocalGet, 0,
+        kGCPrefix, kExprBrOnCastFailNull, 0, typeCode,
         kExprI32Const, 0,
         kExprReturn,
       kExprEnd,
@@ -325,6 +339,27 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
   assertEquals(1, wasm.brOnCastFail_nullfuncref(wasm.fctSub));
   assertEquals(0, wasm.brOnCastFail_super(wasm.fctSub));
   assertEquals(0, wasm.brOnCastFail_sub(wasm.fctSub));
+
+  // br_on_cast fail
+  assertEquals(0, wasm.brOnCastFailNull_funcref(null));
+  assertEquals(0, wasm.brOnCastFailNull_nullfuncref(null));
+  assertEquals(0, wasm.brOnCastFailNull_super(null));
+  assertEquals(0, wasm.brOnCastFailNull_sub(null));
+
+  assertEquals(0, wasm.brOnCastFailNull_funcref(jsFct));
+  assertEquals(1, wasm.brOnCastFailNull_nullfuncref(jsFct));
+  assertEquals(1, wasm.brOnCastFailNull_super(jsFct));
+  assertEquals(1, wasm.brOnCastFailNull_sub(jsFct));
+
+  assertEquals(0, wasm.brOnCastFailNull_funcref(wasm.fctSuper));
+  assertEquals(1, wasm.brOnCastFailNull_nullfuncref(wasm.fctSuper));
+  assertEquals(0, wasm.brOnCastFailNull_super(wasm.fctSuper));
+  assertEquals(1, wasm.brOnCastFailNull_sub(wasm.fctSuper));
+
+  assertEquals(0, wasm.brOnCastFailNull_funcref(wasm.fctSub));
+  assertEquals(1, wasm.brOnCastFailNull_nullfuncref(wasm.fctSub));
+  assertEquals(0, wasm.brOnCastFailNull_super(wasm.fctSub));
+  assertEquals(0, wasm.brOnCastFailNull_sub(wasm.fctSub));
 })();
 
 (function RefTestExternRef() {
@@ -504,6 +539,35 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
   ])
   .exportFunc();
 
+  builder.addFunction('castFailNullToExternRef',
+    makeSig([kWasmExternRef], [kWasmI32]))
+  .addBody([
+    kExprBlock, kWasmRef, kExternRefCode,
+      kExprLocalGet, 0,
+      kGCPrefix, kExprBrOnCastFailNull, 0, kExternRefCode,
+      kExprI32Const, 0,
+      kExprReturn,
+    kExprEnd,
+    kExprDrop,
+    kExprI32Const, 1,
+    kExprReturn,
+  ])
+  .exportFunc();
+  builder.addFunction('castFailNullToNullExternRef',
+    makeSig([kWasmExternRef], [kWasmI32]))
+  .addBody([
+    kExprBlock, kWasmRef, kExternRefCode,
+      kExprLocalGet, 0,
+      kGCPrefix, kExprBrOnCastFailNull, 0, kNullExternRefCode,
+      kExprI32Const, 0,
+      kExprReturn,
+    kExprEnd,
+    kExprDrop,
+    kExprI32Const, 1,
+    kExprReturn,
+  ])
+  .exportFunc();
+
   let instance = builder.instantiate();
   let wasm = instance.exports;
   let obj = {};
@@ -543,6 +607,18 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
   assertEquals(1, wasm.castFailToNullExternRef(1));
   assertEquals(1, wasm.castFailToNullExternRef(obj));
   assertEquals(1, wasm.castFailToNullExternRef(wasm.castToExternRef));
+
+  assertEquals(0, wasm.castFailNullToExternRef(null));
+  assertEquals(0, wasm.castFailNullToExternRef(undefined));
+  assertEquals(0, wasm.castFailNullToExternRef(1));
+  assertEquals(0, wasm.castFailNullToExternRef(obj));
+  assertEquals(0, wasm.castFailNullToExternRef(wasm.castToExternRef));
+
+  assertEquals(0, wasm.castFailNullToNullExternRef(null));
+  assertEquals(1, wasm.castFailNullToNullExternRef(undefined));
+  assertEquals(1, wasm.castFailNullToNullExternRef(1));
+  assertEquals(1, wasm.castFailNullToNullExternRef(obj));
+  assertEquals(1, wasm.castFailNullToNullExternRef(wasm.castToExternRef));
 })();
 
 
@@ -552,6 +628,11 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
   let structSuper = builder.addStruct([makeField(kWasmI32, true)]);
   let structSub = builder.addStruct([makeField(kWasmI32, true)], structSuper);
   let array = builder.addArray(kWasmI32);
+
+  // Helpers to be able to instantiate a true externref value from wasm.
+  let createExternSig = builder.addType(makeSig([], [kWasmExternRef]));
+  let createExternIdx = builder.addImport('import', 'createExtern', createExternSig);
+  let createExtern = () => undefined;
 
   let types = {
     any: kWasmAnyRef,
@@ -570,6 +651,7 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
     structSuper: [kExprI32Const, 42, kGCPrefix, kExprStructNew, structSuper],
     structSub: [kExprI32Const, 42, kGCPrefix, kExprStructNew, structSub],
     array: [kExprI32Const, 42, kGCPrefix, kExprArrayNewFixed, array, 1],
+    any: [kExprCallFunction, createExternIdx, kGCPrefix, kExprExternInternalize],
   };
 
   // Each Test lists the following:
@@ -581,9 +663,9 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
   let tests = [
     {
       source: 'any',
-      values: ['nullref', 'i31ref', 'structSuper', 'structSub', 'array'],
+      values: ['nullref', 'i31ref', 'structSuper', 'structSub', 'array', 'any'],
       targets: {
-        any: ['i31ref', 'structSuper', 'structSub', 'array'],
+        any: ['i31ref', 'structSuper', 'structSub', 'array', 'any'],
         eq: ['i31ref', 'structSuper', 'structSub', 'array'],
         struct: ['structSuper', 'structSub'],
         anyArray: ['array'],
@@ -745,10 +827,26 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
         kExprReturn,
       ])
       .exportFunc();
+
+      builder.addFunction(`brOnCastFailNull_${test.source}_to_${target}`,
+                          makeSig([wasmRefType(creatorType)], [kWasmI32]))
+      .addBody([
+        kExprBlock, kWasmRef, sourceHeapType,
+          kExprLocalGet, 0,
+          kExprCallRef, ...wasmUnsignedLeb(creatorType),
+          kGCPrefix, kExprBrOnCastFailNull, 0, heapType,
+          kExprI32Const, 0,
+          kExprReturn,
+        kExprEnd,
+        kExprDrop,
+        kExprI32Const, 1,
+        kExprReturn,
+      ])
+      .exportFunc();
     }
   }
 
-  let instance = builder.instantiate();
+  let instance = builder.instantiate({import: {createExtern}});
   let wasm = instance.exports;
 
   for (let test of tests) {
@@ -789,6 +887,9 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
         print(`Test br_on_cast_fail: ${test.source}(${value}) -> ${target}`);
         res = wasm[`brOnCastFail_${test.source}_to_${target}`](create_value);
         assertEquals(!validValues.includes(value) || value == "nullref" ? 1 : 0, res);
+        print(`Test br_on_cast_fail null: ${test.source}(${value}) -> ${target}`);
+        res = wasm[`brOnCastFailNull_${test.source}_to_${target}`](create_value);
+        assertEquals(!validValues.includes(value) && value != "nullref" ? 1 : 0, res);
       }
     }
   }

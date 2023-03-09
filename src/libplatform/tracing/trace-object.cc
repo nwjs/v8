@@ -99,7 +99,7 @@ void TraceObject::Initialize(
   }
 }
 
-TraceObject::~TraceObject() { delete[] parameter_copy_storage_; }
+//TraceObject::~TraceObject() { delete[] parameter_copy_storage_; }
 
 void TraceObject::UpdateDuration(int64_t timestamp, int64_t cpu_timestamp) {
   duration_ = timestamp - ts_;

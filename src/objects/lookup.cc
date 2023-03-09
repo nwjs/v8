@@ -324,6 +324,18 @@ void LookupIterator::InternalUpdateProtector(Isolate* isolate,
         receiver->IsJSPromisePrototype()) {
       Protectors::InvalidatePromiseThenLookupChain(isolate);
     }
+  } else if (*name == roots.replace_symbol()) {
+    if (!Protectors::IsNumberStringPrototypeNoReplaceIntact(isolate)) return;
+    // We need to protect the prototype chains of `Number.prototype` and
+    // `String.prototype`: that `Symbol.replace` is not added as a property on
+    // any object on these prototype chains.
+    // We detect `Number.prototype` and `String.prototype` by checking for a
+    // prototype that is a JSPrimitiveWrapper. This is a safe approximation.
+    // Using JSPrimitiveWrapper as prototype should be sufficiently rare.
+    if (receiver->map().is_prototype_map() &&
+        (receiver->IsJSPrimitiveWrapper() || receiver->IsJSObjectPrototype())) {
+      Protectors::InvalidateNumberStringPrototypeNoReplace(isolate);
+    }
   }
 }
 
@@ -559,6 +571,7 @@ void LookupIterator::PrepareTransitionToDataProperty(
   DCHECK_IMPLIES(receiver->IsJSProxy(isolate_), name()->IsPrivate(isolate_));
   DCHECK_IMPLIES(!receiver.is_identical_to(GetStoreTarget<JSReceiver>()),
                  name()->IsPrivateName());
+  DCHECK(!receiver->IsAlwaysSharedSpaceJSObject());
   if (state_ == TRANSITION) return;
 
   if (!IsElement() && name()->IsPrivate(isolate_)) {
@@ -885,7 +898,7 @@ Handle<Object> LookupIterator::FetchValue(
     DCHECK_EQ(PropertyKind::kData, property_details_.kind());
     Handle<JSObject> holder = GetHolder<JSObject>();
     FieldIndex field_index =
-        FieldIndex::ForDescriptor(holder->map(isolate_), descriptor_number());
+        FieldIndex::ForDetails(holder->map(isolate_), property_details_);
     if (allocation_policy == AllocationPolicy::kAllocationDisallowed &&
         field_index.is_inobject() && field_index.is_double()) {
       return isolate_->factory()->undefined_value();
@@ -913,7 +926,7 @@ bool LookupIterator::CanStayConst(Object value) const {
   }
   Handle<JSObject> holder = GetHolder<JSObject>();
   FieldIndex field_index =
-      FieldIndex::ForDescriptor(holder->map(isolate_), descriptor_number());
+      FieldIndex::ForDetails(holder->map(isolate_), property_details_);
   if (property_details_.representation().IsDouble()) {
     if (!value.IsNumber(isolate_)) return false;
     uint64_t bits;
@@ -983,7 +996,7 @@ FieldIndex LookupIterator::GetFieldIndex() const {
   DCHECK(holder_->HasFastProperties(isolate_));
   DCHECK_EQ(PropertyLocation::kField, property_details_.location());
   DCHECK(!IsElement(*holder_));
-  return FieldIndex::ForDescriptor(holder_->map(isolate_), descriptor_number());
+  return FieldIndex::ForDetails(holder_->map(isolate_), property_details_);
 }
 
 Handle<PropertyCell> LookupIterator::GetPropertyCell() const {
@@ -1015,7 +1028,7 @@ Handle<Object> LookupIterator::GetDataValue(SeqCstAccessTag tag) const {
     DCHECK_EQ(PropertyKind::kData, property_details_.kind());
     Handle<JSSharedStruct> holder = GetHolder<JSSharedStruct>();
     FieldIndex field_index =
-        FieldIndex::ForDescriptor(holder->map(isolate_), descriptor_number());
+        FieldIndex::ForDetails(holder->map(isolate_), property_details_);
     return JSObject::FastPropertyAt(
         isolate_, holder, property_details_.representation(), field_index, tag);
   }

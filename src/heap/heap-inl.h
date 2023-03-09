@@ -508,15 +508,6 @@ AlwaysAllocateScope::~AlwaysAllocateScope() {
   heap_->always_allocate_scope_count_--;
 }
 
-OptionalAlwaysAllocateScope::OptionalAlwaysAllocateScope(Heap* heap)
-    : heap_(heap) {
-  if (heap_) heap_->always_allocate_scope_count_++;
-}
-
-OptionalAlwaysAllocateScope::~OptionalAlwaysAllocateScope() {
-  if (heap_) heap_->always_allocate_scope_count_--;
-}
-
 AlwaysAllocateScopeForTesting::AlwaysAllocateScopeForTesting(Heap* heap)
     : scope_(heap) {}
 
@@ -604,7 +595,8 @@ CodePageCollectionMemoryModificationScope::
 }
 
 #ifdef V8_ENABLE_THIRD_PARTY_HEAP
-CodePageMemoryModificationScope::CodePageMemoryModificationScope(Code code)
+CodePageMemoryModificationScope::CodePageMemoryModificationScope(
+    InstructionStream code)
     :
 #if V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT || V8_HEAP_USE_PKU_JIT_WRITE_PROTECT
       rwx_write_scope_("A part of CodePageMemoryModificationScope"),
@@ -613,7 +605,8 @@ CodePageMemoryModificationScope::CodePageMemoryModificationScope(Code code)
       scope_active_(false) {
 }
 #else
-CodePageMemoryModificationScope::CodePageMemoryModificationScope(Code code)
+CodePageMemoryModificationScope::CodePageMemoryModificationScope(
+    InstructionStream code)
     : CodePageMemoryModificationScope(BasicMemoryChunk::FromHeapObject(code)) {}
 #endif
 

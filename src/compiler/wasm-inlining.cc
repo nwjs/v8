@@ -113,6 +113,9 @@ Reduction WasmInliner::ReduceCall(Node* call) {
 }
 
 bool SmallEnoughToInline(size_t current_graph_size, uint32_t candidate_size) {
+  if (candidate_size > v8_flags.wasm_inlining_max_size) {
+    return false;
+  }
   if (WasmInliner::graph_size_allows_inlining(current_graph_size +
                                               candidate_size)) {
     return true;
@@ -152,20 +155,16 @@ void WasmInliner::Finalize() {
     const wasm::WasmFunction* inlinee =
         &module()->functions[candidate.inlinee_index];
 
-    const wasm::FunctionSig* lowered_sig =
-        mcgraph_->machine()->Is64() ? inlinee->sig
-                                    : GetI32Sig(zone(), inlinee->sig);
-
-    DCHECK_EQ(lowered_sig->parameter_count(),
+    DCHECK_EQ(inlinee->sig->parameter_count(),
               call->op()->ValueInputCount() - 2);
 #if DEBUG
     // The two first parameters in the call are the function and instance, and
     // then come the wasm function parameters.
-    for (uint32_t i = 0; i < lowered_sig->parameter_count(); i++) {
+    for (uint32_t i = 0; i < inlinee->sig->parameter_count(); i++) {
       if (!NodeProperties::IsTyped(call->InputAt(i + 2))) continue;
       wasm::TypeInModule param_type =
           NodeProperties::GetType(call->InputAt(i + 2)).AsWasm();
-      CHECK(IsSubtypeOf(param_type.type, lowered_sig->GetParam(i),
+      CHECK(IsSubtypeOf(param_type.type, inlinee->sig->GetParam(i),
                         param_type.module, module()));
     }
 #endif
@@ -213,7 +212,6 @@ void WasmInliner::Finalize() {
               ? wasm::kInlinedHandledCall
               : wasm::kInlinedNonHandledCall);
       CHECK(result.ok());
-      builder.LowerInt64(WasmGraphBuilder::kCalledFromWasm);
       inlinee_start = graph()->start();
       inlinee_end = graph()->end();
     }
@@ -225,7 +223,7 @@ void WasmInliner::Finalize() {
     function_inlining_count_[candidate.inlinee_index]++;
 
     if (call->opcode() == IrOpcode::kCall) {
-      InlineCall(call, inlinee_start, inlinee_end, lowered_sig,
+      InlineCall(call, inlinee_start, inlinee_end, inlinee->sig,
                  subgraph_min_node_id, &dangling_exceptions);
     } else {
       InlineTailCall(call, inlinee_start, inlinee_end);
@@ -331,6 +329,8 @@ void WasmInliner::InlineCall(Node* call, Node* callee_start, Node* callee_end,
         return_inputs.push_back(graph()->NewNode(common()->Int32Constant(0)));
         if (return_arity == 1) {
           // Tail calls are untyped; we have to type the node here.
+          // TODO(manoskouk): Try to compute a more precise type from the callee
+          // node.
           NodeProperties::SetType(
               input, Type::Wasm({inlinee_sig->GetReturn(0), module()},
                                 graph()->zone()));
@@ -454,12 +454,8 @@ void WasmInliner::InlineCall(Node* call, Node* callee_start, Node* callee_end,
       for (Edge use_edge : call->use_edges()) {
         if (NodeProperties::IsValueEdge(use_edge)) {
           Node* use = use_edge.from();
-          // Other nodes are unreachable leftovers from Int32Lowering.
-          if (use->opcode() == IrOpcode::kProjection) {
-            ReplaceWithValue(use, values[ProjectionIndexOf(use->op())]);
-          } else {
-            DCHECK(mcgraph()->machine()->Is32());
-          }
+          DCHECK_EQ(use->opcode(), IrOpcode::kProjection);
+          ReplaceWithValue(use, values[ProjectionIndexOf(use->op())]);
         }
       }
       // All value inputs are replaced by the above loop, so it is ok to use

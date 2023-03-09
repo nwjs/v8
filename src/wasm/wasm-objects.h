@@ -37,6 +37,7 @@ struct WasmFunction;
 struct WasmGlobal;
 struct WasmModule;
 struct WasmTag;
+using WasmTagSig = FunctionSig;
 class WasmValue;
 class WireBytesRef;
 }  // namespace wasm
@@ -551,10 +552,11 @@ class WasmTagObject
  public:
   // Checks whether the given {sig} has the same parameter types as the
   // serialized signature stored within this tag object.
-  bool MatchesSignature(const wasm::FunctionSig* sig);
+  bool MatchesSignature(uint32_t expected_canonical_type_index);
 
   static Handle<WasmTagObject> New(Isolate* isolate,
                                    const wasm::FunctionSig* sig,
+                                   uint32_t canonical_type_index,
                                    Handle<HeapObject> tag);
 
   TQ_OBJECT_CONSTRUCTORS(WasmTagObject)
@@ -579,6 +581,7 @@ class V8_EXPORT_PRIVATE WasmExceptionPackage : public JSObject {
       Isolate* isolate, Handle<WasmExceptionPackage> exception_package);
 
   // Determines the size of the array holding all encoded exception values.
+  static uint32_t GetEncodedSize(const wasm::WasmTagSig* tag);
   static uint32_t GetEncodedSize(const wasm::WasmTag* tag);
 
   DECL_CAST(WasmExceptionPackage)
@@ -612,7 +615,7 @@ class WasmExportedFunction : public JSFunction {
 
   V8_EXPORT_PRIVATE static Handle<WasmExportedFunction> New(
       Isolate* isolate, Handle<WasmInstanceObject> instance, int func_index,
-      int arity, Handle<CodeT> export_wrapper);
+      int arity, Handle<Code> export_wrapper);
 
   Address GetWasmCallTarget();
 
@@ -777,7 +780,7 @@ class WasmJSFunctionData
     : public TorqueGeneratedWasmJSFunctionData<WasmJSFunctionData,
                                                WasmFunctionData> {
  public:
-  DECL_ACCESSORS(wasm_to_js_wrapper_code, CodeT)
+  DECL_ACCESSORS(wasm_to_js_wrapper_code, Code)
 
   // Dispatched behavior.
   DECL_PRINTER(WasmJSFunctionData)

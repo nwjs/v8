@@ -89,8 +89,10 @@ bool IsMutableMap(InstanceType instance_type, ElementsKind elements_kind) {
 
 bool SetupIsolateDelegate::SetupHeapInternal(Isolate* isolate) {
   auto heap = isolate->heap();
-  if (!isolate->read_only_heap()->init_complete()) {
+  if (!isolate->read_only_heap()->roots_init_complete()) {
     if (!heap->CreateReadOnlyHeapObjects()) return false;
+    isolate->VerifyStaticRoots();
+    isolate->read_only_heap()->OnCreateRootsComplete(isolate);
   }
 #ifdef DEBUG
   auto ro_size = heap->read_only_space()->Size();
@@ -249,8 +251,7 @@ void Heap::FinalizePartialMap(Map map) {
   map.set_dependent_code(DependentCode::empty_dependent_code(roots));
   map.set_raw_transitions(MaybeObject::FromSmi(Smi::zero()));
   map.SetInstanceDescriptors(isolate(), roots.empty_descriptor_array(), 0);
-  map.set_prototype(roots.null_value());
-  map.set_constructor_or_back_pointer(roots.null_value());
+  map.init_prototype_and_constructor_or_back_pointer(roots);
 }
 
 AllocationResult Heap::Allocate(Handle<Map> map,
@@ -495,7 +496,7 @@ bool Heap::CreateInitialReadOnlyMaps() {
     TORQUE_DEFINED_VARSIZE_INSTANCE_TYPE_LIST(TORQUE_ALLOCATE_VARSIZE_MAP);
 #undef TORQUE_ALLOCATE_VARSIZE_MAP
 
-    ALLOCATE_VARSIZE_MAP(CODE_TYPE, code)
+    ALLOCATE_VARSIZE_MAP(INSTRUCTION_STREAM_TYPE, instruction_stream)
 
     ALLOCATE_MAP(CELL_TYPE, Cell::kSize, cell);
     {
@@ -568,8 +569,7 @@ bool Heap::CreateInitialReadOnlyMaps() {
                  source_text_module)
     ALLOCATE_MAP(SYNTHETIC_MODULE_TYPE, SyntheticModule::kSize,
                  synthetic_module)
-    ALLOCATE_MAP(CODE_DATA_CONTAINER_TYPE, CodeDataContainer::kSize,
-                 code_data_container)
+    ALLOCATE_MAP(CODE_TYPE, Code::kSize, code)
 
     IF_WASM(ALLOCATE_MAP, WASM_API_FUNCTION_REF_TYPE, WasmApiFunctionRef::kSize,
             wasm_api_function_ref)
@@ -599,10 +599,11 @@ bool Heap::CreateInitialReadOnlyMaps() {
         ArrayList::SizeFor(ArrayList::kFirstIndex), AllocationType::kReadOnly);
     if (!alloc.To(&obj)) return false;
     obj.set_map_after_allocation(roots.array_list_map(), SKIP_WRITE_BARRIER);
-    ArrayList::cast(obj).set_length(ArrayList::kFirstIndex);
-    ArrayList::cast(obj).SetLength(0);
+    // Unchecked to skip failing checks since required roots are uninitialized.
+    ArrayList::unchecked_cast(obj).set_length(ArrayList::kFirstIndex);
+    ArrayList::unchecked_cast(obj).SetLength(0);
   }
-  set_empty_array_list(ArrayList::cast(obj));
+  set_empty_array_list(ArrayList::unchecked_cast(obj));
 
   {
     AllocationResult alloc =
@@ -735,10 +736,15 @@ void Heap::CreateInitialReadOnlyObjects() {
     if (required == obj.Size()) return;
     CHECK_LT(obj.Size(), required);
     int filler_size = required - obj.Size();
-    auto filler = factory->NewFillerObject(filler_size,
-                                           AllocationAlignment::kTaggedAligned,
-                                           AllocationType::kReadOnly);
-    CHECK_EQ(filler->address() + filler->Size(), obj.address() + required);
+
+    HeapObject filler =
+        allocator()->AllocateRawWith<HeapAllocator::kRetryOrFail>(
+            filler_size, AllocationType::kReadOnly, AllocationOrigin::kRuntime,
+            AllocationAlignment::kTaggedAligned);
+    CreateFillerObjectAt(filler.address(), filler_size,
+                         ClearFreedMemoryMode::kClearFreedMemory);
+
+    CHECK_EQ(filler.address() + filler.Size(), obj.address() + required);
 #endif
   };
 
@@ -856,19 +862,19 @@ void Heap::CreateInitialReadOnlyObjects() {
 
   {
     HandleScope handle_scope(isolate());
-#define PUBLIC_SYMBOL_INIT(_, name, description)                         \
-  Handle<Symbol> name = factory->NewSymbol(AllocationType::kReadOnly);   \
-  Handle<String> name##d = factory->InternalizeUtf8String(#description); \
-  name->set_description(*name##d);                                       \
+#define PUBLIC_SYMBOL_INIT(_, name, description)                           \
+  Handle<Symbol> name = factory->NewSymbol(AllocationType::kReadOnly);     \
+  Handle<String> name##d = factory->InternalizeUtf8String(#description);   \
+  TaggedField<Object>::store(*name, Symbol::kDescriptionOffset, *name##d); \
   roots_table()[RootIndex::k##name] = name->ptr();
 
     PUBLIC_SYMBOL_LIST_GENERATOR(PUBLIC_SYMBOL_INIT, /* not used */)
 
-#define WELL_KNOWN_SYMBOL_INIT(_, name, description)                     \
-  Handle<Symbol> name = factory->NewSymbol(AllocationType::kReadOnly);   \
-  Handle<String> name##d = factory->InternalizeUtf8String(#description); \
-  name->set_is_well_known_symbol(true);                                  \
-  name->set_description(*name##d);                                       \
+#define WELL_KNOWN_SYMBOL_INIT(_, name, description)                       \
+  Handle<Symbol> name = factory->NewSymbol(AllocationType::kReadOnly);     \
+  Handle<String> name##d = factory->InternalizeUtf8String(#description);   \
+  name->set_is_well_known_symbol(true);                                    \
+  TaggedField<Object>::store(*name, Symbol::kDescriptionOffset, *name##d); \
   roots_table()[RootIndex::k##name] = name->ptr();
 
     WELL_KNOWN_SYMBOL_LIST_GENERATOR(WELL_KNOWN_SYMBOL_INIT, /* not used */)
@@ -974,27 +980,9 @@ void Heap::CreateInitialReadOnlyObjects() {
       ScopeInfo::CreateForNativeContext(isolate());
   set_native_scope_info(*native_scope_info);
 
-  // Canonical off-heap trampoline data
-  auto reloc_info = Builtins::GenerateOffHeapTrampolineRelocInfo(isolate_);
-  set_off_heap_trampoline_relocation_info(*reloc_info);
-  StaticRootsEnsureAllocatedSize(*reloc_info, 4 * kTaggedSize);
-
-  if (V8_EXTERNAL_CODE_SPACE_BOOL) {
-    // These roots will not be used.
-    HeapObject no_container = *isolate()->factory()->undefined_value();
-    set_trampoline_trivial_code_data_container(no_container);
-    set_trampoline_promise_rejection_code_data_container(no_container);
-
-  } else {
-    set_trampoline_trivial_code_data_container(
-        *isolate()->factory()->NewCodeDataContainer(0,
-                                                    AllocationType::kReadOnly));
-
-    set_trampoline_promise_rejection_code_data_container(
-        *isolate()->factory()->NewCodeDataContainer(
-            Code::IsPromiseRejectionField::encode(true),
-            AllocationType::kReadOnly));
-  }
+  Handle<ScopeInfo> shadow_realm_scope_info =
+      ScopeInfo::CreateForShadowRealmNativeContext(isolate());
+  set_shadow_realm_scope_info(*shadow_realm_scope_info);
 }
 
 void Heap::CreateInitialMutableObjects() {
@@ -1014,7 +1002,8 @@ void Heap::CreateInitialMutableObjects() {
   set_number_string_cache(*factory->NewFixedArray(
       kInitialNumberStringCacheSize * 2, AllocationType::kOld));
 
-  set_basic_block_profiling_data(roots.empty_array_list());
+  // Unchecked to skip failing checks since required roots are uninitialized.
+  set_basic_block_profiling_data(roots.unchecked_empty_array_list());
 
   // Allocate cache for string split and regexp-multiple.
   set_string_split_cache(*factory->NewFixedArray(
@@ -1075,6 +1064,7 @@ void Heap::CreateInitialMutableObjects() {
   set_set_iterator_protector(*factory->NewProtector());
   set_string_iterator_protector(*factory->NewProtector());
   set_string_length_protector(*factory->NewProtector());
+  set_number_string_prototype_no_replace_protector(*factory->NewProtector());
   set_typed_array_species_protector(*factory->NewProtector());
 
   set_serialized_objects(roots.empty_fixed_array());

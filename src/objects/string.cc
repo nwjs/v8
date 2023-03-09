@@ -620,8 +620,7 @@ bool String::SupportsExternalization() {
   DCHECK_LE(ExternalString::kUncachedSize, this->Size());
 #endif
 
-  Isolate* isolate = GetIsolateFromWritableObject(*this);
-  return !isolate->heap()->IsInGCPostProcessing();
+  return true;
 }
 
 const char* String::PrefixForDebugPrint() const {
@@ -1680,7 +1679,8 @@ uint32_t HashString(String string, size_t start, int length, uint64_t seed,
                         access_guard);
     chars = buffer.get();
   } else {
-    chars = string.GetChars<Char>(cage_base, no_gc, access_guard) + start;
+    chars = string.GetDirectStringChars<Char>(cage_base, no_gc, access_guard) +
+            start;
   }
 
   return StringHasher::HashSequentialString<Char>(chars, length, seed);
@@ -1705,7 +1705,7 @@ uint32_t String::ComputeAndSetRawHash(
   DCHECK_IMPLIES(!v8_flags.shared_string_table, !HasHashCode());
 
   // Store the hash code in the object.
-  uint64_t seed = HashSeed(GetReadOnlyRoots());
+  uint64_t seed = HashSeed(EarlyGetReadOnlyRoots());
   size_t start = 0;
   String string = *this;
   PtrComprCageBase cage_base = GetPtrComprCageBase(string);
@@ -1824,6 +1824,7 @@ Handle<String> SeqString::Truncate(Isolate* isolate, Handle<SeqString> string,
   // We are storing the new length using release store after creating a filler
   // for the left-over space to avoid races with the sweeper thread.
   string->set_length(new_length, kReleaseStore);
+  string->ClearPadding();
 
   return string;
 }
@@ -1847,6 +1848,25 @@ SeqString::DataAndPaddingSizes SeqTwoByteString::GetDataAndPaddingSizes()
   int data_size = SeqString::kHeaderSize + length() * base::kUC16Size;
   int padding_size = SizeFor(length()) - data_size;
   return DataAndPaddingSizes{data_size, padding_size};
+}
+
+#ifdef VERIFY_HEAP
+V8_EXPORT_PRIVATE void SeqString::SeqStringVerify(Isolate* isolate) {
+  TorqueGeneratedSeqString<SeqString, String>::SeqStringVerify(isolate);
+  DataAndPaddingSizes sz = GetDataAndPaddingSizes();
+  auto padding = reinterpret_cast<char*>(address() + sz.data_size);
+  CHECK(sz.padding_size <= kTaggedSize);
+  for (int i = 0; i < sz.padding_size; ++i) {
+    CHECK_EQ(padding[i], 0);
+  }
+}
+#endif  // VERIFY_HEAP
+
+void SeqString::ClearPadding() {
+  DataAndPaddingSizes sz = GetDataAndPaddingSizes();
+  DCHECK_EQ(address() + sz.data_size + sz.padding_size, address() + Size());
+  if (sz.padding_size == 0) return;
+  memset(reinterpret_cast<void*>(address() + sz.data_size), 0, sz.padding_size);
 }
 
 uint16_t ConsString::Get(

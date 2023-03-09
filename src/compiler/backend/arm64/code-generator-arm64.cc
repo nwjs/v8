@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include "src/codegen/arm64/assembler-arm64-inl.h"
+#include "src/codegen/arm64/constants-arm64.h"
 #include "src/codegen/arm64/macro-assembler-arm64-inl.h"
 #include "src/codegen/machine-type.h"
 #include "src/codegen/optimized-compilation-info.h"
@@ -287,7 +288,7 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
     }
     __ CheckPageFlag(
         value_, MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
-        ne, exit());
+        eq, exit());
     SaveFPRegsMode const save_fp_mode = frame()->DidAllocateDoubleRegisters()
                                             ? SaveFPRegsMode::kSave
                                             : SaveFPRegsMode::kIgnore;
@@ -759,7 +760,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       static_assert(kJavaScriptCallCodeStartRegister == x2, "ABI mismatch");
       __ LoadTaggedPointerField(x2,
                                 FieldMemOperand(func, JSFunction::kCodeOffset));
-      __ CallCodeTObject(x2);
+      __ CallCodeObject(x2);
       RecordCallPosition(instr);
       frame_access_state()->ClearSPDelta();
       break;
@@ -956,7 +957,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ JumpIfSmi(value, ool->exit());
       }
       __ CheckPageFlag(object, MemoryChunk::kPointersFromHereAreInterestingMask,
-                       eq, ool->entry());
+                       ne, ool->entry());
       __ Bind(ool->exit());
       break;
     }
@@ -975,7 +976,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ JumpIfSmi(value, ool->exit());
       }
       __ CheckPageFlag(object, MemoryChunk::kPointersFromHereAreInterestingMask,
-                       eq, ool->entry());
+                       ne, ool->entry());
       __ Bind(ool->exit());
       break;
     }
@@ -2158,6 +2159,14 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
              i.InputSimd128Register(2).Format(f));                     \
     break;                                                             \
   }
+#define SIMD_DESTRUCTIVE_RELAXED_FUSED_CASE(Op, Instr, FORMAT) \
+  case Op: {                                                   \
+    VRegister dst = i.OutputSimd128Register().V##FORMAT();     \
+    DCHECK_EQ(dst, i.InputSimd128Register(2).V##FORMAT());     \
+    __ Instr(dst, i.InputSimd128Register(0).V##FORMAT(),       \
+             i.InputSimd128Register(1).V##FORMAT());           \
+    break;                                                     \
+  }
       SIMD_BINOP_LANE_SIZE_CASE(kArm64FMin, Fmin);
       SIMD_BINOP_LANE_SIZE_CASE(kArm64FMax, Fmax);
       SIMD_UNOP_LANE_SIZE_CASE(kArm64FAbs, Fabs);
@@ -2273,8 +2282,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       SIMD_FCM_L_CASE(kArm64FLe, le, ge);
       SIMD_FCM_G_CASE(kArm64FGt, gt);
       SIMD_FCM_G_CASE(kArm64FGe, ge);
-      SIMD_DESTRUCTIVE_BINOP_CASE(kArm64F64x2Qfma, Fmla, 2D);
-      SIMD_DESTRUCTIVE_BINOP_CASE(kArm64F64x2Qfms, Fmls, 2D);
+      SIMD_DESTRUCTIVE_RELAXED_FUSED_CASE(kArm64F64x2Qfma, Fmla, 2D);
+      SIMD_DESTRUCTIVE_RELAXED_FUSED_CASE(kArm64F64x2Qfms, Fmls, 2D);
     case kArm64F64x2Pmin: {
       VRegister dst = i.OutputSimd128Register().V2D();
       VRegister lhs = i.InputSimd128Register(0).V2D();
@@ -2307,8 +2316,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
               i.InputSimd128Register(1).Format(s_f), i.InputInt8(2));
       break;
     }
-      SIMD_DESTRUCTIVE_BINOP_CASE(kArm64F32x4Qfma, Fmla, 4S);
-      SIMD_DESTRUCTIVE_BINOP_CASE(kArm64F32x4Qfms, Fmls, 4S);
+      SIMD_DESTRUCTIVE_RELAXED_FUSED_CASE(kArm64F32x4Qfma, Fmla, 4S);
+      SIMD_DESTRUCTIVE_RELAXED_FUSED_CASE(kArm64F32x4Qfms, Fmls, 4S);
     case kArm64F32x4Pmin: {
       VRegister dst = i.OutputSimd128Register().V4S();
       VRegister lhs = i.InputSimd128Register(0).V4S();
@@ -2895,6 +2904,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
 #undef SIMD_BINOP_LANE_SIZE_CASE
 #undef SIMD_DESTRUCTIVE_BINOP_CASE
 #undef SIMD_DESTRUCTIVE_BINOP_LANE_SIZE_CASE
+#undef SIMD_DESTRUCTIVE_RELAXED_FUSED_CASE
 #undef SIMD_REDUCE_OP_CASE
 #undef ASSEMBLE_SIMD_SHIFT_LEFT
 #undef ASSEMBLE_SIMD_SHIFT_RIGHT
@@ -3038,12 +3048,18 @@ void CodeGenerator::AssembleArchTableSwitch(Instruction* instr) {
   int entry_size_log2 = 2;
 #ifdef V8_ENABLE_CONTROL_FLOW_INTEGRITY
   ++entry_size_log2;  // Account for BTI.
+  constexpr int instructions_per_jump_target = 1;
+#else
+  constexpr int instructions_per_jump_target = 0;
 #endif
+  constexpr int instructions_per_case = 1 + instructions_per_jump_target;
   __ Add(temp, temp, Operand(input, UXTW, entry_size_log2));
   __ Br(temp);
   {
+    const size_t instruction_count =
+        case_count * instructions_per_case + instructions_per_jump_target;
     TurboAssembler::BlockPoolsScope block_pools(tasm(),
-                                                case_count * kInstrSize);
+                                                instruction_count * kInstrSize);
     __ Bind(&table);
     for (size_t index = 0; index < case_count; ++index) {
       __ JumpTarget();
@@ -3360,8 +3376,8 @@ void CodeGenerator::PrepareForDeoptimizationExits(
       false, false,
       static_cast<int>(exits->size()) * Deoptimizer::kLazyDeoptExitSize);
 
-  // Check which deopt kinds exist in this Code object, to avoid emitting jumps
-  // to unused entries.
+  // Check which deopt kinds exist in this InstructionStream object, to avoid
+  // emitting jumps to unused entries.
   bool saw_deopt_kind[kDeoptimizeKindCount] = {false};
   for (auto exit : *exits) {
     saw_deopt_kind[static_cast<int>(exit->kind())] = true;
@@ -3578,7 +3594,7 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
       Handle<HeapObject> src_object = src.ToHeapObject();
       RootIndex index;
       if (IsMaterializableFromRoot(src_object, &index)) {
-        __ LoadRoot(dst, index);
+        __ LoadTaggedRoot(dst, index);
       } else {
         // TODO(v8:8977): Even though this mov happens on 32 bits (Note the
         // .W()) and we are passing along the RelocInfo, we still haven't made

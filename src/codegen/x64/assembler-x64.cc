@@ -291,29 +291,35 @@ bool ConstPool::IsMoveRipRelative(Address instr) {
 void ConstPool::Clear() { entries_.clear(); }
 
 void ConstPool::PatchEntries() {
-  for (EntryMap::iterator iter = entries_.begin(); iter != entries_.end();
-       iter = entries_.upper_bound(iter->first)) {
-    std::pair<EntryMap::iterator, EntryMap::iterator> range =
-        entries_.equal_range(iter->first);
-    int constant_entry_offset = 0;
-    for (EntryMap::iterator it = range.first; it != range.second; it++) {
-      if (it == range.first) {
-        constant_entry_offset = it->second;
-        continue;
-      }
+  auto iter = entries_.begin();
+  if (iter == entries_.end()) return;
 
-      DCHECK_GT(constant_entry_offset, 0);
-      DCHECK_LT(constant_entry_offset, it->second);
-      int32_t disp32 =
-          constant_entry_offset - (it->second + kRipRelativeDispSize);
-      Address disp_addr = assm_->addr_at(it->second);
-
-      // Check if the instruction is actually a rip-relative move.
-      DCHECK(IsMoveRipRelative(disp_addr - kMoveRipRelativeDispOffset));
-      // The displacement of the rip-relative move should be 0 before patching.
-      DCHECK(ReadUnalignedValue<uint32_t>(disp_addr) == 0);
-      WriteUnalignedValue(disp_addr, disp32);
+  // Read off the first value/offset pair before starting the loop proper.
+  std::pair<uint64_t, int> first_entry_of_range = *iter;
+  while (++iter != entries_.end()) {
+    // Check if we've entered a new set of values.
+    if (first_entry_of_range.first != iter->first) {
+      // Make sure that this iterator is both the (exclusive) end of the
+      // previous value's equal range, and the start of this value's equal
+      // range.
+      DCHECK_EQ(entries_.equal_range(first_entry_of_range.first).second, iter);
+      DCHECK_EQ(entries_.equal_range(iter->first).first, iter);
+      first_entry_of_range = *iter;
+      continue;
     }
+    int constant_entry_offset = first_entry_of_range.second;
+
+    DCHECK_GT(constant_entry_offset, 0);
+    DCHECK_LT(constant_entry_offset, iter->second);
+    int32_t disp32 =
+        constant_entry_offset - (iter->second + kRipRelativeDispSize);
+    Address disp_addr = assm_->addr_at(iter->second);
+
+    // Check if the instruction is actually a rip-relative move.
+    DCHECK(IsMoveRipRelative(disp_addr - kMoveRipRelativeDispOffset));
+    // The displacement of the rip-relative move should be 0 before patching.
+    DCHECK(ReadUnalignedValue<uint32_t>(disp_addr) == 0);
+    WriteUnalignedValue(disp_addr, disp32);
   }
   Clear();
 }
@@ -361,13 +367,13 @@ void Assembler::GetCode(Isolate* isolate, CodeDesc* desc,
                         SafepointTableBuilderBase* safepoint_table_builder,
                         int handler_table_offset) {
   // As a crutch to avoid having to add manual Align calls wherever we use a
-  // raw workflow to create Code objects (mostly in tests), add another Align
-  // call here. It does no harm - the end of the Code object is aligned to the
-  // (larger) kCodeAlignment anyways.
+  // raw workflow to create InstructionStream objects (mostly in tests), add
+  // another Align call here. It does no harm - the end of the InstructionStream
+  // object is aligned to the (larger) kCodeAlignment anyways.
   // TODO(jgruber): Consider moving responsibility for proper alignment to
   // metadata table builders (safepoint, handler, constant pool, code
   // comments).
-  DataAlign(Code::kMetadataAlignment);
+  DataAlign(InstructionStream::kMetadataAlignment);
 
   PatchConstPool();
   DCHECK(constpool_.IsEmpty());
@@ -1018,9 +1024,8 @@ void Assembler::call(Label* L) {
   }
 }
 
-void Assembler::call(Handle<CodeT> target, RelocInfo::Mode rmode) {
+void Assembler::call(Handle<Code> target, RelocInfo::Mode rmode) {
   DCHECK(RelocInfo::IsCodeTarget(rmode));
-  DCHECK(FromCodeT(*target).IsExecutable());
   EnsureSpace ensure_space(this);
   // 1110 1000 #32-bit disp.
   emit(0xE8);
@@ -1431,7 +1436,7 @@ void Assembler::j(Condition cc, Address entry, RelocInfo::Mode rmode) {
   emitl(static_cast<int32_t>(entry));
 }
 
-void Assembler::j(Condition cc, Handle<CodeT> target, RelocInfo::Mode rmode) {
+void Assembler::j(Condition cc, Handle<Code> target, RelocInfo::Mode rmode) {
   EnsureSpace ensure_space(this);
   DCHECK(is_uint4(cc));
   // 0000 1111 1000 tttn #32-bit disp.
@@ -1510,7 +1515,7 @@ void Assembler::jmp(Label* L, Label::Distance distance) {
   }
 }
 
-void Assembler::jmp(Handle<CodeT> target, RelocInfo::Mode rmode) {
+void Assembler::jmp(Handle<Code> target, RelocInfo::Mode rmode) {
   DCHECK(RelocInfo::IsCodeTarget(rmode));
   EnsureSpace ensure_space(this);
   // 1110 1001 #32-bit disp.
@@ -4485,7 +4490,8 @@ void Assembler::dq(Label* label) {
 
 void Assembler::RecordRelocInfo(RelocInfo::Mode rmode, intptr_t data) {
   if (!ShouldRecordRelocInfo(rmode)) return;
-  RelocInfo rinfo(reinterpret_cast<Address>(pc_), rmode, data, Code());
+  RelocInfo rinfo(reinterpret_cast<Address>(pc_), rmode, data,
+                  InstructionStream());
   reloc_info_writer.Write(&rinfo);
 }
 

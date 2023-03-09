@@ -87,7 +87,7 @@ class TestModuleBuilder {
     return static_cast<byte>(mod.globals.size() - 1);
   }
   byte AddSignature(const FunctionSig* sig, uint32_t supertype = kNoSuperType) {
-    mod.add_signature(sig, supertype);
+    mod.add_signature(sig, supertype, v8_flags.wasm_final_types);
     CHECK_LE(mod.types.size(), kMaxByteSizedLeb128);
     GetTypeCanonicalizer()->AddRecursiveGroup(module(), 1);
     return static_cast<byte>(mod.types.size() - 1);
@@ -107,7 +107,7 @@ class TestModuleBuilder {
     return result;
   }
   byte AddException(WasmTagSig* sig) {
-    mod.tags.emplace_back(sig);
+    mod.tags.emplace_back(sig, AddSignature(sig));
     CHECK_LE(mod.types.size(), kMaxByteSizedLeb128);
     return static_cast<byte>(mod.tags.size() - 1);
   }
@@ -131,14 +131,15 @@ class TestModuleBuilder {
     for (F field : fields) {
       type_builder.AddField(field.first, field.second);
     }
-    mod.add_struct_type(type_builder.Build(), supertype);
+    mod.add_struct_type(type_builder.Build(), supertype,
+                        v8_flags.wasm_final_types);
     GetTypeCanonicalizer()->AddRecursiveGroup(module(), 1);
     return static_cast<byte>(mod.types.size() - 1);
   }
 
   byte AddArray(ValueType type, bool mutability) {
     ArrayType* array = mod.signature_zone.New<ArrayType>(type, mutability);
-    mod.add_array_type(array, kNoSuperType);
+    mod.add_array_type(array, kNoSuperType, v8_flags.wasm_final_types);
     GetTypeCanonicalizer()->AddRecursiveGroup(module(), 1);
     return static_cast<byte>(mod.types.size() - 1);
   }
@@ -4345,6 +4346,10 @@ TEST_F(FunctionBodyDecoderTest, BrOnCastOrCastFail) {
   ExpectValidates(
       FunctionSig::Build(this->zone(), {kWasmI32, supertype}, {supertype}),
       {WASM_I32V(42), WASM_LOCAL_GET(0), WASM_BR_ON_CAST_FAIL(0, sub_struct)});
+  ExpectValidates(
+      FunctionSig::Build(this->zone(), {kWasmI32, supertype}, {supertype}),
+      {WASM_I32V(42), WASM_LOCAL_GET(0),
+       WASM_BR_ON_CAST_FAIL_NULL(0, sub_struct)});
 
   // Wrong branch type.
   ExpectFailure(
@@ -4356,6 +4361,11 @@ TEST_F(FunctionBodyDecoderTest, BrOnCastOrCastFail) {
       {WASM_I32V(42), WASM_LOCAL_GET(0), WASM_BR_ON_CAST_FAIL(0, sub_struct)},
       kAppendEnd,
       "type error in branch[0] (expected (ref null 1), got (ref null 0))");
+  ExpectFailure(FunctionSig::Build(this->zone(), {subtype}, {supertype}),
+                {WASM_I32V(42), WASM_LOCAL_GET(0),
+                 WASM_BR_ON_CAST_FAIL_NULL(0, sub_struct)},
+                kAppendEnd,
+                "type error in branch[0] (expected (ref null 1), got (ref 0))");
 
   // Wrong fallthrough type.
   ExpectFailure(
@@ -4366,6 +4376,11 @@ TEST_F(FunctionBodyDecoderTest, BrOnCastOrCastFail) {
       FunctionSig::Build(this->zone(), {supertype}, {supertype}),
       {WASM_BLOCK_I(WASM_LOCAL_GET(0), WASM_BR_ON_CAST_FAIL(0, sub_struct))},
       kAppendEnd, "type error in branch[0] (expected i32, got (ref null 0))");
+  ExpectFailure(FunctionSig::Build(this->zone(), {supertype}, {supertype}),
+                {WASM_BLOCK_I(WASM_LOCAL_GET(0),
+                              WASM_BR_ON_CAST_FAIL_NULL(0, sub_struct))},
+                kAppendEnd,
+                "type error in branch[0] (expected i32, got (ref 0))");
 
   // Argument type error.
   ExpectFailure(FunctionSig::Build(this->zone(), {subtype}, {kWasmExternRef}),
@@ -4386,6 +4401,11 @@ TEST_F(FunctionBodyDecoderTest, BrOnCastOrCastFail) {
       {WASM_LOCAL_GET(0), WASM_BR_ON_CAST_FAIL(0, sub_struct)}, kAppendEnd,
       "Invalid types for br_on_cast_fail: local.get of type externref has to "
       "be in the same reference type hierarchy as (ref 1)");
+  ExpectFailure(
+      FunctionSig::Build(this->zone(), {supertype}, {kWasmExternRef}),
+      {WASM_LOCAL_GET(0), WASM_BR_ON_CAST_FAIL_NULL(0, sub_struct)}, kAppendEnd,
+      "Invalid types for br_on_cast_fail null: local.get of type "
+      "externref has to be in the same reference type hierarchy as (ref 1)");
 
   // Cast between types of different type hierarchies is invalid.
   ExpectFailure(

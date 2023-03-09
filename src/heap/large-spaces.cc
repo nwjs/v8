@@ -149,7 +149,7 @@ AllocationResult OldLargeObjectSpace::AllocateRaw(int object_size,
   // If so, fail the allocation.
   if (!heap()->CanExpandOldGeneration(object_size) ||
       !heap()->ShouldExpandOldGenerationOnSlowAllocation(
-          heap()->main_thread_local_heap())) {
+          heap()->main_thread_local_heap(), AllocationOrigin::kRuntime)) {
     return AllocationResult::Failure();
   }
 
@@ -185,7 +185,8 @@ AllocationResult OldLargeObjectSpace::AllocateRawBackground(
   // Check if we want to force a GC before growing the old space further.
   // If so, fail the allocation.
   if (!heap()->CanExpandOldGenerationBackground(local_heap, object_size) ||
-      !heap()->ShouldExpandOldGenerationOnSlowAllocation(local_heap)) {
+      !heap()->ShouldExpandOldGenerationOnSlowAllocation(
+          local_heap, AllocationOrigin::kRuntime)) {
     return AllocationResult::Failure();
   }
 
@@ -259,27 +260,14 @@ void CodeLargeObjectSpace::RemoveChunkMapEntries(LargePage* page) {
   }
 }
 
-void LargeObjectSpace::PromoteNewLargeObject(LargePage* page) {
+void OldLargeObjectSpace::PromoteNewLargeObject(LargePage* page) {
   DCHECK_EQ(page->owner_identity(), NEW_LO_SPACE);
-  DCHECK(identity() == LO_SPACE || identity() == SHARED_LO_SPACE);
   DCHECK(page->IsLargePage());
   DCHECK(page->IsFlagSet(MemoryChunk::FROM_PAGE));
   DCHECK(!page->IsFlagSet(MemoryChunk::TO_PAGE));
-  const bool promotion_into_shared_heap =
-      identity() == SHARED_LO_SPACE || heap()->isolate()->is_shared();
   PtrComprCageBase cage_base(heap()->isolate());
   static_cast<LargeObjectSpace*>(page->owner())->RemovePage(page);
   page->ClearFlag(MemoryChunk::FROM_PAGE);
-
-  if (promotion_into_shared_heap) {
-    page->SetFlag(MemoryChunk::IN_SHARED_HEAP);
-
-    MemoryAllocator* current_allocator = page->heap()->memory_allocator();
-    heap()->memory_allocator()->TakeOverLargePage(page, current_allocator);
-    page->set_heap(heap());
-  }
-
-  base::RecursiveMutexGuard guard(&allocation_mutex_);
   AddPage(page, static_cast<size_t>(page->GetObject().Size(cage_base)));
 }
 
@@ -404,6 +392,7 @@ void LargeObjectSpace::Verify(Isolate* isolate,
         object.IsFixedArray(cage_base) ||                         //
         object.IsFixedDoubleArray(cage_base) ||                   //
         object.IsFreeSpace(cage_base) ||                          //
+        object.IsInstructionStream(cage_base) ||                  //
         object.IsPreparseData(cage_base) ||                       //
         object.IsPropertyArray(cage_base) ||                      //
         object.IsScopeInfo() ||                                   //

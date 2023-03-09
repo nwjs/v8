@@ -99,7 +99,6 @@
   'test-jump-table-assembler/JumpTablePatchingStress': [PASS, SLOW],
   'test-strings/StringOOM*': [PASS, ['mode == debug', SKIP]],
   'test-serialize/CustomSnapshotDataBlobImmortalImmovableRoots': [PASS, ['mode == debug', SKIP]],
-  'test-serialize/CreateIsolateFromReadOnlySnapshot': [PASS, SLOW],
 
   # Tests that need to run sequentially (e.g. due to memory consumption).
   'test-accessors/HandleScopePop': [PASS, HEAVY],
@@ -115,6 +114,7 @@
   'test-serialize/SnapshotCompression': [PASS, HEAVY],
   'test-serialize/StartupSerializerOnceRunScript': [PASS, HEAVY],
   'test-serialize/StartupSerializerTwiceRunScript': [PASS, HEAVY],
+  'test-serialize/StaticRootsPredictableSnapshot': [PASS, HEAVY],
   'test-strings/StringOOMNewStringFromOneByte': [PASS, HEAVY],
   'test-strings/StringOOMNewStringFromUtf8': [PASS, HEAVY],
   'test-strings/Traverse': [PASS, HEAVY],
@@ -301,10 +301,9 @@
   'test-serialize/StartupSerializerOnce': [SKIP],
   'test-serialize/StartupSerializerOnceRunScript': [SKIP],
   'test-serialize/StartupSerializerTwiceRunScript': [SKIP],
+  'test-serialize/StaticRootsPredictableSnapshot': [SKIP],
   'test-serialize/StartupSerializerTwice': [SKIP],
 
-  # Test too slow with ASan
-  'test-serialize/CreateIsolateFromReadOnlySnapshot': [SKIP],
 }],  # 'system == windows and arch == x64 and mode == debug'
 
 ##############################################################################
@@ -783,6 +782,7 @@
   'test-serialize/StartupSerializerOnceRunScript': [SKIP],
   'test-serialize/StartupSerializerTwice': [SKIP],
   'test-serialize/StartupSerializerTwiceRunScript': [SKIP],
+  'test-serialize/StaticRootsPredictableSnapshot': [SKIP],
   'test-serialize/WeakArraySerializationInSnapshot': [SKIP],
   'test-typedarrays/SpeciesConstructor': [SKIP],
   'test-typedarrays/SpeciesConstructorAccessor': [SKIP],
@@ -924,18 +924,6 @@
   'test-debug/TerminateOnResumeFromOtherThread': [SKIP],
   'test-debug/TerminateOnResumeRunJavaScriptAtBreakpoint': [SKIP],
   'test-debug/TerminateOnResumeRunMicrotaskAtBreakpoint': [SKIP],
-  'test-embedder-tracing/BasicTracedReference': [SKIP],
-  'test-embedder-tracing/GarbageCollectionForTesting': [SKIP],
-  'test-embedder-tracing/NotifyEmptyStack': [SKIP],
-  'test-embedder-tracing/TracedReferenceCopyReferences': [SKIP],
-  'test-embedder-tracing/TracedReferenceCopy': [SKIP],
-  'test-embedder-tracing/TracedReferenceHandlesDoNotLeak': [SKIP],
-  'test-embedder-tracing/TracedReferenceHandlesMarking': [SKIP],
-  'test-embedder-tracing/TracedReferenceMove': [SKIP],
-  'test-embedder-tracing/TracedReferenceToUnmodifiedJSObjectDiesOnMarkSweep': [SKIP],
-  'test-embedder-tracing/TracingInEphemerons': [SKIP],
-  'test-embedder-tracing/TracingInRevivedSubgraph': [SKIP],
-  'test-embedder-tracing/V8RegisteringEmbedderReference': [SKIP],
   'test-external-string-tracker/ExternalString_ExternalBackingStoreSizeIncreasesAfterExternalization': [SKIP],
   'test-external-string-tracker/ExternalString_ExternalBackingStoreSizeIncreasesMarkCompact': [SKIP],
   'test-heap-profiler/HeapSnapshotDeleteDuringTakeSnapshot': [SKIP],

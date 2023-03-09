@@ -442,8 +442,8 @@ class ReadOnlySpaceObjectIterator : public ObjectIterator {
       cur_addr_ += ALIGN_TO_ALLOCATION_ALIGNMENT(obj_size);
       DCHECK_LE(cur_addr_, cur_end_);
       if (!obj.IsFreeSpaceOrFiller()) {
-        if (obj.IsCode()) {
-          DCHECK(Code::cast(obj).is_builtin());
+        if (obj.IsInstructionStream()) {
+          DCHECK(InstructionStream::cast(obj).is_builtin());
           DCHECK_CODEOBJECT_SIZE(obj_size, space_);
         } else {
           DCHECK_OBJECT_SIZE(obj_size);
@@ -561,6 +561,10 @@ void ReadOnlySpace::FreeLinearAllocationArea() {
 void ReadOnlySpace::EnsurePage() {
   if (pages_.empty()) EnsureSpaceForAllocation(1);
   CHECK(!pages_.empty());
+  // For all configurations where static roots are supported the read only roots
+  // are currently allocated in the first page of the cage.
+  CHECK_IMPLIES(V8_STATIC_ROOTS_BOOL,
+                heap_->isolate()->cage_base() == pages_.back()->address());
 }
 
 void ReadOnlySpace::EnsureSpaceForAllocation(int size_in_bytes) {

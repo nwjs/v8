@@ -769,10 +769,17 @@ void PagedSpaceBase::Verify(Isolate* isolate,
   }
   CHECK(allocation_pointer_found_in_space);
 
-  if (identity() == OLD_SPACE && !v8_flags.concurrent_array_buffer_sweeping) {
-    size_t bytes = heap()->array_buffer_sweeper()->old().BytesSlow();
-    CHECK_EQ(bytes,
-             ExternalBackingStoreBytes(ExternalBackingStoreType::kArrayBuffer));
+  if (!v8_flags.concurrent_array_buffer_sweeping) {
+    if (identity() == OLD_SPACE) {
+      size_t bytes = heap()->array_buffer_sweeper()->old().BytesSlow();
+      CHECK_EQ(bytes, ExternalBackingStoreBytes(
+                          ExternalBackingStoreType::kArrayBuffer));
+    } else if (identity() == NEW_SPACE) {
+      DCHECK(v8_flags.minor_mc);
+      size_t bytes = heap()->array_buffer_sweeper()->young().BytesSlow();
+      CHECK_EQ(bytes, ExternalBackingStoreBytes(
+                          ExternalBackingStoreType::kArrayBuffer));
+    }
   }
 
 #ifdef DEBUG
@@ -936,7 +943,7 @@ bool PagedSpaceBase::RawRefillLabMain(int size_in_bytes,
 
   if (identity() != NEW_SPACE &&
       heap()->ShouldExpandOldGenerationOnSlowAllocation(
-          heap()->main_thread_local_heap()) &&
+          heap()->main_thread_local_heap(), origin) &&
       heap()->CanExpandOldGeneration(AreaSize())) {
     if (TryExpand(size_in_bytes, origin)) {
       return true;

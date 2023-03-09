@@ -90,10 +90,12 @@ using WasmTagSig = FunctionSig;
 
 // Static representation of a wasm tag type.
 struct WasmTag {
-  explicit WasmTag(const WasmTagSig* sig) : sig(sig) {}
+  explicit WasmTag(const WasmTagSig* sig, uint32_t sig_index)
+      : sig(sig), sig_index(sig_index) {}
   const FunctionSig* ToFunctionSig() const { return sig; }
 
   const WasmTagSig* sig;  // type signature of the tag.
+  uint32_t sig_index;
 };
 
 // Static representation of a wasm literal stringref.
@@ -334,23 +336,30 @@ constexpr uint32_t kNoSuperType = std::numeric_limits<uint32_t>::max();
 struct TypeDefinition {
   enum Kind { kFunction, kStruct, kArray };
 
-  TypeDefinition(const FunctionSig* sig, uint32_t supertype)
-      : function_sig(sig), supertype(supertype), kind(kFunction) {}
-  TypeDefinition(const StructType* type, uint32_t supertype)
-      : struct_type(type), supertype(supertype), kind(kStruct) {}
-  TypeDefinition(const ArrayType* type, uint32_t supertype)
-      : array_type(type), supertype(supertype), kind(kArray) {}
+  TypeDefinition(const FunctionSig* sig, uint32_t supertype, bool is_final)
+      : function_sig(sig),
+        supertype(supertype),
+        kind(kFunction),
+        is_final(is_final) {}
+  TypeDefinition(const StructType* type, uint32_t supertype, bool is_final)
+      : struct_type(type),
+        supertype(supertype),
+        kind(kStruct),
+        is_final(is_final) {}
+  TypeDefinition(const ArrayType* type, uint32_t supertype, bool is_final)
+      : array_type(type),
+        supertype(supertype),
+        kind(kArray),
+        is_final(is_final) {}
   TypeDefinition()
-      : function_sig(nullptr), supertype(kNoSuperType), kind(kFunction) {}
-
-  union {
-    const FunctionSig* function_sig;
-    const StructType* struct_type;
-    const ArrayType* array_type;
-  };
+      : function_sig(nullptr),
+        supertype(kNoSuperType),
+        kind(kFunction),
+        is_final(false) {}
 
   bool operator==(const TypeDefinition& other) const {
-    if (supertype != other.supertype || kind != other.kind) {
+    if (supertype != other.supertype || kind != other.kind ||
+        is_final != other.is_final) {
       return false;
     }
     switch (kind) {
@@ -367,8 +376,14 @@ struct TypeDefinition {
     return !(*this == other);
   }
 
+  union {
+    const FunctionSig* function_sig;
+    const StructType* struct_type;
+    const ArrayType* array_type;
+  };
   uint32_t supertype;
   Kind kind;
+  bool is_final;
 };
 
 struct V8_EXPORT_PRIVATE WasmDebugSymbols {
@@ -484,6 +499,8 @@ struct V8_EXPORT_PRIVATE WasmModule {
   Zone signature_zone;
   uint32_t initial_pages = 0;      // initial size of the memory in 64k pages
   uint32_t maximum_pages = 0;      // maximum size of the memory in 64k pages
+  uintptr_t min_memory_size = 0;   // smallest size of any memory in bytes
+  uintptr_t max_memory_size = 0;   // largest size of any memory in bytes
   bool has_shared_memory = false;  // true if memory is a SharedArrayBuffer
   bool has_maximum_pages = false;  // true if there is a maximum memory size
   bool is_memory64 = false;        // true if the memory is 64 bit
@@ -558,9 +575,10 @@ struct V8_EXPORT_PRIVATE WasmModule {
 
   bool has_type(uint32_t index) const { return index < types.size(); }
 
-  void add_signature(const FunctionSig* sig, uint32_t supertype) {
+  void add_signature(const FunctionSig* sig, uint32_t supertype,
+                     bool is_final) {
     DCHECK_NOT_NULL(sig);
-    add_type(TypeDefinition(sig, supertype));
+    add_type(TypeDefinition(sig, supertype, is_final));
   }
   bool has_signature(uint32_t index) const {
     return index < types.size() &&
@@ -568,35 +586,44 @@ struct V8_EXPORT_PRIVATE WasmModule {
   }
   const FunctionSig* signature(uint32_t index) const {
     DCHECK(has_signature(index));
+    size_t num_types = types.size();
+    V8_ASSUME(index < num_types);
     return types[index].function_sig;
   }
 
-  void add_struct_type(const StructType* type, uint32_t supertype) {
+  void add_struct_type(const StructType* type, uint32_t supertype,
+                       bool is_final) {
     DCHECK_NOT_NULL(type);
-    add_type(TypeDefinition(type, supertype));
+    add_type(TypeDefinition(type, supertype, is_final));
   }
   bool has_struct(uint32_t index) const {
     return index < types.size() && types[index].kind == TypeDefinition::kStruct;
   }
   const StructType* struct_type(uint32_t index) const {
     DCHECK(has_struct(index));
+    size_t num_types = types.size();
+    V8_ASSUME(index < num_types);
     return types[index].struct_type;
   }
 
-  void add_array_type(const ArrayType* type, uint32_t supertype) {
+  void add_array_type(const ArrayType* type, uint32_t supertype,
+                      bool is_final) {
     DCHECK_NOT_NULL(type);
-    add_type(TypeDefinition(type, supertype));
+    add_type(TypeDefinition(type, supertype, is_final));
   }
   bool has_array(uint32_t index) const {
     return index < types.size() && types[index].kind == TypeDefinition::kArray;
   }
   const ArrayType* array_type(uint32_t index) const {
     DCHECK(has_array(index));
+    size_t num_types = types.size();
+    V8_ASSUME(index < num_types);
     return types[index].array_type;
   }
 
   uint32_t supertype(uint32_t index) const {
-    DCHECK(index < types.size());
+    size_t num_types = types.size();
+    V8_ASSUME(index < num_types);
     return types[index].supertype;
   }
   bool has_supertype(uint32_t index) const {
@@ -635,6 +662,16 @@ struct V8_EXPORT_PRIVATE WasmModule {
            !atomic_byte->compare_exchange_weak(old_byte, old_byte | new_bit,
                                                std::memory_order_relaxed)) {
       // Retry with updated {old_byte}.
+    }
+  }
+
+  void set_all_functions_validated() const {
+    DCHECK_EQ(kWasmOrigin, origin);
+    if (num_declared_functions == 0) return;
+    DCHECK_NOT_NULL(validated_functions);
+    size_t num_words = (num_declared_functions + 7) / 8;
+    for (size_t i = 0; i < num_words; ++i) {
+      validated_functions[i].store(0xff, std::memory_order_relaxed);
     }
   }
 

@@ -36,6 +36,25 @@
 namespace v8 {
 namespace internal {
 
+namespace {
+
+Builtin BigIntComparisonBuiltinOf(Operation const& op) {
+  switch (op) {
+    case Operation::kLessThan:
+      return Builtin::kBigIntLessThan;
+    case Operation::kGreaterThan:
+      return Builtin::kBigIntGreaterThan;
+    case Operation::kLessThanOrEqual:
+      return Builtin::kBigIntLessThanOrEqual;
+    case Operation::kGreaterThanOrEqual:
+      return Builtin::kBigIntGreaterThanOrEqual;
+    default:
+      UNREACHABLE();
+  }
+}
+
+}  // namespace
+
 CodeStubAssembler::CodeStubAssembler(compiler::CodeAssemblerState* state)
     : compiler::CodeAssembler(state),
       TorqueGeneratedExportedMacrosAssembler(state) {
@@ -3126,20 +3145,20 @@ TNode<BytecodeArray> CodeStubAssembler::LoadSharedFunctionInfoBytecodeArray(
   Label check_for_interpreter_data(this, &var_result);
   Label done(this, &var_result);
 
-  GotoIfNot(HasInstanceType(var_result.value(), CODET_TYPE),
+  GotoIfNot(HasInstanceType(var_result.value(), CODE_TYPE),
             &check_for_interpreter_data);
   {
-    TNode<CodeT> code = CAST(var_result.value());
+    TNode<Code> code = CAST(var_result.value());
 #ifdef DEBUG
     TNode<Int32T> code_flags =
-        LoadObjectField<Int32T>(code, CodeT::kFlagsOffset);
+        LoadObjectField<Int16T>(code, Code::kFlagsOffset);
     CSA_DCHECK(
-        this, Word32Equal(DecodeWord32<CodeT::KindField>(code_flags),
+        this, Word32Equal(DecodeWord32<Code::KindField>(code_flags),
                           Int32Constant(static_cast<int>(CodeKind::BASELINE))));
 #endif  // DEBUG
     TNode<HeapObject> baseline_data = LoadObjectField<HeapObject>(
-        FromCodeTNonBuiltin(code),
-        Code::kDeoptimizationDataOrInterpreterDataOffset);
+        FromCodeNonBuiltin(code),
+        InstructionStream::kDeoptimizationDataOrInterpreterDataOffset);
     var_result = baseline_data;
   }
   Goto(&check_for_interpreter_data);
@@ -3706,6 +3725,10 @@ TNode<String> CodeStubAssembler::AllocateSeqOneByteString(
     return EmptyStringConstant();
   }
   TNode<HeapObject> result = Allocate(SeqOneByteString::SizeFor(length), flags);
+  StoreNoWriteBarrier(MachineRepresentation::kTaggedSigned, result,
+                      IntPtrConstant(SeqOneByteString::SizeFor(length) -
+                                     kObjectAlignment - kHeapObjectTag),
+                      SmiConstant(0));
   DCHECK(RootsTable::IsImmortalImmovable(RootIndex::kOneByteStringMap));
   StoreMapNoWriteBarrier(result, RootIndex::kOneByteStringMap);
   StoreObjectFieldNoWriteBarrier(result, SeqOneByteString::kLengthOffset,
@@ -3728,6 +3751,10 @@ TNode<String> CodeStubAssembler::AllocateSeqTwoByteString(
     return EmptyStringConstant();
   }
   TNode<HeapObject> result = Allocate(SeqTwoByteString::SizeFor(length), flags);
+  StoreNoWriteBarrier(MachineRepresentation::kTaggedSigned, result,
+                      IntPtrConstant(SeqTwoByteString::SizeFor(length) -
+                                     kObjectAlignment - kHeapObjectTag),
+                      SmiConstant(0));
   DCHECK(RootsTable::IsImmortalImmovable(RootIndex::kStringMap));
   StoreMapNoWriteBarrier(result, RootIndex::kStringMap);
   StoreObjectFieldNoWriteBarrier(result, SeqTwoByteString::kLengthOffset,
@@ -6499,6 +6526,14 @@ TNode<BoolT> CodeStubAssembler::IsPromiseSpeciesProtectorCellInvalid() {
   return TaggedEqual(cell_value, invalid);
 }
 
+TNode<BoolT>
+CodeStubAssembler::IsNumberStringPrototypeNoReplaceProtectorCellInvalid() {
+  TNode<Smi> invalid = SmiConstant(Protectors::kProtectorInvalid);
+  TNode<PropertyCell> cell = NumberStringPrototypeNoReplaceProtectorConstant();
+  TNode<Object> cell_value = LoadObjectField(cell, PropertyCell::kValueOffset);
+  return TaggedEqual(cell_value, invalid);
+}
+
 TNode<BoolT> CodeStubAssembler::IsPrototypeInitialArrayPrototype(
     TNode<Context> context, TNode<Map> map) {
   const TNode<NativeContext> native_context = LoadNativeContext(context);
@@ -6796,6 +6831,12 @@ TNode<BoolT> CodeStubAssembler::IsJSArrayMap(TNode<Map> map) {
 
 TNode<BoolT> CodeStubAssembler::IsJSArrayIterator(TNode<HeapObject> object) {
   return HasInstanceType(object, JS_ARRAY_ITERATOR_TYPE);
+}
+
+TNode<BoolT> CodeStubAssembler::IsAlwaysSharedSpaceJSObjectInstanceType(
+    TNode<Int32T> instance_type) {
+  return IsInRange(instance_type, FIRST_ALWAYS_SHARED_SPACE_JS_OBJECT_TYPE,
+                   LAST_ALWAYS_SHARED_SPACE_JS_OBJECT_TYPE);
 }
 
 TNode<BoolT> CodeStubAssembler::IsJSSharedArrayInstanceType(
@@ -7980,15 +8021,6 @@ TNode<BigInt> CodeStubAssembler::ToBigIntConvertNumber(TNode<Context> context,
 
   BIND(&done);
   return var_result.value();
-}
-
-void CodeStubAssembler::TaggedToBigIntWithFeedback(
-    TNode<Context> context, TNode<Object> value, Label* if_not_bigint,
-    Label* if_bigint, Label* if_bigint64, TVariable<BigInt>* var_bigint,
-    TVariable<Smi>* var_feedback) {
-  DCHECK_NOT_NULL(var_feedback);
-  TaggedToBigInt(context, value, if_not_bigint, if_bigint, if_bigint64,
-                 var_bigint, var_feedback);
 }
 
 void CodeStubAssembler::TaggedToBigInt(TNode<Context> context,
@@ -12540,6 +12572,41 @@ TNode<Context> CodeStubAssembler::GotoIfHasContextExtensionUpToDepth(
   return cur_context.value();
 }
 
+void CodeStubAssembler::BigInt64Comparison(Operation op, TNode<Object>& left,
+                                           TNode<Object>& right,
+                                           Label* return_true,
+                                           Label* return_false) {
+  TVARIABLE(UintPtrT, left_raw);
+  TVARIABLE(UintPtrT, right_raw);
+  BigIntToRawBytes(CAST(left), &left_raw, &left_raw);
+  BigIntToRawBytes(CAST(right), &right_raw, &right_raw);
+  TNode<WordT> left_raw_value = left_raw.value();
+  TNode<WordT> right_raw_value = right_raw.value();
+
+  TNode<BoolT> condition;
+  switch (op) {
+    case Operation::kEqual:
+    case Operation::kStrictEqual:
+      condition = WordEqual(left_raw_value, right_raw_value);
+      break;
+    case Operation::kLessThan:
+      condition = IntPtrLessThan(left_raw_value, right_raw_value);
+      break;
+    case Operation::kLessThanOrEqual:
+      condition = IntPtrLessThanOrEqual(left_raw_value, right_raw_value);
+      break;
+    case Operation::kGreaterThan:
+      condition = IntPtrGreaterThan(left_raw_value, right_raw_value);
+      break;
+    case Operation::kGreaterThanOrEqual:
+      condition = IntPtrGreaterThanOrEqual(left_raw_value, right_raw_value);
+      break;
+    default:
+      UNREACHABLE();
+  }
+  Branch(condition, return_true, return_false);
+}
+
 TNode<Oddball> CodeStubAssembler::RelationalComparison(
     Operation op, TNode<Object> left, TNode<Object> right,
     const LazyNode<Context>& context, TVariable<Smi>* var_type_feedback) {
@@ -12762,11 +12829,21 @@ TNode<Oddball> CodeStubAssembler::RelationalComparison(
 
           BIND(&if_right_bigint);
           {
+            if (Is64()) {
+              Label if_both_bigint(this);
+              GotoIfLargeBigInt(CAST(left), &if_both_bigint);
+              GotoIfLargeBigInt(CAST(right), &if_both_bigint);
+
+              CombineFeedback(var_type_feedback,
+                              CompareOperationFeedback::kBigInt64);
+              BigInt64Comparison(op, left, right, &return_true, &return_false);
+              BIND(&if_both_bigint);
+            }
+
             CombineFeedback(var_type_feedback,
                             CompareOperationFeedback::kBigInt);
-            var_result = CAST(CallRuntime(Runtime::kBigIntCompareToBigInt,
-                                          NoContextConstant(), SmiConstant(op),
-                                          left, right));
+            var_result = CAST(CallBuiltin(BigIntComparisonBuiltinOf(op),
+                                          NoContextConstant(), left, right));
             Goto(&end);
           }
 
@@ -13025,6 +13102,14 @@ void CodeStubAssembler::GenerateEqual_Same(TNode<Object> value, Label* if_equal,
     BIND(&if_bigint);
     {
       CSA_DCHECK(this, IsBigInt(value_heapobject));
+
+      if (Is64()) {
+        Label if_large_bigint(this);
+        GotoIfLargeBigInt(CAST(value_heapobject), &if_large_bigint);
+        CombineFeedback(var_type_feedback, CompareOperationFeedback::kBigInt64);
+        Goto(if_equal);
+        BIND(&if_large_bigint);
+      }
       CombineFeedback(var_type_feedback, CompareOperationFeedback::kBigInt);
       Goto(if_equal);
     }
@@ -13214,12 +13299,16 @@ TNode<Oddball> CodeStubAssembler::Equal(TNode<Object> left, TNode<Object> right,
       BIND(&if_left_string);
       {
         GotoIfNot(IsStringInstanceType(right_type), &use_symmetry);
-        result =
-            CAST(CallBuiltin(Builtin::kStringEqual, context(), left, right));
-        CombineFeedback(var_type_feedback,
-                        SmiOr(CollectFeedbackForString(left_type),
-                              CollectFeedbackForString(right_type)));
-        Goto(&end);
+        Label combine_feedback(this);
+        BranchIfStringEqual(CAST(left), CAST(right), &combine_feedback,
+                            &combine_feedback, &result);
+        BIND(&combine_feedback);
+        {
+          CombineFeedback(var_type_feedback,
+                          SmiOr(CollectFeedbackForString(left_type),
+                                CollectFeedbackForString(right_type)));
+          Goto(&end);
+        }
       }
 
       BIND(&if_left_number);
@@ -13289,22 +13378,13 @@ TNode<Oddball> CodeStubAssembler::Equal(TNode<Object> left, TNode<Object> right,
         {
           if (Is64()) {
             Label if_both_bigint(this);
-
             GotoIfLargeBigInt(CAST(left), &if_both_bigint);
             GotoIfLargeBigInt(CAST(right), &if_both_bigint);
 
             OverwriteFeedback(var_type_feedback,
                               CompareOperationFeedback::kBigInt64);
-
-            TVARIABLE(UintPtrT, left_raw);
-            TVARIABLE(UintPtrT, right_raw);
-            BigIntToRawBytes(CAST(left), &left_raw, &left_raw);
-            BigIntToRawBytes(CAST(right), &right_raw, &right_raw);
-
-            Branch(WordEqual(UncheckedCast<WordT>(left_raw.value()),
-                             UncheckedCast<WordT>(right_raw.value())),
-                   &if_equal, &if_notequal);
-
+            BigInt64Comparison(Operation::kEqual, left, right, &if_equal,
+                               &if_notequal);
             BIND(&if_both_bigint);
           }
 
@@ -13701,9 +13781,7 @@ TNode<Oddball> CodeStubAssembler::StrictEqual(
                     CollectFeedbackForString(rhs_instance_type);
                 *var_type_feedback = SmiOr(lhs_feedback, rhs_feedback);
               }
-              result = CAST(CallBuiltin(Builtin::kStringEqual,
-                                        NoContextConstant(), lhs, rhs));
-              Goto(&end);
+              BranchIfStringEqual(CAST(lhs), CAST(rhs), &end, &end, &result);
             }
 
             BIND(&if_rhsisnotstring);
@@ -13732,22 +13810,13 @@ TNode<Oddball> CodeStubAssembler::StrictEqual(
               {
                 if (Is64()) {
                   Label if_both_bigint(this);
-
                   GotoIfLargeBigInt(CAST(lhs), &if_both_bigint);
                   GotoIfLargeBigInt(CAST(rhs), &if_both_bigint);
 
                   OverwriteFeedback(var_type_feedback,
                                     CompareOperationFeedback::kBigInt64);
-
-                  TVARIABLE(UintPtrT, lhs_raw);
-                  TVARIABLE(UintPtrT, rhs_raw);
-                  BigIntToRawBytes(CAST(lhs), &lhs_raw, &lhs_raw);
-                  BigIntToRawBytes(CAST(rhs), &rhs_raw, &rhs_raw);
-
-                  Branch(WordEqual(UncheckedCast<WordT>(lhs_raw.value()),
-                                   UncheckedCast<WordT>(rhs_raw.value())),
-                         &if_equal, &if_notequal);
-
+                  BigInt64Comparison(Operation::kStrictEqual, lhs, rhs,
+                                     &if_equal, &if_notequal);
                   BIND(&if_both_bigint);
                 }
 
@@ -13924,6 +13993,36 @@ TNode<Oddball> CodeStubAssembler::StrictEqual(
   return result.value();
 }
 
+void CodeStubAssembler::BranchIfStringEqual(TNode<String> lhs,
+                                            TNode<IntPtrT> lhs_length,
+                                            TNode<String> rhs,
+                                            TNode<IntPtrT> rhs_length,
+                                            Label* if_true, Label* if_false,
+                                            TVariable<Oddball>* result) {
+  Label length_equal(this), length_not_equal(this);
+  Branch(IntPtrEqual(lhs_length, rhs_length), &length_equal, &length_not_equal);
+
+  BIND(&length_not_equal);
+  {
+    if (result != nullptr) *result = FalseConstant();
+    Goto(if_false);
+  }
+
+  BIND(&length_equal);
+  {
+    TNode<Oddball> value = CAST(CallBuiltin(
+        Builtin::kStringEqual, NoContextConstant(), lhs, rhs, lhs_length));
+    if (result != nullptr) {
+      *result = value;
+    }
+    if (if_true == if_false) {
+      Goto(if_true);
+    } else {
+      Branch(TaggedEqual(value, TrueConstant()), if_true, if_false);
+    }
+  }
+}
+
 // ECMA#sec-samevalue
 // This algorithm differs from the Strict Equality Comparison Algorithm in its
 // treatment of signed zeroes and NaNs.
@@ -13998,9 +14097,7 @@ void CodeStubAssembler::BranchIfSameValue(TNode<Object> lhs, TNode<Object> rhs,
               // Now we can only yield true if {rhs} is also a String
               // with the same sequence of characters.
               GotoIfNot(IsString(CAST(rhs)), if_false);
-              const TNode<Object> result = CallBuiltin(
-                  Builtin::kStringEqual, NoContextConstant(), lhs, rhs);
-              Branch(IsTrue(result), if_true, if_false);
+              BranchIfStringEqual(CAST(lhs), CAST(rhs), if_true, if_false);
             }
 
             BIND(&if_lhsisbigint);
@@ -15374,7 +15471,7 @@ TNode<BoolT> CodeStubAssembler::NeedsAnyPromiseHooks(TNode<Uint32T> flags) {
   return Word32NotEqual(flags, Int32Constant(0));
 }
 
-TNode<CodeT> CodeStubAssembler::LoadBuiltin(TNode<Smi> builtin_id) {
+TNode<Code> CodeStubAssembler::LoadBuiltin(TNode<Smi> builtin_id) {
   CSA_DCHECK(this, SmiBelow(builtin_id, SmiConstant(Builtins::kBuiltinCount)));
 
   TNode<IntPtrT> offset =
@@ -15386,13 +15483,13 @@ TNode<CodeT> CodeStubAssembler::LoadBuiltin(TNode<Smi> builtin_id) {
   return CAST(BitcastWordToTagged(Load<RawPtrT>(table, offset)));
 }
 
-TNode<CodeT> CodeStubAssembler::GetSharedFunctionInfoCode(
+TNode<Code> CodeStubAssembler::GetSharedFunctionInfoCode(
     TNode<SharedFunctionInfo> shared_info, TVariable<Uint16T>* data_type_out,
     Label* if_compile_lazy) {
   TNode<Object> sfi_data =
       LoadObjectField(shared_info, SharedFunctionInfo::kFunctionDataOffset);
 
-  TVARIABLE(CodeT, sfi_code);
+  TVARIABLE(Code, sfi_code);
 
   Label done(this);
   Label check_instance_type(this);
@@ -15418,7 +15515,7 @@ TNode<CodeT> CodeStubAssembler::GetSharedFunctionInfoCode(
 
   int32_t case_values[] = {
     BYTECODE_ARRAY_TYPE,
-    CODET_TYPE,
+    CODE_TYPE,
     UNCOMPILED_DATA_WITHOUT_PREPARSE_DATA_TYPE,
     UNCOMPILED_DATA_WITH_PREPARSE_DATA_TYPE,
     UNCOMPILED_DATA_WITHOUT_PREPARSE_DATA_WITH_JOB_TYPE,
@@ -15468,7 +15565,7 @@ TNode<CodeT> CodeStubAssembler::GetSharedFunctionInfoCode(
   // IsBaselineData: Execute baseline code
   BIND(&check_is_baseline_data);
   {
-    TNode<CodeT> baseline_code = CAST(sfi_data);
+    TNode<Code> baseline_code = CAST(sfi_data);
     sfi_code = baseline_code;
     Goto(&done);
   }
@@ -15490,7 +15587,7 @@ TNode<CodeT> CodeStubAssembler::GetSharedFunctionInfoCode(
   CSA_DCHECK(this,
              Word32Equal(data_type, Int32Constant(INTERPRETER_DATA_TYPE)));
   {
-    TNode<CodeT> trampoline =
+    TNode<Code> trampoline =
         LoadInterpreterDataInterpreterTrampoline(CAST(sfi_data));
     sfi_code = trampoline;
   }
@@ -15518,28 +15615,20 @@ TNode<CodeT> CodeStubAssembler::GetSharedFunctionInfoCode(
   return sfi_code.value();
 }
 
-TNode<RawPtrT> CodeStubAssembler::GetCodeEntry(TNode<CodeT> code) {
-#ifdef V8_EXTERNAL_CODE_SPACE
-  TNode<CodeDataContainer> cdc = CodeDataContainerFromCodeT(code);
-  return LoadObjectField<RawPtrT>(
-      cdc, IntPtrConstant(CodeDataContainer::kCodeEntryPointOffset));
-#else
-  TNode<IntPtrT> object = BitcastTaggedToWord(code);
-  return ReinterpretCast<RawPtrT>(
-      IntPtrAdd(object, IntPtrConstant(Code::kHeaderSize - kHeapObjectTag)));
-#endif
+TNode<RawPtrT> CodeStubAssembler::GetCodeEntry(TNode<Code> code) {
+  return LoadObjectField<RawPtrT>(code,
+                                  IntPtrConstant(Code::kCodeEntryPointOffset));
 }
 
-TNode<BoolT> CodeStubAssembler::IsMarkedForDeoptimization(TNode<CodeT> codet) {
-  return IsSetWord32<Code::MarkedForDeoptimizationField>(
-      LoadObjectField<Int32T>(CodeDataContainerFromCodeT(codet),
-                              CodeDataContainer::kKindSpecificFlagsOffset));
+TNode<BoolT> CodeStubAssembler::IsMarkedForDeoptimization(TNode<Code> code) {
+  return IsSetWord32<InstructionStream::MarkedForDeoptimizationField>(
+      LoadObjectField<Int32T>(code, Code::kKindSpecificFlagsOffset));
 }
 
 TNode<JSFunction> CodeStubAssembler::AllocateFunctionWithMapAndContext(
     TNode<Map> map, TNode<SharedFunctionInfo> shared_info,
     TNode<Context> context) {
-  const TNode<CodeT> code = GetSharedFunctionInfoCode(shared_info);
+  const TNode<Code> code = GetSharedFunctionInfoCode(shared_info);
 
   // TODO(ishell): All the callers of this function pass map loaded from
   // Context::STRICT_FUNCTION_WITHOUT_PROTOTYPE_MAP_INDEX. So we can remove
@@ -16753,9 +16842,9 @@ void CodeStubAssembler::SharedValueBarrier(
   TNode<Uint16T> value_instance_type =
       LoadMapInstanceType(LoadMap(CAST(value)));
   GotoIf(IsSharedStringInstanceType(value_instance_type), &skip_barrier);
-  GotoIf(IsJSSharedStructInstanceType(value_instance_type), &skip_barrier);
+  GotoIf(IsAlwaysSharedSpaceJSObjectInstanceType(value_instance_type),
+         &skip_barrier);
   GotoIf(IsHeapNumberInstanceType(value_instance_type), &check_in_shared_heap);
-  GotoIf(IsJSSharedArrayInstanceType(value_instance_type), &skip_barrier);
   Goto(&slow);
 
   BIND(&check_in_shared_heap);

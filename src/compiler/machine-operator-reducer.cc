@@ -5,6 +5,7 @@
 #include "src/compiler/machine-operator-reducer.h"
 
 #include <cmath>
+#include <cstdint>
 #include <limits>
 
 #include "src/base/bits.h"
@@ -12,6 +13,7 @@
 #include "src/base/ieee754.h"
 #include "src/base/logging.h"
 #include "src/base/overflowing-math.h"
+#include "src/builtins/builtins.h"
 #include "src/compiler/diamond.h"
 #include "src/compiler/graph.h"
 #include "src/compiler/js-operator.h"
@@ -771,7 +773,7 @@ Reduction MachineOperatorReducer::Reduce(Node* node) {
     case IrOpcode::kFloat64Cos: {
       Float64Matcher m(node->InputAt(0));
       if (m.HasResolvedValue())
-        return ReplaceFloat64(base::ieee754::cos(m.ResolvedValue()));
+        return ReplaceFloat64(COS_IMPL(m.ResolvedValue()));
       break;
     }
     case IrOpcode::kFloat64Cosh: {
@@ -836,7 +838,7 @@ Reduction MachineOperatorReducer::Reduce(Node* node) {
     case IrOpcode::kFloat64Sin: {
       Float64Matcher m(node->InputAt(0));
       if (m.HasResolvedValue())
-        return ReplaceFloat64(base::ieee754::sin(m.ResolvedValue()));
+        return ReplaceFloat64(SIN_IMPL(m.ResolvedValue()));
       break;
     }
     case IrOpcode::kFloat64Sinh: {
@@ -898,6 +900,8 @@ Reduction MachineOperatorReducer::Reduce(Node* node) {
     case IrOpcode::kBitcastWord32ToWord64: {
       Int32Matcher m(node->InputAt(0));
       if (m.HasResolvedValue()) return ReplaceInt64(m.ResolvedValue());
+      // No need to truncate the value, since top 32 bits are not important.
+      if (m.IsTruncateInt64ToInt32()) return Replace(m.node()->InputAt(0));
       break;
     }
     case IrOpcode::kChangeInt32ToInt64: {
@@ -1049,7 +1053,8 @@ Reduction MachineOperatorReducer::ReduceTruncateInt64ToInt32(Node* node) {
   Int64Matcher m(node->InputAt(0));
   if (m.HasResolvedValue())
     return ReplaceInt32(static_cast<int32_t>(m.ResolvedValue()));
-  if (m.IsChangeInt32ToInt64()) return Replace(m.node()->InputAt(0));
+  if (m.IsChangeInt32ToInt64() || m.IsChangeUint32ToUint64())
+    return Replace(m.node()->InputAt(0));
   // TruncateInt64ToInt32(BitcastTaggedToWordForTagAndSmiBits(Load(x))) =>
   // Load(x)
   // where the new Load uses Int32 rather than the tagged representation.
@@ -2548,6 +2553,20 @@ Reduction MachineOperatorReducer::ReduceWord32Equal(Node* node) {
       node->ReplaceInput(1, Uint32Constant(replacements->second));
       return Changed(node);
     }
+
+    // Simplifying (x+k1)==k2 into x==k2-k1.
+    if (m.left().IsInt32Add() && m.right().IsInt32Constant()) {
+      Int32AddMatcher m_add(m.left().node());
+      if (m_add.right().IsInt32Constant()) {
+        int32_t lte_right = m.right().ResolvedValue();
+        int32_t add_right = m_add.right().ResolvedValue();
+        // No need to consider overflow in this condition (==).
+        node->ReplaceInput(0, m_add.left().node());
+        node->ReplaceInput(1, Int32Constant(static_cast<uint32_t>(lte_right) -
+                                            static_cast<uint32_t>(add_right)));
+        return Changed(node);
+      }
+    }
   }
 
   return NoChange();
@@ -2574,6 +2593,20 @@ Reduction MachineOperatorReducer::ReduceWord64Equal(Node* node) {
       node->ReplaceInput(0, replacements->first);
       node->ReplaceInput(1, Uint64Constant(replacements->second));
       return Changed(node);
+    }
+
+    // Simplifying (x+k1)==k2 into x==k2-k1.
+    if (m.left().IsInt64Add() && m.right().IsInt64Constant()) {
+      Int64AddMatcher m_add(m.left().node());
+      if (m_add.right().IsInt64Constant()) {
+        int64_t lte_right = m.right().ResolvedValue();
+        int64_t add_right = m_add.right().ResolvedValue();
+        // No need to consider overflow in this condition (==).
+        node->ReplaceInput(0, m_add.left().node());
+        node->ReplaceInput(1, Int64Constant(static_cast<uint64_t>(lte_right) -
+                                            static_cast<uint64_t>(add_right)));
+        return Changed(node);
+      }
     }
 
     /*

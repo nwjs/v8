@@ -39,9 +39,9 @@ extern runtime WasmArrayCopy(
 extern runtime WasmArrayNewSegment(
     Context, WasmInstanceObject, Smi, Smi, Smi, Map): Object;
 extern runtime WasmStringNewWtf8(
-    Context, WasmInstanceObject, Smi, Smi, Number, Number): String;
+    Context, WasmInstanceObject, Smi, Smi, Number, Number): String|Null;
 extern runtime WasmStringNewWtf8Array(
-    Context, Smi, WasmArray, Smi, Smi): String;
+    Context, Smi, WasmArray, Smi, Smi): String|Null;
 extern runtime WasmStringNewWtf16(
     Context, WasmInstanceObject, Smi, Number, Number): String;
 extern runtime WasmStringNewWtf16Array(Context, WasmArray, Smi, Smi): String;
@@ -59,6 +59,7 @@ extern runtime WasmStringViewWtf8Encode(
     Context, WasmInstanceObject, Smi, ByteArray, Number, Number, Number): JSAny;
 extern runtime WasmStringViewWtf8Slice(
     Context, ByteArray, Number, Number): String;
+extern runtime WasmStringCompare(NoContext, String, String): Smi;
 extern runtime WasmJSToWasmObject(Context, JSAny, Smi): JSAny;
 }
 
@@ -505,7 +506,6 @@ builtin WasmI64AtomicWait(
 // Type feedback collection support for `call_ref`.
 
 extern macro GetCodeEntry(Code): RawPtr;
-extern macro GetCodeEntry(CodeDataContainer): RawPtr;
 
 struct TargetAndInstance {
   target: RawPtr;
@@ -804,14 +804,15 @@ transitioning javascript builtin ExperimentalWasmConvertStringToArray(
 }
 
 builtin WasmStringNewWtf8(
-    offset: uint32, size: uint32, memory: Smi, utf8Variant: Smi): String {
+    offset: uint32, size: uint32, memory: Smi, utf8Variant: Smi): String|Null {
   const instance = LoadInstanceFromFrame();
   tail runtime::WasmStringNewWtf8(
       LoadContextFromInstance(instance), instance, memory, utf8Variant,
       WasmUint32ToNumber(offset), WasmUint32ToNumber(size));
 }
 builtin WasmStringNewWtf8Array(
-    start: uint32, end: uint32, array: WasmArray, utf8Variant: Smi): String {
+    start: uint32, end: uint32, array: WasmArray, utf8Variant: Smi): String|
+    Null {
   const context = LoadContextFromFrame();
   try {
     if (array.length < end) goto OffsetOutOfRange;
@@ -1241,6 +1242,10 @@ builtin WasmStringViewIterSlice(
   return (start == end) ?
       kEmptyString :
       string::SubString(string, Convert<uintptr>(start), Convert<uintptr>(end));
+}
+
+builtin WasmStringCompare(lhs: String, rhs: String): Smi {
+  tail runtime::WasmStringCompare(kNoContext, lhs, rhs);
 }
 
 builtin WasmExternInternalize(externObject: JSAny): JSAny {

@@ -265,7 +265,8 @@ bool CanOptimizeFunction(CodeKind target_kind, Handle<JSFunction> function,
     return CrashUnlessFuzzingReturnFalse(isolate);
   }
 
-  if (!v8_flags.turbofan) return false;
+  if (target_kind == CodeKind::TURBOFAN && !v8_flags.turbofan) return false;
+  if (target_kind == CodeKind::MAGLEV && !v8_flags.maglev) return false;
 
   if (function->shared().optimization_disabled() &&
       function->shared().disabled_optimization_reason() ==
@@ -325,11 +326,11 @@ Object OptimizeFunctionOnNextCall(RuntimeArguments& args, Isolate* isolate,
   // function has.
   if (!function->is_compiled()) {
     DCHECK(function->shared().HasBytecodeArray());
-    CodeT codet = *BUILTIN_CODE(isolate, InterpreterEntryTrampoline);
+    Code code = *BUILTIN_CODE(isolate, InterpreterEntryTrampoline);
     if (function->shared().HasBaselineCode()) {
-      codet = function->shared().baseline_code(kAcquireLoad);
+      code = function->shared().baseline_code(kAcquireLoad);
     }
-    function->set_code(codet);
+    function->set_code(code);
   }
 
   TraceManualRecompile(*function, target_kind, concurrency_mode);
@@ -403,10 +404,10 @@ RUNTIME_FUNCTION(Runtime_BenchMaglev) {
   Handle<JSFunction> function = args.at<JSFunction>(0);
   int count = args.smi_value_at(1);
 
-  Handle<CodeT> codet;
+  Handle<Code> code;
   base::ElapsedTimer timer;
   timer.Start();
-  codet = Maglev::Compile(isolate, function).ToHandleChecked();
+  code = Maglev::Compile(isolate, function).ToHandleChecked();
   for (int i = 1; i < count; ++i) {
     HandleScope handle_scope(isolate);
     Maglev::Compile(isolate, function);
@@ -414,7 +415,7 @@ RUNTIME_FUNCTION(Runtime_BenchMaglev) {
   PrintF("Maglev compile time: %g ms!\n",
          timer.Elapsed().InMillisecondsF() / count);
 
-  function->set_code(*codet);
+  function->set_code(*code);
 
   return ReadOnlyRoots(isolate).undefined_value();
 }
@@ -554,10 +555,9 @@ void FinalizeOptimization(Isolate* isolate) {
 #endif  // V8_ENABLE_MAGLEV
 }
 
-BytecodeOffset OffsetOfNextJumpLoop(Isolate* isolate, UnoptimizedFrame* frame) {
-  Handle<BytecodeArray> bytecode_array(frame->GetBytecodeArray(), isolate);
-  const int current_offset = frame->GetBytecodeOffset();
-
+BytecodeOffset OffsetOfNextJumpLoop(Isolate* isolate,
+                                    Handle<BytecodeArray> bytecode_array,
+                                    int current_offset) {
   interpreter::BytecodeArrayIterator it(bytecode_array, current_offset);
 
   // First, look for a loop that contains the current bytecode offset.
@@ -632,8 +632,7 @@ RUNTIME_FUNCTION(Runtime_OptimizeOsr) {
     return ReadOnlyRoots(isolate).undefined_value();
   }
 
-  DCHECK(it.frame()->is_java_script());
-  if (it.frame()->is_turbofan()) {
+  if (!it.frame()->is_unoptimized() && !it.frame()->is_maglev()) {
     // Nothing to be done.
     return ReadOnlyRoots(isolate).undefined_value();
   }
@@ -653,11 +652,23 @@ RUNTIME_FUNCTION(Runtime_OptimizeOsr) {
   // If not (e.g. because we enter a nested loop first), the next JumpLoop will
   // see the cached OSR code with a mismatched offset, and trigger
   // non-concurrent OSR compilation and installation.
-  // TODO(v8:7700): Support spawning a concurrent job when OSRing from Maglev.
-  if (it.frame()->is_unoptimized() &&
-      isolate->concurrent_recompilation_enabled() && v8_flags.concurrent_osr) {
-    const BytecodeOffset osr_offset =
-        OffsetOfNextJumpLoop(isolate, UnoptimizedFrame::cast(it.frame()));
+  if (isolate->concurrent_recompilation_enabled() && v8_flags.concurrent_osr) {
+    BytecodeOffset osr_offset = BytecodeOffset::None();
+    if (it.frame()->is_unoptimized()) {
+      UnoptimizedFrame* frame = UnoptimizedFrame::cast(it.frame());
+      Handle<BytecodeArray> bytecode_array(frame->GetBytecodeArray(), isolate);
+      const int current_offset = frame->GetBytecodeOffset();
+      osr_offset =
+          OffsetOfNextJumpLoop(isolate, bytecode_array, current_offset);
+    } else {
+      MaglevFrame* frame = MaglevFrame::cast(it.frame());
+      Handle<BytecodeArray> bytecode_array(
+          frame->function().shared().GetBytecodeArray(isolate), isolate);
+      const int current_offset = frame->GetBytecodeOffsetForOSR().ToInt();
+      osr_offset =
+          OffsetOfNextJumpLoop(isolate, bytecode_array, current_offset);
+    }
+
     if (osr_offset.IsNone()) {
       // The loop may have been elided by bytecode generation (e.g. for
       // patterns such as `do { ... } while (false);`.
@@ -674,7 +685,8 @@ RUNTIME_FUNCTION(Runtime_OptimizeOsr) {
     USE(unused_result);
 
     // Finalize again to finish the queued job. The next call into
-    // Runtime::kCompileOptimizedOSR will pick up the cached Code object.
+    // Runtime::kCompileOptimizedOSR will pick up the cached InstructionStream
+    // object.
     FinalizeOptimization(isolate);
   }
 
@@ -736,9 +748,9 @@ RUNTIME_FUNCTION(Runtime_GetOptimizationStatus) {
   DCHECK_EQ(args.length(), 1);
 
   int status = 0;
-  if (v8_flags.lite_mode || v8_flags.jitless) {
-    // Both jitless and lite modes cannot optimize. Unit tests should handle
-    // these the same way. In the future, the two flags may become synonyms.
+  if (v8_flags.lite_mode || v8_flags.jitless || !V8_ENABLE_TURBOFAN_BOOL) {
+    // These modes cannot optimize. Unit tests should handle these the same
+    // way.
     status |= static_cast<int>(OptimizationStatus::kLiteMode);
   }
   if (!isolate->use_optimizer()) {
@@ -777,7 +789,7 @@ RUNTIME_FUNCTION(Runtime_GetOptimizationStatus) {
   }
 
   if (function->HasAttachedOptimizedCode()) {
-    CodeT code = function->code();
+    Code code = function->code();
     if (code.marked_for_deoptimization()) {
       status |= static_cast<int>(OptimizationStatus::kMarkedForDeoptimization);
     } else {
@@ -1425,7 +1437,7 @@ RUNTIME_FUNCTION(Runtime_RegexpHasNativeCode) {
   bool is_latin1 = Oddball::cast(args[1]).ToBool(isolate);
   bool result;
   if (regexp.type_tag() == JSRegExp::IRREGEXP) {
-    result = regexp.code(is_latin1).IsCodeT();
+    result = regexp.code(is_latin1).IsCode();
   } else {
     result = false;
   }
@@ -1649,15 +1661,16 @@ RUNTIME_FUNCTION(Runtime_EnableCodeLoggingForTesting) {
     void SetterCallbackEvent(Handle<Name> name, Address entry_point) final {}
     void RegExpCodeCreateEvent(Handle<AbstractCode> code,
                                Handle<String> source) final {}
-    void CodeMoveEvent(AbstractCode from, AbstractCode to) final {}
+    void CodeMoveEvent(InstructionStream from, InstructionStream to) final {}
+    void BytecodeMoveEvent(BytecodeArray from, BytecodeArray to) final {}
     void SharedFunctionInfoMoveEvent(Address from, Address to) final {}
     void NativeContextMoveEvent(Address from, Address to) final {}
     void CodeMovingGCEvent() final {}
     void CodeDisableOptEvent(Handle<AbstractCode> code,
                              Handle<SharedFunctionInfo> shared) final {}
-    void CodeDeoptEvent(Handle<Code> code, DeoptimizeKind kind, Address pc,
-                        int fp_to_sp_delta) final {}
-    void CodeDependencyChangeEvent(Handle<Code> code,
+    void CodeDeoptEvent(Handle<InstructionStream> code, DeoptimizeKind kind,
+                        Address pc, int fp_to_sp_delta) final {}
+    void CodeDependencyChangeEvent(Handle<InstructionStream> code,
                                    Handle<SharedFunctionInfo> shared,
                                    const char* reason) final {}
     void WeakCodeClearEvent() final {}
@@ -1713,13 +1726,6 @@ RUNTIME_FUNCTION(Runtime_IsSharedString) {
   Handle<HeapObject> obj = args.at<HeapObject>(0);
   return isolate->heap()->ToBoolean(obj->IsString() &&
                                     Handle<String>::cast(obj)->IsShared());
-}
-
-RUNTIME_FUNCTION(Runtime_InSharedHeap) {
-  HandleScope scope(isolate);
-  DCHECK_EQ(1, args.length());
-  Handle<HeapObject> obj = args.at<HeapObject>(0);
-  return isolate->heap()->ToBoolean(obj->InSharedWritableHeap());
 }
 
 RUNTIME_FUNCTION(Runtime_IsInPlaceInternalizableString) {

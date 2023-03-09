@@ -190,22 +190,24 @@ class V8FileLogger : public LogEventListener {
   void SetterCallbackEvent(Handle<Name> name, Address entry_point) override;
   void RegExpCodeCreateEvent(Handle<AbstractCode> code,
                              Handle<String> source) override;
-  void CodeMoveEvent(AbstractCode from, AbstractCode to) override;
+  void CodeMoveEvent(InstructionStream from, InstructionStream to) override;
+  void BytecodeMoveEvent(BytecodeArray from, BytecodeArray to) override;
   void SharedFunctionInfoMoveEvent(Address from, Address to) override;
   void NativeContextMoveEvent(Address from, Address to) override {}
   void CodeMovingGCEvent() override;
   void CodeDisableOptEvent(Handle<AbstractCode> code,
                            Handle<SharedFunctionInfo> shared) override;
-  void CodeDeoptEvent(Handle<Code> code, DeoptimizeKind kind, Address pc,
-                      int fp_to_sp_delta) override;
-  void CodeDependencyChangeEvent(Handle<Code> code,
+  void CodeDeoptEvent(Handle<InstructionStream> code, DeoptimizeKind kind,
+                      Address pc, int fp_to_sp_delta) override;
+  void CodeDependencyChangeEvent(Handle<InstructionStream> code,
                                  Handle<SharedFunctionInfo> sfi,
                                  const char* reason) override;
   void FeedbackVectorEvent(FeedbackVector vector, AbstractCode code);
   void WeakCodeClearEvent() override {}
 
-  void ProcessDeoptEvent(Handle<Code> code, SourcePosition position,
-                         const char* kind, const char* reason);
+  void ProcessDeoptEvent(Handle<InstructionStream> code,
+                         SourcePosition position, const char* kind,
+                         const char* reason);
 
   // Emits a code line info record event.
   void CodeLinePosInfoRecordEvent(Address code_start,
@@ -431,9 +433,9 @@ class V8_EXPORT_PRIVATE CodeEventLogger : public LogEventListener {
   void SharedFunctionInfoMoveEvent(Address from, Address to) override {}
   void NativeContextMoveEvent(Address from, Address to) override {}
   void CodeMovingGCEvent() override {}
-  void CodeDeoptEvent(Handle<Code> code, DeoptimizeKind kind, Address pc,
-                      int fp_to_sp_delta) override {}
-  void CodeDependencyChangeEvent(Handle<Code> code,
+  void CodeDeoptEvent(Handle<InstructionStream> code, DeoptimizeKind kind,
+                      Address pc, int fp_to_sp_delta) override {}
+  void CodeDependencyChangeEvent(Handle<InstructionStream> code,
                                  Handle<SharedFunctionInfo> sfi,
                                  const char* reason) override {}
   void WeakCodeClearEvent() override {}
@@ -498,13 +500,14 @@ class ExternalLogEventListener : public LogEventListener {
   void SetterCallbackEvent(Handle<Name> name, Address entry_point) override {}
   void SharedFunctionInfoMoveEvent(Address from, Address to) override {}
   void NativeContextMoveEvent(Address from, Address to) override {}
-  void CodeMoveEvent(AbstractCode from, AbstractCode to) override;
+  void CodeMoveEvent(InstructionStream from, InstructionStream to) override;
+  void BytecodeMoveEvent(BytecodeArray from, BytecodeArray to) override;
   void CodeDisableOptEvent(Handle<AbstractCode> code,
                            Handle<SharedFunctionInfo> shared) override {}
   void CodeMovingGCEvent() override {}
-  void CodeDeoptEvent(Handle<Code> code, DeoptimizeKind kind, Address pc,
-                      int fp_to_sp_delta) override {}
-  void CodeDependencyChangeEvent(Handle<Code> code,
+  void CodeDeoptEvent(Handle<InstructionStream> code, DeoptimizeKind kind,
+                      Address pc, int fp_to_sp_delta) override {}
+  void CodeDependencyChangeEvent(Handle<InstructionStream> code,
                                  Handle<SharedFunctionInfo> sfi,
                                  const char* reason) override {}
   void WeakCodeClearEvent() override {}

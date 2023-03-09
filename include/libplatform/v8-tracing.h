@@ -34,7 +34,7 @@ class TraceEventListener;
 
 const int kTraceMaxNumArgs = 2;
 
-class V8_PLATFORM_EXPORT TraceObject {
+class V8_EXPORT TraceObject {
  public:
   union ArgValue {
     uint64_t as_uint;
@@ -45,7 +45,7 @@ class V8_PLATFORM_EXPORT TraceObject {
   };
 
   TraceObject() = default;
-  ~TraceObject();
+  ~TraceObject() { delete[] parameter_copy_storage_; }
   void Initialize(
       char phase, const uint8_t* category_enabled_flag, const char* name,
       const char* scope, uint64_t id, uint64_t bind_id, int num_args,

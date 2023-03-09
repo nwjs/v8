@@ -153,6 +153,40 @@ std::ostream& operator<<(std::ostream& os, ObjectAccess const& access) {
   return os;
 }
 
+#if V8_ENABLE_WEBASSEMBLY
+
+V8_EXPORT_PRIVATE bool operator==(WasmFieldInfo const& lhs,
+                                  WasmFieldInfo const& rhs) {
+  return lhs.field_index == rhs.field_index && lhs.type == rhs.type &&
+         lhs.is_signed == rhs.is_signed;
+}
+
+size_t hash_value(WasmFieldInfo const& info) {
+  return base::hash_combine(info.field_index, info.type, info.is_signed);
+}
+
+V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os,
+                                           WasmFieldInfo const& info) {
+  return os << info.field_index << ", "
+            << (info.is_signed ? "signed" : "unsigned");
+}
+
+V8_EXPORT_PRIVATE bool operator==(WasmElementInfo const& lhs,
+                                  WasmElementInfo const& rhs) {
+  return lhs.type == rhs.type && lhs.is_signed == rhs.is_signed;
+}
+
+size_t hash_value(WasmElementInfo const& info) {
+  return base::hash_combine(info.type, info.is_signed);
+}
+
+V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os,
+                                           WasmElementInfo const& info) {
+  return os << (info.is_signed ? "signed" : "unsigned");
+}
+
+#endif
+
 const FieldAccess& FieldAccessOf(const Operator* op) {
   DCHECK_NOT_NULL(op);
   DCHECK(op->opcode() == IrOpcode::kLoadField ||
@@ -554,7 +588,9 @@ BigIntOperationHint BigIntOperationHintOf(const Operator* op) {
          op->opcode() == IrOpcode::kSpeculativeBigIntBitwiseXor ||
          op->opcode() == IrOpcode::kSpeculativeBigIntShiftLeft ||
          op->opcode() == IrOpcode::kSpeculativeBigIntShiftRight ||
-         op->opcode() == IrOpcode::kSpeculativeBigIntEqual);
+         op->opcode() == IrOpcode::kSpeculativeBigIntEqual ||
+         op->opcode() == IrOpcode::kSpeculativeBigIntLessThan ||
+         op->opcode() == IrOpcode::kSpeculativeBigIntLessThanOrEqual);
   return OpParameter<BigIntOperationHint>(op);
 }
 
@@ -576,6 +612,26 @@ NumberOperationParameters const& NumberOperationParametersOf(
     Operator const* op) {
   DCHECK_EQ(IrOpcode::kSpeculativeToNumber, op->opcode());
   return OpParameter<NumberOperationParameters>(op);
+}
+
+bool operator==(BigIntOperationParameters const& lhs,
+                BigIntOperationParameters const& rhs) {
+  return lhs.hint() == rhs.hint() && lhs.feedback() == rhs.feedback();
+}
+
+size_t hash_value(BigIntOperationParameters const& p) {
+  FeedbackSource::Hash feedback_hash;
+  return base::hash_combine(p.hint(), feedback_hash(p.feedback()));
+}
+
+std::ostream& operator<<(std::ostream& os, BigIntOperationParameters const& p) {
+  return os << p.hint() << ", " << p.feedback();
+}
+
+BigIntOperationParameters const& BigIntOperationParametersOf(
+    Operator const* op) {
+  DCHECK_EQ(IrOpcode::kSpeculativeToBigInt, op->opcode());
+  return OpParameter<BigIntOperationParameters>(op);
 }
 
 bool operator==(SpeculativeBigIntAsNParameters const& lhs,
@@ -741,6 +797,8 @@ bool operator==(CheckMinusZeroParameters const& lhs,
   V(Integral32OrMinusZeroToBigInt, Operator::kNoProperties, 1, 0) \
   V(NumberSilenceNaN, Operator::kNoProperties, 1, 0)              \
   V(BigIntEqual, Operator::kNoProperties, 2, 0)                   \
+  V(BigIntLessThan, Operator::kNoProperties, 2, 0)                \
+  V(BigIntLessThanOrEqual, Operator::kNoProperties, 2, 0)         \
   V(BigIntNegate, Operator::kNoProperties, 1, 0)                  \
   V(StringConcat, Operator::kNoProperties, 3, 0)                  \
   V(StringToNumber, Operator::kNoProperties, 1, 0)                \
@@ -1213,6 +1271,21 @@ struct SimplifiedOperatorGlobalCache final {
   AssertNotNullOperator kAssertNotNullIllegalCast{TrapId::kTrapIllegalCast};
   AssertNotNullOperator kAssertNotNullNullDereference{
       TrapId::kTrapNullDereference};
+
+  struct WasmArrayLengthOperator final : public Operator {
+    WasmArrayLengthOperator()
+        : Operator(IrOpcode::kWasmArrayLength, Operator::kEliminatable,
+                   "WasmArrayLength", 1, 1, 1, 1, 1, 0) {}
+  };
+  WasmArrayLengthOperator kWasmArrayLength;
+
+  struct WasmArrayInitializeLengthOperator final : public Operator {
+    WasmArrayInitializeLengthOperator()
+        : Operator(IrOpcode::kWasmArrayInitializeLength,
+                   Operator::kNoThrow | Operator::kNoRead | Operator::kNoDeopt,
+                   "WasmArrayInitializeLength", 2, 1, 1, 0, 1, 0) {}
+  };
+  WasmArrayInitializeLengthOperator kWasmArrayInitializeLength;
 #endif
 
 #define SPECULATIVE_NUMBER_BINOP(Name)                                      \
@@ -1251,6 +1324,21 @@ struct SimplifiedOperatorGlobalCache final {
       kSpeculativeToNumberNumberOperator;
   SpeculativeToNumberOperator<NumberOperationHint::kNumberOrOddball>
       kSpeculativeToNumberNumberOrOddballOperator;
+
+  template <BigIntOperationHint kHint>
+  struct SpeculativeToBigIntOperator final
+      : public Operator1<BigIntOperationParameters> {
+    SpeculativeToBigIntOperator()
+        : Operator1<BigIntOperationParameters>(
+              IrOpcode::kSpeculativeToBigInt,
+              Operator::kFoldable | Operator::kNoThrow, "SpeculativeToBigInt",
+              1, 1, 1, 1, 1, 0,
+              BigIntOperationParameters(kHint, FeedbackSource())) {}
+  };
+  SpeculativeToBigIntOperator<BigIntOperationHint::kBigInt64>
+      kSpeculativeToBigIntBigInt64Operator;
+  SpeculativeToBigIntOperator<BigIntOperationHint::kBigInt>
+      kSpeculativeToBigIntBigIntOperator;
 };
 
 namespace {
@@ -1386,6 +1474,12 @@ const Operator* SimplifiedOperatorBuilder::VerifyType() {
                                "VerifyType", 1, 0, 0, 1, 0, 0);
 }
 
+const Operator* SimplifiedOperatorBuilder::CheckTurboshaftTypeOf() {
+  return zone()->New<Operator>(IrOpcode::kCheckTurboshaftTypeOf,
+                               Operator::kNoThrow | Operator::kNoDeopt,
+                               "CheckTurboshaftTypeOf", 2, 1, 1, 1, 1, 0);
+}
+
 #if V8_ENABLE_WEBASSEMBLY
 const Operator* SimplifiedOperatorBuilder::WasmTypeCheck(
     WasmTypeCheckConfig config) {
@@ -1436,6 +1530,46 @@ const Operator* SimplifiedOperatorBuilder::WasmExternExternalize() {
                                Operator::kEliminatable, "WasmExternExternalize",
                                1, 1, 1, 1, 1, 1);
 }
+
+const Operator* SimplifiedOperatorBuilder::WasmStructGet(
+    const wasm::StructType* type, int field_index, bool is_signed) {
+  return zone()->New<Operator1<WasmFieldInfo>>(
+      IrOpcode::kWasmStructGet, Operator::kEliminatable, "WasmStructGet", 1, 1,
+      1, 1, 1, 0, WasmFieldInfo{type, field_index, is_signed});
+}
+
+const Operator* SimplifiedOperatorBuilder::WasmStructSet(
+    const wasm::StructType* type, int field_index) {
+  return zone()->New<Operator1<WasmFieldInfo>>(
+      IrOpcode::kWasmStructSet,
+      Operator::kNoDeopt | Operator::kNoThrow | Operator::kNoRead,
+      "WasmStructSet", 2, 1, 1, 0, 1, 0,
+      WasmFieldInfo{type, field_index, true /* unused */});
+}
+
+const Operator* SimplifiedOperatorBuilder::WasmArrayGet(
+    const wasm::ArrayType* type, bool is_signed) {
+  return zone()->New<Operator1<WasmElementInfo>>(
+      IrOpcode::kWasmArrayGet, Operator::kEliminatable, "WasmArrayGet", 2, 1, 1,
+      1, 1, 0, WasmElementInfo{type, is_signed});
+}
+
+const Operator* SimplifiedOperatorBuilder::WasmArraySet(
+    const wasm::ArrayType* type) {
+  return zone()->New<Operator1<const wasm::ArrayType*>>(
+      IrOpcode::kWasmArraySet,
+      Operator::kNoDeopt | Operator::kNoThrow | Operator::kNoRead,
+      "WasmArraySet", 3, 1, 1, 0, 1, 0, type);
+}
+
+const Operator* SimplifiedOperatorBuilder::WasmArrayLength() {
+  return &cache_.kWasmArrayLength;
+}
+
+const Operator* SimplifiedOperatorBuilder::WasmArrayInitializeLength() {
+  return &cache_.kWasmArrayInitializeLength;
+}
+
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 const Operator* SimplifiedOperatorBuilder::CheckIf(
@@ -1639,6 +1773,7 @@ const Operator* SimplifiedOperatorBuilder::CheckFloat64Hole(
       CheckFloat64HoleParameters(mode, feedback));
 }
 
+// TODO(panq): Cache speculative bigint operators.
 #define SPECULATIVE_BIGINT_BINOP(Name)                                         \
   const Operator* SimplifiedOperatorBuilder::Name(BigIntOperationHint hint) {  \
     return zone()->New<Operator1<BigIntOperationHint>>(                        \
@@ -1646,6 +1781,9 @@ const Operator* SimplifiedOperatorBuilder::CheckFloat64Hole(
         1, 1, 1, 1, 0, hint);                                                  \
   }
 SIMPLIFIED_SPECULATIVE_BIGINT_BINOP_LIST(SPECULATIVE_BIGINT_BINOP)
+SPECULATIVE_BIGINT_BINOP(SpeculativeBigIntEqual)
+SPECULATIVE_BIGINT_BINOP(SpeculativeBigIntLessThan)
+SPECULATIVE_BIGINT_BINOP(SpeculativeBigIntLessThanOrEqual)
 #undef SPECULATIVE_BIGINT_BINOP
 
 const Operator* SimplifiedOperatorBuilder::SpeculativeBigIntNegate(
@@ -1654,6 +1792,22 @@ const Operator* SimplifiedOperatorBuilder::SpeculativeBigIntNegate(
       IrOpcode::kSpeculativeBigIntNegate,
       Operator::kFoldable | Operator::kNoThrow, "SpeculativeBigIntNegate", 1, 1,
       1, 1, 1, 0, hint);
+}
+
+const Operator* SimplifiedOperatorBuilder::SpeculativeToBigInt(
+    BigIntOperationHint hint, const FeedbackSource& feedback) {
+  if (!feedback.IsValid()) {
+    switch (hint) {
+      case BigIntOperationHint::kBigInt64:
+        return &cache_.kSpeculativeToBigIntBigInt64Operator;
+      case BigIntOperationHint::kBigInt:
+        return &cache_.kSpeculativeToBigIntBigIntOperator;
+    }
+  }
+  return zone()->New<Operator1<BigIntOperationParameters>>(
+      IrOpcode::kSpeculativeToBigInt, Operator::kFoldable | Operator::kNoThrow,
+      "SpeculativeToBigInt", 1, 1, 1, 1, 1, 0,
+      BigIntOperationParameters(hint, feedback));
 }
 
 const Operator* SimplifiedOperatorBuilder::CheckClosure(
@@ -1951,15 +2105,6 @@ const Operator* SimplifiedOperatorBuilder::SpeculativeNumberEqual(
       return &cache_.kSpeculativeNumberEqualNumberOrOddballOperator;
   }
   UNREACHABLE();
-}
-
-const Operator* SimplifiedOperatorBuilder::SpeculativeBigIntEqual(
-    BigIntOperationHint hint) {
-  // TODO(panq): Cache speculative bigint operators.
-  return zone()->New<Operator1<BigIntOperationHint>>(
-      IrOpcode::kSpeculativeBigIntEqual,
-      Operator::kFoldable | Operator::kNoThrow, "SpeculativeBigIntEqual", 2, 1,
-      1, 1, 1, 0, hint);
 }
 
 #define ACCESS_OP_LIST(V)                                                  \

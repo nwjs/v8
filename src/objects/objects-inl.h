@@ -84,6 +84,11 @@ bool Object::InSharedWritableHeap() const {
   return IsHeapObject() && HeapObject::cast(*this).InSharedWritableHeap();
 }
 
+bool Object::IsJSObjectThatCanBeTrackedAsPrototype() const {
+  return IsHeapObject() &&
+         HeapObject::cast(*this).IsJSObjectThatCanBeTrackedAsPrototype();
+}
+
 #define IS_TYPE_FUNCTION_DEF(type_)                                        \
   bool Object::Is##type_() const {                                         \
     return IsHeapObject() && HeapObject::cast(*this).Is##type_();          \
@@ -94,18 +99,14 @@ bool Object::InSharedWritableHeap() const {
 HEAP_OBJECT_TYPE_LIST(IS_TYPE_FUNCTION_DEF)
 IS_TYPE_FUNCTION_DEF(HashTableBase)
 IS_TYPE_FUNCTION_DEF(SmallOrderedHashTable)
-IS_TYPE_FUNCTION_DEF(CodeT)
 #undef IS_TYPE_FUNCTION_DEF
 
-#define IS_TYPE_FUNCTION_DEF(Type, Value)                        \
+#define IS_TYPE_FUNCTION_DEF(Type, Value, _)                     \
   bool Object::Is##Type(Isolate* isolate) const {                \
     return Is##Type(ReadOnlyRoots(isolate));                     \
   }                                                              \
   bool Object::Is##Type(LocalIsolate* isolate) const {           \
     return Is##Type(ReadOnlyRoots(isolate));                     \
-  }                                                              \
-  bool Object::Is##Type(ReadOnlyRoots roots) const {             \
-    return SafeEquals(roots.Value());                            \
   }                                                              \
   bool Object::Is##Type() const {                                \
     return IsHeapObject() && HeapObject::cast(*this).Is##Type(); \
@@ -120,6 +121,22 @@ IS_TYPE_FUNCTION_DEF(CodeT)
     return Object::Is##Type(roots);                              \
   }                                                              \
   bool HeapObject::Is##Type() const { return Is##Type(GetReadOnlyRoots()); }
+ODDBALL_LIST(IS_TYPE_FUNCTION_DEF)
+#undef IS_TYPE_FUNCTION_DEF
+
+#if V8_STATIC_ROOTS_BOOL
+#define IS_TYPE_FUNCTION_DEF(Type, Value, CamelName)                       \
+  bool Object::Is##Type(ReadOnlyRoots roots) const {                       \
+    SLOW_DCHECK(CheckObjectComparisonAllowed(ptr(), roots.Value().ptr())); \
+    return V8HeapCompressionScheme::CompressTagged(ptr()) ==               \
+           StaticReadOnlyRoot::k##CamelName;                               \
+  }
+#else
+#define IS_TYPE_FUNCTION_DEF(Type, Value, _)         \
+  bool Object::Is##Type(ReadOnlyRoots roots) const { \
+    return (*this) == roots.Value();                 \
+  }
+#endif
 ODDBALL_LIST(IS_TYPE_FUNCTION_DEF)
 #undef IS_TYPE_FUNCTION_DEF
 
@@ -190,6 +207,13 @@ bool HeapObject::InSharedWritableHeap() const {
   return BasicMemoryChunk::FromHeapObject(*this)->InSharedHeap();
 }
 
+bool HeapObject::IsJSObjectThatCanBeTrackedAsPrototype() const {
+  // Do not optimize objects in the shared heap because it is not
+  // threadsafe. Objects in the shared heap have fixed layouts and their maps
+  // never change.
+  return IsJSObject() && !InSharedWritableHeap();
+}
+
 bool HeapObject::IsNullOrUndefined(Isolate* isolate) const {
   return IsNullOrUndefined(ReadOnlyRoots(isolate));
 }
@@ -200,11 +224,6 @@ bool HeapObject::IsNullOrUndefined(ReadOnlyRoots roots) const {
 
 bool HeapObject::IsNullOrUndefined() const {
   return IsNullOrUndefined(GetReadOnlyRoots());
-}
-
-DEF_GETTER(HeapObject, IsCodeT, bool) {
-  return V8_EXTERNAL_CODE_SPACE_BOOL ? IsCodeDataContainer(cage_base)
-                                     : IsCode(cage_base);
 }
 
 DEF_GETTER(HeapObject, IsUniqueName, bool) {
@@ -784,6 +803,10 @@ void HeapObject::VerifySmiField(int offset) {
 
 #endif
 
+ReadOnlyRoots HeapObject::EarlyGetReadOnlyRoots() const {
+  return ReadOnlyHeap::EarlyGetReadOnlyRoots(*this);
+}
+
 ReadOnlyRoots HeapObject::GetReadOnlyRoots() const {
   return ReadOnlyHeap::GetReadOnlyRoots(*this);
 }
@@ -798,9 +821,9 @@ ReadOnlyRoots HeapObject::GetReadOnlyRoots(PtrComprCageBase cage_base) const {
 }
 
 Map HeapObject::map() const {
-  // This method is never used for objects located in code space (Code and
-  // free space fillers) and thus it is fine to use auto-computed cage base
-  // value.
+  // This method is never used for objects located in code space
+  // (InstructionStream and free space fillers) and thus it is fine to use
+  // auto-computed cage base value.
   DCHECK_IMPLIES(V8_EXTERNAL_CODE_SPACE_BOOL, !IsCodeSpaceObject(*this));
   PtrComprCageBase cage_base = GetPtrComprCageBase(*this);
   return HeapObject::map(cage_base);
@@ -907,9 +930,9 @@ ObjectSlot HeapObject::map_slot() const {
 }
 
 MapWord HeapObject::map_word(RelaxedLoadTag tag) const {
-  // This method is never used for objects located in code space (Code and
-  // free space fillers) and thus it is fine to use auto-computed cage base
-  // value.
+  // This method is never used for objects located in code space
+  // (InstructionStream and free space fillers) and thus it is fine to use
+  // auto-computed cage base value.
   DCHECK_IMPLIES(V8_EXTERNAL_CODE_SPACE_BOOL, !IsCodeSpaceObject(*this));
   PtrComprCageBase cage_base = GetPtrComprCageBase(*this);
   return HeapObject::map_word(cage_base, tag);
@@ -930,9 +953,9 @@ void HeapObject::set_map_word_forwarded(HeapObject target_object,
 }
 
 MapWord HeapObject::map_word(AcquireLoadTag tag) const {
-  // This method is never used for objects located in code space (Code and
-  // free space fillers) and thus it is fine to use auto-computed cage base
-  // value.
+  // This method is never used for objects located in code space
+  // (InstructionStream and free space fillers) and thus it is fine to use
+  // auto-computed cage base value.
   DCHECK_IMPLIES(V8_EXTERNAL_CODE_SPACE_BOOL, !IsCodeSpaceObject(*this));
   PtrComprCageBase cage_base = GetPtrComprCageBase(*this);
   return HeapObject::map_word(cage_base, tag);
@@ -1217,13 +1240,14 @@ bool Object::IsShared() const {
   }
 
   // Check if this object is already shared.
-  switch (object.map().instance_type()) {
+  InstanceType instance_type = object.map().instance_type();
+  if (InstanceTypeChecker::IsAlwaysSharedSpaceJSObject(instance_type)) {
+    DCHECK(object.InSharedHeap());
+    return true;
+  }
+  switch (instance_type) {
     case SHARED_STRING_TYPE:
     case SHARED_ONE_BYTE_STRING_TYPE:
-    case JS_SHARED_ARRAY_TYPE:
-    case JS_SHARED_STRUCT_TYPE:
-    case JS_ATOMICS_MUTEX_TYPE:
-    case JS_ATOMICS_CONDITION_TYPE:
       DCHECK(object.InSharedHeap());
       return true;
     case INTERNALIZED_STRING_TYPE:

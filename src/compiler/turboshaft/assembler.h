@@ -22,6 +22,7 @@
 #include "src/compiler/turboshaft/operation-matching.h"
 #include "src/compiler/turboshaft/operations.h"
 #include "src/compiler/turboshaft/optimization-phase.h"
+#include "src/compiler/turboshaft/reducer-traits.h"
 #include "src/compiler/turboshaft/representations.h"
 #include "src/compiler/turboshaft/sidetable.h"
 #include "src/compiler/turboshaft/snapshot-table.h"
@@ -32,7 +33,7 @@ enum class Builtin : int32_t;
 
 namespace v8::internal::compiler::turboshaft {
 
-Handle<CodeT> BuiltinCodeHandle(Builtin builtin, Isolate* isolate);
+Handle<Code> BuiltinCodeHandle(Builtin builtin, Isolate* isolate);
 
 // Forward declarations
 template <class Assembler>
@@ -61,13 +62,6 @@ class ReducerStack<Assembler> {
 template <typename Next>
 class ReducerBase;
 
-template <typename Next>
-struct next_is_bottom_of_assembler_stack
-    : public std::integral_constant<bool, false> {};
-template <typename A>
-struct next_is_bottom_of_assembler_stack<ReducerStack<A, ReducerBase>>
-    : public std::integral_constant<bool, true> {};
-
 // LABEL_BLOCK is used in Reducers to have a single call forwarding to the next
 // reducer without change. A typical use would be:
 //
@@ -88,10 +82,13 @@ struct next_is_bottom_of_assembler_stack<ReducerStack<A, ReducerBase>>
 template <class Next>
 class ReducerBaseForwarder : public Next {
  public:
-#define EMIT_OP(Name)                                    \
-  template <class... Args>                               \
-  OpIndex Reduce##Name(Args... args) {                   \
-    return this->Asm().template Emit<Name##Op>(args...); \
+#define EMIT_OP(Name)                                                    \
+  OpIndex ReduceInputGraph##Name(OpIndex ig_index, const Name##Op& op) { \
+    return this->Asm().AssembleOutputGraph##Name(op);                    \
+  }                                                                      \
+  template <class... Args>                                               \
+  OpIndex Reduce##Name(Args... args) {                                   \
+    return this->Asm().template Emit<Name##Op>(args...);                 \
   }
   TURBOSHAFT_OPERATION_LIST(EMIT_OP)
 #undef EMIT_OP
@@ -115,6 +112,14 @@ class ReducerBase : public ReducerBaseForwarder<Next> {
   void Bind(Block*, const Block*) {}
 
   void Analyze() {}
+
+#ifdef DEBUG
+  void Verify(OpIndex old_index, OpIndex new_index) {}
+#endif  // DEBUG
+
+  void RemoveLast(OpIndex index_of_last_operation) {
+    Asm().output_graph().RemoveLast();
+  }
 
   // Get, GetPredecessorValue, Set and NewFreshVariable should be overwritten by
   // the VariableReducer. If the reducer stack has no VariableReducer, then
@@ -964,6 +969,11 @@ class AssemblerOpInterface {
   OpIndex Projection(OpIndex tuple, uint16_t index,
                      RegisterRepresentation rep) {
     return stack().ReduceProjection(tuple, index, rep);
+  }
+  OpIndex CheckTurboshaftTypeOf(OpIndex input, RegisterRepresentation rep,
+                                Type expected_type, bool successful) {
+    return stack().ReduceCheckTurboshaftTypeOf(input, rep, expected_type,
+                                               successful);
   }
 
   OpIndex LoadException() { return stack().ReduceLoadException(); }

@@ -487,14 +487,7 @@ MaybeHandle<String> Object::NoSideEffectsToMaybeString(Isolate* isolate,
     } while (currInput->IsJSProxy());
     return NoSideEffectsToString(isolate, currInput);
   } else if (input->IsBigInt()) {
-    MaybeHandle<String> maybe_string =
-        BigInt::ToString(isolate, Handle<BigInt>::cast(input), 10, kDontThrow);
-    Handle<String> result;
-    if (maybe_string.ToHandle(&result)) return result;
-    // BigInt-to-String conversion can fail on 32-bit platforms where
-    // String::kMaxLength is too small to fit this BigInt.
-    return isolate->factory()->NewStringFromStaticChars(
-        "<a very large BigInt>");
+    return BigInt::NoSideEffectsToString(isolate, Handle<BigInt>::cast(input));
   } else if (input->IsFunction()) {
     // -- F u n c t i o n
     Handle<String> fun_str;
@@ -1168,9 +1161,7 @@ MaybeHandle<Object> Object::GetProperty(LookupIterator* it,
         return result;
       }
       case LookupIterator::WASM_OBJECT:
-        THROW_NEW_ERROR(it->isolate(),
-                        NewTypeError(MessageTemplate::kWasmObjectsAreOpaque),
-                        Object);
+        return it->isolate()->factory()->undefined_value();
       case LookupIterator::INTERCEPTOR: {
         bool done;
         Handle<Object> result;
@@ -2031,22 +2022,18 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
       os << ">";
       break;
     }
-    case CODE_DATA_CONTAINER_TYPE: {
-#ifdef V8_EXTERNAL_CODE_SPACE
-      CodeDataContainer code = CodeDataContainer::cast(*this);
-      os << "<CodeDataContainer " << CodeKindToString(code.kind());
+    case CODE_TYPE: {
+      Code code = Code::cast(*this);
+      os << "<Code " << CodeKindToString(code.kind());
       if (code.is_builtin()) {
         os << " " << Builtins::name(code.builtin_id());
       }
       os << ">";
-#else
-      os << "<CodeDataContainer>";
-#endif  // V8_EXTERNAL_CODE_SPACE
       break;
     }
-    case CODE_TYPE: {
-      Code code = Code::cast(*this);
-      os << "<Code " << CodeKindToString(code.kind());
+    case INSTRUCTION_STREAM_TYPE: {
+      InstructionStream code = InstructionStream::cast(*this);
+      os << "<InstructionStream " << CodeKindToString(code.kind());
       if (code.is_builtin()) {
         os << " " << Builtins::name(code.builtin_id());
       }
@@ -2286,8 +2273,8 @@ int HeapObject::SizeFromMap(Map map) const {
   TORQUE_INSTANCE_TYPE_TO_BODY_DESCRIPTOR_LIST(MAKE_TORQUE_SIZE_FOR)
 #undef MAKE_TORQUE_SIZE_FOR
 
-  if (instance_type == CODE_TYPE) {
-    return Code::unchecked_cast(*this).CodeSize();
+  if (instance_type == INSTRUCTION_STREAM_TYPE) {
+    return InstructionStream::unchecked_cast(*this).CodeSize();
   }
   if (instance_type == COVERAGE_INFO_TYPE) {
     return CoverageInfo::SizeFor(
@@ -2316,8 +2303,9 @@ bool HeapObject::NeedsRehashing(PtrComprCageBase cage_base) const {
 
 bool HeapObject::NeedsRehashing(InstanceType instance_type) const {
   if (V8_EXTERNAL_CODE_SPACE_BOOL) {
-    // Use map() only when it's guaranteed that it's not a Code object.
-    DCHECK_IMPLIES(instance_type != CODE_TYPE,
+    // Use map() only when it's guaranteed that it's not a InstructionStream
+    // object.
+    DCHECK_IMPLIES(instance_type != INSTRUCTION_STREAM_TYPE,
                    instance_type == map().instance_type());
   } else {
     DCHECK_EQ(instance_type, map().instance_type());
@@ -4045,6 +4033,21 @@ Handle<ArrayList> ArrayList::Add(Isolate* isolate, Handle<ArrayList> array,
   return array;
 }
 
+Handle<ArrayList> ArrayList::Add(Isolate* isolate, Handle<ArrayList> array,
+                                 Smi obj1) {
+  int length = array->Length();
+  array = EnsureSpace(isolate, array, length + 1);
+  // Check that GC didn't remove elements from the array.
+  DCHECK_EQ(array->Length(), length);
+  {
+    DisallowGarbageCollection no_gc;
+    ArrayList raw_array = *array;
+    raw_array.Set(length, obj1);
+    raw_array.SetLength(length + 1);
+  }
+  return array;
+}
+
 // static
 Handle<ArrayList> ArrayList::Add(Isolate* isolate, Handle<ArrayList> array,
                                  Handle<Object> obj1, Handle<Object> obj2) {
@@ -5595,13 +5598,6 @@ MaybeHandle<Object> JSPromise::Resolve(Handle<JSPromise> promise,
     // is intact, as that guards the lookup path for the "then" property
     // on JSPromise instances which have the (initial) %PromisePrototype%.
     then = isolate->promise_then();
-  } else if (receiver->IsWasmObject()) {
-    // Special case: [[Get]] throws an exception for Wasm objects, but we want
-    // to be able to resolve promises with them, so pretend that we looked
-    // up "then" and it was undefined.
-    // TODO(v8:13523): Drop this special case after changing what [[Get]]
-    // does in general.
-    then = isolate->factory()->undefined_value();
   } else {
     then = JSReceiver::GetProperty(isolate, receiver,
                                    isolate->factory()->then_string());
@@ -5881,7 +5877,7 @@ template <typename Derived, typename Shape>
 void HashTable<Derived, Shape>::Rehash(PtrComprCageBase cage_base) {
   DisallowGarbageCollection no_gc;
   WriteBarrierMode mode = GetWriteBarrierMode(no_gc);
-  ReadOnlyRoots roots = GetReadOnlyRoots(cage_base);
+  ReadOnlyRoots roots = EarlyGetReadOnlyRoots();
   uint32_t capacity = Capacity();
   bool done = false;
   for (int probe = 1; !done; probe++) {

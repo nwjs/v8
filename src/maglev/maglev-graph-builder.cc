@@ -154,7 +154,7 @@ class CallArguments {
   ConvertReceiverMode receiver_mode() const { return receiver_mode_; }
 
   void Truncate(size_t new_args_count) {
-    DCHECK_LE(new_args_count, count());
+    if (new_args_count >= count()) return;
     size_t args_to_pop = count() - new_args_count;
     for (size_t i = 0; i < args_to_pop; i++) {
       args_.pop_back();
@@ -264,15 +264,16 @@ ValueNode* MaglevGraphBuilder::GetTaggedArgument(int i) {
   return GetTaggedValue(reg);
 }
 
-void MaglevGraphBuilder::BuildRegisterFrameInitialization() {
-  // TODO(leszeks): Extract out a separate "incoming context/closure" nodes,
-  // to be able to read in the machine register but also use the frame-spilled
-  // slot.
-  interpreter::Register regs[] = {interpreter::Register::current_context(),
-                                  interpreter::Register::function_closure()};
-  for (interpreter::Register& reg : regs) {
-    current_interpreter_frame_.set(reg, AddNewNode<InitialValue>({}, reg));
-  }
+void MaglevGraphBuilder::InitializeRegister(interpreter::Register reg,
+                                            ValueNode* value) {
+  current_interpreter_frame_.set(
+      reg, value ? value : AddNewNode<InitialValue>({}, reg));
+}
+
+void MaglevGraphBuilder::BuildRegisterFrameInitialization(ValueNode* context,
+                                                          ValueNode* closure) {
+  InitializeRegister(interpreter::Register::current_context(), context);
+  InitializeRegister(interpreter::Register::function_closure(), closure);
 
   interpreter::Register new_target_or_generator_register =
       bytecode().incoming_new_target_or_generator_register();
@@ -285,10 +286,8 @@ void MaglevGraphBuilder::BuildRegisterFrameInitialization() {
     for (; register_index < new_target_index; register_index++) {
       StoreRegister(interpreter::Register(register_index), undefined_value);
     }
-    StoreRegister(
-        new_target_or_generator_register,
-        // TODO(leszeks): Expose in Graph.
-        AddNewNode<RegisterInput>({}, kJavaScriptCallNewTargetRegister));
+    StoreRegister(new_target_or_generator_register,
+                  GetRegisterInput(kJavaScriptCallNewTargetRegister));
     register_index++;
   }
   for (; register_index < register_count(); register_index++) {
@@ -516,9 +515,11 @@ ValueNode* MaglevGraphBuilder::TryFoldInt32BinaryOperation(ValueNode* left,
                                                            ValueNode* right) {
   switch (kOperation) {
     case Operation::kModulus:
-      // x % x = 0
-      if (right == left) return GetInt32Constant(0);
-      break;
+      // Note the `x % x = 0` fold is invalid since for negative x values the
+      // result is -0.0.
+      // TODO(v8:7700): Consider re-enabling this fold if the result is used
+      // only in contexts where -0.0 is semantically equivalent to 0.0, or if x
+      // is known to be non-negative.
     default:
       // TODO(victorgomes): Implement more folds.
       break;
@@ -531,13 +532,14 @@ ValueNode* MaglevGraphBuilder::TryFoldInt32BinaryOperation(ValueNode* left,
                                                            int right) {
   switch (kOperation) {
     case Operation::kModulus:
-      // x % 1 = 0
-      // x % -1 = 0
-      if (right == 1 || right == -1) return GetInt32Constant(0);
+      // Note the `x % 1 = 0` and `x % -1 = 0` folds are invalid since for
+      // negative x values the result is -0.0.
+      // TODO(v8:7700): Consider re-enabling this fold if the result is used
+      // only in contexts where -0.0 is semantically equivalent to 0.0, or if x
+      // is known to be non-negative.
       // TODO(victorgomes): We can emit faster mod operation if {right} is power
       // of 2, unfortunately we need to know if {left} is negative or not.
       // Maybe emit a Int32ModulusRightIsPowerOf2?
-      break;
     default:
       // TODO(victorgomes): Implement more folds.
       break;
@@ -791,10 +793,9 @@ void MaglevGraphBuilder::VisitBinarySmiOperation() {
   BuildGenericBinarySmiOperationNode<kOperation>();
 }
 
-template <typename CompareControlNode>
-bool MaglevGraphBuilder::TryBuildCompareOperation(Operation operation,
-                                                  ValueNode* left,
-                                                  ValueNode* right) {
+template <typename BranchControlNodeT, typename... Args>
+bool MaglevGraphBuilder::TryBuildBranchFor(
+    std::initializer_list<ValueNode*> control_inputs, Args&&... args) {
   // Don't emit the shortcut branch if the next bytecode is a merge target.
   if (IsOffsetAMergePoint(next_offset())) return false;
 
@@ -832,8 +833,8 @@ bool MaglevGraphBuilder::TryBuildCompareOperation(Operation operation,
       return false;
   }
 
-  BasicBlock* block = FinishBlock<CompareControlNode>(
-      {left, right}, operation, &jump_targets_[true_offset],
+  BasicBlock* block = FinishBlock<BranchControlNodeT>(
+      control_inputs, std::forward<Args>(args)..., &jump_targets_[true_offset],
       &jump_targets_[false_offset]);
   if (true_offset == iterator_.GetJumpTargetOffset()) {
     block->control_node()
@@ -862,8 +863,7 @@ void MaglevGraphBuilder::VisitCompareOperation() {
     case CompareOperationHint::kSignedSmall: {
       ValueNode* left = LoadRegisterInt32(0);
       ValueNode* right = GetAccumulatorInt32();
-      if (TryBuildCompareOperation<BranchIfInt32Compare>(kOperation, left,
-                                                         right)) {
+      if (TryBuildBranchFor<BranchIfInt32Compare>({left, right}, kOperation)) {
         return;
       }
       SetAccumulator(AddNewNode<Int32NodeFor<kOperation>>({left, right}));
@@ -872,8 +872,8 @@ void MaglevGraphBuilder::VisitCompareOperation() {
     case CompareOperationHint::kNumber: {
       ValueNode* left = LoadRegisterFloat64(0);
       ValueNode* right = GetAccumulatorFloat64();
-      if (TryBuildCompareOperation<BranchIfFloat64Compare>(kOperation, left,
-                                                           right)) {
+      if (TryBuildBranchFor<BranchIfFloat64Compare>({left, right},
+                                                    kOperation)) {
         return;
       }
       SetAccumulator(AddNewNode<Float64NodeFor<kOperation>>({left, right}));
@@ -892,8 +892,8 @@ void MaglevGraphBuilder::VisitCompareOperation() {
         right =
             GetInternalizedString(interpreter::Register::virtual_accumulator());
       }
-      if (TryBuildCompareOperation<BranchIfReferenceCompare>(kOperation, left,
-                                                             right)) {
+      if (TryBuildBranchFor<BranchIfReferenceCompare>({left, right},
+                                                      kOperation)) {
         return;
       }
       SetAccumulator(AddNewNode<TaggedEqual>({left, right}));
@@ -906,8 +906,8 @@ void MaglevGraphBuilder::VisitCompareOperation() {
       ValueNode* right = GetAccumulatorTagged();
       BuildCheckSymbol(left);
       BuildCheckSymbol(right);
-      if (TryBuildCompareOperation<BranchIfReferenceCompare>(kOperation, left,
-                                                             right)) {
+      if (TryBuildBranchFor<BranchIfReferenceCompare>({left, right},
+                                                      kOperation)) {
         return;
       }
       SetAccumulator(AddNewNode<TaggedEqual>({left, right}));
@@ -1136,8 +1136,8 @@ void MaglevGraphBuilder::VisitTestReferenceEqual() {
     SetAccumulator(GetRootConstant(RootIndex::kTrueValue));
     return;
   }
-  if (TryBuildCompareOperation<BranchIfReferenceCompare>(
-          Operation::kStrictEqual, lhs, rhs)) {
+  if (TryBuildBranchFor<BranchIfReferenceCompare>({lhs, rhs},
+                                                  Operation::kStrictEqual)) {
     return;
   }
   SetAccumulator(AddNewNode<TaggedEqual>({lhs, rhs}));
@@ -1179,7 +1179,9 @@ void MaglevGraphBuilder::VisitTestTypeOf() {
     return;
   }
   ValueNode* value = GetAccumulatorTagged();
-  // TODO(victorgomes): Add fast path for constants.
+  if (TryBuildBranchFor<BranchIfTypeOf>({value}, literal)) {
+    return;
+  }
   SetAccumulator(AddNewNode<TestTypeOf>({value}, literal));
 }
 
@@ -1416,13 +1418,18 @@ NodeType StaticTypeForNode(ValueNode* node) {
 }
 }  // namespace
 
-NodeInfo* MaglevGraphBuilder::CreateInfoIfNot(ValueNode* node, NodeType type) {
+bool MaglevGraphBuilder::EnsureType(ValueNode* node, NodeType type,
+                                    NodeType* old_type) {
   NodeType static_type = StaticTypeForNode(node);
-  if (NodeTypeIs(static_type, type)) return nullptr;
+  if (NodeTypeIs(static_type, type)) {
+    if (old_type) *old_type = static_type;
+    return true;
+  }
   NodeInfo* known_info = known_node_aspects().GetOrCreateInfoFor(node);
-  if (NodeTypeIs(known_info->type, type)) return nullptr;
+  if (old_type) *old_type = known_info->type;
+  if (NodeTypeIs(known_info->type, type)) return true;
   known_info->type = CombineType(known_info->type, static_type);
-  return known_info;
+  return false;
 }
 
 bool MaglevGraphBuilder::CheckType(ValueNode* node, NodeType type) {
@@ -1430,15 +1437,6 @@ bool MaglevGraphBuilder::CheckType(ValueNode* node, NodeType type) {
   auto it = known_node_aspects().FindInfo(node);
   if (!known_node_aspects().IsValid(it)) return false;
   return NodeTypeIs(it->second.type, type);
-}
-
-bool MaglevGraphBuilder::EnsureType(ValueNode* node, NodeType type,
-                                    NodeType* old) {
-  NodeInfo* known_info = CreateInfoIfNot(node, type);
-  if (known_info == nullptr) return true;
-  if (old != nullptr) *old = known_info->type;
-  known_info->type = CombineType(known_info->type, type);
-  return false;
 }
 
 ValueNode* MaglevGraphBuilder::BuildSmiUntag(ValueNode* node) {
@@ -1847,7 +1845,8 @@ bool MaglevGraphBuilder::TryBuildStoreField(
     if (original_map.UnusedPropertyFields() == 0) {
       return false;
     }
-  } else if (access_info.IsFastDataConstant()) {
+  } else if (access_info.IsFastDataConstant() &&
+             access_mode == compiler::AccessMode::kStore) {
     // TODO(verwaest): Deoptimize instead.
     return false;
   }
@@ -1942,7 +1941,7 @@ bool MaglevGraphBuilder::TryBuildPropertyLoad(
       SetAccumulator(BuildLoadField(access_info, lookup_start_object));
       RecordKnownProperty(lookup_start_object, name,
                           current_interpreter_frame_.accumulator(),
-                          access_info.IsFastDataConstant());
+                          access_info);
       return true;
     case compiler::PropertyAccessInfo::kDictionaryProtoDataConstant:
       return TryFoldLoadDictPrototypeConstant(access_info);
@@ -1959,7 +1958,8 @@ bool MaglevGraphBuilder::TryBuildPropertyLoad(
       DCHECK_EQ(receiver, lookup_start_object);
       SetAccumulator(AddNewNode<StringLength>({receiver}));
       RecordKnownProperty(lookup_start_object, name,
-                          current_interpreter_frame_.accumulator(), true);
+                          current_interpreter_frame_.accumulator(),
+                          access_info);
       return true;
   }
 }
@@ -1982,7 +1982,7 @@ bool MaglevGraphBuilder::TryBuildPropertyStore(
     if (TryBuildStoreField(access_info, receiver, access_mode)) {
       RecordKnownProperty(receiver, name,
                           current_interpreter_frame_.accumulator(),
-                          access_info.IsFastDataConstant());
+                          access_info);
       return true;
     }
     return false;
@@ -2092,8 +2092,51 @@ bool MaglevGraphBuilder::TryBuildNamedAccess(
     return TryBuildPropertyAccess(receiver, lookup_start_object,
                                   feedback.name(), access_info, access_mode);
   } else {
-    // TODO(victorgomes): polymorphic case.
-    return false;
+    // TODO(victorgomes): Support more generic polymorphic case.
+
+    // Only support polymorphic load at the moment.
+    if (access_mode != compiler::AccessMode::kLoad) {
+      return false;
+    }
+
+    // Check if we support the polymorphic load.
+    for (compiler::PropertyAccessInfo access_info : access_infos) {
+      switch (access_info.kind()) {
+        case compiler::PropertyAccessInfo::kNotFound:
+        case compiler::PropertyAccessInfo::kModuleExport:
+          break;
+        case compiler::PropertyAccessInfo::kDataField:
+        case compiler::PropertyAccessInfo::kFastDataConstant:
+          if (access_info.field_index().is_double()) {
+            return false;
+          }
+          break;
+        default:
+          // TODO(victorgomes): Support other access.
+          return false;
+      }
+
+      // TODO(victorgomes): Support map migration.
+      for (compiler::MapRef map : access_info.lookup_start_object_maps()) {
+        if (map.is_migration_target()) {
+          return false;
+        }
+      }
+    }
+
+    // Add compilation dependencies if needed.
+    for (compiler::PropertyAccessInfo access_info : access_infos) {
+      if (access_info.holder().has_value() &&
+          !access_info.HasDictionaryHolder()) {
+        broker()->dependencies()->DependOnStablePrototypeChains(
+            access_info.lookup_start_object_maps(), kStartAtPrototype,
+            access_info.holder().value());
+      }
+    }
+
+    SetAccumulator(AddNewNode<LoadPolymorphicTaggedField>(
+        {lookup_start_object}, std::move(access_infos)));
+    return true;
   }
 }
 
@@ -2212,12 +2255,11 @@ bool MaglevGraphBuilder::TryBuildElementAccess(
 
     // TODO(victorgomes): Support more elements kind.
     ElementsKind elements_kind = access_info.elements_kind();
+    if (IsRabGsabTypedArrayElementsKind(elements_kind)) {
+      // TODO(victorgomes): Support RAB/GSAB backed typed arrays.
+      return false;
+    }
     if (IsTypedArrayElementsKind(elements_kind)) {
-      if (JSTypedArray::kMaxSizeInHeap != 0) {
-        // TODO(victorgomes): Support typed array in heap.
-        // Note that the common config is equal to 0 (for Chrome and Node).
-        return false;
-      }
       if (elements_kind == BIGUINT64_ELEMENTS ||
           elements_kind == BIGINT64_ELEMENTS) {
         return false;
@@ -2254,7 +2296,10 @@ bool MaglevGraphBuilder::TryBuildElementAccess(
       AddNewNode<CheckJSObjectElementsBounds>({object, index});
     }
     if (IsDoubleElementsKind(elements_kind)) {
-      SetAccumulator(AddNewNode<LoadDoubleElement>({object, index}));
+      auto* elements_array =
+          AddNewNode<LoadTaggedField>({object}, JSObject::kElementsOffset);
+      SetAccumulator(
+          AddNewNode<LoadFixedDoubleArrayElement>({elements_array, index}));
       if (IsHoleyElementsKind(elements_kind)) {
         // TODO(v8:7700): Add a representation for "Float64OrHole" and emit this
         // boxing lazily.
@@ -2262,30 +2307,50 @@ bool MaglevGraphBuilder::TryBuildElementAccess(
             {current_interpreter_frame_.accumulator()}));
       }
     } else if (IsTypedArrayElementsKind(elements_kind)) {
+      bool depend_on_detaching_protector =
+          broker()->dependencies()->DependOnArrayBufferDetachingProtector();
       switch (elements_kind) {
         case INT8_ELEMENTS:
         case INT16_ELEMENTS:
         case INT32_ELEMENTS:
-          SetAccumulator(AddNewNode<LoadSignedIntTypedArrayElement>(
-              {object, index}, elements_kind));
+          if (depend_on_detaching_protector) {
+            SetAccumulator(AddNewNode<LoadSignedIntTypedArrayElementNoDeopt>(
+                {object, index}, elements_kind));
+          } else {
+            SetAccumulator(AddNewNode<LoadSignedIntTypedArrayElement>(
+                {object, index}, elements_kind));
+          }
           break;
         case UINT8_CLAMPED_ELEMENTS:
         case UINT8_ELEMENTS:
         case UINT16_ELEMENTS:
         case UINT32_ELEMENTS:
-          SetAccumulator(AddNewNode<LoadUnsignedIntTypedArrayElement>(
-              {object, index}, elements_kind));
+          if (depend_on_detaching_protector) {
+            SetAccumulator(AddNewNode<LoadUnsignedIntTypedArrayElementNoDeopt>(
+                {object, index}, elements_kind));
+          } else {
+            SetAccumulator(AddNewNode<LoadUnsignedIntTypedArrayElement>(
+                {object, index}, elements_kind));
+          }
           break;
         case FLOAT32_ELEMENTS:
         case FLOAT64_ELEMENTS:
-          SetAccumulator(AddNewNode<LoadDoubleTypedArrayElement>(
-              {object, index}, elements_kind));
+          if (depend_on_detaching_protector) {
+            SetAccumulator(AddNewNode<LoadDoubleTypedArrayElementNoDeopt>(
+                {object, index}, elements_kind));
+          } else {
+            SetAccumulator(AddNewNode<LoadDoubleTypedArrayElement>(
+                {object, index}, elements_kind));
+          }
           break;
         default:
           UNREACHABLE();
       }
     } else {
-      SetAccumulator(AddNewNode<LoadTaggedElement>({object, index}));
+      ValueNode* elements_array =
+          AddNewNode<LoadTaggedField>({object}, JSObject::kElementsOffset);
+      SetAccumulator(
+          AddNewNode<LoadFixedArrayElement>({elements_array, index}));
       if (IsHoleyElementsKind(elements_kind)) {
         SetAccumulator(AddNewNode<ConvertHoleToUndefined>(
             {current_interpreter_frame_.accumulator()}));
@@ -2299,9 +2364,26 @@ bool MaglevGraphBuilder::TryBuildElementAccess(
   }
 }
 
-void MaglevGraphBuilder::RecordKnownProperty(ValueNode* lookup_start_object,
-                                             compiler::NameRef name,
-                                             ValueNode* value, bool is_const) {
+void MaglevGraphBuilder::RecordKnownProperty(
+    ValueNode* lookup_start_object, compiler::NameRef name, ValueNode* value,
+    compiler::PropertyAccessInfo const& access_info) {
+  bool is_const;
+  if (access_info.IsFastDataConstant() || access_info.IsStringLength()) {
+    is_const = true;
+    // Even if we have a constant load, if the map is not stable, we cannot
+    // guarantee that the load is preserved across side-effecting calls.
+    // TODO(v8:7700): It might be possible to track it as const if we know that
+    // we're still on the main transition tree; and if we add a dependency on
+    // the stable end-maps of the entire tree.
+    for (auto& map : access_info.lookup_start_object_maps()) {
+      if (!map.is_stable()) {
+        is_const = false;
+        break;
+      }
+    }
+  } else {
+    is_const = false;
+  }
   auto& loaded_properties =
       is_const ? known_node_aspects().loaded_constant_properties
                : known_node_aspects().loaded_properties;
@@ -2504,7 +2586,7 @@ void MaglevGraphBuilder::VisitLdaModuleVariable() {
     // The actual array index is (-cell_index - 1).
     cell_index = -cell_index - 1;
   }
-  ValueNode* cell = LoadFixedArrayElement(exports_or_imports, cell_index);
+  ValueNode* cell = BuildLoadFixedArrayElement(exports_or_imports, cell_index);
   SetAccumulator(AddNewNode<LoadTaggedField>({cell}, Cell::kValueOffset));
 }
 
@@ -2543,7 +2625,7 @@ void MaglevGraphBuilder::VisitStaModuleVariable() {
       {module}, SourceTextModule::kRegularExportsOffset);
   // The actual array index is (cell_index - 1).
   cell_index -= 1;
-  ValueNode* cell = LoadFixedArrayElement(exports, cell_index);
+  ValueNode* cell = BuildLoadFixedArrayElement(exports, cell_index);
   AddNewNode<StoreTaggedFieldWithWriteBarrier>({cell, GetAccumulatorTagged()},
                                                Cell::kValueOffset);
 }
@@ -2659,10 +2741,11 @@ void MaglevGraphBuilder::VisitSetKeyedProperty() {
 }
 
 void MaglevGraphBuilder::VisitDefineKeyedOwnProperty() {
-  // DefineKeyedOwnProperty <object> <key> <slot>
+  // DefineKeyedOwnProperty <object> <key> <flags> <slot>
   ValueNode* object = LoadRegisterTagged(0);
   ValueNode* key = LoadRegisterTagged(1);
-  FeedbackSlot slot = GetSlotOperand(2);
+  ValueNode* flags = GetSmiConstant(GetFlag8Operand(2));
+  FeedbackSlot slot = GetSlotOperand(3);
   compiler::FeedbackSource feedback_source{feedback(), slot};
 
   // TODO(victorgomes): Add monomorphic fast path.
@@ -2671,7 +2754,7 @@ void MaglevGraphBuilder::VisitDefineKeyedOwnProperty() {
   ValueNode* context = GetContext();
   ValueNode* value = GetAccumulatorTagged();
   SetAccumulator(AddNewNode<DefineKeyedOwnGeneric>(
-      {context, object, key, value}, feedback_source));
+      {context, object, key, value, flags}, feedback_source));
 }
 
 void MaglevGraphBuilder::VisitStaInArrayLiteral() {
@@ -2885,6 +2968,17 @@ ValueNode* MaglevGraphBuilder::TryBuildInlinedCall(
     return nullptr;
   }
   if (function.code().object()->kind() == CodeKind::TURBOFAN) return nullptr;
+
+  // TODO(victorgomes): Support NewTarget/RegisterInput in inlined functions.
+  compiler::BytecodeArrayRef bytecode = function.shared().GetBytecodeArray();
+  if (bytecode.incoming_new_target_or_generator_register().is_valid()) {
+    return nullptr;
+  }
+  // TODO(victorgomes): Support exception handler inside inlined functions.
+  if (bytecode.handler_table_size() > 0) {
+    return nullptr;
+  }
+
   if (v8_flags.trace_maglev_inlining) {
     std::cout << "  inlining " << function.shared() << std::endl;
   }
@@ -2925,9 +3019,8 @@ ValueNode* MaglevGraphBuilder::TryBuildInlinedCall(
     if (arg_value == nullptr) arg_value = undefined_constant;
     inner_graph_builder.SetArgument(i, arg_value);
   }
-  // TODO(leszeks): Also correctly set up the closure and context slots, instead
-  // of using InitialValue.
-  inner_graph_builder.BuildRegisterFrameInitialization();
+  inner_graph_builder.BuildRegisterFrameInitialization(GetContext(),
+                                                       GetConstant(function));
   inner_graph_builder.BuildMergeStates();
   BasicBlock* inlined_prologue = inner_graph_builder.EndPrologue();
 
@@ -3089,7 +3182,9 @@ ValueNode* MaglevGraphBuilder::TryReduceDataViewPrototypeSetFloat64(
     compiler::JSFunctionRef target, CallArguments& args) {
   return TryBuildStoreDataView<StoreDoubleDataViewElement>(
       args, ExternalArrayType::kExternalFloat64Array, [&](ValueNode* value) {
-        return value ? GetFloat64(value) : GetFloat64Constant(0);
+        return value ? GetFloat64(value)
+                     : GetFloat64Constant(
+                           std::numeric_limits<double>::quiet_NaN());
       });
 }
 
@@ -3341,16 +3436,17 @@ ValueNode* MaglevGraphBuilder::ReduceFunctionPrototypeApplyCallWithReceiver(
     // No need for spread.
     CallArguments empty_args(ConvertReceiverMode::kNullOrUndefined);
     call = ReduceCall(receiver, empty_args, feedback_source, speculation_mode);
-  } else if (args.count() == 1 || IsNullValue(args[1]) ||
-             IsUndefinedValue(args[1])) {
+  } else if ((args.count() == 1 || IsNullValue(args[1]) ||
+              IsUndefinedValue(args[1])) &&
+             args.mode() == CallArguments::kDefault) {
     // No need for spread. We have only the new receiver.
-    CallArguments new_args(ConvertReceiverMode::kAny,
-                           {GetTaggedValue(args[0])});
+    CallArguments new_args(ConvertReceiverMode::kAny, {GetTaggedValue(args[0])},
+                           args.mode());
     call = ReduceCall(receiver, new_args, feedback_source, speculation_mode);
   } else {
     // FunctionPrototypeApply only consider two arguments: the new receiver and
     // an array-like arguments_list. All others shall be ignored.
-    if (IsConstantNode(args[1]->opcode())) {
+    if (args.count() > 1 && IsConstantNode(args[1]->opcode())) {
       DCHECK(!IsNullValue(args[1]) && !IsUndefinedValue(args[1]));
       // The arguments_list is not null, nor undefined, we can do a call with
       // array like.
@@ -3968,11 +4064,13 @@ bool MaglevGraphBuilder::TryBuildFastInstanceOf(
     ValueNode* callable_node;
     if (callable_node_if_not_constant) {
       // Check that {callable_node_if_not_constant} is actually {callable}.
-      AddNewNode<CheckValue>({callable_node_if_not_constant}, callable);
+      BuildCheckValue(callable_node_if_not_constant, callable);
       callable_node = callable_node_if_not_constant;
     } else {
       callable_node = GetConstant(callable);
     }
+    BuildCheckMaps(callable_node,
+                   base::VectorOf(access_info.lookup_start_object_maps()));
 
     // Call @@hasInstance
     CallArguments args(ConvertReceiverMode::kNotNullOrUndefined,
@@ -4603,22 +4701,52 @@ void MaglevGraphBuilder::VisitForInPrepare() {
   compiler::FeedbackSource feedback_source{feedback(), slot};
   // TODO(v8:7700): Use feedback and create fast path.
   ValueNode* context = GetContext();
-  interpreter::Register cache_type = iterator_.GetRegisterOperand(0);
-  // This move needs to happen before ForInPrepare to avoid lazy deopt extending
-  // the lifetime of the {cache_type} register.
-  MoveNodeBetweenRegisters(interpreter::Register::virtual_accumulator(),
-                           cache_type);
-  ForInPrepare* result =
-      AddNewNode<ForInPrepare>({context, enumerator}, feedback_source);
-  // No need to set the accumulator.
-  DCHECK(!GetOutLiveness()->AccumulatorIsLive());
-  // The result is output in registers |cache_info_triple| to
-  // |cache_info_triple + 2|, with the registers holding cache_type,
-  // cache_array, and cache_length respectively.
-  auto cache_array_and_length =
-      std::make_pair(interpreter::Register{cache_type.index() + 1},
-                     interpreter::Register{cache_type.index() + 2});
-  StoreRegisterPair(cache_array_and_length, result);
+  interpreter::Register cache_type_reg = iterator_.GetRegisterOperand(0);
+  interpreter::Register cache_array_reg{cache_type_reg.index() + 1};
+  interpreter::Register cache_length_reg{cache_type_reg.index() + 2};
+
+  ForInHint hint = broker()->GetFeedbackForForIn(feedback_source);
+
+  switch (hint) {
+    case ForInHint::kNone:
+    case ForInHint::kEnumCacheKeysAndIndices:
+    case ForInHint::kEnumCacheKeys: {
+      BuildCheckMaps(enumerator,
+                     base::VectorOf({MakeRefAssumeMemoryFence(
+                         broker(), local_isolate()->factory()->meta_map())}));
+
+      auto* descriptor_array = AddNewNode<LoadTaggedField>(
+          {enumerator}, Map::kInstanceDescriptorsOffset);
+      auto* enum_cache = AddNewNode<LoadTaggedField>(
+          {descriptor_array}, DescriptorArray::kEnumCacheOffset);
+      auto* cache_array =
+          AddNewNode<LoadTaggedField>({enum_cache}, EnumCache::kKeysOffset);
+
+      auto* cache_length = AddNewNode<LoadEnumCacheLength>({enumerator});
+
+      MoveNodeBetweenRegisters(interpreter::Register::virtual_accumulator(),
+                               cache_type_reg);
+      StoreRegister(cache_array_reg, cache_array);
+      StoreRegister(cache_length_reg, cache_length);
+      break;
+    }
+    case ForInHint::kAny: {
+      // This move needs to happen before ForInPrepare to avoid lazy deopt
+      // extending the lifetime of the {cache_type} register.
+      MoveNodeBetweenRegisters(interpreter::Register::virtual_accumulator(),
+                               cache_type_reg);
+      ForInPrepare* result =
+          AddNewNode<ForInPrepare>({context, enumerator}, feedback_source);
+      // No need to set the accumulator.
+      DCHECK(!GetOutLiveness()->AccumulatorIsLive());
+      // The result is output in registers |cache_info_triple| to
+      // |cache_info_triple + 2|, with the registers holding cache_type,
+      // cache_array, and cache_length respectively. Cache type is already set
+      // above, so store the remaining two now.
+      StoreRegisterPair({cache_array_reg, cache_length_reg}, result);
+      break;
+    }
+  }
 }
 
 void MaglevGraphBuilder::VisitForInContinue() {
@@ -4632,7 +4760,6 @@ void MaglevGraphBuilder::VisitForInContinue() {
 void MaglevGraphBuilder::VisitForInNext() {
   // ForInNext <receiver> <index> <cache_info_pair>
   ValueNode* receiver = LoadRegisterTagged(0);
-  ValueNode* index = LoadRegisterTagged(1);
   interpreter::Register cache_type_reg, cache_array_reg;
   std::tie(cache_type_reg, cache_array_reg) =
       iterator_.GetRegisterPairOperand(2);
@@ -4640,17 +4767,35 @@ void MaglevGraphBuilder::VisitForInNext() {
   ValueNode* cache_array = GetTaggedValue(cache_array_reg);
   FeedbackSlot slot = GetSlotOperand(3);
   compiler::FeedbackSource feedback_source{feedback(), slot};
-  ValueNode* context = GetContext();
-  SetAccumulator(AddNewNode<ForInNext>(
-      {context, receiver, cache_array, cache_type, index}, feedback_source));
+
+  ForInHint hint = broker()->GetFeedbackForForIn(feedback_source);
+
+  switch (hint) {
+    case ForInHint::kNone:
+    case ForInHint::kEnumCacheKeysAndIndices:
+    case ForInHint::kEnumCacheKeys: {
+      ValueNode* index = LoadRegisterInt32(1);
+      // Ensure that the expected map still matches that of the {receiver}.
+      auto* receiver_map =
+          AddNewNode<LoadTaggedField>({receiver}, HeapObject::kMapOffset);
+      AddNewNode<CheckDynamicValue>({receiver_map, cache_type});
+      SetAccumulator(AddNewNode<LoadFixedArrayElement>({cache_array, index}));
+      break;
+    }
+    case ForInHint::kAny: {
+      ValueNode* index = LoadRegisterTagged(1);
+      ValueNode* context = GetContext();
+      SetAccumulator(AddNewNode<ForInNext>(
+          {context, receiver, cache_array, cache_type, index},
+          feedback_source));
+      break;
+    };
+  }
 }
 
 void MaglevGraphBuilder::VisitForInStep() {
-  // TODO(victorgomes): We should be able to assert that Register(0)
-  // contains an Smi.
   ValueNode* index = LoadRegisterInt32(0);
-  ValueNode* one = GetInt32Constant(1);
-  SetAccumulator(AddNewNode<Int32NodeFor<Operation::kAdd>>({index, one}));
+  SetAccumulator(AddNewNode<Int32NodeFor<Operation::kIncrement>>({index}));
 }
 
 void MaglevGraphBuilder::VisitSetPendingMessage() {

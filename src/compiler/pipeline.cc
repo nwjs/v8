@@ -82,10 +82,12 @@
 #include "src/compiler/turboshaft/assembler.h"
 #include "src/compiler/turboshaft/assert-types-reducer.h"
 #include "src/compiler/turboshaft/branch-elimination-reducer.h"
+#include "src/compiler/turboshaft/dead-code-elimination-reducer.h"
 #include "src/compiler/turboshaft/decompression-optimization.h"
 #include "src/compiler/turboshaft/graph-builder.h"
 #include "src/compiler/turboshaft/graph-visualizer.h"
 #include "src/compiler/turboshaft/graph.h"
+#include "src/compiler/turboshaft/index.h"
 #include "src/compiler/turboshaft/late-escape-analysis-reducer.h"
 #include "src/compiler/turboshaft/machine-optimization-reducer.h"
 #include "src/compiler/turboshaft/memory-optimization.h"
@@ -94,6 +96,7 @@
 #include "src/compiler/turboshaft/select-lowering-reducer.h"
 #include "src/compiler/turboshaft/simplify-tf-loops.h"
 #include "src/compiler/turboshaft/type-inference-reducer.h"
+#include "src/compiler/turboshaft/typed-optimizations-reducer.h"
 #include "src/compiler/turboshaft/types.h"
 #include "src/compiler/turboshaft/value-numbering-reducer.h"
 #include "src/compiler/turboshaft/variable-reducer.h"
@@ -111,23 +114,30 @@
 #include "src/logging/code-events.h"
 #include "src/logging/counters.h"
 #include "src/logging/runtime-call-stats-scope.h"
+#include "src/logging/runtime-call-stats.h"
 #include "src/objects/shared-function-info.h"
 #include "src/tracing/trace-event.h"
 #include "src/utils/ostreams.h"
 #include "src/utils/utils.h"
 
 #if V8_ENABLE_WEBASSEMBLY
+#include "src/compiler/int64-lowering.h"
 #include "src/compiler/wasm-compiler.h"
 #include "src/compiler/wasm-escape-analysis.h"
 #include "src/compiler/wasm-gc-lowering.h"
 #include "src/compiler/wasm-gc-operator-reducer.h"
 #include "src/compiler/wasm-inlining.h"
+#include "src/compiler/wasm-load-elimination.h"
 #include "src/compiler/wasm-loop-peeling.h"
 #include "src/compiler/wasm-typer.h"
 #include "src/wasm/function-body-decoder.h"
 #include "src/wasm/function-compiler.h"
 #include "src/wasm/wasm-engine.h"
 #endif  // V8_ENABLE_WEBASSEMBLY
+
+#if V8_ENABLE_WASM_SIMD256_REVEC
+#include "src/compiler/revectorizer.h"
+#endif  // V8_ENABLE_WASM_SIMD256_REVEC
 
 namespace v8 {
 namespace internal {
@@ -373,6 +383,7 @@ class PipelineData {
   SourcePositionTable* source_positions() const { return source_positions_; }
   NodeOriginTable* node_origins() const { return node_origins_; }
   MachineOperatorBuilder* machine() const { return machine_; }
+  SimplifiedOperatorBuilder* simplified() const { return simplified_; }
   CommonOperatorBuilder* common() const { return common_; }
   JSOperatorBuilder* javascript() const { return javascript_; }
   JSGraph* jsgraph() const { return jsgraph_; }
@@ -728,6 +739,10 @@ class PipelineImpl final {
   // Substep B.1. Produce a scheduled graph.
   void ComputeScheduledGraph();
 
+#if V8_ENABLE_WASM_SIMD256_REVEC
+  void Revectorize();
+#endif  // V8_ENABLE_WASM_SIMD256_REVEC
+
   // Substep B.2. Select instructions from a scheduled graph.
   bool SelectInstructions(Linkage* linkage);
 
@@ -737,7 +752,10 @@ class PipelineImpl final {
   // Step D. Run the code finalization pass.
   MaybeHandle<Code> FinalizeCode(bool retire_broker = true);
 
-  // Step E. Install any code dependencies.
+  // Step E. Ensure all embedded maps are non-deprecated.
+  bool CheckNoDeprecatedMaps(Handle<Code> code);
+
+  // Step F. Install any code dependencies.
   bool CommitDependencies(Handle<Code> code);
 
   void VerifyGeneratedCodeIsIdempotent();
@@ -1279,6 +1297,9 @@ PipelineCompilationJob::Status PipelineCompilationJob::FinalizeJobImpl(
     }
     return FAILED;
   }
+  if (!pipeline_.CheckNoDeprecatedMaps(code)) {
+    return RetryOptimization(BailoutReason::kConcurrentMapDeprecation);
+  }
   if (!pipeline_.CommitDependencies(code)) {
     return RetryOptimization(BailoutReason::kBailedOutDueToDependencyChange);
   }
@@ -1291,16 +1312,17 @@ PipelineCompilationJob::Status PipelineCompilationJob::FinalizeJobImpl(
 
 void PipelineCompilationJob::RegisterWeakObjectsInOptimizedCode(
     Isolate* isolate, Handle<NativeContext> context, Handle<Code> code) {
+  Handle<InstructionStream> istream(code->instruction_stream(), isolate);
   std::vector<Handle<Map>> maps;
   DCHECK(code->is_optimized_code());
   {
     DisallowGarbageCollection no_gc;
     PtrComprCageBase cage_base(isolate);
     int const mode_mask = RelocInfo::EmbeddedObjectModeMask();
-    for (RelocIterator it(*code, mode_mask); !it.done(); it.next()) {
+    for (RelocIterator it(*istream, mode_mask); !it.done(); it.next()) {
       DCHECK(RelocInfo::IsEmbeddedObjectMode(it.rinfo()->rmode()));
       HeapObject target_object = it.rinfo()->target_object(cage_base);
-      if (code->IsWeakObjectInOptimizedCode(target_object)) {
+      if (istream->IsWeakObjectInOptimizedCode(target_object)) {
         if (target_object.IsMap(cage_base)) {
           maps.push_back(handle(Map::cast(target_object), isolate));
         }
@@ -1354,6 +1376,7 @@ struct GraphBuilderPhase {
       flags |= BytecodeGraphBuilderFlag::kBailoutOnUninitialized;
     }
 
+    UnparkedScopeIfNeeded scope(data->broker());
     JSFunctionRef closure = MakeRef(data->broker(), data->info()->closure());
     CallFrequency frequency(1.0f);
     BuildGraphFromBytecode(data->broker(), temp_zone, closure.shared(),
@@ -1970,7 +1993,8 @@ struct LateOptimizationPhase {
           turboshaft::VariableReducer, turboshaft::BranchEliminationReducer,
           turboshaft::SelectLoweringReducer,
           turboshaft::MachineOptimizationReducerSignallingNanImpossible,
-          turboshaft::ValueNumberingReducer>::Run(&data->turboshaft_graph(),
+          turboshaft::ValueNumberingReducer>::Run(data->isolate(),
+                                                  &data->turboshaft_graph(),
                                                   temp_zone,
                                                   data->node_origins());
     } else {
@@ -2078,10 +2102,13 @@ struct BuildTurboshaftPhase {
     Schedule* schedule = data->schedule();
     data->reset_schedule();
     data->CreateTurboshaftGraph();
+
+    UnparkedScopeIfNeeded scope(data->broker());
+
     if (auto bailout = turboshaft::BuildGraph(
-            schedule, data->isolate(), data->graph_zone(), temp_zone,
-            &data->turboshaft_graph(), linkage, data->source_positions(),
-            data->node_origins())) {
+            data->broker(), schedule, data->isolate(), data->graph_zone(),
+            temp_zone, &data->turboshaft_graph(), linkage,
+            data->source_positions(), data->node_origins())) {
       return bailout;
     }
     return {};
@@ -2099,31 +2126,52 @@ struct OptimizeTurboshaftPhase {
         turboshaft::MemoryOptimizationReducer, turboshaft::VariableReducer,
         turboshaft::MachineOptimizationReducerSignallingNanImpossible,
         turboshaft::ValueNumberingReducer>::
-        Run(&data->turboshaft_graph(), temp_zone, data->node_origins(),
+        Run(data->isolate(), &data->turboshaft_graph(), temp_zone,
+            data->node_origins(),
             std::tuple{
                 turboshaft::MemoryOptimizationReducerArgs{data->isolate()}});
   }
 };
 
-struct TurboshaftTypeInferencePhase {
-  DECL_PIPELINE_PHASE_CONSTANTS(TurboshaftTypeInference)
+struct TurboshaftTypedOptimizationsPhase {
+  DECL_PIPELINE_PHASE_CONSTANTS(TurboshaftTypedOptimizations)
+
+  void Run(PipelineData* data, Zone* temp_zone) {
+    DCHECK(data->HasTurboshaftGraph());
+    turboshaft::OptimizationPhase<turboshaft::TypedOptimizationsReducer,
+                                  turboshaft::TypeInferenceReducer>::
+        Run(data->isolate(), &data->turboshaft_graph(), temp_zone,
+            data->node_origins(),
+            std::tuple{turboshaft::TypeInferenceReducerArgs{data->isolate()}});
+  }
+};
+
+struct TurboshaftTypeAssertionsPhase {
+  DECL_PIPELINE_PHASE_CONSTANTS(TurboshaftTypeAssertions)
 
   void Run(PipelineData* data, Zone* temp_zone) {
     DCHECK(data->HasTurboshaftGraph());
     UnparkedScopeIfNeeded scope(data->broker());
 
-    if (v8_flags.turboshaft_assert_types) {
-      turboshaft::OptimizationPhase<turboshaft::AssertTypesReducer,
-                                    turboshaft::ValueNumberingReducer,
-                                    turboshaft::TypeInferenceReducer>::
-          Run(&data->turboshaft_graph(), temp_zone, data->node_origins(),
-              std::tuple{turboshaft::TypeInferenceReducerArgs{data->isolate()},
-                         turboshaft::AssertTypesReducerArgs{data->isolate()}});
-    } else {
-      turboshaft::OptimizationPhase<turboshaft::TypeInferenceReducer>::Run(
-          &data->turboshaft_graph(), temp_zone, data->node_origins(),
-          std::tuple{turboshaft::TypeInferenceReducerArgs{data->isolate()}});
-    }
+    turboshaft::OptimizationPhase<turboshaft::AssertTypesReducer,
+                                  turboshaft::ValueNumberingReducer,
+                                  turboshaft::TypeInferenceReducer>::
+        Run(data->isolate(), &data->turboshaft_graph(), temp_zone,
+            data->node_origins(),
+            std::tuple{turboshaft::TypeInferenceReducerArgs{data->isolate()},
+                       turboshaft::AssertTypesReducerArgs{data->isolate()}});
+  }
+};
+
+struct TurboshaftDeadCodeEliminationPhase {
+  DECL_PIPELINE_PHASE_CONSTANTS(TurboshaftDeadCodeElimination)
+
+  void Run(PipelineData* data, Zone* temp_zone) {
+    DCHECK(data->HasTurboshaftGraph());
+
+    turboshaft::OptimizationPhase<turboshaft::DeadCodeEliminationReducer>::Run(
+        data->isolate(), &data->turboshaft_graph(), temp_zone,
+        data->node_origins());
   }
 };
 
@@ -2162,8 +2210,11 @@ struct WasmGCOptimizationPhase {
     GraphReducer graph_reducer(
         temp_zone, data->graph(), &data->info()->tick_counter(), data->broker(),
         data->jsgraph()->Dead(), data->observe_node_manager());
+    WasmLoadElimination load_elimination(&graph_reducer, data->jsgraph(),
+                                         temp_zone);
     WasmGCOperatorReducer wasm_gc(&graph_reducer, temp_zone, data->mcgraph(),
                                   module);
+    AddReducer(data, &graph_reducer, &load_elimination);
     AddReducer(data, &graph_reducer, &wasm_gc);
     graph_reducer.ReduceGraph();
   }
@@ -2355,6 +2406,17 @@ struct ComputeSchedulePhase {
   }
 };
 
+#if V8_ENABLE_WASM_SIMD256_REVEC
+struct RevectorizePhase {
+  DECL_PIPELINE_PHASE_CONSTANTS(Revectorizer)
+
+  void Run(PipelineData* data, Zone* temp_zone) {
+    Revectorizer revec(temp_zone, data->graph(), data->mcgraph());
+    revec.TryRevectorize(data->info()->GetDebugName().get());
+  }
+};
+#endif  // V8_ENABLE_WASM_SIMD256_REVEC
+
 struct InstructionRangesAsJSON {
   const InstructionSequence* sequence;
   const ZoneVector<std::pair<int, int>>* instr_origins;
@@ -2432,8 +2494,8 @@ struct InstructionSelectionPhase {
 struct BitcastElisionPhase {
   DECL_PIPELINE_PHASE_CONSTANTS(BitcastElision)
 
-  void Run(PipelineData* data, Zone* temp_zone) {
-    BitcastElider bitcast_optimizer(temp_zone, data->graph());
+  void Run(PipelineData* data, Zone* temp_zone, bool is_builtin) {
+    BitcastElider bitcast_optimizer(temp_zone, data->graph(), is_builtin);
     bitcast_optimizer.Reduce();
   }
 };
@@ -2715,6 +2777,13 @@ struct PrintTurboshaftGraphPhase {
               return true;
             }
             return false;
+          });
+      PrintTurboshaftCustomDataPerOperation(
+          data->info(), "Use Count (saturated)", data->turboshaft_graph(),
+          [](std::ostream& stream, const turboshaft::Graph& graph,
+             turboshaft::OpIndex index) -> bool {
+            stream << static_cast<int>(graph.Get(index).saturated_use_count);
+            return true;
           });
     }
 
@@ -3094,8 +3163,19 @@ bool PipelineImpl::OptimizeGraph(Linkage* linkage) {
     Run<PrintTurboshaftGraphPhase>(
         DecompressionOptimizationPhase::phase_name());
 
-    Run<TurboshaftTypeInferencePhase>();
-    Run<PrintTurboshaftGraphPhase>(TurboshaftTypeInferencePhase::phase_name());
+    Run<TurboshaftTypedOptimizationsPhase>();
+    Run<PrintTurboshaftGraphPhase>(
+        TurboshaftTypedOptimizationsPhase::phase_name());
+
+    if (v8_flags.turboshaft_assert_types) {
+      Run<TurboshaftTypeAssertionsPhase>();
+      Run<PrintTurboshaftGraphPhase>(
+          TurboshaftTypeAssertionsPhase::phase_name());
+    }
+
+    Run<TurboshaftDeadCodeEliminationPhase>();
+    Run<PrintTurboshaftGraphPhase>(
+        TurboshaftDeadCodeEliminationPhase::phase_name());
 
     Run<TurboshaftRecreateSchedulePhase>(linkage);
     TraceSchedule(data->info(), data, data->schedule(),
@@ -3425,6 +3505,30 @@ wasm::WasmCompilationResult Pipeline::GenerateCodeForWasmNativeStub(
   return result;
 }
 
+namespace {
+
+void LowerInt64(const wasm::FunctionSig* sig, MachineGraph* mcgraph,
+                SimplifiedOperatorBuilder* simplified, PipelineImpl& pipeline) {
+  if (mcgraph->machine()->Is64()) return;
+
+  Signature<MachineRepresentation>::Builder builder(
+      mcgraph->zone(), sig->return_count(), sig->parameter_count());
+  for (auto ret : sig->returns()) {
+    builder.AddReturn(ret.machine_representation());
+  }
+  for (auto param : sig->parameters()) {
+    builder.AddParam(param.machine_representation());
+  }
+  Signature<MachineRepresentation>* signature = builder.Build();
+
+  Int64Lowering r(mcgraph->graph(), mcgraph->machine(), mcgraph->common(),
+                  simplified, mcgraph->zone(), signature);
+  r.LowerGraph();
+  pipeline.RunPrintAndVerify("V8.Int64Lowering", true);
+}
+
+}  // namespace
+
 // static
 void Pipeline::GenerateCodeForWasmFunction(
     OptimizedCompilationInfo* info, wasm::CompilationEnv* env,
@@ -3457,6 +3561,13 @@ void Pipeline::GenerateCodeForWasmFunction(
   }
 
   pipeline.RunPrintAndVerify("V8.WasmMachineCode", true);
+
+#if V8_ENABLE_WASM_SIMD256_REVEC
+  if (v8_flags.experimental_wasm_revectorize) {
+    pipeline.Revectorize();
+    pipeline.RunPrintAndVerify("V8.WasmRevec", true);
+  }
+#endif  // V8_ENABLE_WASM_SIMD256_REVEC
 
   data.BeginPhaseKind("V8.WasmOptimization");
   if (v8_flags.wasm_inlining) {
@@ -3493,6 +3604,12 @@ void Pipeline::GenerateCodeForWasmFunction(
     pipeline.Run<WasmGCLoweringPhase>(module);
     pipeline.RunPrintAndVerify(WasmGCLoweringPhase::phase_name(), true);
   }
+
+  // Int64Lowering must happen after inlining (otherwise inlining would have
+  // to invoke it separately for the inlined function body).
+  // It must also happen after WasmGCLowering, otherwise it would have to
+  // add type annotations to nodes it creates, and handle wasm-gc nodes.
+  LowerInt64(function_body.sig, mcgraph, data.simplified(), pipeline);
 
   if (v8_flags.wasm_opt || is_asm_js) {
     pipeline.Run<WasmOptimizationPhase>(signalling_nan_propagation);
@@ -3654,9 +3771,9 @@ MaybeHandle<Code> Pipeline::GenerateCodeForTesting(
   {
     LocalIsolateScope local_isolate_scope(data.broker(), info,
                                           isolate->main_thread_local_isolate());
-    if (!pipeline.CreateGraph()) return MaybeHandle<Code>();
+    if (!pipeline.CreateGraph()) return {};
     // We selectively Unpark inside OptimizeGraph.
-    if (!pipeline.OptimizeGraph(&linkage)) return MaybeHandle<Code>();
+    if (!pipeline.OptimizeGraph(&linkage)) return {};
 
     pipeline.AssembleCode(&linkage);
   }
@@ -3676,7 +3793,7 @@ MaybeHandle<Code> Pipeline::GenerateCodeForTesting(
     if (!will_retire_broker) *out_broker = data.ReleaseBroker();
     return code;
   }
-  return MaybeHandle<Code>();
+  return {};
 }
 
 // static
@@ -3717,7 +3834,7 @@ MaybeHandle<Code> Pipeline::GenerateCodeForTesting(
       pipeline.CommitDependencies(code)) {
     return code;
   }
-  return MaybeHandle<Code>();
+  return {};
 }
 
 // static
@@ -3762,6 +3879,10 @@ void PipelineImpl::ComputeScheduledGraph() {
   Run<ComputeSchedulePhase>();
   TraceScheduleAndVerify(data->info(), data, data->schedule(), "schedule");
 }
+
+#if V8_ENABLE_WASM_SIMD256_REVEC
+void PipelineImpl::Revectorize() { Run<RevectorizePhase>(); }
+#endif  // V8_ENABLE_WASM_SIMD256_REVEC
 
 bool PipelineImpl::SelectInstructions(Linkage* linkage) {
   auto call_descriptor = linkage->GetIncomingDescriptor();
@@ -3816,9 +3937,7 @@ bool PipelineImpl::SelectInstructions(Linkage* linkage) {
                               data->debug_name(), &temp_zone);
   }
 
-  if (Builtins::IsBuiltinId(data->info()->builtin())) {
-    Run<BitcastElisionPhase>();
-  }
+  Run<BitcastElisionPhase>(Builtins::IsBuiltinId(data->info()->builtin()));
 
   data->InitializeInstructionSequence(call_descriptor);
 
@@ -4067,6 +4186,20 @@ MaybeHandle<Code> PipelineImpl::GenerateCode(CallDescriptor* call_descriptor) {
     return MaybeHandle<Code>();
   }
   return FinalizeCode();
+}
+
+// We must not embed deprecated maps, as we rely in the compiler on all explicit
+// maps not being deprecated.
+bool PipelineImpl::CheckNoDeprecatedMaps(Handle<Code> code) {
+  int mode_mask = RelocInfo::EmbeddedObjectModeMask();
+  for (RelocIterator it(*code, mode_mask); !it.done(); it.next()) {
+    DCHECK(RelocInfo::IsEmbeddedObjectMode(it.rinfo()->rmode()));
+    HeapObject obj = it.rinfo()->target_object(data_->isolate());
+    if (obj.IsMap() && Map::cast(obj).is_deprecated()) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool PipelineImpl::CommitDependencies(Handle<Code> code) {

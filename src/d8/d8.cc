@@ -465,6 +465,7 @@ CounterCollection* Shell::counters_ = &local_counters_;
 base::LazyMutex Shell::context_mutex_;
 const base::TimeTicks Shell::kInitialTicks = base::TimeTicks::Now();
 Global<Function> Shell::stringify_function_;
+base::Mutex Shell::profiler_end_callback_lock_;
 std::map<Isolate*, std::pair<Global<Function>, Global<Context>>>
     Shell::profiler_end_callback_;
 base::LazyMutex Shell::workers_mutex_;
@@ -1319,6 +1320,10 @@ MaybeLocal<Context> Shell::HostCreateShadowRealmContext(
       InitializeModuleEmbedderData(context);
   std::shared_ptr<ModuleEmbedderData> initiator_data =
       GetModuleDataFromContext(initiator_context);
+
+  // ShadowRealms are synchronously accessible and are always in the same origin
+  // as the initiator context.
+  context->SetSecurityToken(initiator_context->GetSecurityToken());
   shadow_realm_data->origin = initiator_data->origin;
 
   return context;
@@ -2519,17 +2524,32 @@ void Shell::ProfilerSetOnProfileEndListener(
     isolate->ThrowError("The OnProfileEnd listener has to be a function");
     return;
   }
+  base::MutexGuard lock_guard(&profiler_end_callback_lock_);
   profiler_end_callback_[isolate] =
       std::make_pair(Global<Function>(isolate, args[0].As<Function>()),
                      Global<Context>(isolate, isolate->GetCurrentContext()));
 }
 
 bool Shell::HasOnProfileEndListener(Isolate* isolate) {
+  base::MutexGuard lock_guard(&profiler_end_callback_lock_);
   return profiler_end_callback_.find(isolate) != profiler_end_callback_.end();
 }
 
 void Shell::ResetOnProfileEndListener(Isolate* isolate) {
-  profiler_end_callback_.erase(isolate);
+  // If the inspector is enabled, then the installed console is not the
+  // D8Console.
+  if (options.enable_inspector) return;
+  {
+    base::MutexGuard lock_guard(&profiler_end_callback_lock_);
+    profiler_end_callback_.erase(isolate);
+  }
+
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+  D8Console* console =
+      reinterpret_cast<D8Console*>(i_isolate->console_delegate());
+  if (console) {
+    console->DisposeProfiler();
+  }
 }
 
 void Shell::ProfilerTriggerSample(
@@ -2538,25 +2558,33 @@ void Shell::ProfilerTriggerSample(
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
   D8Console* console =
       reinterpret_cast<D8Console*>(i_isolate->console_delegate());
-  if (console->profiler()) console->profiler()->CollectSample(isolate);
+  if (console && console->profiler()) {
+    console->profiler()->CollectSample(isolate);
+  }
 }
 
 void Shell::TriggerOnProfileEndListener(Isolate* isolate, std::string profile) {
   CHECK(HasOnProfileEndListener(isolate));
+  Local<Function> callback;
+  Local<Context> context;
   Local<Value> argv[1] = {
       String::NewFromUtf8(isolate, profile.c_str()).ToLocalChecked()};
-  auto& callback_pair = profiler_end_callback_[isolate];
-  Local<Function> callback = callback_pair.first.Get(isolate);
-  Local<Context> context = callback_pair.second.Get(isolate);
+  {
+    base::MutexGuard lock_guard(&profiler_end_callback_lock_);
+    auto& callback_pair = profiler_end_callback_[isolate];
+    callback = callback_pair.first.Get(isolate);
+    context = callback_pair.second.Get(isolate);
+  }
   TryCatch try_catch(isolate);
   try_catch.SetVerbose(true);
   USE(callback->Call(context, Undefined(isolate), 1, argv));
 }
 
-void WriteToFile(FILE* file, const v8::FunctionCallbackInfo<v8::Value>& args) {
-  for (int i = 0; i < args.Length(); i++) {
+void WriteToFile(FILE* file, const v8::FunctionCallbackInfo<v8::Value>& args,
+                 int first_arg_index = 0) {
+  for (int i = first_arg_index; i < args.Length(); i++) {
     HandleScope handle_scope(args.GetIsolate());
-    if (i != 0) {
+    if (i != first_arg_index) {
       fprintf(file, " ");
     }
 
@@ -2600,6 +2628,55 @@ void Shell::PrintErr(const v8::FunctionCallbackInfo<v8::Value>& args) {
 
 void Shell::WriteStdout(const v8::FunctionCallbackInfo<v8::Value>& args) {
   WriteToFile(stdout, args);
+}
+
+// There are two overloads of writeFile().
+//
+// The first parameter is always the filename.
+//
+// If there are exactly 2 arguments, and the second argument is an ArrayBuffer
+// or an ArrayBufferView, write the binary contents into the file.
+//
+// Otherwise, convert arguments to UTF-8 strings, and write them to the file,
+// separated by space.
+void Shell::WriteFile(const v8::FunctionCallbackInfo<v8::Value>& args) {
+  String::Utf8Value file_name(args.GetIsolate(), args[0]);
+  if (*file_name == nullptr) {
+    args.GetIsolate()->ThrowError("Error converting filename to string");
+    return;
+  }
+  FILE* file;
+  if (args.Length() == 2 &&
+      (args[1]->IsArrayBuffer() || args[1]->IsArrayBufferView())) {
+    file = base::Fopen(*file_name, "wb");
+    if (file == nullptr) {
+      args.GetIsolate()->ThrowError("Error opening file");
+      return;
+    }
+
+    void* data;
+    size_t length;
+    if (args[1]->IsArrayBuffer()) {
+      Local<v8::ArrayBuffer> buffer = Local<v8::ArrayBuffer>::Cast(args[1]);
+      length = buffer->ByteLength();
+      data = buffer->Data();
+    } else {
+      Local<v8::ArrayBufferView> buffer_view =
+          Local<v8::ArrayBufferView>::Cast(args[1]);
+      length = buffer_view->ByteLength();
+      data = static_cast<uint8_t*>(buffer_view->Buffer()->Data()) +
+             buffer_view->ByteOffset();
+    }
+    fwrite(data, 1, length, file);
+  } else {
+    file = base::Fopen(*file_name, "w");
+    if (file == nullptr) {
+      args.GetIsolate()->ThrowError("Error opening file");
+      return;
+    }
+    WriteToFile(file, args, 1);
+  }
+  base::Fclose(file);
 }
 
 void Shell::ReadFile(const v8::FunctionCallbackInfo<v8::Value>& args) {
@@ -2957,6 +3034,7 @@ void Shell::QuitOnce(v8::FunctionCallbackInfo<v8::Value>* args) {
                       ->Int32Value(args->GetIsolate()->GetCurrentContext())
                       .FromMaybe(0);
   Isolate* isolate = args->GetIsolate();
+  ResetOnProfileEndListener(isolate);
   isolate->Exit();
 
   // As we exit the process anyway, we do not dispose the platform and other
@@ -2965,6 +3043,13 @@ void Shell::QuitOnce(v8::FunctionCallbackInfo<v8::Value>* args) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
   if (i_isolate->thread_manager()->IsLockedByCurrentThread()) {
     i_isolate->thread_manager()->Unlock();
+  }
+
+  // When disposing the shared space isolate, the workers (client isolates) need
+  // to be terminated first.
+  if (i_isolate->is_shared_space_isolate()) {
+    i::ParkedScope parked(i_isolate->main_thread_local_isolate());
+    WaitForRunningWorkers(parked);
   }
 
   OnExit(isolate, false);
@@ -3317,6 +3402,10 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
                        FunctionTemplate::New(isolate, PrintErr));
   global_template->Set(isolate, "write",
                        FunctionTemplate::New(isolate, WriteStdout));
+  if (!i::v8_flags.fuzzing) {
+    global_template->Set(isolate, "writeFile",
+                         FunctionTemplate::New(isolate, WriteFile));
+  }
   global_template->Set(isolate, "read",
                        FunctionTemplate::New(isolate, ReadFile));
   global_template->Set(isolate, "readbuffer",
@@ -3699,25 +3788,6 @@ void Shell::Initialize(Isolate* isolate, D8Console* console,
         [](Local<Object> host, v8::AccessType type, Local<Value> data) {});
   }
 
-#ifdef V8_FUZZILLI
-  // Let the parent process (Fuzzilli) know we are ready.
-  if (options.fuzzilli_enable_builtins_coverage) {
-    cov_init_builtins_edges(static_cast<uint32_t>(
-        i::BasicBlockProfiler::Get()
-            ->GetCoverageBitmap(reinterpret_cast<i::Isolate*>(isolate))
-            .size()));
-  }
-  char helo[] = "HELO";
-  if (write(REPRL_CWFD, helo, 4) != 4 || read(REPRL_CRFD, helo, 4) != 4) {
-    fuzzilli_reprl = false;
-  }
-
-  if (memcmp(helo, "HELO", 4) != 0) {
-    fprintf(stderr, "Invalid response from parent\n");
-    _exit(-1);
-  }
-#endif  // V8_FUZZILLI
-
   debug::SetConsoleDelegate(isolate, console);
 }
 
@@ -3877,9 +3947,7 @@ void Shell::WriteLcovData(v8::Isolate* isolate, const char* file) {
 
 void Shell::OnExit(v8::Isolate* isolate, bool dispose) {
   platform::NotifyIsolateShutdown(g_default_platform, isolate);
-  if (dispose) {
-    isolate->Dispose();
-  }
+  isolate->Dispose();
 
   // Simulate errors before disposing V8, as that resets flags (via
   // FlagList::ResetAllFlags()), but error simulation reads the random seed.
@@ -5019,8 +5087,8 @@ bool Shell::SetOptions(int argc, char* argv[]) {
       options.max_serializer_memory = atoi(argv[i] + 24) * i::MB;
       argv[i] = nullptr;
 #ifdef V8_FUZZILLI
-    } else if (strcmp(argv[i], "--no-fuzzilli-enable-builtins-coverage") == 0) {
-      options.fuzzilli_enable_builtins_coverage = false;
+    } else if (strcmp(argv[i], "--fuzzilli-enable-builtins-coverage") == 0) {
+      options.fuzzilli_enable_builtins_coverage = true;
       argv[i] = nullptr;
     } else if (strcmp(argv[i], "--fuzzilli-coverage-statistics") == 0) {
       options.fuzzilli_coverage_statistics = true;
@@ -5851,6 +5919,24 @@ int Shell::Main(int argc, char* argv[]) {
 
   Isolate* isolate = Isolate::New(create_params);
 
+#ifdef V8_FUZZILLI
+  // Let the parent process (Fuzzilli) know we are ready.
+  if (options.fuzzilli_enable_builtins_coverage) {
+    cov_init_builtins_edges(static_cast<uint32_t>(
+        i::BasicBlockProfiler::Get()
+            ->GetCoverageBitmap(reinterpret_cast<i::Isolate*>(isolate))
+            .size()));
+  }
+  char helo[] = "HELO";
+  if (write(REPRL_CWFD, helo, 4) != 4 || read(REPRL_CRFD, helo, 4) != 4) {
+    fuzzilli_reprl = false;
+  }
+
+  if (memcmp(helo, "HELO", 4) != 0) {
+    FATAL("REPRL: Invalid response from parent");
+  }
+#endif  // V8_FUZZILLI
+
   {
     D8Console console(isolate);
     Isolate::Scope scope(isolate);
@@ -5864,8 +5950,7 @@ int Shell::Main(int argc, char* argv[]) {
         unsigned action = 0;
         ssize_t nread = read(REPRL_CRFD, &action, 4);
         if (nread != 4 || action != 'cexe') {
-          fprintf(stderr, "Unknown action: %u\n", action);
-          _exit(-1);
+          FATAL("REPRL: Unknown action: %u", action);
         }
       }
 #endif  // V8_FUZZILLI
@@ -5928,8 +6013,8 @@ int Shell::Main(int argc, char* argv[]) {
             PerIsolateData data2(isolate2);
 
             result = RunMain(isolate2, false);
+            ResetOnProfileEndListener(isolate2);
           }
-          ResetOnProfileEndListener(isolate2);
           isolate2->Dispose();
         }
 
@@ -5974,12 +6059,6 @@ int Shell::Main(int argc, char* argv[]) {
         cpu_profiler->Dispose();
       }
 
-      // Shut down contexts and collect garbage.
-      cached_code_map_.clear();
-      evaluation_context_.Reset();
-      stringify_function_.Reset();
-      ResetOnProfileEndListener(isolate);
-      CollectGarbage(isolate);
 #ifdef V8_FUZZILLI
       // Send result to parent (fuzzilli) and reset edge guards.
       if (fuzzilli_reprl) {
@@ -6015,6 +6094,13 @@ int Shell::Main(int argc, char* argv[]) {
       }
 #endif  // V8_FUZZILLI
     } while (fuzzilli_reprl);
+
+    // Shut down contexts and collect garbage.
+    cached_code_map_.clear();
+    evaluation_context_.Reset();
+    stringify_function_.Reset();
+    ResetOnProfileEndListener(isolate);
+    CollectGarbage(isolate);
   }
   OnExit(isolate, true);
 

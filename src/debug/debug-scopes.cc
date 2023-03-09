@@ -225,10 +225,9 @@ void ScopeIterator::TryParseAndRetrieveScopes(ReparseStrategy strategy) {
   }
 
   if (strategy == ReparseStrategy::kScriptIfNeeded) {
-    CHECK(v8_flags.experimental_reuse_locals_blocklists);
     Object maybe_block_list = isolate_->LocalsBlockListCacheGet(scope_info);
     calculate_blocklists_ = maybe_block_list.IsTheHole();
-    strategy = calculate_blocklists_ ? ReparseStrategy::kScript
+    strategy = calculate_blocklists_ ? ReparseStrategy::kScriptIfNeeded
                                      : ReparseStrategy::kFunctionLiteral;
   }
 
@@ -532,6 +531,10 @@ ScopeIterator::ScopeType ScopeIterator::Type() const {
       case EVAL_SCOPE:
         DCHECK_IMPLIES(NeedsContext(), context_->IsEvalContext());
         return ScopeTypeEval;
+      case SHADOW_REALM_SCOPE:
+        DCHECK_IMPLIES(NeedsContext(), context_->IsNativeContext());
+        // TODO(v8:11989): New ScopeType for ShadowRealms?
+        return ScopeTypeScript;
     }
     UNREACHABLE();
   }
@@ -1328,7 +1331,6 @@ void ScopeIterator::MaybeCollectAndStoreLocalBlocklists() const {
     return;
   }
 
-  CHECK(v8_flags.experimental_reuse_locals_blocklists);
   DCHECK(isolate_
              ->LocalsBlockListCacheGet(
                  handle(function_->shared().scope_info(), isolate_))

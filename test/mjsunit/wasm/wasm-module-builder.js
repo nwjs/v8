@@ -80,6 +80,7 @@ let kWasmFunctionTypeForm = 0x60;
 let kWasmStructTypeForm = 0x5f;
 let kWasmArrayTypeForm = 0x5e;
 let kWasmSubtypeForm = 0x50;
+let kWasmSubtypeFinalForm = 0x4e;
 let kWasmRecursiveTypeGroupForm = 0x4f;
 
 let kNoSuperType = 0xFFFFFFFF;
@@ -498,7 +499,6 @@ let kExprArrayGet = 0x13;
 let kExprArrayGetS = 0x14;
 let kExprArrayGetU = 0x15;
 let kExprArraySet = 0x16;
-let kExprArrayLenDeprecated = 0x17;
 let kExprArrayCopy = 0x18;
 let kExprArrayLen = 0x19;
 let kExprArrayNewFixed = 0x1a;
@@ -519,6 +519,7 @@ let kExprBrOnCast = 0x42;
 let kExprBrOnCastNull = 0x4a;
 let kExprBrOnCastDeprecated = 0x46;
 let kExprBrOnCastFail = 0x43;
+let kExprBrOnCastFailNull = 0x4b;
 let kExprRefCastNop = 0x4c;
 let kExprRefIsData = 0x51;
 let kExprRefIsI31 = 0x52;
@@ -549,6 +550,7 @@ let kExprStringNewLossyUtf8 = 0x8b;
 let kExprStringNewWtf8 = 0x8c;
 let kExprStringEncodeLossyUtf8 = 0x8d;
 let kExprStringEncodeWtf8 = 0x8e;
+let kExprStringNewUtf8Try = 0x8f;
 let kExprStringAsWtf8 = 0x90;
 let kExprStringViewWtf8Advance = 0x91;
 let kExprStringViewWtf8EncodeUtf8 = 0x92;
@@ -565,6 +567,7 @@ let kExprStringViewIterNext = 0xa1
 let kExprStringViewIterAdvance = 0xa2;
 let kExprStringViewIterRewind = 0xa3
 let kExprStringViewIterSlice = 0xa4;
+let kExprStringCompare = 0xa8;
 let kExprStringNewUtf8Array = 0xb0;
 let kExprStringNewWtf16Array = 0xb1;
 let kExprStringEncodeUtf8Array = 0xb2;
@@ -573,6 +576,7 @@ let kExprStringNewLossyUtf8Array = 0xb4;
 let kExprStringNewWtf8Array = 0xb5;
 let kExprStringEncodeLossyUtf8Array = 0xb6;
 let kExprStringEncodeWtf8Array = 0xb7;
+let kExprStringNewUtf8ArrayTry = 0xb8;
 
 // Numeric opcodes.
 let kExprI32SConvertSatF32 = 0x00;
@@ -1206,21 +1210,23 @@ function makeField(type, mutability) {
 }
 
 class WasmStruct {
-  constructor(fields, supertype_idx) {
+  constructor(fields, is_final, supertype_idx) {
     if (!Array.isArray(fields)) {
       throw new Error('struct fields must be an array');
     }
     this.fields = fields;
     this.type_form = kWasmStructTypeForm;
+    this.is_final = is_final;
     this.supertype = supertype_idx;
   }
 }
 
 class WasmArray {
-  constructor(type, mutability, supertype_idx) {
+  constructor(type, mutability, is_final, supertype_idx) {
     this.type = type;
     this.mutability = mutability;
     this.type_form = kWasmArrayTypeForm;
+    this.is_final = is_final;
     this.supertype = supertype_idx;
   }
 }
@@ -1337,11 +1343,13 @@ class WasmModuleBuilder {
     this.explicit.push(this.createCustomSection(name, bytes));
   }
 
-  addType(type, supertype_idx = kNoSuperType) {
+  // We use {is_final = true} so that the MVP syntax is generated for
+  // signatures.
+  addType(type, supertype_idx = kNoSuperType, is_final = true) {
     var pl = type.params.length;   // should have params
     var rl = type.results.length;  // should have results
     var type_copy = {params: type.params, results: type.results,
-                     supertype: supertype_idx};
+                     is_final: is_final, supertype: supertype_idx};
     this.types.push(type_copy);
     return this.types.length - 1;
   }
@@ -1351,13 +1359,13 @@ class WasmModuleBuilder {
     return this.stringrefs.length - 1;
   }
 
-  addStruct(fields, supertype_idx = kNoSuperType) {
-    this.types.push(new WasmStruct(fields, supertype_idx));
+  addStruct(fields, supertype_idx = kNoSuperType, is_final = false) {
+    this.types.push(new WasmStruct(fields, is_final, supertype_idx));
     return this.types.length - 1;
   }
 
-  addArray(type, mutability, supertype_idx = kNoSuperType) {
-    this.types.push(new WasmArray(type, mutability, supertype_idx));
+  addArray(type, mutability, supertype_idx = kNoSuperType, is_final = false) {
+    this.types.push(new WasmArray(type, mutability, is_final, supertype_idx));
     return this.types.length - 1;
   }
 
@@ -1653,9 +1661,13 @@ class WasmModuleBuilder {
 
           let type = wasm.types[i];
           if (type.supertype != kNoSuperType) {
-            section.emit_u8(kWasmSubtypeForm);
+            section.emit_u8(type.is_final ? kWasmSubtypeFinalForm
+                                          : kWasmSubtypeForm);
             section.emit_u8(1);  // supertype count
             section.emit_u32v(type.supertype);
+          } else if (!type.is_final) {
+            section.emit_u8(kWasmSubtypeForm);
+            section.emit_u8(0);  // no supertypes
           }
           if (type instanceof WasmStruct) {
             section.emit_u8(kWasmStructTypeForm);

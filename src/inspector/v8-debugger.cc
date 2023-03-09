@@ -102,7 +102,7 @@ void V8Debugger::enable() {
   v8::debug::ChangeBreakOnException(m_isolate, v8::debug::NoBreakOnException);
   m_pauseOnExceptionsState = v8::debug::NoBreakOnException;
 #if V8_ENABLE_WEBASSEMBLY
-  v8::debug::TierDownAllModulesPerIsolate(m_isolate);
+  v8::debug::EnterDebuggingForIsolate(m_isolate);
 #endif  // V8_ENABLE_WEBASSEMBLY
 }
 
@@ -860,10 +860,6 @@ v8::MaybeLocal<v8::Array> V8Debugger::internalProperties(
     createDataProperty(context, properties, properties->Length(),
                        toV8StringInternalized(m_isolate, "[[Entries]]"));
     createDataProperty(context, properties, properties->Length(), entries);
-  }
-
-  if (v8::debug::isExperimentalRemoveInternalScopesPropertyEnabled()) {
-    return properties;
   }
 
   if (value->IsGeneratorObject()) {

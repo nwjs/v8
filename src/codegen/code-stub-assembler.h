@@ -82,6 +82,9 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
   V(NoElementsProtector, no_elements_protector, NoElementsProtector)           \
   V(MegaDOMProtector, mega_dom_protector, MegaDOMProtector)                    \
   V(NumberStringCache, number_string_cache, NumberStringCache)                 \
+  V(NumberStringPrototypeNoReplaceProtector,                                   \
+    number_string_prototype_no_replace_protector,                              \
+    NumberStringPrototypeNoReplaceProtector)                                   \
   V(PromiseAllResolveElementSharedFun, promise_all_resolve_element_shared_fun, \
     PromiseAllResolveElementSharedFun)                                         \
   V(PromiseAllSettledRejectElementSharedFun,                                   \
@@ -834,63 +837,28 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   void FastCheck(TNode<BoolT> condition);
 
-  TNode<BoolT> IsCodeTMap(TNode<Map> map) {
-    return V8_EXTERNAL_CODE_SPACE_BOOL ? IsCodeDataContainerMap(map)
-                                       : IsCodeMap(map);
-  }
-  TNode<BoolT> IsCodeT(TNode<HeapObject> object) {
-    return IsCodeTMap(LoadMap(object));
-  }
-
-  // TODO(v8:11880): remove once Code::bytecode_or_interpreter_data field
-  // is cached in or moved to CodeT.
-  TNode<Code> FromCodeTNonBuiltin(TNode<CodeT> code) {
-#ifdef V8_EXTERNAL_CODE_SPACE
-    // Compute the Code object pointer from the code entry point.
+  // TODO(v8:11880): remove once InstructionStream::bytecode_or_interpreter_data
+  // field is cached in or moved to Code.
+  TNode<InstructionStream> FromCodeNonBuiltin(TNode<Code> code) {
+    // Compute the InstructionStream object pointer from the code entry point.
     TNode<RawPtrT> code_entry = Load<RawPtrT>(
-        code, IntPtrConstant(CodeDataContainer::kCodeEntryPointOffset -
-                             kHeapObjectTag));
+        code, IntPtrConstant(Code::kCodeEntryPointOffset - kHeapObjectTag));
     TNode<Object> o = BitcastWordToTagged(IntPtrSub(
-        code_entry, IntPtrConstant(Code::kHeaderSize - kHeapObjectTag)));
+        code_entry,
+        IntPtrConstant(InstructionStream::kHeaderSize - kHeapObjectTag)));
     return CAST(o);
-#else
-    return code;
-#endif
   }
 
-  TNode<CodeDataContainer> CodeDataContainerFromCodeT(TNode<CodeT> code) {
-#ifdef V8_EXTERNAL_CODE_SPACE
-    return code;
-#else
-    return LoadObjectField<CodeDataContainer>(code,
-                                              Code::kCodeDataContainerOffset);
-#endif
+  TNode<Code> ToCode(TNode<InstructionStream> code) {
+    return LoadObjectField<Code>(code, InstructionStream::kCodeOffset);
   }
 
-  TNode<CodeT> ToCodeT(TNode<Code> code) {
-#ifdef V8_EXTERNAL_CODE_SPACE
-    return LoadObjectField<CodeDataContainer>(code,
-                                              Code::kCodeDataContainerOffset);
-#else
-    return code;
-#endif
-  }
-
-  TNode<CodeT> ToCodeT(TNode<Code> code,
-                       TNode<CodeDataContainer> code_data_container) {
-#ifdef V8_EXTERNAL_CODE_SPACE
-    return code_data_container;
-#else
-    return code;
-#endif
-  }
-
-  TNode<RawPtrT> GetCodeEntry(TNode<CodeT> code);
-  TNode<BoolT> IsMarkedForDeoptimization(TNode<CodeT> codet);
+  TNode<RawPtrT> GetCodeEntry(TNode<Code> code);
+  TNode<BoolT> IsMarkedForDeoptimization(TNode<Code> code);
 
   // The following Call wrappers call an object according to the semantics that
   // one finds in the EcmaScript spec, operating on an Callable (e.g. a
-  // JSFunction or proxy) rather than a Code object.
+  // JSFunction or proxy) rather than a InstructionStream object.
   template <class... TArgs>
   TNode<Object> Call(TNode<Context> context, TNode<Object> callable,
                      TNode<JSReceiver> receiver, TArgs... args) {
@@ -2504,11 +2472,10 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   TNode<Int32T> ChangeBoolToInt32(TNode<BoolT> b);
 
-  void TaggedToBigIntWithFeedback(TNode<Context> context, TNode<Object> value,
-                                  Label* if_not_bigint, Label* if_bigint,
-                                  Label* if_bigint64,
-                                  TVariable<BigInt>* var_bigint,
-                                  TVariable<Smi>* var_feedback);
+  void TaggedToBigInt(TNode<Context> context, TNode<Object> value,
+                      Label* if_not_bigint, Label* if_bigint,
+                      Label* if_bigint64, TVariable<BigInt>* var_bigint,
+                      TVariable<Smi>* var_feedback);
 
   // Ensures that {var_shared_value} is shareable across Isolates, and throws if
   // not.
@@ -2591,6 +2558,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<BoolT> InstanceTypeEqual(TNode<Int32T> instance_type, int type);
   TNode<BoolT> IsNoElementsProtectorCellInvalid();
   TNode<BoolT> IsMegaDOMProtectorCellInvalid();
+  TNode<BoolT> IsAlwaysSharedSpaceJSObjectInstanceType(
+      TNode<Int32T> instance_type);
   TNode<BoolT> IsArrayIteratorProtectorCellInvalid();
   TNode<BoolT> IsBigIntInstanceType(TNode<Int32T> instance_type);
   TNode<BoolT> IsBigInt(TNode<HeapObject> object);
@@ -2726,6 +2695,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<BoolT> IsTypedArraySpeciesProtectorCellInvalid();
   TNode<BoolT> IsRegExpSpeciesProtectorCellInvalid();
   TNode<BoolT> IsPromiseSpeciesProtectorCellInvalid();
+  TNode<BoolT> IsNumberStringPrototypeNoReplaceProtectorCellInvalid();
 
   TNode<IntPtrT> LoadBasicMemoryChunkFlags(TNode<HeapObject> object);
 
@@ -3740,6 +3710,29 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<Oddball> StrictEqual(TNode<Object> lhs, TNode<Object> rhs,
                              TVariable<Smi>* var_type_feedback = nullptr);
 
+  void GotoIfStringEqual(TNode<String> lhs, TNode<IntPtrT> lhs_length,
+                         TNode<String> rhs, Label* if_true) {
+    Label if_false(this);
+    TNode<IntPtrT> rhs_length = LoadStringLengthAsWord(rhs);
+    BranchIfStringEqual(lhs, lhs_length, rhs, rhs_length, if_true, &if_false,
+                        nullptr);
+
+    BIND(&if_false);
+  }
+
+  void BranchIfStringEqual(TNode<String> lhs, TNode<String> rhs, Label* if_true,
+                           Label* if_false,
+                           TVariable<Oddball>* result = nullptr) {
+    return BranchIfStringEqual(lhs, LoadStringLengthAsWord(lhs), rhs,
+                               LoadStringLengthAsWord(rhs), if_true, if_false,
+                               result);
+  }
+
+  void BranchIfStringEqual(TNode<String> lhs, TNode<IntPtrT> lhs_length,
+                           TNode<String> rhs, TNode<IntPtrT> rhs_length,
+                           Label* if_true, Label* if_false,
+                           TVariable<Oddball>* result = nullptr);
+
   // ECMA#sec-samevalue
   // Similar to StrictEqual except that NaNs are treated as equal and minus zero
   // differs from positive zero.
@@ -3860,7 +3853,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                 ElementsKind kind = HOLEY_ELEMENTS);
 
   // Load a builtin's code from the builtin array in the isolate.
-  TNode<CodeT> LoadBuiltin(TNode<Smi> builtin_id);
+  TNode<Code> LoadBuiltin(TNode<Smi> builtin_id);
 
   // Figure out the SFI's code object using its data field.
   // If |data_type_out| is provided, the instance type of the function data will
@@ -3868,7 +3861,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   // data_type_out will be set to 0.
   // If |if_compile_lazy| is provided then the execution will go to the given
   // label in case of an CompileLazy code object.
-  TNode<CodeT> GetSharedFunctionInfoCode(
+  TNode<Code> GetSharedFunctionInfoCode(
       TNode<SharedFunctionInfo> shared_info,
       TVariable<Uint16T>* data_type_out = nullptr,
       Label* if_compile_lazy = nullptr);
@@ -4257,6 +4250,10 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
  private:
   friend class CodeStubArguments;
 
+  void BigInt64Comparison(Operation op, TNode<Object>& left,
+                          TNode<Object>& right, Label* return_true,
+                          Label* return_false);
+
   void HandleBreakOnNode();
 
   TNode<HeapObject> AllocateRawDoubleAligned(TNode<IntPtrT> size_in_bytes,
@@ -4319,11 +4316,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<Numeric> NonNumberToNumberOrNumeric(
       TNode<Context> context, TNode<HeapObject> input, Object::Conversion mode,
       BigIntHandling bigint_handling = BigIntHandling::kThrow);
-
-  void TaggedToBigInt(TNode<Context> context, TNode<Object> value,
-                      Label* if_not_bigint, Label* if_bigint,
-                      Label* if_bigint64, TVariable<BigInt>* var_bigint,
-                      TVariable<Smi>* var_feedback);
 
   enum IsKnownTaggedPointer { kNo, kYes };
   template <Object::Conversion conversion>

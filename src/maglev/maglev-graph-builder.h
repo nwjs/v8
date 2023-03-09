@@ -88,8 +88,11 @@ class MaglevGraphBuilder {
 
   void StartPrologue();
   void SetArgument(int i, ValueNode* value);
+  void InitializeRegister(interpreter::Register reg,
+                          ValueNode* value = nullptr);
   ValueNode* GetTaggedArgument(int i);
-  void BuildRegisterFrameInitialization();
+  void BuildRegisterFrameInitialization(ValueNode* context = nullptr,
+                                        ValueNode* closure = nullptr);
   void BuildMergeStates();
   BasicBlock* EndPrologue();
 
@@ -106,7 +109,6 @@ class MaglevGraphBuilder {
   class CallSpeculationScope;
 
   bool CheckType(ValueNode* node, NodeType type);
-  NodeInfo* CreateInfoIfNot(ValueNode* node, NodeType type);
   bool EnsureType(ValueNode* node, NodeType type, NodeType* old = nullptr);
   bool is_toptier() {
     return v8_flags.lower_tier_as_toptier && !v8_flags.turbofan;
@@ -493,8 +495,6 @@ class MaglevGraphBuilder {
     // TODO(victorgomes): Rename all kFeedbackVector parameters in the builtins
     // to kVector.
     DCHECK_EQ(vector_index, Descriptor::kVector);
-    // Also check that the builtin does not allow var args.
-    DCHECK_EQ(Descriptor::kAllowVarArgs, false);
 #endif  // DEBUG
     return call_builtin;
   }
@@ -631,7 +631,7 @@ class MaglevGraphBuilder {
   }
 
   Float64Constant* GetFloat64Constant(double constant) {
-    if (constant != constant) {
+    if (std::isnan(constant)) {
       if (graph_->nan() == nullptr) {
         graph_->set_nan(CreateNewNode<Float64Constant>(0, constant));
       }
@@ -664,6 +664,12 @@ class MaglevGraphBuilder {
       return node;
     }
     return it->second;
+  }
+
+  ValueNode* GetRegisterInput(Register reg) {
+    DCHECK(!graph_->register_inputs().has(reg));
+    graph_->register_inputs().set(reg);
+    return AddNewNode<RegisterInput>({}, reg);
   }
 
 #define DEFINE_IS_ROOT_OBJECT(type, name, CamelName)               \
@@ -764,23 +770,35 @@ class MaglevGraphBuilder {
           return GetInt32Constant(constant->value().value());
         }
         NodeInfo* node_info = known_node_aspects().GetOrCreateInfoFor(value);
-        if (node_info->int32_alternative == nullptr) {
-          NodeType old_type;
-          EnsureType(value, NodeType::kNumber, &old_type);
-          if (NodeTypeIsSmi(old_type)) {
-            node_info->int32_alternative = AddNewNode<UnsafeSmiUntag>({value});
-          } else {
-            // TODO(leszeks): Cache this value somehow.
-            // TODO(leszeks): Add a non-checked version for when the node has a
-            // known Number NodeType.
-            return AddNewNode<CheckedTruncateNumberToInt32>({value});
-          }
+        if (node_info->int32_alternative != nullptr) {
+          return node_info->int32_alternative;
         }
-        return node_info->int32_alternative;
+        if (node_info->truncated_int32_alternative != nullptr) {
+          return node_info->truncated_int32_alternative;
+        }
+        NodeType old_type;
+        EnsureType(value, NodeType::kNumber, &old_type);
+        if (NodeTypeIsSmi(old_type)) {
+          node_info->int32_alternative = AddNewNode<UnsafeSmiUntag>({value});
+          return node_info->int32_alternative;
+        }
+        if (NodeTypeIsNumber(old_type)) {
+          node_info->truncated_int32_alternative =
+              AddNewNode<TruncateNumberToInt32>({value});
+        } else {
+          node_info->truncated_int32_alternative =
+              AddNewNode<CheckedTruncateNumberToInt32>({value});
+        }
+        return node_info->truncated_int32_alternative;
       }
-      case ValueRepresentation::kFloat64:
-        // TODO(leszeks): Cache this value somehow.
-        return AddNewNode<TruncateFloat64ToInt32>({value});
+      case ValueRepresentation::kFloat64: {
+        NodeInfo* node_info = known_node_aspects().GetOrCreateInfoFor(value);
+        if (node_info->truncated_int32_alternative == nullptr) {
+          node_info->truncated_int32_alternative =
+              AddNewNode<TruncateFloat64ToInt32>({value});
+        }
+        return node_info->truncated_int32_alternative;
+      }
       case ValueRepresentation::kInt32:
         // Already good.
         return value;
@@ -937,7 +955,7 @@ class MaglevGraphBuilder {
     return GetFloat64(iterator_.GetRegisterOperand(operand_index));
   }
 
-  ValueNode* LoadFixedArrayElement(ValueNode* node, int index) {
+  ValueNode* BuildLoadFixedArrayElement(ValueNode* node, int index) {
     return AddNewNode<LoadTaggedField>({node},
                                        FixedArray::OffsetOfElementAt(index));
   }
@@ -1312,7 +1330,7 @@ class MaglevGraphBuilder {
   // subsequent loads.
   void RecordKnownProperty(ValueNode* lookup_start_object,
                            compiler::NameRef name, ValueNode* value,
-                           bool is_const);
+                           compiler::PropertyAccessInfo const& access_info);
   bool TryReuseKnownPropertyLoad(ValueNode* lookup_start_object,
                                  compiler::NameRef name);
 
@@ -1377,9 +1395,10 @@ class MaglevGraphBuilder {
   template <Operation kOperation>
   void VisitBinarySmiOperation();
 
-  template <typename CompareControlNode>
-  bool TryBuildCompareOperation(Operation operation, ValueNode* left,
-                                ValueNode* right);
+  template <typename BranchControlNodeT, typename... Args>
+  bool TryBuildBranchFor(std::initializer_list<ValueNode*> control_inputs,
+                         Args&&... args);
+
   template <Operation kOperation>
   void VisitCompareOperation();
 

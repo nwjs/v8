@@ -120,7 +120,7 @@ void CodeSerializer::SerializeObjectImpl(Handle<HeapObject> obj) {
     if (SerializeReadOnlyObjectReference(raw, &sink_)) return;
 
     instance_type = raw.map().instance_type();
-    CHECK(!InstanceTypeChecker::IsCode(instance_type));
+    CHECK(!InstanceTypeChecker::IsInstructionStream(instance_type));
 
     if (ElideObject(raw)) {
       AllowGarbageCollection allow_gc;
@@ -275,9 +275,9 @@ void CreateInterpreterDataForDeserializedCode(Isolate* isolate,
             INTERPRETER_DATA_TYPE, AllocationType::kOld));
 
     interpreter_data->set_bytecode_array(info->GetBytecodeArray(isolate));
-    interpreter_data->set_interpreter_trampoline(ToCodeT(*code));
+    interpreter_data->set_interpreter_trampoline(*code);
     if (info->HasBaselineCode()) {
-      FromCodeT(info->baseline_code(kAcquireLoad))
+      FromCode(info->baseline_code(kAcquireLoad))
           .set_bytecode_or_interpreter_data(*interpreter_data);
     } else {
       info->set_interpreter_data(*interpreter_data);
@@ -613,6 +613,9 @@ MaybeHandle<SharedFunctionInfo> CodeSerializer::FinishOffThreadDeserialize(
   }
 
   FinalizeDeserialization(isolate, result, timer);
+
+  DCHECK(!background_merge_task ||
+         !background_merge_task->HasPendingForegroundWork());
 
   return scope.CloseAndEscape(result);
 }

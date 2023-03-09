@@ -405,7 +405,7 @@ class ShellOptions {
   DisallowReassignment<bool> fuzzilli_coverage_statistics = {
       "fuzzilli-coverage-statistics", false};
   DisallowReassignment<bool> fuzzilli_enable_builtins_coverage = {
-      "fuzzilli-enable-builtins-coverage", true};
+      "fuzzilli-enable-builtins-coverage", false};
   DisallowReassignment<bool> send_idle_notification = {"send-idle-notification",
                                                        false};
   DisallowReassignment<bool> invoke_weak_callbacks = {"invoke-weak-callbacks",
@@ -618,6 +618,7 @@ class Shell : public i::AllStatic {
   static void QuitOnce(v8::FunctionCallbackInfo<v8::Value>* args);
   static void Quit(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void Version(const v8::FunctionCallbackInfo<v8::Value>& args);
+  static void WriteFile(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void ReadFile(const v8::FunctionCallbackInfo<v8::Value>& args);
   static char* ReadChars(const char* name, int* size_out);
   static MaybeLocal<PrimitiveArray> ReadLines(Isolate* isolate,
@@ -747,6 +748,7 @@ class Shell : public i::AllStatic {
   static base::OnceType quit_once_;
   static Global<Function> stringify_function_;
 
+  static base::Mutex profiler_end_callback_lock_;
   static std::map<Isolate*, std::pair<Global<Function>, Global<Context>>>
       profiler_end_callback_;
 

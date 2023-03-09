@@ -5,10 +5,10 @@
 #include "src/compiler/turboshaft/types.h"
 
 #include <sstream>
+#include <string_view>
 
 #include "src/base/logging.h"
-#include "src/compiler/access-builder.h"
-#include "src/compiler/representation-change.h"
+#include "src/compiler/turboshaft/type-parser.h"
 #include "src/heap/factory.h"
 #include "src/objects/turboshaft-types-inl.h"
 
@@ -42,6 +42,30 @@ bool Type::Equals(const Type& other) const {
       return AsFloat64().Equals(other.AsFloat64());
     case Kind::kAny:
       return true;
+  }
+}
+
+bool Type::IsSubtypeOf(const Type& other) const {
+  DCHECK(!IsInvalid());
+  DCHECK(!other.IsInvalid());
+
+  if (other.IsAny() || IsNone()) return true;
+  if (kind_ != other.kind_) return false;
+
+  switch (kind_) {
+    case Kind::kInvalid:
+    case Kind::kNone:
+      UNREACHABLE();
+    case Kind::kWord32:
+      return AsWord32().IsSubtypeOf(other.AsWord32());
+    case Kind::kWord64:
+      return AsWord64().IsSubtypeOf(other.AsWord64());
+    case Kind::kFloat32:
+      return AsFloat32().IsSubtypeOf(other.AsFloat32());
+    case Kind::kFloat64:
+      return AsFloat64().IsSubtypeOf(other.AsFloat64());
+    case Kind::kAny:
+      UNREACHABLE();
   }
 }
 
@@ -79,6 +103,12 @@ void Type::Print() const {
   StdoutStream os;
   PrintTo(os);
   os << std::endl;
+}
+
+base::Optional<Type> Type::ParseFromString(const std::string_view& str,
+                                           Zone* zone) {
+  TypeParser parser(str, zone);
+  return parser.Parse();
 }
 
 Handle<TurboshaftType> Type::AllocateOnHeap(Factory* factory) const {
@@ -129,6 +159,30 @@ bool WordType<Bits>::Equals(const WordType<Bits>& other) const {
       if (set_size() != other.set_size()) return false;
       for (int i = 0; i < set_size(); ++i) {
         if (set_element(i) != other.set_element(i)) return false;
+      }
+      return true;
+    }
+  }
+}
+
+template <size_t Bits>
+bool WordType<Bits>::IsSubtypeOf(const WordType<Bits>& other) const {
+  if (other.is_any()) return true;
+  switch (sub_kind()) {
+    case SubKind::kRange: {
+      if (other.is_set()) return false;
+      DCHECK(other.is_range());
+      if (is_wrapping() == other.is_wrapping()) {
+        return range_from() >= other.range_from() &&
+               range_to() <= other.range_to();
+      }
+      return !is_wrapping() && (range_to() <= other.range_to() ||
+                                range_from() >= other.range_from());
+    }
+    case SubKind::kSet: {
+      if (other.is_set() && set_size() > other.set_size()) return false;
+      for (int i = 0; i < set_size(); ++i) {
+        if (!other.Contains(set_element(i))) return false;
       }
       return true;
     }
@@ -372,9 +426,10 @@ Handle<TurboshaftType> WordType<Bits>::AllocateOnHeap(Factory* factory) const {
 
 template <size_t Bits>
 bool FloatType<Bits>::Contains(float_t value) const {
+  if (IsMinusZero(value)) return has_minus_zero();
   if (std::isnan(value)) return has_nan();
   switch (sub_kind()) {
-    case SubKind::kOnlyNan:
+    case SubKind::kOnlySpecialValues:
       return false;
     case SubKind::kRange: {
       return range_min() <= value && value <= range_max();
@@ -393,7 +448,7 @@ bool FloatType<Bits>::Equals(const FloatType<Bits>& other) const {
   if (sub_kind() != other.sub_kind()) return false;
   if (special_values() != other.special_values()) return false;
   switch (sub_kind()) {
-    case SubKind::kOnlyNan:
+    case SubKind::kOnlySpecialValues:
       return true;
     case SubKind::kRange: {
       return range() == other.range();
@@ -411,26 +466,54 @@ bool FloatType<Bits>::Equals(const FloatType<Bits>& other) const {
 }
 
 template <size_t Bits>
+bool FloatType<Bits>::IsSubtypeOf(const FloatType<Bits>& other) const {
+  if (special_values() & ~other.special_values()) return false;
+  switch (sub_kind()) {
+    case SubKind::kOnlySpecialValues:
+      return true;
+    case SubKind::kRange:
+      if (!other.is_range()) {
+        // This relies on the fact that we don't have singleton ranges.
+        DCHECK_NE(range_min(), range_max());
+        return false;
+      }
+      return other.range_min() <= range_min() &&
+             range_max() <= other.range_max();
+    case SubKind::kSet: {
+      switch (other.sub_kind()) {
+        case SubKind::kOnlySpecialValues:
+          return false;
+        case SubKind::kRange:
+          return other.range_min() <= min() && max() <= other.range_max();
+        case SubKind::kSet:
+          for (int i = 0; i < set_size(); ++i) {
+            if (!other.Contains(set_element(i))) return false;
+          }
+          return true;
+      }
+    }
+  }
+}
+
+template <size_t Bits>
 // static
 FloatType<Bits> FloatType<Bits>::LeastUpperBound(const FloatType<Bits>& lhs,
                                                  const FloatType<Bits>& rhs,
                                                  Zone* zone) {
-  uint32_t special_values =
-      (lhs.has_nan() || rhs.has_nan()) ? Special::kNaN : 0;
+  uint32_t special_values = lhs.special_values() | rhs.special_values();
   if (lhs.is_any() || rhs.is_any()) {
     return Any(special_values);
   }
 
-  const bool lhs_finite = lhs.is_set() || lhs.is_only_nan();
-  const bool rhs_finite = rhs.is_set() || rhs.is_only_nan();
+  const bool lhs_finite = lhs.is_set() || lhs.is_only_special_values();
+  const bool rhs_finite = rhs.is_set() || rhs.is_only_special_values();
 
   if (lhs_finite && rhs_finite) {
     base::SmallVector<float_t, kMaxSetSize * 2> result_elements;
     if (lhs.is_set()) base::vector_append(result_elements, lhs.set_elements());
     if (rhs.is_set()) base::vector_append(result_elements, rhs.set_elements());
     if (result_elements.empty()) {
-      DCHECK_EQ(special_values, Special::kNaN);
-      return NaN();
+      return OnlySpecialValues(special_values);
     }
     base::sort(result_elements);
     auto it = std::unique(result_elements.begin(), result_elements.end());
@@ -453,18 +536,17 @@ template <size_t Bits>
 Type FloatType<Bits>::Intersect(const FloatType<Bits>& lhs,
                                 const FloatType<Bits>& rhs, Zone* zone) {
   auto UpdateSpecials = [](const FloatType& t, uint32_t special_values) {
-    if (t.special_values() == special_values) return t;
     auto result = t;
     result.bitfield_ = special_values;
     DCHECK_EQ(result.bitfield_, result.special_values());
     return result;
   };
 
-  const bool has_nan = lhs.has_nan() && rhs.has_nan();
-  if (lhs.is_any()) return UpdateSpecials(rhs, has_nan ? kNaN : 0);
-  if (rhs.is_any()) return UpdateSpecials(lhs, has_nan ? kNaN : 0);
-  if (lhs.is_only_nan() || rhs.is_only_nan()) {
-    return has_nan ? NaN() : Type::None();
+  const uint32_t special_values = lhs.special_values() & rhs.special_values();
+  if (lhs.is_any()) return UpdateSpecials(rhs, special_values);
+  if (rhs.is_any()) return UpdateSpecials(lhs, special_values);
+  if (lhs.is_only_special_values() || rhs.is_only_special_values()) {
+    return special_values ? OnlySpecialValues(special_values) : Type::None();
   }
 
   if (lhs.is_set() || rhs.is_set()) {
@@ -476,34 +558,43 @@ Type FloatType<Bits>::Intersect(const FloatType<Bits>& lhs,
       if (y.Contains(element)) result_elements.push_back(element);
     }
     if (result_elements.empty()) {
-      return has_nan ? NaN() : Type::None();
+      return special_values ? OnlySpecialValues(special_values) : Type::None();
     }
-    DCHECK(detail::is_unique_and_sorted(result_elements));
-    return Set(result_elements, has_nan ? kNaN : 0, zone);
+    return Set(result_elements, special_values, zone);
   }
 
   DCHECK(lhs.is_range() && rhs.is_range());
   const float_t result_min = std::min(lhs.min(), rhs.min());
   const float_t result_max = std::max(lhs.max(), rhs.max());
   if (result_min < result_max) {
-    return Range(result_min, result_max, has_nan ? kNaN : kNoSpecialValues,
-                 zone);
+    return Range(result_min, result_max, special_values, zone);
   } else if (result_min == result_max) {
-    return Set({result_min}, has_nan ? kNaN : 0, zone);
+    return Set({result_min}, special_values, zone);
   }
-  return has_nan ? NaN() : Type::None();
+  return special_values ? OnlySpecialValues(special_values) : Type::None();
 }
 
 template <size_t Bits>
 void FloatType<Bits>::PrintTo(std::ostream& stream) const {
+  auto PrintSpecials = [this](auto& stream) {
+    if (has_nan()) {
+      stream << "NaN" << (has_minus_zero() ? "|MinusZero" : "");
+    } else {
+      DCHECK(has_minus_zero());
+      stream << "MinusZero";
+    }
+  };
   stream << (Bits == 32 ? "Float32" : "Float64");
   switch (sub_kind()) {
-    case SubKind::kOnlyNan:
-      stream << "NaN";
+    case SubKind::kOnlySpecialValues:
+      PrintSpecials(stream);
       break;
     case SubKind::kRange:
-      stream << "[" << range_min() << ", " << range_max()
-             << (has_nan() ? "]+NaN" : "]");
+      stream << "[" << range_min() << ", " << range_max() << "]";
+      if (has_special_values()) {
+        stream << "|";
+        PrintSpecials(stream);
+      }
       break;
     case SubKind::kSet:
       stream << "{";
@@ -511,7 +602,12 @@ void FloatType<Bits>::PrintTo(std::ostream& stream) const {
         if (i != 0) stream << ", ";
         stream << set_element(i);
       }
-      stream << (has_nan() ? "}+NaN" : "}");
+      if (has_special_values()) {
+        stream << "}|";
+        PrintSpecials(stream);
+      } else {
+        stream << "}";
+      }
       break;
   }
 }
@@ -520,19 +616,19 @@ template <size_t Bits>
 Handle<TurboshaftType> FloatType<Bits>::AllocateOnHeap(Factory* factory) const {
   float_t min = 0.0f, max = 0.0f;
   constexpr uint32_t padding = 0;
-  if (is_only_nan()) {
+  if (is_only_special_values()) {
     min = std::numeric_limits<float_t>::infinity();
     max = -std::numeric_limits<float_t>::infinity();
-    return factory->NewTurboshaftFloat64RangeType(1, padding, min, max,
-                                                  AllocationType::kYoung);
+    return factory->NewTurboshaftFloat64RangeType(
+        special_values(), padding, min, max, AllocationType::kYoung);
   } else if (is_range()) {
     std::tie(min, max) = minmax();
     return factory->NewTurboshaftFloat64RangeType(
-        has_nan() ? 1 : 0, padding, min, max, AllocationType::kYoung);
+        special_values(), padding, min, max, AllocationType::kYoung);
   } else {
     DCHECK(is_set());
     auto result = factory->NewTurboshaftFloat64SetType(
-        has_nan() ? 1 : 0, set_size(), AllocationType::kYoung);
+        special_values(), set_size(), AllocationType::kYoung);
     for (int i = 0; i < set_size(); ++i) {
       result->set_elements(i, set_element(i));
     }
@@ -540,9 +636,9 @@ Handle<TurboshaftType> FloatType<Bits>::AllocateOnHeap(Factory* factory) const {
   }
 }
 
-template class WordType<32>;
-template class WordType<64>;
-template class FloatType<32>;
-template class FloatType<64>;
+template class EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) WordType<32>;
+template class EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) WordType<64>;
+template class EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) FloatType<32>;
+template class EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) FloatType<64>;
 
 }  // namespace v8::internal::compiler::turboshaft

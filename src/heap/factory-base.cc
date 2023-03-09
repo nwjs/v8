@@ -74,20 +74,17 @@ Handle<AccessorPair> FactoryBase<Impl>::NewAccessorPair() {
 }
 
 template <typename Impl>
-Handle<CodeDataContainer> FactoryBase<Impl>::NewCodeDataContainer(
-    int flags, AllocationType allocation) {
-  Map map = read_only_roots().code_data_container_map();
+Handle<Code> FactoryBase<Impl>::NewCode(int flags, AllocationType allocation) {
+  Map map = read_only_roots().code_map();
   int size = map.instance_size();
   DCHECK_NE(allocation, AllocationType::kYoung);
-  CodeDataContainer data_container = CodeDataContainer::cast(
-      AllocateRawWithImmortalMap(size, allocation, map));
+  Code data_container =
+      Code::cast(AllocateRawWithImmortalMap(size, allocation, map));
   DisallowGarbageCollection no_gc;
   data_container.set_kind_specific_flags(flags, kRelaxedStore);
-  if (V8_EXTERNAL_CODE_SPACE_BOOL) {
-    Isolate* isolate_for_sandbox = impl()->isolate_for_sandbox();
-    data_container.set_raw_code(Smi::zero(), SKIP_WRITE_BARRIER);
-    data_container.init_code_entry_point(isolate_for_sandbox, kNullAddress);
-  }
+  Isolate* isolate_for_sandbox = impl()->isolate_for_sandbox();
+  data_container.set_raw_instruction_stream(Smi::zero(), SKIP_WRITE_BARRIER);
+  data_container.init_code_entry_point(isolate_for_sandbox, kNullAddress);
   data_container.clear_padding();
   return handle(data_container, isolate());
 }
@@ -291,6 +288,8 @@ Handle<Script> FactoryBase<Impl>::NewScriptWithId(
     raw.set_flags(0);
     raw.set_host_defined_options(roots.empty_fixed_array(), SKIP_WRITE_BARRIER);
     raw.set_source_hash(roots.undefined_value(), SKIP_WRITE_BARRIER);
+    raw.set_compiled_lazy_function_positions(roots.undefined_value(),
+                                             SKIP_WRITE_BARRIER);
 #ifdef V8_SCRIPTORMODULE_LEGACY_LIFETIME
     raw.set_script_or_modules(roots.empty_array_list());
 #endif
@@ -323,9 +322,9 @@ template <typename Impl>
 Handle<SharedFunctionInfo> FactoryBase<Impl>::NewSharedFunctionInfoForLiteral(
     FunctionLiteral* literal, Handle<Script> script, bool is_toplevel) {
   FunctionKind kind = literal->kind();
-  Handle<SharedFunctionInfo> shared =
-      NewSharedFunctionInfo(literal->GetName(isolate()), MaybeHandle<Code>(),
-                            Builtin::kCompileLazy, kind);
+  Handle<SharedFunctionInfo> shared = NewSharedFunctionInfo(
+      literal->GetName(isolate()), MaybeHandle<InstructionStream>(),
+      Builtin::kCompileLazy, kind);
   SharedFunctionInfo::InitFromFunctionLiteral(isolate(), shared, literal,
                                               is_toplevel);
   shared->SetScript(read_only_roots(), *script, literal->function_literal_id(),
@@ -428,8 +427,8 @@ Handle<SharedFunctionInfo> FactoryBase<Impl>::NewSharedFunctionInfo(
     // If we pass function_data then we shouldn't pass a builtin index, and
     // the function_data should not be code with a builtin.
     DCHECK(!Builtins::IsBuiltinId(builtin));
-    DCHECK_IMPLIES(function_data->IsCode(),
-                   !Code::cast(*function_data).is_builtin());
+    DCHECK_IMPLIES(function_data->IsInstructionStream(),
+                   !InstructionStream::cast(*function_data).is_builtin());
     raw.set_function_data(*function_data, kReleaseStore);
   } else if (Builtins::IsBuiltinId(builtin)) {
     raw.set_builtin_id(builtin);
@@ -674,6 +673,7 @@ MaybeHandle<SeqStringT> FactoryBase<Impl>::NewRawStringWithMap(
   SeqStringT string =
       SeqStringT::cast(AllocateRawWithImmortalMap(size, allocation, map));
   DisallowGarbageCollection no_gc;
+  string.clear_padding_destructively(length);
   string.set_length(length);
   string.set_raw_hash_field(String::kEmptyHashField);
   DCHECK_EQ(size, string.Size());
@@ -762,14 +762,14 @@ MaybeHandle<String> FactoryBase<Impl>::NewConsString(
       uint8_t* dest = result->GetChars(no_gc, access_guard);
       // Copy left part.
       {
-        const uint8_t* src =
-            left->template GetChars<uint8_t>(isolate(), no_gc, access_guard);
+        const uint8_t* src = left->template GetDirectStringChars<uint8_t>(
+            isolate(), no_gc, access_guard);
         CopyChars(dest, src, left_length);
       }
       // Copy right part.
       {
-        const uint8_t* src =
-            right->template GetChars<uint8_t>(isolate(), no_gc, access_guard);
+        const uint8_t* src = right->template GetDirectStringChars<uint8_t>(
+            isolate(), no_gc, access_guard);
         CopyChars(dest + left_length, src, right_length);
       }
       return result;
@@ -1054,6 +1054,7 @@ FactoryBase<Impl>::AllocateRawOneByteInternalizedString(
       map);
   SeqOneByteString answer = SeqOneByteString::cast(result);
   DisallowGarbageCollection no_gc;
+  answer.clear_padding_destructively(length);
   answer.set_length(length);
   answer.set_raw_hash_field(raw_hash_field);
   DCHECK_EQ(size, answer.Size());
@@ -1075,6 +1076,7 @@ FactoryBase<Impl>::AllocateRawTwoByteInternalizedString(
                                                          map),
       map));
   DisallowGarbageCollection no_gc;
+  answer.clear_padding_destructively(length);
   answer.set_length(length);
   answer.set_raw_hash_field(raw_hash_field);
   DCHECK_EQ(size, answer.Size());

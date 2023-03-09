@@ -24,6 +24,7 @@
 #include "src/maglev/maglev-ir-inl.h"
 #include "src/maglev/maglev-ir.h"
 #include "src/maglev/maglev-regalloc-data.h"
+#include "src/zone/zone-containers.h"
 
 #ifdef V8_TARGET_ARCH_ARM64
 #include "src/codegen/arm64/register-arm64.h"
@@ -141,6 +142,10 @@ bool IsLiveAtTarget(ValueNode* node, ControlNode* source, BasicBlock* target) {
     // Gap moves may already be inserted in the target, so skip over those.
     return node->id() < target->FirstNonGapMoveId();
   }
+
+  // Drop all values on resumable loop headers.
+  if (target->has_state() && target->state()->is_resumable_loop()) return false;
+
   // TODO(verwaest): This should be true but isn't because we don't yet
   // eliminate dead code.
   // DCHECK_GT(node->next_use, source->id());
@@ -329,7 +334,9 @@ void StraightForwardRegisterAllocator::AllocateRegisters() {
     constant->SetConstantLocation();
     USE(value);
   }
-
+  if (graph_->nan()) {
+    graph_->nan()->SetConstantLocation();
+  }
   for (const auto& [address, constant] : graph_->external_references()) {
     constant->SetConstantLocation();
     USE(address);
@@ -440,7 +447,7 @@ void StraightForwardRegisterAllocator::AllocateRegisters() {
         DCHECK(phi->owner().is_receiver());
         // The receiver is a special case for a fairly silly reason:
         // OptimizedFrame::Summarize requires the receiver (and the function)
-        // to be in a stack slot, since it's value must be available even
+        // to be in a stack slot, since its value must be available even
         // though we're not deoptimizing (and thus register states are not
         // available).
         //
@@ -464,7 +471,7 @@ void StraightForwardRegisterAllocator::AllocateRegisters() {
         // a DCHECK.
         if (!phi->has_valid_live_range()) continue;
         if (phi->result().operand().IsAllocated()) continue;
-        // We assume that Phis are always untagged, and so are always allocated
+        // We assume that Phis are always tagged, and so are always allocated
         // in a general register.
         if (!general_registers_.UnblockedFreeIsEmpty()) {
           compiler::AllocatedOperand allocation =
@@ -1665,6 +1672,11 @@ void StraightForwardRegisterAllocator::AssignFixedTemporaries(
           << "Fixed Double Temporaries: " << fixed_temporaries << "\n";
     }
   }
+
+  // After allocating the specific/fixed temporary registers, we empty the node
+  // set, so that it is used to allocate only the arbitrary/available temporary
+  // register that is going to be inserted in the scratch scope.
+  node->temporaries<RegisterT>() = {};
 }
 
 void StraightForwardRegisterAllocator::AssignFixedTemporaries(NodeBase* node) {
@@ -1680,6 +1692,7 @@ void StraightForwardRegisterAllocator::AssignArbitraryTemporaries(
 
   DCHECK_GT(num_temporaries_needed, 0);
   RegListBase<RegisterT> temporaries = node->temporaries<RegisterT>();
+  DCHECK(temporaries.is_empty());
   int remaining_temporaries_needed = num_temporaries_needed;
 
   for (RegisterT reg : registers.unblocked_free()) {
@@ -1775,6 +1788,7 @@ void StraightForwardRegisterAllocator::InitializeRegisterValues(
 }
 
 #ifdef DEBUG
+
 bool StraightForwardRegisterAllocator::IsInRegister(
     MergePointRegisterState& target_state, ValueNode* incoming) {
   bool found = false;
@@ -1791,7 +1805,39 @@ bool StraightForwardRegisterAllocator::IsInRegister(
   }
   return found;
 }
-#endif
+
+// Returns true if {first_id} or {last_id} are forward-reachable from {current}.
+bool StraightForwardRegisterAllocator::IsForwardReachable(
+    BasicBlock* start_block, NodeIdT first_id, NodeIdT last_id) {
+  ZoneQueue<BasicBlock*> queue(compilation_info_->zone());
+  ZoneSet<BasicBlock*> seen(compilation_info_->zone());
+  while (!queue.empty()) {
+    BasicBlock* curr = queue.front();
+    queue.pop();
+
+    if (curr->contains_node_id(first_id) || curr->contains_node_id(last_id)) {
+      return true;
+    }
+
+    if (curr->control_node()->Is<JumpLoop>()) {
+      // A JumpLoop will have a backward edge. Since we are only interested in
+      // checking forward reachability, we ignore its successors.
+      continue;
+    }
+
+    for (BasicBlock* succ : curr->successors()) {
+      if (seen.insert(succ).second) {
+        queue.push(succ);
+      }
+      // Since we skipped JumpLoop, only forward edges should remain.
+      DCHECK_GT(succ->first_id(), curr->first_id());
+    }
+  }
+
+  return false;
+}
+
+#endif  //  DEBUG
 
 void StraightForwardRegisterAllocator::InitializeBranchTargetRegisterValues(
     ControlNode* source, BasicBlock* target) {
@@ -1890,6 +1936,25 @@ void StraightForwardRegisterAllocator::MergeRegisterValues(ControlNode* control,
       return;
     }
 
+    if (node != nullptr && !node->is_loadable() && !node->has_register()) {
+      // If we have a node already, but can't load it here, we must be in a
+      // liveness hole for it, so nuke the merge state.
+      // This can only happen for conversion nodes, as they can split and take
+      // over the liveness of the node they are converting.
+      // TODO(v8:7700): Overeager DCHECK.
+      // DCHECK(node->properties().is_conversion());
+      if (v8_flags.trace_maglev_regalloc) {
+        printing_visitor_->os() << "  " << reg << " - can't load "
+                                << PrintNodeLabel(graph_labeller(), node)
+                                << ", dropping the merge\n";
+      }
+      // We always need to be able to restore values on JumpLoop since the value
+      // is definitely live at the loop header.
+      CHECK(!control->Is<JumpLoop>());
+      state = {nullptr, initialized_node};
+      return;
+    }
+
     if (merge) {
       // The register is already occupied with a different node. Figure out
       // where that node is allocated on the incoming branch.
@@ -1900,11 +1965,17 @@ void StraightForwardRegisterAllocator::MergeRegisterValues(ControlNode* control,
                                 << " from " << node->allocation() << " \n";
       }
 
-      // If there's a value in the incoming state, that value is either
-      // already spilled or in another place in the merge state.
-      if (incoming != nullptr && !incoming->is_loadable()) {
-        DCHECK(IsInRegister(target_state, incoming));
+      if (incoming != nullptr) {
+        // If {incoming} isn't loadable or available in a register, then we are
+        // in a liveness hole, and none of its uses should be reachable from
+        // {target} (for simplicity/speed, we only check the first and last use
+        // though).
+        DCHECK_IMPLIES(
+            !incoming->is_loadable() && !IsInRegister(target_state, incoming),
+            !IsForwardReachable(target, incoming->next_use(),
+                                incoming->live_range().end));
       }
+
       return;
     }
 
@@ -1922,27 +1993,8 @@ void StraightForwardRegisterAllocator::MergeRegisterValues(ControlNode* control,
       if (v8_flags.trace_maglev_regalloc) {
         printing_visitor_->os()
             << "  " << reg << " - can't load incoming "
-            << PrintNodeLabel(graph_labeller(), node) << ", bailing out\n";
+            << PrintNodeLabel(graph_labeller(), incoming) << ", bailing out\n";
       }
-      return;
-    }
-
-    if (node != nullptr && !node->is_loadable() && !node->has_register()) {
-      // If we have a node already, but can't load it here, we must be in a
-      // liveness hole for it, so nuke the merge state.
-      // This can only happen for conversion nodes, as they can split and take
-      // over the liveness of the node they are converting.
-      // TODO(v8:7700): Overeager DCHECK.
-      // DCHECK(node->properties().is_conversion());
-      if (v8_flags.trace_maglev_regalloc) {
-        printing_visitor_->os() << "  " << reg << " - can't load "
-                                << PrintNodeLabel(graph_labeller(), node)
-                                << ", dropping the merge\n";
-      }
-      // We always need to be able to restore values on JumpLoop since the value
-      // is definitely live at the loop header.
-      CHECK(!control->Is<JumpLoop>());
-      state = {nullptr, initialized_node};
       return;
     }
 

@@ -21,8 +21,8 @@ namespace internal {
   V(BytecodeArray)                      \
   V(CallHandlerInfo)                    \
   V(Cell)                               \
+  V(InstructionStream)                  \
   V(Code)                               \
-  V(CodeDataContainer)                  \
   V(CoverageInfo)                       \
   V(DataHandler)                        \
   V(EmbedderDataArray)                  \

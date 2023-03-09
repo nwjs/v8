@@ -781,7 +781,7 @@ void CodeGenerator::AssembleCodeStartRegisterCheck() {
 // jumps to the CompileLazyDeoptimizedCode builtin. In order to do this we need
 // to:
 //    1. read from memory the word that contains that bit, which can be found in
-//       the flags in the referenced {CodeDataContainer} object;
+//       the flags in the referenced {Code} object;
 //    2. test kMarkedForDeoptimizationBit in those flags; and
 //    3. if it is not zero then it jumps to the builtin.
 void CodeGenerator::BailoutIfDeoptimized() {
@@ -792,13 +792,11 @@ void CodeGenerator::BailoutIfDeoptimized() {
     __ Assert(eq, AbortReason::kWrongFunctionCodeStart);
   }
 
-  int offset = Code::kCodeDataContainerOffset - Code::kHeaderSize;
+  int offset = InstructionStream::kCodeOffset - InstructionStream::kHeaderSize;
   __ LoadTaggedPointerField(
       r11, MemOperand(kJavaScriptCallCodeStartRegister, offset), r0);
-  __ LoadS32(r11,
-             FieldMemOperand(r11, CodeDataContainer::kKindSpecificFlagsOffset),
-             r0);
-  __ TestBit(r11, Code::kMarkedForDeoptimizationBit);
+  __ LoadS32(r11, FieldMemOperand(r11, Code::kKindSpecificFlagsOffset), r0);
+  __ TestBit(r11, InstructionStream::kMarkedForDeoptimizationBit);
   __ Jump(BUILTIN_CODE(isolate(), CompileLazyDeoptimizedCode),
           RelocInfo::CODE_TARGET, ne, cr0);
 }
@@ -2356,6 +2354,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
   V(F64x2Ceil)              \
   V(F64x2Floor)             \
   V(F64x2Trunc)             \
+  V(F64x2PromoteLowF32x4)   \
   V(F32x4Abs)               \
   V(F32x4Neg)               \
   V(F32x4SConvertI32x4)     \
@@ -2387,9 +2386,12 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
 #undef SIMD_UNOP_LIST
 
 #define SIMD_UNOP_WITH_SCRATCH_LIST(V) \
+  V(F32x4DemoteF64x2Zero)              \
   V(I64x2Abs)                          \
   V(I32x4Abs)                          \
   V(I32x4SConvertF32x4)                \
+  V(I32x4TruncSatF64x2SZero)           \
+  V(I32x4TruncSatF64x2UZero)           \
   V(I16x8Abs)                          \
   V(I16x8Neg)                          \
   V(I8x16Abs)                          \
@@ -2435,6 +2437,21 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       SIMD_QFM_LIST(EMIT_SIMD_QFM)
 #undef EMIT_SIMD_QFM
 #undef SIMD_QFM_LIST
+
+#define SIMD_EXT_ADD_PAIRWISE_LIST(V) \
+  V(I32x4ExtAddPairwiseI16x8S)        \
+  V(I32x4ExtAddPairwiseI16x8U)        \
+  V(I16x8ExtAddPairwiseI8x16S)        \
+  V(I16x8ExtAddPairwiseI8x16U)
+#define EMIT_SIMD_EXT_ADD_PAIRWISE(name)                          \
+  case kPPC_##name: {                                             \
+    __ name(i.OutputSimd128Register(), i.InputSimd128Register(0), \
+            kScratchSimd128Reg, kScratchSimd128Reg2);             \
+    break;                                                        \
+  }
+      SIMD_EXT_ADD_PAIRWISE_LIST(EMIT_SIMD_EXT_ADD_PAIRWISE)
+#undef EMIT_SIMD_EXT_ADD_PAIRWISE
+#undef SIMD_EXT_ADD_PAIRWISE_LIST
 
     case kPPC_F64x2Splat: {
       __ F64x2Splat(i.OutputSimd128Register(), i.InputDoubleRegister(0),
@@ -2878,85 +2895,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     }
 #undef MAYBE_REVERSE_BYTES
-#define EXT_ADD_PAIRWISE(mul_even, mul_odd, add)             \
-  __ mul_even(kScratchSimd128Reg2, src, kScratchSimd128Reg); \
-  __ mul_odd(kScratchSimd128Reg, src, kScratchSimd128Reg);   \
-  __ add(dst, kScratchSimd128Reg2, kScratchSimd128Reg);
-    case kPPC_I32x4ExtAddPairwiseI16x8S: {
-      Simd128Register src = i.InputSimd128Register(0);
-      Simd128Register dst = i.OutputSimd128Register();
-      __ vspltish(kScratchSimd128Reg, Operand(1));
-      EXT_ADD_PAIRWISE(vmulesh, vmulosh, vadduwm)
-      break;
-    }
-    case kPPC_I32x4ExtAddPairwiseI16x8U: {
-      Simd128Register src = i.InputSimd128Register(0);
-      Simd128Register dst = i.OutputSimd128Register();
-      __ vspltish(kScratchSimd128Reg, Operand(1));
-      EXT_ADD_PAIRWISE(vmuleuh, vmulouh, vadduwm)
-      break;
-    }
-    case kPPC_I16x8ExtAddPairwiseI8x16S: {
-      Simd128Register src = i.InputSimd128Register(0);
-      Simd128Register dst = i.OutputSimd128Register();
-      __ xxspltib(kScratchSimd128Reg, Operand(1));
-      EXT_ADD_PAIRWISE(vmulesb, vmulosb, vadduhm)
-      break;
-    }
-    case kPPC_I16x8ExtAddPairwiseI8x16U: {
-      Simd128Register src = i.InputSimd128Register(0);
-      Simd128Register dst = i.OutputSimd128Register();
-      __ xxspltib(kScratchSimd128Reg, Operand(1));
-      EXT_ADD_PAIRWISE(vmuleub, vmuloub, vadduhm)
-      break;
-    }
-#undef EXT_ADD_PAIRWISE
-    case kPPC_F64x2PromoteLowF32x4: {
-      constexpr int lane_number = 8;
-      Simd128Register src = i.InputSimd128Register(0);
-      Simd128Register dst = i.OutputSimd128Register();
-      __ vextractd(kScratchSimd128Reg, src, Operand(lane_number));
-      __ vinsertw(kScratchSimd128Reg, kScratchSimd128Reg, Operand(lane_number));
-      __ xvcvspdp(dst, kScratchSimd128Reg);
-      break;
-    }
-    case kPPC_F32x4DemoteF64x2Zero: {
-      constexpr int lane_number = 8;
-      Simd128Register src = i.InputSimd128Register(0);
-      Simd128Register dst = i.OutputSimd128Register();
-      __ xvcvdpsp(kScratchSimd128Reg, src);
-      __ vextractuw(dst, kScratchSimd128Reg, Operand(lane_number));
-      __ vinsertw(kScratchSimd128Reg, dst, Operand(4));
-      __ vxor(dst, dst, dst);
-      __ vinsertd(dst, kScratchSimd128Reg, Operand(lane_number));
-      break;
-    }
-    case kPPC_I32x4TruncSatF64x2SZero: {
-      constexpr int lane_number = 8;
-      Simd128Register src = i.InputSimd128Register(0);
-      Simd128Register dst = i.OutputSimd128Register();
-      // NaN to 0.
-      __ vor(kScratchSimd128Reg, src, src);
-      __ xvcmpeqdp(kScratchSimd128Reg, kScratchSimd128Reg, kScratchSimd128Reg);
-      __ vand(kScratchSimd128Reg, src, kScratchSimd128Reg);
-      __ xvcvdpsxws(kScratchSimd128Reg, kScratchSimd128Reg);
-      __ vextractuw(dst, kScratchSimd128Reg, Operand(lane_number));
-      __ vinsertw(kScratchSimd128Reg, dst, Operand(4));
-      __ vxor(dst, dst, dst);
-      __ vinsertd(dst, kScratchSimd128Reg, Operand(lane_number));
-      break;
-    }
-    case kPPC_I32x4TruncSatF64x2UZero: {
-      constexpr int lane_number = 8;
-      Simd128Register src = i.InputSimd128Register(0);
-      Simd128Register dst = i.OutputSimd128Register();
-      __ xvcvdpuxws(kScratchSimd128Reg, src);
-      __ vextractuw(dst, kScratchSimd128Reg, Operand(lane_number));
-      __ vinsertw(kScratchSimd128Reg, dst, Operand(4));
-      __ vxor(dst, dst, dst);
-      __ vinsertd(dst, kScratchSimd128Reg, Operand(lane_number));
-      break;
-    }
     case kPPC_StoreCompressTagged: {
       size_t index = 0;
       AddressingMode mode = kMode_None;
@@ -2977,13 +2915,13 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kPPC_LoadDecompressTaggedPointer: {
       CHECK(instr->HasOutput());
       ASSEMBLE_LOAD_INTEGER(lwz, plwz, lwzx, false);
-      __ add(i.OutputRegister(), i.OutputRegister(), kRootRegister);
+      __ add(i.OutputRegister(), i.OutputRegister(), kPtrComprCageBaseRegister);
       break;
     }
     case kPPC_LoadDecompressAnyTagged: {
       CHECK(instr->HasOutput());
       ASSEMBLE_LOAD_INTEGER(lwz, plwz, lwzx, false);
-      __ add(i.OutputRegister(), i.OutputRegister(), kRootRegister);
+      __ add(i.OutputRegister(), i.OutputRegister(), kPtrComprCageBaseRegister);
       break;
     }
     default:
@@ -3245,6 +3183,10 @@ void CodeGenerator::AssembleConstructFrame() {
       if (call_descriptor->IsWasmFunctionCall() ||
           call_descriptor->IsWasmImportWrapper() ||
           call_descriptor->IsWasmCapiFunction()) {
+        // For import wrappers and C-API functions, this stack slot is only used
+        // for printing stack traces in V8. Also, it holds a WasmApiFunctionRef
+        // instead of the instance itself, which is taken care of in the frames
+        // accessors.
         __ Push(kWasmInstanceRegister);
       }
       if (call_descriptor->IsWasmCapiFunction()) {
@@ -3623,7 +3565,7 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
           Handle<HeapObject> src_object = src.ToHeapObject();
           RootIndex index;
           if (IsMaterializableFromRoot(src_object, &index)) {
-            __ LoadRoot(dst, index);
+            __ LoadTaggedRoot(dst, index);
           } else {
             // TODO(v8:7703, jyan@ca.ibm.com): Turn into a
             // COMPRESSED_EMBEDDED_OBJECT when the constant pool entry size is

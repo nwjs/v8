@@ -191,6 +191,8 @@ class EffectControlLinearizer {
   Node* LowerBigIntShiftLeft(Node* node, Node* frame_state);
   Node* LowerBigIntShiftRight(Node* node, Node* frame_state);
   Node* LowerBigIntEqual(Node* node);
+  Node* LowerBigIntLessThan(Node* node);
+  Node* LowerBigIntLessThanOrEqual(Node* node);
   Node* LowerBigIntNegate(Node* node);
   Node* LowerCheckFloat64Hole(Node* node, Node* frame_state);
   Node* LowerCheckNotTaggedHole(Node* node, Node* frame_state);
@@ -1305,6 +1307,12 @@ bool EffectControlLinearizer::TryWireInStateEffect(Node* node,
       break;
     case IrOpcode::kBigIntEqual:
       result = LowerBigIntEqual(node);
+      break;
+    case IrOpcode::kBigIntLessThan:
+      result = LowerBigIntLessThan(node);
+      break;
+    case IrOpcode::kBigIntLessThanOrEqual:
+      result = LowerBigIntLessThanOrEqual(node);
       break;
     case IrOpcode::kBigIntNegate:
       result = LowerBigIntNegate(node);
@@ -4297,6 +4305,11 @@ Node* EffectControlLinearizer::LowerStringFromSingleCharCode(Node* node) {
     Node* vfalse1 =
         __ Allocate(AllocationType::kYoung,
                     __ IntPtrConstant(SeqTwoByteString::SizeFor(1)));
+    __ Store(StoreRepresentation(MachineRepresentation::kTaggedSigned,
+                                 kNoWriteBarrier),
+             vfalse1,
+             SeqTwoByteString::SizeFor(1) - kObjectAlignment - kHeapObjectTag,
+             __ SmiConstant(0));
     __ StoreField(AccessBuilder::ForMap(), vfalse1,
                   __ HeapConstant(factory()->string_map()));
     __ StoreField(AccessBuilder::ForNameRawHashField(), vfalse1,
@@ -4393,6 +4406,11 @@ Node* EffectControlLinearizer::LowerStringFromSingleCodePoint(Node* node) {
       Node* vfalse1 =
           __ Allocate(AllocationType::kYoung,
                       __ IntPtrConstant(SeqTwoByteString::SizeFor(1)));
+      __ Store(StoreRepresentation(MachineRepresentation::kTaggedSigned,
+                                   kNoWriteBarrier),
+               vfalse1,
+               SeqTwoByteString::SizeFor(1) - kObjectAlignment - kHeapObjectTag,
+               __ SmiConstant(0));
       __ StoreField(AccessBuilder::ForMap(), vfalse1,
                     __ HeapConstant(factory()->string_map()));
       __ StoreField(AccessBuilder::ForNameRawHashField(), vfalse1,
@@ -4433,6 +4451,11 @@ Node* EffectControlLinearizer::LowerStringFromSingleCodePoint(Node* node) {
     Node* vfalse0 =
         __ Allocate(AllocationType::kYoung,
                     __ IntPtrConstant(SeqTwoByteString::SizeFor(2)));
+    __ Store(StoreRepresentation(MachineRepresentation::kTaggedSigned,
+                                 kNoWriteBarrier),
+             vfalse0,
+             SeqTwoByteString::SizeFor(2) - kObjectAlignment - kHeapObjectTag,
+             __ SmiConstant(0));
     __ StoreField(AccessBuilder::ForMap(), vfalse0,
                   __ HeapConstant(factory()->string_map()));
     __ StoreField(AccessBuilder::ForNameRawHashField(), vfalse0,
@@ -4487,6 +4510,33 @@ Node* EffectControlLinearizer::LowerStringLength(Node* node) {
   return __ LoadField(AccessBuilder::ForStringLength(), subject);
 }
 
+Node* EffectControlLinearizer::LowerStringEqual(Node* node) {
+  Callable callable = Builtins::CallableFor(isolate(), Builtin::kStringEqual);
+  Node* lhs = node->InputAt(0);
+  Node* rhs = node->InputAt(1);
+  Node* lhs_length = __ LoadField(AccessBuilder::ForStringLength(), lhs);
+  Node* rhs_length = __ LoadField(AccessBuilder::ForStringLength(), rhs);
+
+  auto if_length_equal = __ MakeLabel();
+  auto done = __ MakeLabel(MachineRepresentation::kTagged);
+
+  __ GotoIf(__ Word32Equal(lhs_length, rhs_length), &if_length_equal);
+  __ Goto(&done, __ FalseConstant());
+
+  __ Bind(&if_length_equal);
+  Operator::Properties properties = Operator::kEliminatable;
+  CallDescriptor::Flags flags = CallDescriptor::kNoFlags;
+  auto call_descriptor = Linkage::GetStubCallDescriptor(
+      graph()->zone(), callable.descriptor(),
+      callable.descriptor().GetStackParameterCount(), flags, properties);
+  Node* result = __ Call(call_descriptor, __ HeapConstant(callable.code()), lhs,
+                         rhs, lhs_length, __ NoContextConstant());
+  __ Goto(&done, result);
+
+  __ Bind(&done);
+  return done.PhiAt(0);
+}
+
 Node* EffectControlLinearizer::LowerStringComparison(Callable const& callable,
                                                      Node* node) {
   Node* lhs = node->InputAt(0);
@@ -4515,11 +4565,6 @@ Node* EffectControlLinearizer::LowerStringSubstring(Node* node) {
       callable.descriptor().GetStackParameterCount(), flags, properties);
   return __ Call(call_descriptor, __ HeapConstant(callable.code()), receiver,
                  start, end, __ NoContextConstant());
-}
-
-Node* EffectControlLinearizer::LowerStringEqual(Node* node) {
-  return LowerStringComparison(
-      Builtins::CallableFor(isolate(), Builtin::kStringEqual), node);
 }
 
 Node* EffectControlLinearizer::LowerStringLessThan(Node* node) {
@@ -4812,6 +4857,38 @@ Node* EffectControlLinearizer::LowerBigIntEqual(Node* node) {
 
   Callable const callable =
       Builtins::CallableFor(isolate(), Builtin::kBigIntEqual);
+  auto call_descriptor = Linkage::GetStubCallDescriptor(
+      graph()->zone(), callable.descriptor(),
+      callable.descriptor().GetStackParameterCount(), CallDescriptor::kNoFlags,
+      Operator::kFoldable | Operator::kNoThrow);
+  Node* value = __ Call(call_descriptor, __ HeapConstant(callable.code()), lhs,
+                        rhs, __ NoContextConstant());
+
+  return value;
+}
+
+Node* EffectControlLinearizer::LowerBigIntLessThan(Node* node) {
+  Node* lhs = node->InputAt(0);
+  Node* rhs = node->InputAt(1);
+
+  Callable const callable =
+      Builtins::CallableFor(isolate(), Builtin::kBigIntLessThan);
+  auto call_descriptor = Linkage::GetStubCallDescriptor(
+      graph()->zone(), callable.descriptor(),
+      callable.descriptor().GetStackParameterCount(), CallDescriptor::kNoFlags,
+      Operator::kFoldable | Operator::kNoThrow);
+  Node* value = __ Call(call_descriptor, __ HeapConstant(callable.code()), lhs,
+                        rhs, __ NoContextConstant());
+
+  return value;
+}
+
+Node* EffectControlLinearizer::LowerBigIntLessThanOrEqual(Node* node) {
+  Node* lhs = node->InputAt(0);
+  Node* rhs = node->InputAt(1);
+
+  Callable const callable =
+      Builtins::CallableFor(isolate(), Builtin::kBigIntLessThanOrEqual);
   auto call_descriptor = Linkage::GetStubCallDescriptor(
       graph()->zone(), callable.descriptor(),
       callable.descriptor().GetStackParameterCount(), CallDescriptor::kNoFlags,

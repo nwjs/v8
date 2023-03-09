@@ -119,6 +119,11 @@ BreakLocation BreakLocation::FromFrame(Handle<DebugInfo> debug_info,
   return it.GetBreakLocation();
 }
 
+bool BreakLocation::IsPausedInJsFunctionEntry(JavaScriptFrame* frame) {
+  auto summary = FrameSummary::GetTop(frame);
+  return summary.code_offset() == kFunctionEntryBytecodeOffset;
+}
+
 MaybeHandle<FixedArray> Debug::CheckBreakPointsForLocations(
     Handle<DebugInfo> debug_info, std::vector<BreakLocation>& break_locations,
     bool* has_break_points) {
@@ -385,6 +390,7 @@ void Debug::ThreadInit() {
   thread_local_.break_frame_id_ = StackFrameId::NO_ID;
   thread_local_.last_step_action_ = StepNone;
   thread_local_.last_statement_position_ = kNoSourcePosition;
+  thread_local_.last_bytecode_offset_ = kFunctionEntryBytecodeOffset;
   thread_local_.last_frame_count_ = -1;
   thread_local_.fast_forward_to_return_ = false;
   thread_local_.ignore_step_into_function_ = Smi::zero();
@@ -545,8 +551,6 @@ void Debug::Break(JavaScriptFrame* frame, Handle<JSFunction> break_target) {
   if (!break_points_hit.is_null() || break_on_next_function_call() ||
       scheduled_break) {
     StepAction lastStepAction = last_step_action();
-    DCHECK_IMPLIES(scheduled_break_on_function_call(),
-                   lastStepAction == StepNone);
     debug::BreakReasons break_reasons;
     if (scheduled_break) {
       break_reasons.Add(debug::BreakReason::kScheduled);
@@ -618,10 +622,19 @@ void Debug::Break(JavaScriptFrame* frame, Handle<JSFunction> break_target) {
         return;
       }
       FrameSummary summary = FrameSummary::GetTop(frame);
+      const bool frame_or_statement_changed =
+          current_frame_count != last_frame_count ||
+          thread_local_.last_statement_position_ !=
+              summary.SourceStatementPosition();
+      // If we stayed on the same frame and reached the same bytecode offset
+      // since the last step, we are in a loop and should pause. Otherwise
+      // we keep "stepping" through the loop without ever acutally pausing.
+      const bool potential_single_statement_loop =
+          current_frame_count == last_frame_count &&
+          thread_local_.last_bytecode_offset_ == summary.code_offset();
       step_break = step_break || location.IsReturn() ||
-                   current_frame_count != last_frame_count ||
-                   thread_local_.last_statement_position_ !=
-                       summary.SourceStatementPosition();
+                   potential_single_statement_loop ||
+                   frame_or_statement_changed;
       break;
     }
   }
@@ -1265,9 +1278,8 @@ void Debug::PrepareStep(StepAction step_action) {
     // A step-next in blackboxed function is a step-out.
     if (step_action == StepOver && IsBlackboxed(shared)) step_action = StepOut;
 
-    thread_local_.last_statement_position_ =
-        summary.abstract_code()->SourceStatementPosition(isolate_,
-                                                         summary.code_offset());
+    thread_local_.last_statement_position_ = summary.SourceStatementPosition();
+    thread_local_.last_bytecode_offset_ = summary.code_offset();
     thread_local_.last_frame_count_ = current_frame_count;
     // No longer perform the current async step.
     clear_suspended_generator();
@@ -1294,6 +1306,7 @@ void Debug::PrepareStep(StepAction step_action) {
     case StepOut: {
       // Clear last position info. For stepping out it does not matter.
       thread_local_.last_statement_position_ = kNoSourcePosition;
+      thread_local_.last_bytecode_offset_ = kFunctionEntryBytecodeOffset;
       thread_local_.last_frame_count_ = -1;
       if (!shared.is_null()) {
         if (!location.IsReturnOrSuspend() && !IsBlackboxed(shared)) {
@@ -1409,6 +1422,7 @@ void Debug::ClearStepping() {
 
   thread_local_.last_step_action_ = StepNone;
   thread_local_.last_statement_position_ = kNoSourcePosition;
+  thread_local_.last_bytecode_offset_ = kFunctionEntryBytecodeOffset;
   thread_local_.ignore_step_into_function_ = Smi::zero();
   thread_local_.fast_forward_to_return_ = false;
   thread_local_.last_frame_count_ = -1;
@@ -1622,7 +1636,7 @@ void Debug::InstallDebugBreakTrampoline() {
 
   if (!needs_to_use_trampoline) return;
 
-  Handle<CodeT> trampoline = BUILTIN_CODE(isolate_, DebugBreakTrampoline);
+  Handle<Code> trampoline = BUILTIN_CODE(isolate_, DebugBreakTrampoline);
   std::vector<Handle<JSFunction>> needs_compile;
   using AccessorPairWithContext =
       std::pair<Handle<AccessorPair>, Handle<NativeContext>>;
@@ -1926,7 +1940,8 @@ bool Debug::FindSharedFunctionInfosIntersectingRange(
     for (const auto& candidate : candidates) {
       IsCompiledScope is_compiled_scope(candidate->is_compiled_scope(isolate_));
       if (!is_compiled_scope.is_compiled()) {
-        // Code that cannot be compiled lazily are internal and not debuggable.
+        // InstructionStream that cannot be compiled lazily are internal and not
+        // debuggable.
         DCHECK(candidate->allows_lazy_compilation());
         if (!Compiler::Compile(isolate_, candidate, Compiler::CLEAR_EXCEPTION,
                                &is_compiled_scope)) {
@@ -1991,7 +2006,8 @@ Handle<Object> Debug::FindInnermostContainingFunctionInfo(Handle<Script> script,
     }
     // If not, compile to reveal inner functions.
     HandleScope scope(isolate_);
-    // Code that cannot be compiled lazily are internal and not debuggable.
+    // InstructionStream that cannot be compiled lazily are internal and not
+    // debuggable.
     DCHECK(shared.allows_lazy_compilation());
     if (!Compiler::Compile(isolate_, handle(shared, isolate_),
                            Compiler::CLEAR_EXCEPTION, &is_compiled_scope)) {
@@ -2580,8 +2596,8 @@ void Debug::HandleDebugBreak(IgnoreBreakMode ignore_break_mode,
       // it's context. Instead, we step into the function and pause at the
       // first official breakable position.
       // This behavior mirrors "BreakOnNextFunctionCall".
-      if (break_reasons.contains(v8::debug::BreakReason::kScheduled)) {
-        CHECK_EQ(last_step_action(), StepAction::StepNone);
+      if (break_reasons.contains(v8::debug::BreakReason::kScheduled) &&
+          BreakLocation::IsPausedInJsFunctionEntry(frame)) {
         thread_local_.scheduled_break_on_next_function_call_ = true;
         PrepareStepIn(function);
         return;

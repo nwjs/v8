@@ -17,6 +17,7 @@
 
 #include "src/base/platform/condition-variable.h"
 #include "src/base/platform/mutex.h"
+#include "src/compiler/wasm-call-descriptors.h"
 #include "src/tasks/cancelable-task.h"
 #include "src/tasks/operations-barrier.h"
 #include "src/wasm/canonical-types.h"
@@ -201,10 +202,10 @@ class V8_EXPORT_PRIVATE WasmEngine {
   // Compiles the function with the given index at a specific compilation tier.
   // Errors are stored internally in the CompilationState.
   // This is mostly used for testing to force a function into a specific tier.
-  void CompileFunction(Isolate* isolate, NativeModule* native_module,
+  void CompileFunction(Counters* counters, NativeModule* native_module,
                        uint32_t function_index, ExecutionTier tier);
 
-  void TierDownAllModulesPerIsolate(Isolate* isolate);
+  void EnterDebuggingForIsolate(Isolate* isolate);
 
   void LeaveDebuggingForIsolate(Isolate* isolate);
 
@@ -218,6 +219,8 @@ class V8_EXPORT_PRIVATE WasmEngine {
   Handle<WasmModuleObject> ImportNativeModule(
       Isolate* isolate, std::shared_ptr<NativeModule> shared_module,
       base::Vector<const char> source_url);
+
+  void FlushCode();
 
   AccountingAllocator* allocator() { return &allocator_; }
 
@@ -362,6 +365,10 @@ class V8_EXPORT_PRIVATE WasmEngine {
 
   TypeCanonicalizer* type_canonicalizer() { return &type_canonicalizer_; }
 
+  compiler::WasmCallDescriptors* call_descriptors() {
+    return &call_descriptors_;
+  }
+
   // Returns either the compressed tagged pointer representing a null value or
   // 0 if pointer compression is not available.
   Tagged_t compressed_null_value_or_zero() const {
@@ -407,6 +414,8 @@ class V8_EXPORT_PRIVATE WasmEngine {
   std::atomic<Tagged_t> null_tagged_compressed_{0};
 
   TypeCanonicalizer type_canonicalizer_;
+
+  compiler::WasmCallDescriptors call_descriptors_;
 
   // This mutex protects all information which is mutated concurrently or
   // fields that are initialized lazily on the first access.

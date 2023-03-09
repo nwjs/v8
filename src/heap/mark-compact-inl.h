@@ -51,16 +51,6 @@ void MinorMarkCompactCollector::MarkRootObject(HeapObject obj) {
   }
 }
 
-void MarkCompactCollector::MarkExternallyReferencedObject(HeapObject obj) {
-  DCHECK(ReadOnlyHeap::Contains(obj) || heap()->Contains(obj));
-  if (marking_state()->WhiteToGrey(obj)) {
-    local_marking_worklists()->Push(obj);
-    if (V8_UNLIKELY(v8_flags.track_retaining_path)) {
-      heap_->AddRetainingRoot(Root::kWrapperTracing, obj);
-    }
-  }
-}
-
 // static
 void MarkCompactCollector::RecordSlot(HeapObject object, ObjectSlot slot,
                                       HeapObject target) {
@@ -81,8 +71,7 @@ void MarkCompactCollector::RecordSlot(MemoryChunk* source_page,
                                       HeapObjectSlot slot, HeapObject target) {
   BasicMemoryChunk* target_page = BasicMemoryChunk::FromHeapObject(target);
   if (target_page->IsEvacuationCandidate()) {
-    if (V8_EXTERNAL_CODE_SPACE_BOOL &&
-        target_page->IsFlagSet(MemoryChunk::IS_EXECUTABLE)) {
+    if (target_page->IsFlagSet(MemoryChunk::IS_EXECUTABLE)) {
       RememberedSet<OLD_TO_CODE>::Insert<AccessMode::ATOMIC>(source_page,
                                                              slot.address());
     } else {
@@ -135,7 +124,7 @@ void MainMarkingVisitor<MarkingState>::RecordSlot(HeapObject object, TSlot slot,
 }
 
 template <typename MarkingState>
-void MainMarkingVisitor<MarkingState>::RecordRelocSlot(Code host,
+void MainMarkingVisitor<MarkingState>::RecordRelocSlot(InstructionStream host,
                                                        RelocInfo* rinfo,
                                                        HeapObject target) {
   MarkCompactCollector::RecordRelocSlot(host, rinfo, target);

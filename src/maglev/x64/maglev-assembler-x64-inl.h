@@ -11,6 +11,7 @@
 
 #include "src/codegen/interface-descriptors-inl.h"
 #include "src/codegen/macro-assembler-inl.h"
+#include "src/compiler/compilation-dependencies.h"
 #include "src/maglev/maglev-assembler.h"
 #include "src/maglev/maglev-basic-block.h"
 #include "src/maglev/maglev-code-gen-state.h"
@@ -36,6 +37,44 @@ constexpr Condition ConditionFor(Operation operation) {
       UNREACHABLE();
   }
 }
+
+class MaglevAssembler::ScratchRegisterScope {
+ public:
+  explicit ScratchRegisterScope(MaglevAssembler* masm)
+      : masm_(masm),
+        prev_scope_(masm->scratch_register_scope_),
+        available_(masm->scratch_register_scope_
+                       ? masm_->scratch_register_scope_->available_
+                       : RegList()),
+        available_double_(
+            masm->scratch_register_scope_
+                ? masm_->scratch_register_scope_->available_double_
+                : DoubleRegList()) {
+    masm_->scratch_register_scope_ = this;
+  }
+  ~ScratchRegisterScope() { masm_->scratch_register_scope_ = prev_scope_; }
+
+  Register Acquire() { return available_.PopFirst(); }
+  void Include(Register reg) { available_.set(reg); }
+  void Include(const RegList list) { available_ = available_ | list; }
+
+  DoubleRegister AcquireDouble() { return available_double_.PopFirst(); }
+  void IncludeDouble(const DoubleRegList list) {
+    available_double_ = available_double_ | list;
+  }
+
+  RegList Available() { return available_; }
+  void SetAvailable(RegList list) { available_ = list; }
+
+  DoubleRegList AvailableDouble() { return available_double_; }
+  void SetAvailableDouble(DoubleRegList list) { available_double_ = list; }
+
+ private:
+  MaglevAssembler* masm_;
+  ScratchRegisterScope* prev_scope_;
+  RegList available_;
+  DoubleRegList available_double_;
+};
 
 namespace detail {
 
@@ -129,38 +168,33 @@ void MaglevAssembler::PushReverse(T... vals) {
   detail::PushAllHelper<T...>::PushReverse(this, vals...);
 }
 
-void MaglevAssembler::Branch(Condition condition, BasicBlock* if_true,
-                             BasicBlock* if_false, BasicBlock* next_block) {
-  // We don't have any branch probability information, so try to jump
-  // over whatever the next block emitted is.
-  if (if_false == next_block) {
-    // Jump over the false block if true, otherwise fall through into it.
-    j(condition, if_true->label());
-  } else {
-    // Jump to the false block if true.
-    j(NegateCondition(condition), if_false->label());
-    // Jump to the true block if it's not the next block.
-    if (if_true != next_block) {
-      jmp(if_true->label());
-    }
-  }
+inline void MaglevAssembler::BindJumpTarget(Label* label) { bind(label); }
+
+inline void MaglevAssembler::BindBlock(BasicBlock* block) {
+  bind(block->label());
 }
 
-Register MaglevAssembler::FromAnyToRegister(const Input& input,
-                                            Register scratch) {
-  if (input.operand().IsConstant()) {
-    input.node()->LoadToRegister(this, scratch);
-    return scratch;
-  }
-  const compiler::AllocatedOperand& operand =
-      compiler::AllocatedOperand::cast(input.operand());
-  if (operand.IsRegister()) {
-    return ToRegister(input);
+inline void MaglevAssembler::DoubleToInt64Repr(Register dst,
+                                               DoubleRegister src) {
+  Movq(dst, src);
+}
+
+inline Condition MaglevAssembler::IsInt64Constant(Register reg,
+                                                  int64_t constant) {
+  movq(kScratchRegister, kHoleNanInt64);
+  cmpq(reg, kScratchRegister);
+  return equal;
+}
+
+inline Condition MaglevAssembler::IsRootConstant(Input input,
+                                                 RootIndex root_index) {
+  if (input.operand().IsRegister()) {
+    CompareRoot(ToRegister(input), root_index);
   } else {
-    DCHECK(operand.IsStackSlot());
-    movq(scratch, ToMemOperand(input));
-    return scratch;
+    DCHECK(input.operand().IsStackSlot());
+    CompareRoot(ToMemOperand(input), root_index);
   }
+  return equal;
 }
 
 inline MemOperand MaglevAssembler::GetStackSlot(
@@ -175,6 +209,18 @@ inline MemOperand MaglevAssembler::ToMemOperand(
 
 inline MemOperand MaglevAssembler::ToMemOperand(const ValueLocation& location) {
   return ToMemOperand(location.operand());
+}
+
+inline void MaglevAssembler::BuildTypedArrayDataPointer(Register data_pointer,
+                                                        Register object) {
+  DCHECK_NE(data_pointer, object);
+  LoadExternalPointerField(
+      data_pointer, FieldOperand(object, JSTypedArray::kExternalPointerOffset));
+  if (JSTypedArray::kMaxSizeInHeap == 0) return;
+
+  Register base = kScratchRegister;
+  movl(base, FieldOperand(object, JSTypedArray::kBasePointerOffset));
+  addq(data_pointer, base);
 }
 
 inline void MaglevAssembler::LoadBoundedSizeFromObject(Register result,
@@ -300,7 +346,8 @@ inline void MaglevAssembler::Move(Register dst, Register src) {
 }
 
 inline void MaglevAssembler::Move(Register dst, int32_t i) {
-  MacroAssembler::Move(dst, Immediate(i));
+  // Move as a uint32 to avoid sign extension.
+  MacroAssembler::Move(dst, static_cast<uint32_t>(i));
 }
 
 inline void MaglevAssembler::Move(DoubleRegister dst, double n) {
@@ -311,23 +358,79 @@ inline void MaglevAssembler::Move(Register dst, Handle<HeapObject> obj) {
   MacroAssembler::Move(dst, obj);
 }
 
+inline void MaglevAssembler::SignExtend32To64Bits(Register dst, Register src) {
+  movsxlq(dst, src);
+}
+
+template <typename NodeT>
+inline void MaglevAssembler::DeoptIfBufferDetached(Register array,
+                                                   Register scratch,
+                                                   NodeT* node) {
+  if (!code_gen_state()
+           ->broker()
+           ->dependencies()
+           ->DependOnArrayBufferDetachingProtector()) {
+    // A detached buffer leads to megamorphic feedback, so we won't have a deopt
+    // loop if we deopt here.
+    LoadTaggedPointerField(
+        scratch, FieldOperand(array, JSArrayBufferView::kBufferOffset));
+    LoadTaggedPointerField(
+        scratch, FieldOperand(scratch, JSArrayBuffer::kBitFieldOffset));
+    testl(scratch, Immediate(JSArrayBuffer::WasDetachedBit::kMask));
+    EmitEagerDeoptIf(not_zero, DeoptimizeReason::kArrayBufferWasDetached, node);
+  }
+}
+
+inline void MaglevAssembler::LoadByte(Register dst, MemOperand src) {
+  movzxbl(dst, src);
+}
+
+inline void MaglevAssembler::CompareTagged(Register reg,
+                                           Handle<HeapObject> obj) {
+  Cmp(reg, obj);
+}
+
+inline void MaglevAssembler::CompareInt32(Register reg, int32_t imm) {
+  cmpl(reg, Immediate(imm));
+}
+
 inline void MaglevAssembler::CompareInt32(Register src1, Register src2) {
   cmpl(src1, src2);
 }
 
-inline void MaglevAssembler::Jump(Label* target) { jmp(target); }
+inline void MaglevAssembler::Jump(Label* target, Label::Distance distance) {
+  jmp(target, distance);
+}
 
-inline void MaglevAssembler::JumpIf(Condition cond, Label* target) {
-  j(cond, target);
+inline void MaglevAssembler::JumpIf(Condition cond, Label* target,
+                                    Label::Distance distance) {
+  j(cond, target, distance);
+}
+
+inline void MaglevAssembler::JumpIfEqual(Label* target,
+                                         Label::Distance distance) {
+  j(equal, target, distance);
+}
+
+inline void MaglevAssembler::JumpIfNotEqual(Label* target,
+                                            Label::Distance distance) {
+  j(not_equal, target, distance);
 }
 
 inline void MaglevAssembler::JumpIfTaggedEqual(Register r1, Register r2,
-                                               Label* target) {
+                                               Label* target,
+                                               Label::Distance distance) {
   cmp_tagged(r1, r2);
-  j(equal, target);
+  j(equal, target, distance);
 }
 
 inline void MaglevAssembler::Pop(Register dst) { MacroAssembler::Pop(dst); }
+
+template <typename NodeT>
+inline void MaglevAssembler::EmitEagerDeoptIfNotEqual(DeoptimizeReason reason,
+                                                      NodeT* node) {
+  EmitEagerDeoptIf(not_equal, reason, node);
+}
 
 inline void MaglevAssembler::MaterialiseValueNode(Register dst,
                                                   ValueNode* value) {
@@ -379,7 +482,7 @@ inline void MaglevAssembler::MaterialiseValueNode(Register dst,
       // The value was loaded with movl, so is zero extended in 64-bit.
       // Therefore, we can do an unsigned 32-bit converstion to double with a
       // 64-bit signed conversion (Cvt_q_si2sd instead of Cvt_l_si2sd).
-      Cvtqsi2sd(D::GetDoubleRegisterParameter(D::kValue), src);
+      Cvtqsi2sd(D::GetDoubleRegisterParameter(D::kValue), dst);
       CallBuiltin(Builtin::kNewHeapNumber);
       Move(dst, kReturnRegister0);
       jmp(&done, Label::kNear);
@@ -425,6 +528,12 @@ inline void MaglevAssembler::MoveRepr(MachineRepresentation repr, Dest dst,
     default:
       UNREACHABLE();
   }
+}
+template <>
+inline void MaglevAssembler::MoveRepr(MachineRepresentation repr,
+                                      MemOperand dst, MemOperand src) {
+  MoveRepr(repr, kScratchRegister, src);
+  MoveRepr(repr, dst, kScratchRegister);
 }
 
 inline Condition ToCondition(AssertCondition cond) {

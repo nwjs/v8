@@ -889,6 +889,7 @@ class RefImpl {
     RefImpl* self = new (std::nothrow) RefImpl();
     if (!self) return nullptr;
     i::Isolate* isolate = store->i_isolate();
+    v8::Isolate::Scope isolate_scope(store->isolate());
     self->val_ = isolate->global_handles()->Create(*obj);
     return make_own(seal<Ref>(self));
   }
@@ -1179,13 +1180,13 @@ auto Module::exports() const -> ownvec<ExportType> {
   return ExportsImpl(impl(this)->v8_object());
 }
 
-// We serialize the state of the module when calling this method; an arbitrary
-// number of functions can be tiered up to TurboFan, and only those will be
-// serialized.
-// The caller is responsible for "warming up" the module before serializing.
+// We tier up all functions to TurboFan, and then serialize all TurboFan code.
+// If no TurboFan code existed before calling this function, then the call to
+// {serialize} may take a long time.
 auto Module::serialize() const -> vec<byte_t> {
   i::wasm::NativeModule* native_module =
       impl(this)->v8_object()->native_module();
+  native_module->compilation_state()->TierUpAllFunctions();
   v8::base::Vector<const uint8_t> wire_bytes = native_module->wire_bytes();
   size_t binary_size = wire_bytes.size();
   i::wasm::WasmSerializer serializer(native_module);
@@ -1200,8 +1201,10 @@ auto Module::serialize() const -> vec<byte_t> {
   ptr += binary_size;
   if (!serializer.SerializeNativeModule(
           {reinterpret_cast<uint8_t*>(ptr), serial_size})) {
-    // Serialization failed, because no TurboFan code is present yet. In this
-    // case, the serialized module just contains the wire bytes.
+    // Serialization fails if no TurboFan code is present. This may happen
+    // because the module does not have any functions, or because another thread
+    // modifies the {NativeModule} concurrently. In this case, the serialized
+    // module just contains the wire bytes.
     buffer = vec<byte_t>::make_uninitialized(size_size + binary_size);
     byte_t* ptr = buffer.get();
     i::wasm::LEBHelper::write_u64v(reinterpret_cast<uint8_t**>(&ptr),
@@ -1215,6 +1218,7 @@ auto Module::deserialize(Store* store_abs, const vec<byte_t>& serialized)
     -> own<Module> {
   StoreImpl* store = impl(store_abs);
   i::Isolate* isolate = store->i_isolate();
+  v8::Isolate::Scope isolate_scope(store->isolate());
   i::HandleScope handle_scope(isolate);
   const byte_t* ptr = serialized.get();
   uint64_t binary_size = ReadLebU64(&ptr);
@@ -1539,7 +1543,7 @@ void PrepareFunctionData(i::Isolate* isolate,
     return;
   }
   // Compile wrapper code.
-  i::Handle<i::CodeT> wrapper_code =
+  i::Handle<i::Code> wrapper_code =
       i::compiler::CompileCWasmEntry(isolate, sig, module);
   function_data->set_c_wrapper_code(*wrapper_code);
   // Compute packed args size.
@@ -1676,7 +1680,7 @@ auto Func::call(const Val args[], Val results[]) const -> own<Trap> {
   const i::wasm::FunctionSig* sig =
       instance->module()->functions[function_index].sig;
   PrepareFunctionData(isolate, function_data, sig, instance->module());
-  i::Handle<i::CodeT> wrapper_code(function_data->c_wrapper_code(), isolate);
+  i::Handle<i::Code> wrapper_code(function_data->c_wrapper_code(), isolate);
   i::Address call_target = function_data->internal().call_target(isolate);
 
   i::wasm::CWasmArgumentsPacker packer(function_data->packed_args_size());
@@ -1725,6 +1729,7 @@ i::Address FuncData::v8_callback(i::Address host_data_foreign,
       i::Managed<FuncData>::cast(i::Object(host_data_foreign)).raw();
   StoreImpl* store = impl(self->store);
   i::Isolate* isolate = store->i_isolate();
+  v8::Isolate::Scope isolate_scope(store->isolate());
   i::HandleScope scope(isolate);
 
   isolate->set_context(*v8::Utils::OpenHandle(*store->context()));
@@ -1872,6 +1877,7 @@ auto Global::get() const -> Val {
       // TODO(7748): Handle types other than funcref and externref if needed.
       StoreImpl* store = impl(this)->store();
       i::HandleScope scope(store->i_isolate());
+      v8::Isolate::Scope isolate_scope(store->isolate());
       i::Handle<i::Object> result = v8_global->GetRef();
       if (result->IsWasmInternalFunction()) {
         result =

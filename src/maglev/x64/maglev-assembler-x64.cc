@@ -4,8 +4,9 @@
 
 #include "src/codegen/interface-descriptors-inl.h"
 #include "src/common/globals.h"
+#include "src/interpreter/bytecode-flags.h"
+#include "src/maglev/maglev-assembler-inl.h"
 #include "src/maglev/maglev-graph.h"
-#include "src/maglev/x64/maglev-assembler-x64-inl.h"
 #include "src/objects/heap-number.h"
 
 namespace v8 {
@@ -87,8 +88,10 @@ void MaglevAssembler::AllocateHeapNumber(RegisterSnapshot register_snapshot,
 
 void MaglevAssembler::AllocateTwoByteString(RegisterSnapshot register_snapshot,
                                             Register result, int length) {
-  Allocate(register_snapshot, result, SeqTwoByteString::SizeFor(length));
+  int size = SeqTwoByteString::SizeFor(length);
+  Allocate(register_snapshot, result, size);
   LoadRoot(kScratchRegister, RootIndex::kStringMap);
+  StoreTaggedField(FieldOperand(result, size - kObjectAlignment), Immediate(0));
   StoreTaggedField(FieldOperand(result, HeapObject::kMapOffset),
                    kScratchRegister);
   StoreTaggedField(FieldOperand(result, Name::kRawHashFieldOffset),
@@ -98,20 +101,9 @@ void MaglevAssembler::AllocateTwoByteString(RegisterSnapshot register_snapshot,
 }
 
 void MaglevAssembler::LoadSingleCharacterString(Register result,
-                                                int char_code) {
-  DCHECK_GE(char_code, 0);
-  DCHECK_LT(char_code, String::kMaxOneByteCharCode);
-  Register table = result;
-  LoadRoot(table, RootIndex::kSingleCharacterStringTable);
-  DecompressAnyTagged(result, FieldOperand(table, FixedArray::kHeaderSize +
-                                                      char_code * kTaggedSize));
-}
-
-void MaglevAssembler::LoadSingleCharacterString(Register result,
                                                 Register char_code,
                                                 Register scratch) {
-  // Make sure char_code is zero extended.
-  movl(char_code, char_code);
+  AssertZeroExtended(char_code);
   if (v8_flags.debug_code) {
     cmpq(char_code, Immediate(String::kMaxOneByteCharCode));
     Assert(below_equal, AbortReason::kUnexpectedValue);
@@ -353,6 +345,121 @@ void MaglevAssembler::ToBoolean(Register value, ZoneLabelRef is_true,
   }
 }
 
+void MaglevAssembler::TestTypeOf(
+    Register object, interpreter::TestTypeOfFlags::LiteralFlag literal,
+    Label* is_true, Label::Distance true_distance, bool fallthrough_when_true,
+    Label* is_false, Label::Distance false_distance,
+    bool fallthrough_when_false) {
+  // If both true and false are fallthroughs, we don't have to do anything.
+  if (fallthrough_when_true && fallthrough_when_false) return;
+
+  // IMPORTANT: Note that `object` could be a register that aliases registers in
+  // the ScratchRegisterScope. Make sure that all reads of `object` are before
+  // any writes to scratch registers
+  using LiteralFlag = interpreter::TestTypeOfFlags::LiteralFlag;
+  switch (literal) {
+    case LiteralFlag::kNumber:
+      JumpIfSmi(object, is_true, true_distance);
+      CompareRoot(FieldOperand(object, HeapObject::kMapOffset),
+                  RootIndex::kHeapNumberMap);
+      Branch(equal, is_true, true_distance, fallthrough_when_true, is_false,
+             false_distance, fallthrough_when_false);
+      return;
+    case LiteralFlag::kString: {
+      MaglevAssembler::ScratchRegisterScope temps(this);
+      Register scratch = temps.Acquire();
+      JumpIfSmi(object, is_false, false_distance);
+      LoadMap(scratch, object);
+      cmpw(FieldOperand(scratch, Map::kInstanceTypeOffset),
+           Immediate(LAST_STRING_TYPE));
+      Branch(less_equal, is_true, true_distance, fallthrough_when_true,
+             is_false, false_distance, fallthrough_when_false);
+      return;
+    }
+    case LiteralFlag::kSymbol: {
+      MaglevAssembler::ScratchRegisterScope temps(this);
+      Register scratch = temps.Acquire();
+      JumpIfSmi(object, is_false, false_distance);
+      LoadMap(scratch, object);
+      cmpw(FieldOperand(scratch, Map::kInstanceTypeOffset),
+           Immediate(SYMBOL_TYPE));
+      Branch(equal, is_true, true_distance, fallthrough_when_true, is_false,
+             false_distance, fallthrough_when_false);
+      return;
+    }
+    case LiteralFlag::kBoolean:
+      CompareRoot(object, RootIndex::kTrueValue);
+      JumpIf(equal, is_true, true_distance);
+      CompareRoot(object, RootIndex::kFalseValue);
+      Branch(equal, is_true, true_distance, fallthrough_when_true, is_false,
+             false_distance, fallthrough_when_false);
+      return;
+    case LiteralFlag::kBigInt: {
+      MaglevAssembler::ScratchRegisterScope temps(this);
+      Register scratch = temps.Acquire();
+      JumpIfSmi(object, is_false, false_distance);
+      LoadMap(scratch, object);
+      cmpw(FieldOperand(scratch, Map::kInstanceTypeOffset),
+           Immediate(BIGINT_TYPE));
+      Branch(equal, is_true, true_distance, fallthrough_when_true, is_false,
+             false_distance, fallthrough_when_false);
+      return;
+    }
+    case LiteralFlag::kUndefined: {
+      JumpIfSmi(object, is_false, false_distance);
+      // Check it has the undetectable bit set and it is not null.
+      LoadMap(kScratchRegister, object);
+      testl(FieldOperand(kScratchRegister, Map::kBitFieldOffset),
+            Immediate(Map::Bits1::IsUndetectableBit::kMask));
+      JumpIf(zero, is_false, false_distance);
+      CompareRoot(object, RootIndex::kNullValue);
+      Branch(not_equal, is_true, true_distance, fallthrough_when_true, is_false,
+             false_distance, fallthrough_when_false);
+      return;
+    }
+    case LiteralFlag::kFunction: {
+      MaglevAssembler::ScratchRegisterScope temps(this);
+      Register scratch = temps.Acquire();
+      JumpIfSmi(object, is_false, false_distance);
+      // Check if callable bit is set and not undetectable.
+      LoadMap(scratch, object);
+      movl(scratch, FieldOperand(scratch, Map::kBitFieldOffset));
+      andl(scratch, Immediate(Map::Bits1::IsUndetectableBit::kMask |
+                              Map::Bits1::IsCallableBit::kMask));
+      cmpl(scratch, Immediate(Map::Bits1::IsCallableBit::kMask));
+      Branch(equal, is_true, true_distance, fallthrough_when_true, is_false,
+             false_distance, fallthrough_when_false);
+      return;
+    }
+    case LiteralFlag::kObject: {
+      MaglevAssembler::ScratchRegisterScope temps(this);
+      Register scratch = temps.Acquire();
+      JumpIfSmi(object, is_false, false_distance);
+      // If the object is null then return true.
+      CompareRoot(object, RootIndex::kNullValue);
+      JumpIf(equal, is_true, true_distance);
+      // Check if the object is a receiver type,
+      LoadMap(scratch, object);
+      cmpw(FieldOperand(scratch, Map::kInstanceTypeOffset),
+           Immediate(FIRST_JS_RECEIVER_TYPE));
+      JumpIf(less, is_false, false_distance);
+      // ... and is not undefined (undetectable) nor callable.
+      testl(FieldOperand(scratch, Map::kBitFieldOffset),
+            Immediate(Map::Bits1::IsUndetectableBit::kMask |
+                      Map::Bits1::IsCallableBit::kMask));
+      Branch(equal, is_true, true_distance, fallthrough_when_true, is_false,
+             false_distance, fallthrough_when_false);
+      return;
+    }
+    case LiteralFlag::kOther:
+      if (!fallthrough_when_false) {
+        Jump(is_false, false_distance);
+      }
+      return;
+  }
+  UNREACHABLE();
+}
+
 void MaglevAssembler::TruncateDoubleToInt32(Register dst, DoubleRegister src) {
   ZoneLabelRef done(this);
 
@@ -375,6 +482,8 @@ void MaglevAssembler::TruncateDoubleToInt32(Register dst, DoubleRegister src) {
       },
       src, dst, done);
   bind(*done);
+  // Zero extend the converted value to complete the truncation.
+  movl(dst, dst);
 }
 
 void MaglevAssembler::Prologue(Graph* graph) {
@@ -398,14 +507,6 @@ void MaglevAssembler::Prologue(Graph* graph) {
     Register flags = rcx;
     Register feedback_vector = r9;
 
-    // Load the feedback vector.
-    LoadTaggedPointerField(
-        feedback_vector,
-        FieldOperand(kJSFunctionRegister, JSFunction::kFeedbackCellOffset));
-    LoadTaggedPointerField(feedback_vector,
-                           FieldOperand(feedback_vector, Cell::kValueOffset));
-    AssertFeedbackVector(feedback_vector);
-
     DeferredCodeInfo* deferred_flags_need_processing = PushDeferredCode(
         [](MaglevAssembler* masm, Register flags, Register feedback_vector) {
           ASM_CODE_COMMENT_STRING(masm, "Optimized marker check");
@@ -417,6 +518,8 @@ void MaglevAssembler::Prologue(Graph* graph) {
         },
         flags, feedback_vector);
 
+    Move(feedback_vector,
+         compilation_info()->toplevel_compilation_unit()->feedback().object());
     LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
         flags, feedback_vector, CodeKind::MAGLEV,
         &deferred_flags_need_processing->deferred_code_label);
@@ -451,18 +554,21 @@ void MaglevAssembler::Prologue(Graph* graph) {
     ZoneLabelRef deferred_call_stack_guard_return(this);
     JumpToDeferredIf(
         below_equal,
-        [](MaglevAssembler* masm, ZoneLabelRef done, int max_stack_size) {
+        [](MaglevAssembler* masm, ZoneLabelRef done, RegList register_inputs,
+           int max_stack_size) {
           ASM_CODE_COMMENT_STRING(masm, "Stack/interrupt call");
-          // Save any registers that can be referenced by RegisterInput.
-          // TODO(leszeks): Only push those that are used by the graph.
-          __ PushAll(RegisterInput::kAllowedRegisters);
+          __ PushAll(register_inputs);
           // Push the frame size
           __ Push(Immediate(Smi::FromInt(max_stack_size)));
           __ CallRuntime(Runtime::kStackGuardWithGap, 1);
-          __ PopAll(RegisterInput::kAllowedRegisters);
+          auto safepoint =
+              masm->safepoint_table_builder()->DefineSafepoint(masm);
+          safepoint.DefineStackGuardSafepoint(register_inputs.Count());
+          __ PopAll(register_inputs);
           __ jmp(*done);
         },
-        deferred_call_stack_guard_return, max_stack_size);
+        deferred_call_stack_guard_return, graph->register_inputs(),
+        max_stack_size);
     bind(*deferred_call_stack_guard_return);
   }
 

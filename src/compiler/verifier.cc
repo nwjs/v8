@@ -1000,6 +1000,8 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
       CheckTypeIs(node, Type::BigInt());
       break;
     case IrOpcode::kSpeculativeBigIntEqual:
+    case IrOpcode::kSpeculativeBigIntLessThan:
+    case IrOpcode::kSpeculativeBigIntLessThanOrEqual:
       CheckTypeIs(node, Type::Boolean());
       break;
     case IrOpcode::kSpeculativeBigIntNegate:
@@ -1018,12 +1020,18 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
       CheckTypeIs(node, Type::BigInt());
       break;
     case IrOpcode::kBigIntEqual:
+    case IrOpcode::kBigIntLessThan:
+    case IrOpcode::kBigIntLessThanOrEqual:
       CheckValueInputIs(node, 0, Type::BigInt());
       CheckValueInputIs(node, 1, Type::BigInt());
       CheckTypeIs(node, Type::Boolean());
       break;
     case IrOpcode::kBigIntNegate:
       CheckValueInputIs(node, 0, Type::BigInt());
+      CheckTypeIs(node, Type::BigInt());
+      break;
+    case IrOpcode::kSpeculativeToBigInt:
+      CheckValueInputIs(node, 0, Type::Any());
       CheckTypeIs(node, Type::BigInt());
       break;
     case IrOpcode::kNumberAdd:
@@ -1569,6 +1577,7 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
     case IrOpcode::kCheckedInt64Mod:
     case IrOpcode::kAssertType:
     case IrOpcode::kVerifyType:
+    case IrOpcode::kCheckTurboshaftTypeOf:
       break;
     case IrOpcode::kDoubleArrayMin:
     case IrOpcode::kDoubleArrayMax:
@@ -1716,6 +1725,12 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
     case IrOpcode::kAssertNotNull:
     case IrOpcode::kWasmExternInternalize:
     case IrOpcode::kWasmExternExternalize:
+    case IrOpcode::kWasmStructGet:
+    case IrOpcode::kWasmStructSet:
+    case IrOpcode::kWasmArrayGet:
+    case IrOpcode::kWasmArraySet:
+    case IrOpcode::kWasmArrayLength:
+    case IrOpcode::kWasmArrayInitializeLength:
       // TODO(manoskouk): What are the constraints here?
       break;
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -1947,7 +1962,8 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
     case IrOpcode::kTraceInstruction:
 
 #define SIMD_MACHINE_OP_CASE(Name) case IrOpcode::k##Name:
-      MACHINE_SIMD_OP_LIST(SIMD_MACHINE_OP_CASE)
+      MACHINE_SIMD128_OP_LIST(SIMD_MACHINE_OP_CASE)
+      MACHINE_SIMD256_OP_LIST(SIMD_MACHINE_OP_CASE)
 #undef SIMD_MACHINE_OP_CASE
 
       // TODO(rossberg): Check.

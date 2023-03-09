@@ -38,6 +38,7 @@
 #include "src/baseline/baseline-batch-compiler.h"
 #include "src/builtins/accessors.h"
 #include "src/builtins/builtins-utils.h"
+#include "src/codegen/compilation-cache.h"
 #include "src/codegen/compiler.h"
 #include "src/codegen/cpu-features.h"
 #include "src/codegen/script-details.h"
@@ -64,7 +65,6 @@
 #include "src/handles/persistent-handles.h"
 #include "src/handles/shared-object-conveyor-handles.h"
 #include "src/handles/traced-handles.h"
-#include "src/heap/embedder-tracing.h"
 #include "src/heap/heap-inl.h"
 #include "src/heap/heap-write-barrier.h"
 #include "src/heap/safepoint.h"
@@ -2347,6 +2347,31 @@ Local<Value> Script::GetResourceName() {
       i::handle(i::Script::cast(sfi.script()).name(), i_isolate));
 }
 
+std::vector<int> Script::GetProducedCompileHints() const {
+  i::DisallowGarbageCollection no_gc;
+  i::Handle<i::JSFunction> func = Utils::OpenHandle(this);
+  i::Isolate* i_isolate = func->GetIsolate();
+  i::SharedFunctionInfo sfi = (*func).shared();
+  CHECK(sfi.script().IsScript());
+  i::Script script = i::Script::cast(sfi.script());
+  i::Object maybe_array_list = script.compiled_lazy_function_positions();
+  std::vector<int> result;
+  if (!maybe_array_list.IsUndefined(i_isolate)) {
+    i::ArrayList array_list = i::ArrayList::cast(maybe_array_list);
+    result.reserve(array_list.Length());
+    for (int i = 0; i < array_list.Length(); ++i) {
+      i::Object item = array_list.Get(i);
+      CHECK(item.IsSmi());
+      result.push_back(i::Smi::ToInt(item));
+    }
+    // Clear the data; the embedder can still request more data later, but it'll
+    // have to keep track of the original data itself.
+    script.set_compiled_lazy_function_positions(
+        i::ReadOnlyRoots(i_isolate).undefined_value());
+  }
+  return result;
+}
+
 // static
 Local<PrimitiveArray> PrimitiveArray::New(Isolate* v8_isolate, int length) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
@@ -2765,9 +2790,10 @@ MaybeLocal<Script> ScriptCompiler::Compile(Local<Context> context,
 MaybeLocal<Module> ScriptCompiler::CompileModule(
     Isolate* v8_isolate, Source* source, CompileOptions options,
     NoCacheReason no_cache_reason) {
-  Utils::ApiCheck(options == kNoCompileOptions || options == kConsumeCodeCache,
-                  "v8::ScriptCompiler::CompileModule",
-                  "Invalid CompileOptions");
+  Utils::ApiCheck(
+      options == kNoCompileOptions || options == kConsumeCodeCache ||
+          options == kProduceCompileHints,
+      "v8::ScriptCompiler::CompileModule", "Invalid CompileOptions");
   Utils::ApiCheck(source->GetResourceOptions().IsModule(),
                   "v8::ScriptCompiler::CompileModule",
                   "Invalid ScriptOrigin: is_module must be true");
@@ -2917,7 +2943,8 @@ void ScriptCompiler::ScriptStreamingTask::Run() { data_->task->Run(); }
 ScriptCompiler::ScriptStreamingTask* ScriptCompiler::StartStreaming(
     Isolate* v8_isolate, StreamedSource* source, v8::ScriptType type,
     CompileOptions options) {
-  Utils::ApiCheck(options == kNoCompileOptions || options == kEagerCompile,
+  Utils::ApiCheck(options == kNoCompileOptions || options == kEagerCompile ||
+                      options == kProduceCompileHints,
                   "v8::ScriptCompiler::StartStreaming",
                   "Invalid CompileOptions");
   if (!i::v8_flags.script_streaming) return nullptr;
@@ -6806,7 +6833,7 @@ Local<Context> NewContext(
   // TODO(jkummerow): This is for crbug.com/713699. Remove it if it doesn't
   // fail.
   // Sanity-check that the isolate is initialized and usable.
-  CHECK(i_isolate->builtins()->code(i::Builtin::kIllegal).IsCodeT());
+  CHECK(i_isolate->builtins()->code(i::Builtin::kIllegal).IsCode());
 
   TRACE_EVENT_CALL_STATS_SCOPED(i_isolate, "v8", "V8.NewContext");
   API_RCS_SCOPE(i_isolate, Context, New);
@@ -9073,21 +9100,6 @@ void Isolate::RemoveGCEpilogueCallback(GCCallback callback) {
   RemoveGCEpilogueCallback(CallGCCallbackWithoutData, data);
 }
 
-START_ALLOW_USE_DEPRECATED()
-
-void Isolate::SetEmbedderHeapTracer(EmbedderHeapTracer* tracer) {
-  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
-  CHECK_NULL(i_isolate->heap()->cpp_heap());
-  i_isolate->heap()->SetEmbedderHeapTracer(tracer);
-}
-
-EmbedderHeapTracer* Isolate::GetEmbedderHeapTracer() {
-  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
-  return i_isolate->heap()->GetEmbedderHeapTracer();
-}
-
-END_ALLOW_USE_DEPRECATED()
-
 void Isolate::SetEmbedderRootsHandler(EmbedderRootsHandler* handler) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
   i_isolate->heap()->SetEmbedderRootsHandler(handler);
@@ -9095,7 +9107,6 @@ void Isolate::SetEmbedderRootsHandler(EmbedderRootsHandler* handler) {
 
 void Isolate::AttachCppHeap(CppHeap* cpp_heap) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
-  CHECK_NULL(GetEmbedderHeapTracer());
   i_isolate->heap()->AttachCppHeap(cpp_heap);
 }
 
@@ -9858,6 +9869,7 @@ void Isolate::ClearCachesForTesting() {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
   i_isolate->AbortConcurrentOptimization(i::BlockingBehavior::kBlock);
   i_isolate->ClearSerializerData();
+  i_isolate->compilation_cache()->Clear();
 }
 
 void Isolate::EnableMemorySavingsMode() {
@@ -9929,7 +9941,7 @@ JSEntryStubs Isolate::GetJSEntryStubs() {
        {i::Builtin::kJSRunMicrotasksEntry,
         &entry_stubs.js_run_microtasks_entry_stub}}};
   for (auto& pair : stubs) {
-    i::CodeT js_entry = i_isolate->builtins()->code(pair.first);
+    i::Code js_entry = i_isolate->builtins()->code(pair.first);
     pair.second->code.start =
         reinterpret_cast<const void*>(js_entry.InstructionStart());
     pair.second->code.length_in_bytes = js_entry.InstructionSize();
@@ -9987,6 +9999,9 @@ CALLBACK_SETTER(WasmAsyncResolvePromiseCallback,
 
 CALLBACK_SETTER(WasmLoadSourceMapCallback, WasmLoadSourceMapCallback,
                 wasm_load_source_map_callback)
+
+CALLBACK_SETTER(WasmGCEnabledCallback, WasmGCEnabledCallback,
+                wasm_gc_enabled_callback)
 
 CALLBACK_SETTER(SharedArrayBufferConstructorEnabledCallback,
                 SharedArrayBufferConstructorEnabledCallback,
@@ -10914,72 +10929,6 @@ void HeapProfiler::SetGetDetachednessCallback(GetDetachednessCallback callback,
                                               void* data) {
   reinterpret_cast<i::HeapProfiler*>(this)->SetGetDetachednessCallback(callback,
                                                                        data);
-}
-
-void EmbedderHeapTracer::SetStackStart(void* stack_start) {
-  CHECK(v8_isolate_);
-  reinterpret_cast<i::Isolate*>(v8_isolate_)
-      ->heap()
-      ->SetStackStart(stack_start);
-}
-
-void EmbedderHeapTracer::FinalizeTracing() {
-  if (v8_isolate_) {
-    i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(v8_isolate_);
-    if (i_isolate->heap()->incremental_marking()->IsMarking()) {
-      i_isolate->heap()->FinalizeIncrementalMarkingAtomically(
-          i::GarbageCollectionReason::kExternalFinalize);
-    }
-  }
-}
-
-void EmbedderHeapTracer::IncreaseAllocatedSize(size_t bytes) {
-  if (v8_isolate_) {
-    i::LocalEmbedderHeapTracer* const tracer =
-        reinterpret_cast<i::Isolate*>(v8_isolate_)
-            ->heap()
-            ->local_embedder_heap_tracer();
-    DCHECK_NOT_NULL(tracer);
-    tracer->IncreaseAllocatedSize(bytes);
-  }
-}
-
-void EmbedderHeapTracer::DecreaseAllocatedSize(size_t bytes) {
-  if (v8_isolate_) {
-    i::LocalEmbedderHeapTracer* const tracer =
-        reinterpret_cast<i::Isolate*>(v8_isolate_)
-            ->heap()
-            ->local_embedder_heap_tracer();
-    DCHECK_NOT_NULL(tracer);
-    tracer->DecreaseAllocatedSize(bytes);
-  }
-}
-
-void EmbedderHeapTracer::RegisterEmbedderReference(
-    const BasicTracedReference<v8::Data>& ref) {
-  if (ref.IsEmpty()) return;
-
-  i::Heap* const heap = reinterpret_cast<i::Isolate*>(v8_isolate_)->heap();
-  heap->RegisterExternallyReferencedObject(
-      reinterpret_cast<i::Address*>(ref.val_));
-}
-
-void EmbedderHeapTracer::IterateTracedGlobalHandles(
-    TracedGlobalHandleVisitor* visitor) {
-  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(v8_isolate_);
-  i::DisallowGarbageCollection no_gc;
-  i_isolate->traced_handles()->Iterate(visitor);
-}
-
-
-bool EmbedderHeapTracer::IsRootForNonTracingGC(
-    const v8::TracedReference<v8::Value>& handle) {
-  return true;
-}
-
-void EmbedderHeapTracer::ResetHandleInNonTracingGC(
-    const v8::TracedReference<v8::Value>& handle) {
-  UNREACHABLE();
 }
 
 EmbedderStateScope::EmbedderStateScope(Isolate* v8_isolate,

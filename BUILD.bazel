@@ -68,6 +68,7 @@ load(":bazel/v8-non-pointer-compression.bzl", "v8_binary_non_pointer_compression
 # v8_enable_sandbox
 # cppgc_enable_caged_heap
 # cppgc_enable_check_assignments_in_prefinalizers
+# cppgc_enable_slim_write_barrier
 # cppgc_enable_object_names
 # cppgc_enable_pointer_compression
 # cppgc_enable_verify_heap
@@ -145,6 +146,8 @@ v8_flag(name = "v8_enable_verify_heap")
 v8_flag(name = "v8_enable_verify_predictable")
 
 v8_flag(name = "v8_enable_test_features")
+
+v8_flag(name = "v8_enable_turbofan")
 
 v8_flag(
     name = "v8_enable_webassembly",
@@ -320,6 +323,7 @@ v8_config(
         "v8_enable_snapshot_native_code_counters": "V8_SNAPSHOT_NATIVE_CODE_COUNTERS",
         "v8_enable_static_roots": "V8_STATIC_ROOTS",
         "v8_enable_trace_maps": "V8_TRACE_MAPS",
+        "v8_enable_turbofan": "V8_ENABLE_TURBOFAN",
         "v8_enable_v8_checks": "V8_ENABLE_CHECKS",
         "v8_enable_verify_csa": "ENABLE_VERIFY_CSA",
         "v8_enable_verify_heap": "VERIFY_HEAP",
@@ -861,6 +865,7 @@ filegroup(
         "src/builtins/string-html.tq",
         "src/builtins/string-includes.tq",
         "src/builtins/string-indexof.tq",
+        "src/builtins/string-iswellformed.tq",
         "src/builtins/string-iterator.tq",
         "src/builtins/string-match-search.tq",
         "src/builtins/string-pad.tq",
@@ -870,6 +875,7 @@ filegroup(
         "src/builtins/string-startswith.tq",
         "src/builtins/string-substr.tq",
         "src/builtins/string-substring.tq",
+        "src/builtins/string-towellformed.tq",
         "src/builtins/string-trim.tq",
         "src/builtins/symbol.tq",
         "src/builtins/torque-internal.tq",
@@ -1442,9 +1448,8 @@ filegroup(
         "src/heap/cppgc-js/unified-heap-marking-verifier.h",
         "src/heap/cppgc-js/unified-heap-marking-visitor.cc",
         "src/heap/cppgc-js/unified-heap-marking-visitor.h",
-        "src/heap/embedder-tracing.cc",
-        "src/heap/embedder-tracing.h",
-        "src/heap/embedder-tracing-inl.h",
+        "src/heap/cppgc-js/wrappable-info.h",
+        "src/heap/cppgc-js/wrappable-info-inl.h",
         "src/heap/evacuation-verifier.cc",
         "src/heap/evacuation-verifier.h",
         "src/heap/evacuation-verifier-inl.h",
@@ -2891,10 +2896,13 @@ filegroup(
         "src/compiler/state-values-utils.h",
         "src/compiler/store-store-elimination.cc",
         "src/compiler/store-store-elimination.h",
+        "src/compiler/turbofan-enabled.cc",
+        "src/compiler/turbofan.h",
         "src/compiler/turboshaft/assembler.cc",
         "src/compiler/turboshaft/assembler.h",
         "src/compiler/turboshaft/assert-types-reducer.h",
         "src/compiler/turboshaft/branch-elimination-reducer.h",
+        "src/compiler/turboshaft/dead-code-elimination-reducer.h",
         "src/compiler/turboshaft/decompression-optimization.cc",
         "src/compiler/turboshaft/decompression-optimization.h",
         "src/compiler/turboshaft/deopt-data.h",
@@ -2919,6 +2927,7 @@ filegroup(
         "src/compiler/turboshaft/optimization-phase.h",
         "src/compiler/turboshaft/recreate-schedule.cc",
         "src/compiler/turboshaft/recreate-schedule.h",
+        "src/compiler/turboshaft/reducer-traits.h",
         "src/compiler/turboshaft/representations.cc",
         "src/compiler/turboshaft/representations.h",
         "src/compiler/turboshaft/select-lowering-reducer.h",
@@ -2927,8 +2936,12 @@ filegroup(
         "src/compiler/turboshaft/simplify-tf-loops.h",
         "src/compiler/turboshaft/snapshot-table.h",
         "src/compiler/turboshaft/type-inference-reducer.h",
+        "src/compiler/turboshaft/type-parser.cc",
+        "src/compiler/turboshaft/type-parser.h",
+        "src/compiler/turboshaft/typed-optimizations-reducer.h",
         "src/compiler/turboshaft/types.cc",
         "src/compiler/turboshaft/types.h",
+        "src/compiler/turboshaft/uniform-reducer-adapter.h",
         "src/compiler/turboshaft/utils.cc",
         "src/compiler/turboshaft/utils.h",
         "src/compiler/turboshaft/value-numbering-reducer.h",
@@ -2955,11 +2968,15 @@ filegroup(
         ":is_v8_enable_webassembly": [
             "src/compiler/int64-lowering.cc",
             "src/compiler/int64-lowering.h",
+            "src/compiler/wasm-call-descriptors.cc",
+            "src/compiler/wasm-call-descriptors.h",
             "src/compiler/wasm-compiler-definitions.h",
             "src/compiler/wasm-compiler.cc",
             "src/compiler/wasm-compiler.h",
             "src/compiler/wasm-escape-analysis.cc",
             "src/compiler/wasm-escape-analysis.h",
+            "src/compiler/wasm-load-elimination.cc",
+            "src/compiler/wasm-load-elimination.h",
             "src/compiler/wasm-loop-peeling.cc",
             "src/compiler/wasm-loop-peeling.h",
             "src/compiler/wasm-gc-lowering.cc",
@@ -2998,6 +3015,7 @@ filegroup(
         "src/builtins/builtins-constructor.h",
         "src/builtins/builtins-conversion-gen.cc",
         "src/builtins/builtins-data-view-gen.h",
+        "src/builtins/builtins-data-view-gen.cc",
         "src/builtins/builtins-date-gen.cc",
         "src/builtins/builtins-generator-gen.cc",
         "src/builtins/builtins-global-gen.cc",
@@ -3183,16 +3201,16 @@ filegroup(
         # Note these cannot be v8_target_is_* selects because these contain
         # inline assembly that runs inside the executable. Since these are
         # linked directly into mksnapshot, they must use the actual target cpu.
-        "@v8//bazel/config:is_inline_asm_ia32": ["src/heap/base/asm/ia32/save_registers_asm.cc"],
-        "@v8//bazel/config:is_inline_asm_x64": ["src/heap/base/asm/x64/save_registers_asm.cc"],
-        "@v8//bazel/config:is_inline_asm_arm": ["src/heap/base/asm/arm/save_registers_asm.cc"],
-        "@v8//bazel/config:is_inline_asm_arm64": ["src/heap/base/asm/arm64/save_registers_asm.cc"],
-        "@v8//bazel/config:is_inline_asm_s390x": ["src/heap/base/asm/s390/save_registers_asm.cc"],
-        "@v8//bazel/config:is_inline_asm_riscv64": ["src/heap/base/asm/riscv64/save_registers_asm.cc"],
-        "@v8//bazel/config:is_inline_asm_ppc64le": ["src/heap/base/asm/ppc/save_registers_asm.cc"],
-        "@v8//bazel/config:is_msvc_asm_ia32": ["src/heap/base/asm/ia32/save_registers_masm.asm"],
-        "@v8//bazel/config:is_msvc_asm_x64": ["src/heap/base/asm/x64/save_registers_masm.asm"],
-        "@v8//bazel/config:is_msvc_asm_arm64": ["src/heap/base/asm/arm64/save_registers_masm.S"],
+        "@v8//bazel/config:is_inline_asm_ia32": ["src/heap/base/asm/ia32/push_registers_asm.cc"],
+        "@v8//bazel/config:is_inline_asm_x64": ["src/heap/base/asm/x64/push_registers_asm.cc"],
+        "@v8//bazel/config:is_inline_asm_arm": ["src/heap/base/asm/arm/push_registers_asm.cc"],
+        "@v8//bazel/config:is_inline_asm_arm64": ["src/heap/base/asm/arm64/push_registers_asm.cc"],
+        "@v8//bazel/config:is_inline_asm_s390x": ["src/heap/base/asm/s390/push_registers_asm.cc"],
+        "@v8//bazel/config:is_inline_asm_riscv64": ["src/heap/base/asm/riscv64/push_registers_asm.cc"],
+        "@v8//bazel/config:is_inline_asm_ppc64le": ["src/heap/base/asm/ppc/push_registers_asm.cc"],
+        "@v8//bazel/config:is_msvc_asm_ia32": ["src/heap/base/asm/ia32/push_registers_masm.asm"],
+        "@v8//bazel/config:is_msvc_asm_x64": ["src/heap/base/asm/x64/push_registers_masm.asm"],
+        "@v8//bazel/config:is_msvc_asm_arm64": ["src/heap/base/asm/arm64/push_registers_masm.S"],
     }),
 )
 
@@ -3248,6 +3266,8 @@ filegroup(
 filegroup(
     name = "v8_inspector_files",
     srcs = [
+        "src/inspector/crc32.cc",
+        "src/inspector/crc32.h",
         "src/inspector/custom-preview.cc",
         "src/inspector/custom-preview.h",
         "src/inspector/injected-script.cc",

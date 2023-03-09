@@ -63,8 +63,8 @@ class VerifyPointersVisitor : public ObjectVisitorWithCageBases,
   void VisitPointers(HeapObject host, MaybeObjectSlot start,
                      MaybeObjectSlot end) override;
   void VisitCodePointer(HeapObject host, CodeObjectSlot slot) override;
-  void VisitCodeTarget(Code host, RelocInfo* rinfo) override;
-  void VisitEmbeddedPointer(Code host, RelocInfo* rinfo) override;
+  void VisitCodeTarget(InstructionStream host, RelocInfo* rinfo) override;
+  void VisitEmbeddedPointer(InstructionStream host, RelocInfo* rinfo) override;
 
   void VisitRootPointers(Root root, const char* description,
                          FullObjectSlot start, FullObjectSlot end) override;
@@ -99,10 +99,9 @@ void VerifyPointersVisitor::VisitPointers(HeapObject host,
 
 void VerifyPointersVisitor::VisitCodePointer(HeapObject host,
                                              CodeObjectSlot slot) {
-  CHECK(V8_EXTERNAL_CODE_SPACE_BOOL);
   Object maybe_code = slot.load(code_cage_base());
   HeapObject code;
-  // The slot might contain smi during CodeDataContainer creation.
+  // The slot might contain smi during Code creation.
   if (maybe_code.GetHeapObject(&code)) {
     VerifyCodeObjectImpl(code);
   } else {
@@ -134,10 +133,10 @@ void VerifyPointersVisitor::VerifyHeapObjectImpl(HeapObject heap_object) {
 }
 
 void VerifyPointersVisitor::VerifyCodeObjectImpl(HeapObject heap_object) {
-  CHECK(V8_EXTERNAL_CODE_SPACE_BOOL);
   CHECK(IsValidCodeObject(heap_, heap_object));
   CHECK(heap_object.map(cage_base()).IsMap());
-  CHECK(heap_object.map(cage_base()).instance_type() == CODE_TYPE);
+  CHECK(heap_object.map(cage_base()).instance_type() ==
+        INSTRUCTION_STREAM_TYPE);
 }
 
 template <typename TSlot>
@@ -165,12 +164,15 @@ void VerifyPointersVisitor::VerifyPointers(HeapObject host,
   VerifyPointersImpl(start, end);
 }
 
-void VerifyPointersVisitor::VisitCodeTarget(Code host, RelocInfo* rinfo) {
-  Code target = Code::GetCodeFromTargetAddress(rinfo->target_address());
+void VerifyPointersVisitor::VisitCodeTarget(InstructionStream host,
+                                            RelocInfo* rinfo) {
+  InstructionStream target =
+      InstructionStream::GetCodeFromTargetAddress(rinfo->target_address());
   VerifyHeapObjectImpl(target);
 }
 
-void VerifyPointersVisitor::VisitEmbeddedPointer(Code host, RelocInfo* rinfo) {
+void VerifyPointersVisitor::VisitEmbeddedPointer(InstructionStream host,
+                                                 RelocInfo* rinfo) {
   VerifyHeapObjectImpl(rinfo->target_object(cage_base()));
 }
 
@@ -350,8 +352,7 @@ void HeapVerification::VerifyPage(const BasicMemoryChunk* chunk) {
   CHECK(!current_chunk_.has_value());
   CHECK(!chunk->IsFlagSet(Page::PAGE_NEW_OLD_PROMOTION));
   CHECK(!chunk->IsFlagSet(Page::PAGE_NEW_NEW_PROMOTION));
-  CHECK(!chunk->IsFlagSet(Page::SHARED_HEAP_PROMOTION));
-  if (chunk->InReadOnlySpace()) {
+  if (V8_SHARED_RO_HEAP_BOOL && chunk->InReadOnlySpace()) {
     CHECK_NULL(chunk->owner());
   } else {
     CHECK_EQ(chunk->heap(), heap());
@@ -486,15 +487,15 @@ class SlotVerifyingVisitor : public ObjectVisitorWithCageBases {
   }
 
   void VisitCodePointer(HeapObject host, CodeObjectSlot slot) override {
-    CHECK(V8_EXTERNAL_CODE_SPACE_BOOL);
     if (ShouldHaveBeenRecorded(
             host, MaybeObject::FromObject(slot.load(code_cage_base())))) {
       CHECK_GT(untyped_->count(slot.address()), 0);
     }
   }
 
-  void VisitCodeTarget(Code host, RelocInfo* rinfo) override {
-    Object target = Code::GetCodeFromTargetAddress(rinfo->target_address());
+  void VisitCodeTarget(InstructionStream host, RelocInfo* rinfo) override {
+    Object target =
+        InstructionStream::GetCodeFromTargetAddress(rinfo->target_address());
     if (ShouldHaveBeenRecorded(host, MaybeObject::FromObject(target))) {
       CHECK(InTypedSet(SlotType::kCodeEntry, rinfo->pc()) ||
             (rinfo->IsInConstantPool() &&
@@ -503,7 +504,7 @@ class SlotVerifyingVisitor : public ObjectVisitorWithCageBases {
     }
   }
 
-  void VisitEmbeddedPointer(Code host, RelocInfo* rinfo) override {
+  void VisitEmbeddedPointer(InstructionStream host, RelocInfo* rinfo) override {
     Object target = rinfo->target_object(cage_base());
     if (ShouldHaveBeenRecorded(host, MaybeObject::FromObject(target))) {
       CHECK(InTypedSet(SlotType::kEmbeddedObjectFull, rinfo->pc()) ||
@@ -622,9 +623,11 @@ class SlotCollectingVisitor final : public ObjectVisitor {
 #endif
   }
 
-  void VisitCodeTarget(Code host, RelocInfo* rinfo) final { UNREACHABLE(); }
+  void VisitCodeTarget(InstructionStream host, RelocInfo* rinfo) final {
+    UNREACHABLE();
+  }
 
-  void VisitEmbeddedPointer(Code host, RelocInfo* rinfo) override {
+  void VisitEmbeddedPointer(InstructionStream host, RelocInfo* rinfo) override {
     UNREACHABLE();
   }
 
