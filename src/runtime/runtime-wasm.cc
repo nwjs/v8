@@ -261,7 +261,6 @@ RUNTIME_FUNCTION(Runtime_WasmCompileLazy) {
 
 RUNTIME_FUNCTION(Runtime_WasmAllocateFeedbackVector) {
   ClearThreadInWasmScope wasm_flag(isolate);
-  DCHECK(v8_flags.wasm_speculative_inlining);
   HandleScope scope(isolate);
   DCHECK_EQ(3, args.length());
   Handle<WasmInstanceObject> instance(WasmInstanceObject::cast(args[0]),
@@ -270,6 +269,7 @@ RUNTIME_FUNCTION(Runtime_WasmAllocateFeedbackVector) {
   wasm::NativeModule** native_module_stack_slot =
       reinterpret_cast<wasm::NativeModule**>(args.address_of_arg_at(2));
   wasm::NativeModule* native_module = instance->module_object().native_module();
+  DCHECK(native_module->enabled_features().has_inlining());
   // We have to save the native_module on the stack, in case the allocation
   // triggers a GC and we need the module to scan LiftoffSetupFrame stack frame.
   *native_module_stack_slot = native_module;
@@ -279,8 +279,11 @@ RUNTIME_FUNCTION(Runtime_WasmAllocateFeedbackVector) {
 
   const wasm::WasmModule* module = native_module->module();
   int func_index = declared_func_index + module->num_imported_functions;
-  Handle<FixedArray> vector = isolate->factory()->NewFixedArrayWithZeroes(
-      NumFeedbackSlots(module, func_index));
+  int num_slots = native_module->enabled_features().has_inlining()
+                      ? NumFeedbackSlots(module, func_index)
+                      : 0;
+  Handle<FixedArray> vector =
+      isolate->factory()->NewFixedArrayWithZeroes(num_slots);
   DCHECK_EQ(instance->feedback_vectors().get(declared_func_index), Smi::zero());
   instance->feedback_vectors().set(declared_func_index, *vector);
   return *vector;
@@ -295,7 +298,7 @@ void ReplaceWrapper(Isolate* isolate, Handle<WasmInstanceObject> instance,
           .ToHandleChecked();
   Handle<WasmExternalFunction> exported_function =
       handle(WasmExternalFunction::cast(internal->external()), isolate);
-  exported_function->set_code(*wrapper_code, kReleaseStore);
+  exported_function->set_code(*wrapper_code);
   WasmExportedFunctionData function_data =
       exported_function->shared().wasm_exported_function_data();
   function_data.set_wrapper_code(*wrapper_code);
@@ -793,19 +796,23 @@ RUNTIME_FUNCTION(Runtime_WasmArrayNewSegment) {
         instance->data_segment_starts().get(segment_index) + offset;
     return *isolate->factory()->NewWasmArrayFromMemory(length, rtt, source);
   } else {
-    const wasm::WasmElemSegment* elem_segment =
+    Handle<Object> elem_segment_raw =
+        handle(instance->element_segments().get(segment_index), isolate);
+    const wasm::WasmElemSegment* module_elem_segment =
         &instance->module()->elem_segments[segment_index];
-    if (!base::IsInBounds<size_t>(
-            offset, length,
-            instance->dropped_elem_segments().get(segment_index)
-                ? 0
-                : elem_segment->entries.size())) {
+    // If the segment is initialized in the instance, we have to get its length
+    // from there, as it might have been dropped. If the segment is
+    // uninitialized, we need to fetch its length from the module.
+    int segment_length =
+        elem_segment_raw->IsFixedArray()
+            ? Handle<FixedArray>::cast(elem_segment_raw)->length()
+            : module_elem_segment->element_count;
+    if (!base::IsInBounds<size_t>(offset, length, segment_length)) {
       return ThrowWasmError(
           isolate, MessageTemplate::kWasmTrapElementSegmentOutOfBounds);
     }
-
     Handle<Object> result = isolate->factory()->NewWasmArrayFromElementSegment(
-        instance, elem_segment, offset, length, rtt);
+        instance, segment_index, offset, length, rtt);
     if (result->IsSmi()) {
       return ThrowWasmError(
           isolate, static_cast<MessageTemplate>(result->ToSmi().value()));
@@ -951,7 +958,7 @@ RUNTIME_FUNCTION(Runtime_WasmStringNewWtf8) {
   if (utf8_variant == unibrow::Utf8Variant::kUtf8NoTrap) {
     DCHECK(!isolate->has_pending_exception());
     if (result_string.is_null()) {
-      return *isolate->factory()->null_value();
+      return *isolate->factory()->wasm_null();
     }
     return *result_string.ToHandleChecked();
   }
@@ -976,7 +983,7 @@ RUNTIME_FUNCTION(Runtime_WasmStringNewWtf8Array) {
   if (utf8_variant == unibrow::Utf8Variant::kUtf8NoTrap) {
     DCHECK(!isolate->has_pending_exception());
     if (result_string.is_null()) {
-      return *isolate->factory()->null_value();
+      return *isolate->factory()->wasm_null();
     }
     return *result_string.ToHandleChecked();
   }
@@ -1369,16 +1376,43 @@ RUNTIME_FUNCTION(Runtime_WasmStringCompare) {
   Handle<String> lhs(String::cast(args[0]), isolate);
   Handle<String> rhs(String::cast(args[1]), isolate);
   ComparisonResult result = String::Compare(isolate, lhs, rhs);
-  switch (result) {
-    case ComparisonResult::kEqual:
-      return Smi::FromInt(0);
-    case ComparisonResult::kGreaterThan:
-      return Smi::FromInt(1);
-    case ComparisonResult::kLessThan:
-      return Smi::FromInt(-1);
-    case ComparisonResult::kUndefined:
-      UNREACHABLE();
+  DCHECK_NE(result, ComparisonResult::kUndefined);
+  return Smi::FromInt(static_cast<int>(result));
+}
+
+RUNTIME_FUNCTION(Runtime_WasmStringFromCodePoint) {
+  ClearThreadInWasmScope flag_scope(isolate);
+  DCHECK_EQ(1, args.length());
+  HandleScope scope(isolate);
+
+  uint32_t code_point = NumberToUint32(args[0]);
+  if (code_point <= unibrow::Utf16::kMaxNonSurrogateCharCode) {
+    return *isolate->factory()->LookupSingleCharacterStringFromCode(code_point);
   }
+  if (code_point > 0x10FFFF) {
+    return ThrowWasmError(isolate, MessageTemplate::kInvalidCodePoint,
+                          handle(args[0], isolate));
+  }
+
+  base::uc16 char_buffer[] = {
+      unibrow::Utf16::LeadSurrogate(code_point),
+      unibrow::Utf16::TrailSurrogate(code_point),
+  };
+  Handle<SeqTwoByteString> result =
+      isolate->factory()
+          ->NewRawTwoByteString(arraysize(char_buffer))
+          .ToHandleChecked();
+  DisallowGarbageCollection no_gc;
+  CopyChars(result->GetChars(no_gc), char_buffer, arraysize(char_buffer));
+  return *result;
+}
+
+RUNTIME_FUNCTION(Runtime_WasmStringHash) {
+  ClearThreadInWasmScope flag_scope(isolate);
+  DCHECK_EQ(1, args.length());
+  String string(String::cast(args[0]));
+  uint32_t hash = string.EnsureHash();
+  return Smi::FromInt(static_cast<int>(hash));
 }
 
 }  // namespace internal

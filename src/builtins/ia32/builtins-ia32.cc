@@ -45,6 +45,8 @@ void Builtins::Generate_Adaptor(MacroAssembler* masm, Address address) {
 
 namespace {
 
+constexpr int kReceiverOnStackSize = kSystemPointerSize;
+
 enum class ArgumentsElementType {
   kRaw,    // Push arguments as they are.
   kHandle  // Dereference arguments before pushing.
@@ -99,7 +101,7 @@ void Generate_JSBuiltinsConstructStubHelper(MacroAssembler* masm) {
     // InvokeFunction.
 
     // Set up pointer to first argument (skip receiver).
-    __ lea(esi, Operand(ebp, StandardFrameConstants::kCallerSPOffset +
+    __ lea(esi, Operand(ebp, StandardFrameConstants::kFixedFrameSizeAboveFp +
                                  kSystemPointerSize));
     // Copy arguments to the expression stack.
     // esi: Pointer to start of arguments.
@@ -125,8 +127,8 @@ void Generate_JSBuiltinsConstructStubHelper(MacroAssembler* masm) {
   }
 
   // Remove caller arguments from the stack and return.
-  __ DropArguments(edx, ecx, TurboAssembler::kCountIsSmi,
-                   TurboAssembler::kCountIncludesReceiver);
+  __ DropArguments(edx, ecx, MacroAssembler::kCountIsSmi,
+                   MacroAssembler::kCountIncludesReceiver);
   __ ret(0);
 
   __ bind(&stack_overflow);
@@ -215,7 +217,7 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
   __ movd(xmm0, eax);
 
   // Set up pointer to first argument (skip receiver).
-  __ lea(edi, Operand(ebp, StandardFrameConstants::kCallerSPOffset +
+  __ lea(edi, Operand(ebp, StandardFrameConstants::kFixedFrameSizeAboveFp +
                                kSystemPointerSize));
 
   // Restore argument count.
@@ -280,8 +282,8 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
   __ LeaveFrame(StackFrame::CONSTRUCT);
 
   // Remove caller arguments from the stack and return.
-  __ DropArguments(edx, ecx, TurboAssembler::kCountIsSmi,
-                   TurboAssembler::kCountIncludesReceiver);
+  __ DropArguments(edx, ecx, MacroAssembler::kCountIsSmi,
+                   MacroAssembler::kCountIncludesReceiver);
   __ ret(0);
 
   // Otherwise we do a smi check and fall through to check if the return value
@@ -369,8 +371,8 @@ void Generate_JSEntryVariant(MacroAssembler* masm, StackFrame::Type type,
 
   // Clear c_entry_fp, now we've pushed its previous value to the stack.
   // If the c_entry_fp is not already zero and we don't clear it, the
-  // SafeStackFrameIterator will assume we are executing C++ and miss the JS
-  // frames on top.
+  // StackFrameIteratorForProfiler will assume we are executing C++ and miss the
+  // JS frames on top.
   __ mov(__ ExternalReferenceAsOperand(c_entry_fp, edi), Immediate(0));
 
   // Store the context address in the previously-reserved slot.
@@ -768,8 +770,8 @@ static void LeaveInterpreterFrame(MacroAssembler* masm, Register scratch1,
   __ leave();
 
   // Drop receiver + arguments.
-  __ DropArguments(params_size, scratch2, TurboAssembler::kCountIsBytes,
-                   TurboAssembler::kCountIncludesReceiver);
+  __ DropArguments(params_size, scratch2, MacroAssembler::kCountIsBytes,
+                   MacroAssembler::kCountIncludesReceiver);
 }
 
 // Advance the current bytecode offset. This simulates what all bytecode
@@ -1810,8 +1812,8 @@ void Builtins::Generate_FunctionPrototypeApply(MacroAssembler* masm) {
     }
     __ bind(&no_this_arg);
     __ DropArgumentsAndPushNewReceiver(eax, edi, ecx,
-                                       TurboAssembler::kCountIsInteger,
-                                       TurboAssembler::kCountIncludesReceiver);
+                                       MacroAssembler::kCountIsInteger,
+                                       MacroAssembler::kCountIncludesReceiver);
 
     // Restore receiver to edi.
     __ movd(edi, xmm0);
@@ -1919,8 +1921,8 @@ void Builtins::Generate_ReflectApply(MacroAssembler* masm) {
     __ movd(xmm0, edx);
 
     __ DropArgumentsAndPushNewReceiver(eax, ecx, edx,
-                                       TurboAssembler::kCountIsInteger,
-                                       TurboAssembler::kCountIncludesReceiver);
+                                       MacroAssembler::kCountIsInteger,
+                                       MacroAssembler::kCountIncludesReceiver);
 
     // Restore argumentsList.
     __ movd(edx, xmm0);
@@ -1978,8 +1980,8 @@ void Builtins::Generate_ReflectConstruct(MacroAssembler* masm) {
 
     __ DropArgumentsAndPushNewReceiver(
         eax, masm->RootAsOperand(RootIndex::kUndefinedValue), ecx,
-        TurboAssembler::kCountIsInteger,
-        TurboAssembler::kCountIncludesReceiver);
+        MacroAssembler::kCountIsInteger,
+        MacroAssembler::kCountIncludesReceiver);
 
     // Restore argumentsList.
     __ movd(ecx, xmm0);
@@ -3011,6 +3013,10 @@ void Builtins::Generate_WasmOnStackReplace(MacroAssembler* masm) {
 
 void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
                                ArgvMode argv_mode, bool builtin_exit_frame) {
+  CHECK(result_size == 1 || result_size == 2);
+
+  using ER = ExternalReference;
+
   // eax: number of arguments including receiver
   // edx: pointer to C function
   // ebp: frame pointer  (restored after C call)
@@ -3031,31 +3037,27 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
                      kRuntimeCallFunctionRegister, kContextRegister,
                      kJSFunctionRegister, kRootRegister));
 
-  // Reserve space on the stack for the three arguments passed to the call. If
-  // result size is greater than can be returned in registers, also reserve
-  // space for the hidden argument for the result location, and space for the
-  // result itself.
-  int arg_stack_space = 3;
+  static constexpr int kReservedStackSlots = 3;
+  __ EnterExitFrame(
+      kReservedStackSlots,
+      builtin_exit_frame ? StackFrame::BUILTIN_EXIT : StackFrame::EXIT, edi);
 
-  // Enter the exit frame that transitions from JavaScript to C++.
+  // Set up argv in a callee-saved register. It is reused below so it must be
+  // retained across the C call.
+  static constexpr Register kArgvRegister = edi;
   if (argv_mode == ArgvMode::kRegister) {
-    DCHECK(!builtin_exit_frame);
-    __ EnterApiExitFrame(arg_stack_space, edi);
-
-    // Move argc and argv into the correct registers.
-    __ mov(esi, ecx);
-    __ mov(edi, eax);
+    __ mov(kArgvRegister, ecx);
   } else {
-    __ EnterExitFrame(arg_stack_space, builtin_exit_frame
-                                           ? StackFrame::BUILTIN_EXIT
-                                           : StackFrame::EXIT);
+    int offset =
+        StandardFrameConstants::kFixedFrameSizeAboveFp - kReceiverOnStackSize;
+    __ lea(kArgvRegister, Operand(ebp, eax, times_system_pointer_size, offset));
   }
 
   // edx: pointer to C function
   // ebp: frame pointer  (restored after C call)
   // esp: stack pointer  (restored after C call)
-  // edi: number of arguments including receiver  (C callee-saved)
-  // esi: pointer to the first argument (C callee-saved)
+  // eax: number of arguments including receiver
+  // edi: pointer to the first argument (C callee-saved)
 
   // Result returned in eax, or eax+edx if result size is 2.
 
@@ -3064,9 +3066,10 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
     __ CheckStackAlignment();
   }
   // Call C function.
-  __ mov(Operand(esp, 0 * kSystemPointerSize), edi);  // argc.
-  __ mov(Operand(esp, 1 * kSystemPointerSize), esi);  // argv.
-  __ Move(ecx, Immediate(ExternalReference::isolate_address(masm->isolate())));
+  static_assert(kReservedStackSlots == 3);
+  __ mov(Operand(esp, 0 * kSystemPointerSize), eax);            // argc.
+  __ mov(Operand(esp, 1 * kSystemPointerSize), kArgvRegister);  // argv.
+  __ Move(ecx, Immediate(ER::isolate_address(masm->isolate())));
   __ mov(Operand(esp, 2 * kSystemPointerSize), ecx);
   __ call(kRuntimeCallFunctionRegister);
 
@@ -3083,8 +3086,8 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
     __ push(edx);
     __ LoadRoot(edx, RootIndex::kTheHoleValue);
     Label okay;
-    ExternalReference pending_exception_address = ExternalReference::Create(
-        IsolateAddressId::kPendingExceptionAddress, masm->isolate());
+    ER pending_exception_address =
+        ER::Create(IsolateAddressId::kPendingExceptionAddress, masm->isolate());
     __ cmp(edx, __ ExternalReferenceAsOperand(pending_exception_address, ecx));
     // Cannot use check here as it attempts to generate call into runtime.
     __ j(equal, &okay, Label::kNear);
@@ -3093,34 +3096,37 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
     __ pop(edx);
   }
 
-  // Exit the JavaScript to C++ exit frame.
-  __ LeaveExitFrame(argv_mode == ArgvMode::kStack);
+  __ LeaveExitFrame(esi);
+  if (argv_mode == ArgvMode::kStack) {
+    // Drop arguments and the receiver from the caller stack.
+    DCHECK(!AreAliased(esi, kArgvRegister));
+    __ PopReturnAddressTo(ecx);
+    __ lea(esp, Operand(kArgvRegister, kReceiverOnStackSize));
+    __ PushReturnAddressFrom(ecx);
+  }
   __ ret(0);
 
   // Handling of exception.
   __ bind(&exception_returned);
 
-  ExternalReference pending_handler_context_address = ExternalReference::Create(
+  ER pending_handler_context_address = ER::Create(
       IsolateAddressId::kPendingHandlerContextAddress, masm->isolate());
-  ExternalReference pending_handler_entrypoint_address =
-      ExternalReference::Create(
-          IsolateAddressId::kPendingHandlerEntrypointAddress, masm->isolate());
-  ExternalReference pending_handler_fp_address = ExternalReference::Create(
-      IsolateAddressId::kPendingHandlerFPAddress, masm->isolate());
-  ExternalReference pending_handler_sp_address = ExternalReference::Create(
-      IsolateAddressId::kPendingHandlerSPAddress, masm->isolate());
+  ER pending_handler_entrypoint_address = ER::Create(
+      IsolateAddressId::kPendingHandlerEntrypointAddress, masm->isolate());
+  ER pending_handler_fp_address =
+      ER::Create(IsolateAddressId::kPendingHandlerFPAddress, masm->isolate());
+  ER pending_handler_sp_address =
+      ER::Create(IsolateAddressId::kPendingHandlerSPAddress, masm->isolate());
 
   // Ask the runtime for help to determine the handler. This will set eax to
   // contain the current pending exception, don't clobber it.
-  ExternalReference find_handler =
-      ExternalReference::Create(Runtime::kUnwindAndFindExceptionHandler);
+  ER find_handler = ER::Create(Runtime::kUnwindAndFindExceptionHandler);
   {
     FrameScope scope(masm, StackFrame::MANUAL);
     __ PrepareCallCFunction(3, eax);
     __ mov(Operand(esp, 0 * kSystemPointerSize), Immediate(0));  // argc.
     __ mov(Operand(esp, 1 * kSystemPointerSize), Immediate(0));  // argv.
-    __ Move(esi,
-            Immediate(ExternalReference::isolate_address(masm->isolate())));
+    __ Move(esi, Immediate(ER::isolate_address(masm->isolate())));
     __ mov(Operand(esp, 2 * kSystemPointerSize), esi);
     __ CallCFunction(find_handler, 3);
   }
@@ -3140,8 +3146,8 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
   __ bind(&skip);
 
   // Clear c_entry_fp, like we do in `LeaveExitFrame`.
-  ExternalReference c_entry_fp_address = ExternalReference::Create(
-      IsolateAddressId::kCEntryFPAddress, masm->isolate());
+  ER c_entry_fp_address =
+      ER::Create(IsolateAddressId::kCEntryFPAddress, masm->isolate());
   __ mov(__ ExternalReferenceAsOperand(c_entry_fp_address, esi), Immediate(0));
 
   // Compute the handler entry address and jump to it.
@@ -3259,7 +3265,7 @@ Operand ApiParameterOperand(int index) {
 // stores the pointer to the reserved slot into esi.
 void PrepareCallApiFunction(MacroAssembler* masm, int argc, Register scratch) {
   ASM_CODE_COMMENT(masm);
-  __ EnterApiExitFrame(argc, scratch);
+  __ EnterExitFrame(argc, StackFrame::EXIT, scratch);
   if (v8_flags.debug_code) {
     __ mov(esi, Immediate(base::bit_cast<int32_t>(kZapValue)));
   }
@@ -3325,7 +3331,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
     DCHECK_EQ(stack_space, 0);
     __ mov(edx, *stack_space_operand);
   }
-  __ LeaveApiExitFrame();
+  __ LeaveExitFrame(esi);
 
   // Check if the function scheduled an exception.
   ExternalReference scheduled_exception_address =
@@ -3514,7 +3520,7 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
   ExternalReference thunk_ref = ExternalReference::invoke_function_callback();
 
   // There are two stack slots above the arguments we constructed on the stack:
-  // the stored ebp (pushed by EnterApiExitFrame), and the return address.
+  // the stored ebp (pushed by EnterExitFrame), and the return address.
   static constexpr int kStackSlotsAboveFCA = 2;
   Operand return_value_operand(
       ebp,

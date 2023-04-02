@@ -280,9 +280,9 @@ void WasmTableObject::SetFunctionTableEntry(Isolate* isolate,
                                             Handle<FixedArray> entries,
                                             int entry_index,
                                             Handle<Object> entry) {
-  if (entry->IsNull(isolate)) {
+  if (entry->IsWasmNull(isolate)) {
     ClearDispatchTables(isolate, table, entry_index);  // Degenerate case.
-    entries->set(entry_index, ReadOnlyRoots(isolate).null_value());
+    entries->set(entry_index, ReadOnlyRoots(isolate).wasm_null());
     return;
   }
   Handle<Object> external =
@@ -307,6 +307,7 @@ void WasmTableObject::SetFunctionTableEntry(Isolate* isolate,
   entries->set(entry_index, *entry);
 }
 
+// TODO(manoskouk): Does this need to be handlified?
 void WasmTableObject::Set(Isolate* isolate, Handle<WasmTableObject> table,
                           uint32_t index, Handle<Object> entry) {
   // Callers need to perform bounds checks, type check, and error handling.
@@ -362,7 +363,7 @@ Handle<Object> WasmTableObject::Get(Isolate* isolate,
 
   Handle<Object> entry(entries->get(entry_index), isolate);
 
-  if (entry->IsNull(isolate)) {
+  if (entry->IsWasmNull(isolate)) {
     return entry;
   }
 
@@ -598,7 +599,7 @@ void WasmTableObject::GetFunctionTableEntry(
   *is_valid = true;
   Handle<Object> element(table->entries().get(entry_index), isolate);
 
-  *is_null = element->IsNull(isolate);
+  *is_null = element->IsWasmNull(isolate);
   if (*is_null) return;
 
   if (element->IsWasmInternalFunction()) {
@@ -1150,10 +1151,7 @@ Handle<WasmInstanceObject> WasmInstanceObject::New(
       FixedUInt32Array::New(isolate, num_data_segments);
   instance->set_data_segment_sizes(*data_segment_sizes);
 
-  int num_elem_segments = static_cast<int>(module->elem_segments.size());
-  Handle<FixedUInt8Array> dropped_elem_segments =
-      FixedUInt8Array::New(isolate, num_elem_segments);
-  instance->set_dropped_elem_segments(*dropped_elem_segments);
+  instance->set_element_segments(*isolate->factory()->empty_fixed_array());
 
   Handle<FixedArray> imported_function_refs =
       isolate->factory()->NewFixedArray(num_imported_functions);
@@ -1206,7 +1204,6 @@ Handle<WasmInstanceObject> WasmInstanceObject::New(
   }
 
   InitDataSegmentArrays(instance, module_object);
-  InitElemSegmentArrays(instance, module_object);
 
   return instance;
 }
@@ -1237,20 +1234,6 @@ void WasmInstanceObject::InitDataSegmentArrays(
     // behavior.
     instance->data_segment_sizes().set(
         static_cast<int>(i), segment.active ? 0 : source_bytes.length());
-  }
-}
-
-void WasmInstanceObject::InitElemSegmentArrays(
-    Handle<WasmInstanceObject> instance,
-    Handle<WasmModuleObject> module_object) {
-  auto module = module_object->module();
-  auto num_elem_segments = module->elem_segments.size();
-  for (size_t i = 0; i < num_elem_segments; ++i) {
-    instance->dropped_elem_segments().set(
-        static_cast<int>(i), module->elem_segments[i].status ==
-                                     wasm::WasmElemSegment::kStatusDeclarative
-                                 ? 1
-                                 : 0);
   }
 }
 
@@ -1323,11 +1306,37 @@ bool WasmInstanceObject::CopyTableEntries(Isolate* isolate,
 base::Optional<MessageTemplate> WasmInstanceObject::InitTableEntries(
     Isolate* isolate, Handle<WasmInstanceObject> instance, uint32_t table_index,
     uint32_t segment_index, uint32_t dst, uint32_t src, uint32_t count) {
-  // Note that this implementation just calls through to module instantiation.
-  // This is intentional, so that the runtime only depends on the object
-  // methods, and not the module instantiation logic.
-  return wasm::LoadElemSegment(isolate, instance, table_index, segment_index,
-                               dst, src, count);
+  AccountingAllocator allocator;
+  // This {Zone} will be used only by the temporary WasmFullDecoder allocated
+  // down the line from this call. Therefore it is safe to stack-allocate it
+  // here.
+  Zone zone(&allocator, "LoadElemSegment");
+
+  Handle<WasmTableObject> table_object = handle(
+      WasmTableObject::cast(instance->tables().get(table_index)), isolate);
+
+  // If needed, try to lazily initialize the element segment.
+  base::Optional<MessageTemplate> opt_error =
+      wasm::InitializeElementSegment(&zone, isolate, instance, segment_index);
+  if (opt_error.has_value()) return opt_error;
+
+  Handle<FixedArray> elem_segment =
+      handle(FixedArray::cast(instance->element_segments().get(segment_index)),
+             isolate);
+  if (!base::IsInBounds<uint64_t>(dst, count, table_object->current_length())) {
+    return {MessageTemplate::kWasmTrapTableOutOfBounds};
+  }
+  if (!base::IsInBounds<uint64_t>(src, count, elem_segment->length())) {
+    return {MessageTemplate::kWasmTrapElementSegmentOutOfBounds};
+  }
+
+  for (size_t i = 0; i < count; i++) {
+    WasmTableObject::Set(
+        isolate, table_object, static_cast<int>(dst + i),
+        handle(elem_segment->get(static_cast<int>(src + i)), isolate));
+  }
+
+  return {};
 }
 
 MaybeHandle<WasmInternalFunction> WasmInstanceObject::GetWasmInternalFunction(
@@ -1608,7 +1617,6 @@ Handle<WasmTagObject> WasmTagObject::New(Isolate* isolate,
   return tag_wrapper;
 }
 
-// TODO(7748): Integrate this with type canonicalization.
 bool WasmTagObject::MatchesSignature(uint32_t expected_canonical_type_index) {
   return wasm::GetWasmEngine()->type_canonicalizer()->IsCanonicalSubtype(
       this->canonical_type_index(), expected_canonical_type_index);
@@ -1891,8 +1899,6 @@ Handle<WasmCapiFunction> WasmCapiFunction::New(
   // call target (which is an address pointing into the C++ binary).
   call_target = ExternalReference::Create(call_target).address();
 
-  // TODO(7748): Support proper typing for external functions. That requires
-  // global (cross-module) canonicalization of signatures/RTTs.
   Handle<Map> rtt = isolate->factory()->wasm_internal_function_map();
   Handle<WasmCapiFunctionData> fun_data =
       isolate->factory()->NewWasmCapiFunctionData(
@@ -2065,8 +2071,6 @@ Handle<WasmJSFunction> WasmJSFunction::New(Isolate* isolate,
   }
 
   Factory* factory = isolate->factory();
-  // TODO(7748): Support proper typing for external functions. That requires
-  // global (cross-module) canonicalization of signatures/RTTs.
   Handle<Map> rtt = factory->wasm_internal_function_map();
   Handle<WasmJSFunctionData> function_data = factory->NewWasmJSFunctionData(
       call_target, callable, return_count, parameter_count, serialized_sig,
@@ -2249,7 +2253,10 @@ MaybeHandle<Object> JSToWasmObject(Isolate* isolate, Handle<Object> value,
         *error_message = "stringview_iter has no JS representation";
         return {};
       default:
-        return value;
+        bool is_extern_subtype =
+            expected_canonical.heap_representation() == HeapType::kExtern ||
+            expected_canonical.heap_representation() == HeapType::kNoExtern;
+        return is_extern_subtype ? value : isolate->factory()->wasm_null();
     }
   }
 
@@ -2413,6 +2420,51 @@ MaybeHandle<Object> JSToWasmObject(Isolate* isolate, const WasmModule* module,
         canonical_index, expected_canonical.nullability());
   }
   return JSToWasmObject(isolate, value, expected_canonical, error_message);
+}
+
+MaybeHandle<Object> WasmToJSObject(Isolate* isolate, Handle<Object> value,
+                                   HeapType type, const char** error_message) {
+  switch (type.representation()) {
+    case i::wasm::HeapType::kExtern:
+    case i::wasm::HeapType::kString:
+    case i::wasm::HeapType::kI31:
+    case i::wasm::HeapType::kStruct:
+    case i::wasm::HeapType::kArray:
+    case i::wasm::HeapType::kEq:
+    case i::wasm::HeapType::kAny:
+      return value->IsWasmNull() ? isolate->factory()->null_value() : value;
+    case i::wasm::HeapType::kFunc: {
+      if (value->IsWasmNull()) {
+        return isolate->factory()->null_value();
+      } else {
+        DCHECK(value->IsWasmInternalFunction());
+        return handle(
+            i::Handle<i::WasmInternalFunction>::cast(value)->external(),
+            isolate);
+      }
+    }
+    case i::wasm::HeapType::kStringViewWtf8:
+      *error_message = "stringview_wtf8 has no JS representation";
+      return {};
+    case i::wasm::HeapType::kStringViewWtf16:
+      *error_message = "stringview_wtf16 has no JS representation";
+      return {};
+    case i::wasm::HeapType::kStringViewIter:
+      *error_message = "stringview_iter has no JS representation";
+      return {};
+    case i::wasm::HeapType::kBottom:
+      UNREACHABLE();
+    default:
+      if (value->IsWasmNull()) {
+        return isolate->factory()->null_value();
+      } else if (value->IsWasmInternalFunction()) {
+        return handle(
+            i::Handle<i::WasmInternalFunction>::cast(value)->external(),
+            isolate);
+      } else {
+        return value;
+      }
+  }
 }
 
 }  // namespace wasm

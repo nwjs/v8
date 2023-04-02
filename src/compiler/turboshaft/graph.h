@@ -23,7 +23,7 @@
 
 namespace v8::internal::compiler::turboshaft {
 
-template <template <class> class... Reducers>
+template <class Reducers>
 class Assembler;
 
 // `OperationBuffer` is a growable, Zone-allocated buffer to store Turboshaft
@@ -330,66 +330,6 @@ class Block : public RandomAccessStackDominatorNode<Block> {
     return pred_count - pred_reverse_index - 1;
   }
 
-  // Returns the index of {target} in the predecessors of the current Block
-  // and if target is not in the list of predecessors, recursively traverses
-  // the predecessor graph up.
-  int GetAnyPredecessorIndex(const Block* target, Zone* zone) const {
-    int pred_count = 0;
-    int pred_reverse_index = -1;
-    // The tuple contains (predecessor, index_in_successor, successor).
-    ZoneQueue<std::tuple<const Block*, int, const Block*>> to_visit(zone);
-    for (Block* pred = last_predecessor_; pred != nullptr;
-         pred = pred->neighboring_predecessor_) {
-      if (pred == target) {
-        DCHECK_EQ(pred_reverse_index, -1);
-        pred_reverse_index = pred_count;
-      } else {
-        to_visit.push(std::make_tuple(pred, pred_count, this));
-      }
-      pred_count++;
-    }
-    if (pred_reverse_index != -1) {
-      // The target was found in the predecessors list.
-      return pred_count - pred_reverse_index - 1;
-    }
-
-    const Block* current = nullptr;
-    int pred_index = -1;
-    const Block* successor = nullptr;
-    // The target is not a direct predecessor of the current block.
-    while (!to_visit.empty()) {
-      std::tie(current, pred_index, successor) = to_visit.front();
-      to_visit.pop();
-      if (current == target) {
-        DCHECK_EQ(pred_reverse_index, -1);
-        pred_reverse_index = pred_index;
-        break;
-      } else {
-        int pred_count = 0;
-        for (Block* pred = current->last_predecessor_; pred != nullptr;
-             pred = pred->neighboring_predecessor_) {
-          to_visit.push(std::make_tuple(pred, pred_count, current));
-          pred_count++;
-        }
-      }
-    }
-    if (pred_reverse_index == -1) {
-      // Target was not found by the BFS above.
-      return -1;
-    }
-
-    // The target was found in the predecessors list, we need to reconstruct
-    // the predecessors count for the current (found) Block's successor.
-    DCHECK_NOT_NULL(current);
-    DCHECK_NOT_NULL(successor);
-    pred_count = 0;
-    for (Block* pred = successor->last_predecessor_; pred != nullptr;
-         pred = pred->neighboring_predecessor_) {
-      pred_count++;
-    }
-    return pred_count - pred_reverse_index - 1;
-  }
-
   // HasExactlyNPredecessors(n) returns the same result as
   // `PredecessorCount() == n`, but stops early and iterates at most the first
   // {n} predecessors.
@@ -465,7 +405,7 @@ class Block : public RandomAccessStackDominatorNode<Block> {
   }
 
   friend class Graph;
-  template <template <class> class... Reducers>
+  template <class Reducers>
   friend class Assembler;
 
   Kind kind_;
@@ -493,7 +433,13 @@ class Graph {
         graph_zone_(graph_zone),
         source_positions_(graph_zone),
         operation_origins_(graph_zone),
-        operation_types_(graph_zone) {}
+        operation_types_(graph_zone)
+#ifdef DEBUG
+        ,
+        block_type_refinement_(graph_zone)
+#endif
+  {
+  }
 
   // Reset the graph to recycle its memory.
   void Reset() {
@@ -504,6 +450,9 @@ class Graph {
     operation_types_.Reset();
     next_block_ = 0;
     dominator_tree_depth_ = 0;
+#ifdef DEBUG
+    block_type_refinement_.Reset();
+#endif
   }
 
   V8_INLINE const Operation& Get(OpIndex i) const {
@@ -802,6 +751,19 @@ class Graph {
     return operation_types_;
   }
   GrowingSidetable<Type>& operation_types() { return operation_types_; }
+#ifdef DEBUG
+  // Store refined types per block here for --trace-turbo printing.
+  // TODO(nicohartmann@): Remove this once we have a proper way to print
+  // type information inside the reducers.
+  const GrowingBlockSidetable<std::vector<std::pair<OpIndex, Type>>>&
+  block_type_refinement() const {
+    return block_type_refinement_;
+  }
+  GrowingBlockSidetable<std::vector<std::pair<OpIndex, Type>>>&
+  block_type_refinement() {
+    return block_type_refinement_;
+  }
+#endif  // DEBUG
 
   Graph& GetOrCreateCompanion() {
     if (!companion_) {
@@ -826,6 +788,7 @@ class Graph {
     std::swap(operation_origins_, companion.operation_origins_);
     std::swap(operation_types_, companion.operation_types_);
 #ifdef DEBUG
+    std::swap(block_type_refinement_, companion.block_type_refinement_);
     // Update generation index.
     DCHECK_EQ(generation_ + 1, companion.generation_);
     generation_ = companion.generation_++;
@@ -896,6 +859,10 @@ class Graph {
   GrowingSidetable<OpIndex> operation_origins_;
   uint32_t dominator_tree_depth_ = 0;
   GrowingSidetable<Type> operation_types_;
+#ifdef DEBUG
+  GrowingBlockSidetable<std::vector<std::pair<OpIndex, Type>>>
+      block_type_refinement_;
+#endif
 
   std::unique_ptr<Graph> companion_ = {};
 #ifdef DEBUG
@@ -906,6 +873,10 @@ class Graph {
 V8_INLINE OperationStorageSlot* AllocateOpStorage(Graph* graph,
                                                   size_t slot_count) {
   return graph->Allocate(slot_count);
+}
+
+V8_INLINE const Operation& Get(const Graph& graph, OpIndex index) {
+  return graph.Get(index);
 }
 
 V8_INLINE const Operation& Block::FirstOperation(const Graph& graph) const {

@@ -202,8 +202,8 @@ void CheckEmbeddedObjectsAreEqual(Isolate* isolate,
   CHECK(lhs_it.done() == rhs_it.done());
 }
 
-static void CheckFindCodeObject(Isolate* isolate) {
-  // Test FindCodeObject
+static void CheckGcSafeFindCodeForInnerPointer(Isolate* isolate) {
+  // Test GcSafeFindCodeForInnerPointer
 #define __ assm.
 
   Assembler assm(AssemblerOptions{});
@@ -225,7 +225,7 @@ static void CheckFindCodeObject(Isolate* isolate) {
   Address obj_addr = obj.address();
 
   for (int i = 0; i < obj.Size(cage_base); i += kTaggedSize) {
-    CodeLookupResult lookup_result = isolate->FindCodeObject(obj_addr + i);
+    Code lookup_result = isolate->heap()->FindCodeForInnerPointer(obj_addr + i);
     CHECK_EQ(*code, lookup_result.instruction_stream());
   }
 
@@ -235,12 +235,11 @@ static void CheckFindCodeObject(Isolate* isolate) {
           ->instruction_stream(),
       isolate);
   HeapObject obj_copy = HeapObject::cast(*copy);
-  CodeLookupResult not_right = isolate->FindCodeObject(
+  Code not_right = isolate->heap()->FindCodeForInnerPointer(
       obj_copy.address() + obj_copy.Size(cage_base) / 2);
   CHECK_NE(not_right.instruction_stream(), *code);
   CHECK_EQ(not_right.instruction_stream(), *copy);
 }
-
 
 TEST(HandleNull) {
   CcTest::InitializeVM();
@@ -333,7 +332,7 @@ TEST(HeapObjects) {
   // Check ToString for Numbers
   CheckNumber(isolate, 1.1, "1.1");
 
-  CheckFindCodeObject(isolate);
+  CheckGcSafeFindCodeForInnerPointer(isolate);
 }
 
 TEST(Tagging) {
@@ -506,6 +505,8 @@ TEST(WeakGlobalUnmodifiedApiHandlesScavenge) {
   LocalContext context;
   Factory* factory = isolate->factory();
   GlobalHandles* global_handles = isolate->global_handles();
+  DisableConservativeStackScanningScopeForTesting no_stack_scanning(
+      CcTest::heap());
 
   WeakPointerCleared = false;
 
@@ -1986,6 +1987,7 @@ TEST(TestSizeOfRegExpCode) {
   Isolate* isolate = CcTest::i_isolate();
   Heap* heap = CcTest::heap();
   HandleScope scope(isolate);
+  DisableConservativeStackScanningScopeForTesting no_stack_scanning(heap);
 
   LocalContext context;
 
@@ -2351,6 +2353,8 @@ static int NumberOfGlobalObjects() {
 // Test that we don't embed maps from foreign contexts into
 // optimized code.
 TEST(LeakNativeContextViaMap) {
+  DisableConservativeStackScanningScopeForTesting no_stack_scanning(
+      CcTest::heap());
   v8_flags.allow_natives_syntax = true;
   v8::Isolate* isolate = CcTest::isolate();
   v8::HandleScope outer_scope(isolate);
@@ -2401,6 +2405,8 @@ TEST(LeakNativeContextViaMap) {
 // Test that we don't embed functions from foreign contexts into
 // optimized code.
 TEST(LeakNativeContextViaFunction) {
+  DisableConservativeStackScanningScopeForTesting no_stack_scanning(
+      CcTest::heap());
   v8_flags.allow_natives_syntax = true;
   v8::Isolate* isolate = CcTest::isolate();
   v8::HandleScope outer_scope(isolate);
@@ -2449,6 +2455,8 @@ TEST(LeakNativeContextViaFunction) {
 
 
 TEST(LeakNativeContextViaMapKeyed) {
+  DisableConservativeStackScanningScopeForTesting no_stack_scanning(
+      CcTest::heap());
   v8_flags.allow_natives_syntax = true;
   v8::Isolate* isolate = CcTest::isolate();
   v8::HandleScope outer_scope(isolate);
@@ -2497,6 +2505,8 @@ TEST(LeakNativeContextViaMapKeyed) {
 
 
 TEST(LeakNativeContextViaMapProto) {
+  DisableConservativeStackScanningScopeForTesting no_stack_scanning(
+      CcTest::heap());
   v8_flags.allow_natives_syntax = true;
   v8::Isolate* isolate = CcTest::isolate();
   v8::HandleScope outer_scope(isolate);
@@ -3157,13 +3167,15 @@ TEST(Regress1465) {
   CcTest::InitializeVM();
   v8::Isolate* isolate = CcTest::isolate();
   i::Isolate* i_isolate = CcTest::i_isolate();
+  Heap* heap = CcTest::heap();
+  DisableConservativeStackScanningScopeForTesting no_stack_scanning(heap);
   v8::HandleScope scope(isolate);
   v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
   static const int transitions_count = 256;
 
   CompileRun("function F() {}");
   {
-    AlwaysAllocateScopeForTesting always_allocate(CcTest::i_isolate()->heap());
+    AlwaysAllocateScopeForTesting always_allocate(heap);
     for (int i = 0; i < transitions_count; i++) {
       base::EmbeddedVector<char, 64> buffer;
       base::SNPrintF(buffer, "var o = new F; o.prop%d = %d;", i, i);
@@ -3181,7 +3193,7 @@ TEST(Regress1465) {
   CompileRun("%DebugPrint(root);");
   CHECK_EQ(transitions_count, transitions_before);
 
-  heap::SimulateIncrementalMarking(CcTest::heap());
+  heap::SimulateIncrementalMarking(heap);
   CcTest::CollectAllGarbage();
 
   // Count number of live transitions after marking.  Note that one transition
@@ -3654,6 +3666,9 @@ void ReleaseStackTraceDataTest(v8::Isolate* isolate, const char* source,
   // resource's callback is fired when the external string is GC'ed.
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
   v8::HandleScope scope(isolate);
+  DisableConservativeStackScanningScopeForTesting no_stack_scanning(
+      i_isolate->heap());
+
   SourceResource* resource = new SourceResource(i::StrDup(source));
   {
     v8::HandleScope new_scope(isolate);
@@ -4320,6 +4335,7 @@ TEST(CellsInOptimizedCodeAreWeak) {
   CcTest::InitializeVM();
   Isolate* isolate = CcTest::i_isolate();
   v8::internal::Heap* heap = CcTest::heap();
+  DisableConservativeStackScanningScopeForTesting no_stack_scanning(heap);
 
   if (!isolate->use_optimizer()) return;
   HandleScope outer_scope(heap->isolate());
@@ -4567,6 +4583,8 @@ TEST(WeakFunctionInConstructor) {
   v8::Isolate* isolate = CcTest::isolate();
   LocalContext env;
   v8::HandleScope scope(isolate);
+  DisableConservativeStackScanningScopeForTesting no_stack_scanning(
+      CcTest::heap());
   CompileRun(
       "function createObj(obj) {"
       "  return new obj();"
@@ -4628,6 +4646,8 @@ void CheckWeakness(const char* source) {
   v8_flags.allow_natives_syntax = true;
   CcTest::InitializeVM();
   v8::Isolate* isolate = CcTest::isolate();
+  DisableConservativeStackScanningScopeForTesting no_stack_scanning(
+      CcTest::heap());
   LocalContext env;
   v8::HandleScope scope(isolate);
   v8::Persistent<v8::Object> garbage;
@@ -5552,7 +5572,7 @@ bool HeapTester::CodeEnsureLinearAllocationArea(Heap* heap, int size_in_bytes) {
   bool result = heap->code_space()->EnsureAllocation(
       size_in_bytes, AllocationAlignment::kTaggedAligned,
       AllocationOrigin::kRuntime, nullptr);
-  heap->code_space()->UpdateInlineAllocationLimit(0);
+  heap->code_space()->UpdateInlineAllocationLimit();
   return result;
 }
 
@@ -5812,7 +5832,7 @@ TEST(Regress598319) {
   // progress bar, we would fail here.
   for (int i = 0; i < arr.get().length(); i++) {
     HeapObject arr_value = HeapObject::cast(arr.get().get(i));
-    CHECK(marking_state->IsBlack(arr_value));
+    CHECK(arr_value.InReadOnlySpace() || marking_state->IsBlack(arr_value));
   }
 }
 
@@ -5958,115 +5978,6 @@ TEST(Regress631969) {
     i::Handle<i::ExternalOneByteString>::cast(s3)->SetResource(isolate,
                                                                nullptr);
   }
-}
-
-TEST(LeftTrimFixedArrayInBlackArea) {
-  if (!v8_flags.incremental_marking) return;
-  v8_flags.stress_concurrent_allocation = false;  // For SimulateFullSpace.
-  CcTest::InitializeVM();
-  v8::HandleScope scope(CcTest::isolate());
-  Heap* heap = CcTest::heap();
-  Isolate* isolate = heap->isolate();
-  CcTest::CollectAllGarbage();
-
-  i::IncrementalMarking* marking = heap->incremental_marking();
-  if (heap->sweeping_in_progress()) {
-    heap->EnsureSweepingCompleted(
-        Heap::SweepingForcedFinalizationMode::kV8Only);
-  }
-  CHECK(marking->IsMarking() || marking->IsStopped());
-  if (marking->IsStopped()) {
-    heap->StartIncrementalMarking(i::Heap::kNoGCFlags,
-                                  i::GarbageCollectionReason::kTesting);
-  }
-  CHECK(marking->IsMarking());
-  CHECK(marking->black_allocation());
-
-  // Ensure that we allocate a new page, set up a bump pointer area, and
-  // perform the allocation in a black area.
-  heap::SimulateFullSpace(heap->old_space());
-  isolate->factory()->NewFixedArray(4, AllocationType::kOld);
-  Handle<FixedArray> array =
-      isolate->factory()->NewFixedArray(50, AllocationType::kOld);
-  CHECK(heap->old_space()->Contains(*array));
-  MarkingState* marking_state = heap->marking_state();
-  CHECK(marking_state->IsBlack(*array));
-
-  // Now left trim the allocated black area. A filler has to be installed
-  // for the trimmed area and all mark bits of the trimmed area have to be
-  // cleared.
-  FixedArrayBase trimmed = heap->LeftTrimFixedArray(*array, 10);
-  CHECK(marking_state->IsBlack(trimmed));
-
-  heap::GcAndSweep(heap, OLD_SPACE);
-}
-
-TEST(ContinuousLeftTrimFixedArrayInBlackArea) {
-  if (!v8_flags.incremental_marking) return;
-  v8_flags.stress_concurrent_allocation = false;  // For SimulateFullSpace.
-  CcTest::InitializeVM();
-  v8::HandleScope scope(CcTest::isolate());
-  Heap* heap = CcTest::heap();
-  Isolate* isolate = heap->isolate();
-  CcTest::CollectAllGarbage();
-
-  i::IncrementalMarking* marking = heap->incremental_marking();
-  if (heap->sweeping_in_progress()) {
-    heap->EnsureSweepingCompleted(
-        Heap::SweepingForcedFinalizationMode::kV8Only);
-  }
-  CHECK(marking->IsMarking() || marking->IsStopped());
-  if (marking->IsStopped()) {
-    heap->StartIncrementalMarking(i::Heap::kNoGCFlags,
-                                  i::GarbageCollectionReason::kTesting);
-  }
-  CHECK(marking->IsMarking());
-  CHECK(marking->black_allocation());
-
-  // Ensure that we allocate a new page, set up a bump pointer area, and
-  // perform the allocation in a black area.
-  heap::SimulateFullSpace(heap->old_space());
-  isolate->factory()->NewFixedArray(10, AllocationType::kOld);
-
-  // Allocate the fixed array that will be trimmed later.
-  Handle<FixedArray> array =
-      isolate->factory()->NewFixedArray(100, AllocationType::kOld);
-  Address start_address = array->address();
-  Address end_address = start_address + array->Size();
-  Page* page = Page::FromAddress(start_address);
-  NonAtomicMarkingState* marking_state = heap->non_atomic_marking_state();
-  CHECK(marking_state->IsBlack(*array));
-  CHECK(marking_state->bitmap(page)->AllBitsSetInRange(
-      page->AddressToMarkbitIndex(start_address),
-      page->AddressToMarkbitIndex(end_address)));
-  CHECK(heap->old_space()->Contains(*array));
-
-  FixedArrayBase previous = *array;
-  FixedArrayBase trimmed;
-
-  // First trim in one word steps.
-  for (int i = 0; i < 10; i++) {
-    trimmed = heap->LeftTrimFixedArray(previous, 1);
-    HeapObject filler = HeapObject::FromAddress(previous.address());
-    CHECK(filler.IsFreeSpaceOrFiller());
-    CHECK(marking_state->IsBlack(trimmed));
-    CHECK(marking_state->IsBlack(previous));
-    previous = trimmed;
-  }
-
-  // Then trim in two and three word steps.
-  for (int i = 2; i <= 3; i++) {
-    for (int j = 0; j < 10; j++) {
-      trimmed = heap->LeftTrimFixedArray(previous, i);
-      HeapObject filler = HeapObject::FromAddress(previous.address());
-      CHECK(filler.IsFreeSpaceOrFiller());
-      CHECK(marking_state->IsBlack(trimmed));
-      CHECK(marking_state->IsBlack(previous));
-      previous = trimmed;
-    }
-  }
-
-  heap::GcAndSweep(heap, OLD_SPACE);
 }
 
 TEST(ContinuousRightTrimFixedArrayInBlackArea) {
@@ -6904,7 +6815,7 @@ UNINITIALIZED_TEST(RestoreHeapLimit) {
 }
 
 void HeapTester::UncommitUnusedMemory(Heap* heap) {
-  if (!v8_flags.minor_mc) heap->new_space()->Shrink();
+  if (!v8_flags.minor_mc) SemiSpaceNewSpace::From(heap->new_space())->Shrink();
   heap->memory_allocator()->unmapper()->EnsureUnmappingCompleted();
 }
 

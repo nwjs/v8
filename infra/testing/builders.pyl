@@ -458,6 +458,8 @@
       {'name': 'mjsunit', 'variant': 'stress_snapshot'},
       # Stress maglev.
       {'name': 'mjsunit', 'variant': 'stress_maglev'},
+      # Stress maglev-inlining.
+      {'name': 'mjsunit', 'variant': 'maglev_inlining'},
       # Experimental regexp engine.
       {'name': 'mjsunit', 'variant': 'experimental_regexp'},
     ],
@@ -526,7 +528,7 @@
   },
   'v8_linux64_msan_rel': {
     'swarming_dimensions' : {
-      'os': 'Ubuntu-18.04',
+      'os': 'Ubuntu-20.04',
     },
     'tests': [
       {'name': 'test262', 'variant': 'default', 'shards': 2},
@@ -820,7 +822,7 @@
   'v8_win_dbg': {
     'swarming_dimensions' : {
       'cpu': 'x86-64',
-      'os': 'Windows-7-SP1',
+      'os': 'Windows-10-19045',
     },
     'tests': [
       {'name': 'mozilla'},
@@ -830,7 +832,7 @@
   'v8_win_rel': {
     'swarming_dimensions' : {
       'cpu': 'x86-64',
-      'os': 'Windows-7-SP1',
+      'os': 'Windows-10-19045',
     },
     'tests': [
       {'name': 'mozilla'},
@@ -1113,7 +1115,7 @@
   },
   'V8 Linux - arm64 - sim - MSAN': {
     'swarming_dimensions': {
-      'os': 'Ubuntu-18.04',
+      'os': 'Ubuntu-20.04',
     },
     'tests': [
       {'name': 'test262', 'variant': 'default', 'shards': 3},
@@ -1287,6 +1289,14 @@
     },
     'tests': [
       {'name': 'v8testing'},
+    ],
+  },
+  'V8 Linux PGO instrumentation - builder' : {
+    'swarming_dimensions': {
+      'os': 'Ubuntu-18.04',
+    },
+    'tests': [
+      {'name': 'pgo_instrumentation'}
     ],
   },
   'V8 Linux64': {
@@ -1463,6 +1473,8 @@
       {'name': 'mjsunit', 'variant': 'stress_snapshot'},
       # Stress maglev.
       {'name': 'mjsunit', 'variant': 'stress_maglev'},
+      # Stress maglev-inlining.
+      {'name': 'mjsunit', 'variant': 'maglev_inlining'},
       # Experimental regexp engine.
       {'name': 'mjsunit', 'variant': 'experimental_regexp'},
     ],
@@ -1525,6 +1537,8 @@
       {'name': 'mjsunit', 'variant': 'stress_snapshot'},
       # Stress maglev.
       {'name': 'mjsunit', 'variant': 'stress_maglev'},
+      # Stress maglev-inlining.
+      {'name': 'mjsunit', 'variant': 'maglev_inlining'},
       # Experimental regexp engine.
       {'name': 'mjsunit', 'variant': 'experimental_regexp'},
     ],
@@ -1651,6 +1665,14 @@
         'test_args': ['--gc-stress', '--no-harness'],
         'shards': 3,
       },
+    ],
+  },
+  'V8 Linux64 PGO instrumentation - builder' : {
+    'swarming_dimensions' : {
+      'os': 'Ubuntu-18.04',
+    },
+    'tests': [
+      {'name': 'pgo_instrumentation'}
     ],
   },
   'V8 Linux64 TSAN': {
@@ -1870,7 +1892,7 @@
   'V8 Win32': {
     'swarming_dimensions': {
       'cpu': 'x86-64',
-      'os': 'Windows-7-SP1',
+      'os': 'Windows-10-19045',
     },
     'tests': [
       {'name': 'mozilla'},
@@ -1881,7 +1903,7 @@
   'V8 Win32 - debug': {
     'swarming_dimensions': {
       'cpu': 'x86-64',
-      'os': 'Windows-7-SP1',
+      'os': 'Windows-10-19045',
     },
     'tests': [
       {'name': 'mozilla'},

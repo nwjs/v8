@@ -1912,7 +1912,8 @@ class WasmInterpreterInternals {
         IndexImmediate imm(decoder, code->at(pc + *len),
                            "element segment index", kNoValidate);
         *len += imm.length;
-        instance_object_->dropped_elem_segments().set(imm.index, 1);
+        instance_object_->element_segments().set(
+            imm.index, *isolate_->factory()->empty_fixed_array());
         return true;
       }
       case kExprTableCopy: {
@@ -3324,11 +3325,10 @@ class WasmInterpreterInternals {
       WasmOpcode opcode = static_cast<WasmOpcode>(orig);
 
       if (WasmOpcodes::IsPrefixOpcode(opcode)) {
-        uint32_t prefixed_opcode_length = 0;
-        opcode = decoder.read_prefixed_opcode<Decoder::NoValidationTag>(
-            code->at(pc), &prefixed_opcode_length);
         // read_prefixed_opcode includes the prefix byte, overwrite len.
-        len = prefixed_opcode_length;
+        std::tie(opcode, len) =
+            decoder.read_prefixed_opcode<Decoder::NoValidationTag>(
+                code->at(pc));
       }
 
       // If max is 0, break. If max is positive (a limit is set), decrement it.

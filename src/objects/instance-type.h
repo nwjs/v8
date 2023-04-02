@@ -143,9 +143,8 @@ enum InstanceType : uint16_t {
       UNCACHED_EXTERNAL_INTERNALIZED_STRING_TYPE | kNotInternalizedTag,
   UNCACHED_EXTERNAL_ONE_BYTE_STRING_TYPE =
       UNCACHED_EXTERNAL_ONE_BYTE_INTERNALIZED_STRING_TYPE | kNotInternalizedTag,
+  // Mark thin strings as two-byte just to be on the safe side.
   THIN_STRING_TYPE = kTwoByteStringTag | kThinStringTag | kNotInternalizedTag,
-  THIN_ONE_BYTE_STRING_TYPE =
-      kOneByteStringTag | kThinStringTag | kNotInternalizedTag,
   SHARED_STRING_TYPE = STRING_TYPE | kSharedStringTag,
   SHARED_ONE_BYTE_STRING_TYPE = ONE_BYTE_STRING_TYPE | kSharedStringTag,
   SHARED_EXTERNAL_STRING_TYPE = EXTERNAL_STRING_TYPE | kSharedStringTag,
@@ -155,9 +154,6 @@ enum InstanceType : uint16_t {
       UNCACHED_EXTERNAL_STRING_TYPE | kSharedStringTag,
   SHARED_UNCACHED_EXTERNAL_ONE_BYTE_STRING_TYPE =
       UNCACHED_EXTERNAL_ONE_BYTE_STRING_TYPE | kSharedStringTag,
-  SHARED_THIN_STRING_TYPE = THIN_STRING_TYPE | kSharedStringTag,
-  SHARED_THIN_ONE_BYTE_STRING_TYPE =
-      THIN_ONE_BYTE_STRING_TYPE | kSharedStringTag,
 
 // Most instance types are defined in Torque, with the exception of the string
 // types above. They are ordered by inheritance hierarchy so that we can easily
@@ -275,8 +271,9 @@ V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os,
 
 #define INSTANCE_TYPE_CHECKERS_CUSTOM(V) \
   V(AbstractCode)                        \
-  V(FreeSpaceOrFiller)                   \
   V(ExternalString)                      \
+  V(FreeSpaceOrFiller)                   \
+  V(GcSafeCode)                          \
   V(InternalizedString)
 
 #define INSTANCE_TYPE_CHECKERS(V)  \
@@ -338,10 +335,16 @@ INSTANCE_TYPE_CHECKERS(IS_TYPE_FUNCTION_DECL)
 
 // This list must contain only maps that are shared by all objects of their
 // instance type.
-#define UNIQUE_INSTANCE_TYPE_MAP_LIST_GENERATOR(V, _)           \
-  UNIQUE_LEAF_INSTANCE_TYPE_MAP_LIST_GENERATOR(V, _)            \
-  V(_, HeapNumberMap, heap_number_map, HeapNumber)              \
-  V(_, WeakFixedArrayMap, weak_fixed_array_map, WeakFixedArray) \
+#define UNIQUE_INSTANCE_TYPE_MAP_LIST_GENERATOR(V, _)                 \
+  UNIQUE_LEAF_INSTANCE_TYPE_MAP_LIST_GENERATOR(V, _)                  \
+  V(_, ByteArrayMap, byte_array_map, ByteArray)                       \
+  V(_, NameDictionaryMap, name_dictionary_map, NameDictionary)        \
+  V(_, OrderedNameDictionaryMap, ordered_name_dictionary_map,         \
+    OrderedNameDictionary)                                            \
+  V(_, GlobalDictionaryMap, global_dictionary_map, GlobalDictionary)  \
+  V(_, GlobalPropertyCellMap, global_property_cell_map, PropertyCell) \
+  V(_, HeapNumberMap, heap_number_map, HeapNumber)                    \
+  V(_, WeakFixedArrayMap, weak_fixed_array_map, WeakFixedArray)       \
   TORQUE_DEFINED_MAP_CSA_LIST_GENERATOR(V, _)
 
 }  // namespace internal

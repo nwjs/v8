@@ -18,6 +18,7 @@
 #include "src/wasm/wasm-import-wrapper-cache.h"
 #include "src/wasm/wasm-objects-inl.h"
 #include "src/wasm/wasm-opcodes.h"
+#include "src/wasm/wasm-subtyping.h"
 
 namespace v8 {
 namespace internal {
@@ -241,10 +242,12 @@ void TestingModuleBuilder::AddIndirectFunctionTable(
 
   WasmInstanceObject::EnsureIndirectFunctionTableWithMinimumSize(
       instance_object(), table_index, table_size);
-  Handle<WasmTableObject> table_obj =
-      WasmTableObject::New(isolate_, instance, table.type, table.initial_size,
-                           table.has_maximum_size, table.maximum_size, nullptr,
-                           isolate_->factory()->null_value());
+  Handle<WasmTableObject> table_obj = WasmTableObject::New(
+      isolate_, instance, table.type, table.initial_size,
+      table.has_maximum_size, table.maximum_size, nullptr,
+      IsSubtypeOf(table.type, kWasmExternRef, test_module_.get())
+          ? Handle<Object>::cast(isolate_->factory()->null_value())
+          : Handle<Object>::cast(isolate_->factory()->wasm_null()));
 
   WasmTableObject::AddDispatchTable(isolate_, table_obj, instance_object_,
                                     table_index);
@@ -349,29 +352,6 @@ uint32_t TestingModuleBuilder::AddPassiveDataSegment(
       0, reinterpret_cast<byte*>(data_segment_sizes_.data()),
       size * sizeof(uint32_t));
   instance_object_->set_data_segment_sizes(*data_segment_sizes);
-  return index;
-}
-
-uint32_t TestingModuleBuilder::AddPassiveElementSegment(
-    const std::vector<uint32_t>& entries) {
-  uint32_t index = static_cast<uint32_t>(test_module_->elem_segments.size());
-  DCHECK_EQ(index, dropped_elem_segments_.size());
-
-  test_module_->elem_segments.emplace_back(
-      kWasmFuncRef, WasmElemSegment::kStatusPassive,
-      WasmElemSegment::kFunctionIndexElements);
-  auto& elem_segment = test_module_->elem_segments.back();
-  for (uint32_t entry : entries) {
-    elem_segment.entries.emplace_back(ConstantExpression::RefFunc(entry));
-  }
-
-  // The vector pointers may have moved, so update the instance object.
-  dropped_elem_segments_.push_back(0);
-  uint32_t size = static_cast<uint32_t>(dropped_elem_segments_.size());
-  Handle<FixedUInt8Array> dropped_elem_segments =
-      FixedUInt8Array::New(isolate_, size);
-  dropped_elem_segments->copy_in(0, dropped_elem_segments_.data(), size);
-  instance_object_->set_dropped_elem_segments(*dropped_elem_segments);
   return index;
 }
 

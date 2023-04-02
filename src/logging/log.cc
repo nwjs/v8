@@ -19,6 +19,7 @@
 #include "src/codegen/bailout-reason.h"
 #include "src/codegen/macro-assembler.h"
 #include "src/codegen/source-position-table.h"
+#include "src/common/assert-scope.h"
 #include "src/deoptimizer/deoptimizer.h"
 #include "src/diagnostics/perf-jit.h"
 #include "src/execution/isolate.h"
@@ -129,7 +130,7 @@ const char* ComputeMarker(SharedFunctionInfo shared, AbstractCode code) {
   // We record interpreter trampoline builtin copies as having the
   // "interpreted" marker.
   if (v8_flags.interpreted_frames_native_stack && kind == CodeKind::BUILTIN &&
-      !code.is_off_heap_trampoline(cage_base)) {
+      code.has_instruction_stream(cage_base)) {
     DCHECK_EQ(code.builtin_id(cage_base), Builtin::kInterpreterEntryTrampoline);
     kind = CodeKind::INTERPRETED_FUNCTION;
   }
@@ -248,7 +249,8 @@ void CodeEventLogger::CodeCreateEvent(CodeTag tag, Handle<AbstractCode> code,
   DCHECK(is_listening_to_code_events());
   name_buffer_->Init(tag);
   name_buffer_->AppendBytes(comment);
-  LogRecordedBuffer(code, MaybeHandle<SharedFunctionInfo>(),
+  DisallowGarbageCollection no_gc;
+  LogRecordedBuffer(*code, MaybeHandle<SharedFunctionInfo>(),
                     name_buffer_->get(), name_buffer_->size());
 }
 
@@ -257,7 +259,8 @@ void CodeEventLogger::CodeCreateEvent(CodeTag tag, Handle<AbstractCode> code,
   DCHECK(is_listening_to_code_events());
   name_buffer_->Init(tag);
   name_buffer_->AppendName(*name);
-  LogRecordedBuffer(code, MaybeHandle<SharedFunctionInfo>(),
+  DisallowGarbageCollection no_gc;
+  LogRecordedBuffer(*code, MaybeHandle<SharedFunctionInfo>(),
                     name_buffer_->get(), name_buffer_->size());
 }
 
@@ -269,7 +272,8 @@ void CodeEventLogger::CodeCreateEvent(CodeTag tag, Handle<AbstractCode> code,
   name_buffer_->AppendBytes(ComputeMarker(*shared, *code));
   name_buffer_->AppendByte(' ');
   name_buffer_->AppendName(*script_name);
-  LogRecordedBuffer(code, shared, name_buffer_->get(), name_buffer_->size());
+  DisallowGarbageCollection no_gc;
+  LogRecordedBuffer(*code, shared, name_buffer_->get(), name_buffer_->size());
 }
 
 void CodeEventLogger::CodeCreateEvent(CodeTag tag, Handle<AbstractCode> code,
@@ -292,7 +296,8 @@ void CodeEventLogger::CodeCreateEvent(CodeTag tag, Handle<AbstractCode> code,
   name_buffer_->AppendInt(line);
   name_buffer_->AppendByte(':');
   name_buffer_->AppendInt(column);
-  LogRecordedBuffer(code, shared, name_buffer_->get(), name_buffer_->size());
+  DisallowGarbageCollection no_gc;
+  LogRecordedBuffer(*code, shared, name_buffer_->get(), name_buffer_->size());
 }
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -312,6 +317,7 @@ void CodeEventLogger::CodeCreateEvent(CodeTag tag, const wasm::WasmCode* code,
   }
   name_buffer_->AppendByte('-');
   name_buffer_->AppendBytes(ExecutionTierToString(code->tier()));
+  DisallowGarbageCollection no_gc;
   LogRecordedBuffer(code, name_buffer_->get(), name_buffer_->size());
 }
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -321,7 +327,8 @@ void CodeEventLogger::RegExpCodeCreateEvent(Handle<AbstractCode> code,
   DCHECK(is_listening_to_code_events());
   name_buffer_->Init(LogEventListener::CodeTag::kRegExp);
   name_buffer_->AppendString(*source);
-  LogRecordedBuffer(code, MaybeHandle<SharedFunctionInfo>(),
+  DisallowGarbageCollection no_gc;
+  LogRecordedBuffer(*code, MaybeHandle<SharedFunctionInfo>(),
                     name_buffer_->get(), name_buffer_->size());
 }
 
@@ -338,7 +345,7 @@ class LinuxPerfBasicLogger : public CodeEventLogger {
                            Handle<SharedFunctionInfo> shared) override {}
 
  private:
-  void LogRecordedBuffer(Handle<AbstractCode> code,
+  void LogRecordedBuffer(AbstractCode code,
                          MaybeHandle<SharedFunctionInfo> maybe_shared,
                          const char* name, int length) override;
 #if V8_ENABLE_WEBASSEMBLY
@@ -348,13 +355,14 @@ class LinuxPerfBasicLogger : public CodeEventLogger {
   void WriteLogRecordedBuffer(uintptr_t address, int size, const char* name,
                               int name_length);
 
+  static base::LazyRecursiveMutex& GetFileMutex();
+
   // Extension added to V8 log file name to get the low-level log name.
   static const char kFilenameFormatString[];
   static const int kFilenameBufferPadding;
 
   // Per-process singleton file. We assume that there is one main isolate
   // to determine when it goes away, we keep the reference count.
-  static base::LazyRecursiveMutex file_mutex_;
   static FILE* perf_output_handle_;
   static uint64_t reference_count_;
 };
@@ -363,15 +371,20 @@ const char LinuxPerfBasicLogger::kFilenameFormatString[] = "/tmp/perf-%d.map";
 // Extra space for the PID in the filename
 const int LinuxPerfBasicLogger::kFilenameBufferPadding = 16;
 
-base::LazyRecursiveMutex LinuxPerfBasicLogger::file_mutex_;
+// static
+base::LazyRecursiveMutex& LinuxPerfBasicLogger::GetFileMutex() {
+  static base::LazyRecursiveMutex file_mutex = LAZY_RECURSIVE_MUTEX_INITIALIZER;
+  return file_mutex;
+}
+
 // The following static variables are protected by
-// LinuxPerfBasicLogger::file_mutex_.
+// LinuxPerfBasicLogger::GetFileMutext().
 uint64_t LinuxPerfBasicLogger::reference_count_ = 0;
 FILE* LinuxPerfBasicLogger::perf_output_handle_ = nullptr;
 
 LinuxPerfBasicLogger::LinuxPerfBasicLogger(Isolate* isolate)
     : CodeEventLogger(isolate) {
-  base::LockGuard<base::RecursiveMutex> guard_file(file_mutex_.Pointer());
+  base::LockGuard<base::RecursiveMutex> guard_file(GetFileMutex().Pointer());
   int process_id_ = base::OS::GetCurrentProcessId();
   reference_count_++;
   // If this is the first logger, open the file.
@@ -390,7 +403,7 @@ LinuxPerfBasicLogger::LinuxPerfBasicLogger(Isolate* isolate)
 }
 
 LinuxPerfBasicLogger::~LinuxPerfBasicLogger() {
-  base::LockGuard<base::RecursiveMutex> guard_file(file_mutex_.Pointer());
+  base::LockGuard<base::RecursiveMutex> guard_file(GetFileMutex().Pointer());
   reference_count_--;
 
   // If this was the last logger, close the file.
@@ -414,18 +427,19 @@ void LinuxPerfBasicLogger::WriteLogRecordedBuffer(uintptr_t address, int size,
                    size, name_length, name);
 }
 
-void LinuxPerfBasicLogger::LogRecordedBuffer(Handle<AbstractCode> code,
+void LinuxPerfBasicLogger::LogRecordedBuffer(AbstractCode code,
                                              MaybeHandle<SharedFunctionInfo>,
                                              const char* name, int length) {
+  DisallowGarbageCollection no_gc;
   PtrComprCageBase cage_base(isolate_);
   if (v8_flags.perf_basic_prof_only_functions &&
-      CodeKindIsBuiltinOrJSFunction(code->kind(cage_base))) {
+      CodeKindIsBuiltinOrJSFunction(code.kind(cage_base))) {
     return;
   }
 
   WriteLogRecordedBuffer(
-      static_cast<uintptr_t>(code->InstructionStart(cage_base)),
-      code->InstructionSize(cage_base), name, length);
+      static_cast<uintptr_t>(code.InstructionStart(cage_base)),
+      code.InstructionSize(cage_base), name, length);
 }
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -610,8 +624,8 @@ void InitializeCodeEvent(Isolate* isolate, CodeEvent* event,
 void ExternalLogEventListener::CodeMoveEvent(InstructionStream from,
                                              InstructionStream to) {
   CodeEvent code_event;
-  InitializeCodeEvent(isolate_, &code_event, from.InstructionStart(),
-                      to.InstructionStart(), to.InstructionSize());
+  InitializeCodeEvent(isolate_, &code_event, from.instruction_start(),
+                      to.instruction_start(), to.instruction_size());
   code_event_handler_->Handle(reinterpret_cast<v8::CodeEvent*>(&code_event));
 }
 
@@ -637,7 +651,7 @@ class LowLevelLogger : public CodeEventLogger {
   void CodeMovingGCEvent() override;
 
  private:
-  void LogRecordedBuffer(Handle<AbstractCode> code,
+  void LogRecordedBuffer(AbstractCode code,
                          MaybeHandle<SharedFunctionInfo> maybe_shared,
                          const char* name, int length) override;
 #if V8_ENABLE_WEBASSEMBLY
@@ -727,19 +741,19 @@ void LowLevelLogger::LogCodeInfo() {
   LogWriteBytes(arch, sizeof(arch));
 }
 
-void LowLevelLogger::LogRecordedBuffer(Handle<AbstractCode> code,
+void LowLevelLogger::LogRecordedBuffer(AbstractCode code,
                                        MaybeHandle<SharedFunctionInfo>,
                                        const char* name, int length) {
+  DisallowGarbageCollection no_gc;
   PtrComprCageBase cage_base(isolate_);
   CodeCreateStruct event;
   event.name_size = length;
-  event.code_address = code->InstructionStart(cage_base);
-  event.code_size = code->InstructionSize(cage_base);
+  event.code_address = code.InstructionStart(cage_base);
+  event.code_size = code.InstructionSize(cage_base);
   LogWriteStruct(event);
   LogWriteBytes(name, length);
-  LogWriteBytes(
-      reinterpret_cast<const char*>(code->InstructionStart(cage_base)),
-      code->InstructionSize(cage_base));
+  LogWriteBytes(reinterpret_cast<const char*>(code.InstructionStart(cage_base)),
+                code.InstructionSize(cage_base));
 }
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -759,8 +773,8 @@ void LowLevelLogger::LogRecordedBuffer(const wasm::WasmCode* code,
 void LowLevelLogger::CodeMoveEvent(InstructionStream from,
                                    InstructionStream to) {
   CodeMoveStruct event;
-  event.from_address = from.InstructionStart();
-  event.to_address = to.InstructionStart();
+  event.from_address = from.instruction_start();
+  event.to_address = to.instruction_start();
   LogWriteStruct(event);
 }
 
@@ -801,7 +815,7 @@ class JitLogger : public CodeEventLogger {
                            JitCodeEvent::CodeType code_type);
 
  private:
-  void LogRecordedBuffer(Handle<AbstractCode> code,
+  void LogRecordedBuffer(AbstractCode code,
                          MaybeHandle<SharedFunctionInfo> maybe_shared,
                          const char* name, int length) override;
 #if V8_ENABLE_WEBASSEMBLY
@@ -818,16 +832,17 @@ JitLogger::JitLogger(Isolate* isolate, JitCodeEventHandler code_event_handler)
   DCHECK_NOT_NULL(code_event_handler);
 }
 
-void JitLogger::LogRecordedBuffer(Handle<AbstractCode> code,
+void JitLogger::LogRecordedBuffer(AbstractCode code,
                                   MaybeHandle<SharedFunctionInfo> maybe_shared,
                                   const char* name, int length) {
+  DisallowGarbageCollection no_gc;
   PtrComprCageBase cage_base(isolate_);
   JitCodeEvent event;
   event.type = JitCodeEvent::CODE_ADDED;
-  event.code_start = reinterpret_cast<void*>(code->InstructionStart(cage_base));
-  event.code_type = code->IsCode(cage_base) ? JitCodeEvent::JIT_CODE
-                                            : JitCodeEvent::BYTE_CODE;
-  event.code_len = code->InstructionSize(cage_base);
+  event.code_start = reinterpret_cast<void*>(code.InstructionStart(cage_base));
+  event.code_type =
+      code.IsCode(cage_base) ? JitCodeEvent::JIT_CODE : JitCodeEvent::BYTE_CODE;
+  event.code_len = code.InstructionSize(cage_base);
   Handle<SharedFunctionInfo> shared;
   if (maybe_shared.ToHandle(&shared) &&
       shared->script(cage_base).IsScript(cage_base)) {
@@ -898,9 +913,9 @@ void JitLogger::CodeMoveEvent(InstructionStream from, InstructionStream to) {
   JitCodeEvent event;
   event.type = JitCodeEvent::CODE_MOVED;
   event.code_type = JitCodeEvent::JIT_CODE;
-  event.code_start = reinterpret_cast<void*>(from.InstructionStart());
-  event.code_len = from.InstructionSize();
-  event.new_code_start = reinterpret_cast<void*>(to.InstructionStart());
+  event.code_start = reinterpret_cast<void*>(from.instruction_start());
+  event.code_len = from.instruction_size();
+  event.new_code_start = reinterpret_cast<void*>(to.instruction_start());
   event.isolate = reinterpret_cast<v8::Isolate*>(isolate_);
 
   code_event_handler_(&event);
@@ -1577,8 +1592,8 @@ void V8FileLogger::RegExpCodeCreateEvent(Handle<AbstractCode> code,
 
 void V8FileLogger::CodeMoveEvent(InstructionStream from, InstructionStream to) {
   if (!is_listening_to_code_events()) return;
-  MoveEventInternal(Event::kCodeMove, from.InstructionStart(),
-                    to.InstructionStart());
+  MoveEventInternal(Event::kCodeMove, from.instruction_start(),
+                    to.instruction_start());
 }
 
 void V8FileLogger::BytecodeMoveEvent(BytecodeArray from, BytecodeArray to) {
@@ -1613,7 +1628,7 @@ void V8FileLogger::ProcessDeoptEvent(Handle<InstructionStream> code,
                                      const char* reason) {
   MSG_BUILDER();
   msg << Event::kCodeDeopt << kNext << Time() << kNext << code->CodeSize()
-      << kNext << reinterpret_cast<void*>(code->InstructionStart());
+      << kNext << reinterpret_cast<void*>(code->instruction_start());
 
   std::ostringstream deopt_location;
   int inlining_id = -1;
@@ -2100,8 +2115,7 @@ static void PrepareLogFileName(std::ostream& os, Isolate* isolate,
           break;
         case 't':
           // %t expands to the current time in milliseconds.
-          os << static_cast<int64_t>(
-              V8::GetCurrentPlatform()->CurrentClockTimeMillis());
+          os << V8::GetCurrentPlatform()->CurrentClockTimeMilliseconds();
           break;
         case '%':
           // %% expands (contracts really) to %.
@@ -2178,7 +2192,7 @@ void V8FileLogger::LateSetup(Isolate* isolate) {
   if (!isolate->logger()->is_listening_to_code_events()) return;
   Builtins::EmitCodeCreateEvents(isolate);
 #if V8_ENABLE_WEBASSEMBLY
-  if (!isolate->is_shared()) wasm::GetWasmEngine()->EnableCodeLogging(isolate);
+  wasm::GetWasmEngine()->EnableCodeLogging(isolate);
 #endif
 }
 
@@ -2194,6 +2208,9 @@ void V8FileLogger::SetEtwCodeEventHandler(uint32_t options) {
     etw_jit_logger_ = std::make_unique<ETWJitLogger>(isolate_);
     AddLogEventListener(etw_jit_logger_.get());
     CHECK(isolate_->logger()->is_listening_to_code_events());
+    // Generate builtins for new isolates always. Otherwise it will not
+    // traverse the builtins.
+    options |= kJitCodeEventEnumExisting;
   }
 
   if (options & kJitCodeEventEnumExisting) {
@@ -2326,7 +2343,7 @@ void ExistingCodeLogger::LogCodeObject(AbstractCode object) {
       tag = CodeTag::kBytecodeHandler;
       break;
     case CodeKind::BUILTIN:
-      if (!abstract_code->is_off_heap_trampoline(cage_base)) {
+      if (abstract_code->has_instruction_stream(cage_base)) {
         DCHECK_EQ(abstract_code->builtin_id(cage_base),
                   Builtin::kInterpreterEntryTrampoline);
         // We treat interpreter trampoline builtin copies as

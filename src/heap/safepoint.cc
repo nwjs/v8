@@ -328,23 +328,12 @@ void GlobalSafepoint::RemoveClient(Isolate* client) {
     DCHECK_EQ(clients_head_, client);
     clients_head_ = client->global_safepoint_next_client_isolate_;
   }
-
-  client->shared_isolate_ = nullptr;
 }
 
 void GlobalSafepoint::AssertNoClientsOnTearDown() {
-  if (v8_flags.shared_space) {
-    DCHECK_EQ(clients_head_, shared_heap_isolate_);
-    DCHECK_NULL(shared_heap_isolate_->global_safepoint_prev_client_isolate_);
-    DCHECK_NULL(shared_heap_isolate_->global_safepoint_next_client_isolate_);
-  } else {
-    DCHECK_WITH_MSG(
-        clients_head_ == nullptr,
-        "Shared heap must not have clients at teardown. The first isolate that "
-        "is created (in a process that has no isolates) owns the lifetime of "
-        "the shared heap and is considered the main isolate. The main isolate "
-        "must outlive all other isolates.");
-  }
+  DCHECK_EQ(clients_head_, shared_heap_isolate_);
+  DCHECK_NULL(shared_heap_isolate_->global_safepoint_prev_client_isolate_);
+  DCHECK_NULL(shared_heap_isolate_->global_safepoint_next_client_isolate_);
 }
 
 void GlobalSafepoint::EnterGlobalSafepointScope(Isolate* initiator) {
@@ -374,16 +363,6 @@ void GlobalSafepoint::EnterGlobalSafepointScope(Isolate* initiator) {
         initiator, &clients.back());
   });
 
-  if (shared_heap_isolate_->is_shared()) {
-    // Make it possible to use AssertActive() on shared isolates.
-    CHECK(shared_heap_isolate_->heap()
-              ->safepoint()
-              ->local_heaps_mutex_.TryLock());
-
-    // Shared isolates should never have multiple threads.
-    shared_heap_isolate_->heap()->safepoint()->AssertMainThreadIsOnlyThread();
-  }
-
   // Iterate all clients again to initiate the safepoint for all of them - even
   // if that means blocking.
   for (PerClientSafepointData& client : clients) {
@@ -410,10 +389,6 @@ void GlobalSafepoint::LeaveGlobalSafepointScope(Isolate* initiator) {
   DCHECK_GT(active_safepoint_scopes_, 0);
 
   if (--active_safepoint_scopes_ == 0) {
-    if (shared_heap_isolate_->is_shared()) {
-      shared_heap_isolate_->heap()->safepoint()->local_heaps_mutex_.Unlock();
-    }
-
     IterateClientIsolates([initiator](Isolate* client) {
       Heap* client_heap = client->heap();
       client_heap->safepoint()->LeaveGlobalSafepointScope(initiator);
@@ -425,9 +400,7 @@ void GlobalSafepoint::LeaveGlobalSafepointScope(Isolate* initiator) {
 
 GlobalSafepointScope::GlobalSafepointScope(Isolate* initiator)
     : initiator_(initiator),
-      shared_heap_isolate_(initiator->is_shared()
-                               ? initiator
-                               : initiator->shared_heap_isolate()) {
+      shared_heap_isolate_(initiator->shared_heap_isolate()) {
   shared_heap_isolate_->global_safepoint()->EnterGlobalSafepointScope(
       initiator_);
 }

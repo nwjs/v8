@@ -22,6 +22,7 @@
 #include "src/objects/js-array-inl.h"
 #include "src/objects/js-collection-inl.h"
 #include "src/objects/literal-objects-inl.h"
+#include "src/objects/prototype-info.h"
 #include "src/objects/slots.h"
 #include "src/objects/templates.h"
 #include "src/objects/visitors.h"
@@ -846,8 +847,12 @@ bool ObjectStatsCollectorImpl::IsCowArray(FixedArrayBase array) {
 }
 
 bool ObjectStatsCollectorImpl::SameLiveness(HeapObject obj1, HeapObject obj2) {
-  return obj1.is_null() || obj2.is_null() ||
-         marking_state_->Color(obj1) == marking_state_->Color(obj2);
+  if (obj1.is_null() || obj2.is_null()) return true;
+  auto col1 = obj1.InReadOnlySpace() ? Marking::ObjectColor::BLACK_OBJECT
+                                     : marking_state_->Color(obj1);
+  auto col2 = obj2.InReadOnlySpace() ? Marking::ObjectColor::BLACK_OBJECT
+                                     : marking_state_->Color(obj2);
+  return col1 == col2;
 }
 
 void ObjectStatsCollectorImpl::RecordVirtualMapDetails(Map map) {
@@ -904,9 +909,9 @@ void ObjectStatsCollectorImpl::RecordVirtualMapDetails(Map map) {
   }
 
   if (map.is_prototype_map()) {
-    if (map.prototype_info().IsPrototypeInfo(cage_base())) {
-      PrototypeInfo info = PrototypeInfo::cast(map.prototype_info());
-      Object users = info.prototype_users();
+    PrototypeInfo prototype_info;
+    if (map.TryGetPrototypeInfo(&prototype_info)) {
+      Object users = prototype_info.prototype_users();
       if (users.IsWeakFixedArray(cage_base())) {
         RecordSimpleVirtualObjectStats(map, WeakArrayList::cast(users),
                                        ObjectStats::PROTOTYPE_USERS_TYPE);
@@ -1093,7 +1098,7 @@ class ObjectStatsVisitor {
         phase_(phase) {}
 
   void Visit(HeapObject obj) {
-    if (marking_state_->IsBlack(obj)) {
+    if (obj.InReadOnlySpace() || marking_state_->IsBlack(obj)) {
       live_collector_->CollectStatistics(
           obj, phase_, ObjectStatsCollectorImpl::CollectFieldStats::kYes);
     } else {

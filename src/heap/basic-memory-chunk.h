@@ -306,6 +306,7 @@ class BasicMemoryChunk {
 
   template <AccessMode mode>
   ConcurrentBitmap<mode>* marking_bitmap() const {
+    DCHECK(!InReadOnlySpace());
     return static_cast<ConcurrentBitmap<mode>*>(
         Bitmap::FromAddress(address() + kMarkingBitmapOffset));
   }

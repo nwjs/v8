@@ -187,6 +187,22 @@
 //
 #define FLAG FLAG_FULL
 
+// Experimental features.
+// Features that are still considered experimental and which are not ready for
+// fuzz testing should be defined using this macro. The feature will then imply
+// --experimental, which will indicate to the user that they are running an
+// experimental configuration of V8. Experimental features are always disabled
+// by default. When these features mature, the flag should first turn into a
+// regular feature flag (still disabled by default) and then ideally be staged
+// behind (for example) --future before being enabled by default.
+DEFINE_BOOL(experimental, false,
+            "Indicates that V8 is running with experimental features enabled. "
+            "This flag is typically not set explicitly but instead enabled as "
+            "an implication of other flags which enable experimental features.")
+#define DEFINE_EXPERIMENTAL_FEATURE(nam, cmt)         \
+  FLAG(BOOL, bool, nam, false, cmt " (experimental)") \
+  DEFINE_IMPLICATION(nam, experimental)
+
 // ATTENTION: This is set to true by default in d8. But for API compatibility,
 // it generally defaults to false.
 DEFINE_BOOL(abort_on_contradictory_flags, false,
@@ -224,7 +240,9 @@ DEFINE_BOOL(harmony_shipping, true, "enable all shipped harmony features")
   V(harmony_temporal, "Temporal")                                              \
   V(harmony_shadow_realm, "harmony ShadowRealm")                               \
   V(harmony_struct, "harmony structs, shared structs, and shared arrays")      \
-  V(harmony_json_parse_with_source, "harmony json parse with source")
+  V(harmony_json_parse_with_source, "harmony json parse with source")          \
+  V(harmony_array_from_async, "harmony Array.fromAsync")                       \
+  V(harmony_iterator_helpers, "JavaScript iterator helpers")
 
 #ifdef V8_INTL_SUPPORT
 #define HARMONY_INPROGRESS(V)                             \
@@ -236,9 +254,8 @@ DEFINE_BOOL(harmony_shipping, true, "enable all shipped harmony features")
 #endif
 
 // Features that are complete (but still behind the --harmony flag).
-#define HARMONY_STAGED_BASE(V)                                  \
-  V(harmony_regexp_unicode_sets, "harmony RegExp Unicode Sets") \
-  V(harmony_rab_gsab_transfer, "harmony ArrayBuffer.transfer")  \
+#define HARMONY_STAGED_BASE(V)                                 \
+  V(harmony_rab_gsab_transfer, "harmony ArrayBuffer.transfer") \
   V(harmony_array_grouping, "harmony array grouping")
 
 DEFINE_IMPLICATION(harmony_rab_gsab_transfer, harmony_rab_gsab)
@@ -258,7 +275,8 @@ DEFINE_IMPLICATION(harmony_rab_gsab_transfer, harmony_rab_gsab)
   V(harmony_change_array_by_copy, "harmony change-Array-by-copy")      \
   V(harmony_string_is_well_formed, "harmony String#{is,to}WellFormed") \
   V(harmony_rab_gsab,                                                  \
-    "harmony ResizableArrayBuffer / GrowableSharedArrayBuffer")
+    "harmony ResizableArrayBuffer / GrowableSharedArrayBuffer")        \
+  V(harmony_regexp_unicode_sets, "harmony RegExp Unicode Sets")
 
 #ifdef V8_INTL_SUPPORT
 #define HARMONY_SHIPPING(V) \
@@ -272,9 +290,14 @@ DEFINE_IMPLICATION(harmony_rab_gsab_transfer, harmony_rab_gsab)
 // from HARMONY_SHIPPING, all occurrences of the FLAG_ variable are removed,
 // and associated tests are moved from the harmony directory to the appropriate
 // esN directory.
+//
+// In-progress features are not code complete and are considered experimental,
+// i.e. not ready for fuzz testing.
 
-#define FLAG_INPROGRESS_FEATURES(id, description) \
-  DEFINE_BOOL(id, false, "enable " #description " (in progress)")
+#define FLAG_INPROGRESS_FEATURES(id, description)                     \
+  DEFINE_BOOL(id, false,                                              \
+              "enable " #description " (in progress / experimental)") \
+  DEFINE_IMPLICATION(id, experimental)
 HARMONY_INPROGRESS(FLAG_INPROGRESS_FEATURES)
 #undef FLAG_INPROGRESS_FEATURES
 
@@ -421,6 +444,7 @@ DEFINE_BOOL_READONLY(
 DEFINE_BOOL_READONLY(conservative_stack_scanning,
                      V8_ENABLE_CONSERVATIVE_STACK_SCANNING_BOOL,
                      "use conservative stack scanning")
+DEFINE_IMPLICATION(conservative_stack_scanning, minor_mc)
 
 #if V8_ENABLE_WEBASSEMBLY
 DEFINE_NEG_IMPLICATION(conservative_stack_scanning,
@@ -461,8 +485,19 @@ DEFINE_BOOL(lower_tier_as_toptier, false,
 #define V8_ENABLE_MAGLEV_BOOL true
 DEFINE_BOOL(maglev, false, "enable the maglev optimizing compiler")
 DEFINE_WEAK_IMPLICATION(future, maglev)
-DEFINE_BOOL(maglev_inlining, false,
-            "enable inlining in the maglev optimizing compiler")
+DEFINE_EXPERIMENTAL_FEATURE(maglev_inlining,
+                            "enable inlining in the maglev optimizing compiler")
+DEFINE_IMPLICATION(maglev_inlining, maglev)
+DEFINE_INT(max_maglev_inline_depth, 1,
+           "max depth of functions that Maglev will inline")
+DEFINE_INT(max_maglev_inlined_bytecode_size, 460,
+           "maximum size of bytecode for a single inlining")
+DEFINE_INT(max_maglev_inlined_bytecode_size_cumulative, 920,
+           "maximum cumulative size of bytecode considered for inlining")
+DEFINE_INT(max_maglev_inlined_bytecode_size_small, 27,
+           "maximum size of bytecode considered for small function inlining")
+DEFINE_FLOAT(min_maglev_inlining_frequency, 0.10,
+             "minimum frequency for inlining")
 DEFINE_BOOL(maglev_reuse_stack_slots, true,
             "reuse stack slots in the maglev optimizing compiler")
 
@@ -474,6 +509,8 @@ DEFINE_VALUE_IMPLICATION(stress_maglev, interrupt_budget_for_maglev, 128)
 #else
 #define V8_ENABLE_MAGLEV_BOOL false
 DEFINE_BOOL_READONLY(maglev, false, "enable the maglev optimizing compiler")
+DEFINE_BOOL_READONLY(maglev_inlining, false,
+                     "enable inlining in the maglev optimizing compiler")
 DEFINE_BOOL_READONLY(stress_maglev, false, "trigger maglev compilation earlier")
 #endif  // V8_ENABLE_MAGLEV
 
@@ -486,11 +523,13 @@ DEFINE_BOOL(print_maglev_code, false, "print maglev code")
 DEFINE_BOOL(trace_maglev_graph_building, false, "trace maglev graph building")
 DEFINE_BOOL(trace_maglev_regalloc, false, "trace maglev register allocation")
 DEFINE_BOOL(trace_maglev_inlining, false, "trace maglev inlining")
+DEFINE_BOOL(trace_maglev_inlining_verbose, false,
+            "trace maglev inlining (verbose)")
+DEFINE_IMPLICATION(trace_maglev_inlining_verbose, trace_maglev_inlining)
 
 // TODO(v8:7700): Remove once stable.
 DEFINE_BOOL(maglev_function_context_specialization, true,
             "enable function context specialization in maglev")
-DEFINE_BOOL(maglev_ool_prologue, false, "use the Maglev out of line prologue")
 
 #if ENABLE_SPARKPLUG
 DEFINE_WEAK_IMPLICATION(future, flush_baseline_code)
@@ -522,9 +561,19 @@ DEFINE_STRING(
     "Select which native code sequence to use for wasm trace instruction: "
     "default or cpuid")
 
+// iOS on device does not support executable code pages for 3rd party
+// applications so we need to forcibly disable the JIT.
+#if defined(V8_TARGET_OS_IOS) && !TARGET_OS_SIMULATOR
+#define V8_JITLESS_BOOL true
+#define DEFINE_JITLESS_BOOL DEFINE_BOOL_READONLY
+#else
+#define V8_JITLESS_BOOL V8_LITE_BOOL
+#define DEFINE_JITLESS_BOOL DEFINE_BOOL
+#endif
+
 // Flags for jitless
-DEFINE_BOOL(jitless, V8_LITE_BOOL,
-            "Disable runtime allocation of executable memory.")
+DEFINE_JITLESS_BOOL(jitless, V8_JITLESS_BOOL,
+                    "Disable runtime allocation of executable memory.")
 
 DEFINE_WEAK_IMPLICATION(jitless, lower_tier_as_toptier)
 
@@ -589,7 +638,6 @@ DEFINE_BOOL(trace_block_coverage, false,
             "trace collected block coverage information")
 DEFINE_BOOL(trace_protector_invalidation, false,
             "trace protector cell invalidations")
-DEFINE_BOOL(trace_web_snapshot, false, "trace web snapshot deserialization")
 
 DEFINE_BOOL(feedback_normalization, false,
             "feed back normalization to constructors")
@@ -739,11 +787,6 @@ DEFINE_BOOL(trace_baseline_concurrent_compilation, false,
 
 // Internalize into a shared string table in the shared isolate
 DEFINE_BOOL(shared_string_table, false, "internalize strings into shared table")
-DEFINE_IMPLICATION(harmony_struct, shared_string_table)
-DEFINE_BOOL(shared_string_table_using_shared_space, false,
-            "internalize strings into shared table")
-DEFINE_IMPLICATION(shared_string_table_using_shared_space, shared_string_table)
-DEFINE_IMPLICATION(shared_string_table_using_shared_space, shared_space)
 DEFINE_IMPLICATION(harmony_struct, shared_string_table)
 DEFINE_BOOL(
     always_use_string_forwarding_table, false,
@@ -1002,13 +1045,8 @@ DEFINE_BOOL(turbo_collect_feedback_in_generic_lowering, false,
 DEFINE_BOOL(isolate_script_cache_ageing, true,
             "enable ageing of the isolate script cache.")
 
-DEFINE_FLOAT(script_delay, 0, "busy wait [ms] on every Script::Run")
-DEFINE_FLOAT(script_delay_once, 0, "busy wait [ms] on the first Script::Run")
-DEFINE_FLOAT(script_delay_fraction, 0.0,
-             "busy wait after each Script::Run by the given fraction of the "
-             "run's duration")
-
-DEFINE_BOOL(turboshaft, false, "enable TurboFan's Turboshaft phases for JS")
+DEFINE_EXPERIMENTAL_FEATURE(turboshaft,
+                            "enable TurboFan's Turboshaft phases for JS")
 DEFINE_BOOL(turboshaft_trace_reduction, false,
             "trace individual Turboshaft reduction steps")
 DEFINE_BOOL(turboshaft_wasm, false,
@@ -1023,6 +1061,8 @@ DEFINE_UINT64(turboshaft_opt_bisect_break, std::numeric_limits<uint64_t>::max(),
 DEFINE_BOOL(turboshaft_verify_reductions, false,
             "check that turboshaft reductions are correct with respect to "
             "inferred types")
+DEFINE_BOOL(turboshaft_trace_typing, false,
+            "print typing steps of turboshaft type inference")
 #endif  // DEBUG
 
 // Favor memory over execution speed.
@@ -1166,6 +1206,12 @@ DEFINE_BOOL(wasm_staging, false, "enable staged wasm features")
 FOREACH_WASM_STAGING_FEATURE_FLAG(WASM_STAGING_IMPLICATION)
 #undef WASM_STAGING_IMPLICATION
 
+// Experimental Wasm features imply --experimental.
+#define WASM_IMPLY_EXPERIMENTAL(name, ...) \
+  DEFINE_IMPLICATION(experimental_wasm_##name, experimental)
+FOREACH_WASM_EXPERIMENTAL_FEATURE_FLAG(WASM_IMPLY_EXPERIMENTAL)
+#undef WASM_IMPLY_EXPERIMENTAL
+
 DEFINE_BOOL(wasm_opt, true, "enable wasm optimization")
 DEFINE_BOOL(
     wasm_bounds_checks, true,
@@ -1197,11 +1243,16 @@ DEFINE_BOOL(wasm_final_types, false,
             "enable final types as default for wasm-gc")
 DEFINE_IMPLICATION(wasm_speculative_inlining, wasm_inlining)
 DEFINE_WEAK_IMPLICATION(experimental_wasm_gc, wasm_speculative_inlining)
+// For historical reasons, both --wasm-inlining and --wasm-speculative-inlining
+// are aliases for --experimental-wasm-inlining.
+DEFINE_IMPLICATION(wasm_inlining, experimental_wasm_inlining)
+DEFINE_IMPLICATION(wasm_speculative_inlining, experimental_wasm_inlining)
 
 DEFINE_BOOL(wasm_loop_unrolling, true,
             "enable loop unrolling for wasm functions")
-DEFINE_BOOL(wasm_loop_peeling, false, "enable loop peeling for wasm functions")
+DEFINE_BOOL(wasm_loop_peeling, true, "enable loop peeling for wasm functions")
 DEFINE_SIZE_T(wasm_loop_peeling_max_size, 1000, "maximum size for peeling")
+DEFINE_BOOL(trace_wasm_loop_peeling, false, "trace wasm loop peeling")
 DEFINE_BOOL(wasm_fuzzer_gen_test, false,
             "generate a test case when running a wasm fuzzer")
 DEFINE_IMPLICATION(wasm_fuzzer_gen_test, single_threaded)
@@ -1289,8 +1340,6 @@ DEFINE_SIZE_T(initial_old_space_size, 0, "initial old space size (in Mbytes)")
 DEFINE_BOOL(separate_gc_phases, false,
             "young and full garbage collection phases are not overlapping")
 DEFINE_BOOL(gc_global, false, "always perform global GCs")
-DEFINE_BOOL(shared_space, true,
-            "Implement shared heap as shared space on a main isolate.")
 
 // TODO(12950): The next two flags only have an effect if
 // V8_ENABLE_ALLOCATION_TIMEOUT is set, so we should only define them in that
@@ -1373,8 +1422,9 @@ DEFINE_INT(scavenge_task_trigger, 80,
 DEFINE_BOOL(scavenge_separate_stack_scanning, false,
             "use a separate phase for stack scanning in scavenge")
 DEFINE_BOOL(trace_parallel_scavenge, false, "trace parallel scavenge")
-DEFINE_BOOL(cppgc_young_generation, false,
-            "run young generation garbage collections in Oilpan")
+DEFINE_EXPERIMENTAL_FEATURE(
+    cppgc_young_generation,
+    "run young generation garbage collections in Oilpan")
 // CppGC young generation (enables unified young heap) is based on Minor MC.
 DEFINE_IMPLICATION(cppgc_young_generation, minor_mc)
 // Unified young generation disables the unmodified wrapper reclamation
@@ -2061,11 +2111,12 @@ DEFINE_NEG_NEG_IMPLICATION(text_is_readable, partial_constant_pool)
 //
 DEFINE_BOOL(trace_minor_mc_parallel_marking, false,
             "trace parallel marking for the young generation")
-DEFINE_BOOL(minor_mc, false, "perform young generation mark compact GCs")
+DEFINE_EXPERIMENTAL_FEATURE(minor_mc,
+                            "perform young generation mark compact GCs")
 DEFINE_IMPLICATION(minor_mc, separate_gc_phases)
 
-DEFINE_BOOL(concurrent_minor_mc_marking, false,
-            "perform young generation marking concurrently")
+DEFINE_EXPERIMENTAL_FEATURE(concurrent_minor_mc_marking,
+                            "perform young generation marking concurrently")
 DEFINE_NEG_NEG_IMPLICATION(concurrent_marking, concurrent_minor_mc_marking)
 
 //
@@ -2403,12 +2454,6 @@ DEFINE_NEG_IMPLICATION(single_threaded_gc, parallel_scavenge)
 DEFINE_NEG_IMPLICATION(single_threaded_gc, concurrent_array_buffer_sweeping)
 DEFINE_NEG_IMPLICATION(single_threaded_gc, stress_concurrent_allocation)
 DEFINE_NEG_IMPLICATION(single_threaded_gc, cppheap_concurrent_marking)
-
-// Web snapshots: 1) expose WebSnapshot.* API 2) interpret scripts as web
-// snapshots if they start with a magic number.
-// TODO(v8:11525): Remove this flag once proper embedder integration is done.
-DEFINE_BOOL(experimental_web_snapshots, false, "enable Web Snapshots")
-DEFINE_NEG_IMPLICATION(experimental_web_snapshots, script_streaming)
 
 #if defined(V8_USE_LIBM_TRIG_FUNCTIONS)
 DEFINE_BOOL(use_libm_trig_functions, true, "use libm trig functions")

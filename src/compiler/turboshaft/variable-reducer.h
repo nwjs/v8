@@ -55,7 +55,7 @@ class VariableReducer : public Next {
       SnapshotTable<OpIndex, base::Optional<RegisterRepresentation>>::Snapshot;
 
  public:
-  using Next::Asm;
+  TURBOSHAFT_REDUCER_BOILERPLATE()
 
   template <class... Args>
   explicit VariableReducer(const std::tuple<Args...>& args)
@@ -135,7 +135,16 @@ class VariableReducer : public Next {
     return table_.GetPredecessorValue(var, predecessor_index);
   }
 
-  void Set(Variable var, OpIndex new_index) { table_.Set(var, new_index); }
+  void Set(Variable var, OpIndex new_index) {
+    if (V8_UNLIKELY(Asm().generating_unreachable_operations())) return;
+    table_.Set(var, new_index);
+  }
+  template <typename Rep>
+  void Set(Variable var, V<Rep> value) {
+    if (V8_UNLIKELY(Asm().generating_unreachable_operations())) return;
+    DCHECK(Rep::allows_representation(*var.data()));
+    table_.Set(var, value);
+  }
 
   Variable NewFreshVariable(base::Optional<RegisterRepresentation> rep) {
     return table_.NewKey(rep, OpIndex::Invalid());

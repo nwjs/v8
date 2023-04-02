@@ -248,9 +248,9 @@ class Heap {
 
   class ExternalMemoryAccounting {
    public:
-    int64_t total() { return total_.load(std::memory_order_relaxed); }
-    int64_t limit() { return limit_.load(std::memory_order_relaxed); }
-    int64_t low_since_mark_compact() {
+    int64_t total() const { return total_.load(std::memory_order_relaxed); }
+    int64_t limit() const { return limit_.load(std::memory_order_relaxed); }
+    int64_t low_since_mark_compact() const {
       return low_since_mark_compact_.load(std::memory_order_relaxed);
     }
 
@@ -269,7 +269,7 @@ class Heap {
       return amount;
     }
 
-    int64_t AllocatedSinceMarkCompact() {
+    int64_t AllocatedSinceMarkCompact() const {
       int64_t total_bytes = total();
       int64_t low_since_mark_compact_bytes = low_since_mark_compact();
 
@@ -502,7 +502,7 @@ class Heap {
   inline Address* OldSpaceAllocationLimitAddress();
 
   size_t NewSpaceSize();
-  size_t NewSpaceCapacity();
+  size_t NewSpaceCapacity() const;
 
   // Move len non-weak tagged elements from src_slot to dst_slot of dst_object.
   // The source and destination memory ranges can overlap.
@@ -660,6 +660,7 @@ class Heap {
   }
 
   bool IsGCWithStack() const;
+  V8_EXPORT_PRIVATE void ForceSharedGCWithEmptyStackForTesting();
 
   // Performs GC after background allocation failure.
   void CollectGarbageForBackground(LocalHeap* local_heap);
@@ -853,8 +854,8 @@ class Heap {
     return shared_lo_allocation_space_;
   }
 
-  inline PagedSpace* paged_space(int idx);
-  inline Space* space(int idx);
+  inline PagedSpace* paged_space(int idx) const;
+  inline Space* space(int idx) const;
 
   // ===========================================================================
   // Getters to other components. ==============================================
@@ -980,7 +981,7 @@ class Heap {
   // Performs garbage collection operation.
   // Returns whether there is a chance that another major GC could
   // collect more garbage.
-  V8_EXPORT_PRIVATE bool CollectGarbage(
+  V8_EXPORT_PRIVATE void CollectGarbage(
       AllocationSpace space, GarbageCollectionReason gc_reason,
       const GCCallbackFlags gc_callback_flags = kNoGCCallbackFlags);
 
@@ -1236,10 +1237,6 @@ class Heap {
   // Currently used by tests, serialization and heap verification only.
   V8_EXPORT_PRIVATE bool InSpace(HeapObject value, AllocationSpace space) const;
 
-  // Returns true when this heap is shared.
-  V8_EXPORT_PRIVATE bool IsShared() const;
-  V8_EXPORT_PRIVATE bool ShouldMarkSharedHeap() const;
-
   // Slow methods that can be used for verification as they can also be used
   // with off-heap Addresses.
   V8_EXPORT_PRIVATE bool InSpaceSlow(Address addr, AllocationSpace space) const;
@@ -1284,7 +1281,7 @@ class Heap {
   // ===========================================================================
 
   // Returns the maximum amount of memory reserved for the heap.
-  V8_EXPORT_PRIVATE size_t MaxReserved();
+  V8_EXPORT_PRIVATE size_t MaxReserved() const;
   size_t MaxSemiSpaceSize() { return max_semi_space_size_; }
   size_t InitialSemiSpaceSize() { return initial_semispace_size_; }
   size_t MaxOldGenerationSize() { return max_old_generation_size(); }
@@ -1313,7 +1310,7 @@ class Heap {
   size_t Capacity();
 
   // Returns the capacity of the old generation.
-  V8_EXPORT_PRIVATE size_t OldGenerationCapacity();
+  V8_EXPORT_PRIVATE size_t OldGenerationCapacity() const;
 
   // Returns the amount of memory currently held alive by the unmapper.
   size_t CommittedMemoryOfUnmapper();
@@ -1431,18 +1428,18 @@ class Heap {
 
   // Returns the size of objects residing in non-new spaces.
   // Excludes external memory held by those objects.
-  V8_EXPORT_PRIVATE size_t OldGenerationSizeOfObjects();
+  V8_EXPORT_PRIVATE size_t OldGenerationSizeOfObjects() const;
 
   // Returns the size of objects held by the EmbedderHeapTracer.
   V8_EXPORT_PRIVATE size_t EmbedderSizeOfObjects() const;
 
   // Returns the global size of objects (embedder + V8 non-new spaces).
-  V8_EXPORT_PRIVATE size_t GlobalSizeOfObjects();
+  V8_EXPORT_PRIVATE size_t GlobalSizeOfObjects() const;
 
   // We allow incremental marking to overshoot the V8 and global allocation
   // limit for performance reasons. If the overshoot is too large then we are
   // more eager to finalize incremental marking.
-  bool AllocationLimitOvershotByLargeMargin();
+  bool AllocationLimitOvershotByLargeMargin() const;
 
   // Return the maximum size objects can be before having to allocate them as
   // large objects. This takes into account allocating in the code space for
@@ -1466,8 +1463,10 @@ class Heap {
   void RemoveGCEpilogueCallback(v8::Isolate::GCCallbackWithData callback,
                                 void* data);
 
-  void CallGCPrologueCallbacks(GCType gc_type, GCCallbackFlags flags);
-  void CallGCEpilogueCallbacks(GCType gc_type, GCCallbackFlags flags);
+  void CallGCPrologueCallbacks(GCType gc_type, GCCallbackFlags flags,
+                               GCTracer::Scope::ScopeId scope_id);
+  void CallGCEpilogueCallbacks(GCType gc_type, GCCallbackFlags flags,
+                               GCTracer::Scope::ScopeId scope_id);
 
   // ===========================================================================
   // Allocation methods. =======================================================
@@ -1545,30 +1544,20 @@ class Heap {
   // Stack frame support. ======================================================
   // ===========================================================================
 
-  // Searches for compiled code or embedded builtins code object by given
-  // interior pointer.
-  // Crashes process on unsuccessful lookup if {die_on_unsuccessful_lookup}
-  // is true. All code lookups made by GC must succeed.
-  CodeLookupResult GcSafeFindCodeForInnerPointer(
-      Address inner_pointer, bool die_on_unsuccessful_lookup = true);
-
-  // Same as GcSafeFindCodeForInnerPointer() but it doesn't crash the process
-  // on unsuccessful lookup.
-  // It's intended to be used only from gdb's 'jco' macro.
-  CodeLookupResult GcSafeFindCodeForInnerPointerForPrinting(
+  // Searches for a Code object by the given interior pointer.
+  V8_EXPORT_PRIVATE Code FindCodeForInnerPointer(Address inner_pointer);
+  // Use the GcSafe family of functions if called while GC is in progress.
+  GcSafeCode GcSafeFindCodeForInnerPointer(Address inner_pointer);
+  base::Optional<GcSafeCode> GcSafeTryFindCodeForInnerPointer(
+      Address inner_pointer);
+  // Only intended for use from the `jco` gdb macro.
+  base::Optional<Code> TryFindCodeForInnerPointerForPrinting(
       Address inner_pointer);
 
-  // Returns true if {addr} is contained within {code} and false otherwise.
-  // Mostly useful for debugging.
-  bool GcSafeCodeContains(InstructionStream code, Address addr);
-
-  // Casts a heap object to a code object and checks if the inner_pointer is
-  // within the object.
-  CodeLookupResult GcSafeCastToCode(HeapObject object, Address inner_pointer);
-
-  // Returns the map of an object. Can be used during garbage collection, i.e.
-  // it supports a forwarded map. Fails if the map is not the code map.
-  Map GcSafeMapOfCodeSpaceObject(HeapObject object);
+  // Returns true if {addr} is contained within {instruction_stream} and false
+  // otherwise. Mostly useful for debugging.
+  bool GcSafeInstructionStreamContains(InstructionStream instruction_stream,
+                                       Address addr);
 
   // ===========================================================================
   // Sweeping. =================================================================
@@ -1644,8 +1633,9 @@ class Heap {
   // over all objects.
   V8_EXPORT_PRIVATE void MakeHeapIterable();
 
-  V8_EXPORT_PRIVATE bool CanPromoteYoungAndExpandOldGeneration(size_t size);
-  V8_EXPORT_PRIVATE bool CanExpandOldGeneration(size_t size);
+  V8_EXPORT_PRIVATE bool CanPromoteYoungAndExpandOldGeneration(
+      size_t size) const;
+  V8_EXPORT_PRIVATE bool CanExpandOldGeneration(size_t size) const;
 
   inline bool ShouldReduceMemory() const {
     return (current_gc_flags_ & kReduceMemoryFootprintMask) != 0;
@@ -1696,6 +1686,8 @@ class Heap {
         Heap::ExternalStringTableUpdaterCallback updater_func);
     void UpdateReferences(
         Heap::ExternalStringTableUpdaterCallback updater_func);
+
+    bool HasYoung() const { return !young_strings_.empty(); }
 
    private:
     void Verify();
@@ -1767,7 +1759,7 @@ class Heap {
   // Checks whether a global GC is necessary
   GarbageCollector SelectGarbageCollector(AllocationSpace space,
                                           GarbageCollectionReason gc_reason,
-                                          const char** reason);
+                                          const char** reason) const;
 
   // Free all LABs in the heap.
   void FreeLinearAllocationAreas();
@@ -1786,14 +1778,9 @@ class Heap {
   void UnmarkSharedLinearAllocationAreas();
 
   // Performs garbage collection in a safepoint.
-  // Returns the number of freed global handles.
-  size_t PerformGarbageCollection(GarbageCollector collector,
-                                  GarbageCollectionReason gc_reason,
-                                  const char* collector_reason);
-
-  // Performs garbage collection in the shared heap.
-  void PerformSharedGarbageCollection(Isolate* initiator,
-                                      GarbageCollectionReason gc_reason);
+  void PerformGarbageCollection(GarbageCollector collector,
+                                GarbageCollectionReason gc_reason,
+                                const char* collector_reason);
 
   inline void UpdateOldSpaceLimits();
 
@@ -1886,6 +1873,14 @@ class Heap {
   void InvokeIncrementalMarkingPrologueCallbacks();
   void InvokeIncrementalMarkingEpilogueCallbacks();
 
+  // Casts a heap object to an InstructionStream, DCHECKs that the
+  // inner_pointer is within the object, and returns the attached Code object.
+  GcSafeCode GcSafeGetCodeFromInstructionStream(HeapObject instruction_stream,
+                                                Address inner_pointer);
+  // Returns the map of a HeapObject. Can be used during garbage collection,
+  // i.e. it supports a forwarded map.
+  Map GcSafeMapOfHeapObject(HeapObject object);
+
   // ===========================================================================
   // Actual GC. ================================================================
   // ===========================================================================
@@ -1976,7 +1971,7 @@ class Heap {
 
   size_t global_allocation_limit() const { return global_allocation_limit_; }
 
-  size_t max_old_generation_size() {
+  size_t max_old_generation_size() const {
     return max_old_generation_size_.load(std::memory_order_relaxed);
   }
 
@@ -2195,11 +2190,11 @@ class Heap {
   std::atomic<HeapState> gc_state_{NOT_IN_GC};
 
   // Returns the amount of external memory registered since last global gc.
-  V8_EXPORT_PRIVATE uint64_t AllocatedExternalMemorySinceMarkCompact();
+  V8_EXPORT_PRIVATE uint64_t AllocatedExternalMemorySinceMarkCompact() const;
 
   // Starts marking when stress_marking_percentage_% of the marking start limit
   // is reached.
-  std::atomic<int> stress_marking_percentage_{0};
+  int stress_marking_percentage_ = 0;
 
   // Observer that causes more frequent checks for reached incremental
   // marking limit.
@@ -2384,6 +2379,7 @@ class Heap {
   bool force_oom_ = false;
   bool force_gc_on_next_allocation_ = false;
   bool delay_sweeper_tasks_for_testing_ = false;
+  bool force_shared_gc_with_empty_stack_for_testing_ = false;
 
   UnorderedHeapObjectMap<HeapObject> retainer_;
   UnorderedHeapObjectMap<Root> retaining_root_;
@@ -2640,12 +2636,12 @@ class V8_NODISCARD IgnoreLocalGCRequests {
 // is done.
 class V8_EXPORT_PRIVATE PagedSpaceIterator {
  public:
-  explicit PagedSpaceIterator(Heap* heap)
+  explicit PagedSpaceIterator(const Heap* heap)
       : heap_(heap), counter_(FIRST_GROWABLE_PAGED_SPACE) {}
   PagedSpace* Next();
 
  private:
-  Heap* heap_;
+  const Heap* const heap_;
   int counter_;
 };
 

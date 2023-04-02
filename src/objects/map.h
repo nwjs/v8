@@ -11,6 +11,7 @@
 #include "src/objects/heap-object.h"
 #include "src/objects/internal-index.h"
 #include "src/objects/objects.h"
+#include "src/objects/prototype-info.h"
 #include "torque-generated/bit-fields.h"
 #include "torque-generated/visitor-lists.h"
 
@@ -30,7 +31,8 @@ enum InstanceType : uint16_t;
   V(CoverageInfo)                    \
   V(DataObject)                      \
   V(FeedbackMetadata)                \
-  V(FixedDoubleArray)
+  V(FixedDoubleArray)                \
+  IF_WASM(V, WasmNull)
 
 #define POINTER_VISITOR_ID_LIST(V)      \
   V(AccessorInfo)                       \
@@ -47,7 +49,7 @@ enum InstanceType : uint16_t;
   V(FreeSpace)                          \
   V(JSApiObject)                        \
   V(JSArrayBuffer)                      \
-  V(JSDataView)                         \
+  V(JSDataViewOrRabGsabDataView)        \
   V(JSExternalObject)                   \
   V(JSFinalizationRegistry)             \
   V(JSFunction)                         \
@@ -407,6 +409,8 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
   DECL_BOOLEAN_ACCESSORS(is_extensible)
   DECL_BOOLEAN_ACCESSORS(is_prototype_map)
   inline bool is_abandoned_prototype_map() const;
+  inline bool has_prototype_info() const;
+  inline bool TryGetPrototypeInfo(PrototypeInfo* result) const;
 
   // Whether the instance has been added to the retained map list by
   // Heap::AddRetainedMap.

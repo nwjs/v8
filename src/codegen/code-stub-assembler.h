@@ -166,7 +166,6 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
   V(FixedCOWArrayMap, fixed_cow_array_map, FixedCOWArrayMap)                 \
   V(Function_string, function_string, FunctionString)                        \
   V(function_to_string, function_to_string, FunctionToString)                \
-  V(GlobalPropertyCellMap, global_property_cell_map, PropertyCellMap)        \
   V(has_instance_symbol, has_instance_symbol, HasInstanceSymbol)             \
   V(Infinity_string, Infinity_string, InfinityString)                        \
   V(is_concat_spreadable_symbol, is_concat_spreadable_symbol,                \
@@ -187,6 +186,7 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
   V(NoClosuresCellMap, no_closures_cell_map, NoClosuresCellMap)              \
   V(null_to_string, null_to_string, NullToString)                            \
   V(NullValue, null_value, Null)                                             \
+  IF_WASM(V, WasmNull, wasm_null, WasmNull)                                  \
   V(number_string, number_string, NumberString)                              \
   V(number_to_string, number_to_string, NumberToString)                      \
   V(Object_string, Object_string, ObjectString)                              \
@@ -2592,6 +2592,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<BoolT> IsIndirectStringInstanceType(TNode<Int32T> instance_type);
   TNode<BoolT> IsJSArrayBuffer(TNode<HeapObject> object);
   TNode<BoolT> IsJSDataView(TNode<HeapObject> object);
+  TNode<BoolT> IsJSRabGsabDataView(TNode<HeapObject> object);
   TNode<BoolT> IsJSArrayInstanceType(TNode<Int32T> instance_type);
   TNode<BoolT> IsJSArrayMap(TNode<Map> map);
   TNode<BoolT> IsJSArray(TNode<HeapObject> object);
@@ -3203,6 +3204,11 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                            next_enum_index_smi, SKIP_WRITE_BARRIER);
   }
 
+  template <class Dictionary>
+  TNode<Smi> GetNameDictionaryFlags(TNode<Dictionary> dictionary);
+  template <class Dictionary>
+  void SetNameDictionaryFlags(TNode<Dictionary>, TNode<Smi> flags);
+
   // Looks up an entry in a NameDictionaryBase successor. If the entry is found
   // control goes to {if_found} and {var_name_index} contains an index of the
   // key field of the entry found. If the key is not found control goes to
@@ -3575,10 +3581,34 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   template <typename TIndex>
   TNode<TIndex> BuildFastLoop(
-      const VariableList& var_list, TNode<TIndex> start_index,
-      TNode<TIndex> end_index, const FastLoopBody<TIndex>& body, int increment,
+      const VariableList& vars, TVariable<TIndex>& var_index,
+      TNode<TIndex> start_index, TNode<TIndex> end_index,
+      const FastLoopBody<TIndex>& body, int increment,
       LoopUnrollingMode unrolling_mode,
       IndexAdvanceMode advance_mode = IndexAdvanceMode::kPre);
+
+  template <typename TIndex>
+  TNode<TIndex> BuildFastLoop(
+      TVariable<TIndex>& var_index, TNode<TIndex> start_index,
+      TNode<TIndex> end_index, const FastLoopBody<TIndex>& body, int increment,
+      LoopUnrollingMode unrolling_mode,
+      IndexAdvanceMode advance_mode = IndexAdvanceMode::kPre) {
+    return BuildFastLoop(VariableList(0, zone()), var_index, start_index,
+                         end_index, body, increment, unrolling_mode,
+                         advance_mode);
+  }
+
+  template <typename TIndex>
+  TNode<TIndex> BuildFastLoop(const VariableList& vars,
+                              TNode<TIndex> start_index,
+                              TNode<TIndex> end_index,
+                              const FastLoopBody<TIndex>& body, int increment,
+                              LoopUnrollingMode unrolling_mode,
+                              IndexAdvanceMode advance_mode) {
+    TVARIABLE(TIndex, var_index);
+    return BuildFastLoop(vars, var_index, start_index, end_index, body,
+                         increment, unrolling_mode, advance_mode);
+  }
 
   template <typename TIndex>
   TNode<TIndex> BuildFastLoop(

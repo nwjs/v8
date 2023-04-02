@@ -96,7 +96,7 @@ MaybeHandle<Object> DebugEvaluate::Local(Isolate* isolate,
   DisableBreak disable_break_scope(isolate->debug());
 
   // Get the frame where the debugging is performed.
-  StackTraceFrameIterator it(isolate, frame_id);
+  DebuggableStackFrameIterator it(isolate, frame_id);
 #if V8_ENABLE_WEBASSEMBLY
   if (it.is_wasm()) {
     WasmFrame* frame = WasmFrame::cast(it.frame());
@@ -137,7 +137,7 @@ MaybeHandle<Object> DebugEvaluate::WithTopmostArguments(Isolate* isolate,
   // Handle the processing of break.
   DisableBreak disable_break_scope(isolate->debug());
   Factory* factory = isolate->factory();
-  JavaScriptFrameIterator it(isolate);
+  JavaScriptStackFrameIterator it(isolate);
 
   // Get context and receiver.
   Handle<Context> native_context(
@@ -1240,10 +1240,8 @@ void DebugEvaluate::VerifyTransitiveBuiltins(Isolate* isolate) {
     for (RelocIterator it(code, mode); !it.done(); it.next()) {
       RelocInfo* rinfo = it.rinfo();
       DCHECK(RelocInfo::IsCodeTargetMode(rinfo->rmode()));
-      CodeLookupResult lookup_result =
-          isolate->heap()->GcSafeFindCodeForInnerPointer(
-              rinfo->target_address());
-      CHECK(lookup_result.IsFound());
+      Code lookup_result =
+          isolate->heap()->FindCodeForInnerPointer(rinfo->target_address());
       Builtin callee = lookup_result.builtin_id();
       if (BuiltinGetSideEffectState(callee) == DebugInfo::kHasNoSideEffect) {
         continue;

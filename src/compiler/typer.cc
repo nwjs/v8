@@ -79,6 +79,7 @@ class Typer::Visitor : public Reducer {
       SIMPLIFIED_BIGINT_UNOP_LIST(DECLARE_UNARY_CASE)
       SIMPLIFIED_SPECULATIVE_NUMBER_UNOP_LIST(DECLARE_UNARY_CASE)
       SIMPLIFIED_SPECULATIVE_BIGINT_UNOP_LIST(DECLARE_UNARY_CASE)
+      DECLARE_UNARY_CASE(ChangeUint32ToUint64)
 #undef DECLARE_UNARY_CASE
 #define DECLARE_BINARY_CASE(x, ...) \
   case IrOpcode::k##x:              \
@@ -215,7 +216,6 @@ class Typer::Visitor : public Reducer {
       DECLARE_IMPOSSIBLE_CASE(ChangeInt32ToInt64)
       DECLARE_IMPOSSIBLE_CASE(ChangeInt64ToFloat64)
       DECLARE_IMPOSSIBLE_CASE(ChangeUint32ToFloat64)
-      DECLARE_IMPOSSIBLE_CASE(ChangeUint32ToUint64)
       DECLARE_IMPOSSIBLE_CASE(TruncateFloat64ToFloat32)
       DECLARE_IMPOSSIBLE_CASE(TruncateInt64ToInt32)
       DECLARE_IMPOSSIBLE_CASE(RoundFloat64ToInt32)
@@ -250,6 +250,8 @@ class Typer::Visitor : public Reducer {
       DECLARE_IMPOSSIBLE_CASE(Word32PairSar)
       DECLARE_IMPOSSIBLE_CASE(ProtectedLoad)
       DECLARE_IMPOSSIBLE_CASE(ProtectedStore)
+      DECLARE_IMPOSSIBLE_CASE(LoadTrapOnNull)
+      DECLARE_IMPOSSIBLE_CASE(StoreTrapOnNull)
       DECLARE_IMPOSSIBLE_CASE(MemoryBarrier)
       DECLARE_IMPOSSIBLE_CASE(SignExtendWord8ToInt32)
       DECLARE_IMPOSSIBLE_CASE(SignExtendWord16ToInt32)
@@ -302,6 +304,7 @@ class Typer::Visitor : public Reducer {
 
   Zone* zone() { return typer_->zone(); }
   Graph* graph() { return typer_->graph(); }
+  JSHeapBroker* broker() { return typer_->broker(); }
 
   void SetWeakened(NodeId node_id) { weakened_nodes_.insert(node_id); }
   bool IsWeakened(NodeId node_id) {
@@ -354,6 +357,7 @@ class Typer::Visitor : public Reducer {
   SIMPLIFIED_BIGINT_UNOP_LIST(DECLARE_METHOD)
   SIMPLIFIED_SPECULATIVE_NUMBER_UNOP_LIST(DECLARE_METHOD)
   SIMPLIFIED_SPECULATIVE_BIGINT_UNOP_LIST(DECLARE_METHOD)
+  DECLARE_METHOD(ChangeUint32ToUint64)
 #undef DECLARE_METHOD
 #define DECLARE_METHOD(Name)                       \
   static Type Name(Type lhs, Type rhs, Typer* t) { \
@@ -387,6 +391,7 @@ class Typer::Visitor : public Reducer {
   SIMPLIFIED_BIGINT_UNOP_LIST(DECLARE_METHOD)
   SIMPLIFIED_SPECULATIVE_NUMBER_UNOP_LIST(DECLARE_METHOD)
   SIMPLIFIED_SPECULATIVE_BIGINT_UNOP_LIST(DECLARE_METHOD)
+  DECLARE_METHOD(ChangeUint32ToUint64)
 #undef DECLARE_METHOD
   static Type ObjectIsArrayBufferView(Type, Typer*);
   static Type ObjectIsBigInt(Type, Typer*);
@@ -739,7 +744,7 @@ Type Typer::Visitor::ObjectIsConstructor(Type type, Typer* t) {
   // TODO(turbofan): Introduce a Type::Constructor?
   CHECK(!type.IsNone());
   if (type.IsHeapConstant() &&
-      type.AsHeapConstant()->Ref().map().is_constructor()) {
+      type.AsHeapConstant()->Ref().map(t->broker()).is_constructor()) {
     return t->singleton_true_;
   }
   if (!type.Maybe(Type::Callable())) return t->singleton_false_;
@@ -1430,7 +1435,7 @@ Type Typer::Visitor::TypeJSCreateGeneratorObject(Node* node) {
 
 Type Typer::Visitor::TypeJSCreateClosure(Node* node) {
   SharedFunctionInfoRef shared =
-      JSCreateClosureNode{node}.Parameters().shared_info(typer_->broker());
+      JSCreateClosureNode{node}.Parameters().shared_info();
   if (IsClassConstructor(shared.kind())) {
     return Type::ClassConstructor();
   } else {
@@ -1504,7 +1509,7 @@ Type Typer::Visitor::TypeJSLoadNamed(Node* node) {
   // is not a private brand here. Otherwise Type::NonInternal() is wrong.
   JSLoadNamedNode n(node);
   NamedAccess const& p = n.Parameters();
-  DCHECK(!p.name(typer_->broker()).object()->IsPrivateBrand());
+  DCHECK(!p.name().object()->IsPrivateBrand());
 #endif
   return Type::NonInternal();
 }
@@ -1712,10 +1717,10 @@ Type Typer::Visitor::JSCallTyper(Type fun, Typer* t) {
     return Type::NonInternal();
   }
   JSFunctionRef function = fun.AsHeapConstant()->Ref().AsJSFunction();
-  if (!function.shared().HasBuiltinId()) {
+  if (!function.shared(t->broker()).HasBuiltinId()) {
     return Type::NonInternal();
   }
-  switch (function.shared().builtin_id()) {
+  switch (function.shared(t->broker()).builtin_id()) {
     case Builtin::kMathRandom:
       return Type::PlainNumber();
     case Builtin::kMathFloor:
@@ -2349,7 +2354,7 @@ Type Typer::Visitor::TypeCheckNotTaggedHole(Node* node) {
 
 Type Typer::Visitor::TypeCheckClosure(Node* node) {
   FeedbackCellRef cell = MakeRef(typer_->broker(), FeedbackCellOf(node->op()));
-  base::Optional<SharedFunctionInfoRef> shared = cell.shared_function_info();
+  OptionalSharedFunctionInfoRef shared = cell.shared_function_info(broker());
   if (!shared.has_value()) return Type::Function();
 
   if (IsClassConstructor(shared->kind())) {

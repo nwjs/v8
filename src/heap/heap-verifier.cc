@@ -167,7 +167,7 @@ void VerifyPointersVisitor::VerifyPointers(HeapObject host,
 void VerifyPointersVisitor::VisitCodeTarget(InstructionStream host,
                                             RelocInfo* rinfo) {
   InstructionStream target =
-      InstructionStream::GetCodeFromTargetAddress(rinfo->target_address());
+      InstructionStream::FromTargetAddress(rinfo->target_address());
   VerifyHeapObjectImpl(target);
 }
 
@@ -286,17 +286,16 @@ void HeapVerification::Verify() {
   CHECK(heap()->HasBeenSetUp());
   AllowGarbageCollection allow_gc;
   IgnoreLocalGCRequests ignore_gc_requests(heap());
-  SafepointKind safepoint_kind =
-      v8_flags.shared_space && isolate()->is_shared_heap_isolate()
-          ? SafepointKind::kGlobal
-          : SafepointKind::kIsolate;
+  SafepointKind safepoint_kind = isolate()->is_shared_space_isolate()
+                                     ? SafepointKind::kGlobal
+                                     : SafepointKind::kIsolate;
   SafepointScope safepoint_scope(isolate(), safepoint_kind);
   HandleScope scope(isolate());
 
   heap()->MakeHeapIterable();
 
-  heap()->array_buffer_sweeper()->EnsureFinished();
-
+  // TODO(v8:13257): Currently we don't iterate through the stack conservatively
+  // when verifying the heap.
   VerifyPointersVisitor visitor(heap());
   heap()->IterateRoots(&visitor,
                        base::EnumSet<SkipRoot>{SkipRoot::kConservativeStack});
@@ -495,7 +494,7 @@ class SlotVerifyingVisitor : public ObjectVisitorWithCageBases {
 
   void VisitCodeTarget(InstructionStream host, RelocInfo* rinfo) override {
     Object target =
-        InstructionStream::GetCodeFromTargetAddress(rinfo->target_address());
+        InstructionStream::FromTargetAddress(rinfo->target_address());
     if (ShouldHaveBeenRecorded(host, MaybeObject::FromObject(target))) {
       CHECK(InTypedSet(SlotType::kCodeEntry, rinfo->pc()) ||
             (rinfo->IsInConstantPool() &&
@@ -686,6 +685,9 @@ void HeapVerification::VerifyRememberedSetFor(HeapObject object) {
 
     CHECK_NULL(chunk->slot_set<OLD_TO_OLD>());
     CHECK_NULL(chunk->typed_slot_set<OLD_TO_OLD>());
+
+    CHECK_NULL(chunk->slot_set<OLD_TO_SHARED>());
+    CHECK_NULL(chunk->typed_slot_set<OLD_TO_SHARED>());
   }
 
   // TODO(v8:11797): Add old to old slot set verification once all weak objects
@@ -705,28 +707,6 @@ void HeapVerifier::VerifyReadOnlyHeap(Heap* heap) {
 }
 
 // static
-void HeapVerifier::VerifySharedHeap(Heap* heap, Isolate* initiator) {
-  DCHECK(heap->IsShared());
-  Isolate* isolate = heap->isolate();
-
-  // Stop all client isolates attached to this isolate.
-  GlobalSafepointScope global_safepoint(initiator);
-
-  // Migrate shared isolate to the main thread of the initiator isolate.
-  v8::Locker locker(reinterpret_cast<v8::Isolate*>(isolate));
-  v8::Isolate::Scope isolate_scope(reinterpret_cast<v8::Isolate*>(isolate));
-
-  DCHECK_NOT_NULL(isolate->global_safepoint());
-
-  // Free all shared LABs to make the shared heap iterable.
-  isolate->global_safepoint()->IterateClientIsolates([](Isolate* client) {
-    client->heap()->FreeSharedLinearAllocationAreas();
-  });
-
-  HeapVerifier::VerifyHeap(heap);
-}
-
-// static
 void HeapVerifier::VerifyObjectLayoutChangeIsAllowed(Heap* heap,
                                                      HeapObject object) {
   if (object.InSharedWritableHeap()) {
@@ -735,7 +715,7 @@ void HeapVerifier::VerifyObjectLayoutChangeIsAllowed(Heap* heap,
     // Shared strings only change layout under GC, never concurrently.
     if (object.IsShared()) {
       Isolate* isolate = heap->isolate();
-      Isolate* shared_heap_isolate = isolate->is_shared_heap_isolate()
+      Isolate* shared_heap_isolate = isolate->is_shared_space_isolate()
                                          ? isolate
                                          : isolate->shared_heap_isolate();
       shared_heap_isolate->global_safepoint()->AssertActive();
@@ -787,10 +767,7 @@ void HeapVerifier::VerifySafeMapTransition(Heap* heap, HeapObject object,
   }
 
   if (object.IsString(cage_base) &&
-      (new_map == ReadOnlyRoots(heap).thin_string_map() ||
-       new_map == ReadOnlyRoots(heap).thin_one_byte_string_map() ||
-       new_map == ReadOnlyRoots(heap).shared_thin_string_map() ||
-       new_map == ReadOnlyRoots(heap).shared_thin_one_byte_string_map())) {
+      new_map == ReadOnlyRoots(heap).thin_string_map()) {
     // When transitioning a string to ThinString,
     // Heap::NotifyObjectLayoutChange doesn't need to be invoked because only
     // tagged fields are introduced.

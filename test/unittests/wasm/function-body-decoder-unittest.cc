@@ -159,14 +159,14 @@ class TestModuleBuilder {
 
   byte AddPassiveElementSegment(wasm::ValueType type) {
     mod.elem_segments.emplace_back(type, WasmElemSegment::kStatusPassive,
-                                   WasmElemSegment::kExpressionElements);
+                                   WasmElemSegment::kExpressionElements, 0, 0);
     return static_cast<byte>(mod.elem_segments.size() - 1);
   }
 
   byte AddDeclarativeElementSegment() {
     mod.elem_segments.emplace_back(kWasmFuncRef,
                                    WasmElemSegment::kStatusDeclarative,
-                                   WasmElemSegment::kExpressionElements);
+                                   WasmElemSegment::kExpressionElements, 0, 0);
     return static_cast<byte>(mod.elem_segments.size() - 1);
   }
 
@@ -4774,7 +4774,7 @@ TEST_F(WasmOpcodeLengthTest, MiscExpressions) {
   ExpectLength(2, kExprGlobalSet);
   ExpectLength(2, kExprCallFunction);
   ExpectLength(3, kExprCallIndirect);
-  ExpectLength(3, kExprSelectWithType, 1);
+  ExpectLength(3, kExprSelectWithType, 1, kI32Code);
 }
 
 TEST_F(WasmOpcodeLengthTest, I32Const) {
@@ -4920,9 +4920,10 @@ class TypeReaderTest : public TestWithZone {
  public:
   HeapType DecodeHeapType(const byte* start, const byte* end) {
     Decoder decoder(start, end);
-    uint32_t length;
-    return value_type_reader::read_heap_type<Decoder::FullValidationTag>(
-        &decoder, start, &length, enabled_features_);
+    auto [heap_type, length] =
+        value_type_reader::read_heap_type<Decoder::FullValidationTag>(
+            &decoder, start, enabled_features_);
+    return heap_type;
   }
 
   // This variable is modified by WASM_FEATURE_SCOPE.

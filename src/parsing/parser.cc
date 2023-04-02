@@ -174,6 +174,9 @@ bool Parser::ShortcutNumericLiteralBinaryExpression(Expression** x,
       case Token::DIV:
         *x = factory()->NewNumberLiteral(base::Divide(x_val, y_val), pos);
         return true;
+      case Token::MOD:
+        *x = factory()->NewNumberLiteral(Modulo(x_val, y_val), pos);
+        return true;
       case Token::BIT_OR: {
         int value = DoubleToInt32(x_val) | DoubleToInt32(y_val);
         *x = factory()->NewNumberLiteral(value, pos);
@@ -889,15 +892,6 @@ void Parser::ParseFunction(Isolate* isolate, ParseInfo* info,
   }
 
   int function_literal_id = shared_info->function_literal_id();
-  if (V8_UNLIKELY(script->type() == Script::TYPE_WEB_SNAPSHOT)) {
-    // Function literal IDs for inner functions haven't been allocated when
-    // deserializing. Put the inner function SFIs to the end of the list;
-    // they'll be deduplicated later (if the corresponding SFIs exist already)
-    // in Script::FindSharedFunctionInfo. (-1 here because function_literal_id
-    // is the parent's id. The inner function will get ids starting from
-    // function_literal_id + 1.)
-    function_literal_id = script->shared_function_info_count() - 1;
-  }
 
   // Initialize parser state.
   info->set_function_name(ast_value_factory()->GetString(

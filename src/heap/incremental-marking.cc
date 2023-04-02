@@ -82,36 +82,6 @@ void IncrementalMarking::MarkBlackBackground(HeapObject obj, int object_size) {
   IncrementLiveBytesBackground(chunk, static_cast<intptr_t>(object_size));
 }
 
-void IncrementalMarking::NotifyLeftTrimming(HeapObject from, HeapObject to) {
-  if (!IsMarking()) return;
-
-  DCHECK(MemoryChunk::FromHeapObject(from)->SweepingDone());
-  DCHECK_EQ(MemoryChunk::FromHeapObject(from), MemoryChunk::FromHeapObject(to));
-  DCHECK_NE(from, to);
-
-  MarkBit new_mark_bit = marking_state()->MarkBitFrom(to);
-
-  if (black_allocation() &&
-      Marking::IsBlack<AccessMode::ATOMIC>(new_mark_bit)) {
-    // Nothing to do if the object is in black area.
-    return;
-  }
-  MarkBlackAndVisitObjectDueToLayoutChange(from);
-  DCHECK(marking_state()->IsBlack(from));
-  // Mark the new address as black.
-  if (from.address() + kTaggedSize == to.address()) {
-    // The old and the new markbits overlap. The |to| object has the
-    // grey color. To make it black, we need to set the second bit.
-    DCHECK(new_mark_bit.Get<AccessMode::ATOMIC>());
-    new_mark_bit.Next().Set<AccessMode::ATOMIC>();
-  } else {
-    bool success = Marking::WhiteToBlack<AccessMode::ATOMIC>(new_mark_bit);
-    DCHECK(success);
-    USE(success);
-  }
-  DCHECK(marking_state()->IsBlack(to));
-}
-
 bool IncrementalMarking::CanBeStarted() const {
   // Only start incremental marking in a safe state:
   //   1) when incremental marking is turned on
@@ -119,8 +89,7 @@ bool IncrementalMarking::CanBeStarted() const {
   //   3) when we are currently not serializing or deserializing the heap, and
   //   4) not a shared heap.
   return v8_flags.incremental_marking && heap_->gc_state() == Heap::NOT_IN_GC &&
-         heap_->deserialization_complete() &&
-         !isolate()->serializer_enabled() && !heap_->IsShared();
+         heap_->deserialization_complete() && !isolate()->serializer_enabled();
 }
 
 bool IncrementalMarking::IsBelowActivationThresholds() const {
@@ -131,7 +100,6 @@ bool IncrementalMarking::IsBelowActivationThresholds() const {
 void IncrementalMarking::Start(GarbageCollector garbage_collector,
                                GarbageCollectionReason gc_reason) {
   DCHECK(!heap_->sweeping_in_progress());
-  DCHECK(!heap_->IsShared());
 
   if (v8_flags.trace_incremental_marking) {
     const size_t old_generation_size_mb =
@@ -236,7 +204,7 @@ class IncrementalMarking::IncrementalMarkingRootMarkingVisitor final
     DCHECK(!MapWord::IsPacked(object.ptr()));
     HeapObject heap_object = HeapObject::cast(object);
 
-    if (heap_object.InSharedHeap()) return;
+    if (heap_object.InSharedHeap() || heap_object.InReadOnlySpace()) return;
 
     if (incremental_marking_->IsMajorMarking()) {
       if (incremental_marking_->WhiteToGreyAndPush(heap_object)) {
@@ -275,8 +243,18 @@ void IncrementalMarking::MarkRoots() {
 
     std::vector<PageMarkingItem> marking_items;
     RememberedSet<OLD_TO_NEW>::IterateMemoryChunks(
-        heap_, [&marking_items](MemoryChunk* chunk) {
-          marking_items.emplace_back(chunk);
+        heap(), [&marking_items](MemoryChunk* chunk) {
+          if (chunk->slot_set<OLD_TO_NEW>()) {
+            marking_items.emplace_back(
+                chunk, PageMarkingItem::SlotsType::kRegularSlots);
+          } else {
+            chunk->ReleaseInvalidatedSlots<OLD_TO_NEW>();
+          }
+
+          if (chunk->typed_slot_set<OLD_TO_NEW>()) {
+            marking_items.emplace_back(chunk,
+                                       PageMarkingItem::SlotsType::kTypedSlots);
+          }
         });
 
     V8::GetCurrentPlatform()
@@ -407,7 +385,7 @@ void IncrementalMarking::StartBlackAllocation() {
         "Marking Code objects requires write access to the Code page header");
     heap()->code_space()->MarkLinearAllocationAreaBlack();
   }
-  if (isolate()->is_shared_heap_isolate()) {
+  if (isolate()->is_shared_space_isolate()) {
     DCHECK_EQ(heap()->shared_space()->top(), kNullAddress);
     isolate()->global_safepoint()->IterateClientIsolates([](Isolate* client) {
       client->heap()->MarkSharedLinearAllocationAreasBlack();
@@ -430,7 +408,7 @@ void IncrementalMarking::PauseBlackAllocation() {
         "Marking Code objects requires write access to the Code page header");
     heap()->code_space()->UnmarkLinearAllocationArea();
   }
-  if (isolate()->is_shared_heap_isolate()) {
+  if (isolate()->is_shared_space_isolate()) {
     DCHECK_EQ(heap()->shared_space()->top(), kNullAddress);
     isolate()->global_safepoint()->IterateClientIsolates([](Isolate* client) {
       client->heap()->UnmarkSharedLinearAllocationAreas();
@@ -592,8 +570,7 @@ bool IncrementalMarking::Stop() {
 
   is_marking_ = false;
 
-  if (v8_flags.shared_space && isolate()->has_shared_heap() &&
-      !isolate()->is_shared_space_isolate()) {
+  if (isolate()->has_shared_space() && !isolate()->is_shared_space_isolate()) {
     // When disabling local incremental marking in a client isolate (= worker
     // isolate), the marking barrier needs to stay enabled when incremental
     // marking in the shared heap is running.

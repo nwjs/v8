@@ -172,17 +172,6 @@ void MigrateExternalString(Isolate* isolate, String string,
   }
 }
 
-template <typename IsolateT>
-Map ComputeThinStringMap(IsolateT* isolate, StringShape from_string_shape,
-                         bool one_byte) {
-  ReadOnlyRoots roots(isolate);
-  if (from_string_shape.IsShared()) {
-    return one_byte ? roots.shared_thin_one_byte_string_map()
-                    : roots.shared_thin_string_map();
-  }
-  return one_byte ? roots.thin_one_byte_string_map() : roots.thin_string_map();
-}
-
 void InitExternalPointerFieldsDuringExternalization(String string, Map new_map,
                                                     Isolate* isolate) {
   string.InitExternalPointerField<kExternalStringResourceTag>(
@@ -222,8 +211,7 @@ void String::MakeThin(
 
   bool may_contain_recorded_slots = initial_shape.IsIndirect();
   int old_size = SizeFromMap(initial_map);
-  Map target_map = ComputeThinStringMap(isolate, initial_shape,
-                                        internalized.IsOneByteRepresentation());
+  Map target_map = ReadOnlyRoots(isolate).thin_string_map();
   const bool in_shared_heap = InSharedWritableHeap();
   if (in_shared_heap) {
     // Objects in the shared heap are always direct, therefore they can't have
@@ -388,13 +376,14 @@ void String::MakeExternalDuringGC(Isolate* isolate, T* resource) {
   // Byte size of the external String object.
   int new_size = this->SizeFromMap(new_map);
 
-  // Shared strings are never indirect or large.
-  DCHECK(!isolate->heap()->IsLargeObject(*this));
+  // Shared strings are never indirect.
   DCHECK(!StringShape(*this).IsIndirect());
 
-  isolate->heap()->NotifyObjectSizeChange(*this, size, new_size,
-                                          ClearRecordedSlots::kNo,
-                                          UpdateInvalidatedObjectSize::kNo);
+  if (!isolate->heap()->IsLargeObject(*this)) {
+    isolate->heap()->NotifyObjectSizeChange(*this, size, new_size,
+                                            ClearRecordedSlots::kNo,
+                                            UpdateInvalidatedObjectSize::kNo);
+  }
 
   // The external pointer slots must be initialized before the new map is
   // installed. Otherwise, a GC marking thread may see the new map before the
@@ -1002,8 +991,7 @@ void String::WriteToFlat(String source, sinkchar* sink, int start, int length,
         start += offset;
         continue;
       }
-      case kOneByteStringTag | kThinStringTag:
-      case kTwoByteStringTag | kThinStringTag:
+      case kThinStringTag:
         source = ThinString::cast(source).actual(cage_base);
         continue;
     }

@@ -1428,7 +1428,7 @@ int TranslatedState::CreateNextTranslatedValue(
 
 Address TranslatedState::DecompressIfNeeded(intptr_t value) {
   if (COMPRESS_POINTERS_BOOL) {
-    return V8HeapCompressionScheme::DecompressTaggedAny(
+    return V8HeapCompressionScheme::DecompressTagged(
         isolate(), static_cast<uint32_t>(value));
   } else {
     return value;
@@ -2237,8 +2237,7 @@ void TranslatedState::StoreMaterializedValuesAndDeopt(JavaScriptFrame* frame) {
                             previously_materialized_objects);
     CHECK_EQ(frames_[0].kind(), TranslatedFrame::kUnoptimizedFunction);
     CHECK_EQ(frame->function(), frames_[0].front().GetRawValue());
-    Deoptimizer::DeoptimizeFunction(frame->function(),
-                                    frame->LookupCode().ToCode());
+    Deoptimizer::DeoptimizeFunction(frame->function(), frame->LookupCode());
   }
 }
 

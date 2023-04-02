@@ -1400,7 +1400,7 @@ void TriggerTierUp(WasmInstanceObject instance, int func_index) {
 
   // Before adding the tier-up unit or increasing priority, do process type
   // feedback for best code generation.
-  if (v8_flags.wasm_speculative_inlining) {
+  if (native_module->enabled_features().has_inlining()) {
     // TODO(jkummerow): we could have collisions here if different instances
     // of the same module have collected different feedback. If that ever
     // becomes a problem, figure out a solution.
@@ -1412,10 +1412,10 @@ void TriggerTierUp(WasmInstanceObject instance, int func_index) {
 
 void TierUpNowForTesting(Isolate* isolate, WasmInstanceObject instance,
                          int func_index) {
-  if (v8_flags.wasm_speculative_inlining) {
+  NativeModule* native_module = instance.module_object().native_module();
+  if (native_module->enabled_features().has_inlining()) {
     TransitiveTypeFeedbackProcessor::Process(instance, func_index);
   }
-  auto* native_module = instance.module_object().native_module();
   wasm::GetWasmEngine()->CompileFunction(isolate->counters(), native_module,
                                          func_index,
                                          wasm::ExecutionTier::kTurbofan);
@@ -1425,10 +1425,10 @@ void TierUpNowForTesting(Isolate* isolate, WasmInstanceObject instance,
 namespace {
 
 void RecordStats(Code code, Counters* counters) {
-  if (code.is_off_heap_trampoline()) return;
+  if (!code.has_instruction_stream()) return;
   InstructionStream instruction_stream = FromCode(code);
   counters->wasm_generated_code_size()->Increment(
-      instruction_stream.raw_body_size());
+      instruction_stream.body_size());
   counters->wasm_reloc_size()->Increment(
       instruction_stream.relocation_info().length());
 }

@@ -1135,15 +1135,13 @@ bool GetInitialOrMinimumProperty(v8::Isolate* isolate, ErrorThrower* thrower,
 namespace {
 i::Handle<i::Object> DefaultReferenceValue(i::Isolate* isolate,
                                            i::wasm::ValueType type) {
-  if (type.is_reference()) {
-    // Use undefined for JS type (externref) but null for wasm types as wasm
-    // does not know undefined.
-    if (type.heap_representation() == i::wasm::HeapType::kExtern) {
-      return isolate->factory()->undefined_value();
-    }
-    return isolate->factory()->null_value();
+  DCHECK(type.is_object_reference());
+  // Use undefined for JS type (externref) but null for wasm types as wasm does
+  // not know undefined.
+  if (type.heap_representation() == i::wasm::HeapType::kExtern) {
+    return isolate->factory()->undefined_value();
   }
-  UNREACHABLE();
+  return isolate->factory()->wasm_null();
 }
 }  // namespace
 
@@ -1357,7 +1355,7 @@ void WebAssemblyMemory(const v8::FunctionCallbackInfo<v8::Value>& args) {
         i::Handle<i::WasmMemoryObject>::cast(memory_obj)->array_buffer(),
         i_isolate);
     Maybe<bool> result =
-        buffer->SetIntegrityLevel(buffer, i::FROZEN, i::kDontThrow);
+        buffer->SetIntegrityLevel(i_isolate, buffer, i::FROZEN, i::kDontThrow);
     if (!result.FromJust()) {
       thrower.TypeError(
           "Status of setting SetIntegrityLevel of buffer is false.");
@@ -2261,55 +2259,15 @@ void WebAssemblyTableGrow(const v8::FunctionCallbackInfo<v8::Value>& args) {
 namespace {
 void WasmObjectToJSReturnValue(v8::ReturnValue<v8::Value>& return_value,
                                i::Handle<i::Object> value,
-                               i::wasm::HeapType::Representation repr,
-                               const i::wasm::WasmModule* module,
-                               i::Isolate* isolate,
+                               i::wasm::HeapType type, i::Isolate* isolate,
                                ScheduledErrorThrower* thrower) {
-  switch (repr) {
-    case i::wasm::HeapType::kExtern:
-    case i::wasm::HeapType::kString:
-    case i::wasm::HeapType::kI31:
-      return_value.Set(Utils::ToLocal(value));
-      return;
-    case i::wasm::HeapType::kFunc: {
-      if (!value->IsNull()) {
-        DCHECK(value->IsWasmInternalFunction());
-        value =
-            handle(i::Handle<i::WasmInternalFunction>::cast(value)->external(),
-                   isolate);
-      }
-      return_value.Set(Utils::ToLocal(value));
-      return;
-    }
-    case i::wasm::HeapType::kStringViewWtf8:
-      thrower->TypeError("stringview_wtf8 has no JS representation");
-      return;
-    case i::wasm::HeapType::kStringViewWtf16:
-      thrower->TypeError("stringview_wtf16 has no JS representation");
-      return;
-    case i::wasm::HeapType::kStringViewIter:
-      thrower->TypeError("stringview_iter has no JS representation");
-      return;
-    case i::wasm::HeapType::kBottom:
-      UNREACHABLE();
-    case i::wasm::HeapType::kStruct:
-    case i::wasm::HeapType::kArray:
-    case i::wasm::HeapType::kEq:
-    case i::wasm::HeapType::kAny: {
-      return_value.Set(Utils::ToLocal(value));
-      return;
-    }
-    default:
-      if (module->has_signature(repr)) {
-        if (!value->IsNull()) {
-          DCHECK(value->IsWasmInternalFunction());
-          value = handle(
-              i::Handle<i::WasmInternalFunction>::cast(value)->external(),
-              isolate);
-        }
-      }
-      return_value.Set(Utils::ToLocal(value));
-      return;
+  const char* error_message = nullptr;
+  i::MaybeHandle<i::Object> maybe_result =
+      i::wasm::WasmToJSObject(isolate, value, type, &error_message);
+  if (maybe_result.is_null()) {
+    thrower->TypeError("%s", error_message);
+  } else {
+    return_value.Set(Utils::ToLocal(maybe_result.ToHandleChecked()));
   }
 }
 }  // namespace
@@ -2349,12 +2307,7 @@ void WebAssemblyTableGet(const v8::FunctionCallbackInfo<v8::Value>& args) {
       i::WasmTableObject::Get(i_isolate, receiver, index);
 
   v8::ReturnValue<v8::Value> return_value = args.GetReturnValue();
-  const i::wasm::WasmModule* module =
-      receiver->instance().IsWasmInstanceObject()
-          ? i::WasmInstanceObject::cast(receiver->instance()).module()
-          : nullptr;
-  WasmObjectToJSReturnValue(return_value, result,
-                            receiver->type().heap_representation(), module,
+  WasmObjectToJSReturnValue(return_value, result, receiver->type().heap_type(),
                             i_isolate, &thrower);
 }
 
@@ -2380,19 +2333,18 @@ void WebAssemblyTableSet(const v8::FunctionCallbackInfo<v8::Value>& args) {
   i::Handle<i::Object> element;
   if (args.Length() >= 2) {
     element = Utils::OpenHandle(*args[1]);
+    const char* error_message;
+    if (!i::WasmTableObject::JSToWasmElement(i_isolate, table_object, element,
+                                             &error_message)
+             .ToHandle(&element)) {
+      thrower.TypeError("Argument 1 is invalid for table: %s", error_message);
+      return;
+    }
   } else if (table_object->type().is_defaultable()) {
     element = DefaultReferenceValue(i_isolate, table_object->type());
   } else {
     thrower.TypeError("Table of non-defaultable type %s needs explicit element",
                       table_object->type().name().c_str());
-    return;
-  }
-
-  const char* error_message;
-  if (!i::WasmTableObject::JSToWasmElement(i_isolate, table_object, element,
-                                           &error_message)
-           .ToHandle(&element)) {
-    thrower.TypeError("Argument 1 is invalid for table: %s", error_message);
     return;
   }
 
@@ -2469,7 +2421,7 @@ void WebAssemblyMemoryGetBuffer(
     // buffer are out of sync, handle that here when bounds checks, and Grow
     // are handled correctly.
     Maybe<bool> result =
-        buffer->SetIntegrityLevel(buffer, i::FROZEN, i::kDontThrow);
+        buffer->SetIntegrityLevel(i_isolate, buffer, i::FROZEN, i::kDontThrow);
     if (!result.FromJust()) {
       thrower.TypeError(
           "Status of setting SetIntegrityLevel of buffer is false.");
@@ -2722,13 +2674,9 @@ void WebAssemblyGlobalGetValueCommon(
       break;
     case i::wasm::kRef:
     case i::wasm::kRefNull: {
-      const i::wasm::WasmModule* module =
-          receiver->instance().IsWasmInstanceObject()
-              ? i::WasmInstanceObject::cast(receiver->instance()).module()
-              : nullptr;
       WasmObjectToJSReturnValue(return_value, receiver->GetRef(),
-                                receiver->type().heap_representation(), module,
-                                i_isolate, &thrower);
+                                receiver->type().heap_type(), i_isolate,
+                                &thrower);
       break;
     }
     case i::wasm::kRtt:
@@ -3001,6 +2949,8 @@ void WasmJs::Install(Isolate* isolate, bool exposed_on_global_object) {
   // TODO(7748): These built-ins should not be shipped with wasm GC.
   // Either a new flag will be needed or the built-ins have to be deleted prior
   // to shipping.
+  // TODO(13810): We should install these later, when we can query the
+  // isolate's wasm_gc_enabled_callback, to take the Origin Trial into account.
   if (v8_flags.experimental_wasm_gc) {
     SimpleInstallFunction(
         isolate, webassembly, "experimentalConvertArrayToString",

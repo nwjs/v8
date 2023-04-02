@@ -188,7 +188,7 @@ class V8_EXPORT_PRIVATE CodeGenerator final : public GapResolver::Assembler {
   void RecordSafepoint(ReferenceMap* references);
 
   Zone* zone() const { return zone_; }
-  TurboAssembler* tasm() { return &tasm_; }
+  MacroAssembler* masm() { return &masm_; }
   SafepointTableBuilder* safepoint_table_builder() { return &safepoints_; }
   size_t handler_table_offset() const { return handler_table_offset_; }
 
@@ -278,9 +278,15 @@ class V8_EXPORT_PRIVATE CodeGenerator final : public GapResolver::Assembler {
 #if V8_ENABLE_WEBASSEMBLY
   void AssembleArchTrap(Instruction* instr, FlagsCondition condition);
 #endif  // V8_ENABLE_WEBASSEMBLY
+#if V8_TARGET_ARCH_X64
+  void AssembleArchBinarySearchSwitchRange(
+      Register input, RpoNumber def_block, std::pair<int32_t, Label*>* begin,
+      std::pair<int32_t, Label*>* end, base::Optional<int32_t>& last_cmp_value);
+#else
   void AssembleArchBinarySearchSwitchRange(Register input, RpoNumber def_block,
                                            std::pair<int32_t, Label*>* begin,
                                            std::pair<int32_t, Label*>* end);
+#endif  // V8_TARGET_ARCH_X64
   void AssembleArchBinarySearchSwitch(Instruction* instr);
   void AssembleArchTableSwitch(Instruction* instr);
 
@@ -448,7 +454,7 @@ class V8_EXPORT_PRIVATE CodeGenerator final : public GapResolver::Assembler {
   RpoNumber current_block_;
   SourcePosition start_source_position_;
   SourcePosition current_source_position_;
-  TurboAssembler tasm_;
+  MacroAssembler masm_;
   GapResolver resolver_;
   SafepointTableBuilder safepoints_;
   ZoneVector<HandlerInfo> handlers_;

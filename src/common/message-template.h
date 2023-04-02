@@ -29,7 +29,7 @@ namespace internal {
   T(IcuError, "Internal error. Icu error.")                                    \
   /* TypeError */                                                              \
   T(ApplyNonFunction,                                                          \
-    "Function.prototype.apply was called on %, which is a % and not a "        \
+    "Function.prototype.apply was called on %, which is % and not a "          \
     "function")                                                                \
   T(ArgumentsDisallowedInInitializerAndStaticBlock,                            \
     "'arguments' is not allowed in class field initializer or static "         \
@@ -99,6 +99,8 @@ namespace internal {
   T(DebuggerType, "Debugger: Parameters have wrong types.")                    \
   T(DeclarationMissingInitializer, "Missing initializer in % declaration")     \
   T(DefineDisallowed, "Cannot define property %, object is not extensible")    \
+  T(DefineDisallowedFixedLayout,                                               \
+    "Cannot define property %, object is fixed layout")                        \
   T(DetachedOperation, "Cannot perform % on a detached ArrayBuffer")           \
   T(DoNotUse, "Do not use %; %")                                               \
   T(DuplicateTemplateProperty, "Object template has duplicate property '%'")   \
@@ -710,8 +712,8 @@ namespace internal {
   T(OptionalChainingNoTemplate, "Invalid tagged template on optional chain")   \
   /* AggregateError */                                                         \
   T(AllPromisesRejected, "All promises were rejected")                         \
-  /* Web snapshots */                                                          \
-  T(WebSnapshotError, "Web snapshot failed: %")
+  T(CannotDeepFreezeObject, "Cannot DeepFreeze object of type %")              \
+  T(CannotDeepFreezeValue, "Cannot DeepFreeze non-const value %")
 
 enum class MessageTemplate {
 #define TEMPLATE(NAME, STRING) k##NAME,

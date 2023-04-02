@@ -62,7 +62,6 @@
 #include "src/parsing/scanner-character-streams.h"
 #include "src/snapshot/code-serializer.h"
 #include "src/utils/ostreams.h"
-#include "src/web-snapshot/web-snapshot.h"
 #include "src/zone/zone-list-inl.h"  // crbug.com/v8/8816
 
 #ifdef V8_ENABLE_MAGLEV
@@ -2620,7 +2619,7 @@ bool Compiler::Compile(Isolate* isolate, Handle<JSFunction> function,
   }
 
   // Install code on closure.
-  function->set_code(*code, kReleaseStore);
+  function->set_code(*code);
   // Install a feedback vector if necessary.
   if (code->kind() == CodeKind::BASELINE) {
     JSFunction::EnsureFeedbackVector(isolate, function, is_compiled_scope);
@@ -2740,7 +2739,7 @@ void Compiler::CompileOptimized(Isolate* isolate, Handle<JSFunction> function,
   Handle<Code> code;
   if (GetOrCompileOptimized(isolate, function, mode, code_kind)
           .ToHandle(&code)) {
-    function->set_code(*code, kReleaseStore);
+    function->set_code(*code);
   }
 
 #ifdef DEBUG
@@ -2830,7 +2829,7 @@ MaybeHandle<JSFunction> Compiler::GetFunctionFromEval(
       // If the position is missing, attempt to get the code offset by
       // walking the stack. Do not translate the code offset into source
       // position, but store it as negative value for lazy translation.
-      StackTraceFrameIterator it(isolate);
+      DebuggableStackFrameIterator it(isolate);
       if (!it.done() && it.is_javascript()) {
         FrameSummary summary = it.GetTopValidFrame();
         script->set_eval_from_shared(
@@ -3451,29 +3450,6 @@ MaybeHandle<SharedFunctionInfo> GetSharedFunctionInfoForScriptImpl(
     DCHECK_NULL(deserialize_task);
   }
 
-  if (V8_UNLIKELY(
-          v8_flags.experimental_web_snapshots &&
-          (source->IsExternalOneByteString() || source->IsSeqOneByteString() ||
-           source->IsExternalTwoByteString() || source->IsSeqTwoByteString()) &&
-          source->length() > 4)) {
-    // Experimental: Treat the script as a web snapshot if it starts with the
-    // magic byte sequence. TODO(v8:11525): Remove this once proper embedder
-    // integration is done.
-    bool magic_matches = true;
-    for (size_t i = 0;
-         i < sizeof(WebSnapshotSerializerDeserializer::kMagicNumber); ++i) {
-      if (source->Get(static_cast<int>(i)) !=
-          WebSnapshotSerializerDeserializer::kMagicNumber[i]) {
-        magic_matches = false;
-        break;
-      }
-    }
-    if (magic_matches) {
-      return Compiler::GetSharedFunctionInfoForWebSnapshot(
-          isolate, source, script_details.name_obj);
-    }
-  }
-
   LanguageMode language_mode = construct_language_mode(v8_flags.use_strict);
   CompilationCache* compilation_cache = isolate->compilation_cache();
 
@@ -3804,30 +3780,6 @@ Compiler::GetSharedFunctionInfoForStreamedScript(
 }  // namespace internal
 
 // static
-Handle<SharedFunctionInfo> Compiler::GetSharedFunctionInfoForWebSnapshot(
-    Isolate* isolate, Handle<String> source,
-    MaybeHandle<Object> maybe_script_name) {
-  // This script won't hold the functions created from the web snapshot;
-  // reserving space only for the top-level SharedFunctionInfo is enough.
-  Handle<WeakFixedArray> shared_function_infos =
-      isolate->factory()->NewWeakFixedArray(1, AllocationType::kOld);
-  Handle<Script> script = isolate->factory()->NewScript(source);
-  script->set_type(Script::TYPE_WEB_SNAPSHOT);
-  script->set_shared_function_infos(*shared_function_infos);
-  Handle<Object> script_name;
-  if (maybe_script_name.ToHandle(&script_name) && script_name->IsString()) {
-    script->set_name(String::cast(*script_name));
-  } else {
-    script->set_name(*isolate->factory()->empty_string());
-  }
-
-  Handle<SharedFunctionInfo> shared =
-      isolate->factory()->NewSharedFunctionInfoForWebSnapshot();
-  shared->SetScript(isolate->factory()->read_only_roots(), *script, 0, false);
-  return shared;
-}
-
-// static
 template <typename IsolateT>
 Handle<SharedFunctionInfo> Compiler::GetSharedFunctionInfo(
     FunctionLiteral* literal, Handle<Script> script, IsolateT* isolate) {
@@ -3925,7 +3877,7 @@ void Compiler::DisposeTurbofanCompilationJob(TurbofanCompilationJob* job,
   Handle<JSFunction> function = job->compilation_info()->closure();
   ResetTieringState(*function, job->compilation_info()->osr_offset());
   if (restore_function_code) {
-    function->set_code(function->shared().GetCode(), kReleaseStore);
+    function->set_code(function->shared().GetCode());
   }
 }
 
@@ -3976,7 +3928,7 @@ void Compiler::FinalizeTurbofanCompilationJob(TurbofanCompilationJob* job,
           CompilerTracer::TraceOptimizeOSRFinished(isolate, function,
                                                    osr_offset);
         } else {
-          function->set_code(*compilation_info->code(), kReleaseStore);
+          function->set_code(*compilation_info->code());
         }
       }
       return;
@@ -3990,7 +3942,7 @@ void Compiler::FinalizeTurbofanCompilationJob(TurbofanCompilationJob* job,
   if (V8_LIKELY(use_result)) {
     ResetTieringState(*function, osr_offset);
     if (!IsOSR(osr_offset)) {
-      function->set_code(shared->GetCode(), kReleaseStore);
+      function->set_code(shared->GetCode());
     }
   }
 }
@@ -4065,10 +4017,6 @@ void Compiler::PostInstantiation(Handle<JSFunction> function) {
         DCHECK(!code.marked_for_deoptimization());
         DCHECK(function->shared().is_compiled());
 
-        // We don't need a release store because the optimized code was
-        // stored with release semantics into the vector
-        static_assert(
-            FeedbackVector::kFeedbackVectorMaybeOptimizedCodeIsStoreRelease);
         function->set_code(code);
       }
     }

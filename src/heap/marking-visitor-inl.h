@@ -135,7 +135,7 @@ void MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitCodeTarget(
     InstructionStream host, RelocInfo* rinfo) {
   DCHECK(RelocInfo::IsCodeTargetMode(rinfo->rmode()));
   InstructionStream target =
-      InstructionStream::GetCodeFromTargetAddress(rinfo->target_address());
+      InstructionStream::FromTargetAddress(rinfo->target_address());
 
   if (!ShouldMarkObject(target)) return;
   MarkObject(host, target);
@@ -257,6 +257,7 @@ int MarkingVisitorBase<ConcreteVisitor, MarkingState>::
     if (end < size) {
       // The object can be pushed back onto the marking worklist only after
       // progress bar was updated.
+      DCHECK(ShouldMarkObject(object));
       local_marking_worklists_->Push(object);
     }
   }
@@ -264,21 +265,26 @@ int MarkingVisitorBase<ConcreteVisitor, MarkingState>::
 }
 
 template <typename ConcreteVisitor, typename MarkingState>
+int MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitFixedArrayRegularly(
+    Map map, FixedArray object) {
+  if (!concrete_visitor()->ShouldVisit(object)) return 0;
+  int size = FixedArray::BodyDescriptor::SizeOf(map, object);
+  if (concrete_visitor()->ShouldVisitMapPointer()) {
+    VisitMapPointer(object);
+  }
+  FixedArray::BodyDescriptor::IterateBody(map, object, size,
+                                          concrete_visitor());
+  return size;
+}
+
+template <typename ConcreteVisitor, typename MarkingState>
 int MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitFixedArray(
     Map map, FixedArray object) {
-  // Arrays with the progress bar are not left-trimmable because they reside
-  // in the large object space.
   ProgressBar& progress_bar =
       MemoryChunk::FromHeapObject(object)->ProgressBar();
   return CanUpdateValuesInHeap() && progress_bar.IsEnabled()
              ? VisitFixedArrayWithProgressBar(map, object, progress_bar)
-             : concrete_visitor()->VisitLeftTrimmableArray(map, object);
-}
-
-template <typename ConcreteVisitor, typename MarkingState>
-int MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitFixedDoubleArray(
-    Map map, FixedDoubleArray object) {
-  return concrete_visitor()->VisitLeftTrimmableArray(map, object);
+             : VisitFixedArrayRegularly(map, object);
 }
 
 // ===========================================================================
@@ -335,8 +341,9 @@ int MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitJSArrayBuffer(
 }
 
 template <typename ConcreteVisitor, typename MarkingState>
-int MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitJSDataView(
-    Map map, JSDataView object) {
+int MarkingVisitorBase<ConcreteVisitor, MarkingState>::
+    VisitJSDataViewOrRabGsabDataView(Map map,
+                                     JSDataViewOrRabGsabDataView object) {
   return VisitEmbedderTracingSubclass(map, object);
 }
 
@@ -372,7 +379,8 @@ int MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitEphemeronHashTable(
     // WeakMaps and WeakSets and therefore cannot be ephemeron keys. See also
     // MarkCompactCollector::ProcessEphemeron.
     DCHECK(!key.InSharedWritableHeap());
-    if (concrete_visitor()->marking_state()->IsBlackOrGrey(key)) {
+    if (key.InReadOnlySpace() ||
+        concrete_visitor()->marking_state()->IsBlackOrGrey(key)) {
       VisitPointer(table, value_slot);
     } else {
       Object value_obj = table.ValueAt(i);
@@ -405,7 +413,8 @@ int MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitJSWeakRef(
   if (weak_ref.target().IsHeapObject()) {
     HeapObject target = HeapObject::cast(weak_ref.target());
     SynchronizePageAccess(target);
-    if (concrete_visitor()->marking_state()->IsBlackOrGrey(target)) {
+    if (target.InReadOnlySpace() ||
+        concrete_visitor()->marking_state()->IsBlackOrGrey(target)) {
       // Record the slot inside the JSWeakRef, since the
       // VisitJSObjectSubclass above didn't visit it.
       ObjectSlot slot = weak_ref.RawField(JSWeakRef::kTargetOffset);
@@ -432,8 +441,10 @@ int MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitWeakCell(
   HeapObject unregister_token = weak_cell.relaxed_unregister_token();
   SynchronizePageAccess(target);
   SynchronizePageAccess(unregister_token);
-  if (concrete_visitor()->marking_state()->IsBlackOrGrey(target) &&
-      concrete_visitor()->marking_state()->IsBlackOrGrey(unregister_token)) {
+  if ((target.InReadOnlySpace() ||
+       concrete_visitor()->marking_state()->IsBlackOrGrey(target)) &&
+      (unregister_token.InReadOnlySpace() ||
+       concrete_visitor()->marking_state()->IsBlackOrGrey(unregister_token))) {
     // Record the slots inside the WeakCell, since the IterateBody above
     // didn't visit it.
     ObjectSlot slot = weak_cell.RawField(WeakCell::kTargetOffset);
@@ -458,6 +469,7 @@ int MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitWeakCell(
 template <typename ConcreteVisitor, typename MarkingState>
 int MarkingVisitorBase<ConcreteVisitor, MarkingState>::MarkDescriptorArrayBlack(
     DescriptorArray descriptors) {
+  if (descriptors.InReadOnlySpace()) return 0;
   concrete_visitor()->marking_state()->WhiteToGrey(descriptors);
   if (concrete_visitor()->marking_state()->GreyToBlack(descriptors)) {
     VisitMapPointer(descriptors);
@@ -610,9 +622,9 @@ int YoungGenerationMarkingVisitorBase<
 }
 
 template <typename ConcreteVisitor, typename MarkingState>
-int YoungGenerationMarkingVisitorBase<
-    ConcreteVisitor, MarkingState>::VisitJSDataView(Map map,
-                                                    JSDataView object) {
+int YoungGenerationMarkingVisitorBase<ConcreteVisitor, MarkingState>::
+    VisitJSDataViewOrRabGsabDataView(Map map,
+                                     JSDataViewOrRabGsabDataView object) {
   return VisitEmbedderTracingSubClassWithEmbedderTracing(map, object);
 }
 

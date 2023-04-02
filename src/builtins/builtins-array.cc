@@ -1392,7 +1392,18 @@ Object Slow_ArrayConcat(BuiltinArguments* args, Handle<Object> species,
               UNREACHABLE();
           }
         }
-        if (failure) break;
+        if (failure) {
+#ifdef VERIFY_HEAP
+          // The allocated storage may contain uninitialized values which will
+          // cause FixedDoubleArray::FixedDoubleArrayVerify to fail, when the
+          // heap is verified (see: crbug.com/1415071). To prevent this, we
+          // initialize the array with holes.
+          if (v8_flags.verify_heap) {
+            double_storage->FillWithHoles(0, estimate_result_length);
+          }
+#endif  // VERIFY_HEAP
+          break;
+        }
       }
     }
     if (!failure) {
@@ -1847,6 +1858,13 @@ BUILTIN(ArrayPrototypeGroupToMap) {
 
   // 9. Return map.
   return *map;
+}
+
+BUILTIN(ArrayFromAsync) {
+  HandleScope scope(isolate);
+  DCHECK(v8_flags.harmony_array_from_async);
+
+  return ReadOnlyRoots(isolate).undefined_value();
 }
 
 }  // namespace internal

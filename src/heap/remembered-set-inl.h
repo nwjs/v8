@@ -38,7 +38,7 @@ SlotCallbackResult UpdateTypedSlotHelper::UpdateTypedSlot(Heap* heap,
     }
     case SlotType::kConstPoolEmbeddedObjectCompressed: {
       HeapObject old_target =
-          HeapObject::cast(Object(V8HeapCompressionScheme::DecompressTaggedAny(
+          HeapObject::cast(Object(V8HeapCompressionScheme::DecompressTagged(
               heap->isolate(), base::Memory<Tagged_t>(addr))));
       HeapObject new_target = old_target;
       SlotCallbackResult result = callback(FullMaybeObjectSlot(&new_target));
@@ -64,11 +64,10 @@ HeapObject UpdateTypedSlotHelper::GetTargetObject(Heap* heap,
   switch (slot_type) {
     case SlotType::kCodeEntry: {
       RelocInfo rinfo(addr, RelocInfo::CODE_TARGET, 0, InstructionStream());
-      return InstructionStream::GetCodeFromTargetAddress(
-          rinfo.target_address());
+      return InstructionStream::FromTargetAddress(rinfo.target_address());
     }
     case SlotType::kConstPoolCodeEntry: {
-      return InstructionStream::GetObjectFromEntryAddress(addr);
+      return InstructionStream::FromEntryAddress(addr);
     }
     case SlotType::kEmbeddedObjectCompressed: {
       RelocInfo rinfo(addr, RelocInfo::COMPRESSED_EMBEDDED_OBJECT, 0,
@@ -81,7 +80,7 @@ HeapObject UpdateTypedSlotHelper::GetTargetObject(Heap* heap,
       return rinfo.target_object(heap->isolate());
     }
     case SlotType::kConstPoolEmbeddedObjectCompressed: {
-      Address full = V8HeapCompressionScheme::DecompressTaggedAny(
+      Address full = V8HeapCompressionScheme::DecompressTagged(
           heap->isolate(), base::Memory<Tagged_t>(addr));
       return HeapObject::cast(Object(full));
     }

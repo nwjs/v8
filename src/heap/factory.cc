@@ -49,6 +49,7 @@
 #include "src/objects/foreign-inl.h"
 #include "src/objects/instance-type-inl.h"
 #include "src/objects/js-array-buffer-inl.h"
+#include "src/objects/js-array-buffer.h"
 #include "src/objects/js-array-inl.h"
 #include "src/objects/js-atomics-synchronization-inl.h"
 #include "src/objects/js-collection-inl.h"
@@ -62,6 +63,7 @@
 #include "src/objects/megadom-handler-inl.h"
 #include "src/objects/microtask-inl.h"
 #include "src/objects/module-inl.h"
+#include "src/objects/objects.h"
 #include "src/objects/promise-inl.h"
 #include "src/objects/property-descriptor-object-inl.h"
 #include "src/objects/scope-info.h"
@@ -73,7 +75,9 @@
 #include "src/roots/roots.h"
 #include "src/strings/unicode-inl.h"
 #if V8_ENABLE_WEBASSEMBLY
+#include "src/wasm/module-decoder-impl.h"
 #include "src/wasm/module-instantiate.h"
+#include "src/wasm/wasm-opcodes-inl.h"
 #include "src/wasm/wasm-result.h"
 #include "src/wasm/wasm-value.h"
 #endif
@@ -117,9 +121,7 @@ MaybeHandle<Code> Factory::CodeBuilder::BuildInternal(
     code = factory->NewCode(0, AllocationType::kOld);
   }
 
-  static constexpr bool kIsNotOffHeapTrampoline = false;
-  code->initialize_flags(kind_, builtin_, is_turbofanned_,
-                         kIsNotOffHeapTrampoline);
+  code->initialize_flags(kind_, builtin_, is_turbofanned_);
   code->set_kind_specific_flags(kind_specific_flags_, kRelaxedStore);
 
   // Basic block profiling data for builtins is stored in the JS heap rather
@@ -157,11 +159,10 @@ MaybeHandle<Code> Factory::CodeBuilder::BuildInternal(
     InstructionStream raw_istream = *instruction_stream;
     DisallowGarbageCollection no_gc;
 
-    raw_istream.set_raw_instruction_size(code_desc_.instruction_size());
-    raw_istream.set_raw_metadata_size(code_desc_.metadata_size());
+    raw_istream.set_instruction_size(code_desc_.instruction_size());
+    raw_istream.set_metadata_size(code_desc_.metadata_size());
     raw_istream.set_relocation_info(*reloc_info);
-    raw_istream.initialize_flags(kind_, is_turbofanned_, stack_slots_,
-                                 kIsNotOffHeapTrampoline);
+    raw_istream.initialize_flags(kind_, is_turbofanned_, stack_slots_);
     raw_istream.set_builtin_id(builtin_);
     // This might impact direct concurrent reads from TF if we are resetting
     // this field. We currently assume it's immutable thus a relaxed read (after
@@ -239,7 +240,7 @@ MaybeHandle<Code> Factory::CodeBuilder::BuildInternal(
   if (V8_UNLIKELY(profiler_data_ && v8_flags.turbo_profiling_verbose)) {
 #ifdef ENABLE_DISASSEMBLER
     std::ostringstream os;
-    instruction_stream->Disassemble(nullptr, os, isolate_);
+    code->Disassemble(nullptr, os, isolate_);
     if (!on_heap_profiler_data.is_null()) {
       Handle<String> disassembly =
           isolate_->factory()->NewStringFromAsciiChecked(os.str().c_str(),
@@ -496,8 +497,7 @@ Handle<FeedbackVector> Factory::NewFeedbackVector(
       size, AllocationType::kOld, *feedback_vector_map()));
   DisallowGarbageCollection no_gc;
   vector.set_shared_function_info(*shared);
-  vector.set_maybe_optimized_code(HeapObjectReference::ClearedValue(isolate()),
-                                  kReleaseStore);
+  vector.set_maybe_optimized_code(HeapObjectReference::ClearedValue(isolate()));
   vector.set_length(length);
   vector.set_invocation_count(0);
   vector.set_profiler_ticks(0);
@@ -1512,8 +1512,8 @@ Handle<Script> Factory::CloneScript(Handle<Script> script) {
     new_script.set_context_data(old_script.context_data());
     new_script.set_type(old_script.type());
     new_script.set_line_ends(*undefined_value(), SKIP_WRITE_BARRIER);
-    new_script.set_eval_from_shared_or_wrapped_arguments_or_sfi_table(
-        script->eval_from_shared_or_wrapped_arguments_or_sfi_table());
+    new_script.set_eval_from_shared_or_wrapped_arguments(
+        script->eval_from_shared_or_wrapped_arguments());
     new_script.set_shared_function_infos(*empty_weak_fixed_array(),
                                          SKIP_WRITE_BARRIER);
     new_script.set_eval_from_position(old_script.eval_from_position());
@@ -1831,10 +1831,9 @@ Handle<WasmArray> Factory::NewWasmArrayFromMemory(uint32_t length,
 }
 
 Handle<Object> Factory::NewWasmArrayFromElementSegment(
-    Handle<WasmInstanceObject> instance, const wasm::WasmElemSegment* segment,
+    Handle<WasmInstanceObject> instance, uint32_t segment_index,
     uint32_t start_offset, uint32_t length, Handle<Map> map) {
-  wasm::ValueType element_type = WasmArray::type(*map)->element_type();
-  DCHECK(element_type.is_reference());
+  DCHECK(WasmArray::type(*map)->element_type().is_reference());
   HeapObject raw =
       AllocateRaw(WasmArray::SizeFor(*map, length), AllocationType::kYoung);
   {
@@ -1852,17 +1851,24 @@ Handle<Object> Factory::NewWasmArrayFromElementSegment(
 
   Handle<WasmArray> result = handle(WasmArray::cast(raw), isolate());
 
+  // Lazily initialize the element segment if needed.
   AccountingAllocator allocator;
   Zone zone(&allocator, ZONE_NAME);
-  for (uint32_t i = 0; i < length; i++) {
-    wasm::ValueOrError maybe_element = wasm::EvaluateConstantExpression(
-        &zone, segment->entries[start_offset + i], element_type, isolate(),
-        instance);
-    if (wasm::is_error(maybe_element)) {
-      return handle(Smi::FromEnum(wasm::to_error(maybe_element)), isolate());
-    }
-    result->SetTaggedElement(i, wasm::to_value(maybe_element).to_ref());
+  base::Optional<MessageTemplate> opt_error =
+      wasm::InitializeElementSegment(&zone, isolate(), instance, segment_index);
+  if (opt_error.has_value()) {
+    return handle(Smi::FromEnum(opt_error.value()), isolate());
   }
+
+  Handle<FixedArray> elements =
+      handle(FixedArray::cast(instance->element_segments().get(segment_index)),
+             isolate());
+
+  for (uint32_t i = 0; i < length; i++) {
+    result->SetTaggedElement(
+        i, handle(elements->get(start_offset + i), isolate()));
+  }
+
   return result;
 }
 
@@ -1922,12 +1928,21 @@ Handle<SharedFunctionInfo> Factory::NewSharedFunctionInfoForWasmCapiFunction(
 }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-Handle<Cell> Factory::NewCell(Handle<Object> value) {
+Handle<Cell> Factory::NewCell(Smi value) {
   static_assert(Cell::kSize <= kMaxRegularHeapObjectSize);
   Cell result = Cell::cast(AllocateRawWithImmortalMap(
       Cell::kSize, AllocationType::kOld, *cell_map()));
   DisallowGarbageCollection no_gc;
-  result.set_value(*value);
+  result.set_value(value, WriteBarrierMode::SKIP_WRITE_BARRIER);
+  return handle(result, isolate());
+}
+
+Handle<Cell> Factory::NewCell() {
+  static_assert(Cell::kSize <= kMaxRegularHeapObjectSize);
+  Cell result = Cell::cast(AllocateRawWithImmortalMap(
+      Cell::kSize, AllocationType::kOld, *cell_map()));
+  result.set_value(read_only_roots().undefined_value(),
+                   WriteBarrierMode::SKIP_WRITE_BARRIER);
   return handle(result, isolate());
 }
 
@@ -2031,6 +2046,7 @@ Handle<Map> Factory::NewMap(InstanceType type, int instance_size,
                             ElementsKind elements_kind, int inobject_properties,
                             AllocationType allocation_type) {
   static_assert(LAST_JS_OBJECT_TYPE == LAST_TYPE);
+  DCHECK(!InstanceTypeChecker::UniqueMapOfInstanceType(type).has_value());
   DCHECK_IMPLIES(InstanceTypeChecker::IsJSObject(type) &&
                      !Map::CanHaveFastTransitionableElementsKind(type),
                  IsDictionaryElementsKind(elements_kind) ||
@@ -2489,10 +2505,8 @@ Handle<Code> Factory::NewOffHeapTrampolineFor(Handle<Code> code,
   const int no_flags = 0;
   Handle<Code> off_heap_trampoline = NewCode(no_flags, AllocationType::kOld);
 
-  const bool set_is_off_heap_trampoline = true;
   off_heap_trampoline->initialize_flags(code->kind(), code->builtin_id(),
-                                        code->is_turbofanned(),
-                                        set_is_off_heap_trampoline);
+                                        code->is_turbofanned());
   off_heap_trampoline->set_kind_specific_flags(
       code->kind_specific_flags(kRelaxedLoad), kRelaxedStore);
   off_heap_trampoline->set_code_entry_point(isolate(),
@@ -2772,7 +2786,8 @@ Handle<JSArray> Factory::NewJSArrayForTemplateLiteralArray(
   Handle<JSArray> raw_object =
       NewJSArrayWithElements(raw_strings, PACKED_ELEMENTS,
                              raw_strings->length(), AllocationType::kOld);
-  JSObject::SetIntegrityLevel(raw_object, FROZEN, kThrowOnError).ToChecked();
+  JSObject::SetIntegrityLevel(isolate(), raw_object, FROZEN, kThrowOnError)
+      .ToChecked();
 
   Handle<NativeContext> native_context = isolate()->native_context();
   Handle<TemplateLiteralObject> template_object =
@@ -3166,25 +3181,31 @@ Handle<JSTypedArray> Factory::NewJSTypedArray(ExternalArrayType type,
   return typed_array;
 }
 
-Handle<JSDataView> Factory::NewJSDataView(Handle<JSArrayBuffer> buffer,
-                                          size_t byte_offset,
-                                          size_t byte_length,
-                                          bool is_length_tracking) {
+Handle<JSDataViewOrRabGsabDataView> Factory::NewJSDataViewOrRabGsabDataView(
+    Handle<JSArrayBuffer> buffer, size_t byte_offset, size_t byte_length,
+    bool is_length_tracking) {
   CHECK_IMPLIES(is_length_tracking, v8_flags.harmony_rab_gsab);
   if (is_length_tracking) {
     // Security: enforce the invariant that length-tracking DataViews have their
     // byte_length set to 0.
     byte_length = 0;
   }
-  Handle<Map> map(isolate()->native_context()->data_view_fun().initial_map(),
-                  isolate());
-  Handle<JSDataView> obj = Handle<JSDataView>::cast(NewJSArrayBufferView(
-      map, empty_fixed_array(), buffer, byte_offset, byte_length));
+  bool is_backed_by_rab = !buffer->is_shared() && buffer->is_resizable_by_js();
+  Handle<Map> map;
+  if (is_backed_by_rab || is_length_tracking) {
+    map = handle(isolate()->native_context()->js_rab_gsab_data_view_map(),
+                 isolate());
+  } else {
+    map = handle(isolate()->native_context()->data_view_fun().initial_map(),
+                 isolate());
+  }
+  Handle<JSDataViewOrRabGsabDataView> obj =
+      Handle<JSDataViewOrRabGsabDataView>::cast(NewJSArrayBufferView(
+          map, empty_fixed_array(), buffer, byte_offset, byte_length));
   obj->set_data_pointer(
       isolate(), static_cast<uint8_t*>(buffer->backing_store()) + byte_offset);
   obj->set_is_length_tracking(is_length_tracking);
-  obj->set_is_backed_by_rab(!buffer->is_shared() &&
-                            buffer->is_resizable_by_js());
+  obj->set_is_backed_by_rab(is_backed_by_rab);
   return obj;
 }
 
@@ -3363,12 +3384,6 @@ Handle<SharedFunctionInfo> Factory::NewSharedFunctionInfoForBuiltin(
   Handle<SharedFunctionInfo> shared = NewSharedFunctionInfo(
       maybe_name, MaybeHandle<InstructionStream>(), builtin, kind);
   return shared;
-}
-
-Handle<SharedFunctionInfo> Factory::NewSharedFunctionInfoForWebSnapshot() {
-  return NewSharedFunctionInfo(empty_string(), MaybeHandle<InstructionStream>(),
-                               Builtin::kNoBuiltinId,
-                               FunctionKind::kNormalFunction);
 }
 
 int Factory::NumberToStringCacheHash(Smi number) {

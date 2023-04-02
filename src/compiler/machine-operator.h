@@ -986,6 +986,7 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   const Operator* Load(LoadRepresentation rep);
   const Operator* LoadImmutable(LoadRepresentation rep);
   const Operator* ProtectedLoad(LoadRepresentation rep);
+  const Operator* LoadTrapOnNull(LoadRepresentation rep);
 
   const Operator* LoadTransform(MemoryAccessKind kind,
                                 LoadTransformation transform);
@@ -997,6 +998,7 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   // store [base + index], value
   const Operator* Store(StoreRepresentation rep);
   const Operator* ProtectedStore(MachineRepresentation rep);
+  const Operator* StoreTrapOnNull(StoreRepresentation rep);
 
   // SIMD store: store a specified lane of value into [base + index].
   const Operator* StoreLane(MemoryAccessKind kind, MachineRepresentation rep,
@@ -1129,6 +1131,10 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   }
   const Operator* WordSarShiftOutZeros() {
     return WordSar(ShiftKind::kShiftOutZeros);
+  }
+
+  const Operator* TaggedEqual() {
+    return COMPRESS_POINTERS_BOOL ? Word32Equal() : WordEqual();
   }
 
  private:

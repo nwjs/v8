@@ -198,7 +198,6 @@ namespace internal {
                                                                                \
   /* Maglev Compiler */                                                        \
   ASM(MaglevOnStackReplacement, OnStackReplacement)                            \
-  ASM(MaglevOutOfLinePrologue, NoContext)                                      \
                                                                                \
   /* Code life-cycle */                                                        \
   TFC(CompileLazy, JSTrampoline)                                               \
@@ -271,6 +270,7 @@ namespace internal {
                                                                                \
   /* Type conversions continuations */                                         \
   TFC(ToBooleanLazyDeoptContinuation, SingleParameterOnStack)                  \
+  TFC(MathRoundContinuation, SingleParameterOnStack)                           \
                                                                                \
   /* Handlers */                                                               \
   TFH(KeyedLoadIC_PolymorphicName, LoadWithVector)                             \
@@ -399,6 +399,7 @@ namespace internal {
   CPP(ArrayShift)                                                              \
   /* ES6 #sec-array.prototype.unshift */                                       \
   CPP(ArrayUnshift)                                                            \
+  CPP(ArrayFromAsync)                                                          \
   /* Support for Array.from and other array-copying idioms */                  \
   TFS(CloneFastJSArray, kSource)                                               \
   TFS(CloneFastJSArrayFillingHoles, kSource)                                   \
@@ -427,8 +428,9 @@ namespace internal {
   CPP(ArrayBufferPrototypeSlice)                                               \
   /* https://tc39.es/proposal-resizablearraybuffer/ */                         \
   CPP(ArrayBufferPrototypeResize)                                              \
-  /* proposal-resizablearraybuffer/#sec-arraybuffer.prototype.transfer */      \
+  /* https://tc39.es/proposal-arraybuffer-transfer/ */                         \
   CPP(ArrayBufferPrototypeTransfer)                                            \
+  CPP(ArrayBufferPrototypeTransferToFixedLength)                               \
                                                                                \
   /* AsyncFunction */                                                          \
   TFS(AsyncFunctionEnter, kClosure, kReceiver)                                 \
@@ -502,7 +504,6 @@ namespace internal {
   /* DataView */                                                               \
   /* ES #sec-dataview-constructor */                                           \
   CPP(DataViewConstructor)                                                     \
-  TFC(DataViewGetVariableLength, DataViewGetVariableLength)                    \
                                                                                \
   /* Date */                                                                   \
   /* ES #sec-date-constructor */                                               \
@@ -626,10 +627,6 @@ namespace internal {
   CPP(JsonRawJson)                                                             \
   CPP(JsonIsRawJson)                                                           \
                                                                                \
-  /* Web snapshots */                                                          \
-  CPP(WebSnapshotSerialize)                                                    \
-  CPP(WebSnapshotDeserialize)                                                  \
-                                                                               \
   /* ICs */                                                                    \
   TFH(LoadIC, LoadWithVector)                                                  \
   TFH(LoadIC_Megamorphic, LoadWithVector)                                      \
@@ -671,8 +668,10 @@ namespace internal {
   TFH(LoadGlobalICBaseline, LoadGlobalBaseline)                                \
   TFH(LoadGlobalICInsideTypeofTrampoline, LoadGlobal)                          \
   TFH(LoadGlobalICInsideTypeofBaseline, LoadGlobalBaseline)                    \
+  TFH(LookupGlobalIC, LookupWithVector)                                        \
   TFH(LookupGlobalICTrampoline, LookupTrampoline)                              \
   TFH(LookupGlobalICBaseline, LookupBaseline)                                  \
+  TFH(LookupGlobalICInsideTypeof, LookupWithVector)                            \
   TFH(LookupGlobalICInsideTypeofTrampoline, LookupTrampoline)                  \
   TFH(LookupGlobalICInsideTypeofBaseline, LookupBaseline)                      \
   TFH(CloneObjectIC, CloneObjectWithVector)                                    \

@@ -158,7 +158,8 @@ struct LiveEditResult {
     OK,
     COMPILE_ERROR,
     BLOCKED_BY_RUNNING_GENERATOR,
-    BLOCKED_BY_ACTIVE_FUNCTION
+    BLOCKED_BY_ACTIVE_FUNCTION,
+    BLOCKED_BY_TOP_LEVEL_ES_MODULE_CHANGE,
   };
   Status status = OK;
   bool stack_changed = false;
@@ -310,6 +311,13 @@ class DebugDelegate {
                                int column) {
     return false;
   }
+
+  // Called every time a breakpoint condition is evaluated. This method is
+  // called before `BreakProgramRequested` if the condition is truthy.
+  virtual void BreakpointConditionEvaluated(v8::Local<v8::Context> context,
+                                            debug::BreakpointId breakpoint_id,
+                                            bool exception_thrown,
+                                            v8::Local<v8::Value> exception) {}
 };
 
 V8_EXPORT_PRIVATE void SetDebugDelegate(Isolate* isolate,

@@ -11,6 +11,7 @@
 #include "include/v8-internal.h"
 #include "src/heap/base/worklist.h"
 #include "src/heap/concurrent-marking.h"
+#include "src/heap/index-generator.h"
 #include "src/heap/marking-state.h"
 #include "src/heap/marking-visitor.h"
 #include "src/heap/marking-worklist.h"
@@ -34,6 +35,7 @@ class PagedNewSpace;
 class ReadOnlySpace;
 class RecordMigratedSlotVisitor;
 class UpdatingItem;
+class YoungGenerationMarkingTask;
 
 class MarkBitCellIterator {
  public:
@@ -210,9 +212,6 @@ class MainMarkingVisitor final
   template <typename T, typename TBodyDescriptor = typename T::BodyDescriptor>
   int VisitJSObjectSubclass(Map map, T object);
 
-  template <typename T>
-  int VisitLeftTrimmableArray(Map map, T object);
-
   template <typename TSlot>
   void RecordSlot(HeapObject object, TSlot slot, HeapObject target);
 
@@ -283,7 +282,6 @@ class CollectorBase {
 
  private:
   std::vector<Page*> new_space_evacuation_pages_;
-  std::vector<LargePage*> promoted_large_pages_;
 
  protected:
   using ResizeNewSpaceMode = Heap::ResizeNewSpaceMode;
@@ -298,8 +296,6 @@ class CollectorBase {
   }
 
   void StartSweepSpace(PagedSpace* space);
-  void StartSweepNewSpace();
-  void SweepLargeSpace(LargeObjectSpace* space);
 
   bool IsCppHeapMarkingFinished() const;
 
@@ -421,7 +417,6 @@ class MarkCompactCollector final : public CollectorBase {
   void VerifyMarking();
 #ifdef VERIFY_HEAP
   void VerifyMarkbitsAreClean();
-  void VerifyMarkbitsAreDirty(ReadOnlySpace* space);
   void VerifyMarkbitsAreClean(PagedSpaceBase* space);
   void VerifyMarkbitsAreClean(NewSpace* space);
   void VerifyMarkbitsAreClean(LargeObjectSpace* space);
@@ -456,17 +451,6 @@ class MarkCompactCollector final : public CollectorBase {
 
   explicit MarkCompactCollector(Heap* heap);
   ~MarkCompactCollector() final;
-
-  std::unique_ptr<UpdatingItem> CreateRememberedSetUpdatingItem(
-      MemoryChunk* chunk);
-
-#ifdef V8_ENABLE_INNER_POINTER_RESOLUTION_MB
-  // Finds an object header based on a `maybe_inner_ptr`. It returns
-  // `kNullAddress` if the parameter does not point to (the interior of) a valid
-  // heap object, or if it points to (the interior of) some object that is
-  // already marked as live (black or grey).
-  V8_EXPORT_PRIVATE Address FindBasePtrForMarking(Address maybe_inner_ptr);
-#endif  // V8_ENABLE_INNER_POINTER_RESOLUTION_MB
 
  private:
   Sweeper* sweeper() { return sweeper_; }
@@ -619,6 +603,9 @@ class MarkCompactCollector final : public CollectorBase {
 
   V8_INLINE bool ShouldMarkObject(HeapObject) const;
 
+  void StartSweepNewSpace();
+  void SweepLargeSpace(LargeObjectSpace* space);
+
   base::Mutex mutex_;
   base::Semaphore page_parallel_job_semaphore_{0};
 
@@ -636,7 +623,7 @@ class MarkCompactCollector final : public CollectorBase {
 #endif
 
   const bool uses_shared_heap_;
-  const bool is_shared_heap_isolate_;
+  const bool is_shared_space_isolate_;
 
   // True if we are collecting slots to perform evacuation from evacuation
   // candidates.
@@ -679,7 +666,9 @@ class MarkCompactCollector final : public CollectorBase {
   // the start of each GC.
   base::EnumSet<CodeFlushMode> code_flush_mode_;
 
-  friend class FullEvacuator;
+  std::vector<Page*> swept_empty_new_space_pages_;
+
+  friend class Evacuator;
   friend class RecordMigratedSlotVisitor;
 };
 
@@ -701,14 +690,10 @@ class MinorMarkCompactCollector final : public CollectorBase {
   void SetUp() final;
   void TearDown() final;
   void CollectGarbage() final;
-  void Prepare() final;
+  void Prepare() final {}
   void StartMarking() final;
 
   void MakeIterable(Page* page, FreeSpaceTreatmentMode free_space_mode);
-  void CleanupPromotedPages();
-
-  std::unique_ptr<UpdatingItem> CreateRememberedSetUpdatingItem(
-      MemoryChunk* chunk);
 
   void Finish() final;
 
@@ -716,8 +701,6 @@ class MinorMarkCompactCollector final : public CollectorBase {
 
   // Perform Wrapper Tracing if in use.
   void PerformWrapperTracing();
-
-  static bool IsUnmarkedYoungHeapObject(Heap* heap, FullObjectSlot p);
 
  private:
   class RootMarkingVisitor;
@@ -728,8 +711,8 @@ class MinorMarkCompactCollector final : public CollectorBase {
   Sweeper* sweeper() { return sweeper_; }
 
   void MarkLiveObjects();
-  void MarkRootSetInParallel(RootMarkingVisitor* root_visitor,
-                             bool was_marked_incrementally);
+  void MarkLiveObjectsInParallel(RootMarkingVisitor* root_visitor,
+                                 bool was_marked_incrementally);
   V8_INLINE void MarkRootObject(HeapObject obj);
   void DrainMarkingWorklist();
   void TraceFragmentation();
@@ -737,27 +720,79 @@ class MinorMarkCompactCollector final : public CollectorBase {
 
   void Sweep();
 
-  void EvacuatePrologue();
-  void EvacuateEpilogue();
-  void Evacuate();
-  void EvacuatePagesInParallel();
-  void UpdatePointersAfterEvacuation();
   void FinishConcurrentMarking();
 
-  void SweepArrayBufferExtensions();
+  // 'StartSweepNewSpace' and 'SweepNewLargeSpace' return true if any pages were
+  // promoted.
+  bool StartSweepNewSpace();
+  bool SweepNewLargeSpace();
 
   std::unique_ptr<YoungGenerationMainMarkingVisitor> main_marking_visitor_;
-
-  base::Semaphore page_parallel_job_semaphore_;
-  std::vector<Page*> new_space_evacuation_pages_;
-  std::vector<Page*> promoted_pages_;
-  std::vector<LargePage*> promoted_large_pages_;
 
   Sweeper* const sweeper_;
 
   friend class YoungGenerationMarkingTask;
   friend class YoungGenerationMarkingJob;
   friend class YoungGenerationMainMarkingVisitor;
+};
+
+class PageMarkingItem : public ParallelWorkItem {
+ public:
+  enum class SlotsType { kRegularSlots, kTypedSlots };
+
+  PageMarkingItem(MemoryChunk* chunk, SlotsType slots_type)
+      : chunk_(chunk), slots_type_(slots_type) {}
+  ~PageMarkingItem() = default;
+
+  void Process(YoungGenerationMarkingTask* task);
+
+ private:
+  inline Heap* heap() { return chunk_->heap(); }
+
+  void MarkUntypedPointers(YoungGenerationMarkingTask* task);
+  void MarkTypedPointers(YoungGenerationMarkingTask* task);
+  template <typename TSlot>
+  V8_INLINE SlotCallbackResult
+  CheckAndMarkObject(YoungGenerationMarkingTask* task, TSlot slot);
+
+  MemoryChunk* chunk_;
+  const SlotsType slots_type_;
+};
+
+enum class YoungMarkingJobType { kAtomic, kIncremental };
+
+class YoungGenerationMarkingJob : public v8::JobTask {
+ public:
+  YoungGenerationMarkingJob(Isolate* isolate, Heap* heap,
+                            MarkingWorklists* global_worklists,
+                            std::vector<PageMarkingItem> marking_items,
+                            YoungMarkingJobType young_marking_job_type)
+      : isolate_(isolate),
+        heap_(heap),
+        global_worklists_(global_worklists),
+        marking_items_(std::move(marking_items)),
+        remaining_marking_items_(marking_items_.size()),
+        generator_(marking_items_.size()),
+        young_marking_job_type_(young_marking_job_type) {}
+
+  void Run(JobDelegate* delegate) override;
+  size_t GetMaxConcurrency(size_t worker_count) const override;
+
+  bool ShouldDrainMarkingWorklist() const {
+    return young_marking_job_type_ == YoungMarkingJobType::kAtomic;
+  }
+
+ private:
+  void ProcessItems(JobDelegate* delegate);
+  void ProcessMarkingItems(YoungGenerationMarkingTask* task);
+
+  Isolate* isolate_;
+  Heap* heap_;
+  MarkingWorklists* global_worklists_;
+  std::vector<PageMarkingItem> marking_items_;
+  std::atomic_size_t remaining_marking_items_{0};
+  IndexGenerator generator_;
+  YoungMarkingJobType young_marking_job_type_;
 };
 
 }  // namespace internal

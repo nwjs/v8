@@ -469,7 +469,7 @@ void NewSpace::PromotePageToOldSpace(Page* page) {
   RemovePage(page);
   Page* new_page = Page::ConvertNewToOld(page);
   DCHECK(!new_page->InYoungGeneration());
-  new_page->SetFlag(Page::PAGE_NEW_OLD_PROMOTION);
+  USE(new_page);
 }
 
 // -----------------------------------------------------------------------------
@@ -571,7 +571,7 @@ void SemiSpaceNewSpace::UpdateLinearAllocationArea(Address known_top) {
   to_space_.AddRangeToActiveSystemPages(top(), limit());
   DCHECK_SEMISPACE_ALLOCATION_INFO(allocation_info_, to_space_);
 
-  UpdateInlineAllocationLimit(0);
+  UpdateInlineAllocationLimit();
 }
 
 void SemiSpaceNewSpace::ResetLinearAllocationArea() {
@@ -586,7 +586,8 @@ void SemiSpaceNewSpace::ResetLinearAllocationArea() {
   }
 }
 
-void SemiSpaceNewSpace::UpdateInlineAllocationLimit(size_t min_size) {
+void SemiSpaceNewSpace::UpdateInlineAllocationLimitForAllocation(
+    size_t min_size) {
   Address new_limit = ComputeLimit(top(), to_space_.page_high(),
                                    ALIGN_TO_ALLOCATION_ALIGNMENT(min_size));
   DCHECK_LE(top(), new_limit);
@@ -602,6 +603,10 @@ void SemiSpaceNewSpace::UpdateInlineAllocationLimit(size_t min_size) {
 #if DEBUG
   VerifyTop();
 #endif
+}
+
+void SemiSpaceNewSpace::UpdateInlineAllocationLimit() {
+  UpdateInlineAllocationLimitForAllocation(0);
 }
 
 bool SemiSpaceNewSpace::AddFreshPage() {
@@ -662,7 +667,7 @@ void SemiSpaceNewSpace::ResetParkedAllocationBuffers() {
 void SemiSpaceNewSpace::FreeLinearAllocationArea() {
   AdvanceAllocationObservers();
   MakeLinearAllocationAreaIterable();
-  UpdateInlineAllocationLimit(0);
+  UpdateInlineAllocationLimit();
 }
 
 #if DEBUG
@@ -844,7 +849,7 @@ void SemiSpaceNewSpace::EvacuatePrologue() {
   DCHECK_EQ(0u, Size());
 }
 
-void SemiSpaceNewSpace::EvacuateEpilogue() { set_age_mark(top()); }
+void SemiSpaceNewSpace::GarbageCollectionEpilogue() { set_age_mark(top()); }
 
 void SemiSpaceNewSpace::ZapUnusedMemory() {
   if (!IsFromSpaceCommitted()) return;
@@ -957,8 +962,8 @@ void PagedSpaceForNewSpace::FinishShrinking() {
   }
 }
 
-void PagedSpaceForNewSpace::UpdateInlineAllocationLimit(size_t size_in_bytes) {
-  PagedSpaceBase::UpdateInlineAllocationLimit(size_in_bytes);
+void PagedSpaceForNewSpace::UpdateInlineAllocationLimit() {
+  PagedSpaceBase::UpdateInlineAllocationLimit();
 }
 
 size_t PagedSpaceForNewSpace::AddPage(Page* page) {
@@ -1002,8 +1007,29 @@ void PagedSpaceForNewSpace::FreeLinearAllocationArea() {
   PagedSpaceBase::FreeLinearAllocationArea();
 }
 
-bool PagedSpaceForNewSpace::ShouldReleasePage() const {
+bool PagedSpaceForNewSpace::ShouldReleaseEmptyPage() const {
   return current_capacity_ > target_capacity_;
+}
+
+void PagedSpaceForNewSpace::RefillFreeList() {
+  // New space is not used for concurrent allcations or allocations during
+  // evacuation.
+  DCHECK(heap_->IsMainThread() ||
+         (heap_->IsSharedMainThread() &&
+          !heap_->isolate()->is_shared_space_isolate()));
+  DCHECK(!is_compaction_space());
+
+  Sweeper* sweeper = heap()->sweeper();
+
+  Sweeper::SweptList swept_pages = sweeper->GetAllSweptPagesSafe(this);
+  if (swept_pages.empty()) return;
+
+  base::MutexGuard guard(mutex());
+  for (Page* p : swept_pages) {
+    DCHECK(!p->IsFlagSet(Page::NEVER_ALLOCATE_ON_PAGE));
+    RefineAllocatedBytesAfterSweeping(p);
+    RelinkFreeListCategories(p);
+  }
 }
 
 // -----------------------------------------------------------------------------

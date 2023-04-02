@@ -351,7 +351,6 @@ namespace internal {
   F(DefineObjectOwnProperty, 3, 1)                                     \
   F(SetNamedProperty, 3, 1)                                            \
   F(SetOwnPropertyIgnoreAttributes, 4, 1)                              \
-  F(DefineKeyedOwnPropertyInLiteral_Simple, 3, 1)                      \
   F(ShrinkNameDictionary, 1, 1)                                        \
   F(ShrinkSwissNameDictionary, 1, 1)                                   \
   F(ToFastProperties, 1, 1)                                            \
@@ -653,7 +652,9 @@ namespace internal {
   F(WasmStringAsWtf8, 1, 1)           \
   F(WasmStringViewWtf8Encode, 6, 1)   \
   F(WasmStringViewWtf8Slice, 3, 1)    \
-  F(WasmStringCompare, 2, 1)
+  F(WasmStringCompare, 2, 1)          \
+  F(WasmStringFromCodePoint, 1, 1)    \
+  F(WasmStringHash, 1, 1)
 
 #define FOR_EACH_INTRINSIC_WASM_TEST(F, I) \
   F(DeserializeWasmModule, 2, 1)           \

@@ -233,7 +233,7 @@ class WasmGraphBuildingInterface {
         DCHECK(type.is_reference());
         // TODO(jkummerow): Consider using "the hole" instead, to make any
         // illegal uses more obvious.
-        node = builder_->SetType(builder_->RefNull(), type);
+        node = builder_->SetType(builder_->RefNull(type), type);
       } else {
         node = builder_->SetType(builder_->DefaultValue(type), type);
       }
@@ -264,8 +264,8 @@ class WasmGraphBuildingInterface {
 
   void StartFunctionBody(FullDecoder* decoder, Control* block) {}
 
-  void FinishFunction(FullDecoder*) {
-    if (v8_flags.wasm_speculative_inlining) {
+  void FinishFunction(FullDecoder* decoder) {
+    if (decoder->enabled_.has_inlining()) {
       DCHECK_EQ(feedback_instruction_index_, type_feedback_.size());
     }
     if (inlined_status_ == kRegularFunction) {
@@ -444,8 +444,8 @@ class WasmGraphBuildingInterface {
 
   void UnOp(FullDecoder* decoder, WasmOpcode opcode, const Value& value,
             Value* result) {
-    SetAndTypeNode(result,
-                   builder_->Unop(opcode, value.node, decoder->position()));
+    SetAndTypeNode(result, builder_->Unop(opcode, value.node, value.type,
+                                          decoder->position()));
   }
 
   void BinOp(FullDecoder* decoder, WasmOpcode opcode, const Value& lhs,
@@ -481,7 +481,7 @@ class WasmGraphBuildingInterface {
   }
 
   void RefNull(FullDecoder* decoder, ValueType type, Value* result) {
-    SetAndTypeNode(result, builder_->RefNull());
+    SetAndTypeNode(result, builder_->RefNull(type));
   }
 
   void RefFunc(FullDecoder* decoder, uint32_t function_index, Value* result) {
@@ -489,7 +489,8 @@ class WasmGraphBuildingInterface {
   }
 
   void RefAsNonNull(FullDecoder* decoder, const Value& arg, Value* result) {
-    TFNode* cast_node = builder_->AssertNotNull(arg.node, decoder->position());
+    TFNode* cast_node =
+        builder_->AssertNotNull(arg.node, arg.type, decoder->position());
     SetAndTypeNode(result, cast_node);
   }
 
@@ -539,15 +540,16 @@ class WasmGraphBuildingInterface {
   void AssertNullTypecheck(FullDecoder* decoder, const Value& obj,
                            Value* result) {
     builder_->TrapIfFalse(wasm::TrapReason::kTrapIllegalCast,
-                          builder_->IsNull(obj.node), decoder->position());
+                          builder_->IsNull(obj.node, obj.type),
+                          decoder->position());
     Forward(decoder, obj, result);
   }
 
   void AssertNotNullTypecheck(FullDecoder* decoder, const Value& obj,
                               Value* result) {
-    SetAndTypeNode(result,
-                   builder_->AssertNotNull(obj.node, decoder->position(),
-                                           TrapReason::kTrapIllegalCast));
+    SetAndTypeNode(
+        result, builder_->AssertNotNull(obj.node, obj.type, decoder->position(),
+                                        TrapReason::kTrapIllegalCast));
   }
 
   void NopForTestingUnsupportedInLiftoff(FullDecoder* decoder) {}
@@ -724,7 +726,7 @@ class WasmGraphBuildingInterface {
   void CallDirect(FullDecoder* decoder, const CallFunctionImmediate& imm,
                   const Value args[], Value returns[]) {
     int maybe_call_count = -1;
-    if (v8_flags.wasm_speculative_inlining && type_feedback_.size() > 0) {
+    if (decoder->enabled_.has_inlining() && type_feedback_.size() > 0) {
       const CallSiteFeedback& feedback = next_call_feedback();
       DCHECK_EQ(feedback.num_cases(), 1);
       maybe_call_count = feedback.call_count(0);
@@ -736,7 +738,7 @@ class WasmGraphBuildingInterface {
   void ReturnCall(FullDecoder* decoder, const CallFunctionImmediate& imm,
                   const Value args[]) {
     int maybe_call_count = -1;
-    if (v8_flags.wasm_speculative_inlining && type_feedback_.size() > 0) {
+    if (decoder->enabled_.has_inlining() && type_feedback_.size() > 0) {
       const CallSiteFeedback& feedback = next_call_feedback();
       DCHECK_EQ(feedback.num_cases(), 1);
       maybe_call_count = feedback.call_count(0);
@@ -767,7 +769,7 @@ class WasmGraphBuildingInterface {
                const FunctionSig* sig, uint32_t sig_index, const Value args[],
                Value returns[]) {
     const CallSiteFeedback* feedback = nullptr;
-    if (v8_flags.wasm_speculative_inlining && type_feedback_.size() > 0) {
+    if (decoder->enabled_.has_inlining() && type_feedback_.size() > 0) {
       feedback = &next_call_feedback();
     }
     if (feedback == nullptr || feedback->num_cases() == 0) {
@@ -864,7 +866,7 @@ class WasmGraphBuildingInterface {
                      const FunctionSig* sig, uint32_t sig_index,
                      const Value args[]) {
     const CallSiteFeedback* feedback = nullptr;
-    if (v8_flags.wasm_speculative_inlining && type_feedback_.size() > 0) {
+    if (decoder->enabled_.has_inlining() && type_feedback_.size() > 0) {
       feedback = &next_call_feedback();
     }
     if (feedback == nullptr || feedback->num_cases() == 0) {
@@ -915,7 +917,7 @@ class WasmGraphBuildingInterface {
     SsaEnv* false_env = ssa_env_;
     SsaEnv* true_env = Split(decoder->zone(), false_env);
     false_env->SetNotMerged();
-    builder_->BrOnNull(ref_object.node, &true_env->control,
+    builder_->BrOnNull(ref_object.node, ref_object.type, &true_env->control,
                        &false_env->control);
     builder_->SetControl(false_env->control);
     {
@@ -934,7 +936,7 @@ class WasmGraphBuildingInterface {
     SsaEnv* false_env = ssa_env_;
     SsaEnv* true_env = Split(decoder->zone(), false_env);
     false_env->SetNotMerged();
-    builder_->BrOnNull(ref_object.node, &false_env->control,
+    builder_->BrOnNull(ref_object.node, ref_object.type, &false_env->control,
                        &true_env->control);
     builder_->SetControl(false_env->control);
     ScopedSsaEnv scoped_env(this, true_env);
@@ -1723,12 +1725,9 @@ class WasmGraphBuildingInterface {
   }
 
   void StringAsWtf16(FullDecoder* decoder, const Value& str, Value* result) {
-    // Since we implement stringview_wtf16 as string, that's the type we'll
-    // use for the Node. (The decoder's Value type must be stringview_wtf16
-    // because static type validation relies on it.)
-    result->node = builder_->SetType(
-        builder_->AssertNotNull(str.node, decoder->position()),
-        ValueType::Ref(HeapType::kString));
+    SetAndTypeNode(result,
+                   builder_->StringAsWtf16(str.node, NullCheckFor(str.type),
+                                           decoder->position()));
   }
 
   void StringViewWtf16GetCodeUnit(FullDecoder* decoder, const Value& view,
@@ -1795,6 +1794,17 @@ class WasmGraphBuildingInterface {
     SetAndTypeNode(result, builder_->StringCompare(
                                lhs.node, NullCheckFor(lhs.type), rhs.node,
                                NullCheckFor(rhs.type), decoder->position()));
+  }
+
+  void StringFromCodePoint(FullDecoder* decoder, const Value& code_point,
+                           Value* result) {
+    SetAndTypeNode(result, builder_->StringFromCodePoint(code_point.node));
+  }
+
+  void StringHash(FullDecoder* decoder, const Value& string, Value* result) {
+    SetAndTypeNode(result,
+                   builder_->StringHash(string.node, NullCheckFor(string.type),
+                                        decoder->position()));
   }
 
   void Forward(FullDecoder* decoder, const Value& from, Value* to) {

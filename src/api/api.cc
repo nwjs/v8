@@ -47,6 +47,7 @@
 #include "src/compiler-dispatcher/lazy-compile-dispatcher.h"
 #include "src/date/date.h"
 #include "src/objects/primitive-heap-object.h"
+#include "src/utils/identity-map.h"
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/debug/debug-wasm-objects.h"
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -85,6 +86,7 @@
 #include "src/objects/embedder-data-slot-inl.h"
 #include "src/objects/hash-table-inl.h"
 #include "src/objects/heap-object.h"
+#include "src/objects/instance-type.h"
 #include "src/objects/js-array-buffer-inl.h"
 #include "src/objects/js-array-inl.h"
 #include "src/objects/js-collection-inl.h"
@@ -128,7 +130,6 @@
 #include "src/tracing/trace-event.h"
 #include "src/utils/detachable-vector.h"
 #include "src/utils/version.h"
-#include "src/web-snapshot/web-snapshot.h"
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/trap-handler/trap-handler.h"
@@ -764,7 +765,7 @@ StartupData SnapshotCreator::CreateBlob(
   i::Snapshot::ClearReconstructableDataForSerialization(
       i_isolate, function_code_handling == FunctionCodeHandling::kClear);
 
-  i::SafepointKind safepoint_kind = i_isolate->has_shared_heap()
+  i::SafepointKind safepoint_kind = i_isolate->has_shared_space()
                                         ? i::SafepointKind::kGlobal
                                         : i::SafepointKind::kIsolate;
   i::SafepointScope safepoint_scope(i_isolate, safepoint_kind);
@@ -939,14 +940,21 @@ i::Address* GlobalizeTracedReference(i::Isolate* i_isolate, i::Address* obj,
                                      internal::Address* slot,
                                      GlobalHandleStoreMode store_mode) {
   API_RCS_SCOPE(i_isolate, TracedGlobal, New);
+
+#ifdef V8_ENABLE_CONSERVATIVE_STACK_SCANNING
+  i::Address obj_addr = reinterpret_cast<i::Address>(obj);
+#else
+  i::Address obj_addr = *obj;
+#endif
+
 #ifdef DEBUG
   Utils::ApiCheck((slot != nullptr), "v8::GlobalizeTracedReference",
                   "the address slot must be not null");
 #endif
-  auto result = i_isolate->traced_handles()->Create(*obj, slot, store_mode);
+  auto result = i_isolate->traced_handles()->Create(obj_addr, slot, store_mode);
 #ifdef VERIFY_HEAP
   if (i::v8_flags.verify_heap) {
-    i::Object(*obj).ObjectVerify(i_isolate);
+    i::Object(obj_addr).ObjectVerify(i_isolate);
   }
 #endif  // VERIFY_HEAP
   return result.location();
@@ -1077,6 +1085,15 @@ i::Address* HandleScope::CreateHandle(i::Isolate* i_isolate, i::Address value) {
   return i::HandleScope::CreateHandle(i_isolate, value);
 }
 
+#ifdef V8_ENABLE_CONSERVATIVE_STACK_SCANNING
+
+i::Address* HandleScope::CreateHandleForCurrentIsolate(i::Address value) {
+  i::Isolate* i_isolate = i::Isolate::Current();
+  return i::HandleScope::CreateHandle(i_isolate, value);
+}
+
+#endif
+
 EscapableHandleScope::EscapableHandleScope(Isolate* v8_isolate) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
   escape_slot_ = CreateHandle(
@@ -1160,10 +1177,7 @@ void Context::Enter() {
   i::DisallowGarbageCollection no_gc;
   i::Context env = *Utils::OpenHandle(this);
   i::Isolate* i_isolate = env.GetIsolate();
-  // TODO(cbruni): Use ENTER_V8_NO_SCRIPT_NO_EXCEPTION which also checks
-  // Isolate::is_execution_terminating
-  // ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
-  ENTER_V8_MAYBE_TEARDOWN(i_isolate);
+  ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
   i::HandleScopeImplementer* impl = i_isolate->handle_scope_implementer();
   impl->EnterContext(env);
   impl->SaveContext(i_isolate->context());
@@ -1173,7 +1187,7 @@ void Context::Enter() {
 void Context::Exit() {
   i::Handle<i::Context> env = Utils::OpenHandle(this);
   i::Isolate* i_isolate = env->GetIsolate();
-  ENTER_V8_MAYBE_TEARDOWN(i_isolate);
+  ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
   i::HandleScopeImplementer* impl = i_isolate->handle_scope_implementer();
   if (!Utils::ApiCheck(impl->LastEnteredContextWas(*env), "v8::Context::Exit()",
                        "Cannot exit non-entered context")) {
@@ -1216,7 +1230,7 @@ static i::Handle<i::EmbedderDataArray> EmbedderDataFor(Context* context,
                                                        const char* location) {
   i::Handle<i::Context> env = Utils::OpenHandle(context);
   i::Isolate* i_isolate = env->GetIsolate();
-  DCHECK_NO_SCRIPT_NO_EXCEPTION_MAYBE_TEARDOWN(i_isolate);
+  DCHECK_NO_SCRIPT_NO_EXCEPTION(i_isolate);
   bool ok = Utils::ApiCheck(env->IsNativeContext(), location,
                             "Not a native context") &&
             Utils::ApiCheck(index >= 0, location, "Negative index");
@@ -2255,42 +2269,6 @@ MaybeLocal<Value> Script::Run(Local<Context> context,
   }
 #endif
   auto fun = i::Handle<i::JSFunction>::cast(Utils::OpenHandle(this));
-
-  // TODO(crbug.com/1193459): remove once ablation study is completed
-  base::ElapsedTimer timer;
-  base::TimeDelta delta;
-  if (i::v8_flags.script_delay > 0) {
-    delta = v8::base::TimeDelta::FromMillisecondsD(i::v8_flags.script_delay);
-  }
-  if (i::v8_flags.script_delay_once > 0 && !i_isolate->did_run_script_delay()) {
-    delta =
-        v8::base::TimeDelta::FromMillisecondsD(i::v8_flags.script_delay_once);
-    i_isolate->set_did_run_script_delay(true);
-  }
-  if (i::v8_flags.script_delay_fraction > 0.0) {
-    timer.Start();
-  } else if (delta.InMicroseconds() > 0) {
-    timer.Start();
-    while (timer.Elapsed() < delta) {
-      // Busy wait.
-    }
-  }
-
-  if (V8_UNLIKELY(i::v8_flags.experimental_web_snapshots)) {
-    i::Handle<i::HeapObject> maybe_script =
-        handle(fun->shared().script(), i_isolate);
-    if (maybe_script->IsScript() &&
-        i::Script::cast(*maybe_script).type() == i::Script::TYPE_WEB_SNAPSHOT) {
-      i::WebSnapshotDeserializer deserializer(
-          reinterpret_cast<i::Isolate*>(v8_isolate),
-          i::Handle<i::Script>::cast(maybe_script));
-      deserializer.Deserialize();
-      RETURN_ON_FAILED_EXECUTION(Value);
-      Local<Value> result = v8::Undefined(v8_isolate);
-      RETURN_ESCAPED(result);
-    }
-  }
-
   i::Handle<i::Object> receiver = i_isolate->global_proxy();
   // TODO(cbruni, chromium:1244145): Remove once migrated to the context.
   i::Handle<i::Object> options(
@@ -2299,15 +2277,6 @@ MaybeLocal<Value> Script::Run(Local<Context> context,
   Local<Value> result;
   has_pending_exception = !ToLocal<Value>(
       i::Execution::CallScript(i_isolate, fun, receiver, options), &result);
-
-  if (i::v8_flags.script_delay_fraction > 0.0) {
-    delta = v8::base::TimeDelta::FromMillisecondsD(
-        timer.Elapsed().InMillisecondsF() * i::v8_flags.script_delay_fraction);
-    timer.Restart();
-    while (timer.Elapsed() < delta) {
-      // Busy wait.
-    }
-  }
 
   RETURN_ON_FAILED_EXECUTION(Value);
   RETURN_ESCAPED(result);
@@ -2488,7 +2457,7 @@ Local<Value> Module::GetException() const {
                   "Module status must be kErrored");
   i::Handle<i::Module> self = Utils::OpenHandle(this);
   i::Isolate* i_isolate = self->GetIsolate();
-  ENTER_V8_MAYBE_TEARDOWN(i_isolate);
+  ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
   return ToApiHandle<Value>(i::handle(self->GetException(), i_isolate));
 }
 
@@ -3919,7 +3888,8 @@ TYPED_ARRAYS(VALUE_IS_TYPED_ARRAY)
 #undef VALUE_IS_TYPED_ARRAY
 
 bool Value::IsDataView() const {
-  return Utils::OpenHandle(this)->IsJSDataView();
+  i::Handle<i::Object> obj = Utils::OpenHandle(this);
+  return obj->IsJSDataView() || obj->IsJSRabGsabDataView();
 }
 
 bool Value::IsSharedArrayBuffer() const {
@@ -3954,9 +3924,11 @@ VALUE_IS_SPECIFIC_TYPE(Set, JSSet)
 #if V8_ENABLE_WEBASSEMBLY
 VALUE_IS_SPECIFIC_TYPE(WasmMemoryObject, WasmMemoryObject)
 VALUE_IS_SPECIFIC_TYPE(WasmModuleObject, WasmModuleObject)
+VALUE_IS_SPECIFIC_TYPE(WasmNull, WasmNull)
 #else
 bool Value::IsWasmMemoryObject() const { return false; }
 bool Value::IsWasmModuleObject() const { return false; }
+bool Value::IsWasmNull() const { return false; }
 #endif  // V8_ENABLE_WEBASSEMBLY
 VALUE_IS_SPECIFIC_TYPE(WeakMap, JSWeakMap)
 VALUE_IS_SPECIFIC_TYPE(WeakSet, JSWeakSet)
@@ -4401,8 +4373,8 @@ TYPED_ARRAYS(CHECK_TYPED_ARRAY_CAST)
 
 void v8::DataView::CheckCast(Value* that) {
   i::Handle<i::Object> obj = Utils::OpenHandle(that);
-  Utils::ApiCheck(obj->IsJSDataView(), "v8::DataView::Cast()",
-                  "Value is not a DataView");
+  Utils::ApiCheck(obj->IsJSDataView() || obj->IsJSRabGsabDataView(),
+                  "v8::DataView::Cast()", "Value is not a DataView");
 }
 
 void v8::SharedArrayBuffer::CheckCast(Value* that) {
@@ -5079,8 +5051,8 @@ Maybe<bool> v8::Object::SetIntegrityLevel(Local<Context> context,
   auto self = Utils::OpenHandle(this);
   i::JSReceiver::IntegrityLevel i_level =
       level == IntegrityLevel::kFrozen ? i::FROZEN : i::SEALED;
-  Maybe<bool> result =
-      i::JSReceiver::SetIntegrityLevel(self, i_level, i::kThrowOnError);
+  Maybe<bool> result = i::JSReceiver::SetIntegrityLevel(
+      i_isolate, self, i_level, i::kThrowOnError);
   has_pending_exception = result.IsNothing();
   RETURN_ON_FAILED_EXECUTION_PRIMITIVE(bool);
   return result;
@@ -5605,7 +5577,14 @@ MaybeLocal<v8::Value> Function::Call(Local<Context> context,
                   "Function to be called is a null pointer");
   i::Handle<i::Object> recv_obj = Utils::OpenHandle(*recv);
   static_assert(sizeof(v8::Local<v8::Value>) == sizeof(i::Handle<i::Object>));
+#if V8_ENABLE_CONSERVATIVE_STACK_SCANNING
+  i::Handle<i::Object>* args = new i::Handle<i::Object>[argc];
+  for (int i = 0; i < argc; ++i) {
+    args[i] = Utils::OpenHandle(*argv[i]);
+  }
+#else
   i::Handle<i::Object>* args = reinterpret_cast<i::Handle<i::Object>*>(argv);
+#endif
   Local<Value> result;
   has_pending_exception = !ToLocal<Value>(
       i::Execution::Call(i_isolate, self, recv_obj, argc, args), &result);
@@ -6925,6 +6904,218 @@ Local<Value> v8::Context::GetSecurityToken() {
   return Utils::ToLocal(token_handle);
 }
 
+namespace {
+
+bool MayContainObjectsToFreeze(i::InstanceType obj_type) {
+  if (i::InstanceTypeChecker::IsString(obj_type)) return false;
+  if (i::InstanceTypeChecker::IsSharedFunctionInfo(obj_type)) return false;
+  return true;
+}
+
+bool IsJSReceiverSafeToFreeze(i::InstanceType obj_type) {
+  DCHECK(i::InstanceTypeChecker::IsJSReceiver(obj_type));
+  switch (obj_type) {
+    case i::JS_OBJECT_TYPE:
+    case i::JS_GLOBAL_OBJECT_TYPE:
+    case i::JS_GLOBAL_PROXY_TYPE:
+    case i::JS_PRIMITIVE_WRAPPER_TYPE:
+    case i::JS_FUNCTION_TYPE:
+    /* Function types */
+    case i::BIGINT64_TYPED_ARRAY_CONSTRUCTOR_TYPE:
+    case i::BIGUINT64_TYPED_ARRAY_CONSTRUCTOR_TYPE:
+    case i::FLOAT32_TYPED_ARRAY_CONSTRUCTOR_TYPE:
+    case i::FLOAT64_TYPED_ARRAY_CONSTRUCTOR_TYPE:
+    case i::INT16_TYPED_ARRAY_CONSTRUCTOR_TYPE:
+    case i::INT32_TYPED_ARRAY_CONSTRUCTOR_TYPE:
+    case i::INT8_TYPED_ARRAY_CONSTRUCTOR_TYPE:
+    case i::UINT16_TYPED_ARRAY_CONSTRUCTOR_TYPE:
+    case i::UINT32_TYPED_ARRAY_CONSTRUCTOR_TYPE:
+    case i::UINT8_CLAMPED_TYPED_ARRAY_CONSTRUCTOR_TYPE:
+    case i::UINT8_TYPED_ARRAY_CONSTRUCTOR_TYPE:
+    case i::JS_ARRAY_CONSTRUCTOR_TYPE:
+    case i::JS_PROMISE_CONSTRUCTOR_TYPE:
+    case i::JS_REG_EXP_CONSTRUCTOR_TYPE:
+    case i::JS_CLASS_CONSTRUCTOR_TYPE:
+    /* Prototype Types */
+    case i::JS_ARRAY_ITERATOR_PROTOTYPE_TYPE:
+    case i::JS_ITERATOR_PROTOTYPE_TYPE:
+    case i::JS_MAP_ITERATOR_PROTOTYPE_TYPE:
+    case i::JS_OBJECT_PROTOTYPE_TYPE:
+    case i::JS_PROMISE_PROTOTYPE_TYPE:
+    case i::JS_REG_EXP_PROTOTYPE_TYPE:
+    case i::JS_SET_ITERATOR_PROTOTYPE_TYPE:
+    case i::JS_SET_PROTOTYPE_TYPE:
+    case i::JS_STRING_ITERATOR_PROTOTYPE_TYPE:
+    case i::JS_TYPED_ARRAY_PROTOTYPE_TYPE:
+    /* */
+    case i::JS_ARRAY_TYPE:
+      return true;
+#if V8_ENABLE_WEBASSEMBLY
+    case i::WASM_ARRAY_TYPE:
+    case i::WASM_STRUCT_TYPE:
+#endif  // V8_ENABLE_WEBASSEMBLY
+    case i::JS_PROXY_TYPE:
+      return true;
+    // These types are known not to freeze.
+    case i::JS_MAP_KEY_ITERATOR_TYPE:
+    case i::JS_MAP_KEY_VALUE_ITERATOR_TYPE:
+    case i::JS_MAP_VALUE_ITERATOR_TYPE:
+    case i::JS_SET_KEY_VALUE_ITERATOR_TYPE:
+    case i::JS_SET_VALUE_ITERATOR_TYPE:
+    case i::JS_GENERATOR_OBJECT_TYPE:
+    case i::JS_ASYNC_FUNCTION_OBJECT_TYPE:
+    case i::JS_ASYNC_GENERATOR_OBJECT_TYPE:
+    case i::JS_ARRAY_ITERATOR_TYPE: {
+      return false;
+    }
+    default:
+      // TODO(behamilton): Handle any types that fall through here.
+      return false;
+  }
+}
+
+class ObjectVisitorDeepFreezer : i::ObjectVisitor {
+ public:
+  explicit ObjectVisitorDeepFreezer(i::Isolate* isolate) : isolate_(isolate) {}
+
+  bool DeepFreeze(i::Handle<i::Context> context) {
+    bool success = VisitObject(*i::Handle<i::HeapObject>::cast(context));
+    DCHECK_EQ(success, !error_.has_value());
+    if (!success) {
+      THROW_NEW_ERROR_RETURN_VALUE(
+          isolate_, NewTypeError(error_->msg_id, error_->name), false);
+    }
+
+    for (const auto& obj : objects_to_freeze_) {
+      MAYBE_RETURN_ON_EXCEPTION_VALUE(
+          isolate_,
+          i::JSReceiver::SetIntegrityLevel(isolate_, obj, i::FROZEN,
+                                           i::kThrowOnError),
+          false);
+    }
+    return true;
+  }
+
+  void VisitPointers(i::HeapObject host, i::ObjectSlot start,
+                     i::ObjectSlot end) final {
+    VisitPointersImpl(start, end);
+  }
+  void VisitPointers(i::HeapObject host, i::MaybeObjectSlot start,
+                     i::MaybeObjectSlot end) final {
+    VisitPointersImpl(start, end);
+  }
+  void VisitMapPointer(i::HeapObject host) final {
+    VisitPointer(host, host.map_slot());
+  }
+  void VisitCodePointer(i::HeapObject host, i::CodeObjectSlot slot) final {}
+  void VisitCodeTarget(i::InstructionStream host, i::RelocInfo* rinfo) final {}
+  void VisitEmbeddedPointer(i::InstructionStream host,
+                            i::RelocInfo* rinfo) final {}
+  void VisitCustomWeakPointers(i::HeapObject host, i::ObjectSlot start,
+                               i::ObjectSlot end) final {}
+
+ private:
+  struct ErrorInfo {
+    i::MessageTemplate msg_id;
+    i::Handle<i::String> name;
+  };
+
+  template <typename TSlot>
+  void VisitPointersImpl(TSlot start, TSlot end) {
+    for (TSlot current = start; current < end; ++current) {
+      typename TSlot::TObject object = current.load(isolate_);
+      i::HeapObject heap_object;
+      if (object.GetHeapObjectIfStrong(&heap_object)) {
+        if (!VisitObject(heap_object)) {
+          return;
+        }
+      }
+    }
+  }
+
+  bool VisitObject(i::HeapObject obj) {
+    DCHECK(!error_.has_value());
+    DCHECK(!obj.is_null());
+
+    i::DisallowGarbageCollection no_gc;
+    i::InstanceType obj_type = obj.map().instance_type();
+
+    // Skip common types that can't contain items to freeze.
+    if (!MayContainObjectsToFreeze(obj_type)) {
+      return true;
+    }
+
+    if (!done_list_.insert(obj).second) {
+      // If we couldn't insert (because it is already in the set) then we're
+      // done.
+      return true;
+    }
+
+    // For contexts we need to ensure that all accessible locals are const.
+    // If not they could be replaced to bypass freezing.
+    if (i::InstanceTypeChecker::IsContext(obj_type)) {
+      i::ScopeInfo scope_info = i::Context::cast(obj).scope_info();
+      for (auto it : i::ScopeInfo::IterateLocalNames(&scope_info, no_gc)) {
+        if (scope_info.ContextLocalMode(it->index()) !=
+            i::VariableMode::kConst) {
+          DCHECK(!error_.has_value());
+          error_ = ErrorInfo{i::MessageTemplate::kCannotDeepFreezeValue,
+                             i::handle(it->name(), isolate_)};
+          return false;
+        }
+      }
+    } else if (i::InstanceTypeChecker::IsJSReceiver(obj_type)) {
+      i::Handle<i::JSReceiver> receiver =
+          i::handle(i::JSReceiver::cast(obj), isolate_);
+      if (!IsJSReceiverSafeToFreeze(obj_type)) {
+        DCHECK(!error_.has_value());
+        error_ = ErrorInfo{i::MessageTemplate::kCannotDeepFreezeObject,
+                           i::handle(receiver->class_name(), isolate_)};
+        return false;
+      }
+
+      // Save this to freeze after we are done. Freezing triggers garbage
+      // collection which doesn't work well with this visitor pattern, so we
+      // delay it until after.
+      objects_to_freeze_.push_back(receiver);
+
+    } else {
+      DCHECK(!i::InstanceTypeChecker::IsContext(obj_type) &&
+             !i::InstanceTypeChecker::IsJSReceiver(obj_type));
+    }
+
+    DCHECK(!error_.has_value());
+    obj.Iterate(isolate_, this);
+    // Iterate sets error_ on failure. We should propagate errors.
+    return !error_.has_value();
+  }
+
+  i::Isolate* isolate_;
+  std::unordered_set<i::Object, i::Object::Hasher> done_list_;
+  std::vector<i::Handle<i::JSReceiver>> objects_to_freeze_;
+  base::Optional<ErrorInfo> error_;
+};
+
+}  // namespace
+
+Maybe<void> Context::DeepFreeze() {
+  i::Handle<i::Context> env = Utils::OpenHandle(this);
+  i::Isolate* i_isolate = env->GetIsolate();
+
+  // TODO(behamilton): Incorporate compatibility improvements similar to NodeJS:
+  // https://github.com/nodejs/node/blob/main/lib/internal/freeze_intrinsics.js
+  // These need to be done before freezing.
+
+  Local<Context> context = Utils::ToLocal(env);
+  ENTER_V8_NO_SCRIPT(i_isolate, context, Context, DeepFreeze, Nothing<void>(),
+                     i::HandleScope);
+  ObjectVisitorDeepFreezer vfreezer(i_isolate);
+  has_pending_exception = !vfreezer.DeepFreeze(env);
+
+  RETURN_ON_FAILED_EXECUTION_PRIMITIVE(void);
+  return JustVoid();
+}
+
 v8::Isolate* Context::GetIsolate() {
   i::Handle<i::Context> env = Utils::OpenHandle(this);
   return reinterpret_cast<Isolate*>(env->GetIsolate());
@@ -6974,7 +7165,7 @@ v8::Local<v8::Object> Context::Global() {
 void Context::DetachGlobal() {
   i::Handle<i::Context> context = Utils::OpenHandle(this);
   i::Isolate* i_isolate = context->GetIsolate();
-  ENTER_V8_MAYBE_TEARDOWN(i_isolate);
+  ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
   i_isolate->DetachGlobal(context);
 }
 
@@ -8616,6 +8807,12 @@ Local<ArrayBuffer> v8::ArrayBufferView::Buffer() {
     DCHECK(data_view->buffer().IsJSArrayBuffer());
     buffer = i::handle(i::JSArrayBuffer::cast(data_view->buffer()),
                        data_view->GetIsolate());
+  } else if (obj->IsJSRabGsabDataView()) {
+    i::Handle<i::JSRabGsabDataView> data_view(i::JSRabGsabDataView::cast(*obj),
+                                              obj->GetIsolate());
+    DCHECK(data_view->buffer().IsJSArrayBuffer());
+    buffer = i::handle(i::JSArrayBuffer::cast(data_view->buffer()),
+                       data_view->GetIsolate());
   } else {
     DCHECK(obj->IsJSTypedArray());
     buffer = i::JSTypedArray::cast(*obj).GetBuffer();
@@ -8633,9 +8830,13 @@ size_t v8::ArrayBufferView::CopyContents(void* dest, size_t byte_length) {
     if (self->IsJSTypedArray()) {
       i::Handle<i::JSTypedArray> array(i::JSTypedArray::cast(*self), i_isolate);
       source = reinterpret_cast<char*>(array->DataPtr());
-    } else {
-      DCHECK(self->IsJSDataView());
+    } else if (self->IsJSDataView()) {
       i::Handle<i::JSDataView> data_view(i::JSDataView::cast(*self), i_isolate);
+      source = reinterpret_cast<char*>(data_view->data_pointer());
+    } else {
+      DCHECK(self->IsJSRabGsabDataView());
+      i::Handle<i::JSRabGsabDataView> data_view(
+          i::JSRabGsabDataView::cast(*self), i_isolate);
       source = reinterpret_cast<char*>(data_view->data_pointer());
     }
     memcpy(dest, source, bytes_to_copy);
@@ -8664,7 +8865,10 @@ size_t v8::ArrayBufferView::ByteLength() {
   if (obj.IsJSTypedArray()) {
     return i::JSTypedArray::cast(obj).GetByteLength();
   }
-  return i::JSDataView::cast(obj).GetByteLength();
+  if (obj.IsJSDataView()) {
+    return i::JSDataView::cast(obj).byte_length();
+  }
+  return i::JSRabGsabDataView::cast(obj).GetByteLength();
 }
 
 size_t v8::TypedArray::Length() {
@@ -8726,8 +8930,9 @@ Local<DataView> DataView::New(Local<ArrayBuffer> array_buffer,
   i::Isolate* i_isolate = buffer->GetIsolate();
   API_RCS_SCOPE(i_isolate, DataView, New);
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
-  i::Handle<i::JSDataView> obj =
-      i_isolate->factory()->NewJSDataView(buffer, byte_offset, byte_length);
+  i::Handle<i::JSDataView> obj = i::Handle<i::JSDataView>::cast(
+      i_isolate->factory()->NewJSDataViewOrRabGsabDataView(buffer, byte_offset,
+                                                           byte_length));
   return Utils::ToLocal(obj);
 }
 
@@ -8738,8 +8943,9 @@ Local<DataView> DataView::New(Local<SharedArrayBuffer> shared_array_buffer,
   i::Isolate* i_isolate = buffer->GetIsolate();
   API_RCS_SCOPE(i_isolate, DataView, New);
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
-  i::Handle<i::JSDataView> obj =
-      i_isolate->factory()->NewJSDataView(buffer, byte_offset, byte_length);
+  i::Handle<i::JSDataView> obj = i::Handle<i::JSDataView>::cast(
+      i_isolate->factory()->NewJSDataViewOrRabGsabDataView(buffer, byte_offset,
+                                                           byte_length));
   return Utils::ToLocal(obj);
 }
 
@@ -9304,9 +9510,9 @@ void Isolate::Initialize(Isolate* v8_isolate,
   i_isolate->set_embedder_wrapper_object_index(
       params.embedder_wrapper_object_index);
 
-  if (!i_isolate->is_shared() && !i::V8::GetCurrentPlatform()
-                                      ->GetForegroundTaskRunner(v8_isolate)
-                                      ->NonNestableTasksEnabled()) {
+  if (!i::V8::GetCurrentPlatform()
+           ->GetForegroundTaskRunner(v8_isolate)
+           ->NonNestableTasksEnabled()) {
     FATAL(
         "The current platform's foreground task runner does not have "
         "non-nestable tasks enabled. The embedder must provide one.");

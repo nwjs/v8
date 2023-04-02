@@ -359,11 +359,10 @@ class RepresentationSelector {
         linkage_(linkage),
         observe_node_manager_(observe_node_manager),
         verifier_(verifier) {
-    Factory* factory = broker_->isolate()->factory();
     singleton_true_ =
-        Type::Constant(broker, factory->true_value(), graph_zone());
+        Type::Constant(broker, broker->true_value(), graph_zone());
     singleton_false_ =
-        Type::Constant(broker, factory->false_value(), graph_zone());
+        Type::Constant(broker, broker->false_value(), graph_zone());
   }
 
   bool verification_enabled() const { return verifier_ != nullptr; }
@@ -2033,6 +2032,9 @@ class RepresentationSelector {
         return MachineType::Float32();
       case wasm::kF64:
         return MachineType::Float64();
+      case wasm::kRef:
+      case wasm::kRefNull:
+        return MachineType::AnyTagged();
       default:
         UNREACHABLE();
     }
@@ -2055,6 +2057,9 @@ class RepresentationSelector {
         // WasmWrapperGraphBuilder::BuildJSToWasmWrapper.
         return UseInfo::CheckedNumberOrOddballAsFloat64(kDistinguishZeros,
                                                         feedback);
+      case wasm::kRef:
+      case wasm::kRefNull:
+        return UseInfo::AnyTagged();
       default:
         UNREACHABLE();
     }
@@ -2305,9 +2310,9 @@ class RepresentationSelector {
             node->AppendInput(jsgraph_->zone(), jsgraph_->Int32Constant(0));
             ChangeOp(node, lowering->machine()->Word32Equal());
           } else if (CanBeTaggedPointer(input_info->representation())) {
-            // BooleanNot(x: kRepTagged) => WordEqual(x, #false)
+            // BooleanNot(x: kRepTagged) => TaggedEqual(x, #false)
             node->AppendInput(jsgraph_->zone(), jsgraph_->FalseConstant());
-            ChangeOp(node, lowering->machine()->WordEqual());
+            ChangeOp(node, lowering->machine()->TaggedEqual());
           } else {
             DCHECK(TypeOf(node->InputAt(0)).IsNone());
             DeferReplacement(node, lowering->jsgraph()->Int32Constant(0));
@@ -4510,6 +4515,7 @@ class RepresentationSelector {
       case IrOpcode::kWord64And:
       case IrOpcode::kWord64Shl:
       case IrOpcode::kWord64Shr:
+      case IrOpcode::kChangeUint32ToUint64:
         for (int i = 0; i < node->InputCount(); ++i) {
           ProcessInput<T>(node, i, UseInfo::Any());
         }

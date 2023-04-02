@@ -229,7 +229,7 @@ DeoptimizedFrameInfo* Deoptimizer::DebuggerInspectableFrame(
 namespace {
 class ActivationsFinder : public ThreadVisitor {
  public:
-  ActivationsFinder(Code topmost_optimized_code,
+  ActivationsFinder(GcSafeCode topmost_optimized_code,
                     bool safe_to_deopt_topmost_optimized_code) {
 #ifdef DEBUG
     topmost_ = topmost_optimized_code;
@@ -243,18 +243,18 @@ class ActivationsFinder : public ThreadVisitor {
   void VisitThread(Isolate* isolate, ThreadLocalTop* top) override {
     for (StackFrameIterator it(isolate, top); !it.done(); it.Advance()) {
       if (it.frame()->is_optimized()) {
-        Code code = it.frame()->LookupCode().ToCode();
+        GcSafeCode code = it.frame()->GcSafeLookupCode();
         if (CodeKindCanDeoptimize(code.kind()) &&
             code.marked_for_deoptimization()) {
           // Obtain the trampoline to the deoptimizer call.
           int trampoline_pc;
           if (code.is_maglevved()) {
-            MaglevSafepointEntry safepoint =
-                code.GetMaglevSafepointEntry(isolate, it.frame()->pc());
+            MaglevSafepointEntry safepoint = MaglevSafepointTable::FindEntry(
+                isolate, code, it.frame()->pc());
             trampoline_pc = safepoint.trampoline_pc();
           } else {
             SafepointEntry safepoint =
-                code.GetSafepointEntry(isolate, it.frame()->pc());
+                SafepointTable::FindEntry(isolate, code, it.frame()->pc());
             trampoline_pc = safepoint.trampoline_pc();
           }
           DCHECK_IMPLIES(code == topmost_, safe_to_deopt_);
@@ -263,7 +263,7 @@ class ActivationsFinder : public ThreadVisitor {
           // Replace the current pc on the stack with the trampoline.
           // TODO(v8:10026): avoid replacing a signed pointer.
           Address* pc_addr = it.frame()->pc_address();
-          Address new_pc = code.raw_instruction_start() + trampoline_pc;
+          Address new_pc = code.InstructionStart() + trampoline_pc;
           PointerAuthentication::ReplacePC(pc_addr, new_pc, kSystemPointerSize);
         }
       }
@@ -272,7 +272,7 @@ class ActivationsFinder : public ThreadVisitor {
 
  private:
 #ifdef DEBUG
-  Code topmost_;
+  GcSafeCode topmost_;
   bool safe_to_deopt_;
 #endif
 };
@@ -283,7 +283,7 @@ class ActivationsFinder : public ThreadVisitor {
 void Deoptimizer::DeoptimizeMarkedCode(Isolate* isolate) {
   DisallowGarbageCollection no_gc;
 
-  Code topmost_optimized_code;
+  GcSafeCode topmost_optimized_code;
   bool safe_to_deopt_topmost_optimized_code = false;
 #ifdef DEBUG
   // Make sure all activations of optimized code can deopt at their current PC.
@@ -292,18 +292,18 @@ void Deoptimizer::DeoptimizeMarkedCode(Isolate* isolate) {
   for (StackFrameIterator it(isolate, isolate->thread_local_top()); !it.done();
        it.Advance()) {
     if (it.frame()->is_optimized()) {
-      Code code = it.frame()->LookupCode().ToCode();
+      GcSafeCode code = it.frame()->GcSafeLookupCode();
       JSFunction function =
           static_cast<OptimizedFrame*>(it.frame())->function();
       TraceFoundActivation(isolate, function);
       bool safe_if_deopt_triggered;
       if (code.is_maglevved()) {
         MaglevSafepointEntry safepoint =
-            code.GetMaglevSafepointEntry(isolate, it.frame()->pc());
+            MaglevSafepointTable::FindEntry(isolate, code, it.frame()->pc());
         safe_if_deopt_triggered = safepoint.has_deoptimization_index();
       } else {
         SafepointEntry safepoint =
-            code.GetSafepointEntry(isolate, it.frame()->pc());
+            SafepointTable::FindEntry(isolate, code, it.frame()->pc());
         safe_if_deopt_triggered = safepoint.has_deoptimization_index();
       }
 
@@ -448,8 +448,10 @@ Deoptimizer::Deoptimizer(Isolate* isolate, JSFunction function,
   }
 
   DCHECK_NE(from, kNullAddress);
-  compiled_code_ = FindOptimizedCode();
+  compiled_code_ =
+      isolate_->heap()->FindCodeForInnerPointer(from).instruction_stream();
   DCHECK(!compiled_code_.is_null());
+  DCHECK(compiled_code_.IsInstructionStream());
 
   DCHECK(function.IsJSFunction());
 #ifdef DEBUG
@@ -473,8 +475,8 @@ Deoptimizer::Deoptimizer(Isolate* isolate, JSFunction function,
   DCHECK_GT(kLazyDeoptExitSize, 0);
   DeoptimizationData deopt_data =
       DeoptimizationData::cast(compiled_code_.deoptimization_data());
-  Address deopt_start = compiled_code_.raw_instruction_start() +
-                        deopt_data.DeoptExitStart().value();
+  Address deopt_start =
+      compiled_code_.instruction_start() + deopt_data.DeoptExitStart().value();
   int eager_deopt_count = deopt_data.EagerDeoptCount().value();
   Address lazy_deopt_start =
       deopt_start + eager_deopt_count * kEagerDeoptExitSize;
@@ -497,11 +499,6 @@ Deoptimizer::Deoptimizer(Isolate* isolate, JSFunction function,
     DCHECK_EQ(0, offset % kLazyDeoptExitSize);
     deopt_exit_index_ = eager_deopt_count + (offset / kLazyDeoptExitSize);
   }
-}
-
-InstructionStream Deoptimizer::FindOptimizedCode() {
-  CodeLookupResult lookup_result = isolate_->FindCodeObject(from_);
-  return lookup_result.instruction_stream();
 }
 
 Handle<JSFunction> Deoptimizer::function() const {
@@ -702,7 +699,7 @@ void Deoptimizer::TraceDeoptMarked(Isolate* isolate) {
 void Deoptimizer::DoComputeOutputFrames() {
   // When we call this function, the return address of the previous frame has
   // been removed from the stack by the DeoptimizationEntry builtin, so the
-  // stack is not iterable by the SafeStackFrameIterator.
+  // stack is not iterable by the StackFrameIteratorForProfiler.
 #if V8_TARGET_ARCH_STORES_RETURN_ADDRESS_ON_STACK
   DCHECK_EQ(0, isolate()->isolate_data()->stack_is_iterable());
 #endif
@@ -1938,7 +1935,7 @@ unsigned Deoptimizer::ComputeIncomingArgumentSize(SharedFunctionInfo shared) {
 
 Deoptimizer::DeoptInfo Deoptimizer::GetDeoptInfo(InstructionStream code,
                                                  Address pc) {
-  CHECK(code.InstructionStart() <= pc && pc <= code.InstructionEnd());
+  CHECK(code.instruction_start() <= pc && pc <= code.instruction_end());
   SourcePosition last_position = SourcePosition::Unknown();
   DeoptimizeReason last_reason = DeoptimizeReason::kUnknown;
   uint32_t last_node_id = 0;

@@ -124,40 +124,44 @@ static const constexpr uint8_t character_json_scan_flags[256] = {
 
 }  // namespace
 
-MaybeHandle<Object> JsonParseInternalizer::Internalize(Isolate* isolate,
-                                                       Handle<Object> result,
-                                                       Handle<Object> reviver,
-                                                       Handle<String> source) {
+MaybeHandle<Object> JsonParseInternalizer::Internalize(
+    Isolate* isolate, Handle<Object> result, Handle<Object> reviver,
+    Handle<String> source, MaybeHandle<Object> val_node) {
   DCHECK(reviver->IsCallable());
   JsonParseInternalizer internalizer(isolate, Handle<JSReceiver>::cast(reviver),
                                      source);
   Handle<JSObject> holder =
       isolate->factory()->NewJSObject(isolate->object_function());
   Handle<String> name = isolate->factory()->empty_string();
+  JSObject::AddProperty(isolate, holder, name, result, NONE);
   if (v8_flags.harmony_json_parse_with_source) {
-    DCHECK(result->IsFixedArray());
-    Handle<FixedArray> array = Handle<FixedArray>::cast(result);
-    DCHECK_EQ(2, array->length());
-    Handle<Object> object(array->get(0), isolate);
-    Handle<Object> val_node(array->get(1), isolate);
-    JSObject::AddProperty(isolate, holder, name, object, NONE);
-    return internalizer.InternalizeJsonProperty(holder, name, val_node);
-  } else {
-    JSObject::AddProperty(isolate, holder, name, result, NONE);
-    return internalizer.InternalizeJsonProperty(holder, name, Handle<Object>());
+    return internalizer.InternalizeJsonProperty<kWithSource>(
+        holder, name, val_node.ToHandleChecked(), result);
   }
+  return internalizer.InternalizeJsonProperty<kWithoutSource>(
+      holder, name, Handle<Object>(), Handle<Object>());
 }
 
-// TODO(v8:12955): Fix the parse node assert bug. See
-// https://github.com/tc39/proposal-json-parse-with-source/issues/35.
+template <JsonParseInternalizer::WithOrWithoutSource with_source>
 MaybeHandle<Object> JsonParseInternalizer::InternalizeJsonProperty(
-    Handle<JSReceiver> holder, Handle<String> name, Handle<Object> val_node) {
+    Handle<JSReceiver> holder, Handle<String> name, Handle<Object> val_node,
+    Handle<Object> snapshot) {
+  DCHECK_EQ(with_source == kWithSource,
+            !val_node.is_null() && !snapshot.is_null());
   DCHECK(reviver_->IsCallable());
   HandleScope outer_scope(isolate_);
   Handle<Object> value;
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate_, value, Object::GetPropertyOrElement(isolate_, holder, name),
       Object);
+
+  // When with_source == kWithSource, the source text is passed to the reviver
+  // if the reviver has not mucked with the originally parsed value.
+  //
+  // When with_source == kWithoutSource, this is unused.
+  bool pass_source_to_reviver =
+      with_source == kWithSource && value->SameValue(*snapshot);
+
   if (value->IsJSReceiver()) {
     Handle<JSReceiver> object = Handle<JSReceiver>::cast(value);
     Maybe<bool> is_array = Object::IsArray(object);
@@ -168,28 +172,39 @@ MaybeHandle<Object> JsonParseInternalizer::InternalizeJsonProperty(
           isolate_, length_object,
           Object::GetLengthFromArrayLike(isolate_, object), Object);
       double length = length_object->Number();
-
-      if (v8_flags.harmony_json_parse_with_source) {
-        DCHECK(val_node->IsFixedArray());
-        Handle<FixedArray> val_nodes = Handle<FixedArray>::cast(val_node);
-        for (double i = 0; i < length; i++) {
+      if (pass_source_to_reviver) {
+        Handle<FixedArray> val_nodes_and_snapshots =
+            Handle<FixedArray>::cast(val_node);
+        int snapshot_length = val_nodes_and_snapshots->length() / 2;
+        for (int i = 0; i < length; i++) {
           HandleScope inner_scope(isolate_);
           Handle<Object> index = isolate_->factory()->NewNumber(i);
           Handle<String> index_name =
               isolate_->factory()->NumberToString(index);
-          if (!RecurseAndApply(object, index_name,
-                               handle(val_nodes->get(i), isolate_))) {
+          // Even if the array pointer snapshot matched, it's possible the
+          // array had new elements added that are not in the snapshotted
+          // elements.
+          const bool rv =
+              i < snapshot_length
+                  ? RecurseAndApply<kWithSource>(
+                        object, index_name,
+                        handle(val_nodes_and_snapshots->get(i * 2), isolate_),
+                        handle(val_nodes_and_snapshots->get(i * 2 + 1),
+                               isolate_))
+                  : RecurseAndApply<kWithoutSource>(
+                        object, index_name, Handle<Object>(), Handle<Object>());
+          if (!rv) {
             return MaybeHandle<Object>();
           }
         }
       } else {
-        DCHECK(val_node.is_null());
-        for (double i = 0; i < length; i++) {
+        for (int i = 0; i < length; i++) {
           HandleScope inner_scope(isolate_);
           Handle<Object> index = isolate_->factory()->NewNumber(i);
           Handle<String> index_name =
               isolate_->factory()->NumberToString(index);
-          if (!RecurseAndApply(object, index_name, Handle<Object>())) {
+          if (!RecurseAndApply<kWithoutSource>(
+                  object, index_name, Handle<Object>(), Handle<Object>())) {
             return MaybeHandle<Object>();
           }
         }
@@ -202,37 +217,49 @@ MaybeHandle<Object> JsonParseInternalizer::InternalizeJsonProperty(
                                   ENUMERABLE_STRINGS,
                                   GetKeysConversion::kConvertToString),
           Object);
-      if (v8_flags.harmony_json_parse_with_source) {
-        DCHECK(val_node->IsObjectHashTable());
-        Handle<ObjectHashTable> val_nodes =
-            Handle<ObjectHashTable>::cast(val_node);
+      if (pass_source_to_reviver) {
+        Handle<ObjectTwoHashTable> val_nodes_and_snapshots =
+            Handle<ObjectTwoHashTable>::cast(val_node);
         for (int i = 0; i < contents->length(); i++) {
           HandleScope inner_scope(isolate_);
           Handle<String> key_name(String::cast(contents->get(i)), isolate_);
-          Handle<Object> node = handle(val_nodes->Lookup(key_name), isolate_);
-          DCHECK(!node->IsTheHole());
-          if (!RecurseAndApply(object, key_name, node)) {
+          auto property_val_node_and_snapshot =
+              val_nodes_and_snapshots->Lookup(isolate_, key_name);
+          Handle<Object> property_val_node(property_val_node_and_snapshot[0],
+                                           isolate_);
+          Handle<Object> property_snapshot(property_val_node_and_snapshot[1],
+                                           isolate_);
+          // Even if the object pointer snapshot matched, it's possible the
+          // object had new properties added that are not in the snapshotted
+          // contents.
+          const bool rv =
+              !property_snapshot->IsTheHole()
+                  ? RecurseAndApply<kWithSource>(
+                        object, key_name, property_val_node, property_snapshot)
+                  : RecurseAndApply<kWithoutSource>(
+                        object, key_name, Handle<Object>(), Handle<Object>());
+          if (!rv) {
             return MaybeHandle<Object>();
           }
         }
       } else {
-        DCHECK(val_node.is_null());
         for (int i = 0; i < contents->length(); i++) {
           HandleScope inner_scope(isolate_);
           Handle<String> key_name(String::cast(contents->get(i)), isolate_);
-          if (!RecurseAndApply(object, key_name, Handle<Object>())) {
+          if (!RecurseAndApply<kWithoutSource>(
+                  object, key_name, Handle<Object>(), Handle<Object>())) {
             return MaybeHandle<Object>();
           }
         }
       }
     }
   }
+
   Handle<Object> result;
   if (v8_flags.harmony_json_parse_with_source) {
-    DCHECK(!val_node.is_null());
     Handle<JSObject> context =
         isolate_->factory()->NewJSObject(isolate_->object_function());
-    if (val_node->IsString()) {
+    if (pass_source_to_reviver && val_node->IsString()) {
       JSReceiver::CreateDataProperty(isolate_, context,
                                      isolate_->factory()->source_string(),
                                      val_node, Just(kThrowOnError))
@@ -243,7 +270,6 @@ MaybeHandle<Object> JsonParseInternalizer::InternalizeJsonProperty(
         isolate_, result, Execution::Call(isolate_, reviver_, holder, 3, argv),
         Object);
   } else {
-    DCHECK(val_node.is_null());
     Handle<Object> argv[] = {name, value};
     ASSIGN_RETURN_ON_EXCEPTION(
         isolate_, result, Execution::Call(isolate_, reviver_, holder, 2, argv),
@@ -252,14 +278,18 @@ MaybeHandle<Object> JsonParseInternalizer::InternalizeJsonProperty(
   return outer_scope.CloseAndEscape(result);
 }
 
+template <JsonParseInternalizer::WithOrWithoutSource with_source>
 bool JsonParseInternalizer::RecurseAndApply(Handle<JSReceiver> holder,
                                             Handle<String> name,
-                                            Handle<Object> val_node) {
+                                            Handle<Object> val_node,
+                                            Handle<Object> snapshot) {
   STACK_CHECK(isolate_, false);
   DCHECK(reviver_->IsCallable());
   Handle<Object> result;
   ASSIGN_RETURN_ON_EXCEPTION_VALUE(
-      isolate_, result, InternalizeJsonProperty(holder, name, val_node), false);
+      isolate_, result,
+      InternalizeJsonProperty<with_source>(holder, name, val_node, snapshot),
+      false);
   Maybe<bool> change_result = Nothing<bool>();
   if (result->IsUndefined(isolate_)) {
     change_result = JSReceiver::DeletePropertyOrElement(holder, name,
@@ -429,7 +459,7 @@ void JsonParser<Char>::ReportUnexpectedToken(
     Script::InitLineEnds(isolate(), script);
   }
 
-  StackTraceFrameIterator it(isolate_);
+  DebuggableStackFrameIterator it(isolate_);
   if (!it.done() && it.is_javascript()) {
     FrameSummary summary = it.GetTopValidFrame();
     script->set_eval_from_shared(summary.AsJavaScript().function()->shared());
@@ -945,32 +975,42 @@ MaybeHandle<Object> JsonParser<Char>::ParseJsonValue(Handle<Object> reviver) {
 
   Handle<Object> value;
 
-  // We use val_node to record current json value's parse node. For primitive
-  // values, the val_node is the source string of the json value. For JSObject
-  // values, the val_node is an ObjectHashTable in which the key is the property
-  // name and the value is the property value's parse node. For JSArray values,
-  // the val_node is a FixedArray containing the parse nodes of the elements.
-  // And for JSObject values, The order in which properties are defined may be
-  // different from the order in which properties are enumerated when calling
-  // InternalizeJSONProperty for the JSObject value. E.g., the json source
+  // When should_track_json_source is true, we use val_node to record current
+  // JSON value's parse node.
+  //
+  // For primitive values, the val_node is the source string of the JSON value.
+  //
+  // For JSObject values, the val_node is an ObjectHashTable in which the key is
+  // the property name and the first value is the property value's parse
+  // node. The order in which properties are defined may be different from the
+  // order in which properties are enumerated when calling
+  // InternalizeJSONProperty for the JSObject value. E.g., the JSON source
   // string is '{"a": 1, "1": 2}', and the properties enumerate order is ["1",
-  // "a"]. Moreover, properties may be defined repeatedly in the json string.
-  // E.g., the json string is '{"a": 1, "a": 1}', and the properties enumerate
+  // "a"]. Moreover, properties may be defined repeatedly in the JSON string.
+  // E.g., the JSON string is '{"a": 1, "a": 1}', and the properties enumerate
   // order is ["a"]. So we cannot use the FixedArray to record the properties's
   // parse node by the order in which properties are defined and we use a
   // ObjectHashTable here to record the property name and the property's parse
   // node. We then look up the property's parse node by the property name when
-  // calling InternalizeJSONProperty.
+  // calling InternalizeJSONProperty. The second value associated with the key
+  // is the property value's snapshot.
+  //
+  // For JSArray values, the val_node is a FixedArray containing the parse nodes
+  // and snapshots of the elements.
+  //
+  // For information about snapshotting, see below.
   Handle<Object> val_node;
   // Record the start position and end position for the primitive values.
   int start_position;
   int end_position;
 
-  // element_val_node_stack is used to track all the elements's parse node. And
-  // we use this to construct the JSArray's parse node.
+  // element_val_node_stack is used to track all the elements's
+  // parse nodes. And we use this to construct the JSArray's
+  // parse node and value snapshot.
   SmallVector<Handle<Object>> element_val_node_stack;
-  // property_val_node_stack is used to track all the property value's parse
-  // node. And we use this to construct the JSObject's parse node.
+  // property_val_node_stack is used to track all the property
+  // value's parse nodes. And we use this to construct the
+  // JSObject's parse node and value snapshot.
   SmallVector<Handle<Object>> property_val_node_stack;
   while (true) {
     // Produce a json value.
@@ -1011,7 +1051,7 @@ MaybeHandle<Object> JsonParser<Char>::ParseJsonValue(Handle<Object> reviver) {
           if (Check(JsonToken::RBRACE)) {
             // TODO(verwaest): Directly use the map instead.
             value = factory()->NewJSObject(object_constructor_);
-            val_node = ObjectHashTable::New(isolate_, 0);
+            val_node = ObjectTwoHashTable::New(isolate_, 0);
             break;
           }
 
@@ -1107,14 +1147,9 @@ MaybeHandle<Object> JsonParser<Char>::ParseJsonValue(Handle<Object> reviver) {
         case JsonContinuation::kReturn:
           if (should_track_json_source) {
             DCHECK(!val_node.is_null());
-            Handle<FixedArray> result = factory()->NewFixedArray(2);
-            {
-              DisallowGarbageCollection no_gc;
-              auto raw_result = *result;
-              raw_result.set(0, *value);
-              raw_result.set(1, *val_node);
-            }
-            return cont.scope.CloseAndEscape(result);
+            auto raw_value = *value;
+            parsed_val_node_ = cont.scope.CloseAndEscape(val_node);
+            return cont.scope.CloseAndEscape(handle(raw_value, isolate_));
           } else {
             return cont.scope.CloseAndEscape(value);
           }
@@ -1163,25 +1198,30 @@ MaybeHandle<Object> JsonParser<Char>::ParseJsonValue(Handle<Object> reviver) {
           // Return the object.
           if (should_track_json_source) {
             size_t start = cont.index;
-            int length = static_cast<int>(property_stack.size() - start);
-            Handle<ObjectHashTable> table =
-                ObjectHashTable::New(isolate(), length);
-            for (int i = 0; i < length; i++) {
+            int num_properties =
+                static_cast<int>(property_stack.size() - start);
+            Handle<ObjectTwoHashTable> table =
+                ObjectTwoHashTable::New(isolate(), num_properties);
+            for (int i = 0; i < num_properties; i++) {
               const JsonProperty& property = property_stack[start + i];
+              Handle<Object> property_val_node =
+                  property_val_node_stack[start + i];
+              Handle<Object> property_snapshot = property.value;
+              Handle<String> key;
               if (property.string.is_index()) {
-                table = ObjectHashTable::Put(
-                    table, factory()->Uint32ToString(property.string.index()),
-                    property_val_node_stack[start + i]);
+                key = factory()->Uint32ToString(property.string.index());
               } else {
-                table =
-                    ObjectHashTable::Put(table, MakeString(property.string),
-                                         property_val_node_stack[start + i]);
+                key = MakeString(property.string);
               }
+              table = ObjectTwoHashTable::Put(
+                  isolate(), table, key,
+                  {property_val_node, property_snapshot});
             }
             property_val_node_stack.resize_no_init(cont.index);
-            Object value_obj = *value;
-            val_node = cont.scope.CloseAndEscape(table);
-            value = cont.scope.CloseAndEscape(handle(value_obj, isolate_));
+            DisallowGarbageCollection no_gc;
+            auto raw_table = *table;
+            value = cont.scope.CloseAndEscape(value);
+            val_node = cont.scope.CloseAndEscape(handle(raw_table, isolate_));
           } else {
             value = cont.scope.CloseAndEscape(value);
           }
@@ -1209,17 +1249,21 @@ MaybeHandle<Object> JsonParser<Char>::ParseJsonValue(Handle<Object> reviver) {
           // Return the array.
           if (should_track_json_source) {
             size_t start = cont.index;
-            int length = static_cast<int>(element_stack.size() - start);
-            Handle<FixedArray> array = factory()->NewFixedArray(length);
+            int num_elements = static_cast<int>(element_stack.size() - start);
+            Handle<FixedArray> val_node_and_snapshot_array =
+                factory()->NewFixedArray(num_elements * 2);
             DisallowGarbageCollection no_gc;
-            auto raw_array = *array;
-            for (int i = 0; i < length; i++) {
-              raw_array.set(i, *element_val_node_stack[start + i]);
+            auto raw_val_node_and_snapshot_array = *val_node_and_snapshot_array;
+            for (int i = 0; i < num_elements; i++) {
+              raw_val_node_and_snapshot_array.set(
+                  i * 2, *element_val_node_stack[start + i]);
+              raw_val_node_and_snapshot_array.set(i * 2 + 1,
+                                                  *element_stack[start + i]);
             }
             element_val_node_stack.resize_no_init(cont.index);
-            Object value_obj = *value;
-            val_node = cont.scope.CloseAndEscape(array);
-            value = cont.scope.CloseAndEscape(handle(value_obj, isolate_));
+            value = cont.scope.CloseAndEscape(value);
+            val_node = cont.scope.CloseAndEscape(
+                handle(raw_val_node_and_snapshot_array, isolate_));
           } else {
             value = cont.scope.CloseAndEscape(value);
           }

@@ -91,12 +91,14 @@ class RootVisitor {
     UNREACHABLE();
   }
 
-  // Visits a single pointer which is InstructionStream from the execution
-  // stack.
-  virtual void VisitRunningCode(FullObjectSlot p) {
-    // For most visitors, currently running InstructionStream is no different
-    // than any other on-stack pointer.
-    VisitRootPointer(Root::kStackRoots, nullptr, p);
+  // Visits a running Code object and potentially its associated
+  // InstructionStream from the execution stack.
+  virtual void VisitRunningCode(FullObjectSlot code_slot,
+                                FullObjectSlot istream_or_smi_zero_slot) {
+    // For most visitors, currently running code is no different than any other
+    // on-stack pointer.
+    VisitRootPointer(Root::kStackRoots, nullptr, istream_or_smi_zero_slot);
+    VisitRootPointer(Root::kStackRoots, nullptr, code_slot);
   }
 
   // Intended for serialization/deserialization checking: insert, or
@@ -105,6 +107,15 @@ class RootVisitor {
   virtual void Synchronize(VisitorSynchronization::SyncTag tag) {}
 
   static const char* RootName(Root root);
+
+  // The type of collector that invokes this visitor. This is used by the
+  // ConservativeStackVisitor to determine which root pointers on the stack
+  // to follow, during conservative stack scanning. For MARK_COMPACTOR (the
+  // default) all pointers are followed, whereas for young generation
+  // collectors only pointers to objects in the young generation are followed.
+  virtual GarbageCollector collector() const {
+    return GarbageCollector::MARK_COMPACTOR;
+  }
 };
 
 class RelocIterator;

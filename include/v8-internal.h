@@ -30,6 +30,7 @@ class Isolate;
 
 typedef uintptr_t Address;
 static const Address kNullAddress = 0;
+static const Address kLocalTaggedNullAddress = 1;
 
 constexpr int KB = 1024;
 constexpr int MB = KB * 1024;
@@ -150,6 +151,7 @@ const int kSmiMinValue = static_cast<int>(PlatformSmiTagging::kSmiMinValue);
 const int kSmiMaxValue = static_cast<int>(PlatformSmiTagging::kSmiMaxValue);
 constexpr bool SmiValuesAre31Bits() { return kSmiValueSize == 31; }
 constexpr bool SmiValuesAre32Bits() { return kSmiValueSize == 32; }
+constexpr bool Is64() { return kApiSystemPointerSize == sizeof(int64_t); }
 
 V8_INLINE static constexpr internal::Address IntToSmi(int value) {
   return (static_cast<Address>(value) << (kSmiTagSize + kSmiShiftSize)) |
@@ -807,7 +809,7 @@ class Internals {
     return addr & -static_cast<intptr_t>(kPtrComprCageBaseAlignment);
   }
 
-  V8_INLINE static internal::Address DecompressTaggedAnyField(
+  V8_INLINE static internal::Address DecompressTaggedField(
       internal::Address heap_object_ptr, uint32_t value) {
     internal::Address base =
         GetPtrComprCageBaseFromOnHeapAddress(heap_object_ptr);
@@ -848,6 +850,19 @@ class BackingStoreBase {};
 // The maximum value in enum GarbageCollectionReason, defined in heap.h.
 // This is needed for histograms sampling garbage collection reasons.
 constexpr int kGarbageCollectionReasonMaxValue = 27;
+
+class ValueHelper final {
+  using A = internal::Address;
+
+ public:
+  static A ValueToAddress(const Data* value) {
+#ifdef V8_ENABLE_CONSERVATIVE_STACK_SCANNING
+    return reinterpret_cast<const A>(value);
+#else
+    return *reinterpret_cast<const A*>(value);
+#endif
+  }
+};
 
 }  // namespace internal
 

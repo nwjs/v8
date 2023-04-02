@@ -8,6 +8,7 @@
 #include <numeric>
 #include <string_view>
 
+#include "src/base/container-utils.h"
 #include "src/base/logging.h"
 #include "src/base/optional.h"
 #include "src/base/safe_conversions.h"
@@ -44,13 +45,19 @@ struct GraphBuilder {
   Zone* graph_zone;
   Zone* phase_zone;
   Schedule& schedule;
-  Assembler<> assembler;
+  Assembler<reducer_list<>> assembler;
   Linkage* linkage;
   SourcePositionTable* source_positions;
   NodeOriginTable* origins;
 
+  struct BlockData {
+    Block* block;
+    OpIndex exit_frame_state;
+    OpIndex loop_dominating_frame_state;
+    uint8_t use_count_at_loop_entry;
+  };
   NodeAuxData<OpIndex> op_mapping{phase_zone};
-  ZoneVector<Block*> block_mapping{schedule.RpoBlockCount(), phase_zone};
+  ZoneVector<BlockData> block_mapping{schedule.RpoBlockCount(), phase_zone};
 
   base::Optional<BailoutReason> Run();
 
@@ -61,7 +68,7 @@ struct GraphBuilder {
     return result;
   }
   Block* Map(BasicBlock* block) {
-    Block* result = block_mapping[block->rpo_number()];
+    Block* result = block_mapping[block->rpo_number()].block;
     DCHECK_NOT_NULL(result);
     return result;
   }
@@ -151,6 +158,7 @@ struct GraphBuilder {
   }
   OpIndex Process(Node* node, BasicBlock* block,
                   const base::SmallVector<int, 16>& predecessor_permutation,
+                  OpIndex& dominating_frame_state,
                   base::Optional<BailoutReason>* bailout,
                   bool is_final_control = false);
 
@@ -172,10 +180,12 @@ struct GraphBuilder {
 
 base::Optional<BailoutReason> GraphBuilder::Run() {
   for (BasicBlock* block : *schedule.rpo_order()) {
-    block_mapping[block->rpo_number()] = block->IsLoopHeader()
-                                             ? assembler.NewLoopHeader()
-                                             : assembler.NewBlock();
+    block_mapping[block->rpo_number()] = {
+        block->IsLoopHeader() ? assembler.NewLoopHeader()
+                              : assembler.NewBlock(),
+        OpIndex::Invalid(), OpIndex::Invalid(), 0};
   }
+
   for (BasicBlock* block : *schedule.rpo_order()) {
     Block* target_block = Map(block);
     if (!assembler.Bind(target_block)) continue;
@@ -194,6 +204,39 @@ base::Optional<BailoutReason> GraphBuilder::Run() {
                        predecessors[j]->rpo_number();
               });
 
+    // Compute the dominating frame state. If all predecessors deliver the same
+    // FrameState, we use this. Otherwise we rely on a new Checkpoint before any
+    // operation that needs a FrameState.
+    OpIndex dominating_frame_state = OpIndex::Invalid();
+    if (!predecessors.empty()) {
+      // Predecessor[0] cannot be a backedge.
+      DCHECK_LT(predecessors[0]->rpo_number(), block->rpo_number());
+      dominating_frame_state =
+          block_mapping[predecessors[0]->rpo_number()].exit_frame_state;
+      for (size_t i = 1; i < predecessors.size(); ++i) {
+        if (predecessors[i]->rpo_number() > block->rpo_number() &&
+            dominating_frame_state.valid()) {
+          // This is a backedge, so we do not have an exit_frame_state yet.
+          // We record this and later verify that the backedge provides this, if
+          // this FrameState has a use inside the loop.
+          DCHECK(target_block->IsLoop());
+          DCHECK_EQ(i, PhiOp::kLoopPhiBackEdgeIndex);
+          auto& mapping = block_mapping[block->rpo_number()];
+          mapping.loop_dominating_frame_state = dominating_frame_state;
+          mapping.use_count_at_loop_entry = assembler.output_graph()
+                                                .Get(dominating_frame_state)
+                                                .saturated_use_count;
+          DCHECK_EQ(i, predecessors.size() - 1);
+          break;
+        }
+        if (dominating_frame_state !=
+            block_mapping[predecessors[i]->rpo_number()].exit_frame_state) {
+          dominating_frame_state = OpIndex::Invalid();
+          break;
+        }
+      }
+    }
+
     base::Optional<BailoutReason> bailout = base::nullopt;
     for (Node* node : *block->nodes()) {
       if (V8_UNLIKELY(node->InputCount() >=
@@ -201,7 +244,8 @@ base::Optional<BailoutReason> GraphBuilder::Run() {
                           decltype(Operation::input_count)>::max()})) {
         return BailoutReason::kTooManyArguments;
       }
-      OpIndex i = Process(node, block, predecessor_permutation, &bailout);
+      OpIndex i = Process(node, block, predecessor_permutation,
+                          dominating_frame_state, &bailout);
       if (V8_UNLIKELY(bailout)) return bailout;
       op_mapping.Set(node, i);
     }
@@ -211,7 +255,8 @@ base::Optional<BailoutReason> GraphBuilder::Run() {
                           decltype(Operation::input_count)>::max()})) {
         return BailoutReason::kTooManyArguments;
       }
-      OpIndex i = Process(node, block, predecessor_permutation, &bailout, true);
+      OpIndex i = Process(node, block, predecessor_permutation,
+                          dominating_frame_state, &bailout, true);
       if (V8_UNLIKELY(bailout)) return bailout;
       op_mapping.Set(node, i);
     }
@@ -223,6 +268,17 @@ base::Optional<BailoutReason> GraphBuilder::Run() {
         if (destination->IsBound()) {
           DCHECK(destination->IsLoop());
           FixLoopPhis(destination, target_block);
+          auto& mapping = block_mapping[block->SuccessorAt(0)->rpo_number()];
+          if (mapping.loop_dominating_frame_state.valid()) {
+            uint8_t final_use_count =
+                assembler.output_graph()
+                    .Get(mapping.loop_dominating_frame_state)
+                    .saturated_use_count;
+            if (final_use_count > mapping.use_count_at_loop_entry) {
+              DCHECK_EQ(dominating_frame_state,
+                        mapping.loop_dominating_frame_state);
+            }
+          }
         }
         break;
       }
@@ -238,6 +294,9 @@ base::Optional<BailoutReason> GraphBuilder::Run() {
         UNREACHABLE();
     }
     DCHECK_NULL(assembler.current_block());
+
+    block_mapping[block->rpo_number()].exit_frame_state =
+        dominating_frame_state;
   }
 
   if (source_positions->IsEnabled()) {
@@ -263,7 +322,8 @@ base::Optional<BailoutReason> GraphBuilder::Run() {
 OpIndex GraphBuilder::Process(
     Node* node, BasicBlock* block,
     const base::SmallVector<int, 16>& predecessor_permutation,
-    base::Optional<BailoutReason>* bailout, bool is_final_control) {
+    OpIndex& dominating_frame_state, base::Optional<BailoutReason>* bailout,
+    bool is_final_control) {
   assembler.SetCurrentOrigin(OpIndex::EncodeTurbofanNodeId(node->id()));
   const Operator* op = node->op();
   Operator::Opcode opcode = op->opcode();
@@ -284,6 +344,12 @@ OpIndex GraphBuilder::Process(
     case IrOpcode::kEffectPhi:
     case IrOpcode::kTerminate:
       return OpIndex::Invalid();
+
+    case IrOpcode::kCheckpoint: {
+      // Preserve the frame state from this checkpoint for following nodes.
+      dominating_frame_state = Map(NodeProperties::GetFrameStateInput(node));
+      return OpIndex::Invalid();
+    }
 
     case IrOpcode::kIfException: {
       return assembler.LoadException();
@@ -632,6 +698,75 @@ OpIndex GraphBuilder::Process(
                                      RegisterRepresentation::PointerSized(),
                                      RegisterRepresentation::Tagged());
 
+#define OBJECT_IS_CASE(kind)                                        \
+  case IrOpcode::kObjectIs##kind: {                                 \
+    return assembler.ObjectIs(Map(node->InputAt(0)),                \
+                              ObjectIsOp::Kind::k##kind,            \
+                              ObjectIsOp::InputAssumptions::kNone); \
+  }
+      OBJECT_IS_CASE(ArrayBufferView)
+      OBJECT_IS_CASE(BigInt)
+      OBJECT_IS_CASE(Callable)
+      OBJECT_IS_CASE(Constructor)
+      OBJECT_IS_CASE(DetectableCallable)
+      OBJECT_IS_CASE(NonCallable)
+      OBJECT_IS_CASE(Number)
+      OBJECT_IS_CASE(Receiver)
+      OBJECT_IS_CASE(Smi)
+      OBJECT_IS_CASE(String)
+      OBJECT_IS_CASE(Symbol)
+      OBJECT_IS_CASE(Undetectable)
+#undef OBJECT_IS_CASE
+
+    case IrOpcode::kCheckBigInt: {
+      DCHECK(dominating_frame_state.valid());
+      OpIndex input = Map(node->InputAt(0));
+      OpIndex check = assembler.ObjectIs(input, ObjectIsOp::Kind::kBigInt,
+                                         ObjectIsOp::InputAssumptions::kNone);
+      assembler.DeoptimizeIfNot(check, dominating_frame_state,
+                                DeoptimizeReason::kNotABigInt,
+                                CheckParametersOf(op).feedback());
+      return input;
+    }
+    case IrOpcode::kCheckedBigIntToBigInt64: {
+      DCHECK(dominating_frame_state.valid());
+      OpIndex input = Map(node->InputAt(0));
+      OpIndex check =
+          assembler.ObjectIs(Map(node->InputAt(0)), ObjectIsOp::Kind::kBigInt64,
+                             ObjectIsOp::InputAssumptions::kBigInt);
+      assembler.DeoptimizeIfNot(check, dominating_frame_state,
+                                DeoptimizeReason::kNotABigInt64,
+                                CheckParametersOf(op).feedback());
+      return input;
+    }
+
+#define CHANGE_CASE(name, kind, input_rep, input_interpretation)         \
+  case IrOpcode::k##name:                                                \
+    return assembler.ConvertToObject(                                    \
+        Map(node->InputAt(0)), ConvertToObjectOp::Kind::k##kind,         \
+        input_rep::Rep,                                                  \
+        ConvertToObjectOp::InputInterpretation::k##input_interpretation, \
+        CheckForMinusZeroMode::kDontCheckForMinusZero);
+      CHANGE_CASE(ChangeInt32ToTagged, Number, Word32, Signed)
+      CHANGE_CASE(ChangeUint32ToTagged, Number, Word32, Unsigned)
+      CHANGE_CASE(ChangeInt64ToTagged, Number, Word64, Signed)
+      CHANGE_CASE(ChangeUint64ToTagged, Number, Word64, Unsigned)
+      CHANGE_CASE(ChangeFloat64ToTaggedPointer, HeapNumber, Float64, Signed)
+      CHANGE_CASE(ChangeInt64ToBigInt, BigInt, Word64, Signed)
+      CHANGE_CASE(ChangeUint64ToBigInt, BigInt, Word64, Unsigned)
+      CHANGE_CASE(ChangeInt31ToTaggedSigned, Smi, Word32, Signed)
+      CHANGE_CASE(ChangeBitToTagged, Boolean, Word32, Signed)
+      CHANGE_CASE(StringFromSingleCharCode, String, Word32, CharCode)
+      CHANGE_CASE(StringFromSingleCodePoint, String, Word32, CodePoint)
+
+    case IrOpcode::kChangeFloat64ToTagged:
+      return assembler.ConvertToObject(
+          Map(node->InputAt(0)), ConvertToObjectOp::Kind::kNumber,
+          RegisterRepresentation::Float64(),
+          ConvertToObjectOp::InputInterpretation::kSigned,
+          CheckMinusZeroModeOf(node->op()));
+#undef CHANGE_CASE
+
     case IrOpcode::kSelect: {
       OpIndex cond = Map(node->InputAt(0));
       OpIndex vtrue = Map(node->InputAt(1));
@@ -909,6 +1044,12 @@ OpIndex GraphBuilder::Process(
       return OpIndex::Invalid();
     }
 
+    case IrOpcode::kAllocate: {
+      AllocationType allocation = AllocationTypeOf(node->op());
+      return assembler.Allocate(Map(node->InputAt(0)), allocation,
+                                AllowLargeObjects::kFalse);
+    }
+    // TODO(nicohartmann@): We might not see AllocateRaw here anymore.
     case IrOpcode::kAllocateRaw: {
       Node* size = node->InputAt(0);
       const AllocateParameters& params = AllocateParametersOf(node->op());
@@ -1035,7 +1176,8 @@ OpIndex GraphBuilder::Process(
       CHECK(m.HasResolvedValue() && m.Ref(broker).IsString() &&
             m.Ref(broker).AsString().IsContentAccessible());
       StringRef type_string = m.Ref(broker).AsString();
-      Handle<String> pattern_string = *type_string.ObjectIfContentAccessible();
+      Handle<String> pattern_string =
+          *type_string.ObjectIfContentAccessible(broker);
       std::unique_ptr<char[]> pattern = pattern_string->ToCString();
 
       auto type_opt =
@@ -1054,6 +1196,11 @@ OpIndex GraphBuilder::Process(
                                              false);
     }
 
+    case IrOpcode::kBeginRegion:
+      return OpIndex::Invalid();
+    case IrOpcode::kFinishRegion:
+      return Map(node->InputAt(0));
+
     default:
       std::cerr << "unsupported node type: " << *node->op() << "\n";
       node->Print(std::cerr);
@@ -1069,15 +1216,15 @@ base::Optional<BailoutReason> BuildGraph(JSHeapBroker* broker,
                                          Graph* graph, Linkage* linkage,
                                          SourcePositionTable* source_positions,
                                          NodeOriginTable* origins) {
-  GraphBuilder builder{
-      broker,
-      graph_zone,
-      phase_zone,
-      *schedule,
-      Assembler<>(*graph, *graph, phase_zone, nullptr, std::tuple<>{}),
-      linkage,
-      source_positions,
-      origins};
+  GraphBuilder builder{broker,
+                       graph_zone,
+                       phase_zone,
+                       *schedule,
+                       Assembler<reducer_list<>>(*graph, *graph, phase_zone,
+                                                 nullptr, std::tuple<>{}),
+                       linkage,
+                       source_positions,
+                       origins};
   return builder.Run();
 }
 

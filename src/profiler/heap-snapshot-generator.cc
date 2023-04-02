@@ -1081,7 +1081,7 @@ class IndexedReferencesExtractor : public ObjectVisitorWithCageBases {
 
   void VisitCodeTarget(InstructionStream host, RelocInfo* rinfo) override {
     InstructionStream target =
-        InstructionStream::GetCodeFromTargetAddress(rinfo->target_address());
+        InstructionStream::FromTargetAddress(rinfo->target_address());
     VisitHeapObjectImpl(target, -1);
   }
 
@@ -1501,10 +1501,8 @@ void V8HeapExplorer::ExtractSharedFunctionInfoReferences(
     HeapEntry* entry, SharedFunctionInfo shared) {
   std::unique_ptr<char[]> name = shared.DebugNameCStr();
   Code code = shared.GetCode();
-  // Don't try to get the InstructionStream object from InstructionStream-less
-  // embedded builtin.
   HeapObject maybe_code_obj =
-      code.is_off_heap_trampoline() ? HeapObject::cast(code) : FromCode(code);
+      code.has_instruction_stream() ? FromCode(code) : HeapObject::cast(code);
   if (name[0] != '\0') {
     TagObject(maybe_code_obj,
               names_->GetFormatted("(code for %s)", name.get()));
@@ -1577,7 +1575,7 @@ void V8HeapExplorer::ExtractWeakCellReferences(HeapEntry* entry,
 
 void V8HeapExplorer::TagBuiltinCodeObject(Code code, const char* name) {
   TagObject(code, names_->GetFormatted("(%s builtin handle)", name));
-  if (!code.is_off_heap_trampoline()) {
+  if (code.has_instruction_stream()) {
     TagObject(FromCode(code), names_->GetFormatted("(%s builtin)", name));
   }
 }
@@ -2066,37 +2064,17 @@ class RootsReferencesExtractor : public RootVisitor {
     }
   }
 
-  void VisitRunningCode(FullObjectSlot p) override {
-    // Must match behavior in
-    // MarkCompactCollector::RootMarkingVisitor::VisitRunningCode, which treats
-    // deoptimization literals in running code as stack roots.
-    HeapObject value = HeapObject::cast(*p);
-    if (!IsCodeSpaceObject(value)) {
-      // When external code space is enabled, the slot might contain a
-      // Code object representing an embedded builtin, which
-      // doesn't require additional processing.
-      DCHECK(Code::cast(value).is_off_heap_trampoline());
-    } else {
-      InstructionStream code = InstructionStream::cast(value);
-      if (code.kind() != CodeKind::BASELINE) {
-        DeoptimizationData deopt_data =
-            DeoptimizationData::cast(code.deoptimization_data());
-        if (deopt_data.length() > 0) {
-          DeoptimizationLiteralArray literals = deopt_data.LiteralArray();
-          int literals_length = literals.length();
-          for (int i = 0; i < literals_length; ++i) {
-            MaybeObject maybe_literal = literals.Get(i);
-            HeapObject heap_literal;
-            if (maybe_literal.GetHeapObject(&heap_literal)) {
-              VisitRootPointer(Root::kStackRoots, nullptr,
-                               FullObjectSlot(&heap_literal));
-            }
-          }
-        }
-      }
+  // Keep this synced with
+  // MarkCompactCollector::RootMarkingVisitor::VisitRunningCode.
+  void VisitRunningCode(FullObjectSlot code_slot,
+                        FullObjectSlot istream_or_smi_zero_slot) final {
+    Object istream_or_smi_zero = *istream_or_smi_zero_slot;
+    if (istream_or_smi_zero != Smi::zero()) {
+      InstructionStream istream = InstructionStream::cast(istream_or_smi_zero);
+      istream.IterateDeoptimizationLiterals(this);
+      VisitRootPointer(Root::kStackRoots, nullptr, istream_or_smi_zero_slot);
     }
-    // Finally visit the InstructionStream itself.
-    VisitRootPointer(Root::kStackRoots, nullptr, p);
+    VisitRootPointer(Root::kStackRoots, nullptr, code_slot);
   }
 
  private:

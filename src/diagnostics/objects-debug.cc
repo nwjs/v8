@@ -50,6 +50,7 @@
 #include "src/objects/js-duration-format-inl.h"
 #endif  // V8_INTL_SUPPORT
 #include "src/objects/js-generator-inl.h"
+#include "src/objects/js-iterator-helpers-inl.h"
 #ifdef V8_INTL_SUPPORT
 #include "src/objects/js-list-format-inl.h"
 #include "src/objects/js-locale-inl.h"
@@ -589,8 +590,8 @@ void Map::MapVerify(Isolate* isolate) {
                     IsSharedArrayElementsKind(elements_kind()));
   CHECK_IMPLIES(is_deprecated(), !is_stable());
   if (is_prototype_map()) {
-    DCHECK(prototype_info() == Smi::zero() ||
-           prototype_info().IsPrototypeInfo());
+    CHECK(prototype_info() == Smi::zero() ||
+          prototype_info().IsPrototypeInfo());
   }
 }
 
@@ -1092,64 +1093,56 @@ void PropertyCell::PropertyCellVerify(Isolate* isolate) {
 void Code::CodeVerify(Isolate* isolate) {
   CHECK(IsCode());
   if (raw_instruction_stream() != Smi::zero()) {
-    InstructionStream code = this->instruction_stream();
-    CHECK_EQ(code.kind(), kind());
-    CHECK_EQ(code.builtin_id(), builtin_id());
-    // When v8_flags.interpreted_frames_native_stack is enabled each
-    // interpreted function gets its own copy of the
-    // InterpreterEntryTrampoline. Thus, there could be InstructionStream'ful
-    // builtins.
-    CHECK_IMPLIES(isolate->embedded_blob_code() && is_off_heap_trampoline(),
-                  builtin_id() == Builtin::kInterpreterEntryTrampoline);
-    CHECK_EQ(code.code(kAcquireLoad), *this);
+    InstructionStream istream = instruction_stream();
+    CHECK_EQ(istream.kind(), kind());
+    CHECK_EQ(istream.builtin_id(), builtin_id());
+    CHECK_EQ(istream.code(kAcquireLoad), *this);
 
     // Ensure the cached code entry point corresponds to the InstructionStream
     // object associated with this Code.
 #ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
     if (V8_SHORT_BUILTIN_CALLS_BOOL) {
-      if (code.InstructionStart() == code_entry_point()) {
+      if (istream.instruction_start() == code_entry_point()) {
         // Most common case, all good.
       } else {
         // When shared pointer compression cage is enabled and it has the
         // embedded code blob copy then the
-        // InstructionStream::InstructionStart() might return the address of the
-        // remapped builtin regardless of whether the builtins copy existed when
-        // the code_entry_point value was cached in the Code (see
+        // InstructionStream::instruction_start() might return the address of
+        // the remapped builtin regardless of whether the builtins copy existed
+        // when the code_entry_point value was cached in the Code (see
         // InstructionStream::OffHeapInstructionStart()).  So, do a reverse
-        // InstructionStream object lookup via code_entry_point value to ensure
-        // it corresponds to the same InstructionStream object associated with
-        // this Code.
-        CodeLookupResult lookup_result =
-            isolate->heap()->GcSafeFindCodeForInnerPointer(code_entry_point());
-        CHECK(lookup_result.IsFound());
-        CHECK_EQ(lookup_result.ToInstructionStream(), code);
+        // Code object lookup via code_entry_point value to ensure it
+        // corresponds to this current Code object.
+        Code lookup_result =
+            isolate->heap()->FindCodeForInnerPointer(code_entry_point());
+        CHECK_EQ(lookup_result, *this);
       }
     } else {
-      CHECK_EQ(code.InstructionStart(), code_entry_point());
+      CHECK_EQ(istream.instruction_start(), code_entry_point());
     }
 #else
-    CHECK_EQ(code.InstructionStart(), code_entry_point());
+    CHECK_EQ(istream.instruction_start(), code_entry_point());
 #endif  // V8_COMPRESS_POINTERS_IN_SHARED_CAGE
   }
 }
 
 void InstructionStream::InstructionStreamVerify(Isolate* isolate) {
   CHECK(
-      IsAligned(InstructionSize(),
+      IsAligned(instruction_size(),
                 static_cast<unsigned>(InstructionStream::kMetadataAlignment)));
   CHECK_EQ(safepoint_table_offset(), 0);
   CHECK_LE(safepoint_table_offset(), handler_table_offset());
   CHECK_LE(handler_table_offset(), constant_pool_offset());
   CHECK_LE(constant_pool_offset(), code_comments_offset());
   CHECK_LE(code_comments_offset(), unwinding_info_offset());
-  CHECK_LE(unwinding_info_offset(), MetadataSize());
+  CHECK_LE(unwinding_info_offset(), metadata_size());
 #if !defined(_MSC_VER) || defined(__clang__)
   // See also: PlatformEmbeddedFileWriterWin::AlignToCodeAlignment.
   CHECK_IMPLIES(!ReadOnlyHeap::Contains(*this),
-                IsAligned(InstructionStart(), kCodeAlignment));
+                IsAligned(instruction_start(), kCodeAlignment));
 #endif  // !defined(_MSC_VER) || defined(__clang__)
   CHECK_IMPLIES(!ReadOnlyHeap::Contains(*this),
-                IsAligned(raw_instruction_start(), kCodeAlignment));
+                IsAligned(instruction_start(), kCodeAlignment));
   CHECK_EQ(*this, code(kAcquireLoad).instruction_stream());
   relocation_info().ObjectVerify(isolate);
   CHECK(V8_ENABLE_THIRD_PARTY_HEAP_BOOL ||
@@ -1282,6 +1275,17 @@ void JSSharedArray::JSSharedArrayVerify(Isolate* isolate) {
     Object element_value = storage.get(j);
     CHECK(element_value.IsShared());
   }
+}
+
+void JSIteratorMapHelper::JSIteratorMapHelperVerify(Isolate* isolate) {
+  TorqueGeneratedClassVerifiers::JSIteratorMapHelperVerify(*this, isolate);
+  CHECK(mapper().IsCallable());
+  CHECK_GE(counter().Number(), 0);
+}
+
+void JSIteratorFilterHelper::JSIteratorFilterHelperVerify(Isolate* isolate) {
+  TorqueGeneratedClassVerifiers::JSIteratorFilterHelperVerify(*this, isolate);
+  UNIMPLEMENTED();
 }
 
 void WeakCell::WeakCellVerify(Isolate* isolate) {
@@ -1648,6 +1652,18 @@ void JSTypedArray::JSTypedArrayVerify(Isolate* isolate) {
 
 void JSDataView::JSDataViewVerify(Isolate* isolate) {
   TorqueGeneratedClassVerifiers::JSDataViewVerify(*this, isolate);
+  CHECK(!IsVariableLength());
+  if (!WasDetached()) {
+    CHECK_EQ(reinterpret_cast<uint8_t*>(
+                 JSArrayBuffer::cast(buffer()).backing_store()) +
+                 byte_offset(),
+             data_pointer());
+  }
+}
+
+void JSRabGsabDataView::JSRabGsabDataViewVerify(Isolate* isolate) {
+  TorqueGeneratedClassVerifiers::JSRabGsabDataViewVerify(*this, isolate);
+  CHECK(IsVariableLength());
   if (!WasDetached()) {
     CHECK_EQ(reinterpret_cast<uint8_t*>(
                  JSArrayBuffer::cast(buffer()).backing_store()) +
@@ -1898,12 +1914,6 @@ void AllocationSite::AllocationSiteVerify(Isolate* isolate) {
 
 void Script::ScriptVerify(Isolate* isolate) {
   TorqueGeneratedClassVerifiers::ScriptVerify(*this, isolate);
-  if (V8_UNLIKELY(type() == Script::TYPE_WEB_SNAPSHOT)) {
-    CHECK_LE(shared_function_info_count(), shared_function_infos().length());
-  } else {
-    // No overallocating shared_function_infos.
-    CHECK_EQ(shared_function_info_count(), shared_function_infos().length());
-  }
   for (int i = 0; i < shared_function_info_count(); ++i) {
     MaybeObject maybe_object = shared_function_infos().Get(i);
     HeapObject heap_object;

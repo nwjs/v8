@@ -59,9 +59,9 @@ inline MemOperand FieldMemOperand(Register object, int offset) {
   return MemOperand(object, offset - kHeapObjectTag);
 }
 
-class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
  public:
-  using TurboAssemblerBase::TurboAssemblerBase;
+  using MacroAssemblerBase::MacroAssemblerBase;
 
   // Activation support.
   void EnterFrame(StackFrame::Type type);
@@ -500,12 +500,23 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   // garbage collection, since that might move the code and invalidate the
   // return address (unless this is somehow accounted for by the called
   // function).
-  void CallCFunction(ExternalReference function, int num_arguments);
-  void CallCFunction(Register function, int num_arguments);
-  void CallCFunction(ExternalReference function, int num_reg_arguments,
-                     int num_double_arguments);
-  void CallCFunction(Register function, int num_reg_arguments,
-                     int num_double_arguments);
+  enum class SetIsolateDataSlots {
+    kNo,
+    kYes,
+  };
+  void CallCFunction(
+      ExternalReference function, int num_arguments,
+      SetIsolateDataSlots set_isolate_data_slots = SetIsolateDataSlots::kYes);
+  void CallCFunction(
+      Register function, int num_arguments,
+      SetIsolateDataSlots set_isolate_data_slots = SetIsolateDataSlots::kYes);
+  void CallCFunction(
+      ExternalReference function, int num_reg_arguments,
+      int num_double_arguments,
+      SetIsolateDataSlots set_isolate_data_slots = SetIsolateDataSlots::kYes);
+  void CallCFunction(
+      Register function, int num_reg_arguments, int num_double_arguments,
+      SetIsolateDataSlots set_isolate_data_slots = SetIsolateDataSlots::kYes);
 
   // See comments at the beginning of Builtins::Generate_CEntry.
   inline void PrepareCEntryArgs(int num_args) { li(a0, num_args); }
@@ -773,46 +784,6 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   // Define an exception handler and bind a label.
   void BindExceptionHandler(Label* label) { bind(label); }
 
- protected:
-  inline Register GetRkAsRegisterHelper(const Operand& rk, Register scratch);
-  inline int32_t GetOffset(Label* L, OffsetSize bits);
-
- private:
-  bool has_double_zero_reg_set_ = false;
-
-  // Performs a truncating conversion of a floating point number as used by
-  // the JS bitwise operations. See ECMA-262 9.5: ToInt32. Goes to 'done' if it
-  // succeeds, otherwise falls through if result is saturated. On return
-  // 'result' either holds answer, or is clobbered on fall through.
-  void TryInlineTruncateDoubleToI(Register result, DoubleRegister input,
-                                  Label* done);
-
-  bool BranchShortOrFallback(Label* L, Condition cond, Register rj,
-                             const Operand& rk, bool need_link);
-
-  // f32 or f64
-  void CompareF(FPURegister cmp1, FPURegister cmp2, FPUCondition cc,
-                CFRegister cd, bool f32 = true);
-
-  void CompareIsNanF(FPURegister cmp1, FPURegister cmp2, CFRegister cd,
-                     bool f32 = true);
-
-  void CallCFunctionHelper(Register function, int num_reg_arguments,
-                           int num_double_arguments);
-
-  void RoundDouble(FPURegister dst, FPURegister src, FPURoundingMode mode);
-
-  void RoundFloat(FPURegister dst, FPURegister src, FPURoundingMode mode);
-
-  // Push a fixed frame, consisting of ra, fp.
-  void PushCommonFrame(Register marker_reg = no_reg);
-};
-
-// MacroAssembler implements a collection of frequently used macros.
-class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
- public:
-  using TurboAssembler::TurboAssembler;
-
   // It assumes that the arguments are located below the stack pointer.
   // argc is the number of arguments not including the receiver.
   // TODO(LOONG_dev): LOONG64: Remove this function once we stick with the
@@ -1079,17 +1050,51 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
     DecodeField<Field>(reg, reg);
   }
 
+ protected:
+  inline Register GetRkAsRegisterHelper(const Operand& rk, Register scratch);
+  inline int32_t GetOffset(Label* L, OffsetSize bits);
+
  private:
+  bool has_double_zero_reg_set_ = false;
+
   // Helper functions for generating invokes.
   void InvokePrologue(Register expected_parameter_count,
                       Register actual_parameter_count, Label* done,
                       InvokeType type);
 
+  // Performs a truncating conversion of a floating point number as used by
+  // the JS bitwise operations. See ECMA-262 9.5: ToInt32. Goes to 'done' if it
+  // succeeds, otherwise falls through if result is saturated. On return
+  // 'result' either holds answer, or is clobbered on fall through.
+  void TryInlineTruncateDoubleToI(Register result, DoubleRegister input,
+                                  Label* done);
+
+  bool BranchShortOrFallback(Label* L, Condition cond, Register rj,
+                             const Operand& rk, bool need_link);
+
+  // f32 or f64
+  void CompareF(FPURegister cmp1, FPURegister cmp2, FPUCondition cc,
+                CFRegister cd, bool f32 = true);
+
+  void CompareIsNanF(FPURegister cmp1, FPURegister cmp2, CFRegister cd,
+                     bool f32 = true);
+
+  void CallCFunctionHelper(
+      Register function, int num_reg_arguments, int num_double_arguments,
+      SetIsolateDataSlots set_isolate_data_slots = SetIsolateDataSlots::kYes);
+
+  void RoundDouble(FPURegister dst, FPURegister src, FPURoundingMode mode);
+
+  void RoundFloat(FPURegister dst, FPURegister src, FPURoundingMode mode);
+
+  // Push a fixed frame, consisting of ra, fp.
+  void PushCommonFrame(Register marker_reg = no_reg);
+
   DISALLOW_IMPLICIT_CONSTRUCTORS(MacroAssembler);
 };
 
 template <typename Func>
-void TurboAssembler::GenerateSwitchTable(Register index, size_t case_count,
+void MacroAssembler::GenerateSwitchTable(Register index, size_t case_count,
                                          Func GetLabelFunction) {
   UseScratchRegisterScope scope(this);
   Register scratch = scope.Acquire();

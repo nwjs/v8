@@ -72,7 +72,7 @@ class IterateAndScavengePromotedObjectsVisitor final : public ObjectVisitor {
   V8_INLINE void VisitCodeTarget(InstructionStream host,
                                  RelocInfo* rinfo) final {
     InstructionStream target =
-        InstructionStream::GetCodeFromTargetAddress(rinfo->target_address());
+        InstructionStream::FromTargetAddress(rinfo->target_address());
     HandleSlot(host, FullHeapObjectSlot(&target), target);
   }
   V8_INLINE void VisitEmbeddedPointer(InstructionStream host,
@@ -146,9 +146,6 @@ class IterateAndScavengePromotedObjectsVisitor final : public ObjectVisitor {
       DCHECK_IMPLIES(V8_EXTERNAL_CODE_SPACE_BOOL,
                      !MemoryChunk::FromHeapObject(target)->IsFlagSet(
                          MemoryChunk::IS_EXECUTABLE));
-      // Shared heap pages do not have evacuation candidates outside an atomic
-      // shared GC pause.
-      DCHECK_IMPLIES(!v8_flags.shared_space, !target.InSharedWritableHeap());
 
       // We cannot call MarkCompactCollector::RecordSlot because that checks
       // that the host page is not in young generation, which does not hold
@@ -158,7 +155,6 @@ class IterateAndScavengePromotedObjectsVisitor final : public ObjectVisitor {
     }
 
     if (target.InSharedWritableHeap()) {
-      DCHECK(!scavenger_->heap()->IsShared());
       MemoryChunk* chunk = MemoryChunk::FromHeapObject(host);
       RememberedSet<OLD_TO_SHARED>::Insert<AccessMode::ATOMIC>(chunk,
                                                                slot.address());
@@ -604,12 +600,23 @@ Scavenger::PromotionList::Local::Local(Scavenger::PromotionList* promotion_list)
 
 namespace {
 ConcurrentAllocator* CreateSharedOldAllocator(Heap* heap) {
-  if (v8_flags.shared_string_table && heap->isolate()->has_shared_heap()) {
+  if (v8_flags.shared_string_table && heap->isolate()->has_shared_space()) {
     return new ConcurrentAllocator(nullptr, heap->shared_allocation_space(),
                                    ConcurrentAllocator::Context::kGC);
   }
   return nullptr;
 }
+
+// This returns true if the scavenger runs in a client isolate and incremental
+// marking is enabled in the shared space isolate.
+bool IsSharedIncrementalMarking(Isolate* isolate) {
+  return isolate->has_shared_space() && !isolate->is_shared_space_isolate() &&
+         isolate->shared_space_isolate()
+             ->heap()
+             ->incremental_marking()
+             ->IsMarking();
+}
+
 }  // namespace
 
 Scavenger::Scavenger(ScavengerCollector* collector, Heap* heap, bool is_logging,
@@ -633,8 +640,10 @@ Scavenger::Scavenger(ScavengerCollector* collector, Heap* heap, bool is_logging,
       is_compacting_(heap->incremental_marking()->IsCompacting()),
       shared_string_table_(shared_old_allocator_.get() != nullptr),
       mark_shared_heap_(heap->isolate()->is_shared_space_isolate()),
-      shortcut_strings_(!heap->IsGCWithStack() ||
-                        v8_flags.shortcut_strings_with_stack) {}
+      shortcut_strings_(
+          (!heap->IsGCWithStack() || v8_flags.shortcut_strings_with_stack) &&
+          !is_incremental_marking_ &&
+          !IsSharedIncrementalMarking(heap->isolate())) {}
 
 void Scavenger::IterateAndScavengePromotedObject(HeapObject target, Map map,
                                                  int size) {
@@ -668,13 +677,14 @@ void Scavenger::AddPageToSweeperIfNecessary(MemoryChunk* page) {
   AllocationSpace space = page->owner_identity();
   if ((space == OLD_SPACE) && !page->SweepingDone()) {
     heap()->sweeper()->AddPage(space, reinterpret_cast<Page*>(page),
-                               Sweeper::READD_TEMPORARY_REMOVED_PAGE);
+                               Sweeper::READD_TEMPORARY_REMOVED_PAGE,
+                               AccessMode::ATOMIC);
   }
 }
 
 void Scavenger::ScavengePage(MemoryChunk* page) {
   CodePageMemoryModificationScope memory_modification_scope(page);
-  const bool record_old_to_shared_slots = heap_->isolate()->has_shared_heap();
+  const bool record_old_to_shared_slots = heap_->isolate()->has_shared_space();
 
   if (page->slot_set<OLD_TO_NEW, AccessMode::ATOMIC>() != nullptr) {
     InvalidatedSlotsFilter filter = InvalidatedSlotsFilter::OldToNew(

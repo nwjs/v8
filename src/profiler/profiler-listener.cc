@@ -74,9 +74,6 @@ void ProfilerListener::CodeCreateEvent(CodeTag tag, Handle<AbstractCode> code,
                                        Handle<SharedFunctionInfo> shared,
                                        Handle<Name> script_name) {
   PtrComprCageBase cage_base(isolate_);
-  DCHECK(code->IsBytecodeArray(cage_base) ||
-         Builtins::IsBuiltinId(code->builtin_id(cage_base)) ||
-         code->kind(cage_base) == CodeKind::BASELINE);
   CodeEventsContainer evt_rec(CodeEventRecord::Type::kCodeCreation);
   CodeCreateEventRecord* rec = &evt_rec.CodeCreateEventRecord_;
   rec->instruction_start = code->InstructionStart(cage_base);
@@ -302,8 +299,8 @@ void ProfilerListener::CodeMoveEvent(InstructionStream from,
   DisallowGarbageCollection no_gc;
   CodeEventsContainer evt_rec(CodeEventRecord::Type::kCodeMove);
   CodeMoveEventRecord* rec = &evt_rec.CodeMoveEventRecord_;
-  rec->from_instruction_start = from.InstructionStart();
-  rec->to_instruction_start = to.InstructionStart();
+  rec->from_instruction_start = from.instruction_start();
+  rec->to_instruction_start = to.instruction_start();
   DispatchCodeEvent(evt_rec);
 }
 
@@ -340,7 +337,7 @@ void ProfilerListener::CodeDeoptEvent(Handle<InstructionStream> code,
   CodeEventsContainer evt_rec(CodeEventRecord::Type::kCodeDeopt);
   CodeDeoptEventRecord* rec = &evt_rec.CodeDeoptEventRecord_;
   Deoptimizer::DeoptInfo info = Deoptimizer::GetDeoptInfo(*code, pc);
-  rec->instruction_start = code->InstructionStart();
+  rec->instruction_start = code->instruction_start();
   rec->deopt_reason = DeoptimizeReasonToString(info.deopt_reason);
   rec->deopt_id = info.deopt_id;
   rec->pc = pc;

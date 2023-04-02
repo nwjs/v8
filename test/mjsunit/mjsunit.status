@@ -39,7 +39,6 @@
   'wasm/wasm-module-builder': [SKIP],
   'compiler/fast-api-helpers': [SKIP],
   'typedarray-helpers': [SKIP],
-  'web-snapshot/web-snapshot-helpers': [SKIP],
 
   # All tests in the bug directory are expected to fail.
   'bugs/*': [FAIL],
@@ -147,6 +146,7 @@
   'regress/regress-1200351': [PASS, SLOW],
   'regress/regress-crbug-808192': [PASS, SLOW, NO_VARIANTS, ['arch not in (ia32, x64)', SKIP], ['tsan', SKIP]],
   'regress/regress-crbug-918301': [PASS, SLOW, NO_VARIANTS, ['mode != release or dcheck_always_on', SKIP], ['(arch == arm or arch == arm64) and simulator_run', SKIP]],
+  'regress/regress-crbug-1276923': [PASS, SLOW],
   'regress/wasm/regress-810973': [PASS, SLOW],
   'sealed-array-reduce': [PASS, SLOW],
   'string-replace-gc': [PASS, SLOW],
@@ -220,6 +220,12 @@
   'regress/regress-913844': [PASS,
     ['system != linux or arch not in (arm, arm64, x64, s390x, ppc64)', SKIP]],
 }],  # ALWAYS
+
+################################################################################
+['mode == release', {
+  # Slow tests in release mode.
+  'wasm/many-modules': [PASS, SLOW],
+}],
 
 ##############################################################################
 ['mode == debug', {
@@ -381,6 +387,43 @@
   # https://crbug.com/v8/13461
   'maglev/inner-function': [SKIP],
 }],  # 'gc_stress'
+
+##############################################################################
+['gc_stress or variant == stress_concurrent_allocation', {
+  # These tests check that FinalizationRegistry cleanup tasks and/or the
+  # clearing of WeakRefs work as expected. They use carefully triggered
+  # synchronous or asynchronous GCs to achieve that and they assume that
+  # there are no unexpected, externally triggered GCs that would interfere
+  # with the tests. Therefore, they are unsuitable for modes that stress
+  # activities which can trigger GC.
+  'harmony/weakrefs/cleanup': [SKIP],
+  'harmony/weakrefs/cleanup-is-not-a-microtask': [SKIP],
+  'harmony/weakrefs/cleanup-on-detached-realm': [SKIP],
+  'harmony/weakrefs/cleanupsome': [SKIP],
+  'harmony/weakrefs/cleanupsome-after-unregister': [SKIP],
+  'harmony/weakrefs/finalizationregistry-and-weakref': [SKIP],
+  'harmony/weakrefs/finalizationregistry-independent-lifetime': [SKIP],
+  'harmony/weakrefs/finalizationregistry-independent-lifetime-multiple': [SKIP],
+  'harmony/weakrefs/finalizationregistry-keeps-holdings-alive': [SKIP],
+  'harmony/weakrefs/finalizationregistry-scheduled-for-cleanup-multiple-times': [SKIP],
+  'harmony/weakrefs/multiple-dirty-finalization-groups': [SKIP],
+  'harmony/weakrefs/reentrant-gc-from-cleanup': [SKIP],
+  'harmony/weakrefs/symbol-as-weakref-target-gc': [SKIP],
+  'harmony/weakrefs/symbol-in-finalizationregistry': [SKIP],
+  'harmony/weakrefs/two-weakrefs': [SKIP],
+  'harmony/weakrefs/undefined-holdings': [SKIP],
+  'harmony/weakrefs/unregister-after-cleanup': [SKIP],
+  'harmony/weakrefs/unregister-before-cleanup': [SKIP],
+  'harmony/weakrefs/unregister-called-twice': [SKIP],
+  'harmony/weakrefs/unregister-inside-cleanup2': [SKIP],
+  'harmony/weakrefs/unregister-inside-cleanup3': [SKIP],
+  'harmony/weakrefs/unregister-inside-cleanup': [SKIP],
+  'harmony/weakrefs/unregister-many': [SKIP],
+  'harmony/weakrefs/unregister-when-cleanup-already-scheduled': [SKIP],
+  'harmony/weakrefs/weak-cell-basics': [SKIP],
+  'harmony/weakrefs/weakref-creation-keeps-alive': [SKIP],
+  'harmony/weakrefs/weakref-deref-keeps-alive': [SKIP],
+}],  # 'gc_stress or variant == stress_concurrent_allocation'
 
 ##############################################################################
 # TODO(v8:7777): Change this once wasm is supported in jitless mode.
@@ -900,6 +943,7 @@
   'regress/wasm/regress-1231950': [SKIP],
   'regress/wasm/regress-1264462': [SKIP],
   'regress/wasm/regress-1179025': [SKIP],
+  'regress/wasm/regress-13732': [SKIP],
   'wasm/multi-value-simd': [SKIP],
   'wasm/liftoff-simd-params': [SKIP],
   'wasm/exceptions-simd': [SKIP],
@@ -1131,6 +1175,9 @@
   'wasm/log-code-after-post-message': [SKIP],
   'asm/regress-1395401': [SKIP],
   'regress/regress-1394663': [SKIP],
+
+  # Skipped because it has contradictory flags.
+  'compiler/regress-crbug-1399490': [SKIP],
 }], # gc_fuzzer or deopt_fuzzer or interrupt_fuzzer
 
 ##############################################################################
@@ -1565,6 +1612,8 @@
   'regress/wasm/regress-1289678': [SKIP],
   'regress/wasm/regress-1290079': [SKIP],
   'regress/wasm/regress-1299183': [SKIP],
+  'regress/wasm/regress-1417516': [SKIP],
+  'regress/wasm/regress-13732': [SKIP],
   'regress/wasm/regress-1408337': [SKIP],
   'regress/wasm/regress-crbug-1338980': [SKIP],
   'regress/wasm/regress-crbug-1355070': [SKIP],

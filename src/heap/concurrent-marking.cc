@@ -263,7 +263,7 @@ class YoungGenerationConcurrentMarkingVisitor final
         marking_state_(heap->isolate(), memory_chunk_data) {}
 
   bool ShouldMarkObject(HeapObject object) const {
-    return !object.InSharedHeap();
+    return !object.InSharedHeap() && !object.InReadOnlySpace();
   }
 
   void SynchronizePageAccess(HeapObject heap_object) {
@@ -327,7 +327,8 @@ class YoungGenerationConcurrentMarkingVisitor final
                                                                   object);
   }
 
-  int VisitJSDataView(Map map, JSDataView object) {
+  int VisitJSDataViewOrRabGsabDataView(Map map,
+                                       JSDataViewOrRabGsabDataView object) {
     return ConcurrentMarkingVisitorUtility::VisitJSObjectSubclass(this, map,
                                                                   object);
   }
@@ -370,10 +371,6 @@ class YoungGenerationConcurrentMarkingVisitor final
     return marking_state_.GreyToBlack(object);
   }
 
-  bool ShouldVisitUnaccounted(HeapObject object) {
-    return marking_state_.GreyToBlackUnaccounted(object);
-  }
-
   template <typename TSlot>
   void RecordSlot(HeapObject object, TSlot slot, HeapObject target) {}
 
@@ -382,24 +379,6 @@ class YoungGenerationConcurrentMarkingVisitor final
   ConcurrentMarkingState* marking_state() { return &marking_state_; }
 
  private:
-  template <typename T>
-  int VisitLeftTrimmableArray(Map map, T object) {
-    // The length() function checks that the length is a Smi.
-    // This is not necessarily the case if the array is being left-trimmed.
-    Object length = object.unchecked_length(kAcquireLoad);
-    // No accounting here to avoid re-reading the length which could already
-    // contain a non-SMI value when left-trimming happens concurrently.
-    if (!ShouldVisitUnaccounted(object)) return 0;
-    // The cached length must be the actual length as the array is not black.
-    // Left trimming marks the array black before over-writing the length.
-    DCHECK(length.IsSmi());
-    int size = T::SizeFor(Smi::ToInt(length));
-    marking_state_.IncrementLiveBytes(MemoryChunk::FromHeapObject(object),
-                                      size);
-    T::BodyDescriptor::IterateBody(map, object, size, this);
-    return size;
-  }
-
   ConcurrentMarkingState marking_state_;
   SlotSnapshot slot_snapshot_;
 };
@@ -526,10 +505,6 @@ class ConcurrentMarkingVisitor final
     return marking_state_.GreyToBlack(object);
   }
 
-  bool ShouldVisitUnaccounted(HeapObject object) {
-    return marking_state_.GreyToBlackUnaccounted(object);
-  }
-
   template <typename TSlot>
   void RecordSlot(HeapObject object, TSlot slot, HeapObject target) {
     MarkCompactCollector::RecordSlot(object, slot, target);
@@ -542,25 +517,6 @@ class ConcurrentMarkingVisitor final
   int VisitJSObjectSubclass(Map map, T object) {
     return ConcurrentMarkingVisitorUtility::VisitJSObjectSubclass<
         ConcurrentMarkingVisitor, T, TBodyDescriptor>(this, map, object);
-  }
-
-  template <typename T>
-  int VisitLeftTrimmableArray(Map map, T object) {
-    // The length() function checks that the length is a Smi.
-    // This is not necessarily the case if the array is being left-trimmed.
-    Object length = object.unchecked_length(kAcquireLoad);
-    // No accounting here to avoid re-reading the length which could already
-    // contain a non-SMI value when left-trimming happens concurrently.
-    if (!ShouldVisitUnaccounted(object)) return 0;
-    // The cached length must be the actual length as the array is not black.
-    // Left trimming marks the array black before over-writing the length.
-    DCHECK(length.IsSmi());
-    int size = T::SizeFor(Smi::ToInt(length));
-    marking_state_.IncrementLiveBytes(MemoryChunk::FromHeapObject(object),
-                                      ALIGN_TO_ALLOCATION_ALIGNMENT(size));
-    VisitMapPointer(object);
-    T::BodyDescriptor::IterateBody(map, object, size, this);
-    return size;
   }
 
   void RecordRelocSlot(InstructionStream host, RelocInfo* rinfo,
@@ -617,18 +573,6 @@ SeqOneByteString ConcurrentMarkingVisitor::Cast(HeapObject object) {
 template <>
 SeqTwoByteString ConcurrentMarkingVisitor::Cast(HeapObject object) {
   return SeqTwoByteString::unchecked_cast(object);
-}
-
-// Fixed array can become a free space during left trimming.
-template <>
-FixedArray ConcurrentMarkingVisitor::Cast(HeapObject object) {
-  return FixedArray::unchecked_cast(object);
-}
-
-// FixedDoubleArray can become a free space during left trimming.
-template <>
-FixedDoubleArray ConcurrentMarkingVisitor::Cast(HeapObject object) {
-  return FixedDoubleArray::unchecked_cast(object);
 }
 
 // The Deserializer changes the map from StrongDescriptorArray to
@@ -787,6 +731,7 @@ void ConcurrentMarking::RunMajor(JobDelegate* delegate,
           done = true;
           break;
         }
+        DCHECK(!object.InReadOnlySpace());
         objects_processed++;
 
         Address new_space_top = kNullAddress;

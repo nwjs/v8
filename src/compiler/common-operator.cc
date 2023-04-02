@@ -55,15 +55,8 @@ std::ostream& operator<<(std::ostream& os, TrapId trap_id) {
 }
 
 TrapId TrapIdOf(const Operator* const op) {
-#if V8_ENABLE_WEBASSEMBLY
-  // Combining this with the #else into a single DCHECK() does not with MSVC.
-  DCHECK(op->opcode() == IrOpcode::kTrapIf ||
-         op->opcode() == IrOpcode::kTrapUnless ||
-         op->opcode() == IrOpcode::kAssertNotNull);
-#else
   DCHECK(op->opcode() == IrOpcode::kTrapIf ||
          op->opcode() == IrOpcode::kTrapUnless);
-#endif
   return OpParameter<TrapId>(op);
 }
 
@@ -1646,6 +1639,29 @@ CommonOperatorBuilder::CreateJSToWasmFrameStateFunctionInfo(
       type, parameter_count, local_count, shared_info, signature);
 }
 #endif  // V8_ENABLE_WEBASSEMBLY
+
+const Operator* CommonOperatorBuilder::Chained(const Operator* op) {
+  // Use Chained only for operators that are not on the effect chain already.
+  DCHECK_EQ(op->EffectInputCount(), 0);
+  DCHECK_EQ(op->ControlInputCount(), 0);
+  const char* mnemonic;
+  switch (op->opcode()) {
+    case IrOpcode::kChangeInt64ToBigInt:
+      mnemonic = "Chained[ChangeInt64ToBigInt]";
+      break;
+    case IrOpcode::kChangeUint64ToBigInt:
+      mnemonic = "Chained[ChangeUint64ToBigInt]";
+      break;
+    default:
+      UNREACHABLE();
+  }
+  // TODO(nicohartmann@): Need to store operator properties once we have to
+  // support Operator1 operators.
+  Operator::Properties properties = op->properties();
+  return zone()->New<Operator>(op->opcode(), properties, mnemonic,
+                               op->ValueInputCount(), 1, 1,
+                               op->ValueOutputCount(), 1, 0);
+}
 
 const Operator* CommonOperatorBuilder::DeadValue(MachineRepresentation rep) {
   return zone()->New<Operator1<MachineRepresentation>>(  // --

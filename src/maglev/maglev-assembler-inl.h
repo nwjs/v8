@@ -5,6 +5,8 @@
 #ifndef V8_MAGLEV_MAGLEV_ASSEMBLER_INL_H_
 #define V8_MAGLEV_MAGLEV_ASSEMBLER_INL_H_
 
+#include "src/maglev/maglev-assembler.h"
+
 #ifdef V8_TARGET_ARCH_ARM64
 #include "src/maglev/arm64/maglev-assembler-arm64-inl.h"
 #elif V8_TARGET_ARCH_X64
@@ -69,6 +71,10 @@ struct CopyForDeferredHelper<BytecodeOffset>
 template <>
 struct CopyForDeferredHelper<EagerDeoptInfo*>
     : public CopyForDeferredByValue<EagerDeoptInfo*> {};
+// LazyDeoptInfo pointers are copied by value.
+template <>
+struct CopyForDeferredHelper<LazyDeoptInfo*>
+    : public CopyForDeferredByValue<LazyDeoptInfo*> {};
 // ZoneLabelRef is copied by value.
 template <>
 struct CopyForDeferredHelper<ZoneLabelRef>
@@ -167,8 +173,8 @@ class DeferredCodeInfoImpl final : public DeferredCodeInfo {
 }  // namespace detail
 
 template <typename Function, typename... Args>
-inline DeferredCodeInfo* MaglevAssembler::PushDeferredCode(
-    Function&& deferred_code_gen, Args&&... args) {
+inline Label* MaglevAssembler::MakeDeferredCode(Function&& deferred_code_gen,
+                                                Args&&... args) {
   using FunctionPointer =
       typename detail::FunctionArgumentsTupleHelper<Function>::FunctionPointer;
   static_assert(
@@ -177,7 +183,7 @@ inline DeferredCodeInfo* MaglevAssembler::PushDeferredCode(
                               std::declval<MaglevCompilationInfo*>(),
                               std::declval<Args>()))...>,
       "Parameters of deferred_code_gen function should match arguments into "
-      "PushDeferredCode");
+      "MakeDeferredCode");
 
   ScratchRegisterScope scratch_scope(this);
   using DeferredCodeInfoT = detail::DeferredCodeInfoImpl<Function>;
@@ -188,7 +194,7 @@ inline DeferredCodeInfo* MaglevAssembler::PushDeferredCode(
           std::forward<Args>(args)...);
 
   code_gen_state()->PushDeferredCode(deferred_code);
-  return deferred_code;
+  return &deferred_code->deferred_code_label;
 }
 
 // Note this doesn't take capturing lambdas by design, since state may
@@ -198,12 +204,18 @@ template <typename Function, typename... Args>
 inline void MaglevAssembler::JumpToDeferredIf(Condition cond,
                                               Function&& deferred_code_gen,
                                               Args&&... args) {
-  DeferredCodeInfo* deferred_code = PushDeferredCode<Function, Args...>(
-      std::forward<Function>(deferred_code_gen), std::forward<Args>(args)...);
   if (v8_flags.code_comments) {
     RecordComment("-- Jump to deferred code");
   }
-  JumpIf(cond, &deferred_code->deferred_code_label);
+  JumpIf(cond, MakeDeferredCode<Function, Args...>(
+                   std::forward<Function>(deferred_code_gen),
+                   std::forward<Args>(args)...));
+}
+
+inline void MaglevAssembler::SmiToDouble(DoubleRegister result, Register smi) {
+  AssertSmi(smi);
+  SmiUntag(smi);
+  Int32ToDouble(result, smi);
 }
 
 inline void MaglevAssembler::Branch(Condition condition, BasicBlock* if_true,
@@ -234,6 +246,27 @@ inline void MaglevAssembler::Branch(Condition condition, Label* if_true,
       Jump(if_true, true_distance);
     }
   }
+}
+
+inline void MaglevAssembler::LoadTaggedField(Register result,
+                                             MemOperand operand) {
+  MacroAssembler::LoadTaggedField(result, operand);
+}
+
+inline void MaglevAssembler::LoadTaggedField(Register result, Register object,
+                                             int offset) {
+  MacroAssembler::LoadTaggedField(result, FieldMemOperand(object, offset));
+}
+
+inline void MaglevAssembler::LoadTaggedSignedField(Register result,
+                                                   MemOperand operand) {
+  MacroAssembler::LoadTaggedField(result, operand);
+}
+
+inline void MaglevAssembler::LoadTaggedSignedField(Register result,
+                                                   Register object,
+                                                   int offset) {
+  MacroAssembler::LoadTaggedField(result, FieldMemOperand(object, offset));
 }
 
 }  // namespace maglev

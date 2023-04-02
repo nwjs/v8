@@ -55,10 +55,10 @@ class StackArgumentsAccessor {
   DISALLOW_IMPLICIT_CONSTRUCTORS(StackArgumentsAccessor);
 };
 
-class V8_EXPORT_PRIVATE TurboAssembler
-    : public SharedTurboAssemblerBase<TurboAssembler> {
+class V8_EXPORT_PRIVATE MacroAssembler
+    : public SharedMacroAssembler<MacroAssembler> {
  public:
-  using SharedTurboAssemblerBase<TurboAssembler>::SharedTurboAssemblerBase;
+  using SharedMacroAssembler<MacroAssembler>::SharedMacroAssembler;
 
   void PushReturnAddressFrom(Register src) { pushq(src); }
   void PopReturnAddressTo(Register dst) { popq(dst); }
@@ -112,8 +112,16 @@ class V8_EXPORT_PRIVATE TurboAssembler
   // garbage collection, since that might move the code and invalidate the
   // return address (unless this is somehow accounted for by the called
   // function).
-  void CallCFunction(ExternalReference function, int num_arguments);
-  void CallCFunction(Register function, int num_arguments);
+  enum class SetIsolateDataSlots {
+    kNo,
+    kYes,
+  };
+  void CallCFunction(
+      ExternalReference function, int num_arguments,
+      SetIsolateDataSlots set_isolate_data_slots = SetIsolateDataSlots::kYes);
+  void CallCFunction(
+      Register function, int num_arguments,
+      SetIsolateDataSlots set_isolate_data_slots = SetIsolateDataSlots::kYes);
 
   // Calculate the number of stack slots to reserve for arguments when calling a
   // C function.
@@ -293,6 +301,7 @@ class V8_EXPORT_PRIVATE TurboAssembler
 #endif
 
   void LoadMap(Register destination, Register object);
+  void LoadCompressedMap(Register destination, Register object);
 
   void Move(Register dst, intptr_t x) {
     if (x == 0) {
@@ -583,35 +592,21 @@ class V8_EXPORT_PRIVATE TurboAssembler
   // ---------------------------------------------------------------------------
   // Pointer compression support
 
-  // Loads a field containing a HeapObject and decompresses it if pointer
-  // compression is enabled.
-  void LoadTaggedPointerField(Register destination, Operand field_operand);
+  // Loads a field containing any tagged value and decompresses it if necessary.
+  void LoadTaggedField(Register destination, Operand field_operand);
 
-  // Loads a field containing a HeapObject but does not decompress it when
+  // Loads a field containing any tagged value but does not decompress it when
   // pointer compression is enabled.
-  void LoadTaggedPointerField(TaggedRegister destination,
-                              Operand field_operand);
+  void LoadTaggedField(TaggedRegister destination, Operand field_operand);
 
   // Loads a field containing a Smi and decompresses it if pointer compression
   // is enabled.
   void LoadTaggedSignedField(Register destination, Operand field_operand);
 
-  // Loads a field containing any tagged value and decompresses it if necessary.
-  void LoadAnyTaggedField(Register destination, Operand field_operand);
-
-  // Loads a field containing any tagged value but does not decompress it when
-  // pointer compression is enabled.
-  void LoadAnyTaggedField(TaggedRegister destination, Operand field_operand);
-
-  // Loads a field containing a HeapObject, decompresses it if necessary and
-  // pushes full pointer to the stack. When pointer compression is enabled,
-  // uses |scratch| to decompress the value.
-  void PushTaggedPointerField(Operand field_operand, Register scratch);
-
   // Loads a field containing any tagged value, decompresses it if necessary and
   // pushes the full pointer to the stack. When pointer compression is enabled,
   // uses |scratch| to decompress the value.
-  void PushTaggedAnyField(Operand field_operand, Register scratch);
+  void PushTaggedField(Operand field_operand, Register scratch);
 
   // Loads a field containing smi value and untags it.
   void SmiUntagField(Register dst, Operand src);
@@ -626,10 +621,9 @@ class V8_EXPORT_PRIVATE TurboAssembler
 
   // The following macros work even when pointer compression is not enabled.
   void DecompressTaggedSigned(Register destination, Operand field_operand);
-  void DecompressTaggedPointer(Register destination, Operand field_operand);
-  void DecompressTaggedPointer(Register destination, Register source);
-  void DecompressTaggedPointer(Register destination, Tagged_t immediate);
-  void DecompressAnyTagged(Register destination, Operand field_operand);
+  void DecompressTagged(Register destination, Operand field_operand);
+  void DecompressTagged(Register destination, Register source);
+  void DecompressTagged(Register destination, Tagged_t immediate);
 
   // ---------------------------------------------------------------------------
   // V8 Sandbox support
@@ -652,23 +646,6 @@ class V8_EXPORT_PRIVATE TurboAssembler
                                 ExternalPointerTag tag, Register scratch,
                                 IsolateRootLocation isolateRootLocation =
                                     IsolateRootLocation::kInRootRegister);
-
- protected:
-  static const int kSmiShift = kSmiTagSize + kSmiShiftSize;
-
-  // Returns a register holding the smi value. The register MUST NOT be
-  // modified. It may be the "smi 1 constant" register.
-  Register GetSmiConstant(Smi value);
-
-  // Drops arguments assuming that the return address was already popped.
-  void DropArguments(Register count, ArgumentsCountType type = kCountIsInteger,
-                     ArgumentsCountMode mode = kCountExcludesReceiver);
-};
-
-// MacroAssembler implements a collection of frequently used macros.
-class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
- public:
-  using TurboAssembler::TurboAssembler;
 
   // Loads and stores the value of an external reference.
   // Special case code for load and store to take advantage of
@@ -733,28 +710,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
                    SaveFPRegsMode save_fp,
                    SmiCheck smi_check = SmiCheck::kInline);
 
-  // Enter specific kind of exit frame; either in normal or
-  // debug mode. Expects the number of arguments in register rax and
-  // sets up the number of arguments in register rdi and the pointer
-  // to the first argument in register rsi.
-  //
-  // Allocates arg_stack_space * kSystemPointerSize memory (not GCed) on the
-  // stack accessible via StackSpaceOperand.
-  void EnterExitFrame(int arg_stack_space, StackFrame::Type frame_type);
-
-  // Enter specific kind of exit frame. Allocates
-  // (arg_stack_space * kSystemPointerSize) memory (not GCed) on the stack
-  // accessible via StackSpaceOperand.
-  void EnterApiExitFrame(int arg_stack_space);
-
-  // Leave the current exit frame. Expects/provides the return value in
-  // register rax:rdx (untouched) and the pointer to the first
-  // argument in register rsi (if pop_arguments == true).
-  void LeaveExitFrame(bool pop_arguments);
-
-  // Leave the current exit frame. Expects/provides the return value in
-  // register rax (untouched).
-  void LeaveApiExitFrame();
+  void EnterExitFrame(int reserved_stack_slots, StackFrame::Type frame_type);
+  void LeaveExitFrame();
 
   // ---------------------------------------------------------------------------
   // JavaScript invokes
@@ -781,7 +738,6 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
   // ---------------------------------------------------------------------------
   // Macro instructions.
 
-  using TurboAssembler::Cmp;
   void Cmp(Register dst, Handle<Object> source);
   void Cmp(Operand dst, Handle<Object> source);
 
@@ -816,6 +772,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
   // Incoming register is heap_object and outgoing register is map.
   // They may be the same register, and may be kScratchRegister.
   void CmpObjectType(Register heap_object, InstanceType type, Register map);
+  // Variant of the above, which only guarantees to set the correct
+  // equal/not_equal flag. Map might not be loaded.
+  void IsObjectType(Register heap_object, InstanceType type, Register scratch);
 
   // Compare instance type ranges for a map (low and high inclusive)
   // Always use unsigned comparisons: below_equal for a positive result.
@@ -891,6 +850,12 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
   // Load the native context slot with the current index.
   void LoadNativeContextSlot(Register dst, int index);
 
+  // Falls through and sets scratch_and_result to 0 on failure, jumps to
+  // on_result on success.
+  void TryLoadOptimizedOsrCode(Register scratch_and_result,
+                               Register feedback_vector, FeedbackSlot slot,
+                               Label* on_result, Label::Distance distance);
+
   // ---------------------------------------------------------------------------
   // Runtime calls
 
@@ -939,19 +904,21 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
   // In-place weak references.
   void LoadWeakValue(Register in_out, Label* target_if_cleared);
 
+ protected:
+  static const int kSmiShift = kSmiTagSize + kSmiShiftSize;
+
+  // Returns a register holding the smi value. The register MUST NOT be
+  // modified. It may be the "smi 1 constant" register.
+  Register GetSmiConstant(Smi value);
+
+  // Drops arguments assuming that the return address was already popped.
+  void DropArguments(Register count, ArgumentsCountType type = kCountIsInteger,
+                     ArgumentsCountMode mode = kCountExcludesReceiver);
+
  private:
   // Helper functions for generating invokes.
   void InvokePrologue(Register expected_parameter_count,
                       Register actual_parameter_count, InvokeType type);
-
-  void EnterExitFramePrologue(Register saved_rax_reg,
-                              StackFrame::Type frame_type);
-
-  // Allocates arg_stack_space * kSystemPointerSize memory (not GCed) on the
-  // stack accessible via StackSpaceOperand.
-  void EnterExitFrameEpilogue(int arg_stack_space);
-
-  void LeaveExitFrameEpilogue();
 
   DISALLOW_IMPLICIT_CONSTRUCTORS(MacroAssembler);
 };
@@ -984,20 +951,6 @@ inline Operand FieldOperand(TaggedRegister object, int offset) {
 inline Operand FieldOperand(Register object, Register index, ScaleFactor scale,
                             int offset) {
   return Operand(object, index, scale, offset - kHeapObjectTag);
-}
-
-// Provides access to exit frame stack space (not GCed).
-inline Operand StackSpaceOperand(int index) {
-#ifdef V8_TARGET_OS_WIN
-  const int kShaddowSpace = 4;
-  return Operand(rsp, (index + kShaddowSpace) * kSystemPointerSize);
-#else
-  return Operand(rsp, index * kSystemPointerSize);
-#endif
-}
-
-inline Operand StackOperandForReturnAddress(int32_t disp) {
-  return Operand(rsp, disp);
 }
 
 struct MoveCycleState {

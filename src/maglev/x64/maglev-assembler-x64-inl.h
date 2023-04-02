@@ -38,6 +38,19 @@ constexpr Condition ConditionFor(Operation operation) {
   }
 }
 
+inline ScaleFactor ScaleFactorFromInt(int n) {
+  switch (n) {
+    case 1:
+      return times_1;
+    case 2:
+      return times_2;
+    case 4:
+      return times_4;
+    default:
+      UNREACHABLE();
+  }
+}
+
 class MaglevAssembler::ScratchRegisterScope {
  public:
   explicit ScratchRegisterScope(MaglevAssembler* masm)
@@ -223,6 +236,14 @@ inline void MaglevAssembler::BuildTypedArrayDataPointer(Register data_pointer,
   addq(data_pointer, base);
 }
 
+inline void MaglevAssembler::LoadTaggedFieldByIndex(Register result,
+                                                    Register object,
+                                                    Register index, int scale,
+                                                    int offset) {
+  LoadTaggedField(
+      result, FieldOperand(object, index, ScaleFactorFromInt(scale), offset));
+}
+
 inline void MaglevAssembler::LoadBoundedSizeFromObject(Register result,
                                                        Register object,
                                                        int offset) {
@@ -361,6 +382,7 @@ inline void MaglevAssembler::Move(Register dst, Handle<HeapObject> obj) {
 inline void MaglevAssembler::SignExtend32To64Bits(Register dst, Register src) {
   movsxlq(dst, src);
 }
+inline void MaglevAssembler::NegateInt32(Register val) { negl(val); }
 
 template <typename NodeT>
 inline void MaglevAssembler::DeoptIfBufferDetached(Register array,
@@ -372,10 +394,10 @@ inline void MaglevAssembler::DeoptIfBufferDetached(Register array,
            ->DependOnArrayBufferDetachingProtector()) {
     // A detached buffer leads to megamorphic feedback, so we won't have a deopt
     // loop if we deopt here.
-    LoadTaggedPointerField(
-        scratch, FieldOperand(array, JSArrayBufferView::kBufferOffset));
-    LoadTaggedPointerField(
-        scratch, FieldOperand(scratch, JSArrayBuffer::kBitFieldOffset));
+    LoadTaggedField(scratch,
+                    FieldOperand(array, JSArrayBufferView::kBufferOffset));
+    LoadTaggedField(scratch,
+                    FieldOperand(scratch, JSArrayBuffer::kBitFieldOffset));
     testl(scratch, Immediate(JSArrayBuffer::WasDetachedBit::kMask));
     EmitEagerDeoptIf(not_zero, DeoptimizeReason::kArrayBufferWasDetached, node);
   }
@@ -383,6 +405,42 @@ inline void MaglevAssembler::DeoptIfBufferDetached(Register array,
 
 inline void MaglevAssembler::LoadByte(Register dst, MemOperand src) {
   movzxbl(dst, src);
+}
+
+inline void MaglevAssembler::IsObjectType(Register heap_object,
+                                          InstanceType type) {
+  MacroAssembler::IsObjectType(heap_object, type, kScratchRegister);
+}
+
+inline void MaglevAssembler::CompareObjectType(Register heap_object,
+                                               InstanceType type) {
+  LoadMap(kScratchRegister, heap_object);
+  CmpInstanceType(kScratchRegister, type);
+}
+
+inline void MaglevAssembler::CompareObjectType(Register heap_object,
+                                               InstanceType type,
+                                               Register scratch) {
+  CompareObjectType(heap_object, type);
+}
+
+inline void MaglevAssembler::CompareObjectTypeRange(Register heap_object,
+                                                    InstanceType lower_limit,
+                                                    InstanceType higher_limit) {
+  LoadMap(kScratchRegister, heap_object);
+  CmpInstanceTypeRange(kScratchRegister, kScratchRegister, lower_limit,
+                       higher_limit);
+}
+
+inline void MaglevAssembler::CompareInstanceTypeRange(
+    Register map, InstanceType lower_limit, InstanceType higher_limit) {
+  CompareInstanceTypeRange(map, kScratchRegister, lower_limit, higher_limit);
+}
+
+inline void MaglevAssembler::CompareInstanceTypeRange(
+    Register map, Register instance_type_out, InstanceType lower_limit,
+    InstanceType higher_limit) {
+  CmpInstanceTypeRange(map, instance_type_out, lower_limit, higher_limit);
 }
 
 inline void MaglevAssembler::CompareTagged(Register reg,
@@ -398,6 +456,11 @@ inline void MaglevAssembler::CompareInt32(Register src1, Register src2) {
   cmpl(src1, src2);
 }
 
+inline void MaglevAssembler::CallSelf() {
+  DCHECK(code_gen_state()->entry_label()->is_bound());
+  Call(code_gen_state()->entry_label());
+}
+
 inline void MaglevAssembler::Jump(Label* target, Label::Distance distance) {
   jmp(target, distance);
 }
@@ -407,21 +470,63 @@ inline void MaglevAssembler::JumpIf(Condition cond, Label* target,
   j(cond, target, distance);
 }
 
-inline void MaglevAssembler::JumpIfEqual(Label* target,
-                                         Label::Distance distance) {
-  j(equal, target, distance);
+inline void MaglevAssembler::JumpIfRoot(Register with, RootIndex index,
+                                        Label* if_equal,
+                                        Label::Distance distance) {
+  MacroAssembler::JumpIfRoot(with, index, if_equal, distance);
 }
 
-inline void MaglevAssembler::JumpIfNotEqual(Label* target,
+inline void MaglevAssembler::JumpIfNotRoot(Register with, RootIndex index,
+                                           Label* if_not_equal,
+                                           Label::Distance distance) {
+  MacroAssembler::JumpIfNotRoot(with, index, if_not_equal, distance);
+}
+
+inline void MaglevAssembler::JumpIfSmi(Register src, Label* on_smi,
+                                       Label::Distance distance) {
+  MacroAssembler::JumpIfSmi(src, on_smi, distance);
+}
+
+void MaglevAssembler::JumpIfByte(Condition cc, Register value, int32_t byte,
+                                 Label* target, Label::Distance distance) {
+  cmpb(value, Immediate(byte));
+  j(cc, target, distance);
+}
+
+void MaglevAssembler::CompareInt32AndJumpIf(Register r1, Register r2,
+                                            Condition cond, Label* target,
                                             Label::Distance distance) {
-  j(not_equal, target, distance);
+  CompareInt32(r1, r2);
+  JumpIf(cond, target, distance);
 }
 
-inline void MaglevAssembler::JumpIfTaggedEqual(Register r1, Register r2,
-                                               Label* target,
-                                               Label::Distance distance) {
-  cmp_tagged(r1, r2);
-  j(equal, target, distance);
+inline void MaglevAssembler::CompareInt32AndJumpIf(Register r1, int32_t value,
+                                                   Condition cond,
+                                                   Label* target,
+                                                   Label::Distance distance) {
+  CompareInt32(r1, value);
+  JumpIf(cond, target, distance);
+}
+
+inline void MaglevAssembler::TestInt32AndJumpIfAnySet(
+    Register r1, int32_t mask, Label* target, Label::Distance distance) {
+  testl(r1, Immediate(mask));
+  JumpIf(kNotZero, target, distance);
+}
+
+inline void MaglevAssembler::TestInt32AndJumpIfAllClear(
+    Register r1, int32_t mask, Label* target, Label::Distance distance) {
+  testl(r1, Immediate(mask));
+  JumpIf(kZero, target, distance);
+}
+
+inline void MaglevAssembler::LoadHeapNumberValue(DoubleRegister result,
+                                                 Register heap_number) {
+  Movsd(result, FieldOperand(heap_number, HeapNumber::kValueOffset));
+}
+
+inline void MaglevAssembler::Int32ToDouble(DoubleRegister result, Register n) {
+  Cvtlsi2sd(result, n);
 }
 
 inline void MaglevAssembler::Pop(Register dst) { MacroAssembler::Pop(dst); }
@@ -534,31 +639,6 @@ inline void MaglevAssembler::MoveRepr(MachineRepresentation repr,
                                       MemOperand dst, MemOperand src) {
   MoveRepr(repr, kScratchRegister, src);
   MoveRepr(repr, dst, kScratchRegister);
-}
-
-inline Condition ToCondition(AssertCondition cond) {
-  switch (cond) {
-    case AssertCondition::kLess:
-      return less;
-    case AssertCondition::kLessOrEqual:
-      return less_equal;
-    case AssertCondition::kGreater:
-      return greater;
-    case AssertCondition::kGeaterOrEqual:
-      return greater_equal;
-    case AssertCondition::kBelow:
-      return below;
-    case AssertCondition::kBelowOrEqual:
-      return below_equal;
-    case AssertCondition::kAbove:
-      return above;
-    case AssertCondition::kAboveOrEqual:
-      return above_equal;
-    case AssertCondition::kEqual:
-      return equal;
-    case AssertCondition::kNotEqual:
-      return not_equal;
-  }
 }
 
 }  // namespace maglev

@@ -306,6 +306,7 @@ class WasmGlobalObject
   inline int64_t GetI64();
   inline float GetF32();
   inline double GetF64();
+  inline byte* GetS128RawBytes();
   inline Handle<Object> GetRef();
 
   inline void SetI32(int32_t value);
@@ -365,7 +366,7 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
   DECL_PRIMITIVE_ACCESSORS(tiering_budget_array, uint32_t*)
   DECL_ACCESSORS(data_segment_starts, FixedAddressArray)
   DECL_ACCESSORS(data_segment_sizes, FixedUInt32Array)
-  DECL_ACCESSORS(dropped_elem_segments, FixedUInt8Array)
+  DECL_ACCESSORS(element_segments, FixedArray)
   DECL_PRIMITIVE_ACCESSORS(break_on_entry, uint8_t)
 
   // Clear uninitialized padding space. This ensures that the snapshot content
@@ -408,7 +409,7 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
   /* Less than system pointer size aligned fields are below. */           \
   V(kDataSegmentStartsOffset, kTaggedSize)                                \
   V(kDataSegmentSizesOffset, kTaggedSize)                                 \
-  V(kDroppedElemSegmentsOffset, kTaggedSize)                              \
+  V(kElementSegmentsOffset, kTaggedSize)                                  \
   V(kModuleObjectOffset, kTaggedSize)                                     \
   V(kExportsObjectOffset, kTaggedSize)                                    \
   V(kNativeContextOffset, kTaggedSize)                                    \
@@ -462,7 +463,7 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
       kImportedFunctionTargetsOffset,
       kDataSegmentStartsOffset,
       kDataSegmentSizesOffset,
-      kDroppedElemSegmentsOffset};
+      kElementSegmentsOffset};
 
   const wasm::WasmModule* module();
 
@@ -541,8 +542,6 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
 
  private:
   static void InitDataSegmentArrays(Handle<WasmInstanceObject>,
-                                    Handle<WasmModuleObject>);
-  static void InitElemSegmentArrays(Handle<WasmInstanceObject>,
                                     Handle<WasmModuleObject>);
 };
 
@@ -1063,6 +1062,23 @@ class WasmSuspenderObject
   TQ_OBJECT_CONSTRUCTORS(WasmSuspenderObject)
 };
 
+class WasmNull : public TorqueGeneratedWasmNull<WasmNull, HeapObject> {
+ public:
+  // TODO(manoskouk): Make it smaller if able and needed.
+  static constexpr int kSize = 64 * KB + kTaggedSize;
+  // Payload should be a multiple of page size.
+  static_assert((kSize - kTaggedSize) % kMinimumOSPageSize == 0);
+  // Any wasm struct offset should fit in the object.
+  static_assert(kSize >= WasmStruct::kHeaderSize +
+                             wasm::kV8MaxWasmStructFields * kSimd128Size);
+
+  Address payload() { return ptr() + kHeaderSize - kHeapObjectTag; }
+
+  class BodyDescriptor;
+
+  TQ_OBJECT_CONSTRUCTORS(WasmNull)
+};
+
 #undef DECL_OPTIONAL_ACCESSORS
 
 namespace wasm {
@@ -1077,6 +1093,12 @@ MaybeHandle<Object> JSToWasmObject(Isolate* isolate, Handle<Object> value,
 MaybeHandle<Object> JSToWasmObject(Isolate* isolate, const WasmModule* module,
                                    Handle<Object> value, ValueType expected,
                                    const char** error_message);
+
+// Takes a {value} in the Wasm representation and tries to transform it to the
+// respective JS representation. If the transformation fails, the empty handle
+// is returned.
+MaybeHandle<Object> WasmToJSObject(Isolate* isolate, Handle<Object> value,
+                                   HeapType type, const char** error_message);
 }  // namespace wasm
 }  // namespace internal
 }  // namespace v8

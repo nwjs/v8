@@ -623,7 +623,7 @@ void EmitLoad(InstructionSelector* selector, Node* node, InstructionCode opcode,
       selector->CanAddressRelativeToRootsRegister(m.ResolvedValue())) {
     ptrdiff_t const delta =
         g.GetIntegerConstantValue(index) +
-        TurboAssemblerBase::RootRegisterOffsetForExternalReference(
+        MacroAssemblerBase::RootRegisterOffsetForExternalReference(
             selector->isolate(), m.ResolvedValue());
     input_count = 1;
     // Check that the delta is a 32-bit integer due to the limitations of
@@ -680,7 +680,7 @@ void InstructionSelector::VisitLoadLane(Node* node) {
   InstructionCode opcode = kArm64LoadLane;
   opcode |= LaneSizeField::encode(params.rep.MemSize() * kBitsPerByte);
   if (params.kind == MemoryAccessKind::kProtected) {
-    opcode |= AccessModeField::encode(kMemoryAccessProtected);
+    opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
   }
 
   Arm64OperandGenerator g(this);
@@ -698,7 +698,7 @@ void InstructionSelector::VisitStoreLane(Node* node) {
   opcode |=
       LaneSizeField::encode(ElementSizeInBytes(params.rep) * kBitsPerByte);
   if (params.kind == MemoryAccessKind::kProtected) {
-    opcode |= AccessModeField::encode(kMemoryAccessProtected);
+    opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
   }
 
   Arm64OperandGenerator g(this);
@@ -788,7 +788,7 @@ void InstructionSelector::VisitLoadTransform(Node* node) {
     opcode |= AddressingModeField::encode(kMode_MRR);
   }
   if (params.kind == MemoryAccessKind::kProtected) {
-    opcode |= AccessModeField::encode(kMemoryAccessProtected);
+    opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
   }
   Emit(opcode, 1, outputs, 2, inputs);
 }
@@ -843,11 +843,8 @@ void InstructionSelector::VisitLoad(Node* node) {
       immediate_mode = kLoadStoreImm32;
       break;
     case MachineRepresentation::kTaggedPointer:
-      opcode = kArm64LdrDecompressTaggedPointer;
-      immediate_mode = kLoadStoreImm32;
-      break;
     case MachineRepresentation::kTagged:
-      opcode = kArm64LdrDecompressAnyTagged;
+      opcode = kArm64LdrDecompressTagged;
       immediate_mode = kLoadStoreImm32;
       break;
 #else
@@ -873,7 +870,9 @@ void InstructionSelector::VisitLoad(Node* node) {
       UNREACHABLE();
   }
   if (node->opcode() == IrOpcode::kProtectedLoad) {
-    opcode |= AccessModeField::encode(kMemoryAccessProtected);
+    opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
+  } else if (node->opcode() == IrOpcode::kLoadTrapOnNull) {
+    opcode |= AccessModeField::encode(kMemoryAccessProtectedNullDereference);
   }
 
   EmitLoad(this, node, opcode, immediate_mode, rep);
@@ -988,7 +987,7 @@ void InstructionSelector::VisitStore(Node* node) {
         CanAddressRelativeToRootsRegister(m.ResolvedValue())) {
       ptrdiff_t const delta =
           g.GetIntegerConstantValue(index) +
-          TurboAssemblerBase::RootRegisterOffsetForExternalReference(
+          MacroAssemblerBase::RootRegisterOffsetForExternalReference(
               isolate(), m.ResolvedValue());
       if (is_int32(delta)) {
         input_count = 2;
@@ -1019,7 +1018,9 @@ void InstructionSelector::VisitStore(Node* node) {
     }
 
     if (node->opcode() == IrOpcode::kProtectedStore) {
-      opcode |= AccessModeField::encode(kMemoryAccessProtected);
+      opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
+    } else if (node->opcode() == IrOpcode::kStoreTrapOnNull) {
+      opcode |= AccessModeField::encode(kMemoryAccessProtectedNullDereference);
     }
 
     Emit(opcode, 0, nullptr, input_count, inputs);
@@ -2706,14 +2707,20 @@ void VisitAtomicExchange(InstructionSelector* selector, Node* node,
   InstructionOperand inputs[] = {g.UseRegister(base), g.UseRegister(index),
                                  g.UseUniqueRegister(value)};
   InstructionOperand outputs[] = {g.DefineAsRegister(node)};
-  InstructionOperand temps[] = {g.TempRegister(), g.TempRegister()};
   InstructionCode code = opcode | AddressingModeField::encode(kMode_MRR) |
                          AtomicWidthField::encode(width);
   if (access_kind == MemoryAccessKind::kProtected) {
-    code |= AccessModeField::encode(kMemoryAccessProtected);
+    code |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
   }
-  selector->Emit(code, arraysize(outputs), outputs, arraysize(inputs), inputs,
-                 arraysize(temps), temps);
+  if (CpuFeatures::IsSupported(LSE)) {
+    InstructionOperand temps[] = {g.TempRegister()};
+    selector->Emit(code, arraysize(outputs), outputs, arraysize(inputs), inputs,
+                   arraysize(temps), temps);
+  } else {
+    InstructionOperand temps[] = {g.TempRegister(), g.TempRegister()};
+    selector->Emit(code, arraysize(outputs), outputs, arraysize(inputs), inputs,
+                   arraysize(temps), temps);
+  }
 }
 
 void VisitAtomicCompareExchange(InstructionSelector* selector, Node* node,
@@ -2727,15 +2734,23 @@ void VisitAtomicCompareExchange(InstructionSelector* selector, Node* node,
   InstructionOperand inputs[] = {g.UseRegister(base), g.UseRegister(index),
                                  g.UseUniqueRegister(old_value),
                                  g.UseUniqueRegister(new_value)};
-  InstructionOperand outputs[] = {g.DefineAsRegister(node)};
-  InstructionOperand temps[] = {g.TempRegister(), g.TempRegister()};
+  InstructionOperand outputs[1];
   InstructionCode code = opcode | AddressingModeField::encode(kMode_MRR) |
                          AtomicWidthField::encode(width);
   if (access_kind == MemoryAccessKind::kProtected) {
-    code |= AccessModeField::encode(kMemoryAccessProtected);
+    code |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
   }
-  selector->Emit(code, arraysize(outputs), outputs, arraysize(inputs), inputs,
-                 arraysize(temps), temps);
+  if (CpuFeatures::IsSupported(LSE)) {
+    InstructionOperand temps[] = {g.TempRegister()};
+    outputs[0] = g.DefineSameAsInput(node, 2);
+    selector->Emit(code, arraysize(outputs), outputs, arraysize(inputs), inputs,
+                   arraysize(temps), temps);
+  } else {
+    InstructionOperand temps[] = {g.TempRegister(), g.TempRegister()};
+    outputs[0] = g.DefineAsRegister(node);
+    selector->Emit(code, arraysize(outputs), outputs, arraysize(inputs), inputs,
+                   arraysize(temps), temps);
+  }
 }
 
 void VisitAtomicLoad(InstructionSelector* selector, Node* node,
@@ -2773,10 +2788,10 @@ void VisitAtomicLoad(InstructionSelector* selector, Node* node,
       code = kArm64LdarDecompressTaggedSigned;
       break;
     case MachineRepresentation::kTaggedPointer:
-      code = kArm64LdarDecompressTaggedPointer;
+      code = kArm64LdarDecompressTagged;
       break;
     case MachineRepresentation::kTagged:
-      code = kArm64LdarDecompressAnyTagged;
+      code = kArm64LdarDecompressTagged;
       break;
 #else
     case MachineRepresentation::kTaggedSigned:   // Fall through.
@@ -2799,7 +2814,7 @@ void VisitAtomicLoad(InstructionSelector* selector, Node* node,
   }
 
   if (atomic_load_params.kind() == MemoryAccessKind::kProtected) {
-    code |= AccessModeField::encode(kMemoryAccessProtected);
+    code |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
   }
 
   code |=
@@ -2875,7 +2890,7 @@ void VisitAtomicStore(InstructionSelector* selector, Node* node,
   }
 
   if (store_params.kind() == MemoryAccessKind::kProtected) {
-    code |= AccessModeField::encode(kMemoryAccessProtected);
+    code |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
   }
 
   code |= AddressingModeField::encode(kMode_MRR);
@@ -2894,15 +2909,22 @@ void VisitAtomicBinop(InstructionSelector* selector, Node* node,
   InstructionOperand inputs[] = {g.UseRegister(base), g.UseRegister(index),
                                  g.UseUniqueRegister(value)};
   InstructionOperand outputs[] = {g.DefineAsRegister(node)};
-  InstructionOperand temps[] = {g.TempRegister(), g.TempRegister(),
-                                g.TempRegister()};
   InstructionCode code = opcode | AddressingModeField::encode(addressing_mode) |
                          AtomicWidthField::encode(width);
   if (access_kind == MemoryAccessKind::kProtected) {
-    code |= AccessModeField::encode(kMemoryAccessProtected);
+    code |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
   }
-  selector->Emit(code, arraysize(outputs), outputs, arraysize(inputs), inputs,
-                 arraysize(temps), temps);
+
+  if (CpuFeatures::IsSupported(LSE)) {
+    InstructionOperand temps[] = {g.TempRegister()};
+    selector->Emit(code, arraysize(outputs), outputs, arraysize(inputs), inputs,
+                   arraysize(temps), temps);
+  } else {
+    InstructionOperand temps[] = {g.TempRegister(), g.TempRegister(),
+                                  g.TempRegister()};
+    selector->Emit(code, arraysize(outputs), outputs, arraysize(inputs), inputs,
+                   arraysize(temps), temps);
+  }
 }
 
 }  // namespace
@@ -3886,9 +3908,11 @@ void InstructionSelector::VisitS128Zero(Node* node) {
 
 void InstructionSelector::VisitI32x4DotI8x16I7x16AddS(Node* node) {
   Arm64OperandGenerator g(this);
-  Emit(
-    kArm64I32x4DotI8x16AddS, g.DefineAsRegister(node), g.UseRegister(node->InputAt(0)),
-    g.UseRegister(node->InputAt(1)), g.UseRegister(node->InputAt(2)));
+  InstructionOperand output = CpuFeatures::IsSupported(DOTPROD)
+                                  ? g.DefineSameAsInput(node, 2)
+                                  : g.DefineAsRegister(node);
+  Emit(kArm64I32x4DotI8x16AddS, output, g.UseRegister(node->InputAt(0)),
+       g.UseRegister(node->InputAt(1)), g.UseRegister(node->InputAt(2)));
 }
 
 #define SIMD_VISIT_EXTRACT_LANE(Type, T, Sign, LaneSize)                     \

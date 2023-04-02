@@ -540,8 +540,6 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
   V(int, embedder_wrapper_type_index, -1)                                     \
   V(int, embedder_wrapper_object_index, -1)                                   \
   V(compiler::NodeObserver*, node_observer, nullptr)                          \
-  /* Used in combination with --script-run-delay-once */                      \
-  V(bool, did_run_script_delay, false)                                        \
   V(bool, javascript_execution_assert, true)                                  \
   V(bool, javascript_execution_throws, true)                                  \
   V(bool, javascript_execution_dump, true)                                    \
@@ -772,6 +770,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   bool IsWasmGCEnabled(Handle<Context> context);
   bool IsWasmStringRefEnabled(Handle<Context> context);
+  bool IsWasmInliningEnabled(Handle<Context> context);
 
   THREAD_LOCAL_TOP_ADDRESS(Context, pending_handler_context)
   THREAD_LOCAL_TOP_ADDRESS(Address, pending_handler_entrypoint)
@@ -1563,9 +1562,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // with the provided mask.
   int GenerateIdentityHash(uint32_t mask);
 
-  // Given an address occupied by a live code object, return that object.
-  CodeLookupResult FindCodeObject(Address a);
-
   int NextOptimizationId() {
     int id = next_optimization_id_++;
     if (!Smi::IsValid(next_optimization_id_)) {
@@ -1702,7 +1698,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // shared heap object cache holds objects in shared among Isolates. Otherwise
   // this object cache is per-Isolate like the startup object cache.
   std::vector<Object>* shared_heap_object_cache() {
-    if (has_shared_heap()) {
+    if (has_shared_space()) {
       return &shared_heap_isolate()->shared_heap_object_cache_;
     }
     return &shared_heap_object_cache_;
@@ -1975,42 +1971,25 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     using IsDebugActive = HasAsyncEventDelegate::Next<bool, 1>;
   };
 
-  bool is_shared() const { return is_shared_; }
-  Isolate* shared_isolate() const {
-    DCHECK(attached_to_shared_isolate_);
-    return shared_isolate_;
-  }
-
+  // Returns true when this isolate contains the shared spaces.
   bool is_shared_space_isolate() const { return is_shared_space_isolate_; }
+
   Isolate* shared_space_isolate() const {
-    return shared_space_isolate_.value();
-  }
-
-  void set_shared_isolate(Isolate* shared_isolate) {
-    DCHECK(shared_isolate->is_shared());
-    DCHECK_NULL(shared_isolate_);
-    DCHECK(!attached_to_shared_isolate_);
-    DCHECK(!v8_flags.shared_space);
-    shared_isolate_ = shared_isolate;
-    owns_shareable_data_ = false;
-  }
-
-  // Returns true when this isolate supports allocation in shared spaces.
-  bool has_shared_heap() const {
-    return v8_flags.shared_space ? shared_space_isolate() : shared_isolate();
-  }
-
-  // Returns the isolate that owns the shared spaces.
-  Isolate* shared_heap_isolate() const {
-    DCHECK(has_shared_heap());
-    Isolate* isolate =
-        v8_flags.shared_space ? shared_space_isolate() : shared_isolate();
-    DCHECK_NOT_NULL(isolate);
+    DCHECK(has_shared_space());
+    Isolate* isolate = shared_space_isolate_.value();
+    DCHECK(has_shared_space());
     return isolate;
   }
 
-  bool is_shared_heap_isolate() const {
-    return is_shared() || is_shared_space_isolate();
+  // Returns true when this isolate supports allocation in shared spaces.
+  bool has_shared_space() const { return shared_space_isolate_.value(); }
+
+  // Returns the isolate that owns the shared spaces.
+  Isolate* shared_heap_isolate() const {
+    DCHECK(has_shared_space());
+    Isolate* isolate = shared_space_isolate();
+    DCHECK_NOT_NULL(isolate);
+    return isolate;
   }
 
   GlobalSafepoint* global_safepoint() const { return global_safepoint_.get(); }
@@ -2022,8 +2001,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // TODO(pthier): Unify with owns_shareable_data() once the flag
   // --shared-string-table is removed.
   bool OwnsStringTables() {
-    return !v8_flags.shared_string_table || is_shared() ||
-           is_shared_space_isolate();
+    return !v8_flags.shared_string_table || is_shared_space_isolate();
   }
 
 #if USE_SIMULATOR
@@ -2052,11 +2030,10 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   void VerifyStaticRoots();
 
  private:
-  explicit Isolate(std::unique_ptr<IsolateAllocator> isolate_allocator,
-                   bool is_shared);
+  explicit Isolate(std::unique_ptr<IsolateAllocator> isolate_allocator);
   ~Isolate();
 
-  static Isolate* Allocate(bool is_shared);
+  static Isolate* Allocate();
 
   bool Init(SnapshotData* startup_snapshot_data,
             SnapshotData* read_only_snapshot_data,
@@ -2113,18 +2090,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     EntryStackItem* previous_item;
   };
 
-  // When a feature flag that requires the shared heap is passed, a shared
-  // isolate is created to hold the shared allocations. The shared isolate is
-  // created by the first isolate to be created in the process, which is
-  // considered the main isolate and owns the lifetime of the shared
-  // isolate. The main isolate deletes the shared isolate when it itself is
-  // deleted.
-  static base::LazyMutex process_wide_shared_isolate_mutex_;
-  static Isolate* process_wide_shared_isolate_;
-
-  static Isolate* GetProcessWideSharedIsolate(bool* created_shared_isolate);
-  static void DeleteProcessWideSharedIsolate();
-
   static Isolate* process_wide_shared_space_isolate_;
 
   void Deinit();
@@ -2170,11 +2135,8 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   Object ThrowInternal(Object exception, MessageLocation* location);
 
   // These methods add/remove the isolate to/from the list of clients in the
-  // shared isolate. Isolates in the client list need to participate in a global
-  // safepoint.
-  void AttachToSharedIsolate();
-  void DetachFromSharedIsolate();
-
+  // shared space isolate. Isolates in the client list need to participate in a
+  // global safepoint.
   void AttachToSharedSpaceIsolate(Isolate* shared_space_isolate);
   void DetachFromSharedSpaceIsolate();
 
@@ -2182,10 +2144,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // and compiled code (including assembly stubs, builtins, interpreter bytecode
   // handlers and optimized code).
   IsolateData isolate_data_;
-
-  // Set to true if this isolate is used as shared heap. This field must be set
-  // before Heap is constructed, as Heap's constructor consults it.
-  const bool is_shared_;
 
   // Set to true if this isolate is used as main isolate with a shared space.
   bool is_shared_space_isolate_{false};
@@ -2321,11 +2279,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // Indicates whether the isolate owns shareable data.
   // Only false for client isolates attached to a shared isolate.
   bool owns_shareable_data_ = true;
-
-  // True if this isolate is attached to a shared isolate, and this isolate is
-  // the main isolate in the process and owns the lifetime of the shared
-  // isolate.
-  bool owns_shared_isolate_ = false;
 
   bool log_object_relocation_ = false;
 
@@ -2492,12 +2445,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   base::Mutex thread_data_table_mutex_;
   ThreadDataTable thread_data_table_;
 
-  // Stores the shared isolate for this client isolate. nullptr for shared
-  // isolates or when no shared isolate is used.
-  //
-  // When non-null, it is identical to process_wide_shared_isolate_.
-  Isolate* shared_isolate_ = nullptr;
-
   // Stores the isolate containing the shared space.
   base::Optional<Isolate*> shared_space_isolate_;
 
@@ -2507,13 +2454,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   ExternalPointerHandle waiter_queue_node_external_pointer_handle_ =
       kNullExternalPointerHandle;
 #endif
-
-#if DEBUG
-  // Set to true once during isolate initialization right when attaching to the
-  // shared isolate. If there was no shared isolate given it will still be set
-  // to true. After this point invocations of shared_isolate() are valid.
-  bool attached_to_shared_isolate_ = false;
-#endif  // DEBUG
 
   // Used to track and safepoint all client isolates attached to this shared
   // isolate.
@@ -2578,15 +2518,9 @@ class V8_EXPORT_PRIVATE SaveContext {
 
   ~SaveContext();
 
-  Handle<Context> context() { return context_; }
-
-  // Returns true if this save context is below a given JavaScript frame.
-  bool IsBelowFrame(CommonFrame* frame);
-
  private:
   Isolate* const isolate_;
   Handle<Context> context_;
-  Address c_entry_fp_;
 };
 
 // Like SaveContext, but also switches the Context to a new one in the

@@ -15,6 +15,7 @@
 #include "src/utils/ostreams.h"
 #include "src/wasm/baseline/liftoff-compiler.h"
 #include "src/wasm/function-body-decoder-impl.h"
+#include "src/wasm/module-decoder-impl.h"
 #include "src/wasm/module-instantiate.h"
 #include "src/wasm/wasm-engine.h"
 #include "src/wasm/wasm-feature-flags.h"
@@ -122,10 +123,9 @@ void ExecuteAgainstReference(Isolate* isolate,
 
   base::OwnedVector<Handle<Object>> compiled_args =
       testing::MakeDefaultArguments(isolate, main_function->sig());
-  bool exception_ref = false;
+  std::unique_ptr<const char[]> exception_ref;
   int32_t result_ref = testing::CallWasmFunctionForTesting(
-      isolate, instance_ref, "main", static_cast<int>(compiled_args.size()),
-      compiled_args.begin(), &exception_ref);
+      isolate, instance_ref, "main", compiled_args.as_vector(), &exception_ref);
   // Reached max steps, do not try to execute the test module as it might
   // never terminate.
   if (max_steps < 0) return;
@@ -155,15 +155,14 @@ void ExecuteAgainstReference(Isolate* isolate,
     DCHECK(!thrower.error());
   }
 
-  bool exception = false;
+  std::unique_ptr<const char[]> exception;
   int32_t result = testing::CallWasmFunctionForTesting(
-      isolate, instance, "main", static_cast<int>(compiled_args.size()),
-      compiled_args.begin(), &exception);
+      isolate, instance, "main", compiled_args.as_vector(), &exception);
 
-  if (exception_ref != exception) {
-    const char* exception_text[] = {"no exception", "exception"};
-    FATAL("expected: %s; got: %s", exception_text[exception_ref],
-          exception_text[exception]);
+  if ((exception_ref != nullptr) != (exception != nullptr)) {
+    FATAL("Exception mispatch! Expected: <%s>; got: <%s>",
+          exception_ref ? exception_ref.get() : "<no exception>",
+          exception ? exception.get() : "<no exception>");
   }
 
   if (!exception) {
@@ -366,6 +365,12 @@ class InitExprInterface {
 
   void BinOp(FullDecoder* decoder, WasmOpcode opcode, const Value& lhs,
              const Value& rhs, Value* result) {
+    // TODO(12089): Implement.
+    UNIMPLEMENTED();
+  }
+
+  void UnOp(FullDecoder* decoder, WasmOpcode opcode, const Value& value,
+            Value* result) {
     // TODO(12089): Implement.
     UNIMPLEMENTED();
   }
@@ -611,14 +616,20 @@ void GenerateTestCase(Isolate* isolate, ModuleWireBytes wire_bytes,
       os << ", ";
     }
     os << "[";
-    for (uint32_t i = 0; i < elem_segment.entries.size(); i++) {
+    ModuleDecoderImpl decoder(WasmFeatures::All(),
+                              wire_bytes.module_bytes().SubVectorFrom(
+                                  elem_segment.elements_wire_bytes_offset),
+                              ModuleOrigin::kWasmOrigin);
+    for (uint32_t i = 0; i < elem_segment.element_count; i++) {
+      ConstantExpression expr =
+          decoder.consume_element_segment_entry(module, elem_segment);
       if (elem_segment.element_type == WasmElemSegment::kExpressionElements) {
-        DecodeAndAppendInitExpr(os, &zone, module, wire_bytes,
-                                elem_segment.entries[i], elem_segment.type);
+        DecodeAndAppendInitExpr(os, &zone, module, wire_bytes, expr,
+                                elem_segment.type);
       } else {
-        os << elem_segment.entries[i].index();
+        os << expr.index();
       }
-      if (i < elem_segment.entries.size() - 1) os << ", ";
+      if (i < elem_segment.element_count - 1) os << ", ";
     }
     os << "], "
        << (elem_segment.element_type == WasmElemSegment::kExpressionElements

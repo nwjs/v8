@@ -139,7 +139,10 @@ class IsolateData final {
   ThreadLocalTop const& thread_local_top() const { return thread_local_top_; }
   Address* builtin_entry_table() { return builtin_entry_table_; }
   Address* builtin_table() { return builtin_table_; }
-  uint8_t stack_is_iterable() const { return stack_is_iterable_; }
+  bool stack_is_iterable() const {
+    DCHECK(stack_is_iterable_ == 0 || stack_is_iterable_ == 1);
+    return stack_is_iterable_ != 0;
+  }
 
   // Returns true if this address points to data stored in this instance. If
   // it's the case then the value can be accessed indirectly through the root
@@ -197,8 +200,8 @@ class IsolateData final {
   // builtin entry table to kSystemPointerSize anyway.
   //
 
-  // Whether the SafeStackFrameIterator can successfully iterate the current
-  // stack. Only valid values are 0 or 1.
+  // Whether the StackFrameIteratorForProfiler can successfully iterate the
+  // current stack. The only valid values are 0 or 1.
   uint8_t stack_is_iterable_ = 1;
 
   // Ensure the following tables are kSystemPointerSize-byte aligned.
@@ -215,12 +218,12 @@ class IsolateData final {
   // runtime checks.
   void* embedder_data_[Internals::kNumIsolateDataSlots] = {};
 
-  // Stores the state of the caller for TurboAssembler::CallCFunction so that
+  // Stores the state of the caller for MacroAssembler::CallCFunction so that
   // the sampling CPU profiler can iterate the stack during such calls. These
   // are stored on IsolateData so that they can be stored to with only one move
   // instruction in compiled code.
   //
-  // The FP and PC that are saved right before TurboAssembler::CallCFunction.
+  // The FP and PC that are saved right before MacroAssembler::CallCFunction.
   Address fast_c_call_caller_fp_ = kNullAddress;
   Address fast_c_call_caller_pc_ = kNullAddress;
   // The address of the fast API callback right before it's executed from

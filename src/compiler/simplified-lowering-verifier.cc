@@ -678,6 +678,8 @@ void SimplifiedLoweringVerifier::VisitNode(Node* node,
       CASE(Word32PairSar)
       CASE(ProtectedLoad)
       CASE(ProtectedStore)
+      CASE(LoadTrapOnNull)
+      CASE(StoreTrapOnNull)
       CASE(MemoryBarrier)
       CASE(SignExtendWord8ToInt32)
       CASE(SignExtendWord16ToInt32)

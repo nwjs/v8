@@ -702,7 +702,7 @@ RUNTIME_FUNCTION(Runtime_ObjectIsExtensible) {
 
   Maybe<bool> result =
       object->IsJSReceiver()
-          ? JSReceiver::IsExtensible(Handle<JSReceiver>::cast(object))
+          ? JSReceiver::IsExtensible(isolate, Handle<JSReceiver>::cast(object))
           : Just(false);
   MAYBE_RETURN(result, ReadOnlyRoots(isolate).exception());
   return isolate->heap()->ToBoolean(result.FromJust());
@@ -713,8 +713,8 @@ RUNTIME_FUNCTION(Runtime_JSReceiverPreventExtensionsThrow) {
   DCHECK_EQ(1, args.length());
   Handle<JSReceiver> object = args.at<JSReceiver>(0);
 
-  MAYBE_RETURN(JSReceiver::PreventExtensions(Handle<JSReceiver>::cast(object),
-                                             kThrowOnError),
+  MAYBE_RETURN(JSReceiver::PreventExtensions(
+                   isolate, Handle<JSReceiver>::cast(object), kThrowOnError),
                ReadOnlyRoots(isolate).exception());
   return *object;
 }
@@ -725,7 +725,7 @@ RUNTIME_FUNCTION(Runtime_JSReceiverPreventExtensionsDontThrow) {
   Handle<JSReceiver> object = args.at<JSReceiver>(0);
 
   Maybe<bool> result = JSReceiver::PreventExtensions(
-      Handle<JSReceiver>::cast(object), kDontThrow);
+      isolate, Handle<JSReceiver>::cast(object), kDontThrow);
   MAYBE_RETURN(result, ReadOnlyRoots(isolate).exception());
   return *isolate->factory()->ToBoolean(result.FromJust());
 }
@@ -911,32 +911,6 @@ RUNTIME_FUNCTION(Runtime_SetNamedProperty) {
                                           StoreOrigin::kNamed));
 }
 
-// Similar to DefineKeyedOwnPropertyInLiteral, but does not update feedback, and
-// and does not have a flags parameter for performing SetFunctionName().
-//
-// Currently, this is used for ObjectLiteral spread properties in CloneObjectIC
-// and for array literal creations in StoreInArrayLiteralIC.
-// TODO(v8:12548): merge this into DefineKeyedOwnPropertyInLiteral.
-RUNTIME_FUNCTION(Runtime_DefineKeyedOwnPropertyInLiteral_Simple) {
-  HandleScope scope(isolate);
-  DCHECK_EQ(3, args.length());
-
-  Handle<JSReceiver> object = args.at<JSReceiver>(0);
-  Handle<Object> key = args.at(1);
-  Handle<Object> value = args.at(2);
-
-  PropertyKey lookup_key(isolate, key);
-  LookupIterator it(isolate, object, lookup_key, LookupIterator::OWN);
-
-  Maybe<bool> result = JSObject::DefineOwnPropertyIgnoreAttributes(
-      &it, value, NONE, Just(kDontThrow));
-  RETURN_FAILURE_IF_SCHEDULED_EXCEPTION(isolate);
-  DCHECK(result.IsJust());
-  USE(result);
-
-  return *value;
-}
-
 namespace {
 
 // ES6 section 12.5.4.
@@ -1056,7 +1030,8 @@ RUNTIME_FUNCTION(Runtime_GetDerivedMap) {
   Handle<Object> rab_gsab = args.at(2);
   if (rab_gsab->IsTrue()) {
     RETURN_RESULT_OR_FAILURE(
-        isolate, JSFunction::GetDerivedRabGsabMap(isolate, target, new_target));
+        isolate, JSFunction::GetDerivedRabGsabTypedArrayMap(isolate, target,
+                                                            new_target));
   } else {
     RETURN_RESULT_OR_FAILURE(
         isolate, JSFunction::GetDerivedMap(isolate, target, new_target));
@@ -1137,20 +1112,22 @@ RUNTIME_FUNCTION(Runtime_SetFunctionName) {
 RUNTIME_FUNCTION(Runtime_DefineKeyedOwnPropertyInLiteral) {
   HandleScope scope(isolate);
   DCHECK_EQ(6, args.length());
-  Handle<JSObject> object = args.at<JSObject>(0);
-  Handle<Name> name = args.at<Name>(1);
+  Handle<JSReceiver> object = args.at<JSReceiver>(0);
+  Handle<Object> name = args.at(1);
   Handle<Object> value = args.at(2);
   int flag = args.smi_value_at(3);
   Handle<HeapObject> maybe_vector = args.at<HeapObject>(4);
-  int index = args.tagged_index_value_at(5);
 
   if (!maybe_vector->IsUndefined()) {
+    int index = args.tagged_index_value_at(5);
+    DCHECK(name->IsName());
     DCHECK(maybe_vector->IsFeedbackVector());
     Handle<FeedbackVector> vector = Handle<FeedbackVector>::cast(maybe_vector);
     FeedbackNexus nexus(vector, FeedbackVector::ToSlot(index));
     if (nexus.ic_state() == InlineCacheState::UNINITIALIZED) {
       if (name->IsUniqueName()) {
-        nexus.ConfigureMonomorphic(name, handle(object->map(), isolate),
+        nexus.ConfigureMonomorphic(Handle<Name>::cast(name),
+                                   handle(object->map(), isolate),
                                    MaybeObjectHandle());
       } else {
         nexus.ConfigureMegamorphic(IcCheckType::kProperty);
@@ -1163,17 +1140,14 @@ RUNTIME_FUNCTION(Runtime_DefineKeyedOwnPropertyInLiteral) {
   }
 
   DefineKeyedOwnPropertyInLiteralFlags flags(flag);
-  PropertyAttributes attrs =
-      (flags & DefineKeyedOwnPropertyInLiteralFlag::kDontEnum)
-          ? PropertyAttributes::DONT_ENUM
-          : PropertyAttributes::NONE;
 
   if (flags & DefineKeyedOwnPropertyInLiteralFlag::kSetFunctionName) {
+    DCHECK(name->IsName());
     DCHECK(value->IsJSFunction());
     Handle<JSFunction> function = Handle<JSFunction>::cast(value);
     DCHECK(!function->shared().HasSharedName());
     Handle<Map> function_map(function->map(), isolate);
-    if (!JSFunction::SetName(function, name,
+    if (!JSFunction::SetName(function, Handle<Name>::cast(name),
                              isolate->factory()->empty_string())) {
       return ReadOnlyRoots(isolate).exception();
     }
@@ -1186,7 +1160,7 @@ RUNTIME_FUNCTION(Runtime_DefineKeyedOwnPropertyInLiteral) {
   LookupIterator it(isolate, object, key, object, LookupIterator::OWN);
 
   Maybe<bool> result = JSObject::DefineOwnPropertyIgnoreAttributes(
-      &it, value, attrs, Just(kDontThrow));
+      &it, value, PropertyAttributes::NONE, Just(kDontThrow));
   // Cannot fail since this should only be called when
   // creating an object literal.
   RETURN_FAILURE_IF_SCHEDULED_EXCEPTION(isolate);

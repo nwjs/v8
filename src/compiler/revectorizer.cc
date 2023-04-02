@@ -25,7 +25,7 @@ namespace compiler {
 namespace {
 
 // Currently, only Load/ProtectedLoad/LoadTransfrom are supported.
-// TODO(jiepan): add support for UnalignedLoad, LoadLane
+// TODO(jiepan): add support for UnalignedLoad, LoadLane, LoadTrapOnNull
 bool IsSupportedLoad(const Node* node) {
   if (node->opcode() == IrOpcode::kProtectedLoad ||
       node->opcode() == IrOpcode::kLoad ||
@@ -504,9 +504,9 @@ PackNode* SLPTree::BuildTreeRec(const ZoneVector<Node*>& node_group,
       }
       // Sort loads by offset
       ZoneVector<Node*> sorted_node_group(node_group.size(), zone_);
-      partial_sort_copy(begin(node_group), end(node_group),
-                        begin(sorted_node_group), end(sorted_node_group),
-                        MemoryOffsetComparer());
+      std::partial_sort_copy(node_group.begin(), node_group.end(),
+                             sorted_node_group.begin(), sorted_node_group.end(),
+                             MemoryOffsetComparer());
       if (!IsContinuousAccess(sorted_node_group)) {
         TRACE("Failed due to non-continuous load!\n");
         return nullptr;
@@ -569,7 +569,7 @@ PackNode* SLPTree::BuildTreeRec(const ZoneVector<Node*>& node_group,
       return pnode;
     }
 
-    // TODO(jiepan): UnalignedStore,
+    // TODO(jiepan): UnalignedStore, StoreTrapOnNull.
     case IrOpcode::kStore:
     case IrOpcode::kProtectedStore: {
       TRACE("Added a vector of stores.\n");

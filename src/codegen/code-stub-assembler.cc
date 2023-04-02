@@ -25,6 +25,7 @@
 #include "src/objects/descriptor-array.h"
 #include "src/objects/function-kind.h"
 #include "src/objects/heap-number.h"
+#include "src/objects/instance-type-inl.h"
 #include "src/objects/instance-type.h"
 #include "src/objects/js-generator.h"
 #include "src/objects/oddball.h"
@@ -1830,6 +1831,12 @@ TNode<Float64T> CodeStubAssembler::LoadHeapNumberValue(
 }
 
 TNode<Map> CodeStubAssembler::GetInstanceTypeMap(InstanceType instance_type) {
+  if (V8_STATIC_ROOTS_BOOL) {
+    if (base::Optional<RootIndex> unique =
+            InstanceTypeChecker::UniqueMapOfInstanceType(instance_type)) {
+      return TNode<Map>::UncheckedCast(LoadRoot(*unique));
+    }
+  }
   Handle<Map> map_handle(
       Map::GetInstanceTypeMap(ReadOnlyRoots(isolate()), instance_type),
       isolate());
@@ -1854,11 +1861,25 @@ TNode<Uint16T> CodeStubAssembler::LoadInstanceType(TNode<HeapObject> object) {
 
 TNode<BoolT> CodeStubAssembler::HasInstanceType(TNode<HeapObject> object,
                                                 InstanceType instance_type) {
+  if (V8_STATIC_ROOTS_BOOL) {
+    if (base::Optional<RootIndex> expected_map =
+            InstanceTypeChecker::UniqueMapOfInstanceType(instance_type)) {
+      TNode<Map> map = LoadMap(object);
+      return TaggedEqual(map, LoadRoot(*expected_map));
+    }
+  }
   return InstanceTypeEqual(LoadInstanceType(object), instance_type);
 }
 
 TNode<BoolT> CodeStubAssembler::DoesntHaveInstanceType(
     TNode<HeapObject> object, InstanceType instance_type) {
+  if (V8_STATIC_ROOTS_BOOL) {
+    if (base::Optional<RootIndex> expected_map =
+            InstanceTypeChecker::UniqueMapOfInstanceType(instance_type)) {
+      TNode<Map> map = LoadMap(object);
+      return TaggedNotEqual(map, LoadRoot(*expected_map));
+    }
+  }
   return Word32NotEqual(LoadInstanceType(object), Int32Constant(instance_type));
 }
 
@@ -1912,7 +1933,7 @@ TNode<HeapObject> CodeStubAssembler::LoadSlowProperties(
   CSA_SLOW_DCHECK(this, IsDictionaryMap(LoadMap(object)));
   TNode<Object> properties = LoadJSReceiverPropertiesOrHash(object);
   NodeGenerator<HeapObject> make_empty = [=]() -> TNode<HeapObject> {
-    if (V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL) {
+    if constexpr (V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL) {
       return EmptySwissPropertyDictionaryConstant();
     } else {
       return EmptyPropertyDictionaryConstant();
@@ -1920,7 +1941,7 @@ TNode<HeapObject> CodeStubAssembler::LoadSlowProperties(
   };
   NodeGenerator<HeapObject> cast_properties = [=] {
     TNode<HeapObject> dict = CAST(properties);
-    if (V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL) {
+    if constexpr (V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL) {
       CSA_DCHECK(this, Word32Or(IsSwissNameDictionary(dict),
                                 IsGlobalDictionary(dict)));
     } else {
@@ -2112,7 +2133,7 @@ TNode<IntPtrT> CodeStubAssembler::LoadJSReceiverIdentityHash(
 
   GotoIf(InstanceTypeEqual(properties_instance_type, PROPERTY_ARRAY_TYPE),
          &if_property_array);
-  if (V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL) {
+  if constexpr (V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL) {
     GotoIf(
         InstanceTypeEqual(properties_instance_type, SWISS_NAME_DICTIONARY_TYPE),
         &if_swiss_property_dictionary);
@@ -2139,7 +2160,7 @@ TNode<IntPtrT> CodeStubAssembler::LoadJSReceiverIdentityHash(
     var_hash = Signed(DecodeWord<PropertyArray::HashField>(length_and_hash));
     Goto(&done);
   }
-  if (V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL) {
+  if constexpr (V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL) {
     BIND(&if_swiss_property_dictionary);
     {
       var_hash = Signed(
@@ -3842,6 +3863,9 @@ TNode<NameDictionary> CodeStubAssembler::AllocateNameDictionaryWithCapacity(
                            SKIP_WRITE_BARRIER);
     StoreFixedArrayElement(result, NameDictionary::kObjectHashIndex,
                            SmiConstant(PropertyArray::kNoHashSentinel),
+                           SKIP_WRITE_BARRIER);
+    StoreFixedArrayElement(result, NameDictionary::kFlagsIndex,
+                           SmiConstant(NameDictionary::kFlagsDefault),
                            SKIP_WRITE_BARRIER);
   }
 
@@ -7192,6 +7216,10 @@ TNode<BoolT> CodeStubAssembler::IsJSDataView(TNode<HeapObject> object) {
   return HasInstanceType(object, JS_DATA_VIEW_TYPE);
 }
 
+TNode<BoolT> CodeStubAssembler::IsJSRabGsabDataView(TNode<HeapObject> object) {
+  return HasInstanceType(object, JS_RAB_GSAB_DATA_VIEW_TYPE);
+}
+
 TNode<BoolT> CodeStubAssembler::IsJSRegExp(TNode<HeapObject> object) {
   return HasInstanceType(object, JS_REG_EXP_TYPE);
 }
@@ -8409,9 +8437,6 @@ void CodeStubAssembler::TryToName(TNode<Object> key, Label* if_keyisindex,
 
       GotoIf(InstanceTypeEqual(var_instance_type.value(), THIN_STRING_TYPE),
              &if_thinstring);
-      GotoIf(InstanceTypeEqual(var_instance_type.value(),
-                               THIN_ONE_BYTE_STRING_TYPE),
-             &if_thinstring);
 
       // Check if the hash field encodes an internalized string forwarding
       // index.
@@ -9253,6 +9278,34 @@ template TNode<Smi> CodeStubAssembler::GetNumberOfElements(
     TNode<NumberDictionary> dictionary);
 template TNode<Smi> CodeStubAssembler::GetNumberOfElements(
     TNode<GlobalDictionary> dictionary);
+
+template <>
+TNode<Smi> CodeStubAssembler::GetNameDictionaryFlags(
+    TNode<NameDictionary> dictionary) {
+  return CAST(LoadFixedArrayElement(dictionary, NameDictionary::kFlagsIndex));
+}
+
+template <>
+void CodeStubAssembler::SetNameDictionaryFlags(TNode<NameDictionary> dictionary,
+                                               TNode<Smi> flags) {
+  StoreFixedArrayElement(dictionary, NameDictionary::kFlagsIndex, flags,
+                         SKIP_WRITE_BARRIER);
+}
+
+template <>
+TNode<Smi> CodeStubAssembler::GetNameDictionaryFlags(
+    TNode<SwissNameDictionary> dictionary) {
+  // TODO(pthier): Add flags to swiss dictionaries.
+  Unreachable();
+  return SmiConstant(0);
+}
+
+template <>
+void CodeStubAssembler::SetNameDictionaryFlags(
+    TNode<SwissNameDictionary> dictionary, TNode<Smi> flags) {
+  // TODO(pthier): Add flags to swiss dictionaries.
+  Unreachable();
+}
 
 template <typename Array>
 void CodeStubAssembler::LookupLinear(TNode<Name> unique_name,
@@ -12222,10 +12275,11 @@ TNode<Int32T> CodeStubAssembler::LoadElementsKind(
 
 template <typename TIndex>
 TNode<TIndex> CodeStubAssembler::BuildFastLoop(
-    const VariableList& vars, TNode<TIndex> start_index,
-    TNode<TIndex> end_index, const FastLoopBody<TIndex>& body, int increment,
+    const VariableList& vars, TVariable<TIndex>& var_index,
+    TNode<TIndex> start_index, TNode<TIndex> end_index,
+    const FastLoopBody<TIndex>& body, int increment,
     LoopUnrollingMode unrolling_mode, IndexAdvanceMode advance_mode) {
-  TVARIABLE(TIndex, var_index, start_index);
+  var_index = start_index;
   VariableList vars_copy(vars.begin(), vars.end(), zone());
   vars_copy.push_back(&var_index);
   Label loop(this, vars_copy);
@@ -12261,6 +12315,10 @@ TNode<TIndex> CodeStubAssembler::BuildFastLoop(
     BIND(&loop);
     {
       loop_body();
+      CSA_DCHECK(
+          this, increment > 0
+                    ? IntPtrOrSmiLessThanOrEqual(var_index.value(), end_index)
+                    : IntPtrOrSmiLessThanOrEqual(end_index, var_index.value()));
       Branch(IntPtrOrSmiNotEqual(var_index.value(), end_index), &loop, &done);
     }
     BIND(&done);
@@ -12271,11 +12329,11 @@ TNode<TIndex> CodeStubAssembler::BuildFastLoop(
     CSA_DCHECK(this, increment > 0
                          ? IntPtrOrSmiLessThanOrEqual(start_index, end_index)
                          : IntPtrOrSmiLessThanOrEqual(end_index, start_index));
-    TNode<TIndex> next_index =
-        IntPtrOrSmiAdd(start_index, IntPtrOrSmiConstant<TIndex>(increment));
+    TNode<TIndex> last_index =
+        IntPtrOrSmiSub(end_index, IntPtrOrSmiConstant<TIndex>(increment));
     TNode<BoolT> first_check =
-        increment > 0 ? IntPtrOrSmiLessThan(next_index, end_index)
-                      : IntPtrOrSmiGreaterThan(next_index, end_index);
+        increment > 0 ? IntPtrOrSmiLessThan(start_index, last_index)
+                      : IntPtrOrSmiGreaterThan(start_index, last_index);
     int32_t first_check_val;
     if (TryToInt32Constant(first_check, &first_check_val)) {
       if (first_check_val) {
@@ -12292,18 +12350,14 @@ TNode<TIndex> CodeStubAssembler::BuildFastLoop(
       Comment("Unrolled Loop");
       loop_body();
       loop_body();
-      TNode<TIndex> next_index = IntPtrOrSmiAdd(
-          var_index.value(), IntPtrOrSmiConstant<TIndex>(increment));
       TNode<BoolT> loop_check =
-          increment > 0 ? IntPtrOrSmiLessThan(next_index, end_index)
-                        : IntPtrOrSmiGreaterThan(next_index, end_index);
+          increment > 0 ? IntPtrOrSmiLessThan(var_index.value(), last_index)
+                        : IntPtrOrSmiGreaterThan(var_index.value(), last_index);
       Branch(loop_check, &loop, &after_loop);
     }
     BIND(&after_loop);
     {
-      TNode<TIndex> next_index = IntPtrOrSmiAdd(
-          var_index.value(), IntPtrOrSmiConstant<TIndex>(increment));
-      GotoIfNot(IntPtrOrSmiEqual(next_index, end_index), &done);
+      GotoIfNot(IntPtrOrSmiEqual(var_index.value(), last_index), &done);
       // Iteration count is odd.
       loop_body();
       Goto(&done);
@@ -12313,20 +12367,22 @@ TNode<TIndex> CodeStubAssembler::BuildFastLoop(
   return var_index.value();
 }
 
-// Instantiate BuildFastLoop for IntPtrT and UintPtrT.
-template V8_EXPORT_PRIVATE TNode<IntPtrT>
-CodeStubAssembler::BuildFastLoop<IntPtrT>(
-    const VariableList& vars, TNode<IntPtrT> start_index,
-    TNode<IntPtrT> end_index, const FastLoopBody<IntPtrT>& body, int increment,
-    LoopUnrollingMode unrolling_mode, IndexAdvanceMode advance_mode);
-template V8_EXPORT_PRIVATE TNode<UintPtrT>
-CodeStubAssembler::BuildFastLoop<UintPtrT>(const VariableList& vars,
-                                           TNode<UintPtrT> start_index,
-                                           TNode<UintPtrT> end_index,
-                                           const FastLoopBody<UintPtrT>& body,
-                                           int increment,
-                                           LoopUnrollingMode unrolling_mode,
-                                           IndexAdvanceMode advance_mode);
+// Instantiate BuildFastLoop for IntPtrT, UintPtrT and RawPtrT.
+template V8_EXPORT_PRIVATE TNode<IntPtrT> CodeStubAssembler::BuildFastLoop<
+    IntPtrT>(const VariableList& vars, TVariable<IntPtrT>& var_index,
+             TNode<IntPtrT> start_index, TNode<IntPtrT> end_index,
+             const FastLoopBody<IntPtrT>& body, int increment,
+             LoopUnrollingMode unrolling_mode, IndexAdvanceMode advance_mode);
+template V8_EXPORT_PRIVATE TNode<UintPtrT> CodeStubAssembler::BuildFastLoop<
+    UintPtrT>(const VariableList& vars, TVariable<UintPtrT>& var_index,
+              TNode<UintPtrT> start_index, TNode<UintPtrT> end_index,
+              const FastLoopBody<UintPtrT>& body, int increment,
+              LoopUnrollingMode unrolling_mode, IndexAdvanceMode advance_mode);
+template V8_EXPORT_PRIVATE TNode<RawPtrT> CodeStubAssembler::BuildFastLoop<
+    RawPtrT>(const VariableList& vars, TVariable<RawPtrT>& var_index,
+             TNode<RawPtrT> start_index, TNode<RawPtrT> end_index,
+             const FastLoopBody<RawPtrT>& body, int increment,
+             LoopUnrollingMode unrolling_mode, IndexAdvanceMode advance_mode);
 
 template <typename TIndex>
 void CodeStubAssembler::BuildFastArrayForEach(
@@ -15714,6 +15770,10 @@ TNode<Map> CodeStubAssembler::CheckEnumCache(TNode<JSReceiver> receiver,
     TNode<Smi> length;
     TNode<HeapObject> properties = LoadSlowProperties(receiver);
 
+    // g++ version 8 has a bug when using `if constexpr(false)` with a lambda:
+    // https://gcc.gnu.org/bugzilla/show_bug.cgi?id=85149
+    // TODO(miladfarca): Use `if constexpr` once all compilers handle this
+    // properly.
     if (V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL) {
       CSA_DCHECK(this, Word32Or(IsSwissNameDictionary(properties),
                                 IsGlobalDictionary(properties)));

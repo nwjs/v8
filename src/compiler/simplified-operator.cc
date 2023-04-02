@@ -158,17 +158,19 @@ std::ostream& operator<<(std::ostream& os, ObjectAccess const& access) {
 V8_EXPORT_PRIVATE bool operator==(WasmFieldInfo const& lhs,
                                   WasmFieldInfo const& rhs) {
   return lhs.field_index == rhs.field_index && lhs.type == rhs.type &&
-         lhs.is_signed == rhs.is_signed;
+         lhs.is_signed == rhs.is_signed && lhs.null_check == rhs.null_check;
 }
 
 size_t hash_value(WasmFieldInfo const& info) {
-  return base::hash_combine(info.field_index, info.type, info.is_signed);
+  return base::hash_combine(info.field_index, info.type, info.is_signed,
+                            info.null_check);
 }
 
 V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os,
                                            WasmFieldInfo const& info) {
   return os << info.field_index << ", "
-            << (info.is_signed ? "signed" : "unsigned");
+            << (info.is_signed ? "signed" : "unsigned")
+            << (info.null_check ? "null check" : "no null check");
 }
 
 V8_EXPORT_PRIVATE bool operator==(WasmElementInfo const& lhs,
@@ -740,6 +742,22 @@ bool operator==(CheckMinusZeroParameters const& lhs,
   return lhs.mode() == rhs.mode() && lhs.feedback() == rhs.feedback();
 }
 
+#if V8_ENABLE_WEBASSEMBLY
+V8_EXPORT_PRIVATE std::ostream& operator<<(
+    std::ostream& os, AssertNotNullParameters const& params) {
+  return os << params.type << ", " << params.trap_id;
+}
+
+size_t hash_value(AssertNotNullParameters const& params) {
+  return base::hash_combine(params.type, params.trap_id);
+}
+
+bool operator==(AssertNotNullParameters const& lhs,
+                AssertNotNullParameters const& rhs) {
+  return lhs.type == rhs.type && lhs.trap_id == rhs.trap_id;
+}
+#endif
+
 #define PURE_OP_LIST(V)                                           \
   V(BooleanNot, Operator::kNoProperties, 1, 0)                    \
   V(NumberEqual, Operator::kCommutative, 2, 0)                    \
@@ -1238,46 +1256,13 @@ struct SimplifiedOperatorGlobalCache final {
   LoadStackArgumentOperator kLoadStackArgument;
 
 #if V8_ENABLE_WEBASSEMBLY
-  // Note: The following two operators have a control input solely to find the
-  // typing context from the control path in wasm-gc-operator-reducer.
-  struct IsNullOperator final : public Operator {
-    IsNullOperator()
-        : Operator(IrOpcode::kIsNull, Operator::kPure, "IsNull", 1, 0, 1, 1, 0,
-                   0) {}
+  struct WasmArrayLengthOperator final : public Operator1<bool> {
+    explicit WasmArrayLengthOperator(bool null_check)
+        : Operator1<bool>(IrOpcode::kWasmArrayLength, Operator::kEliminatable,
+                          "WasmArrayLength", 1, 1, 1, 1, 1, 1, null_check) {}
   };
-  IsNullOperator kIsNull;
-
-  struct IsNotNullOperator final : public Operator {
-    IsNotNullOperator()
-        : Operator(IrOpcode::kIsNotNull, Operator::kPure, "IsNotNull", 1, 0, 1,
-                   1, 0, 0) {}
-  };
-  IsNotNullOperator kIsNotNull;
-
-  struct NullOperator final : public Operator {
-    NullOperator()
-        : Operator(IrOpcode::kNull, Operator::kPure, "Null", 0, 0, 0, 1, 0, 0) {
-    }
-  };
-  NullOperator kNull;
-
-  struct AssertNotNullOperator final : public Operator1<TrapId> {
-    explicit AssertNotNullOperator(TrapId trap_id)
-        : Operator1(
-              IrOpcode::kAssertNotNull,
-              Operator::kNoWrite | Operator::kNoThrow | Operator::kIdempotent,
-              "AssertNotNull", 1, 1, 1, 1, 1, 1, trap_id) {}
-  };
-  AssertNotNullOperator kAssertNotNullIllegalCast{TrapId::kTrapIllegalCast};
-  AssertNotNullOperator kAssertNotNullNullDereference{
-      TrapId::kTrapNullDereference};
-
-  struct WasmArrayLengthOperator final : public Operator {
-    WasmArrayLengthOperator()
-        : Operator(IrOpcode::kWasmArrayLength, Operator::kEliminatable,
-                   "WasmArrayLength", 1, 1, 1, 1, 1, 0) {}
-  };
-  WasmArrayLengthOperator kWasmArrayLength;
+  WasmArrayLengthOperator kWasmArrayLengthNullCheck{true};
+  WasmArrayLengthOperator kWasmArrayLengthNoNullCheck{false};
 
   struct WasmArrayInitializeLengthOperator final : public Operator {
     WasmArrayInitializeLengthOperator()
@@ -1286,6 +1271,22 @@ struct SimplifiedOperatorGlobalCache final {
                    "WasmArrayInitializeLength", 2, 1, 1, 0, 1, 0) {}
   };
   WasmArrayInitializeLengthOperator kWasmArrayInitializeLength;
+
+  struct StringAsWtf16Operator final : public Operator {
+    StringAsWtf16Operator()
+        : Operator(IrOpcode::kStringAsWtf16, Operator::kEliminatable,
+                   "StringAsWtf16", 1, 1, 1, 1, 1, 1) {}
+  };
+  StringAsWtf16Operator kStringAsWtf16;
+
+  struct StringPrepareForGetCodeunitOperator final : public Operator {
+    StringPrepareForGetCodeunitOperator()
+        : Operator(IrOpcode::kStringPrepareForGetCodeunit,
+                   Operator::kEliminatable, "StringPrepareForGetCodeunit", 1, 1,
+                   1, 3, 1, 1) {}
+  };
+  StringPrepareForGetCodeunitOperator kStringPrepareForGetCodeunit;
+
 #endif
 
 #define SPECULATIVE_NUMBER_BINOP(Name)                                      \
@@ -1501,22 +1502,56 @@ const Operator* SimplifiedOperatorBuilder::RttCanon(int index) {
                                      "RttCanon", 0, 0, 0, 1, 0, 0, index);
 }
 
-const Operator* SimplifiedOperatorBuilder::Null() { return &cache_.kNull; }
+// Note: The following two operators have a control input solely to find the
+// typing context from the control path in wasm-gc-operator-reducer.
+struct IsNullOperator final : public Operator1<wasm::ValueType> {
+  explicit IsNullOperator(wasm::ValueType type)
+      : Operator1(IrOpcode::kIsNull, Operator::kPure, "IsNull", 1, 0, 1, 1, 0,
+                  0, type) {}
+};
 
-const Operator* SimplifiedOperatorBuilder::AssertNotNull(TrapId trap_id) {
-  switch (trap_id) {
-    case TrapId::kTrapNullDereference:
-      return &cache_.kAssertNotNullNullDereference;
-    case TrapId::kTrapIllegalCast:
-      return &cache_.kAssertNotNullIllegalCast;
-    default:
-      UNREACHABLE();
-  }
+struct IsNotNullOperator final : public Operator1<wasm::ValueType> {
+  explicit IsNotNullOperator(wasm::ValueType type)
+      : Operator1(IrOpcode::kIsNotNull, Operator::kPure, "IsNotNull", 1, 0, 1,
+                  1, 0, 0, type) {}
+};
+
+struct NullOperator final : public Operator1<wasm::ValueType> {
+  explicit NullOperator(wasm::ValueType type)
+      : Operator1(IrOpcode::kNull, Operator::kPure, "Null", 0, 0, 0, 1, 0, 0,
+                  type) {}
+};
+
+struct AssertNotNullOperator final : public Operator1<AssertNotNullParameters> {
+  explicit AssertNotNullOperator(wasm::ValueType type, TrapId trap_id)
+      : Operator1(
+            IrOpcode::kAssertNotNull,
+            Operator::kNoWrite | Operator::kNoThrow | Operator::kIdempotent,
+            "AssertNotNull", 1, 1, 1, 1, 1, 1, {type, trap_id}) {}
+};
+
+const Operator* SimplifiedOperatorBuilder::Null(wasm::ValueType type) {
+  return zone()->New<NullOperator>(type);
 }
 
-const Operator* SimplifiedOperatorBuilder::IsNull() { return &cache_.kIsNull; }
-const Operator* SimplifiedOperatorBuilder::IsNotNull() {
-  return &cache_.kIsNotNull;
+const Operator* SimplifiedOperatorBuilder::AssertNotNull(wasm::ValueType type,
+                                                         TrapId trap_id) {
+  return zone()->New<AssertNotNullOperator>(type, trap_id);
+}
+
+const Operator* SimplifiedOperatorBuilder::IsNull(wasm::ValueType type) {
+  return zone()->New<IsNullOperator>(type);
+}
+const Operator* SimplifiedOperatorBuilder::IsNotNull(wasm::ValueType type) {
+  return zone()->New<IsNotNullOperator>(type);
+}
+
+const Operator* SimplifiedOperatorBuilder::StringAsWtf16() {
+  return &cache_.kStringAsWtf16;
+}
+
+const Operator* SimplifiedOperatorBuilder::StringPrepareForGetCodeunit() {
+  return &cache_.kStringPrepareForGetCodeunit;
 }
 
 const Operator* SimplifiedOperatorBuilder::WasmExternInternalize() {
@@ -1532,19 +1567,20 @@ const Operator* SimplifiedOperatorBuilder::WasmExternExternalize() {
 }
 
 const Operator* SimplifiedOperatorBuilder::WasmStructGet(
-    const wasm::StructType* type, int field_index, bool is_signed) {
+    const wasm::StructType* type, int field_index, bool is_signed,
+    bool null_check) {
   return zone()->New<Operator1<WasmFieldInfo>>(
       IrOpcode::kWasmStructGet, Operator::kEliminatable, "WasmStructGet", 1, 1,
-      1, 1, 1, 0, WasmFieldInfo{type, field_index, is_signed});
+      1, 1, 1, 1, WasmFieldInfo{type, field_index, is_signed, null_check});
 }
 
 const Operator* SimplifiedOperatorBuilder::WasmStructSet(
-    const wasm::StructType* type, int field_index) {
+    const wasm::StructType* type, int field_index, bool null_check) {
   return zone()->New<Operator1<WasmFieldInfo>>(
       IrOpcode::kWasmStructSet,
       Operator::kNoDeopt | Operator::kNoThrow | Operator::kNoRead,
-      "WasmStructSet", 2, 1, 1, 0, 1, 0,
-      WasmFieldInfo{type, field_index, true /* unused */});
+      "WasmStructSet", 2, 1, 1, 0, 1, 1,
+      WasmFieldInfo{type, field_index, true /* unused */, null_check});
 }
 
 const Operator* SimplifiedOperatorBuilder::WasmArrayGet(
@@ -1562,8 +1598,9 @@ const Operator* SimplifiedOperatorBuilder::WasmArraySet(
       "WasmArraySet", 3, 1, 1, 0, 1, 0, type);
 }
 
-const Operator* SimplifiedOperatorBuilder::WasmArrayLength() {
-  return &cache_.kWasmArrayLength;
+const Operator* SimplifiedOperatorBuilder::WasmArrayLength(bool null_check) {
+  return null_check ? &cache_.kWasmArrayLengthNullCheck
+                    : &cache_.kWasmArrayLengthNoNullCheck;
 }
 
 const Operator* SimplifiedOperatorBuilder::WasmArrayInitializeLength() {
@@ -1715,9 +1752,13 @@ const Operator* SimplifiedOperatorBuilder::CheckMaps(
     CheckMapsFlags flags, ZoneHandleSet<Map> maps,
     const FeedbackSource& feedback) {
   CheckMapsParameters const parameters(flags, maps, feedback);
+  Operator::Properties operator_props = Operator::kNoThrow;
+  if (!(flags & CheckMapsFlag::kTryMigrateInstance)) {
+    operator_props |= Operator::kNoWrite;
+  }
   return zone()->New<Operator1<CheckMapsParameters>>(  // --
       IrOpcode::kCheckMaps,                            // opcode
-      Operator::kNoThrow | Operator::kNoWrite,         // flags
+      operator_props,                                  // flags
       "CheckMaps",                                     // name
       1, 1, 1, 0, 1, 0,                                // counts
       parameters);                                     // parameter

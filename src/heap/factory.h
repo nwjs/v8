@@ -450,7 +450,8 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   Handle<Foreign> NewForeign(
       Address addr, AllocationType allocation_type = AllocationType::kYoung);
 
-  Handle<Cell> NewCell(Handle<Object> value);
+  Handle<Cell> NewCell(Smi value);
+  Handle<Cell> NewCell();
 
   Handle<PropertyCell> NewPropertyCell(
       Handle<Name> name, PropertyDetails details, Handle<Object> value,
@@ -668,7 +669,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   // Returns a handle to a WasmArray if successful, or a Smi containing a
   // {MessageTemplate} if computing the array's elements leads to an error.
   Handle<Object> NewWasmArrayFromElementSegment(
-      Handle<WasmInstanceObject> instance, const wasm::WasmElemSegment* segment,
+      Handle<WasmInstanceObject> instance, uint32_t segment_index,
       uint32_t start_offset, uint32_t length, Handle<Map> map);
   Handle<WasmContinuationObject> NewWasmContinuationObject(
       Address jmpbuf, Handle<Foreign> managed_stack, Handle<HeapObject> parent,
@@ -715,9 +716,9 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
                                        size_t byte_offset, size_t length,
                                        bool is_length_tracking = false);
 
-  Handle<JSDataView> NewJSDataView(Handle<JSArrayBuffer> buffer,
-                                   size_t byte_offset, size_t byte_length,
-                                   bool is_length_tracking = false);
+  Handle<JSDataViewOrRabGsabDataView> NewJSDataViewOrRabGsabDataView(
+      Handle<JSArrayBuffer> buffer, size_t byte_offset, size_t byte_length,
+      bool is_length_tracking = false);
 
   Handle<JSIteratorResult> NewJSIteratorResult(Handle<Object> value, bool done);
   Handle<JSAsyncFromSyncIterator> NewJSAsyncFromSyncIterator(
@@ -808,8 +809,6 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   Handle<SharedFunctionInfo> NewSharedFunctionInfoForBuiltin(
       MaybeHandle<String> name, Builtin builtin,
       FunctionKind kind = FunctionKind::kNormalFunction);
-
-  Handle<SharedFunctionInfo> NewSharedFunctionInfoForWebSnapshot();
 
   static bool IsFunctionModeWithPrototype(FunctionMode function_mode) {
     return (function_mode & kWithPrototypeBits) != 0;
@@ -1054,7 +1053,6 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
 
  private:
   friend class FactoryBase<Factory>;
-  friend class WebSnapshotDeserializer;
 
   // ------
   // Customization points for FactoryBase

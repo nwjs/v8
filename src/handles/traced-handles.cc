@@ -539,6 +539,8 @@ class TracedHandlesImpl final {
   size_t used_size_bytes() const { return sizeof(TracedNode) * used_nodes_; }
   size_t total_size_bytes() const { return block_size_bytes_; }
 
+  bool HasYoung() const { return !young_nodes_.empty(); }
+
  private:
   TracedNode* AllocateNode();
   void FreeNode(TracedNode*);
@@ -913,9 +915,9 @@ void TracedHandlesImpl::ProcessYoungObjects(
   for (TracedNode* node : young_nodes_) {
     if (!node->is_in_use()) continue;
 
-    CHECK_IMPLIES(node->is_root(),
-                  !should_reset_handle(isolate_->heap(), node->location()));
-    if (should_reset_handle(isolate_->heap(), node->location())) {
+    bool should_reset = should_reset_handle(isolate_->heap(), node->location());
+    CHECK_IMPLIES(node->is_root(), !should_reset);
+    if (should_reset) {
       CHECK(!is_marking_);
       v8::Value* value = ToApi<v8::Value>(node->handle());
       handler->ResetRoot(
@@ -926,8 +928,10 @@ void TracedHandlesImpl::ProcessYoungObjects(
     } else {
       if (!node->is_root()) {
         node->set_root(true);
-        visitor->VisitRootPointer(Root::kGlobalHandles, nullptr,
-                                  node->location());
+        if (visitor) {
+          visitor->VisitRootPointer(Root::kGlobalHandles, nullptr,
+                                    node->location());
+        }
       }
     }
   }
@@ -1152,5 +1156,7 @@ Object TracedHandles::MarkConservatively(Address* inner_location,
   if (!node.is_in_use<AccessMode::ATOMIC>()) return Smi::zero();
   return MarkObject(node.object(), node, mark_mode);
 }
+
+bool TracedHandles::HasYoung() const { return impl_->HasYoung(); }
 
 }  // namespace v8::internal

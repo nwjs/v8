@@ -632,7 +632,8 @@ void DeclarationScope::HoistSloppyBlockFunctions(AstNodeFactory* factory) {
     // scope and we terminate the iteration there anyway.
     do {
       Variable* var = query_scope->LookupInScopeOrScopeInfo(name, query_scope);
-      if (var != nullptr && IsLexicalVariableMode(var->mode())) {
+      if (var != nullptr && IsLexicalVariableMode(var->mode()) &&
+          !var->is_sloppy_block_function()) {
         should_hoist = false;
         break;
       }
@@ -649,6 +650,19 @@ void DeclarationScope::HoistSloppyBlockFunctions(AstNodeFactory* factory) {
       auto declaration = factory->NewVariableDeclaration(pos);
       // Based on the preceding checks, it doesn't matter what we pass as
       // sloppy_mode_block_scope_function_redefinition.
+      //
+      // This synthesized var for Annex B functions-in-block (FiB) may be
+      // declared multiple times for the same var scope, such as in the case of
+      // shadowed functions-in-block like the following:
+      //
+      // {
+      //    function f() {}
+      //    { function f() {} }
+      // }
+      //
+      // Redeclarations for vars do not create new bindings, but the
+      // redeclarations' initializers are still run. That is, shadowed FiB will
+      // result in multiple assignments to the same synthesized var.
       Variable* var = DeclareVariable(
           declaration, name, pos, VariableMode::kVar, NORMAL_VARIABLE,
           Variable::DefaultInitializationFlag(VariableMode::kVar), &was_added,

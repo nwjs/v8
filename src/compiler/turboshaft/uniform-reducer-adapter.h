@@ -19,8 +19,8 @@ namespace v8::internal::compiler::turboshaft {
 // template <typename Next>
 // class MyReducer : public UniformReducerAdapter<MyReducer, Next> {
 //  public:
+//   TURBOSHAFT_REDUCER_BOILERPLATE()
 //   using Adapter = UniformReducerAdapter<MyReducer, Next>;
-//   using Next::Asm;
 //
 //   template <typename... Args>
 //   explicit MyReducer(const std::tuple<Args...>& args)
@@ -116,6 +116,16 @@ class UniformReducerAdapter : public Next {
   template <typename... Args>
   explicit UniformReducerAdapter(const std::tuple<Args...>& args)
       : Next(args) {}
+
+  template <Opcode opcode, typename Continuation, typename... Args>
+  OpIndex ReduceOperation(Args... args) {
+    return Continuation{this}.Reduce(args...);
+  }
+
+  template <typename Op, typename Continuation>
+  OpIndex ReduceInputGraphOperation(OpIndex ig_index, const Op& operation) {
+    return Continuation{this}.ReduceInputGraph(ig_index, operation);
+  }
 
 #define REDUCE(op)                                                           \
   struct Reduce##op##Continuation final {                                    \

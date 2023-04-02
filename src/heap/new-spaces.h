@@ -8,6 +8,7 @@
 #include <atomic>
 #include <memory>
 
+#include "spaces.h"
 #include "src/base/logging.h"
 #include "src/base/macros.h"
 #include "src/base/platform/mutex.h"
@@ -277,9 +278,6 @@ class NewSpace : NON_EXPORTED_BASE(public SpaceWithLinearArea) {
   // Grow the capacity of the space.
   virtual void Grow() = 0;
 
-  // Shrink the capacity of the space.
-  virtual void Shrink() = 0;
-
   virtual bool ShouldBePromoted(Address) const = 0;
 
   // Creates a filler object in the linear allocation area.
@@ -303,10 +301,7 @@ class NewSpace : NON_EXPORTED_BASE(public SpaceWithLinearArea) {
 
   virtual void Prologue() {}
 
-  virtual void EvacuatePrologue() = 0;
-  virtual void EvacuateEpilogue() = 0;
-
-  virtual void ZapUnusedMemory() {}
+  virtual void GarbageCollectionEpilogue() = 0;
 
   virtual bool IsPromotionCandidate(const MemoryChunk* page) const = 0;
 
@@ -354,7 +349,7 @@ class V8_EXPORT_PRIVATE SemiSpaceNewSpace final : public NewSpace {
   void Grow() final;
 
   // Shrink the capacity of the semispaces.
-  void Shrink() final;
+  void Shrink();
 
   // Return the allocated bytes in the active semispace.
   size_t Size() const final {
@@ -445,7 +440,8 @@ class V8_EXPORT_PRIVATE SemiSpaceNewSpace final : public NewSpace {
   // inline allocation every once in a while. This is done by setting
   // allocation_info_.limit to be lower than the actual limit and and increasing
   // it in steps to guarantee that the observers are notified periodically.
-  void UpdateInlineAllocationLimit(size_t size_in_bytes) final;
+  void UpdateInlineAllocationLimit() final;
+  void UpdateInlineAllocationLimitForAllocation(size_t size_in_bytes);
 
   // Try to switch the active semispace to a new, empty, page.
   // Returns false if this isn't possible or reasonable (i.e., there
@@ -506,10 +502,11 @@ class V8_EXPORT_PRIVATE SemiSpaceNewSpace final : public NewSpace {
 
   void Prologue() final;
 
-  void EvacuatePrologue() final;
-  void EvacuateEpilogue() final;
+  void EvacuatePrologue();
 
-  void ZapUnusedMemory() final;
+  void GarbageCollectionEpilogue() final;
+
+  void ZapUnusedMemory();
 
   bool IsPromotionCandidate(const MemoryChunk* page) const final;
 
@@ -563,7 +560,6 @@ class V8_EXPORT_PRIVATE PagedSpaceForNewSpace final : public PagedSpaceBase {
   void Grow();
 
   // Shrink the capacity of the space.
-  void Shrink() { UNREACHABLE(); }
   bool StartShrinking();
   void FinishShrinking();
 
@@ -585,15 +581,14 @@ class V8_EXPORT_PRIVATE PagedSpaceForNewSpace final : public PagedSpaceBase {
   }
 
   // Reset the allocation pointer.
-  void EvacuatePrologue() {}
-  void EvacuateEpilogue() { allocated_linear_areas_ = 0; }
+  void GarbageCollectionEpilogue() { allocated_linear_areas_ = 0; }
 
   // When inline allocation stepping is active, either because of incremental
   // marking, idle scavenge, or allocation statistics gathering, we 'interrupt'
   // inline allocation every once in a while. This is done by setting
   // allocation_info_.limit to be lower than the actual limit and and increasing
   // it in steps to guarantee that the observers are notified periodically.
-  void UpdateInlineAllocationLimit(size_t size_in_bytes) final;
+  void UpdateInlineAllocationLimit() final;
 
   // Try to switch the active semispace to a new, empty, page.
   // Returns false if this isn't possible or reasonable (i.e., there
@@ -636,7 +631,9 @@ class V8_EXPORT_PRIVATE PagedSpaceForNewSpace final : public PagedSpaceBase {
   void ClearUnusedObjectStartBitmaps() {}
 #endif  // V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
 
-  bool ShouldReleasePage() const;
+  bool ShouldReleaseEmptyPage() const;
+
+  void RefillFreeList() final;
 
  private:
   bool PreallocatePages();
@@ -672,7 +669,6 @@ class V8_EXPORT_PRIVATE PagedNewSpace final : public NewSpace {
   void Grow() final { paged_space_.Grow(); }
 
   // Shrink the capacity of the space.
-  void Shrink() final { paged_space_.Shrink(); }
   bool StartShrinking() { return paged_space_.StartShrinking(); }
   void FinishShrinking() { paged_space_.FinishShrinking(); }
 
@@ -735,8 +731,8 @@ class V8_EXPORT_PRIVATE PagedNewSpace final : public NewSpace {
   // inline allocation every once in a while. This is done by setting
   // allocation_info_.limit to be lower than the actual limit and and increasing
   // it in steps to guarantee that the observers are notified periodically.
-  void UpdateInlineAllocationLimit(size_t size_in_bytes) final {
-    paged_space_.UpdateInlineAllocationLimit(size_in_bytes);
+  void UpdateInlineAllocationLimit() final {
+    paged_space_.UpdateInlineAllocationLimit();
   }
 
   // Try to switch the active semispace to a new, empty, page.
@@ -779,8 +775,9 @@ class V8_EXPORT_PRIVATE PagedNewSpace final : public NewSpace {
 
   bool ShouldBePromoted(Address address) const final { return true; }
 
-  void EvacuatePrologue() final { paged_space_.EvacuatePrologue(); }
-  void EvacuateEpilogue() final { paged_space_.EvacuateEpilogue(); }
+  void GarbageCollectionEpilogue() final {
+    paged_space_.GarbageCollectionEpilogue();
+  }
 
   bool IsPromotionCandidate(const MemoryChunk* page) const final {
     return true;
@@ -807,7 +804,9 @@ class V8_EXPORT_PRIVATE PagedNewSpace final : public NewSpace {
   // All operations on `memory_chunk_list_` should go through `paged_space_`.
   heap::List<MemoryChunk>& memory_chunk_list() final { UNREACHABLE(); }
 
-  bool ShouldReleasePage() const { return paged_space_.ShouldReleasePage(); }
+  bool ShouldReleaseEmptyPage() {
+    return paged_space_.ShouldReleaseEmptyPage();
+  }
   void ReleasePage(Page* page) { paged_space_.ReleasePage(page); }
 
  private:

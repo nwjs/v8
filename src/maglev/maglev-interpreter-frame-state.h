@@ -243,9 +243,13 @@ struct KnownNodeAspects {
 
 class InterpreterFrameState {
  public:
+  InterpreterFrameState(const MaglevCompilationUnit& info,
+                        KnownNodeAspects* known_node_aspects)
+      : frame_(info), known_node_aspects_(known_node_aspects) {}
+
   explicit InterpreterFrameState(const MaglevCompilationUnit& info)
-      : frame_(info),
-        known_node_aspects_(info.zone()->New<KnownNodeAspects>(info.zone())) {}
+      : InterpreterFrameState(
+            info, info.zone()->New<KnownNodeAspects>(info.zone())) {}
 
   inline void CopyFrom(const MaglevCompilationUnit& info,
                        const MergePointInterpreterFrameState& state);
@@ -280,9 +284,14 @@ class InterpreterFrameState {
 
   const RegisterFrameArray<ValueNode*>& frame() const { return frame_; }
 
-  KnownNodeAspects& known_node_aspects() { return *known_node_aspects_; }
-  const KnownNodeAspects& known_node_aspects() const {
-    return *known_node_aspects_;
+  KnownNodeAspects* known_node_aspects() { return known_node_aspects_; }
+  const KnownNodeAspects* known_node_aspects() const {
+    return known_node_aspects_;
+  }
+
+  void set_known_node_aspects(KnownNodeAspects* known_node_aspects) {
+    DCHECK_NOT_NULL(known_node_aspects);
+    known_node_aspects_ = known_node_aspects;
   }
 
  private:
@@ -500,39 +509,36 @@ class MergePointInterpreterFrameState {
   // framestate.
   void Merge(MaglevCompilationUnit& compilation_unit,
              ZoneMap<int, SmiConstant*>& smi_constants,
-             InterpreterFrameState& unmerged, BasicBlock* predecessor,
-             int merge_offset);
+             InterpreterFrameState& unmerged, BasicBlock* predecessor);
 
   // Merges an unmerged framestate with a possibly merged framestate into |this|
   // framestate.
   void MergeLoop(MaglevCompilationUnit& compilation_unit,
                  ZoneMap<int, SmiConstant*>& smi_constants,
                  InterpreterFrameState& loop_end_state,
-                 BasicBlock* loop_end_block, int merge_offset);
+                 BasicBlock* loop_end_block);
 
   // Merges a dead framestate (e.g. one which has been early terminated with a
   // deopt).
-  void MergeDead(const MaglevCompilationUnit& compilation_unit,
-                 int merge_offset) {
+  void MergeDead(const MaglevCompilationUnit& compilation_unit) {
     DCHECK_GE(predecessor_count_, 1);
     DCHECK_LT(predecessors_so_far_, predecessor_count_);
     predecessor_count_--;
     DCHECK_LE(predecessors_so_far_, predecessor_count_);
 
-    frame_state_.ForEachValue(
-        compilation_unit, [&](ValueNode* value, interpreter::Register reg) {
-          ReducePhiPredecessorCount(reg, value, merge_offset);
-        });
+    frame_state_.ForEachValue(compilation_unit,
+                              [&](ValueNode* value, interpreter::Register reg) {
+                                ReducePhiPredecessorCount(reg, value);
+                              });
   }
 
   // Merges a dead loop framestate (e.g. one where the block containing the
   // JumpLoop has been early terminated with a deopt).
-  void MergeDeadLoop(const MaglevCompilationUnit& compilation_unit,
-                     int merge_offset) {
+  void MergeDeadLoop(const MaglevCompilationUnit& compilation_unit) {
     // This should be the last predecessor we try to merge.
     DCHECK_EQ(predecessors_so_far_, predecessor_count_ - 1);
     DCHECK(is_unmerged_loop());
-    MergeDead(compilation_unit, merge_offset);
+    MergeDead(compilation_unit);
     // This means that this is no longer a loop.
     basic_block_type_ = BasicBlockType::kDefault;
   }
@@ -583,6 +589,8 @@ class MergePointInterpreterFrameState {
 
   bool is_resumable_loop() const { return is_resumable_loop_; }
 
+  int merge_offset() const { return merge_offset_; }
+
  private:
   // For each non-Phi value in the frame state, store its alternative
   // representations to avoid re-converting on Phi creation.
@@ -616,39 +624,38 @@ class MergePointInterpreterFrameState {
   friend T* Zone::New(Args&&... args);
 
   MergePointInterpreterFrameState(
-      const MaglevCompilationUnit& info, int predecessor_count,
-      int predecessors_so_far, BasicBlock** predecessors, BasicBlockType type,
-      const compiler::BytecodeLivenessState* liveness);
+      const MaglevCompilationUnit& info, int merge_offset,
+      int predecessor_count, int predecessors_so_far, BasicBlock** predecessors,
+      BasicBlockType type, const compiler::BytecodeLivenessState* liveness);
 
   ValueNode* MergeValue(MaglevCompilationUnit& compilation_unit,
                         ZoneMap<int, SmiConstant*>& smi_constants,
                         interpreter::Register owner,
                         const KnownNodeAspects& unmerged_aspects,
                         ValueNode* merged, ValueNode* unmerged,
-                        Alternatives::List& per_predecessor_alternatives,
-                        int merge_offset);
+                        Alternatives::List& per_predecessor_alternatives);
 
-  void ReducePhiPredecessorCount(interpreter::Register owner, ValueNode* merged,
-                                 int merge_offset);
+  void ReducePhiPredecessorCount(interpreter::Register owner,
+                                 ValueNode* merged);
 
   void MergeLoopValue(MaglevCompilationUnit& compilation_unit,
                       ZoneMap<int, SmiConstant*>& smi_constants,
                       interpreter::Register owner,
                       KnownNodeAspects& unmerged_aspects, ValueNode* merged,
-                      ValueNode* unmerged, int merge_offset);
+                      ValueNode* unmerged);
 
-  ValueNode* NewLoopPhi(Zone* zone, interpreter::Register reg,
-                        int merge_offset);
+  ValueNode* NewLoopPhi(Zone* zone, interpreter::Register reg);
 
-  ValueNode* NewExceptionPhi(Zone* zone, interpreter::Register reg,
-                             int handler_offset) {
+  ValueNode* NewExceptionPhi(Zone* zone, interpreter::Register reg) {
     DCHECK_EQ(predecessors_so_far_, 0);
     DCHECK_EQ(predecessor_count_, 0);
     DCHECK_NULL(predecessors_);
-    Phi* result = Node::New<Phi>(zone, 0, reg, handler_offset);
+    Phi* result = Node::New<Phi>(zone, 0, this, reg);
     phis_.Add(result);
     return result;
   }
+
+  int merge_offset_;
 
   int predecessor_count_;
   int predecessors_so_far_;

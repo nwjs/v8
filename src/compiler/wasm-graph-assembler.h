@@ -159,7 +159,11 @@ class WasmGraphAssembler : public GraphAssembler {
                                        value);
   }
 
-  Node* IsI31(Node* object);
+  Node* BuildLoadExternalPointerFromObject(Node* object, int offset,
+                                           ExternalPointerTag tag,
+                                           Node* isolate_root);
+
+  Node* IsSmi(Node* object);
 
   // Maps and their contents.
 
@@ -242,23 +246,23 @@ class WasmGraphAssembler : public GraphAssembler {
 
   Node* WasmTypeCast(Node* object, Node* rtt, WasmTypeCheckConfig config);
 
-  Node* Null();
+  Node* Null(wasm::ValueType type);
 
-  Node* IsNull(Node* object);
+  Node* IsNull(Node* object, wasm::ValueType type);
 
-  Node* IsNotNull(Node* object);
+  Node* IsNotNull(Node* object, wasm::ValueType type);
 
-  Node* AssertNotNull(Node* object, TrapId trap_id);
+  Node* AssertNotNull(Node* object, wasm::ValueType type, TrapId trap_id);
 
   Node* WasmExternInternalize(Node* object);
 
   Node* WasmExternExternalize(Node* object);
 
   Node* StructGet(Node* object, const wasm::StructType* type, int field_index,
-                  bool is_signed);
+                  bool is_signed, bool null_check);
 
   void StructSet(Node* object, Node* value, const wasm::StructType* type,
-                 int field_index);
+                 int field_index, bool null_check);
 
   Node* ArrayGet(Node* array, Node* index, const wasm::ArrayType* type,
                  bool is_signed);
@@ -266,9 +270,13 @@ class WasmGraphAssembler : public GraphAssembler {
   void ArraySet(Node* array, Node* index, Node* value,
                 const wasm::ArrayType* type);
 
-  Node* ArrayLength(Node* array);
+  Node* ArrayLength(Node* array, bool null_check);
 
   void ArrayInitializeLength(Node* array, Node* length);
+
+  Node* StringAsWtf16(Node* string);
+
+  Node* StringPrepareForGetCodeunit(Node* string);
 
   // Generic helpers.
 

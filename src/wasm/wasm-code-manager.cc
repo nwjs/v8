@@ -899,17 +899,16 @@ WasmCode* NativeModule::AddCodeForTesting(Handle<InstructionStream> code) {
     source_pos_table->copy_out(0, source_pos.begin(),
                                source_pos_table->length());
   }
-  CHECK(!code->is_off_heap_trampoline());
   static_assert(InstructionStream::kOnHeapBodyIsContiguous);
   base::Vector<const byte> instructions(
-      reinterpret_cast<byte*>(code->raw_body_start()),
-      static_cast<size_t>(code->raw_body_size()));
+      reinterpret_cast<byte*>(code->body_start()),
+      static_cast<size_t>(code->body_size()));
   const int stack_slots = code->stack_slots();
 
   // Metadata offsets in InstructionStream objects are relative to the start of
   // the metadata section, whereas WasmCode expects offsets relative to
   // InstructionStart.
-  const int base_offset = code->raw_instruction_size();
+  const int base_offset = code->instruction_size();
   // TODO(jgruber,v8:8758): Remove this translation. It exists only because
   // InstructionStream objects contains real offsets but WasmCode expects an
   // offset of 0 to mean 'empty'.
@@ -927,7 +926,7 @@ WasmCode* NativeModule::AddCodeForTesting(Handle<InstructionStream> code) {
 
   // Apply the relocation delta by iterating over the RelocInfo.
   intptr_t delta = reinterpret_cast<Address>(dst_code_bytes.begin()) -
-                   code->raw_instruction_start();
+                   code->instruction_start();
   int mode_mask =
       RelocInfo::kApplyMask | RelocInfo::ModeMask(RelocInfo::WASM_STUB_CALL);
   auto jump_tables_ref =
@@ -1038,10 +1037,13 @@ std::unique_ptr<WasmCode> NativeModule::AddCode(
     jump_table_ref =
         FindJumpTablesForRegionLocked(base::AddressRegionOf(code_space));
   }
-  return AddCodeWithCodeSpace(index, desc, stack_slots, tagged_parameter_slots,
-                              protected_instructions_data,
-                              source_position_table, kind, tier, for_debugging,
-                              code_space, jump_table_ref);
+  // Only Liftoff code can have the {frame_has_feedback_slot} bit set.
+  DCHECK_NE(tier, ExecutionTier::kLiftoff);
+  bool frame_has_feedback_slot = false;
+  return AddCodeWithCodeSpace(
+      index, desc, stack_slots, tagged_parameter_slots,
+      protected_instructions_data, source_position_table, kind, tier,
+      for_debugging, frame_has_feedback_slot, code_space, jump_table_ref);
 }
 
 std::unique_ptr<WasmCode> NativeModule::AddCodeWithCodeSpace(
@@ -1050,7 +1052,8 @@ std::unique_ptr<WasmCode> NativeModule::AddCodeWithCodeSpace(
     base::Vector<const byte> protected_instructions_data,
     base::Vector<const byte> source_position_table, WasmCode::Kind kind,
     ExecutionTier tier, ForDebugging for_debugging,
-    base::Vector<uint8_t> dst_code_bytes, const JumpTablesRef& jump_tables) {
+    bool frame_has_feedback_slot, base::Vector<uint8_t> dst_code_bytes,
+    const JumpTablesRef& jump_tables) {
   base::Vector<byte> reloc_info{
       desc.buffer + desc.buffer_size - desc.reloc_size,
       static_cast<size_t>(desc.reloc_size)};
@@ -1106,7 +1109,8 @@ std::unique_ptr<WasmCode> NativeModule::AddCodeWithCodeSpace(
       this, index, dst_code_bytes, stack_slots, tagged_parameter_slots,
       safepoint_table_offset, handler_table_offset, constant_pool_offset,
       code_comments_offset, instr_size, protected_instructions_data, reloc_info,
-      source_position_table, kind, tier, for_debugging}};
+      source_position_table, kind, tier, for_debugging,
+      frame_has_feedback_slot}};
 
   code->MaybePrint();
   code->Validate();
@@ -2217,8 +2221,8 @@ std::vector<std::unique_ptr<WasmCode>> NativeModule::AddCompiledCode(
         result.tagged_parameter_slots,
         result.protected_instructions_data.as_vector(),
         result.source_positions.as_vector(), GetCodeKind(result),
-        result.result_tier, result.for_debugging, this_code_space,
-        jump_tables));
+        result.result_tier, result.for_debugging,
+        result.frame_has_feedback_slot, this_code_space, jump_tables));
   }
   DCHECK_EQ(0, code_space.size());
 

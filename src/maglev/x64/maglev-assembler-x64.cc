@@ -15,7 +15,7 @@ namespace maglev {
 
 #define __ masm->
 
-void MaglevAssembler::Allocate(RegisterSnapshot& register_snapshot,
+void MaglevAssembler::Allocate(RegisterSnapshot register_snapshot,
                                Register object, int size_in_bytes,
                                AllocationType alloc_type,
                                AllocationAlignment alignment) {
@@ -111,8 +111,8 @@ void MaglevAssembler::LoadSingleCharacterString(Register result,
   DCHECK_NE(char_code, scratch);
   Register table = scratch;
   LoadRoot(table, RootIndex::kSingleCharacterStringTable);
-  DecompressAnyTagged(result, FieldOperand(table, char_code, times_tagged_size,
-                                           FixedArray::kHeaderSize));
+  DecompressTagged(result, FieldOperand(table, char_code, times_tagged_size,
+                                        FixedArray::kHeaderSize));
 }
 
 void MaglevAssembler::StringFromCharCode(RegisterSnapshot register_snapshot,
@@ -160,7 +160,7 @@ void MaglevAssembler::StringCharCodeAt(RegisterSnapshot& register_snapshot,
   Label cons_string;
   Label sliced_string;
 
-  DeferredCodeInfo* deferred_runtime_call = PushDeferredCode(
+  Label* deferred_runtime_call = MakeDeferredCode(
       [](MaglevAssembler* masm, RegisterSnapshot register_snapshot,
          ZoneLabelRef done, Register result, Register string, Register index) {
         DCHECK(!register_snapshot.live_registers.has(result));
@@ -218,14 +218,13 @@ void MaglevAssembler::StringCharCodeAt(RegisterSnapshot& register_snapshot,
     cmpl(representation, Immediate(kSlicedStringTag));
     j(equal, &sliced_string, Label::kNear);
     cmpl(representation, Immediate(kThinStringTag));
-    j(not_equal, &deferred_runtime_call->deferred_code_label);
+    j(not_equal, deferred_runtime_call);
     // Fallthrough to thin string.
   }
 
   // Is a thin string.
   {
-    DecompressAnyTagged(string,
-                        FieldOperand(string, ThinString::kActualOffset));
+    DecompressTagged(string, FieldOperand(string, ThinString::kActualOffset));
     jmp(&loop, Label::kNear);
   }
 
@@ -234,8 +233,7 @@ void MaglevAssembler::StringCharCodeAt(RegisterSnapshot& register_snapshot,
     Register offset = scratch;
     movl(offset, FieldOperand(string, SlicedString::kOffsetOffset));
     SmiUntag(offset);
-    DecompressAnyTagged(string,
-                        FieldOperand(string, SlicedString::kParentOffset));
+    DecompressTagged(string, FieldOperand(string, SlicedString::kParentOffset));
     addl(index, offset);
     jmp(&loop, Label::kNear);
   }
@@ -244,8 +242,8 @@ void MaglevAssembler::StringCharCodeAt(RegisterSnapshot& register_snapshot,
   {
     CompareRoot(FieldOperand(string, ConsString::kSecondOffset),
                 RootIndex::kempty_string);
-    j(not_equal, &deferred_runtime_call->deferred_code_label);
-    DecompressAnyTagged(string, FieldOperand(string, ConsString::kFirstOffset));
+    j(not_equal, deferred_runtime_call);
+    DecompressTagged(string, FieldOperand(string, ConsString::kFirstOffset));
     jmp(&loop, Label::kNear);  // Try again with first string.
   }
 
@@ -486,16 +484,40 @@ void MaglevAssembler::TruncateDoubleToInt32(Register dst, DoubleRegister src) {
   movl(dst, dst);
 }
 
-void MaglevAssembler::Prologue(Graph* graph) {
-  if (v8_flags.maglev_ool_prologue) {
-    // Call the out-of-line prologue (with parameters passed on the stack).
-    Push(Immediate(code_gen_state()->stack_slots() * kSystemPointerSize));
-    Push(Immediate(code_gen_state()->tagged_slots() * kSystemPointerSize));
-    CallBuiltin(Builtin::kMaglevOutOfLinePrologue);
-    return;
-  }
+void MaglevAssembler::TryTruncateDoubleToInt32(Register dst, DoubleRegister src,
+                                               Label* fail) {
+  DoubleRegister converted_back = kScratchDoubleReg;
 
+  // Convert the input float64 value to int32.
+  Cvttsd2si(dst, src);
+  // Convert that int32 value back to float64.
+  Cvtlsi2sd(converted_back, dst);
+  // Check that the result of the float64->int32->float64 is equal to the input
+  // (i.e. that the conversion didn't truncate.
+  Ucomisd(src, converted_back);
+  JumpIf(parity_even, fail);
+  JumpIf(not_equal, fail);
+
+  // Check if {input} is -0.
+  Label check_done;
+  cmpl(dst, Immediate(0));
+  j(not_equal, &check_done);
+
+  // In case of 0, we need to check the high bits for the IEEE -0 pattern.
+  Register high_word32_of_input = kScratchRegister;
+  Pextrd(high_word32_of_input, src, 1);
+  cmpl(high_word32_of_input, Immediate(0));
+  JumpIf(less, fail);
+
+  bind(&check_done);
+}
+
+void MaglevAssembler::Prologue(Graph* graph) {
   BailoutIfDeoptimized(rbx);
+
+  if (graph->has_recursive_calls()) {
+    bind(code_gen_state()->entry_label());
+  }
 
   // Tiering support.
   // TODO(jgruber): Extract to a builtin (the tiering prologue is ~230 bytes
@@ -507,7 +529,7 @@ void MaglevAssembler::Prologue(Graph* graph) {
     Register flags = rcx;
     Register feedback_vector = r9;
 
-    DeferredCodeInfo* deferred_flags_need_processing = PushDeferredCode(
+    Label* deferred_flags_need_processing = MakeDeferredCode(
         [](MaglevAssembler* masm, Register flags, Register feedback_vector) {
           ASM_CODE_COMMENT_STRING(masm, "Optimized marker check");
           // TODO(leszeks): This could definitely be a builtin that we
@@ -522,7 +544,7 @@ void MaglevAssembler::Prologue(Graph* graph) {
          compilation_info()->toplevel_compilation_unit()->feedback().object());
     LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
         flags, feedback_vector, CodeKind::MAGLEV,
-        &deferred_flags_need_processing->deferred_code_label);
+        deferred_flags_need_processing);
   }
 
   EnterFrame(StackFrame::MAGLEV);
@@ -533,44 +555,6 @@ void MaglevAssembler::Prologue(Graph* graph) {
   Push(kContextRegister);
   Push(kJSFunctionRegister);              // Callee's JS function.
   Push(kJavaScriptCallArgCountRegister);  // Actual argument count.
-
-  {
-    ASM_CODE_COMMENT_STRING(this, " Stack/interrupt check");
-    // Stack check. This folds the checks for both the interrupt stack limit
-    // check and the real stack limit into one by just checking for the
-    // interrupt limit. The interrupt limit is either equal to the real
-    // stack limit or tighter. By ensuring we have space until that limit
-    // after building the frame we can quickly precheck both at once.
-    Move(kScratchRegister, rsp);
-    const int max_stack_slots_used =
-        code_gen_state()->stack_slots() + graph->max_call_stack_args();
-    const int max_stack_size =
-        std::max(static_cast<int>(graph->max_deopted_stack_size()),
-                 max_stack_slots_used * kSystemPointerSize);
-    subq(kScratchRegister, Immediate(max_stack_size));
-    cmpq(kScratchRegister,
-         StackLimitAsOperand(StackLimitKind::kInterruptStackLimit));
-
-    ZoneLabelRef deferred_call_stack_guard_return(this);
-    JumpToDeferredIf(
-        below_equal,
-        [](MaglevAssembler* masm, ZoneLabelRef done, RegList register_inputs,
-           int max_stack_size) {
-          ASM_CODE_COMMENT_STRING(masm, "Stack/interrupt call");
-          __ PushAll(register_inputs);
-          // Push the frame size
-          __ Push(Immediate(Smi::FromInt(max_stack_size)));
-          __ CallRuntime(Runtime::kStackGuardWithGap, 1);
-          auto safepoint =
-              masm->safepoint_table_builder()->DefineSafepoint(masm);
-          safepoint.DefineStackGuardSafepoint(register_inputs.Count());
-          __ PopAll(register_inputs);
-          __ jmp(*done);
-        },
-        deferred_call_stack_guard_return, graph->register_inputs(),
-        max_stack_size);
-    bind(*deferred_call_stack_guard_return);
-  }
 
   // Initialize stack slots.
   if (graph->tagged_stack_slots() > 0) {
@@ -612,12 +596,63 @@ void MaglevAssembler::Prologue(Graph* graph) {
     // no need to initialise these.
     subq(rsp, Immediate(graph->untagged_stack_slots() * kSystemPointerSize));
   }
+
+  {
+    ASM_CODE_COMMENT_STRING(this, " Stack/interrupt check");
+    // Stack check. This folds the checks for both the interrupt stack limit
+    // check and the real stack limit into one by just checking for the
+    // interrupt limit. The interrupt limit is either equal to the real
+    // stack limit or tighter. By ensuring we have space until that limit
+    // after building the frame we can quickly precheck both at once.
+    const int stack_check_offset = graph->stack_check_offset();
+    Register stack_cmp_reg = rsp;
+    if (stack_check_offset > kStackLimitSlackForDeoptimizationInBytes) {
+      stack_cmp_reg = kScratchRegister;
+      leaq(stack_cmp_reg, Operand(rsp, -stack_check_offset));
+    }
+    cmpq(stack_cmp_reg,
+         StackLimitAsOperand(StackLimitKind::kInterruptStackLimit));
+
+    ZoneLabelRef deferred_call_stack_guard_return(this);
+    JumpToDeferredIf(
+        below_equal,
+        [](MaglevAssembler* masm, LazyDeoptInfo* stack_check_deopt,
+           ZoneLabelRef done, RegList register_inputs, int stack_check_offset) {
+          ASM_CODE_COMMENT_STRING(masm, "Stack/interrupt call");
+          __ PushAll(register_inputs);
+          // Push the frame size
+          __ Push(Immediate(Smi::FromInt(stack_check_offset)));
+          __ CallRuntime(Runtime::kStackGuardWithGap, 1);
+          stack_check_deopt->set_deopting_call_return_pc(
+              __ pc_offset_for_safepoint());
+          __ code_gen_state()->PushLazyDeopt(stack_check_deopt);
+          masm->safepoint_table_builder()->DefineSafepoint(masm);
+          __ PopAll(register_inputs);
+          __ jmp(*done);
+        },
+        graph->function_entry_stack_check()->lazy_deopt_info(),
+        deferred_call_stack_guard_return, graph->register_inputs(),
+        stack_check_offset);
+    bind(*deferred_call_stack_guard_return);
+  }
 }
 
 void MaglevAssembler::MaybeEmitDeoptBuiltinsCall(size_t eager_deopt_count,
                                                  Label* eager_deopt_entry,
                                                  size_t lazy_deopt_count,
                                                  Label* lazy_deopt_entry) {}
+
+void MaglevAssembler::StringLength(Register result, Register string) {
+  if (v8_flags.debug_code) {
+    // Check if {string} is a string.
+    AssertNotSmi(string);
+    LoadMap(kScratchRegister, string);
+    CmpInstanceTypeRange(kScratchRegister, kScratchRegister, FIRST_STRING_TYPE,
+                         LAST_STRING_TYPE);
+    Check(below_equal, AbortReason::kUnexpectedValue);
+  }
+  movl(result, FieldOperand(string, String::kLengthOffset));
+}
 
 }  // namespace maglev
 }  // namespace internal

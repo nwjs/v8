@@ -319,6 +319,10 @@ WASM_COMPILED_EXEC_TEST(WasmBasicStruct) {
                        WASM_LOCAL_GET(j_local_index)),
        kExprEnd});
 
+  const byte kNullDereference = tester.DefineFunction(
+      tester.sigs.i_v(), {},
+      {WASM_STRUCT_GET(type_index, 0, WASM_REF_NULL(type_index)), kExprEnd});
+
   tester.CompileModule();
 
   tester.CheckResult(kGet1, 42);
@@ -331,6 +335,7 @@ WASM_COMPILED_EXEC_TEST(WasmBasicStruct) {
             .ToHandleChecked()
             ->IsWasmStruct());
   tester.CheckResult(kSet, -99);
+  tester.CheckHasThrown(kNullDereference);
 }
 
 // Test struct.get, ref.as_non_null and ref-typed globals.
@@ -386,7 +391,7 @@ WASM_COMPILED_EXEC_TEST(WasmRefAsNonNullSkipCheck) {
   tester.CompileModule();
   Handle<Object> result = tester.GetResultObject(kFunc).ToHandleChecked();
   // Without null checks, ref.as_non_null can actually return null.
-  CHECK(result->IsNull());
+  CHECK(result->IsWasmNull());
 }
 
 WASM_COMPILED_EXEC_TEST(WasmBrOnNull) {
@@ -1145,7 +1150,7 @@ WASM_COMPILED_EXEC_TEST(WasmArrayCopy) {
   {
     Handle<Object> result5 =
         tester.GetResultObject(kCopyRef, 5).ToHandleChecked();
-    CHECK(result5->IsNull());
+    CHECK(result5->IsWasmNull());
     for (int i = 6; i <= 9; i++) {
       Handle<Object> res =
           tester.GetResultObject(kCopyRef, i).ToHandleChecked();
@@ -1156,7 +1161,7 @@ WASM_COMPILED_EXEC_TEST(WasmArrayCopy) {
   }
   CHECK(tester.GetResultObject(kCopyRefOverlapping, 6)
             .ToHandleChecked()
-            ->IsNull());
+            ->IsWasmNull());
   Handle<Object> res0 =
       tester.GetResultObject(kCopyRefOverlapping, 0).ToHandleChecked();
   CHECK(res0->IsWasmArray());
@@ -1567,8 +1572,8 @@ WASM_COMPILED_EXEC_TEST(FunctionRefs) {
       Handle<WasmInternalFunction>::cast(result_cast_reference)->external(),
       tester.isolate()));
 
-  CHECK_EQ(cast_function->code().raw_instruction_start(),
-           cast_function_reference->code().raw_instruction_start());
+  CHECK_EQ(cast_function->code().InstructionStart(),
+           cast_function_reference->code().InstructionStart());
 
   tester.CheckResult(test_deprecated, 1);
   tester.CheckResult(test_fail_deprecated, 0);

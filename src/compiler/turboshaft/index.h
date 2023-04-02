@@ -10,6 +10,7 @@
 
 #include "src/base/logging.h"
 #include "src/compiler/turboshaft/fast-hash.h"
+#include "src/compiler/turboshaft/representations.h"
 
 namespace v8::internal::compiler::turboshaft {
 // Operations are stored in possibly muliple sequential storage slots.
@@ -67,13 +68,115 @@ class OpIndex {
   bool operator<=(OpIndex other) const { return offset_ <= other.offset_; }
   bool operator>=(OpIndex other) const { return offset_ >= other.offset_; }
 
- private:
   uint32_t offset_;
 
   static constexpr uint32_t kTurbofanNodeIdFlag = 1;
 };
 
 std::ostream& operator<<(std::ostream& os, OpIndex idx);
+
+// V<> represents an SSA-value that is parameterized with the values
+// representation (see `representations.h` for the different classes to pass as
+// the `Rep` argument). Prefer using V<> instead of a plain OpIndex where
+// possible.
+template <typename Rep>
+class V : public OpIndex {
+  static_assert(std::is_base_of_v<Any, Rep>,
+                "V<> requires a representation tag");
+
+ public:
+  constexpr V() : OpIndex() {}
+
+  // V<Rep> is implicitly constructible from plain OpIndex.
+  template <typename T, typename = std::enable_if_t<std::is_same_v<T, OpIndex>>>
+  V(T index) : OpIndex(index) {}  // NOLINT(runtime/explicit)
+
+  // V<Rep> is implicitly constructible from V<R> iff R == Rep or R is a
+  // subclass of Rep.
+  template <typename R, typename = std::enable_if_t<std::is_base_of_v<Rep, R>>>
+  V(V<R> index) : OpIndex(index) {}  // NOLINT(runtime/explicit)
+
+  template <typename R>
+  static V<Rep> Cast(V<R> index) {
+    return V<Rep>(OpIndex{index});
+  }
+};
+
+// V<Word32> is a specialization of V<> for Word32 representation in order to
+// allow implicit conversion from V<Word64>, which is valid in Turboshaft.
+template <>
+class V<Word32> : public OpIndex {
+ public:
+  constexpr V() : OpIndex() {}
+
+  template <typename T, typename = std::enable_if_t<std::is_same_v<T, OpIndex>>>
+  V(T index) : OpIndex(index) {}  // NOLINT(runtime/explicit)
+
+  template <typename R,
+            typename = std::enable_if_t<std::is_base_of_v<Word32, R>>>
+  V(V<R> index) : OpIndex(index) {}  // NOLINT(runtime/explicit)
+
+  V(V<Word64> index) : OpIndex(index) {}  // NOLINT(runtime/explicit)
+
+  template <typename R>
+  static V<Word32> Cast(V<R> index) {
+    return V<Word32>(OpIndex{index});
+  }
+};
+
+// ConstOrV<> is a generalization of V<> that allows constexpr values
+// (constants) to be passed implicitly. This allows reducers to write things
+// like
+//
+// __ Word32Add(value, 1)
+//
+// instead of having to write
+//
+// __ Word32Add(value, __ Word32Constant(1))
+//
+// which makes overall code more compact and easier to read. Functions need to
+// call `resolve` on the assembler in order to convert to V<> (which will then
+// construct the corresponding ConstantOp if the given ConstOrV<> holds a
+// constexpr value).
+// NOTICE: ConstOrV<Rep> can only be used for `Rep`s that provide a
+// `constexpr_type`.
+template <typename Rep, typename C = typename Rep::constexpr_type>
+class ConstOrV {
+  static_assert(std::is_base_of_v<Any, Rep>,
+                "ConstOrV<> requires a representation tag");
+
+ public:
+  using constant_type = C;
+
+  ConstOrV(constant_type value)  // NOLINT(runtime/explicit)
+      : constant_value_(value), value_() {}
+
+  // ConstOrV<Rep> is implicitly constructible from plain OpIndex.
+  template <typename T, typename = std::enable_if_t<std::is_same_v<T, OpIndex>>>
+  ConstOrV(T index)  // NOLINT(runtime/explicit)
+      : constant_value_(), value_(index) {}
+
+  // ConstOrV<Rep> is implicitly constructible from V<R> iff V<Rep> is
+  // constructible from V<R>.
+  template <typename R,
+            typename = std::enable_if_t<std::is_constructible_v<V<Rep>, V<R>>>>
+  ConstOrV(V<R> index)  // NOLINT(runtime/explicit)
+      : constant_value_(), value_(index) {}
+
+  bool is_constant() const { return constant_value_.has_value(); }
+  constant_type constant_value() const {
+    DCHECK(is_constant());
+    return *constant_value_;
+  }
+  V<Rep> value() const {
+    DCHECK(!is_constant());
+    return value_;
+  }
+
+ private:
+  base::Optional<constant_type> constant_value_;
+  V<Rep> value_;
+};
 
 template <>
 struct fast_hash<OpIndex> {
