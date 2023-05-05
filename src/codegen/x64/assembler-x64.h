@@ -530,7 +530,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // This sets the branch destination (which is in the instruction on x64).
   // This is for calls and branches within generated code.
   inline static void deserialization_set_special_target_at(
-      Address instruction_payload, InstructionStream code, Address target);
+      Address instruction_payload, Code code, Address target);
 
   // Get the size of the special target encoded at 'instruction_payload'.
   inline static int deserialization_special_target_size(
@@ -1591,8 +1591,20 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   void vcvtdq2pd(XMMRegister dst, XMMRegister src) {
     vinstr(0xe6, dst, xmm0, src, kF3, k0F, kWIG);
   }
+  void vcvtdq2pd(YMMRegister dst, XMMRegister src) {
+    vinstr(0xe6, dst, xmm0, src, kF3, k0F, kWIG, AVX);
+  }
+  void vcvtdq2pd(YMMRegister dst, Operand src) {
+    vinstr(0xe6, dst, xmm0, src, kF3, k0F, kWIG, AVX);
+  }
   void vcvttps2dq(XMMRegister dst, XMMRegister src) {
     vinstr(0x5b, dst, xmm0, src, kF3, k0F, kWIG);
+  }
+  void vcvttps2dq(YMMRegister dst, YMMRegister src) {
+    vinstr(0x5b, dst, ymm0, src, kF3, k0F, kWIG, AVX);
+  }
+  void vcvttps2dq(YMMRegister dst, Operand src) {
+    vinstr(0x5b, dst, ymm0, src, kF3, k0F, kWIG, AVX);
   }
   void vcvtlsi2sd(XMMRegister dst, XMMRegister src1, Register src2) {
     XMMRegister isrc2 = XMMRegister::from_code(src2.code());

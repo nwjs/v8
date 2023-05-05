@@ -48,8 +48,7 @@ CodeSerializer::CodeSerializer(Isolate* isolate, uint32_t source_hash)
 
 // static
 ScriptCompiler::CachedData* CodeSerializer::Serialize(
-    Handle<SharedFunctionInfo> info) {
-  Isolate* isolate = info->GetIsolate();
+    Isolate* isolate, Handle<SharedFunctionInfo> info) {
   TRACE_EVENT_CALL_STATS_SCOPED(isolate, "v8", "V8.Execute");
   NestedTimedHistogramScope histogram_timer(
       isolate->counters()->compile_serialize());
@@ -277,7 +276,7 @@ void CreateInterpreterDataForDeserializedCode(Isolate* isolate,
     interpreter_data->set_bytecode_array(info->GetBytecodeArray(isolate));
     interpreter_data->set_interpreter_trampoline(*code);
     if (info->HasBaselineCode()) {
-      FromCode(info->baseline_code(kAcquireLoad))
+      info->baseline_code(kAcquireLoad)
           .set_bytecode_or_interpreter_data(*interpreter_data);
     } else {
       info->set_interpreter_data(*interpreter_data);

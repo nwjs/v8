@@ -422,7 +422,10 @@ class String : public TorqueGeneratedString<String, Name> {
       v8::String::ExternalStringResource* resource);
   V8_EXPORT_PRIVATE bool MakeExternal(
       v8::String::ExternalOneByteStringResource* resource);
+  // TODO(pthier, v8:13785): Remove once v8::String::CanMakeExternal without
+  // encoding is removed.
   bool SupportsExternalization();
+  bool SupportsExternalization(v8::String::Encoding);
 
   // Conversion.
   // "array index": an index allowed by the ES spec for JSArrays.
@@ -933,6 +936,8 @@ class SlicedString : public TorqueGeneratedSlicedString<SlicedString, String> {
 class ExternalString
     : public TorqueGeneratedExternalString<ExternalString, String> {
  public:
+  class BodyDescriptor;
+
   DECL_VERIFIER(ExternalString)
 
   // Size of uncached external strings.
@@ -999,8 +1004,6 @@ class ExternalOneByteString
   inline uint8_t Get(int index, PtrComprCageBase cage_base,
                      const SharedStringAccessGuardIfNeeded& access_guard) const;
 
-  class BodyDescriptor;
-
   static_assert(kSize == kSizeOfAllExternalStrings);
 
   TQ_OBJECT_CONSTRUCTORS(ExternalOneByteString)
@@ -1045,8 +1048,6 @@ class ExternalTwoByteString
 
   // For regexp code.
   inline const uint16_t* ExternalTwoByteStringGetData(unsigned start);
-
-  class BodyDescriptor;
 
   static_assert(kSize == kSizeOfAllExternalStrings);
 

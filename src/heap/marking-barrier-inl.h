@@ -19,7 +19,7 @@ void MarkingBarrier::MarkValue(HeapObject host, HeapObject value) {
   DCHECK(IsCurrentMarkingBarrier(host));
   DCHECK(is_activated_ || shared_heap_worklist_.has_value());
 
-  DCHECK_IMPLIES(!value.InSharedWritableHeap() || is_shared_space_isolate_,
+  DCHECK_IMPLIES(!value.InWritableSharedSpace() || is_shared_space_isolate_,
                  !marking_state_.IsImpossible(value));
 
   // Host may have an impossible markbit pattern if manual allocation folding
@@ -39,18 +39,18 @@ void MarkingBarrier::MarkValue(HeapObject host, HeapObject value) {
       return;
     }
 
-    if (host.InSharedWritableHeap()) {
+    if (host.InWritableSharedSpace()) {
       // Invoking shared marking barrier when storing into shared objects.
       MarkValueShared(value);
       return;
-    } else if (value.InSharedWritableHeap()) {
+    } else if (value.InWritableSharedSpace()) {
       // No marking needed when storing shared objects in local objects.
       return;
     }
   }
 
-  DCHECK_IMPLIES(host.InSharedWritableHeap(), is_shared_space_isolate_);
-  DCHECK_IMPLIES(value.InSharedWritableHeap(), is_shared_space_isolate_);
+  DCHECK_IMPLIES(host.InWritableSharedSpace(), is_shared_space_isolate_);
+  DCHECK_IMPLIES(value.InWritableSharedSpace(), is_shared_space_isolate_);
 
   DCHECK(is_activated_);
   MarkValueLocal(value);
@@ -58,14 +58,14 @@ void MarkingBarrier::MarkValue(HeapObject host, HeapObject value) {
 
 void MarkingBarrier::MarkValueShared(HeapObject value) {
   // Value is either in read-only space or shared heap.
-  DCHECK(value.InSharedHeap());
+  DCHECK(value.InAnySharedSpace());
 
   // We should only reach this on client isolates (= worker isolates).
   DCHECK(!is_shared_space_isolate_);
   DCHECK(shared_heap_worklist_.has_value());
 
   // Mark shared object and push it onto shared heap worklist.
-  if (marking_state_.WhiteToGrey(value)) {
+  if (marking_state_.TryMark(value)) {
     shared_heap_worklist_->Push(value);
   }
 }
@@ -112,11 +112,11 @@ bool MarkingBarrier::IsCompacting(HeapObject object) const {
     return true;
   }
 
-  return shared_heap_worklist_.has_value() && object.InSharedWritableHeap();
+  return shared_heap_worklist_.has_value() && object.InWritableSharedSpace();
 }
 
 bool MarkingBarrier::WhiteToGreyAndPush(HeapObject obj) {
-  if (marking_state_.WhiteToGrey(obj)) {
+  if (marking_state_.TryMark(obj)) {
     current_worklist_->Push(obj);
     return true;
   }

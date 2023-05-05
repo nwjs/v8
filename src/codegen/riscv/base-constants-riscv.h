@@ -17,8 +17,9 @@
 #define UNIMPLEMENTED_RISCV()
 #endif
 
-#define UNSUPPORTED_RISCV() \
-  v8::internal::PrintF("Unsupported instruction %d.\n", __LINE__)
+#define UNSUPPORTED_RISCV()                                        \
+  v8::internal::PrintF("Unsupported instruction %d.\n", __LINE__); \
+  UNIMPLEMENTED();
 
 enum Endianness { kLittle, kBig };
 
@@ -54,9 +55,9 @@ const uint32_t kLessSignificantWordInDoublewordOffset = 4;
 namespace v8 {
 namespace internal {
 using Opcode = uint32_t;
+
 // Actual value of root register is offset from the root array's start
 // to take advantage of negative displacement values.
-// TODO(sigurds): Choose best value.
 constexpr int kRootRegisterBias = 256;
 
 #define RVV_LMUL(V) \
@@ -312,8 +313,17 @@ const uint32_t kRvcBImm8Mask = (((1 << 5) - 1) << 2) | (((1 << 3) - 1) << 10);
 
 // for RVV extension
 constexpr int kRvvELEN = 64;
+#ifdef RVV_VLEN
+constexpr int kRvvVLEN = RVV_VLEN;
+// TODO(riscv): support rvv 256/512/1024
+static_assert(
+    kRvvVLEN == 128,
+    "RVV extension only supports 128bit wide VLEN at current RISC-V backend.");
+#else
 constexpr int kRvvVLEN = 128;
+#endif
 constexpr int kRvvSLEN = kRvvVLEN;
+
 const int kRvvFunct6Shift = 26;
 const int kRvvFunct6Bits = 6;
 const uint32_t kRvvFunct6Mask =

@@ -18,10 +18,12 @@
 #include "src/numbers/conversions.h"
 #include "src/objects/arguments.h"
 #include "src/objects/heap-number-inl.h"
+#include "src/objects/heap-object.h"
 #include "src/objects/oddball.h"
 
 // Has to be the last include (doesn't have include guards)
 #include "src/objects/object-macros.h"
+#include "src/objects/string.h"
 
 namespace v8 {
 
@@ -466,8 +468,55 @@ Object TranslatedValue::GetRawValue() const {
 
   // Otherwise, do a best effort to get the value without allocation.
   switch (kind()) {
-    case kTagged:
-      return raw_literal();
+    case kTagged: {
+      Object object = raw_literal();
+      if (object.IsSlicedString()) {
+        // If {object} is a sliced string of length smaller than
+        // SlicedString::kMinLength, then trim the underlying SeqString and
+        // return it. This assumes that such sliced strings are only built by
+        // the fast string builder optimization of Turbofan's
+        // StringBuilderOptimizer/EffectControlLinearizer.
+        SlicedString string = SlicedString::cast(object);
+        if (string.length() < SlicedString::kMinLength) {
+          String backing_store = string.parent();
+          CHECK(backing_store.IsSeqString());
+
+          // Creating filler at the end of the backing store if needed.
+          int string_size =
+              backing_store.IsSeqOneByteString()
+                  ? SeqOneByteString::SizeFor(backing_store.length())
+                  : SeqTwoByteString::SizeFor(backing_store.length());
+          int needed_size = backing_store.IsSeqOneByteString()
+                                ? SeqOneByteString::SizeFor(string.length())
+                                : SeqTwoByteString::SizeFor(string.length());
+          if (needed_size < string_size) {
+            Address new_end = backing_store.address() + needed_size;
+            isolate()->heap()->CreateFillerObjectAt(
+                new_end, (string_size - needed_size));
+          }
+
+          // Updating backing store's length, effectively trimming it.
+          backing_store.set_length(string.length());
+
+          // Zeroing the padding bytes of {backing_store}.
+          SeqString::DataAndPaddingSizes sz =
+              SeqString::cast(backing_store).GetDataAndPaddingSizes();
+          auto padding =
+              reinterpret_cast<char*>(backing_store.address() + sz.data_size);
+          for (int i = 0; i < sz.padding_size; ++i) {
+            padding[i] = 0;
+          }
+
+          // Overwriting {string} with a filler, so that we don't leave around a
+          // potentially-too-small SlicedString.
+          isolate()->heap()->CreateFillerObjectAt(string.address(),
+                                                  SlicedString::kSize);
+
+          return backing_store;
+        }
+      }
+      return object;
+    }
 
     case kInt32: {
       bool is_smi = Smi::IsValid(int32_value());
@@ -777,10 +826,9 @@ int TranslatedFrame::GetValueCount() {
   UNREACHABLE();
 }
 
-void TranslatedFrame::Handlify() {
+void TranslatedFrame::Handlify(Isolate* isolate) {
   if (!raw_shared_info_.is_null()) {
-    shared_info_ = Handle<SharedFunctionInfo>(raw_shared_info_,
-                                              raw_shared_info_.GetIsolate());
+    shared_info_ = handle(raw_shared_info_, isolate);
     raw_shared_info_ = SharedFunctionInfo();
   }
   for (auto& value : values_) {
@@ -827,7 +875,7 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
       int height = iterator->NextOperand();
       if (trace_file != nullptr) {
         std::unique_ptr<char[]> name = shared_info.DebugNameCStr();
-        PrintF(trace_file, "  reading arguments adaptor frame %s", name.get());
+        PrintF(trace_file, "  reading inlined arguments frame %s", name.get());
         PrintF(trace_file, " => height=%d; inputs:\n", height);
       }
       return TranslatedFrame::InlinedExtraArguments(shared_info, height);
@@ -1532,11 +1580,12 @@ void TranslatedState::Init(Isolate* isolate, Address input_frame_pointer,
 }
 
 void TranslatedState::Prepare(Address stack_frame_pointer) {
-  for (auto& frame : frames_) frame.Handlify();
+  for (auto& frame : frames_) {
+    frame.Handlify(isolate());
+  }
 
   if (!feedback_vector_.is_null()) {
-    feedback_vector_handle_ =
-        Handle<FeedbackVector>(feedback_vector_, isolate());
+    feedback_vector_handle_ = handle(feedback_vector_, isolate());
     feedback_vector_ = FeedbackVector();
   }
   stack_frame_pointer_ = stack_frame_pointer;

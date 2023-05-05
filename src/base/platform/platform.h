@@ -654,13 +654,21 @@ class V8_BASE_EXPORT Stack {
     constexpr size_t kAsanRealFrameOffsetBytes = 32;
     void* real_frame = __asan_addr_is_in_fake_stack(
         __asan_get_current_fake_stack(), slot, nullptr, nullptr);
-    return real_frame
-               ? (static_cast<char*>(real_frame) + kAsanRealFrameOffsetBytes)
-               : slot;
+    return real_frame ? StackSlot(static_cast<char*>(real_frame) +
+                                  kAsanRealFrameOffsetBytes)
+                      : slot;
 #endif  // V8_USE_ADDRESS_SANITIZER
     return slot;
   }
+
+ private:
+  // Returns the current thread stack start pointer.
+  static Stack::StackSlot ObtainCurrentThreadStackStart();
 };
+
+#if V8_HAS_PTHREAD_JIT_WRITE_PROTECT
+V8_BASE_EXPORT void SetJitWriteProtected(int enable);
+#endif
 
 }  // namespace base
 }  // namespace v8

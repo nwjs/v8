@@ -46,6 +46,15 @@ class Symbol;
   V(HeapNumber, smi_min_value, SmiMinValue)               \
   V(HeapNumber, smi_max_value_plus_one, SmiMaxValuePlusOne)
 
+// Adapts one INTERNALIZED_STRING_LIST_GENERATOR entry to
+// the ROOT_LIST-compatible entry
+#define INTERNALIZED_STRING_LIST_ADAPTER(V, name, ...) V(String, name, name)
+
+// Produces (String, name, CamelCase) entries
+#define EXTRA_IMPORTANT_INTERNALIZED_STRING_ROOT_LIST(V) \
+  EXTRA_IMPORTANT_INTERNALIZED_STRING_LIST_GENERATOR(    \
+      INTERNALIZED_STRING_LIST_ADAPTER, V)
+
 // Defines all the read-only roots in Heap.
 #define STRONG_READ_ONLY_ROOT_LIST(V)                                          \
   /* Cluster the most popular ones in a few cache lines here at the top.    */ \
@@ -60,7 +69,7 @@ class Symbol;
   V(Oddball, null_value, NullValue)                                            \
   V(Oddball, true_value, TrueValue)                                            \
   V(Oddball, false_value, FalseValue)                                          \
-  V(String, empty_string, empty_string)                                        \
+  EXTRA_IMPORTANT_INTERNALIZED_STRING_ROOT_LIST(V)                             \
   V(Map, meta_map, MetaMap)                                                    \
   V(Map, byte_array_map, ByteArrayMap)                                         \
   V(Map, fixed_array_map, FixedArrayMap)                                       \
@@ -357,13 +366,12 @@ class Symbol;
     ConstructStubInvokeDeoptPCOffset)                                          \
   V(Smi, interpreter_entry_return_pc_offset, InterpreterEntryReturnPCOffset)
 
-// Adapts one INTERNALIZED_STRING_LIST_GENERATOR entry to
-// the ROOT_LIST-compatible entry
-#define INTERNALIZED_STRING_LIST_ADAPTER(V, name, ...) V(String, name, name)
-
 // Produces (String, name, CamelCase) entries
-#define INTERNALIZED_STRING_ROOT_LIST(V) \
-  INTERNALIZED_STRING_LIST_GENERATOR(INTERNALIZED_STRING_LIST_ADAPTER, V)
+#define INTERNALIZED_STRING_ROOT_LIST(V)            \
+  IMPORTANT_INTERNALIZED_STRING_LIST_GENERATOR(     \
+      INTERNALIZED_STRING_LIST_ADAPTER, V)          \
+  NOT_IMPORTANT_INTERNALIZED_STRING_LIST_GENERATOR( \
+      INTERNALIZED_STRING_LIST_ADAPTER, V)
 
 // Adapts one XXX_SYMBOL_LIST_GENERATOR entry to the ROOT_LIST-compatible entry
 #define SYMBOL_ROOT_LIST_ADAPTER(V, name, ...) V(Symbol, name, name)
@@ -630,8 +638,9 @@ class ReadOnlyRoots {
   // handle otherwise.
   Handle<HeapNumber> FindHeapNumber(double value);
 
-  // Get the address of a given read-only root index, without type checks.
-  V8_INLINE Address at(RootIndex root_index) const;
+  V8_INLINE Address address_at(RootIndex root_index) const;
+  V8_INLINE Object object_at(RootIndex root_index) const;
+  V8_INLINE Handle<Object> handle_at(RootIndex root_index) const;
 
   // Check if a slot is initialized yet. Should only be neccessary for code
   // running during snapshot creation.

@@ -577,8 +577,6 @@ class BaseTestRunner(object):
             False,
         "gc_stress":
             False,
-        "gcov_coverage":
-            self.build_config.gcov_coverage,
         "gdbjit":
             self.build_config.gdbjit,
         # TODO(jgruber): Note this rename from maglev to has_maglev is required
@@ -594,6 +592,8 @@ class BaseTestRunner(object):
             self.options.isolates,
         "is_clang":
             self.build_config.is_clang,
+        "is_clang_coverage":
+            self.build_config.is_clang_coverage,
         "is_debug":
             self.build_config.is_debug,
         "is_DEBUG_defined":
@@ -602,6 +602,8 @@ class BaseTestRunner(object):
             self.build_config.is_full_debug,
         "interrupt_fuzzer":
             False,
+        "jitless_build_mode":
+            self.build_config.jitless_build_mode,
         "mips_arch_variant":
             self.build_config.mips_arch_variant,
         "mode":

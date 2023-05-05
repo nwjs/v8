@@ -3604,8 +3604,21 @@ Reduction JSCallReducer::ReduceCallWasmFunction(
   has_wasm_calls_ = true;
 
   const wasm::WasmModule* wasm_module = shared.wasm_module();
-  const Operator* op =
-      javascript()->CallWasm(wasm_module, wasm_signature, p.feedback());
+  if (wasm_module_for_inlining_ == nullptr) {
+    wasm_module_for_inlining_ = wasm_module;
+  }
+
+  wasm::NativeModule* native_module = nullptr;
+  if (shared.object()->HasWasmExportedFunctionData()) {
+    native_module = shared.object()
+                        ->wasm_exported_function_data()
+                        .instance()
+                        .module_object()
+                        .native_module();
+  }
+  const Operator* op = javascript()->CallWasm(wasm_module, wasm_signature,
+                                              shared.wasm_function_index(),
+                                              native_module, p.feedback());
 
   // Remove additional inputs
   size_t actual_arity = n.ArgumentCount();
@@ -7237,6 +7250,10 @@ Reduction JSCallReducer::ReduceTypedArrayPrototypeToStringTag(Node* node) {
       simplified()->NumberSubtract(), receiver_elements_kind,
       jsgraph()->Constant(FIRST_FIXED_TYPED_ARRAY_ELEMENTS_KIND));
 
+  // To be converted into a switch by the ControlFlowOptimizer, the below
+  // code requires that TYPED_ARRAYS and RAB_GSAB_TYPED_ARRAYS are consecutive.
+  static_assert(LAST_FIXED_TYPED_ARRAY_ELEMENTS_KIND + 1 ==
+                FIRST_RAB_GSAB_FIXED_TYPED_ARRAY_ELEMENTS_KIND);
 #define TYPED_ARRAY_CASE(Type, type, TYPE, ctype)                      \
   do {                                                                 \
     Node* check = graph()->NewNode(                                    \
@@ -7251,6 +7268,7 @@ Reduction JSCallReducer::ReduceTypedArrayPrototypeToStringTag(Node* node) {
     control = graph()->NewNode(common()->IfFalse(), control);          \
   } while (false);
   TYPED_ARRAYS(TYPED_ARRAY_CASE)
+  RAB_GSAB_TYPED_ARRAYS(TYPED_ARRAY_CASE)
 #undef TYPED_ARRAY_CASE
 
   values.push_back(jsgraph()->UndefinedConstant());
@@ -7363,9 +7381,9 @@ Reduction JSCallReducer::ReduceTypedArrayPrototypeLength(Node* node) {
     return inference.NoChange();
   }
 
-  inference.RelyOnMapsPreferStability(dependencies(), jsgraph(), &effect,
-                                      control,
-                                      CallParametersOf(node->op()).feedback());
+  if (!inference.RelyOnMapsViaStability(dependencies())) {
+    return inference.NoChange();
+  }
 
   JSCallReducerAssembler a(this, node);
   TNode<JSTypedArray> typed_array =

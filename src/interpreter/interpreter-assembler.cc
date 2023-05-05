@@ -165,6 +165,13 @@ void InterpreterAssembler::SetAccumulator(TNode<Object> value) {
   accumulator_ = value;
 }
 
+void InterpreterAssembler::ClobberAccumulator(TNode<Object> clobber_value) {
+  DCHECK(Bytecodes::ClobbersAccumulator(bytecode_));
+  implicit_register_use_ =
+      implicit_register_use_ | ImplicitRegisterUse::kClobberAccumulator;
+  accumulator_ = clobber_value;
+}
+
 TNode<Context> InterpreterAssembler::GetContext() {
   return CAST(LoadRegister(Register::current_context()));
 }
@@ -786,12 +793,17 @@ template V8_EXPORT_PRIVATE void InterpreterAssembler::CallJSAndDispatch(
 
 void InterpreterAssembler::CallJSWithSpreadAndDispatch(
     TNode<Object> function, TNode<Context> context, const RegListNodePair& args,
-    TNode<UintPtrT> slot_id, TNode<HeapObject> maybe_feedback_vector) {
+    TNode<UintPtrT> slot_id) {
   DCHECK(Bytecodes::MakesCallAlongCriticalPath(bytecode_));
   DCHECK_EQ(Bytecodes::GetReceiverMode(bytecode_), ConvertReceiverMode::kAny);
+
+#ifndef V8_JITLESS
+  TNode<HeapObject> maybe_feedback_vector = LoadFeedbackVector();
   LazyNode<Object> receiver = [=] { return LoadRegisterAtOperandIndex(1); };
   CollectCallFeedback(function, receiver, context, maybe_feedback_vector,
                       slot_id);
+#endif  // !V8_JITLESS
+
   Comment("call using CallWithSpread builtin");
   Callable callable = CodeFactory::InterpreterPushArgsThenCall(
       isolate(), ConvertReceiverMode::kAny,
@@ -853,15 +865,16 @@ TNode<Object> InterpreterAssembler::Construct(
 
 TNode<Object> InterpreterAssembler::ConstructWithSpread(
     TNode<Object> target, TNode<Context> context, TNode<Object> new_target,
-    const RegListNodePair& args, TNode<UintPtrT> slot_id,
-    TNode<HeapObject> maybe_feedback_vector) {
+    const RegListNodePair& args, TNode<UintPtrT> slot_id) {
   // TODO(bmeurer): Unify this with the Construct bytecode feedback
   // above once we have a way to pass the AllocationSite to the Array
   // constructor _and_ spread the last argument at the same time.
   DCHECK(Bytecodes::MakesCallAlongCriticalPath(bytecode_));
-  Label extra_checks(this, Label::kDeferred), construct(this);
-  GotoIf(IsUndefined(maybe_feedback_vector), &construct);
 
+#ifndef V8_JITLESS
+  Label extra_checks(this, Label::kDeferred), construct(this);
+  TNode<HeapObject> maybe_feedback_vector = LoadFeedbackVector();
+  GotoIf(IsUndefined(maybe_feedback_vector), &construct);
   TNode<FeedbackVector> feedback_vector = CAST(maybe_feedback_vector);
 
   // Increment the call count.
@@ -965,6 +978,7 @@ TNode<Object> InterpreterAssembler::ConstructWithSpread(
   }
 
   BIND(&construct);
+#endif  // !V8_JITLESS
   Comment("call using ConstructWithSpread builtin");
   Callable callable = CodeFactory::InterpreterPushArgsThenConstruct(
       isolate(), InterpreterPushArgsMode::kWithFinalSpread);
@@ -1360,6 +1374,7 @@ void InterpreterAssembler::OnStackReplacement(
   // 2) Presence of cached OSR Sparkplug code.
   // 3) The OSR urgency exceeds the current loop depth - in that case, trigger
   //    a Turbofan OSR compilation.
+
   TVARIABLE(Object, maybe_target_code, SmiConstant(0));
   Label osr_to_turbofan(this), osr_to_sparkplug(this);
 

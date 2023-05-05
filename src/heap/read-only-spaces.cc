@@ -28,7 +28,8 @@ namespace v8 {
 namespace internal {
 
 void CopyAndRebaseRoots(Address* src, Address* dst, Address new_base) {
-  Address src_base = GetIsolateRootAddress(src[0]);
+  Address src_base =
+      V8HeapCompressionScheme::GetPtrComprCageBaseAddress(src[0]);
   for (size_t i = 0; i < ReadOnlyHeap::kEntriesCount; ++i) {
     dst[i] = src[i] - src_base + new_base;
   }
@@ -190,7 +191,7 @@ ReadOnlyHeap* PointerCompressedReadOnlyArtifacts::GetReadOnlyHeapForIsolate(
     Address original_address = original_object.ptr();
     Address new_address =
         isolate_root +
-        V8HeapCompressionScheme::CompressTagged(original_address);
+        V8HeapCompressionScheme::CompressObject(original_address);
     Object new_object = Object(new_address);
     cache.push_back(new_object);
   }
@@ -241,7 +242,7 @@ void PointerCompressedReadOnlyArtifacts::Initialize(
     shared_memory_.push_back(std::move(shared_memory));
     // This is just CompressTagged but inlined so it will always compile.
     Tagged_t compressed_address =
-        V8HeapCompressionScheme::CompressTagged(page->address());
+        V8HeapCompressionScheme::CompressAny(page->address());
     page_offsets_.push_back(compressed_address);
 
     // 3. Update the accounting stats so the allocated bytes are for the new
@@ -441,12 +442,7 @@ class ReadOnlySpaceObjectIterator : public ObjectIterator {
       cur_addr_ += ALIGN_TO_ALLOCATION_ALIGNMENT(obj_size);
       DCHECK_LE(cur_addr_, cur_end_);
       if (!obj.IsFreeSpaceOrFiller()) {
-        if (obj.IsInstructionStream()) {
-          DCHECK(InstructionStream::cast(obj).is_builtin());
-          DCHECK_CODEOBJECT_SIZE(obj_size, space_);
-        } else {
-          DCHECK_OBJECT_SIZE(obj_size);
-        }
+        DCHECK_OBJECT_SIZE(obj_size);
         return obj;
       }
     }

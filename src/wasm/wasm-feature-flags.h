@@ -29,6 +29,10 @@
   /* V8 side owner: jkummerow */                                               \
   V(gc, "garbage collection", false)                                           \
                                                                                \
+  /* Inlining of small wasm GC functions into JavaScript */                    \
+  /* V8 side owner: mliedtke */                                                \
+  V(js_inlining, "inline small wasm functions into JS", false)                 \
+                                                                               \
   /* Non-specified, V8-only experimental additions to the GC proposal */       \
   /* V8 side owner: jkummerow */                                               \
   V(assume_ref_cast_succeeds,                                                  \
@@ -41,18 +45,10 @@
     false)                                                                     \
   V(skip_bounds_checks, "skip array bounds checks (unsafe)", false)            \
                                                                                \
-  /* Not user-visible, defined here so an Origin Trial can control it.*/       \
-  V(inlining, "enable wasm-into-wasm inlining", false)                         \
-                                                                               \
   /* Typed function references proposal. */                                    \
   /* Official proposal: https://github.com/WebAssembly/function-references */  \
   /* V8 side owner: manoskouk */                                               \
   V(typed_funcref, "typed function references", false)                         \
-                                                                               \
-  /* Relaxed SIMD proposal. */                                                 \
-  /* https://github.com/WebAssembly/relaxed-simd */                            \
-  /* V8 side owner: zhin */                                                    \
-  V(relaxed_simd, "relaxed simd", false)                                       \
                                                                                \
   /* Branch Hinting proposal. */                                               \
   /* https://github.com/WebAssembly/branch-hinting */                          \
@@ -63,11 +59,6 @@
   /* https://github.com/WebAssembly/stack-switching */                         \
   /* V8 side owner: thibaudm, fgm */                                           \
   V(stack_switching, "stack switching", false)                                 \
-                                                                               \
-  /* Extended Constant Expressions Proposal. */                                \
-  /* https://github.com/WebAssembly/extended-const */                          \
-  /* V8 side owner: manoskouk */                                               \
-  V(extended_const, "extended constant expressions", false)                    \
                                                                                \
   /* Reference-Typed Strings Proposal. */                                      \
   /* https://github.com/WebAssembly/stringref */                               \
@@ -92,7 +83,24 @@
   /* Memory64 proposal. */                                                     \
   /* https://github.com/WebAssembly/memory64 */                                \
   /* V8 side owner: clemensb */                                                \
-  V(memory64, "memory64", false)
+  V(memory64, "memory64", false)                                               \
+                                                                               \
+  /* Relaxed SIMD proposal. */                                                 \
+  /* https://github.com/WebAssembly/relaxed-simd */                            \
+  /* V8 side owner: gdeepti */                                                 \
+  V(relaxed_simd, "relaxed simd", false)                                       \
+                                                                               \
+  /* Extended Constant Expressions Proposal. */                                \
+  /* https://github.com/WebAssembly/extended-const */                          \
+  /* V8 side owner: manoskouk */                                               \
+  /* Staged in v11.3. */                                                       \
+  V(extended_const, "extended constant expressions", false)                    \
+                                                                               \
+  /* Not user-visible, defined here so an Origin Trial can control it. */      \
+  /* V8 side owner: manoskouk, clemensb */                                     \
+  /* Staged in v11.3 */                                                        \
+  /* Launch bug: https://crbug.com/1424350 */                                  \
+  V(inlining, "wasm-into-wasm inlining", false)
 
 // #############################################################################
 // Shipped features (enabled by default). Remove the feature flag once they hit

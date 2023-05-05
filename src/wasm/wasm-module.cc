@@ -599,8 +599,8 @@ Handle<JSArray> GetCustomSections(Isolate* isolate,
   return array_object;
 }
 
-// Get the source position from a given function index and byte offset,
-// for either asm.js or pure Wasm modules.
+// Get the source position from a given function index and wire bytes offset
+// (relative to the function entry), for either asm.js or pure Wasm modules.
 int GetSourcePosition(const WasmModule* module, uint32_t func_index,
                       uint32_t byte_offset, bool is_at_number_conversion) {
   DCHECK_EQ(is_asmjs_module(module),
@@ -666,9 +666,8 @@ size_t GetWireBytesHash(base::Vector<const uint8_t> wire_bytes) {
 }
 
 int NumFeedbackSlots(const WasmModule* module, int func_index) {
-  // TODO(clemensb): Avoid the mutex once this ships, or at least switch to a
-  // shared mutex.
-  base::MutexGuard type_feedback_guard{&module->type_feedback.mutex};
+  base::SharedMutexGuard<base::kShared> type_feedback_guard{
+      &module->type_feedback.mutex};
   auto it = module->type_feedback.feedback_for_function.find(func_index);
   if (it == module->type_feedback.feedback_for_function.end()) return 0;
   // The number of call instructions is capped by max function size.

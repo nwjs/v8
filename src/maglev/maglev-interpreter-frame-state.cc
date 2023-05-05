@@ -285,7 +285,7 @@ ValueNode* FromInt32ToTagged(MaglevCompilationUnit& compilation_unit,
     int32_t constant = value->Cast<Int32Constant>()->value();
     return GetSmiConstant(compilation_unit, smi_constants, constant);
   } else if (value->Is<StringLength>() ||
-             value->Is<BuiltinStringPrototypeCharCodeAt>()) {
+             value->Is<BuiltinStringPrototypeCharCodeOrCodePointAt>()) {
     static_assert(String::kMaxLength <= kSmiMaxValue,
                   "String length must fit into a Smi");
     tagged = Node::New<UnsafeSmiTag>(compilation_unit.zone(), {value});
@@ -329,7 +329,8 @@ ValueNode* FromFloat64ToTagged(MaglevCompilationUnit& compilation_unit,
   DCHECK(!value->properties().is_conversion());
 
   // Create a tagged version, and insert it at the end of the predecessor.
-  ValueNode* tagged = Node::New<Float64Box>(compilation_unit.zone(), {value});
+  ValueNode* tagged =
+      Node::New<Float64ToTagged>(compilation_unit.zone(), {value});
 
   predecessor->nodes().Add(tagged);
   compilation_unit.RegisterNodeInGraphLabeller(tagged);

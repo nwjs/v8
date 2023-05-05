@@ -61,7 +61,7 @@ class IterateAndScavengePromotedObjectsVisitor final : public ObjectVisitor {
     VisitPointersImpl(host, start, end);
   }
 
-  V8_INLINE void VisitCodePointer(HeapObject host, CodeObjectSlot slot) final {
+  V8_INLINE void VisitCodePointer(Code host, CodeObjectSlot slot) final {
     CHECK(V8_EXTERNAL_CODE_SPACE_BOOL);
     // InstructionStream slots never appear in new space because
     // Code objects, the only object that can contain code pointers, are
@@ -69,17 +69,17 @@ class IterateAndScavengePromotedObjectsVisitor final : public ObjectVisitor {
     UNREACHABLE();
   }
 
-  V8_INLINE void VisitCodeTarget(InstructionStream host,
-                                 RelocInfo* rinfo) final {
+  V8_INLINE void VisitCodeTarget(RelocInfo* rinfo) final {
     InstructionStream target =
         InstructionStream::FromTargetAddress(rinfo->target_address());
-    HandleSlot(host, FullHeapObjectSlot(&target), target);
+    HandleSlot(rinfo->instruction_stream(), FullHeapObjectSlot(&target),
+               target);
   }
-  V8_INLINE void VisitEmbeddedPointer(InstructionStream host,
-                                      RelocInfo* rinfo) final {
-    PtrComprCageBase cage_base = host.main_cage_base();
+  V8_INLINE void VisitEmbeddedPointer(RelocInfo* rinfo) final {
+    PtrComprCageBase cage_base = GetPtrComprCageBase(rinfo->code());
     HeapObject heap_object = rinfo->target_object(cage_base);
-    HandleSlot(host, FullHeapObjectSlot(&heap_object), heap_object);
+    HandleSlot(rinfo->instruction_stream(), FullHeapObjectSlot(&heap_object),
+               heap_object);
   }
 
   inline void VisitEphemeron(HeapObject obj, int entry, ObjectSlot key,
@@ -154,7 +154,7 @@ class IterateAndScavengePromotedObjectsVisitor final : public ObjectVisitor {
           MemoryChunk::FromHeapObject(host), slot.address());
     }
 
-    if (target.InSharedWritableHeap()) {
+    if (target.InWritableSharedSpace()) {
       MemoryChunk* chunk = MemoryChunk::FromHeapObject(host);
       RememberedSet<OLD_TO_SHARED>::Insert<AccessMode::ATOMIC>(chunk,
                                                                slot.address());
@@ -515,7 +515,7 @@ void ScavengerCollector::IterateStackAndScavenge(
     survived_bytes_before +=
         scavenger->bytes_copied() + scavenger->bytes_promoted();
   }
-  heap_->IterateStackRoots(root_scavenge_visitor, Heap::ScanStackMode::kNone);
+  heap_->IterateStackRoots(root_scavenge_visitor);
   (*scavengers)[main_thread_id]->Process();
   size_t survived_bytes_after = 0;
   for (auto& scavenger : *scavengers) {
@@ -537,8 +537,12 @@ void ScavengerCollector::IterateStackAndScavenge(
 }
 
 void ScavengerCollector::SweepArrayBufferExtensions() {
+  DCHECK_EQ(0, heap_->new_lo_space()->Size());
   heap_->array_buffer_sweeper()->RequestSweep(
-      ArrayBufferSweeper::SweepingType::kYoung);
+      ArrayBufferSweeper::SweepingType::kYoung,
+      (heap_->new_space()->Size() == 0)
+          ? ArrayBufferSweeper::TreatAllYoungAsPromoted::kYes
+          : ArrayBufferSweeper::TreatAllYoungAsPromoted::kNo);
 }
 
 void ScavengerCollector::HandleSurvivingNewLargeObjects() {
@@ -553,7 +557,7 @@ void ScavengerCollector::HandleSurvivingNewLargeObjects() {
     // to meta-data like size during page promotion.
     object.set_map_word(map, kRelaxedStore);
 
-    if (is_compacting && marking_state->IsBlack(object) &&
+    if (is_compacting && marking_state->IsMarked(object) &&
         MarkCompactCollector::IsOnEvacuationCandidate(map)) {
       RememberedSet<OLD_TO_OLD>::Insert<AccessMode::ATOMIC>(
           MemoryChunk::FromHeapObject(object), object.map_slot().address());
@@ -654,7 +658,7 @@ void Scavenger::IterateAndScavengePromotedObject(HeapObject target, Map map,
   // the end of collection it would be a violation of the invariant to record
   // its slots.
   const bool record_slots =
-      is_compacting_ && heap()->atomic_marking_state()->IsBlack(target);
+      is_compacting_ && heap()->atomic_marking_state()->IsMarked(target);
 
   IterateAndScavengePromotedObjectsVisitor visitor(this, record_slots);
 
@@ -862,7 +866,7 @@ void Scavenger::CheckOldToNewSlotForSharedUntyped(MemoryChunk* chunk,
   HeapObject heap_object;
 
   if (object.GetHeapObject(&heap_object) &&
-      heap_object.InSharedWritableHeap()) {
+      heap_object.InWritableSharedSpace()) {
     RememberedSet<OLD_TO_SHARED>::Insert<AccessMode::ATOMIC>(chunk,
                                                              slot.address());
   }
@@ -875,7 +879,7 @@ void Scavenger::CheckOldToNewSlotForSharedTyped(MemoryChunk* chunk,
   HeapObject heap_object;
 
   if (new_target.GetHeapObject(&heap_object) &&
-      heap_object.InSharedWritableHeap()) {
+      heap_object.InWritableSharedSpace()) {
     const uintptr_t offset = slot_address - chunk->address();
     DCHECK_LT(offset, static_cast<uintptr_t>(TypedSlotSet::kMaxOffset));
 

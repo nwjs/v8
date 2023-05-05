@@ -21,6 +21,7 @@
 #include "src/base/macros.h"
 #include "src/base/vector.h"
 #include "src/builtins/builtins.h"
+#include "src/codegen/source-position.h"
 #include "src/common/code-memory-access.h"
 #include "src/handles/handles.h"
 #include "src/tasks/operations-barrier.h"
@@ -40,6 +41,7 @@ class Isolate;
 
 namespace wasm {
 
+class AssumptionsJournal;
 class DebugInfo;
 class NamesProvider;
 class NativeModule;
@@ -47,6 +49,7 @@ struct WasmCompilationResult;
 class WasmEngine;
 class WasmImportWrapperCache;
 struct WasmModule;
+enum class WellKnownImport : uint8_t;
 
 // Convenience macro listing all wasm runtime stubs. Note that the first few
 // elements of the list coincide with {compiler::TrapId}, order matters.
@@ -149,7 +152,7 @@ struct WasmModule;
   V(WasmStringViewIterAdvance)           \
   V(WasmStringViewIterRewind)            \
   V(WasmStringViewIterSlice)             \
-  V(WasmStringCompare)                   \
+  V(StringCompare)                       \
   V(WasmStringFromCodePoint)             \
   V(WasmStringHash)                      \
   V(WasmExternInternalize)
@@ -282,6 +285,10 @@ class V8_EXPORT_PRIVATE WasmCode final {
   base::Vector<const byte> source_positions() const {
     return {reloc_info().end(), static_cast<size_t>(source_positions_size_)};
   }
+  base::Vector<const byte> inlining_positions() const {
+    return {source_positions().end(),
+            static_cast<size_t>(inlining_positions_size_)};
+  }
 
   int index() const { return index_; }
   // Anonymous functions are functions that don't carry an index.
@@ -388,7 +395,10 @@ class V8_EXPORT_PRIVATE WasmCode final {
   static void DecrementRefCount(base::Vector<WasmCode* const>);
 
   // Returns the last source position before {offset}.
-  int GetSourcePositionBefore(int offset);
+  SourcePosition GetSourcePositionBefore(int code_offset);
+  int GetSourceOffsetBefore(int code_offset);
+
+  std::pair<int, SourcePosition> GetInliningPosition(int inlining_id) const;
 
   // Returns whether this code was generated for debugging. If this returns
   // {kForDebugging}, but {tier()} is not {kLiftoff}, then Liftoff compilation
@@ -416,19 +426,19 @@ class V8_EXPORT_PRIVATE WasmCode final {
            int code_comments_offset, int unpadded_binary_size,
            base::Vector<const byte> protected_instructions_data,
            base::Vector<const byte> reloc_info,
-           base::Vector<const byte> source_position_table, Kind kind,
+           base::Vector<const byte> source_position_table,
+           base::Vector<const byte> inlining_positions, Kind kind,
            ExecutionTier tier, ForDebugging for_debugging,
            bool frame_has_feedback_slot = false)
       : native_module_(native_module),
         instructions_(instructions.begin()),
-        flags_(KindField::encode(kind) | ExecutionTierField::encode(tier) |
-               ForDebuggingField::encode(for_debugging) |
-               FrameHasFeedbackSlotField::encode(frame_has_feedback_slot)),
-        meta_data_(ConcatenateBytes(
-            {protected_instructions_data, reloc_info, source_position_table})),
+        meta_data_(
+            ConcatenateBytes({protected_instructions_data, reloc_info,
+                              source_position_table, inlining_positions})),
         instructions_size_(instructions.length()),
         reloc_info_size_(reloc_info.length()),
         source_positions_size_(source_position_table.length()),
+        inlining_positions_size_(inlining_positions.length()),
         protected_instructions_size_(protected_instructions_data.length()),
         index_(index),
         constant_pool_offset_(constant_pool_offset),
@@ -437,7 +447,10 @@ class V8_EXPORT_PRIVATE WasmCode final {
         safepoint_table_offset_(safepoint_table_offset),
         handler_table_offset_(handler_table_offset),
         code_comments_offset_(code_comments_offset),
-        unpadded_binary_size_(unpadded_binary_size) {
+        unpadded_binary_size_(unpadded_binary_size),
+        flags_(KindField::encode(kind) | ExecutionTierField::encode(tier) |
+               ForDebuggingField::encode(for_debugging) |
+               FrameHasFeedbackSlotField::encode(frame_has_feedback_slot)) {
     DCHECK_LE(safepoint_table_offset, unpadded_binary_size);
     DCHECK_LE(handler_table_offset, unpadded_binary_size);
     DCHECK_LE(code_comments_offset, unpadded_binary_size);
@@ -474,7 +487,6 @@ class V8_EXPORT_PRIVATE WasmCode final {
 
   NativeModule* const native_module_ = nullptr;
   byte* const instructions_;
-  const uint8_t flags_;  // Bit field, see below.
   // {meta_data_} contains several byte vectors concatenated into one:
   //  - protected instructions data of size {protected_instructions_size_}
   //  - relocation info of size {reloc_info_size_}
@@ -484,6 +496,7 @@ class V8_EXPORT_PRIVATE WasmCode final {
   const int instructions_size_;
   const int reloc_info_size_;
   const int source_positions_size_;
+  const int inlining_positions_size_;
   const int protected_instructions_size_;
   const int index_;
   const int constant_pool_offset_;
@@ -500,6 +513,7 @@ class V8_EXPORT_PRIVATE WasmCode final {
   const int unpadded_binary_size_;
   int trap_handler_index_ = -1;
 
+  const uint8_t flags_;  // Bit field, see below.
   // Bits encoded in {flags_}:
   using KindField = base::BitField8<Kind, 0, 2>;
   using ExecutionTierField = KindField::Next<ExecutionTier, 2>;
@@ -518,14 +532,6 @@ class V8_EXPORT_PRIVATE WasmCode final {
   // machine code is freed.
   std::atomic<int> ref_count_{1};
 };
-
-// Check that {WasmCode} objects are sufficiently small. We create many of them,
-// often for rather small functions.
-// Increase the limit if needed, but first check if the size increase is
-// justified.
-#ifndef V8_GC_MOLE
-static_assert(sizeof(WasmCode) <= 88);
-#endif
 
 WasmCode::Kind GetCodeKind(const WasmCompilationResult& result);
 
@@ -620,7 +626,10 @@ class V8_EXPORT_PRIVATE NativeModule final {
   // {PublishCode} makes the code available to the system by entering it into
   // the code table and patching the jump table. It returns a raw pointer to the
   // given {WasmCode} object. Ownership is transferred to the {NativeModule}.
-  WasmCode* PublishCode(std::unique_ptr<WasmCode>);
+  // Returns {nullptr} if the {AssumptionsJournal} is non-nullptr and contains
+  // invalid assumptions.
+  WasmCode* PublishCode(std::unique_ptr<WasmCode>,
+                        AssumptionsJournal* = nullptr);
   std::vector<WasmCode*> PublishCode(base::Vector<std::unique_ptr<WasmCode>>);
 
   // ReinstallDebugCode does a subset of PublishCode: It installs the code in
@@ -647,11 +656,12 @@ class V8_EXPORT_PRIVATE NativeModule final {
       int code_comments_offset, int unpadded_binary_size,
       base::Vector<const byte> protected_instructions_data,
       base::Vector<const byte> reloc_info,
-      base::Vector<const byte> source_position_table, WasmCode::Kind kind,
+      base::Vector<const byte> source_position_table,
+      base::Vector<const byte> inlining_positions, WasmCode::Kind kind,
       ExecutionTier tier);
 
   // Adds anonymous code for testing purposes.
-  WasmCode* AddCodeForTesting(Handle<InstructionStream> code);
+  WasmCode* AddCodeForTesting(Handle<Code> code);
 
   // Allocates and initializes the {lazy_compile_table_} and initializes the
   // first jump table with jumps to the {lazy_compile_table_}.
@@ -662,9 +672,11 @@ class V8_EXPORT_PRIVATE NativeModule final {
   // jump table with trampolines accordingly.
   void UseLazyStubLocked(uint32_t func_index);
 
-  // Creates a snapshot of the current state of the code table. This is useful
+  // Creates a snapshot of the current state of the code table, along with the
+  // current import statuses that these code objects depend on. This is useful
   // to get a consistent view of the table (e.g. used by the serializer).
-  std::vector<WasmCode*> SnapshotCodeTable() const;
+  std::pair<std::vector<WasmCode*>, std::vector<WellKnownImport>>
+  SnapshotCodeTable() const;
   // Creates a snapshot of all {owned_code_}, will transfer new code (if any) to
   // {owned_code_}.
   std::vector<WasmCode*> SnapshotAllOwnedCode() const;
@@ -809,6 +821,7 @@ class V8_EXPORT_PRIVATE NativeModule final {
     kRemoveDebugCode,
     kRemoveNonDebugCode,
     kRemoveLiftoffCode,
+    kRemoveTurbofanCode,
     kRemoveAllCode,
   };
   // Remove all compiled code from the {NativeModule} and replace it with
@@ -861,7 +874,8 @@ class V8_EXPORT_PRIVATE NativeModule final {
       int index, const CodeDesc& desc, int stack_slots,
       uint32_t tagged_parameter_slots,
       base::Vector<const byte> protected_instructions_data,
-      base::Vector<const byte> source_position_table, WasmCode::Kind kind,
+      base::Vector<const byte> source_position_table,
+      base::Vector<const byte> inlining_positions, WasmCode::Kind kind,
       ExecutionTier tier, ForDebugging for_debugging,
       bool frame_has_feedback_slot, base::Vector<uint8_t> code_space,
       const JumpTablesRef& jump_tables_ref);

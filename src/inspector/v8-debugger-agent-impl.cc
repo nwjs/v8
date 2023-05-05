@@ -50,6 +50,7 @@ static const char pauseOnExceptionsState[] = "pauseOnExceptionsState";
 static const char asyncCallStackDepth[] = "asyncCallStackDepth";
 static const char blackboxPattern[] = "blackboxPattern";
 static const char debuggerEnabled[] = "debuggerEnabled";
+static const char breakpointsActiveWhenEnabled[] = "breakpointsActive";
 static const char skipAllPauses[] = "skipAllPauses";
 
 static const char breakpointsByRegex[] = "breakpointsByRegex";
@@ -446,9 +447,11 @@ void V8DebuggerAgentImpl::enableImpl() {
     didParseSource(std::move(script), true);
   }
 
-  m_breakpointsActive = true;
-  m_debugger->setBreakpointsActive(true);
-
+  m_breakpointsActive = m_state->booleanProperty(
+      DebuggerAgentState::breakpointsActiveWhenEnabled, true);
+  if (m_breakpointsActive) {
+    m_debugger->setBreakpointsActive(true);
+  }
   if (isPaused()) {
     didPause(0, v8::Local<v8::Value>(), std::vector<v8::debug::BreakpointId>(),
              v8::debug::kException, false,
@@ -544,7 +547,8 @@ void V8DebuggerAgentImpl::restore() {
 }
 
 Response V8DebuggerAgentImpl::setBreakpointsActive(bool active) {
-  if (!enabled()) return Response::ServerError(kDebuggerNotEnabled);
+  m_state->setBoolean(DebuggerAgentState::breakpointsActiveWhenEnabled, active);
+  if (!enabled()) return Response::Success();
   if (m_breakpointsActive == active) return Response::Success();
   m_breakpointsActive = active;
   m_debugger->setBreakpointsActive(active);
@@ -669,6 +673,9 @@ Response V8DebuggerAgentImpl::setBreakpointByUrl(
   std::unique_ptr<protocol::DictionaryValue> hint;
   for (const auto& script : m_scripts) {
     if (!matcher.matches(*script.second)) continue;
+    // Make sure the session was not disabled by some re-entrant call
+    // in the script matcher.
+    DCHECK(enabled());
     int adjustedLineNumber = lineNumber;
     int adjustedColumnNumber = columnNumber;
     if (hint) {
@@ -806,6 +813,9 @@ Response V8DebuggerAgentImpl::removeBreakpoint(const String16& breakpointId) {
   std::vector<V8DebuggerScript*> scripts;
   for (const auto& scriptIter : m_scripts) {
     const bool scriptSelectorMatch = matcher.matches(*scriptIter.second);
+    // Make sure the session was not disabled by some re-entrant call
+    // in the script matcher.
+    DCHECK(enabled());
     const bool isInstrumentation =
         type == BreakpointType::kInstrumentationBreakpoint;
     if (!scriptSelectorMatch && !isInstrumentation) continue;
@@ -1765,13 +1775,13 @@ Response V8DebuggerAgentImpl::currentCallFrames(
                      .setCanBeRestarted(iterator->CanBeRestarted())
                      .build();
 
-    v8::Local<v8::Function> func = iterator->GetFunction();
-    if (!func.IsEmpty()) {
+    v8::debug::Location func_loc = iterator->GetFunctionLocation();
+    if (!func_loc.IsEmpty()) {
       frame->setFunctionLocation(
           protocol::Debugger::Location::create()
-              .setScriptId(String16::fromInteger(func->ScriptId()))
-              .setLineNumber(func->GetScriptLineNumber())
-              .setColumnNumber(func->GetScriptColumnNumber())
+              .setScriptId(String16::fromInteger(script->Id()))
+              .setLineNumber(func_loc.GetLineNumber())
+              .setColumnNumber(func_loc.GetColumnNumber())
               .build());
     }
 
@@ -1976,6 +1986,9 @@ void V8DebuggerAgentImpl::didParseSource(
       Matcher matcher(m_inspector, type, selector);
 
       if (!matcher.matches(*scriptRef)) continue;
+      // Make sure the session was not disabled by some re-entrant call
+      // in the script matcher.
+      DCHECK(enabled());
       String16 condition;
       breakpointWithCondition.second->asString(&condition);
       protocol::DictionaryValue* hint =

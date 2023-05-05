@@ -372,7 +372,7 @@ void Compiler::LogFunctionCompilation(Isolate* isolate,
       UNREACHABLE();
   }
 
-  Handle<String> debug_name = SharedFunctionInfo::DebugName(shared);
+  Handle<String> debug_name = SharedFunctionInfo::DebugName(isolate, shared);
   DisallowGarbageCollection no_gc;
   LOG(isolate, FunctionEvent(name.c_str(), script->id(), time_taken_ms,
                              shared->StartPosition(), shared->EndPosition(),
@@ -942,7 +942,7 @@ class OptimizedCodeCache : public AllStatic {
       if (maybe_code.has_value()) code = maybe_code.value();
     } else {
       feedback_vector.EvictOptimizedCodeMarkedForDeoptimization(
-          shared, "OptimizedCodeCache::Get");
+          isolate, shared, "OptimizedCodeCache::Get");
       code = feedback_vector.optimized_code();
     }
 
@@ -1731,18 +1731,13 @@ class MergeAssumptionChecker final : public ObjectVisitor {
   }
 
   // The object graph for a newly compiled Script shouldn't yet contain any
-  // InstructionStream. If any of these functions are called, then that would
-  // indicate that the graph was not disjoint from the rest of the heap as
-  // expected.
-  void VisitCodePointer(HeapObject host, CodeObjectSlot slot) override {
+  // Code. If any of these functions are called, then that would indicate that
+  // the graph was not disjoint from the rest of the heap as expected.
+  void VisitCodePointer(Code host, CodeObjectSlot slot) override {
     UNREACHABLE();
   }
-  void VisitCodeTarget(InstructionStream host, RelocInfo* rinfo) override {
-    UNREACHABLE();
-  }
-  void VisitEmbeddedPointer(InstructionStream host, RelocInfo* rinfo) override {
-    UNREACHABLE();
-  }
+  void VisitCodeTarget(RelocInfo* rinfo) override { UNREACHABLE(); }
+  void VisitEmbeddedPointer(RelocInfo* rinfo) override { UNREACHABLE(); }
 
  private:
   enum ObjectKind {
@@ -2582,7 +2577,7 @@ bool Compiler::Compile(Isolate* isolate, Handle<JSFunction> function,
   }
 
   DCHECK(is_compiled_scope->is_compiled());
-  Handle<Code> code = handle(shared_info->GetCode(), isolate);
+  Handle<Code> code = handle(shared_info->GetCode(isolate), isolate);
 
   // Initialize the feedback cell for this JSFunction and reset the interrupt
   // budget for feedback vector allocation even if there is a closure feedback
@@ -3436,6 +3431,8 @@ MaybeHandle<SharedFunctionInfo> GetSharedFunctionInfoForScriptImpl(
     Isolate* isolate, Handle<String> source,
     const ScriptDetails& script_details, v8::Extension* extension,
     AlignedCachedData* cached_data, BackgroundDeserializeTask* deserialize_task,
+    v8::CompileHintCallback compile_hint_callback,
+    void* compile_hint_callback_data,
     ScriptCompiler::CompileOptions compile_options,
     ScriptCompiler::NoCacheReason no_cache_reason, NativesFlag natives) {
   ScriptCompileTimerScope compile_timer(isolate, no_cache_reason);
@@ -3448,6 +3445,11 @@ MaybeHandle<SharedFunctionInfo> GetSharedFunctionInfoForScriptImpl(
   } else {
     DCHECK_NULL(cached_data);
     DCHECK_NULL(deserialize_task);
+  }
+
+  if (compile_options == ScriptCompiler::kConsumeCompileHints) {
+    DCHECK_NOT_NULL(compile_hint_callback);
+    DCHECK_NOT_NULL(compile_hint_callback_data);
   }
 
   LanguageMode language_mode = construct_language_mode(v8_flags.use_strict);
@@ -3585,8 +3587,8 @@ MaybeHandle<SharedFunctionInfo> Compiler::GetSharedFunctionInfoForScript(
     ScriptCompiler::CompileOptions compile_options,
     ScriptCompiler::NoCacheReason no_cache_reason, NativesFlag natives) {
   return GetSharedFunctionInfoForScriptImpl(
-      isolate, source, script_details, nullptr, nullptr, nullptr,
-      compile_options, no_cache_reason, natives);
+      isolate, source, script_details, nullptr, nullptr, nullptr, nullptr,
+      nullptr, compile_options, no_cache_reason, natives);
 }
 
 MaybeHandle<SharedFunctionInfo>
@@ -3595,8 +3597,9 @@ Compiler::GetSharedFunctionInfoForScriptWithExtension(
     const ScriptDetails& script_details, v8::Extension* extension,
     ScriptCompiler::CompileOptions compile_options, NativesFlag natives) {
   return GetSharedFunctionInfoForScriptImpl(
-      isolate, source, script_details, extension, nullptr, nullptr,
-      compile_options, ScriptCompiler::kNoCacheBecauseV8Extension, natives);
+      isolate, source, script_details, extension, nullptr, nullptr, nullptr,
+      nullptr, compile_options, ScriptCompiler::kNoCacheBecauseV8Extension,
+      natives);
 }
 
 MaybeHandle<SharedFunctionInfo>
@@ -3606,8 +3609,8 @@ Compiler::GetSharedFunctionInfoForScriptWithCachedData(
     ScriptCompiler::CompileOptions compile_options,
     ScriptCompiler::NoCacheReason no_cache_reason, NativesFlag natives) {
   return GetSharedFunctionInfoForScriptImpl(
-      isolate, source, script_details, nullptr, cached_data, nullptr,
-      compile_options, no_cache_reason, natives);
+      isolate, source, script_details, nullptr, cached_data, nullptr, nullptr,
+      nullptr, compile_options, no_cache_reason, natives);
 }
 
 MaybeHandle<SharedFunctionInfo>
@@ -3619,7 +3622,21 @@ Compiler::GetSharedFunctionInfoForScriptWithDeserializeTask(
     ScriptCompiler::NoCacheReason no_cache_reason, NativesFlag natives) {
   return GetSharedFunctionInfoForScriptImpl(
       isolate, source, script_details, nullptr, nullptr, deserialize_task,
-      compile_options, no_cache_reason, natives);
+      nullptr, nullptr, compile_options, no_cache_reason, natives);
+}
+
+MaybeHandle<SharedFunctionInfo>
+Compiler::GetSharedFunctionInfoForScriptWithCompileHints(
+    Isolate* isolate, Handle<String> source,
+    const ScriptDetails& script_details,
+    v8::CompileHintCallback compile_hint_callback,
+    void* compile_hint_callback_data,
+    ScriptCompiler::CompileOptions compile_options,
+    ScriptCompiler::NoCacheReason no_cache_reason, NativesFlag natives) {
+  return GetSharedFunctionInfoForScriptImpl(
+      isolate, source, script_details, nullptr, nullptr, nullptr,
+      compile_hint_callback, compile_hint_callback_data, compile_options,
+      no_cache_reason, natives);
 }
 
 // static
@@ -3872,12 +3889,13 @@ MaybeHandle<Code> Compiler::CompileOptimizedOSR(Isolate* isolate,
 }
 
 // static
-void Compiler::DisposeTurbofanCompilationJob(TurbofanCompilationJob* job,
+void Compiler::DisposeTurbofanCompilationJob(Isolate* isolate,
+                                             TurbofanCompilationJob* job,
                                              bool restore_function_code) {
   Handle<JSFunction> function = job->compilation_info()->closure();
   ResetTieringState(*function, job->compilation_info()->osr_offset());
   if (restore_function_code) {
-    function->set_code(function->shared().GetCode());
+    function->set_code(function->shared().GetCode(isolate));
   }
 }
 
@@ -3942,7 +3960,7 @@ void Compiler::FinalizeTurbofanCompilationJob(TurbofanCompilationJob* job,
   if (V8_LIKELY(use_result)) {
     ResetTieringState(*function, osr_offset);
     if (!IsOSR(osr_offset)) {
-      function->set_code(shared->GetCode());
+      function->set_code(shared->GetCode(isolate));
     }
   }
 }
@@ -4010,7 +4028,7 @@ void Compiler::PostInstantiation(Handle<JSFunction> function) {
       // deoptimized the code on the feedback vector. So check for any
       // deoptimized code just before installing it on the funciton.
       function->feedback_vector().EvictOptimizedCodeMarkedForDeoptimization(
-          *shared, "new function from shared function info");
+          isolate, *shared, "new function from shared function info");
       Code code = function->feedback_vector().optimized_code();
       if (!code.is_null()) {
         // Caching of optimized code enabled and optimized code found.

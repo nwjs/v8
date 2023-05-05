@@ -136,9 +136,10 @@ static void VerifyMemoryChunk(Isolate* isolate, Heap* heap,
       memory_allocator->AllocateLargePage(space, area_size, executable);
   size_t reserved_size =
       ((executable == EXECUTABLE))
-          ? allocatable_memory_area_offset +
-                RoundUp(area_size, page_allocator->CommitPageSize()) +
-                guard_size
+          ? RoundUp(allocatable_memory_area_offset +
+                        RoundUp(area_size, page_allocator->CommitPageSize()) +
+                        guard_size,
+                    page_allocator->CommitPageSize())
           : RoundUp(allocatable_memory_area_offset + area_size,
                     page_allocator->CommitPageSize());
   CHECK(memory_chunk->size() == reserved_size);
@@ -318,6 +319,7 @@ TEST(SemiSpaceNewSpace) {
 
 TEST(PagedNewSpace) {
   if (v8_flags.single_generation) return;
+  ManualGCScope manual_gc_scope;
   Isolate* isolate = CcTest::i_isolate();
   Heap* heap = isolate->heap();
   TestMemoryAllocatorScope test_allocator_scope(isolate, heap->MaxReserved());

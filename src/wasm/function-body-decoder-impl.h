@@ -176,53 +176,40 @@ static constexpr StoreType GetStoreType(WasmOpcode opcode) {
   V(I64AtomicStore16U, Uint16)  \
   V(I64AtomicStore32U, Uint32)
 
-// Decoder error with explicit PC and format arguments.
+// Decoder error with explicit PC and optional format arguments.
+// Depending on the validation tag and the number of arguments, this forwards to
+// a V8_NOINLINE and V8_PRESERVE_MOST method of the decoder.
 template <typename ValidationTag, typename... Args>
-V8_NOINLINE V8_PRESERVE_MOST void DecodeError(Decoder* decoder, const byte* pc,
-                                              const char* str, Args&&... args) {
-  if constexpr (!ValidationTag::validate) UNREACHABLE();
-  static_assert(sizeof...(Args) > 0);
-  if constexpr (ValidationTag::full_validation) {
-    decoder->errorf(pc, str, std::forward<Args>(args)...);
-  } else {
+V8_INLINE void DecodeError(Decoder* decoder, const byte* pc, const char* str,
+                           Args&&... args) {
+  // Decode errors can only happen if we are validating; the compiler should
+  // know this e.g. from the VALIDATE macro, but this assumption tells it again
+  // that this path is impossible.
+  V8_ASSUME(ValidationTag::validate);
+  if constexpr (!ValidationTag::full_validation) {
     decoder->MarkError();
-  }
-}
-
-// Decoder error with explicit PC and no format arguments.
-template <typename ValidationTag>
-V8_NOINLINE V8_PRESERVE_MOST void DecodeError(Decoder* decoder, const byte* pc,
-                                              const char* str) {
-  if constexpr (!ValidationTag::validate) UNREACHABLE();
-  if constexpr (ValidationTag::full_validation) {
+  } else if constexpr (sizeof...(Args) == 0) {
     decoder->error(pc, str);
   } else {
-    decoder->MarkError();
+    decoder->errorf(pc, str, std::forward<Args>(args)...);
   }
 }
 
-// Decoder error without explicit PC, but with format arguments.
+// Decoder error without explicit PC and with optional format arguments.
+// Depending on the validation tag and the number of arguments, this forwards to
+// a V8_NOINLINE and V8_PRESERVE_MOST method of the decoder.
 template <typename ValidationTag, typename... Args>
-V8_NOINLINE V8_PRESERVE_MOST void DecodeError(Decoder* decoder, const char* str,
-                                              Args&&... args) {
-  if constexpr (!ValidationTag::validate) UNREACHABLE();
-  static_assert(sizeof...(Args) > 0);
-  if constexpr (ValidationTag::full_validation) {
-    decoder->errorf(str, std::forward<Args>(args)...);
-  } else {
+V8_INLINE void DecodeError(Decoder* decoder, const char* str, Args&&... args) {
+  // Decode errors can only happen if we are validating; the compiler should
+  // know this e.g. from the VALIDATE macro, but this assumption tells it again
+  // that this path is impossible.
+  V8_ASSUME(ValidationTag::validate);
+  if constexpr (!ValidationTag::full_validation) {
     decoder->MarkError();
-  }
-}
-
-// Decoder error without explicit PC and without format arguments.
-template <typename ValidationTag>
-V8_NOINLINE V8_PRESERVE_MOST void DecodeError(Decoder* decoder,
-                                              const char* str) {
-  if constexpr (!ValidationTag::validate) UNREACHABLE();
-  if constexpr (ValidationTag::full_validation) {
+  } else if constexpr (sizeof...(Args) == 0) {
     decoder->error(str);
   } else {
-    decoder->MarkError();
+    decoder->errorf(str, std::forward<Args>(args)...);
   }
 }
 
@@ -995,7 +982,7 @@ struct ControlBase : public PcForErrors<ValidationTag::full_validation> {
   F(I64Const, Value* result, int64_t value)                                    \
   F(F32Const, Value* result, float value)                                      \
   F(F64Const, Value* result, double value)                                     \
-  F(S128Const, Simd128Immediate& imm, Value* result)                           \
+  F(S128Const, const Simd128Immediate& imm, Value* result)                     \
   F(GlobalGet, Value* result, const GlobalIndexImmediate& imm)                 \
   F(DoReturn, uint32_t drop_values)                                            \
   F(UnOp, WasmOpcode opcode, const Value& value, Value* result)                \
@@ -1077,7 +1064,6 @@ struct ControlBase : public PcForErrors<ValidationTag::full_validation> {
   F(SimdOp, WasmOpcode opcode, base::Vector<Value> args, Value* result)        \
   F(SimdLaneOp, WasmOpcode opcode, const SimdLaneImmediate& imm,               \
     const base::Vector<Value> inputs, Value* result)                           \
-  F(S128Const, const Simd128Immediate& imm, Value* result)                     \
   F(Simd8x16ShuffleOp, const Simd128Immediate& imm, const Value& input0,       \
     const Value& input1, Value* result)                                        \
   F(Throw, const TagIndexImmediate& imm, const base::Vector<Value>& args)      \
@@ -1115,6 +1101,8 @@ struct ControlBase : public PcForErrors<ValidationTag::full_validation> {
   F(ArrayLen, const Value& array_obj, Value* result)                           \
   F(ArrayCopy, const Value& src, const Value& src_index, const Value& dst,     \
     const Value& dst_index, const Value& length)                               \
+  F(ArrayFill, const ArrayIndexImmediate& imm, const Value& array,             \
+    const Value& index, const Value& value, const Value& length)               \
   F(I31GetS, const Value& input, Value* result)                                \
   F(I31GetU, const Value& input, Value* result)                                \
   F(RefTest, const Value& obj, const Value& rtt, Value* result,                \
@@ -2227,6 +2215,11 @@ class WasmDecoder : public Decoder {
             (ios.ArrayCopy(dst_imm, src_imm), ...);
             return length + dst_imm.length + src_imm.length;
           }
+          case kExprArrayFill: {
+            ArrayIndexImmediate imm(decoder, pc + length, validate);
+            (ios.TypeIndex(imm), ...);
+            return length + imm.length;
+          }
           case kExprArrayNewData:
           case kExprArrayNewElem: {
             ArrayIndexImmediate array_imm(decoder, pc + length, validate);
@@ -2523,6 +2516,8 @@ class WasmDecoder : public Decoder {
             return {3, 0};
           case kExprArrayCopy:
             return {5, 0};
+          case kExprArrayFill:
+            return {4, 0};
           case kExprStructNewDefault:
             return {0, 1};
           case kExprStructNew: {
@@ -2673,7 +2668,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
 
   Interface& interface() { return interface_; }
 
-  bool Decode() {
+  void Decode() {
     DCHECK(stack_.empty());
     DCHECK(control_.empty());
     DCHECK_LE(this->pc_, this->end_);
@@ -2713,10 +2708,9 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
 
     DCHECK(stack_.empty());
     TRACE("wasm-decode ok\n\n");
-    return true;
   }
 
-  bool TraceFailed() {
+  void TraceFailed() {
     if (this->error_.offset()) {
       TRACE("wasm-error module+%-6d func+%d: %s\n\n", this->error_.offset(),
             this->GetBufferRelativeOffset(this->error_.offset()),
@@ -2724,7 +2718,6 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
     } else {
       TRACE("wasm-error: %s\n\n", this->error_.message().c_str());
     }
-    return false;
   }
 
   const char* SafeOpcodeNameAt(const byte* pc) {
@@ -4261,7 +4254,8 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
                                validate);
     if (!this->Validate(this->pc_ + opcode_length, opcode, lane_imm)) return 0;
     Value v128 = Peek(0, 1, kWasmS128);
-    Value index = Peek(1, 0, kWasmI32);
+    ValueType index_type = this->module_->is_memory64 ? kWasmI64 : kWasmI32;
+    Value index = Peek(1, 0, index_type);
 
     Value result = CreateValue(kWasmS128);
     if (V8_LIKELY(!CheckStaticallyOutOfBounds(type.size(), mem_imm.offset))) {
@@ -4282,7 +4276,8 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
                                validate);
     if (!this->Validate(this->pc_ + opcode_length, opcode, lane_imm)) return 0;
     Value v128 = Peek(0, 1, kWasmS128);
-    Value index = Peek(1, 0, kWasmI32);
+    ValueType index_type = this->module_->is_memory64 ? kWasmI64 : kWasmI32;
+    Value index = Peek(1, 0, index_type);
 
     if (V8_LIKELY(!CheckStaticallyOutOfBounds(type.size(), mem_imm.offset))) {
       CALL_INTERFACE_IF_OK_AND_REACHABLE(StoreLane, type, mem_imm, index, v128,
@@ -4886,6 +4881,26 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
                                            src_index, length);
         Drop(5);
         return opcode_length + dst_imm.length + src_imm.length;
+      }
+      case kExprArrayFill: {
+        NON_CONST_ONLY
+        ArrayIndexImmediate array_imm(this, this->pc_ + opcode_length,
+                                      validate);
+        if (!this->Validate(this->pc_ + opcode_length, array_imm)) return 0;
+        if (!VALIDATE(array_imm.array_type->mutability())) {
+          this->DecodeError("array.init: immediate array type #%d is immutable",
+                            array_imm.index);
+          return 0;
+        }
+
+        Value array = Peek(3, 0, ValueType::RefNull(array_imm.index));
+        Value offset = Peek(2, 1, kWasmI32);
+        Value value = Peek(1, 2, array_imm.array_type->element_type());
+        Value length = Peek(0, 3, kWasmI32);
+        CALL_INTERFACE_IF_OK_AND_REACHABLE(ArrayFill, array_imm, array, offset,
+                                           value, length);
+        Drop(4);
+        return opcode_length + array_imm.length;
       }
       case kExprArrayNewFixed: {
         ArrayIndexImmediate array_imm(this, this->pc_ + opcode_length,

@@ -181,10 +181,34 @@ void ScheduleBuilder::ProcessOperation(const Operation& op) {
   Node* ScheduleBuilder::ProcessOperation(const op##Op&) { UNREACHABLE(); }
 // These operations should have been lowered in previous reducers already.
 SHOULD_HAVE_BEEN_LOWERED(Allocate)
+SHOULD_HAVE_BEEN_LOWERED(BigIntBinop)
+SHOULD_HAVE_BEEN_LOWERED(BigIntComparison)
+SHOULD_HAVE_BEEN_LOWERED(BigIntEqual)
+SHOULD_HAVE_BEEN_LOWERED(BigIntUnary)
+SHOULD_HAVE_BEEN_LOWERED(ChangeOrDeopt)
 SHOULD_HAVE_BEEN_LOWERED(ConvertToObject)
+SHOULD_HAVE_BEEN_LOWERED(ConvertToObjectOrDeopt)
+SHOULD_HAVE_BEEN_LOWERED(ConvertObjectToPrimitive)
+SHOULD_HAVE_BEEN_LOWERED(ConvertObjectToPrimitiveOrDeopt)
 SHOULD_HAVE_BEEN_LOWERED(DecodeExternalPointer)
+SHOULD_HAVE_BEEN_LOWERED(DoubleArrayMinMax)
+SHOULD_HAVE_BEEN_LOWERED(FloatIs)
+SHOULD_HAVE_BEEN_LOWERED(LoadFieldByIndex)
+SHOULD_HAVE_BEEN_LOWERED(NewArray)
+SHOULD_HAVE_BEEN_LOWERED(NewConsString)
 SHOULD_HAVE_BEEN_LOWERED(ObjectIs)
+SHOULD_HAVE_BEEN_LOWERED(StringAt)
+SHOULD_HAVE_BEEN_LOWERED(StringComparison)
+SHOULD_HAVE_BEEN_LOWERED(StringEqual)
+SHOULD_HAVE_BEEN_LOWERED(StringFromCodePointAt)
+SHOULD_HAVE_BEEN_LOWERED(StringIndexOf)
+SHOULD_HAVE_BEEN_LOWERED(StringLength)
+SHOULD_HAVE_BEEN_LOWERED(StringSubstring)
+#ifdef V8_INTL_SUPPORT
+SHOULD_HAVE_BEEN_LOWERED(StringToCaseIntl)
+#endif  // V8_INTL_SUPPORT
 SHOULD_HAVE_BEEN_LOWERED(Tag)
+SHOULD_HAVE_BEEN_LOWERED(TruncateObjectToPrimitive)
 SHOULD_HAVE_BEEN_LOWERED(Untag)
 #undef SHOULD_HAVE_BEEN_LOWERED
 
@@ -849,6 +873,9 @@ Node* ScheduleBuilder::ProcessOperation(const TaggedBitcastOp& op) {
   } else if (op.from == RegisterRepresentation::PointerSized() &&
              op.to == RegisterRepresentation::Tagged()) {
     o = machine.BitcastWordToTagged();
+  } else if (op.from == RegisterRepresentation::Compressed() &&
+             op.to == RegisterRepresentation::Word32()) {
+    o = machine.BitcastTaggedToWord();
   } else {
     UNIMPLEMENTED();
   }
@@ -1354,6 +1381,14 @@ Node* ScheduleBuilder::ProcessOperation(const SwitchOp& op) {
                       successors.size());
   current_block = nullptr;
   return nullptr;
+}
+
+Node* ScheduleBuilder::ProcessOperation(const DebugBreakOp& op) {
+  return AddNode(machine.DebugBreak(), {});
+}
+
+Node* ScheduleBuilder::ProcessOperation(const LoadRootRegisterOp& op) {
+  return AddNode(machine.LoadRootRegister(), {});
 }
 
 }  // namespace

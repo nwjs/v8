@@ -98,6 +98,9 @@ class PPCOperandConverter final : public InstructionOperandConverter {
       case kMode_MRR:
         *first_index += 2;
         return MemOperand(InputRegister(index + 0), InputRegister(index + 1));
+      case kMode_Root:
+        *first_index += 1;
+        return MemOperand(kRootRegister, InputRegister(index));
     }
     UNREACHABLE();
   }
@@ -174,10 +177,9 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
     if (COMPRESS_POINTERS_BOOL) {
       __ DecompressTagged(value_, value_);
     }
-    __ CheckPageFlag(
-        value_, scratch0_,
-        MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask, eq,
-        exit());
+    __ CheckPageFlag(value_, scratch0_,
+                     MemoryChunk::kPointersToHereAreInterestingMask, eq,
+                     exit());
     if (offset_ == no_reg) {
       __ addi(scratch1_, object_, Operand(offset_immediate_));
     } else {
@@ -448,9 +450,10 @@ Condition FlagsConditionToCondition(FlagsCondition condition, ArchOpcode op) {
 #define ASSEMBLE_LOAD_FLOAT(asm_instr, asm_instrp, asm_instrx) \
   do {                                                         \
     DoubleRegister result = i.OutputDoubleRegister();          \
+    size_t index = 0;                                          \
     AddressingMode mode = kMode_None;                          \
-    MemOperand operand = i.MemoryOperand(&mode);               \
-    bool is_atomic = i.InputInt32(2);                          \
+    MemOperand operand = i.MemoryOperand(&mode, &index);       \
+    bool is_atomic = i.InputInt32(index);                      \
     if (mode == kMode_MRI) {                                   \
       intptr_t offset = operand.offset();                      \
       if (is_int16(offset)) {                                  \
@@ -470,9 +473,10 @@ Condition FlagsConditionToCondition(FlagsCondition condition, ArchOpcode op) {
                               must_be_aligned)                     \
   do {                                                             \
     Register result = i.OutputRegister();                          \
+    size_t index = 0;                                              \
     AddressingMode mode = kMode_None;                              \
-    MemOperand operand = i.MemoryOperand(&mode);                   \
-    bool is_atomic = i.InputInt32(2);                              \
+    MemOperand operand = i.MemoryOperand(&mode, &index);           \
+    bool is_atomic = i.InputInt32(index);                          \
     if (mode == kMode_MRI) {                                       \
       intptr_t offset = operand.offset();                          \
       bool misaligned = offset & 3;                                \
@@ -489,16 +493,17 @@ Condition FlagsConditionToCondition(FlagsCondition condition, ArchOpcode op) {
     DCHECK_EQ(LeaveRC, i.OutputRCBit());                           \
   } while (0)
 
-#define ASSEMBLE_LOAD_INTEGER_RR(asm_instr)      \
-  do {                                           \
-    Register result = i.OutputRegister();        \
-    AddressingMode mode = kMode_None;            \
-    MemOperand operand = i.MemoryOperand(&mode); \
-    DCHECK_EQ(mode, kMode_MRR);                  \
-    bool is_atomic = i.InputInt32(2);            \
-    __ asm_instr(result, operand);               \
-    if (is_atomic) __ lwsync();                  \
-    DCHECK_EQ(LeaveRC, i.OutputRCBit());         \
+#define ASSEMBLE_LOAD_INTEGER_RR(asm_instr)              \
+  do {                                                   \
+    Register result = i.OutputRegister();                \
+    size_t index = 0;                                    \
+    AddressingMode mode = kMode_None;                    \
+    MemOperand operand = i.MemoryOperand(&mode, &index); \
+    DCHECK_EQ(mode, kMode_MRR);                          \
+    bool is_atomic = i.InputInt32(index);                \
+    __ asm_instr(result, operand);                       \
+    if (is_atomic) __ lwsync();                          \
+    DCHECK_EQ(LeaveRC, i.OutputRCBit());                 \
   } while (0)
 
 #define ASSEMBLE_STORE_FLOAT(asm_instr, asm_instrp, asm_instrx) \
@@ -533,7 +538,7 @@ Condition FlagsConditionToCondition(FlagsCondition condition, ArchOpcode op) {
     AddressingMode mode = kMode_None;                              \
     MemOperand operand = i.MemoryOperand(&mode, &index);           \
     Register value = i.InputRegister(index);                       \
-    bool is_atomic = i.InputInt32(3);                              \
+    bool is_atomic = i.InputInt32(index + 1);                      \
     if (is_atomic) __ lwsync();                                    \
     if (mode == kMode_MRI) {                                       \
       intptr_t offset = operand.offset();                          \
@@ -558,7 +563,7 @@ Condition FlagsConditionToCondition(FlagsCondition condition, ArchOpcode op) {
     MemOperand operand = i.MemoryOperand(&mode, &index); \
     DCHECK_EQ(mode, kMode_MRR);                          \
     Register value = i.InputRegister(index);             \
-    bool is_atomic = i.InputInt32(3);                    \
+    bool is_atomic = i.InputInt32(index + 1);            \
     if (is_atomic) __ lwsync();                          \
     __ asm_instr(value, operand);                        \
     if (is_atomic) __ sync();                            \
@@ -795,8 +800,8 @@ void CodeGenerator::BailoutIfDeoptimized() {
   int offset = InstructionStream::kCodeOffset - InstructionStream::kHeaderSize;
   __ LoadTaggedField(r11, MemOperand(kJavaScriptCallCodeStartRegister, offset),
                      r0);
-  __ LoadS32(r11, FieldMemOperand(r11, Code::kKindSpecificFlagsOffset), r0);
-  __ TestBit(r11, InstructionStream::kMarkedForDeoptimizationBit);
+  __ LoadU16(r11, FieldMemOperand(r11, Code::kKindSpecificFlagsOffset), r0);
+  __ TestBit(r11, Code::kMarkedForDeoptimizationBit);
   __ Jump(BUILTIN_CODE(isolate(), CompileLazyDeoptimizedCode),
           RelocInfo::CODE_TARGET, ne, cr0);
 }
@@ -1123,8 +1128,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       DCHECK_EQ(LeaveRC, i.OutputRCBit());
       break;
     case kArchStoreWithWriteBarrier: {
-      RecordWriteMode mode =
-          static_cast<RecordWriteMode>(MiscField::decode(instr->opcode()));
+      RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
       Register object = i.InputRegister(0);
       Register value = i.InputRegister(2);
       Register scratch0 = i.TempRegister(0);
@@ -2310,6 +2314,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
   V(I16x8ExtMulLowI8x16U)               \
   V(I16x8ExtMulHighI8x16U)              \
   V(I16x8Q15MulRSatS)                   \
+  V(I16x8DotI8x16S)                     \
   V(I8x16Ne)                            \
   V(I8x16GeS)                           \
   V(I8x16GeU)                           \
@@ -2495,6 +2500,24 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       SIMD_STORE_LANE_LIST(EMIT_SIMD_STORE_LANE)
 #undef EMIT_SIMD_STORE_LANE
 #undef SIMD_STORE_LANE_LIST
+
+#define SIMD_LOAD_SPLAT(V)               \
+  V(S128Load64Splat, LoadAndSplat64x2LE) \
+  V(S128Load32Splat, LoadAndSplat32x4LE) \
+  V(S128Load16Splat, LoadAndSplat16x8LE) \
+  V(S128Load8Splat, LoadAndSplat8x16LE)
+
+#define EMIT_SIMD_LOAD_SPLAT(name, op)                      \
+  case kPPC_##name: {                                       \
+    AddressingMode mode = kMode_None;                       \
+    MemOperand operand = i.MemoryOperand(&mode);            \
+    DCHECK_EQ(mode, kMode_MRR);                             \
+    __ op(i.OutputSimd128Register(), operand, kScratchReg); \
+    break;                                                  \
+  }
+      SIMD_LOAD_SPLAT(EMIT_SIMD_LOAD_SPLAT)
+#undef EMIT_SIMD_LOAD_SPLAT
+#undef SIMD_LOAD_SPLAT
 
     case kPPC_F64x2Splat: {
       __ F64x2Splat(i.OutputSimd128Register(), i.InputDoubleRegister(0),
@@ -2721,124 +2744,62 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                       kScratchSimd128Reg);
       break;
     }
-#define ASSEMBLE_LOAD_TRANSFORM(scratch, load_instr) \
-  AddressingMode mode = kMode_None;                  \
-  MemOperand operand = i.MemoryOperand(&mode);       \
-  DCHECK_EQ(mode, kMode_MRR);                        \
-  __ load_instr(scratch, operand);
-#if V8_TARGET_BIG_ENDIAN
-#define MAYBE_REVERSE_BYTES(reg, instr) __ instr(reg, reg);
-#else
-#define MAYBE_REVERSE_BYTES(reg, instr)
-#endif
-    case kPPC_S128Load8Splat: {
-      Simd128Register dst = i.OutputSimd128Register();
-      ASSEMBLE_LOAD_TRANSFORM(kScratchSimd128Reg, lxsibzx)
-      __ vspltb(dst, kScratchSimd128Reg, Operand(7));
+    case kPPC_I32x4DotI8x16AddS: {
+      __ I32x4DotI8x16AddS(i.OutputSimd128Register(), i.InputSimd128Register(0),
+                           i.InputSimd128Register(1),
+                           i.InputSimd128Register(2));
       break;
     }
-    case kPPC_S128Load16Splat: {
-      Simd128Register dst = i.OutputSimd128Register();
-      ASSEMBLE_LOAD_TRANSFORM(kScratchSimd128Reg, lxsihzx)
-      MAYBE_REVERSE_BYTES(kScratchSimd128Reg, xxbrh)
-      __ vsplth(dst, kScratchSimd128Reg, Operand(3));
-      break;
-    }
-    case kPPC_S128Load32Splat: {
-      Simd128Register dst = i.OutputSimd128Register();
-      ASSEMBLE_LOAD_TRANSFORM(kScratchSimd128Reg, lxsiwzx)
-      MAYBE_REVERSE_BYTES(kScratchSimd128Reg, xxbrw)
-      __ vspltw(dst, kScratchSimd128Reg, Operand(1));
-      break;
-    }
-    case kPPC_S128Load64Splat: {
-      constexpr int lane_width_in_bytes = 8;
-      Simd128Register dst = i.OutputSimd128Register();
-      ASSEMBLE_LOAD_TRANSFORM(dst, lxsdx)
-      MAYBE_REVERSE_BYTES(dst, xxbrd)
-      __ vinsertd(dst, dst, Operand(1 * lane_width_in_bytes));
-      break;
-    }
+#define PREP_LOAD_EXTEND()                     \
+  AddressingMode mode = kMode_None;            \
+  MemOperand operand = i.MemoryOperand(&mode); \
+  DCHECK_EQ(mode, kMode_MRR);
     case kPPC_S128Load8x8S: {
-      Simd128Register dst = i.OutputSimd128Register();
-      ASSEMBLE_LOAD_TRANSFORM(kScratchSimd128Reg, lxsdx)
-      MAYBE_REVERSE_BYTES(kScratchSimd128Reg, xxbrd)
-      __ vupkhsb(dst, kScratchSimd128Reg);
+      PREP_LOAD_EXTEND()
+      __ LoadAndExtend8x8SLE(i.OutputSimd128Register(), operand, kScratchReg);
       break;
     }
     case kPPC_S128Load8x8U: {
-      Simd128Register dst = i.OutputSimd128Register();
-      ASSEMBLE_LOAD_TRANSFORM(kScratchSimd128Reg, lxsdx)
-      MAYBE_REVERSE_BYTES(kScratchSimd128Reg, xxbrd)
-      __ vupkhsb(dst, kScratchSimd128Reg);
-      // Zero extend.
-      __ li(ip, Operand(0xFF));
-      __ mtvsrd(kScratchSimd128Reg, ip);
-      __ vsplth(kScratchSimd128Reg, kScratchSimd128Reg, Operand(3));
-      __ vand(dst, kScratchSimd128Reg, dst);
+      PREP_LOAD_EXTEND()
+      __ LoadAndExtend8x8ULE(i.OutputSimd128Register(), operand, kScratchReg,
+                             kScratchSimd128Reg);
       break;
     }
     case kPPC_S128Load16x4S: {
-      Simd128Register dst = i.OutputSimd128Register();
-      ASSEMBLE_LOAD_TRANSFORM(kScratchSimd128Reg, lxsdx)
-      MAYBE_REVERSE_BYTES(kScratchSimd128Reg, xxbrd)
-      __ vupkhsh(dst, kScratchSimd128Reg);
+      PREP_LOAD_EXTEND()
+      __ LoadAndExtend16x4SLE(i.OutputSimd128Register(), operand, kScratchReg);
       break;
     }
     case kPPC_S128Load16x4U: {
-      Simd128Register dst = i.OutputSimd128Register();
-      ASSEMBLE_LOAD_TRANSFORM(kScratchSimd128Reg, lxsdx)
-      MAYBE_REVERSE_BYTES(kScratchSimd128Reg, xxbrd)
-      __ vupkhsh(dst, kScratchSimd128Reg);
-      // Zero extend.
-      __ mov(ip, Operand(0xFFFF));
-      __ mtvsrd(kScratchSimd128Reg, ip);
-      __ vspltw(kScratchSimd128Reg, kScratchSimd128Reg, Operand(1));
-      __ vand(dst, kScratchSimd128Reg, dst);
-
+      PREP_LOAD_EXTEND()
+      __ LoadAndExtend16x4ULE(i.OutputSimd128Register(), operand, kScratchReg,
+                              kScratchSimd128Reg);
       break;
     }
     case kPPC_S128Load32x2S: {
-      Simd128Register dst = i.OutputSimd128Register();
-      ASSEMBLE_LOAD_TRANSFORM(kScratchSimd128Reg, lxsdx)
-      MAYBE_REVERSE_BYTES(kScratchSimd128Reg, xxbrd)
-      __ vupkhsw(dst, kScratchSimd128Reg);
+      PREP_LOAD_EXTEND()
+      __ LoadAndExtend32x2SLE(i.OutputSimd128Register(), operand, kScratchReg);
       break;
     }
     case kPPC_S128Load32x2U: {
-      constexpr int lane_width_in_bytes = 8;
-      Simd128Register dst = i.OutputSimd128Register();
-      ASSEMBLE_LOAD_TRANSFORM(kScratchSimd128Reg, lxsdx)
-      MAYBE_REVERSE_BYTES(kScratchSimd128Reg, xxbrd)
-      __ vupkhsw(dst, kScratchSimd128Reg);
-      // Zero extend.
-      __ mov(ip, Operand(0xFFFFFFFF));
-      __ mtvsrd(kScratchSimd128Reg, ip);
-      __ vinsertd(kScratchSimd128Reg, kScratchSimd128Reg,
-                  Operand(1 * lane_width_in_bytes));
-      __ vand(dst, kScratchSimd128Reg, dst);
+      PREP_LOAD_EXTEND()
+      __ LoadAndExtend32x2ULE(i.OutputSimd128Register(), operand, kScratchReg,
+                              kScratchSimd128Reg);
       break;
     }
     case kPPC_S128Load32Zero: {
-      constexpr int lane_width_in_bytes = 4;
-      Simd128Register dst = i.OutputSimd128Register();
-      ASSEMBLE_LOAD_TRANSFORM(kScratchSimd128Reg, lxsiwzx)
-      MAYBE_REVERSE_BYTES(kScratchSimd128Reg, xxbrw)
-      __ vxor(dst, dst, dst);
-      __ vinsertw(dst, kScratchSimd128Reg, Operand(3 * lane_width_in_bytes));
+      PREP_LOAD_EXTEND()
+      __ LoadV32ZeroLE(i.OutputSimd128Register(), operand, kScratchReg,
+                       kScratchSimd128Reg);
       break;
     }
     case kPPC_S128Load64Zero: {
-      constexpr int lane_width_in_bytes = 8;
-      Simd128Register dst = i.OutputSimd128Register();
-      ASSEMBLE_LOAD_TRANSFORM(kScratchSimd128Reg, lxsdx)
-      MAYBE_REVERSE_BYTES(kScratchSimd128Reg, xxbrd)
-      __ vxor(dst, dst, dst);
-      __ vinsertd(dst, kScratchSimd128Reg, Operand(1 * lane_width_in_bytes));
+      PREP_LOAD_EXTEND()
+      __ LoadV64ZeroLE(i.OutputSimd128Register(), operand, kScratchReg,
+                       kScratchSimd128Reg);
       break;
     }
-#undef ASSEMBLE_LOAD_TRANSFORM
-#undef MAYBE_REVERSE_BYTES
+#undef PREP_LOAD_EXTEND
     case kPPC_StoreCompressTagged: {
       size_t index = 0;
       AddressingMode mode = kMode_None;

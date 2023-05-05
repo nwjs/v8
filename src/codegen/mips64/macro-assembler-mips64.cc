@@ -286,8 +286,7 @@ void MacroAssembler::RecordWrite(Register object, Register address,
 
   CheckPageFlag(value,
                 value,  // Used as scratch.
-                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
-                eq, &done);
+                MemoryChunk::kPointersToHereAreInterestingMask, eq, &done);
   CheckPageFlag(object,
                 value,  // Used as scratch.
                 MemoryChunk::kPointersFromHereAreInterestingMask, eq, &done);
@@ -4912,10 +4911,9 @@ void MacroAssembler::StackOverflowCheck(Register num_args, Register scratch1,
 void MacroAssembler::TestCodeIsMarkedForDeoptimizationAndJump(
     Register code_data_container, Register scratch, Condition cond,
     Label* target) {
-  Lwu(scratch,
+  Lhu(scratch,
       FieldMemOperand(code_data_container, Code::kKindSpecificFlagsOffset));
-  And(scratch, scratch,
-      Operand(1 << InstructionStream::kMarkedForDeoptimizationBit));
+  And(scratch, scratch, Operand(1 << Code::kMarkedForDeoptimizationBit));
   Branch(target, cond, scratch, Operand(zero_reg));
 }
 
@@ -5288,11 +5286,6 @@ void MacroAssembler::JumpToExternalReference(const ExternalReference& builtin,
   Handle<Code> code =
       CodeFactory::CEntry(isolate(), 1, ArgvMode::kStack, builtin_exit_frame);
   Jump(code, RelocInfo::CODE_TARGET, al, zero_reg, Operand(zero_reg), bd);
-}
-
-void MacroAssembler::JumpToOffHeapInstructionStream(Address entry) {
-  li(kOffHeapTrampolineRegister, Operand(entry, RelocInfo::OFF_HEAP_TARGET));
-  Jump(kOffHeapTrampolineRegister);
 }
 
 void MacroAssembler::LoadWeakValue(Register out, Register in,
@@ -6197,16 +6190,6 @@ void MacroAssembler::LoadCodeEntry(Register destination,
   ASM_CODE_COMMENT(this);
   Ld(destination,
      FieldMemOperand(code_data_container_object, Code::kCodeEntryPointOffset));
-}
-
-void MacroAssembler::LoadCodeInstructionStreamNonBuiltin(
-    Register destination, Register code_data_container_object) {
-  ASM_CODE_COMMENT(this);
-  // Compute the InstructionStream object pointer from the code entry point.
-  Ld(destination,
-     FieldMemOperand(code_data_container_object, Code::kCodeEntryPointOffset));
-  Dsubu(destination, destination,
-        Operand(InstructionStream::kHeaderSize - kHeapObjectTag));
 }
 
 void MacroAssembler::CallCodeObject(Register code_data_container_object) {

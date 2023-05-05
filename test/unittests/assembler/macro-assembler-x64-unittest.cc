@@ -109,14 +109,14 @@ using F0 = int();
 static void EntryCode(MacroAssembler* masm) {
   // Smi constant register is callee save.
   __ pushq(kRootRegister);
-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+#ifdef V8_COMPRESS_POINTERS
   __ pushq(kPtrComprCageBaseRegister);
 #endif
   __ InitializeRootRegister();
 }
 
 static void ExitCode(MacroAssembler* masm) {
-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+#ifdef V8_COMPRESS_POINTERS
   __ popq(kPtrComprCageBaseRegister);
 #endif
   __ popq(kRootRegister);
@@ -530,8 +530,7 @@ TEST_F(MacroAssemblerX64Test, EmbeddedObj) {
 
   // Test the user-facing reloc interface.
   const int mode_mask = RelocInfo::EmbeddedObjectModeMask();
-  for (RelocIterator it(code->instruction_stream(), mode_mask); !it.done();
-       it.next()) {
+  for (RelocIterator it(*code, mode_mask); !it.done(); it.next()) {
     RelocInfo::Mode mode = it.rinfo()->rmode();
     if (RelocInfo::IsCompressedEmbeddedObject(mode)) {
       CHECK_EQ(*my_array, it.rinfo()->target_object(cage_base));

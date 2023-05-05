@@ -407,6 +407,15 @@ void EmitLoad(InstructionSelector* selector, InstructionCode opcode,
     }
   }
 
+  if (base != nullptr && base->opcode() == IrOpcode::kLoadRootRegister) {
+    input_count = 1;
+    // This will only work if {index} is a constant.
+    inputs[0] = g.UseImmediate(index);
+    opcode |= AddressingModeField::encode(kMode_Root);
+    selector->Emit(opcode, 1, output, input_count, inputs);
+    return;
+  }
+
   inputs[0] = g.UseRegister(base);
   if (g.CanBeImmediate(index, opcode)) {
     inputs[1] = g.UseImmediate(index);
@@ -726,7 +735,7 @@ void VisitStoreCommon(InstructionSelector* selector, Node* node,
     InstructionCode code;
     if (!atomic_order) {
       code = kArchStoreWithWriteBarrier;
-      code |= MiscField::encode(static_cast<int>(record_write_mode));
+      code |= RecordWriteModeField::encode(record_write_mode);
     } else {
       code = kArchAtomicStoreWithWriteBarrier;
       code |= AtomicMemoryOrderField::encode(*atomic_order);
@@ -763,6 +772,16 @@ void VisitStoreCommon(InstructionSelector* selector, Node* node,
         selector->Emit(opcode, 0, nullptr, input_count, inputs);
         return;
       }
+    }
+
+    if (base != nullptr && base->opcode() == IrOpcode::kLoadRootRegister) {
+      int input_count = 2;
+      InstructionOperand inputs[2];
+      inputs[0] = g.UseRegister(value);
+      inputs[1] = g.UseImmediate(index);
+      opcode |= AddressingModeField::encode(kMode_Root);
+      selector->Emit(opcode, 0, nullptr, input_count, inputs);
+      return;
     }
 
     InstructionOperand inputs[4];
@@ -2720,10 +2739,25 @@ void InstructionSelector::VisitWord32AtomicPairCompareExchange(Node* node) {
 
 void InstructionSelector::VisitI32x4DotI16x8S(Node* node) {
   ArmOperandGenerator g(this);
-  InstructionOperand temps[] = {g.TempSimd128Register()};
   Emit(kArmI32x4DotI16x8S, g.DefineAsRegister(node),
        g.UseUniqueRegister(node->InputAt(0)),
-       g.UseUniqueRegister(node->InputAt(1)), arraysize(temps), temps);
+       g.UseUniqueRegister(node->InputAt(1)));
+}
+
+void InstructionSelector::VisitI16x8DotI8x16I7x16S(Node* node) {
+  ArmOperandGenerator g(this);
+  Emit(kArmI16x8DotI8x16S, g.DefineAsRegister(node),
+       g.UseUniqueRegister(node->InputAt(0)),
+       g.UseUniqueRegister(node->InputAt(1)));
+}
+
+void InstructionSelector::VisitI32x4DotI8x16I7x16AddS(Node* node) {
+  ArmOperandGenerator g(this);
+  InstructionOperand temps[] = {g.TempSimd128Register()};
+  Emit(kArmI32x4DotI8x16AddS, g.DefineSameAsInput(node, 2),
+       g.UseUniqueRegister(node->InputAt(0)),
+       g.UseUniqueRegister(node->InputAt(1)),
+       g.UseUniqueRegister(node->InputAt(2)), arraysize(temps), temps);
 }
 
 void InstructionSelector::VisitS128Const(Node* node) {

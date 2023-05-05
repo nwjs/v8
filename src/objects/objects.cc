@@ -2036,7 +2036,8 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
       break;
     }
     case INSTRUCTION_STREAM_TYPE: {
-      InstructionStream code = InstructionStream::cast(*this);
+      InstructionStream istream = InstructionStream::cast(*this);
+      Code code = istream.code(kAcquireLoad);
       os << "<InstructionStream " << CodeKindToString(code.kind());
       if (code.is_builtin()) {
         os << " " << Builtins::name(code.builtin_id());
@@ -2407,6 +2408,7 @@ void HeapObject::RehashBasedOnMap(IsolateT* isolate) {
       SimpleNumberDictionary::cast(*this).Rehash(isolate);
       break;
     case DESCRIPTOR_ARRAY_TYPE:
+    case STRONG_DESCRIPTOR_ARRAY_TYPE:
       DCHECK_LE(1, DescriptorArray::cast(*this).number_of_descriptors());
       DescriptorArray::cast(*this).Sort();
       break;
@@ -4436,14 +4438,14 @@ template Handle<DescriptorArray> DescriptorArray::Allocate(
 
 void DescriptorArray::Initialize(EnumCache empty_enum_cache,
                                  HeapObject undefined_value,
-                                 int nof_descriptors, int slack) {
+                                 int nof_descriptors, int slack,
+                                 uint32_t raw_gc_state) {
   DCHECK_GE(nof_descriptors, 0);
   DCHECK_GE(slack, 0);
   DCHECK_LE(nof_descriptors + slack, kMaxNumberOfDescriptors);
   set_number_of_all_descriptors(nof_descriptors + slack);
   set_number_of_descriptors(nof_descriptors);
-  set_raw_number_of_marked_descriptors(0);
-  set_filler16bits(0);
+  set_raw_gc_state(raw_gc_state, kRelaxedStore);
   set_enum_cache(empty_enum_cache, SKIP_WRITE_BARRIER);
   MemsetTagged(GetDescriptorSlot(0), undefined_value,
                number_of_all_descriptors() * kEntrySize);
@@ -4546,28 +4548,6 @@ void DescriptorArray::CheckNameCollisionDuringInsertion(Descriptor* desc,
     if (current_key.hash() != desc_hash) return;
     CHECK(current_key != *desc->GetKey());
   }
-}
-
-int16_t DescriptorArray::UpdateNumberOfMarkedDescriptors(
-    unsigned mark_compact_epoch, int16_t new_marked) {
-  static_assert(kMaxNumberOfDescriptors <=
-                NumberOfMarkedDescriptors::kMaxNumberOfMarkedDescriptors);
-  int16_t old_raw_marked = raw_number_of_marked_descriptors();
-  int16_t old_marked =
-      NumberOfMarkedDescriptors::decode(mark_compact_epoch, old_raw_marked);
-  int16_t new_raw_marked =
-      NumberOfMarkedDescriptors::encode(mark_compact_epoch, new_marked);
-  while (old_marked < new_marked) {
-    int16_t actual_raw_marked = CompareAndSwapRawNumberOfMarkedDescriptors(
-        old_raw_marked, new_raw_marked);
-    if (actual_raw_marked == old_raw_marked) {
-      break;
-    }
-    old_raw_marked = actual_raw_marked;
-    old_marked =
-        NumberOfMarkedDescriptors::decode(mark_compact_epoch, old_raw_marked);
-  }
-  return old_marked;
 }
 
 Handle<AccessorPair> AccessorPair::Copy(Isolate* isolate,
@@ -4709,20 +4689,33 @@ void WriteFixedArrayToFlat(FixedArray fixed_array, int length, String separator,
   }
 
   uint32_t num_separators = 0;
+  uint32_t repeat_last = 0;
   for (int i = 0; i < length; i++) {
     Object element = fixed_array.get(i);
-    const bool element_is_separator_sequence = element.IsSmi();
+    const bool element_is_special = element.IsSmi();
 
-    // If element is a Smi, it represents the number of separators to write.
-    if (V8_UNLIKELY(element_is_separator_sequence)) {
-      CHECK(element.ToUint32(&num_separators));
-      // Verify that Smis (number of separators) only occur when necessary:
-      //   1) at the beginning
-      //   2) at the end
-      //   3) when the number of separators > 1
-      //     - It is assumed that consecutive Strings will have one separator,
-      //       so there is no need for a Smi.
-      DCHECK(i == 0 || i == length - 1 || num_separators > 1);
+    // If element is a positive Smi, it represents the number of separators to
+    // write. If it is a negative Smi, it reprsents the number of times the last
+    // string is repeated.
+    if (V8_UNLIKELY(element_is_special)) {
+      int count;
+      CHECK(element.ToInt32(&count));
+      if (count > 0) {
+        num_separators = count;
+        //  Verify that Smis (number of separators) only occur when necessary:
+        //    1) at the beginning
+        //    2) at the end
+        //    3) when the number of separators > 1
+        //      - It is assumed that consecutive Strings will have one
+        //      separator,
+        //        so there is no need for a Smi.
+        DCHECK(i == 0 || i == length - 1 || num_separators > 1);
+      } else {
+        repeat_last = -count;
+        // Repeat is only possible when the previous element is not special.
+        DCHECK_GT(i, 0);
+        DCHECK(fixed_array.get(i - 1).IsString());
+      }
     }
 
     // Write separator(s) if necessary.
@@ -4742,11 +4735,41 @@ void WriteFixedArrayToFlat(FixedArray fixed_array, int length, String separator,
           sink += separator_length;
         }
       }
+      num_separators = 0;
     }
 
-    if (V8_UNLIKELY(element_is_separator_sequence)) {
-      num_separators = 0;
-    } else {
+    // Repeat the last written string |repeat_last| times (including
+    // separators).
+    if (V8_UNLIKELY(repeat_last > 0)) {
+      Object last_element = fixed_array.get(i - 1);
+      int string_length = String::cast(last_element).length();
+      // The implemented logic requires that string length is > 0. Empty strings
+      // are handled by repeating the separator (positive smi in the fixed
+      // array) already.
+      DCHECK_GT(string_length, 0);
+      int length_with_sep = string_length + separator_length;
+      // Only copy separators between elements, not at the start or beginning.
+      sinkchar* copy_end =
+          sink + (length_with_sep * repeat_last) - separator_length;
+      int copy_length = length_with_sep;
+      while (sink < copy_end - copy_length) {
+        DCHECK_LE(sink + copy_length, sink_end);
+        memcpy(sink, sink - copy_length, copy_length * sizeof(sinkchar));
+        sink += copy_length;
+        copy_length *= 2;
+      }
+      int remaining = static_cast<int>(copy_end - sink);
+      if (remaining > 0) {
+        DCHECK_LE(sink + remaining, sink_end);
+        memcpy(sink, sink - remaining - separator_length,
+               remaining * sizeof(sinkchar));
+        sink += remaining;
+      }
+      repeat_last = 0;
+      num_separators = 1;
+    }
+
+    if (V8_LIKELY(!element_is_special)) {
       DCHECK(element.IsString());
       String string = String::cast(element);
       const int string_length = string.length();
@@ -6099,6 +6122,23 @@ Handle<Derived> Dictionary<Derived, Shape>::AtPut(Isolate* isolate,
 }
 
 template <typename Derived, typename Shape>
+void Dictionary<Derived, Shape>::UncheckedAtPut(Isolate* isolate,
+                                                Handle<Derived> dictionary,
+                                                Key key, Handle<Object> value,
+                                                PropertyDetails details) {
+  InternalIndex entry = dictionary->FindEntry(isolate, key);
+
+  // If the entry is present set the value;
+  if (entry.is_not_found()) {
+    Derived::UncheckedAdd(isolate, dictionary, key, value, details);
+  } else {
+    // We don't need to copy over the enumeration index.
+    dictionary->ValueAtPut(entry, *value);
+    if (Shape::kEntrySize == 3) dictionary->DetailsAtPut(entry, details);
+  }
+}
+
+template <typename Derived, typename Shape>
 template <typename IsolateT>
 Handle<Derived>
 BaseNameDictionary<Derived, Shape>::AddNoUpdateNextEnumerationIndex(
@@ -6154,6 +6194,27 @@ Handle<Derived> Dictionary<Derived, Shape>::Add(IsolateT* isolate,
 }
 
 template <typename Derived, typename Shape>
+template <typename IsolateT>
+void Dictionary<Derived, Shape>::UncheckedAdd(IsolateT* isolate,
+                                              Handle<Derived> dictionary,
+                                              Key key, Handle<Object> value,
+                                              PropertyDetails details) {
+  ReadOnlyRoots roots(isolate);
+  uint32_t hash = Shape::Hash(roots, key);
+  // Validate that the key is absent and we capacity is sufficient.
+  SLOW_DCHECK(dictionary->FindEntry(isolate, key).is_not_found());
+  DCHECK(dictionary->HasSufficientCapacityToAdd(1));
+
+  // Compute the key object.
+  Handle<Object> k = Shape::AsHandle(isolate, key);
+
+  InternalIndex entry = dictionary->FindInsertionEntry(isolate, roots, hash);
+  dictionary->SetEntry(entry, *k, *value, details);
+  DCHECK(dictionary->KeyAt(isolate, entry).IsNumber() ||
+         Shape::Unwrap(dictionary->KeyAt(isolate, entry)).IsUniqueName());
+}
+
+template <typename Derived, typename Shape>
 Handle<Derived> Dictionary<Derived, Shape>::ShallowCopy(
     Isolate* isolate, Handle<Derived> dictionary) {
   return Handle<Derived>::cast(isolate->factory()->CopyFixedArrayWithMap(
@@ -6201,6 +6262,13 @@ Handle<NumberDictionary> NumberDictionary::Set(
       AtPut(isolate, dictionary, key, value, details);
   new_dictionary->UpdateMaxNumberKey(key, dictionary_holder);
   return new_dictionary;
+}
+
+// static
+void NumberDictionary::UncheckedSet(Isolate* isolate,
+                                    Handle<NumberDictionary> dictionary,
+                                    uint32_t key, Handle<Object> value) {
+  UncheckedAtPut(isolate, dictionary, key, value, PropertyDetails::Empty());
 }
 
 void NumberDictionary::CopyValuesTo(FixedArray elements) {

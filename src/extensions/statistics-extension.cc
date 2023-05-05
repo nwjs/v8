@@ -82,8 +82,7 @@ void StatisticsExtension::GetCounters(
   // clang-format off
   const StatisticsCounter counter_list[] = {
 #define ADD_COUNTER(name, caption) {counters->name(), #name},
-      STATS_COUNTER_LIST_1(ADD_COUNTER)
-      STATS_COUNTER_LIST_2(ADD_COUNTER)
+      STATS_COUNTER_LIST(ADD_COUNTER)
       STATS_COUNTER_NATIVE_CODE_LIST(ADD_COUNTER)
 #undef ADD_COUNTER
   };  // End counter_list array.
@@ -145,8 +144,8 @@ void StatisticsExtension::GetCounters(
     for (HeapObject obj = iterator.Next(); !obj.is_null();
          obj = iterator.Next()) {
       Object maybe_source_positions;
-      if (obj.IsInstructionStream()) {
-        InstructionStream code = InstructionStream::cast(obj);
+      if (obj.IsCode()) {
+        Code code = Code::cast(obj);
         reloc_info_total += code.relocation_info().Size();
         // Baseline code doesn't have source positions since it uses
         // interpreter code positions.

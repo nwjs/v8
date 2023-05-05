@@ -1597,9 +1597,7 @@ int CountBuiltins() {
   int counter = 0;
   for (HeapObject obj = iterator.Next(); !obj.is_null();
        obj = iterator.Next()) {
-    if (obj.IsInstructionStream() &&
-        InstructionStream::cast(obj).kind() == CodeKind::BUILTIN)
-      counter++;
+    if (obj.IsCode() && Code::cast(obj).kind() == CodeKind::BUILTIN) counter++;
   }
   return counter;
 }
@@ -2825,7 +2823,7 @@ TEST(Regress503552) {
   heap::SimulateIncrementalMarking(isolate->heap());
 
   v8::ScriptCompiler::CachedData* cache_data =
-      CodeSerializer::Serialize(shared);
+      CodeSerializer::Serialize(isolate, shared);
   delete cache_data;
 }
 
@@ -5102,7 +5100,7 @@ void CheckObjectsAreInSharedHeap(Isolate* isolate) {
         heap->MustBeInSharedOldSpace(obj) ||
         (obj.IsString() && String::IsInPlaceInternalizable(String::cast(obj)));
     if (expected_in_shared_old) {
-      CHECK(obj.InSharedHeap());
+      CHECK(obj.InAnySharedSpace());
     }
   }
 }

@@ -37,7 +37,7 @@ namespace v8::internal::compiler::turboshaft {
 // information.
 class TypeInferenceAnalysis {
  public:
-  explicit TypeInferenceAnalysis(Graph& graph, Zone* phase_zone)
+  explicit TypeInferenceAnalysis(const Graph& graph, Zone* phase_zone)
       : graph_(graph),
         // TODO(nicohartmann@): Might put types back into phase_zone once we
         // don't store them in the graph anymore.
@@ -49,7 +49,12 @@ class TypeInferenceAnalysis {
         predecessors_(phase_zone),
         graph_zone_(graph.graph_zone()) {}
 
-  void Run() {
+  GrowingSidetable<Type> Run(
+      GrowingBlockSidetable<std::vector<std::pair<OpIndex, Type>>>*
+          block_refinements = nullptr) {
+#ifdef DEBUG
+    block_refinements_ = block_refinements;
+#endif  // DEBUG
     TURBOSHAFT_TRACE_TYPING("=== Running Type Inference Analysis ===\n");
     for (uint32_t unprocessed_index = 0;
          unprocessed_index < graph_.block_count();) {
@@ -61,7 +66,7 @@ class TypeInferenceAnalysis {
     }
     TURBOSHAFT_TRACE_TYPING("=== Completed Type Inference Analysis ===\n");
 
-    std::swap(graph_.operation_types(), types_);
+    return std::move(types_);
   }
 
   template <bool revisit_loop_header>
@@ -148,6 +153,7 @@ class TypeInferenceAnalysis {
         case Opcode::kSwitch:
         case Opcode::kTuple:
         case Opcode::kStaticAssert:
+        case Opcode::kDebugBreak:
           // These operations do not produce any output that needs to be typed.
           DCHECK_EQ(0, op.outputs_rep().size());
           break;
@@ -199,6 +205,7 @@ class TypeInferenceAnalysis {
         case Opcode::kShift:
         case Opcode::kEqual:
         case Opcode::kChange:
+        case Opcode::kChangeOrDeopt:
         case Opcode::kTryChange:
         case Opcode::kFloat64InsertWord32:
         case Opcode::kTaggedBitcast:
@@ -216,9 +223,32 @@ class TypeInferenceAnalysis {
         case Opcode::kLoadException:
         case Opcode::kTailCall:
         case Opcode::kObjectIs:
+        case Opcode::kFloatIs:
         case Opcode::kConvertToObject:
+        case Opcode::kConvertToObjectOrDeopt:
+        case Opcode::kConvertObjectToPrimitive:
+        case Opcode::kConvertObjectToPrimitiveOrDeopt:
+        case Opcode::kTruncateObjectToPrimitive:
         case Opcode::kTag:
         case Opcode::kUntag:
+        case Opcode::kNewConsString:
+        case Opcode::kNewArray:
+        case Opcode::kDoubleArrayMinMax:
+        case Opcode::kLoadFieldByIndex:
+        case Opcode::kBigIntBinop:
+        case Opcode::kBigIntEqual:
+        case Opcode::kBigIntComparison:
+        case Opcode::kBigIntUnary:
+        case Opcode::kStringAt:
+#ifdef V8_INTL_SUPPORT
+        case Opcode::kStringToCaseIntl:
+#endif  // V8_INTL_SUPPORT
+        case Opcode::kStringLength:
+        case Opcode::kStringIndexOf:
+        case Opcode::kStringFromCodePointAt:
+        case Opcode::kStringSubstring:
+        case Opcode::kStringEqual:
+        case Opcode::kStringComparison:
           // TODO(nicohartmann@): Support remaining operations. For now we
           // compute fallback types.
           if (op.outputs_rep().size() > 0) {
@@ -228,6 +258,10 @@ class TypeInferenceAnalysis {
                     Typer::TypeForRepresentation(op.outputs_rep(), graph_zone_),
                     allow_narrowing, is_fallback_for_unsupported_operation);
           }
+          break;
+        case Opcode::kLoadRootRegister:
+          SetType(index,
+                  Typer::TypeForRepresentation(op.outputs_rep(), graph_zone_));
           break;
       }
     }
@@ -296,7 +330,7 @@ class TypeInferenceAnalysis {
     Type old_type = GetTypeAtDefinition(index);
     Type new_type = ComputeTypeForPhi(phi);
 
-    if (old_type.IsInvalid() || old_type.IsNone()) {
+    if (old_type.IsInvalid()) {
       SetType(index, new_type);
       return true;
     }
@@ -319,7 +353,9 @@ class TypeInferenceAnalysis {
         graph_.Get(index).ToString().substr(0, 40).c_str(),
         old_type.ToString().c_str(), new_type.ToString().c_str());
 
-    new_type = Widen(old_type, new_type);
+    if (!old_type.IsNone()) {
+      new_type = Widen(old_type, new_type);
+    }
     SetType(index, new_type);
     return true;
   }
@@ -408,9 +444,9 @@ class TypeInferenceAnalysis {
     table_.Set(*key_opt, type);
 
 #ifdef DEBUG
-    std::vector<std::pair<OpIndex, Type>>& refinement =
-        graph_.block_type_refinement()[new_block->index()];
-    refinement.push_back(std::make_pair(op, type));
+    if (block_refinements_) {
+      (*block_refinements_)[new_block->index()].emplace_back(op, type);
+    }
 #endif
 
     // TODO(nicohartmann@): One could push the refined type deeper into the
@@ -505,7 +541,7 @@ class TypeInferenceAnalysis {
   }
 
  private:
-  Graph& graph_;
+  const Graph& graph_;
   GrowingSidetable<Type> types_;
   using table_t = SnapshotTable<Type>;
   table_t table_;
@@ -517,6 +553,12 @@ class TypeInferenceAnalysis {
   // it, in order to save memory and not reallocate it for each merge.
   ZoneVector<table_t::Snapshot> predecessors_;
   Zone* graph_zone_;
+
+#ifdef DEBUG
+  // {block_refinements_} are only stored for tracing in Debug builds.
+  GrowingBlockSidetable<std::vector<std::pair<OpIndex, Type>>>*
+      block_refinements_ = nullptr;
+#endif
 };
 
 }  // namespace v8::internal::compiler::turboshaft

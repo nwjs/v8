@@ -165,9 +165,33 @@ class X64OperandGenerator final : public OperandGenerator {
       size_t* input_count,
       RegisterUseKind reg_kind = RegisterUseKind::kUseRegister) {
     AddressingMode mode = kMode_MRI;
+    bool fold_base_into_displacement = false;
+    int64_t fold_value = 0;
     if (base != nullptr && (index != nullptr || displacement != nullptr)) {
-      if (base->opcode() == IrOpcode::kInt32Constant &&
-          OpParameter<int32_t>(base->op()) == 0) {
+      if (index != nullptr && displacement != nullptr &&
+          (base->opcode() == IrOpcode::kInt32Constant ||
+           base->opcode() == IrOpcode::kInt64Constant) &&
+          CanBeImmediate(base) &&
+          (displacement->opcode() == IrOpcode::kInt32Constant ||
+           displacement->opcode() == IrOpcode::kInt64Constant) &&
+          CanBeImmediate(displacement)) {
+        fold_value = GetImmediateIntegerValue(base);
+        int64_t displacement_val = GetImmediateIntegerValue(displacement);
+        if (displacement_mode == kNegativeDisplacement) {
+          fold_value -= displacement_val;
+        } else {
+          fold_value += displacement_val;
+        }
+        if (fold_value == 0) {
+          base = nullptr;
+          displacement = nullptr;
+        } else if (std::numeric_limits<int32_t>::min() < fold_value &&
+                   fold_value <= std::numeric_limits<int32_t>::max()) {
+          base = nullptr;
+          fold_base_into_displacement = true;
+        }
+      } else if (base->opcode() == IrOpcode::kInt32Constant &&
+                 OpParameter<int32_t>(base->op()) == 0) {
         base = nullptr;
       } else if (base->opcode() == IrOpcode::kInt64Constant &&
                  OpParameter<int64_t>(base->op()) == 0) {
@@ -203,7 +227,16 @@ class X64OperandGenerator final : public OperandGenerator {
       }
     } else {
       DCHECK(scale_exponent >= 0 && scale_exponent <= 3);
-      if (displacement != nullptr) {
+      if (fold_base_into_displacement) {
+        DCHECK(base == nullptr);
+        DCHECK(index != nullptr);
+        DCHECK(displacement != nullptr);
+        inputs[(*input_count)++] = UseRegister(index, reg_kind);
+        inputs[(*input_count)++] = UseImmediate(static_cast<int>(fold_value));
+        static const AddressingMode kMnI_modes[] = {kMode_MRI, kMode_M2I,
+                                                    kMode_M4I, kMode_M8I};
+        mode = kMnI_modes[scale_exponent];
+      } else if (displacement != nullptr) {
         if (index == nullptr) {
           inputs[(*input_count)++] = UseRegister(displacement, reg_kind);
           mode = kMode_MR;
@@ -265,7 +298,14 @@ class X64OperandGenerator final : public OperandGenerator {
       }
       return mode;
     }
-    if (m.displacement() == nullptr || CanBeImmediate(m.displacement())) {
+    if (m.base() != nullptr &&
+        m.base()->opcode() == IrOpcode::kLoadRootRegister) {
+      DCHECK_EQ(m.index(), nullptr);
+      DCHECK_EQ(m.scale(), 0);
+      inputs[(*input_count)++] = UseImmediate(m.displacement());
+      return kMode_Root;
+    } else if (m.displacement() == nullptr ||
+               CanBeImmediate(m.displacement())) {
       return GenerateMemoryOperandInputs(
           m.index(), m.scale(), m.base(), m.displacement(),
           m.displacement_mode(), inputs, input_count, reg_kind);
@@ -649,7 +689,7 @@ void VisitStoreCommon(InstructionSelector* selector, Node* node,
     InstructionCode code = is_seqcst ? kArchAtomicStoreWithWriteBarrier
                                      : kArchStoreWithWriteBarrier;
     code |= AddressingModeField::encode(addressing_mode);
-    code |= MiscField::encode(static_cast<int>(record_write_mode));
+    code |= RecordWriteModeField::encode(record_write_mode);
     code |= AccessModeField::encode(access_mode);
     selector->Emit(code, 0, nullptr, arraysize(inputs), inputs,
                    arraysize(temps), temps);
@@ -2365,17 +2405,9 @@ InstructionCode TryNarrowOpcodeSize(InstructionCode opcode, Node* left,
         }
         break;
       }
-      case MachineRepresentation::kWord16:
-        if (opcode == kX64Test || opcode == kX64Test32) return kX64Test16;
-        if (opcode == kX64Cmp || opcode == kX64Cmp32) {
-          if (left_type.semantic() == MachineSemantic::kUint32) {
-            cont->OverwriteUnsignedIfSigned();
-          } else {
-            CHECK_EQ(MachineSemantic::kInt32, left_type.semantic());
-          }
-          return kX64Cmp16;
-        }
-        break;
+      // Cmp16/Test16 may introduce LCP(Length-Changing-Prefixes) stall, use
+      // Cmp32/Test32 instead.
+      case MachineRepresentation::kWord16:  // Fall through.
       case MachineRepresentation::kWord32:
         if (opcode == kX64Test) return kX64Test32;
         if (opcode == kX64Cmp) {
@@ -2539,7 +2571,7 @@ void VisitWord64EqualImpl(InstructionSelector* selector, Node* node,
 
 void VisitWord32EqualImpl(InstructionSelector* selector, Node* node,
                           FlagsContinuation* cont) {
-  if (COMPRESS_POINTERS_BOOL && selector->CanUseRootsRegister()) {
+  if (COMPRESS_POINTERS_BOOL && selector->isolate()) {
     X64OperandGenerator g(selector);
     const RootsTable& roots_table = selector->isolate()->roots_table();
     RootIndex root_index;
@@ -2565,19 +2597,20 @@ void VisitWord32EqualImpl(InstructionSelector* selector, Node* node,
       DCHECK_NE(left, nullptr);
       if (RootsTable::IsReadOnly(root_index) &&
           (V8_STATIC_ROOTS_BOOL || !selector->isolate()->bootstrapper())) {
-        return VisitCompare(
-            selector, kX64Cmp32, g.UseRegister(left),
-            g.TempImmediate(V8HeapCompressionScheme::CompressTagged(
-                selector->isolate()->root(root_index).ptr())),
-            cont);
+        return VisitCompare(selector, kX64Cmp32, g.UseRegister(left),
+                            g.TempImmediate(MacroAssemblerBase::ReadOnlyRootPtr(
+                                root_index, selector->isolate())),
+                            cont);
       }
-      InstructionCode opcode =
-          kX64Cmp32 | AddressingModeField::encode(kMode_Root);
-      return VisitCompare(
-          selector, opcode,
-          g.TempImmediate(
-              MacroAssemblerBase::RootRegisterOffsetForRootIndex(root_index)),
-          g.UseRegister(left), cont);
+      if (selector->CanUseRootsRegister()) {
+        InstructionCode opcode =
+            kX64Cmp32 | AddressingModeField::encode(kMode_Root);
+        return VisitCompare(
+            selector, opcode,
+            g.TempImmediate(
+                MacroAssemblerBase::RootRegisterOffsetForRootIndex(root_index)),
+            g.UseRegister(left), cont);
+      }
     }
   }
   VisitWordCompare(selector, node, kX64Cmp32, cont);
@@ -3322,19 +3355,17 @@ VISIT_ATOMIC_BINOP(Xor)
   V(S128Or)                        \
   V(S128Xor)
 
-#define SIMD256_BINOP_SSE_AVX_LIST(V) \
-  V(F32x8Add)                         \
-  V(F32x8Sub)
-
 #define SIMD_BINOP_SSE_AVX_LANE_SIZE_VECTOR_LENGTH_LIST(V) \
   V(F64x2Add, FAdd, kL64, kV128)                           \
   V(F32x4Add, FAdd, kL32, kV128)                           \
+  V(F32x8Add, FAdd, kL32, kV256)                           \
   V(I64x2Add, IAdd, kL64, kV128)                           \
   V(I32x4Add, IAdd, kL32, kV128)                           \
   V(I16x8Add, IAdd, kL16, kV128)                           \
   V(I8x16Add, IAdd, kL8, kV128)                            \
   V(F64x2Sub, FSub, kL64, kV128)                           \
   V(F32x4Sub, FSub, kL32, kV128)                           \
+  V(F32x8Sub, FSub, kL32, kV256)                           \
   V(I64x2Sub, ISub, kL64, kV128)                           \
   V(I32x4Sub, ISub, kL32, kV128)                           \
   V(I16x8Sub, ISub, kL16, kV128)                           \
@@ -3677,19 +3708,10 @@ SIMD_BINOP_LANE_SIZE_VECTOR_LENGTH_LIST(
            g.UseRegister(node->InputAt(0)), g.UseRegister(node->InputAt(1))); \
     }                                                                         \
   }
-#define VISIT_SIMD256_BINOP(Opcode)                                         \
-  void InstructionSelector::Visit##Opcode(Node* node) {                     \
-    X64OperandGenerator g(this);                                            \
-    Emit(kX64##Opcode, g.DefineAsRegister(node),                            \
-         g.UseRegister(node->InputAt(0)), g.UseRegister(node->InputAt(1))); \
-  }
 
 SIMD_BINOP_SSE_AVX_LIST(VISIT_SIMD_BINOP)
-SIMD256_BINOP_SSE_AVX_LIST(VISIT_SIMD256_BINOP)
 #undef VISIT_SIMD_BINOP
-#undef VISIT_SIMD256_BINOP
 #undef SIMD_BINOP_SSE_AVX_LIST
-#undef SIMD256_BINOP_SSE_AVX_LIST
 
 #define VISIT_SIMD_BINOP_LANE_SIZE_VECTOR_LENGTH(Name, Opcode, LaneSize, \
                                                  VectorLength)           \

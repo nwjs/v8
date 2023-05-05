@@ -179,6 +179,7 @@ UNINITIALIZED_TEST(ConcurrentAllocationWhileMainThreadParksAndUnparks) {
 #endif
   v8_flags.stress_concurrent_allocation = false;
   v8_flags.incremental_marking = false;
+  i::FlagList::EnforceFlagImplications();
 
   v8::Isolate::CreateParams create_params;
   create_params.array_buffer_allocator = CcTest::array_buffer_allocator();
@@ -223,6 +224,7 @@ UNINITIALIZED_TEST(ConcurrentAllocationWhileMainThreadRunsWithSafepoints) {
 #endif
   v8_flags.stress_concurrent_allocation = false;
   v8_flags.incremental_marking = false;
+  i::FlagList::EnforceFlagImplications();
 
   v8::Isolate::CreateParams create_params;
   create_params.array_buffer_allocator = CcTest::array_buffer_allocator();
@@ -398,9 +400,9 @@ UNINITIALIZED_TEST(ConcurrentBlackAllocation) {
     HeapObject object = HeapObject::FromAddress(address);
 
     if (i < kWhiteIterations * kObjectsAllocatedPerIteration) {
-      CHECK(heap->marking_state()->IsWhite(object));
+      CHECK(heap->marking_state()->IsUnmarked(object));
     } else {
-      CHECK(heap->marking_state()->IsBlack(object));
+      CHECK(heap->marking_state()->IsMarked(object));
     }
   }
 
@@ -454,7 +456,7 @@ UNINITIALIZED_TEST(ConcurrentWriteBarrier) {
   }
   heap->StartIncrementalMarking(i::Heap::kNoGCFlags,
                                 i::GarbageCollectionReason::kTesting);
-  CHECK(heap->marking_state()->IsWhite(value));
+  CHECK(heap->marking_state()->IsUnmarked(value));
 
   auto thread =
       std::make_unique<ConcurrentWriteBarrierThread>(heap, fixed_array, value);
@@ -470,7 +472,7 @@ UNINITIALIZED_TEST(ConcurrentWriteBarrier) {
 
 class ConcurrentRecordRelocSlotThread final : public v8::base::Thread {
  public:
-  explicit ConcurrentRecordRelocSlotThread(Heap* heap, InstructionStream code,
+  explicit ConcurrentRecordRelocSlotThread(Heap* heap, Code code,
                                            HeapObject value)
       : v8::base::Thread(base::Thread::Options("ThreadWithLocalHeap")),
         heap_(heap),
@@ -491,7 +493,7 @@ class ConcurrentRecordRelocSlotThread final : public v8::base::Thread {
   }
 
   Heap* heap_;
-  InstructionStream code_;
+  Code code_;
   HeapObject value_;
 };
 
@@ -510,7 +512,7 @@ UNINITIALIZED_TEST(ConcurrentRecordRelocSlot) {
   Isolate* i_isolate = reinterpret_cast<Isolate*>(isolate);
   Heap* heap = i_isolate->heap();
   {
-    InstructionStream code;
+    Code code;
     HeapObject value;
     CodePageCollectionMemoryModificationScopeForTesting code_scope(heap);
     {
@@ -529,11 +531,8 @@ UNINITIALIZED_TEST(ConcurrentRecordRelocSlot) {
 #endif
       CodeDesc desc;
       masm.GetCode(i_isolate, &desc);
-      Handle<InstructionStream> code_handle(
-          Factory::CodeBuilder(i_isolate, desc, CodeKind::FOR_TESTING)
-              .Build()
-              ->instruction_stream(),
-          i_isolate);
+      Handle<Code> code_handle =
+          Factory::CodeBuilder(i_isolate, desc, CodeKind::FOR_TESTING).Build();
       heap::AbandonCurrentlyFreeMemory(heap->old_space());
       Handle<HeapNumber> value_handle(
           i_isolate->factory()->NewHeapNumber<AllocationType::kOld>(1.1));
@@ -543,7 +542,7 @@ UNINITIALIZED_TEST(ConcurrentRecordRelocSlot) {
     }
     heap->StartIncrementalMarking(i::Heap::kNoGCFlags,
                                   i::GarbageCollectionReason::kTesting);
-    CHECK(heap->marking_state()->IsWhite(value));
+    CHECK(heap->marking_state()->IsUnmarked(value));
 
     {
       // TODO(v8:13023): remove ResetPKUPermissionsForThreadSpawning in the

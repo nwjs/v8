@@ -678,31 +678,29 @@ TEST(MakingExternalStringConditions) {
     CcTest::CollectGarbage(i::NEW_SPACE);
   }
 
-  uint16_t* two_byte_string = AsciiToTwoByteString("s1");
-  Local<String> tiny_local_string =
-      String::NewFromTwoByte(env->GetIsolate(), two_byte_string)
-          .ToLocalChecked();
-  i::DeleteArray(two_byte_string);
+  Local<String> tiny_local_string = v8_str("\xCF\x80");
+  Local<String> local_string = v8_str("s1234\xCF\x80");
 
-  two_byte_string = AsciiToTwoByteString("s1234");
-  Local<String> local_string =
-      String::NewFromTwoByte(env->GetIsolate(), two_byte_string)
-          .ToLocalChecked();
-  i::DeleteArray(two_byte_string);
+  CHECK(!tiny_local_string->IsOneByte());
+  CHECK(!local_string->IsOneByte());
 
   if (!i::v8_flags.single_generation) {
     // We should refuse to externalize new space strings.
-    CHECK(!local_string->CanMakeExternal());
+    CHECK(!local_string->CanMakeExternal(String::Encoding::TWO_BYTE_ENCODING));
     // Trigger full GC so that the newly allocated string moves to old gen.
     CcTest::CollectGarbage(i::OLD_SPACE);
   }
   // Old space strings should be accepted.
-  CHECK(local_string->CanMakeExternal());
+  CHECK(local_string->CanMakeExternal(String::Encoding::TWO_BYTE_ENCODING));
 
   // Tiny strings are not in-place externalizable when pointer compression is
   // enabled, but they are if the sandbox is enabled.
-  CHECK_EQ(V8_ENABLE_SANDBOX_BOOL || i::kTaggedSize == i::kSystemPointerSize,
-           tiny_local_string->CanMakeExternal());
+  CHECK_EQ(
+      V8_ENABLE_SANDBOX_BOOL || i::kTaggedSize == i::kSystemPointerSize,
+      tiny_local_string->CanMakeExternal(String::Encoding::TWO_BYTE_ENCODING));
+
+  // Change of representation is not allowed.
+  CHECK(!local_string->CanMakeExternal(String::Encoding::ONE_BYTE_ENCODING));
 }
 
 
@@ -719,18 +717,26 @@ TEST(MakingExternalOneByteStringConditions) {
   Local<String> tiny_local_string = v8_str("s");
   Local<String> local_string = v8_str("s1234");
 
+  CHECK(tiny_local_string->IsOneByte());
+  CHECK(local_string->IsOneByte());
+
   // Single-character strings should not be externalized because they
   // are always in the RO-space.
-  CHECK(!tiny_local_string->CanMakeExternal());
+  CHECK(
+      !tiny_local_string->CanMakeExternal(String::Encoding::ONE_BYTE_ENCODING));
   if (!i::v8_flags.single_generation) {
     // We should refuse to externalize new space strings.
-    CHECK(!local_string->CanMakeExternal());
+    CHECK(!local_string->CanMakeExternal(String::Encoding::ONE_BYTE_ENCODING));
     // Trigger full GC so that the newly allocated string moves to old gen.
     CcTest::CollectGarbage(i::OLD_SPACE);
-    CHECK(!tiny_local_string->CanMakeExternal());
+    CHECK(!tiny_local_string->CanMakeExternal(
+        String::Encoding::ONE_BYTE_ENCODING));
   }
   // Old space strings should be accepted.
-  CHECK(local_string->CanMakeExternal());
+  CHECK(local_string->CanMakeExternal(String::Encoding::ONE_BYTE_ENCODING));
+
+  // Change of representation is not allowed.
+  CHECK(!local_string->CanMakeExternal(String::Encoding::TWO_BYTE_ENCODING));
 }
 
 
@@ -2451,7 +2457,6 @@ THREADED_TEST(TestObjectTemplateReflectConstruct) {
   fun_B->SetClassName(class_name);
 
   v8::Local<v8::String> subclass_name = v8_str("C");
-  v8::Local<v8::Object> b_proto;
   v8::Local<v8::Object> c_proto;
   // Perform several iterations to make sure the cache doesn't break
   // subclassing.
@@ -3111,14 +3116,16 @@ THREADED_TEST(SetAlignedPointerInInternalFields) {
   delete[] heap_allocated_2;
 }
 
-static void CheckAlignedPointerInEmbedderData(LocalContext* env, int index,
-                                              void* value) {
+static void CheckAlignedPointerInEmbedderData(LocalContext* env,
+                                              v8::Local<v8::Object> some_obj,
+                                              int index, void* value) {
   CHECK_EQ(0, static_cast<int>(reinterpret_cast<uintptr_t>(value) & 0x1));
   (*env)->SetAlignedPointerInEmbedderData(index, value);
   CcTest::CollectAllGarbage();
   CHECK_EQ(value, (*env)->GetAlignedPointerFromEmbedderData(index));
+  CHECK_EQ(value,
+           some_obj->GetAlignedPointerFromEmbedderDataInCreationContext(index));
 }
-
 
 static void* AlignedTestPointer(int i) {
   return reinterpret_cast<void*>(i * 1234);
@@ -3127,24 +3134,27 @@ static void* AlignedTestPointer(int i) {
 
 THREADED_TEST(EmbedderDataAlignedPointers) {
   LocalContext env;
-  v8::HandleScope scope(env->GetIsolate());
+  v8::Isolate* isolate = env->GetIsolate();
+  v8::HandleScope scope(isolate);
 
-  CheckAlignedPointerInEmbedderData(&env, 0, nullptr);
+  v8::Local<v8::Object> obj = v8::Object::New(isolate);
+
+  CheckAlignedPointerInEmbedderData(&env, obj, 0, nullptr);
   CHECK_EQ(1, (*env)->GetNumberOfEmbedderDataFields());
 
   int* heap_allocated = new int[100];
-  CheckAlignedPointerInEmbedderData(&env, 1, heap_allocated);
+  CheckAlignedPointerInEmbedderData(&env, obj, 1, heap_allocated);
   CHECK_EQ(2, (*env)->GetNumberOfEmbedderDataFields());
   delete[] heap_allocated;
 
   int stack_allocated[100];
-  CheckAlignedPointerInEmbedderData(&env, 2, stack_allocated);
+  CheckAlignedPointerInEmbedderData(&env, obj, 2, stack_allocated);
   CHECK_EQ(3, (*env)->GetNumberOfEmbedderDataFields());
 
   // The aligned pointer must have the top bits be zero on 64-bit machines (at
   // least if the sandboxed external pointers are enabled).
   void* huge = reinterpret_cast<void*>(0x0000fffffffffffe);
-  CheckAlignedPointerInEmbedderData(&env, 3, huge);
+  CheckAlignedPointerInEmbedderData(&env, obj, 3, huge);
   CHECK_EQ(4, (*env)->GetNumberOfEmbedderDataFields());
 
   // Test growing of the embedder data's backing store.
@@ -13715,6 +13725,7 @@ UNINITIALIZED_TEST(SetJitCodeEventHandler) {
   i::v8_flags.baseline_batch_compilation = false;
 #endif
   if (!i::v8_flags.compact) return;
+  i::FlagList::EnforceFlagImplications();
   const char* script =
       "function bar() {"
       "  var sum = 0;"
@@ -13857,9 +13868,7 @@ static void wasm_event_handler(const v8::JitCodeEvent* event) {
   }
 }
 
-namespace v8 {
-namespace internal {
-namespace wasm {
+namespace v8::internal::wasm {
 TEST(WasmSetJitCodeEventHandler) {
   v8::base::HashMap code;
   instruction_stream_map = &code;
@@ -13874,9 +13883,15 @@ TEST(WasmSetJitCodeEventHandler) {
   v8_isolate->SetJitCodeEventHandler(v8::kJitCodeEventDefault,
                                      wasm_event_handler);
 
+  // Add (unreached) endless recursion to prevent fully inling "f". Otherwise we
+  // won't have source positions and will miss the
+  // {CODE_END_LINE_INFO_RECORDING} event.
   TestSignatures sigs;
   auto& f = r.NewFunction(sigs.i_i(), "f");
-  f.Build({WASM_I32_ADD(WASM_LOCAL_GET(0), WASM_LOCAL_GET(0))});
+  f.Build({WASM_IF(WASM_I32_EQZ(WASM_LOCAL_GET(0)),
+                   WASM_LOCAL_SET(0, WASM_CALL_FUNCTION(f.function_index(),
+                                                        WASM_LOCAL_GET(0)))),
+           WASM_I32_ADD(WASM_LOCAL_GET(0), WASM_LOCAL_GET(0))});
 
   LocalContext env;
 
@@ -13893,11 +13908,8 @@ TEST(WasmSetJitCodeEventHandler) {
   )";
   CompileRun(script);
   CHECK(saw_wasm_main);
-  saw_wasm_main = false;
 }
-}  // namespace wasm
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal::wasm
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 TEST(ExternalAllocatedMemory) {
@@ -14385,6 +14397,110 @@ THREADED_TEST(ProxyGetPropertyNames) {
       "target[Symbol('symbol')] = true;"
       "target.__proto__ = {__proto__:null, 2: 4, 3: 5, c: 6, d: 7};"
       "var result = new Proxy(target, {});"
+      "result;");
+  v8::Local<v8::Object> object = result.As<v8::Object>();
+  v8::PropertyFilter default_filter =
+      static_cast<v8::PropertyFilter>(v8::ONLY_ENUMERABLE | v8::SKIP_SYMBOLS);
+  v8::PropertyFilter include_symbols_filter = v8::ONLY_ENUMERABLE;
+
+  v8::Local<v8::Array> properties =
+      object->GetPropertyNames(context.local()).ToLocalChecked();
+  const char* expected_properties1[] = {"0", "1",          "4294967294", "a",
+                                        "b", "4294967296", "4294967295", "2",
+                                        "3", "c",          "d"};
+  CheckStringArray(isolate, properties, 11, expected_properties1);
+
+  properties =
+      object
+          ->GetPropertyNames(context.local(),
+                             v8::KeyCollectionMode::kIncludePrototypes,
+                             default_filter, v8::IndexFilter::kIncludeIndices)
+          .ToLocalChecked();
+  CheckStringArray(isolate, properties, 11, expected_properties1);
+
+  properties = object
+                   ->GetPropertyNames(context.local(),
+                                      v8::KeyCollectionMode::kIncludePrototypes,
+                                      include_symbols_filter,
+                                      v8::IndexFilter::kIncludeIndices)
+                   .ToLocalChecked();
+  const char* expected_properties1_1[] = {
+      "0",          "1",     "4294967294", "a", "b", "4294967296",
+      "4294967295", nullptr, "2",          "3", "c", "d"};
+  CheckStringArray(isolate, properties, 12, expected_properties1_1);
+  CheckIsSymbolAt(isolate, properties, 7, "symbol");
+
+  properties =
+      object
+          ->GetPropertyNames(context.local(),
+                             v8::KeyCollectionMode::kIncludePrototypes,
+                             default_filter, v8::IndexFilter::kSkipIndices)
+          .ToLocalChecked();
+  const char* expected_properties2[] = {"a",          "b", "4294967296",
+                                        "4294967295", "c", "d"};
+  CheckStringArray(isolate, properties, 6, expected_properties2);
+
+  properties = object
+                   ->GetPropertyNames(context.local(),
+                                      v8::KeyCollectionMode::kIncludePrototypes,
+                                      include_symbols_filter,
+                                      v8::IndexFilter::kSkipIndices)
+                   .ToLocalChecked();
+  const char* expected_properties2_1[] = {
+      "a", "b", "4294967296", "4294967295", nullptr, "c", "d"};
+  CheckStringArray(isolate, properties, 7, expected_properties2_1);
+  CheckIsSymbolAt(isolate, properties, 4, "symbol");
+
+  properties =
+      object
+          ->GetPropertyNames(context.local(), v8::KeyCollectionMode::kOwnOnly,
+                             default_filter, v8::IndexFilter::kIncludeIndices)
+          .ToLocalChecked();
+  const char* expected_properties3[] = {"0", "1",          "4294967294", "a",
+                                        "b", "4294967296", "4294967295"};
+  CheckStringArray(isolate, properties, 7, expected_properties3);
+
+  properties = object
+                   ->GetPropertyNames(
+                       context.local(), v8::KeyCollectionMode::kOwnOnly,
+                       include_symbols_filter, v8::IndexFilter::kIncludeIndices)
+                   .ToLocalChecked();
+  const char* expected_properties3_1[] = {
+      "0", "1", "4294967294", "a", "b", "4294967296", "4294967295", nullptr};
+  CheckStringArray(isolate, properties, 8, expected_properties3_1);
+  CheckIsSymbolAt(isolate, properties, 7, "symbol");
+
+  properties =
+      object
+          ->GetPropertyNames(context.local(), v8::KeyCollectionMode::kOwnOnly,
+                             default_filter, v8::IndexFilter::kSkipIndices)
+          .ToLocalChecked();
+  const char* expected_properties4[] = {"a", "b", "4294967296", "4294967295"};
+  CheckStringArray(isolate, properties, 4, expected_properties4);
+
+  properties = object
+                   ->GetPropertyNames(
+                       context.local(), v8::KeyCollectionMode::kOwnOnly,
+                       include_symbols_filter, v8::IndexFilter::kSkipIndices)
+                   .ToLocalChecked();
+  const char* expected_properties4_1[] = {"a", "b", "4294967296", "4294967295",
+                                          nullptr};
+  CheckStringArray(isolate, properties, 5, expected_properties4_1);
+  CheckIsSymbolAt(isolate, properties, 4, "symbol");
+}
+
+THREADED_TEST(ProxyGetPropertyNamesWithOwnKeysTrap) {
+  LocalContext context;
+  v8::Isolate* isolate = context->GetIsolate();
+  v8::HandleScope scope(isolate);
+  v8::Local<v8::Value> result = CompileRun(
+      "var target = {0: 0, 1: 1, a: 2, b: 3};"
+      "target[2**32] = '4294967296';"
+      "target[2**32-1] = '4294967295';"
+      "target[2**32-2] = '4294967294';"
+      "target[Symbol('symbol')] = true;"
+      "target.__proto__ = {__proto__:null, 2: 4, 3: 5, c: 6, d: 7};"
+      "var result = new Proxy(target, { ownKeys: (t) => Reflect.ownKeys(t) });"
       "result;");
   v8::Local<v8::Object> object = result.As<v8::Object>();
   v8::PropertyFilter default_filter =
@@ -16552,13 +16668,16 @@ TEST(TestIdleNotification) {
   bool finished = false;
   for (int i = 0; i < 200 && !finished; i++) {
     if (i < 10 && CcTest::heap()->incremental_marking()->IsStopped()) {
-      CcTest::heap()->StartIdleIncrementalMarking(
+      CcTest::heap()->StartIncrementalMarking(
+          i::Heap::kReduceMemoryFootprintMask,
           i::GarbageCollectionReason::kTesting);
     }
+    START_ALLOW_USE_DEPRECATED();
     finished = env->GetIsolate()->IdleNotificationDeadline(
         (v8::base::TimeTicks::Now().ToInternalValue() /
          static_cast<double>(v8::base::Time::kMicrosecondsPerSecond)) +
         IdlePauseInSeconds);
+    END_ALLOW_USE_DEPRECATED();
     if (CcTest::heap()->sweeping_in_progress()) {
       CcTest::heap()->EnsureSweepingCompleted(
           i::Heap::SweepingForcedFinalizationMode::kV8Only);
@@ -21603,7 +21722,6 @@ TEST(EscapableHandleScope) {
     }
   }
   for (int i = 0; i < runs; i++) {
-    Local<String> expected;
     if (i != 0) {
       CHECK(v8_str("escape value")
                 ->Equals(context.local(), values[i])
@@ -29450,7 +29568,7 @@ TEST(DeepFreezeIncompatibleTypes) {
     v8::Maybe<void> maybe_success = v8::Nothing<void>();
     CompileRun(context, test_cases[idx].script);
     v8::TryCatch tc(isolate);
-    maybe_success = context->DeepFreeze();
+    maybe_success = context->DeepFreeze(nullptr);
     CHECK(maybe_success.IsNothing());
     CHECK(tc.HasCaught());
     v8::String::Utf8Value uS(isolate, tc.Exception());
@@ -29576,7 +29694,7 @@ TEST(DeepFreezeIsFrozen) {
     CHECK(!status.IsEmpty());
     CHECK(!tc.HasCaught());
 
-    maybe_success = context->DeepFreeze();
+    maybe_success = context->DeepFreeze(nullptr);
     CHECK(!tc.HasCaught());
     status = CompileRun(context, "foo()");
 
@@ -29630,8 +29748,362 @@ TEST(DeepFreezeAllowsSyntax) {
     v8::MaybeLocal<v8::Value> status =
         CompileRun(context, test_cases[idx].script);
     CHECK(!status.IsEmpty());
-    maybe_success = context->DeepFreeze();
+    maybe_success = context->DeepFreeze(nullptr);
     CHECK(!maybe_success.IsNothing());
     ExpectInt32("foo()", test_cases[idx].expected);
   }
+}
+
+namespace {
+void DoNothing(const v8::FunctionCallbackInfo<v8::Value>& ignored) {}
+
+class AllowEmbedderObjects : public v8::Context::DeepFreezeDelegate {
+ public:
+  bool FreezeEmbedderObjectAndGetChildren(
+      v8::Local<v8::Object> obj,
+      std::vector<v8::Local<v8::Object>>& children_out) override {
+    return true;
+  }
+};
+
+}  // namespace
+
+TEST(DeepFreezesJSApiObjectWithDelegate) {
+  const int numCases = 3;
+  struct {
+    const char* script;
+    std::function<void()> run_check;
+  } test_cases[numCases] = {
+      {
+          R"(
+          globalThis.jsApiObject.foo = {test: 4};
+          function foo() {
+            globalThis.jsApiObject.foo.test++;
+            return globalThis.jsApiObject.foo.test;
+          }
+          foo();
+        )",
+          []() { ExpectInt32("foo()", 5); }},
+      {
+          R"(
+          function foo() {
+            if (!('foo' in globalThis.jsApiObject))
+              globalThis.jsApiObject.foo = {test: 4}
+            globalThis.jsApiObject.foo.test++;
+            return globalThis.jsApiObject.foo.test;
+          }
+          foo();
+        )",
+          []() { ExpectInt32("foo()", 5); }},
+      {
+          R"(
+          function foo() {
+            if (!('foo' in globalThis.jsApiObject))
+              globalThis.jsApiObject.foo = 4
+            globalThis.jsApiObject.foo++;
+            return globalThis.jsApiObject.foo;
+          }
+        )",
+          []() { ExpectUndefined("foo()"); }},
+  };
+
+  for (int idx = 0; idx < numCases; idx++) {
+    v8::Isolate* isolate = CcTest::isolate();
+    v8::HandleScope scope(isolate);
+    v8::Local<v8::ObjectTemplate> global_template =
+        v8::ObjectTemplate::New(isolate);
+    v8::Local<v8::FunctionTemplate> v8_template =
+        v8::FunctionTemplate::New(isolate, &DoNothing);
+    v8_template->RemovePrototype();
+    global_template->Set(v8_str("jsApiObject"), v8_template);
+
+    LocalContext env(isolate, /*extensions=*/nullptr, global_template);
+    v8::Local<v8::Context> context = env.local();
+
+    v8::TryCatch tc(isolate);
+    v8::MaybeLocal<v8::Value> status =
+        CompileRun(context, test_cases[idx].script);
+    CHECK(!tc.HasCaught());
+    CHECK(!status.IsEmpty());
+
+    AllowEmbedderObjects delegate;
+    v8::Maybe<void> maybe_success = context->DeepFreeze(&delegate);
+    CHECK(!tc.HasCaught());
+    CHECK(!maybe_success.IsNothing());
+
+    test_cases[idx].run_check();
+  }
+}
+
+namespace {
+
+class MyObject {
+ public:
+  bool Freeze() {
+    was_frozen_ = true;
+    return true;
+  }
+
+  bool was_frozen_ = false;
+  v8::Local<v8::Object> internal_data_;
+};
+
+class HiddenDataDelegate : public v8::Context::DeepFreezeDelegate {
+ public:
+  explicit HiddenDataDelegate(v8::Local<v8::External> my_object)
+      : my_object_(my_object) {}
+
+  bool FreezeEmbedderObjectAndGetChildren(
+      v8::Local<v8::Object> obj,
+      std::vector<v8::Local<v8::Object>>& children_out) override {
+    int fields = obj->InternalFieldCount();
+    for (int idx = 0; idx < fields; idx++) {
+      v8::Local<v8::Value> child_value = obj->GetInternalField(idx);
+      if (child_value->IsExternal()) {
+        if (!FreezeExternal(v8::Local<v8::External>::Cast(child_value),
+                            children_out)) {
+          return false;
+        }
+      }
+    }
+    if (obj->IsExternal()) {
+      return FreezeExternal(v8::Local<v8::External>::Cast(obj), children_out);
+    }
+    return true;
+  }
+
+ private:
+  bool FreezeExternal(v8::Local<v8::External> ext,
+                      std::vector<v8::Local<v8::Object>>& children_out) {
+    if (ext->Value() == my_object_->Value()) {
+      MyObject* my_obj = static_cast<MyObject*>(ext->Value());
+      if (my_obj->Freeze()) {
+        children_out.push_back(my_obj->internal_data_);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  v8::Local<v8::External> my_object_;
+};
+
+}  // namespace
+
+TEST(DeepFreezeDoesntFreezeJSApiObjectFunctionData) {
+  v8::Isolate* isolate = CcTest::isolate();
+  v8::HandleScope scope(isolate);
+
+  MyObject foo;
+  v8::Local<v8::External> v8_foo = v8::External::New(isolate, &foo);
+
+  v8::Local<v8::ObjectTemplate> global_template =
+      v8::ObjectTemplate::New(isolate);
+  v8::Local<v8::FunctionTemplate> v8_template =
+      v8::FunctionTemplate::New(isolate, &DoNothing, /*data=*/v8_foo);
+  v8_template->RemovePrototype();
+  global_template->Set(v8_str("jsApiObject"), v8_template);
+
+  LocalContext env(isolate, /*extensions=*/nullptr, global_template);
+  v8::Local<v8::Context> context = env.local();
+
+  foo = {false, v8::Object::New(isolate)};
+
+  HiddenDataDelegate hdd{v8_foo};
+  v8::TryCatch tc(isolate);
+
+  v8::Maybe<void> maybe_success = context->DeepFreeze(&hdd);
+
+  CHECK(!maybe_success.IsNothing());
+  CHECK(!foo.was_frozen_);
+
+  v8::Local<v8::String> param_list[] = {v8_str("obj")};
+  v8::Local<v8::Value> params[] = {
+      v8::Local<v8::Value>::Cast(foo.internal_data_)};
+  v8::ScriptCompiler::Source source{v8_str("return Object.isFrozen(obj)")};
+  v8::Local<v8::Function> is_frozen =
+      v8::ScriptCompiler::CompileFunction(context, &source, 1, param_list)
+          .ToLocalChecked();
+  v8::MaybeLocal<v8::Value> result =
+      is_frozen->Call(context, context->Global(), 1, params);
+
+  CHECK(!result.IsEmpty());
+  CHECK(result.ToLocalChecked()->IsFalse());
+}
+
+TEST(DeepFreezeForbidsJSApiObjectWithoutDelegate) {
+  v8::Isolate* isolate = CcTest::isolate();
+  v8::HandleScope scope(isolate);
+
+  v8::Local<v8::ObjectTemplate> global_template =
+      v8::ObjectTemplate::New(isolate);
+  v8::Local<v8::ObjectTemplate> v8_template = v8::ObjectTemplate::New(isolate);
+  v8_template->SetInternalFieldCount(1);
+  global_template->Set(v8_str("jsApiObject"), v8_template);
+
+  LocalContext env(isolate, /*extensions=*/nullptr, global_template);
+  v8::Local<v8::Context> context = env.local();
+
+  MyObject foo{false, v8::Object::New(isolate)};
+  v8::Local<v8::External> v8_foo = v8::External::New(isolate, &foo);
+
+  v8::Local<v8::Value> val =
+      context->Global()->Get(context, v8_str("jsApiObject")).ToLocalChecked();
+  CHECK(val->IsObject());
+  v8::Local<v8::Object> obj = v8::Local<v8::Object>::Cast(val);
+  CHECK_EQ(1, obj->InternalFieldCount());
+  obj->SetInternalField(0, v8_foo);
+
+  v8::TryCatch tc(isolate);
+  v8::Maybe<void> maybe_success = context->DeepFreeze(nullptr);
+
+  CHECK(tc.HasCaught());
+  v8::String::Utf8Value uS(isolate, tc.Exception());
+  std::string exception(*uS, uS.length());
+  CHECK_EQ(std::string("TypeError: Cannot DeepFreeze object of type Object"),
+           exception);
+  CHECK(maybe_success.IsNothing());
+}
+
+TEST(DeepFreezeFreezesJSApiObjectData) {
+  v8::Isolate* isolate = CcTest::isolate();
+  v8::HandleScope scope(isolate);
+
+  v8::Local<v8::ObjectTemplate> global_template =
+      v8::ObjectTemplate::New(isolate);
+  v8::Local<v8::ObjectTemplate> v8_template = v8::ObjectTemplate::New(isolate);
+  v8_template->SetInternalFieldCount(1);
+  global_template->Set(v8_str("jsApiObject"), v8_template);
+
+  LocalContext env(isolate, /*extensions=*/nullptr, global_template);
+  v8::Local<v8::Context> context = env.local();
+
+  MyObject foo{false, v8::Object::New(isolate)};
+  v8::Local<v8::External> v8_foo = v8::External::New(isolate, &foo);
+
+  v8::Local<v8::Value> val =
+      context->Global()->Get(context, v8_str("jsApiObject")).ToLocalChecked();
+  CHECK(val->IsObject());
+  v8::Local<v8::Object> obj = v8::Local<v8::Object>::Cast(val);
+  CHECK_EQ(1, obj->InternalFieldCount());
+  obj->SetInternalField(0, v8_foo);
+
+  HiddenDataDelegate hdd{v8_foo};
+
+  v8::TryCatch tc(isolate);
+
+  v8::Maybe<void> maybe_success = context->DeepFreeze(&hdd);
+
+  CHECK(!maybe_success.IsNothing());
+  CHECK(foo.was_frozen_);
+
+  v8::Local<v8::String> param_list[] = {v8_str("obj")};
+  v8::Local<v8::Value> params[] = {
+      v8::Local<v8::Value>::Cast(foo.internal_data_)};
+  v8::ScriptCompiler::Source source{v8_str("return Object.isFrozen(obj)")};
+  v8::Local<v8::Function> is_frozen =
+      v8::ScriptCompiler::CompileFunction(context, &source, 1, param_list)
+          .ToLocalChecked();
+  v8::MaybeLocal<v8::Value> result =
+      is_frozen->Call(context, context->Global(), 1, params);
+
+  CHECK(!result.IsEmpty());
+  CHECK(result.ToLocalChecked()->IsTrue());
+}
+
+TEST(DeepFreezeFreezesExternalObjectData) {
+  LocalContext env;
+  v8::Isolate* isolate = env->GetIsolate();
+  v8::HandleScope scope(isolate);
+  v8::Local<v8::Context> context = env.local();
+
+  MyObject foo{false, v8::Object::New(isolate)};
+  v8::Local<v8::External> v8_foo = v8::External::New(isolate, &foo);
+  v8::Maybe<bool> success =
+      context->Global()->CreateDataProperty(context, v8_str("foo"), v8_foo);
+  CHECK(!success.IsNothing() && success.FromJust());
+
+  HiddenDataDelegate hdd{v8_foo};
+
+  v8::Maybe<void> maybe_success = context->DeepFreeze(&hdd);
+
+  CHECK(!maybe_success.IsNothing());
+  CHECK(foo.was_frozen_);
+
+  v8::Local<v8::String> param_list[] = {v8_str("obj")};
+  v8::Local<v8::Value> params[] = {
+      v8::Local<v8::Value>::Cast(foo.internal_data_)};
+  v8::ScriptCompiler::Source source{v8_str("return Object.isFrozen(obj)")};
+  v8::Local<v8::Function> is_frozen =
+      v8::ScriptCompiler::CompileFunction(context, &source, 1, param_list)
+          .ToLocalChecked();
+  v8::MaybeLocal<v8::Value> result =
+      is_frozen->Call(context, context->Global(), 1, params);
+
+  CHECK(!result.IsEmpty());
+  CHECK(result.ToLocalChecked()->IsTrue());
+}
+
+namespace {
+void handle_property(Local<String> name,
+                     const v8::PropertyCallbackInfo<v8::Value>& info) {
+  info.GetReturnValue().Set(v8_num(900));
+}
+
+void handle_property_2(Local<String> name,
+                       const v8::PropertyCallbackInfo<v8::Value>& info) {
+  info.GetReturnValue().Set(v8_num(902));
+}
+
+void handle_property(const v8::FunctionCallbackInfo<v8::Value>& info) {
+  CHECK_EQ(0, info.Length());
+  info.GetReturnValue().Set(v8_num(907));
+}
+
+}  // namespace
+
+TEST(DeepFreezeInstantiatesAccessors) {
+  LocalContext env;
+  v8::Isolate* isolate = env->GetIsolate();
+  v8::HandleScope scope(isolate);
+  Local<v8::FunctionTemplate> fun_templ = v8::FunctionTemplate::New(isolate);
+  Local<v8::FunctionTemplate> getter_templ =
+      v8::FunctionTemplate::New(isolate, handle_property);
+  getter_templ->SetLength(0);
+  fun_templ->SetAccessorProperty(v8_str("bar"), getter_templ);
+  fun_templ->SetNativeDataProperty(v8_str("instance_foo"), handle_property);
+  fun_templ->SetNativeDataProperty(v8_str("object_foo"), handle_property_2);
+  Local<Function> fun = fun_templ->GetFunction(env.local()).ToLocalChecked();
+  CHECK(env->Global()->Set(env.local(), v8_str("Fun"), fun).FromJust());
+
+  v8::Local<v8::Context> context = env.local();
+  v8::Maybe<void> maybe_success = context->DeepFreeze(nullptr);
+  CHECK(maybe_success.IsNothing());
+}
+
+namespace {
+void handle_object_property(v8::Local<v8::String> property,
+                            const v8::PropertyCallbackInfo<Value>& info) {
+  info.GetReturnValue().Set(v8_num(909));
+}
+}  // namespace
+
+TEST(DeepFreezeInstantiatesAccessors2) {
+  LocalContext env;
+  v8::Isolate* isolate = env->GetIsolate();
+  v8::HandleScope scope(isolate);
+  Local<v8::ObjectTemplate> fun_templ = v8::ObjectTemplate::New(isolate);
+  fun_templ->SetAccessor(v8_str("foo"), handle_object_property);
+  Local<v8::FunctionTemplate> getter_templ =
+      v8::FunctionTemplate::New(isolate, handle_property);
+  getter_templ->SetLength(0);
+  fun_templ->SetAccessorProperty(v8_str("bar"), getter_templ);
+  fun_templ->SetNativeDataProperty(v8_str("instance_foo"), handle_property);
+  fun_templ->SetNativeDataProperty(v8_str("object_foo"), handle_property_2);
+  Local<Object> fun = fun_templ->NewInstance(env.local()).ToLocalChecked();
+  CHECK(env->Global()->Set(env.local(), v8_str("Fun"), fun).FromJust());
+
+  v8::Local<v8::Context> context = env.local();
+  v8::Maybe<void> maybe_success = context->DeepFreeze(nullptr);
+  CHECK(maybe_success.IsNothing());
 }

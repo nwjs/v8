@@ -129,8 +129,8 @@
       {'name': 'benchmarks', 'variant': 'extra'},
       {'name': 'mozilla'},
       {'name': 'mozilla', 'variant': 'extra'},
-      {'name': 'test262', 'shards': 2},
-      {'name': 'test262', 'variant': 'extra', 'shards': 2},
+      {'name': 'test262', 'shards': 4},
+      {'name': 'test262', 'variant': 'extra', 'shards': 4},
       {'name': 'v8testing', 'shards': 2},
       {'name': 'v8testing', 'variant': 'extra'},
       {
@@ -358,16 +358,22 @@
       {'name': 'v8testing', 'shards': 3},
     ],
   },
-  'v8_linux64_coverage': {
+  'v8_linux64_coverage_dbg': {
     'swarming_dimensions' : {
       'os': 'Ubuntu-18.04',
     },
     'tests': [
-      # TODO(https://crbug.com/1265931): Speed things up for now. Later replace
-      # mjsunit and unittests with full v8testing.
-      # {'name': 'v8testing'},
-      {'name': 'mjsunit', 'variant': 'default'},
-      {'name': 'unittests', 'variant': 'default'},
+      {'name': 'v8testing', 'variant': 'default'},
+      {'name': 'v8testing', 'variant': 'future'},
+    ],
+  },
+  'v8_linux64_coverage_rel': {
+    'swarming_dimensions' : {
+      'os': 'Ubuntu-18.04',
+    },
+    'tests': [
+      {'name': 'v8testing', 'variant': 'default'},
+      {'name': 'v8testing', 'variant': 'future'},
     ],
   },
   'v8_linux64_cppgc_non_default_dbg': {
@@ -394,12 +400,12 @@
     },
     'tests': [
       {'name': 'benchmarks', 'shards': 2},
-      {'name': 'benchmarks', 'variant': 'extra'},
+      {'name': 'benchmarks', 'variant': 'extra', 'shards': 2},
       {'name': 'mjsunit_sp_frame_access', 'shards': 2},
       {'name': 'mozilla'},
       {'name': 'mozilla', 'variant': 'extra'},
-      {'name': 'test262', 'variant': 'default', 'shards': 2},
-      {'name': 'test262', 'variant': 'extra', 'shards': 9},
+      {'name': 'test262', 'variant': 'default', 'shards': 3},
+      {'name': 'test262', 'variant': 'extra', 'shards': 12},
       {'name': 'v8testing', 'shards': 5},
       {'name': 'v8testing', 'variant': 'extra', 'shards': 5},
       {'name': 'v8testing', 'variant': 'minor_mc'},
@@ -409,6 +415,7 @@
       {'name': 'v8testing', 'variant': 'stress_concurrent_inlining'},
       # Maglev -- move to extra once more architectures are supported.
       {'name': 'mjsunit', 'variant': 'maglev'},
+      {'name': 'mjsunit', 'variant': 'stress_maglev'},
     ],
   },
   'v8_linux64_dict_tracking_dbg': {
@@ -456,10 +463,8 @@
       {'name': 'webkit', 'variant': 'stress_sampling'},
       # Stress snapshot.
       {'name': 'mjsunit', 'variant': 'stress_snapshot'},
-      # Stress maglev.
-      {'name': 'mjsunit', 'variant': 'stress_maglev'},
-      # Stress maglev-inlining.
-      {'name': 'mjsunit', 'variant': 'maglev_inlining'},
+      # Stress maglev-future.
+      {'name': 'mjsunit', 'variant': 'maglev_future'},
       # Experimental regexp engine.
       {'name': 'mjsunit', 'variant': 'experimental_regexp'},
     ],
@@ -505,14 +510,6 @@
       {'name': 'v8testing'},
     ],
   },
-  'v8_linux64_gcov_coverage': {
-    'swarming_dimensions' : {
-      'os': 'Ubuntu-18.04',
-    },
-    'tests': [
-      {'name': 'v8testing'},
-    ],
-  },
   'v8_linux64_minor_mc_dbg': {
     'swarming_dimensions' : {
       'cpu': 'x86-64-avx2',
@@ -531,8 +528,8 @@
       'os': 'Ubuntu-20.04',
     },
     'tests': [
-      {'name': 'test262', 'variant': 'default', 'shards': 2},
-      {'name': 'v8testing', 'shards': 5},
+      {'name': 'test262', 'variant': 'default', 'shards': 4},
+      {'name': 'v8testing', 'shards': 4},
     ],
   },
   'v8_linux64_nodcheck_rel': {
@@ -549,9 +546,9 @@
       {'name': 'mozilla', 'variant': 'assert_types'},
       {'name': 'mozilla', 'variant': 'extra'},
       {'name': 'perf_integration'},
-      {'name': 'test262', 'shards': 2},
-      {'name': 'test262', 'variant': 'assert_types', 'shards': 2},
-      {'name': 'test262', 'variant': 'extra', 'shards': 2},
+      {'name': 'test262', 'shards': 4},
+      {'name': 'test262', 'variant': 'assert_types'},
+      {'name': 'test262', 'variant': 'extra', 'shards': 4},
       {'name': 'v8testing', 'shards': 2},
       {'name': 'v8testing', 'variant': 'assert_types'},
       {'name': 'v8testing', 'variant': 'extra'},
@@ -559,6 +556,7 @@
       {'name': 'v8testing', 'variant': 'stress_instruction_scheduling'},
       # Maglev -- move to extra once more architectures are supported.
       {'name': 'mjsunit', 'variant': 'maglev'},
+      {'name': 'mjsunit', 'variant': 'stress_maglev'},
     ],
   },
   'v8_linux64_perfetto_dbg': {
@@ -605,7 +603,7 @@
       {'name': 'mjsunit_sp_frame_access'},
       {'name': 'optimize_for_size'},
       {'name': 'test262', 'shards': 4},
-      {'name': 'test262', 'variant': 'extra', 'shards': 3},
+      {'name': 'test262', 'variant': 'extra', 'shards': 4},
       {'name': 'v8initializers'},
       {'name': 'v8testing', 'shards': 2},
       {'name': 'v8testing', 'variant': 'extra', 'shards': 2},
@@ -615,6 +613,7 @@
       {'name': 'v8testing', 'variant': 'stress_instruction_scheduling'},
       # Maglev -- move to extra once more architectures are supported.
       {'name': 'mjsunit', 'variant': 'maglev'},
+      {'name': 'mjsunit', 'variant': 'stress_maglev'},
       # GCMole.
       {'name': 'gcmole_v3', 'variant': 'x64', 'shards': 4},
       {
@@ -660,7 +659,7 @@
       {'name': 'mozilla', 'shards': 2},
       {'name': 'test262', 'variant': 'default', 'shards': 5},
       {'name': 'v8testing', 'shards': 6},
-      {'name': 'v8testing', 'variant': 'extra', 'shards': 5},
+      {'name': 'v8testing', 'variant': 'extra', 'shards': 6},
       {'name': 'v8testing', 'variant': 'slow_path', 'shards': 2},
       {'name': 'v8testing', 'variant': 'stress_concurrent_allocation', 'shards': 2},
     ],
@@ -948,6 +947,7 @@
       {'name': 'v8testing'},
       # Maglev -- move to extra once more architectures are supported.
       {'name': 'mjsunit', 'variant': 'maglev'},
+      {'name': 'mjsunit', 'variant': 'stress_maglev'},
     ],
   },
   'v8_mac_arm64_dbg': {
@@ -960,6 +960,7 @@
       {'name': 'v8testing'},
       # Maglev -- move to extra once more architectures are supported.
       {'name': 'mjsunit', 'variant': 'maglev'},
+      {'name': 'mjsunit', 'variant': 'stress_maglev'},
     ],
   },
   'v8_mac_arm64_full_dbg': {
@@ -972,6 +973,7 @@
       {'name': 'v8testing'},
       # Maglev -- move to extra once more architectures are supported.
       {'name': 'mjsunit', 'variant': 'maglev'},
+      {'name': 'mjsunit', 'variant': 'stress_maglev'},
     ],
   },
   'v8_mac_arm64_no_pointer_compression_dbg': {
@@ -1118,7 +1120,7 @@
       'os': 'Ubuntu-20.04',
     },
     'tests': [
-      {'name': 'test262', 'variant': 'default', 'shards': 3},
+      {'name': 'test262', 'variant': 'default', 'shards': 4},
       {'name': 'v8testing', 'shards': 4},
     ],
   },
@@ -1327,6 +1329,7 @@
       {'name': 'v8testing', 'variant': 'stress_instruction_scheduling'},
       # Maglev -- move to extra once more architectures are supported.
       {'name': 'mjsunit', 'variant': 'maglev'},
+      {'name': 'mjsunit', 'variant': 'stress_maglev'},
       # Noavx.
       {
         'name': 'mozilla',
@@ -1378,11 +1381,17 @@
       'os': 'Ubuntu-18.04',
     },
     'tests': [
-      # TODO(https://crbug.com/1265931): Speed things up for now. Later replace
-      # mjsunit and unittests with full v8testing.
-      # {'name': 'v8testing'},
-      {'name': 'mjsunit', 'variant': 'default'},
-      {'name': 'unittests', 'variant': 'default'},
+      {'name': 'v8testing', 'variant': 'default'},
+      {'name': 'v8testing', 'variant': 'future'},
+    ],
+  },
+  'V8 Linux64 - coverage - debug': {
+    'swarming_dimensions' : {
+      'os': 'Ubuntu-18.04',
+    },
+    'tests': [
+      {'name': 'v8testing', 'variant': 'default'},
+      {'name': 'v8testing', 'variant': 'future'},
     ],
   },
   'V8 Linux64 - custom snapshot - debug': {
@@ -1417,6 +1426,7 @@
       {'name': 'v8testing', 'variant': 'stress_concurrent_inlining', 'shards': 2},
       # Maglev -- move to extra once more architectures are supported.
       {'name': 'mjsunit', 'variant': 'maglev'},
+      {'name': 'mjsunit', 'variant': 'stress_maglev'},
       # Noavx.
       {
         'name': 'mozilla',
@@ -1471,10 +1481,8 @@
       {'name': 'webkit', 'variant': 'stress_sampling'},
       # Stress snapshot.
       {'name': 'mjsunit', 'variant': 'stress_snapshot'},
-      # Stress maglev.
-      {'name': 'mjsunit', 'variant': 'stress_maglev'},
-      # Stress maglev-inlining.
-      {'name': 'mjsunit', 'variant': 'maglev_inlining'},
+      # Stress maglev-future.
+      {'name': 'mjsunit', 'variant': 'maglev_future'},
       # Experimental regexp engine.
       {'name': 'mjsunit', 'variant': 'experimental_regexp'},
     ],
@@ -1535,10 +1543,8 @@
       {'name': 'webkit', 'variant': 'stress_sampling'},
       # Stress snapshot.
       {'name': 'mjsunit', 'variant': 'stress_snapshot'},
-      # Stress maglev.
-      {'name': 'mjsunit', 'variant': 'stress_maglev'},
-      # Stress maglev-inlining.
-      {'name': 'mjsunit', 'variant': 'maglev_inlining'},
+      # Stress maglev-future.
+      {'name': 'mjsunit', 'variant': 'maglev_future'},
       # Experimental regexp engine.
       {'name': 'mjsunit', 'variant': 'experimental_regexp'},
     ],
@@ -1574,14 +1580,6 @@
         'test_args': ['--gc-stress'],
         'shards': 2
       },
-    ],
-  },
-  'V8 Linux64 - gcov coverage': {
-    'swarming_dimensions' : {
-      'os': 'Ubuntu-18.04',
-    },
-    'tests': [
-      {'name': 'v8testing'},
     ],
   },
   'V8 Linux64 - internal snapshot': {
@@ -1829,6 +1827,7 @@
       {'name': 'v8testing', 'variant': 'extra'},
       # Maglev -- move to extra once more architectures are supported.
       {'name': 'mjsunit', 'variant': 'maglev'},
+      {'name': 'mjsunit', 'variant': 'stress_maglev'},
     ],
   },
   'V8 Mac - arm64 - debug': {
@@ -1847,6 +1846,7 @@
       {'name': 'v8testing', 'variant': 'extra', 'shards': 2},
       # Maglev -- move to extra once more architectures are supported.
       {'name': 'mjsunit', 'variant': 'maglev'},
+      {'name': 'mjsunit', 'variant': 'stress_maglev'},
     ],
   },
   'V8 Mac - arm64 - no pointer compression debug': {

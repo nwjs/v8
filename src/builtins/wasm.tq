@@ -20,6 +20,7 @@ extern runtime WasmFunctionTableGet(
 extern runtime WasmFunctionTableSet(
     Context, WasmInstanceObject, Smi, Smi, Object): JSAny;
 extern runtime ThrowWasmError(Context, Smi): JSAny;
+extern runtime WasmThrowTypeError(Context, Smi, JSAny): never;
 extern runtime WasmThrow(Context, Object, FixedArray): JSAny;
 extern runtime WasmReThrow(Context, Object): JSAny;
 extern runtime WasmTriggerTierUp(Context, WasmInstanceObject): JSAny;
@@ -59,7 +60,6 @@ extern runtime WasmStringViewWtf8Encode(
     Context, WasmInstanceObject, Smi, ByteArray, Number, Number, Number): JSAny;
 extern runtime WasmStringViewWtf8Slice(
     Context, ByteArray, Number, Number): String;
-extern runtime WasmStringCompare(NoContext, String, String): Smi;
 extern runtime WasmStringFromCodePoint(Context, Number): String;
 extern runtime WasmStringHash(NoContext, String): Smi;
 extern runtime WasmJSToWasmObject(Context, JSAny, Smi): JSAny;
@@ -88,6 +88,8 @@ extern macro WasmBuiltinsAssembler::LoadInternalFunctionsFromInstance(
     WasmInstanceObject): FixedArray;
 extern macro WasmBuiltinsAssembler::LoadManagedObjectMapsFromInstance(
     WasmInstanceObject): FixedArray;
+extern macro WasmBuiltinsAssembler::LoadContextFromWasmOrJsFrame():
+    NativeContext;
 
 macro LoadContextFromFrame(): NativeContext {
   return LoadContextFromInstance(LoadInstanceFromFrame());
@@ -405,10 +407,10 @@ builtin WasmArrayNewSegment(
 builtin WasmArrayCopyWithChecks(
     dstIndex: uint32, srcIndex: uint32, length: uint32, dstObject: Object,
     srcObject: Object): JSAny {
-  if (dstObject == Null) tail ThrowWasmTrapNullDereference();
-  if (srcObject == Null) tail ThrowWasmTrapNullDereference();
-  const dstArray = %RawDownCast<WasmArray>(dstObject);
-  const srcArray = %RawDownCast<WasmArray>(srcObject);
+  if (dstObject == kWasmNull) tail ThrowWasmTrapNullDereference();
+  if (srcObject == kWasmNull) tail ThrowWasmTrapNullDereference();
+  const dstArray = UnsafeCast<WasmArray>(dstObject);
+  const srcArray = UnsafeCast<WasmArray>(srcObject);
   // Check that the end of the copying range is in-bounds and that the range
   // does not overflow.
   if (dstIndex + length > dstArray.length || dstIndex + length < dstIndex ||
@@ -422,11 +424,14 @@ builtin WasmArrayCopyWithChecks(
 }
 
 builtin WasmArrayCopy(
-    dstIndex: uint32, srcIndex: uint32, length: uint32, dstArray: WasmArray,
-    srcArray: WasmArray): JSAny {
+    dstIndex: uint32, srcIndex: uint32, length: uint32, dstObject: Object,
+    srcObject: Object): JSAny {
+  if (dstObject == kWasmNull) tail ThrowWasmTrapNullDereference();
+  if (srcObject == kWasmNull) tail ThrowWasmTrapNullDereference();
   if (length == 0) return Undefined;
   tail runtime::WasmArrayCopy(
-      LoadContextFromFrame(), dstArray, SmiFromUint32(dstIndex), srcArray,
+      LoadContextFromFrame(), UnsafeCast<WasmArray>(dstObject),
+      SmiFromUint32(dstIndex), UnsafeCast<WasmArray>(srcObject),
       SmiFromUint32(srcIndex), SmiFromUint32(length));
 }
 
@@ -632,7 +637,7 @@ transitioning builtin WasmGetOwnProperty(implicit context: Context)(
 // Trap builtins.
 
 builtin WasmTrap(error: Smi): JSAny {
-  tail runtime::ThrowWasmError(LoadContextFromFrame(), error);
+  tail runtime::ThrowWasmError(LoadContextFromWasmOrJsFrame(), error);
 }
 
 builtin ThrowWasmTrapUnreachable(): JSAny {
@@ -1022,15 +1027,27 @@ builtin WasmStringEncodeWtf16Array(
     unreachable;
   }
 }
+
+builtin ThrowToLowerCaseCalledOnNull(): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kCalledOnNullOrUndefined;
+  const name = StringConstant('String.prototype.toLowerCase');
+  runtime::WasmThrowTypeError(context, SmiConstant(error), name);
+}
+
 builtin WasmStringConcat(a: String, b: String): String {
   const context = LoadContextFromFrame();
   tail StringAdd_CheckNone(a, b);
 }
+
+extern builtin StringEqual(NoContext, String, String, intptr): Boolean;
+
 builtin WasmStringEqual(a: String, b: String): int32 {
   if (TaggedEqual(a, b)) return 1;
   if (a.length != b.length) return 0;
-  const context = LoadContextFromFrame();
-  if (StringEqual(context, a, b) == True) return 1;
+  if (StringEqual(kNoContext, a, b, Convert<intptr>(a.length)) == True) {
+    return 1;
+  }
   return 0;
 }
 builtin WasmStringIsUSVSequence(str: String): int32 {
@@ -1155,7 +1172,7 @@ transitioning builtin WasmStringViewWtf16Slice(
   return string::SubString(string, Convert<uintptr>(start), clampedEnd);
 }
 builtin WasmStringAsIter(string: String): WasmStringViewIter {
-  return new WasmStringViewIter{string: string, offset: 0};
+  return new WasmStringViewIter{string: string, offset: 0, optional_padding: 0};
 }
 macro IsLeadSurrogate(code: char16): bool {
   return (code & 0xfc00) == 0xd800;
@@ -1255,10 +1272,6 @@ builtin WasmStringViewIterSlice(
   return (start == end) ?
       kEmptyString :
       string::SubString(string, Convert<uintptr>(start), Convert<uintptr>(end));
-}
-
-builtin WasmStringCompare(lhs: String, rhs: String): Smi {
-  tail runtime::WasmStringCompare(kNoContext, lhs, rhs);
 }
 
 builtin WasmStringFromCodePoint(codePoint: uint32): String {

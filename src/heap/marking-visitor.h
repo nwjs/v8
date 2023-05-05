@@ -10,8 +10,10 @@
 #include "src/heap/marking-state.h"
 #include "src/heap/marking-worklist.h"
 #include "src/heap/objects-visiting.h"
+#include "src/heap/pretenuring-handler.h"
 #include "src/heap/spaces.h"
 #include "src/heap/weak-object-worklists.h"
+#include "src/objects/string.h"
 
 namespace v8 {
 namespace internal {
@@ -30,7 +32,6 @@ struct EphemeronMarking {
 // - ConcreteVisitor::retaining_path_mode method,
 // - ConcreteVisitor::RecordSlot method,
 // - ConcreteVisitor::RecordRelocSlot method,
-// - ConcreteVisitor::VisitJSObjectSubclass method,
 // These methods capture the difference between the concurrent and main thread
 // marking visitors. For example, the concurrent visitor has to use the
 // snapshotting protocol to visit JSObject and left-trimmable FixedArrays.
@@ -62,6 +63,7 @@ class MarkingVisitorBase : public HeapVisitor<int, ConcreteVisitor> {
   }
 
   V8_INLINE int VisitBytecodeArray(Map map, BytecodeArray object);
+  V8_INLINE int VisitDescriptorArrayStrongly(Map map, DescriptorArray object);
   V8_INLINE int VisitDescriptorArray(Map map, DescriptorArray object);
   V8_INLINE int VisitEphemeronHashTable(Map map, EphemeronHashTable object);
   V8_INLINE int VisitFixedArray(Map map, FixedArray object);
@@ -96,13 +98,11 @@ class MarkingVisitorBase : public HeapVisitor<int, ConcreteVisitor> {
                                MaybeObjectSlot end) final {
     VisitPointersImpl(host, start, end);
   }
-  V8_INLINE void VisitCodePointer(HeapObject host, CodeObjectSlot slot) final {
+  V8_INLINE void VisitCodePointer(Code host, CodeObjectSlot slot) final {
     VisitCodePointerImpl(host, slot);
   }
-  V8_INLINE void VisitEmbeddedPointer(InstructionStream host,
-                                      RelocInfo* rinfo) final;
-  V8_INLINE void VisitCodeTarget(InstructionStream host,
-                                 RelocInfo* rinfo) final;
+  V8_INLINE void VisitEmbeddedPointer(RelocInfo* rinfo) final;
+  V8_INLINE void VisitCodeTarget(RelocInfo* rinfo) final;
   void VisitCustomWeakPointers(HeapObject host, ObjectSlot start,
                                ObjectSlot end) final {
     // Weak list pointers should be ignored during marking. The lists are
@@ -122,7 +122,7 @@ class MarkingVisitorBase : public HeapVisitor<int, ConcreteVisitor> {
   bool ShouldMarkObject(HeapObject object) const {
     if (object.InReadOnlySpace()) return false;
     if (should_mark_shared_heap_) return true;
-    return !object.InSharedHeap();
+    return !object.InAnySharedSpace();
   }
 
   // Marks the object grey and pushes it on the marking work list.
@@ -147,12 +147,9 @@ class MarkingVisitorBase : public HeapVisitor<int, ConcreteVisitor> {
 
   // Similar to VisitPointersImpl() but using code cage base for loading from
   // the slot.
-  V8_INLINE void VisitCodePointerImpl(HeapObject host, CodeObjectSlot slot);
+  V8_INLINE void VisitCodePointerImpl(Code host, CodeObjectSlot slot);
 
-  V8_INLINE void VisitDescriptors(DescriptorArray descriptors,
-                                  int number_of_own_descriptors);
-
-  V8_INLINE int VisitDescriptorsForMap(Map map);
+  V8_INLINE void VisitDescriptorsForMap(Map map);
 
   template <typename T>
   int VisitEmbedderTracingSubclass(Map map, T object);
@@ -164,10 +161,6 @@ class MarkingVisitorBase : public HeapVisitor<int, ConcreteVisitor> {
   V8_INLINE int VisitFixedArrayWithProgressBar(Map map, FixedArray object,
                                                ProgressBar& progress_bar);
   V8_INLINE int VisitFixedArrayRegularly(Map map, FixedArray object);
-  // Marks the descriptor array black without pushing it on the marking work
-  // list and visits its header. Returns the size of the descriptor array
-  // if it was successully marked as black.
-  V8_INLINE int MarkDescriptorArrayBlack(DescriptorArray descriptors);
 
   V8_INLINE void AddStrongReferenceForReferenceSummarizer(HeapObject host,
                                                           HeapObject obj) {
@@ -207,6 +200,10 @@ class YoungGenerationMarkingVisitorBase
   YoungGenerationMarkingVisitorBase(Isolate* isolate,
                                     MarkingWorklists::Local* worklists_local);
 
+  ~YoungGenerationMarkingVisitorBase() override {
+    DCHECK(local_pretenuring_feedback_.empty());
+  }
+
   V8_INLINE void VisitPointers(HeapObject host, ObjectSlot start,
                                ObjectSlot end) final {
     VisitPointersImpl(host, start, end);
@@ -217,8 +214,7 @@ class YoungGenerationMarkingVisitorBase
     VisitPointersImpl(host, start, end);
   }
 
-  V8_INLINE void VisitCodePointer(HeapObject host,
-                                  CodeObjectSlot slot) override {
+  V8_INLINE void VisitCodePointer(Code host, CodeObjectSlot slot) override {
     CHECK(V8_EXTERNAL_CODE_SPACE_BOOL);
     // InstructionStream slots never appear in new space because
     // Code objects, the only object that can contain code pointers, are
@@ -234,15 +230,13 @@ class YoungGenerationMarkingVisitorBase
     VisitPointerImpl(host, slot);
   }
 
-  V8_INLINE void VisitCodeTarget(InstructionStream host,
-                                 RelocInfo* rinfo) final {
-    // InstructionStream objects are not expected in new space.
+  V8_INLINE void VisitCodeTarget(RelocInfo* rinfo) final {
+    // Code objects are not expected in new space.
     UNREACHABLE();
   }
 
-  V8_INLINE void VisitEmbeddedPointer(InstructionStream host,
-                                      RelocInfo* rinfo) final {
-    // InstructionStream objects are not expected in new space.
+  V8_INLINE void VisitEmbeddedPointer(RelocInfo* rinfo) final {
+    // Code objects are not expected in new space.
     UNREACHABLE();
   }
 
@@ -251,6 +245,13 @@ class YoungGenerationMarkingVisitorBase
   V8_INLINE int VisitJSDataViewOrRabGsabDataView(
       Map map, JSDataViewOrRabGsabDataView object);
   V8_INLINE int VisitJSTypedArray(Map map, JSTypedArray object);
+
+  V8_INLINE int VisitJSObject(Map map, JSObject object);
+  V8_INLINE int VisitJSObjectFast(Map map, JSObject object);
+  template <typename T, typename TBodyDescriptor = typename T::BodyDescriptor>
+  V8_INLINE int VisitJSObjectSubclass(Map map, T object);
+
+  V8_INLINE void Finalize();
 
  protected:
   ConcreteVisitor* concrete_visitor() {
@@ -274,6 +275,8 @@ class YoungGenerationMarkingVisitorBase
   void VisitPointerImpl(HeapObject host, TSlot slot);
 
   MarkingWorklists::Local* worklists_local_;
+  PretenuringHandler* const pretenuring_handler_;
+  PretenuringHandler::PretenuringFeedbackMap local_pretenuring_feedback_;
 };
 
 }  // namespace internal

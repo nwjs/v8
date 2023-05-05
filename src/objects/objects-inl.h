@@ -77,11 +77,11 @@ bool Object::IsTaggedIndex() const {
 }
 
 bool Object::InSharedHeap() const {
-  return IsHeapObject() && HeapObject::cast(*this).InSharedHeap();
+  return IsHeapObject() && HeapObject::cast(*this).InAnySharedSpace();
 }
 
-bool Object::InSharedWritableHeap() const {
-  return IsHeapObject() && HeapObject::cast(*this).InSharedWritableHeap();
+bool Object::InWritableSharedSpace() const {
+  return IsHeapObject() && HeapObject::cast(*this).InWritableSharedSpace();
 }
 
 bool Object::IsJSObjectThatCanBeTrackedAsPrototype() const {
@@ -128,7 +128,7 @@ ODDBALL_LIST(IS_TYPE_FUNCTION_DEF)
 #define IS_TYPE_FUNCTION_DEF(Type, Value, CamelName)                       \
   bool Object::Is##Type(ReadOnlyRoots roots) const {                       \
     SLOW_DCHECK(CheckObjectComparisonAllowed(ptr(), roots.Value().ptr())); \
-    return V8HeapCompressionScheme::CompressTagged(ptr()) ==               \
+    return V8HeapCompressionScheme::CompressObject(ptr()) ==               \
            StaticReadOnlyRoot::k##CamelName;                               \
   }
 #else
@@ -198,13 +198,13 @@ void Object::Relaxed_WriteField(size_t offset, T value) {
       static_cast<AtomicT>(value));
 }
 
-bool HeapObject::InSharedHeap() const {
+bool HeapObject::InAnySharedSpace() const {
   if (IsReadOnlyHeapObject(*this)) return V8_SHARED_RO_HEAP_BOOL;
-  return InSharedWritableHeap();
+  return InWritableSharedSpace();
 }
 
-bool HeapObject::InSharedWritableHeap() const {
-  return BasicMemoryChunk::FromHeapObject(*this)->InSharedHeap();
+bool HeapObject::InWritableSharedSpace() const {
+  return BasicMemoryChunk::FromHeapObject(*this)->InWritableSharedSpace();
 }
 
 bool HeapObject::InReadOnlySpace() const { return IsReadOnlyHeapObject(*this); }
@@ -213,7 +213,7 @@ bool HeapObject::IsJSObjectThatCanBeTrackedAsPrototype() const {
   // Do not optimize objects in the shared heap because it is not
   // threadsafe. Objects in the shared heap have fixed layouts and their maps
   // never change.
-  return IsJSObject() && !InSharedWritableHeap();
+  return IsJSObject() && !InWritableSharedSpace();
 }
 
 bool HeapObject::IsNullOrUndefined(Isolate* isolate) const {
@@ -817,13 +817,9 @@ ReadOnlyRoots HeapObject::GetReadOnlyRoots() const {
   return ReadOnlyHeap::GetReadOnlyRoots(*this);
 }
 
+// TODO(v8:13788): Remove this cage-ful accessor.
 ReadOnlyRoots HeapObject::GetReadOnlyRoots(PtrComprCageBase cage_base) const {
-#ifdef V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE
-  DCHECK_NE(cage_base.address(), 0);
-  return ReadOnlyRoots(Isolate::FromRootAddress(cage_base.address()));
-#else
   return GetReadOnlyRoots();
-#endif
 }
 
 Map HeapObject::map() const {
@@ -903,6 +899,7 @@ void HeapObject::set_map(Map value, MemoryOrder order, VerificationMode mode) {
     }
   }
   set_map_word(value, order);
+  Heap::NotifyObjectLayoutChangeDone(*this);
 #ifndef V8_DISABLE_WRITE_BARRIERS
   if (!value.is_null()) {
     if (emit_write_barrier == EmitWriteBarrier::kYes) {
@@ -1248,23 +1245,31 @@ bool Object::IsShared() const {
   // Check if this object is already shared.
   InstanceType instance_type = object.map().instance_type();
   if (InstanceTypeChecker::IsAlwaysSharedSpaceJSObject(instance_type)) {
-    DCHECK(object.InSharedHeap());
+    DCHECK(object.InAnySharedSpace());
     return true;
   }
   switch (instance_type) {
     case SHARED_STRING_TYPE:
     case SHARED_ONE_BYTE_STRING_TYPE:
-      DCHECK(object.InSharedHeap());
+    case SHARED_EXTERNAL_STRING_TYPE:
+    case SHARED_EXTERNAL_ONE_BYTE_STRING_TYPE:
+    case SHARED_UNCACHED_EXTERNAL_STRING_TYPE:
+    case SHARED_UNCACHED_EXTERNAL_ONE_BYTE_STRING_TYPE:
+      DCHECK(object.InAnySharedSpace());
       return true;
     case INTERNALIZED_STRING_TYPE:
     case ONE_BYTE_INTERNALIZED_STRING_TYPE:
+    case EXTERNAL_INTERNALIZED_STRING_TYPE:
+    case EXTERNAL_ONE_BYTE_INTERNALIZED_STRING_TYPE:
+    case UNCACHED_EXTERNAL_INTERNALIZED_STRING_TYPE:
+    case UNCACHED_EXTERNAL_ONE_BYTE_INTERNALIZED_STRING_TYPE:
       if (v8_flags.shared_string_table) {
-        DCHECK(object.InSharedHeap());
+        DCHECK(object.InAnySharedSpace());
         return true;
       }
       return false;
     case HEAP_NUMBER_TYPE:
-      return object.InSharedWritableHeap();
+      return object.InWritableSharedSpace();
     default:
       return false;
   }

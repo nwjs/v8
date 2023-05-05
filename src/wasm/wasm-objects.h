@@ -349,7 +349,6 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
   DECL_ACCESSORS(feedback_vectors, FixedArray)
   DECL_SANDBOXED_POINTER_ACCESSORS(memory_start, byte*)
   DECL_PRIMITIVE_ACCESSORS(memory_size, size_t)
-  DECL_PRIMITIVE_ACCESSORS(isolate_root, Address)
   DECL_PRIMITIVE_ACCESSORS(stack_limit_address, Address)
   DECL_PRIMITIVE_ACCESSORS(real_stack_limit_address, Address)
   DECL_PRIMITIVE_ACCESSORS(new_allocation_limit_address, Address*)
@@ -395,7 +394,6 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
   V(kIndirectFunctionTableTargetsOffset, kSystemPointerSize)              \
   V(kIndirectFunctionTableSigIdsOffset, kSystemPointerSize)               \
   V(kGlobalsStartOffset, kSystemPointerSize)                              \
-  V(kIsolateRootOffset, kSystemPointerSize)                               \
   V(kJumpTableStartOffset, kSystemPointerSize)                            \
   /* End of often-accessed fields. */                                     \
   /* Continue with system pointer size fields to maintain alignment. */   \
@@ -1064,6 +1062,7 @@ class WasmSuspenderObject
 
 class WasmNull : public TorqueGeneratedWasmNull<WasmNull, HeapObject> {
  public:
+#if V8_STATIC_ROOTS_BOOL || V8_STATIC_ROOT_GENERATION_BOOL
   // TODO(manoskouk): Make it smaller if able and needed.
   static constexpr int kSize = 64 * KB + kTaggedSize;
   // Payload should be a multiple of page size.
@@ -1073,7 +1072,9 @@ class WasmNull : public TorqueGeneratedWasmNull<WasmNull, HeapObject> {
                              wasm::kV8MaxWasmStructFields * kSimd128Size);
 
   Address payload() { return ptr() + kHeaderSize - kHeapObjectTag; }
-
+#else
+  static constexpr int kSize = kTaggedSize;
+#endif
   class BodyDescriptor;
 
   TQ_OBJECT_CONSTRUCTORS(WasmNull)

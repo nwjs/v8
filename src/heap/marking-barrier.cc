@@ -57,7 +57,7 @@ void MarkingBarrier::WriteWithoutHost(HeapObject value) {
   // objects are considered local.
   if (V8_UNLIKELY(uses_shared_heap_) && !is_shared_space_isolate_) {
     // On client isolates (= worker isolates) shared values can be ignored.
-    if (value.InSharedWritableHeap()) {
+    if (value.InWritableSharedSpace()) {
       return;
     }
   }
@@ -68,7 +68,7 @@ void MarkingBarrier::WriteWithoutHost(HeapObject value) {
 void MarkingBarrier::Write(InstructionStream host, RelocInfo* reloc_info,
                            HeapObject value) {
   DCHECK(IsCurrentMarkingBarrier(host));
-  DCHECK(!host.InSharedWritableHeap());
+  DCHECK(!host.InWritableSharedSpace());
   DCHECK(is_activated_ || shared_heap_worklist_.has_value());
   DCHECK(MemoryChunk::FromHeapObject(host)->IsMarking());
   MarkValue(host, value);
@@ -77,9 +77,9 @@ void MarkingBarrier::Write(InstructionStream host, RelocInfo* reloc_info,
     if (is_main_thread_barrier_) {
       // An optimization to avoid allocating additional typed slots for the
       // main thread.
-      major_collector_->RecordRelocSlot(host, reloc_info, value);
+      major_collector_->RecordRelocSlot(reloc_info, value);
     } else {
-      RecordRelocSlot(host, reloc_info, value);
+      RecordRelocSlot(reloc_info, value);
     }
   }
 }
@@ -87,7 +87,7 @@ void MarkingBarrier::Write(InstructionStream host, RelocInfo* reloc_info,
 void MarkingBarrier::Write(JSArrayBuffer host,
                            ArrayBufferExtension* extension) {
   DCHECK(IsCurrentMarkingBarrier(host));
-  DCHECK(!host.InSharedWritableHeap());
+  DCHECK(!host.InWritableSharedSpace());
   DCHECK(MemoryChunk::FromHeapObject(host)->IsMarking());
 
   if (is_minor()) {
@@ -105,64 +105,53 @@ void MarkingBarrier::Write(DescriptorArray descriptor_array,
   DCHECK(IsReadOnlyHeapObject(descriptor_array.map()));
   DCHECK(MemoryChunk::FromHeapObject(descriptor_array)->IsMarking());
 
-  // The DescriptorArray needs to be marked black here to ensure that slots are
-  // recorded by the Scavenger in case the DescriptorArray is promoted while
-  // incremental marking is running. This is needed as the regular marking
-  // visitor does not re-process any already marked descriptors. If we don't
-  // mark it black here, the Scavenger may promote a DescriptorArray and any
-  // already marked descriptors will not have any slots recorded.
-  if (!marking_state_.IsBlack(descriptor_array)) {
-    marking_state_.WhiteToGrey(descriptor_array);
-    marking_state_.GreyToBlack(descriptor_array);
-    MarkRange(descriptor_array, descriptor_array.GetFirstPointerSlot(),
-              descriptor_array.GetDescriptorSlot(0));
+  // Only major GC uses custom liveness.
+  if (is_minor() || descriptor_array.IsStrongDescriptorArray()) {
+    MarkValueLocal(descriptor_array);
+    return;
   }
 
-  int16_t old_marked = 0;
-  base::Optional<unsigned> gc_epoch;
-
+  unsigned gc_epoch;
+  MarkingWorklist::Local* worklist;
   if (V8_UNLIKELY(uses_shared_heap_) &&
-      descriptor_array.InSharedWritableHeap()) {
-    if (is_shared_space_isolate_) {
-      gc_epoch = major_collector_->epoch();
-    } else {
-      gc_epoch = isolate()
-                     ->shared_heap_isolate()
-                     ->heap()
-                     ->mark_compact_collector()
-                     ->epoch();
-    }
-  } else if (is_major()) {
+      descriptor_array.InWritableSharedSpace() && !is_shared_space_isolate_) {
+    gc_epoch = isolate()
+                   ->shared_space_isolate()
+                   ->heap()
+                   ->mark_compact_collector()
+                   ->epoch();
+    DCHECK(shared_heap_worklist_.has_value());
+    worklist = &*shared_heap_worklist_;
+  } else {
     gc_epoch = major_collector_->epoch();
+    worklist = current_worklist_;
   }
 
-  // Concurrent MinorMC always marks the full young generation DescriptorArray.
-  // We cannot use epoch like MajorMC does because only the lower 2 bits are
-  // used, and with many MinorMC cycles this could lead to correctness issues.
-  if (gc_epoch.has_value()) {
-    old_marked = descriptor_array.UpdateNumberOfMarkedDescriptors(
-        *gc_epoch, number_of_own_descriptors);
+  // The DescriptorArray needs to be marked black here to ensure that slots
+  // are recorded by the Scavenger in case the DescriptorArray is promoted
+  // while incremental marking is running. This is needed as the regular
+  // marking visitor does not re-process any already marked descriptors. If we
+  // don't mark it black here, the Scavenger may promote a DescriptorArray and
+  // any already marked descriptors will not have any slots recorded.
+  if (!marking_state_.IsMarked(descriptor_array)) {
+    marking_state_.TryMark(descriptor_array);
+    marking_state_.GreyToBlack(descriptor_array);
   }
 
-  if (old_marked < number_of_own_descriptors) {
-    // This marks the range from [old_marked, number_of_own_descriptors) instead
-    // of registering weak slots which may temporarily hold alive more objects
-    // for the current GC cycle. Weakness is not needed for actual trimming, see
-    // `MarkCompactCollector::TrimDescriptorArray()`.
-    MarkRange(descriptor_array,
-              MaybeObjectSlot(descriptor_array.GetDescriptorSlot(old_marked)),
-              MaybeObjectSlot(descriptor_array.GetDescriptorSlot(
-                  number_of_own_descriptors)));
+  // `TryUpdateIndicesToMark()` acts as a barrier that publishes the slots'
+  // values corresponding to `number_of_own_descriptors`.
+  if (DescriptorArrayMarkingState::TryUpdateIndicesToMark(
+          gc_epoch, descriptor_array, number_of_own_descriptors)) {
+    worklist->Push(descriptor_array);
   }
 }
 
-void MarkingBarrier::RecordRelocSlot(InstructionStream host, RelocInfo* rinfo,
-                                     HeapObject target) {
-  DCHECK(IsCurrentMarkingBarrier(host));
-  if (!MarkCompactCollector::ShouldRecordRelocSlot(host, rinfo, target)) return;
+void MarkingBarrier::RecordRelocSlot(RelocInfo* rinfo, HeapObject target) {
+  DCHECK(IsCurrentMarkingBarrier(rinfo->instruction_stream()));
+  if (!MarkCompactCollector::ShouldRecordRelocSlot(rinfo, target)) return;
 
   MarkCompactCollector::RecordRelocSlotInfo info =
-      MarkCompactCollector::ProcessRelocInfo(host, rinfo, target);
+      MarkCompactCollector::ProcessRelocInfo(rinfo, target);
 
   auto& typed_slots = typed_slots_map_[info.memory_chunk];
   if (!typed_slots) {
@@ -272,10 +261,9 @@ void MarkingBarrier::ActivateAll(Heap* heap, bool is_compacting,
 
   if (heap->isolate()->is_shared_space_isolate()) {
     heap->isolate()
-        ->shared_heap_isolate()
+        ->shared_space_isolate()
         ->global_safepoint()
         ->IterateClientIsolates([](Isolate* client) {
-          if (client->is_shared_space_isolate()) return;
           // Force the RecordWrite builtin into the incremental marking code
           // path.
           client->heap()->SetIsMarkingFlag(true);
@@ -300,7 +288,7 @@ void MarkingBarrier::Activate(bool is_compacting,
 
 void MarkingBarrier::ActivateShared() {
   DCHECK(!shared_heap_worklist_.has_value());
-  Isolate* shared_isolate = isolate()->shared_heap_isolate();
+  Isolate* shared_isolate = isolate()->shared_space_isolate();
   shared_heap_worklist_.emplace(*shared_isolate->heap()
                                      ->mark_compact_collector()
                                      ->marking_worklists()
@@ -317,10 +305,9 @@ void MarkingBarrier::DeactivateAll(Heap* heap) {
 
   if (heap->isolate()->is_shared_space_isolate()) {
     heap->isolate()
-        ->shared_heap_isolate()
+        ->shared_space_isolate()
         ->global_safepoint()
         ->IterateClientIsolates([](Isolate* client) {
-          if (client->is_shared_space_isolate()) return;
           // We can't just simply disable the marking barrier for all clients. A
           // client may still need it to be set for incremental marking in the
           // local heap.
@@ -355,10 +342,9 @@ void MarkingBarrier::PublishAll(Heap* heap) {
 
   if (heap->isolate()->is_shared_space_isolate()) {
     heap->isolate()
-        ->shared_heap_isolate()
+        ->shared_space_isolate()
         ->global_safepoint()
         ->IterateClientIsolates([](Isolate* client) {
-          if (client->is_shared_space_isolate()) return;
           client->heap()->safepoint()->IterateLocalHeaps(
               [](LocalHeap* local_heap) {
                 local_heap->marking_barrier()->PublishSharedIfNeeded();

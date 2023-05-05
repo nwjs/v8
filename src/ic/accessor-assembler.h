@@ -35,10 +35,12 @@ class V8_EXPORT_PRIVATE AccessorAssembler : public CodeStubAssembler {
   void GenerateLoadSuperICBaseline();
   void GenerateKeyedLoadIC();
   void GenerateKeyedLoadIC_Megamorphic();
+  void GenerateKeyedLoadIC_MegamorphicStringKey();
   void GenerateKeyedLoadIC_PolymorphicName();
   void GenerateKeyedLoadICTrampoline();
   void GenerateKeyedLoadICBaseline();
   void GenerateKeyedLoadICTrampoline_Megamorphic();
+  void GenerateKeyedLoadICTrampoline_MegamorphicStringKey();
   void GenerateStoreIC();
   void GenerateStoreICTrampoline();
   void GenerateStoreICBaseline();
@@ -332,6 +334,7 @@ class V8_EXPORT_PRIVATE AccessorAssembler : public CodeStubAssembler {
 
   void KeyedLoadIC(const LoadICParameters* p, LoadAccessMode access_mode);
   void KeyedLoadICGeneric(const LoadICParameters* p);
+  void KeyedLoadICGeneric_StringKey(const LoadICParameters* p);
   void KeyedLoadICPolymorphicName(const LoadICParameters* p,
                                   LoadAccessMode access_mode);
 
@@ -360,12 +363,12 @@ class V8_EXPORT_PRIVATE AccessorAssembler : public CodeStubAssembler {
   // Checks monomorphic case. Returns {feedback} entry of the vector.
   TNode<HeapObjectReference> TryMonomorphicCase(
       TNode<TaggedIndex> slot, TNode<FeedbackVector> vector,
-      TNode<Map> lookup_start_object_map, Label* if_handler,
+      TNode<HeapObjectReference> weak_lookup_start_object_map,
+      Label* if_handler, TVariable<MaybeObject>* var_handler, Label* if_miss);
+  void HandlePolymorphicCase(
+      TNode<HeapObjectReference> weak_lookup_start_object_map,
+      TNode<WeakFixedArray> feedback, Label* if_handler,
       TVariable<MaybeObject>* var_handler, Label* if_miss);
-  void HandlePolymorphicCase(TNode<Map> lookup_start_object_map,
-                             TNode<WeakFixedArray> feedback, Label* if_handler,
-                             TVariable<MaybeObject>* var_handler,
-                             Label* if_miss);
 
   void TryMegaDOMCase(TNode<Object> lookup_start_object,
                       TNode<Map> lookup_start_object_map,

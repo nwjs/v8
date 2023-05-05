@@ -111,6 +111,7 @@ class StatsCounter;
     "address_of_enable_experimental_regexp_engine")                            \
   V(address_of_float_abs_constant, "float_absolute_constant")                  \
   V(address_of_float_neg_constant, "float_negate_constant")                    \
+  V(address_of_log10_offset_table, "log10_offset_table")                       \
   V(address_of_min_int, "LDoubleConstant::min_int")                            \
   V(address_of_mock_arraybuffer_allocator_flag,                                \
     "v8_flags.mock_arraybuffer_allocator")                                     \
@@ -298,8 +299,7 @@ class StatsCounter;
   IF_WASM(V, wasm_memory_copy, "wasm::memory_copy")                            \
   IF_WASM(V, wasm_memory_fill, "wasm::memory_fill")                            \
   IF_WASM(V, wasm_array_copy, "wasm::array_copy")                              \
-  IF_WASM(V, wasm_array_fill_with_number_or_null,                              \
-          "wasm::array_fill_with_number_or_null")                              \
+  IF_WASM(V, wasm_array_fill, "wasm::array_fill")                              \
   V(address_of_wasm_i8x16_swizzle_mask, "wasm_i8x16_swizzle_mask")             \
   V(address_of_wasm_i8x16_popcnt_mask, "wasm_i8x16_popcnt_mask")               \
   V(address_of_wasm_i8x16_splat_0x01, "wasm_i8x16_splat_0x01")                 \
@@ -321,6 +321,7 @@ class StatsCounter;
   V(shared_barrier_from_code_function, "WriteBarrier::SharedFromCode")         \
   V(call_enqueue_microtask_function, "MicrotaskQueue::CallEnqueueMicrotask")   \
   V(call_enter_context_function, "call_enter_context_function")                \
+  V(int64_mul_high_function, "int64_mul_high_function")                        \
   V(atomic_pair_load_function, "atomic_pair_load_function")                    \
   V(atomic_pair_store_function, "atomic_pair_store_function")                  \
   V(atomic_pair_add_function, "atomic_pair_add_function")                      \

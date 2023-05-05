@@ -8,7 +8,6 @@
 #include <atomic>
 #include <memory>
 
-#include "spaces.h"
 #include "src/base/logging.h"
 #include "src/base/macros.h"
 #include "src/base/platform/mutex.h"
@@ -107,6 +106,9 @@ class SemiSpace final : public Space {
   void RemovePage(Page* page);
   void PrependPage(Page* page);
   void MovePageToTheEnd(Page* page);
+
+  void PauseAllocationObservers() override { UNREACHABLE(); }
+  void ResumeAllocationObservers() override { UNREACHABLE(); }
 
   Page* InitializePage(MemoryChunk* chunk) final;
 
@@ -284,10 +286,6 @@ class NewSpace : NON_EXPORTED_BASE(public SpaceWithLinearArea) {
   virtual void MakeLinearAllocationAreaIterable() = 0;
 
   virtual void MakeIterable() = 0;
-
-#ifdef V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
-  virtual void ClearUnusedObjectStartBitmaps() = 0;
-#endif  // V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
 
   virtual iterator begin() = 0;
   virtual iterator end() = 0;
@@ -475,10 +473,6 @@ class V8_EXPORT_PRIVATE SemiSpaceNewSpace final : public NewSpace {
   void MakeAllPagesInFromSpaceIterable();
   void MakeUnusedPagesInToSpaceIterable();
 
-#ifdef V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
-  void ClearUnusedObjectStartBitmaps() override;
-#endif  // V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
-
   Page* first_page() final { return to_space_.first_page(); }
   Page* last_page() final { return to_space_.last_page(); }
 
@@ -581,7 +575,10 @@ class V8_EXPORT_PRIVATE PagedSpaceForNewSpace final : public PagedSpaceBase {
   }
 
   // Reset the allocation pointer.
-  void GarbageCollectionEpilogue() { allocated_linear_areas_ = 0; }
+  void GarbageCollectionEpilogue() {
+    allocated_linear_areas_ = 0;
+    force_allocation_success_ = false;
+  }
 
   // When inline allocation stepping is active, either because of incremental
   // marking, idle scavenge, or allocation statistics gathering, we 'interrupt'
@@ -620,22 +617,26 @@ class V8_EXPORT_PRIVATE PagedSpaceForNewSpace final : public PagedSpaceBase {
   void Verify(Isolate* isolate, SpaceVerificationVisitor* visitor) const final {
     PagedSpaceBase::Verify(isolate, visitor);
 
-    DCHECK_EQ(current_capacity_, target_capacity_);
     DCHECK_EQ(current_capacity_, Page::kPageSize * CountTotalPages());
   }
 #endif
 
   void MakeIterable() { free_list()->RepairLists(heap()); }
 
-#ifdef V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
-  void ClearUnusedObjectStartBitmaps() {}
-#endif  // V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
-
   bool ShouldReleaseEmptyPage() const;
 
   void RefillFreeList() final;
 
+  bool AddPageBeyondCapacity(int size_in_bytes, AllocationOrigin origin);
+
+  void ForceAllocationSuccessUntilNextGC() { force_allocation_success_ = true; }
+
  private:
+  size_t UsableCapacity() const {
+    DCHECK_LE(free_list_->wasted_bytes(), current_capacity_);
+    return current_capacity_ - free_list_->wasted_bytes();
+  }
+
   bool PreallocatePages();
 
   const size_t initial_capacity_;
@@ -644,6 +645,8 @@ class V8_EXPORT_PRIVATE PagedSpaceForNewSpace final : public PagedSpaceBase {
   size_t current_capacity_ = 0;
 
   size_t allocated_linear_areas_ = 0;
+
+  bool force_allocation_success_ = false;
 };
 
 // TODO(v8:12612): PagedNewSpace is a bridge between the NewSpace interface and
@@ -795,12 +798,6 @@ class V8_EXPORT_PRIVATE PagedNewSpace final : public NewSpace {
 
   void MakeIterable() override { paged_space_.MakeIterable(); }
 
-#ifdef V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
-  void ClearUnusedObjectStartBitmaps() override {
-    paged_space_.ClearUnusedObjectStartBitmaps();
-  }
-#endif  // V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
-
   // All operations on `memory_chunk_list_` should go through `paged_space_`.
   heap::List<MemoryChunk>& memory_chunk_list() final { UNREACHABLE(); }
 
@@ -808,6 +805,10 @@ class V8_EXPORT_PRIVATE PagedNewSpace final : public NewSpace {
     return paged_space_.ShouldReleaseEmptyPage();
   }
   void ReleasePage(Page* page) { paged_space_.ReleasePage(page); }
+
+  void ForceAllocationSuccessUntilNextGC() {
+    paged_space_.ForceAllocationSuccessUntilNextGC();
+  }
 
  private:
   bool EnsureAllocation(int size_in_bytes, AllocationAlignment alignment,

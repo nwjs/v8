@@ -71,6 +71,11 @@ Handle<WasmModuleObject> CompileReferenceModule(
                                       .set_for_debugging(kForDebugging)
                                       .set_max_steps(max_steps)
                                       .set_nondeterminism(nondeterminism));
+    if (!result.succeeded()) {
+      FATAL(
+          "Liftoff compilation failed on a valid module. Run with "
+          "--trace-wasm-decoder (in a debug build) to see why.");
+    }
     native_module->PublishCode(
         native_module->AddCompiledCode(std::move(result)));
   }
@@ -160,7 +165,7 @@ void ExecuteAgainstReference(Isolate* isolate,
       isolate, instance, "main", compiled_args.as_vector(), &exception);
 
   if ((exception_ref != nullptr) != (exception != nullptr)) {
-    FATAL("Exception mispatch! Expected: <%s>; got: <%s>",
+    FATAL("Exception mismatch! Expected: <%s>; got: <%s>",
           exception_ref ? exception_ref.get() : "<no exception>",
           exception ? exception.get() : "<no exception>");
   }
@@ -365,8 +370,28 @@ class InitExprInterface {
 
   void BinOp(FullDecoder* decoder, WasmOpcode opcode, const Value& lhs,
              const Value& rhs, Value* result) {
-    // TODO(12089): Implement.
-    UNIMPLEMENTED();
+    switch (opcode) {
+      case kExprI32Add:
+        os_ << "kExprI32Add, ";
+        break;
+      case kExprI32Sub:
+        os_ << "kExprI32Sub, ";
+        break;
+      case kExprI32Mul:
+        os_ << "kExprI32Mul, ";
+        break;
+      case kExprI64Add:
+        os_ << "kExprI64Add, ";
+        break;
+      case kExprI64Sub:
+        os_ << "kExprI64Sub, ";
+        break;
+      case kExprI64Mul:
+        os_ << "kExprI64Mul, ";
+        break;
+      default:
+        UNREACHABLE();
+    }
   }
 
   void UnOp(FullDecoder* decoder, WasmOpcode opcode, const Value& value,
@@ -511,6 +536,7 @@ void GenerateTestCase(Isolate* isolate, ModuleWireBytes wire_bytes,
         "// found in the LICENSE file.\n"
         "\n"
         "// Flags: --wasm-staging --experimental-wasm-gc\n"
+        "// Flags: --experimental-wasm-relaxed-simd\n"
         "\n"
         "d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');\n"
         "\n"
@@ -781,14 +807,17 @@ void WasmExecutionFuzzer::FuzzWasmModule(base::Vector<const uint8_t> data,
 
   testing::SetupIsolateForWasmModule(i_isolate);
 
-  ErrorThrower interpreter_thrower(i_isolate, "Interpreter");
   ModuleWireBytes wire_bytes(buffer.begin(), buffer.end());
 
-  if (require_valid && v8_flags.wasm_fuzzer_gen_test) {
-    GenerateTestCase(i_isolate, wire_bytes, true);
+  auto enabled_features = WasmFeatures::FromIsolate(i_isolate);
+
+  bool valid =
+      GetWasmEngine()->SyncValidate(i_isolate, enabled_features, wire_bytes);
+
+  if (v8_flags.wasm_fuzzer_gen_test) {
+    GenerateTestCase(i_isolate, wire_bytes, valid);
   }
 
-  auto enabled_features = WasmFeatures::FromIsolate(i_isolate);
   MaybeHandle<WasmModuleObject> compiled_module;
   {
     // Explicitly enable Liftoff, disable tiering and set the tier_mask. This
@@ -799,27 +828,22 @@ void WasmExecutionFuzzer::FuzzWasmModule(base::Vector<const uint8_t> data,
                                    tier_mask);
     FlagScope<int> debug_mask_scope(&v8_flags.wasm_debug_mask_for_testing,
                                     debug_mask);
-    compiled_module = GetWasmEngine()->SyncCompile(
-        i_isolate, enabled_features, &interpreter_thrower, wire_bytes);
+    ErrorThrower thrower(i_isolate, "WasmFuzzerSyncCompile");
+    compiled_module = GetWasmEngine()->SyncCompile(i_isolate, enabled_features,
+                                                   &thrower, wire_bytes);
+    CHECK_EQ(valid, !compiled_module.is_null());
+    CHECK_EQ(!valid, thrower.error());
+    if (require_valid && !valid) {
+      FATAL("Generated module should validate, but got: %s",
+            thrower.error_msg());
+    }
+    thrower.Reset();
   }
-  bool compiles = !compiled_module.is_null();
-  if (!require_valid && v8_flags.wasm_fuzzer_gen_test) {
-    GenerateTestCase(i_isolate, wire_bytes, compiles);
+
+  if (valid) {
+    ExecuteAgainstReference(i_isolate, compiled_module.ToHandleChecked(),
+                            kDefaultMaxFuzzerExecutedInstructions);
   }
-
-  std::string error_message;
-  bool result = GetWasmEngine()->SyncValidate(i_isolate, enabled_features,
-                                              wire_bytes, &error_message);
-
-  CHECK_EQ(compiles, result);
-  CHECK_WITH_MSG(
-      !require_valid || result,
-      ("Generated module should validate, but got: " + error_message).c_str());
-
-  if (!compiles) return;
-
-  ExecuteAgainstReference(i_isolate, compiled_module.ToHandleChecked(),
-                          kDefaultMaxFuzzerExecutedInstructions);
 }
 
 }  // namespace v8::internal::wasm::fuzzer

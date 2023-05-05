@@ -85,7 +85,8 @@ class MemoryChunk : public BasicMemoryChunk {
 
   void DiscardUnusedMemory(Address addr, size_t size);
 
-  base::Mutex* mutex() { return mutex_; }
+  base::Mutex* mutex() const { return mutex_; }
+  base::SharedMutex* shared_mutex() const { return shared_mutex_; }
 
   void set_concurrent_sweeping_state(ConcurrentSweepingState state) {
     concurrent_sweeping_ = state;
@@ -215,14 +216,6 @@ class MemoryChunk : public BasicMemoryChunk {
   // read-only space chunks.
   void ReleaseAllocatedMemoryNeededForWritableChunk();
 
-#ifdef V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
-  ObjectStartBitmap* object_start_bitmap() { return &object_start_bitmap_; }
-
-  const ObjectStartBitmap* object_start_bitmap() const {
-    return &object_start_bitmap_;
-  }
-#endif  // V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
-
   void MarkWasUsedForAllocation() { was_used_for_allocation_ = true; }
   void ClearWasUsedForAllocation() { was_used_for_allocation_ = false; }
   bool WasUsedForAllocation() const { return was_used_for_allocation_; }
@@ -269,6 +262,7 @@ class MemoryChunk : public BasicMemoryChunk {
   InvalidatedSlots* invalidated_slots_[NUMBER_OF_REMEMBERED_SET_TYPES];
 
   base::Mutex* mutex_;
+  base::SharedMutex* shared_mutex_;
 
   std::atomic<ConcurrentSweepingState> concurrent_sweeping_;
 
@@ -298,10 +292,6 @@ class MemoryChunk : public BasicMemoryChunk {
   PossiblyEmptyBuckets possibly_empty_buckets_;
 
   ActiveSystemPages* active_system_pages_;
-
-#ifdef V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
-  ObjectStartBitmap object_start_bitmap_;
-#endif  // V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
 
   // Marks a chunk that was used for allocation since it was last swept. Used
   // only for new space pages.

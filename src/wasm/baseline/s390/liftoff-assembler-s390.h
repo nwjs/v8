@@ -195,25 +195,24 @@ bool LiftoffAssembler::NeedsAlignment(ValueKind kind) {
   return (kind == kS128 || is_reference(kind));
 }
 
-void LiftoffAssembler::LoadConstant(LiftoffRegister reg, WasmValue value,
-                                    RelocInfo::Mode rmode) {
+void LiftoffAssembler::LoadConstant(LiftoffRegister reg, WasmValue value) {
   switch (value.type().kind()) {
     case kI32:
-      mov(reg.gp(), Operand(value.to_i32(), rmode));
+      mov(reg.gp(), Operand(value.to_i32()));
       break;
     case kI64:
-      mov(reg.gp(), Operand(value.to_i64(), rmode));
+      mov(reg.gp(), Operand(value.to_i64()));
       break;
     case kF32: {
       UseScratchRegisterScope temps(this);
       Register scratch = temps.Acquire();
-      LoadF32(reg.fp(), value.to_f32_boxed().get_scalar(), scratch);
+      LoadF32(reg.fp(), value.to_f32(), scratch);
       break;
     }
     case kF64: {
       UseScratchRegisterScope temps(this);
       Register scratch = temps.Acquire();
-      LoadF64(reg.fp(), value.to_f64_boxed().get_bits(), scratch);
+      LoadF64(reg.fp(), value.to_f64(), scratch);
       break;
     }
     default:
@@ -288,18 +287,11 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
 
   if (skip_write_barrier || v8_flags.disable_write_barriers) return;
 
-  Label write_barrier;
   Label exit;
   CheckPageFlag(dst_addr, r1, MemoryChunk::kPointersFromHereAreInterestingMask,
-                ne, &write_barrier);
-  b(&exit);
-  bind(&write_barrier);
+                to_condition(kZero), &exit);
   JumpIfSmi(src.gp(), &exit);
-  if (COMPRESS_POINTERS_BOOL) {
-    DecompressTagged(src.gp(), src.gp());
-  }
-  CheckPageFlag(src.gp(), r1,
-                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+  CheckPageFlag(src.gp(), r1, MemoryChunk::kPointersToHereAreInterestingMask,
                 eq, &exit);
   lay(r1, dst_op);
   CallRecordWriteStubSaveRegisters(dst_addr, r1, SaveFPRegsMode::kSave,
@@ -2654,15 +2646,9 @@ void LiftoffAssembler::LoadTransform(LiftoffRegister dst, Register src_addr,
 void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
                                 Register addr, Register offset_reg,
                                 uintptr_t offset_imm, LoadType type,
-                                uint8_t laneidx, uint32_t* protected_load_pc) {
-  if (!is_int20(offset_imm)) {
-    mov(ip, Operand(offset_imm));
-    if (offset_reg != no_reg) {
-      AddS64(ip, offset_reg);
-    }
-    offset_reg = ip;
-    offset_imm = 0;
-  }
+                                uint8_t laneidx, uint32_t* protected_load_pc,
+                                bool i64_offset) {
+  PREP_MEM_OPERAND(offset_reg, offset_imm, ip)
   MemOperand src_op =
       MemOperand(addr, offset_reg == no_reg ? r0 : offset_reg, offset_imm);
 
@@ -2687,15 +2673,9 @@ void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
 void LiftoffAssembler::StoreLane(Register dst, Register offset,
                                  uintptr_t offset_imm, LiftoffRegister src,
                                  StoreType type, uint8_t lane,
-                                 uint32_t* protected_store_pc) {
-  if (!is_int20(offset_imm)) {
-    mov(ip, Operand(offset_imm));
-    if (offset != no_reg) {
-      AddS64(ip, offset);
-    }
-    offset = ip;
-    offset_imm = 0;
-  }
+                                 uint32_t* protected_store_pc,
+                                 bool i64_offset) {
+  PREP_MEM_OPERAND(offset, offset_imm, ip)
   MemOperand dst_op =
       MemOperand(dst, offset == no_reg ? r0 : offset, offset_imm);
 
@@ -2798,14 +2778,18 @@ void LiftoffAssembler::emit_i16x8_q15mulr_sat_s(LiftoffRegister dst,
 void LiftoffAssembler::emit_i16x8_dot_i8x16_i7x16_s(LiftoffRegister dst,
                                                     LiftoffRegister lhs,
                                                     LiftoffRegister rhs) {
-  bailout(kSimd, "emit_i16x8_dot_i8x16_i7x16_s");
+  I16x8DotI8x16S(dst.fp(), lhs.fp(), rhs.fp(), kScratchDoubleReg);
 }
 
 void LiftoffAssembler::emit_i32x4_dot_i8x16_i7x16_add_s(LiftoffRegister dst,
                                                         LiftoffRegister lhs,
                                                         LiftoffRegister rhs,
                                                         LiftoffRegister acc) {
-  bailout(kSimd, "emit_i32x4_dot_i8x16_i7x16_add_s");
+  // Make sure temp register is unique.
+  Simd128Register temp =
+      GetUnusedRegister(kFpReg, LiftoffRegList{dst, lhs, rhs}).fp();
+  I32x4DotI8x16AddS(dst.fp(), lhs.fp(), rhs.fp(), acc.fp(), kScratchDoubleReg,
+                    temp);
 }
 
 void LiftoffAssembler::emit_i8x16_shuffle(LiftoffRegister dst,

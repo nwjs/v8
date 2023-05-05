@@ -126,7 +126,7 @@ void LargeObjectSpace::TearDown() {
 
 void LargeObjectSpace::AdvanceAndInvokeAllocationObservers(Address soon_object,
                                                            size_t object_size) {
-  if (!allocation_counter_.IsActive()) return;
+  if (!heap()->IsAllocationObserverActive()) return;
 
   if (object_size >= allocation_counter_.NextBytes()) {
     allocation_counter_.InvokeAllocationObservers(soon_object, object_size,
@@ -162,10 +162,10 @@ AllocationResult OldLargeObjectSpace::AllocateRaw(int object_size,
       heap()->GCFlagsForIncrementalMarking(),
       kGCCallbackScheduleIdleGarbageCollection);
   if (heap()->incremental_marking()->black_allocation()) {
-    heap()->marking_state()->WhiteToBlack(object);
+    heap()->marking_state()->TryMarkAndAccountLiveBytes(object);
   }
   DCHECK_IMPLIES(heap()->incremental_marking()->black_allocation(),
-                 heap()->marking_state()->IsBlack(object));
+                 heap()->marking_state()->IsMarked(object));
   page->InitializationMemoryFence();
   heap()->NotifyOldGenerationExpansion(identity(), page);
   AdvanceAndInvokeAllocationObservers(object.address(),
@@ -196,10 +196,10 @@ AllocationResult OldLargeObjectSpace::AllocateRawBackground(
   HeapObject object = page->GetObject();
   heap()->StartIncrementalMarkingIfAllocationLimitIsReachedBackground();
   if (heap()->incremental_marking()->black_allocation()) {
-    heap()->marking_state()->WhiteToBlack(object);
+    heap()->marking_state()->TryMarkAndAccountLiveBytes(object);
   }
   DCHECK_IMPLIES(heap()->incremental_marking()->black_allocation(),
-                 heap()->marking_state()->IsBlack(object));
+                 heap()->marking_state()->IsMarked(object));
   page->InitializationMemoryFence();
   if (identity() == CODE_LO_SPACE) {
     heap()->isolate()->AddCodeMemoryChunk(page);
@@ -278,8 +278,7 @@ void LargeObjectSpace::AddPage(LargePage* page, size_t object_size) {
   page_count_++;
   memory_chunk_list_.PushBack(page);
   page->set_owner(this);
-  page->SetOldGenerationPageFlags(!is_off_thread() &&
-                                  heap()->incremental_marking()->IsMarking());
+  page->SetOldGenerationPageFlags(heap()->incremental_marking()->IsMarking());
   for (size_t i = 0; i < ExternalBackingStoreType::kNumTypes; i++) {
     ExternalBackingStoreType t = static_cast<ExternalBackingStoreType>(i);
     IncrementExternalBackingStoreBytes(t, page->ExternalBackingStoreBytes(t));
@@ -451,8 +450,7 @@ OldLargeObjectSpace::OldLargeObjectSpace(Heap* heap, AllocationSpace id)
     : LargeObjectSpace(heap, id) {}
 
 NewLargeObjectSpace::NewLargeObjectSpace(Heap* heap, size_t capacity)
-    : LargeObjectSpace(heap, NEW_LO_SPACE),
-      capacity_(capacity) {}
+    : LargeObjectSpace(heap, NEW_LO_SPACE), capacity_(capacity) {}
 
 AllocationResult NewLargeObjectSpace::AllocateRaw(int object_size) {
   object_size = ALIGN_TO_ALLOCATION_ALIGNMENT(object_size);

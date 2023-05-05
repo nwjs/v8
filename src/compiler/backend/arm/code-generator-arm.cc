@@ -193,9 +193,8 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
   }
 
   void Generate() final {
-    __ CheckPageFlag(
-        value_, MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
-        eq, exit());
+    __ CheckPageFlag(value_, MemoryChunk::kPointersToHereAreInterestingMask, eq,
+                     exit());
     SaveFPRegsMode const save_fp_mode = frame()->DidAllocateDoubleRegisters()
                                             ? SaveFPRegsMode::kSave
                                             : SaveFPRegsMode::kIgnore;
@@ -650,7 +649,7 @@ void CodeGenerator::BailoutIfDeoptimized() {
   int offset = InstructionStream::kCodeOffset - InstructionStream::kHeaderSize;
   __ ldr(scratch, MemOperand(kJavaScriptCallCodeStartRegister, offset));
   __ ldr(scratch, FieldMemOperand(scratch, Code::kKindSpecificFlagsOffset));
-  __ tst(scratch, Operand(1 << InstructionStream::kMarkedForDeoptimizationBit));
+  __ tst(scratch, Operand(1 << Code::kMarkedForDeoptimizationBit));
   __ Jump(BUILTIN_CODE(isolate(), CompileLazyDeoptimizedCode),
           RelocInfo::CODE_TARGET, ne);
 }
@@ -930,7 +929,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArchAtomicStoreWithWriteBarrier: {
       RecordWriteMode mode;
       if (arch_opcode == kArchStoreWithWriteBarrier) {
-        mode = static_cast<RecordWriteMode>(MiscField::decode(instr->opcode()));
+        mode = RecordWriteModeField::decode(instr->opcode());
       } else {
         mode = AtomicStoreRecordWriteModeField::decode(instr->opcode());
       }
@@ -2501,13 +2500,39 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       Simd128Register dst = i.OutputSimd128Register();
       Simd128Register lhs = i.InputSimd128Register(0);
       Simd128Register rhs = i.InputSimd128Register(1);
-      Simd128Register tmp1 = i.TempSimd128Register(0);
       UseScratchRegisterScope temps(masm());
       Simd128Register scratch = temps.AcquireQ();
-      __ vmull(NeonS16, tmp1, lhs.low(), rhs.low());
+      __ vmull(NeonS16, scratch, lhs.low(), rhs.low());
+      __ vpadd(Neon32, dst.low(), scratch.low(), scratch.high());
       __ vmull(NeonS16, scratch, lhs.high(), rhs.high());
-      __ vpadd(Neon32, dst.low(), tmp1.low(), tmp1.high());
       __ vpadd(Neon32, dst.high(), scratch.low(), scratch.high());
+      break;
+    }
+    case kArmI16x8DotI8x16S: {
+      Simd128Register dst = i.OutputSimd128Register();
+      Simd128Register lhs = i.InputSimd128Register(0);
+      Simd128Register rhs = i.InputSimd128Register(1);
+      UseScratchRegisterScope temps(masm());
+      Simd128Register scratch = temps.AcquireQ();
+      __ vmull(NeonS8, scratch, lhs.low(), rhs.low());
+      __ vpadd(Neon16, dst.low(), scratch.low(), scratch.high());
+      __ vmull(NeonS8, scratch, lhs.high(), rhs.high());
+      __ vpadd(Neon16, dst.high(), scratch.low(), scratch.high());
+      break;
+    }
+    case kArmI32x4DotI8x16AddS: {
+      Simd128Register dst = i.OutputSimd128Register();
+      Simd128Register lhs = i.InputSimd128Register(0);
+      Simd128Register rhs = i.InputSimd128Register(1);
+      Simd128Register tmp1 = i.TempSimd128Register(0);
+      DCHECK_EQ(dst, i.InputSimd128Register(2));
+      UseScratchRegisterScope temps(masm());
+      Simd128Register scratch = temps.AcquireQ();
+      __ vmull(NeonS8, scratch, lhs.low(), rhs.low());
+      __ vpadd(Neon16, tmp1.low(), scratch.low(), scratch.high());
+      __ vmull(NeonS8, scratch, lhs.high(), rhs.high());
+      __ vpadd(Neon16, tmp1.high(), scratch.low(), scratch.high());
+      __ vpadal(NeonS16, dst, tmp1);
       break;
     }
     case kArmI32x4TruncSatF64x2SZero: {

@@ -5,6 +5,7 @@
 #include "src/heap/memory-chunk.h"
 
 #include "src/base/logging.h"
+#include "src/base/platform/mutex.h"
 #include "src/base/platform/platform.h"
 #include "src/common/globals.h"
 #include "src/heap/basic-memory-chunk.h"
@@ -129,12 +130,7 @@ MemoryChunk::MemoryChunk(Heap* heap, BaseSpace* space, size_t chunk_size,
                          VirtualMemory reservation, Executability executable,
                          PageSize page_size)
     : BasicMemoryChunk(heap, space, chunk_size, area_start, area_end,
-                       std::move(reservation))
-#ifdef V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
-      ,
-      object_start_bitmap_(PtrComprCageBase{heap->isolate()}, area_start)
-#endif  // V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
-{
+                       std::move(reservation)) {
   base::AsAtomicPointer::Release_Store(&slot_set_[OLD_TO_NEW], nullptr);
   base::AsAtomicPointer::Release_Store(&slot_set_[OLD_TO_OLD], nullptr);
   base::AsAtomicPointer::Release_Store(&slot_set_[OLD_TO_SHARED], nullptr);
@@ -152,6 +148,7 @@ MemoryChunk::MemoryChunk(Heap* heap, BaseSpace* space, size_t chunk_size,
   page_protection_change_mutex_ = new base::Mutex();
   write_unprotect_counter_ = 0;
   mutex_ = new base::Mutex();
+  shared_mutex_ = new base::SharedMutex();
 
   external_backing_store_bytes_[ExternalBackingStoreType::kArrayBuffer] = 0;
   external_backing_store_bytes_[ExternalBackingStoreType::kExternalString] = 0;
@@ -166,9 +163,13 @@ MemoryChunk::MemoryChunk(Heap* heap, BaseSpace* space, size_t chunk_size,
           heap->code_space_memory_modification_scope_depth();
     } else if (!V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT) {
       size_t page_size = MemoryAllocator::GetCommitPageSize();
-      DCHECK(IsAligned(area_start_, page_size));
-      size_t area_size = RoundUp(area_end_ - area_start_, page_size);
-      CHECK(reservation_.SetPermissions(area_start_, area_size,
+      // On executable chunks, area_start_ points past padding used for code
+      // alignment.
+      Address start_before_padding =
+          address() + MemoryChunkLayout::ObjectPageOffsetInCodePage();
+      DCHECK(IsAligned(start_before_padding, page_size));
+      size_t area_size = RoundUp(area_end_ - start_before_padding, page_size);
+      CHECK(reservation_.SetPermissions(start_before_padding, area_size,
                                         DefaultWritableCodePermissions()));
     }
   }
@@ -194,7 +195,7 @@ MemoryChunk::MemoryChunk(Heap* heap, BaseSpace* space, size_t chunk_size,
   // All pages of a shared heap need to be marked with this flag.
   if (owner()->identity() == SHARED_SPACE ||
       owner()->identity() == SHARED_LO_SPACE) {
-    SetFlag(MemoryChunk::IN_SHARED_HEAP);
+    SetFlag(MemoryChunk::IN_WRITABLE_SHARED_SPACE);
   }
 
 #ifdef DEBUG
@@ -213,8 +214,16 @@ void MemoryChunk::SetOldGenerationPageFlags(bool is_marking) {
     SetFlag(MemoryChunk::POINTERS_FROM_HERE_ARE_INTERESTING);
     SetFlag(MemoryChunk::INCREMENTAL_MARKING);
   } else {
-    ClearFlag(MemoryChunk::POINTERS_TO_HERE_ARE_INTERESTING);
-    SetFlag(MemoryChunk::POINTERS_FROM_HERE_ARE_INTERESTING);
+    if (owner_identity() == SHARED_SPACE ||
+        owner_identity() == SHARED_LO_SPACE) {
+      // We need to track pointers into the SHARED_SPACE for OLD_TO_SHARED.
+      SetFlag(MemoryChunk::POINTERS_TO_HERE_ARE_INTERESTING);
+      // No need to track OLD_TO_NEW or OLD_TO_SHARED within the shared space.
+      ClearFlag(MemoryChunk::POINTERS_FROM_HERE_ARE_INTERESTING);
+    } else {
+      ClearFlag(MemoryChunk::POINTERS_TO_HERE_ARE_INTERESTING);
+      SetFlag(MemoryChunk::POINTERS_FROM_HERE_ARE_INTERESTING);
+    }
     ClearFlag(MemoryChunk::INCREMENTAL_MARKING);
   }
 }
@@ -237,6 +246,10 @@ void MemoryChunk::ReleaseAllocatedMemoryNeededForWritableChunk() {
   if (mutex_ != nullptr) {
     delete mutex_;
     mutex_ = nullptr;
+  }
+  if (shared_mutex_) {
+    delete shared_mutex_;
+    shared_mutex_ = nullptr;
   }
   if (page_protection_change_mutex_ != nullptr) {
     delete page_protection_change_mutex_;
@@ -380,7 +393,7 @@ void MemoryChunk::RegisterObjectWithInvalidatedSlots(HeapObject object,
                                                      int new_size) {
   // ByteArray and FixedArray are still invalidated in tests.
   DCHECK(object.IsString() || object.IsByteArray() || object.IsFixedArray());
-  DCHECK(!object.InSharedWritableHeap());
+  DCHECK(!object.InWritableSharedSpace());
   bool skip_slot_recording;
 
   switch (type) {
@@ -427,7 +440,7 @@ MemoryChunk::UpdateInvalidatedObjectSize<OLD_TO_SHARED>(HeapObject object,
 
 template <RememberedSetType type>
 void MemoryChunk::UpdateInvalidatedObjectSize(HeapObject object, int new_size) {
-  DCHECK(!object.InSharedWritableHeap());
+  DCHECK(!object.InWritableSharedSpace());
   DCHECK_GT(new_size, 0);
 
   if (invalidated_slots<type>() == nullptr) return;
@@ -490,6 +503,8 @@ void MemoryChunk::ValidateOffsets(MemoryChunk* chunk) {
       MemoryChunkLayout::kInvalidatedSlotsOffset);
   DCHECK_EQ(reinterpret_cast<Address>(&chunk->mutex_) - chunk->address(),
             MemoryChunkLayout::kMutexOffset);
+  DCHECK_EQ(reinterpret_cast<Address>(&chunk->shared_mutex_) - chunk->address(),
+            MemoryChunkLayout::kSharedMutexOffset);
   DCHECK_EQ(reinterpret_cast<Address>(&chunk->concurrent_sweeping_) -
                 chunk->address(),
             MemoryChunkLayout::kConcurrentSweepingOffset);
@@ -515,11 +530,6 @@ void MemoryChunk::ValidateOffsets(MemoryChunk* chunk) {
   DCHECK_EQ(reinterpret_cast<Address>(&chunk->active_system_pages_) -
                 chunk->address(),
             MemoryChunkLayout::kActiveSystemPagesOffset);
-#ifdef V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
-  DCHECK_EQ(reinterpret_cast<Address>(&chunk->object_start_bitmap_) -
-                chunk->address(),
-            MemoryChunkLayout::kObjectStartBitmapOffset);
-#endif  // V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
   DCHECK_EQ(reinterpret_cast<Address>(&chunk->was_used_for_allocation_) -
                 chunk->address(),
             MemoryChunkLayout::kWasUsedForAllocationOffset);

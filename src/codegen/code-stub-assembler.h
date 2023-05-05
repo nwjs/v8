@@ -1163,6 +1163,11 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                          kExternalStringResourceDataTag);
   }
 
+  TNode<RawPtr<Uint64T>> Log10OffsetTable() {
+    return ReinterpretCast<RawPtr<Uint64T>>(
+        ExternalConstant(ExternalReference::address_of_log10_offset_table()));
+  }
+
 #if V8_ENABLE_WEBASSEMBLY
   TNode<RawPtrT> LoadWasmInternalFunctionCallTargetPtr(
       TNode<WasmInternalFunction> object) {
@@ -1211,6 +1216,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
     return LoadBufferData<IntPtrT>(buffer, offset);
   }
   TNode<Uint8T> LoadUint8Ptr(TNode<RawPtrT> ptr, TNode<IntPtrT> offset);
+  TNode<Uint64T> LoadUint64Ptr(TNode<RawPtrT> ptr, TNode<IntPtrT> index);
 
   // Load a field from an object on the heap.
   template <class T, typename std::enable_if<
@@ -1508,7 +1514,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<BoolT> IsWeakReferenceToObject(TNode<MaybeObject> maybe_object,
                                        TNode<Object> object);
 
-  TNode<MaybeObject> MakeWeak(TNode<HeapObject> value);
+  TNode<HeapObjectReference> MakeWeak(TNode<HeapObject> value);
   TNode<MaybeObject> ClearedValue();
 
   void FixedArrayBoundsCheck(TNode<FixedArrayBase> array, TNode<Smi> index,
@@ -2624,6 +2630,10 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<BoolT> IsJSReceiverInstanceType(TNode<Int32T> instance_type);
   TNode<BoolT> IsJSReceiverMap(TNode<Map> map);
   TNode<BoolT> IsJSReceiver(TNode<HeapObject> object);
+  // The following two methods assume that we deal either with a primitive
+  // object or a JS receiver.
+  TNode<BoolT> JSAnyIsNotPrimitiveMap(TNode<Map> map);
+  TNode<BoolT> JSAnyIsNotPrimitive(TNode<HeapObject> object);
   TNode<BoolT> IsJSRegExp(TNode<HeapObject> object);
   TNode<BoolT> IsJSTypedArrayInstanceType(TNode<Int32T> instance_type);
   TNode<BoolT> IsJSTypedArrayMap(TNode<Map> map);
@@ -3326,6 +3336,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   TNode<Object> CreateAsyncFromSyncIterator(TNode<Context> context,
                                             TNode<Object> sync_iterator);
+  TNode<JSObject> CreateAsyncFromSyncIterator(TNode<Context> context,
+                                              TNode<JSReceiver> sync_iterator,
+                                              TNode<Object> next);
 
   template <class... TArgs>
   TNode<Object> CallBuiltin(Builtin id, TNode<Object> context, TArgs... args) {
@@ -4001,6 +4014,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   }
   uint8_t ConstexprIntegerLiteralToUint8(const IntegerLiteral& i) {
     return i.To<uint8_t>();
+  }
+  int64_t ConstexprIntegerLiteralToInt64(const IntegerLiteral& i) {
+    return i.To<int64_t>();
   }
   uint64_t ConstexprIntegerLiteralToUint64(const IntegerLiteral& i) {
     return i.To<uint64_t>();

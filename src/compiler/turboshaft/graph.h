@@ -13,6 +13,7 @@
 #include <type_traits>
 
 #include "src/base/iterator.h"
+#include "src/base/logging.h"
 #include "src/base/small-vector.h"
 #include "src/base/vector.h"
 #include "src/codegen/source-position.h"
@@ -347,13 +348,43 @@ class Block : public RandomAccessStackDominatorNode<Block> {
   bool HasPredecessors() const { return last_predecessor_ != nullptr; }
   void ResetLastPredecessor() { last_predecessor_ = nullptr; }
 
-  // The block from the previous graph which produced the current block. This is
-  // used for translating phi nodes from the previous graph.
+  void SetMappingToNextGraph(Block* next_graph_block) {
+    DCHECK_NULL(next_graph_mapping_);
+    DCHECK_NOT_NULL(next_graph_block);
+    next_graph_mapping_ = next_graph_block;
+    next_graph_block->SetOrigin(this);
+  }
+  Block* MapToNextGraph() const {
+    DCHECK_NOT_NULL(next_graph_mapping_);
+    return next_graph_mapping_;
+  }
+  // The block from the previous graph which produced the current block. This
+  // has to be updated to be the last block that contributed operations to the
+  // current block to ensure that phi nodes are created correctly.git cl
   void SetOrigin(const Block* origin) {
-    DCHECK_EQ(origin->graph_generation_ + 1, graph_generation_);
+    DCHECK_IMPLIES(origin != nullptr,
+                   origin->graph_generation_ + 1 == graph_generation_);
     origin_ = origin;
   }
-  const Block* Origin() const { return origin_; }
+  // The block from the input graph that is equivalent as a predecessor. It is
+  // only available for bound blocks and it does *not* refer to an equivalent
+  // block as a branch destination.
+  const Block* OriginForBlockEnd() const {
+    DCHECK(IsBound());
+    return origin_;
+  }
+  // The block from the input graph that corresponds to the current block as a
+  // branch destination. Such a block might not exist, and this function uses a
+  // trick to compute such a block in almost all cases, but might rarely fail
+  // and return `nullptr` instead.
+  const Block* OriginForBlockStart() const {
+    // Check that `origin_` is still valid as a block start and was not changed
+    // to a semantically different block when inlining blocks.
+    if (origin_ && origin_->MapToNextGraph() == this) {
+      return origin_;
+    }
+    return nullptr;
+  }
 
   OpIndex begin() const {
     DCHECK(begin_.valid());
@@ -392,6 +423,9 @@ class Block : public RandomAccessStackDominatorNode<Block> {
 
   explicit Block(Kind kind) : kind_(kind) {}
 
+  uint32_t& custom_data() { return custom_data_; }
+  const uint32_t& custom_data() const { return custom_data_; }
+
  private:
   // AddPredecessor should never be called directly except from Assembler's
   // AddPredecessor and SplitEdge methods, which takes care of maintaining
@@ -415,6 +449,12 @@ class Block : public RandomAccessStackDominatorNode<Block> {
   Block* last_predecessor_ = nullptr;
   Block* neighboring_predecessor_ = nullptr;
   const Block* origin_ = nullptr;
+  Block* next_graph_mapping_ = nullptr;
+  // The {custom_data_} field can be used by algorithms to temporarily store
+  // block-specific data. This field is not preserved when constructing a new
+  // output graph and algorithms cannot rely on this field being properly reset
+  // after previous uses.
+  uint32_t custom_data_ = 0;
 #ifdef DEBUG
   size_t graph_generation_ = 0;
 #endif
@@ -558,6 +598,12 @@ class Graph {
     return NewBlock(Block::Kind::kLoopHeader);
   }
   V8_INLINE Block* NewBlock() { return NewBlock(Block::Kind::kMerge); }
+  V8_INLINE Block* NewMappedBlock(Block* origin) {
+    Block* new_block = NewBlock(origin->IsLoop() ? Block::Kind::kLoopHeader
+                                                 : Block::Kind::kMerge);
+    origin->SetMappingToNextGraph(new_block);
+    return new_block;
+  }
 
   V8_INLINE bool Add(Block* block) {
     DCHECK_EQ(block->graph_generation_, generation_);
@@ -755,12 +801,11 @@ class Graph {
   // Store refined types per block here for --trace-turbo printing.
   // TODO(nicohartmann@): Remove this once we have a proper way to print
   // type information inside the reducers.
-  const GrowingBlockSidetable<std::vector<std::pair<OpIndex, Type>>>&
-  block_type_refinement() const {
+  using TypeRefinements = std::vector<std::pair<OpIndex, Type>>;
+  const GrowingBlockSidetable<TypeRefinements>& block_type_refinement() const {
     return block_type_refinement_;
   }
-  GrowingBlockSidetable<std::vector<std::pair<OpIndex, Type>>>&
-  block_type_refinement() {
+  GrowingBlockSidetable<TypeRefinements>& block_type_refinement() {
     return block_type_refinement_;
   }
 #endif  // DEBUG
@@ -860,8 +905,7 @@ class Graph {
   uint32_t dominator_tree_depth_ = 0;
   GrowingSidetable<Type> operation_types_;
 #ifdef DEBUG
-  GrowingBlockSidetable<std::vector<std::pair<OpIndex, Type>>>
-      block_type_refinement_;
+  GrowingBlockSidetable<TypeRefinements> block_type_refinement_;
 #endif
 
   std::unique_ptr<Graph> companion_ = {};

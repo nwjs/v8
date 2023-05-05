@@ -53,7 +53,7 @@ def PrepareBuildDir(arch, mode):
   args_gn = os.path.join(build_dir, "args.gn")
   if not os.path.exists(args_gn):
     conf = gm.Config(arch, mode, [])
-    _Write(args_gn, conf.GetGnArgs())
+    _Write(args_gn, conf.get_gn_args())
   build_ninja = os.path.join(build_dir, "build.ninja")
   if not os.path.exists(build_ninja):
     code = _Call("gn gen %s" % build_dir)
@@ -102,7 +102,7 @@ def GenerateCCFiles():
 
 
 def StartGoma():
-  gomadir = gm.DetectGoma()
+  gomadir = gm.detect_goma()
   if (gomadir is not None and
       _Call("ps -e | grep compiler_proxy > /dev/null", silent=True) != 0):
     _Call("%s/goma_ctl.py ensure_start" % gomadir)

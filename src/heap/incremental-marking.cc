@@ -61,25 +61,11 @@ IncrementalMarking::IncrementalMarking(Heap* heap, WeakObjects* weak_objects)
       marking_state_(heap->marking_state()),
       atomic_marking_state_(heap->atomic_marking_state()) {}
 
-void IncrementalMarking::MarkBlackAndVisitObjectDueToLayoutChange(
-    HeapObject obj) {
-  // TODO(v8:13012): Add scope for MinorMC.
-  TRACE_EVENT0("v8", "V8.GCIncrementalMarkingLayoutChange");
-  TRACE_GC(heap()->tracer(), GCTracer::Scope::MC_INCREMENTAL_LAYOUT_CHANGE);
-  marking_state()->WhiteToGrey(obj);
-  if (IsMajorMarking()) {
-    major_collector_->VisitObject(obj);
-  } else {
-    // Not covered by tests.
-    minor_collector_->VisitObject(obj);
-  }
-}
-
 void IncrementalMarking::MarkBlackBackground(HeapObject obj, int object_size) {
-  MarkBit mark_bit = atomic_marking_state()->MarkBitFrom(obj);
-  Marking::MarkBlack<AccessMode::ATOMIC>(mark_bit);
-  MemoryChunk* chunk = MemoryChunk::FromHeapObject(obj);
-  IncrementLiveBytesBackground(chunk, static_cast<intptr_t>(object_size));
+  CHECK(atomic_marking_state()->TryMark(obj) &&
+        atomic_marking_state()->GreyToBlack(obj));
+  IncrementLiveBytesBackground(MemoryChunk::FromHeapObject(obj),
+                               static_cast<intptr_t>(object_size));
 }
 
 bool IncrementalMarking::CanBeStarted() const {
@@ -138,10 +124,11 @@ void IncrementalMarking::Start(GarbageCollector garbage_collector,
                : counters->gc_minor_incremental_marking_start());
   const auto scope_id = is_major ? GCTracer::Scope::MC_INCREMENTAL_START
                                  : GCTracer::Scope::MINOR_MC_INCREMENTAL_START;
-  TRACE_EVENT1("v8",
+  TRACE_EVENT2("v8",
                is_major ? "V8.GCIncrementalMarkingStart"
                         : "V8.GCMinorIncrementalMarkingStart",
-               "epoch", heap_->tracer()->CurrentEpoch(scope_id));
+               "epoch", heap_->tracer()->CurrentEpoch(scope_id), "reason",
+               Heap::GarbageCollectionReasonToString(gc_reason));
   TRACE_GC_EPOCH(heap()->tracer(), scope_id, ThreadKind::kMain);
   heap_->tracer()->NotifyIncrementalMarkingStart();
 
@@ -170,7 +157,7 @@ void IncrementalMarking::Start(GarbageCollector garbage_collector,
 }
 
 bool IncrementalMarking::WhiteToGreyAndPush(HeapObject obj) {
-  if (marking_state()->WhiteToGrey(obj)) {
+  if (marking_state()->TryMark(obj)) {
     local_marking_worklists()->Push(obj);
     return true;
   }
@@ -204,7 +191,7 @@ class IncrementalMarking::IncrementalMarkingRootMarkingVisitor final
     DCHECK(!MapWord::IsPacked(object.ptr()));
     HeapObject heap_object = HeapObject::cast(object);
 
-    if (heap_object.InSharedHeap() || heap_object.InReadOnlySpace()) return;
+    if (heap_object.InAnySharedSpace() || heap_object.InReadOnlySpace()) return;
 
     if (incremental_marking_->IsMajorMarking()) {
       if (incremental_marking_->WhiteToGreyAndPush(heap_object)) {
@@ -257,13 +244,24 @@ void IncrementalMarking::MarkRoots() {
           }
         });
 
+    std::vector<YoungGenerationMarkingTask> tasks;
+    for (size_t i = 0; i < (v8_flags.parallel_marking
+                                ? MinorMarkCompactCollector::kMaxParallelTasks
+                                : 1);
+         ++i) {
+      tasks.emplace_back(isolate(), heap(),
+                         minor_collector_->marking_worklists());
+    }
     V8::GetCurrentPlatform()
-        ->CreateJob(
-            v8::TaskPriority::kUserBlocking,
-            std::make_unique<YoungGenerationMarkingJob>(
-                isolate(), heap_, minor_collector_->marking_worklists(),
-                std::move(marking_items), YoungMarkingJobType::kIncremental))
+        ->CreateJob(v8::TaskPriority::kUserBlocking,
+                    std::make_unique<YoungGenerationMarkingJob>(
+                        isolate(), heap_, minor_collector_->marking_worklists(),
+                        std::move(marking_items),
+                        YoungMarkingJobType::kIncremental, tasks))
         ->Join();
+    for (YoungGenerationMarkingTask& task : tasks) {
+      task.Finalize();
+    }
   }
 }
 
@@ -339,6 +337,10 @@ void IncrementalMarking::StartMarkingMajor() {
   }
 
   heap_->InvokeIncrementalMarkingEpilogueCallbacks();
+
+  if (v8_flags.minor_mc && heap_->new_space()) {
+    heap_->paged_new_space()->ForceAllocationSuccessUntilNextGC();
+  }
 }
 
 void IncrementalMarking::StartMarkingMinor() {
@@ -387,9 +389,10 @@ void IncrementalMarking::StartBlackAllocation() {
   }
   if (isolate()->is_shared_space_isolate()) {
     DCHECK_EQ(heap()->shared_space()->top(), kNullAddress);
-    isolate()->global_safepoint()->IterateClientIsolates([](Isolate* client) {
-      client->heap()->MarkSharedLinearAllocationAreasBlack();
-    });
+    isolate()->global_safepoint()->IterateSharedSpaceAndClientIsolates(
+        [](Isolate* client) {
+          client->heap()->MarkSharedLinearAllocationAreasBlack();
+        });
   }
   heap()->safepoint()->IterateLocalHeaps([](LocalHeap* local_heap) {
     local_heap->MarkLinearAllocationAreaBlack();
@@ -410,9 +413,10 @@ void IncrementalMarking::PauseBlackAllocation() {
   }
   if (isolate()->is_shared_space_isolate()) {
     DCHECK_EQ(heap()->shared_space()->top(), kNullAddress);
-    isolate()->global_safepoint()->IterateClientIsolates([](Isolate* client) {
-      client->heap()->UnmarkSharedLinearAllocationAreas();
-    });
+    isolate()->global_safepoint()->IterateSharedSpaceAndClientIsolates(
+        [](Isolate* client) {
+          client->heap()->UnmarkSharedLinearAllocationAreas();
+        });
   }
   heap()->safepoint()->IterateLocalHeaps(
       [](LocalHeap* local_heap) { local_heap->UnmarkLinearAllocationArea(); });
@@ -464,8 +468,8 @@ void IncrementalMarking::UpdateMarkingWorklistAfterYoungGenGC() {
       }
       HeapObject dest = map_word.ToForwardingAddress(obj);
       USE(this);
-      DCHECK_IMPLIES(marking_state->IsWhite(obj), obj.IsFreeSpaceOrFiller());
-      if (dest.InSharedWritableHeap() &&
+      DCHECK_IMPLIES(marking_state->IsUnmarked(obj), obj.IsFreeSpaceOrFiller());
+      if (dest.InWritableSharedSpace() &&
           !isolate()->is_shared_space_isolate()) {
         // Object got promoted into the shared heap. Drop it from the client
         // heap marking worklist.
@@ -483,7 +487,7 @@ void IncrementalMarking::UpdateMarkingWorklistAfterYoungGenGC() {
       DCHECK_IMPLIES(
           v8_flags.minor_mc,
           !obj.map_word(cage_base, kRelaxedLoad).IsForwardingAddress());
-      if (marking_state->IsWhite(obj)) {
+      if (marking_state->IsUnmarked(obj)) {
         return false;
       }
       // Either a large object or an object marked by the minor
@@ -495,13 +499,13 @@ void IncrementalMarking::UpdateMarkingWorklistAfterYoungGenGC() {
       // Only applicable during minor MC garbage collections.
       if (!Heap::IsLargeObject(obj) &&
           Page::FromHeapObject(obj)->IsFlagSet(Page::PAGE_NEW_OLD_PROMOTION)) {
-        if (marking_state->IsWhite(obj)) {
+        if (marking_state->IsUnmarked(obj)) {
           return false;
         }
         *out = obj;
         return true;
       }
-      DCHECK_IMPLIES(marking_state->IsWhite(obj),
+      DCHECK_IMPLIES(marking_state->IsUnmarked(obj),
                      obj.IsFreeSpaceOrFiller(cage_base));
       // Skip one word filler objects that appear on the
       // stack when we perform in place array shift.
@@ -786,7 +790,7 @@ size_t IncrementalMarking::StepSizeToMakeProgress() {
   const size_t kTargetStepCount = 256;
   const size_t kTargetStepCountAtOOM = 32;
   const size_t kMaxStepSizeInByte = 256 * KB;
-  size_t oom_slack = heap()->new_space()->Capacity() + 64 * MB;
+  size_t oom_slack = heap()->new_space()->TotalCapacity() + 64 * MB;
 
   if (!heap()->CanExpandOldGeneration(oom_slack)) {
     return heap()->OldGenerationSizeOfObjects() / kTargetStepCountAtOOM;

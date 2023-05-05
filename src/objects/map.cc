@@ -59,27 +59,6 @@ base::Optional<JSFunction> Map::GetConstructorFunction(Map map,
   return {};
 }
 
-Map Map::GetInstanceTypeMap(ReadOnlyRoots roots, InstanceType type) {
-  Map map;
-  switch (type) {
-#define MAKE_CASE(TYPE, Name, name) \
-  case TYPE:                        \
-    map = roots.name##_map();       \
-    break;
-    STRUCT_LIST(MAKE_CASE)
-#undef MAKE_CASE
-#define MAKE_CASE(TYPE, Name, name) \
-  case TYPE:                        \
-    map = roots.name##_map();       \
-    break;
-    TORQUE_DEFINED_INSTANCE_TYPE_LIST(MAKE_CASE)
-#undef MAKE_CASE
-    default:
-      UNREACHABLE();
-  }
-  return map;
-}
-
 VisitorId Map::GetVisitorId(Map map) {
   static_assert(kVisitorIdCount <= 256);
 
@@ -105,7 +84,7 @@ VisitorId Map::GetVisitorId(Map map) {
         return kVisitSlicedString;
 
       case kExternalStringTag:
-        return kVisitDataObject;
+        return kVisitExternalString;
 
       case kThinStringTag:
         return kVisitThinString;
@@ -247,6 +226,9 @@ VisitorId Map::GetVisitorId(Map map) {
     case CODE_TYPE:
       return kVisitCode;
 
+    case SHARED_FUNCTION_INFO_TYPE:
+      return kVisitSharedFunctionInfo;
+
     case PREPARSE_DATA_TYPE:
       return kVisitPreparseData;
 
@@ -266,6 +248,8 @@ VisitorId Map::GetVisitorId(Map map) {
     case JS_GENERATOR_OBJECT_TYPE:
     case JS_ITERATOR_FILTER_HELPER_TYPE:
     case JS_ITERATOR_MAP_HELPER_TYPE:
+    case JS_ITERATOR_TAKE_HELPER_TYPE:
+    case JS_ITERATOR_DROP_HELPER_TYPE:
     case JS_ITERATOR_PROTOTYPE_TYPE:
     case JS_MAP_ITERATOR_PROTOTYPE_TYPE:
     case JS_MAP_KEY_ITERATOR_TYPE:
@@ -303,6 +287,7 @@ VisitorId Map::GetVisitorId(Map map) {
     case JS_TEMPORAL_TIME_ZONE_TYPE:
     case JS_TEMPORAL_ZONED_DATE_TIME_TYPE:
     case JS_TYPED_ARRAY_PROTOTYPE_TYPE:
+    case JS_VALID_ITERATOR_WRAPPER_TYPE:
     case JS_RAW_JSON_TYPE:
 #ifdef V8_INTL_SUPPORT
     case JS_V8_BREAK_ITERATOR_TYPE:
@@ -2313,7 +2298,7 @@ void Map::SetPrototype(Isolate* isolate, Handle<Map> map,
     JSObject::OptimizeAsPrototype(prototype_jsobj, enable_prototype_setup_mode);
   } else {
     DCHECK(prototype->IsNull(isolate) || prototype->IsJSProxy() ||
-           prototype->IsWasmObject() || prototype->InSharedWritableHeap());
+           prototype->IsWasmObject() || prototype->InWritableSharedSpace());
   }
 
   WriteBarrierMode wb_mode =

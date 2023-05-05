@@ -84,10 +84,10 @@ Node* WasmGraphAssembler::BuildSmiShiftBitsConstant32() {
 
 Node* WasmGraphAssembler::BuildChangeInt32ToSmi(Node* value) {
   // With pointer compression, only the lower 32 bits are used.
-  return COMPRESS_POINTERS_BOOL
-             ? Word32Shl(value, BuildSmiShiftBitsConstant32())
-             : WordShl(BuildChangeInt32ToIntPtr(value),
-                       BuildSmiShiftBitsConstant());
+  return COMPRESS_POINTERS_BOOL ? BitcastWord32ToWord64(Word32Shl(
+                                      value, BuildSmiShiftBitsConstant32()))
+                                : WordShl(BuildChangeInt32ToIntPtr(value),
+                                          BuildSmiShiftBitsConstant());
 }
 
 Node* WasmGraphAssembler::BuildChangeUint31ToSmi(Node* value) {
@@ -187,14 +187,14 @@ Node* WasmGraphAssembler::BuildLoadExternalPointerFromObject(
   Node* table;
   if (IsSharedExternalPointerType(tag)) {
     Node* table_address =
-        LoadFromObject(MachineType::Pointer(), isolate_root,
-                       IsolateData::shared_external_pointer_table_offset());
-    table = LoadFromObject(MachineType::Pointer(), table_address,
-                           Internals::kExternalPointerTableBufferOffset);
+        Load(MachineType::Pointer(), isolate_root,
+             IsolateData::shared_external_pointer_table_offset());
+    table = Load(MachineType::Pointer(), table_address,
+                 Internals::kExternalPointerTableBufferOffset);
   } else {
-    table = LoadFromObject(MachineType::Pointer(), isolate_root,
-                           IsolateData::external_pointer_table_offset() +
-                               Internals::kExternalPointerTableBufferOffset);
+    table = Load(MachineType::Pointer(), isolate_root,
+                 IsolateData::external_pointer_table_offset() +
+                     Internals::kExternalPointerTableBufferOffset);
   }
   Node* decoded_ptr = Load(MachineType::Pointer(), table, scaled_index);
   return WordAnd(decoded_ptr, IntPtrConstant(~tag));
@@ -407,7 +407,7 @@ Node* WasmGraphAssembler::WasmExternExternalize(Node* object) {
 
 Node* WasmGraphAssembler::StructGet(Node* object, const wasm::StructType* type,
                                     int field_index, bool is_signed,
-                                    bool null_check) {
+                                    CheckForNull null_check) {
   return AddNode(graph()->NewNode(
       simplified_.WasmStructGet(type, field_index, is_signed, null_check),
       object, effect(), control()));
@@ -415,7 +415,7 @@ Node* WasmGraphAssembler::StructGet(Node* object, const wasm::StructType* type,
 
 void WasmGraphAssembler::StructSet(Node* object, Node* value,
                                    const wasm::StructType* type,
-                                   int field_index, bool null_check) {
+                                   int field_index, CheckForNull null_check) {
   AddNode(
       graph()->NewNode(simplified_.WasmStructSet(type, field_index, null_check),
                        object, value, effect(), control()));
@@ -434,7 +434,7 @@ void WasmGraphAssembler::ArraySet(Node* array, Node* index, Node* value,
                            effect(), control()));
 }
 
-Node* WasmGraphAssembler::ArrayLength(Node* array, bool null_check) {
+Node* WasmGraphAssembler::ArrayLength(Node* array, CheckForNull null_check) {
   return AddNode(graph()->NewNode(simplified_.WasmArrayLength(null_check),
                                   array, effect(), control()));
 }

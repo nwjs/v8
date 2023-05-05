@@ -80,6 +80,30 @@ class JSIteratorFilterHelper
   TQ_OBJECT_CONSTRUCTORS(JSIteratorFilterHelper)
 };
 
+// The iterator helper returned by Iterator.prototype.take.
+class JSIteratorTakeHelper
+    : public TorqueGeneratedJSIteratorTakeHelper<JSIteratorTakeHelper,
+                                                 JSIteratorHelper> {
+ public:
+  DECL_CAST(JSIteratorTakeHelper)
+  DECL_PRINTER(JSIteratorTakeHelper)
+  DECL_VERIFIER(JSIteratorTakeHelper)
+
+  TQ_OBJECT_CONSTRUCTORS(JSIteratorTakeHelper)
+};
+
+// The iterator helper returned by Iterator.prototype.drop.
+class JSIteratorDropHelper
+    : public TorqueGeneratedJSIteratorDropHelper<JSIteratorDropHelper,
+                                                 JSIteratorHelper> {
+ public:
+  DECL_CAST(JSIteratorDropHelper)
+  DECL_PRINTER(JSIteratorDropHelper)
+  DECL_VERIFIER(JSIteratorDropHelper)
+
+  TQ_OBJECT_CONSTRUCTORS(JSIteratorDropHelper)
+};
+
 }  // namespace internal
 }  // namespace v8
 

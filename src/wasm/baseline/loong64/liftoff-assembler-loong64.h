@@ -310,14 +310,13 @@ bool LiftoffAssembler::NeedsAlignment(ValueKind kind) {
   return kind == kS128 || is_reference(kind);
 }
 
-void LiftoffAssembler::LoadConstant(LiftoffRegister reg, WasmValue value,
-                                    RelocInfo::Mode rmode) {
+void LiftoffAssembler::LoadConstant(LiftoffRegister reg, WasmValue value) {
   switch (value.type().kind()) {
     case kI32:
-      MacroAssembler::li(reg.gp(), Operand(value.to_i32(), rmode));
+      MacroAssembler::li(reg.gp(), Operand(value.to_i32()));
       break;
     case kI64:
-      MacroAssembler::li(reg.gp(), Operand(value.to_i64(), rmode));
+      MacroAssembler::li(reg.gp(), Operand(value.to_i64()));
       break;
     case kF32:
       MacroAssembler::Move(reg.fp(), value.to_f32_boxed().get_bits());
@@ -355,8 +354,7 @@ void LiftoffAssembler::LoadFromInstance(Register dst, Register instance,
 void LiftoffAssembler::LoadTaggedPointerFromInstance(Register dst,
                                                      Register instance,
                                                      int32_t offset) {
-  static_assert(kTaggedSize == kSystemPointerSize);
-  Ld_d(dst, MemOperand(instance, offset));
+  LoadTaggedField(dst, MemOperand(instance, offset));
 }
 
 void LiftoffAssembler::SpillInstance(Register instance) {
@@ -368,11 +366,10 @@ void LiftoffAssembler::ResetOSRTarget() {}
 void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
                                          Register offset_reg,
                                          int32_t offset_imm, bool needs_shift) {
-  static_assert(kTaggedSize == kInt64Size);
-  unsigned shift_amount = !needs_shift ? 0 : 3;
+  unsigned shift_amount = !needs_shift ? 0 : COMPRESS_POINTERS_BOOL ? 2 : 3;
   MemOperand src_op = liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm,
                                         false, shift_amount);
-  Ld_d(dst, src_op);
+  LoadTaggedField(dst, src_op);
 }
 
 void LiftoffAssembler::LoadFullPointer(Register dst, Register src_addr,
@@ -399,23 +396,19 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
     offset_op = Operand(effective_offset);
   }
   if (offset_op.is_reg()) {
-    St_d(src.gp(), MemOperand(dst_addr, offset_op.rm()));
+    StoreTaggedField(src.gp(), MemOperand(dst_addr, offset_op.rm()));
   } else {
-    St_d(src.gp(), MemOperand(dst_addr, offset_imm));
+    StoreTaggedField(src.gp(), MemOperand(dst_addr, offset_imm));
   }
 
   if (skip_write_barrier || v8_flags.disable_write_barriers) return;
 
-  Label write_barrier;
   Label exit;
-  CheckPageFlag(dst_addr, MemoryChunk::kPointersFromHereAreInterestingMask, ne,
-                &write_barrier);
-  b(&exit);
-  bind(&write_barrier);
+  CheckPageFlag(dst_addr, MemoryChunk::kPointersFromHereAreInterestingMask,
+                kZero, &exit);
   JumpIfSmi(src.gp(), &exit);
-  CheckPageFlag(src.gp(),
-                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
-                eq, &exit);
+  CheckPageFlag(src.gp(), MemoryChunk::kPointersToHereAreInterestingMask, eq,
+                &exit);
   CallRecordWriteStubSaveRegisters(dst_addr, offset_op, SaveFPRegsMode::kSave,
                                    StubCallMode::kCallWasmRuntimeStub);
   bind(&exit);
@@ -1040,10 +1033,17 @@ bool LiftoffAssembler::emit_i64_popcnt(LiftoffRegister dst,
 void LiftoffAssembler::IncrementSmi(LiftoffRegister dst, int offset) {
   UseScratchRegisterScope temps(this);
   Register scratch = temps.Acquire();
-  SmiUntag(scratch, MemOperand(dst.gp(), offset));
-  Add_d(scratch, scratch, Operand(1));
-  SmiTag(scratch);
-  St_d(scratch, MemOperand(dst.gp(), offset));
+  if (COMPRESS_POINTERS_BOOL) {
+    DCHECK(SmiValuesAre31Bits());
+    Ld_w(scratch, MemOperand(dst.gp(), offset));
+    Add_w(scratch, scratch, Operand(Smi::FromInt(1)));
+    St_w(scratch, MemOperand(dst.gp(), offset));
+  } else {
+    SmiUntag(scratch, MemOperand(dst.gp(), offset));
+    Add_d(scratch, scratch, Operand(1));
+    SmiTag(scratch);
+    St_d(scratch, MemOperand(dst.gp(), offset));
+  }
 }
 
 void LiftoffAssembler::emit_i32_mul(Register dst, Register lhs, Register rhs) {
@@ -1639,30 +1639,42 @@ void LiftoffAssembler::emit_cond_jump(Condition cond, Label* label,
                                       Register rhs,
                                       const FreezeCacheState& frozen) {
   if (rhs == no_reg) {
-    DCHECK(kind == kI32 || kind == kI64);
-    MacroAssembler::Branch(label, cond, lhs, Operand(zero_reg));
+    if (kind == kI32) {
+      UseScratchRegisterScope temps(this);
+      Register scratch0 = temps.Acquire();
+      slli_w(scratch0, lhs, 0);
+      MacroAssembler::Branch(label, cond, scratch0, Operand(zero_reg));
+    } else {
+      DCHECK(kind == kI64);
+      MacroAssembler::Branch(label, cond, lhs, Operand(zero_reg));
+    }
   } else {
-    DCHECK((kind == kI32 || kind == kI64) ||
-           (is_reference(kind) && (cond == kEqual || cond == kNotEqual)));
-    MacroAssembler::Branch(label, cond, lhs, Operand(rhs));
+    if (kind == kI64) {
+      MacroAssembler::Branch(label, cond, lhs, Operand(rhs));
+    } else {
+      DCHECK((kind == kI32) || (kind == kRtt) || (kind == kRef) ||
+             (kind == kRefNull));
+      MacroAssembler::CompareTaggedAndBranch(label, cond, lhs, Operand(rhs));
+    }
   }
 }
 
 void LiftoffAssembler::emit_i32_cond_jumpi(Condition cond, Label* label,
                                            Register lhs, int32_t imm,
                                            const FreezeCacheState& frozen) {
-  MacroAssembler::Branch(label, cond, lhs, Operand(imm));
+  MacroAssembler::CompareTaggedAndBranch(label, cond, lhs, Operand(imm));
 }
 
 void LiftoffAssembler::emit_i32_subi_jump_negative(
     Register value, int subtrahend, Label* result_negative,
     const FreezeCacheState& frozen) {
-  MacroAssembler::Sub_d(value, value, Operand(subtrahend));
+  MacroAssembler::Sub_w(value, value, Operand(subtrahend));
   MacroAssembler::Branch(result_negative, less, value, Operand(zero_reg));
 }
 
 void LiftoffAssembler::emit_i32_eqz(Register dst, Register src) {
-  sltui(dst, src, 1);
+  slli_w(dst, src, 0);
+  sltui(dst, dst, 1);
 }
 
 void LiftoffAssembler::emit_i32_set_cond(Condition cond, Register dst,
@@ -1676,10 +1688,16 @@ void LiftoffAssembler::emit_i32_set_cond(Condition cond, Register dst,
 
   // If negative condition is true, write 0 as result.
   Condition neg_cond = NegateCondition(cond);
-  MacroAssembler::LoadZeroOnCondition(tmp, lhs, Operand(rhs), neg_cond);
+  UseScratchRegisterScope temps(this);
+  Register scratch0 = temps.Acquire();
+  Register scratch1 = kScratchReg;
 
-  // If tmp != dst, result will be moved.
-  MacroAssembler::Move(dst, tmp);
+  slli_w(scratch0, lhs, 0);
+  slli_w(scratch1, rhs, 0);
+  // Write 1 as result.
+  MacroAssembler::li(dst, 1);
+  MacroAssembler::LoadZeroOnCondition(dst, scratch0, Operand(scratch1),
+                                      neg_cond);
 }
 
 void LiftoffAssembler::emit_i64_eqz(Register dst, LiftoffRegister src) {
@@ -1823,14 +1841,16 @@ void LiftoffAssembler::LoadTransform(LiftoffRegister dst, Register src_addr,
 void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
                                 Register addr, Register offset_reg,
                                 uintptr_t offset_imm, LoadType type,
-                                uint8_t laneidx, uint32_t* protected_load_pc) {
+                                uint8_t laneidx, uint32_t* protected_load_pc,
+                                bool i64_offset) {
   bailout(kSimd, "loadlane");
 }
 
 void LiftoffAssembler::StoreLane(Register dst, Register offset,
                                  uintptr_t offset_imm, LiftoffRegister src,
                                  StoreType type, uint8_t lane,
-                                 uint32_t* protected_store_pc) {
+                                 uint32_t* protected_store_pc,
+                                 bool i64_offset) {
   bailout(kSimd, "storelane");
 }
 

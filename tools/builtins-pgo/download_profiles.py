@@ -18,11 +18,11 @@ import sys
 
 FILENAME = os.path.basename(__file__)
 PGO_PROFILE_BUCKET = 'chromium-v8-builtins-pgo'
-PGO_PROFILE_DIR = pathlib.Path(os.path.dirname(__file__))
+PGO_PROFILE_DIR = pathlib.Path(os.path.dirname(__file__)) / 'profiles'
 
-BASE_DIR = PGO_PROFILE_DIR.parents[1]
-DEPOT_TOOLS_DEFAULT_PATH = os.path.join(BASE_DIR, 'third_party', 'depot_tools')
-VERSION_FILE = BASE_DIR / 'include' / 'v8-version.h'
+V8_DIR = PGO_PROFILE_DIR.parents[2]
+DEPOT_TOOLS_DEFAULT_PATH = os.path.join(V8_DIR, 'third_party', 'depot_tools')
+VERSION_FILE = V8_DIR / 'include' / 'v8-version.h'
 VERSION_RE = r"""#define V8_MAJOR_VERSION (\d+)
 #define V8_MINOR_VERSION (\d+)
 #define V8_BUILD_NUMBER (\d+)

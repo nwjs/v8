@@ -28,6 +28,8 @@ static_assert(sizeof(1) == sizeof(int32_t));
 namespace v8 {
 namespace internal {
 
+// The maximum size of the code range s.t. pc-relative calls are possible
+// between all Code objects in the range.
 constexpr size_t kMaxPCRelativeCodeRangeInMB = 128;
 
 constexpr uint8_t kInstrSize = 4;
@@ -140,11 +142,9 @@ constexpr unsigned kFloat16MantissaBits = 10;
 constexpr unsigned kFloat16ExponentBits = 5;
 constexpr unsigned kFloat16ExponentBias = 15;
 
-// Actual value of root register is offset from the root array's start
+// The actual value of the kRootRegister is offset from the IsolateData's start
 // to take advantage of negative displacement values.
-// TODO(sigurds): Choose best value.
-// TODO(ishell): Choose best value for ptr-compr.
-constexpr int kRootRegisterBias = kSystemPointerSize == kTaggedSize ? 256 : 0;
+constexpr int kRootRegisterBias = 256;
 
 using float16 = uint16_t;
 

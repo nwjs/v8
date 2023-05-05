@@ -157,11 +157,6 @@ TEST_F(HeapTest, HeapLayout) {
     EXPECT_TRUE(IsAligned(code_cage_base, size_t{4} * GB));
   }
 
-#ifdef V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE
-  Address isolate_root = i_isolate()->isolate_root();
-  EXPECT_EQ(cage_base, isolate_root);
-#endif
-
   // Check that all memory chunks belong this region.
   base::AddressRegion heap_reservation(cage_base, size_t{4} * GB);
   base::AddressRegion code_reservation(code_cage_base, size_t{4} * GB);
@@ -437,11 +432,9 @@ TEST_F(HeapTest, Regress978156) {
     marking->Start(GarbageCollector::MARK_COMPACTOR,
                    i::GarbageCollectionReason::kTesting);
   }
-  MarkingState* marking_state = heap->marking_state();
   // 6. Mark the filler black to access its two markbits. This triggers
   // an out-of-bounds access of the marking bitmap in a bad case.
-  marking_state->WhiteToGrey(filler);
-  marking_state->GreyToBlack(filler);
+  heap->marking_state()->TryMarkAndAccountLiveBytes(filler);
 }
 
 }  // namespace internal

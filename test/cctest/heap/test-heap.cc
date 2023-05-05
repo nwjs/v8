@@ -185,9 +185,8 @@ static void CheckNumber(Isolate* isolate, double value, const char* string) {
   CHECK(String::cast(*print_string).IsOneByteEqualTo(base::CStrVector(string)));
 }
 
-void CheckEmbeddedObjectsAreEqual(Isolate* isolate,
-                                  Handle<InstructionStream> lhs,
-                                  Handle<InstructionStream> rhs) {
+void CheckEmbeddedObjectsAreEqual(Isolate* isolate, Handle<Code> lhs,
+                                  Handle<Code> rhs) {
   int mode_mask = RelocInfo::ModeMask(RelocInfo::FULL_EMBEDDED_OBJECT);
   PtrComprCageBase cage_base(isolate);
   RelocIterator lhs_it(*lhs, mode_mask);
@@ -1343,6 +1342,7 @@ UNINITIALIZED_TEST(Regress10843) {
     for (int i = 0; i < 100; i++) {
       arrays.push_back(factory->NewFixedArray(10000));
     }
+    CcTest::CollectAllGarbage(i_isolate);
     CHECK(callback_was_invoked);
   }
   isolate->Dispose();
@@ -2604,7 +2604,7 @@ TEST(InstanceOfStubWriteBarrier) {
   MarkingState* marking_state = CcTest::heap()->marking_state();
 
   const double kStepSizeInMs = 100;
-  while (!marking_state->IsBlack(f->code())) {
+  while (!marking_state->IsMarked(f->code())) {
     // Discard any pending GC requests otherwise we will get GC when we enter
     // code below.
     CHECK(!marking->IsMajorMarkingComplete());
@@ -2673,10 +2673,9 @@ HEAP_TEST(Regress845060) {
   Local<Value> str = CompileRun("var str = (new Array(10000)).join('x'); str");
   CHECK(Heap::InYoungGeneration(*v8::Utils::OpenHandle(*str)));
 
-  // Idle incremental marking sets the "kReduceMemoryFootprint" flag, which
-  // causes from_space to be unmapped after scavenging.
-  heap->StartIdleIncrementalMarking(GarbageCollectionReason::kTesting);
-  CHECK(heap->ShouldReduceMemory());
+  // Use kReduceMemoryFootprintMask to unmap from space after scavenging.
+  heap->StartIncrementalMarking(i::Heap::kReduceMemoryFootprintMask,
+                                GarbageCollectionReason::kTesting);
 
   // Run the test (which allocates results) until the original string was
   // promoted to old space. Unmapping of from_space causes accesses to any
@@ -2706,10 +2705,12 @@ TEST(IdleNotificationFinishMarking) {
 
   // The next idle notification has to finish incremental marking.
   const double kLongIdleTime = 1000.0;
+  START_ALLOW_USE_DEPRECATED();
   CcTest::isolate()->IdleNotificationDeadline(
       (v8::base::TimeTicks::Now().ToInternalValue() /
        static_cast<double>(v8::base::Time::kMicrosecondsPerSecond)) +
       kLongIdleTime);
+  END_ALLOW_USE_DEPRECATED();
   CHECK_EQ(CcTest::heap()->gc_count(), initial_gc_count + 1);
 }
 
@@ -4339,7 +4340,7 @@ TEST(CellsInOptimizedCodeAreWeak) {
 
   if (!isolate->use_optimizer()) return;
   HandleScope outer_scope(heap->isolate());
-  Handle<InstructionStream> code;
+  Handle<Code> code;
   {
     LocalContext context;
     HandleScope scope(heap->isolate());
@@ -4363,7 +4364,7 @@ TEST(CellsInOptimizedCodeAreWeak) {
         *v8::Local<v8::Function>::Cast(CcTest::global()
                                            ->Get(context.local(), v8_str("bar"))
                                            .ToLocalChecked())));
-    code = handle(FromCode(bar->code()), isolate);
+    code = handle(bar->code(), isolate);
     code = scope.CloseAndEscape(code);
   }
 
@@ -4388,7 +4389,7 @@ TEST(ObjectsInOptimizedCodeAreWeak) {
 
   if (!isolate->use_optimizer()) return;
   HandleScope outer_scope(heap->isolate());
-  Handle<InstructionStream> code;
+  Handle<Code> code;
   {
     LocalContext context;
     HandleScope scope(heap->isolate());
@@ -4410,7 +4411,7 @@ TEST(ObjectsInOptimizedCodeAreWeak) {
         *v8::Local<v8::Function>::Cast(CcTest::global()
                                            ->Get(context.local(), v8_str("bar"))
                                            .ToLocalChecked())));
-    code = handle(FromCode(bar->code()), isolate);
+    code = handle(bar->code(), isolate);
     code = scope.CloseAndEscape(code);
   }
 
@@ -4435,7 +4436,7 @@ TEST(NewSpaceObjectsInOptimizedCode) {
 
   if (!isolate->use_optimizer()) return;
   HandleScope outer_scope(isolate);
-  Handle<InstructionStream> code;
+  Handle<Code> code;
   {
     LocalContext context;
     HandleScope scope(isolate);
@@ -4476,7 +4477,7 @@ TEST(NewSpaceObjectsInOptimizedCode) {
     HeapVerifier::VerifyHeap(CcTest::heap());
 #endif
     CHECK(!bar->code().marked_for_deoptimization());
-    code = handle(FromCode(bar->code()), isolate);
+    code = handle(bar->code(), isolate);
     code = scope.CloseAndEscape(code);
   }
 
@@ -4500,7 +4501,7 @@ TEST(ObjectsInEagerlyDeoptimizedCodeAreWeak) {
 
   if (!isolate->use_optimizer()) return;
   HandleScope outer_scope(heap->isolate());
-  Handle<InstructionStream> code;
+  Handle<Code> code;
   {
     LocalContext context;
     HandleScope scope(heap->isolate());
@@ -4523,7 +4524,7 @@ TEST(ObjectsInEagerlyDeoptimizedCodeAreWeak) {
         *v8::Local<v8::Function>::Cast(CcTest::global()
                                            ->Get(context.local(), v8_str("bar"))
                                            .ToLocalChecked())));
-    code = handle(FromCode(bar->code()), isolate);
+    code = handle(bar->code(), isolate);
     code = scope.CloseAndEscape(code);
   }
 
@@ -5778,10 +5779,10 @@ TEST(Regress598319) {
   CHECK(heap->lo_space()->Contains(arr.get()));
   IncrementalMarking* marking = heap->incremental_marking();
   MarkingState* marking_state = heap->marking_state();
-  CHECK(marking_state->IsWhite(arr.get()));
+  CHECK(marking_state->IsUnmarked(arr.get()));
   for (int i = 0; i < arr.get().length(); i++) {
     HeapObject arr_value = HeapObject::cast(arr.get().get(i));
-    CHECK(marking_state->IsWhite(arr_value));
+    CHECK(marking_state->IsUnmarked(arr_value));
   }
 
   // Start incremental marking.
@@ -5795,7 +5796,7 @@ TEST(Regress598319) {
   // Check that we have not marked the interesting array during root scanning.
   for (int i = 0; i < arr.get().length(); i++) {
     HeapObject arr_value = HeapObject::cast(arr.get().get(i));
-    CHECK(marking_state->IsWhite(arr_value));
+    CHECK(marking_state->IsUnmarked(arr_value));
   }
 
   // Now we search for a state where we are in incremental marking and have
@@ -5832,7 +5833,7 @@ TEST(Regress598319) {
   // progress bar, we would fail here.
   for (int i = 0; i < arr.get().length(); i++) {
     HeapObject arr_value = HeapObject::cast(arr.get().get(i));
-    CHECK(arr_value.InReadOnlySpace() || marking_state->IsBlack(arr_value));
+    CHECK(arr_value.InReadOnlySpace() || marking_state->IsMarked(arr_value));
   }
 }
 
@@ -6014,7 +6015,7 @@ TEST(ContinuousRightTrimFixedArrayInBlackArea) {
   Address end_address = start_address + array->Size();
   Page* page = Page::FromAddress(start_address);
   NonAtomicMarkingState* marking_state = heap->non_atomic_marking_state();
-  CHECK(marking_state->IsBlack(*array));
+  CHECK(marking_state->IsMarked(*array));
   CHECK(marking_state->bitmap(page)->AllBitsSetInRange(
       page->AddressToMarkbitIndex(start_address),
       page->AddressToMarkbitIndex(end_address)));
@@ -6035,7 +6036,7 @@ TEST(ContinuousRightTrimFixedArrayInBlackArea) {
       isolate->heap()->RightTrimFixedArray(*array, i);
       filler = HeapObject::FromAddress(previous);
       CHECK(filler.IsFreeSpaceOrFiller());
-      CHECK(marking_state->IsWhite(filler));
+      CHECK(marking_state->IsUnmarked(filler));
     }
   }
 

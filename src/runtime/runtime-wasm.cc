@@ -87,15 +87,18 @@ Context GetNativeContextFromWasmInstanceOnStackTop(Isolate* isolate) {
 
 class V8_NODISCARD ClearThreadInWasmScope {
  public:
-  explicit ClearThreadInWasmScope(Isolate* isolate) : isolate_(isolate) {
-    DCHECK_IMPLIES(trap_handler::IsTrapHandlerEnabled(),
-                   trap_handler::IsThreadInWasm());
-    trap_handler::ClearThreadInWasm();
+  explicit ClearThreadInWasmScope(Isolate* isolate)
+      : isolate_(isolate), is_thread_in_wasm_(trap_handler::IsThreadInWasm()) {
+    // In some cases we call this from Wasm code inlined into JavaScript
+    // so the flag might not be set.
+    if (is_thread_in_wasm_) {
+      trap_handler::ClearThreadInWasm();
+    }
   }
   ~ClearThreadInWasmScope() {
     DCHECK_IMPLIES(trap_handler::IsTrapHandlerEnabled(),
                    !trap_handler::IsThreadInWasm());
-    if (!isolate_->has_pending_exception()) {
+    if (!isolate_->has_pending_exception() && is_thread_in_wasm_) {
       trap_handler::SetThreadInWasm();
     }
     // Otherwise we only want to set the flag if the exception is caught in
@@ -104,6 +107,7 @@ class V8_NODISCARD ClearThreadInWasmScope {
 
  private:
   Isolate* isolate_;
+  const bool is_thread_in_wasm_;
 };
 
 Object ThrowWasmError(Isolate* isolate, MessageTemplate message,
@@ -201,6 +205,15 @@ RUNTIME_FUNCTION(Runtime_ThrowBadSuspenderError) {
   HandleScope scope(isolate);
   DCHECK_EQ(0, args.length());
   return ThrowWasmError(isolate, MessageTemplate::kWasmTrapBadSuspender);
+}
+
+RUNTIME_FUNCTION(Runtime_WasmThrowTypeError) {
+  ClearThreadInWasmScope clear_wasm_flag(isolate);
+  HandleScope scope(isolate);
+  DCHECK_EQ(2, args.length());
+  MessageTemplate message_id = MessageTemplateFromInt(args.smi_value_at(0));
+  Handle<Object> arg(args[1], isolate);
+  THROW_NEW_ERROR_RETURN_FAILURE(isolate, NewTypeError(message_id, arg));
 }
 
 RUNTIME_FUNCTION(Runtime_WasmThrow) {
@@ -1367,17 +1380,6 @@ RUNTIME_FUNCTION(Runtime_WasmStringViewWtf8Slice) {
               ->NewStringFromUtf8(array, start, end,
                                   unibrow::Utf8Variant::kWtf8)
               .ToHandleChecked();
-}
-
-RUNTIME_FUNCTION(Runtime_WasmStringCompare) {
-  ClearThreadInWasmScope flag_scope(isolate);
-  DCHECK_EQ(2, args.length());
-  HandleScope scope(isolate);
-  Handle<String> lhs(String::cast(args[0]), isolate);
-  Handle<String> rhs(String::cast(args[1]), isolate);
-  ComparisonResult result = String::Compare(isolate, lhs, rhs);
-  DCHECK_NE(result, ComparisonResult::kUndefined);
-  return Smi::FromInt(static_cast<int>(result));
 }
 
 RUNTIME_FUNCTION(Runtime_WasmStringFromCodePoint) {

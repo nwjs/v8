@@ -20,6 +20,7 @@
 #include "src/wasm/wasm-engine.h"
 #include "src/wasm/wasm-module.h"
 #include "src/wasm/wasm-subtyping.h"
+#include "src/wasm/well-known-imports.h"
 
 namespace v8::internal::wasm {
 
@@ -823,6 +824,8 @@ class ModuleDecoderImpl : public Decoder {
       }
     }
     UpdateMemorySizes();
+    module_->type_feedback.well_known_imports.Initialize(
+        module_->num_imported_functions);
     if (tracer_) tracer_->ImportsDone();
   }
 
@@ -1619,7 +1622,7 @@ class ModuleDecoderImpl : public Decoder {
   }
 
   void ValidateAllFunctions() {
-    DCHECK(error_.empty());
+    DCHECK(!error_.has_error());
     // Pass nullptr for an "empty" filter function.
     error_ = ValidateFunctions(module_.get(), enabled_features_,
                                base::VectorOf(start_, end_ - start_), nullptr);
@@ -1893,7 +1896,7 @@ class ModuleDecoderImpl : public Decoder {
 
     // V8 does not support shared memory without a maximum.
     if (is_shared && !has_maximum) {
-      errorf(pc() - 1, "shared memory must have a maximum defined");
+      error(pc() - 1, "shared memory must have a maximum defined");
     }
 
     if (is_memory64 && !enabled_features_.has_memory64()) {

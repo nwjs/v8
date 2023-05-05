@@ -46,6 +46,7 @@ namespace v8::internal::compiler::turboshaft {
 class Block;
 struct FrameStateData;
 class Graph;
+struct FrameStateOp;
 
 // DEFINING NEW OPERATIONS
 // =======================
@@ -68,7 +69,14 @@ class Graph;
 //   non-static method `Properties()` if the properties depend on the particular
 //   operation and not just the opcode.
 
+#ifdef V8_INTL_SUPPORT
+#define TURBOSHAFT_INTL_OPERATION_LIST(V) V(StringToCaseIntl)
+#else
+#define TURBOSHAFT_INTL_OPERATION_LIST(V)
+#endif  // V8_INTL_SUPPORT
+
 #define TURBOSHAFT_OPERATION_LIST(V) \
+  TURBOSHAFT_INTL_OPERATION_LIST(V)  \
   V(WordBinop)                       \
   V(FloatBinop)                      \
   V(OverflowCheckedBinop)            \
@@ -78,6 +86,7 @@ class Graph;
   V(Equal)                           \
   V(Comparison)                      \
   V(Change)                          \
+  V(ChangeOrDeopt)                   \
   V(TryChange)                       \
   V(Float64InsertWord32)             \
   V(TaggedBitcast)                   \
@@ -113,9 +122,31 @@ class Graph;
   V(StaticAssert)                    \
   V(CheckTurboshaftTypeOf)           \
   V(ObjectIs)                        \
+  V(FloatIs)                         \
   V(ConvertToObject)                 \
+  V(ConvertToObjectOrDeopt)          \
+  V(ConvertObjectToPrimitive)        \
+  V(ConvertObjectToPrimitiveOrDeopt) \
+  V(TruncateObjectToPrimitive)       \
   V(Tag)                             \
-  V(Untag)
+  V(Untag)                           \
+  V(NewConsString)                   \
+  V(NewArray)                        \
+  V(DoubleArrayMinMax)               \
+  V(LoadFieldByIndex)                \
+  V(DebugBreak)                      \
+  V(BigIntBinop)                     \
+  V(BigIntEqual)                     \
+  V(BigIntComparison)                \
+  V(BigIntUnary)                     \
+  V(LoadRootRegister)                \
+  V(StringAt)                        \
+  V(StringLength)                    \
+  V(StringIndexOf)                   \
+  V(StringFromCodePointAt)           \
+  V(StringSubstring)                 \
+  V(StringEqual)                     \
+  V(StringComparison)
 
 enum class Opcode : uint8_t {
 #define ENUM_CONSTANT(Name) k##Name,
@@ -285,7 +316,7 @@ std::ostream& operator<<(std::ostream& os, OperationPrintStyle op);
 inline std::ostream& operator<<(std::ostream& os, const Operation& op) {
   return os << OperationPrintStyle{op};
 }
-inline void Print(const Operation& op) { std::cout << op << "\n"; }
+void Print(const Operation& op);
 
 OperationStorageSlot* AllocateOpStorage(Graph* graph, size_t slot_count);
 const Operation& Get(const Graph& graph, OpIndex index);
@@ -1097,9 +1128,73 @@ struct ChangeOp : FixedArityOperationT<1, ChangeOp> {
 std::ostream& operator<<(std::ostream& os, ChangeOp::Kind kind);
 std::ostream& operator<<(std::ostream& os, ChangeOp::Assumption assumption);
 
+struct ChangeOrDeoptOp : FixedArityOperationT<2, ChangeOrDeoptOp> {
+  enum class Kind : uint8_t {
+    kUint32ToInt32,
+    kInt64ToInt32,
+    kUint64ToInt32,
+    kUint64ToInt64,
+    kFloat64ToInt32,
+    kFloat64ToInt64,
+  };
+  Kind kind;
+  CheckForMinusZeroMode minus_zero_mode;
+  FeedbackSource feedback;
+
+  static constexpr OpProperties properties = OpProperties::PureNoAllocation();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    switch (kind) {
+      case Kind::kUint32ToInt32:
+      case Kind::kInt64ToInt32:
+      case Kind::kUint64ToInt32:
+      case Kind::kFloat64ToInt32:
+        return RepVector<RegisterRepresentation::Word32()>();
+      case Kind::kUint64ToInt64:
+      case Kind::kFloat64ToInt64:
+        return RepVector<RegisterRepresentation::Word64()>();
+    }
+  }
+
+  OpIndex input() const { return Base::input(0); }
+  OpIndex frame_state() const { return Base::input(1); }
+
+  ChangeOrDeoptOp(OpIndex input, OpIndex frame_state, Kind kind,
+                  CheckForMinusZeroMode minus_zero_mode,
+                  const FeedbackSource& feedback)
+      : Base(input, frame_state),
+        kind(kind),
+        minus_zero_mode(minus_zero_mode),
+        feedback(feedback) {}
+
+  void Validate(const Graph& graph) const {
+    switch (kind) {
+      case Kind::kUint32ToInt32:
+        DCHECK(
+            ValidOpInputRep(graph, input(), RegisterRepresentation::Word32()));
+        break;
+      case Kind::kInt64ToInt32:
+      case Kind::kUint64ToInt32:
+      case Kind::kUint64ToInt64:
+        DCHECK(
+            ValidOpInputRep(graph, input(), RegisterRepresentation::Word64()));
+        break;
+      case Kind::kFloat64ToInt32:
+      case Kind::kFloat64ToInt64:
+        DCHECK(
+            ValidOpInputRep(graph, input(), RegisterRepresentation::Float64()));
+        break;
+    }
+    DCHECK(Get(graph, frame_state()).Is<FrameStateOp>());
+  }
+  auto options() const { return std::tuple{kind, minus_zero_mode, feedback}; }
+};
+std::ostream& operator<<(std::ostream& os, ChangeOrDeoptOp::Kind kind);
+
 // Perform a conversion and return a pair of the result and a bit if it was
 // successful.
 struct TryChangeOp : FixedArityOperationT<1, TryChangeOp> {
+  static constexpr uint32_t kSuccessValue = 1;
+  static constexpr uint32_t kFailureValue = 0;
   enum class Kind : uint8_t {
     // The result of the truncation is undefined if the result is out of range.
     kSignedFloatTruncateOverflowUndefined,
@@ -1179,7 +1274,9 @@ struct TaggedBitcastOp : FixedArityOperationT<1, TaggedBitcastOp> {
     DCHECK((from == RegisterRepresentation::PointerSized() &&
             to == RegisterRepresentation::Tagged()) ||
            (from == RegisterRepresentation::Tagged() &&
-            to == RegisterRepresentation::PointerSized()));
+            to == RegisterRepresentation::PointerSized()) ||
+           (from == RegisterRepresentation::Compressed() &&
+            to == RegisterRepresentation::Word32()));
     DCHECK(ValidOpInputRep(graph, input(), from));
   }
   auto options() const { return std::tuple{from, to}; }
@@ -1246,14 +1343,27 @@ struct PhiOp : OperationT<PhiOp> {
 // Only used when moving a loop phi to a new graph while the loop backedge has
 // not been emitted yet.
 struct PendingLoopPhiOp : FixedArityOperationT<1, PendingLoopPhiOp> {
-  RegisterRepresentation rep;
-  union {
-    // Used when transforming a Turboshaft graph.
-    // This is not an input because it refers to the old graph.
-    OpIndex old_backedge_index = OpIndex::Invalid();
-    // Used when translating from sea-of-nodes.
-    Node* old_backedge_node;
+  struct PhiIndex {
+    int index;
   };
+  struct Data {
+    union {
+      // Used when transforming a Turboshaft graph.
+      // This is not an input because it refers to the old graph.
+      OpIndex old_backedge_index = OpIndex::Invalid();
+      // Used when translating from sea-of-nodes.
+      Node* old_backedge_node;
+      // Used when building loops with the assembler macros.
+      PhiIndex phi_index;
+    };
+    explicit Data(OpIndex old_backedge_index)
+        : old_backedge_index(old_backedge_index) {}
+    explicit Data(Node* old_backedge_node)
+        : old_backedge_node(old_backedge_node) {}
+    explicit Data(PhiIndex phi_index) : phi_index(phi_index) {}
+  };
+  RegisterRepresentation rep;
+  Data data;
 
   static constexpr OpProperties properties = OpProperties::PureNoAllocation();
   base::Vector<const RegisterRepresentation> outputs_rep() const {
@@ -1262,14 +1372,8 @@ struct PendingLoopPhiOp : FixedArityOperationT<1, PendingLoopPhiOp> {
 
   OpIndex first() const { return input(0); }
 
-  PendingLoopPhiOp(OpIndex first, RegisterRepresentation rep,
-                   OpIndex old_backedge_index)
-      : Base(first), rep(rep), old_backedge_index(old_backedge_index) {
-    DCHECK(old_backedge_index.valid());
-  }
-  PendingLoopPhiOp(OpIndex first, RegisterRepresentation rep,
-                   Node* old_backedge_node)
-      : Base(first), rep(rep), old_backedge_node(old_backedge_node) {}
+  PendingLoopPhiOp(OpIndex first, RegisterRepresentation rep, Data data)
+      : Base(first), rep(rep), data(data) {}
 
   void Validate(const Graph& graph) const {
     DCHECK(ValidOpInputRep(graph, first(), rep));
@@ -2345,9 +2449,11 @@ struct ObjectIsOp : FixedArityOperationT<1, ObjectIsOp> {
     kCallable,
     kConstructor,
     kDetectableCallable,
+    kInternalizedString,
     kNonCallable,
     kNumber,
     kReceiver,
+    kReceiverOrNullOrUndefined,
     kSmi,
     kString,
     kSymbol,
@@ -2379,6 +2485,29 @@ std::ostream& operator<<(std::ostream& os, ObjectIsOp::Kind kind);
 std::ostream& operator<<(std::ostream& os,
                          ObjectIsOp::InputAssumptions input_assumptions);
 
+struct FloatIsOp : FixedArityOperationT<1, FloatIsOp> {
+  enum class Kind : uint8_t {
+    kNaN,
+  };
+  Kind kind;
+  FloatRepresentation input_rep;
+
+  static constexpr OpProperties properties = OpProperties::PureNoAllocation();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Word32()>();
+  }
+
+  OpIndex input() const { return Base::input(0); }
+
+  FloatIsOp(OpIndex input, Kind kind, FloatRepresentation input_rep)
+      : Base(input), kind(kind), input_rep(input_rep) {}
+  void Validate(const Graph& graph) const {
+    DCHECK(ValidOpInputRep(graph, input(), input_rep));
+  }
+  auto options() const { return std::tuple{kind, input_rep}; }
+};
+std::ostream& operator<<(std::ostream& os, FloatIsOp::Kind kind);
+
 struct ConvertToObjectOp : FixedArityOperationT<1, ConvertToObjectOp> {
   enum class Kind : uint8_t {
     kBigInt,
@@ -2406,15 +2535,15 @@ struct ConvertToObjectOp : FixedArityOperationT<1, ConvertToObjectOp> {
 
   OpIndex input() const { return Base::input(0); }
 
-  explicit ConvertToObjectOp(OpIndex input, Kind kind,
-                             RegisterRepresentation input_rep,
-                             InputInterpretation input_interpretation,
-                             CheckForMinusZeroMode minus_zero_mode)
+  ConvertToObjectOp(OpIndex input, Kind kind, RegisterRepresentation input_rep,
+                    InputInterpretation input_interpretation,
+                    CheckForMinusZeroMode minus_zero_mode)
       : Base(input),
         kind(kind),
         input_rep(input_rep),
         input_interpretation(input_interpretation),
         minus_zero_mode(minus_zero_mode) {}
+
   void Validate(const Graph& graph) const {
     switch (kind) {
       case Kind::kBigInt:
@@ -2458,6 +2587,204 @@ struct ConvertToObjectOp : FixedArityOperationT<1, ConvertToObjectOp> {
 };
 std::ostream& operator<<(std::ostream& os, ConvertToObjectOp::Kind kind);
 
+struct ConvertToObjectOrDeoptOp
+    : FixedArityOperationT<2, ConvertToObjectOrDeoptOp> {
+  enum class Kind : uint8_t {
+    kSmi,
+  };
+  enum class InputInterpretation : uint8_t {
+    kSigned,
+    kUnsigned,
+  };
+  Kind kind;
+  RegisterRepresentation input_rep;
+  InputInterpretation input_interpretation;
+  FeedbackSource feedback;
+
+  static constexpr OpProperties properties = OpProperties::CanAbort();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Tagged()>();
+  }
+
+  OpIndex input() const { return Base::input(0); }
+  OpIndex frame_state() const { return Base::input(1); }
+
+  ConvertToObjectOrDeoptOp(OpIndex input, OpIndex frame_state, Kind kind,
+                           RegisterRepresentation input_rep,
+                           InputInterpretation input_interpretation,
+                           const FeedbackSource& feedback)
+      : Base(input, frame_state),
+        kind(kind),
+        input_rep(input_rep),
+        input_interpretation(input_interpretation),
+        feedback(feedback) {}
+
+  void Validate(const Graph& graph) const {
+    DCHECK(ValidOpInputRep(graph, input(), input_rep));
+  }
+
+  auto options() const {
+    return std::tuple{kind, input_rep, input_interpretation, feedback};
+  }
+};
+std::ostream& operator<<(std::ostream& os, ConvertToObjectOrDeoptOp::Kind kind);
+std::ostream& operator<<(
+    std::ostream& os,
+    ConvertToObjectOrDeoptOp::InputInterpretation input_interpretation);
+
+struct ConvertObjectToPrimitiveOp
+    : FixedArityOperationT<1, ConvertObjectToPrimitiveOp> {
+  enum class Kind : uint8_t {
+    kInt32,
+    kInt64,
+    kUint32,
+    kBit,
+    kFloat64,
+  };
+  enum class InputAssumptions : uint8_t {
+    kObject,
+    kSmi,
+    kNumberOrOddball,
+  };
+  Kind kind;
+  InputAssumptions input_assumptions;
+
+  static constexpr OpProperties properties = OpProperties::PureNoAllocation();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    switch (kind) {
+      case Kind::kInt32:
+      case Kind::kUint32:
+      case Kind::kBit:
+        return RepVector<RegisterRepresentation::Word32()>();
+      case Kind::kInt64:
+        return RepVector<RegisterRepresentation::Word64()>();
+      case Kind::kFloat64:
+        return RepVector<RegisterRepresentation::Float64()>();
+    }
+  }
+
+  OpIndex input() const { return Base::input(0); }
+
+  ConvertObjectToPrimitiveOp(OpIndex input, Kind kind,
+                             InputAssumptions input_assumptions)
+      : Base(input), kind(kind), input_assumptions(input_assumptions) {}
+  void Validate(const Graph& graph) const {
+    DCHECK(ValidOpInputRep(graph, input(), RegisterRepresentation::Tagged()));
+  }
+
+  auto options() const { return std::tuple{kind, input_assumptions}; }
+};
+std::ostream& operator<<(std::ostream& os,
+                         ConvertObjectToPrimitiveOp::Kind kind);
+std::ostream& operator<<(
+    std::ostream& os,
+    ConvertObjectToPrimitiveOp::InputAssumptions input_assumptions);
+
+struct ConvertObjectToPrimitiveOrDeoptOp
+    : FixedArityOperationT<2, ConvertObjectToPrimitiveOrDeoptOp> {
+  enum class PrimitiveKind : uint8_t {
+    kInt32,
+    kInt64,
+    kFloat64,
+    kArrayIndex,
+  };
+  enum class ObjectKind : uint8_t {
+    kNumber,
+    kNumberOrBoolean,
+    kNumberOrOddball,
+    kNumberOrString,
+    kSmi,
+  };
+  ObjectKind from_kind;
+  PrimitiveKind to_kind;
+  CheckForMinusZeroMode minus_zero_mode;
+  FeedbackSource feedback;
+
+  static constexpr OpProperties properties = OpProperties::ReadingAndCanAbort();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    switch (to_kind) {
+      case PrimitiveKind::kInt32:
+        return RepVector<RegisterRepresentation::Word32()>();
+      case PrimitiveKind::kInt64:
+        return RepVector<RegisterRepresentation::Word64()>();
+      case PrimitiveKind::kFloat64:
+        return RepVector<RegisterRepresentation::Float64()>();
+      case PrimitiveKind::kArrayIndex:
+        return Is64() ? RepVector<RegisterRepresentation::Word64()>()
+                      : RepVector<RegisterRepresentation::Word32()>();
+    }
+  }
+
+  OpIndex input() const { return Base::input(0); }
+  OpIndex frame_state() const { return Base::input(1); }
+
+  ConvertObjectToPrimitiveOrDeoptOp(OpIndex input, OpIndex frame_state,
+                                    ObjectKind from_kind, PrimitiveKind to_kind,
+                                    CheckForMinusZeroMode minus_zero_mode,
+                                    const FeedbackSource& feedback)
+      : Base(input, frame_state),
+        from_kind(from_kind),
+        to_kind(to_kind),
+        minus_zero_mode(minus_zero_mode),
+        feedback(feedback) {}
+  void Validate(const Graph& graph) const {
+    DCHECK(ValidOpInputRep(graph, input(), RegisterRepresentation::Tagged()));
+    DCHECK(Get(graph, frame_state()).Is<FrameStateOp>());
+  }
+
+  auto options() const {
+    return std::tuple{from_kind, to_kind, minus_zero_mode, feedback};
+  }
+};
+std::ostream& operator<<(std::ostream& os,
+                         ConvertObjectToPrimitiveOrDeoptOp::ObjectKind kind);
+std::ostream& operator<<(std::ostream& os,
+                         ConvertObjectToPrimitiveOrDeoptOp::PrimitiveKind kind);
+
+struct TruncateObjectToPrimitiveOp
+    : FixedArityOperationT<1, TruncateObjectToPrimitiveOp> {
+  enum class Kind : uint8_t {
+    kInt32,
+    kInt64,
+    kBit,
+  };
+  enum class InputAssumptions : uint8_t {
+    kBigInt,
+    kNumberOrOddball,
+    kHeapObject,
+    kObject,
+  };
+  Kind kind;
+  InputAssumptions input_assumptions;
+
+  static constexpr OpProperties properties = OpProperties::PureNoAllocation();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    switch (kind) {
+      case Kind::kInt32:
+      case Kind::kBit:
+        return RepVector<RegisterRepresentation::Word32()>();
+      case Kind::kInt64:
+        return RepVector<RegisterRepresentation::Word64()>();
+    }
+  }
+
+  OpIndex input() const { return Base::input(0); }
+
+  TruncateObjectToPrimitiveOp(OpIndex input, Kind kind,
+                              InputAssumptions input_assumptions)
+      : Base(input), kind(kind), input_assumptions(input_assumptions) {}
+  void Validate(const Graph& graph) const {
+    DCHECK(ValidOpInputRep(graph, input(), RegisterRepresentation::Tagged()));
+  }
+
+  auto options() const { return std::tuple{kind, input_assumptions}; }
+};
+std::ostream& operator<<(std::ostream& os,
+                         TruncateObjectToPrimitiveOp::Kind kind);
+std::ostream& operator<<(
+    std::ostream& os,
+    TruncateObjectToPrimitiveOp::InputAssumptions input_assumptions);
+
 enum class TagKind {
   kSmiTag,
 };
@@ -2494,10 +2821,425 @@ struct UntagOp : FixedArityOperationT<1, UntagOp> {
 
   UntagOp(OpIndex input, TagKind kind, RegisterRepresentation rep)
       : Base(input), kind(kind), rep(rep) {}
-  void Validate(const Graph& graph) const { UNIMPLEMENTED(); }
+  void Validate(const Graph& graph) const {
+    DCHECK(ValidOpInputRep(graph, input(), RegisterRepresentation::Tagged()));
+  }
 
   auto options() const { return std::tuple{kind, rep}; }
 };
+
+struct NewConsStringOp : FixedArityOperationT<3, NewConsStringOp> {
+  static constexpr OpProperties properties = OpProperties::PureMayAllocate();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Tagged()>();
+  }
+
+  OpIndex length() const { return Base::input(0); }
+  OpIndex first() const { return Base::input(1); }
+  OpIndex second() const { return Base::input(2); }
+
+  NewConsStringOp(OpIndex length, OpIndex first, OpIndex second)
+      : Base(length, first, second) {}
+  void Validate(const Graph& graph) const {
+    DCHECK(ValidOpInputRep(graph, length(), RegisterRepresentation::Word32()));
+    DCHECK(ValidOpInputRep(graph, first(), RegisterRepresentation::Tagged()));
+    DCHECK(ValidOpInputRep(graph, second(), RegisterRepresentation::Tagged()));
+  }
+
+  auto options() const { return std::tuple{}; }
+};
+
+struct NewArrayOp : FixedArityOperationT<1, NewArrayOp> {
+  enum class Kind : uint8_t {
+    kDouble,
+    kObject,
+  };
+  Kind kind;
+  AllocationType allocation_type;
+
+  static constexpr OpProperties properties = OpProperties::PureMayAllocate();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Tagged()>();
+  }
+
+  OpIndex length() const { return Base::input(0); }
+
+  NewArrayOp(OpIndex length, Kind kind, AllocationType allocation_type)
+      : Base(length), kind(kind), allocation_type(allocation_type) {}
+  void Validate(const Graph& graph) const {
+    DCHECK(ValidOpInputRep(graph, length(),
+                           RegisterRepresentation::PointerSized()));
+  }
+
+  auto options() const { return std::tuple{kind, allocation_type}; }
+};
+std::ostream& operator<<(std::ostream& os, NewArrayOp::Kind kind);
+
+struct DoubleArrayMinMaxOp : FixedArityOperationT<1, DoubleArrayMinMaxOp> {
+  enum class Kind : uint8_t {
+    kMin,
+    kMax,
+  };
+  Kind kind;
+
+  static constexpr OpProperties properties = OpProperties::PureMayAllocate();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Tagged()>();
+  }
+
+  OpIndex array() const { return Base::input(0); }
+
+  DoubleArrayMinMaxOp(OpIndex array, Kind kind) : Base(array), kind(kind) {}
+  void Validate(const Graph& graph) const {
+    DCHECK(ValidOpInputRep(graph, array(), RegisterRepresentation::Tagged()));
+  }
+
+  auto options() const { return std::tuple{kind}; }
+};
+std::ostream& operator<<(std::ostream& os, DoubleArrayMinMaxOp::Kind kind);
+
+// TODO(nicohartmann@): We should consider getting rid of the LoadFieldByIndex
+// operation.
+struct LoadFieldByIndexOp : FixedArityOperationT<2, LoadFieldByIndexOp> {
+  static constexpr OpProperties properties = OpProperties::PureMayAllocate();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Tagged()>();
+  }
+
+  OpIndex object() const { return Base::input(0); }
+  // Index encoding (see `src/objects/field-index-inl.h`):
+  // For efficiency, the LoadByFieldIndex instruction takes an index that is
+  // optimized for quick access. If the property is inline, the index is
+  // positive. If it's out-of-line, the encoded index is -raw_index - 1 to
+  // disambiguate the zero out-of-line index from the zero inobject case.
+  // The index itself is shifted up by one bit, the lower-most bit
+  // signifying if the field is a mutable double box (1) or not (0).
+  OpIndex index() const { return Base::input(1); }
+
+  LoadFieldByIndexOp(OpIndex object, OpIndex index) : Base(object, index) {}
+  void Validate(const Graph& graph) const {
+    DCHECK(ValidOpInputRep(graph, object(), RegisterRepresentation::Tagged()));
+    DCHECK(ValidOpInputRep(graph, index(), RegisterRepresentation::Word32()));
+  }
+
+  auto options() const { return std::tuple{}; }
+};
+
+struct DebugBreakOp : FixedArityOperationT<0, DebugBreakOp> {
+  static constexpr OpProperties properties = OpProperties::AnySideEffects();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<>();
+  }
+
+  DebugBreakOp() : Base() {}
+  void Validate(const Graph& graph) const {}
+
+  auto options() const { return std::tuple{}; }
+};
+
+struct BigIntBinopOp : FixedArityOperationT<3, BigIntBinopOp> {
+  enum class Kind : uint8_t {
+    kAdd,
+    kSub,
+    kMul,
+    kDiv,
+    kMod,
+    kBitwiseAnd,
+    kBitwiseOr,
+    kBitwiseXor,
+    kShiftLeft,
+    kShiftRightArithmetic,
+  };
+  Kind kind;
+
+  // TODO(nicohartmann@): Maybe we can specify more precise properties here.
+  // These operations can deopt (abort), allocate and read immutable data.
+  static constexpr OpProperties properties = OpProperties::AnySideEffects();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Tagged()>();
+  }
+
+  OpIndex left() const { return Base::input(0); }
+  OpIndex right() const { return Base::input(1); }
+  OpIndex frame_state() const { return Base::input(2); }
+
+  BigIntBinopOp(OpIndex left, OpIndex right, OpIndex frame_state, Kind kind)
+      : Base(left, right, frame_state), kind(kind) {}
+  void Validate(const Graph& graph) const {
+    DCHECK(ValidOpInputRep(graph, left(), RegisterRepresentation::Tagged()));
+    DCHECK(ValidOpInputRep(graph, right(), RegisterRepresentation::Tagged()));
+    DCHECK(Get(graph, frame_state()).Is<FrameStateOp>());
+  }
+
+  auto options() const { return std::tuple{kind}; }
+};
+std::ostream& operator<<(std::ostream& os, BigIntBinopOp::Kind kind);
+
+struct BigIntEqualOp : FixedArityOperationT<2, BigIntEqualOp> {
+  static constexpr OpProperties properties = OpProperties::PureNoAllocation();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Tagged()>();
+  }
+
+  OpIndex left() const { return Base::input(0); }
+  OpIndex right() const { return Base::input(1); }
+
+  BigIntEqualOp(OpIndex left, OpIndex right) : Base(left, right) {}
+
+  void Validate(const Graph& graph) const {
+    DCHECK(ValidOpInputRep(graph, left(), RegisterRepresentation::Tagged()));
+    DCHECK(ValidOpInputRep(graph, right(), RegisterRepresentation::Tagged()));
+  }
+
+  auto options() const { return std::tuple{}; }
+};
+
+struct BigIntComparisonOp : FixedArityOperationT<2, BigIntComparisonOp> {
+  enum class Kind : uint8_t {
+    kLessThan,
+    kLessThanOrEqual,
+  };
+  Kind kind;
+
+  static constexpr OpProperties properties = OpProperties::PureNoAllocation();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Tagged()>();
+  }
+
+  OpIndex left() const { return Base::input(0); }
+  OpIndex right() const { return Base::input(1); }
+
+  BigIntComparisonOp(OpIndex left, OpIndex right, Kind kind)
+      : Base(left, right), kind(kind) {}
+
+  void Validate(const Graph& graph) const {
+    DCHECK(ValidOpInputRep(graph, left(), RegisterRepresentation::Tagged()));
+    DCHECK(ValidOpInputRep(graph, right(), RegisterRepresentation::Tagged()));
+  }
+
+  auto options() const { return std::tuple{kind}; }
+};
+std::ostream& operator<<(std::ostream& os, BigIntComparisonOp::Kind kind);
+
+struct BigIntUnaryOp : FixedArityOperationT<1, BigIntUnaryOp> {
+  enum class Kind : uint8_t {
+    kNegate,
+  };
+  Kind kind;
+
+  static constexpr OpProperties properties = OpProperties::PureMayAllocate();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Tagged()>();
+  }
+
+  OpIndex input() const { return Base::input(0); }
+
+  BigIntUnaryOp(OpIndex input, Kind kind) : Base(input), kind(kind) {}
+
+  void Validate(const Graph& graph) const {
+    DCHECK(ValidOpInputRep(graph, input(), RegisterRepresentation::Tagged()));
+  }
+
+  auto options() const { return std::tuple{kind}; }
+};
+std::ostream& operator<<(std::ostream& os, BigIntUnaryOp::Kind kind);
+
+struct LoadRootRegisterOp : FixedArityOperationT<0, LoadRootRegisterOp> {
+  static constexpr OpProperties properties = OpProperties::PureNoAllocation();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::PointerSized()>();
+  }
+
+  LoadRootRegisterOp() : Base() {}
+  void Validate(const Graph& graph) const {}
+  std::tuple<> options() const { return {}; }
+};
+
+struct StringAtOp : FixedArityOperationT<2, StringAtOp> {
+  enum class Kind : uint8_t {
+    kCharCode,
+    kCodePoint,
+  };
+  Kind kind;
+
+  static constexpr OpProperties properties = OpProperties::PureNoAllocation();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Word32()>();
+  }
+
+  OpIndex string() const { return Base::input(0); }
+  OpIndex position() const { return Base::input(1); }
+
+  StringAtOp(OpIndex string, OpIndex position, Kind kind)
+      : Base(string, position), kind(kind) {}
+
+  void Validate(const Graph& graph) const {
+    DCHECK(ValidOpInputRep(graph, string(), RegisterRepresentation::Tagged()));
+    DCHECK(ValidOpInputRep(graph, position(),
+                           RegisterRepresentation::PointerSized()));
+  }
+
+  auto options() const { return std::tuple{kind}; }
+};
+std::ostream& operator<<(std::ostream& os, StringAtOp::Kind kind);
+
+#ifdef V8_INTL_SUPPORT
+struct StringToCaseIntlOp : FixedArityOperationT<1, StringToCaseIntlOp> {
+  enum class Kind : uint8_t {
+    kLower,
+    kUpper,
+  };
+  Kind kind;
+
+  static constexpr OpProperties properties = OpProperties::PureMayAllocate();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Tagged()>();
+  }
+
+  OpIndex string() const { return Base::input(0); }
+
+  StringToCaseIntlOp(OpIndex string, Kind kind) : Base(string), kind(kind) {}
+
+  void Validate(const Graph& graph) const {
+    DCHECK(ValidOpInputRep(graph, string(), RegisterRepresentation::Tagged()));
+  }
+
+  auto options() const { return std::tuple{kind}; }
+};
+std::ostream& operator<<(std::ostream& os, StringToCaseIntlOp::Kind kind);
+#endif  // V8_INTL_SUPPORT
+
+struct StringLengthOp : FixedArityOperationT<1, StringLengthOp> {
+  static constexpr OpProperties properties = OpProperties::PureNoAllocation();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Word32()>();
+  }
+
+  OpIndex string() const { return Base::input(0); }
+
+  explicit StringLengthOp(OpIndex string) : Base(string) {}
+
+  void Validate(const Graph& graph) const {
+    DCHECK(ValidOpInputRep(graph, string(), RegisterRepresentation::Tagged()));
+  }
+
+  auto options() const { return std::tuple{}; }
+};
+
+struct StringIndexOfOp : FixedArityOperationT<3, StringIndexOfOp> {
+  static constexpr OpProperties properties = OpProperties::PureMayAllocate();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Tagged()>();
+  }
+
+  // Search the string `search` within the string `string` starting at
+  // `position`.
+  OpIndex string() const { return Base::input(0); }
+  OpIndex search() const { return Base::input(1); }
+  OpIndex position() const { return Base::input(2); }
+
+  StringIndexOfOp(OpIndex string, OpIndex search, OpIndex position)
+      : Base(string, search, position) {}
+
+  void Validate(const Graph& graph) const {
+    DCHECK(ValidOpInputRep(graph, string(), RegisterRepresentation::Tagged()));
+    DCHECK(ValidOpInputRep(graph, search(), RegisterRepresentation::Tagged()));
+    DCHECK(
+        ValidOpInputRep(graph, position(), RegisterRepresentation::Tagged()));
+  }
+
+  auto options() const { return std::tuple{}; }
+};
+
+struct StringFromCodePointAtOp
+    : FixedArityOperationT<2, StringFromCodePointAtOp> {
+  static constexpr OpProperties properties = OpProperties::PureMayAllocate();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Tagged()>();
+  }
+
+  OpIndex string() const { return Base::input(0); }
+  OpIndex index() const { return Base::input(1); }
+
+  StringFromCodePointAtOp(OpIndex string, OpIndex index)
+      : Base(string, index) {}
+
+  void Validate(const Graph& graph) const {
+    DCHECK(ValidOpInputRep(graph, string(), RegisterRepresentation::Tagged()));
+    DCHECK(ValidOpInputRep(graph, index(),
+                           RegisterRepresentation::PointerSized()));
+  }
+
+  auto options() const { return std::tuple{}; }
+};
+
+struct StringSubstringOp : FixedArityOperationT<3, StringSubstringOp> {
+  static constexpr OpProperties properties = OpProperties::PureMayAllocate();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Tagged()>();
+  }
+
+  OpIndex string() const { return Base::input(0); }
+  OpIndex start() const { return Base::input(1); }
+  OpIndex end() const { return Base::input(2); }
+
+  StringSubstringOp(OpIndex string, OpIndex start, OpIndex end)
+      : Base(string, start, end) {}
+
+  void Validate(const Graph& graph) const {
+    DCHECK(ValidOpInputRep(graph, string(), RegisterRepresentation::Tagged()));
+    DCHECK(ValidOpInputRep(graph, start(), RegisterRepresentation::Word32()));
+    DCHECK(ValidOpInputRep(graph, end(), RegisterRepresentation::Word32()));
+  }
+
+  auto options() const { return std::tuple{}; }
+};
+
+struct StringEqualOp : FixedArityOperationT<2, StringEqualOp> {
+  static constexpr OpProperties properties = OpProperties::PureNoAllocation();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Tagged()>();
+  }
+
+  OpIndex left() const { return Base::input(0); }
+  OpIndex right() const { return Base::input(1); }
+
+  StringEqualOp(OpIndex left, OpIndex right) : Base(left, right) {}
+
+  void Validate(const Graph& graph) const {
+    DCHECK(ValidOpInputRep(graph, left(), RegisterRepresentation::Tagged()));
+    DCHECK(ValidOpInputRep(graph, right(), RegisterRepresentation::Tagged()));
+  }
+
+  auto options() const { return std::tuple{}; }
+};
+
+struct StringComparisonOp : FixedArityOperationT<2, StringComparisonOp> {
+  enum class Kind : uint8_t {
+    kLessThan,
+    kLessThanOrEqual,
+  };
+  Kind kind;
+
+  static constexpr OpProperties properties = OpProperties::PureNoAllocation();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Tagged()>();
+  }
+
+  OpIndex left() const { return Base::input(0); }
+  OpIndex right() const { return Base::input(1); }
+
+  StringComparisonOp(OpIndex left, OpIndex right, Kind kind)
+      : Base(left, right), kind(kind) {}
+
+  void Validate(const Graph& graph) const {
+    DCHECK(ValidOpInputRep(graph, left(), RegisterRepresentation::Tagged()));
+    DCHECK(ValidOpInputRep(graph, right(), RegisterRepresentation::Tagged()));
+  }
+
+  auto options() const { return std::tuple{kind}; }
+};
+std::ostream& operator<<(std::ostream& os, StringComparisonOp::Kind kind);
 
 #define OPERATION_PROPERTIES_CASE(Name) Name##Op::PropertiesIfStatic(),
 static constexpr base::Optional<OpProperties>

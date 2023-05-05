@@ -98,10 +98,7 @@ class Sweeper {
   // the main thread's local sweeper without risk of data races.
   class LocalSweeper final {
    public:
-    explicit LocalSweeper(Sweeper* sweeper)
-        : sweeper_(sweeper),
-          pretenuring_handler_(sweeper_->pretenuring_handler_),
-          pretenuring_feedback_(PretenuringHandler::kInitialFeedbackCapacity) {
+    explicit LocalSweeper(Sweeper* sweeper) : sweeper_(sweeper) {
       DCHECK_NOT_NULL(sweeper_);
     }
     ~LocalSweeper() { DCHECK(IsEmpty()); }
@@ -111,10 +108,7 @@ class Sweeper {
     void ContributeAndWaitForPromotedPagesIteration();
     void Finalize();
 
-    bool IsEmpty() const {
-      return pretenuring_feedback_.empty() &&
-             old_to_new_remembered_sets_.empty();
-    }
+    bool IsEmpty() const { return old_to_new_remembered_sets_.empty(); }
 
    private:
     int ParallelSweepPage(Page* page, AllocationSpace identity,
@@ -122,10 +116,9 @@ class Sweeper {
 
     void ParallelIteratePromotedPagesForRememberedSets();
     void ParallelIteratePromotedPageForRememberedSets(MemoryChunk* chunk);
+    void CleanPromotedPages();
 
     Sweeper* const sweeper_;
-    PretenuringHandler* const pretenuring_handler_;
-    PretenuringHandler::PretenuringFeedbackMap pretenuring_feedback_;
     CachedOldToNewRememberedSets old_to_new_remembered_sets_;
 
     friend class Sweeper;
@@ -173,19 +166,16 @@ class Sweeper {
 
   bool ShouldRefillFreelistForSpace(AllocationSpace space) const;
 
-  void SweepEmptyNewSpacePage(Page* page, bool should_discard_page);
+  void SweepEmptyNewSpacePage(Page* page);
 
  private:
   NonAtomicMarkingState* marking_state() const { return marking_state_; }
 
-  int RawSweep(
-      Page* p, FreeSpaceTreatmentMode free_space_treatment_mode,
-      SweepingMode sweeping_mode, const base::MutexGuard& page_guard,
-      PretenuringHandler::PretenuringFeedbackMap* local_pretenuring_feedback);
+  int RawSweep(Page* p, FreeSpaceTreatmentMode free_space_treatment_mode,
+               SweepingMode sweeping_mode);
 
   void RawIteratePromotedPageForRememberedSets(
       MemoryChunk* chunk,
-      PretenuringHandler::PretenuringFeedbackMap* pretenuring_feedback,
       CachedOldToNewRememberedSets* old_to_new_remembered_sets);
 
   void AddPageImpl(AllocationSpace space, Page* page, AddPageMode mode,
@@ -224,6 +214,7 @@ class Sweeper {
       Address free_start, Address free_end, Page* page, bool record_free_ranges,
       TypedSlotSet::FreeRangesMap* free_ranges_map, SweepingMode sweeping_mode,
       InvalidatedSlotsCleanup* invalidated_old_to_new_cleanup,
+      InvalidatedSlotsCleanup* invalidated_old_to_old_cleanup,
       InvalidatedSlotsCleanup* invalidated_old_to_shared_cleanup);
 
   // Helper function for RawSweep. Clears invalid typed slots in the given free
@@ -251,6 +242,7 @@ class Sweeper {
 
   Page* GetSweepingPageSafe(AllocationSpace space);
   MemoryChunk* GetPromotedPageForIterationSafe();
+  std::vector<MemoryChunk*> GetAllPromotedPagesForIterationSafe();
   bool TryRemoveSweepingPageSafe(AllocationSpace space, Page* page);
 
   void PrepareToBeSweptPage(AllocationSpace space, Page* page);
@@ -266,6 +258,7 @@ class Sweeper {
 
   int NumberOfConcurrentSweepers() const;
 
+  void IncrementAndNotifyPromotedPagesIterationFinishedIfNeeded();
   void NotifyPromotedPagesIterationFinished();
 
   void SnapshotPageSets();
@@ -289,7 +282,6 @@ class Sweeper {
   std::atomic<bool> sweeping_in_progress_;
   bool should_reduce_memory_;
   bool should_sweep_non_new_spaces_ = false;
-  PretenuringHandler* const pretenuring_handler_;
   base::Optional<GarbageCollector> current_new_space_collector_;
   LocalSweeper main_thread_local_sweeper_;
 
@@ -304,6 +296,7 @@ class Sweeper {
   MemoryAllocator::NormalPagesSet snapshot_shared_normal_pages_set_;
   MemoryAllocator::LargePagesSet snapshot_shared_large_pages_set_;
   std::atomic<bool> promoted_page_iteration_in_progress_{false};
+  bool should_iterate_promoted_pages_ = false;
 };
 
 }  // namespace internal

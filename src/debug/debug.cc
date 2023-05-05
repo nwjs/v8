@@ -1523,13 +1523,12 @@ class DiscardBaselineCodeVisitor : public ThreadVisitor {
 void Debug::DiscardBaselineCode(SharedFunctionInfo shared) {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
   DCHECK(shared.HasBaselineCode());
-  Isolate* isolate = shared.GetIsolate();
   DiscardBaselineCodeVisitor visitor(shared);
-  visitor.VisitThread(isolate, isolate->thread_local_top());
-  isolate->thread_manager()->IterateArchivedThreads(&visitor);
+  visitor.VisitThread(isolate_, isolate_->thread_local_top());
+  isolate_->thread_manager()->IterateArchivedThreads(&visitor);
   // TODO(v8:11429): Avoid this heap walk somehow.
-  HeapObjectIterator iterator(isolate->heap());
-  auto trampoline = BUILTIN_CODE(isolate, InterpreterEntryTrampoline);
+  HeapObjectIterator iterator(isolate_->heap());
+  auto trampoline = BUILTIN_CODE(isolate_, InterpreterEntryTrampoline);
   shared.FlushBaselineCode();
   for (HeapObject obj = iterator.Next(); !obj.is_null();
        obj = iterator.Next()) {
@@ -1571,7 +1570,7 @@ void Debug::DeoptimizeFunction(Handle<SharedFunctionInfo> shared) {
   if (shared->HasBaselineCode()) {
     DiscardBaselineCode(*shared);
   }
-  Deoptimizer::DeoptimizeAllOptimizedCodeWithFunction(shared);
+  Deoptimizer::DeoptimizeAllOptimizedCodeWithFunction(isolate_, shared);
 }
 
 void Debug::PrepareFunctionForDebugExecution(
@@ -2812,7 +2811,8 @@ void Debug::StopSideEffectCheckMode() {
   DCHECK(isolate_->debug_execution_mode() == DebugInfo::kSideEffects);
   if (side_effect_check_failed_) {
     DCHECK(isolate_->has_pending_exception());
-    DCHECK(isolate_->is_execution_termination_pending());
+    DCHECK_IMPLIES(v8_flags.strict_termination_checks,
+                   isolate_->is_execution_termination_pending());
     // Convert the termination exception into a regular exception.
     isolate_->CancelTerminateExecution();
     isolate_->Throw(*isolate_->factory()->NewEvalError(

@@ -161,10 +161,11 @@ namespace internal {
   /* String helpers */                                                         \
   TFC(StringFromCodePointAt, StringAtAsString)                                 \
   TFC(StringEqual, StringEqual)                                                \
-  TFC(StringGreaterThan, Compare)                                              \
-  TFC(StringGreaterThanOrEqual, Compare)                                       \
-  TFC(StringLessThan, Compare)                                                 \
-  TFC(StringLessThanOrEqual, Compare)                                          \
+  TFC(StringGreaterThan, CompareNoContext)                                     \
+  TFC(StringGreaterThanOrEqual, CompareNoContext)                              \
+  TFC(StringLessThan, CompareNoContext)                                        \
+  TFC(StringLessThanOrEqual, CompareNoContext)                                 \
+  TFC(StringCompare, CompareNoContext)                                         \
   TFC(StringSubstring, StringSubstring)                                        \
                                                                                \
   /* OrderedHashTable helpers */                                               \
@@ -270,6 +271,8 @@ namespace internal {
                                                                                \
   /* Type conversions continuations */                                         \
   TFC(ToBooleanLazyDeoptContinuation, SingleParameterOnStack)                  \
+  TFC(MathCeilContinuation, SingleParameterOnStack)                            \
+  TFC(MathFloorContinuation, SingleParameterOnStack)                           \
   TFC(MathRoundContinuation, SingleParameterOnStack)                           \
                                                                                \
   /* Handlers */                                                               \
@@ -638,9 +641,11 @@ namespace internal {
   TFH(LoadSuperICBaseline, LoadWithReceiverBaseline)                           \
   TFH(KeyedLoadIC, KeyedLoadWithVector)                                        \
   TFH(KeyedLoadIC_Megamorphic, KeyedLoadWithVector)                            \
+  TFH(KeyedLoadIC_MegamorphicStringKey, KeyedLoadWithVector)                   \
   TFH(KeyedLoadICTrampoline, KeyedLoad)                                        \
   TFH(KeyedLoadICBaseline, KeyedLoadBaseline)                                  \
   TFH(KeyedLoadICTrampoline_Megamorphic, KeyedLoad)                            \
+  TFH(KeyedLoadICTrampoline_MegamorphicStringKey, KeyedLoad)                   \
   TFH(StoreGlobalIC, StoreGlobalWithVector)                                    \
   TFH(StoreGlobalICTrampoline, StoreGlobal)                                    \
   TFH(StoreGlobalICBaseline, StoreGlobalBaseline)                              \
@@ -720,8 +725,8 @@ namespace internal {
   CPP(NumberPrototypeToFixed)                                                  \
   CPP(NumberPrototypeToLocaleString)                                           \
   CPP(NumberPrototypeToPrecision)                                              \
-  TFC(SameValue, Compare)                                                      \
-  TFC(SameValueNumbersOnly, Compare)                                           \
+  TFC(SameValue, CompareNoContext)                                             \
+  TFC(SameValueNumbersOnly, CompareNoContext)                                  \
                                                                                \
   /* Binary ops with feedback collection */                                    \
   TFC(Add_Baseline, BinaryOp_Baseline)                                         \

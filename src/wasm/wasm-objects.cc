@@ -527,7 +527,7 @@ void WasmTableObject::UpdateDispatchTables(
     wasm::NativeModule* native_module =
         instance->module_object().native_module();
     wasm::WasmImportWrapperCache* cache = native_module->import_wrapper_cache();
-    auto kind = compiler::WasmImportCallKind::kWasmToCapi;
+    auto kind = wasm::ImportCallKind::kWasmToCapi;
     uint32_t canonical_type_index =
         wasm::GetTypeCanonicalizer()->AddRecursiveGroup(&sig);
     wasm::WasmCode* wasm_code = cache->MaybeGet(kind, canonical_type_index,
@@ -790,16 +790,24 @@ MaybeHandle<WasmMemoryObject> WasmMemoryObject::New(
   // On 32-bit platforms we need an heuristic here to balance overall memory
   // and address space consumption.
   constexpr int kGBPages = 1024 * 1024 * 1024 / wasm::kWasmPageSize;
+  // We allocate the smallest of the following sizes, but at least the initial
+  // size:
+  // 1) the module-defined maximum;
+  // 2) 1GB;
+  // 3) the engine maximum;
+  int allocation_maximum = std::min(kGBPages, engine_maximum);
   int heuristic_maximum;
   if (initial > kGBPages) {
     // We always allocate at least the initial size.
     heuristic_maximum = initial;
   } else if (has_maximum) {
-    // We try to reserve the maximum, but at most 1GB to avoid OOMs.
-    heuristic_maximum = std::min(maximum, kGBPages);
+    // We try to reserve the maximum, but at most the allocation_maximum to
+    // avoid OOMs.
+    heuristic_maximum = std::min(maximum, allocation_maximum);
   } else if (shared == SharedFlag::kShared) {
-    // If shared memory has no maximum, we use an implicit maximum of 1GB.
-    heuristic_maximum = kGBPages;
+    // If shared memory has no maximum, we use the allocation_maximum as an
+    // implicit maximum.
+    heuristic_maximum = allocation_maximum;
   } else {
     // If non-shared memory has no maximum, we only allocate the initial size
     // and then grow with realloc.
@@ -1157,7 +1165,6 @@ Handle<WasmInstanceObject> WasmInstanceObject::New(
       isolate->factory()->NewFixedArray(num_imported_functions);
   instance->set_imported_function_refs(*imported_function_refs);
 
-  instance->set_isolate_root(isolate->isolate_root());
   instance->set_stack_limit_address(
       isolate->stack_guard()->address_of_jslimit());
   instance->set_real_stack_limit_address(
@@ -1430,15 +1437,14 @@ void WasmInstanceObject::ImportWasmJSFunctionIntoTable(
   if (sig_in_module != module_canonical_ids.end()) {
     wasm::NativeModule* native_module =
         instance->module_object().native_module();
-    auto resolved =
-        compiler::ResolveWasmImportCall(callable, sig, canonical_sig_index);
-    compiler::WasmImportCallKind kind = resolved.kind;
-    callable = resolved.callable;  // Update to ultimate target.
-    DCHECK_NE(compiler::WasmImportCallKind::kLinkError, kind);
+    wasm::WasmImportData resolved(callable, sig, canonical_sig_index);
+    wasm::ImportCallKind kind = resolved.kind();
+    callable = resolved.callable();  // Update to ultimate target.
+    DCHECK_NE(wasm::ImportCallKind::kLinkError, kind);
     wasm::CompilationEnv env = native_module->CreateCompilationEnv();
     // {expected_arity} should only be used if kind != kJSFunctionArityMismatch.
     int expected_arity = -1;
-    if (kind == compiler::WasmImportCallKind ::kJSFunctionArityMismatch) {
+    if (kind == wasm::ImportCallKind ::kJSFunctionArityMismatch) {
       expected_arity = Handle<JSFunction>::cast(callable)
                            ->shared()
                            .internal_formal_parameter_count_without_receiver();
@@ -2077,9 +2083,9 @@ Handle<WasmJSFunction> WasmJSFunction::New(Isolate* isolate,
       wrapper_code, rtt, suspend, wasm::kNoPromise);
 
   if (wasm::WasmFeatures::FromIsolate(isolate).has_typed_funcref()) {
-    using CK = compiler::WasmImportCallKind;
+    using CK = wasm::ImportCallKind;
     int expected_arity = parameter_count;
-    CK kind = compiler::kDefaultImportCallKind;
+    CK kind = wasm::kDefaultImportCallKind;
     if (callable->IsJSFunction()) {
       SharedFunctionInfo shared = Handle<JSFunction>::cast(callable)->shared();
       expected_arity =

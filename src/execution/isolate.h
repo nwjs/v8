@@ -1159,8 +1159,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // compression cage, and the kPtrComprCageBaseRegister is set to this
   // value. When pointer compression is off, this is always kNullAddress.
   Address cage_base() const {
-    DCHECK_IMPLIES(!COMPRESS_POINTERS_IN_ISOLATE_CAGE_BOOL &&
-                       !COMPRESS_POINTERS_IN_SHARED_CAGE_BOOL,
+    DCHECK_IMPLIES(!COMPRESS_POINTERS_BOOL,
                    isolate_data()->cage_base() == kNullAddress);
     return isolate_data()->cage_base();
   }
@@ -1347,6 +1346,19 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
 #ifdef DEBUG
   static size_t non_disposed_isolates() { return non_disposed_isolates_; }
+
+  // Turbofan's string builder optimization can introduce SlicedString that are
+  // less than SlicedString::kMinLength characters. Their live range and scope
+  // are pretty limitted, but they can be visible to the GC, which shouldn't
+  // treat them as invalid. When such short SlicedString are introduced,
+  // Turbofan will set has_turbofan_string_builders_ to true, which
+  // SlicedString::SlicedStringVerify will check when verifying SlicedString to
+  // decide if a too-short SlicedString is an issue or not.
+  // See the compiler's StringBuilderOptimizer class for more details.
+  bool has_turbofan_string_builders() { return has_turbofan_string_builders_; }
+  void set_has_turbofan_string_builders() {
+    has_turbofan_string_builders_ = true;
+  }
 #endif
 
   v8::internal::Factory* factory() {
@@ -1699,7 +1711,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // this object cache is per-Isolate like the startup object cache.
   std::vector<Object>* shared_heap_object_cache() {
     if (has_shared_space()) {
-      return &shared_heap_isolate()->shared_heap_object_cache_;
+      return &shared_space_isolate()->shared_heap_object_cache_;
     }
     return &shared_heap_object_cache_;
   }
@@ -1974,6 +1986,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // Returns true when this isolate contains the shared spaces.
   bool is_shared_space_isolate() const { return is_shared_space_isolate_; }
 
+  // Returns the isolate that owns the shared spaces.
   Isolate* shared_space_isolate() const {
     DCHECK(has_shared_space());
     Isolate* isolate = shared_space_isolate_.value();
@@ -1983,14 +1996,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   // Returns true when this isolate supports allocation in shared spaces.
   bool has_shared_space() const { return shared_space_isolate_.value(); }
-
-  // Returns the isolate that owns the shared spaces.
-  Isolate* shared_heap_isolate() const {
-    DCHECK(has_shared_space());
-    Isolate* isolate = shared_space_isolate();
-    DCHECK_NOT_NULL(isolate);
-    return isolate;
-  }
 
   GlobalSafepoint* global_safepoint() const { return global_safepoint_.get(); }
 
@@ -2133,12 +2138,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   // Returns the Exception sentinel.
   Object ThrowInternal(Object exception, MessageLocation* location);
-
-  // These methods add/remove the isolate to/from the list of clients in the
-  // shared space isolate. Isolates in the client list need to participate in a
-  // global safepoint.
-  void AttachToSharedSpaceIsolate(Isolate* shared_space_isolate);
-  void DetachFromSharedSpaceIsolate();
 
   // This class contains a collection of data accessible from both C++ runtime
   // and compiled code (including assembly stubs, builtins, interpreter bytecode
@@ -2295,6 +2294,8 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   static std::atomic<size_t> non_disposed_isolates_;
 
   JSObject::SpillInformation js_spill_information_;
+
+  std::atomic<bool> has_turbofan_string_builders_ = false;
 #endif
 
   Debug* debug_ = nullptr;
@@ -2391,6 +2392,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   void InitializeDefaultEmbeddedBlob();
   void CreateAndSetEmbeddedBlob();
+  void InitializeIsShortBuiltinCallsEnabled();
   void MaybeRemapEmbeddedBuiltinsIntoCodeRange();
   void TearDownEmbeddedBlob();
   void SetEmbeddedBlob(const uint8_t* code, uint32_t code_size,

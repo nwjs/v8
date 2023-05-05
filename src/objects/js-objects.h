@@ -5,6 +5,7 @@
 #ifndef V8_OBJECTS_JS_OBJECTS_H_
 #define V8_OBJECTS_JS_OBJECTS_H_
 
+#include "src/base/optional.h"
 #include "src/objects/embedder-data-slot.h"
 // TODO(jkummerow): Consider forward-declaring instead.
 #include "src/objects/internal-index.h"
@@ -252,6 +253,7 @@ class JSReceiver : public TorqueGeneratedJSReceiver<JSReceiver, HeapObject> {
   static Handle<String> GetConstructorName(Isolate* isolate,
                                            Handle<JSReceiver> receiver);
 
+  V8_EXPORT_PRIVATE base::Optional<NativeContext> GetCreationContextRaw();
   V8_EXPORT_PRIVATE MaybeHandle<NativeContext> GetCreationContext();
 
   V8_WARN_UNUSED_RESULT static inline Maybe<PropertyAttributes>
@@ -1283,6 +1285,18 @@ class JSStringIterator
   DECL_VERIFIER(JSStringIterator)
 
   TQ_OBJECT_CONSTRUCTORS(JSStringIterator)
+};
+
+// The valid iterator wrapper is the wrapper object created by
+// Iterator.from(obj), which attempts to wrap iterator-like objects into an
+// actual iterator with %Iterator.prototype%.
+class JSValidIteratorWrapper
+    : public TorqueGeneratedJSValidIteratorWrapper<JSValidIteratorWrapper,
+                                                   JSObject> {
+ public:
+  DECL_PRINTER(JSValidIteratorWrapper)
+
+  TQ_OBJECT_CONSTRUCTORS(JSValidIteratorWrapper)
 };
 
 }  // namespace internal

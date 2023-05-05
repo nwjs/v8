@@ -17,6 +17,9 @@
 #undef BIND
 #undef ELSE
 #undef ELSE_IF
+#undef ELSE_IF_LIKELY
+#undef ELSE_IF_UNLIKELY
+#undef ELSE_IF_WITH_HINT
 #undef END_IF
 #undef GOTO
 #undef GOTO_IF
@@ -29,5 +32,9 @@
 #undef IF_LIKELY
 #undef IF_UNLIKELY
 #undef IF_WITH_HINT
+#undef IF_NOT
+#undef IF_NOT_LIKELY
+#undef IF_NOT_UNLIKELY
+#undef LOOP
 
 #undef V8_COMPILER_TURBOSHAFT_ASSEMBLER_MACROS_DEFINED

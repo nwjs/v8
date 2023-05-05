@@ -46,9 +46,6 @@
   ##############################################################################
   # Open bugs.
 
-  # BUG(v8:2989).
-  'regress/regress-2989': [FAIL, NO_VARIANTS, ['lite_mode == True', SKIP]],
-
   # Issue 3784: setters-on-elements is flaky
   'setters-on-elements': [PASS, FAIL],
 
@@ -140,6 +137,7 @@
   'math-floor-of-div': [PASS, SLOW],
   'md5': [PASS, SLOW],
   'readonly': [PASS, SLOW],
+  'regress-1417125': [PASS, SLOW],
   'regress/regress-1122': [PASS, SLOW],
   'regress/regress-605470': [PASS, SLOW],
   'regress/regress-655573': [PASS, SLOW],
@@ -442,6 +440,12 @@
 }],  # not has_webassembly or variant == jitless
 
 ##############################################################################
+['jitless_build_mode', {
+  # invocation_count maintenance is disabled.
+  'code-coverage*': [SKIP],
+}],  # jitless_build_mode
+
+##############################################################################
 ['lite_mode or variant == jitless', {
   # Timeouts in lite / jitless mode.
   'asm/embenchen/*': [SKIP],
@@ -555,6 +559,7 @@
   'wasm/huge-memory': [SKIP],
   'wasm/huge-typedarray': [SKIP],
   'wasm/bigint-opt': [SKIP],
+  'wasm/simd-lane-memory64': [SKIP],
   'regress/regress-1320641': [SKIP],
 }],  # 'arch in (ia32, arm, riscv32)'
 
@@ -1036,8 +1041,9 @@
   # Tier down/up Wasm functions is non-deterministic with
   # multiple isolates, as dynamic tiering relies on a array shared
   # in the module, that can be modified by all instances.
-  'wasm/wasm-dynamic-tiering': [SKIP],
   'wasm/code-flushing': [SKIP],
+  'wasm/enter-and-leave-debug-state': [SKIP],
+  'wasm/wasm-dynamic-tiering': [SKIP],
 
   # The test relies on precise switching of code kinds of wasm functions. With
   # multiple isolates that share the wasm functions, the precise switching is
@@ -1178,6 +1184,11 @@
 
   # Skipped because it has contradictory flags.
   'compiler/regress-crbug-1399490': [SKIP],
+
+  # BUG(v8:13470) Skipped until we have a solution.
+  'compiler/js-create-arguments': [SKIP],
+  'compiler/js-create': [SKIP],
+  'compiler/construct-bound-function': [SKIP],
 }], # gc_fuzzer or deopt_fuzzer or interrupt_fuzzer
 
 ##############################################################################
@@ -1326,6 +1337,9 @@
   # This test uses --wasm-speculative-inlining which is incompatible with
   # stressing.
   'regress/wasm/regress-1364036': [SKIP],
+
+  # Makes assumptions about tiering, which don't hold when we TF everything.
+  'wasm/enter-and-leave-debug-state': [SKIP],
 }],  # variant == stress
 
 ##############################################################################
@@ -1351,15 +1365,6 @@
   # in the 'nooptimization' variant.
   'regress/wasm/regress-7785': [SKIP],
 }],  # variant == nooptimization
-
-##############################################################################
-['gcov_coverage', {
-  # Tests taking too long.
-  'array-functions-prototype-misc': [SKIP],
-
-  # Stack overflow.
-  'big-array-literal': [SKIP],
-}],  # 'gcov_coverage'
 
 ##############################################################################
 ['variant == no_wasm_traps', {
@@ -1839,6 +1844,7 @@
   'harmony/sharedarraybuffer-worker-gc-stress': [SKIP],
   'math-floor-part1': [SKIP],
   'compiler/regress-1125145': [SKIP],
+  'compiler/regress-crbug-1399627': [SKIP],
 
   # TODO(victorgomes):
   'es6/unicode-regexp-ignore-case-noi18n': [SKIP],
@@ -1900,9 +1906,79 @@
   'wasm/bigint-opt': [SKIP],
 }], # variant == always_sparkplug
 
-['tsan and mode == debug', {
-  'wasm/memory64': [SKIP],
-  'wasm/huge-memory': [SKIP],
-}]
+##############################################################################
+# Behavioural differences between Maglev and Turbofan when the former is used
+# for OptimizeFunctionOnNextCall.
+['variant == stress_maglev', {
+  # Maglev doesn't inline Array constructors, so it won't bake in allocation
+  # site feedback.
+  'array-constructor-feedback': [FAIL],
+  # Maglev deopts on non-int division, even if the result is truncated after.
+  'shift-for-integer-div': [FAIL],
+  # Maglev deopts on negative zero for int32, even if truncated afterward.
+  'compiler/number-abs': [FAIL],
+  'compiler/number-floor': [FAIL],
+  'compiler/number-ceil': [FAIL],
+  'compiler/number-min': [FAIL],
+  'compiler/number-max': [FAIL],
+  'compiler/number-round': [FAIL],
+  'compiler/number-trunc': [FAIL],
+  'compiler/number-modulus': [FAIL],
+  'compiler/number-toboolean': [FAIL],
+  'compiler/number-comparison-truncations': [FAIL],
+  'regress/regress-2132': [FAIL],
+  'compiler/regress-1199345': [FAIL],
+  # Maglev doesn't suppress BigInt size errors on truncation.
+  'compiler/bigint-shift-left': [FAIL],
+  'compiler/bigint-multiply-truncate': [FAIL],
+  'wasm/bigint-opt': [FAIL],
+  # Maglev doesn't promote Number to NumberOrOddball ops based on uses.
+  'getters-on-elements': [FAIL],
+  # Maglev doesn't inline the call being tested here.
+  'compiler/call-with-arraylike-or-spread': [FAIL],
+  'compiler/call-with-arraylike-or-spread-3': [FAIL],
+  'compiler/call-with-arraylike-or-spread-4': [FAIL],
+  'compiler/call-with-arraylike-or-spread-5': [FAIL],
+  'compiler/call-with-arraylike-or-spread-6': [FAIL],
+  'compiler/call-with-arraylike-or-spread-7': [FAIL],
+  'compiler/serializer-call': [FAIL],
+  'compiler/serializer-apply': [FAIL],
+  'compiler/serializer-accessors': [FAIL],
+  'compiler/serializer-transition-propagation': [FAIL],
+  'compiler/serializer-dead-after-jump': [FAIL],
+  'compiler/serializer-dead-after-return': [FAIL],
+  'es6/super-ic-opt-no-turboprop': [FAIL],
+  'regress/regress-1049982-1': [FAIL],
+  'regress/regress-1049982-2': [FAIL],
+  # Maglev doesn't support fast API calls.
+  'compiler/fast-api-annotations': [FAIL],
+  'compiler/fast-api-calls': [FAIL],
+  'compiler/fast-api-calls-8args': [FAIL],
+  'compiler/fast-api-calls-string': [FAIL],
+  'compiler/fast-api-calls-pointer': [FAIL],
+  'compiler/fast-api-interface-types': [FAIL],
+  'compiler/fast-api-sequences*': [FAIL],
+  # Maglev doesn't specialise the IsBeingInterpreted runtime func.
+  'compiler/is-being-interpreted-1': [FAIL],
+  # Maglev doesn't support elements transitions (yet!).
+  'compiler/regress-9945-1': [FAIL],
+  'compiler/regress-9945-2': [FAIL],
+  # Maglev doesn't support growing elements stores.
+  'array-store-and-grow': [FAIL],
+  # This test requires inlining, currently disabled in Maglev
+  'regress/regress-4578': [FAIL],
+  # This test appears to be relying on no adding a map stability check, but
+  # instead using a field representation dependency and allowing a read from
+  # the deprecated map. Wiring this through in Maglev would be too messy to be
+  # worth it.
+  'regress/regress-map-invalidation-2': [FAIL],
+}], # variant == stress_maglev
+
+##############################################################################
+['is_clang_coverage and mode == debug', {
+  # Too slow tests.
+  'asm/poppler/poppler': [SKIP],
+  'wasm/shared-memory-worker-gc': [SKIP],
+}],  # 'is_clang_coverage and mode == debug'
 
 ]

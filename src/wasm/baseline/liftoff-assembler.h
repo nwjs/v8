@@ -616,7 +616,8 @@ class LiftoffAssembler : public MacroAssembler {
     return GetUnusedRegister(rc, pinned);
   }
 
-  // Get an unused register for class {rc}, potentially spilling to free one.
+  // Get an unused register for class {rc}, excluding registers from {pinned},
+  // potentially spilling to free one.
   LiftoffRegister GetUnusedRegister(RegClass rc, LiftoffRegList pinned) {
     DCHECK(!cache_state_.frozen);
     if (kNeedI64RegPair && rc == kGpRegPair) {
@@ -711,7 +712,7 @@ class LiftoffAssembler : public MacroAssembler {
   // register, or {no_reg} if target was spilled to the stack.
   void PrepareCall(const ValueKindSig*, compiler::CallDescriptor*,
                    Register* target = nullptr,
-                   Register* target_instance = nullptr);
+                   Register target_instance = no_reg);
   // Process return values of the call.
   void FinishCall(const ValueKindSig*, compiler::CallDescriptor*);
 
@@ -776,8 +777,7 @@ class LiftoffAssembler : public MacroAssembler {
   inline static int SlotSizeForType(ValueKind kind);
   inline static bool NeedsAlignment(ValueKind kind);
 
-  inline void LoadConstant(LiftoffRegister, WasmValue,
-                           RelocInfo::Mode rmode = RelocInfo::NO_INFO);
+  inline void LoadConstant(LiftoffRegister, WasmValue);
   inline void LoadInstanceFromFrame(Register dst);
   inline void LoadFromInstance(Register dst, Register instance, int offset,
                                int size);
@@ -1135,10 +1135,11 @@ class LiftoffAssembler : public MacroAssembler {
                             uint32_t* protected_load_pc);
   inline void LoadLane(LiftoffRegister dst, LiftoffRegister src, Register addr,
                        Register offset_reg, uintptr_t offset_imm, LoadType type,
-                       uint8_t lane, uint32_t* protected_load_pc);
+                       uint8_t lane, uint32_t* protected_load_pc,
+                       bool i64_offset);
   inline void StoreLane(Register dst, Register offset, uintptr_t offset_imm,
                         LiftoffRegister src, StoreType type, uint8_t lane,
-                        uint32_t* protected_store_pc);
+                        uint32_t* protected_store_pc, bool i64_offset);
   inline void emit_i8x16_shuffle(LiftoffRegister dst, LiftoffRegister lhs,
                                  LiftoffRegister rhs, const uint8_t shuffle[16],
                                  bool is_swizzle);

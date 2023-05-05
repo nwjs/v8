@@ -6,6 +6,7 @@
 
 #include "src/base/functional.h"
 #include "src/base/platform/time.h"
+#include "src/base/small-vector.h"
 #include "src/common/globals.h"
 #include "src/debug/debug.h"
 #include "src/diagnostics/code-tracer.h"
@@ -237,7 +238,6 @@ bool NativeModuleCache::GetStreamingCompilationOwnership(size_t prefix_hash) {
 void NativeModuleCache::StreamingCompilationFailed(size_t prefix_hash) {
   base::MutexGuard lock(&mutex_);
   Key key{prefix_hash, {}};
-  DCHECK_EQ(1, map_.count(key));
   map_.erase(key);
   cache_cv_.NotifyAll();
 }
@@ -466,22 +466,15 @@ WasmEngine::~WasmEngine() {
 }
 
 bool WasmEngine::SyncValidate(Isolate* isolate, const WasmFeatures& enabled,
-                              ModuleWireBytes bytes,
-                              std::string* error_message) {
+                              ModuleWireBytes bytes) {
   TRACE_EVENT0("v8.wasm", "wasm.SyncValidate");
-  // TODO(titzer): remove dependency on the isolate.
-  if (bytes.start() == nullptr || bytes.length() == 0) {
-    if (error_message) *error_message = "empty module wire bytes";
-    return false;
-  }
+  if (bytes.length() == 0) return false;
+
   auto result = DecodeWasmModule(
       enabled, bytes.module_bytes(), true, kWasmOrigin, isolate->counters(),
       isolate->metrics_recorder(),
       isolate->GetOrRegisterRecorderContextId(isolate->native_context()),
       DecodingMethod::kSync);
-  if (result.failed() && error_message) {
-    *error_message = result.error().message();
-  }
   return result.ok();
 }
 
@@ -673,7 +666,27 @@ void WasmEngine::AsyncCompile(
         StartStreamingCompilation(
             isolate, enabled, handle(isolate->context(), isolate),
             api_method_name_for_errors, std::move(resolver));
-    streaming_decoder->OnBytesReceived(bytes.module_bytes());
+
+    auto* rng = isolate->random_number_generator();
+    base::SmallVector<base::Vector<const uint8_t>, 16> ranges;
+    if (!bytes.module_bytes().empty()) ranges.push_back(bytes.module_bytes());
+    // Split into up to 16 ranges (2^4).
+    for (int round = 0; round < 4; ++round) {
+      for (auto it = ranges.begin(); it != ranges.end(); ++it) {
+        auto range = *it;
+        if (range.size() < 2 || !rng->NextBool()) continue;  // Do not split.
+        // Choose split point within [1, range.size() - 1].
+        static_assert(kV8MaxWasmModuleSize <= kMaxInt);
+        size_t split_point =
+            1 + rng->NextInt(static_cast<int>(range.size() - 1));
+        // Insert first sub-range *before* {it} and make {it} point after it.
+        it = ranges.insert(it, range.SubVector(0, split_point)) + 1;
+        *it = range.SubVectorFrom(split_point);
+      }
+    }
+    for (auto range : ranges) {
+      streaming_decoder->OnBytesReceived(range);
+    }
     streaming_decoder->Finish();
     return;
   }
@@ -1041,7 +1054,7 @@ void WasmEngine::AddIsolate(Isolate* isolate) {
 #if defined(V8_COMPRESS_POINTERS)
   // The null value is not accessible on mksnapshot runs.
   if (isolate->snapshot_available()) {
-    wasm_null_tagged_compressed_ = V8HeapCompressionScheme::CompressTagged(
+    wasm_null_tagged_compressed_ = V8HeapCompressionScheme::CompressObject(
         isolate->factory()->wasm_null()->ptr());
   }
 #endif
@@ -1197,6 +1210,8 @@ void WasmEngine::LogOutstandingCodesForIsolate(Isolate* isolate) {
 std::shared_ptr<NativeModule> WasmEngine::NewNativeModule(
     Isolate* isolate, const WasmFeatures& enabled,
     std::shared_ptr<const WasmModule> module, size_t code_size_estimate) {
+  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
+               "wasm.NewNativeModule");
 #ifdef V8_ENABLE_WASM_GDB_REMOTE_DEBUGGING
   if (v8_flags.wasm_gdb_remote && !gdb_server_) {
     gdb_server_ = gdb_server::GdbServer::Create();

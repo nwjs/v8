@@ -55,7 +55,7 @@ RELEASE_ACQUIRE_WEAK_ACCESSORS(Map, raw_transitions,
 ACCESSORS_CHECKED2(Map, prototype, HeapObject, kPrototypeOffset, true,
                    value.IsNull() || value.IsJSProxy() ||
                        value.IsWasmObject() ||
-                       (value.IsJSObject() && (value.InSharedWritableHeap() ||
+                       (value.IsJSObject() && (value.InWritableSharedSpace() ||
                                                value.map().is_prototype_map())))
 
 DEF_GETTER(Map, prototype_info, Object) {
@@ -795,6 +795,12 @@ void Map::SetBackPointer(HeapObject value, WriteBarrierMode mode) {
   CHECK(GetBackPointer().IsUndefined());
   CHECK_EQ(Map::cast(value).GetConstructor(), constructor_or_back_pointer());
   set_constructor_or_back_pointer(value, mode);
+}
+
+// static
+Map Map::GetMapFor(ReadOnlyRoots roots, InstanceType type) {
+  RootIndex map_idx = TryGetMapRootIdxFor(type).value();
+  return Map::unchecked_cast(roots.object_at(map_idx));
 }
 
 // static

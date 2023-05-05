@@ -44,6 +44,8 @@ class V8 : public AllStatic {
 
   static void SetTLSPlatform(v8::Platform* platform);
   static void InitializePlatform(v8::Platform* platform);
+  V8_EXPORT_PRIVATE static void InitializePlatformForTesting(
+      v8::Platform* platform);
   static void DisposePlatform();
   V8_EXPORT_PRIVATE static v8::Platform* GetCurrentPlatform();
   // Replaces the current platform with the given platform.

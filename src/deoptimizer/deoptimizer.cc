@@ -338,9 +338,8 @@ void Deoptimizer::DeoptimizeAll(Isolate* isolate) {
 
   // Mark all code, then deoptimize.
   {
-    InstructionStream::OptimizedCodeIterator it(isolate);
-    for (InstructionStream code = it.Next(); !code.is_null();
-         code = it.Next()) {
+    Code::OptimizedCodeIterator it(isolate);
+    for (Code code = it.Next(); !code.is_null(); code = it.Next()) {
       code.set_marked_for_deoptimization(true);
     }
   }
@@ -348,6 +347,7 @@ void Deoptimizer::DeoptimizeAll(Isolate* isolate) {
   DeoptimizeMarkedCode(isolate);
 }
 
+// static
 void Deoptimizer::DeoptimizeFunction(JSFunction function, Code code) {
   Isolate* isolate = function.GetIsolate();
   RCS_SCOPE(isolate, RuntimeCallCounterId::kDeoptimizeCode);
@@ -364,15 +364,15 @@ void Deoptimizer::DeoptimizeFunction(JSFunction function, Code code) {
     // The code in the function's optimized code feedback vector slot might
     // be different from the code on the function - evict it if necessary.
     function.feedback_vector().EvictOptimizedCodeMarkedForDeoptimization(
-        function.shared(), "unlinking code marked for deopt");
+        isolate, function.shared(), "unlinking code marked for deopt");
 
     DeoptimizeMarkedCode(isolate);
   }
 }
 
+// static
 void Deoptimizer::DeoptimizeAllOptimizedCodeWithFunction(
-    Handle<SharedFunctionInfo> function) {
-  Isolate* isolate = function->GetIsolate();
+    Isolate* isolate, Handle<SharedFunctionInfo> function) {
   RCS_SCOPE(isolate, RuntimeCallCounterId::kDeoptimizeCode);
   TimerEventScope<TimerEventDeoptimizeCode> timer(isolate);
   TRACE_EVENT0("v8", "V8.DeoptimizeAllOptimizedCodeWithFunction");
@@ -383,9 +383,8 @@ void Deoptimizer::DeoptimizeAllOptimizedCodeWithFunction(
   // Mark all code that inlines this function, then deoptimize.
   bool any_marked = false;
   {
-    InstructionStream::OptimizedCodeIterator it(isolate);
-    for (InstructionStream code = it.Next(); !code.is_null();
-         code = it.Next()) {
+    Code::OptimizedCodeIterator it(isolate);
+    for (Code code = it.Next(); !code.is_null(); code = it.Next()) {
       if (code.Inlines(*function)) {
         code.set_marked_for_deoptimization(true);
         any_marked = true;
@@ -448,10 +447,9 @@ Deoptimizer::Deoptimizer(Isolate* isolate, JSFunction function,
   }
 
   DCHECK_NE(from, kNullAddress);
-  compiled_code_ =
-      isolate_->heap()->FindCodeForInnerPointer(from).instruction_stream();
+  compiled_code_ = isolate_->heap()->FindCodeForInnerPointer(from);
   DCHECK(!compiled_code_.is_null());
-  DCHECK(compiled_code_.IsInstructionStream());
+  DCHECK(compiled_code_.IsCode());
 
   DCHECK(function.IsJSFunction());
 #ifdef DEBUG
@@ -476,7 +474,7 @@ Deoptimizer::Deoptimizer(Isolate* isolate, JSFunction function,
   DeoptimizationData deopt_data =
       DeoptimizationData::cast(compiled_code_.deoptimization_data());
   Address deopt_start =
-      compiled_code_.instruction_start() + deopt_data.DeoptExitStart().value();
+      compiled_code_.InstructionStart() + deopt_data.DeoptExitStart().value();
   int eager_deopt_count = deopt_data.EagerDeoptCount().value();
   Address lazy_deopt_start =
       deopt_start + eager_deopt_count * kEagerDeoptExitSize;
@@ -505,8 +503,8 @@ Handle<JSFunction> Deoptimizer::function() const {
   return Handle<JSFunction>(function_, isolate());
 }
 
-Handle<InstructionStream> Deoptimizer::compiled_code() const {
-  return Handle<InstructionStream>(compiled_code_, isolate());
+Handle<Code> Deoptimizer::compiled_code() const {
+  return Handle<Code>(compiled_code_, isolate());
 }
 
 Deoptimizer::~Deoptimizer() {
@@ -538,25 +536,6 @@ Builtin Deoptimizer::GetDeoptimizationEntry(DeoptimizeKind kind) {
     case DeoptimizeKind::kLazy:
       return Builtin::kDeoptimizationEntry_Lazy;
   }
-}
-
-bool Deoptimizer::IsDeoptimizationEntry(Isolate* isolate, Address addr,
-                                        DeoptimizeKind* type_out) {
-  Builtin builtin = OffHeapInstructionStream::TryLookupCode(isolate, addr);
-  if (!Builtins::IsBuiltinId(builtin)) return false;
-
-  switch (builtin) {
-    case Builtin::kDeoptimizationEntry_Eager:
-      *type_out = DeoptimizeKind::kEager;
-      return true;
-    case Builtin::kDeoptimizationEntry_Lazy:
-      *type_out = DeoptimizeKind::kLazy;
-      return true;
-    default:
-      return false;
-  }
-
-  UNREACHABLE();
 }
 
 namespace {
@@ -622,12 +601,11 @@ void Deoptimizer::TraceDeoptEnd(double deopt_duration) {
 }
 
 // static
-void Deoptimizer::TraceMarkForDeoptimization(InstructionStream code,
+void Deoptimizer::TraceMarkForDeoptimization(Isolate* isolate, Code code,
                                              const char* reason) {
   if (!v8_flags.trace_deopt && !v8_flags.log_deopt) return;
 
   DisallowGarbageCollection no_gc;
-  Isolate* isolate = code.GetIsolate();
   Object maybe_data = code.deoptimization_data();
   if (maybe_data == ReadOnlyRoots(isolate).empty_fixed_array()) return;
 
@@ -656,12 +634,13 @@ void Deoptimizer::TraceMarkForDeoptimization(InstructionStream code,
 }
 
 // static
-void Deoptimizer::TraceEvictFromOptimizedCodeCache(SharedFunctionInfo sfi,
+void Deoptimizer::TraceEvictFromOptimizedCodeCache(Isolate* isolate,
+                                                   SharedFunctionInfo sfi,
                                                    const char* reason) {
   if (!v8_flags.trace_deopt_verbose) return;
 
   DisallowGarbageCollection no_gc;
-  CodeTracer::Scope scope(sfi.GetIsolate()->GetCodeTracer());
+  CodeTracer::Scope scope(isolate->GetCodeTracer());
   PrintF(scope.file(),
          "[evicting optimized code marked for deoptimization (%s) for ",
          reason);
@@ -685,13 +664,6 @@ void Deoptimizer::TraceDeoptAll(Isolate* isolate) {
   if (!v8_flags.trace_deopt_verbose) return;
   CodeTracer::Scope scope(isolate->GetCodeTracer());
   PrintF(scope.file(), "[deoptimize all code in all contexts]\n");
-}
-
-// static
-void Deoptimizer::TraceDeoptMarked(Isolate* isolate) {
-  if (!v8_flags.trace_deopt_verbose) return;
-  CodeTracer::Scope scope(isolate->GetCodeTracer());
-  PrintF(scope.file(), "[deoptimize marked code in all contexts]\n");
 }
 
 // We rely on this function not causing a GC.  It is called from generated code
@@ -835,7 +807,7 @@ void Deoptimizer::DoComputeOutputFrames() {
   FrameDescription* topmost = output_[count - 1];
   topmost->GetRegisterValues()->SetRegister(kRootRegister.code(),
                                             isolate()->isolate_root());
-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+#ifdef V8_COMPRESS_POINTERS
   topmost->GetRegisterValues()->SetRegister(kPtrComprCageBaseRegister.code(),
                                             isolate()->cage_base());
 #endif
@@ -1208,7 +1180,7 @@ void Deoptimizer::DoComputeInlinedExtraArguments(
       (std::max(0, extra_argument_count) + padding) * kSystemPointerSize;
   if (verbose_tracing_enabled()) {
     PrintF(trace_scope_->file(),
-           "  translating arguments adaptor => variable_size=%d\n",
+           "  translating inlined arguments frame => variable_size=%d\n",
            output_frame_size);
   }
 
@@ -1913,6 +1885,36 @@ unsigned Deoptimizer::ComputeInputFrameAboveFpFixedSize() const {
   return fixed_size;
 }
 
+namespace {
+
+// Get the actual deopt call PC from the return address of the deopt, which
+// points to immediately after the deopt call).
+//
+// See also the Deoptimizer constructor.
+Address GetDeoptCallPCFromReturnPC(Address return_pc, Code code) {
+  DCHECK_GT(Deoptimizer::kEagerDeoptExitSize, 0);
+  DCHECK_GT(Deoptimizer::kLazyDeoptExitSize, 0);
+  DeoptimizationData deopt_data =
+      DeoptimizationData::cast(code.deoptimization_data());
+  Address deopt_start =
+      code.InstructionStart() + deopt_data.DeoptExitStart().value();
+  int eager_deopt_count = deopt_data.EagerDeoptCount().value();
+  Address lazy_deopt_start =
+      deopt_start + eager_deopt_count * Deoptimizer::kEagerDeoptExitSize;
+  // The deoptimization exits are sorted so that lazy deopt exits appear
+  // after eager deopts.
+  static_assert(static_cast<int>(DeoptimizeKind::kLazy) ==
+                    static_cast<int>(kLastDeoptimizeKind),
+                "lazy deopts are expected to be emitted last");
+  if (return_pc <= lazy_deopt_start) {
+    return return_pc - Deoptimizer::kEagerDeoptExitSize;
+  } else {
+    return return_pc - Deoptimizer::kLazyDeoptExitSize;
+  }
+}
+
+}  // namespace
+
 unsigned Deoptimizer::ComputeInputFrameSize() const {
   // The fp-to-sp delta already takes the context, constant pool pointer and the
   // function into account so we have to avoid double counting them.
@@ -1920,10 +1922,31 @@ unsigned Deoptimizer::ComputeInputFrameSize() const {
   unsigned result = fixed_size_above_fp + fp_to_sp_delta_;
   DCHECK(CodeKindCanDeoptimize(compiled_code_.kind()));
   unsigned stack_slots = compiled_code_.stack_slots();
-  unsigned outgoing_size = 0;
-  CHECK_EQ(fixed_size_above_fp + (stack_slots * kSystemPointerSize) -
-               CommonFrameConstants::kFixedFrameSizeAboveFp + outgoing_size,
-           result);
+  if (compiled_code_.is_maglevved()) {
+    // Maglev code can deopt in deferred code which has spilled registers across
+    // the call. These will be included in the fp_to_sp_delta, but the expected
+    // frame size won't include them, so we need to check for less-equal rather
+    // than equal.
+    CHECK_LE(fixed_size_above_fp + (stack_slots * kSystemPointerSize) -
+                 CommonFrameConstants::kFixedFrameSizeAboveFp,
+             result);
+    // With slow asserts we can check this exactly, by looking up the safepoint.
+    if (v8_flags.enable_slow_asserts) {
+      Address deopt_call_pc = GetDeoptCallPCFromReturnPC(from_, compiled_code_);
+      MaglevSafepointTable table(isolate_, deopt_call_pc, compiled_code_);
+      MaglevSafepointEntry safepoint = table.FindEntry(deopt_call_pc);
+      unsigned extra_spills = safepoint.num_pushed_registers();
+      CHECK_EQ(fixed_size_above_fp + (stack_slots * kSystemPointerSize) -
+                   CommonFrameConstants::kFixedFrameSizeAboveFp +
+                   extra_spills * kSystemPointerSize,
+               result);
+    }
+  } else {
+    unsigned outgoing_size = 0;
+    CHECK_EQ(fixed_size_above_fp + (stack_slots * kSystemPointerSize) -
+                 CommonFrameConstants::kFixedFrameSizeAboveFp + outgoing_size,
+             result);
+  }
   return result;
 }
 
@@ -1933,9 +1956,8 @@ unsigned Deoptimizer::ComputeIncomingArgumentSize(SharedFunctionInfo shared) {
   return parameter_slots * kSystemPointerSize;
 }
 
-Deoptimizer::DeoptInfo Deoptimizer::GetDeoptInfo(InstructionStream code,
-                                                 Address pc) {
-  CHECK(code.instruction_start() <= pc && pc <= code.instruction_end());
+Deoptimizer::DeoptInfo Deoptimizer::GetDeoptInfo(Code code, Address pc) {
+  CHECK(code.InstructionStart() <= pc && pc <= code.InstructionEnd());
   SourcePosition last_position = SourcePosition::Unknown();
   DeoptimizeReason last_reason = DeoptimizeReason::kUnknown;
   uint32_t last_node_id = 0;
@@ -1963,15 +1985,6 @@ Deoptimizer::DeoptInfo Deoptimizer::GetDeoptInfo(InstructionStream code,
     }
   }
   return DeoptInfo(last_position, last_reason, last_node_id, last_deopt_id);
-}
-
-// static
-int Deoptimizer::ComputeSourcePositionFromBytecodeArray(
-    Isolate* isolate, SharedFunctionInfo shared,
-    BytecodeOffset bytecode_offset) {
-  DCHECK(shared.HasBytecodeArray());
-  return AbstractCode::cast(shared.GetBytecodeArray(isolate))
-      .SourcePosition(isolate, bytecode_offset.ToInt());
 }
 
 }  // namespace internal

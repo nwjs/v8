@@ -26,7 +26,7 @@ namespace internal {
 
 void MarkCompactCollector::MarkObject(HeapObject host, HeapObject obj) {
   DCHECK(ReadOnlyHeap::Contains(obj) || heap()->Contains(obj));
-  if (marking_state()->WhiteToGrey(obj)) {
+  if (marking_state()->TryMark(obj)) {
     local_marking_worklists()->Push(obj);
     if (V8_UNLIKELY(v8_flags.track_retaining_path)) {
       heap_->AddRetainer(host, obj);
@@ -36,7 +36,7 @@ void MarkCompactCollector::MarkObject(HeapObject host, HeapObject obj) {
 
 void MarkCompactCollector::MarkRootObject(Root root, HeapObject obj) {
   DCHECK(ReadOnlyHeap::Contains(obj) || heap()->Contains(obj));
-  if (marking_state()->WhiteToGrey(obj)) {
+  if (marking_state()->TryMark(obj)) {
     local_marking_worklists()->Push(obj);
     if (V8_UNLIKELY(v8_flags.track_retaining_path)) {
       heap_->AddRetainingRoot(root, obj);
@@ -46,7 +46,7 @@ void MarkCompactCollector::MarkRootObject(Root root, HeapObject obj) {
 
 void MinorMarkCompactCollector::MarkRootObject(HeapObject obj) {
   if (Heap::InYoungGeneration(obj) &&
-      non_atomic_marking_state()->WhiteToGrey(obj)) {
+      non_atomic_marking_state()->TryMark(obj)) {
     local_marking_worklists_->Push(obj);
   }
 }
@@ -89,17 +89,7 @@ bool MarkCompactCollector::ShouldMarkObject(HeapObject object) const {
   if (object.InReadOnlySpace()) return false;
   if (V8_LIKELY(!uses_shared_heap_)) return true;
   if (is_shared_space_isolate_) return true;
-  return !object.InSharedHeap();
-}
-
-template <typename MarkingState>
-template <typename T, typename TBodyDescriptor>
-int MainMarkingVisitor<MarkingState>::VisitJSObjectSubclass(Map map, T object) {
-  if (!this->ShouldVisit(object)) return 0;
-  this->VisitMapPointer(object);
-  int size = TBodyDescriptor::SizeOf(map, object);
-  TBodyDescriptor::IterateBody(map, object, size, this);
-  return size;
+  return !object.InAnySharedSpace();
 }
 
 template <typename MarkingState>
@@ -110,10 +100,9 @@ void MainMarkingVisitor<MarkingState>::RecordSlot(HeapObject object, TSlot slot,
 }
 
 template <typename MarkingState>
-void MainMarkingVisitor<MarkingState>::RecordRelocSlot(InstructionStream host,
-                                                       RelocInfo* rinfo,
+void MainMarkingVisitor<MarkingState>::RecordRelocSlot(RelocInfo* rinfo,
                                                        HeapObject target) {
-  MarkCompactCollector::RecordRelocSlot(host, rinfo, target);
+  MarkCompactCollector::RecordRelocSlot(rinfo, target);
 }
 
 template <LiveObjectIterationMode mode>

@@ -591,7 +591,8 @@ void StackFrame::IteratePc(RootVisitor* v, Address* pc_address,
 
   // Visit.
   GcSafeCode visited_holder = holder;
-  const Object old_istream = holder.raw_instruction_stream();
+  PtrComprCageBase code_cage_base{isolate()->code_cage_base()};
+  const Object old_istream = holder.raw_instruction_stream(code_cage_base);
   Object visited_istream = old_istream;
   v->VisitRunningCode(FullObjectSlot{&visited_holder},
                       FullObjectSlot{&visited_istream});
@@ -610,7 +611,7 @@ void StackFrame::IteratePc(RootVisitor* v, Address* pc_address,
   // TODO(v8:10026): avoid replacing a signed pointer.
   PointerAuthentication::ReplacePC(pc_address, new_pc, kSystemPointerSize);
   if (V8_EMBEDDED_CONSTANT_POOL_BOOL && constant_pool_address != nullptr) {
-    *constant_pool_address = istream.constant_pool();
+    *constant_pool_address = visited_holder.constant_pool();
   }
 }
 
@@ -1188,7 +1189,7 @@ void VisitSpillSlot(Isolate* isolate, RootVisitor* v,
     // Restore compression. Generated code should be able to trust that
     // compressed spill slots remain compressed.
     *spill_slot.location() =
-        V8HeapCompressionScheme::CompressTagged(*spill_slot.location());
+        V8HeapCompressionScheme::CompressObject(*spill_slot.location());
   }
 #endif
 }
@@ -2017,28 +2018,25 @@ FrameSummary::JavaScriptFrameSummary::CreateStackFrameInfo() const {
 #if V8_ENABLE_WEBASSEMBLY
 FrameSummary::WasmFrameSummary::WasmFrameSummary(
     Isolate* isolate, Handle<WasmInstanceObject> instance, wasm::WasmCode* code,
-    int code_offset, bool at_to_number_conversion)
+    int byte_offset, int function_index, bool at_to_number_conversion)
     : FrameSummaryBase(isolate, WASM),
       wasm_instance_(instance),
       at_to_number_conversion_(at_to_number_conversion),
       code_(code),
-      code_offset_(code_offset) {}
+      byte_offset_(byte_offset),
+      function_index_(function_index) {}
 
 Handle<Object> FrameSummary::WasmFrameSummary::receiver() const {
   return wasm_instance_->GetIsolate()->global_proxy();
 }
 
 uint32_t FrameSummary::WasmFrameSummary::function_index() const {
-  return code()->index();
-}
-
-int FrameSummary::WasmFrameSummary::byte_offset() const {
-  return code_->GetSourcePositionBefore(code_offset());
+  return function_index_;
 }
 
 int FrameSummary::WasmFrameSummary::SourcePosition() const {
   const wasm::WasmModule* module = wasm_instance()->module_object().module();
-  return GetSourcePosition(module, function_index(), byte_offset(),
+  return GetSourcePosition(module, function_index(), code_offset(),
                            at_to_number_conversion());
 }
 
@@ -2152,7 +2150,17 @@ void OptimizedFrame::Summarize(std::vector<FrameSummary>* frames) const {
     // summary which is a bit more aware of maglev behaviour and can e.g. handle
     // more compact safepointed frame information for both function entry and
     // loop stack checks.
-    if (code.is_maglevved()) {
+    //
+    // TODO(7748): For JS functions containing inlined wasm we need support to
+    // create a frame summary for the wasm function as well which is needed for
+    // wasm trap stack traces. Also, the current hack does not preserve the code
+    // position in the JavaScript frame.
+    if (code.is_maglevved()
+#if V8_ENABLE_WEBASSEMBLY
+        || ((code.kind() == CodeKind::TURBOFAN) &&
+            v8_flags.experimental_wasm_js_inlining)
+#endif
+    ) {
       DCHECK(frames->empty());
       Handle<AbstractCode> abstract_code(
           AbstractCode::cast(function().shared().GetBytecodeArray(isolate())),
@@ -2441,12 +2449,12 @@ void InterpretedFrame::PatchBytecodeArray(BytecodeArray bytecode_array) {
 }
 
 int BaselineFrame::GetBytecodeOffset() const {
-  InstructionStream code = LookupCode().instruction_stream();
+  Code code = LookupCode();
   return code.GetBytecodeOffsetForBaselinePC(this->pc(), GetBytecodeArray());
 }
 
 intptr_t BaselineFrame::GetPCForBytecodeOffset(int bytecode_offset) const {
-  InstructionStream code = LookupCode().instruction_stream();
+  Code code = LookupCode();
   return code.GetBaselineStartPCForBytecodeOffset(bytecode_offset,
                                                   GetBytecodeArray());
 }
@@ -2526,14 +2534,14 @@ Script WasmFrame::script() const { return module_object().script(); }
 int WasmFrame::position() const {
   wasm::WasmCodeRefScope code_ref_scope;
   const wasm::WasmModule* module = wasm_instance().module_object().module();
-  return GetSourcePosition(module, function_index(), byte_offset(),
+  return GetSourcePosition(module, function_index(), generated_code_offset(),
                            at_to_number_conversion());
 }
 
-int WasmFrame::byte_offset() const {
+int WasmFrame::generated_code_offset() const {
   wasm::WasmCode* code = wasm_code();
   int offset = static_cast<int>(pc() - code->instruction_start());
-  return code->GetSourcePositionBefore(offset);
+  return code->GetSourceOffsetBefore(offset);
 }
 
 bool WasmFrame::is_inspectable() const {
@@ -2551,9 +2559,33 @@ void WasmFrame::Summarize(std::vector<FrameSummary>* functions) const {
   wasm::WasmCode* code = wasm_code();
   int offset = static_cast<int>(pc() - code->instruction_start());
   Handle<WasmInstanceObject> instance(wasm_instance(), isolate());
-  FrameSummary::WasmFrameSummary summary(isolate(), instance, code, offset,
-                                         at_to_number_conversion());
+  // Push regular non-inlined summary.
+  SourcePosition pos = code->GetSourcePositionBefore(offset);
+  bool at_conversion = at_to_number_conversion();
+  // Add summaries for each inlined function at the current location.
+  while (pos.isInlined()) {
+    // Use current pc offset as the code offset for inlined functions.
+    // This is not fully correct but there isn't a real code offset of a stack
+    // frame for an inlined function as the inlined function is not a true
+    // function with a defined start and end in the generated code.
+    //
+    const auto [func_index, caller_pos] =
+        code->GetInliningPosition(pos.InliningId());
+    FrameSummary::WasmFrameSummary summary(isolate(), instance, code,
+                                           pos.ScriptOffset(), func_index,
+                                           at_conversion);
+    functions->push_back(summary);
+    pos = caller_pos;
+    at_conversion = false;
+  }
+
+  int func_index = code->index();
+  FrameSummary::WasmFrameSummary summary(
+      isolate(), instance, code, pos.ScriptOffset(), func_index, at_conversion);
   functions->push_back(summary);
+
+  // The caller has to be on top.
+  std::reverse(functions->begin(), functions->end());
 }
 
 bool WasmFrame::at_to_number_conversion() const {
@@ -2565,7 +2597,7 @@ bool WasmFrame::at_to_number_conversion() const {
           : nullptr;
   if (!code || code->kind() != wasm::WasmCode::kWasmToJsWrapper) return false;
   int offset = static_cast<int>(callee_pc() - code->instruction_start());
-  int pos = code->GetSourcePositionBefore(offset);
+  int pos = code->GetSourceOffsetBefore(offset);
   // The imported call has position 0, ToNumber has position 1.
   // If there is no source position available, this is also not a ToNumber call.
   DCHECK(pos == wasm::kNoCodePosition || pos == 0 || pos == 1);

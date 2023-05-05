@@ -34,10 +34,10 @@ class BuildConfig(object):
     self.dict_property_const_tracking = build_config[
         'v8_dict_property_const_tracking']
     self.disassembler = build_config['v8_enable_disassembler']
-    self.gcov_coverage = build_config['is_gcov_coverage']
     self.gdbjit = build_config['v8_enable_gdbjit']
     self.is_android = build_config['is_android']
     self.is_clang = build_config['is_clang']
+    self.is_clang_coverage = build_config['is_clang_coverage']
     self.is_debug = build_config['is_debug']
     self.is_DEBUG_defined = build_config['is_DEBUG_defined']
     self.is_full_debug = build_config['is_full_debug']
@@ -64,6 +64,9 @@ class BuildConfig(object):
     self.verify_heap = build_config['v8_enable_verify_heap']
     self.webassembly = build_config['v8_enable_webassembly']
     self.write_barriers = not build_config['v8_disable_write_barriers']
+    # TODO(jgruber): Don't rename once it's no longer necessary to avoid
+    # conflicts with test variant names.
+    self.jitless_build_mode = build_config['v8_jitless']
     # Export only for MIPS target
     if self.arch in ['mips64', 'mips64el']:
       self._mips_arch_variant = build_config['mips_arch_variant']
@@ -151,10 +154,10 @@ class BuildConfig(object):
         'debug_code',
         'dict_property_const_tracking',
         'disassembler',
-        'gcov_coverage',
         'gdbjit',
         'is_debug',
         'is_DEBUG_defined',
+        'jitless_build_mode',
         'lite_mode',
         'maglev',
         'msan',
@@ -173,4 +176,4 @@ class BuildConfig(object):
         'webassembly',
     ]
     detected_options = [attr for attr in attrs if getattr(self, attr, False)]
-    return '\n'.join(detected_options)
+    return ', '.join(detected_options)

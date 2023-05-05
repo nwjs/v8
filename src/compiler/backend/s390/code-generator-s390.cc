@@ -99,6 +99,9 @@ class S390OperandConverter final : public InstructionOperandConverter {
         *first_index += 3;
         return MemOperand(InputRegister(index + 0), InputRegister(index + 1),
                           InputInt32(index + 2));
+      case kMode_Root:
+        *first_index += 1;
+        return MemOperand(kRootRegister, InputInt32(index));
     }
     UNREACHABLE();
   }
@@ -211,10 +214,9 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
     if (COMPRESS_POINTERS_BOOL) {
       __ DecompressTagged(value_, value_);
     }
-    __ CheckPageFlag(
-        value_, scratch0_,
-        MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask, eq,
-        exit());
+    __ CheckPageFlag(value_, scratch0_,
+                     MemoryChunk::kPointersToHereAreInterestingMask, eq,
+                     exit());
     if (offset_ == no_reg) {
       __ AddS64(scratch1_, object_, Operand(offset_immediate_));
     } else {
@@ -1136,8 +1138,8 @@ void CodeGenerator::BailoutIfDeoptimized() {
   int offset = InstructionStream::kCodeOffset - InstructionStream::kHeaderSize;
   __ LoadTaggedField(ip, MemOperand(kJavaScriptCallCodeStartRegister, offset),
                      r0);
-  __ LoadS32(ip, FieldMemOperand(ip, Code::kKindSpecificFlagsOffset));
-  __ TestBit(ip, InstructionStream::kMarkedForDeoptimizationBit);
+  __ LoadU16(ip, FieldMemOperand(ip, Code::kKindSpecificFlagsOffset));
+  __ TestBit(ip, Code::kMarkedForDeoptimizationBit);
   __ Jump(BUILTIN_CODE(isolate(), CompileLazyDeoptimizedCode),
           RelocInfo::CODE_TARGET, ne);
 }
@@ -1409,8 +1411,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                            i.InputDoubleRegister(0), DetermineStubCallMode());
       break;
     case kArchStoreWithWriteBarrier: {
-      RecordWriteMode mode =
-          static_cast<RecordWriteMode>(MiscField::decode(instr->opcode()));
+      RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
       Register object = i.InputRegister(0);
       Register value = i.InputRegister(2);
       Register scratch0 = i.TempRegister(0);
@@ -1724,7 +1725,20 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       ASSEMBLE_BIN_OP(RRRInstr(MulHighU64), nullInstr, nullInstr);
       break;
     case kS390_MulHighS64:
-      ASSEMBLE_BIN_OP(RRRInstr(MulHighS64), nullInstr, nullInstr);
+      if (CpuFeatures::IsSupported(MISC_INSTR_EXT2)) {
+        ASSEMBLE_BIN_OP(RRRInstr(MulHighS64), nullInstr, nullInstr);
+      } else {
+        __ Push(r2, r3, i.InputRegister(0), i.InputRegister(1));
+        __ Pop(r2, r3);
+        {
+          FrameScope scope(masm(), StackFrame::INTERNAL);
+          __ PrepareCallCFunction(2, 0, kScratchReg);
+          __ CallCFunction(ExternalReference::int64_mul_high_function(), 2, 0);
+        }
+        __ mov(kScratchReg, r2);
+        __ Pop(r2, r3);
+        __ mov(i.OutputRegister(), kScratchReg);
+      }
       break;
     case kS390_MulFloat:
       ASSEMBLE_BIN_OP(DDInstr(meebr), DMTInstr(MulFloat32), nullInstr);
@@ -3001,6 +3015,18 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kS390_I32x4DotI16x8S: {
       __ I32x4DotI16x8S(i.OutputSimd128Register(), i.InputSimd128Register(0),
                         i.InputSimd128Register(1), kScratchDoubleReg);
+      break;
+    }
+
+    case kS390_I16x8DotI8x16S: {
+      __ I16x8DotI8x16S(i.OutputSimd128Register(), i.InputSimd128Register(0),
+                        i.InputSimd128Register(1), kScratchDoubleReg);
+      break;
+    }
+    case kS390_I32x4DotI8x16AddS: {
+      __ I32x4DotI8x16AddS(i.OutputSimd128Register(), i.InputSimd128Register(0),
+                           i.InputSimd128Register(1), i.InputSimd128Register(2),
+                           kScratchDoubleReg, i.TempSimd128Register(0));
       break;
     }
     case kS390_I16x8Q15MulRSatS: {

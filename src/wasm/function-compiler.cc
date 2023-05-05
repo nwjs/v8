@@ -46,7 +46,7 @@ WasmCompilationResult WasmCompilationUnit::ExecuteImportWrapperCompilation(
   const FunctionSig* sig = env->module->functions[func_index_].sig;
   // Assume the wrapper is going to be a JS function with matching arity at
   // instantiation time.
-  auto kind = compiler::kDefaultImportCallKind;
+  auto kind = kDefaultImportCallKind;
   bool source_positions = is_asmjs_module(env->module);
   WasmCompilationResult result = compiler::CompileWasmImportCallWrapper(
       env, kind, sig, source_positions,
@@ -136,10 +136,7 @@ WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
                 .set_detected_features(detected)
                 .set_assembler_buffer_cache(buffer_cache)
                 .set_debug_sidetable(debug_sidetable_ptr));
-        if (result.succeeded()) {
-          result.frame_has_feedback_slot = env->enabled_features.has_inlining();
-          break;
-        }
+        if (result.succeeded()) break;
       }
 
       // If --liftoff-only, do not fall back to turbofan, even if compilation
@@ -152,13 +149,17 @@ WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
       V8_FALLTHROUGH;
 
     case ExecutionTier::kTurbofan:
-      result = compiler::ExecuteTurbofanWasmCompilation(
-          env, wire_bytes_storage, func_body, func_index_, counters,
-          buffer_cache, detected);
+      compiler::WasmCompilationData data(func_body);
+      data.func_index = func_index_;
+      data.wire_bytes_storage = wire_bytes_storage;
+      data.buffer_cache = buffer_cache;
+      result = compiler::ExecuteTurbofanWasmCompilation(env, data, counters,
+                                                        detected);
       result.for_debugging = for_debugging_;
       break;
   }
 
+  DCHECK(result.succeeded());
   return result;
 }
 
@@ -182,8 +183,15 @@ void WasmCompilationUnit::CompileWasmFunction(Counters* counters,
       counters, nullptr, detected);
   if (result.succeeded()) {
     WasmCodeRefScope code_ref_scope;
+    // We need to extend the lifetime of {assumptions} beyond the
+    // {std::move(result)} statement.
+    // TODO(jkummerow): Refactor this: make {result} stack-allocated here
+    // and pass it by reference to other code that populates or consumes it.
+    AssumptionsJournal* assumptions = result.assumptions.release();
     native_module->PublishCode(
-        native_module->AddCompiledCode(std::move(result)));
+        native_module->AddCompiledCode(std::move(result)),
+        assumptions->empty() ? nullptr : assumptions);
+    delete assumptions;
   } else {
     native_module->compilation_state()->SetError();
   }

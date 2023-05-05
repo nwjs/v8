@@ -15,6 +15,7 @@
 #include "src/heap/memory-chunk.h"
 #include "src/heap/parked-scope.h"
 #include "src/heap/remembered-set.h"
+#include "src/heap/safepoint.h"
 #include "src/objects/fixed-array.h"
 #include "src/objects/heap-object.h"
 #include "src/objects/js-weak-refs.h"
@@ -22,7 +23,6 @@
 #include "src/objects/string-forwarding-table-inl.h"
 #include "test/cctest/cctest.h"
 #include "test/cctest/heap/heap-utils.h"
-#include "v8-persistent-handle.h"
 
 namespace v8 {
 namespace internal {
@@ -1062,7 +1062,7 @@ UNINITIALIZED_TEST(PagePromotionRecordingOldToShared) {
 
     Handle<String> shared_string = factory->NewStringFromAsciiChecked(
         raw_one_byte, AllocationType::kSharedOld);
-    CHECK(shared_string->InSharedWritableHeap());
+    CHECK(shared_string->InWritableSharedSpace());
 
     young_object->set(0, *shared_string);
 
@@ -1601,7 +1601,8 @@ void CreateExternalResources(Isolate* i_isolate, Handle<FixedArray> strings,
   resources.reserve(strings->length());
   for (int i = 0; i < strings->length(); i++) {
     Handle<String> input_string(String::cast(strings->get(i)), i_isolate);
-    CHECK(Utils::ToLocal(input_string)->CanMakeExternal());
+    CHECK(Utils::ToLocal(input_string)
+              ->CanMakeExternal(v8::String::Encoding::ONE_BYTE_ENCODING));
     const int length = input_string->length();
     char* buffer = new char[length + 1];
     String::WriteToFlat(*input_string, reinterpret_cast<uint8_t*>(buffer), 0,
@@ -1982,7 +1983,7 @@ UNINITIALIZED_TEST(SharedStringInGlobalHandle) {
   HandleScope handle_scope(i_isolate);
   Handle<String> shared_string =
       factory->NewStringFromAsciiChecked("foobar", AllocationType::kSharedOld);
-  CHECK(shared_string->InSharedWritableHeap());
+  CHECK(shared_string->InWritableSharedSpace());
   v8::Local<v8::String> lh_shared_string =
       Utils::Convert<String, v8::String>(shared_string);
   v8::Global<v8::String> gh_shared_string(test.main_isolate(),
@@ -2022,7 +2023,7 @@ class WorkerIsolateThread : public v8::base::Thread {
       HandleScope handle_scope(i_client);
       Handle<String> shared_string = factory->NewStringFromAsciiChecked(
           "foobar", AllocationType::kSharedOld);
-      CHECK(shared_string->InSharedWritableHeap());
+      CHECK(shared_string->InWritableSharedSpace());
       v8::Local<v8::String> lh_shared_string =
           Utils::Convert<String, v8::String>(shared_string);
       gh_shared_string.Reset(test_->main_isolate(), lh_shared_string);
@@ -2032,7 +2033,7 @@ class WorkerIsolateThread : public v8::base::Thread {
     {
       // Disable CSS for the shared heap and all clients.
       // DisableConservativeStackScanningScopeForTesting no_stack_scanning(
-      //     i_client->shared_heap_isolate()->heap());
+      //     i_client->shared_space_isolate()->heap());
 
       Isolate* gc_isolate = i_client->shared_space_isolate();
       gc_isolate->heap()->ForceSharedGCWithEmptyStackForTesting();
@@ -2154,7 +2155,7 @@ UNINITIALIZED_TEST(RegisterOldToSharedForPromotedPageFromClient) {
   std::atomic<bool> done = false;
 
   Isolate* i_isolate = test.i_main_isolate();
-  Isolate* shared_isolate = i_isolate->shared_heap_isolate();
+  Isolate* shared_isolate = i_isolate->shared_space_isolate();
   Heap* shared_heap = shared_isolate->heap();
 
   HandleScope scope(i_isolate);
@@ -2195,7 +2196,7 @@ UNINITIALIZED_TEST(
   std::atomic<bool> done = false;
 
   Isolate* i_isolate = test.i_main_isolate();
-  Isolate* shared_isolate = i_isolate->shared_heap_isolate();
+  Isolate* shared_isolate = i_isolate->shared_space_isolate();
   Heap* shared_heap = shared_isolate->heap();
 
   HandleScope scope(i_isolate);
@@ -2340,7 +2341,7 @@ UNINITIALIZED_TEST(SharedObjectRetainedByClientRememberedSet) {
 
   v8::Isolate* isolate = test.main_isolate();
   Isolate* i_isolate = test.i_main_isolate();
-  Isolate* shared_isolate = i_isolate->shared_heap_isolate();
+  Isolate* shared_isolate = i_isolate->shared_space_isolate();
   Heap* shared_heap = shared_isolate->heap();
 
   DisableConservativeStackScanningScopeForTesting no_stack_scanning(
@@ -2395,6 +2396,123 @@ UNINITIALIZED_TEST(SharedObjectRetainedByClientRememberedSet) {
       ->PostTask(std::make_unique<WakeupTask>(
           reinterpret_cast<Isolate*>(thread.isolate())));
 
+  while (!done) {
+    v8::platform::PumpMessageLoop(
+        i::V8::GetCurrentPlatform(), test.main_isolate(),
+        v8::platform::MessageLoopBehavior::kWaitForWork);
+  }
+
+  thread.Join();
+}
+
+class Regress1424955ClientIsolateThread : public v8::base::Thread {
+ public:
+  Regress1424955ClientIsolateThread(const char* name,
+                                    MultiClientIsolateTest* test,
+                                    std::atomic<bool>* done)
+      : v8::base::Thread(base::Thread::Options(name)),
+        test_(test),
+        done_(done) {}
+
+  void Run() override {
+    client_isolate_ = test_->NewClientIsolate();
+    Isolate* i_client = reinterpret_cast<Isolate*>(client_isolate_);
+    Heap* i_client_heap = i_client->heap();
+    Factory* factory = i_client->factory();
+
+    {
+      // Allocate an object so that there is work for the sweeper. Otherwise,
+      // starting a minor GC after a full GC may finalize sweeping since it is
+      // out of work.
+      HandleScope handle_scope(i_client);
+      Handle<FixedArray> array =
+          factory->NewFixedArray(64, AllocationType::kOld);
+      USE(array);
+
+      // Start sweeping.
+      i_client_heap->CollectGarbage(OLD_SPACE,
+                                    GarbageCollectionReason::kTesting);
+      CHECK(i_client_heap->sweeping_in_progress());
+
+      // Inform the initiator thread it's time to request a global safepoint.
+      *done_ = true;
+      V8::GetCurrentPlatform()
+          ->GetForegroundTaskRunner(test_->main_isolate())
+          ->PostTask(std::make_unique<WakeupTask>(test_->i_main_isolate()));
+
+      // Wait for the initiator thread to request a global safepoint.
+      while (!i_client->shared_space_isolate()
+                  ->global_safepoint()
+                  ->IsRequestedForTesting()) {
+        v8::base::OS::Sleep(v8::base::TimeDelta::FromMilliseconds(1));
+      }
+
+      // Start a minor GC. This will cause this client isolate to join the
+      // global safepoint. At which point, the initiator isolate will try to
+      // finalize sweeping on behalf of this client isolate.
+      i_client_heap->CollectGarbage(NEW_SPACE,
+                                    GarbageCollectionReason::kTesting);
+    }
+
+    // Wait for the initiator isolate to finish the shared GC.
+    while (*done_) {
+      v8::platform::PumpMessageLoop(
+          i::V8::GetCurrentPlatform(), client_isolate_,
+          v8::platform::MessageLoopBehavior::kWaitForWork);
+    }
+
+    client_isolate_->Dispose();
+
+    *done_ = true;
+    V8::GetCurrentPlatform()
+        ->GetForegroundTaskRunner(test_->main_isolate())
+        ->PostTask(std::make_unique<WakeupTask>(test_->i_main_isolate()));
+  }
+
+  v8::Isolate* isolate() const {
+    DCHECK_NOT_NULL(client_isolate_);
+    return client_isolate_;
+  }
+
+ private:
+  MultiClientIsolateTest* test_;
+  std::atomic<bool>* done_;
+  v8::Isolate* client_isolate_;
+};
+
+UNINITIALIZED_TEST(Regress1424955) {
+  if (!V8_CAN_CREATE_SHARED_HEAP_BOOL) return;
+  if (v8_flags.single_generation) return;
+  // When heap verification is enabled, sweeping is finalized in the atomic
+  // pause. This issue requires that sweeping is still in progress after the
+  // atomic pause is finished.
+  if (v8_flags.verify_heap) return;
+  v8_flags.shared_string_table = true;
+
+  ManualGCScope maunal_gc_scope;
+
+  MultiClientIsolateTest test;
+  std::atomic<bool> done = false;
+  Regress1424955ClientIsolateThread thread("worker", &test, &done);
+  CHECK(thread.Start());
+
+  // Wait for client thread to start sweeping.
+  while (!done) {
+    v8::platform::PumpMessageLoop(
+        i::V8::GetCurrentPlatform(), test.main_isolate(),
+        v8::platform::MessageLoopBehavior::kWaitForWork);
+  }
+
+  // Client isolate waits for this isolate to request a global safepoint and
+  // then triggers a minor GC.
+  CcTest::CollectSharedGarbage(test.i_main_isolate());
+  done = false;
+  V8::GetCurrentPlatform()
+      ->GetForegroundTaskRunner(thread.isolate())
+      ->PostTask(std::make_unique<WakeupTask>(
+          reinterpret_cast<Isolate*>(thread.isolate())));
+
+  // Wait for client isolate to finish the minor GC and dispose of its isolate.
   while (!done) {
     v8::platform::PumpMessageLoop(
         i::V8::GetCurrentPlatform(), test.main_isolate(),

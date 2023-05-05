@@ -558,8 +558,8 @@ void MacroAssembler::Drop(Register count, Register scratch) {
 
 void MacroAssembler::TestCodeIsMarkedForDeoptimization(Register code,
                                                        Register scratch) {
-  LoadS32(scratch, FieldMemOperand(code, Code::kKindSpecificFlagsOffset));
-  TestBit(scratch, InstructionStream::kMarkedForDeoptimizationBit, scratch);
+  LoadU16(scratch, FieldMemOperand(code, Code::kKindSpecificFlagsOffset));
+  TestBit(scratch, Code::kMarkedForDeoptimizationBit, scratch);
 }
 
 Operand MacroAssembler::ClearedValue() const {
@@ -1089,8 +1089,7 @@ void MacroAssembler::RecordWrite(Register object, Register slot_address,
 
   CheckPageFlag(value,
                 value,  // Used as scratch.
-                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
-                eq, &done);
+                MemoryChunk::kPointersToHereAreInterestingMask, eq, &done);
   CheckPageFlag(object,
                 value,  // Used as scratch.
                 MemoryChunk::kPointersFromHereAreInterestingMask, eq, &done);
@@ -2173,11 +2172,6 @@ void MacroAssembler::JumpToExternalReference(const ExternalReference& builtin,
   Handle<Code> code =
       CodeFactory::CEntry(isolate(), 1, ArgvMode::kStack, builtin_exit_frame);
   Jump(code, RelocInfo::CODE_TARGET);
-}
-
-void MacroAssembler::JumpToOffHeapInstructionStream(Address entry) {
-  mov(kOffHeapTrampolineRegister, Operand(entry, RelocInfo::OFF_HEAP_TARGET));
-  Jump(kOffHeapTrampolineRegister);
 }
 
 void MacroAssembler::LoadWeakValue(Register out, Register in,
@@ -4954,16 +4948,6 @@ void MacroAssembler::LoadCodeEntry(Register destination, Register code_object) {
           FieldMemOperand(code_object, Code::kCodeEntryPointOffset));
 }
 
-void MacroAssembler::LoadCodeInstructionStreamNonBuiltin(Register destination,
-                                                         Register code_object) {
-  ASM_CODE_COMMENT(this);
-  // Compute the InstructionStream object pointer from the code entry point.
-  LoadU64(destination,
-          FieldMemOperand(code_object, Code::kCodeEntryPointOffset));
-  SubS64(destination, destination,
-         Operand(InstructionStream::kHeaderSize - kHeapObjectTag));
-}
-
 void MacroAssembler::CallCodeObject(Register code_object) {
   ASM_CODE_COMMENT(this);
   LoadCodeEntry(code_object, code_object);
@@ -6142,6 +6126,30 @@ void MacroAssembler::I32x4DotI16x8S(Simd128Register dst, Simd128Register src1,
   vme(scratch, src1, src2, Condition(0), Condition(0), Condition(1));
   vmo(dst, src1, src2, Condition(0), Condition(0), Condition(1));
   va(dst, scratch, dst, Condition(0), Condition(0), Condition(2));
+}
+
+void MacroAssembler::I32x4DotI8x16AddS(
+    Simd128Register dst, Simd128Register src1, Simd128Register src2,
+    Simd128Register src3, Simd128Register scratch1, Simd128Register scratch2) {
+  // I8 -> I16.
+  vme(scratch1, src1, src2, Condition(0), Condition(0), Condition(0));
+  vmo(dst, src1, src2, Condition(0), Condition(0), Condition(0));
+  va(dst, scratch1, dst, Condition(0), Condition(0), Condition(1));
+  // I16 -> I32.
+  vrepi(scratch2, Operand(1), Condition(1));
+  vme(scratch1, dst, scratch2, Condition(0), Condition(0), Condition(1));
+  vmo(dst, dst, scratch2, Condition(0), Condition(0), Condition(1));
+  va(dst, scratch1, dst, Condition(0), Condition(0), Condition(2));
+  // Add src3.
+  va(dst, dst, src3, Condition(0), Condition(0), Condition(2));
+}
+
+void MacroAssembler::I16x8DotI8x16S(Simd128Register dst, Simd128Register src1,
+                                    Simd128Register src2,
+                                    Simd128Register scratch) {
+  vme(scratch, src1, src2, Condition(0), Condition(0), Condition(0));
+  vmo(dst, src1, src2, Condition(0), Condition(0), Condition(0));
+  va(dst, scratch, dst, Condition(0), Condition(0), Condition(1));
 }
 
 #define Q15_MUL_ROAUND(accumulator, src1, src2, const_val, scratch, unpack) \

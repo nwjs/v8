@@ -10,6 +10,7 @@
 #define V8_COMPILER_WASM_GC_LOWERING_H_
 
 #include "src/compiler/graph-reducer.h"
+#include "src/compiler/wasm-compiler-definitions.h"
 #include "src/compiler/wasm-graph-assembler.h"
 
 namespace v8 {
@@ -17,20 +18,20 @@ namespace internal {
 namespace compiler {
 
 class MachineGraph;
+class SourcePositionTable;
 class WasmGraphAssembler;
 
 class WasmGCLowering final : public AdvancedReducer {
  public:
   WasmGCLowering(Editor* editor, MachineGraph* mcgraph,
-                 const wasm::WasmModule* module);
+                 const wasm::WasmModule* module, bool disable_trap_handler,
+                 SourcePositionTable* source_position_table);
 
   const char* reducer_name() const override { return "WasmGCLowering"; }
 
   Reduction Reduce(Node* node) final;
 
  private:
-  enum NullCheckStrategy { kExplicitNullChecks, kTrapHandler };
-
   Reduction ReduceWasmTypeCheck(Node* node);
   Reduction ReduceWasmTypeCast(Node* node);
   Reduction ReduceAssertNotNull(Node* node);
@@ -49,17 +50,17 @@ class WasmGCLowering final : public AdvancedReducer {
   Reduction ReduceWasmArrayInitializeLength(Node* node);
   Reduction ReduceStringAsWtf16(Node* node);
   Reduction ReduceStringPrepareForGetCodeunit(Node* node);
-  Node* IsolateRoot();
-  Node* RootNode(RootIndex index);
   Node* Null(wasm::ValueType type);
   Node* IsNull(Node* object, wasm::ValueType type);
   Node* BuildLoadExternalPointerFromObject(Node* object, int offset,
                                            ExternalPointerTag tag);
+  void UpdateSourcePosition(Node* new_node, Node* old_node);
   NullCheckStrategy null_check_strategy_;
   WasmGraphAssembler gasm_;
   const wasm::WasmModule* module_;
   Node* dead_;
-  Node* instance_node_;
+  const MachineGraph* mcgraph_;
+  SourcePositionTable* source_position_table_;
 };
 
 }  // namespace compiler

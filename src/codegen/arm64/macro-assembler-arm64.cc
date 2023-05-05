@@ -816,7 +816,9 @@ void MacroAssembler::AddSubMacro(const Register& rd, const Register& rn,
 
   if (operand.NeedsRelocation(this)) {
     UseScratchRegisterScope temps(this);
-    Register temp = temps.AcquireX();
+    Register temp = temps.AcquireSameSizeAs(rn);
+    DCHECK_IMPLIES(temp.IsW(), RelocInfo::IsCompressedEmbeddedObject(
+                                   operand.ImmediateRMode()));
     Ldr(temp, operand.immediate());
     AddSubMacro(rd, rn, temp, S, op);
   } else if ((operand.IsImmediate() &&
@@ -1940,11 +1942,6 @@ void MacroAssembler::JumpToExternalReference(const ExternalReference& builtin,
   Jump(code, RelocInfo::CODE_TARGET);
 }
 
-void MacroAssembler::JumpToOffHeapInstructionStream(Address entry) {
-  Ldr(kOffHeapTrampolineRegister, Operand(entry, RelocInfo::OFF_HEAP_TARGET));
-  Br(kOffHeapTrampolineRegister);
-}
-
 void MacroAssembler::TailCallRuntime(Runtime::FunctionId fid) {
   ASM_CODE_COMMENT(this);
   const Runtime::Function* function = Runtime::FunctionForId(fid);
@@ -2375,15 +2372,6 @@ void MacroAssembler::LoadCodeEntry(Register destination, Register code_object) {
   Ldr(destination, FieldMemOperand(code_object, Code::kCodeEntryPointOffset));
 }
 
-void MacroAssembler::LoadCodeInstructionStreamNonBuiltin(Register destination,
-                                                         Register code_object) {
-  ASM_CODE_COMMENT(this);
-  // Compute the InstructionStream object pointer from the code entry point.
-  Ldr(destination, FieldMemOperand(code_object, Code::kCodeEntryPointOffset));
-  Sub(destination, destination,
-      Immediate(InstructionStream::kHeaderSize - kHeapObjectTag));
-}
-
 void MacroAssembler::CallCodeObject(Register code_object) {
   ASM_CODE_COMMENT(this);
   LoadCodeEntry(code_object, code_object);
@@ -2463,8 +2451,7 @@ void MacroAssembler::BailoutIfDeoptimized() {
                   MemOperand(kJavaScriptCallCodeStartRegister, offset));
   Ldr(scratch.W(), FieldMemOperand(scratch, Code::kKindSpecificFlagsOffset));
   Label not_deoptimized;
-  Tbz(scratch.W(), InstructionStream::kMarkedForDeoptimizationBit,
-      &not_deoptimized);
+  Tbz(scratch.W(), Code::kMarkedForDeoptimizationBit, &not_deoptimized);
   Jump(BUILTIN_CODE(isolate(), CompileLazyDeoptimizedCode),
        RelocInfo::CODE_TARGET);
   Bind(&not_deoptimized);
@@ -2698,7 +2685,7 @@ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
 void MacroAssembler::JumpIfCodeIsMarkedForDeoptimization(
     Register code, Register scratch, Label* if_marked_for_deoptimization) {
   Ldr(scratch.W(), FieldMemOperand(code, Code::kKindSpecificFlagsOffset));
-  Tbnz(scratch.W(), InstructionStream::kMarkedForDeoptimizationBit,
+  Tbnz(scratch.W(), Code::kMarkedForDeoptimizationBit,
        if_marked_for_deoptimization);
 }
 
@@ -3009,6 +2996,39 @@ void MacroAssembler::JumpIfObjectType(Register object, Register map,
   B(cond, if_cond_pass);
 }
 
+void MacroAssembler::JumpIfJSAnyIsNotPrimitive(Register heap_object,
+                                               Register scratch, Label* target,
+                                               Label::Distance distance,
+                                               Condition cc) {
+  CHECK(cc == Condition::kUnsignedLessThan ||
+        cc == Condition::kUnsignedGreaterThanEqual);
+  if (V8_STATIC_ROOTS_BOOL) {
+#ifdef DEBUG
+    Label ok;
+    LoadMap(scratch, heap_object);
+    CompareInstanceTypeRange(scratch, scratch, FIRST_JS_RECEIVER_TYPE,
+                             LAST_JS_RECEIVER_TYPE);
+    B(Condition::kUnsignedLessThanEqual, &ok);
+    LoadMap(scratch, heap_object);
+    CompareInstanceTypeRange(scratch, scratch, FIRST_PRIMITIVE_HEAP_OBJECT_TYPE,
+                             LAST_PRIMITIVE_HEAP_OBJECT_TYPE);
+    B(Condition::kUnsignedLessThanEqual, &ok);
+    Abort(AbortReason::kInvalidReceiver);
+    bind(&ok);
+#endif  // DEBUG
+
+    // All primitive object's maps are allocated at the start of the read only
+    // heap. Thus JS_RECEIVER's must have maps with larger (compressed)
+    // addresses.
+    LoadCompressedMap(scratch, heap_object);
+    CmpTagged(scratch, Immediate(InstanceTypeChecker::kNonJsReceiverMapLimit));
+  } else {
+    static_assert(LAST_JS_RECEIVER_TYPE == LAST_TYPE);
+    CompareObjectType(heap_object, scratch, scratch, FIRST_JS_RECEIVER_TYPE);
+  }
+  B(cc, target);
+}
+
 // Sets equality condition flags.
 void MacroAssembler::IsObjectType(Register object, Register scratch1,
                                   Register scratch2, InstanceType type) {
@@ -3134,6 +3154,15 @@ void MacroAssembler::LoadTaggedField(const Register& destination,
   }
 }
 
+void MacroAssembler::LoadTaggedFieldWithoutDecompressing(
+    const Register& destination, const MemOperand& field_operand) {
+  if (COMPRESS_POINTERS_BOOL) {
+    Ldr(destination.W(), field_operand);
+  } else {
+    Ldr(destination, field_operand);
+  }
+}
+
 void MacroAssembler::LoadTaggedSignedField(const Register& destination,
                                            const MemOperand& field_operand) {
   if (COMPRESS_POINTERS_BOOL) {
@@ -3145,6 +3174,15 @@ void MacroAssembler::LoadTaggedSignedField(const Register& destination,
 
 void MacroAssembler::SmiUntagField(Register dst, const MemOperand& src) {
   SmiUntag(dst, src);
+}
+
+void MacroAssembler::StoreTwoTaggedFields(const Register& value,
+                                          const MemOperand& dst_field_operand) {
+  if (COMPRESS_POINTERS_BOOL) {
+    Stp(value.W(), value.W(), dst_field_operand);
+  } else {
+    Stp(value, value, dst_field_operand);
+  }
 }
 
 void MacroAssembler::StoreTaggedField(const Register& value,
@@ -3495,9 +3533,8 @@ void MacroAssembler::RecordWrite(Register object, Operand offset,
     DCHECK_EQ(0, kSmiTag);
     JumpIfSmi(value, &done);
   }
-  CheckPageFlag(value,
-                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
-                eq, &done);
+  CheckPageFlag(value, MemoryChunk::kPointersToHereAreInterestingMask, eq,
+                &done);
 
   CheckPageFlag(object, MemoryChunk::kPointersFromHereAreInterestingMask, eq,
                 &done);

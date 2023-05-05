@@ -757,10 +757,11 @@ void DescriptorArray::DescriptorArrayPrint(std::ostream& os) {
   }
   os << "\n - nof slack descriptors: " << number_of_slack_descriptors();
   os << "\n - nof descriptors: " << number_of_descriptors();
-  int16_t raw_marked = raw_number_of_marked_descriptors();
-  os << "\n - raw marked descriptors: mc epoch "
-     << NumberOfMarkedDescriptors::Epoch::decode(raw_marked) << ", marked "
-     << NumberOfMarkedDescriptors::Marked::decode(raw_marked);
+  const auto raw = raw_gc_state(kRelaxedLoad);
+  os << "\n - raw gc state: mc epoch "
+     << DescriptorArrayMarkingState::Epoch::decode(raw) << ", marked "
+     << DescriptorArrayMarkingState::Marked::decode(raw) << ", delta "
+     << DescriptorArrayMarkingState::Delta::decode(raw);
   PrintDescriptors(os);
 }
 
@@ -1418,6 +1419,13 @@ void JSAsyncFromSyncIterator::JSAsyncFromSyncIteratorPrint(std::ostream& os) {
   JSObjectPrintBody(os, *this);
 }
 
+void JSValidIteratorWrapper::JSValidIteratorWrapperPrint(std::ostream& os) {
+  JSObjectPrintHeader(os, *this, "JSValidIteratorWrapper");
+  os << "\n - underlying.object: " << Brief(underlying_object());
+  os << "\n - underlying.next: " << Brief(underlying_next());
+  JSObjectPrintBody(os, *this);
+}
+
 void JSPrimitiveWrapper::JSPrimitiveWrapperPrint(std::ostream& os) {
   JSObjectPrintHeader(os, *this, "JSPrimitiveWrapper");
   os << "\n - value: " << Brief(value());
@@ -1545,7 +1553,7 @@ void JSSharedArray::JSSharedArrayPrint(std::ostream& os) {
   JSObjectPrintHeader(os, *this, "JSSharedArray");
   Isolate* isolate = GetIsolateFromWritableObject(*this);
   os << "\n - isolate: " << isolate;
-  if (InSharedWritableHeap()) os << " (shared)";
+  if (InWritableSharedSpace()) os << " (shared)";
   JSObjectPrintBody(os, *this);
 }
 
@@ -1553,7 +1561,7 @@ void JSSharedStruct::JSSharedStructPrint(std::ostream& os) {
   JSObjectPrintHeader(os, *this, "JSSharedStruct");
   Isolate* isolate = GetIsolateFromWritableObject(*this);
   os << "\n - isolate: " << isolate;
-  if (InSharedWritableHeap()) os << " (shared)";
+  if (InWritableSharedSpace()) os << " (shared)";
   JSObjectPrintBody(os, *this);
 }
 
@@ -1561,7 +1569,7 @@ void JSAtomicsMutex::JSAtomicsMutexPrint(std::ostream& os) {
   JSObjectPrintHeader(os, *this, "JSAtomicsMutex");
   Isolate* isolate = GetIsolateFromWritableObject(*this);
   os << "\n - isolate: " << isolate;
-  if (InSharedWritableHeap()) os << " (shared)";
+  if (InWritableSharedSpace()) os << " (shared)";
   os << "\n - state: " << this->state();
   os << "\n - owner_thread_id: " << this->owner_thread_id();
   JSObjectPrintBody(os, *this);
@@ -1571,7 +1579,7 @@ void JSAtomicsCondition::JSAtomicsConditionPrint(std::ostream& os) {
   JSObjectPrintHeader(os, *this, "JSAtomicsCondition");
   Isolate* isolate = GetIsolateFromWritableObject(*this);
   os << "\n - isolate: " << isolate;
-  if (InSharedWritableHeap()) os << " (shared)";
+  if (InWritableSharedSpace()) os << " (shared)";
   os << "\n - state: " << this->state();
   JSObjectPrintBody(os, *this);
 }
@@ -1594,6 +1602,18 @@ void JSIteratorFilterHelper::JSIteratorFilterHelperPrint(std::ostream& os) {
   JSIteratorHelperPrintHeader(os, "JSIteratorFilterHelper");
   os << "\n - predicate: " << Brief(predicate());
   os << "\n - counter: " << counter();
+  JSObjectPrintBody(os, *this);
+}
+
+void JSIteratorTakeHelper::JSIteratorTakeHelperPrint(std::ostream& os) {
+  JSIteratorHelperPrintHeader(os, "JSIteratorTakeHelper");
+  os << "\n - remaining: " << remaining();
+  JSObjectPrintBody(os, *this);
+}
+
+void JSIteratorDropHelper::JSIteratorDropHelperPrint(std::ostream& os) {
+  JSIteratorHelperPrintHeader(os, "JSIteratorDropHelper");
+  os << "\n - remaining: " << remaining();
   JSObjectPrintBody(os, *this);
 }
 
@@ -1795,7 +1815,12 @@ void SharedFunctionInfo::SharedFunctionInfoPrint(std::ostream& os) {
   os << "\n - language_mode: " << language_mode();
   os << "\n - data: " << Brief(function_data(kAcquireLoad));
   os << "\n - code (from data): ";
-  os << Brief(GetCode());
+  Isolate* isolate;
+  if (GetIsolateFromHeapObject(*this, &isolate)) {
+    os << Brief(GetCode(isolate));
+  } else {
+    os << "<unavailable>";
+  }
   PrintSourceCode(os);
   // Script files are often large, thus only print their {Brief} representation.
   os << "\n - script: " << Brief(script());
@@ -1854,10 +1879,6 @@ void InstructionStream::InstructionStreamPrint(std::ostream& os) {
   PrintHeader(os, "InstructionStream");
   Code the_code = code(kAcquireLoad);
   os << "\n - code: " << Brief(the_code);
-  if (is_builtin()) {
-    os << "\n - builtin_id: " << Builtins::name(builtin_id());
-  }
-  os << "\n";
 #ifdef ENABLE_DISASSEMBLER
   the_code.Disassemble(nullptr, os, GetIsolate());
 #endif
@@ -1869,7 +1890,9 @@ void Code::CodePrint(std::ostream& os) {
   if (is_builtin()) {
     os << "\n - builtin: " << Builtins::name(builtin_id());
   }
-  os << "\n - instruction_stream: " << Brief(raw_instruction_stream());
+  if (has_instruction_stream()) {
+    os << "\n - instruction_stream: " << Brief(raw_instruction_stream());
+  }
   os << "\n - code_entry_point: "
      << reinterpret_cast<void*>(code_entry_point());
   os << "\n - kind_specific_flags: " << kind_specific_flags(kRelaxedLoad);
@@ -2146,7 +2169,6 @@ void WasmInstanceObject::WasmInstanceObjectPrint(std::ostream& os) {
   PRINT_WASM_INSTANCE_FIELD(feedback_vectors, Brief);
   PRINT_WASM_INSTANCE_FIELD(memory_start, to_void_ptr);
   PRINT_WASM_INSTANCE_FIELD(memory_size, +);
-  PRINT_WASM_INSTANCE_FIELD(isolate_root, to_void_ptr);
   PRINT_WASM_INSTANCE_FIELD(stack_limit_address, to_void_ptr);
   PRINT_WASM_INSTANCE_FIELD(real_stack_limit_address, to_void_ptr);
   PRINT_WASM_INSTANCE_FIELD(new_allocation_limit_address, to_void_ptr);
@@ -2210,7 +2232,6 @@ void WasmResumeData::WasmResumeDataPrint(std::ostream& os) {
 
 void WasmApiFunctionRef::WasmApiFunctionRefPrint(std::ostream& os) {
   PrintHeader(os, "WasmApiFunctionRef");
-  os << "\n - isolate_root: " << reinterpret_cast<void*>(isolate_root());
   os << "\n - native_context: " << Brief(native_context());
   os << "\n - callable: " << Brief(callable());
   os << "\n - instance: " << Brief(instance());

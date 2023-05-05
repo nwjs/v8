@@ -426,14 +426,13 @@ bool LiftoffAssembler::NeedsAlignment(ValueKind kind) {
   return kind == kS128 || is_reference(kind);
 }
 
-void LiftoffAssembler::LoadConstant(LiftoffRegister reg, WasmValue value,
-                                    RelocInfo::Mode rmode) {
+void LiftoffAssembler::LoadConstant(LiftoffRegister reg, WasmValue value) {
   switch (value.type().kind()) {
     case kI32:
-      MacroAssembler::li(reg.gp(), Operand(value.to_i32(), rmode));
+      MacroAssembler::li(reg.gp(), Operand(value.to_i32()));
       break;
     case kI64:
-      MacroAssembler::li(reg.gp(), Operand(value.to_i64(), rmode));
+      MacroAssembler::li(reg.gp(), Operand(value.to_i64()));
       break;
     case kF32:
       MacroAssembler::Move(reg.fp(), value.to_f32_boxed().get_bits());
@@ -510,17 +509,12 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
 
   if (skip_write_barrier || v8_flags.disable_write_barriers) return;
 
-  Label write_barrier;
   Label exit;
   CheckPageFlag(dst_addr, scratch,
-                MemoryChunk::kPointersFromHereAreInterestingMask, ne,
-                &write_barrier);
-  Branch(&exit);
-  bind(&write_barrier);
+                MemoryChunk::kPointersFromHereAreInterestingMask, kZero, &exit);
   JumpIfSmi(src.gp(), &exit);
   CheckPageFlag(src.gp(), scratch,
-                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
-                eq, &exit);
+                MemoryChunk::kPointersToHereAreInterestingMask, eq, &exit);
   Daddu(scratch, dst_op.rm(), dst_op.offset());
   CallRecordWriteStubSaveRegisters(dst_addr, scratch, SaveFPRegsMode::kSave,
                                    StubCallMode::kCallWasmRuntimeStub);
@@ -2108,8 +2102,10 @@ void LiftoffAssembler::LoadTransform(LiftoffRegister dst, Register src_addr,
 void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
                                 Register addr, Register offset_reg,
                                 uintptr_t offset_imm, LoadType type,
-                                uint8_t laneidx, uint32_t* protected_load_pc) {
-  MemOperand src_op = liftoff::GetMemOp(this, addr, offset_reg, offset_imm);
+                                uint8_t laneidx, uint32_t* protected_load_pc,
+                                bool i64_offset) {
+  MemOperand src_op =
+      liftoff::GetMemOp(this, addr, offset_reg, offset_imm, i64_offset);
   *protected_load_pc = pc_offset();
   LoadStoreLaneParams load_params(type.mem_type().representation(), laneidx);
   MacroAssembler::LoadLane(load_params.sz, dst.fp().toW(), laneidx, src_op);
@@ -2118,8 +2114,10 @@ void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
 void LiftoffAssembler::StoreLane(Register dst, Register offset,
                                  uintptr_t offset_imm, LiftoffRegister src,
                                  StoreType type, uint8_t lane,
-                                 uint32_t* protected_store_pc) {
-  MemOperand dst_op = liftoff::GetMemOp(this, dst, offset, offset_imm);
+                                 uint32_t* protected_store_pc,
+                                 bool i64_offset) {
+  MemOperand dst_op =
+      liftoff::GetMemOp(this, dst, offset, offset_imm, i64_offset);
   if (protected_store_pc) *protected_store_pc = pc_offset();
   LoadStoreLaneParams store_params(type.mem_rep(), lane);
   MacroAssembler::StoreLane(store_params.sz, src.fp().toW(), lane, dst_op);

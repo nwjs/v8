@@ -64,6 +64,18 @@ class ValueLocationConstraintProcessor {
 #undef DEF_PROCESS_NODE
 };
 
+class DecompressedUseMarkingProcessor {
+ public:
+  void PreProcessGraph(Graph* graph) {}
+  void PostProcessGraph(Graph* graph) {}
+  void PreProcessBasicBlock(BasicBlock* block) {}
+
+  template <typename NodeT>
+  void Process(NodeT* node, const ProcessingState& state) {
+    node->MarkTaggedInputsAsDecompressing();
+  }
+};
+
 class MaxCallDepthProcessor {
  public:
   void PreProcessGraph(Graph* graph) {}
@@ -117,6 +129,11 @@ class MaxCallDepthProcessor {
             deopt_frame->as_interpreted().unit().register_count());
         return info.frame_size_in_bytes();
       }
+      case DeoptFrame::FrameType::kInlinedArgumentsFrame: {
+        return static_cast<int>(
+            deopt_frame->as_inlined_arguments().arguments().size() -
+            deopt_frame->as_inlined_arguments().unit().parameter_count());
+      }
       case DeoptFrame::FrameType::kBuiltinContinuationFrame: {
         // PC + FP + Closure + Params + Context
         const RegisterConfiguration* config = RegisterConfiguration::Default();
@@ -142,7 +159,7 @@ class UseMarkingProcessor {
   explicit UseMarkingProcessor(MaglevCompilationInfo* compilation_info)
       : compilation_info_(compilation_info) {}
 
-  void PreProcessGraph(Graph* graph) { next_node_id_ = kFirstValidNodeId; }
+  void PreProcessGraph(Graph* graph) {}
   void PostProcessGraph(Graph* graph) { DCHECK(loop_used_nodes_.empty()); }
   void PreProcessBasicBlock(BasicBlock* block) {
     if (!block->has_state()) return;
@@ -165,63 +182,10 @@ class UseMarkingProcessor {
     LoopUsedNodes* loop_used_nodes = GetCurrentLoopUsedNodes();
     // Mark input uses in the same order as inputs are assigned in the register
     // allocator (see StraightForwardRegisterAllocator::AssignInputs).
-    for (Input& input : *node) {
-      switch (compiler::UnallocatedOperand::cast(input.operand())
-                  .extended_policy()) {
-        case compiler::UnallocatedOperand::MUST_HAVE_REGISTER:
-        case compiler::UnallocatedOperand::REGISTER_OR_SLOT_OR_CONSTANT:
-          break;
-
-        case compiler::UnallocatedOperand::FIXED_REGISTER:
-        case compiler::UnallocatedOperand::FIXED_FP_REGISTER:
-          MarkUse(input.node(), node->id(), &input, loop_used_nodes);
-          break;
-
-        case compiler::UnallocatedOperand::REGISTER_OR_SLOT:
-        case compiler::UnallocatedOperand::SAME_AS_INPUT:
-        case compiler::UnallocatedOperand::NONE:
-        case compiler::UnallocatedOperand::MUST_HAVE_SLOT:
-          UNREACHABLE();
-      }
-    }
-    for (Input& input : *node) {
-      switch (compiler::UnallocatedOperand::cast(input.operand())
-                  .extended_policy()) {
-        case compiler::UnallocatedOperand::MUST_HAVE_REGISTER:
-          MarkUse(input.node(), node->id(), &input, loop_used_nodes);
-          break;
-
-        case compiler::UnallocatedOperand::REGISTER_OR_SLOT_OR_CONSTANT:
-        case compiler::UnallocatedOperand::FIXED_REGISTER:
-        case compiler::UnallocatedOperand::FIXED_FP_REGISTER:
-          break;
-
-        case compiler::UnallocatedOperand::REGISTER_OR_SLOT:
-        case compiler::UnallocatedOperand::SAME_AS_INPUT:
-        case compiler::UnallocatedOperand::NONE:
-        case compiler::UnallocatedOperand::MUST_HAVE_SLOT:
-          UNREACHABLE();
-      }
-    }
-    for (Input& input : *node) {
-      switch (compiler::UnallocatedOperand::cast(input.operand())
-                  .extended_policy()) {
-        case compiler::UnallocatedOperand::REGISTER_OR_SLOT_OR_CONSTANT:
-          MarkUse(input.node(), node->id(), &input, loop_used_nodes);
-          break;
-
-        case compiler::UnallocatedOperand::MUST_HAVE_REGISTER:
-        case compiler::UnallocatedOperand::FIXED_REGISTER:
-        case compiler::UnallocatedOperand::FIXED_FP_REGISTER:
-          break;
-
-        case compiler::UnallocatedOperand::REGISTER_OR_SLOT:
-        case compiler::UnallocatedOperand::SAME_AS_INPUT:
-        case compiler::UnallocatedOperand::NONE:
-        case compiler::UnallocatedOperand::MUST_HAVE_SLOT:
-          UNREACHABLE();
-      }
-    }
+    node->ForAllInputsInRegallocAssignmentOrder(
+        [&](NodeBase::InputAllocationPolicy, Input* input) {
+          MarkUse(input->node(), node->id(), input, loop_used_nodes);
+        });
     if constexpr (NodeT::kProperties.can_eager_deopt()) {
       MarkCheckpointNodes(node, node->eager_deopt_info(), loop_used_nodes,
                           state);
@@ -339,7 +303,7 @@ class UseMarkingProcessor {
   }
 
   MaglevCompilationInfo* compilation_info_;
-  uint32_t next_node_id_;
+  uint32_t next_node_id_ = kFirstValidNodeId;
   std::vector<LoopUsedNodes> loop_used_nodes_;
 };
 
@@ -381,16 +345,16 @@ bool MaglevCompiler::Compile(LocalIsolate* local_isolate,
       PrintGraph(std::cout, compilation_info, graph);
     }
 
-    // TODO(dmercadier): re-enable Phi untagging.
+    if (v8_flags.maglev_untagged_phis) {
+      GraphProcessor<MaglevPhiRepresentationSelector> representation_selector(
+          &graph_builder);
+      representation_selector.ProcessGraph(graph);
 
-    // GraphProcessor<MaglevPhiRepresentationSelector> representation_selector(
-    //     &graph_builder);
-    // representation_selector.ProcessGraph(graph);
-
-    // if (v8_flags.print_maglev_graph) {
-    //   std::cout << "\nAfter Phi untagging" << std::endl;
-    //   PrintGraph(std::cout, compilation_info, graph);
-    // }
+      if (v8_flags.print_maglev_graph) {
+        std::cout << "\nAfter Phi untagging" << std::endl;
+        PrintGraph(std::cout, compilation_info, graph);
+      }
+    }
   }
 
 #ifdef DEBUG
@@ -406,7 +370,7 @@ bool MaglevCompiler::Compile(LocalIsolate* local_isolate,
     //   - Find the maximum number of stack arguments passed to calls
     //   - Collect use information, for SSA liveness and next-use distance.
     GraphMultiProcessor<ValueLocationConstraintProcessor, MaxCallDepthProcessor,
-                        UseMarkingProcessor>
+                        UseMarkingProcessor, DecompressedUseMarkingProcessor>
         processor(UseMarkingProcessor{compilation_info});
     processor.ProcessGraph(graph);
   }

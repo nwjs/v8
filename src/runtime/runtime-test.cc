@@ -22,6 +22,7 @@
 #include "src/execution/isolate-inl.h"
 #include "src/execution/protectors-inl.h"
 #include "src/execution/tiering-manager.h"
+#include "src/flags/flags.h"
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/heap/pretenuring-handler-inl.h"
 #include "src/ic/stub-cache.h"
@@ -390,7 +391,7 @@ RUNTIME_FUNCTION(Runtime_CompileBaseline) {
     return CrashUnlessFuzzing(isolate);
   }
 
-  return *function;
+  return ReadOnlyRoots(isolate).undefined_value();
 }
 
 // TODO(v8:7700): Remove this function once we no longer need it to measure
@@ -490,7 +491,10 @@ RUNTIME_FUNCTION(Runtime_OptimizeMaglevOnNextCall) {
 // TODO(jgruber): Rename to OptimizeTurbofanOnNextCall.
 RUNTIME_FUNCTION(Runtime_OptimizeFunctionOnNextCall) {
   HandleScope scope(isolate);
-  return OptimizeFunctionOnNextCall(args, isolate, CodeKind::TURBOFAN);
+  return OptimizeFunctionOnNextCall(
+      args, isolate,
+      v8_flags.optimize_on_next_call_optimizes_to_maglev ? CodeKind::MAGLEV
+                                                         : CodeKind::TURBOFAN);
 }
 
 RUNTIME_FUNCTION(Runtime_EnsureFeedbackVectorForFunction) {
@@ -738,7 +742,7 @@ RUNTIME_FUNCTION(Runtime_NeverOptimizeFunction) {
     isolate->lazy_compile_dispatcher()->FinishNow(sfi);
   }
 
-  sfi->DisableOptimization(BailoutReason::kNeverOptimize);
+  sfi->DisableOptimization(isolate, BailoutReason::kNeverOptimize);
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
@@ -760,6 +764,10 @@ RUNTIME_FUNCTION(Runtime_GetOptimizationStatus) {
   }
   if (v8_flags.deopt_every_n_times) {
     status |= static_cast<int>(OptimizationStatus::kMaybeDeopted);
+  }
+  if (v8_flags.optimize_on_next_call_optimizes_to_maglev) {
+    status |= static_cast<int>(
+        OptimizationStatus::kOptimizeOnNextCallOptimizesToMaglev);
   }
 
   Handle<Object> function_object = args.at(0);
@@ -989,7 +997,7 @@ void FillUpOneNewSpacePage(Isolate* isolate, Heap* heap) {
   // We cannot rely on `space->limit()` to point to the end of the current page
   // in the case where inline allocations are disabled, it actually points to
   // the current allocation pointer.
-  DCHECK_IMPLIES(!space->IsInlineAllocationEnabled(),
+  DCHECK_IMPLIES(!heap->IsInlineAllocationEnabled(),
                  space->limit() == space->top());
   int space_remaining = GetSpaceRemainingOnCurrentPage(space);
   while (space_remaining > 0) {
@@ -1667,9 +1675,9 @@ RUNTIME_FUNCTION(Runtime_EnableCodeLoggingForTesting) {
     void CodeMovingGCEvent() final {}
     void CodeDisableOptEvent(Handle<AbstractCode> code,
                              Handle<SharedFunctionInfo> shared) final {}
-    void CodeDeoptEvent(Handle<InstructionStream> code, DeoptimizeKind kind,
-                        Address pc, int fp_to_sp_delta) final {}
-    void CodeDependencyChangeEvent(Handle<InstructionStream> code,
+    void CodeDeoptEvent(Handle<Code> code, DeoptimizeKind kind, Address pc,
+                        int fp_to_sp_delta) final {}
+    void CodeDependencyChangeEvent(Handle<Code> code,
                                    Handle<SharedFunctionInfo> shared,
                                    const char* reason) final {}
     void WeakCodeClearEvent() final {}

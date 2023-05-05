@@ -123,12 +123,12 @@ inline MemOperand GetMemOp(LiftoffAssembler* assm,
 inline Register GetEffectiveAddress(LiftoffAssembler* assm,
                                     UseScratchRegisterScope* temps,
                                     Register addr, Register offset,
-                                    uintptr_t offset_imm) {
+                                    uintptr_t offset_imm,
+                                    bool i64_offset = false) {
   if (!offset.is_valid() && offset_imm == 0) return addr;
   Register tmp = temps->AcquireX();
   if (offset.is_valid()) {
-    // TODO(clemensb): This needs adaption for memory64.
-    assm->Add(tmp, addr, Operand(offset, UXTW));
+    assm->Add(tmp, addr, i64_offset ? Operand(offset) : Operand(offset, UXTW));
     addr = tmp;
   }
   if (offset_imm != 0) assm->Add(tmp, addr, offset_imm);
@@ -392,20 +392,19 @@ bool LiftoffAssembler::NeedsAlignment(ValueKind kind) {
   return kind == kS128 || is_reference(kind);
 }
 
-void LiftoffAssembler::LoadConstant(LiftoffRegister reg, WasmValue value,
-                                    RelocInfo::Mode rmode) {
+void LiftoffAssembler::LoadConstant(LiftoffRegister reg, WasmValue value) {
   switch (value.type().kind()) {
     case kI32:
-      Mov(reg.gp().W(), Immediate(value.to_i32(), rmode));
+      Mov(reg.gp().W(), value.to_i32());
       break;
     case kI64:
-      Mov(reg.gp().X(), Immediate(value.to_i64(), rmode));
+      Mov(reg.gp().X(), value.to_i64());
       break;
     case kF32:
-      Fmov(reg.fp().S(), value.to_f32_boxed().get_scalar());
+      Fmov(reg.fp().S(), value.to_f32());
       break;
     case kF64:
-      Fmov(reg.fp().D(), value.to_f64_boxed().get_scalar());
+      Fmov(reg.fp().D(), value.to_f64());
       break;
     default:
       UNREACHABLE();
@@ -495,19 +494,12 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
   if (skip_write_barrier || v8_flags.disable_write_barriers) return;
 
   // The write barrier.
-  Label write_barrier;
   Label exit;
-  CheckPageFlag(dst_addr, MemoryChunk::kPointersFromHereAreInterestingMask, ne,
-                &write_barrier);
-  b(&exit);
-  bind(&write_barrier);
+  CheckPageFlag(dst_addr, MemoryChunk::kPointersFromHereAreInterestingMask,
+                kZero, &exit);
   JumpIfSmi(src.gp(), &exit);
-  if (COMPRESS_POINTERS_BOOL) {
-    DecompressTagged(src.gp(), src.gp());
-  }
-  CheckPageFlag(src.gp(),
-                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
-                eq, &exit);
+  CheckPageFlag(src.gp(), MemoryChunk::kPointersToHereAreInterestingMask, eq,
+                &exit);
   CallRecordWriteStubSaveRegisters(dst_addr, offset_op, SaveFPRegsMode::kSave,
                                    StubCallMode::kCallWasmRuntimeStub);
   bind(&exit);
@@ -1867,10 +1859,11 @@ void LiftoffAssembler::LoadTransform(LiftoffRegister dst, Register src_addr,
 void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
                                 Register addr, Register offset_reg,
                                 uintptr_t offset_imm, LoadType type,
-                                uint8_t laneidx, uint32_t* protected_load_pc) {
+                                uint8_t laneidx, uint32_t* protected_load_pc,
+                                bool i64_offset) {
   UseScratchRegisterScope temps(this);
-  MemOperand src_op{
-      liftoff::GetEffectiveAddress(this, &temps, addr, offset_reg, offset_imm)};
+  MemOperand src_op{liftoff::GetEffectiveAddress(this, &temps, addr, offset_reg,
+                                                 offset_imm, i64_offset)};
 
   MachineType mem_type = type.mem_type();
   if (dst != src) {
@@ -1894,10 +1887,11 @@ void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
 void LiftoffAssembler::StoreLane(Register dst, Register offset,
                                  uintptr_t offset_imm, LiftoffRegister src,
                                  StoreType type, uint8_t lane,
-                                 uint32_t* protected_store_pc) {
+                                 uint32_t* protected_store_pc,
+                                 bool i64_offset) {
   UseScratchRegisterScope temps(this);
-  MemOperand dst_op{
-      liftoff::GetEffectiveAddress(this, &temps, dst, offset, offset_imm)};
+  MemOperand dst_op{liftoff::GetEffectiveAddress(this, &temps, dst, offset,
+                                                 offset_imm, i64_offset)};
   if (protected_store_pc) *protected_store_pc = pc_offset();
 
   MachineRepresentation rep = type.mem_rep();
@@ -3356,33 +3350,52 @@ void LiftoffAssembler::emit_i64x2_abs(LiftoffRegister dst,
   Abs(dst.fp().V2D(), src.fp().V2D());
 }
 
+#define EMIT_QFMOP(instr, format)                                              \
+  if (dst == src3) {                                                           \
+    instr(dst.fp().V##format(), src1.fp().V##format(), src2.fp().V##format()); \
+    return;                                                                    \
+  }                                                                            \
+  if (dst != src1 && dst != src2) {                                            \
+    Mov(dst.fp().V##format(), src3.fp().V##format());                          \
+    instr(dst.fp().V##format(), src1.fp().V##format(), src2.fp().V##format()); \
+    return;                                                                    \
+  }                                                                            \
+  DCHECK(dst == src1 || dst == src2);                                          \
+  UseScratchRegisterScope temps(this);                                         \
+  VRegister tmp = temps.AcquireV(kFormat##format);                             \
+  Mov(tmp, src3.fp().V##format());                                             \
+  instr(tmp, src1.fp().V##format(), src2.fp().V##format());                    \
+  Mov(dst.fp().V##format(), tmp);
+
 void LiftoffAssembler::emit_f32x4_qfma(LiftoffRegister dst,
                                        LiftoffRegister src1,
                                        LiftoffRegister src2,
                                        LiftoffRegister src3) {
-  bailout(kRelaxedSimd, "emit_f32x4_qfma");
+  EMIT_QFMOP(Fmla, 4S);
 }
 
 void LiftoffAssembler::emit_f32x4_qfms(LiftoffRegister dst,
                                        LiftoffRegister src1,
                                        LiftoffRegister src2,
                                        LiftoffRegister src3) {
-  bailout(kRelaxedSimd, "emit_f32x4_qfms");
+  EMIT_QFMOP(Fmls, 4S);
 }
 
 void LiftoffAssembler::emit_f64x2_qfma(LiftoffRegister dst,
                                        LiftoffRegister src1,
                                        LiftoffRegister src2,
                                        LiftoffRegister src3) {
-  bailout(kRelaxedSimd, "emit_f64x2_qfma");
+  EMIT_QFMOP(Fmla, 2D);
 }
 
 void LiftoffAssembler::emit_f64x2_qfms(LiftoffRegister dst,
                                        LiftoffRegister src1,
                                        LiftoffRegister src2,
                                        LiftoffRegister src3) {
-  bailout(kRelaxedSimd, "emit_f64x2_qfms");
+  EMIT_QFMOP(Fmls, 2D);
 }
+
+#undef EMIT_QFMOP
 
 void LiftoffAssembler::StackCheck(Label* ool_code, Register limit_address) {
   Ldr(limit_address, MemOperand(limit_address));

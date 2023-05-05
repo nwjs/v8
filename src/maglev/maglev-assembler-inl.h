@@ -5,6 +5,8 @@
 #ifndef V8_MAGLEV_MAGLEV_ASSEMBLER_INL_H_
 #define V8_MAGLEV_MAGLEV_ASSEMBLER_INL_H_
 
+#include <type_traits>
+
 #include "src/maglev/maglev-assembler.h"
 
 #ifdef V8_TARGET_ARCH_ARM64
@@ -91,6 +93,11 @@ struct CopyForDeferredHelper<RegisterSnapshot>
 template <>
 struct CopyForDeferredHelper<FeedbackSlot>
     : public CopyForDeferredByValue<FeedbackSlot> {};
+// Heap Refs are copied by value.
+template <typename T>
+struct CopyForDeferredHelper<T, typename std::enable_if<std::is_base_of<
+                                    compiler::ObjectRef, T>::value>::type>
+    : public CopyForDeferredByValue<T> {};
 
 template <typename T>
 T CopyForDeferred(MaglevCompilationInfo* compilation_info, T&& value) {
@@ -256,6 +263,12 @@ inline void MaglevAssembler::LoadTaggedField(Register result,
 inline void MaglevAssembler::LoadTaggedField(Register result, Register object,
                                              int offset) {
   MacroAssembler::LoadTaggedField(result, FieldMemOperand(object, offset));
+}
+
+inline void MaglevAssembler::LoadTaggedFieldWithoutDecompressing(
+    Register result, Register object, int offset) {
+  MacroAssembler::LoadTaggedFieldWithoutDecompressing(
+      result, FieldMemOperand(object, offset));
 }
 
 inline void MaglevAssembler::LoadTaggedSignedField(Register result,

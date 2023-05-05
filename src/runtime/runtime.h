@@ -461,6 +461,8 @@ namespace internal {
   F(StringAdd, 2, 1)                      \
   F(StringBuilderConcat, 3, 1)            \
   F(StringCharCodeAt, 2, 1)               \
+  F(StringCodePointAt, 2, 1)              \
+  F(StringCompare, 2, 1)                  \
   F(StringEqual, 2, 1)                    \
   F(StringEscapeQuotes, 1, 1)             \
   F(StringGreaterThan, 2, 1)              \
@@ -621,6 +623,7 @@ namespace internal {
   F(WasmThrow, 2, 1)                  \
   F(WasmReThrow, 1, 1)                \
   F(WasmThrowJSTypeError, 0, 1)       \
+  F(WasmThrowTypeError, 2, 1)         \
   F(WasmRefFunc, 1, 1)                \
   F(WasmFunctionTableGet, 3, 1)       \
   F(WasmFunctionTableSet, 4, 1)       \
@@ -652,7 +655,6 @@ namespace internal {
   F(WasmStringAsWtf8, 1, 1)           \
   F(WasmStringViewWtf8Encode, 6, 1)   \
   F(WasmStringViewWtf8Slice, 3, 1)    \
-  F(WasmStringCompare, 2, 1)          \
   F(WasmStringFromCodePoint, 1, 1)    \
   F(WasmStringHash, 1, 1)
 
@@ -680,6 +682,7 @@ namespace internal {
   F(WasmGetNumberOfInstances, 1, 1)        \
   F(WasmNumCodeSpaces, 1, 1)               \
   F(WasmEnterDebugging, 0, 1)              \
+  F(WasmLeaveDebugging, 0, 1)              \
   F(WasmTierUpFunction, 1, 1)              \
   F(WasmTraceEnter, 0, 1)                  \
   F(WasmTraceExit, 1, 1)                   \
@@ -984,6 +987,7 @@ enum class OptimizationStatus {
   kTopmostFrameIsBaseline = 1 << 17,
   kIsLazy = 1 << 18,
   kTopmostFrameIsMaglev = 1 << 19,
+  kOptimizeOnNextCallOptimizesToMaglev = 1 << 20,
 };
 
 }  // namespace internal

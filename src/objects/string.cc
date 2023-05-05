@@ -212,7 +212,7 @@ void String::MakeThin(
   bool may_contain_recorded_slots = initial_shape.IsIndirect();
   int old_size = SizeFromMap(initial_map);
   Map target_map = ReadOnlyRoots(isolate).thin_string_map();
-  const bool in_shared_heap = InSharedWritableHeap();
+  const bool in_shared_heap = InWritableSharedSpace();
   if (in_shared_heap) {
     // Objects in the shared heap are always direct, therefore they can't have
     // any invalidated slots.
@@ -224,8 +224,9 @@ void String::MakeThin(
     // from ConsStrings without having had the recorded slots cleared.
     // In the shared heap no such transitions are possible, as it can't contain
     // indirect strings.
+    // Indirect strings also don't get large enough to be in LO space.
     // TODO(v8:13374): Fix this more uniformly.
-    may_contain_recorded_slots = !in_shared_heap;
+    may_contain_recorded_slots = !in_shared_heap && !Heap::IsLargeObject(*this);
 
     // Notify GC about the layout change before the transition to avoid
     // concurrent marking from observing any in-between state (e.g.
@@ -466,8 +467,8 @@ bool String::MakeExternal(v8::String::ExternalStringResource* resource) {
     // Strings in the shared heap are never indirect and thus cannot have any
     // invalidated slots.
     const auto update_invalidated_object_size =
-        InSharedWritableHeap() ? UpdateInvalidatedObjectSize::kNo
-                               : UpdateInvalidatedObjectSize::kYes;
+        InWritableSharedSpace() ? UpdateInvalidatedObjectSize::kNo
+                                : UpdateInvalidatedObjectSize::kYes;
     isolate->heap()->NotifyObjectSizeChange(
         *this, size, new_size,
         has_pointers ? ClearRecordedSlots::kYes : ClearRecordedSlots::kNo,
@@ -549,15 +550,15 @@ bool String::MakeExternal(v8::String::ExternalOneByteStringResource* resource) {
     int new_size = this->SizeFromMap(new_map);
 
     if (has_pointers) {
-      DCHECK(!InSharedWritableHeap());
+      DCHECK(!InWritableSharedSpace());
       isolate->heap()->NotifyObjectLayoutChange(
           *this, no_gc, InvalidateRecordedSlots::kYes, new_size);
     }
     // Strings in the shared heap are never indirect and thus cannot have any
     // invalidated slots.
     const auto update_invalidated_object_size =
-        InSharedWritableHeap() ? UpdateInvalidatedObjectSize::kNo
-                               : UpdateInvalidatedObjectSize::kYes;
+        InWritableSharedSpace() ? UpdateInvalidatedObjectSize::kNo
+                                : UpdateInvalidatedObjectSize::kYes;
     isolate->heap()->NotifyObjectSizeChange(
         *this, size, new_size,
         has_pointers ? ClearRecordedSlots::kYes : ClearRecordedSlots::kNo,
@@ -610,6 +611,38 @@ bool String::SupportsExternalization() {
 #endif
 
   return true;
+}
+
+bool String::SupportsExternalization(v8::String::Encoding encoding) {
+  if (this->IsThinString()) {
+    return i::ThinString::cast(*this).actual().SupportsExternalization(
+        encoding);
+  }
+
+  // RO_SPACE strings cannot be externalized.
+  if (IsReadOnlyHeapObject(*this)) {
+    return false;
+  }
+
+#ifdef V8_COMPRESS_POINTERS
+  // Small strings may not be in-place externalizable.
+  if (this->Size() < ExternalString::kUncachedSize) return false;
+#else
+  DCHECK_LE(ExternalString::kUncachedSize, this->Size());
+#endif
+
+  StringShape shape(*this);
+
+  // Already an external string.
+  if (shape.IsExternal()) {
+    return false;
+  }
+
+  // Encoding changes are not supported.
+  static_assert(kStringEncodingMask == 1 << 3);
+  static_assert(v8::String::Encoding::ONE_BYTE_ENCODING == 1 << 3);
+  static_assert(v8::String::Encoding::TWO_BYTE_ENCODING == 0);
+  return shape.encoding_tag() == static_cast<uint32_t>(encoding);
 }
 
 const char* String::PrefixForDebugPrint() const {

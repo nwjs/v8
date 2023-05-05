@@ -78,10 +78,10 @@ TestingModuleBuilder::TestingModuleBuilder(
     // Manually compile an import wrapper and insert it into the instance.
     uint32_t canonical_type_index =
         GetTypeCanonicalizer()->AddRecursiveGroup(maybe_import->sig);
-    auto resolved = compiler::ResolveWasmImportCall(
-        maybe_import->js_function, maybe_import->sig, canonical_type_index);
-    compiler::WasmImportCallKind kind = resolved.kind;
-    Handle<JSReceiver> callable = resolved.callable;
+    WasmImportData resolved(maybe_import->js_function, maybe_import->sig,
+                            canonical_type_index);
+    ImportCallKind kind = resolved.kind();
+    Handle<JSReceiver> callable = resolved.callable();
     WasmImportWrapperCache::ModificationScope cache_scope(
         native_module_->import_wrapper_cache());
     WasmImportWrapperCache::CacheKey key(
@@ -98,7 +98,7 @@ TestingModuleBuilder::TestingModuleBuilder(
     }
 
     ImportedFunctionEntry(instance_object_, maybe_import_index)
-        .SetWasmToJs(isolate_, callable, import_wrapper, resolved.suspend);
+        .SetWasmToJs(isolate_, callable, import_wrapper, resolved.suspend());
   }
 
   if (tier == TestExecutionTier::kInterpreter) {
@@ -162,6 +162,7 @@ uint32_t TestingModuleBuilder::AddFunction(const FunctionSig* sig,
       std::fill_n(test_module_->validated_functions.get(),
                   (kMaxFunctions + 7) / 8, 0xff);
     }
+    test_module_->type_feedback.well_known_imports.Initialize(kMaxFunctions);
   }
   uint32_t index = static_cast<uint32_t>(test_module_->functions.size());
   test_module_->functions.push_back({sig,      // sig
@@ -394,8 +395,11 @@ Handle<WasmInstanceObject> TestingModuleBuilder::InitInstanceObject() {
   native_module_->ReserveCodeTableForTesting(kMaxFunctions);
 
   auto instance = WasmInstanceObject::New(isolate_, module_object);
-  instance->set_tags_table(*isolate_->factory()->empty_fixed_array());
+  instance->set_tags_table(ReadOnlyRoots{isolate_}.empty_fixed_array());
   instance->set_globals_start(globals_data_);
+  Handle<FixedArray> feedback_vector =
+      isolate_->factory()->NewFixedArrayWithZeroes(kMaxFunctions);
+  instance->set_feedback_vectors(*feedback_vector);
   return instance;
 }
 
@@ -405,24 +409,9 @@ void TestBuildingGraphWithBuilder(compiler::WasmGraphBuilder* builder,
   WasmFeatures unused_detected_features;
   FunctionBody body(sig, 0, start, end);
   std::vector<compiler::WasmLoopInfo> loops;
-  DecodeResult result =
-      BuildTFGraph(zone->allocator(), WasmFeatures::All(), nullptr, builder,
-                   &unused_detected_features, body, &loops, nullptr, nullptr, 0,
-                   kRegularFunction);
-  if (result.failed()) {
-#ifdef DEBUG
-    if (!v8_flags.trace_wasm_decoder) {
-      // Retry the compilation with the tracing flag on, to help in debugging.
-      v8_flags.trace_wasm_decoder = true;
-      result = BuildTFGraph(zone->allocator(), WasmFeatures::All(), nullptr,
-                            builder, &unused_detected_features, body, &loops,
-                            nullptr, nullptr, 0, kRegularFunction);
-    }
-#endif
-
-    FATAL("Verification failed; pc = +%x, msg = %s", result.error().offset(),
-          result.error().message().c_str());
-  }
+  BuildTFGraph(zone->allocator(), WasmFeatures::All(), nullptr, builder,
+               &unused_detected_features, body, &loops, nullptr, nullptr, 0,
+               nullptr, kRegularFunction);
   builder->LowerInt64(compiler::WasmGraphBuilder::kCalledFromWasm);
 }
 

@@ -17,6 +17,7 @@
 #include "src/wasm/wasm-linkage.h"
 #include "src/wasm/wasm-module.h"
 #include "src/wasm/wasm-opcodes-inl.h"
+#include "src/wasm/well-known-imports.h"
 
 namespace v8 {
 namespace internal {
@@ -116,7 +117,7 @@ class WasmGraphBuildingInterface {
   using ValidationTag = Decoder::NoValidationTag;
   using FullDecoder =
       WasmFullDecoder<ValidationTag, WasmGraphBuildingInterface>;
-  using CheckForNull = compiler::WasmGraphBuilder::CheckForNull;
+  using CheckForNull = compiler::CheckForNull;
 
   struct Value : public ValueBase<ValidationTag> {
     TFNode* node = nullptr;
@@ -178,11 +179,12 @@ class WasmGraphBuildingInterface {
   };
 
   WasmGraphBuildingInterface(compiler::WasmGraphBuilder* builder,
-                             int func_index, InlinedStatus inlined_status,
-                             Zone* zone)
+                             int func_index, AssumptionsJournal* assumptions,
+                             InlinedStatus inlined_status, Zone* zone)
       : locals_allocator_(zone),
         builder_(builder),
         func_index_(func_index),
+        assumptions_(assumptions),
         inlined_status_(inlined_status) {}
 
   void StartFunction(FullDecoder* decoder) {
@@ -193,8 +195,8 @@ class WasmGraphBuildingInterface {
       if (branch_hints_it != decoder->module_->branch_hints.end()) {
         branch_hints_ = &branch_hints_it->second;
       }
-      TypeFeedbackStorage& feedbacks = decoder->module_->type_feedback;
-      base::MutexGuard mutex_guard(&feedbacks.mutex);
+      const TypeFeedbackStorage& feedbacks = decoder->module_->type_feedback;
+      base::SharedMutexGuard<base::kShared> mutex_guard(&feedbacks.mutex);
       auto feedback = feedbacks.feedback_for_function.find(func_index_);
       if (feedback != feedbacks.feedback_for_function.end()) {
         // This creates a copy of the vector, which is cheaper than holding on
@@ -723,6 +725,33 @@ class WasmGraphBuildingInterface {
     LoadContextIntoSsa(ssa_env_, decoder);
   }
 
+  bool HandleWellKnownImport(FullDecoder* decoder, uint32_t index,
+                             const Value args[], Value returns[]) {
+    if (!decoder->module_) return false;  // Only needed for tests.
+    if (index >= decoder->module_->num_imported_functions) return false;
+    WellKnownImportsList& well_known_imports =
+        decoder->module_->type_feedback.well_known_imports;
+    using WKI = WellKnownImport;
+    WKI import = well_known_imports.get(index);
+    TFNode* result = nullptr;
+    switch (import) {
+      case WKI::kUninstantiated:
+      case WKI::kGeneric:
+        return false;
+      case WKI::kStringToLowerCaseStringref:
+        result = builder_->WellKnown_StringToLowerCaseStringref(
+            args[0].node, NullCheckFor(args[0].type));
+        break;
+    }
+    assumptions_->RecordAssumption(index, import);
+    SetAndTypeNode(&returns[0], result);
+    if (v8_flags.trace_wasm_inlining) {
+      PrintF("[function %d: import %d is well-known built-in %s]\n",
+             func_index_, index, WellKnownImportName(import));
+    }
+    return true;
+  }
+
   void CallDirect(FullDecoder* decoder, const CallFunctionImmediate& imm,
                   const Value args[], Value returns[]) {
     int maybe_call_count = -1;
@@ -731,6 +760,8 @@ class WasmGraphBuildingInterface {
       DCHECK_EQ(feedback.num_cases(), 1);
       maybe_call_count = feedback.call_count(0);
     }
+    // This must happen after the {next_call_feedback()} call.
+    if (HandleWellKnownImport(decoder, imm.index, args, returns)) return;
     DoCall(decoder, CallInfo::CallDirect(imm.index, maybe_call_count), imm.sig,
            args, returns);
   }
@@ -1195,7 +1226,7 @@ class WasmGraphBuildingInterface {
     SetAndTypeNode(result, builder_->ArrayNew(imm.index, imm.array_type,
                                               length.node, initial_value.node,
                                               rtt.node, decoder->position()));
-    // array.new_with_rtt introduces a loop. Therefore, we have to mark the
+    // array.new(_default) introduces a loop. Therefore, we have to mark the
     // immediately nesting loop (if any) as non-innermost.
     if (!loop_infos_.empty()) loop_infos_.back().can_be_innermost = false;
   }
@@ -1207,6 +1238,9 @@ class WasmGraphBuildingInterface {
     SetAndTypeNode(result, builder_->ArrayNew(imm.index, imm.array_type,
                                               length.node, initial_value,
                                               rtt.node, decoder->position()));
+    // array.new(_default) introduces a loop. Therefore, we have to mark the
+    // immediately nesting loop (if any) as non-innermost.
+    if (!loop_infos_.empty()) loop_infos_.back().can_be_innermost = false;
   }
 
   void ArrayGet(FullDecoder* decoder, const Value& array_obj,
@@ -1234,9 +1268,22 @@ class WasmGraphBuildingInterface {
   void ArrayCopy(FullDecoder* decoder, const Value& dst, const Value& dst_index,
                  const Value& src, const Value& src_index,
                  const Value& length) {
-    builder_->ArrayCopy(dst.node, dst_index.node, NullCheckFor(dst.type),
-                        src.node, src_index.node, NullCheckFor(src.type),
-                        length.node, decoder->position());
+    builder_->ArrayCopy(
+        dst.node, dst_index.node, NullCheckFor(dst.type), src.node,
+        src_index.node, NullCheckFor(src.type), length.node,
+        decoder->module_->types[src.type.ref_index()].array_type,
+        decoder->position());
+  }
+
+  void ArrayFill(FullDecoder* decoder, ArrayIndexImmediate& imm,
+                 const Value& array, const Value& index, const Value& value,
+                 const Value& length) {
+    builder_->ArrayFill(array.node, index.node, value.node, length.node,
+                        imm.array_type, NullCheckFor(array.type),
+                        decoder->position());
+    // array.fill introduces a loop. Therefore, we have to mark the immediately
+    // nesting loop (if any) as non-innermost.
+    if (!loop_infos_.empty()) loop_infos_.back().can_be_innermost = false;
   }
 
   void ArrayNewFixed(FullDecoder* decoder, const ArrayIndexImmediate& imm,
@@ -1293,8 +1340,9 @@ class WasmGraphBuildingInterface {
 
   void RefTestAbstract(FullDecoder* decoder, const Value& object,
                        wasm::HeapType type, Value* result, bool null_succeeds) {
-    SetAndTypeNode(result,
-                   builder_->RefTestAbstract(object.node, type, null_succeeds));
+    bool is_nullable = object.type.is_nullable();
+    SetAndTypeNode(result, builder_->RefTestAbstract(
+                               object.node, type, is_nullable, null_succeeds));
   }
 
   void RefCast(FullDecoder* decoder, const Value& object, const Value& rtt,
@@ -1314,8 +1362,9 @@ class WasmGraphBuildingInterface {
                        wasm::HeapType type, Value* result, bool null_succeeds) {
     TFNode* node = object.node;
     if (!v8_flags.experimental_wasm_assume_ref_cast_succeeds) {
+      bool is_nullable = object.type.is_nullable();
       node = builder_->RefCastAbstract(object.node, type, decoder->position(),
-                                       null_succeeds);
+                                       is_nullable, null_succeeds);
     }
     SetAndTypeNode(result, builder_->TypeGuard(node, result->type));
   }
@@ -1829,6 +1878,7 @@ class WasmGraphBuildingInterface {
   // When inlining, tracks exception handlers that are left dangling and must be
   // handled by the callee.
   DanglingExceptions dangling_exceptions_;
+  AssumptionsJournal* assumptions_;
   InlinedStatus inlined_status_;
   // The entries in {type_feedback_} are indexed by the position of feedback-
   // consuming instructions (currently only calls).
@@ -2356,17 +2406,17 @@ class WasmGraphBuildingInterface {
 
 }  // namespace
 
-DecodeResult BuildTFGraph(AccountingAllocator* allocator,
-                          const WasmFeatures& enabled, const WasmModule* module,
-                          compiler::WasmGraphBuilder* builder,
-                          WasmFeatures* detected, const FunctionBody& body,
-                          std::vector<compiler::WasmLoopInfo>* loop_infos,
-                          DanglingExceptions* dangling_exceptions,
-                          compiler::NodeOriginTable* node_origins,
-                          int func_index, InlinedStatus inlined_status) {
+void BuildTFGraph(AccountingAllocator* allocator, const WasmFeatures& enabled,
+                  const WasmModule* module, compiler::WasmGraphBuilder* builder,
+                  WasmFeatures* detected, const FunctionBody& body,
+                  std::vector<compiler::WasmLoopInfo>* loop_infos,
+                  DanglingExceptions* dangling_exceptions,
+                  compiler::NodeOriginTable* node_origins, int func_index,
+                  AssumptionsJournal* assumptions,
+                  InlinedStatus inlined_status) {
   Zone zone(allocator, ZONE_NAME);
   WasmFullDecoder<Decoder::NoValidationTag, WasmGraphBuildingInterface> decoder(
-      &zone, module, enabled, detected, body, builder, func_index,
+      &zone, module, enabled, detected, body, builder, func_index, assumptions,
       inlined_status, &zone);
   if (node_origins) {
     builder->AddBytecodePositionDecorator(node_origins, &decoder);
@@ -2379,8 +2429,9 @@ DecodeResult BuildTFGraph(AccountingAllocator* allocator,
   if (dangling_exceptions != nullptr) {
     *dangling_exceptions = std::move(decoder.interface().dangling_exceptions());
   }
-
-  return decoder.toResult(nullptr);
+  // TurboFan does not run with validation, so graph building must always
+  // succeed.
+  CHECK(decoder.ok());
 }
 
 }  // namespace wasm

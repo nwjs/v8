@@ -24,6 +24,7 @@
 #include "src/wasm/wasm-constants.h"
 #include "src/wasm/wasm-init-expr.h"
 #include "src/wasm/wasm-limits.h"
+#include "src/wasm/well-known-imports.h"
 
 namespace v8::internal {
 class WasmModuleObject;
@@ -35,6 +36,7 @@ using WasmName = base::Vector<const char>;
 
 struct AsmJsOffsets;
 class ErrorThrower;
+class WellKnownImportsList;
 
 // Reference to a string in the wire bytes.
 class WireBytesRef {
@@ -500,7 +502,20 @@ struct FunctionTypeFeedback {
 struct TypeFeedbackStorage {
   std::unordered_map<uint32_t, FunctionTypeFeedback> feedback_for_function;
   // Accesses to {feedback_for_function} are guarded by this mutex.
-  mutable base::Mutex mutex;
+  // Multiple reads are allowed (shared lock), but only exclusive writes.
+  // Currently known users of the mutex are:
+  // - LiftoffCompiler: writes {call_targets}.
+  // - TransitiveTypeFeedbackProcessor: reads {call_targets},
+  //   writes {feedback_vector}, reads {feedback_vector.size()}.
+  // - TriggerTierUp: increments {tierup_priority}.
+  // - WasmGraphBuilder: reads {feedback_vector}.
+  // - Feedback vector allocation: reads {call_targets.size()}.
+  // - PGO ProfileGenerator: reads everything.
+  // - PGO deserializer: writes everything, currently not locked, relies on
+  //   being called before multi-threading enters the picture.
+  mutable base::SharedMutex mutex;
+
+  WellKnownImportsList well_known_imports;
 };
 
 struct WasmTable;
@@ -557,6 +572,10 @@ struct V8_EXPORT_PRIVATE WasmModule {
   BranchHintInfo branch_hints;
   // Pairs of module offsets and mark id.
   std::vector<std::pair<uint32_t, uint32_t>> inst_traces;
+
+  // This is the only member of {WasmModule} where we store dynamic information
+  // that's not a decoded representation of the wire bytes.
+  // TODO(jkummerow): Rename.
   mutable TypeFeedbackStorage type_feedback;
 
   const ModuleOrigin origin;

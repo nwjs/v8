@@ -1487,7 +1487,9 @@ void ImplementationVisitor::InitializeClass(
     InitializeClass(super, allocate_result, initializer_results, layout);
   }
 
-  for (Field f : class_type->fields()) {
+  for (const Field& f : class_type->fields()) {
+    // Support optional padding fields.
+    if (f.name_and_type.type->IsVoid()) continue;
     VisitResult initializer_value =
         initializer_results.field_value_map.at(f.name_and_type.name);
     LocationReference field =
@@ -3413,12 +3415,6 @@ std::string ImplementationVisitor::ExternalParameterName(
     const std::string& name) {
   return std::string("p_") + name;
 }
-
-DEFINE_CONTEXTUAL_VARIABLE(ImplementationVisitor::ValueBindingsManager)
-DEFINE_CONTEXTUAL_VARIABLE(ImplementationVisitor::LabelBindingsManager)
-DEFINE_CONTEXTUAL_VARIABLE(ImplementationVisitor::CurrentCallable)
-DEFINE_CONTEXTUAL_VARIABLE(ImplementationVisitor::CurrentFileStreams)
-DEFINE_CONTEXTUAL_VARIABLE(ImplementationVisitor::CurrentReturnValue)
 
 bool IsCompatibleSignature(const Signature& sig, const TypeVector& types,
                            size_t label_count) {

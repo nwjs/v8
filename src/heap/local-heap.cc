@@ -158,7 +158,7 @@ void LocalHeap::SetUpSharedMarking() {
   Isolate* isolate = heap_->isolate();
 
   if (isolate->has_shared_space() && !isolate->is_shared_space_isolate()) {
-    if (isolate->shared_heap_isolate()
+    if (isolate->shared_space_isolate()
             ->heap()
             ->incremental_marking()
             ->IsMarking()) {
@@ -486,6 +486,11 @@ void LocalHeap::NotifyObjectSizeChange(
   heap()->NotifyObjectSizeChange(object, old_size, new_size,
                                  clear_recorded_slots,
                                  update_invalidated_object_size);
+}
+
+void LocalHeap::WeakenDescriptorArrays(
+    GlobalHandleVector<DescriptorArray> strong_descriptor_arrays) {
+  AsHeap()->WeakenDescriptorArrays(std::move(strong_descriptor_arrays));
 }
 
 }  // namespace internal

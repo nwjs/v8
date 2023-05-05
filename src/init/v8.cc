@@ -92,6 +92,7 @@ void AdvanceStartupState(V8StartupState expected_next_state) {
 V8_DECLARE_ONCE(init_snapshot_once);
 #endif
 
+// static
 base::Thread::LocalStorageKey platform_tls_key_;
 void V8::SetTLSPlatform(v8::Platform* platform) {
   base::Thread::SetThreadLocal(platform_tls_key_, platform);
@@ -121,6 +122,16 @@ void V8::InitializePlatform(v8::Platform* platform) {
   CppHeap::InitializeOncePerProcess();
 
   AdvanceStartupState(V8StartupState::kPlatformInitialized);
+}
+
+// static
+void V8::InitializePlatformForTesting(v8::Platform* platform) {
+  if (v8_startup_state_ != V8StartupState::kIdle) {
+    FATAL(
+        "The platform was initialized before. Note that running multiple tests "
+        "in the same process is not supported.");
+  }
+  V8::InitializePlatform(platform);
 }
 
 #define DISABLE_FLAG(flag)                                                    \

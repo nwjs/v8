@@ -29,6 +29,8 @@
 namespace v8 {
 namespace internal {
 
+// The maximum size of the code range s.t. pc-relative calls are possible
+// between all Code objects in the range.
 constexpr size_t kMaxPCRelativeCodeRangeInMB = 4096;
 
 // Number of registers
@@ -39,9 +41,8 @@ const int kNumDoubleRegisters = 16;
 
 const int kNoRegister = -1;
 
-// Actual value of root register is offset from the root array's start
+// The actual value of the kRootRegister is offset from the IsolateData's start
 // to take advantage of negative displacement values.
-// TODO(sigurds): Choose best value.
 constexpr int kRootRegisterBias = 128;
 
 // sign-extend the least significant 16-bits of value <imm>

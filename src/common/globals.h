@@ -71,7 +71,9 @@ namespace internal {
 
 // Determine whether the architecture uses an embedded constant pool
 // (contiguous constant pool embedded in code object).
-#if V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_PPC64
+// Need to temporary disable the constant pool on PPC, more details can be found
+// under https://crrev.com/c/4341976.
+#if 0 && (V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_PPC64)
 #define V8_EMBEDDED_CONSTANT_POOL_BOOL true
 #else
 #define V8_EMBEDDED_CONSTANT_POOL_BOOL false
@@ -122,10 +124,10 @@ namespace internal {
 #define V8_CAN_CREATE_SHARED_HEAP_BOOL false
 #endif
 
-#if defined(V8_STATIC_ROOTS)
-#define V8_STATIC_ROOTS_BOOL true
+#ifdef V8_STATIC_ROOT_GENERATION
+#define V8_STATIC_ROOT_GENERATION_BOOL true
 #else
-#define V8_STATIC_ROOTS_BOOL false
+#define V8_STATIC_ROOT_GENERATION_BOOL false
 #endif
 
 #ifdef V8_ENABLE_SANDBOX
@@ -296,6 +298,12 @@ const size_t kShortBuiltinCallsOldSpaceSizeThreshold = size_t{2} * GB;
 #define V8_SFI_HAS_UNIQUE_ID true
 #else
 #define V8_SFI_HAS_UNIQUE_ID false
+#endif
+
+#if V8_SFI_HAS_UNIQUE_ID && TAGGED_SIZE_8_BYTES
+#define V8_SFI_NEEDS_PADDING true
+#else
+#define V8_SFI_NEEDS_PADDING false
 #endif
 
 #if defined(V8_OS_WIN) && defined(V8_TARGET_ARCH_X64)
@@ -1576,9 +1584,18 @@ inline bool IsDeclaredVariableMode(VariableMode mode) {
   return mode <= VariableMode::kVar;
 }
 
-inline bool IsPrivateMethodOrAccessorVariableMode(VariableMode mode) {
-  return mode >= VariableMode::kPrivateMethod &&
+inline bool IsPrivateAccessorVariableMode(VariableMode mode) {
+  return mode >= VariableMode::kPrivateSetterOnly &&
          mode <= VariableMode::kPrivateGetterAndSetter;
+}
+
+inline bool IsPrivateMethodVariableMode(VariableMode mode) {
+  return mode == VariableMode::kPrivateMethod;
+}
+
+inline bool IsPrivateMethodOrAccessorVariableMode(VariableMode mode) {
+  return IsPrivateMethodVariableMode(mode) ||
+         IsPrivateAccessorVariableMode(mode);
 }
 
 inline bool IsSerializableVariableMode(VariableMode mode) {
@@ -2138,6 +2155,7 @@ class PtrComprCageBase {
 #else
 class PtrComprCageBase {
  public:
+  explicit constexpr PtrComprCageBase(Address address) {}
   PtrComprCageBase() = default;
   // NOLINTNEXTLINE
   PtrComprCageBase(const Isolate* isolate) {}

@@ -1985,6 +1985,31 @@ void WasmGenerator::Generate<kS128>(DataRange* data) {
       &WasmGenerator::simd_lane_memop<kExprS128Load16Lane, 8, kS128>,
       &WasmGenerator::simd_lane_memop<kExprS128Load32Lane, 4, kS128>,
       &WasmGenerator::simd_lane_memop<kExprS128Load64Lane, 2, kS128>,
+
+      &WasmGenerator::op_with_prefix<kExprI8x16RelaxedSwizzle, kS128, kS128>,
+      &WasmGenerator::op_with_prefix<kExprI8x16RelaxedLaneSelect, kS128, kS128,
+                                     kS128>,
+      &WasmGenerator::op_with_prefix<kExprI16x8RelaxedLaneSelect, kS128, kS128,
+                                     kS128>,
+      &WasmGenerator::op_with_prefix<kExprI32x4RelaxedLaneSelect, kS128, kS128,
+                                     kS128>,
+      &WasmGenerator::op_with_prefix<kExprI64x2RelaxedLaneSelect, kS128, kS128,
+                                     kS128>,
+      &WasmGenerator::op_with_prefix<kExprF32x4Qfma, kS128, kS128, kS128>,
+      &WasmGenerator::op_with_prefix<kExprF32x4Qfms, kS128, kS128, kS128>,
+      &WasmGenerator::op_with_prefix<kExprF64x2Qfma, kS128, kS128, kS128>,
+      &WasmGenerator::op_with_prefix<kExprF64x2Qfms, kS128, kS128, kS128>,
+      &WasmGenerator::op_with_prefix<kExprF32x4RelaxedMin, kS128, kS128>,
+      &WasmGenerator::op_with_prefix<kExprF32x4RelaxedMax, kS128, kS128>,
+      &WasmGenerator::op_with_prefix<kExprF64x2RelaxedMin, kS128, kS128>,
+      &WasmGenerator::op_with_prefix<kExprF64x2RelaxedMax, kS128, kS128>,
+      &WasmGenerator::op_with_prefix<kExprI32x4RelaxedTruncF32x4S, kS128>,
+      &WasmGenerator::op_with_prefix<kExprI32x4RelaxedTruncF32x4U, kS128>,
+      &WasmGenerator::op_with_prefix<kExprI32x4RelaxedTruncF64x2SZero, kS128>,
+      &WasmGenerator::op_with_prefix<kExprI32x4RelaxedTruncF64x2UZero, kS128>,
+      &WasmGenerator::op_with_prefix<kExprI16x8DotI8x16I7x16S, kS128, kS128>,
+      &WasmGenerator::op_with_prefix<kExprI32x4DotI8x16I7x16AddS, kS128, kS128,
+                                     kS128>,
   };
 
   GenerateOneOf(alternatives, data);
@@ -2292,11 +2317,12 @@ FunctionSig* GenerateSig(Zone* zone, DataRange* data, SigKind sig_kind,
   return builder.Build();
 }
 
-WasmInitExpr GenerateInitExpr(Zone* zone, WasmModuleBuilder* builder,
-                              ValueType type,
+WasmInitExpr GenerateInitExpr(Zone* zone, DataRange& range,
+                              WasmModuleBuilder* builder, ValueType type,
                               uint32_t num_struct_and_array_types);
 
-WasmInitExpr GenerateStructNewInitExpr(Zone* zone, WasmModuleBuilder* builder,
+WasmInitExpr GenerateStructNewInitExpr(Zone* zone, DataRange& range,
+                                       WasmModuleBuilder* builder,
                                        uint32_t index,
                                        uint32_t num_struct_and_array_types) {
   const StructType* struct_type = builder->GetStructType(index);
@@ -2304,25 +2330,62 @@ WasmInitExpr GenerateStructNewInitExpr(Zone* zone, WasmModuleBuilder* builder,
       zone->New<ZoneVector<WasmInitExpr>>(zone);
   int field_count = struct_type->field_count();
   for (int field_index = 0; field_index < field_count; field_index++) {
-    elements->push_back(GenerateInitExpr(zone, builder,
+    elements->push_back(GenerateInitExpr(zone, range, builder,
                                          struct_type->field(field_index),
                                          num_struct_and_array_types));
   }
   return WasmInitExpr::StructNew(index, elements);
 }
 
-WasmInitExpr GenerateInitExpr(Zone* zone, WasmModuleBuilder* builder,
-                              ValueType type,
+// TODO(manoskouk): Generate a variety of expressions for all cases.
+WasmInitExpr GenerateInitExpr(Zone* zone, DataRange& range,
+                              WasmModuleBuilder* builder, ValueType type,
                               uint32_t num_struct_and_array_types) {
   switch (type.kind()) {
     case kRefNull:
       return WasmInitExpr::RefNullConst(type.heap_type().representation());
     case kI8:
     case kI16:
-    case kI32:
-      return WasmInitExpr(int32_t{0});
-    case kI64:
-      return WasmInitExpr(int64_t{0});
+    case kI32: {
+      // 50% to generate a constant, 50% to generate a binary operator.
+      byte choice = range.get<byte>() % 6;
+      switch (choice) {
+        case 0:
+        case 1:
+        case 2:
+          return WasmInitExpr(range.get<int32_t>());
+        default:
+          WasmInitExpr::Operator op = choice == 3   ? WasmInitExpr::kI32Add
+                                      : choice == 4 ? WasmInitExpr::kI32Sub
+                                                    : WasmInitExpr::kI32Mul;
+          return WasmInitExpr::Binop(
+              zone, op,
+              GenerateInitExpr(zone, range, builder, kWasmI32,
+                               num_struct_and_array_types),
+              GenerateInitExpr(zone, range, builder, kWasmI32,
+                               num_struct_and_array_types));
+      }
+    }
+    case kI64: {
+      // 50% to generate a constant, 50% to generate a binary operator.
+      byte choice = range.get<byte>() % 6;
+      switch (choice) {
+        case 0:
+        case 1:
+        case 2:
+          return WasmInitExpr(range.get<int64_t>());
+        default:
+          WasmInitExpr::Operator op = choice == 3   ? WasmInitExpr::kI64Add
+                                      : choice == 4 ? WasmInitExpr::kI64Sub
+                                                    : WasmInitExpr::kI64Mul;
+          return WasmInitExpr::Binop(
+              zone, op,
+              GenerateInitExpr(zone, range, builder, kWasmI64,
+                               num_struct_and_array_types),
+              GenerateInitExpr(zone, range, builder, kWasmI64,
+                               num_struct_and_array_types));
+      }
+    }
     case kF32:
       return WasmInitExpr(0.0f);
     case kF64:
@@ -2339,7 +2402,7 @@ WasmInitExpr GenerateInitExpr(Zone* zone, WasmModuleBuilder* builder,
           // We materialize all these types with a struct because they are all
           // its supertypes.
           DCHECK(builder->IsStructType(0));
-          return GenerateStructNewInitExpr(zone, builder, 0,
+          return GenerateStructNewInitExpr(zone, range, builder, 0,
                                            num_struct_and_array_types);
         }
         case HeapType::kFunc:
@@ -2349,15 +2412,16 @@ WasmInitExpr GenerateInitExpr(Zone* zone, WasmModuleBuilder* builder,
         default: {
           uint32_t index = type.ref_index();
           if (builder->IsStructType(index)) {
-            return GenerateStructNewInitExpr(zone, builder, index,
+            return GenerateStructNewInitExpr(zone, range, builder, index,
                                              num_struct_and_array_types);
           }
           if (builder->IsArrayType(index)) {
             ZoneVector<WasmInitExpr>* elements =
                 zone->New<ZoneVector<WasmInitExpr>>(zone);
-            elements->push_back(GenerateInitExpr(
-                zone, builder, builder->GetArrayType(index)->element_type(),
-                num_struct_and_array_types));
+            elements->push_back(
+                GenerateInitExpr(zone, range, builder,
+                                 builder->GetArrayType(index)->element_type(),
+                                 num_struct_and_array_types));
             return WasmInitExpr::ArrayNewFixed(index, elements);
           }
           if (builder->IsSignature(index)) {
@@ -2486,7 +2550,7 @@ class WasmCompileFuzzer : public WasmExecutionFuzzer {
 
       builder.AddGlobal(
           type, mutability,
-          GenerateInitExpr(zone, &builder, type,
+          GenerateInitExpr(zone, range, &builder, type,
                            static_cast<uint32_t>(num_structs + num_arrays)));
       globals.push_back(type);
       if (mutability) mutable_globals.push_back(static_cast<uint8_t>(i));
@@ -2551,6 +2615,7 @@ class WasmCompileFuzzer : public WasmExecutionFuzzer {
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   constexpr bool require_valid = true;
+  EXPERIMENTAL_FLAG_SCOPE(relaxed_simd);
   WasmCompileFuzzer().FuzzWasmModule({data, size}, require_valid);
   return 0;
 }

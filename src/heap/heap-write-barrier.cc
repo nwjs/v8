@@ -26,7 +26,7 @@ MarkingBarrier* WriteBarrier::CurrentMarkingBarrier(
   DCHECK_NOT_NULL(marking_barrier);
 #if DEBUG
   if (!verification_candidate.is_null() &&
-      !verification_candidate.InSharedHeap()) {
+      !verification_candidate.InAnySharedSpace()) {
     Heap* host_heap =
         MemoryChunk::FromHeapObject(verification_candidate)->heap();
     LocalHeap* local_heap = LocalHeap::Current();
@@ -68,10 +68,9 @@ void WriteBarrier::MarkingSlow(InstructionStream host, RelocInfo* reloc_info,
   marking_barrier->Write(host, reloc_info, value);
 }
 
-void WriteBarrier::SharedSlow(InstructionStream host, RelocInfo* reloc_info,
-                              HeapObject value) {
+void WriteBarrier::SharedSlow(RelocInfo* reloc_info, HeapObject value) {
   MarkCompactCollector::RecordRelocSlotInfo info =
-      MarkCompactCollector::ProcessRelocInfo(host, reloc_info, value);
+      MarkCompactCollector::ProcessRelocInfo(reloc_info, value);
 
   base::MutexGuard write_scope(info.memory_chunk->mutex());
   RememberedSet<OLD_TO_SHARED>::InsertTyped(info.memory_chunk, info.slot_type,
@@ -112,7 +111,7 @@ int WriteBarrier::MarkingFromCode(Address raw_host, Address raw_slot) {
   // current isolate is enabled. However, we might still reach objects in the
   // shared space but only from the shared space isolate (= the main isolate).
   MarkingBarrier* barrier = CurrentMarkingBarrier(host);
-  DCHECK_IMPLIES(host.InSharedWritableHeap(),
+  DCHECK_IMPLIES(host.InWritableSharedSpace(),
                  barrier->heap()->isolate()->is_shared_space_isolate());
   barrier->AssertMarkingIsActivated();
 #endif  // DEBUG
@@ -128,7 +127,7 @@ int WriteBarrier::SharedMarkingFromCode(Address raw_host, Address raw_slot) {
   Address raw_value = (*slot).ptr();
   MaybeObject value(raw_value);
 
-  DCHECK(host.InSharedWritableHeap());
+  DCHECK(host.InWritableSharedSpace());
 
 #if DEBUG
   Heap* heap = MemoryChunk::FromHeapObject(host)->heap();
@@ -152,7 +151,7 @@ int WriteBarrier::SharedMarkingFromCode(Address raw_host, Address raw_slot) {
 int WriteBarrier::SharedFromCode(Address raw_host, Address raw_slot) {
   HeapObject host = HeapObject::cast(Object(raw_host));
 
-  if (!host.InSharedWritableHeap()) {
+  if (!host.InWritableSharedSpace()) {
     Heap::SharedHeapBarrierSlow(host, raw_slot);
   }
 
@@ -164,17 +163,7 @@ int WriteBarrier::SharedFromCode(Address raw_host, Address raw_slot) {
 bool WriteBarrier::IsImmortalImmovableHeapObject(HeapObject object) {
   BasicMemoryChunk* basic_chunk = BasicMemoryChunk::FromHeapObject(object);
   // All objects in readonly space are immortal and immovable.
-  if (basic_chunk->InReadOnlySpace()) return true;
-  MemoryChunk* chunk = MemoryChunk::FromHeapObject(object);
-  // There are also objects in "regular" spaces which are immortal and
-  // immovable. Objects on a page that can get compacted are movable and can be
-  // filtered out.
-  if (!chunk->IsFlagSet(MemoryChunk::NEVER_EVACUATE)) return false;
-  // Builtins don't have InstructionStream objects (instead, they point
-  // directly into off-heap code streams).
-  DCHECK_IMPLIES(object.IsInstructionStream(),
-                 !InstructionStream::cast(object).is_builtin());
-  return false;
+  return basic_chunk->InReadOnlySpace();
 }
 #endif
 

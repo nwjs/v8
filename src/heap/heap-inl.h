@@ -106,8 +106,8 @@ bool Heap::IsMainThread() const {
 
 bool Heap::IsSharedMainThread() const {
   if (!isolate()->has_shared_space()) return false;
-  Isolate* shared_heap_isolate = isolate()->shared_heap_isolate();
-  return shared_heap_isolate->thread_id() == ThreadId::Current();
+  Isolate* shared_space_isolate = isolate()->shared_space_isolate();
+  return shared_space_isolate->thread_id() == ThreadId::Current();
 }
 
 int64_t Heap::external_memory() { return external_memory_.total(); }
@@ -139,7 +139,7 @@ FixedArray Heap::single_character_string_table() {
 #define DCHECK_STATIC_ROOT(obj, name)                                        \
   if constexpr (RootsTable::IsReadOnly(RootIndex::k##name) &&                \
                 RootIndex::k##name != RootIndex::kException) {               \
-    DCHECK_WITH_MSG(V8HeapCompressionScheme::CompressTagged(obj.ptr()) ==    \
+    DCHECK_WITH_MSG(V8HeapCompressionScheme::CompressObject(obj.ptr()) ==    \
                         StaticReadOnlyRootsPointerTable[static_cast<size_t>( \
                             RootIndex::k##name)],                            \
                     STATIC_ROOTS_FAILED_MSG);                                \
@@ -297,10 +297,10 @@ bool Heap::InYoungGeneration(HeapObject heap_object) {
 }
 
 // static
-bool Heap::InSharedWritableHeap(MaybeObject object) {
+bool Heap::InWritableSharedSpace(MaybeObject object) {
   HeapObject heap_object;
   return object->GetHeapObject(&heap_object) &&
-         heap_object.InSharedWritableHeap();
+         heap_object.InWritableSharedSpace();
 }
 
 // static

@@ -180,7 +180,7 @@ int main(int argc, char** argv) {
     }
     i::Handle<i::SharedFunctionInfo> func;
     maybe_func.ToHandle(&func);
-    cache = i::CodeSerializer::Serialize(func);
+    cache = i::CodeSerializer::Serialize(iso, func);
 
     uint8_t* buffer = i::NewArray<uint8_t>(cache->length);
     i::MemCopy(buffer, cache->data, cache->length);

@@ -769,9 +769,11 @@ void SemiSpaceNewSpace::MakeUnusedPagesInToSpaceIterable() {
 
   // Fix the current page, above the LAB.
   DCHECK_NOT_NULL(*it);
-  DCHECK((*it)->Contains(limit()));
-  heap()->CreateFillerObjectAt(limit(),
-                               static_cast<int>((*it)->area_end() - limit()));
+  if (limit() != (*it)->area_end()) {
+    DCHECK((*it)->Contains(limit()));
+    heap()->CreateFillerObjectAt(limit(),
+                                 static_cast<int>((*it)->area_end() - limit()));
+  }
 
   // Fix the remaining unused pages in the "to" semispace.
   for (Page* page = *(++it); page != nullptr; page = *(++it)) {
@@ -779,15 +781,6 @@ void SemiSpaceNewSpace::MakeUnusedPagesInToSpaceIterable() {
                                  static_cast<int>(page->area_size()));
   }
 }
-
-#ifdef V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
-void SemiSpaceNewSpace::ClearUnusedObjectStartBitmaps() {
-  if (!IsFromSpaceCommitted()) return;
-  for (Page* page : PageRange(from_space().first_page(), nullptr)) {
-    page->object_start_bitmap()->Clear();
-  }
-}
-#endif  // V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
 
 bool SemiSpaceNewSpace::ShouldBePromoted(Address address) const {
   Page* page = Page::FromAddress(address);
@@ -938,7 +931,7 @@ void PagedSpaceForNewSpace::Grow() {
 }
 
 bool PagedSpaceForNewSpace::StartShrinking() {
-  DCHECK_EQ(current_capacity_, target_capacity_);
+  DCHECK_GE(current_capacity_, target_capacity_);
   DCHECK(heap()->tracer()->IsInAtomicPause());
   size_t new_target_capacity =
       RoundUp(std::max(initial_capacity_, 2 * Size()), Page::kPageSize);
@@ -968,7 +961,8 @@ void PagedSpaceForNewSpace::UpdateInlineAllocationLimit() {
 
 size_t PagedSpaceForNewSpace::AddPage(Page* page) {
   current_capacity_ += Page::kPageSize;
-  DCHECK_LE(current_capacity_, target_capacity_);
+  DCHECK_IMPLIES(!force_allocation_success_,
+                 UsableCapacity() <= TotalCapacity());
   return PagedSpaceBase::AddPage(page);
 }
 
@@ -988,7 +982,7 @@ bool PagedSpaceForNewSpace::PreallocatePages() {
   while (current_capacity_ < target_capacity_) {
     if (!TryExpandImpl()) return false;
   }
-  DCHECK_EQ(current_capacity_, target_capacity_);
+  DCHECK_GE(current_capacity_, target_capacity_);
   return true;
 }
 
@@ -1030,6 +1024,27 @@ void PagedSpaceForNewSpace::RefillFreeList() {
     RefineAllocatedBytesAfterSweeping(p);
     RelinkFreeListCategories(p);
   }
+}
+
+bool PagedSpaceForNewSpace::AddPageBeyondCapacity(int size_in_bytes,
+                                                  AllocationOrigin origin) {
+  DCHECK(heap()->sweeper()->IsSweepingDoneForSpace(NEW_SPACE));
+  if (!force_allocation_success_ &&
+      ((UsableCapacity() >= TotalCapacity()) ||
+       (TotalCapacity() - UsableCapacity() < Page::kPageSize)))
+    return false;
+  if (!heap()->CanExpandOldGeneration(Size() + heap()->new_lo_space()->Size() +
+                                      Page::kPageSize)) {
+    // Assuming all of new space if alive, doing a full GC and promoting all
+    // objects should still succeed. Don't let new space grow if it means it
+    // will exceed the available size of old space.
+    return false;
+  }
+  DCHECK_IMPLIES(heap()->incremental_marking()->IsMarking(),
+                 heap()->incremental_marking()->IsMajorMarking());
+  if (!TryExpandImpl()) return false;
+  return TryAllocationFromFreeListMain(static_cast<size_t>(size_in_bytes),
+                                       origin);
 }
 
 // -----------------------------------------------------------------------------

@@ -113,7 +113,6 @@ enum class RefSerializationKind {
   BACKGROUND_SERIALIZED(BigInt)                                               \
   NEVER_SERIALIZED(CallHandlerInfo)                                           \
   NEVER_SERIALIZED(Cell)                                                      \
-  NEVER_SERIALIZED(InstructionStream)                                         \
   NEVER_SERIALIZED(Code)                                                      \
   NEVER_SERIALIZED(Context)                                                   \
   NEVER_SERIALIZED(DescriptorArray)                                           \
@@ -257,13 +256,13 @@ class OptionalRef {
   template <typename SRef, typename = typename std::enable_if<
                                std::is_convertible<SRef*, TRef*>::value>::type>
   // NOLINTNEXTLINE
-  V8_INLINE OptionalRef(OptionalRef<SRef> ref) : OptionalRef(ref.data_) {}
+  V8_INLINE OptionalRef(OptionalRef<SRef> ref) : data_(ref.data_) {}
 
   // Allow implicit upcasting from compatible refs.
   template <typename SRef, typename = typename std::enable_if<
                                std::is_convertible<SRef*, TRef*>::value>::type>
   // NOLINTNEXTLINE
-  V8_INLINE OptionalRef(SRef ref) : OptionalRef(ref.data_) {}
+  V8_INLINE OptionalRef(SRef ref) : data_(ref.data_) {}
 
   constexpr bool has_value() const { return data_ != nullptr; }
   constexpr explicit operator bool() const { return has_value(); }
@@ -962,26 +961,27 @@ class ScopeInfoRef : public HeapObjectRef {
   ScopeInfoRef OuterScopeInfo(JSHeapBroker* broker) const;
 };
 
-#define BROKER_SFI_FIELDS(V)                               \
-  V(int, internal_formal_parameter_count_with_receiver)    \
-  V(int, internal_formal_parameter_count_without_receiver) \
-  V(bool, IsDontAdaptArguments)                            \
-  V(bool, has_simple_parameters)                           \
-  V(bool, has_duplicate_parameters)                        \
-  V(int, function_map_index)                               \
-  V(FunctionKind, kind)                                    \
-  V(LanguageMode, language_mode)                           \
-  V(bool, native)                                          \
-  V(bool, HasBreakInfo)                                    \
-  V(bool, HasBuiltinId)                                    \
-  V(bool, construct_as_builtin)                            \
-  V(bool, HasBytecodeArray)                                \
-  V(int, StartPosition)                                    \
-  V(bool, is_compiled)                                     \
-  V(bool, IsUserJavaScript)                                \
-  V(bool, requires_instance_members_initializer)           \
-  IF_WASM(V, const wasm::WasmModule*, wasm_module)         \
-  IF_WASM(V, const wasm::FunctionSig*, wasm_function_signature)
+#define BROKER_SFI_FIELDS(V)                                    \
+  V(int, internal_formal_parameter_count_with_receiver)         \
+  V(int, internal_formal_parameter_count_without_receiver)      \
+  V(bool, IsDontAdaptArguments)                                 \
+  V(bool, has_simple_parameters)                                \
+  V(bool, has_duplicate_parameters)                             \
+  V(int, function_map_index)                                    \
+  V(FunctionKind, kind)                                         \
+  V(LanguageMode, language_mode)                                \
+  V(bool, native)                                               \
+  V(bool, HasBreakInfo)                                         \
+  V(bool, HasBuiltinId)                                         \
+  V(bool, construct_as_builtin)                                 \
+  V(bool, HasBytecodeArray)                                     \
+  V(int, StartPosition)                                         \
+  V(bool, is_compiled)                                          \
+  V(bool, IsUserJavaScript)                                     \
+  V(bool, requires_instance_members_initializer)                \
+  IF_WASM(V, const wasm::WasmModule*, wasm_module)              \
+  IF_WASM(V, const wasm::FunctionSig*, wasm_function_signature) \
+  IF_WASM(V, int, wasm_function_index)
 
 class V8_EXPORT_PRIVATE SharedFunctionInfoRef : public HeapObjectRef {
  public:
@@ -1102,15 +1102,6 @@ class JSGlobalProxyRef : public JSObjectRef {
   DEFINE_REF_CONSTRUCTOR(JSGlobalProxy, JSObjectRef)
 
   Handle<JSGlobalProxy> object() const;
-};
-
-class InstructionStreamRef : public HeapObjectRef {
- public:
-  DEFINE_REF_CONSTRUCTOR(InstructionStream, HeapObjectRef)
-
-  Handle<InstructionStream> object() const;
-
-  unsigned GetInlinedBytecodeSize() const;
 };
 
 class CodeRef : public HeapObjectRef {

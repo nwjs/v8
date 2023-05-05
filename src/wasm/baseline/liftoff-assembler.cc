@@ -269,6 +269,9 @@ class StackTransferRecipe {
   LiftoffRegList move_dst_regs_;
   LiftoffRegList load_dst_regs_;
   LiftoffAssembler* const asm_;
+  // Cache the last spill offset in case we need to spill for resolving move
+  // cycles.
+  int last_spill_offset_ = asm_->TopSpillOffset();
 
   RegisterMove* register_move(LiftoffRegister reg) {
     return reinterpret_cast<RegisterMove*>(&register_moves_) +
@@ -314,16 +317,15 @@ class StackTransferRecipe {
 
     // All remaining moves are parts of a cycle. Just spill the first one, then
     // process all remaining moves in that cycle. Repeat for all cycles.
-    int last_spill_offset = asm_->TopSpillOffset();
     while (!move_dst_regs_.is_empty()) {
       // TODO(clemensb): Use an unused register if available.
       LiftoffRegister dst = move_dst_regs_.GetFirstRegSet();
       RegisterMove* move = register_move(dst);
-      last_spill_offset += LiftoffAssembler::SlotSizeForType(move->kind);
+      last_spill_offset_ += LiftoffAssembler::SlotSizeForType(move->kind);
       LiftoffRegister spill_reg = move->src;
-      asm_->Spill(last_spill_offset, spill_reg, move->kind);
+      asm_->Spill(last_spill_offset_, spill_reg, move->kind);
       // Remember to reload into the destination register later.
-      LoadStackSlot(dst, last_spill_offset, move->kind);
+      LoadStackSlot(dst, last_spill_offset_, move->kind);
       ClearExecutedMove(dst);
     }
   }
@@ -729,14 +731,14 @@ LiftoffRegister LiftoffAssembler::PeekToRegister(int index,
 }
 
 void LiftoffAssembler::DropValues(int count) {
-  for (int i = 0; i < count; ++i) {
-    DCHECK(!cache_state_.stack_state.empty());
-    VarState slot = cache_state_.stack_state.back();
-    cache_state_.stack_state.pop_back();
+  DCHECK_GE(cache_state_.stack_state.size(), count);
+  for (VarState& slot :
+       base::VectorOf(cache_state_.stack_state.end() - count, count)) {
     if (slot.is_reg()) {
       cache_state_.dec_used(slot.reg());
     }
   }
+  cache_state_.stack_state.pop_back(count);
 }
 
 void LiftoffAssembler::DropExceptionValueAtOffset(int offset) {
@@ -1099,21 +1101,8 @@ void LiftoffAssembler::PrepareBuiltinCall(
 
 void LiftoffAssembler::PrepareCall(const ValueKindSig* sig,
                                    compiler::CallDescriptor* call_descriptor,
-                                   Register* target,
-                                   Register* target_instance) {
+                                   Register* target, Register target_instance) {
   uint32_t num_params = static_cast<uint32_t>(sig->parameter_count());
-
-  // Spill all cache slots which are not being used as parameters.
-  cache_state_.ClearAllCacheRegisters();
-  for (VarState* it = cache_state_.stack_state.end() - 1 - num_params;
-       it >= cache_state_.stack_state.begin() &&
-       !cache_state_.used_registers.is_empty();
-       --it) {
-    if (!it->is_reg()) continue;
-    Spill(it->offset(), it->reg(), it->kind());
-    cache_state_.dec_used(it->reg());
-    it->MakeStack();
-  }
 
   LiftoffStackSlots stack_slots(this);
   StackTransferRecipe stack_transfers(this);
@@ -1127,10 +1116,10 @@ void LiftoffAssembler::PrepareCall(const ValueKindSig* sig,
       instance_reg,
       Register::from_code(call_descriptor->GetInputLocation(1).AsRegister()));
   param_regs.set(instance_reg);
-  if (target_instance && *target_instance != instance_reg) {
+  if (target_instance == no_reg) target_instance = cache_state_.cached_instance;
+  if (target_instance != no_reg && target_instance != instance_reg) {
     stack_transfers.MoveRegister(LiftoffRegister(instance_reg),
-                                 LiftoffRegister(*target_instance),
-                                 kIntPtrKind);
+                                 LiftoffRegister(target_instance), kIntPtrKind);
   }
 
   int param_slots = static_cast<int>(call_descriptor->ParameterSlotCount());
@@ -1159,19 +1148,36 @@ void LiftoffAssembler::PrepareCall(const ValueKindSig* sig,
     }
   }
 
+  // After figuring out all register and stack moves, drop the parameter slots
+  // from the stack.
+  DropValues(num_params);
+
+  // Spill all remaining cache slots.
+  cache_state_.ClearAllCacheRegisters();
+  // Iterate backwards, spilling register slots until all registers are free.
+  if (!cache_state_.used_registers.is_empty()) {
+    for (auto* slot = cache_state_.stack_state.end() - 1;; --slot) {
+      DCHECK_LE(cache_state_.stack_state.begin(), slot);
+      if (!slot->is_reg()) continue;
+      Spill(slot->offset(), slot->reg(), slot->kind());
+      cache_state_.dec_used(slot->reg());
+      slot->MakeStack();
+      if (cache_state_.used_registers.is_empty()) break;
+    }
+  }
+  // All slots are either spilled on the stack, or hold constants now.
+  DCHECK(std::all_of(
+      cache_state_.stack_state.begin(), cache_state_.stack_state.end(),
+      [](const VarState& slot) { return slot.is_stack() || slot.is_const(); }));
+
   if (param_slots > 0) {
     stack_slots.Construct(param_slots);
   }
   // Execute the stack transfers before filling the instance register.
   stack_transfers.Execute();
-  // Pop parameters from the value stack.
-  cache_state_.stack_state.pop_back(num_params);
 
-  // Reset register use counters.
-  cache_state_.reset_used_registers();
-
-  // Reload the instance from the stack.
-  if (!target_instance) {
+  // Reload the instance from the stack if we do not have it in a register.
+  if (target_instance == no_reg) {
     LoadInstanceFromFrame(instance_reg);
   }
 }

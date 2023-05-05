@@ -11,6 +11,7 @@
 #include "src/heap/memory-chunk-inl.h"
 #include "src/heap/read-only-heap.h"
 #include "src/objects/code.h"
+#include "src/objects/descriptor-array.h"
 #include "src/objects/instance-type.h"
 #include "src/objects/js-array-buffer-inl.h"
 #include "src/objects/map.h"
@@ -42,7 +43,7 @@ Serializer::Serializer(Isolate* isolate, Snapshot::SerializerFlags flags)
       stack_(isolate->heap())
 #endif
 {
-#ifdef OBJECT_PRINT
+#ifdef VERBOSE_SERIALIZATION_STATISTICS
   if (v8_flags.serialization_statistics) {
     for (int space = 0; space < kNumberOfSnapshotSpaces; ++space) {
       // Value-initialized to 0.
@@ -50,7 +51,7 @@ Serializer::Serializer(Isolate* isolate, Snapshot::SerializerFlags flags)
       instance_type_size_[space] = std::make_unique<size_t[]>(kInstanceTypes);
     }
   }
-#endif  // OBJECT_PRINT
+#endif  // VERBOSE_SERIALIZATION_STATISTICS
 }
 
 #ifdef DEBUG
@@ -62,11 +63,11 @@ void Serializer::CountAllocation(Map map, int size, SnapshotSpace space) {
 
   const int space_number = static_cast<int>(space);
   allocation_size_[space_number] += size;
-#ifdef OBJECT_PRINT
+#ifdef VERBOSE_SERIALIZATION_STATISTICS
   int instance_type = map.instance_type();
   instance_type_count_[space_number][instance_type]++;
   instance_type_size_[space_number][instance_type] += size;
-#endif  // OBJECT_PRINT
+#endif  // VERBOSE_SERIALIZATION_STATISTICS
 }
 
 int Serializer::TotalAllocationSize() const {
@@ -77,39 +78,62 @@ int Serializer::TotalAllocationSize() const {
   return sum;
 }
 
+namespace {
+
+const char* ToString(SnapshotSpace space) {
+  switch (space) {
+    case SnapshotSpace::kReadOnlyHeap:
+      return "ReadOnlyHeap";
+    case SnapshotSpace::kOld:
+      return "Old";
+    case SnapshotSpace::kCode:
+      return "Code";
+  }
+}
+
+}  // namespace
+
 void Serializer::OutputStatistics(const char* name) {
   if (!v8_flags.serialization_statistics) return;
 
   PrintF("%s:\n", name);
+  if (!serializer_tracks_serialization_statistics()) {
+    PrintF("  <serialization statistics are not tracked>\n");
+    return;
+  }
 
   PrintF("  Spaces (bytes):\n");
 
-  for (int space = 0; space < kNumberOfSnapshotSpaces; space++) {
-    PrintF("%16s",
-           BaseSpace::GetSpaceName(static_cast<AllocationSpace>(space)));
+  static constexpr SnapshotSpace kAllSnapshotSpaces[] = {
+      SnapshotSpace::kReadOnlyHeap,
+      SnapshotSpace::kOld,
+      SnapshotSpace::kCode,
+  };
+
+  for (SnapshotSpace space : kAllSnapshotSpaces) {
+    PrintF("%16s", ToString(space));
   }
   PrintF("\n");
 
-  for (int space = 0; space < kNumberOfSnapshotSpaces; space++) {
-    PrintF("%16zu", allocation_size_[space]);
+  for (SnapshotSpace space : kAllSnapshotSpaces) {
+    PrintF("%16zu", allocation_size_[static_cast<int>(space)]);
   }
+  PrintF("\n");
 
-#ifdef OBJECT_PRINT
+#ifdef VERBOSE_SERIALIZATION_STATISTICS
   PrintF("  Instance types (count and bytes):\n");
-#define PRINT_INSTANCE_TYPE(Name)                                          \
-  for (int space = 0; space < kNumberOfSnapshotSpaces; ++space) {          \
-    if (instance_type_count_[space][Name]) {                               \
-      PrintF("%10d %10zu  %-10s %s\n", instance_type_count_[space][Name],  \
-             instance_type_size_[space][Name],                             \
-             BaseSpace::GetSpaceName(static_cast<AllocationSpace>(space)), \
-             #Name);                                                       \
-    }                                                                      \
+#define PRINT_INSTANCE_TYPE(Name)                                           \
+  for (SnapshotSpace space : kAllSnapshotSpaces) {                          \
+    const int space_i = static_cast<int>(space);                            \
+    if (instance_type_count_[space_i][Name]) {                              \
+      PrintF("%10d %10zu  %-10s %s\n", instance_type_count_[space_i][Name], \
+             instance_type_size_[space_i][Name], ToString(space), #Name);   \
+    }                                                                       \
   }
   INSTANCE_TYPE_LIST(PRINT_INSTANCE_TYPE)
 #undef PRINT_INSTANCE_TYPE
-#endif  // OBJECT_PRINT
-
   PrintF("\n");
+#endif  // VERBOSE_SERIALIZATION_STATISTICS
 }
 
 void Serializer::SerializeDeferredObjects() {
@@ -236,8 +260,8 @@ bool Serializer::SerializePendingObject(HeapObject obj) {
 }
 
 bool Serializer::ObjectIsBytecodeHandler(HeapObject obj) const {
-  if (!obj.IsInstructionStream()) return false;
-  return (InstructionStream::cast(obj).kind() == CodeKind::BYTECODE_HANDLER);
+  if (!obj.IsCode()) return false;
+  return (Code::cast(obj).kind() == CodeKind::BYTECODE_HANDLER);
 }
 
 void Serializer::PutRoot(RootIndex root) {
@@ -398,14 +422,19 @@ void Serializer::InitializeCodeAddressMap() {
 
 InstructionStream Serializer::CopyCode(InstructionStream code) {
   code_buffer_.clear();  // Clear buffer without deleting backing store.
+  // Add InstructionStream padding which is usually added by the allocator.
+  // While this doesn't guarantee the exact same alignment, it's enough to
+  // fulfill the alignment requirements of writes during relocation.
+  code_buffer_.resize(InstructionStream::kCodeAlignmentMinusCodeHeader);
   int size = code.CodeSize();
   code_buffer_.insert(code_buffer_.end(),
                       reinterpret_cast<byte*>(code.address()),
                       reinterpret_cast<byte*>(code.address() + size));
   // When pointer compression is enabled the checked cast will try to
   // decompress map field of off-heap InstructionStream object.
-  return InstructionStream::unchecked_cast(HeapObject::FromAddress(
-      reinterpret_cast<Address>(&code_buffer_.front())));
+  return InstructionStream::unchecked_cast(
+      HeapObject::FromAddress(reinterpret_cast<Address>(
+          &code_buffer_[InstructionStream::kCodeAlignmentMinusCodeHeader])));
 }
 
 void Serializer::ObjectSerializer::SerializePrologue(SnapshotSpace space,
@@ -846,8 +875,8 @@ void Serializer::ObjectSerializer::SerializeContent(Map map, int size) {
   HeapObject raw = *object_;
   UnlinkWeakNextScope unlink_weak_next(isolate()->heap(), raw);
   if (raw.IsInstructionStream()) {
-    // For code objects, perform a custom serialization.
-    SerializeCode(map, size);
+    // For InstructionStream objects, perform a custom serialization.
+    SerializeInstructionStream(map, size);
   } else {
     // For other objects, iterate references first.
     raw.IterateBody(map, size, this);
@@ -930,7 +959,7 @@ void Serializer::ObjectSerializer::VisitPointers(HeapObject host,
   }
 }
 
-void Serializer::ObjectSerializer::VisitCodePointer(HeapObject host,
+void Serializer::ObjectSerializer::VisitCodePointer(Code host,
                                                     CodeObjectSlot slot) {
   // A version of VisitPointers() customized for CodeObjectSlot.
   HandleScope scope(isolate());
@@ -1022,12 +1051,12 @@ class Serializer::ObjectSerializer::RelocInfoObjectPreSerializer {
   explicit RelocInfoObjectPreSerializer(Serializer* serializer)
       : serializer_(serializer) {}
 
-  void VisitEmbeddedPointer(InstructionStream host, RelocInfo* target) {
+  void VisitEmbeddedPointer(RelocInfo* target) {
     HeapObject object = target->target_object(isolate());
     serializer_->SerializeObject(handle(object, isolate()));
     num_serialized_objects_++;
   }
-  void VisitCodeTarget(InstructionStream host, RelocInfo* target) {
+  void VisitCodeTarget(RelocInfo* target) {
 #ifdef V8_TARGET_ARCH_ARM
     DCHECK(!RelocInfo::IsRelativeCodeTarget(target->rmode()));
 #endif
@@ -1037,9 +1066,9 @@ class Serializer::ObjectSerializer::RelocInfoObjectPreSerializer {
     num_serialized_objects_++;
   }
 
-  void VisitExternalReference(InstructionStream host, RelocInfo* rinfo) {}
-  void VisitInternalReference(InstructionStream host, RelocInfo* rinfo) {}
-  void VisitOffHeapTarget(InstructionStream host, RelocInfo* target) {}
+  void VisitExternalReference(RelocInfo* rinfo) {}
+  void VisitInternalReference(RelocInfo* rinfo) {}
+  void VisitOffHeapTarget(RelocInfo* target) {}
 
   int num_serialized_objects() const { return num_serialized_objects_; }
 
@@ -1050,8 +1079,7 @@ class Serializer::ObjectSerializer::RelocInfoObjectPreSerializer {
   int num_serialized_objects_ = 0;
 };
 
-void Serializer::ObjectSerializer::VisitEmbeddedPointer(InstructionStream host,
-                                                        RelocInfo* rinfo) {
+void Serializer::ObjectSerializer::VisitEmbeddedPointer(RelocInfo* rinfo) {
   // Target object should be pre-serialized by RelocInfoObjectPreSerializer, so
   // just track the pointer's existence as kTaggedSize in
   // bytes_processed_so_far_.
@@ -1060,8 +1088,7 @@ void Serializer::ObjectSerializer::VisitEmbeddedPointer(InstructionStream host,
   bytes_processed_so_far_ += kTaggedSize;
 }
 
-void Serializer::ObjectSerializer::VisitExternalReference(
-    InstructionStream host, RelocInfo* rinfo) {
+void Serializer::ObjectSerializer::VisitExternalReference(RelocInfo* rinfo) {
   Address target = rinfo->target_external_reference();
   DCHECK_NE(target,
             kNullAddress);  // InstructionStream does not reference null.
@@ -1072,14 +1099,12 @@ void Serializer::ObjectSerializer::VisitExternalReference(
                           kExternalPointerNullTag);
 }
 
-void Serializer::ObjectSerializer::VisitInternalReference(
-    InstructionStream host, RelocInfo* rinfo) {
-  Handle<InstructionStream> istream = Handle<InstructionStream>::cast(object_);
-  Address entry = istream->entry();
+void Serializer::ObjectSerializer::VisitInternalReference(RelocInfo* rinfo) {
+  Address entry = rinfo->code().InstructionStart();
   DCHECK_GE(rinfo->target_internal_reference(), entry);
   uintptr_t target_offset = rinfo->target_internal_reference() - entry;
   static_assert(InstructionStream::kOnHeapBodyIsContiguous);
-  DCHECK_LT(target_offset, istream->instruction_size());
+  DCHECK_LT(target_offset, rinfo->code().instruction_size());
   sink_->Put(kInternalReference, "InternalRef");
   sink_->PutInt(target_offset, "internal ref value");
 }
@@ -1123,8 +1148,7 @@ void Serializer::ObjectSerializer::VisitExternalPointer(
   }
 }
 
-void Serializer::ObjectSerializer::VisitOffHeapTarget(InstructionStream host,
-                                                      RelocInfo* rinfo) {
+void Serializer::ObjectSerializer::VisitOffHeapTarget(RelocInfo* rinfo) {
   static_assert(EmbeddedData::kTableSize == Builtins::kBuiltinCount);
 
   // Currently we don't serialize code that contains near builtin entries.
@@ -1141,8 +1165,7 @@ void Serializer::ObjectSerializer::VisitOffHeapTarget(InstructionStream host,
   sink_->PutInt(static_cast<int>(builtin), "builtin index");
 }
 
-void Serializer::ObjectSerializer::VisitCodeTarget(InstructionStream host,
-                                                   RelocInfo* rinfo) {
+void Serializer::ObjectSerializer::VisitCodeTarget(RelocInfo* rinfo) {
   // Target object should be pre-serialized by RelocInfoObjectPreSerializer, so
   // just track the pointer's existence as kTaggedSize in
   // bytes_processed_so_far_.
@@ -1212,11 +1235,12 @@ void Serializer::ObjectSerializer::OutputRawData(Address up_to) {
     } else if (object_->IsDescriptorArray(cage_base)) {
       // The number of marked descriptors field can be changed by GC
       // concurrently.
-      static byte field_value[2] = {0};
-      OutputRawWithCustomField(
-          sink_, object_start, base, bytes_to_output,
-          DescriptorArray::kRawNumberOfMarkedDescriptorsOffset,
-          sizeof(field_value), field_value);
+      const auto field_value = DescriptorArrayMarkingState::kInitialGCState;
+      static_assert(sizeof(field_value) == DescriptorArray::kSizeOfRawGcState);
+      OutputRawWithCustomField(sink_, object_start, base, bytes_to_output,
+                               DescriptorArray::kRawGcStateOffset,
+                               sizeof(field_value),
+                               reinterpret_cast<const byte*>(&field_value));
     } else if (object_->IsCode(cage_base)) {
       // code_entry_point field contains a raw value that will be recomputed
       // after deserialization, so write zeros to keep the snapshot
@@ -1242,7 +1266,8 @@ void Serializer::ObjectSerializer::OutputRawData(Address up_to) {
   }
 }
 
-void Serializer::ObjectSerializer::SerializeCode(Map map, int size) {
+void Serializer::ObjectSerializer::SerializeInstructionStream(Map map,
+                                                              int size) {
   static const int kWipeOutModeMask =
       RelocInfo::ModeMask(RelocInfo::CODE_TARGET) |
       RelocInfo::ModeMask(RelocInfo::FULL_EMBEDDED_OBJECT) |
@@ -1253,33 +1278,38 @@ void Serializer::ObjectSerializer::SerializeCode(Map map, int size) {
       RelocInfo::ModeMask(RelocInfo::OFF_HEAP_TARGET);
 
   DCHECK_EQ(HeapObject::kHeaderSize, bytes_processed_so_far_);
-  Handle<InstructionStream> on_heap_code =
+  Handle<InstructionStream> on_heap_istream =
       Handle<InstructionStream>::cast(object_);
+  Handle<Code> code = handle(on_heap_istream->code(kAcquireLoad), isolate_);
 
   // With enabled pointer compression normal accessors no longer work for
   // off-heap objects, so we have to get the relocation info data via the
-  // on-heap code object.
-  ByteArray relocation_info = on_heap_code->unchecked_relocation_info();
+  // on-heap InstructionStream object.
+  // TODO(v8:13784): we can clean this up since we moved all data fields from
+  // InstructionStream to Code
+  ByteArray relocation_info = code->unchecked_relocation_info();
 
-  // To make snapshots reproducible, we make a copy of the code object
-  // and wipe all pointers in the copy, which we then serialize.
-  InstructionStream off_heap_code = serializer_->CopyCode(*on_heap_code);
-  for (RelocIterator it(off_heap_code, relocation_info, kWipeOutModeMask);
+  // To make snapshots reproducible, we make a copy of the InstructionStream
+  // object and wipe all pointers in the copy, which we then serialize.
+  InstructionStream off_heap_istream = serializer_->CopyCode(*on_heap_istream);
+  for (RelocIterator it(*code, off_heap_istream, relocation_info,
+                        code->constant_pool(), kWipeOutModeMask);
        !it.done(); it.next()) {
     RelocInfo* rinfo = it.rinfo();
     rinfo->WipeOut();
   }
   // We need to wipe out the header fields *after* wiping out the
   // relocations, because some of these fields are needed for the latter.
-  off_heap_code.WipeOutHeader();
+  off_heap_istream.WipeOutHeader();
 
   // Initially skip serializing the code header. We'll serialize it after the
   // InstructionStream body, so that the various fields the InstructionStream
   // needs for iteration are already valid.
+  // TODO(v8:13784): rename to kInstructionStreamBody
   sink_->Put(kCodeBody, "kCodeBody");
 
   // Now serialize the wiped off-heap InstructionStream, as length + data.
-  Address start = off_heap_code.address() + InstructionStream::kDataStart;
+  Address start = off_heap_istream.address() + InstructionStream::kDataStart;
   int bytes_to_output = size - InstructionStream::kDataStart;
   DCHECK(IsAligned(bytes_to_output, kTaggedSize));
   int tagged_to_output = bytes_to_output / kTaggedSize;
@@ -1298,12 +1328,13 @@ void Serializer::ObjectSerializer::SerializeCode(Map map, int size) {
   // InstructionStream::BodyDescriptor here as we don't yet want to walk the
   // RelocInfos.
   DCHECK_EQ(HeapObject::kHeaderSize, bytes_processed_so_far_);
-  VisitPointers(*on_heap_code, on_heap_code->RawField(HeapObject::kHeaderSize),
-                on_heap_code->RawField(InstructionStream::kDataStart));
+  VisitPointers(*on_heap_istream,
+                on_heap_istream->RawField(HeapObject::kHeaderSize),
+                on_heap_istream->RawField(InstructionStream::kDataStart));
   DCHECK_EQ(bytes_processed_so_far_, InstructionStream::kDataStart);
 
   // Now serialize RelocInfos. We can't allocate during a RelocInfo walk during
-  // deserualization, so we have two passes for RelocInfo serialization:
+  // deserialization, so we have two passes for RelocInfo serialization:
   //   1. A pre-serializer which serializes all allocatable objects in the
   //      RelocInfo, followed by a kSynchronize bytecode, and
   //   2. A walk the RelocInfo with this serializer, serializing any objects
@@ -1314,7 +1345,8 @@ void Serializer::ObjectSerializer::SerializeCode(Map map, int size) {
   // TODO(leszeks): We only really need to pre-serialize objects which need
   // serialization, i.e. no backrefs or roots.
   RelocInfoObjectPreSerializer pre_serializer(serializer_);
-  for (RelocIterator it(*on_heap_code, relocation_info,
+  for (RelocIterator it(*code, *on_heap_istream, relocation_info,
+                        code->constant_pool(),
                         InstructionStream::BodyDescriptor::kRelocModeMask);
        !it.done(); it.next()) {
     it.rinfo()->Visit(&pre_serializer);
@@ -1325,7 +1357,8 @@ void Serializer::ObjectSerializer::SerializeCode(Map map, int size) {
   // Finally serialize all RelocInfo objects in the on-heap InstructionStream,
   // knowing that we will not do a recursive serialization.
   // TODO(leszeks): Add a scope that DCHECKs this.
-  for (RelocIterator it(*on_heap_code, relocation_info,
+  for (RelocIterator it(*code, *on_heap_istream, relocation_info,
+                        code->constant_pool(),
                         InstructionStream::BodyDescriptor::kRelocModeMask);
        !it.done(); it.next()) {
     it.rinfo()->Visit(this);

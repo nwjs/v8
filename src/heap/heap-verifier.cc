@@ -62,9 +62,9 @@ class VerifyPointersVisitor : public ObjectVisitorWithCageBases,
                      ObjectSlot end) override;
   void VisitPointers(HeapObject host, MaybeObjectSlot start,
                      MaybeObjectSlot end) override;
-  void VisitCodePointer(HeapObject host, CodeObjectSlot slot) override;
-  void VisitCodeTarget(InstructionStream host, RelocInfo* rinfo) override;
-  void VisitEmbeddedPointer(InstructionStream host, RelocInfo* rinfo) override;
+  void VisitCodePointer(Code host, CodeObjectSlot slot) override;
+  void VisitCodeTarget(RelocInfo* rinfo) override;
+  void VisitEmbeddedPointer(RelocInfo* rinfo) override;
 
   void VisitRootPointers(Root root, const char* description,
                          FullObjectSlot start, FullObjectSlot end) override;
@@ -97,8 +97,7 @@ void VerifyPointersVisitor::VisitPointers(HeapObject host,
   VerifyPointers(host, start, end);
 }
 
-void VerifyPointersVisitor::VisitCodePointer(HeapObject host,
-                                             CodeObjectSlot slot) {
+void VerifyPointersVisitor::VisitCodePointer(Code host, CodeObjectSlot slot) {
   Object maybe_code = slot.load(code_cage_base());
   HeapObject code;
   // The slot might contain smi during Code creation.
@@ -164,15 +163,13 @@ void VerifyPointersVisitor::VerifyPointers(HeapObject host,
   VerifyPointersImpl(start, end);
 }
 
-void VerifyPointersVisitor::VisitCodeTarget(InstructionStream host,
-                                            RelocInfo* rinfo) {
+void VerifyPointersVisitor::VisitCodeTarget(RelocInfo* rinfo) {
   InstructionStream target =
       InstructionStream::FromTargetAddress(rinfo->target_address());
   VerifyHeapObjectImpl(target);
 }
 
-void VerifyPointersVisitor::VisitEmbeddedPointer(InstructionStream host,
-                                                 RelocInfo* rinfo) {
+void VerifyPointersVisitor::VisitEmbeddedPointer(RelocInfo* rinfo) {
   VerifyHeapObjectImpl(rinfo->target_object(cage_base()));
 }
 
@@ -362,14 +359,6 @@ void HeapVerification::VerifyPage(const BasicMemoryChunk* chunk) {
 
 void HeapVerification::VerifyPageDone(const BasicMemoryChunk* chunk) {
   CHECK_EQ(chunk, *current_chunk_);
-
-#ifdef V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
-  if (!chunk->InReadOnlySpace()) {
-    const MemoryChunk* memory_chunk = MemoryChunk::cast(chunk);
-    memory_chunk->object_start_bitmap()->Verify();
-  }
-#endif  // V8_ENABLE_INNER_POINTER_RESOLUTION_OSB
-
   current_chunk_.reset();
 }
 
@@ -485,17 +474,18 @@ class SlotVerifyingVisitor : public ObjectVisitorWithCageBases {
     }
   }
 
-  void VisitCodePointer(HeapObject host, CodeObjectSlot slot) override {
+  void VisitCodePointer(Code host, CodeObjectSlot slot) override {
     if (ShouldHaveBeenRecorded(
             host, MaybeObject::FromObject(slot.load(code_cage_base())))) {
       CHECK_GT(untyped_->count(slot.address()), 0);
     }
   }
 
-  void VisitCodeTarget(InstructionStream host, RelocInfo* rinfo) override {
+  void VisitCodeTarget(RelocInfo* rinfo) override {
     Object target =
         InstructionStream::FromTargetAddress(rinfo->target_address());
-    if (ShouldHaveBeenRecorded(host, MaybeObject::FromObject(target))) {
+    if (ShouldHaveBeenRecorded(rinfo->instruction_stream(),
+                               MaybeObject::FromObject(target))) {
       CHECK(InTypedSet(SlotType::kCodeEntry, rinfo->pc()) ||
             (rinfo->IsInConstantPool() &&
              InTypedSet(SlotType::kConstPoolCodeEntry,
@@ -503,9 +493,10 @@ class SlotVerifyingVisitor : public ObjectVisitorWithCageBases {
     }
   }
 
-  void VisitEmbeddedPointer(InstructionStream host, RelocInfo* rinfo) override {
+  void VisitEmbeddedPointer(RelocInfo* rinfo) override {
     Object target = rinfo->target_object(cage_base());
-    if (ShouldHaveBeenRecorded(host, MaybeObject::FromObject(target))) {
+    if (ShouldHaveBeenRecorded(rinfo->instruction_stream(),
+                               MaybeObject::FromObject(target))) {
       CHECK(InTypedSet(SlotType::kEmbeddedObjectFull, rinfo->pc()) ||
             InTypedSet(SlotType::kEmbeddedObjectCompressed, rinfo->pc()) ||
             (rinfo->IsInConstantPool() &&
@@ -574,8 +565,8 @@ class OldToSharedSlotVerifyingVisitor : public SlotVerifyingVisitor {
       : SlotVerifyingVisitor(isolate, untyped, typed) {}
 
   bool ShouldHaveBeenRecorded(HeapObject host, MaybeObject target) override {
-    return target->IsStrongOrWeak() && Heap::InSharedWritableHeap(target) &&
-           !Heap::InYoungGeneration(host) && !host.InSharedWritableHeap();
+    return target->IsStrongOrWeak() && Heap::InWritableSharedSpace(target) &&
+           !Heap::InYoungGeneration(host) && !host.InWritableSharedSpace();
   }
 };
 
@@ -615,20 +606,16 @@ class SlotCollectingVisitor final : public ObjectVisitor {
     }
   }
 
-  void VisitCodePointer(HeapObject host, CodeObjectSlot slot) override {
+  void VisitCodePointer(Code host, CodeObjectSlot slot) override {
     CHECK(V8_EXTERNAL_CODE_SPACE_BOOL);
 #ifdef V8_EXTERNAL_CODE_SPACE
     code_slots_.push_back(slot);
 #endif
   }
 
-  void VisitCodeTarget(InstructionStream host, RelocInfo* rinfo) final {
-    UNREACHABLE();
-  }
+  void VisitCodeTarget(RelocInfo* rinfo) final { UNREACHABLE(); }
 
-  void VisitEmbeddedPointer(InstructionStream host, RelocInfo* rinfo) override {
-    UNREACHABLE();
-  }
+  void VisitEmbeddedPointer(RelocInfo* rinfo) override { UNREACHABLE(); }
 
   void VisitMapPointer(HeapObject object) override {}  // do nothing by default
 
@@ -674,9 +661,12 @@ void HeapVerification::VerifyRememberedSetFor(HeapObject object) {
       isolate(), &old_to_shared, &typed_old_to_shared);
   object.IterateBody(cage_base_, &old_to_shared_visitor);
 
-  if (object.InSharedWritableHeap()) {
+  if (object.InWritableSharedSpace()) {
     CHECK_NULL(chunk->slot_set<OLD_TO_SHARED>());
     CHECK_NULL(chunk->typed_slot_set<OLD_TO_SHARED>());
+
+    CHECK_NULL(chunk->slot_set<OLD_TO_NEW>());
+    CHECK_NULL(chunk->typed_slot_set<OLD_TO_NEW>());
   }
 
   if (Heap::InYoungGeneration(object)) {
@@ -709,16 +699,16 @@ void HeapVerifier::VerifyReadOnlyHeap(Heap* heap) {
 // static
 void HeapVerifier::VerifyObjectLayoutChangeIsAllowed(Heap* heap,
                                                      HeapObject object) {
-  if (object.InSharedWritableHeap()) {
+  if (object.InWritableSharedSpace()) {
     // Out of objects in the shared heap, only strings can change layout.
     DCHECK(object.IsString());
     // Shared strings only change layout under GC, never concurrently.
     if (object.IsShared()) {
       Isolate* isolate = heap->isolate();
-      Isolate* shared_heap_isolate = isolate->is_shared_space_isolate()
-                                         ? isolate
-                                         : isolate->shared_heap_isolate();
-      shared_heap_isolate->global_safepoint()->AssertActive();
+      Isolate* shared_space_isolate = isolate->is_shared_space_isolate()
+                                          ? isolate
+                                          : isolate->shared_space_isolate();
+      shared_space_isolate->global_safepoint()->AssertActive();
     }
     // Non-shared strings in the shared heap are allowed to change layout
     // outside of GC like strings in non-shared heaps.

@@ -50,7 +50,6 @@ void PrintPaddedId(std::ostream& os, MaglevGraphLabeller* graph_labeller,
     os << node->id() << "/";
   }
   os << graph_labeller->NodeId(node) << ": ";
-  if (node->is_dead()) os << "☠ ";
 }
 
 void PrintPadding(std::ostream& os, int size) {
@@ -404,6 +403,28 @@ void PrintSingleDeoptFrame(
       os << "}";
       break;
     }
+    case DeoptFrame::FrameType::kInlinedArgumentsFrame: {
+      os << "@" << frame.as_inlined_arguments().bytecode_position();
+      if (!v8_flags.print_maglev_deopt_verbose) return;
+      os << " : {";
+      auto arguments = frame.as_inlined_arguments().arguments();
+      DCHECK_GT(arguments.size(), 0);
+      os << "<this>:" << PrintNodeLabel(graph_labeller, arguments[0]) << ":"
+         << current_input_location->operand();
+      current_input_location++;
+      if (arguments.size() > 1) {
+        os << ", ";
+      }
+      for (size_t i = 1; i < arguments.size(); i++) {
+        os << "a" << (i - 1) << ":"
+           << PrintNodeLabel(graph_labeller, arguments[i]) << ":"
+           << current_input_location->operand();
+        current_input_location++;
+        os << ", ";
+      }
+      os << "}";
+      break;
+    }
     case DeoptFrame::FrameType::kBuiltinContinuationFrame: {
       os << "@" << Builtins::name(frame.as_builtin_continuation().builtin_id());
       if (!v8_flags.print_maglev_deopt_verbose) return;
@@ -612,6 +633,13 @@ void MaglevPrintingVisitor::Process(Phi* phi, const ProcessingState& state) {
     }
     os_ << ")";
   }
+  if (phi->is_tagged() && !phi->result().operand().IsUnallocated()) {
+    if (phi->decompresses_tagged_result()) {
+      os_ << " (decompressed)";
+    } else {
+      os_ << " (compressed)";
+    }
+  }
   os_ << " → " << phi->result().operand() << "\n";
 
   MaglevPrintingVisitorOstream::cast(os_for_additional_info_)
@@ -778,7 +806,7 @@ void MaglevPrintingVisitor::Process(ControlNode* control_node,
 
 void PrintGraph(std::ostream& os, MaglevCompilationInfo* compilation_info,
                 Graph* const graph) {
-  GraphProcessor<MaglevPrintingVisitor, /*visit_dead_nodes*/ true> printer(
+  GraphProcessor<MaglevPrintingVisitor, /*visit_identity_nodes*/ true> printer(
       compilation_info->graph_labeller(), os);
   printer.ProcessGraph(graph);
 }

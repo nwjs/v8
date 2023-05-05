@@ -43,6 +43,7 @@ load(":bazel/v8-non-pointer-compression.bzl", "v8_binary_non_pointer_compression
 # v8_enable_conservative_stack_scanning
 # v8_enable_concurrent_marking
 # v8_enable_ignition_dispatch_counting
+# v8_enable_builtins_optimization
 # v8_enable_builtins_profiling
 # v8_enable_builtins_profiling_verbose
 # v8_builtins_profiling_log_file
@@ -156,6 +157,11 @@ v8_flag(
 v8_flag(
     name = "v8_enable_webassembly",
     default = True,
+)
+
+v8_flag(
+    name = "v8_jitless",
+    default = False,
 )
 
 v8_int(
@@ -333,6 +339,7 @@ v8_config(
         "v8_enable_verify_heap": "VERIFY_HEAP",
         "v8_enable_verify_predictable": "VERIFY_PREDICTABLE",
         "v8_enable_webassembly": "V8_ENABLE_WEBASSEMBLY",
+        "v8_jitless": "V8_JITLESS",
     },
     defines = [
         "GOOGLE3",
@@ -605,6 +612,7 @@ filegroup(
         "src/base/build_config.h",
         "src/base/compiler-specific.h",
         "src/base/container-utils.h",
+        "src/base/contextual.h",
         "src/base/cpu.cc",
         "src/base/cpu.h",
         "src/base/debug/stack_trace.cc",
@@ -663,6 +671,7 @@ filegroup(
         "src/base/platform/mutex.cc",
         "src/base/platform/mutex.h",
         "src/base/platform/platform.h",
+        "src/base/platform/platform.cc",
         "src/base/platform/semaphore.cc",
         "src/base/platform/semaphore.h",
         "src/base/platform/time.cc",
@@ -825,6 +834,7 @@ filegroup(
         "src/builtins/internal-coverage.tq",
         "src/builtins/internal.tq",
         "src/builtins/iterator.tq",
+        "src/builtins/iterator-from.tq",
         "src/builtins/iterator-helpers.tq",
         "src/builtins/math.tq",
         "src/builtins/number.tq",
@@ -1022,7 +1032,6 @@ filegroup(
         "src/torque/cfg.h",
         "src/torque/class-debug-reader-generator.cc",
         "src/torque/constants.h",
-        "src/torque/contextual.h",
         "src/torque/cpp-builder.cc",
         "src/torque/cpp-builder.h",
         "src/torque/csa-generator.cc",
@@ -1542,6 +1551,7 @@ filegroup(
         "src/heap/new-spaces-inl.h",
         "src/heap/new-spaces.cc",
         "src/heap/new-spaces.h",
+        "src/heap/object-lock.h",
         "src/heap/object-stats.cc",
         "src/heap/object-stats.h",
         "src/heap/objects-visiting-inl.h",
@@ -1565,8 +1575,8 @@ filegroup(
         "src/heap/remembered-set.h",
         "src/heap/safepoint.cc",
         "src/heap/safepoint.h",
-        "src/heap/scavenge-job.cc",
-        "src/heap/scavenge-job.h",
+        "src/heap/minor-gc-job.cc",
+        "src/heap/minor-gc-job.h",
         "src/heap/scavenger-inl.h",
         "src/heap/scavenger.cc",
         "src/heap/scavenger.h",
@@ -1575,8 +1585,6 @@ filegroup(
         "src/heap/spaces-inl.h",
         "src/heap/spaces.cc",
         "src/heap/spaces.h",
-        "src/heap/stress-marking-observer.cc",
-        "src/heap/stress-marking-observer.h",
         "src/heap/stress-scavenge-observer.cc",
         "src/heap/stress-scavenge-observer.h",
         "src/heap/sweeper.cc",
@@ -2582,6 +2590,8 @@ filegroup(
             "src/wasm/wasm-subtyping.h",
             "src/wasm/wasm-tier.h",
             "src/wasm/wasm-value.h",
+            "src/wasm/well-known-imports.cc",
+            "src/wasm/well-known-imports.h",
         ],
         "//conditions:default": [],
     }),
@@ -2832,6 +2842,7 @@ filegroup(
         "src/compiler/osr.h",
         "src/compiler/per-isolate-compiler-cache.h",
         "src/compiler/persistent-map.h",
+        "src/compiler/phase.h",
         "src/compiler/pipeline.cc",
         "src/compiler/pipeline.h",
         "src/compiler/pipeline-statistics.cc",
@@ -2864,6 +2875,8 @@ filegroup(
         "src/compiler/state-values-utils.cc",
         "src/compiler/state-values-utils.h",
         "src/compiler/store-store-elimination.cc",
+        "src/compiler/string-builder-optimizer.cc",
+        "src/compiler/string-builder-optimizer.h",
         "src/compiler/store-store-elimination.h",
         "src/compiler/turbofan-enabled.cc",
         "src/compiler/turbofan.h",
@@ -2871,9 +2884,16 @@ filegroup(
         "src/compiler/turboshaft/assembler.h",
         "src/compiler/turboshaft/assert-types-reducer.h",
         "src/compiler/turboshaft/branch-elimination-reducer.h",
+        "src/compiler/turboshaft/build-graph-phase.cc",
+        "src/compiler/turboshaft/build-graph-phase.h",
+        "src/compiler/turboshaft/builtin-call-descriptors.h",
+        "src/compiler/turboshaft/dead-code-elimination-phase.cc",
+        "src/compiler/turboshaft/dead-code-elimination-phase.h",
         "src/compiler/turboshaft/dead-code-elimination-reducer.h",
         "src/compiler/turboshaft/decompression-optimization.cc",
         "src/compiler/turboshaft/decompression-optimization.h",
+        "src/compiler/turboshaft/decompression-optimization-phase.cc",
+        "src/compiler/turboshaft/decompression-optimization-phase.h",
         "src/compiler/turboshaft/define-assembler-macros.inc",
         "src/compiler/turboshaft/deopt-data.h",
         "src/compiler/turboshaft/fast-hash.h",
@@ -2886,33 +2906,51 @@ filegroup(
         "src/compiler/turboshaft/graph-visualizer.h",
         "src/compiler/turboshaft/late-escape-analysis-reducer.h",
         "src/compiler/turboshaft/late-escape-analysis-reducer.cc",
+        "src/compiler/turboshaft/late-optimization-phase.cc",
+        "src/compiler/turboshaft/late-optimization-phase.h",
         "src/compiler/turboshaft/layered-hash-map.h",
+        "src/compiler/turboshaft/machine-lowering-phase.cc",
+        "src/compiler/turboshaft/machine-lowering-phase.h",
         "src/compiler/turboshaft/machine-lowering-reducer.h",
         "src/compiler/turboshaft/machine-optimization-reducer.h",
-        "src/compiler/turboshaft/memory-optimization.cc",
-        "src/compiler/turboshaft/memory-optimization.h",
+        "src/compiler/turboshaft/memory-optimization-reducer.cc",
+        "src/compiler/turboshaft/memory-optimization-reducer.h",
         "src/compiler/turboshaft/operations.cc",
         "src/compiler/turboshaft/operations.h",
         "src/compiler/turboshaft/operation-matching.h",
         "src/compiler/turboshaft/optimization-phase.cc",
         "src/compiler/turboshaft/optimization-phase.h",
+        "src/compiler/turboshaft/optimize-phase.cc",
+        "src/compiler/turboshaft/optimize-phase.h",
+        "src/compiler/turboshaft/phase.cc",
+        "src/compiler/turboshaft/phase.h",
         "src/compiler/turboshaft/recreate-schedule.cc",
         "src/compiler/turboshaft/recreate-schedule.h",
+        "src/compiler/turboshaft/recreate-schedule-phase.cc",
+        "src/compiler/turboshaft/recreate-schedule-phase.h",
         "src/compiler/turboshaft/reducer-traits.h",
         "src/compiler/turboshaft/representations.cc",
         "src/compiler/turboshaft/representations.h",
+        "src/compiler/turboshaft/runtime-call-descriptors.h",
         "src/compiler/turboshaft/select-lowering-reducer.h",
         "src/compiler/turboshaft/sidetable.h",
         "src/compiler/turboshaft/simplify-tf-loops.cc",
         "src/compiler/turboshaft/simplify-tf-loops.h",
         "src/compiler/turboshaft/snapshot-table.h",
+        "src/compiler/turboshaft/tag-untag-lowering-phase.cc",
+        "src/compiler/turboshaft/tag-untag-lowering-phase.h",
         "src/compiler/turboshaft/tag-untag-lowering-reducer.h",
+        "src/compiler/turboshaft/tracing.h",
         "src/compiler/turboshaft/type-inference-analysis.h",
         "src/compiler/turboshaft/type-inference-reducer.h",
         "src/compiler/turboshaft/typer.cc",
         "src/compiler/turboshaft/typer.h",
+        "src/compiler/turboshaft/type-assertions-phase.cc",
+        "src/compiler/turboshaft/type-assertions-phase.h",
         "src/compiler/turboshaft/type-parser.cc",
         "src/compiler/turboshaft/type-parser.h",
+        "src/compiler/turboshaft/typed-optimizations-phase.cc",
+        "src/compiler/turboshaft/typed-optimizations-phase.h",
         "src/compiler/turboshaft/typed-optimizations-reducer.h",
         "src/compiler/turboshaft/types.cc",
         "src/compiler/turboshaft/types.h",
@@ -3016,6 +3054,8 @@ filegroup(
             "src/compiler/wasm-graph-assembler.h",
             "src/compiler/wasm-inlining.cc",
             "src/compiler/wasm-inlining.h",
+            "src/compiler/wasm-inlining-into-js.cc",
+            "src/compiler/wasm-inlining-into-js.h",
             "src/compiler/wasm-typer.cc",
             "src/compiler/wasm-typer.h",
         ],
@@ -3816,6 +3856,7 @@ v8_binary(
         "@v8//bazel/config:is_posix": ["-fexceptions"],
         "//conditions:default": [],
     }),
+    icu_defines = [ "V8_INTL_SUPPORT" ],
     features = ["-use_header_modules"],
     linkopts = select({
         "@v8//bazel/config:is_android": ["-llog"],
@@ -3862,8 +3903,13 @@ v8_binary(
 
 # This target forces torque to be compiled without pointer compression.
 v8_binary_non_pointer_compression(
-    name = "torque_non_pointer_compression",
-    binary = "torque",
+    name = "noicu/torque_non_pointer_compression",
+    binary = "noicu/torque",
+)
+
+v8_binary_non_pointer_compression(
+    name = "icu/torque_non_pointer_compression",
+    binary = "icu/torque",
 )
 
 alias(

@@ -5,10 +5,10 @@
   "is_asan": false,
   "is_cfi": false,
   "is_clang": true,
+  "is_clang_coverage": false,
   "is_component_build": false,
   "is_debug": false,
   "is_full_debug": false,
-  "is_gcov_coverage": false,
   "is_ubsan_vptr": false,
   "is_msan": false,
   "is_tsan": false,
@@ -41,5 +41,6 @@
   "v8_enable_disassembler": false,
   "is_DEBUG_defined": false,
   "v8_enable_turbofan": false,
+  "v8_jitless": false,
   "v8_enable_gdbjit": false
 }

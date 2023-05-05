@@ -286,7 +286,7 @@ bool HasExcludedProperty(
 }
 
 V8_WARN_UNUSED_RESULT Maybe<bool> FastAssign(
-    Handle<JSReceiver> target, Handle<Object> source,
+    Isolate* isolate, Handle<JSReceiver> target, Handle<Object> source,
     PropertiesEnumerationMode mode,
     const base::ScopedVector<Handle<Object>>* excluded_properties,
     bool use_set) {
@@ -295,8 +295,6 @@ V8_WARN_UNUSED_RESULT Maybe<bool> FastAssign(
   if (!source->IsJSReceiver()) {
     return Just(!source->IsString() || String::cast(*source).length() == 0);
   }
-
-  Isolate* isolate = target->GetIsolate();
 
   // If the target is deprecated, the object will be updated on first store. If
   // the source for that store equals the target, this will invalidate the
@@ -432,7 +430,7 @@ Maybe<bool> JSReceiver::SetOrCopyDataProperties(
     const base::ScopedVector<Handle<Object>>* excluded_properties,
     bool use_set) {
   Maybe<bool> fast_assign =
-      FastAssign(target, source, mode, excluded_properties, use_set);
+      FastAssign(isolate, target, source, mode, excluded_properties, use_set);
   if (fast_assign.IsNothing()) return Nothing<bool>();
   if (fast_assign.FromJust()) return Just(true);
 
@@ -584,8 +582,8 @@ std::pair<MaybeHandle<JSFunction>, Handle<String>> GetConstructorHelper(
     if (maybe_constructor->IsJSFunction()) {
       Handle<JSFunction> constructor =
           Handle<JSFunction>::cast(maybe_constructor);
-      Handle<String> name =
-          SharedFunctionInfo::DebugName(handle(constructor->shared(), isolate));
+      Handle<String> name = SharedFunctionInfo::DebugName(
+          isolate, handle(constructor->shared(), isolate));
       if (name->length() != 0 &&
           !name->Equals(ReadOnlyRoots(isolate).Object_string())) {
         return std::make_pair(constructor, name);
@@ -626,7 +624,7 @@ std::pair<MaybeHandle<JSFunction>, Handle<String>> GetConstructorHelper(
       if (maybe_constructor->IsJSFunction()) {
         auto constructor = Handle<JSFunction>::cast(maybe_constructor);
         auto name = SharedFunctionInfo::DebugName(
-            handle(constructor->shared(), isolate));
+            isolate, handle(constructor->shared(), isolate));
 
         if (name->length() != 0 &&
             !name->Equals(ReadOnlyRoots(isolate).Object_string())) {
@@ -653,29 +651,40 @@ Handle<String> JSReceiver::GetConstructorName(Isolate* isolate,
   return GetConstructorHelper(isolate, receiver).second;
 }
 
-MaybeHandle<NativeContext> JSReceiver::GetCreationContext() {
-  JSReceiver receiver = *this;
-  // Externals are JSObjects with null as a constructor.
-  DCHECK(!receiver.IsJSExternalObject());
-  Object constructor = receiver.map().GetConstructor();
+base::Optional<NativeContext> JSReceiver::GetCreationContextRaw() {
+  DisallowGarbageCollection no_gc;
   JSFunction function;
-  if (constructor.IsJSFunction()) {
-    function = JSFunction::cast(constructor);
-  } else if (constructor.IsFunctionTemplateInfo()) {
-    // Remote objects don't have a creation context.
-    return MaybeHandle<NativeContext>();
-  } else if (receiver.IsJSGeneratorObject()) {
-    function = JSGeneratorObject::cast(receiver).function();
-  } else if (receiver.IsJSFunction()) {
-    function = JSFunction::cast(receiver);
-  } else {
-    return MaybeHandle<NativeContext>();
+  {
+    JSReceiver receiver = *this;
+    Map receiver_map = receiver.map();
+    InstanceType receiver_instance_type = receiver_map.instance_type();
+    if (V8_LIKELY(InstanceTypeChecker::IsJSFunction(receiver_instance_type))) {
+      function = JSFunction::cast(receiver);
+    } else if (InstanceTypeChecker::IsJSGeneratorObject(
+                   receiver_instance_type)) {
+      function = JSGeneratorObject::cast(receiver).function();
+    } else {
+      // Externals are JSObjects with null as a constructor.
+      DCHECK(!receiver.IsJSExternalObject());
+      Object constructor = receiver_map.GetConstructor();
+      if (constructor.IsJSFunction()) {
+        function = JSFunction::cast(constructor);
+      } else {
+        // constructor might be a FunctionTemplateInfo but remote objects don't
+        // have a creation context, if the object doesn't have a constructor
+        // then we can't compute a creation context.
+        return {};
+      }
+    }
   }
+  if (function.has_context()) return function.native_context();
+  return {};
+}
 
-  return function.has_context()
-             ? Handle<NativeContext>(function.native_context(),
-                                     receiver.GetIsolate())
-             : MaybeHandle<NativeContext>();
+MaybeHandle<NativeContext> JSReceiver::GetCreationContext() {
+  base::Optional<NativeContext> maybe_context = GetCreationContextRaw();
+  if (!maybe_context.has_value()) return {};
+  return handle(maybe_context.value(), GetIsolate());
 }
 
 // static
@@ -2539,6 +2548,12 @@ int JSObject::GetHeaderSize(InstanceType type,
       return JSStringIterator::kHeaderSize;
     case JS_ITERATOR_MAP_HELPER_TYPE:
       return JSIteratorMapHelper::kHeaderSize;
+    case JS_ITERATOR_FILTER_HELPER_TYPE:
+      return JSIteratorFilterHelper::kHeaderSize;
+    case JS_ITERATOR_TAKE_HELPER_TYPE:
+      return JSIteratorTakeHelper::kHeaderSize;
+    case JS_ITERATOR_DROP_HELPER_TYPE:
+      return JSIteratorDropHelper::kHeaderSize;
     case JS_MODULE_NAMESPACE_TYPE:
       return JSModuleNamespace::kHeaderSize;
     case JS_SHARED_ARRAY_TYPE:
@@ -2569,6 +2584,8 @@ int JSObject::GetHeaderSize(InstanceType type,
       return JSTemporalTimeZone::kHeaderSize;
     case JS_TEMPORAL_ZONED_DATE_TIME_TYPE:
       return JSTemporalZonedDateTime::kHeaderSize;
+    case JS_VALID_ITERATOR_WRAPPER_TYPE:
+      return JSValidIteratorWrapper::kHeaderSize;
     case JS_WRAPPED_FUNCTION_TYPE:
       return JSWrappedFunction::kHeaderSize;
     case JS_RAW_JSON_TYPE:
@@ -4099,7 +4116,7 @@ Maybe<bool> JSObject::DeletePropertyWithInterceptor(LookupIterator* it,
 
   DCHECK(result->IsBoolean());
   args.AcceptSideEffects();
-  // Rebox CustomArguments::kReturnValueOffset before returning.
+  // Rebox CustomArguments::kReturnValueIndex before returning.
   return Just(result->IsTrue(isolate));
 }
 
@@ -5185,9 +5202,14 @@ Maybe<bool> JSObject::SetPrototype(Isolate* isolate, Handle<JSObject> object,
 
   bool immutable_proto = map->is_immutable_proto();
   if (immutable_proto) {
-    RETURN_FAILURE(
-        isolate, should_throw,
-        NewTypeError(MessageTemplate::kImmutablePrototypeSet, object));
+    Handle<Object> msg;
+    if (object->IsJSObjectPrototype()) {  // is [[Object.prototype]]
+      msg = isolate->factory()->Object_prototype_string();
+    } else {
+      msg = object;
+    }
+    RETURN_FAILURE(isolate, should_throw,
+                   NewTypeError(MessageTemplate::kImmutablePrototypeSet, msg));
   }
 
   // From 6.1.7.3 Invariants of the Essential Internal Methods

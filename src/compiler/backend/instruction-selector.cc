@@ -1838,6 +1838,8 @@ void InstructionSelector::VisitNode(Node* node) {
       return VisitLoadFramePointer(node);
     case IrOpcode::kLoadParentFramePointer:
       return VisitLoadParentFramePointer(node);
+    case IrOpcode::kLoadRootRegister:
+      return VisitLoadRootRegister(node);
     case IrOpcode::kUnalignedLoad: {
       LoadRepresentation type = LoadRepresentationOf(node->op());
       MarkAsRepresentation(type.representation(), node);
@@ -2416,6 +2418,11 @@ void InstructionSelector::VisitLoadParentFramePointer(Node* node) {
   Emit(kArchParentFramePointer, g.DefineAsRegister(node));
 }
 
+void InstructionSelector::VisitLoadRootRegister(Node* node) {
+  // Do nothing. Following loads/stores from this operator will use kMode_Root
+  // to load/store from an offset of the root register.
+}
+
 void InstructionSelector::VisitFloat64Acos(Node* node) {
   VisitFloat64Ieee754Unop(node, kIeee754Float64Acos);
 }
@@ -2815,15 +2822,6 @@ void InstructionSelector::VisitI64x2ReplaceLane(Node* node) { UNIMPLEMENTED(); }
         // !V8_TARGET_ARCH_RISCV64 && !V8_TARGET_ARCH_RISCV32
 #endif  // !V8_TARGET_ARCH_ARM64
 #endif  // !V8_TARGET_ARCH_X64 && !V8_TARGET_ARCH_S390X && !V8_TARGET_ARCH_PPC64
-
-#if !V8_TARGET_ARCH_ARM64 && !V8_TARGET_ARCH_X64 && !V8_TARGET_ARCH_IA32
-void InstructionSelector::VisitI16x8DotI8x16I7x16S(Node* node) {
-  UNIMPLEMENTED();
-}
-void InstructionSelector::VisitI32x4DotI8x16I7x16AddS(Node* node) {
-  UNIMPLEMENTED();
-}
-#endif  // !V8_TARGET_ARCH_ARM6 && !V8_TARGET_ARCH_X64 && !V8_TARGET_ARCH_IA32
 
 void InstructionSelector::VisitFinishRegion(Node* node) { EmitIdentity(node); }
 

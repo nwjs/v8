@@ -35,8 +35,8 @@ class MaglevPhiRepresentationSelector {
   }
 
   template <class NodeT>
-  void Process(NodeT* node, const ProcessingState&) {
-    UpdateNodeInputs(node);
+  void Process(NodeT* node, const ProcessingState& state) {
+    UpdateNodeInputs(node, state);
   }
 
  private:
@@ -50,52 +50,94 @@ class MaglevPhiRepresentationSelector {
   // it. UpdateNodeInputs(n) removes such untagging from {n}'s input (and insert
   // new conversions if needed, from Int32 to Float64 for instance).
   template <class NodeT>
-  void UpdateNodeInputs(NodeT* n) {
+  void UpdateNodeInputs(NodeT* n, const ProcessingState& state) {
     NodeBase* node = static_cast<NodeBase*>(n);
-    for (int i = 0; i < node->input_count(); i++) {
-      ValueNode* input = node->input(i).node();
-      if (IsUntagging(input->opcode()) && input->input(0).node()->Is<Phi>() &&
-          input->input(0).node()->value_representation() !=
+
+    if (IsUntagging(n->opcode())) {
+      if (node->input(0).node()->Is<Phi>() &&
+          node->input(0).node()->value_representation() !=
               ValueRepresentation::kTagged) {
-        // Note that we're using `IsUntagging(opcode)` rather than
-        // `input->properties().is_conversion` because truncations also need to
-        // be updated, and they don't have the is_conversion property.
-        node->change_input(i, GetInputReplacement(input));
+        DCHECK_EQ(node->input_count(), 1);
+        // This untagging conversion is outdated, since its input has been
+        // untagged. Depending on the conversion, it might need to be replaced
+        // by another untagged->untagged conversion, or it might need to be
+        // removed alltogether (or rather, replaced by an identity node).
+        UpdateUntaggingOfPhi(n->template Cast<ValueNode>());
+        return;
+      }
+    } else {
+      UpdateNonUntaggingNodeInputs(n, state);
+    }
+
+    // It's important to check the properties of {node} rather than the static
+    // properties of `NodeT`, because `UpdateUntaggingOfPhi` could have changed
+    // the opcode of {node}, potentially converting a deopting node into a
+    // non-deopting one.
+    if (node->properties().can_eager_deopt()) {
+      BypassIdentities(node->eager_deopt_info());
+    }
+    if (node->properties().can_lazy_deopt()) {
+      BypassIdentities(node->lazy_deopt_info());
+    }
+  }
+
+  template <class NodeT>
+  void UpdateNonUntaggingNodeInputs(NodeT* n, const ProcessingState& state) {
+    NodeBase* node = static_cast<NodeBase*>(n);
+
+    // It would be bad to re-tag the input of an untagging node, so this
+    // function should never be called on untagging nodes.
+    DCHECK(!IsUntagging(n->opcode()));
+
+    for (int i = 0; i < n->input_count(); i++) {
+      ValueNode* input = node->input(i).node();
+      if (input->Is<Identity>()) {
+        // Bypassing the identity
+        node->change_input(i, input->input(0).node());
       } else if (Phi* phi = input->TryCast<Phi>()) {
-        // If the input is a Phi and it was used without any untagging, then we
-        // need to retag it.
-        if (!IsUntagging(n->opcode()) &&
-            phi->value_representation() != ValueRepresentation::kTagged) {
-          // If {n} is a conversion that isn't an untagging, then it has to have
-          // been inserted during this phase, because it knows that {phi} isn't
-          // tagged. As such, we don't do anything in that case.
-          if (!n->properties().is_conversion()) {
-            node->change_input(
-                i, TagPhi(phi, current_block_, NewNodePosition::kStart));
-          }
-        }
+        // If the input is a Phi and it was used without any untagging, then
+        // we need to retag it (with some additional checks/changes for some
+        // nodes, cf the overload of UpdateNodePhiInput).
+        UpdateNodePhiInput(n, phi, i, state);
       }
     }
   }
+
+  void UpdateNodePhiInput(StoreTaggedFieldNoWriteBarrier* node, Phi* phi,
+                          int input_index, const ProcessingState& state);
+  void UpdateNodePhiInput(CheckedStoreSmiField* node, Phi* phi, int input_index,
+                          const ProcessingState& state);
+  void UpdateNodePhiInput(StoreFixedArrayElementNoWriteBarrier* node, Phi* phi,
+                          int input_index, const ProcessingState& state);
+  void UpdateNodePhiInput(CheckedStoreFixedArraySmiElement* node, Phi* phi,
+                          int input_index, const ProcessingState& state);
+  void UpdateNodePhiInput(NodeBase* node, Phi* phi, int input_index,
+                          const ProcessingState& state);
 
   void EnsurePhiInputsTagged(Phi* phi);
 
   // Returns true if {op} is an untagging node.
   bool IsUntagging(Opcode op);
 
-  // GetInputReplacement should be called with {old_input} being an untagging
-  // operation whose input is a Phi that we've decided shouldn't be tagged. Now
-  // that the Phi isn't tagged, the untagging isn't needed anymore and should
-  // instead be either the Phi directly, or a conversion of the Phi to something
-  // else (a Int32ToFloat64 for instance).
-  ValueNode* GetInputReplacement(ValueNode* old_conversion);
+  // Updates {old_untagging} to reflect that its Phi input has been untagged and
+  // that a different conversion is now needed.
+  void UpdateUntaggingOfPhi(ValueNode* old_untagging);
 
   // NewNodePosition is used to represent where a new node should be inserted:
-  // at the start of a block (kStart), at the end of a block (kEnd).
+  // at the start of a block (kStart), or at the end of a block (kEnd).
   enum class NewNodePosition { kStart, kEnd };
 
+  // Tags {phi} as a Smi.
+  ValueNode* SmiTagPhi(Phi* phi, CheckedStoreSmiField* user_node,
+                       const ProcessingState& state);
+  ValueNode* SmiTagPhi(Phi* phi, CheckedStoreFixedArraySmiElement* user_node,
+                       const ProcessingState& state);
+  template <class ToNodeT, class FromNodeT>
+  ValueNode* SmiTagPhi(Phi*, FromNodeT* user_node,
+                       const ProcessingState& state);
+
   // Returns a tagged node that represents a tagged version of {phi}.
-  ValueNode* TagPhi(Phi* phi, BasicBlock* block, NewNodePosition pos);
+  ValueNode* EnsurePhiTagged(Phi* phi, BasicBlock* block, NewNodePosition pos);
 
   ValueNode* AddNode(ValueNode* node, BasicBlock* block, NewNodePosition pos);
 
@@ -103,10 +145,15 @@ class MaglevPhiRepresentationSelector {
   // {new_nodes_current_block_end_} into their destinations.
   void MergeNewNodesInBlock(BasicBlock* block);
 
-  // If {block} jumps back to the start of a loop header, FixLoopPhisBackedge
-  // inserts the necessary tagging on the backedge of the loop Phis of the loop
-  // header.
+  // If {block} is the start of a loop header, FixLoopPhisBackedge inserts the
+  // necessary tagging on the backedge of the loop Phis of the loop header.
+  // Additionally, if {block} contains untagged loop phis whose backedges have
+  // been updated to Identity, FixLoopPhisBackedge unwraps those Identity.
   void FixLoopPhisBackedge(BasicBlock* block);
+
+  // Replaces Identity nodes by their inputs in {deopt_info}
+  template <typename DeoptInfoT>
+  void BypassIdentities(const DeoptInfoT* deopt_info);
 
   MaglevGraphBuilder* builder_ = nullptr;
   BasicBlock* current_block_ = nullptr;
@@ -119,6 +166,10 @@ class MaglevPhiRepresentationSelector {
   // inserted respectively at the begining and the end of the current block.
   ZoneVector<Node*> new_nodes_current_block_start_;
   ZoneVector<Node*> new_nodes_current_block_end_;
+
+#ifdef DEBUG
+  std::unordered_set<NodeBase*> new_nodes_;
+#endif
 };
 
 }  // namespace maglev

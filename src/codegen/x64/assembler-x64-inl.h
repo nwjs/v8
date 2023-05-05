@@ -215,7 +215,7 @@ void Assembler::deserialization_set_target_internal_reference_at(
 }
 
 void Assembler::deserialization_set_special_target_at(
-    Address instruction_payload, InstructionStream code, Address target) {
+    Address instruction_payload, Code code, Address target) {
   set_target_address_at(instruction_payload,
                         !code.is_null() ? code.constant_pool() : kNullAddress,
                         target);
@@ -245,7 +245,8 @@ Builtin Assembler::target_builtin_at(Address pc) {
 
 // The modes possibly affected by apply must be in kApplyMask.
 void RelocInfo::apply(intptr_t delta) {
-  if (IsCodeTarget(rmode_) || IsNearBuiltinEntry(rmode_)) {
+  if (IsCodeTarget(rmode_) || IsNearBuiltinEntry(rmode_) ||
+      IsWasmStubCall(rmode_)) {
     WriteUnalignedValue(
         pc_, ReadUnalignedValue<int32_t>(pc_) - static_cast<int32_t>(delta));
   } else if (IsInternalReference(rmode_)) {
@@ -256,7 +257,7 @@ void RelocInfo::apply(intptr_t delta) {
 
 Address RelocInfo::target_address() {
   DCHECK(IsCodeTarget(rmode_) || IsNearBuiltinEntry(rmode_) ||
-         IsWasmCall(rmode_));
+         IsWasmCall(rmode_) || IsWasmStubCall(rmode_));
   return Assembler::target_address_at(pc_, constant_pool_);
 }
 
@@ -339,7 +340,7 @@ void RelocInfo::set_target_object(Heap* heap, HeapObject target,
   DCHECK(IsCodeTarget(rmode_) || IsEmbeddedObjectMode(rmode_));
   if (IsCompressedEmbeddedObject(rmode_)) {
     DCHECK(COMPRESS_POINTERS_BOOL);
-    Tagged_t tagged = V8HeapCompressionScheme::CompressTagged(target.ptr());
+    Tagged_t tagged = V8HeapCompressionScheme::CompressObject(target.ptr());
     WriteUnalignedValue(pc_, tagged);
   } else {
     DCHECK(IsFullEmbeddedObject(rmode_));
@@ -348,8 +349,8 @@ void RelocInfo::set_target_object(Heap* heap, HeapObject target,
   if (icache_flush_mode != SKIP_ICACHE_FLUSH) {
     FlushInstructionCache(pc_, sizeof(Address));
   }
-  if (!host().is_null() && !v8_flags.disable_write_barriers) {
-    WriteBarrierForCode(host(), this, target, write_barrier_mode);
+  if (!instruction_stream().is_null() && !v8_flags.disable_write_barriers) {
+    WriteBarrierForCode(instruction_stream(), this, target, write_barrier_mode);
   }
 }
 
@@ -370,7 +371,7 @@ void RelocInfo::WipeOut() {
   } else if (IsCompressedEmbeddedObject(rmode_)) {
     Address smi_address = Smi::FromInt(0).ptr();
     WriteUnalignedValue(pc_,
-                        V8HeapCompressionScheme::CompressTagged(smi_address));
+                        V8HeapCompressionScheme::CompressObject(smi_address));
   } else if (IsCodeTarget(rmode_) || IsNearBuiltinEntry(rmode_)) {
     // Effectively write zero into the relocation.
     Assembler::set_target_address_at(pc_, constant_pool_,

@@ -40,10 +40,6 @@
 #include "src/compiler-dispatcher/optimizing-compile-dispatcher.h"
 #include "src/date/date.h"
 #include "src/debug/debug-frames.h"
-#if V8_ENABLE_WEBASSEMBLY
-#include "src/debug/debug-wasm-objects.h"
-#include "src/wasm/stacks.h"
-#endif  // V8_ENABLE_WEBASSEMBLY
 #include "src/debug/debug.h"
 #include "src/deoptimizer/deoptimizer.h"
 #include "src/deoptimizer/materialized-object-store.h"
@@ -84,6 +80,7 @@
 #include "src/objects/elements.h"
 #include "src/objects/feedback-vector.h"
 #include "src/objects/hash-table-inl.h"
+#include "src/objects/instance-type-inl.h"
 #include "src/objects/js-array-buffer-inl.h"
 #include "src/objects/js-array-inl.h"
 #include "src/objects/js-generator-inl.h"
@@ -127,7 +124,9 @@
 #endif  // V8_ENABLE_MAGLEV
 
 #if V8_ENABLE_WEBASSEMBLY
+#include "src/debug/debug-wasm-objects.h"
 #include "src/trap-handler/trap-handler.h"
+#include "src/wasm/stacks.h"
 #include "src/wasm/wasm-code-manager.h"
 #include "src/wasm/wasm-engine.h"
 #include "src/wasm/wasm-module.h"
@@ -446,9 +445,9 @@ size_t Isolate::HashIsolateForEmbeddedBlob() {
     DCHECK(Internals::HasHeapObjectTag(code.ptr()));
     uint8_t* const code_ptr = reinterpret_cast<uint8_t*>(code.address());
 
-    // These static asserts ensure we don't miss relevant fields. We don't
-    // hash code cage base and code entry point. Other data fields must
-    // remain the same.
+    // These static asserts ensure we don't miss relevant fields. We don't hash
+    // code cage base and code entry point. Other data fields must remain the
+    // same.
     static_assert(Code::kCodePointerFieldsStrongEndOffset ==
                   Code::kCodeEntryPointOffset);
 
@@ -457,6 +456,22 @@ size_t Isolate::HashIsolateForEmbeddedBlob() {
     static_assert(Code::kBuiltinIdOffsetEnd + 1 ==
                   Code::kKindSpecificFlagsOffset);
     static_assert(Code::kKindSpecificFlagsOffsetEnd + 1 ==
+                  Code::kInstructionSizeOffset);
+    static_assert(Code::kInstructionSizeOffsetEnd + 1 ==
+                  Code::kMetadataSizeOffset);
+    static_assert(Code::kMetadataSizeOffsetEnd + 1 ==
+                  Code::kInlinedBytecodeSizeOffset);
+    static_assert(Code::kInlinedBytecodeSizeOffsetEnd + 1 ==
+                  Code::kOsrOffsetOffset);
+    static_assert(Code::kOsrOffsetOffsetEnd + 1 ==
+                  Code::kHandlerTableOffsetOffset);
+    static_assert(Code::kHandlerTableOffsetOffsetEnd + 1 ==
+                  Code::kUnwindingInfoOffsetOffset);
+    static_assert(Code::kUnwindingInfoOffsetOffsetEnd + 1 ==
+                  Code::kConstantPoolOffsetOffset);
+    static_assert(Code::kConstantPoolOffsetOffsetEnd + 1 ==
+                  Code::kCodeCommentsOffsetOffset);
+    static_assert(Code::kCodeCommentsOffsetOffsetEnd + 1 ==
                   Code::kUnalignedSize);
     constexpr int kStartOffset = Code::kFlagsOffset;
 
@@ -1987,7 +2002,7 @@ Object Isolate::UnwindAndFindHandler() {
       CHECK(frame->is_java_script());
 
       if (frame->is_turbofan()) {
-        InstructionStream code = frame->LookupCode().instruction_stream();
+        Code code = frame->LookupCode();
         // The debugger triggers lazy deopt for the "to-be-restarted" frame
         // immediately when the CDP event arrives while paused.
         CHECK(code.marked_for_deoptimization());
@@ -1996,7 +2011,7 @@ Object Isolate::UnwindAndFindHandler() {
         // Jump directly to the optimized frames return, to immediately fall
         // into the deoptimizer.
         const int offset =
-            static_cast<int>(frame->pc() - code.instruction_start());
+            static_cast<int>(frame->pc() - code.InstructionStart());
 
         // Compute the stack pointer from the frame pointer. This ensures that
         // argument slots on the stack are dropped as returning would.
@@ -2004,7 +2019,7 @@ Object Isolate::UnwindAndFindHandler() {
         Address return_sp = frame->fp() +
                             StandardFrameConstants::kFixedFrameSizeAboveFp -
                             code.stack_slots() * kSystemPointerSize;
-        return FoundHandler(Context(), code.instruction_start(), offset,
+        return FoundHandler(Context(), code.InstructionStart(), offset,
                             code.constant_pool(), return_sp, frame->fp(),
                             visited_frames);
       }
@@ -2039,9 +2054,9 @@ Object Isolate::UnwindAndFindHandler() {
       case StackFrame::C_WASM_ENTRY: {
         StackHandler* handler = frame->top_handler();
         thread_local_top()->handler_ = handler->next_address();
-        InstructionStream code = frame->LookupCode().instruction_stream();
+        Code code = frame->LookupCode();
         HandlerTable table(code);
-        Address instruction_start = code.instruction_start();
+        Address instruction_start = code.InstructionStart();
         int return_offset = static_cast<int>(frame->pc() - instruction_start);
         int handler_offset = table.LookupReturn(return_offset);
         DCHECK_NE(-1, handler_offset);
@@ -2183,12 +2198,12 @@ Object Isolate::UnwindAndFindHandler() {
 
         if (frame->is_baseline()) {
           BaselineFrame* sp_frame = BaselineFrame::cast(js_frame);
-          InstructionStream code = sp_frame->LookupCode().instruction_stream();
+          Code code = sp_frame->LookupCode();
           intptr_t pc_offset = sp_frame->GetPCForBytecodeOffset(offset);
           // Patch the context register directly on the frame, so that we don't
           // need to have a context read + write in the baseline code.
           sp_frame->PatchContext(context);
-          return FoundHandler(Context(), code.instruction_start(), pc_offset,
+          return FoundHandler(Context(), code.InstructionStart(), pc_offset,
                               code.constant_pool(), return_sp, sp_frame->fp(),
                               visited_frames);
         } else {
@@ -2403,10 +2418,12 @@ void Isolate::CancelScheduledExceptionFromTryCatch(v8::TryCatch* handler) {
   DCHECK(has_scheduled_exception());
   if (reinterpret_cast<void*>(scheduled_exception().ptr()) ==
       handler->exception_) {
-    DCHECK(!is_execution_terminating());
+    DCHECK_IMPLIES(v8_flags.strict_termination_checks,
+                   !is_execution_terminating());
     clear_scheduled_exception();
   } else {
-    DCHECK(is_execution_terminating());
+    DCHECK_IMPLIES(v8_flags.strict_termination_checks,
+                   is_execution_terminating());
     // Clear termination once we returned from all V8 frames.
     if (thread_local_top()->CallDepthIsZero()) {
       thread_local_top()->external_caught_exception_ = false;
@@ -3289,10 +3306,6 @@ Isolate* Isolate::Allocate() {
   // Construct Isolate object in the allocated memory.
   void* isolate_ptr = isolate_allocator->isolate_memory();
   Isolate* isolate = new (isolate_ptr) Isolate(std::move(isolate_allocator));
-#ifdef V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE
-  DCHECK(IsAligned(isolate->isolate_root(), kPtrComprCageBaseAlignment));
-  DCHECK_EQ(isolate->isolate_root(), isolate->cage_base());
-#endif
 
 #ifdef DEBUG
   non_disposed_isolates_++;
@@ -3421,8 +3434,12 @@ void Isolate::CheckIsolateLayout() {
   CHECK_EQ(
       static_cast<int>(OFFSET_OF(Isolate, isolate_data_.builtin_tier0_table_)),
       Internals::kBuiltinTier0TableOffset);
-  CHECK_EQ(static_cast<int>(OFFSET_OF(Isolate, isolate_data_.embedder_data_)),
-           Internals::kIsolateEmbedderDataOffset);
+  CHECK_EQ(
+      static_cast<int>(OFFSET_OF(Isolate, isolate_data_.new_allocation_info_)),
+      Internals::kNewAllocationInfoOffset);
+  CHECK_EQ(
+      static_cast<int>(OFFSET_OF(Isolate, isolate_data_.old_allocation_info_)),
+      Internals::kOldAllocationInfoOffset);
   CHECK_EQ(static_cast<int>(
                OFFSET_OF(Isolate, isolate_data_.fast_c_call_caller_fp_)),
            Internals::kIsolateFastCCallCallerFpOffset);
@@ -3436,6 +3453,8 @@ void Isolate::CheckIsolateLayout() {
            Internals::kIsolateLongTaskStatsCounterOffset);
   CHECK_EQ(static_cast<int>(OFFSET_OF(Isolate, isolate_data_.stack_guard_)),
            Internals::kIsolateStackGuardOffset);
+  CHECK_EQ(static_cast<int>(OFFSET_OF(Isolate, isolate_data_.embedder_data_)),
+           Internals::kIsolateEmbedderDataOffset);
 #ifdef V8_COMPRESS_POINTERS
   CHECK_EQ(static_cast<int>(
                OFFSET_OF(Isolate, isolate_data_.external_pointer_table_)),
@@ -3476,10 +3495,10 @@ void Isolate::Deinit() {
     global_safepoint()->AssertNoClientsOnTearDown();
   }
 
-  if (has_shared_space()) {
+  if (has_shared_space() && !is_shared_space_isolate()) {
     IgnoreLocalGCRequests ignore_gc_requests(heap());
     ParkedScope parked_scope(main_thread_local_heap());
-    shared_heap_isolate()->global_safepoint()->clients_mutex_.Lock();
+    shared_space_isolate()->global_safepoint()->clients_mutex_.Lock();
   }
 
   DisallowGarbageCollection no_gc;
@@ -3491,16 +3510,6 @@ void Isolate::Deinit() {
 
   metrics_recorder_->NotifyIsolateDisposal();
   recorder_context_id_map_.clear();
-
-#if defined(V8_OS_WIN64)
-  if (win64_unwindinfo::CanRegisterUnwindInfoForNonABICompliantCodeRange() &&
-      heap()->memory_allocator() && RequiresCodeRange() &&
-      heap()->code_range()->AtomicDecrementUnwindInfoUseCount() == 1) {
-    const base::AddressRegion& code_region = heap()->code_region();
-    void* start = reinterpret_cast<void*>(code_region.begin());
-    win64_unwindinfo::UnregisterNonABICompliantCodeRange(start);
-  }
-#endif  // V8_OS_WIN64
 
   FutexEmulation::IsolateDeinit(this);
 
@@ -3558,11 +3567,14 @@ void Isolate::Deinit() {
   heap_.TearDownWithSharedHeap();
 
   // Detach from the shared heap isolate and then unlock the mutex.
-  if (has_shared_space()) {
-    Isolate* shared_heap_isolate = this->shared_heap_isolate();
-    DetachFromSharedSpaceIsolate();
-    shared_heap_isolate->global_safepoint()->clients_mutex_.Unlock();
+  if (has_shared_space() && !is_shared_space_isolate()) {
+    GlobalSafepoint* global_safepoint =
+        this->shared_space_isolate()->global_safepoint();
+    global_safepoint->RemoveClient(this);
+    global_safepoint->clients_mutex_.Unlock();
   }
+
+  shared_space_isolate_.reset();
 
   // Since there are no other threads left, we can lock this mutex without any
   // ceremony. This signals to the tear down code that we are in a safepoint.
@@ -3756,7 +3768,9 @@ void Isolate::InitializeThreadLocal() {
 }
 
 void Isolate::SetTerminationOnExternalTryCatch() {
-  DCHECK(is_execution_termination_pending() || is_execution_terminating());
+  DCHECK_IMPLIES(
+      v8_flags.strict_termination_checks,
+      is_execution_termination_pending() || is_execution_terminating());
   if (try_catch_handler() == nullptr) return;
   try_catch_handler()->can_continue_ = false;
   try_catch_handler()->has_terminated_ = true;
@@ -3903,6 +3917,36 @@ void Isolate::CreateAndSetEmbeddedBlob() {
   MaybeRemapEmbeddedBuiltinsIntoCodeRange();
 
   CreateOffHeapTrampolines(this);
+}
+
+void Isolate::InitializeIsShortBuiltinCallsEnabled() {
+  if (V8_SHORT_BUILTIN_CALLS_BOOL && v8_flags.short_builtin_calls) {
+#if defined(V8_OS_ANDROID)
+    // On Android, the check is not operative to detect memory, and re-embedded
+    // builtins don't have a memory cost.
+    is_short_builtin_calls_enabled_ = true;
+#else
+    // Check if the system has more than 4GB of physical memory by comparing the
+    // old space size with respective threshold value.
+    is_short_builtin_calls_enabled_ = (heap_.MaxOldGenerationSize() >=
+                                       kShortBuiltinCallsOldSpaceSizeThreshold);
+#endif  // defined(V8_OS_ANDROID)
+    // Additionally, enable if there is already a process-wide CodeRange that
+    // has re-embedded builtins.
+    if (COMPRESS_POINTERS_IN_SHARED_CAGE_BOOL) {
+      CodeRange* code_range = CodeRange::GetProcessWideCodeRange();
+      if (code_range && code_range->embedded_blob_code_copy() != nullptr) {
+        is_short_builtin_calls_enabled_ = true;
+      }
+    }
+    if (V8_ENABLE_NEAR_CODE_RANGE_BOOL) {
+      // The short builtin calls could still be enabled if allocated code range
+      // is close enough to embedded builtins so that the latter could be
+      // reached using pc-relative (short) calls/jumps.
+      is_short_builtin_calls_enabled_ |=
+          GetShortBuiltinsCallRegion().contains(heap_.code_region());
+    }
+  }
 }
 
 void Isolate::MaybeRemapEmbeddedBuiltinsIntoCodeRange() {
@@ -4088,12 +4132,69 @@ void Isolate::VerifyStaticRoots() {
   idx = RootIndex::kFirstReadOnlyRoot;
 #define CHECK_NAME(_1, _2, CamelName)                                     \
   CHECK_WITH_MSG(StaticReadOnlyRoot::k##CamelName ==                      \
-                     V8HeapCompressionScheme::CompressTagged(roots[idx]), \
+                     V8HeapCompressionScheme::CompressObject(roots[idx]), \
                  STATIC_ROOTS_FAILED_MSG);                                \
   ++idx;
   STRONG_READ_ONLY_ROOT_LIST(CHECK_NAME)
 #undef CHECK_NAME
 
+  // Check if instance types to map range mappings are still valid.
+  //
+  // Is##type(map) may be computed by checking if the map pointer lies in a
+  // statically known range of addresses, whereas Is##type(instance_type) is the
+  // definitive source of truth. If they disagree it means that a particular
+  // entry in InstanceTypeChecker::kUniqueMapRangeOfInstanceTypeRangeList is out
+  // of date. This can also happen if an instance type is starting to be used by
+  // more maps.
+  //
+  // If this check fails either re-arrange allocations in the read-only heap
+  // such that the static map range is restored (consult static-roots.h for a
+  // sorted list of addresses) or remove the offending entry from the list.
+  for (auto idx = RootIndex::kFirstRoot; idx <= RootIndex::kLastRoot; ++idx) {
+    Object obj = roots_table().slot(idx).load(this);
+    if (obj.ptr() == kNullAddress || !obj.IsMap()) continue;
+    Map map = Map::cast(obj);
+
+#define INSTANCE_TYPE_CHECKER_SINGLE(type, _)  \
+  CHECK_EQ(InstanceTypeChecker::Is##type(map), \
+           InstanceTypeChecker::Is##type(map.instance_type()));
+    INSTANCE_TYPE_CHECKERS_SINGLE(INSTANCE_TYPE_CHECKER_SINGLE)
+#undef INSTANCE_TYPE_CHECKER_SINGLE
+
+#define INSTANCE_TYPE_CHECKER_RANGE(type, _1, _2) \
+  CHECK_EQ(InstanceTypeChecker::Is##type(map),    \
+           InstanceTypeChecker::Is##type(map.instance_type()));
+    INSTANCE_TYPE_CHECKERS_RANGE(INSTANCE_TYPE_CHECKER_RANGE)
+#undef INSTANCE_TYPE_CHECKER_RANGE
+
+    // This limit is used in various places as a fast IsJSReceiver check.
+    CHECK_IMPLIES(
+        InstanceTypeChecker::IsPrimitiveHeapObject(map.instance_type()),
+        V8HeapCompressionScheme::CompressObject(map.ptr()) <
+            InstanceTypeChecker::kNonJsReceiverMapLimit);
+    CHECK_IMPLIES(InstanceTypeChecker::IsJSReceiver(map.instance_type()),
+                  V8HeapCompressionScheme::CompressObject(map.ptr()) >
+                      InstanceTypeChecker::kNonJsReceiverMapLimit);
+    CHECK(InstanceTypeChecker::kNonJsReceiverMapLimit <
+          read_only_heap()->read_only_space()->Size());
+
+    if (InstanceTypeChecker::IsString(map.instance_type())) {
+      CHECK_EQ(InstanceTypeChecker::IsString(map),
+               InstanceTypeChecker::IsString(map.instance_type()));
+      CHECK_EQ(InstanceTypeChecker::IsExternalString(map),
+               InstanceTypeChecker::IsExternalString(map.instance_type()));
+      CHECK_EQ(InstanceTypeChecker::IsInternalizedString(map),
+               InstanceTypeChecker::IsInternalizedString(map.instance_type()));
+      CHECK_EQ(InstanceTypeChecker::IsThinString(map),
+               InstanceTypeChecker::IsThinString(map.instance_type()));
+    }
+  }
+
+  // Sanity check the API
+  CHECK_EQ(
+      v8::internal::Internals::GetRoot(reinterpret_cast<v8::Isolate*>(this),
+                                       static_cast<int>(RootIndex::kNullValue)),
+      ReadOnlyRoots(this).null_value().ptr());
 #undef STATIC_ROOTS_FAILED_MSG
 #endif  // V8_STATIC_ROOTS_BOOL
 }
@@ -4119,18 +4220,18 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
 
   time_millis_at_init_ = heap_.MonotonicallyIncreasingTimeInMs();
 
-  Isolate* attach_to_shared_space_isolate = nullptr;
+  Isolate* use_shared_space_isolate = nullptr;
 
   if (HasFlagThatRequiresSharedHeap()) {
     if (process_wide_shared_space_isolate_) {
       owns_shareable_data_ = false;
+      use_shared_space_isolate = process_wide_shared_space_isolate_;
     } else {
       process_wide_shared_space_isolate_ = this;
+      use_shared_space_isolate = this;
       is_shared_space_isolate_ = true;
       DCHECK(owns_shareable_data_);
     }
-
-    attach_to_shared_space_isolate = process_wide_shared_space_isolate_;
   }
 
   CHECK_IMPLIES(is_shared_space_isolate_, V8_CAN_CREATE_SHARED_HEAP_BOOL);
@@ -4213,26 +4314,34 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
   // during deserialization.
   base::Optional<base::RecursiveMutexGuard> clients_guard;
 
-  if (attach_to_shared_space_isolate) {
+  if (use_shared_space_isolate && !is_shared_space_isolate()) {
     clients_guard.emplace(
-        &attach_to_shared_space_isolate->global_safepoint()->clients_mutex_);
+        &use_shared_space_isolate->global_safepoint()->clients_mutex_);
+    use_shared_space_isolate->global_safepoint()->AppendClient(this);
   }
 
-  AttachToSharedSpaceIsolate(attach_to_shared_space_isolate);
+  shared_space_isolate_ = use_shared_space_isolate;
 
   isolate_data_.is_shared_space_isolate_flag_ = is_shared_space_isolate();
   isolate_data_.uses_shared_heap_flag_ = has_shared_space();
 
-  if (attach_to_shared_space_isolate && !is_shared_space_isolate() &&
-      attach_to_shared_space_isolate->heap()
+  if (use_shared_space_isolate && !is_shared_space_isolate() &&
+      use_shared_space_isolate->heap()
           ->incremental_marking()
           ->IsMajorMarking()) {
     heap_.SetIsMarkingFlag(true);
   }
 
-  // SetUp the object heap.
+  // Set up the object heap.
   DCHECK(!heap_.HasBeenSetUp());
   heap_.SetUp(main_thread_local_heap());
+  InitializeIsShortBuiltinCallsEnabled();
+  if (!create_heap_objects) {
+    // Must be done before deserializing RO space, since RO space may contain
+    // builtin Code objects which point into the (potentially remapped)
+    // embedded blob.
+    MaybeRemapEmbeddedBuiltinsIntoCodeRange();
+  }
   ReadOnlyHeap::SetUp(this, read_only_snapshot_data, can_rehash);
   heap_.SetUpSpaces(isolate_data_.new_allocation_info_,
                     isolate_data_.old_allocation_info_);
@@ -4249,36 +4358,8 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
     // Only refer to shared string table after attaching to the shared isolate.
     DCHECK(has_shared_space());
     DCHECK(!is_shared_space_isolate());
-    string_table_ = shared_heap_isolate()->string_table_;
-    string_forwarding_table_ = shared_heap_isolate()->string_forwarding_table_;
-  }
-
-  if (V8_SHORT_BUILTIN_CALLS_BOOL && v8_flags.short_builtin_calls) {
-#if defined(V8_OS_ANDROID)
-    // On Android, the check is not operative to detect memory, and re-embedded
-    // builtins don't have a memory cost.
-    is_short_builtin_calls_enabled_ = true;
-#else
-    // Check if the system has more than 4GB of physical memory by comparing the
-    // old space size with respective threshold value.
-    is_short_builtin_calls_enabled_ = (heap_.MaxOldGenerationSize() >=
-                                       kShortBuiltinCallsOldSpaceSizeThreshold);
-#endif  // defined(V8_OS_ANDROID)
-    // Additionally, enable if there is already a process-wide CodeRange that
-    // has re-embedded builtins.
-    if (COMPRESS_POINTERS_IN_SHARED_CAGE_BOOL) {
-      CodeRange* code_range = CodeRange::GetProcessWideCodeRange();
-      if (code_range && code_range->embedded_blob_code_copy() != nullptr) {
-        is_short_builtin_calls_enabled_ = true;
-      }
-    }
-    if (V8_ENABLE_NEAR_CODE_RANGE_BOOL) {
-      // The short builtin calls could still be enabled if allocated code range
-      // is close enough to embedded builtins so that the latter could be
-      // reached using pc-relative (short) calls/jumps.
-      is_short_builtin_calls_enabled_ |=
-          GetShortBuiltinsCallRegion().contains(heap_.code_region());
-    }
+    string_table_ = shared_space_isolate()->string_table_;
+    string_forwarding_table_ = shared_space_isolate()->string_forwarding_table_;
   }
 #ifdef V8_EXTERNAL_CODE_SPACE
   {
@@ -4304,9 +4385,9 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
     Address last = base + code_cage->size() - 1;
     PtrComprCageBase code_cage_base{code_cage_base_};
     CHECK_EQ(base, ComprScheme::DecompressTagged(
-                       code_cage_base, ComprScheme::CompressTagged(base)));
+                       code_cage_base, ComprScheme::CompressObject(base)));
     CHECK_EQ(last, ComprScheme::DecompressTagged(
-                       code_cage_base, ComprScheme::CompressTagged(last)));
+                       code_cage_base, ComprScheme::CompressObject(last)));
   }
 #endif  // V8_EXTERNAL_CODE_SPACE
 
@@ -4320,7 +4401,7 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
   } else {
     DCHECK(has_shared_space());
     isolate_data_.shared_external_pointer_table_ =
-        shared_heap_isolate()->isolate_data_.shared_external_pointer_table_;
+        shared_space_isolate()->isolate_data_.shared_external_pointer_table_;
   }
 #endif  // V8_COMPRESS_POINTERS
 
@@ -4370,7 +4451,6 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
     CreateAndSetEmbeddedBlob();
   } else {
     setup_delegate_->SetupBuiltins(this, false);
-    MaybeRemapEmbeddedBuiltinsIntoCodeRange();
   }
 
   // Initialize custom memcopy and memmove functions (must happen after
@@ -4475,16 +4555,6 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
                                                sampling_flags);
   }
 
-#if defined(V8_OS_WIN64)
-  if (win64_unwindinfo::CanRegisterUnwindInfoForNonABICompliantCodeRange() &&
-      heap()->code_range()->AtomicIncrementUnwindInfoUseCount() == 0) {
-    const base::AddressRegion& code_region = heap()->code_region();
-    void* start = reinterpret_cast<void*>(code_region.begin());
-    size_t size_in_bytes = code_region.size();
-    win64_unwindinfo::RegisterNonABICompliantCodeRange(start, size_in_bytes);
-  }
-#endif  // V8_OS_WIN64
-
   if (create_heap_objects && v8_flags.profile_deserialization) {
     double ms = timer.Elapsed().InMillisecondsF();
     PrintF("[Initializing isolate from scratch took %0.3f ms]\n", ms);
@@ -4507,20 +4577,24 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
         .slot(RootIndex::kActiveContinuation)
         .store(*continuation);
   }
-  if (!create_heap_objects && V8_STATIC_ROOTS_BOOL) {
+#if V8_STATIC_ROOTS_BOOL
+  if (!create_heap_objects) {
     // Protect the payload of wasm null.
-    SetPermissions(page_allocator(), factory()->wasm_null()->payload(),
-                   WasmNull::kSize - kTaggedSize, PageAllocator::kNoAccess);
+    page_allocator()->DecommitPages(
+        reinterpret_cast<void*>(factory()->wasm_null()->payload()),
+        WasmNull::kSize - kTaggedSize);
   }
-#endif
+#endif  // V8_STATIC_ROOTS_BOOL
+#endif  // V8_ENABLE_WEBASSEMBLY
 
   heap()->AddGCPrologueCallback(ResetBeforeGC, kGCTypeMarkSweepCompact,
                                 nullptr);
 
   // Isolate initialization allocates long living objects that should be
   // pretenured to old space.
-  DCHECK_IMPLIES(heap()->new_space(), (heap()->new_space()->Size() == 0) &&
-                                          (heap()->gc_count() == 0));
+  DCHECK_IMPLIES(heap()->new_space(), heap()->new_space()->Size() == 0);
+  DCHECK_IMPLIES(heap()->new_lo_space(), heap()->new_lo_space()->Size() == 0);
+  DCHECK_EQ(heap()->gc_count(), 0);
 
   initialized_ = true;
 
@@ -4695,7 +4769,7 @@ bool Isolate::use_optimizer() {
 
 void Isolate::IncreaseTotalRegexpCodeGenerated(Handle<HeapObject> code) {
   PtrComprCageBase cage_base(this);
-  DCHECK(code->IsInstructionStream(cage_base) || code->IsByteArray(cage_base));
+  DCHECK(code->IsCode(cage_base) || code->IsByteArray(cage_base));
   total_regexp_code_generated_ += code->Size(cage_base);
 }
 
@@ -4950,7 +5024,8 @@ void Isolate::FireCallCompletedCallbackInternal(
 
   bool perform_checkpoint =
       microtask_queue &&
-      microtask_queue->microtasks_policy() == v8::MicrotasksPolicy::kAuto;
+      microtask_queue->microtasks_policy() == v8::MicrotasksPolicy::kAuto &&
+      !is_execution_terminating();
 
   v8::Isolate* isolate = reinterpret_cast<v8::Isolate*>(this);
   if (perform_checkpoint) microtask_queue->PerformCheckpoint(isolate);
@@ -5978,23 +6053,6 @@ Address Isolate::store_to_stack_count_address(const char* function_name) {
   // It is safe to return the address of std::map values.
   // Only iterators and references to the erased elements are invalidated.
   return reinterpret_cast<Address>(&map[name].second);
-}
-
-void Isolate::AttachToSharedSpaceIsolate(Isolate* shared_space_isolate) {
-  DCHECK(!shared_space_isolate_.has_value());
-  shared_space_isolate_ = shared_space_isolate;
-  if (shared_space_isolate) {
-    shared_space_isolate->global_safepoint()->AppendClient(this);
-  }
-}
-
-void Isolate::DetachFromSharedSpaceIsolate() {
-  DCHECK(shared_space_isolate_.has_value());
-  Isolate* shared_space_isolate = shared_space_isolate_.value();
-  if (shared_space_isolate) {
-    shared_space_isolate->global_safepoint()->RemoveClient(this);
-  }
-  shared_space_isolate_.reset();
 }
 
 #ifdef V8_COMPRESS_POINTERS

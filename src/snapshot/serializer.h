@@ -324,6 +324,14 @@ class Serializer : public SerializerDeserializer {
 
   bool deferred_objects_empty() { return deferred_objects_.size() == 0; }
 
+ protected:
+  bool serializer_tracks_serialization_statistics() const {
+    return serializer_tracks_serialization_statistics_;
+  }
+  void set_serializer_tracks_serialization_statistics(bool v) {
+    serializer_tracks_serialization_statistics_ = v;
+  }
+
  private:
   // A circular queue of hot objects. This is added to in the same order as in
   // Deserializer::HotObjectsList, but this stores the objects as an array of
@@ -411,12 +419,17 @@ class Serializer : public SerializerDeserializer {
   int recursion_depth_ = 0;
   const Snapshot::SerializerFlags flags_;
 
+  bool serializer_tracks_serialization_statistics_ = true;
   size_t allocation_size_[kNumberOfSnapshotSpaces] = {0};
 #ifdef OBJECT_PRINT
+// Verbose serialization_statistics output is only enabled conditionally.
+#define VERBOSE_SERIALIZATION_STATISTICS
+#endif
+#ifdef VERBOSE_SERIALIZATION_STATISTICS
   static constexpr int kInstanceTypes = LAST_TYPE + 1;
   std::unique_ptr<int[]> instance_type_count_[kNumberOfSnapshotSpaces];
   std::unique_ptr<size_t[]> instance_type_size_[kNumberOfSnapshotSpaces];
-#endif  // OBJECT_PRINT
+#endif  // VERBOSE_SERIALIZATION_STATISTICS
 
 #ifdef DEBUG
   GlobalHandleVector<HeapObject> back_refs_;
@@ -449,14 +462,12 @@ class Serializer::ObjectSerializer : public ObjectVisitor {
                      ObjectSlot end) override;
   void VisitPointers(HeapObject host, MaybeObjectSlot start,
                      MaybeObjectSlot end) override;
-  void VisitCodePointer(HeapObject host, CodeObjectSlot slot) override;
-  void VisitEmbeddedPointer(InstructionStream host, RelocInfo* target) override;
-  void VisitExternalReference(InstructionStream host,
-                              RelocInfo* rinfo) override;
-  void VisitInternalReference(InstructionStream host,
-                              RelocInfo* rinfo) override;
-  void VisitCodeTarget(InstructionStream host, RelocInfo* target) override;
-  void VisitOffHeapTarget(InstructionStream host, RelocInfo* target) override;
+  void VisitCodePointer(Code host, CodeObjectSlot slot) override;
+  void VisitEmbeddedPointer(RelocInfo* target) override;
+  void VisitExternalReference(RelocInfo* rinfo) override;
+  void VisitInternalReference(RelocInfo* rinfo) override;
+  void VisitCodeTarget(RelocInfo* target) override;
+  void VisitOffHeapTarget(RelocInfo* target) override;
 
   void VisitExternalPointer(HeapObject host, ExternalPointerSlot slot,
                             ExternalPointerTag tag) override;
@@ -474,7 +485,7 @@ class Serializer::ObjectSerializer : public ObjectVisitor {
   void OutputExternalReference(Address target, int target_size, bool sandboxify,
                                ExternalPointerTag tag);
   void OutputRawData(Address up_to);
-  void SerializeCode(Map map, int size);
+  void SerializeInstructionStream(Map map, int size);
   uint32_t SerializeBackingStore(void* backing_store, int32_t byte_length,
                                  Maybe<int32_t> max_byte_length);
   void SerializeJSTypedArray();

@@ -526,8 +526,8 @@ void MacroAssembler::RecordWrite(Register object, Register slot_address,
 
   CheckPageFlag(value,
                 value,  // Used as scratch.
-                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
-                zero, &done, Label::kNear);
+                MemoryChunk::kPointersToHereAreInterestingMask, zero, &done,
+                Label::kNear);
   CheckPageFlag(object,
                 value,  // Used as scratch.
                 MemoryChunk::kPointersFromHereAreInterestingMask, zero, &done,
@@ -708,7 +708,7 @@ void MacroAssembler::CmpInstanceTypeRange(Register map,
 
 void MacroAssembler::TestCodeIsMarkedForDeoptimization(Register code) {
   test(FieldOperand(code, Code::kKindSpecificFlagsOffset),
-       Immediate(1 << InstructionStream::kMarkedForDeoptimizationBit));
+       Immediate(1 << Code::kMarkedForDeoptimizationBit));
 }
 
 Immediate MacroAssembler::ClearedValue() const {
@@ -1266,10 +1266,6 @@ void MacroAssembler::JumpToExternalReference(const ExternalReference& ext,
   Handle<Code> code =
       CodeFactory::CEntry(isolate(), 1, ArgvMode::kStack, builtin_exit_frame);
   Jump(code, RelocInfo::CODE_TARGET);
-}
-
-void MacroAssembler::JumpToOffHeapInstructionStream(Address entry) {
-  jmp(entry, RelocInfo::OFF_HEAP_TARGET);
 }
 
 void MacroAssembler::CompareStackLimit(Register with, StackLimitKind kind) {
@@ -2007,14 +2003,6 @@ Operand MacroAssembler::EntryFromBuiltinAsOperand(Builtin builtin) {
 void MacroAssembler::LoadCodeEntry(Register destination, Register code_object) {
   ASM_CODE_COMMENT(this);
   mov(destination, FieldOperand(code_object, Code::kCodeEntryPointOffset));
-}
-
-void MacroAssembler::LoadCodeInstructionStreamNonBuiltin(Register destination,
-                                                         Register code_object) {
-  ASM_CODE_COMMENT(this);
-  // Compute the InstructionStream object pointer from the code entry point.
-  mov(destination, FieldOperand(code_object, Code::kCodeEntryPointOffset));
-  sub(destination, Immediate(InstructionStream::kHeaderSize - kHeapObjectTag));
 }
 
 void MacroAssembler::CallCodeObject(Register code_object) {

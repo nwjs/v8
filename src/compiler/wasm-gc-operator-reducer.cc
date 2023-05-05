@@ -39,6 +39,8 @@ Reduction WasmGCOperatorReducer::Reduce(Node* node) {
       return ReduceWasmTypeCheck(node);
     case IrOpcode::kWasmTypeCast:
       return ReduceWasmTypeCast(node);
+    case IrOpcode::kWasmExternInternalize:
+      return ReduceWasmExternInternalize(node);
     case IrOpcode::kMerge:
       return ReduceMerge(node);
     case IrOpcode::kIfTrue:
@@ -141,9 +143,10 @@ Reduction WasmGCOperatorReducer::ReduceWasmStructOperation(Node* node) {
     const Operator* new_op =
         node->opcode() == IrOpcode::kWasmStructGet
             ? simplified()->WasmStructGet(op_params.type, op_params.field_index,
-                                          op_params.is_signed, false)
+                                          op_params.is_signed,
+                                          kWithoutNullCheck)
             : simplified()->WasmStructSet(op_params.type, op_params.field_index,
-                                          false);
+                                          kWithoutNullCheck);
     NodeProperties::ChangeOp(node, new_op);
   }
 
@@ -165,7 +168,7 @@ Reduction WasmGCOperatorReducer::ReduceWasmArrayLength(Node* node) {
   if (object_type.type.is_non_nullable()) {
     // If the object is known to be non-nullable in the context, remove the null
     // check.
-    const Operator* new_op = simplified()->WasmArrayLength(false);
+    const Operator* new_op = simplified()->WasmArrayLength(kWithoutNullCheck);
     NodeProperties::ChangeOp(node, new_op);
   }
 
@@ -253,7 +256,6 @@ Reduction WasmGCOperatorReducer::ReduceMerge(Node* node) {
 Reduction WasmGCOperatorReducer::ReduceAssertNotNull(Node* node) {
   DCHECK_EQ(node->opcode(), IrOpcode::kAssertNotNull);
   Node* object = NodeProperties::GetValueInput(node, 0);
-  Node* effect = NodeProperties::GetEffectInput(node);
   Node* control = NodeProperties::GetControlInput(node);
 
   wasm::TypeInModule object_type = ObjectTypeFromContext(object, control);
@@ -269,29 +271,7 @@ Reduction WasmGCOperatorReducer::ReduceAssertNotNull(Node* node) {
     return Changed(node);
   }
 
-  // Optimize the common pattern where a type cast is followed by
-  // {AssertNotNull}.
-  if (object == control && object == effect &&
-      object->opcode() == IrOpcode::kWasmTypeCast) {
-    WasmTypeCheckConfig cast_params =
-        OpParameter<WasmTypeCheckConfig>(object->op());
-    // Otherwise, the return type would be non-nullable, and we would be in the
-    // case above.
-    DCHECK(cast_params.to.is_nullable());
-    NodeProperties::ChangeOp(
-        object, simplified()->WasmTypeCast(
-                    {cast_params.from, cast_params.to.AsNonNull()}));
-    auto type = NodeProperties::GetType(object).AsWasm();
-    NodeProperties::SetType(object, Type::Wasm(type.type.AsNonNull(),
-                                               type.module, graph()->zone()));
-    Revisit(object);
-    ReplaceWithValue(node, object, object, object);
-    node->Kill();
-    return Replace(object);
-  }
-
   object_type.type = object_type.type.AsNonNull();
-
   return UpdateNodeAndAliasesTypes(node, GetState(control), node, object_type,
                                    false);
 }
@@ -326,6 +306,23 @@ Reduction WasmGCOperatorReducer::ReduceCheckNull(Node* node) {
   }
 
   return NoChange();
+}
+
+Reduction WasmGCOperatorReducer::ReduceWasmExternInternalize(Node* node) {
+  DCHECK_EQ(node->opcode(), IrOpcode::kWasmExternInternalize);
+  // Remove redundant extern.internalize(extern.externalize(...)) pattern.
+  // TODO(mliedtke): Currently this doesn't get fully removed, probably due to
+  // not running dead code elimination in this pipeline step. What would it cost
+  // us to run it here?
+  if (NodeProperties::GetValueInput(node, 0)->opcode() ==
+      IrOpcode::kWasmExternExternalize) {
+    Node* externalize = node->InputAt(0);
+    Node* input = externalize->InputAt(0);
+    ReplaceWithValue(node, input);
+    node->Kill();
+    return Replace(input);
+  }
+  return TakeStatesFromFirstControl(node);
 }
 
 Reduction WasmGCOperatorReducer::ReduceWasmTypeCast(Node* node) {
