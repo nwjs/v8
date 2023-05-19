@@ -24,6 +24,7 @@
 #include "src/heap/combined-heap.h"
 #include "src/objects/objects-inl.h"
 #include "src/runtime/runtime-utils.h"
+#include "src/snapshot/embedded/embedded-data.h"
 #include "src/utils/ostreams.h"
 
 #if V8_OS_WIN
@@ -2553,7 +2554,7 @@ void Simulator::CompareAndSwapHelper(const Instruction* instr) {
   T data = MemoryRead<T>(address);
   if (is_acquire) {
     // Approximate load-acquire by issuing a full barrier after the load.
-    __sync_synchronize();
+    std::atomic_thread_fence(std::memory_order_seq_cst);
   }
 
   if (data == comparevalue) {
@@ -2563,7 +2564,7 @@ void Simulator::CompareAndSwapHelper(const Instruction* instr) {
       local_monitor_.NotifyStore();
       GlobalMonitor::Get()->NotifyStore_Locked(&global_monitor_processor_);
       // Approximate store-release by issuing a full barrier before the store.
-      __sync_synchronize();
+      std::atomic_thread_fence(std::memory_order_seq_cst);
     }
 
     MemoryWrite<T>(address, newvalue);
@@ -2609,7 +2610,7 @@ void Simulator::CompareAndSwapPairHelper(const Instruction* instr) {
 
   if (is_acquire) {
     // Approximate load-acquire by issuing a full barrier after the load.
-    __sync_synchronize();
+    std::atomic_thread_fence(std::memory_order_seq_cst);
   }
 
   bool same =
@@ -2621,7 +2622,7 @@ void Simulator::CompareAndSwapPairHelper(const Instruction* instr) {
       local_monitor_.NotifyStore();
       GlobalMonitor::Get()->NotifyStore_Locked(&global_monitor_processor_);
       // Approximate store-release by issuing a full barrier before the store.
-      __sync_synchronize();
+      std::atomic_thread_fence(std::memory_order_seq_cst);
     }
 
     MemoryWrite<T>(address, newvalue_low);
@@ -2665,7 +2666,7 @@ void Simulator::AtomicMemorySimpleHelper(const Instruction* instr) {
 
   if (is_acquire) {
     // Approximate load-acquire by issuing a full barrier after the load.
-    __sync_synchronize();
+    std::atomic_thread_fence(std::memory_order_seq_cst);
   }
 
   T result = 0;
@@ -2702,7 +2703,7 @@ void Simulator::AtomicMemorySimpleHelper(const Instruction* instr) {
     local_monitor_.NotifyStore();
     GlobalMonitor::Get()->NotifyStore_Locked(&global_monitor_processor_);
     // Approximate store-release by issuing a full barrier before the store.
-    __sync_synchronize();
+    std::atomic_thread_fence(std::memory_order_seq_cst);
   }
 
   MemoryWrite<T>(address, result);
@@ -2733,7 +2734,7 @@ void Simulator::AtomicMemorySwapHelper(const Instruction* instr) {
   T data = MemoryRead<T>(address);
   if (is_acquire) {
     // Approximate load-acquire by issuing a full barrier after the load.
-    __sync_synchronize();
+    std::atomic_thread_fence(std::memory_order_seq_cst);
   }
 
   if (is_release) {
@@ -2741,7 +2742,7 @@ void Simulator::AtomicMemorySwapHelper(const Instruction* instr) {
     local_monitor_.NotifyStore();
     GlobalMonitor::Get()->NotifyStore_Locked(&global_monitor_processor_);
     // Approximate store-release by issuing a full barrier before the store.
-    __sync_synchronize();
+    std::atomic_thread_fence(std::memory_order_seq_cst);
   }
   MemoryWrite<T>(address, reg<T>(rs));
 
@@ -3738,11 +3739,7 @@ void Simulator::VisitSystem(Instruction* instr) {
         UNIMPLEMENTED();
     }
   } else if (instr->Mask(MemBarrierFMask) == MemBarrierFixed) {
-#if defined(V8_OS_WIN)
-    MemoryBarrier();
-#else
-    __sync_synchronize();
-#endif
+    std::atomic_thread_fence(std::memory_order_seq_cst);
   } else {
     UNIMPLEMENTED();
   }
@@ -4186,6 +4183,13 @@ void Simulator::VisitException(Instruction* instr) {
           } else {
             PrintF(stream_, "# %sDebugger hit %d.%s\n", clr_debug_number, code,
                    clr_normal);
+          }
+          Builtin maybe_builtin = OffHeapInstructionStream::TryLookupCode(
+              Isolate::Current(), reinterpret_cast<Address>(pc_));
+          if (Builtins::IsBuiltinId(maybe_builtin)) {
+            char const* name = Builtins::name(maybe_builtin);
+            PrintF(stream_, "# %s                %sLOCATION: %s%s\n",
+                   clr_debug_number, clr_debug_message, name, clr_normal);
           }
         }
 

@@ -24,7 +24,7 @@ namespace internal {
  * - s5 : Currently loaded character. Must be loaded using
  *        LoadCurrentCharacter before using any of the dispatch methods.
  * - s6 : Points to tip of backtrack stack
- * - s7 : End of input (points to byte after last character in input).
+ * - s8 : End of input (points to byte after last character in input).
  * - fp : Frame pointer. Used to access arguments, local variables and
  *        RegExp registers.
  * - sp : Points to tip of C stack.
@@ -38,7 +38,7 @@ namespace internal {
  *  --- sp when called ---
  *  - fp[72]  ra                  Return from RegExp code (ra).                  kReturnAddress
  *  - fp[64]  old-fp              Old fp, callee saved(s9).
- *  - fp[0..63]  s1..s78          Callee-saved registers fp..s7.
+ *  - fp[0..63]  s1..s11          Callee-saved registers fp..s11.
  *  --- frame pointer ----
  *  - fp[-8]  frame marker
  *  - fp[-16]  Isolate* isolate   (address of the current isolate)               kIsolate
@@ -672,8 +672,8 @@ Handle<HeapObject> RegExpMacroAssemblerRISCV::GetCode(Handle<String> source) {
     // Order here should correspond to order of offset constants in header file.
     // TODO(plind): we save fp..s11, but ONLY use s3 here - use the regs
     // or dont save.
-    RegList registers_to_retain = {fp, s1, s2, s3, s4,
-                                   s5, s6, s7, s8 /*, s9, s10, s11*/};
+    RegList registers_to_retain = {fp, s1, s2, s3, s4,  s5,
+                                   s6, s7, s8, s9, s10, s11};
     DCHECK(registers_to_retain.Count() == kNumCalleeRegsToRetain);
 
     // The remaining arguments are passed in registers, e.g.by calling the code
@@ -717,7 +717,7 @@ Handle<HeapObject> RegExpMacroAssemblerRISCV::GetCode(Handle<String> source) {
 
     // Initialize backtrack stack pointer. It must not be clobbered from here
     // on. Note the backtrack_stackpointer is callee-saved.
-    static_assert(backtrack_stackpointer() == s7);
+    static_assert(backtrack_stackpointer() == s8);
     LoadRegExpStackPointerFromMemory(backtrack_stackpointer());
     // Store the regexp base pointer - we'll later restore it / write it to
     // memory when returning from this irregexp code object.
@@ -876,19 +876,17 @@ Handle<HeapObject> RegExpMacroAssemblerRISCV::GetCode(Handle<String> source) {
         __ AddWord(a2, a2, num_saved_registers_ * kIntSize);
         __ StoreWord(a2, MemOperand(frame_pointer(), kRegisterOutputOffset));
 
-        // Prepare a0 to initialize registers with its value in the next run.
-        __ LoadWord(a0,
-                    MemOperand(frame_pointer(), kStringStartMinusOneOffset));
-
         // Restore the original regexp stack pointer value (effectively, pop the
         // stored base pointer).
         PopRegExpBasePointer(backtrack_stackpointer(), a2);
+
+        Label reload_string_start_minus_one;
 
         if (global_with_zero_length_check()) {
           // Special case for zero-length matches.
           // s3: capture start index
           // Not a zero-length match, restart.
-          __ Branch(&load_char_start_regexp, ne, current_input_offset(),
+          __ Branch(&reload_string_start_minus_one, ne, current_input_offset(),
                     Operand(s3));
           // Offset from the end is zero if we already reached the end.
           __ Branch(&exit_label_, eq, current_input_offset(),
@@ -900,6 +898,12 @@ Handle<HeapObject> RegExpMacroAssemblerRISCV::GetCode(Handle<String> source) {
                      Operand((mode_ == UC16) ? 2 : 1));
           if (global_unicode()) CheckNotInSurrogatePair(0, &advance);
         }
+
+        __ bind(&reload_string_start_minus_one);
+        // Prepare a0 to initialize registers with its value in the next run.
+        // Must be immediately before the jump to avoid clobbering.
+        __ LoadWord(a0,
+                    MemOperand(frame_pointer(), kStringStartMinusOneOffset));
 
         __ Branch(&load_char_start_regexp);
       } else {
@@ -1177,7 +1181,7 @@ void RegExpMacroAssemblerRISCV::CallCheckStackGuardState(Register scratch) {
 
   EmbeddedData d = EmbeddedData::FromBlob();
   CHECK(Builtins::IsIsolateIndependent(Builtin::kDirectCEntry));
-  Address entry = d.InstructionStartOfBuiltin(Builtin::kDirectCEntry);
+  Address entry = d.InstructionStartOf(Builtin::kDirectCEntry);
   __ li(kScratchReg, Operand(entry, RelocInfo::OFF_HEAP_TARGET));
   __ Call(kScratchReg);
 
