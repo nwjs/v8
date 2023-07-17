@@ -143,6 +143,7 @@ struct FrameStateOp;
   V(DoubleArrayMinMax)                \
   V(LoadFieldByIndex)                 \
   V(DebugBreak)                       \
+  V(DebugPrint)                       \
   V(BigIntBinop)                      \
   V(BigIntEqual)                      \
   V(BigIntComparison)                 \
@@ -1759,6 +1760,7 @@ struct StoreOp : OperationT<StoreOp> {
   WriteBarrierKind write_barrier;
   uint8_t element_size_log2;  // multiply index with 2^element_size_log2
   int32_t offset;             // add offset to scaled index
+  bool maybe_initializing_or_transitioning;
 
   OpProperties Properties() const {
     return kind.with_trap_handler ? OpProperties::WritingAndCanAbort()
@@ -1774,13 +1776,16 @@ struct StoreOp : OperationT<StoreOp> {
 
   StoreOp(OpIndex base, OpIndex index, OpIndex value, Kind kind,
           MemoryRepresentation stored_rep, WriteBarrierKind write_barrier,
-          int32_t offset, uint8_t element_size_log2)
+          int32_t offset, uint8_t element_size_log2,
+          bool maybe_initializing_or_transitioning)
       : Base(2 + index.valid()),
         kind(kind),
         stored_rep(stored_rep),
         write_barrier(write_barrier),
         element_size_log2(element_size_log2),
-        offset(offset) {
+        offset(offset),
+        maybe_initializing_or_transitioning(
+            maybe_initializing_or_transitioning) {
     input(0) = base;
     input(1) = value;
     if (index.valid()) {
@@ -1806,16 +1811,19 @@ struct StoreOp : OperationT<StoreOp> {
   static StoreOp& New(Graph* graph, OpIndex base, OpIndex index, OpIndex value,
                       Kind kind, MemoryRepresentation stored_rep,
                       WriteBarrierKind write_barrier, int32_t offset,
-                      uint8_t element_size_log2) {
+                      uint8_t element_size_log2,
+                      bool maybe_initializing_or_transitioning) {
     return Base::New(graph, 2 + index.valid(), base, index, value, kind,
-                     stored_rep, write_barrier, offset, element_size_log2);
+                     stored_rep, write_barrier, offset, element_size_log2,
+                     maybe_initializing_or_transitioning);
   }
 
   void PrintInputs(std::ostream& os, const std::string& op_index_prefix) const;
   void PrintOptions(std::ostream& os) const;
   auto options() const {
-    return std::tuple{kind, stored_rep, write_barrier, offset,
-                      element_size_log2};
+    return std::tuple{
+        kind,   stored_rep,        write_barrier,
+        offset, element_size_log2, maybe_initializing_or_transitioning};
   }
 };
 
@@ -1976,12 +1984,7 @@ struct FrameStateOp : OperationT<FrameStateOp> {
                const FrameStateData* data)
       : Base(inputs), inlined(inlined), data(data) {}
 
-  void Validate(const Graph& graph) const {
-    if (inlined) {
-      DCHECK(Get(graph, parent_frame_state()).Is<FrameStateOp>());
-    }
-    // TODO(tebbi): Check frame state inputs using `FrameStateData`.
-  }
+  void Validate(const Graph& graph) const;
   void PrintOptions(std::ostream& os) const;
   auto options() const { return std::tuple{inlined, data}; }
 };
@@ -2021,11 +2024,12 @@ struct DeoptimizeIfOp : FixedArityOperationT<2, DeoptimizeIfOp> {
   void Validate(const Graph& graph) const {
     DCHECK(
         ValidOpInputRep(graph, condition(), RegisterRepresentation::Word32()));
+    DCHECK(Get(graph, frame_state()).Is<FrameStateOp>());
   }
   auto options() const { return std::tuple{negated, parameters}; }
 };
 
-struct TrapIfOp : FixedArityOperationT<1, TrapIfOp> {
+struct TrapIfOp : OperationT<TrapIfOp> {
   bool negated;
   const TrapId trap_id;
 
@@ -2033,13 +2037,31 @@ struct TrapIfOp : FixedArityOperationT<1, TrapIfOp> {
   base::Vector<const RegisterRepresentation> outputs_rep() const { return {}; }
 
   OpIndex condition() const { return input(0); }
+  OpIndex frame_state() const {
+    return input_count > 1 ? input(1) : OpIndex::Invalid();
+  }
 
-  TrapIfOp(OpIndex condition, bool negated, const TrapId trap_id)
-      : Base(condition), negated(negated), trap_id(trap_id) {}
+  TrapIfOp(OpIndex condition, OpIndex frame_state, bool negated,
+           const TrapId trap_id)
+      : Base(1 + frame_state.valid()), negated(negated), trap_id(trap_id) {
+    input(0) = condition;
+    if (frame_state.valid()) {
+      input(1) = frame_state;
+    }
+  }
+
+  static TrapIfOp& New(Graph* graph, OpIndex condition, OpIndex frame_state,
+                       bool negated, const TrapId trap_id) {
+    return Base::New(graph, 1 + frame_state.valid(), condition, frame_state,
+                     negated, trap_id);
+  }
 
   void Validate(const Graph& graph) const {
     DCHECK(
         ValidOpInputRep(graph, condition(), RegisterRepresentation::Word32()));
+    if (frame_state().valid()) {
+      DCHECK(Get(graph, frame_state()).Is<FrameStateOp>());
+    }
   }
   auto options() const { return std::tuple{negated, trap_id}; }
 };
@@ -3124,6 +3146,25 @@ struct DebugBreakOp : FixedArityOperationT<0, DebugBreakOp> {
   auto options() const { return std::tuple{}; }
 };
 
+struct DebugPrintOp : FixedArityOperationT<1, DebugPrintOp> {
+  RegisterRepresentation rep;
+
+  static constexpr OpProperties properties = OpProperties::AnySideEffects();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<>();
+  }
+
+  OpIndex input() const { return Base::input(0); }
+
+  DebugPrintOp(OpIndex input, RegisterRepresentation rep)
+      : Base(input), rep(rep) {}
+  void Validate(const Graph& graph) const {
+    DCHECK(ValidOpInputRep(graph, input(), rep));
+  }
+
+  auto options() const { return std::tuple{rep}; }
+};
+
 struct BigIntBinopOp : FixedArityOperationT<3, BigIntBinopOp> {
   enum class Kind : uint8_t {
     kAdd,
@@ -3683,8 +3724,8 @@ struct TransitionAndStoreArrayElementOp
     kSignedSmallElement,
   };
   Kind kind;
-  Handle<Map> fast_map;
-  Handle<Map> double_map;
+  MaybeHandle<Map> fast_map;
+  MaybeHandle<Map> double_map;
 
   static constexpr OpProperties properties = OpProperties::Writing();
   base::Vector<const RegisterRepresentation> outputs_rep() const { return {}; }
@@ -3694,8 +3735,8 @@ struct TransitionAndStoreArrayElementOp
   OpIndex value() const { return Base::input(2); }
 
   TransitionAndStoreArrayElementOp(OpIndex array, OpIndex index, OpIndex value,
-                                   Kind kind, Handle<Map> fast_map,
-                                   Handle<Map> double_map)
+                                   Kind kind, MaybeHandle<Map> fast_map,
+                                   MaybeHandle<Map> double_map)
       : Base(array, index, value),
         kind(kind),
         fast_map(fast_map),

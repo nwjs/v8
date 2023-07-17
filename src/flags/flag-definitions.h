@@ -261,7 +261,7 @@ DEFINE_BOOL(harmony_shipping, true, "enable all shipped harmony features")
   V(harmony_array_grouping, "harmony array grouping") \
   V(harmony_iterator_helpers, "JavaScript iterator helpers")
 
-DEFINE_IMPLICATION(harmony_rab_gsab_transfer, harmony_rab_gsab)
+DEFINE_WEAK_IMPLICATION(harmony_rab_gsab_transfer, harmony_rab_gsab)
 
 #ifdef V8_INTL_SUPPORT
 #define HARMONY_STAGED(V) HARMONY_STAGED_BASE(V)
@@ -448,11 +448,6 @@ DEFINE_BOOL_READONLY(conservative_stack_scanning,
 DEFINE_IMPLICATION(conservative_stack_scanning, minor_mc)
 DEFINE_NEG_IMPLICATION(conservative_stack_scanning, compact_with_stack)
 
-#if V8_ENABLE_WEBASSEMBLY
-DEFINE_NEG_IMPLICATION(conservative_stack_scanning,
-                       experimental_wasm_stack_switching)
-#endif  // V8_ENABLE_WEBASSEMBLY
-
 #ifdef V8_ENABLE_DIRECT_LOCAL
 #define V8_ENABLE_DIRECT_LOCAL_BOOL true
 #else
@@ -482,15 +477,11 @@ DEFINE_EXPERIMENTAL_FEATURE(
     maglev_future,
     "enable maglev features that we want to ship in the not-too-far future")
 DEFINE_IMPLICATION(maglev_future, maglev)
-DEFINE_EXPERIMENTAL_FEATURE(maglev_inlining,
-                            "enable inlining in the maglev optimizing compiler")
-DEFINE_EXPERIMENTAL_FEATURE(
-    maglev_untagged_phis,
-    "enable phi untagging in the maglev optimizing compiler")
+DEFINE_BOOL(maglev_inlining, true,
+            "enable inlining in the maglev optimizing compiler")
 DEFINE_BOOL(maglev_loop_peeling, false,
             "enable loop peeling in the maglev optimizing compiler")
 DEFINE_WEAK_IMPLICATION(maglev_future, maglev_inlining)
-DEFINE_WEAK_IMPLICATION(maglev_future, maglev_untagged_phis)
 DEFINE_WEAK_IMPLICATION(maglev_future, maglev_loop_peeling)
 
 DEFINE_INT(max_maglev_inline_depth, 1,
@@ -503,8 +494,15 @@ DEFINE_INT(max_maglev_inlined_bytecode_size_small, 27,
            "maximum size of bytecode considered for small function inlining")
 DEFINE_FLOAT(min_maglev_inlining_frequency, 0.10,
              "minimum frequency for inlining")
+DEFINE_WEAK_VALUE_IMPLICATION(turbofan, max_maglev_inline_depth, 1)
+DEFINE_WEAK_VALUE_IMPLICATION(turbofan, max_maglev_inlined_bytecode_size, 100)
+DEFINE_WEAK_VALUE_IMPLICATION(turbofan,
+                              max_maglev_inlined_bytecode_size_cumulative, 920)
+DEFINE_WEAK_VALUE_IMPLICATION(turbofan, min_maglev_inlining_frequency, 0.95)
 DEFINE_BOOL(maglev_reuse_stack_slots, true,
             "reuse stack slots in the maglev optimizing compiler")
+DEFINE_BOOL(maglev_untagged_phis, true,
+            "enable phi untagging in the maglev optimizing compiler")
 
 DEFINE_BOOL(
     optimize_on_next_call_optimizes_to_maglev, false,
@@ -536,7 +534,10 @@ DEFINE_BOOL(maglev_assert, false, "insert extra assertion in maglev code")
 DEFINE_DEBUG_BOOL(maglev_assert_stack_size, true,
                   "insert stack size checks before every IR node")
 DEFINE_BOOL(maglev_break_on_entry, false, "insert an int3 on maglev entries")
-DEFINE_BOOL(print_maglev_graph, false, "print maglev graph")
+DEFINE_BOOL(print_maglev_graph, false, "print the final maglev graph")
+DEFINE_BOOL(print_maglev_graphs, false, "print maglev graph across all phases")
+DEFINE_BOOL(maglev_print_feedback, true,
+            "print feedback vector for maglev compiled code")
 DEFINE_BOOL(print_maglev_deopt_verbose, false, "print verbose deopt info")
 DEFINE_BOOL(print_maglev_code, false, "print maglev code")
 DEFINE_BOOL(trace_maglev_graph_building, false, "trace maglev graph building")
@@ -647,6 +648,8 @@ DEFINE_INT(minor_mc_page_promotion_threshold, 50,
 DEFINE_INT(minor_mc_page_promotion_max_lab_threshold, 30,
            "max percentage of labs out of a page to still be considered for "
            "page promotion")
+DEFINE_BOOL(minor_mc_shortcut_strings, false,
+            "short cut strings during marking")
 DEFINE_BOOL(trace_page_promotions, false, "trace page promotion decisions")
 DEFINE_BOOL(trace_pretenuring, false,
             "trace pretenuring decisions of HAllocate instructions")
@@ -677,21 +680,21 @@ DEFINE_INT(invocation_count_for_feedback_allocation, 8,
            "invocation count required for allocating feedback vectors")
 
 // Tiering: Maglev.
-DEFINE_INT(invocation_count_for_maglev, 100,
+DEFINE_INT(invocation_count_for_maglev, 400,
            "invocation count required for optimizing with Maglev")
+DEFINE_BOOL(osr_from_maglev, false,
+            "whether we try to OSR to Turbofan from Maglev")
 
 // Tiering: Turbofan.
-DEFINE_INT(invocation_count_for_turbofan, 2400,
+DEFINE_INT(invocation_count_for_turbofan, 3000,
            "invocation count required for optimizing with TurboFan")
 DEFINE_INT(invocation_count_for_osr, 500, "invocation count required for OSR")
-DEFINE_INT(osr_to_tierup, 200,
+DEFINE_INT(osr_to_tierup, 1,
            "number to decrease the invocation budget by when we follow OSR")
 DEFINE_INT(minimum_invocations_after_ic_update, 500,
            "How long to minimally wait after IC update before tier up")
 DEFINE_INT(minimum_invocations_before_optimization, 2,
            "Minimum number of invocations we need before non-OSR optimization")
-
-DEFINE_WEAK_VALUE_IMPLICATION(maglev, minimum_invocations_after_ic_update, 400)
 
 // Tiering: JIT fuzzing.
 //
@@ -726,9 +729,8 @@ DEFINE_BOOL(ignition_filter_expression_positions, true,
 DEFINE_BOOL(ignition_share_named_property_feedback, true,
             "share feedback slots when loading the same named property from "
             "the same object")
-DEFINE_BOOL(ignition_elide_redundant_tdz_checks, false,
+DEFINE_BOOL(ignition_elide_redundant_tdz_checks, true,
             "elide TDZ checks dominated by other TDZ checks")
-DEFINE_WEAK_IMPLICATION(future, ignition_elide_redundant_tdz_checks)
 DEFINE_BOOL(print_bytecode, false,
             "print bytecode generated by ignition interpreter")
 DEFINE_BOOL(enable_lazy_source_positions, V8_LAZY_SOURCE_POSITIONS_BOOL,
@@ -819,8 +821,8 @@ DEFINE_BOOL(trace_baseline_concurrent_compilation, false,
 // Internalize into a shared string table in the shared isolate
 DEFINE_BOOL(shared_string_table, false, "internalize strings into shared table")
 DEFINE_IMPLICATION(harmony_struct, shared_string_table)
-DEFINE_BOOL(
-    always_use_string_forwarding_table, false,
+DEFINE_EXPERIMENTAL_FEATURE(
+    always_use_string_forwarding_table,
     "use string forwarding table instead of thin strings for all strings")
 // With --always-use-string-forwarding-table, we can have young generation
 // string entries in the forwarding table, requiring table updates when these
@@ -908,6 +910,9 @@ DEFINE_BOOL(
     stress_turbo_late_spilling, false,
     "optimize placement of all spill instructions, not just loop-top phis")
 
+DEFINE_BOOL(turbo_wasm_address_reassociation, true,
+            "refactor address components for immediate indexing")
+
 DEFINE_STRING(turbo_filter, "*", "optimization filter for TurboFan compiler")
 DEFINE_BOOL(trace_turbo, false, "trace generated TurboFan IR")
 DEFINE_STRING(trace_turbo_path, nullptr,
@@ -989,6 +994,8 @@ DEFINE_BOOL(trace_turbo_inlining, false, "trace TurboFan inlining")
 DEFINE_BOOL(turbo_inline_array_builtins, true,
             "inline array builtins in TurboFan code")
 DEFINE_BOOL(use_osr, true, "use on-stack replacement")
+DEFINE_EXPERIMENTAL_FEATURE(maglev_osr,
+                            "use maglev as on-stack replacement target")
 DEFINE_BOOL(concurrent_osr, true, "enable concurrent OSR")
 
 // TODO(dmercadier): re-enable Turbofan's string builder once it's fixed.
@@ -1078,8 +1085,6 @@ DEFINE_BOOL(turbo_optimize_math_minmax, true,
 
 DEFINE_BOOL(turbo_collect_feedback_in_generic_lowering, false,
             "enable experimental feedback collection in generic lowering.")
-DEFINE_BOOL(isolate_script_cache_ageing, true,
-            "enable ageing of the isolate script cache.")
 
 DEFINE_EXPERIMENTAL_FEATURE(turboshaft,
                             "enable TurboFan's Turboshaft phases for JS")
@@ -1087,6 +1092,9 @@ DEFINE_BOOL(turboshaft_trace_reduction, false,
             "trace individual Turboshaft reduction steps")
 DEFINE_EXPERIMENTAL_FEATURE(turboshaft_wasm,
                             "enable TurboFan's Turboshaft phases for wasm")
+DEFINE_EXPERIMENTAL_FEATURE(turboshaft_typed_optimizations,
+                            "enable an additional Turboshaft phase that "
+                            "performs optimizations based on type information")
 #ifdef DEBUG
 DEFINE_UINT64(turboshaft_opt_bisect_limit, std::numeric_limits<uint64_t>::max(),
               "stop applying optional optimizations after a specified number "
@@ -1542,6 +1550,7 @@ DEFINE_BOOL(memory_reducer_for_small_heaps, true,
             "use memory reducer for small heaps")
 DEFINE_BOOL(memory_reducer_single_gc, false,
             "only schedule a single GC from memory reducer")
+DEFINE_WEAK_IMPLICATION(future, memory_reducer_single_gc)
 DEFINE_INT(heap_growing_percent, 0,
            "specifies heap growing factor as (1 + heap_growing_percent/100)")
 DEFINE_INT(v8_os_page_size, 0, "override OS page size (in KBytes)")
@@ -1570,8 +1579,11 @@ DEFINE_BOOL(flush_baseline_code, false,
 DEFINE_BOOL(flush_bytecode, true,
             "flush of bytecode when it has not been executed recently")
 DEFINE_INT(bytecode_old_age, 5, "number of gcs before we flush code")
+DEFINE_BOOL(flush_code_based_on_time, false,
+            "Use time-base code flushing instead of age.")
+DEFINE_INT(bytecode_old_time, 30, "number of seconds before we flush code")
 DEFINE_BOOL(stress_flush_code, false, "stress code flushing")
-DEFINE_BOOL(trace_flush_bytecode, false, "trace bytecode flushing")
+DEFINE_BOOL(trace_flush_code, false, "trace bytecode flushing")
 DEFINE_BOOL(use_marking_progress_bar, true,
             "Use a progress bar to scan large objects in increments when "
             "incremental marking is active.")
@@ -1605,6 +1617,9 @@ DEFINE_BOOL(gc_experiment_less_compaction, false,
 DEFINE_INT(gc_memory_reducer_start_delay_ms, 8000,
            "Delay before memory reducer start")
 
+DEFINE_BOOL(concurrent_marking_high_priority_threads, false,
+            "use high priority threads for concurrent Marking")
+
 DEFINE_BOOL(disable_abortjs, false, "disables AbortJS runtime function")
 
 DEFINE_BOOL(randomize_all_allocations, false,
@@ -1616,9 +1631,6 @@ DEFINE_BOOL(manual_evacuation_candidates_selection, false,
             "candidates pages (requires --stress_compaction).")
 
 DEFINE_BOOL(clear_free_memory, false, "initialize free memory with 0")
-
-DEFINE_BOOL(crash_on_aborted_evacuation, false,
-            "crash when evacuation of page fails")
 
 // v8::CppHeap flags that allow fine-grained control of how C++ memory is
 // reclaimed in the garbage collector.
@@ -2168,6 +2180,7 @@ DEFINE_BOOL(trace_minor_mc_parallel_marking, false,
             "trace parallel marking for the young generation")
 DEFINE_BOOL(minor_mc, false, "perform young generation mark compact GCs")
 DEFINE_IMPLICATION(minor_mc, separate_gc_phases)
+DEFINE_IMPLICATION(minor_mc, page_promotion)
 
 DEFINE_EXPERIMENTAL_FEATURE(concurrent_minor_mc_marking,
                             "perform young generation marking concurrently")

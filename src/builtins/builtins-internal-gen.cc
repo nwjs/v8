@@ -154,9 +154,8 @@ class WriteBarrierCodeStubAssembler : public CodeStubAssembler {
     TNode<IntPtrT> cell;
     TNode<IntPtrT> mask;
     GetMarkBit(object, &cell, &mask);
-    TNode<Int32T> mask32 = TruncateIntPtrToInt32(mask);
     // Marked only requires checking a single bit here.
-    return Word32Equal(Word32And(Load<Int32T>(cell), mask32), Int32Constant(0));
+    return WordEqual(WordAnd(Load<IntPtrT>(cell), mask), IntPtrConstant(0));
   }
 
   void GetMarkBit(TNode<IntPtrT> object, TNode<IntPtrT>* cell,
@@ -762,7 +761,7 @@ class DeletePropertyBaseAssembler : public AccessorAssembler {
                                 TNode<IntPtrT> key_index,
                                 TNode<Context> context) {
     // Overwrite the entry itself (see NameDictionary::SetEntry).
-    TNode<Oddball> filler = TheHoleConstant();
+    TNode<Hole> filler = TheHoleConstant();
     DCHECK(RootsTable::IsImmortalImmovable(RootIndex::kTheHoleValue));
     StoreFixedArrayElement(properties, key_index, filler, SKIP_WRITE_BARRIER);
     StoreValueByKeyIndex<NameDictionary>(properties, key_index, filler,
@@ -1390,9 +1389,12 @@ TF_BUILTIN(GetProperty, CodeStubAssembler) {
           TNode<Name> unique_name, Label* next_holder, Label* if_bailout) {
         TVARIABLE(Object, var_value);
         Label if_found(this);
+        // If we get here then it's guaranteed that |object| (and thus the
+        // |receiver|) is a JSReceiver.
         TryGetOwnProperty(context, receiver, CAST(holder), holder_map,
                           holder_instance_type, unique_name, &if_found,
-                          &var_value, next_holder, if_bailout);
+                          &var_value, next_holder, if_bailout,
+                          kExpectingJSReceiver);
         BIND(&if_found);
         Return(var_value.value());
       };
@@ -1447,7 +1449,8 @@ TF_BUILTIN(GetPropertyWithReceiver, CodeStubAssembler) {
         Label if_found(this);
         TryGetOwnProperty(context, receiver, CAST(holder), holder_map,
                           holder_instance_type, unique_name, &if_found,
-                          &var_value, next_holder, if_bailout);
+                          &var_value, next_holder, if_bailout,
+                          kExpectingAnyReceiver);
         BIND(&if_found);
         Return(var_value.value());
       };
@@ -1574,9 +1577,8 @@ TF_BUILTIN(FindNonDefaultConstructorOrConstruct, CodeStubAssembler) {
   Label found_default_base_ctor(this, &constructor),
       found_something_else(this, &constructor);
 
-  FindNonDefaultConstructorOrConstruct(context, this_function, constructor,
-                                       &found_default_base_ctor,
-                                       &found_something_else);
+  FindNonDefaultConstructor(this_function, constructor,
+                            &found_default_base_ctor, &found_something_else);
 
   BIND(&found_default_base_ctor);
   {

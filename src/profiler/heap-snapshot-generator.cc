@@ -643,7 +643,7 @@ void HeapObjectsMap::UpdateHeapObjectsMap() {
     PrintF("Begin HeapObjectsMap::UpdateHeapObjectsMap. map has %d entries.\n",
            entries_map_.occupancy());
   }
-  heap_->PreciseCollectAllGarbage(Heap::kNoGCFlags,
+  heap_->PreciseCollectAllGarbage(GCFlag::kNoFlags,
                                   GarbageCollectionReason::kHeapProfiler);
   PtrComprCageBase cage_base(heap_->isolate());
   CombinedHeapObjectIterator iterator(heap_);
@@ -788,22 +788,29 @@ HeapEntry* V8HeapExplorer::AllocateEntry(Smi smi) {
   return entry;
 }
 
-void V8HeapExplorer::ExtractLocation(HeapEntry* entry, HeapObject object) {
-  if (object.IsJSFunction()) {
-    JSFunction func = JSFunction::cast(object);
-    ExtractLocationForJSFunction(entry, func);
+JSFunction V8HeapExplorer::GetLocationFunction(HeapObject object) {
+  DisallowHeapAllocation no_gc;
 
+  if (object.IsJSFunction()) {
+    return JSFunction::cast(object);
   } else if (object.IsJSGeneratorObject()) {
     JSGeneratorObject gen = JSGeneratorObject::cast(object);
-    ExtractLocationForJSFunction(entry, gen.function());
-
+    return gen.function();
   } else if (object.IsJSObject()) {
     JSObject obj = JSObject::cast(object);
     JSFunction maybe_constructor = GetConstructor(heap_->isolate(), obj);
 
-    if (!maybe_constructor.is_null()) {
-      ExtractLocationForJSFunction(entry, maybe_constructor);
-    }
+    return maybe_constructor;
+  }
+
+  return JSFunction();
+}
+
+void V8HeapExplorer::ExtractLocation(HeapEntry* entry, HeapObject object) {
+  DisallowHeapAllocation no_gc;
+  JSFunction func = GetLocationFunction(object);
+  if (!func.is_null()) {
+    ExtractLocationForJSFunction(entry, func);
   }
 }
 
@@ -813,6 +820,7 @@ void V8HeapExplorer::ExtractLocationForJSFunction(HeapEntry* entry,
   Script script = Script::cast(func.shared().script());
   int scriptId = script.id();
   int start = func.shared().StartPosition();
+  DCHECK(script.has_line_ends());
   Script::PositionInfo info;
   script.GetPositionInfo(start, &info);
   snapshot_->AddLocation(entry, scriptId, info.line, info.column);
@@ -1023,6 +1031,26 @@ HeapEntry::Type V8HeapExplorer::GetSystemEntryType(HeapObject object) {
   return HeapEntry::kHidden;
 }
 
+void V8HeapExplorer::PopulateLineEnds() {
+  std::vector<Handle<Script>> scripts;
+  HandleScope scope(isolate());
+
+  {
+    Script::Iterator iterator(isolate());
+    for (Script script = iterator.Next(); !script.is_null();
+         script = iterator.Next()) {
+        if (!script.has_line_ends()) {
+        scripts.push_back(handle(script, isolate()));
+        }
+    }
+  }
+
+  DCHECK(AllowHeapAllocation::IsAllowed());
+  for (auto& script : scripts) {
+    Script::InitLineEnds(isolate(), script);
+  }
+}
+
 uint32_t V8HeapExplorer::EstimateObjectsCount() {
   CombinedHeapObjectIterator it(heap_, HeapObjectIterator::kFilterUnreachable);
   uint32_t objects_count = 0;
@@ -1083,7 +1111,8 @@ class IndexedReferencesExtractor : public ObjectVisitorWithCageBases {
     }
   }
 
-  void VisitCodePointer(Code host, CodeObjectSlot slot) override {
+  void VisitInstructionStreamPointer(Code host,
+                                     InstructionStreamSlot slot) override {
     VisitSlotImpl(code_cage_base(), slot);
   }
 
@@ -2196,7 +2225,8 @@ bool V8HeapExplorer::IsEssentialObject(Object object) {
   }
   Isolate* isolate = heap_->isolate();
   ReadOnlyRoots roots(isolate);
-  return !object.IsOddball(isolate) && object != roots.empty_byte_array() &&
+  return !object.IsOddball(isolate) && object != roots.the_hole_value() &&
+         object != roots.empty_byte_array() &&
          object != roots.empty_fixed_array() &&
          object != roots.empty_weak_fixed_array() &&
          object != roots.empty_descriptor_array() &&
@@ -2771,12 +2801,14 @@ bool NativeObjectsExplorer::IterateAndExtractReferences(
 
 HeapSnapshotGenerator::HeapSnapshotGenerator(
     HeapSnapshot* snapshot, v8::ActivityControl* control,
-    v8::HeapProfiler::ObjectNameResolver* resolver, Heap* heap)
+    v8::HeapProfiler::ObjectNameResolver* resolver, Heap* heap,
+    cppgc::EmbedderStackState stack_state)
     : snapshot_(snapshot),
       control_(control),
       v8_heap_explorer_(snapshot_, this, resolver),
       dom_explorer_(snapshot_, this),
-      heap_(heap) {}
+      heap_(heap),
+      stack_state_(stack_state) {}
 
 namespace {
 class V8_NODISCARD NullContextForSnapshotScope {
@@ -2798,9 +2830,12 @@ bool HeapSnapshotGenerator::GenerateSnapshot() {
   timer.Start();
 
   Isolate* isolate = Isolate::FromHeap(heap_);
+  v8_heap_explorer_.PopulateLineEnds();
   base::Optional<HandleScope> handle_scope(base::in_place, isolate);
   v8_heap_explorer_.CollectGlobalObjectsTags();
 
+  EmbedderStackStateScope stack_scope(
+      heap_, EmbedderStackStateScope::kImplicitThroughTask, stack_state_);
   heap_->CollectAllAvailableGarbage(GarbageCollectionReason::kHeapProfiler);
 
   NullContextForSnapshotScope null_context_scope(isolate);
@@ -2974,8 +3009,7 @@ template<> struct ToUnsigned<8> {
 }  // namespace
 
 template <typename T>
-static int utoa_impl(T value, const base::Vector<char>& buffer,
-                     int buffer_pos) {
+static int utoa_impl(T value, base::Vector<char> buffer, int buffer_pos) {
   static_assert(static_cast<T>(-1) > 0);  // Check that T is unsigned
   int number_of_digits = 0;
   T t = value;
@@ -2994,7 +3028,7 @@ static int utoa_impl(T value, const base::Vector<char>& buffer,
 }
 
 template <typename T>
-static int utoa(T value, const base::Vector<char>& buffer, int buffer_pos) {
+static int utoa(T value, base::Vector<char> buffer, int buffer_pos) {
   typename ToUnsigned<sizeof(value)>::Type unsigned_value = value;
   static_assert(sizeof(value) == sizeof(unsigned_value));
   return utoa_impl(unsigned_value, buffer, buffer_pos);
@@ -3215,7 +3249,7 @@ void HeapSnapshotJSONSerializer::SerializeTraceNode(AllocationTraceNode* node) {
 
 
 // 0-based position is converted to 1-based during the serialization.
-static int SerializePosition(int position, const base::Vector<char>& buffer,
+static int SerializePosition(int position, base::Vector<char> buffer,
                              int buffer_pos) {
   if (position == -1) {
     buffer[buffer_pos++] = '0';

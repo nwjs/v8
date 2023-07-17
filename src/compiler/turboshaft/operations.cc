@@ -15,10 +15,12 @@
 #include "src/common/globals.h"
 #include "src/compiler/backend/instruction-selector.h"
 #include "src/compiler/frame-states.h"
+#include "src/compiler/graph-visualizer.h"
 #include "src/compiler/machine-operator.h"
 #include "src/compiler/turboshaft/deopt-data.h"
 #include "src/compiler/turboshaft/graph.h"
 #include "src/handles/handles-inl.h"
+#include "src/handles/maybe-handles-inl.h"
 
 namespace v8::internal {
 std::ostream& operator<<(std::ostream& os, AbortReason reason) {
@@ -448,10 +450,10 @@ void ConstantOp::PrintOptions(std::ostream& os) const {
       os << "external: " << external_reference();
       break;
     case Kind::kHeapObject:
-      os << "heap object: " << handle();
+      os << "heap object: " << JSONEscaped(handle());
       break;
     case Kind::kCompressedHeapObject:
-      os << "compressed heap object: " << handle();
+      os << "compressed heap object: " << JSONEscaped(handle());
       break;
     case Kind::kRelocatableWasmCall:
       os << "relocatable wasm call: 0x"
@@ -519,6 +521,7 @@ void StoreOp::PrintOptions(std::ostream& os) const {
   if (element_size_log2 != 0)
     os << ", element size: 2^" << int{element_size_log2};
   if (offset != 0) os << ", offset: " << offset;
+  if (maybe_initializing_or_transitioning) os << ", initializing";
   os << "]";
 }
 
@@ -584,6 +587,54 @@ void FrameStateOp::PrintOptions(std::ostream& os) const {
     }
   }
   os << "]";
+}
+
+void FrameStateOp::Validate(const Graph& graph) const {
+  if (inlined) {
+    DCHECK(Get(graph, parent_frame_state()).Is<FrameStateOp>());
+  }
+  FrameStateData::Iterator it = data->iterator(state_values());
+  while (it.has_more()) {
+    switch (it.current_instr()) {
+      case FrameStateData::Instr::kInput: {
+        MachineType type;
+        OpIndex input;
+        it.ConsumeInput(&type, &input);
+        RegisterRepresentation rep =
+            RegisterRepresentation::FromMachineRepresentation(
+                type.representation());
+        if (rep == RegisterRepresentation::Tagged()) {
+          // The deoptimizer can handle compressed values.
+          rep = RegisterRepresentation::Compressed();
+        }
+        DCHECK(ValidOpInputRep(graph, input, rep));
+        break;
+      }
+      case FrameStateData::Instr::kUnusedRegister:
+        it.ConsumeUnusedRegister();
+        break;
+      case FrameStateData::Instr::kDematerializedObject: {
+        uint32_t id;
+        uint32_t field_count;
+        it.ConsumeDematerializedObject(&id, &field_count);
+        break;
+      }
+      case FrameStateData::Instr::kDematerializedObjectReference: {
+        uint32_t id;
+        it.ConsumeDematerializedObjectReference(&id);
+        break;
+      }
+      case FrameStateData::Instr::kArgumentsElements: {
+        CreateArgumentsType type;
+        it.ConsumeArgumentsElements(&type);
+        break;
+      }
+      case FrameStateData::Instr::kArgumentsLength: {
+        it.ConsumeArgumentsLength();
+        break;
+      }
+    }
+  }
 }
 
 void WordBinopOp::PrintOptions(std::ostream& os) const {

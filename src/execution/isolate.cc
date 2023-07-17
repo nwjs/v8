@@ -88,6 +88,7 @@
 #include "src/objects/managed-inl.h"
 #include "src/objects/module-inl.h"
 #include "src/objects/promise-inl.h"
+#include "src/objects/property-descriptor.h"
 #include "src/objects/prototype.h"
 #include "src/objects/slots.h"
 #include "src/objects/smi.h"
@@ -729,6 +730,14 @@ class CallSiteBuilder {
       AppendWasmFrame(summary.AsWasm());
       return true;
     }
+    if (summary.IsWasmInlined()) {
+      AppendWasmInlinedFrame(summary.AsWasmInlined());
+      return true;
+    }
+    if (summary.IsBuiltin()) {
+      AppendBuiltinFrame(summary.AsBuiltin());
+      return true;
+    }
 #endif  // V8_ENABLE_WEBASSEMBLY
     AppendJavaScriptFrame(summary.AsJavaScript());
     return true;
@@ -812,6 +821,25 @@ class CallSiteBuilder {
                 handle(Smi::FromInt(summary.function_index()), isolate_), code,
                 summary.code_offset(), flags,
                 isolate_->factory()->empty_fixed_array());
+  }
+
+  void AppendWasmInlinedFrame(
+      FrameSummary::WasmInlinedFrameSummary const& summary) {
+    Handle<HeapObject> code = isolate_->factory()->undefined_value();
+    int flags = CallSiteInfo::kIsWasm;
+    AppendFrame(summary.wasm_instance(),
+                handle(Smi::FromInt(summary.function_index()), isolate_), code,
+                summary.code_offset(), flags,
+                isolate_->factory()->empty_fixed_array());
+  }
+
+  void AppendBuiltinFrame(FrameSummary::BuiltinFrameSummary const& summary) {
+    Builtin builtin = summary.builtin();
+    Handle<Code> code = isolate_->builtins()->code_handle(builtin);
+    Handle<Object> function(Smi::FromInt(static_cast<int>(builtin)), isolate_);
+    int flags = CallSiteInfo::kIsBuiltin;
+    AppendFrame(summary.receiver(), function, code, summary.code_offset(),
+                flags, isolate_->factory()->empty_fixed_array());
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
@@ -1135,6 +1163,7 @@ void VisitStack(Isolate* isolate, Visitor* visitor,
       case StackFrame::BASELINE:
       case StackFrame::BUILTIN:
 #if V8_ENABLE_WEBASSEMBLY
+      case StackFrame::STUB:
       case StackFrame::WASM:
 #endif  // V8_ENABLE_WEBASSEMBLY
       {
@@ -1254,34 +1283,34 @@ MaybeHandle<JSObject> Isolate::CaptureAndSetErrorStack(
 }
 
 Handle<FixedArray> Isolate::GetDetailedStackTrace(
-    Handle<JSReceiver> error_object) {
-  Handle<Object> error_stack = JSReceiver::GetDataProperty(
-      this, error_object, factory()->error_stack_symbol());
-  if (!error_stack->IsErrorStackData()) {
-    return Handle<FixedArray>();
-  }
+    Handle<JSReceiver> maybe_error_object) {
+  ErrorUtils::StackPropertyLookupResult lookup =
+      ErrorUtils::GetErrorStackProperty(this, maybe_error_object);
+
+  if (!lookup.error_stack->IsErrorStackData()) return {};
   Handle<ErrorStackData> error_stack_data =
-      Handle<ErrorStackData>::cast(error_stack);
+      Handle<ErrorStackData>::cast(lookup.error_stack);
+
   ErrorStackData::EnsureStackFrameInfos(this, error_stack_data);
-  if (!error_stack_data->limit_or_stack_frame_infos().IsFixedArray()) {
-    return Handle<FixedArray>();
-  }
+
+  if (!error_stack_data->limit_or_stack_frame_infos().IsFixedArray()) return {};
   return handle(
       FixedArray::cast(error_stack_data->limit_or_stack_frame_infos()), this);
 }
 
 Handle<FixedArray> Isolate::GetSimpleStackTrace(
-    Handle<JSReceiver> error_object) {
-  Handle<Object> error_stack = JSReceiver::GetDataProperty(
-      this, error_object, factory()->error_stack_symbol());
-  if (error_stack->IsFixedArray()) {
-    return Handle<FixedArray>::cast(error_stack);
+    Handle<JSReceiver> maybe_error_object) {
+  ErrorUtils::StackPropertyLookupResult lookup =
+      ErrorUtils::GetErrorStackProperty(this, maybe_error_object);
+
+  if (lookup.error_stack->IsFixedArray()) {
+    return Handle<FixedArray>::cast(lookup.error_stack);
   }
-  if (!error_stack->IsErrorStackData()) {
+  if (!lookup.error_stack->IsErrorStackData()) {
     return factory()->empty_fixed_array();
   }
   Handle<ErrorStackData> error_stack_data =
-      Handle<ErrorStackData>::cast(error_stack);
+      Handle<ErrorStackData>::cast(lookup.error_stack);
   if (!error_stack_data->HasCallSiteInfos()) {
     return factory()->empty_fixed_array();
   }
@@ -1512,8 +1541,7 @@ bool Isolate::MayAccess(Handle<Context> accessing_context,
 
       // Get the native context of current top context.
       // avoid using Isolate::native_context() because it uses Handle.
-      Context native_context =
-          accessing_context->global_object().native_context();
+      Context native_context = accessing_context->native_context();
       if (receiver_context == native_context) return true;
 
       if (Context::cast(receiver_context).security_token() ==
@@ -1582,7 +1610,7 @@ Object Isolate::StackOverflow() {
 
 #ifdef VERIFY_HEAP
   if (v8_flags.verify_heap && v8_flags.stress_compaction) {
-    heap()->CollectAllGarbage(Heap::kNoGCFlags,
+    heap()->CollectAllGarbage(GCFlag::kNoFlags,
                               GarbageCollectionReason::kTesting);
   }
 #endif  // VERIFY_HEAP
@@ -3487,6 +3515,10 @@ void Isolate::CheckIsolateLayout() {
                OFFSET_OF(Isolate, isolate_data_.external_pointer_table_)),
            Internals::kIsolateExternalPointerTableOffset);
 #endif
+  CHECK_EQ(static_cast<int>(
+               OFFSET_OF(Isolate, isolate_data_.api_callback_thunk_argument_)),
+           Internals::kIsolateApiCallbackThunkArgumentOffset);
+
   CHECK_EQ(static_cast<int>(OFFSET_OF(Isolate, isolate_data_.roots_table_)),
            Internals::kIsolateRootsOffset);
 
@@ -4128,12 +4160,6 @@ class BigIntPlatform : public bigint::Platform {
  private:
   Isolate* isolate_;
 };
-
-void ResetBeforeGC(v8::Isolate* v8_isolate, v8::GCType gc_type,
-                   v8::GCCallbackFlags flags, void* data) {
-  Isolate* isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
-  isolate->compilation_cache()->MarkCompactPrologue();
-}
 }  // namespace
 
 VirtualMemoryCage* Isolate::GetPtrComprCodeCageForTesting() {
@@ -4506,8 +4532,6 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
 
   // If we are deserializing, read the state into the now-empty heap.
   {
-    CodePageCollectionMemoryModificationScope modification_scope(heap());
-
     if (create_heap_objects) {
       read_only_heap_->OnCreateHeapObjectsComplete(this);
     } else {
@@ -4611,14 +4635,13 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
   }
 #if V8_STATIC_ROOTS_BOOL
   // Protect the payload of wasm null.
-  page_allocator()->DecommitPages(
-      reinterpret_cast<void*>(factory()->wasm_null()->payload()),
-      WasmNull::kSize - kTaggedSize);
+  if (!page_allocator()->DecommitPages(
+          reinterpret_cast<void*>(factory()->wasm_null()->payload()),
+          WasmNull::kSize - kTaggedSize)) {
+    V8::FatalProcessOutOfMemory(this, "decommitting WasmNull payload");
+  }
 #endif  // V8_STATIC_ROOTS_BOOL
 #endif  // V8_ENABLE_WEBASSEMBLY
-
-  heap()->AddGCPrologueCallback(ResetBeforeGC, kGCTypeMarkSweepCompact,
-                                nullptr);
 
   // Isolate initialization allocates long living objects that should be
   // pretenured to old space.
@@ -4820,6 +4843,13 @@ bool Isolate::NeedsSourcePositions() const {
       v8_flags.trace_turbo_graph || v8_flags.turbo_profiling ||
       v8_flags.print_maglev_code || v8_flags.perf_prof || v8_flags.log_maps ||
       v8_flags.log_ic || v8_flags.log_function_events ||
+#if V8_ENABLE_WEBASSEMBLY
+      // TODO(mliedtke): We need the source positions of wasm trap nodes.
+      // All other positions are not needed. For wasm we do not have the source
+      // position in the FrameState as we only have one FrameState per inlined
+      // function which itself could have many trap instructions.
+      v8_flags.experimental_wasm_js_inlining ||
+#endif  // V8_ENABLE_WEBASSEMBLY
       // Dynamic conditions; changing any of these conditions triggers source
       // position collection for the entire heap
       // (CollectSourcePositionsForAllBytecodeArrays).
@@ -4925,9 +4955,9 @@ void Isolate::UpdateTypedArraySpeciesLookupChainProtectorOnSetPrototype(
   }
 }
 
-void Isolate::UpdateNumberStringPrototypeNoReplaceProtectorOnSetPrototype(
+void Isolate::UpdateNumberStringNotRegexpLikeProtectorOnSetPrototype(
     Handle<JSObject> object) {
-  if (!Protectors::IsNumberStringPrototypeNoReplaceIntact(this)) {
+  if (!Protectors::IsNumberStringNotRegexpLikeIntact(this)) {
     return;
   }
   // We need to protect the prototype chain of `Number.prototype` and
@@ -4939,7 +4969,7 @@ void Isolate::UpdateNumberStringPrototypeNoReplaceProtectorOnSetPrototype(
   // sufficiently rare.
   DCHECK(!object->IsJSObjectPrototype());
   if (object->map().is_prototype_map() && (object->IsJSPrimitiveWrapper())) {
-    Protectors::InvalidateNumberStringPrototypeNoReplace(this);
+    Protectors::InvalidateNumberStringNotRegexpLike(this);
   }
 }
 
@@ -5775,6 +5805,14 @@ void Isolate::CollectSourcePositionsForAllBytecodeArrays() {
          obj = iterator.Next()) {
       if (!obj.IsSharedFunctionInfo()) continue;
       SharedFunctionInfo sfi = SharedFunctionInfo::cast(obj);
+      // If the script_or_debug_info is a Smi, then the SharedFunctionInfo is in
+      // the process of being deserialized.
+      Object script_or_debug_info = sfi.script_or_debug_info(kAcquireLoad);
+      if (script_or_debug_info.IsSmi()) {
+        DCHECK_EQ(script_or_debug_info,
+                  Smi::uninitialized_deserialization_value());
+        continue;
+      }
       if (!sfi.CanCollectSourcePosition(this)) continue;
       sfis.push_back(Handle<SharedFunctionInfo>(sfi, this));
     }

@@ -150,40 +150,6 @@ void FoldedAllocation::GenerateCode(MaglevAssembler* masm,
   __ Add(ToRegister(result()), ToRegister(raw_allocation()), offset());
 }
 
-int CreateEmptyObjectLiteral::MaxCallStackArgs() const {
-  return AllocateDescriptor::GetStackParameterCount();
-}
-void CreateEmptyObjectLiteral::SetValueLocationConstraints() {
-  DefineAsRegister(this);
-}
-void CreateEmptyObjectLiteral::GenerateCode(MaglevAssembler* masm,
-                                            const ProcessingState& state) {
-  Register object = ToRegister(result());
-  __ Allocate(register_snapshot(), object, map().instance_size());
-  MaglevAssembler::ScratchRegisterScope temps(masm);
-  Register scratch = temps.Acquire();
-  __ Move(scratch, map().object());
-  __ StoreTaggedField(scratch, FieldMemOperand(object, HeapObject::kMapOffset));
-  __ LoadTaggedRoot(scratch, RootIndex::kEmptyFixedArray);
-  static_assert(JSObject::kPropertiesOrHashOffset + sizeof(Tagged_t) ==
-                JSObject::kElementsOffset);
-  __ StoreTwoTaggedFields(
-      scratch, FieldMemOperand(object, JSObject::kPropertiesOrHashOffset));
-  __ LoadTaggedRoot(scratch, RootIndex::kUndefinedValue);
-  int i = 0;
-  for (; i + 1 < map().GetInObjectProperties(); i += 2) {
-    int offset1 = map().GetInObjectPropertyOffset(i);
-    int offset2 = map().GetInObjectPropertyOffset(i + 1);
-    CHECK(offset1 + sizeof(Tagged_t) == offset2);
-    __ StoreTwoTaggedFields(scratch, FieldMemOperand(object, offset1));
-  }
-  if (i < map().GetInObjectProperties()) {
-    CHECK(i + 1 == map().GetInObjectProperties());
-    int offset = map().GetInObjectPropertyOffset(i);
-    __ StoreTaggedField(scratch, FieldMemOperand(object, offset));
-  }
-}
-
 void CheckedInt32ToUint32::SetValueLocationConstraints() {
   UseRegister(input());
   DefineSameAsFirst(this);
@@ -246,49 +212,21 @@ void CheckedTruncateFloat64ToUint32::GenerateCode(
   __ Bind(&check_done);
 }
 
-void CheckMaps::SetValueLocationConstraints() { UseRegister(receiver_input()); }
-void CheckMaps::GenerateCode(MaglevAssembler* masm,
-                             const ProcessingState& state) {
-  Register object = ToRegister(receiver_input());
+void CheckMaps::SetValueLocationConstraints() {
+  UseRegister(receiver_input());
+  set_temporaries_needed(2);
+}
 
-  // TODO(victorgomes): This can happen, because we do not emit an unconditional
-  // deopt when we intersect the map sets.
-  if (maps().is_empty()) {
-    __ EmitEagerDeopt(this, DeoptimizeReason::kWrongMap);
-    return;
-  }
+void CheckMaps::MaybeGenerateMapLoad(MaglevAssembler* masm, Register object) {
+  register_for_map_compare_ = masm->scratch_register_scope()->Acquire();
+  __ LoadMap(register_for_map_compare_, object);
+}
 
-  bool maps_include_heap_number = AnyMapIsHeapNumber(maps());
-
-  Label done;
-  if (check_type() == CheckType::kOmitHeapObjectCheck) {
-    __ AssertNotSmi(object);
-  } else {
-    Condition is_smi = __ CheckSmi(object);
-    if (maps_include_heap_number) {
-      // Smis count as matching the HeapNumber map, so we're done.
-      __ B(&done, is_smi);
-    } else {
-      __ EmitEagerDeoptIf(is_smi, DeoptimizeReason::kWrongMap, this);
-    }
-  }
-
+void CheckMaps::GenerateMapCompare(MaglevAssembler* masm, Handle<Map> map) {
   MaglevAssembler::ScratchRegisterScope temps(masm);
-  Register object_map = temps.Acquire();
-  Register map = temps.Acquire();
-  __ LoadMap(object_map, object);
-  size_t map_count = maps().size();
-  for (size_t i = 0; i < map_count - 1; ++i) {
-    Handle<Map> map_handle = maps().at(i).object();
-    __ Move(map, map_handle);
-    __ CmpTagged(object_map, map);
-    __ B(&done, eq);
-  }
-  Handle<Map> last_map_handle = maps().at(map_count - 1).object();
-  __ Move(map, last_map_handle);
-  __ CmpTagged(object_map, map);
-  __ EmitEagerDeoptIf(ne, DeoptimizeReason::kWrongMap, this);
-  __ Bind(&done);
+  Register temp = temps.Acquire();
+  __ Move(temp, map);
+  __ CmpTagged(register_for_map_compare_, temp);
 }
 
 int CheckMapsWithMigration::MaxCallStackArgs() const {
@@ -469,18 +407,12 @@ void CheckedObjectToIndex::GenerateCode(MaglevAssembler* masm,
       NegateCondition(is_smi),
       [](MaglevAssembler* masm, Register object, Register result_reg,
          ZoneLabelRef done, CheckedObjectToIndex* node) {
-        Label is_string;
+        Label check_string;
         MaglevAssembler::ScratchRegisterScope temps(masm);
         Register scratch = temps.Acquire();
         __ LoadMap(scratch, object);
-        __ CompareInstanceTypeRange(scratch, scratch, FIRST_STRING_TYPE,
-                                    LAST_STRING_TYPE);
-        __ B(&is_string, ls);
-
-        __ Cmp(scratch, Immediate(HEAP_NUMBER_TYPE));
-        // The IC will go generic if it encounters something other than a
-        // Number or String key.
-        __ EmitEagerDeoptIf(ne, DeoptimizeReason::kNotInt32, node);
+        __ CompareRoot(scratch, RootIndex::kHeapNumberMap);
+        __ B(&check_string, ne);
 
         // Heap Number.
         {
@@ -500,8 +432,16 @@ void CheckedObjectToIndex::GenerateCode(MaglevAssembler* masm,
         }
 
         // String.
-        __ Bind(&is_string);
+        __ Bind(&check_string);
+        __ CompareInstanceTypeRange(scratch, scratch, FIRST_STRING_TYPE,
+                                    LAST_STRING_TYPE);
+        // The IC will go generic if it encounters something other than a
+        // Number or String key.
+        __ EmitEagerDeoptIf(kUnsignedGreaterThan, DeoptimizeReason::kNotInt32,
+                            node);
+
         {
+          // TODO(verwaest): Load the cached number from the string hash.
           RegisterSnapshot snapshot = node->register_snapshot();
           snapshot.live_registers.clear(result_reg);
           DCHECK(!snapshot.live_tagged_registers.has(result_reg));
@@ -1028,8 +968,8 @@ void CheckHoleyFloat64IsSmi::GenerateCode(MaglevAssembler* masm,
   MaglevAssembler::ScratchRegisterScope temps(masm);
   Register scratch = temps.Acquire();
   Label not_a_smi, done;
-  __ TryTruncateDoubleToInt32(scratch, value, &not_a_smi);
-  __ Adds(wzr, scratch, scratch);
+  __ TryTruncateDoubleToInt32(scratch.W(), value, &not_a_smi);
+  __ Adds(wzr, scratch.W(), scratch.W());
   __ JumpIf(vc, &done);
 
   __ bind(&not_a_smi);
@@ -1719,8 +1659,9 @@ void LoadSignedIntDataViewElement::GenerateCode(MaglevAssembler* masm,
       }
     } else {
       ZoneLabelRef is_little_endian(masm), is_big_endian(masm);
-      __ ToBoolean(ToRegister(is_little_endian_input()), is_little_endian,
-                   is_big_endian, false);
+      __ ToBoolean(ToRegister(is_little_endian_input()),
+                   CheckType::kCheckHeapObject, is_little_endian, is_big_endian,
+                   false);
       __ Bind(*is_big_endian);
       __ ReverseByteOrder(result_reg, element_size);
       __ Bind(*is_little_endian);
@@ -1767,8 +1708,9 @@ void StoreSignedIntDataViewElement::GenerateCode(MaglevAssembler* masm,
       }
     } else {
       ZoneLabelRef is_little_endian(masm), is_big_endian(masm);
-      __ ToBoolean(ToRegister(is_little_endian_input()), is_little_endian,
-                   is_big_endian, false);
+      __ ToBoolean(ToRegister(is_little_endian_input()),
+                   CheckType::kCheckHeapObject, is_little_endian, is_big_endian,
+                   false);
       __ Bind(*is_big_endian);
       __ ReverseByteOrder(value, element_size);
       __ Bind(*is_little_endian);
@@ -1829,8 +1771,9 @@ void LoadDoubleDataViewElement::GenerateCode(MaglevAssembler* masm,
     // TODO(leszeks): We're likely to be calling this on an existing boolean --
     // maybe that's a case we should fast-path here and re-use that boolean
     // value?
-    __ ToBoolean(ToRegister(is_little_endian_input()), is_little_endian,
-                 is_big_endian, true);
+    __ ToBoolean(ToRegister(is_little_endian_input()),
+                 CheckType::kCheckHeapObject, is_little_endian, is_big_endian,
+                 true);
     // arm64 is little endian.
     static_assert(V8_TARGET_LITTLE_ENDIAN == 1);
     __ Bind(*is_little_endian);
@@ -1892,8 +1835,9 @@ void StoreDoubleDataViewElement::GenerateCode(MaglevAssembler* masm,
     // TODO(leszeks): We're likely to be calling this on an existing boolean --
     // maybe that's a case we should fast-path here and re-use that boolean
     // value?
-    __ ToBoolean(ToRegister(is_little_endian_input()), is_little_endian,
-                 is_big_endian, true);
+    __ ToBoolean(ToRegister(is_little_endian_input()),
+                 CheckType::kCheckHeapObject, is_little_endian, is_big_endian,
+                 true);
     // arm64 is little endian.
     static_assert(V8_TARGET_LITTLE_ENDIAN == 1);
     __ Bind(*is_little_endian);

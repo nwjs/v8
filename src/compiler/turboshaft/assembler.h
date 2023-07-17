@@ -396,6 +396,35 @@ class LoopLabel : public LabelBase<true, Ts...> {
 
 Handle<Code> BuiltinCodeHandle(Builtin builtin, Isolate* isolate);
 
+template <typename Assembler>
+class AssemblerOpInterface;
+
+template <typename T>
+class Uninitialized {
+  static_assert(std::is_base_of_v<HeapObject, T>);
+
+ public:
+  explicit Uninitialized(V<T> object) : object_(object) {}
+
+ private:
+  template <typename Assembler>
+  friend class AssemblerOpInterface;
+
+  V<T> object() const {
+    DCHECK(object_.has_value());
+    return *object_;
+  }
+
+  V<T> ReleaseObject() {
+    DCHECK(object_.has_value());
+    auto temp = *object_;
+    object_.reset();
+    return temp;
+  }
+
+  base::Optional<V<T>> object_;
+};
+
 // Forward declarations
 template <class Assembler>
 class GraphVisitor;
@@ -434,9 +463,10 @@ struct reducer_stack_type<reducer_list<Reducers...>> {
 template <typename Next>
 class ReducerBase;
 
-#define TURBOSHAFT_REDUCER_BOILERPLATE()                               \
-  Assembler<typename Next::ReducerList>& Asm() {                       \
-    return *static_cast<Assembler<typename Next::ReducerList>*>(this); \
+#define TURBOSHAFT_REDUCER_BOILERPLATE()                \
+  using ReducerList = typename Next::ReducerList;       \
+  Assembler<ReducerList>& Asm() {                       \
+    return *static_cast<Assembler<ReducerList>*>(this); \
   }
 
 // LABEL_BLOCK is used in Reducers to have a single call forwarding to the next
@@ -481,10 +511,6 @@ class ReducerBase : public ReducerBaseForwarder<Next> {
   TURBOSHAFT_REDUCER_BOILERPLATE()
 
   using Base = ReducerBaseForwarder<Next>;
-  using ArgT = std::tuple<>;
-
-  template <class... Args>
-  explicit ReducerBase(const std::tuple<Args...>&) {}
 
   void Bind(Block* block) {}
 
@@ -1512,19 +1538,32 @@ class AssemblerOpInterface {
 
   void Store(OpIndex base, OpIndex index, OpIndex value, StoreOp::Kind kind,
              MemoryRepresentation stored_rep, WriteBarrierKind write_barrier,
-             int32_t offset = 0, uint8_t element_size_log2 = 0) {
+             int32_t offset = 0, uint8_t element_size_log2 = 0,
+             bool maybe_initializing_or_transitioning = false) {
     if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
       return;
     }
     stack().ReduceStore(base, index, value, kind, stored_rep, write_barrier,
-                        offset, element_size_log2);
+                        offset, element_size_log2,
+                        maybe_initializing_or_transitioning);
   }
   void Store(OpIndex base, OpIndex value, StoreOp::Kind kind,
              MemoryRepresentation stored_rep, WriteBarrierKind write_barrier,
-             int32_t offset = 0) {
+             int32_t offset = 0,
+             bool maybe_initializing_or_transitioning = false) {
     Store(base, OpIndex::Invalid(), value, kind, stored_rep, write_barrier,
-          offset);
+          offset, 0, maybe_initializing_or_transitioning);
   }
+
+  template <typename T>
+  void Initialize(Uninitialized<T>& object, OpIndex value,
+                  MemoryRepresentation stored_rep,
+                  WriteBarrierKind write_barrier, int32_t offset = 0) {
+    return Store(object.object(), value,
+                 StoreOp::Kind::Aligned(BaseTaggedness::kTaggedBase),
+                 stored_rep, write_barrier, offset, true);
+  }
+
   void StoreOffHeap(OpIndex address, OpIndex value, MemoryRepresentation rep,
                     int32_t offset = 0) {
     Store(address, value, StoreOp::Kind::RawAligned(), rep,
@@ -1578,6 +1617,7 @@ class AssemblerOpInterface {
   }
 
   // Helpers to read the most common fields.
+  // TODO(nicohartmann@): Strengthen this to `V<HeapObject>`.
   V<Map> LoadMapField(V<Object> object) {
     return LoadField<Map>(object, AccessBuilder::ForMap());
   }
@@ -1587,6 +1627,19 @@ class AssemblerOpInterface {
 
   template <typename Base>
   void StoreField(V<Base> object, const FieldAccess& access, V<Any> value) {
+    StoreFieldImpl(object, access, value,
+                   access.maybe_initializing_or_transitioning_store);
+  }
+
+  template <typename T>
+  void InitializeField(Uninitialized<T>& object, const FieldAccess& access,
+                       V<Any> value) {
+    StoreFieldImpl(object.object(), access, value, true);
+  }
+
+  template <typename Base>
+  void StoreFieldImpl(V<Base> object, const FieldAccess& access, V<Any> value,
+                      bool maybe_initializing_or_transitioning) {
     if constexpr (std::is_base_of_v<Object, Base>) {
       DCHECK_EQ(access.base_is_tagged, BaseTaggedness::kTaggedBase);
     } else {
@@ -1616,7 +1669,8 @@ class AssemblerOpInterface {
     }
     MemoryRepresentation rep =
         MemoryRepresentation::FromMachineType(machine_type);
-    Store(object, value, kind, rep, access.write_barrier_kind, access.offset);
+    Store(object, value, kind, rep, access.write_barrier_kind, access.offset,
+          maybe_initializing_or_transitioning);
   }
 
   template <typename T = Any, typename Base>
@@ -1651,13 +1705,25 @@ class AssemblerOpInterface {
           access.header_size, rep.SizeInBytesLog2());
   }
 
-  V<HeapObject> Allocate(
+  template <typename T = HeapObject>
+  Uninitialized<T> Allocate(
       ConstOrV<WordPtr> size, AllocationType type,
       AllowLargeObjects allow_large_objects = AllowLargeObjects::kFalse) {
+    static_assert(std::is_base_of_v<HeapObject, T>);
+    DCHECK(!in_object_initialization_);
+    in_object_initialization_ = true;
     if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
-      return OpIndex::Invalid();
+      return Uninitialized<T>(OpIndex::Invalid());
     }
-    return stack().ReduceAllocate(resolve(size), type, allow_large_objects);
+    return Uninitialized<T>{
+        stack().ReduceAllocate(resolve(size), type, allow_large_objects)};
+  }
+
+  template <typename T>
+  V<T> FinishInitialization(Uninitialized<T>&& uninitialized) {
+    DCHECK(in_object_initialization_);
+    in_object_initialization_ = false;
+    return uninitialized.ReleaseObject();
   }
 
   OpIndex DecodeExternalPointer(OpIndex handle, ExternalPointerTag tag) {
@@ -2172,17 +2238,17 @@ class AssemblerOpInterface {
     Deoptimize(frame_state, params);
   }
 
-  void TrapIf(OpIndex condition, TrapId trap_id) {
+  void TrapIf(OpIndex condition, OpIndex frame_state, TrapId trap_id) {
     if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
       return;
     }
-    stack().ReduceTrapIf(condition, false, trap_id);
+    stack().ReduceTrapIf(condition, frame_state, false, trap_id);
   }
-  void TrapIfNot(OpIndex condition, TrapId trap_id) {
+  void TrapIfNot(OpIndex condition, OpIndex frame_state, TrapId trap_id) {
     if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
       return;
     }
-    stack().ReduceTrapIf(condition, true, trap_id);
+    stack().ReduceTrapIf(condition, frame_state, true, trap_id);
   }
 
   void StaticAssert(OpIndex condition, const char* source) {
@@ -2300,8 +2366,7 @@ class AssemblerOpInterface {
   }
 
   OpIndex CallBuiltin(Builtin builtin, OpIndex frame_state,
-                      const base::Vector<OpIndex>& arguments,
-                      Isolate* isolate) {
+                      base::Vector<OpIndex> arguments, Isolate* isolate) {
     if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
       return OpIndex::Invalid();
     }
@@ -2364,6 +2429,14 @@ class AssemblerOpInterface {
       return;
     }
     stack().ReduceDebugBreak();
+  }
+  void DebugPrint(OpIndex input, RegisterRepresentation rep) {
+    // TODO(nicohartmann@): Relax this.
+    DCHECK_EQ(rep, RegisterRepresentation::PointerSized());
+    if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
+      return;
+    }
+    stack().ReduceDebugPrint(input, rep);
   }
 
   V<Tagged> BigIntBinop(V<Tagged> left, V<Tagged> right, OpIndex frame_state,
@@ -2585,8 +2658,8 @@ class AssemblerOpInterface {
 
   void TransitionAndStoreArrayElement(
       V<Object> array, V<WordPtr> index, OpIndex value,
-      TransitionAndStoreArrayElementOp::Kind kind, Handle<Map> fast_map,
-      Handle<Map> double_map) {
+      TransitionAndStoreArrayElementOp::Kind kind, MaybeHandle<Map> fast_map,
+      MaybeHandle<Map> double_map) {
     if (V8_UNLIKELY(stack().generating_unreachable_operations())) {
       return;
     }
@@ -2866,6 +2939,7 @@ class AssemblerOpInterface {
   base::SmallVector<IfScopeInfo, 16> if_scope_stack_;
   // [0] contains the stub with exit frame.
   MaybeHandle<Code> cached_centry_stub_constants_[4];
+  bool in_object_initialization_ = false;
 };
 
 template <class Reducers>
@@ -2876,12 +2950,10 @@ class Assembler : public GraphVisitor<Assembler<Reducers>>,
   using Stack = typename reducer_stack_type<Reducers>::type;
 
  public:
-  template <class... ReducerArgs>
   explicit Assembler(Graph& input_graph, Graph& output_graph, Zone* phase_zone,
-                     compiler::NodeOriginTable* origins,
-                     const typename Stack::ArgT& reducer_args)
+                     compiler::NodeOriginTable* origins)
       : GraphVisitor<Assembler>(input_graph, output_graph, phase_zone, origins),
-        Stack(reducer_args) {
+        Stack() {
     SupportedOperations::Initialize();
   }
 

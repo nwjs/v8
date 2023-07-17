@@ -316,6 +316,15 @@ const size_t kShortBuiltinCallsOldSpaceSizeThreshold = size_t{2} * GB;
 #define V8_OS_WIN64 true
 #endif
 
+// Support for floating point parameters in calls to C.
+// It's currently enabled only for the platforms listed below. We don't plan
+// to add support for IA32, because it has a totally different approach
+// (using FP stack).
+#if defined(V8_TARGET_ARCH_X64) || defined(V8_TARGET_ARCH_ARM64) || \
+    defined(V8_TARGET_ARCH_MIPS64) || defined(V8_TARGET_ARCH_LOONG64)
+#define V8_ENABLE_FP_PARAMS_IN_C_LINKAGE 1
+#endif
+
 // Superclass for classes only using static method functions.
 // The subclass of AllStatic cannot be instantiated at all.
 class AllStatic {
@@ -393,8 +402,8 @@ constexpr uint32_t kMaxCommittedWasmCodeMB = 4095;
 // The actual maximum code space size used can be configured with
 // --max-wasm-code-space-size. This constant is the default value, and at the
 // same time the maximum allowed value (checked by the WasmCodeManager).
-#if V8_TARGET_ARCH_ARM64
-// ARM64 only supports direct calls within a 128 MB range.
+#if V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_LOONG64
+// ARM64 and Loong64 only supports direct calls within a 128 MB range.
 constexpr uint32_t kDefaultMaxWasmCodeSpaceSizeMb = 128;
 #elif V8_TARGET_ARCH_PPC64
 // Branches only take 26 bits.
@@ -962,17 +971,17 @@ struct SlotTraits {
   using TOffHeapObjectSlot =
       OffHeapCompressedObjectSlot<V8HeapCompressionScheme>;
 #ifdef V8_EXTERNAL_CODE_SPACE
-  using TCodeObjectSlot =
+  using TInstructionStreamSlot =
       OffHeapCompressedObjectSlot<ExternalCodeCompressionScheme>;
 #else
-  using TCodeObjectSlot = TObjectSlot;
+  using TInstructionStreamSlot = TObjectSlot;
 #endif  // V8_EXTERNAL_CODE_SPACE
 #else
   using TObjectSlot = FullObjectSlot;
   using TMaybeObjectSlot = FullMaybeObjectSlot;
   using THeapObjectSlot = FullHeapObjectSlot;
   using TOffHeapObjectSlot = OffHeapFullObjectSlot;
-  using TCodeObjectSlot = OffHeapFullObjectSlot;
+  using TInstructionStreamSlot = OffHeapFullObjectSlot;
 #endif  // V8_COMPRESS_POINTERS
 };
 
@@ -994,12 +1003,12 @@ using HeapObjectSlot = SlotTraits::THeapObjectSlot;
 // off-heap.
 using OffHeapObjectSlot = SlotTraits::TOffHeapObjectSlot;
 
-// A CodeObjectSlot instance describes a kTaggedSize-sized field ("slot")
-// holding a strong pointer to a InstructionStream object. The InstructionStream
-// object slots might be compressed and since code space might be allocated off
-// the main heap the load operations require explicit cage base value for code
-// space.
-using CodeObjectSlot = SlotTraits::TCodeObjectSlot;
+// A InstructionStreamSlot instance describes a kTaggedSize-sized field
+// ("slot") holding a strong pointer to a InstructionStream object. The
+// InstructionStream object slots might be compressed and since code space might
+// be allocated off the main heap the load operations require explicit cage base
+// value for code space.
+using InstructionStreamSlot = SlotTraits::TInstructionStreamSlot;
 
 using WeakSlotCallback = bool (*)(FullObjectSlot pointer);
 

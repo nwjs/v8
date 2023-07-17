@@ -406,6 +406,7 @@ class V8_EXPORT_PRIVATE V8HeapExplorer : public HeapEntriesAllocator {
   HeapEntry* AllocateEntry(HeapThing ptr) override;
   HeapEntry* AllocateEntry(Smi smi) override;
   uint32_t EstimateObjectsCount();
+  void PopulateLineEnds();
   bool IterateAndExtractReferences(HeapSnapshotGenerator* generator);
   void CollectGlobalObjectsTags();
   void MakeGlobalObjectTagMap(const IsolateSafepointScope& safepoint_scope);
@@ -428,6 +429,7 @@ class V8_EXPORT_PRIVATE V8HeapExplorer : public HeapEntriesAllocator {
   const char* GetSystemEntryName(HeapObject object);
   HeapEntry::Type GetSystemEntryType(HeapObject object);
 
+  JSFunction GetLocationFunction(HeapObject object);
   void ExtractLocation(HeapEntry* entry, HeapObject object);
   void ExtractLocationForJSFunction(HeapEntry* entry, JSFunction func);
   void ExtractReferences(HeapEntry* entry, HeapObject obj);
@@ -593,10 +595,9 @@ class HeapSnapshotGenerator : public SnapshottingProgressReportingInterface {
   // their representations in heap snapshots.
   using SmiEntriesMap = std::unordered_map<int, HeapEntry*>;
 
-  HeapSnapshotGenerator(HeapSnapshot* snapshot,
-                        v8::ActivityControl* control,
+  HeapSnapshotGenerator(HeapSnapshot* snapshot, v8::ActivityControl* control,
                         v8::HeapProfiler::ObjectNameResolver* resolver,
-                        Heap* heap);
+                        Heap* heap, cppgc::EmbedderStackState stack_state);
   HeapSnapshotGenerator(const HeapSnapshotGenerator&) = delete;
   HeapSnapshotGenerator& operator=(const HeapSnapshotGenerator&) = delete;
   bool GenerateSnapshot();
@@ -673,6 +674,7 @@ class HeapSnapshotGenerator : public SnapshottingProgressReportingInterface {
   uint32_t progress_counter_;
   uint32_t progress_total_;
   Heap* heap_;
+  cppgc::EmbedderStackState stack_state_;
 
 #ifdef V8_ENABLE_HEAP_SNAPSHOT_VERIFY
   std::unordered_map<HeapEntry*, HeapThing> reverse_entries_map_;

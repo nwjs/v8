@@ -119,6 +119,11 @@ enum FunctionMode {
       kWithReadonlyPrototypeBit | kWithNameBit,
 };
 
+enum class ArrayStorageAllocationMode {
+  DONT_INITIALIZE_ARRAY_ELEMENTS,
+  INITIALIZE_ARRAY_ELEMENTS_WITH_HOLE
+};
+
 // Interface for handle based allocation.
 class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
  public:
@@ -196,6 +201,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
       AllocationType allocation = AllocationType::kOld);
 
   // Create a new Tuple2 struct.
+  Handle<Tuple2> NewTuple2Uninitialized(AllocationType allocation);
   Handle<Tuple2> NewTuple2(Handle<Object> value1, Handle<Object> value2,
                            AllocationType allocation);
 
@@ -204,7 +210,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
 
   // Finds the internalized copy for string in the string table.
   // If not found, a new string is added to the table and returned.
-  Handle<String> InternalizeUtf8String(const base::Vector<const char>& str);
+  Handle<String> InternalizeUtf8String(base::Vector<const char> str);
   Handle<String> InternalizeUtf8String(const char* str) {
     return InternalizeUtf8String(base::CStrVector(str));
   }
@@ -215,6 +221,11 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   Handle<String> InternalizeString(base::Vector<const char> str,
                                    bool convert_encoding = false) {
     return InternalizeString(base::Vector<const uint8_t>::cast(str));
+  }
+
+  Handle<String> InternalizeString(const char* str,
+                                   bool convert_encoding = false) {
+    return InternalizeString(base::OneByteVector(str));
   }
 
   template <typename SeqString>
@@ -264,10 +275,10 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   // UTF8 strings are pretenured when used for regexp literal patterns and
   // flags in the parser.
   V8_WARN_UNUSED_RESULT MaybeHandle<String> NewStringFromUtf8(
-      const base::Vector<const char>& str,
+      base::Vector<const char> str,
       AllocationType allocation = AllocationType::kYoung);
   V8_WARN_UNUSED_RESULT MaybeHandle<String> NewStringFromUtf8(
-      const base::Vector<const uint8_t>& str, unibrow::Utf8Variant utf8_variant,
+      base::Vector<const uint8_t> str, unibrow::Utf8Variant utf8_variant,
       AllocationType allocation = AllocationType::kYoung);
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -291,7 +302,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
       AllocationType allocation = AllocationType::kYoung);
 
   V8_WARN_UNUSED_RESULT MaybeHandle<String> NewStringFromTwoByte(
-      const base::Vector<const base::uc16>& str,
+      base::Vector<const base::uc16> str,
       AllocationType allocation = AllocationType::kYoung);
 
   V8_WARN_UNUSED_RESULT MaybeHandle<String> NewStringFromTwoByte(
@@ -302,7 +313,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   // Usually the two-byte encodings are in the native endianness, but for
   // WebAssembly linear memory, they are explicitly little-endian.
   V8_WARN_UNUSED_RESULT MaybeHandle<String> NewStringFromTwoByteLittleEndian(
-      const base::Vector<const base::uc16>& str,
+      base::Vector<const base::uc16> str,
       AllocationType allocation = AllocationType::kYoung);
 #endif  // V8_ENABLE_WEBASSEMBLY
 
@@ -594,7 +605,8 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   // according to the specified mode.
   Handle<JSArray> NewJSArray(
       ElementsKind elements_kind, int length, int capacity,
-      ArrayStorageAllocationMode mode = DONT_INITIALIZE_ARRAY_ELEMENTS,
+      ArrayStorageAllocationMode mode =
+          ArrayStorageAllocationMode::DONT_INITIALIZE_ARRAY_ELEMENTS,
       AllocationType allocation = AllocationType::kYoung);
 
   Handle<JSArray> NewJSArray(
@@ -603,8 +615,10 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
     if (capacity != 0) {
       elements_kind = GetHoleyElementsKind(elements_kind);
     }
-    return NewJSArray(elements_kind, 0, capacity,
-                      INITIALIZE_ARRAY_ELEMENTS_WITH_HOLE, allocation);
+    return NewJSArray(
+        elements_kind, 0, capacity,
+        ArrayStorageAllocationMode::INITIALIZE_ARRAY_ELEMENTS_WITH_HOLE,
+        allocation);
   }
 
   // Create a JSArray with the given elements.
@@ -623,7 +637,8 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
 
   void NewJSArrayStorage(
       Handle<JSArray> array, int length, int capacity,
-      ArrayStorageAllocationMode mode = DONT_INITIALIZE_ARRAY_ELEMENTS);
+      ArrayStorageAllocationMode mode =
+          ArrayStorageAllocationMode::DONT_INITIALIZE_ARRAY_ELEMENTS);
 
   Handle<JSWeakMap> NewJSWeakMap();
 
@@ -1168,7 +1183,8 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   // this method requires capacity greater than zero.
   Handle<FixedArrayBase> NewJSArrayStorage(
       ElementsKind elements_kind, int capacity,
-      ArrayStorageAllocationMode mode = DONT_INITIALIZE_ARRAY_ELEMENTS);
+      ArrayStorageAllocationMode mode =
+          ArrayStorageAllocationMode::DONT_INITIALIZE_ARRAY_ELEMENTS);
 
   void InitializeAllocationMemento(AllocationMemento memento,
                                    AllocationSite allocation_site);

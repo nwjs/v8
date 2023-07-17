@@ -1089,9 +1089,7 @@ Reduction JSNativeContextSpecialization::ReduceGlobalAccess(
   }
 
   ObjectRef property_cell_value = property_cell.value(broker());
-  if (property_cell_value.IsHeapObject() &&
-      property_cell_value.AsHeapObject().map(broker()).oddball_type(broker()) ==
-          OddballType::kHole) {
+  if (property_cell_value.IsTheHole()) {
     // The property cell is no longer valid.
     return NoChange();
   }
@@ -1174,8 +1172,7 @@ Reduction JSNativeContextSpecialization::ReduceGlobalAccess(
                     ? jsgraph()->TrueConstant()
                     : jsgraph()->Constant(property_cell_value, broker());
         DCHECK(!property_cell_value.IsHeapObject() ||
-               property_cell_value.AsHeapObject().map(broker()).oddball_type(
-                   broker()) != OddballType::kHole);
+               !property_cell_value.IsTheHole());
       } else {
         DCHECK_NE(AccessMode::kHas, access_mode);
 
@@ -2389,10 +2386,7 @@ Reduction JSNativeContextSpecialization::ReduceElementLoadFromHeapConstant(
 
   HeapObjectMatcher mreceiver(receiver);
   HeapObjectRef receiver_ref = mreceiver.Ref(broker());
-  if (receiver_ref.map(broker()).oddball_type(broker()) == OddballType::kHole ||
-      receiver_ref.map(broker()).oddball_type(broker()) == OddballType::kNull ||
-      receiver_ref.map(broker()).oddball_type(broker()) ==
-          OddballType::kUndefined ||
+  if (receiver_ref.IsNull() || receiver_ref.IsUndefined() ||
       // The 'in' operator throws a TypeError on primitive values.
       (receiver_ref.IsString() && access_mode == AccessMode::kHas)) {
     return NoChange();
@@ -3058,6 +3052,16 @@ JSNativeContextSpecialization::BuildPropertyStore(
       // with this transitioning store.
       MapRef transition_map_ref = transition_map.value();
       MapRef original_map = transition_map_ref.GetBackPointer(broker()).AsMap();
+      if (!field_index.is_inobject()) {
+        // If slack tracking ends after this compilation started but before it's
+        // finished, then we could {original_map} could be out-of-sync with
+        // {transition_map_ref}. In particular, its UnusedPropertyFields could
+        // be non-zero, which would lead us to not extend the property backing
+        // store, while the underlying Map has actually zero
+        // UnusedPropertyFields. Thus, we install a dependency on {orininal_map}
+        // now, so that if such a situation happens, we'll throw away the code.
+        dependencies()->DependOnNoSlackTrackingChange(original_map);
+      }
       if (original_map.UnusedPropertyFields() == 0) {
         DCHECK(!field_index.is_inobject());
 
@@ -3888,8 +3892,7 @@ Node* JSNativeContextSpecialization::BuildExtendPropertiesBackingStore(
   // difficult for escape analysis to get rid of the backing stores used
   // for intermediate states of chains of property additions. That makes
   // it unclear what the best approach is here.
-  DCHECK_EQ(0, map.UnusedPropertyFields());
-  // Compute the length of the old {properties} and the new properties.
+  DCHECK_EQ(map.UnusedPropertyFields(), 0);
   int length = map.NextFreePropertyIndex() - map.GetInObjectProperties();
   int new_length = length + JSObject::kFieldsAdded;
   // Collect the field values from the {properties}.

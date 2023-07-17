@@ -459,14 +459,20 @@ class ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
           i::Address new_end_of_accessible_region = RoundUp(start, kChunkSize);
           size_t size =
               end_of_accessible_region_ - new_end_of_accessible_region;
-          CHECK(vas->DecommitPages(new_end_of_accessible_region, size));
+          if (!vas->DecommitPages(new_end_of_accessible_region, size)) {
+            i::V8::FatalProcessOutOfMemory(
+                nullptr, "ArrayBufferAllocator::BackendAllocator()");
+          }
           end_of_accessible_region_ = new_end_of_accessible_region;
         } else if (size >= 2 * kChunkSize) {
           // Can discard pages. The pages stay accessible, so the size of the
           // accessible region doesn't change.
           i::Address chunk_start = RoundUp(start, kChunkSize);
           i::Address chunk_end = RoundDown(start + size, kChunkSize);
-          CHECK(vas->DiscardSystemPages(chunk_start, chunk_end - chunk_start));
+          if (!vas->DiscardSystemPages(chunk_start, chunk_end - chunk_start)) {
+            i::V8::FatalProcessOutOfMemory(
+                nullptr, "ArrayBufferAllocator::BackendAllocator()");
+          }
         }
       });
     }
@@ -499,7 +505,10 @@ class ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
         size_t size = new_end_of_accessible_region - end_of_accessible_region_;
         if (!vas->SetPagePermissions(end_of_accessible_region_, size,
                                      PagePermissions::kReadWrite)) {
-          CHECK(region_alloc_->FreeRegion(region));
+          if (!region_alloc_->FreeRegion(region)) {
+            i::V8::FatalProcessOutOfMemory(
+                nullptr, "ArrayBufferAllocator::BackendAllocator::Allocate()");
+          }
           return nullptr;
         }
 
@@ -803,7 +812,9 @@ StartupData SnapshotCreator::CreateBlob(
 
   // Check that values referenced by global/eternal handles are accounted for.
   i::SerializedHandleChecker handle_checker(i_isolate, &contexts);
-  CHECK(handle_checker.CheckGlobalAndEternalHandles());
+  if (!handle_checker.CheckGlobalAndEternalHandles()) {
+    GRACEFUL_FATAL("CheckGlobalAndEternalHandles failed");
+  }
 
   // Create a vector with all embedder fields serializers.
   std::vector<SerializeInternalFieldsCallback> embedder_fields_serializers;
@@ -7074,6 +7085,7 @@ bool IsJSReceiverSafeToFreeze(i::InstanceType obj_type) {
 #if V8_ENABLE_WEBASSEMBLY
     case i::WASM_ARRAY_TYPE:
     case i::WASM_STRUCT_TYPE:
+    case i::WASM_TAG_OBJECT_TYPE:
 #endif  // V8_ENABLE_WEBASSEMBLY
     case i::JS_PROXY_TYPE:
       return true;
@@ -7103,6 +7115,9 @@ class ObjectVisitorDeepFreezer : i::ObjectVisitor {
 
   bool DeepFreeze(i::Handle<i::Context> context) {
     bool success = VisitObject(i::HeapObject::cast(*context));
+    if (success) {
+      success = InstantiateAndVisitLazyAccessorPairs();
+    }
     DCHECK_EQ(success, !error_.has_value());
     if (!success) {
       THROW_NEW_ERROR_RETURN_VALUE(
@@ -7129,7 +7144,8 @@ class ObjectVisitorDeepFreezer : i::ObjectVisitor {
   void VisitMapPointer(i::HeapObject host) final {
     VisitPointer(host, host.map_slot());
   }
-  void VisitCodePointer(i::Code host, i::CodeObjectSlot slot) final {}
+  void VisitInstructionStreamPointer(i::Code host,
+                                     i::InstructionStreamSlot slot) final {}
   void VisitCustomWeakPointers(i::HeapObject host, i::ObjectSlot start,
                                i::ObjectSlot end) final {}
 
@@ -7190,15 +7206,13 @@ class ObjectVisitorDeepFreezer : i::ObjectVisitor {
     if (i::InstanceTypeChecker::IsAccessorPair(obj_type)) {
       // For AccessorPairs we need to ensure that the functions they point to
       // have been instantiated into actual JavaScript objects that can be
-      // frozen. TODO(behamilton): If they haven't then we need to save them to
-      // instantiate (and recurse) before freezing.
+      // frozen. If they haven't then we need to save them to instantiate
+      // (and recurse) before freezing.
       i::AccessorPair accessor_pair = i::AccessorPair::cast(obj);
       if (accessor_pair.getter().IsFunctionTemplateInfo() ||
           accessor_pair.setter().IsFunctionTemplateInfo()) {
-        // TODO(behamilton): Handle this more gracefully.
-        error_ = ErrorInfo{i::MessageTemplate::kCannotDeepFreezeObject,
-                           isolate_->factory()->empty_string()};
-        return false;
+        i::Handle<i::AccessorPair> lazy_accessor_pair(accessor_pair, isolate_);
+        lazy_accessor_pairs_to_freeze_.push_back(lazy_accessor_pair);
       }
     } else if (i::InstanceTypeChecker::IsContext(obj_type)) {
       // For contexts we need to ensure that all accessible locals are const.
@@ -7267,10 +7281,29 @@ class ObjectVisitorDeepFreezer : i::ObjectVisitor {
     return !error_.has_value();
   }
 
+  bool InstantiateAndVisitLazyAccessorPairs() {
+    i::Handle<i::NativeContext> native_context = isolate_->native_context();
+
+    std::vector<i::Handle<i::AccessorPair>> lazy_accessor_pairs_to_freeze;
+    std::swap(lazy_accessor_pairs_to_freeze, lazy_accessor_pairs_to_freeze_);
+
+    for (const auto& accessor_pair : lazy_accessor_pairs_to_freeze) {
+      i::AccessorPair::GetComponent(isolate_, native_context, accessor_pair,
+                                    i::ACCESSOR_GETTER);
+      i::AccessorPair::GetComponent(isolate_, native_context, accessor_pair,
+                                    i::ACCESSOR_SETTER);
+      VisitObject(*accessor_pair);
+    }
+    // Ensure no new lazy accessor pairs were discovered.
+    CHECK_EQ(lazy_accessor_pairs_to_freeze_.size(), 0);
+    return true;
+  }
+
   i::Isolate* isolate_;
   Context::DeepFreezeDelegate* delegate_;
   std::unordered_set<i::Object, i::Object::Hasher> done_list_;
   std::vector<i::Handle<i::JSReceiver>> objects_to_freeze_;
+  std::vector<i::Handle<i::AccessorPair>> lazy_accessor_pairs_to_freeze_;
   base::Optional<ErrorInfo> error_;
 };
 
@@ -7808,7 +7841,7 @@ bool v8::String::MakeExternal(v8::String::ExternalStringResource* resource) {
     obj = i::ThinString::cast(obj).actual();
   }
 
-  if (!obj.SupportsExternalization()) {
+  if (!obj.SupportsExternalization(Encoding::TWO_BYTE_ENCODING)) {
     return false;
   }
 
@@ -7841,7 +7874,7 @@ bool v8::String::MakeExternal(
     obj = i::ThinString::cast(obj).actual();
   }
 
-  if (!obj.SupportsExternalization()) {
+  if (!obj.SupportsExternalization(Encoding::ONE_BYTE_ENCODING)) {
     return false;
   }
 
@@ -7862,21 +7895,6 @@ bool v8::String::MakeExternal(
   bool result = obj.MakeExternal(resource);
   DCHECK_IMPLIES(result, HasExternalStringResource(obj));
   return result;
-}
-
-bool v8::String::CanMakeExternal() const {
-  i::String obj = *Utils::OpenHandle(this);
-
-  if (obj.IsThinString()) {
-    obj = i::ThinString::cast(obj).actual();
-  }
-
-  if (!obj.SupportsExternalization()) {
-    return false;
-  }
-
-  // Only old space strings should be externalized.
-  return !i::Heap::InYoungGeneration(obj);
 }
 
 bool v8::String::CanMakeExternal(Encoding encoding) const {
@@ -8389,7 +8407,7 @@ i::Handle<i::JSArray> MapAsArray(i::Isolate* i_isolate, i::Object table_obj,
   int result_index = 0;
   {
     i::DisallowGarbageCollection no_gc;
-    i::Oddball the_hole = i::ReadOnlyRoots(i_isolate).the_hole_value();
+    i::Hole the_hole = i::ReadOnlyRoots(i_isolate).the_hole_value();
     for (int i = offset; i < capacity; ++i) {
       i::InternalIndex entry(i);
       i::Object key = table->KeyAt(entry);
@@ -8493,7 +8511,7 @@ i::Handle<i::JSArray> SetAsArray(i::Isolate* i_isolate, i::Object table_obj,
   int result_index = 0;
   {
     i::DisallowGarbageCollection no_gc;
-    i::Oddball the_hole = i::ReadOnlyRoots(i_isolate).the_hole_value();
+    i::Hole the_hole = i::ReadOnlyRoots(i_isolate).the_hole_value();
     for (int i = offset; i < capacity; ++i) {
       i::InternalIndex entry(i);
       i::Object key = table->KeyAt(entry);
@@ -9562,7 +9580,7 @@ void Isolate::RequestGarbageCollectionForTesting(GarbageCollectionType type) {
   } else {
     DCHECK_EQ(kFullGarbageCollection, type);
     reinterpret_cast<i::Isolate*>(this)->heap()->PreciseCollectAllGarbage(
-        i::Heap::kNoGCFlags, i::GarbageCollectionReason::kTesting,
+        i::GCFlag::kNoFlags, i::GarbageCollectionReason::kTesting,
         kGCCallbackFlagForced);
   }
 }
@@ -11333,8 +11351,14 @@ CFunction::CFunction(const void* address, const CFunctionInfo* type_info)
 }
 
 CFunctionInfo::CFunctionInfo(const CTypeInfo& return_info,
-                             unsigned int arg_count, const CTypeInfo* arg_info)
-    : return_info_(return_info), arg_count_(arg_count), arg_info_(arg_info) {
+                             unsigned int arg_count, const CTypeInfo* arg_info,
+                             Int64Representation repr)
+    : return_info_(return_info),
+      repr_(repr),
+      arg_count_(arg_count),
+      arg_info_(arg_info) {
+  DCHECK(repr == Int64Representation::kNumber ||
+         repr == Int64Representation::kBigInt);
   if (arg_count_ > 0) {
     for (unsigned int i = 0; i < arg_count_ - 1; ++i) {
       DCHECK(arg_info_[i].GetType() != CTypeInfo::kCallbackOptionsType);
@@ -11572,30 +11596,47 @@ void HandleScopeImplementer::BeginDeferredScope() {
 
 void InvokeAccessorGetterCallback(
     v8::Local<v8::Name> property,
-    const v8::PropertyCallbackInfo<v8::Value>& info,
-    v8::AccessorNameGetterCallback getter) {
+    const v8::PropertyCallbackInfo<v8::Value>& info) {
   // Leaving JavaScript.
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(info.GetIsolate());
   RCS_SCOPE(i_isolate, RuntimeCallCounterId::kAccessorGetterCallback);
 
-  // TODO(v8:13825): perform side effect checks if necessary once
-  // AccessorInfo/InterceptorInfo is passed here.
+  v8::AccessorNameGetterCallback getter;
+  {
+    Address arg = i_isolate->isolate_data()->api_callback_thunk_argument();
+    // Currently we don't call InterceptorInfo callbacks via CallApiGetter.
+    DCHECK(Object(arg).IsAccessorInfo());
+    AccessorInfo accessor_info = AccessorInfo::cast(Object(arg));
+    getter = reinterpret_cast<v8::AccessorNameGetterCallback>(
+        accessor_info.getter());
 
-  Address getter_address = reinterpret_cast<Address>(getter);
-  ExternalCallbackScope call_scope(i_isolate, getter_address);
+    if (V8_UNLIKELY(i_isolate->should_check_side_effects())) {
+      i::Handle<Object> receiver_check_unsupported;
+
+      if (!i_isolate->debug()->PerformSideEffectCheckForAccessor(
+              handle(accessor_info, i_isolate), receiver_check_unsupported,
+              ACCESSOR_GETTER)) {
+        return;
+      }
+    }
+  }
+  ExternalCallbackScope call_scope(i_isolate, FUNCTION_ADDR(getter));
   getter(property, info);
 }
 
-void InvokeFunctionCallback(const v8::FunctionCallbackInfo<v8::Value>& info,
-                            v8::FunctionCallback callback) {
+void InvokeFunctionCallback(const v8::FunctionCallbackInfo<v8::Value>& info) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(info.GetIsolate());
   RCS_SCOPE(i_isolate, RuntimeCallCounterId::kFunctionCallback);
 
   // TODO(v8:13825): perform side effect checks if necessary once
   // CallHandlerInfo is passed here.
 
-  Address callback_address = reinterpret_cast<Address>(callback);
-  ExternalCallbackScope call_scope(i_isolate, callback_address);
+  Address arg = i_isolate->isolate_data()->api_callback_thunk_argument();
+  if (USE_SIMULATOR_BOOL) {
+    arg = ExternalReference::UnwrapRedirection(arg);
+  }
+  v8::FunctionCallback callback = reinterpret_cast<v8::FunctionCallback>(arg);
+  ExternalCallbackScope call_scope(i_isolate, FUNCTION_ADDR(callback));
   callback(info);
 }
 

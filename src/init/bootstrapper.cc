@@ -441,6 +441,7 @@ V8_NOINLINE Handle<JSFunction> CreateFunctionForBuiltinWithPrototype(
   }
   Handle<Map> initial_map =
       factory->NewMap(type, instance_size, elements_kind, inobject_properties);
+  initial_map->SetConstructor(*result);
   if (type == JS_FUNCTION_TYPE) {
     DCHECK_EQ(instance_size, JSFunction::kSizeWithPrototype);
     // Since we are creating an initial map for JSFunction objects with
@@ -609,10 +610,19 @@ V8_NOINLINE Handle<JSFunction> CreateSharedObjectConstructor(
   instance_map->SetInObjectUnusedPropertyFields(0);
   // Shared objects are not extensible and have a null prototype.
   instance_map->set_is_extensible(false);
+
   JSFunction::SetInitialMap(isolate, constructor, instance_map,
                             factory->null_value(), factory->null_value());
-  constructor->map().SetConstructor(ReadOnlyRoots(isolate).null_value());
+
+  // Create a new {constructor, non-instance_prototype} tuple and store it
+  // in Map::constructor field.
+  Handle<Tuple2> non_instance_prototype_constructor_tuple =
+      isolate->factory()->NewTuple2(isolate->function_function(),
+                                    factory->null_value(),
+                                    AllocationType::kOld);
   constructor->map().set_has_non_instance_prototype(true);
+  constructor->map().SetConstructor(*non_instance_prototype_constructor_tuple);
+
   JSObject::AddProperty(
       isolate, constructor, factory->has_instance_symbol(),
       handle(isolate->native_context()->shared_space_js_object_has_instance(),
@@ -730,10 +740,11 @@ Handle<JSFunction> Genesis::CreateEmptyFunction() {
   Handle<JSFunction> empty_function =
       CreateFunctionForBuiltin(isolate(), factory()->empty_string(),
                                empty_function_map, Builtin::kEmptyFunction);
+  empty_function_map->SetConstructor(*empty_function);
   native_context()->set_empty_function(*empty_function);
 
   // --- E m p t y ---
-  Handle<String> source = factory()->NewStringFromStaticChars("() {}");
+  Handle<String> source = factory()->InternalizeString("() {}");
   Handle<Script> script = factory()->NewScript(source);
   script->set_type(Script::Type::kNative);
   Handle<WeakFixedArray> infos = factory()->NewWeakFixedArray(2);
@@ -1169,6 +1180,7 @@ void Genesis::CreateJSProxyMaps() {
   proxy_map->set_is_dictionary_map(true);
   proxy_map->set_may_have_interesting_symbols(true);
   native_context()->set_proxy_map(*proxy_map);
+  proxy_map->SetConstructor(native_context()->object_function());
 
   Handle<Map> proxy_callable_map =
       Map::Copy(isolate_, proxy_map, "callable Proxy");
@@ -1451,6 +1463,10 @@ void Genesis::HookUpGlobalObject(Handle<JSGlobalObject> global_object) {
   TransferIndexedProperties(global_object_from_snapshot, global_object);
 }
 
+// See https://tc39.es/ecma262/#sec-ordinarycreatefromconstructor for details
+// about intrinsicDefaultProto concept. In short it's about using proper
+// prototype object from constructor's realm when the constructor has
+// non-instance prototype.
 static void InstallWithIntrinsicDefaultProto(Isolate* isolate,
                                              Handle<JSFunction> function,
                                              int context_index) {
@@ -1515,12 +1531,22 @@ static void InstallError(Isolate* isolate, Handle<JSObject> global,
   }
 
   Handle<Map> initial_map(error_fun->initial_map(), isolate);
-  Map::EnsureDescriptorSlack(isolate, initial_map, 1);
+  Map::EnsureDescriptorSlack(isolate, initial_map, 2);
+  const int kJSErrorErrorStackSymbolIndex = 0;
 
-  {
-    Handle<AccessorInfo> info = factory->error_stack_accessor();
-    Descriptor d = Descriptor::AccessorConstant(handle(info->name(), isolate),
-                                                info, DONT_ENUM);
+  {  // error_stack_symbol
+    Descriptor d = Descriptor::DataField(isolate, factory->error_stack_symbol(),
+                                         kJSErrorErrorStackSymbolIndex,
+                                         DONT_ENUM, Representation::Tagged());
+    initial_map->AppendDescriptor(isolate, &d);
+  }
+  {  // stack
+    Handle<AccessorPair> new_pair = factory->NewAccessorPair();
+    new_pair->set_getter(*factory->error_stack_getter_fun_template());
+    new_pair->set_setter(*factory->error_stack_setter_fun_template());
+
+    Descriptor d = Descriptor::AccessorConstant(factory->stack_string(),
+                                                new_pair, DONT_ENUM);
     initial_map->AppendDescriptor(isolate, &d);
   }
 }
@@ -1728,10 +1754,14 @@ void Genesis::InitializeGlobal(Handle<JSGlobalObject> global_object,
       isolate_->sloppy_function_with_name_map()->SetConstructor(*function_fun);
       isolate_->sloppy_function_with_readonly_prototype_map()->SetConstructor(
           *function_fun);
+      isolate_->sloppy_function_without_prototype_map()->SetConstructor(
+          *function_fun);
 
       isolate_->strict_function_map()->SetConstructor(*function_fun);
       isolate_->strict_function_with_name_map()->SetConstructor(*function_fun);
       isolate_->strict_function_with_readonly_prototype_map()->SetConstructor(
+          *function_fun);
+      isolate_->strict_function_without_prototype_map()->SetConstructor(
           *function_fun);
 
       isolate_->class_function_map()->SetConstructor(*function_fun);
@@ -4252,6 +4282,8 @@ void Genesis::InitializeIteratorFunctions() {
 
     native_context->generator_function_map().SetConstructor(
         *generator_function_function);
+    native_context->generator_function_with_name_map().SetConstructor(
+        *generator_function_function);
   }
 
   {  // -- A s y n c G e n e r a t o r
@@ -4281,6 +4313,8 @@ void Genesis::InitializeIteratorFunctions() {
         static_cast<PropertyAttributes>(DONT_ENUM | READ_ONLY));
 
     native_context->async_generator_function_map().SetConstructor(
+        *async_generator_function_function);
+    native_context->async_generator_function_with_name_map().SetConstructor(
         *async_generator_function_function);
   }
 
@@ -4382,9 +4416,6 @@ void Genesis::InitializeIteratorFunctions() {
         async_function_constructor,
         static_cast<PropertyAttributes>(DONT_ENUM | READ_ONLY));
 
-    JSFunction::SetPrototype(async_function_constructor,
-                             async_function_prototype);
-
     // Async functions don't have a prototype, but they use generator objects
     // under the hood to model the suspend/resume (in await). Instead of using
     // the "prototype" / initial_map machinery (like for (async) generators),
@@ -4394,6 +4425,10 @@ void Genesis::InitializeIteratorFunctions() {
     Handle<Map> async_function_object_map = factory->NewMap(
         JS_ASYNC_FUNCTION_OBJECT_TYPE, JSAsyncFunctionObject::kHeaderSize);
     native_context->set_async_function_object_map(*async_function_object_map);
+
+    isolate_->async_function_map()->SetConstructor(*async_function_constructor);
+    isolate_->async_function_with_name_map()->SetConstructor(
+        *async_function_constructor);
   }
 }
 
@@ -4568,6 +4603,9 @@ void Genesis::InitializeGlobal_harmony_iterator_helpers() {
       isolate()->object_function(), AllocationType::kOld);
   JSObject::ForceSetPrototype(isolate(), wrap_for_valid_iterator_prototype,
                               iterator_prototype);
+  JSObject::AddProperty(isolate(), iterator_prototype,
+                        factory()->constructor_string(), iterator_function,
+                        DONT_ENUM);
   SimpleInstallFunction(isolate(), wrap_for_valid_iterator_prototype, "next",
                         Builtin::kWrapForValidIteratorPrototypeNext, 0, true);
   SimpleInstallFunction(isolate(), wrap_for_valid_iterator_prototype, "return",
@@ -4577,6 +4615,7 @@ void Genesis::InitializeGlobal_harmony_iterator_helpers() {
       TERMINAL_FAST_ELEMENTS_KIND, 0);
   Map::SetPrototype(isolate(), valid_iterator_wrapper_map,
                     wrap_for_valid_iterator_prototype);
+  valid_iterator_wrapper_map->SetConstructor(*iterator_function);
   native_context()->set_valid_iterator_wrapper_map(*valid_iterator_wrapper_map);
 
   // --- %IteratorHelperPrototype%
@@ -4620,6 +4659,7 @@ void Genesis::InitializeGlobal_harmony_iterator_helpers() {
                           JSIterator##Capitalized_name##Helper::kHeaderSize,   \
                           TERMINAL_FAST_ELEMENTS_KIND, 0);                     \
     Map::SetPrototype(isolate(), map, iterator_helper_prototype);              \
+    map->SetConstructor(*iterator_function);                                   \
     native_context()->set_iterator_##lowercase_name##_helper_map(*map);        \
     SimpleInstallFunction(isolate(), iterator_prototype, #lowercase_name,      \
                           Builtin::kIteratorPrototype##Capitalized_name, argc, \

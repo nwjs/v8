@@ -1338,12 +1338,18 @@ void FeedbackNexus::Print(std::ostream& os) {
     case FeedbackSlotKind::kSetKeyedStrict: {
       os << InlineCacheState2String(ic_state());
       if (ic_state() == InlineCacheState::MONOMORPHIC) {
-        os << "\n   " << Brief(GetFeedback()) << ": ";
-        Object handler = GetFeedbackExtra().GetHeapObjectOrSmi();
-        if (handler.IsWeakFixedArray()) {
-          handler = WeakFixedArray::cast(handler).Get(0).GetHeapObjectOrSmi();
+        HeapObject feedback = GetFeedback().GetHeapObject();
+        HeapObject feedback_extra = GetFeedbackExtra().GetHeapObject();
+        if (feedback.IsName()) {
+          os << " with name " << Brief(feedback);
+          WeakFixedArray array = WeakFixedArray::cast(feedback_extra);
+          os << "\n   " << Brief(array.Get(0)) << ": ";
+          Object handler = array.Get(1).GetHeapObjectOrSmi();
+          StoreHandler::PrintHandler(handler, os);
+        } else {
+          os << "\n   " << Brief(feedback) << ": ";
+          StoreHandler::PrintHandler(feedback_extra, os);
         }
-        StoreHandler::PrintHandler(handler, os);
       } else if (ic_state() == InlineCacheState::POLYMORPHIC) {
         HeapObject feedback = GetFeedback().GetHeapObject();
         WeakFixedArray array;
@@ -1392,6 +1398,11 @@ void Oddball::OddballPrint(std::ostream& os) {
   os << s.PrefixForDebugPrint();
   s.PrintUC16(os);
   os << s.SuffixForDebugPrint();
+  os << std::endl;
+}
+
+void Hole::HolePrint(std::ostream& os) {
+  PrintHeapObjectHeaderWithoutMap(*this, os, "Hole");
   os << std::endl;
 }
 
@@ -2154,7 +2165,7 @@ void WasmArray::WasmArrayPrint(std::ostream& os) {
 #else
         for (int j = kSimd128Size - 1; j >= 0; j--) {
 #endif
-          os << reinterpret_cast<byte*>(this->ElementAddress(i))[j];
+          os << reinterpret_cast<uint8_t*>(this->ElementAddress(i))[j];
         }
         os << std::dec;
       }
@@ -2213,8 +2224,9 @@ void WasmInstanceObject::WasmInstanceObjectPrint(std::ostream& os) {
   PRINT_WASM_INSTANCE_FIELD(wasm_internal_functions, Brief);
   PRINT_WASM_INSTANCE_FIELD(managed_object_maps, Brief);
   PRINT_WASM_INSTANCE_FIELD(feedback_vectors, Brief);
-  PRINT_WASM_INSTANCE_FIELD(memory_start, to_void_ptr);
-  PRINT_WASM_INSTANCE_FIELD(memory_size, +);
+  PRINT_WASM_INSTANCE_FIELD(well_known_imports, Brief);
+  PRINT_WASM_INSTANCE_FIELD(memory0_start, to_void_ptr);
+  PRINT_WASM_INSTANCE_FIELD(memory0_size, +);
   PRINT_WASM_INSTANCE_FIELD(stack_limit_address, to_void_ptr);
   PRINT_WASM_INSTANCE_FIELD(real_stack_limit_address, to_void_ptr);
   PRINT_WASM_INSTANCE_FIELD(new_allocation_limit_address, to_void_ptr);
@@ -2907,6 +2919,9 @@ void Map::MapPrint(std::ostream& os) {
     }
   }
   os << "\n - prototype: " << Brief(prototype());
+  if (has_non_instance_prototype()) {
+    os << "\n - non-instance prototype: " << Brief(GetNonInstancePrototype());
+  }
   if (!IsContextMap()) {
     os << "\n - constructor: " << Brief(GetConstructor());
   }
@@ -3174,6 +3189,38 @@ V8_EXPORT_PRIVATE extern void _v8_internal_Print_Code(void* object) {
   lookup_result->Disassemble(nullptr, os, isolate, address);
 #else
   lookup_result->Print();
+#endif
+}
+
+V8_DONT_STRIP_SYMBOL
+V8_EXPORT_PRIVATE extern void _v8_internal_Print_OnlyCode(void* object,
+                                                          size_t range_limit) {
+  i::Address address = reinterpret_cast<i::Address>(object);
+  i::Isolate* isolate = i::Isolate::Current();
+
+#if V8_ENABLE_WEBASSEMBLY
+  {
+    i::wasm::WasmCodeRefScope scope;
+    if (i::wasm::GetWasmCodeManager()->LookupCode(address)) {
+      i::PrintF("Not supported on wasm code");
+      return;
+    }
+  }
+#endif  // V8_ENABLE_WEBASSEMBLY
+
+  v8::base::Optional<i::Code> lookup_result =
+      isolate->heap()->TryFindCodeForInnerPointerForPrinting(address);
+  if (!lookup_result.has_value()) {
+    i::PrintF(
+        "%p is not within the current isolate's code or embedded spaces\n",
+        object);
+    return;
+  }
+
+#if defined(ENABLE_DISASSEMBLER)
+  i::StdoutStream os;
+  lookup_result->DisassembleOnlyCode(nullptr, os, isolate, address,
+                                     range_limit);
 #endif
 }
 

@@ -719,17 +719,18 @@ void SetInstanceMemory(Handle<WasmInstanceObject> instance,
   CHECK_IMPLIES(is_wasm_module && use_trap_handler,
                 buffer->GetBackingStore()->has_guard_regions());
 
-  instance->SetRawMemory(reinterpret_cast<byte*>(buffer->backing_store()),
+  // TODO(13918): Support multiple memories.
+  instance->SetRawMemory(0, reinterpret_cast<uint8_t*>(buffer->backing_store()),
                          buffer->byte_length());
 #if DEBUG
   if (!v8_flags.mock_arraybuffer_allocator) {
     // To flush out bugs earlier, in DEBUG mode, check that all pages of the
     // memory are accessible by reading and writing one byte on each page.
     // Don't do this if the mock ArrayBuffer allocator is enabled.
-    byte* mem_start = instance->memory_start();
-    size_t mem_size = instance->memory_size();
+    uint8_t* mem_start = instance->memory0_start();
+    size_t mem_size = instance->memory0_size();
     for (size_t offset = 0; offset < mem_size; offset += wasm::kWasmPageSize) {
-      byte val = mem_start[offset];
+      uint8_t val = mem_start[offset];
       USE(val);
       mem_start[offset] = val;
     }
@@ -738,9 +739,10 @@ void SetInstanceMemory(Handle<WasmInstanceObject> instance,
 }
 }  // namespace
 
-MaybeHandle<WasmMemoryObject> WasmMemoryObject::New(
-    Isolate* isolate, Handle<JSArrayBuffer> buffer, int maximum,
-    WasmMemoryFlag memory_type) {
+Handle<WasmMemoryObject> WasmMemoryObject::New(Isolate* isolate,
+                                               Handle<JSArrayBuffer> buffer,
+                                               int maximum,
+                                               WasmMemoryFlag memory_type) {
   Handle<JSFunction> memory_ctor(
       isolate->native_context()->wasm_memory_constructor(), isolate);
 
@@ -806,13 +808,14 @@ MaybeHandle<WasmMemoryObject> WasmMemoryObject::New(
       has_maximum ? std::min(engine_maximum, maximum) : engine_maximum;
 #endif
 
-  auto backing_store = BackingStore::AllocateWasmMemory(
-      isolate, initial, heuristic_maximum, memory_type, shared);
+  std::unique_ptr<BackingStore> backing_store =
+      BackingStore::AllocateWasmMemory(isolate, initial, heuristic_maximum,
+                                       memory_type, shared);
 
   if (!backing_store) return {};
 
   Handle<JSArrayBuffer> buffer =
-      (shared == SharedFlag::kShared)
+      shared == SharedFlag::kShared
           ? isolate->factory()->NewJSSharedArrayBuffer(std::move(backing_store))
           : isolate->factory()->NewJSArrayBuffer(std::move(backing_store));
 
@@ -859,9 +862,6 @@ int32_t WasmMemoryObject::Grow(Isolate* isolate,
                                uint32_t pages) {
   TRACE_EVENT0("v8.wasm", "wasm.GrowMemory");
   Handle<JSArrayBuffer> old_buffer(memory_object->array_buffer(), isolate);
-  // Any buffer used as an asmjs memory cannot be detached, and
-  // therefore this memory cannot be grown.
-  if (old_buffer->is_asmjs_memory()) return -1;
 
   std::shared_ptr<BackingStore> backing_store = old_buffer->GetBackingStore();
   if (!backing_store) return -1;
@@ -1100,11 +1100,14 @@ bool WasmInstanceObject::EnsureIndirectFunctionTableWithMinimumSize(
   return true;
 }
 
-void WasmInstanceObject::SetRawMemory(byte* mem_start, size_t mem_size) {
+void WasmInstanceObject::SetRawMemory(int memory_index, uint8_t* mem_start,
+                                      size_t mem_size) {
+  // TODO(13918): Support multiple memories.
+  CHECK_EQ(0, memory_index);
   CHECK_LE(mem_size, module()->is_memory64 ? wasm::max_mem64_bytes()
                                            : wasm::max_mem32_bytes());
-  set_memory_start(mem_start);
-  set_memory_size(mem_size);
+  set_memory0_start(mem_start);
+  set_memory0_size(mem_size);
 }
 
 const WasmModule* WasmInstanceObject::module() {
@@ -1134,7 +1137,7 @@ Handle<WasmInstanceObject> WasmInstanceObject::New(
   // sandboxed pointers), but some entries (the indices for reference-type
   // globals) are accessed as 32-bit integers which is more convenient with a
   // raw ByteArray.
-  Handle<ByteArray> imported_mutable_globals =
+  Handle<FixedAddressArray> imported_mutable_globals =
       FixedAddressArray::New(isolate, num_imported_mutable_globals);
   instance->set_imported_mutable_globals(*imported_mutable_globals);
 
@@ -1166,7 +1169,7 @@ Handle<WasmInstanceObject> WasmInstanceObject::New(
   instance->set_old_allocation_top_address(
       isolate->heap()->OldSpaceAllocationTopAddress());
   instance->set_globals_start(
-      reinterpret_cast<byte*>(EmptyBackingStoreBuffer()));
+      reinterpret_cast<uint8_t*>(EmptyBackingStoreBuffer()));
   instance->set_indirect_function_table_size(0);
   instance->set_indirect_function_table_refs(
       ReadOnlyRoots(isolate).empty_fixed_array());
@@ -1181,6 +1184,9 @@ Handle<WasmInstanceObject> WasmInstanceObject::New(
   instance->set_hook_on_function_call_address(
       isolate->debug()->hook_on_function_call_address());
   instance->set_managed_object_maps(*isolate->factory()->empty_fixed_array());
+  Handle<FixedArray> well_known_imports =
+      isolate->factory()->NewFixedArray(num_imported_functions);
+  instance->set_well_known_imports(*well_known_imports);
   Handle<FixedArray> functions = isolate->factory()->NewFixedArrayWithZeroes(
       static_cast<int>(module->functions.size()));
   instance->set_wasm_internal_functions(*functions);
@@ -1188,7 +1194,8 @@ Handle<WasmInstanceObject> WasmInstanceObject::New(
   instance->set_tiering_budget_array(
       module_object->native_module()->tiering_budget_array());
   instance->set_break_on_entry(module_object->script().break_on_entry());
-  instance->SetRawMemory(reinterpret_cast<byte*>(EmptyBackingStoreBuffer()), 0);
+  instance->SetRawMemory(
+      0, reinterpret_cast<uint8_t*>(EmptyBackingStoreBuffer()), 0);
 
   // Insert the new instance into the scripts weak list of instances. This list
   // is used for breakpoints affecting all instances belonging to the script.
@@ -1475,7 +1482,7 @@ void WasmInstanceObject::ImportWasmJSFunctionIntoTable(
   if (sig_in_module != module_canonical_ids.end()) {
     wasm::NativeModule* native_module =
         instance->module_object().native_module();
-    wasm::WasmImportData resolved(callable, sig, canonical_sig_index);
+    wasm::WasmImportData resolved({}, -1, callable, sig, canonical_sig_index);
     wasm::ImportCallKind kind = resolved.kind();
     callable = resolved.callable();  // Update to ultimate target.
     DCHECK_NE(wasm::ImportCallKind::kLinkError, kind);
@@ -1490,7 +1497,6 @@ void WasmInstanceObject::ImportWasmJSFunctionIntoTable(
     // TODO(manoskouk): Reuse js_function->wasm_to_js_wrapper_code().
     wasm::WasmCompilationResult result = compiler::CompileWasmImportCallWrapper(
         &env, kind, sig, false, expected_arity, suspend);
-    wasm::CodeSpaceWriteScope write_scope(native_module);
     std::unique_ptr<wasm::WasmCode> wasm_code = native_module->AddCode(
         result.func_index, result.code_desc, result.frame_slot_count,
         result.tagged_parameter_slots,
@@ -1520,9 +1526,9 @@ uint8_t* WasmInstanceObject::GetGlobalStorage(
     Handle<WasmInstanceObject> instance, const wasm::WasmGlobal& global) {
   DCHECK(!global.type.is_reference());
   if (global.mutability && global.imported) {
-    return reinterpret_cast<byte*>(
+    return reinterpret_cast<uint8_t*>(
         instance->imported_mutable_globals().get_sandboxed_pointer(
-            global.index * kSystemPointerSize));
+            global.index));
   } else {
     return instance->globals_start() + global.offset;
   }
@@ -1539,8 +1545,7 @@ WasmInstanceObject::GetGlobalBufferAndIndex(Handle<WasmInstanceObject> instance,
         FixedArray::cast(
             instance->imported_mutable_globals_buffers().get(global.index)),
         isolate);
-    Address idx = instance->imported_mutable_globals().get_int(
-        global.index * kSystemPointerSize);
+    Address idx = instance->imported_mutable_globals().get(global.index);
     DCHECK_LE(idx, std::numeric_limits<uint32_t>::max());
     return {buffer, static_cast<uint32_t>(idx)};
   }

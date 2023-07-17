@@ -276,7 +276,7 @@ TEST_F(HeapTest, GrowAndShrinkNewSpace) {
   CHECK_EQ(old_capacity, new_capacity);
 
   // Let the scavenger empty the new space.
-  CollectGarbage(NEW_SPACE);
+  EmptyNewSpaceUsingGC();
   CHECK_LE(new_space->Size(), old_capacity);
 
   // Explicitly shrinking should halve the space capacity.
@@ -417,7 +417,11 @@ TEST_F(HeapTest, RememberedSet_InsertOnPromotingObjectToOld) {
 
   CHECK(heap->InOldSpace(*arr));
   CHECK(heap->InYoungGeneration(arr->get(0)));
-  CHECK_EQ(1, GetRememberedSetSize<OLD_TO_NEW>(*arr));
+  if (v8_flags.minor_mc) {
+    CHECK_EQ(1, GetRememberedSetSize<OLD_TO_NEW_BACKGROUND>(*arr));
+  } else {
+    CHECK_EQ(1, GetRememberedSetSize<OLD_TO_NEW>(*arr));
+  }
 }
 
 TEST_F(HeapTest, Regress978156) {
@@ -429,7 +433,7 @@ TEST_F(HeapTest, Regress978156) {
   Heap* heap = isolate()->heap();
 
   // 1. Ensure that the new space is empty.
-  GcAndSweep(OLD_SPACE);
+  EmptyNewSpaceUsingGC();
   // 2. Fill the new space with FixedArrays.
   std::vector<Handle<FixedArray>> arrays;
   SimulateFullSpace(heap->new_space(), &arrays);

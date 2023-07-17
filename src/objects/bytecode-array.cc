@@ -34,7 +34,7 @@ void BytecodeArray::PrintJson(std::ostream& os) {
 
     os << "{\"offset\":" << iterator.current_offset() << ", \"disassembly\":\"";
     interpreter::BytecodeDecoder::Decode(
-        os, reinterpret_cast<byte*>(current_address), false);
+        os, reinterpret_cast<uint8_t*>(current_address), false);
 
     if (interpreter::Bytecodes::IsJump(iterator.current_bytecode())) {
       os << " (" << iterator.GetJumpTargetOffset() << ")";
@@ -108,7 +108,7 @@ void BytecodeArray::Disassemble(Handle<BytecodeArray> handle,
     os << reinterpret_cast<const void*>(current_address) << " @ "
        << std::setw(4) << iterator.current_offset() << " : ";
     interpreter::BytecodeDecoder::Decode(
-        os, reinterpret_cast<byte*>(current_address));
+        os, reinterpret_cast<uint8_t*>(current_address));
     if (interpreter::Bytecodes::IsJump(iterator.current_bytecode())) {
       Address jump_target = base_address + iterator.GetJumpTargetOffset();
       os << " (" << reinterpret_cast<void*>(jump_target) << " @ "
@@ -160,28 +160,51 @@ void BytecodeArray::Disassemble(Handle<BytecodeArray> handle,
 void BytecodeArray::CopyBytecodesTo(BytecodeArray to) {
   BytecodeArray from = *this;
   DCHECK_EQ(from.length(), to.length());
-  CopyBytes(reinterpret_cast<byte*>(to.GetFirstBytecodeAddress()),
-            reinterpret_cast<byte*>(from.GetFirstBytecodeAddress()),
+  CopyBytes(reinterpret_cast<uint8_t*>(to.GetFirstBytecodeAddress()),
+            reinterpret_cast<uint8_t*>(from.GetFirstBytecodeAddress()),
             from.length());
 }
 
-void BytecodeArray::MakeOlder() {
-  // BytecodeArray is aged in concurrent marker.
-  // The word must be completely within the byte code array.
-  Address age_addr = address() + kBytecodeAgeOffset;
-  DCHECK_LE(RoundDown(age_addr, kTaggedSize) + kTaggedSize, address() + Size());
-  uint16_t age = bytecode_age();
-  if (age < v8_flags.bytecode_old_age) {
-    static_assert(kBytecodeAgeSize == kUInt16Size);
-    base::AsAtomic16::Relaxed_CompareAndSwap(
-        reinterpret_cast<base::Atomic16*>(age_addr), age, age + 1);
-  }
+void BytecodeArray::MakeOlder(uint16_t increment) {
+  if (v8_flags.flush_code_based_on_time) {
+    DCHECK_NE(increment, 0);
+    uint16_t current_age;
+    uint16_t updated_age;
 
-  DCHECK_LE(bytecode_age(), v8_flags.bytecode_old_age);
+    do {
+      current_age = bytecode_age();
+      // When the age is 0, it was reset by the function prologue in
+      // Ignition/Sparkplug. But that might have been some time after the last
+      // full GC. So in this case we don't increment the value like we normally
+      // would but just set the age to 1. All non-0 values can be incremented as
+      // expected (we add the number of seconds since the last GC) as they were
+      // definitely last executed before the last full GC.
+      updated_age = current_age == 0 ? 1 : SaturateAdd(current_age, increment);
+    } while (CompareExchangeBytecodeAge(current_age, updated_age) !=
+             current_age);
+  } else {
+    uint16_t age = bytecode_age();
+    if (age < v8_flags.bytecode_old_age) {
+      CompareExchangeBytecodeAge(age, age + 1);
+    }
+    DCHECK_LE(bytecode_age(), v8_flags.bytecode_old_age);
+  }
+}
+
+void BytecodeArray::EnsureOldForTesting() {
+  uint16_t old_age = v8_flags.flush_code_based_on_time
+                         ? UINT16_MAX
+                         : v8_flags.bytecode_old_age;
+  set_bytecode_age(old_age);
+  DCHECK(IsOld());
 }
 
 bool BytecodeArray::IsOld() const {
-  return bytecode_age() >= v8_flags.bytecode_old_age;
+  if (v8_flags.flush_code_based_on_time) {
+    return bytecode_age() >= v8_flags.bytecode_old_time;
+  } else {
+    return bytecode_age() >= v8_flags.bytecode_old_age;
+  }
 }
 
 }  // namespace internal

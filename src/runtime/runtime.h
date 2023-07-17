@@ -511,6 +511,7 @@ namespace internal {
   F(CurrentFrameIsTurbofan, 0, 1)             \
   F(DebugPrint, -1, 1)                        \
   F(DebugPrintPtr, 1, 1)                      \
+  F(DebugPrintWord, 5, 1)                     \
   F(DebugTrace, 0, 1)                         \
   F(DebugTrackRetainingPath, -1, 1)           \
   F(DeoptimizeFunction, 1, 1)                 \
@@ -601,7 +602,8 @@ namespace internal {
   F(TurbofanStaticAssert, 1, 1)               \
   F(TypedArraySpeciesProtector, 0, 1)         \
   F(WaitForBackgroundOptimization, 0, 1)      \
-  I(DeoptimizeNow, 0, 1)
+  I(DeoptimizeNow, 0, 1)                      \
+  F(LeakHole, 0, 1)
 
 #define FOR_EACH_INTRINSIC_TYPEDARRAY(F, I)    \
   F(ArrayBufferDetach, -1, 1)                  \

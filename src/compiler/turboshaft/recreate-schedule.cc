@@ -9,6 +9,7 @@
 #include "src/base/small-vector.h"
 #include "src/base/template-utils.h"
 #include "src/base/vector.h"
+#include "src/codegen/callable.h"
 #include "src/codegen/machine-type.h"
 #include "src/common/globals.h"
 #include "src/compiler/backend/instruction-selector.h"
@@ -26,6 +27,8 @@
 #include "src/compiler/turboshaft/deopt-data.h"
 #include "src/compiler/turboshaft/graph.h"
 #include "src/compiler/turboshaft/operations.h"
+#include "src/compiler/turboshaft/phase.h"
+#include "src/compiler/turboshaft/representations.h"
 #include "src/compiler/write-barrier-kind.h"
 #include "src/utils/utils.h"
 #include "src/zone/zone-containers.h"
@@ -35,14 +38,15 @@ namespace v8::internal::compiler::turboshaft {
 namespace {
 
 struct ScheduleBuilder {
-  const Graph& input_graph;
-  JSHeapBroker* broker;
   CallDescriptor* call_descriptor;
-  Zone* graph_zone;
   Zone* phase_zone;
-  SourcePositionTable* source_positions;
-  NodeOriginTable* origins;
 
+  const Graph& input_graph = PipelineData::Get().graph();
+  JSHeapBroker* broker = PipelineData::Get().broker();
+  Zone* graph_zone = PipelineData::Get().graph_zone();
+  SourcePositionTable* source_positions =
+      PipelineData::Get().source_positions();
+  NodeOriginTable* origins = PipelineData::Get().node_origins();
   const size_t node_count_estimate =
       static_cast<size_t>(1.1 * input_graph.op_id_count());
   Schedule* const schedule =
@@ -1117,9 +1121,13 @@ Node* ScheduleBuilder::ProcessOperation(const DeoptimizeIfOp& op) {
 }
 Node* ScheduleBuilder::ProcessOperation(const TrapIfOp& op) {
   Node* condition = GetNode(op.condition());
-  const Operator* o =
-      op.negated ? common.TrapUnless(op.trap_id) : common.TrapIf(op.trap_id);
-  return AddNode(o, {condition});
+  bool has_frame_state = op.frame_state().valid();
+  Node* frame_state = has_frame_state ? GetNode(op.frame_state()) : nullptr;
+  const Operator* o = op.negated
+                          ? common.TrapUnless(op.trap_id, has_frame_state)
+                          : common.TrapIf(op.trap_id, has_frame_state);
+  return has_frame_state ? AddNode(o, {condition, frame_state})
+                         : AddNode(o, {condition});
 }
 Node* ScheduleBuilder::ProcessOperation(const DeoptimizeOp& op) {
   Node* frame_state = GetNode(op.frame_state());
@@ -1431,21 +1439,36 @@ Node* ScheduleBuilder::ProcessOperation(const DebugBreakOp& op) {
   return AddNode(machine.DebugBreak(), {});
 }
 
+Node* ScheduleBuilder::ProcessOperation(const DebugPrintOp& op) {
+  // TODO(nicohartmann@): Support other representations.
+  DCHECK_EQ(op.rep, RegisterRepresentation::PointerSized());
+  Node* input = GetNode(op.input());
+
+  const Callable callable = Builtins::CallableFor(PipelineData::Get().isolate(),
+                                                  Builtin::kDebugPrintWordPtr);
+
+  const CallDescriptor* call_descriptor = Linkage::GetStubCallDescriptor(
+      graph_zone, callable.descriptor(),
+      callable.descriptor().GetStackParameterCount(), CallDescriptor::kNoFlags,
+      Operator::kNoThrow | Operator::kNoDeopt);
+
+  base::SmallVector<Node*, 8> inputs;
+  inputs.push_back(AddNode(common.HeapConstant(callable.code()), {}));
+  inputs.push_back(input);
+  inputs.push_back(AddNode(common.Int32Constant(Context::kNoContext), {}));
+
+  return AddNode(common.Call(call_descriptor), base::VectorOf(inputs));
+}
+
 Node* ScheduleBuilder::ProcessOperation(const LoadRootRegisterOp& op) {
   return AddNode(machine.LoadRootRegister(), {});
 }
 
 }  // namespace
 
-RecreateScheduleResult RecreateSchedule(const Graph& graph,
-                                        JSHeapBroker* broker,
-                                        CallDescriptor* call_descriptor,
-                                        Zone* graph_zone, Zone* phase_zone,
-                                        SourcePositionTable* source_positions,
-                                        NodeOriginTable* origins) {
-  ScheduleBuilder builder{graph,      broker,     call_descriptor,
-                          graph_zone, phase_zone, source_positions,
-                          origins};
+RecreateScheduleResult RecreateSchedule(CallDescriptor* call_descriptor,
+                                        Zone* phase_zone) {
+  ScheduleBuilder builder{call_descriptor, phase_zone};
   return builder.Run();
 }
 

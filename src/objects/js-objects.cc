@@ -5,6 +5,7 @@
 #include "src/objects/js-objects.h"
 
 #include "src/api/api-arguments-inl.h"
+#include "src/api/api-natives.h"
 #include "src/base/optional.h"
 #include "src/common/assert-scope.h"
 #include "src/common/globals.h"
@@ -657,8 +658,8 @@ base::Optional<NativeContext> JSReceiver::GetCreationContextRaw() {
       }
     }
   }
-  if (function.has_context()) return function.native_context();
-  return {};
+  CHECK(function.has_context());
+  return function.native_context();
 }
 
 MaybeHandle<NativeContext> JSReceiver::GetCreationContext() {
@@ -1365,8 +1366,24 @@ Maybe<bool> DefinePropertyWithInterceptorInternal(
   std::unique_ptr<v8::PropertyDescriptor> descriptor(
       new v8::PropertyDescriptor());
   if (PropertyDescriptor::IsAccessorDescriptor(desc)) {
-    descriptor.reset(new v8::PropertyDescriptor(
-        v8::Utils::ToLocal(desc->get()), v8::Utils::ToLocal(desc->set())));
+    Handle<Object> getter = desc->get();
+    if (!getter.is_null() && getter->IsFunctionTemplateInfo()) {
+      ASSIGN_RETURN_ON_EXCEPTION_VALUE(
+          isolate, getter,
+          ApiNatives::InstantiateFunction(
+              Handle<FunctionTemplateInfo>::cast(getter), MaybeHandle<Name>()),
+          Nothing<bool>());
+    }
+    Handle<Object> setter = desc->set();
+    if (!setter.is_null() && setter->IsFunctionTemplateInfo()) {
+      ASSIGN_RETURN_ON_EXCEPTION_VALUE(
+          isolate, setter,
+          ApiNatives::InstantiateFunction(
+              Handle<FunctionTemplateInfo>::cast(setter), MaybeHandle<Name>()),
+          Nothing<bool>());
+    }
+    descriptor.reset(new v8::PropertyDescriptor(v8::Utils::ToLocal(getter),
+                                                v8::Utils::ToLocal(setter)));
   } else if (PropertyDescriptor::IsDataDescriptor(desc)) {
     if (desc->has_writable()) {
       descriptor.reset(new v8::PropertyDescriptor(
@@ -4916,13 +4933,24 @@ void JSObject::OptimizeAsPrototype(Handle<JSObject> object,
     // Replace the pointer to the exact constructor with the Object function
     // from the same context if undetectable from JS. This is to avoid keeping
     // memory alive unnecessarily.
-    Object maybe_constructor = new_map->GetConstructor();
+    Object maybe_constructor = new_map->GetConstructorRaw();
+    Tuple2 tuple;
+    if (maybe_constructor.IsTuple2()) {
+      // Handle the {constructor, non-instance_prototype} tuple case if the map
+      // has non-instance prototype.
+      tuple = Tuple2::cast(maybe_constructor);
+      maybe_constructor = tuple.value1();
+    }
     if (maybe_constructor.IsJSFunction()) {
       JSFunction constructor = JSFunction::cast(maybe_constructor);
       if (!constructor.shared().IsApiFunction()) {
-        Context context = constructor.native_context();
+        NativeContext context = constructor.native_context();
         JSFunction object_function = context.object_function();
-        new_map->SetConstructor(object_function);
+        if (!tuple.is_null()) {
+          tuple.set_value1(object_function);
+        } else {
+          new_map->SetConstructor(object_function);
+        }
       }
     }
     JSObject::MigrateToMap(isolate, object, new_map);
@@ -5245,7 +5273,7 @@ Maybe<bool> JSObject::SetPrototype(Isolate* isolate, Handle<JSObject> object,
   isolate->UpdateNoElementsProtectorOnSetPrototype(real_receiver);
   isolate->UpdateTypedArraySpeciesLookupChainProtectorOnSetPrototype(
       real_receiver);
-  isolate->UpdateNumberStringPrototypeNoReplaceProtectorOnSetPrototype(
+  isolate->UpdateNumberStringNotRegexpLikeProtectorOnSetPrototype(
       real_receiver);
 
   Handle<Map> new_map =

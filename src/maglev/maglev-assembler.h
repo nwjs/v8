@@ -177,8 +177,8 @@ class MaglevAssembler : public MacroAssembler {
                           Label* char_code_fits_one_byte, Register result,
                           Register char_code, Register scratch);
 
-  void ToBoolean(Register value, ZoneLabelRef is_true, ZoneLabelRef is_false,
-                 bool fallthrough_when_true);
+  void ToBoolean(Register value, CheckType check_type, ZoneLabelRef is_true,
+                 ZoneLabelRef is_false, bool fallthrough_when_true);
   void TestTypeOf(Register object,
                   interpreter::TestTypeOfFlags::LiteralFlag literal,
                   Label* if_true, Label::Distance true_distance,
@@ -281,6 +281,7 @@ class MaglevAssembler : public MacroAssembler {
   inline void CompareFloat64(DoubleRegister src1, DoubleRegister src2);
 
   inline void CallSelf();
+  inline void CallBuiltin(Builtin builtin);
 
   inline void Jump(Label* target, Label::Distance distance = Label::kFar);
   inline void JumpIf(Condition cond, Label* target,
@@ -358,6 +359,10 @@ class MaglevAssembler : public MacroAssembler {
   }
   MaglevCompilationInfo* compilation_info() const {
     return code_gen_state()->compilation_info();
+  }
+
+  ScratchRegisterScope* scratch_register_scope() const {
+    return scratch_register_scope_;
   }
 
  private:

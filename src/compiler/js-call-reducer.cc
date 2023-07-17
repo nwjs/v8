@@ -3618,9 +3618,13 @@ Reduction JSCallReducer::ReduceCallWasmFunction(Node* node,
                         .module_object()
                         .native_module();
   }
-  const Operator* op = javascript()->CallWasm(wasm_module, wasm_signature,
-                                              shared.wasm_function_index(),
-                                              native_module, p.feedback());
+  // TODO(mliedtke): We should be able to remove module, signature, native
+  // module and function index from the SharedFunctionInfoRef. However, for some
+  // reason I may dereference the SharedFunctionInfoRef here but not in
+  // JSInliningHeuristic later on.
+  const Operator* op = javascript()->CallWasm(
+      wasm_module, wasm_signature, shared.wasm_function_index(), shared,
+      native_module, p.feedback());
 
   // Remove additional inputs
   size_t actual_arity = n.ArgumentCount();
@@ -4412,7 +4416,7 @@ Reduction JSCallReducer::ReduceJSCall(Node* node) {
       JSBoundFunctionRef function = target_ref.AsJSBoundFunction();
       ObjectRef bound_this = function.bound_this(broker());
       ConvertReceiverMode const convert_mode =
-          bound_this.IsNullOrUndefined(broker())
+          bound_this.IsNullOrUndefined()
               ? ConvertReceiverMode::kNullOrUndefined
               : ConvertReceiverMode::kNotNullOrUndefined;
 

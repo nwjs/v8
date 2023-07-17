@@ -385,7 +385,7 @@ MemoryAllocator::AllocateUninitializedChunkAt(BaseSpace* space,
       // first.
       ZapBlock(base, MemoryChunkLayout::CodePageGuardStartOffset(), kZapValue);
       // Now zap object area.
-      ZapBlock(base + MemoryChunkLayout::ObjectStartOffsetInCodePage(),
+      ZapBlock(base + MemoryChunkLayout::ObjectPageOffsetInCodePage(),
                area_size, kZapValue);
     } else {
       DCHECK_EQ(executable, NOT_EXECUTABLE);
@@ -466,8 +466,6 @@ void MemoryAllocator::UnregisterBasicMemoryChunk(BasicMemoryChunk* chunk,
 #ifdef DEBUG
     UnregisterExecutableMemoryChunk(static_cast<MemoryChunk*>(chunk));
 #endif  // DEBUG
-    chunk->heap()->UnregisterUnprotectedMemoryChunk(
-        static_cast<MemoryChunk*>(chunk));
   }
   chunk->SetFlag(MemoryChunk::UNREGISTERED);
 }
@@ -831,8 +829,6 @@ void MemoryAllocator::RecordNormalPageCreated(const Page& page) {
 
 void MemoryAllocator::RecordNormalPageDestroyed(const Page& page) {
   base::MutexGuard guard(&pages_mutex_);
-  DCHECK_IMPLIES(v8_flags.minor_mc && isolate_->heap()->sweeping_in_progress(),
-                 isolate_->heap()->tracer()->IsInAtomicPause());
   auto size = normal_pages_.erase(&page);
   USE(size);
   DCHECK_EQ(1u, size);
@@ -847,8 +843,6 @@ void MemoryAllocator::RecordLargePageCreated(const LargePage& page) {
 
 void MemoryAllocator::RecordLargePageDestroyed(const LargePage& page) {
   base::MutexGuard guard(&pages_mutex_);
-  DCHECK_IMPLIES(v8_flags.minor_mc && isolate_->heap()->sweeping_in_progress(),
-                 isolate_->heap()->tracer()->IsInAtomicPause());
   auto size = large_pages_.erase(&page);
   USE(size);
   DCHECK_EQ(1u, size);

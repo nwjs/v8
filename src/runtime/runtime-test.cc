@@ -206,6 +206,16 @@ RUNTIME_FUNCTION(Runtime_DeoptimizeNow) {
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
+RUNTIME_FUNCTION(Runtime_LeakHole) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(0, args.length());
+
+  // TODO(chromium:1445008): once we have multiple different hole values, we
+  // could make this function take a number as argument and return the nth hole
+  // value, or a random hole if the argument is undefined.
+  return ReadOnlyRoots(isolate).the_hole_value();
+}
+
 RUNTIME_FUNCTION(Runtime_RunningInSimulator) {
   SealHandleScope shs(isolate);
   DCHECK_EQ(0, args.length());
@@ -409,10 +419,11 @@ RUNTIME_FUNCTION(Runtime_BenchMaglev) {
   Handle<Code> code;
   base::ElapsedTimer timer;
   timer.Start();
-  code = Maglev::Compile(isolate, function).ToHandleChecked();
+  code = Maglev::Compile(isolate, function, BytecodeOffset::None())
+             .ToHandleChecked();
   for (int i = 1; i < count; ++i) {
     HandleScope handle_scope(isolate);
-    Maglev::Compile(isolate, function);
+    Maglev::Compile(isolate, function, BytecodeOffset::None());
   }
   PrintF("Maglev compile time: %g ms!\n",
          timer.Elapsed().InMillisecondsF() / count);
@@ -695,7 +706,8 @@ RUNTIME_FUNCTION(Runtime_OptimizeOsr) {
 
     // Queue the job.
     auto unused_result = Compiler::CompileOptimizedOSR(
-        isolate, function, osr_offset, ConcurrencyMode::kConcurrent);
+        isolate, function, osr_offset, ConcurrencyMode::kConcurrent,
+        v8_flags.maglev_osr ? CodeKind::MAGLEV : CodeKind::TURBOFAN);
     USE(unused_result);
 
     // Finalize again to finish the queued job. The next call into
@@ -1158,6 +1170,33 @@ RUNTIME_FUNCTION(Runtime_DebugPrintPtr) {
   }
   // We don't allow the converted pointer to leak out to JavaScript.
   return args[0];
+}
+
+RUNTIME_FUNCTION(Runtime_DebugPrintWord) {
+  static constexpr int kNum16BitChunks = 4;
+  SealHandleScope shs(isolate);
+
+  // Args are: <bits 63-48>, <bits 47-32>, <bits 31-16>, <bits 15-0>, stream.
+  DCHECK_EQ(kNum16BitChunks + 1, args.length());
+
+  uint64_t value = 0;
+  for (int i = 0; i < kNum16BitChunks; ++i) {
+    value <<= 16;
+    CHECK(args[i].IsSmi());
+    uint32_t chunk = Smi::cast(args[i]).value();
+    // We encode 16 bit per chunk only!
+    CHECK_EQ(chunk & 0xFFFF0000, 0);
+    value |= chunk;
+  }
+
+  if (!args[4].IsSmi() || (Smi::cast(args[4]).value() == fileno(stderr))) {
+    StderrStream os;
+    os << "0x" << std::hex << value << std::dec << std::endl;
+  } else {
+    StdoutStream os;
+    os << "0x" << std::hex << value << std::dec << std::endl;
+  }
+  return ReadOnlyRoots(isolate).undefined_value();
 }
 
 RUNTIME_FUNCTION(Runtime_PrintWithNameForAssert) {

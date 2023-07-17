@@ -58,10 +58,6 @@ class MachineOptimizationReducer : public Next {
  public:
   using Next::Asm;
 
-  template <class... Args>
-  explicit MachineOptimizationReducer(const std::tuple<Args...>& args)
-      : Next(args) {}
-
   // TODO(mslekova): Implement ReduceSelect and ReducePhi,
   // by reducing `(f > 0) ? f : -f` to `fabs(f)`.
 
@@ -1563,14 +1559,15 @@ class MachineOptimizationReducer : public Next {
     }
   }
 
-  OpIndex REDUCE(TrapIf)(OpIndex condition, bool negated, TrapId trap_id) {
+  OpIndex REDUCE(TrapIf)(OpIndex condition, OpIndex frame_state, bool negated,
+                         TrapId trap_id) {
     LABEL_BLOCK(no_change) {
-      return Next::ReduceTrapIf(condition, negated, trap_id);
+      return Next::ReduceTrapIf(condition, frame_state, negated, trap_id);
     }
     if (ShouldSkipOptimizationStep()) goto no_change;
     if (base::Optional<bool> decision = DecideBranchCondition(condition)) {
       if (*decision != negated) {
-        Next::ReduceTrapIf(condition, negated, trap_id);
+        Next::ReduceTrapIf(condition, frame_state, negated, trap_id);
         Asm().Unreachable();
       }
       // `TrapIf` doesn't produce a value.
@@ -1578,7 +1575,8 @@ class MachineOptimizationReducer : public Next {
     }
     if (base::Optional<OpIndex> new_condition =
             ReduceBranchCondition(condition, &negated)) {
-      return Asm().ReduceTrapIf(new_condition.value(), negated, trap_id);
+      return Asm().ReduceTrapIf(new_condition.value(), frame_state, negated,
+                                trap_id);
     } else {
       goto no_change;
     }
@@ -1623,7 +1621,8 @@ class MachineOptimizationReducer : public Next {
   OpIndex REDUCE(Store)(OpIndex base, OpIndex index, OpIndex value,
                         StoreOp::Kind kind, MemoryRepresentation stored_rep,
                         WriteBarrierKind write_barrier, int32_t offset,
-                        uint8_t element_scale) {
+                        uint8_t element_scale,
+                        bool maybe_initializing_or_transitioning) {
     if (!ShouldSkipOptimizationStep()) {
       if (stored_rep.SizeInBytes() <= 4) {
         value = TryRemoveWord32ToWord64Conversion(value);
@@ -1653,7 +1652,8 @@ class MachineOptimizationReducer : public Next {
       }
     }
     return Next::ReduceStore(base, index, value, kind, stored_rep,
-                             write_barrier, offset, element_scale);
+                             write_barrier, offset, element_scale,
+                             maybe_initializing_or_transitioning);
   }
 
   OpIndex REDUCE(Load)(OpIndex base, OpIndex index, LoadOp::Kind kind,

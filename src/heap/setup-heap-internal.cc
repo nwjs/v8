@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "src/api/api-natives.h"
+#include "src/api/api.h"
 #include "src/builtins/accessors.h"
 #include "src/codegen/compilation-cache.h"
 #include "src/execution/isolate.h"
@@ -347,7 +349,7 @@ bool Heap::CreateEarlyReadOnlyMaps() {
 
     ALLOCATE_PARTIAL_MAP(ODDBALL_TYPE, Oddball::kSize, undefined);
     ALLOCATE_PARTIAL_MAP(ODDBALL_TYPE, Oddball::kSize, null);
-    ALLOCATE_PARTIAL_MAP(ODDBALL_TYPE, Oddball::kSize, the_hole);
+    ALLOCATE_PARTIAL_MAP(HOLE_TYPE, Hole::kSize, the_hole);
 
     // Some struct maps which we need for later dependencies
     for (const StructInit& entry : kStructTable) {
@@ -410,8 +412,7 @@ bool Heap::CreateEarlyReadOnlyMaps() {
         Allocate(roots.the_hole_map_handle(), AllocationType::kReadOnly);
     if (!allocation.To(&obj)) return false;
   }
-  set_the_hole_value(Oddball::cast(obj));
-  Oddball::cast(obj).set_kind(Oddball::kTheHole);
+  set_the_hole_value(Hole::cast(obj));
 
   // Set preliminary exception sentinel value before actually initializing it.
   set_exception(roots.null_value());
@@ -900,11 +901,6 @@ bool Heap::CreateReadOnlyObjects() {
   Oddball::Initialize(isolate(), factory->null_value(), "null",
                       handle(Smi::zero(), isolate()), "object", Oddball::kNull);
 
-  // Initialize the_hole_value.
-  Oddball::Initialize(isolate(), factory->the_hole_value(), "hole",
-                      factory->hole_nan_value(), "undefined",
-                      Oddball::kTheHole);
-
   // Initialize the true_value.
   Oddball::Initialize(isolate(), factory->true_value(), "true",
                       handle(Smi::FromInt(1), isolate()), "boolean",
@@ -914,6 +910,10 @@ bool Heap::CreateReadOnlyObjects() {
   Oddball::Initialize(isolate(), factory->false_value(), "false",
                       handle(Smi::zero(), isolate()), "boolean",
                       Oddball::kFalse);
+
+  // Initialize the_hole_value.
+  Hole::Initialize(isolate(), factory->the_hole_value(),
+                   factory->hole_nan_value(), Hole::kDefaultHole);
 
   set_uninitialized_value(
       *factory->NewOddball(factory->uninitialized_map(), "uninitialized",
@@ -1214,7 +1214,7 @@ void Heap::CreateInitialMutableObjects() {
   set_set_iterator_protector(*factory->NewProtector());
   set_string_iterator_protector(*factory->NewProtector());
   set_string_length_protector(*factory->NewProtector());
-  set_number_string_prototype_no_replace_protector(*factory->NewProtector());
+  set_number_string_not_regexp_like_protector(*factory->NewProtector());
   set_typed_array_species_protector(*factory->NewProtector());
 
   set_serialized_objects(roots.empty_fixed_array());
@@ -1278,6 +1278,21 @@ void Heap::CreateInitialMutableObjects() {
     Handle<SharedFunctionInfo> info = CreateSharedFunctionInfo(
         isolate_, Builtin::kAsyncIteratorValueUnwrap, 1);
     set_async_iterator_value_unwrap_shared_fun(*info);
+  }
+
+  // Error.stack accessor callbacks:
+  {
+    // TODO(v8:5962): create these FunctionTemplateInfos in RO space.
+    Handle<FunctionTemplateInfo> function_template;
+    function_template = ApiNatives::CreateAccessorFunctionTemplateInfo(
+        isolate_, Accessors::ErrorStackGetter, 0,
+        SideEffectType::kHasSideEffect);
+    set_error_stack_getter_fun_template(*function_template);
+
+    function_template = ApiNatives::CreateAccessorFunctionTemplateInfo(
+        isolate_, Accessors::ErrorStackSetter, 1,
+        SideEffectType::kHasSideEffectToReceiver);
+    set_error_stack_setter_fun_template(*function_template);
   }
 
   // Promises:

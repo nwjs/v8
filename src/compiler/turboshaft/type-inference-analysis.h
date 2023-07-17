@@ -60,8 +60,16 @@ class TypeInferenceAnalysis {
          unprocessed_index < graph_.block_count();) {
       BlockIndex block_index = static_cast<BlockIndex>(unprocessed_index);
       ++unprocessed_index;
-
       const Block& block = graph_.Get(block_index);
+
+#ifdef DEBUG
+      if (V8_UNLIKELY(v8_flags.turboshaft_trace_typing)) {
+        std::stringstream os;
+        os << block.kind() << " " << block.index().id();
+        TURBOSHAFT_TRACE_TYPING("=== %s ===\n", os.str().c_str());
+      }
+#endif  // DEBUG
+
       ProcessBlock<false>(block, &unprocessed_index);
     }
     TURBOSHAFT_TRACE_TYPING("=== Completed Type Inference Analysis ===\n");
@@ -154,6 +162,7 @@ class TypeInferenceAnalysis {
         case Opcode::kTuple:
         case Opcode::kStaticAssert:
         case Opcode::kDebugBreak:
+        case Opcode::kDebugPrint:
           // These operations do not produce any output that needs to be typed.
           DCHECK_EQ(0, op.outputs_rep().size());
           break;
@@ -432,9 +441,21 @@ class TypeInferenceAnalysis {
   }
 
   Type ComputeTypeForPhi(const PhiOp& phi) {
-    Type result_type = GetTypeOrDefault(phi.inputs()[0], Type::None());
+    // Word64 values are truncated to word32 implicitly, we need to handle this
+    // here.
+    auto MaybeTruncate = [&](Type t) -> Type {
+      if (t.IsNone()) return t;
+      if (phi.rep == RegisterRepresentation::Word32()) {
+        return Typer::TruncateWord32Input(t, true, graph_zone_);
+      }
+      return t;
+    };
+
+    Type result_type =
+        MaybeTruncate(GetTypeOrDefault(phi.inputs()[0], Type::None()));
     for (size_t i = 1; i < phi.inputs().size(); ++i) {
-      Type input_type = GetTypeOrDefault(phi.inputs()[i], Type::None());
+      Type input_type =
+          MaybeTruncate(GetTypeOrDefault(phi.inputs()[i], Type::None()));
       result_type = Type::LeastUpperBound(result_type, input_type, graph_zone_);
     }
     return result_type;

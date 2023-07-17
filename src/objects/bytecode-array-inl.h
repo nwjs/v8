@@ -21,14 +21,14 @@ namespace internal {
 
 TQ_OBJECT_CONSTRUCTORS_IMPL(BytecodeArray)
 
-byte BytecodeArray::get(int index) const {
+uint8_t BytecodeArray::get(int index) const {
   DCHECK(index >= 0 && index < this->length());
-  return ReadField<byte>(kHeaderSize + index * kCharSize);
+  return ReadField<uint8_t>(kHeaderSize + index * kCharSize);
 }
 
-void BytecodeArray::set(int index, byte value) {
+void BytecodeArray::set(int index, uint8_t value) {
   DCHECK(index >= 0 && index < this->length());
-  WriteField<byte>(kHeaderSize + index * kCharSize, value);
+  WriteField<uint8_t>(kHeaderSize + index * kCharSize, value);
 }
 
 void BytecodeArray::set_frame_size(int32_t frame_size) {
@@ -85,6 +85,16 @@ uint16_t BytecodeArray::bytecode_age() const {
 void BytecodeArray::set_bytecode_age(uint16_t age) {
   // Bytecode is aged by the concurrent marker.
   RELAXED_WRITE_UINT16_FIELD(*this, kBytecodeAgeOffset, age);
+}
+
+uint16_t BytecodeArray::CompareExchangeBytecodeAge(uint16_t expected_age,
+                                                   uint16_t new_age) {
+  Address age_addr = address() + kBytecodeAgeOffset;
+  // The word must be completely within the bytecode array.
+  DCHECK_LE(RoundDown(age_addr, kTaggedSize) + kTaggedSize, address() + Size());
+  static_assert(kBytecodeAgeSize == kUInt16Size);
+  return base::AsAtomic16::Relaxed_CompareAndSwap(
+      reinterpret_cast<base::Atomic16*>(age_addr), expected_age, new_age);
 }
 
 int32_t BytecodeArray::parameter_count() const {

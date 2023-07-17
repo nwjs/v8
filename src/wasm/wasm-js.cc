@@ -1869,14 +1869,13 @@ void WebAssemblyException(const v8::FunctionCallbackInfo<v8::Value>& info) {
     if (maybe_trace_stack.ToLocal(&trace_stack_value) &&
         trace_stack_value->BooleanValue(isolate)) {
       auto caller = Utils::OpenHandle(*info.NewTarget());
-      i_isolate->CaptureAndSetErrorStack(runtime_exception, i::SKIP_NONE,
-                                         caller);
-      i::Handle<i::AccessorInfo> error_stack =
-          i_isolate->factory()->error_stack_accessor();
-      i::Handle<i::Name> name(i::Name::cast(error_stack->name()), i_isolate);
-      i::JSObject::SetAccessor(runtime_exception, name, error_stack,
-                               i::DONT_ENUM)
-          .Assert();
+
+      i::Handle<i::Object> capture_result;
+      if (!i::ErrorUtils::CaptureStackTrace(i_isolate, runtime_exception,
+                                            i::SKIP_NONE, caller)
+               .ToHandle(&capture_result)) {
+        return;
+      }
     }
   }
 
@@ -3130,6 +3129,16 @@ void WasmJs::Install(Isolate* isolate, bool exposed_on_global_object) {
       SetupConstructor(isolate, tag_constructor, i::WASM_TAG_OBJECT_TYPE,
                        WasmTagObject::kHeaderSize, "WebAssembly.Tag");
   context->set_wasm_tag_constructor(*tag_constructor);
+  wasm::ValueType param = wasm::kWasmExternRef;
+  const i::wasm::FunctionSig sig{0, 1, &param};
+  auto js_tag = WasmExceptionTag::New(isolate, 0);
+  uint32_t canonical_type_index =
+      i::wasm::GetWasmEngine()->type_canonicalizer()->AddRecursiveGroup(&sig);
+  i::Handle<i::JSObject> js_tag_object =
+      i::WasmTagObject::New(isolate, &sig, canonical_type_index, js_tag);
+  context->set_wasm_js_tag(*js_tag_object);
+  JSObject::AddProperty(isolate, webassembly, "JSTag", js_tag_object,
+                        ro_attributes);
 
   if (enabled_features.has_type_reflection()) {
     InstallFunc(isolate, tag_proto, "type", WebAssemblyTagType, 0);
@@ -3164,8 +3173,9 @@ void WasmJs::Install(Isolate* isolate, bool exposed_on_global_object) {
     JSFunction::EnsureHasInitialMap(function_constructor);
     Handle<JSObject> function_proto(
         JSObject::cast(function_constructor->instance_prototype()), isolate);
-    Handle<Map> function_map = isolate->factory()->CreateSloppyFunctionMap(
-        FUNCTION_WITHOUT_PROTOTYPE, MaybeHandle<JSFunction>());
+    Handle<Map> function_map =
+        Map::Copy(isolate, isolate->sloppy_function_without_prototype_map(),
+                  "WebAssembly.Function");
     CHECK(JSObject::SetPrototype(
               isolate, function_proto,
               handle(context->function_function().prototype(), isolate), false,

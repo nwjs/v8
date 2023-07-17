@@ -27,8 +27,8 @@ class BytecodeArray
     return OBJECT_POINTER_ALIGN(kHeaderSize + length);
   }
 
-  inline byte get(int index) const;
-  inline void set(int index, byte value);
+  inline uint8_t get(int index) const;
+  inline void set(int index, uint8_t value);
 
   inline Address GetFirstBytecodeAddress();
 
@@ -53,6 +53,11 @@ class BytecodeArray
 
   inline uint16_t bytecode_age() const;
   inline void set_bytecode_age(uint16_t age);
+
+  // Replaces the current bytecode_age with a new value if the current value
+  // matches the one expected. Returns the value before this operation.
+  inline uint16_t CompareExchangeBytecodeAge(uint16_t expected_age,
+                                             uint16_t new_age);
 
   inline bool HasSourcePositionTable() const;
   inline bool DidSourcePositionGenerationFail() const;
@@ -91,7 +96,8 @@ class BytecodeArray
 
   // Bytecode aging
   V8_EXPORT_PRIVATE bool IsOld() const;
-  V8_EXPORT_PRIVATE void MakeOlder();
+  V8_EXPORT_PRIVATE void MakeOlder(uint16_t increment);
+  V8_EXPORT_PRIVATE void EnsureOldForTesting();
 
   // Clear uninitialized padding space. This ensures that the snapshot content
   // is deterministic.

@@ -12,6 +12,7 @@
 #include "src/common/globals.h"
 #include "src/heap/base/worklist.h"
 #include "src/heap/concurrent-marking.h"
+#include "src/heap/ephemeron-remembered-set.h"
 #include "src/heap/index-generator.h"
 #include "src/heap/marking-state.h"
 #include "src/heap/marking-visitor.h"
@@ -38,25 +39,6 @@ class RecordMigratedSlotVisitor;
 class UpdatingItem;
 class YoungGenerationMarkingTask;
 
-class LiveObjectVisitor : AllStatic {
- public:
-  // Visits black objects on a MemoryChunk until the Visitor returns |false| for
-  // an object.
-  template <class Visitor, typename MarkingState>
-  static bool VisitBlackObjects(MemoryChunk* chunk, MarkingState* state,
-                                Visitor* visitor, HeapObject* failed_object);
-
-  // Visits black objects on a MemoryChunk. The visitor is not allowed to fail
-  // visitation for an object.
-  template <class Visitor, typename MarkingState>
-  static void VisitBlackObjectsNoFail(MemoryChunk* chunk, MarkingState* state,
-                                      Visitor* visitor);
-
-  template <typename MarkingState>
-  static void RecomputeLiveBytes(MemoryChunk* chunk, MarkingState* state);
-};
-
-enum class PromoteUnusablePages { kYes, kNo };
 enum class MemoryReductionMode { kNone, kShouldReduceMemory };
 enum PageEvacuationMode { NEW_TO_NEW, NEW_TO_OLD };
 enum class RememberedSetUpdatingMode { ALL, OLD_TO_NEW_ONLY };
@@ -74,11 +56,12 @@ class MainMarkingVisitor final
                      unsigned mark_compact_epoch,
                      base::EnumSet<CodeFlushMode> code_flush_mode,
                      bool trace_embedder_fields,
-                     bool should_keep_ages_unchanged)
+                     bool should_keep_ages_unchanged,
+                     uint16_t code_flushing_increase)
       : MarkingVisitorBase<MainMarkingVisitor<MarkingState>, MarkingState>(
             local_marking_worklists, local_weak_objects, heap,
             mark_compact_epoch, code_flush_mode, trace_embedder_fields,
-            should_keep_ages_unchanged),
+            should_keep_ages_unchanged, code_flushing_increase),
         marking_state_(marking_state) {}
 
  private:
@@ -129,8 +112,14 @@ class YoungGenerationMainMarkingVisitor final
     : public YoungGenerationMarkingVisitorBase<
           YoungGenerationMainMarkingVisitor, MarkingState> {
  public:
-  YoungGenerationMainMarkingVisitor(Isolate* isolate,
-                                    MarkingWorklists::Local* worklists_local);
+  YoungGenerationMainMarkingVisitor(
+      Isolate* isolate, MarkingWorklists::Local* worklists_local,
+      EphemeronRememberedSet::TableList::Local* ephemeron_table_list_local);
+
+  YoungGenerationMainMarkingVisitor(const YoungGenerationMainMarkingVisitor&) =
+      delete;
+  YoungGenerationMainMarkingVisitor& operator=(
+      const YoungGenerationMainMarkingVisitor&) = delete;
 
   template <typename TSlot>
   V8_INLINE void VisitPointersImpl(HeapObject host, TSlot start, TSlot end);
@@ -228,7 +217,6 @@ class MarkCompactCollector final : public CollectorBase {
   using MarkingVisitor = MainMarkingVisitor<MarkingState>;
 
   class CustomRootBodyMarkingVisitor;
-  class ClientCustomRootBodyMarkingVisitor;
   class SharedHeapObjectVisitor;
   class RootMarkingVisitor;
 
@@ -277,8 +265,6 @@ class MarkCompactCollector final : public CollectorBase {
 
   // Returns whether compaction is running.
   bool StartCompaction(StartCompactionMode mode);
-
-  void AbortCompaction();
 
   void StartMarking() final;
 
@@ -359,8 +345,6 @@ class MarkCompactCollector final : public CollectorBase {
   ~MarkCompactCollector() final;
 
  private:
-  class ClientRootMarkingVisitor;
-
   Sweeper* sweeper() { return sweeper_; }
 
   void ComputeEvacuationHeuristics(size_t area_size,
@@ -455,6 +439,11 @@ class MarkCompactCollector final : public CollectorBase {
   // Clears bytecode arrays / baseline code that have not been executed for
   // multiple collections.
   void ProcessOldCodeCandidates();
+
+  bool ProcessOldBytecodeSFI(SharedFunctionInfo flushing_candidate);
+  bool ProcessOldBaselineSFI(SharedFunctionInfo flushing_candidate);
+  void FlushSFI(SharedFunctionInfo sfi, bool bytecode_already_decompiled);
+
   void ProcessFlushedBaselineCandidates();
 
   // Resets any JSFunctions which have had their bytecode flushed.
@@ -612,6 +601,10 @@ class MinorMarkCompactCollector final : public CollectorBase {
   // Perform Wrapper Tracing if in use.
   void PerformWrapperTracing();
 
+  EphemeronRememberedSet::TableList* ephemeron_table_list() const {
+    return ephemeron_table_list_.get();
+  }
+
  private:
   class RootMarkingVisitor;
 
@@ -636,8 +629,10 @@ class MinorMarkCompactCollector final : public CollectorBase {
   bool StartSweepNewSpace();
   bool SweepNewLargeSpace();
 
+  std::unique_ptr<EphemeronRememberedSet::TableList> ephemeron_table_list_;
+  std::unique_ptr<EphemeronRememberedSet::TableList::Local>
+      local_ephemeron_table_list_;
   std::unique_ptr<YoungGenerationMainMarkingVisitor> main_marking_visitor_;
-
   Sweeper* const sweeper_;
 
   friend class YoungGenerationMarkingTask;
@@ -658,6 +653,7 @@ class PageMarkingItem : public ParallelWorkItem {
  private:
   inline Heap* heap() { return chunk_->heap(); }
 
+  template <RememberedSetType old_to_new_type>
   void MarkUntypedPointers(YoungGenerationMarkingTask* task);
   void MarkTypedPointers(YoungGenerationMarkingTask* task);
   template <typename TSlot>
@@ -709,8 +705,10 @@ class YoungGenerationMarkingJob : public v8::JobTask {
 
 class YoungGenerationMarkingTask final {
  public:
-  YoungGenerationMarkingTask(Isolate* isolate, Heap* heap,
-                             MarkingWorklists* global_worklists);
+  YoungGenerationMarkingTask(
+      Isolate* isolate, Heap* heap, MarkingWorklists* global_worklists,
+      EphemeronRememberedSet::TableList* ephemeron_table_list);
+  ~YoungGenerationMarkingTask();
 
   YoungGenerationMarkingTask(const YoungGenerationMarkingTask&) = delete;
   YoungGenerationMarkingTask& operator=(const YoungGenerationMarkingTask&) =
@@ -725,6 +723,7 @@ class YoungGenerationMarkingTask final {
 
  private:
   MarkingWorklists::Local marking_worklists_local_;
+  EphemeronRememberedSet::TableList::Local ephemeron_table_list_local_;
   YoungGenerationMainMarkingVisitor visitor_;
 };
 

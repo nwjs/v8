@@ -34,6 +34,7 @@
 #include "src/compiler/turboshaft/deopt-data.h"
 #include "src/compiler/turboshaft/graph.h"
 #include "src/compiler/turboshaft/operations.h"
+#include "src/compiler/turboshaft/phase.h"
 #include "src/compiler/turboshaft/representations.h"
 #include "src/heap/factory-inl.h"
 #include "src/objects/map.h"
@@ -46,15 +47,19 @@ namespace v8::internal::compiler::turboshaft {
 namespace {
 
 struct GraphBuilder {
-  Isolate* isolate;
-  JSHeapBroker* broker;
-  Zone* graph_zone;
   Zone* phase_zone;
   Schedule& schedule;
-  Assembler<reducer_list<>> assembler;
   Linkage* linkage;
-  SourcePositionTable* source_positions;
-  NodeOriginTable* origins;
+
+  Isolate* isolate = PipelineData::Get().isolate();
+  JSHeapBroker* broker = PipelineData::Get().broker();
+  Zone* graph_zone = PipelineData::Get().graph_zone();
+  Assembler<reducer_list<>> assembler{PipelineData::Get().graph(),
+                                      PipelineData::Get().graph(), phase_zone,
+                                      nullptr};
+  SourcePositionTable* source_positions =
+      PipelineData::Get().source_positions();
+  NodeOriginTable* origins = PipelineData::Get().node_origins();
 
   struct BlockData {
     Block* block;
@@ -62,6 +67,7 @@ struct GraphBuilder {
   };
   NodeAuxData<OpIndex> op_mapping{phase_zone};
   ZoneVector<BlockData> block_mapping{schedule.RpoBlockCount(), phase_zone};
+  bool inside_region = false;
 
   base::Optional<BailoutReason> Run();
   Assembler<reducer_list<>>& Asm() { return assembler; }
@@ -1263,10 +1269,17 @@ OpIndex GraphBuilder::Process(
       return OpIndex::Invalid();
 
     case IrOpcode::kTrapIf:
-      __ TrapIf(Map(node->InputAt(0)), TrapIdOf(op));
+      // For wasm the dominating_frame_state is invalid and will not be used.
+      // For traps inlined into JS the dominating_frame_state is valid and is
+      // needed for the trap.
+      __ TrapIf(Map(node->InputAt(0)), dominating_frame_state, TrapIdOf(op));
       return OpIndex::Invalid();
+
     case IrOpcode::kTrapUnless:
-      __ TrapIfNot(Map(node->InputAt(0)), TrapIdOf(op));
+      // For wasm the dominating_frame_state is invalid and will not be used.
+      // For traps inlined into JS the dominating_frame_state is valid and is
+      // needed for the trap.
+      __ TrapIfNot(Map(node->InputAt(0)), dominating_frame_state, TrapIdOf(op));
       return OpIndex::Invalid();
 
     case IrOpcode::kDeoptimize: {
@@ -1320,15 +1333,15 @@ OpIndex GraphBuilder::Process(
 
     case IrOpcode::kAllocate: {
       AllocationType allocation = AllocationTypeOf(node->op());
-      return __ Allocate(Map(node->InputAt(0)), allocation,
-                         AllowLargeObjects::kFalse);
+      return __ FinishInitialization(__ Allocate(
+          Map(node->InputAt(0)), allocation, AllowLargeObjects::kFalse));
     }
     // TODO(nicohartmann@): We might not see AllocateRaw here anymore.
     case IrOpcode::kAllocateRaw: {
       Node* size = node->InputAt(0);
       const AllocateParameters& params = AllocateParametersOf(node->op());
-      return __ Allocate(Map(size), params.allocation_type(),
-                         params.allow_large_objects());
+      return __ FinishInitialization(__ Allocate(
+          Map(size), params.allocation_type(), params.allow_large_objects()));
     }
     case IrOpcode::kStoreToObject: {
       Node* object = node->InputAt(0);
@@ -1380,10 +1393,19 @@ OpIndex GraphBuilder::Process(
         UNIMPLEMENTED();
 #endif
       }
+
+      bool initializing_transitioning =
+          access.maybe_initializing_or_transitioning_store;
+      if (!inside_region) {
+        // Mark stores outside a region as non-initializing and
+        // non-transitioning.
+        initializing_transitioning = false;
+      }
+
       MemoryRepresentation rep =
           MemoryRepresentation::FromMachineType(machine_type);
       __ Store(object, value, kind, rep, access.write_barrier_kind,
-               access.offset);
+               access.offset, initializing_transitioning);
       return OpIndex::Invalid();
     }
     case IrOpcode::kLoadFromObject:
@@ -2132,8 +2154,10 @@ OpIndex GraphBuilder::Process(
                                                    Map(node->InputAt(1)));
 
     case IrOpcode::kBeginRegion:
+      inside_region = true;
       return OpIndex::Invalid();
     case IrOpcode::kFinishRegion:
+      inside_region = false;
       return Map(node->InputAt(0));
 
     case IrOpcode::kTypeGuard:
@@ -2148,23 +2172,9 @@ OpIndex GraphBuilder::Process(
 
 }  // namespace
 
-base::Optional<BailoutReason> BuildGraph(JSHeapBroker* broker,
-                                         Schedule* schedule, Isolate* isolate,
-                                         Zone* graph_zone, Zone* phase_zone,
-                                         Graph* graph, Linkage* linkage,
-                                         SourcePositionTable* source_positions,
-                                         NodeOriginTable* origins) {
-  GraphBuilder builder{isolate,
-                       broker,
-                       graph_zone,
-                       phase_zone,
-                       *schedule,
-                       Assembler<reducer_list<>>(*graph, *graph, phase_zone,
-                                                 nullptr, std::tuple<>{}),
-                       linkage,
-                       source_positions,
-                       origins};
-  return builder.Run();
+base::Optional<BailoutReason> BuildGraph(Schedule* schedule, Zone* phase_zone,
+                                         Linkage* linkage) {
+  return GraphBuilder{phase_zone, *schedule, linkage}.Run();
 }
 
 #include "src/compiler/turboshaft/undef-assembler-macros.inc"

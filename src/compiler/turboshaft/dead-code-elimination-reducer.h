@@ -419,12 +419,6 @@ class DeadCodeEliminationReducer
 
   using Adapter = UniformReducerAdapter<DeadCodeEliminationReducer, Next>;
 
-  template <class... Args>
-  explicit DeadCodeEliminationReducer(const std::tuple<Args...>& args)
-      : Adapter(args),
-        branch_rewrite_targets_(Asm().phase_zone()),
-        analyzer_(Asm().modifiable_input_graph(), Asm().phase_zone()) {}
-
   void Analyze() {
     // TODO(nicohartmann@): We might want to make this a flag.
     constexpr bool trace_analysis = false;
@@ -451,15 +445,11 @@ class DeadCodeEliminationReducer
     return Continuation{this}.ReduceInputGraph(ig_index, op);
   }
 
-  template <Opcode opcode, typename Continuation, typename... Args>
-  OpIndex ReduceOperation(const Args&... args) {
-    return Continuation{this}.Reduce(args...);
-  }
-
  private:
   base::Optional<FixedSidetable<OperationState::Liveness>> liveness_;
-  ZoneMap<uint32_t, BlockIndex> branch_rewrite_targets_;
-  DeadCodeAnalysis analyzer_;
+  ZoneMap<uint32_t, BlockIndex> branch_rewrite_targets_{Asm().phase_zone()};
+  DeadCodeAnalysis analyzer_{Asm().modifiable_input_graph(),
+                             Asm().phase_zone()};
 };
 
 #include "src/compiler/turboshaft/undef-assembler-macros.inc"

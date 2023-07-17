@@ -6,6 +6,7 @@
 #define V8_MAGLEV_MAGLEV_IR_H_
 
 #include "src/base/bit-field.h"
+#include "src/base/discriminated-union.h"
 #include "src/base/enum-set.h"
 #include "src/base/logging.h"
 #include "src/base/macros.h"
@@ -145,14 +146,13 @@ class MergePointInterpreterFrameState;
   V(CallKnownJSFunction)                     \
   V(CallSelf)                                \
   V(Construct)                               \
+  V(CheckConstructResult)                    \
   V(ConstructWithSpread)                     \
   V(ConvertReceiver)                         \
   V(ConvertHoleToUndefined)                  \
-  V(CreateEmptyArrayLiteral)                 \
   V(CreateArrayLiteral)                      \
   V(CreateShallowArrayLiteral)               \
   V(CreateObjectLiteral)                     \
-  V(CreateEmptyObjectLiteral)                \
   V(CreateShallowObjectLiteral)              \
   V(CreateFunctionContext)                   \
   V(CreateClosure)                           \
@@ -234,7 +234,9 @@ class MergePointInterpreterFrameState;
   V(LogicalNot)                              \
   V(SetPendingMessage)                       \
   V(StringAt)                                \
+  V(StringEqual)                             \
   V(StringLength)                            \
+  V(StringConcat)                            \
   V(ToBoolean)                               \
   V(ToBooleanLogicalNot)                     \
   V(TaggedEqual)                             \
@@ -246,6 +248,7 @@ class MergePointInterpreterFrameState;
   V(ToNumberOrNumeric)                       \
   V(ToObject)                                \
   V(ToString)                                \
+  V(NumberToString)                          \
   CONSTANT_VALUE_NODE_LIST(V)                \
   INT32_OPERATIONS_NODE_LIST(V)              \
   FLOAT64_OPERATIONS_NODE_LIST(V)            \
@@ -918,27 +921,17 @@ class Input : public InputLocation {
 
 class InterpretedDeoptFrame;
 class InlinedArgumentsDeoptFrame;
+class ConstructStubDeoptFrame;
 class BuiltinContinuationDeoptFrame;
 class DeoptFrame {
  public:
   enum class FrameType {
     kInterpretedFrame,
     kInlinedArgumentsFrame,
+    kConstructStubFrame,
     kBuiltinContinuationFrame,
   };
 
-  FrameType type() const { return type_; }
-  DeoptFrame* parent() { return parent_; }
-  const DeoptFrame* parent() const { return parent_; }
-
-  inline const InterpretedDeoptFrame& as_interpreted() const;
-  inline const InlinedArgumentsDeoptFrame& as_inlined_arguments() const;
-  inline const BuiltinContinuationDeoptFrame& as_builtin_continuation() const;
-  inline InterpretedDeoptFrame& as_interpreted();
-  inline InlinedArgumentsDeoptFrame& as_inlined_arguments();
-  inline BuiltinContinuationDeoptFrame& as_builtin_continuation();
-
- protected:
   struct InterpretedFrameData {
     const MaglevCompilationUnit& unit;
     const CompactInterpreterFrameState* frame_state;
@@ -946,37 +939,61 @@ class DeoptFrame {
     const BytecodeOffset bytecode_position;
     const SourcePosition source_position;
   };
+
   struct InlinedArgumentsFrameData {
     const MaglevCompilationUnit& unit;
     const BytecodeOffset bytecode_position;
     ValueNode* closure;
     const base::Vector<ValueNode*> arguments;
   };
+
+  struct ConstructStubFrameData {
+    const MaglevCompilationUnit& unit;
+    const BytecodeOffset bytecode_position;
+    const SourcePosition source_position;
+    ValueNode* closure;
+    ValueNode* receiver;
+    const base::Vector<ValueNode*> arguments_without_receiver;
+    ValueNode* context;
+  };
+
   struct BuiltinContinuationFrameData {
     const Builtin builtin_id;
     const base::Vector<ValueNode*> parameters;
     ValueNode* context;
   };
 
-  DeoptFrame(InterpretedFrameData data, DeoptFrame* parent)
-      : interpreted_frame_data_(data),
-        type_(FrameType::kInterpretedFrame),
-        parent_(parent) {}
-  DeoptFrame(InlinedArgumentsFrameData data, DeoptFrame* parent)
-      : inlined_arguments_frame_data_(data),
-        type_(FrameType::kInlinedArgumentsFrame),
-        parent_(parent) {}
-  DeoptFrame(BuiltinContinuationFrameData data, DeoptFrame* parent)
-      : builtin_continuation_frame_data_(data),
-        type_(FrameType::kBuiltinContinuationFrame),
-        parent_(parent) {}
+  using FrameData = base::DiscriminatedUnion<
+      FrameType, InterpretedFrameData, InlinedArgumentsFrameData,
+      ConstructStubFrameData, BuiltinContinuationFrameData>;
 
-  union {
-    InterpretedFrameData interpreted_frame_data_;
-    InlinedArgumentsFrameData inlined_arguments_frame_data_;
-    BuiltinContinuationFrameData builtin_continuation_frame_data_;
-  };
-  const FrameType type_;
+  DeoptFrame(FrameData&& data, DeoptFrame* parent)
+      : data_(std::move(data)), parent_(parent) {}
+
+  FrameType type() const { return data_.tag(); }
+  DeoptFrame* parent() { return parent_; }
+  const DeoptFrame* parent() const { return parent_; }
+
+  inline const InterpretedDeoptFrame& as_interpreted() const;
+  inline const InlinedArgumentsDeoptFrame& as_inlined_arguments() const;
+  inline const ConstructStubDeoptFrame& as_construct_stub() const;
+  inline const BuiltinContinuationDeoptFrame& as_builtin_continuation() const;
+  inline InterpretedDeoptFrame& as_interpreted();
+  inline InlinedArgumentsDeoptFrame& as_inlined_arguments();
+  inline ConstructStubDeoptFrame& as_construct_stub();
+  inline BuiltinContinuationDeoptFrame& as_builtin_continuation();
+
+ protected:
+  DeoptFrame(InterpretedFrameData&& data, DeoptFrame* parent)
+      : data_(std::move(data)), parent_(parent) {}
+  DeoptFrame(InlinedArgumentsFrameData&& data, DeoptFrame* parent)
+      : data_(std::move(data)), parent_(parent) {}
+  DeoptFrame(ConstructStubFrameData&& data, DeoptFrame* parent)
+      : data_(std::move(data)), parent_(parent) {}
+  DeoptFrame(BuiltinContinuationFrameData&& data, DeoptFrame* parent)
+      : data_(std::move(data)), parent_(parent) {}
+
+  FrameData data_;
   DeoptFrame* const parent_;
 };
 
@@ -990,19 +1007,19 @@ class InterpretedDeoptFrame : public DeoptFrame {
                                         bytecode_position, source_position},
                    parent) {}
 
-  const MaglevCompilationUnit& unit() const {
-    return interpreted_frame_data_.unit;
-  }
+  const MaglevCompilationUnit& unit() const { return data().unit; }
   const CompactInterpreterFrameState* frame_state() const {
-    return interpreted_frame_data_.frame_state;
+    return data().frame_state;
   }
-  ValueNode*& closure() { return inlined_arguments_frame_data_.closure; }
-  ValueNode* closure() const { return inlined_arguments_frame_data_.closure; }
-  BytecodeOffset bytecode_position() const {
-    return interpreted_frame_data_.bytecode_position;
-  }
-  SourcePosition source_position() const {
-    return interpreted_frame_data_.source_position;
+  ValueNode*& closure() { return data().closure; }
+  ValueNode* closure() const { return data().closure; }
+  BytecodeOffset bytecode_position() const { return data().bytecode_position; }
+  SourcePosition source_position() const { return data().source_position; }
+
+ private:
+  InterpretedFrameData& data() { return data_.get<InterpretedFrameData>(); }
+  const InterpretedFrameData& data() const {
+    return data_.get<InterpretedFrameData>();
   }
 };
 
@@ -1029,16 +1046,18 @@ class InlinedArgumentsDeoptFrame : public DeoptFrame {
                                              arguments},
                    parent) {}
 
-  const MaglevCompilationUnit& unit() const {
-    return interpreted_frame_data_.unit;
+  const MaglevCompilationUnit& unit() const { return data().unit; }
+  BytecodeOffset bytecode_position() const { return data().bytecode_position; }
+  ValueNode*& closure() { return data().closure; }
+  ValueNode* closure() const { return data().closure; }
+  base::Vector<ValueNode*> arguments() const { return data().arguments; }
+
+ private:
+  InlinedArgumentsFrameData& data() {
+    return data_.get<InlinedArgumentsFrameData>();
   }
-  BytecodeOffset bytecode_position() const {
-    return inlined_arguments_frame_data_.bytecode_position;
-  }
-  ValueNode*& closure() { return inlined_arguments_frame_data_.closure; }
-  ValueNode* closure() const { return inlined_arguments_frame_data_.closure; }
-  base::Vector<ValueNode*> arguments() const {
-    return inlined_arguments_frame_data_.arguments;
+  const InlinedArgumentsFrameData& data() const {
+    return data_.get<InlinedArgumentsFrameData>();
   }
 };
 
@@ -1055,6 +1074,52 @@ inline InlinedArgumentsDeoptFrame& DeoptFrame::as_inlined_arguments() {
   return static_cast<InlinedArgumentsDeoptFrame&>(*this);
 }
 
+class ConstructStubDeoptFrame : public DeoptFrame {
+ public:
+  ConstructStubDeoptFrame(const MaglevCompilationUnit& unit,
+                          BytecodeOffset bytecode_position,
+                          SourcePosition source_position, ValueNode* closure,
+                          ValueNode* receiver,
+                          base::Vector<ValueNode*> arguments_without_receiver,
+                          ValueNode* context, DeoptFrame* parent)
+      : DeoptFrame(ConstructStubFrameData{unit, bytecode_position,
+                                          source_position, closure, receiver,
+                                          arguments_without_receiver, context},
+                   parent) {}
+
+  const MaglevCompilationUnit& unit() const { return data().unit; }
+  BytecodeOffset bytecode_position() const { return data().bytecode_position; }
+  ValueNode*& closure() { return data().closure; }
+  ValueNode* closure() const { return data().closure; }
+  ValueNode*& receiver() { return data().receiver; }
+  ValueNode* receiver() const { return data().receiver; }
+  base::Vector<ValueNode*> arguments_without_receiver() const {
+    return data().arguments_without_receiver;
+  }
+  ValueNode*& context() { return data().context; }
+  ValueNode* context() const { return data().context; }
+  SourcePosition source_position() const { return data().source_position; }
+
+ private:
+  ConstructStubFrameData& data() { return data_.get<ConstructStubFrameData>(); }
+  const ConstructStubFrameData& data() const {
+    return data_.get<ConstructStubFrameData>();
+  }
+};
+
+// Make sure storing/passing deopt frames by value doesn't truncate them.
+static_assert(sizeof(ConstructStubDeoptFrame) == sizeof(DeoptFrame));
+
+inline const ConstructStubDeoptFrame& DeoptFrame::as_construct_stub() const {
+  DCHECK_EQ(type(), FrameType::kConstructStubFrame);
+  return static_cast<const ConstructStubDeoptFrame&>(*this);
+}
+
+inline ConstructStubDeoptFrame& DeoptFrame::as_construct_stub() {
+  DCHECK_EQ(type(), FrameType::kConstructStubFrame);
+  return static_cast<ConstructStubDeoptFrame&>(*this);
+}
+
 class BuiltinContinuationDeoptFrame : public DeoptFrame {
  public:
   BuiltinContinuationDeoptFrame(Builtin builtin_id,
@@ -1064,15 +1129,17 @@ class BuiltinContinuationDeoptFrame : public DeoptFrame {
             BuiltinContinuationFrameData{builtin_id, parameters, context},
             parent) {}
 
-  const Builtin& builtin_id() const {
-    return builtin_continuation_frame_data_.builtin_id;
+  const Builtin& builtin_id() const { return data().builtin_id; }
+  base::Vector<ValueNode*> parameters() const { return data().parameters; }
+  ValueNode*& context() { return data().context; }
+  ValueNode* context() const { return data().context; }
+
+ private:
+  BuiltinContinuationFrameData& data() {
+    return data_.get<BuiltinContinuationFrameData>();
   }
-  base::Vector<ValueNode*> parameters() const {
-    return builtin_continuation_frame_data_.parameters;
-  }
-  ValueNode*& context() { return builtin_continuation_frame_data_.context; }
-  ValueNode* context() const {
-    return builtin_continuation_frame_data_.context;
+  const BuiltinContinuationFrameData& data() const {
+    return data_.get<BuiltinContinuationFrameData>();
   }
 };
 
@@ -3256,20 +3323,26 @@ class SetPendingMessage : public FixedInputValueNodeT<1, SetPendingMessage> {
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 };
 
+enum class CheckType { kCheckHeapObject, kOmitHeapObjectCheck };
 class ToBoolean : public FixedInputValueNodeT<1, ToBoolean> {
   using Base = FixedInputValueNodeT<1, ToBoolean>;
 
  public:
-  explicit ToBoolean(uint64_t bitfield) : Base(bitfield) {}
+  explicit ToBoolean(uint64_t bitfield, CheckType check_type)
+      : Base(CheckTypeBitField::update(bitfield, check_type)) {}
 
   static constexpr
       typename Base::InputTypes kInputTypes{ValueRepresentation::kTagged};
 
   Input& value() { return Node::input(0); }
+  CheckType check_type() const { return CheckTypeBitField::decode(bitfield()); }
 
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+
+ private:
+  using CheckTypeBitField = NextBitField<CheckType, 1>;
 };
 
 class ToBooleanLogicalNot
@@ -3277,13 +3350,38 @@ class ToBooleanLogicalNot
   using Base = FixedInputValueNodeT<1, ToBooleanLogicalNot>;
 
  public:
-  explicit ToBooleanLogicalNot(uint64_t bitfield) : Base(bitfield) {}
+  explicit ToBooleanLogicalNot(uint64_t bitfield, CheckType check_type)
+      : Base(CheckTypeBitField::update(bitfield, check_type)) {}
 
   static constexpr
       typename Base::InputTypes kInputTypes{ValueRepresentation::kTagged};
 
   Input& value() { return Node::input(0); }
+  CheckType check_type() const { return CheckTypeBitField::decode(bitfield()); }
 
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+
+ private:
+  using CheckTypeBitField = NextBitField<CheckType, 1>;
+};
+
+class StringEqual : public FixedInputValueNodeT<2, StringEqual> {
+  using Base = FixedInputValueNodeT<2, StringEqual>;
+
+ public:
+  explicit StringEqual(uint64_t bitfield) : Base(bitfield) {}
+  static constexpr OpProperties kProperties =
+      OpProperties::Call() | OpProperties::LazyDeopt();
+
+  static constexpr typename Base::InputTypes kInputTypes{
+      ValueRepresentation::kTagged, ValueRepresentation::kTagged};
+
+  Input& lhs() { return Node::input(0); }
+  Input& rhs() { return Node::input(1); }
+
+  int MaxCallStackArgs() const { return 0; }
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
@@ -3355,8 +3453,6 @@ class TestInstanceOf : public FixedInputValueNodeT<3, TestInstanceOf> {
  private:
   const compiler::FeedbackSource feedback_;
 };
-
-enum class CheckType { kCheckHeapObject, kOmitHeapObjectCheck };
 
 class TestUndetectable : public FixedInputValueNodeT<1, TestUndetectable> {
   using Base = FixedInputValueNodeT<1, TestUndetectable>;
@@ -3666,7 +3762,8 @@ class ToObject : public FixedInputValueNodeT<2, ToObject> {
   using Base = FixedInputValueNodeT<2, ToObject>;
 
  public:
-  explicit ToObject(uint64_t bitfield) : Base(bitfield) {}
+  explicit ToObject(uint64_t bitfield, CheckType check_type)
+      : Base(CheckTypeBitField::update(bitfield, check_type)) {}
 
   // The implementation currently calls runtime.
   static constexpr OpProperties kProperties = OpProperties::JSCall();
@@ -3675,11 +3772,15 @@ class ToObject : public FixedInputValueNodeT<2, ToObject> {
 
   Input& context() { return Node::input(0); }
   Input& value_input() { return Node::input(1); }
+  CheckType check_type() const { return CheckTypeBitField::decode(bitfield()); }
 
   int MaxCallStackArgs() const;
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+
+ private:
+  using CheckTypeBitField = NextBitField<CheckType, 1>;
 };
 
 class ToString : public FixedInputValueNodeT<2, ToString> {
@@ -3708,6 +3809,25 @@ class ToString : public FixedInputValueNodeT<2, ToString> {
 
  private:
   using ConversionModeBitField = NextBitField<ConversionMode, 1>;
+};
+
+class NumberToString : public FixedInputValueNodeT<1, NumberToString> {
+  using Base = FixedInputValueNodeT<1, NumberToString>;
+
+ public:
+  explicit NumberToString(uint64_t bitfield) : Base(bitfield) {}
+
+  static constexpr OpProperties kProperties =
+      OpProperties::Call() | OpProperties::LazyDeopt();
+  static constexpr
+      typename Base::InputTypes kInputTypes{ValueRepresentation::kTagged};
+
+  Input& value_input() { return Node::input(0); }
+
+  int MaxCallStackArgs() const { return 0; }
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 };
 
 class GeneratorRestoreRegister
@@ -3835,7 +3955,7 @@ class Constant : public FixedInputValueNodeT<0, Constant> {
   }
 
   bool IsTheHole(compiler::JSHeapBroker* broker) const {
-    return object_.IsTheHole(broker);
+    return object_.IsTheHole();
   }
 
   void SetValueLocationConstraints();
@@ -3875,30 +3995,6 @@ class RootConstant : public FixedInputValueNodeT<0, RootConstant> {
 
  private:
   const RootIndex index_;
-};
-
-class CreateEmptyArrayLiteral
-    : public FixedInputValueNodeT<0, CreateEmptyArrayLiteral> {
-  using Base = FixedInputValueNodeT<0, CreateEmptyArrayLiteral>;
-
- public:
-  explicit CreateEmptyArrayLiteral(uint64_t bitfield,
-                                   const compiler::FeedbackSource& feedback)
-      : Base(bitfield), feedback_(feedback) {}
-
-  compiler::FeedbackSource feedback() const { return feedback_; }
-
-  // The implementation currently calls runtime.
-  static constexpr OpProperties kProperties =
-      OpProperties::GenericRuntimeOrBuiltinCall();
-
-  int MaxCallStackArgs() const;
-  void SetValueLocationConstraints();
-  void GenerateCode(MaglevAssembler*, const ProcessingState&);
-  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
-
- private:
-  const compiler::FeedbackSource feedback_;
 };
 
 class CreateArrayLiteral : public FixedInputValueNodeT<0, CreateArrayLiteral> {
@@ -3999,27 +4095,6 @@ class CreateObjectLiteral
   const compiler::ObjectBoilerplateDescriptionRef boilerplate_descriptor_;
   const compiler::FeedbackSource feedback_;
   const int flags_;
-};
-
-class CreateEmptyObjectLiteral
-    : public FixedInputValueNodeT<0, CreateEmptyObjectLiteral> {
-  using Base = FixedInputValueNodeT<0, CreateEmptyObjectLiteral>;
-
- public:
-  explicit CreateEmptyObjectLiteral(uint64_t bitfield, compiler::MapRef& map)
-      : Base(bitfield), map_(map) {}
-
-  static constexpr OpProperties kProperties = OpProperties::DeferredCall();
-
-  compiler::MapRef map() { return map_; }
-
-  int MaxCallStackArgs() const;
-  void SetValueLocationConstraints();
-  void GenerateCode(MaglevAssembler*, const ProcessingState&);
-  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
-
- private:
-  const compiler::MapRef map_;
 };
 
 class CreateShallowObjectLiteral
@@ -4306,7 +4381,9 @@ class CheckMaps : public FixedInputNodeT<1, CheckMaps> {
  public:
   explicit CheckMaps(uint64_t bitfield, const compiler::ZoneRefSet<Map>& maps,
                      CheckType check_type)
-      : Base(CheckTypeBitField::update(bitfield, check_type)), maps_(maps) {}
+      : Base(CheckTypeBitField::update(bitfield, check_type)),
+        maps_(maps),
+        register_for_map_compare_(Register::no_reg()) {}
 
   static constexpr OpProperties kProperties = OpProperties::EagerDeopt();
   static constexpr
@@ -4323,8 +4400,13 @@ class CheckMaps : public FixedInputNodeT<1, CheckMaps> {
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
  private:
+  void MaybeGenerateMapLoad(MaglevAssembler* masm, Register object);
+  void GenerateMapCompare(MaglevAssembler* masm, Handle<Map> map);
+
   using CheckTypeBitField = NextBitField<CheckType, 1>;
   const compiler::ZoneRefSet<Map> maps_;
+
+  Register register_for_map_compare_;
 };
 
 class CheckValue : public FixedInputNodeT<1, CheckValue> {
@@ -4550,8 +4632,15 @@ class CheckInstanceType : public FixedInputNodeT<1, CheckInstanceType> {
  public:
   explicit CheckInstanceType(uint64_t bitfield, CheckType check_type,
                              InstanceType instance_type)
+      : CheckInstanceType(bitfield, check_type, instance_type, instance_type) {}
+  explicit CheckInstanceType(uint64_t bitfield, CheckType check_type,
+                             InstanceType first_instance_type,
+                             InstanceType last_instance_type)
       : Base(CheckTypeBitField::update(bitfield, check_type)),
-        instance_type_(instance_type) {}
+        first_instance_type_(first_instance_type),
+        last_instance_type_(last_instance_type) {
+    DCHECK_LE(first_instance_type, last_instance_type);
+  }
 
   static constexpr OpProperties kProperties = OpProperties::EagerDeopt();
   static constexpr
@@ -4561,7 +4650,6 @@ class CheckInstanceType : public FixedInputNodeT<1, CheckInstanceType> {
   Input& receiver_input() { return input(kReceiverIndex); }
 
   CheckType check_type() const { return CheckTypeBitField::decode(bitfield()); }
-  InstanceType instance_type() const { return instance_type_; }
 
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
@@ -4569,7 +4657,8 @@ class CheckInstanceType : public FixedInputNodeT<1, CheckInstanceType> {
 
  private:
   using CheckTypeBitField = NextBitField<CheckType, 1>;
-  const InstanceType instance_type_;
+  const InstanceType first_instance_type_;
+  const InstanceType last_instance_type_;
 };
 
 class CheckString : public FixedInputNodeT<1, CheckString> {
@@ -4774,8 +4863,7 @@ class CheckedInternalizedString
   using Base = FixedInputValueNodeT<1, CheckedInternalizedString>;
 
  public:
-  explicit CheckedInternalizedString(
-      uint64_t bitfield, CheckType check_type = CheckType::kCheckHeapObject)
+  explicit CheckedInternalizedString(uint64_t bitfield, CheckType check_type)
       : Base(CheckTypeBitField::update(bitfield, check_type)) {
     CHECK_EQ(properties().value_representation(), ValueRepresentation::kTagged);
   }
@@ -4802,7 +4890,8 @@ class CheckedObjectToIndex
   using Base = FixedInputValueNodeT<1, CheckedObjectToIndex>;
 
  public:
-  explicit CheckedObjectToIndex(uint64_t bitfield) : Base(bitfield) {}
+  explicit CheckedObjectToIndex(uint64_t bitfield, CheckType check_type)
+      : Base(CheckTypeBitField::update(bitfield, check_type)) {}
 
   static constexpr OpProperties kProperties =
       OpProperties::EagerDeopt() | OpProperties::Int32() |
@@ -4812,11 +4901,15 @@ class CheckedObjectToIndex
 
   static constexpr int kObjectIndex = 0;
   Input& object_input() { return Node::input(kObjectIndex); }
+  CheckType check_type() const { return CheckTypeBitField::decode(bitfield()); }
 
   int MaxCallStackArgs() const;
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+
+ private:
+  using CheckTypeBitField = NextBitField<CheckType, 1>;
 };
 
 class GetTemplateObject : public FixedInputValueNodeT<1, GetTemplateObject> {
@@ -6042,6 +6135,26 @@ class StringLength : public FixedInputValueNodeT<1, StringLength> {
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 };
 
+class StringConcat : public FixedInputValueNodeT<2, StringConcat> {
+  using Base = FixedInputValueNodeT<2, StringConcat>;
+
+ public:
+  explicit StringConcat(uint64_t bitfield) : Base(bitfield) {}
+
+  static constexpr OpProperties kProperties =
+      OpProperties::Call() | OpProperties::LazyDeopt() | OpProperties::Throw();
+  static constexpr typename Base::InputTypes kInputTypes{
+      ValueRepresentation::kTagged, ValueRepresentation::kTagged};
+
+  Input& lhs() { return Node::input(0); }
+  Input& rhs() { return Node::input(1); }
+
+  int MaxCallStackArgs() const { return 0; }
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+};
+
 class DefineNamedOwnGeneric
     : public FixedInputValueNodeT<3, DefineNamedOwnGeneric> {
   using Base = FixedInputValueNodeT<3, DefineNamedOwnGeneric>;
@@ -6338,13 +6451,16 @@ class Phi : public ValueNodeT<Phi> {
 
   BasicBlock* predecessor_at(int i);
 
-  void RecordUseReprHint(UseRepresentation repr) {
-    RecordUseReprHint(UseRepresentationSet{repr});
+  void RecordUseReprHint(UseRepresentation repr, int current_offset) {
+    RecordUseReprHint(UseRepresentationSet{repr}, current_offset);
   }
 
-  void RecordUseReprHint(UseRepresentationSet repr_mask);
+  void RecordUseReprHint(UseRepresentationSet repr_mask, int current_offset);
 
   UseRepresentationSet get_uses_repr_hints() { return uses_repr_hint_; }
+  UseRepresentationSet get_same_loop_uses_repr_hints() {
+    return same_loop_uses_repr_hint_;
+  }
 
  private:
   Phi** next() { return &next_; }
@@ -6354,6 +6470,7 @@ class Phi : public ValueNodeT<Phi> {
   MergePointInterpreterFrameState* const merge_state_;
 
   UseRepresentationSet uses_repr_hint_;
+  UseRepresentationSet same_loop_uses_repr_hint_;
 
   friend base::ThreadedListTraits<Phi>;
 };
@@ -6375,12 +6492,8 @@ class Call : public ValueNodeT<Call> {
   // This ctor is used when for variable input counts.
   // Inputs must be initialized manually.
   Call(uint64_t bitfield, ConvertReceiverMode mode, TargetType target_type,
-       const compiler::FeedbackSource& feedback, ValueNode* function,
-       ValueNode* context)
-      : Base(bitfield),
-        receiver_mode_(mode),
-        target_type_(target_type),
-        feedback_(feedback) {
+       ValueNode* function, ValueNode* context)
+      : Base(bitfield), receiver_mode_(mode), target_type_(target_type) {
     set_input(kFunctionIndex, function);
     set_input(kContextIndex, context);
   }
@@ -6399,8 +6512,6 @@ class Call : public ValueNodeT<Call> {
   auto args_begin() { return std::make_reverse_iterator(&arg(-1)); }
   auto args_end() { return std::make_reverse_iterator(&arg(num_args() - 1)); }
 
-  compiler::FeedbackSource feedback() const { return feedback_; }
-
   void VerifyInputs(MaglevGraphLabeller* graph_labeller) const;
   void MarkTaggedInputsAsDecompressing();
   int MaxCallStackArgs() const;
@@ -6411,7 +6522,6 @@ class Call : public ValueNodeT<Call> {
  private:
   ConvertReceiverMode receiver_mode_;
   TargetType target_type_;
-  const compiler::FeedbackSource feedback_;
 };
 
 class Construct : public ValueNodeT<Construct> {
@@ -6625,9 +6735,8 @@ class CallWithSpread : public ValueNodeT<CallWithSpread> {
 
   // This ctor is used when for variable input counts.
   // Inputs must be initialized manually.
-  CallWithSpread(uint64_t bitfield, compiler::FeedbackSource feedback,
-                 ValueNode* function, ValueNode* context)
-      : Base(bitfield), feedback_(feedback) {
+  CallWithSpread(uint64_t bitfield, ValueNode* function, ValueNode* context)
+      : Base(bitfield) {
     set_input(kFunctionIndex, function);
     set_input(kContextIndex, context);
   }
@@ -6656,7 +6765,6 @@ class CallWithSpread : public ValueNodeT<CallWithSpread> {
     return input(input_count() - 1);
   }
   Input& receiver() { return arg(0); }
-  compiler::FeedbackSource feedback() const { return feedback_; }
 
   void VerifyInputs(MaglevGraphLabeller* graph_labeller) const;
   void MarkTaggedInputsAsDecompressing();
@@ -6664,9 +6772,6 @@ class CallWithSpread : public ValueNodeT<CallWithSpread> {
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
-
- private:
-  const compiler::FeedbackSource feedback_;
 };
 
 class CallWithArrayLike : public FixedInputValueNodeT<4, CallWithArrayLike> {
@@ -6705,7 +6810,8 @@ class CallSelf : public ValueNodeT<CallSelf> {
   static constexpr int kClosureIndex = 0;
   static constexpr int kContextIndex = 1;
   static constexpr int kReceiverIndex = 2;
-  static constexpr int kFixedInputCount = 3;
+  static constexpr int kNewTargetIndex = 3;
+  static constexpr int kFixedInputCount = 4;
 
   // We need enough inputs to have these fixed inputs plus the maximum arguments
   // to a function call.
@@ -6715,7 +6821,8 @@ class CallSelf : public ValueNodeT<CallSelf> {
   // Inputs must be initialized manually.
   CallSelf(uint64_t bitfield,
            compiler::SharedFunctionInfoRef shared_function_info,
-           ValueNode* closure, ValueNode* context, ValueNode* receiver)
+           ValueNode* closure, ValueNode* context, ValueNode* receiver,
+           ValueNode* new_target)
       : Base(bitfield),
         shared_function_info_(shared_function_info),
         expected_parameter_count_(
@@ -6724,6 +6831,7 @@ class CallSelf : public ValueNodeT<CallSelf> {
     set_input(kClosureIndex, closure);
     set_input(kContextIndex, context);
     set_input(kReceiverIndex, receiver);
+    set_input(kNewTargetIndex, new_target);
   }
 
   static constexpr OpProperties kProperties = OpProperties::JSCall();
@@ -6734,6 +6842,8 @@ class CallSelf : public ValueNodeT<CallSelf> {
   const Input& context() const { return input(kContextIndex); }
   Input& receiver() { return input(kReceiverIndex); }
   const Input& receiver() const { return input(kReceiverIndex); }
+  Input& new_target() { return input(kNewTargetIndex); }
+  const Input& new_target() const { return input(kNewTargetIndex); }
   int num_args() const { return input_count() - kFixedInputCount; }
   Input& arg(int i) { return input(i + kFixedInputCount); }
   void set_arg(int i, ValueNode* node) {
@@ -6767,7 +6877,8 @@ class CallKnownJSFunction : public ValueNodeT<CallKnownJSFunction> {
   static constexpr int kClosureIndex = 0;
   static constexpr int kContextIndex = 1;
   static constexpr int kReceiverIndex = 2;
-  static constexpr int kFixedInputCount = 3;
+  static constexpr int kNewTargetIndex = 3;
+  static constexpr int kFixedInputCount = 4;
 
   // We need enough inputs to have these fixed inputs plus the maximum arguments
   // to a function call.
@@ -6778,7 +6889,7 @@ class CallKnownJSFunction : public ValueNodeT<CallKnownJSFunction> {
   CallKnownJSFunction(uint64_t bitfield,
                       compiler::SharedFunctionInfoRef shared_function_info,
                       ValueNode* closure, ValueNode* context,
-                      ValueNode* receiver)
+                      ValueNode* receiver, ValueNode* new_target)
       : Base(bitfield),
         shared_function_info_(shared_function_info),
         expected_parameter_count_(
@@ -6787,6 +6898,7 @@ class CallKnownJSFunction : public ValueNodeT<CallKnownJSFunction> {
     set_input(kClosureIndex, closure);
     set_input(kContextIndex, context);
     set_input(kReceiverIndex, receiver);
+    set_input(kNewTargetIndex, new_target);
   }
 
   static constexpr OpProperties kProperties = OpProperties::JSCall();
@@ -6797,6 +6909,8 @@ class CallKnownJSFunction : public ValueNodeT<CallKnownJSFunction> {
   const Input& context() const { return input(kContextIndex); }
   Input& receiver() { return input(kReceiverIndex); }
   const Input& receiver() const { return input(kReceiverIndex); }
+  Input& new_target() { return input(kNewTargetIndex); }
+  const Input& new_target() const { return input(kNewTargetIndex); }
   int num_args() const { return input_count() - kFixedInputCount; }
   Input& arg(int i) { return input(i + kFixedInputCount); }
   void set_arg(int i, ValueNode* node) {
@@ -6906,6 +7020,27 @@ class ConvertReceiver : public FixedInputValueNodeT<1, ConvertReceiver> {
  private:
   const compiler::NativeContextRef native_context_;
   ConvertReceiverMode mode_;
+};
+
+class CheckConstructResult
+    : public FixedInputValueNodeT<2, CheckConstructResult> {
+  using Base = FixedInputValueNodeT<2, CheckConstructResult>;
+
+ public:
+  explicit CheckConstructResult(uint64_t bitfield) : Base(bitfield) {}
+
+  Input& construct_result_input() { return input(0); }
+  Input& implicit_receiver_input() { return input(1); }
+
+  static constexpr OpProperties kProperties =
+      OpProperties::Throw() | OpProperties::DeferredCall();
+  static constexpr typename Base::InputTypes kInputTypes{
+      ValueRepresentation::kTagged, ValueRepresentation::kTagged};
+
+  int MaxCallStackArgs() const;
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 };
 
 class ConvertHoleToUndefined
@@ -7468,18 +7603,24 @@ class BranchIfToBooleanTrue
   using Base = BranchControlNodeT<1, BranchIfToBooleanTrue>;
 
  public:
-  explicit BranchIfToBooleanTrue(uint64_t bitfield, BasicBlockRef* if_true_refs,
+  explicit BranchIfToBooleanTrue(uint64_t bitfield, CheckType check_type,
+                                 BasicBlockRef* if_true_refs,
                                  BasicBlockRef* if_false_refs)
-      : Base(bitfield, if_true_refs, if_false_refs) {}
+      : Base(CheckTypeBitField::update(bitfield, check_type), if_true_refs,
+             if_false_refs) {}
 
   static constexpr
       typename Base::InputTypes kInputTypes{ValueRepresentation::kTagged};
 
   Input& condition_input() { return input(0); }
+  CheckType check_type() const { return CheckTypeBitField::decode(bitfield()); }
 
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+
+ private:
+  using CheckTypeBitField = NextBitField<CheckType, 1>;
 };
 
 class BranchIfInt32ToBooleanTrue

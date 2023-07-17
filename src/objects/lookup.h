@@ -97,6 +97,12 @@ class V8_EXPORT_PRIVATE LookupIterator final {
                         Handle<Object> lookup_start_object,
                         Configuration configuration = DEFAULT);
 
+  // Special case for lookup of the |error_stack_trace| private symbol in
+  // prototype chain (usually private symbols are limited to
+  // OWN_SKIP_INTERCEPTOR lookups).
+  inline LookupIterator(Isolate* isolate, Configuration configuration,
+                        Handle<Object> receiver, Handle<Symbol> name);
+
   void Restart() {
     InterceptorState state = InterceptorState::kUninitialized;
     IsElement() ? RestartInternal<true>(state) : RestartInternal<false>(state);
@@ -222,10 +228,11 @@ class V8_EXPORT_PRIVATE LookupIterator final {
                         Handle<Object> lookup_start_object,
                         Configuration configuration);
 
-  // For |ForTransitionHandler|.
-  LookupIterator(Isolate* isolate, Handle<Object> receiver, Handle<Name> name,
-                 Handle<Map> transition_map, PropertyDetails details,
-                 bool has_property);
+  // Lookup private symbol on the prototype chain. Currently used only for
+  // error_stack_symbol.
+  inline LookupIterator(Isolate* isolate, Configuration configuration,
+                        Handle<Object> receiver, Handle<Symbol> name,
+                        Handle<Object> lookup_start_object);
 
   static void InternalUpdateProtector(Isolate* isolate, Handle<Object> receiver,
                                       Handle<Name> name);
@@ -286,12 +293,12 @@ class V8_EXPORT_PRIVATE LookupIterator final {
                                                    Configuration configuration,
                                                    Handle<Name> name);
 
-  static Handle<JSReceiver> GetRootForNonJSReceiver(
-      Isolate* isolate, Handle<Object> lookup_start_object,
-      size_t index = kInvalidIndex);
-  static inline Handle<JSReceiver> GetRoot(Isolate* isolate,
-                                           Handle<Object> lookup_start_object,
-                                           size_t index = kInvalidIndex);
+  static MaybeHandle<JSReceiver> GetRootForNonJSReceiver(
+      Isolate* isolate, Handle<Object> lookup_start_object, size_t index,
+      Configuration configuration);
+  static inline MaybeHandle<JSReceiver> GetRoot(
+      Isolate* isolate, Handle<Object> lookup_start_object, size_t index,
+      Configuration configuration);
 
   State NotFound(JSReceiver const holder) const;
 

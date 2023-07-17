@@ -418,6 +418,13 @@ MaybeHandle<String> Object::ConvertToString(Isolate* isolate,
     if (input->IsBigInt()) {
       return BigInt::ToString(isolate, Handle<BigInt>::cast(input));
     }
+#if V8_ENABLE_WEBASSEMBLY
+    // We generally don't let the WasmNull escape into the JavaScript world,
+    // but some builtins may encounter it when called directly from Wasm code.
+    if (input->IsWasmNull()) {
+      return isolate->factory()->null_string();
+    }
+#endif
     ASSIGN_RETURN_ON_EXCEPTION(
         isolate, input,
         JSReceiver::ToPrimitive(isolate, Handle<JSReceiver>::cast(input),
@@ -434,11 +441,9 @@ MaybeHandle<String> Object::ConvertToString(Isolate* isolate,
 namespace {
 
 bool IsErrorObject(Isolate* isolate, Handle<Object> object) {
-  if (!object->IsJSReceiver()) return false;
-  Handle<Symbol> symbol = isolate->factory()->error_stack_symbol();
-  return JSReceiver::HasOwnProperty(isolate, Handle<JSReceiver>::cast(object),
-                                    symbol)
-      .FromMaybe(false);
+  if (!object->IsJSObject()) return false;
+  return ErrorUtils::HasErrorStackSymbolOwnProperty(
+      isolate, Handle<JSObject>::cast(object));
 }
 
 Handle<String> AsStringOrEmpty(Isolate* isolate, Handle<Object> object) {
@@ -4588,6 +4593,7 @@ Handle<Object> AccessorPair::GetComponent(Isolate* isolate,
                                           AccessorComponent component) {
   Handle<Object> accessor(accessor_pair->get(component), isolate);
   if (accessor->IsFunctionTemplateInfo()) {
+    // TODO(v8:5962): pass the right name here: "get "/"set " + prop.
     auto function = ApiNatives::InstantiateFunction(
                         isolate, native_context,
                         Handle<FunctionTemplateInfo>::cast(accessor))
@@ -4860,7 +4866,7 @@ STATIC_ASSERT_FIELD_OFFSETS_EQUAL(HeapNumber::kValueOffset,
 
 void Oddball::Initialize(Isolate* isolate, Handle<Oddball> oddball,
                          const char* to_string, Handle<Object> to_number,
-                         const char* type_of, byte kind) {
+                         const char* type_of, uint8_t kind) {
   Handle<String> internalized_to_string =
       isolate->factory()->InternalizeUtf8String(to_string);
   Handle<String> internalized_type_of =
@@ -4982,7 +4988,7 @@ bool Script::ContainsAsmModule() {
 namespace {
 
 template <typename Char>
-bool GetPositionInfoSlowImpl(const base::Vector<Char>& source, int position,
+bool GetPositionInfoSlowImpl(base::Vector<Char> source, int position,
                              Script::PositionInfo* info) {
   if (position < 0) {
     position = 0;
@@ -5225,7 +5231,8 @@ Script Script::Iterator::Next() {
 void JSArray::Initialize(Handle<JSArray> array, int capacity, int length) {
   DCHECK_GE(capacity, 0);
   array->GetIsolate()->factory()->NewJSArrayStorage(
-      array, length, capacity, INITIALIZE_ARRAY_ELEMENTS_WITH_HOLE);
+      array, length, capacity,
+      ArrayStorageAllocationMode::INITIALIZE_ARRAY_ELEMENTS_WITH_HOLE);
 }
 
 Maybe<bool> JSArray::SetLength(Handle<JSArray> array, uint32_t new_length) {
@@ -5495,11 +5502,14 @@ Handle<Object> JSPromise::Fulfill(Handle<JSPromise> promise,
 static void MoveMessageToPromise(Isolate* isolate, Handle<JSPromise> promise) {
   if (!isolate->has_pending_message()) return;
 
-  Handle<Object> message = handle(isolate->pending_message(), isolate);
-  Handle<Symbol> key = isolate->factory()->promise_debug_message_symbol();
-  Object::SetProperty(isolate, promise, key, message, StoreOrigin::kMaybeKeyed,
-                      Just(ShouldThrow::kThrowOnError))
-      .Assert();
+  if (isolate->debug()->is_active()) {
+    Handle<Object> message = handle(isolate->pending_message(), isolate);
+    Handle<Symbol> key = isolate->factory()->promise_debug_message_symbol();
+    Object::SetProperty(isolate, promise, key, message,
+                        StoreOrigin::kMaybeKeyed,
+                        Just(ShouldThrow::kThrowOnError))
+        .Assert();
+  }
 
   // The message object for a rejected promise was only stored for this purpose.
   // Clear it, otherwise we might leak memory.
@@ -5513,7 +5523,7 @@ Handle<Object> JSPromise::Reject(Handle<JSPromise> promise,
   DCHECK(
       !reinterpret_cast<v8::Isolate*>(isolate)->GetCurrentContext().IsEmpty());
 
-  if (isolate->debug()->is_active()) MoveMessageToPromise(isolate, promise);
+  MoveMessageToPromise(isolate, promise);
 
   if (debug_event) isolate->debug()->OnPromiseReject(promise, reason);
   isolate->RunAllPromiseHooks(PromiseHookType::kResolve, promise,
@@ -6495,7 +6505,7 @@ void RehashObjectHashTableAndGCIfNeeded(Isolate* isolate, Handle<T> table) {
     if (capacity > T::kMaxCapacity) {
       for (size_t i = 0; i < 2; ++i) {
         isolate->heap()->CollectAllGarbage(
-            Heap::kNoGCFlags, GarbageCollectionReason::kFullHashtable);
+            GCFlag::kNoFlags, GarbageCollectionReason::kFullHashtable);
       }
       table->Rehash(isolate);
     }

@@ -12,9 +12,11 @@
 #include "src/heap/array-buffer-sweeper.h"
 #include "src/heap/basic-memory-chunk.h"
 #include "src/heap/combined-heap.h"
+#include "src/heap/ephemeron-remembered-set.h"
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/heap/heap.h"
 #include "src/heap/large-spaces.h"
+#include "src/heap/memory-chunk-layout.h"
 #include "src/heap/new-spaces.h"
 #include "src/heap/objects-visiting-inl.h"
 #include "src/heap/paged-spaces.h"
@@ -62,7 +64,8 @@ class VerifyPointersVisitor : public ObjectVisitorWithCageBases,
                      ObjectSlot end) override;
   void VisitPointers(HeapObject host, MaybeObjectSlot start,
                      MaybeObjectSlot end) override;
-  void VisitCodePointer(Code host, CodeObjectSlot slot) override;
+  void VisitInstructionStreamPointer(Code host,
+                                     InstructionStreamSlot slot) override;
   void VisitCodeTarget(InstructionStream host, RelocInfo* rinfo) override;
   void VisitEmbeddedPointer(InstructionStream host, RelocInfo* rinfo) override;
 
@@ -97,7 +100,8 @@ void VerifyPointersVisitor::VisitPointers(HeapObject host,
   VerifyPointers(host, start, end);
 }
 
-void VerifyPointersVisitor::VisitCodePointer(Code host, CodeObjectSlot slot) {
+void VerifyPointersVisitor::VisitInstructionStreamPointer(
+    Code host, InstructionStreamSlot slot) {
   Object maybe_code = slot.load(code_cage_base());
   HeapObject code;
   // The slot might contain smi during Code creation.
@@ -249,10 +253,9 @@ class HeapVerification final : public SpaceVerificationVisitor {
   void VerifyObject(HeapObject object) final;
   void VerifyObjectMap(HeapObject object);
   void VerifyOutgoingPointers(HeapObject object);
-  // Verifies OLD_TO_NEW and OLD_TO_SHARED remembered sets for this object.
+  // Verifies OLD_TO_NEW, OLD_TO_NEW_BACKGROUND and OLD_TO_SHARED remembered
+  // sets for this object.
   void VerifyRememberedSetFor(HeapObject object);
-
-  void VerifyInvalidatedObjectSize();
 
   ReadOnlySpace* read_only_space() const { return heap_->read_only_space(); }
   NewSpace* new_space() const { return heap_->new_space(); }
@@ -332,8 +335,6 @@ void HeapVerification::Verify() {
 
   isolate()->string_table()->VerifyIfOwnedBy(isolate());
 
-  VerifyInvalidatedObjectSize();
-
 #if DEBUG
   heap()->VerifyCommittedPhysicalMemory();
 #endif  // DEBUG
@@ -349,7 +350,6 @@ void HeapVerification::VerifySpace(BaseSpace* space) {
 void HeapVerification::VerifyPage(const BasicMemoryChunk* chunk) {
   CHECK(!current_chunk_.has_value());
   CHECK(!chunk->IsFlagSet(Page::PAGE_NEW_OLD_PROMOTION));
-  CHECK(!chunk->IsFlagSet(Page::PAGE_NEW_NEW_PROMOTION));
   if (V8_SHARED_RO_HEAP_BOOL && chunk->InReadOnlySpace()) {
     CHECK_NULL(chunk->owner());
   } else {
@@ -421,28 +421,6 @@ void HeapVerification::VerifyObjectMap(HeapObject object) {
   }
 }
 
-namespace {
-void VerifyInvalidatedSlots(InvalidatedSlots* invalidated_slots) {
-  if (!invalidated_slots) return;
-  for (std::pair<HeapObject, int> object_and_size : *invalidated_slots) {
-    HeapObject object = object_and_size.first;
-    int size = object_and_size.second;
-    CHECK_EQ(object.Size(), size);
-  }
-}
-}  // namespace
-
-void HeapVerification::VerifyInvalidatedObjectSize() {
-  OldGenerationMemoryChunkIterator chunk_iterator(heap());
-  MemoryChunk* chunk;
-
-  while ((chunk = chunk_iterator.next()) != nullptr) {
-    VerifyInvalidatedSlots(chunk->invalidated_slots<OLD_TO_NEW>());
-    VerifyInvalidatedSlots(chunk->invalidated_slots<OLD_TO_OLD>());
-    VerifyInvalidatedSlots(chunk->invalidated_slots<OLD_TO_SHARED>());
-  }
-}
-
 void HeapVerification::VerifyReadOnlyHeap() {
   CHECK(!read_only_space()->writable());
   VerifySpace(read_only_space());
@@ -476,7 +454,8 @@ class SlotVerifyingVisitor : public ObjectVisitorWithCageBases {
     }
   }
 
-  void VisitCodePointer(Code host, CodeObjectSlot slot) override {
+  void VisitInstructionStreamPointer(Code host,
+                                     InstructionStreamSlot slot) override {
     if (ShouldHaveBeenRecorded(
             host, MaybeObject::FromObject(slot.load(code_cage_base())))) {
       CHECK_GT(untyped_->count(slot.address()), 0);
@@ -523,9 +502,10 @@ class SlotVerifyingVisitor : public ObjectVisitorWithCageBases {
 
 class OldToNewSlotVerifyingVisitor : public SlotVerifyingVisitor {
  public:
-  OldToNewSlotVerifyingVisitor(Isolate* isolate, std::set<Address>* untyped,
-                               std::set<std::pair<SlotType, Address>>* typed,
-                               EphemeronRememberedSet* ephemeron_remembered_set)
+  OldToNewSlotVerifyingVisitor(
+      Isolate* isolate, std::set<Address>* untyped,
+      std::set<std::pair<SlotType, Address>>* typed,
+      EphemeronRememberedSet::TableMap* ephemeron_remembered_set)
       : SlotVerifyingVisitor(isolate, untyped, typed),
         ephemeron_remembered_set_(ephemeron_remembered_set) {}
 
@@ -555,7 +535,7 @@ class OldToNewSlotVerifyingVisitor : public SlotVerifyingVisitor {
   }
 
  private:
-  EphemeronRememberedSet* ephemeron_remembered_set_;
+  EphemeronRememberedSet::TableMap* ephemeron_remembered_set_;
 };
 
 class OldToSharedSlotVerifyingVisitor : public SlotVerifyingVisitor {
@@ -606,7 +586,8 @@ class SlotCollectingVisitor final : public ObjectVisitor {
     }
   }
 
-  void VisitCodePointer(Code host, CodeObjectSlot slot) override {
+  void VisitInstructionStreamPointer(Code host,
+                                     InstructionStreamSlot slot) override {
     CHECK(V8_EXTERNAL_CODE_SPACE_BOOL);
 #ifdef V8_EXTERNAL_CODE_SPACE
     code_slots_.push_back(slot);
@@ -627,14 +608,14 @@ class SlotCollectingVisitor final : public ObjectVisitor {
 
   MaybeObjectSlot slot(int i) { return slots_[i]; }
 #ifdef V8_EXTERNAL_CODE_SPACE
-  CodeObjectSlot code_slot(int i) { return code_slots_[i]; }
+  InstructionStreamSlot code_slot(int i) { return code_slots_[i]; }
   int number_of_code_slots() { return static_cast<int>(code_slots_.size()); }
 #endif
 
  private:
   std::vector<MaybeObjectSlot> slots_;
 #ifdef V8_EXTERNAL_CODE_SPACE
-  std::vector<CodeObjectSlot> code_slots_;
+  std::vector<InstructionStreamSlot> code_slots_;
 #endif
 };
 
@@ -652,9 +633,12 @@ void HeapVerification::VerifyRememberedSetFor(HeapObject object) {
   std::set<Address> old_to_new;
   std::set<std::pair<SlotType, Address>> typed_old_to_new;
   CollectSlots<OLD_TO_NEW>(chunk, start, end, &old_to_new, &typed_old_to_new);
+  CollectSlots<OLD_TO_NEW_BACKGROUND>(chunk, start, end, &old_to_new,
+                                      &typed_old_to_new);
+
   OldToNewSlotVerifyingVisitor old_to_new_visitor(
       isolate(), &old_to_new, &typed_old_to_new,
-      &heap()->ephemeron_remembered_set_);
+      heap()->ephemeron_remembered_set()->tables());
   object.IterateBody(cage_base_, &old_to_new_visitor);
 
   std::set<Address> old_to_shared;
@@ -671,11 +655,17 @@ void HeapVerification::VerifyRememberedSetFor(HeapObject object) {
 
     CHECK_NULL(chunk->slot_set<OLD_TO_NEW>());
     CHECK_NULL(chunk->typed_slot_set<OLD_TO_NEW>());
+
+    CHECK_NULL(chunk->slot_set<OLD_TO_NEW_BACKGROUND>());
+    CHECK_NULL(chunk->typed_slot_set<OLD_TO_NEW_BACKGROUND>());
   }
 
   if (Heap::InYoungGeneration(object)) {
     CHECK_NULL(chunk->slot_set<OLD_TO_NEW>());
     CHECK_NULL(chunk->typed_slot_set<OLD_TO_NEW>());
+
+    CHECK_NULL(chunk->slot_set<OLD_TO_NEW_BACKGROUND>());
+    CHECK_NULL(chunk->typed_slot_set<OLD_TO_NEW_BACKGROUND>());
 
     CHECK_NULL(chunk->slot_set<OLD_TO_OLD>());
     CHECK_NULL(chunk->typed_slot_set<OLD_TO_OLD>());

@@ -6,6 +6,7 @@
 #define V8_HEAP_MARKING_VISITOR_INL_H_
 
 #include "src/common/globals.h"
+#include "src/heap/ephemeron-remembered-set.h"
 #include "src/heap/marking-state-inl.h"
 #include "src/heap/marking-visitor.h"
 #include "src/heap/marking-worklist-inl.h"
@@ -101,9 +102,8 @@ MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitPointersImpl(
 }
 
 template <typename ConcreteVisitor, typename MarkingState>
-V8_INLINE void
-MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitCodePointerImpl(
-    Code host, CodeObjectSlot slot) {
+V8_INLINE void MarkingVisitorBase<ConcreteVisitor, MarkingState>::
+    VisitInstructionStreamPointerImpl(Code host, InstructionStreamSlot slot) {
   Object object =
       slot.Relaxed_Load(ObjectVisitorWithCageBases::code_cage_base());
   HeapObject heap_object;
@@ -172,7 +172,7 @@ int MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitBytecodeArray(
   this->VisitMapPointer(object);
   BytecodeArray::BodyDescriptor::IterateBody(map, object, size, this);
   if (!should_keep_ages_unchanged_) {
-    object.MakeOlder();
+    object.MakeOlder(code_flushing_increase_);
   }
   return size;
 }
@@ -579,10 +579,12 @@ int MarkingVisitorBase<ConcreteVisitor, MarkingState>::VisitTransitionArray(
 
 template <typename ConcreteVisitor, typename MarkingState>
 YoungGenerationMarkingVisitorBase<ConcreteVisitor, MarkingState>::
-    YoungGenerationMarkingVisitorBase(Isolate* isolate,
-                                      MarkingWorklists::Local* worklists_local)
+    YoungGenerationMarkingVisitorBase(
+        Isolate* isolate, MarkingWorklists::Local* worklists_local,
+        EphemeronRememberedSet::TableList::Local* ephemeron_tables_local)
     : NewSpaceVisitor<ConcreteVisitor>(isolate),
       worklists_local_(worklists_local),
+      ephemeron_tables_local_(ephemeron_tables_local),
       pretenuring_handler_(isolate->heap()->pretenuring_handler()),
       local_pretenuring_feedback_(
           PretenuringHandler::kInitialFeedbackCapacity) {}
@@ -629,6 +631,21 @@ int YoungGenerationMarkingVisitorBase<
     ConcreteVisitor, MarkingState>::VisitJSTypedArray(Map map,
                                                       JSTypedArray object) {
   return VisitEmbedderTracingSubClassWithEmbedderTracing(map, object);
+}
+
+template <typename ConcreteVisitor, typename MarkingState>
+int YoungGenerationMarkingVisitorBase<ConcreteVisitor, MarkingState>::
+    VisitEphemeronHashTable(Map map, EphemeronHashTable table) {
+  // Register table with Minor MC, so it can take care of the weak keys later.
+  // This allows to only iterate the tables' values, which are treated as strong
+  // independently of whether the key is live.
+  ephemeron_tables_local_->Push(table);
+  for (InternalIndex i : table.IterateEntries()) {
+    ObjectSlot value_slot =
+        table.RawFieldOfElementAt(EphemeronHashTable::EntryToValueIndex(i));
+    VisitPointer(table, value_slot);
+  }
+  return EphemeronHashTable::BodyDescriptor::SizeOf(map, table);
 }
 
 template <typename ConcreteVisitor, typename MarkingState>

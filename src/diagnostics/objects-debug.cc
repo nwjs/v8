@@ -67,6 +67,7 @@
 #include "src/objects/js-segmenter-inl.h"
 #include "src/objects/js-segments-inl.h"
 #endif  // V8_INTL_SUPPORT
+#include "src/objects/hole-inl.h"
 #include "src/objects/js-raw-json-inl.h"
 #include "src/objects/js-shared-array-inl.h"
 #include "src/objects/js-struct-inl.h"
@@ -569,6 +570,26 @@ void Map::MapVerify(Isolate* isolate) {
       if (IsJSSharedArrayMap()) {
         CHECK(has_shared_array_elements());
       }
+    }
+
+    // Check constuctor value in JSFunction's maps.
+    if (IsJSFunctionMap() && !constructor_or_back_pointer().IsMap()) {
+      Object maybe_constructor = constructor_or_back_pointer();
+      // Constructor field might still contain a tuple if this map used to
+      // have non-instance prototype earlier.
+      CHECK_IMPLIES(has_non_instance_prototype(), maybe_constructor.IsTuple2());
+      if (maybe_constructor.IsTuple2()) {
+        Tuple2 tuple = Tuple2::cast(maybe_constructor);
+        // Unwrap the {constructor, non-instance_prototype} pair.
+        maybe_constructor = tuple.value1();
+        CHECK(!tuple.value2().IsJSReceiver());
+      }
+      CHECK(maybe_constructor.IsJSFunction() ||
+            maybe_constructor.IsFunctionTemplateInfo() ||
+            // The above check might fail until empty function setup is done.
+            isolate->raw_native_context()
+                .get(Context::EMPTY_FUNCTION_INDEX)
+                .IsUndefined());
     }
   }
 
@@ -1088,6 +1109,18 @@ void Oddball::OddballVerify(Isolate* isolate) {
     CHECK_EQ(kind(), Oddball::kSelfReferenceMarker);
   } else if (map() == roots.basic_block_counters_marker_map()) {
     CHECK(*this == roots.basic_block_counters_marker());
+  } else {
+    UNREACHABLE();
+  }
+}
+
+void Hole::HoleVerify(Isolate* isolate) {
+  CHECK(IsHole(isolate));
+
+  ReadOnlyRoots roots(isolate->heap());
+  if (map() == roots.the_hole_map()) {
+    CHECK_EQ(*this, roots.the_hole_value());
+    CHECK_EQ(kind(), Hole::kDefaultHole);
   } else {
     UNREACHABLE();
   }
@@ -2005,8 +2038,8 @@ void CallSiteInfo::CallSiteInfoVerify(Isolate* isolate) {
 #if V8_ENABLE_WEBASSEMBLY
   CHECK_IMPLIES(IsAsmJsWasm(), IsWasm());
   CHECK_IMPLIES(IsWasm(), receiver_or_instance().IsWasmInstanceObject());
-  CHECK_IMPLIES(IsWasm(), function().IsSmi());
-  CHECK_IMPLIES(!IsWasm(), function().IsJSFunction());
+  CHECK_IMPLIES(IsWasm() || IsBuiltin(), function().IsSmi());
+  CHECK_IMPLIES(!IsWasm() && !IsBuiltin(), function().IsJSFunction());
   CHECK_IMPLIES(IsAsync(), !IsWasm());
   CHECK_IMPLIES(IsConstructor(), !IsWasm());
 #endif  // V8_ENABLE_WEBASSEMBLY

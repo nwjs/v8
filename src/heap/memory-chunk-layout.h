@@ -25,6 +25,7 @@ class SlotSet;
 
 enum RememberedSetType {
   OLD_TO_NEW,
+  OLD_TO_NEW_BACKGROUND,
   OLD_TO_OLD,
   OLD_TO_SHARED,
   OLD_TO_CODE,
@@ -55,14 +56,12 @@ class V8_EXPORT_PRIVATE MemoryChunkLayout {
     // MemoryChunk fields:
     FIELD(SlotSet* [kNumSets], SlotSet),
     FIELD(TypedSlotsSet* [kNumSets], TypedSlotSet),
-    FIELD(void* [kNumSets], InvalidatedSlots),
     FIELD(ProgressBar, ProgressBar),
     FIELD(std::atomic<intptr_t>, LiveByteCount),
     FIELD(base::Mutex*, Mutex),
     FIELD(base::SharedMutex*, SharedMutex),
     FIELD(base::Mutex*, PageProtectionChangeMutex),
     FIELD(std::atomic<intptr_t>, ConcurrentSweeping),
-    FIELD(uintptr_t, WriteUnprotectCounter),
     FIELD(std::atomic<size_t>[kNumTypes], ExternalBackingStoreBytes),
     FIELD(heap::ListNode<MemoryChunk>, ListNode),
     FIELD(FreeListCategory**, Categories),

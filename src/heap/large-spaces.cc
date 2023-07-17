@@ -16,6 +16,7 @@
 #include "src/heap/marking.h"
 #include "src/heap/memory-allocator.h"
 #include "src/heap/memory-chunk-inl.h"
+#include "src/heap/memory-chunk-layout.h"
 #include "src/heap/remembered-set.h"
 #include "src/heap/slot-set.h"
 #include "src/heap/spaces-inl.h"
@@ -71,6 +72,9 @@ void LargePage::ClearOutOfLiveRangeSlots(Address free_start) {
   DCHECK_NULL(slot_set<OLD_TO_NEW>());
   DCHECK_NULL(typed_slot_set<OLD_TO_NEW>());
 
+  DCHECK_NULL(slot_set<OLD_TO_NEW_BACKGROUND>());
+  DCHECK_NULL(typed_slot_set<OLD_TO_NEW_BACKGROUND>());
+
   DCHECK_NULL(slot_set<OLD_TO_OLD>());
   DCHECK_NULL(typed_slot_set<OLD_TO_OLD>());
 
@@ -105,7 +109,7 @@ HeapObject LargeObjectSpaceObjectIterator::Next() {
 // OldLargeObjectSpace
 
 LargeObjectSpace::LargeObjectSpace(Heap* heap, AllocationSpace id)
-    : Space(heap, id, new NoFreeList(), allocation_counter_),
+    : Space(heap, id, nullptr, allocation_counter_),
       size_(0),
       page_count_(0),
       objects_size_(0),
@@ -534,6 +538,8 @@ CodeLargeObjectSpace::CodeLargeObjectSpace(Heap* heap)
 
 AllocationResult CodeLargeObjectSpace::AllocateRaw(int object_size) {
   DCHECK(!v8_flags.enable_third_party_heap);
+  CodePageHeaderModificationScope header_modification_scope(
+      "Code allocation needs header access.");
   return OldLargeObjectSpace::AllocateRaw(object_size, EXECUTABLE);
 }
 

@@ -114,7 +114,8 @@ namespace internal {
   /* ExternalPointerTable::TableCompactionOutcome enum for more details. */    \
   HR(external_pointer_table_compaction_outcome,                                \
      V8.ExternalPointerTableCompactionOutcome, 0, 2, 3)                        \
-  HR(wasm_compilation_method, V8.WasmCompilationMethod, 0, 4, 5)
+  HR(wasm_compilation_method, V8.WasmCompilationMethod, 0, 4, 5)               \
+  HR(asmjs_instantiate_result, V8.AsmjsInstantiateResult, 0, 1, 2)
 
 // Like TIMED_HISTOGRAM_LIST, but allows the use of NestedTimedHistogramScope.
 // HT(name, caption, max, unit)
@@ -266,8 +267,6 @@ namespace internal {
      V8.WasmFinishModuleStreamingMicroSeconds, 100000000, MICROSECOND)         \
   HT(wasm_deserialization_time, V8.WasmDeserializationTimeMilliSeconds, 10000, \
      MILLISECOND)                                                              \
-  HT(wasm_tier_up_module_time, V8.WasmTierUpModuleMicroSeconds, 100000000,     \
-     MICROSECOND)                                                              \
   HT(wasm_compile_asm_function_time, V8.WasmCompileFunctionMicroSeconds.asm,   \
      1000000, MICROSECOND)                                                     \
   HT(wasm_compile_wasm_function_time, V8.WasmCompileFunctionMicroSeconds.wasm, \
@@ -369,6 +368,7 @@ namespace internal {
      V8.GCCompactorCausedByOldspaceExhaustion)                                 \
   SC(enum_cache_hits, V8.EnumCacheHits)                                        \
   SC(enum_cache_misses, V8.EnumCacheMisses)                                    \
+  SC(maps_created, V8.MapsCreated)                                             \
   SC(megamorphic_stub_cache_updates, V8.MegamorphicStubCacheUpdates)           \
   SC(regexp_entry_runtime, V8.RegExpEntryRuntime)                              \
   SC(stack_interrupts, V8.StackInterrupts)                                     \

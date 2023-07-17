@@ -974,6 +974,8 @@ BytecodeOffset GetBytecodeOffset(const DeoptFrame& deopt_frame) {
     case DeoptFrame::FrameType::kInlinedArgumentsFrame:
       DCHECK_NOT_NULL(deopt_frame.parent());
       return GetBytecodeOffset(*deopt_frame.parent());
+    case DeoptFrame::FrameType::kConstructStubFrame:
+      return deopt_frame.as_construct_stub().bytecode_position();
     case DeoptFrame::FrameType::kBuiltinContinuationFrame:
       return Builtins::GetContinuationBytecodeOffset(
           deopt_frame.as_builtin_continuation().builtin_id());
@@ -986,6 +988,8 @@ SourcePosition GetSourcePosition(const DeoptFrame& deopt_frame) {
     case DeoptFrame::FrameType::kInlinedArgumentsFrame:
       DCHECK_NOT_NULL(deopt_frame.parent());
       return GetSourcePosition(*deopt_frame.parent());
+    case DeoptFrame::FrameType::kConstructStubFrame:
+      return deopt_frame.as_construct_stub().source_position();
     case DeoptFrame::FrameType::kBuiltinContinuationFrame:
       return SourcePosition::Unknown();
   }
@@ -997,6 +1001,8 @@ compiler::SharedFunctionInfoRef GetSharedFunctionInfo(
       return deopt_frame.as_interpreted().unit().shared_function_info();
     case DeoptFrame::FrameType::kInlinedArgumentsFrame:
       return deopt_frame.as_inlined_arguments().unit().shared_function_info();
+    case DeoptFrame::FrameType::kConstructStubFrame:
+      return deopt_frame.as_construct_stub().unit().shared_function_info();
     case DeoptFrame::FrameType::kBuiltinContinuationFrame:
       return GetSharedFunctionInfo(*deopt_frame.parent());
   }
@@ -1095,6 +1101,38 @@ class MaglevTranslationArrayBuilder {
       case DeoptFrame::FrameType::kInlinedArgumentsFrame:
         // The inlined arguments frame can never be the top frame.
         UNREACHABLE();
+      case DeoptFrame::FrameType::kConstructStubFrame: {
+        // TODO(victorgomes): This is very similar to inlined arguments, should
+        // we generalise that?
+        const ConstructStubDeoptFrame& construct_stub_frame =
+            top_frame.as_construct_stub();
+
+        translation_array_builder_->BeginConstructStubFrame(
+            construct_stub_frame.bytecode_position(),
+            GetDeoptLiteral(GetSharedFunctionInfo(construct_stub_frame)),
+            construct_stub_frame.arguments_without_receiver().length() + 1);
+
+        // Closure
+        BuildDeoptFrameSingleValue(construct_stub_frame.closure(),
+                                   *current_input_location);
+        current_input_location++;
+
+        // Arguments
+        BuildDeoptFrameSingleValue(construct_stub_frame.receiver(),
+                                   *current_input_location);
+        current_input_location++;
+        for (ValueNode* value :
+             construct_stub_frame.arguments_without_receiver()) {
+          BuildDeoptFrameSingleValue(value, *current_input_location);
+          current_input_location++;
+        }
+
+        // Context
+        ValueNode* value = construct_stub_frame.context();
+        BuildDeoptFrameSingleValue(value, *current_input_location);
+        current_input_location++;
+        break;
+      }
       case DeoptFrame::FrameType::kBuiltinContinuationFrame: {
         const BuiltinContinuationDeoptFrame& builtin_continuation_frame =
             top_frame.as_builtin_continuation();
@@ -1189,6 +1227,38 @@ class MaglevTranslationArrayBuilder {
           BuildDeoptFrameSingleValue(value, *current_input_location);
           current_input_location++;
         }
+        break;
+      }
+      case DeoptFrame::FrameType::kConstructStubFrame: {
+        // TODO(victorgomes): This is very similar to inlined arguments, should
+        // we generalise that?
+        const ConstructStubDeoptFrame& construct_stub_frame =
+            frame.as_construct_stub();
+
+        translation_array_builder_->BeginConstructStubFrame(
+            construct_stub_frame.bytecode_position(),
+            GetDeoptLiteral(GetSharedFunctionInfo(construct_stub_frame)),
+            construct_stub_frame.arguments_without_receiver().length() + 1);
+
+        // Closure
+        BuildDeoptFrameSingleValue(construct_stub_frame.closure(),
+                                   *current_input_location);
+        current_input_location++;
+
+        // Arguments
+        BuildDeoptFrameSingleValue(construct_stub_frame.receiver(),
+                                   *current_input_location);
+        current_input_location++;
+        for (ValueNode* value :
+             construct_stub_frame.arguments_without_receiver()) {
+          BuildDeoptFrameSingleValue(value, *current_input_location);
+          current_input_location++;
+        }
+
+        // Context
+        ValueNode* value = construct_stub_frame.context();
+        BuildDeoptFrameSingleValue(value, *current_input_location);
+        current_input_location++;
         break;
       }
       case DeoptFrame::FrameType::kBuiltinContinuationFrame: {
@@ -1405,6 +1475,16 @@ void MaglevCodeGenerator::EmitCode() {
       processor(SafepointingNodeProcessor{local_isolate_},
                 MaglevCodeGeneratingNodeProcessor{masm()});
   RecordInlinedFunctions();
+
+  if (code_gen_state_.compilation_info()->is_osr()) {
+    // Do we really want to have this offset or should we set it to 0?
+    masm_.Abort(AbortReason::kShouldNotDirectlyEnterOsrFunction);
+    masm_.RecordComment("-- OSR entrpoint --");
+    masm_.bind(code_gen_state_.osr_entry());
+    // TODO(v8:7700): Implement compilation with OSR offset.
+    masm_.Abort(AbortReason::kMaglevOsrTodo);
+  }
+
   processor.ProcessGraph(graph_);
   EmitDeferredCode();
   EmitDeopts();
@@ -1618,10 +1698,13 @@ Handle<DeoptimizationData> MaglevCodeGenerator::GenerateDeoptimizationData(
   raw_data.SetLiteralArray(raw_literals);
   raw_data.SetInliningPositions(*inlining_positions);
 
-  // TODO(leszeks): Fix once we have OSR.
-  BytecodeOffset osr_offset = BytecodeOffset::None();
-  raw_data.SetOsrBytecodeOffset(Smi::FromInt(osr_offset.ToInt()));
-  raw_data.SetOsrPcOffset(Smi::FromInt(-1));
+  auto info = code_gen_state_.compilation_info();
+  raw_data.SetOsrBytecodeOffset(Smi::FromInt(info->osr_offset().ToInt()));
+  if (info->is_osr()) {
+    raw_data.SetOsrPcOffset(Smi::FromInt(code_gen_state_.osr_entry()->pos()));
+  } else {
+    raw_data.SetOsrPcOffset(Smi::FromInt(-1));
+  }
 
   // Populate deoptimization entries.
   int i = 0;

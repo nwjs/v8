@@ -11,6 +11,7 @@
 #include "src/flags/flags.h"
 #include "src/heap/factory.h"
 #include "src/heap/heap-inl.h"
+#include "src/heap/heap.h"
 #include "src/heap/memory-chunk-layout.h"
 #include "src/heap/memory-chunk.h"
 #include "src/heap/parked-scope.h"
@@ -806,7 +807,9 @@ UNINITIALIZED_TEST(PromotionMarkCompact) {
 
   v8_flags.stress_concurrent_allocation = false;  // For SealCurrentObjects.
   v8_flags.shared_string_table = true;
-  v8_flags.manual_evacuation_candidates_selection = true;
+  ManualGCScope manual_gc_scope;
+  heap::ManualEvacuationCandidatesSelectionScope
+      manual_evacuation_candidate_selection_scope(manual_gc_scope);
 
   MultiClientIsolateTest test;
   Isolate* i_isolate = test.i_main_isolate();
@@ -830,11 +833,11 @@ UNINITIALIZED_TEST(PromotionMarkCompact) {
 
     // 1st GC moves `one_byte_seq` to old space and 2nd GC evacuates it within
     // old space.
-    CcTest::CollectAllGarbage(i_isolate);
+    heap::CollectAllGarbage(heap);
     heap::ForceEvacuationCandidate(i::Page::FromHeapObject(*one_byte_seq));
     // We need to invoke GC without stack, otherwise no compaction is performed.
     DisableConservativeStackScanningScopeForTesting no_stack_scanning(heap);
-    CcTest::CollectAllGarbage(i_isolate);
+    heap::CollectAllGarbage(heap);
 
     // In-place-internalizable strings are promoted into the shared heap when
     // sharing.
@@ -871,7 +874,7 @@ UNINITIALIZED_TEST(PromotionScavenge) {
     CHECK(heap->InSpace(*one_byte_seq, NEW_SPACE));
 
     for (int i = 0; i < 2; i++) {
-      CcTest::CollectGarbage(NEW_SPACE, i_isolate);
+      heap::CollectGarbage(heap, NEW_SPACE);
     }
 
     // In-place-internalizable strings are promoted into the shared heap when
@@ -919,7 +922,7 @@ UNINITIALIZED_TEST(PromotionScavengeOldToShared) {
         RememberedSet<OLD_TO_NEW>::Contains(old_object_chunk, slot.address()));
 
     for (int i = 0; i < 2; i++) {
-      CcTest::CollectGarbage(NEW_SPACE, i_isolate);
+      heap::CollectGarbage(heap, NEW_SPACE);
     }
 
     // In-place-internalizable strings are promoted into the shared heap when
@@ -939,14 +942,15 @@ UNINITIALIZED_TEST(PromotionMarkCompactNewToShared) {
   if (v8_flags.stress_concurrent_allocation) return;
 
   v8_flags.shared_string_table = true;
-  v8_flags.manual_evacuation_candidates_selection = true;
+  ManualGCScope manual_gc_scope;
+  heap::ManualEvacuationCandidatesSelectionScope
+      manual_evacuation_candidate_selection_scope(manual_gc_scope);
   v8_flags.page_promotion = false;
 
   MultiClientIsolateTest test;
   Isolate* i_isolate = test.i_main_isolate();
   Factory* factory = i_isolate->factory();
   Heap* heap = i_isolate->heap();
-  ManualGCScope manual_gc(i_isolate);
 
   const char raw_one_byte[] = "foo";
 
@@ -970,7 +974,7 @@ UNINITIALIZED_TEST(PromotionMarkCompactNewToShared) {
 
     // We need to invoke GC without stack, otherwise no compaction is performed.
     DisableConservativeStackScanningScopeForTesting no_stack_scanning(heap);
-    CcTest::CollectGarbage(OLD_SPACE, i_isolate);
+    heap::CollectGarbage(heap, OLD_SPACE);
 
     // In-place-internalizable strings are promoted into the shared heap when
     // sharing.
@@ -993,13 +997,14 @@ UNINITIALIZED_TEST(PromotionMarkCompactOldToShared) {
   }
 
   v8_flags.shared_string_table = true;
-  v8_flags.manual_evacuation_candidates_selection = true;
+  ManualGCScope manual_gc_scope;
+  heap::ManualEvacuationCandidatesSelectionScope
+      manual_evacuation_candidate_selection_scope(manual_gc_scope);
 
   MultiClientIsolateTest test;
   Isolate* i_isolate = test.i_main_isolate();
   Factory* factory = i_isolate->factory();
   Heap* heap = i_isolate->heap();
-  ManualGCScope manual_gc(i_isolate);
 
   const char raw_one_byte[] = "foo";
 
@@ -1052,13 +1057,14 @@ UNINITIALIZED_TEST(PagePromotionRecordingOldToShared) {
   if (v8_flags.stress_concurrent_allocation) return;
 
   v8_flags.shared_string_table = true;
-  v8_flags.manual_evacuation_candidates_selection = true;
+  ManualGCScope manual_gc_scope;
+  heap::ManualEvacuationCandidatesSelectionScope
+      manual_evacuation_candidate_selection_scope(manual_gc_scope);
 
   MultiClientIsolateTest test;
   Isolate* i_isolate = test.i_main_isolate();
   Factory* factory = i_isolate->factory();
   Heap* heap = i_isolate->heap();
-  ManualGCScope manual_gc(i_isolate);
 
   const char raw_one_byte[] = "foo";
 
@@ -1082,7 +1088,7 @@ UNINITIALIZED_TEST(PagePromotionRecordingOldToShared) {
 
     young_object->set(0, *shared_string);
 
-    CcTest::CollectGarbage(OLD_SPACE, i_isolate);
+    heap::EmptyNewSpaceUsingGC(heap);
 
     // Object should get promoted using page promotion, so address should remain
     // the same.
@@ -1129,7 +1135,7 @@ UNINITIALIZED_TEST(InternalizedSharedStringsTransitionDuringGC) {
     }
 
     // Trigger garbage collection on the shared isolate.
-    CcTest::CollectSharedGarbage(i_isolate);
+    heap::CollectSharedGarbage(i_isolate->heap());
 
     // Check that GC cleared the forwarding table.
     CHECK_EQ(i_isolate->string_forwarding_table()->size(), 0);
@@ -1472,7 +1478,7 @@ UNINITIALIZED_TEST(ExternalizeAndInternalizeMissSharedString) {
   Handle<String> one_byte_intern = factory1->InternalizeString(shared_one_byte);
   CHECK_EQ(*one_byte_intern, *shared_one_byte);
   CHECK(shared_one_byte->IsInternalizedString());
-  // Check that we have both, a forwarding index and an accessable hash.
+  // Check that we have both, a forwarding index and an accessible hash.
   CHECK(shared_one_byte->HasExternalForwardingIndex(kAcquireLoad));
   CHECK(shared_one_byte->HasHashCode());
   CHECK_EQ(shared_one_byte->hash(), one_byte_hash);
@@ -1648,7 +1654,7 @@ void CheckStringAndResource(
   }
 
   // Check exact alive resources only if the string has transitioned, otherwise
-  // there can still be mulitple resource instances in the forwarding table.
+  // there can still be multiple resource instances in the forwarding table.
   // Only check no resource is alive if the string is dead.
   const bool check_alive = check_transition || !should_be_alive;
   if (check_alive) {
@@ -2006,7 +2012,7 @@ UNINITIALIZED_TEST(SharedStringInGlobalHandle) {
                                           lh_shared_string);
   gh_shared_string.SetWeak();
 
-  CcTest::CollectGarbage(OLD_SPACE, i_isolate);
+  heap::CollectGarbage(i_isolate->heap(), OLD_SPACE);
 
   CHECK(!gh_shared_string.IsEmpty());
 }
@@ -2046,8 +2052,13 @@ class WorkerIsolateThread : public v8::base::Thread {
       gh_shared_string.SetWeak();
     }
 
-    i_client->heap()->CollectGarbageShared(i_client->main_thread_local_heap(),
-                                           GarbageCollectionReason::kTesting);
+    {
+      // We need to invoke GC without stack, otherwise some objects may survive.
+      DisableConservativeStackScanningScopeForTesting no_stack_scanning(
+          i_client->heap());
+      i_client->heap()->CollectGarbageShared(i_client->main_thread_local_heap(),
+                                             GarbageCollectionReason::kTesting);
+    }
 
     CHECK(gh_shared_string.IsEmpty());
     client->Dispose();
@@ -2070,22 +2081,17 @@ UNINITIALIZED_TEST(SharedStringInClientGlobalHandle) {
   v8_flags.shared_string_table = true;
 
   MultiClientIsolateTest test;
-  {
-    DisableConservativeStackScanningScopeForTesting no_stack_scanning(
-        test.i_main_isolate()->heap());
+  std::atomic<bool> done = false;
+  WorkerIsolateThread thread("worker", &test, &done);
+  CHECK(thread.Start());
 
-    std::atomic<bool> done = false;
-    WorkerIsolateThread thread("worker", &test, &done);
-    CHECK(thread.Start());
-
-    while (!done) {
-      v8::platform::PumpMessageLoop(
-          i::V8::GetCurrentPlatform(), test.main_isolate(),
-          v8::platform::MessageLoopBehavior::kWaitForWork);
-    }
-
-    thread.Join();
+  while (!done) {
+    v8::platform::PumpMessageLoop(
+        i::V8::GetCurrentPlatform(), test.main_isolate(),
+        v8::platform::MessageLoopBehavior::kWaitForWork);
   }
+
+  thread.Join();
 }
 
 class ClientIsolateThreadForPagePromotions : public v8::base::Thread {
@@ -2125,8 +2131,7 @@ class ClientIsolateThreadForPagePromotions : public v8::base::Thread {
       CHECK(heap->SharedHeapContains(**shared_string_));
       young_object->set(0, **shared_string_);
 
-      CcTest::CollectGarbage(NEW_SPACE, i_client);
-      CcTest::CollectGarbage(NEW_SPACE, i_client);
+      heap::EmptyNewSpaceUsingGC(heap);
       heap->CompleteSweepingFull();
 
       // Object should get promoted using page promotion, so address should
@@ -2164,7 +2169,9 @@ UNINITIALIZED_TEST(RegisterOldToSharedForPromotedPageFromClient) {
 
   v8_flags.stress_concurrent_allocation = false;  // For SealCurrentObjects.
   v8_flags.shared_string_table = true;
-  v8_flags.manual_evacuation_candidates_selection = true;
+  ManualGCScope manual_gc_scope;
+  heap::ManualEvacuationCandidatesSelectionScope
+      manual_evacuation_candidate_selection_scope(manual_gc_scope);
 
   MultiClientIsolateTest test;
   std::atomic<bool> done = false;
@@ -2202,7 +2209,9 @@ UNINITIALIZED_TEST(
 
   v8_flags.stress_concurrent_allocation = false;  // For SealCurrentObjects.
   v8_flags.shared_string_table = true;
-  v8_flags.manual_evacuation_candidates_selection = true;
+  ManualGCScope manual_gc_scope;
+  heap::ManualEvacuationCandidatesSelectionScope
+      manual_evacuation_candidate_selection_scope(manual_gc_scope);
   v8_flags.incremental_marking_task =
       false;  // Prevent the incremental GC from finishing and finalizing in a
               // task.
@@ -2224,7 +2233,6 @@ UNINITIALIZED_TEST(
 
   // Start an incremental shared GC such that shared_string resides on an
   // evacuation candidate.
-  ManualGCScope manual_gc_scope(shared_isolate);
   heap::ForceEvacuationCandidate(Page::FromHeapObject(*shared_string));
   i::IncrementalMarking* marking = shared_heap->incremental_marking();
   CHECK(marking->IsStopped());
@@ -2294,8 +2302,7 @@ class ClientIsolateThreadForRetainingByRememberedSet : public v8::base::Thread {
       CHECK(heap->SharedHeapContains(*shared_string));
       young_object->set(0, *shared_string);
 
-      CcTest::CollectGarbage(NEW_SPACE, i_client);
-      CcTest::CollectGarbage(NEW_SPACE, i_client);
+      heap::EmptyNewSpaceUsingGC(heap);
 
       // Object should get promoted using page promotion, so address should
       // remain the same.
@@ -2360,7 +2367,9 @@ UNINITIALIZED_TEST(SharedObjectRetainedByClientRememberedSet) {
 
   v8_flags.stress_concurrent_allocation = false;  // For SealCurrentObjects.
   v8_flags.shared_string_table = true;
-  v8_flags.manual_evacuation_candidates_selection = true;
+  ManualGCScope manual_gc_scope;
+  heap::ManualEvacuationCandidatesSelectionScope
+      manual_evacuation_candidate_selection_scope(manual_gc_scope);
 
   MultiClientIsolateTest test;
   std::atomic<bool> done = false;
@@ -2370,6 +2379,7 @@ UNINITIALIZED_TEST(SharedObjectRetainedByClientRememberedSet) {
   Isolate* shared_isolate = i_isolate->shared_space_isolate();
   Heap* shared_heap = shared_isolate->heap();
 
+  // We need to invoke GC without stack, otherwise some objects may survive.
   DisableConservativeStackScanningScopeForTesting no_stack_scanning(
       shared_heap);
 
@@ -2411,7 +2421,7 @@ UNINITIALIZED_TEST(SharedObjectRetainedByClientRememberedSet) {
   // slot in the client isolate.
   CHECK(!live_weak_ref.IsEmpty());
   CHECK(!dead_weak_ref.IsEmpty());
-  CcTest::CollectSharedGarbage(i_isolate);
+  heap::CollectSharedGarbage(i_isolate->heap());
   CHECK(!live_weak_ref.IsEmpty());
   CHECK(dead_weak_ref.IsEmpty());
 
@@ -2517,7 +2527,7 @@ UNINITIALIZED_TEST(Regress1424955) {
   if (v8_flags.verify_heap) return;
   v8_flags.shared_string_table = true;
 
-  ManualGCScope maunal_gc_scope;
+  ManualGCScope manual_gc_scope;
 
   MultiClientIsolateTest test;
   std::atomic<bool> done = false;
@@ -2533,7 +2543,7 @@ UNINITIALIZED_TEST(Regress1424955) {
 
   // Client isolate waits for this isolate to request a global safepoint and
   // then triggers a minor GC.
-  CcTest::CollectSharedGarbage(test.i_main_isolate());
+  heap::CollectSharedGarbage(test.i_main_isolate()->heap());
   done = false;
   V8::GetCurrentPlatform()
       ->GetForegroundTaskRunner(thread.isolate())

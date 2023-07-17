@@ -1900,7 +1900,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // Keep track of the last Call's position to ensure that safepoint can get the
   // correct information even if there is a trampoline immediately after the
   // Call.
-  byte* pc_for_safepoint_;
+  uint8_t* pc_for_safepoint_;
 
   RegList scratch_register_list_;
 
@@ -1922,11 +1922,17 @@ class EnsureSpace {
 
 class V8_EXPORT_PRIVATE V8_NODISCARD UseScratchRegisterScope {
  public:
-  explicit UseScratchRegisterScope(Assembler* assembler);
-  ~UseScratchRegisterScope();
+  explicit UseScratchRegisterScope(Assembler* assembler)
+      : available_(assembler->GetScratchRegisterList()),
+        old_available_(*available_) {}
 
-  Register Acquire();
-  bool hasAvailable() const;
+  ~UseScratchRegisterScope() { *available_ = old_available_; }
+
+  Register Acquire() {
+    return available_->PopFirst();
+  }
+
+  bool hasAvailable() const { return !available_->is_empty(); }
 
   void Include(const RegList& list) { *available_ |= list; }
   void Exclude(const RegList& list) { available_->clear(list); }

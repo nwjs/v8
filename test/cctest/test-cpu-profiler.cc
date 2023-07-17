@@ -1429,7 +1429,7 @@ TEST(FunctionCallSample) {
 
   // Collect garbage that might have be generated while installing
   // extensions.
-  CcTest::CollectAllGarbage();
+  heap::CollectAllGarbage(CcTest::heap());
 
   CompileRun(call_function_test_source);
   v8::Local<v8::Function> function = GetFunction(env.local(), "start");
@@ -4163,7 +4163,9 @@ TEST(EmbedderStatePropagateNativeContextMove) {
     return;
   }
   i::v8_flags.allow_natives_syntax = true;
-  i::v8_flags.manual_evacuation_candidates_selection = true;
+  ManualGCScope manual_gc_scope;
+  heap::ManualEvacuationCandidatesSelectionScope
+      manual_evacuation_candidate_selection_scope(manual_gc_scope);
   LocalContext execution_env;
   i::HandleScope scope(CcTest::i_isolate());
 
@@ -4201,7 +4203,7 @@ TEST(EmbedderStatePropagateNativeContextMove) {
                   isolate->heap());
               i::heap::ForceEvacuationCandidate(
                   i::Page::FromHeapObject(isolate->raw_native_context()));
-              CcTest::CollectAllGarbage();
+              heap::CollectAllGarbage(isolate->heap());
             });
     v8::Local<v8::Function> move_func =
         move_func_template->GetFunction(execution_env.local()).ToLocalChecked();
@@ -4238,7 +4240,9 @@ TEST(EmbedderStatePropagateNativeContextMove) {
 TEST(ContextFilterMovedNativeContext) {
   if (i::v8_flags.enable_third_party_heap) return;
   i::v8_flags.allow_natives_syntax = true;
-  i::v8_flags.manual_evacuation_candidates_selection = true;
+  ManualGCScope manual_gc_scope;
+  heap::ManualEvacuationCandidatesSelectionScope
+      manual_evacuation_candidate_selection_scope(manual_gc_scope);
   LocalContext env;
   i::HandleScope scope(CcTest::i_isolate());
 
@@ -4262,7 +4266,7 @@ TEST(ContextFilterMovedNativeContext) {
                   reinterpret_cast<i::Isolate*>(info.GetIsolate());
               i::heap::ForceEvacuationCandidate(
                   i::Page::FromHeapObject(isolate->raw_native_context()));
-              CcTest::CollectAllGarbage();
+              heap::CollectAllGarbage(isolate->heap());
             });
     v8::Local<v8::Function> move_func =
         move_func_template->GetFunction(env.local()).ToLocalChecked();
@@ -4667,15 +4671,12 @@ TEST(BytecodeFlushEventsEagerLogging) {
     CHECK(instruction_stream_map->FindEntry(bytecode_start));
 
     // The code will survive at least two GCs.
-    CcTest::CollectAllGarbage();
-    CcTest::CollectAllGarbage();
+    heap::CollectAllGarbage(CcTest::heap());
+    heap::CollectAllGarbage(CcTest::heap());
     CHECK(function->shared().is_compiled());
 
-    // Simulate several GCs that use full marking.
-    const int kAgingThreshold = 6;
-    for (int i = 0; i < kAgingThreshold; i++) {
-      CcTest::CollectAllGarbage();
-    }
+    function->shared().GetBytecodeArray(i_isolate).EnsureOldForTesting();
+    heap::CollectAllGarbage(CcTest::heap());
 
     // foo should no longer be in the compilation cache
     CHECK(!function->shared().is_compiled());
@@ -4724,7 +4725,7 @@ TEST(ClearUnusedWithEagerLogging) {
   // given two functions.
   isolate->compilation_cache()->Clear();
 
-  CcTest::CollectAllGarbage();
+  heap::CollectAllGarbage(CcTest::heap());
 
   // Verify that the InstructionStreamMap's size is unchanged post-GC.
   CHECK_EQ(instruction_stream_map->size(), initial_size);

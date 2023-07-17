@@ -208,13 +208,13 @@ FixedArray Code::unchecked_deoptimization_data() const {
           *this));
 }
 
-byte* Code::relocation_start() const {
+uint8_t* Code::relocation_start() const {
   return V8_LIKELY(has_instruction_stream())
              ? instruction_stream().relocation_start()
              : nullptr;
 }
 
-byte* Code::relocation_end() const {
+uint8_t* Code::relocation_end() const {
   return V8_LIKELY(has_instruction_stream())
              ? instruction_stream().relocation_end()
              : nullptr;
@@ -520,14 +520,23 @@ void Code::set_raw_instruction_stream(Object value, WriteBarrierMode mode) {
 }
 
 bool Code::has_instruction_stream() const {
+#if defined(V8_COMPRESS_POINTERS) || !defined(V8_HOST_ARCH_64_BIT)
   const uint32_t value = ReadField<uint32_t>(kInstructionStreamOffset);
+#else
+  const uint64_t value = ReadField<uint64_t>(kInstructionStreamOffset);
+#endif
   SLOW_DCHECK(value == 0 || !InReadOnlySpace());
   return value != 0;
 }
 
 bool Code::has_instruction_stream(RelaxedLoadTag tag) const {
+#if defined(V8_COMPRESS_POINTERS) || !defined(V8_HOST_ARCH_64_BIT)
   const uint32_t value =
       RELAXED_READ_INT32_FIELD(*this, kInstructionStreamOffset);
+#else
+  const uint64_t value =
+      RELAXED_READ_INT64_FIELD(*this, kInstructionStreamOffset);
+#endif
   SLOW_DCHECK(value == 0 || !InReadOnlySpace());
   return value != 0;
 }

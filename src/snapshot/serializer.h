@@ -183,7 +183,7 @@ class Serializer : public SerializerDeserializer {
   Serializer(const Serializer&) = delete;
   Serializer& operator=(const Serializer&) = delete;
 
-  const std::vector<byte>* Payload() const { return sink_.data(); }
+  const std::vector<uint8_t>* Payload() const { return sink_.data(); }
 
   bool ReferenceMapContains(Handle<HeapObject> o) {
     return reference_map()->LookupReference(o) != nullptr;
@@ -395,7 +395,7 @@ class Serializer : public SerializerDeserializer {
   ExternalReferenceEncoder external_reference_encoder_;
   RootIndexMap root_index_map_;
   std::unique_ptr<CodeAddressMap> code_address_map_;
-  std::vector<byte> code_buffer_;
+  std::vector<uint8_t> code_buffer_;
   GlobalHandleVector<HeapObject>
       deferred_objects_;  // To handle stack overflow.
   int num_back_refs_ = 0;
@@ -469,7 +469,8 @@ class Serializer::ObjectSerializer : public ObjectVisitor {
                      ObjectSlot end) override;
   void VisitPointers(HeapObject host, MaybeObjectSlot start,
                      MaybeObjectSlot end) override;
-  void VisitCodePointer(Code host, CodeObjectSlot slot) override;
+  void VisitInstructionStreamPointer(Code host,
+                                     InstructionStreamSlot slot) override;
   void VisitEmbeddedPointer(InstructionStream host, RelocInfo* target) override;
   void VisitExternalReference(InstructionStream host,
                               RelocInfo* rinfo) override;
@@ -484,8 +485,6 @@ class Serializer::ObjectSerializer : public ObjectVisitor {
   Isolate* isolate() { return isolate_; }
 
  private:
-  class RelocInfoObjectPreSerializer;
-
   void SerializePrologue(SnapshotSpace space, int size, Map map);
 
   // This function outputs or skips the raw data between the last pointer and
@@ -494,7 +493,6 @@ class Serializer::ObjectSerializer : public ObjectVisitor {
   void OutputExternalReference(Address target, int target_size, bool sandboxify,
                                ExternalPointerTag tag);
   void OutputRawData(Address up_to);
-  void SerializeInstructionStream(Map map, int size);
   uint32_t SerializeBackingStore(void* backing_store, int32_t byte_length,
                                  Maybe<int32_t> max_byte_length);
   void SerializeJSTypedArray();

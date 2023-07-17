@@ -133,6 +133,10 @@ MaybeHandle<Code> Factory::CodeBuilder::BuildInternal(
   Handle<ByteArray> reloc_info =
       NewByteArray(code_desc_.reloc_size, AllocationType::kOld);
 
+  CodePageMemoryModificationScopeForPerf memory_write_scope(
+      "Temporary performance optimization to prevent frequent permission "
+      "switching.");
+
   // Basic block profiling data for builtins is stored in the JS heap rather
   // than in separately-allocated C++ objects. Allocate that data now if
   // appropriate.
@@ -152,7 +156,6 @@ MaybeHandle<Code> Factory::CodeBuilder::BuildInternal(
   Handle<Code> code;
   {
     static_assert(InstructionStream::kOnHeapBodyIsContiguous);
-    CodePageCollectionMemoryModificationScope code_allocation(isolate_->heap());
 
     Handle<InstructionStream> istream;
     if (!NewInstructionStream(retry_allocation_or_fail).ToHandle(&istream)) {
@@ -162,7 +165,7 @@ MaybeHandle<Code> Factory::CodeBuilder::BuildInternal(
     {
       DisallowGarbageCollection no_gc;
       InstructionStream raw_istream = *istream;
-
+      CodePageMemoryModificationScope memory_modification_scope(raw_istream);
       raw_istream.set_body_size(code_desc_.instruction_size() +
                                 code_desc_.metadata_size());
       raw_istream.initialize_code_to_smi_zero(kReleaseStore);
@@ -221,18 +224,22 @@ MaybeHandle<Code> Factory::CodeBuilder::BuildInternal(
                 handle(on_heap_profiler_data->counts(), isolate_));
       }
 
-      // Migrate generated code.
-      // The generated code can contain embedded objects (typically from
-      // handles) in a pointer-to-tagged-value format (i.e. with indirection
-      // like a handle) that are dereferenced during the copy to point directly
-      // to the actual heap objects. These pointers can include references to
-      // the code object itself, through the self_reference parameter.
-      code->CopyFromNoFlush(*reloc_info, isolate_->heap(), code_desc_);
+      {
+        CodePageMemoryModificationScope memory_modification_scope(raw_istream);
+        // Migrate generated code.
+        // The generated code can contain embedded objects (typically from
+        // handles) in a pointer-to-tagged-value format (i.e. with indirection
+        // like a handle) that are dereferenced during the copy to point
+        // directly to the actual heap objects. These pointers can include
+        // references to the code object itself, through the self_reference
+        // parameter.
+        code->CopyFromNoFlush(*reloc_info, isolate_->heap(), code_desc_);
 
-      // Now that the InstructionStream's body is fully initialized and
-      // relocated, publish its code pointer, effectively enabling RelocInfo
-      // iteration. See InstructionStream::BodyDescriptor::IterateBody.
-      raw_istream.set_code(*code, kReleaseStore);
+        // Now that the InstructionStream's body is fully initialized and
+        // relocated, publish its code pointer, effectively enabling RelocInfo
+        // iteration. See InstructionStream::BodyDescriptor::IterateBody.
+        raw_istream.set_code(*code, kReleaseStore);
+      }
 
 #ifdef VERIFY_HEAP
       if (v8_flags.verify_heap) {
@@ -288,8 +295,12 @@ MaybeHandle<InstructionStream> Factory::CodeBuilder::AllocateInstructionStream(
   // The code object has not been fully initialized yet.  We rely on the
   // fact that no allocation will happen from this point on.
   DisallowGarbageCollection no_gc;
-  result.set_map_after_allocation(
-      *isolate_->factory()->instruction_stream_map(), SKIP_WRITE_BARRIER);
+  {
+    CodePageMemoryModificationScope memory_modification_scope(
+        BasicMemoryChunk::FromHeapObject(result));
+    result.set_map_after_allocation(
+        *isolate_->factory()->instruction_stream_map(), SKIP_WRITE_BARRIER);
+  }
   Handle<InstructionStream> istream =
       handle(InstructionStream::cast(result), isolate_);
   DCHECK(IsAligned(istream->instruction_start(), kCodeAlignment));
@@ -313,8 +324,13 @@ Factory::CodeBuilder::AllocateConcurrentSparkplugInstructionStream(
   // The code object has not been fully initialized yet.  We rely on the
   // fact that no allocation will happen from this point on.
   DisallowGarbageCollection no_gc;
-  result.set_map_after_allocation(
-      *local_isolate_->factory()->instruction_stream_map(), SKIP_WRITE_BARRIER);
+  {
+    CodePageMemoryModificationScope memory_modification_scope(
+        BasicMemoryChunk::FromHeapObject(result));
+    result.set_map_after_allocation(
+        *local_isolate_->factory()->instruction_stream_map(),
+        SKIP_WRITE_BARRIER);
+  }
   Handle<InstructionStream> istream =
       handle(InstructionStream::cast(result), local_isolate_);
   DCHECK(IsAligned(istream->instruction_start(), kCodeAlignment));
@@ -416,6 +432,11 @@ Handle<EnumCache> Factory::NewEnumCache(Handle<FixedArray> keys,
   DisallowGarbageCollection no_gc;
   result.set_keys(*keys);
   result.set_indices(*indices);
+  return handle(result, isolate());
+}
+
+Handle<Tuple2> Factory::NewTuple2Uninitialized(AllocationType allocation) {
+  auto result = NewStructInternal<Tuple2>(TUPLE2_TYPE, allocation);
   return handle(result, isolate());
 }
 
@@ -621,7 +642,7 @@ Handle<PropertyDescriptorObject> Factory::NewPropertyDescriptorObject() {
       PROPERTY_DESCRIPTOR_OBJECT_TYPE, AllocationType::kYoung);
   DisallowGarbageCollection no_gc;
   object.set_flags(0);
-  Oddball the_hole = read_only_roots().the_hole_value();
+  Hole the_hole = read_only_roots().the_hole_value();
   object.set_value(the_hole, SKIP_WRITE_BARRIER);
   object.set_get(the_hole, SKIP_WRITE_BARRIER);
   object.set_set(the_hole, SKIP_WRITE_BARRIER);
@@ -650,8 +671,7 @@ Handle<SwissNameDictionary> Factory::CreateCanonicalEmptySwissNameDictionary() {
 }
 
 // Internalized strings are created in the old generation (data space).
-Handle<String> Factory::InternalizeUtf8String(
-    const base::Vector<const char>& string) {
+Handle<String> Factory::InternalizeUtf8String(base::Vector<const char> string) {
   base::Vector<const uint8_t> utf8_data =
       base::Vector<const uint8_t>::cast(string);
   Utf8Decoder decoder(utf8_data);
@@ -773,8 +793,8 @@ MaybeHandle<String> NewStringFromUtf8Variant(Isolate* isolate,
 }  // namespace
 
 MaybeHandle<String> Factory::NewStringFromUtf8(
-    const base::Vector<const uint8_t>& string,
-    unibrow::Utf8Variant utf8_variant, AllocationType allocation) {
+    base::Vector<const uint8_t> string, unibrow::Utf8Variant utf8_variant,
+    AllocationType allocation) {
   if (string.size() > kMaxInt) {
     // The Utf8Decode can't handle longer inputs, and we couldn't create
     // strings from them anyway.
@@ -785,8 +805,8 @@ MaybeHandle<String> Factory::NewStringFromUtf8(
                                   allocation);
 }
 
-MaybeHandle<String> Factory::NewStringFromUtf8(
-    const base::Vector<const char>& string, AllocationType allocation) {
+MaybeHandle<String> Factory::NewStringFromUtf8(base::Vector<const char> string,
+                                               AllocationType allocation) {
   return NewStringFromUtf8(base::Vector<const uint8_t>::cast(string),
                            unibrow::Utf8Variant::kLossyUtf8, allocation);
 }
@@ -829,14 +849,14 @@ namespace {
 struct Wtf16Decoder {
   int length_;
   bool is_one_byte_;
-  explicit Wtf16Decoder(const base::Vector<const uint16_t>& data)
+  explicit Wtf16Decoder(base::Vector<const uint16_t> data)
       : length_(data.length()),
         is_one_byte_(String::IsOneByte(data.begin(), length_)) {}
   bool is_invalid() const { return false; }
   bool is_one_byte() const { return is_one_byte_; }
   int utf16_length() const { return length_; }
   template <typename Char>
-  void Decode(Char* out, const base::Vector<const uint16_t>& data) {
+  void Decode(Char* out, base::Vector<const uint16_t> data) {
     CopyChars(out, data.begin(), length_);
   }
 };
@@ -939,7 +959,7 @@ MaybeHandle<String> Factory::NewStringFromTwoByte(const base::uc16* string,
 }
 
 MaybeHandle<String> Factory::NewStringFromTwoByte(
-    const base::Vector<const base::uc16>& string, AllocationType allocation) {
+    base::Vector<const base::uc16> string, AllocationType allocation) {
   return NewStringFromTwoByte(string.begin(), string.length(), allocation);
 }
 
@@ -951,7 +971,7 @@ MaybeHandle<String> Factory::NewStringFromTwoByte(
 
 #if V8_ENABLE_WEBASSEMBLY
 MaybeHandle<String> Factory::NewStringFromTwoByteLittleEndian(
-    const base::Vector<const base::uc16>& str, AllocationType allocation) {
+    base::Vector<const base::uc16> str, AllocationType allocation) {
 #if defined(V8_TARGET_LITTLE_ENDIAN)
   return NewStringFromTwoByte(str, allocation);
 #elif defined(V8_TARGET_BIG_ENDIAN)
@@ -2063,6 +2083,7 @@ Handle<Map> Factory::NewMap(InstanceType type, int instance_size,
                 V8HeapCompressionScheme::CompressObject(result.ptr()) >
                     InstanceTypeChecker::kNonJsReceiverMapLimit);
 #endif
+  isolate()->counters()->maps_created()->Increment();
   return handle(InitializeMap(Map::cast(result), type, instance_size,
                               elements_kind, inobject_properties, roots),
                 isolate());
@@ -2876,18 +2897,22 @@ Handle<FixedArrayBase> Factory::NewJSArrayStorage(
   DCHECK_GT(capacity, 0);
   Handle<FixedArrayBase> elms;
   if (IsDoubleElementsKind(elements_kind)) {
-    if (mode == DONT_INITIALIZE_ARRAY_ELEMENTS) {
+    if (mode == ArrayStorageAllocationMode::DONT_INITIALIZE_ARRAY_ELEMENTS) {
       elms = NewFixedDoubleArray(capacity);
     } else {
-      DCHECK(mode == INITIALIZE_ARRAY_ELEMENTS_WITH_HOLE);
+      DCHECK_EQ(
+          mode,
+          ArrayStorageAllocationMode::INITIALIZE_ARRAY_ELEMENTS_WITH_HOLE);
       elms = NewFixedDoubleArrayWithHoles(capacity);
     }
   } else {
     DCHECK(IsSmiOrObjectElementsKind(elements_kind));
-    if (mode == DONT_INITIALIZE_ARRAY_ELEMENTS) {
+    if (mode == ArrayStorageAllocationMode::DONT_INITIALIZE_ARRAY_ELEMENTS) {
       elms = NewFixedArray(capacity);
     } else {
-      DCHECK(mode == INITIALIZE_ARRAY_ELEMENTS_WITH_HOLE);
+      DCHECK_EQ(
+          mode,
+          ArrayStorageAllocationMode::INITIALIZE_ARRAY_ELEMENTS_WITH_HOLE);
       elms = NewFixedArrayWithHoles(capacity);
     }
   }
@@ -3791,7 +3816,16 @@ Handle<Map> Factory::CreateSloppyFunctionMap(
   }
   Handle<JSFunction> empty_function;
   if (maybe_empty_function.ToHandle(&empty_function)) {
+    // Temporarily set constructor to empty function to calm down map verifier.
+    map->SetConstructor(*empty_function);
     Map::SetPrototype(isolate(), map, empty_function);
+  } else {
+    // |maybe_empty_function| is allowed to be empty only during empty function
+    // creation.
+    DCHECK(isolate()
+               ->raw_native_context()
+               .get(Context::EMPTY_FUNCTION_INDEX)
+               .IsUndefined());
   }
 
   //
@@ -3880,6 +3914,8 @@ Handle<Map> Factory::CreateStrictFunctionMap(
     raw_map.set_has_prototype_slot(has_prototype);
     raw_map.set_is_constructor(has_prototype);
     raw_map.set_is_callable(true);
+    // Temporarily set constructor to empty function to calm down map verifier.
+    raw_map.SetConstructor(*empty_function);
   }
   Map::SetPrototype(isolate(), map, empty_function);
 
@@ -3944,6 +3980,8 @@ Handle<Map> Factory::CreateClassFunctionMap(Handle<JSFunction> empty_function) {
     raw_map.set_is_constructor(true);
     raw_map.set_is_prototype_map(true);
     raw_map.set_is_callable(true);
+    // Temporarily set constructor to empty function to calm down map verifier.
+    raw_map.SetConstructor(*empty_function);
   }
   Map::SetPrototype(isolate(), map, empty_function);
 

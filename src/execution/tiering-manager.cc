@@ -169,7 +169,8 @@ int InterruptBudgetFor(base::Optional<CodeKind> code_kind,
 }  // namespace
 
 // static
-int TieringManager::InterruptBudgetFor(Isolate* isolate, JSFunction function) {
+int TieringManager::InterruptBudgetFor(Isolate* isolate, JSFunction function,
+                                       bool deoptimize) {
   DCHECK(function.shared().is_compiled());
   const int bytecode_length =
       function.shared().GetBytecodeArray(isolate).length();
@@ -180,8 +181,11 @@ int TieringManager::InterruptBudgetFor(Isolate* isolate, JSFunction function) {
       // operation for forward jump.
       return INT_MAX / 2;
     }
-    return ::i::InterruptBudgetFor(function.GetActiveTier(),
-                                   function.tiering_state(), bytecode_length);
+    base::Optional<CodeKind> active_tier =
+        deoptimize ? CodeKind::INTERPRETED_FUNCTION : function.GetActiveTier();
+    TieringState tiering_state =
+        deoptimize ? TieringState::kNone : function.tiering_state();
+    return ::i::InterruptBudgetFor(active_tier, tiering_state, bytecode_length);
   }
 
   DCHECK(!function.has_feedback_vector());
@@ -279,9 +283,8 @@ void TieringManager::MaybeOptimizeFrame(JSFunction function,
   // We might be stuck in a baseline frame that wants to tier up to Maglev, but
   // is in a loop, and can't OSR, because Maglev doesn't have OSR. Allow it to
   // skip over Maglev by re-checking ShouldOptimize as if we were in Maglev.
-  // TODO(v8:7700): Remove this when Maglev can OSR.
-  static_assert(!CodeKindCanOSR(CodeKind::MAGLEV));
-  if (d.should_optimize() && d.code_kind == CodeKind::MAGLEV) {
+  if (!v8_flags.maglev_osr && d.should_optimize() &&
+      d.code_kind == CodeKind::MAGLEV) {
     bool is_marked_for_maglev_optimization =
         IsRequestMaglev(tiering_state) ||
         function.HasAvailableCodeKind(CodeKind::MAGLEV);

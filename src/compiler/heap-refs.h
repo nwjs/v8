@@ -72,7 +72,6 @@ enum class OddballType : uint8_t {
   kBoolean,  // True or False.
   kUndefined,
   kNull,
-  kHole,
   kUninitialized,
   kOther  // Oddball, but none of the above.
 };
@@ -202,6 +201,8 @@ struct ref_traits<Object> {
 // type, use HeapObjectRef.
 template <>
 struct ref_traits<Oddball> : public ref_traits<HeapObject> {};
+template <>
+struct ref_traits<Hole> : public ref_traits<HeapObject> {};
 template <>
 struct ref_traits<EnumCache> : public ref_traits<HeapObject> {};
 template <>
@@ -346,8 +347,9 @@ class V8_EXPORT_PRIVATE ObjectRef {
 #undef HEAP_AS_METHOD_DECL
 
   bool IsNull() const;
-  bool IsNullOrUndefined(JSHeapBroker* broker) const;
-  bool IsTheHole(JSHeapBroker* broker) const;
+  bool IsUndefined() const;
+  bool IsTheHole() const;
+  bool IsNullOrUndefined() const;
 
   base::Optional<bool> TryGetBooleanValue(JSHeapBroker* broker) const;
   Maybe<double> OddballToNumber(JSHeapBroker* broker) const;
@@ -811,6 +813,7 @@ class V8_EXPORT_PRIVATE MapRef : public HeapObjectRef {
   bool is_undetectable() const;
   bool is_callable() const;
   bool has_indexed_interceptor() const;
+  int construction_counter() const;
   bool is_migration_target() const;
   bool supports_fast_array_iteration(JSHeapBroker* broker) const;
   bool supports_fast_array_resize(JSHeapBroker* broker) const;

@@ -31,10 +31,10 @@
 namespace v8 {
 namespace internal {
 
-AlignedCachedData::AlignedCachedData(const byte* data, int length)
+AlignedCachedData::AlignedCachedData(const uint8_t* data, int length)
     : owns_data_(false), rejected_(false), data_(data), length_(length) {
   if (!IsAligned(reinterpret_cast<intptr_t>(data), kPointerAlignment)) {
-    byte* copy = NewArray<byte>(length);
+    uint8_t* copy = NewArray<uint8_t>(length);
     DCHECK(IsAligned(reinterpret_cast<intptr_t>(copy), kPointerAlignment));
     CopyBytes(copy, data, length);
     data_ = copy;
@@ -337,6 +337,11 @@ class StressOffThreadDeserializeThread final : public base::Thread {
 void FinalizeDeserialization(Isolate* isolate,
                              Handle<SharedFunctionInfo> result,
                              const base::ElapsedTimer& timer) {
+  // Devtools can report time in this function as profiler overhead, since none
+  // of the following tasks would need to happen normally.
+  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
+               "V8.FinalizeDeserialization");
+
   const bool log_code_creation = isolate->IsLoggingCodeCreation();
 
   if (V8_UNLIKELY(v8_flags.interpreted_frames_native_stack)) {
@@ -617,7 +622,7 @@ MaybeHandle<SharedFunctionInfo> CodeSerializer::FinishOffThreadDeserialize(
   return scope.CloseAndEscape(result);
 }
 
-SerializedCodeData::SerializedCodeData(const std::vector<byte>* payload,
+SerializedCodeData::SerializedCodeData(const std::vector<uint8_t>* payload,
                                        const CodeSerializer* cs) {
   DisallowGarbageCollection no_gc;
 
@@ -717,16 +722,16 @@ AlignedCachedData* SerializedCodeData::GetScriptData() {
   return result;
 }
 
-base::Vector<const byte> SerializedCodeData::Payload() const {
-  const byte* payload = data_ + kHeaderSize;
+base::Vector<const uint8_t> SerializedCodeData::Payload() const {
+  const uint8_t* payload = data_ + kHeaderSize;
   DCHECK(IsAligned(reinterpret_cast<intptr_t>(payload), kPointerAlignment));
   int length = GetHeaderValue(kPayloadLengthOffset);
   DCHECK_EQ(data_ + size_, payload + length);
-  return base::Vector<const byte>(payload, length);
+  return base::Vector<const uint8_t>(payload, length);
 }
 
 SerializedCodeData::SerializedCodeData(AlignedCachedData* data)
-    : SerializedData(const_cast<byte*>(data->data()), data->length()) {}
+    : SerializedData(const_cast<uint8_t*>(data->data()), data->length()) {}
 
 SerializedCodeData SerializedCodeData::FromCachedData(
     AlignedCachedData* cached_data, uint32_t expected_source_hash,

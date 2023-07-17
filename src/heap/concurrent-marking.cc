@@ -10,6 +10,7 @@
 #include "include/v8config.h"
 #include "src/common/globals.h"
 #include "src/execution/isolate.h"
+#include "src/heap/ephemeron-remembered-set.h"
 #include "src/heap/gc-tracer-inl.h"
 #include "src/heap/gc-tracer.h"
 #include "src/heap/heap-inl.h"
@@ -71,10 +72,11 @@ class YoungGenerationConcurrentMarkingVisitor final
  public:
   YoungGenerationConcurrentMarkingVisitor(
       Heap* heap, MarkingWorklists::Local* worklists_local,
-      MemoryChunkDataMap* memory_chunk_data)
+      MemoryChunkDataMap* memory_chunk_data,
+      EphemeronRememberedSet::TableList::Local* epemeron_table_list_local)
       : YoungGenerationMarkingVisitorBase<
             YoungGenerationConcurrentMarkingVisitor, ConcurrentMarkingState>(
-            heap->isolate(), worklists_local),
+            heap->isolate(), worklists_local, epemeron_table_list_local),
         marking_state_(heap->isolate(), memory_chunk_data) {}
 
   using YoungGenerationMarkingVisitorBase<
@@ -128,18 +130,16 @@ class ConcurrentMarkingVisitor final
     : public MarkingVisitorBase<ConcurrentMarkingVisitor,
                                 ConcurrentMarkingState> {
  public:
-  ConcurrentMarkingVisitor(int task_id,
-                           MarkingWorklists::Local* local_marking_worklists,
-                           WeakObjects::Local* local_weak_objects, Heap* heap,
-                           unsigned mark_compact_epoch,
-                           base::EnumSet<CodeFlushMode> code_flush_mode,
-                           bool embedder_tracing_enabled,
-                           bool should_keep_ages_unchanged,
-                           MemoryChunkDataMap* memory_chunk_data)
+  ConcurrentMarkingVisitor(
+      int task_id, MarkingWorklists::Local* local_marking_worklists,
+      WeakObjects::Local* local_weak_objects, Heap* heap,
+      unsigned mark_compact_epoch, base::EnumSet<CodeFlushMode> code_flush_mode,
+      bool embedder_tracing_enabled, bool should_keep_ages_unchanged,
+      uint16_t code_flushing_increase, MemoryChunkDataMap* memory_chunk_data)
       : MarkingVisitorBase(local_marking_worklists, local_weak_objects, heap,
                            mark_compact_epoch, code_flush_mode,
-                           embedder_tracing_enabled,
-                           should_keep_ages_unchanged),
+                           embedder_tracing_enabled, should_keep_ages_unchanged,
+                           code_flushing_increase),
         marking_state_(heap->isolate(), memory_chunk_data),
         memory_chunk_data_(memory_chunk_data) {}
 
@@ -147,11 +147,6 @@ class ConcurrentMarkingVisitor final
                            ConcurrentMarkingState>::VisitMapPointerIfNeeded;
 
   static constexpr bool EnableConcurrentVisitation() { return true; }
-
-  template <typename T>
-  static V8_INLINE T Cast(HeapObject object) {
-    return T::cast(object);
-  }
 
   // Implements ephemeron semantics: Marks value if key is already reachable.
   // Returns true if value was actually marked.
@@ -202,13 +197,6 @@ class ConcurrentMarkingVisitor final
   friend class MarkingVisitorBase<ConcurrentMarkingVisitor,
                                   ConcurrentMarkingState>;
 };
-
-// The Deserializer changes the map from StrongDescriptorArray to
-// DescriptorArray
-template <>
-StrongDescriptorArray ConcurrentMarkingVisitor::Cast(HeapObject object) {
-  return StrongDescriptorArray::unchecked_cast(DescriptorArray::cast(object));
-}
 
 class ConcurrentMarking::JobTaskMajor : public v8::JobTask {
  public:
@@ -320,7 +308,8 @@ void ConcurrentMarking::RunMajor(JobDelegate* delegate,
   ConcurrentMarkingVisitor visitor(
       task_id, &local_marking_worklists, &local_weak_objects, heap_,
       mark_compact_epoch, code_flush_mode, heap_->cpp_heap(),
-      should_keep_ages_unchanged, &task_state->memory_chunk_data);
+      should_keep_ages_unchanged, heap_->tracer()->CodeFlushingIncrease(),
+      &task_state->memory_chunk_data);
   NativeContextInferrer& native_context_inferrer =
       task_state->native_context_inferrer;
   NativeContextStats& native_context_stats = task_state->native_context_stats;
@@ -442,10 +431,13 @@ void ConcurrentMarking::RunMinor(JobDelegate* delegate) {
   int kObjectsUntilInterruptCheck = 1000;
   uint8_t task_id = delegate->GetTaskId() + 1;
   TaskState* task_state = task_state_[task_id].get();
+  EphemeronRememberedSet::TableList::Local local_ephemeron_table_list(
+      *heap_->minor_mark_compact_collector()->ephemeron_table_list());
   MarkingWorklists::Local local_marking_worklists(
       marking_worklists_, MarkingWorklists::Local::kNoCppMarkingState);
   YoungGenerationConcurrentMarkingVisitor visitor(
-      heap_, &local_marking_worklists, &task_state->memory_chunk_data);
+      heap_, &local_marking_worklists, &task_state->memory_chunk_data,
+      &local_ephemeron_table_list);
   double time_ms;
   size_t marked_bytes = 0;
   Isolate* isolate = heap_->isolate();
@@ -541,6 +533,10 @@ void ConcurrentMarking::ScheduleJob(GarbageCollector garbage_collector,
   DCHECK(v8_flags.parallel_marking || v8_flags.concurrent_marking);
   DCHECK(!heap_->IsTearingDown());
   DCHECK(IsStopped());
+
+  if (v8_flags.concurrent_marking_high_priority_threads) {
+    priority = TaskPriority::kUserBlocking;
+  }
 
   garbage_collector_ = garbage_collector;
   if (garbage_collector == GarbageCollector::MARK_COMPACTOR) {

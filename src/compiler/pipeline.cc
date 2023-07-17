@@ -70,6 +70,7 @@
 #include "src/compiler/node-observer.h"
 #include "src/compiler/node-origin-table.h"
 #include "src/compiler/osr.h"
+#include "src/compiler/pair-load-store-reducer.h"
 #include "src/compiler/phase.h"
 #include "src/compiler/pipeline-statistics.h"
 #include "src/compiler/redundancy-elimination.h"
@@ -87,14 +88,13 @@
 #include "src/compiler/turboshaft/graph-visualizer.h"
 #include "src/compiler/turboshaft/graph.h"
 #include "src/compiler/turboshaft/index.h"
-#include "src/compiler/turboshaft/late-optimization-phase.h"
 #include "src/compiler/turboshaft/machine-lowering-phase.h"
 #include "src/compiler/turboshaft/optimization-phase.h"
 #include "src/compiler/turboshaft/optimize-phase.h"
 #include "src/compiler/turboshaft/phase.h"
 #include "src/compiler/turboshaft/recreate-schedule-phase.h"
 #include "src/compiler/turboshaft/simplify-tf-loops.h"
-#include "src/compiler/turboshaft/tag-untag-lowering-phase.h"
+#include "src/compiler/turboshaft/store-store-elimination-phase.h"
 #include "src/compiler/turboshaft/tracing.h"
 #include "src/compiler/turboshaft/type-assertions-phase.h"
 #include "src/compiler/turboshaft/type-inference-reducer.h"
@@ -230,11 +230,9 @@ class PipelineData {
                PipelineStatistics* pipeline_statistics,
                SourcePositionTable* source_positions,
                NodeOriginTable* node_origins,
-               const AssemblerOptions& assembler_options,
-               wasm::AssemblerBufferCache* buffer_cache)
+               const AssemblerOptions& assembler_options)
       : isolate_(nullptr),
         wasm_engine_(wasm_engine),
-        assembler_buffer_cache_(buffer_cache),
         allocator_(wasm_engine->allocator()),
         info_(info),
         debug_name_(info_->GetDebugName()),
@@ -375,14 +373,10 @@ class PipelineData {
   Zone* graph_zone() const { return graph_zone_; }
   Graph* graph() const { return graph_; }
   void set_graph(Graph* graph) { graph_ = graph; }
-  turboshaft::PipelineData* InitializeTurboshaftPipeline() {
-    DCHECK_EQ(turboshaft_data_, base::nullopt);
-    turboshaft_data_.emplace(info_, schedule_, graph_zone_, broker_, isolate_,
-                             source_positions_, node_origins_);
-    return &turboshaft_data_.value();
-  }
-  turboshaft::PipelineData* turboshaft_data() {
-    return turboshaft_data_.has_value() ? &turboshaft_data_.value() : nullptr;
+  turboshaft::PipelineData CreateTurboshaftPipeline() {
+    return turboshaft::PipelineData{info_,        schedule_, graph_zone_,
+                                    broker_,      isolate_,  source_positions_,
+                                    node_origins_};
   }
   SourcePositionTable* source_positions() const { return source_positions_; }
   NodeOriginTable* node_origins() const { return node_origins_; }
@@ -513,7 +507,7 @@ class PipelineData {
     jsgraph_ = nullptr;
     mcgraph_ = nullptr;
     schedule_ = nullptr;
-    if (turboshaft_data_) turboshaft_data_->DeleteGraphZone();
+    DCHECK(!turboshaft::PipelineData::HasScope());
     graph_zone_scope_.Destroy();
   }
 
@@ -597,15 +591,11 @@ class PipelineData {
 
   void InitializeCodeGenerator(Linkage* linkage) {
     DCHECK_NULL(code_generator_);
-    wasm::AssemblerBufferCache* buffer_cache = nullptr;
-#if V8_ENABLE_WEBASSEMBLY
-    buffer_cache = assembler_buffer_cache_;
-#endif  // V8_ENABLE_WEBASSEMBLY
     code_generator_ = new CodeGenerator(
         codegen_zone(), frame(), linkage, sequence(), info(), isolate(),
         osr_helper_, start_source_position_, jump_optimization_info_,
-        assembler_options(), buffer_cache, info_->builtin(),
-        max_unoptimized_frame_height(), max_pushed_argument_count(),
+        assembler_options(), info_->builtin(), max_unoptimized_frame_height(),
+        max_pushed_argument_count(),
         v8_flags.trace_turbo_stack_accesses ? debug_name_.get() : nullptr);
   }
 
@@ -657,7 +647,6 @@ class PipelineData {
   Isolate* const isolate_;
 #if V8_ENABLE_WEBASSEMBLY
   wasm::WasmEngine* const wasm_engine_ = nullptr;
-  wasm::AssemblerBufferCache* assembler_buffer_cache_ = nullptr;
   // The wasm module to be used for inlining wasm functions into JS.
   // The first module wins and inlining of different modules into the same
   // JS function is not supported. This is necessary because the wasm
@@ -734,8 +723,6 @@ class PipelineData {
   const ProfileDataFromFile* profile_data_ = nullptr;
 
   bool has_js_wasm_calls_ = false;
-
-  base::Optional<turboshaft::PipelineData> turboshaft_data_ = base::nullopt;
 };
 
 class PipelineImpl final {
@@ -757,7 +744,7 @@ class PipelineImpl final {
 
   // Substep B.1. Produce a scheduled graph.
   void ComputeScheduledGraph();
-  void InitializeTurboshaftPipeline();
+  turboshaft::PipelineData CreateTurboshaftPipeline();
 
 #if V8_ENABLE_WASM_SIMD256_REVEC
   void Revectorize();
@@ -1368,24 +1355,23 @@ auto PipelineImpl::Run(Args&&... args) {
   if constexpr (Phase::kKind == PhaseKind::kTurbofan) {
     return phase.Run(this->data_, scope.zone(), std::forward<Args>(args)...);
   } else if constexpr (Phase::kKind == PhaseKind::kTurboshaft) {
-    turboshaft::PipelineData* data = this->data_->turboshaft_data();
     using result_t =
-        decltype(phase.Run(data, scope.zone(), std::forward<Args>(args)...));
+        decltype(phase.Run(scope.zone(), std::forward<Args>(args)...));
     CodeTracer* code_tracer = nullptr;
-    if (data->info()->trace_turbo_graph()) {
+    if (turboshaft::PipelineData::Get().info()->trace_turbo_graph()) {
       // NOTE: We must not call `GetCodeTracer` if tracing is not enabled,
       // because it may not yet be initialized then and doing so from the
       // background thread is not threadsafe.
       code_tracer = this->data_->GetCodeTracer();
     }
     if constexpr (std::is_same_v<result_t, void>) {
-      phase.Run(data, scope.zone(), std::forward<Args>(args)...);
-      turboshaft::PrintTurboshaftGraph(data, scope.zone(), code_tracer,
+      phase.Run(scope.zone(), std::forward<Args>(args)...);
+      turboshaft::PrintTurboshaftGraph(scope.zone(), code_tracer,
                                        Phase::phase_name());
       return;
     } else {
-      auto result = phase.Run(data, scope.zone(), std::forward<Args>(args)...);
-      turboshaft::PrintTurboshaftGraph(data, scope.zone(), code_tracer,
+      auto result = phase.Run(scope.zone(), std::forward<Args>(args)...);
+      turboshaft::PrintTurboshaftGraph(scope.zone(), code_tracer,
                                        Phase::phase_name());
       return result;
     }
@@ -2100,9 +2086,14 @@ struct MachineOperatorOptimizationPhase {
     ValueNumberingReducer value_numbering(temp_zone, data->graph()->zone());
     MachineOperatorReducer machine_reducer(&graph_reducer, data->jsgraph(),
                                            signalling_nan_propagation);
+    PairLoadStoreReducer pair_load_store_reducer(
+        &graph_reducer, data->jsgraph(), data->isolate());
 
     AddReducer(data, &graph_reducer, &machine_reducer);
     AddReducer(data, &graph_reducer, &value_numbering);
+    if (data->machine()->SupportsLoadStorePairs()) {
+      AddReducer(data, &graph_reducer, &pair_load_store_reducer);
+    }
     graph_reducer.ReduceGraph();
   }
 };
@@ -2341,11 +2332,16 @@ struct CsaOptimizationPhase {
         &graph_reducer, data->graph(), data->broker(), data->common(),
         data->machine(), temp_zone, BranchSemantics::kMachine);
     ValueNumberingReducer value_numbering(temp_zone, data->graph()->zone());
+    PairLoadStoreReducer pair_load_store_reducer(
+        &graph_reducer, data->jsgraph(), data->isolate());
     AddReducer(data, &graph_reducer, &branch_condition_elimination);
     AddReducer(data, &graph_reducer, &dead_code_elimination);
     AddReducer(data, &graph_reducer, &machine_reducer);
     AddReducer(data, &graph_reducer, &common_reducer);
     AddReducer(data, &graph_reducer, &value_numbering);
+    if (data->machine()->SupportsLoadStorePairs()) {
+      AddReducer(data, &graph_reducer, &pair_load_store_reducer);
+    }
     graph_reducer.ReduceGraph();
   }
 };
@@ -3056,7 +3052,8 @@ bool PipelineImpl::OptimizeGraph(Linkage* linkage) {
     UnparkedScopeIfNeeded scope(data->broker(),
                                 v8_flags.turboshaft_trace_reduction);
 
-    data->InitializeTurboshaftPipeline();
+    turboshaft::PipelineData::Scope turboshaft_pipeline(
+        data->CreateTurboshaftPipeline());
     turboshaft::Tracing::Scope tracing_scope(data->info());
 
     if (base::Optional<BailoutReason> bailout =
@@ -3068,21 +3065,22 @@ bool PipelineImpl::OptimizeGraph(Linkage* linkage) {
 
     Run<turboshaft::MachineLoweringPhase>();
 
-    Run<turboshaft::LateOptimizationPhase>();
+    if (v8_flags.turbo_store_elimination) {
+      Run<turboshaft::StoreStoreEliminationPhase>();
+    }
 
     Run<turboshaft::OptimizePhase>();
 
-    Run<turboshaft::DecompressionOptimizationPhase>();
-
-    Run<turboshaft::TypedOptimizationsPhase>();
+    if (v8_flags.turboshaft_typed_optimizations) {
+      Run<turboshaft::TypedOptimizationsPhase>();
+    }
 
     if (v8_flags.turboshaft_assert_types) {
       Run<turboshaft::TypeAssertionsPhase>();
     }
 
     Run<turboshaft::DeadCodeEliminationPhase>();
-
-    Run<turboshaft::TagUntagLoweringPhase>();
+    Run<turboshaft::DecompressionOptimizationPhase>();
 
     auto [new_graph, new_schedule] =
         Run<turboshaft::RecreateSchedulePhase>(linkage);
@@ -3110,9 +3108,9 @@ int HashGraphForPGO(Graph* graph) {
 
   constexpr NodeId kUnassigned = static_cast<NodeId>(-1);
 
-  constexpr byte kUnvisited = 0;
-  constexpr byte kOnStack = 1;
-  constexpr byte kVisited = 2;
+  constexpr uint8_t kUnvisited = 0;
+  constexpr uint8_t kOnStack = 1;
+  constexpr uint8_t kVisited = 2;
 
   // Do a depth-first post-order traversal of the graph. For every node, hash:
   //
@@ -3124,7 +3122,7 @@ int HashGraphForPGO(Graph* graph) {
   // What's a traversal number? We can't use node IDs because they're not stable
   // build-to-build, so we assign a new number for each node as it is visited.
 
-  ZoneVector<byte> state(graph->NodeCount(), kUnvisited, &local_zone);
+  ZoneVector<uint8_t> state(graph->NodeCount(), kUnvisited, &local_zone);
   ZoneVector<NodeId> traversal_numbers(graph->NodeCount(), kUnassigned,
                                        &local_zone);
   ZoneStack<Node*> stack(&local_zone);
@@ -3329,10 +3327,8 @@ wasm::WasmCompilationResult Pipeline::GenerateCodeForWasmNativeStub(
   wasm::WasmEngine* wasm_engine = wasm::GetWasmEngine();
   ZoneStats zone_stats(wasm_engine->allocator());
   NodeOriginTable* node_positions = graph->zone()->New<NodeOriginTable>(graph);
-  // TODO(12809): Use the assembler buffer cache to also protect wasm stubs.
-  constexpr wasm::AssemblerBufferCache* kNoBufferCache = nullptr;
   PipelineData data(&zone_stats, wasm_engine, &info, mcgraph, nullptr,
-                    source_positions, node_positions, options, kNoBufferCache);
+                    source_positions, node_positions, options);
   std::unique_ptr<PipelineStatistics> pipeline_statistics;
   if (v8_flags.turbo_stats || v8_flags.turbo_stats_nvp) {
     pipeline_statistics.reset(new PipelineStatistics(
@@ -3443,12 +3439,12 @@ void LowerInt64(const wasm::FunctionSig* sig, MachineGraph* mcgraph,
   pipeline.RunPrintAndVerify("V8.Int64Lowering", true);
 }
 
-base::OwnedVector<byte> SerializeInliningPositions(
+base::OwnedVector<uint8_t> SerializeInliningPositions(
     const ZoneVector<WasmInliningPosition>& positions) {
   const size_t entry_size =
       sizeof positions[0].inlinee_func_index + sizeof positions[0].caller_pos;
-  auto result = base::OwnedVector<byte>::New(positions.size() * entry_size);
-  byte* iter = result.begin();
+  auto result = base::OwnedVector<uint8_t>::New(positions.size() * entry_size);
+  uint8_t* iter = result.begin();
   for (const auto& [func_index, caller_pos] : positions) {
     size_t index_size = sizeof func_index;
     std::memcpy(iter, &func_index, index_size);
@@ -3480,10 +3476,10 @@ void Pipeline::GenerateCodeForWasmFunction(
   std::unique_ptr<PipelineStatistics> pipeline_statistics(
       CreatePipelineStatistics(compilation_data.func_body, module, info,
                                &zone_stats));
-  PipelineData data(
-      &zone_stats, wasm_engine, info, mcgraph, pipeline_statistics.get(),
-      compilation_data.source_positions, compilation_data.node_origins,
-      WasmAssemblerOptions(), compilation_data.buffer_cache);
+  PipelineData data(&zone_stats, wasm_engine, info, mcgraph,
+                    pipeline_statistics.get(),
+                    compilation_data.source_positions,
+                    compilation_data.node_origins, WasmAssemblerOptions());
 
   PipelineImpl pipeline(&data);
 
@@ -3595,7 +3591,8 @@ void Pipeline::GenerateCodeForWasmFunction(
   Linkage linkage(call_descriptor);
 
   if (v8_flags.turboshaft_wasm) {
-    pipeline.InitializeTurboshaftPipeline();
+    turboshaft::PipelineData::Scope turboshaft_pipeline(
+        pipeline.CreateTurboshaftPipeline());
 
     if (base::Optional<BailoutReason> bailout =
             pipeline.Run<turboshaft::BuildGraphPhase>(&linkage)) {
@@ -3805,8 +3802,8 @@ void PipelineImpl::ComputeScheduledGraph() {
   TraceScheduleAndVerify(data->info(), data, data->schedule(), "schedule");
 }
 
-void PipelineImpl::InitializeTurboshaftPipeline() {
-  this->data_->InitializeTurboshaftPipeline();
+turboshaft::PipelineData PipelineImpl::CreateTurboshaftPipeline() {
+  return data_->CreateTurboshaftPipeline();
 }
 
 #if V8_ENABLE_WASM_SIMD256_REVEC

@@ -34,9 +34,12 @@ void Code::ClearEmbeddedObjects(Heap* heap) {
   HeapObject undefined = ReadOnlyRoots(heap).undefined_value();
   InstructionStream istream = unchecked_instruction_stream();
   int mode_mask = RelocInfo::EmbeddedObjectModeMask();
-  for (RelocIterator it(*this, mode_mask); !it.done(); it.next()) {
-    DCHECK(RelocInfo::IsEmbeddedObjectMode(it.rinfo()->rmode()));
-    it.rinfo()->set_target_object(istream, undefined, SKIP_WRITE_BARRIER);
+  {
+    CodePageMemoryModificationScope memory_modification_scope(istream);
+    for (RelocIterator it(*this, mode_mask); !it.done(); it.next()) {
+      DCHECK(RelocInfo::IsEmbeddedObjectMode(it.rinfo()->rmode()));
+      it.rinfo()->set_target_object(istream, undefined, SKIP_WRITE_BARRIER);
+    }
   }
   set_embedded_objects_cleared(true);
 }
@@ -80,9 +83,9 @@ void Code::CopyFromNoFlush(ByteArray reloc_info, Heap* heap,
 
   // Copy code and inline metadata.
   static_assert(InstructionStream::kOnHeapBodyIsContiguous);
-  CopyBytes(reinterpret_cast<byte*>(instruction_start()), desc.buffer,
+  CopyBytes(reinterpret_cast<uint8_t*>(instruction_start()), desc.buffer,
             static_cast<size_t>(desc.instr_size));
-  CopyBytes(reinterpret_cast<byte*>(instruction_start() + desc.instr_size),
+  CopyBytes(reinterpret_cast<uint8_t*>(instruction_start() + desc.instr_size),
             desc.unwinding_info, static_cast<size_t>(desc.unwinding_info_size));
   DCHECK_EQ(desc.body_size(), desc.instr_size + desc.unwinding_info_size);
   DCHECK_EQ(body_size(), instruction_size() + metadata_size());
@@ -227,14 +230,23 @@ bool Code::Inlines(SharedFunctionInfo sfi) {
 namespace {
 
 void DisassembleCodeRange(Isolate* isolate, std::ostream& os, Code code,
-                          Address begin, size_t size, Address current_pc) {
+                          Address begin, size_t size, Address current_pc,
+                          size_t range_limit = 0) {
   Address end = begin + size;
   AllowHandleAllocation allow_handles;
   DisallowGarbageCollection no_gc;
   HandleScope handle_scope(isolate);
-  Disassembler::Decode(isolate, os, reinterpret_cast<byte*>(begin),
-                       reinterpret_cast<byte*>(end),
-                       CodeReference(handle(code, isolate)), current_pc);
+  Disassembler::Decode(isolate, os, reinterpret_cast<uint8_t*>(begin),
+                       reinterpret_cast<uint8_t*>(end),
+                       CodeReference(handle(code, isolate)), current_pc,
+                       range_limit);
+}
+
+void DisassembleOnlyCode(const char* name, std::ostream& os, Isolate* isolate,
+                         Code code, Address current_pc, size_t range_limit) {
+  int code_size = code.instruction_size();
+  DisassembleCodeRange(isolate, os, code, code.instruction_start(), code_size,
+                       current_pc, range_limit);
 }
 
 void Disassemble(const char* name, std::ostream& os, Isolate* isolate,
@@ -349,8 +361,8 @@ void Disassemble(const char* name, std::ostream& os, Isolate* isolate,
   if (code.has_unwinding_info()) {
     os << "UnwindingInfo (size = " << code.unwinding_info_size() << ")\n";
     EhFrameDisassembler eh_frame_disassembler(
-        reinterpret_cast<byte*>(code.unwinding_info_start()),
-        reinterpret_cast<byte*>(code.unwinding_info_end()));
+        reinterpret_cast<uint8_t*>(code.unwinding_info_start()),
+        reinterpret_cast<uint8_t*>(code.unwinding_info_end()));
     eh_frame_disassembler.DisassembleToStream(os);
     os << "\n";
   }
@@ -361,6 +373,12 @@ void Disassemble(const char* name, std::ostream& os, Isolate* isolate,
 void Code::Disassemble(const char* name, std::ostream& os, Isolate* isolate,
                        Address current_pc) {
   i::Disassemble(name, os, isolate, *this, current_pc);
+}
+
+void Code::DisassembleOnlyCode(const char* name, std::ostream& os,
+                               Isolate* isolate, Address current_pc,
+                               size_t range_limit) {
+  i::DisassembleOnlyCode(name, os, isolate, *this, current_pc, range_limit);
 }
 
 #endif  // ENABLE_DISASSEMBLER
