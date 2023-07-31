@@ -233,9 +233,14 @@ class SharedFunctionInfo
 
   static const int kNotFound = -1;
 
+  static constexpr int kAgeSize = kAgeOffsetEnd - kAgeOffset + 1;
+  static constexpr uint16_t kMaxAge = UINT16_MAX;
+
   DECL_ACQUIRE_GETTER(scope_info, ScopeInfo)
   // Deprecated, use the ACQUIRE version instead.
   DECL_GETTER(scope_info, ScopeInfo)
+  // Slow but safe:
+  inline ScopeInfo EarlyScopeInfo(AcquireLoadTag tag);
 
   // Set scope_info without moving the existing name onto the ScopeInfo.
   inline void set_raw_scope_info(ScopeInfo scope_info,
@@ -445,6 +450,8 @@ class SharedFunctionInfo
   DECL_RELAXED_INT32_ACCESSORS(flags)
   DECL_UINT8_ACCESSORS(flags2)
 
+  DECL_UINT16_ACCESSORS(age)
+
   // True if the outer class scope contains a private brand for
   // private instance methods.
   DECL_BOOLEAN_ACCESSORS(class_scope_has_private_brand)
@@ -642,6 +649,13 @@ class SharedFunctionInfo
   // construct this function.
   inline void CalculateConstructAsBuiltin();
 
+  // Replaces the current age with a new value if the current value matches the
+  // one expected. Returns the value before this operation.
+  inline uint16_t CompareExchangeAge(uint16_t expected_age, uint16_t new_age);
+
+  // Bytecode aging
+  V8_EXPORT_PRIVATE static void EnsureOldForTesting(SharedFunctionInfo sfu);
+
   // Dispatched behavior.
   DECL_PRINTER(SharedFunctionInfo)
   DECL_VERIFIER(SharedFunctionInfo)
@@ -730,6 +744,11 @@ class SharedFunctionInfo
 
   TQ_OBJECT_CONSTRUCTORS(SharedFunctionInfo)
 };
+
+static constexpr int kStaticRootsSFISize = 44;
+#ifdef V8_STATIC_ROOTS
+static_assert(SharedFunctionInfo::kSize == kStaticRootsSFISize);
+#endif  // V8_STATIC_ROOTS
 
 // Printing support.
 struct SourceCodeOf {

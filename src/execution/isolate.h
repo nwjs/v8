@@ -41,8 +41,10 @@
 #include "src/objects/contexts.h"
 #include "src/objects/debug-objects.h"
 #include "src/objects/js-objects.h"
+#include "src/objects/tagged.h"
 #include "src/runtime/runtime.h"
-#include "src/sandbox/external-pointer.h"
+#include "src/sandbox/code-pointer-table.h"
+#include "src/sandbox/external-pointer-table.h"
 #include "src/utils/allocation.h"
 
 #ifdef DEBUG
@@ -510,6 +512,8 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
     DefaultWasmAsyncResolvePromiseCallback)                                   \
   V(WasmLoadSourceMapCallback, wasm_load_source_map_callback, nullptr)        \
   V(WasmGCEnabledCallback, wasm_gc_enabled_callback, nullptr)                 \
+  V(JavaScriptCompileHintsMagicEnabledCallback,                               \
+    compile_hints_magic_enabled_callback, nullptr)                            \
   /* State for Relocatable. */                                                \
   V(Relocatable*, relocatable_top, nullptr)                                   \
   V(DebugObjectCache*, string_stream_debug_object_cache, nullptr)             \
@@ -760,13 +764,15 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     return thread_local_top()->thread_id_.load(std::memory_order_relaxed);
   }
 
-  void InstallConditionalFeatures(Handle<Context> context);
+  void InstallConditionalFeatures(Handle<NativeContext> context);
 
-  bool IsSharedArrayBufferConstructorEnabled(Handle<Context> context);
+  bool IsSharedArrayBufferConstructorEnabled(Handle<NativeContext> context);
 
-  bool IsWasmGCEnabled(Handle<Context> context);
-  bool IsWasmStringRefEnabled(Handle<Context> context);
-  bool IsWasmInliningEnabled(Handle<Context> context);
+  bool IsWasmGCEnabled(Handle<NativeContext> context);
+  bool IsWasmStringRefEnabled(Handle<NativeContext> context);
+  bool IsWasmInliningEnabled(Handle<NativeContext> context);
+
+  bool IsCompileHintsMagicEnabled(Handle<NativeContext> context);
 
   THREAD_LOCAL_TOP_ADDRESS(Context, pending_handler_context)
   THREAD_LOCAL_TOP_ADDRESS(Address, pending_handler_entrypoint)
@@ -952,16 +958,19 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // Returns if the given context may access the given global object. If
   // the result is false, the pending exception is guaranteed to be
   // set.
-  bool MayAccess(Handle<Context> accessing_context, Handle<JSObject> receiver);
+  bool MayAccess(Handle<NativeContext> accessing_context,
+                 Handle<JSObject> receiver);
 
   void SetFailedAccessCheckCallback(v8::FailedAccessCheckCallback callback);
   void ReportFailedAccessCheck(Handle<JSObject> receiver);
 
   // Exception throwing support. The caller should use the result
   // of Throw() as its return value.
-  Object Throw(Object exception) { return ThrowInternal(exception, nullptr); }
-  Object ThrowAt(Handle<JSObject> exception, MessageLocation* location);
-  Object ThrowIllegalOperation();
+  Tagged<Object> Throw(Object exception) {
+    return ThrowInternal(exception, nullptr);
+  }
+  Tagged<Object> ThrowAt(Handle<JSObject> exception, MessageLocation* location);
+  Tagged<Object> ThrowIllegalOperation();
 
   template <typename T>
   V8_WARN_UNUSED_RESULT MaybeHandle<T> Throw(Handle<Object> exception) {
@@ -1071,7 +1080,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   inline Handle<NativeContext> native_context();
   inline NativeContext raw_native_context();
 
-  Handle<Context> GetIncumbentContext();
+  Handle<NativeContext> GetIncumbentContext();
 
   void RegisterTryCatchHandler(v8::TryCatch* that);
   void UnregisterTryCatchHandler(v8::TryCatch* that);
@@ -1422,6 +1431,8 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   bool IsLoggingCodeCreation() const;
 
+  bool AllowsCodeCompaction() const;
+
   bool NeedsDetailedOptimizedCodeLineInfo() const;
 
   bool is_best_effort_code_coverage() const {
@@ -1647,21 +1658,9 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   int GetNextScriptId();
 
-#if V8_SFI_HAS_UNIQUE_ID
-  int GetNextUniqueSharedFunctionInfoId() {
-    int current_id = next_unique_sfi_id_.load(std::memory_order_relaxed);
-    int next_id;
-    do {
-      if (current_id >= Smi::kMaxValue) {
-        next_id = 0;
-      } else {
-        next_id = current_id + 1;
-      }
-    } while (!next_unique_sfi_id_.compare_exchange_weak(
-        current_id, next_id, std::memory_order_relaxed));
-    return current_id;
+  uint32_t GetNextUniqueSharedFunctionInfoId() {
+    return next_unique_sfi_id_.fetch_add(1, std::memory_order_relaxed);
   }
-#endif
 
 #ifdef V8_ENABLE_JAVASCRIPT_PROMISE_HOOKS
   void SetHasContextPromiseHooks(bool context_promise_hook) {
@@ -1860,7 +1859,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 #endif  // V8_OS_WIN64
 
   void SetPrepareStackTraceCallback(PrepareStackTraceCallback callback);
-  MaybeHandle<Object> RunPrepareStackTraceCallback(Handle<Context>,
+  MaybeHandle<Object> RunPrepareStackTraceCallback(Handle<NativeContext>,
                                                    Handle<JSObject> Error,
                                                    Handle<JSArray> sites);
   bool HasPrepareStackTraceCallback() const;
@@ -2051,6 +2050,8 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   Object LocalsBlockListCacheGet(Handle<ScopeInfo> scope_info);
 
   void VerifyStaticRoots();
+
+  bool allow_compile_hints_magic() const { return allow_compile_hints_magic_; }
 
  private:
   explicit Isolate(std::unique_ptr<IsolateAllocator> isolate_allocator);
@@ -2370,11 +2371,9 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   bool initialized_ = false;
   bool jitless_ = false;
 
-  int next_optimization_id_ = 0;
+  std::atomic<int> next_optimization_id_ = 0;
 
-#if V8_SFI_HAS_UNIQUE_ID
-  std::atomic<int> next_unique_sfi_id_;
-#endif
+  std::atomic<uint32_t> next_unique_sfi_id_;
 
   unsigned next_module_async_evaluating_ordinal_;
 
@@ -2440,6 +2439,10 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
       abort_on_uncaught_exception_callback_ = nullptr;
 
   bool allow_atomics_wait_ = true;
+
+  // Cache for the JavaScriptCompileHintsMagic origin trial.
+  // TODO(v8:13917): Remove when the origin trial is removed.
+  bool allow_compile_hints_magic_ = false;
 
   base::Mutex managed_ptr_destructors_mutex_;
   ManagedPtrDestructor* managed_ptr_destructors_head_ = nullptr;

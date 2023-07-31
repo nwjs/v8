@@ -769,6 +769,10 @@ std::ostream& operator<<(std::ostream& os, TruncateKind kind) {
   V(I32x8ExtMulI16x8U, Operator::kCommutative, 2, 0, 1)                    \
   V(I16x16ExtMulI8x16S, Operator::kCommutative, 2, 0, 1)                   \
   V(I16x16ExtMulI8x16U, Operator::kCommutative, 2, 0, 1)                   \
+  V(I32x8ExtAddPairwiseI16x16S, Operator::kNoProperties, 1, 0, 1)          \
+  V(I32x8ExtAddPairwiseI16x16U, Operator::kNoProperties, 1, 0, 1)          \
+  V(I16x16ExtAddPairwiseI8x32S, Operator::kNoProperties, 1, 0, 1)          \
+  V(I16x16ExtAddPairwiseI8x32U, Operator::kNoProperties, 1, 0, 1)          \
   V(S256Zero, Operator::kNoProperties, 0, 0, 1)                            \
   V(S256And, Operator::kAssociative | Operator::kCommutative, 2, 0, 1)     \
   V(S256Or, Operator::kAssociative | Operator::kCommutative, 2, 0, 1)      \
@@ -1646,7 +1650,6 @@ struct MachineOperatorGlobalCache {
   StackPointerGreaterThan##Kind##Operator kStackPointerGreaterThan##Kind;
 
   STACK_POINTER_GREATER_THAN(JSFunctionEntry)
-  STACK_POINTER_GREATER_THAN(JSIterationBody)
   STACK_POINTER_GREATER_THAN(CodeStubAssembler)
   STACK_POINTER_GREATER_THAN(Wasm)
 #undef STACK_POINTER_GREATER_THAN
@@ -2037,12 +2040,12 @@ const Operator* MachineOperatorBuilder::StackPointerGreaterThan(
   switch (kind) {
     case StackCheckKind::kJSFunctionEntry:
       return &cache_.kStackPointerGreaterThanJSFunctionEntry;
-    case StackCheckKind::kJSIterationBody:
-      return &cache_.kStackPointerGreaterThanJSIterationBody;
     case StackCheckKind::kCodeStubAssembler:
       return &cache_.kStackPointerGreaterThanCodeStubAssembler;
     case StackCheckKind::kWasm:
       return &cache_.kStackPointerGreaterThanWasm;
+    case StackCheckKind::kJSIterationBody:
+      UNREACHABLE();
   }
   UNREACHABLE();
 }

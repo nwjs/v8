@@ -557,6 +557,11 @@
       {'name': 'mozilla', 'variant': 'minor_mc'},
       {'name': 'test262', 'variant': 'minor_mc', 'shards': 2},
       {'name': 'mjsunit', 'variant': 'minor_mc'},
+      {'name': 'v8testing', 'variant': 'concurrent_minor_mc'},
+      {'name': 'benchmarks', 'variant': 'concurrent_minor_mc'},
+      {'name': 'mozilla', 'variant': 'concurrent_minor_mc'},
+      {'name': 'test262', 'variant': 'concurrent_minor_mc', 'shards': 2},
+      {'name': 'mjsunit', 'variant': 'concurrent_minor_mc'},
     ],
   },
   'v8_linux64_msan_rel': {
@@ -1055,7 +1060,7 @@
       'os': 'Mac-13',
     },
     'tests': [
-      {'name': 'v8testing', 'shards': 8},
+      {'name': 'v8testing', 'variant': 'default', 'shards': 2},
       {'name': 'v8testing', 'variant': 'future', 'shards': 2},
     ],
   },
@@ -1065,7 +1070,7 @@
       'os': 'Mac-13',
     },
     'tests': [
-      {'name': 'v8testing', 'shards': 8},
+      {'name': 'v8testing', 'variant': 'default', 'shards': 2},
       {'name': 'v8testing', 'variant': 'future', 'shards': 2},
     ],
   },
@@ -1075,7 +1080,7 @@
       'os': 'Mac-13',
     },
     'tests': [
-      {'name': 'v8testing', 'shards': 8},
+      {'name': 'v8testing', 'variant': 'default', 'shards': 2},
       {'name': 'v8testing', 'variant': 'future', 'shards': 2},
     ],
   },
@@ -1535,6 +1540,11 @@
       {'name': 'mozilla', 'variant': 'minor_mc'},
       {'name': 'test262', 'variant': 'minor_mc', 'shards': 2},
       {'name': 'mjsunit', 'variant': 'minor_mc'},
+      {'name': 'v8testing', 'variant': 'concurrent_minor_mc'},
+      {'name': 'benchmarks', 'variant': 'concurrent_minor_mc'},
+      {'name': 'mozilla', 'variant': 'concurrent_minor_mc'},
+      {'name': 'test262', 'variant': 'concurrent_minor_mc', 'shards': 2},
+      {'name': 'mjsunit', 'variant': 'concurrent_minor_mc'},
     ],
   },
   'V8 Linux64 - disable runtime call stats': {
@@ -1962,7 +1972,7 @@
       'priority': 35,
     },
     'tests': [
-      {'name': 'v8testing', 'shards': 10},
+      {'name': 'v8testing', 'variant': 'default', 'shards': 4},
       {'name': 'v8testing', 'variant': 'future', 'shards': 4},
     ],
   },
@@ -1977,7 +1987,7 @@
       'priority': 35,
     },
     'tests': [
-      {'name': 'v8testing', 'shards': 8},
+      {'name': 'v8testing', 'variant': 'default', 'shards': 2},
       {'name': 'v8testing', 'variant': 'future', 'shards': 2},
     ],
   },
@@ -2296,7 +2306,7 @@
       'hard_timeout': 3600,
     },
     'tests': [
-      {'name': 'mjsunit_sp_frame_access'},
+      {'name': 'mjsunit_sp_frame_access', 'shards': 2},
       {'name': 'mozilla', 'shards': 2},
       {'name': 'test262', 'variant': 'default', 'shards': 2},
       {'name': 'v8testing', 'shards': 12},
@@ -2708,6 +2718,42 @@
         'name': 'numfuzz',
         'suffix': 'deopt',
         'test_args': ['--total-timeout-sec=900', '--stress-deopt=1'],
+      },
+    ],
+  },
+  # Try perf bots
+  'v8_android_arm_perf_try': {
+    'tests': [
+      {
+        'name': 'perf_integration',
+      },
+    ],
+  },
+  'v8_android_arm64_perf_try': {
+    'tests': [
+      {
+        'name': 'perf_integration',
+      },
+    ],
+  },
+  'v8_linux_perf_try': {
+    'tests': [
+      {
+        'name': 'perf_integration',
+      },
+    ],
+  },
+  'v8_linux64_perf_try': {
+    'tests': [
+      {
+        'name': 'perf_integration',
+      },
+    ],
+  },
+  'v8_mac_arm64_perf_try': {
+    'tests': [
+      {
+        'name': 'perf_integration',
       },
     ],
   },
