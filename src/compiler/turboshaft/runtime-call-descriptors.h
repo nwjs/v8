@@ -24,7 +24,10 @@ struct RuntimeCallDescriptor {
 #ifdef DEBUG
       Derived::Verify(descriptor);
 #endif  // DEBUG
-      return TSCallDescriptor::Create(descriptor, zone);
+      CanThrow can_throw = (Derived::Properties & Operator::kNoThrow)
+                               ? CanThrow::kNo
+                               : CanThrow::kYes;
+      return TSCallDescriptor::Create(descriptor, can_throw, zone);
     }
 
 #ifdef DEBUG
@@ -65,8 +68,6 @@ struct RuntimeCallDescriptor {
     }
 #endif  // DEBUG
   };
-
-  using Boolean = Oddball;
 
  public:
   struct Abort : public Descriptor<Abort> {

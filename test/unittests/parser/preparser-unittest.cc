@@ -57,7 +57,7 @@ TEST_F(PreParserTest, LazyFunctionLength) {
 
   Handle<Smi> length = RunJS<Smi>("lazy.length");
   int32_t value;
-  CHECK(length->ToInt32(&value));
+  CHECK(Object::ToInt32(*length, &value));
   CHECK_EQ(3, value);
 }
 
@@ -732,7 +732,7 @@ TEST_F(PreParserTest, PreParserScopeAnalysis) {
 
       CHECK(shared->HasUncompiledDataWithPreparseData());
       i::Handle<i::PreparseData> produced_data_on_heap(
-          shared->uncompiled_data_with_preparse_data().preparse_data(),
+          shared->uncompiled_data_with_preparse_data()->preparse_data(),
           isolate);
 
       i::UnoptimizedCompileFlags flags =

@@ -50,7 +50,7 @@ extern const float16 kFP16DefaultNaN;
 }  // end of extern "C"
 #endif
 
-unsigned CalcLSDataSize(LoadStoreOp op);
+unsigned CalcLSDataSizeLog2(LoadStoreOp op);
 unsigned CalcLSPairDataSize(LoadStorePairOp op);
 
 enum ImmBranchType {
@@ -144,7 +144,7 @@ class Instruction {
   double ImmNEONFP64() const;
 
   unsigned SizeLS() const {
-    return CalcLSDataSize(static_cast<LoadStoreOp>(Mask(LoadStoreMask)));
+    return CalcLSDataSizeLog2(static_cast<LoadStoreOp>(Mask(LoadStoreMask)));
   }
 
   unsigned SizeLSPair() const {
@@ -507,6 +507,10 @@ const Instr kImmExceptionIsRedirectedCall = 0xca11;
 // Represent unreachable code. This is used as a guard in parts of the code that
 // should not be reachable, such as in data encoded inline in the instructions.
 const Instr kImmExceptionIsUnreachable = 0xdebf;
+
+// Indicate that the stack is being switched, so the simulator must update its
+// stack limit. The new stack limit is passed in x16.
+const Instr kImmExceptionIsSwitchStackLimit = 0x5915;
 
 // A pseudo 'printf' instruction. The arguments will be passed to the platform
 // printf method.

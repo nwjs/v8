@@ -65,6 +65,7 @@
 #include "src/objects/free-space-inl.h"
 #include "src/objects/function-kind.h"
 #include "src/objects/hash-table-inl.h"
+#include "src/objects/heap-object-inl.h"
 #include "src/objects/instance-type.h"
 #include "src/objects/js-array-buffer-inl.h"
 #include "src/objects/js-array-inl.h"
@@ -141,7 +142,7 @@ namespace internal {
 ShouldThrow GetShouldThrow(Isolate* isolate, Maybe<ShouldThrow> should_throw) {
   if (should_throw.IsJust()) return should_throw.FromJust();
 
-  LanguageMode mode = isolate->context().scope_info().language_mode();
+  LanguageMode mode = isolate->context()->scope_info()->language_mode();
   if (mode == LanguageMode::kStrict) return kThrowOnError;
 
   for (StackFrameIterator it(isolate); !it.done(); it.Advance()) {
@@ -212,14 +213,15 @@ std::ostream& operator<<(std::ostream& os, PropertyCellType type) {
   UNREACHABLE();
 }
 
-Handle<FieldType> Object::OptimalType(Isolate* isolate,
+// static
+Handle<FieldType> Object::OptimalType(Tagged<Object> obj, Isolate* isolate,
                                       Representation representation) {
   if (representation.IsNone()) return FieldType::None(isolate);
   if (v8_flags.track_field_types) {
-    if (representation.IsHeapObject() && IsHeapObject()) {
+    if (representation.IsHeapObject() && IsHeapObject(obj)) {
       // We can track only JavaScript objects with stable maps.
-      Handle<Map> map(HeapObject::cast(*this).map(), isolate);
-      if (map->is_stable() && map->IsJSReceiverMap()) {
+      Handle<Map> map(HeapObject::cast(obj)->map(), isolate);
+      if (map->is_stable() && IsJSReceiverMap(*map)) {
         return FieldType::Class(map, isolate);
       }
     }
@@ -231,14 +233,14 @@ Handle<Object> Object::NewStorageFor(Isolate* isolate, Handle<Object> object,
                                      Representation representation) {
   if (!representation.IsDouble()) return object;
   Handle<HeapNumber> result = isolate->factory()->NewHeapNumberWithHoleNaN();
-  if (object->IsUninitialized(isolate)) {
+  if (IsUninitialized(*object, isolate)) {
     result->set_value_as_bits(kHoleNanInt64, kRelaxedStore);
-  } else if (object->IsHeapNumber()) {
+  } else if (IsHeapNumber(*object)) {
     // Ensure that all bits of the double value are preserved.
     result->set_value_as_bits(
-        HeapNumber::cast(*object).value_as_bits(kRelaxedLoad), kRelaxedStore);
+        HeapNumber::cast(*object)->value_as_bits(kRelaxedLoad), kRelaxedStore);
   } else {
-    result->set_value(object->Number(), kRelaxedStore);
+    result->set_value(Object::Number(*object), kRelaxedStore);
   }
   return result;
 }
@@ -246,13 +248,13 @@ Handle<Object> Object::NewStorageFor(Isolate* isolate, Handle<Object> object,
 template <AllocationType allocation_type, typename IsolateT>
 Handle<Object> Object::WrapForRead(IsolateT* isolate, Handle<Object> object,
                                    Representation representation) {
-  DCHECK(!object->IsUninitialized(isolate));
+  DCHECK(!IsUninitialized(*object, isolate));
   if (!representation.IsDouble()) {
-    DCHECK(object->FitsRepresentation(representation));
+    DCHECK(Object::FitsRepresentation(*object, representation));
     return object;
   }
   return isolate->factory()->template NewHeapNumberFromBits<allocation_type>(
-      HeapNumber::cast(*object).value_as_bits(kRelaxedLoad));
+      HeapNumber::cast(*object)->value_as_bits(kRelaxedLoad));
 }
 
 template Handle<Object> Object::WrapForRead<AllocationType::kYoung>(
@@ -264,14 +266,14 @@ template Handle<Object> Object::WrapForRead<AllocationType::kOld>(
 MaybeHandle<JSReceiver> Object::ToObjectImpl(Isolate* isolate,
                                              Handle<Object> object,
                                              const char* method_name) {
-  DCHECK(!object->IsJSReceiver());  // Use ToObject() for fast path.
+  DCHECK(!IsJSReceiver(*object));  // Use ToObject() for fast path.
   Handle<Context> native_context = isolate->native_context();
   Handle<JSFunction> constructor;
-  if (object->IsSmi()) {
+  if (IsSmi(*object)) {
     constructor = handle(native_context->number_function(), isolate);
   } else {
     int constructor_function_index =
-        Handle<HeapObject>::cast(object)->map().GetConstructorFunctionIndex();
+        Handle<HeapObject>::cast(object)->map()->GetConstructorFunctionIndex();
     if (constructor_function_index == Map::kNoConstructorFunctionIndex) {
       if (method_name != nullptr) {
         THROW_NEW_ERROR(
@@ -298,8 +300,8 @@ MaybeHandle<JSReceiver> Object::ToObjectImpl(Isolate* isolate,
 // static
 MaybeHandle<JSReceiver> Object::ConvertReceiver(Isolate* isolate,
                                                 Handle<Object> object) {
-  if (object->IsJSReceiver()) return Handle<JSReceiver>::cast(object);
-  if (object->IsNullOrUndefined(isolate)) {
+  if (IsJSReceiver(*object)) return Handle<JSReceiver>::cast(object);
+  if (IsNullOrUndefined(*object, isolate)) {
     return isolate->global_proxy();
   }
   return Object::ToObject(isolate, object);
@@ -310,20 +312,20 @@ MaybeHandle<Object> Object::ConvertToNumberOrNumeric(Isolate* isolate,
                                                      Handle<Object> input,
                                                      Conversion mode) {
   while (true) {
-    if (input->IsNumber()) {
+    if (IsNumber(*input)) {
       return input;
     }
-    if (input->IsString()) {
+    if (IsString(*input)) {
       return String::ToNumber(isolate, Handle<String>::cast(input));
     }
-    if (input->IsOddball()) {
+    if (IsOddball(*input)) {
       return Oddball::ToNumber(isolate, Handle<Oddball>::cast(input));
     }
-    if (input->IsSymbol()) {
+    if (IsSymbol(*input)) {
       THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kSymbolToNumber),
                       Object);
     }
-    if (input->IsBigInt()) {
+    if (IsBigInt(*input)) {
       if (mode == Conversion::kToNumeric) return input;
       DCHECK_EQ(mode, Conversion::kToNumber);
       THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kBigIntToNumber),
@@ -343,8 +345,8 @@ MaybeHandle<Object> Object::ConvertToInteger(Isolate* isolate,
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, input,
       ConvertToNumberOrNumeric(isolate, input, Conversion::kToNumber), Object);
-  if (input->IsSmi()) return input;
-  return isolate->factory()->NewNumber(DoubleToInteger(input->Number()));
+  if (IsSmi(*input)) return input;
+  return isolate->factory()->NewNumber(DoubleToInteger(Object::Number(*input)));
 }
 
 // static
@@ -353,8 +355,9 @@ MaybeHandle<Object> Object::ConvertToInt32(Isolate* isolate,
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, input,
       ConvertToNumberOrNumeric(isolate, input, Conversion::kToNumber), Object);
-  if (input->IsSmi()) return input;
-  return isolate->factory()->NewNumberFromInt(DoubleToInt32(input->Number()));
+  if (IsSmi(*input)) return input;
+  return isolate->factory()->NewNumberFromInt(
+      DoubleToInt32(Object::Number(*input)));
 }
 
 // static
@@ -363,8 +366,9 @@ MaybeHandle<Object> Object::ConvertToUint32(Isolate* isolate,
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, input,
       ConvertToNumberOrNumeric(isolate, input, Conversion::kToNumber), Object);
-  if (input->IsSmi()) return handle(Smi::cast(*input).ToUint32Smi(), isolate);
-  return isolate->factory()->NewNumberFromUint(DoubleToUint32(input->Number()));
+  if (IsSmi(*input)) return handle(Smi::cast(*input).ToUint32Smi(), isolate);
+  return isolate->factory()->NewNumberFromUint(
+      DoubleToUint32(Object::Number(*input)));
 }
 
 // static
@@ -373,7 +377,7 @@ MaybeHandle<Name> Object::ConvertToName(Isolate* isolate,
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, input,
       Object::ToPrimitive(isolate, input, ToPrimitiveHint::kString), Name);
-  if (input->IsName()) return Handle<Name>::cast(input);
+  if (IsName(*input)) return Handle<Name>::cast(input);
   return ToString(isolate, input);
 }
 
@@ -388,13 +392,13 @@ MaybeHandle<Object> Object::ConvertToPropertyKey(Isolate* isolate,
   Handle<Object> key;
   if (!maybe_key.ToHandle(&key)) return key;
   // 3. If Type(key) is Symbol, then return key.
-  if (key->IsSymbol()) return key;
+  if (IsSymbol(*key)) return key;
   // 4. Return ToString(key).
   // Extending spec'ed behavior, we'd be happy to return an element index.
-  if (key->IsSmi()) return key;
-  if (key->IsHeapNumber()) {
+  if (IsSmi(*key)) return key;
+  if (IsHeapNumber(*key)) {
     uint32_t uint_value;
-    if (value->ToArrayLength(&uint_value) &&
+    if (Object::ToArrayLength(*value, &uint_value) &&
         uint_value <= static_cast<uint32_t>(Smi::kMaxValue)) {
       return handle(Smi::FromInt(static_cast<int>(uint_value)), isolate);
     }
@@ -406,23 +410,23 @@ MaybeHandle<Object> Object::ConvertToPropertyKey(Isolate* isolate,
 MaybeHandle<String> Object::ConvertToString(Isolate* isolate,
                                             Handle<Object> input) {
   while (true) {
-    if (input->IsOddball()) {
+    if (IsOddball(*input)) {
       return handle(Handle<Oddball>::cast(input)->to_string(), isolate);
     }
-    if (input->IsNumber()) {
+    if (IsNumber(*input)) {
       return isolate->factory()->NumberToString(input);
     }
-    if (input->IsSymbol()) {
+    if (IsSymbol(*input)) {
       THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kSymbolToString),
                       String);
     }
-    if (input->IsBigInt()) {
+    if (IsBigInt(*input)) {
       return BigInt::ToString(isolate, Handle<BigInt>::cast(input));
     }
 #if V8_ENABLE_WEBASSEMBLY
     // We generally don't let the WasmNull escape into the JavaScript world,
     // but some builtins may encounter it when called directly from Wasm code.
-    if (input->IsWasmNull()) {
+    if (IsWasmNull(*input)) {
       return isolate->factory()->null_string();
     }
 #endif
@@ -433,7 +437,7 @@ MaybeHandle<String> Object::ConvertToString(Isolate* isolate,
         String);
     // The previous isString() check happened in Object::ToString and thus we
     // put it at the end of the loop in this helper.
-    if (input->IsString()) {
+    if (IsString(*input)) {
       return Handle<String>::cast(input);
     }
   }
@@ -442,14 +446,14 @@ MaybeHandle<String> Object::ConvertToString(Isolate* isolate,
 namespace {
 
 bool IsErrorObject(Isolate* isolate, Handle<Object> object) {
-  if (!object->IsJSObject()) return false;
+  if (!IsJSObject(*object)) return false;
   return ErrorUtils::HasErrorStackSymbolOwnProperty(
       isolate, Handle<JSObject>::cast(object));
 }
 
 Handle<String> AsStringOrEmpty(Isolate* isolate, Handle<Object> object) {
-  return object->IsString() ? Handle<String>::cast(object)
-                            : isolate->factory()->empty_string();
+  return IsString(*object) ? Handle<String>::cast(object)
+                           : isolate->factory()->empty_string();
 }
 
 Handle<String> NoSideEffectsErrorToString(Isolate* isolate,
@@ -485,27 +489,27 @@ MaybeHandle<String> Object::NoSideEffectsToMaybeString(Isolate* isolate,
                                                        Handle<Object> input) {
   DisallowJavascriptExecution no_js(isolate);
 
-  if (input->IsString() || input->IsNumber() || input->IsOddball()) {
+  if (IsString(*input) || IsNumber(*input) || IsOddball(*input)) {
     return Object::ToString(isolate, input).ToHandleChecked();
-  } else if (input->IsJSProxy()) {
+  } else if (IsJSProxy(*input)) {
     Handle<Object> currInput = input;
     do {
       HeapObject target = Handle<JSProxy>::cast(currInput)->target(isolate);
       currInput = Handle<Object>(target, isolate);
-    } while (currInput->IsJSProxy());
+    } while (IsJSProxy(*currInput));
     return NoSideEffectsToString(isolate, currInput);
-  } else if (input->IsBigInt()) {
+  } else if (IsBigInt(*input)) {
     return BigInt::NoSideEffectsToString(isolate, Handle<BigInt>::cast(input));
-  } else if (input->IsFunction()) {
+  } else if (IsFunction(*input)) {
     // -- F u n c t i o n
     Handle<String> fun_str;
-    if (input->IsJSBoundFunction()) {
+    if (IsJSBoundFunction(*input)) {
       fun_str = JSBoundFunction::ToString(Handle<JSBoundFunction>::cast(input));
-    } else if (input->IsJSWrappedFunction()) {
+    } else if (IsJSWrappedFunction(*input)) {
       fun_str =
           JSWrappedFunction::ToString(Handle<JSWrappedFunction>::cast(input));
     } else {
-      DCHECK(input->IsJSFunction());
+      DCHECK(IsJSFunction(*input));
       fun_str = JSFunction::ToString(Handle<JSFunction>::cast(input));
     }
 
@@ -519,7 +523,7 @@ MaybeHandle<String> Object::NoSideEffectsToMaybeString(Isolate* isolate,
       return builder.Finish().ToHandleChecked();
     }
     return fun_str;
-  } else if (input->IsSymbol()) {
+  } else if (IsSymbol(*input)) {
     // -- S y m b o l
     Handle<Symbol> symbol = Handle<Symbol>::cast(input);
 
@@ -529,7 +533,7 @@ MaybeHandle<String> Object::NoSideEffectsToMaybeString(Isolate* isolate,
 
     IncrementalStringBuilder builder(isolate);
     builder.AppendCStringLiteral("Symbol(");
-    if (symbol->description().IsString()) {
+    if (IsString(symbol->description())) {
       Handle<String> description =
           handle(String::cast(symbol->description()), isolate);
       if (description->length() > 128) {
@@ -545,7 +549,7 @@ MaybeHandle<String> Object::NoSideEffectsToMaybeString(Isolate* isolate,
     builder.AppendCharacter(')');
 
     return builder.Finish().ToHandleChecked();
-  } else if (input->IsJSReceiver()) {
+  } else if (IsJSReceiver(*input)) {
     // -- J S R e c e i v e r
     Handle<JSReceiver> receiver = Handle<JSReceiver>::cast(input);
     Handle<Object> to_string = JSReceiver::GetDataProperty(
@@ -561,13 +565,13 @@ MaybeHandle<String> Object::NoSideEffectsToMaybeString(Isolate* isolate,
     } else if (*to_string == *isolate->object_to_string()) {
       Handle<Object> ctor = JSReceiver::GetDataProperty(
           isolate, receiver, isolate->factory()->constructor_string());
-      if (ctor->IsFunction()) {
+      if (IsFunction(*ctor)) {
         Handle<String> ctor_name;
-        if (ctor->IsJSBoundFunction()) {
+        if (IsJSBoundFunction(*ctor)) {
           ctor_name = JSBoundFunction::GetName(
                           isolate, Handle<JSBoundFunction>::cast(ctor))
                           .ToHandleChecked();
-        } else if (ctor->IsJSFunction()) {
+        } else if (IsJSFunction(*ctor)) {
           ctor_name =
               JSFunction::GetName(isolate, Handle<JSFunction>::cast(ctor));
         }
@@ -601,13 +605,13 @@ Handle<String> Object::NoSideEffectsToString(Isolate* isolate,
   // At this point, input is either none of the above or a JSReceiver.
 
   Handle<JSReceiver> receiver;
-  if (input->IsJSReceiver()) {
+  if (IsJSReceiver(*input)) {
     receiver = Handle<JSReceiver>::cast(input);
   } else {
     // This is the only case where Object::ToObject throws.
-    DCHECK(!input->IsSmi());
+    DCHECK(!IsSmi(*input));
     int constructor_function_index =
-        Handle<HeapObject>::cast(input)->map().GetConstructorFunctionIndex();
+        Handle<HeapObject>::cast(input)->map()->GetConstructorFunctionIndex();
     if (constructor_function_index == Map::kNoConstructorFunctionIndex) {
       return isolate->factory()->NewStringFromAsciiChecked("[object Unknown]");
     }
@@ -619,7 +623,7 @@ Handle<String> Object::NoSideEffectsToString(Isolate* isolate,
   Handle<Object> tag_obj = JSReceiver::GetDataProperty(
       isolate, receiver, isolate->factory()->to_string_tag_symbol());
   Handle<String> tag =
-      tag_obj->IsString() ? Handle<String>::cast(tag_obj) : builtin_tag;
+      IsString(*tag_obj) ? Handle<String>::cast(tag_obj) : builtin_tag;
 
   IncrementalStringBuilder builder(isolate);
   builder.AppendCStringLiteral("[object ");
@@ -633,11 +637,11 @@ Handle<String> Object::NoSideEffectsToString(Isolate* isolate,
 MaybeHandle<Object> Object::ConvertToLength(Isolate* isolate,
                                             Handle<Object> input) {
   ASSIGN_RETURN_ON_EXCEPTION(isolate, input, ToNumber(isolate, input), Object);
-  if (input->IsSmi()) {
+  if (IsSmi(*input)) {
     int value = std::max(Smi::ToInt(*input), 0);
     return handle(Smi::FromInt(value), isolate);
   }
-  double len = DoubleToInteger(input->Number());
+  double len = DoubleToInteger(Object::Number(*input));
   if (len <= 0.0) {
     return handle(Smi::zero(), isolate);
   } else if (len >= kMaxSafeInteger) {
@@ -650,10 +654,10 @@ MaybeHandle<Object> Object::ConvertToLength(Isolate* isolate,
 MaybeHandle<Object> Object::ConvertToIndex(Isolate* isolate,
                                            Handle<Object> input,
                                            MessageTemplate error_index) {
-  if (input->IsUndefined(isolate)) return handle(Smi::zero(), isolate);
+  if (IsUndefined(*input, isolate)) return handle(Smi::zero(), isolate);
   ASSIGN_RETURN_ON_EXCEPTION(isolate, input, ToNumber(isolate, input), Object);
-  if (input->IsSmi() && Smi::ToInt(*input) >= 0) return input;
-  double len = DoubleToInteger(input->Number());
+  if (IsSmi(*input) && Smi::ToInt(*input) >= 0) return input;
+  double len = DoubleToInteger(Object::Number(*input));
   Handle<Object> js_len = isolate->factory()->NewNumber(len);
   if (len < 0.0 || len > kMaxSafeInteger) {
     THROW_NEW_ERROR(isolate, NewRangeError(error_index, js_len), Object);
@@ -662,26 +666,28 @@ MaybeHandle<Object> Object::ConvertToIndex(Isolate* isolate,
 }
 
 template <typename IsolateT>
-bool Object::BooleanValue(IsolateT* isolate) {
-  if (IsSmi()) return Smi::ToInt(*this) != 0;
-  DCHECK(IsHeapObject());
-  if (IsBoolean()) return IsTrue(isolate);
-  if (IsNullOrUndefined(isolate)) return false;
+// static
+bool Object::BooleanValue(Tagged<Object> obj, IsolateT* isolate) {
+  if (IsSmi(obj)) return Smi::ToInt(obj) != 0;
+  DCHECK(IsHeapObject(obj));
+  if (IsBoolean(obj)) return IsTrue(obj, isolate);
+  if (IsNullOrUndefined(obj, isolate)) return false;
 #ifdef V8_ENABLE_WEBASSEMBLY
-  if (IsWasmNull()) return false;
+  if (IsWasmNull(obj)) return false;
 #endif
-  if (IsUndetectable()) return false;  // Undetectable object is false.
-  if (IsString()) return String::cast(*this).length() != 0;
-  if (IsHeapNumber()) return DoubleToBoolean(HeapNumber::cast(*this).value());
-  if (IsBigInt()) return BigInt::cast(*this).ToBoolean();
+  if (IsUndetectable(obj)) return false;  // Undetectable object is false.
+  if (IsString(obj)) return String::cast(obj)->length() != 0;
+  if (IsHeapNumber(obj)) return DoubleToBoolean(HeapNumber::cast(obj)->value());
+  if (IsBigInt(obj)) return BigInt::cast(obj)->ToBoolean();
   return true;
 }
-template bool Object::BooleanValue(Isolate*);
-template bool Object::BooleanValue(LocalIsolate*);
+template bool Object::BooleanValue(Tagged<Object>, Isolate*);
+template bool Object::BooleanValue(Tagged<Object>, LocalIsolate*);
 
-Object Object::ToBoolean(Isolate* isolate) {
-  if (IsBoolean()) return *this;
-  return isolate->heap()->ToBoolean(BooleanValue(isolate));
+// static
+Object Object::ToBoolean(Tagged<Object> obj, Isolate* isolate) {
+  if (IsBoolean(obj)) return obj;
+  return isolate->heap()->ToBoolean(Object::BooleanValue(obj, isolate));
 }
 
 namespace {
@@ -709,7 +715,7 @@ bool StrictNumberEquals(double x, double y) {
 }
 
 bool StrictNumberEquals(const Object x, const Object y) {
-  return StrictNumberEquals(x.Number(), y.Number());
+  return StrictNumberEquals(Object::Number(x), Object::Number(y));
 }
 
 bool StrictNumberEquals(Handle<Object> x, Handle<Object> y) {
@@ -736,16 +742,16 @@ Maybe<ComparisonResult> Object::Compare(Isolate* isolate, Handle<Object> x,
       !Object::ToPrimitive(isolate, y, ToPrimitiveHint::kNumber).ToHandle(&y)) {
     return Nothing<ComparisonResult>();
   }
-  if (x->IsString() && y->IsString()) {
+  if (IsString(*x) && IsString(*y)) {
     // ES6 section 7.2.11 Abstract Relational Comparison step 5.
     return Just(String::Compare(isolate, Handle<String>::cast(x),
                                 Handle<String>::cast(y)));
   }
-  if (x->IsBigInt() && y->IsString()) {
+  if (IsBigInt(*x) && IsString(*y)) {
     return BigInt::CompareToString(isolate, Handle<BigInt>::cast(x),
                                    Handle<String>::cast(y));
   }
-  if (x->IsString() && y->IsBigInt()) {
+  if (IsString(*x) && IsBigInt(*y)) {
     Maybe<ComparisonResult> maybe_result = BigInt::CompareToString(
         isolate, Handle<BigInt>::cast(y), Handle<String>::cast(x));
     ComparisonResult result;
@@ -761,10 +767,10 @@ Maybe<ComparisonResult> Object::Compare(Isolate* isolate, Handle<Object> x,
     return Nothing<ComparisonResult>();
   }
 
-  bool x_is_number = x->IsNumber();
-  bool y_is_number = y->IsNumber();
+  bool x_is_number = IsNumber(*x);
+  bool y_is_number = IsNumber(*y);
   if (x_is_number && y_is_number) {
-    return Just(StrictNumberCompare(x->Number(), y->Number()));
+    return Just(StrictNumberCompare(Object::Number(*x), Object::Number(*y)));
   } else if (!x_is_number && !y_is_number) {
     return Just(BigInt::CompareToBigInt(Handle<BigInt>::cast(x),
                                         Handle<BigInt>::cast(y)));
@@ -781,18 +787,18 @@ Maybe<bool> Object::Equals(Isolate* isolate, Handle<Object> x,
   // This is the generic version of Abstract Equality Comparison. Must be in
   // sync with CodeStubAssembler::Equal.
   while (true) {
-    if (x->IsNumber()) {
-      if (y->IsNumber()) {
+    if (IsNumber(*x)) {
+      if (IsNumber(*y)) {
         return Just(StrictNumberEquals(x, y));
-      } else if (y->IsBoolean()) {
+      } else if (IsBoolean(*y)) {
         return Just(
             StrictNumberEquals(*x, Handle<Oddball>::cast(y)->to_number()));
-      } else if (y->IsString()) {
+      } else if (IsString(*y)) {
         return Just(StrictNumberEquals(
             x, String::ToNumber(isolate, Handle<String>::cast(y))));
-      } else if (y->IsBigInt()) {
+      } else if (IsBigInt(*y)) {
         return Just(BigInt::EqualToNumber(Handle<BigInt>::cast(y), x));
-      } else if (y->IsJSReceiver()) {
+      } else if (IsJSReceiver(*y)) {
         if (!JSReceiver::ToPrimitive(isolate, Handle<JSReceiver>::cast(y))
                  .ToHandle(&y)) {
           return Nothing<bool>();
@@ -800,21 +806,21 @@ Maybe<bool> Object::Equals(Isolate* isolate, Handle<Object> x,
       } else {
         return Just(false);
       }
-    } else if (x->IsString()) {
-      if (y->IsString()) {
+    } else if (IsString(*x)) {
+      if (IsString(*y)) {
         return Just(String::Equals(isolate, Handle<String>::cast(x),
                                    Handle<String>::cast(y)));
-      } else if (y->IsNumber()) {
+      } else if (IsNumber(*y)) {
         x = String::ToNumber(isolate, Handle<String>::cast(x));
         return Just(StrictNumberEquals(x, y));
-      } else if (y->IsBoolean()) {
+      } else if (IsBoolean(*y)) {
         x = String::ToNumber(isolate, Handle<String>::cast(x));
         return Just(
             StrictNumberEquals(*x, Handle<Oddball>::cast(y)->to_number()));
-      } else if (y->IsBigInt()) {
+      } else if (IsBigInt(*y)) {
         return BigInt::EqualToString(isolate, Handle<BigInt>::cast(y),
                                      Handle<String>::cast(x));
-      } else if (y->IsJSReceiver()) {
+      } else if (IsJSReceiver(*y)) {
         if (!JSReceiver::ToPrimitive(isolate, Handle<JSReceiver>::cast(y))
                  .ToHandle(&y)) {
           return Nothing<bool>();
@@ -822,20 +828,20 @@ Maybe<bool> Object::Equals(Isolate* isolate, Handle<Object> x,
       } else {
         return Just(false);
       }
-    } else if (x->IsBoolean()) {
-      if (y->IsOddball()) {
+    } else if (IsBoolean(*x)) {
+      if (IsOddball(*y)) {
         return Just(x.is_identical_to(y));
-      } else if (y->IsNumber()) {
+      } else if (IsNumber(*y)) {
         return Just(
             StrictNumberEquals(Handle<Oddball>::cast(x)->to_number(), *y));
-      } else if (y->IsString()) {
+      } else if (IsString(*y)) {
         y = String::ToNumber(isolate, Handle<String>::cast(y));
         return Just(
             StrictNumberEquals(Handle<Oddball>::cast(x)->to_number(), *y));
-      } else if (y->IsBigInt()) {
+      } else if (IsBigInt(*y)) {
         x = Oddball::ToNumber(isolate, Handle<Oddball>::cast(x));
         return Just(BigInt::EqualToNumber(Handle<BigInt>::cast(y), x));
-      } else if (y->IsJSReceiver()) {
+      } else if (IsJSReceiver(*y)) {
         if (!JSReceiver::ToPrimitive(isolate, Handle<JSReceiver>::cast(y))
                  .ToHandle(&y)) {
           return Nothing<bool>();
@@ -844,10 +850,10 @@ Maybe<bool> Object::Equals(Isolate* isolate, Handle<Object> x,
       } else {
         return Just(false);
       }
-    } else if (x->IsSymbol()) {
-      if (y->IsSymbol()) {
+    } else if (IsSymbol(*x)) {
+      if (IsSymbol(*y)) {
         return Just(x.is_identical_to(y));
-      } else if (y->IsJSReceiver()) {
+      } else if (IsJSReceiver(*y)) {
         if (!JSReceiver::ToPrimitive(isolate, Handle<JSReceiver>::cast(y))
                  .ToHandle(&y)) {
           return Nothing<bool>();
@@ -855,63 +861,65 @@ Maybe<bool> Object::Equals(Isolate* isolate, Handle<Object> x,
       } else {
         return Just(false);
       }
-    } else if (x->IsBigInt()) {
-      if (y->IsBigInt()) {
+    } else if (IsBigInt(*x)) {
+      if (IsBigInt(*y)) {
         return Just(BigInt::EqualToBigInt(BigInt::cast(*x), BigInt::cast(*y)));
       }
       return Equals(isolate, y, x);
-    } else if (x->IsJSReceiver()) {
-      if (y->IsJSReceiver()) {
+    } else if (IsJSReceiver(*x)) {
+      if (IsJSReceiver(*y)) {
         return Just(x.is_identical_to(y));
-      } else if (y->IsUndetectable()) {
-        return Just(x->IsUndetectable());
-      } else if (y->IsBoolean()) {
+      } else if (IsUndetectable(*y)) {
+        return Just(IsUndetectable(*x));
+      } else if (IsBoolean(*y)) {
         y = Oddball::ToNumber(isolate, Handle<Oddball>::cast(y));
       } else if (!JSReceiver::ToPrimitive(isolate, Handle<JSReceiver>::cast(x))
                       .ToHandle(&x)) {
         return Nothing<bool>();
       }
     } else {
-      return Just(x->IsUndetectable() && y->IsUndetectable());
+      return Just(IsUndetectable(*x) && IsUndetectable(*y));
     }
   }
 }
 
-bool Object::StrictEquals(Object that) {
-  if (this->IsNumber()) {
-    if (!that.IsNumber()) return false;
-    return StrictNumberEquals(*this, that);
-  } else if (this->IsString()) {
-    if (!that.IsString()) return false;
-    return String::cast(*this).Equals(String::cast(that));
-  } else if (this->IsBigInt()) {
-    if (!that.IsBigInt()) return false;
-    return BigInt::EqualToBigInt(BigInt::cast(*this), BigInt::cast(that));
+// static
+bool Object::StrictEquals(Tagged<Object> obj, Object that) {
+  if (IsNumber(obj)) {
+    if (!IsNumber(that)) return false;
+    return StrictNumberEquals(obj, that);
+  } else if (IsString(obj)) {
+    if (!IsString(that)) return false;
+    return String::cast(obj)->Equals(String::cast(that));
+  } else if (IsBigInt(obj)) {
+    if (!IsBigInt(that)) return false;
+    return BigInt::EqualToBigInt(BigInt::cast(obj), BigInt::cast(that));
   }
-  return *this == that;
+  return obj == that;
 }
 
 // static
 Handle<String> Object::TypeOf(Isolate* isolate, Handle<Object> object) {
-  if (object->IsNumber()) return isolate->factory()->number_string();
-  if (object->IsOddball())
-    return handle(Oddball::cast(*object).type_of(), isolate);
-  if (object->IsUndetectable()) {
+  if (IsNumber(*object)) return isolate->factory()->number_string();
+  if (IsOddball(*object))
+    return handle(Oddball::cast(*object)->type_of(), isolate);
+  if (IsUndetectable(*object)) {
     return isolate->factory()->undefined_string();
   }
-  if (object->IsString()) return isolate->factory()->string_string();
-  if (object->IsSymbol()) return isolate->factory()->symbol_string();
-  if (object->IsBigInt()) return isolate->factory()->bigint_string();
-  if (object->IsCallable()) return isolate->factory()->function_string();
+  if (IsString(*object)) return isolate->factory()->string_string();
+  if (IsSymbol(*object)) return isolate->factory()->symbol_string();
+  if (IsBigInt(*object)) return isolate->factory()->bigint_string();
+  if (IsCallable(*object)) return isolate->factory()->function_string();
   return isolate->factory()->object_string();
 }
 
 // static
 MaybeHandle<Object> Object::Add(Isolate* isolate, Handle<Object> lhs,
                                 Handle<Object> rhs) {
-  if (lhs->IsNumber() && rhs->IsNumber()) {
-    return isolate->factory()->NewNumber(lhs->Number() + rhs->Number());
-  } else if (lhs->IsString() && rhs->IsString()) {
+  if (IsNumber(*lhs) && IsNumber(*rhs)) {
+    return isolate->factory()->NewNumber(Object::Number(*lhs) +
+                                         Object::Number(*rhs));
+  } else if (IsString(*lhs) && IsString(*rhs)) {
     return isolate->factory()->NewConsString(Handle<String>::cast(lhs),
                                              Handle<String>::cast(rhs));
   }
@@ -919,7 +927,7 @@ MaybeHandle<Object> Object::Add(Isolate* isolate, Handle<Object> lhs,
                              Object);
   ASSIGN_RETURN_ON_EXCEPTION(isolate, rhs, Object::ToPrimitive(isolate, rhs),
                              Object);
-  if (lhs->IsString() || rhs->IsString()) {
+  if (IsString(*lhs) || IsString(*rhs)) {
     ASSIGN_RETURN_ON_EXCEPTION(isolate, rhs, Object::ToString(isolate, rhs),
                                Object);
     ASSIGN_RETURN_ON_EXCEPTION(isolate, lhs, Object::ToString(isolate, lhs),
@@ -931,7 +939,8 @@ MaybeHandle<Object> Object::Add(Isolate* isolate, Handle<Object> lhs,
                              Object);
   ASSIGN_RETURN_ON_EXCEPTION(isolate, lhs, Object::ToNumber(isolate, lhs),
                              Object);
-  return isolate->factory()->NewNumber(lhs->Number() + rhs->Number());
+  return isolate->factory()->NewNumber(Object::Number(*lhs) +
+                                       Object::Number(*rhs));
 }
 
 // static
@@ -939,11 +948,11 @@ MaybeHandle<Object> Object::OrdinaryHasInstance(Isolate* isolate,
                                                 Handle<Object> callable,
                                                 Handle<Object> object) {
   // The {callable} must have a [[Call]] internal method.
-  if (!callable->IsCallable()) return isolate->factory()->false_value();
+  if (!IsCallable(*callable)) return isolate->factory()->false_value();
 
   // Check if {callable} is a bound function, and if so retrieve its
   // [[BoundTargetFunction]] and use that instead of {callable}.
-  if (callable->IsJSBoundFunction()) {
+  if (IsJSBoundFunction(*callable)) {
     // Since there is a mutual recursion here, we might run out of stack
     // space for long chains of bound functions.
     STACK_CHECK(isolate, MaybeHandle<Object>());
@@ -954,7 +963,7 @@ MaybeHandle<Object> Object::OrdinaryHasInstance(Isolate* isolate,
   }
 
   // If {object} is not a receiver, return false.
-  if (!object->IsJSReceiver()) return isolate->factory()->false_value();
+  if (!IsJSReceiver(*object)) return isolate->factory()->false_value();
 
   // Get the "prototype" of {callable}; raise an error if it's not a receiver.
   Handle<Object> prototype;
@@ -963,7 +972,7 @@ MaybeHandle<Object> Object::OrdinaryHasInstance(Isolate* isolate,
       Object::GetProperty(isolate, callable,
                           isolate->factory()->prototype_string()),
       Object);
-  if (!prototype->IsJSReceiver()) {
+  if (!IsJSReceiver(*prototype)) {
     THROW_NEW_ERROR(
         isolate,
         NewTypeError(MessageTemplate::kInstanceofNonobjectProto, prototype),
@@ -981,7 +990,7 @@ MaybeHandle<Object> Object::OrdinaryHasInstance(Isolate* isolate,
 MaybeHandle<Object> Object::InstanceOf(Isolate* isolate, Handle<Object> object,
                                        Handle<Object> callable) {
   // The {callable} must be a receiver.
-  if (!callable->IsJSReceiver()) {
+  if (!IsJSReceiver(*callable)) {
     THROW_NEW_ERROR(isolate,
                     NewTypeError(MessageTemplate::kNonObjectInInstanceOfCheck),
                     Object);
@@ -994,18 +1003,19 @@ MaybeHandle<Object> Object::InstanceOf(Isolate* isolate, Handle<Object> object,
       Object::GetMethod(Handle<JSReceiver>::cast(callable),
                         isolate->factory()->has_instance_symbol()),
       Object);
-  if (!inst_of_handler->IsUndefined(isolate)) {
+  if (!IsUndefined(*inst_of_handler, isolate)) {
     // Call the {inst_of_handler} on the {callable}.
     Handle<Object> result;
     ASSIGN_RETURN_ON_EXCEPTION(
         isolate, result,
         Execution::Call(isolate, inst_of_handler, callable, 1, &object),
         Object);
-    return isolate->factory()->ToBoolean(result->BooleanValue(isolate));
+    return isolate->factory()->ToBoolean(
+        Object::BooleanValue(*result, isolate));
   }
 
   // The {callable} must have a [[Call]] internal method.
-  if (!callable->IsCallable()) {
+  if (!IsCallable(*callable)) {
     THROW_NEW_ERROR(
         isolate, NewTypeError(MessageTemplate::kNonCallableInInstanceOfCheck),
         Object);
@@ -1026,10 +1036,10 @@ MaybeHandle<Object> Object::GetMethod(Handle<JSReceiver> receiver,
   Isolate* isolate = receiver->GetIsolate();
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, func, JSReceiver::GetProperty(isolate, receiver, name), Object);
-  if (func->IsNullOrUndefined(isolate)) {
+  if (IsNullOrUndefined(*func, isolate)) {
     return isolate->factory()->undefined_value();
   }
-  if (!func->IsCallable()) {
+  if (!IsCallable(*func)) {
     THROW_NEW_ERROR(isolate,
                     NewTypeError(MessageTemplate::kPropertyNotFunction, func,
                                  name, receiver),
@@ -1043,17 +1053,18 @@ namespace {
 MaybeHandle<FixedArray> CreateListFromArrayLikeFastPath(
     Isolate* isolate, Handle<Object> object, ElementTypes element_types) {
   if (element_types == ElementTypes::kAll) {
-    if (object->IsJSArray()) {
+    if (IsJSArray(*object)) {
       Handle<JSArray> array = Handle<JSArray>::cast(object);
       uint32_t length;
       if (!array->HasArrayPrototype(isolate) ||
-          !array->length().ToUint32(&length) || !array->HasFastElements() ||
+          !Object::ToUint32(array->length(), &length) ||
+          !array->HasFastElements() ||
           !JSObject::PrototypeHasNoElements(isolate, *array)) {
         return MaybeHandle<FixedArray>();
       }
       return array->GetElementsAccessor()->CreateListFromArrayLike(
           isolate, array, length);
-    } else if (object->IsJSTypedArray()) {
+    } else if (IsJSTypedArray(*object)) {
       Handle<JSTypedArray> array = Handle<JSTypedArray>::cast(object);
       size_t length = array->GetLength();
       if (array->IsDetachedOrOutOfBounds() ||
@@ -1081,7 +1092,7 @@ MaybeHandle<FixedArray> Object::CreateListFromArrayLike(
   // 1. ReturnIfAbrupt(object).
   // 2. (default elementTypes -- not applicable.)
   // 3. If Type(obj) is not Object, throw a TypeError exception.
-  if (!object->IsJSReceiver()) {
+  if (!IsJSReceiver(*object)) {
     THROW_NEW_ERROR(isolate,
                     NewTypeError(MessageTemplate::kCalledOnNonObject,
                                  isolate->factory()->NewStringFromAsciiChecked(
@@ -1096,7 +1107,7 @@ MaybeHandle<FixedArray> Object::CreateListFromArrayLike(
                              Object::GetLengthFromArrayLike(isolate, receiver),
                              FixedArray);
   uint32_t len;
-  if (!raw_length_number->ToUint32(&len) ||
+  if (!Object::ToUint32(*raw_length_number, &len) ||
       len > static_cast<uint32_t>(FixedArray::kMaxLength)) {
     THROW_NEW_ERROR(isolate,
                     NewRangeError(MessageTemplate::kInvalidArrayLength),
@@ -1120,7 +1131,7 @@ MaybeHandle<FixedArray> Object::CreateListFromArrayLike(
       case ElementTypes::kStringAndSymbol: {
         // 7c. If Type(next) is not an element of elementTypes, throw a
         //     TypeError exception.
-        if (!next->IsName()) {
+        if (!IsName(*next)) {
           THROW_NEW_ERROR(isolate,
                           NewTypeError(MessageTemplate::kNotPropertyName, next),
                           FixedArray);
@@ -1161,8 +1172,8 @@ MaybeHandle<Object> Object::GetProperty(LookupIterator* it,
         Handle<Object> receiver = it->GetReceiver();
         // In case of global IC, the receiver is the global object. Replace by
         // the global proxy.
-        if (receiver->IsJSGlobalObject()) {
-          receiver = handle(JSGlobalObject::cast(*receiver).global_proxy(),
+        if (IsJSGlobalObject(*receiver)) {
+          receiver = handle(JSGlobalObject::cast(*receiver)->global_proxy(),
                             it->isolate());
         }
         if (is_global_reference) {
@@ -1256,7 +1267,7 @@ MaybeHandle<Object> JSProxy::GetProperty(Isolate* isolate,
       isolate, trap,
       Object::GetMethod(Handle<JSReceiver>::cast(handler), trap_name), Object);
   // 7. If trap is undefined, then
-  if (trap->IsUndefined(isolate)) {
+  if (IsUndefined(*trap, isolate)) {
     // 7.a Return target.[[Get]](P, Receiver).
     PropertyKey key(isolate, name);
     LookupIterator it(isolate, receiver, key, target);
@@ -1301,7 +1312,7 @@ MaybeHandle<Object> JSProxy::CheckGetSetTrapResult(Isolate* isolate,
     bool inconsistent = PropertyDescriptor::IsDataDescriptor(&target_desc) &&
                         !target_desc.configurable() &&
                         !target_desc.writable() &&
-                        !trap_result->SameValue(*target_desc.value());
+                        !Object::SameValue(*trap_result, *target_desc.value());
     if (inconsistent) {
       if (access_kind == kGet) {
         THROW_NEW_ERROR(
@@ -1321,12 +1332,12 @@ MaybeHandle<Object> JSProxy::CheckGetSetTrapResult(Isolate* isolate,
     if (access_kind == kGet) {
       inconsistent = PropertyDescriptor::IsAccessorDescriptor(&target_desc) &&
                      !target_desc.configurable() &&
-                     target_desc.get()->IsUndefined(isolate) &&
-                     !trap_result->IsUndefined(isolate);
+                     IsUndefined(*target_desc.get(), isolate) &&
+                     !IsUndefined(*trap_result, isolate);
     } else {
       inconsistent = PropertyDescriptor::IsAccessorDescriptor(&target_desc) &&
                      !target_desc.configurable() &&
-                     target_desc.set()->IsUndefined(isolate);
+                     IsUndefined(*target_desc.set(), isolate);
     }
     if (inconsistent) {
       if (access_kind == kGet) {
@@ -1345,13 +1356,14 @@ MaybeHandle<Object> JSProxy::CheckGetSetTrapResult(Isolate* isolate,
   return isolate->factory()->undefined_value();
 }
 
-bool Object::ToInt32(int32_t* value) {
-  if (IsSmi()) {
-    *value = Smi::ToInt(*this);
+// static
+bool Object::ToInt32(Tagged<Object> obj, int32_t* value) {
+  if (IsSmi(obj)) {
+    *value = Smi::ToInt(obj);
     return true;
   }
-  if (IsHeapNumber()) {
-    double num = HeapNumber::cast(*this).value();
+  if (IsHeapNumber(obj)) {
+    double num = HeapNumber::cast(obj)->value();
     // Check range before conversion to avoid undefined behavior.
     if (num >= kMinInt && num <= kMaxInt && FastI2D(FastD2I(num)) == num) {
       *value = FastD2I(num);
@@ -1406,7 +1418,7 @@ MaybeHandle<HeapObject> JSProxy::GetPrototype(Handle<JSProxy> proxy) {
   ASSIGN_RETURN_ON_EXCEPTION(isolate, trap,
                              Object::GetMethod(handler, trap_name), HeapObject);
   // 6. If trap is undefined, then return target.[[GetPrototypeOf]]().
-  if (trap->IsUndefined(isolate)) {
+  if (IsUndefined(*trap, isolate)) {
     return JSReceiver::GetPrototype(isolate, target);
   }
   // 7. Let handlerProto be ? Call(trap, handler, «target»).
@@ -1417,7 +1429,7 @@ MaybeHandle<HeapObject> JSProxy::GetPrototype(Handle<JSProxy> proxy) {
       Execution::Call(isolate, trap, handler, arraysize(argv), argv),
       HeapObject);
   // 8. If Type(handlerProto) is neither Object nor Null, throw a TypeError.
-  if (!(handler_proto->IsJSReceiver() || handler_proto->IsNull(isolate))) {
+  if (!(IsJSReceiver(*handler_proto) || IsNull(*handler_proto, isolate))) {
     THROW_NEW_ERROR(isolate,
                     NewTypeError(MessageTemplate::kProxyGetPrototypeOfInvalid),
                     HeapObject);
@@ -1433,7 +1445,7 @@ MaybeHandle<HeapObject> JSProxy::GetPrototype(Handle<JSProxy> proxy) {
                              JSReceiver::GetPrototype(isolate, target),
                              HeapObject);
   // 12. If SameValue(handlerProto, targetProto) is false, throw a TypeError.
-  if (!handler_proto->SameValue(*target_proto)) {
+  if (!Object::SameValue(*handler_proto, *target_proto)) {
     THROW_NEW_ERROR(
         isolate,
         NewTypeError(MessageTemplate::kProxyGetPrototypeOfNonExtensible),
@@ -1449,23 +1461,23 @@ MaybeHandle<Object> Object::GetPropertyWithAccessor(LookupIterator* it) {
   Handle<Object> receiver = it->GetReceiver();
   // In case of global IC, the receiver is the global object. Replace by the
   // global proxy.
-  if (receiver->IsJSGlobalObject()) {
-    receiver = handle(JSGlobalObject::cast(*receiver).global_proxy(), isolate);
+  if (IsJSGlobalObject(*receiver)) {
+    receiver = handle(JSGlobalObject::cast(*receiver)->global_proxy(), isolate);
   }
 
   // We should never get here to initialize a const with the hole value since a
   // const declaration would conflict with the getter.
-  DCHECK(!structure->IsForeign());
+  DCHECK(!IsForeign(*structure));
 
   // API style callbacks.
   Handle<JSObject> holder = it->GetHolder<JSObject>();
-  if (structure->IsAccessorInfo()) {
+  if (IsAccessorInfo(*structure)) {
     Handle<Name> name = it->GetName();
     Handle<AccessorInfo> info = Handle<AccessorInfo>::cast(structure);
 
     if (!info->has_getter()) return isolate->factory()->undefined_value();
 
-    if (info->is_sloppy() && !receiver->IsJSReceiver()) {
+    if (info->is_sloppy() && !IsJSReceiver(*receiver)) {
       ASSIGN_RETURN_ON_EXCEPTION(isolate, receiver,
                                  Object::ConvertReceiver(isolate, receiver),
                                  Object);
@@ -1477,7 +1489,7 @@ MaybeHandle<Object> Object::GetPropertyWithAccessor(LookupIterator* it) {
     RETURN_EXCEPTION_IF_SCHEDULED_EXCEPTION(isolate, Object);
     if (result.is_null()) return isolate->factory()->undefined_value();
     Handle<Object> reboxed_result = handle(*result, isolate);
-    if (info->replace_on_access() && receiver->IsJSReceiver()) {
+    if (info->replace_on_access() && IsJSReceiver(*receiver)) {
       RETURN_ON_EXCEPTION(isolate,
                           Accessors::ReplaceAccessorWithDataProperty(
                               isolate, receiver, holder, name, result),
@@ -1494,13 +1506,13 @@ MaybeHandle<Object> Object::GetPropertyWithAccessor(LookupIterator* it) {
 
   // Regular accessor.
   Handle<Object> getter(accessor_pair->getter(), isolate);
-  if (getter->IsFunctionTemplateInfo()) {
+  if (IsFunctionTemplateInfo(*getter)) {
     SaveAndSwitchContext save(isolate,
                               *holder->GetCreationContext().ToHandleChecked());
     return Builtins::InvokeApiFunction(
         isolate, false, Handle<FunctionTemplateInfo>::cast(getter), receiver, 0,
         nullptr, isolate->factory()->undefined_value());
-  } else if (getter->IsCallable()) {
+  } else if (IsCallable(*getter)) {
     // TODO(rossberg): nicer would be to cast to some JSCallable here...
     return Object::GetPropertyWithDefinedGetter(
         receiver, Handle<JSReceiver>::cast(getter));
@@ -1517,17 +1529,17 @@ Maybe<bool> Object::SetPropertyWithAccessor(
   Handle<Object> receiver = it->GetReceiver();
   // In case of global IC, the receiver is the global object. Replace by the
   // global proxy.
-  if (receiver->IsJSGlobalObject()) {
-    receiver = handle(JSGlobalObject::cast(*receiver).global_proxy(), isolate);
+  if (IsJSGlobalObject(*receiver)) {
+    receiver = handle(JSGlobalObject::cast(*receiver)->global_proxy(), isolate);
   }
 
   // We should never get here to initialize a const with the hole value since a
   // const declaration would conflict with the setter.
-  DCHECK(!structure->IsForeign());
+  DCHECK(!IsForeign(*structure));
 
   // API style callbacks.
   Handle<JSObject> holder = it->GetHolder<JSObject>();
-  if (structure->IsAccessorInfo()) {
+  if (IsAccessorInfo(*structure)) {
     Handle<Name> name = it->GetName();
     Handle<AccessorInfo> info = Handle<AccessorInfo>::cast(structure);
 
@@ -1538,7 +1550,7 @@ Maybe<bool> Object::SetPropertyWithAccessor(
       return Just(true);
     }
 
-    if (info->is_sloppy() && !receiver->IsJSReceiver()) {
+    if (info->is_sloppy() && !IsJSReceiver(*receiver)) {
       ASSIGN_RETURN_ON_EXCEPTION_VALUE(
           isolate, receiver, Object::ConvertReceiver(isolate, receiver),
           Nothing<bool>());
@@ -1559,14 +1571,14 @@ Maybe<bool> Object::SetPropertyWithAccessor(
     // (signalling an exception) or a boolean Oddball.
     RETURN_VALUE_IF_SCHEDULED_EXCEPTION(isolate, Nothing<bool>());
     if (result.is_null()) return Just(true);
-    DCHECK(result->BooleanValue(isolate) ||
+    DCHECK(Object::BooleanValue(*result, isolate) ||
            GetShouldThrow(isolate, maybe_should_throw) == kDontThrow);
-    return Just(result->BooleanValue(isolate));
+    return Just(Object::BooleanValue(*result, isolate));
   }
 
   // Regular accessor.
-  Handle<Object> setter(AccessorPair::cast(*structure).setter(), isolate);
-  if (setter->IsFunctionTemplateInfo()) {
+  Handle<Object> setter(AccessorPair::cast(*structure)->setter(), isolate);
+  if (IsFunctionTemplateInfo(*setter)) {
     SaveAndSwitchContext save(isolate,
                               *holder->GetCreationContext().ToHandleChecked());
     Handle<Object> argv[] = {value};
@@ -1578,7 +1590,7 @@ Maybe<bool> Object::SetPropertyWithAccessor(
                                     isolate->factory()->undefined_value()),
         Nothing<bool>());
     return Just(true);
-  } else if (setter->IsCallable()) {
+  } else if (IsCallable(*setter)) {
     // TODO(rossberg): nicer would be to cast to some JSCallable here...
     return SetPropertyWithDefinedSetter(
         receiver, Handle<JSReceiver>::cast(setter), value, maybe_should_throw);
@@ -1623,56 +1635,60 @@ Maybe<bool> Object::SetPropertyWithDefinedSetter(
   return Just(true);
 }
 
-Map Object::GetPrototypeChainRootMap(Isolate* isolate) const {
+// static
+Map Object::GetPrototypeChainRootMap(Tagged<Object> obj, Isolate* isolate) {
   DisallowGarbageCollection no_alloc;
-  if (IsSmi()) {
-    Context native_context = isolate->context().native_context();
-    return native_context.number_function().initial_map();
+  if (IsSmi(obj)) {
+    Context native_context = isolate->context()->native_context();
+    return native_context->number_function()->initial_map();
   }
 
-  const HeapObject heap_object = HeapObject::cast(*this);
-  return heap_object.map().GetPrototypeChainRootMap(isolate);
+  const HeapObject heap_object = HeapObject::cast(obj);
+  return heap_object->map()->GetPrototypeChainRootMap(isolate);
 }
 
-Smi Object::GetOrCreateHash(Isolate* isolate) {
+// static
+Smi Object::GetOrCreateHash(Tagged<Object> obj, Isolate* isolate) {
   DisallowGarbageCollection no_gc;
-  Object hash = Object::GetSimpleHash(*this);
-  if (hash.IsSmi()) return Smi::cast(hash);
+  Object hash = Object::GetSimpleHash(obj);
+  if (IsSmi(hash)) return Smi::cast(hash);
 
-  DCHECK(IsJSReceiver());
-  return JSReceiver::cast(*this).GetOrCreateIdentityHash(isolate);
+  DCHECK(IsJSReceiver(obj));
+  return JSReceiver::cast(obj)->GetOrCreateIdentityHash(isolate);
 }
 
-bool Object::SameValue(Object other) {
-  if (other == *this) return true;
+// static
+bool Object::SameValue(Tagged<Object> obj, Object other) {
+  if (other == obj) return true;
 
-  if (IsNumber() && other.IsNumber()) {
-    return SameNumberValue(Number(), other.Number());
+  if (IsNumber(obj) && IsNumber(other)) {
+    return SameNumberValue(Object::Number(obj), Object::Number(other));
   }
-  if (IsString() && other.IsString()) {
-    return String::cast(*this).Equals(String::cast(other));
+  if (IsString(obj) && IsString(other)) {
+    return String::cast(obj)->Equals(String::cast(other));
   }
-  if (IsBigInt() && other.IsBigInt()) {
-    return BigInt::EqualToBigInt(BigInt::cast(*this), BigInt::cast(other));
+  if (IsBigInt(obj) && IsBigInt(other)) {
+    return BigInt::EqualToBigInt(BigInt::cast(obj), BigInt::cast(other));
   }
   return false;
 }
 
-bool Object::SameValueZero(Object other) {
-  if (other == *this) return true;
+// static
+bool Object::SameValueZero(Tagged<Object> obj, Object other) {
+  if (other == obj) return true;
 
-  if (IsNumber() && other.IsNumber()) {
-    double this_value = Number();
-    double other_value = other.Number();
+  if (IsNumber(obj) && IsNumber(other)) {
+    double this_value = Object::Number(obj);
+    double other_value = Object::Number(other);
     // +0 == -0 is true
     return this_value == other_value ||
            (std::isnan(this_value) && std::isnan(other_value));
   }
-  if (IsString() && other.IsString()) {
-    return String::cast(*this).Equals(String::cast(other));
+  if (IsString(obj) && IsString(other)) {
+    return String::cast(obj)->Equals(String::cast(other));
   }
-  if (IsBigInt() && other.IsBigInt()) {
-    return BigInt::EqualToBigInt(BigInt::cast(*this), BigInt::cast(other));
+  if (IsBigInt(obj) && IsBigInt(other)) {
+    return BigInt::EqualToBigInt(BigInt::cast(obj), BigInt::cast(other));
   }
   return false;
 }
@@ -1681,13 +1697,13 @@ MaybeHandle<Object> Object::ArraySpeciesConstructor(
     Isolate* isolate, Handle<Object> original_array) {
   Handle<Object> default_species = isolate->array_function();
   if (!v8_flags.builtin_subclassing) return default_species;
-  if (original_array->IsJSArray() &&
+  if (IsJSArray(*original_array) &&
       Handle<JSArray>::cast(original_array)->HasArrayPrototype(isolate) &&
       Protectors::IsArraySpeciesLookupChainIntact(isolate)) {
     return default_species;
   }
   Handle<Object> constructor = isolate->factory()->undefined_value();
-  Maybe<bool> is_array = Object::IsArray(original_array);
+  Maybe<bool> is_array = IsArray(original_array);
   MAYBE_RETURN_NULL(is_array);
   if (is_array.FromJust()) {
     ASSIGN_RETURN_ON_EXCEPTION(
@@ -1695,7 +1711,7 @@ MaybeHandle<Object> Object::ArraySpeciesConstructor(
         Object::GetProperty(isolate, original_array,
                             isolate->factory()->constructor_string()),
         Object);
-    if (constructor->IsConstructor()) {
+    if (IsConstructor(*constructor)) {
       Handle<Context> constructor_context;
       ASSIGN_RETURN_ON_EXCEPTION(
           isolate, constructor_context,
@@ -1706,22 +1722,22 @@ MaybeHandle<Object> Object::ArraySpeciesConstructor(
         constructor = isolate->factory()->undefined_value();
       }
     }
-    if (constructor->IsJSReceiver()) {
+    if (IsJSReceiver(*constructor)) {
       ASSIGN_RETURN_ON_EXCEPTION(
           isolate, constructor,
           JSReceiver::GetProperty(isolate,
                                   Handle<JSReceiver>::cast(constructor),
                                   isolate->factory()->species_symbol()),
           Object);
-      if (constructor->IsNull(isolate)) {
+      if (IsNull(*constructor, isolate)) {
         constructor = isolate->factory()->undefined_value();
       }
     }
   }
-  if (constructor->IsUndefined(isolate)) {
+  if (IsUndefined(*constructor, isolate)) {
     return default_species;
   } else {
-    if (!constructor->IsConstructor()) {
+    if (!IsConstructor(*constructor)) {
       THROW_NEW_ERROR(isolate,
                       NewTypeError(MessageTemplate::kSpeciesNotConstructor),
                       Object);
@@ -1741,9 +1757,9 @@ V8_WARN_UNUSED_RESULT MaybeHandle<Object> Object::SpeciesConstructor(
                             isolate->factory()->constructor_string()),
       Object);
 
-  if (ctor_obj->IsUndefined(isolate)) return default_ctor;
+  if (IsUndefined(*ctor_obj, isolate)) return default_ctor;
 
-  if (!ctor_obj->IsJSReceiver()) {
+  if (!IsJSReceiver(*ctor_obj)) {
     THROW_NEW_ERROR(isolate,
                     NewTypeError(MessageTemplate::kConstructorNotReceiver),
                     Object);
@@ -1758,30 +1774,31 @@ V8_WARN_UNUSED_RESULT MaybeHandle<Object> Object::SpeciesConstructor(
                             isolate->factory()->species_symbol()),
       Object);
 
-  if (species->IsNullOrUndefined(isolate)) {
+  if (IsNullOrUndefined(*species, isolate)) {
     return default_ctor;
   }
 
-  if (species->IsConstructor()) return species;
+  if (IsConstructor(*species)) return species;
 
   THROW_NEW_ERROR(
       isolate, NewTypeError(MessageTemplate::kSpeciesNotConstructor), Object);
 }
 
-bool Object::IterationHasObservableEffects() {
+// static
+bool Object::IterationHasObservableEffects(Tagged<Object> obj) {
   // Check that this object is an array.
-  if (!IsJSArray()) return true;
-  JSArray array = JSArray::cast(*this);
-  Isolate* isolate = array.GetIsolate();
+  if (!IsJSArray(obj)) return true;
+  JSArray array = JSArray::cast(obj);
+  Isolate* isolate = array->GetIsolate();
 
   // Check that we have the original ArrayPrototype.
   i::HandleScope handle_scope(isolate);
   i::Handle<i::Context> context;
-  if (!array.GetCreationContext().ToHandle(&context)) return false;
-  if (!array.map().prototype().IsJSObject()) return true;
-  JSObject array_proto = JSObject::cast(array.map().prototype());
+  if (!array->GetCreationContext().ToHandle(&context)) return false;
+  if (!IsJSObject(array->map()->prototype())) return true;
+  JSObject array_proto = JSObject::cast(array->map()->prototype());
   auto initial_array_prototype =
-      context->native_context().initial_array_prototype();
+      context->native_context()->initial_array_prototype();
   if (initial_array_prototype != array_proto) return true;
 
   // Check that the ArrayPrototype hasn't been modified in a way that would
@@ -1790,7 +1807,7 @@ bool Object::IterationHasObservableEffects() {
 
   // For FastPacked kinds, iteration will have the same effect as simply
   // accessing each property in order.
-  ElementsKind array_kind = array.GetElementsKind();
+  ElementsKind array_kind = array->GetElementsKind();
   if (IsFastPackedElementsKind(array_kind)) return false;
 
   // For FastHoley kinds, an element access on a hole would cause a lookup on
@@ -1803,26 +1820,27 @@ bool Object::IterationHasObservableEffects() {
   return true;
 }
 
-bool Object::IsCodeLike(Isolate* isolate) const {
+// static
+bool Object::IsCodeLike(Tagged<Object> obj, Isolate* isolate) {
   DisallowGarbageCollection no_gc;
-  return IsJSReceiver() && JSReceiver::cast(*this).IsCodeLike(isolate);
+  return IsJSReceiver(obj) && JSReceiver::cast(obj)->IsCodeLike(isolate);
 }
 
-void Object::ShortPrint(FILE* out) const {
+void ShortPrint(Object obj, FILE* out) {
   OFStream os(out);
-  os << Brief(*this);
+  os << Brief(obj);
 }
 
-void Object::ShortPrint(StringStream* accumulator) const {
+void ShortPrint(Object obj, StringStream* accumulator) {
   std::ostringstream os;
-  os << Brief(*this);
+  os << Brief(obj);
   accumulator->Add(os.str().c_str());
 }
 
-void Object::ShortPrint(std::ostream& os) const { os << Brief(*this); }
+void ShortPrint(Object obj, std::ostream& os) { os << Brief(obj); }
 
 std::ostream& operator<<(std::ostream& os, const Object& obj) {
-  obj.ShortPrint(os);
+  ShortPrint(obj, os);
   return os;
 }
 
@@ -1836,9 +1854,9 @@ std::ostream& operator<<(std::ostream& os, const Brief& v) {
     os << "[cleared]";
   } else if (maybe_object->GetHeapObjectIfWeak(&heap_object)) {
     os << "[weak] ";
-    heap_object.HeapObjectShortPrint(os);
+    heap_object->HeapObjectShortPrint(os);
   } else if (maybe_object->GetHeapObjectIfStrong(&heap_object)) {
-    heap_object.HeapObjectShortPrint(os);
+    heap_object->HeapObjectShortPrint(os);
   } else {
     UNREACHABLE();
   }
@@ -1851,32 +1869,32 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
   PtrComprCageBase cage_base = GetPtrComprCageBase();
   os << AsHex::Address(this->ptr()) << " ";
 
-  if (IsString(cage_base)) {
+  if (IsString(*this, cage_base)) {
     HeapStringAllocator allocator;
     StringStream accumulator(&allocator);
-    String::cast(*this).StringShortPrint(&accumulator);
+    String::cast(*this)->StringShortPrint(&accumulator);
     os << accumulator.ToCString().get();
     return;
   }
-  if (IsJSObject(cage_base)) {
+  if (IsJSObject(*this, cage_base)) {
     HeapStringAllocator allocator;
     StringStream accumulator(&allocator);
-    JSObject::cast(*this).JSObjectShortPrint(&accumulator);
+    JSObject::cast(*this)->JSObjectShortPrint(&accumulator);
     os << accumulator.ToCString().get();
     return;
   }
-  switch (map(cage_base).instance_type()) {
+  switch (map(cage_base)->instance_type()) {
     case MAP_TYPE: {
       os << "<Map";
       Map mapInstance = Map::cast(*this);
-      if (mapInstance.instance_size() != kVariableSizeSentinel) {
-        os << "[" << mapInstance.instance_size() << "]";
+      if (mapInstance->instance_size() != kVariableSizeSentinel) {
+        os << "[" << mapInstance->instance_size() << "]";
       }
       os << "(";
-      if (mapInstance.IsJSObjectMap()) {
-        os << ElementsKindToString(mapInstance.elements_kind());
+      if (IsJSObjectMap(mapInstance)) {
+        os << ElementsKindToString(mapInstance->elements_kind());
       } else {
-        os << mapInstance.instance_type();
+        os << mapInstance->instance_type();
       }
       os << ")>";
     } break;
@@ -1884,98 +1902,102 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
       os << "<AwaitContext generator= ";
       HeapStringAllocator allocator;
       StringStream accumulator(&allocator);
-      Context::cast(*this).extension().ShortPrint(&accumulator);
+      ShortPrint(Context::cast(*this)->extension(), &accumulator);
       os << accumulator.ToCString().get();
       os << '>';
       break;
     }
     case BLOCK_CONTEXT_TYPE:
-      os << "<BlockContext[" << Context::cast(*this).length() << "]>";
+      os << "<BlockContext[" << Context::cast(*this)->length() << "]>";
       break;
     case CATCH_CONTEXT_TYPE:
-      os << "<CatchContext[" << Context::cast(*this).length() << "]>";
+      os << "<CatchContext[" << Context::cast(*this)->length() << "]>";
       break;
     case DEBUG_EVALUATE_CONTEXT_TYPE:
-      os << "<DebugEvaluateContext[" << Context::cast(*this).length() << "]>";
+      os << "<DebugEvaluateContext[" << Context::cast(*this)->length() << "]>";
       break;
     case EVAL_CONTEXT_TYPE:
-      os << "<EvalContext[" << Context::cast(*this).length() << "]>";
+      os << "<EvalContext[" << Context::cast(*this)->length() << "]>";
       break;
     case FUNCTION_CONTEXT_TYPE:
-      os << "<FunctionContext[" << Context::cast(*this).length() << "]>";
+      os << "<FunctionContext[" << Context::cast(*this)->length() << "]>";
       break;
     case MODULE_CONTEXT_TYPE:
-      os << "<ModuleContext[" << Context::cast(*this).length() << "]>";
+      os << "<ModuleContext[" << Context::cast(*this)->length() << "]>";
       break;
     case NATIVE_CONTEXT_TYPE:
-      os << "<NativeContext[" << Context::cast(*this).length() << "]>";
+      os << "<NativeContext[" << Context::cast(*this)->length() << "]>";
       break;
     case SCRIPT_CONTEXT_TYPE:
-      os << "<ScriptContext[" << Context::cast(*this).length() << "]>";
+      os << "<ScriptContext[" << Context::cast(*this)->length() << "]>";
       break;
     case WITH_CONTEXT_TYPE:
-      os << "<WithContext[" << Context::cast(*this).length() << "]>";
+      os << "<WithContext[" << Context::cast(*this)->length() << "]>";
       break;
     case SCRIPT_CONTEXT_TABLE_TYPE:
-      os << "<ScriptContextTable[" << FixedArray::cast(*this).length() << "]>";
+      os << "<ScriptContextTable[" << FixedArray::cast(*this)->length() << "]>";
       break;
     case HASH_TABLE_TYPE:
-      os << "<HashTable[" << FixedArray::cast(*this).length() << "]>";
+      os << "<HashTable[" << FixedArray::cast(*this)->length() << "]>";
       break;
     case ORDERED_HASH_MAP_TYPE:
-      os << "<OrderedHashMap[" << FixedArray::cast(*this).length() << "]>";
+      os << "<OrderedHashMap[" << FixedArray::cast(*this)->length() << "]>";
       break;
     case ORDERED_HASH_SET_TYPE:
-      os << "<OrderedHashSet[" << FixedArray::cast(*this).length() << "]>";
+      os << "<OrderedHashSet[" << FixedArray::cast(*this)->length() << "]>";
       break;
     case ORDERED_NAME_DICTIONARY_TYPE:
-      os << "<OrderedNameDictionary[" << FixedArray::cast(*this).length()
+      os << "<OrderedNameDictionary[" << FixedArray::cast(*this)->length()
          << "]>";
       break;
     case NAME_DICTIONARY_TYPE:
-      os << "<NameDictionary[" << FixedArray::cast(*this).length() << "]>";
+      os << "<NameDictionary[" << FixedArray::cast(*this)->length() << "]>";
       break;
     case SWISS_NAME_DICTIONARY_TYPE:
       os << "<SwissNameDictionary["
-         << SwissNameDictionary::cast(*this).Capacity() << "]>";
+         << SwissNameDictionary::cast(*this)->Capacity() << "]>";
       break;
     case GLOBAL_DICTIONARY_TYPE:
-      os << "<GlobalDictionary[" << FixedArray::cast(*this).length() << "]>";
+      os << "<GlobalDictionary[" << FixedArray::cast(*this)->length() << "]>";
       break;
     case NUMBER_DICTIONARY_TYPE:
-      os << "<NumberDictionary[" << FixedArray::cast(*this).length() << "]>";
+      os << "<NumberDictionary[" << FixedArray::cast(*this)->length() << "]>";
       break;
     case SIMPLE_NUMBER_DICTIONARY_TYPE:
-      os << "<SimpleNumberDictionary[" << FixedArray::cast(*this).length()
+      os << "<SimpleNumberDictionary[" << FixedArray::cast(*this)->length()
          << "]>";
       break;
     case FIXED_ARRAY_TYPE:
-      os << "<FixedArray[" << FixedArray::cast(*this).length() << "]>";
+      os << "<FixedArray[" << FixedArray::cast(*this)->length() << "]>";
       break;
     case OBJECT_BOILERPLATE_DESCRIPTION_TYPE:
-      os << "<ObjectBoilerplateDescription[" << FixedArray::cast(*this).length()
-         << "]>";
+      os << "<ObjectBoilerplateDescription["
+         << FixedArray::cast(*this)->length() << "]>";
       break;
     case FIXED_DOUBLE_ARRAY_TYPE:
-      os << "<FixedDoubleArray[" << FixedDoubleArray::cast(*this).length()
+      os << "<FixedDoubleArray[" << FixedDoubleArray::cast(*this)->length()
          << "]>";
       break;
     case BYTE_ARRAY_TYPE:
-      os << "<ByteArray[" << ByteArray::cast(*this).length() << "]>";
+      os << "<ByteArray[" << ByteArray::cast(*this)->length() << "]>";
       break;
     case BYTECODE_ARRAY_TYPE:
-      os << "<BytecodeArray[" << BytecodeArray::cast(*this).length() << "]>";
+      os << "<BytecodeArray[" << BytecodeArray::cast(*this)->length() << "]>";
+      break;
+    case EXTERNAL_POINTER_ARRAY_TYPE:
+      os << "<ExternalPointerArray["
+         << ExternalPointerArray::cast(*this)->length() << "]>";
       break;
     case DESCRIPTOR_ARRAY_TYPE:
       os << "<DescriptorArray["
-         << DescriptorArray::cast(*this).number_of_descriptors() << "]>";
+         << DescriptorArray::cast(*this)->number_of_descriptors() << "]>";
       break;
     case TRANSITION_ARRAY_TYPE:
-      os << "<TransitionArray[" << TransitionArray::cast(*this).length()
+      os << "<TransitionArray[" << TransitionArray::cast(*this)->length()
          << "]>";
       break;
     case PROPERTY_ARRAY_TYPE:
-      os << "<PropertyArray[" << PropertyArray::cast(*this).length() << "]>";
+      os << "<PropertyArray[" << PropertyArray::cast(*this)->length() << "]>";
       break;
     case FEEDBACK_CELL_TYPE: {
       {
@@ -1996,42 +2018,42 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
     }
     case CLOSURE_FEEDBACK_CELL_ARRAY_TYPE:
       os << "<ClosureFeedbackCellArray["
-         << ClosureFeedbackCellArray::cast(*this).length() << "]>";
+         << ClosureFeedbackCellArray::cast(*this)->length() << "]>";
       break;
     case FEEDBACK_VECTOR_TYPE:
-      os << "<FeedbackVector[" << FeedbackVector::cast(*this).length() << "]>";
+      os << "<FeedbackVector[" << FeedbackVector::cast(*this)->length() << "]>";
       break;
     case FREE_SPACE_TYPE:
-      os << "<FreeSpace[" << FreeSpace::cast(*this).size(kRelaxedLoad) << "]>";
+      os << "<FreeSpace[" << FreeSpace::cast(*this)->size(kRelaxedLoad) << "]>";
       break;
 
     case PREPARSE_DATA_TYPE: {
       PreparseData data = PreparseData::cast(*this);
-      os << "<PreparseData[data=" << data.data_length()
-         << " children=" << data.children_length() << "]>";
+      os << "<PreparseData[data=" << data->data_length()
+         << " children=" << data->children_length() << "]>";
       break;
     }
 
     case UNCOMPILED_DATA_WITHOUT_PREPARSE_DATA_TYPE: {
       UncompiledDataWithoutPreparseData data =
           UncompiledDataWithoutPreparseData::cast(*this);
-      os << "<UncompiledDataWithoutPreparseData (" << data.start_position()
-         << ", " << data.end_position() << ")]>";
+      os << "<UncompiledDataWithoutPreparseData (" << data->start_position()
+         << ", " << data->end_position() << ")]>";
       break;
     }
 
     case UNCOMPILED_DATA_WITH_PREPARSE_DATA_TYPE: {
       UncompiledDataWithPreparseData data =
           UncompiledDataWithPreparseData::cast(*this);
-      os << "<UncompiledDataWithPreparseData (" << data.start_position() << ", "
-         << data.end_position() << ") preparsed=" << Brief(data.preparse_data())
-         << ">";
+      os << "<UncompiledDataWithPreparseData (" << data->start_position()
+         << ", " << data->end_position()
+         << ") preparsed=" << Brief(data->preparse_data()) << ">";
       break;
     }
 
     case SHARED_FUNCTION_INFO_TYPE: {
       SharedFunctionInfo shared = SharedFunctionInfo::cast(*this);
-      std::unique_ptr<char[]> debug_name = shared.DebugNameCStr();
+      std::unique_ptr<char[]> debug_name = shared->DebugNameCStr();
       if (debug_name[0] != '\0') {
         os << "<SharedFunctionInfo " << debug_name.get() << ">";
       } else {
@@ -2042,78 +2064,86 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
     case JS_MESSAGE_OBJECT_TYPE:
       os << "<JSMessageObject>";
       break;
-#define MAKE_STRUCT_CASE(TYPE, Name, name)   \
-  case TYPE:                                 \
-    os << "<" #Name;                         \
-    Name::cast(*this).BriefPrintDetails(os); \
-    os << ">";                               \
+#define MAKE_STRUCT_CASE(TYPE, Name, name)    \
+  case TYPE:                                  \
+    os << "<" #Name;                          \
+    Name::cast(*this)->BriefPrintDetails(os); \
+    os << ">";                                \
     break;
       STRUCT_LIST(MAKE_STRUCT_CASE)
 #undef MAKE_STRUCT_CASE
     case ALLOCATION_SITE_TYPE: {
       os << "<AllocationSite";
-      AllocationSite::cast(*this).BriefPrintDetails(os);
+      AllocationSite::cast(*this)->BriefPrintDetails(os);
       os << ">";
       break;
     }
     case SCOPE_INFO_TYPE: {
       ScopeInfo scope = ScopeInfo::cast(*this);
       os << "<ScopeInfo";
-      if (!scope.IsEmpty()) os << " " << scope.scope_type();
+      if (!scope->IsEmpty()) os << " " << scope->scope_type();
       os << ">";
       break;
     }
     case CODE_TYPE: {
       Code code = Code::cast(*this);
-      os << "<Code " << CodeKindToString(code.kind());
-      if (code.is_builtin()) {
-        os << " " << Builtins::name(code.builtin_id());
+      os << "<Code " << CodeKindToString(code->kind());
+      if (code->is_builtin()) {
+        os << " " << Builtins::name(code->builtin_id());
       }
       os << ">";
       break;
     }
+    case HOLE_TYPE: {
+#define PRINT_HOLE(Type, Value, _) \
+  if (Is##Type(*this)) {           \
+    os << "<" #Value ">";          \
+    break;                         \
+  }
+      HOLE_LIST(PRINT_HOLE)
+#undef PRINT_HOLE
+      UNREACHABLE();
+    }
     case INSTRUCTION_STREAM_TYPE: {
       InstructionStream istream = InstructionStream::cast(*this);
-      Code code = istream.code(kAcquireLoad);
-      os << "<InstructionStream " << CodeKindToString(code.kind());
-      if (code.is_builtin()) {
-        os << " " << Builtins::name(code.builtin_id());
+      Code code = istream->code(kAcquireLoad);
+      os << "<InstructionStream " << CodeKindToString(code->kind());
+      if (code->is_builtin()) {
+        os << " " << Builtins::name(code->builtin_id());
       }
       os << ">";
       break;
     }
     case ODDBALL_TYPE: {
-      if (IsUndefined()) {
+      if (IsUndefined(*this)) {
         os << "<undefined>";
-      } else if (IsTheHole()) {
-        os << "<the_hole>";
-      } else if (IsNull()) {
+      } else if (IsNull(*this)) {
         os << "<null>";
-      } else if (IsTrue()) {
+      } else if (IsTrue(*this)) {
         os << "<true>";
-      } else if (IsFalse()) {
+      } else if (IsFalse(*this)) {
         os << "<false>";
       } else {
         os << "<Odd Oddball: ";
-        os << Oddball::cast(*this).to_string().ToCString().get();
+        os << Oddball::cast(*this)->to_string()->ToCString().get();
         os << ">";
       }
       break;
     }
     case SYMBOL_TYPE: {
       Symbol symbol = Symbol::cast(*this);
-      symbol.SymbolShortPrint(os);
+      symbol->SymbolShortPrint(os);
       break;
     }
     case HEAP_NUMBER_TYPE: {
       os << "<HeapNumber ";
-      HeapNumber::cast(*this).HeapNumberShortPrint(os);
+      HeapNumber::cast(*this)->HeapNumberShortPrint(os);
       os << ">";
       break;
     }
     case BIGINT_TYPE: {
       os << "<BigInt ";
-      BigInt::cast(*this).BigIntShortPrint(os);
+      BigInt::cast(*this)->BigIntShortPrint(os);
       os << ">";
       break;
     }
@@ -2127,7 +2157,7 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
       os << "<Cell value= ";
       HeapStringAllocator allocator;
       StringStream accumulator(&allocator);
-      Cell::cast(*this).value().ShortPrint(&accumulator);
+      ShortPrint(Cell::cast(*this)->value(), &accumulator);
       os << accumulator.ToCString().get();
       os << '>';
       break;
@@ -2135,11 +2165,11 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
     case PROPERTY_CELL_TYPE: {
       PropertyCell cell = PropertyCell::cast(*this);
       os << "<PropertyCell name=";
-      cell.name().ShortPrint(os);
+      ShortPrint(cell->name(), os);
       os << " value=";
       HeapStringAllocator allocator;
       StringStream accumulator(&allocator);
-      cell.value(kAcquireLoad).ShortPrint(&accumulator);
+      ShortPrint(cell->value(kAcquireLoad), &accumulator);
       os << accumulator.ToCString().get();
       os << '>';
       break;
@@ -2147,17 +2177,17 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
     case ACCESSOR_INFO_TYPE: {
       AccessorInfo info = AccessorInfo::cast(*this);
       os << "<AccessorInfo ";
-      os << "name= " << Brief(info.name());
-      os << ", data= " << Brief(info.data());
+      os << "name= " << Brief(info->name());
+      os << ", data= " << Brief(info->data());
       os << ">";
       break;
     }
     case CALL_HANDLER_INFO_TYPE: {
       CallHandlerInfo info = CallHandlerInfo::cast(*this);
       os << "<CallHandlerInfo ";
-      os << "callback= " << reinterpret_cast<void*>(info.callback());
-      os << ", data= " << Brief(info.data());
-      if (info.IsSideEffectFreeCallHandlerInfo()) {
+      os << "callback= " << reinterpret_cast<void*>(info->callback());
+      os << ", data= " << Brief(info->data());
+      if (info->IsSideEffectFreeCallHandlerInfo()) {
         os << ", side_effect_free= true>";
       } else {
         os << ", side_effect_free= false>";
@@ -2165,7 +2195,7 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
       break;
     }
     default:
-      os << "<Other heap object (" << map().instance_type() << ")>";
+      os << "<Other heap object (" << map()->instance_type() << ")>";
       break;
   }
 }
@@ -2201,137 +2231,128 @@ void HeapObject::IterateBody(Map map, int object_size, ObjectVisitor* v) {
   IterateBodyFast<ObjectVisitor>(map, object_size, v);
 }
 
-struct CallIsValidSlot {
-  template <typename BodyDescriptor>
-  static bool apply(Map map, HeapObject obj, int offset) {
-    return BodyDescriptor::IsValidSlot(map, obj, offset);
-  }
-};
-
-bool HeapObject::IsValidSlot(Map map, int offset) {
-  DCHECK_NE(0, offset);
-  return BodyDescriptorApply<CallIsValidSlot>(map.instance_type(), map, *this,
-                                              offset);
-}
-
 int HeapObject::SizeFromMap(Map map) const {
-  int instance_size = map.instance_size();
+  int instance_size = map->instance_size();
   if (instance_size != kVariableSizeSentinel) return instance_size;
   // Only inline the most frequent cases.
-  InstanceType instance_type = map.instance_type();
+  InstanceType instance_type = map->instance_type();
   if (base::IsInRange(instance_type, FIRST_FIXED_ARRAY_TYPE,
                       LAST_FIXED_ARRAY_TYPE)) {
     return FixedArray::SizeFor(
-        FixedArray::unchecked_cast(*this).length(kAcquireLoad));
+        FixedArray::unchecked_cast(*this)->length(kAcquireLoad));
   }
   if (base::IsInRange(instance_type, FIRST_CONTEXT_TYPE, LAST_CONTEXT_TYPE)) {
     if (instance_type == NATIVE_CONTEXT_TYPE) return NativeContext::kSize;
-    return Context::SizeFor(Context::unchecked_cast(*this).length());
+    return Context::SizeFor(Context::unchecked_cast(*this)->length());
   }
-  if (instance_type == ONE_BYTE_STRING_TYPE ||
-      instance_type == ONE_BYTE_INTERNALIZED_STRING_TYPE ||
-      instance_type == SHARED_ONE_BYTE_STRING_TYPE) {
+  if (instance_type == SEQ_ONE_BYTE_STRING_TYPE ||
+      instance_type == INTERNALIZED_ONE_BYTE_STRING_TYPE ||
+      instance_type == SHARED_SEQ_ONE_BYTE_STRING_TYPE) {
     // Strings may get concurrently truncated, hence we have to access its
     // length synchronized.
     return SeqOneByteString::SizeFor(
-        SeqOneByteString::unchecked_cast(*this).length(kAcquireLoad));
+        SeqOneByteString::unchecked_cast(*this)->length(kAcquireLoad));
   }
   if (instance_type == BYTE_ARRAY_TYPE) {
     return ByteArray::SizeFor(
-        ByteArray::unchecked_cast(*this).length(kAcquireLoad));
+        ByteArray::unchecked_cast(*this)->length(kAcquireLoad));
   }
   if (instance_type == BYTECODE_ARRAY_TYPE) {
     return BytecodeArray::SizeFor(
-        BytecodeArray::unchecked_cast(*this).length(kAcquireLoad));
+        BytecodeArray::unchecked_cast(*this)->length(kAcquireLoad));
+  }
+  if (instance_type == EXTERNAL_POINTER_ARRAY_TYPE) {
+    return ExternalPointerArray::SizeFor(
+        ExternalPointerArray::unchecked_cast(*this)->length(kAcquireLoad));
   }
   if (instance_type == FREE_SPACE_TYPE) {
-    return FreeSpace::unchecked_cast(*this).size(kRelaxedLoad);
+    return FreeSpace::unchecked_cast(*this)->size(kRelaxedLoad);
   }
-  if (instance_type == STRING_TYPE ||
-      instance_type == INTERNALIZED_STRING_TYPE ||
-      instance_type == SHARED_STRING_TYPE) {
+  if (instance_type == SEQ_TWO_BYTE_STRING_TYPE ||
+      instance_type == INTERNALIZED_TWO_BYTE_STRING_TYPE ||
+      instance_type == SHARED_SEQ_TWO_BYTE_STRING_TYPE) {
     // Strings may get concurrently truncated, hence we have to access its
     // length synchronized.
     return SeqTwoByteString::SizeFor(
-        SeqTwoByteString::unchecked_cast(*this).length(kAcquireLoad));
+        SeqTwoByteString::unchecked_cast(*this)->length(kAcquireLoad));
   }
   if (instance_type == FIXED_DOUBLE_ARRAY_TYPE) {
     return FixedDoubleArray::SizeFor(
-        FixedDoubleArray::unchecked_cast(*this).length(kAcquireLoad));
+        FixedDoubleArray::unchecked_cast(*this)->length(kAcquireLoad));
   }
   if (instance_type == FEEDBACK_METADATA_TYPE) {
     return FeedbackMetadata::SizeFor(
-        FeedbackMetadata::unchecked_cast(*this).slot_count(kAcquireLoad));
+        FeedbackMetadata::unchecked_cast(*this)->slot_count(kAcquireLoad));
   }
   if (base::IsInRange(instance_type, FIRST_DESCRIPTOR_ARRAY_TYPE,
                       LAST_DESCRIPTOR_ARRAY_TYPE)) {
     return DescriptorArray::SizeFor(
-        DescriptorArray::unchecked_cast(*this).number_of_all_descriptors());
+        DescriptorArray::unchecked_cast(*this)->number_of_all_descriptors());
   }
   if (base::IsInRange(instance_type, FIRST_WEAK_FIXED_ARRAY_TYPE,
                       LAST_WEAK_FIXED_ARRAY_TYPE)) {
     return WeakFixedArray::SizeFor(
-        WeakFixedArray::unchecked_cast(*this).length(kAcquireLoad));
+        WeakFixedArray::unchecked_cast(*this)->length(kAcquireLoad));
   }
   if (instance_type == WEAK_ARRAY_LIST_TYPE) {
     return WeakArrayList::SizeForCapacity(
-        WeakArrayList::unchecked_cast(*this).capacity());
+        WeakArrayList::unchecked_cast(*this)->capacity());
   }
   if (instance_type == SMALL_ORDERED_HASH_SET_TYPE) {
     return SmallOrderedHashSet::SizeFor(
-        SmallOrderedHashSet::unchecked_cast(*this).Capacity());
+        SmallOrderedHashSet::unchecked_cast(*this)->Capacity());
   }
   if (instance_type == SMALL_ORDERED_HASH_MAP_TYPE) {
     return SmallOrderedHashMap::SizeFor(
-        SmallOrderedHashMap::unchecked_cast(*this).Capacity());
+        SmallOrderedHashMap::unchecked_cast(*this)->Capacity());
   }
   if (instance_type == SMALL_ORDERED_NAME_DICTIONARY_TYPE) {
     return SmallOrderedNameDictionary::SizeFor(
-        SmallOrderedNameDictionary::unchecked_cast(*this).Capacity());
+        SmallOrderedNameDictionary::unchecked_cast(*this)->Capacity());
   }
   if (instance_type == SWISS_NAME_DICTIONARY_TYPE) {
     return SwissNameDictionary::SizeFor(
-        SwissNameDictionary::unchecked_cast(*this).Capacity());
+        SwissNameDictionary::unchecked_cast(*this)->Capacity());
   }
   if (instance_type == PROPERTY_ARRAY_TYPE) {
     return PropertyArray::SizeFor(
-        PropertyArray::cast(*this).length(kAcquireLoad));
+        PropertyArray::cast(*this)->length(kAcquireLoad));
   }
   if (instance_type == FEEDBACK_VECTOR_TYPE) {
     return FeedbackVector::SizeFor(
-        FeedbackVector::unchecked_cast(*this).length());
+        FeedbackVector::unchecked_cast(*this)->length());
   }
   if (instance_type == BIGINT_TYPE) {
-    return BigInt::SizeFor(BigInt::unchecked_cast(*this).length());
+    return BigInt::SizeFor(BigInt::unchecked_cast(*this)->length());
   }
   if (instance_type == PREPARSE_DATA_TYPE) {
     PreparseData data = PreparseData::unchecked_cast(*this);
-    return PreparseData::SizeFor(data.data_length(), data.children_length());
+    return PreparseData::SizeFor(data->data_length(), data->children_length());
   }
-#define MAKE_TORQUE_SIZE_FOR(TYPE, TypeName)                \
-  if (instance_type == TYPE) {                              \
-    return TypeName::unchecked_cast(*this).AllocatedSize(); \
+#define MAKE_TORQUE_SIZE_FOR(TYPE, TypeName)                 \
+  if (instance_type == TYPE) {                               \
+    return TypeName::unchecked_cast(*this)->AllocatedSize(); \
   }
   TORQUE_INSTANCE_TYPE_TO_BODY_DESCRIPTOR_LIST(MAKE_TORQUE_SIZE_FOR)
 #undef MAKE_TORQUE_SIZE_FOR
 
   if (instance_type == INSTRUCTION_STREAM_TYPE) {
-    return InstructionStream::unchecked_cast(*this).Size();
+    return InstructionStream::unchecked_cast(*this)->Size();
   }
   if (instance_type == COVERAGE_INFO_TYPE) {
     return CoverageInfo::SizeFor(
-        CoverageInfo::unchecked_cast(*this).slot_count());
+        CoverageInfo::unchecked_cast(*this)->slot_count());
   }
 #if V8_ENABLE_WEBASSEMBLY
   if (instance_type == WASM_TYPE_INFO_TYPE) {
     return WasmTypeInfo::SizeFor(
-        WasmTypeInfo::unchecked_cast(*this).supertypes_length());
+        WasmTypeInfo::unchecked_cast(*this)->supertypes_length());
   }
   if (instance_type == WASM_STRUCT_TYPE) {
     return WasmStruct::GcSafeSize(map);
   }
   if (instance_type == WASM_ARRAY_TYPE) {
-    return WasmArray::SizeFor(map, WasmArray::unchecked_cast(*this).length());
+    return WasmArray::SizeFor(map, WasmArray::unchecked_cast(*this)->length());
   }
   if (instance_type == WASM_NULL_TYPE) {
     return WasmNull::kSize;
@@ -2339,11 +2360,11 @@ int HeapObject::SizeFromMap(Map map) const {
 #endif  // V8_ENABLE_WEBASSEMBLY
   DCHECK_EQ(instance_type, EMBEDDER_DATA_ARRAY_TYPE);
   return EmbedderDataArray::SizeFor(
-      EmbedderDataArray::unchecked_cast(*this).length());
+      EmbedderDataArray::unchecked_cast(*this)->length());
 }
 
 bool HeapObject::NeedsRehashing(PtrComprCageBase cage_base) const {
-  return NeedsRehashing(map(cage_base).instance_type());
+  return NeedsRehashing(map(cage_base)->instance_type());
 }
 
 bool HeapObject::NeedsRehashing(InstanceType instance_type) const {
@@ -2351,16 +2372,16 @@ bool HeapObject::NeedsRehashing(InstanceType instance_type) const {
     // Use map() only when it's guaranteed that it's not a InstructionStream
     // object.
     DCHECK_IMPLIES(instance_type != INSTRUCTION_STREAM_TYPE,
-                   instance_type == map().instance_type());
+                   instance_type == map()->instance_type());
   } else {
-    DCHECK_EQ(instance_type, map().instance_type());
+    DCHECK_EQ(instance_type, map()->instance_type());
   }
   switch (instance_type) {
     case DESCRIPTOR_ARRAY_TYPE:
     case STRONG_DESCRIPTOR_ARRAY_TYPE:
-      return DescriptorArray::cast(*this).number_of_descriptors() > 1;
+      return DescriptorArray::cast(*this)->number_of_descriptors() > 1;
     case TRANSITION_ARRAY_TYPE:
-      return TransitionArray::cast(*this).number_of_entries() > 1;
+      return TransitionArray::cast(*this)->number_of_entries() > 1;
     case ORDERED_HASH_MAP_TYPE:
     case ORDERED_HASH_SET_TYPE:
       return false;  // We'll rehash from the JSMap or JSSet referencing them.
@@ -2385,7 +2406,7 @@ bool HeapObject::NeedsRehashing(InstanceType instance_type) const {
 
 bool HeapObject::CanBeRehashed(PtrComprCageBase cage_base) const {
   DCHECK(NeedsRehashing(cage_base));
-  switch (map(cage_base).instance_type()) {
+  switch (map(cage_base)->instance_type()) {
     case JS_MAP_TYPE:
     case JS_SET_TYPE:
       return true;
@@ -2408,11 +2429,11 @@ bool HeapObject::CanBeRehashed(PtrComprCageBase cage_base) const {
     case TRANSITION_ARRAY_TYPE:
       return true;
     case SMALL_ORDERED_HASH_MAP_TYPE:
-      return SmallOrderedHashMap::cast(*this).NumberOfElements() == 0;
+      return SmallOrderedHashMap::cast(*this)->NumberOfElements() == 0;
     case SMALL_ORDERED_HASH_SET_TYPE:
-      return SmallOrderedHashMap::cast(*this).NumberOfElements() == 0;
+      return SmallOrderedHashMap::cast(*this)->NumberOfElements() == 0;
     case SMALL_ORDERED_NAME_DICTIONARY_TYPE:
-      return SmallOrderedNameDictionary::cast(*this).NumberOfElements() == 0;
+      return SmallOrderedNameDictionary::cast(*this)->NumberOfElements() == 0;
     default:
       return false;
   }
@@ -2446,17 +2467,17 @@ void HeapObject::RehashBasedOnMap(IsolateT* isolate) {
       break;
     case DESCRIPTOR_ARRAY_TYPE:
     case STRONG_DESCRIPTOR_ARRAY_TYPE:
-      DCHECK_LE(1, DescriptorArray::cast(*this).number_of_descriptors());
-      DescriptorArray::cast(*this).Sort();
+      DCHECK_LE(1, DescriptorArray::cast(*this)->number_of_descriptors());
+      DescriptorArray::cast(*this)->Sort();
       break;
     case TRANSITION_ARRAY_TYPE:
-      TransitionArray::cast(*this).Sort();
+      TransitionArray::cast(*this)->Sort();
       break;
     case SMALL_ORDERED_HASH_MAP_TYPE:
-      DCHECK_EQ(0, SmallOrderedHashMap::cast(*this).NumberOfElements());
+      DCHECK_EQ(0, SmallOrderedHashMap::cast(*this)->NumberOfElements());
       break;
     case SMALL_ORDERED_HASH_SET_TYPE:
-      DCHECK_EQ(0, SmallOrderedHashSet::cast(*this).NumberOfElements());
+      DCHECK_EQ(0, SmallOrderedHashSet::cast(*this)->NumberOfElements());
       break;
     case ORDERED_HASH_MAP_TYPE:
     case ORDERED_HASH_SET_TYPE:
@@ -2470,13 +2491,13 @@ void HeapObject::RehashBasedOnMap(IsolateT* isolate) {
       break;
     }
     case SMALL_ORDERED_NAME_DICTIONARY_TYPE:
-      DCHECK_EQ(0, SmallOrderedNameDictionary::cast(*this).NumberOfElements());
+      DCHECK_EQ(0, SmallOrderedNameDictionary::cast(*this)->NumberOfElements());
       break;
-    case ONE_BYTE_INTERNALIZED_STRING_TYPE:
-    case INTERNALIZED_STRING_TYPE:
+    case INTERNALIZED_ONE_BYTE_STRING_TYPE:
+    case INTERNALIZED_TWO_BYTE_STRING_TYPE:
       // Rare case, rehash read-only space strings before they are sealed.
       DCHECK(ReadOnlyHeap::Contains(*this));
-      String::cast(*this).EnsureHash();
+      String::cast(*this)->EnsureHash();
       break;
     default:
       UNREACHABLE();
@@ -2534,8 +2555,8 @@ Maybe<bool> Object::SetPropertyInternal(LookupIterator* it,
         Handle<Object> receiver = it->GetReceiver();
         // In case of global IC, the receiver is the global object. Replace by
         // the global proxy.
-        if (receiver->IsJSGlobalObject()) {
-          receiver = handle(JSGlobalObject::cast(*receiver).global_proxy(),
+        if (IsJSGlobalObject(*receiver)) {
+          receiver = handle(JSGlobalObject::cast(*receiver)->global_proxy(),
                             it->isolate());
         }
         return JSProxy::SetProperty(it->GetHolder<JSProxy>(), it->GetName(),
@@ -2586,9 +2607,9 @@ Maybe<bool> Object::SetPropertyInternal(LookupIterator* it,
           return WriteToReadOnlyProperty(it, value, should_throw);
         }
         Handle<Object> accessors = it->GetAccessors();
-        if (accessors->IsAccessorInfo() &&
+        if (IsAccessorInfo(*accessors) &&
             !it->HolderIsReceiverOrHiddenPrototype() &&
-            AccessorInfo::cast(*accessors).is_special_data_property()) {
+            AccessorInfo::cast(*accessors)->is_special_data_property()) {
           *found = false;
           return Nothing<bool>();
         }
@@ -2645,7 +2666,7 @@ bool Object::CheckContextualStoreToJSGlobalObject(
     LookupIterator* it, Maybe<ShouldThrow> should_throw) {
   Isolate* isolate = it->isolate();
 
-  if (it->GetReceiver()->IsJSGlobalObject(isolate) &&
+  if (IsJSGlobalObject(*it->GetReceiver(), isolate) &&
       (GetShouldThrow(isolate, should_throw) == ShouldThrow::kThrowOnError)) {
     if (it->state() == LookupIterator::TRANSITION) {
       // The property cell that we have created is garbage because we are going
@@ -2694,7 +2715,7 @@ Maybe<bool> Object::SetSuperProperty(LookupIterator* it, Handle<Object> value,
   // The property either doesn't exist on the holder or exists there as a data
   // property.
 
-  if (!it->GetReceiver()->IsJSReceiver()) {
+  if (!IsJSReceiver(*it->GetReceiver())) {
     return WriteToReadOnlyProperty(it, value, should_throw);
   }
   Handle<JSReceiver> receiver = Handle<JSReceiver>::cast(it->GetReceiver());
@@ -2713,7 +2734,7 @@ Maybe<bool> Object::SetSuperProperty(LookupIterator* it, Handle<Object> value,
         break;
 
       case LookupIterator::ACCESSOR:
-        if (own_lookup.GetAccessors()->IsAccessorInfo()) {
+        if (IsAccessorInfo(*own_lookup.GetAccessors())) {
           if (own_lookup.IsReadOnly()) {
             return WriteToReadOnlyProperty(&own_lookup, value, should_throw);
           }
@@ -2820,7 +2841,7 @@ Maybe<bool> Object::RedefineIncompatibleProperty(
 
 Maybe<bool> Object::SetDataProperty(LookupIterator* it, Handle<Object> value) {
   Isolate* isolate = it->isolate();
-  DCHECK_IMPLIES(it->GetReceiver()->IsJSProxy(isolate),
+  DCHECK_IMPLIES(IsJSProxy(*it->GetReceiver(), isolate),
                  it->GetName()->IsPrivateName(isolate));
   DCHECK_IMPLIES(!it->IsElement() && it->GetName()->IsPrivateName(isolate),
                  it->state() == LookupIterator::DATA);
@@ -2831,11 +2852,11 @@ Maybe<bool> Object::SetDataProperty(LookupIterator* it, Handle<Object> value) {
 
   Handle<Object> to_assign = value;
   // Convert the incoming value to a number for storing into typed arrays.
-  if (it->IsElement() && receiver->IsJSObject(isolate) &&
-      JSObject::cast(*receiver).HasTypedArrayOrRabGsabTypedArrayElements(
+  if (it->IsElement() && IsJSObject(*receiver, isolate) &&
+      JSObject::cast(*receiver)->HasTypedArrayOrRabGsabTypedArrayElements(
           isolate)) {
     Handle<JSTypedArray> receiver_ta = Handle<JSTypedArray>::cast(receiver);
-    ElementsKind elements_kind = JSObject::cast(*receiver).GetElementsKind();
+    ElementsKind elements_kind = JSObject::cast(*receiver)->GetElementsKind();
     if (IsBigIntTypedArrayElementsKind(elements_kind)) {
       ASSIGN_RETURN_ON_EXCEPTION_VALUE(isolate, to_assign,
                                        BigInt::FromObject(isolate, value),
@@ -2844,7 +2865,7 @@ Maybe<bool> Object::SetDataProperty(LookupIterator* it, Handle<Object> value) {
                       it->index() >= receiver_ta->GetLength())) {
         return Just(true);
       }
-    } else if (!value->IsNumber() && !value->IsUndefined(isolate)) {
+    } else if (!IsNumber(*value) && !IsUndefined(*value, isolate)) {
       ASSIGN_RETURN_ON_EXCEPTION_VALUE(isolate, to_assign,
                                        Object::ToNumber(isolate, value),
                                        Nothing<bool>());
@@ -2855,9 +2876,9 @@ Maybe<bool> Object::SetDataProperty(LookupIterator* it, Handle<Object> value) {
     }
   }
 
-  DCHECK(!receiver->IsWasmObject(isolate));
-  if (V8_UNLIKELY(receiver->IsJSSharedStruct(isolate) ||
-                  receiver->IsJSSharedArray(isolate))) {
+  DCHECK(!IsWasmObject(*receiver, isolate));
+  if (V8_UNLIKELY(IsJSSharedStruct(*receiver, isolate) ||
+                  IsJSSharedArray(*receiver, isolate))) {
     // Shared structs can only point to primitives or shared values.
     ASSIGN_RETURN_ON_EXCEPTION_VALUE(
         isolate, to_assign, Object::Share(isolate, to_assign, kThrowOnError),
@@ -2885,14 +2906,14 @@ Maybe<bool> Object::AddDataProperty(LookupIterator* it, Handle<Object> value,
                                     Maybe<ShouldThrow> should_throw,
                                     StoreOrigin store_origin,
                                     EnforceDefineSemantics semantics) {
-  if (!it->GetReceiver()->IsJSReceiver()) {
+  if (!IsJSReceiver(*it->GetReceiver())) {
     return CannotCreateProperty(it->isolate(), it->GetReceiver(), it->GetName(),
                                 value, should_throw);
   }
 
   // Private symbols should be installed on JSProxy using
   // JSProxy::SetPrivateSymbol.
-  if (it->GetReceiver()->IsJSProxy() && it->GetName()->IsPrivate() &&
+  if (IsJSProxy(*it->GetReceiver()) && it->GetName()->IsPrivate() &&
       !it->GetName()->IsPrivateName()) {
     RETURN_FAILURE(it->isolate(), GetShouldThrow(it->isolate(), should_throw),
                    NewTypeError(MessageTemplate::kProxyPrivate));
@@ -2901,26 +2922,32 @@ Maybe<bool> Object::AddDataProperty(LookupIterator* it, Handle<Object> value,
   DCHECK_NE(LookupIterator::INTEGER_INDEXED_EXOTIC, it->state());
 
   Handle<JSReceiver> receiver = it->GetStoreTarget<JSReceiver>();
-  DCHECK_IMPLIES(receiver->IsJSProxy(), it->GetName()->IsPrivateName());
-  DCHECK_IMPLIES(receiver->IsJSProxy(),
+  DCHECK_IMPLIES(IsJSProxy(*receiver), it->GetName()->IsPrivateName());
+  DCHECK_IMPLIES(IsJSProxy(*receiver),
                  it->state() == LookupIterator::NOT_FOUND);
 
   // If the receiver is a JSGlobalProxy, store on the prototype (JSGlobalObject)
   // instead. If the prototype is Null, the proxy is detached.
-  if (receiver->IsJSGlobalProxy()) return Just(true);
+  if (IsJSGlobalProxy(*receiver)) return Just(true);
 
   Isolate* isolate = it->isolate();
 
   if (it->ExtendingNonExtensible(receiver)) {
-    RETURN_FAILURE(isolate, GetShouldThrow(it->isolate(), should_throw),
-                   NewTypeError(semantics == EnforceDefineSemantics::kDefine
-                                    ? MessageTemplate::kDefineDisallowed
-                                    : MessageTemplate::kObjectNotExtensible,
-                                it->GetName()));
+    bool is_shared_object = IsAlwaysSharedSpaceJSObject(*receiver);
+    RETURN_FAILURE(
+        isolate, GetShouldThrow(it->isolate(), should_throw),
+        NewTypeError(
+            semantics == EnforceDefineSemantics::kDefine
+                ? (is_shared_object
+                       ? MessageTemplate::kDefineDisallowedFixedLayout
+                       : MessageTemplate::kDefineDisallowed)
+                : (is_shared_object ? MessageTemplate::kObjectFixedLayout
+                                    : MessageTemplate::kObjectNotExtensible),
+            it->GetName()));
   }
 
   if (it->IsElement(*receiver)) {
-    if (receiver->IsJSArray()) {
+    if (IsJSArray(*receiver)) {
       Handle<JSArray> array = Handle<JSArray>::cast(receiver);
       if (JSArray::WouldChangeReadOnlyLength(array, it->array_index())) {
         RETURN_FAILURE(isolate, GetShouldThrow(it->isolate(), should_throw),
@@ -2971,19 +2998,19 @@ MaybeHandle<Object> Object::ShareSlow(Isolate* isolate,
                                       Handle<HeapObject> value,
                                       ShouldThrow throw_if_cannot_be_shared) {
   // Use Object::Share() if value might already be shared.
-  DCHECK(!value->IsShared());
+    DCHECK(!IsShared(*value));
 
-  SharedObjectSafePublishGuard publish_guard;
+    SharedObjectSafePublishGuard publish_guard;
 
-  if (value->IsString()) {
+    if (IsString(*value)) {
     return String::Share(isolate, Handle<String>::cast(value));
-  }
+    }
 
-  if (value->IsHeapNumber()) {
-    uint64_t bits = HeapNumber::cast(*value).value_as_bits(kRelaxedLoad);
+    if (IsHeapNumber(*value)) {
+    uint64_t bits = HeapNumber::cast(*value)->value_as_bits(kRelaxedLoad);
     return isolate->factory()
         ->NewHeapNumberFromBits<AllocationType::kSharedOld>(bits);
-  }
+    }
 
   if (throw_if_cannot_be_shared == kThrowOnError) {
     THROW_NEW_ERROR(
@@ -3005,7 +3032,7 @@ static int AppendUniqueCallbacks(Isolate* isolate,
   for (int i = nof_callbacks - 1; i >= 0; i--) {
     Handle<AccessorInfo> entry(AccessorInfo::cast(callbacks->get(i)), isolate);
     Handle<Name> key(Name::cast(entry->name()), isolate);
-    DCHECK(key->IsUniqueName());
+    DCHECK(IsUniqueName(*key));
     // Check if a descriptor with this name already exists before writing.
     if (!T::Contains(key, entry, valid_descriptors, array)) {
       T::Insert(key, entry, valid_descriptors, array);
@@ -3021,7 +3048,7 @@ struct FixedArrayAppender {
   static bool Contains(Handle<Name> key, Handle<AccessorInfo> entry,
                        int valid_descriptors, Handle<FixedArray> array) {
     for (int i = 0; i < valid_descriptors; i++) {
-      if (*key == AccessorInfo::cast(array->get(i)).name()) return true;
+      if (*key == AccessorInfo::cast(array->get(i))->name()) return true;
     }
     return false;
   }
@@ -3066,8 +3093,8 @@ Maybe<bool> JSProxy::IsArray(Handle<JSProxy> proxy) {
       return Nothing<bool>();
     }
     object = handle(JSReceiver::cast(proxy->target()), isolate);
-    if (object->IsJSArray()) return Just(true);
-    if (!object->IsJSProxy()) return Just(false);
+    if (IsJSArray(*object)) return Just(true);
+    if (!IsJSProxy(*object)) return Just(false);
   }
 
   // Too deep recursion, throw a RangeError.
@@ -3099,7 +3126,7 @@ Maybe<bool> JSProxy::HasProperty(Isolate* isolate, Handle<JSProxy> proxy,
                         isolate->factory()->has_string()),
       Nothing<bool>());
   // 7. If trap is undefined, then
-  if (trap->IsUndefined(isolate)) {
+  if (IsUndefined(*trap, isolate)) {
     // 7a. Return target.[[HasProperty]](P).
     return JSReceiver::HasProperty(isolate, target, name);
   }
@@ -3110,7 +3137,7 @@ Maybe<bool> JSProxy::HasProperty(Isolate* isolate, Handle<JSProxy> proxy,
       isolate, trap_result_obj,
       Execution::Call(isolate, trap, handler, arraysize(args), args),
       Nothing<bool>());
-  bool boolean_trap_result = trap_result_obj->BooleanValue(isolate);
+  bool boolean_trap_result = Object::BooleanValue(*trap_result_obj, isolate);
   // 9. If booleanTrapResult is false, then:
   if (!boolean_trap_result) {
     MAYBE_RETURN(JSProxy::CheckHasTrap(isolate, name, target), Nothing<bool>());
@@ -3168,7 +3195,7 @@ Maybe<bool> JSProxy::SetProperty(Handle<JSProxy> proxy, Handle<Name> name,
   Handle<Object> trap;
   ASSIGN_RETURN_ON_EXCEPTION_VALUE(
       isolate, trap, Object::GetMethod(handler, trap_name), Nothing<bool>());
-  if (trap->IsUndefined(isolate)) {
+  if (IsUndefined(*trap, isolate)) {
     PropertyKey key(isolate, name);
     LookupIterator it(isolate, receiver, key, target);
 
@@ -3182,7 +3209,7 @@ Maybe<bool> JSProxy::SetProperty(Handle<JSProxy> proxy, Handle<Name> name,
       isolate, trap_result,
       Execution::Call(isolate, trap, handler, arraysize(args), args),
       Nothing<bool>());
-  if (!trap_result->BooleanValue(isolate)) {
+  if (!Object::BooleanValue(*trap_result, isolate)) {
     RETURN_FAILURE(isolate, GetShouldThrow(isolate, should_throw),
                    NewTypeError(MessageTemplate::kProxyTrapReturnedFalsishFor,
                                 trap_name, name));
@@ -3219,7 +3246,7 @@ Maybe<bool> JSProxy::DeletePropertyOrElement(Handle<JSProxy> proxy,
   Handle<Object> trap;
   ASSIGN_RETURN_ON_EXCEPTION_VALUE(
       isolate, trap, Object::GetMethod(handler, trap_name), Nothing<bool>());
-  if (trap->IsUndefined(isolate)) {
+  if (IsUndefined(*trap, isolate)) {
     return JSReceiver::DeletePropertyOrElement(target, name, language_mode);
   }
 
@@ -3229,7 +3256,7 @@ Maybe<bool> JSProxy::DeletePropertyOrElement(Handle<JSProxy> proxy,
       isolate, trap_result,
       Execution::Call(isolate, trap, handler, arraysize(args), args),
       Nothing<bool>());
-  if (!trap_result->BooleanValue(isolate)) {
+  if (!Object::BooleanValue(*trap_result, isolate)) {
     RETURN_FAILURE(isolate, should_throw,
                    NewTypeError(MessageTemplate::kProxyTrapReturnedFalsishFor,
                                 trap_name, name));
@@ -3270,11 +3297,11 @@ Maybe<bool> JSProxy::CheckDeleteTrap(Isolate* isolate, Handle<Name> name,
 // static
 MaybeHandle<JSProxy> JSProxy::New(Isolate* isolate, Handle<Object> target,
                                   Handle<Object> handler) {
-  if (!target->IsJSReceiver()) {
+  if (!IsJSReceiver(*target)) {
     THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kProxyNonObject),
                     JSProxy);
   }
-  if (!handler->IsJSReceiver()) {
+  if (!IsJSReceiver(*handler)) {
     THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kProxyNonObject),
                     JSProxy);
   }
@@ -3294,9 +3321,9 @@ Maybe<PropertyAttributes> JSProxy::GetPropertyAttributes(LookupIterator* it) {
 // TODO(jkummerow): Consider unification with FastAsArrayLength() in
 // accessors.cc.
 bool PropertyKeyToArrayLength(Handle<Object> value, uint32_t* length) {
-  DCHECK(value->IsNumber() || value->IsName());
-  if (value->ToArrayLength(length)) return true;
-  if (value->IsString()) return String::cast(*value).AsArrayIndex(length);
+  DCHECK(IsNumber(*value) || IsName(*value));
+  if (Object::ToArrayLength(*value, length)) return true;
+  if (IsString(*value)) return String::cast(*value)->AsArrayIndex(length);
   return false;
 }
 
@@ -3329,7 +3356,7 @@ Maybe<bool> JSArray::DefineOwnProperty(Isolate* isolate, Handle<JSArray> o,
     USE(success);
     // 3c. Let oldLen be oldLenDesc.[[Value]].
     uint32_t old_len = 0;
-    CHECK(old_len_desc.value()->ToArrayLength(&old_len));
+    CHECK(Object::ToArrayLength(*old_len_desc.value(), &old_len));
     // 3d. Let index be ToUint32(P).
     // (Already done above.)
     // 3e. (Assert)
@@ -3375,8 +3402,8 @@ bool JSArray::AnythingToArrayLength(Isolate* isolate,
                                     uint32_t* output) {
   // Fast path: check numbers and strings that can be converted directly
   // and unobservably.
-  if (length_object->ToArrayLength(output)) return true;
-  if (length_object->IsString() &&
+  if (Object::ToArrayLength(*length_object, output)) return true;
+  if (IsString(*length_object) &&
       Handle<String>::cast(length_object)->AsArrayIndex(output)) {
     return true;
   }
@@ -3394,13 +3421,13 @@ bool JSArray::AnythingToArrayLength(Isolate* isolate,
     return false;
   }
   // 7. If newLen != numberLen, throw a RangeError exception.
-  if (uint32_v->Number() != number_v->Number()) {
+  if (Object::Number(*uint32_v) != Object::Number(*number_v)) {
     Handle<Object> exception =
         isolate->factory()->NewRangeError(MessageTemplate::kInvalidArrayLength);
     isolate->Throw(*exception);
     return false;
   }
-  CHECK(uint32_v->ToArrayLength(output));
+  CHECK(Object::ToArrayLength(*uint32_v, output));
   return true;
 }
 
@@ -3435,7 +3462,7 @@ Maybe<bool> JSArray::ArraySetLength(Isolate* isolate, Handle<JSArray> a,
   USE(success);
   // 11. Let oldLen be oldLenDesc.[[Value]].
   uint32_t old_len = 0;
-  CHECK(old_len_desc.value()->ToArrayLength(&old_len));
+  CHECK(Object::ToArrayLength(*old_len_desc.value(), &old_len));
   // 12. If newLen >= oldLen, then
   if (new_len >= old_len) {
     // 8. Set newLenDesc.[[Value]] to newLen.
@@ -3484,7 +3511,7 @@ Maybe<bool> JSArray::ArraySetLength(Isolate* isolate, Handle<JSArray> a,
     USE(success);
   }
   uint32_t actual_new_len = 0;
-  CHECK(a->length().ToArrayLength(&actual_new_len));
+  CHECK(Object::ToArrayLength(a->length(), &actual_new_len));
   // Steps 19d-v, 21. Return false if there were non-deletable elements.
   bool result = actual_new_len == new_len;
   if (!result) {
@@ -3504,14 +3531,14 @@ Maybe<bool> JSProxy::DefineOwnProperty(Isolate* isolate, Handle<JSProxy> proxy,
                                        PropertyDescriptor* desc,
                                        Maybe<ShouldThrow> should_throw) {
   STACK_CHECK(isolate, Nothing<bool>());
-  if (key->IsSymbol() && Handle<Symbol>::cast(key)->IsPrivate()) {
+  if (IsSymbol(*key) && Handle<Symbol>::cast(key)->IsPrivate()) {
     DCHECK(!Handle<Symbol>::cast(key)->IsPrivateName());
     return JSProxy::SetPrivateSymbol(isolate, proxy, Handle<Symbol>::cast(key),
                                      desc, should_throw);
   }
   Handle<String> trap_name = isolate->factory()->defineProperty_string();
   // 1. Assert: IsPropertyKey(P) is true.
-  DCHECK(key->IsName() || key->IsNumber());
+  DCHECK(IsName(*key) || IsNumber(*key));
   // 2. Let handler be the value of the [[ProxyHandler]] internal slot of O.
   Handle<Object> handler(proxy->handler(), isolate);
   // 3. If handler is null, throw a TypeError exception.
@@ -3530,7 +3557,7 @@ Maybe<bool> JSProxy::DefineOwnProperty(Isolate* isolate, Handle<JSProxy> proxy,
       Object::GetMethod(Handle<JSReceiver>::cast(handler), trap_name),
       Nothing<bool>());
   // 7. If trap is undefined, then:
-  if (trap->IsUndefined(isolate)) {
+  if (IsUndefined(*trap, isolate)) {
     // 7a. Return target.[[DefineOwnProperty]](P, Desc).
     return JSReceiver::DefineOwnProperty(isolate, target, key, desc,
                                          should_throw);
@@ -3540,7 +3567,7 @@ Maybe<bool> JSProxy::DefineOwnProperty(Isolate* isolate, Handle<JSProxy> proxy,
   // 9. Let booleanTrapResult be
   //    ToBoolean(? Call(trap, handler, «target, P, descObj»)).
   Handle<Name> property_name =
-      key->IsName()
+      IsName(*key)
           ? Handle<Name>::cast(key)
           : Handle<Name>::cast(isolate->factory()->NumberToString(key));
   // Do not leak private property names.
@@ -3552,7 +3579,7 @@ Maybe<bool> JSProxy::DefineOwnProperty(Isolate* isolate, Handle<JSProxy> proxy,
       Execution::Call(isolate, trap, handler, arraysize(args), args),
       Nothing<bool>());
   // 10. If booleanTrapResult is false, return false.
-  if (!trap_result_obj->BooleanValue(isolate)) {
+  if (!Object::BooleanValue(*trap_result_obj, isolate)) {
     RETURN_FAILURE(isolate, GetShouldThrow(isolate, should_throw),
                    NewTypeError(MessageTemplate::kProxyTrapReturnedFalsishFor,
                                 trap_name, property_name));
@@ -3635,7 +3662,7 @@ Maybe<bool> JSProxy::SetPrivateSymbol(Isolate* isolate, Handle<JSProxy> proxy,
     RETURN_FAILURE(isolate, GetShouldThrow(isolate, should_throw),
                    NewTypeError(MessageTemplate::kProxyPrivate));
   }
-  DCHECK(proxy->map().is_dictionary_map());
+  DCHECK(proxy->map()->is_dictionary_map());
   Handle<Object> value =
       desc->has_value()
           ? desc->value()
@@ -3700,7 +3727,7 @@ Maybe<bool> JSProxy::GetOwnPropertyDescriptor(Isolate* isolate,
       Object::GetMethod(Handle<JSReceiver>::cast(handler), trap_name),
       Nothing<bool>());
   // 7. If trap is undefined, then
-  if (trap->IsUndefined(isolate)) {
+  if (IsUndefined(*trap, isolate)) {
     // 7a. Return target.[[GetOwnProperty]](P).
     return JSReceiver::GetOwnPropertyDescriptor(isolate, target, name, desc);
   }
@@ -3713,8 +3740,8 @@ Maybe<bool> JSProxy::GetOwnPropertyDescriptor(Isolate* isolate,
       Nothing<bool>());
   // 9. If Type(trapResultObj) is neither Object nor Undefined, throw a
   //    TypeError exception.
-  if (!trap_result_obj->IsJSReceiver() &&
-      !trap_result_obj->IsUndefined(isolate)) {
+  if (!IsJSReceiver(*trap_result_obj) &&
+      !IsUndefined(*trap_result_obj, isolate)) {
     isolate->Throw(*isolate->factory()->NewTypeError(
         MessageTemplate::kProxyGetOwnPropertyDescriptorInvalid, name));
     return Nothing<bool>();
@@ -3725,7 +3752,7 @@ Maybe<bool> JSProxy::GetOwnPropertyDescriptor(Isolate* isolate,
       JSReceiver::GetOwnPropertyDescriptor(isolate, target, name, &target_desc);
   MAYBE_RETURN(found, Nothing<bool>());
   // 11. If trapResultObj is undefined, then
-  if (trap_result_obj->IsUndefined(isolate)) {
+  if (IsUndefined(*trap_result_obj, isolate)) {
     // 11a. If targetDesc is undefined, return undefined.
     if (!found.FromJust()) return Just(false);
     // 11b. If targetDesc.[[Configurable]] is false, throw a TypeError
@@ -3816,7 +3843,7 @@ Maybe<bool> JSProxy::PreventExtensions(Handle<JSProxy> proxy,
   Handle<Object> trap;
   ASSIGN_RETURN_ON_EXCEPTION_VALUE(
       isolate, trap, Object::GetMethod(handler, trap_name), Nothing<bool>());
-  if (trap->IsUndefined(isolate)) {
+  if (IsUndefined(*trap, isolate)) {
     return JSReceiver::PreventExtensions(isolate, target, should_throw);
   }
 
@@ -3826,7 +3853,7 @@ Maybe<bool> JSProxy::PreventExtensions(Handle<JSProxy> proxy,
       isolate, trap_result,
       Execution::Call(isolate, trap, handler, arraysize(args), args),
       Nothing<bool>());
-  if (!trap_result->BooleanValue(isolate)) {
+  if (!Object::BooleanValue(*trap_result, isolate)) {
     RETURN_FAILURE(
         isolate, should_throw,
         NewTypeError(MessageTemplate::kProxyTrapReturnedFalsish, trap_name));
@@ -3860,7 +3887,7 @@ Maybe<bool> JSProxy::IsExtensible(Handle<JSProxy> proxy) {
   Handle<Object> trap;
   ASSIGN_RETURN_ON_EXCEPTION_VALUE(
       isolate, trap, Object::GetMethod(handler, trap_name), Nothing<bool>());
-  if (trap->IsUndefined(isolate)) {
+  if (IsUndefined(*trap, isolate)) {
     return JSReceiver::IsExtensible(isolate, target);
   }
 
@@ -3874,7 +3901,7 @@ Maybe<bool> JSProxy::IsExtensible(Handle<JSProxy> proxy) {
   // Enforce the invariant.
   Maybe<bool> target_result = JSReceiver::IsExtensible(isolate, target);
   MAYBE_RETURN(target_result, Nothing<bool>());
-  if (target_result.FromJust() != trap_result->BooleanValue(isolate)) {
+  if (target_result.FromJust() != Object::BooleanValue(*trap_result, isolate)) {
     isolate->Throw(
         *factory->NewTypeError(MessageTemplate::kProxyIsExtensibleInconsistent,
                                factory->ToBoolean(target_result.FromJust())));
@@ -3912,13 +3939,13 @@ Handle<DescriptorArray> DescriptorArray::CopyUpToAddAttributes(
       Name key = source->GetKey(i);
       PropertyDetails details = source->GetDetails(i);
       // Bulk attribute changes never affect private properties.
-      if (!key.IsPrivate()) {
+      if (!key->IsPrivate()) {
         int mask = DONT_DELETE | DONT_ENUM;
         // READ_ONLY is an invalid attribute for JS setters/getters.
         HeapObject heap_object;
         if (details.kind() != PropertyKind::kAccessor ||
             !(value_or_field_type->GetHeapObjectIfStrong(&heap_object) &&
-              heap_object.IsAccessorPair())) {
+              IsAccessorPair(heap_object))) {
           mask |= READ_ONLY;
         }
         details = details.CopyAddAttributes(
@@ -3937,66 +3964,13 @@ Handle<DescriptorArray> DescriptorArray::CopyUpToAddAttributes(
   return copy_handle;
 }
 
-// Create a new descriptor array with only enumerable, configurable, writeable
-// data properties, but identical field locations.
-Handle<DescriptorArray> DescriptorArray::CopyForFastObjectClone(
-    Isolate* isolate, Handle<DescriptorArray> src_handle, int enumeration_index,
-    int slack) {
-  if (enumeration_index + slack == 0) {
-    return isolate->factory()->empty_descriptor_array();
-  }
-
-  int size = enumeration_index;
-  Handle<DescriptorArray> descriptors_handle =
-      DescriptorArray::Allocate(isolate, size, slack);
-
-  DisallowGarbageCollection no_gc;
-  Tagged<DescriptorArray> src = *src_handle;
-  Tagged<DescriptorArray> descriptors = *descriptors_handle;
-
-  for (InternalIndex i : InternalIndex::Range(size)) {
-    Name key = src->GetKey(i);
-    PropertyDetails details = src->GetDetails(i);
-    Representation new_representation = details.representation();
-
-    DCHECK(!key.IsPrivateName());
-    DCHECK(details.IsEnumerable());
-    DCHECK_EQ(details.kind(), PropertyKind::kData);
-    // If the new representation is an in-place changeable field, make it
-    // generic as possible (under in-place changes) to avoid type confusion if
-    // the source representation changes after this feedback has been collected.
-    MaybeObject type = src->GetValue(i);
-    if (details.location() == PropertyLocation::kField) {
-      type = MaybeObject::FromObject(FieldType::Any());
-      // TODO(bmeurer,ishell): Igor suggested to use some kind of dynamic
-      // checks in the fast-path for CloneObjectIC instead to avoid the
-      // need to generalize the descriptors here. That will also enable
-      // us to skip the defensive copying of the target map whenever a
-      // CloneObjectIC misses.
-      new_representation = new_representation.MostGenericInPlaceChange();
-    }
-
-    // Ensure the ObjectClone property details are NONE, and that all source
-    // details did not contain DONT_ENUM.
-    PropertyDetails new_details(PropertyKind::kData, NONE, details.location(),
-                                details.constness(), new_representation,
-                                details.field_index());
-
-    descriptors->Set(i, key, type, new_details);
-  }
-
-  descriptors->Sort();
-
-  return descriptors_handle;
-}
-
 bool DescriptorArray::IsEqualUpTo(DescriptorArray desc, int nof_descriptors) {
   for (InternalIndex i : InternalIndex::Range(nof_descriptors)) {
-    if (GetKey(i) != desc.GetKey(i) || GetValue(i) != desc.GetValue(i)) {
+    if (GetKey(i) != desc->GetKey(i) || GetValue(i) != desc->GetValue(i)) {
       return false;
     }
     PropertyDetails details = GetDetails(i);
-    PropertyDetails other_details = desc.GetDetails(i);
+    PropertyDetails other_details = desc->GetDetails(i);
     if (details.kind() != other_details.kind() ||
         details.location() != other_details.location() ||
         !details.representation().Equals(other_details.representation())) {
@@ -4054,9 +4028,9 @@ void FixedArray::CopyTo(int pos, FixedArray dest, int dest_pos, int len) const {
   // Return early if len == 0 so that we don't try to read the write barrier off
   // a canonical read-only empty fixed array.
   if (len == 0) return;
-  WriteBarrierMode mode = dest.GetWriteBarrierMode(no_gc);
+  WriteBarrierMode mode = dest->GetWriteBarrierMode(no_gc);
   for (int index = 0; index < len; index++) {
-    dest.set(dest_pos + index, get(pos + index), mode);
+    dest->set(dest_pos + index, get(pos + index), mode);
   }
 }
 
@@ -4175,23 +4149,23 @@ Handle<ArrayList> ArrayList::EnsureSpace(Isolate* isolate,
 // static
 Handle<WeakArrayList> WeakArrayList::AddToEnd(Isolate* isolate,
                                               Handle<WeakArrayList> array,
-                                              const MaybeObjectHandle& value) {
+                                              MaybeObjectHandle value) {
   int length = array->length();
   array = EnsureSpace(isolate, array, length + 1);
   {
     DisallowGarbageCollection no_gc;
     WeakArrayList raw = *array;
     // Reload length; GC might have removed elements from the array.
-    length = raw.length();
-    raw.Set(length, *value);
-    raw.set_length(length + 1);
+    length = raw->length();
+    raw->Set(length, *value);
+    raw->set_length(length + 1);
   }
   return array;
 }
 
 Handle<WeakArrayList> WeakArrayList::AddToEnd(Isolate* isolate,
                                               Handle<WeakArrayList> array,
-                                              const MaybeObjectHandle& value1,
+                                              MaybeObjectHandle value1,
                                               Smi value2) {
   int length = array->length();
   array = EnsureSpace(isolate, array, length + 2);
@@ -4200,9 +4174,9 @@ Handle<WeakArrayList> WeakArrayList::AddToEnd(Isolate* isolate,
     WeakArrayList raw = *array;
     // Reload length; GC might have removed elements from the array.
     length = array->length();
-    raw.Set(length, *value1);
-    raw.Set(length + 1, value2);
-    raw.set_length(length + 2);
+    raw->Set(length, *value1);
+    raw->Set(length + 1, value2);
+    raw->set_length(length + 2);
   }
   return array;
 }
@@ -4210,24 +4184,24 @@ Handle<WeakArrayList> WeakArrayList::AddToEnd(Isolate* isolate,
 // static
 Handle<WeakArrayList> WeakArrayList::Append(Isolate* isolate,
                                             Handle<WeakArrayList> array,
-                                            const MaybeObjectHandle& value,
+                                            MaybeObjectHandle value,
                                             AllocationType allocation) {
   int length = 0;
   int new_length = 0;
   {
     DisallowGarbageCollection no_gc;
     WeakArrayList raw = *array;
-    length = raw.length();
+    length = raw->length();
 
-    if (length < raw.capacity()) {
-      raw.Set(length, *value);
-      raw.set_length(length + 1);
+    if (length < raw->capacity()) {
+      raw->Set(length, *value);
+      raw->set_length(length + 1);
       return array;
     }
 
     // Not enough space in the array left, either grow, shrink or
     // compact the array.
-    new_length = raw.CountLiveElements() + 1;
+    new_length = raw->CountLiveElements() + 1;
   }
 
   bool shrink = new_length < length / 4;
@@ -4251,9 +4225,9 @@ Handle<WeakArrayList> WeakArrayList::Append(Isolate* isolate,
     DisallowGarbageCollection no_gc;
     WeakArrayList raw = *array;
     // Reload length, allocation might have killed some weak refs.
-    int index = raw.length();
-    raw.Set(index, *value);
-    raw.set_length(index + 1);
+    int index = raw->length();
+    raw->Set(index, *value);
+    raw->set_length(index + 1);
   }
   return array;
 }
@@ -4313,21 +4287,17 @@ int WeakArrayList::CountLiveElements() const {
   return non_cleared_objects;
 }
 
-bool WeakArrayList::RemoveOne(const MaybeObjectHandle& value) {
-  if (length() == 0) return false;
-  // Optimize for the most recently added element to be removed again.
-  MaybeObject cleared_weak_ref =
-      HeapObjectReference::ClearedValue(GetIsolate());
+bool WeakArrayList::RemoveOne(MaybeObjectHandle value) {
   int last_index = length() - 1;
+  // Optimize for the most recently added element to be removed again.
   for (int i = last_index; i >= 0; --i) {
-    if (Get(i) == *value) {
-      // Move the last element into the this slot (or no-op, if this is the
-      // last slot).
-      Set(i, Get(last_index));
-      Set(last_index, cleared_weak_ref);
-      set_length(last_index);
-      return true;
-    }
+    if (Get(i) != *value) continue;
+    // Move the last element into this slot (or no-op, if this is the last
+    // slot).
+    Set(i, Get(last_index));
+    Set(last_index, HeapObjectReference::ClearedValue(GetIsolate()));
+    set_length(last_index);
+    return true;
   }
   return false;
 }
@@ -4396,8 +4366,8 @@ Handle<WeakArrayList> PrototypeUsers::Add(Isolate* isolate,
 
 // static
 void PrototypeUsers::ScanForEmptySlots(WeakArrayList array) {
-  for (int i = kFirstIndex; i < array.length(); i++) {
-    if (array.Get(i)->IsCleared()) {
+  for (int i = kFirstIndex; i < array->length(); i++) {
+    if (array->Get(i)->IsCleared()) {
       PrototypeUsers::MarkSlotEmpty(array, i);
     }
   }
@@ -4508,14 +4478,14 @@ void DescriptorArray::InitializeOrChangeEnumCache(
                                                    allocation_if_initialize);
     descriptors->set_enum_cache(enum_cache);
   } else {
-    enum_cache.set_keys(*keys);
-    enum_cache.set_indices(*indices);
+    enum_cache->set_keys(*keys);
+    enum_cache->set_indices(*indices);
   }
 }
 
 void DescriptorArray::CopyFrom(InternalIndex index, DescriptorArray src) {
-  PropertyDetails details = src.GetDetails(index);
-  Set(index, src.GetKey(index), src.GetValue(index), details);
+  PropertyDetails details = src->GetDetails(index);
+  Set(index, src->GetKey(index), src->GetValue(index), details);
 }
 
 void DescriptorArray::Sort() {
@@ -4528,12 +4498,12 @@ void DescriptorArray::Sort() {
   int max_parent_index = (len / 2) - 1;
   for (int i = max_parent_index; i >= 0; --i) {
     int parent_index = i;
-    const uint32_t parent_hash = GetSortedKey(i).hash();
+    const uint32_t parent_hash = GetSortedKey(i)->hash();
     while (parent_index <= max_parent_index) {
       int child_index = 2 * parent_index + 1;
-      uint32_t child_hash = GetSortedKey(child_index).hash();
+      uint32_t child_hash = GetSortedKey(child_index)->hash();
       if (child_index + 1 < len) {
-        uint32_t right_child_hash = GetSortedKey(child_index + 1).hash();
+        uint32_t right_child_hash = GetSortedKey(child_index + 1)->hash();
         if (right_child_hash > child_hash) {
           child_index++;
           child_hash = right_child_hash;
@@ -4552,13 +4522,13 @@ void DescriptorArray::Sort() {
     SwapSortedKeys(0, i);
     // Shift down the new top element.
     int parent_index = 0;
-    const uint32_t parent_hash = GetSortedKey(parent_index).hash();
+    const uint32_t parent_hash = GetSortedKey(parent_index)->hash();
     max_parent_index = (i / 2) - 1;
     while (parent_index <= max_parent_index) {
       int child_index = parent_index * 2 + 1;
-      uint32_t child_hash = GetSortedKey(child_index).hash();
+      uint32_t child_hash = GetSortedKey(child_index)->hash();
       if (child_index + 1 < i) {
-        uint32_t right_child_hash = GetSortedKey(child_index + 1).hash();
+        uint32_t right_child_hash = GetSortedKey(child_index + 1)->hash();
         if (right_child_hash > child_hash) {
           child_index++;
           child_hash = right_child_hash;
@@ -4582,7 +4552,7 @@ void DescriptorArray::CheckNameCollisionDuringInsertion(Descriptor* desc,
 
   for (int i = insertion_index; i > 0; --i) {
     Name current_key = GetSortedKey(i - 1);
-    if (current_key.hash() != desc_hash) return;
+    if (current_key->hash() != desc_hash) return;
     CHECK(current_key != *desc->GetKey());
   }
 }
@@ -4603,7 +4573,7 @@ Handle<Object> AccessorPair::GetComponent(Isolate* isolate,
                                           Handle<AccessorPair> accessor_pair,
                                           AccessorComponent component) {
   Handle<Object> accessor(accessor_pair->get(component), isolate);
-  if (accessor->IsFunctionTemplateInfo()) {
+  if (IsFunctionTemplateInfo(*accessor)) {
     // TODO(v8:5962): pass the right name here: "get "/"set " + prop.
     Handle<JSFunction> function =
         ApiNatives::InstantiateFunction(
@@ -4613,7 +4583,7 @@ Handle<Object> AccessorPair::GetComponent(Isolate* isolate,
     accessor_pair->set(component, *function, kReleaseStore);
     return function;
   }
-  if (accessor->IsNull(isolate)) {
+  if (IsNull(*accessor, isolate)) {
     return isolate->factory()->undefined_value();
   }
   return accessor;
@@ -4621,13 +4591,13 @@ Handle<Object> AccessorPair::GetComponent(Isolate* isolate,
 
 #ifdef DEBUG
 bool DescriptorArray::IsEqualTo(DescriptorArray other) {
-  if (number_of_all_descriptors() != other.number_of_all_descriptors()) {
+  if (number_of_all_descriptors() != other->number_of_all_descriptors()) {
     return false;
   }
   for (InternalIndex i : InternalIndex::Range(number_of_descriptors())) {
-    if (GetKey(i) != other.GetKey(i)) return false;
-    if (GetDetails(i).AsSmi() != other.GetDetails(i).AsSmi()) return false;
-    if (GetValue(i) != other.GetValue(i)) return false;
+    if (GetKey(i) != other->GetKey(i)) return false;
+    if (GetDetails(i).AsSmi() != other->GetDetails(i).AsSmi()) return false;
+    if (GetValue(i) != other->GetValue(i)) return false;
   }
   return true;
 }
@@ -4635,11 +4605,11 @@ bool DescriptorArray::IsEqualTo(DescriptorArray other) {
 
 // static
 MaybeHandle<String> Name::ToFunctionName(Isolate* isolate, Handle<Name> name) {
-  if (name->IsString()) return Handle<String>::cast(name);
+  if (IsString(*name)) return Handle<String>::cast(name);
   // ES6 section 9.2.11 SetFunctionName, step 4.
   Handle<Object> description(Handle<Symbol>::cast(name)->description(),
                              isolate);
-  if (description->IsUndefined(isolate)) {
+  if (IsUndefined(*description, isolate)) {
     return isolate->factory()->empty_string();
   }
   IncrementalStringBuilder builder(isolate);
@@ -4711,34 +4681,34 @@ void WriteFixedArrayToFlat(FixedArray fixed_array, int length, String separator,
                            sinkchar* sink, int sink_length) {
   DisallowGarbageCollection no_gc;
   CHECK_GT(length, 0);
-  CHECK_LE(length, fixed_array.length());
+  CHECK_LE(length, fixed_array->length());
 #ifdef DEBUG
   sinkchar* sink_end = sink + sink_length;
 #endif
 
-  const int separator_length = separator.length();
+  const int separator_length = separator->length();
   const bool use_one_byte_separator_fast_path =
       separator_length == 1 && sizeof(sinkchar) == 1 &&
       StringShape(separator).IsSequentialOneByte();
   uint8_t separator_one_char;
   if (use_one_byte_separator_fast_path) {
     CHECK(StringShape(separator).IsSequentialOneByte());
-    CHECK_EQ(separator.length(), 1);
-    separator_one_char = SeqOneByteString::cast(separator).GetChars(no_gc)[0];
+    CHECK_EQ(separator->length(), 1);
+    separator_one_char = SeqOneByteString::cast(separator)->GetChars(no_gc)[0];
   }
 
   uint32_t num_separators = 0;
   uint32_t repeat_last = 0;
   for (int i = 0; i < length; i++) {
-    Object element = fixed_array.get(i);
-    const bool element_is_special = element.IsSmi();
+    Object element = fixed_array->get(i);
+    const bool element_is_special = IsSmi(element);
 
     // If element is a positive Smi, it represents the number of separators to
     // write. If it is a negative Smi, it reprsents the number of times the last
     // string is repeated.
     if (V8_UNLIKELY(element_is_special)) {
       int count;
-      CHECK(element.ToInt32(&count));
+      CHECK(Object::ToInt32(element, &count));
       if (count > 0) {
         num_separators = count;
         //  Verify that Smis (number of separators) only occur when necessary:
@@ -4753,7 +4723,7 @@ void WriteFixedArrayToFlat(FixedArray fixed_array, int length, String separator,
         repeat_last = -count;
         // Repeat is only possible when the previous element is not special.
         DCHECK_GT(i, 0);
-        DCHECK(fixed_array.get(i - 1).IsString());
+        DCHECK(IsString(fixed_array->get(i - 1)));
       }
     }
 
@@ -4780,8 +4750,8 @@ void WriteFixedArrayToFlat(FixedArray fixed_array, int length, String separator,
     // Repeat the last written string |repeat_last| times (including
     // separators).
     if (V8_UNLIKELY(repeat_last > 0)) {
-      Object last_element = fixed_array.get(i - 1);
-      int string_length = String::cast(last_element).length();
+      Object last_element = fixed_array->get(i - 1);
+      int string_length = String::cast(last_element)->length();
       // The implemented logic requires that string length is > 0. Empty strings
       // are handled by repeating the separator (positive smi in the fixed
       // array) already.
@@ -4809,9 +4779,9 @@ void WriteFixedArrayToFlat(FixedArray fixed_array, int length, String separator,
     }
 
     if (V8_LIKELY(!element_is_special)) {
-      DCHECK(element.IsString());
+      DCHECK(IsString(element));
       String string = String::cast(element);
-      const int string_length = string.length();
+      const int string_length = string->length();
 
       DCHECK(string_length == 0 || sink < sink_end);
       String::WriteToFlat(string, sink, 0, string_length);
@@ -4839,19 +4809,19 @@ Address JSArray::ArrayJoinConcatToSequentialString(Isolate* isolate,
   FixedArray fixed_array = FixedArray::cast(Object(raw_fixed_array));
   String separator = String::cast(Object(raw_separator));
   String dest = String::cast(Object(raw_dest));
-  DCHECK(fixed_array.IsFixedArray());
+  DCHECK(IsFixedArray(fixed_array));
   DCHECK(StringShape(dest).IsSequentialOneByte() ||
          StringShape(dest).IsSequentialTwoByte());
 
   if (StringShape(dest).IsSequentialOneByte()) {
     WriteFixedArrayToFlat(fixed_array, static_cast<int>(length), separator,
-                          SeqOneByteString::cast(dest).GetChars(no_gc),
-                          dest.length());
+                          SeqOneByteString::cast(dest)->GetChars(no_gc),
+                          dest->length());
   } else {
     DCHECK(StringShape(dest).IsSequentialTwoByte());
     WriteFixedArrayToFlat(fixed_array, static_cast<int>(length), separator,
-                          SeqTwoByteString::cast(dest).GetChars(no_gc),
-                          dest.length());
+                          SeqTwoByteString::cast(dest)->GetChars(no_gc),
+                          dest->length());
   }
   return dest.ptr();
 }
@@ -4883,11 +4853,11 @@ void Oddball::Initialize(Isolate* isolate, Handle<Oddball> oddball,
       isolate->factory()->InternalizeUtf8String(to_string);
   Handle<String> internalized_type_of =
       isolate->factory()->InternalizeUtf8String(type_of);
-  if (to_number->IsHeapNumber()) {
+  if (IsHeapNumber(*to_number)) {
     oddball->set_to_number_raw_as_bits(
         Handle<HeapNumber>::cast(to_number)->value_as_bits(kRelaxedLoad));
   } else {
-    oddball->set_to_number_raw(to_number->Number());
+    oddball->set_to_number_raw(Object::Number(*to_number));
   }
   oddball->set_to_number(*to_number);
   oddball->set_to_string(*internalized_to_string);
@@ -4910,7 +4880,7 @@ int Script::GetEvalPosition(Isolate* isolate, Handle<Script> script) {
           handle(script->eval_from_shared(), isolate);
       SharedFunctionInfo::EnsureSourcePositionsAvailable(isolate, shared);
       position =
-          shared->abstract_code(isolate).SourcePosition(isolate, -position);
+          shared->abstract_code(isolate)->SourcePosition(isolate, -position);
     }
     DCHECK_GE(position, 0);
     script->set_eval_from_position(position);
@@ -4924,16 +4894,16 @@ void Script::InitLineEndsInternal(IsolateT* isolate, Handle<Script> script) {
   DCHECK(!script->has_line_ends());
   DCHECK(script->CanHaveLineEnds());
   Object src_obj = script->source();
-  if (!src_obj.IsString()) {
-    DCHECK(src_obj.IsUndefined(isolate));
+  if (!IsString(src_obj)) {
+    DCHECK(IsUndefined(src_obj, isolate));
     script->set_line_ends(ReadOnlyRoots(isolate).empty_fixed_array());
   } else {
-    DCHECK(src_obj.IsString());
+    DCHECK(IsString(src_obj));
     Handle<String> src(String::cast(src_obj), isolate);
     Handle<FixedArray> array = String::CalculateLineEnds(isolate, src, true);
     script->set_line_ends(*array);
   }
-  DCHECK(script->line_ends().IsFixedArray());
+  DCHECK(IsFixedArray(script->line_ends()));
   DCHECK(script->has_line_ends());
 }
 
@@ -4958,7 +4928,7 @@ bool Script::GetPositionInfo(Handle<Script> script, int position,
 #ifdef DEBUG
   if (script->type() == Type::kWasm) {
     DCHECK(script->has_line_ends());
-    DCHECK_EQ(FixedArray::cast(script->line_ends()).length(), 0);
+    DCHECK_EQ(FixedArray::cast(script->line_ends())->length(), 0);
   }
 #endif  // DEBUG
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -4991,7 +4961,7 @@ bool Script::ContainsAsmModule() {
   SharedFunctionInfo::ScriptIterator iter(this->GetIsolate(), *this);
   for (SharedFunctionInfo sfi = iter.Next(); !sfi.is_null();
        sfi = iter.Next()) {
-    if (sfi.HasAsmWasmData()) return true;
+    if (sfi->HasAsmWasmData()) return true;
   }
   return false;
 }
@@ -5025,11 +4995,11 @@ bool GetPositionInfoSlowImpl(base::Vector<Char> source, int position,
 bool GetPositionInfoSlow(const Script script, int position,
                          const DisallowGarbageCollection& no_gc,
                          Script::PositionInfo* info) {
-  if (!script.source().IsString()) {
+  if (!IsString(script->source())) {
     return false;
   }
-  auto source = String::cast(script.source());
-  const auto flat = source.GetFlatContent(no_gc);
+  auto source = String::cast(script->source());
+  const auto flat = source->GetFlatContent(no_gc);
   return flat.IsOneByte()
              ? GetPositionInfoSlowImpl(flat.ToOneByteVector(), position, info)
              : GetPositionInfoSlowImpl(flat.ToUC16Vector(), position, info);
@@ -5065,19 +5035,19 @@ bool Script::GetPositionInfo(int position, PositionInfo* info,
     DCHECK(has_line_ends());
     FixedArray ends = FixedArray::cast(line_ends());
 
-    const int ends_len = ends.length();
+    const int ends_len = ends->length();
     if (ends_len == 0) return false;
 
     // Return early on invalid positions. Negative positions behave as if 0 was
     // passed, and positions beyond the end of the script return as failure.
     if (position < 0) {
       position = 0;
-    } else if (position > Smi::ToInt(ends.get(ends_len - 1))) {
+    } else if (position > Smi::ToInt(ends->get(ends_len - 1))) {
       return false;
     }
 
     // Determine line number by doing a binary search on the line ends array.
-    if (Smi::ToInt(ends.get(0)) >= position) {
+    if (Smi::ToInt(ends->get(0)) >= position) {
       info->line = 0;
       info->line_start = 0;
       info->column = position;
@@ -5088,28 +5058,28 @@ bool Script::GetPositionInfo(int position, PositionInfo* info,
       while (right > 0) {
         DCHECK_LE(left, right);
         const int mid = (left + right) / 2;
-        if (position > Smi::ToInt(ends.get(mid))) {
+        if (position > Smi::ToInt(ends->get(mid))) {
           left = mid + 1;
-        } else if (position <= Smi::ToInt(ends.get(mid - 1))) {
+        } else if (position <= Smi::ToInt(ends->get(mid - 1))) {
           right = mid - 1;
         } else {
           info->line = mid;
           break;
         }
       }
-      DCHECK(Smi::ToInt(ends.get(info->line)) >= position &&
-             Smi::ToInt(ends.get(info->line - 1)) < position);
-      info->line_start = Smi::ToInt(ends.get(info->line - 1)) + 1;
+      DCHECK(Smi::ToInt(ends->get(info->line)) >= position &&
+             Smi::ToInt(ends->get(info->line - 1)) < position);
+      info->line_start = Smi::ToInt(ends->get(info->line - 1)) + 1;
       info->column = position - info->line_start;
     }
 
     // Line end is position of the linebreak character.
-    info->line_end = Smi::ToInt(ends.get(info->line));
+    info->line_end = Smi::ToInt(ends->get(info->line));
     if (info->line_end > 0) {
-      DCHECK(source().IsString());
+      DCHECK(IsString(source()));
       String src = String::cast(source());
-      if (src.length() >= info->line_end &&
-          src.Get(info->line_end - 1) == '\r') {
+      if (src->length() >= info->line_end &&
+          src->Get(info->line_end - 1) == '\r') {
         info->line_end--;
       }
     }
@@ -5154,7 +5124,7 @@ int Script::GetLineNumber(int code_pos) const {
 
 Object Script::GetNameOrSourceURL() {
   // Keep in sync with ScriptNameOrSourceURL in messages.js.
-  if (!source_url().IsUndefined()) return source_url();
+  if (!IsUndefined(source_url())) return source_url();
   return name();
 }
 
@@ -5168,7 +5138,7 @@ Handle<String> Script::GetScriptHash(Isolate* isolate, Handle<Script> script,
   PtrComprCageBase cage_base(isolate);
   {
     Object maybe_source_hash = script->source_hash(cage_base);
-    if (maybe_source_hash.IsString(cage_base)) {
+    if (IsString(maybe_source_hash, cage_base)) {
       Handle<String> precomputed(String::cast(maybe_source_hash), isolate);
       if (precomputed->length() > 0) {
         return precomputed;
@@ -5180,7 +5150,7 @@ Handle<String> Script::GetScriptHash(Isolate* isolate, Handle<Script> script,
   {
     Object maybe_script_source = script->source(cage_base);
 
-    if (!maybe_script_source.IsString(cage_base)) {
+    if (!IsString(maybe_script_source, cage_base)) {
       return isolate->factory()->empty_string();
     }
     src_text = handle(String::cast(maybe_script_source), isolate);
@@ -5214,10 +5184,11 @@ MaybeHandle<SharedFunctionInfo> Script::FindSharedFunctionInfo(
   // AstTraversalVisitor doesn't recurse properly in the construct which
   // triggers the mismatch.
   CHECK_LT(function_literal_id, script->shared_function_info_count());
-  MaybeObject shared = script->shared_function_infos().Get(function_literal_id);
+  MaybeObject shared =
+      script->shared_function_infos()->Get(function_literal_id);
   HeapObject heap_object;
   if (!shared->GetHeapObject(&heap_object) ||
-      heap_object.IsUndefined(isolate)) {
+      IsUndefined(heap_object, isolate)) {
     return MaybeHandle<SharedFunctionInfo>();
   }
   return handle(SharedFunctionInfo::cast(heap_object), isolate);
@@ -5262,7 +5233,7 @@ Maybe<bool> JSProxy::SetPrototype(Isolate* isolate, Handle<JSProxy> proxy,
   STACK_CHECK(isolate, Nothing<bool>());
   Handle<Name> trap_name = isolate->factory()->setPrototypeOf_string();
   // 1. Assert: Either Type(V) is Object or Type(V) is Null.
-  DCHECK(value->IsJSReceiver() || value->IsNull(isolate));
+  DCHECK(IsJSReceiver(*value) || IsNull(*value, isolate));
   // 2. Let handler be the value of the [[ProxyHandler]] internal slot of O.
   Handle<Object> handler(proxy->handler(), isolate);
   // 3. If handler is null, throw a TypeError exception.
@@ -5281,7 +5252,7 @@ Maybe<bool> JSProxy::SetPrototype(Isolate* isolate, Handle<JSProxy> proxy,
       Object::GetMethod(Handle<JSReceiver>::cast(handler), trap_name),
       Nothing<bool>());
   // 7. If trap is undefined, then return target.[[SetPrototypeOf]]().
-  if (trap->IsUndefined(isolate)) {
+  if (IsUndefined(*trap, isolate)) {
     return JSReceiver::SetPrototype(isolate, target, value, from_javascript,
                                     should_throw);
   }
@@ -5292,7 +5263,7 @@ Maybe<bool> JSProxy::SetPrototype(Isolate* isolate, Handle<JSProxy> proxy,
       isolate, trap_result,
       Execution::Call(isolate, trap, handler, arraysize(argv), argv),
       Nothing<bool>());
-  bool bool_trap_result = trap_result->BooleanValue(isolate);
+  bool bool_trap_result = Object::BooleanValue(*trap_result, isolate);
   // 9. If booleanTrapResult is false, return false.
   if (!bool_trap_result) {
     RETURN_FAILURE(
@@ -5315,7 +5286,7 @@ Maybe<bool> JSProxy::SetPrototype(Isolate* isolate, Handle<JSProxy> proxy,
                                    JSReceiver::GetPrototype(isolate, target),
                                    Nothing<bool>());
   // 13. If SameValue(V, targetProto) is false, throw a TypeError exception.
-  if (bool_trap_result && !value->SameValue(*target_proto)) {
+  if (bool_trap_result && !Object::SameValue(*value, *target_proto)) {
     isolate->Throw(*isolate->factory()->NewTypeError(
         MessageTemplate::kProxySetPrototypeOfNonExtensible));
     return Nothing<bool>();
@@ -5326,7 +5297,7 @@ Maybe<bool> JSProxy::SetPrototype(Isolate* isolate, Handle<JSProxy> proxy,
 
 bool JSArray::SetLengthWouldNormalize(uint32_t new_length) {
   if (!HasFastElements()) return false;
-  uint32_t capacity = static_cast<uint32_t>(elements().length());
+  uint32_t capacity = static_cast<uint32_t>(elements()->length());
   uint32_t new_capacity;
   return JSArray::SetLengthWouldNormalize(GetHeap(), new_length) &&
          ShouldConvertToSlowElements(*this, capacity, new_length - 1,
@@ -5347,13 +5318,13 @@ AllocationType AllocationSite::GetAllocationType() const {
 
 bool AllocationSite::IsNested() {
   DCHECK(v8_flags.trace_track_allocation_sites);
-  Object current = boilerplate().GetHeap()->allocation_sites_list();
-  while (current.IsAllocationSite()) {
+  Object current = boilerplate()->GetHeap()->allocation_sites_list();
+  while (IsAllocationSite(current)) {
     AllocationSite current_site = AllocationSite::cast(current);
-    if (current_site.nested_site() == *this) {
+    if (current_site->nested_site() == *this) {
       return true;
     }
-    current = current_site.weak_next();
+    current = current_site->weak_next();
   }
   return false;
 }
@@ -5382,16 +5353,16 @@ const char* AllocationSite::PretenureDecisionName(PretenureDecision decision) {
 
 // static
 bool JSArray::MayHaveReadOnlyLength(Map js_array_map) {
-  DCHECK(js_array_map.IsJSArrayMap());
-  if (js_array_map.is_dictionary_map()) return true;
+  DCHECK(IsJSArrayMap(js_array_map));
+  if (js_array_map->is_dictionary_map()) return true;
 
   // Fast path: "length" is the first fast property of arrays with non
   // dictionary properties. Since it's not configurable, it's guaranteed to be
   // the first in the descriptor array.
   InternalIndex first(0);
-  DCHECK(js_array_map.instance_descriptors().GetKey(first) ==
-         js_array_map.GetReadOnlyRoots().length_string());
-  return js_array_map.instance_descriptors().GetDetails(first).IsReadOnly();
+  DCHECK(js_array_map->instance_descriptors()->GetKey(first) ==
+         js_array_map->GetReadOnlyRoots().length_string());
+  return js_array_map->instance_descriptors()->GetDetails(first).IsReadOnly();
 }
 
 bool JSArray::HasReadOnlyLength(Handle<JSArray> array) {
@@ -5410,7 +5381,7 @@ bool JSArray::HasReadOnlyLength(Handle<JSArray> array) {
 
 bool JSArray::WouldChangeReadOnlyLength(Handle<JSArray> array, uint32_t index) {
   uint32_t length = 0;
-  CHECK(array->length().ToArrayLength(&length));
+  CHECK(Object::ToArrayLength(array->length(), &length));
   if (length <= index) return HasReadOnlyLength(array);
   return false;
 }
@@ -5435,10 +5406,10 @@ const char* Symbol::PrivateSymbolToName() const {
 
 void Symbol::SymbolShortPrint(std::ostream& os) {
   os << "<Symbol:";
-  if (!description().IsUndefined()) {
+  if (!IsUndefined(description())) {
     os << " ";
     String description_as_string = String::cast(description());
-    description_as_string.PrintUC16(os, 0, description_as_string.length());
+    description_as_string->PrintUC16(os, 0, description_as_string->length());
   } else {
     os << " (" << PrivateSymbolToName() << ")";
   }
@@ -5585,7 +5556,7 @@ MaybeHandle<Object> JSPromise::Resolve(Handle<JSPromise> promise,
   }
 
   // 8. If Type(resolution) is not Object, then
-  if (!resolution->IsJSReceiver()) {
+  if (!IsJSReceiver(*resolution)) {
     // a. Return FulfillPromise(promise, resolution).
     return Fulfill(promise, resolution);
   }
@@ -5599,8 +5570,8 @@ MaybeHandle<Object> JSPromise::Resolve(Handle<JSPromise> promise,
   // protector also guards the negative lookup of "then" on the intrinsic
   // %ObjectPrototype%, meaning that such lookups are guaranteed to yield
   // undefined without triggering any side-effects.
-  if (receiver->IsJSPromise() &&
-      isolate->IsInAnyContext(receiver->map().prototype(),
+  if (IsJSPromise(*receiver) &&
+      isolate->IsInAnyContext(receiver->map()->prototype(),
                               Context::PROMISE_PROTOTYPE_INDEX) &&
       Protectors::IsPromiseThenLookupChainIntact(isolate)) {
     // We can skip the "then" lookup on {resolution} if its [[Prototype]]
@@ -5629,7 +5600,7 @@ MaybeHandle<Object> JSPromise::Resolve(Handle<JSPromise> promise,
 
   // 11. Let thenAction be then.[[Value]].
   // 12. If IsCallable(thenAction) is false, then
-  if (!then_action->IsCallable()) {
+  if (!IsCallable(*then_action)) {
     // a. Return FulfillPromise(promise, resolution).
     return Fulfill(promise, resolution);
   }
@@ -5646,7 +5617,7 @@ MaybeHandle<Object> JSPromise::Resolve(Handle<JSPromise> promise,
       isolate->factory()->NewPromiseResolveThenableJobTask(
           promise, Handle<JSReceiver>::cast(resolution),
           Handle<JSReceiver>::cast(then_action), then_context);
-  if (isolate->debug()->is_active() && resolution->IsJSPromise()) {
+  if (isolate->debug()->is_active() && IsJSPromise(*resolution)) {
     // Mark the dependency of the new {promise} on the {resolution}.
     Object::SetProperty(isolate, resolution,
                         isolate->factory()->promise_handled_by_symbol(),
@@ -5665,7 +5636,7 @@ Handle<Object> JSPromise::TriggerPromiseReactions(Isolate* isolate,
                                                   Handle<Object> reactions,
                                                   Handle<Object> argument,
                                                   PromiseReaction::Type type) {
-  CHECK(reactions->IsSmi() || reactions->IsPromiseReaction());
+  CHECK(IsSmi(*reactions) || IsPromiseReaction(*reactions));
 
   // We need to reverse the {reactions} here, since we record them
   // on the JSPromise in the reverse order.
@@ -5673,9 +5644,9 @@ Handle<Object> JSPromise::TriggerPromiseReactions(Isolate* isolate,
     DisallowGarbageCollection no_gc;
     Object current = *reactions;
     Object reversed = Smi::zero();
-    while (!current.IsSmi()) {
-      Object next = PromiseReaction::cast(current).next();
-      PromiseReaction::cast(current).set_next(reversed);
+    while (!IsSmi(current)) {
+      Object next = PromiseReaction::cast(current)->next();
+      PromiseReaction::cast(current)->set_next(reversed);
       reversed = current;
       current = next;
     }
@@ -5684,7 +5655,7 @@ Handle<Object> JSPromise::TriggerPromiseReactions(Isolate* isolate,
 
   // Morph the {reactions} into PromiseReactionJobTasks
   // and push them onto the microtask queue.
-  while (!reactions->IsSmi()) {
+  while (!IsSmi(*reactions)) {
     Handle<HeapObject> task = Handle<HeapObject>::cast(reactions);
     Handle<PromiseReaction> reaction = Handle<PromiseReaction>::cast(task);
     reactions = handle(reaction->next(), isolate);
@@ -5705,12 +5676,12 @@ Handle<Object> JSPromise::TriggerPromiseReactions(Isolate* isolate,
     }
 
     bool has_handler_context = false;
-    if (primary_handler->IsJSReceiver()) {
+    if (IsJSReceiver(*primary_handler)) {
       has_handler_context = JSReceiver::GetContextForMicrotask(
                                 Handle<JSReceiver>::cast(primary_handler))
                                 .ToHandle(&handler_context);
     }
-    if (!has_handler_context && secondary_handler->IsJSReceiver()) {
+    if (!has_handler_context && IsJSReceiver(*secondary_handler)) {
       has_handler_context = JSReceiver::GetContextForMicrotask(
                                 Handle<JSReceiver>::cast(secondary_handler))
                                 .ToHandle(&handler_context);
@@ -6053,7 +6024,7 @@ GlobalDictionary::TryFindPropertyCellForConcurrentLookupIterator(
     if (element == undefined) return {};
     if (ShapeT::kMatchNeedsHoleCheck && element == the_hole) continue;
     if (!ShapeT::IsMatch(name, element)) continue;
-    CHECK(element.IsPropertyCell(cage_base));
+    CHECK(IsPropertyCell(element, cage_base));
     return PropertyCell::cast(element);
   }
 }
@@ -6244,8 +6215,8 @@ Handle<Derived> Dictionary<Derived, Shape>::Add(IsolateT* isolate,
 
   InternalIndex entry = dictionary->FindInsertionEntry(isolate, roots, hash);
   dictionary->SetEntry(entry, *k, *value, details);
-  DCHECK(dictionary->KeyAt(isolate, entry).IsNumber() ||
-         Shape::Unwrap(dictionary->KeyAt(isolate, entry)).IsUniqueName());
+  DCHECK(IsNumber(dictionary->KeyAt(isolate, entry)) ||
+         IsUniqueName(Shape::Unwrap(dictionary->KeyAt(isolate, entry))));
   dictionary->ElementAdded();
   if (entry_out) *entry_out = entry;
   return dictionary;
@@ -6268,8 +6239,8 @@ void Dictionary<Derived, Shape>::UncheckedAdd(IsolateT* isolate,
 
   InternalIndex entry = dictionary->FindInsertionEntry(isolate, roots, hash);
   dictionary->SetEntry(entry, *k, *value, details);
-  DCHECK(dictionary->KeyAt(isolate, entry).IsNumber() ||
-         Shape::Unwrap(dictionary->KeyAt(isolate, entry)).IsUniqueName());
+  DCHECK(IsNumber(dictionary->KeyAt(isolate, entry)) ||
+         IsUniqueName(Shape::Unwrap(dictionary->KeyAt(isolate, entry))));
 }
 
 template <typename Derived, typename Shape>
@@ -6303,7 +6274,7 @@ void NumberDictionary::UpdateMaxNumberKey(uint32_t key,
   }
   // Update max key value.
   Object max_index_object = get(kMaxNumberKeyIndex);
-  if (!max_index_object.IsSmi() || max_number_key() < key) {
+  if (!IsSmi(max_index_object) || max_number_key() < key) {
     FixedArray::set(kMaxNumberKeyIndex,
                     Smi::FromInt(key << kRequiresSlowElementsTagSize));
   }
@@ -6333,14 +6304,14 @@ void NumberDictionary::CopyValuesTo(FixedArray elements) {
   ReadOnlyRoots roots = GetReadOnlyRoots();
   int pos = 0;
   DisallowGarbageCollection no_gc;
-  WriteBarrierMode mode = elements.GetWriteBarrierMode(no_gc);
+  WriteBarrierMode mode = elements->GetWriteBarrierMode(no_gc);
   for (InternalIndex i : this->IterateEntries()) {
     Object k;
     if (this->ToKey(roots, i, &k)) {
-      elements.set(pos++, this->ValueAt(i), mode);
+      elements->set(pos++, this->ValueAt(i), mode);
     }
   }
-  DCHECK_EQ(pos, elements.length());
+  DCHECK_EQ(pos, elements->length());
 }
 
 template <typename Derived, typename Shape>
@@ -6350,7 +6321,7 @@ int Dictionary<Derived, Shape>::NumberOfEnumerableProperties() {
   for (InternalIndex i : this->IterateEntries()) {
     Object k;
     if (!this->ToKey(roots, i, &k)) continue;
-    if (k.FilterKey(ENUMERABLE_STRINGS)) continue;
+    if (Object::FilterKey(k, ENUMERABLE_STRINGS)) continue;
     PropertyDetails details = this->DetailsAt(i);
     PropertyAttributes attr = details.attributes();
     if ((int{attr} & ONLY_ENUMERABLE) == 0) result++;
@@ -6448,8 +6419,8 @@ Object ObjectHashTableBase<Derived, Shape>::Lookup(Handle<Object> key) {
   DCHECK(this->IsKey(roots, *key));
 
   // If the object does not have an identity hash, it was never used as a key.
-  Object hash = key->GetHash();
-  if (hash.IsUndefined(roots)) {
+  Object hash = Object::GetHash(*key);
+  if (IsUndefined(hash, roots)) {
     return roots.the_hole_value();
   }
   return Lookup(cage_base, key, Smi::ToInt(hash));
@@ -6476,7 +6447,7 @@ Object NameToIndexHashTable::ValueAt(InternalIndex entry) {
 
 int NameToIndexHashTable::IndexAt(InternalIndex entry) {
   Object value = ValueAt(entry);
-  if (value.IsSmi()) {
+  if (IsSmi(value)) {
     int index = Smi::ToInt(value);
     DCHECK_LE(0, index);
     return index;
@@ -6490,10 +6461,10 @@ Handle<Derived> ObjectHashTableBase<Derived, Shape>::Put(Handle<Derived> table,
                                                          Handle<Object> value) {
   Isolate* isolate = Heap::FromWritableHeapObject(*table)->isolate();
   DCHECK(table->IsKey(ReadOnlyRoots(isolate), *key));
-  DCHECK(!value->IsTheHole(ReadOnlyRoots(isolate)));
+  DCHECK(!IsTheHole(*value, ReadOnlyRoots(isolate)));
 
   // Make sure the key object has an identity hash code.
-  int32_t hash = key->GetOrCreateHash(isolate).value();
+  int32_t hash = Object::GetOrCreateHash(*key, isolate).value();
 
   return ObjectHashTableBase<Derived, Shape>::Put(isolate, table, key, value,
                                                   hash);
@@ -6533,7 +6504,7 @@ Handle<Derived> ObjectHashTableBase<Derived, Shape>::Put(Isolate* isolate,
                                                          int32_t hash) {
   ReadOnlyRoots roots(isolate);
   DCHECK(table->IsKey(roots, *key));
-  DCHECK(!value->IsTheHole(roots));
+  DCHECK(!IsTheHole(*value, roots));
 
   InternalIndex entry = table->FindEntry(isolate, roots, key, hash);
 
@@ -6557,8 +6528,8 @@ Handle<Derived> ObjectHashTableBase<Derived, Shape>::Remove(
     bool* was_present) {
   DCHECK(table->IsKey(table->GetReadOnlyRoots(), *key));
 
-  Object hash = key->GetHash();
-  if (hash.IsUndefined()) {
+  Object hash = Object::GetHash(*key);
+  if (IsUndefined(hash)) {
     *was_present = false;
     return table;
   }
@@ -6614,8 +6585,8 @@ std::array<Object, N> ObjectMultiHashTableBase<Derived, N>::Lookup(
   ReadOnlyRoots roots = this->GetReadOnlyRoots(cage_base);
   DCHECK(this->IsKey(roots, *key));
 
-  Object hash_obj = key->GetHash();
-  if (hash_obj.IsUndefined(roots)) {
+  Object hash_obj = Object::GetHash(*key);
+  if (IsUndefined(hash_obj, roots)) {
     return {roots.the_hole_value(), roots.the_hole_value()};
   }
   int32_t hash = Smi::ToInt(hash_obj);
@@ -6630,7 +6601,7 @@ std::array<Object, N> ObjectMultiHashTableBase<Derived, N>::Lookup(
   std::array<Object, N> values;
   for (int i = 0; i < N; i++) {
     values[i] = this->get(start_index + i);
-    DCHECK(!values[i].IsTheHole());
+    DCHECK(!IsTheHole(values[i]));
   }
   return values;
 }
@@ -6643,7 +6614,7 @@ Handle<Derived> ObjectMultiHashTableBase<Derived, N>::Put(
   ReadOnlyRoots roots(isolate);
   DCHECK(table->IsKey(roots, *key));
 
-  int32_t hash = key->GetOrCreateHash(isolate).value();
+  int32_t hash = Object::GetOrCreateHash(*key, isolate).value();
   InternalIndex entry = table->FindEntry(isolate, roots, key, hash);
 
   // Overwrite values if entry is found.
@@ -6674,7 +6645,7 @@ void ObjectMultiHashTableBase<Derived, N>::SetEntryValues(
 Handle<ObjectHashSet> ObjectHashSet::Add(Isolate* isolate,
                                          Handle<ObjectHashSet> set,
                                          Handle<Object> key) {
-  int32_t hash = key->GetOrCreateHash(isolate).value();
+  int32_t hash = Object::GetOrCreateHash(*key, isolate).value();
   if (!set->Has(isolate, key, hash)) {
     set = EnsureCapacity(isolate, set);
     InternalIndex entry = set->FindInsertionEntry(isolate, hash);
@@ -6729,7 +6700,7 @@ void JSWeakCollection::Initialize(Handle<JSWeakCollection> weak_collection,
 void JSWeakCollection::Set(Handle<JSWeakCollection> weak_collection,
                            Handle<Object> key, Handle<Object> value,
                            int32_t hash) {
-  DCHECK(key->IsJSReceiver() || key->IsSymbol());
+  DCHECK(IsJSReceiver(*key) || IsSymbol(*key));
   Handle<EphemeronHashTable> table(
       EphemeronHashTable::cast(weak_collection->table()),
       weak_collection->GetIsolate());
@@ -6745,7 +6716,7 @@ void JSWeakCollection::Set(Handle<JSWeakCollection> weak_collection,
 
 bool JSWeakCollection::Delete(Handle<JSWeakCollection> weak_collection,
                               Handle<Object> key, int32_t hash) {
-  DCHECK(key->IsJSReceiver() || key->IsSymbol());
+  DCHECK(IsJSReceiver(*key) || IsSymbol(*key));
   Handle<EphemeronHashTable> table(
       EphemeronHashTable::cast(weak_collection->table()),
       weak_collection->GetIsolate());
@@ -6769,7 +6740,7 @@ Handle<JSArray> JSWeakCollection::GetEntries(Handle<JSWeakCollection> holder,
   if (max_entries == 0 || max_entries > table->NumberOfElements()) {
     max_entries = table->NumberOfElements();
   }
-  int values_per_entry = holder->IsJSWeakMap() ? 2 : 1;
+  int values_per_entry = IsJSWeakMap(*holder) ? 2 : 1;
   Handle<FixedArray> entries =
       isolate->factory()->NewFixedArray(max_entries * values_per_entry);
   // Recompute max_values because GC could have removed elements from the table.
@@ -6798,10 +6769,10 @@ Handle<JSArray> JSWeakCollection::GetEntries(Handle<JSWeakCollection> holder,
 }
 
 void PropertyCell::ClearAndInvalidate(ReadOnlyRoots roots) {
-  DCHECK(!value().IsTheHole(roots));
+  DCHECK(!IsTheHole(value(), roots));
   PropertyDetails details = property_details();
   details = details.set_cell_type(PropertyCellType::kConstant);
-  Transition(details, roots.the_hole_value_handle());
+  Transition(details, roots.property_cell_hole_value_handle());
   // TODO(11527): pass Isolate as an argument.
   Isolate* isolate = GetIsolateFromWritableObject(*this);
   DependentCode::DeoptimizeDependencyGroups(
@@ -6815,7 +6786,7 @@ Handle<PropertyCell> PropertyCell::InvalidateAndReplaceEntry(
   Handle<PropertyCell> cell(dictionary->CellAt(entry), isolate);
   Handle<Name> name(cell->name(), isolate);
   DCHECK(cell->property_details().IsConfigurable());
-  DCHECK(!cell->value().IsTheHole(isolate));
+  DCHECK(!IsAnyHole(cell->value(), isolate));
 
   // Swap with a new property cell.
   Handle<PropertyCell> new_cell =
@@ -6829,19 +6800,19 @@ Handle<PropertyCell> PropertyCell::InvalidateAndReplaceEntry(
 static bool RemainsConstantType(PropertyCell cell, Object value) {
   DisallowGarbageCollection no_gc;
   // TODO(dcarney): double->smi and smi->double transition from kConstant
-  if (cell.value().IsSmi() && value.IsSmi()) {
+  if (IsSmi(cell->value()) && IsSmi(value)) {
     return true;
-  } else if (cell.value().IsHeapObject() && value.IsHeapObject()) {
-    Map map = HeapObject::cast(value).map();
-    return HeapObject::cast(cell.value()).map() == map && map.is_stable();
+  } else if (IsHeapObject(cell->value()) && IsHeapObject(value)) {
+    Map map = HeapObject::cast(value)->map();
+    return HeapObject::cast(cell->value())->map() == map && map->is_stable();
   }
   return false;
 }
 
 // static
 PropertyCellType PropertyCell::InitialType(Isolate* isolate, Object value) {
-  return value.IsUndefined(isolate) ? PropertyCellType::kUndefined
-                                    : PropertyCellType::kConstant;
+  return IsUndefined(value, isolate) ? PropertyCellType::kUndefined
+                                     : PropertyCellType::kConstant;
 }
 
 // static
@@ -6849,13 +6820,13 @@ PropertyCellType PropertyCell::UpdatedType(Isolate* isolate, PropertyCell cell,
                                            Object value,
                                            PropertyDetails details) {
   DisallowGarbageCollection no_gc;
-  DCHECK(!value.IsTheHole(isolate));
-  DCHECK(!cell.value().IsTheHole(isolate));
+  DCHECK(!IsAnyHole(value, isolate));
+  DCHECK(!IsAnyHole(cell->value(), isolate));
   switch (details.cell_type()) {
     case PropertyCellType::kUndefined:
       return PropertyCellType::kConstant;
     case PropertyCellType::kConstant:
-      if (value == cell.value()) return PropertyCellType::kConstant;
+      if (value == cell->value()) return PropertyCellType::kConstant;
       V8_FALLTHROUGH;
     case PropertyCellType::kConstantType:
       if (RemainsConstantType(cell, value)) {
@@ -6872,10 +6843,10 @@ PropertyCellType PropertyCell::UpdatedType(Isolate* isolate, PropertyCell cell,
 Handle<PropertyCell> PropertyCell::PrepareForAndSetValue(
     Isolate* isolate, Handle<GlobalDictionary> dictionary, InternalIndex entry,
     Handle<Object> value, PropertyDetails details) {
-  DCHECK(!value->IsTheHole(isolate));
+  DCHECK(!IsAnyHole(*value, isolate));
   PropertyCell raw_cell = dictionary->CellAt(entry);
-  CHECK(!raw_cell.value().IsTheHole(isolate));
-  const PropertyDetails original_details = raw_cell.property_details();
+  CHECK(!IsAnyHole(raw_cell->value(), isolate));
+  const PropertyDetails original_details = raw_cell->property_details();
   // Data accesses could be cached in ics or optimized code.
   bool invalidate = original_details.kind() == PropertyKind::kData &&
                     details.kind() == PropertyKind::kAccessor;
@@ -6926,13 +6897,13 @@ bool PropertyCell::CheckDataIsCompatible(PropertyDetails details,
   DisallowGarbageCollection no_gc;
   PropertyCellType cell_type = details.cell_type();
   CHECK_NE(cell_type, PropertyCellType::kInTransition);
-  if (value.IsTheHole()) {
+  if (IsPropertyCellHole(value)) {
     CHECK_EQ(cell_type, PropertyCellType::kConstant);
   } else {
-    CHECK_EQ(value.IsAccessorInfo() || value.IsAccessorPair(),
+    CHECK_EQ(IsAccessorInfo(value) || IsAccessorPair(value),
              details.kind() == PropertyKind::kAccessor);
     DCHECK_IMPLIES(cell_type == PropertyCellType::kUndefined,
-                   value.IsUndefined());
+                   IsUndefined(value));
   }
   return true;
 }
@@ -6948,17 +6919,17 @@ bool PropertyCell::CanTransitionTo(PropertyDetails new_details,
     case PropertyCellType::kUndefined:
       return new_details.cell_type() != PropertyCellType::kUndefined;
     case PropertyCellType::kConstant:
-      return !value().IsTheHole() &&
+      return !IsPropertyCellHole(value()) &&
              new_details.cell_type() != PropertyCellType::kUndefined;
     case PropertyCellType::kConstantType:
       return new_details.cell_type() == PropertyCellType::kConstantType ||
              new_details.cell_type() == PropertyCellType::kMutable ||
              (new_details.cell_type() == PropertyCellType::kConstant &&
-              new_value.IsTheHole());
+              IsPropertyCellHole(new_value));
     case PropertyCellType::kMutable:
       return new_details.cell_type() == PropertyCellType::kMutable ||
              (new_details.cell_type() == PropertyCellType::kConstant &&
-              new_value.IsTheHole());
+              IsPropertyCellHole(new_value));
     case PropertyCellType::kInTransition:
       UNREACHABLE();
   }
@@ -6966,7 +6937,7 @@ bool PropertyCell::CanTransitionTo(PropertyDetails new_details,
 #endif  // DEBUG
 
 int JSGeneratorObject::code_offset() const {
-  DCHECK(input_or_debug_pos().IsSmi());
+  DCHECK(IsSmi(input_or_debug_pos()));
   int code_offset = Smi::ToInt(input_or_debug_pos());
 
   // The stored bytecode offset is relative to a different base than what
@@ -6977,41 +6948,44 @@ int JSGeneratorObject::code_offset() const {
 
 int JSGeneratorObject::source_position() const {
   CHECK(is_suspended());
-  DCHECK(function().shared().HasBytecodeArray());
+  DCHECK(function()->shared()->HasBytecodeArray());
   Isolate* isolate = GetIsolate();
-  DCHECK(
-      function().shared().GetBytecodeArray(isolate).HasSourcePositionTable());
+  DCHECK(function()
+             ->shared()
+             ->GetBytecodeArray(isolate)
+             ->HasSourcePositionTable());
   AbstractCode code =
-      AbstractCode::cast(function().shared().GetBytecodeArray(isolate));
-  return code.SourcePosition(isolate, code_offset());
+      AbstractCode::cast(function()->shared()->GetBytecodeArray(isolate));
+  return code->SourcePosition(isolate, code_offset());
 }
 
 // static
 AccessCheckInfo AccessCheckInfo::Get(Isolate* isolate,
                                      Handle<JSObject> receiver) {
   DisallowGarbageCollection no_gc;
-  DCHECK(receiver->map().is_access_check_needed());
-  Object maybe_constructor = receiver->map().GetConstructor();
-  if (maybe_constructor.IsFunctionTemplateInfo()) {
+  DCHECK(receiver->map()->is_access_check_needed());
+  Object maybe_constructor = receiver->map()->GetConstructor();
+  if (IsFunctionTemplateInfo(maybe_constructor)) {
     Object data_obj =
-        FunctionTemplateInfo::cast(maybe_constructor).GetAccessCheckInfo();
-    if (data_obj.IsUndefined(isolate)) return AccessCheckInfo();
+        FunctionTemplateInfo::cast(maybe_constructor)->GetAccessCheckInfo();
+    if (IsUndefined(data_obj, isolate)) return AccessCheckInfo();
     return AccessCheckInfo::cast(data_obj);
   }
   // Might happen for a detached context.
-  if (!maybe_constructor.IsJSFunction()) return AccessCheckInfo();
+  if (!IsJSFunction(maybe_constructor)) return AccessCheckInfo();
   JSFunction constructor = JSFunction::cast(maybe_constructor);
   // Might happen for the debug context.
-  if (!constructor.shared().IsApiFunction()) return AccessCheckInfo();
+  if (!constructor->shared()->IsApiFunction()) return AccessCheckInfo();
 
   Object data_obj =
-      constructor.shared().get_api_func_data().GetAccessCheckInfo();
-  if (data_obj.IsUndefined(isolate)) return AccessCheckInfo();
+      constructor->shared()->api_func_data()->GetAccessCheckInfo();
+  if (IsUndefined(data_obj, isolate)) return AccessCheckInfo();
 
   return AccessCheckInfo::cast(data_obj);
 }
 
-Address Smi::LexicographicCompare(Isolate* isolate, Smi x, Smi y) {
+Address Smi::LexicographicCompare(Isolate* isolate, Tagged<Smi> x,
+                                  Tagged<Smi> y) {
   DisallowGarbageCollection no_gc;
   DisallowJavascriptExecution no_js(isolate);
 
@@ -7099,60 +7073,60 @@ void JSFinalizationRegistry::RemoveCellFromUnregisterTokenMap(
   JSFinalizationRegistry finalization_registry =
       JSFinalizationRegistry::cast(Object(raw_finalization_registry));
   WeakCell weak_cell = WeakCell::cast(Object(raw_weak_cell));
-  DCHECK(!weak_cell.unregister_token().IsUndefined(isolate));
+  DCHECK(!IsUndefined(weak_cell->unregister_token(), isolate));
   HeapObject undefined = ReadOnlyRoots(isolate).undefined_value();
 
   // Remove weak_cell from the linked list of other WeakCells with the same
   // unregister token and remove its unregister token from key_map if necessary
   // without shrinking it. Since shrinking may allocate, it is performed by the
   // caller after looping, or on exception.
-  if (weak_cell.key_list_prev().IsUndefined(isolate)) {
+  if (IsUndefined(weak_cell->key_list_prev(), isolate)) {
     SimpleNumberDictionary key_map =
-        SimpleNumberDictionary::cast(finalization_registry.key_map());
-    HeapObject unregister_token = weak_cell.unregister_token();
-    uint32_t key = Smi::ToInt(unregister_token.GetHash());
-    InternalIndex entry = key_map.FindEntry(isolate, key);
+        SimpleNumberDictionary::cast(finalization_registry->key_map());
+    HeapObject unregister_token = weak_cell->unregister_token();
+    uint32_t key = Smi::ToInt(Object::GetHash(unregister_token));
+    InternalIndex entry = key_map->FindEntry(isolate, key);
     DCHECK(entry.is_found());
 
-    if (weak_cell.key_list_next().IsUndefined(isolate)) {
+    if (IsUndefined(weak_cell->key_list_next(), isolate)) {
       // weak_cell is the only one associated with its key; remove the key
       // from the hash table.
-      key_map.ClearEntry(entry);
-      key_map.ElementRemoved();
+      key_map->ClearEntry(entry);
+      key_map->ElementRemoved();
     } else {
       // weak_cell is the list head for its key; we need to change the value
       // of the key in the hash table.
-      WeakCell next = WeakCell::cast(weak_cell.key_list_next());
-      DCHECK_EQ(next.key_list_prev(), weak_cell);
-      next.set_key_list_prev(undefined);
-      key_map.ValueAtPut(entry, next);
+      WeakCell next = WeakCell::cast(weak_cell->key_list_next());
+      DCHECK_EQ(next->key_list_prev(), weak_cell);
+      next->set_key_list_prev(undefined);
+      key_map->ValueAtPut(entry, next);
     }
   } else {
     // weak_cell is somewhere in the middle of its key list.
-    WeakCell prev = WeakCell::cast(weak_cell.key_list_prev());
-    prev.set_key_list_next(weak_cell.key_list_next());
-    if (!weak_cell.key_list_next().IsUndefined()) {
-      WeakCell next = WeakCell::cast(weak_cell.key_list_next());
-      next.set_key_list_prev(weak_cell.key_list_prev());
+    WeakCell prev = WeakCell::cast(weak_cell->key_list_prev());
+    prev->set_key_list_next(weak_cell->key_list_next());
+    if (!IsUndefined(weak_cell->key_list_next())) {
+      WeakCell next = WeakCell::cast(weak_cell->key_list_next());
+      next->set_key_list_prev(weak_cell->key_list_prev());
     }
   }
 
   // weak_cell is now removed from the unregister token map, so clear its
   // unregister token-related fields.
-  weak_cell.set_unregister_token(undefined);
-  weak_cell.set_key_list_prev(undefined);
-  weak_cell.set_key_list_next(undefined);
+  weak_cell->set_unregister_token(undefined);
+  weak_cell->set_key_list_prev(undefined);
+  weak_cell->set_key_list_next(undefined);
 }
 
 // static
 bool MapWord::IsMapOrForwarded(Map map) {
-  MapWord map_word = map.map_word(kRelaxedLoad);
+  MapWord map_word = map->map_word(kRelaxedLoad);
 
   if (map_word.IsForwardingAddress()) {
     // During GC we can't access forwarded maps without synchronization.
     return true;
   } else {
-    return map_word.ToMap().IsMap();
+    return IsMap(map_word.ToMap());
   }
 }
 

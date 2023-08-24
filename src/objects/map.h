@@ -9,9 +9,11 @@
 #include "src/common/globals.h"
 #include "src/objects/code.h"
 #include "src/objects/heap-object.h"
+#include "src/objects/instance-type-checker.h"
 #include "src/objects/internal-index.h"
 #include "src/objects/objects.h"
 #include "src/objects/prototype-info.h"
+#include "src/roots/roots.h"
 #include "torque-generated/bit-fields.h"
 #include "torque-generated/visitor-lists.h"
 
@@ -38,6 +40,7 @@ enum InstanceType : uint16_t;
   V(AccessorInfo)                       \
   V(AllocationSite)                     \
   V(BytecodeArray)                      \
+  V(ExternalPointerArray)               \
   V(CallHandlerInfo)                    \
   V(Cell)                               \
   V(InstructionStream)                  \
@@ -835,15 +838,6 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
   }
   static inline Map GetMapFor(ReadOnlyRoots roots, InstanceType type);
 
-#define DECL_TESTER(Type, ...) inline bool Is##Type##Map() const;
-  INSTANCE_TYPE_CHECKERS(DECL_TESTER)
-#undef DECL_TESTER
-  inline bool IsBooleanMap() const;
-  inline bool IsNullOrUndefinedMap() const;
-  inline bool IsPrimitiveMap() const;
-  inline bool IsSpecialReceiverMap() const;
-  inline bool IsCustomElementsReceiverMap() const;
-
   bool IsMapInArrayPrototypeChain(Isolate* isolate) const;
 
   // Dispatched behavior.
@@ -996,7 +990,7 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
   static const int kMaxFastProperties = 128;
 
   friend class MapUpdater;
-  template <typename ConcreteVisitor, typename MarkingState>
+  template <typename ConcreteVisitor>
   friend class MarkingVisitorBase;
 
   TQ_OBJECT_CONSTRUCTORS(Map)
@@ -1019,8 +1013,8 @@ class NormalizedMapCache : public WeakFixedArray {
   DECL_VERIFIER(NormalizedMapCache)
 
  private:
-  friend bool HeapObject::IsNormalizedMapCache(
-      PtrComprCageBase cage_base) const;
+  friend bool IsNormalizedMapCache(Tagged<HeapObject> obj,
+                                   PtrComprCageBase cage_base);
 
   static const int kEntries = 64;
 
@@ -1032,6 +1026,15 @@ class NormalizedMapCache : public WeakFixedArray {
 
   OBJECT_CONSTRUCTORS(NormalizedMapCache, WeakFixedArray);
 };
+
+#define DECL_TESTER(Type, ...) inline bool Is##Type##Map(Tagged<Map> map);
+INSTANCE_TYPE_CHECKERS(DECL_TESTER)
+#undef DECL_TESTER
+inline bool IsBooleanMap(Tagged<Map> map);
+inline bool IsNullOrUndefinedMap(Tagged<Map> map);
+inline bool IsPrimitiveMap(Tagged<Map> map);
+inline bool IsSpecialReceiverMap(Tagged<Map> map);
+inline bool IsCustomElementsReceiverMap(Tagged<Map> map);
 
 }  // namespace internal
 }  // namespace v8

@@ -241,12 +241,13 @@ class FeedbackVector
   inline void RequestOsrAtNextOpportunity();
 
   // Whether this vector may contain cached optimized osr code for *any* slot.
-  // Represented internally as a bit that can be efficiently checked by
-  // generated code. May diverge from the state of the world; the invariant is
-  // that if `maybe_has_optimized_osr_code` is false, no optimized osr code
+  // May diverge from the state of the world; the invariant is that if
+  // `maybe_has_(maglev|turbofan)_osr_code` is false, no optimized osr code
   // exists.
+  inline bool maybe_has_maglev_osr_code() const;
+  inline bool maybe_has_turbofan_osr_code() const;
   inline bool maybe_has_optimized_osr_code() const;
-  inline void set_maybe_has_optimized_osr_code(bool value);
+  inline void set_maybe_has_optimized_osr_code(bool value, CodeKind code_kind);
 
   // The `osr_state` contains the osr_urgency and maybe_has_optimized_osr_code.
   inline void reset_osr_state();
@@ -871,7 +872,8 @@ class V8_EXPORT_PRIVATE FeedbackNexus final {
 
   // For CloneObject ICs
   static constexpr int kCloneObjectPolymorphicEntrySize = 2;
-  void ConfigureCloneObject(Handle<Map> source_map, Handle<Map> result_map);
+  void ConfigureCloneObject(Handle<Map> source_map,
+                            const MaybeObjectHandle& handler);
 
 // Bit positions in a smi that encodes lexical environment variable access.
 #define LEXICAL_MODE_BIT_FIELDS(V, _)  \

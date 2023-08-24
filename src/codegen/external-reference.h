@@ -137,6 +137,8 @@ class StatsCounter;
   V(copy_typed_array_elements_to_typed_array,                                  \
     "copy_typed_array_elements_to_typed_array")                                \
   V(cpu_features, "cpu_features")                                              \
+  V(debug_break_at_entry_function, "DebugBreakAtEntry")                        \
+  V(debug_get_coverage_info_function, "DebugGetCoverageInfo")                  \
   V(delete_handle_scope_extensions, "HandleScope::DeleteExtensions")           \
   V(ephemeron_key_write_barrier_function,                                      \
     "Heap::EphemeronKeyWriteBarrierFromCode")                                  \
@@ -172,10 +174,7 @@ class StatsCounter;
     "JSObject::InvalidatePrototypeChains()")                                   \
   V(invoke_accessor_getter_callback, "InvokeAccessorGetterCallback")           \
   V(invoke_function_callback_generic, "InvokeFunctionCallbackGeneric")         \
-  V(invoke_function_callback_no_side_effects,                                  \
-    "InvokeFunctionCallbackNoSideEffects")                                     \
-  V(invoke_function_callback_with_side_effects,                                \
-    "InvokeFunctionCallbackWithSideEffects")                                   \
+  V(invoke_function_callback_optimized, "InvokeFunctionCallbackOptimized")     \
   V(jsarray_array_join_concat_to_sequential_string,                            \
     "jsarray_array_join_concat_to_sequential_string")                          \
   V(jsreceiver_create_identity_hash, "jsreceiver_create_identity_hash")        \
@@ -256,8 +255,11 @@ class StatsCounter;
     "name_to_index_hashtable_lookup_forwarded_string")                         \
   V(name_to_index_hashtable_find_insertion_entry_forwarded_string,             \
     "name_to_index_hashtable_find_insertion_entry_forwarded_string")           \
-  IF_WASM(V, wasm_call_trap_callback_for_testing,                              \
-          "wasm::call_trap_callback_for_testing")                              \
+  IF_WASM(V, wasm_sync_stack_limit, "wasm_sync_stack_limit")                   \
+  IF_WASM(V, wasm_switch_to_the_central_stack,                                 \
+          "wasm::switch_to_the_central_stack")                                 \
+  IF_WASM(V, wasm_switch_from_the_central_stack,                               \
+          "wasm::switch_from_the_central_stack")                               \
   IF_WASM(V, wasm_f32_ceil, "wasm::f32_ceil_wrapper")                          \
   IF_WASM(V, wasm_f32_floor, "wasm::f32_floor_wrapper")                        \
   IF_WASM(V, wasm_f32_nearest_int, "wasm::f32_nearest_int_wrapper")            \
@@ -323,6 +325,8 @@ class StatsCounter;
   V(address_of_wasm_int32_overflow_as_float, "wasm_int32_overflow_as_float")   \
   V(supports_cetss_address, "CpuFeatures::supports_cetss_address")             \
   V(write_barrier_marking_from_code_function, "WriteBarrier::MarkingFromCode") \
+  V(write_barrier_indirect_pointer_marking_from_code_function,                 \
+    "WriteBarrier::IndirectPointerMarkingFromCode")                            \
   V(write_barrier_shared_marking_from_code_function,                           \
     "WriteBarrier::SharedMarkingFromCode")                                     \
   V(shared_barrier_from_code_function, "WriteBarrier::SharedFromCode")         \

@@ -89,16 +89,27 @@ ConcurrentAllocator::ConcurrentAllocator(LocalHeap* local_heap,
 }
 
 void ConcurrentAllocator::FreeLinearAllocationArea() {
-  if (lab_.top() != lab_.limit() && IsBlackAllocationEnabled()) {
+  if (IsLabValid() && lab_.top() != lab_.limit()) {
     base::Optional<CodePageHeaderModificationScope> optional_scope;
     if (space_->identity() == CODE_SPACE) {
       optional_scope.emplace("Clears marking bitmap in the page header.");
     }
-    Page::FromAddress(lab_.top())
-        ->DestroyBlackAreaBackground(lab_.top(), lab_.limit());
+
+    Page* page = Page::FromAddress(lab_.top());
+
+    if (IsBlackAllocationEnabled()) {
+      page->DestroyBlackArea(lab_.top(), lab_.limit());
+    }
+
+    // When starting incremental marking free lists are dropped for evacuation
+    // candidates. So for evacuation candidates we just make the free memory
+    // iterable.
+    CHECK(!page->IsEvacuationCandidate());
+    base::MutexGuard guard(space_->mutex());
+    space_->Free(lab_.top(), lab_.limit() - lab_.top(),
+                 SpaceAccountingMode::kSpaceAccounted);
   }
 
-  MakeLabIterable();
   ResetLab();
 }
 
@@ -117,7 +128,7 @@ void ConcurrentAllocator::MarkLinearAllocationAreaBlack() {
           "Marking InstructionStream objects requires write access to the "
           "Code page header");
     }
-    Page::FromAllocationAreaAddress(top)->CreateBlackAreaBackground(top, limit);
+    Page::FromAllocationAreaAddress(top)->CreateBlackArea(top, limit);
   }
 }
 
@@ -132,8 +143,7 @@ void ConcurrentAllocator::UnmarkLinearAllocationArea() {
           "Marking InstructionStream objects requires write access to the "
           "Code page header");
     }
-    Page::FromAllocationAreaAddress(top)->DestroyBlackAreaBackground(top,
-                                                                     limit);
+    Page::FromAllocationAreaAddress(top)->DestroyBlackArea(top, limit);
   }
 }
 
@@ -164,7 +174,7 @@ bool ConcurrentAllocator::AllocateLab(AllocationOrigin origin) {
   if (IsBlackAllocationEnabled()) {
     Address top = lab_.top();
     Address limit = lab_.limit();
-    Page::FromAllocationAreaAddress(top)->CreateBlackAreaBackground(top, limit);
+    Page::FromAllocationAreaAddress(top)->CreateBlackArea(top, limit);
   }
 
   return true;
@@ -186,14 +196,17 @@ ConcurrentAllocator::AllocateFromSpaceFreeList(size_t min_size_in_bytes,
                                                   max_size_in_bytes, origin);
   if (result) return result;
 
+  uint64_t trace_flow_id = owning_heap()->sweeper()->GetTraceIdForFlowEvent(
+      GCTracer::Scope::MC_BACKGROUND_SWEEPING);
   // Sweeping is still in progress.
-  if (owning_heap()->major_sweeping_in_progress()) {
+  if (owning_heap()->sweeping_in_progress()) {
     // First try to refill the free-list, concurrent sweeper threads
     // may have freed some objects in the meantime.
     {
-      TRACE_GC_EPOCH(owning_heap()->tracer(),
-                     GCTracer::Scope::MC_BACKGROUND_SWEEPING,
-                     ThreadKind::kBackground);
+      TRACE_GC_EPOCH_WITH_FLOW(
+          owning_heap()->tracer(), GCTracer::Scope::MC_BACKGROUND_SWEEPING,
+          ThreadKind::kBackground, trace_flow_id,
+          TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
       space_->RefillFreeList();
     }
 
@@ -202,24 +215,27 @@ ConcurrentAllocator::AllocateFromSpaceFreeList(size_t min_size_in_bytes,
         min_size_in_bytes, max_size_in_bytes, origin);
     if (result) return result;
 
-    // Now contribute to sweeping from background thread and then try to
-    // reallocate.
-    int max_freed;
-    {
-      TRACE_GC_EPOCH(owning_heap()->tracer(),
-                     GCTracer::Scope::MC_BACKGROUND_SWEEPING,
-                     ThreadKind::kBackground);
-      const int kMaxPagesToSweep = 1;
-      max_freed = owning_heap()->sweeper()->ParallelSweepSpace(
-          space_->identity(), Sweeper::SweepingMode::kLazyOrConcurrent,
-          static_cast<int>(min_size_in_bytes), kMaxPagesToSweep);
-      space_->RefillFreeList();
-    }
+    if (owning_heap()->major_sweeping_in_progress()) {
+      // Now contribute to sweeping from background thread and then try to
+      // reallocate.
+      int max_freed;
+      {
+        TRACE_GC_EPOCH_WITH_FLOW(
+            owning_heap()->tracer(), GCTracer::Scope::MC_BACKGROUND_SWEEPING,
+            ThreadKind::kBackground, trace_flow_id,
+            TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+        const int kMaxPagesToSweep = 1;
+        max_freed = owning_heap()->sweeper()->ParallelSweepSpace(
+            space_->identity(), Sweeper::SweepingMode::kLazyOrConcurrent,
+            static_cast<int>(min_size_in_bytes), kMaxPagesToSweep);
+        space_->RefillFreeList();
+      }
 
-    if (static_cast<size_t>(max_freed) >= min_size_in_bytes) {
-      result = space_->TryAllocationFromFreeListBackground(
-          min_size_in_bytes, max_size_in_bytes, origin);
-      if (result) return result;
+      if (static_cast<size_t>(max_freed) >= min_size_in_bytes) {
+        result = space_->TryAllocationFromFreeListBackground(
+            min_size_in_bytes, max_size_in_bytes, origin);
+        if (result) return result;
+      }
     }
   }
 
@@ -233,9 +249,10 @@ ConcurrentAllocator::AllocateFromSpaceFreeList(size_t min_size_in_bytes,
 
   if (owning_heap()->major_sweeping_in_progress()) {
     // Complete sweeping for this space.
-    TRACE_GC_EPOCH(owning_heap()->tracer(),
-                   GCTracer::Scope::MC_BACKGROUND_SWEEPING,
-                   ThreadKind::kBackground);
+    TRACE_GC_EPOCH_WITH_FLOW(
+        owning_heap()->tracer(), GCTracer::Scope::MC_BACKGROUND_SWEEPING,
+        ThreadKind::kBackground, trace_flow_id,
+        TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
     owning_heap()->DrainSweepingWorklistForSpace(space_->identity());
 
     space_->RefillFreeList();

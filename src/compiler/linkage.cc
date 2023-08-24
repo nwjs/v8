@@ -72,7 +72,8 @@ std::ostream& operator<<(std::ostream& os, const CallDescriptor& d) {
 MachineSignature* CallDescriptor::GetMachineSignature(Zone* zone) const {
   size_t param_count = ParameterCount();
   size_t return_count = ReturnCount();
-  MachineType* types = zone->NewArray<MachineType>(param_count + return_count);
+  MachineType* types =
+      zone->AllocateArray<MachineType>(param_count + return_count);
   int current = 0;
   for (size_t i = 0; i < return_count; ++i) {
     types[current++] = GetReturnType(i);
@@ -252,7 +253,7 @@ CallDescriptor* Linkage::ComputeIncoming(Zone* zone,
     SharedFunctionInfo shared = info->closure()->shared();
     return GetJSCallDescriptor(
         zone, info->is_osr(),
-        shared.internal_formal_parameter_count_with_receiver(),
+        shared->internal_formal_parameter_count_with_receiver(),
         CallDescriptor::kCanUseRoots);
   }
   return nullptr;  // TODO(titzer): ?
@@ -455,27 +456,20 @@ CallDescriptor* Linkage::GetStubCallDescriptor(
 
   DCHECK_GE(stack_parameter_count, descriptor.GetStackParameterCount());
 
-  size_t return_count = descriptor.GetReturnCount();
+  int return_count = descriptor.GetReturnCount();
   LocationSignature::Builder locations(zone, return_count, parameter_count);
 
   // Add returns.
-  static constexpr Register return_registers[] = {
-      kReturnRegister0, kReturnRegister1, kReturnRegister2};
-  size_t num_returns = 0;
-  size_t num_fp_returns = 0;
-  for (size_t i = 0; i < locations.return_count_; i++) {
+  for (int i = 0; i < return_count; i++) {
     MachineType type = descriptor.GetReturnType(static_cast<int>(i));
     if (IsFloatingPoint(type.representation())) {
-      DCHECK_LT(num_fp_returns, 1);  // Only 1 FP return is supported.
-      locations.AddReturn(regloc(kFPReturnRegister0, type));
-      num_fp_returns++;
+      DoubleRegister reg = descriptor.GetDoubleRegisterReturn(i);
+      locations.AddReturn(regloc(reg, type));
     } else {
-      DCHECK_LT(num_returns, arraysize(return_registers));
-      locations.AddReturn(regloc(return_registers[num_returns], type));
-      num_returns++;
+      Register reg = descriptor.GetRegisterReturn(i);
+      locations.AddReturn(regloc(reg, type));
     }
   }
-  USE(num_fp_returns);
 
   // Add parameters in registers and on the stack.
   for (int i = 0; i < js_parameter_count; i++) {

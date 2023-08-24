@@ -64,14 +64,16 @@ class OutputFrameStateCombine {
   size_t const parameter_;
 };
 
-
 // The type of stack frame that a FrameState node represents.
 enum class FrameStateType {
-  kUnoptimizedFunction,            // Represents an UnoptimizedFrame.
-  kInlinedExtraArguments,          // Represents inlined extra arguments.
-  kConstructStub,                  // Represents a ConstructStubFrame.
-  kBuiltinContinuation,            // Represents a continuation to a stub.
-#if V8_ENABLE_WEBASSEMBLY          // ↓ WebAssembly only
+  kUnoptimizedFunction,    // Represents an UnoptimizedFrame.
+  kInlinedExtraArguments,  // Represents inlined extra arguments.
+  kConstructCreateStub,    // Represents a frame created before creating a new
+                           // object in the construct stub.
+  kConstructInvokeStub,    // Represents a frame created before invoking the
+                           // constructor in the construct stub.
+  kBuiltinContinuation,    // Represents a continuation to a stub.
+#if V8_ENABLE_WEBASSEMBLY  // ↓ WebAssembly only
   kJSToWasmBuiltinContinuation,    // Represents a lazy deopt continuation for a
                                    // JS to Wasm call.
   kWasmInlinedIntoJS,              // Represents a Wasm function inlined into a
@@ -198,6 +200,15 @@ FrameState CreateJavaScriptBuiltinContinuationFrameState(
 FrameState CreateGenericLazyDeoptContinuationFrameState(
     JSGraph* graph, SharedFunctionInfoRef shared, Node* target, Node* context,
     Node* receiver, Node* outer_frame_state);
+
+// Creates GenericLazyDeoptContinuationFrameState if
+// --experimental-stack-trace-frames is enabled, returns outer_frame_state
+// otherwise.
+Node* CreateInlinedApiFunctionFrameState(JSGraph* graph,
+                                         SharedFunctionInfoRef shared,
+                                         Node* target, Node* context,
+                                         Node* receiver,
+                                         Node* outer_frame_state);
 
 // Creates a FrameState otherwise identical to `frame_state` except the
 // OutputFrameStateCombine is changed.

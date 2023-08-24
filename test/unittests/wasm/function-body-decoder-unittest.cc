@@ -221,7 +221,7 @@ class FunctionBodyDecoderTestBase : public WithZoneMixin<BaseTest> {
     size_t locals_size = local_decls.Size();
     size_t total_size =
         code.size() + locals_size + (append_end == kAppendEnd ? 1 : 0);
-    uint8_t* buffer = this->zone()->template NewArray<uint8_t>(total_size);
+    uint8_t* buffer = this->zone()->template AllocateArray<uint8_t>(total_size);
     // Prepend the local decls to the code.
     local_decls.Emit(buffer);
     // Emit the code.
@@ -5379,7 +5379,8 @@ TEST_P(FunctionBodyDecoderTestWithMultiMemory, ExtendedMemoryAccessImmediate) {
   builder.InitializeMemory();
   // The memory index can be encoded in a separate field, after a 0x40
   // alignment. For now, only memory index 0 is allowed.
-  // TODO(13918): Extend this test once we actually more than one memory.
+  // TODO(13918): Extend this test once the {TestModuleBuilder} supports more
+  // than one memory.
   Validate(is_multi_memory_enabled(), sigs.i_v(),
            {WASM_ZERO, kExprI32LoadMem, 0x40 /* alignment */,
             0 /* memory index */, 0 /* offset */});

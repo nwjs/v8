@@ -29,6 +29,7 @@
 #include "src/wasm/module-instantiate.h"
 #include "src/wasm/pgo.h"
 #include "src/wasm/stacks.h"
+#include "src/wasm/std-object-sizes.h"
 #include "src/wasm/streaming-decoder.h"
 #include "src/wasm/wasm-debug.h"
 #include "src/wasm/wasm-limits.h"
@@ -134,10 +135,10 @@ class WasmGCForegroundTask : public CancelableTask {
 class WeakScriptHandle {
  public:
   explicit WeakScriptHandle(Handle<Script> script) : script_id_(script->id()) {
-    DCHECK(script->name().IsString() || script->name().IsUndefined());
-    if (script->name().IsString()) {
+    DCHECK(IsString(script->name()) || IsUndefined(script->name()));
+    if (IsString(script->name())) {
       std::unique_ptr<char[]> source_url =
-          String::cast(script->name()).ToCString();
+          String::cast(script->name())->ToCString();
       // Convert from {unique_ptr} to {shared_ptr}.
       source_url_ = {source_url.release(), source_url.get_deleter()};
     }
@@ -524,7 +525,7 @@ Handle<WasmModuleObject> WasmEngine::FinalizeTranslatedAsmJs(
     Isolate* isolate, Handle<AsmWasmData> asm_wasm_data,
     Handle<Script> script) {
   std::shared_ptr<NativeModule> native_module =
-      asm_wasm_data->managed_native_module().get();
+      asm_wasm_data->managed_native_module()->get();
   Handle<WasmModuleObject> module_object =
       WasmModuleObject::New(isolate, std::move(native_module), script);
   return module_object;
@@ -940,7 +941,9 @@ void WasmEngine::DumpAndResetTurboStatistics() {
   base::MutexGuard guard(&mutex_);
   if (compilation_stats_ != nullptr) {
     StdoutStream os;
-    os << AsPrintableStatistics{*compilation_stats_.get(), false} << std::endl;
+    os << AsPrintableStatistics{"Turbofan Wasm", *compilation_stats_.get(),
+                                false}
+       << std::endl;
   }
   compilation_stats_.reset();
 }
@@ -949,7 +952,9 @@ void WasmEngine::DumpTurboStatistics() {
   base::MutexGuard guard(&mutex_);
   if (compilation_stats_ != nullptr) {
     StdoutStream os;
-    os << AsPrintableStatistics{*compilation_stats_.get(), false} << std::endl;
+    os << AsPrintableStatistics{"Turbofan Wasm", *compilation_stats_.get(),
+                                false}
+       << std::endl;
   }
 }
 
@@ -1682,6 +1687,50 @@ void WasmEngine::PotentiallyFinishCurrentGC() {
   int8_t next_gc_sequence_index = current_gc_info_->next_gc_sequence_index;
   current_gc_info_.reset();
   if (next_gc_sequence_index != 0) TriggerGC(next_gc_sequence_index);
+}
+
+size_t WasmEngine::EstimateCurrentMemoryConsumption() const {
+  UPDATE_WHEN_CLASS_CHANGES(WasmEngine, 704);
+  UPDATE_WHEN_CLASS_CHANGES(IsolateInfo, 256);
+  UPDATE_WHEN_CLASS_CHANGES(NativeModuleInfo, 144);
+  UPDATE_WHEN_CLASS_CHANGES(CurrentGCInfo, 96);
+  size_t result = sizeof(WasmEngine);
+  result += type_canonicalizer_.EstimateCurrentMemoryConsumption();
+  {
+    base::MutexGuard lock(&mutex_);
+    result += ContentSize(async_compile_jobs_);
+    result += async_compile_jobs_.size() * sizeof(AsyncCompileJob);
+
+    // TODO(14106): Do we care about {compilation_stats_}?
+    // TODO(14106): Do we care about {code_tracer_}?
+
+    result += ContentSize(isolates_);
+    result += isolates_.size() * sizeof(IsolateInfo);
+    for (const auto& [isolate, isolate_info] : isolates_) {
+      result += ContentSize(isolate_info->native_modules);
+      result += ContentSize(isolate_info->scripts);
+      result += ContentSize(isolate_info->code_to_log);
+    }
+
+    result += ContentSize(native_modules_);
+    result += native_modules_.size() * sizeof(NativeModuleInfo);
+    for (const auto& [native_module, native_module_info] : native_modules_) {
+      result += native_module->EstimateCurrentMemoryConsumption();
+      result += ContentSize(native_module_info->isolates);
+      result += ContentSize(native_module_info->potentially_dead_code);
+      result += ContentSize(native_module_info->dead_code);
+    }
+
+    if (current_gc_info_) {
+      result += sizeof(CurrentGCInfo);
+      result += ContentSize(current_gc_info_->outstanding_isolates);
+      result += ContentSize(current_gc_info_->dead_code);
+    }
+  }
+  if (v8_flags.trace_wasm_offheap_memory) {
+    PrintF("WasmEngine: %zu\n", result);
+  }
+  return result;
 }
 
 namespace {

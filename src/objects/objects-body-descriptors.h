@@ -15,14 +15,7 @@ namespace internal {
 //
 // Each BodyDescriptor subclass must provide the following methods:
 //
-// 1) Returns true if the object contains a tagged value at given offset.
-//    It is used for invalid slots filtering. If the offset points outside
-//    of the object or to the map word, the result is UNDEFINED (!!!).
-//
-//   static bool IsValidSlot(Map map, HeapObject obj, int offset);
-//
-//
-// 2) Iterate object's body using stateful object visitor.
+// 1) Iterate object's body using stateful object visitor.
 //
 //   template <typename ObjectVisitor>
 //   static inline void IterateBody(Map map, HeapObject obj, int object_size,
@@ -58,11 +51,14 @@ class BodyDescriptorBase {
   static inline void IterateMaybeWeakPointer(HeapObject obj, int offset,
                                              ObjectVisitor* v);
 
- protected:
-  // Returns true for all header and embedder fields.
-  static inline bool IsValidJSObjectSlotImpl(Map map, HeapObject obj,
-                                             int offset);
+  // Visits a field that contains either an indirect pointer (if the sandbox is
+  // enabled) or a regular/tagged pointer (otherwise).
+  template <typename ObjectVisitor>
+  static void IterateMaybeIndirectPointer(HeapObject obj, int offset,
+                                          ObjectVisitor* visitor,
+                                          IndirectPointerMode mode);
 
+ protected:
   // Returns true for all header and embedder fields.
   static inline bool IsValidEmbedderJSObjectSlotImpl(Map map, HeapObject obj,
                                                      int offset);
@@ -82,10 +78,6 @@ class FixedRangeBodyDescriptor : public BodyDescriptorBase {
  public:
   static const int kStartOffset = start_offset;
   static const int kEndOffset = end_offset;
-
-  static bool IsValidSlot(Map map, HeapObject obj, int offset) {
-    return offset >= kStartOffset && offset < kEndOffset;
-  }
 
   template <typename ObjectVisitor>
   static inline void IterateBody(Map map, HeapObject obj, ObjectVisitor* v) {
@@ -125,10 +117,6 @@ class SuffixRangeBodyDescriptor : public BodyDescriptorBase {
  public:
   static const int kStartOffset = start_offset;
 
-  static bool IsValidSlot(Map map, HeapObject obj, int offset) {
-    return (offset >= kStartOffset);
-  }
-
   template <typename ObjectVisitor>
   static inline void IterateBody(Map map, HeapObject obj, int object_size,
                                  ObjectVisitor* v) {
@@ -166,10 +154,6 @@ class SuffixRangeWeakBodyDescriptor : public BodyDescriptorBase {
  public:
   static const int kStartOffset = start_offset;
 
-  static bool IsValidSlot(Map map, HeapObject obj, int offset) {
-    return (offset >= kStartOffset);
-  }
-
   template <typename ObjectVisitor>
   static inline void IterateBody(Map map, HeapObject obj, int object_size,
                                  ObjectVisitor* v) {
@@ -197,8 +181,6 @@ class FlexibleWeakBodyDescriptor
 // This class describes a body of an object without any pointers.
 class DataOnlyBodyDescriptor : public BodyDescriptorBase {
  public:
-  static bool IsValidSlot(Map map, HeapObject obj, int offset) { return false; }
-
   template <typename ObjectVisitor>
   static inline void IterateBody(Map map, HeapObject obj, int object_size,
                                  ObjectVisitor* v) {}
@@ -222,11 +204,6 @@ class SubclassBodyDescriptor final : public BodyDescriptorBase {
   // their slots are disjoint.
   static_assert(ParentBodyDescriptor::kSize <=
                 ChildBodyDescriptor::kStartOffset);
-
-  static bool IsValidSlot(Map map, HeapObject obj, int offset) {
-    return ParentBodyDescriptor::IsValidSlot(map, obj, offset) ||
-           ChildBodyDescriptor::IsValidSlot(map, obj, offset);
-  }
 
   template <typename ObjectVisitor>
   static inline void IterateBody(Map map, HeapObject obj, ObjectVisitor* v) {

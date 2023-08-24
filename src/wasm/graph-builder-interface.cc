@@ -79,22 +79,22 @@ struct SsaEnv : public ZoneObject {
   enum State { kUnreachable, kReached, kMerged };
 
   State state;
-  TFNode* control;
   TFNode* effect;
+  TFNode* control;
   compiler::WasmInstanceCacheNodes instance_cache;
   LocalsVector locals;
 
-  SsaEnv(LocalsAllocator* alloc, State state, TFNode* control, TFNode* effect,
+  SsaEnv(LocalsAllocator* alloc, State state, TFNode* effect, TFNode* control,
          uint32_t locals_size)
       : state(state),
-        control(control),
         effect(effect),
+        control(control),
         locals(alloc, locals_size) {}
 
   SsaEnv(const SsaEnv& other) V8_NOEXCEPT = default;
   SsaEnv(SsaEnv&& other) V8_NOEXCEPT : state(other.state),
-                                       control(other.control),
                                        effect(other.effect),
+                                       control(other.control),
                                        instance_cache(other.instance_cache),
                                        locals(std::move(other.locals)) {
     other.Kill();
@@ -312,12 +312,11 @@ class WasmGraphBuildingInterface {
         &can_be_innermost);
     if (decoder->failed()) return;
     int instance_cache_index = decoder->num_locals();
-    // If the module has shared memory, the stack guard might reallocate the
-    // shared memory. We have to assume the instance cache will be updated.
-    if (!decoder->module_->memories.empty() &&
-        decoder->module_->memories[0].is_shared) {
-      assigned->Add(instance_cache_index);
-    }
+    // If memory 0 is shared, the stack guard might reallocate the backing
+    // store. We have to assume the instance cache will be updated.
+    bool mem0_is_shared = !decoder->module_->memories.empty() &&
+                          decoder->module_->memories.front().is_shared;
+    if (mem0_is_shared) assigned->Add(instance_cache_index);
     DCHECK_NOT_NULL(assigned);
     decoder->control_at(0)->loop_assignments = assigned;
 
@@ -351,11 +350,8 @@ class WasmGraphBuildingInterface {
     // Now we setup a new environment for the inside of the loop.
     // TODO(choongwoo): Clear locals of the following SsaEnv after use.
     SetEnv(Split(decoder->zone(), ssa_env_));
-    bool has_shared_memory = !decoder->module_->memories.empty() &&
-                             decoder->module_->memories[0].is_shared;
-    builder_->StackCheck(
-        has_shared_memory ? &ssa_env_->instance_cache : nullptr,
-        decoder->position());
+    builder_->StackCheck(mem0_is_shared ? &ssa_env_->instance_cache : nullptr,
+                         decoder->position());
     ssa_env_->SetNotMerged();
 
     // Wrap input merge into phis.
@@ -672,59 +668,71 @@ class WasmGraphBuildingInterface {
     SetEnv(if_block->false_env);
   }
 
-  void LoadMem(FullDecoder* decoder, const WasmMemory* memory, LoadType type,
+  void LoadMem(FullDecoder* decoder, LoadType type,
                const MemoryAccessImmediate& imm, const Value& index,
                Value* result) {
     SetAndTypeNode(result,
-                   builder_->LoadMem(memory, type.value_type(), type.mem_type(),
-                                     index.node, imm.offset, imm.alignment,
-                                     decoder->position()));
+                   builder_->LoadMem(imm.memory, type.value_type(),
+                                     type.mem_type(), index.node, imm.offset,
+                                     imm.alignment, decoder->position()));
   }
 
-  void LoadTransform(FullDecoder* decoder, const WasmMemory* memory,
-                     LoadType type, LoadTransformationKind transform,
+  void LoadTransform(FullDecoder* decoder, LoadType type,
+                     LoadTransformationKind transform,
                      const MemoryAccessImmediate& imm, const Value& index,
                      Value* result) {
     SetAndTypeNode(result, builder_->LoadTransform(
-                               memory, type.value_type(), type.mem_type(),
+                               imm.memory, type.value_type(), type.mem_type(),
                                transform, index.node, imm.offset, imm.alignment,
                                decoder->position()));
   }
 
-  void LoadLane(FullDecoder* decoder, const WasmMemory* memory, LoadType type,
-                const Value& value, const Value& index,
-                const MemoryAccessImmediate& imm, const uint8_t laneidx,
-                Value* result) {
+  void LoadLane(FullDecoder* decoder, LoadType type, const Value& value,
+                const Value& index, const MemoryAccessImmediate& imm,
+                const uint8_t laneidx, Value* result) {
     SetAndTypeNode(result, builder_->LoadLane(
-                               memory, type.value_type(), type.mem_type(),
+                               imm.memory, type.value_type(), type.mem_type(),
                                value.node, index.node, imm.offset,
                                imm.alignment, laneidx, decoder->position()));
   }
 
-  void StoreMem(FullDecoder* decoder, const WasmMemory* memory, StoreType type,
+  void StoreMem(FullDecoder* decoder, StoreType type,
                 const MemoryAccessImmediate& imm, const Value& index,
                 const Value& value) {
-    builder_->StoreMem(memory, type.mem_rep(), index.node, imm.offset,
+    builder_->StoreMem(imm.memory, type.mem_rep(), index.node, imm.offset,
                        imm.alignment, value.node, decoder->position(),
                        type.value_type());
   }
 
-  void StoreLane(FullDecoder* decoder, const WasmMemory* memory, StoreType type,
+  void StoreLane(FullDecoder* decoder, StoreType type,
                  const MemoryAccessImmediate& imm, const Value& index,
                  const Value& value, const uint8_t laneidx) {
-    builder_->StoreLane(memory, type.mem_rep(), index.node, imm.offset,
+    builder_->StoreLane(imm.memory, type.mem_rep(), index.node, imm.offset,
                         imm.alignment, value.node, laneidx, decoder->position(),
                         type.value_type());
   }
 
-  void CurrentMemoryPages(FullDecoder* decoder, Value* result) {
-    SetAndTypeNode(result, builder_->CurrentMemoryPages());
+  void CurrentMemoryPages(FullDecoder* decoder, const MemoryIndexImmediate& imm,
+                          Value* result) {
+    SetAndTypeNode(result, builder_->CurrentMemoryPages(imm.memory));
   }
 
-  void MemoryGrow(FullDecoder* decoder, const Value& value, Value* result) {
-    SetAndTypeNode(result, builder_->MemoryGrow(value.node));
+  void MemoryGrow(FullDecoder* decoder, const MemoryIndexImmediate& imm,
+                  const Value& value, Value* result) {
+    SetAndTypeNode(result, builder_->MemoryGrow(imm.memory, value.node));
     // Always reload the instance cache after growing memory.
     ReloadInstanceCacheIntoSsa(ssa_env_, decoder->module_);
+  }
+
+  TFNode* ExternRefToString(FullDecoder* decoder, const Value value,
+                            bool null_succeeds = false) {
+    wasm::ValueType target_type =
+        null_succeeds ? kWasmStringRef : kWasmRefString;
+    WasmTypeCheckConfig config{value.type, target_type};
+    TFNode* string =
+        builder_->RefCastAbstract(value.node, config, decoder->position());
+    TFNode* rename = builder_->TypeGuard(string, target_type);
+    return builder_->SetType(rename, target_type);
   }
 
   bool HandleWellKnownImport(FullDecoder* decoder, uint32_t index,
@@ -740,6 +748,113 @@ class WasmGraphBuildingInterface {
       case WKI::kUninstantiated:
       case WKI::kGeneric:
         return false;
+
+      // WebAssembly.String.* imports.
+      case WKI::kStringCharCodeAt: {
+        TFNode* string = ExternRefToString(decoder, args[0]);
+        TFNode* view = builder_->StringAsWtf16(
+            string, compiler::kWithoutNullCheck, decoder->position());
+        builder_->SetType(view, kWasmRefString);
+        result = builder_->StringViewWtf16GetCodeUnit(
+            view, compiler::kWithoutNullCheck, args[1].node,
+            decoder->position());
+        decoder->detected_->Add(kFeature_imported_strings);
+        break;
+      }
+      case WKI::kStringCodePointAt: {
+        TFNode* string = ExternRefToString(decoder, args[0]);
+        TFNode* view = builder_->StringAsWtf16(
+            string, compiler::kWithoutNullCheck, decoder->position());
+        builder_->SetType(view, kWasmRefString);
+        result = builder_->StringCodePointAt(view, compiler::kWithoutNullCheck,
+                                             args[1].node, decoder->position());
+        decoder->detected_->Add(kFeature_imported_strings);
+        break;
+      }
+      case WKI::kStringCompare: {
+        TFNode* a_string = ExternRefToString(decoder, args[0]);
+        TFNode* b_string = ExternRefToString(decoder, args[1]);
+        result = builder_->StringCompare(a_string, compiler::kWithoutNullCheck,
+                                         b_string, compiler::kWithoutNullCheck,
+                                         decoder->position());
+        decoder->detected_->Add(kFeature_imported_strings);
+        break;
+      }
+      case WKI::kStringConcat: {
+        TFNode* head_string = ExternRefToString(decoder, args[0]);
+        TFNode* tail_string = ExternRefToString(decoder, args[1]);
+        result = builder_->StringConcat(
+            head_string, compiler::kWithoutNullCheck, tail_string,
+            compiler::kWithoutNullCheck, decoder->position());
+        builder_->SetType(result, kWasmRefString);
+        decoder->detected_->Add(kFeature_imported_strings);
+        break;
+      }
+      case WKI::kStringEquals: {
+        // Using nullable type guards here because this instruction needs to
+        // handle {null} without trapping.
+        static constexpr bool kNullSucceeds = true;
+        TFNode* a_string = ExternRefToString(decoder, args[0], kNullSucceeds);
+        TFNode* b_string = ExternRefToString(decoder, args[1], kNullSucceeds);
+        result = builder_->StringEqual(a_string, args[0].type, b_string,
+                                       args[1].type, decoder->position());
+        decoder->detected_->Add(kFeature_imported_strings);
+        break;
+      }
+      case WKI::kStringFromCharCode:
+        result = builder_->StringFromCharCode(args[0].node);
+        builder_->SetType(result, kWasmRefString);
+        decoder->detected_->Add(kFeature_imported_strings);
+        break;
+      case WKI::kStringFromCodePoint:
+        result = builder_->StringFromCodePoint(args[0].node);
+        builder_->SetType(result, kWasmRefString);
+        decoder->detected_->Add(kFeature_imported_strings);
+        break;
+      case WKI::kStringFromWtf16Array:
+        result = builder_->StringNewWtf16Array(
+            args[0].node, NullCheckFor(args[0].type), args[1].node,
+            args[2].node, decoder->position());
+        builder_->SetType(result, kWasmRefString);
+        decoder->detected_->Add(kFeature_imported_strings);
+        break;
+      case WKI::kStringFromWtf8Array:
+        result = builder_->StringNewWtf8Array(
+            unibrow::Utf8Variant::kWtf8, args[0].node,
+            NullCheckFor(args[0].type), args[1].node, args[2].node,
+            decoder->position());
+        builder_->SetType(result, kWasmRefString);
+        decoder->detected_->Add(kFeature_imported_strings);
+        break;
+      case WKI::kStringLength: {
+        TFNode* string = ExternRefToString(decoder, args[0]);
+        result = builder_->StringMeasureWtf16(
+            string, compiler::kWithoutNullCheck, decoder->position());
+        decoder->detected_->Add(kFeature_imported_strings);
+        break;
+      }
+      case WKI::kStringSubstring: {
+        TFNode* string = ExternRefToString(decoder, args[0]);
+        TFNode* view = builder_->StringAsWtf16(
+            string, compiler::kWithoutNullCheck, decoder->position());
+        builder_->SetType(view, kWasmRefString);
+        result = builder_->StringViewWtf16Slice(
+            view, compiler::kWithoutNullCheck, args[1].node, args[2].node,
+            decoder->position());
+        builder_->SetType(result, kWasmRefString);
+        decoder->detected_->Add(kFeature_imported_strings);
+        break;
+      }
+      case WKI::kStringToWtf16Array: {
+        TFNode* string = ExternRefToString(decoder, args[0]);
+        result = builder_->StringEncodeWtf16Array(
+            string, compiler::kWithoutNullCheck, args[1].node,
+            NullCheckFor(args[1].type), args[2].node, decoder->position());
+        decoder->detected_->Add(kFeature_imported_strings);
+        break;
+      }
+
+      // Other string-related imports.
       case WKI::kDoubleToString:
         result = builder_->WellKnown_DoubleToString(args[0].node);
         break;
@@ -749,11 +864,13 @@ class WasmGraphBuildingInterface {
       case WKI::kParseFloat:
         result = builder_->WellKnown_ParseFloat(args[0].node,
                                                 NullCheckFor(args[0].type));
+        decoder->detected_->Add(kFeature_stringref);
         break;
       case WKI::kStringIndexOf:
         result = builder_->WellKnown_StringIndexOf(
             args[0].node, args[1].node, args[2].node,
             NullCheckFor(args[0].type), NullCheckFor(args[1].type));
+        decoder->detected_->Add(kFeature_stringref);
         break;
       case WKI::kStringToLocaleLowerCaseStringref:
         // Temporarily ignored because of bugs (v8:13977, v8:13985).
@@ -761,10 +878,12 @@ class WasmGraphBuildingInterface {
         return false;
         // result = builder_->WellKnown_StringToLocaleLowerCaseStringref(
         //     args[0].node, args[1].node, NullCheckFor(args[0].type));
+        // decoder->detected_->Add(kFeature_stringref);
         // break;
       case WKI::kStringToLowerCaseStringref:
         result = builder_->WellKnown_StringToLowerCaseStringref(
             args[0].node, NullCheckFor(args[0].type));
+        decoder->detected_->Add(kFeature_stringref);
         break;
     }
     if (v8_flags.trace_wasm_inlining) {
@@ -786,6 +905,7 @@ class WasmGraphBuildingInterface {
     }
     // This must happen after the {next_call_feedback()} call.
     if (HandleWellKnownImport(decoder, imm.index, args, returns)) return;
+
     DoCall(decoder, CallInfo::CallDirect(imm.index, maybe_call_count), imm.sig,
            args, returns);
   }
@@ -861,7 +981,7 @@ class WasmGraphBuildingInterface {
       builder_->SetControl(success_control);
       ssa_env_->control = success_control;
       Value* returns_direct =
-          decoder->zone()->NewArray<Value>(sig->return_count());
+          decoder->zone()->AllocateArray<Value>(sig->return_count());
       for (size_t i = 0; i < sig->return_count(); i++) {
         returns_direct[i].type = returns[i].type;
       }
@@ -877,7 +997,8 @@ class WasmGraphBuildingInterface {
       ssa_env_->effect = initial_effect;
       ssa_env_->control = failure_control;
     }
-    Value* returns_ref = decoder->zone()->NewArray<Value>(sig->return_count());
+    Value* returns_ref =
+        decoder->zone()->AllocateArray<Value>(sig->return_count());
     for (size_t i = 0; i < sig->return_count(); i++) {
       returns_ref[i].type = returns[i].type;
     }
@@ -1077,13 +1198,13 @@ class WasmGraphBuildingInterface {
     TFNode* expected_tag = builder_->LoadTagFromTable(imm.index);
 
     if (imm.tag->sig->parameter_count() == 1 &&
-        imm.tag->sig->GetParam(0) == kWasmExternRef) {
+        imm.tag->sig->GetParam(0).is_reference_to(HeapType::kExtern)) {
       // Check for the special case where the tag is WebAssembly.JSTag and the
       // exception is not a WebAssembly.Exception. In this case the exception is
       // caught and pushed on the operand stack.
       // Only perform this check if the tag signature is the same as
-      // the JSTag signature, i.e. a single externref, otherwise we know
-      // statically that it cannot be the JSTag.
+      // the JSTag signature, i.e. a single externref or (ref extern), otherwise
+      // we know statically that it cannot be the JSTag.
 
       TFNode* is_js_exn = builder_->IsExceptionTagUndefined(caught_tag);
       auto [exn_is_js, exn_is_wasm] = builder_->BranchExpectFalse(is_js_exn);
@@ -1176,13 +1297,13 @@ class WasmGraphBuildingInterface {
     SetEnv(block->try_info->catch_env);
   }
 
-  void AtomicOp(FullDecoder* decoder, const WasmMemory* memory,
-                WasmOpcode opcode, const Value args[], const size_t argc,
-                const MemoryAccessImmediate& imm, Value* result) {
+  void AtomicOp(FullDecoder* decoder, WasmOpcode opcode, const Value args[],
+                const size_t argc, const MemoryAccessImmediate& imm,
+                Value* result) {
     NodeVector inputs(argc);
     GetNodes(inputs.begin(), args, argc);
     TFNode* node =
-        builder_->AtomicOp(memory, opcode, inputs.begin(), imm.alignment,
+        builder_->AtomicOp(imm.memory, opcode, inputs.begin(), imm.alignment,
                            imm.offset, decoder->position());
     if (result) SetAndTypeNode(result, node);
   }
@@ -1191,8 +1312,8 @@ class WasmGraphBuildingInterface {
 
   void MemoryInit(FullDecoder* decoder, const MemoryInitImmediate& imm,
                   const Value& dst, const Value& src, const Value& size) {
-    builder_->MemoryInit(imm.data_segment.index, dst.node, src.node, size.node,
-                         decoder->position());
+    builder_->MemoryInit(imm.memory.memory, imm.data_segment.index, dst.node,
+                         src.node, size.node, decoder->position());
   }
 
   void DataDrop(FullDecoder* decoder, const IndexImmediate& imm) {
@@ -1201,12 +1322,14 @@ class WasmGraphBuildingInterface {
 
   void MemoryCopy(FullDecoder* decoder, const MemoryCopyImmediate& imm,
                   const Value& dst, const Value& src, const Value& size) {
-    builder_->MemoryCopy(dst.node, src.node, size.node, decoder->position());
+    builder_->MemoryCopy(imm.memory_dst.memory, imm.memory_src.memory, dst.node,
+                         src.node, size.node, decoder->position());
   }
 
   void MemoryFill(FullDecoder* decoder, const MemoryIndexImmediate& imm,
                   const Value& dst, const Value& value, const Value& size) {
-    builder_->MemoryFill(dst.node, value.node, size.node, decoder->position());
+    builder_->MemoryFill(imm.memory, dst.node, value.node, size.node,
+                         decoder->position());
   }
 
   void TableInit(FullDecoder* decoder, const TableInitImmediate& imm,
@@ -1723,8 +1846,9 @@ class WasmGraphBuildingInterface {
                           const unibrow::Utf8Variant variant,
                           const Value& array, const Value& start,
                           const Value& end, Value* result) {
-    SetAndTypeNode(result, builder_->StringNewWtf8Array(variant, array.node,
-                                                        start.node, end.node));
+    SetAndTypeNode(result, builder_->StringNewWtf8Array(
+                               variant, array.node, NullCheckFor(array.type),
+                               start.node, end.node, decoder->position()));
   }
 
   void StringNewWtf16(FullDecoder* decoder, const MemoryIndexImmediate& imm,
@@ -1736,8 +1860,9 @@ class WasmGraphBuildingInterface {
   void StringNewWtf16Array(FullDecoder* decoder, const Value& array,
                            const Value& start, const Value& end,
                            Value* result) {
-    SetAndTypeNode(result, builder_->StringNewWtf16Array(array.node, start.node,
-                                                         end.node));
+    SetAndTypeNode(result, builder_->StringNewWtf16Array(
+                               array.node, NullCheckFor(array.type), start.node,
+                               end.node, decoder->position()));
   }
 
   void StringConst(FullDecoder* decoder, const StringConstImmediate& imm,
@@ -1817,8 +1942,7 @@ class WasmGraphBuildingInterface {
 
   void StringEq(FullDecoder* decoder, const Value& a, const Value& b,
                 Value* result) {
-    SetAndTypeNode(result, builder_->StringEqual(a.node, NullCheckFor(a.type),
-                                                 b.node, NullCheckFor(b.type),
+    SetAndTypeNode(result, builder_->StringEqual(a.node, a.type, b.node, b.type,
                                                  decoder->position()));
   }
 

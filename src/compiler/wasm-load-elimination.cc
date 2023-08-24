@@ -103,7 +103,12 @@ std::tuple<Node*, Node*> WasmLoadElimination::TruncateAndExtendOrType(
     return {value, effect};
   }
 
-  wasm::TypeInModule node_type = NodeProperties::GetType(value).AsWasm();
+  Type value_type = NodeProperties::GetType(value);
+  if (!value_type.IsWasm()) {
+    return {value, effect};
+  }
+
+  wasm::TypeInModule node_type = value_type.AsWasm();
 
   // TODO(12166): Adapt this if cross-module inlining is allowed.
   if (!wasm::IsSubtypeOf(node_type.type, field_type, node_type.module)) {
@@ -180,9 +185,8 @@ Reduction WasmLoadElimination::ReduceWasmStructGet(Node* node) {
            .LookupField(field_info.field_index, object)
            .IsEmpty()) {
     ReplaceWithValue(node, dead(), dead(), dead());
-    NodeProperties::MergeControlToEnd(
-        graph(), common(),
-        graph()->NewNode(common()->Throw(), effect, control));
+    MergeControlToEnd(graph(), common(),
+                      graph()->NewNode(common()->Throw(), effect, control));
     node->Kill();
     return Replace(dead());
   }
@@ -249,9 +253,8 @@ Reduction WasmLoadElimination::ReduceWasmStructSet(Node* node) {
            .LookupField(field_info.field_index, object)
            .IsEmpty()) {
     ReplaceWithValue(node, dead(), dead(), dead());
-    NodeProperties::MergeControlToEnd(
-        graph(), common(),
-        graph()->NewNode(common()->Throw(), effect, control));
+    MergeControlToEnd(graph(), common(),
+                      graph()->NewNode(common()->Throw(), effect, control));
     node->Kill();
     return Replace(dead());
   }
@@ -490,6 +493,12 @@ WasmLoadElimination::AbstractState const* WasmLoadElimination::ComputeLoopState(
     if (visited.insert(current).second) {
       if (current->opcode() == IrOpcode::kWasmStructSet) {
         Node* object = NodeProperties::GetValueInput(current, 0);
+        if (object->opcode() == IrOpcode::kDead ||
+            object->opcode() == IrOpcode::kDeadValue) {
+          // We are in dead code. Bail out with no mutable state.
+          return zone()->New<AbstractState>(HalfState(zone()),
+                                            state->immutable_state);
+        }
         WasmFieldInfo field_info = OpParameter<WasmFieldInfo>(current->op());
         bool is_mutable = field_info.type->mutability(field_info.field_index);
         if (is_mutable) {

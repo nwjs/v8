@@ -65,10 +65,13 @@ namespace compiler {
   V(RiscvStoreCompressTagged)               \
   V(RiscvLoadDecompressTaggedSigned)        \
   V(RiscvLoadDecompressTagged)              \
+  V(RiscvLoadDecodeSandboxedPointer)        \
+  V(RiscvStoreEncodeSandboxedPointer)       \
   V(RiscvAtomicLoadDecompressTaggedSigned)  \
   V(RiscvAtomicLoadDecompressTagged)        \
   V(RiscvAtomicStoreCompressTagged)         \
   V(RiscvWord64AtomicCompareExchangeUint64) \
+  V(RiscvCmp32)                             \
   V(RiscvTst64)
 #elif V8_TARGET_ARCH_RISCV32
 #define TARGET_ARCH_OPCODE_LIST_SPECAIL(V) \
@@ -214,7 +217,6 @@ namespace compiler {
   V(RiscvI32x4Splat)                      \
   V(RiscvI32x4ExtractLane)                \
   V(RiscvI32x4ReplaceLane)                \
-  V(RiscvI32x4Add)                        \
   V(RiscvI32x4Sub)                        \
   V(RiscvF64x2Abs)                        \
   V(RiscvF64x2Neg)                        \
@@ -269,7 +271,6 @@ namespace compiler {
   V(RiscvI64x2ExtractLane)                \
   V(RiscvI64x2ReplaceLane)                \
   V(RiscvI64x2ReplaceLaneI32Pair)         \
-  V(RiscvI64x2Add)                        \
   V(RiscvI64x2Sub)                        \
   V(RiscvI64x2Mul)                        \
   V(RiscvI64x2Abs)                        \
@@ -321,7 +322,6 @@ namespace compiler {
   V(RiscvI16x8Shl)                        \
   V(RiscvI16x8ShrS)                       \
   V(RiscvI16x8ShrU)                       \
-  V(RiscvI16x8Add)                        \
   V(RiscvI16x8AddSatS)                    \
   V(RiscvI16x8Sub)                        \
   V(RiscvI16x8SubSatS)                    \
@@ -349,7 +349,6 @@ namespace compiler {
   V(RiscvI8x16Neg)                        \
   V(RiscvI8x16Shl)                        \
   V(RiscvI8x16ShrS)                       \
-  V(RiscvI8x16Add)                        \
   V(RiscvI8x16AddSatS)                    \
   V(RiscvI8x16Sub)                        \
   V(RiscvI8x16SubSatS)                    \
@@ -432,7 +431,7 @@ namespace compiler {
   V(RiscvVwmulu)                          \
   V(RiscvVmvSx)                           \
   V(RiscvVcompress)                       \
-  V(RiscvVaddVv)                          \
+  V(RiscvVadd)                            \
   V(RiscvVwadd)                           \
   V(RiscvVwaddu)                          \
   V(RiscvVrgather)                        \

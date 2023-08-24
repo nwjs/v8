@@ -32,6 +32,7 @@
 #include "src/compiler/state-values-utils.h"
 #include "src/compiler/turboshaft/assembler.h"
 #include "src/compiler/turboshaft/deopt-data.h"
+#include "src/compiler/turboshaft/explicit-truncation-reducer.h"
 #include "src/compiler/turboshaft/graph.h"
 #include "src/compiler/turboshaft/operations.h"
 #include "src/compiler/turboshaft/phase.h"
@@ -54,9 +55,9 @@ struct GraphBuilder {
   Isolate* isolate = PipelineData::Get().isolate();
   JSHeapBroker* broker = PipelineData::Get().broker();
   Zone* graph_zone = PipelineData::Get().graph_zone();
-  Assembler<reducer_list<>> assembler{PipelineData::Get().graph(),
-                                      PipelineData::Get().graph(), phase_zone,
-                                      nullptr};
+  using AssemblerT = Assembler<reducer_list<ExplicitTruncationReducer>>;
+  AssemblerT assembler{PipelineData::Get().graph(), PipelineData::Get().graph(),
+                       phase_zone, nullptr};
   SourcePositionTable* source_positions =
       PipelineData::Get().source_positions();
   NodeOriginTable* origins = PipelineData::Get().node_origins();
@@ -70,7 +71,7 @@ struct GraphBuilder {
   bool inside_region = false;
 
   base::Optional<BailoutReason> Run();
-  Assembler<reducer_list<>>& Asm() { return assembler; }
+  AssemblerT& Asm() { return assembler; }
 
  private:
   OpIndex Map(Node* old_node) {
@@ -84,15 +85,18 @@ struct GraphBuilder {
     return result;
   }
 
-  void FixLoopPhis(Block* loop, Block* backedge) {
-    DCHECK(loop->IsLoop());
-    for (Operation& op : __ output_graph().operations(*loop)) {
-      if (!op.Is<PendingLoopPhiOp>()) continue;
-      auto& pending_phi = op.Cast<PendingLoopPhiOp>();
+  void FixLoopPhis(BasicBlock* loop) {
+    DCHECK(loop->IsLoopHeader());
+    for (Node* node : *loop->nodes()) {
+      if (node->opcode() != IrOpcode::kPhi) {
+        continue;
+      }
+      OpIndex phi_index = Map(node);
+      PendingLoopPhiOp& pending_phi =
+          __ output_graph().Get(phi_index).Cast<PendingLoopPhiOp>();
       __ output_graph().Replace<PhiOp>(
-          __ output_graph().Index(pending_phi),
-          base::VectorOf(
-              {pending_phi.first(), Map(pending_phi.data.old_backedge_node)}),
+          phi_index,
+          base::VectorOf({pending_phi.first(), Map(node->InputAt(1))}),
           pending_phi.rep);
     }
   }
@@ -139,12 +143,12 @@ struct GraphBuilder {
     if (frame_state.outer_frame_state()->opcode() != IrOpcode::kStart) {
       builder->AddParentFrameState(Map(frame_state.outer_frame_state()));
     }
-    ProcessStateValues(builder, frame_state.parameters());
-    ProcessStateValues(builder, frame_state.locals());
-    ProcessStateValues(builder, frame_state.stack());
-    ProcessDeoptInput(builder, frame_state.context(), MachineType::AnyTagged());
     ProcessDeoptInput(builder, frame_state.function(),
                       MachineType::AnyTagged());
+    ProcessStateValues(builder, frame_state.parameters());
+    ProcessDeoptInput(builder, frame_state.context(), MachineType::AnyTagged());
+    ProcessStateValues(builder, frame_state.locals());
+    ProcessStateValues(builder, frame_state.stack());
   }
 
   Block::Kind BlockKind(BasicBlock* block) {
@@ -261,7 +265,7 @@ base::Optional<BailoutReason> GraphBuilder::Run() {
         __ Goto(destination);
         if (destination->IsBound()) {
           DCHECK(destination->IsLoop());
-          FixLoopPhis(destination, target_block);
+          FixLoopPhis(block->SuccessorAt(0));
         }
         break;
       }
@@ -357,36 +361,10 @@ OpIndex GraphBuilder::Process(
     }
 
     case IrOpcode::kIfException: {
-      return __ LoadException();
+      return __ CatchBlockBegin();
     }
 
     case IrOpcode::kIfSuccess: {
-      // We emit all of the value projections of the call now, emit a Tuple with
-      // all of those projections, and remap the old call to this new Tuple
-      // instead of the CallAndCatchExceptionOp.
-      Node* call = node->InputAt(0);
-      DCHECK_EQ(call->opcode(), IrOpcode::kCall);
-      OpIndex call_idx = Map(call);
-      CallAndCatchExceptionOp& op =
-          __ output_graph().Get(call_idx).Cast<CallAndCatchExceptionOp>();
-
-      size_t return_count = op.outputs_rep().size();
-      DCHECK_EQ(return_count, op.descriptor->descriptor->ReturnCount());
-      if (return_count <= 1) {
-        // Calls with one output (or zero) do not require Projections.
-        return OpIndex::Invalid();
-      }
-      base::Vector<OpIndex> projections =
-          graph_zone->NewVector<OpIndex>(return_count);
-      for (size_t i = 0; i < return_count; i++) {
-        projections[i] = __ Projection(call_idx, i, op.outputs_rep()[i]);
-      }
-      OpIndex tuple_idx = __ Tuple(projections);
-
-      // Re-mapping {call} to {tuple_idx} so that subsequent projections are not
-      // emitted.
-      op_mapping.Set(call, tuple_idx);
-
       return OpIndex::Invalid();
     }
 
@@ -410,7 +388,7 @@ OpIndex GraphBuilder::Process(
               PhiRepresentationOf(op));
       if (__ current_block()->IsLoop()) {
         DCHECK_EQ(input_count, 2);
-        return __ PendingLoopPhi(Map(node->InputAt(0)), rep, node->InputAt(1));
+        return __ PendingLoopPhi(Map(node->InputAt(0)), rep);
       } else {
         base::SmallVector<OpIndex, 16> inputs;
         for (int i = 0; i < input_count; ++i) {
@@ -658,8 +636,7 @@ OpIndex GraphBuilder::Process(
 #undef UNARY_CASE
 #undef TUPLE_UNARY_CASE
     case IrOpcode::kTruncateInt64ToInt32:
-      // 64- to 32-bit truncation is implicit in Turboshaft.
-      return Map(node->InputAt(0));
+      return __ TruncateWord64ToWord32(Map(node->InputAt(0)));
     case IrOpcode::kTruncateFloat32ToInt32:
       switch (OpParameter<TruncateKind>(node->op())) {
         case TruncateKind::kArchitectureDefault:
@@ -1109,18 +1086,24 @@ OpIndex GraphBuilder::Process(
       LoadOp::Kind kind = opcode == IrOpcode::kUnalignedLoad
                               ? LoadOp::Kind::RawUnaligned()
                               : LoadOp::Kind::RawAligned();
+      if (__ output_graph().Get(Map(base)).outputs_rep().at(0) ==
+          RegisterRepresentation::Tagged()) {
+        kind = LoadOp::Kind::TaggedBase();
+      }
       if (index->opcode() == IrOpcode::kInt32Constant) {
         int32_t offset = OpParameter<int32_t>(index->op());
+        if (kind.tagged_base) offset += kHeapObjectTag;
         return __ Load(Map(base), kind, loaded_rep, offset);
       }
       if (index->opcode() == IrOpcode::kInt64Constant) {
         int64_t offset = OpParameter<int64_t>(index->op());
+        if (kind.tagged_base) offset += kHeapObjectTag;
         if (base::IsValueInRangeForNumericType<int32_t>(offset)) {
           return __ Load(Map(base), kind, loaded_rep,
                          static_cast<int32_t>(offset));
         }
       }
-      int32_t offset = 0;
+      int32_t offset = kind.tagged_base ? kHeapObjectTag : 0;
       uint8_t element_size_log2 = 0;
       return __ Load(Map(base), Map(index), kind, loaded_rep, offset,
                      element_size_log2);
@@ -1142,6 +1125,7 @@ OpIndex GraphBuilder::Process(
       StoreOp::Kind kind = opcode == IrOpcode::kStore
                                ? StoreOp::Kind::RawAligned()
                                : StoreOp::Kind::RawUnaligned();
+      bool initializing_transitioning = inside_region;
 
       Node* base = node->InputAt(0);
       Node* index = node->InputAt(1);
@@ -1151,7 +1135,8 @@ OpIndex GraphBuilder::Process(
         __ Store(Map(base), Map(value), kind,
                  MemoryRepresentation::FromMachineRepresentation(
                      store_rep.representation()),
-                 store_rep.write_barrier_kind(), offset);
+                 store_rep.write_barrier_kind(), offset,
+                 initializing_transitioning);
         return OpIndex::Invalid();
       }
       if (index->opcode() == IrOpcode::kInt64Constant) {
@@ -1160,8 +1145,8 @@ OpIndex GraphBuilder::Process(
           __ Store(Map(base), Map(value), kind,
                    MemoryRepresentation::FromMachineRepresentation(
                        store_rep.representation()),
-                   store_rep.write_barrier_kind(),
-                   static_cast<int32_t>(offset));
+                   store_rep.write_barrier_kind(), static_cast<int32_t>(offset),
+                   initializing_transitioning);
           return OpIndex::Invalid();
         }
       }
@@ -1170,10 +1155,13 @@ OpIndex GraphBuilder::Process(
       __ Store(Map(base), Map(index), Map(value), kind,
                MemoryRepresentation::FromMachineRepresentation(
                    store_rep.representation()),
-               store_rep.write_barrier_kind(), offset, element_size_log2);
+               store_rep.write_barrier_kind(), offset, element_size_log2,
+               initializing_transitioning);
       return OpIndex::Invalid();
     }
     case IrOpcode::kProtectedStore:
+      // We don't mark ProtectedStores as initialzing even when inside regions,
+      // since we don't store-store eliminate them because they have a raw base.
       __ Store(Map(node->InputAt(0)), Map(node->InputAt(1)),
                Map(node->InputAt(2)), StoreOp::Kind::Protected(),
                MemoryRepresentation::FromMachineRepresentation(
@@ -1231,9 +1219,10 @@ OpIndex GraphBuilder::Process(
            ++i) {
         arguments.emplace_back(Map(node->InputAt(i)));
       }
-
+      CanThrow can_throw =
+          op->HasProperty(Operator::kNoThrow) ? CanThrow::kNo : CanThrow::kYes;
       const TSCallDescriptor* ts_descriptor =
-          TSCallDescriptor::Create(call_descriptor, graph_zone);
+          TSCallDescriptor::Create(call_descriptor, can_throw, graph_zone);
 
       OpIndex frame_state_idx = OpIndex::Invalid();
       if (call_descriptor->NeedsFrameState()) {
@@ -1241,22 +1230,20 @@ OpIndex GraphBuilder::Process(
             node->InputAt(static_cast<int>(call_descriptor->InputCount()))};
         frame_state_idx = Map(frame_state);
       }
-
-      if (!is_final_control) {
-        return EmitProjectionsAndTuple(__ Call(
-            callee, frame_state_idx, base::VectorOf(arguments), ts_descriptor));
-      } else {
-        DCHECK_EQ(block->SuccessorCount(), 2);
-
-        Block* if_success = Map(block->SuccessorAt(0));
-        Block* if_exception = Map(block->SuccessorAt(1));
-        // CallAndCatchException is a block terminator, so we can't generate the
-        // projections right away. We'll generate them in the IfSuccess
-        // successor.
-        return __ CallAndCatchException(callee, frame_state_idx,
-                                        base::VectorOf(arguments), if_success,
-                                        if_exception, ts_descriptor);
+      base::Optional<decltype(assembler)::CatchScope> catch_scope;
+      if (is_final_control) {
+        Block* catch_block = Map(block->SuccessorAt(1));
+        catch_scope.emplace(assembler, catch_block);
       }
+      OpIndex result = EmitProjectionsAndTuple(__ Call(
+          callee, frame_state_idx, base::VectorOf(arguments), ts_descriptor));
+      if (is_final_control) {
+        // The `__ Call()` before has already created exceptional control flow
+        // and bound a new block for the success case. So we can just `Goto` the
+        // block that Turbofan designated as the `IfSuccess` successor.
+        __ Goto(Map(block->SuccessorAt(0)));
+      }
+      return result;
     }
 
     case IrOpcode::kTailCall: {
@@ -1271,8 +1258,10 @@ OpIndex GraphBuilder::Process(
         arguments.emplace_back(Map(node->InputAt(i)));
       }
 
+      CanThrow can_throw =
+          op->HasProperty(Operator::kNoThrow) ? CanThrow::kNo : CanThrow::kYes;
       const TSCallDescriptor* ts_descriptor =
-          TSCallDescriptor::Create(call_descriptor, graph_zone);
+          TSCallDescriptor::Create(call_descriptor, can_throw, graph_zone);
 
       __ TailCall(callee, base::VectorOf(arguments), ts_descriptor);
       return OpIndex::Invalid();
@@ -1381,10 +1370,12 @@ OpIndex GraphBuilder::Process(
       Node* offset = node->InputAt(1);
       Node* value = node->InputAt(2);
       ObjectAccess const& access = ObjectAccessOf(node->op());
+      bool initializing_transitioning = inside_region;
       __ Store(Map(object), Map(offset), Map(value),
                StoreOp::Kind::TaggedBase(),
                MemoryRepresentation::FromMachineType(access.machine_type),
-               access.write_barrier_kind, kHeapObjectTag);
+               access.write_barrier_kind, kHeapObjectTag,
+               initializing_transitioning);
       return OpIndex::Invalid();
     }
     case IrOpcode::kStoreElement: {
@@ -1396,9 +1387,10 @@ OpIndex GraphBuilder::Process(
       StoreOp::Kind kind = StoreOp::Kind::Aligned(access.base_is_tagged);
       MemoryRepresentation rep =
           MemoryRepresentation::FromMachineType(access.machine_type);
+      bool initializing_transitioning = inside_region;
       __ Store(Map(object), Map(index), Map(value), kind, rep,
                access.write_barrier_kind, access.header_size,
-               rep.SizeInBytesLog2());
+               rep.SizeInBytesLog2(), initializing_transitioning);
       return OpIndex::Invalid();
     }
     case IrOpcode::kStoreField: {
@@ -2090,7 +2082,8 @@ OpIndex GraphBuilder::Process(
           return __ Call(
               slow_call_callee, dominating_frame_state,
               base::VectorOf(slow_call_arguments),
-              TSCallDescriptor::Create(params.descriptor(), __ graph_zone()));
+              TSCallDescriptor::Create(params.descriptor(), CanThrow::kYes,
+                                       __ graph_zone()));
         }
       }
 
@@ -2121,10 +2114,11 @@ OpIndex GraphBuilder::Process(
         // 2) the embedder requested fallback possibility via providing options
         // arg. None of the above usually holds true for Wasm functions with
         // primitive types only, so we avoid generating an extra branch here.
-        V<Object> slow_call_result = __ Call(
-            slow_call_callee, dominating_frame_state,
-            base::VectorOf(slow_call_arguments),
-            TSCallDescriptor::Create(params.descriptor(), __ graph_zone()));
+        V<Object> slow_call_result =
+            __ Call(slow_call_callee, dominating_frame_state,
+                    base::VectorOf(slow_call_arguments),
+                    TSCallDescriptor::Create(params.descriptor(),
+                                             CanThrow::kYes, __ graph_zone()));
         GOTO(done, slow_call_result);
       }
       END_IF

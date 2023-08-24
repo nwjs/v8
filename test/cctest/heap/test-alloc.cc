@@ -84,7 +84,7 @@ Handle<Object> HeapTester::TestAllocateAfterFailures() {
 
   // Code space.
   heap::SimulateFullSpace(heap->code_space());
-  size = CcTest::i_isolate()->builtins()->code(Builtin::kIllegal).Size();
+  size = CcTest::i_isolate()->builtins()->code(Builtin::kIllegal)->Size();
   obj =
       heap->AllocateRaw(size, AllocationType::kCode, AllocationOrigin::kRuntime)
           .ToObjectChecked();
@@ -100,7 +100,7 @@ HEAP_TEST(StressHandles) {
   v8::Local<v8::Context> env = v8::Context::New(CcTest::isolate());
   env->Enter();
   Handle<Object> o = TestAllocateAfterFailures();
-  CHECK(o->IsTrue(CcTest::i_isolate()));
+  CHECK(IsTrue(*o, CcTest::i_isolate()));
   env->Exit();
 }
 
@@ -142,7 +142,7 @@ TEST(StressJS) {
   info->set_language_mode(LanguageMode::kStrict);
   Handle<JSFunction> function =
       Factory::JSFunctionBuilder{isolate, info, context}.Build();
-  CHECK(!function->shared().construct_as_builtin());
+  CHECK(!function->shared()->construct_as_builtin());
 
   // Force the creation of an initial map.
   factory->NewJSObject(function);

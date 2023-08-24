@@ -10,6 +10,7 @@
 #include "src/common/globals.h"
 #include "src/heap/heap-inl.h"
 #include "src/heap/incremental-marking.h"
+#include "src/heap/large-page.h"
 #include "src/heap/large-spaces.h"
 #include "src/heap/memory-chunk-inl.h"
 #include "src/heap/new-spaces.h"
@@ -73,30 +74,9 @@ void Space::MoveExternalBackingStoreBytes(ExternalBackingStoreType type,
   base::CheckedIncrement(&(to->external_backing_store_bytes_[type]), amount);
 }
 
-void Page::MarkNeverAllocateForTesting() {
-  DCHECK(this->owner_identity() != NEW_SPACE);
-  DCHECK(!IsFlagSet(NEVER_ALLOCATE_ON_PAGE));
-  SetFlag(NEVER_ALLOCATE_ON_PAGE);
-  SetFlag(NEVER_EVACUATE);
-  reinterpret_cast<PagedSpace*>(owner())->free_list()->EvictFreeListItems(this);
-}
-
-void Page::MarkEvacuationCandidate() {
-  DCHECK(!IsFlagSet(NEVER_EVACUATE));
-  DCHECK_NULL(slot_set<OLD_TO_OLD>());
-  DCHECK_NULL(typed_slot_set<OLD_TO_OLD>());
-  SetFlag(EVACUATION_CANDIDATE);
-  reinterpret_cast<PagedSpace*>(owner())->free_list()->EvictFreeListItems(this);
-}
-
-void Page::ClearEvacuationCandidate() {
-  if (!IsFlagSet(COMPACTION_WAS_ABORTED)) {
-    DCHECK_NULL(slot_set<OLD_TO_OLD>());
-    DCHECK_NULL(typed_slot_set<OLD_TO_OLD>());
-  }
-  ClearFlag(EVACUATION_CANDIDATE);
-  InitializeFreeListCategories();
-}
+PageRange::PageRange(Page* page) : PageRange(page, page->next_page()) {}
+ConstPageRange::ConstPageRange(const Page* page)
+    : ConstPageRange(page, page->next_page()) {}
 
 OldGenerationMemoryChunkIterator::OldGenerationMemoryChunkIterator(Heap* heap)
     : heap_(heap),

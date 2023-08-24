@@ -204,6 +204,18 @@ class CollectionsBuiltinsAssembler : public BaseCollectionsAssembler {
   // Normalizes -0 to +0.
   const TNode<Object> NormalizeNumberKey(const TNode<Object> key);
 
+  // Exposed for MapGroupBy in Torque.
+  void UnsafeStoreValueInOrderedHashMapEntry(const TNode<OrderedHashMap> table,
+                                             const TNode<Object> value,
+                                             const TNode<IntPtrT> entry) {
+    return StoreValueInOrderedHashMapEntry(table, value, entry,
+                                           CheckBounds::kDebugOnly);
+  }
+
+  TNode<Smi> DeleteFromSetTable(const TNode<Object> context,
+                                TNode<OrderedHashSet> table, TNode<Object> key,
+                                Label* not_found);
+
  protected:
   template <typename IteratorType>
   TNode<HeapObject> AllocateJSCollectionIterator(
@@ -352,12 +364,6 @@ class CollectionsBuiltinsAssembler : public BaseCollectionsAssembler {
       const TNode<IntPtrT> entry,
       CheckBounds check_bounds = CheckBounds::kAlways);
 
-  void UnsafeStoreValueInOrderedHashMapEntry(const TNode<OrderedHashMap> table,
-                                             const TNode<Object> value,
-                                             const TNode<IntPtrT> entry) {
-    return StoreValueInOrderedHashMapEntry(table, value, entry,
-                                           CheckBounds::kDebugOnly);
-  }
   void UnsafeStoreKeyValueInOrderedHashMapEntry(
       const TNode<OrderedHashMap> table, const TNode<Object> key,
       const TNode<Object> value, const TNode<IntPtrT> entry) {
@@ -439,7 +445,7 @@ class WeakCollectionsBuiltinsAssembler : public BaseCollectionsAssembler {
  protected:
   void AddEntry(TNode<EphemeronHashTable> table, TNode<IntPtrT> key_index,
                 TNode<Object> key, TNode<Object> value,
-                TNode<IntPtrT> number_of_elements);
+                TNode<Int32T> number_of_elements);
 
   TNode<HeapObject> AllocateTable(Variant variant,
                                   TNode<IntPtrT> at_least_space_for) override;
@@ -472,22 +478,22 @@ class WeakCollectionsBuiltinsAssembler : public BaseCollectionsAssembler {
                                     TNode<IntPtrT> entry_mask,
                                     Label* if_not_found);
 
-  TNode<Word32T> InsufficientCapacityToAdd(TNode<IntPtrT> capacity,
-                                           TNode<IntPtrT> number_of_elements,
-                                           TNode<IntPtrT> number_of_deleted);
+  TNode<Word32T> InsufficientCapacityToAdd(TNode<Int32T> capacity,
+                                           TNode<Int32T> number_of_elements,
+                                           TNode<Int32T> number_of_deleted);
   TNode<IntPtrT> KeyIndexFromEntry(TNode<IntPtrT> entry);
 
-  TNode<IntPtrT> LoadNumberOfElements(TNode<EphemeronHashTable> table,
-                                      int offset);
-  TNode<IntPtrT> LoadNumberOfDeleted(TNode<EphemeronHashTable> table,
-                                     int offset = 0);
+  TNode<Int32T> LoadNumberOfElements(TNode<EphemeronHashTable> table,
+                                     int offset);
+  TNode<Int32T> LoadNumberOfDeleted(TNode<EphemeronHashTable> table,
+                                    int offset = 0);
   TNode<EphemeronHashTable> LoadTable(TNode<JSWeakCollection> collection);
   TNode<IntPtrT> LoadTableCapacity(TNode<EphemeronHashTable> table);
 
   void RemoveEntry(TNode<EphemeronHashTable> table, TNode<IntPtrT> key_index,
                    TNode<IntPtrT> number_of_elements);
-  TNode<BoolT> ShouldRehash(TNode<IntPtrT> number_of_elements,
-                            TNode<IntPtrT> number_of_deleted);
+  TNode<BoolT> ShouldRehash(TNode<Int32T> number_of_elements,
+                            TNode<Int32T> number_of_deleted);
   TNode<Word32T> ShouldShrink(TNode<IntPtrT> capacity,
                               TNode<IntPtrT> number_of_elements);
   TNode<IntPtrT> ValueIndexFromKeyIndex(TNode<IntPtrT> key_index);

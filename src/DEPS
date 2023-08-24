@@ -12,6 +12,7 @@ include_rules = [
   "-src/compiler",
   "+src/compiler/code-assembler.h",
   "+src/compiler/turbofan.h",
+  "+src/compiler/turboshaft/wasm-turboshaft-compiler.h",
   "+src/compiler/wasm-compiler-definitions.h",
   "+src/compiler/wasm-compiler.h",
   "-src/heap",
@@ -106,5 +107,8 @@ specific_include_rules = {
     "+src/heap/factory.h",
     "+src/heap/factory-base.h",
     "+src/heap/local-factory.h",
+  ],
+  "snapshot\.cc": [
+    "+src/heap/read-only-promotion.h",
   ],
 }

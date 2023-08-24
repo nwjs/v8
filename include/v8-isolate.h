@@ -416,6 +416,9 @@ class V8_EXPORT Isolate {
    * Features reported via the SetUseCounterCallback callback. Do not change
    * assigned numbers of existing items; add new features to the end of this
    * list.
+   * Dead features can be marked `V8_DEPRECATE_SOON`, then `V8_DEPRECATED`, and
+   * then finally be renamed to `kOBSOLETE_...` to stop embedders from using
+   * them.
    */
   enum UseCounterFeature {
     kUseAsm = 0,
@@ -527,8 +530,10 @@ class V8_EXPORT Isolate {
     kWasmSimdOpcodes = 106,
     kVarRedeclaredCatchBinding = 107,
     kWasmRefTypes = 108,
-    kWasmBulkMemory = 109,  // Unused.
-    kWasmMultiValue = 110,
+    kWasmBulkMemory V8_DEPRECATE_SOON(
+        "Unused since 2021 (https://crrev.com/c/2622913)") = 109,
+    kWasmMultiValue V8_DEPRECATE_SOON(
+        "Unused since 2021 (https://crrev.com/c/2817790)") = 110,
     kWasmExceptionHandling = 111,
     kInvalidatedMegaDOMProtector = 112,
     kFunctionPrototypeArguments = 113,
@@ -542,6 +547,10 @@ class V8_EXPORT Isolate {
     kLocaleInfoObsoletedGetters = 121,
     kLocaleInfoFunctions = 122,
     kCompileHintsMagicAll = 123,
+    kInvalidatedNoProfilingProtector = 124,
+    kWasmMemory64 = 125,
+    kWasmMultiMemory = 126,
+    kWasmGC = 127,
 
     // If you add new values here, you'll also need to update Chromium's:
     // web_feature.mojom, use_counter_callback.cc, and enums.xml. V8 changes to
@@ -910,24 +919,72 @@ class V8_EXPORT Isolate {
 
   /**
    * Enables the host application to receive a notification before a
-   * garbage collection. Allocations are allowed in the callback function,
-   * but the callback is not re-entrant: if the allocation inside it will
-   * trigger the garbage collection, the callback won't be called again.
-   * It is possible to specify the GCType filter for your callback. But it is
-   * not possible to register the same callback function two times with
-   * different GCType filters.
+   * garbage collection.
+   *
+   * \param callback The callback to be invoked. The callback is allowed to
+   *     allocate but invocation is not re-entrant: a callback triggering
+   *     garbage collection will not be called again. JS execution is prohibited
+   *     from these callbacks. A single callback may only be registered once.
+   * \param gc_type_filter A filter in case it should be applied.
    */
-  void AddGCPrologueCallback(GCCallbackWithData callback, void* data = nullptr,
-                             GCType gc_type_filter = kGCTypeAll);
   void AddGCPrologueCallback(GCCallback callback,
                              GCType gc_type_filter = kGCTypeAll);
 
   /**
-   * This function removes callback which was installed by
-   * AddGCPrologueCallback function.
+   * \copydoc AddGCPrologueCallback(GCCallback, GCType)
+   *
+   * \param data Additional data that should be passed to the callback.
+   */
+  void AddGCPrologueCallback(GCCallbackWithData callback, void* data = nullptr,
+                             GCType gc_type_filter = kGCTypeAll);
+
+  /**
+   * This function removes a callback which was added by
+   * `AddGCPrologueCallback`.
+   *
+   * \param callback the callback to remove.
+   */
+  void RemoveGCPrologueCallback(GCCallback callback);
+
+  /**
+   * \copydoc AddGCPrologueCallback(GCCallback)
+   *
+   * \param data Additional data that was used to install the callback.
    */
   void RemoveGCPrologueCallback(GCCallbackWithData, void* data = nullptr);
-  void RemoveGCPrologueCallback(GCCallback callback);
+
+  /**
+   * Enables the host application to receive a notification after a
+   * garbage collection.
+   *
+   * \copydetails AddGCPrologueCallback(GCCallback, GCType)
+   */
+  void AddGCEpilogueCallback(GCCallback callback,
+                             GCType gc_type_filter = kGCTypeAll);
+
+  /**
+   * \copydoc AddGCEpilogueCallback(GCCallback, GCType)
+   *
+   * \param data Additional data that should be passed to the callback.
+   */
+  void AddGCEpilogueCallback(GCCallbackWithData callback, void* data = nullptr,
+                             GCType gc_type_filter = kGCTypeAll);
+
+  /**
+   * This function removes a callback which was added by
+   * `AddGCEpilogueCallback`.
+   *
+   * \param callback the callback to remove.
+   */
+  void RemoveGCEpilogueCallback(GCCallback callback);
+
+  /**
+   * \copydoc RemoveGCEpilogueCallback(GCCallback)
+   *
+   * \param data Additional data that was used to install the callback.
+   */
+  void RemoveGCEpilogueCallback(GCCallbackWithData callback,
+                                void* data = nullptr);
 
   /**
    * Sets an embedder roots handle that V8 should consider when performing
@@ -1037,28 +1094,6 @@ class V8_EXPORT Isolate {
    * as its last parameter.
    */
   void SetAtomicsWaitCallback(AtomicsWaitCallback callback, void* data);
-
-  /**
-   * Enables the host application to receive a notification after a
-   * garbage collection. Allocations are allowed in the callback function,
-   * but the callback is not re-entrant: if the allocation inside it will
-   * trigger the garbage collection, the callback won't be called again.
-   * It is possible to specify the GCType filter for your callback. But it is
-   * not possible to register the same callback function two times with
-   * different GCType filters.
-   */
-  void AddGCEpilogueCallback(GCCallbackWithData callback, void* data = nullptr,
-                             GCType gc_type_filter = kGCTypeAll);
-  void AddGCEpilogueCallback(GCCallback callback,
-                             GCType gc_type_filter = kGCTypeAll);
-
-  /**
-   * This function removes callback which was installed by
-   * AddGCEpilogueCallback function.
-   */
-  void RemoveGCEpilogueCallback(GCCallbackWithData callback,
-                                void* data = nullptr);
-  void RemoveGCEpilogueCallback(GCCallback callback);
 
   using GetExternallyAllocatedMemoryInBytesCallback = size_t (*)();
 
@@ -1328,20 +1363,6 @@ class V8_EXPORT Isolate {
   void IsolateInBackgroundNotification();
 
   /**
-   * Optional notification which will enable the memory savings mode.
-   * V8 uses this notification to guide heuristics which may result in a
-   * smaller memory footprint at the cost of reduced runtime performance.
-   */
-  V8_DEPRECATED("Use IsolateInBackgroundNotification() instead")
-  void EnableMemorySavingsMode();
-
-  /**
-   * Optional notification which will disable the memory savings mode.
-   */
-  V8_DEPRECATED("Use IsolateInBackgroundNotification() instead")
-  void DisableMemorySavingsMode();
-
-  /**
    * Optional notification to tell V8 the current performance requirements
    * of the embedder based on RAIL.
    * V8 uses these notifications to guide heuristics.
@@ -1513,11 +1534,14 @@ class V8_EXPORT Isolate {
   void SetWasmLoadSourceMapCallback(WasmLoadSourceMapCallback callback);
 
   /**
-   * Register callback to control whehter Wasm GC is enabled.
+   * Register callback to control whether Wasm GC is enabled.
    * The callback overwrites the value of the flag.
    * If the callback returns true, it will also enable Wasm stringrefs.
    */
   void SetWasmGCEnabledCallback(WasmGCEnabledCallback callback);
+
+  void SetWasmImportedStringsEnabledCallback(
+      WasmImportedStringsEnabledCallback callback);
 
   void SetSharedArrayBufferConstructorEnabledCallback(
       SharedArrayBufferConstructorEnabledCallback callback);
@@ -1590,6 +1614,7 @@ class V8_EXPORT Isolate {
    * heap.  GC is not invoked prior to iterating, therefore there is no
    * guarantee that visited objects are still alive.
    */
+  V8_DEPRECATE_SOON("Will be removed without replacement. crbug.com/v8/14172")
   void VisitExternalResources(ExternalResourceVisitor* visitor);
 
   /**
@@ -1682,7 +1707,8 @@ template <class T>
 MaybeLocal<T> Isolate::GetDataFromSnapshotOnce(size_t index) {
   auto slot = GetDataFromSnapshotOnce(index);
   if (slot) {
-    internal::PerformCastCheck(internal::ValueHelper::SlotAsValue<T>(slot));
+    internal::PerformCastCheck(
+        internal::ValueHelper::SlotAsValue<T, false>(slot));
   }
   return Local<T>::FromSlot(slot);
 }

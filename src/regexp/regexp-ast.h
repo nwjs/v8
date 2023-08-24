@@ -134,12 +134,6 @@ class CharacterRange {
   static void AddUnicodeCaseEquivalents(ZoneList<CharacterRange>* ranges,
                                         Zone* zone);
 
-#ifdef V8_INTL_SUPPORT
-  // Creates the closeOver of the given UnicodeSet, removing all
-  // characters/strings that can't be derived via simple case folding.
-  static void UnicodeSimpleCloseOver(icu::UnicodeSet& set);
-#endif  // V8_INTL_SUPPORT
-
   bool Contains(base::uc32 i) const { return from_ <= i && i <= to_; }
   base::uc32 from() const { return from_; }
   base::uc32 to() const { return to_; }
@@ -464,7 +458,7 @@ class RegExpClassSetExpression final : public RegExpTree {
       RegExpTree* root, ZoneList<CharacterRange>* temp_ranges, Zone* zone);
 
   const OperationType operation_;
-  const bool is_negated_;
+  bool is_negated_;
   const bool may_contain_strings_;
   ZoneList<RegExpTree*>* operands_ = nullptr;
   int max_match_;

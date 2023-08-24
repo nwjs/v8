@@ -37,6 +37,8 @@ class TaggedIndex : public Object {
   // This replaces the OBJECT_CONSTRUCTORS macro, because TaggedIndex are
   // special in that we want them to be constexprs.
   constexpr TaggedIndex() : Object() {}
+  explicit constexpr TaggedIndex(Address ptr, SkipTypeCheckTag)
+      : Object(ptr, SkipTypeCheckTag()) {}
   explicit constexpr TaggedIndex(Address ptr) : Object(ptr) {
     DCHECK(HAS_SMI_TAG(ptr));
   }
@@ -61,7 +63,7 @@ class TaggedIndex : public Object {
   DECL_CAST(TaggedIndex)
 
   // Dispatched behavior.
-  DECL_VERIFIER(TaggedIndex)
+  DECL_STATIC_VERIFIER(TaggedIndex)
 
   static_assert(kSmiTagSize == 1);
   static constexpr int kTaggedValueSize = 31;

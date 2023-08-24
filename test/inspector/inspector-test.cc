@@ -32,11 +32,9 @@ namespace internal {
 extern void DisableEmbeddedBlobRefcounting();
 extern void FreeCurrentEmbeddedBlob();
 
-extern v8::StartupData CreateSnapshotDataBlobInternal(
+extern v8::StartupData CreateSnapshotDataBlobInternalForInspectorTest(
     v8::SnapshotCreator::FunctionCodeHandling function_code_handling,
-    const char* embedded_source, v8::Isolate* isolate);
-extern v8::StartupData WarmUpSnapshotDataBlobInternal(
-    v8::StartupData cold_snapshot_blob, const char* warmup_source);
+    const char* embedded_source);
 
 namespace {
 
@@ -358,12 +356,20 @@ class UtilsExtension : public InspectorIsolateData::SetupGlobalTask {
                 });
   }
 
+  static bool IsValidConnectSessionArgs(
+      const v8::FunctionCallbackInfo<v8::Value>& info) {
+    if (info.Length() < 3 || info.Length() > 4) return false;
+    if (!info[0]->IsInt32() || !info[1]->IsString() || !info[2]->IsFunction()) {
+      return false;
+    }
+    return info.Length() == 3 || info[3]->IsBoolean();
+  }
+
   static void ConnectSession(const v8::FunctionCallbackInfo<v8::Value>& info) {
-    if (info.Length() != 3 || !info[0]->IsInt32() || !info[1]->IsString() ||
-        !info[2]->IsFunction()) {
+    if (!IsValidConnectSessionArgs(info)) {
       FATAL(
           "Internal error: connectionSession(context_group_id, state, "
-          "dispatch).");
+          "dispatch, is_fully_trusted).");
     }
     v8::Local<v8::Context> context = info.GetIsolate()->GetCurrentContext();
     std::unique_ptr<FrontendChannelImpl> channel =
@@ -376,16 +382,20 @@ class UtilsExtension : public InspectorIsolateData::SetupGlobalTask {
     std::vector<uint8_t> state =
         ToBytes(info.GetIsolate(), info[1].As<v8::String>());
     int context_group_id = info[0].As<v8::Int32>()->Value();
-    int session_id = 0;
-    RunSyncTask(backend_runner_, [&context_group_id, &session_id, &channel,
-                                  &state](InspectorIsolateData* data) {
-      session_id = data->ConnectSession(
-          context_group_id,
-          v8_inspector::StringView(state.data(), state.size()),
-          std::move(channel));
-    });
+    bool is_fully_trusted =
+        info.Length() == 3 || info[3].As<v8::Boolean>()->Value();
+    base::Optional<int> session_id;
+    RunSyncTask(backend_runner_,
+                [context_group_id, &session_id, &channel, &state,
+                 is_fully_trusted](InspectorIsolateData* data) {
+                  session_id = data->ConnectSession(
+                      context_group_id,
+                      v8_inspector::StringView(state.data(), state.size()),
+                      std::move(channel), is_fully_trusted);
+                });
 
-    info.GetReturnValue().Set(v8::Int32::New(info.GetIsolate(), session_id));
+    CHECK(session_id.has_value());
+    info.GetReturnValue().Set(v8::Int32::New(info.GetIsolate(), *session_id));
   }
 
   static void DisconnectSession(
@@ -846,8 +856,8 @@ int InspectorTestMain(int argc, char* argv[]) {
     if (strcmp(argv[i], "--embed") == 0) {
       argv[i++] = nullptr;
       printf("Embedding script '%s'\n", argv[i]);
-      startup_data = i::CreateSnapshotDataBlobInternal(
-          SnapshotCreator::FunctionCodeHandling::kClear, argv[i], nullptr);
+      startup_data = i::CreateSnapshotDataBlobInternalForInspectorTest(
+          SnapshotCreator::FunctionCodeHandling::kClear, argv[i]);
       argv[i] = nullptr;
     }
   }

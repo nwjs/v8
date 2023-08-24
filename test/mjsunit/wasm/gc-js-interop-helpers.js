@@ -37,7 +37,7 @@ function CreateWasmObjects() {
 }
 
 function testThrowsRepeated(fn, ErrorType, ignoreDeopts = false) {
-  const maxRuns = 2;
+  const maxRuns = 3;
   for (let run = 0; run < maxRuns; ++run) {
     %PrepareFunctionForOptimization(fn);
     for (let i = 0; i < 5; i++) assertThrows(fn, ErrorType);
@@ -49,7 +49,7 @@ function testThrowsRepeated(fn, ErrorType, ignoreDeopts = false) {
 }
 
 function repeated(fn, ignoreDeopts = false) {
-  const maxRuns = 2;
+  const maxRuns = 3;
   for (let run = 0; run < maxRuns; ++run) {
     %PrepareFunctionForOptimization(fn);
     for (let i = 0; i < 5; i++) fn();
@@ -59,3 +59,9 @@ function repeated(fn, ignoreDeopts = false) {
   }
   assertOptimized(fn);
 }
+
+// Prevent optimization, so that the test functions can not be inlined which
+// can cause issues in combination with `assertOptimized` and deopts in test
+// code.
+%NeverOptimizeFunction(testThrowsRepeated);
+%NeverOptimizeFunction(repeated);

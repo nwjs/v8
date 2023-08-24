@@ -5,6 +5,7 @@
 #ifndef V8_OBJECTS_TEMPLATES_H_
 #define V8_OBJECTS_TEMPLATES_H_
 
+#include "src/handles/handles.h"
 #include "src/objects/struct.h"
 #include "torque-generated/bit-fields.h"
 
@@ -135,9 +136,6 @@ class FunctionTemplateInfo
   DECL_INT16_ACCESSORS(allowed_receiver_instance_type_range_end)
   // End flag bits ---------------------
 
-  // Dispatched behavior.
-  DECL_PRINTER(FunctionTemplateInfo)
-
   inline int InstanceType() const;
   inline void SetInstanceType(int instance_type);
 
@@ -164,7 +162,7 @@ class FunctionTemplateInfo
   bool IsLeafTemplateForApiObject(Object object) const;
   inline bool instantiated();
 
-  bool BreakAtEntry();
+  bool BreakAtEntry(Isolate* isolate);
   bool HasInstanceType();
 
   // Helper function for cached accessors.
@@ -206,9 +204,6 @@ class ObjectTemplateInfo
   DECL_INT_ACCESSORS(embedder_field_count)
   DECL_BOOLEAN_ACCESSORS(immutable_proto)
   DECL_BOOLEAN_ACCESSORS(code_like)
-
-  // Dispatched behavior.
-  DECL_PRINTER(ObjectTemplateInfo)
 
   // Starting from given object template's constructor walk up the inheritance
   // chain till a function template that has an instance template is found.

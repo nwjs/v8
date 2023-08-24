@@ -201,7 +201,13 @@ class Utils {
   static inline Local<v8::To> Name(      \
       v8::internal::Handle<v8::internal::From> obj);
 
+#define DECLARE_TO_LOCAL_DIRECT_HANDLE(Name, From, To)    \
+  static inline Local<v8::To> Name(                       \
+      v8::internal::DirectHandle<v8::internal::From> obj, \
+      i::Isolate* isolate);
+
   TO_LOCAL_LIST(DECLARE_TO_LOCAL)
+  TO_LOCAL_LIST(DECLARE_TO_LOCAL_DIRECT_HANDLE)
 
 #define DECLARE_TO_LOCAL_TYPED_ARRAY(Type, typeName, TYPE, ctype) \
   static inline Local<v8::Type##Array> ToLocal##Type##Array(      \
@@ -213,14 +219,25 @@ class Utils {
   static inline v8::internal::Handle<v8::internal::To> OpenHandle( \
       const From* that, bool allow_empty_handle = false);
 
+#define DECLARE_OPEN_DIRECT_HANDLE(From, To)                                   \
+  static inline v8::internal::DirectHandle<v8::internal::To> OpenDirectHandle( \
+      const From* that, bool allow_empty_handle = false);
+
   OPEN_HANDLE_LIST(DECLARE_OPEN_HANDLE)
+  OPEN_HANDLE_LIST(DECLARE_OPEN_DIRECT_HANDLE)
 
 #undef DECLARE_OPEN_HANDLE
+#undef DECLARE_OPEN_DIRECT_HANDLE
 #undef DECLARE_TO_LOCAL_TYPED_ARRAY
 #undef DECLARE_TO_LOCAL
+#undef DECLARE_TO_LOCAL_DIRECT_HANDLE
 
   template <class From, class To>
   static inline Local<To> Convert(v8::internal::Handle<From> obj);
+
+  template <class From, class To>
+  static inline Local<To> Convert(v8::internal::DirectHandle<From> obj,
+                                  v8::internal::Isolate* isolate);
 
   template <class T>
   static inline v8::internal::Handle<v8::internal::Object> OpenPersistent(
@@ -252,6 +269,13 @@ template <class T>
 inline v8::Local<T> ToApiHandle(
     v8::internal::Handle<v8::internal::Object> obj) {
   return Utils::Convert<v8::internal::Object, T>(obj);
+}
+
+template <class T>
+inline v8::Local<T> ToApiHandle(
+    v8::internal::DirectHandle<v8::internal::Object> obj,
+    v8::internal::Isolate* isolate) {
+  return Utils::Convert<v8::internal::Object, T>(obj, isolate);
 }
 
 template <class T>
@@ -490,9 +514,7 @@ void InvokeAccessorGetterCallback(
 // IsolateData::api_callback_thunk_argument slot.
 void InvokeFunctionCallbackGeneric(
     const v8::FunctionCallbackInfo<v8::Value>& info);
-void InvokeFunctionCallbackNoSideEffects(
-    const v8::FunctionCallbackInfo<v8::Value>& info);
-void InvokeFunctionCallbackWithSideEffects(
+void InvokeFunctionCallbackOptimized(
     const v8::FunctionCallbackInfo<v8::Value>& info);
 
 void InvokeFinalizationRegistryCleanupFromTask(

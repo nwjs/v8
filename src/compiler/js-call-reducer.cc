@@ -37,6 +37,7 @@
 #include "src/objects/js-function.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/ordered-hash-table.h"
+#include "src/utils/utils.h"
 
 #ifdef V8_INTL_SUPPORT
 #include "src/objects/intl-objects.h"
@@ -82,6 +83,8 @@ class JSCallReducerAssembler : public JSGraphAssembler {
       StringRef search_element_string);
   TNode<Boolean> ReduceStringPrototypeEndsWith();
   TNode<Boolean> ReduceStringPrototypeEndsWith(StringRef search_element_string);
+  TNode<String> ReduceStringPrototypeCharAt();
+  TNode<String> ReduceStringPrototypeCharAt(StringRef s, uint32_t index);
   TNode<String> ReduceStringPrototypeSlice();
   TNode<Object> ReduceJSCallMathMinMaxWithArrayLike(Builtin builtin);
 
@@ -686,10 +689,11 @@ class FastApiCallReducerAssembler : public JSCallReducerAssembler {
     // holder, receiver, ... JS arguments, context, new frame state]
     CallHandlerInfoRef call_handler_info =
         *function_template_info_.call_code(broker());
+    bool no_profiling =
+        broker()->dependencies()->DependOnNoProfilingProtector();
     Callable call_api_callback = Builtins::CallableFor(
-        isolate(), call_handler_info.object()->IsSideEffectCallHandlerInfo()
-                       ? Builtin::kCallApiCallbackWithSideEffects
-                       : Builtin::kCallApiCallbackNoSideEffects);
+        isolate(), no_profiling ? Builtin::kCallApiCallbackOptimizedNoProfiling
+                                : Builtin::kCallApiCallbackOptimized);
     CallInterfaceDescriptor cid = call_api_callback.descriptor();
     CallDescriptor* call_descriptor =
         Linkage::GetStubCallDescriptor(graph()->zone(), cid, arity_ + kReceiver,
@@ -702,10 +706,9 @@ class FastApiCallReducerAssembler : public JSCallReducerAssembler {
         static_cast<unsigned>(
             function_template_info_.c_functions(broker()).size()));
 
-    Node* continuation_frame_state =
-        CreateGenericLazyDeoptContinuationFrameState(
-            jsgraph(), shared_, target_, ContextInput(), receiver_,
-            FrameStateInput());
+    Node* continuation_frame_state = CreateInlinedApiFunctionFrameState(
+        jsgraph(), shared_, target_, ContextInput(), receiver_,
+        FrameStateInput());
 
     inputs[cursor++] = HeapConstant(call_api_callback.code());
     inputs[cursor++] = ExternalConstant(function_reference);
@@ -1125,6 +1128,48 @@ TNode<Boolean> JSCallReducerAssembler::ReduceStringPrototypeEndsWith() {
 
   Bind(&out);
   return out.PhiAt<Boolean>(0);
+}
+
+TNode<String> JSCallReducerAssembler::ReduceStringPrototypeCharAt(
+    StringRef s, uint32_t index) {
+  DCHECK(s.IsContentAccessible());
+  if (s.IsOneByteRepresentation()) {
+    OptionalObjectRef elem = s.GetCharAsStringOrUndefined(broker(), index);
+    TNode<String> elem_string =
+        elem.has_value() ? TNode<String>::UncheckedCast(
+                               jsgraph()->Constant(elem.value(), broker()))
+                         : EmptyStringConstant();
+    return elem_string;
+  } else {
+    const uint32_t length = static_cast<uint32_t>(s.length());
+    if (index >= length) return EmptyStringConstant();
+    Handle<SeqTwoByteString> flat = broker()->CanonicalPersistentHandle(
+        broker()
+            ->local_isolate_or_isolate()
+            ->factory()
+            ->NewRawTwoByteString(1, AllocationType::kOld)
+            .ToHandleChecked());
+    flat->SeqTwoByteStringSet(0, s.GetChar(broker(), index).value());
+    TNode<String> two_byte_elem =
+        TNode<String>::UncheckedCast(jsgraph()->HeapConstant(flat));
+    return two_byte_elem;
+  }
+}
+
+TNode<String> JSCallReducerAssembler::ReduceStringPrototypeCharAt() {
+  TNode<Object> receiver = ReceiverInput();
+  TNode<Object> index = ArgumentOrZero(0);
+
+  TNode<String> receiver_string = CheckString(receiver);
+  TNode<Number> index_smi = CheckSmi(index);
+  TNode<Number> length = StringLength(receiver_string);
+
+  TNode<Number> bounded_index = CheckBounds(index_smi, length);
+
+  Node* result = StringCharCodeAt(receiver_string, bounded_index);
+  TNode<String> result_string =
+      StringFromSingleCharCode(TNode<Number>::UncheckedCast(result));
+  return result_string;
 }
 
 TNode<String> JSCallReducerAssembler::ReduceStringPrototypeSlice() {
@@ -2271,28 +2316,22 @@ struct PromiseCtorFrameStateParams {
 
 // Remnant of old-style JSCallReducer code. Could be ported to graph assembler,
 // but probably not worth the effort.
-FrameState CreateArtificialFrameState(
-    Node* node, Node* outer_frame_state, int parameter_count,
-    BytecodeOffset bailout_id, FrameStateType frame_state_type,
-    SharedFunctionInfoRef shared, Node* context, CommonOperatorBuilder* common,
-    Graph* graph) {
+FrameState CreateConstructInvokeStubFrameState(
+    Node* node, Node* outer_frame_state, SharedFunctionInfoRef shared,
+    Node* context, CommonOperatorBuilder* common, Graph* graph) {
   const FrameStateFunctionInfo* state_info =
-      common->CreateFrameStateFunctionInfo(
-          frame_state_type, parameter_count + 1, 0, shared.object());
+      common->CreateFrameStateFunctionInfo(FrameStateType::kConstructInvokeStub,
+                                           1, 0, shared.object());
 
   const Operator* op = common->FrameState(
-      bailout_id, OutputFrameStateCombine::Ignore(), state_info);
+      BytecodeOffset::None(), OutputFrameStateCombine::Ignore(), state_info);
   const Operator* op0 = common->StateValues(0, SparseInputMask::Dense());
   Node* node0 = graph->NewNode(op0);
 
   static constexpr int kTargetInputIndex = 0;
   static constexpr int kReceiverInputIndex = 1;
-  const int parameter_count_with_receiver = parameter_count + 1;
   std::vector<Node*> params;
-  params.reserve(parameter_count_with_receiver);
-  for (int i = 0; i < parameter_count_with_receiver; i++) {
-    params.push_back(node->InputAt(kReceiverInputIndex + i));
-  }
+  params.push_back(node->InputAt(kReceiverInputIndex));
   const Operator* op_param = common->StateValues(
       static_cast<int>(params.size()), SparseInputMask::Dense());
   Node* params_node = graph->NewNode(op_param, static_cast<int>(params.size()),
@@ -2308,10 +2347,9 @@ FrameState PromiseConstructorFrameState(
     Graph* graph) {
   DCHECK_EQ(1,
             params.shared.internal_formal_parameter_count_without_receiver());
-  return CreateArtificialFrameState(
-      params.node_ptr, params.outer_frame_state, 1,
-      BytecodeOffset::ConstructStubInvoke(), FrameStateType::kConstructStub,
-      params.shared, params.context, common, graph);
+  return CreateConstructInvokeStubFrameState(
+      params.node_ptr, params.outer_frame_state, params.shared, params.context,
+      common, graph);
 }
 
 FrameState PromiseConstructorLazyFrameState(
@@ -2934,7 +2972,7 @@ Reduction JSCallReducer::ReduceFunctionPrototypeBind(Node* node) {
   int const arity_with_bound_this = std::max(arity, kBoundThis);
   int const input_count =
       arity_with_bound_this + kReceiverContextEffectAndControl;
-  Node** inputs = graph()->zone()->NewArray<Node*>(input_count);
+  Node** inputs = graph()->zone()->AllocateArray<Node*>(input_count);
   int cursor = 0;
   inputs[cursor++] = receiver;
   inputs[cursor++] = n.ArgumentOrUndefined(0, jsgraph());  // bound_this.
@@ -3214,9 +3252,9 @@ Reduction JSCallReducer::ReduceReflectConstruct(Node* node) {
   CallParameters const& p = n.Parameters();
   int arity = p.arity_without_implicit_args();
   // Massage value inputs appropriately.
-  Node* arg_target = n.ArgumentOrUndefined(0, jsgraph());
-  Node* arg_argument_list = n.ArgumentOrUndefined(1, jsgraph());
-  Node* arg_new_target = n.ArgumentOr(2, arg_target);
+  TNode<Object> arg_target = n.ArgumentOrUndefined(0, jsgraph());
+  TNode<Object> arg_argument_list = n.ArgumentOrUndefined(1, jsgraph());
+  TNode<Object> arg_new_target = n.ArgumentOr(2, arg_target);
 
   static_assert(n.ReceiverIndex() > n.TargetIndex());
   node->RemoveInput(n.ReceiverIndex());
@@ -3339,7 +3377,7 @@ Reduction JSCallReducer::ReduceReflectGet(Node* node) {
 
   // Connect the throwing path to end.
   if_false = graph()->NewNode(common()->Throw(), efalse, if_false);
-  NodeProperties::MergeControlToEnd(graph(), common(), if_false);
+  MergeControlToEnd(graph(), common(), if_false);
 
   // Continue on the regular path.
   ReplaceWithValue(node, vtrue, etrue, if_true);
@@ -3405,7 +3443,7 @@ Reduction JSCallReducer::ReduceReflectHas(Node* node) {
 
   // Connect the throwing path to end.
   if_false = graph()->NewNode(common()->Throw(), efalse, if_false);
-  NodeProperties::MergeControlToEnd(graph(), common(), if_false);
+  MergeControlToEnd(graph(), common(), if_false);
 
   // Continue on the regular path.
   ReplaceWithValue(node, vtrue, etrue, if_true);
@@ -3723,9 +3761,9 @@ Reduction JSCallReducer::ReduceCallWasmFunction(Node* node,
   if (shared.object()->HasWasmExportedFunctionData()) {
     native_module = shared.object()
                         ->wasm_exported_function_data()
-                        .instance()
-                        .module_object()
-                        .native_module();
+                        ->instance()
+                        ->module_object()
+                        ->native_module();
   }
   // TODO(mliedtke): We should be able to remove module, signature, native
   // module and function index from the SharedFunctionInfoRef. However, for some
@@ -3948,6 +3986,7 @@ Reduction JSCallReducer::ReduceCallApiFunction(Node* node,
       // faster than the generic call sequence.
       Builtin builtin_name;
       if (function_template_info.accept_any_receiver()) {
+        DCHECK(!function_template_info.is_signature_undefined(broker()));
         builtin_name = Builtin::kCallFunctionTemplate_CheckCompatibleReceiver;
       } else if (function_template_info.is_signature_undefined(broker())) {
         builtin_name = Builtin::kCallFunctionTemplate_CheckAccess;
@@ -3973,7 +4012,7 @@ Reduction JSCallReducer::ReduceCallApiFunction(Node* node,
       node->ReplaceInput(1,
                          jsgraph()->Constant(function_template_info, broker()));
       node->InsertInput(graph()->zone(), 2,
-                        jsgraph()->Constant(JSParameterCount(argc)));
+                        jsgraph()->Int32Constant(JSParameterCount(argc)));
       node->ReplaceInput(3, receiver);       // Update receiver input.
       node->ReplaceInput(6 + argc, effect);  // Update effect input.
       NodeProperties::ChangeOp(node, common()->Call(call_descriptor));
@@ -4012,10 +4051,10 @@ Reduction JSCallReducer::ReduceCallApiFunction(Node* node,
 
   CallHandlerInfoRef call_handler_info =
       *function_template_info.call_code(broker());
+  bool no_profiling = broker()->dependencies()->DependOnNoProfilingProtector();
   Callable call_api_callback = Builtins::CallableFor(
-      isolate(), call_handler_info.object()->IsSideEffectCallHandlerInfo()
-                     ? Builtin::kCallApiCallbackWithSideEffects
-                     : Builtin::kCallApiCallbackNoSideEffects);
+      isolate(), no_profiling ? Builtin::kCallApiCallbackOptimizedNoProfiling
+                              : Builtin::kCallApiCallbackOptimized);
   CallInterfaceDescriptor cid = call_api_callback.descriptor();
   auto call_descriptor =
       Linkage::GetStubCallDescriptor(graph()->zone(), cid, argc + 1 /*
@@ -4024,7 +4063,7 @@ Reduction JSCallReducer::ReduceCallApiFunction(Node* node,
   ExternalReference function_reference = ExternalReference::Create(
       &api_function, ExternalReference::DIRECT_API_CALL);
 
-  Node* continuation_frame_state = CreateGenericLazyDeoptContinuationFrameState(
+  Node* continuation_frame_state = CreateInlinedApiFunctionFrameState(
       jsgraph(), shared, target, context, receiver, frame_state);
 
   node->RemoveInput(n.FeedbackVectorIndex());
@@ -4123,7 +4162,7 @@ void JSCallReducer::CheckIfConstructor(Node* construct) {
   // simply connect the successful completion to the graph end.
   Node* throw_node =
       graph()->NewNode(common()->Throw(), check_throw, check_fail);
-  NodeProperties::MergeControlToEnd(graph(), common(), throw_node);
+  MergeControlToEnd(graph(), common(), throw_node);
 }
 
 namespace {
@@ -4702,7 +4741,7 @@ Reduction JSCallReducer::ReduceJSCall(Node* node,
   // If this state changes during background compilation, the compilation
   // job will be aborted from the main thread (see
   // Debug::PrepareFunctionForDebugExecution()).
-  if (shared.HasBreakInfo()) return NoChange();
+  if (shared.HasBreakInfo(broker())) return NoChange();
 
   // Class constructors are callable, but [[Call]] will raise an exception.
   // See ES6 section 9.2.1 [[Call]] ( thisArgument, argumentsList ).
@@ -5281,7 +5320,7 @@ Reduction JSCallReducer::ReduceJSConstruct(Node* node) {
       // job will be aborted from the main thread (see
       // Debug::PrepareFunctionForDebugExecution()).
       SharedFunctionInfoRef sfi = function.shared(broker());
-      if (sfi.HasBreakInfo()) return NoChange();
+      if (sfi.HasBreakInfo(broker())) return NoChange();
 
       // Don't inline cross native context.
       if (!function.native_context(broker()).equals(native_context())) {
@@ -5667,9 +5706,7 @@ Reduction JSCallReducer::ReduceForInsufficientFeedback(
   Node* deoptimize =
       graph()->NewNode(common()->Deoptimize(reason, FeedbackSource()),
                        frame_state, effect, control);
-  // TODO(bmeurer): This should be on the AdvancedReducer somehow.
-  NodeProperties::MergeControlToEnd(graph(), common(), deoptimize);
-  Revisit(graph()->end());
+  MergeControlToEnd(graph(), common(), deoptimize);
   node->TrimInputCount(0);
   NodeProperties::ChangeOp(node, common()->Dead());
   return Changed(node);
@@ -6053,7 +6090,7 @@ Reduction JSCallReducer::ReduceArrayPrototypeShift(Node* node) {
         Node* eloop =
             graph()->NewNode(common()->EffectPhi(2), etrue1, etrue1, loop);
         Node* terminate = graph()->NewNode(common()->Terminate(), eloop, loop);
-        NodeProperties::MergeControlToEnd(graph(), common(), terminate);
+        MergeControlToEnd(graph(), common(), terminate);
 
         Node* index = graph()->NewNode(
             common()->Phi(MachineRepresentation::kTagged, 2),
@@ -6324,22 +6361,23 @@ Reduction JSCallReducer::ReduceArrayIterator(Node* node,
       if (p.speculation_mode() == SpeculationMode::kDisallowSpeculation) {
         return NoChange();
       }
-      Node* buffer = effect = graph()->NewNode(
-          simplified()->LoadField(AccessBuilder::ForJSArrayBufferViewBuffer()),
-          receiver, effect, control);
-      Node* buffer_bit_field = effect = graph()->NewNode(
-          simplified()->LoadField(AccessBuilder::ForJSArrayBufferBitField()),
-          buffer, effect, control);
-      Node* check = graph()->NewNode(
-          simplified()->NumberEqual(),
-          graph()->NewNode(
-              simplified()->NumberBitwiseAnd(), buffer_bit_field,
-              jsgraph()->Constant(JSArrayBuffer::WasDetachedBit::kMask)),
-          jsgraph()->ZeroConstant());
-      effect = graph()->NewNode(
-          simplified()->CheckIf(DeoptimizeReason::kArrayBufferWasDetached,
-                                p.feedback()),
-          check, effect, control);
+
+      std::set<ElementsKind> elements_kinds;
+      for (MapRef map : inference.GetMaps()) {
+        elements_kinds.insert(map.elements_kind());
+      }
+
+      // The following detach check is built with the given {elements_kinds} in
+      // mind, so we have to install dependency on those.
+      inference.RelyOnMapsPreferStability(
+          dependencies(), jsgraph(), &effect, control,
+          CallParametersOf(node->op()).feedback());
+
+      JSCallReducerAssembler a(this, node);
+      a.CheckIfTypedArrayWasDetached(
+          TNode<JSTypedArray>::UncheckedCast(receiver),
+          std::move(elements_kinds), p.feedback());
+      std::tie(effect, control) = ReleaseEffectAndControlFromAssembler(&a);
     }
   }
 
@@ -6729,28 +6767,32 @@ Reduction JSCallReducer::ReduceStringPrototypeCharAt(Node* node) {
 
   Node* receiver = n.receiver();
   Node* index = n.ArgumentOr(0, jsgraph()->ZeroConstant());
-  Effect effect = n.effect();
-  Control control = n.control();
 
-  // Ensure that the {receiver} is actually a String.
-  receiver = effect = graph()->NewNode(simplified()->CheckString(p.feedback()),
-                                       receiver, effect, control);
+  // Attempt to constant fold the operation when we know
+  // that receiver is a string and index is a number.
+  HeapObjectMatcher receiver_matcher(receiver);
+  NumberMatcher index_matcher(index);
+  if (receiver_matcher.HasResolvedValue()) {
+    HeapObjectRef receiver_ref = receiver_matcher.Ref(broker());
+    if (!receiver_ref.IsString()) return NoChange();
+    StringRef receiver_string = receiver_ref.AsString();
+    bool is_content_accessible = receiver_string.IsContentAccessible();
+    bool is_integer_in_max_range =
+        index_matcher.IsInteger() &&
+        index_matcher.IsInRange(
+            0.0, static_cast<double>(JSObject::kMaxElementIndex));
+    if (is_content_accessible && is_integer_in_max_range) {
+      const uint32_t index =
+          static_cast<uint32_t>(index_matcher.ResolvedValue());
+      JSCallReducerAssembler a(this, node);
+      Node* subgraph = a.ReduceStringPrototypeCharAt(receiver_string, index);
+      return ReplaceWithSubgraph(&a, subgraph);
+    }
+  }
 
-  // Determine the {receiver} length.
-  Node* receiver_length =
-      graph()->NewNode(simplified()->StringLength(), receiver);
-
-  // Check that the {index} is within range.
-  index = effect = graph()->NewNode(simplified()->CheckBounds(p.feedback()),
-                                    index, receiver_length, effect, control);
-
-  // Return the character from the {receiver} as single character string.
-  Node* value = effect = graph()->NewNode(simplified()->StringCharCodeAt(),
-                                          receiver, index, effect, control);
-  value = graph()->NewNode(simplified()->StringFromSingleCharCode(), value);
-
-  ReplaceWithValue(node, value, effect, control);
-  return Replace(value);
+  JSCallReducerAssembler a(this, node);
+  Node* subgraph = a.ReduceStringPrototypeCharAt();
+  return ReplaceWithSubgraph(&a, subgraph);
 }
 
 #ifdef V8_INTL_SUPPORT
@@ -7336,8 +7378,6 @@ Reduction JSCallReducer::ReducePromiseResolveTrampoline(Node* node) {
 Reduction JSCallReducer::ReduceTypedArrayConstructor(
     Node* node, SharedFunctionInfoRef shared) {
   JSConstructNode n(node);
-  ConstructParameters const& p = n.Parameters();
-  int arity = p.arity_without_implicit_args();
   Node* target = n.target();
   Node* arg0 = n.ArgumentOrUndefined(0, jsgraph());
   Node* arg1 = n.ArgumentOrUndefined(1, jsgraph());
@@ -7350,23 +7390,19 @@ Reduction JSCallReducer::ReduceTypedArrayConstructor(
 
   // Insert a construct stub frame into the chain of frame states. This will
   // reconstruct the proper frame when deoptimizing within the constructor.
-  frame_state = CreateArtificialFrameState(
-      node, frame_state, arity, BytecodeOffset::ConstructStubInvoke(),
-      FrameStateType::kConstructStub, shared, context, common(), graph());
+  frame_state = CreateConstructInvokeStubFrameState(node, frame_state, shared,
+                                                    context, common(), graph());
 
   // This continuation just returns the newly created JSTypedArray. We
   // pass the_hole as the receiver, just like the builtin construct stub
   // does in this case.
-  Node* const parameters[] = {jsgraph()->TheHoleConstant()};
-  int const num_parameters = static_cast<int>(arraysize(parameters));
-  frame_state = CreateJavaScriptBuiltinContinuationFrameState(
-      jsgraph(), shared, Builtin::kGenericLazyDeoptContinuation, target,
-      context, parameters, num_parameters, frame_state,
-      ContinuationFrameStateMode::LAZY);
+  Node* const receiver = jsgraph()->TheHoleConstant();
+  Node* continuation_frame_state = CreateGenericLazyDeoptContinuationFrameState(
+      jsgraph(), shared, target, context, receiver, frame_state);
 
-  Node* result =
-      graph()->NewNode(javascript()->CreateTypedArray(), target, new_target,
-                       arg0, arg1, arg2, context, frame_state, effect, control);
+  Node* result = graph()->NewNode(javascript()->CreateTypedArray(), target,
+                                  new_target, arg0, arg1, arg2, context,
+                                  continuation_frame_state, effect, control);
   return Replace(result);
 }
 
@@ -7813,7 +7849,7 @@ Reduction JSCallReducer::ReduceCollectionIteratorPrototypeNext(
     Node* eloop = effect =
         graph()->NewNode(common()->EffectPhi(2), effect, effect, loop);
     Node* terminate = graph()->NewNode(common()->Terminate(), eloop, loop);
-    NodeProperties::MergeControlToEnd(graph(), common(), terminate);
+    MergeControlToEnd(graph(), common(), terminate);
 
     // Check if reached the final table of the {receiver}.
     Node* table = effect = graph()->NewNode(
@@ -7909,7 +7945,7 @@ Reduction JSCallReducer::ReduceCollectionIteratorPrototypeNext(
     Node* eloop =
         graph()->NewNode(common()->EffectPhi(2), effect, effect, loop);
     Node* terminate = graph()->NewNode(common()->Terminate(), eloop, loop);
-    NodeProperties::MergeControlToEnd(graph(), common(), terminate);
+    MergeControlToEnd(graph(), common(), terminate);
     Node* iloop = graph()->NewNode(
         common()->Phi(MachineRepresentation::kTagged, 2), index, index, loop);
 
@@ -8515,13 +8551,8 @@ Reduction JSCallReducer::ReduceNumberConstructor(Node* node) {
   // Create the artificial frame state in the middle of the Number constructor.
   SharedFunctionInfoRef shared_info =
       native_context().number_function(broker()).shared(broker());
-  Node* stack_parameters[] = {receiver};
-  int stack_parameter_count = arraysize(stack_parameters);
-  Node* continuation_frame_state =
-      CreateJavaScriptBuiltinContinuationFrameState(
-          jsgraph(), shared_info, Builtin::kGenericLazyDeoptContinuation,
-          target, context, stack_parameters, stack_parameter_count, frame_state,
-          ContinuationFrameStateMode::LAZY);
+  Node* continuation_frame_state = CreateGenericLazyDeoptContinuationFrameState(
+      jsgraph(), shared_info, target, context, receiver, frame_state);
 
   // Convert the {value} to a Number.
   NodeProperties::ReplaceValueInputs(node, value);
@@ -8548,13 +8579,8 @@ Reduction JSCallReducer::ReduceBigIntConstructor(Node* node) {
   // Create the artificial frame state in the middle of the BigInt constructor.
   SharedFunctionInfoRef shared_info =
       native_context().bigint_function(broker()).shared(broker());
-  Node* stack_parameters[] = {receiver};
-  int stack_parameter_count = arraysize(stack_parameters);
-  Node* continuation_frame_state =
-      CreateJavaScriptBuiltinContinuationFrameState(
-          jsgraph(), shared_info, Builtin::kGenericLazyDeoptContinuation,
-          target, context, stack_parameters, stack_parameter_count, frame_state,
-          ContinuationFrameStateMode::LAZY);
+  Node* continuation_frame_state = CreateGenericLazyDeoptContinuationFrameState(
+      jsgraph(), shared_info, target, context, receiver, frame_state);
 
   // Convert the {value} to a BigInt.
   NodeProperties::ReplaceValueInputs(node, value);

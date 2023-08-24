@@ -19,6 +19,7 @@ namespace v8 {
 namespace internal {
 
 // Forward declarations.
+class Boolean;
 enum ElementsKind : uint8_t;
 template <typename T>
 class Handle;
@@ -34,6 +35,8 @@ class ReadOnlyHeap;
 class RootVisitor;
 class String;
 class Symbol;
+template <typename T>
+class Tagged;
 
 #define STRONG_READ_ONLY_HEAP_NUMBER_ROOT_LIST(V)         \
   /* Special numbers */                                   \
@@ -65,11 +68,11 @@ class Symbol;
   V(Map, one_pointer_filler_map, OnePointerFillerMap)                          \
   V(Map, two_pointer_filler_map, TwoPointerFillerMap)                          \
   V(Oddball, uninitialized_value, UninitializedValue)                          \
-  V(Oddball, undefined_value, UndefinedValue)                                  \
+  V(Undefined, undefined_value, UndefinedValue)                                \
   V(Hole, the_hole_value, TheHoleValue)                                        \
-  V(Oddball, null_value, NullValue)                                            \
-  V(Oddball, true_value, TrueValue)                                            \
-  V(Oddball, false_value, FalseValue)                                          \
+  V(Null, null_value, NullValue)                                               \
+  V(True, true_value, TrueValue)                                               \
+  V(False, false_value, FalseValue)                                            \
   EXTRA_IMPORTANT_INTERNALIZED_STRING_ROOT_LIST(V)                             \
   V(Map, meta_map, MetaMap)                                                    \
   V(Map, byte_array_map, ByteArrayMap)                                         \
@@ -78,8 +81,8 @@ class Symbol;
   V(Map, fixed_double_array_map, FixedDoubleArrayMap)                          \
   V(Map, hash_table_map, HashTableMap)                                         \
   V(Map, symbol_map, SymbolMap)                                                \
-  V(Map, one_byte_string_map, OneByteStringMap)                                \
-  V(Map, one_byte_internalized_string_map, OneByteInternalizedStringMap)       \
+  V(Map, seq_one_byte_string_map, SeqOneByteStringMap)                         \
+  V(Map, internalized_one_byte_string_map, InternalizedOneByteStringMap)       \
   V(Map, scope_info_map, ScopeInfoMap)                                         \
   V(Map, shared_function_info_map, SharedFunctionInfoMap)                      \
   V(Map, instruction_stream_map, InstructionStreamMap)                         \
@@ -101,6 +104,8 @@ class Symbol;
   V(Oddball, termination_exception, TerminationException)                      \
   V(Oddball, optimized_out, OptimizedOut)                                      \
   V(Oddball, stale_register, StaleRegister)                                    \
+  /* Holes */                                                                  \
+  V(Hole, property_cell_hole_value, PropertyCellHoleValue)                     \
   /* Maps */                                                                   \
   V(Map, script_context_table_map, ScriptContextTableMap)                      \
   V(Map, closure_feedback_cell_array_map, ClosureFeedbackCellArrayMap)         \
@@ -152,36 +157,41 @@ class Symbol;
   V(Map, ephemeron_hash_table_map, EphemeronHashTableMap)                      \
   V(Map, embedder_data_array_map, EmbedderDataArrayMap)                        \
   V(Map, weak_cell_map, WeakCellMap)                                           \
+  V(Map, external_pointer_array_map, ExternalPointerArrayMap)                  \
   /* String maps */                                                            \
-  V(Map, string_map, StringMap)                                                \
+  V(Map, seq_two_byte_string_map, SeqTwoByteStringMap)                         \
+  V(Map, cons_two_byte_string_map, ConsTwoByteStringMap)                       \
   V(Map, cons_one_byte_string_map, ConsOneByteStringMap)                       \
-  V(Map, cons_string_map, ConsStringMap)                                       \
-  V(Map, thin_string_map, ThinStringMap)                                       \
-  V(Map, sliced_string_map, SlicedStringMap)                                   \
+  V(Map, thin_two_byte_string_map, ThinTwoByteStringMap)                       \
+  V(Map, thin_one_byte_string_map, ThinOneByteStringMap)                       \
+  V(Map, sliced_two_byte_string_map, SlicedTwoByteStringMap)                   \
   V(Map, sliced_one_byte_string_map, SlicedOneByteStringMap)                   \
-  V(Map, external_string_map, ExternalStringMap)                               \
+  V(Map, external_two_byte_string_map, ExternalTwoByteStringMap)               \
   V(Map, external_one_byte_string_map, ExternalOneByteStringMap)               \
-  V(Map, uncached_external_string_map, UncachedExternalStringMap)              \
-  V(Map, internalized_string_map, InternalizedStringMap)                       \
-  V(Map, external_internalized_string_map, ExternalInternalizedStringMap)      \
-  V(Map, external_one_byte_internalized_string_map,                            \
-    ExternalOneByteInternalizedStringMap)                                      \
-  V(Map, uncached_external_internalized_string_map,                            \
-    UncachedExternalInternalizedStringMap)                                     \
-  V(Map, uncached_external_one_byte_internalized_string_map,                   \
-    UncachedExternalOneByteInternalizedStringMap)                              \
+  V(Map, internalized_two_byte_string_map, InternalizedTwoByteStringMap)       \
+  V(Map, external_internalized_two_byte_string_map,                            \
+    ExternalInternalizedTwoByteStringMap)                                      \
+  V(Map, external_internalized_one_byte_string_map,                            \
+    ExternalInternalizedOneByteStringMap)                                      \
+  V(Map, uncached_external_internalized_two_byte_string_map,                   \
+    UncachedExternalInternalizedTwoByteStringMap)                              \
+  V(Map, uncached_external_internalized_one_byte_string_map,                   \
+    UncachedExternalInternalizedOneByteStringMap)                              \
+  V(Map, uncached_external_two_byte_string_map,                                \
+    UncachedExternalTwoByteStringMap)                                          \
   V(Map, uncached_external_one_byte_string_map,                                \
     UncachedExternalOneByteStringMap)                                          \
-  V(Map, shared_one_byte_string_map, SharedOneByteStringMap)                   \
-  V(Map, shared_string_map, SharedStringMap)                                   \
+  V(Map, shared_seq_one_byte_string_map, SharedSeqOneByteStringMap)            \
+  V(Map, shared_seq_two_byte_string_map, SharedSeqTwoByteStringMap)            \
   V(Map, shared_external_one_byte_string_map, SharedExternalOneByteStringMap)  \
-  V(Map, shared_external_string_map, SharedExternalStringMap)                  \
+  V(Map, shared_external_two_byte_string_map, SharedExternalTwoByteStringMap)  \
   V(Map, shared_uncached_external_one_byte_string_map,                         \
     SharedUncachedExternalOneByteStringMap)                                    \
-  V(Map, shared_uncached_external_string_map, SharedUncachedExternalStringMap) \
+  V(Map, shared_uncached_external_two_byte_string_map,                         \
+    SharedUncachedExternalTwoByteStringMap)                                    \
   /* Oddball maps */                                                           \
   V(Map, undefined_map, UndefinedMap)                                          \
-  V(Map, the_hole_map, TheHoleMap)                                             \
+  V(Map, hole_map, HoleMap)                                                    \
   V(Map, null_map, NullMap)                                                    \
   V(Map, boolean_map, BooleanMap)                                              \
   V(Map, uninitialized_map, UninitializedMap)                                  \
@@ -200,6 +210,8 @@ class Symbol;
   V(EnumCache, empty_enum_cache, EmptyEnumCache)                               \
   V(PropertyArray, empty_property_array, EmptyPropertyArray)                   \
   V(ByteArray, empty_byte_array, EmptyByteArray)                               \
+  V(ExternalPointerArray, empty_external_pointer_array,                        \
+    EmptyExternalPointerArray)                                                 \
   V(ObjectBoilerplateDescription, empty_object_boilerplate_description,        \
     EmptyObjectBoilerplateDescription)                                         \
   V(ArrayBoilerplateDescription, empty_array_boilerplate_description,          \
@@ -253,6 +265,7 @@ class Symbol;
   V(PropertyCell, array_constructor_protector, ArrayConstructorProtector)      \
   V(PropertyCell, no_elements_protector, NoElementsProtector)                  \
   V(PropertyCell, mega_dom_protector, MegaDOMProtector)                        \
+  V(PropertyCell, no_profiling_protector, NoProfilingProtector)                \
   V(PropertyCell, is_concat_spreadable_protector, IsConcatSpreadableProtector) \
   V(PropertyCell, array_species_protector, ArraySpeciesProtector)              \
   V(PropertyCell, typed_array_species_protector, TypedArraySpeciesProtector)   \
@@ -294,10 +307,6 @@ class Symbol;
     AsyncGeneratorReturnClosedResolveSharedFun)                                \
   V(SharedFunctionInfo, async_iterator_value_unwrap_shared_fun,                \
     AsyncIteratorValueUnwrapSharedFun)                                         \
-  V(FunctionTemplateInfo, error_stack_getter_fun_template,                     \
-    ErrorStackGetterSharedFun)                                                 \
-  V(FunctionTemplateInfo, error_stack_setter_fun_template,                     \
-    ErrorStackSetterSharedFun)                                                 \
   V(SharedFunctionInfo, promise_all_resolve_element_shared_fun,                \
     PromiseAllResolveElementSharedFun)                                         \
   V(SharedFunctionInfo, promise_all_settled_resolve_element_shared_fun,        \
@@ -359,7 +368,12 @@ class Symbol;
   IF_WASM(V, HeapObject, active_continuation, ActiveContinuation)           \
   IF_WASM(V, HeapObject, active_suspender, ActiveSuspender)                 \
   IF_WASM(V, WeakArrayList, js_to_wasm_wrappers, JSToWasmWrappers)          \
-  IF_WASM(V, WeakArrayList, wasm_canonical_rtts, WasmCanonicalRtts)
+  IF_WASM(V, WeakArrayList, wasm_canonical_rtts, WasmCanonicalRtts)         \
+  /* Internal SharedFunctionInfos */                                        \
+  V(FunctionTemplateInfo, error_stack_getter_fun_template,                  \
+    ErrorStackGetterSharedFun)                                              \
+  V(FunctionTemplateInfo, error_stack_setter_fun_template,                  \
+    ErrorStackSetterSharedFun)
 
 // Entries in this list are limited to Smis and are not visited during GC.
 #define SMI_ROOT_LIST(V)                                                       \
@@ -420,9 +434,9 @@ class Symbol;
   NAME_FOR_PROTECTOR_ROOT_LIST(V)  \
   DATA_HANDLER_MAPS_LIST(V)
 
-#define MUTABLE_ROOT_LIST(V)                \
-  STRONG_MUTABLE_IMMOVABLE_ROOT_LIST(V)     \
-  STRONG_MUTABLE_MOVABLE_ROOT_LIST(V)       \
+#define MUTABLE_ROOT_LIST(V)            \
+  STRONG_MUTABLE_IMMOVABLE_ROOT_LIST(V) \
+  STRONG_MUTABLE_MOVABLE_ROOT_LIST(V)   \
   SMI_ROOT_LIST(V)
 
 #define ROOT_LIST(V)     \
@@ -649,6 +663,9 @@ class ReadOnlyRoots {
 #ifdef DEBUG
   void VerifyNameForProtectors();
 #endif
+
+  V8_INLINE Tagged<Boolean> boolean_value(bool value) const;
+  V8_INLINE Handle<Boolean> boolean_value_handle(bool value) const;
 
   // Returns heap number with identical value if it already exists or the empty
   // handle otherwise.

@@ -6,6 +6,7 @@
 #define V8_OBJECTS_TAGGED_IMPL_H_
 
 #include "include/v8-internal.h"
+#include "src/base/macros.h"
 #include "src/common/checks.h"
 #include "src/common/globals.h"
 
@@ -50,7 +51,7 @@ class TaggedImpl {
   explicit constexpr TaggedImpl(StorageType ptr) : ptr_(ptr) {}
 
   // Make clang on Linux catch what MSVC complains about on Windows:
-  operator bool() const = delete;
+  explicit operator bool() const = delete;
 
   // Don't use this operator for comparing with stale or invalid pointers
   // because CheckObjectComparisonAllowed() might crash when trying to access
@@ -210,28 +211,40 @@ class TaggedImpl {
     return T::cast(Object(ptr_));
   }
 
-  // Prints this object without details.
-  void ShortPrint(FILE* out = stdout);
-
-  // Prints this object without details to a message accumulator.
-  void ShortPrint(StringStream* accumulator);
-
-  void ShortPrint(std::ostream& os);
-
-#ifdef OBJECT_PRINT
-  void Print();
-  void Print(std::ostream& os);
-#else
-  void Print() { ShortPrint(); }
-  void Print(std::ostream& os) { ShortPrint(os); }
-#endif
-
  private:
   friend class CompressedObjectSlot;
   friend class FullObjectSlot;
 
   StorageType ptr_;
 };
+
+// Prints this object without details.
+template <HeapObjectReferenceType kRefType, typename StorageType>
+void ShortPrint(TaggedImpl<kRefType, StorageType> ptr, FILE* out = stdout);
+
+// Prints this object without details to a message accumulator.
+template <HeapObjectReferenceType kRefType, typename StorageType>
+void ShortPrint(TaggedImpl<kRefType, StorageType> ptr,
+                StringStream* accumulator);
+
+template <HeapObjectReferenceType kRefType, typename StorageType>
+void ShortPrint(TaggedImpl<kRefType, StorageType> ptr, std::ostream& os);
+
+#ifdef OBJECT_PRINT
+template <HeapObjectReferenceType kRefType, typename StorageType>
+void Print(TaggedImpl<kRefType, StorageType> ptr);
+template <HeapObjectReferenceType kRefType, typename StorageType>
+void Print(TaggedImpl<kRefType, StorageType> ptr, std::ostream& os);
+#else
+template <HeapObjectReferenceType kRefType, typename StorageType>
+void Print(TaggedImpl<kRefType, StorageType> ptr) {
+  ShortPrint(ptr);
+}
+template <HeapObjectReferenceType kRefType, typename StorageType>
+void Print(TaggedImpl<kRefType, StorageType> ptr, std::ostream& os) {
+  ShortPrint(ptr, os);
+}
+#endif
 
 }  // namespace internal
 }  // namespace v8

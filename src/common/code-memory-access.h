@@ -85,10 +85,19 @@ class V8_EXPORT ThreadIsolation {
   static bool Enabled();
   static void Initialize(ThreadIsolatedAllocator* allocator);
 
+  enum class AllocationSource {
+    kJavaScript,
+    kWasm,
+  };
+
   // Register a new JIT region.
-  static void RegisterJitPage(Address address, size_t size);
+  static void RegisterJitPage(
+      Address address, size_t size,
+      AllocationSource source = AllocationSource::kJavaScript);
   // Unregister a JIT region that is about to be unmpapped.
-  static void UnregisterJitPage(Address address, size_t size);
+  static void UnregisterJitPage(
+      Address address, size_t size,
+      AllocationSource source = AllocationSource::kJavaScript);
   // Make a page executable. Needs to be registered first. Should only be called
   // if Enabled() is true.
   V8_NODISCARD static bool MakeExecutable(Address address, size_t size);
@@ -100,9 +109,16 @@ class V8_EXPORT ThreadIsolation {
   static void RegisterWasmAllocation(Address addr, size_t size);
   static void UnregisterWasmAllocation(Address addr, size_t size);
 
-  // For testing.
-  static void UnregisterAllocationsInPageExcept(
+  // Check for a potential dead lock in case we want to lookup the jit
+  // allocation from inside a signal handler.
+  static bool CanLookupStartOfJitAllocationAt(Address inner_pointer);
+  static base::Optional<Address> StartOfJitAllocationAt(Address inner_pointer);
+
+  // Public for testing. Please use the wasm/js specific functions above.
+  static void UnregisterJitAllocationsInPageExceptForTesting(
       Address page, size_t page_size, const std::vector<Address>& keep);
+  static void RegisterJitAllocationForTesting(Address obj, size_t size);
+  static void UnregisterJitAllocationForTesting(Address addr, size_t size);
 
 #if V8_HAS_PKU_JIT_WRITE_PROTECT
   static int pkey() { return trusted_data_.pkey; }
@@ -126,12 +142,21 @@ class V8_EXPORT ThreadIsolation {
     template <class U>
     explicit StlAllocator(const StlAllocator<U>&) noexcept {}
 
-    static value_type* allocate(size_t n) {
-      return reinterpret_cast<value_type*>(
-          ThreadIsolation::allocator()->Allocate(n * sizeof(value_type)));
+    value_type* allocate(size_t n) {
+      if (Enabled()) {
+        return static_cast<value_type*>(
+            ThreadIsolation::allocator()->Allocate(n * sizeof(value_type)));
+      } else {
+        return static_cast<value_type*>(::operator new(n * sizeof(T)));
+      }
     }
-    static void deallocate(value_type* ptr, size_t n) {
-      ThreadIsolation::allocator()->Free(ptr);
+
+    void deallocate(value_type* ptr, size_t n) {
+      if (Enabled()) {
+        ThreadIsolation::allocator()->Free(ptr);
+      } else {
+        ::operator delete(ptr);
+      }
     }
   };
 
@@ -162,6 +187,9 @@ class V8_EXPORT ThreadIsolation {
     void UnregisterAllocation(base::Address addr);
     void UnregisterAllocationsExcept(base::Address start, size_t size,
                                      const std::vector<base::Address>& addr);
+
+    base::Address StartOfAllocationAt(base::Address inner_pointer);
+
     bool Empty() const;
     void Shrink(class JitPage* tail);
     void Expand(size_t offset);
@@ -190,6 +218,8 @@ class V8_EXPORT ThreadIsolation {
     size_t size_;
 
     friend class JitPageReference;
+    // Allow CanLookupStartOfJitAllocationAt to check if the mutex is locked.
+    friend bool ThreadIsolation::CanLookupStartOfJitAllocationAt(Address);
   };
 
  private:
@@ -241,8 +271,11 @@ class V8_EXPORT ThreadIsolation {
   static void RegisterJitAllocation(Address obj, size_t size);
 
   static JitPageReference LookupJitPage(Address addr, size_t size);
+  static base::Optional<JitPageReference> TryLookupJitPage(Address addr,
+                                                           size_t size);
   // The caller needs to hold a lock of the jit_pages_mutex_
-  static JitPageReference LookupJitPageLocked(Address addr, size_t size);
+  static base::Optional<JitPageReference> TryLookupJitPageLocked(Address addr,
+                                                                 size_t size);
 
   template <class T>
   friend struct StlAllocator;

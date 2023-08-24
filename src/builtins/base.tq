@@ -87,8 +87,8 @@ type PropertyKey = String|PublicSymbol;
 // https://tc39.es/ecma262/#sec-primitive-value.
 type JSPrimitive = Numeric|String|Symbol|Boolean|Null|Undefined;
 
-// A user-exposed JavaScript value, as opposed to V8-internal values like
-// TheHole or FixedArray.
+// A user-exposed JavaScript value, as opposed to V8-internal values like Holes
+// or a FixedArray.
 type JSAny = JSReceiver|JSPrimitive;
 
 type JSAnyNotNumeric = String|Symbol|Boolean|Null|Undefined|JSReceiver;
@@ -232,6 +232,11 @@ type RawPtr generates 'TNode<RawPtrT>' constexpr 'Address';
 type RawPtr<To: type> extends RawPtr;
 type ExternalPointer
     generates 'TNode<ExternalPointerT>' constexpr 'ExternalPointer_t';
+type IndirectPointer
+    generates 'TNode<IndirectPointerHandleT>'
+    constexpr 'IndirectPointerHandle';
+// TODO(saelo): implement accessors and type checkers for these fields.
+type IndirectPointer<To: type> extends IndirectPointer;
 extern class InstructionStream extends HeapObject;
 type BuiltinPtr extends Smi generates 'TNode<BuiltinPtr>';
 
@@ -354,7 +359,8 @@ constexpr 'CodeStubAssembler::AllocationFlag' {
 extern enum SlackTrackingMode
 constexpr 'CodeStubAssembler::SlackTrackingMode' {
   kWithSlackTracking,
-  kNoSlackTracking
+  kNoSlackTracking,
+  kDontInitializeInObjectProperties
 }
 
 extern enum ExtractFixedArrayFlag
@@ -529,14 +535,9 @@ const kWasmArrayHeaderSize:
 const kHeapObjectHeaderSize:
     constexpr int32 generates 'HeapObject::kHeaderSize';
 
-type TheHole extends HeapObject;
-type Null extends Oddball;
-type Undefined extends Oddball;
-type True extends Oddball;
-type False extends Oddball;
+type TheHole extends Hole;
 type Exception extends Oddball;
 type EmptyString extends String;
-type Boolean = True|False;
 
 type NumberOrUndefined = Number|Undefined;
 
@@ -544,6 +545,7 @@ extern macro DefaultStringConstant(): String;
 extern macro EmptyStringConstant(): EmptyString;
 extern macro ErrorsStringConstant(): String;
 extern macro FalseConstant(): False;
+extern macro GetStringConstant(): String;
 extern macro HasStringConstant(): String;
 extern macro Int32FalseConstant(): bool;
 extern macro Int32TrueConstant(): bool;
@@ -637,6 +639,7 @@ extern macro Print(constexpr string): void;
 extern macro Print(constexpr string, Object): void;
 extern macro Print(Object): void;
 extern macro Print(constexpr string, uintptr): void;
+extern macro Print(constexpr string, float64): void;
 extern macro PrintErr(constexpr string): void;
 extern macro PrintErr(constexpr string, Object): void;
 extern macro PrintErr(Object): void;
@@ -709,7 +712,8 @@ extern transitioning macro ToThisValue(implicit context: Context)(
     JSAny, constexpr PrimitiveType, constexpr string): JSAny;
 extern transitioning macro GetProperty(implicit context: Context)(
     JSAny, JSAny): JSAny;
-extern macro GetInterestingProperty(Context, JSReceiver, Symbol): JSAny
+extern macro IsInterestingProperty(Name): bool;
+extern macro GetInterestingProperty(Context, JSReceiver, Name): JSAny
     labels NotFound;
 extern transitioning builtin SetProperty(implicit context: Context)(
     JSAny, JSAny, JSAny): JSAny;
@@ -781,7 +785,8 @@ extern macro SpeciesConstructor(implicit context: Context)(
 extern macro ConstructorBuiltinsAssembler::IsDictionaryMap(Map): bool;
 extern macro CodeStubAssembler::AllocateNameDictionary(constexpr int32):
     NameDictionary;
-extern macro CodeStubAssembler::AllocateNameDictionary(intptr): NameDictionary;
+extern macro CodeStubAssembler::AllocateNameDictionary(
+    intptr, constexpr AllocationFlag): NameDictionary;
 extern macro CodeStubAssembler::AllocateOrderedNameDictionary(constexpr int32):
     OrderedNameDictionary;
 extern macro CodeStubAssembler::AllocateSwissNameDictionary(constexpr int32):
@@ -935,6 +940,7 @@ extern operator '>' macro Float64GreaterThan(float64, float64): bool;
 extern operator '>=' macro Float64GreaterThanOrEqual(float64, float64): bool;
 extern operator '<' macro Float64LessThan(float64, float64): bool;
 extern operator '<=' macro Float64LessThanOrEqual(float64, float64): bool;
+extern macro Float64AlmostEqual(float64, float64, constexpr float64): bool;
 
 extern macro BranchIfNumberEqual(Number, Number): never
     labels Taken, NotTaken;
@@ -970,12 +976,11 @@ macro Float64IsNaN(n: float64): bool {
 
 // The type of all tagged values that can safely be compared with TaggedEqual.
 @if(V8_ENABLE_WEBASSEMBLY)
-type TaggedWithIdentity =
-    JSReceiver | FixedArrayBase | Oddball | TheHole | Map | WeakCell | Context |
-    EmptyString | Symbol | WasmInternalFunction | WasmNull;
+type TaggedWithIdentity = JSReceiver | FixedArrayBase | Oddball | Hole | Map |
+    WeakCell | Context | EmptyString | Symbol | WasmInternalFunction | WasmNull;
 @ifnot(V8_ENABLE_WEBASSEMBLY)
-type TaggedWithIdentity = JSReceiver | FixedArrayBase | Oddball | TheHole |
-    Map | WeakCell | Context | EmptyString | Symbol;
+type TaggedWithIdentity = JSReceiver | FixedArrayBase | Oddball | Hole | Map |
+    WeakCell | Context | EmptyString | Symbol;
 
 extern operator '==' macro TaggedEqual(TaggedWithIdentity, Object): bool;
 extern operator '==' macro TaggedEqual(Object, TaggedWithIdentity): bool;
@@ -1321,6 +1326,7 @@ extern macro BitcastWordToTaggedSigned(intptr): Smi;
 extern macro BitcastWordToTaggedSigned(uintptr): Smi;
 extern macro BitcastWordToTagged(intptr): Object;
 extern macro BitcastWordToTagged(uintptr): Object;
+extern macro BitcastWordToTagged(RawPtr): Object;
 extern macro BitcastTaggedToWord(Object): intptr;
 extern macro BitcastTaggedToWordForTagAndSmiBits(Tagged): intptr;
 
@@ -1330,8 +1336,8 @@ extern macro FixedCOWArrayMapConstant(): Map;
 extern macro EmptyByteArrayConstant(): ByteArray;
 extern macro EmptyFixedArrayConstant(): EmptyFixedArray;
 extern macro PromiseCapabilityMapConstant(): Map;
-extern macro OneByteStringMapConstant(): Map;
-extern macro StringMapConstant(): Map;
+extern macro SeqOneByteStringMapConstant(): Map;
+extern macro SeqTwoByteStringMapConstant(): Map;
 
 const kFixedArrayMap: Map = FixedArrayMapConstant();
 const kFixedDoubleArrayMap: Map = FixedDoubleArrayMapConstant();
@@ -1340,9 +1346,9 @@ const kEmptyByteArray: ByteArray = EmptyByteArrayConstant();
 const kEmptyFixedArray: EmptyFixedArray = EmptyFixedArrayConstant();
 const kPromiseCapabilityMap: Map = PromiseCapabilityMapConstant();
 // The map of a non-internalized internal SeqOneByteString.
-const kOneByteStringMap: Map = OneByteStringMapConstant();
+const kSeqOneByteStringMap: Map = SeqOneByteStringMapConstant();
 // The map of a non-internalized internal SeqTwoByteString.
-const kStringMap: Map = StringMapConstant();
+const kSeqTwoByteStringMap: Map = SeqTwoByteStringMapConstant();
 
 macro OutOfBounds<T: type, X: type>(index: T, length: X): bool {
   return UintPtrGreaterThanOrEqual(
@@ -1708,6 +1714,9 @@ transitioning macro GetLengthProperty(implicit context: Context)(o: JSAny):
 transitioning macro GetMethod(implicit context: Context)(
     o: JSAny, name: AnyName): Callable labels IfNullOrUndefined,
     IfMethodNotCallable(JSAny) {
+  // Use GetInterestingMethod - a version of GetMethod optimized for interesting
+  // properties.
+  dcheck(!IsInterestingProperty(name));
   const value = GetProperty(o, name);
   // TODO(v8:9933): Consider checking for null/undefined after checking for
   // callable because the latter seems to be more common.
@@ -1718,6 +1727,9 @@ transitioning macro GetMethod(implicit context: Context)(
 
 transitioning macro GetMethod(implicit context: Context)(
     o: JSAny, name: String): Callable labels IfNullOrUndefined {
+  // Use GetInterestingMethod - a version of GetMethod optimized for interesting
+  // properties.
+  dcheck(!IsInterestingProperty(name));
   try {
     return GetMethod(o, name) otherwise IfNullOrUndefined, IfMethodNotCallable;
   } label IfMethodNotCallable(value: JSAny) deferred {
@@ -1732,11 +1744,28 @@ transitioning macro GetMethod(implicit context: Context)(
 
 transitioning macro GetMethod(implicit context: Context)(
     o: JSAny, symbol: Symbol): Callable labels IfNullOrUndefined {
+  // Use GetInterestingMethod - a version of GetMethod optimized for interesting
+  // properties.
+  dcheck(!IsInterestingProperty(symbol));
   const value = GetProperty(o, symbol);
   if (value == Undefined || value == Null) goto IfNullOrUndefined;
   return Cast<Callable>(value)
       otherwise ThrowTypeError(
       MessageTemplate::kPropertyNotFunction, value, symbol, o);
+}
+
+transitioning macro GetInterestingMethod(implicit context: Context)(
+    o: JSReceiver, name: String): Callable labels IfNullOrUndefined {
+  dcheck(IsInterestingProperty(name));
+  try {
+    const value = GetInterestingProperty(context, o, name)
+        otherwise goto IfNullOrUndefined;
+    if (value == Undefined || value == Null) goto IfNullOrUndefined;
+    return Cast<Callable>(value)
+        otherwise goto IfMethodNotCallable(value);
+  } label IfMethodNotCallable(value: JSAny) deferred {
+    ThrowTypeError(MessageTemplate::kPropertyNotFunction, value, name, o);
+  }
 }
 
 extern macro IsOneByteStringInstanceType(InstanceType): bool;
@@ -2005,29 +2034,6 @@ macro NumberIsSomeInfinity(n: Number): bool {
       return Float64IsSomeInfinity(Convert<float64>(hn));
     }
   }
-}
-
-// Assert that the objects satisfy SameValue or are both the hole.
-builtin CheckSameObject(implicit context: Context)(
-    lhs: Object, rhs: Object): Undefined {
-  typeswitch (lhs) {
-    case (TheHole): {
-      if (rhs == TheHole) return Undefined;
-    }
-    case (a: JSAny): {
-      typeswitch (rhs) {
-        case (b: JSAny): {
-          if (SameValue(a, b)) return Undefined;
-        }
-        case (Object): {
-        }
-      }
-    }
-    case (Object): {
-    }
-  }
-  Print('Distinct or unexpected values in CheckSameObject');
-  unreachable;
 }
 
 macro ReplaceTheHoleWithUndefined(o: JSAny|TheHole): JSAny {

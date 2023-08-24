@@ -73,7 +73,9 @@ class DecompressedUseMarkingProcessor {
 
   template <typename NodeT>
   ProcessResult Process(NodeT* node, const ProcessingState& state) {
+#ifdef V8_COMPRESS_POINTERS
     node->MarkTaggedInputsAsDecompressing();
+#endif
     return ProcessResult::kContinue;
   }
 };
@@ -132,13 +134,8 @@ class MaxCallDepthProcessor {
             deopt_frame->as_interpreted().unit().register_count());
         return info.frame_size_in_bytes();
       }
-      case DeoptFrame::FrameType::kConstructStubFrame: {
-        int arg_count = deopt_frame->as_construct_stub()
-                            .arguments_without_receiver()
-                            .length() +
-                        1;
-        auto info = ConstructStubFrameInfo::Conservative(arg_count);
-        return info.frame_size_in_bytes();
+      case DeoptFrame::FrameType::kConstructInvokeStubFrame: {
+        return FastConstructStubFrameInfo::Conservative().frame_size_in_bytes();
       }
       case DeoptFrame::FrameType::kInlinedArgumentsFrame: {
         return std::max(
@@ -275,7 +272,7 @@ class UseMarkingProcessor {
       // TODO(leszeks): We only need to extend the lifetime in one outermost
       // loop, allow nodes to be "moved" between lifetime extensions.
       base::Vector<Input> used_node_inputs =
-          compilation_info_->zone()->NewVector<Input>(
+          compilation_info_->zone()->AllocateVector<Input>(
               loop_used_nodes.used_nodes.size());
       int i = 0;
       for (auto& [used_node, info] : loop_used_nodes.used_nodes) {
@@ -399,21 +396,28 @@ bool MaglevCompiler::Compile(LocalIsolate* local_isolate,
       BytecodeArray::Disassemble(top_level_unit->bytecode().object(),
                                  std::cout);
       if (v8_flags.maglev_print_feedback) {
-        top_level_unit->feedback().object()->Print(std::cout);
+        Print(*top_level_unit->feedback().object(), std::cout);
       }
     }
 
     MaglevGraphBuilder graph_builder(
         local_isolate, compilation_info->toplevel_compilation_unit(), graph);
 
-    graph_builder.Build();
+    {
+      TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
+                   "V8.Maglev.GraphBuilding");
+      graph_builder.Build();
 
-    if (v8_flags.print_maglev_graphs) {
-      std::cout << "\nAfter graph buiding" << std::endl;
-      PrintGraph(std::cout, compilation_info, graph);
+      if (v8_flags.print_maglev_graphs) {
+        std::cout << "\nAfter graph buiding" << std::endl;
+        PrintGraph(std::cout, compilation_info, graph);
+      }
     }
 
     if (v8_flags.maglev_untagged_phis) {
+      TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
+                   "V8.Maglev.PhiUntagging");
+
       GraphProcessor<MaglevPhiRepresentationSelector> representation_selector(
           &graph_builder);
       representation_selector.ProcessGraph(graph);
@@ -437,6 +441,8 @@ bool MaglevCompiler::Compile(LocalIsolate* local_isolate,
     //   - Collect input/output location constraints
     //   - Find the maximum number of stack arguments passed to calls
     //   - Collect use information, for SSA liveness and next-use distance.
+    TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
+                 "V8.Maglev.NodeProcessing");
     GraphMultiProcessor<ValueLocationConstraintProcessor, MaxCallDepthProcessor,
                         UseMarkingProcessor, DecompressedUseMarkingProcessor>
         processor(UseMarkingProcessor{compilation_info});
@@ -449,15 +455,21 @@ bool MaglevCompiler::Compile(LocalIsolate* local_isolate,
     PrintGraph(std::cout, compilation_info, graph);
   }
 
-  StraightForwardRegisterAllocator allocator(compilation_info, graph);
+  {
+    TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
+                 "V8.Maglev.RegisterAllocation");
+    StraightForwardRegisterAllocator allocator(compilation_info, graph);
 
-  if (v8_flags.print_maglev_graph || v8_flags.print_maglev_graphs) {
-    UnparkedScopeIfOnBackground unparked_scope(local_isolate->heap());
-    std::cout << "After register allocation" << std::endl;
-    PrintGraph(std::cout, compilation_info, graph);
+    if (v8_flags.print_maglev_graph || v8_flags.print_maglev_graphs) {
+      UnparkedScopeIfOnBackground unparked_scope(local_isolate->heap());
+      std::cout << "After register allocation" << std::endl;
+      PrintGraph(std::cout, compilation_info, graph);
+    }
   }
 
   {
+    TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
+                 "V8.Maglev.CodeAssembly");
     UnparkedScopeIfOnBackground unparked_scope(local_isolate->heap());
     std::unique_ptr<MaglevCodeGenerator> code_generator =
         std::make_unique<MaglevCodeGenerator>(local_isolate, compilation_info,
@@ -486,23 +498,33 @@ MaybeHandle<Code> MaglevCompiler::GenerateCode(
   DCHECK_NOT_NULL(code_generator);
 
   Handle<Code> code;
-  if (!code_generator->Generate(isolate).ToHandle(&code)) {
-    compilation_info->toplevel_compilation_unit()
-        ->shared_function_info()
-        .object()
-        ->set_maglev_compilation_failed(true);
-    return {};
+  {
+    TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
+                 "V8.Maglev.CodeGeneration");
+    if (compilation_info->is_detached() ||
+        !code_generator->Generate(isolate).ToHandle(&code)) {
+      compilation_info->toplevel_compilation_unit()
+          ->shared_function_info()
+          .object()
+          ->set_maglev_compilation_failed(true);
+      return {};
+    }
   }
 
-  if (!compilation_info->broker()->dependencies()->Commit(code)) {
-    // Don't `set_maglev_compilation_failed` s.t. we may reattempt compilation.
-    // TODO(v8:7700): Make this more robust, i.e.: don't recompile endlessly,
-    // and possibly attempt to recompile as early as possible.
-    return {};
+  {
+    TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
+                 "V8.Maglev.CommittingDependencies");
+    if (!compilation_info->broker()->dependencies()->Commit(code)) {
+      // Don't `set_maglev_compilation_failed` s.t. we may reattempt
+      // compilation.
+      // TODO(v8:7700): Make this more robust, i.e.: don't recompile endlessly,
+      // and possibly attempt to recompile as early as possible.
+      return {};
+    }
   }
 
   if (v8_flags.print_maglev_code) {
-    code->Print();
+    Print(*code);
   }
 
   return code;

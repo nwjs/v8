@@ -114,20 +114,36 @@ V8_EXPORT_PRIVATE AtomicOpParameters AtomicOpParametersOf(Operator const*)
     V8_WARN_UNUSED_RESULT;
 
 enum class LoadTransformation {
+  // 128-bit LoadSplats must be first.
   kS128Load8Splat,
   kS128Load16Splat,
   kS128Load32Splat,
   kS128Load64Splat,
+  kFirst128Splat = kS128Load8Splat,
+  kLast128Splat = kS128Load64Splat,
+  // 128-bit LoadExtend.
   kS128Load8x8S,
   kS128Load8x8U,
   kS128Load16x4S,
   kS128Load16x4U,
   kS128Load32x2S,
   kS128Load32x2U,
+  kFirst128Extend = kS128Load8x8S,
+  kLast128Extend = kS128Load32x2U,
   kS128Load32Zero,
   kS128Load64Zero,
+  // 256-bit transformations must be last.
+  kS256Load8Splat,
+  kS256Load16Splat,
   kS256Load32Splat,
   kS256Load64Splat,
+  kS256Load8x16S,
+  kS256Load8x16U,
+  kS256Load16x8S,
+  kS256Load16x8U,
+  kS256Load32x4S,
+  kS256Load32x4U,
+  kFirst256Transform = kS256Load8Splat
 };
 
 size_t hash_value(LoadTransformation);
@@ -1053,6 +1069,7 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   const Operator* I16x16MaxU();
   const Operator* I8x32MaxU();
   const Operator* I64x4Ne();
+  const Operator* I64x4GeS();
   const Operator* I32x8Ne();
   const Operator* I32x8GtU();
   const Operator* I32x8GeS();
@@ -1065,8 +1082,10 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   const Operator* I8x32GtU();
   const Operator* I8x32GeS();
   const Operator* I8x32GeU();
+  const Operator* I32x8UConvertF32x8();
   const Operator* F64x4ConvertI32x4S();
   const Operator* F32x8SConvertI32x8();
+  const Operator* F32x8UConvertI32x8();
   const Operator* F32x4DemoteF64x4();
   const Operator* I64x4SConvertI32x4();
   const Operator* I64x4UConvertI32x4();
@@ -1110,6 +1129,10 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
   const Operator* I32x8Splat();
   const Operator* I16x16Splat();
   const Operator* I8x32Splat();
+  const Operator* F64x4Pmin();
+  const Operator* F64x4Pmax();
+  const Operator* F64x4Splat();
+  const Operator* F32x8Splat();
 
   const Operator* S256Zero();
   const Operator* S256And();

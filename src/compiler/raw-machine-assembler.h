@@ -21,6 +21,7 @@
 #include "src/compiler/write-barrier-kind.h"
 #include "src/execution/isolate.h"
 #include "src/heap/factory.h"
+#include "src/objects/string.h"
 
 namespace v8 {
 namespace internal {
@@ -953,6 +954,7 @@ class V8_EXPORT_PRIVATE RawMachineAssembler {
   // Parameters.
   Node* TargetParameter();
   Node* Parameter(size_t index);
+  Node* LoadRootRegister() { return AddNode(machine()->LoadRootRegister()); }
 
   // Pointer utilities.
   Node* LoadFromPointer(void* address, MachineType type, int32_t offset = 0) {

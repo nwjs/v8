@@ -13,6 +13,7 @@
 #include "src/compiler/operator.h"
 #include "src/compiler/wasm-graph-assembler.h"
 #include "src/objects/heap-number.h"
+#include "src/objects/string.h"
 #include "src/wasm/object-access.h"
 #include "src/wasm/wasm-engine.h"
 #include "src/wasm/wasm-linkage.h"
@@ -30,8 +31,8 @@ WasmGCLowering::WasmGCLowering(Editor* editor, MachineGraph* mcgraph,
     : AdvancedReducer(editor),
       null_check_strategy_(trap_handler::IsTrapHandlerEnabled() &&
                                    V8_STATIC_ROOTS_BOOL && !disable_trap_handler
-                               ? kTrapHandler
-                               : kExplicitNullChecks),
+                               ? NullCheckStrategy::kTrapHandler
+                               : NullCheckStrategy::kExplicit),
       gasm_(mcgraph, mcgraph->zone()),
       module_(module),
       dead_(mcgraph->Dead()),
@@ -222,14 +223,16 @@ Reduction WasmGCLowering::ReduceWasmTypeCheckAbstract(Node* node) {
     }
     // i31 is special in that the Smi check is the last thing to do.
     if (to_rep == wasm::HeapType::kI31) {
-      DCHECK(object_can_be_i31);  // Ensured by WasmGCOperatorReducer.
-      result = gasm_.IsSmi(object);
+      // If earlier optimization passes reached the limit of possible graph
+      // transformations, we could DCHECK(object_can_be_i31) here.
+      result = object_can_be_i31 ? gasm_.IsSmi(object) : gasm_.Int32Constant(0);
       break;
     }
     if (to_rep == wasm::HeapType::kEq) {
-      DCHECK(object_can_be_i31);  // Ensured by WasmGCOperatorReducer.
-      gasm_.GotoIf(gasm_.IsSmi(object), &end_label, BranchHint::kFalse,
-                   gasm_.Int32Constant(1));
+      if (object_can_be_i31) {
+        gasm_.GotoIf(gasm_.IsSmi(object), &end_label, BranchHint::kFalse,
+                     gasm_.Int32Constant(1));
+      }
       result = gasm_.IsDataRefMap(gasm_.LoadMap(object));
       break;
     }
@@ -392,14 +395,18 @@ Reduction WasmGCLowering::ReduceWasmTypeCastAbstract(Node* node) {
       gasm_.GotoIf(IsNull(object, config.from), &end_label, BranchHint::kFalse);
     }
     if (to_rep == wasm::HeapType::kI31) {
-      DCHECK(object_can_be_i31);  // Ensured by WasmGCOperatorBuilder.
-      gasm_.TrapUnless(gasm_.IsSmi(object), TrapId::kTrapIllegalCast);
+      // If earlier optimization passes reached the limit of possible graph
+      // transformations, we could DCHECK(object_can_be_i31) here.
+      Node* success =
+          object_can_be_i31 ? gasm_.IsSmi(object) : gasm_.Int32Constant(0);
+      gasm_.TrapUnless(success, TrapId::kTrapIllegalCast);
       UpdateSourcePosition(gasm_.effect(), node);
       break;
     }
     if (to_rep == wasm::HeapType::kEq) {
-      DCHECK(object_can_be_i31);  // Ensured by WasmGCOperatorReducer.
-      gasm_.GotoIf(gasm_.IsSmi(object), &end_label, BranchHint::kFalse);
+      if (object_can_be_i31) {
+        gasm_.GotoIf(gasm_.IsSmi(object), &end_label, BranchHint::kFalse);
+      }
       gasm_.TrapUnless(gasm_.IsDataRefMap(gasm_.LoadMap(object)),
                        TrapId::kTrapIllegalCast);
       UpdateSourcePosition(gasm_.effect(), node);
@@ -461,7 +468,7 @@ Reduction WasmGCLowering::ReduceAssertNotNull(Node* node) {
       // for null.
       // For subtypes of externref, we use JS null, so we have to check
       // explicitly.
-      if (null_check_strategy_ == kExplicitNullChecks ||
+      if (null_check_strategy_ == NullCheckStrategy::kExplicit ||
           wasm::IsSubtypeOf(wasm::kWasmI31Ref.AsNonNull(), op_parameter.type,
                             module_) ||
           wasm::IsSubtypeOf(op_parameter.type, wasm::kWasmExternRef, module_)) {
@@ -470,7 +477,7 @@ Reduction WasmGCLowering::ReduceAssertNotNull(Node* node) {
       } else {
         static_assert(WasmStruct::kHeaderSize > kTaggedSize);
         static_assert(WasmArray::kHeaderSize > kTaggedSize);
-        // TODO(manoskouk): JSFunction::kHeaderSize also has to be >kTaggedSize.
+        static_assert(WasmInternalFunction::kHeaderSize > kTaggedSize);
         Node* trap_null = gasm_.LoadTrapOnNull(
             MachineType::Int32(), object,
             gasm_.IntPtrConstant(wasm::ObjectAccess::ToTagged(kTaggedSize)));
@@ -660,7 +667,7 @@ Reduction WasmGCLowering::ReduceWasmStructGet(Node* node) {
 
   bool explicit_null_check =
       info.null_check == kWithNullCheck &&
-      (null_check_strategy_ == kExplicitNullChecks ||
+      (null_check_strategy_ == NullCheckStrategy::kExplicit ||
        info.field_index > wasm::kMaxStructFieldIndexForImplicitNullCheck);
   bool implicit_null_check =
       info.null_check == kWithNullCheck && !explicit_null_check;
@@ -696,7 +703,7 @@ Reduction WasmGCLowering::ReduceWasmStructSet(Node* node) {
 
   bool explicit_null_check =
       info.null_check == kWithNullCheck &&
-      (null_check_strategy_ == kExplicitNullChecks ||
+      (null_check_strategy_ == NullCheckStrategy::kExplicit ||
        info.field_index > wasm::kMaxStructFieldIndexForImplicitNullCheck);
   bool implicit_null_check =
       info.null_check == kWithNullCheck && !explicit_null_check;
@@ -784,7 +791,7 @@ Reduction WasmGCLowering::ReduceWasmArrayLength(Node* node) {
 
   bool null_check = OpParameter<bool>(node->op());
 
-  if (null_check_strategy_ == kExplicitNullChecks &&
+  if (null_check_strategy_ == NullCheckStrategy::kExplicit &&
       null_check == kWithNullCheck) {
     gasm_.TrapIf(IsNull(object, wasm::kWasmAnyRef),
                  TrapId::kTrapNullDereference);
@@ -792,7 +799,8 @@ Reduction WasmGCLowering::ReduceWasmArrayLength(Node* node) {
   }
 
   bool use_null_trap =
-      null_check_strategy_ == kTrapHandler && null_check == kWithNullCheck;
+      null_check_strategy_ == NullCheckStrategy::kTrapHandler &&
+      null_check == kWithNullCheck;
   Node* length =
       use_null_trap
           ? gasm_.LoadTrapOnNull(

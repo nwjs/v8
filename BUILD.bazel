@@ -16,8 +16,7 @@ load(
     "v8_library",
     "v8_mksnapshot",
     "v8_string",
-    "v8_torque_definitions",
-    "v8_torque_initializers",
+    "v8_torque_files",
 )
 load(":bazel/v8-non-pointer-compression.bzl", "v8_binary_non_pointer_compression")
 
@@ -30,7 +29,6 @@ load(":bazel/v8-non-pointer-compression.bzl", "v8_binary_non_pointer_compression
 # v8_embed_script
 # v8_embedder_string
 # v8_promise_internal_field_count
-# v8_enable_vtunejit
 # v8_enable_vtunetracemark
 # v8_enable_fast_torque
 # v8_win64_unwinding_info
@@ -40,8 +38,9 @@ load(":bazel/v8-non-pointer-compression.bzl", "v8_binary_non_pointer_compression
 # v8_enable_trace_baseline_exec
 # v8_enable_trace_feedback_updates
 # v8_enable_atomic_object_field_writes
-# v8_enable_conservative_stack_scanning
 # v8_enable_concurrent_marking
+# v8_enable_conservative_stack_scanning
+# v8_enable_direct_handle
 # v8_enable_direct_local
 # v8_enable_ignition_dispatch_counting
 # v8_enable_builtins_optimization
@@ -277,6 +276,12 @@ config_setting(
     },
 )
 
+# Enable VTune jit profiling
+v8_flag(
+    name = "v8_enable_vtunejit",
+    default = False,
+)
+
 # Default setting for v8_enable_short_builtin_calls when target is x64.
 # Disable short calls when pointer compression is not enabled.
 selects.config_setting_group(
@@ -347,6 +352,7 @@ v8_config(
         "v8_enable_verify_predictable": "VERIFY_PREDICTABLE",
         "v8_enable_webassembly": "V8_ENABLE_WEBASSEMBLY",
         "v8_jitless": "V8_JITLESS",
+        "v8_enable_vtunejit": "ENABLE_VTUNE_JIT_INTERFACE",
     },
     defines = [
         "GOOGLE3",
@@ -643,6 +649,7 @@ filegroup(
         "src/base/ieee754.cc",
         "src/base/ieee754.h",
         "src/base/immediate-crash.h",
+        "src/base/intrusive-set.h",
         "src/base/iterator.h",
         "src/base/lazy-instance.h",
         "src/base/logging.cc",
@@ -871,6 +878,7 @@ filegroup(
         "src/builtins/promise-reaction-job.tq",
         "src/builtins/promise-resolve.tq",
         "src/builtins/promise-then.tq",
+        "src/builtins/promise-withresolvers.tq",
         "src/builtins/proxy.tq",
         "src/builtins/proxy-constructor.tq",
         "src/builtins/proxy-delete-property.tq",
@@ -893,7 +901,12 @@ filegroup(
         "src/builtins/regexp-source.tq",
         "src/builtins/regexp-split.tq",
         "src/builtins/regexp-test.tq",
+        "src/builtins/set-difference.tq",
         "src/builtins/set-intersection.tq",
+        "src/builtins/set-is-disjoint-from.tq",
+        "src/builtins/set-is-subset-of.tq",
+        "src/builtins/set-is-superset-of.tq",
+        "src/builtins/set-symmetric-difference.tq",
         "src/builtins/set-union.tq",
         "src/builtins/string-at.tq",
         "src/builtins/string-endswith.tq",
@@ -1015,6 +1028,8 @@ filegroup(
         ":is_v8_enable_webassembly": [
             "src/builtins/js-to-wasm.tq",
             "src/builtins/wasm.tq",
+            "src/builtins/wasm-strings.tq",
+            "src/builtins/wasm-to-js.tq",
             "src/debug/debug-wasm-objects.tq",
             "src/wasm/wasm-objects.tq",
         ],
@@ -1248,6 +1263,7 @@ filegroup(
         "src/codegen/interface-descriptors.h",
         "src/codegen/interface-descriptors-inl.h",
         "src/codegen/label.h",
+        "src/codegen/linkage-location.h",
         "src/codegen/machine-type.cc",
         "src/codegen/machine-type.h",
         "src/codegen/macro-assembler.h",
@@ -1453,14 +1469,11 @@ filegroup(
         "src/heap/allocation-stats.h",
         "src/heap/array-buffer-sweeper.cc",
         "src/heap/array-buffer-sweeper.h",
-        "src/heap/base-space.cc",
         "src/heap/base-space.h",
         "src/heap/base/active-system-pages.cc",
         "src/heap/base/active-system-pages.h",
         "src/heap/basic-memory-chunk.cc",
         "src/heap/basic-memory-chunk.h",
-        "src/heap/code-object-registry.cc",
-        "src/heap/code-object-registry.h",
         "src/heap/code-range.cc",
         "src/heap/code-range.h",
         "src/heap/code-stats.cc",
@@ -1537,6 +1550,8 @@ filegroup(
         "src/heap/incremental-marking-job.h",
         "src/heap/index-generator.cc",
         "src/heap/index-generator.h",
+        "src/heap/large-page.cc",
+        "src/heap/large-page.h",
         "src/heap/large-spaces.cc",
         "src/heap/large-spaces.h",
         "src/heap/linear-allocation-area.h",
@@ -1550,6 +1565,11 @@ filegroup(
         "src/heap/mark-compact.cc",
         "src/heap/mark-compact.h",
         "src/heap/mark-compact-inl.h",
+        "src/heap/mark-sweep-utilities.cc",
+        "src/heap/mark-sweep-utilities.h",
+        "src/heap/minor-mark-sweep.cc",
+        "src/heap/minor-mark-sweep.h",
+        "src/heap/minor-mark-sweep-inl.h",
         "src/heap/marking.cc",
         "src/heap/marking.h",
         "src/heap/marking-inl.h",
@@ -1588,6 +1608,9 @@ filegroup(
         "src/heap/objects-visiting.cc",
         "src/heap/objects-visiting.h",
         "src/heap/objects-visiting-inl.h",
+        "src/heap/page.cc",
+        "src/heap/page.h",
+        "src/heap/page-inl.h",
         "src/heap/paged-spaces.cc",
         "src/heap/paged-spaces.h",
         "src/heap/paged-spaces-inl.h",
@@ -1601,6 +1624,8 @@ filegroup(
         "src/heap/read-only-heap.cc",
         "src/heap/read-only-heap.h",
         "src/heap/read-only-heap-inl.h",
+        "src/heap/read-only-promotion.cc",
+        "src/heap/read-only-promotion.h",
         "src/heap/read-only-spaces.cc",
         "src/heap/read-only-spaces.h",
         "src/heap/remembered-set.h",
@@ -1625,6 +1650,10 @@ filegroup(
         "src/heap/traced-handles-marking-visitor.h",
         "src/heap/weak-object-worklists.cc",
         "src/heap/weak-object-worklists.h",
+        "src/heap/young-generation-marking-visitor.h",
+        "src/heap/young-generation-marking-visitor-inl.h",
+        "src/heap/zapping.cc",
+        "src/heap/zapping.h",
         "src/ic/call-optimization.cc",
         "src/ic/call-optimization.h",
         "src/ic/handler-configuration.cc",
@@ -1809,6 +1838,7 @@ filegroup(
         "src/objects/heap-object.h",
         "src/objects/heap-object-inl.h",
         "src/objects/instance-type.h",
+        "src/objects/instance-type-checker.h",
         "src/objects/instance-type-inl.h",
         "src/objects/internal-index.h",
         "src/objects/instruction-stream.cc",
@@ -2158,6 +2188,8 @@ filegroup(
         "src/sandbox/code-pointer-table-inl.h",
         "src/sandbox/code-pointer.h",
         "src/sandbox/code-pointer-inl.h",
+        "src/sandbox/indirect-pointer.h",
+        "src/sandbox/indirect-pointer-inl.h",
         "src/sandbox/external-entity-table.h",
         "src/sandbox/external-entity-table-inl.h",
         "src/sandbox/sandbox.cc",
@@ -2207,6 +2239,8 @@ filegroup(
         "src/snapshot/snapshot-source-sink.h",
         "src/snapshot/snapshot-utils.cc",
         "src/snapshot/snapshot-utils.h",
+        "src/snapshot/sort-builtins.cc",
+        "src/snapshot/sort-builtins.h",
         "src/snapshot/startup-deserializer.cc",
         "src/snapshot/startup-deserializer.h",
         "src/snapshot/startup-serializer.cc",
@@ -2588,16 +2622,20 @@ filegroup(
             "src/wasm/object-access.h",
             "src/wasm/pgo.cc",
             "src/wasm/pgo.h",
+            "src/wasm/serialized-signature-inl.h",
             "src/wasm/simd-shuffle.cc",
             "src/wasm/simd-shuffle.h",
             "src/wasm/stacks.cc",
             "src/wasm/stacks.h",
+            "src/wasm/std-object-sizes.h",
             "src/wasm/streaming-decoder.cc",
             "src/wasm/streaming-decoder.h",
             "src/wasm/string-builder.h",
             "src/wasm/string-builder-multiline.h",
             "src/wasm/struct-types.h",
             "src/wasm/sync-streaming-decoder.cc",
+            "src/wasm/turboshaft-graph-interface.cc",
+            "src/wasm/turboshaft-graph-interface.h",
             "src/wasm/value-type.cc",
             "src/wasm/value-type.h",
             "src/wasm/wasm-arguments.h",
@@ -2727,6 +2765,7 @@ filegroup(
         "src/compiler/backend/instruction-scheduler.h",
         "src/compiler/backend/instruction-selector.cc",
         "src/compiler/backend/instruction-selector.h",
+        "src/compiler/backend/instruction-selector-adapter.h",
         "src/compiler/backend/instruction-selector-impl.h",
         "src/compiler/backend/jump-threading.cc",
         "src/compiler/backend/jump-threading.h",
@@ -2949,6 +2988,8 @@ filegroup(
         "src/compiler/turboshaft/decompression-optimization-phase.h",
         "src/compiler/turboshaft/define-assembler-macros.inc",
         "src/compiler/turboshaft/deopt-data.h",
+        "src/compiler/turboshaft/doubly-threaded-list.h",
+        "src/compiler/turboshaft/explicit-truncation-reducer.h",
         "src/compiler/turboshaft/fast-api-call-reducer.h",
         "src/compiler/turboshaft/fast-hash.h",
         "src/compiler/turboshaft/graph.cc",
@@ -2958,8 +2999,12 @@ filegroup(
         "src/compiler/turboshaft/graph-visualizer.cc",
         "src/compiler/turboshaft/graph-visualizer.h",
         "src/compiler/turboshaft/index.h",
+        "src/compiler/turboshaft/instruction-selection-phase.cc",
+        "src/compiler/turboshaft/instruction-selection-phase.h",
         "src/compiler/turboshaft/late-escape-analysis-reducer.cc",
         "src/compiler/turboshaft/late-escape-analysis-reducer.h",
+        "src/compiler/turboshaft/late-load-elimination-reducer.cc",
+        "src/compiler/turboshaft/late-load-elimination-reducer.h",
         "src/compiler/turboshaft/layered-hash-map.h",
         "src/compiler/turboshaft/machine-lowering-phase.cc",
         "src/compiler/turboshaft/machine-lowering-phase.h",
@@ -2982,9 +3027,11 @@ filegroup(
         "src/compiler/turboshaft/recreate-schedule.h",
         "src/compiler/turboshaft/recreate-schedule-phase.cc",
         "src/compiler/turboshaft/recreate-schedule-phase.h",
+        "src/compiler/turboshaft/reduce-args-helper.h",
         "src/compiler/turboshaft/reducer-traits.h",
         "src/compiler/turboshaft/representations.cc",
         "src/compiler/turboshaft/representations.h",
+        "src/compiler/turboshaft/required-optimization-reducer.h",
         "src/compiler/turboshaft/runtime-call-descriptors.h",
         "src/compiler/turboshaft/select-lowering-reducer.h",
         "src/compiler/turboshaft/sidetable.h",
@@ -3011,6 +3058,8 @@ filegroup(
         "src/compiler/turboshaft/types.h",
         "src/compiler/turboshaft/undef-assembler-macros.inc",
         "src/compiler/turboshaft/uniform-reducer-adapter.h",
+        "src/compiler/turboshaft/use-map.cc",
+        "src/compiler/turboshaft/use-map.h",
         "src/compiler/turboshaft/utils.cc",
         "src/compiler/turboshaft/utils.h",
         "src/compiler/turboshaft/value-numbering-reducer.h",
@@ -3091,12 +3140,21 @@ filegroup(
         ":is_v8_enable_webassembly": [
             "src/compiler/int64-lowering.cc",
             "src/compiler/int64-lowering.h",
+            "src/compiler/turboshaft/int64-lowering-phase.cc",
+            "src/compiler/turboshaft/int64-lowering-phase.h",
+            "src/compiler/turboshaft/int64-lowering-reducer.h",
+            "src/compiler/turboshaft/wasm-lowering-reducer.h",
+            "src/compiler/turboshaft/wasm-optimize-phase.cc",
+            "src/compiler/turboshaft/wasm-optimize-phase.h",
+            "src/compiler/turboshaft/wasm-turboshaft-compiler.cc",
+            "src/compiler/turboshaft/wasm-turboshaft-compiler.h",
             "src/compiler/wasm-address-reassociation.cc",
             "src/compiler/wasm-address-reassociation.h",
             "src/compiler/wasm-call-descriptors.cc",
             "src/compiler/wasm-call-descriptors.h",
             "src/compiler/wasm-compiler.cc",
             "src/compiler/wasm-compiler.h",
+            "src/compiler/wasm-compiler-definitions.cc",
             "src/compiler/wasm-compiler-definitions.h",
             "src/compiler/wasm-escape-analysis.cc",
             "src/compiler/wasm-escape-analysis.h",
@@ -3262,8 +3320,6 @@ filegroup(
         "src/heap/cppgc/heap-statistics-collector.cc",
         "src/heap/cppgc/heap-statistics-collector.h",
         "src/heap/cppgc/heap-visitor.h",
-        "src/heap/cppgc/incremental-marking-schedule.cc",
-        "src/heap/cppgc/incremental-marking-schedule.h",
         "src/heap/cppgc/liveness-broker.cc",
         "src/heap/cppgc/liveness-broker.h",
         "src/heap/cppgc/logging.cc",
@@ -3328,6 +3384,9 @@ filegroup(
         "src/heap/base/active-system-pages.cc",
         "src/heap/base/active-system-pages.h",
         "src/heap/base/basic-slot-set.h",
+        "src/heap/base/bytes.h",
+        "src/heap/base/incremental-marking-schedule.cc",
+        "src/heap/base/incremental-marking-schedule.h",
         "src/heap/base/stack.cc",
         "src/heap/base/stack.h",
         "src/heap/base/worklist.cc",
@@ -3556,10 +3615,36 @@ filegroup(
 # Generated files
 # =================================================
 
+# Define file groups for torque definitions and initializers. Both are
+# generated together, but we can use output_group to split them.
+filegroup(
+    name = "icu/generated_torque_definitions",
+    srcs = [":icu/generated_torque_files"],
+    output_group = "definitions",
+)
+
+filegroup(
+    name = "noicu/generated_torque_definitions",
+    srcs = [":noicu/generated_torque_files"],
+    output_group = "definitions",
+)
+
+filegroup(
+    name = "icu/generated_torque_initializers",
+    srcs = [":icu/generated_torque_files"],
+    output_group = "initializers",
+)
+
+filegroup(
+    name = "noicu/generated_torque_initializers",
+    srcs = [":noicu/generated_torque_files"],
+    output_group = "initializers",
+)
+
 # TODO(victorgomes): Add support to tools/debug_helper,
 # which needs class-debug-readers and debug-macros.
-v8_torque_definitions(
-    name = "generated_torque_definitions",
+v8_torque_files(
+    name = "generated_torque_files",
     args = select({
         ":is_v8_annotate_torque_ir": ["-annotate-ir"],
         "//conditions:default": [],
@@ -3567,7 +3652,13 @@ v8_torque_definitions(
         "@v8//bazel/config:v8_target_is_32_bits": ["-m32"],
         "//conditions:default": [],
     }),
-    extras = [
+    initializer_extras = [
+        "csa-types.h",
+        "enum-verifiers.cc",
+        "exported-macros-assembler.cc",
+        "exported-macros-assembler.h",
+    ],
+    definition_extras = [
         "bit-fields.h",
         "builtin-definitions.h",
         # "class-debug-readers.cc",
@@ -3584,25 +3675,7 @@ v8_torque_definitions(
         "objects-body-descriptors-inl.inc",
         "objects-printer.cc",
         "visitor-lists.h",
-    ],
-    icu_srcs = [":icu/torque_files"],
-    noicu_srcs = [":noicu/torque_files"],
-)
 
-v8_torque_initializers(
-    name = "generated_torque_initializers",
-    args = select({
-        ":is_v8_annotate_torque_ir": ["-annotate-ir"],
-        "//conditions:default": [],
-    }) + select({
-        "@v8//bazel/config:v8_target_is_32_bits": ["-m32"],
-        "//conditions:default": [],
-    }),
-    extras = [
-        "csa-types.h",
-        "enum-verifiers.cc",
-        "exported-macros-assembler.cc",
-        "exported-macros-assembler.h",
     ],
     icu_srcs = [":icu/torque_files"],
     noicu_srcs = [":noicu/torque_files"],
@@ -3792,6 +3865,7 @@ cc_library(
     deps = [
         ":torque_base_headers",
         ":v8_libbase",
+        "//external:absl_optional",
     ],
 )
 
@@ -3856,7 +3930,12 @@ v8_library(
     copts = ["-Wno-implicit-fallthrough"],
     strip_include_prefix = "third_party",
     visibility = ["//visibility:public"],
-    deps = [":noicu/v8"],
+    deps = [":noicu/v8"] + select({
+        ":is_v8_enable_vtunejit": [
+            ":v8_vtune",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 alias(
@@ -3867,6 +3946,20 @@ alias(
 alias(
     name = "core_lib_icu",
     actual = "icu/v8",
+)
+
+v8_library(
+    name = "v8_vtune",
+    srcs = glob([
+        "src/third_party/vtune/v8-vtune.h",
+        "src/third_party/vtune/vtune-jit.cc",
+        "src/third_party/vtune/vtune-jit.h",
+    ]),
+    copts = ["-I"],
+    deps = [
+        ":core_lib_noicu",
+        "@intel_ittapi//:lib_ittapi",
+    ],
 )
 
 # =================================================
@@ -3904,6 +3997,7 @@ v8_binary(
         "UNISTR_FROM_CHAR_EXPLICIT=",
     ],
     deps = [
+        "//external:absl_optional",
         "//external:icu",
     ],
 )

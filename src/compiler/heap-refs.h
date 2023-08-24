@@ -76,6 +76,12 @@ enum class OddballType : uint8_t {
   kOther  // Oddball, but none of the above.
 };
 
+enum class HoleType : uint8_t {
+  kNone,  // Not a Hole.
+  kGeneric,
+  kPropertyCell,
+};
+
 enum class RefSerializationKind {
   // Skips serialization.
   kNeverSerialized,
@@ -202,6 +208,14 @@ struct ref_traits<Object> {
 template <>
 struct ref_traits<Oddball> : public ref_traits<HeapObject> {};
 template <>
+struct ref_traits<Null> : public ref_traits<HeapObject> {};
+template <>
+struct ref_traits<Undefined> : public ref_traits<HeapObject> {};
+template <>
+struct ref_traits<True> : public ref_traits<HeapObject> {};
+template <>
+struct ref_traits<False> : public ref_traits<HeapObject> {};
+template <>
 struct ref_traits<Hole> : public ref_traits<HeapObject> {};
 template <>
 struct ref_traits<EnumCache> : public ref_traits<HeapObject> {};
@@ -209,6 +223,8 @@ template <>
 struct ref_traits<PropertyArray> : public ref_traits<HeapObject> {};
 template <>
 struct ref_traits<ByteArray> : public ref_traits<HeapObject> {};
+template <>
+struct ref_traits<ExternalPointerArray> : public ref_traits<HeapObject> {};
 template <>
 struct ref_traits<ClosureFeedbackCellArray> : public ref_traits<HeapObject> {};
 template <>
@@ -348,7 +364,9 @@ class V8_EXPORT_PRIVATE ObjectRef {
 
   bool IsNull() const;
   bool IsUndefined() const;
+  enum HoleType HoleType() const;
   bool IsTheHole() const;
+  bool IsPropertyCellHole() const;
   bool IsNullOrUndefined() const;
 
   base::Optional<bool> TryGetBooleanValue(JSHeapBroker* broker) const;
@@ -415,17 +433,20 @@ class HeapObjectType {
   using Flags = base::Flags<Flag>;
 
   HeapObjectType(InstanceType instance_type, Flags flags,
-                 OddballType oddball_type)
+                 OddballType oddball_type, HoleType hole_type)
       : instance_type_(instance_type),
         oddball_type_(oddball_type),
+        hole_type_(hole_type),
         flags_(flags) {
     DCHECK_EQ(instance_type == ODDBALL_TYPE,
               oddball_type != OddballType::kNone);
   }
 
   OddballType oddball_type() const { return oddball_type_; }
+  HoleType hole_type() const { return hole_type_; }
   // For compatibility with MapRef.
   OddballType oddball_type(JSHeapBroker* broker) const { return oddball_type_; }
+  HoleType hole_type(JSHeapBroker* broker) const { return hole_type_; }
   InstanceType instance_type() const { return instance_type_; }
   Flags flags() const { return flags_; }
 
@@ -435,6 +456,7 @@ class HeapObjectType {
  private:
   InstanceType const instance_type_;
   OddballType const oddball_type_;
+  HoleType const hole_type_;
   Flags const flags_;
 };
 
@@ -1006,7 +1028,6 @@ class ScopeInfoRef : public HeapObjectRef {
   V(FunctionKind, kind)                                         \
   V(LanguageMode, language_mode)                                \
   V(bool, native)                                               \
-  V(bool, HasBreakInfo)                                         \
   V(bool, HasBuiltinId)                                         \
   V(bool, construct_as_builtin)                                 \
   V(bool, HasBytecodeArray)                                     \
@@ -1028,6 +1049,7 @@ class V8_EXPORT_PRIVATE SharedFunctionInfoRef : public HeapObjectRef {
   int context_header_size() const;
   int context_parameters_start() const;
   BytecodeArrayRef GetBytecodeArray(JSHeapBroker* broker) const;
+  bool HasBreakInfo(JSHeapBroker* broker) const;
   SharedFunctionInfo::Inlineability GetInlineability(
       JSHeapBroker* broker) const;
   OptionalFunctionTemplateInfoRef function_template_info(
@@ -1068,6 +1090,7 @@ class StringRef : public NameRef {
   bool IsExternalString() const;
 
   bool IsContentAccessible() const;
+  bool IsOneByteRepresentation() const;
 
  private:
   // With concurrent inlining on, we currently support reading directly

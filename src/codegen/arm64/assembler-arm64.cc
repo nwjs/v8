@@ -391,6 +391,7 @@ void Assembler::Reset() {
   pc_ = buffer_start_;
   reloc_info_writer.Reposition(buffer_start_ + buffer_->size(), pc_);
   constpool_.Clear();
+  constpool_.SetNextCheckIn(ConstantPool::kCheckInterval);
   next_veneer_pool_check_ = kMaxInt;
 }
 
@@ -402,7 +403,7 @@ win64_unwindinfo::BuiltinUnwindInfo Assembler::GetUnwindInfo() const {
 }
 #endif
 
-void Assembler::AllocateAndInstallRequestedHeapNumbers(Isolate* isolate) {
+void Assembler::AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate) {
   DCHECK_IMPLIES(isolate == nullptr, heap_number_requests_.empty());
   for (auto& request : heap_number_requests_) {
     Address pc = reinterpret_cast<Address>(buffer_start_) + request.offset();
@@ -414,7 +415,10 @@ void Assembler::AllocateAndInstallRequestedHeapNumbers(Isolate* isolate) {
   }
 }
 
-void Assembler::GetCode(Isolate* isolate, CodeDesc* desc,
+void Assembler::GetCode(Isolate* isolate, CodeDesc* desc) {
+  GetCode(isolate->main_thread_local_isolate(), desc);
+}
+void Assembler::GetCode(LocalIsolate* isolate, CodeDesc* desc,
                         SafepointTableBuilderBase* safepoint_table_builder,
                         int handler_table_offset) {
   // As a crutch to avoid having to add manual Align calls wherever we use a
@@ -3732,10 +3736,10 @@ void Assembler::dcptr(Label* label) {
 // Below, a difference in case for the same letter indicates a
 // negated bit. If b is 1, then B is 0.
 uint32_t Assembler::FPToImm8(double imm) {
-  DCHECK(IsImmFP64(imm));
+  uint64_t bits = base::bit_cast<uint64_t>(imm);
+  DCHECK(IsImmFP64(bits));
   // bits: aBbb.bbbb.bbcd.efgh.0000.0000.0000.0000
   //       0000.0000.0000.0000.0000.0000.0000.0000
-  uint64_t bits = base::bit_cast<uint64_t>(imm);
   // bit7: a000.0000
   uint64_t bit7 = ((bits >> 63) & 0x1) << 7;
   // bit6: 0b00.0000
@@ -4108,20 +4112,15 @@ void Assembler::DataProcExtendedRegister(const Register& rd, const Register& rn,
        dest_reg | RnSP(rn));
 }
 
-bool Assembler::IsImmAddSub(int64_t immediate) {
-  return is_uint12(immediate) ||
-         (is_uint12(immediate >> 12) && ((immediate & 0xFFF) == 0));
-}
-
 void Assembler::LoadStore(const CPURegister& rt, const MemOperand& addr,
                           LoadStoreOp op) {
   Instr memop = op | Rt(rt) | RnSP(addr.base());
 
   if (addr.IsImmediateOffset()) {
-    unsigned size = CalcLSDataSize(op);
+    unsigned size_log2 = CalcLSDataSizeLog2(op);
     int offset = static_cast<int>(addr.offset());
-    if (IsImmLSScaled(addr.offset(), size)) {
-      LoadStoreScaledImmOffset(memop, offset, size);
+    if (IsImmLSScaled(addr.offset(), size_log2)) {
+      LoadStoreScaledImmOffset(memop, offset, size_log2);
     } else {
       DCHECK(IsImmLSUnscaled(addr.offset()));
       LoadStoreUnscaledImmOffset(memop, offset);
@@ -4138,8 +4137,7 @@ void Assembler::LoadStore(const CPURegister& rt, const MemOperand& addr,
 
     // Shifts are encoded in one bit, indicating a left shift by the memory
     // access size.
-    DCHECK((shift_amount == 0) ||
-           (shift_amount == static_cast<unsigned>(CalcLSDataSize(op))));
+    DCHECK(shift_amount == 0 || shift_amount == CalcLSDataSizeLog2(op));
     Emit(LoadStoreRegisterOffsetFixed | memop | Rm(addr.regoffset()) |
          ExtendMode(ext) | ImmShiftLS((shift_amount > 0) ? 1 : 0));
   } else {
@@ -4378,10 +4376,9 @@ bool Assembler::IsImmConditionalCompare(int64_t immediate) {
   return is_uint5(immediate);
 }
 
-bool Assembler::IsImmFP32(float imm) {
+bool Assembler::IsImmFP32(uint32_t bits) {
   // Valid values will have the form:
   // aBbb.bbbc.defg.h000.0000.0000.0000.0000
-  uint32_t bits = base::bit_cast<uint32_t>(imm);
   // bits[19..0] are cleared.
   if ((bits & 0x7FFFF) != 0) {
     return false;
@@ -4401,11 +4398,10 @@ bool Assembler::IsImmFP32(float imm) {
   return true;
 }
 
-bool Assembler::IsImmFP64(double imm) {
+bool Assembler::IsImmFP64(uint64_t bits) {
   // Valid values will have the form:
   // aBbb.bbbb.bbcd.efgh.0000.0000.0000.0000
   // 0000.0000.0000.0000.0000.0000.0000.0000
-  uint64_t bits = base::bit_cast<uint64_t>(imm);
   // bits[47..0] are cleared.
   if ((bits & 0xFFFFFFFFFFFFL) != 0) {
     return false;

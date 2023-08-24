@@ -10,11 +10,8 @@
 #define V8_COMPILER_TURBOSHAFT_WASM_JS_LOWERING_REDUCER_H_
 
 #include "src/compiler/turboshaft/assembler.h"
-#include "src/compiler/turboshaft/graph.h"
 #include "src/compiler/turboshaft/operations.h"
-#include "src/compiler/turboshaft/representations.h"
 #include "src/compiler/wasm-graph-assembler.h"
-#include "src/wasm/wasm-code-manager.h"
 
 namespace v8::internal::compiler::turboshaft {
 
@@ -43,8 +40,8 @@ class WasmJSLoweringReducer : public Next {
     const CallDescriptor* tf_descriptor = GetBuiltinCallDescriptor(
         trap, Asm().graph_zone(), StubCallMode::kCallBuiltinPointer,
         needs_frame_state, Operator::kNoProperties);
-    const TSCallDescriptor* ts_descriptor =
-        TSCallDescriptor::Create(tf_descriptor, Asm().graph_zone());
+    const TSCallDescriptor* ts_descriptor = TSCallDescriptor::Create(
+        tf_descriptor, CanThrow::kYes, Asm().graph_zone());
 
     OpIndex new_frame_state = CreateFrameStateWithUpdatedBailoutId(frame_state);
     OpIndex should_trap = negated ? __ Word32Equal(condition, 0) : condition;

@@ -460,11 +460,15 @@ void TranslationArrayBuilder::BeginJavaScriptBuiltinContinuationWithCatchFrame(
       SignedOperand(height));
 }
 
-void TranslationArrayBuilder::BeginConstructStubFrame(
-    BytecodeOffset bytecode_offset, int literal_id, unsigned height) {
-  auto opcode = TranslationOpcode::CONSTRUCT_STUB_FRAME;
-  Add(opcode, SignedOperand(bytecode_offset.ToInt()), SignedOperand(literal_id),
-      SignedOperand(height));
+void TranslationArrayBuilder::BeginConstructCreateStubFrame(int literal_id,
+                                                            unsigned height) {
+  auto opcode = TranslationOpcode::CONSTRUCT_CREATE_STUB_FRAME;
+  Add(opcode, SignedOperand(literal_id), SignedOperand(height));
+}
+
+void TranslationArrayBuilder::BeginConstructInvokeStubFrame(int literal_id) {
+  auto opcode = TranslationOpcode::CONSTRUCT_INVOKE_STUB_FRAME;
+  Add(opcode, SignedOperand(literal_id));
 }
 
 void TranslationArrayBuilder::BeginInlinedExtraArguments(int literal_id,

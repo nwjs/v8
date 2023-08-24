@@ -59,7 +59,7 @@ class FreeListCategory {
   // category is currently unlinked.
   void Relink(FreeList* owner);
 
-  void Free(Address address, size_t size_in_bytes, FreeMode mode,
+  void Free(Address start, size_t size_in_bytes, FreeMode mode,
             FreeList* owner);
 
   // Performs a single try to pick a node of at least |minimum_size| from the
@@ -82,7 +82,7 @@ class FreeListCategory {
   template <typename Callback>
   void IterateNodesForTesting(Callback callback) {
     for (FreeSpace cur_node = top(); !cur_node.is_null();
-         cur_node = cur_node.next()) {
+         cur_node = cur_node->next()) {
       callback(cur_node);
     }
   }
@@ -178,13 +178,7 @@ class FreeList {
   void increase_wasted_bytes(size_t bytes) { wasted_bytes_ += bytes; }
   void decrease_wasted_bytes(size_t bytes) { wasted_bytes_ -= bytes; }
 
-  bool IsEmpty() {
-    bool empty = true;
-    ForAllFreeListCategories([&empty](FreeListCategory* category) {
-      if (!category->is_empty()) empty = false;
-    });
-    return empty;
-  }
+  inline bool IsEmpty();
 
   // Used after booting the VM.
   void RepairLists(Heap* heap);
@@ -436,7 +430,7 @@ class V8_EXPORT_PRIVATE FreeListManyCachedFastPathBase
  public:
   enum class SmallBlocksMode { kAllow, kProhibit };
 
-  FreeListManyCachedFastPathBase(SmallBlocksMode small_blocks_mode)
+  explicit FreeListManyCachedFastPathBase(SmallBlocksMode small_blocks_mode)
       : small_blocks_mode_(small_blocks_mode) {
     if (small_blocks_mode_ == SmallBlocksMode::kProhibit) {
       min_block_size_ = kFastPathStart;

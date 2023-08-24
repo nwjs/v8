@@ -7,8 +7,11 @@
 
 #include "src/handles/handles.h"
 #include "src/heap/heap-write-barrier-inl.h"
+#include "src/objects/heap-number-inl.h"
 #include "src/objects/hole.h"
 #include "src/objects/objects-inl.h"
+#include "src/objects/smi-inl.h"
+#include "src/objects/tagged-field-inl.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -27,18 +30,9 @@ void Hole::set_raw_numeric_value(uint64_t bits) {
                                       bits);
 }
 
-uint8_t Hole::kind() const {
-  return Smi::ToInt(TaggedField<Smi>::load(*this, kKindOffset));
-}
-
-void Hole::set_kind(uint8_t value) {
-  WRITE_FIELD(*this, kKindOffset, Smi::FromInt(value));
-}
-
 void Hole::Initialize(Isolate* isolate, Handle<Hole> hole,
-                      Handle<HeapNumber> numeric_value, uint8_t kind) {
+                      Handle<HeapNumber> numeric_value) {
   hole->set_raw_numeric_value(numeric_value->value_as_bits(kRelaxedLoad));
-  hole->set_kind(kind);
 }
 
 }  // namespace internal

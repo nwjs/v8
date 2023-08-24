@@ -17,6 +17,7 @@
 #include "src/heap/mark-compact.h"
 #include "src/heap/marking-barrier.h"
 #include "src/heap/memory-chunk.h"
+#include "src/heap/page-inl.h"
 #include "src/heap/safepoint.h"
 #include "src/heap/spaces.h"
 #include "src/objects/free-space-inl.h"
@@ -144,7 +145,7 @@ void FillPageInPagedSpace(Page* page,
   CollectionEpoch full_epoch =
       heap->tracer()->CurrentEpoch(GCTracer::Scope::ScopeId::MARK_COMPACTOR);
   CollectionEpoch young_epoch = heap->tracer()->CurrentEpoch(
-      GCTracer::Scope::ScopeId::MINOR_MARK_COMPACTOR);
+      GCTracer::Scope::ScopeId::MINOR_MARK_SWEEPER);
 
   for (Page* p : *paged_space) {
     if (p != page) paged_space->UnlinkFreeListCategories(p);
@@ -161,7 +162,7 @@ void FillPageInPagedSpace(Page* page,
   page->ForAllFreeListCategories(
       [&available_sizes](FreeListCategory* category) {
         category->IterateNodesForTesting([&available_sizes](FreeSpace node) {
-          int node_size = node.Size();
+          int node_size = node->Size();
           if (node_size >= kMaxRegularHeapObjectSize) {
             available_sizes.push_back(node_size);
           }
@@ -194,7 +195,7 @@ void FillPageInPagedSpace(Page* page,
         std::vector<int>& sizes_in_category =
             remaining_sizes[remaining_sizes.size() - 1];
         category->IterateNodesForTesting([&sizes_in_category](FreeSpace node) {
-          int node_size = node.Size();
+          int node_size = node->Size();
           DCHECK_LT(0, FixedArrayLenFromSize(node_size));
           sizes_in_category.push_back(node_size);
         });
@@ -222,13 +223,13 @@ void FillPageInPagedSpace(Page* page,
   CHECK_EQ(full_epoch, heap->tracer()->CurrentEpoch(
                            GCTracer::Scope::ScopeId::MARK_COMPACTOR));
   CHECK_EQ(young_epoch, heap->tracer()->CurrentEpoch(
-                            GCTracer::Scope::ScopeId::MINOR_MARK_COMPACTOR));
+                            GCTracer::Scope::ScopeId::MINOR_MARK_SWEEPER));
 }
 }  // namespace
 
 void FillCurrentPage(v8::internal::NewSpace* space,
                      std::vector<Handle<FixedArray>>* out_handles) {
-  if (v8_flags.minor_mc) {
+  if (v8_flags.minor_ms) {
     PauseAllocationObserversScope pause_observers(space->heap());
     if (space->top() == kNullAddress) return;
     Page* page = Page::FromAllocationAreaAddress(space->top());
@@ -273,7 +274,7 @@ void FillCurrentPageButNBytes(v8::internal::NewSpace* space, int extra_bytes,
 }
 
 void SimulateIncrementalMarking(i::Heap* heap, bool force_completion) {
-  const double kStepSizeInMs = 100;
+  static constexpr auto kStepSize = v8::base::TimeDelta::FromMilliseconds(100);
   CHECK(v8_flags.incremental_marking);
   i::IncrementalMarking* marking = heap->incremental_marking();
 
@@ -287,7 +288,8 @@ void SimulateIncrementalMarking(i::Heap* heap, bool force_completion) {
     // If minor incremental marking is running, we need to finalize it first
     // because of the AdvanceForTesting call in this function which is currently
     // only possible for MajorMC.
-    heap->CollectGarbage(NEW_SPACE, GarbageCollectionReason::kFinalizeMinorMC);
+    heap->CollectGarbage(NEW_SPACE,
+                         GarbageCollectionReason::kFinalizeConcurrentMinorMS);
   }
 
   if (marking->IsStopped()) {
@@ -302,11 +304,15 @@ void SimulateIncrementalMarking(i::Heap* heap, bool force_completion) {
   marking->MarkRootsForTesting();
 
   while (!marking->IsMajorMarkingComplete()) {
-    marking->AdvanceForTesting(kStepSizeInMs);
+    marking->AdvanceForTesting(kStepSize);
   }
 }
 
 void SimulateFullSpace(v8::internal::PagedSpace* space) {
+  Heap* heap = space->heap();
+  IsolateSafepointScope safepoint_scope(heap);
+  heap->FreeLinearAllocationAreas();
+
   // If you see this check failing, disable the flag at the start of your test:
   // v8_flags.stress_concurrent_allocation = false;
   // Background thread allocating concurrently interferes with this function.
@@ -320,6 +326,10 @@ void SimulateFullSpace(v8::internal::PagedSpace* space) {
 }
 
 void AbandonCurrentlyFreeMemory(PagedSpace* space) {
+  Heap* heap = space->heap();
+  IsolateSafepointScope safepoint_scope(heap);
+  heap->FreeLinearAllocationAreas();
+
   space->FreeLinearAllocationArea();
   for (Page* page : *space) {
     page->MarkNeverAllocateForTesting();
@@ -411,7 +421,7 @@ ManualGCScope::ManualGCScope(Isolate* isolate)
     : isolate_(isolate),
       flag_concurrent_marking_(v8_flags.concurrent_marking),
       flag_concurrent_sweeping_(v8_flags.concurrent_sweeping),
-      flag_concurrent_minor_mc_marking_(v8_flags.concurrent_minor_mc_marking),
+      flag_concurrent_minor_ms_marking_(v8_flags.concurrent_minor_ms_marking),
       flag_stress_concurrent_allocation_(v8_flags.stress_concurrent_allocation),
       flag_stress_incremental_marking_(v8_flags.stress_incremental_marking),
       flag_parallel_marking_(v8_flags.parallel_marking),
@@ -430,7 +440,7 @@ ManualGCScope::ManualGCScope(Isolate* isolate)
 
   v8_flags.concurrent_marking = false;
   v8_flags.concurrent_sweeping = false;
-  v8_flags.concurrent_minor_mc_marking = false;
+  v8_flags.concurrent_minor_ms_marking = false;
   v8_flags.stress_incremental_marking = false;
   v8_flags.stress_concurrent_allocation = false;
   // Parallel marking has a dependency on concurrent marking.
@@ -448,7 +458,7 @@ ManualGCScope::ManualGCScope(Isolate* isolate)
 ManualGCScope::~ManualGCScope() {
   v8_flags.concurrent_marking = flag_concurrent_marking_;
   v8_flags.concurrent_sweeping = flag_concurrent_sweeping_;
-  v8_flags.concurrent_minor_mc_marking = flag_concurrent_minor_mc_marking_;
+  v8_flags.concurrent_minor_ms_marking = flag_concurrent_minor_ms_marking_;
   v8_flags.stress_concurrent_allocation = flag_stress_concurrent_allocation_;
   v8_flags.stress_incremental_marking = flag_stress_incremental_marking_;
   v8_flags.parallel_marking = flag_parallel_marking_;

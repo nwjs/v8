@@ -52,7 +52,7 @@ Object PropertyArray::get(PtrComprCageBase cage_base, int index,
 }
 
 void PropertyArray::set(int index, Object value) {
-  DCHECK(IsPropertyArray());
+  DCHECK(IsPropertyArray(*this));
   DCHECK_LT(static_cast<unsigned>(index),
             static_cast<unsigned>(this->length(kAcquireLoad)));
   int offset = OffsetOfElementAt(index);
@@ -69,10 +69,10 @@ void PropertyArray::set(int index, Object value, WriteBarrierMode mode) {
 }
 
 void PropertyArray::set(int index, Object value, SeqCstAccessTag tag) {
-  DCHECK(IsPropertyArray());
+  DCHECK(IsPropertyArray(*this));
   DCHECK_LT(static_cast<unsigned>(index),
             static_cast<unsigned>(this->length(kAcquireLoad)));
-  DCHECK(value.IsShared());
+  DCHECK(IsShared(value));
   int offset = OffsetOfElementAt(index);
   SEQ_CST_WRITE_FIELD(*this, offset, value);
   CONDITIONAL_WRITE_BARRIER(*this, offset, value, UPDATE_WRITE_BARRIER);
@@ -85,14 +85,29 @@ Object PropertyArray::Swap(int index, Object value, SeqCstAccessTag tag) {
 
 Object PropertyArray::Swap(PtrComprCageBase cage_base, int index, Object value,
                            SeqCstAccessTag tag) {
-  DCHECK(IsPropertyArray());
+  DCHECK(IsPropertyArray(*this));
   DCHECK_LT(static_cast<unsigned>(index),
             static_cast<unsigned>(this->length(kAcquireLoad)));
-  DCHECK(value.IsShared());
+  DCHECK(IsShared(value));
   Object result = TaggedField<Object>::SeqCst_Swap(
       cage_base, *this, OffsetOfElementAt(index), value);
   CONDITIONAL_WRITE_BARRIER(*this, OffsetOfElementAt(index), value,
                             UPDATE_WRITE_BARRIER);
+  return result;
+}
+
+Object PropertyArray::CompareAndSwap(int index, Object expected, Object value,
+                                     SeqCstAccessTag tag) {
+  DCHECK(IsPropertyArray(*this));
+  DCHECK_LT(static_cast<unsigned>(index),
+            static_cast<unsigned>(this->length(kAcquireLoad)));
+  DCHECK(IsShared(value));
+  Object result = TaggedField<Object>::SeqCst_CompareAndSwap(
+      *this, OffsetOfElementAt(index), expected, value);
+  if (result == expected) {
+    CONDITIONAL_WRITE_BARRIER(*this, OffsetOfElementAt(index), value,
+                              UPDATE_WRITE_BARRIER);
+  }
   return result;
 }
 
@@ -126,7 +141,7 @@ void PropertyArray::CopyElements(Isolate* isolate, int dst_index,
   DisallowGarbageCollection no_gc;
 
   ObjectSlot dst_slot(data_start() + dst_index);
-  ObjectSlot src_slot(src.data_start() + src_index);
+  ObjectSlot src_slot(src->data_start() + src_index);
   isolate->heap()->CopyRange(*this, dst_slot, src_slot, len, mode);
 }
 

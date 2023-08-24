@@ -115,9 +115,8 @@ void AllocationSite::SetDoNotInlineCall() {
 
 bool AllocationSite::PointsToLiteral() const {
   Object raw_value = transition_info_or_boilerplate(kAcquireLoad);
-  DCHECK_EQ(!raw_value.IsSmi(),
-            raw_value.IsJSArray() || raw_value.IsJSObject());
-  return !raw_value.IsSmi();
+  DCHECK_EQ(!IsSmi(raw_value), IsJSArray(raw_value) || IsJSObject(raw_value));
+  return !IsSmi(raw_value);
 }
 
 // Heuristic: We only need to create allocation site info if the boilerplate
@@ -196,8 +195,8 @@ inline void AllocationSite::IncrementMementoCreateCount() {
 }
 
 bool AllocationMemento::IsValid() const {
-  return allocation_site().IsAllocationSite() &&
-         !AllocationSite::cast(allocation_site()).IsZombie();
+  return IsAllocationSite(allocation_site()) &&
+         !AllocationSite::cast(allocation_site())->IsZombie();
 }
 
 AllocationSite AllocationMemento::GetAllocationSite() const {
@@ -215,7 +214,7 @@ bool AllocationSite::DigestTransitionFeedback(Handle<AllocationSite> site,
   Isolate* isolate = site->GetIsolate();
   bool result = false;
 
-  if (site->PointsToLiteral() && site->boilerplate().IsJSArray()) {
+  if (site->PointsToLiteral() && IsJSArray(site->boilerplate())) {
     Handle<JSArray> boilerplate(JSArray::cast(site->boilerplate()), isolate);
     ElementsKind kind = boilerplate->GetElementsKind();
     // if kind is holey ensure that to_kind is as well.
@@ -226,7 +225,7 @@ bool AllocationSite::DigestTransitionFeedback(Handle<AllocationSite> site,
       // If the array is huge, it's not likely to be defined in a local
       // function, so we shouldn't make new instances of it very often.
       uint32_t length = 0;
-      CHECK(boilerplate->length().ToArrayLength(&length));
+      CHECK(Object::ToArrayLength(boilerplate->length(), &length));
       if (length <= kMaximumArrayBytesToPretransition) {
         if (update_or_check == AllocationSiteUpdateMode::kCheckOnly) {
           return true;

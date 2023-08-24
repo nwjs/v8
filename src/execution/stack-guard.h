@@ -28,9 +28,17 @@ class V8_EXPORT_PRIVATE V8_NODISCARD StackGuard final {
 
   explicit StackGuard(Isolate* isolate) : isolate_(isolate) {}
 
-  // Pass the address beyond which the stack should not grow.  The stack
+  // Pass the address beyond which the stack should not grow. The stack
   // is assumed to grow downwards.
+  // When executing on the simulator, we set the stack limits to the limits of
+  // the simulator's stack instead of using {limit}.
   void SetStackLimit(uintptr_t limit);
+
+  // Similar to the method above, with one important difference: With Wasm
+  // stack switching, we always want to switch to {limit}, even when running on
+  // the simulator, since we might be switching to a Wasm continuation that's
+  // not on the main stack.
+  void SetStackLimitForStackSwitching(uintptr_t limit);
 
   // The simulator uses a separate JS stack. Limits on the JS stack might have
   // to be adjusted in order to reflect overflows of the C stack, because we
@@ -66,7 +74,9 @@ class V8_EXPORT_PRIVATE V8_NODISCARD StackGuard final {
   V(LOG_WASM_CODE, LogWasmCode, 7, InterruptLevel::kAnyEffect)                 \
   V(WASM_CODE_GC, WasmCodeGC, 8, InterruptLevel::kNoHeapWrites)                \
   V(INSTALL_MAGLEV_CODE, InstallMaglevCode, 9, InterruptLevel::kAnyEffect)     \
-  V(GLOBAL_SAFEPOINT, GlobalSafepoint, 10, InterruptLevel::kNoHeapWrites)
+  V(GLOBAL_SAFEPOINT, GlobalSafepoint, 10, InterruptLevel::kNoHeapWrites)      \
+  V(START_INCREMENTAL_MARKING, StartIncrementalMarking, 11,                    \
+    InterruptLevel::kNoHeapWrites)
 
 #define V(NAME, Name, id, interrupt_level)                   \
   inline bool Check##Name() { return CheckInterrupt(NAME); } \
@@ -134,6 +144,9 @@ class V8_EXPORT_PRIVATE V8_NODISCARD StackGuard final {
   void RequestInterrupt(InterruptFlag flag);
   void ClearInterrupt(InterruptFlag flag);
   int FetchAndClearInterrupts(InterruptLevel level);
+
+  void SetStackLimitInternal(const ExecutionAccess& lock, uintptr_t limit,
+                             uintptr_t jslimit);
 
   // You should hold the ExecutionAccess lock when calling this method.
   bool has_pending_interrupts(const ExecutionAccess& lock) {

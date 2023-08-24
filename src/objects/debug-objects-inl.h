@@ -11,6 +11,7 @@
 #include "src/objects/debug-objects.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/shared-function-info.h"
+#include "src/objects/string.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -37,7 +38,7 @@ BIT_FIELD_ACCESSORS(DebugInfo, debugger_hints, debugging_id,
                     DebugInfo::DebuggingIdBits)
 
 bool DebugInfo::HasInstrumentedBytecodeArray() {
-  return debug_bytecode_array(kAcquireLoad).IsBytecodeArray();
+  return IsBytecodeArray(debug_bytecode_array(kAcquireLoad));
 }
 
 BytecodeArray DebugInfo::OriginalBytecodeArray() {
@@ -47,7 +48,7 @@ BytecodeArray DebugInfo::OriginalBytecodeArray() {
 
 BytecodeArray DebugInfo::DebugBytecodeArray() {
   DCHECK(HasInstrumentedBytecodeArray());
-  DCHECK_EQ(shared().GetActiveBytecodeArray(),
+  DCHECK_EQ(shared()->GetActiveBytecodeArray(),
             debug_bytecode_array(kAcquireLoad));
   return BytecodeArray::cast(debug_bytecode_array(kAcquireLoad));
 }
@@ -57,8 +58,8 @@ NEVER_READ_ONLY_SPACE_IMPL(StackFrameInfo)
 
 Script StackFrameInfo::script() const {
   HeapObject object = shared_or_script();
-  if (object.IsSharedFunctionInfo()) {
-    object = SharedFunctionInfo::cast(object).script();
+  if (IsSharedFunctionInfo(object)) {
+    object = SharedFunctionInfo::cast(object)->script();
   }
   return Script::cast(object);
 }
@@ -72,12 +73,12 @@ NEVER_READ_ONLY_SPACE_IMPL(ErrorStackData)
 TQ_OBJECT_CONSTRUCTORS_IMPL(ErrorStackData)
 
 bool ErrorStackData::HasFormattedStack() const {
-  return !call_site_infos_or_formatted_stack().IsFixedArray();
+  return !IsFixedArray(call_site_infos_or_formatted_stack());
 }
 
 ACCESSORS_RELAXED_CHECKED(ErrorStackData, formatted_stack, Object,
                           kCallSiteInfosOrFormattedStackOffset,
-                          !limit_or_stack_frame_infos().IsSmi())
+                          !IsSmi(limit_or_stack_frame_infos()))
 
 bool ErrorStackData::HasCallSiteInfos() const { return !HasFormattedStack(); }
 

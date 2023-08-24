@@ -72,6 +72,11 @@
 #include "src/utils/ostreams.h"
 #include "src/utils/utils.h"
 
+#ifdef V8_OS_DARWIN
+#include <mach/mach.h>
+#include <mach/task_policy.h>
+#endif
+
 #ifdef V8_ENABLE_MAGLEV
 #include "src/maglev/maglev-concurrent-dispatcher.h"
 #endif  // V8_ENABLE_MAGLEV
@@ -382,7 +387,7 @@ std::shared_ptr<Worker> GetWorkerFromInternalField(Isolate* isolate,
   }
 
   i::Handle<i::Object> handle = Utils::OpenHandle(*object->GetInternalField(0));
-  if (handle->IsSmi()) {
+  if (IsSmi(*handle)) {
     ThrowError(isolate, "Worker is defunct because main thread is terminating");
     return nullptr;
   }
@@ -501,7 +506,6 @@ std::unordered_set<std::shared_ptr<Worker>> Shell::running_workers_;
 std::atomic<bool> Shell::script_executed_{false};
 std::atomic<bool> Shell::valid_fuzz_script_{false};
 base::LazyMutex Shell::isolate_status_lock_;
-std::map<v8::Isolate*, bool> Shell::isolate_status_;
 std::map<v8::Isolate*, int> Shell::isolate_running_streaming_tasks_;
 base::LazyMutex Shell::cached_code_mutex_;
 std::map<std::string, std::unique_ptr<ScriptCompiler::CachedData>>
@@ -945,7 +949,7 @@ bool Shell::ExecuteString(Isolate* isolate, Local<String> source,
     if (options.compile_only) return true;
     if (options.compile_options == ScriptCompiler::kConsumeCodeCache) {
       i::Handle<i::Script> i_script(
-          i::Script::cast(Utils::OpenHandle(*script)->shared().script()),
+          i::Script::cast(Utils::OpenHandle(*script)->shared()->script()),
           i_isolate);
       // TODO(cbruni, chromium:1244145): remove once context-allocated.
       i_script->set_host_defined_options(i::FixedArray::cast(
@@ -961,7 +965,7 @@ bool Shell::ExecuteString(Isolate* isolate, Local<String> source,
       delete cached_data;
     }
     if (process_message_queue) {
-      if (!EmptyMessageQueues(isolate)) success = false;
+      if (!CompleteMessageLoop(isolate)) success = false;
       if (!HandleUnhandledPromiseRejections(isolate)) success = false;
     }
     data->realm_current_ = data->realm_switch_;
@@ -1939,7 +1943,7 @@ void Shell::RealmOwner(const v8::FunctionCallbackInfo<v8::Value>& info) {
   Local<Object> object =
       info[0]->ToObject(isolate->GetCurrentContext()).ToLocalChecked();
   i::Handle<i::JSReceiver> i_object = Utils::OpenHandle(*object);
-  if (i_object->IsJSGlobalProxy() &&
+  if (IsJSGlobalProxy(*i_object) &&
       i::Handle<i::JSGlobalProxy>::cast(i_object)->IsDetached()) {
     return;
   }
@@ -1968,7 +1972,7 @@ void Shell::RealmGlobal(const v8::FunctionCallbackInfo<v8::Value>& info) {
   Local<Object> global =
       Local<Context>::New(info.GetIsolate(), data->realms_[index])->Global();
   i::Handle<i::Object> i_global = Utils::OpenHandle(*global);
-  if (i_global->IsJSGlobalObject()) {
+  if (IsJSGlobalObject(*i_global)) {
     i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(info.GetIsolate());
     i::Handle<i::JSObject> i_global_proxy =
         handle(i::Handle<i::JSGlobalObject>::cast(i_global)->global_proxy(),
@@ -2064,8 +2068,7 @@ void Shell::RealmNavigate(const v8::FunctionCallbackInfo<v8::Value>& info) {
   // advance.
   if (!global_object.IsEmpty()) {
     HandleScope scope(isolate);
-    if (!Utils::OpenHandle(*global_object.ToLocalChecked())
-             ->IsJSGlobalProxy()) {
+    if (!IsJSGlobalProxy(*Utils::OpenHandle(*global_object.ToLocalChecked()))) {
       global_object = v8::MaybeLocal<Value>();
     }
   }
@@ -2222,9 +2225,9 @@ void Shell::TestVerifySourcePositions(
     return;
   }
   auto arg_handle = Utils::OpenHandle(*info[0]);
-  if (!arg_handle->IsHeapObject() ||
-      !i::Handle<i::HeapObject>::cast(arg_handle)
-           ->IsJSFunctionOrBoundFunctionOrWrappedFunction()) {
+  if (!IsHeapObject(*arg_handle) ||
+      !IsJSFunctionOrBoundFunctionOrWrappedFunction(
+          *i::Handle<i::HeapObject>::cast(arg_handle))) {
     ThrowError(isolate, "Expected function as single argument.");
     return;
   }
@@ -2235,11 +2238,11 @@ void Shell::TestVerifySourcePositions(
   auto callable =
       i::Handle<i::JSFunctionOrBoundFunctionOrWrappedFunction>::cast(
           arg_handle);
-  while (callable->IsJSBoundFunction()) {
+  while (IsJSBoundFunction(*callable)) {
     internal::DisallowGarbageCollection no_gc;
     auto bound_function = i::Handle<i::JSBoundFunction>::cast(callable);
     auto bound_target = bound_function->bound_target_function();
-    if (!bound_target.IsJSFunctionOrBoundFunctionOrWrappedFunction()) {
+    if (!IsJSFunctionOrBoundFunctionOrWrappedFunction(bound_target)) {
       internal::AllowGarbageCollection allow_gc;
       ThrowError(isolate, "Expected function as bound target.");
       return;
@@ -2250,20 +2253,20 @@ void Shell::TestVerifySourcePositions(
   }
 
   i::Handle<i::JSFunction> function = i::Handle<i::JSFunction>::cast(callable);
-  if (!function->shared().HasBytecodeArray()) {
+  if (!function->shared()->HasBytecodeArray()) {
     ThrowError(isolate, "Function has no BytecodeArray attached.");
     return;
   }
   i::Handle<i::BytecodeArray> bytecodes =
-      handle(function->shared().GetBytecodeArray(i_isolate), i_isolate);
+      handle(function->shared()->GetBytecodeArray(i_isolate), i_isolate);
   i::interpreter::BytecodeArrayIterator bytecode_iterator(bytecodes);
-  bool has_baseline = function->shared().HasBaselineCode();
+  bool has_baseline = function->shared()->HasBaselineCode();
   i::Handle<i::ByteArray> bytecode_offsets;
   std::unique_ptr<i::baseline::BytecodeOffsetIterator> offset_iterator;
   if (has_baseline) {
     bytecode_offsets = handle(
         i::ByteArray::cast(
-            function->shared().GetCode(i_isolate).bytecode_offset_table()),
+            function->shared()->GetCode(i_isolate)->bytecode_offset_table()),
         i_isolate);
     offset_iterator = std::make_unique<i::baseline::BytecodeOffsetIterator>(
         bytecode_offsets, bytecodes);
@@ -2880,7 +2883,10 @@ void Shell::WorkerNew(const v8::FunctionCallbackInfo<v8::Value>& info) {
     i::Handle<i::Object> managed = i::Managed<Worker>::FromSharedPtr(
         i_isolate, kWorkerSizeEstimate, worker);
     info.Holder()->SetInternalField(0, Utils::ToLocal(managed));
-    if (!Worker::StartWorkerThread(isolate, std::move(worker))) {
+    base::Thread::Priority priority =
+        options.apply_priority ? base::Thread::Priority::kUserBlocking
+                               : base::Thread::Priority::kDefault;
+    if (!Worker::StartWorkerThread(isolate, std::move(worker), priority)) {
       ThrowError(isolate, "Can't start thread");
       return;
     }
@@ -3005,16 +3011,6 @@ void Shell::Quit(const v8::FunctionCallbackInfo<v8::Value>& info) {
   DCHECK(i::ValidateCallbackInfo(info));
   base::CallOnce(&quit_once_, &QuitOnce,
                  const_cast<v8::FunctionCallbackInfo<v8::Value>*>(&info));
-}
-
-void Shell::WaitUntilDone(const v8::FunctionCallbackInfo<v8::Value>& info) {
-  DCHECK(i::ValidateCallbackInfo(info));
-  SetWaitUntilDone(info.GetIsolate(), true);
-}
-
-void Shell::NotifyDone(const v8::FunctionCallbackInfo<v8::Value>& info) {
-  DCHECK(i::ValidateCallbackInfo(info));
-  SetWaitUntilDone(info.GetIsolate(), false);
 }
 
 void Shell::Version(const v8::FunctionCallbackInfo<v8::Value>& info) {
@@ -3472,10 +3468,6 @@ Local<ObjectTemplate> Shell::CreateAsyncHookTemplate(Isolate* isolate) {
 
 Local<ObjectTemplate> Shell::CreateTestRunnerTemplate(Isolate* isolate) {
   Local<ObjectTemplate> test_template = ObjectTemplate::New(isolate);
-  test_template->Set(isolate, "notifyDone",
-                     FunctionTemplate::New(isolate, NotifyDone));
-  test_template->Set(isolate, "waitUntilDone",
-                     FunctionTemplate::New(isolate, WaitUntilDone));
   // Reliable access to quit functionality. The "quit" method function
   // installed on the global object can be hidden with the --omit-quit flag
   // (e.g. on asan bots).
@@ -4464,7 +4456,6 @@ void SourceGroup::ExecuteInThread() {
   Isolate::CreateParams create_params;
   create_params.array_buffer_allocator = Shell::array_buffer_allocator;
   Isolate* isolate = Isolate::New(create_params);
-  Shell::SetWaitUntilDone(isolate, false);
 
   {
     Isolate::Scope isolate_scope(isolate);
@@ -4566,11 +4557,12 @@ Worker::~Worker() {
 bool Worker::is_running() const { return state_.load() == State::kRunning; }
 
 bool Worker::StartWorkerThread(Isolate* requester,
-                               std::shared_ptr<Worker> worker) {
+                               std::shared_ptr<Worker> worker,
+                               base::Thread::Priority priority) {
   auto expected = State::kReady;
   CHECK(
       worker->state_.compare_exchange_strong(expected, State::kPrepareRunning));
-  auto thread = new WorkerThread(worker);
+  auto thread = new WorkerThread(worker, priority);
   worker->thread_ = thread;
   if (!thread->Start()) return false;
   // Wait until the worker is ready to receive messages.
@@ -5008,6 +5000,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
     } else if (strcmp(argv[i], "--enable-os-system") == 0) {
       options.enable_os_system = true;
       argv[i] = nullptr;
+    } else if (strcmp(argv[i], "--no-apply-priority") == 0) {
+      options.apply_priority = false;
+      argv[i] = nullptr;
     } else if (strcmp(argv[i], "--quiet-load") == 0) {
       options.quiet_load = true;
       argv[i] = nullptr;
@@ -5228,7 +5223,6 @@ int Shell::RunMain(v8::Isolate* isolate, bool last_run) {
 }
 
 bool Shell::RunMainIsolate(v8::Isolate* isolate, bool keep_context_alive) {
-  Shell::SetWaitUntilDone(isolate, false);
   if (options.lcov_file) {
     debug::Coverage::SelectMode(isolate, debug::CoverageMode::kBlockCount);
   }
@@ -5267,11 +5261,6 @@ void Shell::CollectGarbage(Isolate* isolate) {
     // unreachable persistent handles.
     isolate->LowMemoryNotification();
   }
-}
-
-void Shell::SetWaitUntilDone(Isolate* isolate, bool value) {
-  base::MutexGuard guard(isolate_status_lock_.Pointer());
-  isolate_status_[isolate] = value;
 }
 
 void Shell::NotifyStartStreamingTask(Isolate* isolate) {
@@ -5350,10 +5339,8 @@ bool ProcessMessages(
 bool Shell::CompleteMessageLoop(Isolate* isolate) {
   auto get_waiting_behaviour = [isolate]() {
     base::MutexGuard guard(isolate_status_lock_.Pointer());
-    DCHECK_GT(isolate_status_.count(isolate), 0);
     bool should_wait = (options.wait_for_background_tasks &&
                         isolate->HasPendingBackgroundTasks()) ||
-                       isolate_status_[isolate] ||
                        isolate_running_streaming_tasks_[isolate] > 0;
     return should_wait ? platform::MessageLoopBehavior::kWaitForWork
                        : platform::MessageLoopBehavior::kDoNotWait;
@@ -5741,6 +5728,16 @@ int Shell::Main(int argc, char* argv[]) {
 
   v8::V8::InitializeICUDefaultLocation(argv[0], options.icu_data_file);
 
+#ifdef V8_OS_DARWIN
+  if (options.apply_priority) {
+    struct task_category_policy category = {.role =
+                                                TASK_FOREGROUND_APPLICATION};
+    task_policy_set(mach_task_self(), TASK_CATEGORY_POLICY,
+                    (task_policy_t)&category, TASK_CATEGORY_POLICY_COUNT);
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+  }
+#endif
+
 #ifdef V8_INTL_SUPPORT
   if (options.icu_locale != nullptr) {
     icu::Locale locale(options.icu_locale);
@@ -5801,9 +5798,17 @@ int Shell::Main(int argc, char* argv[]) {
   }
 
   platform::tracing::TracingController* tracing_controller = tracing.get();
-  g_platform = v8::platform::NewDefaultPlatform(
-      options.thread_pool_size, v8::platform::IdleTaskSupport::kEnabled,
-      in_process_stack_dumping, std::move(tracing));
+  if (i::v8_flags.single_threaded) {
+    g_platform = v8::platform::NewSingleThreadedDefaultPlatform(
+        v8::platform::IdleTaskSupport::kEnabled, in_process_stack_dumping,
+        std::move(tracing));
+  } else {
+    g_platform = v8::platform::NewDefaultPlatform(
+        options.thread_pool_size, v8::platform::IdleTaskSupport::kEnabled,
+        in_process_stack_dumping, std::move(tracing),
+        options.apply_priority ? v8::platform::PriorityMode::kApply
+                               : v8::platform::PriorityMode::kDontApply);
+  }
   g_default_platform = g_platform.get();
   if (i::v8_flags.predictable) {
     g_platform = MakePredictablePlatform(std::move(g_platform));

@@ -77,8 +77,7 @@ static v8::Local<v8::Function> CompileFunction(LocalContext* env,
 static bool HasBreakInfo(v8::Local<v8::Function> fun) {
   Handle<v8::internal::JSFunction> f =
       Handle<v8::internal::JSFunction>::cast(v8::Utils::OpenHandle(*fun));
-  Handle<v8::internal::SharedFunctionInfo> shared(f->shared(), f->GetIsolate());
-  return shared->HasBreakInfo();
+  return f->shared()->HasBreakInfo(f->GetIsolate());
 }
 
 // Set a break point in a function with a position relative to function start,
@@ -88,7 +87,7 @@ static i::Handle<i::BreakPoint> SetBreakPoint(v8::Local<v8::Function> fun,
                                               const char* condition = nullptr) {
   i::Handle<i::JSFunction> function =
       i::Handle<i::JSFunction>::cast(v8::Utils::OpenHandle(*fun));
-  position += function->shared().StartPosition();
+  position += function->shared()->StartPosition();
   static int break_point_index = 0;
   i::Isolate* isolate = function->GetIsolate();
   i::Handle<i::String> condition_string =
@@ -132,7 +131,8 @@ namespace v8 {
 namespace internal {
 
 Handle<FixedArray> GetDebuggedFunctions() {
-  DebugInfoCollection* infos = &CcTest::i_isolate()->debug()->debug_infos_;
+  i::Isolate* isolate = CcTest::i_isolate();
+  DebugInfoCollection* infos = &isolate->debug()->debug_infos_;
 
   int count = static_cast<int>(infos->Size());
   Handle<FixedArray> debugged_functions =
@@ -141,7 +141,7 @@ Handle<FixedArray> GetDebuggedFunctions() {
   int i = 0;
   DebugInfoCollection::Iterator it(infos);
   for (; it.HasNext(); it.Advance()) {
-    Handle<DebugInfo> debug_info = it.Next();
+    Handle<DebugInfo> debug_info(it.Next(), isolate);
     debugged_functions->set(i++, *debug_info);
   }
 
@@ -164,7 +164,7 @@ void CheckDebuggerUnloaded() {
   HeapObjectIterator iterator(CcTest::heap());
   for (HeapObject obj = iterator.Next(); !obj.is_null();
        obj = iterator.Next()) {
-    CHECK(!obj.IsDebugInfo());
+    CHECK(!IsDebugInfo(obj));
   }
 }
 
@@ -1384,7 +1384,7 @@ TEST(Regress1163547) {
   // dictionary mode.
   auto constructor_fun =
       Handle<i::JSFunction>::cast(v8::Utils::OpenHandle(*constructor));
-  CHECK(!i::JSObject::cast(constructor_fun->prototype()).HasFastProperties());
+  CHECK(!i::JSObject::cast(constructor_fun->prototype())->HasFastProperties());
 
   // Run with breakpoint.
   bp = SetBreakPoint(function, 0);
@@ -2963,7 +2963,7 @@ TEST(PauseInScript) {
 
   // Set breakpoint in the script.
   i::Handle<i::Script> i_script(
-      i::Script::cast(v8::Utils::OpenHandle(*script)->shared().script()),
+      i::Script::cast(v8::Utils::OpenHandle(*script)->shared()->script()),
       isolate);
   i::Handle<i::String> condition = isolate->factory()->empty_string();
   int position = 0;
@@ -3354,11 +3354,11 @@ TEST(DebugScriptLineEndsAreAscending) {
     v8::internal::Script::InitLineEnds(CcTest::i_isolate(), new_script);
     v8::internal::FixedArray ends =
         v8::internal::FixedArray::cast(new_script->line_ends());
-    CHECK_GT(ends.length(), 0);
+    CHECK_GT(ends->length(), 0);
 
     int prev_end = -1;
-    for (int j = 0; j < ends.length(); j++) {
-      const int curr_end = v8::internal::Smi::ToInt(ends.get(j));
+    for (int j = 0; j < ends->length(); j++) {
+      const int curr_end = v8::internal::Smi::ToInt(ends->get(j));
       CHECK_GT(curr_end, prev_end);
       prev_end = curr_end;
     }
@@ -4327,7 +4327,7 @@ TEST(BreakLocationIterator) {
   CHECK(i_isolate->debug()->EnsureBreakInfo(shared));
   i_isolate->debug()->PrepareFunctionForDebugExecution(shared);
 
-  Handle<i::DebugInfo> debug_info(shared->GetDebugInfo(), i_isolate);
+  Handle<i::DebugInfo> debug_info(shared->GetDebugInfo(i_isolate), i_isolate);
 
   {
     i::BreakIterator iterator(debug_info);
@@ -4603,7 +4603,7 @@ TEST(DebugEvaluateNoSideEffect) {
     i::HeapObjectIterator iterator(isolate->heap());
     for (i::HeapObject obj = iterator.Next(); !obj.is_null();
          obj = iterator.Next()) {
-      if (!obj.IsJSFunction()) continue;
+      if (!IsJSFunction(obj)) continue;
       i::JSFunction fun = i::JSFunction::cast(obj);
       all_functions.emplace_back(fun, isolate);
     }
@@ -4671,7 +4671,7 @@ i::MaybeHandle<i::Script> FindScript(
   Handle<i::String> i_name =
       isolate->factory()->NewStringFromAsciiChecked(name);
   for (const auto& script : scripts) {
-    if (!script->name().IsString()) continue;
+    if (!IsString(script->name())) continue;
     if (i_name->Equals(i::String::cast(script->name()))) return script;
   }
   return i::MaybeHandle<i::Script>();
@@ -4698,11 +4698,11 @@ UNINITIALIZED_TEST(LoadedAtStartupScripts) {
       i::Script::Iterator iterator(i_isolate);
       for (i::Script script = iterator.Next(); !script.is_null();
            script = iterator.Next()) {
-        if (script.type() == i::Script::Type::kNative &&
-            script.name().IsUndefined(i_isolate)) {
+        if (script->type() == i::Script::Type::kNative &&
+            IsUndefined(script->name(), i_isolate)) {
           continue;
         }
-        ++count_by_type[script.type()];
+        ++count_by_type[script->type()];
         scripts.emplace_back(script, i_isolate);
       }
     }
@@ -4761,7 +4761,7 @@ TEST(SourceInfo) {
   v8::Local<v8::Script> v8_script =
       v8::Script::Compile(env.local(), v8_str(source)).ToLocalChecked();
   i::Handle<i::Script> i_script(
-      i::Script::cast(v8::Utils::OpenHandle(*v8_script)->shared().script()),
+      i::Script::cast(v8::Utils::OpenHandle(*v8_script)->shared()->script()),
       CcTest::i_isolate());
   v8::Local<v8::debug::Script> script =
       v8::ToApiHandle<v8::debug::Script>(i_script);

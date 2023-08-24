@@ -18,33 +18,31 @@ namespace internal {
 class Code;
 
 #define ROOT_ID_LIST(V)                                 \
-  V(kStringTable, "(Internalized strings)")             \
-  V(kExternalStringsTable, "(External strings)")        \
-  V(kReadOnlyRootList, "(Read-only roots)")             \
-  V(kStrongRootList, "(Strong roots)")                  \
-  V(kSmiRootList, "(Smi roots)")                        \
   V(kBootstrapper, "(Bootstrapper)")                    \
-  V(kStackRoots, "(Stack roots)")                       \
-  V(kRelocatable, "(Relocatable)")                      \
-  V(kDebug, "(Debugger)")                               \
-  V(kCompilationCache, "(Compilation cache)")           \
-  V(kHandleScope, "(Handle scope)")                     \
   V(kBuiltins, "(Builtins)")                            \
-  V(kGlobalHandles, "(Global handles)")                 \
-  V(kTracedHandles, "(Traced handles)")                 \
-  V(kEternalHandles, "(Eternal handles)")               \
-  V(kThreadManager, "(Thread manager)")                 \
-  V(kStrongRoots, "(Strong roots)")                     \
-  V(kExtensions, "(Extensions)")                        \
-  V(kCodeFlusher, "(Code flusher)")                     \
-  V(kStartupObjectCache, "(Startup object cache)")      \
-  V(kSharedHeapObjectCache, "(Shareable object cache)") \
-  V(kWeakCollections, "(Weak collections)")             \
-  V(kWrapperTracing, "(Wrapper tracing)")               \
-  V(kWriteBarrier, "(Write barrier)")                   \
-  V(kRetainMaps, "(Retain maps)")                       \
   V(kClientHeap, "(Client heap)")                       \
-  V(kUnknown, "(Unknown)")
+  V(kCodeFlusher, "(Code flusher)")                     \
+  V(kCompilationCache, "(Compilation cache)")           \
+  V(kDebug, "(Debugger)")                               \
+  V(kExtensions, "(Extensions)")                        \
+  V(kEternalHandles, "(Eternal handles)")               \
+  V(kExternalStringsTable, "(External strings)")        \
+  V(kGlobalHandles, "(Global handles)")                 \
+  V(kHandleScope, "(Handle scope)")                     \
+  V(kMicroTasks, "(Micro tasks)")                       \
+  V(kReadOnlyRootList, "(Read-only roots)")             \
+  V(kRelocatable, "(Relocatable)")                      \
+  V(kRetainMaps, "(Retain maps)")                       \
+  V(kSharedHeapObjectCache, "(Shareable object cache)") \
+  V(kSmiRootList, "(Smi roots)")                        \
+  V(kStackRoots, "(Stack roots)")                       \
+  V(kStartupObjectCache, "(Startup object cache)")      \
+  V(kStringTable, "(Internalized strings)")             \
+  V(kStrongRootList, "(Strong root list)")              \
+  V(kStrongRoots, "(Strong roots)")                     \
+  V(kThreadManager, "(Thread manager)")                 \
+  V(kTracedHandles, "(Traced handles)")                 \
+  V(kWriteBarrier, "(Write barrier)")
 
 class VisitorSynchronization : public AllStatic {
  public:
@@ -180,6 +178,12 @@ class ObjectVisitor {
   virtual void VisitExternalPointer(HeapObject host, ExternalPointerSlot slot,
                                     ExternalPointerTag tag) {}
 
+  virtual void VisitIndirectPointer(HeapObject host, IndirectPointerSlot slot,
+                                    IndirectPointerMode mode) {}
+
+  virtual void VisitIndirectPointerTableEntry(HeapObject host,
+                                              IndirectPointerSlot slot) {}
+
   virtual void VisitMapPointer(HeapObject host) { UNREACHABLE(); }
 };
 
@@ -254,7 +258,7 @@ class ClientRootVisitor final : public RootVisitor {
 
  private:
   V8_INLINE static bool IsSharedHeapObject(Object object) {
-    return object.IsHeapObject() &&
+    return IsHeapObject(object) &&
            HeapObject::cast(object).InWritableSharedSpace();
   }
 
@@ -284,7 +288,7 @@ class ClientObjectVisitor final : public ObjectVisitorWithCageBases {
   void VisitPointers(HeapObject host, ObjectSlot start, ObjectSlot end) final {
     for (ObjectSlot p = start; p < end; ++p) {
       // The map slot should be handled in VisitMapPointer.
-      DCHECK_NE(host.map_slot(), p);
+      DCHECK_NE(host->map_slot(), p);
       DCHECK(!HasWeakHeapObjectTag(p.load(cage_base())));
       VisitPointer(host, p);
     }
@@ -314,7 +318,7 @@ class ClientObjectVisitor final : public ObjectVisitorWithCageBases {
 
  private:
   V8_INLINE static bool IsSharedHeapObject(Object object) {
-    return object.IsHeapObject() &&
+    return IsHeapObject(object) &&
            HeapObject::cast(object).InWritableSharedSpace();
   }
 

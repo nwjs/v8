@@ -10,6 +10,9 @@
 #include "src/base/logging.h"
 #include "src/codegen/interface-descriptors.h"
 #include "src/codegen/register.h"
+#if V8_ENABLE_WEBASSEMBLY
+#include "src/wasm/wasm-linkage.h"
+#endif
 
 #if V8_TARGET_ARCH_X64
 #include "src/codegen/x64/interface-descriptors-x64-inl.h"
@@ -59,6 +62,20 @@ StaticCallInterfaceDescriptor<DerivedDescriptor>::double_registers() {
 
 // static
 template <typename DerivedDescriptor>
+constexpr auto
+StaticCallInterfaceDescriptor<DerivedDescriptor>::return_registers() {
+  return CallInterfaceDescriptor::DefaultReturnRegisterArray();
+}
+
+// static
+template <typename DerivedDescriptor>
+constexpr auto
+StaticCallInterfaceDescriptor<DerivedDescriptor>::return_double_registers() {
+  return CallInterfaceDescriptor::DefaultReturnDoubleRegisterArray();
+}
+
+// static
+template <typename DerivedDescriptor>
 constexpr auto StaticJSCallInterfaceDescriptor<DerivedDescriptor>::registers() {
   return CallInterfaceDescriptor::DefaultJSRegisterArray();
 }
@@ -73,8 +90,13 @@ void StaticCallInterfaceDescriptor<DerivedDescriptor>::Initialize(
     CallInterfaceDescriptorData* data) {
   // Static local copy of the Registers array, for platform-specific
   // initialization
-  static auto registers = DerivedDescriptor::registers();
-  static auto double_registers = DerivedDescriptor::double_registers();
+  static constexpr auto registers = DerivedDescriptor::registers();
+  static constexpr auto double_registers =
+      DerivedDescriptor::double_registers();
+  static constexpr auto return_registers =
+      DerivedDescriptor::return_registers();
+  static constexpr auto return_double_registers =
+      DerivedDescriptor::return_double_registers();
 
   // The passed pointer should be a modifiable pointer to our own data.
   DCHECK_EQ(data, this->data());
@@ -86,12 +108,19 @@ void StaticCallInterfaceDescriptor<DerivedDescriptor>::Initialize(
     DCHECK(!DerivedDescriptor::kCalleeSaveRegisters);
   }
 
-  data->InitializeRegisters(DerivedDescriptor::flags(),
-                            DerivedDescriptor::kReturnCount,
-                            DerivedDescriptor::GetParameterCount(),
-                            DerivedDescriptor::kStackArgumentOrder,
-                            DerivedDescriptor::GetRegisterParameterCount(),
-                            registers.data(), double_registers.data());
+  // Make sure the defined arrays are big enough. The arrays can be filled up
+  // with `no_reg` and `no_dreg` to pass this DCHECK.
+  DCHECK_GE(registers.size(), GetRegisterParameterCount());
+  DCHECK_GE(double_registers.size(), GetRegisterParameterCount());
+  DCHECK_GE(return_registers.size(), DerivedDescriptor::kReturnCount);
+  DCHECK_GE(return_double_registers.size(), DerivedDescriptor::kReturnCount);
+  data->InitializeRegisters(
+      DerivedDescriptor::flags(), DerivedDescriptor::kReturnCount,
+      DerivedDescriptor::GetParameterCount(),
+      DerivedDescriptor::kStackArgumentOrder,
+      DerivedDescriptor::GetRegisterParameterCount(), registers.data(),
+      double_registers.data(), return_registers.data(),
+      return_double_registers.data());
 
   // InitializeTypes is customizable by the DerivedDescriptor subclass.
   DerivedDescriptor::InitializeTypes(data);
@@ -433,6 +462,16 @@ constexpr auto OnStackReplacementDescriptor::registers() {
 }
 
 // static
+constexpr auto
+MaglevOptimizeCodeOrTailCallOptimizedCodeSlotDescriptor::registers() {
+#ifdef V8_ENABLE_MAGLEV
+  return RegisterArray(FlagsRegister(), FeedbackVectorRegister());
+#else
+  return DefaultRegisterArray();
+#endif
+}
+
+// static
 constexpr Register OnStackReplacementDescriptor::MaybeTargetCodeRegister() {
   // Picking the first register on purpose because it's convenient that this
   // register is the same as the platform's return-value register.
@@ -655,6 +694,34 @@ constexpr Register RunMicrotasksDescriptor::MicrotaskQueueRegister() {
 constexpr inline Register
 WasmNewJSToWasmWrapperDescriptor::WrapperBufferRegister() {
   return std::get<kWrapperBuffer>(registers());
+}
+
+constexpr auto WasmToJSWrapperDescriptor::registers() {
+#if V8_ENABLE_WEBASSEMBLY
+  return RegisterArray(wasm::kGpParamRegisters[0]);
+#else
+  return EmptyRegisterArray();
+#endif
+}
+
+constexpr auto WasmToJSWrapperDescriptor::return_registers() {
+#if V8_ENABLE_WEBASSEMBLY
+  return RegisterArray(wasm::kGpReturnRegisters[0], wasm::kGpReturnRegisters[1],
+                       no_reg, no_reg);
+#else
+  // An arbitrary register array so that the code compiles.
+  return CallInterfaceDescriptor::DefaultRegisterArray();
+#endif
+}
+
+constexpr auto WasmToJSWrapperDescriptor::return_double_registers() {
+#if V8_ENABLE_WEBASSEMBLY
+  return DoubleRegisterArray(no_dreg, no_dreg, wasm::kFpReturnRegisters[0],
+                             wasm::kFpReturnRegisters[1]);
+#else
+  // An arbitrary register array so that the code compiles.
+  return CallInterfaceDescriptor::DefaultDoubleRegisterArray();
+#endif
 }
 
 #define DEFINE_STATIC_BUILTIN_DESCRIPTOR_GETTER(Name, DescriptorName) \

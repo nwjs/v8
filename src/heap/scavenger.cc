@@ -8,6 +8,7 @@
 #include "src/handles/global-handles.h"
 #include "src/heap/array-buffer-sweeper.h"
 #include "src/heap/concurrent-allocator.h"
+#include "src/heap/concurrent-marking.h"
 #include "src/heap/ephemeron-remembered-set.h"
 #include "src/heap/gc-tracer-inl.h"
 #include "src/heap/gc-tracer.h"
@@ -43,13 +44,13 @@ class IterateAndScavengePromotedObjectsVisitor final : public ObjectVisitor {
 
   V8_INLINE void VisitMapPointer(HeapObject host) final {
     if (!record_slots_) return;
-    MapWord map_word = host.map_word(kRelaxedLoad);
+    MapWord map_word = host->map_word(kRelaxedLoad);
     if (map_word.IsForwardingAddress()) {
       // Surviving new large objects have forwarding pointers in the map word.
       DCHECK(MemoryChunk::FromHeapObject(host)->InNewLargeObjectSpace());
       return;
     }
-    HandleSlot(host, HeapObjectSlot(host.map_slot()), map_word.ToMap());
+    HandleSlot(host, HeapObjectSlot(host->map_slot()), map_word.ToMap());
   }
 
   V8_INLINE void VisitPointers(HeapObject host, ObjectSlot start,
@@ -64,7 +65,7 @@ class IterateAndScavengePromotedObjectsVisitor final : public ObjectVisitor {
 
   inline void VisitEphemeron(HeapObject obj, int entry, ObjectSlot key,
                              ObjectSlot value) override {
-    DCHECK(Heap::IsLargeObject(obj) || obj.IsEphemeronHashTable());
+    DCHECK(Heap::IsLargeObject(obj) || IsEphemeronHashTable(obj));
     VisitPointer(obj, value);
 
     if (ObjectInYoungGeneration(*key)) {
@@ -117,7 +118,7 @@ class IterateAndScavengePromotedObjectsVisitor final : public ObjectVisitor {
       DCHECK(success);
 
       if (result == KEEP_SLOT) {
-        SLOW_DCHECK(target.IsHeapObject());
+        SLOW_DCHECK(IsHeapObject(target));
         MemoryChunk* chunk = MemoryChunk::FromHeapObject(host);
 
         // Sweeper is stopped during scavenge, so we can directly
@@ -158,14 +159,15 @@ class IterateAndScavengePromotedObjectsVisitor final : public ObjectVisitor {
 namespace {
 
 V8_INLINE bool IsUnscavengedHeapObject(Heap* heap, Object object) {
-  return Heap::InFromPage(object) &&
-         !HeapObject::cast(object).map_word(kRelaxedLoad).IsForwardingAddress();
+  return Heap::InFromPage(object) && !HeapObject::cast(object)
+                                          ->map_word(kRelaxedLoad)
+                                          .IsForwardingAddress();
 }
 
 // Same as IsUnscavengedHeapObject() above but specialized for HeapObjects.
 V8_INLINE bool IsUnscavengedHeapObject(Heap* heap, HeapObject heap_object) {
   return Heap::InFromPage(heap_object) &&
-         !heap_object.map_word(kRelaxedLoad).IsForwardingAddress();
+         !heap_object->map_word(kRelaxedLoad).IsForwardingAddress();
 }
 
 bool IsUnscavengedHeapObjectSlot(Heap* heap, FullObjectSlot p) {
@@ -186,19 +188,24 @@ ScavengerCollector::JobTask::JobTask(
       remaining_memory_chunks_(memory_chunks_.size()),
       generator_(memory_chunks_.size()),
       copied_list_(copied_list),
-      promotion_list_(promotion_list) {}
+      promotion_list_(promotion_list),
+      trace_id_(
+          reinterpret_cast<uint64_t>(this) ^
+          outer_->heap_->tracer()->CurrentEpoch(GCTracer::Scope::SCAVENGER)) {}
 
 void ScavengerCollector::JobTask::Run(JobDelegate* delegate) {
   DCHECK_LT(delegate->GetTaskId(), scavengers_->size());
   Scavenger* scavenger = (*scavengers_)[delegate->GetTaskId()].get();
   if (delegate->IsJoiningThread()) {
-    // This is already traced in GCTracer::Scope::SCAVENGER_SCAVENGE_PARALLEL
-    // in ScavengerCollector::CollectGarbage.
+    TRACE_GC_WITH_FLOW(outer_->heap_->tracer(),
+                       GCTracer::Scope::SCAVENGER_SCAVENGE_PARALLEL, trace_id_,
+                       TRACE_EVENT_FLAG_FLOW_IN);
     ProcessItems(delegate, scavenger);
   } else {
-    TRACE_GC_EPOCH(outer_->heap_->tracer(),
-                   GCTracer::Scope::SCAVENGER_BACKGROUND_SCAVENGE_PARALLEL,
-                   ThreadKind::kBackground);
+    TRACE_GC_EPOCH_WITH_FLOW(
+        outer_->heap_->tracer(),
+        GCTracer::Scope::SCAVENGER_BACKGROUND_SCAVENGE_PARALLEL,
+        ThreadKind::kBackground, trace_id_, TRACE_EVENT_FLAG_FLOW_IN);
     ProcessItems(delegate, scavenger);
   }
 }
@@ -207,11 +214,13 @@ size_t ScavengerCollector::JobTask::GetMaxConcurrency(
     size_t worker_count) const {
   // We need to account for local segments held by worker_count in addition to
   // GlobalPoolSize() of copied_list_ and promotion_list_.
-  return std::min<size_t>(
-      scavengers_->size(),
-      std::max<size_t>(
-          remaining_memory_chunks_.load(std::memory_order_relaxed),
-          worker_count + copied_list_->Size() + promotion_list_->Size()));
+  size_t wanted_num_workers = std::max<size_t>(
+      remaining_memory_chunks_.load(std::memory_order_relaxed),
+      worker_count + copied_list_->Size() + promotion_list_->Size());
+  if (!outer_->heap_->ShouldUseBackgroundThreads()) {
+    return std::min<size_t>(wanted_num_workers, 1);
+  }
+  return std::min<size_t>(scavengers_->size(), wanted_num_workers);
 }
 
 void ScavengerCollector::JobTask::ProcessItems(JobDelegate* delegate,
@@ -280,7 +289,7 @@ class GlobalHandlesWeakRootsUpdatingVisitor final : public RootVisitor {
     // TODO(chromium:1336158): Turn the following CHECKs into DCHECKs after
     // flushing out potential issues.
     CHECK(Heap::InFromPage(heap_object));
-    MapWord first_word = heap_object.map_word(kRelaxedLoad);
+    MapWord first_word = heap_object->map_word(kRelaxedLoad);
     CHECK(first_word.IsForwardingAddress());
     HeapObject dest = first_word.ToForwardingAddress(heap_object);
     HeapObjectReference::Update(FullHeapObjectSlot(p), dest);
@@ -365,12 +374,13 @@ void ScavengerCollector::CollectGarbage() {
     }
     {
       // Parallel phase scavenging all copied and promoted objects.
-      TRACE_GC(heap_->tracer(), GCTracer::Scope::SCAVENGER_SCAVENGE_PARALLEL);
+      auto job =
+          std::make_unique<JobTask>(this, &scavengers, std::move(memory_chunks),
+                                    &copied_list, &promotion_list);
+      TRACE_GC_NOTE_WITH_FLOW("Parallel scavenge started", job->trace_id(),
+                              TRACE_EVENT_FLAG_FLOW_OUT);
       V8::GetCurrentPlatform()
-          ->CreateJob(v8::TaskPriority::kUserBlocking,
-                      std::make_unique<JobTask>(this, &scavengers,
-                                                std::move(memory_chunks),
-                                                &copied_list, &promotion_list))
+          ->CreateJob(v8::TaskPriority::kUserBlocking, std::move(job))
           ->Join();
       DCHECK(copied_list.IsEmpty());
       DCHECK(promotion_list.IsEmpty());
@@ -531,7 +541,7 @@ void ScavengerCollector::SweepArrayBufferExtensions() {
 
 void ScavengerCollector::HandleSurvivingNewLargeObjects() {
   const bool is_compacting = heap_->incremental_marking()->IsCompacting();
-  AtomicMarkingState* marking_state = heap_->atomic_marking_state();
+  MarkingState* marking_state = heap_->marking_state();
 
   for (SurvivingNewLargeObjectMapEntry update_info :
        surviving_new_large_objects_) {
@@ -539,12 +549,12 @@ void ScavengerCollector::HandleSurvivingNewLargeObjects() {
     Map map = update_info.second;
     // Order is important here. We have to re-install the map to have access
     // to meta-data like size during page promotion.
-    object.set_map_word(map, kRelaxedStore);
+    object->set_map_word(map, kRelaxedStore);
 
     if (is_compacting && marking_state->IsMarked(object) &&
         MarkCompactCollector::IsOnEvacuationCandidate(map)) {
       RememberedSet<OLD_TO_OLD>::Insert<AccessMode::ATOMIC>(
-          MemoryChunk::FromHeapObject(object), object.map_slot().address());
+          MemoryChunk::FromHeapObject(object), object->map_slot().address());
     }
     LargePage* page = LargePage::FromHeapObject(object);
     heap_->lo_space()->PromoteNewLargeObject(page);
@@ -617,10 +627,13 @@ Scavenger::Scavenger(ScavengerCollector* collector, Heap* heap, bool is_logging,
       is_logging_(is_logging),
       is_incremental_marking_(heap->incremental_marking()->IsMarking()),
       is_compacting_(heap->incremental_marking()->IsCompacting()),
-      shared_string_table_(shared_old_allocator_.get() != nullptr),
+      shared_string_table_(shared_old_allocator_ != nullptr),
       mark_shared_heap_(heap->isolate()->is_shared_space_isolate()),
       shortcut_strings_(
-          heap->CanShortcutStringsDuringGC(GarbageCollector::SCAVENGER)) {}
+          heap->CanShortcutStringsDuringGC(GarbageCollector::SCAVENGER)) {
+  DCHECK_IMPLIES(is_incremental_marking_,
+                 heap->incremental_marking()->IsMajorMarking());
+}
 
 void Scavenger::IterateAndScavengePromotedObject(HeapObject target, Map map,
                                                  int size) {
@@ -631,23 +644,23 @@ void Scavenger::IterateAndScavengePromotedObject(HeapObject target, Map map,
   // the end of collection it would be a violation of the invariant to record
   // its slots.
   const bool record_slots =
-      is_compacting_ && heap()->atomic_marking_state()->IsMarked(target);
+      is_compacting_ && heap()->marking_state()->IsMarked(target);
 
   IterateAndScavengePromotedObjectsVisitor visitor(this, record_slots);
 
   // Iterate all outgoing pointers including map word.
-  target.IterateFast(map, size, &visitor);
+  target->IterateFast(map, size, &visitor);
 
-  if (map.IsJSArrayBufferMap()) {
+  if (IsJSArrayBufferMap(map)) {
     DCHECK(!BasicMemoryChunk::FromHeapObject(target)->IsLargePage());
-    JSArrayBuffer::cast(target).YoungMarkExtensionPromoted();
+    JSArrayBuffer::cast(target)->YoungMarkExtensionPromoted();
   }
 }
 
-void Scavenger::RememberPromotedEphemeron(EphemeronHashTable table, int entry) {
+void Scavenger::RememberPromotedEphemeron(EphemeronHashTable table, int index) {
   auto indices =
       ephemeron_remembered_set_.insert({table, std::unordered_set<int>()});
-  indices.first->second.insert(entry);
+  indices.first->second.insert(index);
 }
 
 void Scavenger::ScavengePage(MemoryChunk* page) {
@@ -747,13 +760,13 @@ void ScavengerCollector::ProcessWeakReferences(
 void ScavengerCollector::ClearYoungEphemerons(
     EphemeronRememberedSet::TableList* ephemeron_table_list) {
   ephemeron_table_list->Iterate([this](EphemeronHashTable table) {
-    for (InternalIndex i : table.IterateEntries()) {
+    for (InternalIndex i : table->IterateEntries()) {
       // Keys in EphemeronHashTables must be heap objects.
       HeapObjectSlot key_slot(
-          table.RawFieldOfElementAt(EphemeronHashTable::EntryToIndex(i)));
+          table->RawFieldOfElementAt(EphemeronHashTable::EntryToIndex(i)));
       HeapObject key = key_slot.ToHeapObject();
       if (IsUnscavengedHeapObject(heap_, key)) {
-        table.RemoveEntry(i);
+        table->RemoveEntry(i);
       } else {
         HeapObject forwarded = ForwardingAddress(key);
         key_slot.StoreHeapObject(forwarded);
@@ -772,11 +785,11 @@ void ScavengerCollector::ClearOldEphemerons() {
     auto& indices = it->second;
     for (auto iti = indices.begin(); iti != indices.end();) {
       // Keys in EphemeronHashTables must be heap objects.
-      HeapObjectSlot key_slot(table.RawFieldOfElementAt(
+      HeapObjectSlot key_slot(table->RawFieldOfElementAt(
           EphemeronHashTable::EntryToIndex(InternalIndex(*iti))));
       HeapObject key = key_slot.ToHeapObject();
       if (IsUnscavengedHeapObject(heap_, key)) {
-        table.RemoveEntry(InternalIndex(*iti));
+        table->RemoveEntry(InternalIndex(*iti));
         iti = indices.erase(iti);
       } else {
         HeapObject forwarded = ForwardingAddress(key);
@@ -789,7 +802,7 @@ void ScavengerCollector::ClearOldEphemerons() {
       }
     }
 
-    if (indices.size() == 0) {
+    if (indices.empty()) {
       it = table_map->erase(it);
     } else {
       ++it;

@@ -45,7 +45,8 @@ class OptimizingCompileDispatcher::CompileTask : public v8::JobTask {
         if (!job) break;
         TRACE_EVENT_WITH_FLOW0(
             TRACE_DISABLED_BY_DEFAULT("v8.compile"), "V8.OptimizeBackground",
-            job, TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+            job->trace_id(),
+            TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
 
         if (dispatcher_->recompilation_delay_ != 0) {
           base::OS::Sleep(base::TimeDelta::FromMilliseconds(
@@ -58,7 +59,12 @@ class OptimizingCompileDispatcher::CompileTask : public v8::JobTask {
   }
 
   size_t GetMaxConcurrency(size_t worker_count) const override {
-    return dispatcher_->InputQueueLength() + worker_count;
+    size_t num_tasks = dispatcher_->InputQueueLength() + worker_count;
+    size_t max_threads = v8_flags.concurrent_turbofan_max_threads;
+    if (max_threads > 0) {
+      return std::min(max_threads, num_tasks);
+    }
+    return num_tasks;
   }
 
  private:
@@ -195,7 +201,7 @@ void OptimizingCompileDispatcher::InstallOptimizedFunctions() {
     if (!info->is_osr() && function->HasAvailableCodeKind(info->code_kind())) {
       if (v8_flags.trace_concurrent_recompilation) {
         PrintF("  ** Aborting compilation for ");
-        function->ShortPrint();
+        ShortPrint(*function);
         PrintF(" as it has already been optimized.\n");
       }
       Compiler::DisposeTurbofanCompilationJob(isolate_, job.get(), false);

@@ -154,6 +154,10 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kX64F64x2Qfms:
     case kX64Minpd:
     case kX64Maxpd:
+    case kX64F32x8Pmin:
+    case kX64F32x8Pmax:
+    case kX64F64x4Pmin:
+    case kX64F64x4Pmax:
     case kX64F64x2Round:
     case kX64F64x2ConvertLowI32x4S:
     case kX64F64x4ConvertI32x4S:
@@ -162,6 +166,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kX64F32x4SConvertI32x4:
     case kX64F32x8SConvertI32x8:
     case kX64F32x4UConvertI32x4:
+    case kX64F32x8UConvertI32x8:
     case kX64F32x4Qfma:
     case kX64F32x4Qfms:
     case kX64Minps:
@@ -203,6 +208,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kX64IMinS:
     case kX64IMaxS:
     case kX64I32x4UConvertF32x4:
+    case kX64I32x8UConvertF32x8:
     case kX64I32x4UConvertI16x8Low:
     case kX64I32x4UConvertI16x8High:
     case kX64I32x8UConvertI16x8:
@@ -348,6 +354,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kX64MovqDecompressTaggedSigned:
     case kX64MovqDecompressTagged:
     case kX64MovqCompressTagged:
+    case kX64MovqStoreIndirectPointer:
     case kX64MovqDecodeSandboxedPointer:
     case kX64MovqEncodeSandboxedPointer:
     case kX64Movq:
@@ -356,7 +363,9 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kX64Movdqu:
     case kX64Movdqu256:
     case kX64S128Load8Splat:
+    case kX64S256Load8Splat:
     case kX64S128Load16Splat:
+    case kX64S256Load16Splat:
     case kX64S128Load32Splat:
     case kX64S256Load32Splat:
     case kX64S128Load64Splat:
@@ -367,6 +376,12 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kX64S128Load16x4U:
     case kX64S128Load32x2S:
     case kX64S128Load32x2U:
+    case kX64S256Load8x16S:
+    case kX64S256Load8x16U:
+    case kX64S256Load16x8S:
+    case kX64S256Load16x8U:
+    case kX64S256Load32x4S:
+    case kX64S256Load32x4U:
       return instr->HasOutput() ? kIsLoadOperation : kHasSideEffect;
 
     case kX64Peek:

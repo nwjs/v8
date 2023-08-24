@@ -38,7 +38,7 @@ bool IsTracked(i::Heap* heap, i::ArrayBufferExtension* extension) {
 }
 
 bool IsTracked(i::Heap* heap, i::JSArrayBuffer buffer) {
-  return IsTracked(heap, buffer.extension());
+  return IsTracked(heap, buffer->extension());
 }
 
 }  // namespace
@@ -247,7 +247,7 @@ TEST(ArrayBuffer_NonLivePromotion) {
     heap::InvokeAtomicMinorGC(heap);
     CHECK(IsTracked(heap, JSArrayBuffer::cast(root->get(0))));
     ArrayBufferExtension* extension =
-        JSArrayBuffer::cast(root->get(0)).extension();
+        JSArrayBuffer::cast(root->get(0))->extension();
     root->set(0, ReadOnlyRoots(heap).undefined_value());
     heap::SimulateIncrementalMarking(heap, true);
     heap::InvokeAtomicMajorGC(heap);
@@ -299,7 +299,7 @@ TEST(ArrayBuffer_LivePromotion) {
 
 TEST(ArrayBuffer_SemiSpaceCopyThenPagePromotion) {
   if (!i::v8_flags.incremental_marking) return;
-  if (v8_flags.minor_mc) return;
+  if (v8_flags.minor_ms) return;
   v8_flags.concurrent_array_buffer_sweeping = false;
   ManualGCScope manual_gc_scope;
   // The test verifies that the marking state is preserved across semispace

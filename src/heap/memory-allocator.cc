@@ -17,6 +17,7 @@
 #include "src/heap/heap.h"
 #include "src/heap/memory-chunk.h"
 #include "src/heap/read-only-spaces.h"
+#include "src/heap/zapping.h"
 #include "src/logging/log.h"
 #include "src/utils/allocation.h"
 
@@ -37,10 +38,6 @@ MemoryAllocator::MemoryAllocator(Isolate* isolate,
       data_page_allocator_(isolate->page_allocator()),
       code_page_allocator_(code_page_allocator),
       capacity_(RoundUp(capacity, Page::kPageSize)),
-      size_(0),
-      size_executable_(0),
-      lowest_ever_allocated_(static_cast<Address>(-1ll)),
-      highest_ever_allocated_(kNullAddress),
       unmapper_(isolate->heap(), this) {
   DCHECK_NOT_NULL(code_page_allocator);
 }
@@ -65,19 +62,25 @@ void MemoryAllocator::TearDown() {
 class MemoryAllocator::Unmapper::UnmapFreeMemoryJob : public JobTask {
  public:
   explicit UnmapFreeMemoryJob(Isolate* isolate, Unmapper* unmapper)
-      : unmapper_(unmapper), tracer_(isolate->heap()->tracer()) {}
+      : unmapper_(unmapper),
+        tracer_(isolate->heap()->tracer()),
+        trace_id_(reinterpret_cast<uint64_t>(this) ^
+                  tracer_->CurrentEpoch(GCTracer::Scope::BACKGROUND_UNMAPPER)) {
+  }
 
   UnmapFreeMemoryJob(const UnmapFreeMemoryJob&) = delete;
   UnmapFreeMemoryJob& operator=(const UnmapFreeMemoryJob&) = delete;
 
   void Run(JobDelegate* delegate) override {
     if (delegate->IsJoiningThread()) {
-      TRACE_GC(tracer_, GCTracer::Scope::UNMAPPER);
+      TRACE_GC_WITH_FLOW(tracer_, GCTracer::Scope::UNMAPPER, trace_id_,
+                         TRACE_EVENT_FLAG_FLOW_IN);
       RunImpl(delegate);
 
     } else {
-      TRACE_GC1(tracer_, GCTracer::Scope::BACKGROUND_UNMAPPER,
-                ThreadKind::kBackground);
+      TRACE_GC1_WITH_FLOW(tracer_, GCTracer::Scope::BACKGROUND_UNMAPPER,
+                          ThreadKind::kBackground, trace_id_,
+                          TRACE_EVENT_FLAG_FLOW_IN);
       RunImpl(delegate);
     }
   }
@@ -91,6 +94,8 @@ class MemoryAllocator::Unmapper::UnmapFreeMemoryJob : public JobTask {
                 kTaskPerChunk);
   }
 
+  uint64_t trace_id() const { return trace_id_; }
+
  private:
   void RunImpl(JobDelegate* delegate) {
     unmapper_->PerformFreeMemoryOnQueuedChunks(FreeMode::kUncommitPooled,
@@ -101,6 +106,7 @@ class MemoryAllocator::Unmapper::UnmapFreeMemoryJob : public JobTask {
   }
   Unmapper* const unmapper_;
   GCTracer* const tracer_;
+  const uint64_t trace_id_;
 };
 
 void MemoryAllocator::Unmapper::FreeQueuedChunks() {
@@ -110,9 +116,11 @@ void MemoryAllocator::Unmapper::FreeQueuedChunks() {
     if (job_handle_ && job_handle_->IsValid()) {
       job_handle_->NotifyConcurrencyIncrease();
     } else {
+      auto job = std::make_unique<UnmapFreeMemoryJob>(heap_->isolate(), this);
+      TRACE_GC_NOTE_WITH_FLOW("MemoryAllocator::Unmapper started",
+                              job->trace_id(), TRACE_EVENT_FLAG_FLOW_OUT);
       job_handle_ = V8::GetCurrentPlatform()->PostJob(
-          TaskPriority::kUserVisible,
-          std::make_unique<UnmapFreeMemoryJob>(heap_->isolate(), this));
+          TaskPriority::kUserVisible, std::move(job));
       if (v8_flags.trace_unmapper) {
         PrintIsolate(heap_->isolate(), "Unmapper::FreeQueuedChunks: new Job\n");
       }
@@ -221,13 +229,14 @@ bool MemoryAllocator::Unmapper::IsRunning() const {
   return job_handle_ && job_handle_->IsValid();
 }
 
-bool MemoryAllocator::CommitMemory(VirtualMemory* reservation) {
+bool MemoryAllocator::CommitMemory(VirtualMemory* reservation,
+                                   Executability executable) {
   Address base = reservation->address();
   size_t size = reservation->size();
   if (!reservation->SetPermissions(base, size, PageAllocator::kReadWrite)) {
     return false;
   }
-  UpdateAllocatedSpaceLimits(base, base + size);
+  UpdateAllocatedSpaceLimits(base, base + size, executable);
   return true;
 }
 
@@ -273,7 +282,7 @@ Address MemoryAllocator::AllocateAlignedMemory(
   if (executable == EXECUTABLE) {
     if (!SetPermissionsOnExecutableMemoryChunk(&reservation, base, area_size,
                                                chunk_size)) {
-      return HandleAllocationFailure(executable);
+      return HandleAllocationFailure(EXECUTABLE);
     }
   } else {
     // No guard page between page header and object area. This allows us to make
@@ -284,9 +293,9 @@ Address MemoryAllocator::AllocateAlignedMemory(
 
     if (reservation.SetPermissions(base, commit_size,
                                    PageAllocator::kReadWrite)) {
-      UpdateAllocatedSpaceLimits(base, base + commit_size);
+      UpdateAllocatedSpaceLimits(base, base + commit_size, NOT_EXECUTABLE);
     } else {
-      return HandleAllocationFailure(executable);
+      return HandleAllocationFailure(NOT_EXECUTABLE);
     }
   }
 
@@ -379,11 +388,12 @@ MemoryAllocator::AllocateUninitializedChunkAt(BaseSpace* space,
     size_executable_ += reservation.size();
   }
 
-  if (Heap::ShouldZapGarbage()) {
+  if (heap::ShouldZapGarbage()) {
     if (executable == EXECUTABLE) {
       // Page header and object area is split by guard page. Zap page header
       // first.
-      ZapBlock(base, MemoryChunkLayout::CodePageGuardStartOffset(), kZapValue);
+      heap::ZapBlock(base, MemoryChunkLayout::CodePageGuardStartOffset(),
+                     kZapValue);
       // Now zap object area.
       Address code_start =
           base + MemoryChunkLayout::ObjectPageOffsetInCodePage();
@@ -391,12 +401,12 @@ MemoryAllocator::AllocateUninitializedChunkAt(BaseSpace* space,
           isolate_->heap(), &reservation,
           base::AddressRegion(code_start,
                               RoundUp(area_size, GetCommitPageSize())));
-      ZapBlock(base + MemoryChunkLayout::ObjectPageOffsetInCodePage(),
-               area_size, kZapValue);
+      heap::ZapBlock(base + MemoryChunkLayout::ObjectPageOffsetInCodePage(),
+                     area_size, kZapValue);
     } else {
       DCHECK_EQ(executable, NOT_EXECUTABLE);
       // Zap both page header and object area at once. No guard page in-between.
-      ZapBlock(
+      heap::ZapBlock(
           base,
           MemoryChunkLayout::ObjectStartOffsetInMemoryChunk(space->identity()) +
               area_size,
@@ -659,23 +669,15 @@ MemoryAllocator::AllocateUninitializedPageFromPool(Space* space) {
   // Pooled pages are always regular data pages.
   DCHECK_NE(CODE_SPACE, space->identity());
   VirtualMemory reservation(data_page_allocator(), start, size);
-  if (!CommitMemory(&reservation)) return {};
-  if (Heap::ShouldZapGarbage()) {
-    ZapBlock(start, size, kZapValue);
+  if (!CommitMemory(&reservation, NOT_EXECUTABLE)) return {};
+  if (heap::ShouldZapGarbage()) {
+    heap::ZapBlock(start, size, kZapValue);
   }
 
   size_ += size;
   return MemoryChunkAllocationResult{
       chunk, size, area_start, area_end, std::move(reservation),
   };
-}
-
-void MemoryAllocator::ZapBlock(Address start, size_t size,
-                               uintptr_t zap_value) {
-  DCHECK(IsAligned(start, kTaggedSize));
-  DCHECK(IsAligned(size, kTaggedSize));
-  MemsetTagged(ObjectSlot(start), Object(static_cast<Address>(zap_value)),
-               size >> kTaggedSizeLog2);
 }
 
 void MemoryAllocator::InitializeOncePerProcess() {
@@ -746,7 +748,8 @@ bool MemoryAllocator::SetPermissionsOnExecutableMemoryChunk(VirtualMemory* vm,
                               PageAllocator::kReadWriteExecute)) {
           // Create the post-code guard page.
           if (vm->DiscardSystemPages(post_guard_page, page_size)) {
-            UpdateAllocatedSpaceLimits(start, code_area + aligned_area_size);
+            UpdateAllocatedSpaceLimits(start, code_area + aligned_area_size,
+                                       EXECUTABLE);
             return true;
           }
 
@@ -780,7 +783,8 @@ bool MemoryAllocator::SetPermissionsOnExecutableMemoryChunk(VirtualMemory* vm,
           // Create the post-code guard page.
           if (vm->SetPermissions(post_guard_page, page_size,
                                  PageAllocator::kNoAccess)) {
-            UpdateAllocatedSpaceLimits(start, code_area + aligned_area_size);
+            UpdateAllocatedSpaceLimits(start, code_area + aligned_area_size,
+                                       EXECUTABLE);
             return true;
           }
 
@@ -797,7 +801,7 @@ bool MemoryAllocator::SetPermissionsOnExecutableMemoryChunk(VirtualMemory* vm,
   return false;
 }
 
-#ifdef V8_ENABLE_CONSERVATIVE_STACK_SCANNING
+#if defined(V8_ENABLE_CONSERVATIVE_STACK_SCANNING) || defined(DEBUG)
 
 const BasicMemoryChunk* MemoryAllocator::LookupChunkContainingAddress(
     Address addr) const {
@@ -826,7 +830,7 @@ const BasicMemoryChunk* MemoryAllocator::LookupChunkContainingAddress(
   return nullptr;
 }
 
-#endif  // V8_ENABLE_CONSERVATIVE_STACK_SCANNING
+#endif  // V8_ENABLE_CONSERVATIVE_STACK_SCANNING || DEBUG
 
 void MemoryAllocator::RecordNormalPageCreated(const Page& page) {
 #ifdef V8_ENABLE_CONSERVATIVE_STACK_SCANNING

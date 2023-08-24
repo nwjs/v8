@@ -51,6 +51,7 @@
 #include "src/codegen/x64/register-x64.h"
 #include "src/codegen/x64/sse-instr.h"
 #include "src/objects/smi.h"
+
 #if defined(V8_OS_WIN_X64)
 #include "src/diagnostics/unwinding-info-win64.h"
 #endif
@@ -172,6 +173,7 @@ enum ScaleFactor : int8_t {
   times_half_system_pointer_size = times_4,
   times_system_pointer_size = times_8,
   times_tagged_size = (kTaggedSize == 8) ? times_8 : times_4,
+  times_external_pointer_size = V8_ENABLE_SANDBOX_BOOL ? times_4 : times_8,
 };
 
 class V8_EXPORT_PRIVATE Operand {
@@ -494,12 +496,14 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   static constexpr int kNoHandlerTable = 0;
   static constexpr SafepointTableBuilderBase* kNoSafepointTable = nullptr;
 
-  void GetCode(Isolate* isolate, CodeDesc* desc,
+  void GetCode(LocalIsolate* isolate, CodeDesc* desc,
                SafepointTableBuilderBase* safepoint_table_builder,
                int handler_table_offset);
 
+  // Convenience wrapper for allocating with an Isolate.
+  void GetCode(Isolate* isolate, CodeDesc* desc);
   // Convenience wrapper for code without safepoint or handler tables.
-  void GetCode(Isolate* isolate, CodeDesc* desc) {
+  void GetCode(LocalIsolate* isolate, CodeDesc* desc) {
     GetCode(isolate, desc, kNoSafepointTable, kNoHandlerTable);
   }
 
@@ -1500,6 +1504,8 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   void vbroadcastss(XMMRegister dst, XMMRegister src);
   void vbroadcastss(YMMRegister dst, Operand src);
   void vbroadcastss(YMMRegister dst, XMMRegister src);
+  void vbroadcastsd(YMMRegister dst, XMMRegister src);
+  void vbroadcastsd(YMMRegister dst, Operand src);
 
   void fma_instr(uint8_t op, XMMRegister dst, XMMRegister src1,
                  XMMRegister src2, VectorLength l, SIMDPrefix pp,
@@ -2196,6 +2202,8 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   void dp(uintptr_t data) { dq(data); }
   void dq(Label* label);
 
+  void WriteBuiltinJumpTableEntry(Label* label, const int table_pos);
+
   // Patch entries for partial constant pool.
   void PatchConstPool();
 
@@ -2697,12 +2705,12 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 
   bool is_optimizable_farjmp(int idx);
 
-  void AllocateAndInstallRequestedHeapNumbers(Isolate* isolate);
+  void AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate);
 
   int WriteCodeComments();
 
-  void GetCode(Isolate* isolate, CodeDesc* desc, int safepoint_table_offset,
-               int handler_table_offset);
+  void GetCode(LocalIsolate* isolate, CodeDesc* desc,
+               int safepoint_table_offset, int handler_table_offset);
 
   friend class EnsureSpace;
   friend class RegExpMacroAssemblerX64;

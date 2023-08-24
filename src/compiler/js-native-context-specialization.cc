@@ -1089,7 +1089,7 @@ Reduction JSNativeContextSpecialization::ReduceGlobalAccess(
   }
 
   ObjectRef property_cell_value = property_cell.value(broker());
-  if (property_cell_value.IsTheHole()) {
+  if (property_cell_value.IsPropertyCellHole()) {
     // The property cell is no longer valid.
     return NoChange();
   }
@@ -1172,7 +1172,7 @@ Reduction JSNativeContextSpecialization::ReduceGlobalAccess(
                     ? jsgraph()->TrueConstant()
                     : jsgraph()->Constant(property_cell_value, broker());
         DCHECK(!property_cell_value.IsHeapObject() ||
-               !property_cell_value.IsTheHole());
+               !property_cell_value.IsPropertyCellHole());
       } else {
         DCHECK_NE(AccessMode::kHas, access_mode);
 
@@ -1421,7 +1421,7 @@ Reduction JSNativeContextSpecialization::ReduceMegaDOMPropertyAccess(
 
     Node* inputs[8] = {jsgraph()->HeapConstant(callable.code()),
                        jsgraph()->Constant(function_template_info, broker()),
-                       jsgraph()->Constant(stack_arg_count),
+                       jsgraph()->Int32Constant(stack_arg_count),
                        lookup_start_object,
                        jsgraph()->Constant(native_context(), broker()),
                        frame_state,
@@ -1950,7 +1950,7 @@ Reduction JSNativeContextSpecialization::ReduceJSGetIterator(Node* node) {
     }
     Node* throw_node =
         graph()->NewNode(common()->Throw(), call_runtime, control_not_iterator);
-    NodeProperties::MergeControlToEnd(graph(), common(), throw_node);
+    MergeControlToEnd(graph(), common(), throw_node);
   }
 
   control = graph()->NewNode(common()->IfFalse(), branch);
@@ -2019,7 +2019,7 @@ Reduction JSNativeContextSpecialization::ReduceJSGetIterator(Node* node) {
     }
     Node* throw_node =
         graph()->NewNode(common()->Throw(), call_runtime, control_not_receiver);
-    NodeProperties::MergeControlToEnd(graph(), common(), throw_node);
+    MergeControlToEnd(graph(), common(), throw_node);
   }
   Node* if_receiver = graph()->NewNode(common()->IfTrue(), branch_node);
   ReplaceWithValue(node, call_property, effect, if_receiver);
@@ -2513,9 +2513,7 @@ Reduction JSNativeContextSpecialization::ReduceEagerDeoptimize(
   Node* deoptimize =
       graph()->NewNode(common()->Deoptimize(reason, FeedbackSource()),
                        frame_state, effect, control);
-  // TODO(bmeurer): This should be on the AdvancedReducer somehow.
-  NodeProperties::MergeControlToEnd(graph(), common(), deoptimize);
-  Revisit(graph()->end());
+  MergeControlToEnd(graph(), common(), deoptimize);
   node->TrimInputCount(0);
   NodeProperties::ChangeOp(node, common()->Dead());
   return Changed(node);
@@ -2767,11 +2765,11 @@ Node* JSNativeContextSpecialization::InlineApiCall(
 
   // Only setters have a value.
   int const argc = value == nullptr ? 0 : 1;
-  // The stub always expects the receiver as the first param on the stack.
+  // The builtin always expects the receiver as the first param on the stack.
+  bool no_profiling = broker()->dependencies()->DependOnNoProfilingProtector();
   Callable call_api_callback = Builtins::CallableFor(
-      isolate(), call_handler_info.object()->IsSideEffectCallHandlerInfo()
-                     ? Builtin::kCallApiCallbackWithSideEffects
-                     : Builtin::kCallApiCallbackNoSideEffects);
+      isolate(), no_profiling ? Builtin::kCallApiCallbackOptimizedNoProfiling
+                              : Builtin::kCallApiCallbackOptimized);
   CallInterfaceDescriptor call_interface_descriptor =
       call_api_callback.descriptor();
   auto call_descriptor = Linkage::GetStubCallDescriptor(
@@ -2875,9 +2873,8 @@ JSNativeContextSpecialization::BuildPropertyTest(
         holder.value());
   }
 
-  Node* value = access_info.IsNotFound() ? jsgraph()->FalseConstant()
-                                         : jsgraph()->TrueConstant();
-  return ValueEffectControl(value, effect, control);
+  return ValueEffectControl(
+      jsgraph()->BooleanConstant(!access_info.IsNotFound()), effect, control);
 }
 
 base::Optional<JSNativeContextSpecialization::ValueEffectControl>
@@ -3037,6 +3034,7 @@ JSNativeContextSpecialization::BuildPropertyStore(
       case MachineRepresentation::kBit:
       case MachineRepresentation::kCompressedPointer:
       case MachineRepresentation::kCompressed:
+      case MachineRepresentation::kIndirectPointer:
       case MachineRepresentation::kSandboxedPointer:
       case MachineRepresentation::kWord8:
       case MachineRepresentation::kWord16:
@@ -3251,7 +3249,7 @@ JSNativeContextSpecialization::BuildElementAccess(
     // of holey backing stores.
     if (IsHoleyElementsKind(elements_kind)) {
       element_access.type =
-          Type::Union(element_type, Type::Hole(), graph()->zone());
+          Type::Union(element_type, Type::TheHole(), graph()->zone());
     }
     if (elements_kind == HOLEY_ELEMENTS ||
         elements_kind == HOLEY_SMI_ELEMENTS) {
@@ -3367,7 +3365,7 @@ JSNativeContextSpecialization::BuildElementAccess(
       Node* vfalse = jsgraph()->FalseConstant();
 
       element_access.type =
-          Type::Union(element_type, Type::Hole(), graph()->zone());
+          Type::Union(element_type, Type::TheHole(), graph()->zone());
 
       if (elements_kind == HOLEY_ELEMENTS ||
           elements_kind == HOLEY_SMI_ELEMENTS) {

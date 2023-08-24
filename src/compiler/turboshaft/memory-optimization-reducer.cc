@@ -16,10 +16,11 @@ const TSCallDescriptor* CreateAllocateBuiltinDescriptor(Zone* zone) {
           AllocateDescriptor{}.GetStackParameterCount(),
           CallDescriptor::kCanUseRoots, Operator::kNoThrow,
           StubCallMode::kCallCodeObject),
-      zone);
+      CanThrow::kNo, zone);
 }
 
 void MemoryAnalyzer::Run() {
+  if (allocation_folding == AllocationFolding::kDontAllocationFolding) return;
   block_states[current_block] = BlockState{};
   BlockIndex end = BlockIndex(input_graph.block_count());
   while (current_block < end) {

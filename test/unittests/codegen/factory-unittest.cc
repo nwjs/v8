@@ -38,7 +38,7 @@ TEST_F(FactoryCodeBuilderTest, Factory_CodeBuilder) {
   CHECK(
       i_isolate()->heap()->InSpace(code->instruction_stream(), CODE_LO_SPACE));
 #if VERIFY_HEAP
-  code->ObjectVerify(i_isolate());
+  Object::ObjectVerify(*code, i_isolate());
 #endif
 }
 
@@ -59,6 +59,9 @@ class FactoryCodeBuilderOOMTest : public TestWithIsolate {
  public:
   static void SetUpTestSuite() {
     v8_flags.max_old_space_size = kInstructionSize / MB / 2;  // In MB.
+    // Keep semi-space size small so that the heuristics don't think we have
+    // enough combined space for the allocation.
+    v8_flags.max_semi_space_size = 8;
   }
 
   void SetUp() override {

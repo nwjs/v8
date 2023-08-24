@@ -95,7 +95,8 @@ namespace {
 void TraceInOptimizationQueue(JSFunction function, CodeKind current_code_kind) {
   if (v8_flags.trace_opt_verbose) {
     PrintF("[not marking function %s (%s) for optimization: already queued]\n",
-           function.DebugNameCStr().get(), CodeKindToString(current_code_kind));
+           function->DebugNameCStr().get(),
+           CodeKindToString(current_code_kind));
   }
 }
 
@@ -104,7 +105,7 @@ void TraceHeuristicOptimizationDisallowed(JSFunction function) {
     PrintF(
         "[not marking function %s for optimization: marked with "
         "%%PrepareFunctionForOptimization for manual optimization]\n",
-        function.DebugNameCStr().get());
+        function->DebugNameCStr().get());
   }
 }
 
@@ -113,7 +114,7 @@ void TraceRecompile(Isolate* isolate, JSFunction function,
   if (v8_flags.trace_opt) {
     CodeTracer::Scope scope(isolate->GetCodeTracer());
     PrintF(scope.file(), "[marking ");
-    function.ShortPrint(scope.file());
+    ShortPrint(function, scope.file());
     PrintF(scope.file(), " for optimization to %s, %s, reason: %s",
            CodeKindToString(d.code_kind), ToString(d.concurrency_mode),
            OptimizationReasonToString(d.optimization_reason));
@@ -127,7 +128,7 @@ void TraceManualRecompile(JSFunction function, CodeKind code_kind,
                           ConcurrencyMode concurrency_mode) {
   if (v8_flags.trace_opt) {
     PrintF("[manually marking ");
-    function.ShortPrint();
+    ShortPrint(function);
     PrintF(" for optimization to %s, %s]\n", CodeKindToString(code_kind),
            ToString(concurrency_mode));
   }
@@ -136,7 +137,7 @@ void TraceManualRecompile(JSFunction function, CodeKind code_kind,
 void TieringManager::Optimize(JSFunction function, OptimizationDecision d) {
   DCHECK(d.should_optimize());
   TraceRecompile(isolate_, function, d);
-  function.MarkForOptimization(isolate_, d.code_kind, d.concurrency_mode);
+  function->MarkForOptimization(isolate_, d.code_kind, d.concurrency_mode);
 }
 
 void TieringManager::MarkForTurboFanOptimization(JSFunction function) {
@@ -144,6 +145,20 @@ void TieringManager::MarkForTurboFanOptimization(JSFunction function) {
 }
 
 namespace {
+
+// Returns true when |function| should be enqueued for sparkplug compilation for
+// the first time.
+bool FirstTimeTierUpToSparkplug(Isolate* isolate, JSFunction function) {
+  return !function->has_feedback_vector() ||
+         // We request sparkplug even in the presence of a fbv, if we are
+         // running ignition and haven't enqueued the function for sparkplug
+         // batch compilation yet. This ensures we tier-up to sparkplug when the
+         // feedback vector is allocated eagerly (e.g. for logging function
+         // events; see JSFunction::InitializeFeedbackCell()).
+         (function->ActiveTierIsIgnition() &&
+          CanCompileWithBaseline(isolate, function->shared()) &&
+          !function->shared()->sparkplug_compiled());
+}
 
 bool TiersUpToMaglev(CodeKind code_kind) {
   // TODO(v8:7700): Flip the UNLIKELY when appropriate.
@@ -178,49 +193,50 @@ int InterruptBudgetFor(base::Optional<CodeKind> code_kind,
 int TieringManager::InterruptBudgetFor(
     Isolate* isolate, JSFunction function,
     base::Optional<CodeKind> override_active_tier) {
-  DCHECK(function.shared().is_compiled());
+  DCHECK(function->shared()->is_compiled());
   const int bytecode_length =
-      function.shared().GetBytecodeArray(isolate).length();
-  if (function.has_feedback_vector()) {
-    if (bytecode_length > v8_flags.max_optimized_bytecode_size) {
-      // Decrease times of interrupt budget underflow, the reason of not setting
-      // to INT_MAX is the interrupt budget may overflow when doing add
-      // operation for forward jump.
-      return INT_MAX / 2;
-    }
-    return ::i::InterruptBudgetFor(
-        override_active_tier ? override_active_tier : function.GetActiveTier(),
-        function.tiering_state(), bytecode_length);
+      function->shared()->GetBytecodeArray(isolate)->length();
+
+  if (FirstTimeTierUpToSparkplug(isolate, function)) {
+    return bytecode_length * v8_flags.invocation_count_for_feedback_allocation;
   }
 
-  DCHECK(!function.has_feedback_vector());
-  return bytecode_length * v8_flags.invocation_count_for_feedback_allocation;
+  DCHECK(function->has_feedback_vector());
+  if (bytecode_length > v8_flags.max_optimized_bytecode_size) {
+    // Decrease times of interrupt budget underflow, the reason of not setting
+    // to INT_MAX is the interrupt budget may overflow when doing add
+    // operation for forward jump.
+    return INT_MAX / 2;
+  }
+  return ::i::InterruptBudgetFor(
+      override_active_tier ? override_active_tier : function->GetActiveTier(),
+      function->tiering_state(), bytecode_length);
 }
 
 namespace {
 
 void TrySetOsrUrgency(Isolate* isolate, JSFunction function, int osr_urgency) {
-  SharedFunctionInfo shared = function.shared();
+  SharedFunctionInfo shared = function->shared();
   if (V8_UNLIKELY(!v8_flags.use_osr)) return;
-  if (V8_UNLIKELY(shared.optimization_disabled())) return;
+  if (V8_UNLIKELY(shared->optimization_disabled())) return;
 
   // We've passed all checks - bump the OSR urgency.
 
-  FeedbackVector fv = function.feedback_vector();
+  FeedbackVector fv = function->feedback_vector();
   if (V8_UNLIKELY(v8_flags.trace_osr)) {
     CodeTracer::Scope scope(isolate->GetCodeTracer());
     PrintF(scope.file(),
            "[OSR - setting osr urgency. function: %s, old urgency: %d, new "
            "urgency: %d]\n",
-           function.DebugNameCStr().get(), fv.osr_urgency(), osr_urgency);
+           function->DebugNameCStr().get(), fv->osr_urgency(), osr_urgency);
   }
 
-  DCHECK_GE(osr_urgency, fv.osr_urgency());  // Never lower urgency here.
-  fv.set_osr_urgency(osr_urgency);
+  DCHECK_GE(osr_urgency, fv->osr_urgency());  // Never lower urgency here.
+  fv->set_osr_urgency(osr_urgency);
 }
 
 void TryIncrementOsrUrgency(Isolate* isolate, JSFunction function) {
-  int old_urgency = function.feedback_vector().osr_urgency();
+  int old_urgency = function->feedback_vector()->osr_urgency();
   int new_urgency = std::min(old_urgency + 1, FeedbackVector::kMaxOsrUrgency);
   TrySetOsrUrgency(isolate, function, new_urgency);
 }
@@ -238,9 +254,10 @@ void TieringManager::RequestOsrAtNextOpportunity(JSFunction function) {
 
 void TieringManager::MaybeOptimizeFrame(JSFunction function,
                                         CodeKind current_code_kind) {
-  const TieringState tiering_state = function.feedback_vector().tiering_state();
+  const TieringState tiering_state =
+      function->feedback_vector()->tiering_state();
   const TieringState osr_tiering_state =
-      function.feedback_vector().osr_tiering_state();
+      function->feedback_vector()->osr_tiering_state();
   // Attenzione! Update this constant in case the condition below changes.
   static_assert(kTieringStateInProgressBlocksTierup);
   if (V8_UNLIKELY(IsInProgress(tiering_state)) ||
@@ -259,7 +276,7 @@ void TieringManager::MaybeOptimizeFrame(JSFunction function,
   }
 
   // TODO(v8:7700): Consider splitting this up for Maglev/Turbofan.
-  if (V8_UNLIKELY(function.shared().optimization_disabled())) return;
+  if (V8_UNLIKELY(function->shared()->optimization_disabled())) return;
 
   if (V8_UNLIKELY(v8_flags.always_osr)) {
     TryRequestOsrAtNextOpportunity(isolate_, function);
@@ -272,9 +289,9 @@ void TieringManager::MaybeOptimizeFrame(JSFunction function,
   if (IsRequestTurbofan(tiering_state) ||
       (maglev_osr && IsRequestMaglev(tiering_state)) ||
       (current_code_kind < CodeKind::TURBOFAN &&
-       function.HasAvailableCodeKind(CodeKind::TURBOFAN)) ||
+       function->HasAvailableCodeKind(CodeKind::TURBOFAN)) ||
       (maglev_osr && current_code_kind < CodeKind::MAGLEV &&
-       function.HasAvailableCodeKind(CodeKind::MAGLEV))) {
+       function->HasAvailableCodeKind(CodeKind::MAGLEV))) {
     if (maglev_osr && current_code_kind == CodeKind::MAGLEV &&
         !v8_flags.osr_from_maglev)
       return;
@@ -289,18 +306,18 @@ void TieringManager::MaybeOptimizeFrame(JSFunction function,
   }
 
   DCHECK(!IsRequestTurbofan(tiering_state));
-  DCHECK(!function.HasAvailableCodeKind(CodeKind::TURBOFAN));
+  DCHECK(!function->HasAvailableCodeKind(CodeKind::TURBOFAN));
   OptimizationDecision d =
-      ShouldOptimize(function.feedback_vector(), current_code_kind);
+      ShouldOptimize(function->feedback_vector(), current_code_kind);
   // We might be stuck in a baseline frame that wants to tier up to Maglev, but
   // is in a loop, and can't OSR, because Maglev doesn't have OSR. Allow it to
   // skip over Maglev by re-checking ShouldOptimize as if we were in Maglev.
   if (!maglev_osr && d.should_optimize() && d.code_kind == CodeKind::MAGLEV) {
     bool is_marked_for_maglev_optimization =
         IsRequestMaglev(tiering_state) ||
-        function.HasAvailableCodeKind(CodeKind::MAGLEV);
+        function->HasAvailableCodeKind(CodeKind::MAGLEV);
     if (is_marked_for_maglev_optimization) {
-      d = ShouldOptimize(function.feedback_vector(), CodeKind::MAGLEV);
+      d = ShouldOptimize(function->feedback_vector(), CodeKind::MAGLEV);
     }
   }
 
@@ -309,22 +326,22 @@ void TieringManager::MaybeOptimizeFrame(JSFunction function,
 
 OptimizationDecision TieringManager::ShouldOptimize(
     FeedbackVector feedback_vector, CodeKind current_code_kind) {
-  SharedFunctionInfo shared = feedback_vector.shared_function_info();
+  SharedFunctionInfo shared = feedback_vector->shared_function_info();
   if (TiersUpToMaglev(current_code_kind) &&
-      shared.PassesFilter(v8_flags.maglev_filter) &&
-      !shared.maglev_compilation_failed()) {
+      shared->PassesFilter(v8_flags.maglev_filter) &&
+      !shared->maglev_compilation_failed()) {
     return OptimizationDecision::Maglev();
   } else if (current_code_kind == CodeKind::TURBOFAN) {
     // Already in the top tier.
     return OptimizationDecision::DoNotOptimize();
   }
 
-  if (!v8_flags.turbofan || !shared.PassesFilter(v8_flags.turbo_filter)) {
+  if (!v8_flags.turbofan || !shared->PassesFilter(v8_flags.turbo_filter)) {
     return OptimizationDecision::DoNotOptimize();
   }
 
-  BytecodeArray bytecode = shared.GetBytecodeArray(isolate_);
-  if (bytecode.length() > v8_flags.max_optimized_bytecode_size) {
+  BytecodeArray bytecode = shared->GetBytecodeArray(isolate_);
+  if (bytecode->length() > v8_flags.max_optimized_bytecode_size) {
     return OptimizationDecision::DoNotOptimize();
   }
 
@@ -332,26 +349,26 @@ OptimizationDecision TieringManager::ShouldOptimize(
 }
 
 void TieringManager::NotifyICChanged(FeedbackVector vector) {
-  CodeKind code_kind = vector.has_optimized_code()
-                           ? vector.optimized_code().kind()
-                       : vector.shared_function_info().HasBaselineCode()
+  CodeKind code_kind = vector->has_optimized_code()
+                           ? vector->optimized_code()->kind()
+                       : vector->shared_function_info()->HasBaselineCode()
                            ? CodeKind::BASELINE
                            : CodeKind::INTERPRETED_FUNCTION;
   OptimizationDecision decision = ShouldOptimize(vector, code_kind);
   if (decision.should_optimize()) {
-    SharedFunctionInfo shared = vector.shared_function_info();
-    int bytecode_length = shared.GetBytecodeArray(isolate_).length();
-    FeedbackCell cell = vector.parent_feedback_cell();
+    SharedFunctionInfo shared = vector->shared_function_info();
+    int bytecode_length = shared->GetBytecodeArray(isolate_)->length();
+    FeedbackCell cell = vector->parent_feedback_cell();
     int invocations = v8_flags.minimum_invocations_after_ic_update;
     int bytecodes = std::min(bytecode_length, (kMaxInt >> 1) / invocations);
     int new_budget = invocations * bytecodes;
-    int current_budget = cell.interrupt_budget();
+    int current_budget = cell->interrupt_budget();
     if (new_budget > current_budget) {
       if (v8_flags.trace_opt_verbose) {
         PrintF("[delaying optimization of %s, IC changed]\n",
-               shared.DebugNameCStr().get());
+               shared->DebugNameCStr().get());
       }
-      cell.set_interrupt_budget(new_budget);
+      cell->set_interrupt_budget(new_budget);
     }
   }
 }
@@ -364,28 +381,38 @@ TieringManager::OnInterruptTickScope::OnInterruptTickScope() {
 void TieringManager::OnInterruptTick(Handle<JSFunction> function,
                                      CodeKind code_kind) {
   IsCompiledScope is_compiled_scope(
-      function->shared().is_compiled_scope(isolate_));
+      function->shared()->is_compiled_scope(isolate_));
 
   // Remember whether the function had a vector at this point. This is relevant
   // later since the configuration 'Ignition without a vector' can be
   // considered a tier on its own. We begin tiering up to tiers higher than
   // Sparkplug only when reaching this point *with* a feedback vector.
   const bool had_feedback_vector = function->has_feedback_vector();
+  const bool first_time_tiered_up_to_sparkplug =
+      FirstTimeTierUpToSparkplug(isolate_, *function);
+  const bool compile_sparkplug =
+      CanCompileWithBaseline(isolate_, function->shared()) &&
+      function->ActiveTierIsIgnition();
 
   // Ensure that the feedback vector has been allocated.
   if (!had_feedback_vector) {
+    if (compile_sparkplug) {
+      // Mark the function as compiled with sparkplug before the feedback vector
+      // is created to initialize the interrupt budget for the next tier.
+      function->shared()->set_sparkplug_compiled(true);
+    }
     JSFunction::CreateAndAttachFeedbackVector(isolate_, function,
                                               &is_compiled_scope);
     DCHECK(is_compiled_scope.is_compiled());
     // Also initialize the invocation count here. This is only really needed for
     // OSR. When we OSR functions with lazy feedback allocation we want to have
     // a non zero invocation count so we can inline functions.
-    function->feedback_vector().set_invocation_count(1, kRelaxedStore);
+    function->feedback_vector()->set_invocation_count(1, kRelaxedStore);
   }
 
   DCHECK(function->has_feedback_vector());
-  DCHECK(function->shared().is_compiled());
-  DCHECK(function->shared().HasBytecodeArray());
+  DCHECK(function->shared()->is_compiled());
+  DCHECK(function->shared()->HasBytecodeArray());
 
   // TODO(jgruber): Consider integrating this into a linear tiering system
   // controlled by TieringState in which the order is always
@@ -395,23 +422,26 @@ void TieringManager::OnInterruptTick(Handle<JSFunction> function,
   // batching compilation can introduce arbitrary latency between the SP
   // compile request and fulfillment, which doesn't work with strictly linear
   // tiering.
-  if (CanCompileWithBaseline(isolate_, function->shared()) &&
-      function->ActiveTierIsIgnition()) {
+  if (compile_sparkplug) {
     if (v8_flags.baseline_batch_compilation) {
       isolate_->baseline_batch_compiler()->EnqueueFunction(function);
     } else {
       IsCompiledScope is_compiled_scope(
-          function->shared().is_compiled_scope(isolate_));
+          function->shared()->is_compiled_scope(isolate_));
       Compiler::CompileBaseline(isolate_, function, Compiler::CLEAR_EXCEPTION,
                                 &is_compiled_scope);
     }
-    function->shared().set_sparkplug_compiled(true);
   }
 
   // We only tier up beyond sparkplug if we already had a feedback vector.
-  if (!had_feedback_vector) {
-    // The interrupt budget has already been set by
-    // JSFunction::CreateAndAttachFeedbackVector.
+  if (first_time_tiered_up_to_sparkplug) {
+    // If we didn't have a feedback vector, the interrupt budget has already
+    // been set by JSFunction::CreateAndAttachFeedbackVector, so no need to
+    // set it again.
+    if (had_feedback_vector) {
+      function->shared()->set_sparkplug_compiled(true);
+      function->SetInterruptBudget(isolate_);
+    }
     return;
   }
 

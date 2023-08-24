@@ -155,10 +155,12 @@ namespace {
 class OutOfLineRecordWrite final : public OutOfLineCode {
  public:
   OutOfLineRecordWrite(CodeGenerator* gen, Register object, Operand offset,
-                       RecordWriteMode mode, StubCallMode stub_mode)
+                       Register value, RecordWriteMode mode,
+                       StubCallMode stub_mode)
       : OutOfLineCode(gen),
         object_(object),
         offset_(offset),
+        value_(value),
         mode_(mode),
 #if V8_ENABLE_WEBASSEMBLY
         stub_mode_(stub_mode),
@@ -168,8 +170,11 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
   }
 
   void Generate() final {
-    __ CheckPageFlag(object_, MemoryChunk::kPointersFromHereAreInterestingMask,
-                     eq, exit());
+    if (COMPRESS_POINTERS_BOOL) {
+      __ DecompressTagged(value_, value_);
+    }
+    __ CheckPageFlag(value_, MemoryChunk::kPointersToHereAreInterestingMask, eq,
+                     exit());
     SaveFPRegsMode const save_fp_mode = frame()->DidAllocateDoubleRegisters()
                                             ? SaveFPRegsMode::kSave
                                             : SaveFPRegsMode::kIgnore;
@@ -198,6 +203,7 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
  private:
   Register const object_;
   Operand const offset_;
+  Register const value_;
   RecordWriteMode const mode_;
 #if V8_ENABLE_WEBASSEMBLY
   StubCallMode const stub_mode_;
@@ -646,9 +652,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                            FieldMemOperand(func, JSFunction::kContextOffset));
         __ Assert(eq, AbortReason::kWrongFunctionContext, cp, Operand(scratch));
       }
-      static_assert(kJavaScriptCallCodeStartRegister == a2, "ABI mismatch");
-      __ LoadTaggedField(a2, FieldMemOperand(func, JSFunction::kCodeOffset));
-      __ CallCodeObject(a2);
+      __ CallJSFunction(func);
       RecordCallPosition(instr);
       frame_access_state()->ClearSPDelta();
       break;
@@ -820,32 +824,33 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       Register object = i.InputRegister(0);
       Register value = i.InputRegister(2);
 
-      auto ool = zone()->New<OutOfLineRecordWrite>(
-          this, object, Operand(i.InputOperand(1)), mode,
-          DetermineStubCallMode());
       if (addressing_mode == kMode_MRI) {
+        auto ool = zone()->New<OutOfLineRecordWrite>(
+            this, object, Operand(i.InputInt64(1)), value, mode,
+            DetermineStubCallMode());
         __ StoreTaggedField(value, MemOperand(object, i.InputInt64(1)));
+
+        if (mode > RecordWriteMode::kValueIsPointer) {
+          __ JumpIfSmi(value, ool->exit());
+        }
+        __ CheckPageFlag(object,
+                         MemoryChunk::kPointersFromHereAreInterestingMask, ne,
+                         ool->entry());
+        __ bind(ool->exit());
       } else {
         DCHECK_EQ(addressing_mode, kMode_MRR);
+        auto ool = zone()->New<OutOfLineRecordWrite>(
+            this, object, Operand(i.InputRegister(1)), value, mode,
+            DetermineStubCallMode());
         __ StoreTaggedField(value, MemOperand(object, i.InputRegister(1)));
-      }
-      if (mode > RecordWriteMode::kValueIsPointer) {
-        __ JumpIfSmi(value, ool->exit());
-      }
-      // Checking the {value}'s page flags first favors old-to-old pointers,
-      // which can skip the OOL code. Checking the {object}'s flags first
-      // would favor new-to-new pointers.
-      if (COMPRESS_POINTERS_BOOL) {
-        MachineRepresentation rep =
-            LocationOperand::cast(instr->InputAt(2))->representation();
-        if (rep == MachineRepresentation::kCompressed ||
-            rep == MachineRepresentation::kCompressedPointer) {
-          __ DecompressTagged(value, value);
+        if (mode > RecordWriteMode::kValueIsPointer) {
+          __ JumpIfSmi(value, ool->exit());
         }
+        __ CheckPageFlag(object,
+                         MemoryChunk::kPointersFromHereAreInterestingMask, ne,
+                         ool->entry());
+        __ bind(ool->exit());
       }
-      __ CheckPageFlag(value, MemoryChunk::kPointersToHereAreInterestingMask,
-                       ne, ool->entry());
-      __ bind(ool->exit());
       break;
     }
     case kArchAtomicStoreWithWriteBarrier: {
@@ -855,24 +860,18 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       Register value = i.InputRegister(2);
 
       auto ool = zone()->New<OutOfLineRecordWrite>(
-          this, object, Operand(offset), mode, DetermineStubCallMode());
+          this, object, Operand(offset), value, mode, DetermineStubCallMode());
       __ AtomicStoreTaggedField(value, MemOperand(object, offset));
       if (mode > RecordWriteMode::kValueIsPointer) {
         __ JumpIfSmi(value, ool->exit());
       }
-      if (COMPRESS_POINTERS_BOOL) {
-        MachineRepresentation rep =
-            LocationOperand::cast(instr->InputAt(2))->representation();
-        if (rep == MachineRepresentation::kCompressed ||
-            rep == MachineRepresentation::kCompressedPointer) {
-          __ DecompressTagged(value, value);
-        }
-      }
-      __ CheckPageFlag(value, MemoryChunk::kPointersToHereAreInterestingMask,
+      __ CheckPageFlag(object, MemoryChunk::kPointersFromHereAreInterestingMask,
                        ne, ool->entry());
       __ bind(ool->exit());
       break;
     }
+    case kArchStoreIndirectWithWriteBarrier:
+      UNREACHABLE();
     case kArchStackSlot: {
       UseScratchRegisterScope temps(masm());
       Register scratch = temps.Acquire();
@@ -2093,32 +2092,16 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
 
    private:
     void GenerateCallToTrap(TrapId trap_id) {
-      if (trap_id == TrapId::kInvalid) {
-        // We cannot test calls to the runtime in cctest/test-run-wasm.
-        // Therefore we emit a call to C here instead of a call to the runtime.
-        // We use the context register as the scratch register, because we do
-        // not have a context here.
-        __ PrepareCallCFunction(0, 0, cp);
-        __ CallCFunction(
-            ExternalReference::wasm_call_trap_callback_for_testing(), 0);
-        __ LeaveFrame(StackFrame::WASM);
-        auto call_descriptor = gen_->linkage()->GetIncomingDescriptor();
-        int pop_count = static_cast<int>(call_descriptor->ParameterSlotCount());
-        pop_count += (pop_count & 1);  // align
-        __ Drop(pop_count);
-        __ Ret();
-      } else {
-        gen_->AssembleSourcePosition(instr_);
-        // A direct call to a wasm runtime stub defined in this module.
-        // Just encode the stub index. This will be patched when the code
-        // is added to the native module and copied into wasm code space.
-        __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
-        ReferenceMap* reference_map =
-            gen_->zone()->New<ReferenceMap>(gen_->zone());
-        gen_->RecordSafepoint(reference_map);
-        if (v8_flags.debug_code) {
-          __ stop();
-        }
+      gen_->AssembleSourcePosition(instr_);
+      // A direct call to a wasm runtime stub defined in this module.
+      // Just encode the stub index. This will be patched when the code
+      // is added to the native module and copied into wasm code space.
+      __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
+      ReferenceMap* reference_map =
+          gen_->zone()->New<ReferenceMap>(gen_->zone());
+      gen_->RecordSafepoint(reference_map);
+      if (v8_flags.debug_code) {
+        __ stop();
       }
     }
     Instruction* instr_;
@@ -2181,70 +2164,7 @@ void CodeGenerator::AssembleArchBoolean(Instruction* instr,
       Register temp1 = right.is_reg() ? i.TempRegister(1) : no_reg;
       SignExtend(masm(), instr, &left, &right, &temp0, &temp1);
     }
-    switch (cc) {
-      case eq:
-      case ne: {
-        if (instr->InputAt(1)->IsImmediate()) {
-          if (is_int12(-right.immediate())) {
-            if (right.immediate() == 0) {
-              if (cc == eq) {
-                __ Sltu(result, left, 1);
-              } else {
-                __ Sltu(result, zero_reg, left);
-              }
-            } else {
-              __ Add_d(result, left, Operand(-right.immediate()));
-              if (cc == eq) {
-                __ Sltu(result, result, 1);
-              } else {
-                __ Sltu(result, zero_reg, result);
-              }
-            }
-          } else {
-            __ Xor(result, left, Operand(right));
-            if (cc == eq) {
-              __ Sltu(result, result, 1);
-            } else {
-              __ Sltu(result, zero_reg, result);
-            }
-          }
-        } else {
-          __ Xor(result, left, right);
-          if (cc == eq) {
-            __ Sltu(result, result, 1);
-          } else {
-            __ Sltu(result, zero_reg, result);
-          }
-        }
-        break;
-      }
-      case lt:
-        __ Slt(result, left, right);
-        break;
-      case gt:
-        __ Sgt(result, left, right);
-        break;
-      case le:
-        __ Sle(result, left, right);
-        break;
-      case ge:
-        __ Sge(result, left, right);
-        break;
-      case lo:
-        __ Sltu(result, left, right);
-        break;
-      case hs:
-        __ Sgeu(result, left, right);
-        break;
-      case hi:
-        __ Sgtu(result, left, right);
-        break;
-      case ls:
-        __ Sleu(result, left, right);
-        break;
-      default:
-        UNREACHABLE();
-    }
+    __ CompareWord(cc, result, left, right);
     return;
   } else if (instr->arch_opcode() == kLoong64Float64Cmp ||
              instr->arch_opcode() == kLoong64Float32Cmp) {
@@ -2569,11 +2489,12 @@ AllocatedOperand CodeGenerator::Push(InstructionOperand* source) {
 
 void CodeGenerator::Pop(InstructionOperand* dest, MachineRepresentation rep) {
   Loong64OperandConverter g(this, nullptr);
-  int new_slots = ElementSizeInPointers(rep);
-  frame_access_state()->IncreaseSPDelta(-new_slots);
+  int dropped_slots = ElementSizeInPointers(rep);
   if (dest->IsRegister()) {
+    frame_access_state()->IncreaseSPDelta(-dropped_slots);
     __ Pop(g.ToRegister(dest));
   } else if (dest->IsStackSlot()) {
+    frame_access_state()->IncreaseSPDelta(-dropped_slots);
     UseScratchRegisterScope temps(masm());
     Register scratch = temps.Acquire();
     __ Pop(scratch);
@@ -2582,12 +2503,13 @@ void CodeGenerator::Pop(InstructionOperand* dest, MachineRepresentation rep) {
     int last_frame_slot_id =
         frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
     int sp_delta = frame_access_state_->sp_delta();
-    int slot_id = last_frame_slot_id + sp_delta + new_slots;
+    int slot_id = last_frame_slot_id + sp_delta;
     AllocatedOperand stack_slot(LocationOperand::STACK_SLOT, rep, slot_id);
     AssembleMove(&stack_slot, dest);
-    __ Add_d(sp, sp, Operand(new_slots * kSystemPointerSize));
+    frame_access_state()->IncreaseSPDelta(-dropped_slots);
+    __ Add_d(sp, sp, Operand(dropped_slots * kSystemPointerSize));
   }
-  temp_slots_ -= new_slots;
+  temp_slots_ -= dropped_slots;
 }
 
 void CodeGenerator::PopTempStackSlots() {

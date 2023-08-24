@@ -84,10 +84,10 @@ void StartupSerializer::SerializeObjectImpl(Handle<HeapObject> obj,
                                             SlotType slot_type) {
   PtrComprCageBase cage_base(isolate());
 #ifdef DEBUG
-  if (obj->IsJSFunction(cage_base)) {
+  if (IsJSFunction(*obj, cage_base)) {
     v8::base::OS::PrintError("Reference stack:\n");
     PrintStack(std::cerr);
-    obj->Print(std::cerr);
+    Print(*obj, std::cerr);
     FATAL(
         "JSFunction should be added through the context snapshot instead of "
         "the isolate snapshot");
@@ -96,7 +96,7 @@ void StartupSerializer::SerializeObjectImpl(Handle<HeapObject> obj,
   {
     DisallowGarbageCollection no_gc;
     HeapObject raw = *obj;
-    DCHECK(!raw.IsInstructionStream());
+    DCHECK(!IsInstructionStream(raw));
     if (SerializeHotObject(raw)) return;
     if (IsRootAndHasBeenSerialized(raw) && SerializeRoot(raw)) return;
   }
@@ -105,24 +105,24 @@ void StartupSerializer::SerializeObjectImpl(Handle<HeapObject> obj,
   if (SerializeUsingSharedHeapObjectCache(&sink_, obj)) return;
   if (SerializeBackReference(*obj)) return;
 
-  if (USE_SIMULATOR_BOOL && obj->IsAccessorInfo(cage_base)) {
+  if (USE_SIMULATOR_BOOL && IsAccessorInfo(*obj, cage_base)) {
     // Wipe external reference redirects in the accessor info.
     Handle<AccessorInfo> info = Handle<AccessorInfo>::cast(obj);
     info->remove_getter_redirection(isolate());
     accessor_infos_.Push(*info);
-  } else if (USE_SIMULATOR_BOOL && obj->IsCallHandlerInfo(cage_base)) {
+  } else if (USE_SIMULATOR_BOOL && IsCallHandlerInfo(*obj, cage_base)) {
     Handle<CallHandlerInfo> info = Handle<CallHandlerInfo>::cast(obj);
     info->remove_callback_redirection(isolate());
     call_handler_infos_.Push(*info);
-  } else if (obj->IsScript(cage_base) &&
+  } else if (IsScript(*obj, cage_base) &&
              Handle<Script>::cast(obj)->IsUserJavaScript()) {
     Handle<Script>::cast(obj)->set_context_data(
         ReadOnlyRoots(isolate()).uninitialized_symbol());
-  } else if (obj->IsSharedFunctionInfo(cage_base)) {
+  } else if (IsSharedFunctionInfo(*obj, cage_base)) {
     // Clear inferred name for native functions.
     Handle<SharedFunctionInfo> shared = Handle<SharedFunctionInfo>::cast(obj);
     if (!shared->IsSubjectToDebugging() && shared->HasUncompiledData()) {
-      shared->uncompiled_data().set_inferred_name(
+      shared->uncompiled_data()->set_inferred_name(
           ReadOnlyRoots(isolate()).empty_string());
     }
   }
@@ -171,7 +171,7 @@ SerializedHandleChecker::SerializedHandleChecker(Isolate* isolate,
     : isolate_(isolate) {
   AddToSet(isolate->heap()->serialized_objects());
   for (auto const& context : *contexts) {
-    AddToSet(context.serialized_objects());
+    AddToSet(context->serialized_objects());
   }
 }
 
@@ -185,21 +185,20 @@ void StartupSerializer::SerializeUsingStartupObjectCache(
     SnapshotByteSink* sink, Handle<HeapObject> obj) {
   int cache_index = SerializeInObjectCache(obj);
   sink->Put(kStartupObjectCache, "StartupObjectCache");
-  sink->PutInt(cache_index, "startup_object_cache_index");
+  sink->PutUint30(cache_index, "startup_object_cache_index");
 }
 
 void StartupSerializer::CheckNoDirtyFinalizationRegistries() {
   Isolate* isolate = this->isolate();
-  CHECK(isolate->heap()->dirty_js_finalization_registries_list().IsUndefined(
-      isolate));
-  CHECK(
-      isolate->heap()->dirty_js_finalization_registries_list_tail().IsUndefined(
-          isolate));
+  CHECK(IsUndefined(isolate->heap()->dirty_js_finalization_registries_list(),
+                    isolate));
+  CHECK(IsUndefined(
+      isolate->heap()->dirty_js_finalization_registries_list_tail(), isolate));
 }
 
 void SerializedHandleChecker::AddToSet(FixedArray serialized) {
-  int length = serialized.length();
-  for (int i = 0; i < length; i++) serialized_.insert(serialized.get(i));
+  int length = serialized->length();
+  for (int i = 0; i < length; i++) serialized_.insert(serialized->get(i));
 }
 
 void SerializedHandleChecker::VisitRootPointers(Root root,
@@ -210,7 +209,7 @@ void SerializedHandleChecker::VisitRootPointers(Root root,
     if (serialized_.find(*p) != serialized_.end()) continue;
     PrintF("%s handle not serialized: ",
            root == Root::kGlobalHandles ? "global" : "eternal");
-    (*p).Print();
+    Print(*p);
     PrintF("\n");
     ok_ = false;
   }

@@ -6,6 +6,7 @@
 #define V8_MAGLEV_MAGLEV_IR_H_
 
 #include "src/base/bit-field.h"
+#include "src/base/bits.h"
 #include "src/base/discriminated-union.h"
 #include "src/base/enum-set.h"
 #include "src/base/logging.h"
@@ -32,6 +33,7 @@
 #include "src/interpreter/bytecode-register.h"
 #include "src/maglev/maglev-compilation-unit.h"
 #include "src/objects/smi.h"
+#include "src/objects/tagged-index.h"
 #include "src/roots/roots.h"
 #include "src/utils/utils.h"
 #include "src/zone/zone.h"
@@ -100,12 +102,7 @@ class MergePointInterpreterFrameState;
   V(Int32NegateWithOverflow)          \
   V(Int32IncrementWithOverflow)       \
   V(Int32DecrementWithOverflow)       \
-  V(Int32Equal)                       \
-  V(Int32StrictEqual)                 \
-  V(Int32LessThan)                    \
-  V(Int32LessThanOrEqual)             \
-  V(Int32GreaterThan)                 \
-  V(Int32GreaterThanOrEqual)
+  V(Int32Compare)
 
 #define FLOAT64_OPERATIONS_NODE_LIST(V) \
   V(Float64Add)                         \
@@ -116,12 +113,7 @@ class MergePointInterpreterFrameState;
   V(Float64Modulus)                     \
   V(Float64Negate)                      \
   V(Float64Round)                       \
-  V(Float64Equal)                       \
-  V(Float64StrictEqual)                 \
-  V(Float64LessThan)                    \
-  V(Float64LessThanOrEqual)             \
-  V(Float64GreaterThan)                 \
-  V(Float64GreaterThanOrEqual)          \
+  V(Float64Compare)                     \
   V(Float64Ieee754Unary)
 
 #define CONSTANT_VALUE_NODE_LIST(V) \
@@ -130,7 +122,8 @@ class MergePointInterpreterFrameState;
   V(Float64Constant)                \
   V(Int32Constant)                  \
   V(RootConstant)                   \
-  V(SmiConstant)
+  V(SmiConstant)                    \
+  V(TaggedIndexConstant)
 
 #define INLINE_BUILTIN_NODE_LIST(V) \
   V(BuiltinStringFromCharCode)      \
@@ -144,10 +137,12 @@ class MergePointInterpreterFrameState;
   V(CallRuntime)                             \
   V(CallWithArrayLike)                       \
   V(CallWithSpread)                          \
+  V(CallKnownApiFunction)                    \
   V(CallKnownJSFunction)                     \
   V(CallSelf)                                \
   V(Construct)                               \
   V(CheckConstructResult)                    \
+  V(CheckDerivedConstructResult)             \
   V(ConstructWithSpread)                     \
   V(ConvertReceiver)                         \
   V(ConvertHoleToUndefined)                  \
@@ -269,7 +264,6 @@ class MergePointInterpreterFrameState;
   V(CheckHeapObject)                        \
   V(CheckInt32Condition)                    \
   V(CheckFixedArrayNonEmpty)                \
-  V(CheckBounds)                            \
   V(CheckJSDataViewBounds)                  \
   V(CheckJSTypedArrayBounds)                \
   V(CheckMaps)                              \
@@ -301,6 +295,7 @@ class MergePointInterpreterFrameState;
   V(StoreDoubleDataViewElement)             \
   V(StoreTaggedFieldNoWriteBarrier)         \
   V(StoreTaggedFieldWithWriteBarrier)       \
+  V(HandleNoHeapWritesInterrupt)            \
   V(ReduceInterruptBudgetForLoop)           \
   V(ReduceInterruptBudgetForReturn)         \
   V(ThrowReferenceErrorIfHole)              \
@@ -319,7 +314,7 @@ class MergePointInterpreterFrameState;
   V(BranchIfInt32ToBooleanTrue)     \
   V(BranchIfFloat64ToBooleanTrue)   \
   V(BranchIfFloat64IsHole)          \
-  V(BranchIfReferenceCompare)       \
+  V(BranchIfReferenceEqual)         \
   V(BranchIfInt32Compare)           \
   V(BranchIfFloat64Compare)         \
   V(BranchIfUndefinedOrNull)        \
@@ -460,28 +455,39 @@ inline constexpr bool IsDoubleRepresentation(ValueRepresentation repr) {
          repr == ValueRepresentation::kHoleyFloat64;
 }
 
-// The intersection (using `&`) of any two NodeTypes must be a valid NodeType
-// (possibly "kUnknown").
-// All heap object types include the heap object bit, so that they can be
-// checked for AnyHeapObject with a single bit check.
-#define NODE_TYPE_LIST(V)                                         \
-  V(Unknown, 0)                                                   \
-  V(NumberOrOddball, (1 << 1))                                    \
-  V(Number, (1 << 2) | kNumberOrOddball)                          \
-  V(ObjectWithKnownMap, (1 << 3))                                 \
-  V(Smi, (1 << 4) | kObjectWithKnownMap | kNumber)                \
-  V(AnyHeapObject, (1 << 5))                                      \
-  V(Oddball, (1 << 6) | kAnyHeapObject | kNumberOrOddball)        \
-  V(Boolean, (1 << 7) | kOddball)                                 \
-  V(Name, (1 << 8) | kAnyHeapObject)                              \
-  V(String, (1 << 9) | kName)                                     \
-  V(InternalizedString, (1 << 10) | kString)                      \
-  V(Symbol, (1 << 11) | kName)                                    \
-  V(JSReceiver, (1 << 12) | kAnyHeapObject)                       \
-  V(Callable, (1 << 13) | kJSReceiver | kAnyHeapObject)           \
-  V(HeapObjectWithKnownMap, kObjectWithKnownMap | kAnyHeapObject) \
-  V(HeapNumber, kHeapObjectWithKnownMap | kNumber)                \
-  V(JSReceiverWithKnownMap, kJSReceiver | kHeapObjectWithKnownMap)
+/*
+ * The intersection (using `&`) of any two NodeTypes must be a valid NodeType
+ * (possibly "kUnknown", modulo heap object bit).
+ *
+ * All heap object types include the heap object bit, so that they can be
+ * checked for AnyHeapObject with a single bit check.
+ *
+ * Here is a diagram of the relations between the types, where (*) means that
+ * they have the kAnyHeapObject bit set.
+ *
+ *    NumberOrOddball              JsReceiver*            Name*
+ *     /         \                     |                 /    \
+ *  Oddball*     Number             Callable*        String*  Symbol*
+ *    |          /    \                                |
+ *  Boolean*    Smi   HeapNumber*              InternalizedString*
+ *
+ */
+
+#define NODE_TYPE_LIST(V)                                  \
+  V(Unknown, 0)                                            \
+  V(NumberOrOddball, (1 << 1))                             \
+  V(Number, (1 << 2) | kNumberOrOddball)                   \
+  V(Smi, (1 << 4) | kNumber)                               \
+  V(AnyHeapObject, (1 << 5))                               \
+  V(Oddball, (1 << 6) | kAnyHeapObject | kNumberOrOddball) \
+  V(Boolean, (1 << 7) | kOddball)                          \
+  V(Name, (1 << 8) | kAnyHeapObject)                       \
+  V(String, (1 << 9) | kName)                              \
+  V(InternalizedString, (1 << 10) | kString)               \
+  V(Symbol, (1 << 11) | kName)                             \
+  V(JSReceiver, (1 << 12) | kAnyHeapObject)                \
+  V(Callable, (1 << 13) | kJSReceiver | kAnyHeapObject)    \
+  V(HeapNumber, kAnyHeapObject | kNumber)
 
 enum class NodeType : uint16_t {
 #define DEFINE_NODE_TYPE(Name, Value) k##Name = Value,
@@ -500,6 +506,85 @@ inline NodeType IntersectType(NodeType left, NodeType right) {
 inline bool NodeTypeIs(NodeType type, NodeType to_check) {
   int right = static_cast<int>(to_check);
   return (static_cast<int>(type) & right) == right;
+}
+
+inline NodeType StaticTypeForMap(compiler::MapRef map) {
+  if (map.IsHeapNumberMap()) return NodeType::kHeapNumber;
+  if (map.IsInternalizedStringMap()) return NodeType::kInternalizedString;
+  if (map.IsStringMap()) return NodeType::kString;
+  if (map.IsJSReceiverMap()) return NodeType::kJSReceiver;
+  return NodeType::kAnyHeapObject;
+}
+
+inline NodeType StaticTypeForConstant(compiler::JSHeapBroker* broker,
+                                      compiler::ObjectRef ref) {
+  if (ref.IsSmi()) return NodeType::kSmi;
+  return StaticTypeForMap(ref.AsHeapObject().map(broker));
+}
+
+inline bool IsInstanceOfNodeType(compiler::MapRef map, NodeType type,
+                                 compiler::JSHeapBroker* broker) {
+  switch (type) {
+    case NodeType::kUnknown:
+      return true;
+    case NodeType::kNumberOrOddball:
+      return map.IsHeapNumberMap() || map.IsOddballMap();
+    case NodeType::kSmi:
+      return false;
+    case NodeType::kNumber:
+    case NodeType::kHeapNumber:
+      return map.IsHeapNumberMap();
+    case NodeType::kAnyHeapObject:
+      return true;
+    case NodeType::kOddball:
+      return map.IsOddballMap();
+    case NodeType::kBoolean:
+      return map.IsOddballMap() &&
+             map.oddball_type(broker) == compiler::OddballType::kBoolean;
+    case NodeType::kName:
+      return map.IsNameMap();
+    case NodeType::kString:
+      return map.IsStringMap();
+    case NodeType::kInternalizedString:
+      return map.IsInternalizedStringMap();
+    case NodeType::kSymbol:
+      return map.IsSymbolMap();
+    case NodeType::kJSReceiver:
+      return map.IsJSReceiverMap();
+    case NodeType::kCallable:
+      return map.is_callable();
+  }
+
+    // This is some composed type. We could speed this up by exploiting the tree
+    // structure of the types.
+#define CASE(Name, _)                                            \
+  if (NodeTypeIs(type, NodeType::k##Name)) {                     \
+    if (!IsInstanceOfNodeType(map, NodeType::k##Name, broker)) { \
+      return false;                                              \
+    }                                                            \
+  }
+  NODE_TYPE_LIST(CASE)
+#undef CASE
+  return true;
+}
+
+inline std::ostream& operator<<(std::ostream& out, const NodeType& type) {
+  switch (type) {
+#define CASE(Name, _)     \
+  case NodeType::k##Name: \
+    out << #Name;         \
+    break;
+    NODE_TYPE_LIST(CASE)
+#undef CASE
+    default:
+#define CASE(Name, _)                        \
+  if (NodeTypeIs(type, NodeType::k##Name)) { \
+    out << #Name ",";                        \
+  }
+      NODE_TYPE_LIST(CASE)
+#undef CASE
+  }
+  return out;
 }
 
 #define DEFINE_NODE_TYPE_CHECK(Type, _)         \
@@ -977,14 +1062,14 @@ class Input : public InputLocation {
 
 class InterpretedDeoptFrame;
 class InlinedArgumentsDeoptFrame;
-class ConstructStubDeoptFrame;
+class ConstructInvokeStubDeoptFrame;
 class BuiltinContinuationDeoptFrame;
 class DeoptFrame {
  public:
   enum class FrameType {
     kInterpretedFrame,
     kInlinedArgumentsFrame,
-    kConstructStubFrame,
+    kConstructInvokeStubFrame,
     kBuiltinContinuationFrame,
   };
 
@@ -1003,13 +1088,10 @@ class DeoptFrame {
     const base::Vector<ValueNode*> arguments;
   };
 
-  struct ConstructStubFrameData {
+  struct ConstructInvokeStubFrameData {
     const MaglevCompilationUnit& unit;
-    const BytecodeOffset bytecode_position;
     const SourcePosition source_position;
-    ValueNode* closure;
     ValueNode* receiver;
-    const base::Vector<ValueNode*> arguments_without_receiver;
     ValueNode* context;
   };
 
@@ -1022,7 +1104,7 @@ class DeoptFrame {
 
   using FrameData = base::DiscriminatedUnion<
       FrameType, InterpretedFrameData, InlinedArgumentsFrameData,
-      ConstructStubFrameData, BuiltinContinuationFrameData>;
+      ConstructInvokeStubFrameData, BuiltinContinuationFrameData>;
 
   DeoptFrame(FrameData&& data, DeoptFrame* parent)
       : data_(std::move(data)), parent_(parent) {}
@@ -1033,18 +1115,18 @@ class DeoptFrame {
 
   inline const InterpretedDeoptFrame& as_interpreted() const;
   inline const InlinedArgumentsDeoptFrame& as_inlined_arguments() const;
-  inline const ConstructStubDeoptFrame& as_construct_stub() const;
+  inline const ConstructInvokeStubDeoptFrame& as_construct_stub() const;
   inline const BuiltinContinuationDeoptFrame& as_builtin_continuation() const;
   inline InterpretedDeoptFrame& as_interpreted();
   inline InlinedArgumentsDeoptFrame& as_inlined_arguments();
-  inline ConstructStubDeoptFrame& as_construct_stub();
+  inline ConstructInvokeStubDeoptFrame& as_construct_stub();
   inline BuiltinContinuationDeoptFrame& as_builtin_continuation();
   bool IsJsFrame() const {
     switch (data_.tag()) {
       case FrameType::kInterpretedFrame:
       case FrameType::kBuiltinContinuationFrame:
         return true;
-      case FrameType::kConstructStubFrame:
+      case FrameType::kConstructInvokeStubFrame:
       case FrameType::kInlinedArgumentsFrame:
         return false;
     }
@@ -1055,7 +1137,7 @@ class DeoptFrame {
       : data_(std::move(data)), parent_(parent) {}
   DeoptFrame(InlinedArgumentsFrameData&& data, DeoptFrame* parent)
       : data_(std::move(data)), parent_(parent) {}
-  DeoptFrame(ConstructStubFrameData&& data, DeoptFrame* parent)
+  DeoptFrame(ConstructInvokeStubFrameData&& data, DeoptFrame* parent)
       : data_(std::move(data)), parent_(parent) {}
   DeoptFrame(BuiltinContinuationFrameData&& data, DeoptFrame* parent)
       : data_(std::move(data)), parent_(parent) {}
@@ -1141,50 +1223,44 @@ inline InlinedArgumentsDeoptFrame& DeoptFrame::as_inlined_arguments() {
   return static_cast<InlinedArgumentsDeoptFrame&>(*this);
 }
 
-class ConstructStubDeoptFrame : public DeoptFrame {
+class ConstructInvokeStubDeoptFrame : public DeoptFrame {
  public:
-  ConstructStubDeoptFrame(const MaglevCompilationUnit& unit,
-                          BytecodeOffset bytecode_position,
-                          SourcePosition source_position, ValueNode* closure,
-                          ValueNode* receiver,
-                          base::Vector<ValueNode*> arguments_without_receiver,
-                          ValueNode* context, DeoptFrame* parent)
-      : DeoptFrame(ConstructStubFrameData{unit, bytecode_position,
-                                          source_position, closure, receiver,
-                                          arguments_without_receiver, context},
+  ConstructInvokeStubDeoptFrame(const MaglevCompilationUnit& unit,
+                                SourcePosition source_position,
+                                ValueNode* receiver, ValueNode* context,
+                                DeoptFrame* parent)
+      : DeoptFrame(ConstructInvokeStubFrameData{unit, source_position, receiver,
+                                                context},
                    parent) {}
 
   const MaglevCompilationUnit& unit() const { return data().unit; }
-  BytecodeOffset bytecode_position() const { return data().bytecode_position; }
-  ValueNode*& closure() { return data().closure; }
-  ValueNode* closure() const { return data().closure; }
   ValueNode*& receiver() { return data().receiver; }
   ValueNode* receiver() const { return data().receiver; }
-  base::Vector<ValueNode*> arguments_without_receiver() const {
-    return data().arguments_without_receiver;
-  }
   ValueNode*& context() { return data().context; }
   ValueNode* context() const { return data().context; }
   SourcePosition source_position() const { return data().source_position; }
 
  private:
-  ConstructStubFrameData& data() { return data_.get<ConstructStubFrameData>(); }
-  const ConstructStubFrameData& data() const {
-    return data_.get<ConstructStubFrameData>();
+  ConstructInvokeStubFrameData& data() {
+    return data_.get<ConstructInvokeStubFrameData>();
+  }
+  const ConstructInvokeStubFrameData& data() const {
+    return data_.get<ConstructInvokeStubFrameData>();
   }
 };
 
 // Make sure storing/passing deopt frames by value doesn't truncate them.
-static_assert(sizeof(ConstructStubDeoptFrame) == sizeof(DeoptFrame));
+static_assert(sizeof(ConstructInvokeStubDeoptFrame) == sizeof(DeoptFrame));
 
-inline const ConstructStubDeoptFrame& DeoptFrame::as_construct_stub() const {
-  DCHECK_EQ(type(), FrameType::kConstructStubFrame);
-  return static_cast<const ConstructStubDeoptFrame&>(*this);
+inline const ConstructInvokeStubDeoptFrame& DeoptFrame::as_construct_stub()
+    const {
+  DCHECK_EQ(type(), FrameType::kConstructInvokeStubFrame);
+  return static_cast<const ConstructInvokeStubDeoptFrame&>(*this);
 }
 
-inline ConstructStubDeoptFrame& DeoptFrame::as_construct_stub() {
-  DCHECK_EQ(type(), FrameType::kConstructStubFrame);
-  return static_cast<ConstructStubDeoptFrame&>(*this);
+inline ConstructInvokeStubDeoptFrame& DeoptFrame::as_construct_stub() {
+  DCHECK_EQ(type(), FrameType::kConstructInvokeStubFrame);
+  return static_cast<ConstructInvokeStubDeoptFrame&>(*this);
 }
 
 class BuiltinContinuationDeoptFrame : public DeoptFrame {
@@ -1286,15 +1362,11 @@ class LazyDeoptInfo : public DeoptInfo {
             ResultSizeField::encode(result_size)) {}
 
   interpreter::Register result_location() const {
-    // We should only be checking this for interpreted frames, other kinds of
-    // frames shouldn't be considered for result locations.
-    DCHECK_EQ(top_frame().type(), DeoptFrame::FrameType::kInterpretedFrame);
+    DCHECK(IsConsideredForResultLocation());
     return result_location_;
   }
   int result_size() const {
-    // We should only be checking this for interpreted frames, other kinds of
-    // frames shouldn't be considered for result locations.
-    DCHECK_EQ(top_frame().type(), DeoptFrame::FrameType::kInterpretedFrame);
+    DCHECK(IsConsideredForResultLocation());
     return ResultSizeField::decode(bitfield_);
   }
 
@@ -1309,9 +1381,7 @@ class LazyDeoptInfo : public DeoptInfo {
     bitfield_ = ResultSizeField::update(bitfield_, result_size);
   }
   bool HasResultLocation() const {
-    // We should only be checking this for interpreted frames, other kinds of
-    // frames shouldn't be considered for result locations.
-    DCHECK_EQ(top_frame().type(), DeoptFrame::FrameType::kInterpretedFrame);
+    DCHECK(IsConsideredForResultLocation());
     return result_location_.is_valid();
   }
 
@@ -1327,6 +1397,27 @@ class LazyDeoptInfo : public DeoptInfo {
   }
 
  private:
+#ifdef DEBUG
+  bool IsConsideredForResultLocation() const {
+    switch (top_frame().type()) {
+      case DeoptFrame::FrameType::kInterpretedFrame:
+        // Interpreted frames obviously need a result location.
+        return true;
+      case DeoptFrame::FrameType::kInlinedArgumentsFrame:
+      case DeoptFrame::FrameType::kConstructInvokeStubFrame:
+        return false;
+      case DeoptFrame::FrameType::kBuiltinContinuationFrame:
+        // Normally if the function is going to be deoptimized then the top
+        // frame should be an interpreted one. The only exception is the case
+        // when the lazy deopt point was added only for the sake of recoring
+        // an inlined Api function instance in the deopt info for exception
+        // stack trace reconstruction.
+        return top_frame().as_builtin_continuation().builtin_id() ==
+               Builtin::kGenericLazyDeoptContinuation;
+    }
+  }
+#endif  // DEBUG
+
   using DeoptingCallReturnPcField = base::BitField<unsigned int, 0, 30>;
   using ResultSizeField = DeoptingCallReturnPcField::Next<unsigned int, 2>;
 
@@ -1956,10 +2047,14 @@ class ValueNode : public Node {
             ValueRepresentation::kTagged);
   }
 
+#ifdef V8_COMPRESS_POINTERS
   constexpr bool decompresses_tagged_result() const {
     return TaggedResultNeedsDecompressField::decode(bitfield());
   }
+
   void SetTaggedResultNeedsDecompress() {
+    static_assert(PointerCompressionIsEnabled());
+
     DCHECK_IMPLIES(!Is<Identity>(), is_tagged());
     DCHECK_IMPLIES(Is<Identity>(), input(0).node()->is_tagged());
     set_bitfield(TaggedResultNeedsDecompressField::update(bitfield(), true));
@@ -1974,6 +2069,9 @@ class ValueNode : public Node {
       input(0).node()->SetTaggedResultNeedsDecompress();
     }
   }
+#else
+  constexpr bool decompresses_tagged_result() const { return false; }
+#endif
 
   constexpr ValueRepresentation value_representation() const {
     return properties().value_representation();
@@ -2196,6 +2294,7 @@ class FixedInputNodeTMixin : public NodeTMixin<Base, Derived> {
     }
   }
 
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing() const {
     if constexpr (kInputCount != 0) {
       static_assert(
@@ -2209,6 +2308,7 @@ class FixedInputNodeTMixin : public NodeTMixin<Base, Derived> {
       }
     }
   }
+#endif
 
  protected:
   using InputTypes = detail::ArrayWrapper<kInputCount>;
@@ -2246,11 +2346,13 @@ class Identity : public FixedInputValueNodeT<1, Identity> {
   void VerifyInputs(MaglevGraphLabeller*) const {
     // Identity is valid for all input types.
   }
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing() {
     // Do not mark inputs as decompressing here, since we don't yet know whether
     // this Phi needs decompression. Instead, let
     // Node::SetTaggedResultNeedsDecompress pass through phis.
   }
+#endif
   void SetValueLocationConstraints() {}
   void GenerateCode(MaglevAssembler*, const ProcessingState&) {}
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
@@ -2468,36 +2570,32 @@ class Int32ShiftRightLogical
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 };
 
-template <class Derived, Operation kOperation>
-class Int32CompareNode : public FixedInputValueNodeT<2, Derived> {
-  using Base = FixedInputValueNodeT<2, Derived>;
+class Int32Compare : public FixedInputValueNodeT<2, Int32Compare> {
+  using Base = FixedInputValueNodeT<2, Int32Compare>;
 
  public:
-  static constexpr typename Base::InputTypes kInputTypes{
-      ValueRepresentation::kInt32, ValueRepresentation::kInt32};
+  explicit Int32Compare(uint64_t bitfield, Operation operation)
+      : Base(OperationBitField::update(bitfield, operation)) {}
+
+  static constexpr Base::InputTypes kInputTypes{ValueRepresentation::kInt32,
+                                                ValueRepresentation::kInt32};
 
   static constexpr int kLeftIndex = 0;
   static constexpr int kRightIndex = 1;
   Input& left_input() { return Node::input(kLeftIndex); }
   Input& right_input() { return Node::input(kRightIndex); }
 
- protected:
-  explicit Int32CompareNode(uint64_t bitfield) : Base(bitfield) {}
+  constexpr Operation operation() const {
+    return OperationBitField::decode(bitfield());
+  }
 
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
-  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
-};
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
-#define DEF_INT32_COMPARE_NODE(Name) \
-  DEF_OPERATION_NODE(Int32##Name, Int32CompareNode, Name)
-DEF_INT32_COMPARE_NODE(Equal)
-DEF_INT32_COMPARE_NODE(StrictEqual)
-DEF_INT32_COMPARE_NODE(LessThan)
-DEF_INT32_COMPARE_NODE(LessThanOrEqual)
-DEF_INT32_COMPARE_NODE(GreaterThan)
-DEF_INT32_COMPARE_NODE(GreaterThanOrEqual)
-#undef DEF_INT32_COMPARE_NODE
+ private:
+  using OperationBitField = NextBitField<Operation, 5>;
+};
 
 template <class Derived, Operation kOperation>
 class Float64BinaryNode : public FixedInputValueNodeT<2, Derived> {
@@ -2560,8 +2658,8 @@ DEF_FLOAT64_BINARY_NODE(Add)
 DEF_FLOAT64_BINARY_NODE(Subtract)
 DEF_FLOAT64_BINARY_NODE(Multiply)
 DEF_FLOAT64_BINARY_NODE(Divide)
-#ifdef V8_TARGET_ARCH_ARM64
-// On Arm64, floating point modulus is implemented with a call to a C++
+#if defined(V8_TARGET_ARCH_ARM64) || defined(V8_TARGET_ARCH_ARM)
+// On Arm/Arm64, floating point modulus is implemented with a call to a C++
 // function, while on x64, it's implemented natively without call.
 DEF_FLOAT64_BINARY_NODE_WITH_CALL(Modulus)
 #else
@@ -2571,39 +2669,35 @@ DEF_FLOAT64_BINARY_NODE_WITH_CALL(Exponentiate)
 #undef DEF_FLOAT64_BINARY_NODE
 #undef DEF_FLOAT64_BINARY_NODE_WITH_CALL
 
-template <class Derived, Operation kOperation>
-class Float64CompareNode : public FixedInputValueNodeT<2, Derived> {
-  using Base = FixedInputValueNodeT<2, Derived>;
+#undef DEF_OPERATION_NODE
+#undef DEF_OPERATION_NODE_WITH_CALL
+
+class Float64Compare : public FixedInputValueNodeT<2, Float64Compare> {
+  using Base = FixedInputValueNodeT<2, Float64Compare>;
 
  public:
-  static constexpr typename Base::InputTypes kInputTypes{
-      ValueRepresentation::kFloat64, ValueRepresentation::kFloat64};
+  explicit Float64Compare(uint64_t bitfield, Operation operation)
+      : Base(OperationBitField::update(bitfield, operation)) {}
+
+  static constexpr Base::InputTypes kInputTypes{ValueRepresentation::kFloat64,
+                                                ValueRepresentation::kFloat64};
 
   static constexpr int kLeftIndex = 0;
   static constexpr int kRightIndex = 1;
   Input& left_input() { return Node::input(kLeftIndex); }
   Input& right_input() { return Node::input(kRightIndex); }
 
- protected:
-  explicit Float64CompareNode(uint64_t bitfield) : Base(bitfield) {}
+  constexpr Operation operation() const {
+    return OperationBitField::decode(bitfield());
+  }
 
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
-  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
+
+ private:
+  using OperationBitField = NextBitField<Operation, 5>;
 };
-
-#define DEF_FLOAT64_COMPARE_NODE(Name) \
-  DEF_OPERATION_NODE(Float64##Name, Float64CompareNode, Name)
-DEF_FLOAT64_COMPARE_NODE(Equal)
-DEF_FLOAT64_COMPARE_NODE(StrictEqual)
-DEF_FLOAT64_COMPARE_NODE(LessThan)
-DEF_FLOAT64_COMPARE_NODE(LessThanOrEqual)
-DEF_FLOAT64_COMPARE_NODE(GreaterThan)
-DEF_FLOAT64_COMPARE_NODE(GreaterThanOrEqual)
-#undef DEF_FLOAT64_COMPARE_NODE
-
-#undef DEF_OPERATION_NODE
-#undef DEF_OPERATION_NODE_WITH_CALL
 
 class Float64Negate : public FixedInputValueNodeT<1, Float64Negate> {
   using Base = FixedInputValueNodeT<1, Float64Negate>;
@@ -2748,9 +2842,13 @@ class UnsafeSmiTag : public FixedInputValueNodeT<1, UnsafeSmiTag> {
   Input& input() { return Node::input(0); }
 
   void VerifyInputs(MaglevGraphLabeller*) const;
+
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing() {
     // No tagged inputs.
   }
+#endif
+
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
@@ -2770,9 +2868,12 @@ class CheckedSmiUntag : public FixedInputValueNodeT<1, CheckedSmiUntag> {
 
   Input& input() { return Node::input(0); }
 
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing() {
     // Don't need to decompress to untag.
   }
+#endif
+
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
@@ -2791,9 +2892,12 @@ class UnsafeSmiUntag : public FixedInputValueNodeT<1, UnsafeSmiUntag> {
 
   Input& input() { return Node::input(0); }
 
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing() {
     // Don't need to decompress to untag.
   }
+#endif
+
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
@@ -3496,9 +3600,12 @@ class TaggedEqual : public FixedInputValueNodeT<2, TaggedEqual> {
   Input& lhs() { return Node::input(0); }
   Input& rhs() { return Node::input(1); }
 
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing() {
     // Don't need to decompress to compare reference equality.
   }
+#endif
+
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
@@ -3516,9 +3623,12 @@ class TaggedNotEqual : public FixedInputValueNodeT<2, TaggedNotEqual> {
   Input& lhs() { return Node::input(0); }
   Input& rhs() { return Node::input(1); }
 
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing() {
     // Don't need to decompress to compare reference equality.
   }
+#endif
+
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
@@ -3703,9 +3813,13 @@ class GeneratorStore : public NodeT<GeneratorStore> {
 
   int MaxCallStackArgs() const;
   void VerifyInputs(MaglevGraphLabeller* graph_labeller) const;
+
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing() {
     // Don't need to decompress to store.
   }
+#endif
+
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
@@ -3991,10 +4105,10 @@ class SmiConstant : public FixedInputValueNodeT<0, SmiConstant> {
  public:
   using OutputRegister = Register;
 
-  explicit SmiConstant(uint64_t bitfield, Smi value)
+  explicit SmiConstant(uint64_t bitfield, Tagged<Smi> value)
       : Base(bitfield), value_(value) {}
 
-  Smi value() const { return value_; }
+  Tagged<Smi> value() const { return value_; }
 
   bool ToBoolean(LocalIsolate* local_isolate) const {
     return value_ != Smi::FromInt(0);
@@ -4008,7 +4122,32 @@ class SmiConstant : public FixedInputValueNodeT<0, SmiConstant> {
   Handle<Object> DoReify(LocalIsolate* isolate) const;
 
  private:
-  const Smi value_;
+  const Tagged<Smi> value_;
+};
+
+class TaggedIndexConstant
+    : public FixedInputValueNodeT<0, TaggedIndexConstant> {
+  using Base = FixedInputValueNodeT<0, TaggedIndexConstant>;
+
+ public:
+  using OutputRegister = Register;
+
+  explicit TaggedIndexConstant(uint64_t bitfield, TaggedIndex value)
+      : Base(bitfield), value_(value) {}
+
+  TaggedIndex value() const { return value_; }
+
+  bool ToBoolean(LocalIsolate* local_isolate) const { UNREACHABLE(); }
+
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
+
+  void DoLoadToRegister(MaglevAssembler*, OutputRegister);
+  Handle<Object> DoReify(LocalIsolate* isolate) const;
+
+ private:
+  const TaggedIndex value_;
 };
 
 class ExternalConstant : public FixedInputValueNodeT<0, ExternalConstant> {
@@ -4049,7 +4188,7 @@ class Constant : public FixedInputValueNodeT<0, Constant> {
       : Base(bitfield), object_(object) {}
 
   bool ToBoolean(LocalIsolate* local_isolate) const {
-    return object_.object()->BooleanValue(local_isolate);
+    return Object::BooleanValue(*object_.object(), local_isolate);
   }
 
   bool IsTheHole(compiler::JSHeapBroker* broker) const {
@@ -4441,6 +4580,10 @@ enum class AssertCondition {
   ASSERT_CONDITION(D)
 #undef D
 };
+static constexpr int kNumAssertConditions =
+#define D(Name) +1
+    0 ASSERT_CONDITION(D);
+#undef D
 
 inline std::ostream& operator<<(std::ostream& os, const AssertCondition cond) {
   switch (cond) {
@@ -4520,9 +4663,12 @@ class CheckValue : public FixedInputNodeT<1, CheckValue> {
   static constexpr int kTargetIndex = 0;
   Input& target_input() { return input(kTargetIndex); }
 
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing() {
     // Don't need to decompress to compare reference equality.
   }
+#endif
+
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
@@ -4625,9 +4771,12 @@ class CheckDynamicValue : public FixedInputNodeT<2, CheckDynamicValue> {
   Input& first_input() { return input(kFirstIndex); }
   Input& second_input() { return input(kSecondIndex); }
 
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing() {
     // Don't need to decompress to compare reference equality.
   }
+#endif
+
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
@@ -4648,9 +4797,12 @@ class CheckSmi : public FixedInputNodeT<1, CheckSmi> {
 
   using Node::set_input;
 
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing() {
     // Don't need to decompress to check Smi bits.
   }
+#endif
+
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
@@ -4692,9 +4844,12 @@ class CheckHeapObject : public FixedInputNodeT<1, CheckHeapObject> {
   static constexpr int kReceiverIndex = 0;
   Input& receiver_input() { return input(kReceiverIndex); }
 
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing() {
     // Don't need to decompress to check Smi bits.
   }
+#endif
+
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
@@ -4832,25 +4987,6 @@ class CheckFixedArrayNonEmpty
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 };
 
-class CheckBounds : public FixedInputNodeT<2, CheckBounds> {
-  using Base = FixedInputNodeT<2, CheckBounds>;
-
- public:
-  explicit CheckBounds(uint64_t bitfield) : Base(bitfield) {}
-  static constexpr OpProperties kProperties = OpProperties::EagerDeopt();
-  static constexpr typename Base::InputTypes kInputTypes{
-      ValueRepresentation::kInt32, ValueRepresentation::kInt32};
-
-  static constexpr int kValueIndex = 0;
-  static constexpr int kBoundIndex = 1;
-  Input& value_input() { return input(kValueIndex); }
-  Input& bound_input() { return input(kBoundIndex); }
-
-  void SetValueLocationConstraints();
-  void GenerateCode(MaglevAssembler*, const ProcessingState&);
-  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
-};
-
 class CheckJSDataViewBounds : public FixedInputNodeT<2, CheckJSDataViewBounds> {
   using Base = FixedInputNodeT<2, CheckJSDataViewBounds>;
 
@@ -4908,7 +5044,8 @@ class CheckInt32Condition : public FixedInputNodeT<2, CheckInt32Condition> {
  public:
   explicit CheckInt32Condition(uint64_t bitfield, AssertCondition condition,
                                DeoptimizeReason reason)
-      : Base(bitfield), condition_(condition), reason_(reason) {}
+      : Base(bitfield | ConditionField::encode(condition) |
+             ReasonField::encode(reason)) {}
 
   static constexpr OpProperties kProperties = OpProperties::EagerDeopt();
   static constexpr typename Base::InputTypes kInputTypes{
@@ -4919,13 +5056,25 @@ class CheckInt32Condition : public FixedInputNodeT<2, CheckInt32Condition> {
   Input& left_input() { return input(kLeftIndex); }
   Input& right_input() { return input(kRightIndex); }
 
+  AssertCondition condition() const {
+    return ConditionField::decode(bitfield());
+  }
+  DeoptimizeReason reason() const { return ReasonField::decode(bitfield()); }
+
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
  private:
-  AssertCondition condition_;
-  DeoptimizeReason reason_;
+  using ConditionField =
+      NextBitField<AssertCondition, base::bits::WhichPowerOfTwo<size_t>(
+                                        base::bits::RoundUpToPowerOfTwo32(
+                                            kNumAssertConditions))>;
+  using ReasonField =
+      ConditionField::Next<DeoptimizeReason,
+                           base::bits::WhichPowerOfTwo<size_t>(
+                               base::bits::RoundUpToPowerOfTwo32(
+                                   kDeoptimizeReasonCount))>;
 };
 
 class DebugBreak : public FixedInputNodeT<0, DebugBreak> {
@@ -4946,8 +5095,12 @@ class FunctionEntryStackCheck
  public:
   explicit FunctionEntryStackCheck(uint64_t bitfield) : Base(bitfield) {}
 
+  // Although FunctionEntryStackCheck calls a builtin, we don't mark it as Call
+  // here. The register allocator should not spill any live registers, since the
+  // builtin already handles it. The only possible live register is
+  // kJavaScriptCallNewTargetRegister.
   static constexpr OpProperties kProperties =
-      OpProperties::DeferredCall() | OpProperties::LazyDeopt();
+      OpProperties::LazyDeopt() | OpProperties::DeferredCall();
 
   int MaxCallStackArgs() const;
   void SetValueLocationConstraints();
@@ -5363,10 +5516,13 @@ class LoadTaggedFieldByFieldIndex
   Input& object_input() { return input(kObjectIndex); }
   Input& index_input() { return input(kIndexIndex); }
 
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing() {
     // Only need to decompress the object, the index should be a Smi.
     object_input().node()->SetTaggedResultNeedsDecompress();
   }
+#endif
+
   int MaxCallStackArgs() const { return 0; }
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
@@ -5919,10 +6075,13 @@ class StoreTaggedFieldNoWriteBarrier
   Input& object_input() { return input(kObjectIndex); }
   Input& value_input() { return input(kValueIndex); }
 
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing() {
     object_input().node()->SetTaggedResultNeedsDecompress();
     // Don't need to decompress value to store it.
   }
+#endif
+
   int MaxCallStackArgs() const {
     // StoreTaggedFieldNoWriteBarrier never really does any call.
     return 0;
@@ -5979,10 +6138,13 @@ class StoreTaggedFieldWithWriteBarrier
   Input& object_input() { return input(kObjectIndex); }
   Input& value_input() { return input(kValueIndex); }
 
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing() {
     object_input().node()->SetTaggedResultNeedsDecompress();
     // Don't need to decompress value to store it.
   }
+#endif
+
   int MaxCallStackArgs() const;
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
@@ -6551,11 +6713,15 @@ class Phi : public ValueNodeT<Phi> {
   }
 
   void VerifyInputs(MaglevGraphLabeller* graph_labeller) const;
+
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing() {
     // Do not mark inputs as decompressing here, since we don't yet know whether
     // this Phi needs decompression. Instead, let
     // Node::SetTaggedResultNeedsDecompress pass through phis.
   }
+#endif
+
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
@@ -6681,7 +6847,9 @@ class Call : public ValueNodeT<Call> {
   auto args_end() { return std::make_reverse_iterator(&arg(num_args() - 1)); }
 
   void VerifyInputs(MaglevGraphLabeller* graph_labeller) const;
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing();
+#endif
   int MaxCallStackArgs() const;
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
@@ -6735,7 +6903,9 @@ class Construct : public ValueNodeT<Construct> {
   compiler::FeedbackSource feedback() const { return feedback_; }
 
   void VerifyInputs(MaglevGraphLabeller* graph_labeller) const;
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing();
+#endif
   int MaxCallStackArgs() const;
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
@@ -6830,7 +7000,9 @@ class CallBuiltin : public ValueNodeT<CallBuiltin> {
   }
 
   void VerifyInputs(MaglevGraphLabeller* graph_labeller) const;
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing();
+#endif
   int MaxCallStackArgs() const;
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
@@ -6882,7 +7054,9 @@ class CallRuntime : public ValueNodeT<CallRuntime> {
   }
 
   void VerifyInputs(MaglevGraphLabeller* graph_labeller) const;
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing();
+#endif
   int MaxCallStackArgs() const;
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
@@ -6935,7 +7109,9 @@ class CallWithSpread : public ValueNodeT<CallWithSpread> {
   Input& receiver() { return arg(0); }
 
   void VerifyInputs(MaglevGraphLabeller* graph_labeller) const;
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing();
+#endif
   int MaxCallStackArgs() const;
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
@@ -6964,7 +7140,9 @@ class CallWithArrayLike : public FixedInputValueNodeT<4, CallWithArrayLike> {
   Input& context() { return input(kContextIndex); }
 
   void VerifyInputs(MaglevGraphLabeller* graph_labeller) const;
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing();
+#endif
   int MaxCallStackArgs() const;
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
@@ -7025,7 +7203,9 @@ class CallSelf : public ValueNodeT<CallSelf> {
   }
 
   void VerifyInputs(MaglevGraphLabeller* graph_labeller) const;
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing();
+#endif
   int MaxCallStackArgs() const;
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
@@ -7092,7 +7272,9 @@ class CallKnownJSFunction : public ValueNodeT<CallKnownJSFunction> {
   }
 
   void VerifyInputs(MaglevGraphLabeller* graph_labeller) const;
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing();
+#endif
   int MaxCallStackArgs() const;
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
@@ -7103,6 +7285,87 @@ class CallKnownJSFunction : public ValueNodeT<CallKnownJSFunction> {
   // Cache the expected parameter count so that we can access it in
   // MaxCallStackArgs without needing to unpark the local isolate.
   int expected_parameter_count_;
+};
+
+class CallKnownApiFunction : public ValueNodeT<CallKnownApiFunction> {
+  using Base = ValueNodeT<CallKnownApiFunction>;
+
+ public:
+  enum Mode {
+    // Use Builtin::kCallApiCallbackOptimizedNoProfiling.
+    kNoProfiling,
+    // Use Builtin::kCallApiCallbackOptimized.
+    kGeneric,
+  };
+
+  static constexpr int kContextIndex = 0;
+  static constexpr int kReceiverIndex = 1;
+  static constexpr int kFixedInputCount = 2;
+
+  // We need enough inputs to have these fixed inputs plus the maximum arguments
+  // to a function call.
+  static_assert(kMaxInputs >= kFixedInputCount + Code::kMaxArguments);
+
+  // This ctor is used when for variable input counts.
+  // Inputs must be initialized manually.
+  CallKnownApiFunction(uint64_t bitfield, Mode mode,
+                       compiler::FunctionTemplateInfoRef function_template_info,
+                       compiler::CallHandlerInfoRef call_handler_info,
+                       compiler::ObjectRef data,
+                       compiler::OptionalJSObjectRef api_holder,
+                       ValueNode* context, ValueNode* receiver)
+      : Base(bitfield | ModeField::encode(mode)),
+        function_template_info_(function_template_info),
+        call_handler_info_(call_handler_info),
+        data_(data),
+        api_holder_(api_holder) {
+    set_input(kContextIndex, context);
+    set_input(kReceiverIndex, receiver);
+  }
+
+  // TODO(ishell): introduce JSApiCall() which will take C++ ABI into account
+  // when deciding which registers to splill.
+  static constexpr OpProperties kProperties = OpProperties::JSCall();
+
+  // Input& closure() { return input(kClosureIndex); }
+  // const Input& closure() const { return input(kClosureIndex); }
+  Input& context() { return input(kContextIndex); }
+  const Input& context() const { return input(kContextIndex); }
+  Input& receiver() { return input(kReceiverIndex); }
+  const Input& receiver() const { return input(kReceiverIndex); }
+  int num_args() const { return input_count() - kFixedInputCount; }
+  Input& arg(int i) { return input(i + kFixedInputCount); }
+  void set_arg(int i, ValueNode* node) {
+    set_input(i + kFixedInputCount, node);
+  }
+  auto args_begin() { return std::make_reverse_iterator(&arg(-1)); }
+  auto args_end() { return std::make_reverse_iterator(&arg(num_args() - 1)); }
+
+  Mode mode() const { return ModeField::decode(bitfield()); }
+
+  compiler::FunctionTemplateInfoRef function_template_info() const {
+    return function_template_info_;
+  }
+  compiler::CallHandlerInfoRef call_handler_info() const {
+    return call_handler_info_;
+  }
+  compiler::ObjectRef data() const { return data_; }
+  void VerifyInputs(MaglevGraphLabeller* graph_labeller) const;
+#ifdef V8_COMPRESS_POINTERS
+  void MarkTaggedInputsAsDecompressing();
+#endif
+  int MaxCallStackArgs() const;
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
+
+ private:
+  using ModeField = NextBitField<Mode, 1>;
+
+  const compiler::FunctionTemplateInfoRef function_template_info_;
+  const compiler::CallHandlerInfoRef call_handler_info_;
+  const compiler::ObjectRef data_;
+  const compiler::OptionalJSObjectRef api_holder_;
 };
 
 class ConstructWithSpread : public ValueNodeT<ConstructWithSpread> {
@@ -7154,7 +7417,9 @@ class ConstructWithSpread : public ValueNodeT<ConstructWithSpread> {
   compiler::FeedbackSource feedback() const { return feedback_; }
 
   void VerifyInputs(MaglevGraphLabeller* graph_labeller) const;
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing();
+#endif
   int MaxCallStackArgs() const;
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
@@ -7200,10 +7465,30 @@ class CheckConstructResult
   Input& construct_result_input() { return input(0); }
   Input& implicit_receiver_input() { return input(1); }
 
-  static constexpr OpProperties kProperties =
-      OpProperties::CanThrow() | OpProperties::DeferredCall();
   static constexpr typename Base::InputTypes kInputTypes{
       ValueRepresentation::kTagged, ValueRepresentation::kTagged};
+
+  int MaxCallStackArgs() const;
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+};
+
+class CheckDerivedConstructResult
+    : public FixedInputValueNodeT<1, CheckDerivedConstructResult> {
+  using Base = FixedInputValueNodeT<1, CheckDerivedConstructResult>;
+
+ public:
+  explicit CheckDerivedConstructResult(uint64_t bitfield) : Base(bitfield) {}
+
+  Input& construct_result_input() { return input(0); }
+
+  static constexpr OpProperties kProperties =
+      OpProperties::CanThrow() | OpProperties::DeferredCall();
+  static constexpr
+      typename Base::InputTypes kInputTypes{ValueRepresentation::kTagged};
+
+  bool for_derived_constructor();
 
   int MaxCallStackArgs() const;
   void SetValueLocationConstraints();
@@ -7226,6 +7511,22 @@ class ConvertHoleToUndefined
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+};
+
+class HandleNoHeapWritesInterrupt
+    : public FixedInputNodeT<0, HandleNoHeapWritesInterrupt> {
+  using Base = FixedInputNodeT<0, HandleNoHeapWritesInterrupt>;
+
+ public:
+  explicit HandleNoHeapWritesInterrupt(uint64_t bitfield) : Base(bitfield) {}
+
+  static constexpr OpProperties kProperties =
+      OpProperties::DeferredCall() | OpProperties::LazyDeopt();
+
+  void SetValueLocationConstraints() {}
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+  int MaxCallStackArgs() const { return 0; }
 };
 
 class ReduceInterruptBudgetForLoop
@@ -7683,9 +7984,12 @@ class BranchIfRootConstant
   RootIndex root_index() { return root_index_; }
   Input& condition_input() { return input(0); }
 
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing() {
     // Don't need to decompress values to reference compare.
   }
+#endif
+
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
@@ -7709,9 +8013,12 @@ class BranchIfUndefinedOrNull
 
   Input& condition_input() { return input(0); }
 
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing() {
     // Don't need to decompress values to reference compare.
   }
+#endif
+
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
@@ -7896,9 +8203,9 @@ class BranchIfFloat64Compare
   Operation operation_;
 };
 
-class BranchIfReferenceCompare
-    : public BranchControlNodeT<2, BranchIfReferenceCompare> {
-  using Base = BranchControlNodeT<2, BranchIfReferenceCompare>;
+class BranchIfReferenceEqual
+    : public BranchControlNodeT<2, BranchIfReferenceEqual> {
+  using Base = BranchControlNodeT<2, BranchIfReferenceEqual>;
 
  public:
   static constexpr int kLeftIndex = 0;
@@ -7906,23 +8213,23 @@ class BranchIfReferenceCompare
   Input& left_input() { return NodeBase::input(kLeftIndex); }
   Input& right_input() { return NodeBase::input(kRightIndex); }
 
-  explicit BranchIfReferenceCompare(uint64_t bitfield, Operation operation,
-                                    BasicBlockRef* if_true_refs,
-                                    BasicBlockRef* if_false_refs)
-      : Base(bitfield, if_true_refs, if_false_refs), operation_(operation) {}
+  explicit BranchIfReferenceEqual(uint64_t bitfield,
+                                  BasicBlockRef* if_true_refs,
+                                  BasicBlockRef* if_false_refs)
+      : Base(bitfield, if_true_refs, if_false_refs) {}
 
   static constexpr typename Base::InputTypes kInputTypes{
       ValueRepresentation::kTagged, ValueRepresentation::kTagged};
 
+#ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing() {
     // Don't need to decompress values to reference compare.
   }
+#endif
+
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
-  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
-
- private:
-  Operation operation_;
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 };
 
 class BranchIfTypeOf : public BranchControlNodeT<1, BranchIfTypeOf> {

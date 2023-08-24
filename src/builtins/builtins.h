@@ -129,12 +129,23 @@ class Builtins {
   static BytecodeOffset GetContinuationBytecodeOffset(Builtin builtin);
   static Builtin GetBuiltinFromBytecodeOffset(BytecodeOffset);
 
-  static constexpr Builtin GetRecordWriteStub(SaveFPRegsMode fp_mode) {
-    switch (fp_mode) {
-      case SaveFPRegsMode::kIgnore:
-        return Builtin::kRecordWriteIgnoreFP;
-      case SaveFPRegsMode::kSave:
-        return Builtin::kRecordWriteSaveFP;
+  static constexpr Builtin GetRecordWriteStub(
+      SaveFPRegsMode fp_mode, PointerType type = PointerType::kDirect) {
+    switch (type) {
+      case PointerType::kDirect:
+        switch (fp_mode) {
+          case SaveFPRegsMode::kIgnore:
+            return Builtin::kRecordWriteIgnoreFP;
+          case SaveFPRegsMode::kSave:
+            return Builtin::kRecordWriteSaveFP;
+        }
+      case PointerType::kIndirect:
+        switch (fp_mode) {
+          case SaveFPRegsMode::kIgnore:
+            return Builtin::kIndirectPointerBarrierIgnoreFP;
+          case SaveFPRegsMode::kSave:
+            return Builtin::kIndirectPointerBarrierSaveFP;
+        }
     }
   }
 
@@ -226,7 +237,8 @@ class Builtins {
   static void Generate_Adaptor(MacroAssembler* masm, Address builtin_address);
 
   static void Generate_CEntry(MacroAssembler* masm, int result_size,
-                              ArgvMode argv_mode, bool builtin_exit_frame);
+                              ArgvMode argv_mode, bool builtin_exit_frame,
+                              bool switch_to_central_stack);
 
   static bool AllowDynamicFunction(Isolate* isolate, Handle<JSFunction> target,
                                    Handle<JSObject> target_global_proxy);
@@ -289,6 +301,9 @@ class Builtins {
   static void Generate_CallOrConstructForwardVarargs(MacroAssembler* masm,
                                                      CallOrConstructMode mode,
                                                      Handle<Code> code);
+
+  static void Generate_MaglevFunctionEntryStackCheck(MacroAssembler* masm,
+                                                     bool save_new_target);
 
   enum class InterpreterEntryTrampolineMode {
     // The version of InterpreterEntryTrampoline used by default.

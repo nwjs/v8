@@ -20,9 +20,10 @@
 namespace v8 {
 namespace internal {
 
-class CodeObjectRegistry;
 class FreeListCategory;
 class Space;
+
+enum class MarkingMode { kNoMarking, kMinorMarking, kMajorMarking };
 
 // MemoryChunk represents a memory region owned by a specific space.
 // It is divided into the header and the body. Chunk start is always
@@ -75,8 +76,8 @@ class MemoryChunk : public BasicMemoryChunk {
 
   size_t buckets() const { return SlotSet::BucketsForSize(size()); }
 
-  void SetOldGenerationPageFlags(bool is_marking);
-  void SetYoungGenerationPageFlags(bool is_marking);
+  void SetOldGenerationPageFlags(MarkingMode marking_mode);
+  void SetYoungGenerationPageFlags(MarkingMode marking_mode);
 
   static inline void MoveExternalBackingStoreBytes(
       ExternalBackingStoreType type, MemoryChunk* from, MemoryChunk* to,
@@ -136,6 +137,28 @@ class MemoryChunk : public BasicMemoryChunk {
   // Not safe to be called concurrently.
   void ReleaseTypedSlotSet(RememberedSetType type);
 
+  template <RememberedSetType type>
+  SlotSet* ExtractSlotSet() {
+    SlotSet* slot_set = slot_set_[type];
+    // Conditionally reset to nullptr (instead of e.g. using std::exchange) to
+    // avoid data races when transitioning from nullptr to nullptr.
+    if (slot_set) {
+      slot_set_[type] = nullptr;
+    }
+    return slot_set;
+  }
+
+  template <RememberedSetType type>
+  TypedSlotSet* ExtractTypedSlotSet() {
+    TypedSlotSet* typed_slot_set = typed_slot_set_[type];
+    // Conditionally reset to nullptr (instead of e.g. using std::exchange) to
+    // avoid data races when transitioning from nullptr to nullptr.
+    if (typed_slot_set) {
+      typed_slot_set_[type] = nullptr;
+    }
+    return typed_slot_set;
+  }
+
   int FreeListsLength();
 
   // Approximate amount of physical memory committed for this chunk.
@@ -191,8 +214,6 @@ class MemoryChunk : public BasicMemoryChunk {
   heap::ListNode<MemoryChunk>& list_node() { return list_node_; }
   const heap::ListNode<MemoryChunk>& list_node() const { return list_node_; }
 
-  CodeObjectRegistry* GetCodeObjectRegistry() { return code_object_registry_; }
-
   PossiblyEmptyBuckets* possibly_empty_buckets() {
     return &possibly_empty_buckets_;
   }
@@ -227,6 +248,24 @@ class MemoryChunk : public BasicMemoryChunk {
     return &marking_bitmap_;
   }
 
+  size_t live_bytes() const {
+    return live_byte_count_.load(std::memory_order_relaxed);
+  }
+
+  void SetLiveBytes(size_t value) {
+    DCHECK_IMPLIES(V8_COMPRESS_POINTERS_8GB_BOOL,
+                   IsAligned(value, kObjectAlignment8GbHeap));
+    live_byte_count_.store(value, std::memory_order_relaxed);
+  }
+
+  void IncrementLiveBytesAtomically(intptr_t diff) {
+    DCHECK_IMPLIES(V8_COMPRESS_POINTERS_8GB_BOOL,
+                   IsAligned(diff, kObjectAlignment8GbHeap));
+    live_byte_count_.fetch_add(diff, std::memory_order_relaxed);
+  }
+
+  void ClearLiveness();
+
  protected:
   // Release all memory allocated by the chunk. Should be called when memory
   // chunk is about to be freed.
@@ -248,6 +287,16 @@ class MemoryChunk : public BasicMemoryChunk {
       return;
     }
     slot_set_[type] = slot_set;
+  }
+
+  template <RememberedSetType type, AccessMode access_mode = AccessMode::ATOMIC>
+  void set_typed_slot_set(TypedSlotSet* typed_slot_set) {
+    if (access_mode == AccessMode::ATOMIC) {
+      base::AsAtomicPointer::Release_Store(&typed_slot_set_[type],
+                                           typed_slot_set);
+      return;
+    }
+    typed_slot_set_[type] = typed_slot_set;
   }
 
   // A single slot set for small pages (of size kPageSize) or an array of slot
@@ -280,8 +329,6 @@ class MemoryChunk : public BasicMemoryChunk {
 
   FreeListCategory** categories_ = nullptr;
 
-  CodeObjectRegistry* code_object_registry_;
-
   PossiblyEmptyBuckets possibly_empty_buckets_;
 
   ActiveSystemPages* active_system_pages_;
@@ -310,6 +357,16 @@ class MemoryChunk : public BasicMemoryChunk {
 };
 
 }  // namespace internal
+
+namespace base {
+// Define special hash function for chunk pointers, to be used with std data
+// structures, e.g. std::unordered_set<MemoryChunk*, base::hash<MemoryChunk*>
+template <>
+struct hash<i::MemoryChunk*> : hash<i::BasicMemoryChunk*> {};
+template <>
+struct hash<const i::MemoryChunk*> : hash<const i::BasicMemoryChunk*> {};
+}  // namespace base
+
 }  // namespace v8
 
 #endif  // V8_HEAP_MEMORY_CHUNK_H_

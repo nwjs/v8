@@ -17,13 +17,13 @@ RUNTIME_FUNCTION(Runtime_TheHole) {
   return ReadOnlyRoots(isolate).the_hole_value();
 }
 
-RUNTIME_FUNCTION(Runtime_OrderedHashSetEnsureGrowable) {
+RUNTIME_FUNCTION(Runtime_OrderedHashSetGrow) {
   HandleScope scope(isolate);
   DCHECK_EQ(2, args.length());
   Handle<OrderedHashSet> table = args.at<OrderedHashSet>(0);
   Handle<String> method_name = args.at<String>(1);
   MaybeHandle<OrderedHashSet> table_candidate =
-      OrderedHashSet::EnsureGrowable(isolate, table);
+      OrderedHashSet::EnsureCapacityForAdding(isolate, table);
   if (!table_candidate.ToHandle(&table)) {
     THROW_NEW_ERROR_RETURN_FAILURE(
         isolate, NewRangeError(MessageTemplate::kOutOfMemory, method_name));
@@ -37,7 +37,7 @@ RUNTIME_FUNCTION(Runtime_SetGrow) {
   Handle<JSSet> holder = args.at<JSSet>(0);
   Handle<OrderedHashSet> table(OrderedHashSet::cast(holder->table()), isolate);
   MaybeHandle<OrderedHashSet> table_candidate =
-      OrderedHashSet::EnsureGrowable(isolate, table);
+      OrderedHashSet::EnsureCapacityForAdding(isolate, table);
   if (!table_candidate.ToHandle(&table)) {
     THROW_NEW_ERROR_RETURN_FAILURE(
         isolate,
@@ -58,6 +58,14 @@ RUNTIME_FUNCTION(Runtime_SetShrink) {
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
+RUNTIME_FUNCTION(Runtime_OrderedHashSetShrink) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(1, args.length());
+  Handle<OrderedHashSet> table = args.at<OrderedHashSet>(0);
+  table = OrderedHashSet::Shrink(isolate, table);
+  return *table;
+}
+
 RUNTIME_FUNCTION(Runtime_MapShrink) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
@@ -74,7 +82,7 @@ RUNTIME_FUNCTION(Runtime_MapGrow) {
   Handle<JSMap> holder = args.at<JSMap>(0);
   Handle<OrderedHashMap> table(OrderedHashMap::cast(holder->table()), isolate);
   MaybeHandle<OrderedHashMap> table_candidate =
-      OrderedHashMap::EnsureGrowable(isolate, table);
+      OrderedHashMap::EnsureCapacityForAdding(isolate, table);
   if (!table_candidate.ToHandle(&table)) {
     THROW_NEW_ERROR_RETURN_FAILURE(
         isolate,
@@ -85,6 +93,20 @@ RUNTIME_FUNCTION(Runtime_MapGrow) {
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
+RUNTIME_FUNCTION(Runtime_OrderedHashMapGrow) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(2, args.length());
+  Handle<OrderedHashMap> table = args.at<OrderedHashMap>(0);
+  Handle<String> methodName = args.at<String>(1);
+  MaybeHandle<OrderedHashMap> table_candidate =
+      OrderedHashMap::EnsureCapacityForAdding(isolate, table);
+  if (!table_candidate.ToHandle(&table)) {
+    THROW_NEW_ERROR_RETURN_FAILURE(
+        isolate, NewRangeError(MessageTemplate::kOutOfMemory, methodName));
+  }
+  return *table;
+}
+
 RUNTIME_FUNCTION(Runtime_WeakCollectionDelete) {
   HandleScope scope(isolate);
   DCHECK_EQ(3, args.length());
@@ -93,7 +115,7 @@ RUNTIME_FUNCTION(Runtime_WeakCollectionDelete) {
   int hash = args.smi_value_at(2);
 
 #ifdef DEBUG
-  DCHECK(key->CanBeHeldWeakly());
+  DCHECK(Object::CanBeHeldWeakly(*key));
   DCHECK(EphemeronHashTable::IsKey(ReadOnlyRoots(isolate), *key));
   Handle<EphemeronHashTable> table(
       EphemeronHashTable::cast(weak_collection->table()), isolate);
@@ -116,7 +138,7 @@ RUNTIME_FUNCTION(Runtime_WeakCollectionSet) {
   int hash = args.smi_value_at(3);
 
 #ifdef DEBUG
-  DCHECK(key->CanBeHeldWeakly());
+  DCHECK(Object::CanBeHeldWeakly(*key));
   DCHECK(EphemeronHashTable::IsKey(ReadOnlyRoots(isolate), *key));
   Handle<EphemeronHashTable> table(
       EphemeronHashTable::cast(weak_collection->table()), isolate);
@@ -128,20 +150,6 @@ RUNTIME_FUNCTION(Runtime_WeakCollectionSet) {
 
   JSWeakCollection::Set(weak_collection, key, value, hash);
   return *weak_collection;
-}
-
-RUNTIME_FUNCTION(Runtime_OrderedHashMapEnsureGrowable) {
-  HandleScope scope(isolate);
-  DCHECK_EQ(1, args.length());
-  Handle<OrderedHashMap> table = args.at<OrderedHashMap>(0);
-  Handle<String> methodName = args.at<String>(1);
-  MaybeHandle<OrderedHashMap> table_candidate =
-      OrderedHashMap::EnsureGrowable(isolate, table);
-  if (!table_candidate.ToHandle(&table)) {
-    THROW_NEW_ERROR_RETURN_FAILURE(
-        isolate, NewRangeError(MessageTemplate::kOutOfMemory, methodName));
-  }
-  return *table;
 }
 
 }  // namespace internal

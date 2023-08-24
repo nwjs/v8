@@ -184,61 +184,9 @@ void ScheduleBuilder::ProcessOperation(const Operation& op) {
 #define SHOULD_HAVE_BEEN_LOWERED(op) \
   Node* ScheduleBuilder::ProcessOperation(const op##Op&) { UNREACHABLE(); }
 // These operations should have been lowered in previous reducers already.
-SHOULD_HAVE_BEEN_LOWERED(Allocate)
-SHOULD_HAVE_BEEN_LOWERED(ArgumentsLength)
-SHOULD_HAVE_BEEN_LOWERED(BigIntBinop)
-SHOULD_HAVE_BEEN_LOWERED(BigIntComparison)
-SHOULD_HAVE_BEEN_LOWERED(BigIntEqual)
-SHOULD_HAVE_BEEN_LOWERED(BigIntUnary)
-SHOULD_HAVE_BEEN_LOWERED(ChangeOrDeopt)
-SHOULD_HAVE_BEEN_LOWERED(CheckedClosure)
-SHOULD_HAVE_BEEN_LOWERED(CheckEqualsInternalizedString)
-SHOULD_HAVE_BEEN_LOWERED(CheckMaps)
-SHOULD_HAVE_BEEN_LOWERED(CompareMaps)
-SHOULD_HAVE_BEEN_LOWERED(Convert)
-SHOULD_HAVE_BEEN_LOWERED(ConvertJSPrimitiveToUntagged)
-SHOULD_HAVE_BEEN_LOWERED(ConvertJSPrimitiveToUntaggedOrDeopt)
-SHOULD_HAVE_BEEN_LOWERED(ConvertUntaggedToJSPrimitive)
-SHOULD_HAVE_BEEN_LOWERED(ConvertUntaggedToJSPrimitiveOrDeopt)
-SHOULD_HAVE_BEEN_LOWERED(ConvertJSPrimitiveToObject)
-SHOULD_HAVE_BEEN_LOWERED(DecodeExternalPointer)
-SHOULD_HAVE_BEEN_LOWERED(DoubleArrayMinMax)
-SHOULD_HAVE_BEEN_LOWERED(EnsureWritableFastElements)
-SHOULD_HAVE_BEEN_LOWERED(FastApiCall)
-SHOULD_HAVE_BEEN_LOWERED(FindOrderedHashEntry)
-SHOULD_HAVE_BEEN_LOWERED(FloatIs)
-SHOULD_HAVE_BEEN_LOWERED(Float64SameValue)
-SHOULD_HAVE_BEEN_LOWERED(LoadDataViewElement)
-SHOULD_HAVE_BEEN_LOWERED(LoadFieldByIndex)
-SHOULD_HAVE_BEEN_LOWERED(LoadMessage)
-SHOULD_HAVE_BEEN_LOWERED(LoadStackArgument)
-SHOULD_HAVE_BEEN_LOWERED(LoadTypedElement)
-SHOULD_HAVE_BEEN_LOWERED(MaybeGrowFastElements)
-SHOULD_HAVE_BEEN_LOWERED(NewArgumentsElements)
-SHOULD_HAVE_BEEN_LOWERED(NewArray)
-SHOULD_HAVE_BEEN_LOWERED(NewConsString)
-SHOULD_HAVE_BEEN_LOWERED(ObjectIs)
-SHOULD_HAVE_BEEN_LOWERED(ObjectIsNumericValue)
-SHOULD_HAVE_BEEN_LOWERED(RuntimeAbort)
-SHOULD_HAVE_BEEN_LOWERED(SameValue)
-SHOULD_HAVE_BEEN_LOWERED(StoreDataViewElement)
-SHOULD_HAVE_BEEN_LOWERED(StoreMessage)
-SHOULD_HAVE_BEEN_LOWERED(StoreTypedElement)
-SHOULD_HAVE_BEEN_LOWERED(StringAt)
-SHOULD_HAVE_BEEN_LOWERED(StringComparison)
-SHOULD_HAVE_BEEN_LOWERED(StringConcat)
-SHOULD_HAVE_BEEN_LOWERED(StringEqual)
-SHOULD_HAVE_BEEN_LOWERED(StringFromCodePointAt)
-SHOULD_HAVE_BEEN_LOWERED(StringIndexOf)
-SHOULD_HAVE_BEEN_LOWERED(StringLength)
-SHOULD_HAVE_BEEN_LOWERED(StringSubstring)
-#ifdef V8_INTL_SUPPORT
-SHOULD_HAVE_BEEN_LOWERED(StringToCaseIntl)
-#endif  // V8_INTL_SUPPORT
-SHOULD_HAVE_BEEN_LOWERED(TransitionAndStoreArrayElement)
-SHOULD_HAVE_BEEN_LOWERED(TransitionElementsKind)
-SHOULD_HAVE_BEEN_LOWERED(TruncateJSPrimitiveToUntagged)
-SHOULD_HAVE_BEEN_LOWERED(TruncateJSPrimitiveToUntaggedOrDeopt)
+TURBOSHAFT_SIMPLIFIED_OPERATION_LIST(SHOULD_HAVE_BEEN_LOWERED)
+TURBOSHAFT_OTHER_OPERATION_LIST(SHOULD_HAVE_BEEN_LOWERED)
+TURBOSHAFT_WASM_OPERATION_LIST(SHOULD_HAVE_BEEN_LOWERED)
 #undef SHOULD_HAVE_BEEN_LOWERED
 
 Node* ScheduleBuilder::ProcessOperation(const WordBinopOp& op) {
@@ -601,7 +549,7 @@ Node* ScheduleBuilder::ProcessOperation(const ShiftOp& op) {
 }
 Node* ScheduleBuilder::ProcessOperation(const EqualOp& op) {
   const Operator* o;
-  switch (op.rep) {
+  switch (op.rep.value()) {
     case RegisterRepresentation::Word32():
       o = machine.Word32Equal();
       break;
@@ -624,7 +572,7 @@ Node* ScheduleBuilder::ProcessOperation(const EqualOp& op) {
 }
 Node* ScheduleBuilder::ProcessOperation(const ComparisonOp& op) {
   const Operator* o;
-  switch (op.rep) {
+  switch (op.rep.value()) {
     case RegisterRepresentation::Word32():
       switch (op.kind) {
         case ComparisonOp::Kind::kSignedLessThan:
@@ -742,7 +690,7 @@ Node* ScheduleBuilder::ProcessOperation(const ChangeOp& op) {
           DCHECK_EQ(truncate_kind, TruncateKind::kArchitectureDefault);
           o = machine.RoundFloat64ToInt32();
         } else {
-          machine.TruncateFloat32ToUint32(truncate_kind);
+          o = machine.TruncateFloat64ToUint32();
         }
       } else if (op.from == FloatRepresentation::Float32() &&
                  op.to == WordRepresentation::Word32()) {
@@ -777,9 +725,6 @@ Node* ScheduleBuilder::ProcessOperation(const ChangeOp& op) {
       } else if (op.from == WordRepresentation::Word64() &&
                  op.to == FloatRepresentation::Float32()) {
         o = machine.RoundInt64ToFloat32();
-      } else if (op.from == WordRepresentation::Word32() &&
-                 op.to == FloatRepresentation::Float64()) {
-        o = machine.ChangeInt32ToFloat64();
       } else {
         UNIMPLEMENTED();
       }
@@ -847,6 +792,13 @@ Node* ScheduleBuilder::ProcessOperation(const ChangeOp& op) {
         UNIMPLEMENTED();
       }
       break;
+    case Kind::kTruncate:
+      if (op.from == WordRepresentation::Word64() &&
+          op.to == WordRepresentation::Word32()) {
+        o = machine.TruncateInt64ToInt32();
+      } else {
+        UNIMPLEMENTED();
+      }
   }
   return AddNode(o, {GetNode(op.input())});
 }
@@ -915,11 +867,30 @@ Node* ScheduleBuilder::ProcessOperation(const SelectOp& op) {
   DCHECK((op.rep == RegisterRepresentation::Word32() &&
           SupportedOperations::word32_select()) ||
          (op.rep == RegisterRepresentation::Word64() &&
-          SupportedOperations::word64_select()));
-
-  const Operator* o = op.rep == RegisterRepresentation::Word32()
-                          ? machine.Word32Select().op()
-                          : machine.Word64Select().op();
+          SupportedOperations::word64_select()) ||
+         (op.rep == RegisterRepresentation::Float32() &&
+          SupportedOperations::float32_select()) ||
+         (op.rep == RegisterRepresentation::Float64() &&
+          SupportedOperations::float64_select()));
+  const Operator* o = nullptr;
+  switch (op.rep.value()) {
+    case RegisterRepresentation::Enum::kWord32:
+      o = machine.Word32Select().op();
+      break;
+    case RegisterRepresentation::Enum::kWord64:
+      o = machine.Word64Select().op();
+      break;
+    case RegisterRepresentation::Enum::kFloat32:
+      o = machine.Float32Select().op();
+      break;
+    case RegisterRepresentation::Enum::kFloat64:
+      o = machine.Float64Select().op();
+      break;
+    case RegisterRepresentation::Enum::kTagged:
+    case RegisterRepresentation::Enum::kCompressed:
+    case RegisterRepresentation::Enum::kSimd128:
+      UNREACHABLE();
+  }
 
   return AddNode(
       o, {GetNode(op.cond()), GetNode(op.vtrue()), GetNode(op.vfalse())});
@@ -1001,7 +972,11 @@ Node* ScheduleBuilder::ProcessOperation(const LoadOp& op) {
     }
   } else if (op.kind.with_trap_handler) {
     DCHECK(!op.kind.maybe_unaligned);
-    o = machine.ProtectedLoad(loaded_rep);
+    if (op.kind.tagged_base) {
+      o = machine.LoadTrapOnNull(loaded_rep);
+    } else {
+      o = machine.ProtectedLoad(loaded_rep);
+    }
   } else {
     o = machine.Load(loaded_rep);
   }
@@ -1045,8 +1020,14 @@ Node* ScheduleBuilder::ProcessOperation(const StoreOp& op) {
     }
   } else if (op.kind.with_trap_handler) {
     DCHECK(!op.kind.maybe_unaligned);
-    DCHECK_EQ(op.write_barrier, WriteBarrierKind::kNoWriteBarrier);
-    o = machine.ProtectedStore(op.stored_rep.ToMachineType().representation());
+    if (op.kind.tagged_base) {
+      o = machine.StoreTrapOnNull(StoreRepresentation(
+          op.stored_rep.ToMachineType().representation(), op.write_barrier));
+    } else {
+      DCHECK_EQ(op.write_barrier, WriteBarrierKind::kNoWriteBarrier);
+      o = machine.ProtectedStore(
+          op.stored_rep.ToMachineType().representation());
+    }
   } else {
     o = machine.Store(StoreRepresentation(
         op.stored_rep.ToMachineType().representation(), op.write_barrier));
@@ -1162,6 +1143,11 @@ Node* ScheduleBuilder::ProcessOperation(const StaticAssertOp& op) {
   FATAL(
       "Expected Turbofan static assert to hold, but got non-true input:\n  %s",
       op.source);
+}
+Node* ScheduleBuilder::ProcessOperation(const AssumeMapOp&) {
+  // AssumeMapOp is just a hint that optimization phases can use, but has no
+  // Turbofan equivalent and is thus not used past this point.
+  return nullptr;
 }
 Node* ScheduleBuilder::ProcessOperation(const CheckTurboshaftTypeOfOp& op) {
   if (op.successful) return GetNode(op.input());
@@ -1289,11 +1275,11 @@ Node* ScheduleBuilder::ProcessOperation(const FrameStateOp& op) {
   const FrameStateInfo& info = op.data->frame_state_info;
   auto it = op.data->iterator(op.state_values());
 
+  Node* closure = BuildTaggedInput(&it);
   Node* parameter_state_values = BuildStateValues(&it, info.parameter_count());
+  Node* context = BuildTaggedInput(&it);
   Node* register_state_values = BuildStateValues(&it, info.local_count());
   Node* accumulator_state_values = BuildStateValues(&it, info.stack_count());
-  Node* context = BuildTaggedInput(&it);
-  Node* closure = BuildTaggedInput(&it);
   Node* parent =
       op.inlined ? GetNode(op.parent_frame_state()) : tf_graph->start();
 
@@ -1315,38 +1301,31 @@ Node* ScheduleBuilder::ProcessOperation(const CallOp& op) {
   return AddNode(common.Call(op.descriptor->descriptor),
                  base::VectorOf(inputs));
 }
-Node* ScheduleBuilder::ProcessOperation(const CallAndCatchExceptionOp& op) {
-  // Re-building the call
-  base::SmallVector<Node*, 16> inputs;
-  inputs.push_back(GetNode(op.callee()));
-  for (OpIndex i : op.arguments()) {
-    inputs.push_back(GetNode(i));
-  }
-  if (op.HasFrameState()) {
-    DCHECK(op.frame_state().valid());
-    inputs.push_back(GetNode(op.frame_state()));
-  }
-  Node* call =
-      AddNode(common.Call(op.descriptor->descriptor), base::VectorOf(inputs));
+Node* ScheduleBuilder::ProcessOperation(const CheckExceptionOp& op) {
+  Node* call_node = GetNode(op.throwing_operation());
+  DCHECK_EQ(call_node->opcode(), IrOpcode::kCall);
 
   // Re-building the IfSuccess/IfException mechanism.
-  BasicBlock* success_block = GetBlock(*op.if_success);
-  BasicBlock* exception_block = GetBlock(*op.if_exception);
-  schedule->AddCall(current_block, call, success_block, exception_block);
+  BasicBlock* success_block = GetBlock(*op.didnt_throw_block);
+  BasicBlock* exception_block = GetBlock(*op.catch_block);
+  schedule->AddCall(current_block, call_node, success_block, exception_block);
   // Pass `call` as the control input of `IfSuccess` and as both the effect and
   // control input of `IfException`.
-  Node* if_success = MakeNode(common.IfSuccess(), {call});
-  Node* if_exception = MakeNode(common.IfException(), {call, call});
+  Node* if_success = MakeNode(common.IfSuccess(), {call_node});
+  Node* if_exception = MakeNode(common.IfException(), {call_node, call_node});
   schedule->AddNode(success_block, if_success);
   schedule->AddNode(exception_block, if_exception);
   current_block = nullptr;
-  return call;
+  return nullptr;
 }
-Node* ScheduleBuilder::ProcessOperation(const LoadExceptionOp& op) {
+Node* ScheduleBuilder::ProcessOperation(const CatchBlockBeginOp& op) {
   Node* if_exception = current_block->NodeAt(0);
   DCHECK(if_exception != nullptr &&
          if_exception->opcode() == IrOpcode::kIfException);
   return if_exception;
+}
+Node* ScheduleBuilder::ProcessOperation(const DidntThrowOp& op) {
+  return GetNode(op.throwing_operation());
 }
 Node* ScheduleBuilder::ProcessOperation(const TailCallOp& op) {
   base::SmallVector<Node*, 16> inputs;
@@ -1434,20 +1413,30 @@ Node* ScheduleBuilder::ProcessOperation(const DebugBreakOp& op) {
 }
 
 Node* ScheduleBuilder::ProcessOperation(const DebugPrintOp& op) {
-  // TODO(nicohartmann@): Support other representations.
-  DCHECK_EQ(op.rep, RegisterRepresentation::PointerSized());
   Node* input = GetNode(op.input());
 
-  const Callable callable = Builtins::CallableFor(PipelineData::Get().isolate(),
-                                                  Builtin::kDebugPrintWordPtr);
+  base::Optional<Callable> callable;
+  switch (op.rep.value()) {
+    case RegisterRepresentation::PointerSized():
+      callable.emplace(Builtins::CallableFor(PipelineData::Get().isolate(),
+                                             Builtin::kDebugPrintWordPtr));
+      break;
+    case RegisterRepresentation::Float64():
+      callable.emplace(Builtins::CallableFor(PipelineData::Get().isolate(),
+                                             Builtin::kDebugPrintFloat64));
+      break;
+    default:
+      // TODO(nicohartmann@): Support other representations.
+      UNIMPLEMENTED();
+  }
 
   const CallDescriptor* call_descriptor = Linkage::GetStubCallDescriptor(
-      graph_zone, callable.descriptor(),
-      callable.descriptor().GetStackParameterCount(), CallDescriptor::kNoFlags,
+      graph_zone, callable->descriptor(),
+      callable->descriptor().GetStackParameterCount(), CallDescriptor::kNoFlags,
       Operator::kNoThrow | Operator::kNoDeopt);
 
   base::SmallVector<Node*, 8> inputs;
-  inputs.push_back(AddNode(common.HeapConstant(callable.code()), {}));
+  inputs.push_back(AddNode(common.HeapConstant(callable->code()), {}));
   inputs.push_back(input);
   inputs.push_back(AddNode(common.Int32Constant(Context::kNoContext), {}));
 
@@ -1457,6 +1446,60 @@ Node* ScheduleBuilder::ProcessOperation(const DebugPrintOp& op) {
 Node* ScheduleBuilder::ProcessOperation(const LoadRootRegisterOp& op) {
   return AddNode(machine.LoadRootRegister(), {});
 }
+
+Node* ScheduleBuilder::ProcessOperation(const Word32PairBinopOp& op) {
+  using Kind = Word32PairBinopOp::Kind;
+  const Operator* pair_operator = nullptr;
+  switch (op.kind) {
+    case Kind::kAdd:
+      pair_operator = machine.Int32PairAdd();
+      break;
+    case Kind::kSub:
+      pair_operator = machine.Int32PairSub();
+      break;
+    case Kind::kMul:
+      pair_operator = machine.Int32PairMul();
+      break;
+    case Kind::kShiftLeft:
+      pair_operator = machine.Word32PairShl();
+      break;
+    case Kind::kShiftRightArithmetic:
+      pair_operator = machine.Word32PairSar();
+      break;
+    case Kind::kShiftRightLogical:
+      pair_operator = machine.Word32PairShr();
+      break;
+  }
+  return AddNode(pair_operator,
+                 {GetNode(op.left_low()), GetNode(op.left_high()),
+                  GetNode(op.right_low()), GetNode(op.right_high())});
+}
+
+#ifdef V8_ENABLE_WEBASSEMBLY
+Node* ScheduleBuilder::ProcessOperation(const Simd128ConstantOp& op) {
+  return AddNode(machine.S128Const(op.value), {});
+}
+
+Node* ScheduleBuilder::ProcessOperation(const Simd128BinopOp& op) {
+  switch (op.kind) {
+#define HANDLE_KIND(kind)             \
+  case Simd128BinopOp::Kind::k##kind: \
+    return AddNode(machine.kind(), {GetNode(op.left()), GetNode(op.right())});
+    FOREACH_SIMD_128_BINARY_OPCODE(HANDLE_KIND);
+#undef HANDLE_KIND
+  }
+}
+
+Node* ScheduleBuilder::ProcessOperation(const Simd128UnaryOp& op) {
+  switch (op.kind) {
+#define HANDLE_KIND(kind)             \
+  case Simd128UnaryOp::Kind::k##kind: \
+    return AddNode(machine.kind(), {GetNode(op.input())});
+    FOREACH_SIMD_128_UNARY_OPCODE(HANDLE_KIND);
+#undef HANDLE_KIND
+  }
+}
+#endif  // V8_ENABLE_WEBASSEMBLY
 
 }  // namespace
 

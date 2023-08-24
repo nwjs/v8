@@ -16,13 +16,13 @@ static Isolate* GetIsolateFrom(LocalContext* context) {
 }
 
 void CopyHashCode(Handle<JSReceiver> from, Handle<JSReceiver> to) {
-  int hash = Smi::ToInt(from->GetHash());
+  int hash = Smi::ToInt(Object::GetHash(*from));
   to->SetIdentityHash(hash);
 }
 
 void Verify(Isolate* isolate, Handle<HeapObject> obj) {
 #if VERIFY_HEAP
-  obj->ObjectVerify(isolate);
+  Object::ObjectVerify(*obj, isolate);
 #endif
 }
 
@@ -297,9 +297,9 @@ TEST(SmallOrderedHashMapDuplicateHashCode) {
   Handle<JSObject> key2 = factory->NewJSObjectWithNullProto();
   CopyHashCode(key1, key2);
 
-  CHECK(!key1->SameValue(*key2));
-  Object hash1 = key1->GetHash();
-  Object hash2 = key2->GetHash();
+  CHECK(!Object::SameValue(*key1, *key2));
+  Object hash1 = Object::GetHash(*key1);
+  Object hash2 = Object::GetHash(*key2);
   CHECK_EQ(hash1, hash2);
 
   map = SmallOrderedHashMap::Add(isolate, map, key2, value).ToHandleChecked();
@@ -1421,7 +1421,8 @@ TEST(OrderedNameDictionaryInsertion) {
   Factory* factory = isolate->factory();
   HandleScope scope(isolate);
 
-  Handle<OrderedNameDictionary> dict = factory->NewOrderedNameDictionary();
+  Handle<OrderedNameDictionary> dict =
+      OrderedNameDictionary::Allocate(isolate, 2).ToHandleChecked();
   Verify(isolate, dict);
   CHECK_EQ(2, dict->NumberOfBuckets());
   CHECK_EQ(0, dict->NumberOfElements());
@@ -1455,7 +1456,8 @@ TEST(OrderedNameDictionaryFindEntry) {
   Factory* factory = isolate->factory();
   HandleScope scope(isolate);
 
-  Handle<OrderedNameDictionary> dict = factory->NewOrderedNameDictionary();
+  Handle<OrderedNameDictionary> dict =
+      OrderedNameDictionary::Allocate(isolate, 2).ToHandleChecked();
   Verify(isolate, dict);
   CHECK_EQ(2, dict->NumberOfBuckets());
   CHECK_EQ(0, dict->NumberOfElements());
@@ -1495,7 +1497,8 @@ TEST(OrderedNameDictionaryValueAtAndValueAtPut) {
   Factory* factory = isolate->factory();
   HandleScope scope(isolate);
 
-  Handle<OrderedNameDictionary> dict = factory->NewOrderedNameDictionary();
+  Handle<OrderedNameDictionary> dict =
+      OrderedNameDictionary::Allocate(isolate, 2).ToHandleChecked();
   Verify(isolate, dict);
   CHECK_EQ(2, dict->NumberOfBuckets());
   CHECK_EQ(0, dict->NumberOfElements());
@@ -1555,7 +1558,8 @@ TEST(OrderedNameDictionaryDetailsAtAndDetailsAtPut) {
   Factory* factory = isolate->factory();
   HandleScope scope(isolate);
 
-  Handle<OrderedNameDictionary> dict = factory->NewOrderedNameDictionary();
+  Handle<OrderedNameDictionary> dict =
+      OrderedNameDictionary::Allocate(isolate, 2).ToHandleChecked();
   Verify(isolate, dict);
   CHECK_EQ(2, dict->NumberOfBuckets());
   CHECK_EQ(0, dict->NumberOfElements());
@@ -1855,9 +1859,9 @@ TEST(SmallOrderedNameDictionarySetAndMigrateHash) {
 TEST(OrderedNameDictionarySetAndMigrateHash) {
   LocalContext context;
   Isolate* isolate = GetIsolateFrom(&context);
-  Factory* factory = isolate->factory();
   HandleScope scope(isolate);
-  Handle<OrderedNameDictionary> dict = factory->NewOrderedNameDictionary();
+  Handle<OrderedNameDictionary> dict =
+      OrderedNameDictionary::Allocate(isolate, 2).ToHandleChecked();
   Handle<String> value = isolate->factory()->InternalizeUtf8String("bar");
   PropertyDetails details = PropertyDetails::Empty();
 
@@ -1883,7 +1887,7 @@ TEST(OrderedNameDictionaryHandlerInsertion) {
 
   Handle<HeapObject> table =
       OrderedNameDictionaryHandler::Allocate(isolate, 4).ToHandleChecked();
-  CHECK(table->IsSmallOrderedNameDictionary());
+  CHECK(IsSmallOrderedNameDictionary(*table));
   Verify(isolate, table);
 
   // Add a new key.
@@ -1893,9 +1897,9 @@ TEST(OrderedNameDictionaryHandlerInsertion) {
 
   table = OrderedNameDictionaryHandler::Add(isolate, table, key, value, details)
               .ToHandleChecked();
-  DCHECK(key->IsUniqueName());
+  DCHECK(IsUniqueName(*key));
   Verify(isolate, table);
-  CHECK(table->IsSmallOrderedNameDictionary());
+  CHECK(IsSmallOrderedNameDictionary(*table));
   CHECK(OrderedNameDictionaryHandler::FindEntry(isolate, *table, *key)
             .is_found());
 
@@ -1906,7 +1910,7 @@ TEST(OrderedNameDictionaryHandlerInsertion) {
     table =
         OrderedNameDictionaryHandler::Add(isolate, table, key, value, details)
             .ToHandleChecked();
-    DCHECK(key->IsUniqueName());
+    DCHECK(IsUniqueName(*key));
     Verify(isolate, table);
 
     for (int j = 0; j <= i; j++) {
@@ -1924,7 +1928,7 @@ TEST(OrderedNameDictionaryHandlerInsertion) {
     }
   }
 
-  CHECK(table->IsOrderedNameDictionary());
+  CHECK(IsOrderedNameDictionary(*table));
 }
 
 TEST(OrderedNameDictionaryHandlerDeletion) {
@@ -1934,7 +1938,7 @@ TEST(OrderedNameDictionaryHandlerDeletion) {
 
   Handle<HeapObject> table =
       OrderedNameDictionaryHandler::Allocate(isolate, 4).ToHandleChecked();
-  CHECK(table->IsSmallOrderedNameDictionary());
+  CHECK(IsSmallOrderedNameDictionary(*table));
   Verify(isolate, table);
 
   // Add a new key.
@@ -1945,16 +1949,16 @@ TEST(OrderedNameDictionaryHandlerDeletion) {
 
   table = OrderedNameDictionaryHandler::Add(isolate, table, key, value, details)
               .ToHandleChecked();
-  DCHECK(key->IsUniqueName());
+  DCHECK(IsUniqueName(*key));
   Verify(isolate, table);
-  CHECK(table->IsSmallOrderedNameDictionary());
+  CHECK(IsSmallOrderedNameDictionary(*table));
   CHECK(OrderedNameDictionaryHandler::FindEntry(isolate, *table, *key)
             .is_found());
 
   // Remove a non-existing key.
   OrderedNameDictionaryHandler::Delete(isolate, table, key2);
   Verify(isolate, table);
-  CHECK(table->IsSmallOrderedNameDictionary());
+  CHECK(IsSmallOrderedNameDictionary(*table));
   CHECK(OrderedNameDictionaryHandler::FindEntry(isolate, *table, *key2)
             .is_not_found());
   CHECK(OrderedNameDictionaryHandler::FindEntry(isolate, *table, *key)
@@ -1963,11 +1967,11 @@ TEST(OrderedNameDictionaryHandlerDeletion) {
   // Remove an existing key.
   OrderedNameDictionaryHandler::Delete(isolate, table, key);
   Verify(isolate, table);
-  CHECK(table->IsSmallOrderedNameDictionary());
+  CHECK(IsSmallOrderedNameDictionary(*table));
   CHECK(OrderedNameDictionaryHandler::FindEntry(isolate, *table, *key)
             .is_not_found());
 
-  CHECK(table->IsSmallOrderedNameDictionary());
+  CHECK(IsSmallOrderedNameDictionary(*table));
 }
 
 TEST(OrderedNameDictionarySetEntry) {
@@ -1976,7 +1980,8 @@ TEST(OrderedNameDictionarySetEntry) {
   Factory* factory = isolate->factory();
   HandleScope scope(isolate);
 
-  Handle<OrderedNameDictionary> dict = factory->NewOrderedNameDictionary();
+  Handle<OrderedNameDictionary> dict =
+      OrderedNameDictionary::Allocate(isolate, 2).ToHandleChecked();
   Verify(isolate, dict);
   CHECK_EQ(2, dict->NumberOfBuckets());
   CHECK_EQ(0, dict->NumberOfElements());
@@ -2063,7 +2068,8 @@ TEST(OrderedNameDictionaryDeleteEntry) {
   Factory* factory = isolate->factory();
   HandleScope scope(isolate);
 
-  Handle<OrderedNameDictionary> dict = factory->NewOrderedNameDictionary();
+  Handle<OrderedNameDictionary> dict =
+      OrderedNameDictionary::Allocate(isolate, 2).ToHandleChecked();
   Verify(isolate, dict);
   CHECK_EQ(2, dict->NumberOfBuckets());
   CHECK_EQ(0, dict->NumberOfElements());
@@ -2094,7 +2100,7 @@ TEST(OrderedNameDictionaryDeleteEntry) {
     key = factory->InternalizeUtf8String(buf);
     dict = OrderedNameDictionary::Add(isolate, dict, key, value, details)
                .ToHandleChecked();
-    DCHECK(key->IsUniqueName());
+    DCHECK(IsUniqueName(*key));
     Verify(isolate, dict);
   }
 
@@ -2156,7 +2162,7 @@ TEST(SmallOrderedNameDictionaryDeleteEntry) {
     key = factory->InternalizeUtf8String(buf);
     dict = SmallOrderedNameDictionary::Add(isolate, dict, key, value, details)
                .ToHandleChecked();
-    DCHECK(key->IsUniqueName());
+    DCHECK(IsUniqueName(*key));
     Verify(isolate, dict);
   }
 
@@ -2261,7 +2267,8 @@ TEST(ZeroSizeOrderedHashMap) {
   {
     Handle<OrderedHashMap> map = empty;
 
-    map = OrderedHashMap::EnsureGrowable(isolate, map).ToHandleChecked();
+    map =
+        OrderedHashMap::EnsureCapacityForAdding(isolate, map).ToHandleChecked();
 
     CHECK_LT(0, map->NumberOfBuckets());
     CHECK_EQ(0, map->NumberOfElements());
@@ -2336,7 +2343,8 @@ TEST(ZeroSizeOrderedHashSet) {
   {
     Handle<OrderedHashSet> set = empty;
 
-    set = OrderedHashSet::EnsureGrowable(isolate, set).ToHandleChecked();
+    set =
+        OrderedHashSet::EnsureCapacityForAdding(isolate, set).ToHandleChecked();
 
     CHECK_LT(0, set->NumberOfBuckets());
     CHECK_EQ(0, set->NumberOfElements());

@@ -56,9 +56,7 @@ class JSCallAccessor {
     return call_->InputAt(JSCallOrConstructNode::TargetIndex());
   }
 
-  Node* receiver() const {
-    return JSCallNode{call_}.receiver();
-  }
+  Node* receiver() const { return JSCallNode{call_}.receiver(); }
 
   Node* new_target() const { return JSConstructNode{call_}.new_target(); }
 
@@ -212,8 +210,7 @@ Reduction JSInliner::InlineCall(Node* call, Node* new_target, Node* context,
       case IrOpcode::kDeoptimize:
       case IrOpcode::kTerminate:
       case IrOpcode::kThrow:
-        NodeProperties::MergeControlToEnd(graph(), common(), input);
-        Revisit(graph()->end());
+        MergeControlToEnd(graph(), common(), input);
         break;
       default:
         UNREACHABLE();
@@ -247,8 +244,8 @@ Reduction JSInliner::InlineCall(Node* call, Node* new_target, Node* context,
 
 FrameState JSInliner::CreateArtificialFrameState(
     Node* node, FrameState outer_frame_state, int parameter_count,
-    BytecodeOffset bailout_id, FrameStateType frame_state_type,
-    SharedFunctionInfoRef shared, Node* context, Node* callee) {
+    FrameStateType frame_state_type, SharedFunctionInfoRef shared,
+    Node* context, Node* callee) {
   const int parameter_count_with_receiver =
       parameter_count + JSCallOrConstructNode::kReceiverOrNewTargetInputCount;
   const FrameStateFunctionInfo* state_info =
@@ -256,7 +253,7 @@ FrameState JSInliner::CreateArtificialFrameState(
           frame_state_type, parameter_count_with_receiver, 0, shared.object());
 
   const Operator* op = common()->FrameState(
-      bailout_id, OutputFrameStateCombine::Ignore(), state_info);
+      BytecodeOffset::None(), OutputFrameStateCombine::Ignore(), state_info);
   const Operator* op0 = common()->StateValues(0, SparseInputMask::Dense());
   Node* node0 = graph()->NewNode(op0);
 
@@ -469,11 +466,11 @@ Reduction JSInliner::ReduceJSWasmCall(Node* node) {
   wasm::NativeModule* native_module = wasm_call_params.native_module();
   const wasm::FunctionSig* sig = wasm_call_params.signature();
 
-  // Try "full" inlining of very simple WasmGC functions.
+  // Try "full" inlining of very simple wasm functions (mainly getters / setters
+  // for wasm gc objects).
   WasmInlineResult inline_result;
-  if (native_module->enabled_features().has_gc() &&
-      v8_flags.experimental_wasm_js_inlining && fct_index != -1 &&
-      native_module) {
+  if (inline_wasm_fct_if_supported_ && fct_index != -1 && native_module &&
+      native_module->enabled_features().has_gc()) {
     inline_result = TryWasmInlining(call_node);
   }
 
@@ -590,7 +587,7 @@ void JSInliner::InlineWasmFunction(Node* call, Node* inlinee_start,
   // We do not have a proper callee JSFunction object.
   Node* callee = jsgraph()->UndefinedConstant();
   Node* frame_state_inside = CreateArtificialFrameState(
-      call, FrameState{frame_state}, argument_count, BytecodeOffset::None(),
+      call, FrameState{frame_state}, argument_count,
       FrameStateType::kWasmInlinedIntoJS, shared_fct_info, context, callee);
   Node* check_point = graph()->NewNode(common()->Checkpoint(),
                                        frame_state_inside, effect, control);
@@ -831,10 +828,17 @@ Reduction JSInliner::ReduceJSCall(Node* node) {
     if (NeedsImplicitReceiver(*shared_info)) {
       Effect effect = n.effect();
       Control control = n.control();
-      Node* frame_state_inside = CreateArtificialFrameState(
-          node, frame_state, n.ArgumentCount(),
-          BytecodeOffset::ConstructStubCreate(), FrameStateType::kConstructStub,
-          *shared_info, caller_context);
+      Node* frame_state_inside;
+      HeapObjectMatcher m(new_target);
+      if (m.HasResolvedValue() && m.Ref(broker()).IsJSFunction()) {
+        // If {new_target} is a JSFunction, then we cannot deopt in the
+        // NewObject call. Therefore we do not need the artificial frame state.
+        frame_state_inside = frame_state;
+      } else {
+        frame_state_inside = CreateArtificialFrameState(
+            node, frame_state, n.ArgumentCount(),
+            FrameStateType::kConstructCreateStub, *shared_info, caller_context);
+      }
       Node* create =
           graph()->NewNode(javascript()->Create(), call.target(), new_target,
                            caller_context, frame_state_inside, effect, control);
@@ -875,8 +879,7 @@ Reduction JSInliner::ReduceJSCall(Node* node) {
       branch_is_receiver_false =
           graph()->NewNode(common()->Throw(), branch_is_receiver_false,
                            branch_is_receiver_false);
-      NodeProperties::MergeControlToEnd(graph(), common(),
-                                        branch_is_receiver_false);
+      MergeControlToEnd(graph(), common(), branch_is_receiver_false);
 
       ReplaceWithValue(node_success, node_success, node_success,
                        branch_is_receiver_true);
@@ -887,8 +890,7 @@ Reduction JSInliner::ReduceJSCall(Node* node) {
     // Insert a construct stub frame into the chain of frame states. This will
     // reconstruct the proper frame when deoptimizing within the constructor.
     frame_state = CreateArtificialFrameState(
-        node, frame_state, n.ArgumentCount(),
-        BytecodeOffset::ConstructStubInvoke(), FrameStateType::kConstructStub,
+        node, frame_state, 0, FrameStateType::kConstructInvokeStub,
         *shared_info, caller_context);
   }
 
@@ -918,7 +920,7 @@ Reduction JSInliner::ReduceJSCall(Node* node) {
   DCHECK_EQ(parameter_count, start.FormalParameterCountWithoutReceiver());
   if (call.argument_count() != parameter_count) {
     frame_state = CreateArtificialFrameState(
-        node, frame_state, call.argument_count(), BytecodeOffset::None(),
+        node, frame_state, call.argument_count(),
         FrameStateType::kInlinedExtraArguments, *shared_info);
   }
 

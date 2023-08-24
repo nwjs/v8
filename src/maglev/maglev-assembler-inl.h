@@ -317,6 +317,12 @@ inline void MaglevAssembler::LoadTaggedSignedField(Register result,
   MacroAssembler::LoadTaggedField(result, FieldMemOperand(object, offset));
 }
 
+inline void MaglevAssembler::LoadAndUntagTaggedSignedField(Register result,
+                                                           Register object,
+                                                           int offset) {
+  MacroAssembler::SmiUntagField(result, FieldMemOperand(object, offset));
+}
+
 namespace detail {
 
 #ifdef DEBUG
@@ -329,7 +335,9 @@ inline bool ClobberedBy(RegList written_registers, DoubleRegister reg) {
 inline bool ClobberedBy(RegList written_registers, Handle<Object> handle) {
   return false;
 }
-inline bool ClobberedBy(RegList written_registers, Smi smi) { return false; }
+inline bool ClobberedBy(RegList written_registers, Tagged<Smi> smi) {
+  return false;
+}
 inline bool ClobberedBy(RegList written_registers, TaggedIndex index) {
   return false;
 }
@@ -354,7 +362,7 @@ inline bool ClobberedBy(DoubleRegList written_registers,
                         Handle<Object> handle) {
   return false;
 }
-inline bool ClobberedBy(DoubleRegList written_registers, Smi smi) {
+inline bool ClobberedBy(DoubleRegList written_registers, Tagged<Smi> smi) {
   return false;
 }
 inline bool ClobberedBy(DoubleRegList written_registers, TaggedIndex index) {
@@ -385,10 +393,10 @@ inline bool MachineTypeMatches(MachineType type, MemOperand reg) {
 inline bool MachineTypeMatches(MachineType type, Handle<HeapObject> handle) {
   return type.IsTagged() && !type.IsTaggedSigned();
 }
-inline bool MachineTypeMatches(MachineType type, Smi handle) {
+inline bool MachineTypeMatches(MachineType type, Tagged<Smi> smi) {
   return type.IsTagged() && !type.IsTaggedPointer();
 }
-inline bool MachineTypeMatches(MachineType type, TaggedIndex handle) {
+inline bool MachineTypeMatches(MachineType type, TaggedIndex index) {
   // TaggedIndex doesn't have a separate type, so check for the same type as for
   // Smis.
   return type.IsTagged() && !type.IsTaggedPointer();
@@ -631,12 +639,20 @@ inline void MaglevAssembler::CallBuiltin(Args&&... args) {
 
 inline void MaglevAssembler::CallRuntime(Runtime::FunctionId fid) {
   DCHECK(allow_call());
+  // Temporaries have to be reset before calling CallRuntime, in case it uses
+  // temporaries that alias register parameters.
+  ScratchRegisterScope reset_temps(this);
+  reset_temps.ResetToDefault();
   MacroAssembler::CallRuntime(fid);
 }
 
 inline void MaglevAssembler::CallRuntime(Runtime::FunctionId fid,
                                          int num_args) {
   DCHECK(allow_call());
+  // Temporaries have to be reset before calling CallRuntime, in case it uses
+  // temporaries that alias register parameters.
+  ScratchRegisterScope reset_temps(this);
+  reset_temps.ResetToDefault();
   MacroAssembler::CallRuntime(fid, num_args);
 }
 
@@ -650,7 +666,9 @@ inline void MaglevAssembler::SetMapAsRoot(Register object, RootIndex map) {
 inline void MaglevAssembler::SmiTagInt32AndJumpIfFail(
     Register dst, Register src, Label* fail, Label::Distance distance) {
   SmiTagInt32AndSetFlags(dst, src);
-  JumpIf(kOverflow, fail, distance);
+  if (!SmiValuesAre32Bits()) {
+    JumpIf(kOverflow, fail, distance);
+  }
 }
 
 inline void MaglevAssembler::SmiTagInt32AndJumpIfFail(
@@ -661,7 +679,11 @@ inline void MaglevAssembler::SmiTagInt32AndJumpIfFail(
 inline void MaglevAssembler::SmiTagInt32AndJumpIfSuccess(
     Register dst, Register src, Label* success, Label::Distance distance) {
   SmiTagInt32AndSetFlags(dst, src);
-  JumpIf(kNoOverflow, success, distance);
+  if (!SmiValuesAre32Bits()) {
+    JumpIf(kNoOverflow, success, distance);
+  } else {
+    jmp(success);
+  }
 }
 
 inline void MaglevAssembler::SmiTagInt32AndJumpIfSuccess(
@@ -718,6 +740,21 @@ inline void MaglevAssembler::UncheckedSmiTagUint32(Register dst, Register src) {
 
 inline void MaglevAssembler::UncheckedSmiTagUint32(Register reg) {
   UncheckedSmiTagUint32(reg, reg);
+}
+
+inline void MaglevAssembler::StringLength(Register result, Register string) {
+  if (v8_flags.debug_code) {
+    // Check if {string} is a string.
+    ScratchRegisterScope temps(this);
+    Register scratch = temps.GetDefaultScratchRegister();
+    AssertNotSmi(string);
+    LoadMap(scratch, string);
+    CompareInstanceTypeRange(scratch, scratch, FIRST_STRING_TYPE,
+                             LAST_STRING_TYPE);
+    Check(kUnsignedLessThanEqual, AbortReason::kUnexpectedValue);
+  }
+  LoadSignedField(result, FieldMemOperand(string, String::kLengthOffset),
+                  sizeof(int32_t));
 }
 
 }  // namespace maglev

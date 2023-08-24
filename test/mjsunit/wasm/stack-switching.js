@@ -617,3 +617,53 @@ function TestNestedSuspenders(suspend) {
   assertThrowsAsync(wrapper(), WebAssembly.RuntimeError,
       /trying to suspend JS frames/);
 })();
+
+// Regression test for v8:14094.
+// Pass an invalid (null) suspender to the suspending wrapper, but return a
+// non-promise. The import should not trap.
+(function TestImportCheckOrder() {
+  print(arguments.callee.name);
+  let builder = new WasmModuleBuilder();
+  import_index = builder.addImport('m', 'import', kSig_i_r);
+  builder.addFunction("test", kSig_i_r)
+      .addBody([
+          kExprLocalGet, 0,
+          kExprCallFunction, import_index, // suspend
+      ]).exportFunc();
+  let js_import = new WebAssembly.Function(
+      {parameters: ['externref'], results: ['i32']},
+      () => 42,
+      {suspending: 'first'});
+  let instance = builder.instantiate({m: {import: js_import}});
+  assertEquals(42, instance.exports.test(null));
+})();
+
+(function TestSwitchingToTheCentralStack() {
+  print(arguments.callee.name);
+  let builder = new WasmModuleBuilder();
+  let table = builder.addTable(kWasmExternRef, 1);
+  builder.addFunction("test", kSig_i_r)
+      .addBody([
+        kExprLocalGet, 0,
+        kExprI32Const, 1,
+        kNumericPrefix, kExprTableGrow, table.index]).exportFunc();
+  builder.addFunction("test2", kSig_i_r)
+      .addBody([
+        kExprI32Const, 1]).exportFunc();
+  let instance = builder.instantiate();
+  let wrapper = ToPromising(instance.exports.test);
+  let wrapper2 = ToPromising(instance.exports.test2);
+  function switchesToCS(fn) {
+    const beforeCall = %WasmSwitchToTheCentralStackCount();
+    fn();
+    return %WasmSwitchToTheCentralStackCount() - beforeCall;
+  }
+  // Calling exported functions from the central stack.
+  assertEquals(switchesToCS(() => instance.exports.test({})), 0);
+  assertEquals(switchesToCS(() => instance.exports.test2({})), 0);
+
+  // Runtime call to table.grow.
+  assertEquals(switchesToCS(wrapper), 1);
+  // No runtime calls.
+  assertEquals(switchesToCS(wrapper2), 0);
+})();

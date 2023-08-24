@@ -273,21 +273,21 @@ void PrintStateValue(std::ostream& os, Isolate* isolate, Handle<Object> value,
                      AllocatedOperand operand) {
   switch (operand.representation()) {
     case MachineRepresentation::kTagged:
-      if (value->IsSmi()) {
+      if (IsSmi(*value)) {
         os << Smi::cast(*value).value();
       } else {
-        os << value->Number();
+        os << Object::Number(*value);
       }
       break;
     case MachineRepresentation::kFloat32:
     case MachineRepresentation::kFloat64:
-      os << value->Number();
+      os << Object::Number(*value);
       break;
     case MachineRepresentation::kSimd128: {
       FixedArray vector = FixedArray::cast(*value);
       os << "[";
       for (int lane = 0; lane < 4; lane++) {
-        os << Smi::cast(vector.get(lane)).value();
+        os << Smi::cast(vector->get(lane)).value();
         if (lane < 3) {
           os << ", ";
         }
@@ -845,7 +845,7 @@ class TestEnvironment : public HandleAndZoneScope {
     // don't appear in the parallel move. Simulate them now.
     for (auto& operand : teardown_layout_) {
       int to_index = OperandToStatePosition(TeardownLayout(), operand);
-      if (state_out->get(to_index).IsUndefined()) {
+      if (IsUndefined(state_out->get(to_index))) {
         int from_index = OperandToStatePosition(setup_layout_, operand);
         state_out->set(to_index, state_in->get(from_index));
       }
@@ -900,13 +900,13 @@ class TestEnvironment : public HandleAndZoneScope {
       case MachineRepresentation::kTagged:
       case MachineRepresentation::kFloat32:
       case MachineRepresentation::kFloat64:
-        return actual->StrictEquals(*expected);
+        return Object::StrictEquals(*actual, *expected);
       case MachineRepresentation::kSimd128:
         for (int lane = 0; lane < 4; lane++) {
           int actual_lane =
-              Smi::cast(FixedArray::cast(*actual).get(lane)).value();
+              Smi::cast(FixedArray::cast(*actual)->get(lane)).value();
           int expected_lane =
-              Smi::cast(FixedArray::cast(*expected).get(lane)).value();
+              Smi::cast(FixedArray::cast(*expected)->get(lane)).value();
           if (actual_lane != expected_lane) {
             return false;
           }
@@ -1370,7 +1370,7 @@ TEST(FuzzAssembleMove) {
 
     Handle<Code> test = c.FinalizeForExecuting();
     if (v8_flags.print_code) {
-      test->Print();
+      Print(*test);
     }
 
     Handle<FixedArray> actual = env.Run(test, state_in);
@@ -1394,7 +1394,7 @@ TEST(FuzzAssembleParallelMove) {
 
   Handle<Code> test = c.FinalizeForExecuting();
   if (v8_flags.print_code) {
-    test->Print();
+    Print(*test);
   }
 
   Handle<FixedArray> actual = env.Run(test, state_in);
@@ -1419,7 +1419,7 @@ TEST(FuzzAssembleSwap) {
 
     Handle<Code> test = c.FinalizeForExecuting();
     if (v8_flags.print_code) {
-      test->Print();
+      Print(*test);
     }
 
     Handle<FixedArray> actual = env.Run(test, state_in);
@@ -1457,7 +1457,7 @@ TEST(FuzzAssembleMoveAndSwap) {
 
     Handle<Code> test = c.FinalizeForExecuting();
     if (v8_flags.print_code) {
-      test->Print();
+      Print(*test);
     }
 
     Handle<FixedArray> actual = env.Run(test, state_in);
@@ -1538,7 +1538,7 @@ TEST(AssembleTailCallGap) {
                                 CodeGeneratorTester::kRegisterPush);
     Handle<Code> code = c.Finalize();
     if (v8_flags.print_code) {
-      code->Print();
+      Print(*code);
     }
   }
 
@@ -1567,7 +1567,7 @@ TEST(AssembleTailCallGap) {
                                 CodeGeneratorTester::kStackSlotPush);
     Handle<Code> code = c.Finalize();
     if (v8_flags.print_code) {
-      code->Print();
+      Print(*code);
     }
   }
 
@@ -1596,7 +1596,7 @@ TEST(AssembleTailCallGap) {
                                 CodeGeneratorTester::kScalarPush);
     Handle<Code> code = c.Finalize();
     if (v8_flags.print_code) {
-      code->Print();
+      Print(*code);
     }
   }
 }

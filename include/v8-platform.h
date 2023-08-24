@@ -71,6 +71,7 @@ enum class TaskPriority : uint8_t {
    * possible.
    */
   kUserBlocking,
+  kMaxPriority = kUserBlocking
 };
 
 /**
@@ -628,6 +629,14 @@ class ThreadIsolatedAllocator {
    * Return the pkey used to implement the thread isolation if Type == kPkey.
    */
   virtual int Pkey() const { return -1; }
+
+  /**
+   * Per-thread permissions can be reset on signal handler entry. Even reading
+   * ThreadIsolated memory will segfault in that case.
+   * Call this function on signal handler entry to ensure that read permissions
+   * are restored.
+   */
+  static void SetDefaultPermissionsForSignalHandler();
 };
 
 // Opaque type representing a handle to a shared memory region.
@@ -1074,9 +1083,24 @@ class Platform {
    * Returns a TaskRunner which can be used to post a task on the foreground.
    * The TaskRunner's NonNestableTasksEnabled() must be true. This function
    * should only be called from a foreground thread.
+   * TODO(chromium:1448758): Deprecate once |GetForegroundTaskRunner(Isolate*,
+   * TaskPriority)| is ready.
    */
   virtual std::shared_ptr<v8::TaskRunner> GetForegroundTaskRunner(
-      Isolate* isolate) = 0;
+      Isolate* isolate) {
+    return GetForegroundTaskRunner(isolate, TaskPriority::kUserBlocking);
+  }
+
+  /**
+   * Returns a TaskRunner with a specific |priority| which can be used to post a
+   * task on the foreground thread. The TaskRunner's NonNestableTasksEnabled()
+   * must be true. This function should only be called from a foreground thread.
+   * TODO(chromium:1448758): Make pure virtual once embedders implement it.
+   */
+  virtual std::shared_ptr<v8::TaskRunner> GetForegroundTaskRunner(
+      Isolate* isolate, TaskPriority priority) {
+    return nullptr;
+  }
 
   /**
    * Schedules a task to be invoked on a worker thread.
@@ -1101,7 +1125,8 @@ class Platform {
   virtual void CallBlockingTaskOnWorkerThread(std::unique_ptr<Task> task) {
     // Embedders may optionally override this to process these tasks in a high
     // priority pool.
-    CallOnWorkerThread(std::move(task));
+    PostTaskOnWorkerThreadImpl(TaskPriority::kUserBlocking, std::move(task),
+                               SourceLocation::Current());
   }
 
   /**
@@ -1114,7 +1139,8 @@ class Platform {
   virtual void CallLowPriorityTaskOnWorkerThread(std::unique_ptr<Task> task) {
     // Embedders may optionally override this to process these tasks in a low
     // priority pool.
-    CallOnWorkerThread(std::move(task));
+    PostTaskOnWorkerThreadImpl(TaskPriority::kBestEffort, std::move(task),
+                               SourceLocation::Current());
   }
 
   /**
@@ -1307,7 +1333,9 @@ class Platform {
    */
   virtual void PostTaskOnWorkerThreadImpl(TaskPriority priority,
                                           std::unique_ptr<Task> task,
-                                          const SourceLocation& location) {}
+                                          const SourceLocation& location) {
+    CallOnWorkerThread(std::move(task));
+  }
 
   /**
    * Schedules a task with |priority| to be invoked on a worker thread after

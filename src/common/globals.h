@@ -134,6 +134,12 @@ namespace internal {
 #define V8_ENABLE_SANDBOX_BOOL false
 #endif
 
+#ifdef V8_CODE_POINTER_SANDBOXING
+#define V8_CODE_POINTER_SANDBOXING_BOOL true
+#else
+#define V8_CODE_POINTER_SANDBOXING_BOOL false
+#endif
+
 // D8's MultiMappedAllocator is only available on Linux, and only if the sandbox
 // is not enabled.
 #if V8_OS_LINUX && !V8_ENABLE_SANDBOX_BOOL
@@ -410,7 +416,7 @@ constexpr bool kPlatformRequiresCodeRange = true;
     (V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_PPC64) && V8_OS_LINUX
 constexpr size_t kMaximalCodeRangeSize = 512 * MB;
 constexpr size_t kMinExpectedOSPageSize = 64 * KB;  // OS page on PPC Linux
-#elif V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_LOONG64
+#elif V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_LOONG64 || V8_TARGET_ARCH_RISCV64
 constexpr size_t kMaximalCodeRangeSize =
     (COMPRESS_POINTERS_BOOL && !V8_EXTERNAL_CODE_SPACE_BOOL) ? 128 * MB
                                                              : 256 * MB;
@@ -525,13 +531,7 @@ static_assert(kExternalPointerSlotSize == kTaggedSize);
 static_assert(kExternalPointerSlotSize == kSystemPointerSize);
 #endif
 
-// This type defines the raw storage type for code pointers stored on V8 heap.
-constexpr int kCodePointerSlotSize = sizeof(CodePointer_t);
-#ifdef V8_CODE_POINTER_SANDBOXING
-static_assert(kCodePointerSlotSize == kTaggedSize);
-#else
-static_assert(kCodePointerSlotSize == kSystemPointerSize);
-#endif
+constexpr int kIndirectPointerSlotSize = sizeof(IndirectPointerHandle);
 
 constexpr int kEmbedderDataSlotSize = kSystemPointerSize;
 
@@ -680,6 +680,28 @@ enum class TypeofMode { kInside, kNotInside };
 // Whether floating point registers should be saved (and restored).
 enum class SaveFPRegsMode { kIgnore, kSave };
 
+// Whether a field contains a direct (i.e. tagged) pointer to another HeapObject
+// or an indirect (i.e. an index into a pointer table) one.
+enum class PointerType { kDirect, kIndirect };
+
+// The type of pointers to Code objects. When the sandbox is enabled, these are
+// referenced through indirect pointers, otherwise regular/direct pointers.
+constexpr PointerType kCodePointerType = V8_CODE_POINTER_SANDBOXING_BOOL
+                                             ? PointerType::kIndirect
+                                             : PointerType::kDirect;
+
+// This enum describes the ownership semantics of an indirect pointer.
+enum class IndirectPointerMode {
+  // A regular reference from one HeapObject to another one through an indirect
+  // pointer, where the referenced object should be kept alive as long as the
+  // referencing object is alive.
+  kStrong,
+  // A reference from one HeapObject to another one through an indirect pointer
+  // with custom ownership semantics. Used for example for references from
+  // JSFunctions to Code objects which follow custom weak ownership semantics.
+  kCustom
+};
+
 // Whether arguments are passed on a known stack location or through a
 // register.
 enum class ArgvMode { kStack, kRegister };
@@ -691,13 +713,20 @@ enum class CallApiCallbackMode {
   // side-effects checking by debugger.
   kGeneric,
 
-  // The following two are used for generating calls from optimized code when
-  // the target CallHandlerInfo object is known and thus the expected
-  // side-effects of the callback. These versions don't get the target
-  // function because the target function can be reconstructed from the deopt
-  // info in case exception is thrown.
-  kNoSideEffects,
-  kWithSideEffects,
+  // The following two versions are used for generating calls from optimized
+  // code. They don't need to support side effects checking because function
+  // will be deoptimized when side effects checking is enabled, and they don't
+  // get the target function because it can be reconstructed from the lazy
+  // deopt info in case exception is thrown.
+
+  // This version is used for compiling code when Isolate profiling or runtime
+  // call stats is disabled. The code that uses this version must be created
+  // with a dependency on NoProfilingProtector.
+  kOptimizedNoProfiling,
+
+  // This version contains a dynamic check for enabled profiler and it supports
+  // runtime call stats.
+  kOptimized,
 };
 
 // This constant is used as an undefined value when passing source positions.
@@ -895,7 +924,7 @@ class InstructionStream;
 class Code;
 class CodeSpace;
 class Context;
-#ifdef V8_ENABLE_CONSERVATIVE_STACK_SCANNING
+#ifdef V8_ENABLE_DIRECT_HANDLE
 template <typename T>
 class DirectHandle;
 #endif
@@ -1037,7 +1066,7 @@ using WeakSlotCallbackWithHeap = bool (*)(Heap* heap, FullObjectSlot pointer);
 enum AllocationSpace {
   RO_SPACE,         // Immortal, immovable and immutable objects,
   NEW_SPACE,        // Young generation space for regular objects collected
-                    // with Scavenger/MinorMC.
+                    // with Scavenger/MinorMS.
   OLD_SPACE,        // Old generation regular object space.
   CODE_SPACE,       // Old generation code object space, marked executable.
   SHARED_SPACE,     // Space shared between multiple isolates. Optional.
@@ -1058,16 +1087,72 @@ enum AllocationSpace {
 constexpr int kSpaceTagSize = 4;
 static_assert(FIRST_SPACE == 0);
 
+constexpr bool IsAnyCodeSpace(AllocationSpace space) {
+  return space == CODE_SPACE || space == CODE_LO_SPACE;
+}
+
+constexpr const char* ToString(AllocationSpace space) {
+  switch (space) {
+    case AllocationSpace::RO_SPACE:
+      return "read_only_space";
+    case AllocationSpace::NEW_SPACE:
+      return "new_space";
+    case AllocationSpace::OLD_SPACE:
+      return "old_space";
+    case AllocationSpace::CODE_SPACE:
+      return "code_space";
+    case AllocationSpace::SHARED_SPACE:
+      return "shared_space";
+    case AllocationSpace::NEW_LO_SPACE:
+      return "new_large_object_space";
+    case AllocationSpace::LO_SPACE:
+      return "large_object_space";
+    case AllocationSpace::CODE_LO_SPACE:
+      return "code_large_object_space";
+    case AllocationSpace::SHARED_LO_SPACE:
+      return "shared_large_object_space";
+  }
+}
+
+inline std::ostream& operator<<(std::ostream& os, AllocationSpace space) {
+  return os << ToString(space);
+}
+
 enum class AllocationType : uint8_t {
-  kYoung,  // Regular object allocated in NEW_SPACE or NEW_LO_SPACE
-  kOld,    // Regular object allocated in OLD_SPACE or LO_SPACE
-  kCode,   // InstructionStream object allocated in CODE_SPACE or CODE_LO_SPACE
-  kMap,    // Map object allocated in OLD_SPACE
-  kReadOnly,   // Object allocated in RO_SPACE
-  kSharedOld,  // Regular object allocated in OLD_SPACE in the shared heap
-  kSharedMap,  // Map object in OLD_SPACE in the shared heap
+  kYoung,  // Regular object allocated in NEW_SPACE or NEW_LO_SPACE.
+  kOld,    // Regular object allocated in OLD_SPACE or LO_SPACE.
+  kCode,   // InstructionStream object allocated in CODE_SPACE or CODE_LO_SPACE.
+  kMap,    // Map object allocated in OLD_SPACE.
+  kReadOnly,   // Object allocated in RO_SPACE.
+  kSharedOld,  // Regular object allocated in OLD_SPACE in the shared heap.
+  kSharedMap,  // Map object in OLD_SPACE in the shared heap.
 };
 
+constexpr const char* ToString(AllocationType kind) {
+  switch (kind) {
+    case AllocationType::kYoung:
+      return "Young";
+    case AllocationType::kOld:
+      return "Old";
+    case AllocationType::kCode:
+      return "Code";
+    case AllocationType::kMap:
+      return "Map";
+    case AllocationType::kReadOnly:
+      return "ReadOnly";
+    case AllocationType::kSharedOld:
+      return "SharedOld";
+    case AllocationType::kSharedMap:
+      return "SharedMap";
+  }
+}
+
+inline std::ostream& operator<<(std::ostream& os, AllocationType type) {
+  return os << ToString(type);
+}
+
+// Reason for a garbage collection.
+//
 // These values are persisted to logs. Entries should not be renumbered and
 // numeric values should never be reused. If you add new items here, update
 // src/tools/metrics/histograms/enums.xml in chromium.
@@ -1098,38 +1183,86 @@ enum class GarbageCollectionReason : int {
   kGlobalAllocationLimit = 23,
   kMeasureMemory = 24,
   kBackgroundAllocationFailure = 25,
-  kFinalizeMinorMC = 26,
+  kFinalizeConcurrentMinorMS = 26,
   kCppHeapAllocationFailure = 27,
 
-  kLastReason = kCppHeapAllocationFailure,
+  NUM_REASONS,
 };
 
 static_assert(kGarbageCollectionReasonMaxValue ==
-                  static_cast<int>(GarbageCollectionReason::kLastReason),
+                  static_cast<int>(GarbageCollectionReason::NUM_REASONS) - 1,
               "The value of kGarbageCollectionReasonMaxValue is inconsistent.");
+
+constexpr const char* ToString(GarbageCollectionReason reason) {
+  switch (reason) {
+    case GarbageCollectionReason::kAllocationFailure:
+      return "allocation failure";
+    case GarbageCollectionReason::kAllocationLimit:
+      return "allocation limit";
+    case GarbageCollectionReason::kContextDisposal:
+      return "context disposal";
+    case GarbageCollectionReason::kCountersExtension:
+      return "counters extension";
+    case GarbageCollectionReason::kDebugger:
+      return "debugger";
+    case GarbageCollectionReason::kDeserializer:
+      return "deserialize";
+    case GarbageCollectionReason::kExternalMemoryPressure:
+      return "external memory pressure";
+    case GarbageCollectionReason::kFinalizeMarkingViaStackGuard:
+      return "finalize incremental marking via stack guard";
+    case GarbageCollectionReason::kFinalizeMarkingViaTask:
+      return "finalize incremental marking via task";
+    case GarbageCollectionReason::kFullHashtable:
+      return "full hash-table";
+    case GarbageCollectionReason::kHeapProfiler:
+      return "heap profiler";
+    case GarbageCollectionReason::kTask:
+      return "task";
+    case GarbageCollectionReason::kLastResort:
+      return "last resort";
+    case GarbageCollectionReason::kLowMemoryNotification:
+      return "low memory notification";
+    case GarbageCollectionReason::kMakeHeapIterable:
+      return "make heap iterable";
+    case GarbageCollectionReason::kMemoryPressure:
+      return "memory pressure";
+    case GarbageCollectionReason::kMemoryReducer:
+      return "memory reducer";
+    case GarbageCollectionReason::kRuntime:
+      return "runtime";
+    case GarbageCollectionReason::kSamplingProfiler:
+      return "sampling profiler";
+    case GarbageCollectionReason::kSnapshotCreator:
+      return "snapshot creator";
+    case GarbageCollectionReason::kTesting:
+      return "testing";
+    case GarbageCollectionReason::kExternalFinalize:
+      return "external finalize";
+    case GarbageCollectionReason::kGlobalAllocationLimit:
+      return "global allocation limit";
+    case GarbageCollectionReason::kMeasureMemory:
+      return "measure memory";
+    case GarbageCollectionReason::kUnknown:
+      return "unknown";
+    case GarbageCollectionReason::kBackgroundAllocationFailure:
+      return "background allocation failure";
+    case GarbageCollectionReason::kFinalizeConcurrentMinorMS:
+      return "finalize concurrent MinorMS";
+    case GarbageCollectionReason::kCppHeapAllocationFailure:
+      return "CppHeap allocation failure";
+    case GarbageCollectionReason::NUM_REASONS:
+      UNREACHABLE();
+  }
+}
+
+inline std::ostream& operator<<(std::ostream& os,
+                                GarbageCollectionReason reason) {
+  return os << ToString(reason);
+}
 
 inline size_t hash_value(AllocationType kind) {
   return static_cast<uint8_t>(kind);
-}
-
-inline std::ostream& operator<<(std::ostream& os, AllocationType kind) {
-  switch (kind) {
-    case AllocationType::kYoung:
-      return os << "Young";
-    case AllocationType::kOld:
-      return os << "Old";
-    case AllocationType::kCode:
-      return os << "Code";
-    case AllocationType::kMap:
-      return os << "Map";
-    case AllocationType::kReadOnly:
-      return os << "ReadOnly";
-    case AllocationType::kSharedOld:
-      return os << "SharedOld";
-    case AllocationType::kSharedMap:
-      return os << "SharedMap";
-  }
-  UNREACHABLE();
 }
 
 inline constexpr bool IsSharedAllocationType(AllocationType kind) {
@@ -1162,13 +1295,28 @@ enum MinimumCapacity {
   USE_CUSTOM_MINIMUM_CAPACITY
 };
 
-enum class GarbageCollector { SCAVENGER, MARK_COMPACTOR, MINOR_MARK_COMPACTOR };
+enum class GarbageCollector { SCAVENGER, MARK_COMPACTOR, MINOR_MARK_SWEEPER };
+
+constexpr const char* ToString(GarbageCollector collector) {
+  switch (collector) {
+    case GarbageCollector::SCAVENGER:
+      return "Scavenger";
+    case GarbageCollector::MARK_COMPACTOR:
+      return "Mark-Sweep-Compact";
+    case GarbageCollector::MINOR_MARK_SWEEPER:
+      return "Minor Mark-Sweep";
+  }
+}
+
+inline std::ostream& operator<<(std::ostream& os, GarbageCollector collector) {
+  return os << ToString(collector);
+}
 
 enum class CompactionSpaceKind {
   kNone,
   kCompactionSpaceForScavenge,
   kCompactionSpaceForMarkCompact,
-  kCompactionSpaceForMinorMarkCompact,
+  kCompactionSpaceForMinorMarkSweep,
 };
 
 enum Executability { NOT_EXECUTABLE, EXECUTABLE };
@@ -2057,6 +2205,7 @@ enum class AliasingKind {
   C(PendingHandlerSP, pending_handler_sp)                           \
   C(NumFramesAbovePendingHandler, num_frames_above_pending_handler) \
   C(ExternalCaughtException, external_caught_exception)             \
+  C(IsOnCentralStackFlag, is_on_central_stack_flag)                 \
   C(JSEntrySP, js_entry_sp)
 
 enum IsolateAddressId {

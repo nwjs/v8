@@ -9,9 +9,6 @@
 #include "src/objects/instance-type.h"
 #include "src/objects/objects.h"
 #include "src/objects/tagged-field.h"
-#include "src/roots/roots.h"
-#include "src/torque/runtime-macro-shims.h"
-#include "src/torque/runtime-support.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -21,6 +18,10 @@ namespace internal {
 
 class Heap;
 class PrimitiveHeapObject;
+class ExternalPointerSlot;
+class IndirectPointerSlot;
+template <typename T>
+class Tagged;
 
 // HeapObject is the superclass for all classes describing heap allocated
 // objects.
@@ -97,38 +98,11 @@ class HeapObject : public Object {
 
   V8_INLINE bool InReadOnlySpace() const;
 
-#define IS_TYPE_FUNCTION_DECL(Type) \
-  V8_INLINE bool Is##Type() const;  \
-  V8_INLINE bool Is##Type(PtrComprCageBase cage_base) const;
-  HEAP_OBJECT_TYPE_LIST(IS_TYPE_FUNCTION_DECL)
-  IS_TYPE_FUNCTION_DECL(HashTableBase)
-  IS_TYPE_FUNCTION_DECL(SmallOrderedHashTable)
-#undef IS_TYPE_FUNCTION_DECL
-
-// Oddball checks are faster when they are raw pointer comparisons, so the
-// isolate/read-only roots overloads should be preferred where possible.
-#define IS_TYPE_FUNCTION_DECL(Type, Value, _)           \
-  V8_INLINE bool Is##Type(Isolate* isolate) const;      \
-  V8_INLINE bool Is##Type(LocalIsolate* isolate) const; \
-  V8_INLINE bool Is##Type(ReadOnlyRoots roots) const;   \
-  V8_INLINE bool Is##Type() const;
-  ODDBALL_LIST(IS_TYPE_FUNCTION_DECL)
-  HOLE_LIST(IS_TYPE_FUNCTION_DECL)
-  IS_TYPE_FUNCTION_DECL(NullOrUndefined, , /* unused */)
-#undef IS_TYPE_FUNCTION_DECL
-
-#define DECL_STRUCT_PREDICATE(NAME, Name, name) \
-  V8_INLINE bool Is##Name() const;              \
-  V8_INLINE bool Is##Name(PtrComprCageBase cage_base) const;
-  STRUCT_LIST(DECL_STRUCT_PREDICATE)
-#undef DECL_STRUCT_PREDICATE
-
-  V8_INLINE bool IsJSObjectThatCanBeTrackedAsPrototype() const;
-
   // Converts an address to a HeapObject pointer.
-  static inline HeapObject FromAddress(Address address) {
+  static inline Tagged<HeapObject> FromAddress(Address address) {
     DCHECK_TAG_ALIGNED(address);
-    return HeapObject(address + kHeapObjectTag);
+    return Tagged<HeapObject>::unchecked_cast(
+        Tagged<Object>(address + kHeapObjectTag));
   }
 
   // Returns the address of this HeapObject.
@@ -163,11 +137,6 @@ class HeapObject : public Object {
   template <typename ObjectVisitor>
   inline void IterateBodyFast(Map map, int object_size, ObjectVisitor* v);
 
-  // Returns true if the object contains a tagged value at given offset.
-  // It is used for invalid slots filtering. If the offset points outside
-  // of the object or to the map word, the result is UNDEFINED (!!!).
-  V8_EXPORT_PRIVATE bool IsValidSlot(Map map, int offset);
-
   // Returns the heap object's size in bytes
   DECL_GETTER(Size, int)
 
@@ -175,6 +144,96 @@ class HeapObject : public Object {
   // Useful when the map pointer field is used for other purposes.
   // GC internal.
   V8_EXPORT_PRIVATE int SizeFromMap(Map map) const;
+
+  template <class T, typename std::enable_if<std::is_arithmetic<T>::value ||
+                                                 std::is_enum<T>::value,
+                                             int>::type = 0>
+  inline T ReadField(size_t offset) const {
+    return ReadMaybeUnalignedValue<T>(field_address(offset));
+  }
+
+  template <class T, typename std::enable_if<std::is_arithmetic<T>::value ||
+                                                 std::is_enum<T>::value,
+                                             int>::type = 0>
+  inline void WriteField(size_t offset, T value) const {
+    return WriteMaybeUnalignedValue<T>(field_address(offset), value);
+  }
+
+  // Atomically reads a field using relaxed memory ordering. Can only be used
+  // with integral types whose size is <= kTaggedSize (to guarantee alignment).
+  template <class T,
+            typename std::enable_if<(std::is_arithmetic<T>::value ||
+                                     std::is_enum<T>::value) &&
+                                        !std::is_floating_point<T>::value,
+                                    int>::type = 0>
+  inline T Relaxed_ReadField(size_t offset) const;
+
+  // Atomically writes a field using relaxed memory ordering. Can only be used
+  // with integral types whose size is <= kTaggedSize (to guarantee alignment).
+  template <class T,
+            typename std::enable_if<(std::is_arithmetic<T>::value ||
+                                     std::is_enum<T>::value) &&
+                                        !std::is_floating_point<T>::value,
+                                    int>::type = 0>
+  inline void Relaxed_WriteField(size_t offset, T value);
+
+  // Atomically compares and swaps a field using seq cst memory ordering.
+  // Contains the required logic to properly handle number comparison.
+  template <typename CompareAndSwapImpl>
+  static Object SeqCst_CompareAndSwapField(
+      Object expected_value, Object new_value,
+      CompareAndSwapImpl compare_and_swap_impl);
+
+  //
+  // SandboxedPointer_t field accessors.
+  //
+  inline Address ReadSandboxedPointerField(size_t offset,
+                                           PtrComprCageBase cage_base) const;
+  inline void WriteSandboxedPointerField(size_t offset,
+                                         PtrComprCageBase cage_base,
+                                         Address value);
+  inline void WriteSandboxedPointerField(size_t offset, Isolate* isolate,
+                                         Address value);
+
+  //
+  // BoundedSize field accessors.
+  //
+  inline size_t ReadBoundedSizeField(size_t offset) const;
+  inline void WriteBoundedSizeField(size_t offset, size_t value);
+
+  //
+  // ExternalPointer_t field accessors.
+  //
+  template <ExternalPointerTag tag>
+  inline void InitExternalPointerField(size_t offset, Isolate* isolate,
+                                       Address value);
+  template <ExternalPointerTag tag>
+  inline Address ReadExternalPointerField(size_t offset,
+                                          Isolate* isolate) const;
+  template <ExternalPointerTag tag>
+  inline void WriteExternalPointerField(size_t offset, Isolate* isolate,
+                                        Address value);
+
+  template <ExternalPointerTag tag>
+  inline void WriteLazilyInitializedExternalPointerField(size_t offset,
+                                                         Isolate* isolate,
+                                                         Address value);
+
+  inline void ResetLazilyInitializedExternalPointerField(size_t offset);
+
+  //
+  // IndirectPointer field accessors.
+  //
+  inline Object ReadIndirectPointerField(size_t offset) const;
+
+  //
+  // CodePointer field accessors.
+  //
+  inline void InitCodePointerTableEntryField(size_t offset, Isolate* isolate,
+                                             Code owning_code,
+                                             Address entrypoint);
+  inline Address ReadCodeEntrypointField(size_t offset) const;
+  inline void WriteCodeEntrypointField(size_t offset, Address value);
 
   // Returns the field at offset in obj, as a read/write Object reference.
   // Does no checking, and is safe to use during GC, while maps are invalid.
@@ -184,6 +243,7 @@ class HeapObject : public Object {
   inline MaybeObjectSlot RawMaybeWeakField(int byte_offset) const;
   inline InstructionStreamSlot RawInstructionStreamField(int byte_offset) const;
   inline ExternalPointerSlot RawExternalPointerField(int byte_offset) const;
+  inline IndirectPointerSlot RawIndirectPointerField(int byte_offset) const;
 
   DECL_CAST(HeapObject)
 
@@ -249,6 +309,10 @@ class HeapObject : public Object {
  protected:
   OBJECT_CONSTRUCTORS(HeapObject, Object);
 
+  inline Address field_address(size_t offset) const {
+    return ptr() + offset - kHeapObjectTag;
+  }
+
  private:
   enum class VerificationMode {
     kSafeMapTransition,
@@ -266,6 +330,54 @@ class HeapObject : public Object {
 
 OBJECT_CONSTRUCTORS_IMPL(HeapObject, Object)
 CAST_ACCESSOR(HeapObject)
+
+// Define Tagged<HeapObject> now that HeapObject exists.
+constexpr HeapObject Tagged<HeapObject>::operator*() const {
+  return ToRawPtr();
+}
+constexpr detail::TaggedOperatorArrowRef<HeapObject>
+Tagged<HeapObject>::operator->() const {
+  return detail::TaggedOperatorArrowRef<HeapObject>{ToRawPtr()};
+}
+// Implicit conversions and explicit casts to/from raw pointers
+// TODO(leszeks): Remove once we're using Tagged everywhere.
+// NOLINTNEXTLINE
+constexpr Tagged<HeapObject>::operator HeapObject() {
+  static_assert(kTaggedCanConvertToRawObjects);
+  return ToRawPtr();
+}
+constexpr HeapObject Tagged<HeapObject>::ToRawPtr() const {
+  return HeapObject::unchecked_cast(Object(this->ptr()));
+}
+
+// Overload Is* predicates for HeapObject.
+#define IS_TYPE_FUNCTION_DECL(Type)                                            \
+  V8_INLINE bool Is##Type(Tagged<HeapObject> obj);                             \
+  V8_INLINE bool Is##Type(Tagged<HeapObject> obj, PtrComprCageBase cage_base); \
+  V8_INLINE bool Is##Type(HeapObject obj);                                     \
+  V8_INLINE bool Is##Type(HeapObject obj, PtrComprCageBase cage_base);
+HEAP_OBJECT_TYPE_LIST(IS_TYPE_FUNCTION_DECL)
+IS_TYPE_FUNCTION_DECL(HashTableBase)
+IS_TYPE_FUNCTION_DECL(SmallOrderedHashTable)
+#undef IS_TYPE_FUNCTION_DECL
+
+// Most calls to Is<Oddball> should go via the Tagged<Object> overloads, withst
+// an Isolate/LocalIsolate/ReadOnlyRoots parameter.
+#define IS_TYPE_FUNCTION_DECL(Type, Value, _)      \
+  V8_INLINE bool Is##Type(Tagged<HeapObject> obj); \
+  V8_INLINE bool Is##Type(HeapObject obj);
+ODDBALL_LIST(IS_TYPE_FUNCTION_DECL)
+HOLE_LIST(IS_TYPE_FUNCTION_DECL)
+IS_TYPE_FUNCTION_DECL(NullOrUndefined, , /* unused */)
+#undef IS_TYPE_FUNCTION_DECL
+
+#define DECL_STRUCT_PREDICATE(NAME, Name, name)                                \
+  V8_INLINE bool Is##Name(Tagged<HeapObject> obj);                             \
+  V8_INLINE bool Is##Name(Tagged<HeapObject> obj, PtrComprCageBase cage_base); \
+  V8_INLINE bool Is##Name(HeapObject obj);                                     \
+  V8_INLINE bool Is##Name(HeapObject obj, PtrComprCageBase cage_base);
+STRUCT_LIST(DECL_STRUCT_PREDICATE)
+#undef DECL_STRUCT_PREDICATE
 
 }  // namespace internal
 }  // namespace v8

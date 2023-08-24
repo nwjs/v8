@@ -16,8 +16,7 @@ class Memory64Runner : public WasmRunner<ReturnType, ParamTypes...> {
  public:
   explicit Memory64Runner(TestExecutionTier execution_tier)
       : WasmRunner<ReturnType, ParamTypes...>(execution_tier, kWasmOrigin,
-                                              nullptr, "main",
-                                              kNoRuntimeExceptionSupport) {
+                                              nullptr, "main") {
     this->builder().EnableFeature(kFeature_memory64);
   }
 
@@ -86,7 +85,7 @@ WASM_EXEC_TEST(InitExpression) {
   testing::CompileAndInstantiateForTesting(
       isolate, &thrower, ModuleWireBytes(data, data + arraysize(data)));
   if (thrower.error()) {
-    thrower.Reify()->Print();
+    Print(*thrower.Reify());
     FATAL("compile or instantiate error");
   }
 }

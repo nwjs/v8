@@ -481,6 +481,8 @@ class Serializer::ObjectSerializer : public ObjectVisitor {
 
   void VisitExternalPointer(HeapObject host, ExternalPointerSlot slot,
                             ExternalPointerTag tag) override;
+  void VisitIndirectPointer(HeapObject host, IndirectPointerSlot slot,
+                            IndirectPointerMode mode) override;
 
   Isolate* isolate() { return isolate_; }
 
@@ -493,8 +495,8 @@ class Serializer::ObjectSerializer : public ObjectVisitor {
   void OutputExternalReference(Address target, int target_size, bool sandboxify,
                                ExternalPointerTag tag);
   void OutputRawData(Address up_to);
-  uint32_t SerializeBackingStore(void* backing_store, int32_t byte_length,
-                                 Maybe<int32_t> max_byte_length);
+  uint32_t SerializeBackingStore(void* backing_store, uint32_t byte_length,
+                                 Maybe<uint32_t> max_byte_length);
   void SerializeJSTypedArray();
   void SerializeJSArrayBuffer();
   void SerializeExternalString();

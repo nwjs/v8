@@ -9,6 +9,7 @@
 #include "src/codegen/assembler.h"
 #include "src/heap/memory-chunk.h"
 #include "src/wasm/baseline/liftoff-assembler.h"
+#include "src/wasm/object-access.h"
 #include "src/wasm/simd-shuffle.h"
 #include "src/wasm/wasm-objects.h"
 
@@ -195,6 +196,30 @@ bool LiftoffAssembler::NeedsAlignment(ValueKind kind) {
   return (kind == kS128 || is_reference(kind));
 }
 
+void LiftoffAssembler::CheckTierUp(int declared_func_index, int budget_used,
+                                   Label* ool_label,
+                                   const FreezeCacheState& frozen) {
+  Register budget_array = ip;
+  Register instance = cache_state_.cached_instance;
+
+  if (instance == no_reg) {
+    instance = budget_array;  // Reuse the temp register.
+    LoadInstanceFromFrame(instance);
+  }
+
+  constexpr int kArrayOffset = wasm::ObjectAccess::ToTagged(
+      WasmInstanceObject::kTieringBudgetArrayOffset);
+  LoadU64(budget_array, MemOperand(instance, kArrayOffset));
+
+  int budget_arr_offset = kInt32Size * declared_func_index;
+  Register budget = r1;
+  MemOperand budget_addr(budget_array, budget_arr_offset);
+  LoadS32(budget, budget_addr);
+  SubS32(budget, Operand(budget_used));
+  StoreU32(budget, budget_addr);
+  blt(ool_label);
+}
+
 void LiftoffAssembler::LoadConstant(LiftoffRegister reg, WasmValue value) {
   switch (value.type().kind()) {
     case kI32:
@@ -247,6 +272,20 @@ void LiftoffAssembler::LoadTaggedPointerFromInstance(Register dst,
                                                      int offset) {
   DCHECK_LE(0, offset);
   LoadTaggedField(dst, MemOperand(instance, offset));
+}
+
+void LiftoffAssembler::LoadExternalPointer(Register dst, Register src_addr,
+                                           int offset, ExternalPointerTag tag,
+                                           Register /* scratch */) {
+  LoadFullPointer(dst, src_addr, offset);
+}
+
+void LiftoffAssembler::LoadExternalPointer(Register dst, Register src_addr,
+                                           int offset, Register index,
+                                           ExternalPointerTag tag,
+                                           Register scratch) {
+  ShiftLeftU64(scratch, index, Operand(kSystemPointerSizeLog2));
+  LoadU64(dst, MemOperand(src_addr, scratch, offset));
 }
 
 void LiftoffAssembler::SpillInstance(Register instance) {
@@ -2149,13 +2188,6 @@ void LiftoffAssembler::emit_i32_cond_jumpi(Condition cond, Label* label,
     bind(&done);            \
   }
 
-void LiftoffAssembler::emit_i32_subi_jump_negative(
-    Register value, int subtrahend, Label* result_negative,
-    const FreezeCacheState& frozen) {
-  SubS64(value, value, Operand(subtrahend));
-  blt(result_negative);
-}
-
 void LiftoffAssembler::emit_i32_eqz(Register dst, Register src) {
   EMIT_EQZ(ltr, src);
 }
@@ -2910,11 +2942,6 @@ void LiftoffAssembler::StackCheck(Label* ool_code, Register limit_address) {
   b(le, ool_code);
 }
 
-void LiftoffAssembler::CallTrapCallbackForTesting() {
-  PrepareCallCFunction(0, 0, no_reg);
-  CallCFunction(ExternalReference::wasm_call_trap_callback_for_testing(), 0);
-}
-
 void LiftoffAssembler::AssertUnreachable(AbortReason reason) {
   // Asserts unreachable within the wasm code.
   MacroAssembler::AssertUnreachable(reason);
@@ -2954,9 +2981,8 @@ void LiftoffAssembler::DropStackSlotsAndRet(uint32_t num_stack_slots) {
   Ret();
 }
 
-void LiftoffAssembler::CallC(const ValueKindSig* sig,
-                             const LiftoffRegister* args,
-                             const LiftoffRegister* rets,
+void LiftoffAssembler::CallC(const std::initializer_list<VarState> args,
+                             const LiftoffRegister* rets, ValueKind return_kind,
                              ValueKind out_argument_kind, int stack_bytes,
                              ExternalReference ext_ref) {
   int total_size = RoundUp(stack_bytes, 8);
@@ -2973,32 +2999,46 @@ void LiftoffAssembler::CallC(const ValueKindSig* sig,
 
   lay(sp, MemOperand(sp, -size));
 
-  int arg_bytes = 0;
-  for (ValueKind param_kind : sig->parameters()) {
-    switch (param_kind) {
-      case kI32:
-        StoreU32(args->gp(), MemOperand(sp, arg_bytes));
-        break;
-      case kI64:
-        StoreU64(args->gp(), MemOperand(sp, arg_bytes));
-        break;
-      case kF32:
-        StoreF32(args->fp(), MemOperand(sp, arg_bytes));
-        break;
-      case kF64:
-        StoreF64(args->fp(), MemOperand(sp, arg_bytes));
-        break;
-      case kS128:
-        StoreV128(args->fp(), MemOperand(sp, arg_bytes), r0);
-        break;
-      default:
-        UNREACHABLE();
+  int arg_offset = 0;
+  for (const VarState& arg : args) {
+    MemOperand dst{sp, arg_offset};
+    if (arg.is_reg()) {
+      switch (arg.kind()) {
+        case kI32:
+          StoreU32(arg.reg().gp(), MemOperand(sp, arg_offset));
+          break;
+        case kI64:
+          StoreU64(arg.reg().gp(), MemOperand(sp, arg_offset));
+          break;
+        case kF32:
+          StoreF32(arg.reg().fp(), MemOperand(sp, arg_offset));
+          break;
+        case kF64:
+          StoreF64(arg.reg().fp(), MemOperand(sp, arg_offset));
+          break;
+        case kS128:
+          StoreV128(arg.reg().fp(), MemOperand(sp, arg_offset), r0);
+          break;
+        default:
+          UNREACHABLE();
+      }
+    } else if (arg.is_const()) {
+      DCHECK_EQ(kI32, arg.kind());
+      mov(r0, Operand(arg.i32_const()));
+      StoreU32(r0, dst);
+    } else if (value_kind_size(arg.kind()) == 4) {
+      MemOperand src = liftoff::GetStackSlot(arg.offset());
+      LoadU32(r0, src);
+      StoreU32(r0, dst);
+    } else {
+      DCHECK_EQ(8, value_kind_size(arg.kind()));
+      MemOperand src = liftoff::GetStackSlot(arg.offset());
+      LoadU64(r0, src);
+      StoreU64(r0, dst);
     }
-    args++;
-    arg_bytes += value_kind_size(param_kind);
+    arg_offset += value_kind_size(arg.kind());
   }
-
-  DCHECK_LE(arg_bytes, stack_bytes);
+  DCHECK_LE(arg_offset, stack_bytes);
 
   // Pass a pointer to the buffer with the arguments to the C function.
   mov(r2, sp);
@@ -3010,11 +3050,10 @@ void LiftoffAssembler::CallC(const ValueKindSig* sig,
 
   // Move return value to the right register.
   const LiftoffRegister* result_reg = rets;
-  if (sig->return_count() > 0) {
-    DCHECK_EQ(1, sig->return_count());
+  if (return_kind != kVoid) {
     constexpr Register kReturnReg = r2;
     if (kReturnReg != rets->gp()) {
-      Move(*rets, LiftoffRegister(kReturnReg), sig->GetReturn(0));
+      Move(*rets, LiftoffRegister(kReturnReg), return_kind);
     }
     result_reg++;
   }

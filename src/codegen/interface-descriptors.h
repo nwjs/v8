@@ -109,6 +109,7 @@ namespace internal {
   V(LookupWithVector)                                \
   V(LookupTrampoline)                                \
   V(LookupBaseline)                                  \
+  V(MaglevOptimizeCodeOrTailCallOptimizedCodeSlot)   \
   V(NewHeapNumber)                                   \
   V(NoContext)                                       \
   V(OnStackReplacement)                              \
@@ -138,6 +139,7 @@ namespace internal {
   V(WasmFloat32ToNumber)                             \
   V(WasmFloat64ToTagged)                             \
   V(WasmNewJSToWasmWrapper)                          \
+  V(WasmToJSWrapper)                                 \
   V(WasmSuspend)                                     \
   V(WriteBarrier)                                    \
   IF_TSAN(V, TSANLoad)                               \
@@ -187,7 +189,9 @@ class V8_EXPORT_PRIVATE CallInterfaceDescriptorData {
                            StackArgumentOrder stack_order,
                            int register_parameter_count,
                            const Register* registers,
-                           const DoubleRegister* double_registers);
+                           const DoubleRegister* double_registers,
+                           const Register* return_registers,
+                           const DoubleRegister* return_double_registers);
 
   // if machine_types is null, then an array of size
   // (return_count + parameter_count) will be created with
@@ -213,6 +217,10 @@ class V8_EXPORT_PRIVATE CallInterfaceDescriptorData {
   Register register_param(int index) const { return register_params_[index]; }
   DoubleRegister double_register_param(int index) const {
     return double_register_params_[index];
+  }
+  Register register_return(int index) const { return register_returns_[index]; }
+  DoubleRegister double_register_return(int index) const {
+    return double_register_returns_[index];
   }
   MachineType return_type(int index) const {
     DCHECK_LT(index, return_count_);
@@ -271,6 +279,8 @@ class V8_EXPORT_PRIVATE CallInterfaceDescriptorData {
   // allocated dynamically by the InterfaceDescriptor and freed on destruction.
   const Register* register_params_ = nullptr;
   const DoubleRegister* double_register_params_ = nullptr;
+  const Register* register_returns_ = nullptr;
+  const DoubleRegister* double_register_returns_ = nullptr;
   MachineType* machine_types_ = nullptr;
 };
 
@@ -377,6 +387,16 @@ class V8_EXPORT_PRIVATE CallInterfaceDescriptor {
     return data()->double_register_param(index);
   }
 
+  Register GetRegisterReturn(int index) const {
+    DCHECK_LT(index, data()->return_count());
+    return data()->register_return(index);
+  }
+
+  DoubleRegister GetDoubleRegisterReturn(int index) const {
+    DCHECK_LT(index, data()->return_count());
+    return data()->double_register_return(index);
+  }
+
   MachineType GetParameterType(int index) const {
     DCHECK_LT(index, data()->param_count());
     return data()->param_type(index);
@@ -409,6 +429,8 @@ class V8_EXPORT_PRIVATE CallInterfaceDescriptor {
   // differently sized default register arrays.
   static constexpr inline auto DefaultRegisterArray();
   static constexpr inline auto DefaultDoubleRegisterArray();
+  static constexpr inline auto DefaultReturnRegisterArray();
+  static constexpr inline auto DefaultReturnDoubleRegisterArray();
   static constexpr inline std::array<Register, kJSBuiltinRegisterParams>
   DefaultJSRegisterArray();
 
@@ -456,6 +478,8 @@ class StaticCallInterfaceDescriptor : public CallInterfaceDescriptor {
   // Defaults to CallInterfaceDescriptor::DefaultRegisterArray().
   static constexpr inline auto registers();
   static constexpr inline auto double_registers();
+  static constexpr inline auto return_registers();
+  static constexpr inline auto return_double_registers();
 
   // An additional limit on the number of register parameters allowed. This is
   // here so that it can be overwritten to kMaxTFSBuiltinRegisterParams for TFS
@@ -555,7 +579,7 @@ struct CallInterfaceDescriptorFor;
 // Stub class replacing std::array<Register, 0>, as a workaround for MSVC's
 // https://github.com/microsoft/STL/issues/942
 struct EmptyRegisterArray {
-  Register* data() { return nullptr; }
+  const Register* data() const { return nullptr; }
   size_t size() const { return 0; }
   Register operator[](size_t i) const { UNREACHABLE(); }
 };
@@ -573,7 +597,7 @@ constexpr EmptyRegisterArray RegisterArray() { return {}; }
 // Stub class replacing std::array<Register, 0>, as a workaround for MSVC's
 // https://github.com/microsoft/STL/issues/942
 struct EmptyDoubleRegisterArray {
-  DoubleRegister* data() { return nullptr; }
+  const DoubleRegister* data() const { return nullptr; }
   size_t size() const { return 0; }
   DoubleRegister operator[](size_t i) const { UNREACHABLE(); }
 };
@@ -917,6 +941,21 @@ class LookupBaselineDescriptor
                          MachineType::AnyTagged(),  // kDepth
                          MachineType::AnyTagged())  // kSlot
   DECLARE_DESCRIPTOR(LookupBaselineDescriptor)
+};
+
+class MaglevOptimizeCodeOrTailCallOptimizedCodeSlotDescriptor
+    : public StaticCallInterfaceDescriptor<
+          MaglevOptimizeCodeOrTailCallOptimizedCodeSlotDescriptor> {
+ public:
+  DEFINE_PARAMETERS_NO_CONTEXT(kFlags, kFeedbackVector)
+  DEFINE_PARAMETER_TYPES(MachineType::Int32(),          // kFlags
+                         MachineType::TaggedPointer())  // kFeedbackVector
+  DECLARE_DESCRIPTOR(MaglevOptimizeCodeOrTailCallOptimizedCodeSlotDescriptor)
+
+  static constexpr inline Register FlagsRegister();
+  static constexpr inline Register FeedbackVectorRegister();
+
+  static constexpr inline auto registers();
 };
 
 class StoreDescriptor : public StaticCallInterfaceDescriptor<StoreDescriptor> {
@@ -1420,7 +1459,7 @@ class CallFunctionTemplateDescriptor
  public:
   DEFINE_PARAMETERS_VARARGS(kFunctionTemplateInfo, kArgumentsCount)
   DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(),  // kFunctionTemplateInfo
-                         MachineType::IntPtr())     // kArgumentsCount
+                         MachineType::Int32())      // kArgumentsCount
   DECLARE_DESCRIPTOR(CallFunctionTemplateDescriptor)
 
   static constexpr inline auto registers();
@@ -2089,6 +2128,24 @@ class WasmNewJSToWasmWrapperDescriptor final
   static constexpr inline Register WrapperBufferRegister();
 };
 
+class WasmToJSWrapperDescriptor final
+    : public StaticCallInterfaceDescriptor<WasmToJSWrapperDescriptor> {
+ public:
+  DEFINE_RESULT_AND_PARAMETERS_NO_CONTEXT(4, kWasmApiFunctionRef)
+  DEFINE_RESULT_AND_PARAMETER_TYPES(
+      MachineType::IntPtr(),     // GP return 1
+      MachineType::IntPtr(),     // GP return 2
+      MachineType::Float64(),    // FP return 1
+      MachineType::Float64(),    // FP return 2
+      MachineType::AnyTagged())  // WasmApiFunctionRef
+  DECLARE_DESCRIPTOR(WasmToJSWrapperDescriptor)
+
+  static constexpr int kMaxRegisterParams = 1;
+  static constexpr inline auto registers();
+  static constexpr inline auto return_registers();
+  static constexpr inline auto return_double_registers();
+};
+
 class WasmSuspendDescriptor final
     : public StaticCallInterfaceDescriptor<WasmSuspendDescriptor> {
  public:
@@ -2305,6 +2362,15 @@ class DebugPrintWordPtrDescriptor
   DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::TaggedPointer(),
                                     MachineType::UintPtr())
   DECLARE_DEFAULT_DESCRIPTOR(DebugPrintWordPtrDescriptor)
+};
+
+class DebugPrintFloat64Descriptor
+    : public StaticCallInterfaceDescriptor<DebugPrintFloat64Descriptor> {
+ public:
+  DEFINE_RESULT_AND_PARAMETERS(1, kValue)
+  DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::TaggedPointer(),
+                                    MachineType::Float64())
+  DECLARE_DEFAULT_DESCRIPTOR(DebugPrintFloat64Descriptor)
 };
 
 #define DEFINE_TFS_BUILTIN_DESCRIPTOR(Name, DoesNeedContext, ...)            \

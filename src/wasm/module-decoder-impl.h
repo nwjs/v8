@@ -698,7 +698,8 @@ class ModuleDecoderImpl : public Decoder {
       }
     }
 
-    // Check validity of explicitly defined supertypes.
+    // Check validity of explicitly defined supertypes and propagate subtyping
+    // depth.
     const WasmModule* module = module_.get();
     for (uint32_t i = 0; ok() && i < module_->types.size(); ++i) {
       uint32_t explicit_super = module_->supertype(i);
@@ -711,9 +712,10 @@ class ModuleDecoderImpl : public Decoder {
         errorf("type %u: forward-declared supertype %u", i, explicit_super);
         continue;
       }
-      int depth = GetSubtypingDepth(module, i);
+      uint32_t depth = module->types[explicit_super].subtyping_depth + 1;
+      module_->types[i].subtyping_depth = depth;
       DCHECK_GE(depth, 0);
-      if (depth > static_cast<int>(kV8MaxRttSubtypingDepth)) {
+      if (depth > kV8MaxRttSubtypingDepth) {
         errorf("type %u: subtyping depth is greater than allowed", i);
         continue;
       }
@@ -793,13 +795,25 @@ class ModuleDecoderImpl : public Decoder {
         }
         case kExternalMemory: {
           // ===== Imported memory =============================================
-          if (!module_->memories.empty()) {
-            // TODO(13918): Support multiple memories.
-            error("At most one memory is supported");
+          static_assert(kV8MaxWasmMemories <= kMaxUInt32);
+          if (!enabled_features_.has_multi_memory()) {
+            if (!module_->memories.empty()) {
+              error(
+                  "At most one imported memory is supported (pass "
+                  "--experimental-wasm-multi-memory to allow more "
+                  "memories)");
+              break;
+            }
+          } else if (module_->memories.size() >= kV8MaxWasmMemories - 1) {
+            errorf("At most %u imported memories are supported",
+                   kV8MaxWasmMemories);
             break;
           }
+          uint32_t mem_index = static_cast<uint32_t>(module_->memories.size());
+          import->index = mem_index;
           module_->memories.emplace_back();
           WasmMemory* external_memory = &module_->memories.back();
+          external_memory->index = mem_index;
 
           consume_memory_flags(&external_memory->is_shared,
                                &external_memory->is_memory64,
@@ -892,10 +906,10 @@ class ModuleDecoderImpl : public Decoder {
       if (enabled_features_.has_typed_funcref() &&
           read_u8<Decoder::FullValidationTag>(
               pc(), "table-with-initializer byte") == 0x40) {
-        consume_bytes(1, "table-with-initializer byte", tracer_);
+        consume_bytes(1, "with-initializer ", tracer_);
         has_initializer = true;
         type_position++;
-        uint8_t reserved = consume_u8("reserved byte", tracer_);
+        uint8_t reserved = consume_u8("reserved-byte", tracer_);
         if (reserved != 0) {
           error(type_position, "Reserved byte must be 0x00");
           break;
@@ -931,18 +945,34 @@ class ModuleDecoderImpl : public Decoder {
 
   void DecodeMemorySection() {
     const uint8_t* mem_count_pc = pc();
+    static_assert(kV8MaxWasmMemories <= kMaxUInt32);
+    // Use {kV8MaxWasmMemories} here, but only allow for >1 memory if
+    // multi-memory is enabled (checked below). This allows for better error
+    // messages.
     uint32_t memory_count = consume_count("memory count", kV8MaxWasmMemories);
     size_t imported_memories = module_->memories.size();
-    if (memory_count + imported_memories > 1) {
-      // TODO(13918): Support multiple memories.
-      errorf(mem_count_pc,
-             "At most one memory is supported (declared %u, imported %zu)",
-             memory_count, imported_memories);
+    if (enabled_features_.has_multi_memory()) {
+      DCHECK_GE(kV8MaxWasmMemories, imported_memories);
+      if (memory_count > kV8MaxWasmMemories - imported_memories) {
+        errorf(mem_count_pc,
+               "Exceeding maximum number of memories (%u; declared %u, "
+               "imported %zu)",
+               kV8MaxWasmMemories, memory_count, imported_memories);
+      }
+    } else {
+      DCHECK_GE(1, imported_memories);
+      if (imported_memories + memory_count > 1) {
+        errorf(mem_count_pc,
+               "At most one memory is supported (declared %u, imported %zu); "
+               "pass --experimental-wasm-multi-memory to allow more memories",
+               memory_count, imported_memories);
+      }
     }
     module_->memories.resize(imported_memories + memory_count);
 
     for (uint32_t i = 0; ok() && i < memory_count; i++) {
       WasmMemory* memory = module_->memories.data() + imported_memories + i;
+      memory->index = static_cast<uint32_t>(imported_memories + i);
       if (tracer_) tracer_->MemoryOffset(pc_offset());
       consume_memory_flags(&memory->is_shared, &memory->is_memory64,
                            &memory->has_maximum_pages);
@@ -1029,14 +1059,14 @@ class ModuleDecoderImpl : public Decoder {
           break;
         }
         case kExternalMemory: {
-          uint32_t index = consume_u32v("memory index", tracer_);
+          exp->index = consume_u32v("memory index", tracer_);
           size_t num_memories = module_->memories.size();
-          if (index >= module_->memories.size()) {
+          if (exp->index >= module_->memories.size()) {
             errorf(pos, "invalid exported memory index %u (having %zu memor%s)",
-                   index, num_memories, num_memories == 1 ? "y" : "ies");
+                   exp->index, num_memories, num_memories == 1 ? "y" : "ies");
             break;
           }
-          module_->memories[index].exported = true;
+          module_->memories[exp->index].exported = true;
           break;
         }
         case kExternalGlobal: {
@@ -2163,7 +2193,8 @@ class ModuleDecoderImpl : public Decoder {
     if (failed()) return nullptr;
 
     // FunctionSig stores the return types first.
-    ValueType* buffer = zone->NewArray<ValueType>(param_count + return_count);
+    ValueType* buffer =
+        zone->AllocateArray<ValueType>(param_count + return_count);
     uint32_t b = 0;
     for (uint32_t i = 0; i < return_count; ++i) buffer[b++] = returns[i];
     for (uint32_t i = 0; i < param_count; ++i) buffer[b++] = params[i];
@@ -2175,15 +2206,15 @@ class ModuleDecoderImpl : public Decoder {
     uint32_t field_count =
         consume_count(", field count", kV8MaxWasmStructFields);
     if (failed()) return nullptr;
-    ValueType* fields = zone->NewArray<ValueType>(field_count);
-    bool* mutabilities = zone->NewArray<bool>(field_count);
+    ValueType* fields = zone->AllocateArray<ValueType>(field_count);
+    bool* mutabilities = zone->AllocateArray<bool>(field_count);
     for (uint32_t i = 0; ok() && i < field_count; ++i) {
       fields[i] = consume_storage_type();
       mutabilities[i] = consume_mutability();
       if (tracer_) tracer_->NextLine();
     }
     if (failed()) return nullptr;
-    uint32_t* offsets = zone->NewArray<uint32_t>(field_count);
+    uint32_t* offsets = zone->AllocateArray<uint32_t>(field_count);
     StructType* result =
         zone->New<StructType>(field_count, offsets, fields, mutabilities);
     result->InitializeOffsets();
@@ -2334,7 +2365,7 @@ class ModuleDecoderImpl : public Decoder {
     }
 
     uint32_t num_elem =
-        consume_count("number of elements", max_table_init_entries());
+        consume_count(" number of elements", max_table_init_entries());
 
     if (is_active) {
       return {type,         table_index, std::move(offset),

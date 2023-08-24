@@ -506,7 +506,7 @@ class LogAllTest : public LogTest {
     i::v8_flags.log_all = true;
     i::v8_flags.log_deopt = true;
     i::v8_flags.turbo_inlining = false;
-    i::v8_flags.log_internal_timer_events = true;
+    i::v8_flags.log_timer_events = true;
     i::v8_flags.allow_natives_syntax = true;
     LogTest::SetUpTestSuite();
   }
@@ -924,12 +924,12 @@ void ValidateMapDetailsLogging(v8::Isolate* isolate,
   size_t i = 0;
   for (i::HeapObject obj = iterator.Next(); !obj.is_null();
        obj = iterator.Next()) {
-    if (!obj.IsMap()) continue;
+    if (!IsMap(obj)) continue;
     i++;
     uintptr_t address = obj.ptr();
     if (map_create_addresses.find(address) == map_create_addresses.end()) {
       // logger->PrintLog();
-      i::Map::cast(obj).Print();
+      i::Print(i::Map::cast(obj));
       FATAL(
           "Map (%p, #%zu) creation not logged during startup with "
           "--log-maps!"
@@ -939,7 +939,7 @@ void ValidateMapDetailsLogging(v8::Isolate* isolate,
     } else if (map_details_addresses.find(address) ==
                map_details_addresses.end()) {
       // logger->PrintLog();
-      i::Map::cast(obj).Print();
+      i::Print(i::Map::cast(obj));
       FATAL(
           "Map (%p, #%zu) details not logged during startup with "
           "--log-maps!"
@@ -1094,7 +1094,15 @@ TEST_F(LogMapsTest, LogMapsDetailsContexts) {
   }
 }
 
-TEST_F(LogTest, ConsoleTimeEvents) {
+class LogTimerTest : public LogTest {
+ public:
+  static void SetUpTestSuite() {
+    i::v8_flags.log_timer_events = true;
+    LogTest::SetUpTestSuite();
+  }
+};
+
+TEST_F(LogTimerTest, ConsoleTimeEvents) {
   {
     ScopedLoggerInitializer logger(isolate());
     {

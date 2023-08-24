@@ -69,7 +69,7 @@ class SharedEngineIsolate {
   }
 
   SharedModule ExportInstance(Handle<WasmInstanceObject> instance) {
-    return instance->module_object().shared_native_module();
+    return instance->module_object()->shared_native_module();
   }
 
   int32_t Run(Handle<WasmInstanceObject> instance) {
@@ -164,7 +164,7 @@ Handle<WasmInstanceObject> CompileAndInstantiateAsync(
       isolate->isolate(), enabled_features,
       std::make_unique<MockCompilationResolver>(isolate, &maybe_instance),
       ModuleWireBytes(buffer->begin(), buffer->end()), true, kAPIMethodName);
-  while (!maybe_instance->IsWasmInstanceObject()) PumpMessageLoop(isolate);
+  while (!IsWasmInstanceObject(*maybe_instance)) PumpMessageLoop(isolate);
   Handle<WasmInstanceObject> instance =
       Handle<WasmInstanceObject>::cast(maybe_instance);
   return instance;

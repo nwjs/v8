@@ -7,15 +7,19 @@
 #include <cstddef>
 #include <iomanip>
 
+#include "src/base/iterator.h"
 #include "src/codegen/aligned-slot-allocator.h"
 #include "src/codegen/interface-descriptors.h"
 #include "src/codegen/machine-type.h"
 #include "src/codegen/register-configuration.h"
 #include "src/codegen/source-position.h"
 #include "src/compiler/common-operator.h"
+#include "src/compiler/frame-states.h"
 #include "src/compiler/graph.h"
 #include "src/compiler/node.h"
 #include "src/compiler/schedule.h"
+#include "src/compiler/turboshaft/graph.h"
+#include "src/compiler/turboshaft/operations.h"
 #include "src/deoptimizer/deoptimizer.h"
 #include "src/execution/frames.h"
 #include "src/execution/isolate-utils-inl.h"
@@ -279,6 +283,9 @@ std::ostream& operator<<(std::ostream& os, const InstructionOperand& op) {
           break;
         case MachineRepresentation::kCompressed:
           os << "|c";
+          break;
+        case MachineRepresentation::kIndirectPointer:
+          os << "|ip";
           break;
         case MachineRepresentation::kSandboxedPointer:
           os << "|sb";
@@ -589,7 +596,7 @@ Handle<HeapObject> Constant::ToHeapObject() const {
 Handle<Code> Constant::ToCode() const {
   DCHECK_EQ(kHeapObject, type());
   Handle<Code> value(reinterpret_cast<Address*>(static_cast<intptr_t>(value_)));
-  DCHECK(value->IsCode());
+  DCHECK(IsCode(*value));
   return value;
 }
 
@@ -667,9 +674,23 @@ static RpoNumber GetRpo(const BasicBlock* block) {
   return RpoNumber::FromInt(block->rpo_number());
 }
 
+static RpoNumber GetRpo(const turboshaft::Block* block) {
+  if (block == nullptr) return RpoNumber::Invalid();
+  return RpoNumber::FromInt(block->index().id());
+}
+
 static RpoNumber GetLoopEndRpo(const BasicBlock* block) {
   if (!block->IsLoopHeader()) return RpoNumber::Invalid();
   return RpoNumber::FromInt(block->loop_end()->rpo_number());
+}
+
+static RpoNumber GetLoopEndRpo(const turboshaft::Block* block) {
+  if (!block->IsLoop()) return RpoNumber::Invalid();
+  // In Turbofan, the `block->loop_end()` refers to the first after (outside)
+  // the loop. In the relevant use cases, we retrieve the backedge block by
+  // subtracting one from the rpo_number, so for Turboshaft we "fake" this by
+  // adding 1 to the backedge block's rpo_number.
+  return RpoNumber::FromInt(GetRpo(block->LastPredecessor()).ToInt() + 1);
 }
 
 static InstructionBlock* InstructionBlockFor(Zone* zone,
@@ -691,6 +712,41 @@ static InstructionBlock* InstructionBlockFor(Zone* zone,
   if (block->PredecessorCount() == 1 &&
       block->predecessors()[0]->control() == BasicBlock::Control::kSwitch) {
     instr_block->set_switch_target(true);
+  }
+  return instr_block;
+}
+
+static InstructionBlock* InstructionBlockFor(Zone* zone,
+                                             const turboshaft::Graph& graph,
+                                             const turboshaft::Block* block) {
+  bool is_handler =
+      block->FirstOperation(graph).Is<turboshaft::CatchBlockBeginOp>();
+  // TODO(nicohartmann@): Properly get the loop_header.
+  turboshaft::Block* loop_header = nullptr;  // block->loop_header()
+  // TODO(nicohartmann@): Properly get the deferred.
+  bool deferred = false;
+  InstructionBlock* instr_block = zone->New<InstructionBlock>(
+      zone, GetRpo(block), GetRpo(loop_header), GetLoopEndRpo(block),
+      GetRpo(block->GetDominator()), deferred, is_handler);
+  // Map successors and predecessors.
+  base::SmallVector<turboshaft::Block*, 4> succs =
+      turboshaft::SuccessorBlocks(block->LastOperation(graph));
+  instr_block->successors().reserve(succs.size());
+  for (const turboshaft::Block* successor : succs) {
+    instr_block->successors().push_back(GetRpo(successor));
+  }
+  instr_block->predecessors().reserve(block->PredecessorCount());
+  for (const turboshaft::Block* predecessor = block->LastPredecessor();
+       predecessor; predecessor = predecessor->NeighboringPredecessor()) {
+    instr_block->predecessors().push_back(GetRpo(predecessor));
+  }
+  std::reverse(instr_block->predecessors().begin(),
+               instr_block->predecessors().end());
+  if (block->HasExactlyNPredecessors(1)) {
+    const turboshaft::Block* predecessor = block->LastPredecessor();
+    if (predecessor->LastOperation(graph).Is<turboshaft::SwitchOp>()) {
+      instr_block->set_switch_target(true);
+    }
   }
   return instr_block;
 }
@@ -747,15 +803,30 @@ std::ostream& operator<<(std::ostream& os,
 
 InstructionBlocks* InstructionSequence::InstructionBlocksFor(
     Zone* zone, const Schedule* schedule) {
-  InstructionBlocks* blocks = zone->NewArray<InstructionBlocks>(1);
+  InstructionBlocks* blocks = zone->AllocateArray<InstructionBlocks>(1);
   new (blocks) InstructionBlocks(
       static_cast<int>(schedule->rpo_order()->size()), nullptr, zone);
   size_t rpo_number = 0;
   for (BasicBlockVector::const_iterator it = schedule->rpo_order()->begin();
        it != schedule->rpo_order()->end(); ++it, ++rpo_number) {
     DCHECK(!(*blocks)[rpo_number]);
-    DCHECK(GetRpo(*it).ToSize() == rpo_number);
+    DCHECK_EQ(GetRpo(*it).ToSize(), rpo_number);
     (*blocks)[rpo_number] = InstructionBlockFor(zone, *it);
+  }
+  return blocks;
+}
+
+InstructionBlocks* InstructionSequence::InstructionBlocksFor(
+    Zone* zone, const turboshaft::Graph& graph) {
+  InstructionBlocks* blocks = zone->AllocateArray<InstructionBlocks>(1);
+  new (blocks)
+      InstructionBlocks(static_cast<int>(graph.block_count()), nullptr, zone);
+  size_t rpo_number = 0;
+  for (const turboshaft::Block& block : graph.blocks()) {
+    DCHECK(!(*blocks)[rpo_number]);
+    DCHECK_EQ(RpoNumber::FromInt(block.index().id()).ToSize(), rpo_number);
+    (*blocks)[rpo_number] = InstructionBlockFor(zone, graph, &block);
+    ++rpo_number;
   }
   return blocks;
 }
@@ -819,7 +890,7 @@ void InstructionSequence::ComputeAssemblyOrder() {
   int ao = 0;
   RpoNumber invalid = RpoNumber::Invalid();
 
-  ao_blocks_ = zone()->NewArray<InstructionBlocks>(1);
+  ao_blocks_ = zone()->AllocateArray<InstructionBlocks>(1);
   new (ao_blocks_) InstructionBlocks(zone());
   ao_blocks_->reserve(instruction_blocks_->size());
 
@@ -937,11 +1008,6 @@ int InstructionSequence::AddInstruction(Instruction* instr) {
   return index;
 }
 
-InstructionBlock* InstructionSequence::GetInstructionBlock(
-    int instruction_index) const {
-  return instructions()[instruction_index]->block();
-}
-
 static MachineRepresentation FilterRepresentation(MachineRepresentation rep) {
   switch (rep) {
     case MachineRepresentation::kBit:
@@ -963,6 +1029,7 @@ static MachineRepresentation FilterRepresentation(MachineRepresentation rep) {
       return rep;
     case MachineRepresentation::kNone:
     case MachineRepresentation::kMapWord:
+    case MachineRepresentation::kIndirectPointer:
       break;
   }
 
@@ -1079,11 +1146,13 @@ size_t GetConservativeFrameSizeInBytes(FrameStateType type,
 #if V8_ENABLE_WEBASSEMBLY
     case FrameStateType::kWasmInlinedIntoJS:
 #endif
-    case FrameStateType::kConstructStub: {
+    case FrameStateType::kConstructCreateStub: {
       auto info = ConstructStubFrameInfo::Conservative(
           static_cast<int>(parameters_count));
       return info.frame_size_in_bytes();
     }
+    case FrameStateType::kConstructInvokeStub:
+      return FastConstructStubFrameInfo::Conservative().frame_size_in_bytes();
     case FrameStateType::kBuiltinContinuation:
 #if V8_ENABLE_WEBASSEMBLY
     case FrameStateType::kJSToWasmBuiltinContinuation:
@@ -1150,7 +1219,8 @@ size_t FrameStateDescriptor::GetHeight() const {
       // a receiver or context).
       return parameters_count();
     case FrameStateType::kInlinedExtraArguments:
-    case FrameStateType::kConstructStub:
+    case FrameStateType::kConstructCreateStub:
+    case FrameStateType::kConstructInvokeStub:
     case FrameStateType::kJavaScriptBuiltinContinuation:
     case FrameStateType::kJavaScriptBuiltinContinuationWithCatch:
       // JS linkage. The parameters count
@@ -1164,8 +1234,8 @@ size_t FrameStateDescriptor::GetHeight() const {
 }
 
 size_t FrameStateDescriptor::GetSize() const {
-  return 1 + parameters_count() + locals_count() + stack_count() +
-         (HasContext() ? 1 : 0);
+  return (HasClosure() ? 1 : 0) + parameters_count() + locals_count() +
+         stack_count() + (HasContext() ? 1 : 0);
 }
 
 size_t FrameStateDescriptor::GetTotalSize() const {
@@ -1229,6 +1299,32 @@ std::ostream& operator<<(std::ostream& os, const InstructionSequence& code) {
     os << PrintableInstructionBlock{block, &code};
   }
   return os;
+}
+
+std::ostream& operator<<(std::ostream& os, StateValueKind kind) {
+  switch (kind) {
+    case StateValueKind::kArgumentsElements:
+      return os << "ArgumentsElements";
+    case StateValueKind::kArgumentsLength:
+      return os << "ArgumentsLength";
+    case StateValueKind::kPlain:
+      return os << "Plain";
+    case StateValueKind::kOptimizedOut:
+      return os << "OptimizedOut";
+    case StateValueKind::kNested:
+      return os << "Nested";
+    case StateValueKind::kDuplicate:
+      return os << "Duplicate";
+  }
+}
+
+void StateValueDescriptor::Print(std::ostream& os) const {
+  os << "kind=" << kind_ << ", type=" << type_;
+  if (kind_ == StateValueKind::kDuplicate || kind_ == StateValueKind::kNested) {
+    os << ", id=" << id_;
+  } else if (kind_ == StateValueKind::kArgumentsElements) {
+    os << ", args_type=" << args_type_;
+  }
 }
 
 }  // namespace compiler

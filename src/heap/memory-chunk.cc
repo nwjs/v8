@@ -9,7 +9,7 @@
 #include "src/base/platform/platform.h"
 #include "src/common/globals.h"
 #include "src/heap/basic-memory-chunk.h"
-#include "src/heap/code-object-registry.h"
+#include "src/heap/incremental-marking.h"
 #include "src/heap/marking-state-inl.h"
 #include "src/heap/memory-allocator.h"
 #include "src/heap/memory-chunk-inl.h"
@@ -50,7 +50,7 @@ void MemoryChunk::DecrementWriteUnprotectCounterAndMaybeSetPermissions(
   DCHECK(permission == PageAllocator::kRead ||
          permission == PageAllocator::kReadExecute);
   DCHECK(IsFlagSet(MemoryChunk::IS_EXECUTABLE));
-  DCHECK(owner_identity() == CODE_SPACE || owner_identity() == CODE_LO_SPACE);
+  DCHECK(IsAnyCodeSpace(owner_identity()));
   page_protection_change_mutex_->AssertHeld();
   Address protect_start =
       address() + MemoryChunkLayout::ObjectPageOffsetInCodePage();
@@ -73,7 +73,7 @@ void MemoryChunk::SetReadAndExecutable() {
 base::MutexGuard MemoryChunk::SetCodeModificationPermissions() {
   DCHECK(!V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT);
   DCHECK(IsFlagSet(MemoryChunk::IS_EXECUTABLE));
-  DCHECK(owner_identity() == CODE_SPACE || owner_identity() == CODE_LO_SPACE);
+  DCHECK(IsAnyCodeSpace(owner_identity()));
   // Incrementing the write_unprotect_counter_ and changing the page
   // protection mode has to be atomic.
   base::MutexGuard guard(page_protection_change_mutex_);
@@ -109,10 +109,7 @@ MemoryChunk::MemoryChunk(Heap* heap, BaseSpace* space, size_t chunk_size,
                        std::move(reservation)),
       mutex_(new base::Mutex()),
       shared_mutex_(new base::SharedMutex()),
-      page_protection_change_mutex_(new base::Mutex()),
-      code_object_registry_(owner()->identity() == CODE_SPACE
-                                ? new CodeObjectRegistry()
-                                : nullptr) {
+      page_protection_change_mutex_(new base::Mutex()) {
   DCHECK_NE(space->identity(), RO_SPACE);
 
   if (executable == EXECUTABLE) {
@@ -145,29 +142,32 @@ size_t MemoryChunk::CommittedPhysicalMemory() const {
   return active_system_pages_->Size(MemoryAllocator::GetCommitPageSizeBits());
 }
 
-void MemoryChunk::SetOldGenerationPageFlags(bool is_marking) {
-  if (is_marking) {
+void MemoryChunk::SetOldGenerationPageFlags(MarkingMode marking_mode) {
+  if (marking_mode == MarkingMode::kMajorMarking) {
     SetFlag(MemoryChunk::POINTERS_TO_HERE_ARE_INTERESTING);
     SetFlag(MemoryChunk::POINTERS_FROM_HERE_ARE_INTERESTING);
     SetFlag(MemoryChunk::INCREMENTAL_MARKING);
-  } else {
-    if (owner_identity() == SHARED_SPACE ||
-        owner_identity() == SHARED_LO_SPACE) {
-      // We need to track pointers into the SHARED_SPACE for OLD_TO_SHARED.
-      SetFlag(MemoryChunk::POINTERS_TO_HERE_ARE_INTERESTING);
-      // No need to track OLD_TO_NEW or OLD_TO_SHARED within the shared space.
-      ClearFlag(MemoryChunk::POINTERS_FROM_HERE_ARE_INTERESTING);
-    } else {
-      ClearFlag(MemoryChunk::POINTERS_TO_HERE_ARE_INTERESTING);
-      SetFlag(MemoryChunk::POINTERS_FROM_HERE_ARE_INTERESTING);
-    }
+  } else if (owner_identity() == SHARED_SPACE ||
+             owner_identity() == SHARED_LO_SPACE) {
+    // We need to track pointers into the SHARED_SPACE for OLD_TO_SHARED.
+    SetFlag(MemoryChunk::POINTERS_TO_HERE_ARE_INTERESTING);
+    // No need to track OLD_TO_NEW or OLD_TO_SHARED within the shared space.
+    ClearFlag(MemoryChunk::POINTERS_FROM_HERE_ARE_INTERESTING);
     ClearFlag(MemoryChunk::INCREMENTAL_MARKING);
+  } else {
+    ClearFlag(MemoryChunk::POINTERS_TO_HERE_ARE_INTERESTING);
+    SetFlag(MemoryChunk::POINTERS_FROM_HERE_ARE_INTERESTING);
+    if (marking_mode == MarkingMode::kMinorMarking) {
+      SetFlag(MemoryChunk::INCREMENTAL_MARKING);
+    } else {
+      ClearFlags(MemoryChunk::INCREMENTAL_MARKING);
+    }
   }
 }
 
-void MemoryChunk::SetYoungGenerationPageFlags(bool is_marking) {
+void MemoryChunk::SetYoungGenerationPageFlags(MarkingMode marking_mode) {
   SetFlag(MemoryChunk::POINTERS_TO_HERE_ARE_INTERESTING);
-  if (is_marking) {
+  if (marking_mode != MarkingMode::kNoMarking) {
     SetFlag(MemoryChunk::POINTERS_FROM_HERE_ARE_INTERESTING);
     SetFlag(MemoryChunk::INCREMENTAL_MARKING);
   } else {
@@ -191,10 +191,6 @@ void MemoryChunk::ReleaseAllocatedMemoryNeededForWritableChunk() {
   if (page_protection_change_mutex_ != nullptr) {
     delete page_protection_change_mutex_;
     page_protection_change_mutex_ = nullptr;
-  }
-  if (code_object_registry_ != nullptr) {
-    delete code_object_registry_;
-    code_object_registry_ = nullptr;
   }
 
   if (active_system_pages_ != nullptr) {
@@ -271,6 +267,11 @@ bool MemoryChunk::ContainsAnySlots() const {
   return false;
 }
 
+void MemoryChunk::ClearLiveness() {
+  marking_bitmap()->Clear<AccessMode::NON_ATOMIC>();
+  SetLiveBytes(0);
+}
+
 #ifdef DEBUG
 void MemoryChunk::ValidateOffsets(MemoryChunk* chunk) {
   // Note that we cannot use offsetof because MemoryChunk is not a POD.
@@ -301,9 +302,6 @@ void MemoryChunk::ValidateOffsets(MemoryChunk* chunk) {
             MemoryChunkLayout::kListNodeOffset);
   DCHECK_EQ(reinterpret_cast<Address>(&chunk->categories_) - chunk->address(),
             MemoryChunkLayout::kCategoriesOffset);
-  DCHECK_EQ(reinterpret_cast<Address>(&chunk->code_object_registry_) -
-                chunk->address(),
-            MemoryChunkLayout::kCodeObjectRegistryOffset);
   DCHECK_EQ(reinterpret_cast<Address>(&chunk->possibly_empty_buckets_) -
                 chunk->address(),
             MemoryChunkLayout::kPossiblyEmptyBucketsOffset);

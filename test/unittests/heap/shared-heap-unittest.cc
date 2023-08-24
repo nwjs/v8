@@ -221,7 +221,7 @@ void AllocateInSharedHeap(int iterations = 100) {
 
     for (int i = 0; i < kKeptAliveInHeap; i++) {
       FixedArray array = FixedArray::cast(arrays_in_heap->get(i));
-      CHECK_EQ(array.length(), 100);
+      CHECK_EQ(array->length(), 100);
     }
   });
 }
@@ -489,7 +489,7 @@ void InvokeGC(AllocationSpace space, Isolate* isolate) {
 
 template <typename TestType, AllocationType allocation, AllocationSpace space>
 void ToEachTheirOwnWithHandle(TestType* test) {
-  using ThreadType = TestType::ThreadType;
+  using ThreadType = typename TestType::ThreadType;
   auto thread = test->thread();
 
   // Install all the callbacks.
@@ -566,7 +566,7 @@ using SharedHeapTestStateWithRawPointerUnparked =
 
 template <typename TestType, AllocationType allocation, AllocationSpace space>
 void ToEachTheirOwnWithRawPointer(TestType* test) {
-  using ThreadType = TestType::ThreadType;
+  using ThreadType = typename TestType::ThreadType;
   auto thread = test->thread();
 
   // Install all the callbacks.

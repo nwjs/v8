@@ -203,6 +203,15 @@ void LiftoffAssembler::LoadConstant(LiftoffRegister reg, WasmValue value) {
   }
 }
 
+void LiftoffAssembler::LoadExternalPointer(Register dst, Register src_addr,
+                                           int offset, Register index,
+                                           ExternalPointerTag tag,
+                                           Register scratch) {
+  MemOperand src_op =
+      liftoff::GetMemOp(this, src_addr, index, offset, kSystemPointerSizeLog2);
+  LoadWord(dst, src_op);
+}
+
 void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
                                          Register offset_reg,
                                          int32_t offset_imm, bool needs_shift) {
@@ -410,6 +419,52 @@ inline Register CalculateActualAddress(LiftoffAssembler* lasm,
 }
 
 enum class Binop { kAdd, kSub, kAnd, kOr, kXor, kExchange };
+inline void AtomicBinop64(LiftoffAssembler* lasm, Register dst_addr,
+                          Register offset_reg, uintptr_t offset_imm,
+                          LiftoffRegister value, LiftoffRegister result,
+                          StoreType type, Binop op) {
+  FrameScope scope(lasm, StackFrame::MANUAL);
+  RegList c_params = {arg_reg_1, arg_reg_2, arg_reg_3};
+  RegList result_list = {result.low_gp(), result.high_gp()};
+
+  // Result registers does not need to be pushed.
+  __ MultiPush(c_params - result_list);
+  liftoff::CalculateActualAddress(lasm, dst_addr, offset_reg, offset_imm,
+                                  arg_reg_1);
+  __ Mv(arg_reg_2, value.low_gp());
+  __ Mv(arg_reg_3, value.high_gp());
+  __ MultiPush(kJSCallerSaved - c_params - result_list);
+  __ PrepareCallCFunction(3, 0, kScratchReg);
+  ExternalReference extern_func_ref;
+  switch (op) {
+    case Binop::kAdd:
+      extern_func_ref = ExternalReference::atomic_pair_add_function();
+      break;
+    case Binop::kSub:
+      extern_func_ref = ExternalReference::atomic_pair_sub_function();
+      break;
+    case Binop::kAnd:
+      extern_func_ref = ExternalReference::atomic_pair_and_function();
+      break;
+    case Binop::kOr:
+      extern_func_ref = ExternalReference::atomic_pair_or_function();
+      break;
+    case Binop::kXor:
+      extern_func_ref = ExternalReference::atomic_pair_xor_function();
+      break;
+    case Binop::kExchange:
+      extern_func_ref = ExternalReference::atomic_pair_exchange_function();
+      break;
+    default:
+      UNREACHABLE();
+  }
+  __ CallCFunction(extern_func_ref, 3, 0);
+  __ MultiPop(kJSCallerSaved - c_params - result_list);
+  __ Mv(result.low_gp(), kReturnRegister0);
+  __ Mv(result.high_gp(), kReturnRegister1);
+  __ MultiPop(c_params - result_list);
+  return;
+}
 
 inline void AtomicBinop(LiftoffAssembler* lasm, Register dst_addr,
                         Register offset_reg, uintptr_t offset_imm,
@@ -425,14 +480,12 @@ inline void AtomicBinop(LiftoffAssembler* lasm, Register dst_addr,
   switch (type.value()) {
     case StoreType::kI64Store8:
     case StoreType::kI64Store16:
-    case StoreType::kI64Store32:
       __ LoadConstant(result.high(), WasmValue(0));
       result_reg = result.low_gp();
       value_reg = value.low_gp();
       break;
     case StoreType::kI32Store8:
     case StoreType::kI32Store16:
-    case StoreType::kI32Store:
       result_reg = result.gp();
       value_reg = value.gp();
       break;
@@ -646,7 +699,9 @@ void LiftoffAssembler::AtomicAdd(Register dst_addr, Register offset_reg,
                                  LiftoffRegister result, StoreType type,
                                  bool i64_offset) {
   if (type.value() == StoreType::kI64Store) {
-    bailout(kAtomics, "Atomic64");
+    liftoff::AtomicBinop64(this, dst_addr, offset_reg, offset_imm, value,
+                           result, type, liftoff::Binop::kAdd);
+    return;
   }
   if (type.value() == StoreType::kI32Store ||
       type.value() == StoreType::kI64Store32) {
@@ -654,6 +709,7 @@ void LiftoffAssembler::AtomicAdd(Register dst_addr, Register offset_reg,
     Register actual_addr = liftoff::CalculateActualAddress(
         this, dst_addr, offset_reg, offset_imm, temps.Acquire());
     if (type.value() == StoreType::kI64Store32) {
+      mv(result.high_gp(), zero_reg);  // High word of result is always 0.
       result = result.low();
       value = value.low();
     }
@@ -670,7 +726,9 @@ void LiftoffAssembler::AtomicSub(Register dst_addr, Register offset_reg,
                                  LiftoffRegister result, StoreType type,
                                  bool i64_offset) {
   if (type.value() == StoreType::kI64Store) {
-    bailout(kAtomics, "Atomic64");
+    liftoff::AtomicBinop64(this, dst_addr, offset_reg, offset_imm, value,
+                           result, type, liftoff::Binop::kSub);
+    return;
   }
   if (type.value() == StoreType::kI32Store ||
       type.value() == StoreType::kI64Store32) {
@@ -678,6 +736,7 @@ void LiftoffAssembler::AtomicSub(Register dst_addr, Register offset_reg,
     Register actual_addr = liftoff::CalculateActualAddress(
         this, dst_addr, offset_reg, offset_imm, temps.Acquire());
     if (type.value() == StoreType::kI64Store32) {
+      mv(result.high_gp(), zero_reg);
       result = result.low();
       value = value.low();
     }
@@ -694,7 +753,9 @@ void LiftoffAssembler::AtomicAnd(Register dst_addr, Register offset_reg,
                                  LiftoffRegister result, StoreType type,
                                  bool i64_offset) {
   if (type.value() == StoreType::kI64Store) {
-    bailout(kAtomics, "Atomic64");
+    liftoff::AtomicBinop64(this, dst_addr, offset_reg, offset_imm, value,
+                           result, type, liftoff::Binop::kAnd);
+    return;
   }
   if (type.value() == StoreType::kI32Store ||
       type.value() == StoreType::kI64Store32) {
@@ -702,6 +763,7 @@ void LiftoffAssembler::AtomicAnd(Register dst_addr, Register offset_reg,
     Register actual_addr = liftoff::CalculateActualAddress(
         this, dst_addr, offset_reg, offset_imm, temps.Acquire());
     if (type.value() == StoreType::kI64Store32) {
+      mv(result.high_gp(), zero_reg);
       result = result.low();
       value = value.low();
     }
@@ -717,7 +779,9 @@ void LiftoffAssembler::AtomicOr(Register dst_addr, Register offset_reg,
                                 LiftoffRegister result, StoreType type,
                                 bool i64_offset) {
   if (type.value() == StoreType::kI64Store) {
-    bailout(kAtomics, "Atomic64");
+    liftoff::AtomicBinop64(this, dst_addr, offset_reg, offset_imm, value,
+                           result, type, liftoff::Binop::kOr);
+    return;
   }
   if (type.value() == StoreType::kI32Store ||
       type.value() == StoreType::kI64Store32) {
@@ -725,6 +789,7 @@ void LiftoffAssembler::AtomicOr(Register dst_addr, Register offset_reg,
     Register actual_addr = liftoff::CalculateActualAddress(
         this, dst_addr, offset_reg, offset_imm, temps.Acquire());
     if (type.value() == StoreType::kI64Store32) {
+      mv(result.high_gp(), zero_reg);
       result = result.low();
       value = value.low();
     }
@@ -740,7 +805,9 @@ void LiftoffAssembler::AtomicXor(Register dst_addr, Register offset_reg,
                                  LiftoffRegister result, StoreType type,
                                  bool i64_offset) {
   if (type.value() == StoreType::kI64Store) {
-    bailout(kAtomics, "Atomic64");
+    liftoff::AtomicBinop64(this, dst_addr, offset_reg, offset_imm, value,
+                           result, type, liftoff::Binop::kXor);
+    return;
   }
   if (type.value() == StoreType::kI32Store ||
       type.value() == StoreType::kI64Store32) {
@@ -748,6 +815,7 @@ void LiftoffAssembler::AtomicXor(Register dst_addr, Register offset_reg,
     Register actual_addr = liftoff::CalculateActualAddress(
         this, dst_addr, offset_reg, offset_imm, temps.Acquire());
     if (type.value() == StoreType::kI64Store32) {
+      mv(result.high_gp(), zero_reg);
       result = result.low();
       value = value.low();
     }
@@ -764,7 +832,9 @@ void LiftoffAssembler::AtomicExchange(Register dst_addr, Register offset_reg,
                                       LiftoffRegister result, StoreType type,
                                       bool i64_offset) {
   if (type.value() == StoreType::kI64Store) {
-    bailout(kAtomics, "Atomic64");
+    liftoff::AtomicBinop64(this, dst_addr, offset_reg, offset_imm, value,
+                           result, type, liftoff::Binop::kExchange);
+    return;
   }
   if (type.value() == StoreType::kI32Store ||
       type.value() == StoreType::kI64Store32) {
@@ -772,6 +842,7 @@ void LiftoffAssembler::AtomicExchange(Register dst_addr, Register offset_reg,
     Register actual_addr = liftoff::CalculateActualAddress(
         this, dst_addr, offset_reg, offset_imm, temps.Acquire());
     if (type.value() == StoreType::kI64Store32) {
+      mv(result.high_gp(), zero_reg);
       result = result.low();
       value = value.low();
     }
@@ -792,18 +863,30 @@ void LiftoffAssembler::AtomicCompareExchange(
   if (type.value() == StoreType::kI64Store) {
     Register actual_addr = liftoff::CalculateActualAddress(
         this, dst_addr, offset_reg, offset_imm, kScratchReg);
-    Mv(a0, actual_addr);
     FrameScope scope(this, StackFrame::MANUAL);
-    PushCallerSaved(SaveFPRegsMode::kIgnore, a0, a1);
+    // NOTE:
+    // a0~a4 are caller-saved registers and also used
+    // to pass parameters for C functions.
+    RegList c_params = {arg_reg_1, arg_reg_2, arg_reg_3, arg_reg_4, a4};
+    RegList result_list = {result.low_gp(), result.high_gp()};
+    MultiPush(c_params - result_list);
+
+    Mv(a0, actual_addr);
+    Mv(a1, expected.low_gp());
+    Mv(a2, expected.high_gp());
+    Mv(a3, new_value.low_gp());
+    Mv(a4, new_value.high_gp());
+
+    MultiPush(kJSCallerSaved - c_params - result_list);
     PrepareCallCFunction(5, 0, kScratchReg);
     CallCFunction(ExternalReference::atomic_pair_compare_exchange_function(), 5,
                   0);
-    PopCallerSaved(SaveFPRegsMode::kIgnore, a0, a1);
-    Mv(result.low_gp(), a0);
-    Mv(result.high_gp(), a1);
+    MultiPop(kJSCallerSaved - c_params - result_list);
+    Mv(result.low_gp(), kReturnRegister0);
+    Mv(result.high_gp(), kReturnRegister1);
+    MultiPop(c_params - result_list);
     return;
   }
-
   // Make sure that {result} is unique.
   switch (type.value()) {
     case StoreType::kI64Store8:
@@ -1622,13 +1705,6 @@ void LiftoffAssembler::emit_i32_cond_jumpi(Condition cond, Label* label,
   MacroAssembler::Branch(label, cond, lhs, Operand(imm));
 }
 
-void LiftoffAssembler::emit_i32_subi_jump_negative(
-    Register value, int subtrahend, Label* result_negative,
-    const FreezeCacheState& frozen) {
-  SubWord(value, value, Operand(subtrahend));
-  MacroAssembler::Branch(result_negative, lt, value, Operand(zero_reg));
-}
-
 void LiftoffAssembler::emit_i32_eqz(Register dst, Register src) {
   MacroAssembler::Sltu(dst, src, 1);
 }
@@ -2000,19 +2076,38 @@ void LiftoffAssembler::emit_i16x8_extadd_pairwise_i8x16_u(LiftoffRegister dst,
   vwaddu_vv(dst.fp().toV(), kSimd128ScratchReg, kSimd128ScratchReg2);
 }
 
-void LiftoffAssembler::CallC(const ValueKindSig* sig,
-                             const LiftoffRegister* args,
-                             const LiftoffRegister* rets,
+void LiftoffAssembler::CallC(const std::initializer_list<VarState> args,
+                             const LiftoffRegister* rets, ValueKind return_kind,
                              ValueKind out_argument_kind, int stack_bytes,
                              ExternalReference ext_ref) {
   AddWord(sp, sp, Operand(-stack_bytes));
 
-  int arg_bytes = 0;
-  for (ValueKind param_kind : sig->parameters()) {
-    liftoff::Store(this, sp, arg_bytes, *args++, param_kind);
-    arg_bytes += value_kind_size(param_kind);
+  int arg_offset = 0;
+  for (const VarState& arg : args) {
+    UseScratchRegisterScope temps(this);
+    Register src = no_reg;
+    MemOperand dst{sp, arg_offset};
+    if (arg.is_reg()) {
+      liftoff::Store(this, sp, arg_offset, arg.reg(), arg.kind());
+    } else if (arg.is_const()) {
+      DCHECK_EQ(kI32, arg.kind());
+      if (arg.i32_const() == 0) {
+        src = zero_reg;
+      } else {
+        src = temps.Acquire();
+        li(src, arg.i32_const());
+      }
+      StoreWord(src, dst);
+    } else {
+      DCHECK_EQ(value_kind_size(arg.kind()), 4);
+      MemOperand src = liftoff::GetStackSlot(arg.offset());
+      auto scratch = temps.Acquire();
+      Lw(scratch, src);
+      Sw(scratch, dst);
+    }
+    arg_offset += value_kind_size(arg.kind());
   }
-  DCHECK_LE(arg_bytes, stack_bytes);
+  DCHECK_LE(arg_offset, stack_bytes);
 
   // Pass a pointer to the buffer with the arguments to the C function.
   // On RISC-V, the first argument is passed in {a0}.
@@ -2026,11 +2121,10 @@ void LiftoffAssembler::CallC(const ValueKindSig* sig,
 
   // Move return value to the right register.
   const LiftoffRegister* next_result_reg = rets;
-  if (sig->return_count() > 0) {
-    DCHECK_EQ(1, sig->return_count());
+  if (return_kind != kVoid) {
     constexpr Register kReturnReg = a0;
     if (kReturnReg != next_result_reg->gp()) {
-      Move(*next_result_reg, LiftoffRegister(kReturnReg), sig->GetReturn(0));
+      Move(*next_result_reg, LiftoffRegister(kReturnReg), return_kind);
     }
     ++next_result_reg;
   }
@@ -2056,25 +2150,40 @@ void LiftoffStackSlots::Construct(int param_slots) {
     const LiftoffAssembler::VarState& src = slot.src_;
     switch (src.loc()) {
       case LiftoffAssembler::VarState::kStack: {
-        if (src.kind() == kF64) {
-          asm_->AllocateStackSpace(stack_decrement - kDoubleSize);
-          DCHECK_EQ(kLowWord, slot.half_);
-          asm_->Lw(kScratchReg,
-                   liftoff::GetHalfStackSlot(slot.src_offset_, kHighWord));
-          asm_->push(kScratchReg);
-          asm_->Lw(kScratchReg,
-                   liftoff::GetHalfStackSlot(slot.src_offset_, kLowWord));
-          asm_->push(kScratchReg);
-        } else if (src.kind() != kS128) {
-          asm_->AllocateStackSpace(stack_decrement - kSystemPointerSize);
-          asm_->Lw(kScratchReg, liftoff::GetStackSlot(slot.src_offset_));
-          asm_->push(kScratchReg);
-        } else {
-          asm_->AllocateStackSpace(stack_decrement - kSimd128Size);
-          asm_->Lw(kScratchReg, liftoff::GetStackSlot(slot.src_offset_ - 8));
-          asm_->push(kScratchReg);
-          asm_->Lw(kScratchReg, liftoff::GetStackSlot(slot.src_offset_));
-          asm_->push(kScratchReg);
+        switch (src.kind()) {
+          // i32 and i64 can be treated as similar cases, i64 being previously
+          // split into two i32 registers
+          case kI32:
+          case kI64:
+          case kF32:
+          case kRef:
+          case kRefNull: {
+            asm_->AllocateStackSpace(stack_decrement - kSystemPointerSize);
+            UseScratchRegisterScope temps(asm_);
+            Register scratch = temps.Acquire();
+            asm_->Lw(scratch,
+                     liftoff::GetHalfStackSlot(slot.src_offset_, slot.half_));
+            asm_->Push(scratch);
+          } break;
+          case kF64: {
+            asm_->AllocateStackSpace(stack_decrement - kDoubleSize);
+            DCHECK_EQ(kLowWord, slot.half_);
+            asm_->Lw(kScratchReg,
+                     liftoff::GetHalfStackSlot(slot.src_offset_, kHighWord));
+            asm_->push(kScratchReg);
+            asm_->Lw(kScratchReg,
+                     liftoff::GetHalfStackSlot(slot.src_offset_, kLowWord));
+            asm_->push(kScratchReg);
+          } break;
+          case kS128: {
+            asm_->AllocateStackSpace(stack_decrement - kSimd128Size);
+            asm_->Lw(kScratchReg, liftoff::GetStackSlot(slot.src_offset_ - 8));
+            asm_->push(kScratchReg);
+            asm_->Lw(kScratchReg, liftoff::GetStackSlot(slot.src_offset_));
+            asm_->push(kScratchReg);
+          } break;
+          default:
+            UNREACHABLE();
         }
         break;
       }

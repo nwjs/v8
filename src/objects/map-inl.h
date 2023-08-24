@@ -10,6 +10,7 @@
 #include "src/objects/cell-inl.h"
 #include "src/objects/dependent-code.h"
 #include "src/objects/descriptor-array-inl.h"
+#include "src/objects/dictionary.h"
 #include "src/objects/field-type.h"
 #include "src/objects/instance-type-inl.h"
 #include "src/objects/js-function-inl.h"
@@ -54,10 +55,10 @@ RELEASE_ACQUIRE_WEAK_ACCESSORS(Map, raw_transitions,
                                kTransitionsOrPrototypeInfoOffset)
 
 ACCESSORS_CHECKED2(Map, prototype, HeapObject, kPrototypeOffset, true,
-                   value.IsNull() || value.IsJSProxy() ||
-                       value.IsWasmObject() ||
-                       (value.IsJSObject() && (value.InWritableSharedSpace() ||
-                                               value.map().is_prototype_map())))
+                   IsNull(value) || IsJSProxy(value) || IsWasmObject(value) ||
+                       (IsJSObject(value) &&
+                        (value.InWritableSharedSpace() ||
+                         value->map()->is_prototype_map())))
 
 DEF_GETTER(Map, prototype_info, Object) {
   Object value = TaggedField<Object, kTransitionsOrPrototypeInfoOffset>::load(
@@ -129,24 +130,24 @@ BIT_FIELD_ACCESSORS(Map, relaxed_bit_field3, construction_counter,
 DEF_GETTER(Map, GetNamedInterceptor, InterceptorInfo) {
   DCHECK(has_named_interceptor());
   FunctionTemplateInfo info = GetFunctionTemplateInfo(cage_base);
-  return InterceptorInfo::cast(info.GetNamedPropertyHandler(cage_base));
+  return InterceptorInfo::cast(info->GetNamedPropertyHandler(cage_base));
 }
 
 DEF_GETTER(Map, GetIndexedInterceptor, InterceptorInfo) {
   DCHECK(has_indexed_interceptor());
   FunctionTemplateInfo info = GetFunctionTemplateInfo(cage_base);
-  return InterceptorInfo::cast(info.GetIndexedPropertyHandler(cage_base));
+  return InterceptorInfo::cast(info->GetIndexedPropertyHandler(cage_base));
 }
 
 // static
 bool Map::IsMostGeneralFieldType(Representation representation,
                                  FieldType field_type) {
-  return !representation.IsHeapObject() || field_type.IsAny();
+  return !representation.IsHeapObject() || IsAny(field_type);
 }
 
 // static
 bool Map::FieldTypeIsCleared(Representation rep, FieldType type) {
-  return type.IsNone() && rep.IsHeapObject();
+  return IsNone(type) && rep.IsHeapObject();
 }
 
 // static
@@ -163,7 +164,7 @@ bool Map::CanHaveFastTransitionableElementsKind() const {
 bool Map::IsDetached(Isolate* isolate) const {
   if (is_prototype_map()) return true;
   return instance_type() == JS_OBJECT_TYPE && NumberOfOwnDescriptors() > 0 &&
-         GetBackPointer().IsUndefined(isolate);
+         IsUndefined(GetBackPointer(), isolate);
 }
 
 // static
@@ -213,11 +214,11 @@ bool Map::TooManyFastProperties(StoreOrigin store_origin) const {
 }
 
 Name Map::GetLastDescriptorName(Isolate* isolate) const {
-  return instance_descriptors(isolate).GetKey(LastAdded());
+  return instance_descriptors(isolate)->GetKey(LastAdded());
 }
 
 PropertyDetails Map::GetLastDescriptorDetails(Isolate* isolate) const {
-  return instance_descriptors(isolate).GetDetails(LastAdded());
+  return instance_descriptors(isolate)->GetDetails(LastAdded());
 }
 
 InternalIndex Map::LastAdded() const {
@@ -232,7 +233,7 @@ int Map::NumberOfOwnDescriptors() const {
 }
 
 void Map::SetNumberOfOwnDescriptors(int number) {
-  DCHECK_LE(number, instance_descriptors().number_of_descriptors());
+  DCHECK_LE(number, instance_descriptors()->number_of_descriptors());
   CHECK_LE(static_cast<unsigned>(number),
            static_cast<unsigned>(kMaxNumberOfDescriptors));
   set_release_acquire_bit_field3(
@@ -257,7 +258,7 @@ void Map::SetEnumLength(int length) {
 }
 
 FixedArrayBase Map::GetInitialElements() const {
-  FixedArrayBase result;
+  Tagged<FixedArrayBase> result;
   if (has_fast_elements() || has_fast_string_wrapper_elements() ||
       has_any_nonextensible_elements()) {
     result = GetReadOnlyRoots().empty_fixed_array();
@@ -318,12 +319,12 @@ void Map::set_inobject_properties_start_or_constructor_function_index(
 }
 
 int Map::GetInObjectPropertiesStartInWords() const {
-  DCHECK(IsJSObjectMap());
+  DCHECK(IsJSObjectMap(*this));
   return inobject_properties_start_or_constructor_function_index();
 }
 
 void Map::SetInObjectPropertiesStartInWords(int value) {
-  CHECK(IsJSObjectMap());
+  CHECK(IsJSObjectMap(*this));
   set_inobject_properties_start_or_constructor_function_index(value);
 }
 
@@ -335,7 +336,7 @@ bool Map::HasOutOfObjectProperties() const {
 }
 
 int Map::GetInObjectProperties() const {
-  DCHECK(IsJSObjectMap());
+  DCHECK(IsJSObjectMap(*this));
   return instance_size_in_words() - GetInObjectPropertiesStartInWords();
 }
 
@@ -344,15 +345,15 @@ int Map::GetConstructorFunctionIndex() const {
   // We allow WasmNull here so builtins can produce error messages when
   // called from Wasm, without having to special-case WasmNull at every
   // caller of such a builtin.
-  DCHECK(IsPrimitiveMap() || instance_type() == WASM_NULL_TYPE);
+  DCHECK(IsPrimitiveMap(*this) || instance_type() == WASM_NULL_TYPE);
 #else
-  DCHECK(IsPrimitiveMap());
+  DCHECK(IsPrimitiveMap(*this));
 #endif
   return inobject_properties_start_or_constructor_function_index();
 }
 
 void Map::SetConstructorFunctionIndex(int value) {
-  CHECK(IsPrimitiveMap());
+  CHECK(IsPrimitiveMap(*this));
   set_inobject_properties_start_or_constructor_function_index(value);
 }
 
@@ -379,7 +380,7 @@ void Map::set_instance_type(InstanceType value) {
 
 int Map::UnusedPropertyFields() const {
   int value = used_or_unused_instance_size_in_words();
-  DCHECK_IMPLIES(!IsJSObjectMap(), value == 0);
+  DCHECK_IMPLIES(!IsJSObjectMap(*this), value == 0);
   int unused;
   if (value >= JSObject::kFieldsAdded) {
     unused = instance_size_in_words() - value;
@@ -395,7 +396,7 @@ int Map::UnusedInObjectProperties() const {
   // Like Map::UnusedPropertyFields(), but returns 0 for out of object
   // properties.
   int value = used_or_unused_instance_size_in_words();
-  DCHECK_IMPLIES(!IsJSObjectMap(), value == 0);
+  DCHECK_IMPLIES(!IsJSObjectMap(*this), value == 0);
   if (value >= JSObject::kFieldsAdded) {
     return instance_size_in_words() - value;
   }
@@ -424,7 +425,7 @@ int Map::UsedInstanceSize() const {
 
 void Map::SetInObjectUnusedPropertyFields(int value) {
   static_assert(JSObject::kFieldsAdded == JSObject::kHeaderSize / kTaggedSize);
-  if (!IsJSObjectMap()) {
+  if (!IsJSObjectMap(*this)) {
     CHECK_EQ(0, value);
     set_used_or_unused_instance_size_in_words(0);
     DCHECK_EQ(0, UnusedPropertyFields());
@@ -449,19 +450,19 @@ void Map::SetOutOfObjectUnusedPropertyFields(int value) {
 
 void Map::CopyUnusedPropertyFields(Map map) {
   set_used_or_unused_instance_size_in_words(
-      map.used_or_unused_instance_size_in_words());
-  DCHECK_EQ(UnusedPropertyFields(), map.UnusedPropertyFields());
+      map->used_or_unused_instance_size_in_words());
+  DCHECK_EQ(UnusedPropertyFields(), map->UnusedPropertyFields());
 }
 
 void Map::CopyUnusedPropertyFieldsAdjustedForInstanceSize(Map map) {
-  int value = map.used_or_unused_instance_size_in_words();
+  int value = map->used_or_unused_instance_size_in_words();
   if (value >= JSPrimitiveWrapper::kFieldsAdded) {
     // Unused in-object fields. Adjust the offset from the object’s start
     // so it matches the distance to the object’s end.
-    value += instance_size_in_words() - map.instance_size_in_words();
+    value += instance_size_in_words() - map->instance_size_in_words();
   }
   set_used_or_unused_instance_size_in_words(value);
-  DCHECK_EQ(UnusedPropertyFields(), map.UnusedPropertyFields());
+  DCHECK_EQ(UnusedPropertyFields(), map->UnusedPropertyFields());
 }
 
 void Map::AccountAddedPropertyField() {
@@ -498,22 +499,22 @@ void Map::AccountAddedOutOfObjectPropertyField(int unused_in_property_array) {
 
 #if V8_ENABLE_WEBASSEMBLY
 uint8_t Map::WasmByte1() const {
-  DCHECK(IsWasmObjectMap());
+  DCHECK(IsWasmObjectMap(*this));
   return inobject_properties_start_or_constructor_function_index();
 }
 
 uint8_t Map::WasmByte2() const {
-  DCHECK(IsWasmObjectMap());
+  DCHECK(IsWasmObjectMap(*this));
   return used_or_unused_instance_size_in_words();
 }
 
 void Map::SetWasmByte1(uint8_t value) {
-  CHECK(IsWasmObjectMap());
+  CHECK(IsWasmObjectMap(*this));
   set_inobject_properties_start_or_constructor_function_index(value);
 }
 
 void Map::SetWasmByte2(uint8_t value) {
-  CHECK(IsWasmObjectMap());
+  CHECK(IsWasmObjectMap(*this));
   set_used_or_unused_instance_size_in_words(value);
 }
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -575,7 +576,7 @@ bool Map::is_abandoned_prototype_map() const {
 bool Map::should_be_fast_prototype_map() const {
   DCHECK(is_prototype_map());
   if (!has_prototype_info()) return false;
-  return PrototypeInfo::cast(prototype_info()).should_be_fast_map();
+  return PrototypeInfo::cast(prototype_info())->should_be_fast_map();
 }
 
 bool Map::has_prototype_info() const {
@@ -696,7 +697,7 @@ bool Map::is_stable() const {
 
 bool Map::CanBeDeprecated() const {
   for (InternalIndex i : IterateOwnDescriptors()) {
-    PropertyDetails details = instance_descriptors(kRelaxedLoad).GetDetails(i);
+    PropertyDetails details = instance_descriptors(kRelaxedLoad)->GetDetails(i);
     if (details.representation().MightCauseMapDeprecation()) return true;
     if (details.kind() == PropertyKind::kData &&
         details.location() == PropertyLocation::kDescriptor) {
@@ -716,27 +717,26 @@ void Map::NotifyLeafMapLayoutChange(Isolate* isolate) {
 
 bool Map::CanTransition() const {
   // Only JSObject and subtypes have map transitions and back pointers.
-  return InstanceTypeChecker::IsJSObject(*this);
+  const InstanceType type = instance_type();
+  // Shared JS objects have fixed shapes and do not transition. Their maps are
+  // either in shared space or RO space.
+  DCHECK_IMPLIES(InstanceTypeChecker::IsAlwaysSharedSpaceJSObject(type),
+                 InAnySharedSpace());
+  return InstanceTypeChecker::IsJSObject(type) &&
+         !InstanceTypeChecker::IsAlwaysSharedSpaceJSObject(type);
 }
 
-#define DEF_TESTER(Type, ...)                    \
-  bool Map::Is##Type##Map() const {              \
-    return InstanceTypeChecker::Is##Type(*this); \
-  }
-INSTANCE_TYPE_CHECKERS(DEF_TESTER)
-#undef DEF_TESTER
-
-bool Map::IsBooleanMap() const {
-  return *this == GetReadOnlyRoots().boolean_map();
+bool IsBooleanMap(Tagged<Map> map) {
+  return map == map->GetReadOnlyRoots().boolean_map();
 }
 
-bool Map::IsNullOrUndefinedMap() const {
-  auto roots = GetReadOnlyRoots();
-  return *this == roots.null_map() || *this == roots.undefined_map();
+bool IsNullOrUndefinedMap(Tagged<Map> map) {
+  auto roots = map->GetReadOnlyRoots();
+  return map == roots.null_map() || map == roots.undefined_map();
 }
 
-bool Map::IsPrimitiveMap() const {
-  return instance_type() <= LAST_PRIMITIVE_HEAP_OBJECT_TYPE;
+bool IsPrimitiveMap(Tagged<Map> map) {
+  return map->instance_type() <= LAST_PRIMITIVE_HEAP_OBJECT_TYPE;
 }
 
 void Map::UpdateDescriptors(Isolate* isolate, DescriptorArray descriptors,
@@ -746,7 +746,7 @@ void Map::UpdateDescriptors(Isolate* isolate, DescriptorArray descriptors,
 
 void Map::InitializeDescriptors(Isolate* isolate, DescriptorArray descriptors) {
   SetInstanceDescriptors(isolate, descriptors,
-                         descriptors.number_of_descriptors());
+                         descriptors->number_of_descriptors());
 }
 
 void Map::clear_padding() {
@@ -759,11 +759,11 @@ void Map::clear_padding() {
 void Map::AppendDescriptor(Isolate* isolate, Descriptor* desc) {
   DescriptorArray descriptors = instance_descriptors(isolate);
   int number_of_own_descriptors = NumberOfOwnDescriptors();
-  DCHECK(descriptors.number_of_descriptors() == number_of_own_descriptors);
+  DCHECK(descriptors->number_of_descriptors() == number_of_own_descriptors);
   {
     // The following two operations need to happen before the marking write
     // barrier.
-    descriptors.Append(desc);
+    descriptors->Append(desc);
     SetNumberOfOwnDescriptors(number_of_own_descriptors + 1);
 #ifndef V8_DISABLE_WRITE_BARRIERS
     WriteBarrier::Marking(descriptors, number_of_own_descriptors + 1);
@@ -789,8 +789,8 @@ void Map::AppendDescriptor(Isolate* isolate, Descriptor* desc) {
 
 bool Map::ConcurrentIsMap(PtrComprCageBase cage_base,
                           const Object& object) const {
-  return object.IsHeapObject() && HeapObject::cast(object).map(cage_base) ==
-                                      GetReadOnlyRoots(cage_base).meta_map();
+  return IsHeapObject(object) && HeapObject::cast(object)->map(cage_base) ==
+                                     GetReadOnlyRoots(cage_base).meta_map();
 }
 
 DEF_GETTER(Map, GetBackPointer, HeapObject) {
@@ -813,9 +813,10 @@ bool Map::TryGetBackPointer(PtrComprCageBase cage_base,
 
 void Map::SetBackPointer(HeapObject value, WriteBarrierMode mode) {
   CHECK_GE(instance_type(), FIRST_JS_RECEIVER_TYPE);
-  CHECK(value.IsMap());
-  CHECK(GetBackPointer().IsUndefined());
-  CHECK_EQ(Map::cast(value).GetConstructorRaw(), constructor_or_back_pointer());
+  CHECK(IsMap(value));
+  CHECK(IsUndefined(GetBackPointer()));
+  CHECK_EQ(Map::cast(value)->GetConstructorRaw(),
+           constructor_or_back_pointer());
   set_constructor_or_back_pointer(value, mode);
 }
 
@@ -836,31 +837,33 @@ RELAXED_ACCESSORS(Map, prototype_validity_cell, Object,
                   kPrototypeValidityCellOffset)
 ACCESSORS_CHECKED2(Map, constructor_or_back_pointer, Object,
                    kConstructorOrBackPointerOrNativeContextOffset,
-                   !IsContextMap(), value.IsNull() || !IsContextMap())
+                   !IsContextMap(*this), IsNull(value) || !IsContextMap(*this))
 RELAXED_ACCESSORS_CHECKED2(Map, constructor_or_back_pointer, Object,
                            kConstructorOrBackPointerOrNativeContextOffset,
-                           !IsContextMap(), value.IsNull() || !IsContextMap())
+                           !IsContextMap(*this),
+                           IsNull(value) || !IsContextMap(*this))
 ACCESSORS_CHECKED(Map, native_context, NativeContext,
                   kConstructorOrBackPointerOrNativeContextOffset,
-                  IsContextMap())
+                  IsContextMap(*this))
 ACCESSORS_CHECKED(Map, native_context_or_null, Object,
                   kConstructorOrBackPointerOrNativeContextOffset,
-                  (value.IsNull() || value.IsNativeContext()) && IsContextMap())
+                  (IsNull(value) || IsNativeContext(value)) &&
+                      IsContextMap(*this))
 #if V8_ENABLE_WEBASSEMBLY
 ACCESSORS_CHECKED(Map, wasm_type_info, WasmTypeInfo,
                   kConstructorOrBackPointerOrNativeContextOffset,
-                  IsWasmStructMap() || IsWasmArrayMap() ||
-                      IsWasmInternalFunctionMap())
+                  IsWasmStructMap(*this) || IsWasmArrayMap(*this) ||
+                      IsWasmInternalFunctionMap(*this))
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 bool Map::IsPrototypeValidityCellValid() const {
   Object validity_cell = prototype_validity_cell(kRelaxedLoad);
-  if (validity_cell.IsSmi()) {
+  if (IsSmi(validity_cell)) {
     // Smi validity cells should always be considered valid.
     DCHECK_EQ(Smi::cast(validity_cell).value(), Map::kPrototypeChainValid);
     return true;
   }
-  Smi cell_value = Smi::cast(Cell::cast(validity_cell).value());
+  Smi cell_value = Smi::cast(Cell::cast(validity_cell)->value());
   return cell_value == Smi::FromInt(Map::kPrototypeChainValid);
 }
 
@@ -869,7 +872,7 @@ DEF_GETTER(Map, GetConstructorRaw, Object) {
   // Follow any back pointers.
   while (ConcurrentIsMap(cage_base, maybe_constructor)) {
     maybe_constructor =
-        Map::cast(maybe_constructor).constructor_or_back_pointer(cage_base);
+        Map::cast(maybe_constructor)->constructor_or_back_pointer(cage_base);
   }
   return maybe_constructor;
 }
@@ -877,21 +880,21 @@ DEF_GETTER(Map, GetConstructorRaw, Object) {
 DEF_GETTER(Map, GetNonInstancePrototype, Object) {
   DCHECK(has_non_instance_prototype());
   Object raw_constructor = GetConstructorRaw(cage_base);
-  CHECK(raw_constructor.IsTuple2());
+  CHECK(IsTuple2(raw_constructor));
   // Get prototype from the {constructor, non-instance_prototype} tuple.
   Tuple2 non_instance_prototype_constructor_tuple =
       Tuple2::cast(raw_constructor);
-  Object result = non_instance_prototype_constructor_tuple.value2();
-  DCHECK(!result.IsJSReceiver());
-  DCHECK(!result.IsFunctionTemplateInfo());
+  Object result = non_instance_prototype_constructor_tuple->value2();
+  DCHECK(!IsJSReceiver(result));
+  DCHECK(!IsFunctionTemplateInfo(result));
   return result;
 }
 
 DEF_GETTER(Map, GetConstructor, Object) {
   Object maybe_constructor = GetConstructorRaw(cage_base);
-  if (maybe_constructor.IsTuple2()) {
+  if (IsTuple2(maybe_constructor)) {
     // Get constructor from the {constructor, non-instance_prototype} tuple.
-    maybe_constructor = Tuple2::cast(maybe_constructor).value1();
+    maybe_constructor = Tuple2::cast(maybe_constructor)->value1();
   }
   return maybe_constructor;
 }
@@ -899,35 +902,35 @@ DEF_GETTER(Map, GetConstructor, Object) {
 Object Map::TryGetConstructor(Isolate* isolate, int max_steps) {
   Object maybe_constructor = constructor_or_back_pointer(isolate);
   // Follow any back pointers.
-  while (maybe_constructor.IsMap(isolate)) {
+  while (IsMap(maybe_constructor, isolate)) {
     if (max_steps-- == 0) return Smi::FromInt(0);
     maybe_constructor =
-        Map::cast(maybe_constructor).constructor_or_back_pointer(isolate);
+        Map::cast(maybe_constructor)->constructor_or_back_pointer(isolate);
   }
-  if (maybe_constructor.IsTuple2()) {
+  if (IsTuple2(maybe_constructor)) {
     // Get constructor from the {constructor, non-instance_prototype} tuple.
-    maybe_constructor = Tuple2::cast(maybe_constructor).value1();
+    maybe_constructor = Tuple2::cast(maybe_constructor)->value1();
   }
   return maybe_constructor;
 }
 
 DEF_GETTER(Map, GetFunctionTemplateInfo, FunctionTemplateInfo) {
   Object constructor = GetConstructor(cage_base);
-  if (constructor.IsJSFunction(cage_base)) {
-    SharedFunctionInfo sfi = JSFunction::cast(constructor).shared(cage_base);
-    DCHECK(sfi.IsApiFunction());
-    return sfi.get_api_func_data();
+  if (IsJSFunction(constructor, cage_base)) {
+    SharedFunctionInfo sfi = JSFunction::cast(constructor)->shared(cage_base);
+    DCHECK(sfi->IsApiFunction());
+    return sfi->api_func_data();
   }
-  DCHECK(constructor.IsFunctionTemplateInfo(cage_base));
+  DCHECK(IsFunctionTemplateInfo(constructor, cage_base));
   return FunctionTemplateInfo::cast(constructor);
 }
 
 void Map::SetConstructor(Object constructor, WriteBarrierMode mode) {
   // Never overwrite a back pointer with a constructor.
-  CHECK(!constructor_or_back_pointer().IsMap());
+  CHECK(!IsMap(constructor_or_back_pointer()));
   // Constructor field must contain {constructor, non-instance_prototype} tuple
   // for maps with non-instance prototype.
-  DCHECK_EQ(has_non_instance_prototype(), constructor.IsTuple2());
+  DCHECK_EQ(has_non_instance_prototype(), IsTuple2(constructor));
   set_constructor_or_back_pointer(constructor, mode);
 }
 
@@ -944,8 +947,8 @@ bool Map::IsInobjectSlackTrackingInProgress() const {
 void Map::InobjectSlackTrackingStep(Isolate* isolate) {
   DisallowGarbageCollection no_gc;
   // Slack tracking should only be performed on an initial map.
-  DCHECK(GetBackPointer().IsUndefined());
-  if (!IsInobjectSlackTrackingInProgress()) return;
+  DCHECK(IsUndefined(GetBackPointer()));
+  if (!this->IsInobjectSlackTrackingInProgress()) return;
   int counter = construction_counter();
   set_construction_counter(counter - 1);
   if (counter == kSlackTrackingCounterEnd) {
@@ -975,9 +978,9 @@ int NormalizedMapCache::GetIndex(Handle<Map> map) {
   return map->Hash() % NormalizedMapCache::kEntries;
 }
 
-DEF_GETTER(HeapObject, IsNormalizedMapCache, bool) {
-  if (!IsWeakFixedArray(cage_base)) return false;
-  if (WeakFixedArray::cast(*this).length() != NormalizedMapCache::kEntries) {
+DEF_HEAP_OBJECT_PREDICATE(HeapObject, IsNormalizedMapCache) {
+  if (!IsWeakFixedArray(obj, cage_base)) return false;
+  if (WeakFixedArray::cast(obj)->length() != NormalizedMapCache::kEntries) {
     return false;
   }
   return true;

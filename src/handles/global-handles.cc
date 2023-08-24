@@ -408,7 +408,7 @@ class NodeBase {
 namespace {
 
 void ExtractInternalFields(JSObject jsobject, void** embedder_fields, int len) {
-  int field_count = jsobject.GetEmbedderFieldCount();
+  int field_count = jsobject->GetEmbedderFieldCount();
   Isolate* isolate = GetIsolateForSandbox(jsobject);
   for (int i = 0; i < len; ++i) {
     if (field_count == i) break;
@@ -541,7 +541,7 @@ class GlobalHandles::Node final : public NodeBase<GlobalHandles::Node> {
     void* embedder_fields[v8::kEmbedderFieldsInWeakCallback] = {nullptr,
                                                                 nullptr};
     if (weakness_type() == WeaknessType::kCallbackWithTwoEmbedderFields &&
-        object().IsJSObject()) {
+        IsJSObject(object())) {
       ExtractInternalFields(JSObject::cast(object()), embedder_fields,
                             v8::kEmbedderFieldsInWeakCallback);
     }
@@ -639,7 +639,7 @@ Handle<Object> GlobalHandles::CopyGlobal(Address* location) {
       Node::FromLocation(location)->global_handles();
 #ifdef VERIFY_HEAP
   if (v8_flags.verify_heap) {
-    Object(*location).ObjectVerify(global_handles->isolate());
+    Object::ObjectVerify(Object(*location), global_handles->isolate());
   }
 #endif  // VERIFY_HEAP
   return global_handles->Create(*location);
@@ -742,7 +742,7 @@ void GlobalHandles::ProcessWeakYoungObjects(
 }
 
 void GlobalHandles::InvokeSecondPassPhantomCallbacks() {
-  DCHECK(AllowJavascriptExecution::IsAllowed(isolate()));
+  AllowJavascriptExecution js(isolate());
   DCHECK(AllowGarbageCollection::IsAllowed());
 
   if (second_pass_callbacks_.empty()) return;

@@ -152,12 +152,12 @@ TEST_P(MacroAssemblerTestMoveObjectAndSlot, MoveObjectAndSlot) {
     __ Ret();
 
     CodeDesc desc;
-    masm.GetCode(nullptr, &desc);
+    masm.GetCode(static_cast<LocalIsolate*>(nullptr), &desc);
     if (v8_flags.print_code) {
       Handle<Code> code =
           Factory::CodeBuilder(isolate(), desc, CodeKind::FOR_TESTING).Build();
       StdoutStream os;
-      code->Print(os);
+      Print(*code, os);
     }
 
     buffer->MakeExecutable();

@@ -8,6 +8,7 @@
 #include "src/codegen/callable.h"
 #include "src/snapshot/embedded/embedded-data-inl.h"
 #include "src/snapshot/snapshot-utils.h"
+#include "src/snapshot/sort-builtins.h"
 
 namespace v8 {
 namespace internal {
@@ -199,7 +200,7 @@ void FinalizeEmbeddedCodeTargets(Isolate* isolate, EmbeddedData* blob) {
 
       // Do not emit write-barrier for off-heap writes.
       off_heap_it.rinfo()->set_off_heap_target_address(
-          blob->InstructionStartOf(target_code.builtin_id()));
+          blob->InstructionStartOf(target_code->builtin_id()));
 
       on_heap_it.next();
       off_heap_it.next();
@@ -216,7 +217,7 @@ void FinalizeEmbeddedCodeTargets(Isolate* isolate, EmbeddedData* blob) {
 }
 
 void EnsureRelocatable(Code code) {
-  if (code.relocation_size() == 0) return;
+  if (code->relocation_size() == 0) return;
 
   // On some architectures (arm) the builtin might have a non-empty reloc
   // info containing a CONST_POOL entry. These entries don't have to be
@@ -242,24 +243,45 @@ EmbeddedData EmbeddedData::NewFromIsolate(Isolate* isolate) {
   uint32_t raw_code_size = 0;
   uint32_t raw_data_size = 0;
   static_assert(Builtins::kAllBuiltinsAreIsolateIndependent);
-  // We will traversal builtins in embedded snapshot order instead of builtin id
-  // order.
+
+  std::vector<Builtin> reordered_builtins;
+  if (v8_flags.reorder_builtins &&
+      BuiltinsCallGraph::Get()->all_hash_matched()) {
+    DCHECK(v8_flags.turbo_profiling_input.value());
+    // TODO(ishell, v8:13938): avoid the binary size overhead for non-mksnapshot
+    // binaries.
+    BuiltinsSorter sorter;
+    std::vector<uint32_t> builtin_sizes;
+    for (Builtin i = Builtins::kFirst; i <= Builtins::kLast; ++i) {
+      Code code = builtins->code(i);
+      uint32_t instruction_size =
+          static_cast<uint32_t>(code->instruction_size());
+      uint32_t padding_size = PadAndAlignCode(instruction_size);
+      builtin_sizes.push_back(padding_size);
+    }
+    reordered_builtins = sorter.SortBuiltins(
+        v8_flags.turbo_profiling_input.value(), builtin_sizes);
+    CHECK_EQ(reordered_builtins.size(), Builtins::kBuiltinCount);
+  }
+
   for (ReorderedBuiltinIndex embedded_index = 0;
        embedded_index < Builtins::kBuiltinCount; embedded_index++) {
-    // TODO(v8:13938): Update the static_cast later when we introduce reordering
-    // builtins. At current stage builtin id equals to i in the loop, if we
-    // introduce reordering builtin, we may have to map them in another method.
-    Builtin builtin = static_cast<Builtin>(embedded_index);
+    Builtin builtin;
+    if (reordered_builtins.empty()) {
+      builtin = static_cast<Builtin>(embedded_index);
+    } else {
+      builtin = reordered_builtins[embedded_index];
+    }
     Code code = builtins->code(builtin);
 
     // Sanity-check that the given builtin is isolate-independent.
-    if (!code.IsIsolateIndependent(isolate)) {
+    if (!code->IsIsolateIndependent(isolate)) {
       saw_unsafe_builtin = true;
       fprintf(stderr, "%s is not isolate-independent.\n",
               Builtins::name(builtin));
     }
 
-    uint32_t instruction_size = static_cast<uint32_t>(code.instruction_size());
+    uint32_t instruction_size = static_cast<uint32_t>(code->instruction_size());
     DCHECK_EQ(0, raw_code_size % kCodeAlignment);
     {
       // We use builtin id as index in layout_descriptions.
@@ -271,7 +293,7 @@ EmbeddedData EmbeddedData::NewFromIsolate(Isolate* isolate) {
     }
     // Align the start of each section.
     raw_code_size += PadAndAlignCode(instruction_size);
-    raw_data_size += PadAndAlignData(code.metadata_size());
+    raw_data_size += PadAndAlignData(code->metadata_size());
 
     {
       // We use embedded index as index in offset_descriptions.
@@ -330,10 +352,10 @@ EmbeddedData EmbeddedData::NewFromIsolate(Isolate* isolate) {
     uint32_t offset =
         layout_descriptions[static_cast<int>(builtin)].metadata_offset;
     uint8_t* dst = raw_metadata_start + offset;
-    DCHECK_LE(RawMetadataOffset() + offset + code.metadata_size(),
+    DCHECK_LE(RawMetadataOffset() + offset + code->metadata_size(),
               blob_data_size);
-    std::memcpy(dst, reinterpret_cast<uint8_t*>(code.metadata_start()),
-                code.metadata_size());
+    std::memcpy(dst, reinterpret_cast<uint8_t*>(code->metadata_start()),
+                code->metadata_size());
   }
   CHECK_IMPLIES(
       kMaxPCRelativeCodeRangeInMB,
@@ -348,10 +370,10 @@ EmbeddedData EmbeddedData::NewFromIsolate(Isolate* isolate) {
     uint32_t offset =
         layout_descriptions[static_cast<int>(builtin)].instruction_offset;
     uint8_t* dst = raw_code_start + offset;
-    DCHECK_LE(RawCodeOffset() + offset + code.instruction_size(),
+    DCHECK_LE(RawCodeOffset() + offset + code->instruction_size(),
               blob_code_size);
-    std::memcpy(dst, reinterpret_cast<uint8_t*>(code.instruction_start()),
-                code.instruction_size());
+    std::memcpy(dst, reinterpret_cast<uint8_t*>(code->instruction_start()),
+                code->instruction_size());
   }
 
   EmbeddedData d(blob_code, blob_code_size, blob_data, blob_data_size);
@@ -381,7 +403,7 @@ EmbeddedData EmbeddedData::NewFromIsolate(Isolate* isolate) {
     for (Builtin builtin = Builtins::kFirst; builtin <= Builtins::kLast;
          ++builtin) {
       Code code = builtins->code(builtin);
-      CHECK_EQ(d.InstructionSizeOf(builtin), code.instruction_size());
+      CHECK_EQ(d.InstructionSizeOf(builtin), code->instruction_size());
     }
   }
 
@@ -412,6 +434,12 @@ size_t EmbeddedData::CreateEmbeddedBlobCodeHash() const {
   CHECK(v8_flags.text_is_readable);
   base::Vector<const uint8_t> payload(code_, code_size_);
   return Checksum(payload);
+}
+
+Builtin EmbeddedData::GetBuiltinId(ReorderedBuiltinIndex embedded_index) const {
+  Builtin builtin =
+      Builtins::FromInt(BuiltinLookupEntry(embedded_index)->builtin_id);
+  return builtin;
 }
 
 void EmbeddedData::PrintStatistics() const {

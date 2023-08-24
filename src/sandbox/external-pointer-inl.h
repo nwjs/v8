@@ -28,6 +28,13 @@ ExternalPointerTable& GetExternalPointerTable(Isolate* isolate) {
              ? isolate->shared_external_pointer_table()
              : isolate->external_pointer_table();
 }
+
+template <ExternalPointerTag tag>
+ExternalPointerTable::Space* GetDefaultExternalPointerSpace(Isolate* isolate) {
+  return IsSharedExternalPointerType(tag)
+             ? isolate->shared_external_pointer_space()
+             : isolate->heap()->external_pointer_space();
+}
 #endif  // V8_ENABLE_SANDBOX
 
 template <ExternalPointerTag tag>
@@ -36,7 +43,8 @@ V8_INLINE void InitExternalPointerField(Address field_address, Isolate* isolate,
 #ifdef V8_ENABLE_SANDBOX
   static_assert(tag != kExternalPointerNullTag);
   ExternalPointerTable& table = GetExternalPointerTable<tag>(isolate);
-  ExternalPointerHandle handle = table.AllocateAndInitializeEntry(value, tag);
+  ExternalPointerHandle handle = table.AllocateAndInitializeEntry(
+      GetDefaultExternalPointerSpace<tag>(isolate), value, tag);
   // Use a Release_Store to ensure that the store of the pointer into the
   // table is not reordered after the store of the handle. Otherwise, other
   // threads may access an uninitialized table entry and crash.
@@ -91,7 +99,8 @@ V8_INLINE void WriteLazilyInitializedExternalPointerField(Address field_address,
   ExternalPointerHandle handle = base::AsAtomic32::Relaxed_Load(location);
   if (handle == kNullExternalPointerHandle) {
     // Field has not been initialized yet.
-    ExternalPointerHandle handle = table.AllocateAndInitializeEntry(value, tag);
+    ExternalPointerHandle handle = table.AllocateAndInitializeEntry(
+        GetDefaultExternalPointerSpace<tag>(isolate), value, tag);
     base::AsAtomic32::Release_Store(location, handle);
   } else {
     table.Set(handle, value, tag);
@@ -99,6 +108,16 @@ V8_INLINE void WriteLazilyInitializedExternalPointerField(Address field_address,
 #else
   WriteMaybeUnalignedValue<Address>(field_address, value);
 #endif  // V8_ENABLE_SANDBOX
+}
+
+V8_INLINE void ResetLazilyInitializedExternalPointerField(
+    Address field_address) {
+#ifdef V8_ENABLE_SANDBOX
+  auto location = reinterpret_cast<ExternalPointerHandle*>(field_address);
+  base::AsAtomic32::Release_Store(location, kNullExternalPointerHandle);
+#else
+  WriteMaybeUnalignedValue<Address>(field_address, kNullAddress);
+#endif
 }
 
 }  // namespace internal

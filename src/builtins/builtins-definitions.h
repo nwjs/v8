@@ -54,6 +54,10 @@ namespace internal {
   TFC(AdaptorWithBuiltinExitFrame, CppBuiltinAdaptor)
 
 #define BUILTIN_LIST_BASE_TIER1(CPP, TFJ, TFC, TFS, TFH, ASM)                  \
+  /* GC write barriers */                                                      \
+  TFC(IndirectPointerBarrierSaveFP, WriteBarrier)                              \
+  TFC(IndirectPointerBarrierIgnoreFP, WriteBarrier)                            \
+                                                                               \
   /* TSAN support for stores in generated code. */                             \
   IF_TSAN(TFC, TSANRelaxedStore8IgnoreFP, TSANStore)                           \
   IF_TSAN(TFC, TSANRelaxedStore8SaveFP, TSANStore)                             \
@@ -117,6 +121,7 @@ namespace internal {
   ASM(CallFunctionForwardVarargs, CallForwardVarargs)                          \
   /* Call an API callback via a {FunctionTemplateInfo}, doing appropriate */   \
   /* access and compatible receiver checks. */                                 \
+  TFC(CallFunctionTemplate_Generic, CallFunctionTemplate)                      \
   TFC(CallFunctionTemplate_CheckAccess, CallFunctionTemplate)                  \
   TFC(CallFunctionTemplate_CheckCompatibleReceiver, CallFunctionTemplate)      \
   TFC(CallFunctionTemplate_CheckAccessAndCompatibleReceiver,                   \
@@ -180,6 +185,8 @@ namespace internal {
   ASM(InterpreterPushUndefinedAndArgsThenCall, InterpreterPushArgsThenCall)    \
   ASM(InterpreterPushArgsThenCallWithFinalSpread, InterpreterPushArgsThenCall) \
   ASM(InterpreterPushArgsThenConstruct, InterpreterPushArgsThenConstruct)      \
+  ASM(InterpreterPushArgsThenFastConstructFunction,                            \
+      InterpreterPushArgsThenConstruct)                                        \
   ASM(InterpreterPushArgsThenConstructArrayFunction,                           \
       InterpreterPushArgsThenConstruct)                                        \
   ASM(InterpreterPushArgsThenConstructWithFinalSpread,                         \
@@ -199,6 +206,10 @@ namespace internal {
                                                                                \
   /* Maglev Compiler */                                                        \
   ASM(MaglevOnStackReplacement, OnStackReplacement)                            \
+  ASM(MaglevFunctionEntryStackCheck_WithoutNewTarget, Void)                    \
+  ASM(MaglevFunctionEntryStackCheck_WithNewTarget, Void)                       \
+  ASM(MaglevOptimizeCodeOrTailCallOptimizedCodeSlot,                           \
+      MaglevOptimizeCodeOrTailCallOptimizedCodeSlot)                           \
                                                                                \
   /* Code life-cycle */                                                        \
   TFC(CompileLazy, JSTrampoline)                                               \
@@ -233,8 +244,8 @@ namespace internal {
                                                                                \
   /* API callback handling */                                                  \
   ASM(CallApiCallbackGeneric, CallApiCallbackGeneric)                          \
-  ASM(CallApiCallbackNoSideEffects, CallApiCallbackOptimized)                  \
-  ASM(CallApiCallbackWithSideEffects, CallApiCallbackOptimized)                \
+  ASM(CallApiCallbackOptimizedNoProfiling, CallApiCallbackOptimized)           \
+  ASM(CallApiCallbackOptimized, CallApiCallbackOptimized)                      \
   ASM(CallApiGetter, ApiGetter)                                                \
   TFC(HandleApiCallOrConstruct, JSTrampoline)                                  \
   CPP(HandleApiConstruct)                                                      \
@@ -398,9 +409,6 @@ namespace internal {
   /* ES6 #sec-array.prototype.pop */                                           \
   CPP(ArrayPop)                                                                \
   TFJ(ArrayPrototypePop, kDontAdaptArgumentsSentinel)                          \
-  /* ES6 #sec-array.prototype.group */                                         \
-  CPP(ArrayPrototypeGroup)                                                     \
-  CPP(ArrayPrototypeGroupToMap)                                                \
   /* ES6 #sec-array.prototype.push */                                          \
   CPP(ArrayPush)                                                               \
   TFJ(ArrayPrototypePush, kDontAdaptArgumentsSentinel)                         \
@@ -930,8 +938,8 @@ namespace internal {
       kIndexOrFieldName, kValue)                                               \
   TFJ(AtomicsExchange, kJSArgcReceiverSlots + 3, kReceiver,                    \
       kArrayOrSharedObject, kIndexOrFieldName, kValue)                         \
-  TFJ(AtomicsCompareExchange, kJSArgcReceiverSlots + 4, kReceiver, kArray,     \
-      kIndex, kOldValue, kNewValue)                                            \
+  TFJ(AtomicsCompareExchange, kJSArgcReceiverSlots + 4, kReceiver,             \
+      kArrayOrSharedObject, kIndexOrFieldName, kOldValue, kNewValue)           \
   TFJ(AtomicsAdd, kJSArgcReceiverSlots + 3, kReceiver, kArray, kIndex, kValue) \
   TFJ(AtomicsSub, kJSArgcReceiverSlots + 3, kReceiver, kArray, kIndex, kValue) \
   TFJ(AtomicsAnd, kJSArgcReceiverSlots + 3, kReceiver, kArray, kIndex, kValue) \
@@ -1000,6 +1008,8 @@ namespace internal {
   /* Wasm */                                                                   \
   IF_WASM(ASM, GenericJSToWasmWrapper, WasmDummy)                              \
   IF_WASM(ASM, NewGenericJSToWasmWrapper, WasmNewJSToWasmWrapper)              \
+  IF_WASM(ASM, WasmToJsWrapperAsm, WasmDummy)                                  \
+  IF_WASM(TFC, WasmToJsWrapperCSA, WasmToJSWrapper)                            \
   IF_WASM(ASM, WasmReturnPromiseOnSuspend, WasmDummy)                          \
   IF_WASM(ASM, WasmSuspend, WasmSuspend)                                       \
   IF_WASM(ASM, WasmResume, WasmDummy)                                          \
@@ -1108,6 +1118,7 @@ namespace internal {
   ASM(CEntry_Return2_ArgvInRegister_NoBuiltinExit, CEntryDummy)                \
   ASM(CEntry_Return2_ArgvOnStack_BuiltinExit, CEntryDummy)                     \
   ASM(CEntry_Return2_ArgvOnStack_NoBuiltinExit, CEntryDummy)                   \
+  ASM(WasmCEntry, CEntryDummy)                                                 \
   ASM(DirectCEntry, CEntryDummy)                                               \
                                                                                \
   /* String helpers */                                                         \

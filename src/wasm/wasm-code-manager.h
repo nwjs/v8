@@ -124,7 +124,6 @@ enum class WellKnownImport : uint8_t;
   V(WasmArrayNewSegment)                 \
   V(WasmArrayInitSegment)                \
   V(WasmAllocateStructWithRtt)           \
-  V(WasmSubtypeCheck)                    \
   V(WasmOnStackReplace)                  \
   V(WasmSuspend)                         \
   V(WasmStringNewWtf8)                   \
@@ -139,6 +138,7 @@ enum class WellKnownImport : uint8_t;
   V(WasmStringIsUSVSequence)             \
   V(WasmStringAsWtf16)                   \
   V(WasmStringViewWtf16GetCodeUnit)      \
+  V(WasmStringCodePointAt)               \
   V(WasmStringViewWtf16Encode)           \
   V(WasmStringViewWtf16Slice)            \
   V(WasmStringNewWtf8Array)              \
@@ -605,7 +605,7 @@ class WasmCodeAllocator {
 class V8_EXPORT_PRIVATE NativeModule final {
  public:
 #if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_S390X || V8_TARGET_ARCH_ARM64 || \
-    V8_TARGET_ARCH_PPC64 || V8_TARGET_ARCH_LOONG64
+    V8_TARGET_ARCH_PPC64 || V8_TARGET_ARCH_LOONG64 || V8_TARGET_ARCH_RISCV64
   static constexpr bool kNeedsFarJumpsBetweenCodeSpaces = true;
 #else
   static constexpr bool kNeedsFarJumpsBetweenCodeSpaces = false;
@@ -858,6 +858,8 @@ class V8_EXPORT_PRIVATE NativeModule final {
   uint32_t* tiering_budget_array() const { return tiering_budgets_.get(); }
 
   Counters* counters() const { return code_allocator_.counters(); }
+
+  size_t EstimateCurrentMemoryConsumption() const;
 
  private:
   friend class WasmCode;

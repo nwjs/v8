@@ -26,7 +26,7 @@ EmbedderDataSlot::EmbedderDataSlot(EmbedderDataArray array, int entry_index)
 
 EmbedderDataSlot::EmbedderDataSlot(JSObject object, int embedder_field_index)
     : SlotBase(FIELD_ADDR(
-          object, object.GetEmbedderFieldOffset(embedder_field_index))) {}
+          object, object->GetEmbedderFieldOffset(embedder_field_index))) {}
 
 EmbedderDataSlot::EmbedderDataSlot(const EmbedderDataSlotSnapshot& snapshot)
     : SlotBase(reinterpret_cast<Address>(&snapshot)) {}
@@ -34,7 +34,7 @@ EmbedderDataSlot::EmbedderDataSlot(const EmbedderDataSlotSnapshot& snapshot)
 void EmbedderDataSlot::Initialize(Object initial_value) {
   // TODO(v8) initialize the slot with Smi::zero() instead. This'll also
   // guarantee that we don't need a write barrier.
-  DCHECK(initial_value.IsSmi() ||
+  DCHECK(IsSmi(initial_value) ||
          ReadOnlyHeap::Contains(HeapObject::cast(initial_value)));
   ObjectSlot(address() + kTaggedPayloadOffset).Relaxed_Store(initial_value);
 #ifdef V8_COMPRESS_POINTERS
@@ -58,7 +58,7 @@ void EmbedderDataSlot::store_smi(Smi value) {
 void EmbedderDataSlot::store_tagged(EmbedderDataArray array, int entry_index,
                                     Object value) {
 #ifdef V8_COMPRESS_POINTERS
-  CHECK(value.IsSmi() ||
+  CHECK(IsSmi(value) ||
         V8HeapCompressionScheme::GetPtrComprCageBaseAddress(value.ptr()) ==
             V8HeapCompressionScheme::GetPtrComprCageBaseAddress(array.ptr()));
 #endif
@@ -77,11 +77,11 @@ void EmbedderDataSlot::store_tagged(EmbedderDataArray array, int entry_index,
 void EmbedderDataSlot::store_tagged(JSObject object, int embedder_field_index,
                                     Object value) {
 #ifdef V8_COMPRESS_POINTERS
-  CHECK(value.IsSmi() ||
+  CHECK(IsSmi(value) ||
         V8HeapCompressionScheme::GetPtrComprCageBaseAddress(value.ptr()) ==
             V8HeapCompressionScheme::GetPtrComprCageBaseAddress(object.ptr()));
 #endif
-  int slot_offset = object.GetEmbedderFieldOffset(embedder_field_index);
+  int slot_offset = object->GetEmbedderFieldOffset(embedder_field_index);
   ObjectSlot(FIELD_ADDR(object, slot_offset + kTaggedPayloadOffset))
       .Relaxed_Store(value);
   WRITE_BARRIER(object, slot_offset + kTaggedPayloadOffset, value);
@@ -199,7 +199,7 @@ void EmbedderDataSlot::PopulateEmbedderDataSnapshot(
   static_assert(sizeof(EmbedderDataSlotSnapshot) == kEmbedderDataSlotSize);
 
   const Address field_base =
-      FIELD_ADDR(js_object, js_object.GetEmbedderFieldOffset(entry_index));
+      FIELD_ADDR(js_object, js_object->GetEmbedderFieldOffset(entry_index));
 
 #if defined(V8_TARGET_BIG_ENDIAN) && defined(V8_COMPRESS_POINTERS)
   const int index = 1;

@@ -22,6 +22,11 @@
 #include "src/handles/handles-inl.h"
 #include "src/handles/maybe-handles-inl.h"
 
+#ifdef DEBUG
+// For InWritableSharedSpace
+#include "src/objects/objects-inl.h"
+#endif
+
 namespace v8::internal {
 std::ostream& operator<<(std::ostream& os, AbortReason reason) {
   return os << GetAbortReason(reason);
@@ -32,52 +37,7 @@ namespace v8::internal::compiler::turboshaft {
 
 void Print(const Operation& op) { std::cout << op << "\n"; }
 
-bool AllowImplicitRepresentationChange(RegisterRepresentation actual_rep,
-                                       RegisterRepresentation expected_rep) {
-  if (actual_rep == expected_rep) {
-    return true;
-  }
-  switch (expected_rep.value()) {
-    case RegisterRepresentation::Word32():
-      // We allow implicit 64- to 32-bit truncation.
-      if (actual_rep == RegisterRepresentation::Word64()) {
-        return true;
-      }
-      // We allow implicit tagged -> untagged conversions.
-      // Even without pointer compression, we use `Word32And` for Smi-checks on
-      // tagged values.
-      if (actual_rep == any_of(RegisterRepresentation::Tagged(),
-                               RegisterRepresentation::Compressed())) {
-        return true;
-      }
-      break;
-    case RegisterRepresentation::Word64():
-      // We allow implicit tagged -> untagged conversions.
-      if (kTaggedSize == kInt64Size &&
-          actual_rep == RegisterRepresentation::Tagged()) {
-        return true;
-      }
-      break;
-    case RegisterRepresentation::Tagged():
-      // We allow implicit untagged -> tagged conversions. This is only safe for
-      // Smi values.
-      if (actual_rep == RegisterRepresentation::PointerSized()) {
-        return true;
-      }
-      break;
-    case RegisterRepresentation::Compressed():
-      // Compression is a no-op.
-      if (actual_rep == any_of(RegisterRepresentation::Tagged(),
-                               RegisterRepresentation::PointerSized(),
-                               RegisterRepresentation::Word32())) {
-        return true;
-      }
-      break;
-    default:
-      break;
-  }
-  return false;
-}
+Zone* get_zone(Graph* graph) { return graph->graph_zone(); }
 
 bool ValidOpInputRep(
     const Graph& graph, OpIndex input,
@@ -93,7 +53,7 @@ bool ValidOpInputRep(
       std::cerr << "Turboshaft operation has input #" << input
                 << " with wrong arity.\n";
       std::cerr << "Input has results " << PrintCollection(input_reps)
-                << ", but expected at least " << *projection_index
+                << ", but expected at least " << (*projection_index + 1)
                 << " results.\n";
       return false;
     }
@@ -107,7 +67,7 @@ bool ValidOpInputRep(
     return false;
   }
   for (RegisterRepresentation expected_rep : expected_reps) {
-    if (AllowImplicitRepresentationChange(input_rep, expected_rep)) {
+    if (input_rep.AllowImplicitRepresentationChangeTo(expected_rep)) {
       return true;
     }
   }
@@ -320,6 +280,8 @@ std::ostream& operator<<(std::ostream& os, ChangeOp::Kind kind) {
       return os << "ZeroExtend";
     case ChangeOp::Kind::kSignExtend:
       return os << "SignExtend";
+    case ChangeOp::Kind::kTruncate:
+      return os << "Truncate";
     case ChangeOp::Kind::kBitcast:
       return os << "Bitcast";
   }
@@ -405,10 +367,6 @@ void Operation::PrintOptions(std::ostream& os) const {
     TURBOSHAFT_OPERATION_LIST(SWITCH_CASE)
 #undef SWITCH_CASE
   }
-}
-
-void PendingLoopPhiOp::PrintOptions(std::ostream& os) const {
-  os << "[" << rep << ", #o" << data.old_backedge_index.id() << "]";
 }
 
 void ConstantOp::PrintOptions(std::ostream& os) const {
@@ -623,6 +581,32 @@ void FrameStateOp::Validate(const Graph& graph) const {
   }
 }
 
+void DidntThrowOp::Validate(const Graph& graph) const {
+#ifdef DEBUG
+  DCHECK(MayThrow(graph.Get(throwing_operation()).opcode));
+  switch (graph.Get(throwing_operation()).opcode) {
+    case Opcode::kCall: {
+      auto& call_op = graph.Get(throwing_operation()).Cast<CallOp>();
+      DCHECK(call_op.descriptor->out_reps == outputs_rep());
+      break;
+    }
+    default:
+      UNREACHABLE();
+  }
+  // Check that `may_throw()` is either immediately before or that there is only
+  // a `CheckExceptionOp` in-between.
+  OpIndex this_index = graph.Index(*this);
+  OpIndex in_between = graph.NextIndex(throwing_operation());
+  if (has_catch_block) {
+    DCHECK_NE(in_between, this_index);
+    auto& catch_op = graph.Get(in_between).Cast<CheckExceptionOp>();
+    DCHECK_EQ(catch_op.didnt_throw_block->begin(), this_index);
+  } else {
+    DCHECK_EQ(in_between, this_index);
+  }
+#endif
+}
+
 void WordBinopOp::PrintOptions(std::ostream& os) const {
   os << "[";
   switch (kind) {
@@ -699,6 +683,31 @@ void FloatBinopOp::PrintOptions(std::ostream& os) const {
       break;
   }
   os << rep;
+  os << "]";
+}
+
+void Word32PairBinopOp::PrintOptions(std::ostream& os) const {
+  os << "[";
+  switch (kind) {
+    case Kind::kAdd:
+      os << "Add";
+      break;
+    case Kind::kSub:
+      os << "Sub";
+      break;
+    case Kind::kMul:
+      os << "Mul";
+      break;
+    case Kind::kShiftLeft:
+      os << "ShiftLeft";
+      break;
+    case Kind::kShiftRightArithmetic:
+      os << "ShiftRightSigned";
+      break;
+    case Kind::kShiftRightLogical:
+      os << "ShiftRightUnsigned";
+      break;
+  }
   os << "]";
 }
 
@@ -1152,6 +1161,67 @@ std::ostream& operator<<(std::ostream& os, FindOrderedHashEntryOp::Kind kind) {
   }
 }
 
+#if V8_ENABLE_WEBASSEMBLY
+
+const RegisterRepresentation& RepresentationFor(wasm::ValueType type) {
+  static const RegisterRepresentation kWord32 =
+      RegisterRepresentation::Word32();
+  static const RegisterRepresentation kWord64 =
+      RegisterRepresentation::Word64();
+  static const RegisterRepresentation kFloat32 =
+      RegisterRepresentation::Float32();
+  static const RegisterRepresentation kFloat64 =
+      RegisterRepresentation::Float64();
+  static const RegisterRepresentation kTagged =
+      RegisterRepresentation::Tagged();
+  static const RegisterRepresentation kSimd128 =
+      RegisterRepresentation::Simd128();
+
+  switch (type.kind()) {
+    case wasm::kI8:
+    case wasm::kI16:
+    case wasm::kI32:
+      return kWord32;
+    case wasm::kI64:
+      return kWord64;
+    case wasm::kF32:
+      return kFloat32;
+    case wasm::kF64:
+      return kFloat64;
+    case wasm::kRefNull:
+    case wasm::kRef:
+      return kTagged;
+    case wasm::kS128:
+      return kSimd128;
+    case wasm::kVoid:
+    case wasm::kRtt:
+    case wasm::kBottom:
+      UNREACHABLE();
+  }
+}
+
+std::ostream& operator<<(std::ostream& os, Simd128BinopOp::Kind kind) {
+  switch (kind) {
+#define PRINT_KIND(kind)              \
+  case Simd128BinopOp::Kind::k##kind: \
+    return os << #kind;
+    FOREACH_SIMD_128_BINARY_OPCODE(PRINT_KIND)
+  }
+#undef PRINT_KIND
+}
+
+std::ostream& operator<<(std::ostream& os, Simd128UnaryOp::Kind kind) {
+  switch (kind) {
+#define PRINT_KIND(kind)              \
+  case Simd128UnaryOp::Kind::k##kind: \
+    return os << #kind;
+    FOREACH_SIMD_128_UNARY_OPCODE(PRINT_KIND)
+  }
+#undef PRINT_KIND
+}
+
+#endif  // V8_ENABLE_WEBASSEBMLY
+
 std::string Operation::ToString() const {
   std::stringstream ss;
   ss << *this;
@@ -1175,5 +1245,48 @@ void SupportedOperations::Initialize() {
   SUPPORTED_OPERATIONS_LIST(SET_SUPPORTED)
 #undef SET_SUPPORTED
 }
+
+base::SmallVector<Block*, 4> SuccessorBlocks(const Block& block,
+                                             const Graph& graph) {
+  return SuccessorBlocks(block.LastOperation(graph));
+}
+
+// static
+bool SupportedOperations::IsUnalignedLoadSupported(MemoryRepresentation repr) {
+  return InstructionSelector::AlignmentRequirements().IsUnalignedLoadSupported(
+      repr.ToMachineType().representation());
+}
+
+// static
+bool SupportedOperations::IsUnalignedStoreSupported(MemoryRepresentation repr) {
+  return InstructionSelector::AlignmentRequirements().IsUnalignedStoreSupported(
+      repr.ToMachineType().representation());
+}
+
+void CheckExceptionOp::Validate(const Graph& graph) const {
+  DCHECK_NE(didnt_throw_block, catch_block);
+  // `CheckException` should follow right after the throwing operation.
+  DCHECK_EQ(throwing_operation(), graph.PreviousIndex(graph.Index(*this)));
+}
+
+namespace {
+// Ensures basic consistency of representation mapping.
+class InputsRepFactoryCheck : InputsRepFactory {
+  static_assert(*ToMaybeRepPointer(RegisterRepresentation::Word32()) ==
+                MaybeRegisterRepresentation::Word32());
+  static_assert(*ToMaybeRepPointer(RegisterRepresentation::Word64()) ==
+                MaybeRegisterRepresentation::Word64());
+  static_assert(*ToMaybeRepPointer(RegisterRepresentation::Float32()) ==
+                MaybeRegisterRepresentation::Float32());
+  static_assert(*ToMaybeRepPointer(RegisterRepresentation::Float64()) ==
+                MaybeRegisterRepresentation::Float64());
+  static_assert(*ToMaybeRepPointer(RegisterRepresentation::Tagged()) ==
+                MaybeRegisterRepresentation::Tagged());
+  static_assert(*ToMaybeRepPointer(RegisterRepresentation::Compressed()) ==
+                MaybeRegisterRepresentation::Compressed());
+  static_assert(*ToMaybeRepPointer(RegisterRepresentation::Simd128()) ==
+                MaybeRegisterRepresentation::Simd128());
+};
+}  // namespace
 
 }  // namespace v8::internal::compiler::turboshaft

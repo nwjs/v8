@@ -15,15 +15,7 @@ namespace wasm {
 extern builtin NewGenericJSToWasmWrapper(
     RawPtr<intptr>, WasmInstanceObject, JSAny): JSAny;
 
-extern enum ExternalPointerTag extends uint64 {
-  kWasmExportedFunctionDataSignatureTag,
-  ...
-}
-
 extern macro UniqueIntPtrConstant(constexpr intptr): intptr;
-
-extern macro LoadExternalPointerFromObject(
-    HeapObject, constexpr int32, constexpr ExternalPointerTag): RawPtr;
 
 const kWasmExportedFunctionDataSignatureOffset:
     constexpr int32 generates 'WasmExportedFunctionData::kSigOffset';
@@ -136,7 +128,7 @@ macro RefCast<To: type>(i: &intptr):
   return torque_internal::unsafe::NewReference<To>(i.object, i.offset);
 }
 
-macro TrucateBigIntToI64(context: Context, input: JSAny): intptr {
+macro TruncateBigIntToI64(context: Context, input: JSAny): intptr {
   // This is only safe to use on 64-bit platforms.
   dcheck(Is64());
   const bigint = ToBigInt(context, input);
@@ -346,8 +338,7 @@ struct LocationAllocator {
   smallSlotLast: bool;
 }
 
-macro LocationAllocatorForParams(paramBuffer: MutableSlice<intptr>):
-    LocationAllocator {
+macro LocationAllocatorForParams(paramBuffer: &intptr): LocationAllocator {
   let slotsPerFloat: intptr;
   if constexpr (Is64()) {
     slotsPerFloat = 1;
@@ -400,11 +391,8 @@ JSToWasmWrapper(
   if (functionData.wrapper_budget == 0) {
     runtime::WasmCompileWrapper(kNoContext, functionData);
   }
-  // TODO(ahaas): Define an `extern operator` for the signature the same as it
-  // exists for `call_target_ptr`.
-  const sig = LoadExternalPointerFromObject(
-      functionData, kWasmExportedFunctionDataSignatureOffset,
-      ExternalPointerTag::kWasmExportedFunctionDataSignatureTag);
+
+  const sig = functionData.sig_ptr;
 
   const paramCount = *GetRefAt<int32>(sig, kWasmParameterCountOffset);
 
@@ -463,7 +451,7 @@ JSToWasmWrapper(
       sigTypes, Convert<intptr>(returnCount), Convert<intptr>(paramCount))
       otherwise unreachable;
 
-  let paramBuffer: MutableSlice<intptr>;
+  let paramBuffer: &intptr;
 
   // 10 here is an arbitrary number. The analysis of signatures of exported
   // functions of big modules showed that most signatures have a low number of
@@ -480,11 +468,7 @@ JSToWasmWrapper(
     // by register, so all 8 FP register slots would remain empty.
     const stackSlots = %RawDownCast<RawPtr<intptr>>(
         StackSlotPtr(144, torque_internal::SizeOf<float64>()));
-    // The size of the slice is set to 36, which is correct on 32-bit platforms.
-    // It does not matter though, because the size field never gets read
-    // afterwards.
-    paramBuffer =
-        torque_internal::unsafe::NewOffHeapMutableSlice(stackSlots, 36);
+    paramBuffer = torque_internal::unsafe::NewOffHeapReference(stackSlots);
   } else {
     // We have to estimate the size of the byte array such that it can store
     // all converted parameters. The size is the sum of sizes of the segments
@@ -501,8 +485,8 @@ JSToWasmWrapper(
         UniqueIntPtrConstant(kNumFPRegisterParameters) * kSlotSize +
         Convert<intptr>(paramCount) * kSlotSize;
     const slice = &AllocateByteArray(Convert<uintptr>(bufferSize)).bytes;
-    paramBuffer = torque_internal::unsafe::NewMutableSlice<intptr>(
-        slice.object, slice.offset, slice.length);
+    paramBuffer = torque_internal::unsafe::NewReference<intptr>(
+        slice.object, slice.offset);
   }
 
   let locationAllocator = LocationAllocatorForParams(paramBuffer);
@@ -532,7 +516,7 @@ JSToWasmWrapper(
     } else if (paramType == kWasmI64Type) {
       if constexpr (Is64()) {
         let toRef = locationAllocator.GetGPSlot();
-        const v = TrucateBigIntToI64(context, param);
+        const v = TruncateBigIntToI64(context, param);
         *toRef = v;
       } else {
         let toLowRef = locationAllocator.GetGPSlot();
@@ -600,7 +584,7 @@ JSToWasmWrapper(
       k++;
     }
   }
-  const paramStart = paramBuffer.GCUnsafeStartPointer();
+  const paramStart = paramBuffer.GCUnsafeRawPtr();
   const paramEnd = locationAllocator.GetStackEnd();
 
   const internal: WasmInternalFunction = functionData.internal;
@@ -649,7 +633,7 @@ JSToWasmWrapper(
 }
 
 macro WasmToJSObject(
-    instance: WasmInstanceObject, value: Object, retType: int32): JSAny {
+    context: NativeContext, value: Object, retType: int32): JSAny {
   const paramKind = retType & kValueTypeKindBitsMask;
   const heapType = (retType >> kValueTypeKindBits) & kValueTypeHeapTypeMask;
   if (paramKind == ValueKind::kRef) {
@@ -664,8 +648,7 @@ macro WasmToJSObject(
     // array types can be passed to JS as-is as well; and for function types we
     // could at least support the fast path where the WasmExternalFunction has
     // already been created.
-    return runtime::WasmGenericWasmToJSObject(
-        LoadContextFromInstance(instance), value);
+    return runtime::WasmGenericWasmToJSObject(context, value);
   } else {
     dcheck(paramKind == ValueKind::kRefNull);
     if (heapType == HeapType::kExtern || heapType == HeapType::kNoExtern) {
@@ -683,14 +666,8 @@ macro WasmToJSObject(
     // array types can be passed to JS as-is as well; and for function types we
     // could at least support the fast path where the WasmExternalFunction has
     // already been created.
-    return runtime::WasmGenericWasmToJSObject(
-        LoadContextFromInstance(instance), value);
+    return runtime::WasmGenericWasmToJSObject(context, value);
   }
-}
-
-macro GetRefAt<T: type, From: type>(base: From, offset: intptr): &T {
-  return torque_internal::unsafe::NewOffHeapReference<T>(
-      %RawDownCast<RawPtr<T>>(base + offset));
 }
 
 builtin JSToWasmHandleReturns(
@@ -735,7 +712,7 @@ builtin JSToWasmHandleReturns(
           wrapperBuffer + kWrapperBufferGPReturnRegister1);
       const rawRef = *GetRefAt<uintptr>(ptr, 0);
       const value = BitcastWordToTagged(rawRef);
-      return WasmToJSObject(instance, value, retType);
+      return WasmToJSObject(LoadContextFromInstance(instance), value, retType);
     }
   }
 
@@ -820,11 +797,11 @@ builtin JSToWasmHandleReturns(
     } else {
       locationAllocator.GetGPSlot();
       const value = fixedArray.objects[k];
-      fixedArray.objects[k] = WasmToJSObject(instance, value, retType);
+      fixedArray.objects[k] =
+          WasmToJSObject(LoadContextFromInstance(instance), value, retType);
     }
   }
 
   return resultArray;
 }
-
 }  // namespace wasm

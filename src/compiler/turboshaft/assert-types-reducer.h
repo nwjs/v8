@@ -36,7 +36,7 @@ class AssertTypesReducer
 
   using Adapter = UniformReducerAdapter<AssertTypesReducer, Next>;
 
-  uint32_t NoContextConstant() { return IntToSmi(Context::kNoContext); }
+  Smi NoContextConstant() { return Smi::FromInt(Context::kNoContext); }
 
   template <typename Op, typename Continuation>
   OpIndex ReduceInputGraphOperation(OpIndex ig_index, const Op& operation) {
@@ -73,17 +73,17 @@ class AssertTypesReducer
         [this](Builtin builtin, OpIndex original_value,
                base::SmallVector<OpIndex, 6> actual_value_indices,
                const Type& type) {
-          uint32_t op_id = static_cast<uint32_t>(IntToSmi(original_value.id()));
+          Smi op_id = Smi::FromInt(original_value.id());
           // Add expected type and operation id.
           Handle<TurboshaftType> expected_type = type.AllocateOnHeap(factory());
           actual_value_indices.push_back(Asm().HeapConstant(expected_type));
-          actual_value_indices.push_back(Asm().Word32Constant(op_id));
+          actual_value_indices.push_back(Asm().SmiConstant(op_id));
           actual_value_indices.push_back(
-              Asm().Word32Constant(NoContextConstant()));
+              Asm().SmiConstant(NoContextConstant()));
           Asm().CallBuiltin(
               builtin, OpIndex::Invalid(),
               {actual_value_indices.data(), actual_value_indices.size()},
-              isolate_);
+              CanThrow::kNo, isolate_);
 #ifdef DEBUG
           // Used for debugging
           if (v8_flags.turboshaft_trace_typing) {
@@ -129,6 +129,7 @@ class AssertTypesReducer
       }
       case RegisterRepresentation::Tagged():
       case RegisterRepresentation::Compressed():
+      case RegisterRepresentation::Simd128():
         // TODO(nicohartmann@): Handle remaining cases.
         break;
     }

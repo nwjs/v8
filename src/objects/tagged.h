@@ -7,12 +7,18 @@
 
 #include <type_traits>
 
+#include "src/common/checks.h"
 #include "src/common/globals.h"
-#include "src/objects/objects.h"
-#include "src/objects/smi.h"
+#include "src/objects/tagged-impl.h"
 
 namespace v8 {
 namespace internal {
+
+class Object;
+class Smi;
+class HeapObject;
+class TaggedIndex;
+class FieldType;
 
 // Tagged<T> represents an uncompressed V8 tagged pointer.
 //
@@ -54,47 +60,8 @@ class Tagged;
 static constexpr bool kTaggedCanConvertToRawObjects = true;
 
 // Base class for all Tagged<T> classes.
-class TaggedBase {
- public:
-  constexpr TaggedBase() = default;
-
-  constexpr Address ptr() const { return ptr_; }
-
-  constexpr bool operator==(TaggedBase other) const {
-    return static_cast<Tagged_t>(ptr()) == static_cast<Tagged_t>(other.ptr());
-  }
-  constexpr bool operator!=(TaggedBase other) const {
-    return static_cast<Tagged_t>(ptr()) != static_cast<Tagged_t>(other.ptr());
-  }
-
- protected:
-  constexpr explicit TaggedBase(Address ptr) : ptr_(ptr) {}
-  // TODO(leszeks): Consider a different default value, e.g. a tagged null.
-  Address ptr_ = kNullAddress;
-};
-
-// Implicit comparisons with raw pointers
-// TODO(leszeks): Remove once we're using Tagged everywhere.
-inline constexpr bool operator==(TaggedBase tagged_ptr, Object obj) {
-  static_assert(kTaggedCanConvertToRawObjects);
-  return static_cast<Tagged_t>(tagged_ptr.ptr()) ==
-         static_cast<Tagged_t>(obj.ptr());
-}
-inline constexpr bool operator==(Object obj, TaggedBase tagged_ptr) {
-  static_assert(kTaggedCanConvertToRawObjects);
-  return static_cast<Tagged_t>(obj.ptr()) ==
-         static_cast<Tagged_t>(tagged_ptr.ptr());
-}
-inline constexpr bool operator!=(TaggedBase tagged_ptr, Object obj) {
-  static_assert(kTaggedCanConvertToRawObjects);
-  return static_cast<Tagged_t>(tagged_ptr.ptr()) !=
-         static_cast<Tagged_t>(obj.ptr());
-}
-inline constexpr bool operator!=(Object obj, TaggedBase tagged_ptr) {
-  static_assert(kTaggedCanConvertToRawObjects);
-  return static_cast<Tagged_t>(obj.ptr()) !=
-         static_cast<Tagged_t>(tagged_ptr.ptr());
-}
+// TODO(leszeks): Merge with TaggedImpl.
+using TaggedBase = TaggedImpl<HeapObjectReferenceType::STRONG, Address>;
 
 namespace detail {
 
@@ -115,105 +82,29 @@ class TaggedOperatorArrowRef {
   T object_;
 };
 
-// Special hack to make all Tagged<T> (except Tagged<Object> and Tagged<Smi>) a
-// subclass of Tagged<HeapObject>, so that Tagged<HeapObject> function overloads
-// accept them without an ambiguous user-defined conversion.
 template <typename T>
-using GetBaseForTagged = std::conditional_t<std::is_same_v<T, HeapObject>,
-                                            TaggedBase, Tagged<HeapObject>>;
+struct BaseForTagged {
+  using type = Tagged<HeapObject>;
+};
+
+// FieldType is special, since it can be Smi or Map. It could probably even be
+// its own specialization, to avoid exposing an operator->.
+template <>
+struct BaseForTagged<FieldType> {
+  using type = Tagged<Object>;
+};
+
+// TaggedIndex is special, since it's a more strict Smi. It could probably even
+// be its own specialization, to avoid exposing an operator->.
+template <>
+struct BaseForTagged<TaggedIndex> {
+  using type = Tagged<Object>;
+};
 
 }  // namespace detail
 
-// Generic Tagged<T> for any T that is a subclass of HeapObject. There are
-// separate Tagged<T> specializations for T==Smi and T==Object, so we know that
-// all other Tagged<T> are definitely pointers and not Smis.
 template <typename T>
-class Tagged : public detail::GetBaseForTagged<T> {
-  using Base = detail::GetBaseForTagged<T>;
-
- public:
-  // Explicit cast for sub- and superclasses.
-  template <typename U>
-  static constexpr Tagged<T> cast(Tagged<U> other) {
-    static_assert(std::is_convertible_v<U*, T*> ||
-                  std::is_convertible_v<T*, U*>);
-    return Tagged<T>(T::cast(*other).ptr());
-  }
-  static constexpr Tagged<T> unchecked_cast(TaggedBase other) {
-    // Don't check incoming type for unchecked casts, in case the object
-    // definitions are not available.
-    return Tagged<T>(other.ptr());
-  }
-
-  constexpr Tagged() = default;
-
-  // Implicit conversion for subclasses.
-  template <typename U,
-            typename = std::enable_if_t<std::is_convertible_v<U*, T*>>>
-  constexpr Tagged& operator=(Tagged<U> other) {
-    this->ptr_ = other.ptr();
-    return *this;
-  }
-
-  // Implicit conversion for subclasses.
-  template <typename U,
-            typename = std::enable_if_t<std::is_convertible_v<U*, T*>>>
-  // NOLINTNEXTLINE
-  constexpr Tagged(Tagged<U> other) : Base(other) {}
-
-  constexpr T operator*() const { return ToRawPtr(); }
-  constexpr detail::TaggedOperatorArrowRef<T> operator->() const {
-    return detail::TaggedOperatorArrowRef<T>{ToRawPtr()};
-  }
-
-  constexpr bool is_null() const {
-    return static_cast<Tagged_t>(this->ptr()) ==
-           static_cast<Tagged_t>(kNullAddress);
-  }
-
-  constexpr bool IsHeapObject() const { return true; }
-  constexpr bool IsSmi() const { return false; }
-
-#define IS_TYPE_FUNCTION_DEF(type_)                         \
-  bool Is##type_() const { return ToRawPtr().Is##type_(); } \
-  bool Is##type_(PtrComprCageBase cage_base) const {        \
-    return ToRawPtr().Is##type_(cage_base);                 \
-  }
-  HEAP_OBJECT_TYPE_LIST(IS_TYPE_FUNCTION_DEF)
-  IS_TYPE_FUNCTION_DEF(HashTableBase)
-  IS_TYPE_FUNCTION_DEF(SmallOrderedHashTable)
-#undef IS_TYPE_FUNCTION_DEF
-
-  // Implicit conversions and explicit casts to/from raw pointers
-  // TODO(leszeks): Remove once we're using Tagged everywhere.
-  template <typename U,
-            typename = std::enable_if_t<std::is_convertible_v<U*, T*>>>
-  // NOLINTNEXTLINE
-  constexpr Tagged(U raw) : Base(raw.ptr()) {
-    static_assert(kTaggedCanConvertToRawObjects);
-  }
-  template <typename U,
-            typename = std::enable_if_t<std::is_convertible_v<T*, U*>>>
-  // NOLINTNEXTLINE
-  constexpr operator U() {
-    static_assert(kTaggedCanConvertToRawObjects);
-    return ToRawPtr();
-  }
-  template <typename U>
-  static constexpr Tagged<T> cast(U other) {
-    static_assert(kTaggedCanConvertToRawObjects);
-    return Tagged<T>::cast(Tagged<U>(other));
-  }
-
- private:
-  // Handles of the same type are allowed to access the Address constructor.
-  friend class Handle<T>;
-
-  using Base::Base;
-  constexpr T ToRawPtr() const {
-    return T::unchecked_cast(Object(this->ptr()));
-  }
-};
+class Tagged;
 
 // Specialization for Object, where it's unknown whether this is a Smi or a
 // HeapObject.
@@ -229,6 +120,10 @@ class Tagged<Object> : public TaggedBase {
     return Tagged<Object>(other);
   }
 
+  // Tagged<Object> doesn't provide a default constructor on purpose.
+  // It depends on the use case if default initializing with Smi::Zero() or a
+  // tagged null makes more sense.
+
   // Allow Tagged<Object> to be created from any address.
   constexpr explicit Tagged(Address o) : TaggedBase(o) {}
 
@@ -237,53 +132,28 @@ class Tagged<Object> : public TaggedBase {
   // NOLINTNEXTLINE
   constexpr Tagged(TaggedBase other) : TaggedBase(other.ptr()) {}
   constexpr Tagged& operator=(TaggedBase other) {
-    ptr_ = other.ptr();
-    return *this;
+    return *this = Tagged(other);
   }
 
   // TODO(leszeks): Tagged<Object> is not known to be a pointer, so it shouldn't
   // have an operator* or operator->. Remove once all Object member functions
   // are free/static functions.
-  constexpr Object operator*() { return ToRawPtr(); }
-  constexpr detail::TaggedOperatorArrowRef<Object> operator->() {
-    return detail::TaggedOperatorArrowRef<Object>{ToRawPtr()};
-  }
-
-  bool IsHeapObject() const { return ToRawPtr().IsHeapObject(); }
-  bool IsSmi() const { return ToRawPtr().IsSmi(); }
-
-#define IS_TYPE_FUNCTION_DEF(type_)                               \
-  /* Hack in a default templated type to delay name resolution */ \
-  template <typename U = void>                                    \
-  bool Is##type_() const {                                        \
-    return ToRawPtr().Is##type_();                                \
-  }                                                               \
-  /* Hack in a default templated type to delay name resolution */ \
-  template <typename U = void>                                    \
-  bool Is##type_(PtrComprCageBase cage_base) const {              \
-    return ToRawPtr().Is##type_(cage_base);                       \
-  }
-  HEAP_OBJECT_TYPE_LIST(IS_TYPE_FUNCTION_DEF)
-  IS_TYPE_FUNCTION_DEF(HashTableBase)
-  IS_TYPE_FUNCTION_DEF(SmallOrderedHashTable)
-#undef IS_TYPE_FUNCTION_DEF
+  inline constexpr Object operator*() const;
+  inline constexpr detail::TaggedOperatorArrowRef<Object> operator->();
 
   // Implicit conversions to/from raw pointers
   // TODO(leszeks): Remove once we're using Tagged everywhere.
   // NOLINTNEXTLINE
-  constexpr Tagged(Object raw) : TaggedBase(raw.ptr()) {
-    static_assert(kTaggedCanConvertToRawObjects);
-  }
+  inline constexpr Tagged(Object raw);
   template <typename U,
-            typename = std::enable_if_t<std::is_convertible_v<Object*, U*>>>
+            typename = std::enable_if_t<std::is_base_of_v<U, Object> ||
+                                        std::is_convertible_v<Object*, U*>>>
   // NOLINTNEXTLINE
-  constexpr operator U() {
-    static_assert(kTaggedCanConvertToRawObjects);
-    return ToRawPtr();
-  }
+  inline constexpr operator U();
 
  private:
-  constexpr Object ToRawPtr() const { return Object(ptr()); }
+  friend class Object;
+  inline constexpr Object ToRawPtr() const;
 };
 
 // Specialization for Smi disallowing any implicit creation or access via ->,
@@ -295,8 +165,11 @@ class Tagged<Smi> : public TaggedBase {
   // this static assert).
   template <typename U>
   static constexpr Tagged<Smi> cast(Tagged<U> other) {
-    static_assert(std::is_convertible_v<U*, Smi*>);
-    return Tagged<Smi>(Smi::cast(*other).ptr());
+    static_assert(std::is_base_of_v<Smi, U> ||
+                  std::is_convertible_v<U*, Smi*> ||
+                  std::is_base_of_v<U, Smi> || std::is_convertible_v<Smi*, U*>);
+    DCHECK(other.IsSmi());
+    return Tagged<Smi>(other.ptr());
   }
   static constexpr Tagged<Smi> unchecked_cast(TaggedBase other) {
     return Tagged<Smi>(other.ptr());
@@ -307,36 +180,197 @@ class Tagged<Smi> : public TaggedBase {
   constexpr bool IsHeapObject() const { return false; }
   constexpr bool IsSmi() const { return true; }
 
-  constexpr int32_t value() const { return Smi(ptr_).value(); }
+  constexpr int32_t value() const { return Internals::SmiValue(ptr()); }
 
   // Implicit conversions to/from raw pointers
   // TODO(leszeks): Remove once we're using Tagged everywhere.
   // NOLINTNEXTLINE
-  constexpr Tagged(Smi raw) : TaggedBase(raw.ptr()) {
-    static_assert(kTaggedCanConvertToRawObjects);
-  }
-  template <typename U,
-            typename = std::enable_if_t<std::is_convertible_v<Smi*, U*>>>
+  inline constexpr Tagged(Smi raw);
   // NOLINTNEXTLINE
-  constexpr operator U() {
-    static_assert(kTaggedCanConvertToRawObjects);
-    return Smi(ptr_);
-  }
+  inline constexpr operator Smi();
 
   // Access via ->, remove once Smi doesn't have its own address.
-  constexpr Smi operator*() { return Smi(ptr_); }
-  constexpr detail::TaggedOperatorArrowRef<Smi> operator->() {
-    return detail::TaggedOperatorArrowRef<Smi>(Smi(ptr_));
-  }
+  inline constexpr Smi operator*() const;
+  inline constexpr detail::TaggedOperatorArrowRef<Smi> operator->();
 
  private:
+  friend class Smi;
   // Handles of the same type are allowed to access the Address constructor.
   friend class Handle<Smi>;
+#ifdef V8_ENABLE_DIRECT_HANDLE
+  friend class DirectHandle<Smi>;
+#endif
 
   using TaggedBase::TaggedBase;
 };
 
+// Specialization for HeapObject, to group together functions shared between all
+// HeapObjects
+template <>
+class Tagged<HeapObject> : public TaggedBase {
+  using Base = TaggedBase;
+
+ public:
+  // Explicit cast for sub- and superclasses.
+  template <typename U>
+  static constexpr Tagged<HeapObject> cast(Tagged<U> other) {
+    static_assert(std::is_base_of_v<HeapObject, U> ||
+                  std::is_convertible_v<U*, HeapObject*> ||
+                  std::is_base_of_v<U, HeapObject> ||
+                  std::is_convertible_v<HeapObject*, U*>);
+    DCHECK(other.IsHeapObject());
+    return Tagged<HeapObject>(other.ptr());
+  }
+  static constexpr Tagged<HeapObject> unchecked_cast(TaggedBase other) {
+    // Don't check incoming type for unchecked casts, in case the object
+    // definitions are not available.
+    return Tagged<HeapObject>(other.ptr());
+  }
+
+  constexpr Tagged() = default;
+
+  // Implicit conversion for subclasses.
+  template <typename U,
+            typename = std::enable_if_t<std::is_base_of_v<HeapObject, U> ||
+                                        std::is_convertible_v<U*, HeapObject*>>>
+  constexpr Tagged& operator=(Tagged<U> other) {
+    return *this = Tagged(other);
+  }
+
+  // Implicit conversion for subclasses.
+  template <typename U,
+            typename = std::enable_if_t<std::is_base_of_v<HeapObject, U> ||
+                                        std::is_convertible_v<U*, HeapObject*>>>
+  // NOLINTNEXTLINE
+  constexpr Tagged(Tagged<U> other) : Base(other) {}
+
+  constexpr HeapObject operator*() const;
+  constexpr detail::TaggedOperatorArrowRef<HeapObject> operator->() const;
+
+  constexpr bool is_null() const {
+    return static_cast<Tagged_t>(this->ptr()) ==
+           static_cast<Tagged_t>(kNullAddress);
+  }
+
+  constexpr bool IsHeapObject() const { return true; }
+  constexpr bool IsSmi() const { return false; }
+
+  inline bool InAnySharedSpace() const;
+  inline bool InWritableSharedSpace() const;
+  inline bool InReadOnlySpace() const;
+
+  // Implicit conversions and explicit casts to/from raw pointers
+  // TODO(leszeks): Remove once we're using Tagged everywhere.
+  template <typename U,
+            typename = std::enable_if_t<std::is_base_of_v<HeapObject, U> ||
+                                        std::is_convertible_v<U*, HeapObject*>>>
+  // NOLINTNEXTLINE
+  constexpr Tagged(U raw) : Base(raw.ptr()) {
+    static_assert(kTaggedCanConvertToRawObjects);
+  }
+  // NOLINTNEXTLINE
+  constexpr operator HeapObject();
+  template <typename U>
+  static constexpr Tagged<HeapObject> cast(U other) {
+    static_assert(kTaggedCanConvertToRawObjects);
+    return Tagged<HeapObject>::cast(Tagged<U>(other));
+  }
+
+  Address address() const { return this->ptr() - kHeapObjectTag; }
+
+ private:
+  friend class HeapObject;
+  // Handles of the same type are allowed to access the Address constructor.
+  friend class Handle<HeapObject>;
+#ifdef V8_ENABLE_DIRECT_HANDLE
+  friend class DirectHandle<HeapObject>;
+#endif
+
+  using Base::Base;
+  constexpr HeapObject ToRawPtr() const;
+};
+
 static_assert(Tagged<HeapObject>().is_null());
+
+// Generic Tagged<T> for any T that is a subclass of HeapObject. There are
+// separate Tagged<T> specializations for T==Smi and T==Object, so we know that
+// all other Tagged<T> are definitely pointers and not Smis.
+template <typename T>
+class Tagged : public detail::BaseForTagged<T>::type {
+  using Base = typename detail::BaseForTagged<T>::type;
+
+ public:
+  // Explicit cast for sub- and superclasses.
+  template <typename U>
+  static constexpr Tagged<T> cast(Tagged<U> other) {
+    static_assert(std::is_base_of_v<T, U> || std::is_convertible_v<U*, T*> ||
+                  std::is_base_of_v<U, T> || std::is_convertible_v<T*, U*>);
+    return Tagged<T>(T::cast(*other).ptr());
+  }
+  static constexpr Tagged<T> unchecked_cast(TaggedBase other) {
+    // Don't check incoming type for unchecked casts, in case the object
+    // definitions are not available.
+    return Tagged<T>(other.ptr());
+  }
+
+  constexpr Tagged() = default;
+
+  // Implicit conversion for subclasses.
+  template <typename U,
+            typename = std::enable_if_t<std::is_base_of_v<T, U> ||
+                                        std::is_convertible_v<U*, T*>>>
+  constexpr Tagged& operator=(Tagged<U> other) {
+    *this = Tagged(other);
+    return *this;
+  }
+
+  // Implicit conversion for subclasses.
+  template <typename U,
+            typename = std::enable_if_t<std::is_base_of_v<T, U> ||
+                                        std::is_convertible_v<U*, T*>>>
+  // NOLINTNEXTLINE
+  constexpr Tagged(Tagged<U> other) : Base(other) {}
+
+  constexpr T operator*() const { return ToRawPtr(); }
+  constexpr detail::TaggedOperatorArrowRef<T> operator->() const {
+    return detail::TaggedOperatorArrowRef<T>{ToRawPtr()};
+  }
+
+  // Implicit conversions and explicit casts to/from raw pointers
+  // TODO(leszeks): Remove once we're using Tagged everywhere.
+  template <typename U,
+            typename = std::enable_if_t<std::is_base_of_v<T, U> ||
+                                        std::is_convertible_v<U*, T*>>>
+  // NOLINTNEXTLINE
+  constexpr Tagged(U raw) : Base(raw.ptr()) {
+    static_assert(kTaggedCanConvertToRawObjects);
+  }
+  template <typename U,
+            typename = std::enable_if_t<std::is_base_of_v<U, T> ||
+                                        std::is_convertible_v<T*, U*>>>
+  // NOLINTNEXTLINE
+  constexpr operator U() {
+    static_assert(kTaggedCanConvertToRawObjects);
+    return ToRawPtr();
+  }
+  template <typename U>
+  static constexpr Tagged<T> cast(U other) {
+    static_assert(kTaggedCanConvertToRawObjects);
+    return Tagged<T>::cast(Tagged<U>(other));
+  }
+
+ private:
+  // Handles of the same type are allowed to access the Address constructor.
+  friend class Handle<T>;
+#ifdef V8_ENABLE_DIRECT_HANDLE
+  friend class DirectHandle<T>;
+#endif
+
+  using Base::Base;
+  constexpr T ToRawPtr() const {
+    return T::unchecked_cast(Object(this->ptr()));
+  }
+};
 
 // Deduction guide to simplify Foo->Tagged<Foo> transition.
 // TODO(leszeks): Remove once we're using Tagged everywhere.

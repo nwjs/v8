@@ -735,9 +735,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ Assert(eq, AbortReason::kWrongFunctionContext, cp,
                   Operand(kScratchReg));
       }
-      static_assert(kJavaScriptCallCodeStartRegister == a2, "ABI mismatch");
-      __ LoadTaggedField(a2, FieldMemOperand(func, JSFunction::kCodeOffset));
-      __ CallCodeObject(a2);
+      __ CallJSFunction(func);
       RecordCallPosition(instr);
       frame_access_state()->ClearSPDelta();
       break;
@@ -910,6 +908,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ bind(ool->exit());
       break;
     }
+    case kArchStoreIndirectWithWriteBarrier:
+      UNREACHABLE();
     case kArchStackSlot: {
       FrameOffset offset =
           frame_access_state()->GetFrameOffset(i.InputInt32(0));
@@ -1264,6 +1264,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ Ror(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1));
       break;
     case kRiscvCmp:
+#ifdef V8_TARGET_ARCH_RISCV64
+    case kRiscvCmp32:
+#endif
       // Pseudo-instruction used for cmp/branch. No opcode emitted here.
       break;
     case kRiscvCmpZero:
@@ -1536,12 +1539,34 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kRiscvFloat64SilenceNaN:
       __ FPUCanonicalizeNaN(i.OutputDoubleRegister(), i.InputDoubleRegister(0));
       break;
-    case kRiscvCvtSD:
-      __ fcvt_s_d(i.OutputSingleRegister(), i.InputDoubleRegister(0));
+    case kRiscvCvtSD: {
+      Label done;
+      __ feq_d(kScratchReg, i.InputDoubleRegister(0), i.InputDoubleRegister(0));
+      __ fmv_x_d(kScratchReg2, i.InputDoubleRegister(0));
+      __ fcvt_s_d(i.OutputDoubleRegister(), i.InputDoubleRegister(0));
+      __ Branch(&done, eq, kScratchReg, Operand(1));
+      __ And(kScratchReg2, kScratchReg2, Operand(0x8000000000000000));
+      __ srai(kScratchReg2, kScratchReg2, 32);
+      __ fmv_d_x(kScratchDoubleReg, kScratchReg2);
+      __ fsgnj_s(i.OutputDoubleRegister(), i.OutputDoubleRegister(),
+                 kScratchDoubleReg);
+      __ bind(&done);
       break;
-    case kRiscvCvtDS:
+    }
+    case kRiscvCvtDS: {
+      Label done;
+      __ feq_s(kScratchReg, i.InputDoubleRegister(0), i.InputDoubleRegister(0));
+      __ fmv_x_d(kScratchReg2, i.InputDoubleRegister(0));
       __ fcvt_d_s(i.OutputDoubleRegister(), i.InputSingleRegister(0));
+      __ Branch(&done, eq, kScratchReg, Operand(1));
+      __ And(kScratchReg2, kScratchReg2, Operand(0x80000000));
+      __ slli(kScratchReg2, kScratchReg2, 32);
+      __ fmv_d_x(kScratchDoubleReg, kScratchReg2);
+      __ fsgnj_d(i.OutputDoubleRegister(), i.OutputDoubleRegister(),
+                 kScratchDoubleReg);
+      __ bind(&done);
       break;
+    }
     case kRiscvCvtDW: {
       __ fcvt_d_w(i.OutputDoubleRegister(), i.InputRegister(0));
       break;
@@ -2218,6 +2243,14 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ DecompressTagged(result, operand);
       break;
     }
+    case kRiscvLoadDecodeSandboxedPointer:
+      __ LoadSandboxedPointerField(i.OutputRegister(), i.MemoryOperand());
+      break;
+    case kRiscvStoreEncodeSandboxedPointer: {
+      MemOperand mem = i.MemoryOperand(1);
+      __ StoreSandboxedPointerField(i.InputOrZeroRegister(0), mem);
+      break;
+    }
     case kRiscvAtomicLoadDecompressTaggedSigned:
       __ AtomicDecompressTaggedSigned(i.OutputRegister(), i.MemoryOperand());
       break;
@@ -2405,12 +2438,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kRiscvI64x2Mul: {
       (__ VU).set(kScratchReg, VSew::E64, Vlmul::m1);
       __ vmul_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
-                 i.InputSimd128Register(1));
-      break;
-    }
-    case kRiscvI64x2Add: {
-      (__ VU).set(kScratchReg, VSew::E64, Vlmul::m1);
-      __ vadd_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
                  i.InputSimd128Register(1));
       break;
     }
@@ -3748,7 +3775,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       ASSEMBLE_RVV_BINOP_INTEGER(MinU, vminu_vv)
       ASSEMBLE_RVV_BINOP_INTEGER(MinS, vmin_vv)
       ASSEMBLE_RVV_UNOP_INTEGER_VR(Splat, vmv_vx)
-      ASSEMBLE_RVV_BINOP_INTEGER(Add, vadd_vv)
       ASSEMBLE_RVV_BINOP_INTEGER(Sub, vsub_vv)
 #if V8_TARGET_ARCH_RISCV64
     case kRiscvI64x2Splat: {
@@ -3815,7 +3841,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       }
       break;
     }
-    case kRiscvVaddVv: {
+    case kRiscvVadd: {
       __ VU.set(kScratchReg, i.InputInt8(2), i.InputInt8(3));
       __ vadd_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
                  i.InputSimd128Register(1));
@@ -3920,9 +3946,29 @@ void AssembleBranchToLabels(CodeGenerator* gen, MacroAssembler* masm,
       default:
         UNSUPPORTED_COND(instr->arch_opcode(), condition);
     }
+#if V8_TARGET_ARCH_RISCV64
+  } else if (instr->arch_opcode() == kRiscvCmp ||
+             instr->arch_opcode() == kRiscvCmp32) {
+#elif V8_TARGET_ARCH_RISCV32
   } else if (instr->arch_opcode() == kRiscvCmp) {
+#endif
     Condition cc = FlagsConditionToConditionCmp(condition);
-    __ Branch(tlabel, cc, i.InputRegister(0), i.InputOperand(1));
+    Register left = i.InputRegister(0);
+    Operand right = i.InputOperand(1);
+    // Word32Compare has two temp registers.
+#if V8_TARGET_ARCH_RISCV64
+    if (COMPRESS_POINTERS_BOOL && (instr->arch_opcode() == kRiscvCmp32)) {
+      Register temp0 = i.TempRegister(0);
+      Register temp1 = right.is_reg() ? i.TempRegister(1) : no_reg;
+      __ slliw(temp0, left, 0);
+      left = temp0;
+      if (temp1 != no_reg) {
+        __ slliw(temp1, right.rm(), 0);
+        right = Operand(temp1);
+      }
+    }
+#endif
+    __ Branch(tlabel, cc, left, right);
   } else if (instr->arch_opcode() == kRiscvCmpZero) {
     Condition cc = FlagsConditionToConditionCmp(condition);
     if (i.InputOrZeroRegister(0) == zero_reg && IsInludeEqual(cc)) {
@@ -3995,32 +4041,16 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
 
    private:
     void GenerateCallToTrap(TrapId trap_id) {
-      if (trap_id == TrapId::kInvalid) {
-        // We cannot test calls to the runtime in cctest/test-run-wasm.
-        // Therefore we emit a call to C here instead of a call to the runtime.
-        // We use the context register as the scratch register, because we do
-        // not have a context here.
-        __ PrepareCallCFunction(0, 0, cp);
-        __ CallCFunction(
-            ExternalReference::wasm_call_trap_callback_for_testing(), 0);
-        __ LeaveFrame(StackFrame::WASM);
-        auto call_descriptor = gen_->linkage()->GetIncomingDescriptor();
-        int pop_count = static_cast<int>(call_descriptor->ParameterSlotCount());
-        pop_count += (pop_count & 1);  // align
-        __ Drop(pop_count);
-        __ Ret();
-      } else {
-        gen_->AssembleSourcePosition(instr_);
-        // A direct call to a wasm runtime stub defined in this module.
-        // Just encode the stub index. This will be patched when the code
-        // is added to the native module and copied into wasm code space.
-        __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
-        ReferenceMap* reference_map =
-            gen_->zone()->New<ReferenceMap>(gen_->zone());
-        gen_->RecordSafepoint(reference_map);
-        if (v8_flags.debug_code) {
-          __ stop();
-        }
+      gen_->AssembleSourcePosition(instr_);
+      // A direct call to a wasm runtime stub defined in this module.
+      // Just encode the stub index. This will be patched when the code
+      // is added to the native module and copied into wasm code space.
+      __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
+      ReferenceMap* reference_map =
+          gen_->zone()->New<ReferenceMap>(gen_->zone());
+      gen_->RecordSafepoint(reference_map);
+      if (v8_flags.debug_code) {
+        __ stop();
       }
     }
     Instruction* instr_;
@@ -4085,13 +4115,30 @@ void CodeGenerator::AssembleArchBoolean(Instruction* instr,
 #endif
     // Overflow occurs if overflow register is not zero
     __ Sgtu(result, kScratchReg, zero_reg);
+#if V8_TARGET_ARCH_RISCV64
+  } else if (instr->arch_opcode() == kRiscvCmp ||
+             instr->arch_opcode() == kRiscvCmp32) {
+#elif V8_TARGET_ARCH_RISCV32
   } else if (instr->arch_opcode() == kRiscvCmp) {
+#endif
     Condition cc = FlagsConditionToConditionCmp(condition);
+    Register left = i.InputRegister(0);
+    Operand right = i.InputOperand(1);
+#if V8_TARGET_ARCH_RISCV64
+    if (COMPRESS_POINTERS_BOOL && (instr->arch_opcode() == kRiscvCmp32)) {
+      Register temp0 = i.TempRegister(0);
+      Register temp1 = right.is_reg() ? i.TempRegister(1) : no_reg;
+      __ slliw(temp0, left, 0);
+      left = temp0;
+      if (temp1 != no_reg) {
+        __ slliw(temp1, right.rm(), 0);
+        right = Operand(temp1);
+      }
+    }
+#endif
     switch (cc) {
       case eq:
       case ne: {
-        Register left = i.InputOrZeroRegister(0);
-        Operand right = i.InputOperand(1);
         if (instr->InputAt(1)->IsImmediate()) {
           if (is_int12(-right.immediate())) {
             if (right.immediate() == 0) {
@@ -4947,12 +4994,13 @@ AllocatedOperand CodeGenerator::Push(InstructionOperand* source) {
 }
 
 void CodeGenerator::Pop(InstructionOperand* dest, MachineRepresentation rep) {
-  int new_slots = ElementSizeInPointers(rep);
-  frame_access_state()->IncreaseSPDelta(-new_slots);
+  int dropped_slots = ElementSizeInPointers(rep);
   RiscvOperandConverter g(this, nullptr);
   if (dest->IsRegister()) {
+    frame_access_state()->IncreaseSPDelta(-dropped_slots);
     __ Pop(g.ToRegister(dest));
   } else if (dest->IsStackSlot()) {
+    frame_access_state()->IncreaseSPDelta(-dropped_slots);
     UseScratchRegisterScope temps(masm());
     Register scratch = temps.Acquire();
     __ Pop(scratch);
@@ -4961,12 +5009,13 @@ void CodeGenerator::Pop(InstructionOperand* dest, MachineRepresentation rep) {
     int last_frame_slot_id =
         frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
     int sp_delta = frame_access_state_->sp_delta();
-    int slot_id = last_frame_slot_id + sp_delta + new_slots;
+    int slot_id = last_frame_slot_id + sp_delta;
     AllocatedOperand stack_slot(LocationOperand::STACK_SLOT, rep, slot_id);
     AssembleMove(&stack_slot, dest);
-    __ AddWord(sp, sp, Operand(new_slots * kSystemPointerSize));
+    frame_access_state()->IncreaseSPDelta(-dropped_slots);
+    __ AddWord(sp, sp, Operand(dropped_slots * kSystemPointerSize));
   }
-  temp_slots_ -= new_slots;
+  temp_slots_ -= dropped_slots;
 }
 
 void CodeGenerator::PopTempStackSlots() {

@@ -28,6 +28,22 @@ constexpr auto CallInterfaceDescriptor::DefaultDoubleRegisterArray() {
   return registers;
 }
 
+constexpr auto CallInterfaceDescriptor::DefaultReturnRegisterArray() {
+  auto registers =
+      RegisterArray(kReturnRegister0, kReturnRegister1, kReturnRegister2);
+  return registers;
+}
+
+constexpr auto CallInterfaceDescriptor::DefaultReturnDoubleRegisterArray() {
+  // Construct the std::array explicitly here because on arm, the registers d0,
+  // d1, ... are not of type DoubleRegister but only support implicit casting to
+  // DoubleRegister. For template resolution, however, implicit casting is not
+  // sufficient.
+  // Padding to have as many double return registers as GP return registers.
+  std::array<DoubleRegister, 3> registers{kFPReturnRegister0, no_dreg, no_dreg};
+  return registers;
+}
+
 #if DEBUG
 template <typename DerivedDescriptor>
 void StaticCallInterfaceDescriptor<DerivedDescriptor>::
@@ -137,6 +153,17 @@ constexpr Register TypeConversionDescriptor::ArgumentRegister() { return r0; }
 
 // static
 constexpr auto TypeofDescriptor::registers() { return RegisterArray(r0); }
+
+// static
+constexpr Register
+MaglevOptimizeCodeOrTailCallOptimizedCodeSlotDescriptor::FlagsRegister() {
+  return r2;
+}
+// static
+constexpr Register MaglevOptimizeCodeOrTailCallOptimizedCodeSlotDescriptor::
+    FeedbackVectorRegister() {
+  return r5;
+}
 
 // static
 constexpr auto CallTrampolineDescriptor::registers() {

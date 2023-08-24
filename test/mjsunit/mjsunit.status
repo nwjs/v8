@@ -40,6 +40,8 @@
   'compiler/fast-api-helpers': [SKIP],
   'typedarray-helpers': [SKIP],
 
+  # TODO(ahaas): Fix generic wasm-to-js wrapper tierup test.
+  'wasm/wasm-to-js-tierup': [SKIP],
   # All tests in the bug directory are expected to fail.
   'bugs/*': [FAIL],
 
@@ -973,7 +975,13 @@
 
 [ 'arch == riscv32' , {
 'wasm/compare-exchange64-stress':[SKIP],
+'regress/regress-crbug-781583':[SKIP],
+'regress/wasm/regress-14171':[SKIP],
 }], # 'arch == riscv32'
+
+[ 'arch == riscv64' , {
+'regress/wasm/regress-14113':[SKIP],
+}], # 'arch == riscv64'
 
 ##############################################################################
 ['system == macos', {
@@ -1059,6 +1067,7 @@
   'wasm/code-flushing': [SKIP],
   'wasm/enter-and-leave-debug-state': [SKIP],
   'wasm/wasm-dynamic-tiering': [SKIP],
+  'wasm/wasm-to-js-tierup': [SKIP],
 
   # The test relies on precise switching of code kinds of wasm functions. With
   # multiple isolates that share the wasm functions, the precise switching is
@@ -1159,6 +1168,9 @@
 
   # BUG(v8:11826) Skipped until we remove flakes on NumFuzz.
   'regress/wasm/regress-1231950': [SKIP],
+
+  # BUG(v8:13433)
+  'compiler/array-slice-clone': [SKIP],
 }],  # 'gc_fuzzer'
 
 ##############################################################################
@@ -1208,9 +1220,6 @@
   # BUG(v8:13882) Skipped until we have a solution.
   'compiler/osr-literals': [SKIP],
   'compiler/osr-literals-adapted': [SKIP],
-
-  # BUG(v8:13950) Skipped until bug is solved.
-  'wasm/large-struct': [SKIP],
 }], # gc_fuzzer or deopt_fuzzer or interrupt_fuzzer
 
 ##############################################################################
@@ -1249,6 +1258,7 @@
   'd8/enable-tracing': [SKIP],
 
   # Intentionally non-deterministic using shared arraybuffers between workers.
+  'wasm/atomic-wait-multi-memory': [SKIP],
   'wasm/atomics-stress': [SKIP],
   'wasm/atomics64-stress': [SKIP],
   'wasm/atomics-memory64': [SKIP],
@@ -1373,6 +1383,16 @@
 }],  # variant == stress
 
 ##############################################################################
+['variant == turboshaft', {
+  # TODO(v8:14108): These tests require Liftoff. Enable again when we remove
+  # --no-liftoff from this variant.
+  'wasm/code-flushing': [FAIL],
+  'wasm/enter-and-leave-debug-state': [FAIL],
+  # Slow TF compilation.
+  'wasm/large-struct': [SKIP],
+}],  # variant == turboshaft
+
+##############################################################################
 ['variant == stress and (arch == arm or arch == arm64) and simulator_run', {
   # Slow tests: https://crbug.com/v8/7783
   'es6/large-classes-properties': [SKIP],
@@ -1384,7 +1404,10 @@
 ['variant in (nooptimization, jitless) and arch in (arm, arm64) and simulator_run', {
   # Slow tests: https://crbug.com/v8/7783
   'regress/regress-crbug-319860': [SKIP],
-}],  # variant == nooptimization and (arch == arm or arch == arm64) and simulator_run
+
+  # Other slow tests:
+  'regress/regress-1449567': [SKIP],
+}],  # variant in (nooptimization, jitless) and (arch == arm or arch == arm64) and simulator_run
 
 ##############################################################################
 ['variant == nooptimization', {
@@ -1657,6 +1680,7 @@
   'regress/wasm/regress-crbug-1338980': [SKIP],
   'regress/wasm/regress-crbug-1355070': [SKIP],
   'regress/wasm/regress-crbug-1356718': [SKIP],
+  'regress/wasm/regress-crbug-1465386': [SKIP],
 }],  # no_simd_hardware == True
 
 ##############################################################################
@@ -1687,6 +1711,7 @@
 ##############################################################################
 ['variant == experimental_regexp', {
   'regress/regress-779407': [SKIP],
+  'regexp-14098': [FAIL],
 }],  # variant == experimental_regexp
 
 ################################################################################
@@ -1712,6 +1737,8 @@
   'default-nospec': [SKIP],
   'es6/collections-constructor-*': [SKIP],
   'es6/map-constructor-entry-side-effect*': [SKIP],
+  # This test uses %SimulateNewspaceFull, which only works in the young generation
+  'regress/regress-1424415': [SKIP],
 }], # single_generation
 
 ################################################################################
@@ -1854,11 +1881,25 @@
 }], # third_party_heap
 
 ##############################################################################
-['(arch != x64 and arch != arm64) or simulator_run', {
+['arch != x64 or gc_fuzzer or deopt_fuzzer or interrupt_fuzzer', {
+  # TODO(nicohartmann@): Instruction selection on turboshaft graph is
+  # currently only supported on x64.
+  'turboshaft/turboshaft-instruction-selection': [SKIP],
+}],  # arch != x64 or gc_fuzzer or deopt_fuzzer or interrupt_fuzzer
+
+##############################################################################
+['((arch != x64 and arch != arm64) or (simulator_run and conservative_stack_scanning))', {
   # Stack switching is only supported on x64/arm64.
   'wasm/stack-switching': [SKIP],
   'wasm/stack-switching-export': [SKIP],
-}],  # (arch != x64 and arch != arm64) or simulator_run
+}],  # (arch != x64 and arch != arm64)
+
+##############################################################################
+['arch != x64', {
+  # The generic wasm-to-js wrapper only exists for x64 so far, so specific tests
+  # don't work on other platforms yet.
+  'wasm/wasm-to-js-tierup': [SKIP],
+}], # arch != x64
 
 ##############################################################################
 ['arch != x64 and arch != arm64 and arch != loong64 and arch != mips64', {
@@ -1878,6 +1919,7 @@
   'math-floor-part1': [SKIP],
   'compiler/regress-1125145': [SKIP],
   'compiler/regress-crbug-1399627': [SKIP],
+  'es6/typedarray-of': [PASS, SLOW],
 
   # TODO(victorgomes):
   'es6/unicode-regexp-ignore-case-noi18n': [SKIP],
@@ -1942,7 +1984,7 @@
 ##############################################################################
 # Behavioural differences between Maglev and Turbofan when the former is used
 # for OptimizeFunctionOnNextCall.
-['variant == stress_maglev or variant == stress_maglev_future', {
+['variant in (stress_maglev, stress_maglev_future, stress_maglev_no_turbofan, maglev_no_turbofan)', {
   # Maglev doesn't inline Array constructors, so it won't bake in allocation
   # site feedback.
   'array-constructor-feedback': [FAIL],
@@ -1961,9 +2003,6 @@
   'compiler/number-comparison-truncations': [FAIL],
   'regress/regress-2132': [FAIL],
   'compiler/regress-1199345': [FAIL],
-  # Maglev doesn't suppress BigInt size errors on truncation.
-  'compiler/bigint-shift-left': [FAIL],
-  'compiler/bigint-multiply-truncate': [FAIL],
   'wasm/bigint-opt': [FAIL],
   # Maglev doesn't inline the call being tested here.
   'compiler/call-with-arraylike-or-spread': [FAIL],
@@ -2003,54 +2042,14 @@
   # the deprecated map. Wiring this through in Maglev would be too messy to be
   # worth it.
   'regress/regress-map-invalidation-2': [FAIL],
-}], # variant == stress_maglev or variant == stress_maglev_future
+}], # variant in (stress_maglev, stress_maglev_future, stress_maglev_no_turbofan, maglev_no_turbofan)
 
-['variant == maglev_no_turbofan or variant == stress_maglev_no_turbofan', {
-  # Relies on OSR from maglev to turbofan due to a missing interrupt check.
-  # TODO(olivf): Add interrupt check for inlined functions.
-  'regress/regress-1376663': [SKIP],
-}], # variant == maglev_no_turbofan or variant == stress_maglev_no_turbofan
-
-# TODO(victorgomes): Remove these once we support Maglev on arm.
-['arch == arm', {
-  'baseline/test-osr-maglev': [FAIL],
-  'baseline/test-osr-maglev-tf': [FAIL],
-  'maglev/add-number': [FAIL],
-  'maglev/add-smi': [FAIL],
-  'maglev/call-js-runtime': [FAIL],
-  'maglev/call-runtime-for-pair': [FAIL],
-  'maglev/destructuring-assignment-with-exclude-properties': [FAIL],
-  'maglev/get-template-object': [FAIL],
-  'maglev/inner-function': [FAIL],
-  'maglev/int32-branch': [FAIL],
-  'maglev/lazy-deopt-with-onstack-activation': [FAIL],
-  'maglev/lazy-deopt-without-onstack-activation': [FAIL],
-  'maglev/lda-global-inside-typeof': [FAIL],
-  'maglev/lda-global': [FAIL],
-  'maglev/lda-module-variable': [FAIL],
-  'maglev/literals': [FAIL],
-  'maglev/load-named': [FAIL],
-  'maglev/negate': [FAIL],
-  'maglev/omit-default-ctors-array-iterator': [FAIL],
-  'maglev/omit-default-ctors': [FAIL],
-  'maglev/osr-from-ml-to-tf' : [SKIP],
-  'maglev/tier-to-ml-to-tf': [SKIP],
-  'maglev/shift-right-logical-smi': [FAIL],
-  'maglev/shift-right-logical': [FAIL],
-  'maglev/shift-right-smi': [FAIL],
-  'maglev/shift-right': [FAIL],
-  'maglev/spill-double': [FAIL],
-  'maglev/sta-module-variable': [FAIL],
-  'maglev/string-compare': [FAIL],
-  'maglev/super-ic': [FAIL],
-  'maglev/undefined-or-null-branch': [FAIL],
-  'maglev/unstable-map-transition': [FAIL],
-  'maglev/regress/regress-1405651': [FAIL],
-  'maglev/polymorphic-load': [FAIL],
-  'maglev/polymorphic-load-migration': [FAIL],
-  'maglev/typedarray-resizablearraybuffer': [FAIL],
-  'maglev/phi-untagging-conversions': [FAIL],
-}], # arch == arm
+['(variant in (stress_maglev, stress_maglev_future, stress_maglev_no_turbofan, maglev_no_turbofan)) and (arch != arm)', {
+  # Maglev doesn't suppress BigInt size errors on truncation.
+  # On Arm that works, since we always _and_ the shift amount first.
+  'compiler/bigint-shift-left': [FAIL],
+  'compiler/bigint-multiply-truncate': [FAIL],
+}], # (variant in (stress_maglev, stress_maglev_future, stress_maglev_no_turbofan, maglev_no_turbofan))' and (arch != arm)
 
 ##############################################################################
 ['clang_coverage and mode == debug', {

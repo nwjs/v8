@@ -11,6 +11,7 @@
 #include "src/objects/shared-function-info.h"
 #include "src/objects/smi-inl.h"
 #include "src/objects/string-inl.h"
+#include "src/objects/string.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -57,11 +58,11 @@ ACCESSORS(Script, compiled_lazy_function_positions, Object,
           kCompiledLazyFunctionPositionsOffset)
 
 bool Script::is_wrapped() const {
-  return eval_from_shared_or_wrapped_arguments().IsFixedArray();
+  return IsFixedArray(eval_from_shared_or_wrapped_arguments());
 }
 
 bool Script::has_eval_from_shared() const {
-  return eval_from_shared_or_wrapped_arguments().IsSharedFunctionInfo();
+  return IsSharedFunctionInfo(eval_from_shared_or_wrapped_arguments());
 }
 
 void Script::set_eval_from_shared(SharedFunctionInfo shared,
@@ -104,16 +105,16 @@ void Script::set_shared_function_infos(WeakFixedArray value,
 }
 
 int Script::shared_function_info_count() const {
-  return shared_function_infos().length();
+  return shared_function_infos()->length();
 }
 
 #if V8_ENABLE_WEBASSEMBLY
 bool Script::has_wasm_breakpoint_infos() const {
-  return type() == Type::kWasm && wasm_breakpoint_infos().length() > 0;
+  return type() == Type::kWasm && wasm_breakpoint_infos()->length() > 0;
 }
 
 wasm::NativeModule* Script::wasm_native_module() const {
-  return Managed<wasm::NativeModule>::cast(wasm_managed_native_module()).raw();
+  return Managed<wasm::NativeModule>::cast(wasm_managed_native_module())->raw();
 }
 
 bool Script::break_on_entry() const { return BreakOnEntryBit::decode(flags()); }
@@ -159,14 +160,14 @@ void Script::set_origin_options(ScriptOriginOptions origin_options) {
 }
 
 bool Script::HasValidSource() {
-  Object src = this->source();
-  if (!src.IsString()) return true;
-  String src_str = String::cast(src);
+  Tagged<Object> src = this->source();
+  if (!IsString(src)) return true;
+  Tagged<String> src_str = Tagged<String>::cast(src);
   if (!StringShape(src_str).IsExternal()) return true;
-  if (src_str.IsOneByteRepresentation()) {
-    return ExternalOneByteString::cast(src).resource() != nullptr;
-  } else if (src_str.IsTwoByteRepresentation()) {
-    return ExternalTwoByteString::cast(src).resource() != nullptr;
+  if (src_str->IsOneByteRepresentation()) {
+    return ExternalOneByteString::cast(src)->resource() != nullptr;
+  } else if (src_str->IsTwoByteRepresentation()) {
+    return ExternalTwoByteString::cast(src)->resource() != nullptr;
   }
   return true;
 }
@@ -193,13 +194,14 @@ void Script::InitLineEnds(LocalIsolate* isolate, Handle<Script> script) {
 }
 
 bool Script::HasSourceURLComment() const {
-  return source_url().IsString() && String::cast(source_url()).length() != 0;
+  return IsString(source_url()) && String::cast(source_url())->length() != 0;
 }
 
 bool Script::IsMaybeUnfinalized(Isolate* isolate) const {
   // TODO(v8:12051): A more robust detection, e.g. with a dedicated sentinel
   // value.
-  return source().IsUndefined(isolate) || String::cast(source()).length() == 0;
+  return IsUndefined(source(), isolate) ||
+         String::cast(source())->length() == 0;
 }
 
 }  // namespace internal

@@ -571,7 +571,7 @@ TEST(TestInterruptLoop) {
             isolate, &thrower, ModuleWireBytes(buffer.begin(), buffer.end()))
             .ToHandleChecked();
 
-    Handle<JSArrayBuffer> memory(instance->memory_object(0).array_buffer(),
+    Handle<JSArrayBuffer> memory(instance->memory_object(0)->array_buffer(),
                                  isolate);
     std::atomic<int32_t>* memory_array =
         reinterpret_cast<std::atomic<int32_t>*>(memory->backing_store());
@@ -830,7 +830,7 @@ TEST(InitDataAtTheUpperLimit) {
     CompileAndInstantiateForTesting(
         isolate, &thrower, ModuleWireBytes(data, data + arraysize(data)));
     if (thrower.error()) {
-      thrower.Reify()->Print();
+      Print(*thrower.Reify());
       FATAL("compile or instantiate error");
     }
   }

@@ -282,9 +282,8 @@ class TypeInferenceReducer
     }
   }
 
-  OpIndex REDUCE(PendingLoopPhi)(OpIndex first, RegisterRepresentation rep,
-                                 PendingLoopPhiOp::Data data) {
-    OpIndex index = Next::ReducePendingLoopPhi(first, rep, data);
+  OpIndex REDUCE(PendingLoopPhi)(OpIndex first, RegisterRepresentation rep) {
+    OpIndex index = Next::ReducePendingLoopPhi(first, rep);
     if (!NeedsTyping(index)) return index;
 
     // There is not much we can do for pending loop phis, because we don't know
@@ -437,7 +436,7 @@ class TypeInferenceReducer
         (og_type.IsInvalid() ? "invalid" : og_type.ToString().c_str()),
         ig_type.ToString().c_str());
 
-    SetType(index, ig_type);
+    RefineOperationType(Asm().current_block(), index, ig_type, 'I');
   }
 
   Type GetTypeOrInvalid(OpIndex index) {

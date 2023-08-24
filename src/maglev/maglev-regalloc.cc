@@ -362,6 +362,10 @@ void StraightForwardRegisterAllocator::AllocateRegisters() {
     constant->SetConstantLocation();
     USE(value);
   }
+  for (const auto& [value, constant] : graph_->tagged_index()) {
+    constant->SetConstantLocation();
+    USE(value);
+  }
   for (const auto& [value, constant] : graph_->int32()) {
     constant->SetConstantLocation();
     USE(value);
@@ -1581,7 +1585,7 @@ void StraightForwardRegisterAllocator::AllocateSpillSlot(ValueNode* node) {
   // TODO(victorgomes): We don't currently reuse double slots on arm.
   if (!v8_flags.maglev_reuse_stack_slots || slot_size > 1 ||
       slots.free_slots.empty()) {
-    free_slot = slots.top;
+    free_slot = slots.top + slot_size - 1;
     slots.top += slot_size;
   } else {
     NodeIdT start = node->live_range().start;

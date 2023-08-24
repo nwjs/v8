@@ -412,32 +412,15 @@ void PrintSingleDeoptFrame(
       os << "}";
       break;
     }
-    case DeoptFrame::FrameType::kConstructStubFrame: {
-      if (frame.as_construct_stub().bytecode_position() ==
-          BytecodeOffset::ConstructStubCreate()) {
-        os << "@ConstructStubCreate";
-      } else {
-        os << "@ConstructStubInvoke";
-      }
+    case DeoptFrame::FrameType::kConstructInvokeStubFrame: {
+      os << "@ConstructInvokeStub";
       if (!v8_flags.print_maglev_deopt_verbose) return;
       os << " : {";
-      auto arguments_without_receiver =
-          frame.as_construct_stub().arguments_without_receiver();
       os << "<this>:"
          << PrintNodeLabel(graph_labeller, frame.as_construct_stub().receiver())
          << ":" << current_input_location->operand();
       current_input_location++;
-      if (arguments_without_receiver.size() > 0) {
-        os << ", ";
-      }
-      for (size_t i = 0; i < arguments_without_receiver.size(); i++) {
-        os << "a" << i << ":"
-           << PrintNodeLabel(graph_labeller, arguments_without_receiver[i])
-           << ":" << current_input_location->operand();
-        current_input_location++;
-        os << ", ";
-      }
-      os << "<context>:"
+      os << ", <context>:"
          << PrintNodeLabel(graph_labeller, frame.as_construct_stub().context())
          << ":" << current_input_location->operand();
       current_input_location++;
@@ -596,7 +579,7 @@ void PrintExceptionHandlerPoint(std::ostream& os,
       break;
     case DeoptFrame::FrameType::kInlinedArgumentsFrame:
       UNREACHABLE();
-    case DeoptFrame::FrameType::kConstructStubFrame:
+    case DeoptFrame::FrameType::kConstructInvokeStubFrame:
     case DeoptFrame::FrameType::kBuiltinContinuationFrame:
       lazy_frame = &deopt_info->top_frame().parent()->as_interpreted();
       break;
@@ -664,9 +647,9 @@ void MaybePrintProvenance(std::ostream& os, std::vector<BasicBlock*> targets,
        provenance.unit != existing_provenance.unit)) {
     script = Script::cast(
         provenance.unit->shared_function_info().object()->script());
-    has_position_info =
-        script.GetPositionInfo(provenance.position.ScriptOffset(),
-                               &position_info, Script::OffsetFlag::kWithOffset);
+    has_position_info = script->GetPositionInfo(
+        provenance.position.ScriptOffset(), &position_info,
+        Script::OffsetFlag::kWithOffset);
     needs_function_print = true;
   }
 
@@ -681,7 +664,7 @@ void MaybePrintProvenance(std::ostream& os, std::vector<BasicBlock*> targets,
       os << "\033[1;34m";
     }
     os << *provenance.unit->shared_function_info().object() << " ("
-       << script.GetNameOrSourceURL();
+       << script->GetNameOrSourceURL();
     if (has_position_info) {
       os << ":" << position_info.line << ":" << position_info.column;
     } else if (provenance.position.IsKnown()) {

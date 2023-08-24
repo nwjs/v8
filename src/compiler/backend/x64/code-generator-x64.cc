@@ -7,6 +7,7 @@
 #include "src/base/logging.h"
 #include "src/base/optional.h"
 #include "src/base/overflowing-math.h"
+#include "src/builtins/builtins.h"
 #include "src/codegen/assembler.h"
 #include "src/codegen/cpu-features.h"
 #include "src/codegen/external-reference.h"
@@ -304,12 +305,17 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
   }
 
   void Generate() final {
-    if (COMPRESS_POINTERS_BOOL) {
+    // When storing an indirect pointer, the value will always be a
+    // full/decompressed pointer.
+    if (COMPRESS_POINTERS_BOOL &&
+        mode_ != RecordWriteMode::kValueIsIndirectPointer) {
       __ DecompressTagged(value_, value_);
     }
+
     __ CheckPageFlag(value_, scratch0_,
                      MemoryChunk::kPointersToHereAreInterestingMask, zero,
                      exit());
+
     __ leaq(scratch1_, operand_);
 
     SaveFPRegsMode const save_fp_mode = frame()->DidAllocateDoubleRegisters()
@@ -318,6 +324,10 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
 
     if (mode_ == RecordWriteMode::kValueIsEphemeronKey) {
       __ CallEphemeronKeyBarrier(object_, scratch1_, save_fp_mode);
+    } else if (mode_ == RecordWriteMode::kValueIsIndirectPointer) {
+      __ CallRecordWriteStubSaveRegisters(object_, scratch1_, save_fp_mode,
+                                          StubCallMode::kCallBuiltinPointer,
+                                          PointerType::kIndirect);
 #if V8_ENABLE_WEBASSEMBLY
     } else if (stub_mode_ == StubCallMode::kCallWasmRuntimeStub) {
       // A direct call to a wasm runtime stub defined in this module.
@@ -368,6 +378,9 @@ int EmitStore(MacroAssembler* masm, Operand operand, Register value,
         break;
       case MachineRepresentation::kSandboxedPointer:
         masm->StoreSandboxedPointerField(operand, value);
+        break;
+      case MachineRepresentation::kIndirectPointer:
+        masm->StoreIndirectPointerField(operand, value);
         break;
       default:
         UNREACHABLE();
@@ -458,29 +471,14 @@ class WasmOutOfLineTrap : public OutOfLineCode {
 
  private:
   void GenerateCallToTrap(TrapId trap_id) {
-    if (!gen_->wasm_runtime_exception_support()) {
-      // We cannot test calls to the runtime in cctest/test-run-wasm.
-      // Therefore we emit a call to C here instead of a call to the runtime.
-      __ PrepareCallCFunction(0);
-      __ CallCFunction(ExternalReference::wasm_call_trap_callback_for_testing(),
-                       0);
-      __ LeaveFrame(StackFrame::WASM);
-      auto call_descriptor = gen_->linkage()->GetIncomingDescriptor();
-      size_t pop_size =
-          call_descriptor->ParameterSlotCount() * kSystemPointerSize;
-      // Use rcx as a scratch register, we return anyways immediately.
-      __ Ret(static_cast<int>(pop_size), rcx);
-    } else {
-      gen_->AssembleSourcePosition(instr_);
-      // A direct call to a wasm runtime stub defined in this module.
-      // Just encode the stub index. This will be patched when the code
-      // is added to the native module and copied into wasm code space.
-      __ near_call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
-      ReferenceMap* reference_map =
-          gen_->zone()->New<ReferenceMap>(gen_->zone());
-      gen_->RecordSafepoint(reference_map);
-      __ AssertUnreachable(AbortReason::kUnexpectedReturnFromWasmTrap);
-    }
+    gen_->AssembleSourcePosition(instr_);
+    // A direct call to a wasm runtime stub defined in this module.
+    // Just encode the stub index. This will be patched when the code
+    // is added to the native module and copied into wasm code space.
+    __ near_call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
+    ReferenceMap* reference_map = gen_->zone()->New<ReferenceMap>(gen_->zone());
+    gen_->RecordSafepoint(reference_map);
+    __ AssertUnreachable(AbortReason::kUnexpectedReturnFromWasmTrap);
   }
 
   Instruction* instr_;
@@ -636,6 +634,14 @@ Register GetTSANValueRegister(MacroAssembler* masm, Register value,
     masm->movq(value_reg, value);
     masm->EncodeSandboxedPointer(value_reg);
     return value_reg;
+  } else if (rep == MachineRepresentation::kIndirectPointer) {
+    // Indirect pointer fields contain an index to a pointer table entry, which
+    // is obtained from the referenced object.
+    static_assert(kAllIndirectPointerObjectsAreCode);
+    Register value_reg = i.TempRegister(1);
+    masm->movl(value_reg,
+               FieldOperand(value, Code::kCodePointerTableEntryOffset));
+    return value_reg;
   }
   return value;
 }
@@ -654,6 +660,12 @@ Register GetTSANValueRegister<std::memory_order_relaxed>(
   if (rep == MachineRepresentation::kSandboxedPointer) {
     // SandboxedPointers need to be encoded.
     masm->EncodeSandboxedPointer(value_reg);
+  } else if (rep == MachineRepresentation::kIndirectPointer) {
+    // Indirect pointer fields contain an index to a pointer table entry, which
+    // is obtained from the referenced object.
+    static_assert(kAllIndirectPointerObjectsAreCode);
+    masm->movl(value_reg,
+               FieldOperand(value_reg, Code::kCodePointerTableEntryOffset));
   }
   return value_reg;
 }
@@ -1395,8 +1407,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ Assert(equal, AbortReason::kWrongFunctionContext);
       }
       static_assert(kJavaScriptCallCodeStartRegister == rcx, "ABI mismatch");
-      __ LoadTaggedField(rcx, FieldOperand(func, JSFunction::kCodeOffset));
-      __ CallCodeObject(rcx);
+      __ CallJSFunction(func);
       frame_access_state()->ClearSPDelta();
       RecordCallPosition(instr);
       break;
@@ -1578,6 +1589,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArchAtomicStoreWithWriteBarrier: {
       // {EmitTSANAwareStore} calls EmitOOLTrapIfNeeded. No need to do it here.
       RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
+      // Indirect pointer writes must use a different opcode.
+      DCHECK_NE(mode, RecordWriteMode::kValueIsIndirectPointer);
       Register object = i.InputRegister(0);
       size_t index = 0;
       Operand operand = i.MemoryOperand(&index);
@@ -1608,6 +1621,28 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       if (mode > RecordWriteMode::kValueIsPointer) {
         __ JumpIfSmi(value, ool->exit());
       }
+      __ CheckPageFlag(object, scratch0,
+                       MemoryChunk::kPointersFromHereAreInterestingMask,
+                       not_zero, ool->entry());
+      __ bind(ool->exit());
+      break;
+    }
+    case kArchStoreIndirectWithWriteBarrier: {
+      RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
+      DCHECK_EQ(mode, RecordWriteMode::kValueIsIndirectPointer);
+      Register object = i.InputRegister(0);
+      size_t index = 0;
+      Operand operand = i.MemoryOperand(&index);
+      Register value = i.InputRegister(index);
+      Register scratch0 = i.TempRegister(0);
+      Register scratch1 = i.TempRegister(1);
+
+      auto ool = zone()->New<OutOfLineRecordWrite>(this, object, operand, value,
+                                                   scratch0, scratch1, mode,
+                                                   DetermineStubCallMode());
+      EmitTSANAwareStore<std::memory_order_relaxed>(
+          zone(), this, masm(), operand, value, i, DetermineStubCallMode(),
+          MachineRepresentation::kIndirectPointer, instr);
       __ CheckPageFlag(object, scratch0,
                        MemoryChunk::kPointersFromHereAreInterestingMask,
                        not_zero, ool->entry());
@@ -2758,6 +2793,17 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       }
       break;
     }
+    case kX64MovqStoreIndirectPointer: {
+      CHECK(!instr->HasOutput());
+      size_t index = 0;
+      Operand operand = i.MemoryOperand(&index);
+      CHECK(!HasImmediateInput(instr, index));
+      Register value(i.InputRegister(index));
+      EmitTSANAwareStore<std::memory_order_relaxed>(
+          zone(), this, masm(), operand, value, i, DetermineStubCallMode(),
+          MachineRepresentation::kIndirectPointer, instr);
+      break;
+    }
     case kX64MovqDecodeSandboxedPointer: {
       CHECK(instr->HasOutput());
       Operand address(i.MemoryOperand());
@@ -3051,6 +3097,21 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
             UNREACHABLE();
         }
 
+      } else if (vec_len == kV256) {
+        switch (lane_size) {
+          case kL32: {
+            // F32x8Splat
+            __ F32x8Splat(i.OutputSimd256Register(), i.InputSimd128Register(0));
+            break;
+          }
+          case kL64: {
+            // F64X4Splat
+            __ F64x4Splat(i.OutputSimd256Register(), i.InputSimd128Register(0));
+            break;
+          }
+          default:
+            UNREACHABLE();
+        }
       } else {
         UNREACHABLE();
       }
@@ -3633,6 +3694,25 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ Addps(dst, kScratchDoubleReg);  // add hi and lo, may round.
       break;
     }
+    case kX64F32x8UConvertI32x8: {
+      DCHECK_EQ(i.OutputSimd256Register(), i.InputSimd256Register(0));
+      DCHECK_NE(i.OutputSimd256Register(), kScratchSimd256Reg);
+      CpuFeatureScope avx_scope(masm(), AVX);
+      CpuFeatureScope avx2_scope(masm(), AVX2);
+      YMMRegister dst = i.OutputSimd256Register();
+      __ vpxor(kScratchSimd256Reg, kScratchSimd256Reg,
+               kScratchSimd256Reg);  // zeros
+      __ vpblendw(kScratchSimd256Reg, kScratchSimd256Reg, dst,
+                  uint8_t{0x55});               // get lo 16 bits
+      __ vpsubd(dst, dst, kScratchSimd256Reg);  // get hi 16 bits
+      __ vcvtdq2ps(kScratchSimd256Reg,
+                   kScratchSimd256Reg);  // convert lo exactly
+      __ vpsrld(dst, dst, uint8_t{1});   // divide by 2 to get in unsigned range
+      __ vcvtdq2ps(dst, dst);            // convert hi
+      __ vaddps(dst, dst, dst);          // double hi
+      __ vaddps(dst, dst, kScratchSimd256Reg);
+      break;
+    }
     case kX64F32x4Qfma: {
       __ F32x4Qfma(i.OutputSimd128Register(), i.InputSimd128Register(0),
                    i.InputSimd128Register(1), i.InputSimd128Register(2),
@@ -3651,6 +3731,30 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
     case kX64Maxps: {
       ASSEMBLE_SIMD_BINOP(maxps);
+      break;
+    }
+    case kX64F32x8Pmin: {
+      YMMRegister dst = i.OutputSimd256Register();
+      CpuFeatureScope avx_scope(masm(), AVX);
+      __ vminps(dst, i.InputSimd256Register(0), i.InputSimd256Register(1));
+      break;
+    }
+    case kX64F32x8Pmax: {
+      YMMRegister dst = i.OutputSimd256Register();
+      CpuFeatureScope avx_scope(masm(), AVX);
+      __ vmaxps(dst, i.InputSimd256Register(0), i.InputSimd256Register(1));
+      break;
+    }
+    case kX64F64x4Pmin: {
+      YMMRegister dst = i.OutputSimd256Register();
+      CpuFeatureScope avx_scope(masm(), AVX);
+      __ vminpd(dst, i.InputSimd256Register(0), i.InputSimd256Register(1));
+      break;
+    }
+    case kX64F64x4Pmax: {
+      YMMRegister dst = i.OutputSimd256Register();
+      CpuFeatureScope avx_scope(masm(), AVX);
+      __ vmaxpd(dst, i.InputSimd256Register(0), i.InputSimd256Register(1));
       break;
     }
     case kX64F32x4Round: {
@@ -4558,27 +4662,38 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
             UNREACHABLE();
         }
       } else if (vec_len == kV256) {
-        DCHECK_EQ(i.OutputSimd256Register(), i.InputSimd256Register(0));
         YMMRegister dst = i.OutputSimd256Register();
         YMMRegister src = i.InputSimd256Register(1);
         CpuFeatureScope avx2_scope(masm(), AVX2);
         switch (lane_size) {
           case kL8: {
             // I8x32GeS
+            DCHECK_EQ(i.OutputSimd256Register(), i.InputSimd256Register(0));
             __ vpminsb(dst, dst, src);
             __ vpcmpeqb(dst, dst, src);
             break;
           }
           case kL16: {
             // I16x16GeS
+            DCHECK_EQ(i.OutputSimd256Register(), i.InputSimd256Register(0));
             __ vpminsw(dst, dst, src);
             __ vpcmpeqw(dst, dst, src);
             break;
           }
           case kL32: {
             // I32x8GeS
+            DCHECK_EQ(i.OutputSimd256Register(), i.InputSimd256Register(0));
             __ vpminsd(dst, dst, src);
             __ vpcmpeqd(dst, dst, src);
+            break;
+          }
+          case kL64: {
+            // I64x4GeS
+            __ vpcmpgtq(dst, i.InputSimd256Register(1),
+                        i.InputSimd256Register(0));
+            __ vpcmpeqq(kScratchSimd256Reg, kScratchSimd256Reg,
+                        kScratchSimd256Reg);
+            __ vpxor(dst, dst, kScratchSimd256Reg);
             break;
           }
           default:
@@ -4857,6 +4972,36 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ Cvttps2dq(dst, dst);
       // Add (src-max_signed) for overflow lanes.
       __ Paddd(dst, tmp);
+      break;
+    }
+    case kX64I32x8UConvertF32x8: {
+      DCHECK_EQ(i.OutputSimd256Register(), i.InputSimd256Register(0));
+      CpuFeatureScope avx_scope(masm(), AVX);
+      CpuFeatureScope avx2_scope(masm(), AVX2);
+      YMMRegister dst = i.OutputSimd256Register();
+      YMMRegister tmp1 = i.TempSimd256Register(0);
+      YMMRegister tmp2 = i.TempSimd256Register(1);
+      // NAN->0, negative->0
+      __ vpxor(tmp2, tmp2, tmp2);
+      __ vmaxps(dst, dst, tmp2);
+      // scratch: float representation of max_signed
+      __ vpcmpeqd(tmp2, tmp2, tmp2);
+      __ vpsrld(tmp2, tmp2, uint8_t{1});  // 0x7fffffff
+      __ vcvtdq2ps(tmp2, tmp2);           // 0x4f000000
+      // tmp1: convert (src-max_signed).
+      // Positive overflow lanes -> 0x7FFFFFFF
+      // Negative lanes -> 0
+      __ vmovaps(tmp1, dst);
+      __ vsubps(tmp1, tmp1, tmp2);
+      __ vcmpleps(tmp2, tmp2, tmp1);
+      __ vcvttps2dq(tmp1, tmp1);
+      __ vpxor(tmp1, tmp1, tmp2);
+      __ vpxor(tmp2, tmp2, tmp2);
+      __ vpmaxsd(tmp1, tmp1, tmp2);
+      // convert. Overflow lanes above max_signed will be 0x80000000
+      __ vcvttps2dq(dst, dst);
+      // Add (src-max_signed) for overflow lanes.
+      __ vpaddd(dst, dst, tmp1);
       break;
     }
     case kX64I32x4UConvertI16x8Low: {
@@ -5647,18 +5792,13 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kX64SAndNot: {
       VectorLength vec_len = VectorLengthField::decode(opcode);
       if (vec_len == kV128) {  // S128AndNot
-        XMMRegister dst = i.OutputSimd128Register();
-        DCHECK_EQ(dst, i.InputSimd128Register(0));
         // The inputs have been inverted by instruction selector, so we can call
         // andnps here without any modifications.
-        __ Andnps(dst, i.InputSimd128Register(1));
+        ASSEMBLE_SIMD_BINOP(andnps);
       } else if (vec_len == kV256) {  // S256AndNot
-        YMMRegister dst = i.OutputSimd256Register();
-        DCHECK_EQ(dst, i.InputSimd256Register(0));
         // The inputs have been inverted by instruction selector, so we can call
         // andnps here without any modifications.
-        CpuFeatureScope avx_scope(masm(), AVX);
-        __ vandnps(dst, dst, i.InputSimd256Register(1));
+        ASSEMBLE_SIMD256_BINOP(andnps, AVX);
       } else {
         UNREACHABLE();
       }
@@ -6286,6 +6426,18 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       ASSEMBLE_SIMD256_BINOP(pmaddwd, AVX2);
       break;
     }
+    case kX64S256Load8Splat: {
+      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+      CpuFeatureScope avx2_scope(masm(), AVX2);
+      __ vpbroadcastb(i.OutputSimd256Register(), i.MemoryOperand());
+      break;
+    }
+    case kX64S256Load16Splat: {
+      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+      CpuFeatureScope avx2_scope(masm(), AVX2);
+      __ vpbroadcastw(i.OutputSimd256Register(), i.MemoryOperand());
+      break;
+    }
     case kX64S256Load32Splat: {
       EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       CpuFeatureScope avx_scope(masm(), AVX);
@@ -6293,7 +6445,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     }
     case kX64S256Load64Splat: {
-      UNIMPLEMENTED();
+      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+      CpuFeatureScope avx_scope(masm(), AVX);
+      __ vbroadcastsd(i.OutputSimd256Register(), i.MemoryOperand());
+      break;
     }
     case kX64Movdqu256: {
       EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
@@ -6369,6 +6524,42 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ I16x16ExtMul(i.OutputSimd256Register(), i.InputSimd128Register(0),
                       i.InputSimd128Register(1), kScratchSimd256Reg,
                       /*is_signed=*/false);
+      break;
+    }
+    case kX64S256Load8x16S: {
+      CpuFeatureScope avx_scope(masm(), AVX2);
+      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+      __ vpmovsxbw(i.OutputSimd256Register(), i.MemoryOperand());
+      break;
+    }
+    case kX64S256Load8x16U: {
+      CpuFeatureScope avx_scope(masm(), AVX2);
+      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+      __ vpmovzxbw(i.OutputSimd256Register(), i.MemoryOperand());
+      break;
+    }
+    case kX64S256Load16x8S: {
+      CpuFeatureScope avx_scope(masm(), AVX2);
+      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+      __ vpmovsxwd(i.OutputSimd256Register(), i.MemoryOperand());
+      break;
+    }
+    case kX64S256Load16x8U: {
+      CpuFeatureScope avx_scope(masm(), AVX2);
+      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+      __ vpmovzxwd(i.OutputSimd256Register(), i.MemoryOperand());
+      break;
+    }
+    case kX64S256Load32x4S: {
+      CpuFeatureScope avx_scope(masm(), AVX2);
+      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+      __ vpmovsxdq(i.OutputSimd256Register(), i.MemoryOperand());
+      break;
+    }
+    case kX64S256Load32x4U: {
+      CpuFeatureScope avx_scope(masm(), AVX2);
+      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+      __ vpmovzxdq(i.OutputSimd256Register(), i.MemoryOperand());
       break;
     }
   }
@@ -6586,7 +6777,7 @@ void CodeGenerator::AssembleArchTableSwitch(Instruction* instr) {
   X64OperandConverter i(this, instr);
   Register input = i.InputRegister(0);
   int32_t const case_count = static_cast<int32_t>(instr->InputCount() - 2);
-  Label** cases = zone()->NewArray<Label*>(case_count);
+  Label** cases = zone()->AllocateArray<Label*>(case_count);
   for (int32_t index = 0; index < case_count; ++index) {
     cases[index] = GetLabel(i.InputRpo(index + 2));
   }
@@ -6594,7 +6785,22 @@ void CodeGenerator::AssembleArchTableSwitch(Instruction* instr) {
   __ cmpl(input, Immediate(case_count));
   __ j(above_equal, GetLabel(i.InputRpo(1)));
   __ leaq(kScratchRegister, Operand(table));
-  __ jmp(Operand(kScratchRegister, input, times_8, 0));
+
+  if (V8_UNLIKELY(Builtins::IsBuiltinId(masm_.builtin()))) {
+    // For builtins, the value in the table is 'target_address - table_address'
+    // (4 bytes) Load the value in the table with index.
+    // value = [table +index*4]
+    __ movsxlq(input, Operand(kScratchRegister, input, times_4, 0));
+    // Calculate the absolute address of target:
+    // target = table + (target - table)
+    __ addq(input, kScratchRegister);
+    // Jump to the target.
+    __ jmp(input);
+  } else {
+    // For non builtins, the value in the table is 'target_address' (8 bytes)
+    // jmp [table + index*8]
+    __ jmp(Operand(kScratchRegister, input, times_8, 0));
+  }
 }
 
 void CodeGenerator::AssembleArchSelect(Instruction* instr,
@@ -6961,23 +7167,25 @@ AllocatedOperand CodeGenerator::Push(InstructionOperand* source) {
 
 void CodeGenerator::Pop(InstructionOperand* dest, MachineRepresentation rep) {
   X64OperandConverter g(this, nullptr);
-  int new_slots = ElementSizeInPointers(rep);
-  frame_access_state()->IncreaseSPDelta(-new_slots);
+  int dropped_slots = ElementSizeInPointers(rep);
   if (dest->IsRegister()) {
+    frame_access_state()->IncreaseSPDelta(-dropped_slots);
     __ popq(g.ToRegister(dest));
   } else if (dest->IsStackSlot() || dest->IsFloatStackSlot() ||
              dest->IsDoubleStackSlot()) {
+    frame_access_state()->IncreaseSPDelta(-dropped_slots);
     __ popq(g.ToOperand(dest));
   } else {
     int last_frame_slot_id =
         frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
     int sp_delta = frame_access_state_->sp_delta();
-    int slot_id = last_frame_slot_id + sp_delta + new_slots;
+    int slot_id = last_frame_slot_id + sp_delta;
     AllocatedOperand stack_slot(LocationOperand::STACK_SLOT, rep, slot_id);
     AssembleMove(&stack_slot, dest);
-    __ addq(rsp, Immediate(new_slots * kSystemPointerSize));
+    frame_access_state()->IncreaseSPDelta(-dropped_slots);
+    __ addq(rsp, Immediate(dropped_slots * kSystemPointerSize));
   }
-  temp_slots_ -= new_slots;
+  temp_slots_ -= dropped_slots;
 }
 
 void CodeGenerator::PopTempStackSlots() {
@@ -7422,6 +7630,23 @@ void CodeGenerator::AssembleSwap(InstructionOperand* source,
 }
 
 void CodeGenerator::AssembleJumpTable(Label** targets, size_t target_count) {
+#ifdef V8_ENABLE_BUILTIN_JUMP_TABLE_SWITCH
+  // For builtins, the value in table is `target_address - table_address`.
+  // The reason is that the builtins code position may be changed so the table
+  // value should be position independent.
+  if (V8_UNLIKELY(Builtins::IsBuiltinId(masm_.builtin()))) {
+    int table_pos = __ pc_offset();
+
+    for (size_t index = 0; index < target_count; ++index) {
+      __ WriteBuiltinJumpTableEntry(targets[index], table_pos);
+    }
+    return;
+  }
+
+#endif  // V8_ENABLE_BUILTIN_JUMP_TABLE_SWITCH
+
+  // For non-builtins, the value in table is just the target absolute address,
+  // it's position dependent.
   for (size_t index = 0; index < target_count; ++index) {
     __ dq(targets[index]);
   }

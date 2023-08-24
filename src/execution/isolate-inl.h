@@ -42,22 +42,22 @@ V8_INLINE Isolate* Isolate::Current() {
 bool Isolate::IsCurrent() const { return this == TryGetCurrent(); }
 
 void Isolate::set_context(Context context) {
-  DCHECK(context.is_null() || context.IsContext());
+  DCHECK(context.is_null() || IsContext(context));
   thread_local_top()->context_ = context;
 }
 
 Handle<NativeContext> Isolate::native_context() {
   DCHECK(!context().is_null());
-  return handle(context().native_context(), this);
+  return handle(context()->native_context(), this);
 }
 
 NativeContext Isolate::raw_native_context() {
   DCHECK(!context().is_null());
-  return context().native_context();
+  return context()->native_context();
 }
 
 void Isolate::set_pending_message(Object message_obj) {
-  DCHECK(message_obj.IsTheHole(this) || message_obj.IsJSMessageObject());
+  DCHECK(IsTheHole(message_obj, this) || IsJSMessageObject(message_obj));
   thread_local_top()->pending_message_ = message_obj;
 }
 
@@ -70,44 +70,44 @@ void Isolate::clear_pending_message() {
 }
 
 bool Isolate::has_pending_message() {
-  return !pending_message().IsTheHole(this);
+  return !IsTheHole(pending_message(), this);
 }
 
 Object Isolate::pending_exception() {
   CHECK(has_pending_exception());
-  DCHECK(!thread_local_top()->pending_exception_.IsException(this));
+  DCHECK(!IsException(thread_local_top()->pending_exception_, this));
   return thread_local_top()->pending_exception_;
 }
 
 void Isolate::set_pending_exception(Object exception_obj) {
-  DCHECK(!exception_obj.IsException(this));
+  DCHECK(!IsException(exception_obj, this));
   thread_local_top()->pending_exception_ = exception_obj;
 }
 
 void Isolate::clear_pending_exception() {
-  DCHECK(!thread_local_top()->pending_exception_.IsException(this));
+  DCHECK(!IsException(thread_local_top()->pending_exception_, this));
   thread_local_top()->pending_exception_ = ReadOnlyRoots(this).the_hole_value();
 }
 
 bool Isolate::has_pending_exception() {
-  DCHECK(!thread_local_top()->pending_exception_.IsException(this));
-  return !thread_local_top()->pending_exception_.IsTheHole(this);
+  DCHECK(!IsException(thread_local_top()->pending_exception_, this));
+  return !IsTheHole(thread_local_top()->pending_exception_, this);
 }
 
 Object Isolate::scheduled_exception() {
   DCHECK(has_scheduled_exception());
-  DCHECK(!thread_local_top()->scheduled_exception_.IsException(this));
+  DCHECK(!IsException(thread_local_top()->scheduled_exception_, this));
   return thread_local_top()->scheduled_exception_;
 }
 
 bool Isolate::has_scheduled_exception() {
-  DCHECK(!thread_local_top()->scheduled_exception_.IsException(this));
+  DCHECK(!IsException(thread_local_top()->scheduled_exception_, this));
   return thread_local_top()->scheduled_exception_ !=
          ReadOnlyRoots(this).the_hole_value();
 }
 
 void Isolate::clear_scheduled_exception() {
-  DCHECK(!thread_local_top()->scheduled_exception_.IsException(this));
+  DCHECK(!IsException(thread_local_top()->scheduled_exception_, this));
   set_scheduled_exception(ReadOnlyRoots(this).the_hole_value());
 }
 
@@ -132,7 +132,7 @@ Object Isolate::VerifyBuiltinsResult(Object result) {
   // Check that the returned pointer is actually part of the current isolate,
   // because that's the assumption in generated code (which might call this
   // builtin).
-  if (!result.IsSmi()) {
+  if (!IsSmi(result)) {
     DCHECK_EQ(result.ptr(), V8HeapCompressionScheme::DecompressTagged(
                                 this, static_cast<Tagged_t>(result.ptr())));
   }
@@ -168,7 +168,7 @@ bool Isolate::is_catchable_by_javascript(Object exception) {
 
 bool Isolate::is_catchable_by_wasm(Object exception) {
   if (!is_catchable_by_javascript(exception)) return false;
-  if (!exception.IsJSObject()) return true;
+  if (!IsJSObject(exception)) return true;
   // We don't allocate, but the LookupIterator interface expects a handle.
   DisallowGarbageCollection no_gc;
   HandleScope handle_scope(this);
@@ -185,11 +185,11 @@ void Isolate::FireBeforeCallEnteredCallback() {
 }
 
 Handle<JSGlobalObject> Isolate::global_object() {
-  return handle(context().global_object(), this);
+  return handle(context()->global_object(), this);
 }
 
 Handle<JSGlobalProxy> Isolate::global_proxy() {
-  return handle(context().global_proxy(), this);
+  return handle(context()->global_proxy(), this);
 }
 
 Isolate::ExceptionScope::ExceptionScope(Isolate* isolate)
@@ -235,12 +235,12 @@ void Isolate::DidFinishModuleAsyncEvaluation(unsigned ordinal) {
   }
 }
 
-#define NATIVE_CONTEXT_FIELD_ACCESSOR(index, type, name)    \
-  Handle<type> Isolate::name() {                            \
-    return Handle<type>(raw_native_context().name(), this); \
-  }                                                         \
-  bool Isolate::is_##name(type value) {                     \
-    return raw_native_context().is_##name(value);           \
+#define NATIVE_CONTEXT_FIELD_ACCESSOR(index, type, name)     \
+  Handle<type> Isolate::name() {                             \
+    return Handle<type>(raw_native_context()->name(), this); \
+  }                                                          \
+  bool Isolate::is_##name(type value) {                      \
+    return raw_native_context()->is_##name(value);           \
   }
 NATIVE_CONTEXT_FIELDS(NATIVE_CONTEXT_FIELD_ACCESSOR)
 #undef NATIVE_CONTEXT_FIELD_ACCESSOR

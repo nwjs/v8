@@ -40,7 +40,7 @@ TEST(WeakReferencesBasic) {
   if (!v8_flags.single_generation) CHECK(Heap::InYoungGeneration(*lh));
 
   MaybeObject code_object = lh->data1();
-  CHECK(code_object->IsSmi());
+  CHECK(IsSmi(code_object));
   heap::InvokeMajorGC(CcTest::heap());
   CHECK(!Heap::InYoungGeneration(*lh));
   CHECK_EQ(code_object, lh->data1());
@@ -55,7 +55,7 @@ TEST(WeakReferencesBasic) {
     assm.GetCode(isolate, &desc);
     Handle<Code> code =
         Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
-    CHECK(code->IsCode());
+    CHECK(IsCode(*code));
 
     lh->set_data1(HeapObjectReference::Weak(*code));
     HeapObject code_heap_object;
@@ -347,8 +347,8 @@ TEST(EmptyWeakArray) {
   HandleScope outer_scope(isolate);
 
   Handle<WeakFixedArray> array = factory->empty_weak_fixed_array();
-  CHECK(array->IsWeakFixedArray());
-  CHECK(!array->IsFixedArray());
+  CHECK(IsWeakFixedArray(*array));
+  CHECK(!IsFixedArray(*array));
   CHECK_EQ(array->length(), 0);
 }
 
@@ -365,8 +365,8 @@ TEST(WeakArraysBasic) {
 
   const int length = 4;
   Handle<WeakFixedArray> array = factory->NewWeakFixedArray(length);
-  CHECK(array->IsWeakFixedArray());
-  CHECK(!array->IsFixedArray());
+  CHECK(IsWeakFixedArray(*array));
+  CHECK(!IsFixedArray(*array));
   CHECK_EQ(array->length(), length);
 
   CHECK(Heap::InYoungGeneration(*array));
@@ -406,21 +406,21 @@ TEST(WeakArraysBasic) {
   heap::InvokeMinorGC(heap);
   HeapObject heap_object;
   CHECK(array->Get(0)->GetHeapObjectIfWeak(&heap_object));
-  CHECK_EQ(Smi::cast(FixedArray::cast(heap_object).get(0)).value(), 2016);
+  CHECK_EQ(Smi::cast(FixedArray::cast(heap_object)->get(0)).value(), 2016);
   CHECK(array->Get(1)->GetHeapObjectIfWeak(&heap_object));
-  CHECK_EQ(Smi::cast(FixedArray::cast(heap_object).get(0)).value(), 2017);
+  CHECK_EQ(Smi::cast(FixedArray::cast(heap_object)->get(0)).value(), 2017);
   CHECK(array->Get(2)->GetHeapObjectIfStrong(&heap_object));
-  CHECK_EQ(Smi::cast(FixedArray::cast(heap_object).get(0)).value(), 2018);
+  CHECK_EQ(Smi::cast(FixedArray::cast(heap_object)->get(0)).value(), 2018);
   CHECK(array->Get(3)->GetHeapObjectIfWeak(&heap_object));
-  CHECK_EQ(Smi::cast(FixedArray::cast(heap_object).get(0)).value(), 2019);
+  CHECK_EQ(Smi::cast(FixedArray::cast(heap_object)->get(0)).value(), 2019);
 
   heap::InvokeMajorGC(heap);
   CHECK(heap->InOldSpace(*array));
   CHECK(array->Get(0)->IsCleared());
   CHECK(array->Get(1)->GetHeapObjectIfWeak(&heap_object));
-  CHECK_EQ(Smi::cast(FixedArray::cast(heap_object).get(0)).value(), 2017);
+  CHECK_EQ(Smi::cast(FixedArray::cast(heap_object)->get(0)).value(), 2017);
   CHECK(array->Get(2)->GetHeapObjectIfStrong(&heap_object));
-  CHECK_EQ(Smi::cast(FixedArray::cast(heap_object).get(0)).value(), 2018);
+  CHECK_EQ(Smi::cast(FixedArray::cast(heap_object)->get(0)).value(), 2018);
   CHECK(array->Get(3)->IsCleared());
 }
 
@@ -437,9 +437,9 @@ TEST(WeakArrayListBasic) {
 
   Handle<WeakArrayList> array(ReadOnlyRoots(heap).empty_weak_array_list(),
                               isolate);
-  CHECK(array->IsWeakArrayList());
-  CHECK(!array->IsFixedArray());
-  CHECK(!array->IsWeakFixedArray());
+  CHECK(IsWeakArrayList(*array));
+  CHECK(!IsFixedArray(*array));
+  CHECK(!IsWeakFixedArray(*array));
   CHECK_EQ(array->length(), 0);
 
   Handle<FixedArray> index2 = factory->NewFixedArray(1);
@@ -504,19 +504,19 @@ TEST(WeakArrayListBasic) {
   HeapObject heap_object;
   CHECK_EQ(array->length(), 8);
   CHECK(array->Get(0)->GetHeapObjectIfWeak(&heap_object));
-  CHECK_EQ(Smi::cast(FixedArray::cast(heap_object).get(0)).value(), 2016);
+  CHECK_EQ(Smi::cast(FixedArray::cast(heap_object)->get(0)).value(), 2016);
   CHECK_EQ(array->Get(1).ToSmi().value(), 1);
 
   CHECK(array->Get(2)->GetHeapObjectIfWeak(&heap_object));
-  CHECK_EQ(Smi::cast(FixedArray::cast(heap_object).get(0)).value(), 2017);
+  CHECK_EQ(Smi::cast(FixedArray::cast(heap_object)->get(0)).value(), 2017);
   CHECK_EQ(array->Get(3).ToSmi().value(), 3);
 
   CHECK(array->Get(4)->GetHeapObjectIfWeak(&heap_object));
-  CHECK_EQ(Smi::cast(FixedArray::cast(heap_object).get(0)).value(), 2018);
+  CHECK_EQ(Smi::cast(FixedArray::cast(heap_object)->get(0)).value(), 2018);
   CHECK_EQ(array->Get(5).ToSmi().value(), 5);
 
   CHECK(array->Get(6)->GetHeapObjectIfWeak(&heap_object));
-  CHECK_EQ(Smi::cast(FixedArray::cast(heap_object).get(0)).value(), 2019);
+  CHECK_EQ(Smi::cast(FixedArray::cast(heap_object)->get(0)).value(), 2019);
   CHECK_EQ(array->Get(7).ToSmi().value(), 7);
 
   heap::InvokeMajorGC(heap);
@@ -526,7 +526,7 @@ TEST(WeakArrayListBasic) {
   CHECK_EQ(array->Get(1).ToSmi().value(), 1);
 
   CHECK(array->Get(2)->GetHeapObjectIfWeak(&heap_object));
-  CHECK_EQ(Smi::cast(FixedArray::cast(heap_object).get(0)).value(), 2017);
+  CHECK_EQ(Smi::cast(FixedArray::cast(heap_object)->get(0)).value(), 2017);
   CHECK_EQ(array->Get(3).ToSmi().value(), 3);
 
   CHECK(array->Get(4)->IsCleared());
@@ -761,7 +761,7 @@ TEST(PrototypeUsersCompacted) {
   CHECK_EQ(array->length(), 3 + PrototypeUsers::kFirstIndex);
   WeakArrayList new_array =
       PrototypeUsers::Compact(array, heap, TestCompactCallback);
-  CHECK_EQ(new_array.length(), 1 + PrototypeUsers::kFirstIndex);
+  CHECK_EQ(new_array->length(), 1 + PrototypeUsers::kFirstIndex);
   CHECK_EQ(saved_heap_object, *live_map);
 }
 

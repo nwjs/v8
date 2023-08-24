@@ -35,6 +35,7 @@ constexpr int kMaxTableSize = 32;
 constexpr int kMaxTables = 4;
 constexpr int kMaxArraySize = 20;
 constexpr int kMaxPassiveDataSegments = 2;
+constexpr uint32_t kMaxRecursionDepth = 64;
 
 class DataRange {
   // data_ is used for general random values for fuzzing.
@@ -642,7 +643,11 @@ class WasmGenerator {
   void memop(DataRange* data) {
     const uint8_t align =
         data->getPseudoRandom<uint8_t>() % (max_alignment(memory_op) + 1);
-    const uint32_t offset = data->getPseudoRandom<uint32_t>();
+    uint32_t offset = data->get<uint16_t>();
+    // With a 1/256 chance generate potentially very large offsets.
+    if ((offset & 0xff) == 0xff) {
+      offset = data->getPseudoRandom<uint32_t>();
+    }
 
     // Generate the index and the arguments, if any.
     Generate<kI32, arg_kinds...>(data);
@@ -661,7 +666,11 @@ class WasmGenerator {
   void atomic_op(DataRange* data) {
     const uint8_t align =
         data->getPseudoRandom<uint8_t>() % (max_alignment(Op) + 1);
-    const uint32_t offset = data->getPseudoRandom<uint32_t>();
+    uint32_t offset = data->get<uint16_t>();
+    // With a 1/256 chance generate potentially very large offsets.
+    if ((offset & 0xff) == 0xff) {
+      offset = data->getPseudoRandom<uint32_t>();
+    }
 
     Generate<Args...>(data);
     builder_->EmitWithPrefix(Op);
@@ -1080,22 +1089,14 @@ class WasmGenerator {
           builder_->EmitU32V(index);
           break;
         case kExprArrayNewFixed: {
-          uint32_t element_count;
-          uint8_t diceroll = data->get<uint8_t>();
-          if (diceroll < 250 || element_type.is_non_nullable()) {
-            // Most generated arrays will be small and fast...
-            element_count = diceroll % 25;
-          } else {
-            // ...but we also want to test some huge arrays.
-            element_count =
-                data->get<uint16_t>() % kV8MaxWasmArrayNewFixedLength;
-          }
-          for (uint32_t i = 0; i < element_count; ++i) {
+          size_t element_count =
+              std::min(static_cast<size_t>(data->get<uint8_t>()), data->size());
+          for (size_t i = 0; i < element_count; ++i) {
             Generate(element_type.Unpacked(), data);
           }
           builder_->EmitWithPrefix(kExprArrayNewFixed);
           builder_->EmitU32V(index);
-          builder_->EmitU32V(element_count);
+          builder_->EmitU32V(static_cast<uint32_t>(element_count));
           break;
         }
         case kExprArrayNewDefault:
@@ -1810,7 +1811,6 @@ class WasmGenerator {
   bool has_simd_;
   uint32_t num_structs_;
   uint32_t num_arrays_;
-  static constexpr uint32_t kMaxRecursionDepth = 64;
   bool locals_initialized_;
 
   bool recursion_limit_reached() {
@@ -2318,7 +2318,7 @@ void WasmGenerator::Generate<kS128>(DataRange* data) {
   if (recursion_limit_reached() || data->size() <= sizeof(int32_t)) {
     // TODO(v8:8460): v128.const is not implemented yet, and we need a way to
     // "bottom-out", so use a splat to generate this.
-    builder_->EmitI32Const(data->getPseudoRandom<int32_t>());
+    builder_->EmitI32Const(0);
     builder_->EmitWithPrefix(kExprI8x16Splat);
     return;
   }
@@ -2915,12 +2915,14 @@ FunctionSig* GenerateSig(Zone* zone, DataRange* data, SigKind sig_kind,
 
 WasmInitExpr GenerateInitExpr(Zone* zone, DataRange& range,
                               WasmModuleBuilder* builder, ValueType type,
-                              int num_structs, int num_arrays);
+                              int num_structs, int num_arrays,
+                              uint32_t recursion_depth);
 
 WasmInitExpr GenerateStructNewInitExpr(Zone* zone, DataRange& range,
                                        WasmModuleBuilder* builder,
                                        uint32_t index, int num_structs,
-                                       int num_arrays) {
+                                       int num_arrays,
+                                       uint32_t recursion_depth) {
   const StructType* struct_type = builder->GetStructType(index);
   bool use_new_default =
       std::all_of(struct_type->fields().begin(), struct_type->fields().end(),
@@ -2934,9 +2936,9 @@ WasmInitExpr GenerateStructNewInitExpr(Zone* zone, DataRange& range,
         zone->New<ZoneVector<WasmInitExpr>>(zone);
     int field_count = struct_type->field_count();
     for (int field_index = 0; field_index < field_count; field_index++) {
-      elements->push_back(GenerateInitExpr(zone, range, builder,
-                                           struct_type->field(field_index),
-                                           num_structs, num_arrays));
+      elements->push_back(GenerateInitExpr(
+          zone, range, builder, struct_type->field(field_index), num_structs,
+          num_arrays, recursion_depth + 1));
     }
     return WasmInitExpr::StructNew(index, elements);
   }
@@ -2944,7 +2946,8 @@ WasmInitExpr GenerateStructNewInitExpr(Zone* zone, DataRange& range,
 
 WasmInitExpr GenerateArrayInitExpr(Zone* zone, DataRange& range,
                                    WasmModuleBuilder* builder, uint32_t index,
-                                   int num_structs, int num_arrays) {
+                                   int num_structs, int num_arrays,
+                                   uint32_t recursion_depth) {
   constexpr int kMaxArrayLength = 20;
   uint8_t choice = range.get<uint8_t>() % 3;
   ValueType element_type = builder->GetArrayType(index)->element_type();
@@ -2954,14 +2957,16 @@ WasmInitExpr GenerateArrayInitExpr(Zone* zone, DataRange& range,
         zone->New<ZoneVector<WasmInitExpr>>(zone);
     for (int i = 0; i < element_count; i++) {
       elements->push_back(GenerateInitExpr(zone, range, builder, element_type,
-                                           num_structs, num_arrays));
+                                           num_structs, num_arrays,
+                                           recursion_depth + 1));
     }
     return WasmInitExpr::ArrayNewFixed(index, elements);
   } else if (choice == 1 || !element_type.is_defaultable()) {
     // TODO(14034): Add other int expressions to length (same below).
     WasmInitExpr length = WasmInitExpr(range.get<uint8_t>() % kMaxArrayLength);
-    WasmInitExpr init = GenerateInitExpr(zone, range, builder, element_type,
-                                         num_structs, num_arrays);
+    WasmInitExpr init =
+        GenerateInitExpr(zone, range, builder, element_type, num_structs,
+                         num_arrays, recursion_depth + 1);
     return WasmInitExpr::ArrayNew(zone, index, init, length);
   } else {
     WasmInitExpr length = WasmInitExpr(range.get<uint8_t>() % kMaxArrayLength);
@@ -2969,13 +2974,18 @@ WasmInitExpr GenerateArrayInitExpr(Zone* zone, DataRange& range,
   }
 }
 
+// TODO(manoskouk): Add global.get.
 WasmInitExpr GenerateInitExpr(Zone* zone, DataRange& range,
                               WasmModuleBuilder* builder, ValueType type,
-                              int num_structs, int num_arrays) {
+                              int num_structs, int num_arrays,
+                              uint32_t recursion_depth) {
   switch (type.kind()) {
     case kI8:
     case kI16:
     case kI32: {
+      if (range.size() == 0 || recursion_depth >= kMaxRecursionDepth) {
+        return WasmInitExpr(int32_t{0});
+      }
       // 50% to generate a constant, 50% to generate a binary operator.
       uint8_t choice = range.get<uint8_t>() % 6;
       switch (choice) {
@@ -2990,12 +3000,15 @@ WasmInitExpr GenerateInitExpr(Zone* zone, DataRange& range,
           return WasmInitExpr::Binop(
               zone, op,
               GenerateInitExpr(zone, range, builder, kWasmI32, num_structs,
-                               num_arrays),
+                               num_arrays, recursion_depth + 1),
               GenerateInitExpr(zone, range, builder, kWasmI32, num_structs,
-                               num_arrays));
+                               num_arrays, recursion_depth + 1));
       }
     }
     case kI64: {
+      if (range.size() == 0 || recursion_depth >= kMaxRecursionDepth) {
+        return WasmInitExpr(int64_t{0});
+      }
       // 50% to generate a constant, 50% to generate a binary operator.
       uint8_t choice = range.get<uint8_t>() % 6;
       switch (choice) {
@@ -3010,9 +3023,9 @@ WasmInitExpr GenerateInitExpr(Zone* zone, DataRange& range,
           return WasmInitExpr::Binop(
               zone, op,
               GenerateInitExpr(zone, range, builder, kWasmI64, num_structs,
-                               num_arrays),
+                               num_arrays, recursion_depth + 1),
               GenerateInitExpr(zone, range, builder, kWasmI64, num_structs,
-                               num_arrays));
+                               num_arrays, recursion_depth + 1));
       }
     }
     case kF32:
@@ -3034,7 +3047,8 @@ WasmInitExpr GenerateInitExpr(Zone* zone, DataRange& range,
         default:
           break;
       }
-      if (null_only || (range.get<uint8_t>() % 4 == 0)) {
+      if (range.size() == 0 || recursion_depth >= kMaxRecursionDepth ||
+          null_only || (range.get<uint8_t>() % 4 == 0)) {
         return WasmInitExpr::RefNullConst(type.heap_type().representation());
       }
       V8_FALLTHROUGH;
@@ -3044,19 +3058,21 @@ WasmInitExpr GenerateInitExpr(Zone* zone, DataRange& range,
         case HeapType::kStruct: {
           uint8_t index = range.get<uint8_t>() % num_structs;
           return GenerateStructNewInitExpr(zone, range, builder, index,
-                                           num_structs, num_arrays);
+                                           num_structs, num_arrays,
+                                           recursion_depth);
         }
         case HeapType::kAny: {
           // Do not use 0 as the determining value here, otherwise an exhausted
           // {range} will generate an infinite recursion with the {kExtern}
           // case.
-          if (range.get<uint8_t>() % 4 == 3) {
+          if (recursion_depth < kMaxRecursionDepth && range.size() > 0 &&
+              range.get<uint8_t>() % 4 == 3) {
             return WasmInitExpr::ExternInternalize(
                 zone,
                 GenerateInitExpr(zone, range, builder,
                                  ValueType::RefMaybeNull(HeapType::kExtern,
                                                          type.nullability()),
-                                 num_structs, num_arrays));
+                                 num_structs, num_arrays, recursion_depth + 1));
           }
           V8_FALLTHROUGH;
         }
@@ -3069,7 +3085,7 @@ WasmInitExpr GenerateInitExpr(Zone* zone, DataRange& range,
           return GenerateInitExpr(
               zone, range, builder,
               ValueType::RefMaybeNull(subtype, type.nullability()), num_structs,
-              num_arrays);
+              num_arrays, recursion_depth);
         }
         case HeapType::kFunc: {
           uint32_t index = range.get<uint32_t>() % builder->NumFunctions();
@@ -3077,18 +3093,20 @@ WasmInitExpr GenerateInitExpr(Zone* zone, DataRange& range,
         }
         case HeapType::kExtern:
           return WasmInitExpr::ExternExternalize(
-              zone, GenerateInitExpr(zone, range, builder,
-                                     ValueType::RefMaybeNull(
-                                         HeapType::kAny, type.nullability()),
-                                     num_structs, num_arrays));
+              zone,
+              GenerateInitExpr(
+                  zone, range, builder,
+                  ValueType::RefMaybeNull(HeapType::kAny, type.nullability()),
+                  num_structs, num_arrays, recursion_depth + 1));
         case HeapType::kI31:
           return WasmInitExpr::I31New(
-              zone, GenerateInitExpr(zone, range, builder, kWasmI32,
-                                     num_structs, num_arrays));
+              zone,
+              GenerateInitExpr(zone, range, builder, kWasmI32, num_structs,
+                               num_arrays, recursion_depth + 1));
         case HeapType::kArray: {
           uint32_t index = range.get<uint32_t>() % num_arrays + num_structs;
           return GenerateArrayInitExpr(zone, range, builder, index, num_structs,
-                                       num_arrays);
+                                       num_arrays, recursion_depth);
         }
         case HeapType::kNone:
         case HeapType::kNoFunc:
@@ -3098,10 +3116,12 @@ WasmInitExpr GenerateInitExpr(Zone* zone, DataRange& range,
           uint32_t index = type.ref_index();
           if (builder->IsStructType(index)) {
             return GenerateStructNewInitExpr(zone, range, builder, index,
-                                             num_structs, num_arrays);
+                                             num_structs, num_arrays,
+                                             recursion_depth);
           } else if (builder->IsArrayType(index)) {
             return GenerateArrayInitExpr(zone, range, builder, index,
-                                         num_structs, num_arrays);
+                                         num_structs, num_arrays,
+                                         recursion_depth);
           } else {
             DCHECK(builder->IsSignature(index));
             // Transform from signature index to function index.
@@ -3301,7 +3321,7 @@ class WasmCompileFuzzer : public WasmExecutionFuzzer {
 
       builder.AddGlobal(type, mutability,
                         GenerateInitExpr(zone, module_range, &builder, type,
-                                         num_structs, num_arrays));
+                                         num_structs, num_arrays, 0));
       globals.push_back(type);
       if (mutability) mutable_globals.push_back(static_cast<uint8_t>(i));
     }
@@ -3328,11 +3348,12 @@ class WasmCompileFuzzer : public WasmExecutionFuzzer {
                                    kAlwaysIncludeAllGenerics);
       bool use_initializer = !type.is_defaultable() || module_range.get<bool>();
       uint32_t table_index =
-          use_initializer ? builder.AddTable(
-                                type, min_size, max_size,
-                                GenerateInitExpr(zone, module_range, &builder,
-                                                 type, num_structs, num_arrays))
-                          : builder.AddTable(type, min_size, max_size);
+          use_initializer
+              ? builder.AddTable(
+                    type, min_size, max_size,
+                    GenerateInitExpr(zone, module_range, &builder, type,
+                                     num_structs, num_arrays, 0))
+              : builder.AddTable(type, min_size, max_size);
       if (type.is_reference_to(HeapType::kFunc)) {
         // For function tables, initialize them with functions from the program.
         // Currently, the fuzzer assumes that every funcref/(ref func) table

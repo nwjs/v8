@@ -9,6 +9,7 @@
 #include "src/builtins/builtins-utils-gen.h"
 #include "src/builtins/builtins.h"
 #include "src/codegen/code-factory.h"
+#include "src/codegen/code-stub-assembler.h"
 #include "src/execution/protectors.h"
 #include "src/heap/factory-inl.h"
 #include "src/heap/heap-inl.h"
@@ -130,13 +131,17 @@ void StringBuiltinsAssembler::GenerateStringEqual(TNode<String> left,
   TVARIABLE(String, var_left, left);
   TVARIABLE(String, var_right, right);
   Label if_equal(this), if_notequal(this), if_indirect(this, Label::kDeferred),
-      restart(this, {&var_left, &var_right});
+      start(this, {&var_left, &var_right});
+
+  // Callers must handle the case where {lhs} and {rhs} refer to the same
+  // String object.
+  CSA_DCHECK(this, TaggedNotEqual(left, right));
 
   CSA_DCHECK(this, IntPtrEqual(LoadStringLengthAsWord(left), length));
   CSA_DCHECK(this, IntPtrEqual(LoadStringLengthAsWord(right), length));
 
-  Goto(&restart);
-  BIND(&restart);
+  Goto(&start);
+  BIND(&start);
   TNode<String> lhs = var_left.value();
   TNode<String> rhs = var_right.value();
 
@@ -148,11 +153,16 @@ void StringBuiltinsAssembler::GenerateStringEqual(TNode<String> left,
 
   BIND(&if_indirect);
   {
+    Label restart(this, {&var_left, &var_right});
     // Try to unwrap indirect strings, restart the above attempt on success.
     MaybeDerefIndirectStrings(&var_left, lhs_instance_type, &var_right,
                               rhs_instance_type, &restart);
 
     TailCallRuntime(Runtime::kStringEqual, NoContextConstant(), lhs, rhs);
+
+    BIND(&restart);
+    GotoIf(TaggedEqual(var_left.value(), var_right.value()), &if_equal);
+    Goto(&start);
   }
 
   BIND(&if_equal);
@@ -168,8 +178,10 @@ void StringBuiltinsAssembler::StringEqual_Core(
     Label* if_not_equal, Label* if_indirect) {
   CSA_DCHECK(this, WordEqual(LoadStringLengthAsWord(lhs), length));
   CSA_DCHECK(this, WordEqual(LoadStringLengthAsWord(rhs), length));
-  // Fast check to see if {lhs} and {rhs} refer to the same String object.
-  GotoIf(TaggedEqual(lhs, rhs), if_equal);
+
+  // Callers must handle the case where {lhs} and {rhs} refer to the same
+  // String object.
+  CSA_DCHECK(this, TaggedNotEqual(lhs, rhs));
 
   // Combine the instance types into a single 16-bit value, so we can check
   // both of them at once.
@@ -424,25 +436,22 @@ TNode<String> StringBuiltinsAssembler::AllocateConsString(TNode<Uint32T> length,
   // Added string can be a cons string.
   Comment("Allocating ConsString");
   TVARIABLE(String, first, left);
-  TVARIABLE(Int32T, left_instance_type, LoadInstanceType(left));
+  TNode<Int32T> left_instance_type = LoadInstanceType(left);
   Label handle_right(this);
-  GotoIfNot(InstanceTypeEqual(left_instance_type.value(), THIN_STRING_TYPE),
-            &handle_right);
+  static_assert(base::bits::CountPopulation(kThinStringTagBit) == 1);
+  GotoIfNot(IsSetWord32(left_instance_type, kThinStringTagBit), &handle_right);
   {
     first = LoadObjectField<String>(left, ThinString::kActualOffset);
-    left_instance_type = LoadInstanceType(first.value());
     Goto(&handle_right);
   }
 
   BIND(&handle_right);
   TVARIABLE(String, second, right);
-  TVARIABLE(Int32T, right_instance_type, LoadInstanceType(right));
+  TNode<Int32T> right_instance_type = LoadInstanceType(right);
   Label allocate(this);
-  GotoIfNot(InstanceTypeEqual(right_instance_type.value(), THIN_STRING_TYPE),
-            &allocate);
+  GotoIfNot(IsSetWord32(right_instance_type, kThinStringTagBit), &allocate);
   {
     second = LoadObjectField<String>(right, ThinString::kActualOffset);
-    right_instance_type = LoadInstanceType(second.value());
     Goto(&allocate);
   }
 
@@ -452,11 +461,11 @@ TNode<String> StringBuiltinsAssembler::AllocateConsString(TNode<Uint32T> length,
   static_assert(kOneByteStringTag != 0);
   static_assert(kTwoByteStringTag == 0);
   TNode<Int32T> combined_instance_type =
-      Word32And(left_instance_type.value(), right_instance_type.value());
+      Word32And(left_instance_type, right_instance_type);
   TNode<Map> result_map = CAST(Select<Object>(
       IsSetWord32(combined_instance_type, kStringEncodingMask),
       [=] { return ConsOneByteStringMapConstant(); },
-      [=] { return ConsStringMapConstant(); }));
+      [=] { return ConsTwoByteStringMapConstant(); }));
   TNode<HeapObject> result = AllocateInNewSpace(ConsString::kSize);
   StoreMapNoWriteBarrier(result, result_map);
   StoreObjectFieldNoWriteBarrier(result, ConsString::kLengthOffset, length);
@@ -729,27 +738,46 @@ void StringBuiltinsAssembler::GenerateStringRelationalComparison(
 
     // Unrolled first iteration.
     GotoIf(IntPtrEqual(length, IntPtrConstant(0)), &if_done);
-    TNode<Uint32T> lhs_chunk = Load<Uint32T>(lhs, IntPtrConstant(kBeginOffset));
-    TNode<Uint32T> rhs_chunk = Load<Uint32T>(rhs, IntPtrConstant(kBeginOffset));
-    GotoIf(Word32NotEqual(lhs_chunk, rhs_chunk), &char_loop);
-    // We could make the chunk size depend on kTaggedSize, but kTaggedSize > 4
-    // is rare at the time of this writing.
-    constexpr int kChunkSize = sizeof(uint32_t);
+
+    constexpr int kChunkSize = kTaggedSize;
+    static_assert(
+        kChunkSize == ElementSizeInBytes(MachineRepresentation::kWord64) ||
+        kChunkSize == ElementSizeInBytes(MachineRepresentation::kWord32));
+    if (kChunkSize == ElementSizeInBytes(MachineRepresentation::kWord32)) {
+      TNode<Uint32T> lhs_chunk =
+          Load<Uint32T>(lhs, IntPtrConstant(kBeginOffset));
+      TNode<Uint32T> rhs_chunk =
+          Load<Uint32T>(rhs, IntPtrConstant(kBeginOffset));
+      GotoIf(Word32NotEqual(lhs_chunk, rhs_chunk), &char_loop);
+    } else {
+      TNode<Uint64T> lhs_chunk =
+          Load<Uint64T>(lhs, IntPtrConstant(kBeginOffset));
+      TNode<Uint64T> rhs_chunk =
+          Load<Uint64T>(rhs, IntPtrConstant(kBeginOffset));
+      GotoIf(Word64NotEqual(lhs_chunk, rhs_chunk), &char_loop);
+    }
+
     var_offset = IntPtrConstant(SeqOneByteString::kHeaderSize - kHeapObjectTag +
                                 kChunkSize);
 
     Goto(&chunk_loop);
 
-    // Try skipping over chunks of 4 identical characters.
+    // Try skipping over chunks of kChunkSize identical characters.
     // This depends on padding (between strings' lengths and the actual end
     // of the heap object) being zeroed out.
     BIND(&chunk_loop);
     {
       GotoIf(IntPtrGreaterThanOrEqual(var_offset.value(), end), &if_done);
 
-      TNode<Uint32T> lhs_chunk = Load<Uint32T>(lhs, var_offset.value());
-      TNode<Uint32T> rhs_chunk = Load<Uint32T>(rhs, var_offset.value());
-      GotoIf(Word32NotEqual(lhs_chunk, rhs_chunk), &char_loop);
+      if (kChunkSize == ElementSizeInBytes(MachineRepresentation::kWord32)) {
+        TNode<Uint32T> lhs_chunk = Load<Uint32T>(lhs, var_offset.value());
+        TNode<Uint32T> rhs_chunk = Load<Uint32T>(rhs, var_offset.value());
+        GotoIf(Word32NotEqual(lhs_chunk, rhs_chunk), &char_loop);
+      } else {
+        TNode<Uint64T> lhs_chunk = Load<Uint64T>(lhs, var_offset.value());
+        TNode<Uint64T> rhs_chunk = Load<Uint64T>(rhs, var_offset.value());
+        GotoIf(Word64NotEqual(lhs_chunk, rhs_chunk), &char_loop);
+      }
 
       var_offset = IntPtrAdd(var_offset.value(), IntPtrConstant(kChunkSize));
       Goto(&chunk_loop);
@@ -866,6 +894,9 @@ TF_BUILTIN(StringEqual, StringBuiltinsAssembler) {
   auto left = Parameter<String>(Descriptor::kLeft);
   auto right = Parameter<String>(Descriptor::kRight);
   auto length = UncheckedParameter<IntPtrT>(Descriptor::kLength);
+  // Callers must handle the case where {lhs} and {rhs} refer to the same
+  // String object.
+  CSA_DCHECK(this, TaggedNotEqual(left, right));
   GenerateStringEqual(left, right, length);
 }
 
@@ -1733,7 +1764,7 @@ void StringBuiltinsAssembler::BranchIfStringPrimitiveWithNoCustomIteration(
   // Check that the String iterator hasn't been modified in a way that would
   // affect iteration.
   TNode<PropertyCell> protector_cell = StringIteratorProtectorConstant();
-  DCHECK(isolate()->heap()->string_iterator_protector().IsPropertyCell());
+  DCHECK(i::IsPropertyCell(isolate()->heap()->string_iterator_protector()));
   Branch(
       TaggedEqual(LoadObjectField(protector_cell, PropertyCell::kValueOffset),
                   SmiConstant(Protectors::kProtectorValid)),

@@ -1146,6 +1146,7 @@
   V(F32x8Min)                      \
   V(F32x8Max)                      \
   V(I64x4Ne)                       \
+  V(I64x4GeS)                      \
   V(I32x8Ne)                       \
   V(I32x8GtU)                      \
   V(I32x8GeS)                      \
@@ -1158,8 +1159,10 @@
   V(I8x32GtU)                      \
   V(I8x32GeS)                      \
   V(I8x32GeU)                      \
+  V(I32x8UConvertF32x8)            \
   V(F64x4ConvertI32x4S)            \
   V(F32x8SConvertI32x8)            \
+  V(F32x8UConvertI32x8)            \
   V(F32x4DemoteF64x4)              \
   V(I64x4SConvertI32x4)            \
   V(I64x4UConvertI32x4)            \
@@ -1212,7 +1215,11 @@
   V(I64x4Splat)                    \
   V(I32x8Splat)                    \
   V(I16x16Splat)                   \
-  V(I8x32Splat)
+  V(I8x32Splat)                    \
+  V(F64x4Pmin)                     \
+  V(F64x4Pmax)                     \
+  V(F64x4Splat)                    \
+  V(F32x8Splat)
 
 #define VALUE_OP_LIST(V)     \
   COMMON_OP_LIST(V)          \

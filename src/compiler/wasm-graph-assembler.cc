@@ -4,9 +4,11 @@
 
 #include "src/compiler/wasm-graph-assembler.h"
 
+#include "src/common/globals.h"
 #include "src/compiler/diamond.h"
 #include "src/compiler/node-matchers.h"
 #include "src/compiler/wasm-compiler-definitions.h"
+#include "src/objects/string.h"
 #include "src/wasm/object-access.h"
 #include "src/wasm/wasm-objects.h"
 
@@ -173,13 +175,9 @@ Node* WasmGraphAssembler::InitializeImmutableInObject(ObjectAccess access,
                        offset, value, effect(), control()));
 }
 
-Node* WasmGraphAssembler::BuildLoadExternalPointerFromObject(
-    Node* object, int field_offset, ExternalPointerTag tag,
-    Node* isolate_root) {
+Node* WasmGraphAssembler::BuildDecodeSandboxedExternalPointer(
+    Node* handle, ExternalPointerTag tag, Node* isolate_root) {
 #ifdef V8_ENABLE_SANDBOX
-  DCHECK_NE(tag, kExternalPointerNullTag);
-  Node* handle = LoadFromObject(MachineType::Uint32(), object,
-                                wasm::ObjectAccess::ToTagged(field_offset));
   Node* index = Word32Shr(handle, Int32Constant(kExternalPointerIndexShift));
   Node* offset = ChangeUint32ToUint64(
       Word32Shl(index, Int32Constant(kExternalPointerTableEntrySizeLog2)));
@@ -189,14 +187,27 @@ Node* WasmGraphAssembler::BuildLoadExternalPointerFromObject(
         Load(MachineType::Pointer(), isolate_root,
              IsolateData::shared_external_pointer_table_offset());
     table = Load(MachineType::Pointer(), table_address,
-                 Internals::kExternalPointerTableBufferOffset);
+                 Internals::kExternalPointerTableBasePointerOffset);
   } else {
     table = Load(MachineType::Pointer(), isolate_root,
                  IsolateData::external_pointer_table_offset() +
-                     Internals::kExternalPointerTableBufferOffset);
+                     Internals::kExternalPointerTableBasePointerOffset);
   }
   Node* decoded_ptr = Load(MachineType::Pointer(), table, offset);
   return WordAnd(decoded_ptr, IntPtrConstant(~tag));
+#else
+  UNREACHABLE();
+#endif
+}
+
+Node* WasmGraphAssembler::BuildLoadExternalPointerFromObject(
+    Node* object, int field_offset, ExternalPointerTag tag,
+    Node* isolate_root) {
+#ifdef V8_ENABLE_SANDBOX
+  DCHECK_NE(tag, kExternalPointerNullTag);
+  Node* handle = LoadFromObject(MachineType::Uint32(), object,
+                                wasm::ObjectAccess::ToTagged(field_offset));
+  return BuildDecodeSandboxedExternalPointer(handle, tag, isolate_root);
 #else
   return LoadFromObject(MachineType::Pointer(), object,
                         wasm::ObjectAccess::ToTagged(field_offset));
@@ -295,6 +306,21 @@ Node* WasmGraphAssembler::LoadByteArrayElement(Node* byte_array,
       IntMul(index_intptr, IntPtrConstant(element_size)),
       IntPtrConstant(wasm::ObjectAccess::ToTagged(ByteArray::kHeaderSize)));
   return LoadFromObject(type, byte_array, offset);
+}
+
+Node* WasmGraphAssembler::LoadExternalPointerArrayElement(
+    Node* array, Node* index_intptr, ExternalPointerTag tag,
+    Node* isolate_root) {
+  Node* offset = IntAdd(
+      IntMul(index_intptr, IntPtrConstant(kExternalPointerSlotSize)),
+      IntPtrConstant(
+          wasm::ObjectAccess::ToTagged(ExternalPointerArray::kHeaderSize)));
+#ifdef V8_ENABLE_SANDBOX
+  Node* handle = LoadFromObject(MachineType::Uint32(), array, offset);
+  return BuildDecodeSandboxedExternalPointer(handle, tag, isolate_root);
+#else
+  return LoadFromObject(MachineType::Pointer(), array, offset);
+#endif
 }
 
 Node* WasmGraphAssembler::StoreFixedArrayElement(Node* array, int index,

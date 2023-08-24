@@ -36,9 +36,11 @@
 #include "src/codegen/compiler.h"
 #include "src/codegen/script-details.h"
 #include "src/common/assert-scope.h"
+#include "src/debug/debug-coverage.h"
 #include "src/heap/heap-inl.h"
 #include "src/heap/parked-scope-inl.h"
 #include "src/heap/read-only-heap.h"
+#include "src/heap/read-only-promotion.h"
 #include "src/heap/safepoint.h"
 #include "src/heap/spaces.h"
 #include "src/numbers/hash-seed-inl.h"
@@ -157,13 +159,7 @@ v8::StartupData CreateSnapshotDataBlob(const char* embedded_source) {
   return data;
 }
 
-enum class SerializeQuirks {
-  kNone,
-  kReadOnlySpaceIsSealed,
-};
-
-StartupBlobs Serialize(v8::Isolate* isolate,
-                       SerializeQuirks quirks = SerializeQuirks::kNone) {
+StartupBlobs Serialize(v8::Isolate* isolate) {
   // We have to create one context.  One reason for this is so that the builtins
   // can be loaded from self hosted JS builtins and their addresses can be
   // processed.  This will clear the pending fixups array, which would otherwise
@@ -180,11 +176,15 @@ StartupBlobs Serialize(v8::Isolate* isolate,
 
   // Note this effectively reimplements Snapshot::Create, keep in sync.
 
-  IsolateSafepointScope safepoint(i_isolate->heap());
+  SafepointScope safepoint(i_isolate, SafepointKind::kIsolate);
   HandleScope scope(i_isolate);
 
-  if (!i_isolate->initialized_from_snapshot() &&
-      quirks != SerializeQuirks::kReadOnlySpaceIsSealed) {
+  if (i_isolate->heap()->read_only_space()->writable()) {
+    // Promote objects from mutable heap spaces to read-only space prior to
+    // serialization. Objects can be promoted if a) they are themselves
+    // immutable-after-deserialization and b) all objects in the transitive
+    // object graph also satisfy condition a).
+    ReadOnlyPromotion::Promote(i_isolate, safepoint);
     // When creating the snapshot from scratch, we are responsible for sealing
     // the RO heap here. Note we cannot delegate the responsibility e.g. to
     // Isolate::Init since it should still be possible to allocate into RO
@@ -244,8 +244,8 @@ void SanityCheck(v8::Isolate* v8_isolate) {
 #ifdef VERIFY_HEAP
   HeapVerifier::VerifyHeap(isolate->heap());
 #endif
-  CHECK(isolate->global_object()->IsJSObject());
-  CHECK(isolate->native_context()->IsContext());
+  CHECK(IsJSObject(*isolate->global_object()));
+  CHECK(IsContext(*isolate->native_context()));
   isolate->factory()->InternalizeString(base::StaticCharVector("Empty"));
 }
 
@@ -279,10 +279,13 @@ UNINITIALIZED_TEST(StartupSerializerTwice) {
   DisableAlwaysOpt();
   v8::Isolate* isolate = TestSerializer::NewIsolateInitialized();
   StartupBlobs blobs1 = Serialize(isolate);
-  StartupBlobs blobs2 =
-      Serialize(isolate, SerializeQuirks::kReadOnlySpaceIsSealed);
+  isolate->Dispose();
+
+  isolate = Deserialize(blobs1);
+  StartupBlobs blobs2 = Serialize(isolate);
   isolate->Dispose();
   blobs1.Dispose();
+
   isolate = Deserialize(blobs2);
   {
     v8::Isolate::Scope isolate_scope(isolate);
@@ -327,10 +330,13 @@ UNINITIALIZED_TEST(StartupSerializerTwiceRunScript) {
   DisableAlwaysOpt();
   v8::Isolate* isolate = TestSerializer::NewIsolateInitialized();
   StartupBlobs blobs1 = Serialize(isolate);
-  StartupBlobs blobs2 =
-      Serialize(isolate, SerializeQuirks::kReadOnlySpaceIsSealed);
+  isolate->Dispose();
+
+  isolate = Deserialize(blobs1);
+  StartupBlobs blobs2 = Serialize(isolate);
   isolate->Dispose();
   blobs1.Dispose();
+
   isolate = Deserialize(blobs2);
   {
     v8::Isolate::Scope isolate_scope(isolate);
@@ -484,7 +490,7 @@ UNINITIALIZED_TEST(ContextSerializerContext) {
                  isolate, &snapshot_data, false, global_proxy,
                  v8::DeserializeInternalFieldsCallback())
                  .ToHandleChecked();
-      CHECK(root->IsContext());
+      CHECK(IsContext(*root));
       CHECK(Handle<Context>::cast(root)->global_proxy() == *global_proxy);
     }
 
@@ -495,7 +501,7 @@ UNINITIALIZED_TEST(ContextSerializerContext) {
                   isolate, &snapshot_data, false, global_proxy,
                   v8::DeserializeInternalFieldsCallback())
                   .ToHandleChecked();
-      CHECK(root2->IsContext());
+      CHECK(IsContext(*root2));
       CHECK(!root.is_identical_to(root2));
     }
     context_blob.Dispose();
@@ -510,20 +516,20 @@ static void SerializeCustomContext(
     base::Vector<const uint8_t>* read_only_blob_out,
     base::Vector<const uint8_t>* shared_space_blob_out,
     base::Vector<const uint8_t>* context_blob_out) {
-  v8::Isolate* v8_isolate = TestSerializer::NewIsolateInitialized();
-  Isolate* isolate = reinterpret_cast<Isolate*>(v8_isolate);
+  v8::Isolate* isolate = TestSerializer::NewIsolateInitialized();
+  Isolate* i_isolate = reinterpret_cast<Isolate*>(isolate);
   {
-    v8::Isolate::Scope isolate_scope(v8_isolate);
+    v8::Isolate::Scope isolate_scope(isolate);
 
     v8::Persistent<v8::Context> env;
     {
-      HandleScope scope(isolate);
-      env.Reset(v8_isolate, v8::Context::New(v8_isolate));
+      HandleScope scope(i_isolate);
+      env.Reset(isolate, v8::Context::New(isolate));
     }
     CHECK(!env.IsEmpty());
     {
-      v8::HandleScope handle_scope(v8_isolate);
-      v8::Local<v8::Context>::New(v8_isolate, env)->Enter();
+      v8::HandleScope handle_scope(isolate);
+      v8::Local<v8::Context>::New(isolate, env)->Enter();
       // After execution, e's function context refers to the global object.
       CompileRun(
           "var e;"
@@ -542,54 +548,58 @@ static void SerializeCustomContext(
           base::StaticCharVector("function g() { return [,"),
           base::StaticCharVector("1,"),
           base::StaticCharVector("];} a = g(); b = g(); b.push(1);"), 100000);
-      v8::MaybeLocal<v8::String> source_str =
-          v8::String::NewFromUtf8(v8_isolate, source.begin(),
-                                  v8::NewStringType::kNormal, source.length());
+      v8::MaybeLocal<v8::String> source_str = v8::String::NewFromUtf8(
+          isolate, source.begin(), v8::NewStringType::kNormal, source.length());
       CompileRun(source_str.ToLocalChecked());
       source.Dispose();
     }
     // If we don't do this then we end up with a stray root pointing at the
     // context even after we have disposed of env.
-    heap::InvokeMemoryReducingMajorGCs(isolate->heap());
+    heap::InvokeMemoryReducingMajorGCs(i_isolate->heap());
 
     {
-      v8::HandleScope handle_scope(v8_isolate);
-      v8::Local<v8::Context>::New(v8_isolate, env)->Exit();
+      v8::HandleScope handle_scope(isolate);
+      v8::Local<v8::Context>::New(isolate, env)->Exit();
     }
 
-    HandleScope scope(isolate);
+    HandleScope scope(i_isolate);
     i::Context raw_context = i::Context::cast(*v8::Utils::OpenPersistent(env));
 
     env.Reset();
 
-    IsolateSafepointScope safepoint(isolate->heap());
+    SafepointScope safepoint(i_isolate, SafepointKind::kIsolate);
 
-    if (!isolate->initialized_from_snapshot()) {
+    if (i_isolate->heap()->read_only_space()->writable()) {
+      // Promote objects from mutable heap spaces to read-only space prior to
+      // serialization. Objects can be promoted if a) they are themselves
+      // immutable-after-deserialization and b) all objects in the transitive
+      // object graph also satisfy condition a).
+      ReadOnlyPromotion::Promote(i_isolate, safepoint);
       // When creating the snapshot from scratch, we are responsible for sealing
       // the RO heap here. Note we cannot delegate the responsibility e.g. to
       // Isolate::Init since it should still be possible to allocate into RO
       // space after the Isolate has been initialized, for example as part of
       // Context creation.
-      isolate->read_only_heap()->OnCreateHeapObjectsComplete(isolate);
+      i_isolate->read_only_heap()->OnCreateHeapObjectsComplete(i_isolate);
     }
 
     DisallowGarbageCollection no_gc;
     SnapshotByteSink read_only_sink;
-    ReadOnlySerializer read_only_serializer(isolate,
+    ReadOnlySerializer read_only_serializer(i_isolate,
                                             Snapshot::kDefaultSerializerFlags);
     read_only_serializer.Serialize();
 
     SharedHeapSerializer shared_space_serializer(
-        isolate, Snapshot::kDefaultSerializerFlags);
+        i_isolate, Snapshot::kDefaultSerializerFlags);
 
     SnapshotByteSink startup_sink;
     StartupSerializer startup_serializer(
-        isolate, Snapshot::kDefaultSerializerFlags, &shared_space_serializer);
+        i_isolate, Snapshot::kDefaultSerializerFlags, &shared_space_serializer);
     startup_serializer.SerializeStrongReferences(no_gc);
 
     SnapshotByteSink context_sink;
     ContextSerializer context_serializer(
-        isolate, Snapshot::kDefaultSerializerFlags, &startup_serializer,
+        i_isolate, Snapshot::kDefaultSerializerFlags, &startup_serializer,
         v8::SerializeInternalFieldsCallback());
     context_serializer.Serialize(&raw_context, no_gc);
 
@@ -607,7 +617,7 @@ static void SerializeCustomContext(
     *read_only_blob_out = WritePayload(read_only_snapshot.RawData());
     *shared_space_blob_out = WritePayload(shared_space_snapshot.RawData());
   }
-  v8_isolate->Dispose();
+  isolate->Dispose();
 }
 
 UNINITIALIZED_TEST(ContextSerializerCustomContext) {
@@ -637,7 +647,7 @@ UNINITIALIZED_TEST(ContextSerializerCustomContext) {
                  isolate, &snapshot_data, false, global_proxy,
                  v8::DeserializeInternalFieldsCallback())
                  .ToHandleChecked();
-      CHECK(root->IsContext());
+      CHECK(IsContext(*root));
       Handle<NativeContext> context = Handle<NativeContext>::cast(root);
 
       // Add context to the weak native context list
@@ -806,8 +816,8 @@ UNINITIALIZED_TEST(CustomSnapshotDataBlobStringNotInternalized) {
     v8::Local<v8::Value> result = CompileRun("f()").As<v8::Value>();
     CHECK(result->IsString());
     i::String str = *v8::Utils::OpenHandle(*result.As<v8::String>());
-    CHECK_EQ(std::string(str.ToCString().get()), "AB");
-    CHECK(!str.IsInternalizedString());
+    CHECK_EQ(std::string(str->ToCString().get()), "AB");
+    CHECK(!IsInternalizedString(str));
     CHECK(!i::ReadOnlyHeap::Contains(str));
   }
   isolate1->Dispose();
@@ -1466,7 +1476,7 @@ bool IsCompiled(const char* name) {
   return i::Handle<i::JSFunction>::cast(
              v8::Utils::OpenHandle(*CompileRun(name)))
       ->shared()
-      .is_compiled();
+      ->is_compiled();
 }
 
 UNINITIALIZED_TEST(SnapshotDataBlobWithWarmup) {
@@ -1635,7 +1645,7 @@ int CountBuiltins() {
   int counter = 0;
   for (HeapObject obj = iterator.Next(); !obj.is_null();
        obj = iterator.Next()) {
-    if (obj.IsCode() && Code::cast(obj).kind() == CodeKind::BUILTIN) counter++;
+    if (IsCode(obj) && Code::cast(obj)->kind() == CodeKind::BUILTIN) counter++;
   }
   return counter;
 }
@@ -1697,7 +1707,7 @@ TEST(CodeSerializerWithProfiler) {
       isolate, orig_source, default_script_details, &cache,
       v8::ScriptCompiler::kNoCompileOptions);
 
-  CHECK(!orig->GetBytecodeArray(isolate).HasSourcePositionTable());
+  CHECK(!orig->GetBytecodeArray(isolate)->HasSourcePositionTable());
 
   isolate->SetIsProfiling(true);
 
@@ -1709,7 +1719,7 @@ TEST(CodeSerializerWithProfiler) {
 
   // Since the profiler is now enabled, source positions should be collected
   // after deserialization.
-  CHECK(copy->GetBytecodeArray(isolate).HasSourcePositionTable());
+  CHECK(copy->GetBytecodeArray(isolate)->HasSourcePositionTable());
 
   delete cache;
 }
@@ -1750,12 +1760,12 @@ void TestCodeSerializerOnePlusOneImpl(bool verify_builtins_count = true) {
   }
 
   CHECK_NE(*orig, *copy);
-  CHECK(Script::cast(copy->script()).source() == *copy_source);
+  CHECK(Script::cast(copy->script())->source() == *copy_source);
 
   Handle<JSFunction> copy_fun =
       Factory::JSFunctionBuilder{isolate, copy, isolate->native_context()}
           .Build();
-  Handle<JSObject> global(isolate->context().global_object(), isolate);
+  Handle<JSObject> global(isolate->context()->global_object(), isolate);
   Handle<Object> copy_result =
       Execution::CallScript(isolate, copy_fun, global,
                             isolate->factory()->empty_fixed_array())
@@ -1781,6 +1791,14 @@ TEST(CodeSerializerOnePlusOneWithDebugger) {
   v8::HandleScope scope(CcTest::isolate());
   static v8::debug::DebugDelegate dummy_delegate;
   v8::debug::SetDebugDelegate(CcTest::isolate(), &dummy_delegate);
+  TestCodeSerializerOnePlusOneImpl();
+}
+
+TEST(CodeSerializerOnePlusOneWithBlockCoverage) {
+  v8::HandleScope scope(CcTest::isolate());
+  static v8::debug::DebugDelegate dummy_delegate;
+  v8::debug::SetDebugDelegate(CcTest::isolate(), &dummy_delegate);
+  Coverage::SelectMode(CcTest::i_isolate(), debug::CoverageMode::kBlockCount);
   TestCodeSerializerOnePlusOneImpl();
 }
 
@@ -1963,7 +1981,7 @@ TEST(CodeSerializerInternalizedString) {
   CHECK(!orig_source.is_identical_to(copy_source));
   CHECK(orig_source->Equals(*copy_source));
 
-  Handle<JSObject> global(isolate->context().global_object(), isolate);
+  Handle<JSObject> global(isolate->context()->global_object(), isolate);
 
   i::AlignedCachedData* cached_data = nullptr;
   Handle<SharedFunctionInfo> orig = CompileScriptAndProduceCache(
@@ -1976,7 +1994,7 @@ TEST(CodeSerializerInternalizedString) {
       Execution::CallScript(isolate, orig_fun, global,
                             isolate->factory()->empty_fixed_array())
           .ToHandleChecked();
-  CHECK(orig_result->IsInternalizedString());
+  CHECK(IsInternalizedString(*orig_result));
 
   int builtins_count = CountBuiltins();
 
@@ -1987,7 +2005,7 @@ TEST(CodeSerializerInternalizedString) {
                          v8::ScriptCompiler::kConsumeCodeCache);
   }
   CHECK_NE(*orig, *copy);
-  CHECK(Script::cast(copy->script()).source() == *copy_source);
+  CHECK(Script::cast(copy->script())->source() == *copy_source);
 
   Handle<JSFunction> copy_fun =
       Factory::JSFunctionBuilder{isolate, copy, isolate->native_context()}
@@ -2027,7 +2045,7 @@ TEST(CodeSerializerLargeCodeObject) {
   Handle<String> source_str =
       isolate->factory()->NewStringFromUtf8(source).ToHandleChecked();
 
-  Handle<JSObject> global(isolate->context().global_object(), isolate);
+  Handle<JSObject> global(isolate->context()->global_object(), isolate);
   AlignedCachedData* cache = nullptr;
 
   Handle<SharedFunctionInfo> orig =
@@ -2054,7 +2072,7 @@ TEST(CodeSerializerLargeCodeObject) {
           .ToHandleChecked();
 
   int result_int;
-  CHECK(copy_result->ToInt32(&result_int));
+  CHECK(Object::ToInt32(*copy_result, &result_int));
   CHECK_EQ(7, result_int);
 
   delete cache;
@@ -2097,7 +2115,7 @@ TEST(CodeSerializerLargeCodeObjectWithIncrementalMarking) {
     ec_page = Page::FromHeapObject(*moving_object);
   }
 
-  Handle<JSObject> global(isolate->context().global_object(), isolate);
+  Handle<JSObject> global(isolate->context()->global_object(), isolate);
   AlignedCachedData* cache = nullptr;
 
   Handle<SharedFunctionInfo> orig =
@@ -2137,7 +2155,7 @@ TEST(CodeSerializerLargeCodeObjectWithIncrementalMarking) {
           .ToHandleChecked();
 
   int result_int;
-  CHECK(copy_result->ToInt32(&result_int));
+  CHECK(Object::ToInt32(*copy_result, &result_int));
   CHECK_EQ(7, result_int);
 
   delete cache;
@@ -2164,7 +2182,7 @@ TEST(CodeSerializerLargeStrings) {
                        f->NewStringFromUtf8(source_t).ToHandleChecked())
           .ToHandleChecked();
 
-  Handle<JSObject> global(isolate->context().global_object(), isolate);
+  Handle<JSObject> global(isolate->context()->global_object(), isolate);
   AlignedCachedData* cache = nullptr;
 
   Handle<SharedFunctionInfo> orig =
@@ -2240,7 +2258,7 @@ TEST(CodeSerializerThreeBigStrings) {
            source_c_str)
           .ToHandleChecked();
 
-  Handle<JSObject> global(isolate->context().global_object(), isolate);
+  Handle<JSObject> global(isolate->context()->global_object(), isolate);
   AlignedCachedData* cache = nullptr;
 
   Handle<SharedFunctionInfo> orig =
@@ -2338,8 +2356,8 @@ TEST(CodeSerializerExternalString) {
       isolate->factory()->NewStringFromAsciiChecked("one_byte");
   one_byte_string = isolate->factory()->InternalizeString(one_byte_string);
   one_byte_string->MakeExternal(&one_byte_resource);
-  CHECK(one_byte_string->IsExternalOneByteString());
-  CHECK(one_byte_string->IsInternalizedString());
+  CHECK(IsExternalOneByteString(*one_byte_string));
+  CHECK(IsInternalizedString(*one_byte_string));
 
   // Obtain external internalized two-byte string.
   size_t two_byte_length;
@@ -2351,8 +2369,8 @@ TEST(CodeSerializerExternalString) {
           .ToHandleChecked();
   two_byte_string = isolate->factory()->InternalizeString(two_byte_string);
   two_byte_string->MakeExternal(&two_byte_resource);
-  CHECK(two_byte_string->IsExternalTwoByteString());
-  CHECK(two_byte_string->IsInternalizedString());
+  CHECK(IsExternalTwoByteString(*two_byte_string));
+  CHECK(IsInternalizedString(*two_byte_string));
 
   const char* source =
       "var o = {}               \n"
@@ -2364,7 +2382,7 @@ TEST(CodeSerializerExternalString) {
           ->NewStringFromUtf8(base::CStrVector(source))
           .ToHandleChecked();
 
-  Handle<JSObject> global(isolate->context().global_object(), isolate);
+  Handle<JSObject> global(isolate->context()->global_object(), isolate);
   AlignedCachedData* cache = nullptr;
 
   Handle<SharedFunctionInfo> orig = CompileScriptAndProduceCache(
@@ -2388,7 +2406,7 @@ TEST(CodeSerializerExternalString) {
                             isolate->factory()->empty_fixed_array())
           .ToHandleChecked();
 
-  CHECK_EQ(15.0, copy_result->Number());
+  CHECK_EQ(15.0, Object::Number(*copy_result));
 
   // This avoids the GC from trying to free stack allocated resources.
   i::Handle<i::ExternalOneByteString>::cast(one_byte_string)
@@ -2417,8 +2435,8 @@ TEST(CodeSerializerLargeExternalString) {
       reinterpret_cast<const char*>(string.begin()), string.length());
   name = f->InternalizeString(name);
   name->MakeExternal(&one_byte_resource);
-  CHECK(name->IsExternalOneByteString());
-  CHECK(name->IsInternalizedString());
+  CHECK(IsExternalOneByteString(*name));
+  CHECK(IsInternalizedString(*name));
   CHECK(isolate->heap()->InSpace(*name, LO_SPACE));
 
   // Create the source, which is "var <literal> = 42; <literal>".
@@ -2430,7 +2448,7 @@ TEST(CodeSerializerLargeExternalString) {
                .ToHandleChecked())
           .ToHandleChecked();
 
-  Handle<JSObject> global(isolate->context().global_object(), isolate);
+  Handle<JSObject> global(isolate->context()->global_object(), isolate);
   AlignedCachedData* cache = nullptr;
 
   Handle<SharedFunctionInfo> orig =
@@ -2454,7 +2472,7 @@ TEST(CodeSerializerLargeExternalString) {
                             isolate->factory()->empty_fixed_array())
           .ToHandleChecked();
 
-  CHECK_EQ(42.0, copy_result->Number());
+  CHECK_EQ(42.0, Object::Number(*copy_result));
 
   // This avoids the GC from trying to free stack allocated resources.
   i::Handle<i::ExternalOneByteString>::cast(name)->SetResource(isolate,
@@ -2483,10 +2501,10 @@ TEST(CodeSerializerExternalScriptName) {
   const SerializerOneByteResource one_byte_resource("one_byte", 8);
   Handle<String> name =
       f->NewExternalStringFromOneByte(&one_byte_resource).ToHandleChecked();
-  CHECK(name->IsExternalOneByteString());
-  CHECK(!name->IsInternalizedString());
+  CHECK(IsExternalOneByteString(*name));
+  CHECK(!IsInternalizedString(*name));
 
-  Handle<JSObject> global(isolate->context().global_object(), isolate);
+  Handle<JSObject> global(isolate->context()->global_object(), isolate);
   AlignedCachedData* cache = nullptr;
 
   Handle<SharedFunctionInfo> orig = CompileScriptAndProduceCache(
@@ -2510,7 +2528,7 @@ TEST(CodeSerializerExternalScriptName) {
                             isolate->factory()->empty_fixed_array())
           .ToHandleChecked();
 
-  CHECK_EQ(10.0, copy_result->Number());
+  CHECK_EQ(10.0, Object::Number(*copy_result));
 
   // This avoids the GC from trying to free stack allocated resources.
   i::Handle<i::ExternalOneByteString>::cast(name)->SetResource(isolate,
@@ -2893,9 +2911,9 @@ static void CodeSerializerMergeDeserializedScript(bool retain_toplevel_sfi) {
 
   Handle<HeapObject> retained_toplevel_sfi;
   if (retain_toplevel_sfi) {
-    retained_toplevel_sfi =
-        handle(script->shared_function_infos().Get(0).GetHeapObjectAssumeWeak(),
-               isolate);
+    retained_toplevel_sfi = handle(
+        script->shared_function_infos()->Get(0).GetHeapObjectAssumeWeak(),
+        isolate);
   }
 
   // GC twice in case incremental marking had already marked the bytecode array.
@@ -4261,8 +4279,8 @@ UNINITIALIZED_TEST(ReinitializeHashSeedRehashable) {
           "p = JSON.parse('{\"foo\": {\"x\": 1}}');");
       i::Handle<i::Object> i_a = v8::Utils::OpenHandle(*CompileRun("a"));
       i::Handle<i::Object> i_o = v8::Utils::OpenHandle(*CompileRun("o"));
-      CHECK(i_a->IsJSArray());
-      CHECK(i_a->IsJSObject());
+      CHECK(IsJSArray(*i_a));
+      CHECK(IsJSObject(*i_a));
       CHECK(!i::Handle<i::JSArray>::cast(i_a)->HasFastElements());
       CHECK(!i::Handle<i::JSObject>::cast(i_o)->HasFastProperties());
       ExpectInt32("a[2111]", 5);
@@ -4290,8 +4308,8 @@ UNINITIALIZED_TEST(ReinitializeHashSeedRehashable) {
     v8::Context::Scope context_scope(context);
     i::Handle<i::Object> i_a = v8::Utils::OpenHandle(*CompileRun("a"));
     i::Handle<i::Object> i_o = v8::Utils::OpenHandle(*CompileRun("o"));
-    CHECK(i_a->IsJSArray());
-    CHECK(i_a->IsJSObject());
+    CHECK(IsJSArray(*i_a));
+    CHECK(IsJSObject(*i_a));
     CHECK(!i::Handle<i::JSArray>::cast(i_a)->HasFastElements());
     CHECK(!i::Handle<i::JSObject>::cast(i_o)->HasFastProperties());
     ExpectInt32("a[2111]", 5);
@@ -4887,14 +4905,14 @@ UNINITIALIZED_TEST(ClassFieldsWithBindings) {
 }
 
 void CheckSFIsAreWeak(WeakFixedArray sfis, Isolate* isolate) {
-  CHECK_GT(sfis.length(), 0);
+  CHECK_GT(sfis->length(), 0);
   int no_of_weak = 0;
-  for (int i = 0; i < sfis.length(); ++i) {
-    MaybeObject maybe_object = sfis.Get(i);
+  for (int i = 0; i < sfis->length(); ++i) {
+    MaybeObject maybe_object = sfis->Get(i);
     HeapObject heap_object;
     CHECK(maybe_object->IsWeakOrCleared() ||
           (maybe_object->GetHeapObjectIfStrong(&heap_object) &&
-           heap_object.IsUndefined(isolate)));
+           IsUndefined(heap_object, isolate)));
     if (maybe_object->IsWeak()) {
       ++no_of_weak;
     }
@@ -4947,7 +4965,7 @@ UNINITIALIZED_TEST(WeakArraySerializationInSnapshot) {
 
     // Verify that the pointers in shared_function_infos are weak.
     WeakFixedArray sfis =
-        Script::cast(function->shared().script()).shared_function_infos();
+        Script::cast(function->shared()->script())->shared_function_infos();
     CheckSFIsAreWeak(sfis, reinterpret_cast<i::Isolate*>(isolate));
   }
   isolate->Dispose();
@@ -4979,7 +4997,7 @@ TEST(WeakArraySerializationInCodeCache) {
                     v8::ScriptCompiler::kConsumeCodeCache);
 
   // Verify that the pointers in shared_function_infos are weak.
-  WeakFixedArray sfis = Script::cast(copy->script()).shared_function_infos();
+  WeakFixedArray sfis = Script::cast(copy->script())->shared_function_infos();
   CheckSFIsAreWeak(sfis, isolate);
 
   delete cache;
@@ -5050,7 +5068,7 @@ TEST(CachedCompileFunctionRespectsEager) {
     auto i_fun = i::Handle<i::JSFunction>::cast(Utils::OpenHandle(*fun));
 
     // Function should be compiled iff kEagerCompile was used.
-    CHECK_EQ(i_fun->shared().is_compiled(), eager_compile);
+    CHECK_EQ(i_fun->shared()->is_compiled(), eager_compile);
   }
 }
 
@@ -5173,7 +5191,7 @@ void CheckObjectsAreInSharedHeap(Isolate* isolate) {
        obj = iterator.Next()) {
     const bool expected_in_shared_old =
         heap->MustBeInSharedOldSpace(obj) ||
-        (obj.IsString() && String::IsInPlaceInternalizable(String::cast(obj)));
+        (IsString(obj) && String::IsInPlaceInternalizable(String::cast(obj)));
     if (expected_in_shared_old) {
       CHECK(obj.InAnySharedSpace());
     }
@@ -5331,13 +5349,35 @@ UNINITIALIZED_TEST(BreakPointAccessorContextSnapshot) {
 // static roots, to be able to generate the static-roots.h file.
 #if defined(V8_COMPRESS_POINTERS_IN_SHARED_CAGE) && defined(V8_SHARED_RO_HEAP)
 UNINITIALIZED_TEST(StaticRootsPredictableSnapshot) {
-  if (v8_flags.random_seed == 0) {
-    return;
+#ifdef V8_ENABLE_CONSERVATIVE_STACK_SCANNING
+  // TODO(jgruber): Snapshot determinism requires predictable heap layout
+  // (v8_flags.predictable), but this flag is currently known not to work with
+  // CSS due to false positives.
+  UNREACHABLE();
+#else
+  if (v8_flags.random_seed == 0) return;
+  const int random_seed = v8_flags.random_seed;
+
+  // Predictable RO promotion order requires a predictable initial heap layout.
+  v8_flags.predictable = true;
+  // Emulate v8_enable_fast_mksnapshot to speed up this test.
+  {
+    v8_flags.turbo_verify_allocation = false;
+#if defined(V8_TARGET_ARCH_X64) || defined(V8_TARGET_ARCH_IA32)
+    v8_flags.turbo_rewrite_far_jumps = false;
+#endif
+#ifdef ENABLE_SLOW_DCHECKS
+    v8_flags.enable_slow_asserts = false;
+#endif
   }
+  i::FlagList::EnforceFlagImplications();
 
   v8::Isolate* isolate1 = TestSerializer::NewIsolateInitialized();
   StartupBlobs blobs1 = Serialize(isolate1);
   isolate1->Dispose();
+
+  // Reset the seed.
+  v8_flags.random_seed = random_seed;
 
   v8::Isolate* isolate2 = TestSerializer::NewIsolateInitialized();
   StartupBlobs blobs2 = Serialize(isolate2);
@@ -5353,6 +5393,7 @@ UNINITIALIZED_TEST(StaticRootsPredictableSnapshot) {
   blobs1.Dispose();
   blobs2.Dispose();
   FreeCurrentEmbeddedBlob();
+#endif  // V8_ENABLE_CONSERVATIVE_STACK_SCANNING
 }
 #endif  // defined(V8_COMPRESS_POINTERS_IN_SHARED_CAGE) &&
         // defined(V8_SHARED_RO_HEAP)

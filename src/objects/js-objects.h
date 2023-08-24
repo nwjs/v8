@@ -6,6 +6,7 @@
 #define V8_OBJECTS_JS_OBJECTS_H_
 
 #include "src/base/optional.h"
+#include "src/handles/handles.h"
 #include "src/objects/embedder-data-slot.h"
 // TODO(jkummerow): Consider forward-declaring instead.
 #include "src/objects/internal-index.h"
@@ -29,6 +30,7 @@ class LookupIterator;
 class PropertyKey;
 class NativeContext;
 class IsCompiledScope;
+class SwissNameDictionary;
 
 #include "torque-generated/src/objects/js-objects-tq.inc"
 
@@ -727,11 +729,16 @@ class JSObject : public TorqueGeneratedJSObject<JSObject, JSReceiver> {
   inline void WriteToField(InternalIndex descriptor, PropertyDetails details,
                            Object value);
 
+  inline Object RawFastInobjectPropertyAtSwap(FieldIndex index, Object value,
+                                              SeqCstAccessTag tag);
   inline Object RawFastPropertyAtSwap(FieldIndex index, Object value,
                                       SeqCstAccessTag tag);
-  inline Object RawFastPropertyAtSwap(PtrComprCageBase cage_base,
-                                      FieldIndex index, Object value,
-                                      SeqCstAccessTag tag);
+  Object RawFastPropertyAtCompareAndSwap(FieldIndex index, Object expected,
+                                         Object value, SeqCstAccessTag tag);
+  inline Object RawFastInobjectPropertyAtCompareAndSwap(FieldIndex index,
+                                                        Object expected,
+                                                        Object value,
+                                                        SeqCstAccessTag tag);
 
   // Access to in object properties.
   inline int GetInObjectPropertyOffset(int index);
@@ -910,6 +917,11 @@ class JSObject : public TorqueGeneratedJSObject<JSObject, JSReceiver> {
   template <PropertyAttributes attrs>
   V8_WARN_UNUSED_RESULT static Maybe<bool> PreventExtensionsWithTransition(
       Isolate* isolate, Handle<JSObject> object, ShouldThrow should_throw);
+
+  inline Object RawFastPropertyAtCompareAndSwapInternal(FieldIndex index,
+                                                        Object expected,
+                                                        Object value,
+                                                        SeqCstAccessTag tag);
 
   TQ_OBJECT_CONSTRUCTORS(JSObject)
 };
@@ -1300,6 +1312,39 @@ class JSValidIteratorWrapper
   DECL_PRINTER(JSValidIteratorWrapper)
 
   TQ_OBJECT_CONSTRUCTORS(JSValidIteratorWrapper)
+};
+
+// JSPromiseWithResolversResult is just a JSObject with a specific initial map.
+// This initial map adds in-object properties for "promise", "resolve", and
+// "reject", in that order.
+class JSPromiseWithResolversResult : public JSObject {
+ public:
+  DECL_ACCESSORS(promise, Object)
+
+  DECL_ACCESSORS(resolve, Object)
+
+  DECL_ACCESSORS(reject, Object)
+
+  // Layout description.
+#define JS_PROMISE_WITHRESOLVERS_RESULT_FIELDS(V) \
+  V(kPromiseOffset, kTaggedSize)                  \
+  V(kResolveOffset, kTaggedSize)                  \
+  V(kRejectOffset, kTaggedSize)                   \
+  /* Total size. */                               \
+  V(kSize, 0)
+
+  DEFINE_FIELD_OFFSET_CONSTANTS(JSObject::kHeaderSize,
+                                JS_PROMISE_WITHRESOLVERS_RESULT_FIELDS)
+#undef JS_PROMISE_WITHRESOLVERS_RESULT_FIELDS
+
+  // Indices of in-object properties.
+  static const int kPromiseIndex = 0;
+  static const int kResolveIndex = 1;
+  static const int kRejectIndex = 2;
+
+  DECL_CAST(JSPromiseWithResolversResult)
+
+  OBJECT_CONSTRUCTORS(JSPromiseWithResolversResult, JSObject);
 };
 
 }  // namespace internal

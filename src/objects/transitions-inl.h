@@ -57,16 +57,16 @@ HeapObjectSlot TransitionArray::GetKeySlot(int transition_number) {
 }
 
 void TransitionArray::SetPrototypeTransitions(WeakFixedArray transitions) {
-  DCHECK(transitions.IsWeakFixedArray());
+  DCHECK(IsWeakFixedArray(transitions));
   WeakFixedArray::Set(kPrototypeTransitionsIndex,
                       HeapObjectReference::Strong(transitions));
 }
 
 int TransitionArray::NumberOfPrototypeTransitions(
     WeakFixedArray proto_transitions) {
-  if (proto_transitions.length() == 0) return 0;
+  if (proto_transitions->length() == 0) return 0;
   MaybeObject raw =
-      proto_transitions.Get(kProtoTransitionNumberOfEntriesOffset);
+      proto_transitions->Get(kProtoTransitionNumberOfEntriesOffset);
   return raw.ToSmi().value();
 }
 
@@ -92,7 +92,7 @@ Name TransitionsAccessor::GetKey(int transition_number) {
       return GetSimpleTransitionKey(map);
     }
     case kFullTransitionArray:
-      return transitions().GetKey(transition_number);
+      return transitions()->GetKey(transition_number);
   }
   UNREACHABLE();
 }
@@ -110,22 +110,22 @@ HeapObjectSlot TransitionArray::GetTargetSlot(int transition_number) {
 
 // static
 PropertyDetails TransitionsAccessor::GetTargetDetails(Name name, Map target) {
-  DCHECK(!IsSpecialTransition(name.GetReadOnlyRoots(), name));
-  InternalIndex descriptor = target.LastAdded();
-  DescriptorArray descriptors = target.instance_descriptors(kRelaxedLoad);
+  DCHECK(!IsSpecialTransition(name->GetReadOnlyRoots(), name));
+  InternalIndex descriptor = target->LastAdded();
+  DescriptorArray descriptors = target->instance_descriptors(kRelaxedLoad);
   // Transitions are allowed only for the last added property.
-  DCHECK(descriptors.GetKey(descriptor).Equals(name));
-  return descriptors.GetDetails(descriptor);
+  DCHECK(descriptors->GetKey(descriptor)->Equals(name));
+  return descriptors->GetDetails(descriptor);
 }
 
 PropertyDetails TransitionsAccessor::GetSimpleTargetDetails(Map transition) {
-  return transition.GetLastDescriptorDetails(isolate_);
+  return transition->GetLastDescriptorDetails(isolate_);
 }
 
 // static
 Name TransitionsAccessor::GetSimpleTransitionKey(Map transition) {
-  InternalIndex descriptor = transition.LastAdded();
-  return transition.instance_descriptors().GetKey(descriptor);
+  InternalIndex descriptor = transition->LastAdded();
+  return transition->instance_descriptors()->GetKey(descriptor);
 }
 
 // static
@@ -153,7 +153,7 @@ Map TransitionsAccessor::GetTarget(int transition_number) {
     case kWeakRef:
       return Map::cast(raw_transitions_->GetHeapObjectAssumeWeak());
     case kFullTransitionArray:
-      return transitions().GetTarget(transition_number);
+      return transitions()->GetTarget(transition_number);
   }
   UNREACHABLE();
 }
@@ -161,7 +161,7 @@ Map TransitionsAccessor::GetTarget(int transition_number) {
 void TransitionArray::SetRawTarget(int transition_number, MaybeObject value) {
   DCHECK(transition_number < number_of_transitions());
   DCHECK(value->IsWeak());
-  DCHECK(value->GetHeapObjectAssumeWeak().IsMap());
+  DCHECK(IsMap(value->GetHeapObjectAssumeWeak()));
   WeakFixedArray::Set(ToTargetIndex(transition_number), value);
 }
 
@@ -178,7 +178,7 @@ bool TransitionArray::GetTargetIfExists(int transition_number, Isolate* isolate,
     return false;
   }
   if (raw->GetHeapObjectIfStrong(&heap_object) &&
-      heap_object.IsUndefined(isolate)) {
+      IsUndefined(heap_object, isolate)) {
     return false;
   }
   *target = TransitionsAccessor::GetTargetFromRaw(raw);
@@ -201,7 +201,7 @@ int TransitionArray::SearchSpecial(Symbol symbol, bool concurrent_search,
 
 int TransitionArray::SearchName(Name name, bool concurrent_search,
                                 int* out_insertion_index) {
-  DCHECK(name.IsUniqueName());
+  DCHECK(IsUniqueName(name));
   return internal::Search<ALL_ENTRIES>(this, name, number_of_entries(),
                                        out_insertion_index, concurrent_search);
 }
@@ -210,13 +210,13 @@ TransitionsAccessor::TransitionsAccessor(Isolate* isolate, Map map,
                                          bool concurrent_access)
     : isolate_(isolate),
       map_(map),
-      raw_transitions_(map.raw_transitions(isolate_, kAcquireLoad)),
+      raw_transitions_(map->raw_transitions(isolate_, kAcquireLoad)),
       encoding_(GetEncoding(isolate_, raw_transitions_)),
       concurrent_access_(concurrent_access) {
-  DCHECK_IMPLIES(encoding_ == kMigrationTarget, map_.is_deprecated());
+  DCHECK_IMPLIES(encoding_ == kMigrationTarget, map_->is_deprecated());
 }
 
-int TransitionsAccessor::Capacity() { return transitions().Capacity(); }
+int TransitionsAccessor::Capacity() { return transitions()->Capacity(); }
 
 // static
 TransitionsAccessor::Encoding TransitionsAccessor::GetEncoding(
@@ -227,12 +227,12 @@ TransitionsAccessor::Encoding TransitionsAccessor::GetEncoding(
   } else if (raw_transitions->IsWeak()) {
     return kWeakRef;
   } else if (raw_transitions->GetHeapObjectIfStrong(isolate, &heap_object)) {
-    if (heap_object.IsTransitionArray()) {
+    if (IsTransitionArray(heap_object)) {
       return kFullTransitionArray;
-    } else if (heap_object.IsPrototypeInfo()) {
+    } else if (IsPrototypeInfo(heap_object)) {
       return kPrototypeInfo;
     } else {
-      DCHECK(heap_object.IsMap());
+      DCHECK(IsMap(heap_object));
       return kMigrationTarget;
     }
   } else {
@@ -355,7 +355,7 @@ Handle<String> TransitionsAccessor::ExpectedTransitionKey() {
       DCHECK_EQ(PropertyKind::kData, details.kind());
       if (details.attributes() != NONE) return Handle<String>::null();
       Name name = GetSimpleTransitionKey(target);
-      if (!name.IsString()) return Handle<String>::null();
+      if (!IsString(name)) return Handle<String>::null();
       return handle(String::cast(name), isolate_);
     }
   }

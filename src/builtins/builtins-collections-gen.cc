@@ -710,7 +710,7 @@ void CollectionsBuiltinsAssembler::SameValueZeroSmi(TNode<Smi> key_smi,
 void CollectionsBuiltinsAssembler::BranchIfMapIteratorProtectorValid(
     Label* if_true, Label* if_false) {
   TNode<PropertyCell> protector_cell = MapIteratorProtectorConstant();
-  DCHECK(isolate()->heap()->map_iterator_protector().IsPropertyCell());
+  DCHECK(i::IsPropertyCell(isolate()->heap()->map_iterator_protector()));
   Branch(
       TaggedEqual(LoadObjectField(protector_cell, PropertyCell::kValueOffset),
                   SmiConstant(Protectors::kProtectorValid)),
@@ -769,7 +769,7 @@ void BranchIfIterableWithOriginalKeyOrValueMapIterator(
 void CollectionsBuiltinsAssembler::BranchIfSetIteratorProtectorValid(
     Label* if_true, Label* if_false) {
   const TNode<PropertyCell> protector_cell = SetIteratorProtectorConstant();
-  DCHECK(isolate()->heap()->set_iterator_protector().IsPropertyCell());
+  DCHECK(i::IsPropertyCell(isolate()->heap()->set_iterator_protector()));
   Branch(
       TaggedEqual(LoadObjectField(protector_cell, PropertyCell::kValueOffset),
                   SmiConstant(Protectors::kProtectorValid)),
@@ -1128,6 +1128,7 @@ void CollectionsBuiltinsAssembler::SameValueZeroString(
   GotoIf(TaggedIsSmi(candidate_key), if_not_same);
   GotoIfNot(IsString(CAST(candidate_key)), if_not_same);
 
+  GotoIf(TaggedEqual(key_string, candidate_key), if_same);
   BranchIfStringEqual(key_string, CAST(candidate_key), if_same, if_not_same);
 }
 
@@ -1758,8 +1759,8 @@ TNode<OrderedHashSet> CollectionsBuiltinsAssembler::AddToSetTable(
   key = NormalizeNumberKey(key);
 
   GrowCollection<OrderedHashSet> grow = [this, context, table, method_name]() {
-    TNode<OrderedHashSet> new_table = Cast(CallRuntime(
-        Runtime::kOrderedHashSetEnsureGrowable, context, table, method_name));
+    TNode<OrderedHashSet> new_table = Cast(
+        CallRuntime(Runtime::kOrderedHashSetGrow, context, table, method_name));
     // TODO(v8:13556): check if the table is updated and remove pointer to the
     // new table.
     return new_table;
@@ -1821,14 +1822,39 @@ TF_BUILTIN(SetPrototypeDelete, CollectionsBuiltinsAssembler) {
   const TNode<OrderedHashSet> table =
       LoadObjectField<OrderedHashSet>(CAST(receiver), JSMap::kTableOffset);
 
-  TVARIABLE(IntPtrT, entry_start_position_or_hash, IntPtrConstant(0));
-  Label entry_found(this), not_found(this);
+  Label not_found(this);
+  const TNode<Smi> number_of_elements =
+      DeleteFromSetTable(context, table, key, &not_found);
 
-  TryLookupOrderedHashTableIndex<OrderedHashSet>(
-      table, key, &entry_start_position_or_hash, &entry_found, &not_found);
+  const TNode<Smi> number_of_buckets = CAST(
+      LoadFixedArrayElement(table, OrderedHashSet::NumberOfBucketsIndex()));
+
+  // If there fewer elements than #buckets / 2, shrink the table.
+  Label shrink(this);
+  GotoIf(SmiLessThan(SmiAdd(number_of_elements, number_of_elements),
+                     number_of_buckets),
+         &shrink);
+  Return(TrueConstant());
+
+  BIND(&shrink);
+  CallRuntime(Runtime::kSetShrink, context, receiver);
+  Return(TrueConstant());
 
   BIND(&not_found);
   Return(FalseConstant());
+}
+
+TNode<Smi> CollectionsBuiltinsAssembler::DeleteFromSetTable(
+    const TNode<Object> context, TNode<OrderedHashSet> table, TNode<Object> key,
+    Label* not_found) {
+  // This check breaks a known exploitation technique. See crbug.com/1263462
+  CSA_CHECK(this, TaggedNotEqual(key, TheHoleConstant()));
+
+  TVARIABLE(IntPtrT, entry_start_position_or_hash, IntPtrConstant(0));
+  Label entry_found(this);
+
+  TryLookupOrderedHashTableIndex<OrderedHashSet>(
+      table, key, &entry_start_position_or_hash, &entry_found, not_found);
 
   BIND(&entry_found);
   // If we found the entry, mark the entry as deleted.
@@ -1849,19 +1875,7 @@ TF_BUILTIN(SetPrototypeDelete, CollectionsBuiltinsAssembler) {
       table, OrderedHashSet::NumberOfDeletedElementsOffset(),
       number_of_deleted);
 
-  const TNode<Smi> number_of_buckets = CAST(
-      LoadFixedArrayElement(table, OrderedHashSet::NumberOfBucketsIndex()));
-
-  // If there fewer elements than #buckets / 2, shrink the table.
-  Label shrink(this);
-  GotoIf(SmiLessThan(SmiAdd(number_of_elements, number_of_elements),
-                     number_of_buckets),
-         &shrink);
-  Return(TrueConstant());
-
-  BIND(&shrink);
-  CallRuntime(Runtime::kSetShrink, context, receiver);
-  Return(TrueConstant());
+  return number_of_elements;
 }
 
 TF_BUILTIN(MapPrototypeEntries, CollectionsBuiltinsAssembler) {
@@ -1984,7 +1998,7 @@ TF_BUILTIN(MapIteratorPrototypeNext, CollectionsBuiltinsAssembler) {
   TNode<JSMapIterator> receiver = CAST(maybe_receiver);
 
   // Check if the {receiver} is exhausted.
-  TVARIABLE(Oddball, var_done, TrueConstant());
+  TVARIABLE(Boolean, var_done, TrueConstant());
   TVARIABLE(Object, var_value, UndefinedConstant());
   Label return_value(this, {&var_done, &var_value}), return_entry(this),
       return_end(this, Label::kDeferred);
@@ -2169,7 +2183,7 @@ TF_BUILTIN(SetIteratorPrototypeNext, CollectionsBuiltinsAssembler) {
   TNode<JSSetIterator> receiver = CAST(maybe_receiver);
 
   // Check if the {receiver} is exhausted.
-  TVARIABLE(Oddball, var_done, TrueConstant());
+  TVARIABLE(Boolean, var_done, TrueConstant());
   TVARIABLE(Object, var_value, UndefinedConstant());
   Label return_value(this, {&var_done, &var_value}), return_entry(this),
       return_end(this, Label::kDeferred);
@@ -2298,9 +2312,8 @@ const TNode<OrderedHashMap> CollectionsBuiltinsAssembler::AddValueToKeyedGroup(
     const TNode<OrderedHashMap> groups, const TNode<Object> key,
     const TNode<Object> value, const TNode<String> methodName) {
   GrowCollection<OrderedHashMap> grow = [this, groups, methodName]() {
-    TNode<OrderedHashMap> new_groups =
-        CAST(CallRuntime(Runtime::kOrderedHashMapEnsureGrowable,
-                         NoContextConstant(), groups, methodName));
+    TNode<OrderedHashMap> new_groups = CAST(CallRuntime(
+        Runtime::kOrderedHashMapGrow, NoContextConstant(), groups, methodName));
     // The groups OrderedHashMap is not escaped to user script while grouping
     // items, so there can't be live iterators. So we don't need to keep the
     // pointer from the old table to the new one.
@@ -2308,7 +2321,7 @@ const TNode<OrderedHashMap> CollectionsBuiltinsAssembler::AddValueToKeyedGroup(
     Branch(TaggedEqual(groups, new_groups), &done, &did_grow);
     BIND(&did_grow);
     {
-      StoreObjectFieldNoWriteBarrier(groups, OrderedHashMap::NextTableIndex(),
+      StoreObjectFieldNoWriteBarrier(groups, OrderedHashMap::NextTableOffset(),
                                      SmiConstant(0));
       Goto(&done);
     }
@@ -2340,7 +2353,7 @@ const TNode<OrderedHashMap> CollectionsBuiltinsAssembler::AddValueToKeyedGroup(
 
 void WeakCollectionsBuiltinsAssembler::AddEntry(
     TNode<EphemeronHashTable> table, TNode<IntPtrT> key_index,
-    TNode<Object> key, TNode<Object> value, TNode<IntPtrT> number_of_elements) {
+    TNode<Object> key, TNode<Object> value, TNode<Int32T> number_of_elements) {
   // See EphemeronHashTable::AddEntry().
   TNode<IntPtrT> value_index = ValueIndexFromKeyIndex(key_index);
   UnsafeStoreFixedArrayElement(table, key_index, key,
@@ -2350,7 +2363,7 @@ void WeakCollectionsBuiltinsAssembler::AddEntry(
   // See HashTableBase::ElementAdded().
   UnsafeStoreFixedArrayElement(table,
                                EphemeronHashTable::kNumberOfElementsIndex,
-                               SmiFromIntPtr(number_of_elements));
+                               SmiFromInt32(number_of_elements));
 }
 
 TNode<IntPtrT> WeakCollectionsBuiltinsAssembler::GetHash(
@@ -2483,20 +2496,19 @@ TNode<IntPtrT> WeakCollectionsBuiltinsAssembler::KeyIndexFromEntry(
                      EphemeronHashTable::kEntryKeyIndex));
 }
 
-TNode<IntPtrT> WeakCollectionsBuiltinsAssembler::LoadNumberOfElements(
+TNode<Int32T> WeakCollectionsBuiltinsAssembler::LoadNumberOfElements(
     TNode<EphemeronHashTable> table, int offset) {
-  TNode<IntPtrT> number_of_elements =
-      PositiveSmiUntag(CAST(UnsafeLoadFixedArrayElement(
+  TNode<Int32T> number_of_elements =
+      SmiToInt32(CAST(UnsafeLoadFixedArrayElement(
           table, EphemeronHashTable::kNumberOfElementsIndex)));
-  return IntPtrAdd(number_of_elements, IntPtrConstant(offset));
+  return Int32Add(number_of_elements, Int32Constant(offset));
 }
 
-TNode<IntPtrT> WeakCollectionsBuiltinsAssembler::LoadNumberOfDeleted(
+TNode<Int32T> WeakCollectionsBuiltinsAssembler::LoadNumberOfDeleted(
     TNode<EphemeronHashTable> table, int offset) {
-  TNode<IntPtrT> number_of_deleted =
-      PositiveSmiUntag(CAST(UnsafeLoadFixedArrayElement(
-          table, EphemeronHashTable::kNumberOfDeletedElementsIndex)));
-  return IntPtrAdd(number_of_deleted, IntPtrConstant(offset));
+  TNode<Int32T> number_of_deleted = SmiToInt32(CAST(UnsafeLoadFixedArrayElement(
+      table, EphemeronHashTable::kNumberOfDeletedElementsIndex)));
+  return Int32Add(number_of_deleted, Int32Constant(offset));
 }
 
 TNode<EphemeronHashTable> WeakCollectionsBuiltinsAssembler::LoadTable(
@@ -2511,21 +2523,21 @@ TNode<IntPtrT> WeakCollectionsBuiltinsAssembler::LoadTableCapacity(
 }
 
 TNode<Word32T> WeakCollectionsBuiltinsAssembler::InsufficientCapacityToAdd(
-    TNode<IntPtrT> capacity, TNode<IntPtrT> number_of_elements,
-    TNode<IntPtrT> number_of_deleted) {
+    TNode<Int32T> capacity, TNode<Int32T> number_of_elements,
+    TNode<Int32T> number_of_deleted) {
   // This is the negative form of HashTable::HasSufficientCapacityToAdd().
   // Return true if:
   //   - more than 50% of the available space are deleted elements
   //   - less than 50% will be available
-  TNode<IntPtrT> available = IntPtrSub(capacity, number_of_elements);
-  TNode<IntPtrT> half_available = WordShr(available, 1);
-  TNode<IntPtrT> needed_available = WordShr(number_of_elements, 1);
+  TNode<Int32T> available = Int32Sub(capacity, number_of_elements);
+  TNode<Int32T> half_available = Signed(Word32Shr(available, 1));
+  TNode<Int32T> needed_available = Signed(Word32Shr(number_of_elements, 1));
   return Word32Or(
       // deleted > half
-      IntPtrGreaterThan(number_of_deleted, half_available),
+      Int32GreaterThan(number_of_deleted, half_available),
       // elements + needed available > capacity
-      IntPtrGreaterThan(IntPtrAdd(number_of_elements, needed_available),
-                        capacity));
+      Int32GreaterThan(Int32Add(number_of_elements, needed_available),
+                       capacity));
 }
 
 void WeakCollectionsBuiltinsAssembler::RemoveEntry(
@@ -2537,19 +2549,19 @@ void WeakCollectionsBuiltinsAssembler::RemoveEntry(
   StoreFixedArrayElement(table, value_index, TheHoleConstant());
 
   // See HashTableBase::ElementRemoved().
-  TNode<IntPtrT> number_of_deleted = LoadNumberOfDeleted(table, 1);
+  TNode<Int32T> number_of_deleted = LoadNumberOfDeleted(table, 1);
   StoreFixedArrayElement(table, EphemeronHashTable::kNumberOfElementsIndex,
                          SmiFromIntPtr(number_of_elements), SKIP_WRITE_BARRIER);
   StoreFixedArrayElement(table,
                          EphemeronHashTable::kNumberOfDeletedElementsIndex,
-                         SmiFromIntPtr(number_of_deleted), SKIP_WRITE_BARRIER);
+                         SmiFromInt32(number_of_deleted), SKIP_WRITE_BARRIER);
 }
 
 TNode<BoolT> WeakCollectionsBuiltinsAssembler::ShouldRehash(
-    TNode<IntPtrT> number_of_elements, TNode<IntPtrT> number_of_deleted) {
+    TNode<Int32T> number_of_elements, TNode<Int32T> number_of_deleted) {
   // Rehash if more than 33% of the entries are deleted.
-  return IntPtrGreaterThanOrEqual(WordShl(number_of_deleted, 1),
-                                  number_of_elements);
+  return Int32GreaterThanOrEqual(Word32Shl(number_of_deleted, 1),
+                                 number_of_elements);
 }
 
 TNode<Word32T> WeakCollectionsBuiltinsAssembler::ShouldShrink(
@@ -2673,10 +2685,11 @@ TF_BUILTIN(WeakCollectionDelete, WeakCollectionsBuiltinsAssembler) {
   TNode<IntPtrT> capacity = LoadTableCapacity(table);
   TNode<IntPtrT> key_index = FindKeyIndexForKey(
       table, key, hash, EntryMask(capacity), &if_cannot_be_held_weakly);
-  TNode<IntPtrT> number_of_elements = LoadNumberOfElements(table, -1);
-  GotoIf(ShouldShrink(capacity, number_of_elements), &call_runtime);
+  TNode<Int32T> number_of_elements = LoadNumberOfElements(table, -1);
+  GotoIf(ShouldShrink(capacity, ChangeInt32ToIntPtr(number_of_elements)),
+         &call_runtime);
 
-  RemoveEntry(table, key_index, number_of_elements);
+  RemoveEntry(table, key_index, ChangeInt32ToIntPtr(number_of_elements));
   Return(TrueConstant());
 
   BIND(&if_cannot_be_held_weakly);
@@ -2718,12 +2731,17 @@ TF_BUILTIN(WeakCollectionSet, WeakCollectionsBuiltinsAssembler) {
   }
   BIND(&if_not_found);
   {
-    TNode<IntPtrT> number_of_deleted = LoadNumberOfDeleted(table);
-    TNode<IntPtrT> number_of_elements = LoadNumberOfElements(table, 1);
+    TNode<Int32T> number_of_deleted = LoadNumberOfDeleted(table);
+    TNode<Int32T> number_of_elements = LoadNumberOfElements(table, 1);
 
+    CSA_DCHECK(this,
+               IntPtrLessThanOrEqual(capacity, IntPtrConstant(INT32_MAX)));
+    CSA_DCHECK(this,
+               IntPtrGreaterThanOrEqual(capacity, IntPtrConstant(INT32_MIN)));
     // TODO(pwong): Port HashTable's Rehash() and EnsureCapacity() to CSA.
     GotoIf(Word32Or(ShouldRehash(number_of_elements, number_of_deleted),
-                    InsufficientCapacityToAdd(capacity, number_of_elements,
+                    InsufficientCapacityToAdd(TruncateIntPtrToInt32(capacity),
+                                              number_of_elements,
                                               number_of_deleted)),
            &call_runtime);
 

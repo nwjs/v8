@@ -8,6 +8,7 @@
 #include "src/heap/memory-chunk.h"
 #include "src/wasm/baseline/liftoff-assembler.h"
 #include "src/wasm/wasm-objects.h"
+#include "src/wasm/object-access.h"
 
 namespace v8 {
 namespace internal {
@@ -59,6 +60,33 @@ void LiftoffAssembler::PrepareTailCall(int num_callee_stack_params,
 }
 
 void LiftoffAssembler::AlignFrameSize() {}
+
+void LiftoffAssembler::CheckTierUp(int declared_func_index, int budget_used,
+                                   Label* ool_label,
+                                   const FreezeCacheState& frozen) {
+  UseScratchRegisterScope temps(this);
+  Register budget_array = temps.Acquire();
+  Register instance = cache_state_.cached_instance;
+
+  if (instance == no_reg) {
+    instance = budget_array;  // Reuse the temp register.
+    LoadInstanceFromFrame(instance);
+  }
+
+  constexpr int kArrayOffset = wasm::ObjectAccess::ToTagged(
+      WasmInstanceObject::kTieringBudgetArrayOffset);
+  LoadWord(budget_array, MemOperand(instance, kArrayOffset));
+
+  int budget_arr_offset = kInt32Size * declared_func_index;
+  // Pick a random register from kLiftoffAssemblerGpCacheRegs.
+  // TODO(miladfarca): Use ScratchRegisterScope when available.
+  Register budget = kScratchReg;
+  MemOperand budget_addr(budget_array, budget_arr_offset);
+  Lw(budget, budget_addr);
+  Sub32(budget, budget, Operand{budget_used});
+  Sw(budget, budget_addr);
+  Branch(ool_label, lt, budget, Operand{0});
+}
 
 void LiftoffAssembler::PatchPrepareStackFrame(
     int offset, SafepointTableBuilder* safepoint_table_builder,
@@ -199,6 +227,21 @@ void LiftoffAssembler::LoadTaggedPointerFromInstance(Register dst,
   DCHECK_LE(0, offset);
   LoadTaggedField(dst, MemOperand{instance, offset});
 }
+
+void LiftoffAssembler::LoadExternalPointer(Register dst, Register src_addr,
+                                           int offset, ExternalPointerTag tag,
+                                           Register /* scratch */) {
+  LoadFullPointer(dst, src_addr, offset);
+}
+
+#ifdef V8_ENABLE_SANDBOX
+void LiftoffAssembler::LoadExternalPointer(Register dst, Register instance,
+                                           int offset, ExternalPointerTag tag,
+                                           Register /* scratch */) {
+  LoadExternalPointerField(dst, FieldMemOperand(instance, offset), tag,
+                           kRootRegister);
+}
+#endif
 
 void LiftoffAssembler::SpillInstance(Register instance) {
   StoreWord(instance, liftoff::GetInstanceOperand());
@@ -2164,11 +2207,6 @@ void LiftoffAssembler::emit_f64x2_qfms(LiftoffRegister dst,
 void LiftoffAssembler::StackCheck(Label* ool_code, Register limit_address) {
   MacroAssembler::LoadWord(limit_address, MemOperand(limit_address));
   MacroAssembler::Branch(ool_code, ule, sp, Operand(limit_address));
-}
-
-void LiftoffAssembler::CallTrapCallbackForTesting() {
-  PrepareCallCFunction(0, GetUnusedRegister(kGpReg, {}).gp());
-  CallCFunction(ExternalReference::wasm_call_trap_callback_for_testing(), 0);
 }
 
 void LiftoffAssembler::AssertUnreachable(AbortReason reason) {

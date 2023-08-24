@@ -43,12 +43,12 @@ struct ReadOnlySegmentForSerialization {
     ReadOnlyPageObjectIterator it(page, segment_start);
     for (HeapObject o = it.Next(); !o.is_null(); o = it.Next()) {
       if (o.address() >= segment_end) break;
-      if (!o.IsCode()) continue;
+      if (!IsCode(o)) continue;
 
       size_t o_offset = o.ptr() - segment_start;
       Address o_dst = reinterpret_cast<Address>(contents.get()) + o_offset;
       Code code = Code::cast(Object(o_dst));
-      code.ClearInstructionStartForSerialization(isolate);
+      code->ClearInstructionStartForSerialization(isolate);
     }
   }
 
@@ -113,14 +113,14 @@ class EncodeRelocationsVisitor final : public ObjectVisitor {
   }
 
   void VisitMapPointer(HeapObject host) override {
-    ProcessSlot(host.RawMaybeWeakField(HeapObject::kMapOffset));
+    ProcessSlot(host->RawMaybeWeakField(HeapObject::kMapOffset));
   }
 
   // Sanity-checks:
   void VisitInstructionStreamPointer(Code host,
                                      InstructionStreamSlot slot) override {
     // RO space contains only builtin Code objects.
-    DCHECK(!host.has_instruction_stream());
+    DCHECK(!host->has_instruction_stream());
   }
   void VisitCodeTarget(InstructionStream, RelocInfo*) override {
     UNREACHABLE();
@@ -186,7 +186,7 @@ void ReadOnlySegmentForSerialization::EncodeTaggedSlots(Isolate* isolate) {
                                 SkipFreeSpaceOrFiller::kNo);
   for (HeapObject o = it.Next(); !o.is_null(); o = it.Next()) {
     if (o.address() >= segment_end) break;
-    o.Iterate(cage_base, &v);
+    o->Iterate(cage_base, &v);
   }
 }
 
@@ -225,8 +225,8 @@ class ReadOnlyHeapImageSerializer {
     sink_->Put(Bytecode::kPage, "page begin");
     if (V8_STATIC_ROOTS_BOOL) {
       auto page_addr = reinterpret_cast<Address>(page);
-      sink_->PutInt(V8HeapCompressionScheme::CompressAny(page_addr),
-                    "page start offset");
+      sink_->PutUint32(V8HeapCompressionScheme::CompressAny(page_addr),
+                       "page start offset");
     }
 
     Address pos = page->area_start();
@@ -258,8 +258,10 @@ class ReadOnlyHeapImageSerializer {
 
   void WriteSegment(const ReadOnlySegmentForSerialization* segment) {
     sink_->Put(Bytecode::kSegment, "segment begin");
-    sink_->PutInt(segment->segment_offset, "segment start offset");
-    sink_->PutInt(segment->segment_size, "segment byte size");
+    sink_->PutUint30(static_cast<uint32_t>(segment->segment_offset),
+                     "segment start offset");
+    sink_->PutUint30(static_cast<uint32_t>(segment->segment_size),
+                     "segment byte size");
     sink_->PutRaw(segment->contents.get(),
                   static_cast<int>(segment->segment_size), "page");
     if (!V8_STATIC_ROOTS_BOOL) {
@@ -278,7 +280,7 @@ class ReadOnlyHeapImageSerializer {
         RootIndex rudi = static_cast<RootIndex>(i);
         HeapObject rudolf = HeapObject::cast(roots.object_at(rudi));
         ro::EncodedTagged_t encoded = Encode(isolate_, rudolf);
-        sink_->PutInt(encoded.ToUint32(), "read only roots entry");
+        sink_->PutUint32(encoded.ToUint32(), "read only roots entry");
       }
     }
   }
@@ -297,7 +299,7 @@ std::vector<ReadOnlyHeapImageSerializer::MemoryRegion> GetUnmappedRegions(
   ReadOnlyRoots ro_roots(isolate);
   WasmNull wasm_null = ro_roots.wasm_null();
   HeapObject wasm_null_padding = ro_roots.wasm_null_padding();
-  CHECK(wasm_null_padding.IsFreeSpace());
+  CHECK(IsFreeSpace(wasm_null_padding));
   Address wasm_null_padding_start =
       wasm_null_padding.address() + FreeSpace::kHeaderSize;
   std::vector<ReadOnlyHeapImageSerializer::MemoryRegion> unmapped;
@@ -305,7 +307,7 @@ std::vector<ReadOnlyHeapImageSerializer::MemoryRegion> GetUnmappedRegions(
     unmapped.push_back({wasm_null_padding_start,
                         wasm_null.address() - wasm_null_padding_start});
   }
-  unmapped.push_back({wasm_null.payload(), WasmNull::kPayloadSize});
+  unmapped.push_back({wasm_null->payload(), WasmNull::kPayloadSize});
   return unmapped;
 #else
   return {};
@@ -331,7 +333,7 @@ void ReadOnlySerializer::Serialize() {
   for (HeapObject o = it.Next(); !o.is_null(); o = it.Next()) {
     CheckRehashability(o);
     if (v8_flags.serialization_statistics) {
-      CountAllocation(o.map(), o.Size(), SnapshotSpace::kReadOnlyHeap);
+      CountAllocation(o->map(), o->Size(), SnapshotSpace::kReadOnlyHeap);
     }
   }
 }

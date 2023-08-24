@@ -53,7 +53,7 @@ class ArrayBufferSweeper final {
   ~ArrayBufferSweeper();
 
   void RequestSweep(SweepingType sweeping_type,
-                    TreatAllYoungAsPromoted treat_young_as_promoted);
+                    TreatAllYoungAsPromoted treat_all_young_as_promoted);
   void EnsureFinished();
 
   // Track the given ArrayBufferExtension for the given JSArrayBuffer.
@@ -71,6 +71,8 @@ class ArrayBufferSweeper final {
   size_t OldBytes() const { return old().ApproximateBytes(); }
 
   bool sweeping_in_progress() const { return job_.get(); }
+
+  uint64_t GetTraceIdForFlowEvent(GCTracer::Scope::ScopeId scope_id) const;
 
  private:
   struct SweepingJob;

@@ -163,6 +163,10 @@ class TypeInferenceAnalysis {
         case Opcode::kStaticAssert:
         case Opcode::kDebugBreak:
         case Opcode::kDebugPrint:
+#if V8_ENABLE_WEBASSEMBLY
+        case Opcode::kGlobalSet:
+#endif
+        case Opcode::kCheckException:
           // These operations do not produce any output that needs to be typed.
           DCHECK_EQ(0, op.outputs_rep().size());
           break;
@@ -188,8 +192,9 @@ class TypeInferenceAnalysis {
         case Opcode::kWordBinop:
           ProcessWordBinop(index, op.Cast<WordBinopOp>());
           break;
+        case Opcode::kWord32PairBinop:
         case Opcode::kPendingLoopPhi:
-          // Input graph must not contain PendingLoopPhi.
+          // Input graph must not contain these op codes.
           UNREACHABLE();
         case Opcode::kPhi:
           if constexpr (revisit_loop_header) {
@@ -202,9 +207,17 @@ class TypeInferenceAnalysis {
         case Opcode::kGoto: {
           const GotoOp& gto = op.Cast<GotoOp>();
           // Check if this is a backedge.
-          if (gto.destination->IsLoop() &&
-              gto.destination->index() < current_block_->index()) {
-            ProcessBlock<true>(*gto.destination, unprocessed_index);
+          if (gto.destination->IsLoop()) {
+            if (gto.destination->index() < current_block_->index()) {
+              ProcessBlock<true>(*gto.destination, unprocessed_index);
+            } else if (gto.destination->index() == current_block_->index()) {
+              // This is a single block loop. We must only revisit the current
+              // header block if we actually need to, in order to prevent
+              // infinite recursion.
+              if (!revisit_loop_header || loop_needs_revisit) {
+                ProcessBlock<true>(*gto.destination, unprocessed_index);
+              }
+            }
           }
           break;
         }
@@ -228,9 +241,9 @@ class TypeInferenceAnalysis {
         case Opcode::kStackSlot:
         case Opcode::kFrameConstant:
         case Opcode::kCall:
-        case Opcode::kCallAndCatchException:
-        case Opcode::kLoadException:
+        case Opcode::kCatchBlockBegin:
         case Opcode::kTailCall:
+        case Opcode::kDidntThrow:
         case Opcode::kObjectIs:
         case Opcode::kFloatIs:
         case Opcode::kObjectIsNumericValue:
@@ -271,6 +284,7 @@ class TypeInferenceAnalysis {
         case Opcode::kTransitionAndStoreArrayElement:
         case Opcode::kCompareMaps:
         case Opcode::kCheckMaps:
+        case Opcode::kAssumeMap:
         case Opcode::kCheckedClosure:
         case Opcode::kCheckEqualsInternalizedString:
         case Opcode::kLoadMessage:
@@ -283,6 +297,16 @@ class TypeInferenceAnalysis {
         case Opcode::kMaybeGrowFastElements:
         case Opcode::kTransitionElementsKind:
         case Opcode::kFindOrderedHashEntry:
+#if V8_ENABLE_WEBASSEMBLY
+        // TODO(14108): Implement.
+        case Opcode::kGlobalGet:
+        case Opcode::kIsNull:
+        case Opcode::kNull:
+        case Opcode::kAssertNotNull:
+        case Opcode::kSimd128Constant:
+        case Opcode::kSimd128Binop:
+        case Opcode::kSimd128Unary:
+#endif
           // TODO(nicohartmann@): Support remaining operations. For now we
           // compute fallback types.
           if (op.outputs_rep().size() > 0) {

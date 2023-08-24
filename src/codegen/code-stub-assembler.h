@@ -29,6 +29,7 @@
 #include "src/objects/oddball.h"
 #include "src/objects/shared-function-info.h"
 #include "src/objects/smi.h"
+#include "src/objects/string.h"
 #include "src/objects/swiss-name-dictionary.h"
 #include "src/objects/tagged-index.h"
 #include "src/roots/roots.h"
@@ -52,6 +53,26 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
 #define HEAP_MUTABLE_IMMOVABLE_OBJECT_LIST(V)                                  \
   V(ArrayIteratorProtector, array_iterator_protector, ArrayIteratorProtector)  \
   V(ArraySpeciesProtector, array_species_protector, ArraySpeciesProtector)     \
+  V(IsConcatSpreadableProtector, is_concat_spreadable_protector,               \
+    IsConcatSpreadableProtector)                                               \
+  V(MapIteratorProtector, map_iterator_protector, MapIteratorProtector)        \
+  V(NoElementsProtector, no_elements_protector, NoElementsProtector)           \
+  V(MegaDOMProtector, mega_dom_protector, MegaDOMProtector)                    \
+  V(NumberStringCache, number_string_cache, NumberStringCache)                 \
+  V(NumberStringNotRegexpLikeProtector,                                        \
+    number_string_not_regexp_like_protector,                                   \
+    NumberStringNotRegexpLikeProtector)                                        \
+  V(PromiseResolveProtector, promise_resolve_protector,                        \
+    PromiseResolveProtector)                                                   \
+  V(PromiseSpeciesProtector, promise_species_protector,                        \
+    PromiseSpeciesProtector)                                                   \
+  V(PromiseThenProtector, promise_then_protector, PromiseThenProtector)        \
+  V(RegExpSpeciesProtector, regexp_species_protector, RegExpSpeciesProtector)  \
+  V(SetIteratorProtector, set_iterator_protector, SetIteratorProtector)        \
+  V(StringIteratorProtector, string_iterator_protector,                        \
+    StringIteratorProtector)                                                   \
+  V(TypedArraySpeciesProtector, typed_array_species_protector,                 \
+    TypedArraySpeciesProtector)                                                \
   V(AsyncFunctionAwaitRejectSharedFun, async_function_await_reject_shared_fun, \
     AsyncFunctionAwaitRejectSharedFun)                                         \
   V(AsyncFunctionAwaitResolveSharedFun,                                        \
@@ -77,15 +98,6 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
     AsyncGeneratorYieldWithAwaitResolveSharedFun)                              \
   V(AsyncIteratorValueUnwrapSharedFun, async_iterator_value_unwrap_shared_fun, \
     AsyncIteratorValueUnwrapSharedFun)                                         \
-  V(IsConcatSpreadableProtector, is_concat_spreadable_protector,               \
-    IsConcatSpreadableProtector)                                               \
-  V(MapIteratorProtector, map_iterator_protector, MapIteratorProtector)        \
-  V(NoElementsProtector, no_elements_protector, NoElementsProtector)           \
-  V(MegaDOMProtector, mega_dom_protector, MegaDOMProtector)                    \
-  V(NumberStringCache, number_string_cache, NumberStringCache)                 \
-  V(NumberStringNotRegexpLikeProtector,                                        \
-    number_string_not_regexp_like_protector,                                   \
-    NumberStringNotRegexpLikeProtector)                                        \
   V(PromiseAllResolveElementSharedFun, promise_all_resolve_element_shared_fun, \
     PromiseAllResolveElementSharedFun)                                         \
   V(PromiseAllSettledRejectElementSharedFun,                                   \
@@ -107,27 +119,16 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
   V(PromiseGetCapabilitiesExecutorSharedFun,                                   \
     promise_get_capabilities_executor_shared_fun,                              \
     PromiseGetCapabilitiesExecutorSharedFun)                                   \
-  V(PromiseResolveProtector, promise_resolve_protector,                        \
-    PromiseResolveProtector)                                                   \
-  V(PromiseSpeciesProtector, promise_species_protector,                        \
-    PromiseSpeciesProtector)                                                   \
   V(PromiseThenFinallySharedFun, promise_then_finally_shared_fun,              \
     PromiseThenFinallySharedFun)                                               \
-  V(PromiseThenProtector, promise_then_protector, PromiseThenProtector)        \
   V(PromiseThrowerFinallySharedFun, promise_thrower_finally_shared_fun,        \
     PromiseThrowerFinallySharedFun)                                            \
   V(PromiseValueThunkFinallySharedFun, promise_value_thunk_finally_shared_fun, \
     PromiseValueThunkFinallySharedFun)                                         \
   V(ProxyRevokeSharedFun, proxy_revoke_shared_fun, ProxyRevokeSharedFun)       \
-  V(RegExpSpeciesProtector, regexp_species_protector, RegExpSpeciesProtector)  \
-  V(SetIteratorProtector, set_iterator_protector, SetIteratorProtector)        \
   V(ShadowRealmImportValueFulfilledSFI,                                        \
     shadow_realm_import_value_fulfilled_sfi,                                   \
-    ShadowRealmImportValueFulfilledSFI)                                        \
-  V(StringIteratorProtector, string_iterator_protector,                        \
-    StringIteratorProtector)                                                   \
-  V(TypedArraySpeciesProtector, typed_array_species_protector,                 \
-    TypedArraySpeciesProtector)
+    ShadowRealmImportValueFulfilledSFI)
 
 #define UNIQUE_INSTANCE_TYPE_IMMUTABLE_IMMOVABLE_MAP_ADAPTER( \
     V, rootIndexName, rootAccessorName, class_name)           \
@@ -145,7 +146,7 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
   V(boolean_to_string, boolean_to_string, BooleanToString)                   \
   V(class_fields_symbol, class_fields_symbol, ClassFieldsSymbol)             \
   V(ConsOneByteStringMap, cons_one_byte_string_map, ConsOneByteStringMap)    \
-  V(ConsStringMap, cons_string_map, ConsStringMap)                           \
+  V(ConsTwoByteStringMap, cons_two_byte_string_map, ConsTwoByteStringMap)    \
   V(constructor_string, constructor_string, ConstructorString)               \
   V(date_to_string, date_to_string, DateToString)                            \
   V(default_string, default_string, DefaultString)                           \
@@ -169,6 +170,7 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
   V(FixedCOWArrayMap, fixed_cow_array_map, FixedCOWArrayMap)                 \
   V(Function_string, function_string, FunctionString)                        \
   V(function_to_string, function_to_string, FunctionToString)                \
+  V(get_string, get_string, GetString)                                       \
   V(has_instance_symbol, has_instance_symbol, HasInstanceSymbol)             \
   V(has_string, has_string, HasString)                                       \
   V(Infinity_string, Infinity_string, InfinityString)                        \
@@ -196,7 +198,7 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
   V(number_to_string, number_to_string, NumberToString)                      \
   V(Object_string, Object_string, ObjectString)                              \
   V(object_to_string, object_to_string, ObjectToString)                      \
-  V(OneByteStringMap, one_byte_string_map, OneByteStringMap)                 \
+  V(SeqOneByteStringMap, seq_one_byte_string_map, SeqOneByteStringMap)       \
   V(OneClosureCellMap, one_closure_cell_map, OneClosureCellMap)              \
   V(OnePointerFillerMap, one_pointer_filler_map, OnePointerFillerMap)        \
   V(PromiseCapabilityMap, promise_capability_map, PromiseCapabilityMap)      \
@@ -225,9 +227,11 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
   V(StoreHandler0Map, store_handler0_map, StoreHandler0Map)                  \
   V(string_string, string_string, StringString)                              \
   V(string_to_string, string_to_string, StringToString)                      \
-  V(StringMap, string_map, StringMap)                                        \
+  V(SeqTwoByteStringMap, seq_two_byte_string_map, SeqTwoByteStringMap)       \
   V(TheHoleValue, the_hole_value, TheHole)                                   \
+  V(PropertyCellHoleValue, property_cell_hole_value, PropertyCellHole)       \
   V(then_string, then_string, ThenString)                                    \
+  V(toJSON_string, toJSON_string, ToJSONString)                              \
   V(toString_string, toString_string, ToStringString)                        \
   V(to_primitive_symbol, to_primitive_symbol, ToPrimitiveSymbol)             \
   V(to_string_tag_symbol, to_string_tag_symbol, ToStringTagSymbol)           \
@@ -350,7 +354,11 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
     kAllowLargeObjectAllocation = 1 << 2,
   };
 
-  enum SlackTrackingMode { kWithSlackTracking, kNoSlackTracking };
+  enum SlackTrackingMode {
+    kWithSlackTracking,
+    kNoSlackTracking,
+    kDontInitializeInObjectProperties,
+  };
 
   using AllocationFlags = base::Flags<AllocationFlag>;
 
@@ -496,17 +504,15 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   PARAMETER_BINOP(IntPtrOrSmiSub, IntPtrSub, SmiSub)
 #undef PARAMETER_BINOP
 
-#define PARAMETER_BINOP(OpName, IntPtrOpName, SmiOpName)                      \
-  TNode<BoolT> OpName(TNode<Smi> a, TNode<Smi> b) { return SmiOpName(a, b); } \
-  TNode<BoolT> OpName(TNode<IntPtrT> a, TNode<IntPtrT> b) {                   \
-    return IntPtrOpName(a, b);                                                \
-  }                                                                           \
-  TNode<BoolT> OpName(TNode<UintPtrT> a, TNode<UintPtrT> b) {                 \
-    return IntPtrOpName(Signed(a), Signed(b));                                \
-  }                                                                           \
-  TNode<BoolT> OpName(TNode<RawPtrT> a, TNode<RawPtrT> b) {                   \
-    return IntPtrOpName(a, b);                                                \
-  }
+#define PARAMETER_BINOP(OpName, IntPtrOpName, SmiOpName)                       \
+  TNode<BoolT> OpName(TNode<Smi> a, TNode<Smi> b) { return SmiOpName(a, b); }  \
+  TNode<BoolT> OpName(TNode<IntPtrT> a, TNode<IntPtrT> b) {                    \
+    return IntPtrOpName(a, b);                                                 \
+  }                                                                            \
+  /* IntPtrXXX comparisons shouldn't be used with unsigned types, use          \
+   * UintPtrXXX operations explicitly instead. */                              \
+  TNode<BoolT> OpName(TNode<UintPtrT> a, TNode<UintPtrT> b) { UNREACHABLE(); } \
+  TNode<BoolT> OpName(TNode<RawPtrT> a, TNode<RawPtrT> b) { UNREACHABLE(); }
   // TODO(v8:9708): Define BInt operations once all uses are ported.
   PARAMETER_BINOP(IntPtrOrSmiEqual, WordEqual, SmiEqual)
   PARAMETER_BINOP(IntPtrOrSmiNotEqual, WordNotEqual, SmiNotEqual)
@@ -514,7 +520,26 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   PARAMETER_BINOP(IntPtrOrSmiLessThanOrEqual, IntPtrLessThanOrEqual,
                   SmiLessThanOrEqual)
   PARAMETER_BINOP(IntPtrOrSmiGreaterThan, IntPtrGreaterThan, SmiGreaterThan)
+#undef PARAMETER_BINOP
+
+#define PARAMETER_BINOP(OpName, UintPtrOpName, SmiOpName)                     \
+  TNode<BoolT> OpName(TNode<Smi> a, TNode<Smi> b) { return SmiOpName(a, b); } \
+  TNode<BoolT> OpName(TNode<IntPtrT> a, TNode<IntPtrT> b) {                   \
+    return UintPtrOpName(Unsigned(a), Unsigned(b));                           \
+  }                                                                           \
+  TNode<BoolT> OpName(TNode<UintPtrT> a, TNode<UintPtrT> b) {                 \
+    return UintPtrOpName(a, b);                                               \
+  }                                                                           \
+  TNode<BoolT> OpName(TNode<RawPtrT> a, TNode<RawPtrT> b) {                   \
+    return UintPtrOpName(a, b);                                               \
+  }
+  // TODO(v8:9708): Define BInt operations once all uses are ported.
+  PARAMETER_BINOP(UintPtrOrSmiEqual, WordEqual, SmiEqual)
+  PARAMETER_BINOP(UintPtrOrSmiNotEqual, WordNotEqual, SmiNotEqual)
   PARAMETER_BINOP(UintPtrOrSmiLessThan, UintPtrLessThan, SmiBelow)
+  PARAMETER_BINOP(UintPtrOrSmiLessThanOrEqual, UintPtrLessThanOrEqual,
+                  SmiBelowOrEqual)
+  PARAMETER_BINOP(UintPtrOrSmiGreaterThan, UintPtrGreaterThan, SmiAbove)
   PARAMETER_BINOP(UintPtrOrSmiGreaterThanOrEqual, UintPtrGreaterThanOrEqual,
                   SmiAboveOrEqual)
 #undef PARAMETER_BINOP
@@ -586,6 +611,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<UintPtrT> UintPtrMin(TNode<UintPtrT> left, TNode<UintPtrT> right);
 
   // Float64 operations.
+  TNode<BoolT> Float64AlmostEqual(TNode<Float64T> x, TNode<Float64T> y,
+                                  double max_relative_error = 0.0000001);
   TNode<Float64T> Float64Ceil(TNode<Float64T> x);
   TNode<Float64T> Float64Floor(TNode<Float64T> x);
   TNode<Float64T> Float64Round(TNode<Float64T> x);
@@ -732,6 +759,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   SMI_COMPARISON_OP(SmiAboveOrEqual, UintPtrGreaterThanOrEqual,
                     Uint32GreaterThanOrEqual)
   SMI_COMPARISON_OP(SmiBelow, UintPtrLessThan, Uint32LessThan)
+  SMI_COMPARISON_OP(SmiBelowOrEqual, UintPtrLessThanOrEqual,
+                    Uint32LessThanOrEqual)
   SMI_COMPARISON_OP(SmiLessThan, IntPtrLessThan, Int32LessThan)
   SMI_COMPARISON_OP(SmiLessThanOrEqual, IntPtrLessThanOrEqual,
                     Int32LessThanOrEqual)
@@ -755,6 +784,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   //  0 iff x == y.
   //  1 iff x > y.
   TNode<Smi> SmiLexicographicCompare(TNode<Smi> x, TNode<Smi> y);
+
+  // Returns Smi::zero() if no CoverageInfo exists.
+  TNode<Object> GetCoverageInfo(TNode<SharedFunctionInfo> sfi);
 
 #ifdef BINT_IS_SMI
 #define BINT_COMPARISON_OP(BIntOpName, SmiOpName, IntPtrOpName) \
@@ -937,7 +969,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                     int false_value);
   TNode<IntPtrT> SelectIntPtrConstant(TNode<BoolT> condition, int true_value,
                                       int false_value);
-  TNode<Oddball> SelectBooleanConstant(TNode<BoolT> condition);
+  TNode<Boolean> SelectBooleanConstant(TNode<BoolT> condition);
   TNode<Smi> SelectSmiConstant(TNode<BoolT> condition, Smi true_value,
                                Smi false_value);
   TNode<Smi> SelectSmiConstant(TNode<BoolT> condition, int true_value,
@@ -1125,14 +1157,33 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                     TNode<RawPtrT> pointer,
                                     ExternalPointerTag tag);
 
-  // Load a code pointer from an object.
-  TNode<RawPtrT> LoadCodePointerFromObject(TNode<HeapObject> object,
-                                           int offset) {
-    return LoadCodePointerFromObject(object, IntPtrConstant(offset));
-  }
+  // Load an indirect pointer field.
+  TNode<HeapObject> LoadIndirectPointerFromObject(TNode<HeapObject> object,
+                                                  int offset);
 
-  TNode<RawPtrT> LoadCodePointerFromObject(TNode<HeapObject> object,
-                                           TNode<IntPtrT> offset);
+  // Load a field that contains either an indirect pointer (if the sandbox is
+  // enabled) or a regular/tagged pointer (otherwise).
+  TNode<HeapObject> LoadMaybeIndirectPointerFromObject(TNode<HeapObject> object,
+                                                       int offset);
+
+  // When the sandbox is enabled, this will load the Code object pointer from
+  // the code pointer table entry.
+  // Load a code entrypoint pointer from an object.
+  // When the sandbox is enabled, this will load the entrypoint pointer from the
+  // code pointer table entry.
+  TNode<RawPtrT> LoadCodeEntrypointFromObject(TNode<HeapObject> object,
+                                              int offset) {
+    return LoadCodeEntrypointFromObject(object, IntPtrConstant(offset));
+  }
+  TNode<RawPtrT> LoadCodeEntrypointFromObject(TNode<HeapObject> object,
+                                              TNode<IntPtrT> offset);
+
+#ifdef V8_CODE_POINTER_SANDBOXING
+  // Helper function to load a CodePointerHandle from an object and compute the
+  // offset into the code pointer table from it.
+  TNode<UintPtrT> ComputeCodePointerTableEntryOffset(
+      TNode<HeapObject> object, TNode<IntPtrT> field_offset);
+#endif
 
   TNode<RawPtrT> LoadForeignForeignAddressPtr(TNode<Foreign> object) {
     return LoadExternalPointerFromObject(object, Foreign::kForeignAddressOffset,
@@ -1180,6 +1231,13 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<RawPtrT> LoadWasmTypeInfoNativeTypePtr(TNode<WasmTypeInfo> object) {
     return LoadExternalPointerFromObject(
         object, WasmTypeInfo::kNativeTypeOffset, kWasmTypeInfoNativeTypeTag);
+  }
+
+  TNode<RawPtrT> LoadWasmExportedFunctionDataSigPtr(
+      TNode<WasmExportedFunctionData> object) {
+    return LoadExternalPointerFromObject(object,
+                                         WasmExportedFunctionData::kSigOffset,
+                                         kWasmExportedFunctionDataSignatureTag);
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
@@ -1390,7 +1448,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   // Load the properties backing store of a JSReceiver.
   TNode<HeapObject> LoadSlowProperties(TNode<JSReceiver> object);
-  TNode<HeapObject> LoadFastProperties(TNode<JSReceiver> object);
+  TNode<HeapObject> LoadFastProperties(TNode<JSReceiver> object,
+                                       bool skip_empty_check = false);
   // Load the elements backing store of a JSObject.
   TNode<FixedArrayBase> LoadElements(TNode<JSObject> object) {
     return LoadJSObjectElements(object);
@@ -1404,6 +1463,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<Smi> LoadFixedArrayBaseLength(TNode<FixedArrayBase> array);
   // Load the length of a fixed array base instance.
   TNode<IntPtrT> LoadAndUntagFixedArrayBaseLength(TNode<FixedArrayBase> array);
+  TNode<Uint32T> LoadAndUntagFixedArrayBaseLengthAsUint32(
+      TNode<FixedArrayBase> array);
   // Load the length of a WeakFixedArray.
   TNode<Smi> LoadWeakFixedArrayLength(TNode<WeakFixedArray> array);
   TNode<IntPtrT> LoadAndUntagWeakFixedArrayLength(TNode<WeakFixedArray> array);
@@ -1437,9 +1498,13 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   // Load the constructor of a Map (equivalent to Map::GetConstructor()).
   TNode<Object> LoadMapConstructor(TNode<Map> map);
   // Load the EnumLength of a Map.
-  TNode<WordT> LoadMapEnumLength(TNode<Map> map);
+  TNode<Uint32T> LoadMapEnumLength(TNode<Map> map);
   // Load the back-pointer of a Map.
   TNode<Object> LoadMapBackPointer(TNode<Map> map);
+  // Compute the used instance size in words of a map.
+  TNode<IntPtrT> MapUsedInstanceSizeInWords(TNode<Map> map);
+  // Compute the number of used inobject properties on a map.
+  TNode<IntPtrT> MapUsedInObjectProperties(TNode<Map> map);
   // Checks that |map| has only simple properties, returns bitfield3.
   TNode<Uint32T> EnsureOnlyHasSimpleProperties(TNode<Map> map,
                                                TNode<Int32T> instance_type,
@@ -1672,6 +1737,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<Map> LoadObjectFunctionInitialMap(TNode<NativeContext> native_context);
   TNode<Map> LoadSlowObjectWithNullPrototypeMap(
       TNode<NativeContext> native_context);
+  TNode<Map> LoadCachedMap(TNode<NativeContext> native_context,
+                           TNode<IntPtrT> number_of_properties, Label* runtime);
 
   TNode<Map> LoadJSArrayElementsMap(ElementsKind kind,
                                     TNode<NativeContext> native_context);
@@ -1690,6 +1757,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<HeapObject> LoadJSFunctionPrototype(TNode<JSFunction> function,
                                             Label* if_bailout);
 
+  // Load the "code" property of a JSFunction.
+  TNode<Code> LoadJSFunctionCode(TNode<JSFunction> function);
+
   TNode<BytecodeArray> LoadSharedFunctionInfoBytecodeArray(
       TNode<SharedFunctionInfo> shared);
 
@@ -1707,6 +1777,26 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                         TNode<Object> value);
   void StoreObjectField(TNode<HeapObject> object, TNode<IntPtrT> offset,
                         TNode<Object> value);
+
+  // Store to an indirect pointer field. This involves loading the index for
+  // the pointer table entry owned by the pointed-to object (which points back
+  // to it) and storing that into the specified field.
+  // TODO(saelo) Currently, only Code objects can be referenced through
+  // indirect pointers, and so we only support these here, but we should
+  // generalize this.
+  void StoreIndirectPointerField(TNode<HeapObject> object, int offset,
+                                 TNode<Code> value);
+  void StoreIndirectPointerFieldNoWriteBarrier(TNode<HeapObject> object,
+                                               int offset, TNode<Code> value);
+
+  // Store to a field that either contains an indirect pointer (when the
+  // sandbox is enabled) or a regular (tagged) pointer otherwise.
+  void StoreMaybeIndirectPointerField(TNode<HeapObject> object, int offset,
+                                      TNode<Code> value);
+  void StoreMaybeIndirectPointerFieldNoWriteBarrier(TNode<HeapObject> object,
+                                                    int offset,
+                                                    TNode<Code> value);
+
   template <class T>
   void StoreObjectFieldNoWriteBarrier(TNode<HeapObject> object,
                                       TNode<IntPtrT> offset, TNode<T> value) {
@@ -2108,12 +2198,17 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   // TODO(v8:9722): Return type should be JSIteratorResult
   TNode<JSObject> AllocateJSIteratorResult(TNode<Context> context,
                                            TNode<Object> value,
-                                           TNode<Oddball> done);
+                                           TNode<Boolean> done);
 
   // TODO(v8:9722): Return type should be JSIteratorResult
   TNode<JSObject> AllocateJSIteratorResultForEntry(TNode<Context> context,
                                                    TNode<Object> key,
                                                    TNode<Object> value);
+
+  TNode<JSObject> AllocatePromiseWithResolversResult(TNode<Context> context,
+                                                     TNode<Object> promise,
+                                                     TNode<Object> resolve,
+                                                     TNode<Object> reject);
 
   TNode<JSReceiver> ArraySpeciesCreate(TNode<Context> context,
                                        TNode<Object> originalArray,
@@ -2615,6 +2710,10 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<BoolT> IsHashTable(TNode<HeapObject> object);
   TNode<BoolT> IsEphemeronHashTable(TNode<HeapObject> object);
   TNode<BoolT> IsHeapNumberInstanceType(TNode<Int32T> instance_type);
+  // We only want to check for any hole in a negated way. For regular hole
+  // checks, we should check for a specific hole kind instead.
+  TNode<BoolT> IsNotAnyHole(TNode<Object> object);
+  TNode<BoolT> IsHoleInstanceType(TNode<Int32T> instance_type);
   TNode<BoolT> IsOddball(TNode<HeapObject> object);
   TNode<BoolT> IsOddballInstanceType(TNode<Int32T> instance_type);
   TNode<BoolT> IsIndirectStringInstanceType(TNode<Int32T> instance_type);
@@ -3348,16 +3447,15 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
     return CallBuiltin(Builtin::kGetProperty, context, receiver, name);
   }
 
+  TNode<BoolT> IsInterestingProperty(TNode<Name> name);
   TNode<Object> GetInterestingProperty(TNode<Context> context,
                                        TNode<JSReceiver> receiver,
-                                       TNode<Symbol> symbol,
-                                       Label* if_not_found);
+                                       TNode<Name> name, Label* if_not_found);
   TNode<Object> GetInterestingProperty(TNode<Context> context,
                                        TNode<Object> receiver,
                                        TVariable<HeapObject>* var_holder,
                                        TVariable<Map>* var_holder_map,
-                                       TNode<Symbol> symbol,
-                                       Label* if_not_found, Label* if_proxy);
+                                       TNode<Name> name, Label* if_not_found);
 
   TNode<Object> SetPropertyStrict(TNode<Context> context,
                                   TNode<Object> receiver, TNode<Object> key,
@@ -3499,11 +3597,11 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   // Returns true if {object} has {prototype} somewhere in it's prototype
   // chain, otherwise false is returned. Might cause arbitrary side effects
   // due to [[GetPrototypeOf]] invocations.
-  TNode<Oddball> HasInPrototypeChain(TNode<Context> context,
+  TNode<Boolean> HasInPrototypeChain(TNode<Context> context,
                                      TNode<HeapObject> object,
                                      TNode<Object> prototype);
   // ES6 section 7.3.19 OrdinaryHasInstance (C, O)
-  TNode<Oddball> OrdinaryHasInstance(TNode<Context> context,
+  TNode<Boolean> OrdinaryHasInstance(TNode<Context> context,
                                      TNode<Object> callable,
                                      TNode<Object> object);
 
@@ -3729,14 +3827,14 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                                     TNode<Uint32T> depth,
                                                     Label* target);
 
-  TNode<Oddball> RelationalComparison(
+  TNode<Boolean> RelationalComparison(
       Operation op, TNode<Object> left, TNode<Object> right,
       TNode<Context> context, TVariable<Smi>* var_type_feedback = nullptr) {
     return RelationalComparison(
         op, left, right, [=]() { return context; }, var_type_feedback);
   }
 
-  TNode<Oddball> RelationalComparison(
+  TNode<Boolean> RelationalComparison(
       Operation op, TNode<Object> left, TNode<Object> right,
       const LazyNode<Context>& context,
       TVariable<Smi>* var_type_feedback = nullptr);
@@ -3789,22 +3887,25 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   void GotoIfNumberGreaterThanOrEqual(TNode<Number> left, TNode<Number> right,
                                       Label* if_false);
 
-  TNode<Oddball> Equal(TNode<Object> lhs, TNode<Object> rhs,
+  TNode<Boolean> Equal(TNode<Object> lhs, TNode<Object> rhs,
                        TNode<Context> context,
                        TVariable<Smi>* var_type_feedback = nullptr) {
     return Equal(
         lhs, rhs, [=]() { return context; }, var_type_feedback);
   }
-  TNode<Oddball> Equal(TNode<Object> lhs, TNode<Object> rhs,
+  TNode<Boolean> Equal(TNode<Object> lhs, TNode<Object> rhs,
                        const LazyNode<Context>& context,
                        TVariable<Smi>* var_type_feedback = nullptr);
 
-  TNode<Oddball> StrictEqual(TNode<Object> lhs, TNode<Object> rhs,
+  TNode<Boolean> StrictEqual(TNode<Object> lhs, TNode<Object> rhs,
                              TVariable<Smi>* var_type_feedback = nullptr);
 
   void GotoIfStringEqual(TNode<String> lhs, TNode<IntPtrT> lhs_length,
                          TNode<String> rhs, Label* if_true) {
     Label if_false(this);
+    // Callers must handle the case where {lhs} and {rhs} refer to the same
+    // String object.
+    CSA_DCHECK(this, TaggedNotEqual(lhs, rhs));
     TNode<IntPtrT> rhs_length = LoadStringLengthAsWord(rhs);
     BranchIfStringEqual(lhs, lhs_length, rhs, rhs_length, if_true, &if_false,
                         nullptr);
@@ -3814,7 +3915,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   void BranchIfStringEqual(TNode<String> lhs, TNode<String> rhs, Label* if_true,
                            Label* if_false,
-                           TVariable<Oddball>* result = nullptr) {
+                           TVariable<Boolean>* result = nullptr) {
     return BranchIfStringEqual(lhs, LoadStringLengthAsWord(lhs), rhs,
                                LoadStringLengthAsWord(rhs), if_true, if_false,
                                result);
@@ -3823,7 +3924,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   void BranchIfStringEqual(TNode<String> lhs, TNode<IntPtrT> lhs_length,
                            TNode<String> rhs, TNode<IntPtrT> rhs_length,
                            Label* if_true, Label* if_false,
-                           TVariable<Oddball>* result = nullptr);
+                           TVariable<Boolean>* result = nullptr);
 
   // ECMA#sec-samevalue
   // Similar to StrictEqual except that NaNs are treated as equal and minus zero
@@ -3840,11 +3941,11 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   enum HasPropertyLookupMode { kHasProperty, kForInHasProperty };
 
-  TNode<Oddball> HasProperty(TNode<Context> context, TNode<Object> object,
+  TNode<Boolean> HasProperty(TNode<Context> context, TNode<Object> object,
                              TNode<Object> key, HasPropertyLookupMode mode);
 
   // Due to naming conflict with the builtin function namespace.
-  TNode<Oddball> HasProperty_Inline(TNode<Context> context,
+  TNode<Boolean> HasProperty_Inline(TNode<Context> context,
                                     TNode<JSReceiver> object,
                                     TNode<Object> key) {
     return HasProperty(context, object, key,
@@ -3865,7 +3966,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                        TNode<Object> object,
                                        TNode<JSReceiver> default_constructor);
 
-  TNode<Oddball> InstanceOf(TNode<Object> object, TNode<Object> callable,
+  TNode<Boolean> InstanceOf(TNode<Object> object, TNode<Object> callable,
                             TNode<Context> context);
 
   // Debug helpers
@@ -4026,6 +4127,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
     return Print(nullptr, tagged_value);
   }
   void Print(const char* prefix, TNode<UintPtrT> value);
+  void Print(const char* prefix, TNode<Float64T> value);
   void PrintErr(const char* s);
   void PrintErr(const char* prefix, TNode<MaybeObject> tagged_value);
   void PrintErr(TNode<MaybeObject> tagged_value) {
@@ -4035,6 +4137,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   void PrintToStream(const char* prefix, TNode<MaybeObject> tagged_value,
                      int stream);
   void PrintToStream(const char* prefix, TNode<UintPtrT> value, int stream);
+  void PrintToStream(const char* prefix, TNode<Float64T> value, int stream);
 
   template <class... TArgs>
   TNode<HeapObject> MakeTypeError(MessageTemplate message,

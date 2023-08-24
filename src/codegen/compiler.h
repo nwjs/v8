@@ -48,14 +48,7 @@ struct ScriptStreamingData;
 namespace maglev {
 class MaglevCompilationJob;
 
-static inline bool IsMaglevEnabled() {
-  // TODO(victorgomes): Currently arm ignores the --maglev flag.
-#ifdef V8_TARGET_ARCH_ARM
-  return v8_flags.maglev_arm;
-#else
-  return v8_flags.maglev;
-#endif
-}
+static inline bool IsMaglevEnabled() { return v8_flags.maglev; }
 
 static inline bool IsMaglevOsrEnabled() {
   return IsMaglevEnabled() && v8_flags.maglev_osr;
@@ -144,7 +137,8 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
   // Give the compiler a chance to perform low-latency initialization tasks of
   // the given {function} on its instantiation. Note that only the runtime will
   // offer this chance, optimized closure instantiation will not call this.
-  static void PostInstantiation(Handle<JSFunction> function);
+  static void PostInstantiation(Handle<JSFunction> function,
+                                IsCompiledScope* is_compiled_scope);
 
   // ===========================================================================
   // The following family of methods instantiates new functions for scripts or
@@ -455,6 +449,9 @@ class TurbofanCompilationJob : public OptimizedCompilationJob {
   void RecordCompilationStats(ConcurrencyMode mode, Isolate* isolate) const;
   void RecordFunctionCompilation(LogEventListener::CodeTag code_type,
                                  Isolate* isolate) const;
+
+  // Intended for use as a globally unique id in trace events.
+  uint64_t trace_id() const;
 
  private:
   OptimizedCompilationInfo* const compilation_info_;

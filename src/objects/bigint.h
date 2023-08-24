@@ -184,7 +184,7 @@ class FreshlyAllocatedBigInt : public BigIntBase {
 
  private:
   // Only serves to make macros happy; other code should use IsBigInt.
-  bool IsFreshlyAllocatedBigInt() const { return true; }
+  static bool IsFreshlyAllocatedBigInt(FreshlyAllocatedBigInt) { return true; }
 
   OBJECT_CONSTRUCTORS(FreshlyAllocatedBigInt, BigIntBase);
 };
@@ -256,7 +256,8 @@ class BigInt : public BigIntBase {
 
   V8_EXPORT_PRIVATE static Handle<BigInt> FromInt64(Isolate* isolate,
                                                     int64_t n);
-  static Handle<BigInt> FromUint64(Isolate* isolate, uint64_t n);
+  V8_EXPORT_PRIVATE static Handle<BigInt> FromUint64(Isolate* isolate,
+                                                     uint64_t n);
   static MaybeHandle<BigInt> FromWords64(Isolate* isolate, int sign_bit,
                                          int words64_count,
                                          const uint64_t* words);

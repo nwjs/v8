@@ -6,9 +6,13 @@
 
 #include "src/snapshot/snapshot.h"
 
+#include "src/api/api-inl.h"  // For OpenHandle.
+#include "src/baseline/baseline-batch-compiler.h"
 #include "src/common/assert-scope.h"
 #include "src/execution/local-isolate-inl.h"
+#include "src/handles/global-handles-inl.h"
 #include "src/heap/local-heap-inl.h"
+#include "src/heap/read-only-promotion.h"
 #include "src/heap/safepoint.h"
 #include "src/init/bootstrapper.h"
 #include "src/logging/runtime-call-stats-scope.h"
@@ -234,24 +238,33 @@ void Snapshot::ClearReconstructableDataForSerialization(
     {
       i::HeapObjectIterator it(isolate->heap());
       for (i::HeapObject o = it.Next(); !o.is_null(); o = it.Next()) {
-        if (clear_recompilable_data && o.IsSharedFunctionInfo(cage_base)) {
+        if (clear_recompilable_data && IsSharedFunctionInfo(o, cage_base)) {
           i::SharedFunctionInfo shared = i::SharedFunctionInfo::cast(o);
-          if (shared.script(cage_base).IsScript(cage_base) &&
-              Script::cast(shared.script(cage_base)).type() ==
+          if (IsScript(shared->script(cage_base), cage_base) &&
+              Script::cast(shared->script(cage_base))->type() ==
                   Script::Type::kExtension) {
             continue;  // Don't clear extensions, they cannot be recompiled.
           }
-          if (shared.CanDiscardCompiled()) {
+          if (shared->CanDiscardCompiled()) {
             sfis_to_clear.emplace_back(shared, isolate);
           }
-        } else if (o.IsJSRegExp(cage_base)) {
+        } else if (IsJSRegExp(o, cage_base)) {
           i::JSRegExp regexp = i::JSRegExp::cast(o);
-          if (regexp.HasCompiledCode()) {
-            regexp.DiscardCompiledCodeForSerialization();
+          if (regexp->HasCompiledCode()) {
+            regexp->DiscardCompiledCodeForSerialization();
           }
         }
       }
     }
+
+#if V8_ENABLE_WEBASSEMBLY
+    // Clear the cached js-to-wasm wrappers.
+    Handle<WeakArrayList> wrappers =
+        handle(isolate->heap()->js_to_wasm_wrappers(), isolate);
+    for (int i = 0; i < wrappers->length(); ++i) {
+      wrappers->Set(i, MaybeObject{});
+    }
+#endif  // V8_ENABLE_WEBASSEMBLY
 
     // Must happen after heap iteration since SFI::DiscardCompiled may allocate.
     for (i::Handle<i::SharedFunctionInfo> shared : sfis_to_clear) {
@@ -265,32 +278,32 @@ void Snapshot::ClearReconstructableDataForSerialization(
 
   i::HeapObjectIterator it(isolate->heap());
   for (i::HeapObject o = it.Next(); !o.is_null(); o = it.Next()) {
-    if (!o.IsJSFunction(cage_base)) continue;
+    if (!IsJSFunction(o, cage_base)) continue;
 
     i::JSFunction fun = i::JSFunction::cast(o);
-    fun.CompleteInobjectSlackTrackingIfActive();
+    fun->CompleteInobjectSlackTrackingIfActive();
 
-    i::SharedFunctionInfo shared = fun.shared();
-    if (shared.script(cage_base).IsScript(cage_base) &&
-        Script::cast(shared.script(cage_base)).type() ==
+    i::SharedFunctionInfo shared = fun->shared();
+    if (IsScript(shared->script(cage_base), cage_base) &&
+        Script::cast(shared->script(cage_base))->type() ==
             Script::Type::kExtension) {
       continue;  // Don't clear extensions, they cannot be recompiled.
     }
 
     // Also, clear out feedback vectors and recompilable code.
-    if (fun.CanDiscardCompiled()) {
-      fun.set_code(*BUILTIN_CODE(isolate, CompileLazy));
+    if (fun->CanDiscardCompiled()) {
+      fun->set_code(*BUILTIN_CODE(isolate, CompileLazy));
     }
-    if (!fun.raw_feedback_cell(cage_base).value(cage_base).IsUndefined()) {
-      fun.raw_feedback_cell(cage_base).set_value(
+    if (!IsUndefined(fun->raw_feedback_cell(cage_base)->value(cage_base))) {
+      fun->raw_feedback_cell(cage_base)->set_value(
           i::ReadOnlyRoots(isolate).undefined_value());
     }
 #ifdef DEBUG
     if (clear_recompilable_data) {
 #if V8_ENABLE_WEBASSEMBLY
-      DCHECK(fun.shared().HasWasmExportedFunctionData() ||
-             fun.shared().HasBuiltinId() || fun.shared().IsApiFunction() ||
-             fun.shared().HasUncompiledDataWithoutPreparseData());
+      DCHECK(fun->shared()->HasWasmExportedFunctionData() ||
+             fun->shared()->HasBuiltinId() || fun->shared()->IsApiFunction() ||
+             fun->shared()->HasUncompiledDataWithoutPreparseData());
 #else
       DCHECK(fun.shared().HasBuiltinId() || fun.shared().IsApiFunction() ||
              fun.shared().HasUncompiledDataWithoutPreparseData());
@@ -329,7 +342,9 @@ void Snapshot::SerializeDeserializeAndVerifyForTesting(
         ((isolate->has_shared_space() || ReadOnlyHeap::IsReadOnlySpaceShared())
              ? Snapshot::kReconstructReadOnlyAndSharedObjectCachesForTesting
              : 0));
-    serialized_data = Snapshot::Create(isolate, *default_context,
+    std::vector<Context> contexts{*default_context};
+    std::vector<SerializeInternalFieldsCallback> callbacks{{}};
+    serialized_data = Snapshot::Create(isolate, &contexts, callbacks,
                                        safepoint_scope, no_gc, flags);
     auto_delete_serialized_data.reset(serialized_data.data);
   }
@@ -356,7 +371,7 @@ void Snapshot::SerializeDeserializeAndVerifyForTesting(
           HandleScope scope(new_isolate);
           Handle<Context> new_native_context =
               new_isolate->bootstrapper()->CreateEnvironmentForTesting();
-          CHECK(new_native_context->IsNativeContext());
+          CHECK(IsNativeContext(*new_native_context));
 
 #ifdef VERIFY_HEAP
           if (v8_flags.verify_heap)
@@ -369,9 +384,6 @@ void Snapshot::SerializeDeserializeAndVerifyForTesting(
 }
 
 // static
-constexpr Snapshot::SerializerFlags Snapshot::kDefaultSerializerFlags;
-
-// static
 v8::StartupData Snapshot::Create(
     Isolate* isolate, std::vector<Context>* contexts,
     const std::vector<SerializeInternalFieldsCallback>&
@@ -382,15 +394,6 @@ v8::StartupData Snapshot::Create(
   DCHECK_EQ(contexts->size(), embedder_fields_serializers.size());
   DCHECK_GT(contexts->size(), 0);
   HandleScope scope(isolate);
-
-  if (!isolate->initialized_from_snapshot()) {
-    // When creating the snapshot from scratch, we are responsible for sealing
-    // the RO heap here. Note we cannot delegate the responsibility e.g. to
-    // Isolate::Init since it should still be possible to allocate into RO
-    // space after the Isolate has been initialized, for example as part of
-    // Context creation.
-    isolate->read_only_heap()->OnCreateHeapObjectsComplete(isolate);
-  }
 
   ReadOnlySerializer read_only_serializer(isolate, flags);
   read_only_serializer.Serialize();
@@ -467,17 +470,6 @@ v8::StartupData Snapshot::Create(
 
   CHECK(Snapshot::VerifyChecksum(&result));
   return result;
-}
-
-// static
-v8::StartupData Snapshot::Create(Isolate* isolate, Context default_context,
-                                 const SafepointScope& safepoint_scope,
-                                 const DisallowGarbageCollection& no_gc,
-                                 SerializerFlags flags) {
-  std::vector<Context> contexts{default_context};
-  std::vector<SerializeInternalFieldsCallback> callbacks{{}};
-  return Snapshot::Create(isolate, &contexts, callbacks, safepoint_scope, no_gc,
-                          flags);
 }
 
 v8::StartupData SnapshotImpl::CreateSnapshotBlob(
@@ -753,8 +745,9 @@ bool RunExtraCode(v8::Isolate* isolate, v8::Local<v8::Context> context,
   v8::ScriptOrigin origin(isolate, resource_name);
   v8::ScriptCompiler::Source source(source_string, origin);
   v8::Local<v8::Script> script;
-  if (!v8::ScriptCompiler::Compile(context, &source).ToLocal(&script))
+  if (!v8::ScriptCompiler::Compile(context, &source).ToLocal(&script)) {
     return false;
+  }
   if (script->Run(context).IsEmpty()) return false;
   CHECK(!try_catch.HasCaught());
   return true;
@@ -764,26 +757,29 @@ bool RunExtraCode(v8::Isolate* isolate, v8::Local<v8::Context> context,
 
 v8::StartupData CreateSnapshotDataBlobInternal(
     v8::SnapshotCreator::FunctionCodeHandling function_code_handling,
-    const char* embedded_source, v8::Isolate* isolate) {
-  bool owns_isolate = false;
-  // If no isolate is passed in, create it (and a new context) from scratch.
-  if (isolate == nullptr) {
-    isolate = v8::Isolate::Allocate();
-    owns_isolate = true;
-  }
+    const char* embedded_source, Isolate* isolate,
+    Snapshot::SerializerFlags serializer_flags) {
+  bool owns_isolate = isolate == nullptr;
+  SnapshotCreatorImpl creator(isolate, nullptr, nullptr, owns_isolate);
 
-  // Optionally run a script to embed, and serialize to create a snapshot blob.
-  v8::SnapshotCreator snapshot_creator(isolate, nullptr, nullptr, owns_isolate);
   {
-    v8::HandleScope scope(isolate);
-    v8::Local<v8::Context> context = v8::Context::New(isolate);
+    auto v8_isolate = reinterpret_cast<v8::Isolate*>(creator.isolate());
+    v8::HandleScope scope(v8_isolate);
+    v8::Local<v8::Context> context = v8::Context::New(v8_isolate);
     if (embedded_source != nullptr &&
-        !RunExtraCode(isolate, context, embedded_source, "<embedded>")) {
+        !RunExtraCode(v8_isolate, context, embedded_source, "<embedded>")) {
       return {};
     }
-    snapshot_creator.SetDefaultContext(context);
+    creator.SetDefaultContext(Utils::OpenHandle(*context), nullptr);
   }
-  return snapshot_creator.CreateBlob(function_code_handling);
+  return creator.CreateBlob(function_code_handling, serializer_flags);
+}
+
+v8::StartupData CreateSnapshotDataBlobInternalForInspectorTest(
+    v8::SnapshotCreator::FunctionCodeHandling function_code_handling,
+    const char* embedded_source) {
+  return CreateSnapshotDataBlobInternal(function_code_handling,
+                                        embedded_source);
 }
 
 v8::StartupData WarmUpSnapshotDataBlobInternal(
@@ -815,6 +811,259 @@ v8::StartupData WarmUpSnapshotDataBlobInternal(
 
   return snapshot_creator.CreateBlob(
       v8::SnapshotCreator::FunctionCodeHandling::kKeep);
+}
+
+SnapshotCreatorImpl::SnapshotCreatorImpl(
+    Isolate* isolate, const intptr_t* api_external_references,
+    const StartupData* existing_blob, bool owns_isolate)
+    : owns_isolate_(owns_isolate),
+      isolate_(isolate == nullptr ? Isolate::New() : isolate),
+      array_buffer_allocator_(ArrayBuffer::Allocator::NewDefaultAllocator()) {
+  DCHECK_NOT_NULL(isolate_);
+
+  isolate_->set_array_buffer_allocator(array_buffer_allocator_);
+  isolate_->set_api_external_references(api_external_references);
+  isolate_->enable_serializer();
+  isolate_->Enter();
+
+  const StartupData* blob = existing_blob != nullptr
+                                ? existing_blob
+                                : Snapshot::DefaultSnapshotBlob();
+  if (blob != nullptr && blob->raw_size > 0) {
+    isolate_->set_snapshot_blob(blob);
+    Snapshot::Initialize(isolate_);
+  } else {
+    isolate_->InitWithoutSnapshot();
+  }
+
+  isolate_->baseline_batch_compiler()->set_enabled(false);
+
+  // Reserve a spot for the default context s.t. the call sequence of
+  // SetDefaultContext / AddContext remains independent.
+  contexts_.push_back(SerializableContext{});
+  DCHECK_EQ(contexts_.size(), kDefaultContextIndex + 1);
+}
+
+SnapshotCreatorImpl::~SnapshotCreatorImpl() {
+  if (!created()) {
+    // Finalize the RO heap in order to leave the Isolate in a consistent state.
+    isolate_->read_only_heap()->OnCreateHeapObjectsComplete(isolate_);
+  }
+  // Destroy leftover global handles (i.e. if CreateBlob was never called).
+  for (size_t i = 0; i < contexts_.size(); i++) {
+    DCHECK(!created());
+    GlobalHandles::Destroy(contexts_[i].handle_location);
+    contexts_[i].handle_location = nullptr;
+  }
+  isolate_->Exit();
+  if (owns_isolate_) Isolate::Delete(isolate_);
+  delete array_buffer_allocator_;
+}
+
+void SnapshotCreatorImpl::SetDefaultContext(
+    Handle<NativeContext> context, SerializeInternalFieldsCallback callback) {
+  DCHECK(contexts_[kDefaultContextIndex].handle_location == nullptr);
+  DCHECK(!context.is_null());
+  DCHECK(!created());
+  CHECK_EQ(isolate_, context->GetIsolate());
+  contexts_[kDefaultContextIndex].handle_location =
+      isolate_->global_handles()->Create(*context).location();
+  contexts_[kDefaultContextIndex].callback = callback;
+}
+
+size_t SnapshotCreatorImpl::AddContext(
+    Handle<NativeContext> context, SerializeInternalFieldsCallback callback) {
+  DCHECK(!context.is_null());
+  DCHECK(!created());
+  CHECK_EQ(isolate_, context->GetIsolate());
+  size_t index = contexts_.size() - kFirstAddtlContextIndex;
+  contexts_.emplace_back(
+      isolate_->global_handles()->Create(*context).location(), callback);
+  return index;
+}
+
+size_t SnapshotCreatorImpl::AddData(Handle<NativeContext> context,
+                                    Address object) {
+  CHECK_EQ(isolate_, context->GetIsolate());
+  DCHECK_NE(object, kNullAddress);
+  DCHECK(!created());
+  HandleScope scope(isolate_);
+  Handle<Object> obj(Object(object), isolate_);
+  Handle<ArrayList> list;
+  if (!IsArrayList(context->serialized_objects())) {
+    list = ArrayList::New(isolate_, 1);
+  } else {
+    list = Handle<ArrayList>(ArrayList::cast(context->serialized_objects()),
+                             isolate_);
+  }
+  size_t index = static_cast<size_t>(list->Length());
+  list = ArrayList::Add(isolate_, list, obj);
+  context->set_serialized_objects(*list);
+  return index;
+}
+
+size_t SnapshotCreatorImpl::AddData(Address object) {
+  DCHECK_NE(object, kNullAddress);
+  DCHECK(!created());
+  HandleScope scope(isolate_);
+  Handle<Object> obj(Object(object), isolate_);
+  Handle<ArrayList> list;
+  if (!IsArrayList(isolate_->heap()->serialized_objects())) {
+    list = ArrayList::New(isolate_, 1);
+  } else {
+    list = Handle<ArrayList>(
+        ArrayList::cast(isolate_->heap()->serialized_objects()), isolate_);
+  }
+  size_t index = static_cast<size_t>(list->Length());
+  list = ArrayList::Add(isolate_, list, obj);
+  isolate_->heap()->SetSerializedObjects(*list);
+  return index;
+}
+
+Handle<NativeContext> SnapshotCreatorImpl::context_at(size_t i) const {
+  return Handle<NativeContext>(contexts_[i].handle_location);
+}
+
+namespace {
+
+void ConvertSerializedObjectsToFixedArray(Isolate* isolate) {
+  if (!IsArrayList(isolate->heap()->serialized_objects())) {
+    isolate->heap()->SetSerializedObjects(
+        ReadOnlyRoots(isolate).empty_fixed_array());
+  } else {
+    Handle<ArrayList> list(
+        ArrayList::cast(isolate->heap()->serialized_objects()), isolate);
+    Handle<FixedArray> elements = ArrayList::Elements(isolate, list);
+    isolate->heap()->SetSerializedObjects(*elements);
+  }
+}
+
+void ConvertSerializedObjectsToFixedArray(Isolate* isolate,
+                                          Handle<NativeContext> context) {
+  if (!IsArrayList(context->serialized_objects())) {
+    context->set_serialized_objects(ReadOnlyRoots(isolate).empty_fixed_array());
+  } else {
+    Handle<ArrayList> list(ArrayList::cast(context->serialized_objects()),
+                           isolate);
+    Handle<FixedArray> elements = ArrayList::Elements(isolate, list);
+    context->set_serialized_objects(*elements);
+  }
+}
+
+}  // anonymous namespace
+
+// static
+StartupData SnapshotCreatorImpl::CreateBlob(
+    SnapshotCreator::FunctionCodeHandling function_code_handling,
+    Snapshot::SerializerFlags serializer_flags) {
+  CHECK(!created());
+  CHECK(contexts_[kDefaultContextIndex].handle_location != nullptr);
+
+  const size_t num_contexts = contexts_.size();
+  const size_t num_additional_contexts = num_contexts - 1;
+
+  // Create and store lists of embedder-provided data needed during
+  // serialization.
+  {
+    HandleScope scope(isolate_);
+
+    // Convert list of context-independent data to FixedArray.
+    ConvertSerializedObjectsToFixedArray(isolate_);
+
+    // Convert lists of context-dependent data to FixedArray.
+    for (size_t i = 0; i < num_contexts; i++) {
+      ConvertSerializedObjectsToFixedArray(isolate_, context_at(i));
+    }
+
+    // We need to store the global proxy size upfront in case we need the
+    // bootstrapper to create a global proxy before we deserialize the context.
+    Handle<FixedArray> global_proxy_sizes = isolate_->factory()->NewFixedArray(
+        static_cast<int>(num_additional_contexts), AllocationType::kOld);
+    for (size_t i = kFirstAddtlContextIndex; i < num_contexts; i++) {
+      global_proxy_sizes->set(
+          static_cast<int>(i - kFirstAddtlContextIndex),
+          Smi::FromInt(context_at(i)->global_proxy()->Size()));
+    }
+    isolate_->heap()->SetSerializedGlobalProxySizes(*global_proxy_sizes);
+  }
+
+  // We might rehash strings and re-sort descriptors. Clear the lookup cache.
+  isolate_->descriptor_lookup_cache()->Clear();
+
+  // If we don't do this then we end up with a stray root pointing at the
+  // context even after we have disposed of the context.
+  isolate_->heap()->CollectAllAvailableGarbage(
+      GarbageCollectionReason::kSnapshotCreator);
+  {
+    HandleScope scope(isolate_);
+    isolate_->heap()->CompactWeakArrayLists();
+  }
+
+  Snapshot::ClearReconstructableDataForSerialization(
+      isolate_,
+      function_code_handling == SnapshotCreator::FunctionCodeHandling::kClear);
+
+  SafepointKind safepoint_kind = isolate_->has_shared_space()
+                                     ? SafepointKind::kGlobal
+                                     : SafepointKind::kIsolate;
+  SafepointScope safepoint_scope(isolate_, safepoint_kind);
+  DisallowGarbageCollection no_gc_from_here_on;
+
+  // RO space is usually writable when serializing a snapshot s.t. preceding
+  // heap initialization can also extend RO space. There are notable exceptions
+  // though, including --stress-snapshot and serializer cctests.
+  if (isolate_->heap()->read_only_space()->writable()) {
+    // Promote objects from mutable heap spaces to read-only space prior to
+    // serialization. Objects can be promoted if a) they are themselves
+    // immutable-after-deserialization and b) all objects in the transitive
+    // object graph also satisfy condition a).
+    ReadOnlyPromotion::Promote(isolate_, safepoint_scope);
+    // When creating the snapshot from scratch, we are responsible for sealing
+    // the RO heap here. Note we cannot delegate the responsibility e.g. to
+    // Isolate::Init since it should still be possible to allocate into RO
+    // space after the Isolate has been initialized, for example as part of
+    // Context creation.
+    isolate_->read_only_heap()->OnCreateHeapObjectsComplete(isolate_);
+  } else {
+    // All exceptions to the above rule should explicitly pass this flag:
+    DCHECK_NE(serializer_flags & Snapshot::kAllowActiveIsolateForTesting, 0);
+  }
+
+  // Create a vector with all contexts and destroy associated global handles.
+  // This is important because serialization visits active global handles as
+  // roots, which we don't want for our internal SnapshotCreatorImpl-related
+  // data.
+  // Note these contexts may be dead after calling Clear(), but will not be
+  // collected until serialization completes and the DisallowGarbageCollection
+  // scope above goes out of scope.
+  std::vector<Context> raw_contexts;
+  raw_contexts.reserve(num_contexts);
+  {
+    HandleScope scope(isolate_);
+    for (size_t i = 0; i < num_contexts; i++) {
+      raw_contexts.push_back(*context_at(i));
+      GlobalHandles::Destroy(contexts_[i].handle_location);
+      contexts_[i].handle_location = nullptr;
+    }
+  }
+
+  // Check that values referenced by global/eternal handles are accounted for.
+  SerializedHandleChecker handle_checker(isolate_, &raw_contexts);
+  if (!handle_checker.CheckGlobalAndEternalHandles()) {
+    GRACEFUL_FATAL("CheckGlobalAndEternalHandles failed");
+  }
+
+  // Create a vector with all embedder fields serializers.
+  std::vector<SerializeInternalFieldsCallback> raw_callbacks;
+  raw_callbacks.reserve(num_contexts);
+  for (size_t i = 0; i < num_contexts; i++) {
+    raw_callbacks.push_back(contexts_[i].callback);
+  }
+
+  contexts_.clear();
+  return Snapshot::Create(isolate_, &raw_contexts, raw_callbacks,
+                          safepoint_scope, no_gc_from_here_on,
+                          serializer_flags);
 }
 
 }  // namespace internal

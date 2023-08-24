@@ -19,7 +19,8 @@ function BasicMemory64Tests(num_pages, use_atomic_ops) {
       use_atomic_ops ? '' : 'non-'}atomic memory`);
 
   let builder = new WasmModuleBuilder();
-  builder.addMemory64(num_pages, num_pages, true);
+  builder.addMemory64(num_pages, num_pages);
+  builder.exportMemoryAs('memory');
 
   // A memory operation with alignment (0) and offset (0).
   let op = (non_atomic, atomic) => use_atomic_ops ?
@@ -201,7 +202,8 @@ function allowOOM(fn) {
 (function TestGrow64_ToMemory() {
   print(arguments.callee.name);
   let builder = new WasmModuleBuilder();
-  builder.addMemory64(1, 10, true);
+  builder.addMemory64(1, 10);
+  builder.exportMemoryAs('memory');
 
   // Grow memory and store the result in memory for inspection from JS.
   builder.addFunction('grow', makeSig([kWasmI64], []))
@@ -235,7 +237,8 @@ function allowOOM(fn) {
   print(arguments.callee.name);
   let builder = new WasmModuleBuilder();
   let max_pages = 5 * GB / kPageSize;
-  builder.addMemory64(1, max_pages, true);
+  builder.addMemory64(1, max_pages);
+  builder.exportMemoryAs('memory');
 
   builder.addFunction('grow', makeSig([kWasmI64], [kWasmI64]))
       .addBody([
@@ -377,7 +380,8 @@ function allowOOM(fn) {
 (function TestMemory64SharedBasic() {
   print(arguments.callee.name);
   let builder = new WasmModuleBuilder();
-  builder.addMemory64(1, 10, true, true);
+  builder.addMemory64(1, 10, true);
+  builder.exportMemoryAs('memory');
   builder.addFunction('load', makeSig([kWasmI64], [kWasmI32]))
       .addBody([
         kExprLocalGet, 0,       // local.get 0
@@ -397,7 +401,8 @@ function allowOOM(fn) {
   // TODO(clemensb): Use the proper API once that's decided.
   let shared_mem64 = (function() {
     let builder = new WasmModuleBuilder();
-    builder.addMemory64(1, 10, true, true);
+    builder.addMemory64(1, 10, true);
+    builder.exportMemoryAs('memory');
     return builder.instantiate().exports.memory;
   })();
 
@@ -442,8 +447,9 @@ function allowOOM(fn) {
       }
 
       function workerAssertEquals(expected, actual, message) {
-        if (expected != actual)
+        if (expected != actual) {
           postMessage(`Check failed (${message}): ${expected} != ${actual}`);
+        }
       }
 
       const kOffset1 = 47n;
@@ -482,7 +488,7 @@ function allowOOM(fn) {
 (function Test64BitOffsetOn32BitMemory() {
   print(arguments.callee.name);
   let builder = new WasmModuleBuilder();
-  builder.addMemory(1, 1, false);
+  builder.addMemory(1, 1);
 
   builder.addFunction('load', makeSig([kWasmI32], [kWasmI32]))
       .addBody([
@@ -500,7 +506,7 @@ function allowOOM(fn) {
 (function Test64BitOffsetOn64BitMemory() {
   print(arguments.callee.name);
   let builder = new WasmModuleBuilder();
-  builder.addMemory64(1, 1, false);
+  builder.addMemory64(1, 1);
 
   builder.addFunction('load', makeSig([kWasmI64], [kWasmI32]))
       .addBody([
@@ -516,4 +522,107 @@ function allowOOM(fn) {
   let load = instance.exports.load;
 
   assertTraps(kTrapMemOutOfBounds, () => load(0n));
+})();
+
+(function TestImportMemory64() {
+  print(arguments.callee.name);
+  const builder1 = new WasmModuleBuilder();
+  builder1.addMemory64(1, 1);
+  builder1.exportMemoryAs('mem64');
+  const instance1 = builder1.instantiate();
+  const {mem64} = instance1.exports;
+
+  let builder2 = new WasmModuleBuilder();
+  builder2.addImportedMemory(
+      'imp', 'mem', 1, 1, /* shared */ false, /* memory64 */ true);
+  builder2.instantiate({imp: {mem: mem64}});
+})();
+
+(function TestImportMemory64AsMemory32() {
+  print(arguments.callee.name);
+  const builder1 = new WasmModuleBuilder();
+  builder1.addMemory64(1, 1);
+  builder1.exportMemoryAs('mem64');
+  const instance1 = builder1.instantiate();
+  const {mem64} = instance1.exports;
+
+  let builder2 = new WasmModuleBuilder();
+  builder2.addImportedMemory('imp', 'mem');
+  assertThrows(
+      () => builder2.instantiate({imp: {mem: mem64}}), WebAssembly.LinkError,
+      'WebAssembly.Instance(): cannot import memory64 as memory32');
+})();
+
+(function TestImportMemory32AsMemory64() {
+  print(arguments.callee.name);
+  const builder1 = new WasmModuleBuilder();
+  builder1.addMemory(1, 1);
+  builder1.exportMemoryAs('mem32');
+  const instance1 = builder1.instantiate();
+  const {mem32} = instance1.exports;
+
+  let builder2 = new WasmModuleBuilder();
+  builder2.addImportedMemory(
+      'imp', 'mem', 1, 1, /* shared */ false, /* memory64 */ true);
+  assertThrows(
+      () => builder2.instantiate({imp: {mem: mem32}}), WebAssembly.LinkError,
+      'WebAssembly.Instance(): cannot import memory32 as memory64');
+})();
+
+function InstantiatingWorkerCode() {
+  function workerAssert(condition, message) {
+    if (!condition) postMessage(`Check failed: ${message}`);
+  }
+
+  onmessage = function([mem, module]) {
+    workerAssert(mem instanceof WebAssembly.Memory, 'Wasm memory');
+    workerAssert(mem.buffer instanceof SharedArrayBuffer, 'SAB');
+    try {
+      new WebAssembly.Instance(module, {imp: {mem: mem}});
+      postMessage('Instantiation succeeded');
+    } catch (e) {
+      postMessage(`Exception: ${e}`);
+    }
+  };
+}
+
+(function TestImportMemory64AsMemory32InWorker() {
+  print(arguments.callee.name);
+  const builder1 = new WasmModuleBuilder();
+  builder1.addMemory64(1, 1, /* shared */ true);
+  builder1.exportMemoryAs('mem64');
+  const instance1 = builder1.instantiate();
+  const {mem64} = instance1.exports;
+
+  let builder2 = new WasmModuleBuilder();
+  builder2.addImportedMemory('imp', 'mem');
+  let module2 = builder2.toModule();
+
+  let worker = new Worker(InstantiatingWorkerCode, {type: 'function'});
+  worker.postMessage([mem64, module2]);
+  assertEquals(
+      'Exception: LinkError: WebAssembly.Instance(): ' +
+          'cannot import memory64 as memory32',
+      worker.getMessage());
+})();
+
+(function TestImportMemory32AsMemory64InWorker() {
+  print(arguments.callee.name);
+  const builder1 = new WasmModuleBuilder();
+  builder1.addMemory(1, 1, /* shared */ true);
+  builder1.exportMemoryAs('mem32');
+  const instance1 = builder1.instantiate();
+  const {mem32} = instance1.exports;
+
+  let builder2 = new WasmModuleBuilder();
+  builder2.addImportedMemory(
+      'imp', 'mem', 1, 1, /* shared */ false, /* memory64 */ true);
+  let module2 = builder2.toModule();
+
+  let worker = new Worker(InstantiatingWorkerCode, {type: 'function'});
+  worker.postMessage([mem32, module2]);
+  assertEquals(
+      'Exception: LinkError: WebAssembly.Instance(): ' +
+          'cannot import memory32 as memory64',
+      worker.getMessage());
 })();

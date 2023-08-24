@@ -92,6 +92,9 @@ declare_args() {
   # Scan the call stack conservatively during garbage collection.
   v8_enable_conservative_stack_scanning = false
 
+  # Use direct pointers in internal (direct) handles.
+  v8_enable_direct_handle = ""
+
   # Use direct pointers in local handles.
   v8_enable_direct_local = false
 
@@ -138,6 +141,10 @@ declare_args() {
 
   # Location of zlib.
   v8_zlib_path = "//third_party/zlib"
+
+  # Change code emission and runtime features to be CET shadow-stack compliant
+  # (incomplete and experimental).
+  v8_enable_cet_shadow_stack = false
 }
 
 if (v8_use_external_startup_data == "") {
@@ -185,6 +192,12 @@ if (v8_enable_turbofan == "") {
 }
 assert(v8_enable_turbofan || !v8_enable_webassembly,
        "Webassembly is not available when Turbofan is disabled.")
+
+# Direct internal handles are enabled by default if conservative stack scanning
+# is enabled.
+if (v8_enable_direct_handle == "") {
+  v8_enable_direct_handle = v8_enable_conservative_stack_scanning
+}
 
 # Points to // in v8 stand-alone or to //v8/ in chromium. We need absolute
 # paths for all configs in templates as they are shared in different
@@ -344,6 +357,10 @@ template("v8_executable") {
         ldflags = [ "-pie" ]
       }
       deps += [ v8_path_prefix + ":v8_dump_build_config" ]
+
+      if (is_win && !v8_enable_cet_shadow_stack) {
+        configs -= [ "//build/config/compiler:cet_shadow_stack" ]
+      }
     }
   }
 }

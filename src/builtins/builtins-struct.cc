@@ -25,8 +25,8 @@ struct NameHandleHasher {
 
 struct UniqueNameHandleEqual {
   bool operator()(Handle<Name> x, Handle<Name> y) const {
-    DCHECK(x->IsUniqueName());
-    DCHECK(y->IsUniqueName());
+    DCHECK(IsUniqueName(*x));
+    DCHECK(IsUniqueName(*y));
     return *x == *y;
   }
 };
@@ -39,7 +39,7 @@ using UniqueNameHandleSet =
 BUILTIN(SharedSpaceJSObjectHasInstance) {
   HandleScope scope(isolate);
   Handle<Object> constructor = args.receiver();
-  if (!constructor->IsJSFunction()) {
+  if (!IsJSFunction(*constructor)) {
     return *isolate->factory()->false_value();
   }
 
@@ -76,7 +76,7 @@ Maybe<bool> CollectFieldsAndElements(Isolate* isolate,
       property_name = isolate->factory()->InternalizeName(property_name);
 
       // TODO(v8:12547): Support Symbols?
-      if (property_name->IsSymbol()) {
+      if (IsSymbol(*property_name)) {
         THROW_NEW_ERROR_RETURN_VALUE(
             isolate, NewTypeError(MessageTemplate::kSymbolToString),
             Nothing<bool>());
@@ -119,7 +119,7 @@ BUILTIN(SharedStructTypeConstructor) {
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
       isolate, raw_length_number,
       Object::GetLengthFromArrayLike(isolate, property_names_arg));
-  double num_properties_double = raw_length_number->Number();
+  double num_properties_double = Object::Number(*raw_length_number);
   if (num_properties_double < 0 || num_properties_double > kMaxJSStructFields) {
     THROW_NEW_ERROR_RETURN_FAILURE(
         isolate, NewRangeError(MessageTemplate::kStructFieldCountOutOfRange));
@@ -209,8 +209,8 @@ BUILTIN(SharedStructTypeConstructor) {
       isolate->factory()->NewTuple2(isolate->function_function(),
                                     factory->null_value(),
                                     AllocationType::kOld);
-  constructor->map().set_has_non_instance_prototype(true);
-  constructor->map().SetConstructor(*non_instance_prototype_constructor_tuple);
+  constructor->map()->set_has_non_instance_prototype(true);
+  constructor->map()->SetConstructor(*non_instance_prototype_constructor_tuple);
 
   int num_elements = num_properties - num_fields;
   if (num_elements != 0) {
@@ -245,25 +245,25 @@ BUILTIN(SharedStructConstructor) {
 BUILTIN(SharedArrayIsSharedArray) {
   HandleScope scope(isolate);
   return isolate->heap()->ToBoolean(
-      args.atOrUndefined(isolate, 1)->IsJSSharedArray());
+      IsJSSharedArray(*args.atOrUndefined(isolate, 1)));
 }
 
 BUILTIN(SharedStructTypeIsSharedStruct) {
   HandleScope scope(isolate);
   return isolate->heap()->ToBoolean(
-      args.atOrUndefined(isolate, 1)->IsJSSharedStruct());
+      IsJSSharedStruct(*args.atOrUndefined(isolate, 1)));
 }
 
 BUILTIN(AtomicsMutexIsMutex) {
   HandleScope scope(isolate);
   return isolate->heap()->ToBoolean(
-      args.atOrUndefined(isolate, 1)->IsJSAtomicsMutex());
+      IsJSAtomicsMutex(*args.atOrUndefined(isolate, 1)));
 }
 
 BUILTIN(AtomicsConditionIsCondition) {
   HandleScope scope(isolate);
   return isolate->heap()->ToBoolean(
-      args.atOrUndefined(isolate, 1)->IsJSAtomicsCondition());
+      IsJSAtomicsCondition(*args.atOrUndefined(isolate, 1)));
 }
 
 }  // namespace internal

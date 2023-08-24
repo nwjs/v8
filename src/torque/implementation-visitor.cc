@@ -170,6 +170,7 @@ void ImplementationVisitor::BeginDebugMacrosFile() {
   source << "#include \"torque-generated/debug-macros.h\"\n\n";
   source << "#include \"src/objects/swiss-name-dictionary.h\"\n";
   source << "#include \"src/objects/ordered-hash-table.h\"\n";
+  source << "#include \"src/torque/runtime-support.h\"\n";
   source << "#include \"tools/debug_helper/debug-macro-shims.h\"\n";
   source << "#include \"include/v8-internal.h\"\n";
   source << "\n";
@@ -4089,7 +4090,7 @@ void CppClassGenerator::GenerateClass() {
     f.PrintDeclaration(hdr_);
     hdr_ << "\n";
     f.PrintDefinition(impl_, [&](std::ostream& stream) {
-      stream << "  return o.Is" << name_ << "();\n";
+      stream << "  return Is" << name_ << "(o);\n";
     });
   }
   hdr_ << "// Definition " << Position() << "\n";
@@ -4330,6 +4331,9 @@ void CppClassGenerator::GenerateClassConstructors() {
   hdr_ << "  }\n\n";
 
   hdr_ << " protected:\n";
+  hdr_ << "  inline explicit constexpr " << gen_name_
+       << "(Address ptr, Object::SkipTypeCheckTag\n)";
+  hdr_ << "    : P(ptr, Object::SkipTypeCheckTag()) {}\n";
   hdr_ << "  inline explicit " << gen_name_ << "(Address ptr);\n";
 
   inl_ << "template<class D, class P>\n";
@@ -4362,13 +4366,12 @@ std::string GenerateRuntimeTypeCheck(const Type* type,
         // to, so just check that it's weak.
         type_check << value << ".IsWeak()";
       } else {
-        type_check << "(" << (strong ? "!" : "") << value << ".IsWeak() && "
-                   << value << ".GetHeapObjectOrSmi().Is"
+        type_check << "(" << (strong ? "!" : "") << value << ".IsWeak() && Is"
                    << (strong ? runtime_type.type : runtime_type.weak_ref_to)
-                   << "())";
+                   << "(" << value << ".GetHeapObjectOrSmi()))";
       }
     } else {
-      type_check << value << ".Is" << runtime_type.type << "()";
+      type_check << "Is" << runtime_type.type << "(" << value << ")";
     }
   }
   return type_check.str();
@@ -4396,7 +4399,8 @@ bool CanGenerateFieldAccessors(const Type* field_type) {
   // TODO(v8:10391) Generate accessors for external pointers.
   return field_type != TypeOracle::GetVoidType() &&
          field_type != TypeOracle::GetFloat64OrHoleType() &&
-         !field_type->IsSubtypeOf(TypeOracle::GetExternalPointerType());
+         !field_type->IsSubtypeOf(TypeOracle::GetExternalPointerType()) &&
+         !field_type->IsSubtypeOf(TypeOracle::GetIndirectPointerType());
 }
 }  // namespace
 
@@ -4803,14 +4807,14 @@ void ImplementationVisitor::GenerateClassDefinitions(
         }
 
         factory_impl << ");\n";
-        factory_impl << "  Map map = factory()->read_only_roots()."
+        factory_impl << "  Tagged<Map> map = factory()->read_only_roots()."
                      << SnakeifyString(type->name()) << "_map();";
-        factory_impl << "  HeapObject raw_object =\n";
+        factory_impl << "  Tagged<HeapObject> raw_object =\n";
         factory_impl << "    factory()->AllocateRawWithImmortalMap(size, "
                         "allocation_type, map);\n";
-        factory_impl << "  " << type->UnhandlifiedCppTypeName()
-                     << " result = " << type->UnhandlifiedCppTypeName()
-                     << "::cast(raw_object);\n";
+        factory_impl << "  Tagged<" << type->UnhandlifiedCppTypeName()
+                     << "> result = Tagged<" << type->UnhandlifiedCppTypeName()
+                     << ">::cast(raw_object);\n";
         factory_impl << "  DisallowGarbageCollection no_gc;";
         factory_impl << "  WriteBarrierMode write_barrier_mode =\n"
                      << "     allocation_type == AllocationType::kYoung\n"
@@ -4820,7 +4824,7 @@ void ImplementationVisitor::GenerateClassDefinitions(
         for (const Field& f : type->ComputeAllFields()) {
           if (f.name_and_type.name == "map") continue;
           if (!f.index) {
-            factory_impl << "  result.TorqueGeneratedClass::set_"
+            factory_impl << "  result->TorqueGeneratedClass::set_"
                          << SnakeifyString(f.name_and_type.name) << "(";
             if (f.name_and_type.type->IsSubtypeOf(
                     TypeOracle::GetTaggedType()) &&
@@ -5026,26 +5030,6 @@ void ImplementationVisitor::GenerateBodyDescriptors(
       } else {
         h_contents << "BodyDescriptorBase {\n";
         h_contents << " public:\n";
-
-        h_contents << "  static bool IsValidSlot(Map map, HeapObject obj, int "
-                      "offset) {\n";
-        if (has_array_fields) {
-          h_contents << "    if (offset < kHeaderSize) {\n";
-        }
-        h_contents << "      bool valid_slots[] = {";
-        for (ObjectSlotKind slot : header_slot_kinds) {
-          h_contents << (slot != ObjectSlotKind::kNoPointer ? "1" : "0") << ",";
-        }
-        h_contents << "};\n"
-                   << "      return valid_slots[static_cast<unsigned "
-                      "int>(offset)/kTaggedSize];\n";
-        if (has_array_fields) {
-          h_contents << "    }\n";
-          bool array_is_tagged = *array_slot_kind != ObjectSlotKind::kNoPointer;
-          h_contents << "    return " << (array_is_tagged ? "true" : "false")
-                     << ";\n";
-        }
-        h_contents << "  }\n\n";
 
         h_contents << "  template <typename ObjectVisitor>\n";
         h_contents
@@ -5300,7 +5284,7 @@ void ImplementationVisitor::GenerateClassVerifiers(
       }
 
       // Second, verify that this object is what it claims to be.
-      cc_contents << "  CHECK(o.Is" << name << "(isolate));\n";
+      cc_contents << "  CHECK(Is" << name << "(o, isolate));\n";
 
       // Third, verify its properties.
       for (auto f : type->fields()) {

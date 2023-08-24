@@ -25,44 +25,47 @@ class Smi : public Object {
   // This replaces the OBJECT_CONSTRUCTORS macro, because Smis are special
   // in that we want them to be constexprs.
   constexpr Smi() : Object() {}
+  explicit constexpr Smi(Address ptr, SkipTypeCheckTag)
+      : Object(ptr, SkipTypeCheckTag()) {}
   explicit constexpr Smi(Address ptr) : Object(ptr) {
     DCHECK(HAS_SMI_TAG(ptr));
   }
 
   // Returns the integer value.
   inline constexpr int value() const { return Internals::SmiValue(ptr()); }
-  inline constexpr Smi ToUint32Smi() {
+  inline constexpr Tagged<Smi> ToUint32Smi() {
     if (value() <= 0) return Smi::FromInt(0);
     return Smi::FromInt(static_cast<uint32_t>(value()));
   }
 
   // Convert a Smi object to an int.
   static inline constexpr int ToInt(const Object object) {
-    return Smi(object.ptr()).value();
+    return Tagged<Smi>(object.ptr()).value();
   }
 
   // Convert a value to a Smi object.
-  static inline constexpr Smi FromInt(int value) {
+  static inline constexpr Tagged<Smi> FromInt(int value) {
     DCHECK(Smi::IsValid(value));
-    return Smi(Internals::IntToSmi(value));
+    return Tagged<Smi>(Internals::IntToSmi(value));
   }
 
-  static inline constexpr Smi FromIntptr(intptr_t value) {
+  static inline constexpr Tagged<Smi> FromIntptr(intptr_t value) {
     DCHECK(Smi::IsValid(value));
     int smi_shift_bits = kSmiTagSize + kSmiShiftSize;
-    return Smi((static_cast<Address>(value) << smi_shift_bits) | kSmiTag);
+    return Tagged<Smi>((static_cast<Address>(value) << smi_shift_bits) |
+                       kSmiTag);
   }
 
   // Given {value} in [0, 2^31-1], force it into Smi range by changing at most
   // the MSB (leaving the lower 31 bit unchanged).
-  static inline constexpr Smi From31BitPattern(int value) {
+  static inline constexpr Tagged<Smi> From31BitPattern(int value) {
     return Smi::FromInt((value << (32 - kSmiValueSize)) >>
                         (32 - kSmiValueSize));
   }
 
   template <typename E,
             typename = typename std::enable_if<std::is_enum<E>::value>::type>
-  static inline constexpr Smi FromEnum(E value) {
+  static inline constexpr Tagged<Smi> FromEnum(E value) {
     static_assert(sizeof(E) <= sizeof(int));
     return FromInt(static_cast<int>(value));
   }
@@ -81,18 +84,19 @@ class Smi : public Object {
   //  1 if x > y.
   // Returns the result (a tagged Smi) as a raw Address for ExternalReference
   // usage.
-  V8_EXPORT_PRIVATE static Address LexicographicCompare(Isolate* isolate, Smi x,
-                                                        Smi y);
+  V8_EXPORT_PRIVATE static Address LexicographicCompare(Isolate* isolate,
+                                                        Tagged<Smi> x,
+                                                        Tagged<Smi> y);
 
   DECL_CAST(Smi)
 
   // Dispatched behavior.
   V8_EXPORT_PRIVATE void SmiPrint(std::ostream& os) const;
-  DECL_VERIFIER(Smi)
+  DECL_STATIC_VERIFIER(Smi)
 
   // Since this is a constexpr, "calling" it is just as efficient
   // as reading a constant.
-  static inline constexpr Smi zero() { return Smi::FromInt(0); }
+  static inline constexpr Tagged<Smi> zero() { return Smi::FromInt(0); }
   static constexpr int kMinValue = kSmiMinValue;
   static constexpr int kMaxValue = kSmiMaxValue;
 
@@ -107,12 +111,32 @@ class Smi : public Object {
   // of embedder tracing (and similar mechanisms), as nullptrs are skipped for
   // those cases and otherwise the embedder would try to dereference the
   // uninitialized pointer value.
-  static constexpr Smi uninitialized_deserialization_value() {
-    return Smi(kNullAddress);
+  static constexpr Tagged<Smi> uninitialized_deserialization_value() {
+    return Tagged<Smi>(kNullAddress);
   }
 };
 
 CAST_ACCESSOR(Smi)
+
+// Defined Tagged<Smi> now that Smi exists.
+
+// Implicit conversions to/from raw pointers
+// TODO(leszeks): Remove once we're using Tagged everywhere.
+// NOLINTNEXTLINE
+constexpr Tagged<Smi>::Tagged(Smi raw) : TaggedBase(raw.ptr()) {
+  static_assert(kTaggedCanConvertToRawObjects);
+}
+// NOLINTNEXTLINE
+constexpr Tagged<Smi>::operator Smi() {
+  static_assert(kTaggedCanConvertToRawObjects);
+  return Smi(ptr());
+}
+
+// Access via ->, remove once Smi doesn't have its own address.
+constexpr Smi Tagged<Smi>::operator*() const { return Smi(ptr()); }
+constexpr detail::TaggedOperatorArrowRef<Smi> Tagged<Smi>::operator->() {
+  return detail::TaggedOperatorArrowRef<Smi>(Smi(ptr()));
+}
 
 }  // namespace internal
 }  // namespace v8

@@ -57,7 +57,8 @@ class ReadOnlyHeapImageDeserializer final {
 
   void DeserializeReadOnlyPage() {
     if (V8_STATIC_ROOTS_BOOL) {
-      Address pos = isolate_->GetPtrComprCage()->base() + source_->GetInt();
+      uint32_t compressed_page_addr = source_->GetUint32();
+      Address pos = isolate_->GetPtrComprCage()->base() + compressed_page_addr;
       ro_space()->AllocateNextPageAt(pos);
     } else {
       ro_space()->AllocateNextPage();
@@ -68,8 +69,8 @@ class ReadOnlyHeapImageDeserializer final {
     ReadOnlyPage* cur_page = ro_space()->pages().back();
 
     // Copy over raw contents.
-    Address start = cur_page->area_start() + source_->GetInt();
-    int size_in_bytes = source_->GetInt();
+    Address start = cur_page->area_start() + source_->GetUint30();
+    int size_in_bytes = source_->GetUint30();
     CHECK_LE(start + size_in_bytes, cur_page->area_end());
     source_->CopyRaw(reinterpret_cast<void*>(start), size_in_bytes);
     ro_space()->top_ = start + size_in_bytes;
@@ -117,7 +118,7 @@ class ReadOnlyHeapImageDeserializer final {
       roots.InitFromStaticRootsTable(isolate_->cage_base());
     } else {
       for (size_t i = 0; i < ReadOnlyRoots::kEntriesCount; i++) {
-        uint32_t encoded_as_int = source_->GetInt();
+        uint32_t encoded_as_int = source_->GetUint32();
         Address rudolf =
             Decode(ro::EncodedTagged_t::FromUint32(encoded_as_int));
         roots.read_only_roots_[i] = rudolf + kHeapObjectTag;
@@ -169,28 +170,32 @@ void ReadOnlyDeserializer::PostProcessNewObjects() {
   PtrComprCageBase cage_base(isolate());
   ReadOnlyHeapObjectIterator it(isolate()->read_only_heap());
   for (HeapObject o = it.Next(); !o.is_null(); o = it.Next()) {
-    const InstanceType instance_type = o.map(cage_base).instance_type();
+    const InstanceType instance_type = o->map(cage_base)->instance_type();
 
     if (should_rehash()) {
       if (InstanceTypeChecker::IsString(instance_type)) {
         String str = String::cast(o);
-        str.set_raw_hash_field(Name::kEmptyHashField);
+        str->set_raw_hash_field(Name::kEmptyHashField);
         PushObjectToRehash(handle(str, isolate()));
-      } else if (o.NeedsRehashing(instance_type)) {
+      } else if (o->NeedsRehashing(instance_type)) {
         PushObjectToRehash(handle(o, isolate()));
       }
     }
 
     if (InstanceTypeChecker::IsCode(instance_type)) {
       Code code = Code::cast(o);
-      code.init_instruction_start(main_thread_isolate(), kNullAddress);
+      code->init_instruction_start(main_thread_isolate(), kNullAddress);
       // RO space only contains builtin Code objects which don't have an
       // attached InstructionStream.
-      DCHECK(code.is_builtin());
-      DCHECK(!code.has_instruction_stream());
-      code.SetInstructionStartForOffHeapBuiltin(
+      DCHECK(code->is_builtin());
+      DCHECK(!code->has_instruction_stream());
+      code->SetInstructionStartForOffHeapBuiltin(
           main_thread_isolate(), EmbeddedData::FromBlob(main_thread_isolate())
-                                     .InstructionStartOf(code.builtin_id()));
+                                     .InstructionStartOf(code->builtin_id()));
+    } else if (InstanceTypeChecker::IsSharedFunctionInfo(instance_type)) {
+      SharedFunctionInfo sfi = SharedFunctionInfo::cast(o);
+      // Reset the id to avoid collisions - it must be unique in this isolate.
+      sfi->set_unique_id(isolate()->GetAndIncNextUniqueSfiId());
     }
   }
 }

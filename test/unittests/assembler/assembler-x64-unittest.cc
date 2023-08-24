@@ -838,7 +838,7 @@ TEST_F(AssemblerX64Test, AssemblerX64Extractps) {
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   StdoutStream os;
-  code->Print(os);
+  Print(*code, os);
 #endif
 
   auto f = GeneratedCode<F3>::FromCode(isolate, *code);
@@ -873,7 +873,7 @@ TEST_F(AssemblerX64Test, AssemblerX64SSE) {
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   StdoutStream os;
-  code->Print(os);
+  Print(*code, os);
 #endif
 
   auto f = GeneratedCode<F6>::FromCode(isolate, *code);
@@ -903,7 +903,7 @@ TEST_F(AssemblerX64Test, AssemblerX64SSE3) {
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   StdoutStream os;
-  code->Print(os);
+  Print(*code, os);
 #endif
 
   auto f = GeneratedCode<F6>::FromCode(isolate, *code);
@@ -1124,7 +1124,7 @@ TEST_F(AssemblerX64Test, AssemblerX64FMA_sd) {
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   StdoutStream os;
-  code->Print(os);
+  Print(*code, os);
 #endif
 
   auto f = GeneratedCode<F7>::FromCode(isolate, *code);
@@ -1346,7 +1346,7 @@ TEST_F(AssemblerX64Test, AssemblerX64FMA_ss) {
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   StdoutStream os;
-  code->Print(os);
+  Print(*code, os);
 #endif
 
   auto f = GeneratedCode<F8>::FromCode(isolate, *code);
@@ -1419,7 +1419,7 @@ TEST_F(AssemblerX64Test, AssemblerX64SSE_ss) {
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   StdoutStream os;
-  code->Print(os);
+  Print(*code, os);
 #endif
 
   auto f = GeneratedCode<F8>::FromCode(isolate, *code);
@@ -1503,7 +1503,7 @@ TEST_F(AssemblerX64Test, AssemblerX64AVX_ss) {
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   StdoutStream os;
-  code->Print(os);
+  Print(*code, os);
 #endif
 
   auto f = GeneratedCode<F8>::FromCode(isolate, *code);
@@ -1741,7 +1741,7 @@ TEST_F(AssemblerX64Test, AssemblerX64AVX_sd) {
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   StdoutStream os;
-  code->Print(os);
+  Print(*code, os);
 #endif
 
   auto f = GeneratedCode<F7>::FromCode(isolate, *code);
@@ -1931,7 +1931,7 @@ TEST_F(AssemblerX64Test, AssemblerX64BMI1) {
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   StdoutStream os;
-  code->Print(os);
+  Print(*code, os);
 #endif
 
   auto f = GeneratedCode<F0>::FromCode(isolate, *code);
@@ -1989,7 +1989,7 @@ TEST_F(AssemblerX64Test, AssemblerX64LZCNT) {
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   StdoutStream os;
-  code->Print(os);
+  Print(*code, os);
 #endif
 
   auto f = GeneratedCode<F0>::FromCode(isolate, *code);
@@ -2047,7 +2047,7 @@ TEST_F(AssemblerX64Test, AssemblerX64POPCNT) {
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   StdoutStream os;
-  code->Print(os);
+  Print(*code, os);
 #endif
 
   auto f = GeneratedCode<F0>::FromCode(isolate, *code);
@@ -2308,7 +2308,7 @@ TEST_F(AssemblerX64Test, AssemblerX64BMI2) {
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   StdoutStream os;
-  code->Print(os);
+  Print(*code, os);
 #endif
 
   auto f = GeneratedCode<F0>::FromCode(isolate, *code);
@@ -2350,7 +2350,7 @@ TEST_F(AssemblerX64Test, AssemblerX64JumpTables1) {
   Handle<Code> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
-  code->Print(std::cout);
+  Print(*code, std::cout);
 #endif
 
   auto f = GeneratedCode<F1>::FromCode(isolate, *code);
@@ -2397,7 +2397,7 @@ TEST_F(AssemblerX64Test, AssemblerX64JumpTables2) {
   Handle<Code> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
-  code->Print(std::cout);
+  Print(*code, std::cout);
 #endif
 
   auto f = GeneratedCode<F1>::FromCode(isolate, *code);
@@ -2453,7 +2453,7 @@ TEST_F(AssemblerX64Test, AssemblerX64vmovups) {
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
 #ifdef OBJECT_PRINT
   StdoutStream os;
-  code->Print(os);
+  Print(*code, os);
 #endif
 
   auto f = GeneratedCode<F9>::FromCode(isolate, *code);
@@ -2478,6 +2478,7 @@ TEST_F(AssemblerX64Test, AssemblerX64Regmove256bit) {
   __ vmovapd(ymm0, ymm5);
   __ vmovupd(ymm6, Operand(r8, r9, times_4, 10000));
   __ vbroadcastss(ymm7, Operand(rbx, rcx, times_4, 10000));
+  __ vbroadcastsd(ymm6, Operand(rbx, rcx, times_4, 10000));
   __ vmovddup(ymm3, ymm2);
   __ vmovddup(ymm4, Operand(rbx, rcx, times_4, 10000));
   __ vmovshdup(ymm1, ymm2);
@@ -2488,7 +2489,7 @@ TEST_F(AssemblerX64Test, AssemblerX64Regmove256bit) {
   Handle<Code> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   StdoutStream os;
-  code->Print(os);
+  Print(*code, os);
 #endif
 
   uint8_t expected[] = {
@@ -2517,6 +2518,8 @@ TEST_F(AssemblerX64Test, AssemblerX64Regmove256bit) {
 
       // vbroadcastss ymm7, DWORD PTR [rbx+rcx*4+0x2710]
       0xc4, 0xe2, 0x7d, 0x18, 0xbc, 0x8b, 0x10, 0x27, 0x00, 0x00,
+      // vbroadcastsd ymm6, QWORD PTR [rbx+rcx*4+0x2710]
+      0xc4, 0xe2, 0x7d, 0x19, 0xb4, 0x8b, 0x10, 0x27, 0x00, 0x00,
 
       // vmovddup ymm3, ymm2
       0xc5, 0xff, 0x12, 0xda,
@@ -2548,6 +2551,7 @@ TEST_F(AssemblerX64Test, AssemblerX64AVX2Op256bit) {
   __ vpalignr(ymm10, ymm11, ymm12, 4);
   __ vpalignr(ymm10, ymm11, Operand(rbx, rcx, times_4, 10000), 4);
   __ vbroadcastss(ymm7, xmm0);
+  __ vbroadcastsd(ymm6, xmm5);
   __ vpbroadcastb(ymm2, xmm1);
   __ vpbroadcastb(ymm3, Operand(rbx, rcx, times_4, 10000));
   __ vpbroadcastw(ymm15, xmm4);
@@ -2566,7 +2570,7 @@ TEST_F(AssemblerX64Test, AssemblerX64AVX2Op256bit) {
   Handle<Code> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   StdoutStream os;
-  code->Print(os);
+  Print(*code, os);
 #endif
 
   uint8_t expected[] = {
@@ -2594,6 +2598,8 @@ TEST_F(AssemblerX64Test, AssemblerX64AVX2Op256bit) {
       0xC4, 0x63, 0x25, 0x0F, 0x94, 0x8B, 0x10, 0x27, 0x00, 0x00, 0x04,
       // vbroadcastss ymm7, xmm0
       0xc4, 0xe2, 0x7d, 0x18, 0xf8,
+      // vbroadcastsd ymm7, xmm0
+      0xc4, 0xe2, 0x7d, 0x19, 0xf5,
       // vpbroadcastb ymm2, xmm1
       0xc4, 0xe2, 0x7d, 0x78, 0xd1,
       // vpbroadcastb ymm3, BYTE PTR [rbx+rcx*4+0x2710]
@@ -2658,7 +2664,7 @@ TEST_F(AssemblerX64Test, AssemblerX64FloatingPoint256bit) {
   Handle<Code> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   StdoutStream os;
-  code->Print(os);
+  Print(*code, os);
 #endif
 
   uint8_t expected[] = {// vandpd ymm1, ymm3, ymm5
@@ -2762,7 +2768,7 @@ TEST_F(AssemblerX64Test, AssemblerX64Integer256bit) {
   Handle<Code> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   StdoutStream os;
-  code->Print(os);
+  Print(*code, os);
 #endif
 
   uint8_t expected[] = {
@@ -2854,7 +2860,7 @@ TEST_F(AssemblerX64Test, AssemblerX64CmpOperations256bit) {
   Handle<Code> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   StdoutStream os;
-  code->Print(os);
+  Print(*code, os);
 #endif
 
   uint8_t expected[] = {
@@ -2904,7 +2910,7 @@ TEST_F(AssemblerX64Test, AssemblerX64ShiftImm128bit) {
   Handle<Code> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   StdoutStream os;
-  code->Print(os);
+  Print(*code, os);
 #endif
 
   uint8_t expected[] = {// vpsrlw xmm8,xmm2,0x4
@@ -2949,7 +2955,7 @@ TEST_F(AssemblerX64Test, AssemblerX64ShiftImm256bit) {
   Handle<Code> code =
       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
   StdoutStream os;
-  code->Print(os);
+  Print(*code, os);
 #endif
 
   uint8_t expected[] = {// vpsrlw ymm0,ymm2,0x4
@@ -3001,7 +3007,7 @@ TEST_F(AssemblerX64Test, AssemblerX64BinOp256bit) {
     Handle<Code> code =
         Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
     StdoutStream os;
-    code->Print(os);
+    Print(*code, os);
 #endif
 
     uint8_t expected[] = {// vaddps ymm0,ymm1,ymm2
@@ -3055,7 +3061,7 @@ TEST_F(AssemblerX64Test, AssemblerX64BinOp256bit) {
     Handle<Code> code =
         Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
     StdoutStream os;
-    code->Print(os);
+    Print(*code, os);
 #endif
 
     uint8_t expected[] = {// vpaddb ymm6,ymm7,ymm8

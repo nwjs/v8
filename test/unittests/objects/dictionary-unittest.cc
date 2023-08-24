@@ -82,17 +82,17 @@ class DictionaryTest : public TestWithHeapInternalsAndContext {
       CHECK_EQ(table->NumberOfElements(), i + 1);
       CHECK(table->FindEntry(isolate(), key).is_found());
       CHECK_EQ(table->Lookup(key), *value);
-      CHECK(key->GetIdentityHash().IsSmi());
+      CHECK(IsSmi(key->GetIdentityHash()));
     }
 
     // Keys never added to the map which already have an identity hash
     // code should not be found.
     for (int i = 0; i < 100; i++) {
       Handle<JSReceiver> key = factory->NewJSArray(7);
-      CHECK(key->GetOrCreateIdentityHash(isolate()).IsSmi());
+      CHECK(IsSmi(key->GetOrCreateIdentityHash(isolate())));
       CHECK(table->FindEntry(isolate(), key).is_not_found());
       CHECK_EQ(table->Lookup(key), roots.the_hole_value());
-      CHECK(key->GetIdentityHash().IsSmi());
+      CHECK(IsSmi(key->GetIdentityHash()));
     }
 
     // Keys that don't have an identity hash should not be found and also
@@ -144,16 +144,16 @@ class DictionaryTest : public TestWithHeapInternalsAndContext {
       table = HashSet::Add(isolate(), table, key);
       CHECK_EQ(table->NumberOfElements(), i + 2);
       CHECK(table->Has(isolate(), key));
-      CHECK(key->GetIdentityHash().IsSmi());
+      CHECK(IsSmi(key->GetIdentityHash()));
     }
 
     // Keys never added to the map which already have an identity hash
     // code should not be found.
     for (int i = 0; i < 100; i++) {
       Handle<JSReceiver> key = factory->NewJSArray(7);
-      CHECK(key->GetOrCreateIdentityHash(isolate()).IsSmi());
+      CHECK(IsSmi(key->GetOrCreateIdentityHash(isolate())));
       CHECK(!table->Has(isolate(), key));
-      CHECK(key->GetIdentityHash().IsSmi());
+      CHECK(IsSmi(key->GetIdentityHash()));
     }
 
     // Keys that don't have an identity hash should not be found and also
@@ -210,7 +210,7 @@ class DictionaryTest : public TestWithHeapInternalsAndContext {
     SimulateFullSpace(heap()->old_space());
 
     // Calling Lookup() should not cause GC ever.
-    CHECK(table->Lookup(key).IsTheHole(isolate()));
+    CHECK(IsTheHole(table->Lookup(key), isolate()));
 
     // Calling Put() should request GC by returning a failure.
     int gc_count = heap()->gc_count();
@@ -232,6 +232,11 @@ class ObjectHashTableTest : public ObjectHashTable {
  public:
   explicit ObjectHashTableTest(ObjectHashTable o) : ObjectHashTable(o) {}
 
+  // For every object, add a `->` operator which returns a pointer to this
+  // object. This will allow smoother transition between T and Tagged<T>.
+  ObjectHashTableTest* operator->() { return this; }
+  const ObjectHashTableTest* operator->() const { return this; }
+
   void insert(InternalIndex entry, int key, int value) {
     set(EntryToIndex(entry), Smi::FromInt(key));
     set(EntryToIndex(entry) + 1, Smi::FromInt(value));
@@ -250,26 +255,26 @@ TEST_F(DictionaryTest, HashTableRehash) {
   {
     Handle<ObjectHashTable> table = ObjectHashTable::New(isolate(), 100);
     ObjectHashTableTest t(*table);
-    int capacity = t.capacity();
+    int capacity = t->capacity();
     for (int i = 0; i < capacity - 1; i++) {
-      t.insert(InternalIndex(i), i * i, i);
+      t->insert(InternalIndex(i), i * i, i);
     }
-    t.Rehash(isolate());
+    t->Rehash(isolate());
     for (int i = 0; i < capacity - 1; i++) {
-      CHECK_EQ(i, t.lookup(i * i, isolate()));
+      CHECK_EQ(i, t->lookup(i * i, isolate()));
     }
   }
   // Test half-filled table.
   {
     Handle<ObjectHashTable> table = ObjectHashTable::New(isolate(), 100);
     ObjectHashTableTest t(*table);
-    int capacity = t.capacity();
+    int capacity = t->capacity();
     for (int i = 0; i < capacity / 2; i++) {
-      t.insert(InternalIndex(i), i * i, i);
+      t->insert(InternalIndex(i), i * i, i);
     }
-    t.Rehash(isolate());
+    t->Rehash(isolate());
     for (int i = 0; i < capacity / 2; i++) {
-      CHECK_EQ(i, t.lookup(i * i, isolate()));
+      CHECK_EQ(i, t->lookup(i * i, isolate()));
     }
   }
 }

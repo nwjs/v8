@@ -413,17 +413,17 @@ class ReadOnlySpaceObjectIterator : public ObjectIterator {
   // Advance to the next object, skipping free spaces and other fillers and
   // skipping the special garbage section of which there is one per space.
   // Returns a null object when the iteration has ended.
-  HeapObject Next() override {
+  Tagged<HeapObject> Next() override {
     while (cur_addr_ != cur_end_) {
       if (cur_addr_ == space_->top() && cur_addr_ != space_->limit()) {
         cur_addr_ = space_->limit();
         continue;
       }
       HeapObject obj = HeapObject::FromAddress(cur_addr_);
-      const int obj_size = obj.Size();
+      const int obj_size = obj->Size();
       cur_addr_ += ALIGN_TO_ALLOCATION_ALIGNMENT(obj_size);
       DCHECK_LE(cur_addr_, cur_end_);
-      if (!obj.IsFreeSpaceOrFiller()) {
+      if (!IsFreeSpaceOrFiller(obj)) {
         DCHECK_OBJECT_SIZE(obj_size);
         return obj;
       }
@@ -464,7 +464,7 @@ void ReadOnlySpace::Verify(Isolate* isolate,
       visitor->VerifyObject(object);
 
       // All the interior pointers should be contained in the heap.
-      int size = object.Size();
+      int size = object->Size();
       CHECK(object.address() + size <= top);
       end_of_previous_object = object.address() + size;
     }
@@ -487,8 +487,8 @@ void ReadOnlySpace::VerifyCounters(Heap* heap) const {
     ReadOnlySpaceObjectIterator it(heap, this, page);
     size_t real_allocated = 0;
     for (HeapObject object = it.Next(); !object.is_null(); object = it.Next()) {
-      if (!object.IsFreeSpaceOrFiller()) {
-        real_allocated += object.Size();
+      if (!IsFreeSpaceOrFiller(object)) {
+        real_allocated += object->Size();
       }
     }
     total_allocated += page->allocated_bytes();
@@ -562,7 +562,6 @@ void ReadOnlySpace::EnsureSpaceForAllocation(int size_in_bytes) {
 
   top_ = chunk->area_start();
   limit_ = chunk->area_end();
-  return;
 }
 
 HeapObject ReadOnlySpace::TryAllocateLinearlyAligned(
@@ -644,8 +643,8 @@ size_t ReadOnlyPage::ShrinkToHighWaterMark() {
   // or the area_end.
   HeapObject filler = HeapObject::FromAddress(HighWaterMark());
   if (filler.address() == area_end()) return 0;
-  CHECK(filler.IsFreeSpaceOrFiller());
-  DCHECK_EQ(filler.address() + filler.Size(), area_end());
+  CHECK(IsFreeSpaceOrFiller(filler));
+  DCHECK_EQ(filler.address() + filler->Size(), area_end());
 
   size_t unused = RoundDown(static_cast<size_t>(area_end() - filler.address()),
                             MemoryAllocator::GetCommitPageSize());
@@ -663,8 +662,8 @@ size_t ReadOnlyPage::ShrinkToHighWaterMark() {
     heap()->memory_allocator()->PartialFreeMemory(
         this, address() + size() - unused, unused, area_end() - unused);
     if (filler.address() != area_end()) {
-      CHECK(filler.IsFreeSpaceOrFiller());
-      CHECK_EQ(filler.address() + filler.Size(), area_end());
+      CHECK(IsFreeSpaceOrFiller(filler));
+      CHECK_EQ(filler.address() + filler->Size(), area_end());
     }
   }
   return unused;

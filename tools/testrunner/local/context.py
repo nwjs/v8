@@ -2,12 +2,12 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-from contextlib import contextmanager
 import os
 import signal
-
 import subprocess
 import sys
+
+from contextlib import contextmanager
 
 from ..local.android import Driver
 from .command import AndroidCommand, IOSCommand, PosixCommand, WindowsCommand, taskkill_windows
@@ -31,8 +31,8 @@ class DefaultOSContext:
   def terminate_process(self, process):
     pass
 
-  def platform_shell(self, shell, outdir):
-    return shell
+  def platform_shell(self, shell, args, outdir):
+    return outdir.resolve() / shell
 
 
 class LinuxContext(DefaultOSContext):
@@ -55,8 +55,8 @@ class WindowsContext(DefaultOSContext):
   def terminate_process(self, process):
     taskkill_windows(process, verbose=True, force=False)
 
-  def platform_shell(self, shell, outdir):
-    return shell + '.exe'
+  def platform_shell(self, shell, args, outdir):
+    return outdir.resolve() / f'{shell}.exe'
 
 
 class AndroidOSContext(DefaultOSContext):
@@ -81,14 +81,21 @@ class IOSContext(DefaultOSContext):
   def terminate_process(self, process):
     os.kill(process.pid, signal.SIGTERM)
 
-  def platform_shell(self, shell, outdir):
+  def platform_shell(self, shell, appargs, outdir):
     # Rather than having to use a physical device (iPhone, iPad, etc), we use
     # the iOS Simulator for the test runners in order to ease the job of
     # builders and testers.
     # At the moment Chromium's iossim tool is being used, which is a wrapper
     # around 'simctl' macOS command utility.
-    iossim = "iossim -d 'iPhone X' "
-    return outdir + '/' + iossim + outdir + '/' + shell + ".app"
+    iossim = outdir.resolve() / "iossim -d 'iPhone X' "
+
+    if isinstance(appargs, list):
+      appargs = ' '.join(map(str, appargs))
+    if appargs != "":
+      iossim = f'{iossim}-c '
+      appargs = '\"' + appargs + '\"'
+    app = outdir.resolve() / f'{shell}.app'
+    return f'{iossim}{appargs} {app}'
 
 # TODO(liviurau): Add documentation with diagrams to describe how context and
 # its components gets initialized and eventually teared down and how does it

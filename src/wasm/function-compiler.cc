@@ -6,12 +6,14 @@
 
 #include "src/codegen/compiler.h"
 #include "src/codegen/optimized-compilation-info.h"
+#include "src/compiler/turboshaft/wasm-turboshaft-compiler.h"
 #include "src/compiler/wasm-compiler.h"
 #include "src/handles/handles-inl.h"
 #include "src/logging/counters-scopes.h"
 #include "src/logging/log.h"
 #include "src/objects/code-inl.h"
 #include "src/wasm/baseline/liftoff-compiler.h"
+#include "src/wasm/turboshaft-graph-interface.h"
 #include "src/wasm/wasm-code-manager.h"
 #include "src/wasm/wasm-debug.h"
 
@@ -147,6 +149,14 @@ WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
       compiler::WasmCompilationData data(func_body);
       data.func_index = func_index_;
       data.wire_bytes_storage = wire_bytes_storage;
+      bool use_turboshaft = v8_flags.turboshaft_wasm;
+      if (use_turboshaft) {
+        result = compiler::turboshaft::ExecuteTurboshaftWasmCompilation(
+            env, data, detected);
+        if (result.succeeded()) return result;
+        // Else fall back to turbofan.
+      }
+
       result = compiler::ExecuteTurbofanWasmCompilation(env, data, counters,
                                                         detected);
       result.for_debugging = for_debugging_;

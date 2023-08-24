@@ -208,6 +208,9 @@ class V8_EXPORT_PRIVATE LookupIterator final {
   Handle<Object> GetDataValue(SeqCstAccessTag tag) const;
   void WriteDataValue(Handle<Object> value, SeqCstAccessTag tag);
   Handle<Object> SwapDataValue(Handle<Object> value, SeqCstAccessTag tag);
+  Handle<Object> CompareAndSwapDataValue(Handle<Object> expected,
+                                         Handle<Object> value,
+                                         SeqCstAccessTag tag);
   inline void UpdateProtector();
   static inline void UpdateProtector(Isolate* isolate, Handle<Object> receiver,
                                      Handle<Name> name);
@@ -256,7 +259,7 @@ class V8_EXPORT_PRIVATE LookupIterator final {
   void NextInternal(Map map, JSReceiver holder);
   template <bool is_element>
   inline State LookupInHolder(Map map, JSReceiver holder) {
-    return map.IsSpecialReceiverMap()
+    return IsSpecialReceiverMap(map)
                ? LookupInSpecialHolder<is_element>(map, holder)
                : LookupInRegularHolder<is_element>(map, holder);
   }
@@ -274,6 +277,10 @@ class V8_EXPORT_PRIVATE LookupIterator final {
                                 AllocationPolicy::kAllocationAllowed) const;
   bool CanStayConst(Object value) const;
   bool DictCanStayConst(Object value) const;
+
+  Handle<Object> CompareAndSwapInternal(Handle<Object> desired,
+                                        Handle<Object> value,
+                                        SeqCstAccessTag tag, bool& success);
 
   template <bool is_element>
   void ReloadPropertyInformation();

@@ -213,7 +213,7 @@ class SemiSpaceObjectIterator : public ObjectIterator {
   // Create an iterator over the objects in the given to-space.
   inline explicit SemiSpaceObjectIterator(const SemiSpaceNewSpace* space);
 
-  inline HeapObject Next() final;
+  inline Tagged<HeapObject> Next() final;
 
  private:
   // The current iteration point.
@@ -310,7 +310,7 @@ class V8_EXPORT_PRIVATE SemiSpaceNewSpace final : public NewSpace {
 
  public:
   static SemiSpaceNewSpace* From(NewSpace* space) {
-    DCHECK(!v8_flags.minor_mc);
+    DCHECK(!v8_flags.minor_ms);
     return static_cast<SemiSpaceNewSpace*>(space);
   }
 
@@ -634,7 +634,7 @@ class V8_EXPORT_PRIVATE PagedSpaceForNewSpace final : public PagedSpaceBase {
 class V8_EXPORT_PRIVATE PagedNewSpace final : public NewSpace {
  public:
   static PagedNewSpace* From(NewSpace* space) {
-    DCHECK(v8_flags.minor_mc);
+    DCHECK(v8_flags.minor_ms);
     return static_cast<PagedNewSpace*>(space);
   }
 

@@ -44,8 +44,11 @@ class ValueHelper final {
     return reinterpret_cast<Address>(value);
   }
 
-  template <typename T, typename S>
+  template <typename T, bool check_null = true, typename S>
   V8_INLINE static T* SlotAsValue(S* slot) {
+    if (check_null && slot == nullptr) {
+      return reinterpret_cast<T*>(kTaggedNullAddress);
+    }
     return *reinterpret_cast<T**>(slot);
   }
 
@@ -56,7 +59,7 @@ class ValueHelper final {
     return *reinterpret_cast<const Address*>(value);
   }
 
-  template <typename T, typename S>
+  template <typename T, bool check_null = true, typename S>
   V8_INLINE static T* SlotAsValue(S* slot) {
     return reinterpret_cast<T*>(slot);
   }
@@ -85,6 +88,8 @@ class HandleHelper final {
     if (rhs.IsEmpty()) return false;
     return lhs.ptr() == rhs.ptr();
   }
+
+  static V8_EXPORT void VerifyOnStack(const void* ptr);
 };
 
 }  // namespace internal
@@ -126,7 +131,7 @@ class IndirectHandleBase {
   // whether direct local support is enabled).
   template <typename T>
   V8_INLINE T* value() const {
-    return internal::ValueHelper::SlotAsValue<T>(slot());
+    return internal::ValueHelper::SlotAsValue<T, false>(slot());
   }
 
  private:

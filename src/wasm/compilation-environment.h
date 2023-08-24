@@ -31,11 +31,6 @@ class WasmCode;
 class WasmEngine;
 class WasmError;
 
-enum RuntimeExceptionSupport : bool {
-  kRuntimeExceptionSupport = true,
-  kNoRuntimeExceptionSupport = false
-};
-
 enum DynamicTiering : bool {
   kDynamicTiering = true,
   kNoDynamicTiering = false
@@ -59,22 +54,15 @@ struct CompilationEnv {
   // A pointer to the decoded module's static representation.
   const WasmModule* const module;
 
-  // If the runtime doesn't support exception propagation,
-  // we won't generate stack checks, and trap handling will also
-  // be generated differently.
-  const RuntimeExceptionSupport runtime_exception_support;
-
   // Features enabled for this compilation.
   const WasmFeatures enabled_features;
 
   const DynamicTiering dynamic_tiering;
 
   constexpr CompilationEnv(const WasmModule* module,
-                           RuntimeExceptionSupport runtime_exception_support,
                            const WasmFeatures& enabled_features,
                            DynamicTiering dynamic_tiering)
       : module(module),
-        runtime_exception_support(runtime_exception_support),
         enabled_features(enabled_features),
         dynamic_tiering(dynamic_tiering) {}
 };
@@ -165,6 +153,8 @@ class V8_EXPORT_PRIVATE CompilationState {
   void operator delete(void* ptr) { ::operator delete(ptr); }
 
   CompilationState() = delete;
+
+  size_t EstimateCurrentMemoryConsumption() const;
 
  private:
   // NativeModule is allowed to call the static {New} method.

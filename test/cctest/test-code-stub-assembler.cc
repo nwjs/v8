@@ -157,7 +157,7 @@ TEST(NumberToString) {
     Handle<String> expected = factory->NumberToString(input);
 
     Handle<Object> result = ft.Call(input).ToHandleChecked();
-    if (result->IsUndefined(isolate)) {
+    if (IsUndefined(*result, isolate)) {
       // Query may fail if cache was resized, in which case the entry is not
       // added to the cache.
       CHECK_LT(cache_length_before_addition, kFullCacheSize);
@@ -165,7 +165,7 @@ TEST(NumberToString) {
       expected = factory->NumberToString(input);
       result = ft.Call(input).ToHandleChecked();
     }
-    CHECK(!result->IsUndefined(isolate));
+    CHECK(!IsUndefined(*result, isolate));
     CHECK_EQ(*expected, *result);
   }
 }
@@ -186,9 +186,9 @@ void CheckToUint32Result(uint32_t expected, Handle<Object> result) {
       static_cast<int64_t>(std::numeric_limits<intptr_t>::max());
   if (expected_fits_into_intptr &&
       Smi::IsValid(static_cast<intptr_t>(expected))) {
-    CHECK(result->IsSmi());
+    CHECK(IsSmi(*result));
   } else {
-    CHECK(result->IsHeapNumber());
+    CHECK(IsHeapNumber(*result));
   }
 }
 
@@ -243,7 +243,7 @@ TEST(ToUint32) {
     Handle<HeapNumber> input_num;
 
     // Check with Smi input.
-    if (input_obj->IsSmi()) {
+    if (IsSmi(*input_obj)) {
       Handle<Smi> input_smi = Handle<Smi>::cast(input_obj);
       Handle<Object> result = ft.Call(input_smi).ToHandleChecked();
       CheckToUint32Result(expectations[i], result);
@@ -254,7 +254,7 @@ TEST(ToUint32) {
 
     // Check with HeapNumber input.
     {
-      CHECK(input_num->IsHeapNumber());
+      CHECK(IsHeapNumber(*input_num));
       Handle<Object> result = ft.Call(input_num).ToHandleChecked();
       CheckToUint32Result(expectations[i], result);
     }
@@ -286,9 +286,9 @@ void IsValidPositiveSmiCase(Isolate* isolate, intptr_t value) {
 
   bool expected = i::PlatformSmiTagging::IsValidSmi(value) && (value >= 0);
   if (expected) {
-    CHECK(maybe_handle.ToHandleChecked()->IsTrue(isolate));
+    CHECK(IsTrue(*maybe_handle.ToHandleChecked(), isolate));
   } else {
-    CHECK(maybe_handle.ToHandleChecked()->IsFalse(isolate));
+    CHECK(IsFalse(*maybe_handle.ToHandleChecked(), isolate));
   }
 }
 }  // namespace
@@ -559,7 +559,7 @@ TEST(ToString) {
     Handle<Object> obj = handle(test->get(0), isolate);
     Handle<String> expected = handle(String::cast(test->get(1)), isolate);
     Handle<Object> result = ft.Call(obj).ToHandleChecked();
-    CHECK(result->IsString());
+    CHECK(IsString(*result));
     CHECK(String::Equals(isolate, Handle<String>::cast(result), expected));
   }
 }
@@ -748,7 +748,7 @@ TEST(TryToName) {
     uint32_t dummy;
     CHECK(key->AsArrayIndex(&dummy));
     CHECK(key->HasHashCode());
-    CHECK(!key->IsInternalizedString());
+    CHECK(!IsInternalizedString(*key));
     Handle<Object> index(Smi::FromInt(153), isolate);
     ft.CheckTrue(key, expect_index, index);
   }
@@ -1108,9 +1108,8 @@ TEST(TransitionLookup) {
     }
   }
 
-  CHECK(root_map->raw_transitions()
-            ->GetHeapObjectAssumeStrong()
-            .IsTransitionArray());
+  CHECK(IsTransitionArray(
+      root_map->raw_transitions()->GetHeapObjectAssumeStrong()));
   Handle<TransitionArray> transitions(
       TransitionArray::cast(
           root_map->raw_transitions()->GetHeapObjectAssumeStrong()),
@@ -1174,7 +1173,7 @@ void AddProperties(Handle<JSObject> object, Handle<Name> names[],
   Isolate* isolate = object->GetIsolate();
   for (size_t i = 0; i < names_count; i++) {
     Handle<Object> value = values[(seed + i) % values_count];
-    if (value->IsAccessorPair()) {
+    if (IsAccessorPair(*value)) {
       Handle<AccessorPair> pair = Handle<AccessorPair>::cast(value);
       Handle<Object> getter(pair->getter(), isolate);
       Handle<Object> setter(pair->setter(), isolate);
@@ -1264,9 +1263,9 @@ TEST(TryHasOwnProperty) {
     Handle<Map> map = Map::Create(isolate, inobject_properties);
     Handle<JSObject> object = factory->NewJSObjectFromMap(map);
     AddProperties(object, names, arraysize(names));
-    CHECK_EQ(JS_OBJECT_TYPE, object->map().instance_type());
-    CHECK_EQ(inobject_properties, object->map().GetInObjectProperties());
-    CHECK(!object->map().is_dictionary_map());
+    CHECK_EQ(JS_OBJECT_TYPE, object->map()->instance_type());
+    CHECK_EQ(inobject_properties, object->map()->GetInObjectProperties());
+    CHECK(!object->map()->is_dictionary_map());
     objects.push_back(object);
   }
 
@@ -1276,9 +1275,9 @@ TEST(TryHasOwnProperty) {
     Handle<Map> map = Map::Create(isolate, inobject_properties);
     Handle<JSObject> object = factory->NewJSObjectFromMap(map);
     AddProperties(object, names, arraysize(names));
-    CHECK_EQ(JS_OBJECT_TYPE, object->map().instance_type());
-    CHECK_EQ(inobject_properties, object->map().GetInObjectProperties());
-    CHECK(!object->map().is_dictionary_map());
+    CHECK_EQ(JS_OBJECT_TYPE, object->map()->instance_type());
+    CHECK_EQ(inobject_properties, object->map()->GetInObjectProperties());
+    CHECK(!object->map()->is_dictionary_map());
     objects.push_back(object);
   }
 
@@ -1288,9 +1287,9 @@ TEST(TryHasOwnProperty) {
     Handle<Map> map = Map::Create(isolate, inobject_properties);
     Handle<JSObject> object = factory->NewJSObjectFromMap(map);
     AddProperties(object, names, arraysize(names));
-    CHECK_EQ(JS_OBJECT_TYPE, object->map().instance_type());
-    CHECK_EQ(inobject_properties, object->map().GetInObjectProperties());
-    CHECK(!object->map().is_dictionary_map());
+    CHECK_EQ(JS_OBJECT_TYPE, object->map()->instance_type());
+    CHECK_EQ(inobject_properties, object->map()->GetInObjectProperties());
+    CHECK(!object->map()->is_dictionary_map());
     objects.push_back(object);
   }
 
@@ -1308,8 +1307,8 @@ TEST(TryHasOwnProperty) {
                                    LanguageMode::kSloppy)
               .FromJust());
 
-    CHECK_EQ(JS_OBJECT_TYPE, object->map().instance_type());
-    CHECK(object->map().is_dictionary_map());
+    CHECK_EQ(JS_OBJECT_TYPE, object->map()->instance_type());
+    CHECK(object->map()->is_dictionary_map());
     objects.push_back(object);
   }
 
@@ -1318,10 +1317,10 @@ TEST(TryHasOwnProperty) {
     Handle<JSFunction> function =
         factory->NewFunctionForTesting(factory->empty_string());
     JSFunction::EnsureHasInitialMap(function);
-    function->initial_map().set_instance_type(JS_GLOBAL_OBJECT_TYPE);
-    function->initial_map().set_is_prototype_map(true);
-    function->initial_map().set_is_dictionary_map(true);
-    function->initial_map().set_may_have_interesting_properties(true);
+    function->initial_map()->set_instance_type(JS_GLOBAL_OBJECT_TYPE);
+    function->initial_map()->set_is_prototype_map(true);
+    function->initial_map()->set_is_dictionary_map(true);
+    function->initial_map()->set_may_have_interesting_properties(true);
     Handle<JSObject> object = factory->NewJSGlobalObject(function);
     AddProperties(object, names, arraysize(names));
 
@@ -1330,8 +1329,8 @@ TEST(TryHasOwnProperty) {
                                    LanguageMode::kSloppy)
               .FromJust());
 
-    CHECK_EQ(JS_GLOBAL_OBJECT_TYPE, object->map().instance_type());
-    CHECK(object->map().is_dictionary_map());
+    CHECK_EQ(JS_GLOBAL_OBJECT_TYPE, object->map()->instance_type());
+    CHECK(object->map()->is_dictionary_map());
     objects.push_back(object);
   }
 
@@ -1369,13 +1368,13 @@ TEST(TryHasOwnProperty) {
     Handle<JSFunction> function =
         factory->NewFunctionForTesting(factory->empty_string());
     Handle<JSProxy> object = factory->NewJSProxy(function, objects[0]);
-    CHECK_EQ(JS_PROXY_TYPE, object->map().instance_type());
+    CHECK_EQ(JS_PROXY_TYPE, object->map()->instance_type());
     ft.CheckTrue(object, names[0], expect_bailout);
   }
 
   {
     Handle<JSObject> object = isolate->global_proxy();
-    CHECK_EQ(JS_GLOBAL_PROXY_TYPE, object->map().instance_type());
+    CHECK_EQ(JS_GLOBAL_PROXY_TYPE, object->map()->instance_type());
     ft.CheckTrue(object, names[0], expect_bailout);
   }
 }
@@ -1469,9 +1468,9 @@ TEST(TryGetOwnProperty) {
     Handle<JSObject> object = factory->NewJSObjectFromMap(map);
     AddProperties(object, names, arraysize(names), values, arraysize(values),
                   rand_gen.NextInt());
-    CHECK_EQ(JS_OBJECT_TYPE, object->map().instance_type());
-    CHECK_EQ(inobject_properties, object->map().GetInObjectProperties());
-    CHECK(!object->map().is_dictionary_map());
+    CHECK_EQ(JS_OBJECT_TYPE, object->map()->instance_type());
+    CHECK_EQ(inobject_properties, object->map()->GetInObjectProperties());
+    CHECK(!object->map()->is_dictionary_map());
     objects.push_back(object);
   }
 
@@ -1482,9 +1481,9 @@ TEST(TryGetOwnProperty) {
     Handle<JSObject> object = factory->NewJSObjectFromMap(map);
     AddProperties(object, names, arraysize(names), values, arraysize(values),
                   rand_gen.NextInt());
-    CHECK_EQ(JS_OBJECT_TYPE, object->map().instance_type());
-    CHECK_EQ(inobject_properties, object->map().GetInObjectProperties());
-    CHECK(!object->map().is_dictionary_map());
+    CHECK_EQ(JS_OBJECT_TYPE, object->map()->instance_type());
+    CHECK_EQ(inobject_properties, object->map()->GetInObjectProperties());
+    CHECK(!object->map()->is_dictionary_map());
     objects.push_back(object);
   }
 
@@ -1495,9 +1494,9 @@ TEST(TryGetOwnProperty) {
     Handle<JSObject> object = factory->NewJSObjectFromMap(map);
     AddProperties(object, names, arraysize(names), values, arraysize(values),
                   rand_gen.NextInt());
-    CHECK_EQ(JS_OBJECT_TYPE, object->map().instance_type());
-    CHECK_EQ(inobject_properties, object->map().GetInObjectProperties());
-    CHECK(!object->map().is_dictionary_map());
+    CHECK_EQ(JS_OBJECT_TYPE, object->map()->instance_type());
+    CHECK_EQ(inobject_properties, object->map()->GetInObjectProperties());
+    CHECK(!object->map()->is_dictionary_map());
     objects.push_back(object);
   }
 
@@ -1516,8 +1515,8 @@ TEST(TryGetOwnProperty) {
                                    LanguageMode::kSloppy)
               .FromJust());
 
-    CHECK_EQ(JS_OBJECT_TYPE, object->map().instance_type());
-    CHECK(object->map().is_dictionary_map());
+    CHECK_EQ(JS_OBJECT_TYPE, object->map()->instance_type());
+    CHECK(object->map()->is_dictionary_map());
     objects.push_back(object);
   }
 
@@ -1532,8 +1531,8 @@ TEST(TryGetOwnProperty) {
                                    LanguageMode::kSloppy)
               .FromJust());
 
-    CHECK_EQ(JS_GLOBAL_OBJECT_TYPE, object->map().instance_type());
-    CHECK(object->map().is_dictionary_map());
+    CHECK_EQ(JS_GLOBAL_OBJECT_TYPE, object->map()->instance_type());
+    CHECK(object->map()->is_dictionary_map());
     objects.push_back(object);
   }
 
@@ -1546,7 +1545,7 @@ TEST(TryGetOwnProperty) {
         Handle<Object> expected_value =
             JSReceiver::GetProperty(isolate, object, name).ToHandleChecked();
         Handle<Object> value = ft.Call(object, name).ToHandleChecked();
-        CHECK(expected_value->SameValue(*value));
+        CHECK(Object::SameValue(*expected_value, *value));
       }
     }
   }
@@ -1567,7 +1566,7 @@ TEST(TryGetOwnProperty) {
         Handle<Name> name = non_existing_names[key_index];
         Handle<Object> expected_value =
             JSReceiver::GetProperty(isolate, object, name).ToHandleChecked();
-        CHECK(expected_value->IsUndefined(isolate));
+        CHECK(IsUndefined(*expected_value, isolate));
         Handle<Object> value = ft.Call(object, name).ToHandleChecked();
         CHECK_EQ(*not_found_symbol, *value);
       }
@@ -1578,7 +1577,7 @@ TEST(TryGetOwnProperty) {
     Handle<JSFunction> function =
         factory->NewFunctionForTesting(factory->empty_string());
     Handle<JSProxy> object = factory->NewJSProxy(function, objects[0]);
-    CHECK_EQ(JS_PROXY_TYPE, object->map().instance_type());
+    CHECK_EQ(JS_PROXY_TYPE, object->map()->instance_type());
     Handle<Object> value = ft.Call(object, names[0]).ToHandleChecked();
     // Proxies are not supported yet.
     CHECK_EQ(*bailout_symbol, *value);
@@ -1586,7 +1585,7 @@ TEST(TryGetOwnProperty) {
 
   {
     Handle<JSObject> object = isolate->global_proxy();
-    CHECK_EQ(JS_GLOBAL_PROXY_TYPE, object->map().instance_type());
+    CHECK_EQ(JS_GLOBAL_PROXY_TYPE, object->map()->instance_type());
     // Global proxies are not supported yet.
     Handle<Object> value = ft.Call(object, names[0]).ToHandleChecked();
     CHECK_EQ(*bailout_symbol, *value);
@@ -1686,7 +1685,7 @@ TEST(TryLookupElement) {
     Handle<JSArray> object = factory->NewJSArray(0, PACKED_SMI_ELEMENTS);
     AddElement(object, 0, smi0);
     AddElement(object, 1, smi0);
-    CHECK_EQ(PACKED_SMI_ELEMENTS, object->map().elements_kind());
+    CHECK_EQ(PACKED_SMI_ELEMENTS, object->map()->elements_kind());
 
     CHECK_FOUND(object, 0);
     CHECK_FOUND(object, 1);
@@ -1699,7 +1698,7 @@ TEST(TryLookupElement) {
     Handle<JSArray> object = factory->NewJSArray(0, HOLEY_SMI_ELEMENTS);
     AddElement(object, 0, smi0);
     AddElement(object, 13, smi0);
-    CHECK_EQ(HOLEY_SMI_ELEMENTS, object->map().elements_kind());
+    CHECK_EQ(HOLEY_SMI_ELEMENTS, object->map()->elements_kind());
 
     CHECK_FOUND(object, 0);
     CHECK_NOT_FOUND(object, 1);
@@ -1712,7 +1711,7 @@ TEST(TryLookupElement) {
     Handle<JSArray> object = factory->NewJSArray(0, PACKED_ELEMENTS);
     AddElement(object, 0, smi0);
     AddElement(object, 1, smi0);
-    CHECK_EQ(PACKED_ELEMENTS, object->map().elements_kind());
+    CHECK_EQ(PACKED_ELEMENTS, object->map()->elements_kind());
 
     CHECK_FOUND(object, 0);
     CHECK_FOUND(object, 1);
@@ -1725,7 +1724,7 @@ TEST(TryLookupElement) {
     Handle<JSArray> object = factory->NewJSArray(0, HOLEY_ELEMENTS);
     AddElement(object, 0, smi0);
     AddElement(object, 13, smi0);
-    CHECK_EQ(HOLEY_ELEMENTS, object->map().elements_kind());
+    CHECK_EQ(HOLEY_ELEMENTS, object->map()->elements_kind());
 
     CHECK_FOUND(object, 0);
     CHECK_NOT_FOUND(object, 1);
@@ -1740,7 +1739,7 @@ TEST(TryLookupElement) {
     Handle<JSTypedArray> object = factory->NewJSTypedArray(
         kExternalInt32Array, v8::Utils::OpenHandle(*buffer), 0, 2);
 
-    CHECK_EQ(INT32_ELEMENTS, object->map().elements_kind());
+    CHECK_EQ(INT32_ELEMENTS, object->map()->elements_kind());
 
     CHECK_FOUND(object, 0);
     CHECK_FOUND(object, 1);
@@ -1766,7 +1765,7 @@ TEST(TryLookupElement) {
     Handle<String> str = factory->InternalizeUtf8String("ab");
     Handle<JSPrimitiveWrapper>::cast(object)->set_value(*str);
     AddElement(object, 13, smi0);
-    CHECK_EQ(FAST_STRING_WRAPPER_ELEMENTS, object->map().elements_kind());
+    CHECK_EQ(FAST_STRING_WRAPPER_ELEMENTS, object->map()->elements_kind());
 
     CHECK_FOUND(object, 0);
     CHECK_FOUND(object, 1);
@@ -1782,7 +1781,7 @@ TEST(TryLookupElement) {
     Handle<JSPrimitiveWrapper>::cast(object)->set_value(*str);
     AddElement(object, 13, smi0);
     JSObject::NormalizeElements(object);
-    CHECK_EQ(SLOW_STRING_WRAPPER_ELEMENTS, object->map().elements_kind());
+    CHECK_EQ(SLOW_STRING_WRAPPER_ELEMENTS, object->map()->elements_kind());
 
     CHECK_FOUND(object, 0);
     CHECK_FOUND(object, 1);
@@ -1814,19 +1813,19 @@ TEST(TryLookupElement) {
     Handle<JSFunction> function =
         factory->NewFunctionForTesting(factory->empty_string());
     Handle<JSProxy> object = factory->NewJSProxy(function, handler);
-    CHECK_EQ(JS_PROXY_TYPE, object->map().instance_type());
+    CHECK_EQ(JS_PROXY_TYPE, object->map()->instance_type());
     ft.CheckTrue(object, smi0, expect_bailout);
   }
 
   {
     Handle<JSObject> object = isolate->global_object();
-    CHECK_EQ(JS_GLOBAL_OBJECT_TYPE, object->map().instance_type());
+    CHECK_EQ(JS_GLOBAL_OBJECT_TYPE, object->map()->instance_type());
     ft.CheckTrue(object, smi0, expect_bailout);
   }
 
   {
     Handle<JSObject> object = isolate->global_proxy();
-    CHECK_EQ(JS_GLOBAL_PROXY_TYPE, object->map().instance_type());
+    CHECK_EQ(JS_GLOBAL_PROXY_TYPE, object->map()->instance_type());
     ft.CheckTrue(object, smi0, expect_bailout);
   }
 }
@@ -1955,11 +1954,11 @@ TEST(AllocationFoldingCSA) {
       } else {
         CHECK(IsAligned(current_array.address(), kTaggedSize));
       }
-      CHECK_EQ(current_array.length(), i * kTaggedSize);
+      CHECK_EQ(current_array->length(), i * kTaggedSize);
       if (i != 1) {
         // TODO(v8:13070): Align prev_array.AllocatedSize() to the allocation
         // size.
-        CHECK_EQ(prev_array.address() + prev_array.AllocatedSize(),
+        CHECK_EQ(prev_array.address() + prev_array->AllocatedSize(),
                  current_array.address());
       }
       prev_array = current_array;
@@ -2100,7 +2099,7 @@ TEST(PopAndReturnFromTFCBuiltinWithStackParameters) {
 namespace {
 
 TNode<Object> MakeConstantNode(CodeStubAssembler& m, Handle<Object> value) {
-  if (value->IsSmi()) {
+  if (IsSmi(*value)) {
     return m.SmiConstant(Smi::ToInt(*value));
   }
   return m.HeapConstant(Handle<HeapObject>::cast(value));
@@ -2190,7 +2189,7 @@ TEST(PopAndReturnConstant) {
   }
 
   FunctionTester ft(asm_tester.GenerateCode(), 0);
-  ft.function->shared().DontAdaptArguments();
+  ft.function->shared()->DontAdaptArguments();
 
   // Now call this function multiple time also checking that the stack pointer
   // didn't change after the calls.
@@ -2224,7 +2223,7 @@ TEST(PopAndReturnVariable) {
   }
 
   FunctionTester ft(asm_tester.GenerateCode(), 0);
-  ft.function->shared().DontAdaptArguments();
+  ft.function->shared()->DontAdaptArguments();
 
   // Now call this function multiple time also checking that the stack pointer
   // didn't change after the calls.
@@ -2392,7 +2391,7 @@ TEST(Arguments) {
   }
 
   FunctionTester ft(asm_tester.GenerateCode(), 0);
-  ft.function->shared().DontAdaptArguments();
+  ft.function->shared()->DontAdaptArguments();
 
   Handle<Object> result;
   result = ft.Call(Handle<Smi>(Smi::FromInt(12), isolate),
@@ -2449,7 +2448,7 @@ TEST(ArgumentsForEach) {
   }
 
   FunctionTester ft(asm_tester.GenerateCode(), 0);
-  ft.function->shared().DontAdaptArguments();
+  ft.function->shared()->DontAdaptArguments();
 
   Handle<Object> result;
   result = ft.Call(Handle<Smi>(Smi::FromInt(12), isolate),
@@ -2781,7 +2780,7 @@ TEST(NewJSPromise) {
   FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
   Handle<Object> result =
       ft.Call(isolate->factory()->undefined_value()).ToHandleChecked();
-  CHECK(result->IsJSPromise());
+  CHECK(IsJSPromise(*result));
 }
 
 TEST(NewJSPromise2) {
@@ -2799,7 +2798,7 @@ TEST(NewJSPromise2) {
   FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
   Handle<Object> result =
       ft.Call(isolate->factory()->undefined_value()).ToHandleChecked();
-  CHECK(result->IsJSPromise());
+  CHECK(IsJSPromise(*result));
   Handle<JSPromise> js_promise = Handle<JSPromise>::cast(result);
   CHECK_EQ(v8::Promise::kRejected, js_promise->status());
   CHECK_EQ(Smi::FromInt(1), js_promise->result());
@@ -2883,11 +2882,11 @@ TEST(CreatePromiseResolvingFunctionsContext) {
 
   FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
   Handle<Object> result = ft.Call().ToHandleChecked();
-  CHECK(result->IsContext());
+  CHECK(IsContext(*result));
   Handle<Context> context_js = Handle<Context>::cast(result);
   CHECK_EQ(isolate->root(RootIndex::kEmptyScopeInfo), context_js->scope_info());
   CHECK_EQ(*isolate->native_context(), context_js->native_context());
-  CHECK(context_js->get(PromiseBuiltins::kPromiseSlot).IsJSPromise());
+  CHECK(IsJSPromise(context_js->get(PromiseBuiltins::kPromiseSlot)));
   CHECK_EQ(ReadOnlyRoots(isolate).false_value(),
            context_js->get(PromiseBuiltins::kDebugEventSlot));
 }
@@ -2917,10 +2916,10 @@ TEST(CreatePromiseResolvingFunctions) {
   FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
   Handle<Object> result_obj =
       ft.Call(isolate->factory()->undefined_value()).ToHandleChecked();
-  CHECK(result_obj->IsFixedArray());
+  CHECK(IsFixedArray(*result_obj));
   Handle<FixedArray> result_arr = Handle<FixedArray>::cast(result_obj);
-  CHECK(result_arr->get(0).IsJSFunction());
-  CHECK(result_arr->get(1).IsJSFunction());
+  CHECK(IsJSFunction(result_arr->get(0)));
+  CHECK(IsJSFunction(result_arr->get(1)));
 }
 
 TEST(NewElementsCapacity) {
@@ -3008,7 +3007,7 @@ TEST(AllocateFunctionWithMapAndContext) {
   FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
   Handle<Object> result_obj =
       ft.Call(isolate->factory()->undefined_value()).ToHandleChecked();
-  CHECK(result_obj->IsJSFunction());
+  CHECK(IsJSFunction(*result_obj));
   Handle<JSFunction> fun = Handle<JSFunction>::cast(result_obj);
   CHECK_EQ(ReadOnlyRoots(isolate).empty_property_array(),
            fun->property_array());
@@ -3042,13 +3041,12 @@ TEST(CreatePromiseGetCapabilitiesExecutorContext) {
   FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
   Handle<Object> result_obj =
       ft.Call(isolate->factory()->undefined_value()).ToHandleChecked();
-  CHECK(result_obj->IsContext());
+  CHECK(IsContext(*result_obj));
   Handle<Context> context_js = Handle<Context>::cast(result_obj);
   CHECK_EQ(PromiseBuiltins::kCapabilitiesContextLength, context_js->length());
   CHECK_EQ(isolate->root(RootIndex::kEmptyScopeInfo), context_js->scope_info());
   CHECK_EQ(*isolate->native_context(), context_js->native_context());
-  CHECK(
-      context_js->get(PromiseBuiltins::kCapabilitySlot).IsPromiseCapability());
+  CHECK(IsPromiseCapability(context_js->get(PromiseBuiltins::kCapabilitySlot)));
 }
 
 TEST(NewPromiseCapability) {
@@ -3064,7 +3062,7 @@ TEST(NewPromiseCapability) {
     const TNode<Object> promise_constructor =
         m.LoadContextElement(native_context, Context::PROMISE_FUNCTION_INDEX);
 
-    const TNode<Oddball> debug_event = m.TrueConstant();
+    const TNode<True> debug_event = m.TrueConstant();
     const TNode<Object> capability =
         m.CallBuiltin(Builtin::kNewPromiseCapability, context,
                       promise_constructor, debug_event);
@@ -3073,19 +3071,19 @@ TEST(NewPromiseCapability) {
     FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
 
     Handle<Object> result_obj = ft.Call().ToHandleChecked();
-    CHECK(result_obj->IsPromiseCapability());
+    CHECK(IsPromiseCapability(*result_obj));
     Handle<PromiseCapability> result =
         Handle<PromiseCapability>::cast(result_obj);
 
-    CHECK(result->promise().IsJSPromise());
-    CHECK(result->resolve().IsJSFunction());
-    CHECK(result->reject().IsJSFunction());
+    CHECK(IsJSPromise(result->promise()));
+    CHECK(IsJSFunction(result->resolve()));
+    CHECK(IsJSFunction(result->reject()));
     CHECK_EQ(
         *isolate->factory()->promise_capability_default_reject_shared_fun(),
-        JSFunction::cast(result->reject()).shared());
+        JSFunction::cast(result->reject())->shared());
     CHECK_EQ(
         *isolate->factory()->promise_capability_default_resolve_shared_fun(),
-        JSFunction::cast(result->resolve()).shared());
+        JSFunction::cast(result->resolve())->shared());
 
     Handle<JSFunction> callbacks[] = {
         handle(JSFunction::cast(result->resolve()), isolate),
@@ -3112,7 +3110,7 @@ TEST(NewPromiseCapability) {
     auto context = m.GetJSContextParameter();
 
     auto constructor = m.Parameter<Object>(1);
-    const TNode<Oddball> debug_event = m.TrueConstant();
+    const TNode<True> debug_event = m.TrueConstant();
     const TNode<Object> capability = m.CallBuiltin(
         Builtin::kNewPromiseCapability, context, constructor, debug_event);
     m.Return(capability);
@@ -3129,16 +3127,16 @@ TEST(NewPromiseCapability) {
             "})")));
 
     Handle<Object> result_obj = ft.Call(constructor_fn).ToHandleChecked();
-    CHECK(result_obj->IsPromiseCapability());
+    CHECK(IsPromiseCapability(*result_obj));
     Handle<PromiseCapability> result =
         Handle<PromiseCapability>::cast(result_obj);
 
-    CHECK(result->promise().IsJSObject());
+    CHECK(IsJSObject(result->promise()));
     Handle<JSObject> promise(JSObject::cast(result->promise()), isolate);
     CHECK_EQ(constructor_fn->prototype_or_initial_map(kAcquireLoad),
              promise->map());
-    CHECK(result->resolve().IsJSFunction());
-    CHECK(result->reject().IsJSFunction());
+    CHECK(IsJSFunction(result->resolve()));
+    CHECK(IsJSFunction(result->reject()));
 
     Handle<String> resolved_str =
         isolate->factory()->NewStringFromAsciiChecked("resolvedStr");
@@ -3459,7 +3457,7 @@ TEST(IsNumberArrayIndex) {
   for (size_t i = 0; i < arraysize(indices); i++) {
     Handle<Object> index = isolate->factory()->NewNumber(indices[i]);
     uint32_t array_index;
-    CHECK_EQ(index->ToArrayIndex(&array_index),
+    CHECK_EQ(Object::ToArrayIndex(*index, &array_index),
              (ft.CallChecked<Smi>(index)->value() == 1));
   }
 }
@@ -3577,7 +3575,7 @@ TEST(CloneEmptyFixedArray) {
   Handle<FixedArray> source(isolate->factory()->empty_fixed_array());
   Handle<Object> result_raw = ft.Call(source).ToHandleChecked();
   FixedArray result(FixedArray::cast(*result_raw));
-  CHECK_EQ(0, result.length());
+  CHECK_EQ(0, result->length());
   CHECK_EQ(*(isolate->factory()->empty_fixed_array()), result);
 }
 
@@ -3595,12 +3593,12 @@ TEST(CloneFixedArray) {
   source->set(1, Smi::FromInt(1234));
   Handle<Object> result_raw = ft.Call(source).ToHandleChecked();
   FixedArray result(FixedArray::cast(*result_raw));
-  CHECK_EQ(5, result.length());
-  CHECK(result.get(0).IsTheHole(isolate));
-  CHECK_EQ(Smi::cast(result.get(1)).value(), 1234);
-  CHECK(result.get(2).IsTheHole(isolate));
-  CHECK(result.get(3).IsTheHole(isolate));
-  CHECK(result.get(4).IsTheHole(isolate));
+  CHECK_EQ(5, result->length());
+  CHECK(IsTheHole(result->get(0), isolate));
+  CHECK_EQ(Smi::cast(result->get(1)).value(), 1234);
+  CHECK(IsTheHole(result->get(2), isolate));
+  CHECK(IsTheHole(result->get(3), isolate));
+  CHECK(IsTheHole(result->get(4), isolate));
 }
 
 TEST(CloneFixedArrayCOW) {
@@ -3643,12 +3641,12 @@ TEST(ExtractFixedArrayCOWForceCopy) {
   Handle<Object> result_raw = ft.Call(source).ToHandleChecked();
   FixedArray result(FixedArray::cast(*result_raw));
   CHECK_NE(*source, result);
-  CHECK_EQ(5, result.length());
-  CHECK(result.get(0).IsTheHole(isolate));
-  CHECK_EQ(Smi::cast(result.get(1)).value(), 1234);
-  CHECK(result.get(2).IsTheHole(isolate));
-  CHECK(result.get(3).IsTheHole(isolate));
-  CHECK(result.get(4).IsTheHole(isolate));
+  CHECK_EQ(5, result->length());
+  CHECK(IsTheHole(result->get(0), isolate));
+  CHECK_EQ(Smi::cast(result->get(1)).value(), 1234);
+  CHECK(IsTheHole(result->get(2), isolate));
+  CHECK(IsTheHole(result->get(3), isolate));
+  CHECK(IsTheHole(result->get(4), isolate));
 }
 
 TEST(ExtractFixedArraySimple) {
@@ -3675,9 +3673,9 @@ TEST(ExtractFixedArraySimple) {
               Handle<Smi>(Smi::FromInt(2), isolate))
           .ToHandleChecked();
   FixedArray result(FixedArray::cast(*result_raw));
-  CHECK_EQ(2, result.length());
-  CHECK_EQ(Smi::cast(result.get(0)).value(), 1234);
-  CHECK(result.get(1).IsTheHole(isolate));
+  CHECK_EQ(2, result->length());
+  CHECK_EQ(Smi::cast(result->get(0)).value(), 1234);
+  CHECK(IsTheHole(result->get(1), isolate));
 }
 
 TEST(ExtractFixedArraySimpleSmiConstant) {
@@ -3701,9 +3699,9 @@ TEST(ExtractFixedArraySimpleSmiConstant) {
   source->set(1, Smi::FromInt(1234));
   Handle<Object> result_raw = ft.Call(source).ToHandleChecked();
   FixedArray result(FixedArray::cast(*result_raw));
-  CHECK_EQ(2, result.length());
-  CHECK_EQ(Smi::cast(result.get(0)).value(), 1234);
-  CHECK(result.get(1).IsTheHole(isolate));
+  CHECK_EQ(2, result->length());
+  CHECK_EQ(Smi::cast(result->get(0)).value(), 1234);
+  CHECK(IsTheHole(result->get(1), isolate));
 }
 
 TEST(ExtractFixedArraySimpleIntPtrConstant) {
@@ -3727,9 +3725,9 @@ TEST(ExtractFixedArraySimpleIntPtrConstant) {
   source->set(1, Smi::FromInt(1234));
   Handle<Object> result_raw = ft.Call(source).ToHandleChecked();
   FixedArray result(FixedArray::cast(*result_raw));
-  CHECK_EQ(2, result.length());
-  CHECK_EQ(Smi::cast(result.get(0)).value(), 1234);
-  CHECK(result.get(1).IsTheHole(isolate));
+  CHECK_EQ(2, result->length());
+  CHECK_EQ(Smi::cast(result->get(0)).value(), 1234);
+  CHECK(IsTheHole(result->get(1), isolate));
 }
 
 TEST(ExtractFixedArraySimpleIntPtrConstantNoDoubles) {
@@ -3751,9 +3749,9 @@ TEST(ExtractFixedArraySimpleIntPtrConstantNoDoubles) {
   source->set(1, Smi::FromInt(1234));
   Handle<Object> result_raw = ft.Call(source).ToHandleChecked();
   FixedArray result(FixedArray::cast(*result_raw));
-  CHECK_EQ(2, result.length());
-  CHECK_EQ(Smi::cast(result.get(0)).value(), 1234);
-  CHECK(result.get(1).IsTheHole(isolate));
+  CHECK_EQ(2, result->length());
+  CHECK_EQ(Smi::cast(result->get(0)).value(), 1234);
+  CHECK(IsTheHole(result->get(1), isolate));
 }
 
 TEST(ExtractFixedArraySimpleIntPtrParameters) {
@@ -3776,9 +3774,9 @@ TEST(ExtractFixedArraySimpleIntPtrParameters) {
               Handle<Smi>(Smi::FromInt(2), isolate))
           .ToHandleChecked();
   FixedArray result(FixedArray::cast(*result_raw));
-  CHECK_EQ(2, result.length());
-  CHECK_EQ(Smi::cast(result.get(0)).value(), 1234);
-  CHECK(result.get(1).IsTheHole(isolate));
+  CHECK_EQ(2, result->length());
+  CHECK_EQ(Smi::cast(result->get(0)).value(), 1234);
+  CHECK(IsTheHole(result->get(1), isolate));
 
   Handle<FixedDoubleArray> source_double = Handle<FixedDoubleArray>::cast(
       isolate->factory()->NewFixedDoubleArray(5));
@@ -3792,9 +3790,9 @@ TEST(ExtractFixedArraySimpleIntPtrParameters) {
               Handle<Smi>(Smi::FromInt(2), isolate))
           .ToHandleChecked();
   FixedDoubleArray double_result = FixedDoubleArray::cast(*double_result_raw);
-  CHECK_EQ(2, double_result.length());
-  CHECK_EQ(double_result.get_scalar(0), 11);
-  CHECK_EQ(double_result.get_scalar(1), 12);
+  CHECK_EQ(2, double_result->length());
+  CHECK_EQ(double_result->get_scalar(0), 11);
+  CHECK_EQ(double_result->get_scalar(1), 12);
 }
 
 TEST(SingleInputPhiElimination) {
@@ -4045,8 +4043,8 @@ TEST(InstructionSchedulingCallerSavedRegisters) {
   FunctionTester ft(asm_tester.GenerateCode(options), kNumParams);
   Handle<Object> input = isolate->factory()->NewNumber(8);
   MaybeHandle<Object> result = ft.Call(input);
-  CHECK(result.ToHandleChecked()->IsSmi());
-  CHECK_EQ(result.ToHandleChecked()->Number(), 13);
+  CHECK(IsSmi(*result.ToHandleChecked()));
+  CHECK_EQ(Object::Number(*result.ToHandleChecked()), 13);
 
   v8_flags.turbo_instruction_scheduling = old_turbo_instruction_scheduling;
 }
@@ -4084,18 +4082,18 @@ TEST(WasmInt32ToHeapNumber) {
 
     FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
     Handle<Object> result = ft.Call().ToHandleChecked();
-    CHECK(result->IsNumber());
+    CHECK(IsNumber(*result));
     Handle<Object> expected(isolate->factory()->NewNumber(test_value));
-    CHECK(result->StrictEquals(*expected));
+    CHECK(Object::StrictEquals(*result, *expected));
   }
 }
 
 int32_t NumberToInt32(Handle<Object> number) {
-  if (number->IsSmi()) {
+  if (IsSmi(*number)) {
     return Smi::ToInt(*number);
   }
-  if (number->IsHeapNumber()) {
-    double num = HeapNumber::cast(*number).value();
+  if (IsHeapNumber(*number)) {
+    double num = HeapNumber::cast(*number)->value();
     return DoubleToInt32(num);
   }
   UNREACHABLE();
@@ -4170,11 +4168,11 @@ TEST(WasmFloat32ToNumber) {
 
     FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
     Handle<Object> result = ft.Call().ToHandleChecked();
-    CHECK(result->IsNumber());
+    CHECK(IsNumber(*result));
     Handle<Object> expected(isolate->factory()->NewNumber(test_value));
-    CHECK(result->StrictEquals(*expected) ||
-          (std::isnan(test_value) && std::isnan(result->Number())));
-    CHECK_EQ(result->IsSmi(), expected->IsSmi());
+    CHECK(Object::StrictEquals(*result, *expected) ||
+          (std::isnan(test_value) && std::isnan(Object::Number(*result))));
+    CHECK_EQ(IsSmi(*result), IsSmi(*expected));
   }
 }
 
@@ -4210,20 +4208,20 @@ TEST(WasmFloat64ToNumber) {
 
     FunctionTester ft(asm_tester.GenerateCode(), kNumParams);
     Handle<Object> result = ft.Call().ToHandleChecked();
-    CHECK(result->IsNumber());
+    CHECK(IsNumber(*result));
     Handle<Object> expected(isolate->factory()->NewNumber(test_value));
-    CHECK(result->StrictEquals(*expected) ||
-          (std::isnan(test_value) && std::isnan(result->Number())));
-    CHECK_EQ(result->IsSmi(), expected->IsSmi());
+    CHECK(Object::StrictEquals(*result, *expected) ||
+          (std::isnan(test_value) && std::isnan(Object::Number(*result))));
+    CHECK_EQ(IsSmi(*result), IsSmi(*expected));
   }
 }
 
 double NumberToFloat64(Handle<Object> number) {
-  if (number->IsSmi()) {
+  if (IsSmi(*number)) {
     return Smi::ToInt(*number);
   }
-  if (number->IsHeapNumber()) {
-    return HeapNumber::cast(*number).value();
+  if (IsHeapNumber(*number)) {
+    return HeapNumber::cast(*number)->value();
   }
   UNREACHABLE();
 }
@@ -4504,18 +4502,14 @@ TEST(IntPtrMulWithOverflow) {
     m.Return(m.SelectBooleanConstant(overflow));
 
     FunctionTester ft(asm_tester.GenerateCode());
-    CHECK(ft.Call(handle(Smi::FromInt(-1), isolate))
-              .ToHandleChecked()
-              ->IsTrue(isolate));
-    CHECK(ft.Call(handle(Smi::FromInt(1), isolate))
-              .ToHandleChecked()
-              ->IsFalse(isolate));
-    CHECK(ft.Call(handle(Smi::FromInt(2), isolate))
-              .ToHandleChecked()
-              ->IsTrue(isolate));
-    CHECK(ft.Call(handle(Smi::FromInt(0), isolate))
-              .ToHandleChecked()
-              ->IsFalse(isolate));
+    CHECK(IsTrue(*ft.Call(handle(Smi::FromInt(-1), isolate)).ToHandleChecked(),
+                 isolate));
+    CHECK(IsFalse(*ft.Call(handle(Smi::FromInt(1), isolate)).ToHandleChecked(),
+                  isolate));
+    CHECK(IsTrue(*ft.Call(handle(Smi::FromInt(2), isolate)).ToHandleChecked(),
+                 isolate));
+    CHECK(IsFalse(*ft.Call(handle(Smi::FromInt(0), isolate)).ToHandleChecked(),
+                  isolate));
   }
 
   {
@@ -4529,15 +4523,12 @@ TEST(IntPtrMulWithOverflow) {
     m.Return(m.SelectBooleanConstant(overflow));
 
     FunctionTester ft(asm_tester.GenerateCode());
-    CHECK(ft.Call(handle(Smi::FromInt(-1), isolate))
-              .ToHandleChecked()
-              ->IsFalse(isolate));
-    CHECK(ft.Call(handle(Smi::FromInt(1), isolate))
-              .ToHandleChecked()
-              ->IsFalse(isolate));
-    CHECK(ft.Call(handle(Smi::FromInt(2), isolate))
-              .ToHandleChecked()
-              ->IsTrue(isolate));
+    CHECK(IsFalse(*ft.Call(handle(Smi::FromInt(-1), isolate)).ToHandleChecked(),
+                  isolate));
+    CHECK(IsFalse(*ft.Call(handle(Smi::FromInt(1), isolate)).ToHandleChecked(),
+                  isolate));
+    CHECK(IsTrue(*ft.Call(handle(Smi::FromInt(2), isolate)).ToHandleChecked(),
+                 isolate));
   }
 }
 

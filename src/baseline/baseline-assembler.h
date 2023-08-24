@@ -31,7 +31,7 @@ class BaselineAssembler {
   inline MemOperand FunctionOperand();
   inline MemOperand FeedbackVectorOperand();
 
-  inline void GetCode(Isolate* isolate, CodeDesc* desc);
+  inline void GetCode(LocalIsolate* isolate, CodeDesc* desc);
   inline int pc_offset() const;
   inline void CodeEntry() const;
   inline void ExceptionHandler() const;
@@ -238,16 +238,6 @@ class BaselineAssembler {
  private:
   MacroAssembler* masm_;
   ScratchRegisterScope* scratch_register_scope_ = nullptr;
-};
-
-class SaveAccumulatorScope final {
- public:
-  inline explicit SaveAccumulatorScope(BaselineAssembler* assembler);
-
-  inline ~SaveAccumulatorScope();
-
- private:
-  BaselineAssembler* assembler_;
 };
 
 class EnsureAccumulatorPreservedScope final {

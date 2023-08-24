@@ -159,7 +159,8 @@ class WasmSerializationTest {
           v8_module_object->GetCompiledModule();
       v8::MemorySpan<const uint8_t> uncompiled_bytes =
           compiled_module.GetWireBytesRef();
-      uint8_t* bytes_copy = zone()->NewArray<uint8_t>(uncompiled_bytes.size());
+      uint8_t* bytes_copy =
+          zone()->AllocateArray<uint8_t>(uncompiled_bytes.size());
       memcpy(bytes_copy, uncompiled_bytes.data(), uncompiled_bytes.size());
       wire_bytes_ = {bytes_copy, uncompiled_bytes.size()};
 
@@ -220,8 +221,8 @@ TEST(DeserializeWithSourceUrl) {
     const std::string url = "http://example.com/example.wasm";
     Handle<WasmModuleObject> module_object;
     CHECK(test.Deserialize(base::VectorOf(url)).ToHandle(&module_object));
-    String url_str = String::cast(module_object->script().name());
-    CHECK_EQ(url, url_str.ToCString().get());
+    String url_str = String::cast(module_object->script()->name());
+    CHECK_EQ(url, url_str->ToCString().get());
   }
   test.CollectGarbage();
 }

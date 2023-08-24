@@ -148,6 +148,7 @@ class LifetimePosition final {
     return this->value_ >= that.value_;
   }
 
+  // APIs to aid debugging. For general-stream APIs, use operator<<.
   void Print() const;
 
   static inline LifetimePosition Invalid() { return LifetimePosition(); }
@@ -174,7 +175,20 @@ class LifetimePosition final {
   int value_;
 };
 
-std::ostream& operator<<(std::ostream& os, const LifetimePosition pos);
+inline std::ostream& operator<<(std::ostream& os, const LifetimePosition pos) {
+  os << '@' << pos.ToInstructionIndex();
+  if (pos.IsGapPosition()) {
+    os << 'g';
+  } else {
+    os << 'i';
+  }
+  if (pos.IsStart()) {
+    os << 's';
+  } else {
+    os << 'e';
+  }
+  return os;
+}
 
 enum class RegisterAllocationFlag : unsigned { kTraceAllocation = 1 << 0 };
 
@@ -288,7 +302,6 @@ class TopTierRegisterAllocationData final : public RegisterAllocationData {
   }
   ZoneVector<SparseBitVector*>& live_in_sets() { return live_in_sets_; }
   ZoneVector<SparseBitVector*>& live_out_sets() { return live_out_sets_; }
-  ZoneVector<SpillRange*>& spill_ranges() { return spill_ranges_; }
   DelayedReferences& delayed_references() { return delayed_references_; }
   InstructionSequence* code() const { return code_; }
   // This zone is for data structures only needed during register allocation
@@ -303,7 +316,7 @@ class TopTierRegisterAllocationData final : public RegisterAllocationData {
 
   MachineRepresentation RepresentationFor(int virtual_register);
 
-  TopLevelLiveRange* GetOrCreateLiveRangeFor(int index);
+  TopLevelLiveRange* GetLiveRangeFor(int index);
   // Creates a new live range.
   TopLevelLiveRange* NewLiveRange(int index, MachineRepresentation rep);
 
@@ -364,12 +377,15 @@ class TopTierRegisterAllocationData final : public RegisterAllocationData {
   PhiMap phi_map_;
   ZoneVector<SparseBitVector*> live_in_sets_;
   ZoneVector<SparseBitVector*> live_out_sets_;
+  // TODO(dlehmann): All of these arrays of `TopLevelLiveRange`s have a known
+  // size and don't grow at runtime, so (1) make them a plain `base::Vector`,
+  // (2) get rid of one pointer indirection by storing the elements inline, and
+  // (3) initialize them eagerly to avoid repeated nullptr checks.
   ZoneVector<TopLevelLiveRange*> live_ranges_;
   ZoneVector<TopLevelLiveRange*> fixed_live_ranges_;
   ZoneVector<TopLevelLiveRange*> fixed_float_live_ranges_;
   ZoneVector<TopLevelLiveRange*> fixed_double_live_ranges_;
   ZoneVector<TopLevelLiveRange*> fixed_simd128_live_ranges_;
-  ZoneVector<SpillRange*> spill_ranges_;
   DelayedReferences delayed_references_;
   BitVector* assigned_registers_;
   BitVector* assigned_double_registers_;
@@ -386,31 +402,40 @@ class TopTierRegisterAllocationData final : public RegisterAllocationData {
 };
 
 // Representation of the non-empty interval [start,end[.
-class UseInterval final : public ZoneObject {
+// This is a value class given that it only contains two (32-bit) positions.
+class UseInterval final {
  public:
   UseInterval(LifetimePosition start, LifetimePosition end)
-      : start_(start), end_(end), next_(nullptr) {
-    DCHECK(start < end);
+      : start_(start), end_(end) {
+    DCHECK_LT(start, end);
   }
-  UseInterval(const UseInterval&) = delete;
-  UseInterval& operator=(const UseInterval&) = delete;
 
   LifetimePosition start() const { return start_; }
-  void set_start(LifetimePosition start) { start_ = start; }
+  void set_start(LifetimePosition start) {
+    DCHECK_LT(start, end_);
+    start_ = start;
+  }
   LifetimePosition end() const { return end_; }
-  void set_end(LifetimePosition end) { end_ = end; }
-  UseInterval* next() const { return next_; }
-  void set_next(UseInterval* next) { next_ = next; }
+  void set_end(LifetimePosition end) {
+    DCHECK_LT(start_, end);
+    end_ = end;
+  }
 
   // Split this interval at the given position without effecting the
   // live range that owns it. The interval must contain the position.
-  UseInterval* SplitAt(LifetimePosition pos, Zone* zone);
+  UseInterval SplitAt(LifetimePosition pos) {
+    DCHECK(Contains(pos) && pos != start());
+    UseInterval after(pos, end_);
+    end_ = pos;
+    return after;
+  }
 
   // If this interval intersects with other return smallest position
   // that belongs to both of them.
-  LifetimePosition Intersect(const UseInterval* other) const {
-    if (other->start() < start_) return other->Intersect(this);
-    if (other->start() < end_) return other->start();
+  LifetimePosition Intersect(const UseInterval& other) const {
+    LifetimePosition intersection_start = std::max(start_, other.start_);
+    LifetimePosition intersection_end = std::min(end_, other.end_);
+    if (intersection_start < intersection_end) return intersection_start;
     return LifetimePosition::Invalid();
   }
 
@@ -436,10 +461,22 @@ class UseInterval final : public ZoneObject {
     return ret;
   }
 
+  bool operator==(const UseInterval& other) const {
+    return std::tie(start_, end_) == std::tie(other.start_, other.end_);
+  }
+  bool operator!=(const UseInterval& other) const { return !(*this == other); }
+
+  bool operator<(const UseInterval& other) const {
+    return start_ < other.start_;
+  }
+
+  void PrettyPrint(std::ostream& os) const {
+    os << '[' << start() << ", " << end() << ')';
+  }
+
  private:
   LifetimePosition start_;
   LifetimePosition end_;
-  UseInterval* next_;
 };
 
 enum class UsePositionType : uint8_t {
@@ -501,6 +538,12 @@ class V8_EXPORT_PRIVATE UsePosition final
   }
   static UsePositionHintType HintTypeForOperand(const InstructionOperand& op);
 
+  struct Ordering {
+    bool operator()(const UsePosition* left, const UsePosition* right) const {
+      return left->pos() < right->pos();
+    }
+  };
+
  private:
   using TypeField = base::BitField<UsePositionType, 0, 2>;
   using HintTypeField = base::BitField<UsePositionHintType, 2, 3>;
@@ -519,6 +562,253 @@ class TopTierRegisterAllocationData;
 class TopLevelLiveRange;
 class LiveRangeBundle;
 
+enum GrowthDirection { kFront, kFrontOrBack };
+
+// A data structure that:
+// - Allocates its elements in the Zone.
+// - Has O(1) random access.
+// - Inserts at the front are O(1) (asymptotically).
+// - Can be split efficiently into two halves, and merged again efficiently
+//   if those were not modified in the meantime.
+// - Has empty storage at the front and back, such that split halves both
+//   can perform inserts without reallocating.
+template <typename T>
+class DoubleEndedSplitVector {
+ public:
+  using value_type = T;
+  using iterator = T*;
+  using const_iterator = const T*;
+
+  // This allows us to skip calling destructors and use simple copies,
+  // which is sufficient for the exclusive use here in the register allocator.
+  ASSERT_TRIVIALLY_COPYABLE(T);
+  static_assert(std::is_trivially_destructible<T>::value);
+
+  size_t size() const { return data_end_ - data_begin_; }
+  bool empty() const { return size() == 0; }
+  size_t capacity() const { return storage_end_ - storage_begin_; }
+
+  T* data() const { return data_begin_; }
+
+  void clear() { data_begin_ = data_end_; }
+
+  T& operator[](size_t position) {
+    DCHECK_LT(position, size());
+    return data_begin_[position];
+  }
+  const T& operator[](size_t position) const {
+    DCHECK_LT(position, size());
+    return data_begin_[position];
+  }
+
+  iterator begin() { return data_begin_; }
+  const_iterator begin() const { return data_begin_; }
+  iterator end() { return data_end_; }
+  const_iterator end() const { return data_end_; }
+
+  T& front() {
+    DCHECK(!empty());
+    return *begin();
+  }
+  const T& front() const {
+    DCHECK(!empty());
+    return *begin();
+  }
+  T& back() {
+    DCHECK(!empty());
+    return *std::prev(end());
+  }
+  const T& back() const {
+    DCHECK(!empty());
+    return *std::prev(end());
+  }
+
+  void push_front(Zone* zone, const T& value) {
+    EnsureOneMoreCapacityAt<kFront>(zone);
+    --data_begin_;
+    *data_begin_ = value;
+  }
+  void pop_front() {
+    DCHECK(!empty());
+    ++data_begin_;
+  }
+
+  // This can be configured to arrange the data in the middle of the backing
+  // store (`kFrontOrBack`, default), or at the end of the backing store, if
+  // subsequent inserts are mostly at the front (`kFront`).
+  template <GrowthDirection direction = kFrontOrBack>
+  iterator insert(Zone* zone, const_iterator position, const T& value) {
+    DCHECK_LE(begin(), position);
+    DCHECK_LE(position, end());
+    size_t old_size = size();
+
+    size_t insert_index = position - data_begin_;
+    EnsureOneMoreCapacityAt<direction>(zone);
+
+    // Make space for the insertion.
+    // Copy towards the end with more remaining space, such that over time
+    // the data is roughly centered, which is beneficial in case of splitting.
+    if (direction == kFront || space_at_front() >= space_at_back()) {
+      // Copy to the left.
+      DCHECK_GT(space_at_front(), 0);
+      T* copy_src_begin = data_begin_;
+      T* copy_src_end = data_begin_ + insert_index;
+      --data_begin_;
+      std::copy(copy_src_begin, copy_src_end, data_begin_);
+    } else {
+      // Copy to the right.
+      DCHECK_GT(space_at_back(), 0);
+      T* copy_src_begin = data_begin_ + insert_index;
+      T* copy_src_end = data_end_;
+      ++data_end_;
+      std::copy_backward(copy_src_begin, copy_src_end, data_end_);
+    }
+
+    T* insert_position = data_begin_ + insert_index;
+    *insert_position = value;
+
+#ifdef DEBUG
+    Verify();
+#endif
+    DCHECK_LE(begin(), insert_position);
+    DCHECK_LT(insert_position, end());
+    DCHECK_EQ(size(), old_size + 1);
+    USE(old_size);
+
+    return insert_position;
+  }
+
+  // Returns a split-off vector from `split_begin` to `end()`.
+  // Afterwards, `this` ends just before `split_begin`.
+  // This does not allocate; it instead splits the backing store in two halves.
+  DoubleEndedSplitVector<T> SplitAt(const_iterator split_begin_const) {
+    iterator split_begin = const_cast<iterator>(split_begin_const);
+
+    DCHECK_LE(data_begin_, split_begin);
+    DCHECK_LE(split_begin, data_end_);
+    size_t old_size = size();
+
+    // NOTE: The splitted allocation might no longer fulfill alignment
+    // requirements by the Zone allocator, so do not delete it!
+    DoubleEndedSplitVector split_off;
+    split_off.storage_begin_ = split_begin;
+    split_off.data_begin_ = split_begin;
+    split_off.data_end_ = data_end_;
+    split_off.storage_end_ = storage_end_;
+    data_end_ = split_begin;
+    storage_end_ = split_begin;
+
+#ifdef DEBUG
+    Verify();
+    split_off.Verify();
+#endif
+    DCHECK_EQ(size() + split_off.size(), old_size);
+    USE(old_size);
+
+    return split_off;
+  }
+
+  // Appends the elements from `other` after the end of `this`.
+  // In particular if `other` is directly adjacent to `this`, it does not
+  // allocate or copy.
+  void Append(Zone* zone, DoubleEndedSplitVector<T> other) {
+    if (data_end_ == other.data_begin_) {
+      // The `other`s elements are directly adjacent to ours, so just extend
+      // our storage to encompass them.
+      // This could happen if `other` comes from an earlier `this->SplitAt()`.
+      // For the usage here in the register allocator, this is always the case.
+      DCHECK_EQ(other.storage_begin_, other.data_begin_);
+      DCHECK_EQ(data_end_, storage_end_);
+      data_end_ = other.data_end_;
+      storage_end_ = other.storage_end_;
+      return;
+    }
+
+    // General case: Copy into newly allocated vector.
+    // TODO(dlehmann): One could check if `this` or `other` has enough capacity
+    // such that one can avoid the allocation, but currently we never reach
+    // this path anyway.
+    DoubleEndedSplitVector<T> result;
+    size_t merged_size = this->size() + other.size();
+    result.GrowAt<kFront>(zone, merged_size);
+
+    result.data_begin_ -= merged_size;
+    std::copy(this->begin(), this->end(), result.data_begin_);
+    std::copy(other.begin(), other.end(), result.data_begin_ + this->size());
+    DCHECK_EQ(result.data_begin_ + merged_size, result.data_end_);
+
+    *this = std::move(result);
+
+#ifdef DEBUG
+    Verify();
+#endif
+    DCHECK_EQ(size(), merged_size);
+  }
+
+ private:
+  static constexpr size_t kMinCapacity = 2;
+
+  size_t space_at_front() const { return data_begin_ - storage_begin_; }
+  size_t space_at_back() const { return storage_end_ - data_end_; }
+
+  template <GrowthDirection direction>
+  V8_INLINE void EnsureOneMoreCapacityAt(Zone* zone) {
+    if constexpr (direction == kFront) {
+      if (V8_LIKELY(space_at_front() > 0)) return;
+      GrowAt<kFront>(zone, capacity() * 2);
+      DCHECK_GT(space_at_front(), 0);
+    } else {
+      if (V8_LIKELY(space_at_front() > 0 || space_at_back() > 0)) return;
+      GrowAt<kFrontOrBack>(zone, capacity() * 2);
+      DCHECK(space_at_front() > 0 || space_at_back() > 0);
+    }
+  }
+
+  template <GrowthDirection direction>
+  V8_NOINLINE V8_PRESERVE_MOST void GrowAt(Zone* zone,
+                                           size_t new_minimum_capacity) {
+    DoubleEndedSplitVector<T> old = std::move(*this);
+
+    size_t new_capacity = std::max(kMinCapacity, new_minimum_capacity);
+    storage_begin_ = zone->AllocateArray<T>(new_capacity);
+    storage_end_ = storage_begin_ + new_capacity;
+
+    size_t remaining_capacity = new_capacity - old.size();
+    size_t remaining_capacity_front =
+        direction == kFront ? remaining_capacity : remaining_capacity / 2;
+
+    data_begin_ = storage_begin_ + remaining_capacity_front;
+    data_end_ = data_begin_ + old.size();
+    std::copy(old.begin(), old.end(), data_begin_);
+
+#ifdef DEBUG
+    Verify();
+#endif
+    DCHECK_EQ(size(), old.size());
+  }
+
+#ifdef DEBUG
+  void Verify() const {
+    DCHECK_LE(storage_begin_, data_begin_);
+    DCHECK_LE(data_begin_, data_end_);
+    DCHECK_LE(data_end_, storage_end_);
+  }
+#endif
+
+  // Do not store a pointer to the `Zone` to save memory when there are very
+  // many `LiveRange`s (which each contain this vector twice).
+  // It makes the API a bit cumbersome, because the Zone has to be explicitly
+  // passed around, but is worth the 1-3% of max zone memory reduction.
+
+  T* storage_begin_ = nullptr;
+  T* data_begin_ = nullptr;
+  T* data_end_ = nullptr;
+  T* storage_end_ = nullptr;
+};
+
+using UseIntervalVector = DoubleEndedSplitVector<UseInterval>;
+using UsePositionVector = DoubleEndedSplitVector<UsePosition*>;
+
 // Representation of SSA values' live ranges as a collection of (continuous)
 // intervals over the instruction ordering.
 class V8_EXPORT_PRIVATE LiveRange : public NON_EXPORTED_BASE(ZoneObject) {
@@ -526,8 +816,9 @@ class V8_EXPORT_PRIVATE LiveRange : public NON_EXPORTED_BASE(ZoneObject) {
   LiveRange(const LiveRange&) = delete;
   LiveRange& operator=(const LiveRange&) = delete;
 
-  UseInterval* first_interval() const { return first_interval_; }
+  const UseIntervalVector& intervals() const { return intervals_; }
   base::Vector<UsePosition*> positions() const { return positions_span_; }
+
   TopLevelLiveRange* TopLevel() { return top_level_; }
   const TopLevelLiveRange* TopLevel() const { return top_level_; }
 
@@ -537,7 +828,7 @@ class V8_EXPORT_PRIVATE LiveRange : public NON_EXPORTED_BASE(ZoneObject) {
 
   int relative_id() const { return relative_id_; }
 
-  bool IsEmpty() const { return first_interval() == nullptr; }
+  bool IsEmpty() const { return intervals_.empty(); }
 
   InstructionOperand GetAssignedOperand() const;
 
@@ -570,7 +861,7 @@ class V8_EXPORT_PRIVATE LiveRange : public NON_EXPORTED_BASE(ZoneObject) {
     return false;
   }
   bool spilled() const { return SpilledField::decode(bits_); }
-  void AttachToNext();
+  void AttachToNext(Zone* zone);
   void Unspill();
   void Spill();
 
@@ -619,26 +910,30 @@ class V8_EXPORT_PRIVATE LiveRange : public NON_EXPORTED_BASE(ZoneObject) {
 
   LifetimePosition Start() const {
     DCHECK(!IsEmpty());
-    return first_interval()->start();
+    DCHECK_EQ(start_, intervals_.front().start());
+    return start_;
   }
 
   LifetimePosition End() const {
     DCHECK(!IsEmpty());
-    return last_interval_->end();
+    DCHECK_EQ(end_, intervals_.back().end());
+    return end_;
   }
 
   bool ShouldBeAllocatedBefore(const LiveRange* other) const;
   bool CanCover(LifetimePosition position) const;
-  bool Covers(LifetimePosition position) const;
+  bool Covers(LifetimePosition position);
   LifetimePosition NextStartAfter(LifetimePosition position);
-  LifetimePosition NextEndAfter(LifetimePosition position) const;
-  LifetimePosition FirstIntersection(LiveRange* other) const;
+  LifetimePosition NextEndAfter(LifetimePosition position);
+  LifetimePosition FirstIntersection(LiveRange* other);
   LifetimePosition NextStart() const { return next_start_; }
 
+#ifdef DEBUG
   void VerifyChildStructure() const {
     VerifyIntervals();
     VerifyPositions();
   }
+#endif
 
   void ConvertUsesToOperand(const InstructionOperand& op,
                             const InstructionOperand& spill_op);
@@ -649,8 +944,6 @@ class V8_EXPORT_PRIVATE LiveRange : public NON_EXPORTED_BASE(ZoneObject) {
   void Print(const RegisterConfiguration* config, bool with_children) const;
   void Print(bool with_children) const;
 
-  void set_bundle(LiveRangeBundle* bundle) { bundle_ = bundle; }
-  LiveRangeBundle* get_bundle() const { return bundle_; }
   bool RegisterFromBundle(int* hint) const;
   void UpdateBundleRegister(int reg) const;
 
@@ -663,12 +956,15 @@ class V8_EXPORT_PRIVATE LiveRange : public NON_EXPORTED_BASE(ZoneObject) {
 
   void set_spilled(bool value) { bits_ = SpilledField::update(bits_, value); }
 
-  UseInterval* FirstSearchIntervalForPosition(LifetimePosition position) const;
-  void AdvanceLastProcessedMarker(UseInterval* to_start_of,
-                                  LifetimePosition but_not_past) const;
+  UseIntervalVector::iterator FirstSearchIntervalForPosition(
+      LifetimePosition position);
+  void AdvanceLastProcessedMarker(UseIntervalVector::iterator to_start_of,
+                                  LifetimePosition but_not_past);
 
+#ifdef DEBUG
   void VerifyPositions() const;
   void VerifyIntervals() const;
+#endif
 
   using SpilledField = base::BitField<bool, 0, 1>;
   // Bits (1,7[ are used by TopLevelLiveRange.
@@ -681,21 +977,31 @@ class V8_EXPORT_PRIVATE LiveRange : public NON_EXPORTED_BASE(ZoneObject) {
   // Unique among children of the same virtual register.
   int relative_id_;
   uint32_t bits_;
-  UseInterval* last_interval_;
-  UseInterval* first_interval_;
+
+  UseIntervalVector intervals_;
   // This is a view into the `positions_` owned by the `TopLevelLiveRange`.
   // This allows cheap splitting and merging of `LiveRange`s.
   base::Vector<UsePosition*> positions_span_;
+
   TopLevelLiveRange* top_level_;
+  // TODO(dlehmann): Remove linked list fully and instead use only the
+  // `TopLevelLiveRange::children_` vector. This requires API changes to
+  // `SplitAt` and `AttachToNext`, as they need access to a vector iterator.
   LiveRange* next_;
-  // This is used as a cache, it doesn't affect correctness.
-  mutable UseInterval* current_interval_;
+
+  // This is used as a cache in `FirstSearchIntervalForPosition`.
+  UseIntervalVector::iterator current_interval_;
   // This is used as a cache in `BuildLiveRanges` and during register
   // allocation.
   size_t current_hint_position_index_ = 0;
-  LiveRangeBundle* bundle_ = nullptr;
+
   // Next interval start, relative to the current linear scan position.
   LifetimePosition next_start_;
+
+  // Just a cache for `Start()` and `End()` that improves locality
+  // (i.e., one less pointer indirection).
+  LifetimePosition start_;
+  LifetimePosition end_;
 };
 
 struct LiveRangeOrdering {
@@ -708,75 +1014,32 @@ struct LiveRangeOrdering {
 // same spill slot or reuse the same register for connected live ranges.
 class LiveRangeBundle : public ZoneObject {
  public:
-  void MergeSpillRangesAndClear();
+  explicit LiveRangeBundle(Zone* zone, int id)
+      : ranges_(zone), intervals_(zone), id_(id) {}
 
-  int id() { return id_; }
+  int id() const { return id_; }
 
-  int reg() { return reg_; }
-
+  int reg() const { return reg_; }
   void set_reg(int reg) {
     DCHECK_EQ(reg_, kUnassignedRegister);
     reg_ = reg;
   }
 
- private:
-  friend class BundleBuilder;
-  friend Zone;
-
-  // Representation of the non-empty interval [start,end[.
-  class Range {
-   public:
-    Range(int s, int e) : start(s), end(e) {}
-    Range(LifetimePosition s, LifetimePosition e)
-        : start(s.value()), end(e.value()) {}
-    int start;
-    int end;
-    bool operator==(const Range& rhs) const {
-      return this->start == rhs.start && this->end == rhs.end;
-    }
-    bool operator!=(const Range& rhs) const { return !(*this == rhs); }
-  };
-
-  struct RangeOrdering {
-    bool operator()(const Range left, const Range right) const {
-      return left.start < right.start;
-    }
-  };
-  bool UsesOverlap(UseInterval* interval) {
-    auto use = uses_.begin();
-    while (interval != nullptr && use != uses_.end()) {
-      if (use->end <= interval->start().value()) {
-        ++use;
-      } else if (interval->end().value() <= use->start) {
-        interval = interval->next();
-      } else {
-        return true;
-      }
-    }
-    return false;
-  }
-  void InsertUses(UseInterval* interval) {
-    while (interval != nullptr) {
-      Range range = {interval->start(), interval->end()};
-      Range* pos =
-          std::lower_bound(uses_.begin(), uses_.end(), range, RangeOrdering());
-      DCHECK_IMPLIES(pos != uses_.end(), *pos != range);
-      uses_.insert(pos, 1, range);
-      interval = interval->next();
-    }
-  }
-  explicit LiveRangeBundle(Zone* zone, int id)
-      : ranges_(zone), uses_(zone), id_(id) {}
-
-  bool TryAddRange(LiveRange* range);
-
+  void MergeSpillRangesAndClear();
+  bool TryAddRange(TopLevelLiveRange* range);
   // If merging is possible, merge either {lhs} into {rhs} or {rhs} into
   // {lhs}, clear the source and return the result. Otherwise return nullptr.
   static LiveRangeBundle* TryMerge(LiveRangeBundle* lhs, LiveRangeBundle* rhs,
                                    bool trace_alloc);
 
-  ZoneSet<LiveRange*, LiveRangeOrdering> ranges_;
-  ZoneVector<Range> uses_;  // Sorted by `RangeOrdering`, essentially a set.
+ private:
+  void AddRange(TopLevelLiveRange* range);
+
+  // A flat set, sorted by `LiveRangeOrdering`.
+  ZoneVector<TopLevelLiveRange*> ranges_;
+  // A flat set, sorted by their `start()` position.
+  ZoneVector<UseInterval> intervals_;
+
   int id_;
   int reg_ = kUnassignedRegister;
 };
@@ -835,7 +1098,7 @@ class V8_EXPORT_PRIVATE TopLevelLiveRange final : public LiveRange {
                       bool trace_alloc);
   void AddUseInterval(LifetimePosition start, LifetimePosition end, Zone* zone,
                       bool trace_alloc);
-  void AddUsePosition(UsePosition* pos, bool trace_alloc);
+  void AddUsePosition(UsePosition* pos, Zone* zone, bool trace_alloc);
 
   // Shorten the most recently added interval by setting a new start.
   void ShortenTo(LifetimePosition start, bool trace_alloc);
@@ -944,18 +1207,18 @@ class V8_EXPORT_PRIVATE TopLevelLiveRange final : public LiveRange {
   void UpdateSpillRangePostMerge(TopLevelLiveRange* merged);
   int vreg() const { return vreg_; }
 
+#ifdef DEBUG
   void Verify() const;
   void VerifyChildrenInOrder() const;
+#endif
 
-  // Returns the LiveRange covering the given position, or nullptr if no such
-  // range exists. Uses a linear search through child ranges. The range at the
-  // previously requested position is cached, so this function will be very fast
-  // if you call it with a non-decreasing sequence of positions.
+  // Returns the child `LiveRange` covering the given position, or `nullptr`
+  // if no such range exists. Uses a binary search.
   LiveRange* GetChildCovers(LifetimePosition pos);
 
-  int GetNextChildId() { return ++last_child_id_; }
+  const ZoneVector<LiveRange*>& Children() const { return children_; }
 
-  int GetMaxChildCount() const { return last_child_id_ + 1; }
+  int GetNextChildId() { return ++last_child_id_; }
 
   bool IsSpilledOnlyInDeferredBlocks(
       const TopTierRegisterAllocationData* data) const {
@@ -1005,6 +1268,9 @@ class V8_EXPORT_PRIVATE TopLevelLiveRange final : public LiveRange {
     return list_of_blocks_requiring_spill_operands_;
   }
 
+  LiveRangeBundle* get_bundle() const { return bundle_; }
+  void set_bundle(LiveRangeBundle* bundle) { bundle_ = bundle; }
+
  private:
   friend class LiveRange;
 
@@ -1037,15 +1303,20 @@ class V8_EXPORT_PRIVATE TopLevelLiveRange final : public LiveRange {
     SparseBitVector* list_of_blocks_requiring_spill_operands_;
   };
 
+  LiveRangeBundle* bundle_ = nullptr;
+
+  UsePositionVector positions_;
+
+  // This is a cache for the binary search in `GetChildCovers`.
+  // The `LiveRange`s are sorted by their `Start()` position.
+  ZoneVector<LiveRange*> children_;
+
   // TODO(mtrofin): generalize spilling after definition, currently specialized
   // just for spill in a single deferred block.
   bool spilled_in_deferred_blocks_;
   bool has_preassigned_slot_;
 
   int spill_start_index_;
-  LiveRange* last_child_covers_;
-
-  ZoneVector<UsePosition*> positions_;
 };
 
 struct PrintableLiveRange {
@@ -1059,16 +1330,20 @@ std::ostream& operator<<(std::ostream& os,
 // Represent the spill operand of a LiveRange and its use intervals. After
 // register allocation, disjoint spill ranges are merged and they get assigned
 // the same spill slot by OperandAssigner::AssignSpillSlots().
+// TODO(dlehmann): `SpillRange`s seem awefully similar to `LiveRangeBundle`s,
+// especially since both store `ranges_` and `intervals_` and check for
+// intersection in exactly the same way. I wonder if we can merge those two
+// concepts and save a bunch of memory by not storing ranges and intervals
+// twice.
 class SpillRange final : public ZoneObject {
  public:
   static const int kUnassignedSlot = -1;
+
   SpillRange(TopLevelLiveRange* range, Zone* zone);
   SpillRange(const SpillRange&) = delete;
   SpillRange& operator=(const SpillRange&) = delete;
 
-  UseInterval* interval() const { return use_interval_; }
-
-  bool IsEmpty() const { return live_ranges_.empty(); }
+  bool IsEmpty() const { return ranges_.empty(); }
   bool TryMerge(SpillRange* other);
   bool HasSlot() const { return assigned_slot_ != kUnassignedSlot; }
 
@@ -1076,93 +1351,23 @@ class SpillRange final : public ZoneObject {
     DCHECK_EQ(kUnassignedSlot, assigned_slot_);
     assigned_slot_ = index;
   }
-  int assigned_slot() {
+  int assigned_slot() const {
     DCHECK_NE(kUnassignedSlot, assigned_slot_);
     return assigned_slot_;
   }
-  const ZoneVector<TopLevelLiveRange*>& live_ranges() const {
-    return live_ranges_;
-  }
-  ZoneVector<TopLevelLiveRange*>& live_ranges() { return live_ranges_; }
+
   // Spill slots can be 4, 8, or 16 bytes wide.
   int byte_width() const { return byte_width_; }
+
   void Print() const;
 
  private:
-  LifetimePosition End() const { return end_position_; }
-  bool IsIntersectingWith(SpillRange* other) const;
-  // Merge intervals, making sure the use intervals are sorted
-  void MergeDisjointIntervals(UseInterval* other);
+  ZoneVector<TopLevelLiveRange*> ranges_;
+  // A flat set, sorted by their `start()` position.
+  ZoneVector<UseInterval> intervals_;
 
-  ZoneVector<TopLevelLiveRange*> live_ranges_;
-  UseInterval* use_interval_;
-  LifetimePosition end_position_;
   int assigned_slot_;
   int byte_width_;
-};
-
-// A live range with the start and end position, and helper methods for the
-// ResolveControlFlow phase.
-class LiveRangeBound {
- public:
-  explicit LiveRangeBound(LiveRange* range, bool skip)
-      : range_(range), start_(range->Start()), end_(range->End()), skip_(skip) {
-    DCHECK(!range->IsEmpty());
-  }
-  LiveRangeBound(const LiveRangeBound&) = delete;
-  LiveRangeBound& operator=(const LiveRangeBound&) = delete;
-
-  bool CanCover(LifetimePosition position) {
-    return start_ <= position && position < end_;
-  }
-
-  LiveRange* const range_;
-  const LifetimePosition start_;
-  const LifetimePosition end_;
-  const bool skip_;
-};
-
-struct FindResult {
-  LiveRange* cur_cover_;
-  LiveRange* pred_cover_;
-};
-
-// An array of LiveRangeBounds belonging to the same TopLevelLiveRange. Sorted
-// by their start position for quick binary search.
-class LiveRangeBoundArray {
- public:
-  LiveRangeBoundArray() : length_(0), start_(nullptr) {}
-  LiveRangeBoundArray(const LiveRangeBoundArray&) = delete;
-  LiveRangeBoundArray& operator=(const LiveRangeBoundArray&) = delete;
-
-  bool ShouldInitialize() { return start_ == nullptr; }
-  void Initialize(Zone* zone, TopLevelLiveRange* range);
-  LiveRangeBound* Find(const LifetimePosition position) const;
-  LiveRangeBound* FindPred(const InstructionBlock* pred);
-  LiveRangeBound* FindSucc(const InstructionBlock* succ);
-  bool FindConnectableSubranges(const InstructionBlock* block,
-                                const InstructionBlock* pred,
-                                FindResult* result) const;
-
- private:
-  size_t length_;
-  LiveRangeBound* start_;
-};
-
-class LiveRangeFinder {
- public:
-  explicit LiveRangeFinder(const TopTierRegisterAllocationData* data,
-                           Zone* zone);
-  LiveRangeFinder(const LiveRangeFinder&) = delete;
-  LiveRangeFinder& operator=(const LiveRangeFinder&) = delete;
-
-  LiveRangeBoundArray* ArrayFor(int operand_index);
-
- private:
-  const TopTierRegisterAllocationData* const data_;
-  const int bounds_length_;
-  LiveRangeBoundArray* const bounds_;
-  Zone* const zone_;
 };
 
 class ConstraintBuilder final : public ZoneObject {
@@ -1221,12 +1426,15 @@ class LiveRangeBuilder final : public ZoneObject {
     return data()->live_in_sets();
   }
 
+#ifdef DEBUG
   // Verification.
   void Verify() const;
-  bool IntervalStartsAtBlockBoundary(const UseInterval* interval) const;
-  bool IntervalPredecessorsCoveredByRange(const UseInterval* interval,
-                                          const TopLevelLiveRange* range) const;
-  bool NextIntervalStartsInDifferentBlocks(const UseInterval* interval) const;
+  bool IntervalStartsAtBlockBoundary(UseInterval interval) const;
+  bool IntervalPredecessorsCoveredByRange(UseInterval interval,
+                                          TopLevelLiveRange* range) const;
+  bool NextIntervalStartsInDifferentBlocks(UseInterval interval,
+                                           UseInterval next) const;
+#endif
 
   // Liveness analysis support.
   void AddInitialIntervals(const InstructionBlock* block,
@@ -1398,6 +1606,8 @@ class LinearScanAllocator final : public RegisterAllocator {
         : range(toplevel), expected_register(reg) {}
   };
 
+  // TODO(dlehmann): Try replacing with a
+  // `ZoneVector<std::pair<TLLR, /* expected_register */int>>` or similar.
   using RangeWithRegisterSet =
       ZoneUnorderedSet<RangeWithRegister, RangeWithRegister::Hash,
                        RangeWithRegister::Equals>;
@@ -1405,7 +1615,7 @@ class LinearScanAllocator final : public RegisterAllocator {
   void MaybeSpillPreviousRanges(LiveRange* begin_range,
                                 LifetimePosition begin_pos,
                                 LiveRange* end_range);
-  void MaybeUndoPreviousSplit(LiveRange* range);
+  void MaybeUndoPreviousSplit(LiveRange* range, Zone* zone);
   void SpillNotLiveRanges(RangeWithRegisterSet* to_be_live,
                           LifetimePosition position, SpillMode spill_mode);
   LiveRange* AssignRegisterOnReload(LiveRange* range, int reg);
@@ -1429,11 +1639,14 @@ class LinearScanAllocator final : public RegisterAllocator {
     }
   };
 
-  // TODO(dlehmann): Evaluate whether a priority queue (backed by a ZoneVector)
-  // improves performance, as did a sorted vector for `InactiveLiveRangeQueue`.
+  // NOTE: We also tried a sorted ZoneVector instead of a `ZoneMultiset`
+  // (like for `InactiveLiveRangeQueue`), but it does not improve performance
+  // or max memory usage.
+  // TODO(dlehmann): Try `std::priority_queue`/`std::make_heap` instead.
   using UnhandledLiveRangeQueue =
       ZoneMultiset<LiveRange*, UnhandledLiveRangeOrdering>;
-  // Sorted by InactiveLiveRangeOrdering.
+  // Sorted by `InactiveLiveRangeOrdering`.
+  // TODO(dlehmann): Try `std::priority_queue`/`std::make_heap` instead.
   using InactiveLiveRangeQueue = ZoneVector<LiveRange*>;
   UnhandledLiveRangeQueue& unhandled_live_ranges() {
     return unhandled_live_ranges_;
@@ -1607,15 +1820,12 @@ class LiveRangeConnector final : public ZoneObject {
   Zone* code_zone() const { return code()->zone(); }
 
   bool CanEagerlyResolveControlFlow(const InstructionBlock* block) const;
-
   int ResolveControlFlow(const InstructionBlock* block,
                          const InstructionOperand& cur_op,
                          const InstructionBlock* pred,
                          const InstructionOperand& pred_op);
 
-  void CommitSpillsInDeferredBlocks(TopLevelLiveRange* range,
-                                    LiveRangeBoundArray* array,
-                                    Zone* temp_zone);
+  void CommitSpillsInDeferredBlocks(TopLevelLiveRange* range, Zone* temp_zone);
 
   TopTierRegisterAllocationData* const data_;
 };

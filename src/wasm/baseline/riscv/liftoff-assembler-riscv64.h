@@ -149,6 +149,15 @@ inline void push(LiftoffAssembler* assm, LiftoffRegister reg, ValueKind kind) {
 
 }  // namespace liftoff
 
+void LiftoffAssembler::LoadExternalPointer(Register dst, Register src_addr,
+                                           int offset, Register index,
+                                           ExternalPointerTag tag,
+                                           Register scratch) {
+  MemOperand src_op = liftoff::GetMemOp(this, src_addr, index, offset, false,
+                                        kSystemPointerSizeLog2);
+  LoadWord(dst, src_op);
+}
+
 void LiftoffAssembler::LoadConstant(LiftoffRegister reg, WasmValue value) {
   switch (value.type().kind()) {
     case kI32:
@@ -436,7 +445,7 @@ inline void AtomicBinop(LiftoffAssembler* lasm, Register dst_addr,
       __ sc_w(false, true, store_result, actual_addr, temp);
       break;
     case StoreType::kI64Store:
-      __ sc_w(false, true, store_result, actual_addr, temp);
+      __ sc_d(false, true, store_result, actual_addr, temp);
       break;
     default:
       UNREACHABLE();
@@ -1325,13 +1334,6 @@ void LiftoffAssembler::emit_i32_cond_jumpi(Condition cond, Label* label,
   MacroAssembler::CompareTaggedAndBranch(label, cond, lhs, Operand(imm));
 }
 
-void LiftoffAssembler::emit_i32_subi_jump_negative(
-    Register value, int subtrahend, Label* result_negative,
-    const FreezeCacheState& frozen) {
-  Sub32(value, value, Operand(subtrahend));
-  MacroAssembler::Branch(result_negative, lt, value, Operand(zero_reg));
-}
-
 void LiftoffAssembler::emit_i32_eqz(Register dst, Register src) {
   MacroAssembler::slliw(dst, src, 0);
   MacroAssembler::Sltu(dst, src, 1);
@@ -1631,19 +1633,64 @@ void LiftoffAssembler::emit_i16x8_extadd_pairwise_i8x16_u(LiftoffRegister dst,
   vwaddu_vv(dst.fp().toV(), kSimd128ScratchReg, kSimd128ScratchReg2);
 }
 
-void LiftoffAssembler::CallC(const ValueKindSig* sig,
-                             const LiftoffRegister* args,
-                             const LiftoffRegister* rets,
+void LiftoffAssembler::CallC(const std::initializer_list<VarState> args,
+                             const LiftoffRegister* rets, ValueKind return_kind,
                              ValueKind out_argument_kind, int stack_bytes,
                              ExternalReference ext_ref) {
   AddWord(sp, sp, Operand(-stack_bytes));
 
-  int arg_bytes = 0;
-  for (ValueKind param_kind : sig->parameters()) {
-    liftoff::Store(this, sp, arg_bytes, *args++, param_kind);
-    arg_bytes += value_kind_size(param_kind);
+  int arg_offset = 0;
+  for (const VarState& arg : args) {
+    UseScratchRegisterScope temps(this);
+    Register src = no_reg;
+    MemOperand dst{sp, arg_offset};
+    if (arg.is_reg()) {
+      switch (arg.kind()) {
+        case kI32:
+          Sw(arg.reg().gp(), dst);
+          break;
+        case kI64:
+          StoreWord(arg.reg().gp(), dst);
+          break;
+        case kF32:
+          StoreFloat(arg.reg().fp(), dst);
+          break;
+        case kF64:
+          StoreDouble(arg.reg().fp(), dst);
+          break;
+        case kS128: {
+          auto scratch = temps.Acquire();
+          AddWord(scratch, sp, Operand(arg_offset));
+          vs(arg.reg().fp().toV(), scratch, 0, VSew::E8);
+          break;
+        }
+        default:
+          UNREACHABLE();
+      }
+    } else if (arg.is_const()) {
+      DCHECK_EQ(kI32, arg.kind());
+      if (arg.i32_const() == 0) {
+        src = zero_reg;
+      } else {
+        src = temps.Acquire();
+        li(src, arg.i32_const());
+      }
+      StoreWord(src, dst);
+    } else if (value_kind_size(arg.kind()) == 4) {
+      MemOperand src = liftoff::GetStackSlot(arg.offset());
+      auto scratch = temps.Acquire();
+      Lw(scratch, src);
+      Sw(scratch, dst);
+    } else {
+      DCHECK_EQ(8, value_kind_size(arg.kind()));
+      MemOperand src = liftoff::GetStackSlot(arg.offset());
+      auto scratch = temps.Acquire();
+      Ld(scratch, src);
+      Sd(scratch, dst);
+    }
+    arg_offset += value_kind_size(arg.kind());
   }
-  DCHECK_LE(arg_bytes, stack_bytes);
+  DCHECK_LE(arg_offset, stack_bytes);
 
   // Pass a pointer to the buffer with the arguments to the C function.
   // On RISC-V, the first argument is passed in {a0}.
@@ -1657,11 +1704,10 @@ void LiftoffAssembler::CallC(const ValueKindSig* sig,
 
   // Move return value to the right register.
   const LiftoffRegister* next_result_reg = rets;
-  if (sig->return_count() > 0) {
-    DCHECK_EQ(1, sig->return_count());
+  if (return_kind != kVoid) {
     constexpr Register kReturnReg = a0;
     if (kReturnReg != next_result_reg->gp()) {
-      Move(*next_result_reg, LiftoffRegister(kReturnReg), sig->GetReturn(0));
+      Move(*next_result_reg, LiftoffRegister(kReturnReg), return_kind);
     }
     ++next_result_reg;
   }

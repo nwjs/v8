@@ -98,9 +98,13 @@ class ImportedFunctionEntry {
 
   // Initialize this entry as a Wasm to JS call. This accepts the isolate as a
   // parameter, since it must allocate a tuple.
+  void SetWasmToJs(Isolate*, Handle<JSReceiver> callable, wasm::Suspend suspend,
+                   const wasm::FunctionSig* sig);
   V8_EXPORT_PRIVATE void SetWasmToJs(Isolate*, Handle<JSReceiver> callable,
                                      const wasm::WasmCode* wasm_to_js_wrapper,
-                                     wasm::Suspend suspend);
+                                     wasm::Suspend suspend,
+                                     const wasm::FunctionSig* sig);
+
   // Initialize this entry as a Wasm to Wasm call.
   void SetWasmToWasm(WasmInstanceObject target_instance, Address call_target);
 
@@ -108,6 +112,7 @@ class ImportedFunctionEntry {
   Object maybe_callable();
   Object object_ref();
   Address target();
+  void set_target(Address new_target);
 
  private:
   Handle<WasmInstanceObject> const instance_;
@@ -211,10 +216,11 @@ class WasmTableObject
                                      uint32_t count);
 
   // TODO(wasm): Unify these three methods into one.
-  static void UpdateDispatchTables(Isolate* isolate, WasmTableObject table,
+  static void UpdateDispatchTables(Isolate* isolate,
+                                   Handle<WasmTableObject> table,
                                    int entry_index,
                                    const wasm::WasmFunction* func,
-                                   WasmInstanceObject target_instance);
+                                   Handle<WasmInstanceObject> target_instance);
   static void UpdateDispatchTables(Isolate* isolate,
                                    Handle<WasmTableObject> table,
                                    int entry_index,
@@ -264,6 +270,9 @@ class WasmMemoryObject
                                               Handle<WasmInstanceObject> object,
                                               int memory_index_in_instance);
   inline bool has_maximum_pages();
+
+  // Overwrite the Torque-generated method that returns an int.
+  inline bool is_memory64() const;
 
   V8_EXPORT_PRIVATE static Handle<WasmMemoryObject> New(
       Isolate* isolate, Handle<JSArrayBuffer> buffer, int maximum,
@@ -346,7 +355,7 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
   DECL_ACCESSORS(imported_function_targets, FixedAddressArray)
   DECL_OPTIONAL_ACCESSORS(indirect_function_table_refs, FixedArray)
   DECL_ACCESSORS(indirect_function_table_sig_ids, FixedUInt32Array)
-  DECL_ACCESSORS(indirect_function_table_targets, FixedAddressArray)
+  DECL_ACCESSORS(indirect_function_table_targets, ExternalPointerArray)
   DECL_OPTIONAL_ACCESSORS(tags_table, FixedArray)
   DECL_ACCESSORS(wasm_internal_functions, FixedArray)
   DECL_ACCESSORS(managed_object_maps, FixedArray)
@@ -377,7 +386,7 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
   V8_INLINE void clear_padding();
 
   inline WasmMemoryObject memory_object(int memory_index) const;
-  inline Address memory_base(int memory_index) const;
+  inline uint8_t* memory_base(int memory_index) const;
   inline size_t memory_size(int memory_index) const;
 
   // Dispatched behavior.
@@ -451,31 +460,47 @@ class V8_EXPORT_PRIVATE WasmInstanceObject : public JSObject {
 #undef ASSERT_FIELD_ALIGNED
 #undef WASM_INSTANCE_OBJECT_FIELDS
 
-  static constexpr uint16_t kTaggedFieldOffsets[] = {
-      kImportedFunctionRefsOffset,
-      kIndirectFunctionTableRefsOffset,
-      kIndirectFunctionTableTargetsOffset,
-      kIndirectFunctionTableSigIdsOffset,
-      kModuleObjectOffset,
-      kExportsObjectOffset,
-      kNativeContextOffset,
-      kMemoryObjectsOffset,
-      kUntaggedGlobalsBufferOffset,
-      kTaggedGlobalsBufferOffset,
-      kImportedMutableGlobalsBuffersOffset,
-      kTablesOffset,
-      kIndirectFunctionTablesOffset,
-      kTagsTableOffset,
-      kWasmInternalFunctionsOffset,
-      kManagedObjectMapsOffset,
-      kFeedbackVectorsOffset,
-      kWellKnownImportsOffset,
-      kImportedMutableGlobalsOffset,
-      kImportedFunctionTargetsOffset,
-      kMemoryBasesAndSizesOffset,
-      kDataSegmentStartsOffset,
-      kDataSegmentSizesOffset,
-      kElementSegmentsOffset};
+// V(offset, name)
+#define WASM_TAGGED_INSTANCE_OBJECT_FIELDS(V)                                 \
+  V(kImportedFunctionRefsOffset, "imported_function_refs")                    \
+  V(kIndirectFunctionTableRefsOffset, "indirect_function_table_refs")         \
+  V(kIndirectFunctionTableTargetsOffset, "indirect_function_table_targets")   \
+  V(kIndirectFunctionTableSigIdsOffset, "indirect_function_table_sig_ids")    \
+  V(kModuleObjectOffset, "module_object")                                     \
+  V(kExportsObjectOffset, "exports_object")                                   \
+  V(kNativeContextOffset, "native_context")                                   \
+  V(kMemoryObjectsOffset, "memory_objects")                                   \
+  V(kUntaggedGlobalsBufferOffset, "untagged_globals_buffer")                  \
+  V(kTaggedGlobalsBufferOffset, "tagged_globals_buffer")                      \
+  V(kImportedMutableGlobalsBuffersOffset, "imported_mutable_globals_buffers") \
+  V(kTablesOffset, "tables")                                                  \
+  V(kIndirectFunctionTablesOffset, "indirect_function_tables")                \
+  V(kTagsTableOffset, "tags_table")                                           \
+  V(kWasmInternalFunctionsOffset, "wasm_internal_functions")                  \
+  V(kManagedObjectMapsOffset, "managed_object_maps")                          \
+  V(kFeedbackVectorsOffset, "feedback_vectors")                               \
+  V(kWellKnownImportsOffset, "well_known_imports")                            \
+  V(kImportedMutableGlobalsOffset, "imported_mutable_globals")                \
+  V(kImportedFunctionTargetsOffset, "imported_function_targets")              \
+  V(kMemoryBasesAndSizesOffset, "memory_bases_and_sizes")                     \
+  V(kDataSegmentStartsOffset, "data_segment_starts")                          \
+  V(kDataSegmentSizesOffset, "data_segment_sizes")                            \
+  V(kElementSegmentsOffset, "element_segments")
+
+  static constexpr std::array<uint16_t, 24> kTaggedFieldOffsets = {
+#define WASM_INSTANCE_TAGGED_FIELD_OFFSET(offset, _) offset,
+      WASM_TAGGED_INSTANCE_OBJECT_FIELDS(WASM_INSTANCE_TAGGED_FIELD_OFFSET)
+#undef WASM_INSTANCE_TAGGED_FIELD_OFFSET
+  };
+
+  static constexpr std::array<const char*, 24> kTaggedFieldNames = {
+#define WASM_INSTANCE_TAGGED_FIELD_NAME(_, name) name,
+      WASM_TAGGED_INSTANCE_OBJECT_FIELDS(WASM_INSTANCE_TAGGED_FIELD_NAME)
+#undef WASM_INSTANCE_TAGGED_FIELD_NAME
+  };
+
+  static_assert(kTaggedFieldOffsets.size() == kTaggedFieldNames.size(),
+                "every field offset needs a name");
 
   const wasm::WasmModule* module();
 
@@ -614,6 +639,9 @@ void V8_EXPORT_PRIVATE
 DecodeI64ExceptionValue(Handle<FixedArray> encoded_values,
                         uint32_t* encoded_index, uint64_t* value);
 
+bool UseGenericWasmToJSWrapper(const wasm::FunctionSig* sig,
+                               wasm::Suspend suspend);
+
 // A Wasm function that is wrapped and exported to JavaScript.
 // Representation of WebAssembly.Function JavaScript-level object.
 class WasmExportedFunction : public JSFunction {
@@ -700,11 +728,18 @@ class WasmIndirectFunctionTable
     : public TorqueGeneratedWasmIndirectFunctionTable<WasmIndirectFunctionTable,
                                                       Struct> {
  public:
-  // TODO(saelo): holding raw addresses isn't sandbox-compatible, so we should
-  // probably turn these into indices into some pointer table instead (or make
-  // this entire class a pointer table).
   DECL_ACCESSORS(sig_ids, FixedUInt32Array)
-  DECL_ACCESSORS(targets, FixedAddressArray)
+  // When the sandbox is enabled, this array holds indices into the external
+  // pointer table that contain the function entrypoint. Otherwise, this array
+  // directly contains the entrypoint pointers.
+  // TODO(chromium:1395058): consider instead turning this entire structure into
+  // a pointer table entry. For example, we could create a WasmCodePointerTable
+  // where each entry contains the signature, the target, and the ref
+  // object. Then the WasmIndirectFunctionTable object would simply contain an
+  // array of indices into a WasmCodePointerTable. This way, we can also
+  // guarantee that an attacker cannot for example modify the signature
+  // associated with a target function.
+  DECL_ACCESSORS(targets, ExternalPointerArray)
 
   V8_EXPORT_PRIVATE static Handle<WasmIndirectFunctionTable> New(
       Isolate* isolate, uint32_t size);
@@ -762,6 +797,26 @@ class WasmApiFunctionRef
  public:
   // Dispatched behavior.
   DECL_PRINTER(WasmApiFunctionRef)
+  static constexpr int kInvalidCallOrigin = 0;
+
+  static void SetImportIndexAsCallOrigin(Handle<WasmApiFunctionRef> ref,
+                                         int entry_index);
+
+  static bool CallOriginIsImportIndex(Handle<Object> call_origin);
+
+  static bool CallOriginIsIndexInTable(Handle<Object> call_origin);
+
+  static int CallOriginAsIndex(Handle<Object> call_origin);
+
+  static void SetIndexInTableAsCallOrigin(Handle<WasmApiFunctionRef> ref,
+                                          int entry_index);
+
+  static void SetCrossInstanceTableIndexAsCallOrigin(
+      Isolate* isolate, Handle<WasmApiFunctionRef> ref,
+      Handle<WasmInstanceObject> instance, int entry_index);
+
+  static void SetInternalFunctionAsCallOrigin(
+      Handle<WasmApiFunctionRef> ref, Handle<WasmInternalFunction> internal);
 
   class BodyDescriptor;
 
@@ -1110,6 +1165,9 @@ class WasmNull : public TorqueGeneratedWasmNull<WasmNull, HeapObject> {
 };
 
 #undef DECL_OPTIONAL_ACCESSORS
+
+Handle<Map> CreateFuncRefMap(Isolate* isolate, Handle<Map> opt_rtt_parent,
+                             Handle<WasmInstanceObject> opt_instance);
 
 namespace wasm {
 // Takes a {value} in the JS representation and typechecks it according to

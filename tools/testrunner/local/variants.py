@@ -33,11 +33,21 @@ ALL_VARIANT_FLAGS = {
         "--maglev", "--no-turbofan", "--stress-maglev",
         "--optimize-on-next-call-optimizes-to-maglev"
     ]],
-    "turboshaft": [["--turboshaft"]],
+    # We test both the JS and Wasm Turboshaft pipelines under the same variant.
+    # For extended Wasm Turboshaft coverage, we add --no-liftoff to the options.
+    "turboshaft": [[
+        "--turboshaft",
+        "--turboshaft-future",
+        "--turboshaft-wasm",
+        "--no-liftoff",
+        # We need this to correctly bailout for call_indirect with subtyping
+        # until we turn it on by default, or remove the bailout.
+        "--wasm-final-types"
+    ]],
     "concurrent_sparkplug": [["--concurrent-sparkplug", "--sparkplug"]],
     "always_sparkplug": [["--always-sparkplug", "--sparkplug"]],
-    "minor_mc": [["--minor-mc"]],
-    "concurrent_minor_mc": [["--minor-mc", "--concurrent-minor-mc-marking"]],
+    "minor_ms": [["--minor-ms"]],
+    "concurrent_minor_ms": [["--concurrent-minor-ms-marking"]],
     "no_lfa": [["--no-lazy-feedback-allocation"]],
     # No optimization means disable all optimizations. OptimizeFunctionOnNextCall
     # would not force optimization too. It turns into a Nop. Please see
@@ -49,7 +59,7 @@ ALL_VARIANT_FLAGS = {
     # compilation. "Liftoff-only" and eager compilation is not a problem,
     # because test functions do typically not get optimized to TurboFan anyways.
     "nooptimization": [[
-        "--no-turbofan", "--liftoff", "--no-wasm-tier-up",
+        "--no-turbofan", "--no-maglev", "--liftoff", "--no-wasm-tier-up",
         "--no-wasm-lazy-compilation"
     ]],
     "slow_path": [["--force-slow-path"]],
@@ -117,6 +127,12 @@ INCOMPATIBLE_FLAGS_PER_VARIANT = {
         "--wasm-dynamic-tiering"
     ],
     "sparkplug": ["--jitless", "--no-sparkplug"],
+    "turboshaft": [
+        # 'turboshaft' disables Liftoff, which conflicts with flags that require
+        # Liftoff support.
+        "--liftoff-only",
+        "--wasm-dynamic-tiering"
+    ],
     "concurrent_sparkplug": ["--jitless"],
     "maglev": ["--jitless", "--no-maglev"],
     "maglev_future": ["--jitless", "--no-maglev", "--no-maglev-future"],
@@ -145,7 +161,7 @@ INCOMPATIBLE_FLAGS_PER_VARIANT = {
         "--concurrent-recompilation", "--stress_concurrent_inlining",
         "--no-assert-types"
     ],
-    "concurrent_minor_mc": [
+    "concurrent_minor_ms": [
         "--predictable", "--single_threaded_gc", "--single_threaded",
         "--stress_snapshot", "--trace_gc_object_stats",
         "--no-incremental-marking", "--no-concurrent-marking"

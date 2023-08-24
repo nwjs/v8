@@ -127,10 +127,26 @@ std::ostream& operator<<(std::ostream& os, LoadTransformation rep) {
     case LoadTransformation::kS128Load64Zero:
       return os << "kS128Load64Zero";
     // Simd256
+    case LoadTransformation::kS256Load8Splat:
+      return os << "kS256Load8Splat";
+    case LoadTransformation::kS256Load16Splat:
+      return os << "kS256Load16Splat";
     case LoadTransformation::kS256Load32Splat:
       return os << "kS256Load32Splat";
     case LoadTransformation::kS256Load64Splat:
       return os << "kS256Load64Splat";
+    case LoadTransformation::kS256Load8x16S:
+      return os << "kS256Load8x16S";
+    case LoadTransformation::kS256Load8x16U:
+      return os << "kS256Load8x16U";
+    case LoadTransformation::kS256Load16x8S:
+      return os << "kS256Load16x8S";
+    case LoadTransformation::kS256Load16x8U:
+      return os << "kS256Load16x8U";
+    case LoadTransformation::kS256Load32x4S:
+      return os << "kS256Load32x4S";
+    case LoadTransformation::kS256Load32x4U:
+      return os << "kS256Load32x4U";
   }
   UNREACHABLE();
 }
@@ -602,6 +618,8 @@ std::ostream& operator<<(std::ostream& os, TruncateKind kind) {
   V(I16x8ExtAddPairwiseI8x16U, Operator::kNoProperties, 1, 0, 1)           \
   V(I8x32Splat, Operator::kNoProperties, 1, 0, 1)                          \
   V(I8x16Splat, Operator::kNoProperties, 1, 0, 1)                          \
+  V(F64x4Splat, Operator::kNoProperties, 1, 0, 1)                          \
+  V(F32x8Splat, Operator::kNoProperties, 1, 0, 1)                          \
   V(I8x16Neg, Operator::kNoProperties, 1, 0, 1)                            \
   V(I8x16Shl, Operator::kNoProperties, 2, 0, 1)                            \
   V(I8x16ShrS, Operator::kNoProperties, 2, 0, 1)                           \
@@ -721,6 +739,7 @@ std::ostream& operator<<(std::ostream& os, TruncateKind kind) {
   V(I16x16MaxU, Operator::kNoProperties, 2, 0, 1)                          \
   V(I8x32MaxU, Operator::kNoProperties, 2, 0, 1)                           \
   V(I64x4Ne, Operator::kCommutative, 2, 0, 1)                              \
+  V(I64x4GeS, Operator::kNoProperties, 2, 0, 1)                            \
   V(I32x8Ne, Operator::kCommutative, 2, 0, 1)                              \
   V(I32x8GtU, Operator::kNoProperties, 2, 0, 1)                            \
   V(I32x8GeS, Operator::kNoProperties, 2, 0, 1)                            \
@@ -733,8 +752,10 @@ std::ostream& operator<<(std::ostream& os, TruncateKind kind) {
   V(I8x32GtU, Operator::kNoProperties, 2, 0, 1)                            \
   V(I8x32GeS, Operator::kNoProperties, 2, 0, 1)                            \
   V(I8x32GeU, Operator::kNoProperties, 2, 0, 1)                            \
+  V(I32x8UConvertF32x8, Operator::kNoProperties, 1, 0, 1)                  \
   V(F64x4ConvertI32x4S, Operator::kNoProperties, 1, 0, 1)                  \
   V(F32x8SConvertI32x8, Operator::kNoProperties, 1, 0, 1)                  \
+  V(F32x8UConvertI32x8, Operator::kNoProperties, 1, 0, 1)                  \
   V(F32x4DemoteF64x4, Operator::kNoProperties, 1, 0, 1)                    \
   V(I64x4SConvertI32x4, Operator::kNoProperties, 1, 0, 1)                  \
   V(I64x4UConvertI32x4, Operator::kNoProperties, 1, 0, 1)                  \
@@ -773,6 +794,8 @@ std::ostream& operator<<(std::ostream& os, TruncateKind kind) {
   V(I32x8ExtAddPairwiseI16x16U, Operator::kNoProperties, 1, 0, 1)          \
   V(I16x16ExtAddPairwiseI8x32S, Operator::kNoProperties, 1, 0, 1)          \
   V(I16x16ExtAddPairwiseI8x32U, Operator::kNoProperties, 1, 0, 1)          \
+  V(F64x4Pmin, Operator::kNoProperties, 2, 0, 1)                           \
+  V(F64x4Pmax, Operator::kNoProperties, 2, 0, 1)                           \
   V(S256Zero, Operator::kNoProperties, 0, 0, 1)                            \
   V(S256And, Operator::kAssociative | Operator::kCommutative, 2, 0, 1)     \
   V(S256Or, Operator::kAssociative | Operator::kCommutative, 2, 0, 1)      \
@@ -856,6 +879,7 @@ std::ostream& operator<<(std::ostream& os, TruncateKind kind) {
   V(kTagged)                           \
   V(kCompressedPointer)                \
   V(kSandboxedPointer)                 \
+  V(kIndirectPointer)                  \
   V(kCompressed)                       \
   V(kSimd256)
 
@@ -944,8 +968,16 @@ std::ostream& operator<<(std::ostream& os, TruncateKind kind) {
   V(S128Load32x2U)             \
   V(S128Load32Zero)            \
   V(S128Load64Zero)            \
+  V(S256Load8Splat)            \
+  V(S256Load16Splat)           \
   V(S256Load32Splat)           \
-  V(S256Load64Splat)
+  V(S256Load64Splat)           \
+  V(S256Load8x16S)             \
+  V(S256Load8x16U)             \
+  V(S256Load16x8S)             \
+  V(S256Load16x8U)             \
+  V(S256Load32x4S)             \
+  V(S256Load32x4U)
 
 #if TAGGED_SIZE_8_BYTES
 
@@ -1279,6 +1311,11 @@ struct MachineOperatorGlobalCache {
     Store##Type##PointerWriteBarrier##Operator()                           \
         : Store##Type##Operator(kPointerWriteBarrier) {}                   \
   };                                                                       \
+  struct Store##Type##IndirectPointerWriteBarrier##Operator final          \
+      : public Store##Type##Operator {                                     \
+    Store##Type##IndirectPointerWriteBarrier##Operator()                   \
+        : Store##Type##Operator(kIndirectPointerWriteBarrier) {}           \
+  };                                                                       \
   struct Store##Type##EphemeronKeyWriteBarrier##Operator final             \
       : public Store##Type##Operator {                                     \
     Store##Type##EphemeronKeyWriteBarrier##Operator()                      \
@@ -1334,6 +1371,8 @@ struct MachineOperatorGlobalCache {
   Store##Type##MapWriteBarrier##Operator kStore##Type##MapWriteBarrier;    \
   Store##Type##PointerWriteBarrier##Operator                               \
       kStore##Type##PointerWriteBarrier;                                   \
+  Store##Type##IndirectPointerWriteBarrier##Operator                       \
+      kStore##Type##IndirectPointerWriteBarrier;                           \
   Store##Type##EphemeronKeyWriteBarrier##Operator                          \
       kStore##Type##EphemeronKeyWriteBarrier;                              \
   Store##Type##FullWriteBarrier##Operator kStore##Type##FullWriteBarrier;  \
@@ -1953,22 +1992,24 @@ const Operator* MachineOperatorBuilder::StackSlot(MachineRepresentation rep,
 const Operator* MachineOperatorBuilder::Store(StoreRepresentation store_rep) {
   DCHECK_NE(store_rep.representation(), MachineRepresentation::kMapWord);
   switch (store_rep.representation()) {
-#define STORE(kRep)                                              \
-  case MachineRepresentation::kRep:                              \
-    switch (store_rep.write_barrier_kind()) {                    \
-      case kNoWriteBarrier:                                      \
-        return &cache_.k##Store##kRep##NoWriteBarrier;           \
-      case kAssertNoWriteBarrier:                                \
-        return &cache_.k##Store##kRep##AssertNoWriteBarrier;     \
-      case kMapWriteBarrier:                                     \
-        return &cache_.k##Store##kRep##MapWriteBarrier;          \
-      case kPointerWriteBarrier:                                 \
-        return &cache_.k##Store##kRep##PointerWriteBarrier;      \
-      case kEphemeronKeyWriteBarrier:                            \
-        return &cache_.k##Store##kRep##EphemeronKeyWriteBarrier; \
-      case kFullWriteBarrier:                                    \
-        return &cache_.k##Store##kRep##FullWriteBarrier;         \
-    }                                                            \
+#define STORE(kRep)                                                 \
+  case MachineRepresentation::kRep:                                 \
+    switch (store_rep.write_barrier_kind()) {                       \
+      case kNoWriteBarrier:                                         \
+        return &cache_.k##Store##kRep##NoWriteBarrier;              \
+      case kAssertNoWriteBarrier:                                   \
+        return &cache_.k##Store##kRep##AssertNoWriteBarrier;        \
+      case kMapWriteBarrier:                                        \
+        return &cache_.k##Store##kRep##MapWriteBarrier;             \
+      case kPointerWriteBarrier:                                    \
+        return &cache_.k##Store##kRep##PointerWriteBarrier;         \
+      case kIndirectPointerWriteBarrier:                            \
+        return &cache_.k##Store##kRep##IndirectPointerWriteBarrier; \
+      case kEphemeronKeyWriteBarrier:                               \
+        return &cache_.k##Store##kRep##EphemeronKeyWriteBarrier;    \
+      case kFullWriteBarrier:                                       \
+        return &cache_.k##Store##kRep##FullWriteBarrier;            \
+    }                                                               \
     break;
     MACHINE_REPRESENTATION_LIST(STORE)
 #undef STORE

@@ -22,7 +22,6 @@
   'proposals/memory64/table/get-set': [FAIL],
   'proposals/tail-call/table/get-set': [FAIL],
   'proposals/js-types/memory/constructor': [FAIL],
-  'proposals/memory64/memory/constructor': [FAIL],
   'proposals/tail-call/memory/constructor': [FAIL],
   'proposals/js-types/interface': [FAIL],
   'proposals/memory64/interface': [FAIL],
@@ -42,7 +41,10 @@
   'proposals/tail-call/limits': [SKIP],
 
   # Slow tests:
-  'limits': [PASS, SLOW],
+  # TODO(13918): Switch back to [PASS, SLOW] once wasm-js tests allow more
+  # than one memory. Github issue:
+  # https://github.com/WebAssembly/multi-memory/issues/49
+  'limits': [FAIL],
 }], # ALWAYS
 
 ['system == android', {

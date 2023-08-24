@@ -5,7 +5,7 @@
 #include 'src/builtins/builtins-wasm-gen.h'
 
 namespace runtime {
-extern runtime WasmMemoryGrow(Context, WasmInstanceObject, Smi): Smi;
+extern runtime WasmMemoryGrow(Context, WasmInstanceObject, Smi, Smi): Smi;
 extern runtime WasmRefFunc(Context, WasmInstanceObject, Smi): JSAny;
 extern runtime WasmInternalFunctionCreateExternal(
     Context, WasmInternalFunction): JSFunction;
@@ -33,15 +33,17 @@ extern runtime WasmTraceMemory(Context, Smi): JSAny;
 extern runtime WasmTraceEnter(Context): JSAny;
 extern runtime WasmTraceExit(Context, Smi): JSAny;
 extern runtime WasmAtomicNotify(
-    Context, WasmInstanceObject, Number, Number): Smi;
+    Context, WasmInstanceObject, Smi, Number, Number): Smi;
 extern runtime WasmI32AtomicWait(
-    Context, WasmInstanceObject, Number, Number, BigInt): Smi;
+    Context, WasmInstanceObject, Smi, Number, Number, BigInt): Smi;
 extern runtime WasmI64AtomicWait(
-    Context, WasmInstanceObject, Number, BigInt, BigInt): Smi;
+    Context, WasmInstanceObject, Smi, Number, BigInt, BigInt): Smi;
 extern runtime WasmArrayCopy(
     Context, WasmArray, Smi, WasmArray, Smi, Smi): JSAny;
 extern runtime WasmArrayNewSegment(
     Context, WasmInstanceObject, Smi, Smi, Smi, Map): Object;
+extern runtime WasmStringNewSegmentWtf8(
+    Context, WasmInstanceObject, Smi, Smi, Smi): String;
 extern runtime WasmArrayInitSegment(
     Context, WasmInstanceObject, Smi, WasmArray, Smi, Smi, Smi): JSAny;
 extern runtime WasmStringNewWtf8(
@@ -134,13 +136,14 @@ builtin WasmTaggedToFloat32(implicit context: Context)(val: JSAny): float32 {
   return TruncateFloat64ToFloat32(ChangeTaggedToFloat64(val));
 }
 
-builtin WasmMemoryGrow(numPages: int32): int32 {
+builtin WasmMemoryGrow(memIndex: int32, numPages: int32): int32 {
+  dcheck(IsValidPositiveSmi(ChangeInt32ToIntPtr(memIndex)));
   if (!IsValidPositiveSmi(ChangeInt32ToIntPtr(numPages)))
     return Int32Constant(-1);
   const instance: WasmInstanceObject = LoadInstanceFromFrame();
   const context: NativeContext = LoadContextFromInstance(instance);
-  const result: Smi =
-      runtime::WasmMemoryGrow(context, instance, SmiFromInt32(numPages));
+  const result: Smi = runtime::WasmMemoryGrow(
+      context, instance, SmiFromInt32(memIndex), SmiFromInt32(numPages));
   return SmiToInt32(result);
 }
 
@@ -488,40 +491,6 @@ builtin WasmArrayCopy(
       SmiFromUint32(srcIndex), SmiFromUint32(length));
 }
 
-// Redeclaration with different typing (value is an Object, not JSAny).
-extern transitioning runtime
-CreateDataProperty(implicit context: Context)(JSReceiver, JSAny, Object): void;
-
-transitioning builtin WasmAllocateObjectWrapper(implicit context: Context)(
-    obj: Object): JSObject {
-  // Note: {obj} can be null, or i31ref. The code below is agnostic to that.
-  const wrapper = NewJSObject();
-  const symbol = WasmWrappedObjectSymbolConstant();
-  CreateDataProperty(wrapper, symbol, obj);
-  return wrapper;
-}
-
-builtin WasmSubtypeCheck(objectSupertypes: FixedArray, rtt: Map): int32 {
-  const rttSupertypeLength: Smi =
-      %RawDownCast<WasmTypeInfo>(
-          rtt.constructor_or_back_pointer_or_native_context)
-          .supertypes_length;
-
-  if (objectSupertypes.length <= rttSupertypeLength) {
-    return 0;
-  }
-
-  const supertype: Map = %RawDownCast<Map>(
-      LoadFixedArrayElement(objectSupertypes, rttSupertypeLength));
-
-  if (supertype == rtt) return 1;
-  return 0;
-}
-
-builtin WasmInt32ToNumber(value: int32): Number {
-  return ChangeInt32ToTagged(value);
-}
-
 builtin WasmUint32ToNumber(value: uint32): Number {
   return ChangeUint32ToTagged(value);
 }
@@ -538,29 +507,32 @@ builtin UintPtr53ToNumber(value: uintptr): Number {
 extern builtin I64ToBigInt(intptr): BigInt;
 extern builtin I32PairToBigInt(/*low*/ intptr, /*high*/ intptr): BigInt;
 
-builtin WasmAtomicNotify(offset: uintptr, count: uint32): uint32 {
+builtin WasmAtomicNotify(
+    memoryIndex: int32, offset: uintptr, count: uint32): uint32 {
   const instance: WasmInstanceObject = LoadInstanceFromFrame();
   const result: Smi = runtime::WasmAtomicNotify(
-      LoadContextFromInstance(instance), instance, UintPtr53ToNumber(offset),
-      WasmUint32ToNumber(count));
+      LoadContextFromInstance(instance), instance, SmiFromInt32(memoryIndex),
+      UintPtr53ToNumber(offset), WasmUint32ToNumber(count));
   return Unsigned(SmiToInt32(result));
 }
 
 builtin WasmI32AtomicWait(
-    offset: uintptr, expectedValue: int32, timeout: BigInt): uint32 {
+    memIndex: int32, offset: uintptr, expectedValue: int32,
+    timeout: BigInt): uint32 {
   const instance: WasmInstanceObject = LoadInstanceFromFrame();
   const result: Smi = runtime::WasmI32AtomicWait(
-      LoadContextFromInstance(instance), instance, UintPtr53ToNumber(offset),
-      WasmInt32ToNumber(expectedValue), timeout);
+      LoadContextFromInstance(instance), instance, SmiFromInt32(memIndex),
+      UintPtr53ToNumber(offset), ChangeInt32ToTagged(expectedValue), timeout);
   return Unsigned(SmiToInt32(result));
 }
 
 builtin WasmI64AtomicWait(
-    offset: uintptr, expectedValue: BigInt, timeout: BigInt): uint32 {
+    memIndex: int32, offset: uintptr, expectedValue: BigInt,
+    timeout: BigInt): uint32 {
   const instance: WasmInstanceObject = LoadInstanceFromFrame();
   const result: Smi = runtime::WasmI64AtomicWait(
-      LoadContextFromInstance(instance), instance, UintPtr53ToNumber(offset),
-      expectedValue, timeout);
+      LoadContextFromInstance(instance), instance, SmiFromInt32(memIndex),
+      UintPtr53ToNumber(offset), expectedValue, timeout);
   return Unsigned(SmiToInt32(result));
 }
 
@@ -787,6 +759,8 @@ macro WasmTypeInfo(map: Map): WasmTypeInfo {
 
 const kWasmI16ValueType: constexpr int32
     generates 'wasm::ValueType::Primitive(wasm::kI16).raw_bit_field()';
+const kWasmI8ValueType: constexpr int32
+    generates 'wasm::ValueType::Primitive(wasm::kI8).raw_bit_field()';
 
 const kWasmArrayTypeRepOffset:
     constexpr intptr generates 'wasm::ArrayType::kRepOffset';
@@ -800,6 +774,15 @@ macro IsWord16WasmArrayMap(map: Map): bool {
   const arrayTypeRef: &int32 =
       torque_internal::unsafe::NewOffHeapReference(arrayTypePtr);
   return *arrayTypeRef == kWasmI16ValueType;
+}
+
+macro IsWord8WasmArrayMap(map: Map): bool {
+  const arrayTypePtr: RawPtr<int32> = %RawDownCast<RawPtr<int32>>(
+      WasmTypeInfo(map).native_type_ptr + kWasmArrayTypeRepOffset +
+      kWasmValueTypeBitFieldOffset);
+  const arrayTypeRef: &int32 =
+      torque_internal::unsafe::NewOffHeapReference(arrayTypePtr);
+  return *arrayTypeRef == kWasmI8ValueType;
 }
 
 // Non-standard experimental feature.
@@ -824,6 +807,42 @@ transitioning javascript builtin ExperimentalWasmConvertArrayToString(
             .Iterator());
   } label InvalidArgument deferred {
     ThrowTypeError(MessageTemplate::kInvalidArgument);
+  }
+}
+
+macro GetRefAt<T: type, From: type>(base: From, offset: intptr): &T {
+  return torque_internal::unsafe::NewOffHeapReference<T>(
+      %RawDownCast<RawPtr<T>>(base + offset));
+}
+
+extern macro LoadPointerFromRootRegister(intptr): RawPtr;
+
+const kThreadInWasmFlagAddressOffset: constexpr intptr
+    generates 'Isolate::thread_in_wasm_flag_address_offset()';
+
+const kActiveSuspenderOffset: constexpr intptr
+    generates 'IsolateData::root_slot_offset(RootIndex::kActiveSuspender)';
+
+macro ModifyThreadInWasmFlag(newValue: int32): void {
+  const threadInWasmFlagAddress =
+      LoadPointerFromRootRegister(kThreadInWasmFlagAddressOffset);
+  const threadInWasmFlagRef = GetRefAt<int32>(threadInWasmFlagAddress, 0);
+  dcheck(*threadInWasmFlagRef != newValue);
+  *threadInWasmFlagRef = newValue;
+}
+
+macro ModifyWasmToJSCounter(increment: int32): void {
+  const rootSlot = LoadPointerFromRootRegister(kActiveSuspenderOffset);
+
+  const rawSuspender = BitcastWordToTagged(rootSlot);
+  typeswitch (rawSuspender) {
+    case (activeSuspender: WasmSuspenderObject): {
+      const current = Signed(activeSuspender.wasm_to_js_counter);
+      activeSuspender.wasm_to_js_counter = Unsigned(current + increment);
+    }
+    case (Object): {
+      // Nothing to do, but the case is needed by the Torque compiler.
+    }
   }
 }
 
@@ -878,7 +897,8 @@ builtin WasmStringNewWtf8(
 builtin WasmStringNewWtf8Array(
     start: uint32, end: uint32, array: WasmArray, utf8Variant: Smi): String|
     Null {
-  const context = LoadContextFromFrame();
+  // This can be called from Wasm and from WebAssembly.String.* JS builtins.
+  const context = LoadContextFromWasmOrJsFrame();
   try {
     if (array.length < end) goto OffsetOutOfRange;
     if (end < start) goto OffsetOutOfRange;
@@ -919,6 +939,14 @@ builtin WasmStringNewWtf16Array(
     if (end < start) goto OffsetOutOfRange;
     const length: uint32 = end - start;
     if (length == 0) return kEmptyString;
+    if (length == 1) {
+      const offset = kWasmArrayHeaderSize +
+          torque_internal::TimesSizeOf<char16>(Convert<intptr>(start));
+      const code: char16 = *torque_internal::unsafe::NewReference<char16>(
+          array, offset);
+      // This makes sure we check the SingleCharacterStringTable.
+      return StringFromSingleCharCode(code);
+    }
     // Calling into the runtime has overhead, but once we're there it's faster,
     // so it pays off for long strings. The threshold has been determined
     // experimentally.
@@ -991,13 +1019,43 @@ builtin WasmStringNewWtf16Array(
           torque_internal::TimesSizeOf<char16>(Convert<intptr>(end))
     });
   } label OffsetOutOfRange deferred {
-    const context = LoadContextFromFrame();
+    // This can be called from Wasm and from WebAssembly.String.* JS builtins.
+    const context = LoadContextFromWasmOrJsFrame();
     const error = MessageTemplate::kWasmTrapArrayOutOfBounds;
     runtime::ThrowWasmError(context, SmiConstant(error));
   } label Runtime deferred {
-    const context = LoadContextFromFrame();
+    const context = LoadContextFromWasmOrJsFrame();
     tail runtime::WasmStringNewWtf16Array(
         context, array, SmiFromUint32(start), SmiFromUint32(end));
+  }
+}
+
+// For imports based string constants.
+// Always returns a String if it didn't trap; typed "JSAny" to satisfy
+// Torque's type checker for tail calls.
+builtin WasmStringFromDataSegment(
+    segmentLength: uint32, arrayStart: uint32, arrayEnd: uint32,
+    segmentIndex: Smi, segmentOffset: Smi): JSAny {
+  const instance = LoadInstanceFromFrame();
+  try {
+    const segmentOffsetU: uint32 = Unsigned(SmiToInt32(segmentOffset));
+    if (segmentLength > Convert<uint32>(kSmiMax) - segmentOffsetU) {
+      goto SegmentOOB;
+    }
+    if (arrayStart > segmentLength) goto ArrayOutOfBounds;
+    if (arrayEnd < arrayStart) goto ArrayOutOfBounds;
+    const arrayLength = arrayEnd - arrayStart;
+    if (arrayLength > segmentLength - arrayStart) goto ArrayOutOfBounds;
+    const smiOffset = Convert<PositiveSmi>(segmentOffsetU + arrayStart)
+        otherwise SegmentOOB;
+    const smiLength = Convert<PositiveSmi>(arrayLength) otherwise SegmentOOB;
+    tail runtime::WasmStringNewSegmentWtf8(
+        LoadContextFromInstance(instance), instance, segmentIndex, smiOffset,
+        smiLength);
+  } label SegmentOOB deferred {
+    tail ThrowWasmTrapElementSegmentOutOfBounds();
+  } label ArrayOutOfBounds deferred {
+    tail ThrowWasmTrapArrayOutOfBounds();
   }
 }
 
@@ -1054,7 +1112,7 @@ builtin WasmStringEncodeWtf16Array(
     const byteOffset: intptr = kWasmArrayHeaderSize +
         torque_internal::TimesSizeOf<char16>(Convert<intptr>(start));
     const arrayContent = torque_internal::unsafe::NewMutableSlice<char16>(
-        array, byteOffset, Convert<intptr>(string.length));
+        array, byteOffset, string.length_intptr);
     try {
       StringToSlice(string) otherwise OneByte, TwoByte;
     } label OneByte(slice: ConstSlice<char8>) {
@@ -1075,7 +1133,7 @@ builtin WasmStringEncodeWtf16Array(
     return Unsigned(string.length);
   } label OffsetOutOfRange deferred {
     const error = MessageTemplate::kWasmTrapArrayOutOfBounds;
-    runtime::ThrowWasmError(LoadContextFromFrame(), SmiConstant(error));
+    runtime::ThrowWasmError(LoadContextFromWasmOrJsFrame(), SmiConstant(error));
   }
 }
 
@@ -1103,20 +1161,23 @@ extern builtin StringEqual(NoContext, String, String, intptr): Boolean;
 builtin WasmStringEqual(a: String, b: String): int32 {
   if (TaggedEqual(a, b)) return 1;
   if (a.length != b.length) return 0;
-  if (StringEqual(kNoContext, a, b, Convert<intptr>(a.length)) == True) {
+  if (StringEqual(kNoContext, a, b, a.length_intptr) == True) {
     return 1;
   }
   return 0;
 }
+
 builtin WasmStringIsUSVSequence(str: String): int32 {
   if (IsOneByteStringInstanceType(str.instanceType)) return 1;
   const length = runtime::WasmStringMeasureUtf8(LoadContextFromFrame(), str);
   if (Signed(ChangeNumberToUint32(length)) < 0) return 0;
   return 1;
 }
+
 builtin WasmStringAsWtf8(str: String): ByteArray {
   tail runtime::WasmStringAsWtf8(LoadContextFromFrame(), str);
 }
+
 macro IsWtf8CodepointStart(view: ByteArray, pos: uint32): bool {
   // We're already at the start of a codepoint if the current byte
   // doesn't start with 0b10xxxxxx.
@@ -1225,8 +1286,43 @@ transitioning builtin WasmStringViewWtf16Slice(
   const length = Unsigned(string.length);
   if (start >= length) return kEmptyString;
   if (end <= start) return kEmptyString;
-  const clampedEnd = Convert<uintptr>(end <= length ? end : length);
-  return string::SubString(string, Convert<uintptr>(start), clampedEnd);
+
+  // On a high level, the intended logic is:
+  // (1) If start == 0 && end == string.length, return string.
+  // (2) If clampedLength == 1, use a cached single-character string.
+  // (3) If clampedLength < SlicedString::kMinLength, make a copy.
+  // (4) If clampedLength < string.length / 2, make a copy.
+  // (5) Else, create a slice.
+  // The reason for having case (4) is that case (5) has the risk of keeping
+  // huge parent strings alive unnecessarily, and Wasm currently doesn't have a
+  // way to control that behavior, so we have to be careful.
+  // The reason for having case (5) is that case (4) would lead to quadratic
+  // overall behavior if code repeatedly chops off a few characters of a long
+  // string, which we want to avoid.
+  // The string::SubString implementation can handle cases (1), (2), (3),
+  // and (5). The inline code here handles case (4), and doesn't mind if it
+  // also catches some of case (3).
+  const clampedEnd = end <= length ? end : length;
+  const clampedLength = clampedEnd - start;
+  if (clampedLength > 1 && clampedLength < length / 2) {
+    try {
+      StringToSlice(string) otherwise OneByte, TwoByte;
+    } label OneByte(slice: ConstSlice<char8>) {
+      let subslice = Subslice(
+          slice, Convert<intptr>(start), Convert<intptr>(clampedLength))
+          otherwise unreachable;
+      return AllocateNonEmptySeqOneByteString(
+          clampedLength, subslice.Iterator());
+    } label TwoByte(slice: ConstSlice<char16>) {
+      let subslice = Subslice(
+          slice, Convert<intptr>(start), Convert<intptr>(clampedLength))
+          otherwise unreachable;
+      return AllocateNonEmptySeqTwoByteString(
+          clampedLength, subslice.Iterator());
+    }
+  }
+  return string::SubString(
+      string, Convert<uintptr>(start), Convert<uintptr>(clampedEnd));
 }
 builtin WasmStringAsIter(string: String): WasmStringViewIter {
   return new WasmStringViewIter{string: string, offset: 0, optional_padding: 0};
@@ -1247,6 +1343,24 @@ macro CombineSurrogatePair(lead: char16, trail: char16): int32 {
   const surrogateBias: uint32 = 0xFCA02400;
   return Signed((lead32 << 10) + trail32 + surrogateBias);
 }
+
+builtin WasmStringCodePointAt(string: String, offset: uint32): uint32 {
+  try {
+    if (Unsigned(string.length) <= offset) goto OffsetOutOfRange;
+    const lead: char16 = StringCharCodeAt(string, Convert<uintptr>(offset));
+    if (!IsLeadSurrogate(lead)) return Convert<uint32>(lead);
+    const trailOffset = offset + 1;
+    if (Unsigned(string.length) <= trailOffset) return Convert<uint32>(lead);
+    const trail: char16 =
+        StringCharCodeAt(string, Convert<uintptr>(trailOffset));
+    if (!IsTrailSurrogate(trail)) return Convert<uint32>(lead);
+    return Unsigned(CombineSurrogatePair(lead, trail));
+  } label OffsetOutOfRange deferred {
+    const error = MessageTemplate::kWasmTrapStringOffsetOutOfBounds;
+    runtime::ThrowWasmError(LoadContextFromFrame(), SmiConstant(error));
+  }
+}
+
 builtin WasmStringViewIterNext(view: WasmStringViewIter): int32 {
   const string = view.string;
   const offset = view.offset;

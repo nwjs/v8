@@ -160,6 +160,12 @@ void* Allocate(void* hint, size_t size, OS::MemoryPermission access,
   int flags = GetFlagsForMemoryPermission(access, page_type);
   void* result = mmap(hint, size, prot, flags, kMmapFd, kMmapFdOffset);
   if (result == MAP_FAILED) return nullptr;
+
+#if V8_ENABLE_PRIVATE_MAPPING_FORK_OPTIMIZATION
+  // This is advisory, so we ignore errors.
+  madvise(result, size, MADV_DONTFORK);
+#endif
+
 #if ENABLE_HUGEPAGE
   if (result != nullptr && size >= kHugePageSize) {
     const uintptr_t huge_start =
@@ -1083,12 +1089,12 @@ class Thread::PlatformData {
 Thread::Thread(const Options& options)
     : data_(new PlatformData),
       stack_size_(options.stack_size()),
+      priority_(options.priority()),
       start_semaphore_(nullptr) {
   const int min_stack_size = static_cast<int>(PTHREAD_STACK_MIN);
   if (stack_size_ > 0) stack_size_ = std::max(stack_size_, min_stack_size);
   set_name(options.name());
 }
-
 
 Thread::~Thread() {
   delete data_;
@@ -1120,7 +1126,6 @@ static void SetThreadName(const char* name) {
 #endif
 }
 
-
 static void* ThreadEntry(void* arg) {
   Thread* thread = reinterpret_cast<Thread*>(arg);
   // We take the lock here to make sure that pthread_create finished first since
@@ -1128,6 +1133,35 @@ static void* ThreadEntry(void* arg) {
   // one).
   { MutexGuard lock_guard(&thread->data()->thread_creation_mutex_); }
   SetThreadName(thread->name());
+#if V8_OS_DARWIN
+  switch (thread->priority()) {
+    case Thread::Priority::kBestEffort:
+      pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
+      break;
+    case Thread::Priority::kUserVisible:
+      pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, -1);
+      break;
+    case Thread::Priority::kUserBlocking:
+      pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+      break;
+    case Thread::Priority::kDefault:
+      break;
+  }
+#elif V8_OS_LINUX
+  switch (thread->priority()) {
+    case Thread::Priority::kBestEffort:
+      setpriority(PRIO_PROCESS, 0, 10);
+      break;
+    case Thread::Priority::kUserVisible:
+      setpriority(PRIO_PROCESS, 0, 1);
+      break;
+    case Thread::Priority::kUserBlocking:
+      setpriority(PRIO_PROCESS, 0, 0);
+      break;
+    case Thread::Priority::kDefault:
+      break;
+  }
+#endif
   DCHECK_NE(thread->data()->thread_, kNoThread);
   thread->NotifyStartedAndRun();
   return nullptr;

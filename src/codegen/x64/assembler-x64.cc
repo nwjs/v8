@@ -243,7 +243,7 @@ bool Operand::AddressUsesRegister(Register reg) const {
   }
 }
 
-void Assembler::AllocateAndInstallRequestedHeapNumbers(Isolate* isolate) {
+void Assembler::AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate) {
   DCHECK_IMPLIES(isolate == nullptr, heap_number_requests_.empty());
   for (auto& request : heap_number_requests_) {
     Address pc = reinterpret_cast<Address>(buffer_start_) + request.offset();
@@ -367,7 +367,10 @@ Assembler::Assembler(const AssemblerOptions& options,
 #endif
 }
 
-void Assembler::GetCode(Isolate* isolate, CodeDesc* desc,
+void Assembler::GetCode(Isolate* isolate, CodeDesc* desc) {
+  GetCode(isolate->main_thread_local_isolate(), desc);
+}
+void Assembler::GetCode(LocalIsolate* isolate, CodeDesc* desc,
                         SafepointTableBuilderBase* safepoint_table_builder,
                         int handler_table_offset) {
   // As a crutch to avoid having to add manual Align calls wherever we use a
@@ -646,7 +649,7 @@ void Assembler::emit_operand(int code, Operand adr) {
 
   // Compute the opcode extension to be encoded in the ModR/M byte.
   V8_ASSUME(0 <= code && code <= 7);
-  DCHECK((adr.memory().buf[0] & 0x38) == 0);
+  DCHECK_EQ((adr.memory().buf[0] & 0x38), 0);
   uint8_t opcode_extension = code << 3;
 
   // Use an optimized routine for copying the 1-6 bytes into the assembler
@@ -3567,24 +3570,25 @@ VMOV_DUP(XMMRegister, L128)
 VMOV_DUP(YMMRegister, L256)
 #undef VMOV_DUP
 
-#define BROADCASTSS(SIMDRegister, length)                           \
-  void Assembler::vbroadcastss(SIMDRegister dst, Operand src) {     \
-    DCHECK(IsEnabled(AVX));                                         \
-    EnsureSpace ensure_space(this);                                 \
-    emit_vex_prefix(dst, xmm0, src, k##length, k66, k0F38, kW0);    \
-    emit(0x18);                                                     \
-    emit_sse_operand(dst, src);                                     \
-  }                                                                 \
-  void Assembler::vbroadcastss(SIMDRegister dst, XMMRegister src) { \
-    DCHECK(IsEnabled(AVX2));                                        \
-    EnsureSpace ensure_space(this);                                 \
-    emit_vex_prefix(dst, xmm0, src, k##length, k66, k0F38, kW0);    \
-    emit(0x18);                                                     \
-    emit_sse_operand(dst, src);                                     \
+#define BROADCAST(suffix, SIMDRegister, length, opcode)                   \
+  void Assembler::vbroadcast##suffix(SIMDRegister dst, Operand src) {     \
+    DCHECK(IsEnabled(AVX));                                               \
+    EnsureSpace ensure_space(this);                                       \
+    emit_vex_prefix(dst, xmm0, src, k##length, k66, k0F38, kW0);          \
+    emit(0x##opcode);                                                     \
+    emit_sse_operand(dst, src);                                           \
+  }                                                                       \
+  void Assembler::vbroadcast##suffix(SIMDRegister dst, XMMRegister src) { \
+    DCHECK(IsEnabled(AVX2));                                              \
+    EnsureSpace ensure_space(this);                                       \
+    emit_vex_prefix(dst, xmm0, src, k##length, k66, k0F38, kW0);          \
+    emit(0x##opcode);                                                     \
+    emit_sse_operand(dst, src);                                           \
   }
-BROADCASTSS(XMMRegister, L128)
-BROADCASTSS(YMMRegister, L256)
-#undef BROADCASTSS
+BROADCAST(ss, XMMRegister, L128, 18)
+BROADCAST(ss, YMMRegister, L256, 18)
+BROADCAST(sd, YMMRegister, L256, 19)
+#undef BROADCAST
 
 void Assembler::fma_instr(uint8_t op, XMMRegister dst, XMMRegister src1,
                           XMMRegister src2, VectorLength l, SIMDPrefix pp,
@@ -4539,6 +4543,14 @@ void Assembler::dq(Label* label) {
       label->link_to(current);
     }
   }
+}
+
+void Assembler::WriteBuiltinJumpTableEntry(Label* label, const int table_pos) {
+  EnsureSpace ensure_space(this);
+  CHECK(label->is_bound());
+  int32_t value = label->pos() - table_pos;
+  RecordRelocInfo(RelocInfo::RELATIVE_SWITCH_TABLE_ENTRY, label->pos());
+  emitl(value);
 }
 
 // Relocation information implementations.

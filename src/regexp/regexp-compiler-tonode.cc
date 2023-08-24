@@ -2,9 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/regexp/regexp-compiler.h"
-
+#include "src/common/globals.h"
 #include "src/execution/isolate.h"
+#include "src/objects/string.h"
+#include "src/regexp/regexp-compiler.h"
 #include "src/regexp/regexp.h"
 #include "src/strings/unicode-inl.h"
 #include "src/zone/zone-list-inl.h"
@@ -422,27 +423,6 @@ RegExpNode* UnanchoredAdvance(RegExpCompiler* compiler,
 
 }  // namespace
 
-#ifdef V8_INTL_SUPPORT
-// static
-void CharacterRange::UnicodeSimpleCloseOver(icu::UnicodeSet& set) {
-  // Remove characters for which closeOver() adds full-case-folding equivalents
-  // because we should work only with simple case folding mappings.
-  icu::UnicodeSet non_simple = icu::UnicodeSet(set);
-  non_simple.retainAll(RegExpCaseFolding::UnicodeNonSimpleCloseOverSet());
-  set.removeAll(non_simple);
-
-  set.closeOver(USET_CASE_INSENSITIVE);
-  // Full case folding maps single characters to multiple characters.
-  // Those are represented as strings in the set. Remove them so that
-  // we end up with only simple and common case mappings.
-  set.removeAllStrings();
-
-  // Add characters that have non-simple case foldings again (they match
-  // themselves).
-  set.addAll(non_simple);
-}
-#endif  // V8_INTL_SUPPORT
-
 // static
 void CharacterRange::AddUnicodeCaseEquivalents(ZoneList<CharacterRange>* ranges,
                                                Zone* zone) {
@@ -464,8 +444,7 @@ void CharacterRange::AddUnicodeCaseEquivalents(ZoneList<CharacterRange>* ranges,
   }
   // Clear the ranges list without freeing the backing store.
   ranges->Rewind(0);
-
-  UnicodeSimpleCloseOver(set);
+  set.closeOver(USET_SIMPLE_CASE_INSENSITIVE);
   for (int i = 0; i < set.getRangeCount(); i++) {
     ranges->Add(Range(set.getRangeStart(i), set.getRangeEnd(i)), zone);
   }
@@ -682,6 +661,7 @@ RegExpClassSetOperand* RegExpClassSetExpression::ComputeExpression(
     CharacterRange::Negate(result->ranges(), temp_ranges, zone);
     std::swap(*result->ranges(), *temp_ranges);
     temp_ranges->Rewind(0);
+    node->is_negated_ = false;
   }
   // Store the result as single operand of the current node.
   node->operands()->Set(0, result);

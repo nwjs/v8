@@ -512,6 +512,8 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
     DefaultWasmAsyncResolvePromiseCallback)                                   \
   V(WasmLoadSourceMapCallback, wasm_load_source_map_callback, nullptr)        \
   V(WasmGCEnabledCallback, wasm_gc_enabled_callback, nullptr)                 \
+  V(WasmImportedStringsEnabledCallback,                                       \
+    wasm_imported_strings_enabled_callback, nullptr)                          \
   V(JavaScriptCompileHintsMagicEnabledCallback,                               \
     compile_hints_magic_enabled_callback, nullptr)                            \
   /* State for Relocatable. */                                                \
@@ -546,7 +548,8 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
   V(uint32_t, javascript_execution_counter, 0)                                \
   V(bool, deoptimization_assert, true)                                        \
   V(bool, compilation_assert, true)                                           \
-  V(bool, no_exception_assert, true)
+  V(bool, no_exception_assert, true)                                          \
+  V(uint32_t, wasm_switch_to_the_central_stack_counter, 0)
 
 #define THREAD_LOCAL_TOP_ACCESSOR(type, name)                         \
   inline void set_##name(type v) { thread_local_top()->name##_ = v; } \
@@ -771,6 +774,8 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   bool IsWasmGCEnabled(Handle<NativeContext> context);
   bool IsWasmStringRefEnabled(Handle<NativeContext> context);
   bool IsWasmInliningEnabled(Handle<NativeContext> context);
+  bool IsWasmInliningIntoJSEnabled(Handle<NativeContext> context);
+  bool IsWasmImportedStringsEnabled(Handle<NativeContext> context);
 
   bool IsCompileHintsMagicEnabled(Handle<NativeContext> context);
 
@@ -1070,6 +1075,8 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   void RequestInterrupt(InterruptCallback callback, void* data);
   void InvokeApiInterruptCallbacks();
 
+  void RequestInvalidateNoProfilingProtector();
+
   // Administration
   void Iterate(RootVisitor* v);
   void Iterate(RootVisitor* v, ThreadLocalTop* t);
@@ -1276,6 +1283,8 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   THREAD_LOCAL_TOP_ADDRESS(Address, thread_in_wasm_flag_address)
 
+  THREAD_LOCAL_TOP_ADDRESS(bool, is_on_central_stack_flag)
+
   MaterializedObjectStore* materialized_object_store() const {
     return materialized_object_store_;
   }
@@ -1347,6 +1356,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   void SetIsProfiling(bool enabled) {
     if (enabled) {
       CollectSourcePositionsForAllBytecodeArrays();
+      RequestInvalidateNoProfilingProtector();
     }
     isolate_data_.execution_mode_.set(IsolateExecutionModeFlag::kIsProfiling,
                                       enabled);
@@ -1583,6 +1593,9 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   }
 
   std::shared_ptr<CompilationStatistics> GetTurboStatistics();
+#ifdef V8_ENABLE_MAGLEV
+  std::shared_ptr<CompilationStatistics> GetMaglevStatistics();
+#endif
   CodeTracer* GetCodeTracer();
 
   void DumpAndResetStats();
@@ -1658,7 +1671,10 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   int GetNextScriptId();
 
-  uint32_t GetNextUniqueSharedFunctionInfoId() {
+  uint32_t next_unique_sfi_id() const {
+    return next_unique_sfi_id_.load(std::memory_order_relaxed);
+  }
+  uint32_t GetAndIncNextUniqueSfiId() {
     return next_unique_sfi_id_.fetch_add(1, std::memory_order_relaxed);
   }
 
@@ -1892,12 +1908,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   bool IsIsolateInBackground() { return is_isolate_in_background_; }
 
-  void EnableMemorySavingsMode() { memory_savings_mode_active_ = true; }
-
-  void DisableMemorySavingsMode() { memory_savings_mode_active_ = false; }
-
-  bool IsMemorySavingsModeActive() { return memory_savings_mode_active_; }
-
   PRINTF_FORMAT(2, 3) void PrintWithTimestamp(const char* format, ...);
 
   void set_allow_atomics_wait(bool set) { allow_atomics_wait_ = set; }
@@ -1956,6 +1966,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   Isolate* AsIsolate() { return this; }
   LocalIsolate* AsLocalIsolate() { return main_thread_local_isolate(); }
+  Isolate* GetMainThreadIsolateUnsafe() { return this; }
 
   LocalHeap* main_thread_local_heap();
   LocalHeap* CurrentLocalHeap();
@@ -1979,6 +1990,10 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   const ExternalPointerTable& shared_external_pointer_table() const {
     return *isolate_data_.shared_external_pointer_table_;
+  }
+
+  ExternalPointerTable::Space* shared_external_pointer_space() {
+    return shared_external_pointer_space_;
   }
 
   Address shared_external_pointer_table_address_address() {
@@ -2037,6 +2052,8 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // Update the thread local's Stack object so that it is aware of the new stack
   // start and the inactive stacks.
   void RecordStackSwitchForScanning();
+
+  void SyncStackLimit();
 #endif
 
   // Access to the global "locals block list cache". Caches outer-stack
@@ -2052,6 +2069,27 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   void VerifyStaticRoots();
 
   bool allow_compile_hints_magic() const { return allow_compile_hints_magic_; }
+
+  class EnableRoAllocationForSnapshotScope final {
+   public:
+    explicit EnableRoAllocationForSnapshotScope(Isolate* isolate)
+        : isolate_(isolate) {
+      CHECK(!isolate_->enable_ro_allocation_for_snapshot_);
+      isolate_->enable_ro_allocation_for_snapshot_ = true;
+    }
+
+    ~EnableRoAllocationForSnapshotScope() {
+      CHECK(isolate_->enable_ro_allocation_for_snapshot_);
+      isolate_->enable_ro_allocation_for_snapshot_ = false;
+    }
+
+   private:
+    Isolate* const isolate_;
+  };
+
+  bool enable_ro_allocation_for_snapshot() const {
+    return enable_ro_allocation_for_snapshot_;
+  }
 
  private:
   explicit Isolate(std::unique_ptr<IsolateAllocator> isolate_allocator);
@@ -2289,10 +2327,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // to prioritize between memory usage and latency.
   bool is_isolate_in_background_ = false;
 
-  // True if the isolate is in memory savings mode. This flag is used to
-  // favor memory over runtime performance.
-  bool memory_savings_mode_active_ = false;
-
   // Indicates whether the isolate owns shareable data.
   // Only false for client isolates attached to a shared isolate.
   bool owns_shareable_data_ = true;
@@ -2368,11 +2402,20 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   bool force_slow_path_ = false;
 
+  // Certain objects may be allocated in RO space if suitable for the snapshot.
+  bool enable_ro_allocation_for_snapshot_ = false;
+
   bool initialized_ = false;
   bool jitless_ = false;
 
   std::atomic<int> next_optimization_id_ = 0;
 
+  void InitializeNextUniqueSfiId(uint32_t id) {
+    uint32_t expected = 0;  // Called at most once per Isolate on startup.
+    bool successfully_exchanged = next_unique_sfi_id_.compare_exchange_strong(
+        expected, id, std::memory_order_relaxed, std::memory_order_relaxed);
+    CHECK(successfully_exchanged);
+  }
   std::atomic<uint32_t> next_unique_sfi_id_;
 
   unsigned next_module_async_evaluating_ordinal_;
@@ -2386,6 +2429,9 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   v8::Isolate::UseCounterCallback use_counter_callback_ = nullptr;
 
   std::shared_ptr<CompilationStatistics> turbo_statistics_;
+#ifdef V8_ENABLE_MAGLEV
+  std::shared_ptr<CompilationStatistics> maglev_statistics_;
+#endif
   std::shared_ptr<metrics::Recorder> metrics_recorder_;
   uintptr_t last_recorder_context_id_ = 0;
   std::unordered_map<uintptr_t, v8::Global<v8::Context>>
@@ -2471,6 +2517,10 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   base::Optional<Isolate*> shared_space_isolate_;
 
 #ifdef V8_COMPRESS_POINTERS
+  // Stores the external pointer table space for the shared external pointer
+  // table.
+  ExternalPointerTable::Space* shared_external_pointer_space_ = nullptr;
+
   // The external pointer handle to the Isolate's main thread's WaiterQueueNode.
   // It is used to wait for JS-exposed mutex or condition variable.
   ExternalPointerHandle waiter_queue_node_external_pointer_handle_ =
@@ -2607,6 +2657,12 @@ class StackLimitCheck {
 
   // Use this to check for stack-overflow when entering runtime from JS code.
   bool JsHasOverflowed(uintptr_t gap = 0) const;
+
+  // Use this to check for stack-overflow when entering runtime from Wasm code.
+  // If it is called from the central stack, while a switch was performed,
+  // it checks logical stack limit of a secondary stack stored in the isolate,
+  // instead checking actual one.
+  bool WasmHasOverflowed(uintptr_t gap = 0) const;
 
   // Use this to check for interrupt request in C++ code.
   V8_INLINE bool InterruptRequested() {

@@ -605,7 +605,7 @@ void TryCloneBranch(Node* node, BasicBlock* block, Zone* temp_zone,
   BranchHint const hint = BranchHintOf(branch->op());
   int const input_count = merge->op()->ControlInputCount();
   DCHECK_LE(1, input_count);
-  Node** const inputs = graph->zone()->NewArray<Node*>(2 * input_count);
+  Node** const inputs = graph->zone()->AllocateArray<Node*>(2 * input_count);
   Node** const merge_true_inputs = &inputs[0];
   Node** const merge_false_inputs = &inputs[input_count];
   for (int index = 0; index < input_count; ++index) {
@@ -2719,9 +2719,10 @@ Node* EffectControlLinearizer::AllocateSeqString(Node* length, bool one_byte) {
   Node* seq_string =
       __ Allocate(AllocationType::kYoung, size, AllowLargeObjects::kTrue);
 
-  __ StoreField(AccessBuilder::ForMap(), seq_string,
-                __ HeapConstant(one_byte ? factory()->one_byte_string_map()
-                                         : factory()->string_map()));
+  __ StoreField(
+      AccessBuilder::ForMap(), seq_string,
+      __ HeapConstant(one_byte ? factory()->seq_one_byte_string_map()
+                               : factory()->seq_two_byte_string_map()));
   __ StoreField(AccessBuilder::ForNameRawHashField(), seq_string,
                 __ Int32Constant(Name::kEmptyHashField));
   __ StoreField(AccessBuilder::ForStringLength(), seq_string, length);
@@ -2762,11 +2763,11 @@ Node* EffectControlLinearizer::AllocateSeqString(Node* length,
       is_one_byte,
       [&]() {
         __ StoreField(AccessBuilder::ForMap(), seq_string,
-                      __ HeapConstant(factory()->one_byte_string_map()));
+                      __ HeapConstant(factory()->seq_one_byte_string_map()));
       },
       [&]() {
         __ StoreField(AccessBuilder::ForMap(), seq_string,
-                      __ HeapConstant(factory()->string_map()));
+                      __ HeapConstant(factory()->seq_two_byte_string_map()));
       });
   return seq_string;
 }
@@ -2785,9 +2786,9 @@ Node* EffectControlLinearizer::AllocateTwoByteSlicedString() {
   Node* sliced_string = __ Allocate(
       AllocationType::kYoung,
       __ IntPtrConstant(
-          jsgraph()->factory()->sliced_string_map()->instance_size()));
+          jsgraph()->factory()->sliced_two_byte_string_map()->instance_size()));
   __ StoreField(AccessBuilder::ForMap(), sliced_string,
-                __ HeapConstant(factory()->sliced_string_map()));
+                __ HeapConstant(factory()->sliced_two_byte_string_map()));
   return sliced_string;
 }
 
@@ -3263,7 +3264,7 @@ Node* EffectControlLinearizer::LowerStringConcat(Node* node) {
         Node* new_backing_store = ConvertOneByteStringToTwoByte(
             init_backing_store, max_length, current_length);
         __ StoreField(AccessBuilder::ForMap(), sliced_string,
-                      __ HeapConstant(factory()->sliced_string_map()));
+                      __ HeapConstant(factory()->sliced_two_byte_string_map()));
         __ StoreField(AccessBuilder::ForSlicedStringParent(), sliced_string,
                       new_backing_store);
         __ Goto(&has_correct_representation, new_backing_store);
@@ -5075,8 +5076,8 @@ Node* EffectControlLinearizer::LowerNewDoubleElements(Node* node) {
     __ GotoIfNot(check, &done, result);
 
     ElementAccess const access = {kTaggedBase, FixedDoubleArray::kHeaderSize,
-                                  Type::NumberOrHole(), MachineType::Float64(),
-                                  kNoWriteBarrier};
+                                  Type::NumberOrTheHole(),
+                                  MachineType::Float64(), kNoWriteBarrier};
     __ StoreElement(access, result, index, the_hole);
 
     // Advance the {index}.
@@ -5198,7 +5199,7 @@ Node* EffectControlLinearizer::LowerNewConsString(Node* node) {
   __ Bind(&if_onebyte);
   __ Goto(&done, __ HeapConstant(factory()->cons_one_byte_string_map()));
   __ Bind(&if_twobyte);
-  __ Goto(&done, __ HeapConstant(factory()->cons_string_map()));
+  __ Goto(&done, __ HeapConstant(factory()->cons_two_byte_string_map()));
   __ Bind(&done);
   Node* result_map = done.PhiAt(0);
 
@@ -5545,7 +5546,7 @@ Node* EffectControlLinearizer::LowerStringFromSingleCharCode(Node* node) {
              SeqTwoByteString::SizeFor(1) - kObjectAlignment - kHeapObjectTag,
              __ SmiConstant(0));
     __ StoreField(AccessBuilder::ForMap(), vfalse1,
-                  __ HeapConstant(factory()->string_map()));
+                  __ HeapConstant(factory()->seq_two_byte_string_map()));
     __ StoreField(AccessBuilder::ForNameRawHashField(), vfalse1,
                   __ Int32Constant(Name::kEmptyHashField));
     __ StoreField(AccessBuilder::ForStringLength(), vfalse1,
@@ -5649,7 +5650,7 @@ Node* EffectControlLinearizer::LowerStringFromSingleCodePoint(Node* node) {
                SeqTwoByteString::SizeFor(1) - kObjectAlignment - kHeapObjectTag,
                __ SmiConstant(0));
       __ StoreField(AccessBuilder::ForMap(), vfalse1,
-                    __ HeapConstant(factory()->string_map()));
+                    __ HeapConstant(factory()->seq_two_byte_string_map()));
       __ StoreField(AccessBuilder::ForNameRawHashField(), vfalse1,
                     __ IntPtrConstant(Name::kEmptyHashField));
       __ StoreField(AccessBuilder::ForStringLength(), vfalse1,
@@ -5694,7 +5695,7 @@ Node* EffectControlLinearizer::LowerStringFromSingleCodePoint(Node* node) {
              SeqTwoByteString::SizeFor(2) - kObjectAlignment - kHeapObjectTag,
              __ SmiConstant(0));
     __ StoreField(AccessBuilder::ForMap(), vfalse0,
-                  __ HeapConstant(factory()->string_map()));
+                  __ HeapConstant(factory()->seq_two_byte_string_map()));
     __ StoreField(AccessBuilder::ForNameRawHashField(), vfalse0,
                   __ Int32Constant(Name::kEmptyHashField));
     __ StoreField(AccessBuilder::ForStringLength(), vfalse0,
@@ -5761,6 +5762,7 @@ Node* EffectControlLinearizer::LowerStringEqual(Node* node) {
   auto if_length_equal = __ MakeLabel();
   auto done = __ MakeLabel(MachineRepresentation::kTagged);
 
+  __ GotoIf(__ TaggedEqual(lhs, rhs), &done, __ TrueConstant());
   __ GotoIf(__ Word32Equal(lhs_length, rhs_length), &if_length_equal);
   __ Goto(&done, __ FalseConstant());
 
@@ -6126,9 +6128,11 @@ void EffectControlLinearizer::LowerCheckEqualsInternalizedString(
         __ LoadField(AccessBuilder::ForMapInstanceType(), val_map);
 
     // ThinString.
-    __ Branch(
-        __ Word32Equal(val_instance_type, __ Int32Constant(THIN_STRING_TYPE)),
-        &if_thinstring, &if_notthinstring);
+    __ Branch(__ Word32Equal(
+                  __ Word32And(val_instance_type,
+                               __ Int32Constant(kStringRepresentationMask)),
+                  __ Int32Constant(kThinStringTag)),
+              &if_thinstring, &if_notthinstring);
 
     __ Bind(&if_notthinstring);
     {
@@ -7034,7 +7038,7 @@ Node* EffectControlLinearizer::GenerateSlowApiCall(Node* node) {
   const CFunctionInfo* c_signature = params.c_functions()[0].signature;
   const int c_arg_count = c_signature->ArgumentCount();
 
-  Node** const slow_inputs = graph()->zone()->NewArray<Node*>(
+  Node** const slow_inputs = graph()->zone()->AllocateArray<Node*>(
       n.SlowCallArgumentCount() + FastApiCallNode::kEffectAndControlInputCount);
 
   int fast_call_params = c_arg_count;
