@@ -41,12 +41,12 @@ bool DebugInfo::HasInstrumentedBytecodeArray() {
   return IsBytecodeArray(debug_bytecode_array(kAcquireLoad));
 }
 
-BytecodeArray DebugInfo::OriginalBytecodeArray() {
+Tagged<BytecodeArray> DebugInfo::OriginalBytecodeArray() {
   DCHECK(HasInstrumentedBytecodeArray());
   return BytecodeArray::cast(original_bytecode_array(kAcquireLoad));
 }
 
-BytecodeArray DebugInfo::DebugBytecodeArray() {
+Tagged<BytecodeArray> DebugInfo::DebugBytecodeArray() {
   DCHECK(HasInstrumentedBytecodeArray());
   DCHECK_EQ(shared()->GetActiveBytecodeArray(),
             debug_bytecode_array(kAcquireLoad));
@@ -56,8 +56,8 @@ BytecodeArray DebugInfo::DebugBytecodeArray() {
 TQ_OBJECT_CONSTRUCTORS_IMPL(StackFrameInfo)
 NEVER_READ_ONLY_SPACE_IMPL(StackFrameInfo)
 
-Script StackFrameInfo::script() const {
-  HeapObject object = shared_or_script();
+Tagged<Script> StackFrameInfo::script() const {
+  Tagged<HeapObject> object = shared_or_script();
   if (IsSharedFunctionInfo(object)) {
     object = SharedFunctionInfo::cast(object)->script();
   }
@@ -76,13 +76,13 @@ bool ErrorStackData::HasFormattedStack() const {
   return !IsFixedArray(call_site_infos_or_formatted_stack());
 }
 
-ACCESSORS_RELAXED_CHECKED(ErrorStackData, formatted_stack, Object,
+ACCESSORS_RELAXED_CHECKED(ErrorStackData, formatted_stack, Tagged<Object>,
                           kCallSiteInfosOrFormattedStackOffset,
                           !IsSmi(limit_or_stack_frame_infos()))
 
 bool ErrorStackData::HasCallSiteInfos() const { return !HasFormattedStack(); }
 
-ACCESSORS_RELAXED_CHECKED(ErrorStackData, call_site_infos, FixedArray,
+ACCESSORS_RELAXED_CHECKED(ErrorStackData, call_site_infos, Tagged<FixedArray>,
                           kCallSiteInfosOrFormattedStackOffset,
                           !HasFormattedStack())
 

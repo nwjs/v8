@@ -943,7 +943,8 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
   Register feedback_vector = temps.Acquire();
   __ ldr(feedback_vector,
          FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
-  __ ldr(feedback_vector, FieldMemOperand(feedback_vector, Cell::kValueOffset));
+  __ ldr(feedback_vector,
+         FieldMemOperand(feedback_vector, FeedbackCell::kValueOffset));
   __ AssertFeedbackVector(feedback_vector);
 
   // Check the tiering state.
@@ -1131,7 +1132,8 @@ void Builtins::Generate_InterpreterEntryTrampoline(
   Register feedback_vector = r2;
   __ ldr(feedback_vector,
          FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
-  __ ldr(feedback_vector, FieldMemOperand(feedback_vector, Cell::kValueOffset));
+  __ ldr(feedback_vector,
+         FieldMemOperand(feedback_vector, FeedbackCell::kValueOffset));
 
   Label push_stack_frame;
   // Check if feedback vector is valid. If valid, check for optimized code
@@ -1313,7 +1315,7 @@ void Builtins::Generate_InterpreterEntryTrampoline(
     __ ldr(feedback_vector,
            FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
     __ ldr(feedback_vector,
-           FieldMemOperand(feedback_vector, Cell::kValueOffset));
+           FieldMemOperand(feedback_vector, FeedbackCell::kValueOffset));
 
     Label install_baseline_code;
     // Check if feedback vector is valid. If not, call prepare for baseline to
@@ -1657,7 +1659,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
   // Set the return address to the correct point in the interpreter entry
   // trampoline.
   Label builtin_trampoline, trampoline_loaded;
-  Smi interpreter_entry_return_pc_offset(
+  Tagged<Smi> interpreter_entry_return_pc_offset(
       masm->isolate()->heap()->interpreter_entry_return_pc_offset());
   DCHECK_NE(interpreter_entry_return_pc_offset, Smi::zero());
 
@@ -2895,17 +2897,31 @@ void Builtins::Generate_WasmDebugBreak(MacroAssembler* masm) {
   __ Ret();
 }
 
-void Builtins::Generate_GenericJSToWasmWrapper(MacroAssembler* masm) {
-  // TODO(v8:10701): Implement for this platform.
-  __ Trap();
-}
-
-void Builtins::Generate_WasmReturnPromiseOnSuspend(MacroAssembler* masm) {
+void Builtins::Generate_WasmReturnPromiseOnSuspendAsm(MacroAssembler* masm) {
   // TODO(v8:12191): Implement for this platform.
   __ Trap();
 }
 
-void Builtins::Generate_WasmToJsWrapperAsm(MacroAssembler* masm) { __ Trap(); }
+void Builtins::Generate_WasmToJsWrapperAsm(MacroAssembler* masm) {
+  // Push registers in reverse order so that they are on the stack like
+  // in an array, with the first item being at the lowest address.
+  for (int i = static_cast<int>(arraysize(wasm::kFpParamRegisters)) - 1; i >= 0;
+       --i) {
+    __ vpush(wasm::kFpParamRegisters[i]);
+  }
+
+  // r6 is pushed for alignment, so that the pushed register parameters and
+  // stack parameters look the same as the layout produced by the js-to-wasm
+  // wrapper for out-going parameters. Having the same layout allows to share
+  // code in Torque, especially the `LocationAllocator`. r6 has been picked
+  // arbitrarily.
+  __ Push(r6, wasm::kGpParamRegisters[3], wasm::kGpParamRegisters[2],
+          wasm::kGpParamRegisters[1]);
+  // Push an arbitrary register to reserve stack space for the signature which
+  // will be spilled on the stack in Torque.
+  __ Push(r0);
+  __ TailCallBuiltin(Builtin::kWasmToJsWrapperCSA);
+}
 
 void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
   // TODO(v8:12191): Implement for this platform.
@@ -2927,34 +2943,49 @@ void Builtins::Generate_WasmOnStackReplace(MacroAssembler* masm) {
   __ Trap();
 }
 
-void Builtins::Generate_NewGenericJSToWasmWrapper(MacroAssembler* masm) {
+void ResetStackSwitchFrameStackSlots(MacroAssembler* masm) {
+  Register zero = r0;
+  __ Move(zero, Smi::zero());
+  __ str(zero, MemOperand(fp, StackSwitchFrameConstants::kResultArrayOffset));
+  __ str(zero, MemOperand(fp, StackSwitchFrameConstants::kInstanceOffset));
+}
+
+void Builtins::Generate_JSToWasmWrapperAsm(MacroAssembler* masm) {
   __ EnterFrame(StackFrame::JS_TO_WASM);
+
+  constexpr int kNumSpillSlots = StackSwitchFrameConstants::kNumSpillSlots;
+  __ AllocateStackSpace(kNumSpillSlots * kSystemPointerSize);
+  ResetStackSwitchFrameStackSlots(masm);
+
   Register wrapper_buffer =
-      WasmNewJSToWasmWrapperDescriptor::WrapperBufferRegister();
+      WasmJSToWasmWrapperDescriptor::WrapperBufferRegister();
   // Push the wrapper_buffer stack, it's needed later for the results.
-  __ Push(wrapper_buffer);
+  __ str(wrapper_buffer,
+         MemOperand(fp, JSToWasmWrapperFrameConstants::kWrapperBufferOffset));
 
   Register result_size = r0;
-  __ ldr(result_size,
-         MemOperand(
-             wrapper_buffer,
-             JSToWasmWrapperConstants::kWrapperBufferStackReturnBufferSize));
+  __ ldr(
+      result_size,
+      MemOperand(
+          wrapper_buffer,
+          JSToWasmWrapperFrameConstants::kWrapperBufferStackReturnBufferSize));
   __ sub(sp, sp, Operand(result_size, LSL, kPointerSizeLog2));
 
-  __ str(sp,
-         MemOperand(
-             wrapper_buffer,
-             JSToWasmWrapperConstants::kWrapperBufferStackReturnBufferStart));
+  __ str(
+      sp,
+      MemOperand(
+          wrapper_buffer,
+          JSToWasmWrapperFrameConstants::kWrapperBufferStackReturnBufferStart));
   // Push stack parameters on the stack.
   Register params_end = r9;
   __ ldr(params_end,
          MemOperand(wrapper_buffer,
-                    JSToWasmWrapperConstants::kWrapperBufferParamEnd));
+                    JSToWasmWrapperFrameConstants::kWrapperBufferParamEnd));
 
   Register params_start = r4;
   __ ldr(params_start,
          MemOperand(wrapper_buffer,
-                    JSToWasmWrapperConstants::kWrapperBufferParamStart));
+                    JSToWasmWrapperFrameConstants::kWrapperBufferParamStart));
 
   // The first GP parameter is the instance, which we handle specially.
   int stack_params_offset =
@@ -3002,7 +3033,7 @@ void Builtins::Generate_NewGenericJSToWasmWrapper(MacroAssembler* masm) {
 
   // Load the instance into r3.
   __ ldr(kWasmInstanceRegister,
-         MemOperand(fp, JSToWasmWrapperConstants::kInstanceOffset));
+         MemOperand(fp, JSToWasmWrapperFrameConstants::kInstanceParamOffset));
 
   {
     Register thread_in_wasm_flag_addr = r1;
@@ -3017,7 +3048,7 @@ void Builtins::Generate_NewGenericJSToWasmWrapper(MacroAssembler* masm) {
   Register function_entry = r1;
   __ ldr(function_entry,
          MemOperand(wrapper_buffer,
-                    JSToWasmWrapperConstants::kWrapperBufferCallTarget));
+                    JSToWasmWrapperFrameConstants::kWrapperBufferCallTarget));
   __ Call(function_entry);
   {
     Register thread_in_wasm_flag_addr = r4;
@@ -3032,28 +3063,33 @@ void Builtins::Generate_NewGenericJSToWasmWrapper(MacroAssembler* masm) {
   // `wrapper_buffer` is a parameter for `JSToWasmHandleReturns`, it therefore
   // has to be in r2.
   wrapper_buffer = r2;
-  __ ldr(wrapper_buffer, MemOperand(fp, -2 * kSystemPointerSize));
+  __ ldr(wrapper_buffer,
+         MemOperand(fp, JSToWasmWrapperFrameConstants::kWrapperBufferOffset));
 
-  __ vstr(
-      wasm::kFpReturnRegisters[0],
-      MemOperand(wrapper_buffer,
-                 JSToWasmWrapperConstants::kWrapperBufferFPReturnRegister1));
-  __ vstr(
-      wasm::kFpReturnRegisters[1],
-      MemOperand(wrapper_buffer,
-                 JSToWasmWrapperConstants::kWrapperBufferFPReturnRegister2));
+  __ vstr(wasm::kFpReturnRegisters[0],
+          MemOperand(
+              wrapper_buffer,
+              JSToWasmWrapperFrameConstants::kWrapperBufferFPReturnRegister1));
+  __ vstr(wasm::kFpReturnRegisters[1],
+          MemOperand(
+              wrapper_buffer,
+              JSToWasmWrapperFrameConstants::kWrapperBufferFPReturnRegister2));
   __ str(wasm::kGpReturnRegisters[0],
-         MemOperand(wrapper_buffer,
-                    JSToWasmWrapperConstants::kWrapperBufferGPReturnRegister1));
+         MemOperand(
+             wrapper_buffer,
+             JSToWasmWrapperFrameConstants::kWrapperBufferGPReturnRegister1));
   __ str(wasm::kGpReturnRegisters[1],
-         MemOperand(wrapper_buffer,
-                    JSToWasmWrapperConstants::kWrapperBufferGPReturnRegister2));
+         MemOperand(
+             wrapper_buffer,
+             JSToWasmWrapperFrameConstants::kWrapperBufferGPReturnRegister2));
 
   // r0: wasm instance.
   // r1: the result JSArray for multi-return.
   // r2: pointer to the byte buffer which contains all parameters.
-  __ ldr(r1, MemOperand(fp, JSToWasmWrapperConstants::kResultArrayOffset));
-  __ ldr(r0, MemOperand(fp, JSToWasmWrapperConstants::kInstanceOffset));
+  __ ldr(r1, MemOperand(
+                 fp, JSToWasmWrapperFrameConstants::kResultArrayParamOffset));
+  __ ldr(r0,
+         MemOperand(fp, JSToWasmWrapperFrameConstants::kInstanceParamOffset));
   __ Call(BUILTIN_CODE(masm->isolate(), JSToWasmHandleReturns),
           RelocInfo::CODE_TARGET);
 
@@ -3945,7 +3981,8 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
   Register feedback_vector = r2;
   __ ldr(feedback_vector,
          FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
-  __ ldr(feedback_vector, FieldMemOperand(feedback_vector, Cell::kValueOffset));
+  __ ldr(feedback_vector,
+         FieldMemOperand(feedback_vector, FeedbackCell::kValueOffset));
 
   Label install_baseline_code;
   // Check if feedback vector is valid. If not, call prepare for baseline to

@@ -61,7 +61,7 @@ class V8_EXPORT_PRIVATE LocalIsolate final : private HiddenLocalFactory {
   inline Address cage_base() const;
   inline Address code_cage_base() const;
   inline ReadOnlyHeap* read_only_heap() const;
-  inline Object root(RootIndex index) const;
+  inline Tagged<Object> root(RootIndex index) const;
   inline Handle<Object> root_handle(RootIndex index) const;
 
   base::RandomNumberGenerator* fuzzer_rng() const {
@@ -146,6 +146,9 @@ class V8_EXPORT_PRIVATE LocalIsolate final : private HiddenLocalFactory {
   // only constructor.
   Isolate* GetMainThreadIsolateUnsafe() const { return isolate_; }
 
+  const v8::StartupData* snapshot_blob() const {
+    return isolate_->snapshot_blob();
+  }
   Object* pending_message_address() {
     return isolate_->pending_message_address();
   }

@@ -18,7 +18,7 @@
 #include "src/compiler/backend/instruction.h"
 #include "src/deoptimizer/deoptimize-reason.h"
 #include "src/deoptimizer/deoptimizer.h"
-#include "src/deoptimizer/translation-array.h"
+#include "src/deoptimizer/frame-translation-builder.h"
 #include "src/execution/frame-constants.h"
 #include "src/flags/flags.h"
 #include "src/interpreter/bytecode-register.h"
@@ -964,12 +964,8 @@ class SafepointingNodeProcessor {
 };
 
 namespace {
-struct FrameCount {
-  int total;
-  int js_frame;
-};
-
-FrameCount GetFrameCount(const DeoptFrame* deopt_frame) {
+DeoptimizationFrameTranslation::FrameCount GetFrameCount(
+    const DeoptFrame* deopt_frame) {
   int total = 0;
   int js_frame = 0;
   do {
@@ -979,7 +975,7 @@ FrameCount GetFrameCount(const DeoptFrame* deopt_frame) {
     total++;
     deopt_frame = deopt_frame->parent();
   } while (deopt_frame);
-  return FrameCount{total, js_frame};
+  return {total, js_frame};
 }
 
 BytecodeOffset GetBytecodeOffset(const DeoptFrame& deopt_frame) {
@@ -1024,11 +1020,11 @@ compiler::SharedFunctionInfoRef GetSharedFunctionInfo(
 }
 }  // namespace
 
-class MaglevTranslationArrayBuilder {
+class MaglevFrameTranslationBuilder {
  public:
-  MaglevTranslationArrayBuilder(
+  MaglevFrameTranslationBuilder(
       LocalIsolate* local_isolate, MaglevAssembler* masm,
-      TranslationArrayBuilder* translation_array_builder,
+      FrameTranslationBuilder* translation_array_builder,
       IdentityMap<int, base::DefaultAllocationPolicy>* deopt_literals)
       : local_isolate_(local_isolate),
         masm_(masm),
@@ -1390,7 +1386,7 @@ class MaglevTranslationArrayBuilder {
     }
   }
 
-  int GetDeoptLiteral(Object obj) {
+  int GetDeoptLiteral(Tagged<Object> obj) {
     IdentityMapFindResult<int> res = deopt_literals_->FindOrInsert(obj);
     if (!res.already_exists) {
       DCHECK_EQ(0, *res.entry);
@@ -1405,7 +1401,7 @@ class MaglevTranslationArrayBuilder {
 
   LocalIsolate* local_isolate_;
   MaglevAssembler* masm_;
-  TranslationArrayBuilder* translation_array_builder_;
+  FrameTranslationBuilder* translation_array_builder_;
   IdentityMap<int, base::DefaultAllocationPolicy>* deopt_literals_;
 };
 
@@ -1418,22 +1414,23 @@ MaglevCodeGenerator::MaglevCodeGenerator(
       safepoint_table_builder_(compilation_info->zone(),
                                graph->tagged_stack_slots(),
                                graph->untagged_stack_slots()),
-      translation_array_builder_(compilation_info->zone()),
+      frame_translation_builder_(compilation_info->zone()),
       code_gen_state_(compilation_info, &safepoint_table_builder_),
       masm_(isolate->GetMainThreadIsolateUnsafe(), &code_gen_state_),
       graph_(graph),
       deopt_literals_(isolate->heap()->heap()) {}
 
-void MaglevCodeGenerator::Assemble() {
-  EmitCode();
+bool MaglevCodeGenerator::Assemble() {
+  if (!EmitCode()) {
 #ifdef V8_TARGET_ARCH_ARM
-  if (masm_.failed()) {
     // Even if we fail, we force emit the constant pool, so that it is empty.
     __ CheckConstPool(true, false);
-    return;
-  }
 #endif
+    return false;
+  }
+
   EmitMetadata();
+
   if (v8_flags.maglev_build_code_on_background) {
     code_ = local_isolate_->heap()->NewPersistentMaybeHandle(
         BuildCodeObject(local_isolate_));
@@ -1443,6 +1440,7 @@ void MaglevCodeGenerator::Assemble() {
     deopt_data_ = local_isolate_->heap()->NewPersistentHandle(
         GenerateDeoptimizationData(local_isolate_));
   }
+  return true;
 }
 
 MaybeHandle<Code> MaglevCodeGenerator::Generate(Isolate* isolate) {
@@ -1457,7 +1455,7 @@ MaybeHandle<Code> MaglevCodeGenerator::Generate(Isolate* isolate) {
   return BuildCodeObject(isolate->main_thread_local_isolate());
 }
 
-void MaglevCodeGenerator::EmitCode() {
+bool MaglevCodeGenerator::EmitCode() {
   GraphProcessor<NodeMultiProcessor<SafepointingNodeProcessor,
                                     MaglevCodeGeneratingNodeProcessor>>
       processor(SafepointingNodeProcessor{local_isolate_},
@@ -1472,10 +1470,12 @@ void MaglevCodeGenerator::EmitCode() {
 
   processor.ProcessGraph(graph_);
   EmitDeferredCode();
-  EmitDeopts();
-  if (code_gen_failed_) return;
+  if (!EmitDeopts()) return false;
   EmitExceptionHandlerTrampolines();
   __ FinishCode();
+
+  code_gen_succeeded_ = true;
+  return true;
 }
 
 void MaglevCodeGenerator::RecordInlinedFunctions() {
@@ -1507,16 +1507,15 @@ void MaglevCodeGenerator::EmitDeferredCode() {
   }
 }
 
-void MaglevCodeGenerator::EmitDeopts() {
+bool MaglevCodeGenerator::EmitDeopts() {
   const size_t num_deopts = code_gen_state_.eager_deopts().size() +
                             code_gen_state_.lazy_deopts().size();
   if (num_deopts > Deoptimizer::kMaxNumberOfEntries) {
-    code_gen_failed_ = true;
-    return;
+    return false;
   }
 
-  MaglevTranslationArrayBuilder translation_builder(
-      local_isolate_, &masm_, &translation_array_builder_, &deopt_literals_);
+  MaglevFrameTranslationBuilder translation_builder(
+      local_isolate_, &masm_, &frame_translation_builder_, &deopt_literals_);
 
   // Deoptimization exits must be as small as possible, since their count grows
   // with function size. These labels are an optimization which extracts the
@@ -1582,6 +1581,8 @@ void MaglevCodeGenerator::EmitDeopts() {
         deopt_index);
     deopt_index++;
   }
+
+  return true;
 }
 
 void MaglevCodeGenerator::EmitExceptionHandlerTrampolines() {
@@ -1609,7 +1610,7 @@ void MaglevCodeGenerator::EmitMetadata() {
 
 MaybeHandle<Code> MaglevCodeGenerator::BuildCodeObject(
     LocalIsolate* local_isolate) {
-  if (code_gen_failed_) return {};
+  if (!code_gen_succeeded_) return {};
 
   Handle<DeoptimizationData> deopt_data =
       (v8_flags.maglev_deopt_data_on_background &&
@@ -1640,13 +1641,13 @@ Handle<DeoptimizationData> MaglevCodeGenerator::GenerateDeoptimizationData(
   Handle<DeoptimizationData> data =
       DeoptimizationData::New(local_isolate, deopt_count, AllocationType::kOld);
 
-  Handle<TranslationArray> translation_array =
-      translation_array_builder_.ToTranslationArray(local_isolate->factory());
+  Handle<DeoptimizationFrameTranslation> translations =
+      frame_translation_builder_.ToFrameTranslation(local_isolate->factory());
   {
     DisallowGarbageCollection no_gc;
     Tagged<DeoptimizationData> raw_data = *data;
 
-    raw_data->SetTranslationByteArray(*translation_array);
+    raw_data->SetFrameTranslation(*translations);
     raw_data->SetInlinedFunctionCount(Smi::FromInt(inlined_function_count_));
     raw_data->SetOptimizationId(
         Smi::FromInt(local_isolate->NextOptimizationId()));
@@ -1731,6 +1732,13 @@ Handle<DeoptimizationData> MaglevCodeGenerator::GenerateDeoptimizationData(
 #endif  // DEBUG
     i++;
   }
+
+#ifdef DEBUG
+  raw_data->Verify(code_gen_state_.compilation_info()
+                       ->toplevel_compilation_unit()
+                       ->bytecode()
+                       .object());
+#endif
 
   return data;
 }

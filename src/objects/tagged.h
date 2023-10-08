@@ -127,6 +127,17 @@ class Tagged<Object> : public TaggedBase {
   // Allow Tagged<Object> to be created from any address.
   constexpr explicit Tagged(Address o) : TaggedBase(o) {}
 
+  // Allow explicit uninitialized initialization. In debug mode this is zapped.
+  // TODO(leszeks): Mark this somehow as uninitialized, so that we get some
+  // warning if it is used before initialization.
+  constexpr Tagged()
+      : TaggedBase(
+#ifdef DEBUG
+            kZapValue
+#endif
+        ) {
+  }
+
   // Implicit conversion for subclasses -- all classes are subclasses of Object,
   // so allow all tagged pointers.
   // NOLINTNEXTLINE
@@ -134,12 +145,6 @@ class Tagged<Object> : public TaggedBase {
   constexpr Tagged& operator=(TaggedBase other) {
     return *this = Tagged(other);
   }
-
-  // TODO(leszeks): Tagged<Object> is not known to be a pointer, so it shouldn't
-  // have an operator* or operator->. Remove once all Object member functions
-  // are free/static functions.
-  inline constexpr Object operator*() const;
-  inline constexpr detail::TaggedOperatorArrowRef<Object> operator->();
 
   // Implicit conversions to/from raw pointers
   // TODO(leszeks): Remove once we're using Tagged everywhere.
@@ -175,6 +180,9 @@ class Tagged<Smi> : public TaggedBase {
     return Tagged<Smi>(other.ptr());
   }
 
+  constexpr Tagged() = default;
+  constexpr explicit Tagged(Address ptr) : TaggedBase(ptr) {}
+
   // No implicit conversions from other tagged pointers.
 
   constexpr bool IsHeapObject() const { return false; }
@@ -189,10 +197,6 @@ class Tagged<Smi> : public TaggedBase {
   // NOLINTNEXTLINE
   inline constexpr operator Smi();
 
-  // Access via ->, remove once Smi doesn't have its own address.
-  inline constexpr Smi operator*() const;
-  inline constexpr detail::TaggedOperatorArrowRef<Smi> operator->();
-
  private:
   friend class Smi;
   // Handles of the same type are allowed to access the Address constructor.
@@ -200,8 +204,57 @@ class Tagged<Smi> : public TaggedBase {
 #ifdef V8_ENABLE_DIRECT_HANDLE
   friend class DirectHandle<Smi>;
 #endif
+};
 
-  using TaggedBase::TaggedBase;
+// Specialization for TaggedIndex disallowing any implicit creation or access
+// via ->, but offering instead a cast from Object and an intptr_t value()
+// method.
+template <>
+class Tagged<TaggedIndex> : public TaggedBase {
+ public:
+  // Explicit cast for sub- and superclasses (in practice, only Object will pass
+  // this static assert).
+  template <typename U>
+  static constexpr Tagged<TaggedIndex> cast(Tagged<U> other) {
+    static_assert(std::is_base_of_v<TaggedIndex, U> ||
+                  std::is_convertible_v<U*, TaggedIndex*> ||
+                  std::is_base_of_v<U, TaggedIndex> ||
+                  std::is_convertible_v<TaggedIndex*, U*>);
+    DCHECK(IsTaggedIndex(other));
+    return Tagged<TaggedIndex>(other.ptr());
+  }
+  static constexpr Tagged<TaggedIndex> unchecked_cast(TaggedBase other) {
+    return Tagged<TaggedIndex>(other.ptr());
+  }
+
+  constexpr Tagged() = default;
+  constexpr explicit Tagged(Address ptr) : TaggedBase(ptr) {}
+
+  // No implicit conversions from other tagged pointers.
+
+  constexpr bool IsHeapObject() const { return false; }
+  constexpr bool IsSmi() const { return true; }
+
+  // Returns the integer value.
+  constexpr intptr_t value() const {
+    // Truncate and shift down (requires >> to be sign extending).
+    return static_cast<intptr_t>(ptr()) >> kSmiTagSize;
+  }
+
+  // Implicit conversions to/from raw pointers
+  // TODO(leszeks): Remove once we're using Tagged everywhere.
+  // NOLINTNEXTLINE
+  inline constexpr Tagged(TaggedIndex raw);
+  // NOLINTNEXTLINE
+  inline constexpr operator TaggedIndex();
+
+ private:
+  friend class TaggedIndex;
+  // Handles of the same type are allowed to access the Address constructor.
+  friend class Handle<TaggedIndex>;
+#ifdef V8_ENABLE_DIRECT_HANDLE
+  friend class DirectHandle<TaggedIndex>;
+#endif
 };
 
 // Specialization for HeapObject, to group together functions shared between all
@@ -278,6 +331,9 @@ class Tagged<HeapObject> : public TaggedBase {
 
   Address address() const { return this->ptr() - kHeapObjectTag; }
 
+ protected:
+  constexpr explicit Tagged(Address ptr) : Base(ptr) {}
+
  private:
   friend class HeapObject;
   // Handles of the same type are allowed to access the Address constructor.
@@ -286,7 +342,6 @@ class Tagged<HeapObject> : public TaggedBase {
   friend class DirectHandle<HeapObject>;
 #endif
 
-  using Base::Base;
   constexpr HeapObject ToRawPtr() const;
 };
 
@@ -305,7 +360,7 @@ class Tagged : public detail::BaseForTagged<T>::type {
   static constexpr Tagged<T> cast(Tagged<U> other) {
     static_assert(std::is_base_of_v<T, U> || std::is_convertible_v<U*, T*> ||
                   std::is_base_of_v<U, T> || std::is_convertible_v<T*, U*>);
-    return Tagged<T>(T::cast(*other).ptr());
+    return T::cast(other);
   }
   static constexpr Tagged<T> unchecked_cast(TaggedBase other) {
     // Don't check incoming type for unchecked casts, in case the object
@@ -349,7 +404,7 @@ class Tagged : public detail::BaseForTagged<T>::type {
             typename = std::enable_if_t<std::is_base_of_v<U, T> ||
                                         std::is_convertible_v<T*, U*>>>
   // NOLINTNEXTLINE
-  constexpr operator U() {
+  constexpr operator U() const {
     static_assert(kTaggedCanConvertToRawObjects);
     return ToRawPtr();
   }
@@ -360,15 +415,16 @@ class Tagged : public detail::BaseForTagged<T>::type {
   }
 
  private:
+  friend T;
   // Handles of the same type are allowed to access the Address constructor.
   friend class Handle<T>;
 #ifdef V8_ENABLE_DIRECT_HANDLE
   friend class DirectHandle<T>;
 #endif
 
-  using Base::Base;
+  constexpr explicit Tagged(Address ptr) : Base(ptr) {}
   constexpr T ToRawPtr() const {
-    return T::unchecked_cast(Object(this->ptr()));
+    return T(this->ptr(), typename T::SkipTypeCheckTag{});
   }
 };
 
@@ -377,11 +433,6 @@ class Tagged : public detail::BaseForTagged<T>::type {
 static_assert(kTaggedCanConvertToRawObjects);
 template <class T>
 Tagged(T object) -> Tagged<T>;
-
-template <typename T>
-inline std::ostream& operator<<(std::ostream& os, Tagged<T> o) {
-  return os << *o;
-}
 
 template <typename T>
 struct RemoveTagged {

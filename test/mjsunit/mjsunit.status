@@ -280,8 +280,8 @@
 }],  # novfp3
 
 ##############################################################################
-# TODO(ahaas): Port multiple return values to MIPS, S390 and PPC
-['arch in (mips64, mips64el, s390, s390x, ppc, ppc64)', {
+# TODO(ahaas): Port multiple return values to MIPS.
+['arch in (mips64, mips64el)', {
   'wasm/multi-value': [SKIP],
 }],
 
@@ -550,9 +550,12 @@
 ##############################################################################
 ['full_debug', {
   # Tests too slow in non-optimized debug mode.
+  'es6/super-ic': [SKIP],
+  'regress/regress-1122': [SKIP],
   'regress/regress-2790': [SKIP],
   'regress/regress-740784': [SKIP],
   'regress/regress-992389': [SKIP],
+  'wasm/shared-memory-worker-gc': [SKIP],
 }],  # 'full_debug'
 
 ##############################################################################
@@ -979,10 +982,6 @@
 'regress/wasm/regress-14171':[SKIP],
 }], # 'arch == riscv32'
 
-[ 'arch == riscv64' , {
-'regress/wasm/regress-14113':[SKIP],
-}], # 'arch == riscv64'
-
 ##############################################################################
 ['system == macos', {
   # TODO(machenbach): These tests are x25 slower on 4-core Mac Minis. They can
@@ -1291,6 +1290,9 @@
 
   # Slow tests.
   'wasm/serialization-with-compilation-hints': [SKIP],
+
+  # https://crbug.com/v8/14228
+  'asm/poppler/poppler': [SKIP],
 }],  # 'verify_predictable'
 
 ##############################################################################
@@ -1542,6 +1544,7 @@
   'regress/regress-441099': [SKIP],
   'regress/regress-677685': [SKIP],
   'regress/regress-799690': [SKIP],
+  'regress/regress-1469634': [SKIP],
   'regress/regress-crbug-935800': [SKIP],
   'regress/wasm/*': [SKIP],
   'wasm/*': [SKIP],
@@ -1588,13 +1591,13 @@
   'harmony/array-to-spliced-big': [SKIP],
 }],  # variant == slow_path
 
-['((arch == mips64el or arch == mips64) and not simd_mips) or (arch in [ppc64])', {
+['(arch == mips64el or arch == mips64) and not simd_mips', {
   # Requires scalar lowering for 64x2 SIMD instructions, which are not
   # implemented yet.
   # Also skip tests on archs that don't support SIMD and lowering doesn't yet work correctly.
   # Condition copied from cctest.status.
   'regress/wasm/regress-10831': [SKIP],
-}],  # ((arch == mips64el or arch == mips64) and not simd_mips) or (arch in [ppc64])
+}],  # (arch == mips64el or arch == mips64) and not simd_mips
 
 ##############################################################################
 ['variant == stress_sampling', {
@@ -1971,8 +1974,6 @@
 # Tests that cannot run without JS shared memory
 ['not js_shared_memory', {
   'shared-memory/*': [SKIP],
-  'regress/regress-crbug-1394741': [SKIP],
-  'regress/regress-crbug-1395117': [SKIP],
 }],  # 'not js_shared_memory'
 
 ##############################################################################
@@ -2035,8 +2036,6 @@
   'compiler/regress-9945-1': [FAIL],
   # Maglev doesn't support growing elements stores.
   'array-store-and-grow': [FAIL],
-  # This test requires inlining, currently disabled in Maglev
-  'regress/regress-4578': [FAIL],
   # This test appears to be relying on no adding a map stability check, but
   # instead using a field representation dependency and allowing a read from
   # the deprecated map. Wiring this through in Maglev would be too messy to be

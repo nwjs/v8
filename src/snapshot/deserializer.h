@@ -57,7 +57,7 @@ class Deserializer : public SerializerDeserializer {
 
   // Create Log events for newly deserialized objects.
   void LogNewObjectEvents();
-  void LogScriptEvents(Script script);
+  void LogScriptEvents(Tagged<Script> script);
   void LogNewMapEvents();
 
   // Descriptor arrays are deserialized as "strong", so that there is no risk of
@@ -155,7 +155,8 @@ class Deserializer : public SerializerDeserializer {
   void Synchronize(VisitorSynchronization::SyncTag tag) override;
 
   template <typename SlotAccessor>
-  int WriteHeapPointer(SlotAccessor slot_accessor, HeapObject heap_object,
+  int WriteHeapPointer(SlotAccessor slot_accessor,
+                       Tagged<HeapObject> heap_object,
                        ReferenceDescriptor descr);
   template <typename SlotAccessor>
   int WriteHeapPointer(SlotAccessor slot_accessor,
@@ -164,7 +165,8 @@ class Deserializer : public SerializerDeserializer {
 
   inline int WriteExternalPointer(ExternalPointerSlot dest, Address value,
                                   ExternalPointerTag tag);
-  inline int WriteIndirectPointer(IndirectPointerSlot dest, HeapObject value);
+  inline int WriteIndirectPointer(IndirectPointerSlot dest,
+                                  Tagged<HeapObject> value);
 
   // Fills in a heap object's data from start to end (exclusive). Start and end
   // are slot indices within the object.
@@ -245,12 +247,12 @@ class Deserializer : public SerializerDeserializer {
   // Special handling for serialized code like hooking up internalized strings.
   void PostProcessNewObject(Handle<Map> map, Handle<HeapObject> obj,
                             SnapshotSpace space);
-  void PostProcessNewJSReceiver(Map map, Handle<JSReceiver> obj,
+  void PostProcessNewJSReceiver(Tagged<Map> map, Handle<JSReceiver> obj,
                                 InstanceType instance_type,
                                 SnapshotSpace space);
 
-  HeapObject Allocate(AllocationType allocation, int size,
-                      AllocationAlignment alignment);
+  Tagged<HeapObject> Allocate(AllocationType allocation, int size,
+                              AllocationAlignment alignment);
 
   // Cached current isolate.
   IsolateT* isolate_;
@@ -344,7 +346,7 @@ class StringTableInsertionKey final : public StringTableKey {
       DeserializingUserCodeOption deserializing_user_code);
 
   template <typename IsolateT>
-  bool IsMatch(IsolateT* isolate, String string);
+  bool IsMatch(IsolateT* isolate, Tagged<String> string);
 
   void PrepareForInsertion(Isolate* isolate) {
     // When sharing the string table, all string table lookups during snapshot

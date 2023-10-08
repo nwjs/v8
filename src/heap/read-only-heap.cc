@@ -82,7 +82,7 @@ void ReadOnlyHeap::SetUp(Isolate* isolate,
       if (!artifacts) {
         artifacts = InitializeSharedReadOnlyArtifacts();
         artifacts->InitializeChecksum(read_only_snapshot_data);
-        ro_heap = CreateInitalHeapForBootstrapping(isolate, artifacts);
+        ro_heap = CreateInitialHeapForBootstrapping(isolate, artifacts);
         ro_heap->DeserializeIntoIsolate(isolate, read_only_snapshot_data,
                                         can_rehash);
         artifacts->set_initial_next_unique_sfi_id(
@@ -93,6 +93,11 @@ void ReadOnlyHeap::SetUp(Isolate* isolate,
         // Without PC, there is only one shared between all Isolates.
         ro_heap = artifacts->GetReadOnlyHeapForIsolate(isolate);
         isolate->SetUpFromReadOnlyArtifacts(artifacts, ro_heap);
+#ifdef V8_COMPRESS_POINTERS
+        isolate->external_pointer_table().SetUpFromReadOnlyArtifacts(
+            isolate->heap()->read_only_external_pointer_space(),
+            artifacts.get());
+#endif  // V8_COMPRESS_POINTERS
       }
       artifacts->VerifyChecksum(read_only_snapshot_data,
                                 read_only_heap_created);
@@ -106,7 +111,7 @@ void ReadOnlyHeap::SetUp(Isolate* isolate,
       CHECK(!artifacts);
       artifacts = InitializeSharedReadOnlyArtifacts();
 
-      ro_heap = CreateInitalHeapForBootstrapping(isolate, artifacts);
+      ro_heap = CreateInitialHeapForBootstrapping(isolate, artifacts);
 
       // Ensure the first read-only page ends up first in the cage.
       ro_heap->read_only_space()->EnsurePage();
@@ -131,6 +136,7 @@ void ReadOnlyHeap::DeserializeIntoIsolate(Isolate* isolate,
   des.DeserializeIntoIsolate();
   OnCreateRootsComplete(isolate);
 
+#ifdef V8_ENABLE_EXTENSIBLE_RO_SNAPSHOT
   if (isolate->serializer_enabled()) {
     // If this isolate will be serialized, leave RO space unfinalized and
     // allocatable s.t. it can be extended (e.g. by future Context::New calls).
@@ -140,6 +146,9 @@ void ReadOnlyHeap::DeserializeIntoIsolate(Isolate* isolate,
   } else {
     InitFromIsolate(isolate);
   }
+#else
+  InitFromIsolate(isolate);
+#endif  // V8_ENABLE_EXTENSIBLE_RO_SNAPSHOT
 }
 
 void ReadOnlyHeap::OnCreateRootsComplete(Isolate* isolate) {
@@ -173,7 +182,7 @@ ReadOnlyHeap::ReadOnlyHeap(ReadOnlyHeap* ro_heap, ReadOnlySpace* ro_space)
 }
 
 // static
-ReadOnlyHeap* ReadOnlyHeap::CreateInitalHeapForBootstrapping(
+ReadOnlyHeap* ReadOnlyHeap::CreateInitialHeapForBootstrapping(
     Isolate* isolate, std::shared_ptr<ReadOnlyArtifacts> artifacts) {
   DCHECK(IsReadOnlySpaceShared());
 
@@ -273,7 +282,7 @@ bool ReadOnlyHeap::Contains(Address address) {
 }
 
 // static
-bool ReadOnlyHeap::Contains(HeapObject object) {
+bool ReadOnlyHeap::Contains(Tagged<HeapObject> object) {
   if (V8_ENABLE_THIRD_PARTY_HEAP_BOOL) {
     return third_party_heap::Heap::InReadOnlySpace(object.address());
   } else {
@@ -325,7 +334,7 @@ ReadOnlyPageObjectIterator::ReadOnlyPageObjectIterator(
   DCHECK_LT(current_addr, page->GetAreaStart() + page->area_size());
 }
 
-HeapObject ReadOnlyPageObjectIterator::Next() {
+Tagged<HeapObject> ReadOnlyPageObjectIterator::Next() {
   if (page_ == nullptr) return HeapObject();
 
   Address end = page_->GetAreaStart() + page_->area_size();
@@ -333,7 +342,7 @@ HeapObject ReadOnlyPageObjectIterator::Next() {
     DCHECK_LE(current_addr_, end);
     if (current_addr_ == end) return HeapObject();
 
-    HeapObject object = HeapObject::FromAddress(current_addr_);
+    Tagged<HeapObject> object = HeapObject::FromAddress(current_addr_);
     const int object_size = object->Size();
     current_addr_ += ALIGN_TO_ALLOCATION_ALIGNMENT(object_size);
 

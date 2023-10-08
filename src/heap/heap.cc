@@ -486,10 +486,14 @@ size_t Heap::Available() {
 bool Heap::CanExpandOldGeneration(size_t size) const {
   if (force_oom_ || force_gc_on_next_allocation_) return false;
   if (OldGenerationCapacity() + size > max_old_generation_size()) return false;
-  // The OldGenerationCapacity does not account compaction spaces used
-  // during evacuation. Ensure that expanding the old generation does push
-  // the total allocated memory size over the maximum heap size.
+  // Stay below `MaxReserved()` such that it is more likely that committing the
+  // second semi space at the beginning of a GC succeeds.
   return memory_allocator()->Size() + size <= MaxReserved();
+}
+
+bool Heap::IsOldGenerationExpansionAllowed(
+    size_t size, const base::MutexGuard& expansion_mutex_guard) const {
+  return OldGenerationCapacity() + size <= max_old_generation_size();
 }
 
 namespace {
@@ -497,17 +501,6 @@ bool IsIsolateDeserializationActive(LocalHeap* local_heap) {
   return local_heap && !local_heap->heap()->deserialization_complete();
 }
 }  // anonymous namespace
-
-bool Heap::CanExpandOldGenerationBackground(LocalHeap* local_heap,
-                                            size_t size) {
-  if (force_oom_) return false;
-
-  // When the heap is tearing down, then GC requests from background threads
-  // are not served and the threads are allowed to expand the heap to avoid OOM.
-  return gc_state() == TEAR_DOWN || IsMainThreadParked(local_heap) ||
-         IsIsolateDeserializationActive(local_heap) ||
-         memory_allocator()->Size() + size <= MaxReserved();
-}
 
 bool Heap::CanPromoteYoungAndExpandOldGeneration(size_t size) const {
   size_t new_space_capacity = NewSpaceTargetCapacity();
@@ -1170,7 +1163,11 @@ void Heap::GarbageCollectionPrologue(
   // evacuation of a non-full new space (or if we are on the last page) there
   // may be uninitialized memory behind top. We fill the remainder of the page
   // with a filler.
-  if (new_space()) new_space()->MakeLinearAllocationAreaIterable();
+  if (new_space()) {
+    new_space()->MakeLinearAllocationAreaIterable();
+    DCHECK_NOT_NULL(minor_gc_job());
+    minor_gc_job()->CancelTaskIfScheduled();
+  }
 
   // Reset GC statistics.
   promoted_objects_size_ = 0;
@@ -1484,7 +1481,7 @@ void Heap::HandleGCRequest() {
 
 void Heap::ScheduleMinorGCTaskIfNeeded() {
   DCHECK_NOT_NULL(minor_gc_job_);
-  minor_gc_job_->ScheduleTaskIfNeeded(this);
+  minor_gc_job_->ScheduleTask();
 }
 
 namespace {
@@ -1818,25 +1815,27 @@ void Heap::CollectGarbage(AllocationSpace space,
   });
 
   // The main garbage collection phase.
-  DisallowGarbageCollection no_gc_during_gc;
+  //
+  // We need a stack marker at the top of all entry points to allow
+  // deterministic passes over the stack. E.g., a verifier that should only
+  // find a subset of references of the marker.
+  //
+  // TODO(chromium:1056170): Consider adding a component that keeps track
+  // of relevant GC stack regions where interesting pointers can be found.
+  stack().SetMarkerIfNeededAndCallback([this, collector, gc_reason,
+                                        collector_reason, gc_callback_flags]() {
+    DisallowGarbageCollection no_gc_during_gc;
 
-  size_t committed_memory_before = collector == GarbageCollector::MARK_COMPACTOR
-                                       ? CommittedOldGenerationMemory()
-                                       : 0;
-  {
-    tracer()->StartObservablePause();
+    size_t committed_memory_before =
+        collector == GarbageCollector::MARK_COMPACTOR
+            ? CommittedOldGenerationMemory()
+            : 0;
+
+    tracer()->StartObservablePause(base::TimeTicks::Now());
     VMState<GC> state(isolate());
     DevToolsTraceEventScope devtools_trace_event_scope(
         this, IsYoungGenerationCollector(collector) ? "MinorGC" : "MajorGC",
         ToString(gc_reason));
-
-    // We need a stack marker at the top of all entry points to allow
-    // deterministic passes over the stack. E.g., a verifier that should only
-    // find a subset of references of the marker.
-    //
-    // TODO(chromium:1056170): Consider adding a component that keeps track
-    // of relevant GC stack regions where interesting pointers can be found.
-    stack().SetMarkerToCurrentStackPosition();
 
     GarbageCollectionPrologue(gc_reason, gc_callback_flags);
     {
@@ -1891,7 +1890,7 @@ void Heap::CollectGarbage(AllocationSpace space,
     }
 
     tracer()->StopAtomicPause();
-    tracer()->StopObservablePause(collector);
+    tracer()->StopObservablePause(collector, base::TimeTicks::Now());
     // Young generation cycles finish atomically. It is important that
     // StopObservablePause, and StopCycle are called in this
     // order; the latter may replace the current event with that of an
@@ -1901,7 +1900,7 @@ void Heap::CollectGarbage(AllocationSpace space,
     } else {
       tracer()->StopFullCycleIfNeeded();
     }
-  }
+  });
 
   // Epilogue callbacks. These callbacks may trigger GC themselves and thus
   // cannot be related exactly to garbage collection cycles.
@@ -4691,10 +4690,7 @@ void Heap::IterateRoots(RootVisitor* v, base::EnumSet<SkipRoot> options,
     if (!options.contains(SkipRoot::kStack)) {
       IterateStackRoots(v);
       if (!options.contains(SkipRoot::kConservativeStack)) {
-        ScanStackMode stack_mode = options.contains(SkipRoot::kTopOfStack)
-                                       ? ScanStackMode::kFromMarker
-                                       : ScanStackMode::kComplete;
-        IterateConservativeStackRoots(v, stack_mode, roots_mode);
+        IterateConservativeStackRoots(v, roots_mode);
       }
       v->Synchronize(VisitorSynchronization::kStackRoots);
     }
@@ -4771,9 +4767,6 @@ void Heap::IterateRootsIncludingClients(RootVisitor* v,
 
   if (isolate()->is_shared_space_isolate()) {
     ClientRootVisitor<> client_root_visitor(v);
-    // For client isolates, use the stack marker to conservatively scan the
-    // stack.
-    options.Add(SkipRoot::kTopOfStack);
     isolate()->global_safepoint()->IterateClientIsolates(
         [v = &client_root_visitor, options](Isolate* client) {
           client->heap()->IterateRoots(v, options,
@@ -4808,7 +4801,6 @@ void Heap::IterateBuiltins(RootVisitor* v) {
 void Heap::IterateStackRoots(RootVisitor* v) { isolate_->Iterate(v); }
 
 void Heap::IterateConservativeStackRoots(RootVisitor* v,
-                                         ScanStackMode stack_mode,
                                          IterateRootsMode roots_mode) {
 #ifdef V8_ENABLE_CONSERVATIVE_STACK_SCANNING
   if (!IsGCWithStack()) return;
@@ -4821,11 +4813,7 @@ void Heap::IterateConservativeStackRoots(RootVisitor* v,
                               : isolate();
 
   ConservativeStackVisitor stack_visitor(main_isolate, v);
-  if (stack_mode == ScanStackMode::kComplete) {
-    stack().IteratePointers(&stack_visitor);
-  } else {
-    stack().IteratePointersUntilMarker(&stack_visitor);
-  }
+  stack().IteratePointersUntilMarker(&stack_visitor);
 #endif  // V8_ENABLE_CONSERVATIVE_STACK_SCANNING
 }
 
@@ -5607,7 +5595,7 @@ void Heap::SetUpSpaces(LinearAllocationArea& new_allocation_info,
   LOG(isolate_, IntPtrTEvent("heap-available", Available()));
 
   if (new_space()) {
-    minor_gc_job_.reset(new MinorGCJob());
+    minor_gc_job_.reset(new MinorGCJob(this));
     minor_gc_task_observer_.reset(new ScheduleMinorGCTaskObserver(this));
   }
 
@@ -6225,70 +6213,69 @@ class UnreachableObjectsFilter : public HeapObjectsFilter {
     MarkReachableObjects();
   }
 
-  ~UnreachableObjectsFilter() override {
-    for (auto it : reachable_) {
-      delete it.second;
-      it.second = nullptr;
-    }
-  }
+  ~UnreachableObjectsFilter() override = default;
 
   bool SkipObject(Tagged<HeapObject> object) override {
-    if (IsFreeSpaceOrFiller(object)) return true;
-    Address chunk = object.ptr() & ~kLogicalChunkAlignmentMask;
+    // Space object iterators should skip free space or filler objects.
+    DCHECK(!IsFreeSpaceOrFiller(object));
+    // If the bucket corresponding to the object's chunk does not exist, or the
+    // object is not found in the bucket, return true.
+    BasicMemoryChunk* chunk = BasicMemoryChunk::FromHeapObject(object);
     if (reachable_.count(chunk) == 0) return true;
     return reachable_[chunk]->count(object) == 0;
   }
 
  private:
+  using BucketType = std::unordered_set<HeapObject, Object::Hasher>;
+
   bool MarkAsReachable(Tagged<HeapObject> object) {
-    Address chunk = object.ptr() & ~kLogicalChunkAlignmentMask;
+    // If the bucket corresponding to the object's chunk does not exist, then
+    // create an empty bucket.
+    BasicMemoryChunk* chunk = BasicMemoryChunk::FromHeapObject(object);
     if (reachable_.count(chunk) == 0) {
-      reachable_[chunk] = new std::unordered_set<HeapObject, Object::Hasher>();
+      reachable_[chunk] = std::make_unique<BucketType>();
     }
+    // Insert the object if not present; return whether it was indeed inserted.
     if (reachable_[chunk]->count(object)) return false;
     reachable_[chunk]->insert(object);
     return true;
   }
-
-  static constexpr intptr_t kLogicalChunkAlignment =
-      (static_cast<uintptr_t>(1) << kPageSizeBits);
-
-  static constexpr intptr_t kLogicalChunkAlignmentMask =
-      kLogicalChunkAlignment - 1;
 
   class MarkingVisitor : public ObjectVisitorWithCageBases, public RootVisitor {
    public:
     explicit MarkingVisitor(UnreachableObjectsFilter* filter)
         : ObjectVisitorWithCageBases(filter->heap_), filter_(filter) {}
 
-    void VisitMapPointer(HeapObject object) override {
+    void VisitMapPointer(Tagged<HeapObject> object) override {
       MarkHeapObject(Map::unchecked_cast(object->map(cage_base())));
     }
-    void VisitPointers(HeapObject host, ObjectSlot start,
+    void VisitPointers(Tagged<HeapObject> host, ObjectSlot start,
                        ObjectSlot end) override {
       MarkPointers(MaybeObjectSlot(start), MaybeObjectSlot(end));
     }
 
-    void VisitPointers(HeapObject host, MaybeObjectSlot start,
+    void VisitPointers(Tagged<HeapObject> host, MaybeObjectSlot start,
                        MaybeObjectSlot end) final {
       MarkPointers(start, end);
     }
 
-    void VisitInstructionStreamPointer(Code host,
+    void VisitInstructionStreamPointer(Tagged<Code> host,
                                        InstructionStreamSlot slot) override {
       Tagged<Object> maybe_code = slot.load(code_cage_base());
-      HeapObject heap_object;
-      if (maybe_code->GetHeapObject(&heap_object)) {
+      Tagged<HeapObject> heap_object;
+      if (maybe_code.GetHeapObject(&heap_object)) {
         MarkHeapObject(heap_object);
       }
     }
 
-    void VisitCodeTarget(InstructionStream host, RelocInfo* rinfo) final {
+    void VisitCodeTarget(Tagged<InstructionStream> host,
+                         RelocInfo* rinfo) final {
       Tagged<InstructionStream> target =
           InstructionStream::FromTargetAddress(rinfo->target_address());
       MarkHeapObject(target);
     }
-    void VisitEmbeddedPointer(InstructionStream host, RelocInfo* rinfo) final {
+    void VisitEmbeddedPointer(Tagged<InstructionStream> host,
+                              RelocInfo* rinfo) final {
       MarkHeapObject(rinfo->target_object(cage_base()));
     }
 
@@ -6320,7 +6307,7 @@ class UnreachableObjectsFilter : public HeapObjectsFilter {
       // Treat weak references as strong.
       for (TSlot p = start; p < end; ++p) {
         typename TSlot::TObject object = p.load(cage_base());
-        HeapObject heap_object;
+        Tagged<HeapObject> heap_object;
         if (object.GetHeapObject(&heap_object)) {
           MarkHeapObject(heap_object);
         }
@@ -6341,13 +6328,15 @@ class UnreachableObjectsFilter : public HeapObjectsFilter {
 
   void MarkReachableObjects() {
     MarkingVisitor visitor(this);
-    heap_->IterateRoots(&visitor, {});
+    heap_->stack().SetMarkerIfNeededAndCallback(
+        [this, &visitor]() { heap_->IterateRoots(&visitor, {}); });
     visitor.TransitiveClosure();
   }
 
   Heap* heap_;
   DISALLOW_GARBAGE_COLLECTION(no_gc_)
-  std::unordered_map<Address, std::unordered_set<HeapObject, Object::Hasher>*>
+  std::unordered_map<BasicMemoryChunk*, std::unique_ptr<BucketType>,
+                     base::hash<BasicMemoryChunk*>>
       reachable_;
 };
 
@@ -6371,63 +6360,47 @@ HeapObjectIterator::HeapObjectIterator(
     HeapObjectsFiltering filtering)
     : heap_(heap),
       safepoint_scope_(safepoint_scope_or_nullptr),
-      filtering_(filtering) {
+      space_iterator_(heap_) {
   heap_->MakeHeapIterable();
-  // Start the iteration.
-  space_iterator_ = new SpaceIterator(heap_);
-  switch (filtering_) {
+  switch (filtering) {
     case kFilterUnreachable:
-      filter_ = new UnreachableObjectsFilter(heap_);
+      filter_ = std::make_unique<UnreachableObjectsFilter>(heap_);
       break;
     default:
       break;
   }
-  CHECK(space_iterator_->HasNext());
-  object_iterator_ = space_iterator_->Next()->GetObjectIterator(heap_);
+  // Start the iteration.
+  CHECK(space_iterator_.HasNext());
+  object_iterator_ = space_iterator_.Next()->GetObjectIterator(heap_);
   if (V8_ENABLE_THIRD_PARTY_HEAP_BOOL) heap_->tp_heap_->ResetIterator();
 }
 
-HeapObjectIterator::~HeapObjectIterator() {
-#ifdef DEBUG
-  // Assert that in filtering mode we have iterated through all
-  // objects. Otherwise, heap will be left in an inconsistent state.
-  if (!V8_ENABLE_THIRD_PARTY_HEAP_BOOL && filtering_ != kNoFiltering) {
-    DCHECK_NULL(object_iterator_);
-  }
-#endif
-  delete space_iterator_;
-  delete filter_;
-}
+HeapObjectIterator::~HeapObjectIterator() = default;
 
 Tagged<HeapObject> HeapObjectIterator::Next() {
-  if (filter_ == nullptr) return NextObject();
+  if (!filter_) return NextObject();
 
   Tagged<HeapObject> obj = NextObject();
-  while (!obj.is_null() && (filter_->SkipObject(obj))) obj = NextObject();
+  while (!obj.is_null() && filter_->SkipObject(obj)) obj = NextObject();
   return obj;
 }
 
 Tagged<HeapObject> HeapObjectIterator::NextObject() {
   if (V8_ENABLE_THIRD_PARTY_HEAP_BOOL) return heap_->tp_heap_->NextObject();
   // No iterator means we are done.
-  if (object_iterator_.get() == nullptr) return HeapObject();
+  if (!object_iterator_) return Tagged<HeapObject>();
 
-  Tagged<HeapObject> obj = object_iterator_.get()->Next();
-  if (!obj.is_null()) {
-    // If the current iterator has more objects we are fine.
-    return obj;
-  } else {
-    // Go though the spaces looking for one that has objects.
-    while (space_iterator_->HasNext()) {
-      object_iterator_ = space_iterator_->Next()->GetObjectIterator(heap_);
-      obj = object_iterator_.get()->Next();
-      if (!obj.is_null()) {
-        return obj;
-      }
-    }
+  Tagged<HeapObject> obj = object_iterator_->Next();
+  // If the current iterator has more objects we are fine.
+  if (!obj.is_null()) return obj;
+  // Go though the spaces looking for one that has objects.
+  while (space_iterator_.HasNext()) {
+    object_iterator_ = space_iterator_.Next()->GetObjectIterator(heap_);
+    obj = object_iterator_->Next();
+    if (!obj.is_null()) return obj;
   }
   // Done with the last space.
-  object_iterator_.reset(nullptr);
+  object_iterator_.reset();
   return Tagged<HeapObject>();
 }
 
@@ -6808,7 +6781,7 @@ void Heap::CreateObjectStats() {
   }
 }
 
-Map Heap::GcSafeMapOfHeapObject(Tagged<HeapObject> object) {
+Tagged<Map> Heap::GcSafeMapOfHeapObject(Tagged<HeapObject> object) {
   PtrComprCageBase cage_base(isolate());
   MapWord map_word = object->map_word(cage_base, kRelaxedLoad);
   if (map_word.IsForwardingAddress()) {
@@ -6817,9 +6790,9 @@ Map Heap::GcSafeMapOfHeapObject(Tagged<HeapObject> object) {
   return map_word.ToMap();
 }
 
-GcSafeCode Heap::GcSafeGetCodeFromInstructionStream(
+Tagged<GcSafeCode> Heap::GcSafeGetCodeFromInstructionStream(
     Tagged<HeapObject> instruction_stream, Address inner_pointer) {
-  InstructionStream istream =
+  Tagged<InstructionStream> istream =
       InstructionStream::unchecked_cast(instruction_stream);
   DCHECK(!istream.is_null());
   DCHECK(GcSafeInstructionStreamContains(istream, inner_pointer));
@@ -6875,11 +6848,11 @@ base::Optional<GcSafeCode> Heap::GcSafeTryFindCodeForInnerPointer(
   return GcSafeGetCodeFromInstructionStream(*maybe_istream, inner_pointer);
 }
 
-Code Heap::FindCodeForInnerPointer(Address inner_pointer) {
+Tagged<Code> Heap::FindCodeForInnerPointer(Address inner_pointer) {
   return GcSafeFindCodeForInnerPointer(inner_pointer)->UnsafeCastToCode();
 }
 
-GcSafeCode Heap::GcSafeFindCodeForInnerPointer(Address inner_pointer) {
+Tagged<GcSafeCode> Heap::GcSafeFindCodeForInnerPointer(Address inner_pointer) {
   base::Optional<GcSafeCode> maybe_code =
       GcSafeTryFindCodeForInnerPointer(inner_pointer);
   // Callers expect that the code object is found.
@@ -6989,7 +6962,7 @@ void Heap::WriteBarrierForRangeImpl(MemoryChunk* source_page,
 
   for (TSlot slot = start_slot; slot < end_slot; ++slot) {
     typename TSlot::TObject value = *slot;
-    HeapObject value_heap_object;
+    Tagged<HeapObject> value_heap_object;
     if (!value.GetHeapObject(&value_heap_object)) continue;
 
     if (kModeMask & kDoGenerationalOrShared) {
@@ -7208,9 +7181,10 @@ void Heap::EnsureSweepingCompleted(SweepingForcedFinalizationMode mode) {
   CompleteArrayBufferSweeping(this);
 
   if (sweeper()->sweeping_in_progress()) {
+    bool was_minor_sweeping_in_progress = minor_sweeping_in_progress();
     sweeper()->EnsureMajorCompleted();
 
-    if (v8_flags.minor_ms && new_space()) {
+    if (v8_flags.minor_ms && new_space() && was_minor_sweeping_in_progress) {
       TRACE_GC_EPOCH_WITH_FLOW(
           tracer(), GCTracer::Scope::MINOR_MS_COMPLETE_SWEEPING,
           ThreadKind::kMain,

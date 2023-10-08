@@ -45,103 +45,43 @@ class ObjectIterator;
 class PagedSpaceBase;
 class SemiSpace;
 
-// -----------------------------------------------------------------------------
-// Heap structures:
-//
-// A JS heap consists of a young generation, an old generation, and a large
-// object space. The young generation is divided into two semispaces. A
-// scavenger implements Cheney's copying algorithm. The old generation is
-// separated into a map space and an old object space. The map space contains
-// all (and only) map objects, the rest of old objects go into the old space.
-// The old generation is collected by a mark-sweep-compact collector.
-//
-// The semispaces of the young generation are contiguous.  The old and map
-// spaces consists of a list of pages. A page has a page header and an object
-// area.
-//
-// There is a separate large object space for objects larger than
-// kMaxRegularHeapObjectSize, so that they do not have to move during
-// collection. The large object space is paged. Pages in large object space
-// may be larger than the page size.
-//
-// A remembered set is used to keep track of inter-generational references.
-//
-// During scavenges and mark-sweep collections we sometimes (after a store
-// buffer overflow) iterate inter-generational pointers without decoding heap
-// object maps so if the page belongs to old space or large object space
-// it is essential to guarantee that the page does not contain any
-// garbage pointers to new space: every pointer aligned word which satisfies
-// the Heap::InNewSpace() predicate must be a pointer to a live heap object in
-// new space. Thus objects in old space and large object spaces should have a
-// special layout (e.g. no bare integer fields). This requirement does not
-// apply to map space which is iterated in a special fashion. However we still
-// require pointer fields of dead maps to be cleaned.
-//
-// To enable lazy cleaning of old space pages we can mark chunks of the page
-// as being garbage.  Garbage sections are marked with a special map.  These
-// sections are skipped when scanning the page, even if we are otherwise
-// scanning without regard for object boundaries.  Garbage sections are chained
-// together to form a free list after a GC.  Garbage sections created outside
-// of GCs by object truncation etc. may not be in the free list chain.  Very
-// small free spaces are ignored, they need only be cleaned of bogus pointers
-// into new space.
-//
-// Each page may have up to one special garbage section.  The start of this
-// section is denoted by the top field in the space.  The end of the section
-// is denoted by the limit field in the space.  This special garbage section
-// is not marked with a free space map in the data.  The point of this section
-// is to enable linear allocation without having to constantly update the byte
-// array every time the top field is updated and a new object is created.  The
-// special garbage section is not in the chain of garbage sections.
-//
-// Since the top and limit fields are in the space, not the page, only one page
-// has a special garbage section, and if the top and limit are equal then there
-// is no special garbage section.
-
 // Some assertion macros used in the debugging mode.
 
 #define DCHECK_OBJECT_SIZE(size) \
   DCHECK((0 < size) && (size <= kMaxRegularHeapObjectSize))
 
-#define DCHECK_CODEOBJECT_SIZE(size, code_space)                          \
-  DCHECK((0 < size) &&                                                    \
-         (size <= std::min(MemoryChunkLayout::MaxRegularCodeObjectSize(), \
-                           code_space->AreaSize())))
+#define DCHECK_CODEOBJECT_SIZE(size) \
+  DCHECK((0 < size) && (size <= MemoryChunkLayout::MaxRegularCodeObjectSize()))
+
+template <typename Enum, typename Callback>
+void ForAll(Callback callback) {
+  for (int i = 0; i < static_cast<int>(Enum::kNumValues); i++) {
+    callback(static_cast<Enum>(i), i);
+  }
+}
 
 // ----------------------------------------------------------------------------
 // Space is the abstract superclass for all allocation spaces that are not
 // sealed after startup (i.e. not ReadOnlySpace).
 class V8_EXPORT_PRIVATE Space : public BaseSpace {
  public:
+  static inline void MoveExternalBackingStoreBytes(
+      ExternalBackingStoreType type, Space* from, Space* to, size_t amount);
+
   Space(Heap* heap, AllocationSpace id, std::unique_ptr<FreeList> free_list,
         AllocationCounter& allocation_counter)
       : BaseSpace(heap, id),
         free_list_(std::move(free_list)),
-        allocation_counter_(allocation_counter) {
-    external_backing_store_bytes_ =
-        new std::atomic<size_t>[ExternalBackingStoreType::kNumTypes];
-    external_backing_store_bytes_[ExternalBackingStoreType::kArrayBuffer] = 0;
-    external_backing_store_bytes_[ExternalBackingStoreType::kExternalString] =
-        0;
-  }
+        allocation_counter_(allocation_counter) {}
+
+  ~Space() override = default;
 
   Space(const Space&) = delete;
   Space& operator=(const Space&) = delete;
 
-  static inline void MoveExternalBackingStoreBytes(
-      ExternalBackingStoreType type, Space* from, Space* to, size_t amount);
-
-  ~Space() override {
-    delete[] external_backing_store_bytes_;
-    external_backing_store_bytes_ = nullptr;
-  }
-
   virtual void AddAllocationObserver(AllocationObserver* observer);
-
   virtual void RemoveAllocationObserver(AllocationObserver* observer);
-
   virtual void PauseAllocationObservers() {}
-
   virtual void ResumeAllocationObservers() {}
 
   // Returns size of objects. Can differ from the allocated size
@@ -165,14 +105,13 @@ class V8_EXPORT_PRIVATE Space : public BaseSpace {
 
   inline void IncrementExternalBackingStoreBytes(ExternalBackingStoreType type,
                                                  size_t amount);
-
   inline void DecrementExternalBackingStoreBytes(ExternalBackingStoreType type,
                                                  size_t amount);
 
   // Returns amount of off-heap memory in-use by objects in this Space.
   virtual size_t ExternalBackingStoreBytes(
       ExternalBackingStoreType type) const {
-    return external_backing_store_bytes_[type];
+    return external_backing_store_bytes_[static_cast<int>(type)];
   }
 
   virtual MemoryChunk* first_page() { return memory_chunk_list_.front(); }
@@ -206,7 +145,8 @@ class V8_EXPORT_PRIVATE Space : public BaseSpace {
   // The List manages the pages that belong to the given space.
   heap::List<MemoryChunk> memory_chunk_list_;
   // Tracks off-heap memory used by this space.
-  std::atomic<size_t>* external_backing_store_bytes_;
+  std::atomic<size_t> external_backing_store_bytes_[static_cast<int>(
+      ExternalBackingStoreType::kNumValues)] = {0};
   std::unique_ptr<FreeList> free_list_;
   AllocationCounter& allocation_counter_;
 };
@@ -340,7 +280,7 @@ class LocalAllocationBuffer {
   // Returns true if the merge was successful, false otherwise.
   inline bool TryMerge(LocalAllocationBuffer* other);
 
-  inline bool TryFreeLast(HeapObject object, int object_size);
+  inline bool TryFreeLast(Tagged<HeapObject> object, int object_size);
 
   // Close a LAB, effectively invalidating it. Returns the unused area.
   V8_EXPORT_PRIVATE LinearAllocationArea CloseAndMakeIterable();

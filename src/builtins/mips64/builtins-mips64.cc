@@ -911,7 +911,8 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
   Register feedback_vector = temps.Acquire();
   __ Ld(feedback_vector,
         FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
-  __ Ld(feedback_vector, FieldMemOperand(feedback_vector, Cell::kValueOffset));
+  __ Ld(feedback_vector,
+        FieldMemOperand(feedback_vector, FeedbackCell::kValueOffset));
   {
     UseScratchRegisterScope temps(masm);
     Register scratch = temps.Acquire();
@@ -1099,7 +1100,8 @@ void Builtins::Generate_InterpreterEntryTrampoline(
   Register feedback_vector = a2;
   __ Ld(feedback_vector,
         FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
-  __ Ld(feedback_vector, FieldMemOperand(feedback_vector, Cell::kValueOffset));
+  __ Ld(feedback_vector,
+        FieldMemOperand(feedback_vector, FeedbackCell::kValueOffset));
 
   Label push_stack_frame;
   // Check if feedback vector is valid. If valid, check for optimized code
@@ -1283,7 +1285,7 @@ void Builtins::Generate_InterpreterEntryTrampoline(
     __ Ld(feedback_vector,
           FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
     __ Ld(feedback_vector,
-          FieldMemOperand(feedback_vector, Cell::kValueOffset));
+          FieldMemOperand(feedback_vector, FeedbackCell::kValueOffset));
 
     Label install_baseline_code;
     // Check if feedback vector is valid. If not, call prepare for baseline to
@@ -1511,12 +1513,6 @@ void Builtins::Generate_InterpreterPushArgsThenFastConstructFunction(
   FrameScope scope(masm, StackFrame::MANUAL);
   __ EnterFrame(StackFrame::FAST_CONSTRUCT);
 
-  if (v8_flags.debug_code) {
-    // Check that FrameScope pushed the context on to the stack already.
-    __ LoadReceiver(a2);
-    __ Check(eq, AbortReason::kUnexpectedValue, a2, Operand(cp));
-  }
-
   // Implicit receiver stored in the construct frame.
   __ LoadRoot(a2, RootIndex::kTheHoleValue);
   __ Push(cp, a2);
@@ -1622,7 +1618,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
   // Set the return address to the correct point in the interpreter entry
   // trampoline.
   Label builtin_trampoline, trampoline_loaded;
-  Smi interpreter_entry_return_pc_offset(
+  Tagged<Smi> interpreter_entry_return_pc_offset(
       masm->isolate()->heap()->interpreter_entry_return_pc_offset());
   DCHECK_NE(interpreter_entry_return_pc_offset, Smi::zero());
 
@@ -2917,12 +2913,7 @@ void Builtins::Generate_WasmDebugBreak(MacroAssembler* masm) {
   __ Ret();
 }
 
-void Builtins::Generate_GenericJSToWasmWrapper(MacroAssembler* masm) {
-  __ Trap();
-}
-
-void Builtins::Generate_WasmReturnPromiseOnSuspend(MacroAssembler* masm) {
-  // TODO(v8:12191): Implement for this platform.
+void Builtins::Generate_WasmReturnPromiseOnSuspendAsm(MacroAssembler* masm) {
   __ Trap();
 }
 
@@ -2948,9 +2939,7 @@ void Builtins::Generate_WasmOnStackReplace(MacroAssembler* masm) {
   __ Trap();
 }
 
-void Builtins::Generate_NewGenericJSToWasmWrapper(MacroAssembler* masm) {
-  __ Trap();
-}
+void Builtins::Generate_JSToWasmWrapperAsm(MacroAssembler* masm) { __ Trap(); }
 
 #endif  // V8_ENABLE_WEBASSEMBLY
 
@@ -3837,7 +3826,8 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
   Register feedback_vector = a2;
   __ Ld(feedback_vector,
         FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
-  __ Ld(feedback_vector, FieldMemOperand(feedback_vector, Cell::kValueOffset));
+  __ Ld(feedback_vector,
+        FieldMemOperand(feedback_vector, FeedbackCell::kValueOffset));
 
   Label install_baseline_code;
   // Check if feedback vector is valid. If not, call prepare for baseline to

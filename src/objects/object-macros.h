@@ -30,6 +30,7 @@
  protected:                                                                    \
   template <typename TFieldType, int kFieldOffset, typename CompressionScheme> \
   friend class TaggedField;                                                    \
+  friend class Tagged<Type>;                                                   \
                                                                                \
   /* Special constructor for constexpr construction which allows skipping type \
    * checks. */                                                                \
@@ -172,14 +173,17 @@
   DECL_ACQUIRE_GETTER(name, MaybeObject)          \
   DECL_RELEASE_SETTER(name, MaybeObject)
 
-#define DECL_CAST(Type)                                           \
-  V8_INLINE static Type cast(Object object);                      \
-  V8_INLINE static constexpr Type unchecked_cast(Object object) { \
-    return Type(object.ptr(), SkipTypeCheckTag());                \
+#define DECL_CAST(Type)                                      \
+  V8_INLINE static Tagged<Type> cast(Tagged<Object> object); \
+  V8_INLINE static constexpr Tagged<Type> unchecked_cast(    \
+      Tagged<Object> object) {                               \
+    return Tagged<Type>::unchecked_cast(object);             \
   }
 
-#define CAST_ACCESSOR(Type) \
-  Type Type::cast(Object object) { return Type(object.ptr()); }
+#define CAST_ACCESSOR(Type)                        \
+  Tagged<Type> Type::cast(Tagged<Object> object) { \
+    return Tagged<Type>(Type(object.ptr()));       \
+  }
 
 #define DEF_PRIMITIVE_ACCESSORS(holder, name, offset, type)     \
   type holder::name() const { return ReadField<type>(offset); } \
@@ -243,6 +247,9 @@
 #define RENAME_TORQUE_ACCESSORS(holder, name, torque_name, type)      \
   inline type holder::name() const {                                  \
     return TorqueGeneratedClass::torque_name();                       \
+  }                                                                   \
+  inline type holder::name(PtrComprCageBase cage_base) const {        \
+    return TorqueGeneratedClass::torque_name(cage_base);              \
   }                                                                   \
   inline void holder::set_##name(type value, WriteBarrierMode mode) { \
     TorqueGeneratedClass::set_##torque_name(value, mode);             \
@@ -434,17 +441,15 @@
                 kRelaxedStore);                                      \
   }
 
-#define DECL_EXTERNAL_POINTER_ACCESSORS(name, type)                       \
-  inline type name() const;                                               \
+// Host objects in ReadOnlySpace can't define the isolate-less accessor.
+#define DECL_EXTERNAL_POINTER_ACCESSORS_MAYBE_READ_ONLY_HOST(name, type)  \
   inline type name(i::Isolate* isolate_for_sandbox) const;                \
   inline void init_##name(i::Isolate* isolate, const type initial_value); \
   inline void set_##name(i::Isolate* isolate, const type value);
 
-#define EXTERNAL_POINTER_ACCESSORS(holder, name, type, offset, tag)         \
-  type holder::name() const {                                               \
-    i::Isolate* isolate_for_sandbox = GetIsolateForSandbox(*this);          \
-    return holder::name(isolate_for_sandbox);                               \
-  }                                                                         \
+// Host objects in ReadOnlySpace can't define the isolate-less accessor.
+#define EXTERNAL_POINTER_ACCESSORS_MAYBE_READ_ONLY_HOST(holder, name, type, \
+                                                        offset, tag)        \
   type holder::name(i::Isolate* isolate_for_sandbox) const {                \
     /* This is a workaround for MSVC error C2440 not allowing  */           \
     /* reinterpret casts to the same type. */                               \
@@ -469,6 +474,18 @@
         reinterpret_cast<Address>(reinterpret_cast<const C2440*>(value));   \
     HeapObject::WriteExternalPointerField<tag>(offset, isolate, the_value); \
   }
+
+#define DECL_EXTERNAL_POINTER_ACCESSORS(name, type) \
+  inline type name() const;                         \
+  DECL_EXTERNAL_POINTER_ACCESSORS_MAYBE_READ_ONLY_HOST(name, type)
+
+#define EXTERNAL_POINTER_ACCESSORS(holder, name, type, offset, tag)           \
+  type holder::name() const {                                                 \
+    i::Isolate* isolate_for_sandbox = GetIsolateForSandbox(*this);            \
+    return holder::name(isolate_for_sandbox);                                 \
+  }                                                                           \
+  EXTERNAL_POINTER_ACCESSORS_MAYBE_READ_ONLY_HOST(holder, name, type, offset, \
+                                                  tag)
 
 #define BIT_FIELD_ACCESSORS2(holder, get_field, set_field, name, BitField) \
   typename BitField::FieldType holder::name() const {                      \

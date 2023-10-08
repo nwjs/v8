@@ -670,7 +670,8 @@ namespace internal {
   F(WasmStringViewWtf8Encode, 6, 1)           \
   F(WasmStringViewWtf8Slice, 3, 1)            \
   F(WasmStringFromCodePoint, 1, 1)            \
-  F(WasmStringHash, 1, 1)
+  F(WasmStringHash, 1, 1)                     \
+  F(WasmSubstring, 3, 1)
 
 #define FOR_EACH_INTRINSIC_WASM_TEST(F, I)  \
   F(CountUnoptimizedWasmToJSWrapper, 1, 1)  \
@@ -984,8 +985,6 @@ V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream&, Runtime::FunctionId);
 // Constants used by interface to runtime functions.
 
 using AllocateDoubleAlignFlag = base::BitField<bool, 0, 1>;
-
-using AllowLargeObjectAllocationFlag = base::BitField<bool, 1, 1>;
 
 // A set of bits returned by Runtime_GetOptimizationStatus.
 // These bits must be in sync with bits defined in test/mjsunit/mjsunit.js

@@ -55,6 +55,12 @@ struct KeyIndexPair {
   index: intptr;
 }
 
+@export
+struct OrderedHashSetIndexPair {
+  table: OrderedHashSet;
+  index: intptr;
+}
+
 extern macro CollectionsBuiltinsAssembler::NextKeyIndexPairUnmodifiedTable(
     OrderedHashSet, int32, int32, intptr): KeyIndexPair labels Done;
 
@@ -72,17 +78,25 @@ struct UnmodifiedOrderedHashSetIterator {
   current: KeyIndexPair;
 }
 
+extern macro CollectionsBuiltinsAssembler::TransitionOrderedHashSetNoUpdate(
+    OrderedHashSet, intptr): OrderedHashSetIndexPair;
+
 extern macro CollectionsBuiltinsAssembler::NextKeyIndexPair(
     OrderedHashSet, intptr): KeyIndexPair labels Done;
 
 // The underlying table can be resized during iteration.
 struct OrderedHashSetIterator {
   macro Next(): JSAny labels Done {
+    // Transition the table and index in case it was modified during iteration.
+    const tableAndIndex =
+        TransitionOrderedHashSetNoUpdate(this.table, this.current.index);
+    this.table = tableAndIndex.table;
+    this.current.index = tableAndIndex.index;
     this.current = NextKeyIndexPair(this.table, this.current.index)
         otherwise Done;
     return this.current.key;
   }
-  const table: OrderedHashSet;
+  table: OrderedHashSet;
   current: KeyIndexPair;
 }
 
@@ -112,16 +126,19 @@ macro NewUnmodifiedOrderedHashSetIterator(table: OrderedHashSet):
     numBuckets: numBuckets,
     usedCapacity: usedCapacity,
     current: KeyIndexPair {
-      key: Undefined, index: 0
+      key:
+        Undefined, index: 0
     }
   };
 }
 
-macro NewOrderedHashSetIterator(table: OrderedHashSet): OrderedHashSetIterator {
+macro NewOrderedHashSetIterator(table: OrderedHashSet):
+    OrderedHashSetIterator {
   return OrderedHashSetIterator{
     table: table,
     current: KeyIndexPair {
-      key: Undefined, index: 0
+      key:
+        Undefined, index: 0
     }
   };
 }
@@ -133,15 +150,15 @@ struct KeyValueIndexTuple {
   index: intptr;
 }
 extern macro
-CollectionsBuiltinsAssembler::NextKeyValueIndexTupleUnmodifiedTable(
-    OrderedHashMap, int32, int32, intptr): KeyValueIndexTuple labels Done;
+    CollectionsBuiltinsAssembler::NextKeyValueIndexTupleUnmodifiedTable(
+        OrderedHashMap, int32, int32, intptr): KeyValueIndexTuple labels Done;
 
 extern macro CollectionsBuiltinsAssembler::NextKeyValueIndexTuple(
     OrderedHashMap, intptr): KeyValueIndexTuple labels Done;
 
 extern macro
-CollectionsBuiltinsAssembler::UnsafeStoreValueInOrderedHashMapEntry(
-    OrderedHashMap, Object, intptr): void;
+    CollectionsBuiltinsAssembler::UnsafeStoreValueInOrderedHashMapEntry(
+        OrderedHashMap, Object, intptr): void;
 
 const kOrderedHashMapEntrySize:
     constexpr int32 generates 'OrderedHashMap::kEntrySize';
@@ -194,7 +211,8 @@ macro NewUnmodifiedOrderedHashMapIterator(table: OrderedHashMap):
     numBuckets: numBuckets,
     usedCapacity: usedCapacity,
     current: KeyValueIndexTuple {
-      key: Undefined, value: Undefined, index: 0
+      key:
+        Undefined, value: Undefined, index: 0
     }
   };
 }
@@ -249,8 +267,9 @@ transitioning macro LoadKeyValuePair(implicit context: Context)(o: JSAny):
 }
 
 // https://tc39.es/proposal-set-methods/#sec-getsetrecord
-transitioning macro GetSetRecord(implicit context: Context)(
-    obj: JSAny, methodName: constexpr string): SetRecord {
+transitioning macro GetSetRecord(
+    implicit context: Context)(obj: JSAny,
+    methodName: constexpr string): SetRecord {
   // 1. If obj is not an Object, throw a TypeError exception.
   const obj = Cast<JSReceiver>(obj)
       otherwise ThrowTypeError(MessageTemplate::kArgumentIsNonObject, methodName);
@@ -289,8 +308,9 @@ transitioning macro GetSetRecord(implicit context: Context)(
 }
 
 // https://tc39.es/proposal-set-methods/#sec-getkeysiterator
-transitioning macro GetKeysIterator(implicit context: Context)(
-    set: JSReceiver, keys: Callable): iterator::IteratorRecord {
+transitioning macro GetKeysIterator(
+    implicit context: Context)(set: JSReceiver,
+    keys: Callable): iterator::IteratorRecord {
   // 1. Let keysIter be ? Call(setRec.[[Keys]], setRec.[[Set]]).
   const keysIter = Call(context, keys, set);
 
@@ -338,8 +358,9 @@ macro CheckSetRecordHasJSMapMethods(setRecord: SetRecord):
     goto HasUserProvidedMethods;
 }
 
-macro ShrinkOrderedHashSetIfNeeded(implicit context: Context)(
-    numberOfElements: Smi, resultSetData: OrderedHashSet): OrderedHashSet {
+macro ShrinkOrderedHashSetIfNeeded(
+    implicit context: Context)(numberOfElements: Smi,
+    resultSetData: OrderedHashSet): OrderedHashSet {
   dcheck(
       Convert<int32>(numberOfElements) ==
       LoadOrderedHashTableMetadata(

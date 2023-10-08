@@ -129,7 +129,7 @@ class V8_EXPORT_PRIVATE MacroAssembler
     }
   }
   void Move(Register dst, const Immediate& src);
-  void Move(Register dst, Smi src) { Move(dst, Immediate(src)); }
+  void Move(Register dst, Tagged<Smi> src) { Move(dst, Immediate(src)); }
   void Move(Register dst, Handle<HeapObject> src);
   void Move(Register dst, Register src);
   void Move(Register dst, Operand src);
@@ -171,6 +171,8 @@ class V8_EXPORT_PRIVATE MacroAssembler
 
   void Jump(const ExternalReference& reference);
   void Jump(Handle<Code> code_object, RelocInfo::Mode rmode);
+
+  void LoadLabelAddress(Register dst, Label* lbl);
 
   void LoadMap(Register destination, Register object);
 
@@ -361,7 +363,7 @@ class V8_EXPORT_PRIVATE MacroAssembler
   void Push(Operand src) { push(src); }
   void Push(Immediate value);
   void Push(Handle<HeapObject> handle) { push(Immediate(handle)); }
-  void Push(Smi smi) { Push(Immediate(smi)); }
+  void Push(Tagged<Smi> smi) { Push(Immediate(smi)); }
   void Push(XMMRegister src, Register scratch) {
     movd(scratch, src);
     push(scratch);

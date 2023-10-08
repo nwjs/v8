@@ -347,8 +347,8 @@ void CallOrConstructBuiltinsAssembler::CallOrConstructDoubleVarargs(
   CSA_DCHECK(this, WordNotEqual(intptr_length, IntPtrConstant(0)));
 
   // Allocate a new FixedArray of Objects.
-  TNode<FixedArray> new_elements = CAST(AllocateFixedArray(
-      new_kind, intptr_length, AllocationFlag::kAllowLargeObjectAllocation));
+  TNode<FixedArray> new_elements =
+      CAST(AllocateFixedArray(new_kind, intptr_length));
   // CopyFixedArrayElements does not distinguish between holey and packed for
   // its first argument, so we don't need to dispatch on {kind} here.
   CopyFixedArrayElements(PACKED_DOUBLE_ELEMENTS, elements, new_kind,
@@ -729,11 +729,8 @@ void CallOrConstructBuiltinsAssembler::CallFunctionTemplate(
 
     BIND(&receiver_needs_access_check);
     {
-      TNode<BoolT> has_access =
-          IsTrue(CallRuntime(Runtime::kAccessCheck, context, receiver));
-      GotoIf(has_access, &receiver_done);
-      // Access check failed, return undefined value.
-      args.PopAndReturn(UndefinedConstant());
+      CallRuntime(Runtime::kAccessCheck, context, receiver);
+      Goto(&receiver_done);
     }
 
     BIND(&receiver_done);

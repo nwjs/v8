@@ -49,7 +49,6 @@ LocalHeap::LocalHeap(Heap* heap, ThreadKind kind,
                      std::unique_ptr<PersistentHandles> persistent_handles)
     : heap_(heap),
       is_main_thread_(kind == ThreadKind::kMain),
-      is_in_trampoline_(false),
       state_(ThreadState::Parked()),
       allocation_failed_(false),
       main_thread_parked_(false),
@@ -490,7 +489,7 @@ void LocalHeap::InvokeGCEpilogueCallbacksInSafepoint(
 }
 
 void LocalHeap::NotifyObjectSizeChange(
-    HeapObject object, int old_size, int new_size,
+    Tagged<HeapObject> object, int old_size, int new_size,
     ClearRecordedSlots clear_recorded_slots) {
   heap()->NotifyObjectSizeChange(object, old_size, new_size,
                                  clear_recorded_slots);

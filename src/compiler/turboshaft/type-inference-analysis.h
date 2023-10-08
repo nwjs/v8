@@ -193,6 +193,7 @@ class TypeInferenceAnalysis {
           ProcessWordBinop(index, op.Cast<WordBinopOp>());
           break;
         case Opcode::kWord32PairBinop:
+        case Opcode::kAtomicWord32Pair:
         case Opcode::kPendingLoopPhi:
           // Input graph must not contain these op codes.
           UNREACHABLE();
@@ -233,6 +234,7 @@ class TypeInferenceAnalysis {
         case Opcode::kTaggedBitcast:
         case Opcode::kSelect:
         case Opcode::kLoad:
+        case Opcode::kAtomicRMW:
         case Opcode::kAllocate:
         case Opcode::kDecodeExternalPointer:
         case Opcode::kParameter:
@@ -303,9 +305,26 @@ class TypeInferenceAnalysis {
         case Opcode::kIsNull:
         case Opcode::kNull:
         case Opcode::kAssertNotNull:
+        case Opcode::kRttCanon:
+        case Opcode::kWasmTypeCheck:
+        case Opcode::kWasmTypeCast:
+        case Opcode::kStructGet:
+        case Opcode::kStructSet:
+        case Opcode::kArrayGet:
+        case Opcode::kArraySet:
+        case Opcode::kArrayLength:
         case Opcode::kSimd128Constant:
         case Opcode::kSimd128Binop:
         case Opcode::kSimd128Unary:
+        case Opcode::kSimd128Shift:
+        case Opcode::kSimd128Test:
+        case Opcode::kSimd128Splat:
+        case Opcode::kSimd128Ternary:
+        case Opcode::kSimd128ExtractLane:
+        case Opcode::kSimd128ReplaceLane:
+        case Opcode::kSimd128LaneMemory:
+        case Opcode::kSimd128LoadTransform:
+        case Opcode::kSimd128Shuffle:
 #endif
           // TODO(nicohartmann@): Support remaining operations. For now we
           // compute fallback types.

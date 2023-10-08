@@ -53,7 +53,7 @@ CodeKinds JSFunction::GetAvailableCodeKinds() const {
   // Check the optimized code cache.
   if (has_feedback_vector() && feedback_vector()->has_optimized_code() &&
       !feedback_vector()->optimized_code()->marked_for_deoptimization()) {
-    Code code = feedback_vector()->optimized_code();
+    Tagged<Code> code = feedback_vector()->optimized_code();
     DCHECK(CodeKindIsOptimizedJSFunction(code->kind()));
     result |= CodeKindToCodeKindFlag(code->kind());
   }
@@ -1083,13 +1083,13 @@ MaybeHandle<Map> JSFunction::GetDerivedMap(Isolate* isolate,
                                          isolate);
     prototype = handle(realm_constructor->prototype(), isolate);
   }
-
-  Handle<Map> map = Map::CopyInitialMap(isolate, constructor_initial_map);
-  map->set_new_target_is_base(false);
   CHECK(IsJSReceiver(*prototype));
-  if (map->prototype() != *prototype)
-    Map::SetPrototype(isolate, map, Handle<HeapObject>::cast(prototype));
-  map->SetConstructor(*constructor);
+  DCHECK_EQ(constructor_initial_map->constructor_or_back_pointer(),
+            *constructor);
+
+  Handle<Map> map = Map::TransitionToDerivedMap(
+      isolate, constructor_initial_map, Handle<HeapObject>::cast(prototype));
+  DCHECK_EQ(map->constructor_or_back_pointer(), *constructor);
   return map;
 }
 
@@ -1132,7 +1132,7 @@ MaybeHandle<Map> JSFunction::GetDerivedRabGsabTypedArrayMap(
   }
   {
     DisallowHeapAllocation no_alloc;
-    NativeContext context = isolate->context()->native_context();
+    Tagged<NativeContext> context = isolate->context()->native_context();
     int ctor_index =
         TypedArrayElementsKindToConstructorIndex(map->elements_kind());
     if (*new_target == context->get(ctor_index)) {
@@ -1199,7 +1199,7 @@ bool UseFastFunctionNameLookup(Isolate* isolate, Map map) {
     return false;
   }
   DCHECK(!map->is_dictionary_map());
-  HeapObject value;
+  Tagged<HeapObject> value;
   ReadOnlyRoots roots(isolate);
   auto descriptors = map->instance_descriptors(isolate);
   InternalIndex kNameIndex{JSFunction::kNameDescriptorIndex};

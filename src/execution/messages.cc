@@ -117,7 +117,7 @@ void MessageHandler::ReportMessage(Isolate* isolate, const MessageLocation* loc,
   // and ignore scheduled exceptions callbacks can throw.
 
   // We pass the exception object into the message handler callback though.
-  Object exception_object = ReadOnlyRoots(isolate).undefined_value();
+  Tagged<Object> exception_object = ReadOnlyRoots(isolate).undefined_value();
   if (isolate->has_pending_exception()) {
     exception_object = isolate->pending_exception();
   }
@@ -164,9 +164,8 @@ void MessageHandler::ReportMessageNoExceptions(
   v8::Local<v8::Message> api_message_obj = v8::Utils::MessageToLocal(message);
   int error_level = api_message_obj->ErrorLevel();
 
-  Handle<TemplateList> global_listeners =
-      isolate->factory()->message_listeners();
-  int global_length = global_listeners->length();
+  Handle<ArrayList> global_listeners = isolate->factory()->message_listeners();
+  int global_length = global_listeners->Length();
   if (global_length == 0) {
     DefaultMessageReport(isolate, loc, message);
     if (isolate->has_scheduled_exception()) {
@@ -175,9 +174,9 @@ void MessageHandler::ReportMessageNoExceptions(
   } else {
     for (int i = 0; i < global_length; i++) {
       HandleScope scope(isolate);
-      if (IsUndefined(global_listeners->get(i), isolate)) continue;
-      FixedArray listener = FixedArray::cast(global_listeners->get(i));
-      Foreign callback_obj = Foreign::cast(listener->get(0));
+      if (IsUndefined(global_listeners->Get(i), isolate)) continue;
+      Tagged<FixedArray> listener = FixedArray::cast(global_listeners->Get(i));
+      Tagged<Foreign> callback_obj = Foreign::cast(listener->get(0));
       int32_t message_levels =
           static_cast<int32_t>(Smi::ToInt(listener->get(2)));
       if (!(message_levels & error_level)) {
@@ -836,8 +835,9 @@ Handle<JSObject> ErrorUtils::NewIteratorError(Isolate* isolate,
   return isolate->factory()->NewTypeError(id, callsite);
 }
 
-Object ErrorUtils::ThrowSpreadArgError(Isolate* isolate, MessageTemplate id,
-                                       Handle<Object> object) {
+Tagged<Object> ErrorUtils::ThrowSpreadArgError(Isolate* isolate,
+                                               MessageTemplate id,
+                                               Handle<Object> object) {
   MessageLocation location;
   Handle<String> callsite;
   if (ComputeLocation(isolate, &location)) {
@@ -891,9 +891,8 @@ Handle<JSObject> ErrorUtils::NewConstructedNonConstructable(
   return isolate->factory()->NewTypeError(id, callsite);
 }
 
-Object ErrorUtils::ThrowLoadFromNullOrUndefined(Isolate* isolate,
-                                                Handle<Object> object,
-                                                MaybeHandle<Object> key) {
+Tagged<Object> ErrorUtils::ThrowLoadFromNullOrUndefined(
+    Isolate* isolate, Handle<Object> object, MaybeHandle<Object> key) {
   DCHECK(IsNullOrUndefined(*object));
 
   MaybeHandle<String> maybe_property_name;

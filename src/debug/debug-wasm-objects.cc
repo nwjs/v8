@@ -72,7 +72,7 @@ Handle<Map> GetOrCreateDebugProxyMap(
     return handle(Map::cast(maps->get(id)), isolate);
   }
   auto tmp = (*create_template_fn)(reinterpret_cast<v8::Isolate*>(isolate));
-  auto fun = ApiNatives::InstantiateFunction(Utils::OpenHandle(*tmp))
+  auto fun = ApiNatives::InstantiateFunction(isolate, Utils::OpenHandle(*tmp))
                  .ToHandleChecked();
   auto map = JSFunction::GetDerivedMap(isolate, fun, fun).ToHandleChecked();
   Map::SetPrototype(isolate, map, isolate->factory()->null_value());
@@ -921,7 +921,8 @@ Handle<WasmValueObject> WasmValueObject::New(
     case wasm::kRef: {
       Handle<Object> ref = value.to_ref();
       if (IsWasmStruct(*ref)) {
-        WasmTypeInfo type_info = ref->GetHeapObject()->map()->wasm_type_info();
+        Tagged<WasmTypeInfo> type_info =
+            HeapObject::cast(*ref)->map()->wasm_type_info();
         wasm::ValueType type = wasm::ValueType::FromIndex(
             wasm::ValueKind::kRef, type_info->type_index());
         // The cast is safe; structs always have the instance defined.
@@ -931,7 +932,8 @@ Handle<WasmValueObject> WasmValueObject::New(
         t = GetRefTypeName(isolate, type, module->native_module());
         v = StructProxy::Create(isolate, Handle<WasmStruct>::cast(ref), module);
       } else if (IsWasmArray(*ref)) {
-        WasmTypeInfo type_info = ref->GetHeapObject()->map()->wasm_type_info();
+        Tagged<WasmTypeInfo> type_info =
+            HeapObject::cast(*ref)->map()->wasm_type_info();
         wasm::ValueType type = wasm::ValueType::FromIndex(
             wasm::ValueKind::kRef, type_info->type_index());
         // The cast is safe; arrays always have the instance defined.

@@ -175,8 +175,9 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
   Register feedback_vector = r4;
   __ LoadTaggedField(feedback_vector,
                      FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
-  __ LoadTaggedField(feedback_vector,
-                     FieldMemOperand(feedback_vector, Cell::kValueOffset));
+  __ LoadTaggedField(
+      feedback_vector,
+      FieldMemOperand(feedback_vector, FeedbackCell::kValueOffset));
 
   Label install_baseline_code;
   // Check if feedback vector is valid. If not, call prepare for baseline to
@@ -1242,8 +1243,9 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
   Register feedback_vector = ip;
   __ LoadTaggedField(feedback_vector,
                      FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
-  __ LoadTaggedField(feedback_vector,
-                     FieldMemOperand(feedback_vector, Cell::kValueOffset));
+  __ LoadTaggedField(
+      feedback_vector,
+      FieldMemOperand(feedback_vector, FeedbackCell::kValueOffset));
   __ AssertFeedbackVector(feedback_vector, r1);
 
   // Check for an tiering state.
@@ -1423,8 +1425,9 @@ void Builtins::Generate_InterpreterEntryTrampoline(
   Register feedback_vector = r4;
   __ LoadTaggedField(feedback_vector,
                      FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
-  __ LoadTaggedField(feedback_vector,
-                     FieldMemOperand(feedback_vector, Cell::kValueOffset));
+  __ LoadTaggedField(
+      feedback_vector,
+      FieldMemOperand(feedback_vector, FeedbackCell::kValueOffset));
 
   Label push_stack_frame;
   // Check if feedback vector is valid. If valid, check for optimized code
@@ -1615,8 +1618,9 @@ void Builtins::Generate_InterpreterEntryTrampoline(
     __ LoadTaggedField(
         feedback_vector,
         FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
-    __ LoadTaggedField(feedback_vector,
-                       FieldMemOperand(feedback_vector, Cell::kValueOffset));
+    __ LoadTaggedField(
+        feedback_vector,
+        FieldMemOperand(feedback_vector, FeedbackCell::kValueOffset));
 
     Label install_baseline_code;
     // Check if feedback vector is valid. If not, call prepare for baseline to
@@ -1958,7 +1962,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
   // Set the return address to the correct point in the interpreter entry
   // trampoline.
   Label builtin_trampoline, trampoline_loaded;
-  Smi interpreter_entry_return_pc_offset(
+  Tagged<Smi> interpreter_entry_return_pc_offset(
       masm->isolate()->heap()->interpreter_entry_return_pc_offset());
   DCHECK_NE(interpreter_entry_return_pc_offset, Smi::zero());
 
@@ -3084,13 +3088,7 @@ void Builtins::Generate_WasmDebugBreak(MacroAssembler* masm) {
   __ Ret();
 }
 
-void Builtins::Generate_GenericJSToWasmWrapper(MacroAssembler* masm) {
-  // TODO(v8:10701): Implement for this platform.
-  __ Trap();
-}
-
-void Builtins::Generate_WasmReturnPromiseOnSuspend(MacroAssembler* masm) {
-  // TODO(v8:12191): Implement for this platform.
+void Builtins::Generate_WasmReturnPromiseOnSuspendAsm(MacroAssembler* masm) {
   __ Trap();
 }
 
@@ -3116,9 +3114,7 @@ void Builtins::Generate_WasmOnStackReplace(MacroAssembler* masm) {
   __ Trap();
 }
 
-void Builtins::Generate_NewGenericJSToWasmWrapper(MacroAssembler* masm) {
-  __ Trap();
-}
+void Builtins::Generate_JSToWasmWrapperAsm(MacroAssembler* masm) { __ Trap(); }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,

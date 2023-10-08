@@ -98,7 +98,7 @@ void SourceCodeCache::Iterate(RootVisitor* v) {
 bool SourceCodeCache::Lookup(Isolate* isolate, base::Vector<const char> name,
                              Handle<SharedFunctionInfo>* handle) {
   for (int i = 0; i < cache_->length(); i += 2) {
-    SeqOneByteString str = SeqOneByteString::cast(cache_->get(i));
+    Tagged<SeqOneByteString> str = SeqOneByteString::cast(cache_->get(i));
     if (str->IsOneByteEqualTo(name)) {
       *handle = Handle<SharedFunctionInfo>(
           SharedFunctionInfo::cast(cache_->get(i + 1)), isolate);
@@ -538,7 +538,7 @@ V8_NOINLINE void SetConstructorInstanceType(Isolate* isolate,
   DCHECK(InstanceTypeChecker::IsJSFunction(constructor_type));
   DCHECK_NE(constructor_type, JS_FUNCTION_TYPE);
 
-  Map map = constructor->map();
+  Tagged<Map> map = constructor->map();
 
   // Check we don't accidentally change one of the existing maps.
   DCHECK_NE(map, *isolate->strict_function_map());
@@ -607,15 +607,6 @@ V8_NOINLINE Handle<JSFunction> CreateSharedObjectConstructor(
           .set_map(isolate->strict_function_with_readonly_prototype_map())
           .Build();
   constructor->set_prototype_or_initial_map(*instance_map, kReleaseStore);
-
-  // Create a new {constructor, non-instance_prototype} tuple and store it
-  // in Map::constructor field.
-  Handle<Tuple2> non_instance_prototype_constructor_tuple =
-      isolate->factory()->NewTuple2(isolate->function_function(),
-                                    factory->null_value(),
-                                    AllocationType::kOld);
-  constructor->map()->set_has_non_instance_prototype(true);
-  constructor->map()->SetConstructor(*non_instance_prototype_constructor_tuple);
 
   JSObject::AddProperty(
       isolate, constructor, factory->has_instance_symbol(),
@@ -767,7 +758,7 @@ Handle<JSFunction> Genesis::CreateEmptyFunction() {
   Handle<WeakFixedArray> infos = factory()->NewWeakFixedArray(2);
   script->set_shared_function_infos(*infos);
   ReadOnlyRoots roots{isolate()};
-  SharedFunctionInfo sfi = empty_function->shared();
+  Tagged<SharedFunctionInfo> sfi = empty_function->shared();
   sfi->set_raw_scope_info(roots.empty_function_scope_info());
   sfi->DontAdaptArguments();
   sfi->SetScript(roots, *script, 1);
@@ -899,7 +890,7 @@ void Genesis::CreateObjectFunction(Handle<JSFunction> empty_function) {
 
   {
     // Finish setting up Object function's initial map.
-    Map initial_map = object_fun->initial_map();
+    Tagged<Map> initial_map = object_fun->initial_map();
     initial_map->set_elements_kind(HOLEY_ELEMENTS);
   }
 
@@ -1242,7 +1233,7 @@ namespace {
 void ReplaceAccessors(Isolate* isolate, Handle<Map> map, Handle<String> name,
                       PropertyAttributes attributes,
                       Handle<AccessorPair> accessor_pair) {
-  DescriptorArray descriptors = map->instance_descriptors(isolate);
+  Tagged<DescriptorArray> descriptors = map->instance_descriptors(isolate);
   InternalIndex entry = descriptors->SearchWithCache(isolate, *name, *map);
   Descriptor d = Descriptor::AccessorConstant(name, accessor_pair, attributes);
   descriptors->Replace(entry, &d);
@@ -1264,7 +1255,7 @@ void InitializeJSArrayMaps(Isolate* isolate, Handle<Context> native_context,
        i < kFastElementsKindCount; ++i) {
     Handle<Map> new_map;
     ElementsKind next_kind = GetFastElementsKindFromSequenceIndex(i);
-    Map maybe_elements_transition = current_map->ElementsTransitionMap(
+    Tagged<Map> maybe_elements_transition = current_map->ElementsTransitionMap(
         isolate, ConcurrencyMode::kSynchronous);
     if (!maybe_elements_transition.is_null()) {
       new_map = handle(maybe_elements_transition, isolate);
@@ -1294,14 +1285,15 @@ void Genesis::AddRestrictedFunctionProperties(Handle<JSFunction> empty) {
                    accessors);
 }
 
-static void AddToWeakNativeContextList(Isolate* isolate, Context context) {
+static void AddToWeakNativeContextList(Isolate* isolate,
+                                       Tagged<Context> context) {
   DCHECK(IsNativeContext(context));
   Heap* heap = isolate->heap();
 #ifdef DEBUG
   {
     DCHECK(IsUndefined(context->next_context_link(), isolate));
     // Check that context is not in the list yet.
-    for (Object current = heap->native_contexts_list();
+    for (Tagged<Object> current = heap->native_contexts_list();
          !IsUndefined(current, isolate);
          current = Context::cast(current)->next_context_link()) {
       DCHECK(current != context);
@@ -1322,12 +1314,6 @@ void Genesis::CreateRoots() {
 
   AddToWeakNativeContextList(isolate(), *native_context());
   isolate()->set_context(*native_context());
-
-  // Allocate the message listeners object.
-  {
-    Handle<TemplateList> list = TemplateList::New(isolate(), 1);
-    native_context()->set_message_listeners(*list);
-  }
 }
 
 void Genesis::InstallGlobalThisBinding() {
@@ -4417,9 +4403,8 @@ void Genesis::InitializeIteratorFunctions() {
         native_context->async_function_map(), kReleaseStore);
     async_function_constructor->shared()->DontAdaptArguments();
     async_function_constructor->shared()->set_length(1);
-    InstallWithIntrinsicDefaultProto(
-        isolate, async_function_constructor,
-        Context::ASYNC_FUNCTION_FUNCTION_INDEX);
+    InstallWithIntrinsicDefaultProto(isolate, async_function_constructor,
+                                     Context::ASYNC_FUNCTION_FUNCTION_INDEX);
 
     native_context->set_async_function_constructor(*async_function_constructor);
     JSObject::ForceSetPrototype(isolate, async_function_constructor,
@@ -5874,7 +5859,7 @@ bool Genesis::InstallABunchOfRandomThings() {
   // and the String function has been set up.
   Handle<JSFunction> string_function(native_context()->string_function(),
                                      isolate());
-  JSObject string_function_prototype =
+  Tagged<JSObject> string_function_prototype =
       JSObject::cast(string_function->initial_map()->prototype());
   DCHECK(string_function_prototype->HasFastProperties());
   native_context()->set_string_function_prototype_map(
@@ -5930,7 +5915,7 @@ bool Genesis::InstallABunchOfRandomThings() {
                           isolate());
 
     // Verification of important array prototype properties.
-    Object length = proto->length();
+    Tagged<Object> length = proto->length();
     CHECK(IsSmi(length));
     CHECK_EQ(Smi::ToInt(length), 0);
     CHECK(proto->HasSmiOrObjectElements());
@@ -6046,7 +6031,7 @@ bool Genesis::InstallABunchOfRandomThings() {
         Handle<JSArray>::cast(factory()->NewJSObjectFromMap(template_map));
     {
       DisallowGarbageCollection no_gc;
-      JSArray raw = *template_object;
+      Tagged<JSArray> raw = *template_object;
       raw->set_elements(ReadOnlyRoots(isolate()).empty_fixed_array());
       raw->set_length(Smi::FromInt(0));
     }
@@ -6081,7 +6066,8 @@ bool Genesis::InstallABunchOfRandomThings() {
         .ToChecked();
     {
       DisallowGarbageCollection no_gc;
-      DescriptorArray desc = template_object->map()->instance_descriptors();
+      Tagged<DescriptorArray> desc =
+          template_object->map()->instance_descriptors();
       {
         // Verify TemplateLiteralObject::kRawOffset
         InternalIndex descriptor_index = desc->Search(
@@ -6309,7 +6295,7 @@ void Genesis::InitializeMapCaches() {
       cache->Set(i, HeapObjectReference::ClearedValue(isolate()));
     }
     native_context()->set_map_cache(*cache);
-    Map initial = native_context()->object_function()->initial_map();
+    Tagged<Map> initial = native_context()->object_function()->initial_map();
     cache->Set(0, HeapObjectReference::Weak(initial));
     cache->Set(initial->GetInObjectProperties(),
                HeapObjectReference::Weak(initial));
@@ -6619,7 +6605,7 @@ void Genesis::TransferNamedProperties(Handle<JSObject> from,
         from->property_dictionary_swiss(), isolate());
     ReadOnlyRoots roots(isolate());
     for (InternalIndex entry : properties->IterateEntriesOrdered()) {
-      Object raw_key;
+      Tagged<Object> raw_key;
       if (!properties->ToKey(roots, entry, &raw_key)) continue;
 
       DCHECK(IsName(raw_key));
@@ -6644,7 +6630,7 @@ void Genesis::TransferNamedProperties(Handle<JSObject> from,
     ReadOnlyRoots roots(isolate());
     for (int i = 0; i < key_indices->length(); i++) {
       InternalIndex key_index(Smi::ToInt(key_indices->get(i)));
-      Object raw_key = properties->KeyAt(key_index);
+      Tagged<Object> raw_key = properties->KeyAt(key_index);
       DCHECK(properties->IsKey(roots, raw_key));
       DCHECK(IsName(raw_key));
       Handle<Name> key(Name::cast(raw_key), isolate());
@@ -6709,7 +6695,7 @@ Handle<Map> Genesis::CreateInitialMapForArraySubclass(int size,
 
   // length descriptor.
   {
-    JSFunction array_function = native_context()->array_function();
+    Tagged<JSFunction> array_function = native_context()->array_function();
     Handle<DescriptorArray> array_descriptors(
         array_function->initial_map()->instance_descriptors(isolate()),
         isolate());
@@ -6750,9 +6736,10 @@ Genesis::Genesis(
       // The global proxy function to reinitialize this global proxy is in the
       // context that is yet to be deserialized. We need to prepare a global
       // proxy of the correct size.
-      Object size = isolate->heap()->serialized_global_proxy_sizes()->get(
-          static_cast<int>(context_snapshot_index) -
-          SnapshotCreatorImpl::kFirstAddtlContextIndex);
+      Tagged<Object> size =
+          isolate->heap()->serialized_global_proxy_sizes()->get(
+              static_cast<int>(context_snapshot_index) -
+              SnapshotCreatorImpl::kFirstAddtlContextIndex);
       instance_size = Smi::ToInt(size);
     } else {
       instance_size = JSGlobalProxy::SizeWithEmbedderFields(
@@ -6846,7 +6833,7 @@ Genesis::Genesis(
     // experimental natives.
     Handle<JSFunction> string_function(native_context()->string_function(),
                                        isolate);
-    JSObject string_function_prototype =
+    Tagged<JSObject> string_function_prototype =
         JSObject::cast(string_function->initial_map()->prototype());
     DCHECK(string_function_prototype->HasFastProperties());
     native_context()->set_string_function_prototype_map(

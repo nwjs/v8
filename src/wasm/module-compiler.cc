@@ -1174,10 +1174,10 @@ class CompileLazyTimingScope {
 
 }  // namespace
 
-bool CompileLazy(Isolate* isolate, WasmInstanceObject instance,
+bool CompileLazy(Isolate* isolate, Tagged<WasmInstanceObject> instance,
                  int func_index) {
   DisallowGarbageCollection no_gc;
-  WasmModuleObject module_object = instance->module_object();
+  Tagged<WasmModuleObject> module_object = instance->module_object();
   NativeModule* native_module = module_object->native_module();
   Counters* counters = isolate->counters();
 
@@ -1224,12 +1224,10 @@ bool CompileLazy(Isolate* isolate, WasmInstanceObject instance,
       native_module->PublishCode(native_module->AddCompiledCode(result));
   DCHECK_EQ(func_index, code->index());
 
-  if (WasmCode::ShouldBeLogged(isolate)) {
-    Object url_obj = module_object->script()->name();
-    DCHECK(IsString(url_obj) || IsUndefined(url_obj));
-    std::unique_ptr<char[]> url =
-        IsString(url_obj) ? String::cast(url_obj)->ToCString() : nullptr;
-    code->LogCode(isolate, url.get(), module_object->script()->id());
+  if (V8_UNLIKELY(native_module->log_code())) {
+    GetWasmEngine()->LogCode(base::VectorOf(&code, 1));
+    // Log the code immediately in the current isolate.
+    GetWasmEngine()->LogOutstandingCodesForIsolate(isolate);
   }
 
   counters->wasm_lazily_compiled_functions()->Increment();
@@ -1270,12 +1268,13 @@ void ThrowLazyCompilationError(Isolate* isolate,
 
 class TransitiveTypeFeedbackProcessor {
  public:
-  static void Process(WasmInstanceObject instance, int func_index) {
+  static void Process(Tagged<WasmInstanceObject> instance, int func_index) {
     TransitiveTypeFeedbackProcessor{instance, func_index}.ProcessQueue();
   }
 
  private:
-  TransitiveTypeFeedbackProcessor(WasmInstanceObject instance, int func_index)
+  TransitiveTypeFeedbackProcessor(Tagged<WasmInstanceObject> instance,
+                                  int func_index)
       : instance_(instance),
         module_(instance->module()),
         mutex_guard(&module_->type_feedback.mutex),
@@ -1325,7 +1324,8 @@ class TransitiveTypeFeedbackProcessor {
 
 class FeedbackMaker {
  public:
-  FeedbackMaker(WasmInstanceObject instance, int func_index, int num_calls)
+  FeedbackMaker(Tagged<WasmInstanceObject> instance, int func_index,
+                int num_calls)
       : instance_(instance),
         num_imported_functions_(
             static_cast<int>(instance->module()->num_imported_functions)),
@@ -1333,9 +1333,10 @@ class FeedbackMaker {
     result_.reserve(num_calls);
   }
 
-  void AddCandidate(Object maybe_function, int count) {
+  void AddCandidate(Tagged<Object> maybe_function, int count) {
     if (!IsWasmInternalFunction(maybe_function)) return;
-    WasmInternalFunction function = WasmInternalFunction::cast(maybe_function);
+    Tagged<WasmInternalFunction> function =
+        WasmInternalFunction::cast(maybe_function);
     if (function->ref() != instance_) {
       // Not a wasm function, or not a function declared in this instance.
       return;
@@ -1402,25 +1403,26 @@ class FeedbackMaker {
 
 void TransitiveTypeFeedbackProcessor::ProcessFunction(int func_index) {
   int which_vector = declared_function_index(module_, func_index);
-  Object maybe_feedback = instance_->feedback_vectors()->get(which_vector);
+  Tagged<Object> maybe_feedback =
+      instance_->feedback_vectors()->get(which_vector);
   if (!IsFixedArray(maybe_feedback)) return;
-  FixedArray feedback = FixedArray::cast(maybe_feedback);
+  Tagged<FixedArray> feedback = FixedArray::cast(maybe_feedback);
   base::Vector<uint32_t> call_direct_targets =
       module_->type_feedback.feedback_for_function[func_index]
           .call_targets.as_vector();
   DCHECK_EQ(feedback->length(), call_direct_targets.size() * 2);
   FeedbackMaker fm(instance_, func_index, feedback->length() / 2);
   for (int i = 0; i < feedback->length(); i += 2) {
-    Object value = feedback->get(i);
+    Tagged<Object> value = feedback->get(i);
     if (IsWasmInternalFunction(value)) {
       // Monomorphic.
       int count = Smi::cast(feedback->get(i + 1)).value();
       fm.AddCandidate(value, count);
     } else if (IsFixedArray(value)) {
       // Polymorphic.
-      FixedArray polymorphic = FixedArray::cast(value);
+      Tagged<FixedArray> polymorphic = FixedArray::cast(value);
       for (int j = 0; j < polymorphic->length(); j += 2) {
-        Object function = polymorphic->get(j);
+        Tagged<Object> function = polymorphic->get(j);
         int count = Smi::cast(polymorphic->get(j + 1)).value();
         fm.AddCandidate(function, count);
       }
@@ -1446,7 +1448,7 @@ void TransitiveTypeFeedbackProcessor::ProcessFunction(int func_index) {
   feedback_for_function_[func_index].feedback_vector = std::move(result);
 }
 
-void TriggerTierUp(WasmInstanceObject instance, int func_index) {
+void TriggerTierUp(Tagged<WasmInstanceObject> instance, int func_index) {
   NativeModule* native_module = instance->module_object()->native_module();
   CompilationStateImpl* compilation_state =
       Impl(native_module->compilation_state());
@@ -1485,7 +1487,7 @@ void TriggerTierUp(WasmInstanceObject instance, int func_index) {
   compilation_state->AddTopTierPriorityCompilationUnit(tiering_unit, priority);
 }
 
-void TierUpNowForTesting(Isolate* isolate, WasmInstanceObject instance,
+void TierUpNowForTesting(Isolate* isolate, Tagged<WasmInstanceObject> instance,
                          int func_index) {
   NativeModule* native_module = instance->module_object()->native_module();
   if (native_module->enabled_features().has_inlining()) {
@@ -1499,7 +1501,7 @@ void TierUpNowForTesting(Isolate* isolate, WasmInstanceObject instance,
 
 namespace {
 
-void RecordStats(Code code, Counters* counters) {
+void RecordStats(Tagged<Code> code, Counters* counters) {
   if (!code->has_instruction_stream()) return;
   counters->wasm_generated_code_size()->Increment(code->body_size());
   counters->wasm_reloc_size()->Increment(code->relocation_size());
@@ -1680,7 +1682,8 @@ int AddImportWrapperUnits(NativeModule* native_module,
     const WasmFunction& function =
         native_module->module()->functions[func_index];
     if (!IsJSCompatibleSignature(function.sig)) continue;
-    if (UseGenericWasmToJSWrapper(function.sig, kNoSuspend)) {
+    if (UseGenericWasmToJSWrapper(kDefaultImportCallKind, function.sig,
+                                  kNoSuspend)) {
       continue;
     }
     uint32_t canonical_type_index =
@@ -3612,11 +3615,11 @@ void CompilationStateImpl::FinalizeJSToWasmWrappers(Isolate* isolate,
     // Note: The code is either the compiled signature-specific wrapper or the
     // generic wrapper built-in.
     Handle<Code> code = unit->Finalize();
-    uint32_t index =
-        GetExportWrapperIndex(unit->canonical_sig_index(), unit->is_import());
-    isolate->heap()->js_to_wasm_wrappers()->Set(index,
-                                                MaybeObject::FromObject(*code));
     if (!code->is_builtin()) {
+      uint32_t index =
+          GetExportWrapperIndex(unit->canonical_sig_index(), unit->is_import());
+      isolate->heap()->js_to_wasm_wrappers()->Set(
+          index, MaybeObject::FromObject(*code));
       // Do not increase code stats for non-jitted wrappers.
       RecordStats(*code, isolate->counters());
       isolate->counters()->wasm_compiled_export_wrapper()->Increment(1);
@@ -3813,7 +3816,7 @@ void CompilationStateImpl::PublishCode(
   std::vector<WasmCode*> published_code =
       native_module_->PublishCode(std::move(code));
   // Defer logging code in case wire bytes were not fully received yet.
-  if (native_module_->HasWireBytes()) {
+  if (native_module_->log_code() && native_module_->HasWireBytes()) {
     GetWasmEngine()->LogCode(base::VectorOf(published_code));
   }
 
@@ -4024,10 +4027,10 @@ void CompileJsToWasmWrappers(Isolate* isolate, const WasmModule* module) {
     JSToWasmWrapperCompilationUnit* unit = pair.second.get();
     DCHECK_EQ(isolate, unit->isolate());
     Handle<Code> code = unit->Finalize();
-    int wrapper_index = GetExportWrapperIndex(key.second, key.first);
-    isolate->heap()->js_to_wasm_wrappers()->Set(
-        wrapper_index, HeapObjectReference::Strong(*code));
     if (!code->is_builtin()) {
+      int wrapper_index = GetExportWrapperIndex(key.second, key.first);
+      isolate->heap()->js_to_wasm_wrappers()->Set(
+          wrapper_index, HeapObjectReference::Strong(*code));
       // Do not increase code stats for non-jitted wrappers.
       RecordStats(*code, isolate->counters());
       isolate->counters()->wasm_compiled_export_wrapper()->Increment(1);

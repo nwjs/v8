@@ -159,6 +159,7 @@ check(/[[2-57-8]--[0-3]--[5-7]]/v, Array.from('48'));
 check(/[[0-57-8]--[1-34]--[5-7]]/v, Array.from('08'));
 check(/[\d--[^02468]]/v, Array.from('02468'));
 check(/[\d--[^13579]]/v, Array.from('13579'));
+check(/[[a-c]--\0]/v, Array.from('abc'));
 
 // Ignore-Case
 check(/[Ā-č]/v, Array.from('ĀāĂăĄąĆć'), Array.from('abc'));
@@ -252,5 +253,9 @@ assertTrue(
     /[\p{RGI_Emoji_Flag_Sequence}\p{RGI_Emoji_Tag_Sequence}]/v.test('🇨🇭'));
 assertTrue(/[\p{RGI_Emoji_Flag_Sequence}\p{RGI_Emoji_Tag_Sequence}]/v.test(
     '🏴󠁧󠁢󠁷󠁬󠁳󠁿'));
+
+// Check new case-folding semantics.
 assertEquals('XXXXXX4#', 'aAbBcC4#'.replaceAll(/\p{Lowercase_Letter}/giv, 'X'));
 assertEquals('XXXXXX4#', 'aAbBcC4#'.replaceAll(/[^\P{Lowercase_Letter}]/giv, 'X'));
+assertFalse(/\P{ASCII}/iv.test('K'));
+assertFalse(/^\P{Lowercase}/iv.test('A'));

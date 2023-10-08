@@ -20,7 +20,7 @@ class WithInnerPointerResolutionMixin : public TMixin {
   Address ResolveInnerPointer(Address maybe_inner_ptr) {
     return ConservativeStackVisitor::ForTesting(
                this->isolate(), GarbageCollector::MARK_COMPACTOR)
-        .FindBasePtrForMarking(maybe_inner_ptr);
+        .FindBasePtr(maybe_inner_ptr);
   }
 };
 
@@ -236,10 +236,7 @@ class InnerPointerResolutionTest
     DCHECK_GT(object.size, offset);
     Address base_ptr = ResolveInnerPointer(object.address + offset);
     bool should_return_null =
-        !IsPageAlive(object.page_id) || (object.type == ObjectRequest::FREE) ||
-        (object.type == ObjectRequest::REGULAR &&
-         (object.marked == ObjectRequest::MARKED_AREA ||
-          (object.marked == ObjectRequest::MARKED && offset < kTaggedSize)));
+        !IsPageAlive(object.page_id) || object.type == ObjectRequest::FREE;
     if (should_return_null)
       EXPECT_EQ(kNullAddress, base_ptr);
     else
@@ -637,8 +634,8 @@ TEST_F(InnerPointerResolutionHeapTest, UnusedRegularYoungPages) {
     weak2.Reset(v8_isolate(), Utils::FixedArrayToLocal(h2));
     weak1.SetWeak();
     weak2.SetWeak();
-    auto obj1 = h1->GetHeapObject();
-    auto obj2 = h2->GetHeapObject();
+    auto obj1 = *h1;
+    auto obj2 = *h2;
     page1 = Page::FromHeapObject(obj1);
     EXPECT_TRUE(!page1->IsLargePage());
     EXPECT_TRUE(v8_flags.minor_ms || page1->IsToPage());
@@ -651,13 +648,13 @@ TEST_F(InnerPointerResolutionHeapTest, UnusedRegularYoungPages) {
     // page2. Keep a strong reference to this object.
     auto h3 = factory()->NewFixedArray(16, AllocationType::kYoung);
     strong.Reset(v8_isolate(), Utils::FixedArrayToLocal(h3));
-    auto obj3 = h3->GetHeapObject();
+    auto obj3 = *h3;
     auto page3 = Page::FromHeapObject(obj3);
     EXPECT_TRUE(page3 == page1 || page3 == page2);
     if (page3 == page1) {
-      EXPECT_EQ(obj3.address(), obj1.address() + obj1.Size(cage_base));
+      EXPECT_EQ(obj3.address(), obj1.address() + obj1->Size(cage_base));
     } else {
-      EXPECT_EQ(obj3.address(), obj2.address() + obj2.Size(cage_base));
+      EXPECT_EQ(obj3.address(), obj2.address() + obj2->Size(cage_base));
     }
 
     // Keep inner pointers to all objects.
@@ -668,12 +665,12 @@ TEST_F(InnerPointerResolutionHeapTest, UnusedRegularYoungPages) {
     // Keep pointers to the end of the pages, after the objects.
     outside_ptr1 = page1->area_end() - 3 * kTaggedSize;
     outside_ptr2 = page2->area_end() - 2 * kTaggedSize;
-    EXPECT_LE(obj1.address() + obj1.Size(cage_base), outside_ptr1);
-    EXPECT_LE(obj2.address() + obj2.Size(cage_base), outside_ptr2);
+    EXPECT_LE(obj1.address() + obj1->Size(cage_base), outside_ptr1);
+    EXPECT_LE(obj2.address() + obj2->Size(cage_base), outside_ptr2);
     if (page3 == page1) {
-      EXPECT_LE(obj3.address() + obj3.Size(cage_base), outside_ptr1);
+      EXPECT_LE(obj3.address() + obj3->Size(cage_base), outside_ptr1);
     } else {
-      EXPECT_LE(obj3.address() + obj3.Size(cage_base), outside_ptr2);
+      EXPECT_LE(obj3.address() + obj3->Size(cage_base), outside_ptr2);
     }
 
     // Ensure the young generation space is iterable.
@@ -763,7 +760,7 @@ TEST_F(InnerPointerResolutionHeapTest, UnusedLargeYoungPage) {
     auto h = factory()->NewFixedArray(length, AllocationType::kYoung);
     weak.Reset(v8_isolate(), Utils::FixedArrayToLocal(h));
     weak.SetWeak();
-    auto obj = h->GetHeapObject();
+    auto obj = *h;
     auto page = Page::FromHeapObject(obj);
     EXPECT_TRUE(page->IsLargePage());
     EXPECT_EQ(AllocationSpace::NEW_LO_SPACE, page->owner_identity());

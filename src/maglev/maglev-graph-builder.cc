@@ -51,6 +51,10 @@
 #include "src/roots/roots.h"
 #include "src/utils/utils.h"
 
+#ifdef V8_INTL_SUPPORT
+#include "src/objects/intl-objects.h"
+#endif
+
 namespace v8::internal::maglev {
 
 namespace {
@@ -4108,7 +4112,9 @@ ReduceResult MaglevGraphBuilder::TryBuildElementLoadOnJSArrayOrJSObject(
 
   base::Vector<const compiler::MapRef> maps =
       base::VectorOf(access_info.lookup_start_object_maps());
-  if (IsHoleyElementsKind(elements_kind) && !CanTreatHoleAsUndefined(maps)) {
+  // TODO(v8:7700): Add non-deopting bounds check (has to support undefined
+  // values).
+  if (load_mode != STANDARD_LOAD) {
     return ReduceResult::Fail();
   }
 
@@ -4130,22 +4136,27 @@ ReduceResult MaglevGraphBuilder::TryBuildElementLoadOnJSArrayOrJSObject(
                                   AssertCondition::kUnsignedLessThan,
                                   DeoptimizeReason::kOutOfBounds);
 
-  // TODO(v8:7700): Add non-deopting bounds check (has to support undefined
-  // values).
-  DCHECK_EQ(load_mode, STANDARD_LOAD);
-
   // 3. Do the load.
   ValueNode* result;
   if (elements_kind == HOLEY_DOUBLE_ELEMENTS) {
-    result =
-        AddNewNode<LoadHoleyFixedDoubleArrayElement>({elements_array, index});
+    if (CanTreatHoleAsUndefined(maps)) {
+      result =
+          AddNewNode<LoadHoleyFixedDoubleArrayElement>({elements_array, index});
+    } else {
+      result = AddNewNode<LoadHoleyFixedDoubleArrayElementCheckedNotHole>(
+          {elements_array, index});
+    }
   } else if (elements_kind == PACKED_DOUBLE_ELEMENTS) {
     result = AddNewNode<LoadFixedDoubleArrayElement>({elements_array, index});
   } else {
     DCHECK(!IsDoubleElementsKind(elements_kind));
     result = AddNewNode<LoadFixedArrayElement>({elements_array, index});
     if (IsHoleyElementsKind(elements_kind)) {
-      result = AddNewNode<ConvertHoleToUndefined>({result});
+      if (CanTreatHoleAsUndefined(maps)) {
+        result = AddNewNode<ConvertHoleToUndefined>({result});
+      } else {
+        result = AddNewNode<CheckNotHole>({result});
+      }
     }
   }
   return result;
@@ -4349,10 +4360,11 @@ ReduceResult MaglevGraphBuilder::TryBuildElementAccess(
         // If the {receiver_map} has a prototype and its elements backing
         // store is either holey, or we have a potentially growing store,
         // then we need to check that all prototypes have stable maps with
-        // fast elements (and we need to guard against changes to that below).
+        // with no element accessors and no throwing behavior for elements (and
+        // we need to guard against changes to that below).
         if ((IsHoleyOrDictionaryElementsKind(receiver_map.elements_kind()) ||
              IsGrowStoreMode(feedback.keyed_mode().store_mode())) &&
-            !receiver_map.HasOnlyStablePrototypesWithFastElements(
+            !receiver_map.PrototypesElementsDoNotHaveAccessorsOrThrow(
                 broker(), &prototype_maps)) {
           return ReduceResult::Fail();
         }
@@ -4653,7 +4665,7 @@ void MaglevGraphBuilder::VisitGetKeyedProperty() {
       break;
   }
 
-  // Create a generic store in the fallthrough.
+  // Create a generic load in the fallthrough.
   ValueNode* context = GetContext();
   ValueNode* key = GetAccumulatorTagged();
   SetAccumulator(
@@ -5010,7 +5022,7 @@ void MaglevGraphBuilder::VisitBitwiseNot() {
 }
 
 void MaglevGraphBuilder::VisitToBooleanLogicalNot() {
-  BuildToBoolean</* flip */ true>(GetAccumulatorTagged());
+  SetAccumulator(BuildToBoolean</* flip */ true>(GetRawAccumulator()));
 }
 
 void MaglevGraphBuilder::VisitLogicalNot() {
@@ -5074,63 +5086,95 @@ bool MaglevGraphBuilder::HasValidInitialMap(
   return initial_map.GetConstructor(broker()).equals(constructor);
 }
 
+bool MaglevGraphBuilder::TryBuildFindNonDefaultConstructorOrConstruct(
+    ValueNode* this_function, ValueNode* new_target,
+    std::pair<interpreter::Register, interpreter::Register> result) {
+  // See also:
+  // JSNativeContextSpecialization::ReduceJSFindNonDefaultConstructorOrConstruct
+
+  compiler::OptionalHeapObjectRef maybe_constant =
+      TryGetConstant(this_function);
+  if (!maybe_constant) return false;
+
+  compiler::MapRef function_map = maybe_constant->map(broker());
+  compiler::HeapObjectRef current = function_map.prototype(broker());
+
+  // TODO(v8:13091): Don't produce incomplete stack traces when debug is active.
+  // We already deopt when a breakpoint is set. But it would be even nicer to
+  // avoid producting incomplete stack traces when when debug is active, even if
+  // there are no breakpoints - then a user inspecting stack traces via Dev
+  // Tools would always see the full stack trace.
+
+  while (true) {
+    if (!current.IsJSFunction()) return false;
+    compiler::JSFunctionRef current_function = current.AsJSFunction();
+
+    // If there are class fields, bail out. TODO(v8:13091): Handle them here.
+    if (current_function.shared(broker())
+            .requires_instance_members_initializer()) {
+      return false;
+    }
+
+    // If there are private methods, bail out. TODO(v8:13091): Handle them here.
+    if (current_function.context(broker())
+            .scope_info(broker())
+            .ClassScopeHasPrivateBrand()) {
+      return false;
+    }
+
+    FunctionKind kind = current_function.shared(broker()).kind();
+    if (kind != FunctionKind::kDefaultDerivedConstructor) {
+      // The hierarchy walk will end here; this is the last change to bail out
+      // before creating new nodes.
+      if (!broker()->dependencies()->DependOnArrayIteratorProtector()) {
+        return false;
+      }
+
+      compiler::OptionalHeapObjectRef new_target_function =
+          TryGetConstant(new_target);
+      if (kind == FunctionKind::kDefaultBaseConstructor) {
+        // Store the result register first, so that a lazy deopt in
+        // `FastNewObject` writes `true` to this register.
+        StoreRegister(result.first, GetBooleanConstant(true));
+
+        ValueNode* object;
+        if (new_target_function && new_target_function->IsJSFunction() &&
+            HasValidInitialMap(new_target_function->AsJSFunction(),
+                               current_function)) {
+          object = BuildAllocateFastObject(
+              FastObject(new_target_function->AsJSFunction(), zone(), broker()),
+              AllocationType::kYoung);
+        } else {
+          object = BuildCallBuiltin<Builtin::kFastNewObject>(
+              {GetConstant(current_function), new_target});
+          // We've already stored "true" into result.first, so a deopt here just
+          // has to store result.second.
+          object->lazy_deopt_info()->UpdateResultLocation(result.second, 1);
+        }
+        StoreRegister(result.second, object);
+      } else {
+        StoreRegister(result.first, GetBooleanConstant(false));
+        StoreRegister(result.second, GetConstant(current));
+      }
+
+      broker()->dependencies()->DependOnStablePrototypeChain(
+          function_map, WhereToStart::kStartAtReceiver, current_function);
+      return true;
+    }
+
+    // Keep walking up the class tree.
+    current = current_function.map(broker()).prototype(broker());
+  }
+}
+
 void MaglevGraphBuilder::VisitFindNonDefaultConstructorOrConstruct() {
   ValueNode* this_function = LoadRegisterTagged(0);
   ValueNode* new_target = LoadRegisterTagged(1);
 
   auto register_pair = iterator_.GetRegisterPairOperand(2);
 
-  if (compiler::OptionalHeapObjectRef constant =
-          TryGetConstant(this_function)) {
-    compiler::MapRef function_map = constant->map(broker());
-    compiler::HeapObjectRef current = function_map.prototype(broker());
-
-    if (broker()->dependencies()->DependOnArrayIteratorProtector()) {
-      while (true) {
-        if (!current.IsJSFunction()) break;
-        compiler::JSFunctionRef current_function = current.AsJSFunction();
-        if (current_function.shared(broker())
-                .requires_instance_members_initializer()) {
-          break;
-        }
-        if (current_function.context(broker())
-                .scope_info(broker())
-                .ClassScopeHasPrivateBrand()) {
-          break;
-        }
-        FunctionKind kind = current_function.shared(broker()).kind();
-        if (kind != FunctionKind::kDefaultDerivedConstructor) {
-          broker()->dependencies()->DependOnStablePrototypeChain(
-              function_map, WhereToStart::kStartAtReceiver, current_function);
-
-          compiler::OptionalHeapObjectRef new_target_function =
-              TryGetConstant(new_target);
-          if (kind == FunctionKind::kDefaultBaseConstructor) {
-            ValueNode* object;
-            if (new_target_function && new_target_function->IsJSFunction() &&
-                HasValidInitialMap(new_target_function->AsJSFunction(),
-                                   current_function)) {
-              object = BuildAllocateFastObject(
-                  FastObject(new_target_function->AsJSFunction(), zone(),
-                             broker()),
-                  AllocationType::kYoung);
-            } else {
-              object = BuildCallBuiltin<Builtin::kFastNewObject>(
-                  {GetConstant(current_function), new_target});
-            }
-            StoreRegister(register_pair.first, GetBooleanConstant(true));
-            StoreRegister(register_pair.second, object);
-            return;
-          }
-          break;
-        }
-
-        // Keep walking up the class tree.
-        current = current_function.map(broker()).prototype(broker());
-      }
-    }
-    StoreRegister(register_pair.first, GetBooleanConstant(false));
-    StoreRegister(register_pair.second, GetConstant(current));
+  if (TryBuildFindNonDefaultConstructorOrConstruct(this_function, new_target,
+                                                   register_pair)) {
     return;
   }
 
@@ -5589,7 +5633,7 @@ ReduceResult MaglevGraphBuilder::TryReduceArrayForEach(
         // before the call.
         if (receiver_info_after_call &&
             receiver_info_after_call->possible_maps_are_known()) {
-          recheck_maps_after_call = receiver_maps_before_loop.contains(
+          recheck_maps_after_call = !receiver_maps_before_loop.contains(
               receiver_info_after_call->possible_maps());
         }
       }
@@ -5716,6 +5760,60 @@ ReduceResult MaglevGraphBuilder::TryReduceStringPrototypeCodePointAt(
   return AddNewNode<BuiltinStringPrototypeCharCodeOrCodePointAt>(
       {receiver, index},
       BuiltinStringPrototypeCharCodeOrCodePointAt::kCodePointAt);
+}
+
+ReduceResult MaglevGraphBuilder::TryReduceStringPrototypeLocaleCompare(
+    compiler::JSFunctionRef target, CallArguments& args) {
+#ifdef V8_INTL_SUPPORT
+  if (args.count() < 1 || args.count() > 3) return ReduceResult::Fail();
+
+  LocalFactory* factory = local_isolate()->factory();
+  compiler::ObjectRef undefined_ref = broker()->undefined_value();
+
+  Handle<Object> locales_handle;
+  ValueNode* locales_node = nullptr;
+  if (args.count() > 1) {
+    compiler::OptionalHeapObjectRef maybe_locales = TryGetConstant(args[1]);
+    if (!maybe_locales) return ReduceResult::Fail();
+    compiler::HeapObjectRef locales = maybe_locales.value();
+    if (locales.equals(undefined_ref)) {
+      locales_handle = factory->undefined_value();
+      locales_node = GetRootConstant(RootIndex::kUndefinedValue);
+    } else {
+      if (!locales.IsString()) return ReduceResult::Fail();
+      compiler::StringRef sref = locales.AsString();
+      base::Optional<Handle<String>> maybe_locales_handle =
+          sref.ObjectIfContentAccessible(broker());
+      if (!maybe_locales_handle) return ReduceResult::Fail();
+      locales_handle = *maybe_locales_handle;
+      locales_node = GetTaggedValue(args[1]);
+    }
+  } else {
+    locales_handle = factory->undefined_value();
+    locales_node = GetRootConstant(RootIndex::kUndefinedValue);
+  }
+
+  if (args.count() > 2) {
+    compiler::OptionalHeapObjectRef maybe_options = TryGetConstant(args[2]);
+    if (!maybe_options) return ReduceResult::Fail();
+    if (!maybe_options.value().equals(undefined_ref))
+      return ReduceResult::Fail();
+  }
+
+  DCHECK(!locales_handle.is_null());
+  DCHECK_NOT_NULL(locales_node);
+
+  if (Intl::CompareStringsOptionsFor(local_isolate(), locales_handle,
+                                     factory->undefined_value()) !=
+      Intl::CompareStringsOptions::kTryFastPath) {
+    return ReduceResult::Fail();
+  }
+  return BuildCallBuiltin<Builtin::kStringFastLocaleCompare>(
+      {GetConstant(target), GetTaggedOrUndefined(args.receiver()),
+       GetTaggedValue(args[0]), locales_node});
+#else
+  return ReduceResult::Fail();
+#endif
 }
 
 template <typename LoadNode>
@@ -7501,24 +7599,54 @@ ReduceResult MaglevGraphBuilder::TryBuildFastInstanceOf(
       // TODO(victorgomes): Propagate the case if we need to soft deopt.
     }
 
-    BuildToBoolean(GetTaggedValue(call_result));
-    return ReduceResult::Done();
+    return BuildToBoolean(call_result);
   }
 
   return ReduceResult::Fail();
 }
 
 template <bool flip>
-void MaglevGraphBuilder::BuildToBoolean(ValueNode* value) {
+ValueNode* MaglevGraphBuilder::BuildToBoolean(ValueNode* value) {
   if (IsConstantNode(value->opcode())) {
-    SetAccumulator(
-        GetBooleanConstant(FromConstantToBool(local_isolate(), value) ^ flip));
-    return;
+    return GetBooleanConstant(FromConstantToBool(local_isolate(), value) ^
+                              flip);
   }
+
+  switch (value->value_representation()) {
+    case ValueRepresentation::kFloat64:
+    case ValueRepresentation::kHoleyFloat64:
+      // The ToBoolean of both the_hole and NaN is false, so we can use the
+      // same operation for HoleyFloat64 and Float64.
+      return AddNewNode<Float64ToBoolean>({value}, flip);
+
+    case ValueRepresentation::kUint32:
+      // Uint32 has the same logic as Int32 when converting ToBoolean, namely
+      // comparison against zero, so we can cast it and ignore the signedness.
+      value = AddNewNode<TruncateUint32ToInt32>({value});
+      V8_FALLTHROUGH;
+    case ValueRepresentation::kInt32:
+      return AddNewNode<Int32ToBoolean>({value}, flip);
+
+    case ValueRepresentation::kWord64:
+      UNREACHABLE();
+
+    case ValueRepresentation::kTagged:
+      break;
+  }
+
+  NodeInfo* node_info = known_node_aspects().TryGetInfoFor(value);
+  if (node_info) {
+    if (ValueNode* as_int32 = node_info->alternative().int32()) {
+      return AddNewNode<Int32ToBoolean>({as_int32}, flip);
+    }
+    if (ValueNode* as_float64 = node_info->alternative().float64()) {
+      return AddNewNode<Float64ToBoolean>({as_float64}, flip);
+    }
+  }
+
   NodeType value_type;
   if (CheckType(value, NodeType::kJSReceiver, &value_type)) {
-    SetAccumulator(GetBooleanConstant(!flip));
-    return;
+    return GetBooleanConstant(!flip);
   }
   ValueNode* falsy_value = nullptr;
   if (CheckType(value, NodeType::kString)) {
@@ -7527,21 +7655,17 @@ void MaglevGraphBuilder::BuildToBoolean(ValueNode* value) {
     falsy_value = GetSmiConstant(0);
   }
   if (falsy_value != nullptr) {
-    SetAccumulator(
-        AddNewNode<std::conditional_t<flip, TaggedEqual, TaggedNotEqual>>(
-            {value, falsy_value}));
-    return;
+    return AddNewNode<std::conditional_t<flip, TaggedEqual, TaggedNotEqual>>(
+        {value, falsy_value});
   }
   if (CheckType(value, NodeType::kBoolean)) {
     if (flip) {
       value = AddNewNode<LogicalNot>({value});
     }
-    SetAccumulator(value);
-    return;
+    return value;
   }
-  SetAccumulator(
-      AddNewNode<std::conditional_t<flip, ToBooleanLogicalNot, ToBoolean>>(
-          {value}, GetCheckType(value_type)));
+  return AddNewNode<std::conditional_t<flip, ToBooleanLogicalNot, ToBoolean>>(
+      {value}, GetCheckType(value_type));
 }
 
 ReduceResult MaglevGraphBuilder::TryBuildFastInstanceOfWithFeedback(
@@ -7701,7 +7825,7 @@ void MaglevGraphBuilder::VisitToString() {
 }
 
 void MaglevGraphBuilder::VisitToBoolean() {
-  BuildToBoolean(GetAccumulatorTagged());
+  SetAccumulator(BuildToBoolean(GetRawAccumulator()));
 }
 
 void FastObject::ClearFields() {
@@ -8662,6 +8786,22 @@ void MaglevGraphBuilder::BuildBranchIfRootConstant(
             node->Cast<Float64Compare>()->operation(), true_target,
             false_target);
         break;
+      case Opcode::kInt32ToBoolean:
+        if (node->Cast<Int32ToBoolean>()->flip()) {
+          std::swap(true_target, false_target);
+        }
+        block = FinishBlock<BranchIfInt32ToBooleanTrue>(
+            {node->Cast<Int32ToBoolean>()->value().node()}, true_target,
+            false_target);
+        break;
+      case Opcode::kFloat64ToBoolean:
+        if (node->Cast<Float64ToBoolean>()->flip()) {
+          std::swap(true_target, false_target);
+        }
+        block = FinishBlock<BranchIfFloat64ToBooleanTrue>(
+            {node->Cast<Float64ToBoolean>()->value().node()}, true_target,
+            false_target);
+        break;
       case Opcode::kTestUndetectable:
         block = FinishBlock<BranchIfUndetectable>(
             {node->Cast<TestUndetectable>()->value().node()},
@@ -8728,81 +8868,58 @@ void MaglevGraphBuilder::BuildBranchIfUndefined(ValueNode* node,
 
 BasicBlock* MaglevGraphBuilder::BuildSpecializedBranchIfCompareNode(
     ValueNode* node, BasicBlockRef* true_target, BasicBlockRef* false_target) {
-  auto make_specialized_branch_if_compare = [&](ValueRepresentation repr,
-                                                ValueNode* cond) {
-    // Note that this function (BuildBranchIfToBooleanTrue) generates either a
-    // BranchIfToBooleanTrue, or a BranchIfFloat64Compare/BranchIfInt32Compare
-    // comparing the {node} with 0. In the former case, the jump is taken if
-    // {node} is non-zero, while in the latter cases, the jump is taken if
-    // {node} is zero. The {true_target} and {false_target} are thus swapped
-    // when we generate a BranchIfFloat64Compare or a BranchIfInt32Compare
-    // below.
-    switch (repr) {
-      case ValueRepresentation::kFloat64:
-      case ValueRepresentation::kHoleyFloat64:
-        DCHECK(cond->value_representation() == ValueRepresentation::kFloat64 ||
-               cond->value_representation() ==
-                   ValueRepresentation::kHoleyFloat64);
-        // The ToBoolean of both the_hole and NaN is false, so we can use the
-        // same operation for HoleyFloat64 and Float64.
-        return FinishBlock<BranchIfFloat64ToBooleanTrue>({cond}, true_target,
-                                                         false_target);
-
-      case ValueRepresentation::kInt32:
-        DCHECK_EQ(cond->value_representation(), ValueRepresentation::kInt32);
-        return FinishBlock<BranchIfInt32ToBooleanTrue>({cond}, true_target,
+  switch (node->value_representation()) {
+    // The ToBoolean of both the_hole and NaN is false, so we can use the
+    // same operation for HoleyFloat64 and Float64.
+    case ValueRepresentation::kFloat64:
+    case ValueRepresentation::kHoleyFloat64:
+      return FinishBlock<BranchIfFloat64ToBooleanTrue>({node}, true_target,
                                                        false_target);
-      default:
-        UNREACHABLE();
-    }
-  };
 
-  if (node->value_representation() == ValueRepresentation::kInt32) {
-    return make_specialized_branch_if_compare(ValueRepresentation::kInt32,
-                                              node);
-  } else if (node->value_representation() == ValueRepresentation::kFloat64 ||
-             node->value_representation() ==
-                 ValueRepresentation::kHoleyFloat64) {
-    return make_specialized_branch_if_compare(ValueRepresentation::kFloat64,
-                                              node);
-  } else {
-    NodeInfo* node_info = known_node_aspects().GetOrCreateInfoFor(node);
-    if (auto as_int32 = node_info->alternative().int32()) {
-      return make_specialized_branch_if_compare(ValueRepresentation::kInt32,
-                                                as_int32);
-    } else if (auto as_float64 = node_info->alternative().float64()) {
-      return make_specialized_branch_if_compare(ValueRepresentation::kFloat64,
-                                                as_float64);
-    } else {
-      DCHECK(node->value_representation() == ValueRepresentation::kTagged ||
-             node->value_representation() == ValueRepresentation::kUint32);
-      // Uint32 should be rare enough that tagging them shouldn't be too
-      // expensive (we don't have a `BranchIfUint32Compare` node, and adding
-      // one doesn't seem worth it at this point).
-      // We do not record a Tagged use hint here, because Tagged hints prevent
-      // Phi untagging. A BranchIfToBooleanTrue should never prevent Phi
-      // untagging: if we untag a Phi that is used in such a node, then we can
-      // convert the node to BranchIfFloat64ToBooleanTrue or
-      // BranchIfInt32ToBooleanTrue.
-      node = GetTaggedValue(node, UseReprHintRecording::kDoNotRecord);
-      NodeType old_type;
-      if (CheckType(node, NodeType::kBoolean, &old_type)) {
-        return FinishBlock<BranchIfRootConstant>({node}, RootIndex::kTrueValue,
-                                                 true_target, false_target);
-      }
-      if (CheckType(node, NodeType::kSmi)) {
-        return FinishBlock<BranchIfReferenceEqual>({node, GetSmiConstant(0)},
-                                                   false_target, true_target);
-      }
-      if (CheckType(node, NodeType::kString)) {
-        return FinishBlock<BranchIfRootConstant>(
-            {node}, RootIndex::kempty_string, false_target, true_target);
-      }
-      // TODO(verwaest): Number or oddball.
-      return FinishBlock<BranchIfToBooleanTrue>({node}, GetCheckType(old_type),
-                                                true_target, false_target);
+    case ValueRepresentation::kUint32:
+      // Uint32 has the same logic as Int32 when converting ToBoolean, namely
+      // comparison against zero, so we can cast it and ignore the signedness.
+      node = AddNewNode<TruncateUint32ToInt32>({node});
+      V8_FALLTHROUGH;
+    case ValueRepresentation::kInt32:
+      return FinishBlock<BranchIfInt32ToBooleanTrue>({node}, true_target,
+                                                     false_target);
+
+    case ValueRepresentation::kWord64:
+      UNREACHABLE();
+
+    case ValueRepresentation::kTagged:
+      break;
+  }
+
+  NodeInfo* node_info = known_node_aspects().TryGetInfoFor(node);
+  if (node_info) {
+    if (ValueNode* as_int32 = node_info->alternative().int32()) {
+      return FinishBlock<BranchIfInt32ToBooleanTrue>({as_int32}, true_target,
+                                                     false_target);
+    }
+    if (ValueNode* as_float64 = node_info->alternative().float64()) {
+      return FinishBlock<BranchIfFloat64ToBooleanTrue>(
+          {as_float64}, true_target, false_target);
     }
   }
+
+  NodeType old_type;
+  if (CheckType(node, NodeType::kBoolean, &old_type)) {
+    return FinishBlock<BranchIfRootConstant>({node}, RootIndex::kTrueValue,
+                                             true_target, false_target);
+  }
+  if (CheckType(node, NodeType::kSmi)) {
+    return FinishBlock<BranchIfReferenceEqual>({node, GetSmiConstant(0)},
+                                               false_target, true_target);
+  }
+  if (CheckType(node, NodeType::kString)) {
+    return FinishBlock<BranchIfRootConstant>({node}, RootIndex::kempty_string,
+                                             false_target, true_target);
+  }
+  // TODO(verwaest): Number or oddball.
+  return FinishBlock<BranchIfToBooleanTrue>({node}, GetCheckType(old_type),
+                                            true_target, false_target);
 }
 
 void MaglevGraphBuilder::BuildBranchIfToBooleanTrue(ValueNode* node,
@@ -8835,9 +8952,25 @@ void MaglevGraphBuilder::BuildBranchIfToBooleanTrue(ValueNode* node,
   if (IsConstantNode(node->opcode())) {
     known_to_boolean_value = true;
     direction_is_true = FromConstantToBool(local_isolate(), node);
-  } else if (CheckType(node, NodeType::kJSReceiver)) {
-    known_to_boolean_value = true;
-    direction_is_true = true;
+  } else {
+    // JSReceivers are true iff they are not marked as undetectable. Check if
+    // all maps have the same detectability, and if yes, the boolean value is
+    // known.
+    NodeInfo* node_info = known_node_aspects().TryGetInfoFor(node);
+    if (node_info && NodeTypeIs(node_info->type(), NodeType::kJSReceiver) &&
+        node_info->possible_maps_are_known()) {
+      bool all_detectable = true;
+      bool all_undetectable = true;
+      for (compiler::MapRef map : node_info->possible_maps()) {
+        bool is_undetectable = map.is_undetectable();
+        all_detectable &= !is_undetectable;
+        all_undetectable &= is_undetectable;
+      }
+      if (all_detectable || all_undetectable) {
+        known_to_boolean_value = true;
+        direction_is_true = all_detectable;
+      }
+    }
   }
   if (known_to_boolean_value) {
     bool is_jump_taken = direction_is_true == (jump_type == kJumpIfTrue);

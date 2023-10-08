@@ -161,3 +161,54 @@
   assertEquals(arrIndex, [0, 1, -1]);
   assertEquals(resultArray, intersectionArray);
 })();
+
+(function TestIntersectionAfterClearingTheReceiver() {
+  const firstSet = new Set();
+  firstSet.add(42);
+  firstSet.add(43);
+
+  const otherSet = new Set();
+  otherSet.add(42);
+  otherSet.add(46);
+  otherSet.add(47);
+
+  Object.defineProperty(otherSet, 'size', {
+    get: function() {
+      firstSet.clear();
+      return 3;
+    },
+
+  });
+
+  const resultSet = new Set();
+
+  const resultArray = Array.from(resultSet);
+  const intersectionArray = Array.from(firstSet.intersection(otherSet));
+
+  assertEquals(resultArray, intersectionArray);
+})();
+
+(function TestTableTransition() {
+  const firstSet = new Set();
+  firstSet.add(42);
+  firstSet.add(43);
+  firstSet.add(44);
+
+  const setLike = {
+    size: 5,
+    keys() {
+      return [1, 2, 3, 4, 5].keys();
+    },
+    has(key) {
+      if (key == 43) {
+        // Cause a table transition in the receiver.
+        firstSet.clear();
+        return true;
+      }
+      return false;
+    }
+  };
+
+  assertEquals([43], Array.from(firstSet.intersection(setLike)));
+  assertEquals(0, firstSet.size);
+})();

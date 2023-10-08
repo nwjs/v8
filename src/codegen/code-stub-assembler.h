@@ -350,8 +350,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   enum class AllocationFlag : uint8_t {
     kNone = 0,
     kDoubleAlignment = 1,
-    kPretenured = 1 << 1,
-    kAllowLargeObjectAllocation = 1 << 2,
+    kPretenured = 1 << 1
   };
 
   enum SlackTrackingMode {
@@ -566,6 +565,17 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   TNode<Smi> NoContextConstant();
 
+  TNode<IntPtrT> StackAlignmentInBytes() {
+    // This node makes the graph platform-specific. To make sure that the graph
+    // structure is still platform independent, UniqueIntPtrConstants are used
+    // here.
+#if V8_TARGET_ARCH_ARM64
+    return UniqueIntPtrConstant(16);
+#else
+    return UniqueIntPtrConstant(kSystemPointerSize);
+#endif
+  }
+
 #define HEAP_CONSTANT_ACCESSOR(rootIndexName, rootAccessorName, name)    \
   TNode<RemoveTagged<                                                    \
       decltype(std::declval<ReadOnlyRoots>().rootAccessorName())>::type> \
@@ -641,6 +651,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<Smi> SmiFromUint32(TNode<Uint32T> value);
   TNode<IntPtrT> SmiToIntPtr(TNode<Smi> value) { return SmiUntag(value); }
   TNode<Int32T> SmiToInt32(TNode<Smi> value);
+  TNode<Uint32T> PositiveSmiToUint32(TNode<Smi> value);
 
   // Smi operations.
 #define SMI_ARITHMETIC_BINOP(SmiOpName, IntPtrOpName, Int32OpName)          \
@@ -970,13 +981,13 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<IntPtrT> SelectIntPtrConstant(TNode<BoolT> condition, int true_value,
                                       int false_value);
   TNode<Boolean> SelectBooleanConstant(TNode<BoolT> condition);
-  TNode<Smi> SelectSmiConstant(TNode<BoolT> condition, Smi true_value,
-                               Smi false_value);
+  TNode<Smi> SelectSmiConstant(TNode<BoolT> condition, Tagged<Smi> true_value,
+                               Tagged<Smi> false_value);
   TNode<Smi> SelectSmiConstant(TNode<BoolT> condition, int true_value,
-                               Smi false_value) {
+                               Tagged<Smi> false_value) {
     return SelectSmiConstant(condition, Smi::FromInt(true_value), false_value);
   }
-  TNode<Smi> SelectSmiConstant(TNode<BoolT> condition, Smi true_value,
+  TNode<Smi> SelectSmiConstant(TNode<BoolT> condition, Tagged<Smi> true_value,
                                int false_value) {
     return SelectSmiConstant(condition, true_value, Smi::FromInt(false_value));
   }
@@ -1510,7 +1521,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                                TNode<Int32T> instance_type,
                                                Label* bailout);
   // Load the identity hash of a JSRececiver.
-  TNode<IntPtrT> LoadJSReceiverIdentityHash(TNode<JSReceiver> receiver,
+  TNode<Uint32T> LoadJSReceiverIdentityHash(TNode<JSReceiver> receiver,
                                             Label* if_no_hash = nullptr);
 
   // This is only used on a newly allocated PropertyArray which
@@ -1999,8 +2010,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                   TNode<IntPtrT> digit_index);
 
   // Allocate a ByteArray with the given non-zero length.
-  TNode<ByteArray> AllocateNonEmptyByteArray(TNode<UintPtrT> length,
-                                             AllocationFlags flags);
+  TNode<ByteArray> AllocateNonEmptyByteArray(
+      TNode<UintPtrT> length, AllocationFlags flags = AllocationFlag::kNone);
 
   // Allocate a ByteArray with the given length.
   TNode<ByteArray> AllocateByteArray(
@@ -2160,8 +2171,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   TNode<FixedArray> AllocateZeroedFixedArray(TNode<IntPtrT> capacity) {
     TNode<FixedArray> result = UncheckedCast<FixedArray>(
-        AllocateFixedArray(PACKED_ELEMENTS, capacity,
-                           AllocationFlag::kAllowLargeObjectAllocation));
+        AllocateFixedArray(PACKED_ELEMENTS, capacity));
     FillEntireFixedArrayWithSmiZero(PACKED_ELEMENTS, result, capacity);
     return result;
   }
@@ -2169,14 +2179,13 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<FixedDoubleArray> AllocateZeroedFixedDoubleArray(
       TNode<IntPtrT> capacity) {
     TNode<FixedDoubleArray> result = UncheckedCast<FixedDoubleArray>(
-        AllocateFixedArray(PACKED_DOUBLE_ELEMENTS, capacity,
-                           AllocationFlag::kAllowLargeObjectAllocation));
+        AllocateFixedArray(PACKED_DOUBLE_ELEMENTS, capacity));
     FillEntireFixedDoubleArrayWithZero(result, capacity);
     return result;
   }
 
-  TNode<FixedArray> AllocateFixedArrayWithHoles(TNode<IntPtrT> capacity,
-                                                AllocationFlags flags) {
+  TNode<FixedArray> AllocateFixedArrayWithHoles(
+      TNode<IntPtrT> capacity, AllocationFlags flags = AllocationFlag::kNone) {
     TNode<FixedArray> result = UncheckedCast<FixedArray>(
         AllocateFixedArray(PACKED_ELEMENTS, capacity, flags));
     FillFixedArrayWithValue(PACKED_ELEMENTS, result, IntPtrConstant(0),
@@ -2185,7 +2194,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   }
 
   TNode<FixedDoubleArray> AllocateFixedDoubleArrayWithHoles(
-      TNode<IntPtrT> capacity, AllocationFlags flags) {
+      TNode<IntPtrT> capacity, AllocationFlags flags = AllocationFlag::kNone) {
     TNode<FixedDoubleArray> result = UncheckedCast<FixedDoubleArray>(
         AllocateFixedArray(PACKED_DOUBLE_ELEMENTS, capacity, flags));
     FillFixedArrayWithValue(PACKED_DOUBLE_ELEMENTS, result, IntPtrConstant(0),
@@ -4103,6 +4112,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<Object> GetArgumentValue(TorqueStructArguments args,
                                  TNode<IntPtrT> index);
 
+  void SetArgumentValue(TorqueStructArguments args, TNode<IntPtrT> index,
+                        TNode<Object> value);
+
   enum class FrameArgumentsArgcType {
     kCountIncludesReceiver,
     kCountExcludesReceiver
@@ -4650,6 +4662,8 @@ class V8_EXPORT_PRIVATE CodeStubArguments {
   TNode<Object> GetOptionalArgumentValue(int index) {
     return GetOptionalArgumentValue(assembler_->IntPtrConstant(index));
   }
+
+  void SetArgumentValue(TNode<IntPtrT> index, TNode<Object> value);
 
   // Iteration doesn't include the receiver. |first| and |last| are zero-based.
   using ForEachBodyFunction = std::function<void(TNode<Object> arg)>;

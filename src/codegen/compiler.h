@@ -258,6 +258,10 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
                                      Handle<FeedbackVector> vector,
                                      Handle<AbstractCode> abstract_code,
                                      CodeKind kind, double time_taken_ms);
+
+  static void InstallInterpreterTrampolineCopy(
+      Isolate* isolate, Handle<SharedFunctionInfo> shared_info,
+      LogEventListener::CodeTag log_tag);
 };
 
 // A base class for compilation jobs intended to run concurrent to the main
@@ -273,18 +277,12 @@ class V8_EXPORT_PRIVATE CompilationJob {
     kFailed,
   };
 
-  explicit CompilationJob(State initial_state) : state_(initial_state) {
-    timer_.Start();
-  }
+  explicit CompilationJob(State initial_state) : state_(initial_state) {}
   virtual ~CompilationJob() = default;
 
   State state() const { return state_; }
 
  protected:
-  V8_WARN_UNUSED_RESULT base::TimeDelta ElapsedTime() const {
-    return timer_.Elapsed();
-  }
-
   V8_WARN_UNUSED_RESULT Status UpdateState(Status status, State next_state) {
     switch (status) {
       case SUCCEEDED:
@@ -302,7 +300,6 @@ class V8_EXPORT_PRIVATE CompilationJob {
 
  private:
   State state_;
-  base::ElapsedTimer timer_;
 };
 
 // A base class for unoptimized compilation jobs.
@@ -387,7 +384,9 @@ class UnoptimizedCompilationJob : public CompilationJob {
 class OptimizedCompilationJob : public CompilationJob {
  public:
   OptimizedCompilationJob(const char* compiler_name, State initial_state)
-      : CompilationJob(initial_state), compiler_name_(compiler_name) {}
+      : CompilationJob(initial_state), compiler_name_(compiler_name) {
+    timer_.Start();
+  }
 
   // Prepare the compile job. Must be called on the main thread.
   V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT Status PrepareJob(Isolate* isolate);
@@ -398,6 +397,11 @@ class OptimizedCompilationJob : public CompilationJob {
 
   // Finalizes the compile job. Must be called on the main thread.
   V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT Status FinalizeJob(Isolate* isolate);
+
+  // Registers weak object to optimized code dependencies.
+  void RegisterWeakObjectsInOptimizedCode(Isolate* isolate,
+                                          Handle<NativeContext> context,
+                                          Handle<Code> code);
 
   const char* compiler_name() const { return compiler_name_; }
 
@@ -411,6 +415,10 @@ class OptimizedCompilationJob : public CompilationJob {
     return time_taken_to_finalize_.InMillisecondsF();
   }
 
+  V8_WARN_UNUSED_RESULT base::TimeDelta ElapsedTime() const {
+    return timer_.Elapsed();
+  }
+
  protected:
   // Overridden by the actual implementation.
   virtual Status PrepareJobImpl(Isolate* isolate) = 0;
@@ -421,6 +429,8 @@ class OptimizedCompilationJob : public CompilationJob {
   base::TimeDelta time_taken_to_prepare_;
   base::TimeDelta time_taken_to_execute_;
   base::TimeDelta time_taken_to_finalize_;
+
+  base::ElapsedTimer timer_;
 
  private:
   const char* const compiler_name_;

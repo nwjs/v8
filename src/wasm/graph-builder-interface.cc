@@ -245,6 +245,19 @@ class WasmGraphBuildingInterface {
         ssa_env->locals[index++] = node;
       }
     }
+
+    size_t num_memories =
+        decoder->module_ == nullptr ? 0 : decoder->module_->memories.size();
+    if (num_memories == 1) {
+      builder_->set_cached_memory_index(0);
+    } else if (num_memories > 1) {
+      int first_used_mem_index = FindFirstUsedMemoryIndex(
+          base::VectorOf(decoder->start(), decoder->end() - decoder->start()),
+          decoder->zone());
+      if (first_used_mem_index >= 0) {
+        builder_->set_cached_memory_index(first_used_mem_index);
+      }
+    }
     LoadInstanceCacheIntoSsa(ssa_env);
 
     if (v8_flags.trace_wasm && inlined_status_ == kRegularFunction) {
@@ -312,11 +325,12 @@ class WasmGraphBuildingInterface {
         &can_be_innermost);
     if (decoder->failed()) return;
     int instance_cache_index = decoder->num_locals();
-    // If memory 0 is shared, the stack guard might reallocate the backing
-    // store. We have to assume the instance cache will be updated.
-    bool mem0_is_shared = !decoder->module_->memories.empty() &&
-                          decoder->module_->memories.front().is_shared;
-    if (mem0_is_shared) assigned->Add(instance_cache_index);
+    // If the cached memory is shared, the stack guard might reallocate the
+    // backing store. We have to assume the instance cache will be updated.
+    bool cached_mem_is_shared =
+        builder_->has_cached_memory() &&
+        decoder->module_->memories[builder_->cached_memory_index()].is_shared;
+    if (cached_mem_is_shared) assigned->Add(instance_cache_index);
     DCHECK_NOT_NULL(assigned);
     decoder->control_at(0)->loop_assignments = assigned;
 
@@ -350,8 +364,9 @@ class WasmGraphBuildingInterface {
     // Now we setup a new environment for the inside of the loop.
     // TODO(choongwoo): Clear locals of the following SsaEnv after use.
     SetEnv(Split(decoder->zone(), ssa_env_));
-    builder_->StackCheck(mem0_is_shared ? &ssa_env_->instance_cache : nullptr,
-                         decoder->position());
+    builder_->StackCheck(
+        cached_mem_is_shared ? &ssa_env_->instance_cache : nullptr,
+        decoder->position());
     ssa_env_->SetNotMerged();
 
     // Wrap input merge into phis.
@@ -1147,7 +1162,8 @@ class WasmGraphBuildingInterface {
     GetNodes(args.data(), base::VectorOf(arg_values, count));
     CheckForException(decoder,
                       builder_->Throw(imm.index, imm.tag, base::VectorOf(args),
-                                      decoder->position()));
+                                      decoder->position()),
+                      false);
     builder_->TerminateThrow(effect(), control());
   }
 
@@ -1155,7 +1171,7 @@ class WasmGraphBuildingInterface {
     DCHECK(block->is_try_catchall() || block->is_try_catch());
     TFNode* exception = block->try_info->exception;
     DCHECK_NOT_NULL(exception);
-    CheckForException(decoder, builder_->Rethrow(exception));
+    CheckForException(decoder, builder_->Rethrow(exception), false);
     builder_->TerminateThrow(effect(), control());
   }
 
@@ -2186,7 +2202,8 @@ class WasmGraphBuildingInterface {
     builder_->set_instance_cache(&env->instance_cache);
   }
 
-  TFNode* CheckForException(FullDecoder* decoder, TFNode* node) {
+  TFNode* CheckForException(FullDecoder* decoder, TFNode* node,
+                            bool may_modify_instance_cache) {
     DCHECK_NOT_NULL(node);
 
     // We need to emit IfSuccess/IfException nodes if this node throws and has
@@ -2216,7 +2233,9 @@ class WasmGraphBuildingInterface {
 
     // The exceptional operation could have modified memory size; we need to
     // reload the memory context into the exceptional control path.
-    ReloadInstanceCacheIntoSsa(ssa_env_, decoder->module_);
+    if (may_modify_instance_cache) {
+      ReloadInstanceCacheIntoSsa(ssa_env_, decoder->module_);
+    }
 
     if (emit_loop_exits()) {
       ValueVector values;
@@ -2463,7 +2482,7 @@ class WasmGraphBuildingInterface {
             call_info.table_index(), call_info.sig_index(),
             base::VectorOf(arg_nodes), base::VectorOf(return_nodes),
             decoder->position());
-        CheckForException(decoder, call);
+        CheckForException(decoder, call, true);
         break;
       }
       case CallInfo::kCallDirect: {
@@ -2471,14 +2490,14 @@ class WasmGraphBuildingInterface {
             call_info.callee_index(), base::VectorOf(arg_nodes),
             base::VectorOf(return_nodes), decoder->position());
         builder_->StoreCallCount(call, call_info.call_count());
-        CheckForException(decoder, call);
+        CheckForException(decoder, call, true);
         break;
       }
       case CallInfo::kCallRef: {
         TFNode* call = builder_->CallRef(
             sig, base::VectorOf(arg_nodes), base::VectorOf(return_nodes),
             call_info.null_check(), decoder->position());
-        CheckForException(decoder, call);
+        CheckForException(decoder, call, true);
         break;
       }
     }
@@ -2606,6 +2625,34 @@ class WasmGraphBuildingInterface {
     // This DCHECK will help us catch uninitialized values.
     DCHECK_LT(value->type.kind(), kBottom);
     value->node = builder_->SetType(node, value->type);
+  }
+
+  // In order to determine the memory index to cache in an SSA value, we try to
+  // determine the first memory index that will be accessed in the function. If
+  // we do not find a memory access this method returns -1.
+  // This is a best-effort implementation: It ignores potential control flow and
+  // only looks for basic memory load and store operations.
+  int FindFirstUsedMemoryIndex(base::Vector<const uint8_t> body, Zone* zone) {
+    BodyLocalDecls locals;
+    for (BytecodeIterator it{body.begin(), body.end(), &locals, zone};
+         it.has_next(); it.next()) {
+      WasmOpcode opcode = it.current();
+      constexpr bool kConservativelyAssumeMemory64 = true;
+      constexpr bool kConservativelyAssumeMultiMemory = true;
+      switch (opcode) {
+        default:
+          break;
+#define CASE(name, ...) case kExpr##name:
+          FOREACH_LOAD_MEM_OPCODE(CASE)
+          FOREACH_STORE_MEM_OPCODE(CASE)
+#undef CASE
+          MemoryAccessImmediate imm(
+              &it, it.pc() + 1, UINT32_MAX, kConservativelyAssumeMemory64,
+              kConservativelyAssumeMultiMemory, Decoder::kNoValidation);
+          return imm.mem_index;
+      }
+    }
+    return -1;
   }
 };
 

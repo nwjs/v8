@@ -28,6 +28,7 @@
 #include "src/diagnostics/perf-jit.h"
 
 #include "src/common/assert-scope.h"
+#include "src/flags/flags.h"
 
 // Only compile the {LinuxPerfJitLogger} on Linux.
 #if V8_OS_LINUX
@@ -116,7 +117,7 @@ struct PerfJitCodeUnwindingInfo : PerfJitBase {
   // Followed by size_ - sizeof(PerfJitCodeUnwindingInfo) bytes of data.
 };
 
-const char LinuxPerfJitLogger::kFilenameFormatString[] = "./jit-%d.dump";
+const char LinuxPerfJitLogger::kFilenameFormatString[] = "%s/jit-%d.dump";
 
 // Extra padding for the PID in the filename
 const int LinuxPerfJitLogger::kFilenameBufferPadding = 16;
@@ -135,9 +136,11 @@ void LinuxPerfJitLogger::OpenJitDumpFile() {
   // Open the perf JIT dump file.
   perf_output_handle_ = nullptr;
 
-  int bufferSize = sizeof(kFilenameFormatString) + kFilenameBufferPadding;
+  size_t bufferSize = strlen(v8_flags.perf_prof_path) +
+                      sizeof(kFilenameFormatString) + kFilenameBufferPadding;
   base::ScopedVector<char> perf_dump_name(bufferSize);
-  int size = SNPrintF(perf_dump_name, kFilenameFormatString, process_id_);
+  int size = SNPrintF(perf_dump_name, kFilenameFormatString,
+                      v8_flags.perf_prof_path.value(), process_id_);
   CHECK_NE(size, -1);
 
   int fd = open(perf_dump_name.begin(), O_CREAT | O_TRUNC | O_RDWR, 0666);
@@ -217,8 +220,8 @@ uint64_t LinuxPerfJitLogger::GetTimestamp() {
 }
 
 void LinuxPerfJitLogger::LogRecordedBuffer(
-    AbstractCode abstract_code, MaybeHandle<SharedFunctionInfo> maybe_sfi,
-    const char* name, int length) {
+    Tagged<AbstractCode> abstract_code,
+    MaybeHandle<SharedFunctionInfo> maybe_sfi, const char* name, int length) {
   DisallowGarbageCollection no_gc;
   if (v8_flags.perf_basic_prof_only_functions) {
     CodeKind code_kind = abstract_code->kind(isolate_);
@@ -235,7 +238,7 @@ void LinuxPerfJitLogger::LogRecordedBuffer(
 
   // We only support non-interpreted functions.
   if (!IsCode(abstract_code, isolate_)) return;
-  Code code = Code::cast(abstract_code);
+  Tagged<Code> code = Code::cast(abstract_code);
 
   // Debug info has to be emitted first.
   Handle<SharedFunctionInfo> sfi;
@@ -304,13 +307,14 @@ constexpr size_t kUnknownScriptNameStringLen =
     arraysize(kUnknownScriptNameString) - 1;
 
 namespace {
-base::Vector<const char> GetScriptName(Object maybeScript,
+base::Vector<const char> GetScriptName(Tagged<Object> maybeScript,
                                        std::unique_ptr<char[]>* storage,
                                        const DisallowGarbageCollection& no_gc) {
   if (IsScript(maybeScript)) {
-    Object name_or_url = Script::cast(maybeScript)->GetNameOrSourceURL();
+    Tagged<Object> name_or_url =
+        Script::cast(maybeScript)->GetNameOrSourceURL();
     if (IsSeqOneByteString(name_or_url)) {
-      SeqOneByteString str = SeqOneByteString::cast(name_or_url);
+      Tagged<SeqOneByteString> str = SeqOneByteString::cast(name_or_url);
       return {reinterpret_cast<char*>(str->GetChars(no_gc)),
               static_cast<size_t>(str->length())};
     } else if (IsString(name_or_url)) {
@@ -326,7 +330,7 @@ base::Vector<const char> GetScriptName(Object maybeScript,
 
 }  // namespace
 
-SourcePositionInfo GetSourcePositionInfo(Isolate* isolate, Code code,
+SourcePositionInfo GetSourcePositionInfo(Isolate* isolate, Tagged<Code> code,
                                          Handle<SharedFunctionInfo> function,
                                          SourcePosition pos) {
   DisallowGarbageCollection disallow;
@@ -339,31 +343,31 @@ SourcePositionInfo GetSourcePositionInfo(Isolate* isolate, Code code,
 
 }  // namespace
 
-void LinuxPerfJitLogger::LogWriteDebugInfo(Code code,
+void LinuxPerfJitLogger::LogWriteDebugInfo(Tagged<Code> code,
                                            Handle<SharedFunctionInfo> shared) {
   // Line ends of all scripts have been initialized prior to this.
   DisallowGarbageCollection no_gc;
   // The WasmToJS wrapper stubs have source position entries.
-  SharedFunctionInfo raw_shared = *shared;
+  Tagged<SharedFunctionInfo> raw_shared = *shared;
   if (!raw_shared->HasSourceCode()) return;
 
   PerfJitCodeDebugInfo debug_info;
   uint32_t size = sizeof(debug_info);
 
-  ByteArray source_position_table =
+  Tagged<ByteArray> source_position_table =
       code->SourcePositionTable(isolate_, raw_shared);
   // Compute the entry count and get the names of all scripts.
   // Avoid additional work if the script name is repeated. Multiple script
   // names only occur for cross-script inlining.
   uint32_t entry_count = 0;
-  Object last_script = Smi::zero();
+  Tagged<Object> last_script = Smi::zero();
   size_t last_script_name_size = 0;
   std::vector<base::Vector<const char>> script_names;
   for (SourcePositionTableIterator iterator(source_position_table);
        !iterator.done(); iterator.Advance()) {
     SourcePositionInfo info(GetSourcePositionInfo(isolate_, code, shared,
                                                   iterator.source_position()));
-    Object current_script = *info.script;
+    Tagged<Object> current_script = *info.script;
     if (current_script != last_script) {
       std::unique_ptr<char[]> name_storage;
       auto name = GetScriptName(raw_shared->script(), &name_storage, no_gc);
@@ -408,7 +412,7 @@ void LinuxPerfJitLogger::LogWriteDebugInfo(Code code,
     entry.line_number_ = info.line + 1;
     entry.column_ = info.column + 1;
     LogWriteBytes(reinterpret_cast<const char*>(&entry), sizeof(entry));
-    Object current_script = *info.script;
+    Tagged<Object> current_script = *info.script;
     auto name_string = script_names[script_names_index];
     LogWriteBytes(name_string.begin(),
                   static_cast<uint32_t>(name_string.size()));
@@ -491,7 +495,7 @@ void LinuxPerfJitLogger::LogWriteDebugInfo(const wasm::WasmCode* code) {
 }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-void LinuxPerfJitLogger::LogWriteUnwindingInfo(Code code) {
+void LinuxPerfJitLogger::LogWriteUnwindingInfo(Tagged<Code> code) {
   PerfJitCodeUnwindingInfo unwinding_info_header;
   unwinding_info_header.event_ = PerfJitCodeLoad::kUnwindingInfo;
   unwinding_info_header.time_stamp_ = GetTimestamp();

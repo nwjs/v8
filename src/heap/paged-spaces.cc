@@ -42,67 +42,21 @@ namespace internal {
 
 PagedSpaceObjectIterator::PagedSpaceObjectIterator(Heap* heap,
                                                    const PagedSpaceBase* space)
-    : cur_addr_(kNullAddress),
-      cur_end_(kNullAddress),
-      space_(space),
+    : space_(space),
       page_range_(space->first_page(), nullptr),
-      current_page_(page_range_.begin())
-#if V8_COMPRESS_POINTERS
-      ,
-      cage_base_(heap->isolate())
-#endif  // V8_COMPRESS_POINTERS
-{
+      current_page_(page_range_.begin()) {
   heap->MakeHeapIterable();
   USE(space_);
-}
-
-PagedSpaceObjectIterator::PagedSpaceObjectIterator(Heap* heap,
-                                                   const PagedSpaceBase* space,
-                                                   const Page* page)
-    : cur_addr_(kNullAddress),
-      cur_end_(kNullAddress),
-      space_(space),
-      page_range_(page),
-      current_page_(page_range_.begin())
-#if V8_COMPRESS_POINTERS
-      ,
-      cage_base_(heap->isolate())
-#endif  // V8_COMPRESS_POINTERS
-{
-  heap->MakeHeapIterable();
-}
-
-PagedSpaceObjectIterator::PagedSpaceObjectIterator(Heap* heap,
-                                                   const PagedSpace* space,
-                                                   const Page* page,
-                                                   Address start_address)
-    : cur_addr_(start_address),
-      cur_end_(page->area_end()),
-      space_(space),
-      page_range_(page, page),
-      current_page_(page_range_.begin())
-#if V8_COMPRESS_POINTERS
-      ,
-      cage_base_(heap->isolate())
-#endif  // V8_COMPRESS_POINTERS
-{
-  heap->MakeHeapIterable();
-  DCHECK_IMPLIES(!heap->IsInlineAllocationEnabled(),
-                 !page->Contains(space->top()));
-  DCHECK(page->Contains(start_address));
-  DCHECK(page->SweepingDone());
 }
 
 // We have hit the end of the page and should advance to the next block of
 // objects.  This happens at the end of the page.
 bool PagedSpaceObjectIterator::AdvanceToNextPage() {
-  DCHECK_EQ(cur_addr_, cur_end_);
   if (current_page_ == page_range_.end()) return false;
   const Page* cur_page = *(current_page_++);
-
-  cur_addr_ = cur_page->area_start();
-  cur_end_ = cur_page->area_end();
-  DCHECK(cur_page->SweepingDone());
+  HeapObjectRange heap_objects(cur_page);
+  cur_ = heap_objects.begin();
+  end_ = heap_objects.end();
   return true;
 }
 
@@ -282,10 +236,11 @@ void PagedSpaceBase::AddPageImpl(Page* page) {
   AccountCommitted(page->size());
   IncreaseCapacity(page->area_size());
   IncreaseAllocatedBytes(page->allocated_bytes(), page);
-  for (size_t i = 0; i < ExternalBackingStoreType::kNumTypes; i++) {
-    ExternalBackingStoreType t = static_cast<ExternalBackingStoreType>(i);
-    IncrementExternalBackingStoreBytes(t, page->ExternalBackingStoreBytes(t));
-  }
+  ForAll<ExternalBackingStoreType>(
+      [this, page](ExternalBackingStoreType type, int index) {
+        IncrementExternalBackingStoreBytes(
+            type, page->ExternalBackingStoreBytes(type));
+      });
   IncrementCommittedPhysicalMemory(page->CommittedPhysicalMemory());
 }
 
@@ -312,10 +267,11 @@ void PagedSpaceBase::RemovePage(Page* page) {
   }
   DecreaseCapacity(page->area_size());
   AccountUncommitted(page->size());
-  for (size_t i = 0; i < ExternalBackingStoreType::kNumTypes; i++) {
-    ExternalBackingStoreType t = static_cast<ExternalBackingStoreType>(i);
-    DecrementExternalBackingStoreBytes(t, page->ExternalBackingStoreBytes(t));
-  }
+  ForAll<ExternalBackingStoreType>(
+      [this, page](ExternalBackingStoreType type, int index) {
+        DecrementExternalBackingStoreBytes(
+            type, page->ExternalBackingStoreBytes(type));
+      });
   DecrementCommittedPhysicalMemory(page->CommittedPhysicalMemory());
 }
 
@@ -371,9 +327,18 @@ void PagedSpaceBase::ShrinkImmortalImmovablePages() {
 
 Page* PagedSpaceBase::TryExpandImpl(
     MemoryAllocator::AllocationMode allocation_mode) {
+  base::MutexGuard expansion_guard(heap_->heap_expansion_mutex());
+  const size_t accounted_size =
+      MemoryChunkLayout::AllocatableMemoryInMemoryChunk(identity());
+  if (identity() != NEW_SPACE && !is_compaction_space() &&
+      !heap()->IsOldGenerationExpansionAllowed(accounted_size,
+                                               expansion_guard)) {
+    return nullptr;
+  }
   Page* page = heap()->memory_allocator()->AllocatePage(allocation_mode, this,
                                                         executable());
   if (page == nullptr) return nullptr;
+  DCHECK_EQ(page->area_size(), accounted_size);
   ConcurrentAllocationMutex guard(this);
   AddPage(page);
   Free(page->area_start(), page->area_size(),
@@ -384,9 +349,17 @@ Page* PagedSpaceBase::TryExpandImpl(
 base::Optional<std::pair<Address, size_t>> PagedSpaceBase::TryExpandBackground(
     size_t size_in_bytes) {
   DCHECK_NE(NEW_SPACE, identity());
+  base::MutexGuard expansion_guard(heap_->heap_expansion_mutex());
+  const size_t accounted_size =
+      MemoryChunkLayout::AllocatableMemoryInMemoryChunk(identity());
+  if (!heap()->IsOldGenerationExpansionAllowed(accounted_size,
+                                               expansion_guard)) {
+    return {};
+  }
   Page* page = heap()->memory_allocator()->AllocatePage(
       MemoryAllocator::AllocationMode::kRegular, this, executable());
   if (page == nullptr) return {};
+  DCHECK_EQ(page->area_size(), accounted_size);
   base::MutexGuard lock(&space_mutex_);
   AddPage(page);
   heap()->NotifyOldGenerationExpansionBackground(identity(), page);
@@ -470,7 +443,11 @@ void PagedSpaceBase::UnmarkLinearAllocationArea() {
 
 void PagedSpaceBase::MakeLinearAllocationAreaIterable() {
   Address current_top = top();
-  Address current_limit = limit();
+  Address current_limit = original_limit_relaxed();
+  DCHECK_GE(current_limit, limit());
+  // Only new space supports LAB extensions. For all other spaces,
+  // `original_limit_relaxed()` and `limit()` should be equivalent.
+  DCHECK_IMPLIES(!SupportsExtendingLAB(), current_limit == limit());
   if (current_top != kNullAddress && current_top != current_limit) {
     heap_->CreateFillerObjectAt(current_top,
                                 static_cast<int>(current_limit - current_top));
@@ -588,7 +565,7 @@ bool PagedSpaceBase::TryAllocationFromFreeListMain(size_t size_in_bytes,
   FreeLinearAllocationArea();
 
   size_t new_node_size = 0;
-  FreeSpace new_node =
+  Tagged<FreeSpace> new_node =
       free_list_->Allocate(size_in_bytes, &new_node_size, origin);
   if (new_node.is_null()) return false;
   DCHECK_GE(new_node_size, size_in_bytes);
@@ -634,7 +611,7 @@ PagedSpaceBase::TryAllocationFromFreeListBackground(size_t min_size_in_bytes,
          identity() == SHARED_SPACE);
 
   size_t new_node_size = 0;
-  FreeSpace new_node =
+  Tagged<FreeSpace> new_node =
       free_list_->Allocate(min_size_in_bytes, &new_node_size, origin);
   if (new_node.is_null()) return {};
   DCHECK_GE(new_node_size, min_size_in_bytes);
@@ -675,32 +652,25 @@ void PagedSpaceBase::Verify(Isolate* isolate,
 
   bool allocation_pointer_found_in_space =
       (allocation_info_.top() == allocation_info_.limit());
-  size_t external_space_bytes[kNumTypes];
-  size_t external_page_bytes[kNumTypes];
-
-  for (int i = 0; i < kNumTypes; i++) {
-    external_space_bytes[static_cast<ExternalBackingStoreType>(i)] = 0;
-  }
-
+  size_t external_space_bytes[static_cast<int>(
+      ExternalBackingStoreType::kNumValues)] = {0};
   PtrComprCageBase cage_base(isolate);
   for (const Page* page : *this) {
+    size_t external_page_bytes[static_cast<int>(
+        ExternalBackingStoreType::kNumValues)] = {0};
+
     CHECK_EQ(page->owner(), this);
     CHECK_IMPLIES(identity() != NEW_SPACE, page->AllocatedLabSize() == 0);
     visitor->VerifyPage(page);
-
-    for (int i = 0; i < kNumTypes; i++) {
-      external_page_bytes[static_cast<ExternalBackingStoreType>(i)] = 0;
-    }
 
     if (page == Page::FromAllocationAreaAddress(allocation_info_.top())) {
       allocation_pointer_found_in_space = true;
     }
     CHECK(page->SweepingDone());
-    PagedSpaceObjectIterator it(isolate->heap(), this, page);
     Address end_of_previous_object = page->area_start();
     Address top = page->area_end();
 
-    for (HeapObject object = it.Next(); !object.is_null(); object = it.Next()) {
+    for (Tagged<HeapObject> object : HeapObjectRange(page)) {
       CHECK(end_of_previous_object <= object.address());
 
       // Invoke verification method for each object.
@@ -712,25 +682,29 @@ void PagedSpaceBase::Verify(Isolate* isolate,
       end_of_previous_object = object.address() + size;
 
       if (IsExternalString(object, cage_base)) {
-        ExternalString external_string = ExternalString::cast(object);
+        Tagged<ExternalString> external_string = ExternalString::cast(object);
         size_t payload_size = external_string->ExternalPayloadSize();
-        external_page_bytes[ExternalBackingStoreType::kExternalString] +=
-            payload_size;
+        external_page_bytes[static_cast<int>(
+            ExternalBackingStoreType::kExternalString)] += payload_size;
       }
     }
-    for (int i = 0; i < kNumTypes; i++) {
-      ExternalBackingStoreType t = static_cast<ExternalBackingStoreType>(i);
-      CHECK_EQ(external_page_bytes[t], page->ExternalBackingStoreBytes(t));
-      external_space_bytes[t] += external_page_bytes[t];
-    }
+    ForAll<ExternalBackingStoreType>(
+        [page, external_page_bytes, &external_space_bytes](
+            ExternalBackingStoreType type, int index) {
+          CHECK_EQ(external_page_bytes[index],
+                   page->ExternalBackingStoreBytes(type));
+          external_space_bytes[index] += external_page_bytes[index];
+        });
 
     visitor->VerifyPageDone(page);
   }
-  for (int i = 0; i < kNumTypes; i++) {
-    if (i == ExternalBackingStoreType::kArrayBuffer) continue;
-    ExternalBackingStoreType t = static_cast<ExternalBackingStoreType>(i);
-    CHECK_EQ(external_space_bytes[t], ExternalBackingStoreBytes(t));
-  }
+  ForAll<ExternalBackingStoreType>(
+      [this, external_space_bytes](ExternalBackingStoreType type, int index) {
+        if (type == ExternalBackingStoreType::kArrayBuffer) {
+          return;
+        }
+        CHECK_EQ(external_space_bytes[index], ExternalBackingStoreBytes(type));
+      });
   CHECK(allocation_pointer_found_in_space);
 
   if (!v8_flags.concurrent_array_buffer_sweeping) {
@@ -756,9 +730,8 @@ void PagedSpaceBase::VerifyLiveBytes() const {
   PtrComprCageBase cage_base(heap()->isolate());
   for (const Page* page : *this) {
     CHECK(page->SweepingDone());
-    PagedSpaceObjectIterator it(heap(), this, page);
     int black_size = 0;
-    for (HeapObject object = it.Next(); !object.is_null(); object = it.Next()) {
+    for (Tagged<HeapObject> object : HeapObjectRange(page)) {
       // All the interior pointers should be contained in the heap.
       if (marking_state->IsMarked(object)) {
         black_size += object->Size(cage_base);
@@ -777,9 +750,8 @@ void PagedSpaceBase::VerifyCountersAfterSweeping(Heap* heap) const {
   for (const Page* page : *this) {
     DCHECK(page->SweepingDone());
     total_capacity += page->area_size();
-    PagedSpaceObjectIterator it(heap, this, page);
     size_t real_allocated = 0;
-    for (HeapObject object = it.Next(); !object.is_null(); object = it.Next()) {
+    for (HeapObject object : HeapObjectRange(page)) {
       if (!IsFreeSpaceOrFiller(object)) {
         real_allocated +=
             ALIGN_TO_ALLOCATION_ALIGNMENT(object->Size(cage_base));

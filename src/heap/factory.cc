@@ -112,11 +112,6 @@ Handle<ByteArray> Factory::CodeBuilder::NewByteArray(
   return local_isolate_->factory()->NewByteArray(length, allocation);
 }
 
-MaybeHandle<InstructionStream> Factory::CodeBuilder::NewInstructionStream(
-    bool retry_allocation_or_fail) {
-  return AllocateInstructionStream(retry_allocation_or_fail);
-}
-
 Handle<Code> Factory::CodeBuilder::NewCode(const NewCodeOptions& options) {
   return local_isolate_->factory()->NewCode(options);
 }
@@ -126,9 +121,8 @@ MaybeHandle<Code> Factory::CodeBuilder::BuildInternal(
   Handle<ByteArray> reloc_info =
       NewByteArray(code_desc_.reloc_size, AllocationType::kOld);
 
-  CodePageMemoryModificationScopeForPerf memory_write_scope(
-      "Temporary performance optimization to prevent frequent permission "
-      "switching.");
+  CodePageHeaderModificationScope memory_write_scope(
+      "Write barriers need to access the IStreams' page headers.");
 
   // Basic block profiling data for builtins is stored in the JS heap rather
   // than in separately-allocated C++ objects. Allocate that data now if
@@ -146,27 +140,33 @@ MaybeHandle<Code> Factory::CodeBuilder::BuildInternal(
     isolate_->heap()->SetBasicBlockProfilingData(new_list);
   }
 
+  Tagged<HeapObject> istream_allocation =
+      AllocateUninitializedInstructionStream(retry_allocation_or_fail);
+  if (istream_allocation->is_null()) {
+    return {};
+  }
+
+  Handle<InstructionStream> istream;
+  {
+    // The InstructionStream object has not been fully initialized yet. We
+    // rely on the fact that no allocation will happen from this point on.
+    DisallowGarbageCollection no_gc;
+    Tagged<InstructionStream> raw_istream = InstructionStream::Initialize(
+        istream_allocation,
+        ReadOnlyRoots(local_isolate_).instruction_stream_map(),
+        code_desc_.body_size(), *reloc_info);
+    istream = handle(raw_istream, local_isolate_);
+    DCHECK(IsAligned(istream->instruction_start(), kCodeAlignment));
+    DCHECK_IMPLIES(
+        !V8_ENABLE_THIRD_PARTY_HEAP_BOOL &&
+            !local_isolate_->heap()->heap()->code_region().is_empty(),
+        local_isolate_->heap()->heap()->code_region().contains(
+            istream->address()));
+  }
+
   Handle<Code> code;
   {
     static_assert(InstructionStream::kOnHeapBodyIsContiguous);
-
-    Handle<InstructionStream> istream;
-    if (!NewInstructionStream(retry_allocation_or_fail).ToHandle(&istream)) {
-      return {};
-    }
-
-    {
-      DisallowGarbageCollection no_gc;
-      Tagged<InstructionStream> raw_istream = *istream;
-      CodePageMemoryModificationScope memory_modification_scope(raw_istream);
-      int body_size = code_desc_.body_size();
-      ThreadIsolation::RegisterInstructionStreamAllocation(
-          raw_istream.address(), InstructionStream::SizeFor(body_size));
-      raw_istream->set_body_size(body_size);
-      raw_istream->initialize_code_to_smi_zero(kReleaseStore);
-      raw_istream->set_relocation_info(*reloc_info);
-      raw_istream->clear_padding();
-    }
 
     NewCodeOptions new_code_options = {
         kind_,
@@ -218,35 +218,20 @@ MaybeHandle<Code> Factory::CodeBuilder::BuildInternal(
                 handle(on_heap_profiler_data->counts(), isolate_));
       }
 
-      {
-        CodePageMemoryModificationScope memory_modification_scope(raw_istream);
-        // Migrate generated code.
-        // The generated code can contain embedded objects (typically from
-        // handles) in a pointer-to-tagged-value format (i.e. with indirection
-        // like a handle) that are dereferenced during the copy to point
-        // directly to the actual heap objects. These pointers can include
-        // references to the code object itself, through the self_reference
-        // parameter.
-        code->CopyFromNoFlush(*reloc_info, isolate_->heap(), code_desc_);
-
-        // Now that the InstructionStream's body is fully initialized and
-        // relocated, publish its code pointer, effectively enabling RelocInfo
-        // iteration. See InstructionStream::BodyDescriptor::IterateBody.
-        raw_istream->set_code(*code, kReleaseStore);
-      }
+      // Migrate generated code.
+      // The generated code can contain embedded objects (typically from
+      // handles) in a pointer-to-tagged-value format (i.e. with indirection
+      // like a handle) that are dereferenced during the copy to point
+      // directly to the actual heap objects. These pointers can include
+      // references to the code object itself, through the self_reference
+      // parameter.
+      istream->Finalize(*code, *reloc_info, code_desc_, isolate_->heap());
 
 #ifdef VERIFY_HEAP
       if (v8_flags.verify_heap) {
         HeapObject::VerifyCodePointer(isolate_, raw_istream);
       }
 #endif
-
-      // Flush the instruction cache before changing the permissions.
-      // Note: we do this before setting permissions to ReadExecute because on
-      // some older ARM kernels there is a bug which causes an access error on
-      // cache flush instructions to trigger access error on non-writable
-      // memory. See https://bugs.chromium.org/p/v8/issues/detail?id=8157
-      code->FlushICache();
     }
   }
 
@@ -268,8 +253,7 @@ MaybeHandle<Code> Factory::CodeBuilder::BuildInternal(
   return code;
 }
 
-// TODO(victorgomes): Unify the two AllocateCodes
-MaybeHandle<InstructionStream> Factory::CodeBuilder::AllocateInstructionStream(
+Tagged<HeapObject> Factory::CodeBuilder::AllocateUninitializedInstructionStream(
     bool retry_allocation_or_fail) {
   LocalHeap* heap = local_isolate_->heap();
   Tagged<HeapObject> result;
@@ -282,33 +266,13 @@ MaybeHandle<InstructionStream> Factory::CodeBuilder::AllocateInstructionStream(
     result =
         heap->heap()->allocator()->AllocateRawWith<HeapAllocator::kRetryOrFail>(
             object_size, AllocationType::kCode, AllocationOrigin::kRuntime);
+    CHECK(!result.is_null());
+    return result;
   } else {
-    result = heap->AllocateRawWith<LocalHeap::kLightRetry>(
-        object_size, AllocationType::kCode);
-    if (result.is_null()) {
-      // Return an empty handle if we cannot allocate the code object.
-      return MaybeHandle<InstructionStream>();
-    }
+    // Return null if we cannot allocate the code object.
+    return heap->AllocateRawWith<LocalHeap::kLightRetry>(object_size,
+                                                         AllocationType::kCode);
   }
-  CHECK(!result.is_null());
-
-  // The code object has not been fully initialized yet.  We rely on the
-  // fact that no allocation will happen from this point on.
-  DisallowGarbageCollection no_gc;
-  {
-    CodePageMemoryModificationScope memory_modification_scope(
-        BasicMemoryChunk::FromHeapObject(result));
-    result->set_map_after_allocation(
-        ReadOnlyRoots(local_isolate_).instruction_stream_map(),
-        SKIP_WRITE_BARRIER);
-  }
-  Handle<InstructionStream> istream =
-      handle(InstructionStream::cast(result), local_isolate_);
-  DCHECK(IsAligned(istream->instruction_start(), kCodeAlignment));
-  DCHECK_IMPLIES(!V8_ENABLE_THIRD_PARTY_HEAP_BOOL &&
-                     !heap->heap()->code_region().is_empty(),
-                 heap->heap()->code_region().contains(istream->address()));
-  return istream;
 }
 
 MaybeHandle<Code> Factory::CodeBuilder::TryBuild() {
@@ -1098,6 +1062,35 @@ Handle<String> Factory::NewSurrogatePairString(uint16_t lead, uint16_t trail) {
   return str;
 }
 
+Handle<String> Factory::NewCopiedSubstring(Handle<String> str, int begin,
+                                           int length) {
+  DCHECK(str->IsFlat());  // Callers must flatten.
+  DCHECK_GT(length, 0);   // Callers must handle empty string.
+  bool one_byte;
+  if (str->IsOneByteRepresentation()) {
+    one_byte = true;
+  } else {
+    DisallowGarbageCollection no_gc;
+    const uint16_t* src = str->GetFlatContent(no_gc).ToUC16Vector().data();
+    one_byte = String::IsOneByte(src + begin, length);
+  }
+  if (one_byte) {
+    Handle<SeqOneByteString> result =
+        NewRawOneByteString(length).ToHandleChecked();
+    DisallowGarbageCollection no_gc;
+    uint8_t* dest = result->GetChars(no_gc);
+    String::WriteToFlat(*str, dest, begin, length);
+    return result;
+  } else {
+    Handle<SeqTwoByteString> result =
+        NewRawTwoByteString(length).ToHandleChecked();
+    DisallowGarbageCollection no_gc;
+    base::uc16* dest = result->GetChars(no_gc);
+    String::WriteToFlat(*str, dest, begin, length);
+    return result;
+  }
+}
+
 Handle<String> Factory::NewProperSubString(Handle<String> str, int begin,
                                            int end) {
 #if VERIFY_HEAP
@@ -1122,21 +1115,7 @@ Handle<String> Factory::NewProperSubString(Handle<String> str, int begin,
   }
 
   if (!v8_flags.string_slices || length < SlicedString::kMinLength) {
-    if (str->IsOneByteRepresentation()) {
-      Handle<SeqOneByteString> result =
-          NewRawOneByteString(length).ToHandleChecked();
-      DisallowGarbageCollection no_gc;
-      uint8_t* dest = result->GetChars(no_gc);
-      String::WriteToFlat(*str, dest, begin, length);
-      return result;
-    } else {
-      Handle<SeqTwoByteString> result =
-          NewRawTwoByteString(length).ToHandleChecked();
-      DisallowGarbageCollection no_gc;
-      base::uc16* dest = result->GetChars(no_gc);
-      String::WriteToFlat(*str, dest, begin, length);
-      return result;
-    }
+    return NewCopiedSubstring(str, begin, length);
   }
 
   int offset = begin;
@@ -2119,9 +2098,10 @@ Handle<Map> Factory::NewMap(InstanceType type, int instance_size,
                 isolate());
 }
 
-Map Factory::InitializeMap(Tagged<Map> map, InstanceType type,
-                           int instance_size, ElementsKind elements_kind,
-                           int inobject_properties, Heap* roots) {
+Tagged<Map> Factory::InitializeMap(Tagged<Map> map, InstanceType type,
+                                   int instance_size,
+                                   ElementsKind elements_kind,
+                                   int inobject_properties, Heap* roots) {
   DisallowGarbageCollection no_gc;
   map->set_bit_field(0);
   map->set_bit_field2(Map::Bits2::NewTargetIsBaseBit::encode(true));
@@ -3651,7 +3631,7 @@ Handle<Map> Factory::ObjectLiteralMapFromCache(Handle<NativeContext> context,
 
   // Check to see whether there is a matching element in the cache.
   MaybeObject result = cache->Get(number_of_properties);
-  HeapObject heap_object;
+  Tagged<HeapObject> heap_object;
   if (result.GetHeapObjectIfWeak(&heap_object)) {
     Tagged<Map> map = Tagged<Map>::cast(heap_object);
     DCHECK(!map->is_dictionary_map());

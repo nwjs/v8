@@ -369,7 +369,7 @@ void* ExtractEmbedderDataBackref(Isolate* isolate, CppHeap& cpp_heap,
       !JSObject::cast(*v8_object)->MayHaveEmbedderFields())
     return nullptr;
 
-  JSObject js_object = JSObject::cast(*v8_object);
+  Tagged<JSObject> js_object = JSObject::cast(*v8_object);
 
   const auto maybe_info =
       WrappableInfo::From(isolate, js_object, cpp_heap.wrapper_descriptor());
@@ -970,7 +970,7 @@ void CppGraphBuilderImpl::Run() {
         states_.CreateRootState(AddRootNode("C++ native stack roots")));
     GraphBuildingRootVisitor root_object_visitor(*this, parent_scope);
     GraphBuildingStackVisitor stack_visitor(cpp_heap_, root_object_visitor);
-    cpp_heap_.stack()->IteratePointers(&stack_visitor);
+    cpp_heap_.stack()->IteratePointersUntilMarker(&stack_visitor);
   }
 }
 

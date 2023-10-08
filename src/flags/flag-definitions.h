@@ -1036,13 +1036,24 @@ DEFINE_STRING(trace_turbo_cfg_file, nullptr,
 DEFINE_BOOL(trace_turbo_types, true, "trace TurboFan's types")
 DEFINE_BOOL(trace_turbo_scheduler, false, "trace TurboFan's scheduler")
 DEFINE_BOOL(trace_turbo_reduction, false, "trace TurboFan's various reducers")
-DEFINE_BOOL(trace_turbo_trimming, false, "trace TurboFan's graph trimmer")
-DEFINE_BOOL(trace_turbo_jt, false, "trace TurboFan's jump threading")
-DEFINE_BOOL(trace_turbo_ceq, false, "trace TurboFan's control equivalence")
-DEFINE_BOOL(trace_turbo_loop, false, "trace TurboFan's loop optimizations")
-DEFINE_BOOL(trace_turbo_alloc, false, "trace TurboFan's register allocator")
-DEFINE_BOOL(trace_all_uses, false, "trace all use positions")
-DEFINE_BOOL(trace_representation, false, "trace representation types")
+#ifdef V8_ENABLE_SLOW_TRACING
+#define DEFINE_SLOW_TRACING_BOOL DEFINE_BOOL
+#else
+#define DEFINE_SLOW_TRACING_BOOL DEFINE_BOOL_READONLY
+#endif  // V8_ENABLE_SLOW_TRACING
+DEFINE_SLOW_TRACING_BOOL(trace_turbo_trimming, false,
+                         "trace TurboFan's graph trimmer")
+DEFINE_SLOW_TRACING_BOOL(trace_turbo_jt, false,
+                         "trace TurboFan's jump threading")
+DEFINE_SLOW_TRACING_BOOL(trace_turbo_ceq, false,
+                         "trace TurboFan's control equivalence")
+DEFINE_SLOW_TRACING_BOOL(trace_turbo_loop, false,
+                         "trace TurboFan's loop optimizations")
+DEFINE_SLOW_TRACING_BOOL(trace_turbo_alloc, false,
+                         "trace TurboFan's register allocator")
+DEFINE_SLOW_TRACING_BOOL(trace_all_uses, false, "trace all use positions")
+DEFINE_SLOW_TRACING_BOOL(trace_representation, false,
+                         "trace representation types")
 DEFINE_BOOL(
     trace_turbo_stack_accesses, false,
     "trace stack load/store counters for optimized code in run-time (x64 only)")
@@ -1186,11 +1197,12 @@ DEFINE_BOOL(
     "simulate GC/compiler thread race related to https://crbug.com/v8/8520")
 DEFINE_BOOL(turbo_fast_api_calls, true, "enable fast API calls from TurboFan")
 #ifdef V8_USE_ZLIB
-DEFINE_BOOL(turbo_compress_translation_arrays, false,
-            "compress translation arrays (experimental)")
+DEFINE_BOOL(turbo_compress_frame_translations, false,
+            "compress deoptimization frame translations (experimental)")
 #else
-DEFINE_BOOL_READONLY(turbo_compress_translation_arrays, false,
-                     "compress translation arrays (experimental)")
+DEFINE_BOOL_READONLY(
+    turbo_compress_frame_translations, false,
+    "compress deoptimization frame translations (experimental)")
 #endif  // V8_USE_ZLIB
 DEFINE_BOOL(turbo_inline_js_wasm_calls, true, "inline JS->Wasm calls")
 DEFINE_BOOL(turbo_use_mid_tier_regalloc_for_huge_functions, true,
@@ -1210,6 +1222,9 @@ DEFINE_WEAK_IMPLICATION(future, turboshaft)
 
 DEFINE_BOOL(turboshaft_trace_reduction, false,
             "trace individual Turboshaft reduction steps")
+DEFINE_BOOL(turboshaft_enable_debug_features, false,
+            "enables Turboshaft's DebugPrint, StaticAssert and "
+            "CheckTurboshaftTypeOf operations")
 DEFINE_EXPERIMENTAL_FEATURE(turboshaft_wasm,
                             "enable TurboFan's Turboshaft phases for wasm")
 DEFINE_EXPERIMENTAL_FEATURE(turboshaft_typed_optimizations,
@@ -1225,8 +1240,14 @@ DEFINE_EXPERIMENTAL_FEATURE(turboshaft_machine_lowering_opt,
 DEFINE_EXPERIMENTAL_FEATURE(
     turboshaft_future,
     "enable Turboshaft features that we want to ship in the not-too-far future")
+DEFINE_IMPLICATION(turboshaft_future, turboshaft)
 DEFINE_WEAK_IMPLICATION(turboshaft_future, turboshaft_load_elimination)
 DEFINE_WEAK_IMPLICATION(turboshaft_future, turboshaft_machine_lowering_opt)
+// TODO(nicohartmann): re-enable turboshaft instruction selection behind
+// turboshaft future.
+// #ifdef V8_TARGET_ARCH_X64
+// DEFINE_WEAK_IMPLICATION(turboshaft_future, turboshaft_instruction_selection)
+// #endif
 
 #ifdef DEBUG
 DEFINE_UINT64(turboshaft_opt_bisect_limit, std::numeric_limits<uint64_t>::max(),
@@ -1331,14 +1352,18 @@ DEFINE_DEBUG_BOOL(trace_liftoff, false,
                   "trace Liftoff, the baseline compiler for WebAssembly")
 DEFINE_BOOL(trace_wasm_memory, false,
             "print all memory updates performed in wasm code")
-// Fuzzers use {wasm_tier_mask_for_testing} and {wasm_debug_mask_for_testing}
-// together with {liftoff} and {no_wasm_tier_up} to force some functions to be
-// compiled with TurboFan or for debug.
+// Fuzzers use {wasm_tier_mask_for_testing}, {wasm_debug_mask_for_testing}, and
+// {wasm_turboshaft_mask_for_testing} together with {liftoff} and
+// {no_wasm_tier_up} to force some functions to be compiled with TurboFan or for
+// debug.
 DEFINE_INT(wasm_tier_mask_for_testing, 0,
            "bitmask of functions to compile with TurboFan instead of Liftoff")
 DEFINE_INT(wasm_debug_mask_for_testing, 0,
            "bitmask of functions to compile for debugging, only applies if the "
            "tier is Liftoff")
+DEFINE_INT(
+    wasm_turboshaft_mask_for_testing, 0,
+    "bitmask of functions to compile with Turboshaft instead of TurboFan")
 // TODO(clemensb): Introduce experimental_wasm_pgo to read from a custom section
 // instead of from a local file.
 DEFINE_BOOL(
@@ -1413,6 +1438,12 @@ DEFINE_SIZE_T(wasm_inlining_budget, 5000,
               "maximum graph size (in TF nodes) that allows inlining more")
 DEFINE_SIZE_T(wasm_inlining_max_size, 500,
               "maximum function size (in wire bytes) that may be inlined")
+DEFINE_SIZE_T(
+    wasm_inlining_factor, 3,
+    "maximum multiple graph size (in TF nodes) in comparison to initial size")
+DEFINE_SIZE_T(wasm_inlining_min_budget, 50,
+              "minimum graph size budget (in TF nodes) for which the "
+              "wasm_inlinining_factor does not apply")
 DEFINE_BOOL(trace_wasm_inlining, false, "trace wasm inlining")
 DEFINE_BOOL(trace_wasm_typer, false, "trace wasm typer")
 DEFINE_BOOL(wasm_final_types, false,
@@ -2557,23 +2588,28 @@ DEFINE_BOOL(ll_prof, false, "Enable low-level linux profiler.")
 #define DEFINE_PERF_PROF_IMPLICATION(...)
 #endif
 
+#if defined(ANDROID)
+#define DEFAULT_PERF_BASIC_PROF_PATH "/data/local/tmp"
+#define DEFAULT_PERF_PROF_PATH DEFAULT_PERF_BASIC_PROF_PATH
+#else
+#define DEFAULT_PERF_BASIC_PROF_PATH "/tmp"
+#define DEFAULT_PERF_PROF_PATH "."
+#endif
+
 DEFINE_PERF_PROF_BOOL(perf_basic_prof,
                       "Enable perf linux profiler (basic support).")
 DEFINE_NEG_IMPLICATION(perf_basic_prof, compact_code_space)
+DEFINE_STRING(perf_basic_prof_path, DEFAULT_PERF_BASIC_PROF_PATH,
+              "directory to write perf-<pid>.map symbol file to")
 DEFINE_PERF_PROF_BOOL(
     perf_basic_prof_only_functions,
     "Only report function code ranges to perf (i.e. no stubs).")
 DEFINE_PERF_PROF_IMPLICATION(perf_basic_prof_only_functions, perf_basic_prof)
-#if defined(ANDROID)
-#define DEFAULT_PERF_BASIC_PROF_PATH "/data/local/tmp"
-#else
-#define DEFAULT_PERF_BASIC_PROF_PATH "/tmp"
-#endif
-DEFINE_STRING(perf_basic_prof_path, DEFAULT_PERF_BASIC_PROF_PATH,
-              "directory to write perf-<pid>.map symbol file to")
 
 DEFINE_PERF_PROF_BOOL(
     perf_prof, "Enable perf linux profiler (experimental annotate support).")
+DEFINE_STRING(perf_prof_path, DEFAULT_PERF_PROF_PATH,
+              "directory to write jit-<pid>.dump symbol file to")
 DEFINE_PERF_PROF_BOOL(
     perf_prof_annotate_wasm,
     "Used with --perf-prof, load wasm source map and provide annotate "

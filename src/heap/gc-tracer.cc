@@ -107,7 +107,7 @@ GCTracer::RecordGCPhasesInfo::RecordGCPhasesInfo(
     DCHECK_EQ(GarbageCollector::MARK_COMPACTOR, collector);
     Counters* counters = heap->isolate()->counters();
     const bool in_background = heap->isolate()->IsIsolateInBackground();
-    const bool is_incremental = heap->incremental_marking()->IsStopped();
+    const bool is_incremental = !heap->incremental_marking()->IsStopped();
     mode_ = Mode::None;
     // The following block selects histogram counters to emit. The trace event
     // name should be changed when metrics are updated.
@@ -173,7 +173,8 @@ GCTracer::GCTracer(Heap* heap, GarbageCollectionReason initial_gc_reason)
     : heap_(heap),
       current_(Event::Type::START, Event::State::NOT_RUNNING, initial_gc_reason,
                nullptr),
-      previous_(current_) {
+      previous_(current_),
+      previous_mark_compact_end_time_(base::TimeTicks::Now()) {
   // All accesses to incremental_marking_scope assume that incremental marking
   // scopes come first.
   static_assert(0 == Scope::FIRST_INCREMENTAL_SCOPE);
@@ -183,7 +184,7 @@ GCTracer::GCTracer(Heap* heap, GarbageCollectionReason initial_gc_reason)
   // Starting a new cycle will make the current event the previous event.
   // Setting the current end time here allows us to refer back to a previous
   // event's end time to compute time spent in mutator.
-  current_.end_time = base::TimeTicks::Now();
+  current_.end_time = previous_mark_compact_end_time_;
 }
 
 void GCTracer::ResetForTesting() {
@@ -191,9 +192,9 @@ void GCTracer::ResetForTesting() {
   new (this) GCTracer(heap_, GarbageCollectionReason::kTesting);
 }
 
-void GCTracer::StartObservablePause() {
+void GCTracer::StartObservablePause(base::TimeTicks time) {
   DCHECK(!IsInObservablePause());
-  start_of_observable_pause_.emplace(base::TimeTicks::Now());
+  start_of_observable_pause_.emplace(time);
 }
 
 void GCTracer::UpdateCurrentEvent(GarbageCollectionReason gc_reason,
@@ -310,7 +311,8 @@ void GCTracer::StopInSafepoint() {
   current_.survived_young_object_size = heap_->SurvivedYoungObjectSize();
 }
 
-void GCTracer::StopObservablePause(GarbageCollector collector) {
+void GCTracer::StopObservablePause(GarbageCollector collector,
+                                   base::TimeTicks time) {
   DCHECK(IsConsistentWithCollector(collector));
   DCHECK(IsInObservablePause());
   start_of_observable_pause_.reset();
@@ -318,7 +320,7 @@ void GCTracer::StopObservablePause(GarbageCollector collector) {
   // TODO(chromium:1154636): The end_time of the current event contains
   // currently the end time of the observable pause. This should be
   // reconsidered.
-  current_.end_time = base::TimeTicks::Now();
+  current_.end_time = time;
   AddAllocation(current_.end_time);
 
   FetchBackgroundCounters();
@@ -355,8 +357,6 @@ void GCTracer::StopObservablePause(GarbageCollector collector) {
       DCHECK_EQ(0u, incremental_marking_bytes_);
       DCHECK(incremental_marking_duration_.IsZero());
     }
-    RecordMutatorUtilization(current_.end_time,
-                             duration + incremental_marking_duration_);
     RecordGCSumCounters();
     combined_mark_compact_speed_cache_ = 0.0;
     long_task_stats->gc_full_atomic_wall_clock_duration_us +=
@@ -376,13 +376,17 @@ void GCTracer::StopObservablePause(GarbageCollector collector) {
           0, current_.start_object_size - previous_.end_object_size +
                  heap_->AllocatedExternalMemorySinceMarkCompact());
       const base::TimeDelta major_allocation_duration =
-          (current_.end_time - previous_.end_time) - blocked_time_taken;
+          (current_.end_time - previous_mark_compact_end_time_) -
+          blocked_time_taken;
       CHECK_GT(major_allocation_duration, base::TimeDelta());
       heap_->mb_->TracerUpdate(live_memory, major_allocation_bytes,
                                major_allocation_duration.InMillisecondsF(),
                                major_gc_bytes,
                                major_gc_duration.InMillisecondsF());
     }
+
+    RecordMutatorUtilization(current_.end_time,
+                             duration + incremental_marking_duration_);
   }
 
   heap_->UpdateTotalGCTime(duration);
@@ -1171,33 +1175,28 @@ void GCTracer::RecordEmbedderSpeed(size_t bytes, double duration) {
 
 void GCTracer::RecordMutatorUtilization(base::TimeTicks mark_compact_end_time,
                                         base::TimeDelta mark_compact_duration) {
-  if (!previous_mark_compact_end_time_.has_value()) {
-    // The first event only contributes to previous_mark_compact_end_time_,
-    // because we cannot compute the mutator duration.
-    previous_mark_compact_end_time_.emplace(mark_compact_end_time);
+  const base::TimeDelta total_duration =
+      mark_compact_end_time - previous_mark_compact_end_time_;
+  DCHECK_GE(total_duration, base::TimeDelta());
+  const base::TimeDelta mutator_duration =
+      total_duration - mark_compact_duration;
+  DCHECK_GE(mutator_duration, base::TimeDelta());
+  if (average_mark_compact_duration_ == 0 && average_mutator_duration_ == 0) {
+    // This is the first event with mutator and mark-compact durations.
+    average_mark_compact_duration_ = mark_compact_duration.InMillisecondsF();
+    average_mutator_duration_ = mutator_duration.InMillisecondsF();
   } else {
-    const base::TimeDelta total_duration =
-        mark_compact_end_time - previous_mark_compact_end_time_.value();
-    const base::TimeDelta mutator_duration =
-        total_duration - mark_compact_duration;
-    if (average_mark_compact_duration_ == 0 && average_mutator_duration_ == 0) {
-      // This is the first event with mutator and mark-compact durations.
-      average_mark_compact_duration_ = mark_compact_duration.InMillisecondsF();
-      average_mutator_duration_ = mutator_duration.InMillisecondsF();
-    } else {
-      average_mark_compact_duration_ =
-          (average_mark_compact_duration_ +
-           mark_compact_duration.InMillisecondsF()) /
-          2;
-      average_mutator_duration_ =
-          (average_mutator_duration_ + mutator_duration.InMillisecondsF()) / 2;
-    }
-    current_mark_compact_mutator_utilization_ =
-        !total_duration.IsZero() ? mutator_duration.InMillisecondsF() /
-                                       total_duration.InMillisecondsF()
-                                 : 0;
-    previous_mark_compact_end_time_ = mark_compact_end_time;
+    average_mark_compact_duration_ = (average_mark_compact_duration_ +
+                                      mark_compact_duration.InMillisecondsF()) /
+                                     2;
+    average_mutator_duration_ =
+        (average_mutator_duration_ + mutator_duration.InMillisecondsF()) / 2;
   }
+  current_mark_compact_mutator_utilization_ =
+      !total_duration.IsZero() ? mutator_duration.InMillisecondsF() /
+                                     total_duration.InMillisecondsF()
+                               : 0;
+  previous_mark_compact_end_time_ = mark_compact_end_time;
 }
 
 double GCTracer::AverageMarkCompactMutatorUtilization() const {

@@ -17,11 +17,12 @@
 namespace v8 {
 namespace internal {
 
-template <YoungGenerationMarkingVisitorMode marking_mode>
+template <YoungGenerationMarkingVisitationMode marking_mode>
 YoungGenerationMarkingVisitor<marking_mode>::YoungGenerationMarkingVisitor(
     Heap* heap,
     PretenuringHandler::PretenuringFeedbackMap* local_pretenuring_feedback)
     : Parent(heap->isolate()),
+      isolate_(heap->isolate()),
       marking_worklists_local_(
           heap->minor_mark_sweep_collector()->marking_worklists(),
           heap->cpp_heap()
@@ -34,7 +35,7 @@ YoungGenerationMarkingVisitor<marking_mode>::YoungGenerationMarkingVisitor(
       shortcut_strings_(heap->CanShortcutStringsDuringGC(
           GarbageCollector::MINOR_MARK_SWEEPER)) {}
 
-template <YoungGenerationMarkingVisitorMode marking_mode>
+template <YoungGenerationMarkingVisitationMode marking_mode>
 YoungGenerationMarkingVisitor<marking_mode>::~YoungGenerationMarkingVisitor() {
   PublishWorklists();
 
@@ -48,11 +49,11 @@ YoungGenerationMarkingVisitor<marking_mode>::~YoungGenerationMarkingVisitor() {
   }
 }
 
-template <YoungGenerationMarkingVisitorMode marking_mode>
+template <YoungGenerationMarkingVisitationMode marking_mode>
 template <typename T>
-int YoungGenerationMarkingVisitor<
-    marking_mode>::VisitEmbedderTracingSubClassWithEmbedderTracing(Map map,
-                                                                   T object) {
+int YoungGenerationMarkingVisitor<marking_mode>::
+    VisitEmbedderTracingSubClassWithEmbedderTracing(Tagged<Map> map,
+                                                    Tagged<T> object) {
   const int size = VisitJSObjectSubclass(map, object);
   if (!marking_worklists_local_.SupportsExtractWrapper()) return size;
   MarkingWorklists::Local::WrapperSnapshot wrapper_snapshot;
@@ -65,35 +66,35 @@ int YoungGenerationMarkingVisitor<
   return size;
 }
 
-template <YoungGenerationMarkingVisitorMode marking_mode>
+template <YoungGenerationMarkingVisitationMode marking_mode>
 int YoungGenerationMarkingVisitor<marking_mode>::VisitJSArrayBuffer(
-    Map map, JSArrayBuffer object) {
+    Tagged<Map> map, Tagged<JSArrayBuffer> object) {
   object->YoungMarkExtension();
   return VisitEmbedderTracingSubClassWithEmbedderTracing(map, object);
 }
 
-template <YoungGenerationMarkingVisitorMode marking_mode>
+template <YoungGenerationMarkingVisitationMode marking_mode>
 int YoungGenerationMarkingVisitor<marking_mode>::VisitJSApiObject(
-    Map map, JSObject object) {
+    Tagged<Map> map, Tagged<JSObject> object) {
   return VisitEmbedderTracingSubClassWithEmbedderTracing(map, object);
 }
 
-template <YoungGenerationMarkingVisitorMode marking_mode>
+template <YoungGenerationMarkingVisitationMode marking_mode>
 int YoungGenerationMarkingVisitor<marking_mode>::
-    VisitJSDataViewOrRabGsabDataView(Map map,
-                                     JSDataViewOrRabGsabDataView object) {
+    VisitJSDataViewOrRabGsabDataView(
+        Tagged<Map> map, Tagged<JSDataViewOrRabGsabDataView> object) {
   return VisitEmbedderTracingSubClassWithEmbedderTracing(map, object);
 }
 
-template <YoungGenerationMarkingVisitorMode marking_mode>
+template <YoungGenerationMarkingVisitationMode marking_mode>
 int YoungGenerationMarkingVisitor<marking_mode>::VisitJSTypedArray(
-    Map map, JSTypedArray object) {
+    Tagged<Map> map, Tagged<JSTypedArray> object) {
   return VisitEmbedderTracingSubClassWithEmbedderTracing(map, object);
 }
 
-template <YoungGenerationMarkingVisitorMode marking_mode>
+template <YoungGenerationMarkingVisitationMode marking_mode>
 int YoungGenerationMarkingVisitor<marking_mode>::VisitJSObject(
-    Map map, JSObject object) {
+    Tagged<Map> map, Tagged<JSObject> object) {
   int result = Parent::VisitJSObject(map, object);
   DCHECK_LT(0, result);
   pretenuring_handler_->UpdateAllocationSite(map, object,
@@ -101,9 +102,9 @@ int YoungGenerationMarkingVisitor<marking_mode>::VisitJSObject(
   return result;
 }
 
-template <YoungGenerationMarkingVisitorMode marking_mode>
+template <YoungGenerationMarkingVisitationMode marking_mode>
 int YoungGenerationMarkingVisitor<marking_mode>::VisitJSObjectFast(
-    Map map, JSObject object) {
+    Tagged<Map> map, Tagged<JSObject> object) {
   int result = Parent::VisitJSObjectFast(map, object);
   DCHECK_LT(0, result);
   pretenuring_handler_->UpdateAllocationSite(map, object,
@@ -111,10 +112,10 @@ int YoungGenerationMarkingVisitor<marking_mode>::VisitJSObjectFast(
   return result;
 }
 
-template <YoungGenerationMarkingVisitorMode marking_mode>
+template <YoungGenerationMarkingVisitationMode marking_mode>
 template <typename T, typename TBodyDescriptor>
 int YoungGenerationMarkingVisitor<marking_mode>::VisitJSObjectSubclass(
-    Map map, T object) {
+    Tagged<Map> map, Tagged<T> object) {
   int result =
       Parent::template VisitJSObjectSubclass<T, TBodyDescriptor>(map, object);
   DCHECK_LT(0, result);
@@ -123,9 +124,9 @@ int YoungGenerationMarkingVisitor<marking_mode>::VisitJSObjectSubclass(
   return result;
 }
 
-template <YoungGenerationMarkingVisitorMode marking_mode>
+template <YoungGenerationMarkingVisitationMode marking_mode>
 int YoungGenerationMarkingVisitor<marking_mode>::VisitEphemeronHashTable(
-    Map map, EphemeronHashTable table) {
+    Tagged<Map> map, Tagged<EphemeronHashTable> table) {
   // Register table with Minor MC, so it can take care of the weak keys later.
   // This allows to only iterate the tables' values, which are treated as strong
   // independently of whether the key is live.
@@ -138,37 +139,38 @@ int YoungGenerationMarkingVisitor<marking_mode>::VisitEphemeronHashTable(
   return EphemeronHashTable::BodyDescriptor::SizeOf(map, table);
 }
 
-template <YoungGenerationMarkingVisitorMode marking_mode>
+template <YoungGenerationMarkingVisitationMode marking_mode>
 template <typename TSlot>
 void YoungGenerationMarkingVisitor<marking_mode>::VisitPointersImpl(
-    HeapObject host, TSlot start, TSlot end) {
+    Tagged<HeapObject> host, TSlot start, TSlot end) {
   for (TSlot slot = start; slot < end; ++slot) {
     if constexpr (marking_mode ==
-                  YoungGenerationMarkingVisitorMode::kParallel) {
-      VisitObjectViaSlot<ObjectVisitationMode::kPushToWorklist,
-                         SlotTreatmentMode::kReadWrite>(slot);
-    } else {
+                  YoungGenerationMarkingVisitationMode::kConcurrent) {
       VisitObjectViaSlot<ObjectVisitationMode::kPushToWorklist,
                          SlotTreatmentMode::kReadOnly>(slot);
+    } else {
+      VisitObjectViaSlot<ObjectVisitationMode::kPushToWorklist,
+                         SlotTreatmentMode::kReadWrite>(slot);
     }
   }
 }
 
-template <YoungGenerationMarkingVisitorMode marking_mode>
+template <YoungGenerationMarkingVisitationMode marking_mode>
 template <typename TSlot>
 V8_INLINE bool
-YoungGenerationMarkingVisitor<marking_mode>::VisitObjectViaSlotInRemeberedSet(
+YoungGenerationMarkingVisitor<marking_mode>::VisitObjectViaSlotInRememberedSet(
     TSlot slot) {
-  if constexpr (marking_mode == YoungGenerationMarkingVisitorMode::kParallel) {
-    return VisitObjectViaSlot<ObjectVisitationMode::kVisitDirectly,
-                              SlotTreatmentMode::kReadWrite>(slot);
-  } else {
+  if constexpr (marking_mode ==
+                YoungGenerationMarkingVisitationMode::kConcurrent) {
     return VisitObjectViaSlot<ObjectVisitationMode::kPushToWorklist,
                               SlotTreatmentMode::kReadOnly>(slot);
+  } else {
+    return VisitObjectViaSlot<ObjectVisitationMode::kVisitDirectly,
+                              SlotTreatmentMode::kReadWrite>(slot);
   }
 }
 
-template <YoungGenerationMarkingVisitorMode marking_mode>
+template <YoungGenerationMarkingVisitationMode marking_mode>
 template <typename YoungGenerationMarkingVisitor<
               marking_mode>::ObjectVisitationMode visitation_mode,
           typename YoungGenerationMarkingVisitor<
@@ -176,22 +178,17 @@ template <typename YoungGenerationMarkingVisitor<
           typename TSlot>
 V8_INLINE bool YoungGenerationMarkingVisitor<marking_mode>::VisitObjectViaSlot(
     TSlot slot) {
-  typename TSlot::TObject target;
-  if constexpr (EnableConcurrentVisitation()) {
-    target = slot.Relaxed_Load(ObjectVisitorWithCageBases::cage_base());
-  } else {
-    target = *slot;
-  }
-  HeapObject heap_object;
+  typename TSlot::TObject target =
+      slot.Relaxed_Load(ObjectVisitorWithCageBases::cage_base());
+
+  Tagged<HeapObject> heap_object;
   // Treat weak references as strong.
   if (!target.GetHeapObject(&heap_object)) {
     return false;
   }
 
 #ifdef THREAD_SANITIZER
-  if constexpr (EnableConcurrentVisitation()) {
-    BasicMemoryChunk::FromHeapObject(heap_object)->SynchronizedHeapLoad();
-  }
+  BasicMemoryChunk::FromHeapObject(heap_object)->SynchronizedHeapLoad();
 #endif  // THREAD_SANITIZER
 
   if (!Heap::InYoungGeneration(heap_object)) {
@@ -207,28 +204,10 @@ V8_INLINE bool YoungGenerationMarkingVisitor<marking_mode>::VisitObjectViaSlot(
 
   if (!TryMark(heap_object)) return true;
 
-  if constexpr (EnableConcurrentVisitation()) {
-    static_assert(visitation_mode != ObjectVisitationMode::kVisitDirectly);
-    marking_worklists_local_.Push(heap_object);
-    return true;
-  }
-
   // Maps won't change in the atomic pause, so the map can be read without
   // atomics.
-  Map map;
-  map = Map::cast(*heap_object->map_slot());
-  const VisitorId visitor_id = map->visitor_id();
-  // Data-only objects don't require any body descriptor visitation at all and
-  // are always visited directly.
-  if (Map::ObjectFieldsFrom(visitor_id) == ObjectFields::kDataOnly) {
-    const int visited_size = heap_object->SizeFromMap(map);
-    IncrementLiveBytesCached(
-        MemoryChunk::cast(BasicMemoryChunk::FromHeapObject(heap_object)),
-        ALIGN_TO_ALLOCATION_ALIGNMENT(visited_size));
-    return true;
-  }
   if constexpr (visitation_mode == ObjectVisitationMode::kVisitDirectly) {
-    // TODO(omerkatz): Why do I need `Parent::` here?
+    Tagged<Map> map = heap_object->map(isolate_);
     const int visited_size = Parent::Visit(map, heap_object);
     if (visited_size) {
       IncrementLiveBytesCached(
@@ -244,10 +223,10 @@ V8_INLINE bool YoungGenerationMarkingVisitor<marking_mode>::VisitObjectViaSlot(
 }
 
 #ifdef V8_MINORMS_STRING_SHORTCUTTING
-template <YoungGenerationMarkingVisitorMode marking_mode>
+template <YoungGenerationMarkingVisitationMode marking_mode>
 V8_INLINE bool YoungGenerationMarkingVisitor<marking_mode>::ShortCutStrings(
     HeapObjectSlot slot, HeapObject* heap_object) {
-  DCHECK_EQ(YoungGenerationMarkingVisitorMode::kParallel, marking_mode);
+  DCHECK_EQ(YoungGenerationMarkingVisitationMode::kParallel, marking_mode);
   if (shortcut_strings_) {
     DCHECK(V8_STATIC_ROOTS_BOOL);
 #if V8_STATIC_ROOTS_BOOL
@@ -288,7 +267,7 @@ V8_INLINE bool YoungGenerationMarkingVisitor<marking_mode>::ShortCutStrings(
 }
 #endif  // V8_MINORMS_STRING_SHORTCUTTING
 
-template <YoungGenerationMarkingVisitorMode marking_mode>
+template <YoungGenerationMarkingVisitationMode marking_mode>
 V8_INLINE void
 YoungGenerationMarkingVisitor<marking_mode>::IncrementLiveBytesCached(
     MemoryChunk* chunk, intptr_t by) {

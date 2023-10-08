@@ -32,13 +32,11 @@ RUNTIME_FUNCTION(Runtime_AccessCheck) {
   DCHECK_EQ(1, args.length());
   Handle<JSObject> object = args.at<JSObject>(0);
   if (!isolate->MayAccess(isolate->native_context(), object)) {
-    isolate->ReportFailedAccessCheck(object);
-    RETURN_FAILURE_IF_SCHEDULED_EXCEPTION(isolate);
-    // TODO(ishell): Force throw an exception if the callback doesn't, so we
-    // can remove reliance on return values.
-    return ReadOnlyRoots(isolate).false_value();
+    RETURN_FAILURE_ON_EXCEPTION(isolate,
+                                isolate->ReportFailedAccessCheck(object));
+    UNREACHABLE();
   }
-  return ReadOnlyRoots(isolate).true_value();
+  return ReadOnlyRoots(isolate).undefined_value();
 }
 
 RUNTIME_FUNCTION(Runtime_FatalProcessOutOfMemoryInAllocateRaw) {
@@ -393,9 +391,9 @@ RUNTIME_FUNCTION(Runtime_StackGuardWithGap) {
 
 namespace {
 
-Object BytecodeBudgetInterruptWithStackCheck(Isolate* isolate,
-                                             RuntimeArguments& args,
-                                             CodeKind code_kind) {
+Tagged<Object> BytecodeBudgetInterruptWithStackCheck(Isolate* isolate,
+                                                     RuntimeArguments& args,
+                                                     CodeKind code_kind) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
   Handle<JSFunction> function = args.at<JSFunction>(0);
@@ -410,7 +408,7 @@ Object BytecodeBudgetInterruptWithStackCheck(Isolate* isolate,
     // the runtime function call being what overflows the stack.
     return isolate->StackOverflow();
   } else if (check.InterruptRequested()) {
-    Object return_value = isolate->stack_guard()->HandleInterrupts();
+    Tagged<Object> return_value = isolate->stack_guard()->HandleInterrupts();
     if (!IsUndefined(return_value, isolate)) {
       return return_value;
     }
@@ -420,8 +418,8 @@ Object BytecodeBudgetInterruptWithStackCheck(Isolate* isolate,
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
-Object BytecodeBudgetInterrupt(Isolate* isolate, RuntimeArguments& args,
-                               CodeKind code_kind) {
+Tagged<Object> BytecodeBudgetInterrupt(Isolate* isolate, RuntimeArguments& args,
+                                       CodeKind code_kind) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
   Handle<JSFunction> function = args.at<JSFunction>(0);
@@ -495,13 +493,8 @@ RUNTIME_FUNCTION(Runtime_AllocateInYoungGeneration) {
   int flags = args.smi_value_at(1);
   AllocationAlignment alignment =
       AllocateDoubleAlignFlag::decode(flags) ? kDoubleAligned : kTaggedAligned;
-  bool allow_large_object_allocation =
-      AllowLargeObjectAllocationFlag::decode(flags);
   CHECK(IsAligned(size, kTaggedSize));
   CHECK_GT(size, 0);
-  if (!allow_large_object_allocation) {
-    CHECK(size <= kMaxRegularHeapObjectSize);
-  }
 
 #if V8_ENABLE_WEBASSEMBLY
   // When this is called from WasmGC code, clear the "thread in wasm" flag,
@@ -528,13 +521,8 @@ RUNTIME_FUNCTION(Runtime_AllocateInOldGeneration) {
   int flags = args.smi_value_at(1);
   AllocationAlignment alignment =
       AllocateDoubleAlignFlag::decode(flags) ? kDoubleAligned : kTaggedAligned;
-  bool allow_large_object_allocation =
-      AllowLargeObjectAllocationFlag::decode(flags);
   CHECK(IsAligned(size, kTaggedSize));
   CHECK_GT(size, 0);
-  if (!allow_large_object_allocation) {
-    CHECK(size <= kMaxRegularHeapObjectSize);
-  }
   return *isolate->factory()->NewFillerObject(
       size, alignment, AllocationType::kOld, AllocationOrigin::kGeneratedCode);
 }

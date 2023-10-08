@@ -33,13 +33,13 @@ class Smi : public Object {
 
   // Returns the integer value.
   inline constexpr int value() const { return Internals::SmiValue(ptr()); }
-  inline constexpr Tagged<Smi> ToUint32Smi() {
-    if (value() <= 0) return Smi::FromInt(0);
-    return Smi::FromInt(static_cast<uint32_t>(value()));
+  static inline constexpr Tagged<Smi> ToUint32Smi(Tagged<Smi> smi) {
+    if (smi.value() <= 0) return Smi::FromInt(0);
+    return Smi::FromInt(static_cast<uint32_t>(smi.value()));
   }
 
   // Convert a Smi object to an int.
-  static inline constexpr int ToInt(const Object object) {
+  static inline constexpr int ToInt(const Tagged<Object> object) {
     return Tagged<Smi>(object.ptr()).value();
   }
 
@@ -91,7 +91,7 @@ class Smi : public Object {
   DECL_CAST(Smi)
 
   // Dispatched behavior.
-  V8_EXPORT_PRIVATE void SmiPrint(std::ostream& os) const;
+  V8_EXPORT_PRIVATE static void SmiPrint(Tagged<Smi> smi, std::ostream& os);
   DECL_STATIC_VERIFIER(Smi)
 
   // Since this is a constexpr, "calling" it is just as efficient
@@ -130,12 +130,6 @@ constexpr Tagged<Smi>::Tagged(Smi raw) : TaggedBase(raw.ptr()) {
 constexpr Tagged<Smi>::operator Smi() {
   static_assert(kTaggedCanConvertToRawObjects);
   return Smi(ptr());
-}
-
-// Access via ->, remove once Smi doesn't have its own address.
-constexpr Smi Tagged<Smi>::operator*() const { return Smi(ptr()); }
-constexpr detail::TaggedOperatorArrowRef<Smi> Tagged<Smi>::operator->() {
-  return detail::TaggedOperatorArrowRef<Smi>(Smi(ptr()));
 }
 
 }  // namespace internal

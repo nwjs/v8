@@ -107,7 +107,7 @@ TestingModuleBuilder::~TestingModuleBuilder() {
 
 uint8_t* TestingModuleBuilder::AddMemory(uint32_t size, SharedFlag shared,
                                          TestingModuleMemoryType mem_type) {
-  // TODO(13918): Add support for multi-memory.
+  // The TestingModuleBuilder only supports one memory currently.
   CHECK_EQ(0, test_module_->memories.size());
   CHECK_NULL(mem0_start_);
   CHECK_EQ(0, mem0_size_);
@@ -503,7 +503,8 @@ void WasmFunctionCompiler::Build(base::Vector<const uint8_t> bytes) {
       native_module->PublishCode(native_module->AddCompiledCode(*result));
   DCHECK_NOT_NULL(code);
   DisallowGarbageCollection no_gc;
-  Script script = builder_->instance_object()->module_object()->script();
+  Tagged<Script> script =
+      builder_->instance_object()->module_object()->script();
   std::unique_ptr<char[]> source_url =
       String::cast(script->name())->ToCString();
   if (WasmCode::ShouldBeLogged(isolate())) {

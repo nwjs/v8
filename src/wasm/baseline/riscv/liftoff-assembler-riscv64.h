@@ -395,6 +395,9 @@ inline void AtomicBinop(LiftoffAssembler* lasm, Register dst_addr,
       __ sync();
       break;
     case StoreType::kI64Store32:
+      __ lr_w(true, false, result_reg, actual_addr);
+      __ ZeroExtendWord(result_reg, result_reg);
+      break;
     case StoreType::kI32Store:
       __ lr_w(true, false, result_reg, actual_addr);
       break;
@@ -479,8 +482,11 @@ void LiftoffAssembler::AtomicLoad(LiftoffRegister dst, Register src_addr,
       sync();
       return;
     case LoadType::kI32Load:
-    case LoadType::kI64Load32U:
       lw(dst.gp(), src_reg, 0);
+      sync();
+      return;
+    case LoadType::kI64Load32U:
+      lwu(dst.gp(), src_reg, 0);
       sync();
       return;
     case LoadType::kI64Load:
@@ -1668,14 +1674,23 @@ void LiftoffAssembler::CallC(const std::initializer_list<VarState> args,
           UNREACHABLE();
       }
     } else if (arg.is_const()) {
-      DCHECK_EQ(kI32, arg.kind());
-      if (arg.i32_const() == 0) {
-        src = zero_reg;
+      if (arg.kind() == kI32) {
+        if (arg.i32_const() == 0) {
+          Sw(zero_reg, dst);
+        } else {
+          src = temps.Acquire();
+          li(src, arg.i32_const());
+          Sw(src, dst);
+        }
       } else {
-        src = temps.Acquire();
-        li(src, arg.i32_const());
+        if (arg.i32_const() == 0) {
+          StoreWord(zero_reg, dst);
+        } else {
+          src = temps.Acquire();
+          li(src, static_cast<int64_t>(arg.i32_const()));
+          StoreWord(src, dst);
+        }
       }
-      StoreWord(src, dst);
     } else if (value_kind_size(arg.kind()) == 4) {
       MemOperand src = liftoff::GetStackSlot(arg.offset());
       auto scratch = temps.Acquire();

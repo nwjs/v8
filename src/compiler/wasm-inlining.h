@@ -58,8 +58,17 @@ class WasmInliner final : public AdvancedReducer {
   // Inlines calls registered by {Reduce}, until an inlining budget is exceeded.
   void Finalize() final;
 
-  static bool graph_size_allows_inlining(size_t graph_size) {
-    return graph_size < v8_flags.wasm_inlining_budget;
+  static bool graph_size_allows_inlining(size_t graph_size,
+                                         size_t initial_graph_size) {
+    size_t budget =
+        std::max<size_t>(v8_flags.wasm_inlining_min_budget,
+                         v8_flags.wasm_inlining_factor * initial_graph_size);
+    // Independent of the wasm_inlining_budget, for large functions we should
+    // still allow some inlining.
+    size_t full_budget = std::max<size_t>(v8_flags.wasm_inlining_budget,
+                                          initial_graph_size * 1.1);
+    budget = std::min<size_t>(full_budget, budget);
+    return graph_size < budget;
   }
 
  private:
@@ -68,14 +77,26 @@ class WasmInliner final : public AdvancedReducer {
     uint32_t inlinee_index;
     int call_count;
     int wire_byte_size;
+
+    int64_t score() const {
+      // Note that the zero-point is arbitrary. Functions with negative score
+      // can still get inlined.
+
+      // Note(mliedtke): Adding information about "this call has constant
+      // arguments" didn't seem to provide measurable gains at the current
+      // state, still this would be an interesting measure to retry at a later
+      // point potentially together with other metrics.
+      const int count_factor = 2;
+      const int size_factor = 3;
+      return int64_t{call_count} * count_factor -
+             int64_t{wire_byte_size} * size_factor;
+    }
   };
 
   struct LexicographicOrdering {
     // Returns if c1 should be prioritized less than c2.
     bool operator()(CandidateInfo& c1, CandidateInfo& c2) {
-      if (c1.call_count > c2.call_count) return false;
-      if (c2.call_count > c1.call_count) return true;
-      return c1.wire_byte_size > c2.wire_byte_size;
+      return c1.score() < c2.score();
     }
   };
 

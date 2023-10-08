@@ -26,11 +26,6 @@ using PropertyDictionary = SwissNameDictionary;
 using PropertyDictionary = NameDictionary;
 #endif
 
-template <typename T>
-class Handle;
-
-class Isolate;
-
 template <typename Derived, typename Shape>
 class EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE) Dictionary
     : public HashTable<Derived, Shape> {
@@ -38,24 +33,29 @@ class EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE) Dictionary
 
  public:
   using Key = typename Shape::Key;
-  inline Object ValueAt(InternalIndex entry);
-  inline Object ValueAt(PtrComprCageBase cage_base, InternalIndex entry);
-  inline Object ValueAt(InternalIndex entry, SeqCstAccessTag);
-  inline Object ValueAt(PtrComprCageBase cage_base, InternalIndex entry,
-                        SeqCstAccessTag);
+  inline Tagged<Object> ValueAt(InternalIndex entry);
+  inline Tagged<Object> ValueAt(PtrComprCageBase cage_base,
+                                InternalIndex entry);
+  inline Tagged<Object> ValueAt(InternalIndex entry, SeqCstAccessTag);
+  inline Tagged<Object> ValueAt(PtrComprCageBase cage_base, InternalIndex entry,
+                                SeqCstAccessTag);
   // Returns {} if we would be reading out of the bounds of the object.
-  inline base::Optional<Object> TryValueAt(InternalIndex entry);
+  inline base::Optional<Tagged<Object>> TryValueAt(InternalIndex entry);
 
   // Set the value for entry.
-  inline void ValueAtPut(InternalIndex entry, Object value);
-  inline void ValueAtPut(InternalIndex entry, Object value, SeqCstAccessTag);
+  inline void ValueAtPut(InternalIndex entry, Tagged<Object> value);
+  inline void ValueAtPut(InternalIndex entry, Tagged<Object> value,
+                         SeqCstAccessTag);
 
   // Swap the value for the entry.
-  inline Object ValueAtSwap(InternalIndex entry, Object value, SeqCstAccessTag);
+  inline Tagged<Object> ValueAtSwap(InternalIndex entry, Tagged<Object> value,
+                                    SeqCstAccessTag);
 
   // Compare and swap the value for the entry.
-  inline Object ValueAtCompareAndSwap(InternalIndex entry, Object expected,
-                                      Object value, SeqCstAccessTag);
+  inline Tagged<Object> ValueAtCompareAndSwap(InternalIndex entry,
+                                              Tagged<Object> expected,
+                                              Tagged<Object> value,
+                                              SeqCstAccessTag);
 
   // Returns the property details for the property at entry.
   inline PropertyDetails DetailsAt(InternalIndex entry);
@@ -78,13 +78,13 @@ class EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE) Dictionary
   int NumberOfEnumerableProperties();
 
   // Returns the key (slow).
-  Object SlowReverseLookup(Object value);
+  Tagged<Object> SlowReverseLookup(Tagged<Object> value);
 
   inline void ClearEntry(InternalIndex entry);
 
   // Sets the entry to (key, value) pair.
-  inline void SetEntry(InternalIndex entry, Object key, Object value,
-                       PropertyDetails details);
+  inline void SetEntry(InternalIndex entry, Tagged<Object> key,
+                       Tagged<Object> value, PropertyDetails details);
 
   // Garbage collection support.
   inline ObjectSlot RawFieldOfValueAt(InternalIndex entry);
@@ -138,18 +138,20 @@ class BaseDictionaryShape : public BaseShape<Key> {
  public:
   static const bool kHasDetails = true;
   template <typename Dictionary>
-  static inline PropertyDetails DetailsAt(Dictionary dict, InternalIndex entry);
+  static inline PropertyDetails DetailsAt(Tagged<Dictionary> dict,
+                                          InternalIndex entry);
 
   template <typename Dictionary>
-  static inline void DetailsAtPut(Dictionary dict, InternalIndex entry,
+  static inline void DetailsAtPut(Tagged<Dictionary> dict, InternalIndex entry,
                                   PropertyDetails value);
 };
 
 class BaseNameDictionaryShape : public BaseDictionaryShape<Handle<Name>> {
  public:
-  static inline bool IsMatch(Handle<Name> key, Object other);
+  static inline bool IsMatch(Handle<Name> key, Tagged<Object> other);
   static inline uint32_t Hash(ReadOnlyRoots roots, Handle<Name> key);
-  static inline uint32_t HashForObject(ReadOnlyRoots roots, Object object);
+  static inline uint32_t HashForObject(ReadOnlyRoots roots,
+                                       Tagged<Object> object);
   template <AllocationType allocation = AllocationType::kYoung>
   static inline Handle<Object> AsHandle(Isolate* isolate, Handle<Name> key);
   template <AllocationType allocation = AllocationType::kOld>
@@ -235,8 +237,8 @@ class V8_EXPORT_PRIVATE NameDictionary
   static const int kEntryDetailsIndex = 2;
   static const int kInitialCapacity = 2;
 
-  inline Name NameAt(InternalIndex entry);
-  inline Name NameAt(PtrComprCageBase cage_base, InternalIndex entry);
+  inline Tagged<Name> NameAt(InternalIndex entry);
+  inline Tagged<Name> NameAt(PtrComprCageBase cage_base, InternalIndex entry);
 
   inline void set_hash(int hash);
   inline int hash() const;
@@ -263,21 +265,23 @@ class V8_EXPORT_PRIVATE NameDictionary
 
 class V8_EXPORT_PRIVATE GlobalDictionaryShape : public BaseNameDictionaryShape {
  public:
-  static inline bool IsMatch(Handle<Name> key, Object other);
-  static inline uint32_t HashForObject(ReadOnlyRoots roots, Object object);
+  static inline bool IsMatch(Handle<Name> key, Tagged<Object> other);
+  static inline uint32_t HashForObject(ReadOnlyRoots roots,
+                                       Tagged<Object> object);
 
   static const bool kMatchNeedsHoleCheck = true;
   static const int kPrefixSize = 2;
   static const int kEntrySize = 1;
 
   template <typename Dictionary>
-  static inline PropertyDetails DetailsAt(Dictionary dict, InternalIndex entry);
+  static inline PropertyDetails DetailsAt(Tagged<Dictionary> dict,
+                                          InternalIndex entry);
 
   template <typename Dictionary>
-  static inline void DetailsAtPut(Dictionary dict, InternalIndex entry,
+  static inline void DetailsAtPut(Tagged<Dictionary> dict, InternalIndex entry,
                                   PropertyDetails value);
 
-  static inline Object Unwrap(Object key);
+  static inline Tagged<Object> Unwrap(Tagged<Object> key);
 };
 
 EXTERN_DECLARE_BASE_NAME_DICTIONARY(GlobalDictionary, GlobalDictionaryShape)
@@ -290,19 +294,23 @@ class V8_EXPORT_PRIVATE GlobalDictionary
   DECL_CAST(GlobalDictionary)
   DECL_PRINTER(GlobalDictionary)
 
-  inline Object ValueAt(InternalIndex entry);
-  inline Object ValueAt(PtrComprCageBase cage_base, InternalIndex entry);
-  inline PropertyCell CellAt(InternalIndex entry);
-  inline PropertyCell CellAt(PtrComprCageBase cage_base, InternalIndex entry);
-  inline void SetEntry(InternalIndex entry, Object key, Object value,
-                       PropertyDetails details);
+  inline Tagged<Object> ValueAt(InternalIndex entry);
+  inline Tagged<Object> ValueAt(PtrComprCageBase cage_base,
+                                InternalIndex entry);
+  inline Tagged<PropertyCell> CellAt(InternalIndex entry);
+  inline Tagged<PropertyCell> CellAt(PtrComprCageBase cage_base,
+                                     InternalIndex entry);
+  inline void SetEntry(InternalIndex entry, Tagged<Object> key,
+                       Tagged<Object> value, PropertyDetails details);
   inline void ClearEntry(InternalIndex entry);
-  inline Name NameAt(InternalIndex entry);
-  inline Name NameAt(PtrComprCageBase cage_base, InternalIndex entry);
-  inline void ValueAtPut(InternalIndex entry, Object value);
+  inline Tagged<Name> NameAt(InternalIndex entry);
+  inline Tagged<Name> NameAt(PtrComprCageBase cage_base, InternalIndex entry);
+  inline void ValueAtPut(InternalIndex entry, Tagged<Object> value);
 
-  base::Optional<PropertyCell> TryFindPropertyCellForConcurrentLookupIterator(
-      Isolate* isolate, Handle<Name> name, RelaxedLoadTag tag);
+  base::Optional<Tagged<PropertyCell>>
+  TryFindPropertyCellForConcurrentLookupIterator(Isolate* isolate,
+                                                 Handle<Name> name,
+                                                 RelaxedLoadTag tag);
 
   OBJECT_CONSTRUCTORS(
       GlobalDictionary,
@@ -311,14 +319,15 @@ class V8_EXPORT_PRIVATE GlobalDictionary
 
 class NumberDictionaryBaseShape : public BaseDictionaryShape<uint32_t> {
  public:
-  static inline bool IsMatch(uint32_t key, Object other);
+  static inline bool IsMatch(uint32_t key, Tagged<Object> other);
   template <AllocationType allocation = AllocationType::kYoung>
   static inline Handle<Object> AsHandle(Isolate* isolate, uint32_t key);
   template <AllocationType allocation = AllocationType::kOld>
   static inline Handle<Object> AsHandle(LocalIsolate* isolate, uint32_t key);
 
   static inline uint32_t Hash(ReadOnlyRoots roots, uint32_t key);
-  static inline uint32_t HashForObject(ReadOnlyRoots roots, Object object);
+  static inline uint32_t HashForObject(ReadOnlyRoots roots,
+                                       Tagged<Object> object);
 
   static const bool kMatchNeedsHoleCheck = true;
 };
@@ -336,13 +345,13 @@ class SimpleNumberDictionaryShape : public NumberDictionaryBaseShape {
   static const int kEntrySize = 2;
 
   template <typename Dictionary>
-  static inline PropertyDetails DetailsAt(Dictionary dict,
+  static inline PropertyDetails DetailsAt(Tagged<Dictionary> dict,
                                           InternalIndex entry) {
     UNREACHABLE();
   }
 
   template <typename Dictionary>
-  static inline void DetailsAtPut(Dictionary dict, InternalIndex entry,
+  static inline void DetailsAtPut(Tagged<Dictionary> dict, InternalIndex entry,
                                   PropertyDetails value) {
     UNREACHABLE();
   }
@@ -400,7 +409,7 @@ class NumberDictionary
   void UpdateMaxNumberKey(uint32_t key, Handle<JSObject> dictionary_holder);
 
   // Sorting support
-  void CopyValuesTo(FixedArray elements);
+  void CopyValuesTo(Tagged<FixedArray> elements);
 
   // If slow elements are required we will never go back to fast-case
   // for the elements kept in this dictionary.  We require slow
@@ -436,15 +445,15 @@ class NumberDictionary
 // enumeration order.
 template <typename Dictionary>
 struct EnumIndexComparator {
-  explicit EnumIndexComparator(Dictionary dict) : dict(dict) {}
+  explicit EnumIndexComparator(Tagged<Dictionary> dict) : dict(dict) {}
   bool operator()(Tagged_t a, Tagged_t b) {
     PropertyDetails da(
-        dict.DetailsAt(InternalIndex(Smi(static_cast<Address>(a)).value())));
+        dict->DetailsAt(InternalIndex(Smi(static_cast<Address>(a)).value())));
     PropertyDetails db(
-        dict.DetailsAt(InternalIndex(Smi(static_cast<Address>(b)).value())));
+        dict->DetailsAt(InternalIndex(Smi(static_cast<Address>(b)).value())));
     return da.dictionary_index() < db.dictionary_index();
   }
-  Dictionary dict;
+  Tagged<Dictionary> dict;
 };
 
 }  // namespace internal

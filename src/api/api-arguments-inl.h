@@ -41,21 +41,21 @@ Handle<V> CustomArguments<T>::GetReturnValue(Isolate* isolate) const {
   // Check the ReturnValue.
   FullObjectSlot slot = slot_at(kReturnValueIndex);
   // Nothing was set, return empty handle as per previous behaviour.
-  Object raw_object = *slot;
+  Tagged<Object> raw_object = *slot;
   if (IsTheHole(raw_object, isolate)) return Handle<V>();
   DCHECK(IsApiCallResultType(raw_object));
   return Handle<V>::cast(Handle<Object>(slot.location()));
 }
 
-inline JSObject PropertyCallbackArguments::holder() const {
+inline Tagged<JSObject> PropertyCallbackArguments::holder() const {
   return JSObject::cast(*slot_at(T::kHolderIndex));
 }
 
-inline Object PropertyCallbackArguments::receiver() const {
+inline Tagged<Object> PropertyCallbackArguments::receiver() const {
   return *slot_at(T::kThisIndex);
 }
 
-inline JSReceiver FunctionCallbackArguments::holder() const {
+inline Tagged<JSReceiver> FunctionCallbackArguments::holder() const {
   return JSReceiver::cast(*slot_at(T::kHolderIndex));
 }
 
@@ -84,11 +84,12 @@ inline JSReceiver FunctionCallbackArguments::holder() const {
   ExternalCallbackScope call_scope(ISOLATE, FUNCTION_ADDR(F));         \
   PropertyCallbackInfo<API_RETURN_TYPE> callback_info(values_);
 
-Handle<Object> FunctionCallbackArguments::Call(CallHandlerInfo handler) {
+Handle<Object> FunctionCallbackArguments::Call(
+    Tagged<CallHandlerInfo> handler) {
   Isolate* isolate = this->isolate();
   RCS_SCOPE(isolate, RuntimeCallCounterId::kFunctionCallback);
   v8::FunctionCallback f =
-      reinterpret_cast<v8::FunctionCallback>(handler->callback());
+      reinterpret_cast<v8::FunctionCallback>(handler->callback(isolate));
   Handle<Object> receiver_check_unsupported;
   if (isolate->should_check_side_effects() &&
       !isolate->debug()->PerformSideEffectCheckForCallback(
@@ -310,7 +311,7 @@ Handle<Object> PropertyCallbackArguments::CallAccessorGetter(
   AcceptSideEffects();
 
   AccessorNameGetterCallback f =
-      reinterpret_cast<AccessorNameGetterCallback>(info->getter());
+      reinterpret_cast<AccessorNameGetterCallback>(info->getter(isolate));
   PREPARE_CALLBACK_INFO_ACCESSOR(isolate, f, v8::Value, info,
                                  handle(receiver(), isolate), ACCESSOR_GETTER);
   f(v8::Utils::ToLocal(name), callback_info);
@@ -326,8 +327,8 @@ Handle<Object> PropertyCallbackArguments::CallAccessorSetter(
   // the callback is allowed to have side effects.
   AcceptSideEffects();
 
-  AccessorNameSetterCallback f =
-      reinterpret_cast<AccessorNameSetterCallback>(accessor_info->setter());
+  AccessorNameSetterCallback f = reinterpret_cast<AccessorNameSetterCallback>(
+      accessor_info->setter(isolate));
   PREPARE_CALLBACK_INFO_ACCESSOR(isolate, f, void, accessor_info,
                                  handle(receiver(), isolate), ACCESSOR_SETTER);
   f(v8::Utils::ToLocal(name), v8::Utils::ToLocal(value), callback_info);

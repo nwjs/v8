@@ -116,3 +116,42 @@
   assertEquals(firstSet.isDisjointFrom(SetLike), true);
   assertEquals(arrIndex, [-1, -1, -1]);
 })();
+
+(function TestIsDisjointFromAfterClearingTheReceiver() {
+  const firstSet = new Set();
+  const otherSet = new Set();
+
+  Object.defineProperty(otherSet, 'size', {
+    get: function() {
+      firstSet.clear();
+      return 1;
+    },
+
+  });
+  assertEquals(firstSet.isDisjointFrom(otherSet), true);
+})();
+
+(function TestTableTransition() {
+  const firstSet = new Set();
+  firstSet.add(42);
+  firstSet.add(43);
+  firstSet.add(44);
+
+  const setLike = {
+    size: 5,
+    keys() {
+      return [1, 2, 3, 4, 5].keys();
+    },
+    has(key) {
+      if (key == 42) {
+        // Cause a table transition in the receiver.
+        firstSet.clear();
+      }
+      // Return false so we keep iterating the transitioned receiver.
+      return false;
+    }
+  };
+
+  assertTrue(firstSet.isDisjointFrom(setLike));
+  assertEquals(0, firstSet.size);
+})();

@@ -345,6 +345,9 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
 
   // Create a new string object which holds a proper substring of a string.
   Handle<String> NewProperSubString(Handle<String> str, int begin, int end);
+  // Same, but always copies (never creates a SlicedString).
+  // {str} must be flat, {length} must be non-zero.
+  Handle<String> NewCopiedSubstring(Handle<String> str, int begin, int length);
 
   // Create a new string object which holds a substring of a string.
   inline Handle<String> NewSubString(Handle<String> str, int begin, int end);
@@ -478,9 +481,9 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   // Initializes the fields of a newly created Map using roots from the
   // passed-in Heap. Exposed for tests and heap setup; other code should just
   // call NewMap which takes care of it.
-  Map InitializeMap(Tagged<Map> map, InstanceType type, int instance_size,
-                    ElementsKind elements_kind, int inobject_properties,
-                    Heap* roots);
+  Tagged<Map> InitializeMap(Tagged<Map> map, InstanceType type,
+                            int instance_size, ElementsKind elements_kind,
+                            int inobject_properties, Heap* roots);
 
   // Allocate a block of memory of the given AllocationType (filled with a
   // filler). Used as a fall-back for generated code when the space is full.
@@ -1058,9 +1061,9 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
     MaybeHandle<Code> BuildInternal(bool retry_allocation_or_fail);
 
     Handle<ByteArray> NewByteArray(int length, AllocationType allocation);
-    MaybeHandle<InstructionStream> NewInstructionStream(
-        bool retry_allocation_or_fail);
-    MaybeHandle<InstructionStream> AllocateInstructionStream(
+    // Return an allocation suitable for InstructionStreams but without writing
+    // the map.
+    Tagged<HeapObject> AllocateUninitializedInstructionStream(
         bool retry_allocation_or_fail);
     Handle<Code> NewCode(const NewCodeOptions& options);
 

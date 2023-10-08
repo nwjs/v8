@@ -412,9 +412,13 @@ void InstructionSelectorT<Adapter>::VisitStackSlot(node_t node) {
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitAbortCSADcheck(Node* node) {
-  Loong64OperandGeneratorT<Adapter> g(this);
-  Emit(kArchAbortCSADcheck, g.NoOutput(), g.UseFixed(node->InputAt(0), a0));
+void InstructionSelectorT<Adapter>::VisitAbortCSADcheck(node_t node) {
+  if constexpr (Adapter::IsTurboshaft) {
+    UNIMPLEMENTED();
+  } else {
+    Loong64OperandGeneratorT<Adapter> g(this);
+    Emit(kArchAbortCSADcheck, g.NoOutput(), g.UseFixed(node->InputAt(0), a0));
+  }
 }
 
 template <typename Adapter>
@@ -583,13 +587,13 @@ void InstructionSelectorT<Adapter>::VisitLoad(node_t node) {
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitProtectedLoad(Node* node) {
+void InstructionSelectorT<Adapter>::VisitProtectedLoad(node_t node) {
   // TODO(eholk)
   UNIMPLEMENTED();
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitStorePair(Node* node) {
+void InstructionSelectorT<Adapter>::VisitStorePair(node_t node) {
   UNREACHABLE();
 }
 
@@ -1146,12 +1150,12 @@ void InstructionSelectorT<Adapter>::VisitWord64Ror(node_t node) {
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitWord32ReverseBits(Node* node) {
+void InstructionSelectorT<Adapter>::VisitWord32ReverseBits(node_t node) {
   UNREACHABLE();
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitWord64ReverseBits(Node* node) {
+void InstructionSelectorT<Adapter>::VisitWord64ReverseBits(node_t node) {
   UNREACHABLE();
 }
 
@@ -1622,7 +1626,7 @@ void InstructionSelectorT<Adapter>::VisitChangeFloat64ToUint64(node_t node) {
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitTruncateFloat64ToUint32(Node* node) {
+void InstructionSelectorT<Adapter>::VisitTruncateFloat64ToUint32(node_t node) {
   VisitRR(this, kLoong64Float64ToUint32, node);
 }
 
@@ -1642,105 +1646,132 @@ void InstructionSelectorT<Adapter>::VisitTruncateFloat64ToInt64(node_t node) {
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitTryTruncateFloat32ToInt64(Node* node) {
-  Loong64OperandGeneratorT<Adapter> g(this);
-  InstructionOperand inputs[] = {g.UseRegister(node->InputAt(0))};
-  InstructionOperand outputs[2];
-  size_t output_count = 0;
-  outputs[output_count++] = g.DefineAsRegister(node);
+void InstructionSelectorT<Adapter>::VisitTryTruncateFloat32ToInt64(
+    node_t node) {
+  if constexpr (Adapter::IsTurboshaft) {
+    UNIMPLEMENTED();
+  } else {
+    Loong64OperandGeneratorT<Adapter> g(this);
+    InstructionOperand inputs[] = {g.UseRegister(node->InputAt(0))};
+    InstructionOperand outputs[2];
+    size_t output_count = 0;
+    outputs[output_count++] = g.DefineAsRegister(node);
 
-  Node* success_output = NodeProperties::FindProjection(node, 1);
-  if (success_output) {
-    outputs[output_count++] = g.DefineAsRegister(success_output);
+    Node* success_output = NodeProperties::FindProjection(node, 1);
+    if (success_output) {
+      outputs[output_count++] = g.DefineAsRegister(success_output);
+    }
+
+    this->Emit(kLoong64Float32ToInt64, output_count, outputs, 1, inputs);
   }
-
-  this->Emit(kLoong64Float32ToInt64, output_count, outputs, 1, inputs);
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitTryTruncateFloat64ToInt64(Node* node) {
-  Loong64OperandGeneratorT<Adapter> g(this);
-  InstructionOperand inputs[] = {g.UseRegister(node->InputAt(0))};
-  InstructionOperand outputs[2];
-  size_t output_count = 0;
-  outputs[output_count++] = g.DefineAsRegister(node);
+void InstructionSelectorT<Adapter>::VisitTryTruncateFloat64ToInt64(
+    node_t node) {
+  if constexpr (Adapter::IsTurboshaft) {
+    UNIMPLEMENTED();
+  } else {
+    Loong64OperandGeneratorT<Adapter> g(this);
+    InstructionOperand inputs[] = {g.UseRegister(node->InputAt(0))};
+    InstructionOperand outputs[2];
+    size_t output_count = 0;
+    outputs[output_count++] = g.DefineAsRegister(node);
 
-  Node* success_output = NodeProperties::FindProjection(node, 1);
-  if (success_output) {
-    outputs[output_count++] = g.DefineAsRegister(success_output);
+    Node* success_output = NodeProperties::FindProjection(node, 1);
+    if (success_output) {
+      outputs[output_count++] = g.DefineAsRegister(success_output);
+    }
+
+    Emit(kLoong64Float64ToInt64, output_count, outputs, 1, inputs);
   }
-
-  Emit(kLoong64Float64ToInt64, output_count, outputs, 1, inputs);
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitTryTruncateFloat32ToUint64(
-    Node* node) {
-  Loong64OperandGeneratorT<Adapter> g(this);
-  InstructionOperand inputs[] = {g.UseRegister(node->InputAt(0))};
-  InstructionOperand outputs[2];
-  size_t output_count = 0;
-  outputs[output_count++] = g.DefineAsRegister(node);
+    node_t node) {
+  if constexpr (Adapter::IsTurboshaft) {
+    UNIMPLEMENTED();
+  } else {
+    Loong64OperandGeneratorT<Adapter> g(this);
+    InstructionOperand inputs[] = {g.UseRegister(node->InputAt(0))};
+    InstructionOperand outputs[2];
+    size_t output_count = 0;
+    outputs[output_count++] = g.DefineAsRegister(node);
 
-  Node* success_output = NodeProperties::FindProjection(node, 1);
-  if (success_output) {
-    outputs[output_count++] = g.DefineAsRegister(success_output);
+    Node* success_output = NodeProperties::FindProjection(node, 1);
+    if (success_output) {
+      outputs[output_count++] = g.DefineAsRegister(success_output);
+    }
+
+    Emit(kLoong64Float32ToUint64, output_count, outputs, 1, inputs);
   }
-
-  Emit(kLoong64Float32ToUint64, output_count, outputs, 1, inputs);
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitTryTruncateFloat64ToUint64(
-    Node* node) {
-  Loong64OperandGeneratorT<Adapter> g(this);
+    node_t node) {
+  if constexpr (Adapter::IsTurboshaft) {
+    UNIMPLEMENTED();
+  } else {
+    Loong64OperandGeneratorT<Adapter> g(this);
 
-  InstructionOperand inputs[] = {g.UseRegister(node->InputAt(0))};
-  InstructionOperand outputs[2];
-  size_t output_count = 0;
-  outputs[output_count++] = g.DefineAsRegister(node);
+    InstructionOperand inputs[] = {g.UseRegister(node->InputAt(0))};
+    InstructionOperand outputs[2];
+    size_t output_count = 0;
+    outputs[output_count++] = g.DefineAsRegister(node);
 
-  Node* success_output = NodeProperties::FindProjection(node, 1);
-  if (success_output) {
-    outputs[output_count++] = g.DefineAsRegister(success_output);
+    Node* success_output = NodeProperties::FindProjection(node, 1);
+    if (success_output) {
+      outputs[output_count++] = g.DefineAsRegister(success_output);
+    }
+
+    Emit(kLoong64Float64ToUint64, output_count, outputs, 1, inputs);
   }
-
-  Emit(kLoong64Float64ToUint64, output_count, outputs, 1, inputs);
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitTryTruncateFloat64ToInt32(Node* node) {
-  Loong64OperandGeneratorT<Adapter> g(this);
-  InstructionOperand inputs[] = {g.UseRegister(node->InputAt(0))};
-  InstructionOperand temps[] = {g.TempDoubleRegister()};
-  InstructionOperand outputs[2];
-  size_t output_count = 0;
-  outputs[output_count++] = g.DefineAsRegister(node);
+void InstructionSelectorT<Adapter>::VisitTryTruncateFloat64ToInt32(
+    node_t node) {
+  if constexpr (Adapter::IsTurboshaft) {
+    UNIMPLEMENTED();
+  } else {
+    Loong64OperandGeneratorT<Adapter> g(this);
+    InstructionOperand inputs[] = {g.UseRegister(node->InputAt(0))};
+    InstructionOperand temps[] = {g.TempDoubleRegister()};
+    InstructionOperand outputs[2];
+    size_t output_count = 0;
+    outputs[output_count++] = g.DefineAsRegister(node);
 
-  Node* success_output = NodeProperties::FindProjection(node, 1);
-  if (success_output) {
-    outputs[output_count++] = g.DefineAsRegister(success_output);
+    Node* success_output = NodeProperties::FindProjection(node, 1);
+    if (success_output) {
+      outputs[output_count++] = g.DefineAsRegister(success_output);
+    }
+
+    Emit(kLoong64Float64ToInt32, output_count, outputs, 1, inputs, 1, temps);
   }
-
-  Emit(kLoong64Float64ToInt32, output_count, outputs, 1, inputs, 1, temps);
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitTryTruncateFloat64ToUint32(
-    Node* node) {
-  Loong64OperandGeneratorT<Adapter> g(this);
-  InstructionOperand inputs[] = {g.UseRegister(node->InputAt(0))};
-  InstructionOperand temps[] = {g.TempDoubleRegister()};
-  InstructionOperand outputs[2];
-  size_t output_count = 0;
-  outputs[output_count++] = g.DefineAsRegister(node);
+    node_t node) {
+  if constexpr (Adapter::IsTurboshaft) {
+    UNIMPLEMENTED();
+  } else {
+    Loong64OperandGeneratorT<Adapter> g(this);
+    InstructionOperand inputs[] = {g.UseRegister(node->InputAt(0))};
+    InstructionOperand temps[] = {g.TempDoubleRegister()};
+    InstructionOperand outputs[2];
+    size_t output_count = 0;
+    outputs[output_count++] = g.DefineAsRegister(node);
 
-  Node* success_output = NodeProperties::FindProjection(node, 1);
-  if (success_output) {
-    outputs[output_count++] = g.DefineAsRegister(success_output);
+    Node* success_output = NodeProperties::FindProjection(node, 1);
+    if (success_output) {
+      outputs[output_count++] = g.DefineAsRegister(success_output);
+    }
+
+    Emit(kLoong64Float64ToUint32, output_count, outputs, 1, inputs, 1, temps);
   }
-
-  Emit(kLoong64Float64ToUint32, output_count, outputs, 1, inputs, 1, temps);
 }
 
 template <typename Adapter>
@@ -2260,12 +2291,12 @@ bool InstructionSelectorT<Adapter>::IsTailCallAddressImmediate() {
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitUnalignedLoad(Node* node) {
+void InstructionSelectorT<Adapter>::VisitUnalignedLoad(node_t node) {
   UNREACHABLE();
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitUnalignedStore(Node* node) {
+void InstructionSelectorT<Adapter>::VisitUnalignedStore(node_t node) {
   UNREACHABLE();
 }
 
@@ -3176,25 +3207,33 @@ void InstructionSelectorT<Adapter>::VisitFloat64SilenceNaN(node_t node) {
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitFloat64InsertLowWord32(Node* node) {
-  Loong64OperandGeneratorT<Adapter> g(this);
-  Node* left = node->InputAt(0);
-  Node* right = node->InputAt(1);
-  Emit(kLoong64Float64InsertLowWord32, g.DefineSameAsFirst(node),
-       g.UseRegister(left), g.UseRegister(right));
+void InstructionSelectorT<Adapter>::VisitFloat64InsertLowWord32(node_t node) {
+  if constexpr (Adapter::IsTurboshaft) {
+    UNIMPLEMENTED();
+  } else {
+    Loong64OperandGeneratorT<Adapter> g(this);
+    Node* left = node->InputAt(0);
+    Node* right = node->InputAt(1);
+    Emit(kLoong64Float64InsertLowWord32, g.DefineSameAsFirst(node),
+         g.UseRegister(left), g.UseRegister(right));
+  }
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitFloat64InsertHighWord32(Node* node) {
-  Loong64OperandGeneratorT<Adapter> g(this);
-  Node* left = node->InputAt(0);
-  Node* right = node->InputAt(1);
-  Emit(kLoong64Float64InsertHighWord32, g.DefineSameAsFirst(node),
-       g.UseRegister(left), g.UseRegister(right));
+void InstructionSelectorT<Adapter>::VisitFloat64InsertHighWord32(node_t node) {
+  if constexpr (Adapter::IsTurboshaft) {
+    UNIMPLEMENTED();
+  } else {
+    Loong64OperandGeneratorT<Adapter> g(this);
+    Node* left = node->InputAt(0);
+    Node* right = node->InputAt(1);
+    Emit(kLoong64Float64InsertHighWord32, g.DefineSameAsFirst(node),
+         g.UseRegister(left), g.UseRegister(right));
+  }
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitMemoryBarrier(Node* node) {
+void InstructionSelectorT<Adapter>::VisitMemoryBarrier(node_t node) {
   Loong64OperandGeneratorT<Adapter> g(this);
   Emit(kLoong64Dbar, g.NoOutput());
 }
@@ -3379,12 +3418,12 @@ VISIT_ATOMIC_BINOP(Xor)
 #undef VISIT_ATOMIC_BINOP
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitInt32AbsWithOverflow(Node* node) {
+void InstructionSelectorT<Adapter>::VisitInt32AbsWithOverflow(node_t node) {
   UNREACHABLE();
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitInt64AbsWithOverflow(Node* node) {
+void InstructionSelectorT<Adapter>::VisitInt64AbsWithOverflow(node_t node) {
   UNREACHABLE();
 }
 
@@ -3842,10 +3881,14 @@ void InstructionSelectorT<Adapter>::VisitSignExtendWord16ToInt64(node_t node) {
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitSignExtendWord32ToInt64(Node* node) {
-  Loong64OperandGeneratorT<Adapter> g(this);
-  Emit(kLoong64Sll_w, g.DefineAsRegister(node), g.UseRegister(node->InputAt(0)),
-       g.TempImmediate(0));
+void InstructionSelectorT<Adapter>::VisitSignExtendWord32ToInt64(node_t node) {
+  if constexpr (Adapter::IsTurboshaft) {
+    UNIMPLEMENTED();
+  } else {
+    Loong64OperandGeneratorT<Adapter> g(this);
+    Emit(kLoong64Sll_w, g.DefineAsRegister(node),
+         g.UseRegister(node->InputAt(0)), g.TempImmediate(0));
+  }
 }
 
 template <typename Adapter>

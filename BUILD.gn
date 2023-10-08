@@ -406,13 +406,21 @@ declare_args() {
   v8_jitless = v8_enable_lite_mode || target_is_ios_device
 
   # Enable Maglev's graph printer.
-  # Sets -DV8_MAGLEV_GRAPH_PRINTER.
+  # Sets -DV8_ENABLE_MAGLEV_GRAPH_PRINTER.
   v8_enable_maglev_graph_printer = !build_with_chromium
+
+  # Enable slow tracing, e.g., tracing on every instruction or Turbofan node.
+  # Sets -DV8_ENABLE_SLOW_TRACING.
+  v8_enable_slow_tracing = is_debug
 
   # Enable jump table switch for built-in.
   v8_enable_builtin_jump_table_switch = v8_current_cpu == "x64"
 
   v8_shortcut_strings_in_minor_ms = false
+
+  # Whether custom embedder snapshots may extend (= allocate new objects in)
+  # ReadOnlySpace.
+  v8_enable_extensible_ro_snapshot = true
 }
 
 # Derived defaults.
@@ -1207,11 +1215,17 @@ config("features") {
   if (v8_enable_maglev_graph_printer) {
     defines += [ "V8_ENABLE_MAGLEV_GRAPH_PRINTER" ]
   }
+  if (v8_enable_slow_tracing) {
+    defines += [ "V8_ENABLE_SLOW_TRACING" ]
+  }
   if (v8_enable_builtin_jump_table_switch) {
     defines += [ "V8_ENABLE_BUILTIN_JUMP_TABLE_SWITCH" ]
   }
   if (v8_enable_direct_handle) {
     defines += [ "V8_ENABLE_DIRECT_HANDLE" ]
+  }
+  if (v8_enable_extensible_ro_snapshot) {
+    defines += [ "V8_ENABLE_EXTENSIBLE_RO_SNAPSHOT" ]
   }
 }
 
@@ -1358,10 +1372,9 @@ config("toolchain") {
     defines += [ "__riscv_xlen=32" ]
     defines += [ "CAN_USE_FPU_INSTRUCTIONS" ]
 
-    # TODO(riscv32): Add condition riscv_use_rvv and riscv_rvv_vlen here after
-    # 4538202 merge.
-    if (target_is_simulator) {
+    if (riscv_use_rvv || target_is_simulator) {
       defines += [ "CAN_USE_RVV_INSTRUCTIONS" ]
+      defines += [ "RVV_VLEN=${riscv_rvv_vlen}" ]
     }
   }
 
@@ -2233,6 +2246,18 @@ v8_source_set("torque_generated_initializers") {
   }
 
   configs = [ ":internal_config" ]
+
+  if (v8_symbol_level > 1) {
+    # Symbols cause huge compile time on some bigger torque files, see
+    # https://crbug.com/1472715. Thus remove any symbol configs added in v8.gni
+    # and instead add the "minimal_symbols" config.
+    v8_add_configs -=
+        filter_include(v8_add_configs, [ "//build/config/compiler:*symbols" ])
+    if (v8_symbol_level == symbol_level) {
+      v8_remove_configs += [ "//build/config/compiler:default_symbols" ]
+    }
+    configs += [ "//build/config/compiler:minimal_symbols" ]
+  }
 }
 
 v8_source_set("torque_generated_definitions") {
@@ -3290,6 +3315,8 @@ v8_header_set("v8_internal_headers") {
     "src/compiler/turboshaft/builtin-call-descriptors.h",
     "src/compiler/turboshaft/dead-code-elimination-phase.h",
     "src/compiler/turboshaft/dead-code-elimination-reducer.h",
+    "src/compiler/turboshaft/debug-feature-lowering-phase.h",
+    "src/compiler/turboshaft/debug-feature-lowering-reducer.h",
     "src/compiler/turboshaft/decompression-optimization-phase.h",
     "src/compiler/turboshaft/decompression-optimization.h",
     "src/compiler/turboshaft/define-assembler-macros.inc",
@@ -3310,7 +3337,7 @@ v8_header_set("v8_internal_headers") {
     "src/compiler/turboshaft/machine-lowering-reducer.h",
     "src/compiler/turboshaft/machine-optimization-reducer.h",
     "src/compiler/turboshaft/memory-optimization-reducer.h",
-    "src/compiler/turboshaft/operation-matching.h",
+    "src/compiler/turboshaft/operation-matcher.h",
     "src/compiler/turboshaft/operations.h",
     "src/compiler/turboshaft/optimization-phase.h",
     "src/compiler/turboshaft/optimize-phase.h",
@@ -3374,9 +3401,9 @@ v8_header_set("v8_internal_headers") {
     "src/deoptimizer/deoptimized-frame-info.h",
     "src/deoptimizer/deoptimizer.h",
     "src/deoptimizer/frame-description.h",
+    "src/deoptimizer/frame-translation-builder.h",
     "src/deoptimizer/materialized-object-store.h",
     "src/deoptimizer/translated-state.h",
-    "src/deoptimizer/translation-array.h",
     "src/deoptimizer/translation-opcode.h",
     "src/diagnostics/basic-block-profiler.h",
     "src/diagnostics/code-tracer.h",
@@ -4812,6 +4839,7 @@ v8_source_set("v8_turboshaft") {
     "src/compiler/turboshaft/assembler.cc",
     "src/compiler/turboshaft/build-graph-phase.cc",
     "src/compiler/turboshaft/dead-code-elimination-phase.cc",
+    "src/compiler/turboshaft/debug-feature-lowering-phase.cc",
     "src/compiler/turboshaft/decompression-optimization-phase.cc",
     "src/compiler/turboshaft/decompression-optimization.cc",
     "src/compiler/turboshaft/graph-builder.cc",
@@ -4995,9 +5023,9 @@ v8_source_set("v8_base_without_compiler") {
     "src/deoptimizer/deoptimize-reason.cc",
     "src/deoptimizer/deoptimized-frame-info.cc",
     "src/deoptimizer/deoptimizer.cc",
+    "src/deoptimizer/frame-translation-builder.cc",
     "src/deoptimizer/materialized-object-store.cc",
     "src/deoptimizer/translated-state.cc",
-    "src/deoptimizer/translation-array.cc",
     "src/diagnostics/basic-block-profiler.cc",
     "src/diagnostics/compilation-statistics.cc",
     "src/diagnostics/disassembler.cc",
@@ -5164,6 +5192,7 @@ v8_source_set("v8_base_without_compiler") {
     "src/objects/embedder-data-array.cc",
     "src/objects/feedback-vector.cc",
     "src/objects/field-type.cc",
+    "src/objects/fixed-array.cc",
     "src/objects/instruction-stream.cc",
     "src/objects/intl-objects.cc",
     "src/objects/js-array-buffer.cc",
@@ -6037,6 +6066,7 @@ v8_static_lib("v8_libbase") {
     "src/base/sanitizer/lsan.h",
     "src/base/sanitizer/msan.h",
     "src/base/sanitizer/tsan.h",
+    "src/base/small-map.h",
     "src/base/small-vector.h",
     "src/base/string-format.h",
     "src/base/strings.cc",

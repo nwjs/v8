@@ -46,8 +46,8 @@ class SemiSpace final : public Space {
   SemiSpace(Heap* heap, SemiSpaceId semispace)
       : Space(heap, NEW_SPACE, nullptr, allocation_counter_), id_(semispace) {}
 
-  inline bool Contains(HeapObject o) const;
-  inline bool Contains(Object o) const;
+  inline bool Contains(Tagged<HeapObject> o) const;
+  inline bool Contains(Tagged<Object> o) const;
   template <typename T>
   inline bool Contains(Tagged<T> o) const;
   inline bool ContainsSlow(Address a) const;
@@ -227,10 +227,8 @@ class NewSpace : NON_EXPORTED_BASE(public SpaceWithLinearArea) {
 
   NewSpace(Heap* heap, LinearAllocationArea& allocation_info);
 
-  inline bool Contains(Object o) const;
-  inline bool Contains(HeapObject o) const;
-  template <typename T>
-  inline bool Contains(Tagged<T> o) const;
+  inline bool Contains(Tagged<Object> o) const;
+  inline bool Contains(Tagged<HeapObject> o) const;
   virtual bool ContainsSlow(Address a) const = 0;
 
 #if DEBUG
@@ -245,10 +243,10 @@ class NewSpace : NON_EXPORTED_BASE(public SpaceWithLinearArea) {
 
   size_t ExternalBackingStoreOverallBytes() const {
     size_t result = 0;
-    for (int i = 0; i < ExternalBackingStoreType::kNumTypes; i++) {
-      result +=
-          ExternalBackingStoreBytes(static_cast<ExternalBackingStoreType>(i));
-    }
+    ForAll<ExternalBackingStoreType>(
+        [this, &result](ExternalBackingStoreType type, int index) {
+          result += ExternalBackingStoreBytes(type);
+        });
     return result;
   }
 
@@ -587,7 +585,7 @@ class V8_EXPORT_PRIVATE PagedSpaceForNewSpace final : public PagedSpaceBase {
   size_t ExternalBackingStoreBytes(ExternalBackingStoreType type) const final {
     if (type == ExternalBackingStoreType::kArrayBuffer)
       return heap()->YoungArrayBufferBytes();
-    return external_backing_store_bytes_[type];
+    return external_backing_store_bytes_[static_cast<int>(type)];
   }
 
 #ifdef VERIFY_HEAP

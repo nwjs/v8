@@ -231,7 +231,17 @@ bool WasmCode::ShouldBeLogged(Isolate* isolate) {
 
 std::string WasmCode::DebugName() const {
   if (IsAnonymous()) {
-    return "anonymous function";
+    switch (kind()) {
+      case kWasmFunction:
+        UNREACHABLE();
+      case kWasmToCapiWrapper:
+        return "wasm to C-API wrapper";
+      case kWasmToJsWrapper:
+        return "wasm to js wrapper";
+      case kJumpTable:
+        return "jump table";
+    }
+    UNREACHABLE();
   }
 
   ModuleWireBytes wire_bytes(native_module()->wire_bytes());
@@ -878,14 +888,14 @@ void NativeModule::ReserveCodeTableForTesting(uint32_t max_functions) {
   InitializeJumpTableForLazyCompilation(max_functions);
 }
 
-void NativeModule::LogWasmCodes(Isolate* isolate, Script script) {
+void NativeModule::LogWasmCodes(Isolate* isolate, Tagged<Script> script) {
   DisallowGarbageCollection no_gc;
   if (!WasmCode::ShouldBeLogged(isolate)) return;
 
   TRACE_EVENT1("v8.wasm", "wasm.LogWasmCodes", "functions",
                module_->num_declared_functions);
 
-  Object url_obj = script->name();
+  Tagged<Object> url_obj = script->name();
   DCHECK(IsString(url_obj) || IsUndefined(url_obj));
   std::unique_ptr<char[]> source_url =
       IsString(url_obj) ? String::cast(url_obj)->ToCString()
@@ -1066,6 +1076,11 @@ std::unique_ptr<WasmCode> NativeModule::AddCode(
   // Only Liftoff code can have the {frame_has_feedback_slot} bit set.
   DCHECK_NE(tier, ExecutionTier::kLiftoff);
   bool frame_has_feedback_slot = false;
+  {
+    CodeSpaceWriteScope write_scope;
+    ThreadIsolation::RegisterWasmAllocation(
+        reinterpret_cast<Address>(code_space.begin()), desc.instr_size);
+  }
   return AddCodeWithCodeSpace(index, desc, stack_slots, tagged_parameter_slots,
                               protected_instructions_data,
                               source_position_table, inlining_positions, kind,
@@ -1099,8 +1114,6 @@ std::unique_ptr<WasmCode> NativeModule::AddCodeWithCodeSpace(
 
   {
     CodeSpaceWriteScope write_scope;
-    ThreadIsolation::RegisterWasmAllocation(
-        reinterpret_cast<Address>(dst_code_bytes.begin()), desc.instr_size);
     memcpy(dst_code_bytes.begin(), desc.buffer,
            static_cast<size_t>(desc.instr_size));
 
@@ -1934,8 +1947,7 @@ VirtualMemory WasmCodeManager::TryAllocate(size_t size, void* hint) {
   TRACE_HEAP("VMem alloc: 0x%" PRIxPTR ":0x%" PRIxPTR " (%zu)\n", mem.address(),
              mem.end(), mem.size());
 
-  ThreadIsolation::RegisterJitPage(mem.address(), mem.size(),
-                                   ThreadIsolation::AllocationSource::kWasm);
+  ThreadIsolation::RegisterJitPage(mem.address(), mem.size());
 
   // TODO(v8:8462): Remove eager commit once perf supports remapping.
   if (v8_flags.perf_prof) {
@@ -2244,6 +2256,14 @@ std::vector<std::unique_ptr<WasmCode>> NativeModule::AddCompiledCode(
   // {results} vector in smaller chunks).
   CHECK(jump_tables.is_valid());
 
+  std::vector<size_t> sizes;
+  for (const auto& result : results) {
+    sizes.emplace_back(RoundUp<kCodeAlignment>(result.code_desc.instr_size));
+  }
+  ThreadIsolation::RegisterJitAllocations(
+      reinterpret_cast<Address>(code_space.begin()), sizes,
+      ThreadIsolation::JitAllocationType::kWasmCode);
+
   // Now copy the generated code into the code space and relocate it.
   for (auto& result : results) {
     DCHECK_EQ(result.code_desc.buffer, result.instr_buffer->start());
@@ -2424,9 +2444,7 @@ void WasmCodeManager::FreeNativeModule(
 #endif  // V8_OS_WIN64
 
     lookup_map_.erase(code_space.address());
-    ThreadIsolation::UnregisterJitPage(
-        code_space.address(), code_space.size(),
-        ThreadIsolation::AllocationSource::kWasm);
+    ThreadIsolation::UnregisterJitPage(code_space.address(), code_space.size());
     code_space.Free();
     DCHECK(!code_space.IsReserved());
   }

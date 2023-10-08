@@ -38,11 +38,12 @@ LargeObjectSpaceObjectIterator::LargeObjectSpaceObjectIterator(
 }
 
 Tagged<HeapObject> LargeObjectSpaceObjectIterator::Next() {
-  if (current_ == nullptr) return Tagged<HeapObject>();
-
-  Tagged<HeapObject> object = current_->GetObject();
-  current_ = current_->next_page();
-  return object;
+  while (current_ != nullptr) {
+    Tagged<HeapObject> object = current_->GetObject();
+    current_ = current_->next_page();
+    if (!IsFreeSpaceOrFiller(object)) return object;
+  }
+  return Tagged<HeapObject>();
 }
 
 // -----------------------------------------------------------------------------
@@ -96,9 +97,9 @@ AllocationResult OldLargeObjectSpace::AllocateRaw(int object_size,
   DCHECK(!v8_flags.enable_third_party_heap);
   // Check if we want to force a GC before growing the old space further.
   // If so, fail the allocation.
-  if (!heap()->CanExpandOldGeneration(object_size) ||
-      !heap()->ShouldExpandOldGenerationOnSlowAllocation(
-          heap()->main_thread_local_heap(), AllocationOrigin::kRuntime)) {
+  if (!heap()->ShouldExpandOldGenerationOnSlowAllocation(
+          heap()->main_thread_local_heap(), AllocationOrigin::kRuntime) ||
+      !heap()->CanExpandOldGeneration(object_size)) {
     return AllocationResult::Failure();
   }
 
@@ -106,7 +107,7 @@ AllocationResult OldLargeObjectSpace::AllocateRaw(int object_size,
   if (page == nullptr) return AllocationResult::Failure();
   page->SetOldGenerationPageFlags(
       heap()->incremental_marking()->marking_mode());
-  HeapObject object = page->GetObject();
+  Tagged<HeapObject> object = page->GetObject();
   UpdatePendingObject(object);
   heap()->StartIncrementalMarkingIfAllocationLimitIsReached(
       heap()->GCFlagsForIncrementalMarking(),
@@ -134,7 +135,7 @@ AllocationResult OldLargeObjectSpace::AllocateRawBackground(
   DCHECK(!v8_flags.enable_third_party_heap);
   // Check if we want to force a GC before growing the old space further.
   // If so, fail the allocation.
-  if (!heap()->CanExpandOldGenerationBackground(local_heap, object_size) ||
+  if (!heap()->CanExpandOldGeneration(object_size) ||
       !heap()->ShouldExpandOldGenerationOnSlowAllocation(
           local_heap, AllocationOrigin::kRuntime)) {
     return AllocationResult::Failure();
@@ -144,7 +145,7 @@ AllocationResult OldLargeObjectSpace::AllocateRawBackground(
   if (page == nullptr) return AllocationResult::Failure();
   page->SetOldGenerationPageFlags(
       heap()->incremental_marking()->marking_mode());
-  HeapObject object = page->GetObject();
+  Tagged<HeapObject> object = page->GetObject();
   heap()->StartIncrementalMarkingIfAllocationLimitIsReachedBackground();
   if (heap()->incremental_marking()->black_allocation()) {
     heap()->marking_state()->TryMarkAndAccountLiveBytes(object);
@@ -158,6 +159,13 @@ AllocationResult OldLargeObjectSpace::AllocateRawBackground(
 
 LargePage* LargeObjectSpace::AllocateLargePage(int object_size,
                                                Executability executable) {
+  base::MutexGuard expansion_guard(heap_->heap_expansion_mutex());
+
+  if (identity() != NEW_LO_SPACE &&
+      !heap()->IsOldGenerationExpansionAllowed(object_size, expansion_guard)) {
+    return nullptr;
+  }
+
   LargePage* page = heap()->memory_allocator()->AllocateLargePage(
       this, object_size, executable);
   if (page == nullptr) return nullptr;
@@ -168,7 +176,7 @@ LargePage* LargeObjectSpace::AllocateLargePage(int object_size,
     AddPage(page, object_size);
   }
 
-  HeapObject object = page->GetObject();
+  Tagged<HeapObject> object = page->GetObject();
 
   heap()->CreateFillerObjectAt(object.address(), object_size);
   return page;
@@ -201,10 +209,11 @@ void LargeObjectSpace::AddPage(LargePage* page, size_t object_size) {
   page->set_owner(this);
   page->SetOldGenerationPageFlags(
       heap()->incremental_marking()->marking_mode());
-  for (size_t i = 0; i < ExternalBackingStoreType::kNumTypes; i++) {
-    ExternalBackingStoreType t = static_cast<ExternalBackingStoreType>(i);
-    IncrementExternalBackingStoreBytes(t, page->ExternalBackingStoreBytes(t));
-  }
+  ForAll<ExternalBackingStoreType>(
+      [this, page](ExternalBackingStoreType type, int index) {
+        IncrementExternalBackingStoreBytes(
+            type, page->ExternalBackingStoreBytes(type));
+      });
 }
 
 void LargeObjectSpace::RemovePage(LargePage* page) {
@@ -213,14 +222,15 @@ void LargeObjectSpace::RemovePage(LargePage* page) {
   page_count_--;
   memory_chunk_list_.Remove(page);
   page->set_owner(nullptr);
-  for (size_t i = 0; i < ExternalBackingStoreType::kNumTypes; i++) {
-    ExternalBackingStoreType t = static_cast<ExternalBackingStoreType>(i);
-    DecrementExternalBackingStoreBytes(t, page->ExternalBackingStoreBytes(t));
-  }
+  ForAll<ExternalBackingStoreType>(
+      [this, page](ExternalBackingStoreType type, int index) {
+        DecrementExternalBackingStoreBytes(
+            type, page->ExternalBackingStoreBytes(type));
+      });
 }
 
 void LargeObjectSpace::ShrinkPageToObjectSize(LargePage* page,
-                                              HeapObject object,
+                                              Tagged<HeapObject> object,
                                               size_t object_size) {
 #ifdef DEBUG
   PtrComprCageBase cage_base(heap()->isolate());
@@ -256,7 +266,7 @@ void LargeObjectSpace::ShrinkPageToObjectSize(LargePage* page,
   DCHECK_EQ(object_size, page->area_size());
 }
 
-bool LargeObjectSpace::Contains(HeapObject object) const {
+bool LargeObjectSpace::Contains(Tagged<HeapObject> object) const {
   BasicMemoryChunk* chunk = BasicMemoryChunk::FromHeapObject(object);
 
   bool owned = (chunk->owner() == this);
@@ -284,11 +294,8 @@ std::unique_ptr<ObjectIterator> LargeObjectSpace::GetObjectIterator(
 // on the invariants we are checking during verification.
 void LargeObjectSpace::Verify(Isolate* isolate,
                               SpaceVerificationVisitor* visitor) const {
-  size_t external_backing_store_bytes[kNumTypes];
-
-  for (int i = 0; i < kNumTypes; i++) {
-    external_backing_store_bytes[static_cast<ExternalBackingStoreType>(i)] = 0;
-  }
+  size_t external_backing_store_bytes[static_cast<int>(
+      ExternalBackingStoreType::kNumValues)] = {0};
 
   PtrComprCageBase cage_base(isolate);
   for (const LargePage* chunk = first_page(); chunk != nullptr;
@@ -297,7 +304,7 @@ void LargeObjectSpace::Verify(Isolate* isolate,
 
     // Each chunk contains an object that starts at the large object page's
     // object area start.
-    HeapObject object = chunk->GetObject();
+    Tagged<HeapObject> object = chunk->GetObject();
     Page* page = Page::FromHeapObject(object);
     CHECK(object.address() == page->area_start());
 
@@ -338,17 +345,21 @@ void LargeObjectSpace::Verify(Isolate* isolate,
     // Invoke visitor on each object.
     visitor->VerifyObject(object);
 
-    for (int i = 0; i < kNumTypes; i++) {
-      ExternalBackingStoreType t = static_cast<ExternalBackingStoreType>(i);
-      external_backing_store_bytes[t] += chunk->ExternalBackingStoreBytes(t);
-    }
+    ForAll<ExternalBackingStoreType>(
+        [chunk, &external_backing_store_bytes](ExternalBackingStoreType type,
+                                               int index) {
+          external_backing_store_bytes[index] +=
+              chunk->ExternalBackingStoreBytes(type);
+        });
 
     visitor->VerifyPageDone(chunk);
   }
-  for (int i = 0; i < kNumTypes; i++) {
-    ExternalBackingStoreType t = static_cast<ExternalBackingStoreType>(i);
-    CHECK_EQ(external_backing_store_bytes[t], ExternalBackingStoreBytes(t));
-  }
+  ForAll<ExternalBackingStoreType>(
+      [this, external_backing_store_bytes](ExternalBackingStoreType type,
+                                           int index) {
+        CHECK_EQ(external_backing_store_bytes[index],
+                 ExternalBackingStoreBytes(type));
+      });
 }
 #endif
 
@@ -356,13 +367,13 @@ void LargeObjectSpace::Verify(Isolate* isolate,
 void LargeObjectSpace::Print() {
   StdoutStream os;
   LargeObjectSpaceObjectIterator it(this);
-  for (HeapObject obj = it.Next(); !obj.is_null(); obj = it.Next()) {
+  for (Tagged<HeapObject> obj = it.Next(); !obj.is_null(); obj = it.Next()) {
     i::Print(obj, os);
   }
 }
 #endif  // DEBUG
 
-void LargeObjectSpace::UpdatePendingObject(HeapObject object) {
+void LargeObjectSpace::UpdatePendingObject(Tagged<HeapObject> object) {
   base::SharedMutexGuard<base::kExclusive> guard(&pending_allocation_mutex_);
   pending_object_.store(object.address(), std::memory_order_release);
 }
@@ -396,7 +407,7 @@ AllocationResult NewLargeObjectSpace::AllocateRaw(int object_size) {
   // The size of the first object may exceed the capacity.
   capacity_ = std::max(capacity_, SizeOfObjects());
 
-  HeapObject result = page->GetObject();
+  Tagged<HeapObject> result = page->GetObject();
   page->SetYoungGenerationPageFlags(
       heap()->incremental_marking()->marking_mode());
   page->SetFlag(MemoryChunk::TO_PAGE);
@@ -425,7 +436,7 @@ void NewLargeObjectSpace::Flip() {
 }
 
 void NewLargeObjectSpace::FreeDeadObjects(
-    const std::function<bool(HeapObject)>& is_dead) {
+    const std::function<bool(Tagged<HeapObject>)>& is_dead) {
   bool is_marking = heap()->incremental_marking()->IsMarking();
   DCHECK_IMPLIES(v8_flags.minor_ms, !is_marking);
   DCHECK_IMPLIES(is_marking, heap()->incremental_marking()->IsMajorMarking());
@@ -434,7 +445,7 @@ void NewLargeObjectSpace::FreeDeadObjects(
   for (auto it = begin(); it != end();) {
     LargePage* page = *it;
     it++;
-    HeapObject object = page->GetObject();
+    Tagged<HeapObject> object = page->GetObject();
     if (is_dead(object)) {
       RemovePage(page);
       heap()->memory_allocator()->Free(MemoryAllocator::FreeMode::kConcurrently,

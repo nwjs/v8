@@ -716,11 +716,11 @@ UListFormatterWidth StyleToWidth(JSDurationFormat::Style style) {
   switch (style) {
     case JSDurationFormat::Style::kLong:
       return ULISTFMT_WIDTH_WIDE;
-    case JSDurationFormat::Style::kShort:
-      return ULISTFMT_WIDTH_SHORT;
     case JSDurationFormat::Style::kNarrow:
-    case JSDurationFormat::Style::kDigital:
       return ULISTFMT_WIDTH_NARROW;
+    case JSDurationFormat::Style::kShort:
+    case JSDurationFormat::Style::kDigital:
+      return ULISTFMT_WIDTH_SHORT;
   }
   UNREACHABLE();
 }
@@ -756,8 +756,8 @@ MaybeHandle<T> PartitionDurationFormatPattern(Isolate* isolate,
   std::vector<std::vector<Part>>* parts = Details ? &list : nullptr;
   std::vector<icu::UnicodeString> string_list;
 
-  DurationRecordToListOfFormattedNumber(df, *(df->icu_number_formatter().raw()),
-                                        record, parts, &string_list);
+  DurationRecordToListOfFormattedNumber(
+      df, *(df->icu_number_formatter()->raw()), record, parts, &string_list);
 
   icu::FormattedList formatted = formatter->formatStringsToValue(
       string_list.data(), static_cast<int32_t>(string_list.size()), status);

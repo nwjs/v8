@@ -31,6 +31,7 @@
 #include "src/heap/gc-callbacks.h"
 #include "src/heap/heap-allocator.h"
 #include "src/heap/marking-state.h"
+#include "src/heap/minor-gc-job.h"
 #include "src/heap/pretenuring-handler.h"
 #include "src/heap/sweeper.h"
 #include "src/init/heap-symbols.h"
@@ -106,7 +107,6 @@ class MemoryBalancer;
 class MemoryChunk;
 class MemoryMeasurement;
 class MemoryReducer;
-class MinorGCJob;
 class MinorMarkSweepCollector;
 class NativeContext;
 class NopRwxMemoryWriteScope;
@@ -149,7 +149,6 @@ enum class SkipRoot {
   kUnserializable,
   kWeak,
   kConservativeStack,
-  kTopOfStack,
   kReadOnlyBuiltins,
 };
 
@@ -775,8 +774,11 @@ class Heap final {
   ExternalPointerTable::Space* external_pointer_space() {
     return &external_pointer_space_;
   }
+  ExternalPointerTable::Space* read_only_external_pointer_space() {
+    return &read_only_external_pointer_space_;
+  }
 #endif  // V8_COMPRESS_POINTERS
-        //
+
 #ifdef V8_CODE_POINTER_SANDBOXING
   CodePointerTable::Space* code_pointer_space() { return &code_pointer_space_; }
 #endif  // V8_CODE_POINTER_SANDBOXING
@@ -850,7 +852,7 @@ class Heap final {
   V8_INLINE void SetRootMaterializedObjects(Tagged<FixedArray> objects);
   V8_INLINE void SetRootScriptList(Tagged<Object> value);
   V8_INLINE void SetRootNoScriptSharedFunctionInfos(Tagged<Object> value);
-  V8_INLINE void SetMessageListeners(Tagged<TemplateList> value);
+  V8_INLINE void SetMessageListeners(Tagged<ArrayList> value);
   V8_INLINE void SetFunctionsMarkedForManualOptimization(
       Tagged<Object> bytecode);
 
@@ -984,9 +986,8 @@ class Heap final {
 
   void IterateStackRoots(RootVisitor* v);
 
-  enum class ScanStackMode { kFromMarker, kComplete };
   void IterateConservativeStackRoots(
-      RootVisitor* v, ScanStackMode stack_mode,
+      RootVisitor* v,
       IterateRootsMode roots_mode = IterateRootsMode::kMainIsolate);
 
   // ===========================================================================
@@ -1127,21 +1128,15 @@ class Heap final {
   // ===========================================================================
 
   // Returns whether the object resides in new space.
-  static inline bool InYoungGeneration(Object object);
+  static inline bool InYoungGeneration(Tagged<Object> object);
   static inline bool InYoungGeneration(MaybeObject object);
-  static inline bool InYoungGeneration(HeapObject heap_object);
-  template <typename T>
-  static inline bool InYoungGeneration(Tagged<T> object);
-  static inline bool InFromPage(Object object);
+  static inline bool InYoungGeneration(Tagged<HeapObject> heap_object);
+  static inline bool InFromPage(Tagged<Object> object);
   static inline bool InFromPage(MaybeObject object);
-  static inline bool InFromPage(HeapObject heap_object);
-  template <typename T>
-  static inline bool InFromPage(Tagged<T> object);
-  static inline bool InToPage(Object object);
+  static inline bool InFromPage(Tagged<HeapObject> heap_object);
+  static inline bool InToPage(Tagged<Object> object);
   static inline bool InToPage(MaybeObject object);
-  static inline bool InToPage(HeapObject heap_object);
-  template <typename T>
-  static inline bool InToPage(Tagged<T> object);
+  static inline bool InToPage(Tagged<HeapObject> heap_object);
 
   // Returns whether the object resides in old space.
   inline bool InOldSpace(Tagged<Object> object);
@@ -1244,6 +1239,8 @@ class Heap final {
 
   // Returns the capacity of the old generation.
   V8_EXPORT_PRIVATE size_t OldGenerationCapacity() const;
+
+  base::Mutex* heap_expansion_mutex() { return &heap_expansion_mutex_; }
 
   // Returns the amount of memory currently held alive by the unmapper.
   size_t CommittedMemoryOfUnmapper();
@@ -1449,12 +1446,8 @@ class Heap final {
   // Check if the given object was recently allocated and its fields may appear
   // as uninitialized to background threads.
   // This predicate may be invoked from a background thread.
-  inline bool IsPendingAllocation(HeapObject object);
-  inline bool IsPendingAllocation(Object object);
-  template <typename T>
-  inline bool IsPendingAllocation(Tagged<T> object) {
-    return IsPendingAllocation(*object);
-  }
+  inline bool IsPendingAllocation(Tagged<HeapObject> object);
+  inline bool IsPendingAllocation(Tagged<Object> object);
 
   // Notifies that all previously allocated objects are properly initialized
   // and ensures that IsPendingAllocation returns false for them. This function
@@ -1488,9 +1481,9 @@ class Heap final {
   // ===========================================================================
 
   // Searches for a Code object by the given interior pointer.
-  V8_EXPORT_PRIVATE Code FindCodeForInnerPointer(Address inner_pointer);
+  V8_EXPORT_PRIVATE Tagged<Code> FindCodeForInnerPointer(Address inner_pointer);
   // Use the GcSafe family of functions if called while GC is in progress.
-  GcSafeCode GcSafeFindCodeForInnerPointer(Address inner_pointer);
+  Tagged<GcSafeCode> GcSafeFindCodeForInnerPointer(Address inner_pointer);
   base::Optional<GcSafeCode> GcSafeTryFindCodeForInnerPointer(
       Address inner_pointer);
   base::Optional<InstructionStream>
@@ -1582,6 +1575,11 @@ class Heap final {
   V8_EXPORT_PRIVATE bool CanPromoteYoungAndExpandOldGeneration(
       size_t size) const;
   V8_EXPORT_PRIVATE bool CanExpandOldGeneration(size_t size) const;
+
+  // Checks whether OldGenerationCapacity() can be expanded by `size` bytes and
+  // still fits into `max_old_generation_size_`.
+  V8_EXPORT_PRIVATE bool IsOldGenerationExpansionAllowed(
+      size_t size, const base::MutexGuard& expansion_mutex_witness) const;
 
   bool ShouldReduceMemory() const {
     return current_gc_flags_ & GCFlag::kReduceMemoryFootprint;
@@ -1798,11 +1796,11 @@ class Heap final {
 
   // Casts a heap object to an InstructionStream, DCHECKs that the
   // inner_pointer is within the object, and returns the attached Code object.
-  GcSafeCode GcSafeGetCodeFromInstructionStream(
+  Tagged<GcSafeCode> GcSafeGetCodeFromInstructionStream(
       Tagged<HeapObject> instruction_stream, Address inner_pointer);
   // Returns the map of a HeapObject. Can be used during garbage collection,
   // i.e. it supports a forwarded map.
-  Map GcSafeMapOfHeapObject(Tagged<HeapObject> object);
+  Tagged<Map> GcSafeMapOfHeapObject(Tagged<HeapObject> object);
 
   // ===========================================================================
   // Actual GC. ================================================================
@@ -1889,6 +1887,8 @@ class Heap final {
     return max_old_generation_size_.load(std::memory_order_relaxed);
   }
 
+  size_t min_old_generation_size() const { return min_old_generation_size_; }
+
   // Sets max_old_generation_size_ and computes the new global heap limit from
   // it.
   void SetOldGenerationAndGlobalMaximumSize(size_t max_old_generation_size);
@@ -1901,9 +1901,6 @@ class Heap final {
   void ResetOldGenerationAndGlobalAllocationLimit();
 
   bool always_allocate() { return always_allocate_scope_count_ != 0; }
-
-  V8_EXPORT_PRIVATE bool CanExpandOldGenerationBackground(LocalHeap* local_heap,
-                                                          size_t size);
 
   bool ShouldExpandOldGenerationOnSlowAllocation(LocalHeap* local_heap,
                                                  AllocationOrigin origin);
@@ -1937,6 +1934,8 @@ class Heap final {
   V8_EXPORT_PRIVATE void StartMinorMSIncrementalMarkingIfNeeded();
   bool MinorMSSizeTaskTriggerReached() const;
 
+  MinorGCJob* minor_gc_job() { return minor_gc_job_.get(); }
+
   // ===========================================================================
   // Allocation methods. =======================================================
   // ===========================================================================
@@ -1963,10 +1962,10 @@ class Heap final {
   // otherwise it falls back to a slower path indicated by the mode.
   enum AllocationRetryMode { kLightRetry, kRetryOrFail };
   template <AllocationRetryMode mode>
-  V8_WARN_UNUSED_RESULT V8_INLINE HeapObject
-  AllocateRawWith(int size, AllocationType allocation,
-                  AllocationOrigin origin = AllocationOrigin::kRuntime,
-                  AllocationAlignment alignment = kTaggedAligned);
+  V8_WARN_UNUSED_RESULT V8_INLINE Tagged<HeapObject> AllocateRawWith(
+      int size, AllocationType allocation,
+      AllocationOrigin origin = AllocationOrigin::kRuntime,
+      AllocationAlignment alignment = kTaggedAligned);
 
   // Call AllocateRawWith with kRetryOrFail. Matches the method in LocalHeap.
   V8_WARN_UNUSED_RESULT inline Address AllocateRawOrFail(
@@ -2115,6 +2114,8 @@ class Heap final {
   // The space in the ExternalPointerTable containing entries owned by objects
   // in this heap.
   ExternalPointerTable::Space external_pointer_space_;
+  // Likewise but for slots in host objects in ReadOnlySpace.
+  ExternalPointerTable::Space read_only_external_pointer_space_;
 #endif  // V8_COMPRESS_POINTERS
 
 #ifdef V8_CODE_POINTER_SANDBOXING
@@ -2242,6 +2243,8 @@ class Heap final {
 
   StrongRootsEntry* strong_roots_head_ = nullptr;
   base::Mutex strong_roots_mutex_;
+
+  base::Mutex heap_expansion_mutex_;
 
   bool need_to_remove_stress_concurrent_allocation_observer_ = false;
 
@@ -2506,7 +2509,8 @@ using CodePageHeaderModificationScope = NopRwxMemoryWriteScope;
 class V8_NODISCARD CodePageMemoryModificationScope {
  public:
   explicit inline CodePageMemoryModificationScope(BasicMemoryChunk* chunk);
-  explicit inline CodePageMemoryModificationScope(InstructionStream object);
+  explicit inline CodePageMemoryModificationScope(
+      Tagged<InstructionStream> object);
   inline ~CodePageMemoryModificationScope();
 
  private:
@@ -2574,10 +2578,7 @@ class V8_EXPORT_PRIVATE PagedSpaceIterator {
 // an embedded DisallowGarbageCollection instance).
 //
 // HeapObjectIterator can skip free list nodes (that is, de-allocated heap
-// objects that still remain in the heap). As implementation of free nodes
-// filtering uses GC marks, it can't be used during MS/MC GC phases. Also, it is
-// forbidden to interrupt iteration in this mode, as this will leave heap
-// objects marked (and thus, unusable).
+// objects that still remain in the heap).
 //
 // See ReadOnlyHeapObjectIterator if you need to iterate over read-only space
 // objects, or CombinedHeapObjectIterator if you need to iterate over both
@@ -2602,18 +2603,17 @@ class V8_EXPORT_PRIVATE HeapObjectIterator {
   Tagged<HeapObject> NextObject();
 
   Heap* heap_;
+  DISALLOW_GARBAGE_COLLECTION(no_heap_allocation_)
+
   // The safepoint scope pointer is null if a scope already existed when the
   // iterator was created (i.e. when using the constructor that passes a
   // safepoint_scope reference).
   std::unique_ptr<SafepointScope> safepoint_scope_;  // nullable
-  HeapObjectsFiltering filtering_;
-  HeapObjectsFilter* filter_ = nullptr;
+  std::unique_ptr<HeapObjectsFilter> filter_;
   // Space iterator for iterating all the spaces.
-  SpaceIterator* space_iterator_ = nullptr;
+  SpaceIterator space_iterator_;
   // Object iterator for the space currently being iterated.
-  std::unique_ptr<ObjectIterator> object_iterator_ = nullptr;
-
-  DISALLOW_GARBAGE_COLLECTION(no_heap_allocation_)
+  std::unique_ptr<ObjectIterator> object_iterator_;
 };
 
 // Abstract base class for checking whether a weak object should be retained.

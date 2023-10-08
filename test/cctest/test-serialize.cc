@@ -172,11 +172,20 @@ StartupBlobs Serialize(v8::Isolate* isolate) {
   }
 
   Isolate* i_isolate = reinterpret_cast<Isolate*>(isolate);
-  heap::InvokeMemoryReducingMajorGCs(i_isolate->heap());
+  {
+    // Note that we need to run a garbage collection without stack at this
+    // point, so that all dead objects are reclaimed. This is required to avoid
+    // conservative stack scanning and guarantee deterministic behaviour.
+    EmbedderStackStateScope stack_scope(
+        i_isolate->heap(), EmbedderStackStateScope::kExplicitInvocation,
+        StackState::kNoHeapPointers);
+    heap::InvokeMemoryReducingMajorGCs(i_isolate->heap());
+  }
 
   // Note this effectively reimplements Snapshot::Create, keep in sync.
 
   SafepointScope safepoint(i_isolate, SafepointKind::kIsolate);
+  DisallowGarbageCollection no_gc;
   HandleScope scope(i_isolate);
 
   if (i_isolate->heap()->read_only_space()->writable()) {
@@ -184,7 +193,7 @@ StartupBlobs Serialize(v8::Isolate* isolate) {
     // serialization. Objects can be promoted if a) they are themselves
     // immutable-after-deserialization and b) all objects in the transitive
     // object graph also satisfy condition a).
-    ReadOnlyPromotion::Promote(i_isolate, safepoint);
+    ReadOnlyPromotion::Promote(i_isolate, safepoint, no_gc);
     // When creating the snapshot from scratch, we are responsible for sealing
     // the RO heap here. Note we cannot delegate the responsibility e.g. to
     // Isolate::Init since it should still be possible to allocate into RO
@@ -193,7 +202,6 @@ StartupBlobs Serialize(v8::Isolate* isolate) {
     i_isolate->read_only_heap()->OnCreateHeapObjectsComplete(i_isolate);
   }
 
-  DisallowGarbageCollection no_gc;
   ReadOnlySerializer read_only_serializer(i_isolate,
                                           Snapshot::kDefaultSerializerFlags);
   read_only_serializer.Serialize();
@@ -380,7 +388,16 @@ static void SerializeContext(base::Vector<const uint8_t>* startup_blob_out,
 
     // If we don't do this then we end up with a stray root pointing at the
     // context even after we have disposed of env.
-    heap::InvokeMemoryReducingMajorGCs(heap);
+    {
+      // Note that we need to run a garbage collection without stack at this
+      // point, so that all dead objects are reclaimed. This is required to
+      // avoid conservative stack scanning and guarantee deterministic
+      // behaviour.
+      EmbedderStackStateScope stack_scope(
+          heap, EmbedderStackStateScope::kExplicitInvocation,
+          StackState::kNoHeapPointers);
+      heap::InvokeMemoryReducingMajorGCs(heap);
+    }
 
     {
       v8::HandleScope handle_scope(v8_isolate);
@@ -555,7 +572,16 @@ static void SerializeCustomContext(
     }
     // If we don't do this then we end up with a stray root pointing at the
     // context even after we have disposed of env.
-    heap::InvokeMemoryReducingMajorGCs(i_isolate->heap());
+    {
+      // Note that we need to run a garbage collection without stack at this
+      // point, so that all dead objects are reclaimed. This is required to
+      // avoid conservative stack scanning and guarantee deterministic
+      // behaviour.
+      EmbedderStackStateScope stack_scope(
+          i_isolate->heap(), EmbedderStackStateScope::kExplicitInvocation,
+          StackState::kNoHeapPointers);
+      heap::InvokeMemoryReducingMajorGCs(i_isolate->heap());
+    }
 
     {
       v8::HandleScope handle_scope(isolate);
@@ -568,13 +594,14 @@ static void SerializeCustomContext(
     env.Reset();
 
     SafepointScope safepoint(i_isolate, SafepointKind::kIsolate);
+    DisallowGarbageCollection no_gc;
 
     if (i_isolate->heap()->read_only_space()->writable()) {
       // Promote objects from mutable heap spaces to read-only space prior to
       // serialization. Objects can be promoted if a) they are themselves
       // immutable-after-deserialization and b) all objects in the transitive
       // object graph also satisfy condition a).
-      ReadOnlyPromotion::Promote(i_isolate, safepoint);
+      ReadOnlyPromotion::Promote(i_isolate, safepoint, no_gc);
       // When creating the snapshot from scratch, we are responsible for sealing
       // the RO heap here. Note we cannot delegate the responsibility e.g. to
       // Isolate::Init since it should still be possible to allocate into RO
@@ -583,7 +610,6 @@ static void SerializeCustomContext(
       i_isolate->read_only_heap()->OnCreateHeapObjectsComplete(i_isolate);
     }
 
-    DisallowGarbageCollection no_gc;
     SnapshotByteSink read_only_sink;
     ReadOnlySerializer read_only_serializer(i_isolate,
                                             Snapshot::kDefaultSerializerFlags);
@@ -1770,7 +1796,7 @@ void TestCodeSerializerOnePlusOneImpl(bool verify_builtins_count = true) {
       Execution::CallScript(isolate, copy_fun, global,
                             isolate->factory()->empty_fixed_array())
           .ToHandleChecked();
-  CHECK_EQ(2, Handle<Smi>::cast(copy_result)->value());
+  CHECK_EQ(2, Smi::cast(*copy_result).value());
 
   if (verify_builtins_count) CHECK_EQ(builtins_count, CountBuiltins());
 
@@ -3237,6 +3263,7 @@ UNINITIALIZED_TEST(SnapshotCreatorShortExternalReferences) {
   FreeCurrentEmbeddedBlob();
 }
 
+namespace {
 v8::StartupData CreateSnapshotWithDefaultAndCustom() {
   v8::SnapshotCreator creator(original_external_references);
   v8::Isolate* isolate = creator.GetIsolate();
@@ -3270,6 +3297,7 @@ v8::StartupData CreateSnapshotWithDefaultAndCustom() {
   }
   return creator.CreateBlob(v8::SnapshotCreator::FunctionCodeHandling::kClear);
 }
+}  // namespace
 
 UNINITIALIZED_TEST(SnapshotCreatorNoExternalReferencesDefault) {
   DisableAlwaysOpt();
@@ -4909,9 +4937,9 @@ void CheckSFIsAreWeak(WeakFixedArray sfis, Isolate* isolate) {
   int no_of_weak = 0;
   for (int i = 0; i < sfis->length(); ++i) {
     MaybeObject maybe_object = sfis->Get(i);
-    HeapObject heap_object;
+    Tagged<HeapObject> heap_object;
     CHECK(maybe_object->IsWeakOrCleared() ||
-          (maybe_object->GetHeapObjectIfStrong(&heap_object) &&
+          (maybe_object.GetHeapObjectIfStrong(&heap_object) &&
            IsUndefined(heap_object, isolate)));
     if (maybe_object->IsWeak()) {
       ++no_of_weak;

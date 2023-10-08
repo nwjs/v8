@@ -15,9 +15,6 @@ namespace internal {
 class ByteArray;
 class CallInterfaceDescriptor;
 class Callable;
-template <typename T>
-class Handle;
-class Isolate;
 
 // Forward declarations.
 class BytecodeOffset;
@@ -166,9 +163,9 @@ class Builtins {
   Handle<Code> OrdinaryToPrimitive(OrdinaryToPrimitiveHint hint);
 
   // Used by CreateOffHeapTrampolines in isolate.cc.
-  void set_code(Builtin builtin, Code code);
+  void set_code(Builtin builtin, Tagged<Code> code);
 
-  V8_EXPORT_PRIVATE Code code(Builtin builtin);
+  V8_EXPORT_PRIVATE Tagged<Code> code(Builtin builtin);
   V8_EXPORT_PRIVATE Handle<Code> code_handle(Builtin builtin);
 
   static CallInterfaceDescriptor CallInterfaceDescriptorFor(Builtin builtin);
@@ -196,7 +193,7 @@ class Builtins {
 
   // True, iff the given code object is a builtin. Note that this does not
   // necessarily mean that its kind is InstructionStream::BUILTIN.
-  static bool IsBuiltin(const Code code);
+  static bool IsBuiltin(const Tagged<Code> code);
 
   // As above, but safe to access off the main thread since the check is done
   // by handle location. Similar to Heap::IsRootHandle.
@@ -214,7 +211,7 @@ class Builtins {
   }
 
   // True, iff the given code object is a builtin with off-heap embedded code.
-  static bool IsIsolateIndependentBuiltin(Code code);
+  static bool IsIsolateIndependentBuiltin(Tagged<Code> code);
 
   static void InitializeIsolateDataTables(Isolate* isolate);
 

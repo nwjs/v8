@@ -284,7 +284,7 @@ OptionalObjectRef GetOwnFastDataPropertyFromHeap(JSHeapBroker* broker,
                                                  JSObjectRef holder,
                                                  Representation representation,
                                                  FieldIndex field_index) {
-  base::Optional<Object> constant;
+  base::Optional<Tagged<Object>> constant;
   {
     DisallowGarbageCollection no_gc;
     PtrComprCageBase cage_base = broker->cage_base();
@@ -309,7 +309,7 @@ OptionalObjectRef GetOwnFastDataPropertyFromHeap(JSHeapBroker* broker,
         return {};
       }
     } else {
-      Object raw_properties_or_hash =
+      Tagged<Object> raw_properties_or_hash =
           holder.object()->raw_properties_or_hash(cage_base, kRelaxedLoad);
       // Ensure that the object is safe to inspect.
       if (broker->ObjectMayBeUninitialized(raw_properties_or_hash)) {
@@ -377,8 +377,9 @@ OptionalObjectRef GetOwnDictionaryPropertyFromHeap(JSHeapBroker* broker,
     DisallowGarbageCollection no_gc;
     // DictionaryPropertyAt will check that we are within the bounds of the
     // object.
-    base::Optional<Object> maybe_constant = JSObject::DictionaryPropertyAt(
-        receiver, dict_index, broker->isolate()->heap());
+    base::Optional<Tagged<Object>> maybe_constant =
+        JSObject::DictionaryPropertyAt(receiver, dict_index,
+                                       broker->isolate()->heap());
     DCHECK_IMPLIES(broker->IsMainThread(), maybe_constant);
     if (!maybe_constant) return {};
     constant = broker->CanonicalPersistentHandle(maybe_constant.value());
@@ -577,7 +578,7 @@ int InstanceSizeWithMinSlack(JSHeapBroker* broker, MapRef map) {
 
     static constexpr bool kConcurrentAccess = true;
     TransitionsAccessor(broker->isolate(), *map.object(), kConcurrentAccess)
-        .TraverseTransitionTree([&](Map m) {
+        .TraverseTransitionTree([&](Tagged<Map> m) {
           maps.push_back(broker->CanonicalPersistentHandle(m));
         });
   }
@@ -768,7 +769,7 @@ base::Optional<bool> HeapObjectData::TryGetBooleanValue(
 base::Optional<bool> HeapObjectData::TryGetBooleanValueImpl(
     JSHeapBroker* broker) const {
   DisallowGarbageCollection no_gc;
-  Object o = *object();
+  Tagged<Object> o = *object();
   Isolate* isolate = broker->isolate();
   const InstanceType t = GetMapInstanceType();
   if (IsTrue(o, isolate)) {
@@ -1064,7 +1065,7 @@ bool ObjectRef::IsSmi() const { return data()->is_smi(); }
 int ObjectRef::AsSmi() const {
   DCHECK(IsSmi());
   // Handle-dereference is always allowed for Handle<Smi>.
-  return Handle<Smi>::cast(object())->value();
+  return Smi::cast(*object()).value();
 }
 
 #define DEF_TESTER(Type, ...)                              \
@@ -1119,13 +1120,26 @@ OptionalMapRef MapRef::AsElementsKind(JSHeapBroker* broker,
   return MakeRefAssumeMemoryFence(broker, maybe_result.value());
 }
 
-bool MapRef::HasOnlyStablePrototypesWithFastElements(
+bool MapRef::PrototypesElementsDoNotHaveAccessorsOrThrow(
     JSHeapBroker* broker, ZoneVector<MapRef>* prototype_maps) {
   DCHECK_NOT_NULL(prototype_maps);
   MapRef prototype_map = prototype(broker).map(broker);
   while (prototype_map.oddball_type(broker) != OddballType::kNull) {
+    // For the purposes of depending on prototypes' elements behavior when
+    // doing keyed property sets, non-extensible and sealed fast elements are
+    // okay because they behave like fast elements for stores into holes on
+    // the receiver. In such cases, the value is stored on the receiver's
+    // elements and does not trigger any setters and does not throw.
+    //
+    // Note that frozen elements are _not_ okay because of the "override
+    // mistake":
+    //
+    //   Object.prototype[1] = "x";
+    //   Object.freeze(Object.prototype);
+    //   ([])[1] = "y"; <-- throws in strict mode, nop in sloppy mode
     if (!prototype_map.IsJSObjectMap() || !prototype_map.is_stable() ||
-        !IsFastElementsKind(prototype_map.elements_kind())) {
+        !IsFastOrNonextensibleOrSealedElementsKind(
+            prototype_map.elements_kind())) {
       return false;
     }
     prototype_maps->push_back(prototype_map);
@@ -1225,7 +1239,7 @@ OptionalObjectRef JSObjectRef::RawInobjectPropertyAt(JSHeapBroker* broker,
       return {};
     }
 
-    base::Optional<Object> maybe_value =
+    base::Optional<Tagged<Object>> maybe_value =
         object()->RawInobjectPropertyAt(cage_base, current_map, index);
     if (!maybe_value.has_value()) {
       TRACE_BROKER_MISSING(broker,
@@ -1286,7 +1300,7 @@ MapRef MapRef::FindFieldOwner(JSHeapBroker* broker,
 
 OptionalObjectRef StringRef::GetCharAsStringOrUndefined(JSHeapBroker* broker,
                                                         uint32_t index) const {
-  String maybe_char;
+  Tagged<String> maybe_char;
   auto result = ConcurrentLookupIterator::TryGetOwnChar(
       &maybe_char, broker->isolate(), broker->local_isolate(), *object(),
       index);
@@ -1552,7 +1566,7 @@ int RegExpBoilerplateDescriptionRef::flags() const { return object()->flags(); }
 
 OptionalCallHandlerInfoRef FunctionTemplateInfoRef::call_code(
     JSHeapBroker* broker) const {
-  HeapObject call_code = object()->call_code(kAcquireLoad);
+  Tagged<HeapObject> call_code = object()->call_code(kAcquireLoad);
   if (i::IsUndefined(call_code)) return base::nullopt;
   return TryMakeRef(broker, CallHandlerInfo::cast(call_code));
 }
@@ -1579,7 +1593,7 @@ HolderLookupResult FunctionTemplateInfoRef::LookupHolderOfExpectedType(
   Handle<FunctionTemplateInfo> expected_receiver_type;
   {
     DisallowGarbageCollection no_gc;
-    HeapObject signature = object()->signature();
+    Tagged<HeapObject> signature = object()->signature();
     if (i::IsUndefined(signature)) {
       return HolderLookupResult(CallOptimization::kHolderIsReceiver);
     }
@@ -1746,7 +1760,9 @@ bool StringRef::IsExternalString() const {
   return i::IsExternalString(*object());
 }
 
-Address CallHandlerInfoRef::callback() const { return object()->callback(); }
+Address CallHandlerInfoRef::callback(JSHeapBroker* broker) const {
+  return object()->callback(broker->isolate());
+}
 
 ZoneVector<Address> FunctionTemplateInfoRef::c_functions(
     JSHeapBroker* broker) const {
@@ -1888,7 +1904,7 @@ bool ObjectRef::should_access_heap() const {
 OptionalObjectRef JSObjectRef::GetOwnConstantElement(
     JSHeapBroker* broker, FixedArrayBaseRef elements_ref, uint32_t index,
     CompilationDependencies* dependencies) const {
-  base::Optional<Object> maybe_element = GetOwnConstantElementFromHeap(
+  base::Optional<Tagged<Object>> maybe_element = GetOwnConstantElementFromHeap(
       broker, *elements_ref.object(), map(broker).elements_kind(), index);
   if (!maybe_element.has_value()) return {};
 
@@ -1899,9 +1915,9 @@ OptionalObjectRef JSObjectRef::GetOwnConstantElement(
   return result;
 }
 
-base::Optional<Object> JSObjectRef::GetOwnConstantElementFromHeap(
-    JSHeapBroker* broker, FixedArrayBase elements, ElementsKind elements_kind,
-    uint32_t index) const {
+base::Optional<Tagged<Object>> JSObjectRef::GetOwnConstantElementFromHeap(
+    JSHeapBroker* broker, Tagged<FixedArrayBase> elements,
+    ElementsKind elements_kind, uint32_t index) const {
   DCHECK_LE(index, JSObject::kMaxElementIndex);
 
   Handle<JSObject> holder = object();
@@ -1917,7 +1933,7 @@ base::Optional<Object> JSObjectRef::GetOwnConstantElementFromHeap(
   // - The release-load of that map ensures we read the newest value
   //   of `length` below.
   if (i::IsJSArray(*holder)) {
-    Object array_length_obj =
+    Tagged<Object> array_length_obj =
         JSArray::cast(*holder)->length(broker->isolate(), kRelaxedLoad);
     if (!i::IsSmi(array_length_obj)) {
       // Can't safely read into HeapNumber objects without atomic semantics
@@ -1932,7 +1948,7 @@ base::Optional<Object> JSObjectRef::GetOwnConstantElementFromHeap(
     if (index >= array_length) return {};
   }
 
-  Object maybe_element;
+  Tagged<Object> maybe_element;
   auto result = ConcurrentLookupIterator::TryGetOwnConstantElement(
       &maybe_element, broker->isolate(), broker->local_isolate(), *holder,
       elements, elements_kind, index);
@@ -2015,9 +2031,10 @@ OptionalObjectRef JSArrayRef::GetOwnCowElement(JSHeapBroker* broker,
   // Likewise we only deal with smi lengths.
   if (!length_ref->IsSmi()) return {};
 
-  base::Optional<Object> result = ConcurrentLookupIterator::TryGetOwnCowElement(
-      broker->isolate(), *elements_ref.AsFixedArray().object(), elements_kind,
-      length_ref->AsSmi(), index);
+  base::Optional<Tagged<Object>> result =
+      ConcurrentLookupIterator::TryGetOwnCowElement(
+          broker->isolate(), *elements_ref.AsFixedArray().object(),
+          elements_kind, length_ref->AsSmi(), index);
   if (!result.has_value()) return {};
 
   return TryMakeRef(broker, result.value());
@@ -2111,7 +2128,7 @@ NameRef DescriptorArrayRef::GetPropertyKey(
 
 OptionalObjectRef DescriptorArrayRef::GetStrongValue(
     JSHeapBroker* broker, InternalIndex descriptor_index) const {
-  HeapObject heap_object;
+  Tagged<HeapObject> heap_object;
   if (!object()
            ->GetValue(descriptor_index)
            .GetHeapObjectIfStrong(&heap_object)) {
@@ -2283,7 +2300,7 @@ OptionalMapRef JSObjectRef::GetObjectCreateMap(JSHeapBroker* broker) const {
   if (!maybe_object_create_map->IsWeak()) return {};
 
   return MapRef(broker->GetOrCreateData(
-      maybe_object_create_map->GetHeapObjectAssumeWeak(), kAssumeMemoryFence));
+      maybe_object_create_map.GetHeapObjectAssumeWeak(), kAssumeMemoryFence));
 }
 
 bool PropertyCellRef::Cache(JSHeapBroker* broker) const {
@@ -2301,7 +2318,7 @@ bool NativeContextRef::GlobalIsDetached(JSHeapBroker* broker) const {
 
 OptionalPropertyCellRef JSGlobalObjectRef::GetPropertyCell(JSHeapBroker* broker,
                                                            NameRef name) const {
-  base::Optional<PropertyCell> maybe_cell =
+  base::Optional<Tagged<PropertyCell>> maybe_cell =
       ConcurrentLookupIterator::TryGetPropertyCell(
           broker->isolate(), broker->local_isolate_or_isolate(),
           broker->target_native_context().global_object(broker).object(),

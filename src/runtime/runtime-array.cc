@@ -71,7 +71,7 @@ RUNTIME_FUNCTION(Runtime_NewArray) {
   if (argv.length() == 1) {
     Handle<Object> argument_one = argv.at<Object>(0);
     if (IsSmi(*argument_one)) {
-      int value = Handle<Smi>::cast(argument_one)->value();
+      int value = Smi::cast(*argument_one).value();
       if (value < 0 ||
           JSArray::SetLengthWouldNormalize(isolate->heap(), value)) {
         // the array is a dictionary in this case.
@@ -207,7 +207,7 @@ RUNTIME_FUNCTION(Runtime_ArrayIsArray) {
 RUNTIME_FUNCTION(Runtime_IsArray) {
   SealHandleScope shs(isolate);
   DCHECK_EQ(1, args.length());
-  Object obj = args[0];
+  Tagged<Object> obj = args[0];
   return isolate->heap()->ToBoolean(IsJSArray(obj));
 }
 

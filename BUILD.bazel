@@ -233,6 +233,11 @@ v8_flag(
     default = True,
 )
 
+v8_flag(
+    name = "v8_enable_extensible_ro_snapshot",
+    default = True,
+)
+
 # Enable shared cage if v8_enable_pointer_compression
 # and v8_enable_pointer_compression_shared_cage.
 selects.config_setting_group(
@@ -428,6 +433,10 @@ v8_config(
     }) + select({
         ":is_v8_enable_shared_ro_heap": [
             "V8_SHARED_RO_HEAP",
+        ],
+    }) + select({
+        ":is_v8_enable_extensible_ro_snapshot": [
+            "V8_ENABLE_EXTENSIBLE_RO_SNAPSHOT",
         ],
     }) + select({
         ":is_v8_enable_short_builtin_calls": [
@@ -702,6 +711,7 @@ filegroup(
         "src/base/safe_conversions.h",
         "src/base/safe_conversions_arm_impl.h",
         "src/base/safe_conversions_impl.h",
+        "src/base/small-map.h",
         "src/base/small-vector.h",
         "src/base/string-format.h",
         "src/base/strings.cc",
@@ -1353,12 +1363,12 @@ filegroup(
         "src/deoptimizer/deoptimizer.cc",
         "src/deoptimizer/deoptimizer.h",
         "src/deoptimizer/frame-description.h",
+        "src/deoptimizer/frame-translation-builder.cc",
+        "src/deoptimizer/frame-translation-builder.h",
         "src/deoptimizer/materialized-object-store.cc",
         "src/deoptimizer/materialized-object-store.h",
         "src/deoptimizer/translated-state.cc",
         "src/deoptimizer/translated-state.h",
-        "src/deoptimizer/translation-array.cc",
-        "src/deoptimizer/translation-array.h",
         "src/deoptimizer/translation-opcode.h",
         "src/diagnostics/basic-block-profiler.cc",
         "src/diagnostics/basic-block-profiler.h",
@@ -1823,6 +1833,7 @@ filegroup(
         "src/objects/field-index-inl.h",
         "src/objects/field-type.cc",
         "src/objects/field-type.h",
+        "src/objects/fixed-array.cc",
         "src/objects/fixed-array.h",
         "src/objects/fixed-array-inl.h",
         "src/objects/foreign.h",
@@ -2982,6 +2993,9 @@ filegroup(
         "src/compiler/turboshaft/dead-code-elimination-phase.cc",
         "src/compiler/turboshaft/dead-code-elimination-phase.h",
         "src/compiler/turboshaft/dead-code-elimination-reducer.h",
+        "src/compiler/turboshaft/debug-feature-lowering-phase.cc",
+        "src/compiler/turboshaft/debug-feature-lowering-phase.h",
+        "src/compiler/turboshaft/debug-feature-lowering-reducer.h",
         "src/compiler/turboshaft/decompression-optimization.cc",
         "src/compiler/turboshaft/decompression-optimization.h",
         "src/compiler/turboshaft/decompression-optimization-phase.cc",
@@ -3012,7 +3026,7 @@ filegroup(
         "src/compiler/turboshaft/machine-optimization-reducer.h",
         "src/compiler/turboshaft/memory-optimization-reducer.cc",
         "src/compiler/turboshaft/memory-optimization-reducer.h",
-        "src/compiler/turboshaft/operation-matching.h",
+        "src/compiler/turboshaft/operation-matcher.h",
         "src/compiler/turboshaft/operations.cc",
         "src/compiler/turboshaft/operations.h",
         "src/compiler/turboshaft/optimization-phase.cc",

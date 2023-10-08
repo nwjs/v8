@@ -113,6 +113,24 @@ class ReadOnlyArtifacts {
     return initial_next_unique_sfi_id_;
   }
 
+  struct ExternalPointerRegistryEntry {
+    ExternalPointerRegistryEntry(ExternalPointerHandle handle, Address value,
+                                 ExternalPointerTag tag)
+        : handle(handle), value(value), tag(tag) {}
+    ExternalPointerHandle handle;
+    Address value;
+    ExternalPointerTag tag;
+  };
+  void set_external_pointer_registry(
+      std::vector<ExternalPointerRegistryEntry>&& registry) {
+    DCHECK(external_pointer_registry_.empty());
+    external_pointer_registry_ = std::move(registry);
+  }
+  const std::vector<ExternalPointerRegistryEntry>& external_pointer_registry()
+      const {
+    return external_pointer_registry_;
+  }
+
   void InitializeChecksum(SnapshotData* read_only_snapshot_data);
   void VerifyChecksum(SnapshotData* read_only_snapshot_data,
                       bool read_only_heap_created);
@@ -125,6 +143,7 @@ class ReadOnlyArtifacts {
   std::unique_ptr<SharedReadOnlySpace> shared_read_only_space_;
   std::unique_ptr<ReadOnlyHeap> read_only_heap_;
   uint32_t initial_next_unique_sfi_id_ = 0;
+  std::vector<ExternalPointerRegistryEntry> external_pointer_registry_;
 #ifdef DEBUG
   // The checksum of the blob the read-only heap was deserialized from, if
   // any.
@@ -199,7 +218,7 @@ class ReadOnlySpace : public BaseSpace {
   bool writable() const { return !is_marked_read_only_; }
 
   bool Contains(Address a) = delete;
-  bool Contains(Object o) = delete;
+  bool Contains(Tagged<Object> o) = delete;
 
   V8_EXPORT_PRIVATE
   AllocationResult AllocateRaw(int size_in_bytes,
@@ -229,6 +248,9 @@ class ReadOnlySpace : public BaseSpace {
   Address top() const { return top_; }
   Address limit() const { return limit_; }
   size_t Capacity() const { return capacity_; }
+
+  // Returns the index within pages_. The chunk must be part of this space.
+  size_t IndexOf(const BasicMemoryChunk* chunk) const;
 
   bool ContainsSlow(Address addr) const;
   V8_EXPORT_PRIVATE void ShrinkPages();
@@ -272,12 +294,16 @@ class ReadOnlySpace : public BaseSpace {
   AllocationResult AllocateRawUnaligned(int size_in_bytes);
   AllocationResult AllocateRawAligned(int size_in_bytes,
                                       AllocationAlignment alignment);
-  HeapObject TryAllocateLinearlyAligned(int size_in_bytes,
-                                        AllocationAlignment alignment);
-  void AllocateNextPage();
-  void AllocateNextPageAt(Address pos);
-  void FinalizeExternallyInitializedPage();
-  void FinalizeExternallyInitializedSpace();
+  Tagged<HeapObject> TryAllocateLinearlyAligned(int size_in_bytes,
+                                                AllocationAlignment alignment);
+
+  // Return the index within pages_ of the newly allocated page.
+  size_t AllocateNextPage();
+  size_t AllocateNextPageAt(Address pos);
+  void InitializePageForDeserialization(ReadOnlyPage* page,
+                                        size_t area_size_in_bytes);
+  void FinalizeSpaceForDeserialization();
+
   void EnsureSpaceForAllocation(int size_in_bytes);
   void FreeLinearAllocationArea();
 

@@ -308,11 +308,6 @@ class Object : public TaggedImpl<HeapObjectReferenceType::STRONG, Address> {
   constexpr Object() : TaggedImpl(kNullAddress) {}
   explicit constexpr Object(Address ptr) : TaggedImpl(ptr) {}
 
-  /* For every object, add a `->` operator which returns a pointer to this     \
-     object. This will allow smoother transition between T and Tagged<T>. */
-  Object* operator->() { return this; }
-  const Object* operator->() const { return this; }
-
   // Whether the object is in the RO heap and the RO heap is shared, or in the
   // writable shared heap.
   static V8_INLINE bool InSharedHeap(Tagged<Object> obj);
@@ -364,7 +359,7 @@ class Object : public TaggedImpl<HeapObjectReferenceType::STRONG, Address> {
   template <typename IsolateT>
   V8_EXPORT_PRIVATE static bool BooleanValue(Tagged<Object> obj,
                                              IsolateT* isolate);
-  static Object ToBoolean(Tagged<Object> obj, Isolate* isolate);
+  static Tagged<Object> ToBoolean(Tagged<Object> obj, Isolate* isolate);
 
   // ES6 section 7.2.11 Abstract Relational Comparison
   V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static Maybe<ComparisonResult>
@@ -375,7 +370,8 @@ class Object : public TaggedImpl<HeapObjectReferenceType::STRONG, Address> {
       Isolate* isolate, Handle<Object> x, Handle<Object> y);
 
   // ES6 section 7.2.13 Strict Equality Comparison
-  V8_EXPORT_PRIVATE static bool StrictEquals(Tagged<Object> obj, Object that);
+  V8_EXPORT_PRIVATE static bool StrictEquals(Tagged<Object> obj,
+                                             Tagged<Object> that);
 
   // ES6 section 7.1.13 ToObject
   // Convert to a JSObject if needed.
@@ -447,7 +443,7 @@ class Object : public TaggedImpl<HeapObjectReferenceType::STRONG, Address> {
 
   // ES6 section 7.3.9 GetMethod
   V8_WARN_UNUSED_RESULT static MaybeHandle<Object> GetMethod(
-      Handle<JSReceiver> receiver, Handle<Name> name);
+      Isolate* isolate, Handle<JSReceiver> receiver, Handle<Name> name);
 
   // ES6 section 7.3.17 CreateListFromArrayLike
   V8_WARN_UNUSED_RESULT static MaybeHandle<FixedArray> CreateListFromArrayLike(
@@ -564,18 +560,19 @@ class Object : public TaggedImpl<HeapObjectReferenceType::STRONG, Address> {
 
   // Returns the permanent hash code associated with this object. May return
   // undefined if not yet created.
-  static inline Object GetHash(Tagged<Object> obj);
+  static inline Tagged<Object> GetHash(Tagged<Object> obj);
 
   // Returns the permanent hash code associated with this object depending on
   // the actual object type. May create and store a hash code if needed and none
   // exists.
-  V8_EXPORT_PRIVATE static Smi GetOrCreateHash(Tagged<Object> obj,
-                                               Isolate* isolate);
+  V8_EXPORT_PRIVATE static Tagged<Smi> GetOrCreateHash(Tagged<Object> obj,
+                                                       Isolate* isolate);
 
   // Checks whether this object has the same value as the given one.  This
   // function is implemented according to ES5, section 9.12 and can be used
   // to implement the Object.is function.
-  V8_EXPORT_PRIVATE static bool SameValue(Tagged<Object> obj, Object other);
+  V8_EXPORT_PRIVATE static bool SameValue(Tagged<Object> obj,
+                                          Tagged<Object> other);
 
   // A part of SameValue which handles Number vs. Number case.
   // Treats NaN == NaN and +0 != -0.
@@ -585,7 +582,7 @@ class Object : public TaggedImpl<HeapObjectReferenceType::STRONG, Address> {
   // +0 and -0 are treated equal. Everything else is the same as SameValue.
   // This function is implemented according to ES6, section 7.2.4 and is used
   // by ES6 Map and Set.
-  static bool SameValueZero(Tagged<Object> obj, Object other);
+  static bool SameValueZero(Tagged<Object> obj, Tagged<Object> other);
 
   // ES6 section 9.4.2.3 ArraySpeciesCreate (part of it)
   V8_WARN_UNUSED_RESULT static MaybeHandle<Object> ArraySpeciesConstructor(
@@ -625,15 +622,17 @@ class Object : public TaggedImpl<HeapObjectReferenceType::STRONG, Address> {
   // Verify a pointer is a valid (non-InstructionStream) object pointer.
   // When V8_EXTERNAL_CODE_SPACE is enabled InstructionStream objects are
   // not allowed.
-  static void VerifyPointer(Isolate* isolate, Object p);
+  static void VerifyPointer(Isolate* isolate, Tagged<Object> p);
   // Verify a pointer is a valid object pointer.
   // InstructionStream objects are allowed regardless of the
   // V8_EXTERNAL_CODE_SPACE mode.
-  static void VerifyAnyTagged(Isolate* isolate, Object p);
+  static void VerifyAnyTagged(Isolate* isolate, Tagged<Object> p);
 #endif
 
-  inline static constexpr Object cast(Object object) { return object; }
-  inline static constexpr Object unchecked_cast(Object object) {
+  inline static constexpr Tagged<Object> cast(Tagged<Object> object) {
+    return object;
+  }
+  inline static constexpr Tagged<Object> unchecked_cast(Tagged<Object> object) {
     return object;
   }
 
@@ -642,7 +641,7 @@ class Object : public TaggedImpl<HeapObjectReferenceType::STRONG, Address> {
 
   // For use with std::unordered_set.
   struct Hasher {
-    size_t operator()(const Object o) const {
+    size_t operator()(const Tagged<Object> o) const {
       return std::hash<v8::internal::Address>{}(static_cast<Tagged_t>(o.ptr()));
     }
   };
@@ -650,14 +649,16 @@ class Object : public TaggedImpl<HeapObjectReferenceType::STRONG, Address> {
   // For use with std::unordered_set/unordered_map when using both
   // InstructionStream and non-InstructionStream objects as keys.
   struct KeyEqualSafe {
-    bool operator()(const Object a, const Object b) const {
+    bool operator()(const Tagged<Object> a, const Tagged<Object> b) const {
       return a.SafeEquals(b);
     }
   };
 
   // For use with std::map.
   struct Comparer {
-    bool operator()(const Object a, const Object b) const { return a < b; }
+    bool operator()(const Tagged<Object> a, const Tagged<Object> b) const {
+      return a < b;
+    }
   };
 
   // If the receiver is the JSGlobalObject, the store was contextual. In case
@@ -700,7 +701,8 @@ class Object : public TaggedImpl<HeapObjectReferenceType::STRONG, Address> {
   friend class StringStream;
 
   // Return the map of the root of object's prototype chain.
-  static Map GetPrototypeChainRootMap(Tagged<Object> obj, Isolate* isolate);
+  static Tagged<Map> GetPrototypeChainRootMap(Tagged<Object> obj,
+                                              Isolate* isolate);
 
   // Returns a non-SMI for JSReceivers, but returns the hash code forp
   // simple objects.  This avoids a double lookup in the cases where
@@ -709,7 +711,7 @@ class Object : public TaggedImpl<HeapObjectReferenceType::STRONG, Address> {
   //
   // Despite its size, this needs to be inlined for performance
   // reasons.
-  static inline Object GetSimpleHash(Object object);
+  static inline Tagged<Object> GetSimpleHash(Tagged<Object> object);
 
   // Helper for SetProperty and SetSuperProperty.
   // Return value is only meaningful if [found] is set to true on return.
@@ -738,14 +740,6 @@ class Object : public TaggedImpl<HeapObjectReferenceType::STRONG, Address> {
                  MessageTemplate error_index);
 };
 
-// TODO(leszeks): Tagged<Object> is not known to be a pointer, so it shouldn't
-// have an operator* or operator->. Remove once all Object member functions
-// are free/static functions.
-constexpr Object Tagged<Object>::operator*() const { return ToRawPtr(); }
-constexpr detail::TaggedOperatorArrowRef<Object> Tagged<Object>::operator->() {
-  return detail::TaggedOperatorArrowRef<Object>{ToRawPtr()};
-}
-
 // Implicit conversions to/from raw pointers
 // TODO(leszeks): Remove once we're using Tagged everywhere.
 // NOLINTNEXTLINE
@@ -761,7 +755,8 @@ constexpr Tagged<Object>::operator U() {
 
 constexpr Object Tagged<Object>::ToRawPtr() const { return Object(ptr()); }
 
-V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os, const Object& obj);
+V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os,
+                                           Tagged<Object> obj);
 
 struct Brief {
   template <typename TObject>
@@ -776,7 +771,7 @@ V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os, const Brief& v);
 
 // Objects should never have the weak tag; this variant is for overzealous
 // checking.
-V8_INLINE static bool HasWeakHeapObjectTag(const Object value) {
+V8_INLINE static bool HasWeakHeapObjectTag(const Tagged<Object> value) {
   return HAS_WEAK_HEAP_OBJECT_TAG(value.ptr());
 }
 
@@ -798,13 +793,13 @@ V8_INLINE constexpr bool IsHeapObject(TaggedImpl<kRefType, StorageType> obj) {
 
 // TODO(leszeks): These exist both as free functions and members of Tagged. They
 // probably want to be cleaned up at some point.
-V8_INLINE bool IsSmi(Tagged<Object> obj);
-V8_INLINE bool IsSmi(Tagged<HeapObject> obj);
-V8_INLINE bool IsSmi(Tagged<Smi> obj);
+V8_INLINE bool IsSmi(Tagged<Object> obj) { return obj.IsSmi(); }
+V8_INLINE bool IsSmi(Tagged<HeapObject> obj) { return false; }
+V8_INLINE bool IsSmi(Tagged<Smi> obj) { return true; }
 
-V8_INLINE bool IsHeapObject(Tagged<Object> obj);
-V8_INLINE bool IsHeapObject(Tagged<HeapObject> obj);
-V8_INLINE bool IsHeapObject(Tagged<Smi> obj);
+V8_INLINE bool IsHeapObject(Tagged<Object> obj) { return obj.IsHeapObject(); }
+V8_INLINE bool IsHeapObject(Tagged<HeapObject> obj) { return true; }
+V8_INLINE bool IsHeapObject(Tagged<Smi> obj) { return false; }
 
 template <typename T>
 // static
@@ -886,44 +881,20 @@ inline bool IsApiCallResultType(Tagged<Object> obj);
 #endif  // DEBUG
 
 // Prints this object without details.
-// TODO(leszeks): Make these functions work on Tagged<Object>, once there is no
-// implicit conversion between Tagged and Object which makes them ambiguously
-// overload with the TaggedImpl overloads.
-V8_EXPORT_PRIVATE void ShortPrint(Object obj, FILE* out = stdout);
+V8_EXPORT_PRIVATE void ShortPrint(Tagged<Object> obj, FILE* out = stdout);
 
 // Prints this object without details to a message accumulator.
-V8_EXPORT_PRIVATE void ShortPrint(Object obj, StringStream* accumulator);
+V8_EXPORT_PRIVATE void ShortPrint(Tagged<Object> obj,
+                                  StringStream* accumulator);
 
-V8_EXPORT_PRIVATE void ShortPrint(Object obj, std::ostream& os);
-
-inline void ShortPrint(TaggedBase obj, FILE* out = stdout) {
-  static_assert(kTaggedCanConvertToRawObjects);
-  return ShortPrint(Object(obj.ptr()), out);
-}
-inline void ShortPrint(TaggedBase obj, StringStream* accumulator) {
-  static_assert(kTaggedCanConvertToRawObjects);
-  return ShortPrint(Object(obj.ptr()), accumulator);
-}
-inline void ShortPrint(TaggedBase obj, std::ostream& os) {
-  static_assert(kTaggedCanConvertToRawObjects);
-  return ShortPrint(Object(obj.ptr()), os);
-}
+V8_EXPORT_PRIVATE void ShortPrint(Tagged<Object> obj, std::ostream& os);
 
 #ifdef OBJECT_PRINT
 // For our gdb macros, we should perhaps change these in the future.
-V8_EXPORT_PRIVATE void Print(Object obj);
+V8_EXPORT_PRIVATE void Print(Tagged<Object> obj);
 
 // Prints this object with details.
-V8_EXPORT_PRIVATE void Print(Object obj, std::ostream& os);
-
-inline void Print(TaggedBase obj) {
-  static_assert(kTaggedCanConvertToRawObjects);
-  return Print(Object(obj.ptr()));
-}
-inline void Print(TaggedBase obj, std::ostream& os) {
-  static_assert(kTaggedCanConvertToRawObjects);
-  return Print(Object(obj.ptr()), os);
-}
+V8_EXPORT_PRIVATE void Print(Tagged<Object> obj, std::ostream& os);
 
 #else
 inline void Print(Object obj) { ShortPrint(obj); }
@@ -949,10 +920,10 @@ class MapWord {
   // Normal state: the map word contains a map pointer.
 
   // Create a map word from a map pointer.
-  static inline MapWord FromMap(const Map map);
+  static inline MapWord FromMap(const Tagged<Map> map);
 
   // View this map word as a map pointer.
-  inline Map ToMap() const;
+  inline Tagged<Map> ToMap() const;
 
   // Scavenge collection: the map word of live objects in the from space
   // contains a forwarding address (a heap object pointer in the to space).
@@ -962,14 +933,15 @@ class MapWord {
   // when all map words are heap object pointers, i.e. not during a full GC).
   inline bool IsForwardingAddress() const;
 
-  V8_EXPORT_PRIVATE static bool IsMapOrForwarded(Map map);
+  V8_EXPORT_PRIVATE static bool IsMapOrForwarded(Tagged<Map> map);
 
   // Create a map word from a forwarding address.
-  static inline MapWord FromForwardingAddress(HeapObject map_word_host,
-                                              HeapObject object);
+  static inline MapWord FromForwardingAddress(Tagged<HeapObject> map_word_host,
+                                              Tagged<HeapObject> object);
 
   // View this map word as a forwarding address.
-  inline HeapObject ToForwardingAddress(HeapObject map_word_host);
+  inline Tagged<HeapObject> ToForwardingAddress(
+      Tagged<HeapObject> map_word_host);
 
   constexpr inline Address ptr() const { return value_; }
 

@@ -76,6 +76,8 @@ class MultiClientIsolateTest {
     return reinterpret_cast<Isolate*>(main_isolate_);
   }
 
+  int& main_isolate_wakeup_counter() { return main_isolate_wakeup_counter_; }
+
   v8::Isolate* NewClientIsolate() {
     CHECK_NOT_NULL(main_isolate_);
     std::unique_ptr<v8::ArrayBuffer::Allocator> allocator(
@@ -87,6 +89,7 @@ class MultiClientIsolateTest {
 
  private:
   v8::Isolate* main_isolate_;
+  int main_isolate_wakeup_counter_ = 0;
 };
 
 UNINITIALIZED_TEST(InPlaceInternalizableStringsAreShared) {
@@ -474,10 +477,11 @@ class ConcurrentStringTableLookupThread final
 
   void RunForString(Handle<String> input_string, int counter) override {
     CHECK(input_string->IsShared());
-    Object result = Object(StringTable::TryStringToIndexOrLookupExisting(
-        i_isolate, input_string->ptr()));
+    Tagged<Object> result =
+        Object(StringTable::TryStringToIndexOrLookupExisting(
+            i_isolate, input_string->ptr()));
     if (IsString(result)) {
-      String internalized = String::cast(result);
+      Tagged<String> internalized = String::cast(result);
       CHECK(IsInternalizedString(internalized));
       CHECK_IMPLIES(IsInternalizedString(*input_string),
                     *input_string == internalized);
@@ -1618,8 +1622,8 @@ void CreateExternalResources(Isolate* i_isolate, Handle<FixedArray> strings,
 }
 
 void CheckStringAndResource(
-    String string, int index, bool should_be_alive, String deleted_string,
-    bool check_transition, bool shared_resources,
+    Tagged<String> string, int index, bool should_be_alive,
+    Tagged<String> deleted_string, bool check_transition, bool shared_resources,
     const std::vector<std::unique_ptr<ConcurrentExternalizationThread>>&
         threads) {
   if (check_transition) {
@@ -1726,7 +1730,7 @@ void TestConcurrentExternalization(bool share_resources) {
   for (int i = 0; i < shared_strings->length(); i++) {
     Handle<String> input_string(String::cast(shared_strings->get(i)),
                                 i_isolate);
-    String string = *input_string;
+    Tagged<String> string = *input_string;
     CheckStringAndResource(string, i, true, String{}, true, share_resources,
                            threads);
   }
@@ -1822,7 +1826,7 @@ void TestConcurrentExternalizationWithDeadStrings(bool share_resources,
     Handle<String> input_string(String::cast(shared_strings->get(i)),
                                 i_isolate);
     const bool should_be_alive = i % 3 != 0;
-    String string = *input_string;
+    Tagged<String> string = *input_string;
     CheckStringAndResource(string, i, should_be_alive, *empty_string,
                            transition_with_stack, share_resources, threads);
   }
@@ -1840,7 +1844,7 @@ void TestConcurrentExternalizationWithDeadStrings(bool share_resources,
       Handle<String> input_string(String::cast(shared_strings->get(i)),
                                   i_isolate);
       const bool should_be_alive = i % 3 != 0;
-      String string = *input_string;
+      Tagged<String> string = *input_string;
       CheckStringAndResource(string, i, should_be_alive, *empty_string, true,
                              share_resources, threads);
     }
@@ -1932,7 +1936,7 @@ void TestConcurrentExternalizationAndInternalization(
   for (int i = 0; i < shared_strings->length(); i++) {
     Handle<String> input_string(String::cast(shared_strings->get(i)),
                                 i_isolate);
-    String string = *input_string;
+    Tagged<String> string = *input_string;
     if (hit_or_miss == kTestHit) {
       CHECK(IsThinString(string));
       string = ThinString::cast(string)->actual();
@@ -1981,8 +1985,7 @@ UNINITIALIZED_TEST(SharedStringInGlobalHandle) {
   Handle<String> shared_string =
       factory->NewStringFromAsciiChecked("foobar", AllocationType::kSharedOld);
   CHECK(shared_string->InWritableSharedSpace());
-  v8::Local<v8::String> lh_shared_string =
-      Utils::Convert<String, v8::String>(shared_string);
+  v8::Local<v8::String> lh_shared_string = Utils::ToLocal(shared_string);
   v8::Global<v8::String> gh_shared_string(test.main_isolate(),
                                           lh_shared_string);
   gh_shared_string.SetWeak();
@@ -1994,20 +1997,20 @@ UNINITIALIZED_TEST(SharedStringInGlobalHandle) {
 
 class WakeupTask : public CancelableTask {
  public:
-  explicit WakeupTask(Isolate* isolate) : CancelableTask(isolate) {}
+  explicit WakeupTask(Isolate* isolate, int& wakeup_counter)
+      : CancelableTask(isolate), wakeup_counter_(wakeup_counter) {}
 
  private:
   // v8::internal::CancelableTask overrides.
-  void RunInternal() override {}
+  void RunInternal() override { (wakeup_counter_)++; }
+
+  int& wakeup_counter_;
 };
 
 class WorkerIsolateThread : public v8::base::Thread {
  public:
-  WorkerIsolateThread(const char* name, MultiClientIsolateTest* test,
-                      std::atomic<bool>* done)
-      : v8::base::Thread(base::Thread::Options(name)),
-        test_(test),
-        done_(done) {}
+  WorkerIsolateThread(const char* name, MultiClientIsolateTest* test)
+      : v8::base::Thread(base::Thread::Options(name)), test_(test) {}
 
   void Run() override {
     v8::Isolate* client = test_->NewClientIsolate();
@@ -2021,8 +2024,7 @@ class WorkerIsolateThread : public v8::base::Thread {
       Handle<String> shared_string = factory->NewStringFromAsciiChecked(
           "foobar", AllocationType::kSharedOld);
       CHECK(shared_string->InWritableSharedSpace());
-      v8::Local<v8::String> lh_shared_string =
-          Utils::Convert<String, v8::String>(shared_string);
+      v8::Local<v8::String> lh_shared_string = Utils::ToLocal(shared_string);
       gh_shared_string.Reset(test_->main_isolate(), lh_shared_string);
       gh_shared_string.SetWeak();
     }
@@ -2038,16 +2040,14 @@ class WorkerIsolateThread : public v8::base::Thread {
     CHECK(gh_shared_string.IsEmpty());
     client->Dispose();
 
-    *done_ = true;
-
     V8::GetCurrentPlatform()
         ->GetForegroundTaskRunner(test_->main_isolate())
-        ->PostTask(std::make_unique<WakeupTask>(test_->i_main_isolate()));
+        ->PostTask(std::make_unique<WakeupTask>(
+            test_->i_main_isolate(), test_->main_isolate_wakeup_counter()));
   }
 
  private:
   MultiClientIsolateTest* test_;
-  std::atomic<bool>* done_;
 };
 
 UNINITIALIZED_TEST(SharedStringInClientGlobalHandle) {
@@ -2056,11 +2056,10 @@ UNINITIALIZED_TEST(SharedStringInClientGlobalHandle) {
   v8_flags.shared_string_table = true;
 
   MultiClientIsolateTest test;
-  std::atomic<bool> done = false;
-  WorkerIsolateThread thread("worker", &test, &done);
+  WorkerIsolateThread thread("worker", &test);
   CHECK(thread.Start());
 
-  while (!done) {
+  while (test.main_isolate_wakeup_counter() < 1) {
     v8::platform::PumpMessageLoop(
         i::V8::GetCurrentPlatform(), test.main_isolate(),
         v8::platform::MessageLoopBehavior::kWaitForWork);
@@ -2073,11 +2072,9 @@ class ClientIsolateThreadForPagePromotions : public v8::base::Thread {
  public:
   ClientIsolateThreadForPagePromotions(const char* name,
                                        MultiClientIsolateTest* test,
-                                       std::atomic<bool>* done,
                                        Handle<String>* shared_string)
       : v8::base::Thread(base::Thread::Options(name)),
         test_(test),
-        done_(done),
         shared_string_(shared_string) {}
 
   void Run() override {
@@ -2124,16 +2121,14 @@ class ClientIsolateThreadForPagePromotions : public v8::base::Thread {
 
     client->Dispose();
 
-    *done_ = true;
-
     V8::GetCurrentPlatform()
         ->GetForegroundTaskRunner(test_->main_isolate())
-        ->PostTask(std::make_unique<WakeupTask>(test_->i_main_isolate()));
+        ->PostTask(std::make_unique<WakeupTask>(
+            test_->i_main_isolate(), test_->main_isolate_wakeup_counter()));
   }
 
  private:
   MultiClientIsolateTest* test_;
-  std::atomic<bool>* done_;
   Handle<String>* shared_string_;
 };
 
@@ -2149,7 +2144,6 @@ UNINITIALIZED_TEST(RegisterOldToSharedForPromotedPageFromClient) {
       manual_evacuation_candidate_selection_scope(manual_gc_scope);
 
   MultiClientIsolateTest test;
-  std::atomic<bool> done = false;
 
   Isolate* i_isolate = test.i_main_isolate();
   Isolate* shared_isolate = i_isolate->shared_space_isolate();
@@ -2163,11 +2157,10 @@ UNINITIALIZED_TEST(RegisterOldToSharedForPromotedPageFromClient) {
           raw_one_byte, AllocationType::kSharedOld);
   CHECK(shared_heap->Contains(*shared_string));
 
-  ClientIsolateThreadForPagePromotions thread("worker", &test, &done,
-                                              &shared_string);
+  ClientIsolateThreadForPagePromotions thread("worker", &test, &shared_string);
   CHECK(thread.Start());
 
-  while (!done) {
+  while (test.main_isolate_wakeup_counter() < 1) {
     v8::platform::PumpMessageLoop(
         i::V8::GetCurrentPlatform(), test.main_isolate(),
         v8::platform::MessageLoopBehavior::kWaitForWork);
@@ -2192,7 +2185,6 @@ UNINITIALIZED_TEST(
               // task.
 
   MultiClientIsolateTest test;
-  std::atomic<bool> done = false;
 
   Isolate* i_isolate = test.i_main_isolate();
   Isolate* shared_isolate = i_isolate->shared_space_isolate();
@@ -2220,11 +2212,10 @@ UNINITIALIZED_TEST(
                    i::GarbageCollectionReason::kTesting);
   }
 
-  ClientIsolateThreadForPagePromotions thread("worker", &test, &done,
-                                              &shared_string);
+  ClientIsolateThreadForPagePromotions thread("worker", &test, &shared_string);
   CHECK(thread.Start());
 
-  while (!done) {
+  while (test.main_isolate_wakeup_counter() < 1) {
     v8::platform::PumpMessageLoop(
         i::V8::GetCurrentPlatform(), test.main_isolate(),
         v8::platform::MessageLoopBehavior::kWaitForWork);
@@ -2236,11 +2227,10 @@ UNINITIALIZED_TEST(
 class ClientIsolateThreadForRetainingByRememberedSet : public v8::base::Thread {
  public:
   ClientIsolateThreadForRetainingByRememberedSet(
-      const char* name, MultiClientIsolateTest* test, std::atomic<bool>* done,
+      const char* name, MultiClientIsolateTest* test,
       Persistent<v8::String>* weak_ref)
       : v8::base::Thread(base::Thread::Options(name)),
         test_(test),
-        done_(done),
         weak_ref_(weak_ref) {}
 
   void Run() override {
@@ -2249,10 +2239,6 @@ class ClientIsolateThreadForRetainingByRememberedSet : public v8::base::Thread {
     Isolate* i_client = reinterpret_cast<Isolate*>(client_isolate_);
     Factory* factory = i_client->factory();
     Heap* heap = i_client->heap();
-
-    // Cache the thread's task runner.
-    task_runner_ =
-        V8::GetCurrentPlatform()->GetForegroundTaskRunner(client_isolate_);
 
     {
       HandleScope scope(i_client);
@@ -2288,13 +2274,13 @@ class ClientIsolateThreadForRetainingByRememberedSet : public v8::base::Thread {
       CHECK_IMPLIES(!v8_flags.verify_heap, heap->sweeping_in_progress());
 
       // Inform main thread that the client is set up and is doing a GC.
-      *done_ = true;
       V8::GetCurrentPlatform()
           ->GetForegroundTaskRunner(test_->main_isolate())
-          ->PostTask(std::make_unique<WakeupTask>(test_->i_main_isolate()));
+          ->PostTask(std::make_unique<WakeupTask>(
+              test_->i_main_isolate(), test_->main_isolate_wakeup_counter()));
 
       // Wait for main thread to do a shared GC.
-      while (*done_) {
+      while (wakeup_counter_ < 1) {
         v8::platform::PumpMessageLoop(
             i::V8::GetCurrentPlatform(), isolate(),
             v8::platform::MessageLoopBehavior::kWaitForWork);
@@ -2310,10 +2296,10 @@ class ClientIsolateThreadForRetainingByRememberedSet : public v8::base::Thread {
     client_isolate_->Dispose();
 
     // Inform main thread that client is finished.
-    *done_ = true;
     V8::GetCurrentPlatform()
         ->GetForegroundTaskRunner(test_->main_isolate())
-        ->PostTask(std::make_unique<WakeupTask>(test_->i_main_isolate()));
+        ->PostTask(std::make_unique<WakeupTask>(
+            test_->i_main_isolate(), test_->main_isolate_wakeup_counter()));
   }
 
   v8::Isolate* isolate() const {
@@ -2321,17 +2307,13 @@ class ClientIsolateThreadForRetainingByRememberedSet : public v8::base::Thread {
     return client_isolate_;
   }
 
-  std::shared_ptr<v8::TaskRunner> task_runner() const {
-    DCHECK_NOT_NULL(task_runner_);
-    return task_runner_;
-  }
+  int& wakeup_counter() { return wakeup_counter_; }
 
  private:
   MultiClientIsolateTest* test_;
-  std::atomic<bool>* done_;
   Persistent<v8::String>* weak_ref_;
   v8::Isolate* client_isolate_;
-  std::shared_ptr<v8::TaskRunner> task_runner_;
+  int wakeup_counter_ = 0;
 };
 
 UNINITIALIZED_TEST(SharedObjectRetainedByClientRememberedSet) {
@@ -2346,7 +2328,6 @@ UNINITIALIZED_TEST(SharedObjectRetainedByClientRememberedSet) {
       manual_evacuation_candidate_selection_scope(manual_gc_scope);
 
   MultiClientIsolateTest test;
-  std::atomic<bool> done = false;
 
   v8::Isolate* isolate = test.main_isolate();
   Isolate* i_isolate = test.i_main_isolate();
@@ -2380,12 +2361,12 @@ UNINITIALIZED_TEST(SharedObjectRetainedByClientRememberedSet) {
     dead_weak_ref.SetWeak();
   }
 
-  ClientIsolateThreadForRetainingByRememberedSet thread("worker", &test, &done,
+  ClientIsolateThreadForRetainingByRememberedSet thread("worker", &test,
                                                         &live_weak_ref);
   CHECK(thread.Start());
 
   // Wait for client isolate to allocate objects and start a GC.
-  while (!done) {
+  while (test.main_isolate_wakeup_counter() < 1) {
     v8::platform::PumpMessageLoop(
         i::V8::GetCurrentPlatform(), test.main_isolate(),
         v8::platform::MessageLoopBehavior::kWaitForWork);
@@ -2399,16 +2380,14 @@ UNINITIALIZED_TEST(SharedObjectRetainedByClientRememberedSet) {
   CHECK(!live_weak_ref.IsEmpty());
   CHECK(dead_weak_ref.IsEmpty());
 
-  // Inform client that shared GC is finished. It is possible that the thread
-  // has already finished, after setting done to false and before we post the
-  // task; we use the thread's cached task runner and we construct the wake up
-  // task beforehand, to prevent a crash in that case.
+  // Inform client that shared GC is finished.
   auto thread_wakeup_task = std::make_unique<WakeupTask>(
-      reinterpret_cast<Isolate*>(thread.isolate()));
-  done = false;
-  thread.task_runner()->PostTask(std::move(thread_wakeup_task));
+      reinterpret_cast<Isolate*>(thread.isolate()), thread.wakeup_counter());
+  V8::GetCurrentPlatform()
+      ->GetForegroundTaskRunner(thread.isolate())
+      ->PostTask(std::move(thread_wakeup_task));
 
-  while (!done) {
+  while (test.main_isolate_wakeup_counter() < 2) {
     v8::platform::PumpMessageLoop(
         i::V8::GetCurrentPlatform(), test.main_isolate(),
         v8::platform::MessageLoopBehavior::kWaitForWork);
@@ -2420,11 +2399,8 @@ UNINITIALIZED_TEST(SharedObjectRetainedByClientRememberedSet) {
 class Regress1424955ClientIsolateThread : public v8::base::Thread {
  public:
   Regress1424955ClientIsolateThread(const char* name,
-                                    MultiClientIsolateTest* test,
-                                    std::atomic<bool>* done)
-      : v8::base::Thread(base::Thread::Options(name)),
-        test_(test),
-        done_(done) {}
+                                    MultiClientIsolateTest* test)
+      : v8::base::Thread(base::Thread::Options(name)), test_(test) {}
 
   void Run() override {
     client_isolate_ = test_->NewClientIsolate();
@@ -2446,10 +2422,10 @@ class Regress1424955ClientIsolateThread : public v8::base::Thread {
       CHECK(i_client_heap->sweeping_in_progress());
 
       // Inform the initiator thread it's time to request a global safepoint.
-      *done_ = true;
       V8::GetCurrentPlatform()
           ->GetForegroundTaskRunner(test_->main_isolate())
-          ->PostTask(std::make_unique<WakeupTask>(test_->i_main_isolate()));
+          ->PostTask(std::make_unique<WakeupTask>(
+              test_->i_main_isolate(), test_->main_isolate_wakeup_counter()));
 
       // Wait for the initiator thread to request a global safepoint.
       while (!i_client->shared_space_isolate()
@@ -2465,7 +2441,7 @@ class Regress1424955ClientIsolateThread : public v8::base::Thread {
     }
 
     // Wait for the initiator isolate to finish the shared GC.
-    while (*done_) {
+    while (wakeup_counter_ < 1) {
       v8::platform::PumpMessageLoop(
           i::V8::GetCurrentPlatform(), client_isolate_,
           v8::platform::MessageLoopBehavior::kWaitForWork);
@@ -2473,10 +2449,10 @@ class Regress1424955ClientIsolateThread : public v8::base::Thread {
 
     client_isolate_->Dispose();
 
-    *done_ = true;
     V8::GetCurrentPlatform()
         ->GetForegroundTaskRunner(test_->main_isolate())
-        ->PostTask(std::make_unique<WakeupTask>(test_->i_main_isolate()));
+        ->PostTask(std::make_unique<WakeupTask>(
+            test_->i_main_isolate(), test_->main_isolate_wakeup_counter()));
   }
 
   v8::Isolate* isolate() const {
@@ -2484,10 +2460,12 @@ class Regress1424955ClientIsolateThread : public v8::base::Thread {
     return client_isolate_;
   }
 
+  int& wakeup_counter() { return wakeup_counter_; }
+
  private:
   MultiClientIsolateTest* test_;
-  std::atomic<bool>* done_;
   v8::Isolate* client_isolate_;
+  int wakeup_counter_ = 0;
 };
 
 UNINITIALIZED_TEST(Regress1424955) {
@@ -2502,12 +2480,11 @@ UNINITIALIZED_TEST(Regress1424955) {
   ManualGCScope manual_gc_scope;
 
   MultiClientIsolateTest test;
-  std::atomic<bool> done = false;
-  Regress1424955ClientIsolateThread thread("worker", &test, &done);
+  Regress1424955ClientIsolateThread thread("worker", &test);
   CHECK(thread.Start());
 
   // Wait for client thread to start sweeping.
-  while (!done) {
+  while (test.main_isolate_wakeup_counter() < 1) {
     v8::platform::PumpMessageLoop(
         i::V8::GetCurrentPlatform(), test.main_isolate(),
         v8::platform::MessageLoopBehavior::kWaitForWork);
@@ -2516,14 +2493,14 @@ UNINITIALIZED_TEST(Regress1424955) {
   // Client isolate waits for this isolate to request a global safepoint and
   // then triggers a minor GC.
   heap::CollectSharedGarbage(test.i_main_isolate()->heap());
-  done = false;
   V8::GetCurrentPlatform()
       ->GetForegroundTaskRunner(thread.isolate())
       ->PostTask(std::make_unique<WakeupTask>(
-          reinterpret_cast<Isolate*>(thread.isolate())));
+          reinterpret_cast<Isolate*>(thread.isolate()),
+          thread.wakeup_counter()));
 
   // Wait for client isolate to finish the minor GC and dispose of its isolate.
-  while (!done) {
+  while (test.main_isolate_wakeup_counter() < 2) {
     v8::platform::PumpMessageLoop(
         i::V8::GetCurrentPlatform(), test.main_isolate(),
         v8::platform::MessageLoopBehavior::kWaitForWork);
@@ -2536,13 +2513,11 @@ class ProtectExternalStringTableAddStringClientIsolateThread
     : public v8::base::Thread {
  public:
   ProtectExternalStringTableAddStringClientIsolateThread(
-      const char* name, MultiClientIsolateTest* test, v8::Isolate* isolate,
-      std::atomic<bool>* done)
+      const char* name, MultiClientIsolateTest* test, v8::Isolate* isolate)
       : v8::base::Thread(base::Thread::Options(name)),
         test_(test),
         isolate_(isolate),
-        i_isolate_(reinterpret_cast<Isolate*>(isolate)),
-        done_(done) {}
+        i_isolate_(reinterpret_cast<Isolate*>(isolate)) {}
 
   void Run() override {
     const char* text = "worker_external_string";
@@ -2564,17 +2539,16 @@ class ProtectExternalStringTableAddStringClientIsolateThread
 
     isolate_->Dispose();
 
-    *done_ = true;
     V8::GetCurrentPlatform()
         ->GetForegroundTaskRunner(test_->main_isolate())
-        ->PostTask(std::make_unique<WakeupTask>(test_->i_main_isolate()));
+        ->PostTask(std::make_unique<WakeupTask>(
+            test_->i_main_isolate(), test_->main_isolate_wakeup_counter()));
   }
 
  private:
   MultiClientIsolateTest* test_;
   v8::Isolate* isolate_;
   Isolate* i_isolate_;
-  std::atomic<bool>* done_;
 };
 
 UNINITIALIZED_TEST(ProtectExternalStringTableAddString) {
@@ -2584,10 +2558,9 @@ UNINITIALIZED_TEST(ProtectExternalStringTableAddString) {
   ManualGCScope manual_gc_scope;
 
   MultiClientIsolateTest test;
-  std::atomic<bool> done = false;
   v8::Isolate* client = test.NewClientIsolate();
   ProtectExternalStringTableAddStringClientIsolateThread thread("worker", &test,
-                                                                client, &done);
+                                                                client);
   CHECK(thread.Start());
   Isolate* isolate = test.i_main_isolate();
   HandleScope scope(isolate);
@@ -2600,7 +2573,7 @@ UNINITIALIZED_TEST(ProtectExternalStringTableAddString) {
   }
 
   // Wait for client isolate to finish the minor GC and dispose of its isolate.
-  while (!done) {
+  while (test.main_isolate_wakeup_counter() < 1) {
     v8::platform::PumpMessageLoop(
         i::V8::GetCurrentPlatform(), test.main_isolate(),
         v8::platform::MessageLoopBehavior::kWaitForWork);

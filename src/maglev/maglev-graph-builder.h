@@ -1563,6 +1563,7 @@ class MaglevGraphBuilder {
   V(StringFromCharCode)            \
   V(StringPrototypeCharCodeAt)     \
   V(StringPrototypeCodePointAt)    \
+  V(StringPrototypeLocaleCompare)  \
   MATH_UNARY_IEEE_BUILTIN(V)
 
 #define DEFINE_BUILTIN_REDUCER(Name)                           \
@@ -1673,6 +1674,10 @@ class MaglevGraphBuilder {
       const compiler::GlobalAccessFeedback& global_access_feedback);
   ReduceResult TryBuildGlobalLoad(
       const compiler::GlobalAccessFeedback& global_access_feedback);
+
+  bool TryBuildFindNonDefaultConstructorOrConstruct(
+      ValueNode* this_function, ValueNode* new_target,
+      std::pair<interpreter::Register, interpreter::Register> result);
 
   ValueNode* BuildSmiUntag(ValueNode* node);
   ValueNode* BuildNumberOrOddballToFloat64(
@@ -1903,7 +1908,7 @@ class MaglevGraphBuilder {
   void BuildBranchIfUndefined(ValueNode* node, JumpType jump_type);
   void BuildBranchIfToBooleanTrue(ValueNode* node, JumpType jump_type);
   template <bool flip = false>
-  void BuildToBoolean(ValueNode* node);
+  ValueNode* BuildToBoolean(ValueNode* node);
   BasicBlock* BuildSpecializedBranchIfCompareNode(ValueNode* node,
                                                   BasicBlockRef* true_target,
                                                   BasicBlockRef* false_target);

@@ -190,10 +190,6 @@ inline std::ostream& operator<<(std::ostream& os, const LifetimePosition pos) {
   return os;
 }
 
-enum class RegisterAllocationFlag : unsigned { kTraceAllocation = 1 << 0 };
-
-using RegisterAllocationFlags = base::Flags<RegisterAllocationFlag>;
-
 class SpillRange;
 class LiveRange;
 class TopLevelLiveRange;
@@ -224,10 +220,6 @@ class TopTierRegisterAllocationData final : public RegisterAllocationData {
   // Encodes whether a spill happens in deferred code (kSpillDeferred) or
   // regular code (kSpillAtDefinition).
   enum SpillMode { kSpillAtDefinition, kSpillDeferred };
-
-  bool is_trace_alloc() {
-    return flags_ & RegisterAllocationFlag::kTraceAllocation;
-  }
 
   static constexpr int kNumberOfFixedRangesPerRegister = 2;
 
@@ -268,7 +260,6 @@ class TopTierRegisterAllocationData final : public RegisterAllocationData {
   TopTierRegisterAllocationData(const RegisterConfiguration* config,
                                 Zone* allocation_zone, Frame* frame,
                                 InstructionSequence* code,
-                                RegisterAllocationFlags flags,
                                 TickCounter* tick_counter,
                                 const char* debug_name = nullptr);
 
@@ -377,10 +368,6 @@ class TopTierRegisterAllocationData final : public RegisterAllocationData {
   PhiMap phi_map_;
   ZoneVector<SparseBitVector*> live_in_sets_;
   ZoneVector<SparseBitVector*> live_out_sets_;
-  // TODO(dlehmann): All of these arrays of `TopLevelLiveRange`s have a known
-  // size and don't grow at runtime, so (1) make them a plain `base::Vector`,
-  // (2) get rid of one pointer indirection by storing the elements inline, and
-  // (3) initialize them eagerly to avoid repeated nullptr checks.
   ZoneVector<TopLevelLiveRange*> live_ranges_;
   ZoneVector<TopLevelLiveRange*> fixed_live_ranges_;
   ZoneVector<TopLevelLiveRange*> fixed_float_live_ranges_;
@@ -396,7 +383,6 @@ class TopTierRegisterAllocationData final : public RegisterAllocationData {
   int virtual_register_count_;
   RangesWithPreassignedSlots preassigned_slot_ranges_;
   ZoneVector<ZoneVector<LiveRange*>> spill_state_;
-  RegisterAllocationFlags flags_;
   TickCounter* const tick_counter_;
   ZoneMap<TopLevelLiveRange*, AllocatedOperand*> slot_for_const_range_;
 };
@@ -1029,8 +1015,7 @@ class LiveRangeBundle : public ZoneObject {
   bool TryAddRange(TopLevelLiveRange* range);
   // If merging is possible, merge either {lhs} into {rhs} or {rhs} into
   // {lhs}, clear the source and return the result. Otherwise return nullptr.
-  static LiveRangeBundle* TryMerge(LiveRangeBundle* lhs, LiveRangeBundle* rhs,
-                                   bool trace_alloc);
+  static LiveRangeBundle* TryMerge(LiveRangeBundle* lhs, LiveRangeBundle* rhs);
 
  private:
   void AddRange(TopLevelLiveRange* range);
@@ -1094,14 +1079,12 @@ class V8_EXPORT_PRIVATE TopLevelLiveRange final : public LiveRange {
   SlotUseKind slot_use_kind() const { return HasSlotUseField::decode(bits_); }
 
   // Add a new interval or a new use position to this live range.
-  void EnsureInterval(LifetimePosition start, LifetimePosition end, Zone* zone,
-                      bool trace_alloc);
-  void AddUseInterval(LifetimePosition start, LifetimePosition end, Zone* zone,
-                      bool trace_alloc);
-  void AddUsePosition(UsePosition* pos, Zone* zone, bool trace_alloc);
+  void EnsureInterval(LifetimePosition start, LifetimePosition end, Zone* zone);
+  void AddUseInterval(LifetimePosition start, LifetimePosition end, Zone* zone);
+  void AddUsePosition(UsePosition* pos, Zone* zone);
 
   // Shorten the most recently added interval by setting a new start.
-  void ShortenTo(LifetimePosition start, bool trace_alloc);
+  void ShortenTo(LifetimePosition start);
 
   // Spill range management.
   void SetSpillRange(SpillRange* spill_range);
@@ -1573,6 +1556,13 @@ class RegisterAllocator : public ZoneObject {
   bool no_combining_;
 };
 
+// A map from `TopLevelLiveRange`s to their expected physical register.
+// Typically this is very small, e.g., on JetStream2 it has 3 elements or less
+// >50% of the times it is queried, 8 elements or less >90% of the times,
+// and never more than 15 elements. Hence this is backed by a `SmallZoneMap`.
+using RangeRegisterSmallMap =
+    SmallZoneMap<TopLevelLiveRange*, /* expected_register */ int, 16>;
+
 class LinearScanAllocator final : public RegisterAllocator {
  public:
   LinearScanAllocator(TopTierRegisterAllocationData* data, RegisterKind kind,
@@ -1584,42 +1574,14 @@ class LinearScanAllocator final : public RegisterAllocator {
   void AllocateRegisters();
 
  private:
-  struct RangeWithRegister {
-    TopLevelLiveRange* range;
-    int expected_register;
-    struct Hash {
-      size_t operator()(const RangeWithRegister item) const {
-        return item.range->vreg();
-      }
-    };
-    struct Equals {
-      bool operator()(const RangeWithRegister one,
-                      const RangeWithRegister two) const {
-        return one.range == two.range;
-      }
-    };
-
-    explicit RangeWithRegister(LiveRange* a_range)
-        : range(a_range->TopLevel()),
-          expected_register(a_range->assigned_register()) {}
-    RangeWithRegister(TopLevelLiveRange* toplevel, int reg)
-        : range(toplevel), expected_register(reg) {}
-  };
-
-  // TODO(dlehmann): Try replacing with a
-  // `ZoneVector<std::pair<TLLR, /* expected_register */int>>` or similar.
-  using RangeWithRegisterSet =
-      ZoneUnorderedSet<RangeWithRegister, RangeWithRegister::Hash,
-                       RangeWithRegister::Equals>;
-
   void MaybeSpillPreviousRanges(LiveRange* begin_range,
                                 LifetimePosition begin_pos,
                                 LiveRange* end_range);
   void MaybeUndoPreviousSplit(LiveRange* range, Zone* zone);
-  void SpillNotLiveRanges(RangeWithRegisterSet* to_be_live,
+  void SpillNotLiveRanges(RangeRegisterSmallMap& to_be_live,
                           LifetimePosition position, SpillMode spill_mode);
   LiveRange* AssignRegisterOnReload(LiveRange* range, int reg);
-  void ReloadLiveRanges(RangeWithRegisterSet const& to_be_live,
+  void ReloadLiveRanges(RangeRegisterSmallMap const& to_be_live,
                         LifetimePosition position);
 
   void UpdateDeferredFixedRanges(SpillMode spill_mode, InstructionBlock* block);
@@ -1693,9 +1655,9 @@ class LinearScanAllocator final : public RegisterAllocator {
   RpoNumber ChooseOneOfTwoPredecessorStates(InstructionBlock* current_block,
                                             LifetimePosition boundary);
   bool CheckConflict(MachineRepresentation rep, int reg,
-                     RangeWithRegisterSet* to_be_live);
+                     const RangeRegisterSmallMap& to_be_live);
   void ComputeStateFromManyPredecessors(InstructionBlock* current_block,
-                                        RangeWithRegisterSet* to_be_live);
+                                        RangeRegisterSmallMap& to_be_live);
 
   // Helper methods for allocating registers.
 

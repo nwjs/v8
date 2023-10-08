@@ -21,6 +21,7 @@
 #include "src/base/utils/random-number-generator.h"
 #include "src/handles/handles.h"
 #include "src/heap/parked-scope.h"
+#include "src/logging/log.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/objects.h"
 #include "src/zone/accounting-allocator.h"
@@ -510,10 +511,10 @@ class V8_NODISCARD SaveFlags {
 };
 
 // For GTest.
-inline void PrintTo(Object o, ::std::ostream* os) {
+inline void PrintTo(Tagged<Object> o, ::std::ostream* os) {
   *os << reinterpret_cast<void*>(o.ptr());
 }
-inline void PrintTo(Smi o, ::std::ostream* os) {
+inline void PrintTo(Tagged<Smi> o, ::std::ostream* os) {
   *os << reinterpret_cast<void*>(o.ptr());
 }
 
@@ -526,7 +527,7 @@ static inline uint16_t* AsciiToTwoByteString(const char* source) {
 
 class TestTransitionsAccessor : public TransitionsAccessor {
  public:
-  TestTransitionsAccessor(Isolate* isolate, Map map)
+  TestTransitionsAccessor(Isolate* isolate, Tagged<Map> map)
       : TransitionsAccessor(isolate, map) {}
   TestTransitionsAccessor(Isolate* isolate, Handle<Map> map)
       : TransitionsAccessor(isolate, *map) {}
@@ -541,7 +542,9 @@ class TestTransitionsAccessor : public TransitionsAccessor {
 
   int Capacity() { return TransitionsAccessor::Capacity(); }
 
-  TransitionArray transitions() { return TransitionsAccessor::transitions(); }
+  Tagged<TransitionArray> transitions() {
+    return TransitionsAccessor::transitions();
+  }
 };
 
 // Helper class that allows to write tests in a slot size independent manner.
@@ -576,6 +579,28 @@ template <typename Spec>
 Handle<FeedbackVector> NewFeedbackVector(Isolate* isolate, Spec* spec) {
   return FeedbackVector::NewForTesting(isolate, spec);
 }
+
+class FakeCodeEventLogger : public i::CodeEventLogger {
+ public:
+  explicit FakeCodeEventLogger(i::Isolate* isolate)
+      : CodeEventLogger(isolate) {}
+
+  void CodeMoveEvent(i::Tagged<i::InstructionStream> from,
+                     i::Tagged<i::InstructionStream> to) override {}
+  void BytecodeMoveEvent(i::Tagged<i::BytecodeArray> from,
+                         i::Tagged<i::BytecodeArray> to) override {}
+  void CodeDisableOptEvent(i::Handle<i::AbstractCode> code,
+                           i::Handle<i::SharedFunctionInfo> shared) override {}
+
+ private:
+  void LogRecordedBuffer(i::Tagged<i::AbstractCode> code,
+                         i::MaybeHandle<i::SharedFunctionInfo> maybe_shared,
+                         const char* name, int length) override {}
+#if V8_ENABLE_WEBASSEMBLY
+  void LogRecordedBuffer(const i::wasm::WasmCode* code, const char* name,
+                         int length) override {}
+#endif  // V8_ENABLE_WEBASSEMBLY
+};
 
 #ifdef V8_CC_GNU
 

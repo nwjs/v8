@@ -19,6 +19,7 @@ namespace internal {
 
 class Isolate;
 class Counters;
+class ReadOnlyArtifacts;
 
 /**
  * The entries of an ExternalPointerTable.
@@ -48,6 +49,9 @@ struct ExternalPointerTableEntry {
   // Tag and store the given external pointer in this entry.
   // This entry must be an external pointer entry.
   inline void SetExternalPointer(Address value, ExternalPointerTag tag);
+
+  // Returns true if this entry contains an external pointer with the given tag.
+  inline bool HasExternalPointer(ExternalPointerTag tag) const;
 
   // Exchanges the external pointer stored in this entry with the provided one.
   // Returns the old external pointer. This entry must be an external pointer
@@ -93,7 +97,12 @@ struct ExternalPointerTableEntry {
     }
 
     bool IsTaggedWith(ExternalPointerTag tag) const {
-      return (encoded_word_ & kExternalPointerTagMask) == tag;
+      // We have to explicitly ignore the marking bit (which is part of the
+      // tag) since an unmarked entry with tag kXyzTag is still considered to
+      // be tagged with kXyzTag.
+      uint64_t expected = tag & ~kExternalPointerMarkBit;
+      uint64_t actual = encoded_word_ & kExternalPointerTagMaskWithoutMarkBit;
+      return expected == actual;
     }
 
     void SetMarkBit() { encoded_word_ |= kExternalPointerMarkBit; }
@@ -171,13 +180,9 @@ struct ExternalPointerTableEntry {
 #if defined(LEAK_SANITIZER)
 //  When LSan is active, we need "fat" entries, see above.
 static_assert(sizeof(ExternalPointerTableEntry) == 16);
-constexpr size_t kExternalPointerTableReservationSizeAfterAccountingForLSan =
-    kExternalPointerTableReservationSize * 2;
 #else
 //  We expect ExternalPointerTable entries to consist of a single 64-bit word.
 static_assert(sizeof(ExternalPointerTableEntry) == 8);
-constexpr size_t kExternalPointerTableReservationSizeAfterAccountingForLSan =
-    kExternalPointerTableReservationSize;
 #endif
 
 /**
@@ -282,10 +287,14 @@ constexpr size_t kExternalPointerTableReservationSizeAfterAccountingForLSan =
  * guarded by write barriers to avoid this scenario.
  */
 class V8_EXPORT_PRIVATE ExternalPointerTable
-    : public ExternalEntityTable<
-          ExternalPointerTableEntry,
-          kExternalPointerTableReservationSizeAfterAccountingForLSan> {
+    : public ExternalEntityTable<ExternalPointerTableEntry,
+                                 kExternalPointerTableReservationSize> {
+#if defined(LEAK_SANITIZER)
+  //  When LSan is active, we use "fat" entries, see above.
+  static_assert(kMaxExternalPointers == kMaxCapacity * 2);
+#else
   static_assert(kMaxExternalPointers == kMaxCapacity);
+#endif
 
  public:
   // Size of an ExternalPointerTable, for layout computation in IsolateData.
@@ -297,10 +306,9 @@ class V8_EXPORT_PRIVATE ExternalPointerTable
 
   // The Spaces used by an ExternalPointerTable also contain the state related
   // to compaction.
-  struct Space
-      : public ExternalEntityTable<
-            ExternalPointerTableEntry,
-            kExternalPointerTableReservationSizeAfterAccountingForLSan>::Space {
+  struct Space : public ExternalEntityTable<
+                     ExternalPointerTableEntry,
+                     kExternalPointerTableReservationSize>::Space {
    public:
     Space() : start_of_evacuation_area_(kNotCompactingMarker) {}
 
@@ -346,6 +354,10 @@ class V8_EXPORT_PRIVATE ExternalPointerTable
     //   evacuation area is still contained in the lower bits.
     std::atomic<uint32_t> start_of_evacuation_area_;
   };
+
+  // Initializes all slots in the RO space from pre-existing artifacts.
+  void SetUpFromReadOnlyArtifacts(Space* read_only_space,
+                                  const ReadOnlyArtifacts* artifacts);
 
   // Retrieves the entry referenced by the given handle.
   //

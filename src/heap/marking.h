@@ -23,12 +23,12 @@ class MarkBit final {
   static_assert(sizeof(CellType) == sizeof(base::AtomicWord));
 
   V8_ALLOW_UNUSED static inline MarkBit From(Address);
-  V8_ALLOW_UNUSED static inline MarkBit From(HeapObject);
+  V8_ALLOW_UNUSED static inline MarkBit From(Tagged<HeapObject>);
 
   // These methods are meant to be used from the debugger and therefore
   // intentionally not inlined such that they are always available.
   V8_ALLOW_UNUSED static MarkBit FromForTesting(Address);
-  V8_ALLOW_UNUSED static MarkBit FromForTesting(HeapObject);
+  V8_ALLOW_UNUSED static MarkBit FromForTesting(Tagged<HeapObject>);
 
   // The function returns true if it succeeded to
   // transition the bit from 0 to 1.
@@ -191,13 +191,15 @@ class V8_EXPORT_PRIVATE MarkingBitmap final {
     return MarkBit(cell, mask);
   }
 
-  // This method returns the highest address in the page that is lower than
-  // maybe_inner_ptr, has its markbit set, and whose previous address (if it
-  // exists) does not have its markbit set. This address is guaranteed to be
-  // the start of a valid object in the page. In case the markbit corresponding
-  // to maybe_inner_ptr is set, the function bails out and returns kNullAddress.
-  static inline Address FindPreviousObjectForConservativeMarking(
-      const Page* page, Address maybe_inner_ptr);
+  // This method provides a basis for inner-pointer resolution. It expects a
+  // page and a maybe_inner_ptr that is contained in that page. It returns the
+  // highest address in the page that is not larger than maybe_inner_ptr, has
+  // its markbit set, and whose previous address (if it exists) does not have
+  // its markbit set. If no such address exists, it returns the page area start.
+  // If the page is iterable, the returned address is guaranteed to be the start
+  // of a valid object in the page.
+  static inline Address FindPreviousValidObject(const Page* page,
+                                                Address maybe_inner_ptr);
 
  private:
   V8_INLINE static MarkingBitmap* FromAddress(Address address);

@@ -26,30 +26,33 @@ NEVER_READ_ONLY_SPACE_IMPL(AllocationSite)
 
 CAST_ACCESSOR(AllocationSite)
 
-ACCESSORS(AllocationSite, transition_info_or_boilerplate, Object,
+ACCESSORS(AllocationSite, transition_info_or_boilerplate, Tagged<Object>,
           kTransitionInfoOrBoilerplateOffset)
 RELEASE_ACQUIRE_ACCESSORS(AllocationSite, transition_info_or_boilerplate,
-                          Object, kTransitionInfoOrBoilerplateOffset)
-ACCESSORS(AllocationSite, nested_site, Object, kNestedSiteOffset)
+                          Tagged<Object>, kTransitionInfoOrBoilerplateOffset)
+ACCESSORS(AllocationSite, nested_site, Tagged<Object>, kNestedSiteOffset)
 RELAXED_INT32_ACCESSORS(AllocationSite, pretenure_data, kPretenureDataOffset)
 INT32_ACCESSORS(AllocationSite, pretenure_create_count,
                 kPretenureCreateCountOffset)
-ACCESSORS(AllocationSite, dependent_code, DependentCode, kDependentCodeOffset)
-ACCESSORS_CHECKED(AllocationSite, weak_next, Object, kWeakNextOffset,
+ACCESSORS(AllocationSite, dependent_code, Tagged<DependentCode>,
+          kDependentCodeOffset)
+ACCESSORS_CHECKED(AllocationSite, weak_next, Tagged<Object>, kWeakNextOffset,
                   HasWeakNext())
-ACCESSORS(AllocationMemento, allocation_site, Object, kAllocationSiteOffset)
+ACCESSORS(AllocationMemento, allocation_site, Tagged<Object>,
+          kAllocationSiteOffset)
 
-JSObject AllocationSite::boilerplate() const {
+Tagged<JSObject> AllocationSite::boilerplate() const {
   DCHECK(PointsToLiteral());
   return JSObject::cast(transition_info_or_boilerplate());
 }
 
-JSObject AllocationSite::boilerplate(AcquireLoadTag tag) const {
+Tagged<JSObject> AllocationSite::boilerplate(AcquireLoadTag tag) const {
   DCHECK(PointsToLiteral());
   return JSObject::cast(transition_info_or_boilerplate(tag));
 }
 
-void AllocationSite::set_boilerplate(JSObject value, ReleaseStoreTag tag,
+void AllocationSite::set_boilerplate(Tagged<JSObject> value,
+                                     ReleaseStoreTag tag,
                                      WriteBarrierMode mode) {
   set_transition_info_or_boilerplate(value, tag, mode);
 }
@@ -114,7 +117,7 @@ void AllocationSite::SetDoNotInlineCall() {
 }
 
 bool AllocationSite::PointsToLiteral() const {
-  Object raw_value = transition_info_or_boilerplate(kAcquireLoad);
+  Tagged<Object> raw_value = transition_info_or_boilerplate(kAcquireLoad);
   DCHECK_EQ(!IsSmi(raw_value), IsJSArray(raw_value) || IsJSObject(raw_value));
   return !IsSmi(raw_value);
 }
@@ -199,7 +202,7 @@ bool AllocationMemento::IsValid() const {
          !AllocationSite::cast(allocation_site())->IsZombie();
 }
 
-AllocationSite AllocationMemento::GetAllocationSite() const {
+Tagged<AllocationSite> AllocationMemento::GetAllocationSite() const {
   DCHECK(IsValid());
   return AllocationSite::cast(allocation_site());
 }

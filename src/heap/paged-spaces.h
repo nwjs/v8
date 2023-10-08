@@ -35,6 +35,78 @@ class ObjectVisitor;
 class PagedSpaceBase;
 class Sweeper;
 
+class HeapObjectRange final {
+ public:
+  class iterator final {
+   public:
+    using value_type = HeapObject;
+    using pointer = const value_type*;
+    using reference = const value_type&;
+    using iterator_category = std::forward_iterator_tag;
+
+    inline iterator();
+    explicit inline iterator(const Page* page);
+
+    inline iterator& operator++();
+    inline iterator operator++(int);
+
+    bool operator==(iterator other) const {
+      return cur_addr_ == other.cur_addr_;
+    }
+    bool operator!=(iterator other) const { return !(*this == other); }
+
+    value_type operator*() { return HeapObject::FromAddress(cur_addr_); }
+
+   private:
+    inline void AdvanceToNextObject();
+
+    PtrComprCageBase cage_base() const { return cage_base_; }
+
+    PtrComprCageBase cage_base_;
+    Address cur_addr_ = kNullAddress;  // Current iteration point.
+    int cur_size_ = 0;
+    Address cur_end_ = kNullAddress;  // End iteration point.
+  };
+
+  explicit HeapObjectRange(const Page* page) : page_(page) {}
+
+  inline iterator begin();
+  inline iterator end();
+
+ private:
+  const Page* const page_;
+};
+
+// Heap object iterator in paged spaces.
+//
+// A PagedSpaceObjectIterator iterates objects from the bottom of the given
+// space to its top or from the bottom of the given page to its top.
+//
+// If objects are allocated in the page during iteration the iterator may
+// or may not iterate over those objects.  The caller must create a new
+// iterator in order to be sure to visit these new objects.
+class V8_EXPORT_PRIVATE PagedSpaceObjectIterator : public ObjectIterator {
+ public:
+  // Creates a new object iterator in a given space.
+  PagedSpaceObjectIterator(Heap* heap, const PagedSpaceBase* space);
+
+  // Advance to the next object, skipping free spaces and other fillers and
+  // skipping the special garbage section of which there is one per space.
+  // Returns nullptr when the iteration has ended.
+  inline Tagged<HeapObject> Next() override;
+
+ private:
+  // Slow path of next(), goes into the next page.  Returns false if the
+  // iteration has ended.
+  bool AdvanceToNextPage();
+
+  HeapObjectRange::iterator cur_;
+  HeapObjectRange::iterator end_;
+  const PagedSpaceBase* const space_;
+  ConstPageRange page_range_;
+  ConstPageRange::iterator current_page_;
+};
+
 class V8_EXPORT_PRIVATE PagedSpaceBase
     : NON_EXPORTED_BASE(public SpaceWithLinearArea) {
  public:
@@ -56,7 +128,7 @@ class V8_EXPORT_PRIVATE PagedSpaceBase
 
   // Checks whether an object/address is in this space.
   inline bool Contains(Address a) const;
-  inline bool Contains(Object o) const;
+  inline bool Contains(Tagged<Object> o) const;
   bool ContainsSlow(Address addr) const;
 
   // Does the space need executable memory?
@@ -490,7 +562,7 @@ class OldSpace final : public PagedSpace {
   size_t ExternalBackingStoreBytes(ExternalBackingStoreType type) const final {
     if (type == ExternalBackingStoreType::kArrayBuffer)
       return heap()->OldArrayBufferBytes();
-    return external_backing_store_bytes_[type];
+    return external_backing_store_bytes_[static_cast<int>(type)];
   }
 };
 
@@ -528,7 +600,7 @@ class SharedSpace final : public PagedSpace {
   size_t ExternalBackingStoreBytes(ExternalBackingStoreType type) const final {
     if (type == ExternalBackingStoreType::kArrayBuffer) return 0;
     DCHECK_EQ(type, ExternalBackingStoreType::kExternalString);
-    return external_backing_store_bytes_[type];
+    return external_backing_store_bytes_[static_cast<int>(type)];
   }
 
  private:

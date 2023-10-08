@@ -93,7 +93,7 @@ void YoungGenerationRememberedSetsMarkingWorklist::MarkingItem::Process(
 void YoungGenerationRememberedSetsMarkingWorklist::MarkingItem::
     CheckOldToNewSlotForSharedUntyped(MemoryChunk* chunk, Address slot_address,
                                       MaybeObject object) {
-  HeapObject heap_object;
+  Tagged<HeapObject> heap_object;
   if (!object.GetHeapObject(&heap_object)) return;
 #ifdef THREAD_SANITIZER
   BasicMemoryChunk::FromHeapObject(heap_object)->SynchronizedHeapLoad();
@@ -108,7 +108,7 @@ void YoungGenerationRememberedSetsMarkingWorklist::MarkingItem::
     CheckOldToNewSlotForSharedTyped(MemoryChunk* chunk, SlotType slot_type,
                                     Address slot_address,
                                     MaybeObject new_target) {
-  HeapObject heap_object;
+  Tagged<HeapObject> heap_object;
   if (!new_target.GetHeapObject(&heap_object)) return;
 #ifdef THREAD_SANITIZER
   BasicMemoryChunk::FromHeapObject(heap_object)->SynchronizedHeapLoad();
@@ -207,8 +207,8 @@ YoungGenerationRememberedSetsMarkingWorklist::MarkingItem::CheckAndMarkObject(
       std::is_same<TSlot, FullMaybeObjectSlot>::value ||
           std::is_same<TSlot, MaybeObjectSlot>::value,
       "Only FullMaybeObjectSlot and MaybeObjectSlot are expected here");
-  return visitor->VisitObjectViaSlotInRemeberedSet(slot) ? KEEP_SLOT
-                                                         : REMOVE_SLOT;
+  return visitor->VisitObjectViaSlotInRememberedSet(slot) ? KEEP_SLOT
+                                                          : REMOVE_SLOT;
 }
 
 }  // namespace internal

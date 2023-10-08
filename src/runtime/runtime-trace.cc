@@ -44,7 +44,7 @@ void PrintRegisterRange(UnoptimizedFrame* frame, std::ostream& os,
                         interpreter::Register first_reg, int range) {
   for (int reg_index = first_reg.index(); reg_index < first_reg.index() + range;
        reg_index++) {
-    Object reg_object = frame->ReadInterpreterRegister(reg_index);
+    Tagged<Object> reg_object = frame->ReadInterpreterRegister(reg_index);
     os << "      [ " << std::setw(reg_field_width)
        << interpreter::Register(reg_index).ToString() << arrow_direction;
     ShortPrint(reg_object, os);
@@ -210,13 +210,13 @@ RUNTIME_FUNCTION(Runtime_TraceUpdateFeedback) {
   int slot = args.smi_value_at(1);
   auto reason = String::cast(args[2]);
 
-  int slot_count = function->feedback_vector().metadata().slot_count();
+  int slot_count = function->feedback_vector()->metadata()->slot_count();
 
   StdoutStream os;
   os << "[Feedback slot " << slot << "/" << slot_count << " in ";
   ShortPrint(function->shared(), os);
   os << " updated to ";
-  function->feedback_vector().FeedbackSlotPrint(os, FeedbackSlot(slot));
+  function->feedback_vector()->FeedbackSlotPrint(os, FeedbackSlot(slot));
   os << " - ";
 
   StringCharacterStream stream(reason);

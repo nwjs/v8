@@ -917,10 +917,11 @@ Handle<DeoptimizationData> CodeGenerator::GenerateDeoptimizationData() {
   Handle<DeoptimizationData> data =
       DeoptimizationData::New(isolate(), deopt_count, AllocationType::kOld);
 
-  Handle<TranslationArray> translation_array = translations_.ToTranslationArray(
-      isolate()->main_thread_local_isolate()->factory());
+  Handle<DeoptimizationFrameTranslation> translation_array =
+      translations_.ToFrameTranslation(
+          isolate()->main_thread_local_isolate()->factory());
 
-  data->SetTranslationByteArray(*translation_array);
+  data->SetFrameTranslation(*translation_array);
   data->SetInlinedFunctionCount(
       Smi::FromInt(static_cast<int>(inlined_function_count_)));
   data->SetOptimizationId(Smi::FromInt(info->optimization_id()));
@@ -973,6 +974,9 @@ Handle<DeoptimizationData> CodeGenerator::GenerateDeoptimizationData() {
 #endif  // DEBUG
   }
 
+#ifdef DEBUG
+  data->Verify(info->bytecode_array());
+#endif  // DEBUG
   return data;
 }
 
@@ -1259,7 +1263,7 @@ void CodeGenerator::AddTranslationForOperand(Instruction* instr,
           // When pointers are 4 bytes, we can use int32 constants to represent
           // Smis.
           DCHECK_EQ(4, kSystemPointerSize);
-          Smi smi(static_cast<Address>(constant.ToInt32()));
+          Tagged<Smi> smi(static_cast<Address>(constant.ToInt32()));
           DCHECK(IsSmi(smi));
           literal = DeoptimizationLiteral(static_cast<double>(smi.value()));
         } else if (type.representation() == MachineRepresentation::kBit) {
@@ -1303,7 +1307,7 @@ void CodeGenerator::AddTranslationForOperand(Instruction* instr,
           // When pointers are 8 bytes, we can use int64 constants to represent
           // Smis.
           DCHECK_EQ(MachineRepresentation::kTagged, type.representation());
-          Smi smi(static_cast<Address>(constant.ToInt64()));
+          Tagged<Smi> smi(static_cast<Address>(constant.ToInt64()));
           DCHECK(IsSmi(smi));
           literal = DeoptimizationLiteral(static_cast<double>(smi.value()));
         }

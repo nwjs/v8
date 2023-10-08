@@ -4590,7 +4590,7 @@ void AccessorAssembler::GenerateLookupGlobalICBaseline(TypeofMode typeof_mode) {
 }
 
 void AccessorAssembler::GenerateKeyedLoadIC() {
-  using Descriptor = LoadWithVectorDescriptor;
+  using Descriptor = KeyedLoadWithVectorDescriptor;
 
   auto receiver = Parameter<Object>(Descriptor::kReceiver);
   auto name = Parameter<Object>(Descriptor::kName);
@@ -4603,7 +4603,7 @@ void AccessorAssembler::GenerateKeyedLoadIC() {
 }
 
 void AccessorAssembler::GenerateKeyedLoadIC_Megamorphic() {
-  using Descriptor = LoadWithVectorDescriptor;
+  using Descriptor = KeyedLoadWithVectorDescriptor;
 
   auto receiver = Parameter<Object>(Descriptor::kReceiver);
   auto name = Parameter<Object>(Descriptor::kName);
@@ -4629,7 +4629,7 @@ void AccessorAssembler::GenerateKeyedLoadIC_MegamorphicStringKey() {
 }
 
 void AccessorAssembler::GenerateKeyedLoadICTrampoline() {
-  using Descriptor = LoadDescriptor;
+  using Descriptor = KeyedLoadDescriptor;
 
   auto receiver = Parameter<Object>(Descriptor::kReceiver);
   auto name = Parameter<Object>(Descriptor::kName);
@@ -4641,7 +4641,7 @@ void AccessorAssembler::GenerateKeyedLoadICTrampoline() {
 }
 
 void AccessorAssembler::GenerateKeyedLoadICBaseline() {
-  using Descriptor = LoadBaselineDescriptor;
+  using Descriptor = KeyedLoadBaselineDescriptor;
 
   auto receiver = Parameter<Object>(Descriptor::kReceiver);
   auto name = Parameter<Object>(Descriptor::kName);
@@ -4653,7 +4653,7 @@ void AccessorAssembler::GenerateKeyedLoadICBaseline() {
 }
 
 void AccessorAssembler::GenerateKeyedLoadICTrampoline_Megamorphic() {
-  using Descriptor = LoadDescriptor;
+  using Descriptor = KeyedLoadDescriptor;
 
   auto receiver = Parameter<Object>(Descriptor::kReceiver);
   auto name = Parameter<Object>(Descriptor::kName);
@@ -5071,18 +5071,6 @@ void AccessorAssembler::GenerateCloneObjectIC() {
     feedback = TryMonomorphicCase(slot, CAST(maybe_vector), weak_source_map,
                                   &if_handler, &var_handler, &try_polymorphic);
 
-    BIND(&if_handler);
-    Comment("CloneObjectIC_if_handler");
-
-    // When the result of cloning the object is an empty object literal we store
-    // a Smi into the feedback.
-    GotoIf(TaggedIsSmi(var_handler.value()), &if_empty_object);
-
-    // Handlers for the CloneObjectIC stub are weak references to the Map of
-    // a result object.
-    result_map = CAST(GetHeapObjectAssumeWeak(var_handler.value(), &miss));
-    Goto(&if_result_map);
-
     BIND(&try_polymorphic);
     TNode<HeapObject> strong_feedback = GetHeapObjectIfStrong(feedback, &miss);
     {
@@ -5104,6 +5092,18 @@ void AccessorAssembler::GenerateCloneObjectIC() {
                 &miss);
       Goto(&slow);
     }
+
+    BIND(&if_handler);
+    Comment("CloneObjectIC_if_handler");
+
+    // When the result of cloning the object is an empty object literal we store
+    // a Smi into the feedback.
+    GotoIf(TaggedIsSmi(var_handler.value()), &if_empty_object);
+
+    // Handlers for the CloneObjectIC stub are weak references to the Map of
+    // a result object.
+    result_map = CAST(GetHeapObjectAssumeWeak(var_handler.value(), &miss));
+    Goto(&if_result_map);
   }
 
   // Cloning with a concrete result_map.
@@ -5248,7 +5248,7 @@ void AccessorAssembler::GenerateCloneObjectIC() {
 }
 
 void AccessorAssembler::GenerateKeyedHasIC() {
-  using Descriptor = LoadWithVectorDescriptor;
+  using Descriptor = KeyedHasICWithVectorDescriptor;
 
   auto receiver = Parameter<Object>(Descriptor::kReceiver);
   auto name = Parameter<Object>(Descriptor::kName);
@@ -5261,7 +5261,7 @@ void AccessorAssembler::GenerateKeyedHasIC() {
 }
 
 void AccessorAssembler::GenerateKeyedHasICBaseline() {
-  using Descriptor = LoadBaselineDescriptor;
+  using Descriptor = KeyedHasICBaselineDescriptor;
 
   auto receiver = Parameter<Object>(Descriptor::kReceiver);
   auto name = Parameter<Object>(Descriptor::kName);
@@ -5273,7 +5273,7 @@ void AccessorAssembler::GenerateKeyedHasICBaseline() {
 }
 
 void AccessorAssembler::GenerateKeyedHasIC_Megamorphic() {
-  using Descriptor = LoadWithVectorDescriptor;
+  using Descriptor = KeyedHasICWithVectorDescriptor;
 
   auto receiver = Parameter<Object>(Descriptor::kReceiver);
   auto name = Parameter<Object>(Descriptor::kName);

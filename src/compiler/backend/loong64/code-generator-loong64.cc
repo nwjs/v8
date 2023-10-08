@@ -2205,7 +2205,13 @@ void CodeGenerator::AssembleArchBinarySearchSwitch(Instruction* instr) {
   for (size_t index = 2; index < instr->InputCount(); index += 2) {
     cases.push_back({i.InputInt32(index + 0), GetLabel(i.InputRpo(index + 1))});
   }
-  AssembleArchBinarySearchSwitchRange(input, i.InputRpo(1), cases.data(),
+
+  UseScratchRegisterScope temps(masm());
+  Register scratch = temps.Acquire();
+  // The input register may contains dirty data in upper 32 bits, explicitly
+  // sign-extend it here.
+  __ slli_w(scratch, input, 0);
+  AssembleArchBinarySearchSwitchRange(scratch, i.InputRpo(1), cases.data(),
                                       cases.data() + cases.size());
 }
 
@@ -2214,8 +2220,13 @@ void CodeGenerator::AssembleArchTableSwitch(Instruction* instr) {
   Register input = i.InputRegister(0);
   size_t const case_count = instr->InputCount() - 2;
 
-  __ Branch(GetLabel(i.InputRpo(1)), hs, input, Operand(case_count));
-  __ GenerateSwitchTable(input, case_count, [&i, this](size_t index) {
+  UseScratchRegisterScope temps(masm());
+  Register scratch = temps.Acquire();
+  // The input register may contains dirty data in upper 32 bits, explicitly
+  // sign-extend it here.
+  __ slli_w(scratch, input, 0);
+  __ Branch(GetLabel(i.InputRpo(1)), hs, scratch, Operand(case_count));
+  __ GenerateSwitchTable(scratch, case_count, [&i, this](size_t index) {
     return GetLabel(i.InputRpo(index + 2));
   });
 }
@@ -2652,6 +2663,24 @@ void CodeGenerator::SetPendingMove(MoveOperands* move) {
   }
 }
 
+namespace {
+
+bool Is32BitOperand(InstructionOperand* operand) {
+  DCHECK(operand->IsStackSlot() || operand->IsRegister());
+  MachineRepresentation mr = LocationOperand::cast(operand)->representation();
+  return mr == MachineRepresentation::kWord32 ||
+         mr == MachineRepresentation::kCompressed ||
+         mr == MachineRepresentation::kCompressedPointer;
+}
+
+// When we need only 32 bits, move only 32 bits, otherwise the destination
+// register' upper 32 bits may contain dirty data.
+bool Use32BitMove(InstructionOperand* source, InstructionOperand* destination) {
+  return Is32BitOperand(source) && Is32BitOperand(destination);
+}
+
+}  // namespace
+
 void CodeGenerator::AssembleMove(InstructionOperand* source,
                                  InstructionOperand* destination) {
   Loong64OperandConverter g(this, nullptr);
@@ -2669,7 +2698,11 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
     DCHECK(destination->IsRegister() || destination->IsStackSlot());
     MemOperand src = g.ToMemOperand(source);
     if (destination->IsRegister()) {
-      __ Ld_d(g.ToRegister(destination), src);
+      if (Use32BitMove(source, destination)) {
+        __ Ld_w(g.ToRegister(destination), src);
+      } else {
+        __ Ld_d(g.ToRegister(destination), src);
+      }
     } else {
       UseScratchRegisterScope temps(masm());
       Register scratch = temps.Acquire();

@@ -299,6 +299,12 @@ class GraphVisitor {
 #ifdef DEBUG
     if (V8_UNLIKELY(v8_flags.turboshaft_verify_reductions)) {
       if (new_index.valid()) {
+        const Operation& new_op = output_graph().Get(new_index);
+        DCHECK_EQ(new_op.outputs_rep().size(), op.outputs_rep().size());
+        for (size_t i = 0; i < new_op.outputs_rep().size(); ++i) {
+          DCHECK(new_op.outputs_rep()[i].AllowImplicitRepresentationChangeTo(
+              op.outputs_rep()[i]));
+        }
         assembler().Verify(index, new_index);
       }
     }
@@ -418,9 +424,10 @@ class GraphVisitor {
     DCHECK_IMPLIES(new_pred == nullptr, old_pred == nullptr);
 
     if (new_pred != nullptr) {
-      // If {new_pred} is nullptr, then the order of the predecessors changed.
-      // This should only happen with blocks that were introduced in the
-      // previous graph. For instance, consider this (partial) dominator tree:
+      // If {new_pred} is not nullptr, then the order of the predecessors
+      // changed. This should only happen with blocks that were introduced in
+      // the previous graph. For instance, consider this (partial) dominator
+      // tree:
       //
       //     ╠ 7
       //     ║ ╠ 8
@@ -438,17 +445,15 @@ class GraphVisitor {
 
 #ifdef DEBUG
       // To check that indices are set properly, we zap them in debug builds.
-      const uint32_t invalid_custom_data = std::numeric_limits<uint32_t>::max();
       for (auto& block : assembler().modifiable_input_graph().blocks()) {
-        block.custom_data() = invalid_custom_data;
+        block.clear_custom_data();
       }
 #endif
       uint32_t pos = current_input_block_->PredecessorCount() - 1;
       for (old_pred = current_input_block_->LastPredecessor();
            old_pred != nullptr; old_pred = old_pred->NeighboringPredecessor()) {
         // Store the current index of the {old_pred}.
-        DCHECK_EQ(old_pred->custom_data(), invalid_custom_data);
-        old_pred->custom_data() = pos--;
+        old_pred->set_custom_data(pos--, Block::CustomDataKind::kPhiInputIndex);
       }
 
       // Filling {new_inputs}: we iterate the new predecessors, and, for each
@@ -460,8 +465,8 @@ class GraphVisitor {
            new_pred != nullptr; new_pred = new_pred->NeighboringPredecessor()) {
         const Block* origin = new_pred->OriginForBlockEnd();
         DCHECK_NOT_NULL(origin);
-        DCHECK_NE(origin->custom_data(), invalid_custom_data);
-        OpIndex input = old_inputs[origin->custom_data()];
+        OpIndex input = old_inputs[origin->get_custom_data(
+            Block::CustomDataKind::kPhiInputIndex)];
         // Phis inputs have to come from predecessors. We thus have to
         // MapToNewGraph with {predecessor_index} so that we get an OpIndex that
         // is from a predecessor rather than one that comes from a Variable
@@ -672,6 +677,22 @@ class GraphVisitor {
   OpIndex AssembleOutputGraphConstant(const ConstantOp& op) {
     return assembler().ReduceConstant(op.kind, op.storage);
   }
+  OpIndex AssembleOutputGraphAtomicRMW(const AtomicRMWOp& op) {
+    return assembler().ReduceAtomicRMW(
+        MapToNewGraph(op.base()), MapToNewGraph(op.index()),
+        MapToNewGraph(op.value()), MapToNewGraphIfValid(op.expected()),
+        op.bin_op, op.result_rep, op.input_rep, op.memory_access_kind);
+  }
+
+  OpIndex AssembleOutputGraphAtomicWord32Pair(const AtomicWord32PairOp& op) {
+    return assembler().ReduceAtomicWord32Pair(
+        MapToNewGraph(op.base()), MapToNewGraphIfValid(op.index()),
+        MapToNewGraphIfValid(op.value_low()),
+        MapToNewGraphIfValid(op.value_high()),
+        MapToNewGraphIfValid(op.expected_low()),
+        MapToNewGraphIfValid(op.expected_high()), op.op_kind, op.offset);
+  }
+
   OpIndex AssembleOutputGraphLoad(const LoadOp& op) {
     return assembler().ReduceLoad(
         MapToNewGraph(op.base()), MapToNewGraphIfValid(op.index()), op.kind,
@@ -685,8 +706,8 @@ class GraphVisitor {
         op.maybe_initializing_or_transitioning);
   }
   OpIndex AssembleOutputGraphAllocate(const AllocateOp& op) {
-    return assembler().FinishInitialization(assembler().Allocate(
-        MapToNewGraph(op.size()), op.type, op.allow_large_objects));
+    return assembler().FinishInitialization(
+        assembler().Allocate(MapToNewGraph(op.size()), op.type));
   }
   OpIndex AssembleOutputGraphDecodeExternalPointer(
       const DecodeExternalPointerOp& op) {
@@ -748,7 +769,8 @@ class GraphVisitor {
     return assembler().ReduceUnreachable();
   }
   OpIndex AssembleOutputGraphStaticAssert(const StaticAssertOp& op) {
-    return assembler().ReduceStaticAssert(op.condition(), op.source);
+    return assembler().ReduceStaticAssert(MapToNewGraph(op.condition()),
+                                          op.source);
   }
   OpIndex AssembleOutputGraphCheckTurboshaftTypeOf(
       const CheckTurboshaftTypeOfOp& op) {
@@ -981,6 +1003,50 @@ class GraphVisitor {
                                            op.trap_id);
   }
 
+  OpIndex AssembleOutputGraphRttCanon(const RttCanonOp& op) {
+    return assembler().ReduceRttCanon(MapToNewGraph(op.instance()),
+                                      op.type_index);
+  }
+
+  OpIndex AssembleOutputGraphWasmTypeCheck(const WasmTypeCheckOp& op) {
+    return assembler().ReduceWasmTypeCheck(
+        MapToNewGraph(op.object()), MapToNewGraphIfValid(op.rtt()), op.config);
+  }
+
+  OpIndex AssembleOutputGraphWasmTypeCast(const WasmTypeCastOp& op) {
+    return assembler().ReduceWasmTypeCast(
+        MapToNewGraph(op.object()), MapToNewGraphIfValid(op.rtt()), op.config);
+  }
+
+  OpIndex AssembleOutputGraphStructGet(const StructGetOp& op) {
+    return assembler().ReduceStructGet(MapToNewGraph(op.object()), op.type,
+                                       op.field_index, op.is_signed,
+                                       op.null_check);
+  }
+
+  OpIndex AssembleOutputGraphStructSet(const StructSetOp& op) {
+    return assembler().ReduceStructSet(MapToNewGraph(op.object()),
+                                       MapToNewGraph(op.value()), op.type,
+                                       op.field_index, op.null_check);
+  }
+
+  OpIndex AssembleOutputGraphArrayGet(const ArrayGetOp& op) {
+    return assembler().ReduceArrayGet(MapToNewGraph(op.array()),
+                                      MapToNewGraph(op.index()),
+                                      op.element_type, op.is_signed);
+  }
+
+  OpIndex AssembleOutputGraphArraySet(const ArraySetOp& op) {
+    return assembler().ReduceArraySet(
+        MapToNewGraph(op.array()), MapToNewGraph(op.index()),
+        MapToNewGraph(op.value()), op.element_type);
+  }
+
+  OpIndex AssembleOutputGraphArrayLength(const ArrayLengthOp& op) {
+    return assembler().ReduceArrayLength(MapToNewGraph(op.array()),
+                                         op.null_check);
+  }
+
   OpIndex AssembleOutputGraphSimd128Constant(const Simd128ConstantOp& op) {
     return assembler().ReduceSimd128Constant(op.value);
   }
@@ -993,7 +1059,53 @@ class GraphVisitor {
   OpIndex AssembleOutputGraphSimd128Unary(const Simd128UnaryOp& op) {
     return assembler().ReduceSimd128Unary(MapToNewGraph(op.input()), op.kind);
   }
-#endif
+
+  OpIndex AssembleOutputGraphSimd128Shift(const Simd128ShiftOp& op) {
+    return assembler().ReduceSimd128Shift(MapToNewGraph(op.input()),
+                                          MapToNewGraph(op.shift()), op.kind);
+  }
+
+  OpIndex AssembleOutputGraphSimd128Test(const Simd128TestOp& op) {
+    return assembler().ReduceSimd128Test(MapToNewGraph(op.input()), op.kind);
+  }
+
+  OpIndex AssembleOutputGraphSimd128Splat(const Simd128SplatOp& op) {
+    return assembler().ReduceSimd128Splat(MapToNewGraph(op.input()), op.kind);
+  }
+
+  OpIndex AssembleOutputGraphSimd128Ternary(const Simd128TernaryOp& op) {
+    return assembler().ReduceSimd128Ternary(MapToNewGraph(op.first()),
+                                            MapToNewGraph(op.second()),
+                                            MapToNewGraph(op.third()), op.kind);
+  }
+  OpIndex AssembleOutputGraphSimd128ExtractLane(
+      const Simd128ExtractLaneOp& op) {
+    return assembler().ReduceSimd128ExtractLane(MapToNewGraph(op.input()),
+                                                op.kind, op.lane);
+  }
+  OpIndex AssembleOutputGraphSimd128ReplaceLane(
+      const Simd128ReplaceLaneOp& op) {
+    return assembler().ReduceSimd128ReplaceLane(MapToNewGraph(op.into()),
+                                                MapToNewGraph(op.new_lane()),
+                                                op.kind, op.lane);
+  }
+  OpIndex AssembleOutputGraphSimd128LaneMemory(const Simd128LaneMemoryOp& op) {
+    return assembler().ReduceSimd128LaneMemory(
+        MapToNewGraph(op.base()), MapToNewGraph(op.index()),
+        MapToNewGraph(op.value()), op.mode, op.kind, op.lane_kind, op.lane,
+        op.offset);
+  }
+  OpIndex AssembleOutputGraphSimd128LoadTransform(
+      const Simd128LoadTransformOp& op) {
+    return assembler().ReduceSimd128LoadTransform(
+        MapToNewGraph(op.base()), MapToNewGraph(op.index()), op.load_kind,
+        op.transform_kind, op.offset);
+  }
+  OpIndex AssembleOutputGraphSimd128Shuffle(const Simd128ShuffleOp& op) {
+    return assembler().ReduceSimd128Shuffle(
+        MapToNewGraph(op.left()), MapToNewGraph(op.right()), op.shuffle);
+  }
+#endif  // V8_ENABLE_WEBASSEMBLY
 
   void CreateOldToNewMapping(OpIndex old_index, OpIndex new_index) {
     if constexpr (reducer_list_contains<typename Assembler::ReducerList,
@@ -1001,13 +1113,11 @@ class GraphVisitor {
       if (current_block_needs_variables_) {
         MaybeVariable var = GetVariableFor(old_index);
         if (!var.has_value()) {
-          base::Optional<RegisterRepresentation> rep =
+          MaybeRegisterRepresentation rep =
               input_graph().Get(old_index).outputs_rep().size() == 1
-                  ? base::Optional<
-                        RegisterRepresentation>{input_graph()
-                                                    .Get(old_index)
-                                                    .outputs_rep()[0]}
-                  : base::nullopt;
+                  ? static_cast<const MaybeRegisterRepresentation&>(
+                        input_graph().Get(old_index).outputs_rep()[0])
+                  : MaybeRegisterRepresentation::None();
           var = assembler().NewLoopInvariantVariable(rep);
           SetVariableFor(old_index, *var);
         }

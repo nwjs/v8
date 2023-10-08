@@ -1205,6 +1205,7 @@
   V(I16x16ExtAddPairwiseI8x32S)    \
   V(I16x16ExtAddPairwiseI8x32U)    \
   V(ExtractF128)                   \
+  V(S256Const)                     \
   V(S256Zero)                      \
   V(S256Not)                       \
   V(S256And)                       \
@@ -1219,7 +1220,8 @@
   V(F64x4Pmin)                     \
   V(F64x4Pmax)                     \
   V(F64x4Splat)                    \
-  V(F32x8Splat)
+  V(F32x8Splat)                    \
+  V(I8x32Shuffle)
 
 #define VALUE_OP_LIST(V)     \
   COMMON_OP_LIST(V)          \

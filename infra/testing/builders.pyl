@@ -608,6 +608,14 @@
       {'name': 'v8testing', 'shards': 3},
     ],
   },
+  'v8_linux64_no_shared_cage_dbg': {
+    'swarming_dimensions' : {
+      'os': 'Ubuntu-22.04',
+    },
+    'tests': [
+      {'name': 'v8testing', 'shards': 3},
+    ],
+  },
   'v8_linux64_no_pointer_compression_rel': {
     'swarming_dimensions' : {
       'os': 'Ubuntu-22.04',
@@ -632,6 +640,16 @@
     },
     'tests': [
       {'name': 'v8testing', 'shards': 2},
+    ],
+  },
+  'v8_linux64_pku_rel': {
+    'swarming_dimensions' : {
+      'os': 'Ubuntu-22.04',
+      'cpu': 'x86-64-avx2',
+      'pool': 'v8.tests',
+    },
+    'tests': [
+      {'name': 'v8testing', 'variant': 'default'},
     ],
   },
   'v8_linux64_single_generation_dbg': {
@@ -831,6 +849,14 @@
     ],
   },
   'v8_linux64_riscv64_rel': {
+    'swarming_dimensions': {
+      'os': 'Ubuntu-22.04',
+    },
+    'tests': [
+      {'name': 'v8testing', 'shards': 3},
+    ],
+  },
+  'v8_linux64_riscv64_pointer_compression_rel': {
     'swarming_dimensions': {
       'os': 'Ubuntu-22.04',
     },
@@ -1605,6 +1631,16 @@
       {'name': 'v8testing', 'variant': 'stress_maglev_no_turbofan'},
     ],
   },
+  'V8 Linux64 - PKU': {
+    'swarming_dimensions' : {
+      'os': 'Ubuntu-22.04',
+      'cpu': 'x86-64-avx2',
+      'pool': 'v8.tests',
+    },
+    'tests': [
+      {'name': 'v8testing', 'variant': 'default'},
+    ],
+  },
   'V8 Linux64 gcc': {
     'swarming_dimensions' : {
       'os': 'Ubuntu-20.04',
@@ -1650,6 +1686,19 @@
     },
     'tests': [
       {'name': 'v8testing'},
+    ],
+  },
+  'V8 Linux64 - no shared cage - debug': {
+    'swarming_dimensions' : {
+      'os': 'Ubuntu-22.04',
+    },
+    'swarming_task_attrs': {
+      'expiration': 14400,
+      'hard_timeout': 3600,
+      'priority': 35,
+    },
+    'tests': [
+      {'name': 'v8testing', 'shards': 2},
     ],
   },
   'V8 Linux64 - no pointer compression': {
@@ -2339,6 +2388,19 @@
     ],
   },
   'V8 Linux - riscv64 - sim': {
+    'swarming_dimensions': {
+      'os': 'Ubuntu-22.04',
+    },
+    'swarming_task_attrs': {
+      'expiration': 14400,
+      'hard_timeout': 3600,
+      'priority': 35,
+    },
+    'tests': [
+      {'name': 'v8testing', 'shards': 3},
+    ],
+  },
+  'V8 Linux - riscv64 - sim - pointer compression': {
     'swarming_dimensions': {
       'os': 'Ubuntu-22.04',
     },

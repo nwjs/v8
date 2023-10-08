@@ -1229,6 +1229,7 @@ void WebAssemblyTable(const v8::FunctionCallbackInfo<v8::Value>& info) {
   if (!GetInitialOrMinimumProperty(isolate, &thrower, context, descriptor,
                                    &initial, 0,
                                    i::wasm::max_table_init_entries())) {
+    DCHECK(i_isolate->has_scheduled_exception() || thrower.error());
     return;
   }
   // The descriptor's 'maximum'.
@@ -1238,6 +1239,7 @@ void WebAssemblyTable(const v8::FunctionCallbackInfo<v8::Value>& info) {
                                   v8_str(isolate, "maximum"), &has_maximum,
                                   &maximum, initial,
                                   std::numeric_limits<uint32_t>::max())) {
+    DCHECK(i_isolate->has_scheduled_exception() || thrower.error());
     return;
   }
 
@@ -1257,6 +1259,7 @@ void WebAssemblyTable(const v8::FunctionCallbackInfo<v8::Value>& info) {
   // point, so we must overwrite that with the correct prototype for {Foo}.
   if (!TransferPrototype(i_isolate, table_obj,
                          Utils::OpenHandle(*info.This()))) {
+    DCHECK(i_isolate->has_pending_exception());
     return;
   }
 
@@ -1315,34 +1318,55 @@ void WebAssemblyMemory(const v8::FunctionCallbackInfo<v8::Value>& info) {
   Local<Context> context = isolate->GetCurrentContext();
   Local<v8::Object> descriptor = Local<Object>::Cast(info[0]);
 
-  // TODO(14076): The JS API spec is not updated for memory64 yet; fix this
-  // code once it is.
+  auto memory_flag = i::WasmMemoryFlag::kWasmMemory32;
+  auto max_pages = i::wasm::kSpecMaxMemory32Pages;
+
+  v8::Local<v8::Value> index_value;
+  if (!descriptor->Get(context, v8_str(isolate, "index"))
+           .ToLocal(&index_value)) {
+    DCHECK(i_isolate->has_scheduled_exception());
+    return;
+  }
+
+  if (!index_value->IsUndefined()) {
+    v8::Local<v8::String> index;
+    if (!index_value->ToString(context).ToLocal(&index)) {
+      DCHECK(i_isolate->has_scheduled_exception());
+      return;
+    }
+    if (index->StringEquals(v8_str(isolate, "u64"))) {
+      memory_flag = i::WasmMemoryFlag::kWasmMemory64;
+      max_pages = i::wasm::kSpecMaxMemory64Pages;
+    } else if (!index->StringEquals(v8_str(isolate, "u32"))) {
+      thrower.TypeError("Unknown memory index");
+      return;
+    }
+  }
+
   int64_t initial = 0;
   if (!GetInitialOrMinimumProperty(isolate, &thrower, context, descriptor,
-                                   &initial, 0,
-                                   i::wasm::kSpecMaxMemory32Pages)) {
+                                   &initial, 0, max_pages)) {
+    DCHECK(i_isolate->has_scheduled_exception() || thrower.error());
     return;
   }
   // The descriptor's 'maximum'.
   int64_t maximum = i::WasmMemoryObject::kNoMaximum;
   if (!GetOptionalIntegerProperty(isolate, &thrower, context, descriptor,
                                   v8_str(isolate, "maximum"), nullptr, &maximum,
-                                  initial, i::wasm::kSpecMaxMemory32Pages)) {
+                                  initial, max_pages)) {
+    DCHECK(i_isolate->has_scheduled_exception() || thrower.error());
     return;
   }
 
-  auto shared = i::SharedFlag::kNotShared;
-  // Shared property of descriptor
-  Local<String> shared_key = v8_str(isolate, "shared");
-  v8::MaybeLocal<v8::Value> maybe_value = descriptor->Get(context, shared_key);
+  // Shared property of descriptor.
   v8::Local<v8::Value> value;
-  if (maybe_value.ToLocal(&value)) {
-    shared = value->BooleanValue(isolate) ? i::SharedFlag::kShared
-                                          : i::SharedFlag::kNotShared;
-  } else {
+  if (!descriptor->Get(context, v8_str(isolate, "shared")).ToLocal(&value)) {
     DCHECK(i_isolate->has_scheduled_exception());
     return;
   }
+
+  auto shared = value->BooleanValue(isolate) ? i::SharedFlag::kShared
+                                             : i::SharedFlag::kNotShared;
 
   // Throw TypeError if shared is true, and the descriptor has no "maximum"
   if (shared == i::SharedFlag::kShared && maximum == -1) {
@@ -1351,10 +1375,8 @@ void WebAssemblyMemory(const v8::FunctionCallbackInfo<v8::Value>& info) {
   }
 
   i::Handle<i::JSObject> memory_obj;
-  // TODO(14076): Pass {kWasmMemory64} for 64-bit memories.
   if (!i::WasmMemoryObject::New(i_isolate, static_cast<int>(initial),
-                                static_cast<int>(maximum), shared,
-                                i::WasmMemoryFlag::kWasmMemory32)
+                                static_cast<int>(maximum), shared, memory_flag)
            .ToHandle(&memory_obj)) {
     thrower.RangeError("could not allocate memory");
     return;
@@ -1369,6 +1391,7 @@ void WebAssemblyMemory(const v8::FunctionCallbackInfo<v8::Value>& info) {
   // point, so we must overwrite that with the correct prototype for {Foo}.
   if (!TransferPrototype(i_isolate, memory_obj,
                          Utils::OpenHandle(*info.This()))) {
+    DCHECK(i_isolate->has_pending_exception());
     return;
   }
 
@@ -1730,6 +1753,7 @@ void WebAssemblySuspender(const v8::FunctionCallbackInfo<v8::Value>& info) {
   // point, so we must overwrite that with the correct prototype for {Foo}.
   if (!TransferPrototype(i_isolate, suspender,
                          Utils::OpenHandle(*info.This()))) {
+    DCHECK(i_isolate->has_pending_exception());
     return;
   }
   info.GetReturnValue().Set(Utils::ToLocal(suspender));
@@ -2517,7 +2541,8 @@ void WebAssemblyMemoryType(const v8::FunctionCallbackInfo<v8::Value>& info) {
     max_size.emplace(static_cast<uint32_t>(max_size64));
   }
   bool shared = buffer->is_shared();
-  auto type = i::wasm::GetTypeForMemory(i_isolate, min_size, max_size, shared);
+  auto type = i::wasm::GetTypeForMemory(i_isolate, min_size, max_size, shared,
+                                        memory->is_memory64());
   info.GetReturnValue().Set(Utils::ToLocal(type));
 }
 
@@ -2856,7 +2881,7 @@ Handle<JSFunction> CreateFunc(
   Handle<FunctionTemplateInfo> temp =
       NewFunctionTemplate(isolate, func, has_prototype, side_effect_type);
   Handle<JSFunction> function =
-      ApiNatives::InstantiateFunction(temp, name).ToHandleChecked();
+      ApiNatives::InstantiateFunction(isolate, temp, name).ToHandleChecked();
   DCHECK(function->shared()->HasSharedName());
   return function;
 }
@@ -2985,7 +3010,7 @@ void WasmJs::Install(Isolate* isolate, bool exposed_on_global_object) {
   Handle<JSGlobalObject> global = isolate->global_object();
   Handle<Context> context(global->native_context(), isolate);
   // Install the JS API once only.
-  Object prev = context->get(Context::WASM_MODULE_CONSTRUCTOR_INDEX);
+  Tagged<Object> prev = context->get(Context::WASM_MODULE_CONSTRUCTOR_INDEX);
   if (!IsUndefined(prev, isolate)) {
     DCHECK(IsJSFunction(prev));
     return;
@@ -3013,20 +3038,6 @@ void WasmJs::Install(Isolate* isolate, bool exposed_on_global_object) {
   InstallFunc(isolate, webassembly, "compile", WebAssemblyCompile, 1);
   InstallFunc(isolate, webassembly, "validate", WebAssemblyValidate, 1);
   InstallFunc(isolate, webassembly, "instantiate", WebAssemblyInstantiate, 1);
-
-  // TODO(7748): These built-ins should not be shipped with wasm GC.
-  // Either a new flag will be needed or the built-ins have to be deleted prior
-  // to shipping.
-  // TODO(13810): We should install these later, when we can query the
-  // isolate's wasm_gc_enabled_callback, to take the Origin Trial into account.
-  if (v8_flags.experimental_wasm_gc) {
-    SimpleInstallFunction(
-        isolate, webassembly, "experimentalConvertArrayToString",
-        Builtin::kExperimentalWasmConvertArrayToString, 0, true);
-    SimpleInstallFunction(
-        isolate, webassembly, "experimentalConvertStringToArray",
-        Builtin::kExperimentalWasmConvertStringToArray, 0, true);
-  }
 
   if (v8_flags.wasm_test_streaming) {
     isolate->set_wasm_streaming_callback(WasmStreamingCallbackForTesting);

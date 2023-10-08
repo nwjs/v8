@@ -71,6 +71,7 @@
       'V8 Linux64 - builder (reclient compare)': 'release_x64_reclient',
       'V8 Linux64 - official - builder': 'official_x64',
       'V8 Linux64 - debug builder': 'debug_x64',
+      'V8 Linux64 - no shared cage - debug builder': 'debug_x64_no_shared_cage',
       'V8 Linux64 - external code space - debug - builder': 'debug_x64_external_code_space',
       'V8 Linux64 - custom snapshot - debug builder': 'debug_x64_custom',
       'V8 Linux64 - internal snapshot - builder': 'release_x64_internal',
@@ -230,6 +231,7 @@
       # RISC-V
       'V8 Linux - riscv32 - sim - builder': 'release_simulate_riscv32',
       'V8 Linux - riscv64 - sim - builder': 'release_simulate_riscv64',
+      'V8 Linux - riscv64 - sim - pointer compression - builder': 'release_simulate_riscv64_pointer_compression',
       # Loongson
       'V8 Linux - loong64 - sim - builder': 'release_simulate_loong64',
     },
@@ -256,6 +258,7 @@
           'release_simulate_arm64_no_pointer_compression',
       'v8_linux64_cppgc_non_default_compile_dbg': 'debug_x64_non_default_cppgc',
       'v8_linux64_compile_dbg': 'debug_x64_trybot',
+      'v8_linux64_no_shared_cage_compile_dbg': 'debug_x64_no_shared_cage',
       'v8_linux64_coverage_dbg': 'debug_x64_coverage',
       'v8_linux64_coverage_rel': 'release_x64_coverage',
       'v8_linux64_no_sandbox_compile_dbg': 'debug_x64_no_sandbox',
@@ -278,6 +281,7 @@
       'v8_linux64_no_sandbox_compile_rel': 'release_x64_no_sandbox',
       'v8_linux64_official_compile_rel': 'official_x64',
       'v8_linux64_predictable_compile_rel': 'release_x64_predictable',
+      'v8_linux64_pku_compile_rel': 'release_x64',
       'v8_linux64_shared_compile_rel': 'release_x64_shared_verify_heap',
       'v8_linux64_single_generation_compile_dbg': 'debug_x64_single_generation',
       'v8_linux64_no_wasm_compile_rel': 'release_x64_webassembly_disabled',
@@ -290,6 +294,7 @@
       'v8_linux64_msan_compile_rel': 'release_simulate_arm64_msan_minimal_symbols',
       'v8_linux_riscv32_compile_rel': 'release_simulate_riscv32',
       'v8_linux64_riscv64_compile_rel': 'release_simulate_riscv64',
+      'v8_linux64_riscv64_pointer_compression_compile_rel': 'release_simulate_riscv64_pointer_compression',
       'v8_linux64_tsan_compile_rel': 'release_x64_tsan_minimal_symbols',
       'v8_linux64_tsan_compile_dbg': 'debug_x64_tsan_minimal_symbols',
       'v8_linux64_tsan_no_cm_compile_rel': 'release_x64_tsan_no_cm',
@@ -476,6 +481,8 @@
       'release_bot', 'simulate_riscv32'],
     'release_simulate_riscv64': [
       'release_bot', 'simulate_riscv64'],
+    'release_simulate_riscv64_pointer_compression': [
+      'release_bot', 'simulate_riscv64', 'v8_enable_pointer_compression'],
     'release_simulate_s390x': [
       'release_bot', 'simulate_s390x'],
 
@@ -657,6 +664,8 @@
       'debug_bot_no_goma', 'x64', 'gcc', 'lld', 'no_custom_libcxx'],
     'debug_x64_header_includes': [
       'debug_bot', 'x64', 'v8_check_header_includes'],
+    'debug_x64_no_shared_cage': [
+      'debug_bot', 'x64', 'v8_disable_pointer_compression_shared_cage'],
     'debug_x64_minimal_symbols': [
       'debug_bot', 'x64', 'minimal_symbols'],
     'debug_x64_non_default_cppgc': [
@@ -1064,6 +1073,12 @@
 
     'v8_disable_pointer_compression': {
       'gn_args': 'v8_enable_pointer_compression=false',
+    },
+    'v8_enable_pointer_compression': {
+      'gn_args': 'v8_enable_pointer_compression=true',
+    },
+    'v8_disable_pointer_compression_shared_cage': {
+      'gn_args': 'v8_enable_pointer_compression_shared_cage=false',
     },
     'v8_enable_single_generation': {
       'gn_args': 'v8_enable_single_generation=true '

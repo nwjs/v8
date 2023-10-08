@@ -179,3 +179,49 @@
 
   assertEquals(firstSet.isSubsetOf(SetLike), false);
 })();
+
+(function TestIsSubsetOfAfterClearingTheReceiver() {
+  const firstSet = new Set();
+  firstSet.add(42);
+  firstSet.add(43);
+
+  const otherSet = new Set();
+  otherSet.add(42);
+  otherSet.add(43);
+  otherSet.add(47);
+
+  Object.defineProperty(otherSet, 'size', {
+    get: function() {
+      firstSet.clear();
+      return 3;
+    },
+
+  });
+
+  assertEquals(firstSet.isSubsetOf(otherSet), true);
+})();
+
+(function TestTableTransition() {
+  const firstSet = new Set();
+  firstSet.add(42);
+  firstSet.add(43);
+  firstSet.add(44);
+
+  const setLike = {
+    size: 5,
+    keys() {
+      return [1, 2, 3, 4, 5].keys();
+    },
+    has(key) {
+      if (key == 42) {
+        // Cause a table transition in the receiver.
+        firstSet.clear();
+      }
+      // Return true so we keep iterating the transitioned receiver.
+      return true;
+    }
+  };
+
+  assertTrue(firstSet.isSubsetOf(setLike));
+  assertEquals(0, firstSet.size);
+})();

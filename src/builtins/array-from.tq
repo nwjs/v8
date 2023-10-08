@@ -5,9 +5,9 @@
 namespace array {
 // Array.from( items [, mapfn [, thisArg ] ] )
 // ES #sec-array.from
-transitioning javascript builtin
-ArrayFrom(js-implicit context: NativeContext, receiver: JSAny)(...arguments):
-    JSReceiver {
+transitioning javascript builtin ArrayFrom(
+    js-implicit context: NativeContext, receiver: JSAny)(
+    ...arguments): JSReceiver {
   const c = HasBuiltinSubclassingFlag() ? receiver : GetArrayFunction();
 
   // Use fast path if:
@@ -149,8 +149,7 @@ ArrayFrom(js-implicit context: NativeContext, receiver: JSAny)(...arguments):
       const capacity: intptr = Convert<intptr>(len);
       const map: Map = GetFastPackedSmiElementsJSArrayMap();
       a = AllocateJSArray(
-          ElementsKind::PACKED_SMI_ELEMENTS, map, capacity, smiLen,
-          AllocationFlag::kAllowLargeObjectAllocation);
+          ElementsKind::PACKED_SMI_ELEMENTS, map, capacity, smiLen);
     } label CreateWithConstructor {
       typeswitch (c) {
         case (c: Constructor): {

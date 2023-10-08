@@ -70,8 +70,8 @@ void MaglevAssembler::Allocate(RegisterSnapshot register_snapshot,
         __ B(*done);
       },
       register_snapshot, object,
-      in_new_space ? Builtin::kAllocateRegularInYoungGeneration
-                   : Builtin::kAllocateRegularInOldGeneration,
+      in_new_space ? Builtin::kAllocateInYoungGeneration
+                   : Builtin::kAllocateInOldGeneration,
       size_in_bytes, done);
   // Store new top and tag object.
   Move(ExternalReferenceAsOperand(top, scratch), new_top);
@@ -378,14 +378,14 @@ void MaglevAssembler::StringCharCodeOrCodePointAt(
     // TODO(victorgomes): Add fast path for external strings.
     And(representation, instance_type.W(),
         Immediate(kStringRepresentationMask));
-    Cmp(representation, Immediate(kSeqStringTag));
-    B(&seq_string, eq);
-    Cmp(representation, Immediate(kConsStringTag));
-    B(&cons_string, eq);
-    Cmp(representation, Immediate(kSlicedStringTag));
-    B(&sliced_string, eq);
-    Cmp(representation, Immediate(kThinStringTag));
-    B(deferred_runtime_call, ne);
+    CompareAndBranch(representation, Immediate(kSeqStringTag), kEqual,
+                     &seq_string);
+    CompareAndBranch(representation, Immediate(kConsStringTag), kEqual,
+                     &cons_string);
+    CompareAndBranch(representation, Immediate(kSlicedStringTag), kEqual,
+                     &sliced_string);
+    CompareAndBranch(representation, Immediate(kThinStringTag), kNotEqual,
+                     deferred_runtime_call);
     // Fallthrough to thin string.
   }
 
@@ -588,8 +588,8 @@ void MaglevAssembler::TryChangeFloat64ToIndex(Register result,
   // Check that the result of the float64->int32->float64 is equal to
   // the input (i.e. that the conversion didn't truncate).
   Fcmp(value, converted_back);
-  JumpIf(kEqual, success);
-  Jump(fail);
+  JumpIf(kNotEqual, fail);
+  Jump(success);
 }
 
 }  // namespace maglev

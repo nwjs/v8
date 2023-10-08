@@ -37,10 +37,15 @@ namespace compiler {
     UNIMPLEMENTED();                                      \
   }
 
-Smi NumberConstantToSmi(Node* node) {
+namespace {
+const turboshaft::EffectDimensions::Bits kTurboshaftEffectLevelMask =
+    turboshaft::OpEffects().CanReadMemory().produces.bits();
+}
+
+Tagged<Smi> NumberConstantToSmi(Node* node) {
   DCHECK_EQ(node->opcode(), IrOpcode::kNumberConstant);
   const double d = OpParameter<double>(node->op());
-  Smi smi = Smi::FromInt(static_cast<int32_t>(d));
+  Tagged<Smi> smi = Smi::FromInt(static_cast<int32_t>(d));
   CHECK_EQ(smi.value(), d);
   return smi;
 }
@@ -58,7 +63,8 @@ InstructionSelectorT<Adapter>::InstructionSelectorT(
     InstructionSelector::EnableRootsRelativeAddressing
         enable_roots_relative_addressing,
     InstructionSelector::EnableTraceTurboJson trace_turbo)
-    : zone_(zone),
+    : Adapter(schedule),
+      zone_(zone),
       linkage_(linkage),
       sequence_(sequence),
       source_positions_(source_positions),
@@ -112,8 +118,6 @@ InstructionSelectorT<Adapter>::InstructionSelectorT(
 template <typename Adapter>
 base::Optional<BailoutReason>
 InstructionSelectorT<Adapter>::SelectInstructions() {
-  Adapter::InitializeAdapter(schedule_);
-
   // Mark the inputs of all phis in loop headers as used.
   block_range_t blocks = this->rpo_order(schedule());
   for (const block_t block : blocks) {
@@ -288,6 +292,19 @@ Instruction* InstructionSelectorT<Adapter>::Emit(
 
 template <typename Adapter>
 Instruction* InstructionSelectorT<Adapter>::Emit(
+    InstructionCode opcode, InstructionOperand output, InstructionOperand a,
+    InstructionOperand b, InstructionOperand c, InstructionOperand d,
+    InstructionOperand e, InstructionOperand f, InstructionOperand g,
+    InstructionOperand h, size_t temp_count, InstructionOperand* temps) {
+  size_t output_count = output.IsInvalid() ? 0 : 1;
+  InstructionOperand inputs[] = {a, b, c, d, e, f, g, h};
+  size_t input_count = arraysize(inputs);
+  return Emit(opcode, output_count, &output, input_count, inputs, temp_count,
+              temps);
+}
+
+template <typename Adapter>
+Instruction* InstructionSelectorT<Adapter>::Emit(
     InstructionCode opcode, size_t output_count, InstructionOperand* outputs,
     size_t input_count, InstructionOperand* inputs, size_t temp_count,
     InstructionOperand* temps) {
@@ -316,18 +333,30 @@ bool InstructionSelectorT<Adapter>::CanCover(node_t user, node_t node) const {
   if (this->block(schedule(), node) != current_block_) {
     return false;
   }
-  // 2. Pure {node}s must be owned by the {user}.
-  if constexpr (Adapter::IsTurbofan) {
-    // For Turboshaft, this should be subsumed by check 4.
+
+  if constexpr (Adapter::IsTurboshaft) {
+    const turboshaft::Operation& op = this->Get(node);
+    // 2. If node does not produce anything, it can be covered.
+    if (op.Effects().produces.bits() == 0) {
+      return this->is_exclusive_user_of(user, node);
+    }
+    // If it does produce something outside the {kTurboshaftEffectLevelMask}, it
+    // can never be covered.
+    if ((op.Effects().produces.bits() & ~kTurboshaftEffectLevelMask) != 0) {
+      return false;
+    }
+  } else {
+    // 2. Pure {node}s must be owned by the {user}.
     if (node->op()->HasProperty(Operator::kPure)) {
       return node->OwnedBy(user);
     }
   }
-  // 3. Impure {node}s must match the effect level of {user}.
+
+  // 3. Otherwise, the {node}'s effect level must match the {user}'s.
   if (GetEffectLevel(node) != current_effect_level_) {
-    // TODO(nicohartmann@): We should revisit CanCover for Turboshaft.
     return false;
   }
+
   // 4. Only {node} must have value edges pointing to {user}.
   return this->is_exclusive_user_of(user, node);
 }
@@ -560,7 +589,7 @@ InstructionOperand OperandForDeopt(Isolate* isolate,
       case Kind::kNumber:
         if (rep == MachineRepresentation::kWord32) {
           const double d = constant->number();
-          Smi smi = Smi::FromInt(static_cast<int32_t>(d));
+          Tagged<Smi> smi = Smi::FromInt(static_cast<int32_t>(d));
           CHECK_EQ(smi.value(), d);
           return g->UseImmediate(static_cast<int32_t>(smi.ptr()));
         }
@@ -620,7 +649,7 @@ InstructionOperand OperandForDeopt(Isolate* isolate,
       return g->UseImmediate(input);
     case IrOpcode::kNumberConstant:
       if (rep == MachineRepresentation::kWord32) {
-        Smi smi = NumberConstantToSmi(input);
+        Tagged<Smi> smi = NumberConstantToSmi(input);
         return g->UseImmediate(static_cast<int32_t>(smi.ptr()));
       } else {
         return g->UseImmediate(input);
@@ -1542,7 +1571,8 @@ bool InstructionSelectorT<Adapter>::IsSourcePositionUsed(node_t node) {
 }
 
 namespace {
-bool increment_effect_level_for_opcode(IrOpcode::Value opcode) {
+bool increment_effect_level_for_node(TurbofanAdapter* adapter, Node* node) {
+  const IrOpcode::Value opcode = node->opcode();
   return opcode == IrOpcode::kStore || opcode == IrOpcode::kUnalignedStore ||
          opcode == IrOpcode::kCall || opcode == IrOpcode::kProtectedStore ||
          opcode == IrOpcode::kStoreTrapOnNull ||
@@ -1552,9 +1582,12 @@ bool increment_effect_level_for_opcode(IrOpcode::Value opcode) {
                  opcode == IrOpcode::kMemoryBarrier;
 }
 
-bool increment_effect_level_for_opcode(turboshaft::Opcode opcode) {
-  // TODO(nicohartmann@): Implement this.
-  return true;
+bool increment_effect_level_for_node(TurboshaftAdapter* adapter,
+                                     turboshaft::OpIndex node) {
+  // We need to increment the effect level if the operation consumes any of the
+  // dimensions of the {kTurboshaftEffectLevelMask}.
+  const turboshaft::Operation& op = adapter->Get(node);
+  return (op.Effects().consumes.bits() & kTurboshaftEffectLevelMask) != 0;
 }
 }  // namespace
 
@@ -1572,7 +1605,7 @@ void InstructionSelectorT<Adapter>::VisitBlock(block_t block) {
   for (node_t node : this->nodes(block)) {
     SetEffectLevel(node, effect_level);
     current_effect_level_ = effect_level;
-    if (increment_effect_level_for_opcode(this->opcode(node))) {
+    if (increment_effect_level_for_node(this, node)) {
       ++effect_level;
     }
   }
@@ -1643,13 +1676,13 @@ void InstructionSelectorT<Adapter>::VisitBlock(block_t block) {
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::MarkPairProjectionsAsWord32(Node* node) {
-  Node* projection0 = NodeProperties::FindProjection(node, 0);
-  if (projection0) {
+void InstructionSelectorT<Adapter>::MarkPairProjectionsAsWord32(node_t node) {
+  node_t projection0 = FindProjection(node, 0);
+  if (Adapter::valid(projection0)) {
     MarkAsWord32(projection0);
   }
-  Node* projection1 = NodeProperties::FindProjection(node, 1);
-  if (projection1) {
+  node_t projection1 = FindProjection(node, 1);
+  if (Adapter::valid(projection1)) {
     MarkAsWord32(projection1);
   }
 }
@@ -1661,21 +1694,20 @@ void InstructionSelectorT<Adapter>::VisitStackPointerGreaterThan(node_t node) {
   VisitStackPointerGreaterThan(node, &cont);
 }
 
-template <>
-void InstructionSelectorT<TurbofanAdapter>::VisitLoadStackCheckOffset(
-    Node* node) {
+template <typename Adapter>
+void InstructionSelectorT<Adapter>::VisitLoadStackCheckOffset(node_t node) {
   OperandGenerator g(this);
   Emit(kArchStackCheckOffset, g.DefineAsRegister(node));
 }
 
-template <>
-void InstructionSelectorT<TurbofanAdapter>::VisitLoadFramePointer(Node* node) {
+template <typename Adapter>
+void InstructionSelectorT<Adapter>::VisitLoadFramePointer(node_t node) {
   OperandGenerator g(this);
   Emit(kArchFramePointer, g.DefineAsRegister(node));
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitLoadParentFramePointer(Node* node) {
+void InstructionSelectorT<Adapter>::VisitLoadParentFramePointer(node_t node) {
   OperandGenerator g(this);
   Emit(kArchParentFramePointer, g.DefineAsRegister(node));
 }
@@ -1864,12 +1896,7 @@ VISIT_UNSUPPORTED_OP(Word64Rol)
 VISIT_UNSUPPORTED_OP(Word64Ror)
 VISIT_UNSUPPORTED_OP(Word64Clz)
 VISIT_UNSUPPORTED_OP(Word64Ctz)
-
-template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitWord64ReverseBits(Node* node) {
-  UNIMPLEMENTED();
-}
-
+VISIT_UNSUPPORTED_OP(Word64ReverseBits)
 VISIT_UNSUPPORTED_OP(Word64Popcnt)
 VISIT_UNSUPPORTED_OP(Word64Equal)
 VISIT_UNSUPPORTED_OP(Int64Add)
@@ -1896,40 +1923,12 @@ VISIT_UNSUPPORTED_OP(ChangeFloat64ToInt64)
 VISIT_UNSUPPORTED_OP(ChangeFloat64ToUint64)
 VISIT_UNSUPPORTED_OP(TruncateFloat64ToInt64)
 VISIT_UNSUPPORTED_OP(TruncateInt64ToInt32)
-
-template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitTryTruncateFloat32ToInt64(Node* node) {
-  UNIMPLEMENTED();
-}
-
-template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitTryTruncateFloat64ToInt64(Node* node) {
-  UNIMPLEMENTED();
-}
-
-template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitTryTruncateFloat32ToUint64(
-    Node* node) {
-  UNIMPLEMENTED();
-}
-
-template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitTryTruncateFloat64ToUint64(
-    Node* node) {
-  UNIMPLEMENTED();
-}
-
-template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitTryTruncateFloat64ToInt32(Node* node) {
-  UNIMPLEMENTED();
-}
-
-template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitTryTruncateFloat64ToUint32(
-    Node* node) {
-  UNIMPLEMENTED();
-}
-
+VISIT_UNSUPPORTED_OP(TryTruncateFloat32ToInt64)
+VISIT_UNSUPPORTED_OP(TryTruncateFloat64ToInt64)
+VISIT_UNSUPPORTED_OP(TryTruncateFloat32ToUint64)
+VISIT_UNSUPPORTED_OP(TryTruncateFloat64ToUint64)
+VISIT_UNSUPPORTED_OP(TryTruncateFloat64ToInt32)
+VISIT_UNSUPPORTED_OP(TryTruncateFloat64ToUint32)
 VISIT_UNSUPPORTED_OP(RoundInt64ToFloat32)
 VISIT_UNSUPPORTED_OP(RoundInt64ToFloat64)
 VISIT_UNSUPPORTED_OP(RoundUint64ToFloat32)
@@ -1938,44 +1937,18 @@ VISIT_UNSUPPORTED_OP(BitcastFloat64ToInt64)
 VISIT_UNSUPPORTED_OP(BitcastInt64ToFloat64)
 VISIT_UNSUPPORTED_OP(SignExtendWord8ToInt64)
 VISIT_UNSUPPORTED_OP(SignExtendWord16ToInt64)
-
-template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitSignExtendWord32ToInt64(Node* node) {
-  UNIMPLEMENTED();
-}
+VISIT_UNSUPPORTED_OP(SignExtendWord32ToInt64)
 #endif  // V8_TARGET_ARCH_32_BIT
 
 // 64 bit targets do not implement the following instructions.
 #if V8_TARGET_ARCH_64_BIT
-template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitInt32PairAdd(Node* node) {
-  UNIMPLEMENTED();
-}
-
-template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitInt32PairSub(Node* node) {
-  UNIMPLEMENTED();
-}
-
-template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitInt32PairMul(Node* node) {
-  UNIMPLEMENTED();
-}
-
-template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitWord32PairShl(Node* node) {
-  UNIMPLEMENTED();
-}
-
-template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitWord32PairShr(Node* node) {
-  UNIMPLEMENTED();
-}
-
-template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitWord32PairSar(Node* node) {
-  UNIMPLEMENTED();
-}
+VISIT_UNSUPPORTED_OP(Int32PairAdd)
+VISIT_UNSUPPORTED_OP(Int32PairSub)
+VISIT_UNSUPPORTED_OP(Int32PairMul)
+VISIT_UNSUPPORTED_OP(Word32PairShl)
+VISIT_UNSUPPORTED_OP(Word32PairShr)
+VISIT_UNSUPPORTED_OP(Word32PairSar)
+VISIT_UNSUPPORTED_OP(BitcastWord32PairToFloat64)
 #endif  // V8_TARGET_ARCH_64_BIT
 
 #if !V8_TARGET_ARCH_IA32 && !V8_TARGET_ARCH_ARM && !V8_TARGET_ARCH_RISCV32
@@ -2186,19 +2159,19 @@ void InstructionSelectorT<Adapter>::VisitPhi(node_t node) {
 template <>
 void InstructionSelectorT<TurboshaftAdapter>::VisitProjection(
     turboshaft::OpIndex node) {
-  const turboshaft::ProjectionOp& projection =
-      this->Get(node).Cast<turboshaft::ProjectionOp>();
-  const turboshaft::Operation& value_op = this->Get(projection.input());
-  if (value_op.Is<turboshaft::OverflowCheckedBinopOp>()) {
+  using namespace turboshaft;  // NOLINT(build/namespaces)
+  const ProjectionOp& projection = this->Get(node).Cast<ProjectionOp>();
+  const Operation& value_op = this->Get(projection.input());
+  if (value_op.Is<OverflowCheckedBinopOp>() || value_op.Is<TryChangeOp>()) {
     if (projection.index == 0u) {
       EmitIdentity(node);
     } else {
       DCHECK_EQ(1u, projection.index);
       MarkAsUsed(projection.input());
     }
-  } else if (value_op.Is<turboshaft::DidntThrowOp>()) {
+  } else if (value_op.Is<DidntThrowOp>()) {
     // Nothing to do here?
-  } else if (value_op.Is<turboshaft::CallOp>()) {
+  } else if (value_op.Is<CallOp>()) {
     // Call projections need to be behind the call's DidntThrow.
     UNREACHABLE();
   } else {
@@ -2369,72 +2342,67 @@ void InstructionSelectorT<Adapter>::VisitCall(node_t node, block_t handler) {
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitTailCall(Node* node) {
-  if constexpr (Adapter::IsTurboshaft) {
-    // TODO(nicohartmann@): Implement for Turboshaft.
-    UNIMPLEMENTED();
-  } else {
-    OperandGenerator g(this);
+void InstructionSelectorT<Adapter>::VisitTailCall(node_t node) {
+  OperandGenerator g(this);
 
-    auto caller = linkage()->GetIncomingDescriptor();
-    auto callee = CallDescriptorOf(node->op());
-    DCHECK(caller->CanTailCall(callee));
-    const int stack_param_delta = callee->GetStackParameterDelta(caller);
-    CallBuffer buffer(zone(), callee, nullptr);
+  auto call = this->call_view(node);
+  auto caller = linkage()->GetIncomingDescriptor();
+  auto callee = call.call_descriptor();
+  DCHECK(caller->CanTailCall(callee));
+  const int stack_param_delta = callee->GetStackParameterDelta(caller);
+  CallBuffer buffer(zone(), callee, nullptr);
 
-    // Compute InstructionOperands for inputs and outputs.
-    CallBufferFlags flags(kCallCodeImmediate | kCallTail);
-    if (IsTailCallAddressImmediate()) {
-      flags |= kCallAddressImmediate;
-    }
-    if (callee->flags() & CallDescriptor::kFixedTargetRegister) {
-      flags |= kCallFixedTargetRegister;
-    }
-    InitializeCallBuffer(node, &buffer, flags, stack_param_delta);
-    UpdateMaxPushedArgumentCount(stack_param_delta);
-
-    // Select the appropriate opcode based on the call type.
-    InstructionCode opcode;
-    InstructionOperandVector temps(zone());
-    switch (callee->kind()) {
-      case CallDescriptor::kCallCodeObject:
-        opcode = kArchTailCallCodeObject;
-        break;
-      case CallDescriptor::kCallAddress:
-        DCHECK(!caller->IsJSFunctionCall());
-        opcode = kArchTailCallAddress;
-        break;
-#if V8_ENABLE_WEBASSEMBLY
-      case CallDescriptor::kCallWasmFunction:
-        DCHECK(!caller->IsJSFunctionCall());
-        opcode = kArchTailCallWasm;
-        break;
-#endif  // V8_ENABLE_WEBASSEMBLY
-      default:
-        UNREACHABLE();
-    }
-    opcode = EncodeCallDescriptorFlags(opcode, callee->flags());
-
-    Emit(kArchPrepareTailCall, g.NoOutput());
-
-    // Add an immediate operand that represents the offset to the first slot
-    // that is unused with respect to the stack pointer that has been updated
-    // for the tail call instruction. Backends that pad arguments can write the
-    // padding value at this offset from the stack.
-    const int optional_padding_offset =
-        callee->GetOffsetToFirstUnusedStackSlot() - 1;
-    buffer.instruction_args.push_back(g.TempImmediate(optional_padding_offset));
-
-    const int first_unused_slot_offset =
-        kReturnAddressStackSlotCount + stack_param_delta;
-    buffer.instruction_args.push_back(
-        g.TempImmediate(first_unused_slot_offset));
-
-    // Emit the tailcall instruction.
-    Emit(opcode, 0, nullptr, buffer.instruction_args.size(),
-         &buffer.instruction_args.front(), temps.size(),
-         temps.empty() ? nullptr : &temps.front());
+  // Compute InstructionOperands for inputs and outputs.
+  CallBufferFlags flags(kCallCodeImmediate | kCallTail);
+  if (IsTailCallAddressImmediate()) {
+    flags |= kCallAddressImmediate;
   }
+  if (callee->flags() & CallDescriptor::kFixedTargetRegister) {
+    flags |= kCallFixedTargetRegister;
+  }
+  InitializeCallBuffer(node, &buffer, flags, stack_param_delta);
+  UpdateMaxPushedArgumentCount(stack_param_delta);
+
+  // Select the appropriate opcode based on the call type.
+  InstructionCode opcode;
+  InstructionOperandVector temps(zone());
+  switch (callee->kind()) {
+    case CallDescriptor::kCallCodeObject:
+      opcode = kArchTailCallCodeObject;
+      break;
+    case CallDescriptor::kCallAddress:
+      DCHECK(!caller->IsJSFunctionCall());
+      opcode = kArchTailCallAddress;
+      break;
+#if V8_ENABLE_WEBASSEMBLY
+    case CallDescriptor::kCallWasmFunction:
+      DCHECK(!caller->IsJSFunctionCall());
+      opcode = kArchTailCallWasm;
+      break;
+#endif  // V8_ENABLE_WEBASSEMBLY
+    default:
+      UNREACHABLE();
+  }
+  opcode = EncodeCallDescriptorFlags(opcode, callee->flags());
+
+  Emit(kArchPrepareTailCall, g.NoOutput());
+
+  // Add an immediate operand that represents the offset to the first slot
+  // that is unused with respect to the stack pointer that has been updated
+  // for the tail call instruction. Backends that pad arguments can write the
+  // padding value at this offset from the stack.
+  const int optional_padding_offset =
+      callee->GetOffsetToFirstUnusedStackSlot() - 1;
+  buffer.instruction_args.push_back(g.TempImmediate(optional_padding_offset));
+
+  const int first_unused_slot_offset =
+      kReturnAddressStackSlotCount + stack_param_delta;
+  buffer.instruction_args.push_back(g.TempImmediate(first_unused_slot_offset));
+
+  // Emit the tailcall instruction.
+  Emit(opcode, 0, nullptr, buffer.instruction_args.size(),
+       &buffer.instruction_args.front(), temps.size(),
+       temps.empty() ? nullptr : &temps.front());
 }
 
 template <typename Adapter>
@@ -2446,8 +2414,8 @@ void InstructionSelectorT<Adapter>::VisitGoto(block_t target) {
 
 template <>
 void InstructionSelectorT<TurboshaftAdapter>::VisitReturn(node_t node) {
-  const turboshaft::ReturnOp& ret =
-      schedule()->Get(node).Cast<turboshaft::ReturnOp>();
+  using namespace turboshaft;  // NOLINT(build/namespaces)
+  const ReturnOp& ret = schedule()->Get(node).Cast<ReturnOp>();
 
   OperandGenerator g(this);
   const int input_count =
@@ -2458,12 +2426,9 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitReturn(node_t node) {
 
   auto value_locations =
       zone()->template AllocateArray<InstructionOperand>(input_count);
-  const turboshaft::Operation& pop_count = schedule()->Get(ret.pop_count());
-  if (const turboshaft::ConstantOp* constant =
-          pop_count.TryCast<turboshaft::ConstantOp>();
-      constant != nullptr &&
-      (constant->kind == turboshaft::ConstantOp::Kind::kWord32 ||
-       constant->kind == turboshaft::ConstantOp::Kind::kWord64)) {
+  const Operation& pop_count = schedule()->Get(ret.pop_count());
+  if (pop_count.Is<Opmask::kWord32Constant>() ||
+      pop_count.Is<Opmask::kWord64Constant>()) {
     value_locations[0] = g.UseImmediate(ret.pop_count());
   } else {
     value_locations[0] = g.UseRegister(ret.pop_count());
@@ -2647,15 +2612,11 @@ void InstructionSelectorT<Adapter>::VisitDeoptimizeUnless(node_t node) {
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitSelect(Node* node) {
-  if constexpr (Adapter::IsTurboshaft) {
-    // TODO(nicohartmann@): Implement for Turboshaft.
-    UNIMPLEMENTED();
-  } else {
-    FlagsContinuation cont = FlagsContinuation::ForSelect(
-        kNotEqual, node, node->InputAt(1), node->InputAt(2));
-    VisitWordCompareZero(node, node->InputAt(0), &cont);
-  }
+void InstructionSelectorT<Adapter>::VisitSelect(node_t node) {
+  DCHECK_EQ(this->value_input_count(node), 3);
+  FlagsContinuation cont = FlagsContinuation::ForSelect(
+      kNotEqual, node, this->input_at(node, 1), this->input_at(node, 2));
+  VisitWordCompareZero(node, this->input_at(node, 0), &cont);
 }
 
 template <typename Adapter>
@@ -2705,7 +2666,7 @@ void InstructionSelectorT<Adapter>::VisitThrow(Node* node) {
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitDebugBreak(Node* node) {
+void InstructionSelectorT<Adapter>::VisitDebugBreak(node_t node) {
   OperandGenerator g(this);
   Emit(kArchDebugBreak, g.NoOutput());
 }
@@ -2735,7 +2696,7 @@ void InstructionSelectorT<Adapter>::VisitDeadValue(Node* node) {
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitComment(Node* node) {
+void InstructionSelectorT<Adapter>::VisitComment(node_t node) {
   OperandGenerator g(this);
   InstructionOperand operand(g.UseImmediate(node));
   Emit(kArchComment, 0, nullptr, 1, &operand);
@@ -2754,10 +2715,10 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitControl(block_t block) {
 #ifdef DEBUG
   // SSA deconstruction requires targets of branches not to have phis.
   // Edge split form guarantees this property, but is more strict.
-  if (auto successors = turboshaft::SuccessorBlocks(
-          block->LastOperation(*turboshaft_graph()));
+  if (auto successors =
+          SuccessorBlocks(block->LastOperation(*turboshaft_graph()));
       successors.size() > 1) {
-    for (turboshaft::Block* successor : successors) {
+    for (Block* successor : successors) {
       if (successor->HasPhis(*turboshaft_graph())) {
         std::ostringstream str;
         str << "You might have specified merged variables for a label with "
@@ -2777,6 +2738,9 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitControl(block_t block) {
       break;
     case Opcode::kReturn:
       VisitReturn(node);
+      break;
+    case Opcode::kTailCall:
+      VisitTailCall(node);
       break;
     case Opcode::kDeoptimize: {
       const DeoptimizeOp& deoptimize = op.Cast<DeoptimizeOp>();
@@ -4132,6 +4096,8 @@ void InstructionSelectorT<TurbofanAdapter>::VisitNode(Node* node) {
       return MarkAsSimd256(node), VisitI16x16RoundingAverageU(node);
     case IrOpcode::kI8x32RoundingAverageU:
       return MarkAsSimd256(node), VisitI8x32RoundingAverageU(node);
+    case IrOpcode::kS256Const:
+      return MarkAsSimd256(node), VisitS256Const(node);
     case IrOpcode::kS256Zero:
       return MarkAsSimd256(node), VisitS256Zero(node);
     case IrOpcode::kS256And:
@@ -4238,6 +4204,8 @@ void InstructionSelectorT<TurbofanAdapter>::VisitNode(Node* node) {
       return MarkAsSimd256(node), VisitF64x4Pmin(node);
     case IrOpcode::kF64x4Pmax:
       return MarkAsSimd256(node), VisitF64x4Pmax(node);
+    case IrOpcode::kI8x32Shuffle:
+      return MarkAsSimd256(node), VisitI8x32Shuffle(node);
 #endif  //  V8_TARGET_ARCH_X64
     default:
       FATAL("Unexpected operator #%d:%s @ node #%d", node->opcode(),
@@ -4257,6 +4225,7 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitNode(
     case Opcode::kBranch:
     case Opcode::kGoto:
     case Opcode::kReturn:
+    case Opcode::kTailCall:
     case Opcode::kUnreachable:
     case Opcode::kDeoptimize:
     case Opcode::kSwitch:
@@ -4393,6 +4362,34 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitNode(
             default:
               UNREACHABLE();
           }
+      }
+      UNREACHABLE();
+    }
+    case Opcode::kTryChange: {
+      const TryChangeOp& try_change = op.Cast<TryChangeOp>();
+      MarkAsRepresentation(try_change.to.machine_representation(), node);
+      DCHECK(try_change.kind ==
+                 TryChangeOp::Kind::kSignedFloatTruncateOverflowUndefined ||
+             try_change.kind ==
+                 TryChangeOp::Kind::kUnsignedFloatTruncateOverflowUndefined);
+      const bool is_signed =
+          try_change.kind ==
+          TryChangeOp::Kind::kSignedFloatTruncateOverflowUndefined;
+      switch (multi(try_change.from, try_change.to, is_signed)) {
+        case multi(Rep::Float64(), Rep::Word64(), true):
+          return VisitTryTruncateFloat64ToInt64(node);
+        case multi(Rep::Float64(), Rep::Word64(), false):
+          return VisitTryTruncateFloat64ToUint64(node);
+        case multi(Rep::Float64(), Rep::Word32(), true):
+          return VisitTryTruncateFloat64ToInt32(node);
+        case multi(Rep::Float64(), Rep::Word32(), false):
+          return VisitTryTruncateFloat64ToUint32(node);
+        case multi(Rep::Float32(), Rep::Word64(), true):
+          return VisitTryTruncateFloat32ToInt64(node);
+        case multi(Rep::Float32(), Rep::Word64(), false):
+          return VisitTryTruncateFloat32ToUint64(node);
+        default:
+          UNREACHABLE();
       }
       UNREACHABLE();
     }
@@ -4832,28 +4829,25 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitNode(
       UNREACHABLE();
     }
     case Opcode::kLoad: {
-      MachineRepresentation rep = op.Cast<turboshaft::LoadOp>()
-                                      .loaded_rep.ToMachineType()
-                                      .representation();
+      MachineRepresentation rep =
+          op.Cast<LoadOp>().loaded_rep.ToMachineType().representation();
       MarkAsRepresentation(rep, node);
       return VisitLoad(node);
     }
     case Opcode::kStore:
       return VisitStore(node);
     case Opcode::kTaggedBitcast: {
-      const turboshaft::TaggedBitcastOp& cast =
-          op.Cast<turboshaft::TaggedBitcastOp>();
-      if (cast.from == turboshaft::RegisterRepresentation::Tagged() &&
-          cast.to == turboshaft::RegisterRepresentation::PointerSized()) {
+      const TaggedBitcastOp& cast = op.Cast<TaggedBitcastOp>();
+      if (cast.from == RegisterRepresentation::Tagged() &&
+          cast.to == RegisterRepresentation::PointerSized()) {
         MarkAsRepresentation(MachineType::PointerRepresentation(), node);
         return VisitBitcastTaggedToWord(node);
       } else if (cast.from.IsWord() &&
-                 cast.to == turboshaft::RegisterRepresentation::Tagged()) {
+                 cast.to == RegisterRepresentation::Tagged()) {
         MarkAsTagged(node);
         return VisitBitcastWordToTagged(node);
-      } else if (cast.from ==
-                     turboshaft::RegisterRepresentation::Compressed() &&
-                 cast.to == turboshaft::RegisterRepresentation::Word32()) {
+      } else if (cast.from == RegisterRepresentation::Compressed() &&
+                 cast.to == RegisterRepresentation::Word32()) {
         MarkAsRepresentation(MachineType::PointerRepresentation(), node);
         return VisitBitcastTaggedToWord(node);
       } else {
@@ -4861,16 +4855,24 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitNode(
       }
     }
     case Opcode::kPhi:
-      MarkAsRepresentation(op.Cast<turboshaft::PhiOp>().rep, node);
+      MarkAsRepresentation(op.Cast<PhiOp>().rep, node);
       return VisitPhi(node);
     case Opcode::kProjection:
       return VisitProjection(node);
     case Opcode::kDeoptimizeIf:
-      if (Get(node).Cast<turboshaft::DeoptimizeIfOp>().negated) {
+      if (Get(node).Cast<DeoptimizeIfOp>().negated) {
         return VisitDeoptimizeUnless(node);
       }
       return VisitDeoptimizeIf(node);
+    case Opcode::kTrapIf: {
+      const TrapIfOp& trap_if = op.Cast<TrapIfOp>();
+      if (trap_if.negated) {
+        return VisitTrapUnless(node, trap_if.trap_id);
+      }
+      return VisitTrapIf(node, trap_if.trap_id);
+    }
     case Opcode::kCatchBlockBegin:
+      MarkAsTagged(node);
       return VisitIfException(node);
     case Opcode::kRetain:
       return VisitRetain(node);
@@ -4888,43 +4890,57 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitNode(
       // AssumeMap is used as a hint for optimization phases but does not
       // produce any code.
       return;
-    case Opcode::kStaticAssert: {
-      // Static asserts should be (statically asserted and) removed by
-      // turboshaft.
-      const turboshaft::StaticAssertOp& assert =
-          op.Cast<turboshaft::StaticAssertOp>();
-      UnparkedScopeIfNeeded scope(broker_);
-      AllowHandleDereference allow_handle_dereference;
-      std::cout << this->Get(assert.condition());
-      FATAL(
-          "Expected Turbofan static assert to hold, but got non-true input:\n  "
-          "%s",
-          assert.source);
+    case Opcode::kDebugBreak:
+      return VisitDebugBreak(node);
+    case Opcode::kSelect: {
+      const SelectOp& select = op.Cast<SelectOp>();
+      // If there is a Select, then it should only be one that is supported by
+      // the machine, and it should be meant to be implementation with cmove.
+      DCHECK_EQ(select.implem, SelectOp::Implementation::kCMove);
+      MarkAsRepresentation(select.rep, node);
+      return VisitSelect(node);
+    }
+    case Opcode::kWord32PairBinop: {
+      const Word32PairBinopOp& binop = op.Cast<Word32PairBinopOp>();
+      MarkAsWord32(node);
+      MarkPairProjectionsAsWord32(node);
+      switch (binop.kind) {
+        case Word32PairBinopOp::Kind::kAdd:
+          return VisitInt32PairAdd(node);
+        case Word32PairBinopOp::Kind::kSub:
+          return VisitInt32PairSub(node);
+        case Word32PairBinopOp::Kind::kMul:
+          return VisitInt32PairMul(node);
+        case Word32PairBinopOp::Kind::kShiftLeft:
+          return VisitWord32PairShl(node);
+        case Word32PairBinopOp::Kind::kShiftRightLogical:
+          return VisitWord32PairShr(node);
+        case Word32PairBinopOp::Kind::kShiftRightArithmetic:
+          return VisitWord32PairSar(node);
+      }
+      UNREACHABLE();
+    }
+    case Opcode::kBitcastWord32PairToFloat64:
+      return VisitBitcastWord32PairToFloat64(node);
+
+#define UNIMPLEMENTED_CASE(op) case Opcode::k##op:
+      TURBOSHAFT_WASM_OPERATION_LIST(UNIMPLEMENTED_CASE)
+      TURBOSHAFT_SIMD_OPERATION_LIST(UNIMPLEMENTED_CASE)
+#undef UNIMPLEMENTED_CASE
+    case Opcode::kAtomicWord32Pair:
+    case Opcode::kAtomicRMW: {
+      const std::string op_string = op.ToString();
+      PrintF("\033[31mNo ISEL support for: %s\033[m\n", op_string.c_str());
+      FATAL("Unexpected operation #%d:%s", node.id(), op_string.c_str());
     }
 
 #define UNREACHABLE_CASE(op) case Opcode::k##op:
       TURBOSHAFT_SIMPLIFIED_OPERATION_LIST(UNREACHABLE_CASE)
       TURBOSHAFT_OTHER_OPERATION_LIST(UNREACHABLE_CASE)
-      TURBOSHAFT_WASM_OPERATION_LIST(UNREACHABLE_CASE)
-      TURBOSHAFT_SIMD_OPERATION_LIST(UNREACHABLE_CASE)
-      UNREACHABLE_CASE(Tuple)
       UNREACHABLE_CASE(PendingLoopPhi)
+      UNREACHABLE_CASE(Tuple)
       UNREACHABLE();
 #undef UNREACHABLE_CASE
-
-    case Opcode::kTailCall:
-    case Opcode::kTryChange:
-    case Opcode::kWord32PairBinop:
-    case Opcode::kBitcastWord32PairToFloat64:
-    case Opcode::kSelect:
-    case Opcode::kTrapIf:
-    case Opcode::kDebugBreak:
-    case Opcode::kDebugPrint:
-    case Opcode::kCheckTurboshaftTypeOf: {
-      const std::string op_string = op.ToString();
-      PrintF("\033[31mNo ISEL support for: %s\033[m\n", op_string.c_str());
-      FATAL("Unexpected operation #%d:%s", node.id(), op_string.c_str());
-    }
   }
 }
 
@@ -5084,27 +5100,6 @@ InstructionSelectorT<TurbofanAdapter>::GetFrameStateDescriptor(node_t node) {
 }
 
 #if V8_ENABLE_WEBASSEMBLY
-template <typename Adapter>
-void InstructionSelectorT<Adapter>::CanonicalizeShuffle(Node* node,
-                                                        uint8_t* shuffle,
-                                                        bool* is_swizzle) {
-  // Get raw shuffle indices.
-  memcpy(shuffle, S128ImmediateParameterOf(node->op()).data(), kSimd128Size);
-  bool needs_swap;
-  bool inputs_equal = GetVirtualRegister(node->InputAt(0)) ==
-                      GetVirtualRegister(node->InputAt(1));
-  wasm::SimdShuffle::CanonicalizeShuffle(inputs_equal, shuffle, &needs_swap,
-                                         is_swizzle);
-  if (needs_swap) {
-    SwapShuffleInputs(node);
-  }
-  // Duplicate the first input; for some shuffles on some architectures, it's
-  // easiest to implement a swizzle as a shuffle so it might be used.
-  if (*is_swizzle) {
-    node->ReplaceInput(1, node->InputAt(0));
-  }
-}
-
 // static
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::SwapShuffleInputs(Node* node) {

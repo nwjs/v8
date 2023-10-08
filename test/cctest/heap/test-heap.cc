@@ -279,12 +279,12 @@ TEST(HeapObjects) {
   value = factory->NewNumberFromInt(Smi::kMinValue);
   CHECK(IsSmi(*value));
   CHECK(IsNumber(*value));
-  CHECK_EQ(Smi::kMinValue, Handle<Smi>::cast(value)->value());
+  CHECK_EQ(Smi::kMinValue, Smi::cast(*value).value());
 
   value = factory->NewNumberFromInt(Smi::kMaxValue);
   CHECK(IsSmi(*value));
   CHECK(IsNumber(*value));
-  CHECK_EQ(Smi::kMaxValue, Handle<Smi>::cast(value)->value());
+  CHECK_EQ(Smi::kMaxValue, Smi::cast(*value).value());
 
 #if !defined(V8_TARGET_ARCH_64_BIT)
   // TODO(lrn): We need a NumberFromIntptr function in order to test this.
@@ -1022,7 +1022,7 @@ static int ObjectsFoundInHeap(Heap* heap, Handle<Object> objs[], int size) {
       // InstructionStream object with non-InstructionStream object here and it
       // might produce false positives because operator== for tagged values
       // compares only lower 32 bits when pointer compression is enabled.
-      if (objs[i]->ptr() == obj.ptr()) {
+      if ((*objs[i]).ptr() == obj.ptr()) {
         found_count++;
       }
     }
@@ -1037,7 +1037,7 @@ TEST(Iteration) {
   Factory* factory = isolate->factory();
   v8::HandleScope scope(CcTest::isolate());
 
-  // Array of objects to scan haep for.
+  // Array of objects to scan heap for.
   const int objs_count = 6;
   Handle<Object> objs[objs_count];
   int next_objs_index = 0;
@@ -1740,7 +1740,7 @@ void CompilationCacheRegeneration(bool retain_root_sfi, bool flush_root_sfi,
     bool root_sfi_still_exists = false;
     MaybeObject maybe_root_sfi =
         script->shared_function_infos()->Get(kFunctionLiteralIdTopLevel);
-    if (HeapObject sfi_or_undefined;
+    if (Tagged<HeapObject> sfi_or_undefined;
         maybe_root_sfi.GetHeapObject(&sfi_or_undefined)) {
       root_sfi_still_exists = !IsUndefined(sfi_or_undefined);
     }
@@ -4182,7 +4182,7 @@ TEST(EnsureAllocationSiteDependentCodesProcessed) {
     CHECK_EQ(dependency->length(), DependentCode::kSlotsPerEntry);
     MaybeObject code = dependency->Get(0 + DependentCode::kCodeSlotOffset);
     CHECK(code->IsWeak());
-    CHECK_EQ(bar_handle->code(), Code::cast(code->GetHeapObjectAssumeWeak()));
+    CHECK_EQ(bar_handle->code(), Code::cast(code.GetHeapObjectAssumeWeak()));
     Smi groups = dependency->Get(0 + DependentCode::kGroupsSlotOffset).ToSmi();
     CHECK_EQ(static_cast<DependentCode::DependencyGroups>(groups.value()),
              DependentCode::kAllocationSiteTransitionChangedGroup |
@@ -6488,7 +6488,6 @@ void OOMCallback(const char* location, const OOMDetails&) {
   Heap* heap = oom_isolate->heap();
   size_t kSlack = heap->new_space() ? heap->MaxSemiSpaceSize() : 0;
   CHECK_LE(heap->OldGenerationCapacity(), kHeapLimit + kSlack);
-  CHECK_LE(heap->memory_allocator()->Size(), heap->MaxReserved() + kSlack);
   base::OS::ExitProcess(0);
 }
 
@@ -6839,7 +6838,7 @@ TEST(Regress8617) {
       "obj.method = foo;"
       "obj;");
   // Step 3. Make sure that foo moves during Mark-Compact.
-  Page* ec_page = Page::FromAddress(foo->ptr());
+  Page* ec_page = Page::FromAddress((*foo).ptr());
   heap::ForceEvacuationCandidate(ec_page);
   // Step 4. Start incremental marking.
   heap::SimulateIncrementalMarking(heap, false);
@@ -6859,7 +6858,7 @@ TEST(Regress8617) {
 }
 
 HEAP_TEST(MemoryReducerActivationForSmallHeaps) {
-  if (v8_flags.single_generation) return;
+  if (v8_flags.single_generation || !v8_flags.memory_reducer) return;
   ManualGCScope manual_gc_scope;
   LocalContext env;
   Isolate* isolate = CcTest::i_isolate();

@@ -3045,10 +3045,44 @@ void Shell::Fuzzilli(const v8::FunctionCallbackInfo<v8::Value>& info) {
         IMMEDIATE_CRASH();
         break;
       case 1:
-        CHECK(0);
+        CHECK(false);
         break;
-      default:
+      case 2:
         DCHECK(false);
+        break;
+      case 3: {
+        // Access an invalid address.
+        // We want to use an "interesting" address for the access (instead of
+        // e.g. nullptr). In the (unlikely) case that the address is actually
+        // mapped, simply increment the pointer until it crashes.
+        char* ptr = reinterpret_cast<char*>(0x414141414141ull);
+        for (int i = 0; i < 1024; i++) {
+          *ptr = 'A';
+          ptr += 1 * i::GB;
+        }
+        break;
+      }
+      case 4: {
+        // Use-after-free, likely only crashes in ASan builds.
+        auto* vec = new std::vector<int>(4);
+        delete vec;
+        USE(vec->at(0));
+        break;
+      }
+      case 5: {
+        // Out-of-bounds access (1), likely only crashes in ASan or
+        // "hardened"/"safe" libc++ builds.
+        std::vector<int> vec(5);
+        USE(vec[5]);
+        break;
+      }
+      case 6: {
+        // Out-of-bounds access (2), likely only crashes in ASan builds.
+        std::vector<int> vec(6);
+        memset(vec.data(), 42, 0x100);
+        break;
+      }
+      default:
         break;
     }
   } else if (strcmp(*operation, "FUZZILLI_PRINT") == 0) {
@@ -3307,39 +3341,6 @@ Local<FunctionTemplate> Shell::CreateNodeTemplates(
   return div_element;
 }
 
-static bool D8AccessCheckCallback(Local<Context> accessing_context,
-                                  Local<Object> accessed_object,
-                                  Local<Value> data) {
-  return Isolate::GetCurrent()
-      ->GetCurrentContext()
-      ->GetSecurityToken()
-      ->StrictEquals(
-          accessed_object->GetCreationContextChecked()->GetSecurityToken());
-}
-
-static void AccessNamedGetter(Local<Name> property,
-                              const PropertyCallbackInfo<Value>& info) {}
-static void AccessNamedSetter(Local<Name> property, Local<Value> value,
-                              const PropertyCallbackInfo<Value>& info) {}
-static void AccessNamedQuery(Local<Name> property,
-                             const PropertyCallbackInfo<Integer>& info) {}
-static void AccessNamedDeleter(Local<Name> property,
-                               const PropertyCallbackInfo<Boolean>& info) {}
-static void AccessNamedEnumerator(const PropertyCallbackInfo<Array>& info) {}
-static void AccessIndexedGetter(uint32_t index,
-                                const PropertyCallbackInfo<Value>& info) {}
-
-static void AccessIndexedSetter(uint32_t index, Local<Value> value,
-                                const PropertyCallbackInfo<Value>& info) {}
-
-static void AccessIndexedQuery(uint32_t index,
-                               const PropertyCallbackInfo<Integer>& info) {}
-
-static void AccessIndexedDeleter(uint32_t index,
-                                 const PropertyCallbackInfo<Boolean>& info) {}
-
-static void AccessIndexedEnumerator(const PropertyCallbackInfo<Array>& info) {}
-
 Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
   Local<ObjectTemplate> global_template = ObjectTemplate::New(isolate);
   global_template->Set(Symbol::GetToStringTag(isolate),
@@ -3395,18 +3396,6 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
   if (i::v8_flags.expose_async_hooks) {
     global_template->Set(isolate, "async_hooks",
                          Shell::CreateAsyncHookTemplate(isolate));
-  }
-
-  if (options.throw_on_failed_access_check ||
-      options.noop_on_failed_access_check) {
-    global_template->SetAccessCheckCallbackAndHandler(
-        D8AccessCheckCallback,
-        v8::NamedPropertyHandlerConfiguration(
-            AccessNamedGetter, AccessNamedSetter, AccessNamedQuery,
-            AccessNamedDeleter, AccessNamedEnumerator),
-        v8::IndexedPropertyHandlerConfiguration(
-            AccessIndexedGetter, AccessIndexedSetter, AccessIndexedQuery,
-            AccessIndexedDeleter, AccessIndexedEnumerator));
   }
 
   return global_template;
@@ -3692,11 +3681,6 @@ void Shell::PromiseRejectCallback(v8::PromiseRejectMessage data) {
   isolate_data->AddUnhandledPromise(promise, message, exception);
 }
 
-static void ThrowOnFailedAccessCheck(Local<Object> host, v8::AccessType type,
-                                     Local<Value> data) {
-  Isolate::GetCurrent()->ThrowError("Error in failed access check callback");
-}
-
 void Shell::Initialize(Isolate* isolate, D8Console* console,
                        bool isOnMainThread) {
   isolate->SetPromiseRejectCallback(PromiseRejectCallback);
@@ -3721,13 +3705,6 @@ void Shell::Initialize(Isolate* isolate, D8Console* console,
       Shell::HostInitializeImportMetaObject);
   isolate->SetHostCreateShadowRealmContextCallback(
       Shell::HostCreateShadowRealmContext);
-
-  if (options.throw_on_failed_access_check) {
-    isolate->SetFailedAccessCheckCallbackFunction(ThrowOnFailedAccessCheck);
-  } else if (options.noop_on_failed_access_check) {
-    isolate->SetFailedAccessCheckCallbackFunction(
-        [](Local<Object> host, v8::AccessType type, Local<Value> data) {});
-  }
 
   debug::SetConsoleDelegate(isolate, console);
 }
@@ -5078,24 +5055,11 @@ bool Shell::SetOptions(int argc, char* argv[]) {
       options.enable_sandbox_crash_filter = true;
       argv[i] = nullptr;
 #endif  // V8_ENABLE_SANDBOX
-    } else if (strcmp(argv[i], "--throw-on-failed-access-check") == 0) {
-      options.throw_on_failed_access_check = true;
-      argv[i] = nullptr;
-    } else if (strcmp(argv[i], "--noop-on-failed-access-check") == 0) {
-      options.noop_on_failed_access_check = true;
-      argv[i] = nullptr;
     } else {
 #ifdef V8_TARGET_OS_WIN
       PreProcessUnicodeFilenameArg(argv, i);
 #endif
     }
-  }
-
-  if (options.throw_on_failed_access_check &&
-      options.noop_on_failed_access_check && check_d8_flag_contradictions) {
-    FATAL(
-        "Flag --throw-on-failed-access-check is incompatible with "
-        "--noop-on-failed-access-check.");
   }
 
   const char* usage =
@@ -5201,6 +5165,10 @@ int Shell::RunMain(v8::Isolate* isolate, bool last_run) {
     // TODO(jgruber,v8:10500): Don't deoptimize once we support serialization
     // of optimized code.
     i::Deoptimizer::DeoptimizeAll(i_isolate);
+    // Trigger GC to better align with production code. Also needed by
+    // ClearReconstructableDataForSerialization to not look into dead objects.
+    i_isolate->heap()->CollectAllAvailableGarbage(
+        i::GarbageCollectionReason::kSnapshotCreator);
     i::Snapshot::ClearReconstructableDataForSerialization(
         i_isolate, kClearRecompilableData);
     i::Snapshot::SerializeDeserializeAndVerifyForTesting(i_isolate, i_context);

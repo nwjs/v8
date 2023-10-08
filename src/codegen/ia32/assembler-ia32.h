@@ -124,7 +124,7 @@ class Immediate {
       : Immediate(ext.address(), RelocInfo::EXTERNAL_REFERENCE) {}
   inline explicit Immediate(Handle<HeapObject> handle)
       : Immediate(handle.address(), RelocInfo::FULL_EMBEDDED_OBJECT) {}
-  inline explicit Immediate(Smi value)
+  inline explicit Immediate(Tagged<Smi> value)
       : Immediate(static_cast<intptr_t>(value.ptr())) {}
 
   static Immediate EmbeddedNumber(double number);  // Smi or HeapNumber.
@@ -247,7 +247,7 @@ class V8_EXPORT_PRIVATE Operand {
   explicit Operand(Register base, int32_t disp,
                    RelocInfo::Mode rmode = RelocInfo::NO_INFO);
 
-  // [rip + disp/r]
+  // [disp/r]
   explicit Operand(Label* label) {
     set_modrm(0, ebp);
     set_dispr(reinterpret_cast<intptr_t>(label), RelocInfo::INTERNAL_REFERENCE);
@@ -423,7 +423,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // This sets the branch destination (which is in the instruction on x86).
   // This is for calls and branches within generated code.
   inline static void deserialization_set_special_target_at(
-      Address instruction_payload, Code code, Address target);
+      Address instruction_payload, Tagged<Code> code, Address target);
 
   // Get the size of the special target encoded at 'instruction_payload'.
   inline static int deserialization_special_target_size(
@@ -642,6 +642,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   void inc(Operand dst);
 
   void lea(Register dst, Operand src);
+  void lea(Register dst, Register src, Label* lbl);
 
   // Unsigned multiply instruction.
   void mul(Register src);  // edx:eax = eax * reg.

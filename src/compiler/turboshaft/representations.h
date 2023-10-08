@@ -32,10 +32,12 @@ class MaybeRegisterRepresentation {
   };
 
   explicit constexpr MaybeRegisterRepresentation(Enum value) : value_(value) {}
-  MaybeRegisterRepresentation() : value_(kInvalid) {}
+  constexpr MaybeRegisterRepresentation() : value_(kInvalid) {}
+
+  constexpr bool is_valid() const { return value_ != kInvalid; }
 
   constexpr Enum value() const {
-    DCHECK_NE(value_, kInvalid);
+    DCHECK(is_valid());
     return value_;
   }
 
@@ -334,10 +336,11 @@ constexpr bool RegisterRepresentation::AllowImplicitRepresentationChangeTo(
 
 std::ostream& operator<<(std::ostream& os, MaybeRegisterRepresentation rep);
 
-template <>
-struct MultiSwitch<RegisterRepresentation> {
+template <typename T>
+struct MultiSwitch<
+    T, std::enable_if_t<std::is_base_of_v<MaybeRegisterRepresentation, T>>> {
   static constexpr uint64_t max_value = 8;
-  static constexpr uint64_t encode(RegisterRepresentation rep) {
+  static constexpr uint64_t encode(T rep) {
     const uint64_t value = static_cast<uint64_t>(rep.value());
     DCHECK_LT(value, max_value);
     return value;
@@ -448,9 +451,12 @@ class MemoryRepresentation {
   };
 
   explicit constexpr MemoryRepresentation(Enum value) : value_(value) {}
-  MemoryRepresentation() : value_(kInvalid) {}
+  constexpr MemoryRepresentation() : value_(kInvalid) {}
+
+  constexpr bool is_valid() const { return value_ != kInvalid; }
+
   constexpr Enum value() const {
-    DCHECK_NE(value_, kInvalid);
+    DCHECK(is_valid());
     return value_;
   }
   constexpr operator Enum() const { return value(); }

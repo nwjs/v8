@@ -33,6 +33,7 @@
 #include <stdlib.h>
 
 #include "include/v8-json.h"
+#include "include/v8-template.h"
 #include "src/api/api-inl.h"
 #include "src/base/platform/elapsed-timer.h"
 #include "src/base/strings.h"
@@ -306,7 +307,7 @@ void ConsStringGenerationData::Reset() {
   rng_.init();
 }
 
-void AccumulateStats(ConsString cons_string, ConsStringStats* stats) {
+void AccumulateStats(Tagged<ConsString> cons_string, ConsStringStats* stats) {
   int left_length = cons_string->first()->length();
   int right_length = cons_string->second()->length();
   CHECK(cons_string->length() == left_length + right_length);
@@ -343,11 +344,11 @@ void AccumulateStats(Handle<String> cons_string, ConsStringStats* stats) {
   stats->chars_ += cons_string->length();
 }
 
-void AccumulateStatsWithOperator(ConsString cons_string,
+void AccumulateStatsWithOperator(Tagged<ConsString> cons_string,
                                  ConsStringStats* stats) {
   ConsStringIterator iter(cons_string);
   int offset;
-  for (String string = iter.Next(&offset); !string.is_null();
+  for (Tagged<String> string = iter.Next(&offset); !string.is_null();
        string = iter.Next(&offset)) {
     // Accumulate stats.
     CHECK_EQ(0, offset);
@@ -610,7 +611,8 @@ TEST(ConsStringWithEmptyFirstFlatten) {
   CHECK_EQ(initial_length, flat->length());
 }
 
-static void VerifyCharacterStream(String flat_string, String cons_string) {
+static void VerifyCharacterStream(Tagged<String> flat_string,
+                                  Tagged<String> cons_string) {
   // Do not want to test ConString traversal on flat string.
   CHECK(flat_string->IsFlat() && !IsConsString(flat_string));
   CHECK(IsConsString(cons_string));
@@ -676,7 +678,7 @@ void TestStringCharacterStream(BuildString build, int test_cases) {
     VerifyConsString(cons_string, &data);
     // TODO(leszeks): Remove Tagged cast when .first() returns a Tagged.
     static_assert(kTaggedCanConvertToRawObjects);
-    String flat_string_ptr =
+    Tagged<String> flat_string_ptr =
         IsConsString(*flat_string)
             ? Tagged(Tagged<ConsString>::cast(*flat_string)->first())
             : *flat_string;
@@ -1425,6 +1427,44 @@ TEST(SliceFromExternal) {
   // This avoids the GC from trying to free stack allocated resources.
   i::Handle<i::ExternalOneByteString>::cast(string)->SetResource(
       CcTest::i_isolate(), nullptr);
+}
+
+static void ExternalizeDuringJsonStringifyCallback(
+    const v8::FunctionCallbackInfo<v8::Value>& args) {
+  v8::Local<v8::Value> key = v8_compile("p")
+                                 ->Run(CcTest::isolate()->GetCurrentContext())
+                                 .ToLocalChecked();
+  const static char ext_string_content[] = "prop-1234567890asdf";
+  OneByteVectorResource* resource =
+      new OneByteVectorResource(v8::base::Vector<const char>(
+          ext_string_content, strlen(ext_string_content)));
+  CHECK(v8::String::Cast(*key)->MakeExternal(resource));
+}
+
+TEST(ExternalizeDuringJsonStringify) {
+  CcTest::InitializeVM();
+  v8::Isolate* isolate = CcTest::isolate();
+  v8::HandleScope scope(isolate);
+  const char script[] = R"(
+    var p = "prop-1234567890asdf";
+    JSON.stringify([
+      { [p]: 3 },
+      { toJSON: callExternal },
+      { [p]: 4 },
+    ]);
+  )";
+  v8::Local<v8::ObjectTemplate> global = ObjectTemplate::New(isolate);
+  global->Set(isolate, "callExternal",
+              v8::FunctionTemplate::New(
+                  isolate, ExternalizeDuringJsonStringifyCallback));
+  LocalContext context(nullptr, global);
+  v8::Local<v8::Value> stringified =
+      v8_compile(script)->Run(context.local()).ToLocalChecked();
+  CHECK(v8::String::NewFromUtf8Literal(
+            isolate,
+            R"([{"prop-1234567890asdf":3},null,{"prop-1234567890asdf":4}])")
+            ->Equals(context.local(), stringified)
+            .FromJust());
 }
 
 TEST(TrivialSlice) {

@@ -91,10 +91,10 @@
 
 ##############################################################################
 ['arch == s390x or arch == ppc64', {
-  # Need simd support on Liftoff
-  'debugger/wasm-scope-info': [SKIP],
+  # Need to fix loading of DebugBreak registers
   'debugger/wasm-inspect-many-registers': [SKIP],
   # endian related issue
+  'debugger/wasm-scope-info': [SKIP],
   'debugger/wasm-conditional-breakpoints': [SKIP],
   'debugger/wasm-evaluate-on-call-frame': [SKIP],
   'debugger/wasm-set-breakpoint': [SKIP],
@@ -205,6 +205,12 @@
   # (https://crbug.com/v8/11107).
   'runtime/evaluate-async': [SKIP],
 }], # asan == True
+
+##############################################################################
+['full_debug', {
+  # Tests too slow in non-optimized debug mode.
+  'runtime/console-messages-limits': [SKIP],
+}],  # 'full_debug'
 
 ################################################################################
 ['third_party_heap', {

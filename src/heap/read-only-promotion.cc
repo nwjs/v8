@@ -11,6 +11,7 @@
 #include "src/heap/combined-heap.h"
 #include "src/heap/heap.h"
 #include "src/objects/heap-object-inl.h"
+#include "src/sandbox/external-pointer-table.h"
 
 namespace v8 {
 namespace internal {
@@ -19,9 +20,14 @@ namespace {
 // Convenience aliases:
 using HeapObjectSet =
     std::unordered_set<HeapObject, Object::Hasher, Object::KeyEqualSafe>;
-using HeapObjectMap = std::unordered_map<HeapObject, HeapObject, Object::Hasher,
-                                         Object::KeyEqualSafe>;
-bool Contains(const HeapObjectSet& s, HeapObject o) { return s.count(o) != 0; }
+using HeapObjectMap = std::unordered_map<Tagged<HeapObject>, Tagged<HeapObject>,
+                                         Object::Hasher, Object::KeyEqualSafe>;
+bool Contains(const HeapObjectSet& s, Tagged<HeapObject> o) {
+  return s.count(o) != 0;
+}
+bool Contains(const HeapObjectMap& s, Tagged<HeapObject> o) {
+  return s.count(o) != 0;
+}
 
 class Committee final {
  public:
@@ -39,10 +45,10 @@ class Committee final {
     DCHECK(promo_accepted_.empty());
     DCHECK(promo_rejected_.empty());
 
-    HeapObjectIterator it(
-        isolate_->heap(), safepoint_scope,
-        HeapObjectIterator::HeapObjectsFiltering::kFilterUnreachable);
-    for (HeapObject o = it.Next(); !o.is_null(); o = it.Next()) {
+    // We assume that a full and precise GC has reclaimed all dead objects
+    // and therefore that no filtering of unreachable objects is required here.
+    HeapObjectIterator it(isolate_->heap(), safepoint_scope);
+    for (Tagged<HeapObject> o = it.Next(); !o.is_null(); o = it.Next()) {
       DCHECK(!o.InReadOnlySpace());
 
       // Note that cycles prevent us from promoting/rejecting each subgraph as
@@ -53,6 +59,7 @@ class Committee final {
       HeapObjectSet accepted_subgraph;  // Either all are accepted or none.
       HeapObjectSet visited;            // Cycle detection.
       if (!EvaluateSubgraph(o, &accepted_subgraph, &visited)) continue;
+      if (accepted_subgraph.empty()) continue;
 
       if (V8_UNLIKELY(v8_flags.trace_read_only_promotion)) {
         LogAcceptedPromotionSet(accepted_subgraph);
@@ -74,7 +81,7 @@ class Committee final {
   // Returns `false` if the subgraph rooted at `o` is rejected.
   // Returns `true` if it is accepted, or if we've reached a cycle and `o`
   // will be processed further up the callchain.
-  bool EvaluateSubgraph(HeapObject o, HeapObjectSet* accepted_subgraph,
+  bool EvaluateSubgraph(Tagged<HeapObject> o, HeapObjectSet* accepted_subgraph,
                         HeapObjectSet* visited) {
     if (o.InReadOnlySpace()) return true;
     if (Contains(promo_rejected_, o)) return false;
@@ -90,7 +97,7 @@ class Committee final {
     }
     // Recurse into outgoing pointers.
     CandidateVisitor v(this, accepted_subgraph, visited);
-    o.Iterate(isolate_, &v);
+    o->Iterate(isolate_, &v);
     if (!v.all_slots_are_promo_candidates()) {
       const auto& [it, inserted] = promo_rejected_.insert(o);
       if (V8_UNLIKELY(v8_flags.trace_read_only_promotion) && inserted) {
@@ -105,14 +112,19 @@ class Committee final {
   }
 
 #define PROMO_CANDIDATE_TYPE_LIST(V) \
+  V(AccessCheckInfo)                 \
+  V(AccessorInfo)                    \
+  V(CallHandlerInfo)                 \
   V(Code)                            \
+  V(InterceptorInfo)                 \
   V(ScopeInfo)                       \
-  V(SharedFunctionInfo)
+  V(SharedFunctionInfo)              \
+  V(Symbol)
   // TODO(jgruber): Don't forget to extend ReadOnlyPromotionImpl::Verify when
   // adding new object types here.
 
-  static bool IsPromoCandidate(Isolate* isolate, HeapObject o) {
-    const InstanceType itype = o.map(isolate).instance_type();
+  static bool IsPromoCandidate(Isolate* isolate, Tagged<HeapObject> o) {
+    const InstanceType itype = o->map(isolate)->instance_type();
 #define V(TYPE)                                            \
   if (InstanceTypeChecker::Is##TYPE(itype)) {              \
     return IsPromoCandidate##TYPE(isolate, TYPE::cast(o)); \
@@ -127,29 +139,21 @@ class Committee final {
   }
 #undef PROMO_CANDIDATE_TYPE_LIST
 
-  static bool IsPromoCandidateCode(Isolate* isolate, Code o) {
-#if !defined(V8_SHORT_BUILTIN_CALLS) || \
-    defined(V8_COMPRESS_POINTERS_IN_SHARED_CAGE)
-    // Builtins have a single unique shared entry point per process. The
-    // embedded builtins region may be remapped into the process-wide code
-    // range, but that happens before RO space is deserialized. Their Code
-    // objects can be shared in RO space.
-    static_assert(Builtins::kCodeObjectsAreInROSpace);
-    return o.is_builtin();
-#else
-    // Builtins may be remapped more than once per process and thus their Code
-    // objects cannot be shared.
-    static_assert(!Builtins::kCodeObjectsAreInROSpace);
-    return false;
-#endif
+#define DEF_PROMO_CANDIDATE(Type) \
+  static bool IsPromoCandidate##Type(Isolate* isolate, Type o) { return true; }
+
+  DEF_PROMO_CANDIDATE(AccessCheckInfo)
+  DEF_PROMO_CANDIDATE(AccessorInfo)
+  DEF_PROMO_CANDIDATE(CallHandlerInfo)
+  static bool IsPromoCandidateCode(Isolate* isolate, Tagged<Code> o) {
+    return Builtins::kCodeObjectsAreInROSpace && o->is_builtin();
   }
-  static bool IsPromoCandidateScopeInfo(Isolate* isolate, ScopeInfo o) {
-    return true;
-  }
+  DEF_PROMO_CANDIDATE(InterceptorInfo)
+  DEF_PROMO_CANDIDATE(ScopeInfo)
   static bool IsPromoCandidateSharedFunctionInfo(Isolate* isolate,
-                                                 SharedFunctionInfo o) {
-    // Only internal builtin SFIs are guaranteed to remain immutable.
-    if (o.has_script(kAcquireLoad)) return false;
+                                                 Tagged<SharedFunctionInfo> o) {
+    // Only internal SFIs are guaranteed to remain immutable.
+    if (o->has_script(kAcquireLoad)) return false;
     // kIllegal is used for js_global_object_function, which is created during
     // bootstrapping but never rooted. We currently assumed that all objects in
     // the snapshot are live. But RO space is 1) not GC'd and 2) serialized
@@ -158,8 +162,11 @@ class Committee final {
     // TODO(jgruber): A better solution. Remove the liveness assumption (see
     // test-heap-profiler.cc)? Overwrite dead RO objects with fillers
     // pre-serialization? Implement a RO GC pass pre-serialization?
-    return o.HasBuiltinId() && o.builtin_id() != Builtin::kIllegal;
+    return o->HasBuiltinId() && o->builtin_id() != Builtin::kIllegal;
   }
+  DEF_PROMO_CANDIDATE(Symbol)
+
+#undef DEF_PROMO_CANDIDATE
 
   // Recurses into all tagged slots of an object and tracks whether predicates
   // failed on any part of the subgraph.
@@ -178,12 +185,12 @@ class Committee final {
       return first_rejected_slot_offset_ == -1;
     }
 
-    void VisitPointers(HeapObject host, MaybeObjectSlot start,
+    void VisitPointers(Tagged<HeapObject> host, MaybeObjectSlot start,
                        MaybeObjectSlot end) final {
       if (!all_slots_are_promo_candidates()) return;
       for (MaybeObjectSlot slot = start; slot < end; slot++) {
         MaybeObject maybe_object = slot.load(committee_->isolate_);
-        HeapObject heap_object;
+        Tagged<HeapObject> heap_object;
         if (!maybe_object.GetHeapObject(&heap_object)) continue;
         if (!committee_->EvaluateSubgraph(heap_object, accepted_subgraph_,
                                           visited_)) {
@@ -194,16 +201,16 @@ class Committee final {
         }
       }
     }
-    void VisitPointers(HeapObject host, ObjectSlot start,
+    void VisitPointers(Tagged<HeapObject> host, ObjectSlot start,
                        ObjectSlot end) final {
       VisitPointers(host, MaybeObjectSlot(start), MaybeObjectSlot(end));
     }
-    void VisitInstructionStreamPointer(Code host,
+    void VisitInstructionStreamPointer(Tagged<Code> host,
                                        InstructionStreamSlot slot) final {
-      DCHECK(host.is_builtin());
+      DCHECK(host->is_builtin());
     }
-    void VisitMapPointer(HeapObject host) final {
-      MaybeObjectSlot slot = host.RawMaybeWeakField(HeapObject::kMapOffset);
+    void VisitMapPointer(Tagged<HeapObject> host) final {
+      MaybeObjectSlot slot = host->RawMaybeWeakField(HeapObject::kMapOffset);
       VisitPointers(host, slot, slot + 1);
     }
 
@@ -216,22 +223,36 @@ class Committee final {
 
   static void LogAcceptedPromotionSet(const HeapObjectSet& os) {
     std::cout << "ro-promotion: accepted set {";
-    for (HeapObject o : os) {
+    for (Tagged<HeapObject> o : os) {
       std::cout << reinterpret_cast<void*>(o.ptr()) << ", ";
     }
     std::cout << "}\n";
   }
 
-  static void LogRejectedPromotionForFailedPredicate(HeapObject o) {
+  static void LogRejectedPromotionForFailedPredicate(Tagged<HeapObject> o) {
     std::cout << "ro-promotion: rejected due to failed predicate "
-              << reinterpret_cast<void*>(o.ptr()) << "\n";
+              << reinterpret_cast<void*>(o.ptr()) << " ("
+              << o->map()->instance_type() << ")"
+              << "\n";
   }
 
-  static void LogRejectedPromotionForInvalidSubgraph(
-      HeapObject o, int first_rejected_slot_offset) {
+  void LogRejectedPromotionForInvalidSubgraph(Tagged<HeapObject> o,
+                                              int first_rejected_slot_offset) {
     std::cout << "ro-promotion: rejected due to rejected subgraph "
-              << reinterpret_cast<void*>(o.ptr()) << " at slot offset "
-              << first_rejected_slot_offset << "\n";
+              << reinterpret_cast<void*>(o.ptr()) << " ("
+              << o->map()->instance_type() << ")"
+              << " at slot offset " << first_rejected_slot_offset << " ";
+
+    MaybeObjectSlot slot = o->RawMaybeWeakField(first_rejected_slot_offset);
+    MaybeObject maybe_object = slot.load(isolate_);
+    Tagged<HeapObject> heap_object;
+    if (maybe_object.GetHeapObject(&heap_object)) {
+      std::cout << reinterpret_cast<void*>(heap_object.ptr()) << " ("
+                << heap_object->map()->instance_type() << ")"
+                << "\n";
+    } else {
+      std::cout << "<cleared weak object>\n";
+    }
   }
 
   Isolate* const isolate_;
@@ -245,8 +266,8 @@ class ReadOnlyPromotionImpl final : public AllStatic {
                                  const std::vector<HeapObject>& promotees,
                                  HeapObjectMap* moves) {
     ReadOnlySpace* rospace = isolate->heap()->read_only_space();
-    for (HeapObject src : promotees) {
-      const int size = src.Size(isolate);
+    for (Tagged<HeapObject> src : promotees) {
+      const int size = src->Size(isolate);
       Tagged<HeapObject> dst =
           rospace->AllocateRaw(size, kTaggedAligned).ToObjectChecked();
       Heap::CopyBlock(dst.address(), src.address(), size);
@@ -258,25 +279,29 @@ class ReadOnlyPromotionImpl final : public AllStatic {
                              const SafepointScope& safepoint_scope,
                              const HeapObjectMap& moves) {
     Heap* heap = isolate->heap();
+#ifdef V8_COMPRESS_POINTERS
+    ExternalPointerTable::UnsealReadOnlySegmentScope unseal_scope(
+        &isolate->external_pointer_table());
+#endif  // V8_COMPRESS_POINTERS
     UpdatePointersVisitor v(isolate, &moves);
 
     // Iterate all roots.
-    heap->IterateRoots(&v, base::EnumSet<SkipRoot>{
-                               SkipRoot::kUnserializable,
-                               SkipRoot::kWeak,
-                           });
+    EmbedderStackStateScope stack_scope(
+        isolate->heap(), EmbedderStackStateScope::kExplicitInvocation,
+        StackState::kNoHeapPointers);
+    heap->IterateRoots(&v, base::EnumSet<SkipRoot>{});
 
     // Iterate all objects on the mutable heap.
-    HeapObjectIterator it(
-        heap, safepoint_scope,
-        HeapObjectIterator::HeapObjectsFiltering::kFilterUnreachable);
-    for (HeapObject o = it.Next(); !o.is_null(); o = it.Next()) {
-      o.Iterate(isolate, &v);
+    // We assume that a full and precise GC has reclaimed all dead objects
+    // and therefore that no filtering of unreachable objects is required here.
+    HeapObjectIterator it(heap, safepoint_scope);
+    for (Tagged<HeapObject> o = it.Next(); !o.is_null(); o = it.Next()) {
+      o->Iterate(isolate, &v);
     }
 
     // Iterate all objects we just copied into RO space.
     for (auto [src, dst] : moves) {
-      dst.Iterate(isolate, &v);
+      dst->Iterate(isolate, &v);
     }
   }
 
@@ -304,7 +329,11 @@ class ReadOnlyPromotionImpl final : public AllStatic {
   class UpdatePointersVisitor final : public ObjectVisitor, public RootVisitor {
    public:
     UpdatePointersVisitor(Isolate* isolate, const HeapObjectMap* moves)
-        : isolate_(isolate), moves_(moves) {}
+        : isolate_(isolate), moves_(moves) {
+      for (auto [src, dst] : *moves_) {
+        moves_reverse_lookup_.emplace(dst, src);
+      }
+    }
 
     // The RootVisitor interface.
     void VisitRootPointers(Root root, const char* description,
@@ -315,26 +344,45 @@ class ReadOnlyPromotionImpl final : public AllStatic {
     }
 
     // The ObjectVisitor interface.
-    void VisitPointers(HeapObject host, MaybeObjectSlot start,
+    void VisitPointers(Tagged<HeapObject> host, MaybeObjectSlot start,
                        MaybeObjectSlot end) final {
       for (MaybeObjectSlot slot = start; slot < end; slot++) {
         ProcessSlot(host, slot);
       }
     }
-    void VisitPointers(HeapObject host, ObjectSlot start,
+    void VisitPointers(Tagged<HeapObject> host, ObjectSlot start,
                        ObjectSlot end) final {
       VisitPointers(host, MaybeObjectSlot(start), MaybeObjectSlot(end));
     }
-    void VisitInstructionStreamPointer(Code host,
+    void VisitInstructionStreamPointer(Tagged<Code> host,
                                        InstructionStreamSlot slot) final {
       // InstructionStream objects never move to RO space.
     }
-    void VisitMapPointer(HeapObject host) final {
-      ProcessSlot(host, host.RawMaybeWeakField(HeapObject::kMapOffset));
+    void VisitMapPointer(Tagged<HeapObject> host) final {
+      ProcessSlot(host, host->RawMaybeWeakField(HeapObject::kMapOffset));
     }
-    void VisitIndirectPointer(HeapObject host, IndirectPointerSlot slot,
+    void VisitExternalPointer(Tagged<HeapObject> host, ExternalPointerSlot slot,
+                              ExternalPointerTag tag) final {
+#ifdef V8_ENABLE_SANDBOX
+      auto it = moves_reverse_lookup_.find(host);
+      if (it == moves_reverse_lookup_.end()) return;
+
+      // If we reach here, `host` is a moved object with external pointer slots
+      // located in RO space. To preserve the 1:1 relation between slots and
+      // table entries, allocate a new entry (in
+      // read_only_external_pointer_space) now.
+      RecordProcessedSlotIfDebug(slot.address());
+      Address slot_value = slot.load(isolate_, tag);
+      slot.init(isolate_, slot_value, tag);
+
+      if (V8_UNLIKELY(v8_flags.trace_read_only_promotion_verbose)) {
+        LogUpdatedExternalPointerTableEntry(host, slot, slot_value);
+      }
+#endif  // V8_ENABLE_SANDBOX
+    }
+    void VisitIndirectPointer(Tagged<HeapObject> host, IndirectPointerSlot slot,
                               IndirectPointerMode mode) final {}
-    void VisitIndirectPointerTableEntry(HeapObject host,
+    void VisitIndirectPointerTableEntry(Tagged<HeapObject> host,
                                         IndirectPointerSlot slot) final {
 #ifdef V8_CODE_POINTER_SANDBOXING
       // When an object owning an indirect pointer table entry is relocated, it
@@ -343,51 +391,71 @@ class ReadOnlyPromotionImpl final : public AllStatic {
       // code pointer table.
       CHECK(IsCode(host));
 
-      // Due to the way we handle baseline code during serialization, we may
-      // encounter such Code objects during iteration. Do a lookup through
-      // moves_ to make sure we only update CPT entries for moved objects.
+      // Due to the way we handle baseline code during serialization (we
+      // manually skip over them), we may encounter such live Code objects in
+      // mutable space during iteration. Do a lookup to make sure we only
+      // update CPT entries for moved objects.
+      auto it = moves_reverse_lookup_.find(host);
+      if (it == moves_reverse_lookup_.end()) return;
+
+      // If we reach here, `host` is a moved Code object located in RO space.
+      CHECK(host.InReadOnlySpace());
+      RecordProcessedSlotIfDebug(slot.address());
+
+      Tagged<Code> dead_code = Code::cast(it->second);
+      CHECK(IsCode(dead_code));
+      CHECK(!dead_code.InReadOnlySpace());
+
       IndirectPointerHandle handle = slot.Relaxed_LoadHandle();
       CodePointerTable* cpt = GetProcessWideCodePointerTable();
-      Code maybe_dead_code(Code::cast(Object(cpt->GetCodeObject(handle))));
-      auto it = moves_->find(maybe_dead_code);
-      if (it == moves_->end()) return;
-      DCHECK_EQ(it->second, host);
+      CHECK_EQ(dead_code, Object(cpt->GetCodeObject(handle)));
 
       // The old Code object (in mutable space) is dead. To preserve the 1:1
       // relation between Code objects and CPT entries, overwrite it immediately
       // with the filler object.
-      Code dead_code = maybe_dead_code;
-      CHECK(IsCode(dead_code));
-      CHECK(host.InReadOnlySpace());
-      CHECK(!dead_code.InReadOnlySpace());
       isolate_->heap()->CreateFillerObjectAt(dead_code.address(), Code::kSize);
 
       // Update the CPT entry to point at the moved RO Code object.
       cpt->SetCodeObject(handle, host.ptr());
+
+      if (V8_UNLIKELY(v8_flags.trace_read_only_promotion_verbose)) {
+        LogUpdatedCodePointerTableEntry(host, slot, dead_code);
+      }
 #else
       UNREACHABLE();
 #endif
     }
+    void VisitRootPointers(Root root, const char* description,
+                           OffHeapObjectSlot start,
+                           OffHeapObjectSlot end) override {
+      // We shouldn't have moved any string table contents (which is what
+      // OffHeapObjectSlot currently refers to).
+      for (OffHeapObjectSlot slot = start; slot < end; slot++) {
+        Object o = slot.load(isolate_);
+        if (!IsHeapObject(o)) continue;
+        CHECK(!Contains(*moves_, HeapObject::cast(o)));
+      }
+    }
 
    private:
     void ProcessSlot(Root root, FullObjectSlot slot) {
-      Object old_slot_value_obj = slot.load(isolate_);
+      Tagged<Object> old_slot_value_obj = slot.load(isolate_);
       if (!IsHeapObject(old_slot_value_obj)) return;
-      HeapObject old_slot_value = HeapObject::cast(old_slot_value_obj);
+      Tagged<HeapObject> old_slot_value = HeapObject::cast(old_slot_value_obj);
       auto it = moves_->find(old_slot_value);
       if (it == moves_->end()) return;
-      HeapObject new_slot_value = it->second;
+      Tagged<HeapObject> new_slot_value = it->second;
       slot.store(new_slot_value);
       if (V8_UNLIKELY(v8_flags.trace_read_only_promotion_verbose)) {
         LogUpdatedPointer(root, slot, old_slot_value, new_slot_value);
       }
     }
-    void ProcessSlot(HeapObject host, MaybeObjectSlot slot) {
-      HeapObject old_slot_value;
+    void ProcessSlot(Tagged<HeapObject> host, MaybeObjectSlot slot) {
+      Tagged<HeapObject> old_slot_value;
       if (!slot.load(isolate_).GetHeapObject(&old_slot_value)) return;
       auto it = moves_->find(old_slot_value);
       if (it == moves_->end()) return;
-      HeapObject new_slot_value = it->second;
+      Tagged<HeapObject> new_slot_value = it->second;
       slot.store(MaybeObject::FromObject(new_slot_value));
       if (V8_UNLIKELY(v8_flags.trace_read_only_promotion_verbose)) {
         LogUpdatedPointer(host, slot, old_slot_value, new_slot_value);
@@ -395,26 +463,54 @@ class ReadOnlyPromotionImpl final : public AllStatic {
     }
 
     void LogUpdatedPointer(Root root, FullObjectSlot slot,
-                           HeapObject old_slot_value,
-                           HeapObject new_slot_value) {
+                           Tagged<HeapObject> old_slot_value,
+                           Tagged<HeapObject> new_slot_value) {
       std::cout << "ro-promotion: updated pointer {root "
                 << static_cast<int>(root) << " slot "
                 << reinterpret_cast<void*>(slot.address()) << " from "
                 << reinterpret_cast<void*>(old_slot_value.ptr()) << " to "
                 << reinterpret_cast<void*>(new_slot_value.ptr()) << "}\n";
     }
-    void LogUpdatedPointer(HeapObject host, MaybeObjectSlot slot,
-                           HeapObject old_slot_value,
-                           HeapObject new_slot_value) {
+    void LogUpdatedPointer(Tagged<HeapObject> host, MaybeObjectSlot slot,
+                           Tagged<HeapObject> old_slot_value,
+                           Tagged<HeapObject> new_slot_value) {
       std::cout << "ro-promotion: updated pointer {host "
                 << reinterpret_cast<void*>(host.address()) << " slot "
                 << reinterpret_cast<void*>(slot.address()) << " from "
                 << reinterpret_cast<void*>(old_slot_value.ptr()) << " to "
                 << reinterpret_cast<void*>(new_slot_value.ptr()) << "}\n";
     }
+    void LogUpdatedExternalPointerTableEntry(Tagged<HeapObject> host,
+                                             ExternalPointerSlot slot,
+                                             Address slot_value) {
+      std::cout << "ro-promotion: updated external pointer slot {host "
+                << reinterpret_cast<void*>(host.address()) << " slot "
+                << reinterpret_cast<void*>(slot.address()) << " slot_value "
+                << reinterpret_cast<void*>(slot_value) << "}\n";
+    }
+    void LogUpdatedCodePointerTableEntry(Tagged<HeapObject> host,
+                                         IndirectPointerSlot slot,
+                                         Tagged<Code> old_code_object) {
+      std::cout << "ro-promotion: updated code pointer table entry {host "
+                << reinterpret_cast<void*>(host.address()) << " slot "
+                << reinterpret_cast<void*>(slot.address()) << " from "
+                << reinterpret_cast<void*>(old_code_object.ptr()) << "}\n";
+    }
+
+#ifdef DEBUG
+    void RecordProcessedSlotIfDebug(Address slot_address) {
+      // If this fails, we're visiting some object multiple times by accident.
+      CHECK_EQ(processed_slots_.count(slot_address), 0);
+      processed_slots_.insert(slot_address);
+    }
+    std::unordered_set<Address> processed_slots_;  // To avoid dupe processing.
+#else
+    void RecordProcessedSlotIfDebug(Address slot_address) const {}
+#endif  // DEBUG
 
     Isolate* const isolate_;
     const HeapObjectMap* moves_;
+    HeapObjectMap moves_reverse_lookup_;
   };
 };
 
@@ -422,8 +518,8 @@ class ReadOnlyPromotionImpl final : public AllStatic {
 
 // static
 void ReadOnlyPromotion::Promote(Isolate* isolate,
-                                const SafepointScope& safepoint_scope) {
-  DisallowGarbageCollection no_gc;
+                                const SafepointScope& safepoint_scope,
+                                const DisallowGarbageCollection& no_gc) {
   // Visit the mutable heap and determine the set of objects that can be
   // promoted to RO space.
   std::vector<HeapObject> promotees =

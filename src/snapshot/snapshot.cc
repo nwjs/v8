@@ -57,6 +57,8 @@ class SnapshotImpl : public AllStatic {
       const v8::StartupData* data, uint32_t index);
 
   static uint32_t GetHeaderValue(const v8::StartupData* data, uint32_t offset) {
+    DCHECK_NOT_NULL(data);
+    DCHECK_LT(offset, static_cast<uint32_t>(data->raw_size));
     return base::ReadLittleEndianValue<uint32_t>(
         reinterpret_cast<Address>(data->data) + offset);
   }
@@ -71,11 +73,12 @@ class SnapshotImpl : public AllStatic {
   // [0] number of contexts N
   // [1] rehashability
   // [2] checksum
-  // [3] (64 bytes) version string
-  // [4] offset to readonly
-  // [5] offset to shared heap
-  // [6] offset to context 0
-  // [7] offset to context 1
+  // [3] read-only snapshot checksum
+  // [4] (64 bytes) version string
+  // [5] offset to readonly
+  // [6] offset to shared heap
+  // [7] offset to context 0
+  // [8] offset to context 1
   // ...
   // ... offset to context N - 1
   // ... startup snapshot data
@@ -89,7 +92,10 @@ class SnapshotImpl : public AllStatic {
   static const uint32_t kRehashabilityOffset =
       kNumberOfContextsOffset + kUInt32Size;
   static const uint32_t kChecksumOffset = kRehashabilityOffset + kUInt32Size;
-  static const uint32_t kVersionStringOffset = kChecksumOffset + kUInt32Size;
+  static const uint32_t kReadOnlySnapshotChecksumOffset =
+      kChecksumOffset + kUInt32Size;
+  static const uint32_t kVersionStringOffset =
+      kReadOnlySnapshotChecksumOffset + kUInt32Size;
   static const uint32_t kVersionStringLength = 64;
   static const uint32_t kReadOnlyOffsetOffset =
       kVersionStringOffset + kVersionStringLength;
@@ -100,8 +106,14 @@ class SnapshotImpl : public AllStatic {
 
   static base::Vector<const uint8_t> ChecksummedContent(
       const v8::StartupData* data) {
-    static_assert(kVersionStringOffset == kChecksumOffset + kUInt32Size);
-    const uint32_t kChecksumStart = kVersionStringOffset;
+    // The hashed region is everything but the header slots up-to-and-including
+    // the checksum slot itself.
+    // TODO(jgruber): We currently exclude #contexts and rehashability. This
+    // seems arbitrary and I think we could shuffle header slot order around to
+    // include them, just for consistency.
+    static_assert(kReadOnlySnapshotChecksumOffset ==
+                  kChecksumOffset + kUInt32Size);
+    const uint32_t kChecksumStart = kReadOnlySnapshotChecksumOffset;
     return base::Vector<const uint8_t>(
         reinterpret_cast<const uint8_t*>(data->data + kChecksumStart),
         data->raw_size - kChecksumStart);
@@ -237,9 +249,11 @@ void Snapshot::ClearReconstructableDataForSerialization(
     std::vector<i::Handle<i::SharedFunctionInfo>> sfis_to_clear;
     {
       i::HeapObjectIterator it(isolate->heap());
-      for (i::HeapObject o = it.Next(); !o.is_null(); o = it.Next()) {
+      for (i::Tagged<i::HeapObject> o = it.Next(); !o.is_null();
+           o = it.Next()) {
         if (clear_recompilable_data && IsSharedFunctionInfo(o, cage_base)) {
-          i::SharedFunctionInfo shared = i::SharedFunctionInfo::cast(o);
+          i::Tagged<i::SharedFunctionInfo> shared =
+              i::SharedFunctionInfo::cast(o);
           if (IsScript(shared->script(cage_base), cage_base) &&
               Script::cast(shared->script(cage_base))->type() ==
                   Script::Type::kExtension) {
@@ -249,7 +263,7 @@ void Snapshot::ClearReconstructableDataForSerialization(
             sfis_to_clear.emplace_back(shared, isolate);
           }
         } else if (IsJSRegExp(o, cage_base)) {
-          i::JSRegExp regexp = i::JSRegExp::cast(o);
+          i::Tagged<i::JSRegExp> regexp = i::JSRegExp::cast(o);
           if (regexp->HasCompiledCode()) {
             regexp->DiscardCompiledCodeForSerialization();
           }
@@ -275,41 +289,44 @@ void Snapshot::ClearReconstructableDataForSerialization(
   }
 
   // Clear JSFunctions.
+  {
+    i::HeapObjectIterator it(isolate->heap());
+    for (i::Tagged<i::HeapObject> o = it.Next(); !o.is_null(); o = it.Next()) {
+      if (!IsJSFunction(o, cage_base)) continue;
 
-  i::HeapObjectIterator it(isolate->heap());
-  for (i::HeapObject o = it.Next(); !o.is_null(); o = it.Next()) {
-    if (!IsJSFunction(o, cage_base)) continue;
+      i::Tagged<i::JSFunction> fun = i::JSFunction::cast(o);
+      fun->CompleteInobjectSlackTrackingIfActive();
 
-    i::JSFunction fun = i::JSFunction::cast(o);
-    fun->CompleteInobjectSlackTrackingIfActive();
+      i::Tagged<i::SharedFunctionInfo> shared = fun->shared();
+      if (IsScript(shared->script(cage_base), cage_base) &&
+          Script::cast(shared->script(cage_base))->type() ==
+              Script::Type::kExtension) {
+        continue;  // Don't clear extensions, they cannot be recompiled.
+      }
 
-    i::SharedFunctionInfo shared = fun->shared();
-    if (IsScript(shared->script(cage_base), cage_base) &&
-        Script::cast(shared->script(cage_base))->type() ==
-            Script::Type::kExtension) {
-      continue;  // Don't clear extensions, they cannot be recompiled.
-    }
-
-    // Also, clear out feedback vectors and recompilable code.
-    if (fun->CanDiscardCompiled()) {
-      fun->set_code(*BUILTIN_CODE(isolate, CompileLazy));
-    }
-    if (!IsUndefined(fun->raw_feedback_cell(cage_base)->value(cage_base))) {
-      fun->raw_feedback_cell(cage_base)->set_value(
-          i::ReadOnlyRoots(isolate).undefined_value());
-    }
+      // Also, clear out feedback vectors and recompilable code.
+      if (fun->CanDiscardCompiled()) {
+        fun->set_code(*BUILTIN_CODE(isolate, CompileLazy));
+      }
+      if (!IsUndefined(fun->raw_feedback_cell(cage_base)->value(cage_base))) {
+        fun->raw_feedback_cell(cage_base)->set_value(
+            i::ReadOnlyRoots(isolate).undefined_value());
+      }
 #ifdef DEBUG
-    if (clear_recompilable_data) {
+      if (clear_recompilable_data) {
 #if V8_ENABLE_WEBASSEMBLY
-      DCHECK(fun->shared()->HasWasmExportedFunctionData() ||
-             fun->shared()->HasBuiltinId() || fun->shared()->IsApiFunction() ||
-             fun->shared()->HasUncompiledDataWithoutPreparseData());
+        DCHECK(fun->shared()->HasWasmExportedFunctionData() ||
+               fun->shared()->HasBuiltinId() ||
+               fun->shared()->IsApiFunction() ||
+               fun->shared()->HasUncompiledDataWithoutPreparseData());
 #else
-      DCHECK(fun.shared().HasBuiltinId() || fun.shared().IsApiFunction() ||
-             fun.shared().HasUncompiledDataWithoutPreparseData());
+        DCHECK(fun->shared()->HasBuiltinId() ||
+               fun->shared()->IsApiFunction() ||
+               fun->shared()->HasUncompiledDataWithoutPreparseData());
 #endif  // V8_ENABLE_WEBASSEMBLY
-    }
+      }
 #endif  // DEBUG
+    }
   }
 
   // PendingOptimizeTable also contains BytecodeArray, we need to clear the
@@ -317,6 +334,30 @@ void Snapshot::ClearReconstructableDataForSerialization(
   ReadOnlyRoots roots(isolate);
   isolate->heap()->SetFunctionsMarkedForManualOptimization(
       roots.undefined_value());
+
+#if V8_ENABLE_WEBASSEMBLY
+  {
+    // Check if there are any asm.js / wasm functions on the heap.
+    // These cannot be serialized due to restrictions with the js-to-wasm
+    // wrapper. A tiered-up wrapper would have to be replaced with a generic
+    // wrapper which isn't supported. For asm.js there also isn't any support
+    // for the generic wrapper at all.
+    i::HeapObjectIterator it(isolate->heap(),
+                             HeapObjectIterator::kFilterUnreachable);
+    for (i::Tagged<i::HeapObject> o = it.Next(); !o.is_null(); o = it.Next()) {
+      if (IsJSFunction(o)) {
+        i::Tagged<i::JSFunction> fun = i::JSFunction::cast(o);
+        if (fun->shared()->HasAsmWasmData()) {
+          FATAL("asm.js functions are not supported in snapshots");
+        }
+        if (fun->shared()->HasWasmExportedFunctionData()) {
+          FATAL(
+              "Exported WebAssembly functions are not supported in snapshots");
+        }
+      }
+    }
+  }
+#endif  // V8_ENABLE_WEBASSEMBLY
 }
 
 // static
@@ -562,6 +603,11 @@ v8::StartupData SnapshotImpl::CreateSnapshotBlob(
       data + payload_offset,
       reinterpret_cast<const char*>(read_only_snapshot->RawData().begin()),
       payload_length);
+  SnapshotImpl::SetHeaderValue(
+      data, SnapshotImpl::kReadOnlySnapshotChecksumOffset,
+      Checksum(base::VectorOf(
+          reinterpret_cast<const uint8_t*>(data + payload_offset),
+          payload_length)));
   if (v8_flags.serialization_statistics) {
     // These prints must match the regexp in test/memory/Memory.json
     PrintF("%10d bytes for read-only\n", payload_length);
@@ -611,9 +657,7 @@ v8::StartupData SnapshotImpl::CreateSnapshotBlob(
 }
 
 uint32_t SnapshotImpl::ExtractNumContexts(const v8::StartupData* data) {
-  CHECK_LT(kNumberOfContextsOffset, data->raw_size);
-  uint32_t num_contexts = GetHeaderValue(data, kNumberOfContextsOffset);
-  return num_contexts;
+  return GetHeaderValue(data, kNumberOfContextsOffset);
 }
 
 uint32_t Snapshot::GetExpectedChecksum(const v8::StartupData* data) {
@@ -646,12 +690,17 @@ uint32_t SnapshotImpl::ExtractContextOffset(const v8::StartupData* data,
 }
 
 bool Snapshot::ExtractRehashability(const v8::StartupData* data) {
-  CHECK_LT(SnapshotImpl::kRehashabilityOffset,
-           static_cast<uint32_t>(data->raw_size));
   uint32_t rehashability =
       SnapshotImpl::GetHeaderValue(data, SnapshotImpl::kRehashabilityOffset);
   CHECK_IMPLIES(rehashability != 0, rehashability == 1);
   return rehashability != 0;
+}
+
+// static
+uint32_t Snapshot::ExtractReadOnlySnapshotChecksum(
+    const v8::StartupData* data) {
+  return SnapshotImpl::GetHeaderValue(
+      data, SnapshotImpl::kReadOnlySnapshotChecksumOffset);
 }
 
 namespace {
@@ -845,7 +894,7 @@ SnapshotCreatorImpl::SnapshotCreatorImpl(
 }
 
 SnapshotCreatorImpl::~SnapshotCreatorImpl() {
-  if (!created()) {
+  if (isolate_->heap()->read_only_space()->writable()) {
     // Finalize the RO heap in order to leave the Isolate in a consistent state.
     isolate_->read_only_heap()->OnCreateHeapObjectsComplete(isolate_);
   }
@@ -992,8 +1041,16 @@ StartupData SnapshotCreatorImpl::CreateBlob(
 
   // If we don't do this then we end up with a stray root pointing at the
   // context even after we have disposed of the context.
-  isolate_->heap()->CollectAllAvailableGarbage(
-      GarbageCollectionReason::kSnapshotCreator);
+  {
+    // Note that we need to run a garbage collection without stack at this
+    // point, so that all dead objects are reclaimed. This is required to avoid
+    // conservative stack scanning and guarantee deterministic behaviour.
+    EmbedderStackStateScope stack_scope(
+        isolate_->heap(), EmbedderStackStateScope::kExplicitInvocation,
+        StackState::kNoHeapPointers);
+    isolate_->heap()->CollectAllAvailableGarbage(
+        GarbageCollectionReason::kSnapshotCreator);
+  }
   {
     HandleScope scope(isolate_);
     isolate_->heap()->CompactWeakArrayLists();
@@ -1017,16 +1074,13 @@ StartupData SnapshotCreatorImpl::CreateBlob(
     // serialization. Objects can be promoted if a) they are themselves
     // immutable-after-deserialization and b) all objects in the transitive
     // object graph also satisfy condition a).
-    ReadOnlyPromotion::Promote(isolate_, safepoint_scope);
+    ReadOnlyPromotion::Promote(isolate_, safepoint_scope, no_gc_from_here_on);
     // When creating the snapshot from scratch, we are responsible for sealing
     // the RO heap here. Note we cannot delegate the responsibility e.g. to
     // Isolate::Init since it should still be possible to allocate into RO
     // space after the Isolate has been initialized, for example as part of
     // Context creation.
     isolate_->read_only_heap()->OnCreateHeapObjectsComplete(isolate_);
-  } else {
-    // All exceptions to the above rule should explicitly pass this flag:
-    DCHECK_NE(serializer_flags & Snapshot::kAllowActiveIsolateForTesting, 0);
   }
 
   // Create a vector with all contexts and destroy associated global handles.

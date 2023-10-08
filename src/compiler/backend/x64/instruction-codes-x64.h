@@ -322,6 +322,7 @@ namespace compiler {
   V(X64I8x16UConvertI16x8)                           \
   V(X64I8x32UConvertI16x16)                          \
   V(X64S128Const)                                    \
+  V(X64S256Const)                                    \
   V(X64SZero)                                        \
   V(X64SAllOnes)                                     \
   V(X64SNot)                                         \
@@ -332,6 +333,7 @@ namespace compiler {
   V(X64SAndNot)                                      \
   V(X64I8x16Swizzle)                                 \
   V(X64I8x16Shuffle)                                 \
+  V(X64Vpshufd)                                      \
   V(X64I8x16Popcnt)                                  \
   V(X64Shufps)                                       \
   V(X64S32x4Rotate)                                  \

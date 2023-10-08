@@ -82,7 +82,7 @@ void TestStubCacheOffsetCalculation(StubCache::Table table) {
       }
       Handle<Object> result = ft.Call(name, map).ToHandleChecked();
 
-      Smi expected = Smi::FromInt(expected_result & Smi::kMaxValue);
+      Tagged<Smi> expected = Smi::FromInt(expected_result & Smi::kMaxValue);
       CHECK_EQ(expected, Smi::cast(*result));
     }
   }
@@ -227,7 +227,7 @@ TEST(TryProbeStubCache) {
       queried_existing = true;
     }
 
-    Handle<Object> expected_handler(handler->GetHeapObjectOrSmi(), isolate);
+    Handle<Object> expected_handler(handler.GetHeapObjectOrSmi(), isolate);
     ft.CheckTrue(receiver, name, expected_handler);
   }
 
@@ -243,7 +243,7 @@ TEST(TryProbeStubCache) {
       queried_existing = true;
     }
 
-    Handle<Object> expected_handler(handler->GetHeapObjectOrSmi(), isolate);
+    Handle<Object> expected_handler(handler.GetHeapObjectOrSmi(), isolate);
     ft.CheckTrue(receiver, name, expected_handler);
   }
   // Ensure we performed both kind of queries.

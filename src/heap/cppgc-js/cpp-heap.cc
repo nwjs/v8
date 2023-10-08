@@ -830,7 +830,7 @@ bool CppHeap::FinishConcurrentMarkingIfNeeded() {
   return marker_->JoinConcurrentMarkingIfNeeded();
 }
 
-void CppHeap::WriteBarrier(JSObject js_object) {
+void CppHeap::WriteBarrier(Tagged<JSObject> js_object) {
   DCHECK(js_object->MayHaveEmbedderFields());
   DCHECK_NOT_NULL(isolate()->heap()->mark_compact_collector());
 
@@ -954,11 +954,8 @@ void CppHeap::AllocatedObjectSizeDecreased(size_t bytes) {
 }
 
 void CppHeap::ReportBufferedAllocationSizeIfPossible() {
-  // Avoid reporting to V8 in the following conditions as that may trigger GC
-  // finalizations where not allowed.
-  // - Recursive sweeping.
-  // - GC forbidden scope.
-  if (sweeper().IsSweepingOnMutatorThread() || in_no_gc_scope() || !isolate_) {
+  // Reporting memory to V8 may trigger GC.
+  if (!IsGCAllowed()) {
     return;
   }
 
@@ -999,18 +996,21 @@ void CppHeap::ReportBufferedAllocationSizeIfPossible() {
 
 void CppHeap::CollectGarbageForTesting(CollectionType collection_type,
                                        StackState stack_state) {
-  if (in_no_gc_scope()) return;
+  if (!IsDetachedGCAllowed()) {
+    return;
+  }
 
   // Finish sweeping in case it is still running.
   sweeper().FinishIfRunning();
-
-  stack()->SetMarkerToCurrentStackPosition();
 
   if (isolate_) {
     reinterpret_cast<v8::Isolate*>(isolate_)
         ->RequestGarbageCollectionForTesting(
             v8::Isolate::kFullGarbageCollection, stack_state);
-  } else {
+    return;
+  }
+
+  stack()->SetMarkerIfNeededAndCallback([this, collection_type, stack_state]() {
     // Perform an atomic GC, with starting incremental/concurrent marking and
     // immediately finalizing the garbage collection.
     if (!IsMarking()) {
@@ -1023,7 +1023,7 @@ void CppHeap::CollectGarbageForTesting(CollectionType collection_type,
       CHECK(AdvanceTracing(v8::base::TimeDelta::Max()));
     }
     TraceEpilogue();
-  }
+  });
 }
 
 void CppHeap::EnableDetachedGarbageCollectionsForTesting() {
@@ -1174,8 +1174,9 @@ CppHeap::PauseConcurrentMarkingScope::PauseConcurrentMarkingScope(
 }
 
 void CppHeap::CollectGarbage(cppgc::internal::GCConfig config) {
-  if (in_no_gc_scope() || !isolate_) return;
-
+  if (!IsGCAllowed()) {
+    return;
+  }
   // TODO(mlippautz): Respect full config.
   const auto flags =
       (config.free_memory_handling ==
@@ -1207,6 +1208,14 @@ void CppHeap::ResetCrossHeapRememberedSet() {
 
 void CppHeap::UpdateGCCapabilitiesFromFlagsForTesting() {
   UpdateGCCapabilitiesFromFlags();
+}
+
+bool CppHeap::IsDetachedGCAllowed() const {
+  return (isolate_ || in_detached_testing_mode_) && HeapBase::IsGCAllowed();
+}
+
+bool CppHeap::IsGCAllowed() const {
+  return isolate_ && HeapBase::IsGCAllowed();
 }
 
 }  // namespace internal

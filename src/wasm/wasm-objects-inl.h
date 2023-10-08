@@ -65,7 +65,7 @@ CAST_ACCESSOR(WasmInstanceObject)
     Object value = TaggedField<Object, offset>::load(cage_base, *this); \
     return !IsUndefined(value, GetReadOnlyRoots(cage_base));            \
   }                                                                     \
-  ACCESSORS_CHECKED2(holder, name, type, offset,                        \
+  ACCESSORS_CHECKED2(holder, name, Tagged<type>, offset,                \
                      !IsUndefined(value, GetReadOnlyRoots(cage_base)), true)
 
 #define PRIMITIVE_ACCESSORS(holder, name, type, offset)               \
@@ -110,9 +110,10 @@ bool WasmModuleObject::is_asm_js() {
 OPTIONAL_ACCESSORS(WasmMemoryObject, instances, WeakArrayList, kInstancesOffset)
 
 // WasmGlobalObject
-ACCESSORS(WasmGlobalObject, untagged_buffer, JSArrayBuffer,
+ACCESSORS(WasmGlobalObject, untagged_buffer, Tagged<JSArrayBuffer>,
           kUntaggedBufferOffset)
-ACCESSORS(WasmGlobalObject, tagged_buffer, FixedArray, kTaggedBufferOffset)
+ACCESSORS(WasmGlobalObject, tagged_buffer, Tagged<FixedArray>,
+          kTaggedBufferOffset)
 
 wasm::ValueType WasmGlobalObject::type() const {
   return wasm::ValueType::FromRawBitField(static_cast<uint32_t>(raw_type()));
@@ -198,38 +199,41 @@ PRIMITIVE_ACCESSORS(WasmInstanceObject, isorecursive_canonical_types,
                     const uint32_t*, kIsorecursiveCanonicalTypesOffset)
 SANDBOXED_POINTER_ACCESSORS(WasmInstanceObject, globals_start, uint8_t*,
                             kGlobalsStartOffset)
-ACCESSORS(WasmInstanceObject, imported_mutable_globals, FixedAddressArray,
-          kImportedMutableGlobalsOffset)
-ACCESSORS(WasmInstanceObject, imported_function_targets, FixedAddressArray,
-          kImportedFunctionTargetsOffset)
+ACCESSORS(WasmInstanceObject, imported_mutable_globals,
+          Tagged<FixedAddressArray>, kImportedMutableGlobalsOffset)
+ACCESSORS(WasmInstanceObject, imported_function_targets,
+          Tagged<FixedAddressArray>, kImportedFunctionTargetsOffset)
 PRIMITIVE_ACCESSORS(WasmInstanceObject, indirect_function_table_size, uint32_t,
                     kIndirectFunctionTableSizeOffset)
-ACCESSORS(WasmInstanceObject, indirect_function_table_sig_ids, FixedUInt32Array,
-          kIndirectFunctionTableSigIdsOffset)
+ACCESSORS(WasmInstanceObject, indirect_function_table_sig_ids,
+          Tagged<FixedUInt32Array>, kIndirectFunctionTableSigIdsOffset)
 ACCESSORS(WasmInstanceObject, indirect_function_table_targets,
-          ExternalPointerArray, kIndirectFunctionTableTargetsOffset)
+          Tagged<ExternalPointerArray>, kIndirectFunctionTableTargetsOffset)
 PRIMITIVE_ACCESSORS(WasmInstanceObject, jump_table_start, Address,
                     kJumpTableStartOffset)
 PRIMITIVE_ACCESSORS(WasmInstanceObject, hook_on_function_call_address, Address,
                     kHookOnFunctionCallAddressOffset)
 PRIMITIVE_ACCESSORS(WasmInstanceObject, tiering_budget_array, uint32_t*,
                     kTieringBudgetArrayOffset)
-ACCESSORS(WasmInstanceObject, memory_bases_and_sizes, FixedAddressArray,
+ACCESSORS(WasmInstanceObject, memory_bases_and_sizes, Tagged<FixedAddressArray>,
           kMemoryBasesAndSizesOffset)
-ACCESSORS(WasmInstanceObject, data_segment_starts, FixedAddressArray,
+ACCESSORS(WasmInstanceObject, data_segment_starts, Tagged<FixedAddressArray>,
           kDataSegmentStartsOffset)
-ACCESSORS(WasmInstanceObject, data_segment_sizes, FixedUInt32Array,
+ACCESSORS(WasmInstanceObject, data_segment_sizes, Tagged<FixedUInt32Array>,
           kDataSegmentSizesOffset)
-ACCESSORS(WasmInstanceObject, element_segments, FixedArray,
+ACCESSORS(WasmInstanceObject, element_segments, Tagged<FixedArray>,
           kElementSegmentsOffset)
 PRIMITIVE_ACCESSORS(WasmInstanceObject, break_on_entry, uint8_t,
                     kBreakOnEntryOffset)
 
-ACCESSORS(WasmInstanceObject, module_object, WasmModuleObject,
+ACCESSORS(WasmInstanceObject, module_object, Tagged<WasmModuleObject>,
           kModuleObjectOffset)
-ACCESSORS(WasmInstanceObject, exports_object, JSObject, kExportsObjectOffset)
-ACCESSORS(WasmInstanceObject, native_context, Context, kNativeContextOffset)
-ACCESSORS(WasmInstanceObject, memory_objects, FixedArray, kMemoryObjectsOffset)
+ACCESSORS(WasmInstanceObject, exports_object, Tagged<JSObject>,
+          kExportsObjectOffset)
+ACCESSORS(WasmInstanceObject, native_context, Tagged<Context>,
+          kNativeContextOffset)
+ACCESSORS(WasmInstanceObject, memory_objects, Tagged<FixedArray>,
+          kMemoryObjectsOffset)
 OPTIONAL_ACCESSORS(WasmInstanceObject, untagged_globals_buffer, JSArrayBuffer,
                    kUntaggedGlobalsBufferOffset)
 OPTIONAL_ACCESSORS(WasmInstanceObject, tagged_globals_buffer, FixedArray,
@@ -239,18 +243,18 @@ OPTIONAL_ACCESSORS(WasmInstanceObject, imported_mutable_globals_buffers,
 OPTIONAL_ACCESSORS(WasmInstanceObject, tables, FixedArray, kTablesOffset)
 OPTIONAL_ACCESSORS(WasmInstanceObject, indirect_function_tables, FixedArray,
                    kIndirectFunctionTablesOffset)
-ACCESSORS(WasmInstanceObject, imported_function_refs, FixedArray,
+ACCESSORS(WasmInstanceObject, imported_function_refs, Tagged<FixedArray>,
           kImportedFunctionRefsOffset)
 OPTIONAL_ACCESSORS(WasmInstanceObject, indirect_function_table_refs, FixedArray,
                    kIndirectFunctionTableRefsOffset)
 OPTIONAL_ACCESSORS(WasmInstanceObject, tags_table, FixedArray, kTagsTableOffset)
-ACCESSORS(WasmInstanceObject, wasm_internal_functions, FixedArray,
+ACCESSORS(WasmInstanceObject, wasm_internal_functions, Tagged<FixedArray>,
           kWasmInternalFunctionsOffset)
-ACCESSORS(WasmInstanceObject, managed_object_maps, FixedArray,
+ACCESSORS(WasmInstanceObject, managed_object_maps, Tagged<FixedArray>,
           kManagedObjectMapsOffset)
-ACCESSORS(WasmInstanceObject, feedback_vectors, FixedArray,
+ACCESSORS(WasmInstanceObject, feedback_vectors, Tagged<FixedArray>,
           kFeedbackVectorsOffset)
-ACCESSORS(WasmInstanceObject, well_known_imports, FixedArray,
+ACCESSORS(WasmInstanceObject, well_known_imports, Tagged<FixedArray>,
           kWellKnownImportsOffset)
 
 void WasmInstanceObject::clear_padding() {
@@ -261,7 +265,8 @@ void WasmInstanceObject::clear_padding() {
   }
 }
 
-WasmMemoryObject WasmInstanceObject::memory_object(int memory_index) const {
+Tagged<WasmMemoryObject> WasmInstanceObject::memory_object(
+    int memory_index) const {
   return WasmMemoryObject::cast(memory_objects()->get(memory_index));
 }
 
@@ -301,7 +306,8 @@ EXTERNAL_POINTER_ACCESSORS(WasmInternalFunction, call_target, Address,
                            kWasmInternalFunctionCallTargetTag)
 
 // WasmFunctionData
-ACCESSORS(WasmFunctionData, internal, WasmInternalFunction, kInternalOffset)
+ACCESSORS(WasmFunctionData, internal, Tagged<WasmInternalFunction>,
+          kInternalOffset)
 
 EXTERNAL_POINTER_ACCESSORS(WasmExportedFunctionData, sig, wasm::FunctionSig*,
                            kSigOffset, kWasmExportedFunctionDataSignatureTag)
@@ -329,8 +335,9 @@ CAST_ACCESSOR(WasmExternalFunction)
 
 // WasmIndirectFunctionTable
 TQ_OBJECT_CONSTRUCTORS_IMPL(WasmIndirectFunctionTable)
-ACCESSORS(WasmIndirectFunctionTable, sig_ids, FixedUInt32Array, kSigIdsOffset)
-ACCESSORS(WasmIndirectFunctionTable, targets, ExternalPointerArray,
+ACCESSORS(WasmIndirectFunctionTable, sig_ids, Tagged<FixedUInt32Array>,
+          kSigIdsOffset)
+ACCESSORS(WasmIndirectFunctionTable, targets, Tagged<ExternalPointerArray>,
           kTargetsOffset)
 
 // WasmTypeInfo
@@ -445,7 +452,7 @@ MaybeHandle<Object> WasmObject::ToWasmValue(Isolate* isolate,
 // Conversions from Numeric objects.
 // static
 template <typename ElementType>
-ElementType WasmObject::FromNumber(Object value) {
+ElementType WasmObject::FromNumber(Tagged<Object> value) {
   // The value must already be prepared for storing to numeric fields.
   DCHECK(IsNumber(value));
   if (IsSmi(value)) {
@@ -519,18 +526,18 @@ void WasmObject::WriteValueAt(Isolate* isolate, Handle<HeapObject> obj,
   }
 }
 
-wasm::StructType* WasmStruct::type(Map map) {
-  WasmTypeInfo type_info = map->wasm_type_info();
+wasm::StructType* WasmStruct::type(Tagged<Map> map) {
+  Tagged<WasmTypeInfo> type_info = map->wasm_type_info();
   return reinterpret_cast<wasm::StructType*>(type_info->native_type());
 }
 
-wasm::StructType* WasmStruct::GcSafeType(Map map) {
+wasm::StructType* WasmStruct::GcSafeType(Tagged<Map> map) {
   DCHECK_EQ(WASM_STRUCT_TYPE, map->instance_type());
-  HeapObject raw = HeapObject::cast(map->constructor_or_back_pointer());
+  Tagged<HeapObject> raw = HeapObject::cast(map->constructor_or_back_pointer());
   // The {WasmTypeInfo} might be in the middle of being moved, which is why we
   // can't read its map for a checked cast. But we can rely on its native type
   // pointer being intact in the old location.
-  WasmTypeInfo type_info = WasmTypeInfo::unchecked_cast(raw);
+  Tagged<WasmTypeInfo> type_info = WasmTypeInfo::unchecked_cast(raw);
   return reinterpret_cast<wasm::StructType*>(type_info->native_type());
 }
 
@@ -544,7 +551,7 @@ int WasmStruct::Size(const wasm::StructType* type) {
 }
 
 // static
-void WasmStruct::EncodeInstanceSizeInMap(int instance_size, Map map) {
+void WasmStruct::EncodeInstanceSizeInMap(int instance_size, Tagged<Map> map) {
   // WasmStructs can be bigger than the {map.instance_size_in_words} field
   // can describe; yet we have to store the instance size somewhere on the
   // map so that the GC can read it without relying on any other objects
@@ -558,12 +565,14 @@ void WasmStruct::EncodeInstanceSizeInMap(int instance_size, Map map) {
 }
 
 // static
-int WasmStruct::DecodeInstanceSizeFromMap(Map map) {
+int WasmStruct::DecodeInstanceSizeFromMap(Tagged<Map> map) {
   return (map->WasmByte2() << (8 + kObjectAlignmentBits)) |
          (map->WasmByte1() << kObjectAlignmentBits);
 }
 
-int WasmStruct::GcSafeSize(Map map) { return DecodeInstanceSizeFromMap(map); }
+int WasmStruct::GcSafeSize(Tagged<Map> map) {
+  return DecodeInstanceSizeFromMap(map);
+}
 
 wasm::StructType* WasmStruct::type() const { return type(map()); }
 
@@ -596,25 +605,25 @@ void WasmStruct::SetField(Isolate* isolate, Handle<WasmStruct> obj,
   WriteValueAt(isolate, obj, field_type, offset, value);
 }
 
-wasm::ArrayType* WasmArray::type(Map map) {
+wasm::ArrayType* WasmArray::type(Tagged<Map> map) {
   DCHECK_EQ(WASM_ARRAY_TYPE, map->instance_type());
-  WasmTypeInfo type_info = map->wasm_type_info();
+  Tagged<WasmTypeInfo> type_info = map->wasm_type_info();
   return reinterpret_cast<wasm::ArrayType*>(type_info->native_type());
 }
 
-wasm::ArrayType* WasmArray::GcSafeType(Map map) {
+wasm::ArrayType* WasmArray::GcSafeType(Tagged<Map> map) {
   DCHECK_EQ(WASM_ARRAY_TYPE, map->instance_type());
-  HeapObject raw = HeapObject::cast(map->constructor_or_back_pointer());
+  Tagged<HeapObject> raw = HeapObject::cast(map->constructor_or_back_pointer());
   // The {WasmTypeInfo} might be in the middle of being moved, which is why we
   // can't read its map for a checked cast. But we can rely on its native type
   // pointer being intact in the old location.
-  WasmTypeInfo type_info = WasmTypeInfo::unchecked_cast(raw);
+  Tagged<WasmTypeInfo> type_info = WasmTypeInfo::unchecked_cast(raw);
   return reinterpret_cast<wasm::ArrayType*>(type_info->native_type());
 }
 
 wasm::ArrayType* WasmArray::type() const { return type(map()); }
 
-int WasmArray::SizeFor(Map map, int length) {
+int WasmArray::SizeFor(Tagged<Map> map, int length) {
   int element_size = DecodeElementSizeFromMap(map);
   return kHeaderSize + RoundUp(element_size * length, kTaggedSize);
 }
@@ -647,12 +656,14 @@ Handle<Object> WasmArray::GetElement(Isolate* isolate, Handle<WasmArray> array,
 }
 
 // static
-void WasmArray::EncodeElementSizeInMap(int element_size, Map map) {
+void WasmArray::EncodeElementSizeInMap(int element_size, Tagged<Map> map) {
   map->SetWasmByte1(element_size);
 }
 
 // static
-int WasmArray::DecodeElementSizeFromMap(Map map) { return map->WasmByte1(); }
+int WasmArray::DecodeElementSizeFromMap(Tagged<Map> map) {
+  return map->WasmByte1();
+}
 
 EXTERNAL_POINTER_ACCESSORS(WasmContinuationObject, jmpbuf, Address,
                            kJmpbufOffset, kWasmContinuationJmpbufTag)

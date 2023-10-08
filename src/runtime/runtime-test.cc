@@ -55,7 +55,7 @@ namespace v8 {
 namespace internal {
 
 namespace {
-V8_WARN_UNUSED_RESULT Object CrashUnlessFuzzing(Isolate* isolate) {
+V8_WARN_UNUSED_RESULT Tagged<Object> CrashUnlessFuzzing(Isolate* isolate) {
   CHECK(v8_flags.fuzzing);
   return ReadOnlyRoots(isolate).undefined_value();
 }
@@ -67,7 +67,8 @@ V8_WARN_UNUSED_RESULT bool CrashUnlessFuzzingReturnFalse(Isolate* isolate) {
 
 // Returns |value| unless correctness-fuzzer-supressions is enabled,
 // otherwise returns undefined_value.
-V8_WARN_UNUSED_RESULT Object ReturnFuzzSafe(Object value, Isolate* isolate) {
+V8_WARN_UNUSED_RESULT Tagged<Object> ReturnFuzzSafe(Tagged<Object> value,
+                                                    Isolate* isolate) {
   return v8_flags.correctness_fuzzer_suppressions
              ? ReadOnlyRoots(isolate).undefined_value()
              : value;
@@ -88,7 +89,7 @@ V8_WARN_UNUSED_RESULT Object ReturnFuzzSafe(Object value, Isolate* isolate) {
   if (!IsBoolean(args[index])) return CrashUnlessFuzzing(isolate); \
   bool name = IsTrue(args[index], isolate);
 
-bool IsAsmWasmFunction(Isolate* isolate, JSFunction function) {
+bool IsAsmWasmFunction(Isolate* isolate, Tagged<JSFunction> function) {
   DisallowGarbageCollection no_gc;
 #if V8_ENABLE_WEBASSEMBLY
   // For simplicity we include invalid asm.js functions whose code hasn't yet
@@ -339,8 +340,9 @@ bool CanOptimizeFunction(CodeKind target_kind, Handle<JSFunction> function,
   return true;
 }
 
-Object OptimizeFunctionOnNextCall(RuntimeArguments& args, Isolate* isolate,
-                                  CodeKind target_kind) {
+Tagged<Object> OptimizeFunctionOnNextCall(RuntimeArguments& args,
+                                          Isolate* isolate,
+                                          CodeKind target_kind) {
   if (args.length() != 1 && args.length() != 2) {
     return CrashUnlessFuzzing(isolate);
   }
@@ -371,7 +373,7 @@ Object OptimizeFunctionOnNextCall(RuntimeArguments& args, Isolate* isolate,
   // function has.
   if (!function->is_compiled()) {
     DCHECK(function->shared()->HasBytecodeArray());
-    Code code = *BUILTIN_CODE(isolate, InterpreterEntryTrampoline);
+    Tagged<Code> code = *BUILTIN_CODE(isolate, InterpreterEntryTrampoline);
     if (function->shared()->HasBaselineCode()) {
       code = function->shared()->baseline_code(kAcquireLoad);
     }
@@ -741,14 +743,9 @@ RUNTIME_FUNCTION(Runtime_OptimizeOsr) {
       Handle<BytecodeArray> bytecode_array(
           function->shared()->GetBytecodeArray(isolate), isolate);
       const BytecodeOffset current_offset = frame->GetBytecodeOffsetForOSR();
-      // TODO(olivf) It's possible that a valid osr_offset happens to be the
-      // construct stub range but. We should use OptimizedFrame::Summarize here
-      // instead.
-      if (!IsConstructor(*function) ||
-          current_offset != BytecodeOffset::None()) {
-        osr_offset = OffsetOfNextJumpLoop(isolate, bytecode_array,
-                                          current_offset.ToInt());
-      }
+      osr_offset = OffsetOfNextJumpLoop(
+          isolate, bytecode_array,
+          current_offset.IsNone() ? 0 : current_offset.ToInt());
       is_maglev = true;
     }
 
@@ -907,7 +904,7 @@ RUNTIME_FUNCTION(Runtime_GetOptimizationStatus) {
   }
 
   if (function->HasAttachedOptimizedCode()) {
-    Code code = function->code();
+    Tagged<Code> code = function->code();
     if (code->marked_for_deoptimization()) {
       status |= static_cast<int>(OptimizationStatus::kMarkedForDeoptimization);
     } else {
@@ -1145,12 +1142,22 @@ void FillUpOneNewSpacePage(Isolate* isolate, Heap* heap) {
 RUNTIME_FUNCTION(Runtime_SimulateNewspaceFull) {
   HandleScope scope(isolate);
   Heap* heap = isolate->heap();
-  NewSpace* space = heap->new_space();
   AlwaysAllocateScopeForTesting always_allocate(heap);
-  do {
-    FillUpOneNewSpacePage(isolate, heap);
-  } while (space->AddFreshPage());
-
+  if (v8_flags.minor_ms) {
+    if (heap->minor_sweeping_in_progress()) {
+      heap->EnsureYoungSweepingCompleted();
+    }
+    auto* space = heap->paged_new_space()->paged_space();
+    while (space->AddFreshPage()) {
+    }
+    space->FreeLinearAllocationArea();
+    space->ResetFreeList();
+  } else {
+    NewSpace* space = heap->new_space();
+    do {
+      FillUpOneNewSpacePage(isolate, heap);
+    } while (space->AddFreshPage());
+  }
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
@@ -1216,7 +1223,7 @@ static void DebugPrintImpl(MaybeObject maybe_object, std::ostream& os) {
   if (maybe_object->IsCleared()) {
     os << "[weak cleared]";
   } else {
-    Object object = maybe_object.GetHeapObjectOrSmi();
+    Tagged<Object> object = maybe_object.GetHeapObjectOrSmi();
     bool weak = maybe_object.IsWeak();
 
 #ifdef OBJECT_PRINT
@@ -1264,7 +1271,7 @@ RUNTIME_FUNCTION(Runtime_DebugPrintPtr) {
 
   MaybeObject maybe_object(*args.address_of_arg_at(0));
   if (!maybe_object.IsCleared()) {
-    Object object = maybe_object.GetHeapObjectOrSmi();
+    Tagged<Object> object = maybe_object.GetHeapObjectOrSmi();
     size_t pointer;
     if (Object::ToIntegerIndex(object, &pointer)) {
       MaybeObject from_pointer(static_cast<Address>(pointer));
@@ -1434,7 +1441,7 @@ RUNTIME_FUNCTION(Runtime_SetForceSlowPath) {
   if (args.length() != 1) {
     return CrashUnlessFuzzing(isolate);
   }
-  Object arg = args[0];
+  Tagged<Object> arg = args[0];
   if (IsTrue(arg, isolate)) {
     isolate->set_force_slow_path(true);
   } else {
@@ -1543,7 +1550,7 @@ RUNTIME_FUNCTION(Runtime_TraceExit) {
   if (args.length() != 1) {
     return CrashUnlessFuzzing(isolate);
   }
-  Object obj = args[0];
+  Tagged<Object> obj = args[0];
   PrintIndentation(StackSize(isolate));
   PrintF("} -> ");
   ShortPrint(obj);
@@ -1579,7 +1586,7 @@ RUNTIME_FUNCTION(Runtime_HasElementsInALargeObjectSpace) {
     return CrashUnlessFuzzing(isolate);
   }
   auto array = JSArray::cast(args[0]);
-  FixedArrayBase elements = array->elements();
+  Tagged<FixedArrayBase> elements = array->elements();
   return isolate->heap()->ToBoolean(
       isolate->heap()->new_lo_space()->Contains(elements) ||
       isolate->heap()->lo_space()->Contains(elements));
@@ -1590,7 +1597,7 @@ RUNTIME_FUNCTION(Runtime_InYoungGeneration) {
   if (args.length() != 1) {
     return CrashUnlessFuzzing(isolate);
   }
-  Object obj = args[0];
+  Tagged<Object> obj = args[0];
   return isolate->heap()->ToBoolean(ObjectInYoungGeneration(obj));
 }
 
@@ -1599,9 +1606,9 @@ RUNTIME_FUNCTION(Runtime_PretenureAllocationSite) {
   DisallowGarbageCollection no_gc;
 
   if (args.length() != 1) return CrashUnlessFuzzing(isolate);
-  Object arg = args[0];
+  Tagged<Object> arg = args[0];
   if (!IsJSObject(arg)) return CrashUnlessFuzzing(isolate);
-  JSObject object = JSObject::cast(arg);
+  Tagged<JSObject> object = JSObject::cast(arg);
 
   Heap* heap = object->GetHeap();
   if (!heap->InYoungGeneration(object)) {
@@ -1610,13 +1617,13 @@ RUNTIME_FUNCTION(Runtime_PretenureAllocationSite) {
   }
 
   PretenuringHandler* pretenuring_handler = heap->pretenuring_handler();
-  AllocationMemento memento =
+  Tagged<AllocationMemento> memento =
       pretenuring_handler
           ->FindAllocationMemento<PretenuringHandler::kForRuntime>(
               object->map(), object);
   if (memento.is_null())
     return ReturnFuzzSafe(ReadOnlyRoots(isolate).false_value(), isolate);
-  AllocationSite site = memento->GetAllocationSite();
+  Tagged<AllocationSite> site = memento->GetAllocationSite();
   pretenuring_handler->PretenureAllocationSiteOnNextCollection(site);
   return ReturnFuzzSafe(ReadOnlyRoots(isolate).true_value(), isolate);
 }
@@ -1855,9 +1862,9 @@ RUNTIME_FUNCTION(Runtime_HeapObjectVerify) {
 #ifdef VERIFY_HEAP
   Object::ObjectVerify(*object, isolate);
 #else
-  CHECK(IsObject(**object));
+  CHECK(IsObject(*object));
   if (IsHeapObject(*object)) {
-    CHECK(IsMap(HeapObject::cast(*object).map()));
+    CHECK(IsMap(HeapObject::cast(*object)->map()));
   } else {
     CHECK(IsSmi(*object));
   }
@@ -1933,8 +1940,10 @@ RUNTIME_FUNCTION(Runtime_EnableCodeLoggingForTesting) {
     void SetterCallbackEvent(Handle<Name> name, Address entry_point) final {}
     void RegExpCodeCreateEvent(Handle<AbstractCode> code,
                                Handle<String> source) final {}
-    void CodeMoveEvent(InstructionStream from, InstructionStream to) final {}
-    void BytecodeMoveEvent(BytecodeArray from, BytecodeArray to) final {}
+    void CodeMoveEvent(Tagged<InstructionStream> from,
+                       Tagged<InstructionStream> to) final {}
+    void BytecodeMoveEvent(Tagged<BytecodeArray> from,
+                           Tagged<BytecodeArray> to) final {}
     void SharedFunctionInfoMoveEvent(Address from, Address to) final {}
     void NativeContextMoveEvent(Address from, Address to) final {}
     void CodeMovingGCEvent() final {}

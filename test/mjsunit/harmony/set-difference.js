@@ -188,3 +188,52 @@
 
   assertEquals(resultArray, differenceArray);
 })();
+
+(function TestIsDifferenceAfterClearingTheReceiver() {
+  const firstSet = new Set();
+  firstSet.add(42);
+  firstSet.add(43);
+
+  const otherSet = new Set();
+  otherSet.add(43);
+
+  Object.defineProperty(otherSet, 'size', {
+    get: function() {
+      firstSet.clear();
+      return 1;
+    },
+
+  });
+
+  const resultSet = new Set();
+
+  const resultArray = Array.from(resultSet);
+  const differenceArray = Array.from(firstSet.difference(otherSet));
+
+  assertEquals(resultArray, differenceArray);
+})();
+
+(function TestTableTransition() {
+  const firstSet = new Set();
+  firstSet.add(42);
+  firstSet.add(43);
+  firstSet.add(44);
+
+  const setLike = {
+    size: 5,
+    keys() {
+      return [1, 2, 3, 4, 5].keys();
+    },
+    has(key) {
+      if (key == 43) {
+        // Cause a table transition in the receiver.
+        firstSet.clear();
+        return true;
+      }
+      return false;
+    }
+  };
+
+  assertEquals([42, 44], Array.from(firstSet.difference(setLike)));
+  assertEquals(0, firstSet.size);
+})();

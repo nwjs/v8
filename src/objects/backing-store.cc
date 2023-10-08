@@ -952,7 +952,7 @@ void GlobalBackingStoreRegistry::UpdateSharedWasmMemoryObjects(
       isolate->factory()->shared_wasm_memories();
 
   for (int i = 0, e = shared_wasm_memories->length(); i < e; ++i) {
-    HeapObject obj;
+    Tagged<HeapObject> obj;
     if (!shared_wasm_memories->Get(i).GetHeapObject(&obj)) continue;
 
     Handle<WasmMemoryObject> memory_object(WasmMemoryObject::cast(obj),

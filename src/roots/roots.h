@@ -21,22 +21,13 @@ namespace internal {
 // Forward declarations.
 class Boolean;
 enum ElementsKind : uint8_t;
-template <typename T>
-class Handle;
-class Heap;
-class Isolate;
 class Factory;
 template <typename Impl>
 class FactoryBase;
 class LocalFactory;
-class Map;
 class PropertyCell;
 class ReadOnlyHeap;
 class RootVisitor;
-class String;
-class Symbol;
-template <typename T>
-class Tagged;
 
 #define STRONG_READ_ONLY_HEAP_NUMBER_ROOT_LIST(V)         \
   /* Special numbers */                                   \
@@ -354,7 +345,7 @@ class Tagged;
     FeedbackVectorsForProfilingTools)                                       \
   V(FixedArray, serialized_objects, SerializedObjects)                      \
   V(FixedArray, serialized_global_proxy_sizes, SerializedGlobalProxySizes)  \
-  V(TemplateList, message_listeners, MessageListeners)                      \
+  V(ArrayList, message_listeners, MessageListeners)                         \
   /* Support for async stack traces */                                      \
   V(HeapObject, current_microtask, CurrentMicrotask)                        \
   /* KeepDuringJob set for JS WeakRefs */                                   \
@@ -658,7 +649,7 @@ class ReadOnlyRoots {
   READ_ONLY_ROOT_LIST(ROOT_ACCESSOR)
 #undef ROOT_ACCESSOR
 
-  V8_INLINE bool IsNameForProtector(HeapObject object) const;
+  V8_INLINE bool IsNameForProtector(Tagged<HeapObject> object) const;
   V8_INLINE void VerifyNameForProtectorsPages() const;
 #ifdef DEBUG
   void VerifyNameForProtectors();

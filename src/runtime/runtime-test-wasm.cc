@@ -149,15 +149,15 @@ RUNTIME_FUNCTION(Runtime_CountUnoptimizedWasmToJSWrapper) {
   Handle<WasmInstanceObject> instance = args.at<WasmInstanceObject>(0);
   Address wrapper_start = isolate->builtins()
                               ->code(Builtin::kWasmToJsWrapperAsm)
-                              .instruction_start();
+                              ->instruction_start();
   int result = 0;
-  int import_count = instance->imported_function_targets().length();
+  int import_count = instance->imported_function_targets()->length();
   for (int i = 0; i < import_count; ++i) {
-    if (instance->imported_function_targets().get(i) == wrapper_start) {
+    if (instance->imported_function_targets()->get(i) == wrapper_start) {
       ++result;
     }
   }
-  int table_count = instance->tables().length();
+  int table_count = instance->tables()->length();
   for (int table_index = 0; table_index < table_count; ++table_index) {
     if (!IsWasmIndirectFunctionTable(
             instance->indirect_function_tables()->get(table_index))) {
@@ -194,12 +194,13 @@ RUNTIME_FUNCTION(Runtime_HasUnoptimizedWasmToJSWrapper) {
     internal = wasm_js_function->shared()->wasm_js_function_data()->internal();
   }
 
-  Code wrapper = isolate->builtins()->code(Builtin::kWasmToJsWrapperAsm);
+  Tagged<Code> wrapper =
+      isolate->builtins()->code(Builtin::kWasmToJsWrapperAsm);
   if (!internal->call_target()) {
     return isolate->heap()->ToBoolean(internal->code() == wrapper);
   }
   return isolate->heap()->ToBoolean(internal->call_target() ==
-                                    wrapper.instruction_start());
+                                    wrapper->instruction_start());
 }
 
 RUNTIME_FUNCTION(Runtime_WasmTraceEnter) {
@@ -239,7 +240,7 @@ RUNTIME_FUNCTION(Runtime_WasmTraceEnter) {
 RUNTIME_FUNCTION(Runtime_WasmTraceExit) {
   HandleScope shs(isolate);
   DCHECK_EQ(1, args.length());
-  Smi return_addr_smi = Smi::cast(args[0]);
+  Tagged<Smi> return_addr_smi = Smi::cast(args[0]);
 
   PrintIndentation(WasmStackSize(isolate));
   PrintF("}");
@@ -332,11 +333,9 @@ RUNTIME_FUNCTION(Runtime_IsWasmCode) {
   SealHandleScope shs(isolate);
   DCHECK_EQ(1, args.length());
   auto function = JSFunction::cast(args[0]);
-  Code code = function->code();
-  bool is_js_to_wasm =
-      code->kind() == CodeKind::JS_TO_WASM_FUNCTION ||
-      (code->builtin_id() == Builtin::kGenericJSToWasmWrapper) ||
-      (code->builtin_id() == Builtin::kJSToWasmWrapper);
+  Tagged<Code> code = function->code();
+  bool is_js_to_wasm = code->kind() == CodeKind::JS_TO_WASM_FUNCTION ||
+                       (code->builtin_id() == Builtin::kJSToWasmWrapper);
   return isolate->heap()->ToBoolean(is_js_to_wasm);
 }
 
@@ -459,7 +458,7 @@ RUNTIME_FUNCTION(Runtime_WasmGetNumberOfInstances) {
   DCHECK_EQ(1, args.length());
   Handle<WasmModuleObject> module_obj = args.at<WasmModuleObject>(0);
   int instance_count = 0;
-  WeakArrayList weak_instance_list =
+  Tagged<WeakArrayList> weak_instance_list =
       module_obj->script()->wasm_weak_instance_list();
   for (int i = 0; i < weak_instance_list->length(); ++i) {
     if (weak_instance_list->Get(i)->IsWeak()) instance_count++;
@@ -499,7 +498,7 @@ RUNTIME_FUNCTION(Runtime_WasmTraceMemory) {
   DCHECK(it.is_wasm());
   WasmFrame* frame = WasmFrame::cast(it.frame());
 
-  // TODO(13918): Fix for multi-memory.
+  // TODO(14259): Fix for multi-memory.
   auto memory_object = frame->wasm_instance()->memory_object(0);
   uint8_t* mem_start = reinterpret_cast<uint8_t*>(
       memory_object->array_buffer()->backing_store());
@@ -519,7 +518,7 @@ RUNTIME_FUNCTION(Runtime_WasmTierUpFunction) {
   CHECK(WasmExportedFunction::IsWasmExportedFunction(*function));
   Handle<WasmExportedFunction> exp_fun =
       Handle<WasmExportedFunction>::cast(function);
-  WasmInstanceObject instance = exp_fun->instance();
+  Tagged<WasmInstanceObject> instance = exp_fun->instance();
   int func_index = exp_fun->function_index();
   wasm::TierUpNowForTesting(isolate, instance, func_index);
   return ReadOnlyRoots(isolate).undefined_value();

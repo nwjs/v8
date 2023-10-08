@@ -12,7 +12,8 @@
 namespace v8 {
 namespace internal {
 
-DependentCode DependentCode::GetDependentCode(HeapObject object) {
+Tagged<DependentCode> DependentCode::GetDependentCode(
+    Tagged<HeapObject> object) {
   if (IsMap(object)) {
     return Map::cast(object)->dependent_code();
   } else if (IsPropertyCell(object)) {
@@ -104,7 +105,7 @@ void DependentCode::IterateAndCompact(const IterateAndCompactFn& fn) {
       continue;
     }
 
-    if (fn(Code::cast(obj->GetHeapObjectAssumeWeak()),
+    if (fn(Code::cast(obj.GetHeapObjectAssumeWeak()),
            static_cast<DependencyGroups>(
                Get(i + kGroupsSlotOffset).ToSmi().value()))) {
       len = FillEntryFromBack(i, len);
@@ -161,7 +162,8 @@ void DependentCode::DeoptimizeDependencyGroups(
 }
 
 // static
-DependentCode DependentCode::empty_dependent_code(const ReadOnlyRoots& roots) {
+Tagged<DependentCode> DependentCode::empty_dependent_code(
+    const ReadOnlyRoots& roots) {
   return DependentCode::cast(roots.empty_weak_array_list());
 }
 

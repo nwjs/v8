@@ -14,7 +14,7 @@
 #include "src/compiler/operator.h"
 #include "src/compiler/schedule.h"
 #include "src/compiler/turboshaft/graph.h"
-#include "src/compiler/turboshaft/operation-matching.h"
+#include "src/compiler/turboshaft/operation-matcher.h"
 #include "src/compiler/turboshaft/operations.h"
 #include "src/compiler/turboshaft/use-map.h"
 
@@ -63,6 +63,8 @@ struct TurbofanAdapter {
   using opcode_t = IrOpcode::Value;
   using id_t = uint32_t;
   using source_position_table_t = SourcePositionTable;
+
+  explicit TurbofanAdapter(Schedule*) {}
 
   class ConstantView {
    public:
@@ -347,8 +349,6 @@ struct TurbofanAdapter {
   StoreView store_view(node_t node) { return StoreView(node); }
   DeoptimizeView deoptimize_view(node_t node) { return DeoptimizeView(node); }
 
-  void InitializeAdapter(schedule_t) {}
-
   block_t block(schedule_t schedule, node_t node) const {
     return schedule->block(node);
   }
@@ -473,8 +473,7 @@ struct TurbofanAdapter {
   }
 };
 
-struct TurboshaftAdapter
-    : public turboshaft::OperationMatching<TurboshaftAdapter> {
+struct TurboshaftAdapter : public turboshaft::OperationMatcher {
   static constexpr bool IsTurbofan = false;
   static constexpr bool IsTurboshaft = true;
   static constexpr bool AllowsImplicitWord64ToWord32Truncation = true;
@@ -488,10 +487,8 @@ struct TurboshaftAdapter
   using id_t = uint32_t;
   using source_position_table_t = turboshaft::GrowingSidetable<SourcePosition>;
 
-  bool Matches(node_t node,
-               const turboshaft::MatchOrBind<node_t>& pattern) const {
-    return pattern.MatchesWith(graph_, node);
-  }
+  explicit TurboshaftAdapter(turboshaft::Graph* graph)
+      : turboshaft::OperationMatcher(*graph), graph_(graph) {}
 
   class ConstantView {
     using Kind = turboshaft::ConstantOp::Kind;
@@ -544,12 +541,10 @@ struct TurboshaftAdapter
   class CallView {
    public:
     explicit CallView(turboshaft::Graph* graph, node_t node) : node_(node) {
-      if ((call_op_ = graph->Get(node_).TryCast<turboshaft::CallOp>())) {
-        return;
-      }
-      if (graph->Get(node_).Is<turboshaft::TailCallOp>()) {
-        UNIMPLEMENTED();
-      }
+      call_op_ = graph->Get(node_).TryCast<turboshaft::CallOp>();
+      if (call_op_ != nullptr) return;
+      tail_call_op_ = graph->Get(node_).TryCast<turboshaft::TailCallOp>();
+      if (tail_call_op_ != nullptr) return;
       UNREACHABLE();
     }
 
@@ -557,10 +552,14 @@ struct TurboshaftAdapter
       if (call_op_) {
         return static_cast<int>(call_op_->results_rep().size());
       }
+      if (tail_call_op_) {
+        return static_cast<int>(tail_call_op_->outputs_rep().size());
+      }
       UNREACHABLE();
     }
     node_t callee() const {
       if (call_op_) return call_op_->callee();
+      if (tail_call_op_) return tail_call_op_->callee();
       UNREACHABLE();
     }
     node_t frame_state() const {
@@ -569,10 +568,12 @@ struct TurboshaftAdapter
     }
     base::Vector<const node_t> arguments() const {
       if (call_op_) return call_op_->arguments();
+      if (tail_call_op_) return tail_call_op_->arguments();
       UNREACHABLE();
     }
     const CallDescriptor* call_descriptor() const {
       if (call_op_) return call_op_->descriptor->descriptor;
+      if (tail_call_op_) return tail_call_op_->descriptor->descriptor;
       UNREACHABLE();
     }
 
@@ -581,6 +582,7 @@ struct TurboshaftAdapter
    private:
     node_t node_;
     const turboshaft::CallOp* call_op_;
+    const turboshaft::TailCallOp* tail_call_op_;
   };
 
   class BranchView {
@@ -780,7 +782,6 @@ struct TurboshaftAdapter
     return DeoptimizeView(graph_, node);
   }
 
-  void InitializeAdapter(schedule_t schedule) { graph_ = schedule; }
   turboshaft::Graph* turboshaft_graph() const { return graph_; }
 
   block_t block(schedule_t schedule, node_t node) const {
@@ -954,10 +955,6 @@ struct TurboshaftAdapter
   }
 
  private:
-  friend class turboshaft::OperationMatching<TurboshaftAdapter>;
-  // Provide access to the graph for the OpMatcher.
-  const turboshaft::Graph& output_graph() const { return *graph_; }
-
   turboshaft::Graph* graph_;
 };
 

@@ -481,19 +481,19 @@ void WasmGraphBuilder::StackCheck(
   // them in contexts where load elimination would eliminate the reload.
   // Therefore, we use plain Load nodes which are not subject to load
   // elimination.
-  Node* new_memory0_size = shared_memory_instance_cache == nullptr
-                               ? nullptr
-                               : LOAD_INSTANCE_FIELD_NO_ELIMINATION(
-                                     Memory0Size, MachineType::UintPtr());
+  DCHECK_IMPLIES(shared_memory_instance_cache, has_cached_memory());
+  Node* new_memory_size = shared_memory_instance_cache == nullptr
+                              ? nullptr
+                              : LoadMemSize(cached_memory_index_);
 
   Node* merge = Merge(if_true, control());
   Node* ephi_inputs[] = {check, effect(), merge};
   Node* ephi = EffectPhi(2, ephi_inputs);
 
   if (shared_memory_instance_cache != nullptr) {
-    shared_memory_instance_cache->mem0_size = CreateOrMergeIntoPhi(
+    shared_memory_instance_cache->mem_size = CreateOrMergeIntoPhi(
         MachineType::PointerRepresentation(), merge,
-        shared_memory_instance_cache->mem0_size, new_memory0_size);
+        shared_memory_instance_cache->mem_size, new_memory_size);
   }
 
   SetEffectControl(ephi, merge);
@@ -3232,24 +3232,17 @@ void WasmGraphBuilder::InitInstanceCache(
 
   // Only cache memory start and size if there is a memory (the nodes would be
   // dead otherwise, but we can avoid creating them in the first place).
-  if (env_->module->memories.empty()) return;
+  if (!has_cached_memory()) return;
 
-  // Load the memory start.
-  instance_cache->mem0_start =
-      LOAD_INSTANCE_FIELD_NO_ELIMINATION(Memory0Start, kMaybeSandboxedPointer);
+  instance_cache->mem_start = LoadMemStart(cached_memory_index_);
 
-  // Load the memory size.
   // TODO(13957): Clamp the loaded memory size to a safe value.
-  instance_cache->mem0_size =
-      LOAD_INSTANCE_FIELD_NO_ELIMINATION(Memory0Size, MachineType::UintPtr());
-  wasm::ValueType mem0_size_type =
-      env_->module->memories[0].is_memory64 ? wasm::kWasmI64 : wasm::kWasmI32;
-  SetType(instance_cache->mem0_size, mem0_size_type);
+  instance_cache->mem_size = LoadMemSize(cached_memory_index_);
 }
 
 void WasmGraphBuilder::PrepareInstanceCacheForLoop(
     WasmInstanceCacheNodes* instance_cache, Node* control) {
-  if (env_->module->memories.empty()) return;
+  if (!has_cached_memory()) return;
   for (auto field : WasmInstanceCacheNodes::kFields) {
     instance_cache->*field = graph()->NewNode(
         mcgraph()->common()->Phi(MachineType::PointerRepresentation(), 1),
@@ -3272,10 +3265,10 @@ void WasmGraphBuilder::NewInstanceCacheMerge(WasmInstanceCacheNodes* to,
 void WasmGraphBuilder::MergeInstanceCacheInto(WasmInstanceCacheNodes* to,
                                               WasmInstanceCacheNodes* from,
                                               Node* merge) {
-  if (env_->module->memories.empty()) {
+  if (!has_cached_memory()) {
     // Instance cache nodes should be nullptr then.
-    DCHECK(to->mem0_start == nullptr && to->mem0_size == nullptr &&
-           from->mem0_start == nullptr && from->mem0_size == nullptr);
+    DCHECK(to->mem_start == nullptr && to->mem_size == nullptr &&
+           from->mem_start == nullptr && from->mem_size == nullptr);
     return;
   }
 
@@ -3344,19 +3337,59 @@ void WasmGraphBuilder::SetEffectControl(Node* effect, Node* control) {
   gasm_->InitializeEffectControl(effect, control);
 }
 
-Node* WasmGraphBuilder::MemBuffer(uint32_t mem_index, uintptr_t offset) {
+Node* WasmGraphBuilder::MemStart(uint32_t mem_index) {
   DCHECK_NOT_NULL(instance_cache_);
-  Node* mem_start;
-  if (mem_index == 0) {
-    mem_start = instance_cache_->mem0_start;
-    DCHECK_NOT_NULL(mem_start);
-  } else {
-    Node* memory_bases_and_sizes =
-        LOAD_INSTANCE_FIELD(MemoryBasesAndSizes, MachineType::TaggedPointer());
-    mem_start = gasm_->LoadByteArrayElement(
-        memory_bases_and_sizes, gasm_->IntPtrConstant(2 * mem_index),
-        kMaybeSandboxedPointer);
+  V8_ASSUME(cached_memory_index_ == kNoCachedMemoryIndex ||
+            cached_memory_index_ >= 0);
+  if (mem_index == static_cast<uint8_t>(cached_memory_index_)) {
+    return instance_cache_->mem_start;
   }
+  return LoadMemStart(mem_index);
+}
+
+Node* WasmGraphBuilder::MemSize(uint32_t mem_index) {
+  DCHECK_NOT_NULL(instance_cache_);
+  V8_ASSUME(cached_memory_index_ == kNoCachedMemoryIndex ||
+            cached_memory_index_ >= 0);
+  if (mem_index == static_cast<uint8_t>(cached_memory_index_)) {
+    return instance_cache_->mem_size;
+  }
+
+  return LoadMemSize(mem_index);
+}
+
+Node* WasmGraphBuilder::LoadMemStart(uint32_t mem_index) {
+  if (mem_index == 0) {
+    return LOAD_INSTANCE_FIELD_NO_ELIMINATION(Memory0Start,
+                                              kMaybeSandboxedPointer);
+  }
+  Node* memory_bases_and_sizes =
+      LOAD_INSTANCE_FIELD(MemoryBasesAndSizes, MachineType::TaggedPointer());
+  return gasm_->LoadByteArrayElement(memory_bases_and_sizes,
+                                     gasm_->IntPtrConstant(2 * mem_index),
+                                     kMaybeSandboxedPointer);
+}
+
+Node* WasmGraphBuilder::LoadMemSize(uint32_t mem_index) {
+  wasm::ValueType mem_type = env_->module->memories[mem_index].is_memory64
+                                 ? wasm::kWasmI64
+                                 : wasm::kWasmI32;
+  if (mem_index == 0) {
+    return SetType(
+        LOAD_INSTANCE_FIELD_NO_ELIMINATION(Memory0Size, MachineType::UintPtr()),
+        mem_type);
+  }
+  Node* memory_bases_and_sizes =
+      LOAD_INSTANCE_FIELD(MemoryBasesAndSizes, MachineType::TaggedPointer());
+  return SetType(
+      gasm_->LoadByteArrayElement(memory_bases_and_sizes,
+                                  gasm_->IntPtrConstant(2 * mem_index + 1),
+                                  MachineType::UintPtr()),
+      mem_type);
+}
+
+Node* WasmGraphBuilder::MemBuffer(uint32_t mem_index, uintptr_t offset) {
+  Node* mem_start = MemStart(mem_index);
   if (offset == 0) return mem_start;
   return gasm_->IntAdd(mem_start, gasm_->UintPtrConstant(offset));
 }
@@ -3364,18 +3397,8 @@ Node* WasmGraphBuilder::MemBuffer(uint32_t mem_index, uintptr_t offset) {
 Node* WasmGraphBuilder::CurrentMemoryPages(const wasm::WasmMemory* memory) {
   // CurrentMemoryPages can not be called from asm.js.
   DCHECK_EQ(wasm::kWasmOrigin, env_->module->origin);
-  Node* mem_size;
-  if (memory->index == 0) {
-    mem_size = instance_cache_->mem0_size;
-  } else {
-    Node* memory_bases_and_sizes =
-        LOAD_INSTANCE_FIELD(MemoryBasesAndSizes, MachineType::TaggedPointer());
-    mem_size = gasm_->LoadByteArrayElement(
-        memory_bases_and_sizes, gasm_->IntPtrConstant(2 * memory->index + 1),
-        MachineType::Pointer());
-  }
 
-  DCHECK_NOT_NULL(mem_size);
+  Node* mem_size = MemSize(memory->index);
   Node* result =
       gasm_->WordShr(mem_size, gasm_->IntPtrConstant(wasm::kWasmPageSizeLog2));
   result = env_->module->memories[0].is_memory64
@@ -3610,16 +3633,7 @@ std::pair<Node*, BoundsCheckResult> WasmGraphBuilder::BoundsCheckMem(
     return {index, BoundsCheckResult::kTrapHandler};
   }
 
-  Node* mem_size;
-  if (memory->index == 0) {
-    mem_size = instance_cache_->mem0_size;
-  } else {
-    Node* memory_bases_and_sizes =
-        LOAD_INSTANCE_FIELD(MemoryBasesAndSizes, MachineType::TaggedPointer());
-    mem_size = gasm_->LoadByteArrayElement(
-        memory_bases_and_sizes, gasm_->IntPtrConstant(2 * memory->index + 1),
-        MachineType::Pointer());
-  }
+  Node* mem_size = MemSize(memory->index);
 
   Node* end_offset_node = mcgraph_->UintPtrConstant(end_offset);
   if (end_offset > memory->min_memory_size) {
@@ -3808,6 +3822,8 @@ Node* WasmGraphBuilder::LoadLane(const wasm::WasmMemory* memory,
     SetSourcePosition(load, position);
   }
   if (v8_flags.trace_wasm_memory) {
+    // TODO(14259): Implement memory tracing for multiple memories.
+    CHECK_EQ(0, memory->index);
     TraceMemoryOperation(false, memtype.representation(), index, offset,
                          position);
   }
@@ -3848,6 +3864,8 @@ Node* WasmGraphBuilder::LoadTransform(const wasm::WasmMemory* memory,
   }
 
   if (v8_flags.trace_wasm_memory) {
+    // TODO(14259): Implement memory tracing for multiple memories.
+    CHECK_EQ(0, memory->index);
     TraceMemoryOperation(false, memtype.representation(), index, offset,
                          position);
   }
@@ -3899,6 +3917,8 @@ Node* WasmGraphBuilder::LoadMem(const wasm::WasmMemory* memory,
   }
 
   if (v8_flags.trace_wasm_memory) {
+    // TODO(14259): Implement memory tracing for multiple memories.
+    CHECK_EQ(0, memory->index);
     TraceMemoryOperation(false, memtype.representation(), index, offset,
                          position);
   }
@@ -3929,6 +3949,8 @@ void WasmGraphBuilder::StoreLane(const wasm::WasmMemory* memory,
     SetSourcePosition(store, position);
   }
   if (v8_flags.trace_wasm_memory) {
+    // TODO(14259): Implement memory tracing for multiple memories.
+    CHECK_EQ(0, memory->index);
     TraceMemoryOperation(true, mem_rep, index, offset, position);
   }
 }
@@ -3977,6 +3999,8 @@ void WasmGraphBuilder::StoreMem(const wasm::WasmMemory* memory,
   }
 
   if (v8_flags.trace_wasm_memory) {
+    // TODO(14259): Implement memory tracing for multiple memories.
+    CHECK_EQ(0, memory->index);
     TraceMemoryOperation(true, mem_rep, index, offset, position);
   }
 }
@@ -3984,10 +4008,8 @@ void WasmGraphBuilder::StoreMem(const wasm::WasmMemory* memory,
 Node* WasmGraphBuilder::BuildAsmjsLoadMem(MachineType type, Node* index) {
   DCHECK_NOT_NULL(instance_cache_);
   DCHECK_EQ(1, env_->module->memories.size());
-  Node* mem_start = instance_cache_->mem0_start;
-  Node* mem_size = instance_cache_->mem0_size;
-  DCHECK_NOT_NULL(mem_start);
-  DCHECK_NOT_NULL(mem_size);
+  Node* mem_start = MemStart(0);
+  Node* mem_size = MemSize(0);
 
   // Asm.js semantics are defined in terms of typed arrays, hence OOB
   // reads return {undefined} coerced to the result type (0 for integers, NaN
@@ -4031,10 +4053,8 @@ Node* WasmGraphBuilder::BuildAsmjsStoreMem(MachineType type, Node* index,
                                            Node* val) {
   DCHECK_NOT_NULL(instance_cache_);
   DCHECK_EQ(1, env_->module->memories.size());
-  Node* mem_start = instance_cache_->mem0_start;
-  Node* mem_size = instance_cache_->mem0_size;
-  DCHECK_NOT_NULL(mem_start);
-  DCHECK_NOT_NULL(mem_size);
+  Node* mem_start = MemStart(0);
+  Node* mem_size = MemSize(0);
 
   // Asm.js semantics are to ignore OOB writes.
   // Note that we check against the memory size ignoring the size of the
@@ -4152,27 +4172,16 @@ void WasmGraphBuilder::LowerInt64(CallOrigin origin) {
 
 Node* WasmGraphBuilder::BuildChangeInt64ToBigInt(Node* input,
                                                  StubCallMode stub_mode) {
-  Node* target;
   if (mcgraph()->machine()->Is64()) {
-    target = (stub_mode == StubCallMode::kCallWasmRuntimeStub)
-                 ? mcgraph()->RelocatableIntPtrConstant(
-                       wasm::WasmCode::kI64ToBigInt, RelocInfo::WASM_STUB_CALL)
-                 : gasm_->GetBuiltinPointerTarget(Builtin::kI64ToBigInt);
+    return gasm_->CallBuiltin(Builtin::kI64ToBigInt, Operator::kEliminatable,
+                              input);
   } else {
-    DCHECK(mcgraph()->machine()->Is32());
-    // On 32-bit platforms we already set the target to the
-    // I32PairToBigInt builtin here, so that we don't have to replace the
-    // target in the int64-lowering.
-    target =
-        (stub_mode == StubCallMode::kCallWasmRuntimeStub)
-            ? mcgraph()->RelocatableIntPtrConstant(
-                  wasm::WasmCode::kI32PairToBigInt, RelocInfo::WASM_STUB_CALL)
-            : gasm_->GetBuiltinPointerTarget(Builtin::kI32PairToBigInt);
+    Node* low_word = gasm_->TruncateInt64ToInt32(input);
+    Node* high_word = gasm_->TruncateInt64ToInt32(
+        gasm_->Word64Shr(input, gasm_->Int32Constant(32)));
+    return gasm_->CallBuiltin(Builtin::kI32PairToBigInt,
+                              Operator::kEliminatable, low_word, high_word);
   }
-  CallDescriptor* descriptor =
-      wasm::GetWasmEngine()->call_descriptors()->GetI64ToBigIntDescriptor(
-          stub_mode);
-  return gasm_->Call(descriptor, target, input);
 }
 
 void WasmGraphBuilder::SetSourcePosition(Node* node,
@@ -6991,6 +7000,8 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
                                    target, value, context, frame_state)
                      : gasm_->Call(tagged_non_smi_to_int32_operator_.get(),
                                    target, value, context);
+    // The source position here is needed for asm.js, see the comment on the
+    // source position of the call to JavaScript in the wasm-to-js wrapper.
     SetSourcePosition(call, 1);
     gasm_->Goto(&done, call);
     gasm_->Bind(&done);
@@ -7042,6 +7053,8 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
                                    value, context, frame_state)
                      : gasm_->Call(tagged_to_float64_operator_.get(), target,
                                    value, context);
+    // The source position here is needed for asm.js, see the comment on the
+    // source position of the call to JavaScript in the wasm-to-js wrapper.
     SetSourcePosition(call, 1);
     return call;
   }
@@ -7904,6 +7917,12 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
     }
     DCHECK_NOT_NULL(call);
 
+    // For asm.js the error location can differ depending on whether an
+    // exception was thrown in imported JS code or an exception was thrown in
+    // the ToNumber builtin that converts the result of the JS code a
+    // WebAssembly value. The source position allows asm.js to determine the
+    // correct error location. Source position 1 encodes the call to ToNumber,
+    // source position 0 encodes the call to the imported JS code.
     SetSourcePosition(call, 0);
 
     if (v8_flags.experimental_wasm_stack_switching) {
@@ -8097,8 +8116,8 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
           BuildReceiverNode(callable_node, native_context, undefined_node);
     }
 
-    SharedFunctionInfo shared = target->shared();
-    FunctionTemplateInfo api_func_data = shared->api_func_data();
+    Tagged<SharedFunctionInfo> shared = target->shared();
+    Tagged<FunctionTemplateInfo> api_func_data = shared->api_func_data();
     const Address c_address = api_func_data->GetCFunction(0);
     const v8::CFunctionInfo* c_signature = api_func_data->GetCSignature(0);
 
@@ -8160,7 +8179,7 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
         },
         // Initialize wasm-specific callback options fields
         [this](Node* options_stack_slot) {
-          // TODO(13918): Do we need to support multiple memories for the fast
+          // TODO(14260): Do we need to support multiple memories for the fast
           // API?
           Node* mem_start = LOAD_INSTANCE_FIELD_NO_ELIMINATION(
               Memory0Start, kMaybeSandboxedPointer);
@@ -8309,6 +8328,8 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
       }
     }
     Return(jsval);
+
+    if (ContainsInt64(sig_)) LowerInt64(kCalledFromJS);
   }
 
   void BuildCWasmEntry() {
@@ -8495,6 +8516,15 @@ wasm::WasmOpcode GetMathIntrinsicOpcode(wasm::ImportCallKind kind,
 #undef CASE
 }
 
+MachineGraph* CreateCommonMachineGraph(Zone* zone) {
+  return zone->New<MachineGraph>(
+      zone->New<Graph>(zone), zone->New<CommonOperatorBuilder>(zone),
+      zone->New<MachineOperatorBuilder>(
+          zone, MachineType::PointerRepresentation(),
+          InstructionSelector::SupportedMachineOperatorFlags(),
+          InstructionSelector::AlignmentRequirements()));
+}
+
 wasm::WasmCompilationResult CompileWasmMathIntrinsic(
     wasm::ImportCallKind kind, const wasm::FunctionSig* sig) {
   DCHECK_EQ(1, sig->return_count());
@@ -8507,12 +8537,7 @@ wasm::WasmCompilationResult CompileWasmMathIntrinsic(
   // Compile a Wasm function with a single bytecode and let TurboFan
   // generate either inlined machine code or a call to a helper.
   SourcePositionTable* source_positions = nullptr;
-  MachineGraph* mcgraph = zone.New<MachineGraph>(
-      zone.New<Graph>(&zone), zone.New<CommonOperatorBuilder>(&zone),
-      zone.New<MachineOperatorBuilder>(
-          &zone, MachineType::PointerRepresentation(),
-          InstructionSelector::SupportedMachineOperatorFlags(),
-          InstructionSelector::AlignmentRequirements()));
+  MachineGraph* mcgraph = CreateCommonMachineGraph(&zone);
 
   wasm::CompilationEnv env(nullptr, wasm::WasmFeatures::All(),
                            wasm::kNoDynamicTiering);
@@ -8635,14 +8660,8 @@ wasm::WasmCode* CompileWasmCapiCallWrapper(wasm::NativeModule* native_module,
 
   Zone zone(wasm::GetWasmEngine()->allocator(), ZONE_NAME, kCompressGraphZone);
 
-  // TODO(jkummerow): Extract common code into helper method.
   SourcePositionTable* source_positions = nullptr;
-  MachineGraph* mcgraph = zone.New<MachineGraph>(
-      zone.New<Graph>(&zone), zone.New<CommonOperatorBuilder>(&zone),
-      zone.New<MachineOperatorBuilder>(
-          &zone, MachineType::PointerRepresentation(),
-          InstructionSelector::SupportedMachineOperatorFlags(),
-          InstructionSelector::AlignmentRequirements()));
+  MachineGraph* mcgraph = CreateCommonMachineGraph(&zone);
 
   WasmWrapperGraphBuilder builder(
       &zone, mcgraph, sig, native_module->module(),
@@ -8686,15 +8705,8 @@ wasm::WasmCode* CompileWasmJSFastCallWrapper(wasm::NativeModule* native_module,
                "wasm.CompileWasmJSFastCallWrapper");
 
   Zone zone(wasm::GetWasmEngine()->allocator(), ZONE_NAME, kCompressGraphZone);
-
-  // TODO(jkummerow): Extract common code into helper method.
   SourcePositionTable* source_positions = nullptr;
-  MachineGraph* mcgraph = zone.New<MachineGraph>(
-      zone.New<Graph>(&zone), zone.New<CommonOperatorBuilder>(&zone),
-      zone.New<MachineOperatorBuilder>(
-          &zone, MachineType::PointerRepresentation(),
-          InstructionSelector::SupportedMachineOperatorFlags(),
-          InstructionSelector::AlignmentRequirements()));
+  MachineGraph* mcgraph = CreateCommonMachineGraph(&zone);
 
   WasmWrapperGraphBuilder builder(
       &zone, mcgraph, sig, native_module->module(),
@@ -8920,12 +8932,7 @@ wasm::WasmCompilationResult ExecuteTurbofanWasmCompilation(
                "wasm.CompileTopTier", "func_index", data.func_index,
                "body_size", data.body_size());
   Zone zone(wasm::GetWasmEngine()->allocator(), ZONE_NAME, kCompressGraphZone);
-  MachineGraph* mcgraph = zone.New<MachineGraph>(
-      zone.New<Graph>(&zone), zone.New<CommonOperatorBuilder>(&zone),
-      zone.New<MachineOperatorBuilder>(
-          &zone, MachineType::PointerRepresentation(),
-          InstructionSelector::SupportedMachineOperatorFlags(),
-          InstructionSelector::AlignmentRequirements()));
+  MachineGraph* mcgraph = CreateCommonMachineGraph(&zone);
 
   OptimizedCompilationInfo info(
       GetDebugName(&zone, env->module, data.wire_bytes_storage,

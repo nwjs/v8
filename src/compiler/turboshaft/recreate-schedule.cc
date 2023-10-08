@@ -898,6 +898,97 @@ Node* ScheduleBuilder::ProcessOperation(const SelectOp& op) {
 Node* ScheduleBuilder::ProcessOperation(const PendingLoopPhiOp& op) {
   UNREACHABLE();
 }
+
+Node* ScheduleBuilder::ProcessOperation(const AtomicWord32PairOp& op) {
+  DCHECK(!Is64());
+  Node* index;
+  if (op.index().valid() && op.offset) {
+    index = AddNode(machine.Int32Add(),
+                    {GetNode(op.index()), IntPtrConstant(op.offset)});
+  } else if (op.index().valid()) {
+    index = GetNode(op.index());
+  } else {
+    index = IntPtrConstant(op.offset);
+  }
+#define BINOP_CASE(OP)                                                 \
+  if (op.op_kind == AtomicWord32PairOp::OpKind::k##OP) {               \
+    return AddNode(                                                    \
+        machine.Word32AtomicPair##OP(),                                \
+        {GetNode(op.base()),                                           \
+         op.index().valid() ? GetNode(op.index()) : IntPtrConstant(0), \
+         GetNode(op.value_low()), GetNode(op.value_high())});          \
+  }
+#define ATOMIC_BINOPS(V) \
+  V(Add)                 \
+  V(Sub)                 \
+  V(And)                 \
+  V(Or)                  \
+  V(Xor)                 \
+  V(Exchange)
+  ATOMIC_BINOPS(BINOP_CASE)
+#undef ATOMIC_BINOPS
+#undef BINOP_CASE
+
+  if (op.op_kind == AtomicWord32PairOp::OpKind::kLoad) {
+    return AddNode(machine.Word32AtomicPairLoad(AtomicMemoryOrder::kSeqCst),
+                   {GetNode(op.base()), index});
+  }
+  if (op.op_kind == AtomicWord32PairOp::OpKind::kStore) {
+    return AddNode(machine.Word32AtomicPairStore(AtomicMemoryOrder::kSeqCst),
+                   {GetNode(op.base()), index, GetNode(op.value_low()),
+                    GetNode(op.value_high())});
+  }
+  DCHECK_EQ(op.op_kind, AtomicWord32PairOp::OpKind::kCompareExchange);
+  return AddNode(machine.Word32AtomicPairCompareExchange(),
+                 {GetNode(op.base()), index, GetNode(op.expected_low()),
+                  GetNode(op.expected_high()), GetNode(op.value_low()),
+                  GetNode(op.value_high())});
+}
+
+Node* ScheduleBuilder::ProcessOperation(const AtomicRMWOp& op) {
+#define ATOMIC_BINOPS(V) \
+  V(Add)                 \
+  V(Sub)                 \
+  V(And)                 \
+  V(Or)                  \
+  V(Xor)                 \
+  V(Exchange)            \
+  V(CompareExchange)
+
+  AtomicOpParameters param(op.input_rep.ToMachineType(), op.memory_access_kind);
+  const Operator* node_op;
+  if (op.result_rep == RegisterRepresentation::Word32()) {
+    switch (op.bin_op) {
+#define CASE(Name)                               \
+  case AtomicRMWOp::BinOp::k##Name:              \
+    node_op = machine.Word32Atomic##Name(param); \
+    break;
+      ATOMIC_BINOPS(CASE)
+#undef CASE
+    }
+  } else {
+    DCHECK_EQ(op.result_rep, RegisterRepresentation::Word64());
+    switch (op.bin_op) {
+#define CASE(Name)                               \
+  case AtomicRMWOp::BinOp::k##Name:              \
+    node_op = machine.Word64Atomic##Name(param); \
+    break;
+      ATOMIC_BINOPS(CASE)
+#undef CASE
+    }
+  }
+#undef ATOMIC_BINOPS
+  Node* base = GetNode(op.base());
+  Node* index = GetNode(op.index());
+  Node* value = GetNode(op.value());
+  if (op.bin_op == AtomicRMWOp::BinOp::kCompareExchange) {
+    Node* expected = GetNode(op.expected());
+    return AddNode(node_op, {base, index, expected, value});
+  } else {
+    return AddNode(node_op, {base, index, value});
+  }
+}
+
 Node* ScheduleBuilder::ProcessOperation(const TupleOp& op) {
   // Tuples are only used for lowerings during reduction. Therefore, we can
   // assume that it is unused if it occurs at this point.
@@ -970,6 +1061,18 @@ Node* ScheduleBuilder::ProcessOperation(const LoadOp& op) {
     } else {
       o = machine.UnalignedLoad(loaded_rep);
     }
+  } else if (op.kind.is_atomic) {
+    DCHECK(!op.kind.maybe_unaligned);
+    AtomicLoadParameters params(loaded_rep, AtomicMemoryOrder::kSeqCst,
+                                op.kind.with_trap_handler
+                                    ? MemoryAccessKind::kProtected
+                                    : MemoryAccessKind::kNormal);
+    if (op.result_rep == RegisterRepresentation::Word32()) {
+      o = machine.Word32AtomicLoad(params);
+    } else {
+      DCHECK_EQ(op.result_rep, RegisterRepresentation::Word64());
+      o = machine.Word64AtomicLoad(params);
+    }
   } else if (op.kind.with_trap_handler) {
     DCHECK(!op.kind.maybe_unaligned);
     if (op.kind.tagged_base) {
@@ -1017,6 +1120,18 @@ Node* ScheduleBuilder::ProcessOperation(const StoreOp& op) {
     } else {
       o = machine.UnalignedStore(
           op.stored_rep.ToMachineType().representation());
+    }
+  } else if (op.kind.is_atomic) {
+    AtomicStoreParameters params(op.stored_rep.ToMachineType().representation(),
+                                 op.write_barrier, AtomicMemoryOrder::kSeqCst,
+                                 op.kind.with_trap_handler
+                                     ? MemoryAccessKind::kProtected
+                                     : MemoryAccessKind::kNormal);
+    if (op.stored_rep == MemoryRepresentation::Int64() ||
+        op.stored_rep == MemoryRepresentation::Uint64()) {
+      o = machine.Word64AtomicStore(params);
+    } else {
+      o = machine.Word32AtomicStore(params);
     }
   } else if (op.kind.with_trap_handler) {
     DCHECK(!op.kind.maybe_unaligned);
@@ -1124,10 +1239,45 @@ Node* ScheduleBuilder::ProcessOperation(const PhiOp& op) {
     loop_phis.emplace_back(node, op.input(1));
     return node;
   } else {
-    base::SmallVector<Node*, 8> inputs;
-    for (OpIndex i : op.inputs()) {
-      inputs.push_back(GetNode(i));
+    // Predecessors of {current_input_block} and the TF's matching block might
+    // not be in the same order, so Phi inputs might need to be reordered to
+    // match the new order.
+    // This is similar to what AssembleOutputGraphPhi in OptimizationPhase does,
+    // except that OptimizationPhase has a new->old block mapping, which we
+    // don't have here in RecreateSchedule, so the implementation is slightly
+    // different (relying on std::lower_bound rather than looking up the
+    // old->new mapping).
+    ZoneVector<BasicBlock*> new_predecessors = current_block->predecessors();
+    // Since RecreateSchedule visits the blocks in increasing ID order,
+    // predecessors should be sorted (we rely on this property to binary search
+    // new predecessors corresponding to old ones).
+    auto cmp_basic_block = [](BasicBlock* a, BasicBlock* b) {
+      return a->id().ToInt() < b->id().ToInt();
+    };
+    DCHECK(std::is_sorted(new_predecessors.begin(), new_predecessors.end(),
+                          cmp_basic_block));
+    size_t predecessor_count = new_predecessors.size();
+    base::SmallVector<Node*, 8> inputs(predecessor_count);
+#ifdef DEBUG
+    std::fill(inputs.begin(), inputs.end(), nullptr);
+#endif
+
+    int current_index = 0;
+    for (Block* pred = current_input_block->LastPredecessor(); pred != nullptr;
+         pred = pred->NeighboringPredecessor()) {
+      size_t pred_index = predecessor_count - current_index - 1;
+      auto lower =
+          std::lower_bound(new_predecessors.begin(), new_predecessors.end(),
+                           GetBlock(*pred), cmp_basic_block);
+      DCHECK_NE(lower, new_predecessors.end());
+      size_t new_pred_index = std::distance(new_predecessors.begin(), lower);
+      // Block {pred_index} became predecessor {new_pred_index} in the TF graph.
+      // We thus put the input {pred_index} in position {new_pred_index}.
+      inputs[new_pred_index] = GetNode(op.input(pred_index));
+      ++current_index;
     }
+    DCHECK(!base::contains(inputs, nullptr));
+
     return AddNode(common.Phi(op.rep.machine_representation(), op.input_count),
                    base::VectorOf(inputs));
   }
@@ -1135,28 +1285,10 @@ Node* ScheduleBuilder::ProcessOperation(const PhiOp& op) {
 Node* ScheduleBuilder::ProcessOperation(const ProjectionOp& op) {
   return AddNode(common.Projection(op.index), {GetNode(op.input())});
 }
-Node* ScheduleBuilder::ProcessOperation(const StaticAssertOp& op) {
-  // Static asserts should be (statically asserted and) removed by turboshaft.
-  UnparkedScopeIfNeeded scope(broker);
-  AllowHandleDereference allow_handle_dereference;
-  std::cout << input_graph.Get(op.condition());
-  FATAL(
-      "Expected Turbofan static assert to hold, but got non-true input:\n  %s",
-      op.source);
-}
 Node* ScheduleBuilder::ProcessOperation(const AssumeMapOp&) {
   // AssumeMapOp is just a hint that optimization phases can use, but has no
   // Turbofan equivalent and is thus not used past this point.
   return nullptr;
-}
-Node* ScheduleBuilder::ProcessOperation(const CheckTurboshaftTypeOfOp& op) {
-  if (op.successful) return GetNode(op.input());
-
-  UnparkedScopeIfNeeded scope(broker);
-  AllowHandleDereference allow_handle_dereference;
-  FATAL("Checking type %s of operation %d:%s failed!",
-        op.type.ToString().c_str(), op.input().id(),
-        input_graph.Get(op.input()).ToString().c_str());
 }
 
 std::pair<Node*, MachineType> ScheduleBuilder::BuildDeoptInput(
@@ -1412,37 +1544,6 @@ Node* ScheduleBuilder::ProcessOperation(const DebugBreakOp& op) {
   return AddNode(machine.DebugBreak(), {});
 }
 
-Node* ScheduleBuilder::ProcessOperation(const DebugPrintOp& op) {
-  Node* input = GetNode(op.input());
-
-  base::Optional<Callable> callable;
-  switch (op.rep.value()) {
-    case RegisterRepresentation::PointerSized():
-      callable.emplace(Builtins::CallableFor(PipelineData::Get().isolate(),
-                                             Builtin::kDebugPrintWordPtr));
-      break;
-    case RegisterRepresentation::Float64():
-      callable.emplace(Builtins::CallableFor(PipelineData::Get().isolate(),
-                                             Builtin::kDebugPrintFloat64));
-      break;
-    default:
-      // TODO(nicohartmann@): Support other representations.
-      UNIMPLEMENTED();
-  }
-
-  const CallDescriptor* call_descriptor = Linkage::GetStubCallDescriptor(
-      graph_zone, callable->descriptor(),
-      callable->descriptor().GetStackParameterCount(), CallDescriptor::kNoFlags,
-      Operator::kNoThrow | Operator::kNoDeopt);
-
-  base::SmallVector<Node*, 8> inputs;
-  inputs.push_back(AddNode(common.HeapConstant(callable->code()), {}));
-  inputs.push_back(input);
-  inputs.push_back(AddNode(common.Int32Constant(Context::kNoContext), {}));
-
-  return AddNode(common.Call(call_descriptor), base::VectorOf(inputs));
-}
-
 Node* ScheduleBuilder::ProcessOperation(const LoadRootRegisterOp& op) {
   return AddNode(machine.LoadRootRegister(), {});
 }
@@ -1499,6 +1600,166 @@ Node* ScheduleBuilder::ProcessOperation(const Simd128UnaryOp& op) {
 #undef HANDLE_KIND
   }
 }
+
+Node* ScheduleBuilder::ProcessOperation(const Simd128ShiftOp& op) {
+  switch (op.kind) {
+#define HANDLE_KIND(kind)             \
+  case Simd128ShiftOp::Kind::k##kind: \
+    return AddNode(machine.kind(), {GetNode(op.input()), GetNode(op.shift())});
+    FOREACH_SIMD_128_SHIFT_OPCODE(HANDLE_KIND);
+#undef HANDLE_KIND
+  }
+}
+
+Node* ScheduleBuilder::ProcessOperation(const Simd128TestOp& op) {
+  switch (op.kind) {
+#define HANDLE_KIND(kind)            \
+  case Simd128TestOp::Kind::k##kind: \
+    return AddNode(machine.kind(), {GetNode(op.input())});
+    FOREACH_SIMD_128_TEST_OPCODE(HANDLE_KIND);
+#undef HANDLE_KIND
+  }
+}
+
+Node* ScheduleBuilder::ProcessOperation(const Simd128SplatOp& op) {
+  switch (op.kind) {
+#define HANDLE_KIND(kind)             \
+  case Simd128SplatOp::Kind::k##kind: \
+    return AddNode(machine.kind##Splat(), {GetNode(op.input())});
+    FOREACH_SIMD_128_SPLAT_OPCODE(HANDLE_KIND);
+#undef HANDLE_KIND
+  }
+}
+
+Node* ScheduleBuilder::ProcessOperation(const Simd128TernaryOp& op) {
+  switch (op.kind) {
+#define HANDLE_KIND(kind)                                                      \
+  case Simd128TernaryOp::Kind::k##kind:                                        \
+    return AddNode(machine.kind(), {GetNode(op.first()), GetNode(op.second()), \
+                                    GetNode(op.third())});
+    FOREACH_SIMD_128_TERNARY_OPCODE(HANDLE_KIND);
+#undef HANDLE_KIND
+  }
+}
+
+Node* ScheduleBuilder::ProcessOperation(const Simd128ExtractLaneOp& op) {
+  const Operator* o = nullptr;
+  switch (op.kind) {
+    case Simd128ExtractLaneOp::Kind::kI8x16S:
+      o = machine.I8x16ExtractLaneS(op.lane);
+      break;
+    case Simd128ExtractLaneOp::Kind::kI8x16U:
+      o = machine.I8x16ExtractLaneU(op.lane);
+      break;
+    case Simd128ExtractLaneOp::Kind::kI16x8S:
+      o = machine.I16x8ExtractLaneS(op.lane);
+      break;
+    case Simd128ExtractLaneOp::Kind::kI16x8U:
+      o = machine.I16x8ExtractLaneU(op.lane);
+      break;
+    case Simd128ExtractLaneOp::Kind::kI32x4:
+      o = machine.I32x4ExtractLane(op.lane);
+      break;
+    case Simd128ExtractLaneOp::Kind::kI64x2:
+      o = machine.I64x2ExtractLane(op.lane);
+      break;
+    case Simd128ExtractLaneOp::Kind::kF32x4:
+      o = machine.F32x4ExtractLane(op.lane);
+      break;
+    case Simd128ExtractLaneOp::Kind::kF64x2:
+      o = machine.F64x2ExtractLane(op.lane);
+      break;
+  }
+
+  return AddNode(o, {GetNode(op.input())});
+}
+
+Node* ScheduleBuilder::ProcessOperation(const Simd128ReplaceLaneOp& op) {
+  const Operator* o = nullptr;
+  switch (op.kind) {
+    case Simd128ReplaceLaneOp::Kind::kI8x16:
+      o = machine.I8x16ReplaceLane(op.lane);
+      break;
+    case Simd128ReplaceLaneOp::Kind::kI16x8:
+      o = machine.I16x8ReplaceLane(op.lane);
+      break;
+    case Simd128ReplaceLaneOp::Kind::kI32x4:
+      o = machine.I32x4ReplaceLane(op.lane);
+      break;
+    case Simd128ReplaceLaneOp::Kind::kI64x2:
+      o = machine.I64x2ReplaceLane(op.lane);
+      break;
+    case Simd128ReplaceLaneOp::Kind::kF32x4:
+      o = machine.F32x4ReplaceLane(op.lane);
+      break;
+    case Simd128ReplaceLaneOp::Kind::kF64x2:
+      o = machine.F64x2ReplaceLane(op.lane);
+      break;
+  }
+
+  return AddNode(o, {GetNode(op.into()), GetNode(op.new_lane())});
+}
+
+Node* ScheduleBuilder::ProcessOperation(const Simd128LaneMemoryOp& op) {
+  DCHECK_EQ(op.offset, 0);
+  MemoryAccessKind access =
+      op.kind.with_trap_handler ? MemoryAccessKind::kProtected
+      : op.kind.maybe_unaligned ? MemoryAccessKind::kUnaligned
+                                : MemoryAccessKind::kNormal;
+
+  MachineType type;
+  switch (op.lane_kind) {
+    case Simd128LaneMemoryOp::LaneKind::k8:
+      type = MachineType::Int8();
+      break;
+    case Simd128LaneMemoryOp::LaneKind::k16:
+      type = MachineType::Int16();
+      break;
+    case Simd128LaneMemoryOp::LaneKind::k32:
+      type = MachineType::Int32();
+      break;
+    case Simd128LaneMemoryOp::LaneKind::k64:
+      type = MachineType::Int64();
+      break;
+  }
+
+  const Operator* o = nullptr;
+  if (op.mode == Simd128LaneMemoryOp::Mode::kLoad) {
+    o = machine.LoadLane(access, type, op.lane);
+  } else {
+    o = machine.StoreLane(access, type.representation(), op.lane);
+  }
+
+  return AddNode(
+      o, {GetNode(op.base()), GetNode(op.index()), GetNode(op.value())});
+}
+
+Node* ScheduleBuilder::ProcessOperation(const Simd128LoadTransformOp& op) {
+  DCHECK_EQ(op.offset, 0);
+  MemoryAccessKind access =
+      op.load_kind.with_trap_handler ? MemoryAccessKind::kProtected
+      : op.load_kind.maybe_unaligned ? MemoryAccessKind::kUnaligned
+                                     : MemoryAccessKind::kNormal;
+  LoadTransformation transformation;
+  switch (op.transform_kind) {
+#define HANDLE_KIND(kind)                                 \
+  case Simd128LoadTransformOp::TransformKind::k##kind:    \
+    transformation = LoadTransformation::kS128Load##kind; \
+    break;
+    FOREACH_SIMD_128_LOAD_TRANSFORM_OPCODE(HANDLE_KIND)
+#undef HANDLE_KIND
+  }
+
+  const Operator* o = machine.LoadTransform(access, transformation);
+
+  return AddNode(o, {GetNode(op.base()), GetNode(op.index())});
+}
+
+Node* ScheduleBuilder::ProcessOperation(const Simd128ShuffleOp& op) {
+  return AddNode(machine.I8x16Shuffle(op.shuffle),
+                 {GetNode(op.left()), GetNode(op.right())});
+}
+
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 }  // namespace

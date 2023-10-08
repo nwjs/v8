@@ -824,12 +824,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         // Put the return address in a stack slot.
         Register scratch = eax;
         __ push(scratch);
-        __ PushPC();
-        int pc = __ pc_offset();
-        __ pop(scratch);
-        __ sub(scratch,
-               Immediate(pc + InstructionStream::kHeaderSize - kHeapObjectTag));
-        __ add(scratch, Immediate::CodeRelativeOffset(&return_location));
+        __ LoadLabelAddress(scratch, &return_location);
         __ mov(MemOperand(ebp, WasmExitFrameConstants::kCallingPCOffset),
                scratch);
         __ pop(scratch);
@@ -4211,7 +4206,7 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
     }
   } else {
     Register pop_reg = g.ToRegister(additional_pop_count);
-    Register scratch_reg = pop_reg == ecx ? edx : ecx;
+    Register scratch_reg = pop_reg == ecx ? edi : ecx;
     DCHECK(!call_descriptor->CalleeSavedRegisters().has(scratch_reg));
     DCHECK(!call_descriptor->CalleeSavedRegisters().has(pop_reg));
     int pop_size = static_cast<int>(parameter_slots * kSystemPointerSize);

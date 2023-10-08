@@ -19,7 +19,7 @@
 namespace v8 {
 
 template <typename T>
-inline T ToCData(v8::internal::Object obj) {
+inline T ToCData(v8::internal::Tagged<v8::internal::Object> obj) {
   static_assert(sizeof(T) == sizeof(v8::internal::Address));
   if (obj == v8::internal::Smi::zero()) return nullptr;
   return reinterpret_cast<T>(
@@ -27,7 +27,8 @@ inline T ToCData(v8::internal::Object obj) {
 }
 
 template <>
-inline v8::internal::Address ToCData(v8::internal::Object obj) {
+inline v8::internal::Address ToCData(
+    v8::internal::Tagged<v8::internal::Object> obj) {
   if (obj == v8::internal::Smi::zero()) return v8::internal::kNullAddress;
   return v8::internal::Foreign::cast(obj)->foreign_address();
 }
@@ -66,9 +67,9 @@ inline Local<To> Utils::Convert(v8::internal::DirectHandle<From> obj,
   DCHECK(obj.is_null() || (IsSmi(*obj) || !IsTheHole(*obj)));
   return Local<To>::FromAddress(obj.address());
 #elif defined(V8_ENABLE_DIRECT_HANDLE)
-  return Utils::Convert<From, To>(v8::internal::Handle<From>(*obj, isolate));
+  return Convert<From, To>(v8::internal::Handle<From>(*obj, isolate));
 #else
-  return Utils::Convert<From, To>(obj);
+  return Convert<From, To>(obj);
 #endif
 }
 
@@ -77,30 +78,34 @@ inline Local<To> Utils::Convert(v8::internal::DirectHandle<From> obj,
 #define MAKE_TO_LOCAL(Name, From, To)                                       \
   Local<v8::To> Utils::Name(v8::internal::Handle<v8::internal::From> obj) { \
     return Convert<v8::internal::From, v8::To>(obj);                        \
-  }
-
-#define MAKE_TO_LOCAL_DIRECT_HANDLE(Name, From, To)           \
-  Local<v8::To> Utils::Name(                                  \
-      v8::internal::DirectHandle<v8::internal::From> obj,     \
-      i::Isolate* isolate) {                                  \
-    return Convert<v8::internal::From, v8::To>(obj, isolate); \
+  }                                                                         \
+                                                                            \
+  Local<v8::To> Utils::Name(                                                \
+      v8::internal::DirectHandle<v8::internal::From> obj,                   \
+      i::Isolate* isolate) {                                                \
+    return Convert<v8::internal::From, v8::To>(obj, isolate);               \
   }
 
 TO_LOCAL_LIST(MAKE_TO_LOCAL)
-TO_LOCAL_LIST(MAKE_TO_LOCAL_DIRECT_HANDLE)
 
-#define MAKE_TO_LOCAL_TYPED_ARRAY(Type, typeName, TYPE, ctype)        \
-  Local<v8::Type##Array> Utils::ToLocal##Type##Array(                 \
-      v8::internal::Handle<v8::internal::JSTypedArray> obj) {         \
-    DCHECK(obj->type() == v8::internal::kExternal##Type##Array);      \
-    return Convert<v8::internal::JSTypedArray, v8::Type##Array>(obj); \
+#define MAKE_TO_LOCAL_TYPED_ARRAY(Type, typeName, TYPE, ctype)                 \
+  Local<v8::Type##Array> Utils::ToLocal##Type##Array(                          \
+      v8::internal::Handle<v8::internal::JSTypedArray> obj) {                  \
+    DCHECK(obj->type() == v8::internal::kExternal##Type##Array);               \
+    return Convert<v8::internal::JSTypedArray, v8::Type##Array>(obj);          \
+  }                                                                            \
+                                                                               \
+  Local<v8::Type##Array> Utils::ToLocal##Type##Array(                          \
+      v8::internal::DirectHandle<v8::internal::JSTypedArray> obj,              \
+      v8::internal::Isolate* isolate) {                                        \
+    DCHECK(obj->type() == v8::internal::kExternal##Type##Array);               \
+    return Convert<v8::internal::JSTypedArray, v8::Type##Array>(obj, isolate); \
   }
 
 TYPED_ARRAYS(MAKE_TO_LOCAL_TYPED_ARRAY)
 
 #undef MAKE_TO_LOCAL_TYPED_ARRAY
 #undef MAKE_TO_LOCAL
-#undef MAKE_TO_LOCAL_DIRECT_HANDLE
 #undef TO_LOCAL_LIST
 
 // Implementations of OpenHandle
@@ -120,9 +125,8 @@ TYPED_ARRAYS(MAKE_TO_LOCAL_TYPED_ARRAY)
     return v8::internal::Handle<v8::internal::To>(                           \
         v8::HandleScope::CreateHandleForCurrentIsolate(                      \
             v8::internal::ValueHelper::ValueAsAddress(that)));               \
-  }
-
-#define MAKE_OPEN_DIRECT_HANDLE(From, To)                                    \
+  }                                                                          \
+                                                                             \
   v8::internal::DirectHandle<v8::internal::To> Utils::OpenDirectHandle(      \
       const v8::From* that, bool allow_empty_handle) {                       \
     DCHECK(allow_empty_handle || !v8::internal::ValueHelper::IsEmpty(that)); \
@@ -131,6 +135,11 @@ TYPED_ARRAYS(MAKE_TO_LOCAL_TYPED_ARRAY)
                v8::internal::ValueHelper::ValueAsAddress(that))));           \
     return v8::internal::DirectHandle<v8::internal::To>(                     \
         v8::internal::ValueHelper::ValueAsAddress(that));                    \
+  }                                                                          \
+                                                                             \
+  v8::internal::IndirectHandle<v8::internal::To> Utils::OpenIndirectHandle(  \
+      const v8::From* that, bool allow_empty_handle) {                       \
+    return Utils::OpenHandle(that, allow_empty_handle);                      \
   }
 
 #else  // !V8_ENABLE_DIRECT_LOCAL
@@ -145,21 +154,23 @@ TYPED_ARRAYS(MAKE_TO_LOCAL_TYPED_ARRAY)
     return v8::internal::Handle<v8::internal::To>(                           \
         reinterpret_cast<v8::internal::Address*>(                            \
             const_cast<v8::From*>(that)));                                   \
-  }
-
-#define MAKE_OPEN_DIRECT_HANDLE(From, To)                                      \
-  v8::internal::DirectHandle<v8::internal::To> Utils::OpenDirectHandle(        \
-      const v8::From* that, bool allow_empty_handle) {                         \
-    return Utils::OpenHandle(that, allow_empty_handle); \
+  }                                                                          \
+                                                                             \
+  v8::internal::DirectHandle<v8::internal::To> Utils::OpenDirectHandle(      \
+      const v8::From* that, bool allow_empty_handle) {                       \
+    return Utils::OpenHandle(that, allow_empty_handle);                      \
+  }                                                                          \
+                                                                             \
+  v8::internal::IndirectHandle<v8::internal::To> Utils::OpenIndirectHandle(  \
+      const v8::From* that, bool allow_empty_handle) {                       \
+    return Utils::OpenHandle(that, allow_empty_handle);                      \
   }
 
 #endif  // V8_ENABLE_DIRECT_LOCAL
 
 OPEN_HANDLE_LIST(MAKE_OPEN_HANDLE)
-OPEN_HANDLE_LIST(MAKE_OPEN_DIRECT_HANDLE)
 
 #undef MAKE_OPEN_HANDLE
-#undef MAKE_OPEN_DIRECT_HANDLE
 #undef OPEN_HANDLE_LIST
 
 template <bool do_callback>
@@ -181,7 +192,7 @@ class V8_NODISCARD CallDepthScope {
     isolate_->set_next_v8_call_is_safe_for_termination(false);
     if (!context.IsEmpty()) {
       i::DisallowGarbageCollection no_gc;
-      i::Context env = *Utils::OpenHandle(*context);
+      i::Tagged<i::Context> env = *Utils::OpenHandle(*context);
       i::HandleScopeImplementer* impl = isolate->handle_scope_implementer();
       if (isolate->context().is_null() ||
           isolate->context()->native_context() != env->native_context()) {
@@ -266,7 +277,7 @@ class V8_NODISCARD InternalEscapableScope : public EscapableHandleScope {
 
 template <typename T>
 void CopySmiElementsToTypedBuffer(T* dst, uint32_t length,
-                                  i::FixedArray elements) {
+                                  i::Tagged<i::FixedArray> elements) {
   for (uint32_t i = 0; i < length; ++i) {
     double value = i::Object::Number(elements->get(static_cast<int>(i)));
     // TODO(mslekova): Avoid converting back-and-forth when possible, e.g
@@ -277,7 +288,7 @@ void CopySmiElementsToTypedBuffer(T* dst, uint32_t length,
 
 template <typename T>
 void CopyDoubleElementsToTypedBuffer(T* dst, uint32_t length,
-                                     i::FixedDoubleArray elements) {
+                                     i::Tagged<i::FixedDoubleArray> elements) {
   for (uint32_t i = 0; i < length; ++i) {
     double value = elements->get_scalar(static_cast<int>(i));
     // TODO(mslekova): There are certain cases, e.g. double->double, in which
@@ -301,13 +312,13 @@ bool CopyAndConvertArrayToCppBuffer(Local<Array> src, T* dst,
   }
 
   i::DisallowGarbageCollection no_gc;
-  i::JSArray obj = *reinterpret_cast<i::JSArray*>(*src);
+  i::Tagged<i::JSArray> obj = *reinterpret_cast<i::JSArray*>(*src);
   if (i::Object::IterationHasObservableEffects(obj)) {
     // The array has a custom iterator.
     return false;
   }
 
-  i::FixedArrayBase elements = obj->elements();
+  i::Tagged<i::FixedArrayBase> elements = obj->elements();
   switch (obj->GetElementsKind()) {
     case i::PACKED_SMI_ELEMENTS:
       CopySmiElementsToTypedBuffer(dst, length, i::FixedArray::cast(elements));
@@ -339,14 +350,15 @@ inline bool V8_EXPORT TryToCopyAndConvertArrayToCppBuffer(Local<Array> src,
 
 namespace internal {
 
-void HandleScopeImplementer::EnterContext(NativeContext context) {
+void HandleScopeImplementer::EnterContext(Tagged<NativeContext> context) {
   DCHECK_EQ(entered_contexts_.capacity(), is_microtask_context_.capacity());
   DCHECK_EQ(entered_contexts_.size(), is_microtask_context_.size());
   entered_contexts_.push_back(context);
   is_microtask_context_.push_back(0);
 }
 
-void HandleScopeImplementer::EnterMicrotaskContext(NativeContext context) {
+void HandleScopeImplementer::EnterMicrotaskContext(
+    Tagged<NativeContext> context) {
   DCHECK_EQ(entered_contexts_.capacity(), is_microtask_context_.capacity());
   DCHECK_EQ(entered_contexts_.size(), is_microtask_context_.size());
   entered_contexts_.push_back(context);

@@ -1344,26 +1344,21 @@ OpIndex GraphBuilder::Process(
     }
 
     case IrOpcode::kStaticAssert: {
-      // We currently ignore StaticAsserts in turboshaft (because some of them
-      // need specific unported optimizations to be evaluated).
-      // TODO(turboshaft): once CommonOperatorReducer and MachineOperatorReducer
-      // have been ported, re-enable StaticAsserts.
-      // return __ ReduceStaticAssert(Map(node->InputAt(0)),
-      //                                     StaticAssertSourceOf(node->op()));
+      __ StaticAssert(Map(node->InputAt(0)), StaticAssertSourceOf(node->op()));
       return OpIndex::Invalid();
     }
 
     case IrOpcode::kAllocate: {
       AllocationType allocation = AllocationTypeOf(node->op());
-      return __ FinishInitialization(__ Allocate(
-          Map(node->InputAt(0)), allocation, AllowLargeObjects::kFalse));
+      return __ FinishInitialization(
+          __ Allocate(Map(node->InputAt(0)), allocation));
     }
     // TODO(nicohartmann@): We might not see AllocateRaw here anymore.
     case IrOpcode::kAllocateRaw: {
       Node* size = node->InputAt(0);
       const AllocateParameters& params = AllocateParametersOf(node->op());
-      return __ FinishInitialization(__ Allocate(
-          Map(size), params.allocation_type(), params.allow_large_objects()));
+      return __ FinishInitialization(
+          __ Allocate(Map(size), params.allocation_type()));
     }
     case IrOpcode::kStoreToObject: {
       Node* object = node->InputAt(0);

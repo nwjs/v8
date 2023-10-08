@@ -22,7 +22,7 @@
 #include "src/compiler/compilation-dependencies.h"
 #include "src/compiler/heap-refs.h"
 #include "src/compiler/js-heap-broker.h"
-#include "src/deoptimizer/translation-array.h"
+#include "src/deoptimizer/frame-translation-builder.h"
 #include "src/execution/frames.h"
 #include "src/ic/handler-configuration.h"
 #include "src/maglev/maglev-basic-block.h"
@@ -474,13 +474,10 @@ bool MaglevCompiler::Compile(LocalIsolate* local_isolate,
     std::unique_ptr<MaglevCodeGenerator> code_generator =
         std::make_unique<MaglevCodeGenerator>(local_isolate, compilation_info,
                                               graph);
-    code_generator->Assemble();
-
-#ifdef V8_TARGET_ARCH_ARM
-    if (code_generator->AssembleHasFailed()) {
+    bool success = code_generator->Assemble();
+    if (!success) {
       return false;
     }
-#endif
 
     // Stash the compiled code_generator on the compilation info.
     compilation_info->set_code_generator(std::move(code_generator));

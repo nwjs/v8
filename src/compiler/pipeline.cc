@@ -83,6 +83,7 @@
 #include "src/compiler/store-store-elimination.h"
 #include "src/compiler/turboshaft/build-graph-phase.h"
 #include "src/compiler/turboshaft/dead-code-elimination-phase.h"
+#include "src/compiler/turboshaft/debug-feature-lowering-phase.h"
 #include "src/compiler/turboshaft/decompression-optimization-phase.h"
 #include "src/compiler/turboshaft/instruction-selection-phase.h"
 #include "src/compiler/turboshaft/machine-lowering-phase.h"
@@ -573,12 +574,11 @@ class PipelineData {
   }
 
   void InitializeTopTierRegisterAllocationData(
-      const RegisterConfiguration* config, CallDescriptor* call_descriptor,
-      RegisterAllocationFlags flags) {
+      const RegisterConfiguration* config, CallDescriptor* call_descriptor) {
     DCHECK_NULL(register_allocation_data_);
     register_allocation_data_ =
         register_allocation_zone()->New<TopTierRegisterAllocationData>(
-            config, register_allocation_zone(), frame(), sequence(), flags,
+            config, register_allocation_zone(), frame(), sequence(),
             &info()->tick_counter(), debug_name());
   }
 
@@ -1176,11 +1176,6 @@ class PipelineCompilationJob final : public TurbofanCompilationJob {
                         LocalIsolate* local_isolate) final;
   Status FinalizeJobImpl(Isolate* isolate) final;
 
-  // Registers weak object to optimized code dependencies.
-  void RegisterWeakObjectsInOptimizedCode(Isolate* isolate,
-                                          Handle<NativeContext> context,
-                                          Handle<Code> code);
-
  private:
   Zone zone_;
   ZoneStats zone_stats_;
@@ -1344,30 +1339,6 @@ PipelineCompilationJob::Status PipelineCompilationJob::FinalizeJobImpl(
   compilation_info()->SetCode(code);
   RegisterWeakObjectsInOptimizedCode(isolate, context, code);
   return SUCCEEDED;
-}
-
-void PipelineCompilationJob::RegisterWeakObjectsInOptimizedCode(
-    Isolate* isolate, Handle<NativeContext> context, Handle<Code> code) {
-  std::vector<Handle<Map>> maps;
-  DCHECK(code->is_optimized_code());
-  {
-    DisallowGarbageCollection no_gc;
-    PtrComprCageBase cage_base(isolate);
-    int const mode_mask = RelocInfo::EmbeddedObjectModeMask();
-    for (RelocIterator it(*code, mode_mask); !it.done(); it.next()) {
-      DCHECK(RelocInfo::IsEmbeddedObjectMode(it.rinfo()->rmode()));
-      HeapObject target_object = it.rinfo()->target_object(cage_base);
-      if (code->IsWeakObjectInOptimizedCode(target_object)) {
-        if (IsMap(target_object, cage_base)) {
-          maps.push_back(handle(Map::cast(target_object), isolate));
-        }
-      }
-    }
-  }
-  for (Handle<Map> map : maps) {
-    isolate->heap()->AddRetainedMap(context, map);
-  }
-  code->set_can_have_weak_objects(true);
 }
 
 template <typename Phase, typename... Args>
@@ -1771,7 +1742,8 @@ struct WasmInliningPhase {
            WasmCompilationData& compilation_data,
            ZoneVector<WasmInliningPosition>* inlining_positions,
            wasm::WasmFeatures* detected) {
-    if (!WasmInliner::graph_size_allows_inlining(data->graph()->NodeCount())) {
+    if (!WasmInliner::graph_size_allows_inlining(
+            data->graph()->NodeCount(), v8_flags.wasm_inlining_budget)) {
       return;
     }
     GraphReducer graph_reducer(
@@ -3114,6 +3086,13 @@ bool PipelineImpl::OptimizeGraph(Linkage* linkage) {
     }
 
     Run<turboshaft::DeadCodeEliminationPhase>();
+
+    if (V8_UNLIKELY(v8_flags.turboshaft_enable_debug_features)) {
+      // This phase has to run very late to allow all previous phases to use
+      // debug features.
+      Run<turboshaft::DebugFeatureLoweringPhase>();
+    }
+
     Run<turboshaft::DecompressionOptimizationPhase>();
 
     if (v8_flags.turboshaft_instruction_selection) {
@@ -4101,15 +4080,17 @@ bool PipelineImpl::SelectInstructionsTurboshaft(
     turbofan_data->InitializeFrameData(call_descriptor);
   }
 
-  // Produce special RPO numbering.
-  Run<turboshaft::SpecialRPOSchedulingPhase>();
-
-  turboshaft_scope->Value().InitializeInstructionSequence(call_descriptor);
-
   // Select and schedule instructions covering the scheduled graph.
+  CodeTracer* code_tracer = nullptr;
+  if (turbofan_data->info()->trace_turbo_graph()) {
+    // NOTE: We must not call `GetCodeTracer` if tracing is not enabled,
+    // because it may not yet be initialized then and doing so from the
+    // background thread is not threadsafe.
+    code_tracer = turbofan_data->GetCodeTracer();
+  }
   if (base::Optional<BailoutReason> bailout =
-          Run<turboshaft::InstructionSelectionPhase>(call_descriptor,
-                                                     linkage)) {
+          Run<turboshaft::InstructionSelectionPhase>(call_descriptor, linkage,
+                                                     code_tracer)) {
     info()->AbortOptimization(*bailout);
     turbofan_data->EndPhaseKind();
     return false;
@@ -4439,11 +4420,7 @@ void PipelineImpl::AllocateRegistersForTopTier(
   data_->sequence()->ValidateDeferredBlockExitPaths();
 #endif
 
-  RegisterAllocationFlags flags;
-  if (data->info()->trace_turbo_allocation()) {
-    flags |= RegisterAllocationFlag::kTraceAllocation;
-  }
-  data->InitializeTopTierRegisterAllocationData(config, call_descriptor, flags);
+  data->InitializeTopTierRegisterAllocationData(config, call_descriptor);
 
   Run<MeetRegisterConstraintsPhase>();
   Run<ResolvePhisPhase>();

@@ -204,7 +204,8 @@ class CollectionsBuiltinsAssembler : public BaseCollectionsAssembler {
   // Normalizes -0 to +0.
   const TNode<Object> NormalizeNumberKey(const TNode<Object> key);
 
-  // Exposed for MapGroupBy in Torque.
+  // Methods after this point should really be protected but are exposed for
+  // Torque.
   void UnsafeStoreValueInOrderedHashMapEntry(const TNode<OrderedHashMap> table,
                                              const TNode<Object> value,
                                              const TNode<IntPtrT> entry) {
@@ -216,6 +217,9 @@ class CollectionsBuiltinsAssembler : public BaseCollectionsAssembler {
                                 TNode<OrderedHashSet> table, TNode<Object> key,
                                 Label* not_found);
 
+  TorqueStructOrderedHashSetIndexPair TransitionOrderedHashSetNoUpdate(
+      const TNode<OrderedHashSet> table, const TNode<IntPtrT> index);
+
  protected:
   template <typename IteratorType>
   TNode<HeapObject> AllocateJSCollectionIterator(
@@ -223,8 +227,8 @@ class CollectionsBuiltinsAssembler : public BaseCollectionsAssembler {
       const TNode<HeapObject> collection);
   TNode<HeapObject> AllocateTable(Variant variant,
                                   TNode<IntPtrT> at_least_space_for) override;
-  TNode<IntPtrT> GetHash(const TNode<HeapObject> key);
-  TNode<IntPtrT> CallGetHashRaw(const TNode<HeapObject> key);
+  TNode<Uint32T> GetHash(const TNode<HeapObject> key);
+  TNode<Uint32T> CallGetHashRaw(const TNode<HeapObject> key);
   TNode<Smi> CallGetOrCreateHashRaw(const TNode<HeapObject> key);
 
   // Transitions the iterator to the non obsolete backing store.
@@ -239,6 +243,7 @@ class CollectionsBuiltinsAssembler : public BaseCollectionsAssembler {
   template <typename IteratorType, typename TableType>
   std::pair<TNode<TableType>, TNode<IntPtrT>> TransitionAndUpdate(
       const TNode<IteratorType> iterator);
+
   template <typename TableType>
   std::tuple<TNode<Object>, TNode<IntPtrT>, TNode<IntPtrT>> NextSkipHoles(
       TNode<TableType> table, TNode<IntPtrT> index, Label* if_end);
@@ -290,7 +295,7 @@ class CollectionsBuiltinsAssembler : public BaseCollectionsAssembler {
                                              TVariable<IntPtrT>* result,
                                              Label* entry_found,
                                              Label* not_found);
-  TNode<IntPtrT> ComputeStringHash(TNode<String> string_key);
+  TNode<Uint32T> ComputeStringHash(TNode<String> string_key);
   void SameValueZeroString(TNode<String> key_string,
                            TNode<Object> candidate_key, Label* if_same,
                            Label* if_not_same);
@@ -429,7 +434,7 @@ class CollectionsBuiltinsAssembler : public BaseCollectionsAssembler {
   // of OrderedHashTable, it should be OrderedHashMap or OrderedHashSet.
   template <typename CollectionType>
   void FindOrderedHashTableEntry(
-      const TNode<CollectionType> table, const TNode<IntPtrT> hash,
+      const TNode<CollectionType> table, const TNode<Uint32T> hash,
       const std::function<void(TNode<Object>, Label*, Label*)>& key_compare,
       TVariable<IntPtrT>* entry_start_position, Label* entry_found,
       Label* not_found);

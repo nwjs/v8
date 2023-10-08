@@ -35,6 +35,15 @@ enum ScavengeSpeedMode { kForAllObjects, kForSurvivedObjects };
   TRACE_EVENT0(TRACE_GC_CATEGORIES,                                   \
                GCTracer::Scope::Name(GCTracer::Scope::ScopeId(scope_id)))
 
+#define TRACE_GC_ARG1(tracer, scope_id, arg0_name, arg0_value)            \
+  DCHECK_NE(GCTracer::Scope::MC_SWEEP, scope_id);                         \
+  DCHECK_NE(GCTracer::Scope::MC_BACKGROUND_SWEEPING, scope_id);           \
+  GCTracer::Scope UNIQUE_IDENTIFIER(gc_tracer_scope)(                     \
+      tracer, GCTracer::Scope::ScopeId(scope_id), ThreadKind::kMain);     \
+  TRACE_EVENT1(TRACE_GC_CATEGORIES,                                       \
+               GCTracer::Scope::Name(GCTracer::Scope::ScopeId(scope_id)), \
+               arg0_name, arg0_value)
+
 #define TRACE_GC_WITH_FLOW(tracer, scope_id, bind_id, flow_flags)         \
   DCHECK_NE(GCTracer::Scope::MC_SWEEP, scope_id);                         \
   DCHECK_NE(GCTracer::Scope::MC_BACKGROUND_SWEEPING, scope_id);           \
@@ -262,8 +271,8 @@ class V8_EXPORT_PRIVATE GCTracer {
   V8_INLINE CollectionEpoch CurrentEpoch(Scope::ScopeId id) const;
 
   // Start and stop an observable pause.
-  void StartObservablePause();
-  void StopObservablePause(GarbageCollector collector);
+  void StartObservablePause(base::TimeTicks time);
+  void StopObservablePause(GarbageCollector collector, base::TimeTicks time);
 
   // Update the current event if it precedes the start of the observable pause.
   void UpdateCurrentEvent(GarbageCollectionReason gc_reason,
@@ -537,7 +546,10 @@ class V8_EXPORT_PRIVATE GCTracer {
   double average_mutator_duration_ = 0.0;
   double average_mark_compact_duration_ = 0.0;
   double current_mark_compact_mutator_utilization_ = 1.0;
-  base::Optional<base::TimeTicks> previous_mark_compact_end_time_;
+
+  // The end of the last mark-compact GC. Is set to isolate/heap setup time
+  // before the first one.
+  base::TimeTicks previous_mark_compact_end_time_;
 
   BytesAndDurationBuffer recorded_minor_gcs_total_;
   BytesAndDurationBuffer recorded_minor_gcs_survived_;
