@@ -13,6 +13,7 @@
 #include "src/base/platform/condition-variable.h"
 #include "src/base/platform/mutex.h"
 #include "src/common/assert-scope.h"
+#include "src/common/ptr-compr.h"
 #include "src/execution/isolate.h"
 #include "src/handles/global-handles.h"
 #include "src/handles/persistent-handles.h"
@@ -112,6 +113,9 @@ class V8_EXPORT_PRIVATE LocalHeap {
   }
   ConcurrentAllocator* shared_old_space_allocator() {
     return shared_old_space_allocator_.get();
+  }
+  ConcurrentAllocator* trusted_space_allocator() {
+    return trusted_space_allocator_.get();
   }
 
   // Mark/Unmark linear allocation areas black. Used for black allocation.
@@ -348,6 +352,7 @@ class V8_EXPORT_PRIVATE LocalHeap {
   void SetUpSharedMarking();
 
   Heap* heap_;
+  V8_NO_UNIQUE_ADDRESS PtrComprCageAccessScope ptr_compr_cage_access_scope_;
   bool is_main_thread_;
 
   AtomicThreadState state_;
@@ -367,6 +372,7 @@ class V8_EXPORT_PRIVATE LocalHeap {
   std::unique_ptr<ConcurrentAllocator> old_space_allocator_;
   std::unique_ptr<ConcurrentAllocator> code_space_allocator_;
   std::unique_ptr<ConcurrentAllocator> shared_old_space_allocator_;
+  std::unique_ptr<ConcurrentAllocator> trusted_space_allocator_;
 
   MarkingBarrier* saved_marking_barrier_ = nullptr;
 

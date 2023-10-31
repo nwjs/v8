@@ -144,6 +144,11 @@ class Sweeper::MajorSweeperJob final : public JobTask {
 
  private:
   void RunImpl(JobDelegate* delegate, bool is_joining_thread) {
+    // In case multi-cage pointer compression mode is enabled ensure that
+    // current thread's cage base values are properly initialized.
+    PtrComprCageAccessScope ptr_compr_cage_access_scope(
+        sweeper_->heap_->isolate());
+
     DCHECK(sweeper_->major_sweeping_in_progress());
     const int offset = delegate->GetTaskId();
     DCHECK_LT(offset, concurrent_sweepers.size());
@@ -213,6 +218,11 @@ class Sweeper::MinorSweeperJob final : public JobTask {
         tracer_, sweeper_->GetTracingScope(NEW_SPACE, is_joining_thread),
         is_joining_thread ? ThreadKind::kMain : ThreadKind::kBackground,
         trace_id_, TRACE_EVENT_FLAG_FLOW_IN);
+    // In case multi-cage pointer compression mode is enabled ensure that
+    // current thread's cage base values are properly initialized.
+    PtrComprCageAccessScope ptr_compr_cage_access_scope(
+        sweeper_->heap_->isolate());
+
     if (!concurrent_sweeper.ConcurrentSweepSpace(delegate)) return;
     concurrent_sweeper.ConcurrentSweepPromotedPages(delegate);
   }
@@ -507,8 +517,8 @@ class PromotedPageRecordMigratedSlotVisitor final
                               RelocInfo* rinfo) final {}
   void VisitInternalReference(Tagged<InstructionStream> host,
                               RelocInfo* rinfo) final {}
-  void VisitExternalPointer(Tagged<HeapObject> host, ExternalPointerSlot slot,
-                            ExternalPointerTag tag) final {}
+  void VisitExternalPointer(Tagged<HeapObject> host,
+                            ExternalPointerSlot slot) final {}
 
   // Maps can be shared, so we need to visit them to record old to shared slots.
   V8_INLINE static constexpr bool ShouldVisitMapPointer() { return true; }
@@ -911,6 +921,7 @@ int Sweeper::RawSweep(Page* p, FreeSpaceTreatmentMode free_space_treatment_mode,
   DCHECK_NOT_NULL(space);
   DCHECK(space->identity() == OLD_SPACE || space->identity() == CODE_SPACE ||
          space->identity() == SHARED_SPACE ||
+         space->identity() == TRUSTED_SPACE ||
          (space->identity() == NEW_SPACE && v8_flags.minor_ms));
   DCHECK(!p->IsEvacuationCandidate());
   DCHECK(!p->SweepingDone());

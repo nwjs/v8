@@ -405,7 +405,8 @@ static void SerializeContext(base::Vector<const uint8_t>* startup_blob_out,
     }
 
     HandleScope scope(isolate);
-    i::Context raw_context = i::Context::cast(*v8::Utils::OpenPersistent(env));
+    i::Tagged<i::Context> raw_context =
+        i::Context::cast(*v8::Utils::OpenPersistent(env));
 
     env.Reset();
 
@@ -504,7 +505,7 @@ UNINITIALIZED_TEST(ContextSerializerContext) {
     {
       SnapshotData snapshot_data(context_blob);
       root = ContextDeserializer::DeserializeContext(
-                 isolate, &snapshot_data, false, global_proxy,
+                 isolate, &snapshot_data, 0, false, global_proxy,
                  v8::DeserializeInternalFieldsCallback())
                  .ToHandleChecked();
       CHECK(IsContext(*root));
@@ -515,7 +516,7 @@ UNINITIALIZED_TEST(ContextSerializerContext) {
     {
       SnapshotData snapshot_data(context_blob);
       root2 = ContextDeserializer::DeserializeContext(
-                  isolate, &snapshot_data, false, global_proxy,
+                  isolate, &snapshot_data, 0, false, global_proxy,
                   v8::DeserializeInternalFieldsCallback())
                   .ToHandleChecked();
       CHECK(IsContext(*root2));
@@ -589,7 +590,8 @@ static void SerializeCustomContext(
     }
 
     HandleScope scope(i_isolate);
-    i::Context raw_context = i::Context::cast(*v8::Utils::OpenPersistent(env));
+    i::Tagged<i::Context> raw_context =
+        i::Context::cast(*v8::Utils::OpenPersistent(env));
 
     env.Reset();
 
@@ -670,7 +672,7 @@ UNINITIALIZED_TEST(ContextSerializerCustomContext) {
     {
       SnapshotData snapshot_data(context_blob);
       root = ContextDeserializer::DeserializeContext(
-                 isolate, &snapshot_data, false, global_proxy,
+                 isolate, &snapshot_data, 0, false, global_proxy,
                  v8::DeserializeInternalFieldsCallback())
                  .ToHandleChecked();
       CHECK(IsContext(*root));
@@ -841,7 +843,7 @@ UNINITIALIZED_TEST(CustomSnapshotDataBlobStringNotInternalized) {
     v8::Context::Scope c_scope(context);
     v8::Local<v8::Value> result = CompileRun("f()").As<v8::Value>();
     CHECK(result->IsString());
-    i::String str = *v8::Utils::OpenHandle(*result.As<v8::String>());
+    i::Tagged<i::String> str = *v8::Utils::OpenHandle(*result.As<v8::String>());
     CHECK_EQ(std::string(str->ToCString().get()), "AB");
     CHECK(!IsInternalizedString(str));
     CHECK(!i::ReadOnlyHeap::Contains(str));
@@ -1669,7 +1671,7 @@ int CountBuiltins() {
   HeapObjectIterator iterator(CcTest::heap());
   DisallowGarbageCollection no_gc;
   int counter = 0;
-  for (HeapObject obj = iterator.Next(); !obj.is_null();
+  for (Tagged<HeapObject> obj = iterator.Next(); !obj.is_null();
        obj = iterator.Next()) {
     if (IsCode(obj) && Code::cast(obj)->kind() == CodeKind::BUILTIN) counter++;
   }
@@ -2078,7 +2080,11 @@ TEST(CodeSerializerLargeCodeObject) {
       CompileScriptAndProduceCache(isolate, source_str, ScriptDetails(), &cache,
                                    v8::ScriptCompiler::kNoCompileOptions);
 
-  CHECK(isolate->heap()->InSpace(orig->abstract_code(isolate), LO_SPACE));
+  // The object may end up in LO_SPACE or TRUSTED_LO_SPACE depending on whether
+  // the sandbox is enabled.
+  CHECK(
+      isolate->heap()->InSpace(orig->abstract_code(isolate), LO_SPACE) ||
+      isolate->heap()->InSpace(orig->abstract_code(isolate), TRUSTED_LO_SPACE));
 
   Handle<SharedFunctionInfo> copy;
   {
@@ -2148,7 +2154,10 @@ TEST(CodeSerializerLargeCodeObjectWithIncrementalMarking) {
       CompileScriptAndProduceCache(isolate, source_str, ScriptDetails(), &cache,
                                    v8::ScriptCompiler::kNoCompileOptions);
 
-  CHECK(heap->InSpace(orig->abstract_code(isolate), LO_SPACE));
+  // The object may end up in LO_SPACE or TRUSTED_LO_SPACE depending on whether
+  // the sandbox is enabled.
+  CHECK(heap->InSpace(orig->abstract_code(isolate), LO_SPACE) ||
+        heap->InSpace(orig->abstract_code(isolate), TRUSTED_LO_SPACE));
 
   // Pretend that incremental marking is on when deserialization begins.
   heap::ForceEvacuationCandidate(ec_page);
@@ -3667,23 +3676,27 @@ UNINITIALIZED_TEST(SnapshotCreatorTemplates) {
                                       .ToLocalChecked()
                                       ->ToObject(context)
                                       .ToLocalChecked();
-        v8::Local<v8::Object> b =
-            a->GetInternalField(0)->ToObject(context).ToLocalChecked();
-        v8::Local<v8::Object> c =
-            b->GetInternalField(0)->ToObject(context).ToLocalChecked();
+        v8::Local<v8::Object> b = a->GetInternalField(0)
+                                      .As<v8::Value>()
+                                      ->ToObject(context)
+                                      .ToLocalChecked();
+        v8::Local<v8::Object> c = b->GetInternalField(0)
+                                      .As<v8::Value>()
+                                      ->ToObject(context)
+                                      .ToLocalChecked();
 
         InternalFieldData* a1 = reinterpret_cast<InternalFieldData*>(
             a->GetAlignedPointerFromInternalField(1));
-        v8::Local<v8::Value> a2 = a->GetInternalField(2);
+        v8::Local<v8::Value> a2 = a->GetInternalField(2).As<v8::Value>();
 
         InternalFieldData* b1 = reinterpret_cast<InternalFieldData*>(
             b->GetAlignedPointerFromInternalField(1));
-        v8::Local<v8::Value> b2 = b->GetInternalField(2);
+        v8::Local<v8::Value> b2 = b->GetInternalField(2).As<v8::Value>();
 
-        v8::Local<v8::Value> c0 = c->GetInternalField(0);
+        v8::Local<v8::Value> c0 = c->GetInternalField(0).As<v8::Value>();
         InternalFieldData* c1 = reinterpret_cast<InternalFieldData*>(
             c->GetAlignedPointerFromInternalField(1));
-        v8::Local<v8::Value> c2 = c->GetInternalField(2);
+        v8::Local<v8::Value> c2 = c->GetInternalField(2).As<v8::Value>();
 
         CHECK(c0->IsUndefined());
 
@@ -4258,10 +4271,10 @@ UNINITIALIZED_TEST(ReinitializeHashSeedJSCollectionRehashable) {
   create_params.snapshot_blob = &blob;
   v8::Isolate* isolate = v8::Isolate::New(create_params);
   {
+    v8::Isolate::Scope isolate_scope(isolate);
     // Check that rehashing has been performed.
     CHECK_EQ(static_cast<uint64_t>(1337),
              HashSeed(reinterpret_cast<i::Isolate*>(isolate)));
-    v8::Isolate::Scope isolate_scope(isolate);
     v8::HandleScope handle_scope(isolate);
     v8::Local<v8::Context> context = v8::Context::New(isolate);
     CHECK(!context.IsEmpty());
@@ -4326,10 +4339,10 @@ UNINITIALIZED_TEST(ReinitializeHashSeedRehashable) {
   create_params.snapshot_blob = &blob;
   v8::Isolate* isolate = v8::Isolate::New(create_params);
   {
+    v8::Isolate::Scope isolate_scope(isolate);
     // Check that rehashing has been performed.
     CHECK_EQ(static_cast<uint64_t>(1337),
              HashSeed(reinterpret_cast<i::Isolate*>(isolate)));
-    v8::Isolate::Scope isolate_scope(isolate);
     v8::HandleScope handle_scope(isolate);
     v8::Local<v8::Context> context = v8::Context::New(isolate);
     CHECK(!context.IsEmpty());
@@ -4932,7 +4945,7 @@ UNINITIALIZED_TEST(ClassFieldsWithBindings) {
   FreeCurrentEmbeddedBlob();
 }
 
-void CheckSFIsAreWeak(WeakFixedArray sfis, Isolate* isolate) {
+void CheckSFIsAreWeak(Tagged<WeakFixedArray> sfis, Isolate* isolate) {
   CHECK_GT(sfis->length(), 0);
   int no_of_weak = 0;
   for (int i = 0; i < sfis->length(); ++i) {
@@ -4992,7 +5005,7 @@ UNINITIALIZED_TEST(WeakArraySerializationInSnapshot) {
         Handle<JSFunction>::cast(v8::Utils::OpenHandle(*x));
 
     // Verify that the pointers in shared_function_infos are weak.
-    WeakFixedArray sfis =
+    Tagged<WeakFixedArray> sfis =
         Script::cast(function->shared()->script())->shared_function_infos();
     CheckSFIsAreWeak(sfis, reinterpret_cast<i::Isolate*>(isolate));
   }
@@ -5025,7 +5038,8 @@ TEST(WeakArraySerializationInCodeCache) {
                     v8::ScriptCompiler::kConsumeCodeCache);
 
   // Verify that the pointers in shared_function_infos are weak.
-  WeakFixedArray sfis = Script::cast(copy->script())->shared_function_infos();
+  Tagged<WeakFixedArray> sfis =
+      Script::cast(copy->script())->shared_function_infos();
   CheckSFIsAreWeak(sfis, isolate);
 
   delete cache;
@@ -5215,7 +5229,7 @@ void CheckObjectsAreInSharedHeap(Isolate* isolate) {
   Heap* heap = isolate->heap();
   HeapObjectIterator iterator(heap);
   DisallowGarbageCollection no_gc;
-  for (HeapObject obj = iterator.Next(); !obj.is_null();
+  for (Tagged<HeapObject> obj = iterator.Next(); !obj.is_null();
        obj = iterator.Next()) {
     const bool expected_in_shared_old =
         heap->MustBeInSharedOldSpace(obj) ||

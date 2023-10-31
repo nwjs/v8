@@ -761,7 +761,7 @@ i::Address* GlobalizeTracedReference(i::Isolate* i_isolate, i::Address value,
   auto result = i_isolate->traced_handles()->Create(value, slot, store_mode);
 #ifdef VERIFY_HEAP
   if (i::v8_flags.verify_heap) {
-    Object::ObjectVerify(i::Object(value), i_isolate);
+    Object::ObjectVerify(i::Tagged<i::Object>(value), i_isolate);
   }
 #endif  // VERIFY_HEAP
   return result.location();
@@ -830,7 +830,7 @@ i::Address* GlobalizeReference(i::Isolate* i_isolate, i::Address value) {
   i::Handle<i::Object> result = i_isolate->global_handles()->Create(value);
 #ifdef VERIFY_HEAP
   if (i::v8_flags.verify_heap) {
-    i::Object::ObjectVerify(i::Object(value), i_isolate);
+    i::Object::ObjectVerify(i::Tagged<i::Object>(value), i_isolate);
   }
 #endif  // VERIFY_HEAP
   return result.location();
@@ -950,8 +950,9 @@ EscapableHandleScope::EscapableHandleScope(Isolate* v8_isolate) {
 
 i::Address* EscapableHandleScope::Escape(i::Address* escape_value) {
   i::Heap* heap = reinterpret_cast<i::Isolate*>(GetIsolate())->heap();
-  Utils::ApiCheck(i::IsTheHole(i::Object(*escape_slot_), heap->isolate()),
-                  "EscapableHandleScope::Escape", "Escape value set twice");
+  Utils::ApiCheck(
+      i::IsTheHole(i::Tagged<i::Object>(*escape_slot_), heap->isolate()),
+      "EscapableHandleScope::Escape", "Escape value set twice");
   if (escape_value == nullptr) {
     *escape_slot_ = i::ReadOnlyRoots(heap).undefined_value().ptr();
     return nullptr;
@@ -1835,8 +1836,8 @@ void ObjectTemplate::SetAccessCheckCallback(AccessCheckCallback callback,
       i::Handle<i::AccessCheckInfo>::cast(struct_info);
 
   SET_FIELD_WRAPPED(i_isolate, info, set_callback, callback);
-  info->set_named_interceptor(i::Object());
-  info->set_indexed_interceptor(i::Object());
+  info->set_named_interceptor(i::Tagged<i::Object>());
+  info->set_indexed_interceptor(i::Tagged<i::Object>());
 
   if (data.IsEmpty()) {
     data = v8::Undefined(reinterpret_cast<v8::Isolate*>(i_isolate));
@@ -2485,7 +2486,17 @@ MaybeLocal<Value> Module::Evaluate(Local<Context> context) {
 
 Local<Module> Module::CreateSyntheticModule(
     Isolate* v8_isolate, Local<String> module_name,
-    const std::vector<Local<v8::String>>& export_names,
+    const std::vector<Local<String>>& export_names,
+    v8::Module::SyntheticModuleEvaluationSteps evaluation_steps) {
+  return CreateSyntheticModule(
+      v8_isolate, module_name,
+      MemorySpan<const Local<String>>(export_names.begin(), export_names.end()),
+      evaluation_steps);
+}
+
+Local<Module> Module::CreateSyntheticModule(
+    Isolate* v8_isolate, Local<String> module_name,
+    const MemorySpan<const Local<String>>& export_names,
     v8::Module::SyntheticModuleEvaluationSteps evaluation_steps) {
   auto i_isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
@@ -3038,8 +3049,9 @@ void v8::TryCatch::operator delete(void*, size_t) { base::OS::Abort(); }
 void v8::TryCatch::operator delete[](void*, size_t) { base::OS::Abort(); }
 
 bool v8::TryCatch::HasCaught() const {
-  return !IsTheHole(i::Object(reinterpret_cast<i::Address>(exception_)),
-                    i_isolate_);
+  return !IsTheHole(
+      i::Tagged<i::Object>(reinterpret_cast<i::Address>(exception_)),
+      i_isolate_);
 }
 
 bool v8::TryCatch::CanContinue() const { return can_continue_; }
@@ -4051,7 +4063,8 @@ MaybeLocal<Uint32> Value::ToUint32(Local<Context> context) const {
 }
 
 i::Isolate* i::IsolateFromNeverReadOnlySpaceObject(i::Address obj) {
-  return i::GetIsolateFromWritableObject(i::HeapObject::cast(i::Object(obj)));
+  return i::GetIsolateFromWritableObject(
+      i::HeapObject::cast(i::Tagged<i::Object>(obj)));
 }
 
 bool i::ShouldThrowOnError(i::Isolate* i_isolate) {
@@ -4305,8 +4318,6 @@ void v8::ArrayBufferView::CheckCast(Value* that) {
   Utils::ApiCheck(i::IsJSArrayBufferView(*obj), "v8::ArrayBufferView::Cast()",
                   "Value is not an ArrayBufferView");
 }
-
-constexpr size_t v8::TypedArray::kMaxLength;
 
 void v8::TypedArray::CheckCast(Value* that) {
   i::Handle<i::Object> obj = Utils::OpenHandle(that);
@@ -6406,16 +6417,16 @@ static bool InternalFieldOK(i::Handle<i::JSReceiver> obj, int index,
       location, "Internal field out of bounds");
 }
 
-Local<Value> v8::Object::SlowGetInternalField(int index) {
+Local<Data> v8::Object::SlowGetInternalField(int index) {
   i::Handle<i::JSReceiver> obj = Utils::OpenHandle(this);
   const char* location = "v8::Object::GetInternalField()";
   if (!InternalFieldOK(obj, index, location)) return Local<Value>();
   i::Handle<i::Object> value(i::JSObject::cast(*obj)->GetEmbedderField(index),
                              obj->GetIsolate());
-  return Utils::ToLocal(value);
+  return ToApiHandle<Data>(value);
 }
 
-void v8::Object::SetInternalField(int index, v8::Local<Value> value) {
+void v8::Object::SetInternalField(int index, v8::Local<Data> value) {
   i::Handle<i::JSReceiver> obj = Utils::OpenHandle(this);
   const char* location = "v8::Object::SetInternalField()";
   if (!InternalFieldOK(obj, index, location)) return;
@@ -6880,9 +6891,10 @@ MaybeLocal<Object> v8::Context::NewRemoteContext(
   i::Handle<i::AccessCheckInfo> access_check_info = i::handle(
       i::AccessCheckInfo::cast(global_constructor->GetAccessCheckInfo()),
       i_isolate);
-  Utils::ApiCheck(access_check_info->named_interceptor() != i::Object(),
-                  "v8::Context::NewRemoteContext",
-                  "Global template needs to have access check handlers");
+  Utils::ApiCheck(
+      access_check_info->named_interceptor() != i::Tagged<i::Object>(),
+      "v8::Context::NewRemoteContext",
+      "Global template needs to have access check handlers");
   i::Handle<i::JSObject> global_proxy = CreateEnvironment<i::JSGlobalProxy>(
       i_isolate, nullptr, global_template, global_object, 0,
       DeserializeInternalFieldsCallback(), nullptr);
@@ -7188,7 +7200,7 @@ class ObjectVisitorDeepFreezer : i::ObjectVisitor {
 
   i::Isolate* isolate_;
   Context::DeepFreezeDelegate* delegate_;
-  std::unordered_set<i::Object, i::Object::Hasher> done_list_;
+  std::unordered_set<i::Tagged<i::Object>, i::Object::Hasher> done_list_;
   std::vector<i::Handle<i::JSReceiver>> objects_to_freeze_;
   std::vector<i::Handle<i::AccessorPair>> lazy_accessor_pairs_to_freeze_;
   base::Optional<ErrorInfo> error_;
@@ -7484,9 +7496,10 @@ MaybeLocal<v8::Object> FunctionTemplate::NewRemoteInstance() {
                   "InstanceTemplate needs to have access checks enabled");
   i::Handle<i::AccessCheckInfo> access_check_info = i::handle(
       i::AccessCheckInfo::cast(constructor->GetAccessCheckInfo()), i_isolate);
-  Utils::ApiCheck(access_check_info->named_interceptor() != i::Object(),
-                  "v8::FunctionTemplate::NewRemoteInstance",
-                  "InstanceTemplate needs to have access check handlers");
+  Utils::ApiCheck(
+      access_check_info->named_interceptor() != i::Tagged<i::Object>(),
+      "v8::FunctionTemplate::NewRemoteInstance",
+      "InstanceTemplate needs to have access check handlers");
   i::Handle<i::JSObject> object;
   if (!i::ApiNatives::InstantiateRemoteObject(
            Utils::OpenHandle(*InstanceTemplate()))
@@ -8172,14 +8185,211 @@ Local<v8::Array> v8::Array::New(Isolate* v8_isolate, Local<Value>* elements,
       factory->NewJSArrayWithElements(result, i::PACKED_ELEMENTS, len));
 }
 
+namespace internal {
+
+uint32_t GetLength(Tagged<JSArray> array) {
+  Tagged<Object> length = array->length();
+  if (IsSmi(length)) return Smi::ToInt(length);
+  return static_cast<uint32_t>(Object::Number(length));
+}
+
+}  // namespace internal
+
 uint32_t v8::Array::Length() const {
   i::Handle<i::JSArray> obj = Utils::OpenHandle(this);
-  i::Tagged<i::Object> length = obj->length();
-  if (i::IsSmi(length)) {
-    return i::Smi::ToInt(length);
-  } else {
-    return static_cast<uint32_t>(i::Object::Number(length));
+  return i::GetLength(*obj);
+}
+
+namespace internal {
+
+bool CanUseFastIteration(Isolate* isolate, Handle<JSArray> array) {
+  if (IsCustomElementsReceiverMap(array->map())) return false;
+  if (array->GetElementsAccessor()->HasAccessors(*array)) return false;
+  if (!JSObject::PrototypeHasNoElements(isolate, *array)) return false;
+  return true;
+}
+
+enum class FastIterateResult {
+  kException = static_cast<int>(v8::Array::CallbackResult::kException),
+  kBreak = static_cast<int>(v8::Array::CallbackResult::kBreak),
+  kSlowPath,
+  kFinished,
+};
+
+FastIterateResult FastIterateArray(Handle<JSArray> array, Isolate* isolate,
+                                   v8::Array::IterationCallback callback,
+                                   void* callback_data) {
+  // Instead of relying on callers to check condition, this function returns
+  // {kSlowPath} for situations it can't handle.
+  // Most code paths below don't allocate, and rely on {callback} not allocating
+  // either, but this isn't enforced with {DisallowHeapAllocation} to allow
+  // embedders to allocate error objects before terminating the iteration.
+  // Since {callback} must not allocate anyway, we can get away with fake
+  // handles, reducing per-element overhead.
+  if (!CanUseFastIteration(isolate, array)) return FastIterateResult::kSlowPath;
+  using Result = v8::Array::CallbackResult;
+  DisallowJavascriptExecution no_js(isolate);
+  uint32_t length = GetLength(*array);
+  if (length == 0) return FastIterateResult::kFinished;
+  switch (array->GetElementsKind()) {
+    case PACKED_SMI_ELEMENTS:
+    case PACKED_ELEMENTS:
+    case PACKED_FROZEN_ELEMENTS:
+    case PACKED_SEALED_ELEMENTS:
+    case PACKED_NONEXTENSIBLE_ELEMENTS: {
+      Tagged<FixedArray> elements = FixedArray::cast(array->elements());
+      for (uint32_t i = 0; i < length; i++) {
+        Tagged<Object> element = elements->get(static_cast<int>(i));
+        // TODO(13270): When we switch to CSS, we can pass {element} to
+        // the callback directly, without {fake_handle}.
+        Handle<Object> fake_handle(reinterpret_cast<Address*>(&element));
+        Result result = callback(i, Utils::ToLocal(fake_handle), callback_data);
+        if (result != Result::kContinue) {
+          return static_cast<FastIterateResult>(result);
+        }
+        DCHECK(CanUseFastIteration(isolate, array));
+      }
+      return FastIterateResult::kFinished;
+    }
+    case HOLEY_SMI_ELEMENTS:
+    case HOLEY_FROZEN_ELEMENTS:
+    case HOLEY_SEALED_ELEMENTS:
+    case HOLEY_NONEXTENSIBLE_ELEMENTS:
+    case HOLEY_ELEMENTS: {
+      Tagged<FixedArray> elements = FixedArray::cast(array->elements());
+      for (uint32_t i = 0; i < length; i++) {
+        Tagged<Object> element = elements->get(static_cast<int>(i));
+        if (IsTheHole(element)) continue;
+        // TODO(13270): When we switch to CSS, we can pass {element} to
+        // the callback directly, without {fake_handle}.
+        Handle<Object> fake_handle(reinterpret_cast<Address*>(&element));
+        Result result = callback(i, Utils::ToLocal(fake_handle), callback_data);
+        if (result != Result::kContinue) {
+          return static_cast<FastIterateResult>(result);
+        }
+        DCHECK(CanUseFastIteration(isolate, array));
+      }
+      return FastIterateResult::kFinished;
+    }
+    case HOLEY_DOUBLE_ELEMENTS:
+    case PACKED_DOUBLE_ELEMENTS: {
+      DCHECK_NE(length, 0);  // Cast to FixedDoubleArray would be invalid.
+      Handle<FixedDoubleArray> elements(
+          FixedDoubleArray::cast(array->elements()), isolate);
+      FOR_WITH_HANDLE_SCOPE(isolate, uint32_t, i = 0, i, i < length, i++, {
+        if (elements->is_the_hole(i)) continue;
+        double element = elements->get_scalar(i);
+        Handle<Object> value = isolate->factory()->NewNumber(element);
+        Result result = callback(i, Utils::ToLocal(value), callback_data);
+        if (result != Result::kContinue) {
+          return static_cast<FastIterateResult>(result);
+        }
+        DCHECK(CanUseFastIteration(isolate, array));
+      });
+      return FastIterateResult::kFinished;
+    }
+    case DICTIONARY_ELEMENTS: {
+      DisallowGarbageCollection no_gc;
+      Tagged<NumberDictionary> dict = array->element_dictionary();
+      struct Entry {
+        uint32_t index;
+        InternalIndex entry;
+      };
+      std::vector<Entry> sorted;
+      sorted.reserve(dict->NumberOfElements());
+      ReadOnlyRoots roots(isolate);
+      for (InternalIndex i : dict->IterateEntries()) {
+        Tagged<Object> key = dict->KeyAt(isolate, i);
+        if (!dict->IsKey(roots, key)) continue;
+        uint32_t index = static_cast<uint32_t>(Object::Number(key));
+        sorted.push_back({index, i});
+      }
+      std::sort(
+          sorted.begin(), sorted.end(),
+          [](const Entry& a, const Entry& b) { return a.index < b.index; });
+      for (const Entry& entry : sorted) {
+        Tagged<Object> value = dict->ValueAt(entry.entry);
+        // TODO(13270): When we switch to CSS, we can pass {element} to
+        // the callback directly, without {fake_handle}.
+        Handle<Object> fake_handle(reinterpret_cast<Address*>(&value));
+        Result result =
+            callback(entry.index, Utils::ToLocal(fake_handle), callback_data);
+        if (result != Result::kContinue) {
+          return static_cast<FastIterateResult>(result);
+        }
+        SLOW_DCHECK(CanUseFastIteration(isolate, array));
+      }
+      return FastIterateResult::kFinished;
+    }
+    case NO_ELEMENTS:
+      return FastIterateResult::kFinished;
+    case FAST_SLOPPY_ARGUMENTS_ELEMENTS:
+    case SLOW_SLOPPY_ARGUMENTS_ELEMENTS:
+      // Probably not worth implementing. Take the slow path.
+      return FastIterateResult::kSlowPath;
+    case WASM_ARRAY_ELEMENTS:
+    case FAST_STRING_WRAPPER_ELEMENTS:
+    case SLOW_STRING_WRAPPER_ELEMENTS:
+    case SHARED_ARRAY_ELEMENTS:
+#define TYPED_ARRAY_CASE(Type, type, TYPE, ctype) case TYPE##_ELEMENTS:
+      TYPED_ARRAYS(TYPED_ARRAY_CASE)
+      RAB_GSAB_TYPED_ARRAYS(TYPED_ARRAY_CASE)
+#undef TYPED_ARRAY_CASE
+      // These are never used by v8::Array instances.
+      UNREACHABLE();
   }
+}
+
+}  // namespace internal
+
+Maybe<void> v8::Array::Iterate(Local<Context> context,
+                               v8::Array::IterationCallback callback,
+                               void* callback_data) {
+  i::Handle<i::JSArray> array = Utils::OpenHandle(this);
+  i::Isolate* isolate = array->GetIsolate();
+  i::FastIterateResult fast_result =
+      i::FastIterateArray(array, isolate, callback, callback_data);
+  if (fast_result == i::FastIterateResult::kException) return Nothing<void>();
+  // Early breaks and completed iteration both return successfully.
+  if (fast_result != i::FastIterateResult::kSlowPath) return JustVoid();
+
+  // Slow path: retrieving elements could have side effects.
+  ENTER_V8(isolate, context, Array, Iterate, Nothing<void>(), i::HandleScope);
+  for (uint32_t i = 0; i < i::GetLength(*array); ++i) {
+    i::Handle<i::Object> element;
+    has_pending_exception =
+        !i::JSReceiver::GetElement(isolate, array, i).ToHandle(&element);
+    RETURN_ON_FAILED_EXECUTION_PRIMITIVE(void);
+    using Result = v8::Array::CallbackResult;
+    Result result = callback(i, Utils::ToLocal(element), callback_data);
+    if (result == Result::kException) return Nothing<void>();
+    if (result == Result::kBreak) return JustVoid();
+  }
+  return JustVoid();
+}
+
+v8::TypecheckWitness::TypecheckWitness(Isolate* isolate)
+    // We need to reserve a handle that we can patch later.
+    // TODO(13270): When we switch to CSS, we can use a direct pointer
+    // instead of a handle.
+    : cached_map_(v8::Number::New(isolate, 1)) {}
+
+void v8::TypecheckWitness::Update(Local<Value> baseline) {
+  i::Tagged<i::Object> obj = *Utils::OpenHandle(*baseline);
+  i::Tagged<i::Object> map = i::Smi::zero();
+  if (!IsSmi(obj)) map = i::HeapObject::cast(obj)->map();
+  // Design overview: in the {TypecheckWitness} constructor, we create
+  // a single handle for the witness value. Whenever {Update} is called, we
+  // make this handle point at the fresh baseline/witness; the intention is
+  // to allow having short-lived HandleScopes (e.g. in {FastIterateArray}
+  // above) while a {TypecheckWitness} is alive: it therefore cannot hold
+  // on to one of the short-lived handles.
+  // Calling {OpenHandle} on the {cached_map_} only serves to "reinterpret_cast"
+  // it to an {i::Handle} on which we can call {PatchValue}.
+  // TODO(13270): When we switch to CSS, this can become simpler: we can
+  // then simply overwrite the direct pointer.
+  i::Handle<i::Object> cache = Utils::OpenHandle(*cached_map_);
+  cache.PatchValue(map);
 }
 
 Local<v8::Map> v8::Map::New(Isolate* v8_isolate) {
@@ -8289,11 +8499,12 @@ i::Handle<i::JSArray> MapAsArray(i::Isolate* i_isolate,
   int result_index = 0;
   {
     i::DisallowGarbageCollection no_gc;
-    i::Tagged<i::Hole> the_hole = i::ReadOnlyRoots(i_isolate).the_hole_value();
+    i::Tagged<i::Hole> hash_table_hole =
+        i::ReadOnlyRoots(i_isolate).hash_table_hole_value();
     for (int i = offset; i < capacity; ++i) {
       i::InternalIndex entry(i);
       i::Tagged<i::Object> key = table->KeyAt(entry);
-      if (key == the_hole) continue;
+      if (key == hash_table_hole) continue;
       if (collect_keys) result->set(result_index++, key);
       if (collect_values) result->set(result_index++, table->ValueAt(entry));
     }
@@ -8394,11 +8605,12 @@ i::Handle<i::JSArray> SetAsArray(i::Isolate* i_isolate,
   int result_index = 0;
   {
     i::DisallowGarbageCollection no_gc;
-    i::Tagged<i::Hole> the_hole = i::ReadOnlyRoots(i_isolate).the_hole_value();
+    i::Tagged<i::Hole> hash_table_hole =
+        i::ReadOnlyRoots(i_isolate).hash_table_hole_value();
     for (int i = offset; i < capacity; ++i) {
       i::InternalIndex entry(i);
       i::Tagged<i::Object> key = table->KeyAt(entry);
-      if (key == the_hole) continue;
+      if (key == hash_table_hole) continue;
       result->set(result_index++, key);
       if (collect_key_values) result->set(result_index++, key);
     }
@@ -8971,9 +9183,9 @@ size_t v8::TypedArray::Length() {
   return obj->WasDetached() ? 0 : obj->GetLength();
 }
 
-static_assert(
-    v8::TypedArray::kMaxLength == i::JSTypedArray::kMaxLength,
-    "v8::TypedArray::kMaxLength must match i::JSTypedArray::kMaxLength");
+static_assert(v8::TypedArray::kMaxByteLength == i::JSTypedArray::kMaxByteLength,
+              "v8::TypedArray::kMaxByteLength must match "
+              "i::JSTypedArray::kMaxByteLength");
 
 #define TYPED_ARRAY_NEW(Type, type, TYPE, ctype)                            \
   Local<Type##Array> Type##Array::New(Local<ArrayBuffer> array_buffer,      \
@@ -9427,6 +9639,14 @@ void Isolate::TerminateExecution() {
 
 bool Isolate::IsExecutionTerminating() {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
+#ifdef DEBUG
+  // This method might be called on a thread that's not bound to any Isolate
+  // and thus pointer compression schemes might have cage base value unset.
+  // Read-only roots accessors contain type DCHECKs which require access to
+  // V8 heap in order to check the object type. So, allow heap access here
+  // to let the checks work.
+  i::PtrComprCageAccessScope ptr_compr_cage_access_scope(i_isolate);
+#endif  // DEBUG
   return i_isolate->is_execution_terminating();
 }
 
@@ -10105,6 +10325,14 @@ void Isolate::LowMemoryNotification() {
     i::NestedTimedHistogramScope idle_notification_scope(
         i_isolate->counters()->gc_low_memory_notification());
     TRACE_EVENT0("v8", "V8.GCLowMemoryNotification");
+#ifdef DEBUG
+    // This method might be called on a thread that's not bound to any Isolate
+    // and thus pointer compression schemes might have cage base value unset.
+    // Read-only roots accessors contain type DCHECKs which require access to
+    // V8 heap in order to check the object type. So, allow heap access here
+    // to let the checks work.
+    i::PtrComprCageAccessScope ptr_compr_cage_access_scope(i_isolate);
+#endif  // DEBUG
     i_isolate->heap()->CollectAllAvailableGarbage(
         i::GarbageCollectionReason::kLowMemoryNotification);
   }
@@ -10425,13 +10653,13 @@ void v8::Isolate::LocaleConfigurationChangeNotification() {
 #endif  // V8_INTL_SUPPORT
 }
 
-#if defined(V8_OS_WIN)
+#if defined(V8_OS_WIN) && defined(V8_ENABLE_ETW_STACK_WALKING)
 void Isolate::SetFilterETWSessionByURLCallback(
     FilterETWSessionByURLCallback callback) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
   i_isolate->SetFilterETWSessionByURLCallback(callback);
 }
-#endif  // V8_OS_WIN
+#endif  // V8_OS_WIN && V8_ENABLE_ETW_STACK_WALKING
 
 bool v8::Object::IsCodeLike(v8::Isolate* v8_isolate) const {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
@@ -10551,20 +10779,25 @@ String::Value::Value(v8::Isolate* v8_isolate, v8::Local<v8::Value> obj)
 
 String::Value::~Value() { i::DeleteArray(str_); }
 
-#define DEFINE_ERROR(NAME, name)                                           \
-  Local<Value> Exception::NAME(v8::Local<v8::String> raw_message) {        \
-    i::Isolate* i_isolate = i::Isolate::Current();                         \
-    API_RCS_SCOPE(i_isolate, NAME, New);                                   \
-    ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);                            \
-    i::Object error;                                                       \
-    {                                                                      \
-      i::HandleScope scope(i_isolate);                                     \
-      i::Handle<i::String> message = Utils::OpenHandle(*raw_message);      \
-      i::Handle<i::JSFunction> constructor = i_isolate->name##_function(); \
-      error = *i_isolate->factory()->NewError(constructor, message);       \
-    }                                                                      \
-    i::Handle<i::Object> result(error, i_isolate);                         \
-    return Utils::ToLocal(result);                                         \
+#define DEFINE_ERROR(NAME, name)                                              \
+  Local<Value> Exception::NAME(v8::Local<v8::String> raw_message,             \
+                               v8::Local<v8::Value> raw_options) {            \
+    i::Isolate* i_isolate = i::Isolate::Current();                            \
+    API_RCS_SCOPE(i_isolate, NAME, New);                                      \
+    ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);                               \
+    i::Tagged<i::Object> error;                                               \
+    {                                                                         \
+      i::HandleScope scope(i_isolate);                                        \
+      i::Handle<i::Object> options;                                           \
+      if (!raw_options.IsEmpty()) {                                           \
+        options = Utils::OpenHandle(*raw_options);                            \
+      }                                                                       \
+      i::Handle<i::String> message = Utils::OpenHandle(*raw_message);         \
+      i::Handle<i::JSFunction> constructor = i_isolate->name##_function();    \
+      error = *i_isolate->factory()->NewError(constructor, message, options); \
+    }                                                                         \
+    i::Handle<i::Object> result(error, i_isolate);                            \
+    return Utils::ToLocal(result);                                            \
   }
 
 DEFINE_ERROR(RangeError, range_error)
@@ -11495,8 +11728,9 @@ void InvokeAccessorGetterCallback(
   {
     Address arg = i_isolate->isolate_data()->api_callback_thunk_argument();
     // Currently we don't call InterceptorInfo callbacks via CallApiGetter.
-    DCHECK(IsAccessorInfo(Object(arg)));
-    Tagged<AccessorInfo> accessor_info = AccessorInfo::cast(Object(arg));
+    DCHECK(IsAccessorInfo(Tagged<Object>(arg)));
+    Tagged<AccessorInfo> accessor_info =
+        AccessorInfo::cast(Tagged<Object>(arg));
     getter = reinterpret_cast<v8::AccessorNameGetterCallback>(
         accessor_info->getter(i_isolate));
 

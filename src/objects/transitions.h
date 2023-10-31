@@ -124,20 +124,19 @@ class V8_EXPORT_PRIVATE TransitionsAccessor {
   }
 
   // ===== PROTOTYPE TRANSITIONS =====
-  // When you set the prototype of an object using the __proto__ accessor, or if
-  // an unrelated new.target is passed to a constructor you need a new map for
-  // the object (the prototype is stored in the map).  In order not to multiply
-  // maps unnecessarily we store these as transitions in the original map.  That
-  // way we can transition to the same map if the same prototype is set, rather
-  // than creating a new map every time.  The transitions are in the form of a
-  // map where the keys are prototype objects and the values are the maps they
-  // transition to. PutPrototypeTransition can trigger GC.
+  // When you set the prototype of an object using the __proto__ accessor you
+  // need a new map for the object (the prototype is stored in the map).  In
+  // order not to multiply maps unnecessarily we store these as transitions in
+  // the original map.  That way we can transition to the same map if the same
+  // prototype is set, rather than creating a new map every time.  The
+  // transitions are in the form of a map where the keys are prototype objects
+  // and the values are the maps they transition to.
+  // PutPrototypeTransition can trigger GC.
   static void PutPrototypeTransition(Isolate* isolate, Handle<Map>,
                                      Handle<Object> prototype,
                                      Handle<Map> target_map);
   static Handle<Map> GetPrototypeTransition(Isolate* isolate, Handle<Map> map,
-                                            Handle<Object> prototype,
-                                            bool new_target_is_base);
+                                            Handle<Object> prototype);
 
   // During the first-time Map::Update and Map::TryUpdate, the migration target
   // map could be cached in the raw_transitions slot of the old map that is
@@ -225,7 +224,7 @@ class V8_EXPORT_PRIVATE TransitionsAccessor {
                                       DisallowGarbageCollection* no_gc);
 
   Isolate* isolate_;
-  Map map_;
+  Tagged<Map> map_;
   MaybeObject raw_transitions_;
   Encoding encoding_;
   bool concurrent_access_;
@@ -239,7 +238,7 @@ class V8_EXPORT_PRIVATE TransitionsAccessor {
 // should use TransitionsAccessors.
 // TransitionArrays have the following format:
 // [0] Link to next TransitionArray (for weak handling support) (strong ref)
-// [1] Smi(0) or WeakFixedArray of prototype transitions (strong ref)
+// [1] Tagged<Smi>(0) or WeakFixedArray of prototype transitions (strong ref)
 // [2] Number of transitions (can be zero after trimming)
 // [3] First transition key (strong ref)
 // [4] First transition target (weak ref)
