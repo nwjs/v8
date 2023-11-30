@@ -1940,7 +1940,7 @@ void V8HeapExplorer::ExtractWeakArrayReferences(int header_size,
                                                 HeapEntry* entry,
                                                 Tagged<T> array) {
   for (int i = 0; i < array->length(); ++i) {
-    MaybeObject object = array->Get(i);
+    MaybeObject object = array->get(i);
     Tagged<HeapObject> heap_object;
     if (object.GetHeapObjectIfWeak(&heap_object)) {
       SetWeakReference(entry, i, heap_object, header_size + i * kTaggedSize);
@@ -2205,12 +2205,16 @@ class RootsReferencesExtractor : public RootVisitor {
   void SetVisitingWeakRoots() { visiting_weak_roots_ = true; }
 
   void VisitRootPointer(Root root, const char* description,
-                        FullObjectSlot object) override {
+                        FullObjectSlot p) override {
+    Tagged<Object> object = *p;
+#ifdef V8_ENABLE_DIRECT_LOCAL
+    if (object.ptr() == kTaggedNullAddress) return;
+#endif
     if (root == Root::kBuiltins) {
-      explorer_->TagBuiltinCodeObject(Code::cast(*object), description);
+      explorer_->TagBuiltinCodeObject(Code::cast(object), description);
     }
     explorer_->SetGcSubrootReference(root, description, visiting_weak_roots_,
-                                     *object);
+                                     object);
   }
 
   void VisitRootPointers(Root root, const char* description,
@@ -2331,9 +2335,10 @@ bool V8HeapExplorer::IterateAndExtractReferences(
 
 bool V8HeapExplorer::IsEssentialObject(Tagged<Object> object) {
   if (!IsHeapObject(object)) return false;
-  // Avoid comparing InstructionStream objects with non-InstructionStream
-  // objects below.
-  if (IsCodeSpaceObject(HeapObject::cast(object))) {
+  // Avoid comparing objects in other pointer compression cages to objects
+  // inside the main cage as the comparison may only look at the lower 32 bits.
+  if (IsCodeSpaceObject(HeapObject::cast(object)) ||
+      IsTrustedSpaceObject(HeapObject::cast(object))) {
     return true;
   }
   Isolate* isolate = heap_->isolate();

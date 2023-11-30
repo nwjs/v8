@@ -498,7 +498,9 @@ Maybe<bool> JSReceiver::SetOrCopyDataProperties(
 
 Tagged<String> JSReceiver::class_name() {
   ReadOnlyRoots roots = GetReadOnlyRoots();
-  if (IsFunction(*this)) return roots.Function_string();
+  if (IsJSFunctionOrBoundFunctionOrWrappedFunction(*this)) {
+    return roots.Function_string();
+  }
   if (IsJSArgumentsObject(*this)) return roots.Arguments_string();
   if (IsJSArray(*this)) return roots.Array_string();
   if (IsJSArrayBuffer(*this)) {
@@ -2273,7 +2275,7 @@ V8_WARN_UNUSED_RESULT Maybe<bool> FastGetOwnValuesOrEntries(
   }
 
   DCHECK_LE(count, values_or_entries->length());
-  *result = FixedArray::ShrinkOrEmpty(isolate, values_or_entries, count);
+  *result = FixedArray::RightTrimOrEmpty(isolate, values_or_entries, count);
   return Just(true);
 }
 
@@ -2304,8 +2306,7 @@ MaybeHandle<FixedArray> GetOwnValuesOrEntries(Isolate* isolate,
   int length = 0;
 
   for (int i = 0; i < keys->length(); ++i) {
-    Handle<Name> key =
-        Handle<Name>::cast(handle(keys->get(isolate, i), isolate));
+    Handle<Name> key(Name::cast(keys->get(i)), isolate);
 
     if (filter & ONLY_ENUMERABLE) {
       PropertyDescriptor descriptor;
@@ -2332,7 +2333,7 @@ MaybeHandle<FixedArray> GetOwnValuesOrEntries(Isolate* isolate,
     length++;
   }
   DCHECK_LE(length, values_or_entries->length());
-  return FixedArray::ShrinkOrEmpty(isolate, values_or_entries, length);
+  return FixedArray::RightTrimOrEmpty(isolate, values_or_entries, length);
 }
 
 MaybeHandle<FixedArray> JSReceiver::GetOwnValues(Isolate* isolate,
@@ -3083,21 +3084,23 @@ void JSObject::PrintInstanceMigration(FILE* file, Tagged<Map> original_map,
   PrintF(file, "\n");
 }
 
+// static
 bool JSObject::IsUnmodifiedApiObject(FullObjectSlot o) {
   Tagged<Object> object = *o;
   if (IsSmi(object)) return false;
   Tagged<HeapObject> heap_object = HeapObject::cast(object);
-  if (!IsJSObject(object)) return false;
-  Tagged<JSObject> js_object = JSObject::cast(object);
-  if (!js_object->IsDroppableApiObject()) return false;
-  Tagged<Object> maybe_constructor = js_object->map()->GetConstructor();
+  Tagged<Map> map = heap_object->map();
+  if (!InstanceTypeChecker::IsJSObject(map)) return false;
+  if (!JSObject::IsDroppableApiObject(map)) return false;
+  Tagged<Object> maybe_constructor = map->GetConstructor();
   if (!IsJSFunction(maybe_constructor)) return false;
-  Tagged<JSFunction> constructor = JSFunction::cast(maybe_constructor);
+  Tagged<JSObject> js_object = JSObject::cast(object);
   if (js_object->elements()->length() != 0) return false;
   // Check that the object is not a key in a WeakMap (over-approximation).
   if (!IsUndefined(js_object->GetIdentityHash())) return false;
 
-  return constructor->initial_map() == heap_object->map();
+  Tagged<JSFunction> constructor = JSFunction::cast(maybe_constructor);
+  return constructor->initial_map() == map;
 }
 
 // static
@@ -3325,7 +3328,7 @@ void MigrateFastToFast(Isolate* isolate, Handle<JSObject> object,
   int limit = std::min(inobject, number_of_fields);
   for (int i = 0; i < limit; i++) {
     FieldIndex index = FieldIndex::ForPropertyIndex(*new_map, i);
-    Tagged<Object> value = inobject_props->get(isolate, i);
+    Tagged<Object> value = inobject_props->get(i);
     object->FastPropertyAtPut(index, value);
   }
 

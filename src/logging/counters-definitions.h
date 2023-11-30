@@ -53,7 +53,10 @@ namespace internal {
      21)                                                                       \
   HR(wasm_memory_allocation_result, V8.WasmMemoryAllocationResult, 0, 3, 4)    \
   /* Committed code size per module, collected on GC. */                       \
+  /* Older histogram, in MiB (0..1024MB). */                                   \
   HR(wasm_module_code_size_mb, V8.WasmModuleCodeSizeMiB, 0, 1024, 64)          \
+  /* Newer histogram, in KiB (0..100MB). */                                    \
+  HR(wasm_module_code_size_kb, V8.WasmModuleCodeSizeKiB, 0, 1024 * 100, 101)   \
   /* Percent of freed code size per module, collected on GC. */                \
   HR(wasm_module_freed_code_size_percent, V8.WasmModuleCodeSizePercentFreed,   \
      0, 100, 32)                                                               \
@@ -94,8 +97,8 @@ namespace internal {
      kMaxExternalPointers, 101)                                                \
   HR(code_pointers_count, V8.SandboxedCodePointersCount, 0, kMaxCodePointers,  \
      101)                                                                      \
-  HR(indirect_pointers_count, V8.IndirectPointersCount, 0,                     \
-     kMaxIndirectPointers, 101)                                                \
+  HR(trusted_pointers_count, V8.SandboxedTrustedPointersCount, 0,              \
+     kMaxTrustedPointers, 101)                                                 \
   HR(wasm_num_lazy_compilations_5sec, V8.WasmNumLazyCompilations5Sec, 0,       \
      200000, 50)                                                               \
   HR(wasm_num_lazy_compilations_20sec, V8.WasmNumLazyCompilations20Sec, 0,     \

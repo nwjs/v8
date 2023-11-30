@@ -16,12 +16,14 @@
 #include "src/heap/progress-bar.h"
 #include "src/heap/spaces.h"
 #include "src/objects/descriptor-array.h"
-#include "src/objects/object-macros.h"
 #include "src/objects/objects.h"
 #include "src/objects/property-details.h"
 #include "src/objects/smi.h"
 #include "src/objects/string.h"
 #include "src/sandbox/external-pointer-inl.h"
+
+// Has to be the last include (doesn't have include guards):
+#include "src/objects/object-macros.h"
 
 namespace v8 {
 namespace internal {
@@ -193,7 +195,7 @@ void MarkingVisitorBase<ConcreteVisitor>::VisitIndirectPointer(
 }
 
 template <typename ConcreteVisitor>
-void MarkingVisitorBase<ConcreteVisitor>::VisitIndirectPointerTableEntry(
+void MarkingVisitorBase<ConcreteVisitor>::VisitTrustedPointerTableEntry(
     Tagged<HeapObject> host, IndirectPointerSlot slot) {
 #ifdef V8_ENABLE_SANDBOX
   IndirectPointerHandle handle = slot.Relaxed_LoadHandle();
@@ -205,8 +207,8 @@ void MarkingVisitorBase<ConcreteVisitor>::VisitIndirectPointerTableEntry(
     return;
   }
 
-  IndirectPointerTable* table = indirect_pointer_table_;
-  IndirectPointerTable::Space* space = heap_->indirect_pointer_space();
+  TrustedPointerTable* table = trusted_pointer_table_;
+  TrustedPointerTable::Space* space = heap_->trusted_pointer_space();
   table->Mark(space, handle);
 #else
   UNREACHABLE();
@@ -765,5 +767,7 @@ int MarkingVisitorBase<ConcreteVisitor>::VisitTransitionArray(
 
 }  // namespace internal
 }  // namespace v8
+
+#include "src/objects/object-macros-undef.h"
 
 #endif  // V8_HEAP_MARKING_VISITOR_INL_H_

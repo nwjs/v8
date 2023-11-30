@@ -6,6 +6,7 @@
 #include "src/api/api.h"
 #include "src/builtins/accessors.h"
 #include "src/codegen/compilation-cache.h"
+#include "src/common/assert-scope.h"
 #include "src/execution/isolate.h"
 #include "src/execution/protectors.h"
 #include "src/heap/factory.h"
@@ -50,6 +51,7 @@
 #include "src/objects/turbofan-types.h"
 #include "src/objects/turboshaft-types.h"
 #include "src/regexp/regexp.h"
+#include "src/roots/roots.h"
 #include "src/utils/allocation.h"
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -179,7 +181,7 @@ bool SetupIsolateDelegate::SetupHeapInternal(Isolate* isolate) {
 
 bool Heap::CreateReadOnlyHeapObjects() {
   // Create initial maps and important objects.
-  if (!CreateEarlyReadOnlyMaps()) return false;
+  if (!CreateEarlyReadOnlyMapsAndObjects()) return false;
   if (!CreateImportantReadOnlyObjects()) return false;
 
 #if V8_STATIC_ROOTS_BOOL
@@ -272,17 +274,10 @@ AllocationResult Heap::AllocateMap(AllocationType allocation_type,
   return AllocationResult::FromObject(map);
 }
 
-AllocationResult Heap::AllocatePartialMap(InstanceType instance_type,
-                                          int instance_size) {
-  Tagged<Object> result;
-  AllocationResult allocation =
-      AllocateRaw(Map::kSize, AllocationType::kReadOnly);
-  if (!allocation.To(&result)) return allocation;
-  // Map::cast cannot be used due to uninitialized map field.
-  Tagged<Map> map = Map::unchecked_cast(result);
-  map->set_map_after_allocation(
-      Map::unchecked_cast(isolate()->root(RootIndex::kMetaMap)),
-      SKIP_WRITE_BARRIER);
+namespace {
+void InitializePartialMap(Tagged<Map> map, Tagged<Map> meta_map,
+                          InstanceType instance_type, int instance_size) {
+  map->set_map_after_allocation(meta_map, SKIP_WRITE_BARRIER);
   map->set_instance_type(instance_type);
   map->set_instance_size(instance_size);
   map->set_visitor_id(Map::GetVisitorId(map));
@@ -301,6 +296,20 @@ AllocationResult Heap::AllocatePartialMap(InstanceType instance_type,
   DCHECK(!map->is_in_retained_map_list());
   map->clear_padding();
   map->set_elements_kind(TERMINAL_FAST_ELEMENTS_KIND);
+}
+}  // namespace
+
+AllocationResult Heap::AllocatePartialMap(InstanceType instance_type,
+                                          int instance_size) {
+  Tagged<Object> result;
+  AllocationResult allocation =
+      AllocateRaw(Map::kSize, AllocationType::kReadOnly);
+  if (!allocation.To(&result)) return allocation;
+  // Map::cast cannot be used due to uninitialized map field.
+  Tagged<Map> map = Map::unchecked_cast(result);
+  InitializePartialMap(
+      map, Map::unchecked_cast(isolate()->root(RootIndex::kMetaMap)),
+      instance_type, instance_size);
   return AllocationResult::FromObject(map);
 }
 
@@ -327,18 +336,120 @@ AllocationResult Heap::Allocate(Handle<Map> map,
   return AllocationResult::FromObject(result);
 }
 
-bool Heap::CreateEarlyReadOnlyMaps() {
-  // Setup maps which are used often, or used in CreateImportantReadOnlyObjects.
+bool Heap::CreateEarlyReadOnlyMapsAndObjects() {
+  // Setup maps and objects which are used often, or used in
+  // CreateImportantReadOnlyObjects.
   ReadOnlyRoots roots(this);
+
+  // First create the following, in the following order:
+  //   - Undefined value
+  //   - Null value
+  //   - Empty string
+  //   - False value
+  //   - True value
+  //   - /String maps
+  //     \...
+  //   - Symbol map
+  //   - Meta-map
+  //   - Undefined map
+  //   - Null map
+  //   - Boolean map
+  //
+  // This is so that:
+  //   1. The falsy values are the first in the space, allowing ToBoolean false
+  //      checks to be a single less-than.
+  //   2. The true value is immediately after the falsy values, so that we can
+  //      use a single compare's condition flags to check both falsy and true.
+  //   3. The string maps are all together, and are the first maps, allowing
+  //      them to be checked with a single less-than if we know we have a map.
+  //   4. The symbol map is with the string maps, for similarly fast Name
+  //      checks.
+
   Tagged<HeapObject> obj;
   {
-    AllocationResult allocation = AllocatePartialMap(MAP_TYPE, Map::kSize);
-    if (!allocation.To(&obj)) return false;
+    // We're a bit loose with raw pointers here for readability -- this is all
+    // guaranteed to be safe anyway since the allocations can't cause a GC, so
+    // disable gcmole in this range.
+    DisableGCMole no_gc_mole;
+
+    // First, set up the roots to all point to the right offset in the
+    // allocation folded allocation.
+#define ALLOCATE_AND_SET_ROOT(Type, name, Size)                            \
+  {                                                                        \
+    AllocationResult alloc = AllocateRaw(Size, AllocationType::kReadOnly); \
+    if (!alloc.To(&obj)) return false;                                     \
+  }                                                                        \
+  Tagged<Type> name = Type::unchecked_cast(obj);                           \
+  set_##name(name)
+
+    ALLOCATE_AND_SET_ROOT(Undefined, undefined_value, Undefined::kSize);
+    ALLOCATE_AND_SET_ROOT(Null, null_value, Null::kSize);
+    ALLOCATE_AND_SET_ROOT(SeqOneByteString, empty_string, String::kHeaderSize);
+    ALLOCATE_AND_SET_ROOT(False, false_value, False::kSize);
+    ALLOCATE_AND_SET_ROOT(True, true_value, True::kSize);
+
+    for (const StringTypeInit& entry : kStringTypeTable) {
+      {
+        AllocationResult alloc =
+            AllocateRaw(Map::kSize, AllocationType::kReadOnly);
+        if (!alloc.To(&obj)) return false;
+      }
+      Tagged<Map> map = Map::unchecked_cast(obj);
+      roots_table()[entry.index] = map.ptr();
+    }
+    ALLOCATE_AND_SET_ROOT(Map, symbol_map, Map::kSize);
+
+    ALLOCATE_AND_SET_ROOT(Map, meta_map, Map::kSize);
+    ALLOCATE_AND_SET_ROOT(Map, undefined_map, Map::kSize);
+    ALLOCATE_AND_SET_ROOT(Map, null_map, Map::kSize);
+    ALLOCATE_AND_SET_ROOT(Map, boolean_map, Map::kSize);
+
+#undef ALLOCATE_AND_SET_ROOT
+
+    // Then, initialise the initial maps.
+    InitializePartialMap(meta_map, meta_map, MAP_TYPE, Map::kSize);
+    InitializePartialMap(undefined_map, meta_map, ODDBALL_TYPE,
+                         Undefined::kSize);
+    InitializePartialMap(null_map, meta_map, ODDBALL_TYPE, Null::kSize);
+    InitializePartialMap(boolean_map, meta_map, ODDBALL_TYPE, Boolean::kSize);
+    boolean_map->SetConstructorFunctionIndex(Context::BOOLEAN_FUNCTION_INDEX);
+
+    for (const StringTypeInit& entry : kStringTypeTable) {
+      Tagged<Map> map = Map::unchecked_cast(roots.object_at(entry.index));
+      InitializePartialMap(map, meta_map, entry.type, entry.size);
+      map->SetConstructorFunctionIndex(Context::STRING_FUNCTION_INDEX);
+      if (StringShape(entry.type).IsCons()) map->mark_unstable();
+    }
+    InitializePartialMap(symbol_map, meta_map, SYMBOL_TYPE, Symbol::kSize);
+    symbol_map->SetConstructorFunctionIndex(Context::SYMBOL_FUNCTION_INDEX);
+
+    // Finally, initialise the non-map objects using those maps.
+    undefined_value->set_map_after_allocation(undefined_map,
+                                              SKIP_WRITE_BARRIER);
+    undefined_value->set_kind(Oddball::kUndefined);
+
+    null_value->set_map_after_allocation(null_map, SKIP_WRITE_BARRIER);
+    null_value->set_kind(Oddball::kNull);
+
+    true_value->set_map_after_allocation(boolean_map, SKIP_WRITE_BARRIER);
+    true_value->set_kind(Oddball::kTrue);
+
+    false_value->set_map_after_allocation(boolean_map, SKIP_WRITE_BARRIER);
+    false_value->set_kind(Oddball::kFalse);
+
+    // The empty string is initialised with an empty hash despite being
+    // internalized -- this will be calculated once the hashseed is available.
+    // TODO(leszeks): Unify this initialisation with normal string
+    // initialisation.
+    empty_string->set_map_after_allocation(
+        roots.unchecked_internalized_one_byte_string_map(), SKIP_WRITE_BARRIER);
+    empty_string->clear_padding_destructively(0);
+    empty_string->set_length(0);
+    empty_string->set_raw_hash_field(String::kEmptyHashField);
   }
-  // Map::cast cannot be used due to uninitialized map field.
-  Tagged<Map> new_meta_map = Map::unchecked_cast(obj);
-  set_meta_map(new_meta_map);
-  new_meta_map->set_map_after_allocation(new_meta_map);
+
+  // Now that the initial objects are allocated, we can start allocating other
+  // objects where the order matters less.
 
 #define ALLOCATE_PARTIAL_MAP(instance_type, size, field_name)                \
   {                                                                          \
@@ -360,8 +471,6 @@ bool Heap::CreateEarlyReadOnlyMaps() {
     ALLOCATE_PARTIAL_MAP(DESCRIPTOR_ARRAY_TYPE, kVariableSizeSentinel,
                          descriptor_array)
 
-    ALLOCATE_PARTIAL_MAP(ODDBALL_TYPE, Oddball::kSize, undefined);
-    ALLOCATE_PARTIAL_MAP(ODDBALL_TYPE, Oddball::kSize, null);
     ALLOCATE_PARTIAL_MAP(HOLE_TYPE, Hole::kSize, hole);
 
     // Some struct maps which we need for later dependencies
@@ -371,8 +480,8 @@ bool Heap::CreateEarlyReadOnlyMaps() {
       if (!AllocatePartialMap(entry.type, entry.size).To(&map)) return false;
       roots_table()[entry.index] = map.ptr();
     }
-#undef ALLOCATE_PARTIAL_MAP
   }
+#undef ALLOCATE_PARTIAL_MAP
 
   {
     AllocationResult alloc =
@@ -404,21 +513,6 @@ bool Heap::CreateEarlyReadOnlyMaps() {
   }
   set_empty_weak_array_list(WeakArrayList::cast(obj));
 
-  {
-    AllocationResult allocation =
-        Allocate(roots.null_map_handle(), AllocationType::kReadOnly);
-    if (!allocation.To(&obj)) return false;
-  }
-  set_null_value(Null::unchecked_cast(obj));
-  Oddball::cast(obj)->set_kind(Oddball::kNull);
-
-  {
-    AllocationResult allocation =
-        Allocate(roots.undefined_map_handle(), AllocationType::kReadOnly);
-    if (!allocation.To(&obj)) return false;
-  }
-  set_undefined_value(Undefined::unchecked_cast(obj));
-  Oddball::cast(obj)->set_kind(Oddball::kUndefined);
   DCHECK(!InYoungGeneration(roots.undefined_value()));
   {
     AllocationResult allocation =
@@ -428,7 +522,7 @@ bool Heap::CreateEarlyReadOnlyMaps() {
   set_the_hole_value(Hole::cast(obj));
 
   // Set preliminary exception sentinel value before actually initializing it.
-  set_exception(roots.null_value());
+  set_exception(Hole::cast(obj));
 
   // Allocate the empty enum cache.
   {
@@ -463,9 +557,14 @@ bool Heap::CreateEarlyReadOnlyMaps() {
   roots.undefined_map()->set_is_undetectable(true);
   FinalizePartialMap(roots.null_map());
   roots.null_map()->set_is_undetectable(true);
+  FinalizePartialMap(roots.boolean_map());
   FinalizePartialMap(roots.hole_map());
+  FinalizePartialMap(roots.symbol_map());
   for (const StructInit& entry : kStructTable) {
     if (!is_important_struct(entry.type)) continue;
+    FinalizePartialMap(Map::cast(roots.object_at(entry.index)));
+  }
+  for (const StringTypeInit& entry : kStringTypeTable) {
     FinalizePartialMap(Map::cast(roots.object_at(entry.index)));
   }
 
@@ -496,38 +595,14 @@ bool Heap::CreateEarlyReadOnlyMaps() {
     ALLOCATE_VARSIZE_MAP(CLOSURE_FEEDBACK_CELL_ARRAY_TYPE,
                          closure_feedback_cell_array)
     ALLOCATE_VARSIZE_MAP(FEEDBACK_VECTOR_TYPE, feedback_vector)
+
+    // Keep HeapNumber and BigInt maps together for cheaper numerics checks.
     ALLOCATE_PRIMITIVE_MAP(HEAP_NUMBER_TYPE, HeapNumber::kSize, heap_number,
                            Context::NUMBER_FUNCTION_INDEX)
-    ALLOCATE_MAP(FOREIGN_TYPE, Foreign::kSize, foreign)
-    ALLOCATE_MAP(MEGA_DOM_HANDLER_TYPE, MegaDomHandler::kSize, mega_dom_handler)
-
-    ALLOCATE_PRIMITIVE_MAP(ODDBALL_TYPE, Oddball::kSize, boolean,
-                           Context::BOOLEAN_FUNCTION_INDEX);
-    ALLOCATE_MAP(ODDBALL_TYPE, Oddball::kSize, uninitialized);
-    ALLOCATE_MAP(ODDBALL_TYPE, Oddball::kSize, arguments_marker);
-    ALLOCATE_MAP(ODDBALL_TYPE, Oddball::kSize, exception);
-    ALLOCATE_MAP(ODDBALL_TYPE, Oddball::kSize, termination_exception);
-    ALLOCATE_MAP(ODDBALL_TYPE, Oddball::kSize, optimized_out);
-    ALLOCATE_MAP(ODDBALL_TYPE, Oddball::kSize, stale_register);
-    ALLOCATE_MAP(ODDBALL_TYPE, Oddball::kSize, self_reference_marker);
-    ALLOCATE_MAP(ODDBALL_TYPE, Oddball::kSize, basic_block_counters_marker);
     ALLOCATE_VARSIZE_MAP(BIGINT_TYPE, bigint);
 
-    ALLOCATE_PRIMITIVE_MAP(SYMBOL_TYPE, Symbol::kSize, symbol,
-                           Context::SYMBOL_FUNCTION_INDEX)
-
-    for (const StringTypeInit& entry : kStringTypeTable) {
-      Tagged<Map> map;
-      if (!AllocateMap(AllocationType::kReadOnly, entry.type, entry.size)
-               .To(&map)) {
-        return false;
-      }
-      map->SetConstructorFunctionIndex(Context::STRING_FUNCTION_INDEX);
-      // Mark cons string maps as unstable, because their objects can change
-      // maps during GC.
-      if (StringShape(entry.type).IsCons()) map->mark_unstable();
-      roots_table()[entry.index] = map.ptr();
-    }
+    ALLOCATE_MAP(FOREIGN_TYPE, Foreign::kSize, foreign)
+    ALLOCATE_MAP(MEGA_DOM_HANDLER_TYPE, MegaDomHandler::kSize, mega_dom_handler)
 
     ALLOCATE_VARSIZE_MAP(FIXED_DOUBLE_ARRAY_TYPE, fixed_double_array)
     roots.fixed_double_array_map()->set_elements_kind(HOLEY_DOUBLE_ELEMENTS);
@@ -581,7 +656,7 @@ bool Heap::CreateEarlyReadOnlyMaps() {
 
     ALLOCATE_VARSIZE_MAP(REGISTERED_SYMBOL_TABLE_TYPE, registered_symbol_table)
 
-    ALLOCATE_VARSIZE_MAP(FIXED_ARRAY_TYPE, array_list)
+    ALLOCATE_VARSIZE_MAP(ARRAY_LIST_TYPE, array_list)
 
     ALLOCATE_MAP(ACCESSOR_INFO_TYPE, AccessorInfo::kSize, accessor_info)
 
@@ -637,6 +712,7 @@ bool Heap::CreateLateReadOnlyNonJSReceiverMaps() {
                          object_boilerplate_description)
 
     ALLOCATE_VARSIZE_MAP(COVERAGE_INFO_TYPE, coverage_info);
+    ALLOCATE_VARSIZE_MAP(REG_EXP_MATCH_INFO_TYPE, regexp_match_info);
 
     ALLOCATE_MAP(CALL_HANDLER_INFO_TYPE, CallHandlerInfo::kSize,
                  side_effect_call_handler_info)
@@ -753,25 +829,7 @@ bool Heap::CreateImportantReadOnlyObjects() {
   // Allocate some objects early to get addresses to fit as arm64 immediates.
   Tagged<HeapObject> obj;
   ReadOnlyRoots roots(isolate());
-
-  // Bools
-
   HandleScope initial_objects_handle_scope(isolate());
-  {
-    AllocationResult allocation =
-        Allocate(roots.boolean_map_handle(), AllocationType::kReadOnly);
-    if (!allocation.To(&obj)) return false;
-  }
-  set_true_value(True::unchecked_cast(obj));
-  Oddball::cast(obj)->set_kind(Oddball::kTrue);
-
-  {
-    AllocationResult allocation =
-        Allocate(roots.boolean_map_handle(), AllocationType::kReadOnly);
-    if (!allocation.To(&obj)) return false;
-  }
-  set_false_value(False::unchecked_cast(obj));
-  Oddball::cast(obj)->set_kind(Oddball::kFalse);
 
   // Hash seed for strings
 
@@ -781,8 +839,14 @@ bool Heap::CreateImportantReadOnlyObjects() {
 
   // Important strings and symbols
   for (const ConstantStringInit& entry : kImportantConstantStringTable) {
-    Handle<String> str = factory->InternalizeUtf8String(entry.contents);
-    roots_table()[entry.index] = str->ptr();
+    if (entry.index == RootIndex::kempty_string) {
+      // Special case the empty string, since it's allocated and initialised in
+      // the initial section.
+      isolate()->string_table()->InsertEmptyStringForBootstrapping(isolate());
+    } else {
+      Handle<String> str = factory->InternalizeUtf8String(entry.contents);
+      roots_table()[entry.index] = str->ptr();
+    }
   }
 
   {
@@ -810,8 +874,10 @@ bool Heap::CreateImportantReadOnlyObjects() {
   set_empty_ordered_property_dictionary(*empty_ordered_property_dictionary);
 
   {
-    if (!AllocateRaw(ByteArray::SizeFor(0), AllocationType::kReadOnly).To(&obj))
+    if (!AllocateRaw(ByteArray::SizeFor(0), AllocationType::kReadOnly)
+             .To(&obj)) {
       return false;
+    }
     obj->set_map_after_allocation(roots.byte_array_map(), SKIP_WRITE_BARRIER);
     ByteArray::cast(obj)->set_length(0);
     set_empty_byte_array(ByteArray::cast(obj));
@@ -878,29 +944,27 @@ bool Heap::CreateReadOnlyObjects() {
   ReadOnlyRoots roots(this);
   Tagged<HeapObject> obj;
 
-  // Empty elements
   {
-    AllocationResult alloc = AllocateRaw(
-        ArrayList::SizeFor(ArrayList::kFirstIndex), AllocationType::kReadOnly);
+    AllocationResult alloc =
+        AllocateRaw(ArrayList::SizeFor(0), AllocationType::kReadOnly);
     if (!alloc.To(&obj)) return false;
     obj->set_map_after_allocation(roots.array_list_map(), SKIP_WRITE_BARRIER);
     // Unchecked to skip failing checks since required roots are uninitialized.
-    ArrayList::unchecked_cast(obj)->set_length(ArrayList::kFirstIndex);
-    ArrayList::unchecked_cast(obj)->SetLength(0);
+    ArrayList::unchecked_cast(obj)->set_capacity(0);
+    ArrayList::unchecked_cast(obj)->set_length(0);
   }
   set_empty_array_list(ArrayList::unchecked_cast(obj));
 
   {
-    // Empty boilerplate needs a field for literal_flags
-    AllocationResult alloc =
-        AllocateRaw(FixedArray::SizeFor(1), AllocationType::kReadOnly);
+    AllocationResult alloc = AllocateRaw(
+        ObjectBoilerplateDescription::SizeFor(0), AllocationType::kReadOnly);
     if (!alloc.To(&obj)) return false;
     obj->set_map_after_allocation(roots.object_boilerplate_description_map(),
                                   SKIP_WRITE_BARRIER);
 
-    FixedArray::cast(obj)->set_length(1);
-    FixedArray::cast(obj)->set(ObjectBoilerplateDescription::kLiteralTypeOffset,
-                               Smi::zero());
+    ObjectBoilerplateDescription::cast(obj)->set_capacity(0);
+    ObjectBoilerplateDescription::cast(obj)->set_backing_store_size(0);
+    ObjectBoilerplateDescription::cast(obj)->set_flags(0);
   }
   set_empty_object_boilerplate_description(
       ObjectBoilerplateDescription::cast(obj));
@@ -922,13 +986,14 @@ bool Heap::CreateReadOnlyObjects() {
 
   // Empty arrays.
   {
-    if (!AllocateRaw(FixedArray::SizeFor(0), AllocationType::kReadOnly)
+    if (!AllocateRaw(ClosureFeedbackCellArray::SizeFor(0),
+                     AllocationType::kReadOnly)
              .To(&obj)) {
       return false;
     }
     obj->set_map_after_allocation(roots.closure_feedback_cell_array_map(),
                                   SKIP_WRITE_BARRIER);
-    FixedArray::cast(obj)->set_length(0);
+    ClosureFeedbackCellArray::cast(obj)->set_length(0);
     set_empty_closure_feedback_cell_array(ClosureFeedbackCellArray::cast(obj));
   }
 
@@ -984,40 +1049,17 @@ bool Heap::CreateReadOnlyObjects() {
                    factory->hole_nan_value());
 
   set_property_cell_hole_value(*factory->NewHole());
-
   set_hash_table_hole_value(*factory->NewHole());
-
-  set_uninitialized_value(
-      *factory->NewOddball(factory->uninitialized_map(), "uninitialized",
-                           handle(Smi::FromInt(-1), isolate()), "undefined",
-                           Oddball::kUninitialized));
-
-  set_arguments_marker(
-      *factory->NewOddball(factory->arguments_marker_map(), "arguments_marker",
-                           handle(Smi::FromInt(-4), isolate()), "undefined",
-                           Oddball::kArgumentsMarker));
-
-  set_termination_exception(*factory->NewOddball(
-      factory->termination_exception_map(), "termination_exception",
-      handle(Smi::FromInt(-3), isolate()), "undefined", Oddball::kOther));
-
-  set_exception(*factory->NewOddball(factory->exception_map(), "exception",
-                                     handle(Smi::FromInt(-5), isolate()),
-                                     "undefined", Oddball::kException));
-
-  set_optimized_out(*factory->NewOddball(factory->optimized_out_map(),
-                                         "optimized_out",
-                                         handle(Smi::FromInt(-6), isolate()),
-                                         "undefined", Oddball::kOptimizedOut));
-
-  set_stale_register(
-      *factory->NewOddball(factory->stale_register_map(), "stale_register",
-                           handle(Smi::FromInt(-7), isolate()), "undefined",
-                           Oddball::kStaleRegister));
+  set_uninitialized_value(*factory->NewHole());
+  set_arguments_marker(*factory->NewHole());
+  set_termination_exception(*factory->NewHole());
+  set_exception(*factory->NewHole());
+  set_optimized_out(*factory->NewHole());
+  set_stale_register(*factory->NewHole());
 
   // Initialize marker objects used during compilation.
-  set_self_reference_marker(*factory->NewSelfReferenceMarker());
-  set_basic_block_counters_marker(*factory->NewBasicBlockCountersMarker());
+  set_self_reference_marker(*factory->NewHole());
+  set_basic_block_counters_marker(*factory->NewHole());
 
   {
     HandleScope handle_scope(isolate());
@@ -1206,7 +1248,7 @@ bool Heap::CreateReadOnlyObjects() {
 
 void Heap::CreateMutableApiObjects() {
   HandleScope scope(isolate());
-  set_message_listeners(*ArrayList::New(isolate(), 2));
+  set_message_listeners(*ArrayList::New(isolate(), 2, AllocationType::kOld));
 }
 
 void Heap::CreateReadOnlyApiObjects() {
@@ -1290,6 +1332,7 @@ void Heap::CreateInitialMutableObjects() {
   set_no_elements_protector(*factory->NewProtector());
   set_mega_dom_protector(*factory->NewProtector());
   set_no_profiling_protector(*factory->NewProtector());
+  set_no_undetectable_objects_protector(*factory->NewProtector());
   set_promise_hook_protector(*factory->NewProtector());
   set_promise_resolve_protector(*factory->NewProtector());
   set_promise_species_protector(*factory->NewProtector());
@@ -1468,12 +1511,20 @@ void Heap::CreateInitialMutableObjects() {
   // Array.fromAsync:
   {
     Handle<SharedFunctionInfo> info = CreateSharedFunctionInfo(
-        isolate_, Builtin::kArrayFromAsyncOnFulfilled, 0);
-    set_array_from_async_on_fulfilled_shared_fun(*info);
+        isolate_, Builtin::kArrayFromAsyncIterableOnFulfilled, 0);
+    set_array_from_async_iterable_on_fulfilled_shared_fun(*info);
 
-    info = CreateSharedFunctionInfo(isolate_,
-                                    Builtin::kArrayFromAsyncOnRejected, 0);
-    set_array_from_async_on_rejected_shared_fun(*info);
+    info = CreateSharedFunctionInfo(
+        isolate_, Builtin::kArrayFromAsyncIterableOnRejected, 0);
+    set_array_from_async_iterable_on_rejected_shared_fun(*info);
+
+    info = CreateSharedFunctionInfo(
+        isolate_, Builtin::kArrayFromAsyncArrayLikeOnFulfilled, 0);
+    set_array_from_async_array_like_on_fulfilled_shared_fun(*info);
+
+    info = CreateSharedFunctionInfo(
+        isolate_, Builtin::kArrayFromAsyncArrayLikeOnRejected, 0);
+    set_array_from_async_array_like_on_rejected_shared_fun(*info);
   }
 }
 

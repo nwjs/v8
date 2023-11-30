@@ -4,11 +4,6 @@
 
 #include "src/baseline/baseline-batch-compiler.h"
 
-// TODO(v8:11421): Remove #if once baseline compiler is ported to other
-// architectures.
-#include "src/flags/flags.h"
-#if ENABLE_SPARKPLUG
-
 #include <algorithm>
 
 #include "src/baseline/baseline-compiler.h"
@@ -104,9 +99,9 @@ class BaselineBatchCompilerJob {
     handles_ = isolate->NewPersistentHandles();
     tasks_.reserve(batch_size);
     for (int i = 0; i < batch_size; i++) {
-      MaybeObject maybe_sfi = task_queue->Get(i);
+      MaybeObject maybe_sfi = task_queue->get(i);
       // TODO(victorgomes): Do I need to clear the value?
-      task_queue->Set(i, HeapObjectReference::ClearedValue(isolate));
+      task_queue->set(i, HeapObjectReference::ClearedValue(isolate));
       Tagged<HeapObject> obj;
       // Skip functions where weak reference is no longer valid.
       if (!maybe_sfi.GetHeapObjectIfWeak(&obj)) continue;
@@ -283,7 +278,7 @@ void BaselineBatchCompiler::EnqueueSFI(Tagged<SharedFunctionInfo> shared) {
 
 void BaselineBatchCompiler::Enqueue(Handle<SharedFunctionInfo> shared) {
   EnsureQueueCapacity();
-  compilation_queue_->Set(last_index_++, HeapObjectReference::Weak(*shared));
+  compilation_queue_->set(last_index_++, HeapObjectReference::Weak(*shared));
 }
 
 void BaselineBatchCompiler::InstallBatch() {
@@ -315,9 +310,9 @@ void BaselineBatchCompiler::CompileBatch(Handle<JSFunction> function) {
                               &is_compiled_scope);
   }
   for (int i = 0; i < last_index_; i++) {
-    MaybeObject maybe_sfi = compilation_queue_->Get(i);
+    MaybeObject maybe_sfi = compilation_queue_->get(i);
     MaybeCompileFunction(maybe_sfi);
-    compilation_queue_->Set(i, HeapObjectReference::ClearedValue(isolate_));
+    compilation_queue_->set(i, HeapObjectReference::ClearedValue(isolate_));
   }
   ClearBatch();
 }
@@ -390,41 +385,3 @@ void BaselineBatchCompiler::ClearBatch() {
 }  // namespace baseline
 }  // namespace internal
 }  // namespace v8
-
-#else
-
-namespace v8 {
-namespace internal {
-namespace baseline {
-
-class ConcurrentBaselineCompiler {};
-
-BaselineBatchCompiler::BaselineBatchCompiler(Isolate* isolate)
-    : isolate_(isolate),
-      compilation_queue_(Handle<WeakFixedArray>::null()),
-      last_index_(0),
-      estimated_instruction_size_(0),
-      enabled_(false) {}
-
-BaselineBatchCompiler::~BaselineBatchCompiler() {
-  if (!compilation_queue_.is_null()) {
-    GlobalHandles::Destroy(compilation_queue_.location());
-    compilation_queue_ = Handle<WeakFixedArray>::null();
-  }
-}
-
-void BaselineBatchCompiler::InstallBatch() { UNREACHABLE(); }
-
-void BaselineBatchCompiler::EnqueueFunction(Handle<JSFunction> function) {
-  UNREACHABLE();
-}
-
-void BaselineBatchCompiler::EnqueueSFI(SharedFunctionInfo shared) {
-  UNREACHABLE();
-}
-
-}  // namespace baseline
-}  // namespace internal
-}  // namespace v8
-
-#endif

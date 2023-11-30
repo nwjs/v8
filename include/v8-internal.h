@@ -10,9 +10,11 @@
 #include <string.h>
 
 #include <atomic>
+#include <iterator>
+#include <memory>
 #include <type_traits>
 
-#include "v8config.h"    // NOLINT(build/include_directory)
+#include "v8config.h"  // NOLINT(build/include_directory)
 
 namespace v8 {
 
@@ -23,6 +25,7 @@ class Isolate;
 
 namespace internal {
 
+class Heap;
 class Isolate;
 
 typedef uintptr_t Address;
@@ -487,63 +490,87 @@ PER_ISOLATE_EXTERNAL_POINTER_TAGS(CHECK_NON_SHARED_EXTERNAL_POINTER_TAGS)
 // HeapObjects that live outside of the sandbox (but are still managed by V8's
 // garbage collector). When object A references an object B through an indirect
 // pointer, object A will contain a IndirectPointerHandle, i.e. a shifted
-// 32-bit index, which identifies an entry in a pointer table (generally an
-// indirect pointer table, or the code pointer table if it is a Code object).
-// This table entry then contains the actual pointer to object B. Further,
-// object B owns this pointer table entry, and it is responsible for updating
-// the "self-pointer" in the entry when it is relocated in memory. This way, in
-// contrast to "normal" pointers, indirect pointers never need to be tracked by
-// the GC (i.e. there is no remembered set for them).
+// 32-bit index, which identifies an entry in a pointer table (either the
+// trusted pointer table for TrustedObjects, or the code pointer table if it is
+// a Code object). This table entry then contains the actual pointer to object
+// B. Further, object B owns this pointer table entry, and it is responsible
+// for updating the "self-pointer" in the entry when it is relocated in memory.
+// This way, in contrast to "normal" pointers, indirect pointers never need to
+// be tracked by the GC (i.e. there is no remembered set for them).
+// These pointers do not exist when the sandbox is disabled.
 
 // An IndirectPointerHandle represents a 32-bit index into a pointer table.
 using IndirectPointerHandle = uint32_t;
 
-// The size of the virtual memory reservation for the indirect pointer table.
-// As with the external pointer table, a maximum table size in combination with
-// shifted indices allows omitting bounds checks.
-constexpr size_t kIndirectPointerTableReservationSize = 8 * MB;
-
-// The indirect pointer handles are stores shifted to the left by this amount
-// to guarantee that they are smaller than the maximum table size.
-constexpr uint32_t kIndirectPointerHandleShift = 12;
-
 // A null handle always references an entry that contains nullptr.
 constexpr IndirectPointerHandle kNullIndirectPointerHandle = 0;
 
-// The maximum number of entries in an indirect pointer table.
-constexpr int kIndirectPointerTableEntrySize = 8;
-constexpr int kIndirectPointerTableEntrySizeLog2 = 3;
-constexpr size_t kMaxIndirectPointers =
-    kIndirectPointerTableReservationSize / kIndirectPointerTableEntrySize;
-static_assert((1 << (32 - kIndirectPointerHandleShift)) == kMaxIndirectPointers,
-              "kIndirectPointerTableReservationSize and "
-              "kIndirectPointerHandleShift don't match");
+// When the sandbox is enabled, indirect pointers are used to implement:
+// - TrustedPointers: an indirect pointer using the trusted pointer table (TPT)
+//   and referencing a TrustedObject in one of the trusted heap spaces.
+// - CodePointers, an indirect pointer using the code pointer table (CPT) and
+//   referencing a Code object together with its instruction stream.
+
+//
+// Trusted Pointers.
+//
+// A pointer to a TrustedObject.
+// When the sandbox is enabled, these are indirect pointers using the trusted
+// pointer table (TPT). They are used to reference trusted objects (located in
+// one of V8's trusted heap spaces, outside of the sandbox) from inside the
+// sandbox in a memory-safe way. When the sandbox is disabled, these are
+// regular tagged pointers.
+using TrustedPointerHandle = IndirectPointerHandle;
+
+// The size of the virtual memory reservation for the trusted pointer table.
+// As with the external pointer table, a maximum table size in combination with
+// shifted indices allows omitting bounds checks.
+constexpr size_t kTrustedPointerTableReservationSize = 64 * MB;
+
+// The trusted pointer handles are stores shifted to the left by this amount
+// to guarantee that they are smaller than the maximum table size.
+constexpr uint32_t kTrustedPointerHandleShift = 9;
+
+// A null handle always references an entry that contains nullptr.
+constexpr TrustedPointerHandle kNullTrustedPointerHandle =
+    kNullIndirectPointerHandle;
+
+// The maximum number of entries in an trusted pointer table.
+constexpr int kTrustedPointerTableEntrySize = 8;
+constexpr int kTrustedPointerTableEntrySizeLog2 = 3;
+constexpr size_t kMaxTrustedPointers =
+    kTrustedPointerTableReservationSize / kTrustedPointerTableEntrySize;
+static_assert((1 << (32 - kTrustedPointerHandleShift)) == kMaxTrustedPointers,
+              "kTrustedPointerTableReservationSize and "
+              "kTrustedPointerHandleShift don't match");
 
 //
 // Code Pointers.
 //
-// When the sandbox is enabled, Code objects are referenced from inside the
-// sandbox through indirect pointers that reference entries in the code pointer
-// table (CPT) instead of the indirect pointer table (IPT). Each entry in the
-// CPT contains both a pointer to a Code object as well as a pointer to the
-// Code's entrypoint. This allows calling/jumping into Code with one fewer
-// memory access (compared to the case where the entrypoint pointer needs to be
-// loaded from the Code object). As such, a CodePointerHandle can be used both
-// to obtain the referenced Code object and to directly load its entrypoint
-// pointer.
+// A pointer to a Code object.
+// Essentially a specialized version of a trusted pointer that (when the
+// sandbox is enabled) uses the code pointer table (CPT) instead of the TPT.
+// Each entry in the CPT contains both a pointer to a Code object as well as a
+// pointer to the Code's entrypoint. This allows calling/jumping into Code with
+// one fewer memory access (compared to the case where the entrypoint pointer
+// first needs to be loaded from the Code object). As such, a CodePointerHandle
+// can be used both to obtain the referenced Code object and to directly load
+// its entrypoint.
+//
+// When the sandbox is disabled, these are regular tagged pointers.
 using CodePointerHandle = IndirectPointerHandle;
 
 // The size of the virtual memory reservation for the code pointer table.
 // As with the other tables, a maximum table size in combination with shifted
 // indices allows omitting bounds checks.
-constexpr size_t kCodePointerTableReservationSize = 1 * GB;
+constexpr size_t kCodePointerTableReservationSize = 16 * MB;
 
 // Code pointer handles are shifted by a different amount than indirect pointer
 // handles as the tables have a different maximum size.
-constexpr uint32_t kCodePointerHandleShift = 6;
+constexpr uint32_t kCodePointerHandleShift = 12;
 
 // A null handle always references an entry that contains nullptr.
-constexpr CodePointerHandle kNullCodePointerHandle = 0;
+constexpr CodePointerHandle kNullCodePointerHandle = kNullIndirectPointerHandle;
 
 // The maximum number of entries in a code pointer table.
 constexpr int kCodePointerTableEntrySize = 16;
@@ -611,11 +638,11 @@ class Internals {
   static const int kHandleScopeDataSize =
       2 * kApiSystemPointerSize + 2 * kApiInt32Size;
 
-  // ExternalPointerTable and IndirectPointerTable layout guarantees.
+  // ExternalPointerTable and TrustedPointerTable layout guarantees.
   static const int kExternalPointerTableBasePointerOffset = 0;
   static const int kExternalPointerTableSize = 2 * kApiSystemPointerSize;
-  static const int kIndirectPointerTableSize = 2 * kApiSystemPointerSize;
-  static const int kIndirectPointerTableBasePointerOffset = 0;
+  static const int kTrustedPointerTableSize = 2 * kApiSystemPointerSize;
+  static const int kTrustedPointerTableBasePointerOffset = 0;
 
   // IsolateData layout guarantees.
   static const int kIsolateCageBaseOffset = 0;
@@ -650,10 +677,10 @@ class Internals {
       kIsolateEmbedderDataOffset + kNumIsolateDataSlots * kApiSystemPointerSize;
   static const int kIsolateSharedExternalPointerTableAddressOffset =
       kIsolateExternalPointerTableOffset + kExternalPointerTableSize;
-  static const int kIsolateIndirectPointerTableOffset =
+  static const int kIsolateTrustedPointerTableOffset =
       kIsolateSharedExternalPointerTableAddressOffset + kApiSystemPointerSize;
   static const int kIsolateApiCallbackThunkArgumentOffset =
-      kIsolateIndirectPointerTableOffset + kIndirectPointerTableSize;
+      kIsolateTrustedPointerTableOffset + kTrustedPointerTableSize;
 #else
   static const int kIsolateApiCallbackThunkArgumentOffset =
       kIsolateEmbedderDataOffset + kNumIsolateDataSlots * kApiSystemPointerSize;
@@ -706,7 +733,7 @@ class Internals {
   static const int kFirstJSApiObjectType = 0x422;
   static const int kLastJSApiObjectType = 0x80A;
 
-  static const int kUndefinedOddballKind = 5;
+  static const int kUndefinedOddballKind = 4;
   static const int kNullOddballKind = 3;
 
   // Constants used by PropertyCallbackInfo to check if we should throw when an
@@ -1005,6 +1032,211 @@ class BackingStoreBase {};
 // The maximum value in enum GarbageCollectionReason, defined in heap.h.
 // This is needed for histograms sampling garbage collection reasons.
 constexpr int kGarbageCollectionReasonMaxValue = 27;
+
+// Base class for the address block allocator compatible with standard
+// containers, which registers its allocated range as strong roots.
+class V8_EXPORT StrongRootAllocatorBase {
+ public:
+  Heap* heap() const { return heap_; }
+
+  bool operator==(const StrongRootAllocatorBase& other) const {
+    return heap_ == other.heap_;
+  }
+  bool operator!=(const StrongRootAllocatorBase& other) const {
+    return heap_ != other.heap_;
+  }
+
+ protected:
+  explicit StrongRootAllocatorBase(Heap* heap) : heap_(heap) {}
+  explicit StrongRootAllocatorBase(v8::Isolate* isolate);
+
+  // Allocate/deallocate a range of n elements of type internal::Address.
+  Address* allocate_impl(size_t n);
+  void deallocate_impl(Address* p, size_t n) noexcept;
+
+ private:
+  Heap* heap_;
+};
+
+// The general version of this template behaves just as std::allocator, with
+// the exception that the constructor takes the isolate as parameter. Only
+// specialized versions, e.g., internal::StrongRootAllocator<internal::Address>
+// and internal::StrongRootAllocator<v8::Local<T>> register the allocated range
+// as strong roots.
+template <typename T>
+class StrongRootAllocator : public StrongRootAllocatorBase,
+                            private std::allocator<T> {
+ public:
+  using value_type = T;
+
+  explicit StrongRootAllocator(Heap* heap) : StrongRootAllocatorBase(heap) {}
+  explicit StrongRootAllocator(v8::Isolate* isolate)
+      : StrongRootAllocatorBase(isolate) {}
+  template <typename U>
+  StrongRootAllocator(const StrongRootAllocator<U>& other) noexcept
+      : StrongRootAllocatorBase(other) {}
+
+  using std::allocator<T>::allocate;
+  using std::allocator<T>::deallocate;
+};
+
+// A class of iterators that wrap some different iterator type.
+// If specified, ElementType is the type of element accessed by the wrapper
+// iterator; in this case, the actual reference and pointer types of Iterator
+// must be convertible to ElementType& and ElementType*, respectively.
+template <typename Iterator, typename ElementType = void>
+class WrappedIterator {
+ public:
+  static_assert(
+      !std::is_void_v<ElementType> ||
+      (std::is_convertible_v<typename std::iterator_traits<Iterator>::pointer,
+                             ElementType*> &&
+       std::is_convertible_v<typename std::iterator_traits<Iterator>::reference,
+                             ElementType&>));
+
+  using iterator_category =
+      typename std::iterator_traits<Iterator>::iterator_category;
+  using difference_type =
+      typename std::iterator_traits<Iterator>::difference_type;
+  using value_type =
+      std::conditional_t<std::is_void_v<ElementType>,
+                         typename std::iterator_traits<Iterator>::value_type,
+                         ElementType>;
+  using pointer =
+      std::conditional_t<std::is_void_v<ElementType>,
+                         typename std::iterator_traits<Iterator>::pointer,
+                         ElementType*>;
+  using reference =
+      std::conditional_t<std::is_void_v<ElementType>,
+                         typename std::iterator_traits<Iterator>::reference,
+                         ElementType&>;
+
+  constexpr WrappedIterator() noexcept : it_() {}
+  constexpr explicit WrappedIterator(Iterator it) noexcept : it_(it) {}
+
+  template <typename OtherIterator, typename OtherElementType,
+            std::enable_if_t<std::is_convertible_v<OtherIterator, Iterator>,
+                             bool> = true>
+  constexpr WrappedIterator(
+      const WrappedIterator<OtherIterator, OtherElementType>& it) noexcept
+      : it_(it.base()) {}
+
+  constexpr reference operator*() const noexcept { return *it_; }
+  constexpr pointer operator->() const noexcept { return it_.operator->(); }
+
+  constexpr WrappedIterator& operator++() noexcept {
+    ++it_;
+    return *this;
+  }
+  constexpr WrappedIterator operator++(int) noexcept {
+    WrappedIterator result(*this);
+    ++(*this);
+    return result;
+  }
+
+  constexpr WrappedIterator& operator--() noexcept {
+    --it_;
+    return *this;
+  }
+  constexpr WrappedIterator operator--(int) noexcept {
+    WrappedIterator result(*this);
+    --(*this);
+    return result;
+  }
+  constexpr WrappedIterator operator+(difference_type n) const noexcept {
+    WrappedIterator result(*this);
+    result += n;
+    return result;
+  }
+  constexpr WrappedIterator& operator+=(difference_type n) noexcept {
+    it_ += n;
+    return *this;
+  }
+  constexpr WrappedIterator operator-(difference_type n) const noexcept {
+    return *this + (-n);
+  }
+  constexpr WrappedIterator& operator-=(difference_type n) noexcept {
+    *this += -n;
+    return *this;
+  }
+  constexpr reference operator[](difference_type n) const noexcept {
+    return it_[n];
+  }
+
+  constexpr Iterator base() const noexcept { return it_; }
+
+ private:
+  template <typename OtherIterator, typename OtherElementType>
+  friend class WrappedIterator;
+
+ private:
+  Iterator it_;
+};
+
+template <typename Iterator, typename ElementType, typename OtherIterator,
+          typename OtherElementType>
+constexpr bool operator==(
+    const WrappedIterator<Iterator, ElementType>& x,
+    const WrappedIterator<OtherIterator, OtherElementType>& y) noexcept {
+  return x.base() == y.base();
+}
+
+template <typename Iterator, typename ElementType, typename OtherIterator,
+          typename OtherElementType>
+constexpr bool operator<(
+    const WrappedIterator<Iterator, ElementType>& x,
+    const WrappedIterator<OtherIterator, OtherElementType>& y) noexcept {
+  return x.base() < y.base();
+}
+
+template <typename Iterator, typename ElementType, typename OtherIterator,
+          typename OtherElementType>
+constexpr bool operator!=(
+    const WrappedIterator<Iterator, ElementType>& x,
+    const WrappedIterator<OtherIterator, OtherElementType>& y) noexcept {
+  return !(x == y);
+}
+
+template <typename Iterator, typename ElementType, typename OtherIterator,
+          typename OtherElementType>
+constexpr bool operator>(
+    const WrappedIterator<Iterator, ElementType>& x,
+    const WrappedIterator<OtherIterator, OtherElementType>& y) noexcept {
+  return y < x;
+}
+
+template <typename Iterator, typename ElementType, typename OtherIterator,
+          typename OtherElementType>
+constexpr bool operator>=(
+    const WrappedIterator<Iterator, ElementType>& x,
+    const WrappedIterator<OtherIterator, OtherElementType>& y) noexcept {
+  return !(x < y);
+}
+
+template <typename Iterator, typename ElementType, typename OtherIterator,
+          typename OtherElementType>
+constexpr bool operator<=(
+    const WrappedIterator<Iterator, ElementType>& x,
+    const WrappedIterator<OtherIterator, OtherElementType>& y) noexcept {
+  return !(y < x);
+}
+
+template <typename Iterator, typename ElementType, typename OtherIterator,
+          typename OtherElementType>
+constexpr auto operator-(
+    const WrappedIterator<Iterator, ElementType>& x,
+    const WrappedIterator<OtherIterator, OtherElementType>& y) noexcept
+    -> decltype(x.base() - y.base()) {
+  return x.base() - y.base();
+}
+
+template <typename Iterator, typename ElementType>
+constexpr WrappedIterator<Iterator> operator+(
+    typename WrappedIterator<Iterator, ElementType>::difference_type n,
+    const WrappedIterator<Iterator, ElementType>& x) noexcept {
+  x += n;
+  return x;
+}
 
 }  // namespace internal
 }  // namespace v8

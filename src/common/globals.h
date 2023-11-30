@@ -154,8 +154,6 @@ namespace internal {
 #define ENABLE_CONTROL_FLOW_INTEGRITY_BOOL false
 #endif
 
-#define ENABLE_SPARKPLUG true
-
 #if V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_ARM64
 // Set stack limit lower for ARM and ARM64 than for other architectures because:
 //  - on Arm stack allocating MacroAssembler takes 120K bytes.
@@ -444,6 +442,10 @@ constexpr size_t kReservedCodeRangePages = 1;
 constexpr size_t kMinimumCodeRangeSize = 3 * MB;
 constexpr size_t kReservedCodeRangePages = 0;
 #endif
+
+// These constants define the total trusted space memory per process.
+constexpr size_t kMaximalTrustedRangeSize = 256 * MB;
+constexpr size_t kMinimumTrustedRangeSize = 3 * MB;
 
 #else  // V8_HOST_ARCH_64_BIT
 
@@ -932,6 +934,7 @@ class DirectHandle;
 #endif
 class TransitionArray;
 class ExternalReference;
+class ExposedTrustedObject;
 class FeedbackVector;
 class FixedArray;
 class Foreign;

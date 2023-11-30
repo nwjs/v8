@@ -322,13 +322,13 @@ bool DebugEvaluate::IsSideEffectFreeIntrinsic(Runtime::FunctionId id) {
   V(ToString)                            \
   /* Type checks */                      \
   V(IsArray)                             \
-  V(IsFunction)                          \
   V(IsJSProxy)                           \
   V(IsJSReceiver)                        \
   V(IsRegExp)                            \
   V(IsSmi)                               \
   /* Loads */                            \
   V(LoadLookupSlotForCall)               \
+  V(GetPrivateMember)                    \
   V(GetProperty)                         \
   /* Arrays */                           \
   V(ArraySpeciesConstructor)             \

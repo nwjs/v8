@@ -235,6 +235,9 @@ class IncrementalMarking::IncrementalMarkingRootMarkingVisitor final
  private:
   void MarkObjectByPointer(Root root, FullObjectSlot p) {
     Tagged<Object> object = *p;
+#ifdef V8_ENABLE_DIRECT_LOCAL
+    if (object.ptr() == kTaggedNullAddress) return;
+#endif
     if (!IsHeapObject(object)) return;
     DCHECK(!MapWord::IsPacked(object.ptr()));
     Tagged<HeapObject> heap_object = HeapObject::cast(object);
@@ -315,15 +318,6 @@ void IncrementalMarking::StartMarkingMajor() {
   heap_->external_pointer_space()->StartCompactingIfNeeded();
 #endif  // V8_COMPRESS_POINTERS
 
-  if (heap_->cpp_heap()) {
-    TRACE_GC(heap()->tracer(),
-             GCTracer::Scope::MC_INCREMENTAL_EMBEDDER_PROLOGUE);
-    // PrepareForTrace should be called before visitor initialization in
-    // StartMarking.
-    CppHeap::From(heap_->cpp_heap())
-        ->InitializeTracing(CppHeap::CollectionType::kMajor);
-  }
-
   major_collector_->StartMarking();
   current_local_marking_worklists_ =
       major_collector_->local_marking_worklists();
@@ -354,9 +348,8 @@ void IncrementalMarking::StartMarkingMajor() {
   if (heap()->cpp_heap()) {
     // StartTracing may call back into V8 in corner cases, requiring that
     // marking (including write barriers) is fully set up.
-    TRACE_GC(heap()->tracer(),
-             GCTracer::Scope::MC_INCREMENTAL_EMBEDDER_PROLOGUE);
-    CppHeap::From(heap()->cpp_heap())->StartTracing();
+    TRACE_GC(heap()->tracer(), GCTracer::Scope::MC_MARK_EMBEDDER_PROLOGUE);
+    CppHeap::From(heap()->cpp_heap())->StartMarking();
   }
 
   heap_->InvokeIncrementalMarkingEpilogueCallbacks();
@@ -409,16 +402,15 @@ void IncrementalMarking::StartBlackAllocation() {
   DCHECK(!black_allocation_);
   DCHECK(IsMajorMarking());
   black_allocation_ = true;
-  heap()->allocator()->MarkLinearAllocationAreaBlack();
+  heap()->allocator()->MarkLinearAllocationAreasBlack();
   if (isolate()->is_shared_space_isolate()) {
-    DCHECK(!heap()->shared_space()->main_allocator()->IsLabValid());
     isolate()->global_safepoint()->IterateSharedSpaceAndClientIsolates(
         [](Isolate* client) {
           client->heap()->MarkSharedLinearAllocationAreasBlack();
         });
   }
   heap()->safepoint()->IterateLocalHeaps([](LocalHeap* local_heap) {
-    local_heap->MarkLinearAllocationAreaBlack();
+    local_heap->MarkLinearAllocationAreasBlack();
   });
   if (v8_flags.trace_incremental_marking) {
     isolate()->PrintWithTimestamp(
@@ -428,16 +420,15 @@ void IncrementalMarking::StartBlackAllocation() {
 
 void IncrementalMarking::PauseBlackAllocation() {
   DCHECK(IsMajorMarking());
-  heap()->allocator()->UnmarkLinearAllocationArea();
+  heap()->allocator()->UnmarkLinearAllocationsArea();
   if (isolate()->is_shared_space_isolate()) {
-    DCHECK(!heap()->shared_space()->main_allocator()->IsLabValid());
     isolate()->global_safepoint()->IterateSharedSpaceAndClientIsolates(
         [](Isolate* client) {
           client->heap()->UnmarkSharedLinearAllocationAreas();
         });
   }
   heap()->safepoint()->IterateLocalHeaps(
-      [](LocalHeap* local_heap) { local_heap->UnmarkLinearAllocationArea(); });
+      [](LocalHeap* local_heap) { local_heap->UnmarkLinearAllocationsArea(); });
   if (v8_flags.trace_incremental_marking) {
     isolate()->PrintWithTimestamp(
         "[IncrementalMarking] Black allocation paused\n");
@@ -860,7 +851,7 @@ void IncrementalMarking::Step(v8::base::TimeDelta max_duration,
   if (step_origin == StepOrigin::kTask) {
     // We cannot publish the pending allocations for V8 step origin because the
     // last object was allocated before invoking the step.
-    heap()->PublishPendingAllocations();
+    heap()->PublishMainThreadPendingAllocations();
   }
 
   // Perform a single V8 and a single embedder step. In case both have been

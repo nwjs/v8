@@ -256,7 +256,7 @@ TNode<IntPtrT> CodeAssembler::IntPtrConstant(intptr_t value) {
 
 TNode<TaggedIndex> CodeAssembler::TaggedIndexConstant(intptr_t value) {
   DCHECK(TaggedIndex::IsValid(value));
-  return UncheckedCast<TaggedIndex>(raw_assembler()->IntPtrConstant(value));
+  return UncheckedCast<TaggedIndex>(jsgraph()->TaggedIndexConstant(value));
 }
 
 TNode<Number> CodeAssembler::NumberConstant(double value) {
@@ -268,7 +268,7 @@ TNode<Number> CodeAssembler::NumberConstant(double value) {
     // deferring allocation to code generation
     // (see AllocateAndInstallRequestedHeapNumbers) since that makes it easier
     // to generate constant lookups for embedded builtins.
-    return UncheckedCast<Number>(HeapConstant(
+    return UncheckedCast<Number>(HeapConstantNoHole(
         isolate()->factory()->NewHeapNumberForCodeAssembler(value)));
   }
 }
@@ -282,21 +282,37 @@ TNode<Smi> CodeAssembler::SmiConstant(int value) {
   return SmiConstant(Smi::FromInt(value));
 }
 
-TNode<HeapObject> CodeAssembler::UntypedHeapConstant(
+// This emits an untyped heap constant that is never a hole.
+TNode<HeapObject> CodeAssembler::UntypedHeapConstantNoHole(
     Handle<HeapObject> object) {
-  return UncheckedCast<HeapObject>(jsgraph()->HeapConstant(object));
+  // jsgraph()->HeapConstantNoHole does a CHECK that it is in fact a hole
+  // value.
+  return UncheckedCast<HeapObject>(jsgraph()->HeapConstantNoHole(object));
+}
+
+// This is used to emit untyped heap constants that can be a hole value.
+// Only use this if you really need to and cannot use *NoHole or *Hole.
+TNode<HeapObject> CodeAssembler::UntypedHeapConstantMaybeHole(
+    Handle<HeapObject> object) {
+  return UncheckedCast<HeapObject>(jsgraph()->HeapConstantMaybeHole(object));
+}
+
+// This is used to emit an untyped heap constant that can only be Hole values.
+TNode<HeapObject> CodeAssembler::UntypedHeapConstantHole(
+    Handle<HeapObject> object) {
+  return UncheckedCast<HeapObject>(jsgraph()->HeapConstantHole(object));
 }
 
 TNode<String> CodeAssembler::StringConstant(const char* str) {
   Handle<String> internalized_string =
       factory()->InternalizeString(base::OneByteVector(str));
-  return UncheckedCast<String>(HeapConstant(internalized_string));
+  return UncheckedCast<String>(HeapConstantNoHole(internalized_string));
 }
 
 TNode<Boolean> CodeAssembler::BooleanConstant(bool value) {
   Handle<Boolean> object = isolate()->factory()->ToBoolean(value);
   return UncheckedCast<Boolean>(
-      jsgraph()->HeapConstant(Handle<HeapObject>::cast(object)));
+      jsgraph()->HeapConstantNoHole(Handle<HeapObject>::cast(object)));
 }
 
 TNode<ExternalReference> CodeAssembler::ExternalConstant(
@@ -668,6 +684,10 @@ TNode<Int32T> CodeAssembler::TruncateFloat32ToInt32(TNode<Float32T> value) {
   return UncheckedCast<Int32T>(raw_assembler()->TruncateFloat32ToInt32(
       value, TruncateKind::kSetOverflowToMin));
 }
+TNode<Int64T> CodeAssembler::TruncateFloat64ToInt64(TNode<Float64T> value) {
+  return UncheckedCast<Int64T>(raw_assembler()->TruncateFloat64ToInt64(
+      value, TruncateKind::kSetOverflowToMin));
+}
 #define DEFINE_CODE_ASSEMBLER_UNARY_OP(name, ResType, ArgType) \
   TNode<ResType> CodeAssembler::name(TNode<ArgType> a) {       \
     return UncheckedCast<ResType>(raw_assembler()->name(a));   \
@@ -732,7 +752,7 @@ Node* CodeAssembler::PackMapWord(Node* value) {
 TNode<AnyTaggedT> CodeAssembler::LoadRootMapWord(RootIndex root_index) {
 #ifdef V8_MAP_PACKING
   Handle<Object> root = isolate()->root_handle(root_index);
-  Node* map = HeapConstant(Handle<Map>::cast(root));
+  Node* map = HeapConstantNoHole(Handle<Map>::cast(root));
   map = PackMapWord(map);
   return ReinterpretCast<AnyTaggedT>(map);
 #else
@@ -746,7 +766,7 @@ TNode<Object> CodeAssembler::LoadRoot(RootIndex root_index) {
     if (IsSmi(*root)) {
       return SmiConstant(Smi::cast(*root));
     } else {
-      return HeapConstant(Handle<HeapObject>::cast(root));
+      return HeapConstantMaybeHole(Handle<HeapObject>::cast(root));
     }
   }
 
@@ -1042,7 +1062,7 @@ Node* CodeAssembler::CallRuntimeImpl(
   int result_size = Runtime::FunctionForId(function)->result_size;
   bool switch_to_the_central_stack =
       Runtime::SwitchToTheCentralStackForTarget(function);
-  TNode<Code> centry = HeapConstant(CodeFactory::RuntimeCEntry(
+  TNode<Code> centry = HeapConstantNoHole(CodeFactory::RuntimeCEntry(
       isolate(), result_size, switch_to_the_central_stack));
   constexpr size_t kMaxNumArgs = 6;
   DCHECK_GE(kMaxNumArgs, args.size());
@@ -1077,7 +1097,7 @@ void CodeAssembler::TailCallRuntimeImpl(
   int result_size = Runtime::FunctionForId(function)->result_size;
   bool switch_to_the_central_stack =
       Runtime::SwitchToTheCentralStackForTarget(function);
-  TNode<Code> centry = HeapConstant(CodeFactory::RuntimeCEntry(
+  TNode<Code> centry = HeapConstantNoHole(CodeFactory::RuntimeCEntry(
       isolate(), result_size, switch_to_the_central_stack));
   constexpr size_t kMaxNumArgs = 6;
   DCHECK_GE(kMaxNumArgs, args.size());

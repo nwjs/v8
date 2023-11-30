@@ -50,27 +50,39 @@ class Debug::TemporaryObjectsTracker : public HeapObjectAllocationTracker {
   TemporaryObjectsTracker(const TemporaryObjectsTracker&) = delete;
   TemporaryObjectsTracker& operator=(const TemporaryObjectsTracker&) = delete;
 
-  void AllocationEvent(Address addr, int) override {
+  void AllocationEvent(Address addr, int size) override {
     if (disabled) return;
-    objects_.insert(addr);
+    auto existing_region = GetAllocationRegion(addr);
+    if (IsEmpty(existing_region)) {
+      AddAllocationRegion(addr, size);
+    } else {
+      // If we allocate into a region we already know (e.g. because part of the
+      // region is dead) we merge the new allocation into the existing one.
+      Address region_end = std::max(
+          existing_region->first + existing_region->second, addr + size);
+      existing_region->second =
+          static_cast<int>(region_end - existing_region->first);
+    }
   }
 
-  void MoveEvent(Address from, Address to, int) override {
+  void MoveEvent(Address from, Address to, int size) override {
     if (from == to) return;
     base::MutexGuard guard(&mutex_);
-    auto it = objects_.find(from);
-    if (it == objects_.end()) {
+    auto from_region = GetAllocationRegion(from);
+    auto to_region = GetAllocationRegion(to);
+    if (IsEmpty(from_region)) {
       // If temporary object was collected we can get MoveEvent which moves
       // existing non temporary object to the address where we had temporary
       // object. So we should mark new address as non temporary.
-      objects_.erase(to);
+      if (!IsEmpty(to_region)) RemoveFromAllocationRegion(to_region, to, size);
       return;
     }
-    objects_.erase(it);
-    objects_.insert(to);
+    RemoveFromAllocationRegion(from_region, from, size);
+    DCHECK(IsEmpty(to_region));
+    AddAllocationRegion(to, size);
   }
 
-  bool HasObject(Handle<HeapObject> obj) const {
+  bool HasObject(Handle<HeapObject> obj) {
     if (IsJSObject(*obj) &&
         Handle<JSObject>::cast(obj)->GetEmbedderFieldCount()) {
       // Embedder may store any pointers using embedder fields and implements
@@ -79,13 +91,60 @@ class Debug::TemporaryObjectsTracker : public HeapObjectAllocationTracker {
       // with embedder fields as non temporary.
       return false;
     }
-    return objects_.find(obj->address()) != objects_.end();
+    return !IsEmpty(GetAllocationRegion(obj->address()));
   }
 
   bool disabled = false;
 
  private:
-  std::unordered_set<Address> objects_;
+  using AllocationRegion = std::map<Address, int>::iterator;
+  bool IsEmpty(AllocationRegion region) const {
+    return region == allocations_.end();
+  }
+  void AddAllocationRegion(Address addr, int size) {
+    allocations_.emplace(addr, size);
+  }
+  AllocationRegion GetAllocationRegion(Address addr) {
+    if (allocations_.empty()) return allocations_.end();
+    auto it = allocations_.upper_bound(addr);
+    // {it} points to the first region after {addr}, if any.
+    if (it == allocations_.begin()) return allocations_.end();
+    // Consider the region before that as the one that contains the object at
+    // {addr}.
+    it = std::prev(it);
+    DCHECK_LE(it->first, addr);
+    return addr < (it->first + it->second) ? it : allocations_.end();
+  }
+  void RemoveFromAllocationRegion(AllocationRegion region, Address address,
+                                  int size) {
+    DCHECK_LE(region->first, address);
+    DCHECK_LE(address + size, region->first + region->second);
+
+    int region_size = region->second;
+    if (address == region->first) {
+      // Object is at the start of the allocated region.
+      allocations_.erase(region);
+      if (region_size > size) {
+        allocations_.emplace(address + size, region_size - size);
+      }
+    } else {
+      // Object is in the middle or end of the allocated region.
+      int region_before_object_size = static_cast<int>(address - region->first);
+      int region_after_object_size =
+          region_size - region_before_object_size - size;
+      region->second = region_before_object_size;
+      if (region_after_object_size > 0) {
+        allocations_.emplace(
+            region->first + region_size - region_after_object_size,
+            region_after_object_size);
+      }
+    }
+  }
+  // Tracking addresses is not enough, because a single allocation may combine
+  // multiple objects due to allocation folding. Track start address of an
+  // allocation and the size to figure out if a given object is contained in
+  // such an allocation block.
+  std::map<Address, int> allocations_;
   base::Mutex mutex_;
 };
 
@@ -148,7 +207,7 @@ MaybeHandle<FixedArray> Debug::CheckBreakPointsForLocations(
   *has_break_points = has_break_points_at_all;
   if (break_points_hit_count == 0) return {};
 
-  break_points_hit->Shrink(isolate_, break_points_hit_count);
+  break_points_hit->RightTrim(isolate_, break_points_hit_count);
   return break_points_hit;
 }
 
@@ -247,7 +306,7 @@ BreakIterator::BreakIterator(Handle<DebugInfo> debug_info)
     : debug_info_(debug_info),
       break_index_(-1),
       source_position_iterator_(
-          debug_info->DebugBytecodeArray()->SourcePositionTable()) {
+          debug_info->DebugBytecodeArray(isolate())->SourcePositionTable()) {
   position_ = debug_info->shared()->StartPosition();
   statement_position_ = position_;
   // There is at least one break location.
@@ -292,7 +351,8 @@ void BreakIterator::Next() {
 }
 
 DebugBreakType BreakIterator::GetDebugBreakType() {
-  Tagged<BytecodeArray> bytecode_array = debug_info_->OriginalBytecodeArray();
+  Tagged<BytecodeArray> bytecode_array =
+      debug_info_->OriginalBytecodeArray(isolate());
   interpreter::Bytecode bytecode =
       interpreter::Bytecodes::FromByte(bytecode_array->get(code_offset()));
 
@@ -331,8 +391,8 @@ void BreakIterator::SetDebugBreak() {
   if (debug_break_type == DEBUGGER_STATEMENT) return;
   HandleScope scope(isolate());
   DCHECK(debug_break_type >= DEBUG_BREAK_SLOT);
-  Handle<BytecodeArray> bytecode_array(debug_info_->DebugBytecodeArray(),
-                                       isolate());
+  Handle<BytecodeArray> bytecode_array(
+      debug_info_->DebugBytecodeArray(isolate()), isolate());
   interpreter::BytecodeArrayIterator(bytecode_array, code_offset())
       .ApplyDebugBreak();
 }
@@ -341,14 +401,17 @@ void BreakIterator::ClearDebugBreak() {
   DebugBreakType debug_break_type = GetDebugBreakType();
   if (debug_break_type == DEBUGGER_STATEMENT) return;
   DCHECK(debug_break_type >= DEBUG_BREAK_SLOT);
-  Tagged<BytecodeArray> bytecode_array = debug_info_->DebugBytecodeArray();
-  Tagged<BytecodeArray> original = debug_info_->OriginalBytecodeArray();
+  Tagged<BytecodeArray> bytecode_array =
+      debug_info_->DebugBytecodeArray(isolate());
+  Tagged<BytecodeArray> original =
+      debug_info_->OriginalBytecodeArray(isolate());
   bytecode_array->set(code_offset(), original->get(code_offset()));
 }
 
 BreakLocation BreakIterator::GetBreakLocation() {
   Handle<AbstractCode> code(
-      AbstractCode::cast(debug_info_->DebugBytecodeArray()), isolate());
+      AbstractCode::cast(debug_info_->DebugBytecodeArray(isolate())),
+      isolate());
   DebugBreakType type = GetDebugBreakType();
   int generator_object_reg_index = -1;
   int generator_suspend_id = -1;
@@ -358,7 +421,8 @@ BreakLocation BreakIterator::GetBreakLocation() {
     // index that holds the generator object by reading it directly off the
     // bytecode array, and we'll read the actual generator object off the
     // interpreter stack frame in GetGeneratorObjectForSuspendedFrame.
-    Tagged<BytecodeArray> bytecode_array = debug_info_->OriginalBytecodeArray();
+    Tagged<BytecodeArray> bytecode_array =
+        debug_info_->OriginalBytecodeArray(isolate());
     interpreter::BytecodeArrayIterator iterator(
         handle(bytecode_array, isolate()), code_offset());
 
@@ -1170,7 +1234,7 @@ MaybeHandle<FixedArray> Debug::GetHitBreakPoints(Handle<DebugInfo> debug_info,
     }
   }
   if (break_points_hit_count == 0) return {};
-  break_points_hit->Shrink(isolate_, break_points_hit_count);
+  break_points_hit->RightTrim(isolate_, break_points_hit_count);
   return break_points_hit;
 }
 
@@ -1403,9 +1467,9 @@ void Debug::PrepareStep(StepAction step_action) {
             Handle<WeakFixedArray> weak_fixed_array =
                 Handle<WeakFixedArray>::cast(awaited_by_holder);
             if (weak_fixed_array->length() == 1 &&
-                weak_fixed_array->Get(0).IsWeak()) {
+                weak_fixed_array->get(0).IsWeak()) {
               Handle<HeapObject> awaited_by(
-                  weak_fixed_array->Get(0).GetHeapObjectAssumeWeak(isolate_),
+                  weak_fixed_array->get(0).GetHeapObjectAssumeWeak(isolate_),
                   isolate_);
               if (IsJSGeneratorObject(*awaited_by)) {
                 DCHECK(!has_suspended_generator());
@@ -2011,7 +2075,7 @@ bool Debug::FindSharedFunctionInfosIntersectingRange(
         script->shared_function_info_count() > 0) {
       DCHECK_LE(script->shared_function_info_count(),
                 script->shared_function_infos()->length());
-      MaybeObject maybeToplevel = script->shared_function_infos()->Get(0);
+      MaybeObject maybeToplevel = script->shared_function_infos()->get(0);
       Tagged<HeapObject> heap_object;
       const bool topLevelInfoExists =
           maybeToplevel.GetHeapObject(&heap_object) &&
@@ -2244,7 +2308,7 @@ Handle<FixedArray> Debug::GetLoadedScripts() {
       if (script->HasValidSource()) results->set(length++, script);
     }
   }
-  return FixedArray::ShrinkOrEmpty(isolate_, results, length);
+  return FixedArray::RightTrimOrEmpty(isolate_, results, length);
 }
 
 base::Optional<Tagged<DebugInfo>> Debug::TryGetDebugInfo(
@@ -2320,20 +2384,6 @@ void Debug::OnPromiseReject(Handle<Object> promise, Handle<Object> value) {
   }
 }
 
-bool Debug::IsExceptionBlackboxed(bool uncaught) {
-  RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
-  // Uncaught exception is blackboxed if all current frames are blackboxed,
-  // caught exception if top frame is blackboxed.
-  DebuggableStackFrameIterator it(isolate_);
-#if V8_ENABLE_WEBASSEMBLY
-  while (!it.done() && it.is_wasm()) it.Advance();
-#endif  // V8_ENABLE_WEBASSEMBLY
-  bool is_top_frame_blackboxed =
-      !it.done() ? IsFrameBlackboxed(it.javascript_frame()) : true;
-  if (!uncaught || !is_top_frame_blackboxed) return is_top_frame_blackboxed;
-  return AllFramesOnStackAreBlackboxed();
-}
-
 bool Debug::IsFrameBlackboxed(JavaScriptFrame* frame) {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
   HandleScope scope(isolate_);
@@ -2394,9 +2444,12 @@ void Debug::OnException(Handle<Object> exception, Handle<Object> promise,
 
   {
     JavaScriptStackFrameIterator it(isolate_);
-    // Check whether the top frame is blackboxed or the break location is muted.
-    if (!it.done() && (IsMutedAtCurrentLocation(it.frame()) ||
-                       IsExceptionBlackboxed(uncaught))) {
+    // Check whether the affected frames are blackboxed or the break location is
+    // muted.
+    if (!it.done() &&
+        (IsMutedAtCurrentLocation(it.frame()) ||
+         AllFramesOnStackAreBlackboxed(
+             exception_type == debug::kPromiseRejection, !uncaught))) {
       return;
     }
     if (it.done()) return;  // Do not trigger an event with an empty stack.
@@ -2523,12 +2576,62 @@ bool Debug::ShouldBeSkipped() {
   }
 }
 
-bool Debug::AllFramesOnStackAreBlackboxed() {
+namespace {
+bool ReceiverIsBlackboxed(Isolate* isolate, Handle<JSReceiver> receiver) {
+  if (!IsJSFunction(*receiver)) return true;
+
+  Handle<SharedFunctionInfo> function_info(
+      Handle<JSFunction>::cast(receiver)->shared(), isolate);
+  return isolate->debug()->IsBlackboxed(function_info);
+}
+}  // namespace
+
+bool Debug::AllFramesOnStackAreBlackboxed(bool include_async,
+                                          bool stop_at_caught) {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
   HandleScope scope(isolate_);
-  for (DebuggableStackFrameIterator it(isolate_); !it.done(); it.Advance()) {
-    if (!it.is_javascript()) continue;
-    if (!IsFrameBlackboxed(it.javascript_frame())) return false;
+  Handle<Object> promise_stack(thread_local_.promise_stack_, isolate_);
+
+  for (StackFrameIterator it(isolate_); !it.done(); it.Advance()) {
+    StackFrame* frame = it.frame();
+    if (frame->is_java_script() &&
+        !IsFrameBlackboxed(JavaScriptFrame::cast(frame))) {
+      return false;
+    }
+    if (!stop_at_caught && !include_async) continue;
+
+    Isolate::CatchType prediction =
+        isolate_->PredictExceptionCatchAtFrame(frame);
+    if (include_async && prediction == Isolate::CAUGHT_BY_ASYNC_AWAIT) {
+      // This logic is duplicated from Isolate::GetPromiseOnStackOnThrow.
+      // In the future a more advanced version of Isolate::WalkPromiseTree
+      // could further reduce duplicated logic by walking both frames and
+      // promises.
+      if (!IsPromiseOnStack(*promise_stack)) continue;
+      Handle<PromiseOnStack> promise_on_stack =
+          Handle<PromiseOnStack>::cast(promise_stack);
+      MaybeHandle<JSObject> maybe_promise =
+          PromiseOnStack::GetPromise(promise_on_stack);
+      Handle<JSObject> object_handle;
+      if (maybe_promise.ToHandle(&object_handle) &&
+          IsJSPromise(*object_handle)) {
+        bool is_caught = false;
+        bool is_blackboxed = true;
+        isolate_->WalkPromiseTree(
+            Handle<JSPromise>::cast(object_handle),
+            [this, &is_caught,
+             &is_blackboxed](Isolate::PromiseHandler handler) {
+              is_caught = handler.catches;
+              is_blackboxed = ReceiverIsBlackboxed(isolate_, handler.receiver);
+              return is_caught || !is_blackboxed;
+            });
+        if ((stop_at_caught && is_caught) || !is_blackboxed) {
+          return is_blackboxed;
+        }
+      }
+    } else if (stop_at_caught && prediction != Isolate::NOT_CAUGHT) {
+      break;
+    }
   }
   return true;
 }
@@ -2861,10 +2964,19 @@ void Debug::StartSideEffectCheckMode() {
   DCHECK(!temporary_objects_);
   temporary_objects_.reset(new TemporaryObjectsTracker());
   isolate_->heap()->AddHeapObjectAllocationTracker(temporary_objects_.get());
-  Handle<FixedArray> array(isolate_->native_context()->regexp_last_match_info(),
-                           isolate_);
-  regexp_match_info_ =
-      Handle<RegExpMatchInfo>::cast(isolate_->factory()->CopyFixedArray(array));
+
+  Handle<RegExpMatchInfo> current_match_info(
+      isolate_->native_context()->regexp_last_match_info(), isolate_);
+  int register_count = current_match_info->number_of_capture_registers();
+  regexp_match_info_ = RegExpMatchInfo::New(
+      isolate_, JSRegExp::CaptureCountForRegisters(register_count));
+  DCHECK_EQ(regexp_match_info_->number_of_capture_registers(),
+            current_match_info->number_of_capture_registers());
+  regexp_match_info_->set_last_subject(current_match_info->last_subject());
+  regexp_match_info_->set_last_input(current_match_info->last_input());
+  RegExpMatchInfo::CopyElements(isolate_, *regexp_match_info_, 0,
+                                *current_match_info, 0, register_count,
+                                SKIP_WRITE_BARRIER);
 
   // Update debug infos to have correct execution mode.
   UpdateDebugInfosForExecutionMode();
@@ -2899,7 +3011,7 @@ void Debug::StopSideEffectCheckMode() {
 void Debug::ApplySideEffectChecks(Handle<DebugInfo> debug_info) {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
   DCHECK(debug_info->HasInstrumentedBytecodeArray());
-  Handle<BytecodeArray> debug_bytecode(debug_info->DebugBytecodeArray(),
+  Handle<BytecodeArray> debug_bytecode(debug_info->DebugBytecodeArray(isolate_),
                                        isolate_);
   DebugEvaluate::ApplySideEffectChecks(debug_bytecode);
   debug_info->SetDebugExecutionMode(DebugInfo::kSideEffects);
@@ -2908,9 +3020,10 @@ void Debug::ApplySideEffectChecks(Handle<DebugInfo> debug_info) {
 void Debug::ClearSideEffectChecks(Handle<DebugInfo> debug_info) {
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kDebugger);
   DCHECK(debug_info->HasInstrumentedBytecodeArray());
-  Handle<BytecodeArray> debug_bytecode(debug_info->DebugBytecodeArray(),
+  Handle<BytecodeArray> debug_bytecode(debug_info->DebugBytecodeArray(isolate_),
                                        isolate_);
-  Handle<BytecodeArray> original(debug_info->OriginalBytecodeArray(), isolate_);
+  Handle<BytecodeArray> original(debug_info->OriginalBytecodeArray(isolate_),
+                                 isolate_);
   for (interpreter::BytecodeArrayIterator it(debug_bytecode); !it.done();
        it.Advance()) {
     // Restore from original. This may copy only the scaling prefix, which is

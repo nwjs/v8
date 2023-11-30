@@ -24,6 +24,7 @@ extern runtime WasmFunctionTableSet(
 extern runtime ThrowRangeError(Context, Smi): never;
 extern runtime ThrowWasmError(Context, Smi): never;
 extern runtime WasmThrowRangeError(Context, Smi): never;
+extern runtime TrapHandlerThrowWasmError(Context): never;
 extern runtime WasmThrowTypeError(Context, Smi, JSAny): never;
 extern runtime WasmThrowTypeErrorTwoArgs(Context, Smi, JSAny, JSAny): never;
 extern runtime WasmThrow(Context, Object, FixedArray): JSAny;
@@ -34,8 +35,6 @@ extern runtime ThrowWasmStackOverflow(Context): JSAny;
 extern runtime WasmTraceMemory(Context, Smi): JSAny;
 extern runtime WasmTraceEnter(Context): JSAny;
 extern runtime WasmTraceExit(Context, Smi): JSAny;
-extern runtime WasmAtomicNotify(
-    Context, WasmInstanceObject, Smi, Number, Number): Smi;
 extern runtime WasmI32AtomicWait(
     Context, WasmInstanceObject, Smi, Number, Number, BigInt): Smi;
 extern runtime WasmI64AtomicWait(
@@ -518,15 +517,6 @@ builtin UintPtr53ToNumber(value: uintptr): Number {
 extern builtin I64ToBigInt(intptr): BigInt;
 extern builtin I32PairToBigInt(/*low*/ intptr, /*high*/ intptr): BigInt;
 
-builtin WasmAtomicNotify(memoryIndex: int32, offset: uintptr, count: uint32):
-    uint32 {
-  const instance: WasmInstanceObject = LoadInstanceFromFrame();
-  const result: Smi = runtime::WasmAtomicNotify(
-      LoadContextFromInstance(instance), instance, SmiFromInt32(memoryIndex),
-      UintPtr53ToNumber(offset), WasmUint32ToNumber(count));
-  return Unsigned(SmiToInt32(result));
-}
-
 builtin WasmI32AtomicWait(
     memIndex: int32, offset: uintptr, expectedValue: int32,
     timeout: BigInt): uint32 {
@@ -682,6 +672,10 @@ builtin ThrowWasmTrapUnreachable(): JSAny {
   tail WasmTrap(SmiConstant(MessageTemplate::kWasmTrapUnreachable));
 }
 
+builtin WasmTrapHandlerThrowTrap(): JSAny {
+  tail runtime::TrapHandlerThrowWasmError(LoadContextFromWasmOrJsFrame());
+}
+
 builtin ThrowWasmTrapMemOutOfBounds(): JSAny {
   tail WasmTrap(SmiConstant(MessageTemplate::kWasmTrapMemOutOfBounds));
 }
@@ -745,39 +739,6 @@ builtin ThrowWasmTrapArrayTooLarge(): JSAny {
 
 builtin ThrowWasmTrapStringOffsetOutOfBounds(): JSAny {
   tail WasmTrap(SmiConstant(MessageTemplate::kWasmTrapStringOffsetOutOfBounds));
-}
-
-macro WasmTypeInfo(map: Map): WasmTypeInfo {
-  return UnsafeCast<WasmTypeInfo>(
-      map.constructor_or_back_pointer_or_native_context);
-}
-
-const kWasmI16ValueType: constexpr int32
-    generates 'wasm::ValueType::Primitive(wasm::kI16).raw_bit_field()';
-const kWasmI8ValueType: constexpr int32
-    generates 'wasm::ValueType::Primitive(wasm::kI8).raw_bit_field()';
-
-const kWasmArrayTypeRepOffset:
-    constexpr intptr generates 'wasm::ArrayType::kRepOffset';
-const kWasmValueTypeBitFieldOffset:
-    constexpr intptr generates 'wasm::ValueType::kBitFieldOffset';
-
-macro IsWord16WasmArrayMap(map: Map): bool {
-  const arrayTypePtr: RawPtr<int32> = %RawDownCast<RawPtr<int32>>(
-      WasmTypeInfo(map).native_type_ptr + kWasmArrayTypeRepOffset +
-      kWasmValueTypeBitFieldOffset);
-  const arrayTypeRef: &int32 =
-      torque_internal::unsafe::NewOffHeapReference(arrayTypePtr);
-  return *arrayTypeRef == kWasmI16ValueType;
-}
-
-macro IsWord8WasmArrayMap(map: Map): bool {
-  const arrayTypePtr: RawPtr<int32> = %RawDownCast<RawPtr<int32>>(
-      WasmTypeInfo(map).native_type_ptr + kWasmArrayTypeRepOffset +
-      kWasmValueTypeBitFieldOffset);
-  const arrayTypeRef: &int32 =
-      torque_internal::unsafe::NewOffHeapReference(arrayTypePtr);
-  return *arrayTypeRef == kWasmI8ValueType;
 }
 
 macro GetRefAt<T: type, From: type>(base: From, offset: intptr): &T {
@@ -1084,6 +1045,117 @@ builtin ThrowIndexOfCalledOnNull(): JSAny {
   runtime::WasmThrowTypeError(context, SmiConstant(error), name);
 }
 
+// For DataView related import check fails, we need to throw a specific error
+// message containing the import's type.
+// TODO(evih): Pass the import's type as a parameter.
+builtin ThrowDataViewGetBigInt64DetachedError(): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kDetachedOperation;
+  const name = StringConstant('DataView.prototype.getBigInt64');
+  runtime::WasmThrowTypeError(context, SmiConstant(error), name);
+}
+
+builtin ThrowDataViewGetBigInt64OutOfBounds(): JSAny {
+  ThrowDataViewOutOfBounds();
+}
+
+builtin ThrowDataViewGetBigInt64TypeError(value: JSAny): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kIncompatibleMethodReceiver;
+  const name = StringConstant('DataView.prototype.getBigInt64');
+  runtime::WasmThrowTypeErrorTwoArgs(context, SmiConstant(error), name, value);
+}
+
+builtin ThrowDataViewGetBigUint64DetachedError(): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kDetachedOperation;
+  const name = StringConstant('DataView.prototype.getBigUint64');
+  runtime::WasmThrowTypeError(context, SmiConstant(error), name);
+}
+
+builtin ThrowDataViewGetBigUint64OutOfBounds(): JSAny {
+  ThrowDataViewOutOfBounds();
+}
+
+builtin ThrowDataViewGetBigUint64TypeError(value: JSAny): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kIncompatibleMethodReceiver;
+  const name = StringConstant('DataView.prototype.getBigUint64');
+  runtime::WasmThrowTypeErrorTwoArgs(context, SmiConstant(error), name, value);
+}
+
+builtin ThrowDataViewGetFloat32DetachedError(): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kDetachedOperation;
+  const name = StringConstant('DataView.prototype.getFloat32');
+  runtime::WasmThrowTypeError(context, SmiConstant(error), name);
+}
+
+builtin ThrowDataViewGetFloat32OutOfBounds(): JSAny {
+  ThrowDataViewOutOfBounds();
+}
+
+builtin ThrowDataViewGetFloat32TypeError(value: JSAny): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kIncompatibleMethodReceiver;
+  const name = StringConstant('DataView.prototype.getFloat32');
+  runtime::WasmThrowTypeErrorTwoArgs(context, SmiConstant(error), name, value);
+}
+
+builtin ThrowDataViewGetFloat64DetachedError(): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kDetachedOperation;
+  const name = StringConstant('DataView.prototype.getFloat64');
+  runtime::WasmThrowTypeError(context, SmiConstant(error), name);
+}
+
+builtin ThrowDataViewGetFloat64OutOfBounds(): JSAny {
+  ThrowDataViewOutOfBounds();
+}
+
+builtin ThrowDataViewGetFloat64TypeError(value: JSAny): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kIncompatibleMethodReceiver;
+  const name = StringConstant('DataView.prototype.getFloat64');
+  runtime::WasmThrowTypeErrorTwoArgs(context, SmiConstant(error), name, value);
+}
+
+builtin ThrowDataViewGetInt8DetachedError(): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kDetachedOperation;
+  const name = StringConstant('DataView.prototype.getInt8');
+  runtime::WasmThrowTypeError(context, SmiConstant(error), name);
+}
+
+builtin ThrowDataViewGetInt8OutOfBounds(): JSAny {
+  ThrowDataViewOutOfBounds();
+}
+
+builtin ThrowDataViewGetInt8TypeError(value: JSAny): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kIncompatibleMethodReceiver;
+  const name = StringConstant('DataView.prototype.getInt8');
+  runtime::WasmThrowTypeErrorTwoArgs(context, SmiConstant(error), name, value);
+}
+
+builtin ThrowDataViewGetInt16DetachedError(): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kDetachedOperation;
+  const name = StringConstant('DataView.prototype.getInt16');
+  runtime::WasmThrowTypeError(context, SmiConstant(error), name);
+}
+
+builtin ThrowDataViewGetInt16OutOfBounds(): JSAny {
+  ThrowDataViewOutOfBounds();
+}
+
+builtin ThrowDataViewGetInt16TypeError(value: JSAny): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kIncompatibleMethodReceiver;
+  const name = StringConstant('DataView.prototype.getInt16');
+  runtime::WasmThrowTypeErrorTwoArgs(context, SmiConstant(error), name, value);
+}
+
 builtin ThrowDataViewGetInt32DetachedError(): JSAny {
   const context = LoadContextFromFrame();
   const error = MessageTemplate::kDetachedOperation;
@@ -1092,9 +1164,7 @@ builtin ThrowDataViewGetInt32DetachedError(): JSAny {
 }
 
 builtin ThrowDataViewGetInt32OutOfBounds(): JSAny {
-  const context = LoadContextFromFrame();
-  const error = MessageTemplate::kInvalidDataViewAccessorOffset;
-  runtime::WasmThrowRangeError(context, SmiConstant(error));
+  ThrowDataViewOutOfBounds();
 }
 
 builtin ThrowDataViewGetInt32TypeError(value: JSAny): JSAny {
@@ -1102,6 +1172,246 @@ builtin ThrowDataViewGetInt32TypeError(value: JSAny): JSAny {
   const error = MessageTemplate::kIncompatibleMethodReceiver;
   const name = StringConstant('DataView.prototype.getInt32');
   runtime::WasmThrowTypeErrorTwoArgs(context, SmiConstant(error), name, value);
+}
+
+builtin ThrowDataViewGetUint8DetachedError(): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kDetachedOperation;
+  const name = StringConstant('DataView.prototype.getUint8');
+  runtime::WasmThrowTypeError(context, SmiConstant(error), name);
+}
+
+builtin ThrowDataViewGetUint8OutOfBounds(): JSAny {
+  ThrowDataViewOutOfBounds();
+}
+
+builtin ThrowDataViewGetUint8TypeError(value: JSAny): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kIncompatibleMethodReceiver;
+  const name = StringConstant('DataView.prototype.getUint8');
+  runtime::WasmThrowTypeErrorTwoArgs(context, SmiConstant(error), name, value);
+}
+
+builtin ThrowDataViewGetUint16DetachedError(): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kDetachedOperation;
+  const name = StringConstant('DataView.prototype.getUint16');
+  runtime::WasmThrowTypeError(context, SmiConstant(error), name);
+}
+
+builtin ThrowDataViewGetUint16OutOfBounds(): JSAny {
+  ThrowDataViewOutOfBounds();
+}
+
+builtin ThrowDataViewGetUint16TypeError(value: JSAny): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kIncompatibleMethodReceiver;
+  const name = StringConstant('DataView.prototype.getUint16');
+  runtime::WasmThrowTypeErrorTwoArgs(context, SmiConstant(error), name, value);
+}
+
+builtin ThrowDataViewGetUint32DetachedError(): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kDetachedOperation;
+  const name = StringConstant('DataView.prototype.getUint32');
+  runtime::WasmThrowTypeError(context, SmiConstant(error), name);
+}
+
+builtin ThrowDataViewGetUint32OutOfBounds(): JSAny {
+  ThrowDataViewOutOfBounds();
+}
+
+builtin ThrowDataViewGetUint32TypeError(value: JSAny): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kIncompatibleMethodReceiver;
+  const name = StringConstant('DataView.prototype.getUint32');
+  runtime::WasmThrowTypeErrorTwoArgs(context, SmiConstant(error), name, value);
+}
+
+builtin ThrowDataViewSetBigInt64DetachedError(): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kDetachedOperation;
+  const name = StringConstant('DataView.prototype.setBigInt64');
+  runtime::WasmThrowTypeError(context, SmiConstant(error), name);
+}
+
+builtin ThrowDataViewSetBigInt64OutOfBounds(): JSAny {
+  ThrowDataViewOutOfBounds();
+}
+
+builtin ThrowDataViewSetBigInt64TypeError(value: JSAny): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kIncompatibleMethodReceiver;
+  const name = StringConstant('DataView.prototype.setBigInt64');
+  runtime::WasmThrowTypeErrorTwoArgs(context, SmiConstant(error), name, value);
+}
+
+builtin ThrowDataViewSetBigUint64DetachedError(): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kDetachedOperation;
+  const name = StringConstant('DataView.prototype.setBigUint64');
+  runtime::WasmThrowTypeError(context, SmiConstant(error), name);
+}
+
+builtin ThrowDataViewSetBigUint64OutOfBounds(): JSAny {
+  ThrowDataViewOutOfBounds();
+}
+
+builtin ThrowDataViewSetBigUint64TypeError(value: JSAny): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kIncompatibleMethodReceiver;
+  const name = StringConstant('DataView.prototype.setBigUint64');
+  runtime::WasmThrowTypeErrorTwoArgs(context, SmiConstant(error), name, value);
+}
+
+builtin ThrowDataViewSetFloat32DetachedError(): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kDetachedOperation;
+  const name = StringConstant('DataView.prototype.setFloat32');
+  runtime::WasmThrowTypeError(context, SmiConstant(error), name);
+}
+
+builtin ThrowDataViewSetFloat32OutOfBounds(): JSAny {
+  ThrowDataViewOutOfBounds();
+}
+
+builtin ThrowDataViewSetFloat32TypeError(value: JSAny): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kIncompatibleMethodReceiver;
+  const name = StringConstant('DataView.prototype.setFloat32');
+  runtime::WasmThrowTypeErrorTwoArgs(context, SmiConstant(error), name, value);
+}
+
+builtin ThrowDataViewSetFloat64DetachedError(): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kDetachedOperation;
+  const name = StringConstant('DataView.prototype.setFloat64');
+  runtime::WasmThrowTypeError(context, SmiConstant(error), name);
+}
+
+builtin ThrowDataViewSetFloat64OutOfBounds(): JSAny {
+  ThrowDataViewOutOfBounds();
+}
+
+builtin ThrowDataViewSetFloat64TypeError(value: JSAny): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kIncompatibleMethodReceiver;
+  const name = StringConstant('DataView.prototype.setFloat64');
+  runtime::WasmThrowTypeErrorTwoArgs(context, SmiConstant(error), name, value);
+}
+
+builtin ThrowDataViewSetInt8DetachedError(): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kDetachedOperation;
+  const name = StringConstant('DataView.prototype.setInt8');
+  runtime::WasmThrowTypeError(context, SmiConstant(error), name);
+}
+
+builtin ThrowDataViewSetInt8OutOfBounds(): JSAny {
+  ThrowDataViewOutOfBounds();
+}
+
+builtin ThrowDataViewSetInt8TypeError(value: JSAny): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kIncompatibleMethodReceiver;
+  const name = StringConstant('DataView.prototype.setInt8');
+  runtime::WasmThrowTypeErrorTwoArgs(context, SmiConstant(error), name, value);
+}
+
+builtin ThrowDataViewSetInt16DetachedError(): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kDetachedOperation;
+  const name = StringConstant('DataView.prototype.setInt16');
+  runtime::WasmThrowTypeError(context, SmiConstant(error), name);
+}
+
+builtin ThrowDataViewSetInt16OutOfBounds(): JSAny {
+  ThrowDataViewOutOfBounds();
+}
+
+builtin ThrowDataViewSetInt16TypeError(value: JSAny): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kIncompatibleMethodReceiver;
+  const name = StringConstant('DataView.prototype.setInt16');
+  runtime::WasmThrowTypeErrorTwoArgs(context, SmiConstant(error), name, value);
+}
+
+builtin ThrowDataViewSetInt32DetachedError(): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kDetachedOperation;
+  const name = StringConstant('DataView.prototype.setInt32');
+  runtime::WasmThrowTypeError(context, SmiConstant(error), name);
+}
+
+builtin ThrowDataViewSetInt32OutOfBounds(): JSAny {
+  ThrowDataViewOutOfBounds();
+}
+
+builtin ThrowDataViewSetInt32TypeError(value: JSAny): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kIncompatibleMethodReceiver;
+  const name = StringConstant('DataView.prototype.setInt32');
+  runtime::WasmThrowTypeErrorTwoArgs(context, SmiConstant(error), name, value);
+}
+
+builtin ThrowDataViewSetUint8DetachedError(): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kDetachedOperation;
+  const name = StringConstant('DataView.prototype.setUint8');
+  runtime::WasmThrowTypeError(context, SmiConstant(error), name);
+}
+
+builtin ThrowDataViewSetUint8OutOfBounds(): JSAny {
+  ThrowDataViewOutOfBounds();
+}
+
+builtin ThrowDataViewSetUint8TypeError(value: JSAny): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kIncompatibleMethodReceiver;
+  const name = StringConstant('DataView.prototype.setUint8');
+  runtime::WasmThrowTypeErrorTwoArgs(context, SmiConstant(error), name, value);
+}
+
+builtin ThrowDataViewSetUint16DetachedError(): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kDetachedOperation;
+  const name = StringConstant('DataView.prototype.setUint16');
+  runtime::WasmThrowTypeError(context, SmiConstant(error), name);
+}
+
+builtin ThrowDataViewSetUint16OutOfBounds(): JSAny {
+  ThrowDataViewOutOfBounds();
+}
+
+builtin ThrowDataViewSetUint16TypeError(value: JSAny): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kIncompatibleMethodReceiver;
+  const name = StringConstant('DataView.prototype.setUint16');
+  runtime::WasmThrowTypeErrorTwoArgs(context, SmiConstant(error), name, value);
+}
+
+builtin ThrowDataViewSetUint32DetachedError(): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kDetachedOperation;
+  const name = StringConstant('DataView.prototype.setUint32');
+  runtime::WasmThrowTypeError(context, SmiConstant(error), name);
+}
+
+builtin ThrowDataViewSetUint32OutOfBounds(): JSAny {
+  ThrowDataViewOutOfBounds();
+}
+
+builtin ThrowDataViewSetUint32TypeError(value: JSAny): JSAny {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kIncompatibleMethodReceiver;
+  const name = StringConstant('DataView.prototype.setUint32');
+  runtime::WasmThrowTypeErrorTwoArgs(context, SmiConstant(error), name, value);
+}
+
+macro ThrowDataViewOutOfBounds(): never {
+  const context = LoadContextFromFrame();
+  const error = MessageTemplate::kInvalidDataViewAccessorOffset;
+  runtime::WasmThrowRangeError(context, SmiConstant(error));
 }
 
 builtin WasmStringConcat(a: String, b: String): String {
@@ -1445,7 +1755,7 @@ builtin WasmStringHash(string: String): int32 {
   return SmiToInt32(result);
 }
 
-builtin WasmExternInternalize(externObject: JSAny): JSAny {
+builtin WasmAnyConvertExtern(externObject: JSAny): JSAny {
   const instance = LoadInstanceFromFrame();
   const context = LoadContextFromInstance(instance);
 

@@ -106,13 +106,17 @@ using Variable = SnapshotTable<OpIndex, VariableData>::Key;
   V(RttCanon)                             \
   V(WasmTypeCheck)                        \
   V(WasmTypeCast)                         \
-  V(ExternInternalize)                    \
-  V(ExternExternalize)                    \
+  V(AnyConvertExtern)                     \
+  V(ExternConvertAny)                     \
+  V(WasmTypeAnnotation)                   \
   V(StructGet)                            \
   V(StructSet)                            \
   V(ArrayGet)                             \
   V(ArraySet)                             \
   V(ArrayLength)                          \
+  V(WasmAllocateArray)                    \
+  V(WasmAllocateStruct)                   \
+  V(WasmRefFunc)                          \
   V(StringAsWtf16)                        \
   V(StringPrepareForGetCodeUnit)
 
@@ -700,6 +704,12 @@ struct OpEffects {
   bool can_write() const {
     return produces.store_heap_memory | produces.store_off_heap_memory;
   }
+  bool can_be_constant_folded() const {
+    // Operations that CanDependOnChecks can still be constant-folded. If they
+    // did indeed depend on a check, then their result will only be used after
+    // said check has been executed anyways.
+    return IsSubsetOf(OpEffects().CanDependOnChecks());
+  }
 };
 static_assert(sizeof(OpEffects) == sizeof(OpEffects::Bits));
 
@@ -834,6 +844,9 @@ struct alignas(OpIndex) Operation {
   std::string ToString() const;
   void PrintInputs(std::ostream& os, const std::string& op_index_prefix) const;
   void PrintOptions(std::ostream& os) const;
+
+  // Returns true if {this} is the only operation using {value}.
+  bool IsOnlyUserOf(const Operation& value, const Graph& graph) const;
 
  protected:
   // Operation objects store their inputs behind the object. Therefore, they can
@@ -2138,8 +2151,7 @@ struct PhiOp : OperationT<PhiOp> {
   explicit PhiOp(base::Vector<const OpIndex> inputs, RegisterRepresentation rep)
       : Base(inputs), rep(rep) {}
 
-  void Validate(const Graph& graph) const {
-  }
+  void Validate(const Graph& graph) const { DCHECK_GT(input_count, 0); }
   auto options() const { return std::tuple{rep}; }
 };
 
@@ -2549,11 +2561,11 @@ struct LoadOp : OperationT<LoadOp> {
   }
 
   OpIndex base() const { return input(0); }
-  OpIndex index() const {
+  OptionalOpIndex index() const {
     return input_count == 2 ? input(1) : OpIndex::Invalid();
   }
 
-  LoadOp(OpIndex base, OpIndex index, Kind kind,
+  LoadOp(OpIndex base, OptionalOpIndex index, Kind kind,
          MemoryRepresentation loaded_rep, RegisterRepresentation result_rep,
          int32_t offset, uint8_t element_size_log2)
       : Base(1 + index.valid()),
@@ -2564,7 +2576,7 @@ struct LoadOp : OperationT<LoadOp> {
         offset(offset) {
     input(0) = base;
     if (index.valid()) {
-      input(1) = index;
+      input(1) = index.value();
     }
   }
 
@@ -2575,8 +2587,8 @@ struct LoadOp : OperationT<LoadOp> {
            kind.is_atomic);
     DCHECK_IMPLIES(element_size_log2 > 0, index().valid());
   }
-  static LoadOp& New(Graph* graph, OpIndex base, OpIndex index, Kind kind,
-                     MemoryRepresentation loaded_rep,
+  static LoadOp& New(Graph* graph, OpIndex base, OptionalOpIndex index,
+                     Kind kind, MemoryRepresentation loaded_rep,
                      RegisterRepresentation result_rep, int32_t offset,
                      uint8_t element_size_log2) {
     return Base::New(graph, 1 + index.valid(), base, index, kind, loaded_rep,
@@ -2639,7 +2651,7 @@ struct AtomicRMWOp : OperationT<AtomicRMWOp> {
   V<WordPtr> base() const { return input(0); }
   V<WordPtr> index() const { return input(1); }
   OpIndex value() const { return input(2); }
-  OpIndex expected() const {
+  OptionalOpIndex expected() const {
     return (input_count == 4) ? input(3) : OpIndex::Invalid();
   }
 
@@ -2647,9 +2659,10 @@ struct AtomicRMWOp : OperationT<AtomicRMWOp> {
     DCHECK_EQ(bin_op == BinOp::kCompareExchange, expected().valid());
   }
 
-  AtomicRMWOp(OpIndex base, OpIndex index, OpIndex value, OpIndex expected,
-              BinOp bin_op, RegisterRepresentation result_rep,
-              MemoryRepresentation input_rep, MemoryAccessKind kind)
+  AtomicRMWOp(OpIndex base, OpIndex index, OpIndex value,
+              OptionalOpIndex expected, BinOp bin_op,
+              RegisterRepresentation result_rep, MemoryRepresentation input_rep,
+              MemoryAccessKind kind)
       : Base(3 + expected.valid()),
         bin_op(bin_op),
         result_rep(result_rep),
@@ -2659,12 +2672,12 @@ struct AtomicRMWOp : OperationT<AtomicRMWOp> {
     input(1) = index;
     input(2) = value;
     if (expected.valid()) {
-      input(3) = expected;
+      input(3) = expected.value();
     }
   }
 
   static AtomicRMWOp& New(Graph* graph, OpIndex base, OpIndex index,
-                          OpIndex value, OpIndex expected, BinOp bin_op,
+                          OpIndex value, OptionalOpIndex expected, BinOp bin_op,
                           RegisterRepresentation result_rep,
                           MemoryRepresentation input_rep,
                           MemoryAccessKind kind) {
@@ -2685,7 +2698,7 @@ DEFINE_MULTI_SWITCH_INTEGRAL(AtomicRMWOp::BinOp, 8)
 std::ostream& operator<<(std::ostream& os, AtomicRMWOp::BinOp kind);
 
 struct AtomicWord32PairOp : OperationT<AtomicWord32PairOp> {
-  enum class OpKind : uint8_t {
+  enum class Kind : uint8_t {
     kAdd,
     kSub,
     kAnd,
@@ -2697,143 +2710,151 @@ struct AtomicWord32PairOp : OperationT<AtomicWord32PairOp> {
     kStore
   };
 
-  static OpKind OpKindFromBinOp(AtomicRMWOp::BinOp bin_op) {
+  Kind kind;
+  int32_t offset;
+
+  static Kind KindFromBinOp(AtomicRMWOp::BinOp bin_op) {
     switch (bin_op) {
       case AtomicRMWOp::BinOp::kAdd:
-        return OpKind::kAdd;
+        return Kind::kAdd;
       case AtomicRMWOp::BinOp::kSub:
-        return OpKind::kSub;
+        return Kind::kSub;
       case AtomicRMWOp::BinOp::kAnd:
-        return OpKind::kAnd;
+        return Kind::kAnd;
       case AtomicRMWOp::BinOp::kOr:
-        return OpKind::kOr;
+        return Kind::kOr;
       case AtomicRMWOp::BinOp::kXor:
-        return OpKind::kXor;
+        return Kind::kXor;
       case AtomicRMWOp::BinOp::kExchange:
-        return OpKind::kExchange;
+        return Kind::kExchange;
       case AtomicRMWOp::BinOp::kCompareExchange:
-        return OpKind::kCompareExchange;
+        return Kind::kCompareExchange;
     }
   }
 
-  OpKind op_kind;
-  int32_t offset;
-  bool has_index;
   OpEffects Effects() const {
     OpEffects effects = OpEffects().CanDependOnChecks();
-    if (op_kind == OpKind::kLoad) {
+    if (kind == Kind::kLoad) {
       return effects.CanReadMemory();
     }
-    if (op_kind == OpKind::kStore) {
+    if (kind == Kind::kStore) {
       return effects.CanWriteMemory();
     }
     return effects.CanReadMemory().CanWriteMemory();
   }
 
   base::Vector<const RegisterRepresentation> outputs_rep() const {
-    if (op_kind == OpKind::kStore) return {};
+    if (kind == Kind::kStore) return {};
     return RepVector<RegisterRepresentation::Word32(),
                      RegisterRepresentation::Word32()>();
   }
   base::Vector<const MaybeRegisterRepresentation> inputs_rep(
       ZoneVector<MaybeRegisterRepresentation>& storage) const {
     storage.resize(input_count);
-    int idx = 0;
-    storage[idx++] = RegisterRepresentation::PointerSized();  // base
+
+    const bool has_index = HasIndex();
+    storage[0] = RegisterRepresentation::PointerSized();  // base
     if (has_index) {
-      storage[idx++] = RegisterRepresentation::PointerSized();  // index
+      storage[1] = RegisterRepresentation::PointerSized();  // index
     }
-    if (op_kind != OpKind::kLoad) {
-      storage[idx++] = RegisterRepresentation::Word32();  // value_low
-      storage[idx++] = RegisterRepresentation::Word32();  // value_high
+    if (kind != Kind::kLoad) {
+      storage[1 + has_index] = RegisterRepresentation::Word32();  // value_low
+      storage[2 + has_index] = RegisterRepresentation::Word32();  // value_high
+      if (kind == Kind::kCompareExchange) {
+        storage[3 + has_index] =
+            RegisterRepresentation::Word32();  // expected_low
+        storage[4 + has_index] =
+            RegisterRepresentation::Word32();  // expected_high
+      }
     }
-    if (op_kind == OpKind::kCompareExchange) {
-      storage[idx++] = RegisterRepresentation::Word32();  // expected_low
-      storage[idx++] = RegisterRepresentation::Word32();  // expected_high
-    }
-    DCHECK_EQ(idx, input_count);
     return base::VectorOf(storage);
   }
 
   V<WordPtr> base() const { return input(0); }
-  V<WordPtr> index() const { return has_index ? input(1) : OpIndex::Invalid(); }
-  V<Word32> value_low() const {
-    return (input_count > 1 + has_index) ? input(1 + has_index)
-                                         : OpIndex::Invalid();
+  OptionalV<WordPtr> index() const {
+    return HasIndex() ? input(1) : OpIndex::Invalid();
   }
-  V<Word32> value_high() const {
-    return (input_count > 2 + has_index) ? input(2 + has_index)
-                                         : OpIndex::Invalid();
+  OptionalV<Word32> value_low() const {
+    return kind != Kind::kLoad ? input(1 + HasIndex()) : OpIndex::Invalid();
   }
-  V<Word32> expected_low() const {
-    return (input_count > 3 + has_index) ? input(3 + has_index)
-                                         : OpIndex::Invalid();
+  OptionalV<Word32> value_high() const {
+    return kind != Kind::kLoad ? input(2 + HasIndex()) : OpIndex::Invalid();
   }
-  V<Word32> expected_high() const {
-    return (input_count > 4 + has_index) ? input(4 + has_index)
-                                         : OpIndex::Invalid();
+  OptionalV<Word32> expected_low() const {
+    return kind == Kind::kCompareExchange ? input(3 + HasIndex())
+                                          : OpIndex::Invalid();
   }
-
-  void Validate(const Graph& graph) const {
-    if (op_kind == OpKind::kLoad) {
-      DCHECK_EQ(input_count, 1 + has_index);
-    }
-    DCHECK_EQ(op_kind == OpKind::kLoad, input_count == 1 + has_index);
-    DCHECK_EQ(op_kind == OpKind::kCompareExchange,
-              input_count == 5 + has_index);
-    DCHECK_EQ(op_kind != OpKind::kCompareExchange && op_kind != OpKind::kLoad,
-              input_count == 3 + has_index);
+  OptionalV<Word32> expected_high() const {
+    return kind == Kind::kCompareExchange ? input(4 + HasIndex())
+                                          : OpIndex::Invalid();
   }
 
-  AtomicWord32PairOp(V<WordPtr> base, V<WordPtr> index, V<Word32> value_low,
-                     V<Word32> value_high, V<Word32> expected_low,
-                     V<Word32> expected_high, OpKind op_kind, int32_t offset)
-      : Base(1 + index.valid() + value_low.valid() + value_high.valid() +
-             expected_low.valid() + expected_high.valid()),
-        op_kind(op_kind),
-        offset(offset) {
+  void Validate(const Graph& graph) const {}
+
+  AtomicWord32PairOp(V<WordPtr> base, OptionalV<WordPtr> index,
+                     OptionalV<Word32> value_low, OptionalV<Word32> value_high,
+                     OptionalV<Word32> expected_low,
+                     OptionalV<Word32> expected_high, Kind kind, int32_t offset)
+      : Base(InputCount(kind, index.has_value())), kind(kind), offset(offset) {
     DCHECK_EQ(value_low.valid(), value_high.valid());
     DCHECK_EQ(expected_low.valid(), expected_high.valid());
-    has_index = index.valid();
+    DCHECK_EQ(kind == Kind::kCompareExchange, expected_low.valid());
+    DCHECK_EQ(kind != Kind::kLoad, value_low.valid());
+
+    const bool has_index = index.has_value();
+    DCHECK_EQ(has_index, HasIndex());
+
     input(0) = base;
-    if (index.valid()) {
-      input(1) = index;
-    }
-    if (value_low.valid()) {
-      input(1 + has_index) = value_low;
-    }
-    if (value_high.valid()) {
-      input(2 + has_index) = value_high;
-    }
-    if (expected_low.valid()) {
-      input(3 + has_index) = expected_low;
-    }
-    if (expected_high.valid()) {
-      input(4 + has_index) = expected_high;
+    if (has_index) input(1) = index.value();
+    if (kind != Kind::kLoad) {
+      input(1 + has_index) = value_low.value();
+      input(2 + has_index) = value_high.value();
+      if (kind == Kind::kCompareExchange) {
+        input(3 + has_index) = expected_low.value();
+        input(4 + has_index) = expected_high.value();
+      }
     }
   }
 
+  static constexpr size_t InputCount(Kind kind, bool has_index) {
+    switch (kind) {
+      case Kind::kLoad:
+        return 1 + has_index;  // base, index?
+      case Kind::kAdd:
+      case Kind::kSub:
+      case Kind::kAnd:
+      case Kind::kOr:
+      case Kind::kXor:
+      case Kind::kExchange:
+      case Kind::kStore:
+        return 3 + has_index;  // base, index?, value_low, value_high
+      case Kind::kCompareExchange:
+        return 5 + has_index;  // base, index?, value_low, value_high,
+                               // expected_low, expected_high
+    }
+  }
+  bool HasIndex() const { return input_count == InputCount(kind, true); }
+
   static AtomicWord32PairOp& New(Graph* graph, V<WordPtr> base,
-                                 V<WordPtr> index, V<Word32> value_low,
-                                 V<Word32> value_high, V<Word32> expected_low,
-                                 V<Word32> expected_high, OpKind op_kind,
+                                 OptionalV<WordPtr> index,
+                                 OptionalV<Word32> value_low,
+                                 OptionalV<Word32> value_high,
+                                 OptionalV<Word32> expected_low,
+                                 OptionalV<Word32> expected_high, Kind kind,
                                  int32_t offset) {
-    return Base::New(graph,
-                     1 + index.valid() + value_low.valid() +
-                         value_high.valid() + expected_low.valid() +
-                         expected_high.valid(),
-                     base, index, value_low, value_high, expected_low,
-                     expected_high, op_kind, offset);
+    return Base::New(graph, InputCount(kind, index.has_value()), base, index,
+                     value_low, value_high, expected_low, expected_high, kind,
+                     offset);
   }
 
   void PrintInputs(std::ostream& os, const std::string& op_index_prefix) const;
 
   void PrintOptions(std::ostream& os) const;
 
-  auto options() const { return std::tuple{op_kind, offset}; }
+  auto options() const { return std::tuple{kind, offset}; }
 };
 
-std::ostream& operator<<(std::ostream& os, AtomicWord32PairOp::OpKind kind);
+std::ostream& operator<<(std::ostream& os, AtomicWord32PairOp::Kind kind);
 
 struct MemoryBarrierOp : FixedArityOperationT<0, MemoryBarrierOp> {
   AtomicMemoryOrder memory_order;
@@ -2914,7 +2935,7 @@ struct StoreOp : OperationT<StoreOp> {
 
   OpIndex base() const { return input(0); }
   OpIndex value() const { return input(1); }
-  OpIndex index() const {
+  OptionalOpIndex index() const {
     return input_count == 3 ? input(2) : OpIndex::Invalid();
   }
 
@@ -2924,7 +2945,7 @@ struct StoreOp : OperationT<StoreOp> {
   }
 
   StoreOp(
-      OpIndex base, OpIndex index, OpIndex value, Kind kind,
+      OpIndex base, OptionalOpIndex index, OpIndex value, Kind kind,
       MemoryRepresentation stored_rep, WriteBarrierKind write_barrier,
       int32_t offset, uint8_t element_size_log2,
       bool maybe_initializing_or_transitioning,
@@ -2943,16 +2964,16 @@ struct StoreOp : OperationT<StoreOp> {
     input(0) = base;
     input(1) = value;
     if (index.valid()) {
-      input(2) = index;
+      input(2) = index.value();
     }
   }
 
   void Validate(const Graph& graph) const {
   }
   static StoreOp& New(
-      Graph* graph, OpIndex base, OpIndex index, OpIndex value, Kind kind,
-      MemoryRepresentation stored_rep, WriteBarrierKind write_barrier,
-      int32_t offset, uint8_t element_size_log2,
+      Graph* graph, OpIndex base, OptionalOpIndex index, OpIndex value,
+      Kind kind, MemoryRepresentation stored_rep,
+      WriteBarrierKind write_barrier, int32_t offset, uint8_t element_size_log2,
       bool maybe_initializing_or_transitioning,
       IndirectPointerTag maybe_indirect_pointer_tag = kIndirectPointerNullTag) {
     return Base::New(graph, 2 + index.valid(), base, index, value, kind,
@@ -3335,11 +3356,7 @@ struct ParameterOp : FixedArityOperationT<0, ParameterOp> {
   RegisterRepresentation rep;
   const char* debug_name;
 
-  // Parameters are marked as RequiredWhenUnused to make sure that parameters
-  // are at the beginning of the Turboshaft graph. Without RequiredWhenUnused
-  // it can happen that a parameter gets eliminated and later inserted again
-  // in a later location in the graph.
-  static constexpr OpEffects effects = OpEffects().RequiredWhenUnused();
+  static constexpr OpEffects effects = OpEffects();
   base::Vector<const RegisterRepresentation> outputs_rep() const {
     return {&rep, 1};
   }
@@ -3489,6 +3506,7 @@ struct CallOp : OperationT<CallOp> {
                      frame_state, arguments, descriptor, effects);
   }
   auto options() const { return std::tuple{descriptor}; }
+  void PrintOptions(std::ostream& os) const;
 };
 
 // Catch an exception from the first operation of the `successor` block and
@@ -3860,6 +3878,13 @@ struct ProjectionOp : FixedArityOperationT<1, ProjectionOp> {
   }
   auto options() const { return std::tuple{index}; }
 };
+
+using ProjectionMask = MaskBuilder<ProjectionOp, FIELD(ProjectionOp, index)>;
+
+namespace Opmask {
+using kProjection0 = ProjectionMask::For<0>;
+using kProjection1 = ProjectionMask::For<1>;
+}  // namespace Opmask
 
 struct CheckTurboshaftTypeOfOp
     : FixedArityOperationT<1, CheckTurboshaftTypeOfOp> {
@@ -6158,12 +6183,43 @@ struct WasmTypeCastOp : OperationT<WasmTypeCastOp> {
   }
 };
 
-struct ExternInternalizeOp : FixedArityOperationT<1, ExternInternalizeOp> {
+// Annotate a value with a wasm type.
+// This is a helper operation to propagate type information from the graph
+// builder to type-based optimizations and will then be removed.
+struct WasmTypeAnnotationOp : FixedArityOperationT<1, WasmTypeAnnotationOp> {
+  static constexpr OpEffects effects = OpEffects();
+  wasm::ValueType type;
+
+  explicit WasmTypeAnnotationOp(OpIndex value, wasm::ValueType type)
+      : Base(value), type(type) {}
+
+  V<Tagged> value() const { return Base::input(0); }
+
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Tagged()>();
+  }
+
+  base::Vector<const MaybeRegisterRepresentation> inputs_rep(
+      ZoneVector<MaybeRegisterRepresentation>& storage) const {
+    return MaybeRepVector<MaybeRegisterRepresentation::Tagged()>();
+  }
+
+  void Validate(const Graph& graph) const {
+    // In theory, the operation could be used for non-reference types as well.
+    // This would require updating inputs_rep and outputs_rep to be based on
+    // the wasm type.
+    DCHECK(type.is_object_reference());
+  }
+
+  auto options() const { return std::tuple(type); }
+};
+
+struct AnyConvertExternOp : FixedArityOperationT<1, AnyConvertExternOp> {
   static constexpr OpEffects effects =
       SmiValuesAre31Bits() ? OpEffects().CanReadMemory()
                            : OpEffects().CanReadMemory().CanAllocate();
 
-  explicit ExternInternalizeOp(V<Tagged> object) : Base(object) {}
+  explicit AnyConvertExternOp(V<Tagged> object) : Base(object) {}
 
   V<Tagged> object() const { return Base::input(0); }
 
@@ -6181,10 +6237,10 @@ struct ExternInternalizeOp : FixedArityOperationT<1, ExternInternalizeOp> {
   auto options() const { return std::tuple(); }
 };
 
-struct ExternExternalizeOp : FixedArityOperationT<1, ExternExternalizeOp> {
+struct ExternConvertAnyOp : FixedArityOperationT<1, ExternConvertAnyOp> {
   static constexpr OpEffects effects = OpEffects();
 
-  explicit ExternExternalizeOp(V<Tagged> object) : Base(object) {}
+  explicit ExternConvertAnyOp(V<Tagged> object) : Base(object) {}
 
   V<Tagged> object() const { return Base::input(0); }
 
@@ -6204,6 +6260,7 @@ struct ExternExternalizeOp : FixedArityOperationT<1, ExternExternalizeOp> {
 
 struct StructGetOp : FixedArityOperationT<1, StructGetOp> {
   const wasm::StructType* type;
+  uint32_t type_index;
   int field_index;
   bool is_signed;  // `false` only for unsigned packed type accesses.
   CheckForNull null_check;
@@ -6221,10 +6278,11 @@ struct StructGetOp : FixedArityOperationT<1, StructGetOp> {
     return result;
   }
 
-  StructGetOp(OpIndex object, const wasm::StructType* type, int field_index,
-              bool is_signed, CheckForNull null_check)
+  StructGetOp(OpIndex object, const wasm::StructType* type, uint32_t type_index,
+              int field_index, bool is_signed, CheckForNull null_check)
       : Base(object),
         type(type),
+        type_index(type_index),
         field_index(field_index),
         is_signed(is_signed),
         null_check(null_check) {}
@@ -6246,12 +6304,13 @@ struct StructGetOp : FixedArityOperationT<1, StructGetOp> {
   }
 
   auto options() const {
-    return std::tuple{type, field_index, is_signed, null_check};
+    return std::tuple{type, type_index, field_index, is_signed, null_check};
   }
 };
 
 struct StructSetOp : FixedArityOperationT<2, StructSetOp> {
   const wasm::StructType* type;
+  uint32_t type_index;
   int field_index;
   CheckForNull null_check;
 
@@ -6269,9 +6328,10 @@ struct StructSetOp : FixedArityOperationT<2, StructSetOp> {
   }
 
   StructSetOp(OpIndex object, OpIndex value, const wasm::StructType* type,
-              int field_index, CheckForNull null_check)
+              uint32_t type_index, int field_index, CheckForNull null_check)
       : Base(object, value),
         type(type),
+        type_index(type_index),
         field_index(field_index),
         null_check(null_check) {}
 
@@ -6292,7 +6352,9 @@ struct StructSetOp : FixedArityOperationT<2, StructSetOp> {
     DCHECK_LT(field_index, type->field_count());
   }
 
-  auto options() const { return std::tuple{type, field_index, null_check}; }
+  auto options() const {
+    return std::tuple{type, type_index, field_index, null_check};
+  }
 };
 
 struct ArrayGetOp : FixedArityOperationT<2, ArrayGetOp> {
@@ -6394,6 +6456,80 @@ struct ArrayLengthOp : FixedArityOperationT<1, ArrayLengthOp> {
   void Validate(const Graph& graph) const {}
 
   auto options() const { return std::tuple{null_check}; }
+};
+
+struct WasmAllocateArrayOp : FixedArityOperationT<2, WasmAllocateArrayOp> {
+  static constexpr OpEffects effects =
+      OpEffects().CanAllocate().CanLeaveCurrentFunction();
+
+  const wasm::ArrayType* array_type;
+
+  explicit WasmAllocateArrayOp(V<Map> rtt, V<Word32> length,
+                               const wasm::ArrayType* array_type)
+      : Base(rtt, length), array_type(array_type) {}
+
+  V<Map> rtt() const { return Base::input(0); }
+  V<Word32> length() const { return Base::input(1); }
+
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Tagged()>();
+  }
+
+  base::Vector<const MaybeRegisterRepresentation> inputs_rep(
+      ZoneVector<MaybeRegisterRepresentation>& storage) const {
+    return MaybeRepVector<MaybeRegisterRepresentation::Tagged(),
+                          MaybeRegisterRepresentation::Word32()>();
+  }
+
+  void Validate(const Graph& graph) const {}
+  auto options() const { return std::tuple{array_type}; }
+  void PrintOptions(std::ostream& os) const;
+};
+
+struct WasmAllocateStructOp : FixedArityOperationT<1, WasmAllocateStructOp> {
+  static constexpr OpEffects effects =
+      OpEffects().CanAllocate().CanLeaveCurrentFunction();
+
+  const wasm::StructType* struct_type;
+
+  explicit WasmAllocateStructOp(V<Map> rtt, const wasm::StructType* struct_type)
+      : Base(rtt), struct_type(struct_type) {}
+
+  V<Map> rtt() const { return Base::input(0); }
+
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Tagged()>();
+  }
+
+  base::Vector<const MaybeRegisterRepresentation> inputs_rep(
+      ZoneVector<MaybeRegisterRepresentation>& storage) const {
+    return MaybeRepVector<MaybeRegisterRepresentation::Tagged()>();
+  }
+
+  void Validate(const Graph& graph) const {}
+  auto options() const { return std::tuple{struct_type}; }
+};
+
+struct WasmRefFuncOp : FixedArityOperationT<1, WasmRefFuncOp> {
+  static constexpr OpEffects effects = OpEffects().CanAllocate();
+  uint32_t function_index;
+
+  explicit WasmRefFuncOp(V<Tagged> wasm_instance, uint32_t function_index)
+      : Base(wasm_instance), function_index(function_index) {}
+
+  OpIndex instance() const { return Base::input(0); }
+
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return RepVector<RegisterRepresentation::Tagged()>();
+  }
+
+  base::Vector<const MaybeRegisterRepresentation> inputs_rep(
+      ZoneVector<MaybeRegisterRepresentation>& storage) const {
+    return MaybeRepVector<MaybeRegisterRepresentation::Tagged()>();
+  }
+
+  void Validate(const Graph& graph) const {}
+  auto options() const { return std::tuple{function_index}; }
 };
 
 // Casts a JavaScript string to a flattened wtf16 string.
@@ -7359,6 +7495,39 @@ inline base::Vector<const MaybeRegisterRepresentation> Operation::inputs_rep(
 
 bool IsUnlikelySuccessor(const Block* block, const Block* successor,
                          const Graph& graph);
+
+// All operations whose `saturated_use_count` is 0 are unused and can be
+// skipped. Analyzers modify the input graph in-place when they want to mark
+// some Operations as removeable. In order to make that work for operations that
+// have no uses such as Goto and Branch, all operations that have the property
+// `IsRequiredWhenUnused()` have a non-zero `saturated_use_count`.
+V8_INLINE bool ShouldSkipOperation(const Operation& op) {
+  return op.saturated_use_count.IsZero();
+}
+
+namespace detail {
+// Computes the number of inputs of an operation, ignoring non-OpIndex inputs
+// (which are always inlined in the operation) and `base::Vector<OpIndex>`
+// inputs.
+template <typename T>
+constexpr size_t input_count(T) {
+  return 0;
+}
+constexpr size_t input_count() { return 0; }
+constexpr size_t input_count(OpIndex) { return 1; }
+constexpr size_t input_count(base::Vector<const OpIndex> inputs) {
+  return inputs.size();
+}
+}  // namespace detail
+
+template <typename Op, typename... Args>
+Op* CreateOperation(base::SmallVector<OperationStorageSlot, 32>& storage,
+                    Args... args) {
+  size_t size = Operation::StorageSlotCount(
+      Op::opcode, (0 + ... + detail::input_count(args)));
+  storage.resize_no_init(size);
+  return new (storage.data()) Op(args...);
+}
 
 #undef FIELD
 

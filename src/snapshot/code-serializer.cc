@@ -171,7 +171,8 @@ void CodeSerializer::SerializeObjectImpl(Handle<HeapObject> obj,
         // Clear debug info.
         if (debug_info->HasInstrumentedBytecodeArray()) {
           restore_bytecode = true;
-          sfi->SetActiveBytecodeArray(debug_info->OriginalBytecodeArray());
+          sfi->SetActiveBytecodeArray(
+              debug_info->OriginalBytecodeArray(isolate()));
         }
       }
     }
@@ -179,7 +180,7 @@ void CodeSerializer::SerializeObjectImpl(Handle<HeapObject> obj,
     if (restore_bytecode) {
       DisallowGarbageCollection no_gc;
       Tagged<SharedFunctionInfo> sfi = SharedFunctionInfo::cast(*obj);
-      sfi->SetActiveBytecodeArray(debug_info->DebugBytecodeArray());
+      sfi->SetActiveBytecodeArray(debug_info->DebugBytecodeArray(isolate()));
     }
     return;
   } else if (InstanceTypeChecker::IsUncompiledDataWithoutPreparseDataWithJob(
@@ -377,6 +378,7 @@ void FinalizeDeserialization(Isolate* isolate,
   }
 }
 
+#ifdef V8_ENABLE_SPARKPLUG
 void BaselineBatchCompileIfSparkplugCompiled(Isolate* isolate,
                                              Tagged<Script> script) {
   // Here is main thread, we trigger early baseline compilation only in
@@ -392,6 +394,9 @@ void BaselineBatchCompileIfSparkplugCompiled(Isolate* isolate,
     }
   }
 }
+#else
+void BaselineBatchCompileIfSparkplugCompiled(Isolate*, Tagged<Script>) {}
+#endif  // V8_ENABLE_SPARKPLUG
 
 const char* ToString(SerializedCodeSanityCheckResult result) {
   switch (result) {

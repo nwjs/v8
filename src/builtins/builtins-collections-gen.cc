@@ -343,7 +343,7 @@ void BaseCollectionsAssembler::GenerateConstructor(
 
   BIND(&if_undefined);
   ThrowTypeError(context, MessageTemplate::kConstructorNotFunction,
-                 HeapConstant(constructor_function_name));
+                 HeapConstantNoHole(constructor_function_name));
 }
 
 TNode<Object> BaseCollectionsAssembler::GetAddFunction(
@@ -360,7 +360,7 @@ TNode<Object> BaseCollectionsAssembler::GetAddFunction(
 
   BIND(&if_notcallable);
   ThrowTypeError(context, MessageTemplate::kPropertyNotFunction, add_func,
-                 HeapConstant(add_func_name), collection);
+                 HeapConstantNoHole(add_func_name), collection);
 
   BIND(&exit);
   return add_func;
@@ -1820,7 +1820,7 @@ TF_BUILTIN(SetPrototypeDelete, CollectionsBuiltinsAssembler) {
                          "Set.prototype.delete");
 
   // This check breaks a known exploitation technique. See crbug.com/1263462
-  CSA_CHECK(this, TaggedNotEqual(key, HashTableHoleConstant()));
+  CSA_HOLE_SECURITY_CHECK(this, TaggedNotEqual(key, HashTableHoleConstant()));
 
   const TNode<OrderedHashSet> table =
       LoadObjectField<OrderedHashSet>(CAST(receiver), JSMap::kTableOffset);
@@ -2398,7 +2398,7 @@ TNode<HeapObject> WeakCollectionsBuiltinsAssembler::AllocateTable(
   TNode<FixedArray> table = CAST(AllocateFixedArray(HOLEY_ELEMENTS, length));
 
   TNode<Map> map =
-      HeapConstant(EphemeronHashTable::GetMap(ReadOnlyRoots(isolate())));
+      HeapConstantNoHole(EphemeronHashTable::GetMap(ReadOnlyRoots(isolate())));
   StoreMapNoWriteBarrier(table, map);
   StoreFixedArrayElement(table, EphemeronHashTable::kNumberOfElementsIndex,
                          SmiConstant(0), SKIP_WRITE_BARRIER);
@@ -2582,9 +2582,10 @@ TNode<Word32T> WeakCollectionsBuiltinsAssembler::ShouldShrink(
 
 TNode<IntPtrT> WeakCollectionsBuiltinsAssembler::ValueIndexFromKeyIndex(
     TNode<IntPtrT> key_index) {
-  return IntPtrAdd(key_index,
-                   IntPtrConstant(EphemeronHashTable::ShapeT::kEntryValueIndex -
-                                  EphemeronHashTable::kEntryKeyIndex));
+  return IntPtrAdd(
+      key_index,
+      IntPtrConstant(EphemeronHashTable::TodoShape::kEntryValueIndex -
+                     EphemeronHashTable::kEntryKeyIndex));
 }
 
 TF_BUILTIN(WeakMapConstructor, WeakCollectionsBuiltinsAssembler) {
@@ -2767,7 +2768,7 @@ TF_BUILTIN(WeakMapPrototypeDelete, CodeStubAssembler) {
                          "WeakMap.prototype.delete");
 
   // This check breaks a known exploitation technique. See crbug.com/1263462
-  CSA_CHECK(this, TaggedNotEqual(key, TheHoleConstant()));
+  CSA_HOLE_SECURITY_CHECK(this, TaggedNotEqual(key, TheHoleConstant()));
 
   Return(CallBuiltin(Builtin::kWeakCollectionDelete, context, receiver, key));
 }
@@ -2818,7 +2819,7 @@ TF_BUILTIN(WeakSetPrototypeDelete, CodeStubAssembler) {
                          "WeakSet.prototype.delete");
 
   // This check breaks a known exploitation technique. See crbug.com/1263462
-  CSA_CHECK(this, TaggedNotEqual(value, TheHoleConstant()));
+  CSA_HOLE_SECURITY_CHECK(this, TaggedNotEqual(value, TheHoleConstant()));
 
   Return(CallBuiltin(Builtin::kWeakCollectionDelete, context, receiver, value));
 }

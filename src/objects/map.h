@@ -29,11 +29,9 @@ enum InstanceType : uint16_t;
 
 #define DATA_ONLY_VISITOR_ID_LIST(V) \
   V(BigInt)                          \
-  V(ByteArray)                       \
   V(CoverageInfo)                    \
   V(DataObject)                      \
   V(FeedbackMetadata)                \
-  V(FixedDoubleArray)                \
   IF_WASM(V, WasmNull)
 
 #define POINTER_VISITOR_ID_LIST(V)      \
@@ -46,11 +44,11 @@ enum InstanceType : uint16_t;
   V(InstructionStream)                  \
   V(Code)                               \
   V(DataHandler)                        \
+  V(DebugInfo)                          \
   V(EmbedderDataArray)                  \
   V(EphemeronHashTable)                 \
   V(ExternalString)                     \
   V(FeedbackCell)                       \
-  V(FixedArray)                         \
   V(FreeSpace)                          \
   V(JSApiObject)                        \
   V(JSArrayBuffer)                      \
@@ -99,7 +97,8 @@ enum InstanceType : uint16_t;
   IF_WASM(V, WasmSuspenderObject)       \
   IF_WASM(V, WasmTypeInfo)              \
   IF_WASM(V, WasmContinuationObject)    \
-  V(WeakCell)
+  V(WeakCell)                           \
+  SIMPLE_HEAP_OBJECT_LIST1(V)
 
 #define TORQUE_VISITOR_ID_LIST(V)     \
   TORQUE_DATA_ONLY_VISITOR_ID_LIST(V) \

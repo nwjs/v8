@@ -31,6 +31,7 @@
 #include <csignal>
 #include <map>
 #include <memory>
+#include <sstream>
 #include <string>
 
 #include "test/cctest/cctest.h"
@@ -4924,6 +4925,51 @@ TEST(MessageGetSourceLine) {
             message->GetSourceLine(context).ToLocalChecked()));
         CHECK_EQ("      throw new Error();", result);
       });
+}
+
+void GetCurrentStackTrace(const v8::FunctionCallbackInfo<v8::Value>& args) {
+  std::stringstream ss;
+  v8::Message::PrintCurrentStackTrace(args.GetIsolate(), ss);
+  std::string str = ss.str();
+  args.GetReturnValue().Set(v8_str(str.c_str()));
+}
+
+THREADED_TEST(MessagePrintCurrentStackTrace) {
+  v8::Isolate* isolate = CcTest::isolate();
+  v8::HandleScope scope(isolate);
+  Local<ObjectTemplate> templ = ObjectTemplate::New(isolate);
+  templ->Set(isolate, "getCurrentStackTrace",
+             v8::FunctionTemplate::New(isolate, GetCurrentStackTrace));
+  LocalContext context(nullptr, templ);
+
+  v8::ScriptOrigin origin = v8::ScriptOrigin(isolate, v8_str("test"), 0, 0);
+  v8::Local<v8::String> script = v8_str(
+      "function c() {\n"
+      "  return getCurrentStackTrace();\n"
+      "}\n"
+      "function b() {\n"
+      "  return c();\n"
+      "}\n"
+      "function a() {\n"
+      "  return b();\n"
+      "}\n"
+      "a();");
+  v8::Local<v8::Value> stack_trace =
+      v8::Script::Compile(context.local(), script, &origin)
+          .ToLocalChecked()
+          ->Run(context.local())
+          .ToLocalChecked();
+
+  CHECK(stack_trace->IsString());
+  v8::String::Utf8Value stack_trace_value(isolate,
+                                          stack_trace.As<v8::String>());
+  std::string stack_trace_string(*stack_trace_value);
+  std::string expected(
+      "c (test:2:10)\n"
+      "b (test:5:10)\n"
+      "a (test:8:10)\n"
+      "test:10:1");
+  CHECK_EQ(stack_trace_string, expected);
 }
 
 THREADED_TEST(GetSetProperty) {
@@ -13826,7 +13872,7 @@ UNINITIALIZED_TEST(SetJitCodeEventHandler) {
   i::v8_flags.incremental_marking = false;
   i::v8_flags.stress_concurrent_allocation = false;  // For SimulateFullSpace.
   // Batch compilation can cause different owning spaces for foo and bar.
-#if ENABLE_SPARKPLUG
+#ifdef V8_ENABLE_SPARKPLUG
   i::v8_flags.baseline_batch_compilation = false;
 #endif
   if (!i::v8_flags.compact) return;
@@ -16924,9 +16970,6 @@ TEST(GetHeapSpaceStatistics) {
   auto unused = i_isolate->factory()->TryNewFixedArray(512 * 1024,
                                                        i::AllocationType::kOld);
   USE(unused);
-  unused = i_isolate->factory()->TryNewFixedArray(512 * 1024,
-                                                  i::AllocationType::kTrusted);
-  USE(unused);
 
   isolate->GetHeapStatistics(&heap_statistics);
 
@@ -19589,7 +19632,7 @@ static int CountLiveMapsInMapCache(i::Tagged<i::Context> context) {
   int length = map_cache->length();
   int count = 0;
   for (int i = 0; i < length; i++) {
-    if (map_cache->Get(i)->IsWeak()) count++;
+    if (map_cache->get(i)->IsWeak()) count++;
   }
   return count;
 }
@@ -29652,7 +29695,7 @@ class AllowEmbedderObjects : public v8::Context::DeepFreezeDelegate {
  public:
   bool FreezeEmbedderObjectAndGetChildren(
       v8::Local<v8::Object> obj,
-      std::vector<v8::Local<v8::Object>>& children_out) override {
+      v8::LocalVector<v8::Object>& children_out) override {
     return true;
   }
 };
@@ -29746,7 +29789,7 @@ class HiddenDataDelegate : public v8::Context::DeepFreezeDelegate {
 
   bool FreezeEmbedderObjectAndGetChildren(
       v8::Local<v8::Object> obj,
-      std::vector<v8::Local<v8::Object>>& children_out) override {
+      v8::LocalVector<v8::Object>& children_out) override {
     int fields = obj->InternalFieldCount();
     for (int idx = 0; idx < fields; idx++) {
       v8::Local<v8::Value> child_value =
@@ -29766,7 +29809,7 @@ class HiddenDataDelegate : public v8::Context::DeepFreezeDelegate {
 
  private:
   bool FreezeExternal(v8::Local<v8::External> ext,
-                      std::vector<v8::Local<v8::Object>>& children_out) {
+                      v8::LocalVector<v8::Object>& children_out) {
     if (ext->Value() == my_object_->Value()) {
       MyObject* my_obj = static_cast<MyObject*>(ext->Value());
       if (my_obj->Freeze()) {

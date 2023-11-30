@@ -772,19 +772,27 @@ class V8_EXPORT_PRIVATE SharedMacroAssembler : public SharedMacroAssemblerBase {
     ASM_CODE_COMMENT(this);
     Operand int32_overflow_op = ExternalReferenceAsOperand(
         ExternalReference::address_of_wasm_int32_overflow_as_float(), scratch);
+
+    // NAN->0, negative->0.
+    Pxor(tmp, tmp);
+    if (CpuFeatures::IsSupported(AVX)) {
+      CpuFeatureScope scope(this, AVX);
+      vmaxps(dst, src, tmp);
+    } else {
+      if (dst != src) movaps(dst, src);
+      maxps(dst, tmp);
+    }
+
     if (CpuFeatures::IsSupported(AVX)) {
       CpuFeatureScope avx_scope(this, AVX);
-      vcmpltps(tmp, src, int32_overflow_op);
+      vcmpltps(tmp, dst, int32_overflow_op);
     } else {
-      movaps(tmp, src);
+      movaps(tmp, dst);
       cmpltps(tmp, int32_overflow_op);
     }
     // In tmp, lanes < INT32_MAX are left alone, other lanes are zeroed.
-    Pand(tmp, src);
+    Pand(tmp, dst);
     // tmp = src with all the valid conversions
-    if (dst != src) {
-      Movaps(dst, src);
-    }
     // In dst, lanes < INT32_MAX are zeroed, other lanes left alone.
     Pxor(dst, tmp);
     // tmp contains only lanes which can be converted correctly (<INT32_MAX)

@@ -34,15 +34,14 @@
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
 
-//
-// Most object types in the V8 JavaScript are described in this file.
-//
-
 namespace v8 {
 namespace internal {
 
 struct InliningPosition;
+class LookupIterator;
 class PropertyDescriptorObject;
+class ReadOnlyRoots;
+class RootVisitor;
 
 // UNSAFE_SKIP_WRITE_BARRIER skips the write barrier.
 // SKIP_WRITE_BARRIER skips the write barrier and asserts that this is safe in
@@ -607,6 +606,7 @@ V8_INLINE bool IsNumber(Tagged<Object> obj, ReadOnlyRoots roots);
 // A wrapper around IsHole to make it easier to distinguish from specific hole
 // checks (e.g. IsTheHole).
 V8_INLINE bool IsAnyHole(Tagged<Object> obj, PtrComprCageBase cage_base);
+V8_INLINE bool IsAnyHole(Tagged<Object> obj);
 
 // Oddball checks are faster when they are raw pointer comparisons, so the
 // isolate/read-only roots overloads should be preferred where possible.

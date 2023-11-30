@@ -20,30 +20,29 @@ class StackCheckReducer : public Next {
  public:
   TURBOSHAFT_REDUCER_BOILERPLATE()
 
-  OpIndex REDUCE(Parameter)(int32_t parameter_index, RegisterRepresentation rep,
-                            const char* debug_name = "") {
-    OpIndex result = Next::ReduceParameter(parameter_index, rep, debug_name);
-    if (parameter_index == 0) {
-      param0_ = result;
-    }
-    return result;
-  }
-
   OpIndex REDUCE(StackCheck)(StackCheckOp::CheckOrigin origin,
                              StackCheckOp::CheckKind kind) {
+    V<WordPtr> limit = __ Load(
+        __ LoadRootRegister(), LoadOp::Kind::RawAligned(),
+        MemoryRepresentation::PointerSized(), IsolateData::jslimit_offset());
+    compiler::StackCheckKind check_kind =
+        origin == StackCheckOp::CheckOrigin::kFromJS
+            ? compiler::StackCheckKind::kJSFunctionEntry
+            : compiler::StackCheckKind::kWasm;
+    V<Word32> check = __ StackPointerGreaterThan(limit, check_kind);
+    IF_NOT (LIKELY(check)) {
+      if (origin == StackCheckOp::CheckOrigin::kFromJS) {
+        if (kind == StackCheckOp::CheckKind::kLoopCheck) {
+          UNIMPLEMENTED();
+        }
+        DCHECK_EQ(kind, StackCheckOp::CheckKind::kFunctionHeaderCheck);
+
+        if (!isolate_) isolate_ = PipelineData::Get().isolate();
+        __ CallRuntime_StackGuardWithGap(isolate_, __ NoContextConstant(),
+                                         __ StackCheckOffset());
+      }
 #ifdef V8_ENABLE_WEBASSEMBLY
-    if (origin == StackCheckOp::CheckOrigin::kFromWasm) {
-      V<Tagged> instance_node = param0_;
-      DCHECK(instance_node.valid());
-      V<WordPtr> limit_address =
-          __ Load(instance_node, LoadOp ::Kind ::TaggedBase().Immutable(),
-                  MemoryRepresentation ::PointerSized(),
-                  WasmInstanceObject ::kStackLimitAddressOffset);
-      V<WordPtr> limit = __ Load(limit_address, LoadOp::Kind::RawAligned(),
-                                 MemoryRepresentation::PointerSized(), 0);
-      V<Word32> check =
-          __ StackPointerGreaterThan(limit, compiler::StackCheckKind::kWasm);
-      IF_NOT (LIKELY(check)) {
+      else if (origin == StackCheckOp::CheckOrigin::kFromWasm) {
         // TODO(14108): Cache descriptor.
         V<WordPtr> builtin =
             __ RelocatableWasmBuiltinCallTarget(Builtin::kWasmStackGuard);
@@ -59,18 +58,16 @@ class StackCheckReducer : public Next {
             call_descriptor, compiler::CanThrow::kNo, __ graph_zone());
         __ Call(builtin, {}, ts_call_descriptor);
       }
-      END_IF
-      return OpIndex::Invalid();
-    }
 #endif  // V8_ENABLE_WEBASSEMBLY
-    // TODO(turboshaft): Implement stack checks for JavaScript.
-    UNIMPLEMENTED();
+    }
+    END_IF
+    return OpIndex::Invalid();
   }
 
  private:
-  // For WebAssembly, param0 is the instance, we store it to use it for the
-  // stack check.
-  OpIndex param0_ = OpIndex::Invalid();
+  Isolate* isolate_ = nullptr;
+  // We cache the instance because we need it to load the limit_address used to
+  // lower stack checks.
 };
 
 #include "src/compiler/turboshaft/undef-assembler-macros.inc"

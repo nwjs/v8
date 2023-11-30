@@ -128,6 +128,9 @@ class YoungGenerationMarkingVerifier : public MarkingVerifierBase {
         GetPtrComprCageBaseFromOnHeapAddress(start.address());
     for (TSlot slot = start; slot < end; ++slot) {
       typename TSlot::TObject object = slot.load(cage_base);
+#ifdef V8_ENABLE_DIRECT_LOCAL
+      if (object.ptr() == kTaggedNullAddress) continue;
+#endif
       Tagged<HeapObject> heap_object;
       // Minor MS treats weak references as strong.
       if (object.GetHeapObject(&heap_object)) {
@@ -303,11 +306,11 @@ void MinorMarkSweepCollector::StartMarking() {
 #endif  // VERIFY_HEAP
 
   auto* cpp_heap = CppHeap::From(heap_->cpp_heap_);
+  // CppHeap's marker must be initialized before the V8 marker to allow
+  // exchanging of worklists.
   if (cpp_heap && cpp_heap->generational_gc_supported()) {
     TRACE_GC(heap_->tracer(), GCTracer::Scope::MINOR_MS_MARK_EMBEDDER_PROLOGUE);
-    // InitializeTracing should be called before visitor initialization in
-    // StartMarking.
-    cpp_heap->InitializeTracing(CppHeap::CollectionType::kMinor);
+    cpp_heap->InitializeMarking(CppHeap::CollectionType::kMinor);
   }
   DCHECK_NULL(ephemeron_table_list_);
   ephemeron_table_list_ = std::make_unique<EphemeronRememberedSet::TableList>();
@@ -327,7 +330,7 @@ void MinorMarkSweepCollector::StartMarking() {
     TRACE_GC(heap_->tracer(), GCTracer::Scope::MINOR_MS_MARK_EMBEDDER_PROLOGUE);
     // StartTracing immediately starts marking which requires V8 worklists to
     // be set up.
-    cpp_heap->StartTracing();
+    cpp_heap->StartMarking();
   }
 }
 
@@ -363,7 +366,6 @@ void MinorMarkSweepCollector::CollectGarbage() {
   DCHECK(!sweeper()->AreMinorSweeperTasksRunning());
   DCHECK(sweeper()->IsSweepingDoneForSpace(NEW_SPACE));
 
-  heap_->allocator()->new_space_allocator()->FreeLinearAllocationArea();
   heap_->new_lo_space()->ResetPendingObject();
 
   is_in_atomic_pause_.store(true, std::memory_order_relaxed);

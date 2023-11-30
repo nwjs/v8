@@ -247,6 +247,13 @@ std::pair<HeapType, uint32_t> read_heap_type(Decoder* decoder,
       case kExternRefCode:
       case kFuncRefCode:
         return {HeapType::from_code(code), length};
+      case kExnRefCode:
+        if (!VALIDATE(enabled.has_exnref())) {
+          DecodeError<ValidationTag>(decoder, pc,
+                                     "invalid heap type 'exnref', enable with "
+                                     "--experimental-wasm-exnref");
+        }
+        return {HeapType::from_code(code), length};
       case kStringRefCode:
       case kStringViewWtf8Code:
       case kStringViewWtf16Code:
@@ -314,6 +321,14 @@ std::pair<ValueType, uint32_t> read_value_type(Decoder* decoder,
     case kExternRefCode:
     case kFuncRefCode:
       return {ValueType::RefNull(HeapType::from_code(code)), 1};
+    case kExnRefCode:
+      if (!VALIDATE(enabled.has_exnref())) {
+        DecodeError<ValidationTag>(decoder, pc,
+                                   "invalid value type 'exnref', enable with"
+                                   "--experimental-wasm-exnref");
+        return {kWasmBottom, 0};
+      }
+      return {kWasmExnRef, 1};
     case kStringRefCode:
     case kStringViewWtf8Code:
     case kStringViewWtf16Code:
@@ -2353,8 +2368,8 @@ class WasmDecoder : public Decoder {
           case kExprRefI31:
           case kExprI31GetS:
           case kExprI31GetU:
-          case kExprExternInternalize:
-          case kExprExternExternalize:
+          case kExprAnyConvertExtern:
+          case kExprExternConvertAny:
           case kExprArrayLen:
             return length;
           case kExprStringNewUtf8:
@@ -4942,21 +4957,21 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
         pc_offset += flags_imm.length;
         return ParseBrOnCastFail(opcode, pc_offset, flags_imm.flags);
       }
-      case kExprExternInternalize: {
+      case kExprAnyConvertExtern: {
         Value extern_val = Pop(kWasmExternRef);
         ValueType intern_type = ValueType::RefMaybeNull(
             HeapType::kAny, Nullability(extern_val.type.is_nullable()));
         Value* intern_val = Push(intern_type);
-        CALL_INTERFACE_IF_OK_AND_REACHABLE(UnOp, kExprExternInternalize,
+        CALL_INTERFACE_IF_OK_AND_REACHABLE(UnOp, kExprAnyConvertExtern,
                                            extern_val, intern_val);
         return opcode_length;
       }
-      case kExprExternExternalize: {
+      case kExprExternConvertAny: {
         Value val = Pop(kWasmAnyRef);
         ValueType extern_type = ValueType::RefMaybeNull(
             HeapType::kExtern, Nullability(val.type.is_nullable()));
         Value* extern_val = Push(extern_type);
-        CALL_INTERFACE_IF_OK_AND_REACHABLE(UnOp, kExprExternExternalize, val,
+        CALL_INTERFACE_IF_OK_AND_REACHABLE(UnOp, kExprExternConvertAny, val,
                                            extern_val);
         return opcode_length;
       }

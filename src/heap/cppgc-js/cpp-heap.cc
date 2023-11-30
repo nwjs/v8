@@ -646,8 +646,11 @@ CppHeap::MarkingType CppHeap::SelectMarkingType() const {
 
   const MarkingType marking_type = marking_support();
 
+  // CollectionType is major at this point. Check the surrounding
+  // MarkCompactCollector for whether we should rely on background threads in
+  // this GC cycle.
   if (marking_type == MarkingType::kIncrementalAndConcurrent && heap_ &&
-      !heap_->ShouldUseBackgroundThreads()) {
+      !heap_->mark_compact_collector()->UseBackgroundThreadsInCycle()) {
     return MarkingType::kIncremental;
   }
 
@@ -678,7 +681,7 @@ void CppHeap::UpdateGCCapabilitiesFromFlags() {
                           : CppHeap::SweepingType::kIncrementalAndConcurrent;
 }
 
-void CppHeap::InitializeTracing(CollectionType collection_type,
+void CppHeap::InitializeMarking(CollectionType collection_type,
                                 GarbageCollectionFlags gc_flags) {
   DCHECK(!collection_type_);
 
@@ -757,7 +760,7 @@ MarkingWorklists::Local* GetV8MarkingWorklists(
 }
 }  // namespace
 
-void CppHeap::StartTracing() {
+void CppHeap::StartMarking() {
   CHECK(marking_done_);
   if (!TracingInitialized()) return;
   if (isolate_) {
@@ -863,7 +866,7 @@ void RecordEmbedderSpeed(GCTracer* tracer, base::TimeDelta marking_time,
 
 }  // namespace
 
-void CppHeap::TraceEpilogue() {
+void CppHeap::FinishMarkingAndStartSweeping() {
   CHECK(in_atomic_pause_);
   CHECK(marking_done_);
 
@@ -940,7 +943,6 @@ void CppHeap::TraceEpilogue() {
 
   in_atomic_pause_ = false;
   collection_type_.reset();
-  sweeper().NotifyDoneIfNeeded();
 }
 
 void CppHeap::AllocatedObjectSizeIncreased(size_t bytes) {
@@ -1015,15 +1017,16 @@ void CppHeap::CollectGarbageForTesting(CollectionType collection_type,
     // Perform an atomic GC, with starting incremental/concurrent marking and
     // immediately finalizing the garbage collection.
     if (!IsMarking()) {
-      InitializeTracing(collection_type, GarbageCollectionFlagValues::kForced);
-      StartTracing();
+      InitializeMarking(collection_type, GarbageCollectionFlagValues::kForced);
+      StartMarking();
     }
     EnterFinalPause(stack_state);
     CHECK(AdvanceTracing(v8::base::TimeDelta::Max()));
     if (FinishConcurrentMarkingIfNeeded()) {
       CHECK(AdvanceTracing(v8::base::TimeDelta::Max()));
     }
-    TraceEpilogue();
+    FinishMarkingAndStartSweeping();
+    FinishAtomicSweepingIfRunning();
   });
 }
 
@@ -1041,9 +1044,9 @@ void CppHeap::StartIncrementalGarbageCollectionForTesting() {
   DCHECK_NULL(isolate_);
   if (IsMarking()) return;
   force_incremental_marking_for_testing_ = true;
-  InitializeTracing(CollectionType::kMajor,
+  InitializeMarking(CollectionType::kMajor,
                     GarbageCollectionFlagValues::kForced);
-  StartTracing();
+  StartMarking();
   force_incremental_marking_for_testing_ = false;
 }
 
@@ -1144,6 +1147,15 @@ void CppHeap::FinishSweepingIfRunning() {
   sweeper_.FinishIfRunning();
   if (isolate_) {
     isolate_->traced_handles()->DeleteEmptyBlocks();
+  }
+}
+
+void CppHeap::FinishAtomicSweepingIfRunning() {
+  // Young generation GCs are optional and as such sweeping is not necessarily
+  // running.
+  if (sweeper_.IsSweepingInProgress() &&
+      SelectSweepingType() == SweepingType::kAtomic) {
+    FinishSweepingIfRunning();
   }
 }
 

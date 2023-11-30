@@ -694,8 +694,8 @@ void WasmIndirectFunctionTable::Resize(Isolate* isolate,
 
   Handle<FixedUInt32Array> new_sig_ids =
       FixedUInt32Array::New(isolate, new_capacity);
-  new_sig_ids->copy_in(0, old_sig_ids->GetDataStartAddress(),
-                       old_capacity * kUInt32Size);
+  MemCopy(new_sig_ids->begin(), old_sig_ids->begin(),
+          old_capacity * kUInt32Size);
   table->set_sig_ids(*new_sig_ids);
 
   Handle<ExternalPointerArray> new_targets =
@@ -1246,10 +1246,6 @@ Handle<WasmInstanceObject> WasmInstanceObject::New(
     instance->set_data_segment_sizes(*data_segment_sizes);
     instance->set_element_segments(empty_fixed_array);
     instance->set_imported_function_refs(*imported_function_refs);
-    instance->set_stack_limit_address(
-        isolate->stack_guard()->address_of_jslimit());
-    instance->set_real_stack_limit_address(
-        isolate->stack_guard()->address_of_real_jslimit());
     instance->set_new_allocation_limit_address(
         isolate->heap()->NewSpaceAllocationLimitAddress());
     instance->set_new_allocation_top_address(
@@ -1531,6 +1527,9 @@ Handle<JSFunction> WasmInternalFunction::GetOrCreateExternal(
   // {entry} can be cleared, {undefined}, or a ready {Code}.
   if (entry.IsStrongOrWeak() && IsCode(entry.GetHeapObject())) {
     wrapper = handle(Code::cast(entry.GetHeapObject()), isolate);
+  } else if (!function.imported &&
+             CanUseGenericJsToWasmWrapper(module, function.sig)) {
+    wrapper = isolate->builtins()->code_handle(Builtin::kJSToWasmWrapper);
   } else {
     // The wrapper may not exist yet if no function in the exports section has
     // this signature. We compile it and store the wrapper in the module for
@@ -2546,6 +2545,10 @@ MaybeHandle<Object> JSToWasmObject(Isolate* isolate, Handle<Object> value,
       *error_message = "null is not allowed for (ref any)";
       return {};
     }
+    case HeapType::kExn:
+      if (!IsNull(*value, isolate)) return value;
+      *error_message = "null is not allowed for (ref exn)";
+      return {};
     case HeapType::kStruct: {
       if (IsWasmStruct(*value)) {
         return value;

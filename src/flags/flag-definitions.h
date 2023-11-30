@@ -119,11 +119,7 @@
 #error DEBUG_BOOL must be defined at this point.
 #endif  // DEBUG_BOOL
 
-#ifndef ENABLE_SPARKPLUG
-#error ENABLE_SPARKPLUG must be defined at this point.
-#endif  // ENABLE_SPARKPLUG
-
-#if ENABLE_SPARKPLUG
+#if V8_ENABLE_SPARKPLUG
 #define ENABLE_SPARKPLUG_BY_DEFAULT true
 #else
 #define ENABLE_SPARKPLUG_BY_DEFAULT false
@@ -254,8 +250,7 @@ DEFINE_BOOL(js_shipping, true, "enable all shipped JavaScript features")
     "harmony weak references with FinalizationRegistry.prototype.cleanupSome") \
   V(harmony_temporal, "Temporal")                                              \
   V(harmony_shadow_realm, "harmony ShadowRealm")                               \
-  V(harmony_struct, "harmony structs, shared structs, and shared arrays")      \
-  V(harmony_array_from_async, "harmony Array.fromAsync")
+  V(harmony_struct, "harmony structs, shared structs, and shared arrays")
 
 #define JAVASCRIPT_INPROGRESS_FEATURES_BASE(V)
 
@@ -277,9 +272,10 @@ DEFINE_BOOL(js_shipping, true, "enable all shipped JavaScript features")
 #endif
 
 // Features that are complete (but still behind the --harmony flag).
-#define HARMONY_STAGED_BASE(V)                  \
-  V(harmony_set_methods, "harmony Set Methods") \
-  V(harmony_iterator_helpers, "JavaScript iterator helpers")
+#define HARMONY_STAGED_BASE(V)                               \
+  V(harmony_set_methods, "harmony Set Methods")              \
+  V(harmony_iterator_helpers, "JavaScript iterator helpers") \
+  V(harmony_array_from_async, "harmony Array.fromAsync")
 
 #define JAVASCRIPT_STAGED_FEATURES_BASE(V)
 
@@ -297,7 +293,6 @@ DEFINE_WEAK_IMPLICATION(harmony_rab_gsab_transfer, harmony_rab_gsab)
 #define HARMONY_SHIPPING_BASE(V)                                       \
   V(harmony_import_assertions, "harmony import assertions")            \
   V(harmony_change_array_by_copy, "harmony change-Array-by-copy")      \
-  V(harmony_string_is_well_formed, "harmony String#{is,to}WellFormed") \
   V(harmony_rab_gsab,                                                  \
     "harmony ResizableArrayBuffer / GrowableSharedArrayBuffer")        \
   V(harmony_regexp_unicode_sets, "harmony RegExp Unicode Sets")        \
@@ -503,6 +498,15 @@ DEFINE_BOOL_READONLY(direct_local, V8_ENABLE_DIRECT_LOCAL_BOOL,
                      "use direct local handles")
 DEFINE_IMPLICATION(direct_local, conservative_stack_scanning)
 
+#ifdef V8_ENABLE_LOCAL_OFF_STACK_CHECK
+#define V8_ENABLE_LOCAL_OFF_STACK_CHECK_BOOL true
+#else
+#define V8_ENABLE_LOCAL_OFF_STACK_CHECK_BOOL false
+#endif
+DEFINE_BOOL_READONLY(local_off_stack_check,
+                     V8_ENABLE_LOCAL_OFF_STACK_CHECK_BOOL,
+                     "check for off-stack allocation of v8::Local")
+
 #ifdef V8_ENABLE_FUTURE
 #define FUTURE_BOOL true
 #else
@@ -636,7 +640,7 @@ DEFINE_BOOL(maglev_stats_nvp, false,
 DEFINE_BOOL(maglev_function_context_specialization, true,
             "enable function context specialization in maglev")
 
-#if ENABLE_SPARKPLUG
+#ifdef V8_ENABLE_SPARKPLUG
 DEFINE_WEAK_IMPLICATION(future, flush_baseline_code)
 #endif
 
@@ -655,9 +659,9 @@ DEFINE_WEAK_VALUE_IMPLICATION(max_opt < 3, turbofan, false)
 #ifdef V8_ENABLE_MAGLEV
 DEFINE_WEAK_VALUE_IMPLICATION(max_opt < 2, maglev, false)
 #endif  // V8_ENABLE_MAGLEV
-#if ENABLE_SPARKPLUG
+#ifdef V8_ENABLE_SPARKPLUG
 DEFINE_WEAK_VALUE_IMPLICATION(max_opt < 1, sparkplug, false)
-#endif  // ENABLE_SPARKPLUG
+#endif  // V8_ENABLE_SPARKPLUG
 
 // Flag to select wasm trace mark type
 DEFINE_STRING(
@@ -681,10 +685,10 @@ DEFINE_NEG_IMPLICATION(jitless, track_field_types)
 // No code generation at runtime.
 DEFINE_IMPLICATION(jitless, regexp_interpret_all)
 DEFINE_NEG_IMPLICATION(jitless, turbofan)
-#if ENABLE_SPARKPLUG
+#ifdef V8_ENABLE_SPARKPLUG
 DEFINE_NEG_IMPLICATION(jitless, sparkplug)
 DEFINE_NEG_IMPLICATION(jitless, always_sparkplug)
-#endif  // ENABLE_SPARKPLUG
+#endif  // V8_ENABLE_SPARKPLUG
 #ifdef V8_ENABLE_MAGLEV
 DEFINE_NEG_IMPLICATION(jitless, maglev)
 #endif  // V8_ENABLE_MAGLEV
@@ -877,7 +881,7 @@ DEFINE_BOOL(trace_generalization, false, "trace map generalization")
 
 // Flags for Sparkplug
 #undef FLAG
-#if ENABLE_SPARKPLUG
+#if V8_ENABLE_SPARKPLUG
 #define FLAG FLAG_FULL
 #else
 #define FLAG FLAG_READONLY
@@ -885,7 +889,7 @@ DEFINE_BOOL(trace_generalization, false, "trace map generalization")
 DEFINE_BOOL(sparkplug, ENABLE_SPARKPLUG_BY_DEFAULT,
             "enable Sparkplug baseline compiler")
 DEFINE_BOOL(always_sparkplug, false, "directly tier up to Sparkplug code")
-#if ENABLE_SPARKPLUG
+#if V8_ENABLE_SPARKPLUG
 DEFINE_IMPLICATION(always_sparkplug, sparkplug)
 DEFINE_BOOL(baseline_batch_compilation, true, "batch compile Sparkplug code")
 #if defined(V8_OS_DARWIN) && defined(V8_HOST_ARCH_ARM64) && \
@@ -1224,8 +1228,7 @@ DEFINE_BOOL(turbo_optimize_math_minmax, true,
 DEFINE_BOOL(turbo_collect_feedback_in_generic_lowering, false,
             "enable experimental feedback collection in generic lowering.")
 
-DEFINE_BOOL(turboshaft, false, "enable TurboFan's Turboshaft phases for JS")
-DEFINE_WEAK_IMPLICATION(future, turboshaft)
+DEFINE_BOOL(turboshaft, true, "enable TurboFan's Turboshaft phases for JS")
 
 DEFINE_BOOL(turboshaft_enable_debug_features, false,
             "enables Turboshaft's DebugPrint, StaticAssert and "
@@ -1233,12 +1236,14 @@ DEFINE_BOOL(turboshaft_enable_debug_features, false,
 DEFINE_EXPERIMENTAL_FEATURE(turboshaft_wasm,
                             "enable TurboFan's Turboshaft phases for wasm")
 DEFINE_WEAK_IMPLICATION(turboshaft_wasm, turboshaft_load_elimination)
+DEFINE_EXPERIMENTAL_FEATURE(turboshaft_wasm_load_elimination,
+                            "enable Turboshaft's WasmLoadElimination")
+DEFINE_WEAK_IMPLICATION(turboshaft_wasm, turboshaft_wasm_load_elimination)
 DEFINE_EXPERIMENTAL_FEATURE(turboshaft_typed_optimizations,
                             "enable an additional Turboshaft phase that "
                             "performs optimizations based on type information")
-DEFINE_EXPERIMENTAL_FEATURE(
-    turboshaft_instruction_selection,
-    "run instruction selection on Turboshaft IR directly")
+DEFINE_BOOL(turboshaft_instruction_selection, false,
+            "run instruction selection on Turboshaft IR directly")
 DEFINE_EXPERIMENTAL_FEATURE(
     turboshaft_wasm_instruction_selection,
     "run instruction selection on Turboshaft IR directly for wasm")
@@ -1248,6 +1253,8 @@ DEFINE_EXPERIMENTAL_FEATURE(turboshaft_machine_lowering_opt,
                             "enable MachineOptimization during MachineLowering")
 DEFINE_EXPERIMENTAL_FEATURE(turboshaft_loop_unrolling,
                             "enable Turboshaft's loop unrolling")
+DEFINE_EXPERIMENTAL_FEATURE(turboshaft_frontend,
+                            "run (parts of) the frontend in Turboshaft")
 DEFINE_EXPERIMENTAL_FEATURE(
     turboshaft_future,
     "enable Turboshaft features that we want to ship in the not-too-far future")
@@ -2058,6 +2065,7 @@ DEFINE_BOOL(
     "print debug messages for side-effect-free debug-evaluate for testing")
 DEFINE_BOOL(hard_abort, true, "abort by crashing")
 DEFINE_NEG_IMPLICATION(fuzzing, hard_abort)
+DEFINE_NEG_IMPLICATION(hole_fuzzing, hard_abort)
 
 DEFINE_BOOL(experimental_value_unavailable, true,
             "enable experimental <value unavailable> in scopes")
@@ -2353,6 +2361,13 @@ DEFINE_BOOL(
 DEFINE_WEAK_NEG_IMPLICATION(fuzzing, lazy)
 DEFINE_WEAK_IMPLICATION(fuzzing, stress_lazy_source_positions)
 
+DEFINE_BOOL(
+    hole_fuzzing, false,
+    "Fuzzers use this flag to turn DCHECKs into NOPs  and CHECK failures into "
+    "silent exits. This is useful if we want to find memory corruption "
+    "primitives with a leaked hole, where the engine is already in a weird "
+    "state")
+
 #if defined(V8_OS_AIX) && defined(COMPONENT_BUILD)
 // FreezeFlags relies on mprotect() method, which does not work by default on
 // shared mem: https://www.ibm.com/docs/en/aix/7.2?topic=m-mprotect-subroutine
@@ -2404,6 +2419,7 @@ DEFINE_BOOL(trace_minor_ms_parallel_marking, false,
             "trace parallel marking for the young generation")
 DEFINE_BOOL(minor_ms, false, "perform young generation mark sweep GCs")
 DEFINE_IMPLICATION(minor_ms, separate_gc_phases)
+DEFINE_NEG_NEG_IMPLICATION(minor_ms, separate_gc_phases)
 DEFINE_IMPLICATION(minor_ms, page_promotion)
 
 DEFINE_BOOL(concurrent_minor_ms_marking, true,

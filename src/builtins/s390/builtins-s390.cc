@@ -1237,7 +1237,6 @@ static void AdvanceBytecodeOffsetOrReturn(MacroAssembler* masm,
   __ bind(&end);
 }
 
-#if ENABLE_SPARKPLUG
 // static
 void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
   // UseScratchRegisterScope temps(masm);
@@ -1366,7 +1365,6 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
   __ LoadRoot(kInterpreterAccumulatorRegister, RootIndex::kUndefinedValue);
   __ Ret();
 }
-#endif
 
 // static
 void Builtins::Generate_BaselineOutOfLinePrologueDeopt(MacroAssembler* masm) {
@@ -3089,6 +3087,10 @@ void Builtins::Generate_WasmReturnPromiseOnSuspendAsm(MacroAssembler* masm) {
 
 void Builtins::Generate_WasmToJsWrapperAsm(MacroAssembler* masm) { __ Trap(); }
 
+void Builtins::Generate_WasmTrapHandlerLandingPad(MacroAssembler* masm) {
+  __ Trap();
+}
+
 void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
   // TODO(v8:12191): Implement for this platform.
   __ Trap();
@@ -3985,7 +3987,6 @@ void Builtins::Generate_InterpreterOnStackReplacement(MacroAssembler* masm) {
                      D::MaybeTargetCodeRegister());
 }
 
-#if ENABLE_SPARKPLUG
 void Builtins::Generate_BaselineOnStackReplacement(MacroAssembler* masm) {
   using D = OnStackReplacementDescriptor;
   static_assert(D::kParameterCount == 1);
@@ -3995,7 +3996,6 @@ void Builtins::Generate_BaselineOnStackReplacement(MacroAssembler* masm) {
   OnStackReplacement(masm, OsrSourceTier::kBaseline,
                      D::MaybeTargetCodeRegister());
 }
-#endif
 
 void Builtins::Generate_BaselineOrInterpreterEnterAtBytecode(
     MacroAssembler* masm) {

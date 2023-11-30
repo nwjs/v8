@@ -502,7 +502,7 @@ MaybeHandle<String> Object::NoSideEffectsToMaybeString(Isolate* isolate,
     return NoSideEffectsToString(isolate, currInput);
   } else if (IsBigInt(*input)) {
     return BigInt::NoSideEffectsToString(isolate, Handle<BigInt>::cast(input));
-  } else if (IsFunction(*input)) {
+  } else if (IsJSFunctionOrBoundFunctionOrWrappedFunction(*input)) {
     // -- F u n c t i o n
     Handle<String> fun_str;
     if (IsJSBoundFunction(*input)) {
@@ -567,7 +567,7 @@ MaybeHandle<String> Object::NoSideEffectsToMaybeString(Isolate* isolate,
     } else if (*to_string == *isolate->object_to_string()) {
       Handle<Object> ctor = JSReceiver::GetDataProperty(
           isolate, receiver, isolate->factory()->constructor_string());
-      if (IsFunction(*ctor)) {
+      if (IsJSFunctionOrBoundFunctionOrWrappedFunction(*ctor)) {
         Handle<String> ctor_name;
         if (IsJSBoundFunction(*ctor)) {
           ctor_name = JSBoundFunction::GetName(
@@ -1892,9 +1892,14 @@ int HeapObject::SizeFromMap(Tagged<Map> map) const {
   InstanceType instance_type = map->instance_type();
   if (base::IsInRange(instance_type, FIRST_FIXED_ARRAY_TYPE,
                       LAST_FIXED_ARRAY_TYPE)) {
-    return FixedArray::SizeFor(
-        FixedArray::unchecked_cast(*this)->length(kAcquireLoad));
+    return FixedArray::unchecked_cast(*this)->AllocatedSize();
   }
+#define CASE(TypeCamelCase, TYPE_UPPER_CASE)                      \
+  if (instance_type == TYPE_UPPER_CASE##_TYPE) {                  \
+    return TypeCamelCase::unchecked_cast(*this)->AllocatedSize(); \
+  }
+  SIMPLE_HEAP_OBJECT_LIST2(CASE)
+#undef CASE
   if (instance_type == SLOPPY_ARGUMENTS_ELEMENTS_TYPE) {
     return SloppyArgumentsElements::unchecked_cast(*this)->AllocatedSize();
   }
@@ -1909,10 +1914,6 @@ int HeapObject::SizeFromMap(Tagged<Map> map) const {
     // length synchronized.
     return SeqOneByteString::SizeFor(
         SeqOneByteString::unchecked_cast(*this)->length(kAcquireLoad));
-  }
-  if (instance_type == BYTE_ARRAY_TYPE) {
-    return ByteArray::SizeFor(
-        ByteArray::unchecked_cast(*this)->length(kAcquireLoad));
   }
   if (instance_type == BYTECODE_ARRAY_TYPE) {
     return BytecodeArray::SizeFor(
@@ -1934,8 +1935,7 @@ int HeapObject::SizeFromMap(Tagged<Map> map) const {
         SeqTwoByteString::unchecked_cast(*this)->length(kAcquireLoad));
   }
   if (instance_type == FIXED_DOUBLE_ARRAY_TYPE) {
-    return FixedDoubleArray::SizeFor(
-        FixedDoubleArray::unchecked_cast(*this)->length(kAcquireLoad));
+    return FixedDoubleArray::unchecked_cast(*this)->AllocatedSize();
   }
   if (instance_type == FEEDBACK_METADATA_TYPE) {
     return FeedbackMetadata::SizeFor(
@@ -1948,8 +1948,7 @@ int HeapObject::SizeFromMap(Tagged<Map> map) const {
   }
   if (base::IsInRange(instance_type, FIRST_WEAK_FIXED_ARRAY_TYPE,
                       LAST_WEAK_FIXED_ARRAY_TYPE)) {
-    return WeakFixedArray::SizeFor(
-        WeakFixedArray::unchecked_cast(*this)->length(kAcquireLoad));
+    return WeakFixedArray::unchecked_cast(*this)->AllocatedSize();
   }
   if (instance_type == WEAK_ARRAY_LIST_TYPE) {
     return WeakArrayList::SizeForCapacity(
@@ -2682,13 +2681,13 @@ template <class T>
 int AppendUniqueCallbacks(Isolate* isolate, Handle<ArrayList> callbacks,
                           Handle<typename T::Array> array,
                           int valid_descriptors) {
-  int nof_callbacks = callbacks->Length();
+  int nof_callbacks = callbacks->length();
 
   // Fill in new callback descriptors.  Process the callbacks from
   // back to front so that the last callback with a given name takes
   // precedence over previously added callbacks with that name.
   for (int i = nof_callbacks - 1; i >= 0; i--) {
-    Handle<AccessorInfo> entry(AccessorInfo::cast(callbacks->Get(i)), isolate);
+    Handle<AccessorInfo> entry(AccessorInfo::cast(callbacks->get(i)), isolate);
     Handle<Name> key(Name::cast(entry->name()), isolate);
     DCHECK(IsUniqueName(*key));
     // Check if a descriptor with this name already exists before writing.
@@ -2723,7 +2722,7 @@ int AccessorInfo::AppendUnique(Isolate* isolate, Handle<Object> descriptors,
                                Handle<FixedArray> array,
                                int valid_descriptors) {
   Handle<ArrayList> callbacks = Handle<ArrayList>::cast(descriptors);
-  DCHECK_GE(array->length(), callbacks->Length() + valid_descriptors);
+  DCHECK_GE(array->length(), callbacks->length() + valid_descriptors);
   return AppendUniqueCallbacks<FixedArrayAppender>(isolate, callbacks, array,
                                                    valid_descriptors);
 }
@@ -4505,7 +4504,7 @@ MaybeHandle<SharedFunctionInfo> Script::FindSharedFunctionInfo(
   // triggers the mismatch.
   CHECK_LT(function_literal_id, script->shared_function_info_count());
   MaybeObject shared =
-      script->shared_function_infos()->Get(function_literal_id);
+      script->shared_function_infos()->get(function_literal_id);
   Tagged<HeapObject> heap_object;
   if (!shared.GetHeapObject(&heap_object) ||
       IsUndefined(heap_object, isolate)) {
@@ -5098,21 +5097,21 @@ void HashTable<Derived, Shape>::Rehash(PtrComprCageBase cage_base,
 
   // Copy prefix to new array.
   for (int i = kPrefixStartIndex; i < kElementsStartIndex; i++) {
-    new_table->set(i, get(cage_base, i), mode);
+    new_table->set(i, get(i), mode);
   }
 
   // Rehash the elements.
   ReadOnlyRoots roots = GetReadOnlyRoots(cage_base);
   for (InternalIndex i : this->IterateEntries()) {
     uint32_t from_index = EntryToIndex(i);
-    Tagged<Object> k = this->get(cage_base, from_index);
+    Tagged<Object> k = this->get(from_index);
     if (!IsKey(roots, k)) continue;
-    uint32_t hash = Shape::HashForObject(roots, k);
+    uint32_t hash = TodoShape::HashForObject(roots, k);
     uint32_t insertion_index =
         EntryToIndex(new_table->FindInsertionEntry(cage_base, roots, hash));
-    new_table->set_key(insertion_index, get(cage_base, from_index), mode);
-    for (int j = 1; j < Shape::kEntrySize; j++) {
-      new_table->set(insertion_index + j, get(cage_base, from_index + j), mode);
+    new_table->set_key(insertion_index, get(from_index), mode);
+    for (int j = 1; j < TodoShape::kEntrySize; j++) {
+      new_table->set(insertion_index + j, get(from_index + j), mode);
     }
   }
   new_table->SetNumberOfElements(NumberOfElements());
@@ -5124,7 +5123,7 @@ InternalIndex HashTable<Derived, Shape>::EntryForProbe(ReadOnlyRoots roots,
                                                        Tagged<Object> k,
                                                        int probe,
                                                        InternalIndex expected) {
-  uint32_t hash = Shape::HashForObject(roots, k);
+  uint32_t hash = TodoShape::HashForObject(roots, k);
   uint32_t capacity = this->Capacity();
   InternalIndex entry = FirstProbe(hash, capacity);
   for (int i = 1; i < probe; i++) {
@@ -5139,17 +5138,17 @@ void HashTable<Derived, Shape>::Swap(InternalIndex entry1, InternalIndex entry2,
                                      WriteBarrierMode mode) {
   int index1 = EntryToIndex(entry1);
   int index2 = EntryToIndex(entry2);
-  Tagged<Object> temp[Shape::kEntrySize];
+  Tagged<Object> temp[TodoShape::kEntrySize];
   Derived* self = static_cast<Derived*>(this);
-  for (int j = 0; j < Shape::kEntrySize; j++) {
+  for (int j = 0; j < TodoShape::kEntrySize; j++) {
     temp[j] = get(index1 + j);
   }
   self->set_key(index1, get(index2), mode);
-  for (int j = 1; j < Shape::kEntrySize; j++) {
+  for (int j = 1; j < TodoShape::kEntrySize; j++) {
     set(index1 + j, get(index2 + j), mode);
   }
   self->set_key(index2, temp[0], mode);
-  for (int j = 1; j < Shape::kEntrySize; j++) {
+  for (int j = 1; j < TodoShape::kEntrySize; j++) {
     set(index2 + j, temp[j], mode);
   }
 }
@@ -5311,7 +5310,7 @@ GlobalDictionary::TryFindPropertyCellForConcurrentLookupIterator(
   DisallowGarbageCollection no_gc;
   PtrComprCageBase cage_base{isolate};
   ReadOnlyRoots roots(isolate);
-  const int32_t hash = ShapeT::Hash(roots, name);
+  const int32_t hash = TodoShape::Hash(roots, name);
   const uint32_t capacity = Capacity();
   uint32_t count = 1;
   Tagged<Object> undefined = roots.undefined_value();
@@ -5322,8 +5321,8 @@ GlobalDictionary::TryFindPropertyCellForConcurrentLookupIterator(
     Tagged<Object> element = KeyAt(cage_base, entry, kRelaxedLoad);
     if (isolate->heap()->IsPendingAllocation(element)) return {};
     if (element == undefined) return {};
-    if (ShapeT::kMatchNeedsHoleCheck && element == the_hole) continue;
-    if (!ShapeT::IsMatch(name, element)) continue;
+    if (TodoShape::kMatchNeedsHoleCheck && element == the_hole) continue;
+    if (!TodoShape::IsMatch(name, element)) continue;
     CHECK(IsPropertyCell(element, cage_base));
     return PropertyCell::cast(element);
   }
@@ -5337,7 +5336,7 @@ Handle<StringSet> StringSet::Add(Isolate* isolate, Handle<StringSet> stringset,
                                  Handle<String> name) {
   if (!stringset->Has(isolate, name)) {
     stringset = EnsureCapacity(isolate, stringset);
-    uint32_t hash = ShapeT::Hash(ReadOnlyRoots(isolate), *name);
+    uint32_t hash = TodoShape::Hash(ReadOnlyRoots(isolate), *name);
     InternalIndex entry = stringset->FindInsertionEntry(isolate, hash);
     stringset->set(EntryToIndex(entry), *name);
     stringset->ElementAdded();
@@ -5356,7 +5355,7 @@ Handle<RegisteredSymbolTable> RegisteredSymbolTable::Add(
   SLOW_DCHECK(table->FindEntry(isolate, key).is_not_found());
 
   table = EnsureCapacity(isolate, table);
-  uint32_t hash = ShapeT::Hash(ReadOnlyRoots(isolate), key);
+  uint32_t hash = TodoShape::Hash(ReadOnlyRoots(isolate), key);
   InternalIndex entry = table->FindInsertionEntry(isolate, hash);
   table->set(EntryToIndex(entry), *key);
   table->set(EntryToValueIndex(entry), *symbol);
@@ -5425,7 +5424,7 @@ int BaseNameDictionary<Derived, Shape>::NextEnumerationIndex(
 template <typename Derived, typename Shape>
 Handle<Derived> Dictionary<Derived, Shape>::DeleteEntry(
     Isolate* isolate, Handle<Derived> dictionary, InternalIndex entry) {
-  DCHECK(Shape::kEntrySize != 3 ||
+  DCHECK(TodoShape::kEntrySize != 3 ||
          dictionary->DetailsAt(entry).IsConfigurable());
   dictionary->ClearEntry(entry);
   dictionary->ElementRemoved();
@@ -5446,7 +5445,7 @@ Handle<Derived> Dictionary<Derived, Shape>::AtPut(Isolate* isolate,
 
   // We don't need to copy over the enumeration index.
   dictionary->ValueAtPut(entry, *value);
-  if (Shape::kEntrySize == 3) dictionary->DetailsAtPut(entry, details);
+  if (TodoShape::kEntrySize == 3) dictionary->DetailsAtPut(entry, details);
   return dictionary;
 }
 
@@ -5463,7 +5462,7 @@ void Dictionary<Derived, Shape>::UncheckedAtPut(Isolate* isolate,
   } else {
     // We don't need to copy over the enumeration index.
     dictionary->ValueAtPut(entry, *value);
-    if (Shape::kEntrySize == 3) dictionary->DetailsAtPut(entry, details);
+    if (TodoShape::kEntrySize == 3) dictionary->DetailsAtPut(entry, details);
   }
 }
 
@@ -5504,19 +5503,19 @@ Handle<Derived> Dictionary<Derived, Shape>::Add(IsolateT* isolate,
                                                 PropertyDetails details,
                                                 InternalIndex* entry_out) {
   ReadOnlyRoots roots(isolate);
-  uint32_t hash = Shape::Hash(roots, key);
+  uint32_t hash = TodoShape::Hash(roots, key);
   // Validate that the key is absent.
   SLOW_DCHECK(dictionary->FindEntry(isolate, key).is_not_found());
   // Check whether the dictionary should be extended.
   dictionary = Derived::EnsureCapacity(isolate, dictionary);
 
   // Compute the key object.
-  Handle<Object> k = Shape::template AsHandle<key_allocation>(isolate, key);
+  Handle<Object> k = TodoShape::template AsHandle<key_allocation>(isolate, key);
 
   InternalIndex entry = dictionary->FindInsertionEntry(isolate, roots, hash);
   dictionary->SetEntry(entry, *k, *value, details);
   DCHECK(IsNumber(dictionary->KeyAt(isolate, entry)) ||
-         IsUniqueName(Shape::Unwrap(dictionary->KeyAt(isolate, entry))));
+         IsUniqueName(TodoShape::Unwrap(dictionary->KeyAt(isolate, entry))));
   dictionary->ElementAdded();
   if (entry_out) *entry_out = entry;
   return dictionary;
@@ -5529,18 +5528,18 @@ void Dictionary<Derived, Shape>::UncheckedAdd(IsolateT* isolate,
                                               Key key, Handle<Object> value,
                                               PropertyDetails details) {
   ReadOnlyRoots roots(isolate);
-  uint32_t hash = Shape::Hash(roots, key);
+  uint32_t hash = TodoShape::Hash(roots, key);
   // Validate that the key is absent and we capacity is sufficient.
   SLOW_DCHECK(dictionary->FindEntry(isolate, key).is_not_found());
   DCHECK(dictionary->HasSufficientCapacityToAdd(1));
 
   // Compute the key object.
-  Handle<Object> k = Shape::template AsHandle<key_allocation>(isolate, key);
+  Handle<Object> k = TodoShape::template AsHandle<key_allocation>(isolate, key);
 
   InternalIndex entry = dictionary->FindInsertionEntry(isolate, roots, hash);
   dictionary->SetEntry(entry, *k, *value, details);
   DCHECK(IsNumber(dictionary->KeyAt(isolate, entry)) ||
-         IsUniqueName(Shape::Unwrap(dictionary->KeyAt(isolate, entry))));
+         IsUniqueName(TodoShape::Unwrap(dictionary->KeyAt(isolate, entry))));
 }
 
 template <typename Derived, typename Shape>
@@ -5656,10 +5655,10 @@ Handle<FixedArray> BaseNameDictionary<Derived, Shape>::IterationIndices(
     EnumIndexComparator<Derived> cmp(raw_dictionary);
     // Use AtomicSlot wrapper to ensure that std::sort uses atomic load and
     // store operations that are safe for concurrent marking.
-    AtomicSlot start(array->GetFirstElementAddress());
+    AtomicSlot start(array->RawFieldOfFirstElement());
     std::sort(start, start + array_size, cmp);
   }
-  return FixedArray::ShrinkOrEmpty(isolate, array, array_size);
+  return FixedArray::RightTrimOrEmpty(isolate, array, array_size);
 }
 
 // Backwards lookup (slow).
@@ -5680,9 +5679,10 @@ Tagged<Object> Dictionary<Derived, Shape>::SlowReverseLookup(
 template <typename Derived, typename Shape>
 void ObjectHashTableBase<Derived, Shape>::FillEntriesWithHoles(
     Handle<Derived> table) {
+  auto roots = table->GetReadOnlyRoots();
   int length = table->length();
   for (int i = Derived::EntryToIndex(InternalIndex(0)); i < length; i++) {
-    table->set_the_hole(i);
+    table->set_the_hole(roots, i);
   }
 }
 
@@ -5868,8 +5868,9 @@ void ObjectHashTableBase<Derived, Shape>::AddEntry(InternalIndex entry,
 
 template <typename Derived, typename Shape>
 void ObjectHashTableBase<Derived, Shape>::RemoveEntry(InternalIndex entry) {
-  this->set_the_hole(Derived::EntryToIndex(entry));
-  this->set_the_hole(Derived::EntryToValueIndex(entry));
+  auto roots = this->GetReadOnlyRoots();
+  this->set_the_hole(roots, Derived::EntryToIndex(entry));
+  this->set_the_hole(roots, Derived::EntryToValueIndex(entry));
   this->ElementRemoved();
 }
 

@@ -180,6 +180,7 @@ class MachineRepresentationInferrer {
           case IrOpcode::kChangeInt32ToTagged:
           case IrOpcode::kChangeUint32ToTagged:
           case IrOpcode::kBitcastWordToTagged:
+          case IrOpcode::kTaggedIndexConstant:
             representation_vector_[node->id()] = MachineRepresentation::kTagged;
             break;
           case IrOpcode::kCompressedHeapConstant:
@@ -254,6 +255,7 @@ class MachineRepresentationInferrer {
           case IrOpcode::kBitcastFloat64ToInt64:
           case IrOpcode::kChangeFloat64ToInt64:
           case IrOpcode::kChangeFloat64ToUint64:
+          case IrOpcode::kTruncateFloat64ToInt64:
           case IrOpcode::kWord64Popcnt:
           case IrOpcode::kWord64Ctz:
           case IrOpcode::kWord64Clz:
@@ -443,7 +445,10 @@ class MachineRepresentationChecker {
           case IrOpcode::kWord32Popcnt:
             MACHINE_UNOP_32_LIST(LABEL) { CheckValueInputForInt32Op(node, 0); }
             break;
+          // Allow tagged pointers to be compared directly, and range checked.
           case IrOpcode::kWord32Equal:
+          case IrOpcode::kUint32LessThan:
+          case IrOpcode::kUint32LessThanOrEqual:
             if (Is32()) {
               CheckValueInputIsTaggedOrPointer(node, 0);
               CheckValueInputIsTaggedOrPointer(node, 1);
@@ -464,8 +469,6 @@ class MachineRepresentationChecker {
 
           case IrOpcode::kInt32LessThan:
           case IrOpcode::kInt32LessThanOrEqual:
-          case IrOpcode::kUint32LessThan:
-          case IrOpcode::kUint32LessThanOrEqual:
             MACHINE_BINOP_32_LIST(LABEL) {
               CheckValueInputForInt32Op(node, 0);
               CheckValueInputForInt32Op(node, 1);
@@ -503,6 +506,7 @@ class MachineRepresentationChecker {
           case IrOpcode::kFloat64SilenceNaN:
           case IrOpcode::kChangeFloat64ToInt64:
           case IrOpcode::kChangeFloat64ToUint64:
+          case IrOpcode::kTruncateFloat64ToInt64:
             MACHINE_FLOAT64_UNOP_LIST(LABEL) {
               CheckValueInputForFloat64Op(node, 0);
             }

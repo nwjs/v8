@@ -258,6 +258,24 @@ class V8_NODISCARD MaglevGraphBuilder::CallSpeculationScope {
   MaglevGraphBuilder* builder_;
 };
 
+class V8_NODISCARD MaglevGraphBuilder::SaveCallSpeculationScope {
+ public:
+  explicit SaveCallSpeculationScope(MaglevGraphBuilder* builder)
+      : builder_(builder) {
+    saved_ = builder_->current_speculation_feedback_;
+    builder_->current_speculation_feedback_ = compiler::FeedbackSource();
+  }
+  ~SaveCallSpeculationScope() {
+    builder_->current_speculation_feedback_ = saved_;
+  }
+
+  const compiler::FeedbackSource& value() { return saved_; }
+
+ private:
+  compiler::FeedbackSource saved_;
+  MaglevGraphBuilder* builder_;
+};
+
 class V8_NODISCARD MaglevGraphBuilder::DeoptFrameScope {
  public:
   DeoptFrameScope(MaglevGraphBuilder* builder, Builtin continuation,
@@ -1281,7 +1299,7 @@ ValueNode* MaglevGraphBuilder::GetTruncatedInt32ForToNumber(ValueNode* value,
       if (NodeTypeIsSmi(old_type)) {
         // Smi untagging can be cached as an int32 alternative, not just a
         // truncated alternative.
-        return alternative.set_int32(AddNewNode<UnsafeSmiUntag>({value}));
+        return alternative.set_int32(BuildSmiUntag(value));
       }
       if (desired_type == NodeType::kSmi) {
         return alternative.set_int32(AddNewNode<CheckedSmiUntag>({value}));
@@ -2999,6 +3017,11 @@ bool MaglevGraphBuilder::CheckType(ValueNode* node, NodeType type,
 
 ValueNode* MaglevGraphBuilder::BuildSmiUntag(ValueNode* node) {
   if (EnsureType(node, NodeType::kSmi)) {
+    if (SmiValuesAre31Bits()) {
+      if (auto phi = node->TryCast<Phi>()) {
+        phi->SetUseRequires31BitValue();
+      }
+    }
     return AddNewNode<UnsafeSmiUntag>({node});
   } else {
     return AddNewNode<CheckedSmiUntag>({node});
@@ -3023,7 +3046,7 @@ ValueNode* MaglevGraphBuilder::BuildNumberOrOddballToFloat64(
   if (EnsureType(node, TaggedToFloat64ConversionTypeToNodeType(conversion_type),
                  &old_type)) {
     if (old_type == NodeType::kSmi) {
-      ValueNode* untagged_smi = AddNewNode<UnsafeSmiUntag>({node});
+      ValueNode* untagged_smi = BuildSmiUntag(node);
       return AddNewNode<ChangeInt32ToFloat64>({untagged_smi});
     }
     return AddNewNode<UncheckedNumberOrOddballToFloat64>({node},
@@ -4355,11 +4378,15 @@ ReduceResult MaglevGraphBuilder::TryBuildElementAccess(
   const compiler::KeyedAccessMode& keyed_mode = feedback.keyed_mode();
   // Check for the megamorphic case.
   if (feedback.transition_groups().empty()) {
-    if (keyed_mode.access_mode() != compiler::AccessMode::kLoad) {
-      return ReduceResult::Fail();
+    if (keyed_mode.access_mode() == compiler::AccessMode::kLoad) {
+      return BuildCallBuiltin<Builtin::kKeyedLoadIC_Megamorphic>(
+          {object, GetTaggedValue(index_object)}, feedback_source);
+    } else if (keyed_mode.access_mode() == compiler::AccessMode::kStore) {
+      return BuildCallBuiltin<Builtin::kKeyedStoreIC_Megamorphic>(
+          {object, GetTaggedValue(index_object), GetAccumulatorTagged()},
+          feedback_source);
     }
-    return BuildCallBuiltin<Builtin::kKeyedLoadIC_Megamorphic>(
-        {object, GetTaggedValue(index_object)}, feedback_source);
+    return ReduceResult::Fail();
   }
 
   // TODO(leszeks): Add non-deopting bounds check (has to support undefined
@@ -4884,7 +4911,7 @@ void MaglevGraphBuilder::VisitSetKeyedProperty() {
 
   const compiler::ProcessedFeedback& processed_feedback =
       broker()->GetFeedbackForPropertyAccess(
-          feedback_source, compiler::AccessMode::kLoad, base::nullopt);
+          feedback_source, compiler::AccessMode::kStore, base::nullopt);
 
   switch (processed_feedback.kind()) {
     case compiler::ProcessedFeedback::kInsufficient:
@@ -5666,11 +5693,9 @@ ReduceResult MaglevGraphBuilder::TryReduceArrayForEach(
             : CallArguments(ConvertReceiverMode::kAny,
                             {this_arg, element, index_tagged, receiver});
 
-    compiler::FeedbackSource feedback_source = std::exchange(
-        current_speculation_feedback_, compiler::FeedbackSource());
-    result = ReduceCall(callback, call_args, feedback_source,
+    SaveCallSpeculationScope saved(this);
+    result = ReduceCall(callback, call_args, saved.value(),
                         SpeculationMode::kAllowSpeculation);
-    current_speculation_feedback_ = feedback_source;
   }
 
   // ```
@@ -6171,7 +6196,8 @@ ReduceResult MaglevGraphBuilder::TryReduceArrayPrototypePush(
     do_return.emplace(&sub_graph, unique_kind_count);
   }
 
-  ValueNode* old_array_length_smi = BuildLoadJSArrayLength(receiver).value();
+  ValueNode* old_array_length_smi =
+      GetSmiValue(BuildLoadJSArrayLength(receiver).value());
   ValueNode* old_array_length =
       AddNewNode<UnsafeSmiUntag>({old_array_length_smi});
   ValueNode* new_array_length_smi =
@@ -6320,7 +6346,8 @@ ReduceResult MaglevGraphBuilder::TryReduceArrayPrototypePop(
               &var_value, &var_new_array_length});
   MaglevSubGraphBuilder::Label empty_array(&sub_graph, 1);
 
-  ValueNode* old_array_length_smi = BuildLoadJSArrayLength(receiver).value();
+  ValueNode* old_array_length_smi =
+      GetSmiValue(BuildLoadJSArrayLength(receiver).value());
 
   // If the array is empty, skip the pop and return undefined.
   sub_graph.GotoIfTrue<BranchIfReferenceEqual>(
@@ -7960,6 +7987,7 @@ ReduceResult MaglevGraphBuilder::TryBuildFastInstanceOf(
           this, Builtin::kToBooleanLazyDeoptContinuation);
 
       if (has_instance_field->IsJSFunction()) {
+        SaveCallSpeculationScope saved(this);
         ReduceResult result =
             ReduceCallForConstant(has_instance_field->AsJSFunction(), args);
         DCHECK(!result.IsDoneWithAbort());

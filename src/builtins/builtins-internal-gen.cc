@@ -1281,7 +1281,7 @@ TF_BUILTIN(AdaptorWithBuiltinExitFrame, CodeStubAssembler) {
       Int32Constant(BuiltinExitFrameConstants::kNumExtraArgsWithoutReceiver));
 
   const bool builtin_exit_frame = true;
-  TNode<Code> code = HeapConstant(
+  TNode<Code> code = HeapConstantNoHole(
       CodeFactory::CEntry(isolate(), 1, ArgvMode::kStack, builtin_exit_frame));
 
   // Unconditionally push argc, target and new target as extra stack arguments.
@@ -1376,24 +1376,13 @@ void Builtins::Generate_MemMove(MacroAssembler* masm) {
 }
 #endif  // V8_TARGET_ARCH_IA32
 
-// TODO(v8:11421): Remove #if once baseline compiler is ported to other
-// architectures.
-#if ENABLE_SPARKPLUG
 void Builtins::Generate_BaselineLeaveFrame(MacroAssembler* masm) {
+#ifdef V8_ENABLE_SPARKPLUG
   EmitReturnBaseline(masm);
-}
 #else
-// Stub out implementations of arch-specific baseline builtins.
-void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
   masm->Trap();
+#endif  // V8_ENABLE_SPARKPLUG
 }
-void Builtins::Generate_BaselineLeaveFrame(MacroAssembler* masm) {
-  masm->Trap();
-}
-void Builtins::Generate_BaselineOnStackReplacement(MacroAssembler* masm) {
-  masm->Trap();
-}
-#endif
 
 // TODO(v8:11421): Remove #if once the Maglev compiler is ported to other
 // architectures.

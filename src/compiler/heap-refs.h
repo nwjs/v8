@@ -12,6 +12,7 @@
 #include "src/objects/elements-kind.h"
 #include "src/objects/feedback-vector.h"
 #include "src/objects/instance-type.h"
+#include "src/objects/object-list-macros.h"
 #include "src/utils/boxed-float.h"
 #include "src/zone/zone-compact-set.h"
 
@@ -72,15 +73,16 @@ enum class OddballType : uint8_t {
   kBoolean,  // True or False.
   kUndefined,
   kNull,
-  kUninitialized,
-  kOther  // Oddball, but none of the above.
 };
 
 enum class HoleType : uint8_t {
   kNone,  // Not a Hole.
-  kGeneric,
-  kPropertyCell,
-  kHashTable,
+
+#define FOR_HOLE(Name, name, Root) k##Name,
+  HOLE_LIST(FOR_HOLE)
+#undef FOR_HOLE
+
+      kGeneric = kTheHole,
 };
 
 enum class RefSerializationKind {
@@ -109,7 +111,6 @@ enum class RefSerializationKind {
   /* Subtypes of String */                                                    \
   NEVER_SERIALIZED(InternalizedString)                                        \
   /* Subtypes of FixedArrayBase */                                            \
-  NEVER_SERIALIZED(BytecodeArray)                                             \
   BACKGROUND_SERIALIZED(FixedArray)                                           \
   NEVER_SERIALIZED(FixedDoubleArray)                                          \
   /* Subtypes of Name */                                                      \
@@ -122,6 +123,7 @@ enum class RefSerializationKind {
   NEVER_SERIALIZED(AllocationSite)                                            \
   NEVER_SERIALIZED(ArrayBoilerplateDescription)                               \
   BACKGROUND_SERIALIZED(BigInt)                                               \
+  NEVER_SERIALIZED(BytecodeArray)                                             \
   NEVER_SERIALIZED(CallHandlerInfo)                                           \
   NEVER_SERIALIZED(Cell)                                                      \
   NEVER_SERIALIZED(Code)                                                      \
@@ -943,15 +945,17 @@ class FixedDoubleArrayRef : public FixedArrayBaseRef {
   Float64 GetFromImmutableFixedDoubleArray(int i) const;
 };
 
-class BytecodeArrayRef : public FixedArrayBaseRef {
+class BytecodeArrayRef : public HeapObjectRef {
  public:
-  DEFINE_REF_CONSTRUCTOR(BytecodeArray, FixedArrayBaseRef)
+  DEFINE_REF_CONSTRUCTOR(BytecodeArray, HeapObjectRef)
 
   Handle<BytecodeArray> object() const;
 
   // NOTE: Concurrent reads of the actual bytecodes as well as the constant pool
   // (both immutable) do not go through BytecodeArrayRef but are performed
   // directly through the handle by BytecodeArrayIterator.
+
+  int length() const;
 
   int register_count() const;
   int parameter_count() const;
@@ -964,9 +968,9 @@ class BytecodeArrayRef : public FixedArrayBaseRef {
   int handler_table_size() const;
 };
 
-class ScriptContextTableRef : public FixedArrayRef {
+class ScriptContextTableRef : public FixedArrayBaseRef {
  public:
-  DEFINE_REF_CONSTRUCTOR(ScriptContextTable, FixedArrayRef)
+  DEFINE_REF_CONSTRUCTOR(ScriptContextTable, FixedArrayBaseRef)
 
   Handle<ScriptContextTable> object() const;
 };
@@ -977,7 +981,7 @@ class ObjectBoilerplateDescriptionRef : public FixedArrayRef {
 
   Handle<ObjectBoilerplateDescription> object() const;
 
-  int size() const;
+  int boilerplate_properties_count() const;
 };
 
 class JSArrayRef : public JSObjectRef {

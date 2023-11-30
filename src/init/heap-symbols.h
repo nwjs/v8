@@ -566,7 +566,6 @@
 #define MC_INCREMENTAL_SCOPES(F)                                   \
   /* MC_INCREMENTAL is the top-level incremental marking scope. */ \
   F(MC_INCREMENTAL)                                                \
-  F(MC_INCREMENTAL_EMBEDDER_PROLOGUE)                              \
   F(MC_INCREMENTAL_EMBEDDER_TRACING)                               \
   F(MC_INCREMENTAL_EXTERNAL_EPILOGUE)                              \
   F(MC_INCREMENTAL_EXTERNAL_PROLOGUE)                              \
@@ -623,7 +622,6 @@
 #define SCAVENGER_MAIN_THREAD_SCOPES(F)              \
   F(SCAVENGER)                                       \
   F(SCAVENGER_COMPLETE_SWEEP_ARRAY_BUFFERS)          \
-  F(SCAVENGER_FAST_PROMOTE)                          \
   F(SCAVENGER_FREE_REMEMBERED_SET)                   \
   F(SCAVENGER_SCAVENGE)                              \
   F(SCAVENGER_SCAVENGE_WEAK_GLOBAL_HANDLES_IDENTIFY) \

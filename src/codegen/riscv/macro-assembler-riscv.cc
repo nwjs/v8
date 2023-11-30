@@ -4903,16 +4903,9 @@ void MacroAssembler::MovToFloatParameters(DoubleRegister src1,
 
 void MacroAssembler::LoadStackLimit(Register destination, StackLimitKind kind) {
   DCHECK(root_array_available());
-  Isolate* isolate = this->isolate();
-  ExternalReference limit =
-      kind == StackLimitKind::kRealStackLimit
-          ? ExternalReference::address_of_real_jslimit(isolate)
-          : ExternalReference::address_of_jslimit(isolate);
-  DCHECK(MacroAssembler::IsAddressableThroughRootRegister(isolate, limit));
-
-  intptr_t offset =
-      MacroAssembler::RootRegisterOffsetForExternalReference(isolate, limit);
-  CHECK(is_int32(offset));
+  intptr_t offset = kind == StackLimitKind::kRealStackLimit
+                        ? IsolateData::real_jslimit_offset()
+                        : IsolateData::jslimit_offset();
   LoadWord(destination,
            MemOperand(kRootRegister, static_cast<int32_t>(offset)));
 }
@@ -6804,11 +6797,12 @@ void MacroAssembler::LoadFeedbackVector(Register dst, Register closure,
                                         Register scratch, Label* fbv_undef) {
   Label done;
   // Load the feedback vector from the closure.
-  LoadWord(dst, FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
-  LoadWord(dst, FieldMemOperand(dst, FeedbackCell::kValueOffset));
+  LoadTaggedField(dst,
+                  FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
+  LoadTaggedField(dst, FieldMemOperand(dst, FeedbackCell::kValueOffset));
 
   // Check if feedback vector is valid.
-  LoadWord(scratch, FieldMemOperand(dst, HeapObject::kMapOffset));
+  LoadTaggedField(scratch, FieldMemOperand(dst, HeapObject::kMapOffset));
   Lhu(scratch, FieldMemOperand(scratch, Map::kInstanceTypeOffset));
   Branch(&done, eq, scratch, Operand(FEEDBACK_VECTOR_TYPE));
 

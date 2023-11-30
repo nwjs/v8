@@ -709,6 +709,50 @@ bool NoExtension(const v8::FunctionCallbackInfo<v8::Value>&) { return false; }
 
 namespace {
 
+bool IsBuiltinFunction(Isolate* isolate, Tagged<HeapObject> object,
+                       Builtin builtin) {
+  if (!IsJSFunction(object)) return false;
+  Tagged<JSFunction> const function = JSFunction::cast(object);
+  return function->code() == isolate->builtins()->code(builtin);
+}
+
+// Check if the function is one of the known async function or
+// async generator fulfill handlers.
+bool IsBuiltinAsyncFulfillHandler(Isolate* isolate, Tagged<HeapObject> object) {
+  return IsBuiltinFunction(isolate, object,
+                           Builtin::kAsyncFunctionAwaitResolveClosure) ||
+         IsBuiltinFunction(isolate, object,
+                           Builtin::kAsyncGeneratorAwaitResolveClosure) ||
+         IsBuiltinFunction(
+             isolate, object,
+             Builtin::kAsyncGeneratorYieldWithAwaitResolveClosure);
+}
+
+// Check if the function is one of the known async function or
+// async generator fulfill handlers.
+bool IsBuiltinAsyncRejectHandler(Isolate* isolate, Tagged<HeapObject> object) {
+  return IsBuiltinFunction(isolate, object,
+                           Builtin::kAsyncFunctionAwaitRejectClosure) ||
+         IsBuiltinFunction(isolate, object,
+                           Builtin::kAsyncGeneratorAwaitRejectClosure);
+}
+
+Handle<JSGeneratorObject> ToAsyncGenerator(Isolate* isolate,
+                                           Handle<PromiseReaction> reaction) {
+  // Check if the {reaction} has one of the known async function or
+  // async generator continuations as its fulfill handler.
+  if (IsBuiltinAsyncFulfillHandler(isolate, reaction->fulfill_handler())) {
+    // Now peek into the handlers' AwaitContext to get to
+    // the JSGeneratorObject for the async function.
+    Handle<Context> context(
+        JSFunction::cast(reaction->fulfill_handler())->context(), isolate);
+    Handle<JSGeneratorObject> generator_object(
+        JSGeneratorObject::cast(context->extension()), isolate);
+    return generator_object;
+  }
+  return Handle<JSGeneratorObject>();
+}
+
 class CallSiteBuilder {
  public:
   CallSiteBuilder(Isolate* isolate, FrameSkipMode mode, int limit,
@@ -849,7 +893,7 @@ class CallSiteBuilder {
   bool Full() { return index_ >= limit_; }
 
   Handle<FixedArray> Build() {
-    return FixedArray::ShrinkOrEmpty(isolate_, elements_, index_);
+    return FixedArray::RightTrimOrEmpty(isolate_, elements_, index_);
   }
 
  private:
@@ -954,13 +998,6 @@ bool GetStackTraceLimit(Isolate* isolate, int* result) {
   return true;
 }
 
-bool IsBuiltinFunction(Isolate* isolate, Tagged<HeapObject> object,
-                       Builtin builtin) {
-  if (!IsJSFunction(object)) return false;
-  Tagged<JSFunction> const function = JSFunction::cast(object);
-  return function->code() == isolate->builtins()->code(builtin);
-}
-
 void CaptureAsyncStackTrace(Isolate* isolate, Handle<JSPromise> promise,
                             CallSiteBuilder* builder) {
   while (!builder->Full()) {
@@ -973,21 +1010,10 @@ void CaptureAsyncStackTrace(Isolate* isolate, Handle<JSPromise> promise,
         PromiseReaction::cast(promise->reactions()), isolate);
     if (!IsSmi(reaction->next())) return;
 
-    // Check if the {reaction} has one of the known async function or
-    // async generator continuations as its fulfill handler.
-    if (IsBuiltinFunction(isolate, reaction->fulfill_handler(),
-                          Builtin::kAsyncFunctionAwaitResolveClosure) ||
-        IsBuiltinFunction(isolate, reaction->fulfill_handler(),
-                          Builtin::kAsyncGeneratorAwaitResolveClosure) ||
-        IsBuiltinFunction(
-            isolate, reaction->fulfill_handler(),
-            Builtin::kAsyncGeneratorYieldWithAwaitResolveClosure)) {
-      // Now peek into the handlers' AwaitContext to get to
-      // the JSGeneratorObject for the async function.
-      Handle<Context> context(
-          JSFunction::cast(reaction->fulfill_handler())->context(), isolate);
-      Handle<JSGeneratorObject> generator_object(
-          JSGeneratorObject::cast(context->extension()), isolate);
+    Handle<JSGeneratorObject> generator_object =
+        ToAsyncGenerator(isolate, reaction);
+
+    if (!generator_object.is_null()) {
       CHECK(generator_object->is_suspended());
 
       // Append async frame corresponding to the {generator_object}.
@@ -1099,17 +1125,10 @@ void CaptureAsyncStackTrace(Isolate* isolate, CallSiteBuilder* builder) {
         Handle<PromiseReactionJobTask>::cast(current_microtask);
     // Check if the {reaction} has one of the known async function or
     // async generator continuations as its fulfill handler.
-    if (IsBuiltinFunction(isolate, promise_reaction_job_task->handler(),
-                          Builtin::kAsyncFunctionAwaitResolveClosure) ||
-        IsBuiltinFunction(isolate, promise_reaction_job_task->handler(),
-                          Builtin::kAsyncGeneratorAwaitResolveClosure) ||
-        IsBuiltinFunction(
-            isolate, promise_reaction_job_task->handler(),
-            Builtin::kAsyncGeneratorYieldWithAwaitResolveClosure) ||
-        IsBuiltinFunction(isolate, promise_reaction_job_task->handler(),
-                          Builtin::kAsyncFunctionAwaitRejectClosure) ||
-        IsBuiltinFunction(isolate, promise_reaction_job_task->handler(),
-                          Builtin::kAsyncGeneratorAwaitRejectClosure)) {
+    if (IsBuiltinAsyncFulfillHandler(isolate,
+                                     promise_reaction_job_task->handler()) ||
+        IsBuiltinAsyncRejectHandler(isolate,
+                                    promise_reaction_job_task->handler())) {
       // Now peek into the handlers' AwaitContext to get to
       // the JSGeneratorObject for the async function.
       Handle<Context> context(
@@ -1381,7 +1400,7 @@ class StackFrameBuilder {
   }
 
   Handle<FixedArray> Build() {
-    return FixedArray::ShrinkOrEmpty(isolate_, frames_, index_);
+    return FixedArray::RightTrimOrEmpty(isolate_, frames_, index_);
   }
 
  private:
@@ -2372,7 +2391,6 @@ Isolate::CatchType ToCatchType(HandlerTable::CatchPrediction prediction) {
 }  // anonymous namespace
 
 Isolate::CatchType Isolate::PredictExceptionCatcher() {
-  Address external_handler = thread_local_top()->try_catch_handler_address();
   if (TopExceptionHandlerType(Tagged<Object>()) ==
       ExceptionHandlerType::kExternalTryCatch) {
     return CAUGHT_BY_EXTERNAL;
@@ -2381,60 +2399,60 @@ Isolate::CatchType Isolate::PredictExceptionCatcher() {
   // Search for an exception handler by performing a full walk over the stack.
   for (StackFrameIterator iter(this); !iter.done(); iter.Advance()) {
     StackFrame* frame = iter.frame();
-
-    switch (frame->type()) {
-      case StackFrame::ENTRY:
-      case StackFrame::CONSTRUCT_ENTRY: {
-        Address entry_handler = frame->top_handler()->next_address();
-        // The exception has been externally caught if and only if there is an
-        // external handler which is on top of the top-most JS_ENTRY handler.
-        if (external_handler != kNullAddress &&
-            !try_catch_handler()->is_verbose_) {
-          if (entry_handler == kNullAddress ||
-              entry_handler > external_handler) {
-            return CAUGHT_BY_EXTERNAL;
-          }
-        }
-      } break;
-
-      // For JavaScript frames we perform a lookup in the handler table.
-      case StackFrame::INTERPRETED:
-      case StackFrame::BASELINE:
-      case StackFrame::TURBOFAN:
-      case StackFrame::MAGLEV:
-      case StackFrame::BUILTIN: {
-        JavaScriptFrame* js_frame = JavaScriptFrame::cast(frame);
-        Isolate::CatchType prediction = ToCatchType(PredictException(js_frame));
-        if (prediction == NOT_CAUGHT) break;
-        return prediction;
-      }
-
-      case StackFrame::STUB: {
-        Tagged<Code> code = *frame->LookupCode();
-        if (code->kind() != CodeKind::BUILTIN || !code->has_handler_table() ||
-            !code->is_turbofanned()) {
-          break;
-        }
-
-        auto prediction = ToCatchType(CatchPredictionFor(code->builtin_id()));
-        if (prediction != NOT_CAUGHT) return prediction;
-        break;
-      }
-
-      case StackFrame::JAVA_SCRIPT_BUILTIN_CONTINUATION_WITH_CATCH: {
-        Tagged<Code> code = *frame->LookupCode();
-        auto prediction = ToCatchType(CatchPredictionFor(code->builtin_id()));
-        if (prediction != NOT_CAUGHT) return prediction;
-        break;
-      }
-
-      default:
-        // All other types can not handle exception.
-        break;
-    }
+    Isolate::CatchType prediction = PredictExceptionCatchAtFrame(frame);
+    if (prediction != NOT_CAUGHT) return prediction;
   }
 
   // Handler not found.
+  return NOT_CAUGHT;
+}
+
+Isolate::CatchType Isolate::PredictExceptionCatchAtFrame(StackFrame* frame) {
+  switch (frame->type()) {
+    case StackFrame::ENTRY:
+    case StackFrame::CONSTRUCT_ENTRY: {
+      Address external_handler =
+          thread_local_top()->try_catch_handler_address();
+      Address entry_handler = frame->top_handler()->next_address();
+      // The exception has been externally caught if and only if there is an
+      // external handler which is on top of the top-most JS_ENTRY handler.
+      if (external_handler != kNullAddress &&
+          !try_catch_handler()->is_verbose_) {
+        if (entry_handler == kNullAddress || entry_handler > external_handler) {
+          return CAUGHT_BY_EXTERNAL;
+        }
+      }
+    } break;
+
+    // For JavaScript frames we perform a lookup in the handler table.
+    case StackFrame::INTERPRETED:
+    case StackFrame::BASELINE:
+    case StackFrame::TURBOFAN:
+    case StackFrame::MAGLEV:
+    case StackFrame::BUILTIN: {
+      JavaScriptFrame* js_frame = JavaScriptFrame::cast(frame);
+      return ToCatchType(PredictException(js_frame));
+    }
+
+    case StackFrame::STUB: {
+      Tagged<Code> code = *frame->LookupCode();
+      if (code->kind() != CodeKind::BUILTIN || !code->has_handler_table() ||
+          !code->is_turbofanned()) {
+        break;
+      }
+
+      return ToCatchType(CatchPredictionFor(code->builtin_id()));
+    }
+
+    case StackFrame::JAVA_SCRIPT_BUILTIN_CONTINUATION_WITH_CATCH: {
+      Tagged<Code> code = *frame->LookupCode();
+      return ToCatchType(CatchPredictionFor(code->builtin_id()));
+    }
+
+    default:
+      // All other types can not handle exception.
+      break;
+  }
   return NOT_CAUGHT;
 }
 
@@ -2503,6 +2521,7 @@ void Isolate::PrintCurrentStackTrace(std::ostream& out) {
   for (int i = 0; i < frames->length(); ++i) {
     Handle<CallSiteInfo> frame(CallSiteInfo::cast(frames->get(i)), this);
     SerializeCallSiteInfo(this, frame, &builder);
+    if (i != frames->length() - 1) builder.AppendCharacter('\n');
   }
 
   Handle<String> stack_trace = builder.Finish().ToHandleChecked();
@@ -2806,7 +2825,7 @@ bool Isolate::IsPromiseStackEmpty() const {
 }
 
 namespace {
-bool PromiseIsRejectHandler(Isolate* isolate, Handle<JSReceiver> handler) {
+bool ReceiverIsForwardingHandler(Isolate* isolate, Handle<JSReceiver> handler) {
   // Recurse to the forwarding Promise (e.g. return false) due to
   //  - await reaction forwarding to the throwaway Promise, which has
   //    a dependency edge to the outer Promise.
@@ -2817,11 +2836,12 @@ bool PromiseIsRejectHandler(Isolate* isolate, Handle<JSReceiver> handler) {
   Handle<Symbol> key = isolate->factory()->promise_forwarding_handler_symbol();
   Handle<Object> forwarding_handler =
       JSReceiver::GetDataProperty(isolate, handler, key);
-  return IsUndefined(*forwarding_handler, isolate);
+  return !IsUndefined(*forwarding_handler, isolate);
 }
 
-bool PromiseHasUserDefinedRejectHandlerInternal(Isolate* isolate,
-                                                Handle<JSPromise> promise) {
+bool WalkPromiseTreeInternal(
+    Isolate* isolate, Handle<JSPromise> promise,
+    std::function<bool(Isolate::PromiseHandler)> callback) {
   Handle<Object> current(promise->reactions(), isolate);
   while (!IsSmi(*current)) {
     Handle<PromiseReaction> reaction = Handle<PromiseReaction>::cast(current);
@@ -2835,12 +2855,63 @@ bool PromiseHasUserDefinedRejectHandlerInternal(Isolate* isolate,
       }
       if (IsJSPromise(*promise_or_capability)) {
         promise = Handle<JSPromise>::cast(promise_or_capability);
+        bool caught = false;
+        Handle<JSReceiver> reject_handler;
         if (!IsUndefined(reaction->reject_handler(), isolate)) {
-          Handle<JSReceiver> reject_handler(
-              JSReceiver::cast(reaction->reject_handler()), isolate);
-          if (PromiseIsRejectHandler(isolate, reject_handler)) return true;
+          reject_handler =
+              handle(JSReceiver::cast(reaction->reject_handler()), isolate);
+          if (!ReceiverIsForwardingHandler(isolate, reject_handler) &&
+              !IsBuiltinFunction(isolate, reaction->reject_handler(),
+                                 Builtin::kPromiseCatchFinally)) {
+            caught = true;
+            // If there is no callback, just return true if anything catches
+            if (!callback) return true;
+          }
         }
-        if (isolate->PromiseHasUserDefinedRejectHandler(promise)) return true;
+        if (callback) {
+          // Pass each handler to the callback
+          Handle<JSGeneratorObject> async_function =
+              ToAsyncGenerator(isolate, reaction);
+          if (!async_function.is_null()) {
+            // Look at the async function, not the individual handlers
+            if (callback(
+                    {handle(async_function->function(), isolate), caught})) {
+              return true;
+            }
+          } else {
+            // Not an async function, look at individual handlers
+            if (callback &&
+                !IsUndefined(reaction->fulfill_handler(), isolate)) {
+              Handle<JSReceiver> fulfill_handler(
+                  JSReceiver::cast(reaction->fulfill_handler()), isolate);
+              if (!ReceiverIsForwardingHandler(isolate, fulfill_handler)) {
+                if (IsBuiltinFunction(isolate, reaction->fulfill_handler(),
+                                      Builtin::kPromiseThenFinally)) {
+                  // If this is the finally handler, get the wrapped callback
+                  // from the context to use instead
+                  Handle<Context> context(
+                      JSFunction::cast(reaction->fulfill_handler())->context(),
+                      isolate);
+                  int const index = PromiseBuiltins::PromiseFinallyContextSlot::
+                      kOnFinallySlot;
+                  fulfill_handler =
+                      handle(JSReceiver::cast(context->get(index)), isolate);
+                }
+                if (callback({fulfill_handler, false})) {
+                  return true;
+                }
+              }
+            }
+            if (caught) {
+              // We've already checked that this isn't undefined or
+              // a forwarding handler
+              if (callback({reject_handler, true})) {
+                return true;
+              }
+            }
+          }
+        }
+        if (!caught && isolate->WalkPromiseTree(promise, callback)) return true;
       }
     }
     current = handle(reaction->next(), isolate);
@@ -2850,7 +2921,8 @@ bool PromiseHasUserDefinedRejectHandlerInternal(Isolate* isolate,
 
 }  // namespace
 
-bool Isolate::PromiseHasUserDefinedRejectHandler(Handle<JSPromise> promise) {
+bool Isolate::WalkPromiseTree(Handle<JSPromise> promise,
+                              std::function<bool(PromiseHandler)> callback) {
   Handle<Symbol> key = factory()->promise_handled_by_symbol();
   std::stack<Handle<JSPromise>> promises;
   // First descend into the outermost promise and collect the stack of
@@ -2858,7 +2930,11 @@ bool Isolate::PromiseHasUserDefinedRejectHandler(Handle<JSPromise> promise) {
   while (true) {
     // If this promise was marked as being handled by a catch block
     // in an async function, then it has a user-defined reject handler.
-    if (promise->handled_hint()) return true;
+    // Because it will catch there is no reason to continue to outer promises.
+    // However the handled_hint may have been set by GetPromiseOnStackOnThrow,
+    // and if we have a callback we don't want that to stop us from walking
+    // the promise tree.
+    if (!callback && promise->handled_hint()) return true;
     if (promise->status() == Promise::kPending) {
       promises.push(promise);
     }
@@ -2870,10 +2946,14 @@ bool Isolate::PromiseHasUserDefinedRejectHandler(Handle<JSPromise> promise) {
 
   while (!promises.empty()) {
     promise = promises.top();
-    if (PromiseHasUserDefinedRejectHandlerInternal(this, promise)) return true;
+    if (WalkPromiseTreeInternal(this, promise, callback)) return true;
     promises.pop();
   }
   return false;
+}
+
+bool Isolate::PromiseHasUserDefinedRejectHandler(Handle<JSPromise> promise) {
+  return WalkPromiseTree(promise, nullptr);
 }
 
 Handle<Object> Isolate::GetPromiseOnStackOnThrow() {
@@ -2888,24 +2968,13 @@ Handle<Object> Isolate::GetPromiseOnStackOnThrow() {
   Handle<Object> promise_stack(debug()->thread_local_.promise_stack_, this);
   for (StackFrameIterator it(this); !it.done(); it.Advance()) {
     StackFrame* frame = it.frame();
-    HandlerTable::CatchPrediction catch_prediction;
-    if (frame->is_java_script()) {
-      catch_prediction = PredictException(JavaScriptFrame::cast(frame));
-    } else if (frame->type() == StackFrame::STUB) {
-      Tagged<Code> code = *frame->LookupCode();
-      if (code->kind() != CodeKind::BUILTIN || !code->has_handler_table() ||
-          !code->is_turbofanned()) {
-        continue;
-      }
-      catch_prediction = CatchPredictionFor(code->builtin_id());
-    } else {
-      continue;
-    }
+    prediction = PredictExceptionCatchAtFrame(frame);
 
-    switch (catch_prediction) {
-      case HandlerTable::UNCAUGHT:
+    switch (prediction) {
+      case NOT_CAUGHT:
+      case CAUGHT_BY_EXTERNAL:
         continue;
-      case HandlerTable::CAUGHT:
+      case CAUGHT_BY_JAVASCRIPT:
         if (IsJSPromise(*retval)) {
           // Caught the result of an inner async/await invocation.
           // Mark the inner promise as caught in the "synchronous case" so
@@ -2917,7 +2986,7 @@ Handle<Object> Isolate::GetPromiseOnStackOnThrow() {
           Handle<JSPromise>::cast(retval)->set_handled_hint(true);
         }
         return retval;
-      case HandlerTable::PROMISE: {
+      case CAUGHT_BY_PROMISE: {
         Handle<JSObject> promise;
         if (IsPromiseOnStack(*promise_stack) &&
             PromiseOnStack::GetPromise(
@@ -2927,8 +2996,7 @@ Handle<Object> Isolate::GetPromiseOnStackOnThrow() {
         }
         return undefined;
       }
-      case HandlerTable::UNCAUGHT_ASYNC_AWAIT:
-      case HandlerTable::ASYNC_AWAIT: {
+      case CAUGHT_BY_ASYNC_AWAIT: {
         // If in the initial portion of async/await, continue the loop to pop up
         // successive async/await stack frames until an asynchronous one with
         // dependents is found, or a non-async stack frame is encountered, in
@@ -3570,6 +3638,25 @@ Isolate::Isolate(std::unique_ptr<i::IsolateAllocator> isolate_allocator)
 
   InitializeDefaultEmbeddedBlob();
 
+#if V8_ENABLE_WEBASSEMBLY
+  // If we are in production V8 and not in mksnapshot we have to pass the
+  // landing pad builtin to the WebAssembly TrapHandler.
+  // TODO(ahaas): Isolate creation is the earliest point in time when builtins
+  // are available, so we cannot set the landing pad earlier at the moment.
+  // However, if builtins ever get loaded during process initialization time,
+  // then the initialization of the trap handler landing pad should also go
+  // there.
+  // TODO(ahaas): The code of the landing pad does not have to be a builtin,
+  // we could also just move it to the trap handler, and implement it e.g. with
+  // inline assembly. It's not clear if that's worth it.
+  if (Isolate::CurrentEmbeddedBlobCodeSize()) {
+    EmbeddedData embedded_data = EmbeddedData::FromBlob();
+    Address landing_pad =
+        embedded_data.InstructionStartOf(Builtin::kWasmTrapHandlerLandingPad);
+    i::trap_handler::SetLandingPad(landing_pad);
+  }
+#endif  // V8_ENABLE_WEBASSEMBLY
+
   MicrotaskQueue::SetUpDefaultMicrotaskQueue(this);
 }
 
@@ -3577,16 +3664,16 @@ void Isolate::CheckIsolateLayout() {
 #ifdef V8_ENABLE_SANDBOX
   CHECK_EQ(static_cast<int>(OFFSET_OF(ExternalPointerTable, base_)),
            Internals::kExternalPointerTableBasePointerOffset);
-  CHECK_EQ(static_cast<int>(OFFSET_OF(IndirectPointerTable, base_)),
-           Internals::kIndirectPointerTableBasePointerOffset);
+  CHECK_EQ(static_cast<int>(OFFSET_OF(TrustedPointerTable, base_)),
+           Internals::kTrustedPointerTableBasePointerOffset);
   CHECK_EQ(static_cast<int>(sizeof(ExternalPointerTable)),
            Internals::kExternalPointerTableSize);
   CHECK_EQ(static_cast<int>(sizeof(ExternalPointerTable)),
            ExternalPointerTable::kSize);
-  CHECK_EQ(static_cast<int>(sizeof(IndirectPointerTable)),
-           Internals::kIndirectPointerTableSize);
-  CHECK_EQ(static_cast<int>(sizeof(IndirectPointerTable)),
-           IndirectPointerTable::kSize);
+  CHECK_EQ(static_cast<int>(sizeof(TrustedPointerTable)),
+           Internals::kTrustedPointerTableSize);
+  CHECK_EQ(static_cast<int>(sizeof(TrustedPointerTable)),
+           TrustedPointerTable::kSize);
 #endif
 
   CHECK_EQ(OFFSET_OF(Isolate, isolate_data_), 0);
@@ -3633,8 +3720,8 @@ void Isolate::CheckIsolateLayout() {
                OFFSET_OF(Isolate, isolate_data_.external_pointer_table_)),
            Internals::kIsolateExternalPointerTableOffset);
   CHECK_EQ(static_cast<int>(
-               OFFSET_OF(Isolate, isolate_data_.indirect_pointer_table_)),
-           Internals::kIsolateIndirectPointerTableOffset);
+               OFFSET_OF(Isolate, isolate_data_.trusted_pointer_table_)),
+           Internals::kIsolateTrustedPointerTableOffset);
 #endif
   CHECK_EQ(static_cast<int>(
                OFFSET_OF(Isolate, isolate_data_.api_callback_thunk_argument_)),
@@ -3728,8 +3815,10 @@ void Isolate::Deinit() {
   cancelable_task_manager()->CancelAndWait();
 
   // Cancel all compiler tasks.
+#ifdef V8_ENABLE_SPARKPLUG
   delete baseline_batch_compiler_;
   baseline_batch_compiler_ = nullptr;
+#endif  // V8_ENABLE_SPARKPLUG
 
 #ifdef V8_ENABLE_MAGLEV
   delete maglev_concurrent_dispatcher_;
@@ -3847,8 +3936,8 @@ void Isolate::Deinit() {
     delete shared_external_pointer_space_;
     shared_external_pointer_space_ = nullptr;
   }
-  indirect_pointer_table().TearDownSpace(heap()->indirect_pointer_space());
-  indirect_pointer_table().TearDown();
+  trusted_pointer_table().TearDownSpace(heap()->trusted_pointer_space());
+  trusted_pointer_table().TearDown();
 #endif  // V8_COMPRESS_POINTERS
 
 #ifdef V8_ENABLE_SANDBOX
@@ -4483,7 +4572,9 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
     lazy_compile_dispatcher_ = std::make_unique<LazyCompileDispatcher>(
         this, V8::GetCurrentPlatform(), v8_flags.stack_size);
   }
+#ifdef V8_ENABLE_SPARKPLUG
   baseline_batch_compiler_ = new baseline::BaselineBatchCompiler(this);
+#endif  // V8_ENABLE_SPARKPLUG
 #ifdef V8_ENABLE_MAGLEV
   maglev_concurrent_dispatcher_ = new maglev::MaglevConcurrentDispatcher(this);
 #endif  // V8_ENABLE_MAGLEV
@@ -4560,8 +4651,8 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
         heap()->read_only_external_pointer_space());
     external_pointer_table().InitializeSpace(heap()->external_pointer_space());
 
-    indirect_pointer_table().Initialize();
-    indirect_pointer_table().InitializeSpace(heap()->indirect_pointer_space());
+    trusted_pointer_table().Initialize();
+    trusted_pointer_table().InitializeSpace(heap()->trusted_pointer_space());
 #endif  // V8_COMPRESS_POINTERS
   }
   ReadOnlyHeap::SetUp(this, read_only_snapshot_data, can_rehash);
@@ -5875,6 +5966,11 @@ void Isolate::SetUseCounterCallback(v8::Isolate::UseCounterCallback callback) {
 }
 
 void Isolate::CountUsage(v8::Isolate::UseCounterFeature feature) {
+  CountUsage(base::VectorOf({feature}));
+}
+
+void Isolate::CountUsage(
+    base::Vector<const v8::Isolate::UseCounterFeature> features) {
   // The counter callback
   // - may cause the embedder to call into V8, which is not generally possible
   //   during GC.
@@ -5886,16 +5982,12 @@ void Isolate::CountUsage(v8::Isolate::UseCounterFeature feature) {
     DCHECK(IsNativeContext(context()->native_context()));
     if (use_counter_callback_) {
       HandleScope handle_scope(this);
-      use_counter_callback_(reinterpret_cast<v8::Isolate*>(this), feature);
+      for (auto feature : features) {
+        use_counter_callback_(reinterpret_cast<v8::Isolate*>(this), feature);
+      }
     }
   } else {
-    heap_.IncrementDeferredCount(feature);
-  }
-}
-
-void Isolate::CountUsage(v8::Isolate::UseCounterFeature feature, int count) {
-  for (int i = 0; i < count; ++i) {
-    CountUsage(feature);
+    heap_.IncrementDeferredCounts(features);
   }
 }
 

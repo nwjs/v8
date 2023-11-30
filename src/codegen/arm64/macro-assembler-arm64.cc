@@ -1177,6 +1177,10 @@ void MacroAssembler::Switch(Register scratch, Register value,
   Ldr(table, MemOperand(table, value, LSL, kSystemPointerSizeLog2));
   Br(table);
   // Emit the jump table inline, under the assumption that it's not too big.
+  // Make sure there are no veneer pool entries in the middle of the table.
+  const int jump_table_size = num_labels * kSystemPointerSize;
+  CheckVeneerPool(false, false, jump_table_size);
+  BlockPoolsScope no_pool_inbetween(this, jump_table_size);
   Align(kSystemPointerSize);
   bind(&jump_table);
   for (int i = 0; i < num_labels; ++i) {
@@ -1463,12 +1467,11 @@ void MacroAssembler::ReplaceClosureCodeWithOptimizedCode(
   DCHECK(!AreAliased(optimized_code, closure));
   // Store code entry in the closure.
   AssertCode(optimized_code);
-  StoreMaybeIndirectPointerField(
-      optimized_code, FieldMemOperand(closure, JSFunction::kCodeOffset));
-  RecordWriteField(
-      closure, JSFunction::kCodeOffset, optimized_code, kLRHasNotBeenSaved,
-      SaveFPRegsMode::kIgnore, SmiCheck::kOmit,
-      SlotDescriptor::ForMaybeIndirectPointerSlot(kCodeIndirectPointerTag));
+  StoreCodePointerField(optimized_code,
+                        FieldMemOperand(closure, JSFunction::kCodeOffset));
+  RecordWriteField(closure, JSFunction::kCodeOffset, optimized_code,
+                   kLRHasNotBeenSaved, SaveFPRegsMode::kIgnore, SmiCheck::kOmit,
+                   SlotDescriptor::ForCodePointerSlot());
 }
 
 void MacroAssembler::GenerateTailCallToReturnedCode(
@@ -2451,7 +2454,7 @@ void MacroAssembler::LoadCodeInstructionStart(Register destination,
                                               Register code_object) {
   ASM_CODE_COMMENT(this);
 #ifdef V8_ENABLE_SANDBOX
-  LoadCodeEntrypointViaIndirectPointer(
+  LoadCodeEntrypointViaCodePointer(
       destination,
       FieldMemOperand(code_object, Code::kSelfIndirectPointerOffset));
 #else
@@ -2484,7 +2487,7 @@ void MacroAssembler::CallJSFunction(Register function_object) {
   // When the sandbox is enabled, we can directly fetch the entrypoint pointer
   // from the code pointer table instead of going through the Code object. In
   // this way, we avoid one memory load on this code path.
-  LoadCodeEntrypointViaIndirectPointer(
+  LoadCodeEntrypointViaCodePointer(
       code, FieldMemOperand(function_object, JSFunction::kCodeOffset));
   Call(code);
 #else
@@ -2501,7 +2504,7 @@ void MacroAssembler::JumpJSFunction(Register function_object,
   // When the sandbox is enabled, we can directly fetch the entrypoint pointer
   // from the code pointer table instead of going through the Code object. In
   // this way, we avoid one memory load on this code path.
-  LoadCodeEntrypointViaIndirectPointer(
+  LoadCodeEntrypointViaCodePointer(
       code, FieldMemOperand(function_object, JSFunction::kCodeOffset));
   DCHECK_EQ(jump_mode, JumpMode::kJump);
   // We jump through x17 here because for Branch Identification (BTI) we use
@@ -2599,15 +2602,10 @@ void MacroAssembler::CallForDeoptimization(
 void MacroAssembler::LoadStackLimit(Register destination, StackLimitKind kind) {
   ASM_CODE_COMMENT(this);
   DCHECK(root_array_available());
-  Isolate* isolate = this->isolate();
-  ExternalReference limit =
-      kind == StackLimitKind::kRealStackLimit
-          ? ExternalReference::address_of_real_jslimit(isolate)
-          : ExternalReference::address_of_jslimit(isolate);
-  DCHECK(MacroAssembler::IsAddressableThroughRootRegister(isolate, limit));
+  intptr_t offset = kind == StackLimitKind::kRealStackLimit
+                        ? IsolateData::real_jslimit_offset()
+                        : IsolateData::jslimit_offset();
 
-  intptr_t offset =
-      MacroAssembler::RootRegisterOffsetForExternalReference(isolate, limit);
   Ldr(destination, MemOperand(kRootRegister, offset));
 }
 
@@ -3565,10 +3563,10 @@ void MacroAssembler::LoadIndirectPointerField(Register destination,
   } else {
     CHECK(root_array_available_);
     Mov(table,
-        ExternalReference::indirect_pointer_table_base_address(isolate()));
-    Mov(destination, Operand(destination, LSR, kIndirectPointerHandleShift));
-    Ldr(destination, MemOperand(table, destination, LSL,
-                                kIndirectPointerTableEntrySizeLog2));
+        ExternalReference::trusted_pointer_table_base_address(isolate()));
+    Mov(destination, Operand(destination, LSR, kTrustedPointerHandleShift));
+    Ldr(destination,
+        MemOperand(table, destination, LSL, kTrustedPointerTableEntrySizeLog2));
   }
   Orr(destination, destination, Immediate(kHeapObjectTag));
 #else
@@ -3589,8 +3587,8 @@ void MacroAssembler::StoreIndirectPointerField(Register value,
 #endif
 }
 
-void MacroAssembler::StoreMaybeIndirectPointerField(
-    Register value, MemOperand dst_field_operand) {
+void MacroAssembler::StoreTrustedPointerField(Register value,
+                                              MemOperand dst_field_operand) {
 #ifdef V8_ENABLE_SANDBOX
   StoreIndirectPointerField(value, dst_field_operand);
 #else
@@ -3598,7 +3596,7 @@ void MacroAssembler::StoreMaybeIndirectPointerField(
 #endif
 }
 
-void MacroAssembler::LoadCodeEntrypointViaIndirectPointer(
+void MacroAssembler::LoadCodeEntrypointViaCodePointer(
     Register destination, MemOperand field_operand) {
   ASM_CODE_COMMENT(this);
 #ifdef V8_ENABLE_SANDBOX

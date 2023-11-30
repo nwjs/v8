@@ -148,7 +148,21 @@ struct GraphBuilder {
     ProcessStateValues(builder, frame_state.parameters());
     ProcessDeoptInput(builder, frame_state.context(), MachineType::AnyTagged());
     ProcessStateValues(builder, frame_state.locals());
-    ProcessStateValues(builder, frame_state.stack());
+    Node* stack = frame_state.stack();
+    if (v8_flags.turboshaft_frontend) {
+      // If we run graph building before Turbofan's SimplifiedLowering, the
+      // `stack` input of frame states is still a single deopt input, rather
+      // than a StateValues node.
+      if (stack->opcode() == IrOpcode::kHeapConstant &&
+          *HeapConstantOf(stack->op()) ==
+              ReadOnlyRoots(isolate->heap()).optimized_out()) {
+        // Nothing to do in this case.
+      } else {
+        ProcessDeoptInput(builder, stack, MachineType::AnyTagged());
+      }
+    } else {
+      ProcessStateValues(builder, stack);
+    }
   }
 
   Block::Kind BlockKind(BasicBlock* block) {
@@ -2163,6 +2177,12 @@ OpIndex GraphBuilder::Process(
     case IrOpcode::kTypeGuard:
       return Map(node->InputAt(0));
 
+    case IrOpcode::kJSStackCheck: {
+      DCHECK_EQ(OpParameter<StackCheckKind>(node->op()),
+                StackCheckKind::kJSFunctionEntry);
+      return __ StackCheck(StackCheckOp::CheckOrigin::kFromJS,
+                           StackCheckOp::CheckKind::kFunctionHeaderCheck);
+    }
     default:
       std::cerr << "unsupported node type: " << *node->op() << "\n";
       node->Print(std::cerr);

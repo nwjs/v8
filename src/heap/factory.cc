@@ -199,9 +199,8 @@ MaybeHandle<Code> Factory::CodeBuilder::BuildInternal(
       // point to the newly allocated InstructionStream object.
       Handle<Object> self_reference;
       if (self_reference_.ToHandle(&self_reference)) {
-        DCHECK(IsOddball(*self_reference));
-        DCHECK_EQ(Oddball::cast(*self_reference)->kind(),
-                  Oddball::kSelfReferenceMarker);
+        DCHECK_EQ(*self_reference,
+                  ReadOnlyRoots(isolate_).self_reference_marker());
         DCHECK_NE(kind_, CodeKind::BASELINE);
         if (isolate_->IsGeneratingEmbeddedBuiltins()) {
           isolate_->builtins_constants_table_builder()->PatchSelfReference(
@@ -398,28 +397,6 @@ Handle<Hole> Factory::NewHole() {
   return hole;
 }
 
-Handle<Oddball> Factory::NewOddball(Handle<Map> map, const char* to_string,
-                                    Handle<Object> to_number,
-                                    const char* type_of, uint8_t kind) {
-  Handle<Oddball> oddball(Oddball::cast(New(map, AllocationType::kReadOnly)),
-                          isolate());
-  Oddball::Initialize(isolate(), oddball, to_string, to_number, type_of, kind);
-  return oddball;
-}
-
-Handle<Oddball> Factory::NewSelfReferenceMarker() {
-  return NewOddball(self_reference_marker_map(), "self_reference_marker",
-                    handle(Smi::FromInt(-1), isolate()), "undefined",
-                    Oddball::kSelfReferenceMarker);
-}
-
-Handle<Oddball> Factory::NewBasicBlockCountersMarker() {
-  return NewOddball(basic_block_counters_marker_map(),
-                    "basic_block_counters_marker",
-                    handle(Smi::FromInt(-1), isolate()), "undefined",
-                    Oddball::kBasicBlockCountersMarker);
-}
-
 Handle<PropertyArray> Factory::NewPropertyArray(int length,
                                                 AllocationType allocation) {
   DCHECK_LE(0, length);
@@ -452,20 +429,8 @@ MaybeHandle<FixedArray> Factory::TryNewFixedArray(
   result->set_map_after_allocation(*fixed_array_map(), SKIP_WRITE_BARRIER);
   Tagged<FixedArray> array = Tagged<FixedArray>::cast(result);
   array->set_length(length);
-  MemsetTagged(array->data_start(), *undefined_value(), length);
+  MemsetTagged(array->RawFieldOfFirstElement(), *undefined_value(), length);
   return handle(array, isolate());
-}
-
-Handle<ClosureFeedbackCellArray> Factory::NewClosureFeedbackCellArray(
-    int length) {
-  if (length == 0) return empty_closure_feedback_cell_array();
-
-  Handle<ClosureFeedbackCellArray> feedback_cell_array =
-      Handle<ClosureFeedbackCellArray>::cast(NewFixedArrayWithMap(
-          read_only_roots().closure_feedback_cell_array_map_handle(), length,
-          AllocationType::kOld));
-
-  return feedback_cell_array;
 }
 
 Handle<FeedbackVector> Factory::NewFeedbackVector(
@@ -785,8 +750,7 @@ MaybeHandle<String> Factory::NewStringFromUtf8(
   // {end - start} can never be more than what the Utf8Decoder can handle.
   static_assert(ByteArray::kMaxLength <= kMaxInt);
   auto peek_bytes = [&]() -> base::Vector<const uint8_t> {
-    const uint8_t* contents =
-        reinterpret_cast<const uint8_t*>(array->GetDataStartAddress());
+    const uint8_t* contents = reinterpret_cast<const uint8_t*>(array->begin());
     return {contents + start, end - start};
   };
   return NewStringFromUtf8Variant(isolate(), peek_bytes, utf8_variant,
@@ -1315,13 +1279,8 @@ Handle<Context> Factory::NewScriptContext(Handle<NativeContext> outer,
 }
 
 Handle<ScriptContextTable> Factory::NewScriptContextTable() {
-  Handle<ScriptContextTable> context_table = Handle<ScriptContextTable>::cast(
-      NewFixedArrayWithMap(read_only_roots().script_context_table_map_handle(),
-                           ScriptContextTable::kMinLength));
-  Handle<NameToIndexHashTable> names = NameToIndexHashTable::New(isolate(), 16);
-  context_table->set_used(0, kReleaseStore);
-  context_table->set_names_to_context_index(*names);
-  return context_table;
+  static constexpr int kInitialCapacity = 0;
+  return ScriptContextTable::New(isolate(), kInitialCapacity);
 }
 
 Handle<Context> Factory::NewModuleContext(Handle<SourceTextModule> module,
@@ -2044,9 +2003,9 @@ Handle<TransitionArray> Factory::NewTransitionArray(int number_of_transitions,
   if (heap->incremental_marking()->black_allocation()) {
     heap->mark_compact_collector()->AddTransitionArray(*array);
   }
-  array->WeakFixedArray::Set(TransitionArray::kPrototypeTransitionsIndex,
+  array->WeakFixedArray::set(TransitionArray::kPrototypeTransitionsIndex,
                              MaybeObject::FromObject(Smi::zero()));
-  array->WeakFixedArray::Set(
+  array->WeakFixedArray::set(
       TransitionArray::kTransitionLengthIndex,
       MaybeObject::FromObject(Smi::FromInt(number_of_transitions)));
   return array;
@@ -2277,7 +2236,7 @@ Handle<T> Factory::CopyArrayWithMap(Handle<T> src, Handle<Map> map,
   initialize_length(result, len);
   // Copy the content.
   WriteBarrierMode mode = result->GetWriteBarrierMode(no_gc);
-  result->CopyElements(isolate(), 0, *src, 0, len, mode);
+  T::CopyElements(isolate(), result, 0, *src, 0, len, mode);
   return handle(result, isolate());
 }
 
@@ -2288,6 +2247,7 @@ Handle<T> Factory::CopyArrayAndGrow(Handle<T> src, int grow_by,
   DCHECK_LE(grow_by, kMaxInt - src->length());
   int old_len = src->length();
   int new_len = old_len + grow_by;
+  // TODO(jgruber,v8:14345): Use T::Allocate instead.
   Tagged<HeapObject> new_object = AllocateRawFixedArray(new_len, allocation);
   DisallowGarbageCollection no_gc;
   new_object->set_map_after_allocation(src->map(), SKIP_WRITE_BARRIER);
@@ -2295,8 +2255,10 @@ Handle<T> Factory::CopyArrayAndGrow(Handle<T> src, int grow_by,
   initialize_length(result, new_len);
   // Copy the content.
   WriteBarrierMode mode = result->GetWriteBarrierMode(no_gc);
-  result->CopyElements(isolate(), 0, *src, 0, old_len, mode);
-  MemsetTagged(ObjectSlot(result->data_start() + old_len),
+  T::CopyElements(isolate(), *result, 0, *src, 0, old_len, mode);
+  // TODO(jgruber,v8:14345): Enable the static assert once all T's support it:
+  // static_assert(T::Shape::kElementSize == kTaggedSize);
+  MemsetTagged(ObjectSlot(result->RawFieldOfElementAt(old_len)),
                read_only_roots().undefined_value(), grow_by);
   return handle(result, isolate());
 }
@@ -2439,16 +2401,11 @@ Handle<HeapNumber> Factory::NewHeapNumberForCodeAssembler(double value) {
 
 Handle<JSObject> Factory::NewError(Handle<JSFunction> constructor,
                                    MessageTemplate template_index,
-                                   Handle<Object> arg0, Handle<Object> arg1,
-                                   Handle<Object> arg2) {
+                                   base::Vector<const Handle<Object>> args) {
   HandleScope scope(isolate());
 
-  if (arg0.is_null()) arg0 = undefined_value();
-  if (arg1.is_null()) arg1 = undefined_value();
-  if (arg2.is_null()) arg2 = undefined_value();
-
   return scope.CloseAndEscape(ErrorUtils::MakeGenericError(
-      isolate(), constructor, template_index, arg0, arg1, arg2, SKIP_NONE));
+      isolate(), constructor, template_index, args, SKIP_NONE));
 }
 
 Handle<JSObject> Factory::NewError(Handle<JSFunction> constructor,
@@ -2476,12 +2433,11 @@ Handle<Object> Factory::NewInvalidStringLengthError() {
   return NewRangeError(MessageTemplate::kInvalidStringLength);
 }
 
-#define DEFINE_ERROR(NAME, name)                                              \
-  Handle<JSObject> Factory::New##NAME(                                        \
-      MessageTemplate template_index, Handle<Object> arg0,                    \
-      Handle<Object> arg1, Handle<Object> arg2) {                             \
-    return NewError(isolate()->name##_function(), template_index, arg0, arg1, \
-                    arg2);                                                    \
+#define DEFINE_ERROR(NAME, name)                                         \
+  Handle<JSObject> Factory::New##NAME(                                   \
+      MessageTemplate template_index,                                    \
+      base::Vector<const Handle<Object>> args) {                         \
+    return NewError(isolate()->name##_function(), template_index, args); \
   }
 DEFINE_ERROR(Error, error)
 DEFINE_ERROR(EvalError, eval_error)
@@ -2584,6 +2540,7 @@ Handle<BytecodeArray> Factory::CopyBytecodeArray(Handle<BytecodeArray> source) {
       size, AllocationType::kOld, *bytecode_array_map()));
   DisallowGarbageCollection no_gc;
   Tagged<BytecodeArray> raw_source = *source;
+  copy->init_self_indirect_pointer(isolate()->AsLocalIsolate());
   copy->set_length(raw_source->length());
   copy->set_frame_size(raw_source->frame_size());
   copy->set_parameter_count(raw_source->parameter_count());
@@ -3525,12 +3482,9 @@ Handle<DebugInfo> Factory::NewDebugInfo(Handle<SharedFunctionInfo> shared) {
   debug_info->set_shared(raw_shared);
   debug_info->set_debugger_hints(0);
   DCHECK_EQ(DebugInfo::kNoDebuggingId, debug_info->debugging_id());
-  Tagged<HeapObject> undefined = *undefined_value();
-  debug_info->set_original_bytecode_array(undefined, kReleaseStore,
-                                          SKIP_WRITE_BARRIER);
-  debug_info->set_debug_bytecode_array(undefined, kReleaseStore,
-                                       SKIP_WRITE_BARRIER);
   debug_info->set_break_points(*empty_fixed_array(), SKIP_WRITE_BARRIER);
+  debug_info->clear_original_bytecode_array(kReleaseStore);
+  debug_info->clear_debug_bytecode_array(kReleaseStore);
 
   return handle(debug_info, isolate());
 }
@@ -3631,7 +3585,7 @@ Handle<Map> Factory::ObjectLiteralMapFromCache(Handle<NativeContext> context,
                                isolate());
 
   // Check to see whether there is a matching element in the cache.
-  MaybeObject result = cache->Get(number_of_properties);
+  MaybeObject result = cache->get(number_of_properties);
   Tagged<HeapObject> heap_object;
   if (result.GetHeapObjectIfWeak(&heap_object)) {
     Tagged<Map> map = Tagged<Map>::cast(heap_object);
@@ -3642,7 +3596,7 @@ Handle<Map> Factory::ObjectLiteralMapFromCache(Handle<NativeContext> context,
   // Create a new map and add it to the cache.
   Handle<Map> map = Map::Create(isolate(), number_of_properties);
   DCHECK(!map->is_dictionary_map());
-  cache->Set(number_of_properties, HeapObjectReference::Weak(*map));
+  cache->set(number_of_properties, HeapObjectReference::Weak(*map));
   return map;
 }
 
@@ -3758,27 +3712,6 @@ void Factory::SetRegExpExperimentalData(Handle<JSRegExp> regexp,
   store->set(JSRegExp::kIrregexpTicksUntilTierUpIndex, uninitialized);
   store->set(JSRegExp::kIrregexpBacktrackLimit, uninitialized);
   regexp->set_data(store);
-}
-
-Handle<RegExpMatchInfo> Factory::NewRegExpMatchInfo() {
-  // Initially, the last match info consists of all fixed fields plus space for
-  // the match itself (i.e., 2 capture indices).
-  static const int kInitialSize = RegExpMatchInfo::kFirstCaptureIndex +
-                                  RegExpMatchInfo::kInitialCaptureIndices;
-
-  Handle<FixedArray> elems =
-      NewFixedArray(kInitialSize, AllocationType::kYoung);
-  Handle<RegExpMatchInfo> result = Handle<RegExpMatchInfo>::cast(elems);
-  {
-    DisallowGarbageCollection no_gc;
-    Tagged<RegExpMatchInfo> raw = *result;
-    raw->SetNumberOfCaptureRegisters(RegExpMatchInfo::kInitialCaptureIndices);
-    raw->SetLastSubject(*empty_string(), SKIP_WRITE_BARRIER);
-    raw->SetLastInput(*undefined_value(), SKIP_WRITE_BARRIER);
-    raw->SetCapture(0, 0);
-    raw->SetCapture(1, 0);
-  }
-  return result;
 }
 
 Handle<Object> Factory::GlobalConstantFor(Handle<Name> name) {

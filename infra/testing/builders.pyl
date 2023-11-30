@@ -34,7 +34,7 @@
   # Android
   'v8_android_arm64_n5x_rel': {
     'swarming_dimensions' : {
-      'device_os': 'MMB29Q',
+      'device_os': 'OPR4.170623.020',
       'device_type': 'bullhead',
       'os': 'Android',
     },
@@ -763,7 +763,10 @@
       'os': 'Ubuntu-22.04',
     },
     'tests': [
+      {'name': 'mozilla'},
+      {'name': 'test262', 'variant': 'default', 'shards': 2},
       {'name': 'v8testing', 'shards': 2},
+      {'name': 'v8testing', 'variant': 'extra', 'shards': 2},
     ],
   },
   'v8_linux64_verify_csa_rel': {
@@ -2077,7 +2080,7 @@
   # Ports.
   'V8 Android Arm64 - N5X': {
     'swarming_dimensions': {
-      'device_os': 'MMB29Q',
+      'device_os': 'OPR4.170623.020',
       'device_type': 'bullhead',
       'os': 'Android',
     },

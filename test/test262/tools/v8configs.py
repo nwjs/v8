@@ -44,7 +44,17 @@ class Test262GitHub(GitHubRepo):
 
   @property
   def skipped_revisions(self):
-    return []
+    return [
+        # Revisions below would choke on github checks. Next revision in v8 repo
+        # is an effective reland.
+        "f4e862d29f6aeaa66b5e8e755dc70fe7cb2bc243",
+        "44702d6ea9c1bce9c95316e3aca41c14e0e8533f",
+        "87437c41113c2b41aaf5bcbc7fee996df0ab1711",
+        "b8d49712ab12dd13bee5da34849f8ab7f5309715",
+        "46c933180967191758afd0427f9d0ba02a4d24a3",
+        "85bf69fd70e118b1ace64110ed82cb1ff0d58533",
+        "b97d50ae5e4bb6b5abfc811c0b618d888c3f1377",
+    ]
 
 
 class V8Test262Config(ProjectConfig):
@@ -89,8 +99,7 @@ def local_repo_factory(config):
       mirror_url=None,
       default_committer_email=config.export.committer_email,
       default_committer_name=config.export.committer_name,
-      source_relative_tests=config.github.source_relative_tests,
-      destination_relative_tests=config.github.destination_relative_tests,
+      patch_path_renames = [(r.source, r.destination) for r in config.github.patch_path_renames],
       host=host,
       gh_token=gh_token,
       main_branch=config.github.main_branch,

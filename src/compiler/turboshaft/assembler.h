@@ -1691,20 +1691,48 @@ class AssemblerOpInterface {
         result_rep, input_rep, memory_access_kind);
   }
 
-  OpIndex AtomicWord32Pair(V<WordPtr> base, V<WordPtr> index,
-                           V<Word32> value_low, V<Word32> value_high,
-                           V<Word32> expected_low, V<Word32> expected_high,
-                           AtomicWord32PairOp::OpKind op_kind, int32_t offset) {
+  OpIndex AtomicWord32Pair(V<WordPtr> base, OptionalV<WordPtr> index,
+                           OptionalV<Word32> value_low,
+                           OptionalV<Word32> value_high,
+                           OptionalV<Word32> expected_low,
+                           OptionalV<Word32> expected_high,
+                           AtomicWord32PairOp::Kind op_kind, int32_t offset) {
     return ReduceIfReachableAtomicWord32Pair(base, index, value_low, value_high,
                                              expected_low, expected_high,
                                              op_kind, offset);
+  }
+
+  OpIndex AtomicWord32PairLoad(V<WordPtr> base, OptionalV<WordPtr> index,
+                               int32_t offset) {
+    return AtomicWord32Pair(base, index, {}, {}, {}, {},
+                            AtomicWord32PairOp::Kind::kLoad, offset);
+  }
+  OpIndex AtomicWord32PairStore(V<WordPtr> base, OptionalV<WordPtr> index,
+                                V<Word32> value_low, V<Word32> value_high,
+                                int32_t offset) {
+    return AtomicWord32Pair(base, index, value_low, value_high, {}, {},
+                            AtomicWord32PairOp::Kind::kStore, offset);
+  }
+  OpIndex AtomicWord32PairCompareExchange(
+      V<WordPtr> base, OptionalV<WordPtr> index, V<Word32> value_low,
+      V<Word32> value_high, V<Word32> expected_low, V<Word32> expected_high,
+      int32_t offset = 0) {
+    return AtomicWord32Pair(base, index, value_low, value_high, expected_low,
+                            expected_high,
+                            AtomicWord32PairOp::Kind::kCompareExchange, offset);
+  }
+  OpIndex AtomicWord32PairBinop(V<WordPtr> base, OptionalV<WordPtr> index,
+                                V<Word32> value_low, V<Word32> value_high,
+                                AtomicRMWOp::BinOp bin_op, int32_t offset = 0) {
+    return AtomicWord32Pair(base, index, value_low, value_high, {}, {},
+                            AtomicWord32PairOp::KindFromBinOp(bin_op), offset);
   }
 
   OpIndex MemoryBarrier(AtomicMemoryOrder memory_order) {
     return ReduceIfReachableMemoryBarrier(memory_order);
   }
 
-  OpIndex Load(OpIndex base, OpIndex index, LoadOp::Kind kind,
+  OpIndex Load(OpIndex base, OptionalOpIndex index, LoadOp::Kind kind,
                MemoryRepresentation loaded_rep,
                RegisterRepresentation result_rep, int32_t offset = 0,
                uint8_t element_size_log2 = 0) {
@@ -1712,7 +1740,7 @@ class AssemblerOpInterface {
                                  offset, element_size_log2);
   }
 
-  OpIndex Load(OpIndex base, OpIndex index, LoadOp::Kind kind,
+  OpIndex Load(OpIndex base, OptionalOpIndex index, LoadOp::Kind kind,
                MemoryRepresentation loaded_rep, int32_t offset = 0,
                uint8_t element_size_log2 = 0) {
     return Load(base, index, kind, loaded_rep,
@@ -1730,14 +1758,14 @@ class AssemblerOpInterface {
                       MemoryRepresentation rep) {
     return Load(address, LoadOp::Kind::RawAligned(), rep, offset);
   }
-  OpIndex LoadOffHeap(OpIndex address, OpIndex index, int32_t offset,
+  OpIndex LoadOffHeap(OpIndex address, OptionalOpIndex index, int32_t offset,
                       MemoryRepresentation rep) {
     return Load(address, index, LoadOp::Kind::RawAligned(), rep, offset,
                 rep.SizeInBytesLog2());
   }
 
   void Store(
-      OpIndex base, OpIndex index, OpIndex value, StoreOp::Kind kind,
+      OpIndex base, OptionalOpIndex index, OpIndex value, StoreOp::Kind kind,
       MemoryRepresentation stored_rep, WriteBarrierKind write_barrier,
       int32_t offset = 0, uint8_t element_size_log2 = 0,
       bool maybe_initializing_or_transitioning = false,
@@ -1771,7 +1799,7 @@ class AssemblerOpInterface {
     Store(address, value, StoreOp::Kind::RawAligned(), rep,
           WriteBarrierKind::kNoWriteBarrier, offset);
   }
-  void StoreOffHeap(OpIndex address, OpIndex index, OpIndex value,
+  void StoreOffHeap(OpIndex address, OptionalOpIndex index, OpIndex value,
                     MemoryRepresentation rep, int32_t offset) {
     Store(address, index, value, StoreOp::Kind::RawAligned(), rep,
           WriteBarrierKind::kNoWriteBarrier, offset, rep.SizeInBytesLog2());
@@ -2314,6 +2342,11 @@ class AssemblerOpInterface {
     return CallRuntime<typename RuntimeCallDescriptor::DateCurrentTime>(
         isolate, context, {});
   }
+  V<Object> CallRuntime_StackGuardWithGap(Isolate* isolate, V<Context> context,
+                                          V<Smi> gap) {
+    return CallRuntime<typename RuntimeCallDescriptor::StackGuardWithGap>(
+        isolate, context, {gap});
+  }
   V<Tagged> CallRuntime_StringCharCodeAt(Isolate* isolate, V<Context> context,
                                          V<String> string, V<Number> index) {
     return CallRuntime<typename RuntimeCallDescriptor::StringCharCodeAt>(
@@ -2705,7 +2738,7 @@ class AssemblerOpInterface {
                                        array_type);
   }
 
-  void StoreDataViewElement(V<Object> object, V<Object> storage,
+  void StoreDataViewElement(V<Object> object, V<WordPtr> storage,
                             V<WordPtr> index, OpIndex value,
                             V<Word32> is_little_endian,
                             ExternalArrayType element_type) {
@@ -2856,24 +2889,30 @@ class AssemblerOpInterface {
     return ReduceIfReachableWasmTypeCast(object, rtt, config);
   }
 
-  V<Tagged> ExternInternalize(V<Tagged> input) {
-    return ReduceIfReachableExternInternalize(input);
+  V<Tagged> AnyConvertExtern(V<Tagged> input) {
+    return ReduceIfReachableAnyConvertExtern(input);
   }
 
-  V<Tagged> ExternExternalize(V<Tagged> input) {
-    return ReduceIfReachableExternExternalize(input);
+  V<Tagged> ExternConvertAny(V<Tagged> input) {
+    return ReduceIfReachableExternConvertAny(input);
+  }
+
+  OpIndex AnnotateWasmType(OpIndex value, const wasm::ValueType type) {
+    return ReduceIfReachableWasmTypeAnnotation(value, type);
   }
 
   OpIndex StructGet(V<HeapObject> object, const wasm::StructType* type,
-                    int field_index, bool is_signed, CheckForNull null_check) {
-    return ReduceIfReachableStructGet(object, type, field_index, is_signed,
-                                      null_check);
+                    uint32_t type_index, int field_index, bool is_signed,
+                    CheckForNull null_check) {
+    return ReduceIfReachableStructGet(object, type, type_index, field_index,
+                                      is_signed, null_check);
   }
 
   void StructSet(V<HeapObject> object, OpIndex value,
-                 const wasm::StructType* type, int field_index,
-                 CheckForNull null_check) {
-    ReduceIfReachableStructSet(object, value, type, field_index, null_check);
+                 const wasm::StructType* type, uint32_t type_index,
+                 int field_index, CheckForNull null_check) {
+    ReduceIfReachableStructSet(object, value, type, type_index, field_index,
+                               null_check);
   }
 
   OpIndex ArrayGet(V<HeapObject> array, V<Word32> index,
@@ -2888,6 +2927,20 @@ class AssemblerOpInterface {
 
   V<Word32> ArrayLength(V<HeapObject> array, CheckForNull null_check) {
     return ReduceIfReachableArrayLength(array, null_check);
+  }
+
+  V<HeapObject> WasmAllocateArray(V<Map> rtt, ConstOrV<Word32> length,
+                                  const wasm::ArrayType* array_type) {
+    return ReduceIfReachableWasmAllocateArray(rtt, resolve(length), array_type);
+  }
+
+  V<HeapObject> WasmAllocateStruct(V<Map> rtt,
+                                   const wasm::StructType* struct_type) {
+    return ReduceIfReachableWasmAllocateStruct(rtt, struct_type);
+  }
+
+  V<Tagged> WasmRefFunc(V<Tagged> wasm_instance, uint32_t function_index) {
+    return ReduceIfReachableWasmRefFunc(wasm_instance, function_index);
   }
 
   V<Tagged> StringAsWtf16(V<Tagged> string) {
@@ -2982,6 +3035,33 @@ class AssemblerOpInterface {
   V<WasmInstanceObject> WasmInstanceParameter() {
     return Parameter(wasm::kWasmInstanceParameterIndex,
                      RegisterRepresentation::Tagged());
+  }
+
+  V<Tagged> LoadFixedArrayElement(V<FixedArray> array, int index) {
+    return Load(array, LoadOp::Kind::TaggedBase(),
+                MemoryRepresentation::AnyTagged(),
+                FixedArray::kHeaderSize + index * kTaggedSize);
+  }
+
+  V<Tagged> LoadFixedArrayElement(V<FixedArray> array, V<WordPtr> index) {
+    return Load(array, index, LoadOp::Kind::TaggedBase(),
+                MemoryRepresentation::AnyTagged(), FixedArray::kHeaderSize,
+                kTaggedSizeLog2);
+  }
+
+  void StoreFixedArrayElement(V<FixedArray> array, int index, V<Tagged> value,
+                              compiler::WriteBarrierKind write_barrier) {
+    Store(array, value, LoadOp::Kind::TaggedBase(),
+          MemoryRepresentation::AnyTagged(), write_barrier,
+          FixedArray::kHeaderSize + index * kTaggedSize);
+  }
+
+  void StoreFixedArrayElement(V<FixedArray> array, V<WordPtr> index,
+                              V<Tagged> value,
+                              compiler::WriteBarrierKind write_barrier) {
+    Store(array, index, value, LoadOp::Kind::TaggedBase(),
+          MemoryRepresentation::AnyTagged(), write_barrier,
+          FixedArray::kHeaderSize, kTaggedSizeLog2);
   }
 
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -3472,7 +3552,7 @@ class Assembler : public GraphVisitor<Assembler<Reducers>>,
     // Inserting a Goto in {intermediate_block} to {destination}. This will
     // create the edge from {intermediate_block} to {destination}. Note that
     // this will call AddPredecessor, but we've already removed the eventual
-    // edge of {destination} that need splitting, so no risks of inifinite
+    // edge of {destination} that need splitting, so no risks of infinite
     // recursion here.
     this->Goto(destination);
   }
@@ -3538,7 +3618,8 @@ class Assembler : public GraphVisitor<Assembler<Reducers>>,
   OpIndex current_operation_origin_ = OpIndex::Invalid();
   OperationMatcher matcher_;
 #ifdef DEBUG
-  GrowingSidetable<Block*> op_to_block_{this->phase_zone()};
+  GrowingOpIndexSidetable<Block*> op_to_block_{this->phase_zone(),
+                                               &this->output_graph()};
 
   bool ValidInputs(OpIndex op_idx) {
     const Operation& op = this->output_graph().Get(op_idx);

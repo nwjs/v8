@@ -250,11 +250,11 @@ ExternalReference::shared_external_pointer_table_address_address(
       isolate->shared_external_pointer_table_address_address());
 }
 
-ExternalReference ExternalReference::indirect_pointer_table_base_address(
+ExternalReference ExternalReference::trusted_pointer_table_base_address(
     Isolate* isolate) {
   // TODO(saelo): maybe the external pointer table external references should
   // also directly return the table base address?
-  return ExternalReference(isolate->indirect_pointer_table_base_address());
+  return ExternalReference(isolate->trusted_pointer_table_base_address());
 }
 
 ExternalReference ExternalReference::code_pointer_table_address() {
@@ -522,6 +522,8 @@ FUNCTION_REFERENCE(wasm_array_copy, wasm::array_copy_wrapper)
 FUNCTION_REFERENCE(wasm_array_fill, wasm::array_fill_wrapper)
 FUNCTION_REFERENCE_WITH_TYPE(wasm_string_to_f64, wasm::flat_string_to_f64,
                              BUILTIN_FP_POINTER_CALL)
+int32_t (&futex_emulation_wake)(void*, uint32_t) = FutexEmulation::Wake;
+FUNCTION_REFERENCE(wasm_atomic_notify, futex_emulation_wake)
 
 #define V(Name) RAW_FUNCTION_REFERENCE(wasm_##Name, wasm::Name)
 WASM_JS_EXTERNAL_REFERENCE_LIST(V)
@@ -1685,15 +1687,15 @@ IF_TSAN(FUNCTION_REFERENCE, tsan_relaxed_load_function_32_bits,
 IF_TSAN(FUNCTION_REFERENCE, tsan_relaxed_load_function_64_bits,
         tsan_relaxed_load_64_bits)
 
-static int EnterMicrotaskContextWrapper(HandleScopeImplementer* hsi,
-                                        Address raw_context) {
+static int EnterContextWrapper(HandleScopeImplementer* hsi,
+                               Address raw_context) {
   Tagged<NativeContext> context =
       NativeContext::cast(Tagged<Object>(raw_context));
-  hsi->EnterMicrotaskContext(context);
+  hsi->EnterContext(context);
   return 0;
 }
 
-FUNCTION_REFERENCE(call_enter_context_function, EnterMicrotaskContextWrapper)
+FUNCTION_REFERENCE(call_enter_context_function, EnterContextWrapper)
 
 FUNCTION_REFERENCE(
     js_finalization_registry_remove_cell_from_unregister_token_map,

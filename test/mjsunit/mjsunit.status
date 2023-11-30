@@ -300,6 +300,9 @@
   'wasm/atomics-stress': [SKIP],
   'wasm/atomics64-stress': [SKIP],
   'wasm/atomics-memory64': [SKIP],
+  # Profiler test is flaky on simulators.
+  'wasm/log-wasm-to-js-wrapper-callref': [SKIP],
+  'wasm/log-wasm-to-js-wrapper-indirect': [SKIP],
 }],  # simulator_run
 
 ##############################################################################
@@ -317,6 +320,7 @@
   'getters-on-elements': [SKIP],
   'es6/block-let-crankshaft': [SKIP],
   'maglev/osr-to-tf': [SKIP],
+  'maglev/unstable-map-transition': [SKIP],
   'opt-elements-kind': [SKIP],
   'osr-elements-kind': [SKIP],
   'compiler/number-divide': [SKIP],
@@ -1268,11 +1272,13 @@
   'd8/enable-tracing': [SKIP],
 
   # Intentionally non-deterministic using shared arraybuffers between workers.
+  'huge-typedarrays': [SKIP],
   'wasm/atomic-wait-multi-memory': [SKIP],
   'wasm/atomics-stress': [SKIP],
   'wasm/atomics64-stress': [SKIP],
   'wasm/atomics-memory64': [SKIP],
   'wasm/futex': [SKIP],
+  'wasm/grow-shared-memory': [SKIP],
   'regress/regress-1205290': [SKIP],
   'regress/regress-1212404': [SKIP],
   'regress/regress-1221035': [SKIP],
@@ -1291,9 +1297,6 @@
   # The test triggers profiling, which can trigger non-deterministic
   # allocations.
   'regress/regress-1394663': [SKIP],
-
-  # BUG(v8:12605): flaky test.
-  'wasm/grow-shared-memory': [SKIP],
 
   # BUG(v8:13234)
   'wasm/shared-memory-worker-gc-stress': [SKIP],
@@ -1659,6 +1662,7 @@
   'regress/wasm/regress-10309': [SKIP],
   'regress/wasm/regress-10831': [SKIP],
   'regress/wasm/regress-13732': [SKIP],
+  'regress/wasm/regress-14356': [SKIP],
   'regress/wasm/regress-1054466': [SKIP],
   'regress/wasm/regress-1065599': [SKIP],
   'regress/wasm/regress-1070078': [SKIP],
@@ -1695,6 +1699,7 @@
   'regress/wasm/regress-1479926': [SKIP],
   'regress/wasm/regress-1480117': [SKIP],
   'regress/wasm/regress-1484978': [SKIP],
+  'regress/wasm/regress-1487077': [SKIP],
   'regress/wasm/regress-crbug-1338980': [SKIP],
   'regress/wasm/regress-crbug-1355070': [SKIP],
   'regress/wasm/regress-crbug-1356718': [SKIP],

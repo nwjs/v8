@@ -860,7 +860,9 @@ SnapshotCreatorImpl::SnapshotCreatorImpl(
     isolate_->InitWithoutSnapshot();
   }
 
+#ifdef V8_ENABLE_SPARKPLUG
   isolate_->baseline_batch_compiler()->set_enabled(false);
+#endif  // V8_ENABLE_SPARKPLUG
 
   // Reserve a spot for the default context s.t. the call sequence of
   // SetDefaultContext / AddContext remains independent.
@@ -920,7 +922,7 @@ size_t SnapshotCreatorImpl::AddData(Handle<NativeContext> context,
     list = Handle<ArrayList>(ArrayList::cast(context->serialized_objects()),
                              isolate_);
   }
-  size_t index = static_cast<size_t>(list->Length());
+  size_t index = static_cast<size_t>(list->length());
   list = ArrayList::Add(isolate_, list, obj);
   context->set_serialized_objects(*list);
   return index;
@@ -938,7 +940,7 @@ size_t SnapshotCreatorImpl::AddData(Address object) {
     list = Handle<ArrayList>(
         ArrayList::cast(isolate_->heap()->serialized_objects()), isolate_);
   }
-  size_t index = static_cast<size_t>(list->Length());
+  size_t index = static_cast<size_t>(list->length());
   list = ArrayList::Add(isolate_, list, obj);
   isolate_->heap()->SetSerializedObjects(*list);
   return index;
@@ -957,7 +959,7 @@ void ConvertSerializedObjectsToFixedArray(Isolate* isolate) {
   } else {
     Handle<ArrayList> list(
         ArrayList::cast(isolate->heap()->serialized_objects()), isolate);
-    Handle<FixedArray> elements = ArrayList::Elements(isolate, list);
+    Handle<FixedArray> elements = ArrayList::ToFixedArray(isolate, list);
     isolate->heap()->SetSerializedObjects(*elements);
   }
 }
@@ -969,7 +971,7 @@ void ConvertSerializedObjectsToFixedArray(Isolate* isolate,
   } else {
     Handle<ArrayList> list(ArrayList::cast(context->serialized_objects()),
                            isolate);
-    Handle<FixedArray> elements = ArrayList::Elements(isolate, list);
+    Handle<FixedArray> elements = ArrayList::ToFixedArray(isolate, list);
     context->set_serialized_objects(*elements);
   }
 }

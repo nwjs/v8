@@ -1463,6 +1463,9 @@ bool GetValueType(Isolate* isolate, MaybeLocal<Value> maybe,
   } else if (enabled_features.has_gc() &&
              string->StringEquals(v8_str(isolate, "i31ref"))) {
     *type = i::wasm::kWasmI31Ref;
+  } else if (enabled_features.has_exnref() &&
+             string->StringEquals(v8_str(isolate, "exnref"))) {
+    *type = i::wasm::kWasmExnRef;
   } else {
     // Unrecognized type.
     *type = i::wasm::kWasmVoid;
@@ -1769,9 +1772,9 @@ namespace {
 
 uint32_t GetEncodedSize(i::Handle<i::WasmTagObject> tag_object) {
   auto serialized_sig = tag_object->serialized_signature();
-  i::wasm::WasmTagSig sig{0, static_cast<size_t>(serialized_sig->length()),
-                          reinterpret_cast<i::wasm::ValueType*>(
-                              serialized_sig->GetDataStartAddress())};
+  i::wasm::WasmTagSig sig{
+      0, static_cast<size_t>(serialized_sig->length()),
+      reinterpret_cast<i::wasm::ValueType*>(serialized_sig->begin())};
   return i::WasmExceptionPackage::GetEncodedSize(&sig);
 }
 
@@ -2115,36 +2118,6 @@ void WebAssemblyFunction(const v8::FunctionCallbackInfo<v8::Value>& info) {
       i::WasmExportedFunction::IsWasmExportedFunction(*callable);
   bool is_wasm_js_function = i::WasmJSFunction::IsWasmJSFunction(*callable);
 
-  if (is_wasm_exported_function && !suspend && !promise) {
-    uint32_t canonical_sig_index =
-        i::wasm::GetWasmEngine()->type_canonicalizer()->AddRecursiveGroup(sig);
-    if (i::Handle<i::WasmExportedFunction>::cast(callable)->MatchesSignature(
-            canonical_sig_index)) {
-      info.GetReturnValue().Set(Utils::ToLocal(callable));
-      return;
-    }
-
-    thrower.TypeError(
-        "The signature of Argument 1 (a WebAssembly function) does "
-        "not match the signature specified in Argument 0");
-    return;
-  }
-
-  if (is_wasm_js_function && !suspend && !promise) {
-    uint32_t canonical_sig_index =
-        i::wasm::GetWasmEngine()->type_canonicalizer()->AddRecursiveGroup(sig);
-    if (i::Handle<i::WasmJSFunction>::cast(callable)->MatchesSignature(
-            canonical_sig_index)) {
-      info.GetReturnValue().Set(Utils::ToLocal(callable));
-      return;
-    }
-
-    thrower.TypeError(
-        "The signature of Argument 1 (a WebAssembly function) does "
-        "not match the signature specified in Argument 0");
-    return;
-  }
-
   if (is_wasm_exported_function && suspend) {
     // TODO(thibaudm): Support wasm-to-wasm calls with suspending behavior, and
     // also with combined promising+suspending behavior.
@@ -2219,7 +2192,7 @@ void WebAssemblyFunction(const v8::FunctionCallbackInfo<v8::Value>& info) {
   info.GetReturnValue().Set(Utils::ToLocal(result));
 }
 
-// WebAssembly.Function.type(WebAssembly.Function) -> FunctionType
+// WebAssembly.Function.prototype.type() -> FunctionType
 void WebAssemblyFunctionType(const v8::FunctionCallbackInfo<v8::Value>& info) {
   DCHECK(i::ValidateCallbackInfo(info));
   v8::Isolate* isolate = info.GetIsolate();
@@ -2229,10 +2202,11 @@ void WebAssemblyFunctionType(const v8::FunctionCallbackInfo<v8::Value>& info) {
 
   const i::wasm::FunctionSig* sig;
   i::Zone zone(i_isolate->allocator(), ZONE_NAME);
-  i::Handle<i::Object> arg0 = Utils::OpenHandle(*info[0]);
-  if (i::WasmExportedFunction::IsWasmExportedFunction(*arg0)) {
+
+  i::Handle<i::Object> fun = Utils::OpenHandle(*info.This());
+  if (i::WasmExportedFunction::IsWasmExportedFunction(*fun)) {
     auto wasm_exported_function =
-        i::Handle<i::WasmExportedFunction>::cast(arg0);
+        i::Handle<i::WasmExportedFunction>::cast(fun);
     auto sfi = handle(wasm_exported_function->shared(), i_isolate);
     i::Handle<i::WasmExportedFunctionData> data =
         handle(sfi->wasm_exported_function_data(), i_isolate);
@@ -2252,10 +2226,10 @@ void WebAssemblyFunctionType(const v8::FunctionCallbackInfo<v8::Value>& info) {
       builder.AddReturn(i::wasm::kWasmExternRef);
       sig = builder.Build();
     }
-  } else if (i::WasmJSFunction::IsWasmJSFunction(*arg0)) {
-    sig = i::Handle<i::WasmJSFunction>::cast(arg0)->GetSignature(&zone);
+  } else if (i::WasmJSFunction::IsWasmJSFunction(*fun)) {
+    sig = i::Handle<i::WasmJSFunction>::cast(fun)->GetSignature(&zone);
   } else {
-    thrower.TypeError("Argument 0 must be a WebAssembly.Function");
+    thrower.TypeError("Receiver must be a WebAssembly.Function");
     return;
   }
 
@@ -3278,8 +3252,7 @@ void WasmJs::Install(Isolate* isolate, bool exposed_on_global_object) {
               .FromJust());
     JSFunction::SetInitialMap(isolate, function_constructor, function_map,
                               function_proto);
-    InstallFunc(isolate, function_constructor, "type", WebAssemblyFunctionType,
-                1);
+    InstallFunc(isolate, function_proto, "type", WebAssemblyFunctionType, 0);
     // Make all exported functions an instance of {WebAssembly.Function}.
     native_context->set_wasm_exported_function_map(*function_map);
   }

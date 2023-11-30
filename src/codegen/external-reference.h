@@ -95,8 +95,8 @@ class StatsCounter;
     "Isolate::external_pointer_table_address()")                \
   V(shared_external_pointer_table_address_address,              \
     "Isolate::shared_external_pointer_table_address_address()") \
-  V(indirect_pointer_table_base_address,                        \
-    "Isolate::indirect_pointer_table_base_address()")
+  V(trusted_pointer_table_base_address,                         \
+    "Isolate::trusted_pointer_table_base_address()")
 #else
 #define EXTERNAL_REFERENCE_LIST_WITH_ISOLATE_SANDBOX(V)
 #endif  // V8_ENABLE_SANDBOX
@@ -309,6 +309,7 @@ class StatsCounter;
   IF_WASM(V, wasm_array_copy, "wasm::array_copy")                              \
   IF_WASM(V, wasm_array_fill, "wasm::array_fill")                              \
   IF_WASM(V, wasm_string_to_f64, "wasm_string_to_f64")                         \
+  IF_WASM(V, wasm_atomic_notify, "wasm_atomic_notify")                         \
   IF_WASM(V, wasm_WebAssemblyCompile, "wasm::WebAssemblyCompile")              \
   IF_WASM(V, wasm_WebAssemblyException, "wasm::WebAssemblyException")          \
   IF_WASM(V, wasm_WebAssemblyExceptionGetArg,                                  \

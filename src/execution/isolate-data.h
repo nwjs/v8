@@ -14,7 +14,7 @@
 #include "src/roots/roots.h"
 #include "src/sandbox/code-pointer-table.h"
 #include "src/sandbox/external-pointer-table.h"
-#include "src/sandbox/indirect-pointer-table.h"
+#include "src/sandbox/trusted-pointer-table.h"
 #include "src/utils/utils.h"
 #include "testing/gtest/include/gtest/gtest_prod.h"  // nogncheck
 
@@ -73,8 +73,8 @@ class Isolate;
     external_pointer_table)                                   \
   V(kSharedExternalPointerTableOffset, kSystemPointerSize,    \
     shared_external_pointer_table)                            \
-  V(kIndirectPointerTableOffset, IndirectPointerTable::kSize, \
-    indirect_pointer_table)
+  V(kTrustedPointerTableOffset, TrustedPointerTable::kSize,   \
+    trusted_pointer_table)
 #else
 #define ISOLATE_DATA_FIELDS_POINTER_COMPRESSION(V)
 #endif  // V8_COMPRESS_POINTERS
@@ -123,6 +123,14 @@ class IsolateData final {
     return (Builtins::IsTier0(id) ? builtin_tier0_table_offset()
                                   : builtin_table_offset()) +
            Builtins::ToInt(id) * kSystemPointerSize;
+  }
+
+  static constexpr int jslimit_offset() {
+    return stack_guard_offset() + StackGuard::jslimit_offset();
+  }
+
+  static constexpr int real_jslimit_offset() {
+    return stack_guard_offset() + StackGuard::real_jslimit_offset();
   }
 
 #define V(Offset, Size, Name) \
@@ -190,10 +198,10 @@ class IsolateData final {
   StackGuard stack_guard_;
 
   //
-  // Hot flags that are regularily checked.
+  // Hot flags that are regularly checked.
   //
 
-  // These flags are regularily checked by write barriers.
+  // These flags are regularly checked by write barriers.
   // Only valid values are 0 or 1.
   uint8_t is_marking_flag_ = false;
   uint8_t is_minor_marking_flag_ = false;
@@ -255,7 +263,7 @@ class IsolateData final {
 #ifdef V8_COMPRESS_POINTERS
   ExternalPointerTable external_pointer_table_;
   ExternalPointerTable* shared_external_pointer_table_;
-  IndirectPointerTable indirect_pointer_table_;
+  TrustedPointerTable trusted_pointer_table_;
 #endif
 
   // This is a storage for an additional argument for the Api callback thunk
@@ -296,6 +304,7 @@ class IsolateData final {
 // issues because of different compilers used for snapshot generator and
 // actual V8 code.
 void IsolateData::AssertPredictableLayout() {
+  static_assert(std::is_standard_layout<StackGuard>::value);
   static_assert(std::is_standard_layout<RootsTable>::value);
   static_assert(std::is_standard_layout<ThreadLocalTop>::value);
   static_assert(std::is_standard_layout<ExternalReferenceTable>::value);

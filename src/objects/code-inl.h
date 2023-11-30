@@ -499,7 +499,7 @@ void Code::IterateDeoptimizationLiterals(RootVisitor* v) {
   Tagged<DeoptimizationLiteralArray> literals = deopt_data->LiteralArray();
   const int literals_length = literals->length();
   for (int i = 0; i < literals_length; ++i) {
-    MaybeObject maybe_literal = literals->Get(i);
+    MaybeObject maybe_literal = literals->get_raw(i);
     Tagged<HeapObject> heap_literal;
     if (maybe_literal.GetHeapObject(&heap_literal)) {
       v->VisitRootPointer(Root::kStackRoots, "deoptimization literal",
@@ -594,7 +594,7 @@ Tagged<Object> Code::raw_instruction_stream(PtrComprCageBase cage_base,
 
 DEF_GETTER(Code, instruction_start, Address) {
 #ifdef V8_ENABLE_SANDBOX
-  return ReadCodeEntrypointViaIndirectPointerField(kSelfIndirectPointerOffset);
+  return ReadCodeEntrypointViaCodePointerField(kSelfIndirectPointerOffset);
 #else
   return ReadField<Address>(kInstructionStartOffset);
 #endif
@@ -604,8 +604,7 @@ void Code::init_instruction_start(Isolate* isolate, Address value) {
 #ifdef V8_ENABLE_SANDBOX
   // In this case, the instruction_start is stored in this Code's code pointer
   // table entry, so initialize that instead.
-  InitCodePointerTableEntryField(kSelfIndirectPointerOffset, isolate, *this,
-                                 value);
+  InitSelfCodePointerField(kSelfIndirectPointerOffset, isolate, *this, value);
 #else
   set_instruction_start(isolate, value);
 #endif
@@ -613,7 +612,7 @@ void Code::init_instruction_start(Isolate* isolate, Address value) {
 
 void Code::set_instruction_start(Isolate* isolate, Address value) {
 #ifdef V8_ENABLE_SANDBOX
-  WriteCodeEntrypointViaIndirectPointerField(kSelfIndirectPointerOffset, value);
+  WriteCodeEntrypointViaCodePointerField(kSelfIndirectPointerOffset, value);
 #else
   WriteField<Address>(kInstructionStartOffset, value);
 #endif

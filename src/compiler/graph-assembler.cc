@@ -102,17 +102,17 @@ Node* GraphAssembler::Float64Constant(double value) {
 
 TNode<HeapObject> JSGraphAssembler::HeapConstant(Handle<HeapObject> object) {
   return TNode<HeapObject>::UncheckedCast(
-      AddClonedNode(jsgraph()->HeapConstant(object)));
+      AddClonedNode(jsgraph()->HeapConstantNoHole(object)));
 }
 
 TNode<Object> JSGraphAssembler::Constant(ObjectRef ref) {
   return TNode<Object>::UncheckedCast(
-      AddClonedNode(jsgraph()->Constant(ref, broker())));
+      AddClonedNode(jsgraph()->ConstantNoHole(ref, broker())));
 }
 
 TNode<Number> JSGraphAssembler::NumberConstant(double value) {
   return TNode<Number>::UncheckedCast(
-      AddClonedNode(jsgraph()->Constant(value)));
+      AddClonedNode(jsgraph()->ConstantNoHole(value)));
 }
 
 Node* GraphAssembler::ExternalConstant(ExternalReference ref) {
@@ -821,6 +821,18 @@ class ArrayBufferViewAccessBuilder {
     TNode<Word32T> backed_by_rab_bit = a.Word32And(
         bitfield, a.Uint32Constant(JSArrayBufferView::kIsBackedByRab));
 
+    auto RabLengthTracking = [&]() {
+      TNode<UintPtrT> byte_offset = MachineLoadField<UintPtrT>(
+          AccessBuilder::ForJSArrayBufferViewByteOffset(), view,
+          UseInfo::Word());
+
+      TNode<UintPtrT> underlying_byte_length = MachineLoadField<UintPtrT>(
+          AccessBuilder::ForJSArrayBufferByteLength(), buffer, UseInfo::Word());
+
+      return a.Word32Or(detached_bit,
+                        a.UintPtrLessThan(underlying_byte_length, byte_offset));
+    };
+
     auto RabFixed = [&]() {
       TNode<UintPtrT> unchecked_byte_length = MachineLoadField<UintPtrT>(
           AccessBuilder::ForJSArrayBufferViewByteLength(), view,
@@ -839,14 +851,14 @@ class ArrayBufferViewAccessBuilder {
     };
 
     // Dispatch depending on rab/gsab and length tracking.
-    return a.MachineSelectIf<Word32T>(length_tracking_bit)
-        .Then([&]() { return detached_bit; })
-        .Else([&]() {
-          return a.MachineSelectIf<Word32T>(backed_by_rab_bit)
-              .Then(RabFixed)
-              .Else([&]() { return detached_bit; })
+    return a.MachineSelectIf<Word32T>(backed_by_rab_bit)
+        .Then([&]() {
+          return a.MachineSelectIf<Word32T>(length_tracking_bit)
+              .Then(RabLengthTracking)
+              .Else(RabFixed)
               .Value();
         })
+        .Else([&]() { return detached_bit; })
         .Value();
   }
 

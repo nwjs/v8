@@ -98,9 +98,6 @@ VisitorId Map::GetVisitorId(Tagged<Map> map) {
   }
 
   switch (instance_type) {
-    case BYTE_ARRAY_TYPE:
-      return kVisitByteArray;
-
     case BYTECODE_ARRAY_TYPE:
       return kVisitBytecodeArray;
 
@@ -113,11 +110,8 @@ VisitorId Map::GetVisitorId(Tagged<Map> map) {
     case EMBEDDER_DATA_ARRAY_TYPE:
       return kVisitEmbedderDataArray;
 
-    case FIXED_ARRAY_TYPE:
-    case OBJECT_BOILERPLATE_DESCRIPTION_TYPE:
     case NAME_TO_INDEX_HASH_TABLE_TYPE:
     case REGISTERED_SYMBOL_TABLE_TYPE:
-    case CLOSURE_FEEDBACK_CELL_ARRAY_TYPE:
     case HASH_TABLE_TYPE:
     case ORDERED_HASH_MAP_TYPE:
     case ORDERED_HASH_SET_TYPE:
@@ -126,7 +120,6 @@ VisitorId Map::GetVisitorId(Tagged<Map> map) {
     case GLOBAL_DICTIONARY_TYPE:
     case NUMBER_DICTIONARY_TYPE:
     case SIMPLE_NUMBER_DICTIONARY_TYPE:
-    case SCRIPT_CONTEXT_TABLE_TYPE:
       return kVisitFixedArray;
 
     case SLOPPY_ARGUMENTS_ELEMENTS_TYPE:
@@ -148,9 +141,6 @@ VisitorId Map::GetVisitorId(Tagged<Map> map) {
 
     case EPHEMERON_HASH_TABLE_TYPE:
       return kVisitEphemeronHashTable;
-
-    case FIXED_DOUBLE_ARRAY_TYPE:
-      return kVisitFixedDoubleArray;
 
     case PROPERTY_ARRAY_TYPE:
       return kVisitPropertyArray;
@@ -371,6 +361,9 @@ VisitorId Map::GetVisitorId(Tagged<Map> map) {
       if (instance_type == PROTOTYPE_INFO_TYPE) {
         return kVisitPrototypeInfo;
       }
+      if (instance_type == DEBUG_INFO_TYPE) {
+        return kVisitDebugInfo;
+      }
 #if V8_ENABLE_WEBASSEMBLY
       if (instance_type == WASM_INDIRECT_FUNCTION_TABLE_TYPE) {
         return kVisitWasmIndirectFunctionTable;
@@ -421,6 +414,12 @@ VisitorId Map::GetVisitorId(Tagged<Map> map) {
     return kVisit##Name;
       TORQUE_INSTANCE_TYPE_TO_BODY_DESCRIPTOR_LIST(MAKE_TQ_CASE)
 #undef MAKE_TQ_CASE
+
+#define CASE(TypeCamelCase, TYPE_UPPER_CASE) \
+  case TYPE_UPPER_CASE##_TYPE:               \
+    return kVisit##TypeCamelCase;
+      SIMPLE_HEAP_OBJECT_LIST2(CASE)
+#undef CASE
 
     default:
       UNREACHABLE();
@@ -2371,7 +2370,7 @@ MaybeHandle<Map> NormalizedMapCache::Get(Handle<Map> fast_map,
                                          ElementsKind elements_kind,
                                          PropertyNormalizationMode mode) {
   DisallowGarbageCollection no_gc;
-  MaybeObject value = WeakFixedArray::Get(GetIndex(fast_map));
+  MaybeObject value = WeakFixedArray::get(GetIndex(fast_map));
   Tagged<HeapObject> heap_object;
   if (!value.GetHeapObjectIfWeak(&heap_object)) {
     return MaybeHandle<Map>();
@@ -2388,7 +2387,7 @@ MaybeHandle<Map> NormalizedMapCache::Get(Handle<Map> fast_map,
 void NormalizedMapCache::Set(Handle<Map> fast_map, Handle<Map> normalized_map) {
   DisallowGarbageCollection no_gc;
   DCHECK(normalized_map->is_dictionary_map());
-  WeakFixedArray::Set(GetIndex(fast_map),
+  WeakFixedArray::set(GetIndex(fast_map),
                       HeapObjectReference::Weak(*normalized_map));
 }
 

@@ -426,10 +426,10 @@ void WasmCode::Disassemble(const char* name, std::ostream& os,
   }
 
   if (protected_instructions_size_ > 0) {
-    os << "Protected instructions:\n pc offset  land pad\n";
+    os << "Protected instructions:\n pc offset\n";
     for (auto& data : protected_instructions()) {
       os << std::setw(10) << std::hex << data.instr_offset << std::setw(10)
-         << std::hex << data.landing_offset << "\n";
+         << "\n";
     }
     os << "\n";
   }
@@ -909,12 +909,12 @@ WasmCode* NativeModule::AddCodeForTesting(Handle<Code> code) {
   }
   Handle<ByteArray> source_pos_table(code->source_position_table(),
                                      code->instruction_stream()->GetIsolate());
-  base::OwnedVector<uint8_t> source_pos =
-      base::OwnedVector<uint8_t>::NewForOverwrite(source_pos_table->length());
-  if (source_pos_table->length() > 0) {
-    source_pos_table->copy_out(0, source_pos.begin(),
-                               source_pos_table->length());
+  int source_pos_len = source_pos_table->length();
+  auto source_pos = base::OwnedVector<uint8_t>::NewForOverwrite(source_pos_len);
+  if (source_pos_len > 0) {
+    MemCopy(source_pos.begin(), source_pos_table->begin(), source_pos_len);
   }
+
   static_assert(InstructionStream::kOnHeapBodyIsContiguous);
   base::Vector<const uint8_t> instructions(
       reinterpret_cast<uint8_t*>(code->body_start()),
@@ -2206,6 +2206,8 @@ void NativeModule::SampleCodeSize(Counters* counters) const {
   size_t code_size = code_allocator_.committed_code_space();
   int code_size_mb = static_cast<int>(code_size / MB);
   counters->wasm_module_code_size_mb()->AddSample(code_size_mb);
+  int code_size_kb = static_cast<int>(code_size / KB);
+  counters->wasm_module_code_size_kb()->AddSample(code_size_kb);
   // If this is a wasm module of >= 2MB, also sample the freed code size,
   // absolute and relative. Code GC does not happen on asm.js
   // modules, and small modules will never trigger GC anyway.

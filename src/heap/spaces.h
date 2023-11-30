@@ -279,51 +279,12 @@ class LocalAllocationBuffer {
 
 class V8_EXPORT_PRIVATE SpaceWithLinearArea : public Space {
  public:
-  // Creates this space with a new MainAllocator instance.
-  SpaceWithLinearArea(
-      Heap* heap, AllocationSpace id, std::unique_ptr<FreeList> free_list,
-      CompactionSpaceKind compaction_space_kind,
-      MainAllocator::SupportsExtendingLAB supports_extending_lab);
-
-  // Creates this space with a new MainAllocator instance and passes
-  // `allocation_info` to its constructor.
-  SpaceWithLinearArea(
-      Heap* heap, AllocationSpace id, std::unique_ptr<FreeList> free_list,
-      CompactionSpaceKind compaction_space_kind,
-      MainAllocator::SupportsExtendingLAB supports_extending_lab,
-      LinearAllocationArea& allocation_info);
-
   // Creates this space and uses the existing `allocator`. It doesn't create a
   // new MainAllocator instance.
   SpaceWithLinearArea(Heap* heap, AllocationSpace id,
-                      std::unique_ptr<FreeList> free_list,
-                      CompactionSpaceKind compaction_space_kind,
-                      MainAllocator* allocator);
+                      std::unique_ptr<FreeList> free_list);
 
-  MainAllocator* main_allocator() { return allocator_; }
-
-  V8_WARN_UNUSED_RESULT V8_INLINE AllocationResult
-  AllocateRaw(int size_in_bytes, AllocationAlignment alignment,
-              AllocationOrigin origin = AllocationOrigin::kRuntime);
-
- protected:
-  // Sets up a linear allocation area that fits the given number of bytes.
-  // Returns false if there is not enough space and the caller has to retry
-  // after collecting garbage.
-  // Writes to `max_aligned_size` the actual number of bytes used for checking
-  // that there is enough space.
-  virtual bool EnsureAllocation(int size_in_bytes,
-                                AllocationAlignment alignment,
-                                AllocationOrigin origin,
-                                int* out_max_aligned_size) = 0;
-
-  virtual void FreeLinearAllocationArea() = 0;
-
-  virtual void UpdateInlineAllocationLimit() = 0;
-
-  // TODO(chromium:1480975): Move the LAB out of the space.
-  MainAllocator* allocator_;
-  base::Optional<MainAllocator> owned_allocator_;
+  virtual AllocatorPolicy* CreateAllocatorPolicy(MainAllocator* allocator) = 0;
 
   friend class MainAllocator;
 };

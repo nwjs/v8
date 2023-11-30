@@ -36,6 +36,7 @@ struct MemoryAnalyzer {
 
   Zone* phase_zone;
   const Graph& input_graph;
+  Isolate* isolate_ = PipelineData::Get().isolate();
   AllocationFolding allocation_folding;
   MemoryAnalyzer(Zone* phase_zone, const Graph& input_graph,
                  AllocationFolding allocation_folding)
@@ -52,7 +53,7 @@ struct MemoryAnalyzer {
              reserved_size != other.reserved_size;
     }
   };
-  FixedSidetable<base::Optional<BlockState>, BlockIndex> block_states{
+  FixedBlockSidetable<base::Optional<BlockState>> block_states{
       input_graph.block_count(), phase_zone};
   ZoneUnorderedMap<const AllocateOp*, const AllocateOp*> folded_into{
       phase_zone};
@@ -61,18 +62,49 @@ struct MemoryAnalyzer {
   BlockIndex current_block = BlockIndex(0);
   BlockState state;
 
-  bool SkipWriteBarrier(const Operation& object) {
-    if (ShouldSkipOptimizationStep()) return false;
+  bool SkipWriteBarrier(const StoreOp& store) {
+    const Operation& object = input_graph.Get(store.base());
+    const Operation& value = input_graph.Get(store.value());
+
+    auto CannotEliminate = [&](WriteBarrierKind kind) {
+      if (kind == WriteBarrierKind::kAssertNoWriteBarrier) {
+        std::stringstream str;
+        str << "MemoryOptimizationReducer could not remove write barrier for "
+               "operation\n  #"
+            << input_graph.Index(store) << ": " << store.ToString() << "\n";
+        FATAL("%s", str.str().c_str());
+      }
+      return false;
+    };
+
+    if (v8_flags.disable_write_barriers) return true;
+    WriteBarrierKind write_barrier_kind = store.write_barrier;
+    if (write_barrier_kind != WriteBarrierKind::kAssertNoWriteBarrier) {
+      // If we have {kAssertNoWriteBarrier}, we cannot skip elimination checks.
+      if (ShouldSkipOptimizationStep()) return false;
+    }
+    if (const ConstantOp* constant = value.TryCast<ConstantOp>()) {
+      if (constant->kind == ConstantOp::Kind::kHeapObject) {
+        RootIndex root_index;
+        if (isolate_->roots_table().IsRootHandle(constant->handle(),
+                                                 &root_index)) {
+          if (RootsTable::IsImmortalImmovable(root_index)) return true;
+        }
+      }
+    }
     if (state.last_allocation == nullptr ||
         state.last_allocation->type != AllocationType::kYoung) {
-      return false;
+      return CannotEliminate(write_barrier_kind);
     }
     if (state.last_allocation == &object) {
       return true;
     }
-    if (!object.Is<AllocateOp>()) return false;
+    if (!object.Is<AllocateOp>()) return CannotEliminate(write_barrier_kind);
     auto it = folded_into.find(&object.Cast<AllocateOp>());
-    return it != folded_into.end() && it->second == state.last_allocation;
+    if (it != folded_into.end() && it->second == state.last_allocation) {
+      return true;
+    }
+    return CannotEliminate(write_barrier_kind);
   }
 
   bool IsFoldedAllocation(OpIndex op) {
@@ -94,7 +126,7 @@ struct MemoryAnalyzer {
   void Process(const Operation& op);
   void ProcessBlockTerminator(const Operation& op);
   void ProcessAllocation(const AllocateOp& alloc);
-  void ProcessStore(OpIndex store, OpIndex object);
+  void ProcessStore(const StoreOp& store);
   void MergeCurrentStateIntoSuccessor(const Block* successor);
 };
 
@@ -113,21 +145,25 @@ class MemoryOptimizationReducer : public Next {
     Next::Analyze();
   }
 
-  OpIndex REDUCE(Store)(OpIndex base, OpIndex index, OpIndex value,
-                        StoreOp::Kind kind, MemoryRepresentation stored_rep,
-                        WriteBarrierKind write_barrier, int32_t offset,
-                        uint8_t element_scale,
-                        bool maybe_initializing_or_transitioning,
-                        IndirectPointerTag indirect_pointer_tag) {
-    if (!ShouldSkipOptimizationStep() &&
-        analyzer_->skipped_write_barriers.count(
-            __ current_operation_origin())) {
-      write_barrier = WriteBarrierKind::kNoWriteBarrier;
+  OpIndex REDUCE_INPUT_GRAPH(Store)(OpIndex ig_index, const StoreOp& store) {
+    if (store.write_barrier != WriteBarrierKind::kAssertNoWriteBarrier) {
+      // We cannot skip this optimization if we have to eliminate a
+      // {kAssertNoWriteBarrier}.
+      if (ShouldSkipOptimizationStep()) {
+        return Next::ReduceInputGraphStore(ig_index, store);
+      }
     }
-    return Next::ReduceStore(base, index, value, kind, stored_rep,
-                             write_barrier, offset, element_scale,
-                             maybe_initializing_or_transitioning,
-                             indirect_pointer_tag);
+    if (analyzer_->skipped_write_barriers.count(ig_index)) {
+      __ Store(__ MapToNewGraph(store.base()), __ MapToNewGraph(store.index()),
+               __ MapToNewGraph(store.value()), store.kind, store.stored_rep,
+               WriteBarrierKind::kNoWriteBarrier, store.offset,
+               store.element_size_log2,
+               store.maybe_initializing_or_transitioning,
+               store.indirect_pointer_tag());
+      return OpIndex::Invalid();
+    }
+    DCHECK_NE(store.write_barrier, WriteBarrierKind::kAssertNoWriteBarrier);
+    return Next::ReduceInputGraphStore(ig_index, store);
   }
 
   OpIndex REDUCE(Allocate)(OpIndex size, AllocationType type) {
@@ -205,15 +241,13 @@ class MemoryOptimizationReducer : public Next {
     Block* done = __ NewBlock();
 
     OpIndex limit_address = GetLimitAddress(type);
-    OpIndex limit =
-        __ LoadOffHeap(limit_address, MemoryRepresentation::PointerSized());
 
     // If the allocation size is not statically known or is known to be larger
     // than kMaxRegularHeapObjectSize, do not update {top(type)} in case of a
     // runtime call. This is needed because we cannot allocation-fold large and
     // normal-sized objects.
     uint64_t constant_size{};
-    if (!__ matcher().MatchWordConstant(
+    if (!__ matcher().MatchIntegralWordConstant(
             size, WordRepresentation::PointerSized(), &constant_size) ||
         constant_size > kMaxRegularHeapObjectSize) {
       Variable result =
@@ -225,6 +259,8 @@ class MemoryOptimizationReducer : public Next {
                        __ BitcastWordPtrToTagged(__ WordPtrAdd(
                            top_value, __ IntPtrConstant(kHeapObjectTag))));
         OpIndex new_top = __ PointerAdd(top_value, size);
+        OpIndex limit =
+            __ LoadOffHeap(limit_address, MemoryRepresentation::PointerSized());
         __ GotoIfNot(LIKELY(__ UintPtrLessThan(new_top, limit)), call_runtime);
         __ GotoIfNot(LIKELY(__ UintPtrLessThan(
                          size, __ IntPtrConstant(kMaxRegularHeapObjectSize))),
@@ -257,6 +293,8 @@ class MemoryOptimizationReducer : public Next {
                      call_runtime, BranchHint::kTrue) !=
         ConditionalGotoStatus::kGotoDestination;
     if (reachable) {
+      OpIndex limit =
+          __ LoadOffHeap(limit_address, MemoryRepresentation::PointerSized());
       __ Branch(__ UintPtrLessThan(
                     __ PointerAdd(__ GetVariable(top(type)), reservation_size),
                     limit),

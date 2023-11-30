@@ -39,6 +39,7 @@
 #include "src/heap/factory.h"
 #include "src/heap/heap.h"
 #include "src/heap/large-spaces.h"
+#include "src/heap/main-allocator.h"
 #include "src/heap/memory-allocator.h"
 #include "src/heap/memory-chunk.h"
 #include "src/heap/spaces-inl.h"
@@ -66,6 +67,7 @@ class V8_NODISCARD TestMemoryAllocatorScope {
     isolate->GetCodePages()->swap(code_pages_);
     isolate->heap()->memory_allocator_.reset(new MemoryAllocator(
         isolate,
+        page_allocator != nullptr ? page_allocator : isolate->page_allocator(),
         page_allocator != nullptr ? page_allocator : isolate->page_allocator(),
         max_capacity));
     if (page_allocator != nullptr) {
@@ -217,10 +219,9 @@ TEST(MemoryAllocator) {
 
   TestMemoryAllocatorScope test_allocator_scope(isolate, heap->MaxReserved());
   MemoryAllocator* memory_allocator = test_allocator_scope.allocator();
-  LinearAllocationArea allocation_info;
 
   int total_pages = 0;
-  OldSpace faked_space(heap, allocation_info);
+  OldSpace faked_space(heap);
   CHECK(!faked_space.first_page());
   CHECK(!faked_space.last_page());
   Page* first_page = memory_allocator->AllocatePage(
@@ -302,14 +303,14 @@ TEST(SemiSpaceNewSpace) {
   LinearAllocationArea allocation_info;
 
   auto new_space = std::make_unique<SemiSpaceNewSpace>(
-      heap, heap->InitialSemiSpaceSize(), heap->InitialSemiSpaceSize(),
-      allocation_info);
+      heap, heap->InitialSemiSpaceSize(), heap->InitialSemiSpaceSize());
+  MainAllocator allocator(heap, new_space.get(), allocation_info);
   CHECK(new_space->MaximumCapacity());
 
   size_t successful_allocations = 0;
   while (new_space->Available() >= kMaxRegularHeapObjectSize) {
-    AllocationResult allocation =
-        new_space->AllocateRaw(kMaxRegularHeapObjectSize, kTaggedAligned);
+    AllocationResult allocation = allocator.AllocateRaw(
+        kMaxRegularHeapObjectSize, kTaggedAligned, AllocationOrigin::kRuntime);
     if (allocation.IsFailure()) break;
     successful_allocations++;
     Tagged<Object> obj = allocation.ToObjectChecked();
@@ -332,16 +333,16 @@ TEST(PagedNewSpace) {
   LinearAllocationArea allocation_info;
 
   auto new_space = std::make_unique<PagedNewSpace>(
-      heap, heap->InitialSemiSpaceSize(), heap->InitialSemiSpaceSize(),
-      allocation_info);
+      heap, heap->InitialSemiSpaceSize(), heap->InitialSemiSpaceSize());
+  MainAllocator allocator(heap, new_space.get(), allocation_info);
   CHECK(new_space->MaximumCapacity());
   CHECK(new_space->EnsureCurrentCapacity());
   CHECK_LT(0, new_space->TotalCapacity());
 
   size_t successful_allocations = 0;
   while (true) {
-    AllocationResult allocation =
-        new_space->AllocateRaw(kMaxRegularHeapObjectSize, kTaggedAligned);
+    AllocationResult allocation = allocator.AllocateRaw(
+        kMaxRegularHeapObjectSize, kTaggedAligned, AllocationOrigin::kRuntime);
     if (allocation.IsFailure()) break;
     successful_allocations++;
     Tagged<Object> obj = allocation.ToObjectChecked();
@@ -367,14 +368,15 @@ TEST(OldSpace) {
   TestMemoryAllocatorScope test_allocator_scope(isolate, heap->MaxReserved());
   LinearAllocationArea allocation_info;
 
-  auto old_space = std::make_unique<OldSpace>(heap, allocation_info);
+  auto old_space = std::make_unique<OldSpace>(heap);
+  MainAllocator allocator(heap, old_space.get(), allocation_info);
   const int obj_size = kMaxRegularHeapObjectSize;
 
   size_t successful_allocations = 0;
 
   while (true) {
-    AllocationResult allocation =
-        old_space->AllocateRaw(obj_size, kTaggedAligned);
+    AllocationResult allocation = allocator.AllocateRaw(
+        obj_size, kTaggedAligned, AllocationOrigin::kRuntime);
     if (allocation.IsFailure()) break;
     successful_allocations++;
     Tagged<Object> obj = allocation.ToObjectChecked();
@@ -504,6 +506,7 @@ HEAP_TEST(Regress777177) {
   OldSpace* old_space = heap->old_space();
   MainAllocator* old_space_allocator = heap->allocator()->old_space_allocator();
   Observer observer(128);
+  old_space_allocator->FreeLinearAllocationArea();
   old_space_allocator->AddAllocationObserver(&observer);
 
   int area_size = old_space->AreaSize();
@@ -514,8 +517,8 @@ HEAP_TEST(Regress777177) {
     // Ensure a new linear allocation area on a fresh page.
     AlwaysAllocateScopeForTesting always_allocate(heap);
     heap::SimulateFullSpace(old_space);
-    AllocationResult result =
-        old_space->AllocateRaw(filler_size, kTaggedAligned);
+    AllocationResult result = old_space_allocator->AllocateRaw(
+        filler_size, kTaggedAligned, AllocationOrigin::kRuntime);
     Tagged<HeapObject> obj = result.ToObjectChecked();
     heap->CreateFillerObjectAt(obj.address(), filler_size);
   }
@@ -523,19 +526,19 @@ HEAP_TEST(Regress777177) {
   {
     // Allocate all bytes of the linear allocation area. This moves top_ and
     // top_on_previous_step_ to the next page.
-    AllocationResult result =
-        old_space->AllocateRaw(max_object_size, kTaggedAligned);
+    AllocationResult result = old_space_allocator->AllocateRaw(
+        max_object_size, kTaggedAligned, AllocationOrigin::kRuntime);
     Tagged<HeapObject> obj = result.ToObjectChecked();
     // Simulate allocation folding moving the top pointer back.
-    old_space->SetTopAndLimit(
+    old_space_allocator->ResetLab(
         obj.address(), heap->allocator()->old_space_allocator()->limit(),
         heap->allocator()->old_space_allocator()->limit());
   }
 
   {
     // This triggers assert in crbug.com/777177.
-    AllocationResult result =
-        old_space->AllocateRaw(filler_size, kTaggedAligned);
+    AllocationResult result = old_space_allocator->AllocateRaw(
+        filler_size, kTaggedAligned, AllocationOrigin::kRuntime);
     Tagged<HeapObject> obj = result.ToObjectChecked();
     heap->CreateFillerObjectAt(obj.address(), filler_size);
   }
@@ -548,7 +551,6 @@ HEAP_TEST(Regress791582) {
   Isolate* isolate = CcTest::i_isolate();
   Heap* heap = isolate->heap();
   HandleScope scope(isolate);
-  NewSpace* new_space = heap->new_space();
   MainAllocator* new_space_allocator = heap->allocator()->new_space_allocator();
   GrowNewSpace(heap);
 
@@ -563,11 +565,12 @@ HEAP_TEST(Regress791582) {
   }
 
   Observer observer(128);
+  new_space_allocator->FreeLinearAllocationArea();
   new_space_allocator->AddAllocationObserver(&observer);
 
   {
-    AllocationResult result =
-        new_space->AllocateRaw(until_page_end, kTaggedAligned);
+    AllocationResult result = new_space_allocator->AllocateRaw(
+        until_page_end, kTaggedAligned, AllocationOrigin::kRuntime);
     Tagged<HeapObject> obj = result.ToObjectChecked();
     heap->CreateFillerObjectAt(obj.address(), until_page_end);
     // Simulate allocation folding moving the top pointer back.
@@ -576,7 +579,8 @@ HEAP_TEST(Regress791582) {
 
   {
     // This triggers assert in crbug.com/791582
-    AllocationResult result = new_space->AllocateRaw(256, kTaggedAligned);
+    AllocationResult result = new_space_allocator->AllocateRaw(
+        256, kTaggedAligned, AllocationOrigin::kRuntime);
     Tagged<HeapObject> obj = result.ToObjectChecked();
     heap->CreateFillerObjectAt(obj.address(), 256);
   }
@@ -600,7 +604,7 @@ TEST(ShrinkPageToHighWaterMarkFreeSpaceEnd) {
 
   // Reset space so high water mark is consistent.
   PagedSpace* old_space = CcTest::heap()->old_space();
-  old_space->FreeLinearAllocationArea();
+  CcTest::heap()->FreeMainThreadLinearAllocationAreas();
   old_space->ResetFreeList();
 
   Tagged<HeapObject> filler =
@@ -630,8 +634,8 @@ TEST(ShrinkPageToHighWaterMarkNoFiller) {
 
   // Reset space so high water mark and fillers are consistent.
   PagedSpace* old_space = CcTest::heap()->old_space();
+  CcTest::heap()->FreeMainThreadLinearAllocationAreas();
   old_space->ResetFreeList();
-  old_space->FreeLinearAllocationArea();
 
   size_t shrunk = old_space->ShrinkPageToHighWaterMark(page);
   CHECK_EQ(0u, shrunk);
@@ -654,7 +658,7 @@ TEST(ShrinkPageToHighWaterMarkOneWordFiller) {
 
   // Reset space so high water mark and fillers are consistent.
   PagedSpace* old_space = CcTest::heap()->old_space();
-  old_space->FreeLinearAllocationArea();
+  CcTest::heap()->FreeMainThreadLinearAllocationAreas();
   old_space->ResetFreeList();
 
   Tagged<HeapObject> filler =
@@ -683,7 +687,7 @@ TEST(ShrinkPageToHighWaterMarkTwoWordFiller) {
 
   // Reset space so high water mark and fillers are consistent.
   PagedSpace* old_space = CcTest::heap()->old_space();
-  old_space->FreeLinearAllocationArea();
+  CcTest::heap()->FreeMainThreadLinearAllocationAreas();
   old_space->ResetFreeList();
 
   Tagged<HeapObject> filler =
@@ -731,8 +735,7 @@ TEST(NoMemoryForNewPage) {
   FailingPageAllocator failing_allocator;
   TestMemoryAllocatorScope test_allocator_scope(isolate, 0, &failing_allocator);
   MemoryAllocator* memory_allocator = test_allocator_scope.allocator();
-  LinearAllocationArea allocation_info;
-  OldSpace faked_space(heap, allocation_info);
+  OldSpace faked_space(heap);
   Page* page = memory_allocator->AllocatePage(
       MemoryAllocator::AllocationMode::kRegular,
       static_cast<PagedSpace*>(&faked_space), NOT_EXECUTABLE);

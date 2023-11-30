@@ -21,10 +21,10 @@ extern class FixedDoubleArray extends FixedArrayBase {
   floats[length]: float64_or_hole;
 }
 
-@generateBodyDescriptor
+@cppObjectDefinition
 extern class WeakFixedArray extends HeapObject {
   const length: Smi;
-  @cppRelaxedLoad objects[length]: MaybeObject;
+  objects[length]: MaybeObject;
 }
 
 @cppObjectDefinition
@@ -40,9 +40,11 @@ extern class ExternalPointerArray extends FixedArrayBase {
 extern macro CodeStubAssembler::AllocateByteArray(uintptr): ByteArray;
 
 @cppObjectDefinition
-@hasSameInstanceTypeAsParent
-@doNotGenerateCast
-extern class ArrayList extends FixedArray {}
+extern class ArrayList extends HeapObject {
+  const capacity: Smi;
+  length: Smi;
+  objects[capacity]: Object;
+}
 
 @generateBodyDescriptor
 extern class WeakArrayList extends HeapObject {

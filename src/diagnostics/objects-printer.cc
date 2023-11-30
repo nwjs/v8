@@ -135,9 +135,6 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {
     case WITH_CONTEXT_TYPE:
       Context::cast(*this)->ContextPrint(os);
       break;
-    case SCRIPT_CONTEXT_TABLE_TYPE:
-      FixedArray::cast(*this)->FixedArrayPrint(os);
-      break;
     case NATIVE_CONTEXT_TYPE:
       NativeContext::cast(*this)->NativeContextPrint(os);
       break;
@@ -174,17 +171,9 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {
     case EPHEMERON_HASH_TABLE_TYPE:
       EphemeronHashTable::cast(*this)->EphemeronHashTablePrint(os);
       break;
-    case OBJECT_BOILERPLATE_DESCRIPTION_TYPE:
-      ObjectBoilerplateDescription::cast(*this)
-          ->ObjectBoilerplateDescriptionPrint(os);
-      break;
     case TRANSITION_ARRAY_TYPE:
       TransitionArray::cast(*this)->TransitionArrayPrint(os);
       break;
-    case CLOSURE_FEEDBACK_CELL_ARRAY_TYPE:
-      ClosureFeedbackCellArray::cast(*this)->ClosureFeedbackCellArrayPrint(os);
-      break;
-
     case FILLER_TYPE:
       os << "filler";
       break;
@@ -299,8 +288,7 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {
 void ByteArray::ByteArrayPrint(std::ostream& os) {
   PrintHeader(os, "ByteArray");
   os << "\n - length: " << length()
-     << "\n - data-start: " << static_cast<void*>(GetDataStartAddress())
-     << "\n";
+     << "\n - begin: " << static_cast<void*>(begin()) << "\n";
 }
 
 void BytecodeArray::BytecodeArrayPrint(std::ostream& os) {
@@ -442,17 +430,17 @@ void PrintTypedArrayElements(std::ostream& os, const ElementType* data_ptr,
 }
 
 template <typename T>
-void PrintFixedArrayElements(std::ostream& os, Tagged<T> array,
+void PrintFixedArrayElements(std::ostream& os, Tagged<T> array, int capacity,
                              Tagged<Object> (*get)(Tagged<T>, int)) {
   // Print in array notation for non-sparse arrays.
-  if (array->length() == 0) return;
+  if (capacity == 0) return;
   Tagged<Object> previous_value = get(array, 0);
   Tagged<Object> value;
   int previous_index = 0;
   int i;
-  for (i = 1; i <= array->length(); i++) {
-    if (i < array->length()) value = get(array, i);
-    if (previous_value == value && i != array->length()) {
+  for (i = 1; i <= capacity; i++) {
+    if (i < capacity) value = get(array, i);
+    if (previous_value == value && i != capacity) {
       continue;
     }
     os << "\n";
@@ -469,8 +457,9 @@ void PrintFixedArrayElements(std::ostream& os, Tagged<T> array,
 
 template <typename T>
 void PrintFixedArrayElements(std::ostream& os, Tagged<T> array) {
-  PrintFixedArrayElements<T>(os, array,
-                             [](Tagged<T> xs, int i) { return xs->get(i); });
+  PrintFixedArrayElements<T>(
+      os, array, array->length(),
+      [](Tagged<T> xs, int i) { return Object::cast(xs->get(i)); });
 }
 
 void PrintDictionaryElements(std::ostream& os,
@@ -793,12 +782,12 @@ template <typename T>
 void PrintWeakArrayElements(std::ostream& os, T* array) {
   // Print in array notation for non-sparse arrays.
   MaybeObject previous_value =
-      array->length() > 0 ? array->Get(0) : MaybeObject(kNullAddress);
+      array->length() > 0 ? array->get(0) : MaybeObject(kNullAddress);
   MaybeObject value;
   int previous_index = 0;
   int i;
   for (i = 1; i <= array->length(); i++) {
-    if (i < array->length()) value = array->Get(i);
+    if (i < array->length()) value = array->get(i);
     if (previous_value == value && i != array->length()) {
       continue;
     }
@@ -818,7 +807,29 @@ void PrintWeakArrayElements(std::ostream& os, T* array) {
 
 void ObjectBoilerplateDescription::ObjectBoilerplateDescriptionPrint(
     std::ostream& os) {
-  PrintFixedArrayWithHeader(os, *this, "ObjectBoilerplateDescription");
+  PrintHeader(os, "ObjectBoilerplateDescription");
+  os << "\n - capacity: " << capacity();
+  os << "\n - backing_store_size: " << backing_store_size();
+  os << "\n - flags: " << flags();
+  os << "\n - elements:";
+  PrintFixedArrayElements<ObjectBoilerplateDescription>(
+      os, *this, capacity(),
+      [](Tagged<ObjectBoilerplateDescription> xs, int i) {
+        return xs->get(i);
+      });
+  os << "\n";
+}
+
+void ClassBoilerplate::ClassBoilerplatePrint(std::ostream& os) {
+  PrintHeader(os, "ClassBoilerplate");
+  os << "\n - arguments_count: " << arguments_count();
+  os << "\n - static_properties_template: " << static_properties_template();
+  os << "\n - static_elements_template: " << static_elements_template();
+  os << "\n - static_computed_properties: " << static_computed_properties();
+  os << "\n - instance_properties_template: " << instance_properties_template();
+  os << "\n - instance_elements_template: " << instance_elements_template();
+  os << "\n - instance_computed_properties: " << instance_computed_properties();
+  os << "\n";
 }
 
 void EmbedderDataArray::EmbedderDataArrayPrint(std::ostream& os) {
@@ -838,6 +849,45 @@ void FixedArray::FixedArrayPrint(std::ostream& os) {
   PrintFixedArrayWithHeader(os, *this, "FixedArray");
 }
 
+void ArrayList::ArrayListPrint(std::ostream& os) {
+  PrintHeader(os, "ArrayList");
+  os << "\n - capacity: " << capacity();
+  os << "\n - length: " << length();
+  os << "\n - elements:";
+  PrintFixedArrayElements<ArrayList>(
+      os, *this, length(),
+      [](Tagged<ArrayList> xs, int i) { return xs->get(i); });
+  os << "\n";
+}
+
+void ScriptContextTable::ScriptContextTablePrint(std::ostream& os) {
+  PrintHeader(os, "ScriptContextTable");
+  os << "\n - capacity: " << capacity();
+  os << "\n - length: " << length(kAcquireLoad);
+  os << "\n - names_to_context_index: " << names_to_context_index();
+  os << "\n - elements:";
+  PrintFixedArrayElements<ScriptContextTable>(
+      os, *this, length(kAcquireLoad),
+      [](Tagged<ScriptContextTable> xs, int i) {
+        return Object::cast(xs->get(i));
+      });
+  os << "\n";
+}
+
+void RegExpMatchInfo::RegExpMatchInfoPrint(std::ostream& os) {
+  PrintHeader(os, "RegExpMatchInfo");
+  os << "\n - capacity: " << capacity();
+  os << "\n - number_of_capture_registers: " << number_of_capture_registers();
+  os << "\n - last_subject: " << last_subject();
+  os << "\n - last_input: " << last_input();
+  os << "\n - captures:";
+  PrintFixedArrayElements<RegExpMatchInfo>(
+      os, Tagged{*this}, capacity(), [](Tagged<RegExpMatchInfo> xs, int i) {
+        return Object::cast(xs->get(i));
+      });
+  os << "\n";
+}
+
 void ExternalPointerArray::ExternalPointerArrayPrint(std::ostream& os) {
   PrintHeader(os, "ExternalPointerArray");
   os << "\n - length: " << length();
@@ -851,7 +901,8 @@ void SloppyArgumentsElements::SloppyArgumentsElementsPrint(std::ostream& os) {
   os << "\n - arguments: " << Brief(arguments());
   os << "\n - mapped_entries:";
   PrintFixedArrayElements<SloppyArgumentsElements>(
-      os, Tagged(*this), [](Tagged<SloppyArgumentsElements> xs, int i) {
+      os, Tagged(*this), length(),
+      [](Tagged<SloppyArgumentsElements> xs, int i) {
         return xs->mapped_entries(i, kRelaxedLoad);
       });
   os << '\n';
@@ -1254,7 +1305,11 @@ void FeedbackMetadata::FeedbackMetadataPrint(std::ostream& os) {
 }
 
 void ClosureFeedbackCellArray::ClosureFeedbackCellArrayPrint(std::ostream& os) {
-  PrintFixedArrayWithHeader(os, *this, "ClosureFeedbackCellArray");
+  PrintHeader(os, "ClosureFeedbackCellArray");
+  os << "\n - length: " << length();
+  os << "\n - elements:";
+  PrintFixedArrayElements<ClosureFeedbackCellArray>(os, *this);
+  os << "\n";
 }
 
 void FeedbackVector::FeedbackVectorPrint(std::ostream& os) {
@@ -1354,7 +1409,7 @@ void FeedbackNexus::Print(std::ostream& os) {
         os << "\n   " << Brief(GetFeedback()) << ": ";
         Tagged<Object> handler = GetFeedbackExtra().GetHeapObjectOrSmi();
         if (IsWeakFixedArray(handler)) {
-          handler = WeakFixedArray::cast(handler)->Get(0).GetHeapObjectOrSmi();
+          handler = WeakFixedArray::cast(handler)->get(0).GetHeapObjectOrSmi();
         }
         LoadHandler::PrintHandler(handler, os);
       } else if (ic_state() == InlineCacheState::POLYMORPHIC) {
@@ -1367,8 +1422,8 @@ void FeedbackNexus::Print(std::ostream& os) {
           array = WeakFixedArray::cast(feedback);
         }
         for (int i = 0; i < array->length(); i += 2) {
-          os << "\n   " << Brief(array->Get(i)) << ": ";
-          LoadHandler::PrintHandler(array->Get(i + 1).GetHeapObjectOrSmi(), os);
+          os << "\n   " << Brief(array->get(i)) << ": ";
+          LoadHandler::PrintHandler(array->get(i + 1).GetHeapObjectOrSmi(), os);
         }
       }
       break;
@@ -1384,8 +1439,8 @@ void FeedbackNexus::Print(std::ostream& os) {
           os << " with name " << Brief(feedback);
           Tagged<WeakFixedArray> array =
               WeakFixedArray::cast(GetFeedbackExtra().GetHeapObject());
-          os << "\n   " << Brief(array->Get(0)) << ": ";
-          Tagged<Object> handler = array->Get(1).GetHeapObjectOrSmi();
+          os << "\n   " << Brief(array->get(0)) << ": ";
+          Tagged<Object> handler = array->get(1).GetHeapObjectOrSmi();
           StoreHandler::PrintHandler(handler, os);
         } else {
           os << "\n   " << Brief(feedback) << ": ";
@@ -1402,9 +1457,9 @@ void FeedbackNexus::Print(std::ostream& os) {
           array = WeakFixedArray::cast(feedback);
         }
         for (int i = 0; i < array->length(); i += 2) {
-          os << "\n   " << Brief(array->Get(i)) << ": ";
-          if (!array->Get(i + 1).IsCleared()) {
-            StoreHandler::PrintHandler(array->Get(i + 1).GetHeapObjectOrSmi(),
+          os << "\n   " << Brief(array->get(i)) << ": ";
+          if (!array->get(i + 1).IsCleared()) {
+            StoreHandler::PrintHandler(array->get(i + 1).GetHeapObjectOrSmi(),
                                        os);
           }
         }
@@ -2282,8 +2337,6 @@ void WasmInstanceObject::WasmInstanceObjectPrint(std::ostream& os) {
   PRINT_WASM_INSTANCE_FIELD(well_known_imports, Brief);
   PRINT_WASM_INSTANCE_FIELD(memory0_start, to_void_ptr);
   PRINT_WASM_INSTANCE_FIELD(memory0_size, +);
-  PRINT_WASM_INSTANCE_FIELD(stack_limit_address, to_void_ptr);
-  PRINT_WASM_INSTANCE_FIELD(real_stack_limit_address, to_void_ptr);
   PRINT_WASM_INSTANCE_FIELD(new_allocation_limit_address, to_void_ptr);
   PRINT_WASM_INSTANCE_FIELD(new_allocation_top_address, to_void_ptr);
   PRINT_WASM_INSTANCE_FIELD(old_allocation_limit_address, to_void_ptr);
@@ -2812,6 +2865,8 @@ void PreparseData::PreparseDataPrint(std::ostream& os) {
 }
 
 void HeapNumber::HeapNumberPrint(std::ostream& os) {
+  PrintHeader(os, "HeapNumber");
+  os << "\n - value: ";
   HeapNumberShortPrint(os);
   os << "\n";
 }
@@ -2888,7 +2943,8 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
       os << "<WithContext[" << Context::cast(*this)->length() << "]>";
       break;
     case SCRIPT_CONTEXT_TABLE_TYPE:
-      os << "<ScriptContextTable[" << FixedArray::cast(*this)->length() << "]>";
+      os << "<ScriptContextTable["
+         << ScriptContextTable::cast(*this)->capacity() << "]>";
       break;
     case HASH_TABLE_TYPE:
       os << "<HashTable[" << FixedArray::cast(*this)->length() << "]>";
@@ -2925,7 +2981,7 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
       break;
     case OBJECT_BOILERPLATE_DESCRIPTION_TYPE:
       os << "<ObjectBoilerplateDescription["
-         << FixedArray::cast(*this)->length() << "]>";
+         << ObjectBoilerplateDescription::cast(*this)->capacity() << "]>";
       break;
     case FIXED_DOUBLE_ARRAY_TYPE:
       os << "<FixedDoubleArray[" << FixedDoubleArray::cast(*this)->length()

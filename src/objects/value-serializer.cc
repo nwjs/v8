@@ -731,8 +731,9 @@ Maybe<bool> ValueSerializer::WriteJSArray(Handle<JSArray> array) {
       case PACKED_SMI_ELEMENTS: {
         DisallowGarbageCollection no_gc;
         Tagged<FixedArray> elements = FixedArray::cast(array->elements());
-        for (i = 0; i < length; i++)
-          WriteSmi(Smi::cast(elements->get(cage_base, i)));
+        for (i = 0; i < length; i++) {
+          WriteSmi(Smi::cast(elements->get(i)));
+        }
         break;
       }
       case PACKED_DOUBLE_ELEMENTS: {
@@ -756,8 +757,8 @@ Maybe<bool> ValueSerializer::WriteJSArray(Handle<JSArray> array) {
             // Fall back to slow path.
             break;
           }
-          Handle<Object> element(
-              FixedArray::cast(array->elements())->get(cage_base, i), isolate_);
+          Handle<Object> element(FixedArray::cast(array->elements())->get(i),
+                                 isolate_);
           if (!WriteObject(element).FromMaybe(false)) return Nothing<bool>();
         }
         break;
@@ -1237,7 +1238,8 @@ Maybe<bool> ValueSerializer::ThrowDataCloneError(
 
 Maybe<bool> ValueSerializer::ThrowDataCloneError(MessageTemplate index,
                                                  Handle<Object> arg0) {
-  Handle<String> message = MessageFormatter::Format(isolate_, index, arg0);
+  Handle<String> message =
+      MessageFormatter::Format(isolate_, index, base::VectorOf({arg0}));
   if (delegate_) {
     delegate_->ThrowDataCloneError(Utils::ToLocal(message));
   } else {

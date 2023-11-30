@@ -389,6 +389,7 @@ class RuntimeCallTimer final {
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftMachineLowering)         \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftOptimize)                \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftRecreateSchedule)        \
+  ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftSimplifiedLowering)      \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftSpecialRPOScheduling)    \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftStoreStoreElim)          \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftTagUntagLowering)        \
@@ -397,6 +398,7 @@ class RuntimeCallTimer final {
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftWasmDeadCodeElimination) \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftWasmGCOptimize)          \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftWasmOptimize)            \
+  ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftWasmLowering)            \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TypeAssertions)                    \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TypedLowering)                     \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, Typer)                             \

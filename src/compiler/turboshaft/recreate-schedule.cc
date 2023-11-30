@@ -160,6 +160,9 @@ RecreateScheduleResult ScheduleBuilder::Run() {
 }
 
 void ScheduleBuilder::ProcessOperation(const Operation& op) {
+  if (!turboshaft::ShouldSkipOptimizationStep() && ShouldSkipOperation(op)) {
+    return;
+  }
   Node* node;
   switch (op.opcode) {
 #define SWITCH_CASE(Name)                         \
@@ -904,19 +907,18 @@ Node* ScheduleBuilder::ProcessOperation(const AtomicWord32PairOp& op) {
   Node* index;
   if (op.index().valid() && op.offset) {
     index = AddNode(machine.Int32Add(),
-                    {GetNode(op.index()), IntPtrConstant(op.offset)});
+                    {GetNode(op.index().value()), IntPtrConstant(op.offset)});
   } else if (op.index().valid()) {
-    index = GetNode(op.index());
+    index = GetNode(op.index().value());
   } else {
     index = IntPtrConstant(op.offset);
   }
-#define BINOP_CASE(OP)                                                 \
-  if (op.op_kind == AtomicWord32PairOp::OpKind::k##OP) {               \
-    return AddNode(                                                    \
-        machine.Word32AtomicPair##OP(),                                \
-        {GetNode(op.base()),                                           \
-         op.index().valid() ? GetNode(op.index()) : IntPtrConstant(0), \
-         GetNode(op.value_low()), GetNode(op.value_high())});          \
+#define BINOP_CASE(OP)                                               \
+  if (op.kind == AtomicWord32PairOp::Kind::k##OP) {                  \
+    return AddNode(                                                  \
+        machine.Word32AtomicPair##OP(),                              \
+        {GetNode(op.base()), index, GetNode(op.value_low().value()), \
+         GetNode(op.value_high().value())});                         \
   }
 #define ATOMIC_BINOPS(V) \
   V(Add)                 \
@@ -929,20 +931,21 @@ Node* ScheduleBuilder::ProcessOperation(const AtomicWord32PairOp& op) {
 #undef ATOMIC_BINOPS
 #undef BINOP_CASE
 
-  if (op.op_kind == AtomicWord32PairOp::OpKind::kLoad) {
+  if (op.kind == AtomicWord32PairOp::Kind::kLoad) {
     return AddNode(machine.Word32AtomicPairLoad(AtomicMemoryOrder::kSeqCst),
                    {GetNode(op.base()), index});
   }
-  if (op.op_kind == AtomicWord32PairOp::OpKind::kStore) {
+  if (op.kind == AtomicWord32PairOp::Kind::kStore) {
     return AddNode(machine.Word32AtomicPairStore(AtomicMemoryOrder::kSeqCst),
-                   {GetNode(op.base()), index, GetNode(op.value_low()),
-                    GetNode(op.value_high())});
+                   {GetNode(op.base()), index, GetNode(op.value_low().value()),
+                    GetNode(op.value_high().value())});
   }
-  DCHECK_EQ(op.op_kind, AtomicWord32PairOp::OpKind::kCompareExchange);
-  return AddNode(machine.Word32AtomicPairCompareExchange(),
-                 {GetNode(op.base()), index, GetNode(op.expected_low()),
-                  GetNode(op.expected_high()), GetNode(op.value_low()),
-                  GetNode(op.value_high())});
+  DCHECK_EQ(op.kind, AtomicWord32PairOp::Kind::kCompareExchange);
+  return AddNode(
+      machine.Word32AtomicPairCompareExchange(),
+      {GetNode(op.base()), index, GetNode(op.expected_low().value()),
+       GetNode(op.expected_high().value()), GetNode(op.value_low().value()),
+       GetNode(op.value_high().value())});
 }
 
 Node* ScheduleBuilder::ProcessOperation(const AtomicRMWOp& op) {
@@ -982,7 +985,7 @@ Node* ScheduleBuilder::ProcessOperation(const AtomicRMWOp& op) {
   Node* index = GetNode(op.index());
   Node* value = GetNode(op.value());
   if (op.bin_op == AtomicRMWOp::BinOp::kCompareExchange) {
-    Node* expected = GetNode(op.expected());
+    Node* expected = GetNode(op.expected().value());
     return AddNode(node_op, {base, index, expected, value});
   } else {
     return AddNode(node_op, {base, index, value});
@@ -1037,7 +1040,7 @@ Node* ScheduleBuilder::ProcessOperation(const LoadOp& op) {
   Node* base = GetNode(op.base());
   Node* index;
   if (op.index().valid()) {
-    index = GetNode(op.index());
+    index = GetNode(op.index().value());
     if (op.element_size_log2 != 0) {
       index = IntPtrShl(index, IntPtrConstant(op.element_size_log2));
     }
@@ -1099,7 +1102,7 @@ Node* ScheduleBuilder::ProcessOperation(const StoreOp& op) {
   Node* base = GetNode(op.base());
   Node* index;
   if (op.index().valid()) {
-    index = GetNode(op.index());
+    index = GetNode(op.index().value());
     if (op.element_size_log2 != 0) {
       index = IntPtrShl(index, IntPtrConstant(op.element_size_log2));
     }
@@ -1163,9 +1166,6 @@ Node* ScheduleBuilder::ProcessOperation(const RetainOp& op) {
   return AddNode(common.Retain(), {GetNode(op.retained())});
 }
 Node* ScheduleBuilder::ProcessOperation(const ParameterOp& op) {
-  // DeadCodeElimination does not eliminate unused parameter operations, so we
-  // just eliminate them here.
-  if (op.saturated_use_count.IsZero()) return nullptr;
   // Parameters need to be cached because the register allocator assumes that
   // there are no duplicate nodes for the same parameter.
   if (parameters.count(op.parameter_index)) {

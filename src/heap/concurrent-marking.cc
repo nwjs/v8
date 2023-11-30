@@ -284,7 +284,7 @@ void ConcurrentMarking::RunMajor(JobDelegate* delegate,
   }
   bool another_ephemeron_iteration = false;
   MainAllocator* const new_space_allocator =
-      heap_->new_space() ? heap_->new_space()->main_allocator() : nullptr;
+      heap_->new_space() ? heap_->allocator()->new_space_allocator() : nullptr;
 
   {
     TimedScope scope(&time_ms);
@@ -446,7 +446,7 @@ V8_INLINE size_t ConcurrentMarking::RunMinorImpl(JobDelegate* delegate,
   Isolate* isolate = heap_->isolate();
   minor_marking_state_->MarkerStarted();
   MainAllocator* const new_space_allocator =
-      heap_->new_space()->main_allocator();
+      heap_->allocator()->new_space_allocator();
   NewLargeObjectSpace* const new_lo_space = heap_->new_lo_space();
 
   do {
@@ -568,8 +568,16 @@ void ConcurrentMarking::TryScheduleJob(GarbageCollector garbage_collector,
     priority = TaskPriority::kUserBlocking;
   }
 
-  DCHECK_NULL(minor_marking_state_);
-  DCHECK(
+  // Marking state can only be alive if the concurrent marker was previously
+  // stopped.
+  DCHECK_IMPLIES(
+      minor_marking_state_,
+      garbage_collector_.has_value() &&
+          (*garbage_collector_ == garbage_collector) &&
+          (garbage_collector == GarbageCollector::MINOR_MARK_SWEEPER));
+  DCHECK_IMPLIES(
+      !garbage_collector_.has_value() ||
+          *garbage_collector_ == GarbageCollector::MARK_COMPACTOR,
       std::all_of(task_state_.begin(), task_state_.end(), [](auto& task_state) {
         return task_state->local_pretenuring_feedback.empty();
       }));

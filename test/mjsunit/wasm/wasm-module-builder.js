@@ -131,6 +131,7 @@ let kWasmEqRef = -0x13;
 let kWasmI31Ref = -0x14;
 let kWasmStructRef = -0x15;
 let kWasmArrayRef = -0x16;
+let kWasmExnRef = -0x17;
 let kWasmStringRef = -0x19;
 let kWasmStringViewWtf8 = -0x1a;
 let kWasmStringViewWtf16 = -0x1e;
@@ -148,6 +149,7 @@ let kNullExternRefCode = kWasmNullExternRef & kLeb128Mask;
 let kNullFuncRefCode = kWasmNullFuncRef & kLeb128Mask;
 let kStructRefCode = kWasmStructRef & kLeb128Mask;
 let kArrayRefCode = kWasmArrayRef & kLeb128Mask;
+let kExnRefCode = kWasmExnRef & kLeb128Mask;
 let kNullRefCode = kWasmNullRef & kLeb128Mask;
 let kStringRefCode = kWasmStringRef & kLeb128Mask;
 let kStringViewWtf8Code = kWasmStringViewWtf8 & kLeb128Mask;
@@ -518,8 +520,8 @@ let kExprRefCast = 0x16;
 let kExprRefCastNull = 0x17;
 let kExprBrOnCastGeneric = 0x18;      // TODO(14034): Drop "Generic" name.
 let kExprBrOnCastFailGeneric = 0x19;  // TODO(14034): Drop "Generic" name.
-let kExprExternInternalize = 0x1a;
-let kExprExternExternalize = 0x1b;
+let kExprAnyConvertExtern = 0x1a;
+let kExprExternConvertAny = 0x1b;
 let kExprRefI31 = 0x1c;
 let kExprI31GetS = 0x1d;
 let kExprI31GetU = 0x1e;
@@ -2144,7 +2146,7 @@ class WasmModuleBuilder {
 }
 
 function wasmSignedLeb(val, max_len = 5) {
-  if (val == null) throw new Error("Leb value many not be null/undefined");
+  if (val == null) throw new Error("Leb value may not be null/undefined");
   let res = [];
   for (let i = 0; i < max_len; ++i) {
     let v = val & 0x7f;
@@ -2161,7 +2163,7 @@ function wasmSignedLeb(val, max_len = 5) {
 }
 
 function wasmSignedLeb64(val, max_len = 10) {
-  if (val == null) throw new Error("Leb value many not be null/undefined");
+  if (val == null) throw new Error("Leb value may not be null/undefined");
   if (typeof val != "bigint") {
     if (val < Math.pow(2, 31)) {
       return wasmSignedLeb(val, max_len);

@@ -15,14 +15,18 @@ namespace internal {
 //
 // When accessing an indirect pointer, an IndirectPointerTag must be provided
 // which expresses the expected instance type of the pointed-to object. When
-// the sandbox is enabled, this tag is used by the indirect pointer table to
-// ensure type-safe access to objects referenced via indirect pointers. As
-// IndirectPointerTags are derived from instance types, conversion between the
-// two types is possible and supported through routines defined in this file.
+// the sandbox is enabled, this tag is used to ensure type-safe access to
+// objects referenced via indirect pointers. As IndirectPointerTags are derived
+// from instance types, conversion between the two types is possible and
+// supported through routines defined in this file.
 
 constexpr int kIndirectPointerTagShift = 48;
 constexpr uint64_t kIndirectPointerTagMask = 0xffff000000000000;
-#define INDIRECT_POINTER_TAG_LIST(V) V(kCodeIndirectPointerTag, CODE_TYPE)
+
+#define INDIRECT_POINTER_TAG_LIST(V)    \
+  V(kCodeIndirectPointerTag, CODE_TYPE) \
+  V(kBytecodeArrayIndirectPointerTag, BYTECODE_ARRAY_TYPE)
+
 #define MAKE_TAG(instance_type) \
   (uint64_t{instance_type} << kIndirectPointerTagShift)
 
@@ -34,7 +38,7 @@ enum IndirectPointerTag : uint64_t {
 #undef INDIRECT_POINTER_TAG_ENUM_DECL
 };
 
-V8_INLINE bool IsValidIndirectPointerTag(IndirectPointerTag tag) {
+V8_INLINE constexpr bool IsValidIndirectPointerTag(IndirectPointerTag tag) {
 #define VALID_INDIRECT_POINTER_TAG_CASE(tag, instance_type) case tag:
   switch (tag) {
     INDIRECT_POINTER_TAG_LIST(VALID_INDIRECT_POINTER_TAG_CASE)
@@ -44,6 +48,10 @@ V8_INLINE bool IsValidIndirectPointerTag(IndirectPointerTag tag) {
   }
 #undef VALID_INDIRECT_POINTER_TAG_CASE
 }
+
+// The null tag is also considered an invalid tag since no indirect pointer
+// field should be using this tag.
+static_assert(!IsValidIndirectPointerTag(kIndirectPointerNullTag));
 
 V8_INLINE IndirectPointerTag
 IndirectPointerTagFromInstanceType(InstanceType instance_type) {

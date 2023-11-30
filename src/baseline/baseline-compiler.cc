@@ -2,11 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// TODO(v8:11421): Remove #if once baseline compiler is ported to other
-// architectures.
-#include "src/flags/flags.h"
-#if ENABLE_SPARKPLUG
-
 #include <algorithm>
 #include <type_traits>
 
@@ -69,7 +64,7 @@ Handle<ByteArray> BytecodeOffsetTableBuilder::ToBytecodeOffsetTable(
   if (bytes_.empty()) return isolate->factory()->empty_byte_array();
   Handle<ByteArray> table = isolate->factory()->NewByteArray(
       static_cast<int>(bytes_.size()), AllocationType::kOld);
-  MemCopy(table->GetDataStartAddress(), bytes_.data(), bytes_.size());
+  MemCopy(table->begin(), bytes_.data(), bytes_.size());
   return table;
 }
 
@@ -1321,7 +1316,7 @@ void BaselineCompiler::VisitCallRuntimeForPair() {
       BaselineAssembler::ScratchRegisterScope scratch_scope(&basm_);
       Register out_reg = scratch_scope.AcquireScratch();
       __ RegisterFrameAddress(out.first, out_reg);
-      DCHECK(in.register_count() == 1);
+      DCHECK_EQ(in.register_count(), 1);
       CallRuntime(Runtime::kLoadLookupSlotForCall_Baseline, in.first_register(),
                   out_reg);
       break;
@@ -2402,5 +2397,3 @@ SaveAccumulatorScope::~SaveAccumulatorScope() {
 }  // namespace baseline
 }  // namespace internal
 }  // namespace v8
-
-#endif  // ENABLE_SPARKPLUG

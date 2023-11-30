@@ -28,7 +28,6 @@
 #include "src/handles/handles-inl.h"
 #include "src/objects/slots-inl.h"
 #include "src/roots/roots-inl.h"
-#include "v8-internal.h"
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/wasm/simd-shuffle.h"
@@ -272,7 +271,7 @@ TryMatchBaseWithScaledIndexAndDisplacement64(
   const Operation& op = selector->Get(node);
   if (const LoadOp* load = op.TryCast<LoadOp>()) {
     result.base = load->base();
-    result.index = load->index();
+    result.index = load->index().value_or_invalid();
     result.scale = load->element_size_log2;
     result.displacement = load->offset;
     if (load->kind.tagged_base) result.displacement -= kHeapObjectTag;
@@ -280,7 +279,7 @@ TryMatchBaseWithScaledIndexAndDisplacement64(
   } else if (const StoreOp* store = op.TryCast<StoreOp>()) {
     BaseWithScaledIndexAndDisplacementMatch<TurboshaftAdapter> result;
     result.base = store->base();
-    result.index = store->index();
+    result.index = store->index().value_or_invalid();
     result.scale = store->element_size_log2;
     result.displacement = store->offset;
     if (store->kind.tagged_base) result.displacement -= kHeapObjectTag;
@@ -740,7 +739,18 @@ X64OperandGeneratorT<TurboshaftAdapter>::GetEffectiveAddressMemoryOperand(
   auto m = TryMatchBaseWithScaledIndexAndDisplacement64(selector(), operand);
   DCHECK(m.has_value());
   if (IsCompressed(selector(), m->base)) {
-    UNIMPLEMENTED();
+    DCHECK(!m->index.valid());
+    DCHECK(m->displacement == 0 || ValueFitsIntoImmediate(m->displacement));
+    AddressingMode mode = kMode_MCR;
+    inputs[(*input_count)++] = UseRegister(m->base, reg_kind);
+    if (m->displacement != 0) {
+      inputs[(*input_count)++] =
+          m->displacement_mode == kNegativeDisplacement
+              ? UseImmediate(static_cast<int>(-m->displacement))
+              : UseImmediate(static_cast<int>(m->displacement));
+      mode = kMode_MCRI;
+    }
+    return mode;
   }
   if (TurboshaftAdapter::valid(m->base) &&
       this->Get(m->base).Is<turboshaft::LoadRootRegisterOp>()) {
@@ -3377,16 +3387,30 @@ Node* InstructionSelectorT<TurbofanAdapter>::FindProjection(
 template <>
 turboshaft::OpIndex InstructionSelectorT<TurboshaftAdapter>::FindProjection(
     turboshaft::OpIndex node, size_t projection_index) {
-  // TODO(nicohartmann@): We need to make sure to emit canoncial projections
-  // right after all operations with multiple outputs for this to work
-  // correctly.
+  using namespace turboshaft;  // NOLINT(build/namespaces)
+  const turboshaft::Graph* graph = this->turboshaft_graph();
+  // Projections are always emitted right after the operation.
+  for (OpIndex next = graph->NextIndex(node); next.valid();
+       next = graph->NextIndex(next)) {
+    const ProjectionOp* projection = graph->Get(next).TryCast<ProjectionOp>();
+    if (projection == nullptr) break;
+    if (projection->index == projection_index) return next;
+  }
+
+  // If there is no Projection with index {projection_index} following the
+  // operation, then there shouldn't be any such Projection in the graph. We
+  // verify this in Debug mode.
+#ifdef DEBUG
   for (turboshaft::OpIndex use : turboshaft_uses(node)) {
     if (const turboshaft::ProjectionOp* projection =
             this->Get(use).TryCast<turboshaft::ProjectionOp>()) {
       DCHECK_EQ(projection->input(), node);
-      if (projection->index == projection_index) return use;
+      if (projection->index == projection_index) {
+        UNREACHABLE();
+      }
     }
   }
+#endif  // DEBUG
   return turboshaft::OpIndex::Invalid();
 }
 
@@ -4128,9 +4152,13 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitWordCompareZero(
         case RegisterRepresentation::Float32():
           cont->OverwriteAndNegateIfEqual(kUnorderedEqual);
           return VisitFloat32Compare(this, value, cont);
-        case RegisterRepresentation::Float64():
-          cont->OverwriteAndNegateIfEqual(kUnorderedEqual);
+        case RegisterRepresentation::Float64(): {
+          bool is_self_compare =
+              this->input_at(value, 0) == this->input_at(value, 1);
+          cont->OverwriteAndNegateIfEqual(is_self_compare ? kIsNotNaN
+                                                          : kUnorderedEqual);
           return VisitFloat64Compare(this, value, cont);
+        }
         default:
           break;
       }
@@ -4327,9 +4355,13 @@ void InstructionSelectorT<TurbofanAdapter>::VisitWordCompareZero(
       case IrOpcode::kFloat32LessThanOrEqual:
         cont->OverwriteAndNegateIfEqual(kUnsignedGreaterThanOrEqual);
         return VisitFloat32Compare(this, value, cont);
-      case IrOpcode::kFloat64Equal:
-        cont->OverwriteAndNegateIfEqual(kUnorderedEqual);
+      case IrOpcode::kFloat64Equal: {
+        bool is_self_compare =
+            this->input_at(value, 0) == this->input_at(value, 1);
+        cont->OverwriteAndNegateIfEqual(is_self_compare ? kIsNotNaN
+                                                        : kUnorderedEqual);
         return VisitFloat64Compare(this, value, cont);
+      }
       case IrOpcode::kFloat64LessThan: {
         Float64BinopMatcher m(value);
         if (m.left().Is(0.0) && m.right().IsFloat64Abs()) {
@@ -4611,7 +4643,9 @@ void InstructionSelectorT<Adapter>::VisitFloat32LessThanOrEqual(node_t node) {
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitFloat64Equal(node_t node) {
-  FlagsContinuation cont = FlagsContinuation::ForSet(kUnorderedEqual, node);
+  bool is_self_compare = this->input_at(node, 0) == this->input_at(node, 1);
+  FlagsContinuation cont = FlagsContinuation::ForSet(
+      is_self_compare ? kIsNotNaN : kUnorderedEqual, node);
   VisitFloat64Compare(this, node, &cont);
 }
 

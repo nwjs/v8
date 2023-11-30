@@ -151,8 +151,8 @@ RUNTIME_FUNCTION(Runtime_DeclareModuleExports) {
           SharedFunctionInfo::cast(declarations->get(i)), isolate);
       int feedback_index = Smi::ToInt(declarations->get(++i));
       index = Smi::ToInt(declarations->get(++i));
-      Handle<FeedbackCell> feedback_cell =
-          closure_feedback_cell_array->GetFeedbackCell(feedback_index);
+      Handle<FeedbackCell> feedback_cell(
+          closure_feedback_cell_array->get(feedback_index), isolate);
       value = *Factory::JSFunctionBuilder(isolate, sfi, context)
                    .set_feedback_cell(feedback_cell)
                    .Build();
@@ -199,8 +199,8 @@ RUNTIME_FUNCTION(Runtime_DeclareGlobals) {
       Handle<SharedFunctionInfo> sfi = Handle<SharedFunctionInfo>::cast(decl);
       name = handle(sfi->Name(), isolate);
       int index = Smi::ToInt(declarations->get(++i));
-      Handle<FeedbackCell> feedback_cell =
-          closure_feedback_cell_array->GetFeedbackCell(index);
+      Handle<FeedbackCell> feedback_cell(
+          closure_feedback_cell_array->get(index), isolate);
       value = Factory::JSFunctionBuilder(isolate, sfi, context)
                   .set_feedback_cell(feedback_cell)
                   .Build();
@@ -451,11 +451,12 @@ Handle<JSObject> NewSloppyArguments(Isolate* isolate, Handle<JSFunction> callee,
 
       // Walk all context slots to find context allocated parameters. Mark each
       // found parameter as mapped.
+      ReadOnlyRoots roots{isolate};
       for (int i = 0; i < scope_info->ContextLocalCount(); i++) {
         if (!scope_info->ContextLocalIsParameter(i)) continue;
         int parameter = scope_info->ContextLocalParameterNumber(i);
         if (parameter >= mapped_count) continue;
-        arguments->set_the_hole(parameter);
+        arguments->set_the_hole(roots, parameter);
         Tagged<Smi> slot = Smi::FromInt(scope_info->ContextHeaderLength() + i);
         parameter_map->set_mapped_entries(parameter, slot);
       }
@@ -903,9 +904,8 @@ RUNTIME_FUNCTION(Runtime_StoreGlobalNoHoleCheckForReplLetOrConst) {
   VariableLookupResult lookup_result;
   bool found = script_contexts->Lookup(name, &lookup_result);
   CHECK(found);
-  Handle<Context> script_context = ScriptContextTable::GetContext(
-      isolate, script_contexts, lookup_result.context_index);
-
+  Tagged<Context> script_context =
+      script_contexts->get(lookup_result.context_index);
   script_context->set(lookup_result.slot_index, *value);
   return *value;
 }
