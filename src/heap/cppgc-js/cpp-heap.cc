@@ -983,6 +983,7 @@ void CppHeap::ReportBufferedAllocationSizeIfPossible() {
       if (allocated_size_ > allocated_size_limit_for_check_) {
         Heap* heap = isolate_->heap();
         heap->StartIncrementalMarkingIfAllocationLimitIsReached(
+            heap->main_thread_local_heap(),
             heap->GCFlagsForIncrementalMarking(),
             kGCCallbackScheduleIdleGarbageCollection);
         if (heap->AllocationLimitOvershotByLargeMargin() &&
@@ -1145,7 +1146,7 @@ CppHeap::MetricRecorderAdapter* CppHeap::GetMetricRecorder() const {
 
 void CppHeap::FinishSweepingIfRunning() {
   sweeper_.FinishIfRunning();
-  if (isolate_) {
+  if (isolate_ && ShouldReduceMemory(current_gc_flags_)) {
     isolate_->traced_handles()->DeleteEmptyBlocks();
   }
 }

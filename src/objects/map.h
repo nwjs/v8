@@ -38,11 +38,14 @@ enum InstanceType : uint16_t;
   V(AccessorInfo)                       \
   V(AllocationSite)                     \
   V(BytecodeArray)                      \
+  V(BytecodeWrapper)                    \
   V(ExternalPointerArray)               \
   V(CallHandlerInfo)                    \
   V(Cell)                               \
   V(InstructionStream)                  \
+  V(CallSiteInfo)                       \
   V(Code)                               \
+  V(CodeWrapper)                        \
   V(DataHandler)                        \
   V(DebugInfo)                          \
   V(EmbedderDataArray)                  \
@@ -71,6 +74,7 @@ enum InstanceType : uint16_t;
   V(PropertyArray)                      \
   V(PropertyCell)                       \
   V(PrototypeInfo)                      \
+  V(InterpreterData)                    \
   V(SharedFunctionInfo)                 \
   V(SloppyArgumentsElements)            \
   V(ShortcutCandidate)                  \
@@ -455,7 +459,7 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
   // in the prototype chain. It could be a Proxy, a string wrapper,
   // an object with DICTIONARY_ELEMENTS potentially containing read-only
   // elements or an object with any frozen elements, or a slow arguments object.
-  bool MayHaveReadOnlyElementsInPrototypeChain(Isolate* isolate);
+  bool ShouldCheckForReadOnlyElementsInPrototypeChain(Isolate* isolate);
 
   inline Tagged<Map> ElementsTransitionMap(Isolate* isolate,
                                            ConcurrencyMode cmode);
@@ -983,10 +987,11 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
   void ReplaceDescriptors(Isolate* isolate,
                           Tagged<DescriptorArray> new_descriptors);
 
-  // This is the equivalent of IsMap() but avoids reading the instance type so
-  // it can be used concurrently without acquire load.
-  V8_INLINE bool ConcurrentIsMap(PtrComprCageBase cage_base,
-                                 Tagged<Object> object) const;
+  // This is the replacement for IsMap() which avoids reading the instance type
+  // but compares the object's map against given meta_map, so it can be used
+  // concurrently without acquire load.
+  V8_INLINE static bool ConcurrentIsHeapObjectWithMap(
+      PtrComprCageBase cage_base, Tagged<Object> object, Tagged<Map> meta_map);
 
   // Use the high-level instance_descriptors/SetInstanceDescriptors instead.
   DECL_RELEASE_SETTER(instance_descriptors, Tagged<DescriptorArray>)

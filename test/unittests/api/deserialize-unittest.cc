@@ -306,15 +306,28 @@ class MergeDeserializedCodeTest : public DeserializeTest {
                : i::MaybeObject::MakeWeak(i::MaybeObject::FromObject(obj));
   }
 
+  static i::Tagged<i::Object> ExtractSharedFunctionInfoData(
+      i::Tagged<i::SharedFunctionInfo> sfi, i::Isolate* i_isolate) {
+    i::Tagged<i::Object> data = sfi->GetData(i_isolate);
+    // BytecodeArrays live in trusted space and so cannot be referenced through
+    // tagged/compressed pointers from e.g. a FixedArray. Instead, we need to
+    // use their in-sandbox wrapper object for that purpose.
+    if (i::IsBytecodeArray(data)) {
+      data = i::BytecodeArray::cast(data)->wrapper();
+    }
+    return data;
+  }
+
   void ValidateStandaloneGraphAndPopulateArray(
       i::Tagged<i::SharedFunctionInfo> toplevel_sfi,
-      i::Tagged<i::WeakFixedArray> array, bool lazy_should_be_compiled = false,
+      i::Tagged<i::WeakFixedArray> array, i::Isolate* i_isolate,
+      bool lazy_should_be_compiled = false,
       bool eager_should_be_compiled = true) {
     i::DisallowGarbageCollection no_gc;
     CHECK(toplevel_sfi->is_compiled());
     array->set(kToplevelSfi, WeakOrSmi(toplevel_sfi));
-    array->set(kToplevelFunctionData,
-               WeakOrSmi(toplevel_sfi->function_data(kAcquireLoad)));
+    array->set(kToplevelFunctionData, WeakOrSmi(ExtractSharedFunctionInfoData(
+                                          toplevel_sfi, i_isolate)));
     array->set(kToplevelFeedbackMetadata,
                WeakOrSmi(toplevel_sfi->feedback_metadata()));
     i::Tagged<i::Script> script = i::Script::cast(toplevel_sfi->script());
@@ -328,14 +341,14 @@ class MergeDeserializedCodeTest : public DeserializeTest {
     array->set(kEagerSfi, WeakOrSmi(eager));
     if (eager_should_be_compiled) {
       array->set(kEagerFunctionData,
-                 WeakOrSmi(eager->function_data(kAcquireLoad)));
+                 WeakOrSmi(ExtractSharedFunctionInfoData(eager, i_isolate)));
       array->set(kEagerFeedbackMetadata, WeakOrSmi(eager->feedback_metadata()));
       i::Tagged<i::SharedFunctionInfo> iife =
           i::SharedFunctionInfo::cast(sfis->get(2).GetHeapObjectAssumeWeak());
       CHECK(iife->is_compiled());
       array->set(kIifeSfi, WeakOrSmi(iife));
       array->set(kIifeFunctionData,
-                 WeakOrSmi(iife->function_data(kAcquireLoad)));
+                 WeakOrSmi(ExtractSharedFunctionInfoData(iife, i_isolate)));
       array->set(kIifeFeedbackMetadata, WeakOrSmi(iife->feedback_metadata()));
     }
     i::Tagged<i::SharedFunctionInfo> lazy =
@@ -405,7 +418,7 @@ class MergeDeserializedCodeTest : public DeserializeTest {
     i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate());
     i::DisableConservativeStackScanningScopeForTesting no_stack_scanning(
         i_isolate->heap());
-    ScriptOrigin default_origin(isolate(), NewString(""));
+    ScriptOrigin default_origin(NewString(""));
 
     i::Handle<i::WeakFixedArray> original_objects =
         i_isolate->factory()->NewWeakFixedArray(kScriptObjectsCount);
@@ -424,7 +437,7 @@ class MergeDeserializedCodeTest : public DeserializeTest {
               .ToLocalChecked();
 
       ValidateStandaloneGraphAndPopulateArray(GetSharedFunctionInfo(script),
-                                              *original_objects);
+                                              *original_objects, i_isolate);
 
       RetainObjects(retained_before_background_merge, *original_objects,
                     *retained_original_objects, i_isolate);
@@ -479,7 +492,7 @@ class MergeDeserializedCodeTest : public DeserializeTest {
       CHECK(!original_script->Run(context()).IsEmpty());
       CHECK_EQ(RunGlobalFunc("lazy"), v8::Integer::New(isolate(), 42));
       ValidateStandaloneGraphAndPopulateArray(
-          GetSharedFunctionInfo(original_script), *original_objects,
+          GetSharedFunctionInfo(original_script), *original_objects, i_isolate,
           true /*lazy_should_be_compiled*/);
     }
 
@@ -497,8 +510,8 @@ class MergeDeserializedCodeTest : public DeserializeTest {
 
     CHECK(!source.GetCachedData()->rejected);
     ValidateStandaloneGraphAndPopulateArray(
-        GetSharedFunctionInfo(script), *new_objects, lazy_should_be_compiled,
-        eager_should_be_compiled);
+        GetSharedFunctionInfo(script), *new_objects, i_isolate,
+        lazy_should_be_compiled, eager_should_be_compiled);
 
     // At this point, the original_objects array might still have pointers to
     // some old discarded content, such as UncompiledData from flushed
@@ -639,7 +652,7 @@ TEST_F(MergeDeserializedCodeTest, MergeWithNoFollowUpWork) {
   i::DisableConservativeStackScanningScopeForTesting no_stack_scanning(
       i_isolate->heap());
 
-  ScriptOrigin default_origin(isolate(), NewString(""));
+  ScriptOrigin default_origin(NewString(""));
 
   constexpr char kSourceCode[] = "function f() {}";
   Local<Script> original_script;
@@ -717,7 +730,7 @@ TEST_F(MergeDeserializedCodeTest, MergeThatCompilesLazyFunction) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate());
   i::DisableConservativeStackScanningScopeForTesting no_stack_scanning(
       i_isolate->heap());
-  ScriptOrigin default_origin(isolate(), NewString(""));
+  ScriptOrigin default_origin(NewString(""));
 
   constexpr char kSourceCode[] =
       "var f = function () {var s = f.toString(); f = null; return s;};";
@@ -809,7 +822,7 @@ TEST_F(MergeDeserializedCodeTest, MergeThatStartsButDoesNotFinish) {
   std::vector<std::unique_ptr<v8::ScriptCompiler::CachedData>> cached_data;
   IsolateAndContextScope scope(this);
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate());
-  ScriptOrigin default_origin(isolate(), NewString(""));
+  ScriptOrigin default_origin(NewString(""));
   i::DisableConservativeStackScanningScopeForTesting no_stack_scanning(
       i_isolate->heap());
 

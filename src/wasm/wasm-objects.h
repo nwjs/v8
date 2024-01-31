@@ -13,6 +13,8 @@
 
 #include "src/base/bit-field.h"
 #include "src/debug/interface-types.h"
+#include "src/heap/heap.h"
+#include "src/objects/backing-store.h"
 #include "src/objects/foreign.h"
 #include "src/objects/js-function.h"
 #include "src/objects/js-objects.h"
@@ -615,6 +617,11 @@ class V8_EXPORT_PRIVATE WasmExceptionPackage : public JSObject {
   // Determines the size of the array holding all encoded exception values.
   static uint32_t GetEncodedSize(const wasm::WasmTagSig* tag);
   static uint32_t GetEncodedSize(const wasm::WasmTag* tag);
+
+  // In-object fields.
+  enum { kTagIndex, kValuesIndex, kInObjectFieldCount };
+  static constexpr int kSize =
+      kHeaderSize + (kTaggedSize * kInObjectFieldCount);
 
   DECL_CAST(WasmExceptionPackage)
   DECL_PRINTER(WasmExceptionPackage)

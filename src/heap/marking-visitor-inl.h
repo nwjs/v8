@@ -56,6 +56,18 @@ void MarkingVisitorBase<ConcreteVisitor>::ProcessStrongHeapObject(
     Tagged<HeapObject> heap_object) {
   SynchronizePageAccess(heap_object);
   if (!ShouldMarkObject(heap_object)) return;
+  // TODO(chromium:1495151): Remove after diagnosing.
+  if (V8_UNLIKELY(!BasicMemoryChunk::FromHeapObject(heap_object)->IsMarking() &&
+                  IsFreeSpaceOrFiller(
+                      heap_object, ObjectVisitorWithCageBases::cage_base()))) {
+    heap_->isolate()->PushStackTraceAndDie(
+        reinterpret_cast<void*>(host->map().ptr()),
+        reinterpret_cast<void*>(host->address()),
+        reinterpret_cast<void*>(slot.address()),
+        reinterpret_cast<void*>(BasicMemoryChunk::FromHeapObject(heap_object)
+                                    ->owner()
+                                    ->identity()));
+  }
   MarkObject(host, heap_object);
   concrete_visitor()->RecordSlot(host, slot, heap_object);
 }
@@ -198,18 +210,23 @@ template <typename ConcreteVisitor>
 void MarkingVisitorBase<ConcreteVisitor>::VisitTrustedPointerTableEntry(
     Tagged<HeapObject> host, IndirectPointerSlot slot) {
 #ifdef V8_ENABLE_SANDBOX
+  DCHECK_NE(slot.tag(), kUnknownIndirectPointerTag);
+
   IndirectPointerHandle handle = slot.Relaxed_LoadHandle();
+
+  // We must not see an uninitialized 'self' indirect pointer as we might
+  // otherwise fail to mark the table entry as alive.
+  DCHECK_NE(handle, kNullIndirectPointerHandle);
 
   if (slot.tag() == kCodeIndirectPointerTag) {
     CodePointerTable* table = GetProcessWideCodePointerTable();
     CodePointerTable::Space* space = heap_->code_pointer_space();
     table->Mark(space, handle);
-    return;
+  } else {
+    TrustedPointerTable* table = trusted_pointer_table_;
+    TrustedPointerTable::Space* space = heap_->trusted_pointer_space();
+    table->Mark(space, handle);
   }
-
-  TrustedPointerTable* table = trusted_pointer_table_;
-  TrustedPointerTable::Space* space = heap_->trusted_pointer_space();
-  table->Mark(space, handle);
 #else
   UNREACHABLE();
 #endif
@@ -248,7 +265,7 @@ int MarkingVisitorBase<ConcreteVisitor>::VisitJSFunction(
     // also include cases where there is old bytecode even when there is no
     // baseline code and remove this check here.
     if (IsByteCodeFlushingEnabled(code_flush_mode_) &&
-        js_function->NeedsResetDueToFlushedBytecode()) {
+        js_function->NeedsResetDueToFlushedBytecode(heap_->isolate())) {
       local_weak_objects_->flushed_js_functions_local.Push(js_function);
     }
   }
@@ -272,14 +289,20 @@ int MarkingVisitorBase<ConcreteVisitor>::VisitSharedFunctionInfo(
   if (!can_flush_bytecode || !ShouldFlushCode(shared_info)) {
     // If the SharedFunctionInfo doesn't have old bytecode visit the function
     // data strongly.
+#ifdef V8_ENABLE_SANDBOX
+    VisitIndirectPointer(shared_info,
+                         shared_info->RawIndirectPointerField(
+                             SharedFunctionInfo::kTrustedFunctionDataOffset,
+                             kUnknownIndirectPointerTag),
+                         IndirectPointerMode::kStrong);
+#endif
     VisitPointer(shared_info, shared_info->RawField(
                                   SharedFunctionInfo::kFunctionDataOffset));
   } else if (!IsByteCodeFlushingEnabled(code_flush_mode_)) {
     // If bytecode flushing is disabled but baseline code flushing is enabled
     // then we have to visit the bytecode but not the baseline code.
     DCHECK(IsBaselineCodeFlushingEnabled(code_flush_mode_));
-    Tagged<Code> baseline_code =
-        Code::cast(shared_info->function_data(kAcquireLoad));
+    Tagged<Code> baseline_code = shared_info->baseline_code(kAcquireLoad);
     // Visit the bytecode hanging off baseline code.
     VisitPointer(baseline_code,
                  baseline_code->RawField(
@@ -306,14 +329,14 @@ bool MarkingVisitorBase<ConcreteVisitor>::HasBytecodeArrayForFlushing(
   // Get a snapshot of the function data field, and if it is a bytecode array,
   // check if it is old. Note, this is done this way since this function can be
   // called by the concurrent marker.
-  Tagged<Object> data = sfi->function_data(kAcquireLoad);
+  Tagged<Object> data = sfi->GetData(heap_->isolate());
   if (IsCode(data)) {
     Tagged<Code> baseline_code = Code::cast(data);
     DCHECK_EQ(baseline_code->kind(), CodeKind::BASELINE);
     // If baseline code flushing isn't enabled and we have baseline data on SFI
     // we cannot flush baseline / bytecode.
     if (!IsBaselineCodeFlushingEnabled(code_flush_mode_)) return false;
-    data = baseline_code->bytecode_or_interpreter_data();
+    data = baseline_code->bytecode_or_interpreter_data(heap_->isolate());
   } else if (!IsByteCodeFlushingEnabled(code_flush_mode_)) {
     // If bytecode flushing isn't enabled and there is no baseline code there is
     // nothing to flush.
@@ -395,7 +418,8 @@ bool MarkingVisitorBase<ConcreteVisitor>::ShouldFlushBaselineCode(
   // See crbug.com/v8/11972 for more details on acquire / release semantics for
   // code field. We don't use release stores when copying code pointers from
   // SFI / FV to JSFunction but it is safe in practice.
-  Tagged<Object> maybe_code = js_function->raw_code(kAcquireLoad);
+  Tagged<Object> maybe_code =
+      js_function->raw_code(heap_->isolate(), kAcquireLoad);
 
 #ifdef THREAD_SANITIZER
   // This is needed because TSAN does not process the memory fence
@@ -745,6 +769,7 @@ void MarkingVisitorBase<ConcreteVisitor>::VisitDescriptorsForMap(
 template <typename ConcreteVisitor>
 int MarkingVisitorBase<ConcreteVisitor>::VisitMap(Tagged<Map> meta_map,
                                                   Tagged<Map> map) {
+  this->VisitMapPointer(map);
   int size = Map::BodyDescriptor::SizeOf(meta_map, map);
   VisitDescriptorsForMap(map);
 

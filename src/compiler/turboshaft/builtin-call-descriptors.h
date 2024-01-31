@@ -125,7 +125,10 @@ struct BuiltinCallDescriptor {
     static constexpr bool kNeedsFrameState = false;
     static constexpr bool kNeedsContext = true;
     static constexpr Operator::Properties kProperties = Operator::kEliminatable;
-    static constexpr OpEffects kEffects = base_effects.CanReadMemory();
+    // TODO(chromium:1489500, nicohartmann@): We can probably relax this to
+    // base_effects.AssumesConsistentHeap().CanReadMemory() but for now we go
+    // with stronger effects until we better understand the recent crashes.
+    static constexpr OpEffects kEffects = OpEffects().CanCallAnything();
   };
   using FindOrderedHashMapEntry =
       FindOrderedHashEntry<Builtin::kFindOrderedHashMapEntry>;
@@ -201,7 +204,8 @@ struct BuiltinCallDescriptor {
     static constexpr bool kNeedsFrameState = false;
     static constexpr bool kNeedsContext = false;
     static constexpr Operator::Properties kProperties = Operator::kEliminatable;
-    static constexpr OpEffects kEffects = base_effects.CanReadMemory();
+    static constexpr OpEffects kEffects =
+        base_effects.CanReadMemory().CanAllocate();
   };
 
   struct SameValueNumbersOnly : public Descriptor<SameValueNumbersOnly> {
@@ -278,7 +282,8 @@ struct BuiltinCallDescriptor {
     static constexpr bool kNeedsFrameState = false;
     static constexpr bool kNeedsContext = false;
     static constexpr Operator::Properties kProperties = Operator::kEliminatable;
-    static constexpr OpEffects kEffects = base_effects.CanReadMemory();
+    static constexpr OpEffects kEffects =
+        base_effects.CanReadMemory().CanAllocate();
   };
   using StringLessThan = StringComparison<Builtin::kStringLessThan>;
   using StringLessThanOrEqual =

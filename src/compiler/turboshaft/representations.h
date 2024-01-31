@@ -270,6 +270,14 @@ class RegisterRepresentation : public MaybeRegisterRepresentation {
 
   constexpr bool AllowImplicitRepresentationChangeTo(
       RegisterRepresentation dst_rep) const;
+
+  constexpr RegisterRepresentation MapTaggedToWord() const {
+    if (this->value() == RegisterRepresentation::Tagged()) {
+      return COMPRESS_POINTERS_BOOL ? RegisterRepresentation::Word32()
+                                    : RegisterRepresentation::PointerSized();
+    }
+    return *this;
+  }
 };
 
 V8_INLINE constexpr bool operator==(MaybeRegisterRepresentation a,
@@ -826,10 +834,12 @@ class MemoryRepresentation {
   static constexpr Enum kInvalid = static_cast<Enum>(-1);
 };
 
-V8_INLINE bool operator==(MemoryRepresentation a, MemoryRepresentation b) {
+V8_INLINE constexpr bool operator==(MemoryRepresentation a,
+                                    MemoryRepresentation b) {
   return a.value() == b.value();
 }
-V8_INLINE bool operator!=(MemoryRepresentation a, MemoryRepresentation b) {
+V8_INLINE constexpr bool operator!=(MemoryRepresentation a,
+                                    MemoryRepresentation b) {
   return a.value() != b.value();
 }
 

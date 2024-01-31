@@ -2,10 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#if !defined(_WIN32) && !defined(_WIN64)
-#include <unistd.h>
-#endif  // !defined(_WIN32) && !defined(_WIN64)
-
 #include <locale.h>
 
 #include <string>
@@ -25,6 +21,10 @@
 #include "test/inspector/task-runner.h"
 #include "test/inspector/tasks.h"
 #include "test/inspector/utils.h"
+
+#if !defined(V8_OS_WIN)
+#include <unistd.h>
+#endif  // !defined(V8_OS_WIN)
 
 namespace v8 {
 namespace internal {
@@ -461,8 +461,8 @@ class ConsoleExtension : public InspectorIsolateData::SetupGlobalTask {
            v8::Local<v8::ObjectTemplate> global) override {
     v8::Local<v8::String> name =
         v8::String::NewFromUtf8Literal(isolate, "console");
-    global->SetAccessor(name, &ConsoleGetterCallback, nullptr, {}, v8::DEFAULT,
-                        v8::DontEnum);
+    global->SetNativeDataProperty(name, &ConsoleGetterCallback, nullptr, {},
+                                  v8::DontEnum);
   }
 
  private:

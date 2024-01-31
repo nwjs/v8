@@ -257,6 +257,7 @@
   V(_, epochSeconds_string, "epochSeconds")                                   \
   V(_, era_string, "era")                                                     \
   V(_, eraYear_string, "eraYear")                                             \
+  V(_, error_string, "error")                                                 \
   V(_, errors_string, "errors")                                               \
   V(_, error_to_string, "[object Error]")                                     \
   V(_, eval_string, "eval")                                                   \
@@ -430,6 +431,8 @@
   V(_, String_string, "String")                                               \
   V(_, string_string, "string")                                               \
   V(_, string_to_string, "[object String]")                                   \
+  V(_, suppressed_string, "suppressed")                                       \
+  V(_, SuppressedError_string, "SuppressedError")                             \
   V(_, Symbol_iterator_string, "Symbol.iterator")                             \
   V(_, Symbol_match_all_string, "Symbol.matchAll")                            \
   V(_, Symbol_replace_string, "Symbol.replace")                               \
@@ -512,6 +515,8 @@
   V(_, regexp_result_regexp_input_symbol)                 \
   V(_, regexp_result_regexp_last_index_symbol)            \
   V(_, sealed_symbol)                                     \
+  V(_, shared_struct_map_elements_template_symbol)        \
+  V(_, shared_struct_map_registry_key_symbol)             \
   V(_, strict_function_transition_symbol)                 \
   V(_, template_literal_function_literal_id_symbol)       \
   V(_, template_literal_slot_id_symbol)                   \
@@ -652,6 +657,7 @@
   F(MC_CLEAR_WEAK_LISTS)                      \
   F(MC_CLEAR_WEAK_REFERENCES)                 \
   F(MC_SWEEP_EXTERNAL_POINTER_TABLE)          \
+  F(MC_SWEEP_TRUSTED_POINTER_TABLE)           \
   F(MC_SWEEP_CODE_POINTER_TABLE)              \
   F(MC_COMPLETE_SWEEP_ARRAY_BUFFERS)          \
   F(MC_COMPLETE_SWEEPING)                     \

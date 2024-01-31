@@ -25,11 +25,14 @@ namespace internal {
   V(AllocationSite)                     \
   V(BigInt)                             \
   V(BytecodeArray)                      \
+  V(BytecodeWrapper)                    \
   V(ExternalPointerArray)               \
   V(CallHandlerInfo)                    \
   V(Cell)                               \
   V(InstructionStream)                  \
+  V(CallSiteInfo)                       \
   V(Code)                               \
+  V(CodeWrapper)                        \
   V(CoverageInfo)                       \
   V(DataHandler)                        \
   V(DebugInfo)                          \
@@ -58,6 +61,7 @@ namespace internal {
   V(PropertyArray)                      \
   V(PropertyCell)                       \
   V(PrototypeInfo)                      \
+  V(InterpreterData)                    \
   V(SharedFunctionInfo)                 \
   V(SloppyArgumentsElements)            \
   V(SmallOrderedHashMap)                \

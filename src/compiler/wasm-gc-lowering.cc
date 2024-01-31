@@ -87,7 +87,9 @@ Reduction WasmGCLowering::Reduce(Node* node) {
 }
 
 Node* WasmGCLowering::Null(wasm::ValueType type) {
-  RootIndex index = wasm::IsSubtypeOf(type, wasm::kWasmExternRef, module_)
+  // TODO(thibaudm): Can we use wasm null for exnref?
+  RootIndex index = wasm::IsSubtypeOf(type, wasm::kWasmExternRef, module_) ||
+                            wasm::IsSubtypeOf(type, wasm::kWasmExnRef, module_)
                         ? RootIndex::kNullValue
                         : RootIndex::kWasmNull;
   return gasm_.LoadImmutable(MachineType::Pointer(), gasm_.LoadRootRegister(),
@@ -97,10 +99,12 @@ Node* WasmGCLowering::Null(wasm::ValueType type) {
 Node* WasmGCLowering::IsNull(Node* object, wasm::ValueType type) {
   Tagged_t static_null =
       wasm::GetWasmEngine()->compressed_wasm_null_value_or_zero();
-  Node* null_value = !wasm::IsSubtypeOf(type, wasm::kWasmExternRef, module_) &&
-                             static_null != 0
-                         ? gasm_.UintPtrConstant(static_null)
-                         : Null(type);
+  Node* null_value =
+      !wasm::IsSubtypeOf(type, wasm::kWasmExternRef, module_) &&
+              !wasm::IsSubtypeOf(type, wasm::kWasmExnRef, module_) &&
+              static_null != 0
+          ? gasm_.UintPtrConstant(static_null)
+          : Null(type);
   return gasm_.TaggedEqual(object, null_value);
 }
 
@@ -471,7 +475,8 @@ Reduction WasmGCLowering::ReduceAssertNotNull(Node* node) {
       if (null_check_strategy_ == NullCheckStrategy::kExplicit ||
           wasm::IsSubtypeOf(wasm::kWasmI31Ref.AsNonNull(), op_parameter.type,
                             module_) ||
-          wasm::IsSubtypeOf(op_parameter.type, wasm::kWasmExternRef, module_)) {
+          wasm::IsSubtypeOf(op_parameter.type, wasm::kWasmExternRef, module_) ||
+          wasm::IsSubtypeOf(op_parameter.type, wasm::kWasmExnRef, module_)) {
         gasm_.TrapIf(IsNull(object, op_parameter.type), op_parameter.trap_id);
         UpdateSourcePosition(gasm_.effect(), node);
       } else {

@@ -45,6 +45,7 @@ enum class WellKnownImport : uint8_t {
   kDataViewSetUint8,
   kDataViewSetUint16,
   kDataViewSetUint32,
+  kDataViewByteLength,
 
   // String-related functions:
   kDoubleToString,
@@ -53,6 +54,8 @@ enum class WellKnownImport : uint8_t {
 
   // JS String Builtins
   // https://github.com/WebAssembly/js-string-builtins
+  kStringCast,
+  kStringTest,
   kStringCharCodeAt,
   kStringCodePointAt,
   kStringCompare,
@@ -63,10 +66,12 @@ enum class WellKnownImport : uint8_t {
   kStringFromWtf16Array,
   kStringFromWtf8Array,
   kStringIndexOf,
+  kStringIndexOfImported,
   kStringLength,
   kStringSubstring,
   kStringToLocaleLowerCaseStringref,
   kStringToLowerCaseStringref,
+  kStringToLowerCaseImported,
   kStringToWtf16Array,
 };
 

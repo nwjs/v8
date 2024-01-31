@@ -206,6 +206,38 @@ inline void EmitAllTrue(LiftoffAssembler* assm, LiftoffRegister dst,
   assm->Cset(dst.gp().W(), ne);
 }
 
+inline CPURegister LoadToRegister(LiftoffAssembler* assm,
+                                  UseScratchRegisterScope* temps,
+                                  const LiftoffAssembler::VarState& src) {
+  if (src.is_reg()) {
+    return GetRegFromType(src.reg(), src.kind()).Reg();
+  }
+  if (src.is_const()) {
+    if (src.kind() == kI32) {
+      if (src.i32_const() == 0) return wzr;
+      Register temp = temps->AcquireW();
+      assm->Mov(temp, src.i32_const());
+      return temp;
+    }
+    DCHECK_EQ(kI64, src.kind());
+    if (src.i32_const() == 0) return xzr;
+    Register temp = temps->AcquireX();
+    assm->Mov(temp, static_cast<int64_t>(src.i32_const()));
+    return temp;
+  }
+  DCHECK(src.is_stack());
+  CPURegister temp = AcquireByType(temps, src.kind());
+  assm->Ldr(temp, GetStackSlot(src.offset()));
+  return temp;
+}
+
+inline void StoreToMemory(LiftoffAssembler* assm, MemOperand dst,
+                          const LiftoffAssembler::VarState& src) {
+  UseScratchRegisterScope temps{assm};
+  CPURegister src_reg = LoadToRegister(assm, &temps, src);
+  assm->Str(src_reg, dst);
+}
+
 }  // namespace liftoff
 
 int LiftoffAssembler::PrepareStackFrame() {
@@ -3425,6 +3457,17 @@ void LiftoffAssembler::emit_f64x2_qfms(LiftoffRegister dst,
 
 #undef EMIT_QFMOP
 
+void LiftoffAssembler::set_trap_on_oob_mem64(Register index, int oob_shift,
+                                             MemOperand oob_offset) {
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.AcquireX();
+  Lsr(scratch.X(), index.X(), oob_shift);
+
+  Register scratch2 = temps.AcquireX();
+  ldr(scratch2, oob_offset);
+  Csel(index.X(), scratch2, index.X(), ne);
+}
+
 void LiftoffAssembler::StackCheck(Label* ool_code) {
   UseScratchRegisterScope temps(this);
   Register limit_address = temps.AcquireX();
@@ -3487,31 +3530,7 @@ void LiftoffAssembler::CallCWithStackBuffer(
 
   int arg_offset = 0;
   for (const VarState& arg : args) {
-    UseScratchRegisterScope temps(this);
-    CPURegister src = no_reg;
-    if (arg.is_reg()) {
-      src = liftoff::GetRegFromType(arg.reg(), arg.kind());
-    } else if (arg.is_const()) {
-      if (arg.kind() == kI32) {
-        if (arg.i32_const() == 0) {
-          src = wzr;
-        } else {
-          src = temps.AcquireW();
-          Mov(src.W(), arg.i32_const());
-        }
-      } else {
-        if (arg.i32_const() == 0) {
-          src = xzr;
-        } else {
-          src = temps.AcquireX();
-          Mov(src.X(), static_cast<int64_t>(arg.i32_const()));
-        }
-      }
-    } else {
-      src = liftoff::AcquireByType(&temps, arg.kind());
-      Ldr(src, liftoff::GetStackSlot(arg.offset()));
-    }
-    Poke(src, arg_offset);
+    liftoff::StoreToMemory(this, MemOperand{sp, arg_offset}, arg);
     arg_offset += value_kind_size(arg.kind());
   }
   DCHECK_LE(arg_offset, stack_bytes);
@@ -3541,20 +3560,26 @@ void LiftoffAssembler::CallCWithStackBuffer(
   Drop(total_size, 1);
 }
 
-void LiftoffAssembler::CallC(const std::initializer_list<VarState> args,
+void LiftoffAssembler::CallC(const std::initializer_list<VarState> args_list,
                              ExternalReference ext_ref) {
-  constexpr Register kArgRegs[] = {arg_reg_1, arg_reg_2, arg_reg_3, arg_reg_4};
-  DCHECK_LE(args.size(), arraysize(kArgRegs));
-  const Register* next_arg_reg = kArgRegs;
+  const int num_args = static_cast<int>(args_list.size());
+  const VarState* const args = args_list.begin();
+
+  // Note: If we ever need more than eight arguments we would need to load the
+  // stack arguments to registers (via LoadToRegister) in pairs of two, then use
+  // Stp with MemOperand{sp, -2 * kSystemPointerSize, PreIndex} to push them to
+  // the stack.
+
+  // Execute the parallel register move for register parameters.
+  DCHECK_GE(arraysize(kCArgRegs), num_args);
   ParallelMove parallel_move{this};
-  for (const VarState& arg : args) {
-    parallel_move.LoadIntoRegister(LiftoffRegister{*next_arg_reg}, arg);
-    ++next_arg_reg;
+  for (int reg_arg = 0; reg_arg < num_args; ++reg_arg) {
+    parallel_move.LoadIntoRegister(LiftoffRegister{kCArgRegs[reg_arg]},
+                                   args[reg_arg]);
   }
   parallel_move.Execute();
 
   // Now call the C function.
-  int num_args = static_cast<int>(args.size());
   CallCFunction(ext_ref, num_args);
 }
 

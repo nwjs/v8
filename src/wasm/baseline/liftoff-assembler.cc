@@ -347,7 +347,11 @@ int LiftoffAssembler::GetTotalFrameSlotCountForGC() const {
 
 namespace {
 
-AssemblerOptions DefaultLiftoffOptions() { return AssemblerOptions{}; }
+AssemblerOptions DefaultLiftoffOptions() {
+  AssemblerOptions options = AssemblerOptions{};
+  options.is_wasm = true;
+  return options;
+}
 
 }  // namespace
 
@@ -704,10 +708,9 @@ void LiftoffAssembler::ClearRegister(
     // at the beginning of an instruction when values don't have to be in
     // specific registers yet. Therefore the instance should never be one of the
     // {possible_uses}.
-    for (Register* use : possible_uses) {
-      USE(use);
-      DCHECK_NE(reg, *use);
-    }
+#ifdef DEBUG
+    for (Register* use : possible_uses) DCHECK_NE(reg, *use);
+#endif
     return;
   } else if (reg == cache_state()->cached_mem_start) {
     cache_state()->ClearCachedMemStartRegister();

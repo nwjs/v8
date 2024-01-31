@@ -9,7 +9,6 @@
 #include "src/wasm/baseline/liftoff-assembler.h"
 #include "src/wasm/baseline/riscv/liftoff-assembler-riscv-inl.h"
 #include "src/wasm/wasm-objects.h"
-
 namespace v8::internal::wasm {
 
 namespace liftoff {
@@ -106,6 +105,15 @@ inline void Load(LiftoffAssembler* assm, LiftoffRegister dst, Register base,
     case kF64:
       assm->LoadDouble(dst.fp(), src);
       break;
+    case kS128:{
+      assm->VU.set(kScratchReg, E8, m1);
+      Register src_reg = src.offset() == 0 ? src.rm() : kScratchReg;
+      if (src.offset() != 0) {
+        assm->AddWord(src_reg, src.rm(), src.offset());
+      }
+      assm->vl(dst.fp().toV(), src_reg, 0, E8);
+      break;
+    }
     default:
       UNREACHABLE();
   }
@@ -133,6 +141,15 @@ inline void Store(LiftoffAssembler* assm, Register base, int32_t offset,
     case kF64:
       assm->StoreDouble(src.fp(), dst);
       break;
+    case kS128:{
+      assm->VU.set(kScratchReg, E8, m1);
+      Register dst_reg = dst.offset() == 0 ? dst.rm() : kScratchReg;
+      if (dst.offset() != 0) {
+        assm->AddWord(kScratchReg, dst.rm(), dst.offset());
+      }
+      assm->vs(src.fp().toV(), dst_reg, 0, VSew::E8);
+      break;
+    }
     default:
       UNREACHABLE();
   }
@@ -158,6 +175,12 @@ inline void push(LiftoffAssembler* assm, LiftoffRegister reg, ValueKind kind) {
       assm->addi(sp, sp, -kDoubleSize);
       assm->StoreDouble(reg.fp(), MemOperand(sp, 0));
       break;
+    case kS128:{
+      assm->VU.set(kScratchReg, E8, m1);
+      assm->addi(sp, sp, -kSystemPointerSize * 4);
+      assm->vs(reg.fp().toV(), sp, 0, VSew::E8);
+      break;
+    }
     default:
       UNREACHABLE();
   }
@@ -421,16 +444,17 @@ inline void AtomicBinop64(LiftoffAssembler* lasm, Register dst_addr,
                           Register offset_reg, uintptr_t offset_imm,
                           LiftoffRegister value, LiftoffRegister result,
                           StoreType type, Binop op) {
+  ASM_CODE_COMMENT(lasm);
   FrameScope scope(lasm, StackFrame::MANUAL);
-  RegList c_params = {arg_reg_1, arg_reg_2, arg_reg_3};
+  RegList c_params = {kCArgRegs[0], kCArgRegs[1], kCArgRegs[2]};
   RegList result_list = {result.low_gp(), result.high_gp()};
-
   // Result registers does not need to be pushed.
   __ MultiPush(c_params - result_list);
   liftoff::CalculateActualAddress(lasm, dst_addr, offset_reg, offset_imm,
-                                  arg_reg_1);
-  __ Mv(arg_reg_2, value.low_gp());
-  __ Mv(arg_reg_3, value.high_gp());
+                                  kScratchReg);
+  __ Mv(kCArgRegs[1], value.low_gp());
+  __ Mv(kCArgRegs[2], value.high_gp());
+  __ Mv(kCArgRegs[0], kScratchReg);
   __ MultiPush(kJSCallerSaved - c_params - result_list);
   __ PrepareCallCFunction(3, 0, kScratchReg);
   ExternalReference extern_func_ref;
@@ -865,15 +889,16 @@ void LiftoffAssembler::AtomicCompareExchange(
     // NOTE:
     // a0~a4 are caller-saved registers and also used
     // to pass parameters for C functions.
-    RegList c_params = {arg_reg_1, arg_reg_2, arg_reg_3, arg_reg_4, a4};
+    RegList c_params = {kCArgRegs[0], kCArgRegs[1], kCArgRegs[2], kCArgRegs[3],
+                        a4};
     RegList result_list = {result.low_gp(), result.high_gp()};
     MultiPush(c_params - result_list);
 
-    Mv(a0, actual_addr);
     Mv(a1, expected.low_gp());
     Mv(a2, expected.high_gp());
     Mv(a3, new_value.low_gp());
     Mv(a4, new_value.high_gp());
+    Mv(a0, actual_addr);
 
     MultiPush(kJSCallerSaved - c_params - result_list);
     PrepareCallCFunction(5, 0, kScratchReg);
@@ -2137,25 +2162,51 @@ void LiftoffAssembler::CallCWithStackBuffer(
 
 void LiftoffAssembler::CallC(const std::initializer_list<VarState> args,
                              ExternalReference ext_ref) {
-  constexpr Register kArgRegs[] = {arg_reg_1, arg_reg_2, arg_reg_3, arg_reg_4};
-  const Register* next_arg_reg = kArgRegs;
+  // First, prepare the stack for the C call.
+  int num_args = static_cast<int>(args.size());
+  PrepareCallCFunction(num_args, kScratchReg);
+  // Then execute the parallel register move and also move values to parameter
+  // stack slots.
+  int reg_args = 0;
+  int stack_args = 0;
   ParallelMove parallel_move{this};
   for (const VarState& arg : args) {
-    DCHECK_GT(std::end(kArgRegs), next_arg_reg);
-    Register dst_lo = *next_arg_reg++;
-    if (arg.kind() == kI64) {
-      DCHECK_GT(std::end(kArgRegs), next_arg_reg);
-      Register dst_hi = *next_arg_reg++;
-      parallel_move.LoadIntoRegister(LiftoffRegister::ForPair(dst_lo, dst_hi),
-                                     arg);
+    if (needs_gp_reg_pair(arg.kind())) {
+      // All i64 arguments (currently) fully fit in the register parameters.
+      DCHECK_LE(reg_args + 2, arraysize(kCArgRegs));
+      parallel_move.LoadIntoRegister(
+          LiftoffRegister::ForPair(kCArgRegs[reg_args],
+                                   kCArgRegs[reg_args + 1]),
+          arg);
+      reg_args += 2;
+      continue;
+    }
+    if (reg_args < int{arraysize(kCArgRegs)}) {
+      parallel_move.LoadIntoRegister(LiftoffRegister{kCArgRegs[reg_args]}, arg);
+      ++reg_args;
+      continue;
+    }
+    MemOperand dst{sp, stack_args * kSystemPointerSize};
+    ++stack_args;
+    if (arg.is_reg()) {
+      liftoff::Store(this, dst.rm(), dst.offset(), arg.reg(), arg.kind());
+      continue;
+    }
+    UseScratchRegisterScope temps(this);
+    Register scratch = temps.Acquire();
+    if (arg.is_const()) {
+      DCHECK_EQ(kI32, arg.kind());
+      li(scratch, Operand(arg.i32_const()));
+      Sw(scratch, dst);
     } else {
-      parallel_move.LoadIntoRegister(LiftoffRegister{dst_lo}, arg);
+      // Stack to stack move.
+      MemOperand src = liftoff::GetStackSlot(arg.offset());
+      Lw(scratch, src);
+      Sw(scratch, dst);
     }
   }
   parallel_move.Execute();
-
   // Now call the C function.
-  int num_args = static_cast<int>(args.size());
   PrepareCallCFunction(num_args, kScratchReg);
   CallCFunction(ext_ref, num_args);
 }

@@ -7,11 +7,12 @@
 
 #include "src/base/logging.h"
 #include "src/compiler/turboshaft/assembler.h"
+#include "src/compiler/turboshaft/copying-phase.h"
 #include "src/compiler/turboshaft/index.h"
 #include "src/compiler/turboshaft/loop-finder.h"
 #include "src/compiler/turboshaft/machine-optimization-reducer.h"
 #include "src/compiler/turboshaft/operations.h"
-#include "src/compiler/turboshaft/optimization-phase.h"
+#include "src/compiler/turboshaft/phase.h"
 
 namespace v8::internal::compiler::turboshaft {
 
@@ -100,15 +101,14 @@ class LoopUnrollingAnalyzer {
   //    for (let i = 0; i < 4; i++) { ... }
   //
   // where `i++` could alternatively be pretty much any WordBinopOp or
-  // OverflowCheckedBinopOp, and `i < 4` could be any ComparisonOp or EqualOp.
+  // OverflowCheckedBinopOp, and `i < 4` could be any ComparisonOp.
   // Such loops, if small enough, could be fully unrolled.
   //
   // Loops that don't have statically-known bounds could still be partially
   // unrolled if they are small enough.
  public:
   LoopUnrollingAnalyzer(Zone* phase_zone, Graph* input_graph)
-      : phase_zone_(phase_zone),
-        input_graph_(input_graph),
+      : input_graph_(input_graph),
         matcher_(*input_graph),
         loop_finder_(phase_zone, input_graph),
         loop_iteration_count_(phase_zone),
@@ -143,12 +143,9 @@ class LoopUnrollingAnalyzer {
     return it->second;
   }
 
-  struct BlockCmp {
-    bool operator()(Block* a, Block* b) const {
-      return a->index().id() < b->index().id();
-    }
-  };
-  ZoneSet<Block*, BlockCmp> GetLoopBody(Block* loop_header);
+  ZoneSet<Block*, LoopFinder::BlockCmp> GetLoopBody(Block* loop_header) {
+    return loop_finder_.GetLoopBody(loop_header);
+  }
 
   Block* GetLoopHeader(Block* block) {
     return loop_finder_.GetLoopHeader(block);
@@ -168,7 +165,6 @@ class LoopUnrollingAnalyzer {
   bool CanFullyUnrollLoop(const LoopFinder::LoopInfo& info,
                           int* iter_count) const;
 
-  Zone* phase_zone_;
   Graph* input_graph_;
   OperationMatcher matcher_;
   LoopFinder loop_finder_;
@@ -183,11 +179,19 @@ class LoopUnrollingAnalyzer {
 };
 
 template <class Next>
+class LoopPeelingReducer;
+
+template <class Next>
 class LoopUnrollingReducer : public Next {
  public:
   TURBOSHAFT_REDUCER_BOILERPLATE()
 
 #if defined(__clang__)
+  // LoopUnrolling and LoopPeeling shouldn't be performed in the same phase, see
+  // the comment in pipeline.cc where LoopUnrolling is triggered.
+  static_assert(!reducer_list_contains<ReducerList, LoopPeelingReducer>::value);
+
+  // LoopUnrolling duplicates loop blocks, which requires a VariableReducer.
   static_assert(reducer_list_contains<ReducerList, VariableReducer>::value);
 #endif
 
@@ -200,7 +204,7 @@ class LoopUnrollingReducer : public Next {
 
     Block* dst = gto.destination;
     if (unrolling_ == UnrollingStatus::kNotUnrolling && dst->IsLoop() &&
-        __ current_input_block() != dst->LastPredecessor()) {
+        !gto.is_backedge) {
       // We trigger unrolling when reaching the GotoOp that jumps to the loop
       // header (note that loop headers only have 2 predecessor, including the
       // backedge), and that isn't the backedge.
@@ -222,11 +226,14 @@ class LoopUnrollingReducer : public Next {
       // PartiallyUnrollLoop will emit a Goto to the next unrolled iteration.
       return OpIndex::Invalid();
     }
-
     goto no_change;
   }
 
   OpIndex REDUCE_INPUT_GRAPH(Branch)(OpIndex ig_idx, const BranchOp& branch) {
+    LABEL_BLOCK(no_change) {
+      return Next::ReduceInputGraphBranch(ig_idx, branch);
+    }
+
     if (unrolling_ == UnrollingStatus::kRemoveLoop) {
       // We know that the branch of the final inlined header of a fully unrolled
       // loop never actually goes to the loop, so we can replace it by a Goto
@@ -252,7 +259,7 @@ class LoopUnrollingReducer : public Next {
         DCHECK(is_true_in_loop && is_false_in_loop);
       }
     }
-    return Next::ReduceInputGraphBranch(ig_idx, branch);
+    goto no_change;
   }
 
   OpIndex REDUCE_INPUT_GRAPH(Call)(OpIndex ig_idx, const CallOp& call) {

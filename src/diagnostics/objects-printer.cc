@@ -109,7 +109,9 @@ void PrintDictionaryContents(std::ostream& os, Tagged<T> dict) {
 void HeapObject::PrintHeader(std::ostream& os, const char* id) {
   PrintHeapObjectHeaderWithoutMap(*this, os, id);
   PtrComprCageBase cage_base = GetPtrComprCageBase();
-  if (!IsMap(*this, cage_base)) os << "\n - map: " << Brief(map(cage_base));
+  if (!SafeEquals(GetReadOnlyRoots().meta_map())) {
+    os << "\n - map: " << Brief(map(cage_base));
+  }
 }
 
 void HeapObject::HeapObjectPrint(std::ostream& os) {
@@ -210,6 +212,9 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {
     case CODE_TYPE:
       Code::cast(*this)->CodePrint(os);
       break;
+    case CODE_WRAPPER_TYPE:
+      CodeWrapper::cast(*this)->CodeWrapperPrint(os);
+      break;
     case JS_SET_KEY_VALUE_ITERATOR_TYPE:
     case JS_SET_VALUE_ITERATOR_TYPE:
       JSSetIterator::cast(*this)->JSSetIteratorPrint(os);
@@ -291,10 +296,22 @@ void ByteArray::ByteArrayPrint(std::ostream& os) {
      << "\n - begin: " << static_cast<void*>(begin()) << "\n";
 }
 
+void TrustedByteArray::TrustedByteArrayPrint(std::ostream& os) {
+  PrintHeader(os, "TrustedByteArray");
+  os << "\n - length: " << length()
+     << "\n - begin: " << static_cast<void*>(begin()) << "\n";
+}
+
 void BytecodeArray::BytecodeArrayPrint(std::ostream& os) {
   PrintHeader(os, "BytecodeArray");
   os << "\n";
   Disassemble(os);
+}
+
+void BytecodeWrapper::BytecodeWrapperPrint(std::ostream& os) {
+  PrintHeader(os, "BytecodeWrapper");
+  Isolate* isolate = GetIsolateForSandbox(*this);
+  os << "\n    bytecode: " << Brief(bytecode(isolate));
 }
 
 void FreeSpace::FreeSpacePrint(std::ostream& os) {
@@ -770,7 +787,8 @@ void DescriptorArray::DescriptorArrayPrint(std::ostream& os) {
 }
 
 namespace {
-void PrintFixedArrayWithHeader(std::ostream& os, Tagged<FixedArray> array,
+template <typename T>
+void PrintFixedArrayWithHeader(std::ostream& os, Tagged<T> array,
                                const char* type) {
   array->PrintHeader(os, type);
   os << "\n - length: " << array->length();
@@ -846,7 +864,11 @@ void EmbedderDataArray::EmbedderDataArrayPrint(std::ostream& os) {
 }
 
 void FixedArray::FixedArrayPrint(std::ostream& os) {
-  PrintFixedArrayWithHeader(os, *this, "FixedArray");
+  PrintFixedArrayWithHeader(os, Tagged{*this}, "FixedArray");
+}
+
+void TrustedFixedArray::TrustedFixedArrayPrint(std::ostream& os) {
+  PrintFixedArrayWithHeader(os, Tagged{*this}, "TrustedFixedArray");
 }
 
 void ArrayList::ArrayListPrint(std::ostream& os) {
@@ -923,9 +945,7 @@ const char* SideEffectType2String(SideEffectType type) {
 
 void AccessorInfo::AccessorInfoPrint(std::ostream& os) {
   TorqueGeneratedAccessorInfo<AccessorInfo, HeapObject>::AccessorInfoPrint(os);
-  os << " - all_can_read: " << all_can_read();
-  os << "\n - all_can_write: " << all_can_write();
-  os << "\n - is_special_data_property: " << is_special_data_property();
+  os << " - is_special_data_property: " << is_special_data_property();
   os << "\n - is_sloppy: " << is_sloppy();
   os << "\n - replace_on_access: " << replace_on_access();
   os << "\n - getter_side_effect_type: "
@@ -1489,7 +1509,7 @@ void FeedbackNexus::Print(std::ostream& os) {
 }
 
 void Oddball::OddballPrint(std::ostream& os) {
-  PrintHeapObjectHeaderWithoutMap(*this, os, "Oddball");
+  PrintHeapObjectHeaderWithoutMap(Tagged<HeapObject>(this), os, "Oddball");
   os << ": ";
   Tagged<String> s = to_string();
   os << s->PrefixForDebugPrint();
@@ -1857,7 +1877,7 @@ void JSFunction::JSFunctionPrint(std::ostream& os) {
   os << "\n - name: " << Brief(shared()->Name());
 
   // Print Builtin name for builtin functions
-  Builtin builtin = code()->builtin_id();
+  Builtin builtin = code(isolate)->builtin_id();
   if (Builtins::IsBuiltinId(builtin)) {
     os << "\n - builtin: " << isolate->builtins()->name(builtin);
   }
@@ -1866,10 +1886,10 @@ void JSFunction::JSFunctionPrint(std::ostream& os) {
      << shared()->internal_formal_parameter_count_without_receiver();
   os << "\n - kind: " << shared()->kind();
   os << "\n - context: " << Brief(context());
-  os << "\n - code: " << Brief(code());
-  if (code()->kind() == CodeKind::FOR_TESTING) {
+  os << "\n - code: " << Brief(code(isolate));
+  if (code(isolate)->kind() == CodeKind::FOR_TESTING) {
     os << "\n - FOR_TESTING";
-  } else if (ActiveTierIsIgnition()) {
+  } else if (ActiveTierIsIgnition(isolate)) {
     os << "\n - interpreted";
     if (shared()->HasBytecodeArray()) {
       os << "\n - bytecode: " << shared()->GetBytecodeArray(isolate);
@@ -2015,7 +2035,7 @@ void Code::CodePrint(std::ostream& os, const char* name, Address current_pc) {
     os << "\n - builtin_id: " << Builtins::name(builtin_id());
   }
   os << "\n - deoptimization_data_or_interpreter_data: "
-     << Brief(raw_deoptimization_data_or_interpreter_data());
+     << Brief(raw_deoptimization_data_or_interpreter_data(Isolate::Current()));
   os << "\n - position_table: " << Brief(raw_position_table());
   os << "\n - instruction_stream: " << Brief(raw_instruction_stream());
   os << "\n - instruction_start: "
@@ -2051,6 +2071,11 @@ void Code::CodePrint(std::ostream& os, const char* name, Address current_pc) {
   os << "\n--- Disassembly: ---\n";
   Disassemble(name, os, Isolate::Current(), current_pc);
 #endif
+}
+
+void CodeWrapper::CodeWrapperPrint(std::ostream& os) {
+  PrintHeader(os, "CodeWrapper");
+  os << "\n    code: " << Brief(code(Isolate::Current()));
 }
 
 void Foreign::ForeignPrint(std::ostream& os) {
@@ -2873,6 +2898,16 @@ void HeapNumber::HeapNumberPrint(std::ostream& os) {
 
 #endif  // OBJECT_PRINT
 
+void HeapObject::Print() { Print(*this); }
+
+// static
+void HeapObject::Print(Tagged<Object> obj) { v8::internal::Print(obj); }
+
+// static
+void HeapObject::Print(Tagged<Object> obj, std::ostream& os) {
+  v8::internal::Print(obj, os);
+}
+
 void HeapObject::HeapObjectShortPrint(std::ostream& os) {
   PtrComprCageBase cage_base = GetPtrComprCageBase();
   os << AsHex::Address(this->ptr()) << " ";
@@ -2893,18 +2928,23 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
   }
   switch (map(cage_base)->instance_type()) {
     case MAP_TYPE: {
-      os << "<Map";
-      Tagged<Map> mapInstance = Map::cast(*this);
-      if (mapInstance->instance_size() != kVariableSizeSentinel) {
-        os << "[" << mapInstance->instance_size() << "]";
-      }
-      os << "(";
-      if (IsJSObjectMap(mapInstance)) {
-        os << ElementsKindToString(mapInstance->elements_kind());
+      Tagged<Map> map = Map::cast(*this);
+      if (map->instance_type() == MAP_TYPE) {
+        // This is one of the meta maps, print only relevant fields.
+        os << "<MetaMap (" << Brief(map->native_context_or_null()) << ")>";
       } else {
-        os << mapInstance->instance_type();
+        os << "<Map";
+        if (map->instance_size() != kVariableSizeSentinel) {
+          os << "[" << map->instance_size() << "]";
+        }
+        os << "(";
+        if (IsJSObjectMap(map)) {
+          os << ElementsKindToString(map->elements_kind());
+        } else {
+          os << map->instance_type();
+        }
+        os << ")>";
       }
-      os << ")>";
     } break;
     case AWAIT_CONTEXT_TYPE: {
       os << "<AwaitContext generator= ";
@@ -3287,10 +3327,11 @@ void Map::PrintMapDetails(std::ostream& os) {
 }
 
 void Map::MapPrint(std::ostream& os) {
+  bool is_meta_map = instance_type() == MAP_TYPE;
 #ifdef OBJECT_PRINT
-  PrintHeader(os, "Map");
+  PrintHeader(os, is_meta_map ? "MetaMap" : "Map");
 #else
-  os << "Map=" << reinterpret_cast<void*>(ptr());
+  os << (is_meta_map ? "MetaMap=" : "Map=") << reinterpret_cast<void*>(ptr());
 #endif
   os << "\n - type: " << instance_type();
   os << "\n - instance size: ";
@@ -3299,6 +3340,13 @@ void Map::MapPrint(std::ostream& os) {
   } else {
     os << instance_size();
   }
+  if (is_meta_map) {
+    // This is one of the meta maps, print only relevant fields.
+    os << "\n - native_context: " << Brief(native_context_or_null());
+    os << "\n";
+    return;
+  }
+
   if (IsJSObjectMap(*this)) {
     os << "\n - inobject properties: " << GetInObjectProperties();
     os << "\n - unused property fields: " << UnusedPropertyFields();
@@ -3615,8 +3663,8 @@ V8_EXPORT_PRIVATE extern void _v8_internal_Print_Code(void* object) {
 
 #if V8_ENABLE_WEBASSEMBLY
   {
-    i::wasm::WasmCodeRefScope scope;
-    if (auto* wasm_code = i::wasm::GetWasmCodeManager()->LookupCode(address)) {
+    if (auto* wasm_code =
+            i::wasm::GetWasmCodeManager()->LookupCode(isolate, address)) {
       i::StdoutStream os;
       wasm_code->Disassemble(nullptr, os, address);
       return;
@@ -3652,8 +3700,7 @@ V8_EXPORT_PRIVATE extern void _v8_internal_Print_OnlyCode(void* object,
 
 #if V8_ENABLE_WEBASSEMBLY
   {
-    i::wasm::WasmCodeRefScope scope;
-    if (i::wasm::GetWasmCodeManager()->LookupCode(address)) {
+    if (i::wasm::GetWasmCodeManager()->LookupCode(isolate, address)) {
       i::PrintF("Not supported on wasm code");
       return;
     }

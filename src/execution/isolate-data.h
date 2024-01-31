@@ -34,7 +34,8 @@ class Isolate;
   V(kUsesSharedHeapFlag, kUInt8Size, uses_shared_heap_flag)                   \
   V(kExecutionModeOffset, kUInt8Size, execution_mode)                         \
   V(kStackIsIterableOffset, kUInt8Size, stack_is_iterable)                    \
-  V(kTablesAlignmentPaddingOffset, 2, tables_alignment_padding)               \
+  V(kErrorMessageParam, kUInt8Size, error_message_param)                      \
+  V(kTablesAlignmentPaddingOffset, 1, tables_alignment_padding)               \
   /* Tier 0 tables (small but fast access). */                                \
   V(kBuiltinTier0EntryTableOffset,                                            \
     Builtins::kBuiltinTier0Count* kSystemPointerSize,                         \
@@ -55,8 +56,12 @@ class Isolate;
   V(kEmbedderDataOffset, Internals::kNumIsolateDataSlots* kSystemPointerSize, \
     embedder_data)                                                            \
   ISOLATE_DATA_FIELDS_POINTER_COMPRESSION(V)                                  \
+  ISOLATE_DATA_FIELDS_SANDBOX(V)                                              \
   V(kApiCallbackThunkArgumentOffset, kSystemPointerSize,                      \
     api_callback_thunk_argument)                                              \
+  V(kWasm64OOBOffset, kInt64Size, wasm64_oob_offset)                          \
+  V(kContinuationPreservedEmbedderDataOffset, kSystemPointerSize,             \
+    continuation_preserved_embedder_data)                                     \
   /* Full tables (arbitrary size, potentially slower access). */              \
   V(kRootsTableOffset, RootsTable::kEntriesCount* kSystemPointerSize,         \
     roots_table)                                                              \
@@ -72,12 +77,18 @@ class Isolate;
   V(kExternalPointerTableOffset, ExternalPointerTable::kSize, \
     external_pointer_table)                                   \
   V(kSharedExternalPointerTableOffset, kSystemPointerSize,    \
-    shared_external_pointer_table)                            \
-  V(kTrustedPointerTableOffset, TrustedPointerTable::kSize,   \
-    trusted_pointer_table)
+    shared_external_pointer_table)
 #else
 #define ISOLATE_DATA_FIELDS_POINTER_COMPRESSION(V)
 #endif  // V8_COMPRESS_POINTERS
+
+#ifdef V8_ENABLE_SANDBOX
+#define ISOLATE_DATA_FIELDS_SANDBOX(V)                      \
+  V(kTrustedPointerTableOffset, TrustedPointerTable::kSize, \
+    trusted_pointer_table)
+#else
+#define ISOLATE_DATA_FIELDS_SANDBOX(V)
+#endif  // V8_ENABLE_SANDBOX
 
 // This class contains a collection of data accessible from both C++ runtime
 // and compiled code (including builtins, interpreter bytecode handlers and
@@ -150,6 +161,12 @@ class IsolateData final {
   Address api_callback_thunk_argument() const {
     return api_callback_thunk_argument_;
   }
+  Tagged<Object> continuation_preserved_embedder_data() const {
+    return continuation_preserved_embedder_data_;
+  }
+  void set_continuation_preserved_embedder_data(Tagged<Object> data) {
+    continuation_preserved_embedder_data_ = data;
+  }
   const RootsTable& roots() const { return roots_table_; }
   ExternalReferenceTable* external_reference_table() {
     return &external_reference_table_;
@@ -171,6 +188,16 @@ class IsolateData final {
     Address start = reinterpret_cast<Address>(this);
     return (address - start) < sizeof(*this);
   }
+
+// Offset of a ThreadLocalTop member from {isolate_root()}.
+#define THREAD_LOCAL_TOP_MEMBER_OFFSET(Name)                              \
+  static uint32_t Name##_offset() {                                       \
+    return static_cast<uint32_t>(IsolateData::thread_local_top_offset() + \
+                                 OFFSET_OF(ThreadLocalTop, Name##_));     \
+  }
+
+  THREAD_LOCAL_TOP_MEMBER_OFFSET(is_on_central_stack_flag)
+#undef THREAD_LOCAL_TOP_MEMBER_OFFSET
 
  private:
   // Static layout definition.
@@ -223,6 +250,11 @@ class IsolateData final {
   // current stack. The only valid values are 0 or 1.
   uint8_t stack_is_iterable_ = 1;
 
+  // Field to pass value for error throwing builtins. Currently, it is used to
+  // pass the type of the `Dataview` operation to print out operation's name in
+  // case of an error.
+  uint8_t error_message_param_;
+
   // Ensure the following tables are kSystemPointerSize-byte aligned.
   static_assert(FIELD_SIZE(kTablesAlignmentPaddingOffset) > 0);
   uint8_t tables_alignment_padding_[FIELD_SIZE(kTablesAlignmentPaddingOffset)];
@@ -263,12 +295,22 @@ class IsolateData final {
 #ifdef V8_COMPRESS_POINTERS
   ExternalPointerTable external_pointer_table_;
   ExternalPointerTable* shared_external_pointer_table_;
+#endif  // V8_COMPRESS_POINTERS
+#ifdef V8_ENABLE_SANDBOX
   TrustedPointerTable trusted_pointer_table_;
-#endif
+#endif  // V8_ENABLE_SANDBOX
 
   // This is a storage for an additional argument for the Api callback thunk
   // functions, see InvokeAccessorGetterCallback and InvokeFunctionCallback.
   Address api_callback_thunk_argument_ = kNullAddress;
+
+  // An offset that always generates an invalid address when added to any
+  // start address of a Wasm memory. This is used to force an out-of-bounds
+  // access on Wasm memory64.
+  int64_t wasm64_oob_offset_ = 0xf000'0000'0000'0000;
+
+  // This is data that should be preserved on newly created continuations.
+  Tagged<Object> continuation_preserved_embedder_data_ = Smi::zero();
 
   RootsTable roots_table_;
   ExternalReferenceTable external_reference_table_;

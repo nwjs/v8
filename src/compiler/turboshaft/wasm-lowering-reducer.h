@@ -13,6 +13,7 @@
 #include "src/compiler/turboshaft/assembler.h"
 #include "src/compiler/turboshaft/index.h"
 #include "src/compiler/turboshaft/operations.h"
+#include "src/compiler/turboshaft/phase.h"
 #include "src/compiler/turboshaft/wasm-assembler-helpers.h"
 #include "src/wasm/wasm-engine.h"
 #include "src/wasm/wasm-module.h"
@@ -46,6 +47,7 @@ class WasmLoweringReducer : public Next {
         wasm::GetWasmEngine()->compressed_wasm_null_value_or_zero();
     OpIndex null_value =
         !wasm::IsSubtypeOf(type, wasm::kWasmExternRef, module_) &&
+                !wasm::IsSubtypeOf(type, wasm::kWasmExnRef, module_) &&
                 static_null != 0
             ? __ UintPtrConstant(static_null)
             : Null(type);
@@ -63,7 +65,8 @@ class WasmLoweringReducer : public Next {
         // (3) the object might be a JS object.
         if (null_check_strategy_ == NullCheckStrategy::kExplicit ||
             wasm::IsSubtypeOf(wasm::kWasmI31Ref.AsNonNull(), type, module_) ||
-            wasm::IsSubtypeOf(type, wasm::kWasmExternRef, module_)) {
+            wasm::IsSubtypeOf(type, wasm::kWasmExternRef, module_) ||
+            wasm::IsSubtypeOf(type, wasm::kWasmExnRef, module_)) {
           __ TrapIf(__ IsNull(object, type), OpIndex::Invalid(), trap_id);
         } else {
           // Otherwise, load the word after the map word.
@@ -80,11 +83,9 @@ class WasmLoweringReducer : public Next {
     return object;
   }
 
-  OpIndex REDUCE(RttCanon)(OpIndex instance, uint32_t type_index) {
-    OpIndex maps_list = LOAD_INSTANCE_FIELD(
-        instance, ManagedObjectMaps, MemoryRepresentation::TaggedPointer());
+  OpIndex REDUCE(RttCanon)(OpIndex rtts, uint32_t type_index) {
     int map_offset = FixedArray::kHeaderSize + type_index * kTaggedSize;
-    return __ Load(maps_list, LoadOp::Kind::TaggedBase(),
+    return __ Load(rtts, LoadOp::Kind::TaggedBase().Immutable(),
                    MemoryRepresentation::AnyTagged(), map_offset);
   }
 
@@ -902,9 +903,11 @@ class WasmLoweringReducer : public Next {
 
   OpIndex Null(wasm::ValueType type) {
     OpIndex roots = __ LoadRootRegister();
-    RootIndex index = wasm::IsSubtypeOf(type, wasm::kWasmExternRef, module_)
-                          ? RootIndex::kNullValue
-                          : RootIndex::kWasmNull;
+    RootIndex index =
+        wasm::IsSubtypeOf(type, wasm::kWasmExternRef, module_) ||
+                wasm::IsSubtypeOf(type, wasm::kWasmExnRef, module_)
+            ? RootIndex::kNullValue
+            : RootIndex::kWasmNull;
     return __ Load(roots, LoadOp::Kind::RawAligned().Immutable(),
                    MemoryRepresentation::PointerSized(),
                    IsolateData::root_slot_offset(index));

@@ -62,6 +62,47 @@ inline MemOperand GetStackSlot(uint32_t offset) {
 
 inline MemOperand GetInstanceOperand() { return GetStackSlot(kInstanceOffset); }
 
+inline void StoreToMemory(LiftoffAssembler* assm, MemOperand dst,
+                          const LiftoffAssembler::VarState& src,
+                          Register scratch1, Register scratch2) {
+  if (src.is_reg()) {
+    switch (src.kind()) {
+      case kI32:
+        assm->StoreU32(src.reg().gp(), dst, scratch1);
+        break;
+      case kI64:
+        assm->StoreU64(src.reg().gp(), dst, scratch1);
+        break;
+      case kF32:
+        assm->StoreF32(src.reg().fp(), dst, scratch1);
+        break;
+      case kF64:
+        assm->StoreF64(src.reg().fp(), dst, scratch1);
+        break;
+      case kS128:
+        assm->StoreSimd128(src.reg().fp().toSimd(), dst, scratch1);
+        break;
+      default:
+        UNREACHABLE();
+    }
+  } else if (src.is_const()) {
+    if (src.kind() == kI32) {
+      assm->mov(scratch2, Operand(src.i32_const()));
+      assm->StoreU32(scratch2, dst, scratch1);
+    } else {
+      assm->mov(scratch2, Operand(static_cast<int64_t>(src.i32_const())));
+      assm->StoreU64(scratch2, dst, scratch1);
+    }
+  } else if (value_kind_size(src.kind()) == 4) {
+    assm->LoadU32(scratch2, liftoff::GetStackSlot(src.offset()), scratch1);
+    assm->StoreU32(scratch2, dst, scratch1);
+  } else {
+    DCHECK_EQ(8, value_kind_size(src.kind()));
+    assm->LoadU64(scratch2, liftoff::GetStackSlot(src.offset()), scratch1);
+    assm->StoreU64(scratch2, dst, scratch1);
+  }
+}
+
 }  // namespace liftoff
 
 int LiftoffAssembler::PrepareStackFrame() {
@@ -160,7 +201,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
   Label continuation;
   if (frame_size < v8_flags.stack_size * 1024) {
     Register stack_limit = ip;
-    LoadStackLimit(stack_limit, StackLimitKind::kRealStackLimit);
+    LoadStackLimit(stack_limit, StackLimitKind::kRealStackLimit, r0);
     AddS64(stack_limit, stack_limit, Operand(frame_size), r0);
     CmpU64(sp, stack_limit);
     bge(&continuation);
@@ -2502,9 +2543,14 @@ void LiftoffAssembler::emit_i32x4_uconvert_i16x8_high(LiftoffRegister dst,
                          kScratchSimd128Reg);
 }
 
+void LiftoffAssembler::set_trap_on_oob_mem64(Register index, int oob_shift,
+                                             MemOperand oob_offset) {
+  UNREACHABLE();
+}
+
 void LiftoffAssembler::StackCheck(Label* ool_code) {
   Register limit_address = ip;
-  LoadStackLimit(limit_address, StackLimitKind::kInterruptStackLimit);
+  LoadStackLimit(limit_address, StackLimitKind::kInterruptStackLimit, r0);
   CmpU64(sp, limit_address);
   ble(ool_code);
 }
@@ -2571,44 +2617,7 @@ void LiftoffAssembler::CallCWithStackBuffer(
   int arg_offset = 0;
   for (const VarState& arg : args) {
     MemOperand dst{sp, arg_offset};
-    if (arg.is_reg()) {
-      switch (arg.kind()) {
-        case kI32:
-          StoreU32(arg.reg().gp(), MemOperand(sp, arg_offset), r0);
-          break;
-        case kI64:
-          StoreU64(arg.reg().gp(), MemOperand(sp, arg_offset), r0);
-          break;
-        case kF32:
-          StoreF32(arg.reg().fp(), MemOperand(sp, arg_offset), r0);
-          break;
-        case kF64:
-          StoreF64(arg.reg().fp(), MemOperand(sp, arg_offset), r0);
-          break;
-        case kS128:
-          StoreSimd128(arg.reg().fp().toSimd(), MemOperand(sp, arg_offset), r0);
-          break;
-        default:
-          UNREACHABLE();
-      }
-    } else if (arg.is_const()) {
-      if (arg.kind() == kI32) {
-        mov(ip, Operand(arg.i32_const()));
-        StoreU32(ip, dst, r0);
-      } else {
-        mov(ip, Operand(static_cast<int64_t>(arg.i32_const())));
-        StoreU64(ip, dst, r0);
-      }
-    } else if (value_kind_size(arg.kind()) == 4) {
-      MemOperand src = liftoff::GetStackSlot(arg.offset());
-      LoadU32(ip, src, r0);
-      StoreU32(ip, dst, r0);
-    } else {
-      DCHECK_EQ(8, value_kind_size(arg.kind()));
-      MemOperand src = liftoff::GetStackSlot(arg.offset());
-      LoadU64(ip, src, r0);
-      StoreU64(ip, dst, r0);
-    }
+    liftoff::StoreToMemory(this, dst, arg, r0, ip);
     arg_offset += value_kind_size(arg.kind());
   }
   DCHECK_LE(arg_offset, stack_bytes);
@@ -2661,19 +2670,34 @@ void LiftoffAssembler::CallCWithStackBuffer(
 
 void LiftoffAssembler::CallC(const std::initializer_list<VarState> args,
                              ExternalReference ext_ref) {
-  constexpr Register kArgRegs[] = {arg_reg_1, arg_reg_2, arg_reg_3, arg_reg_4};
-  DCHECK_LE(args.size(), arraysize(kArgRegs));
-  const Register* next_arg_reg = kArgRegs;
+  // First, prepare the stack for the C call.
+  int num_args = static_cast<int>(args.size());
+  PrepareCallCFunction(num_args, r0);
+
+  // Then execute the parallel register move and also move values to parameter
+  // stack slots.
+  int reg_args = 0;
+  int stack_args = 0;
   ParallelMove parallel_move{this};
   for (const VarState& arg : args) {
-    parallel_move.LoadIntoRegister(LiftoffRegister{*next_arg_reg}, arg);
-    ++next_arg_reg;
+    if (reg_args < int{arraysize(kCArgRegs)}) {
+      parallel_move.LoadIntoRegister(LiftoffRegister{kCArgRegs[reg_args]}, arg);
+      ++reg_args;
+    } else {
+      int bias = 0;
+      // On BE machines values with less than 8 bytes are right justified.
+      // bias here is relative to the stack pointer.
+      if (arg.kind() == kI32 || arg.kind() == kF32) bias = -stack_bias;
+      int offset =
+          (kStackFrameExtraParamSlot + stack_args) * kSystemPointerSize;
+      MemOperand dst{sp, offset + bias};
+      liftoff::StoreToMemory(this, dst, arg, r0, ip);
+      ++stack_args;
+    }
   }
   parallel_move.Execute();
 
   // Now call the C function.
-  int num_args = static_cast<int>(args.size());
-  PrepareCallCFunction(num_args, r0);
   CallCFunction(ext_ref, num_args);
 }
 

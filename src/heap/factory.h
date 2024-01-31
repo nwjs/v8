@@ -459,16 +459,50 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   Handle<AllocationSite> NewAllocationSite(bool with_weak_next);
 
   // Allocates and initializes a new Map.
-  Handle<Map> NewMap(InstanceType type, int instance_size,
+  Handle<Map> NewMap(Handle<HeapObject> meta_map_holder, InstanceType type,
+                     int instance_size,
                      ElementsKind elements_kind = TERMINAL_FAST_ELEMENTS_KIND,
                      int inobject_properties = 0,
                      AllocationType allocation_type = AllocationType::kMap);
+
+  Handle<Map> NewMapWithMetaMap(
+      Handle<Map> meta_map, InstanceType type, int instance_size,
+      ElementsKind elements_kind = TERMINAL_FAST_ELEMENTS_KIND,
+      int inobject_properties = 0,
+      AllocationType allocation_type = AllocationType::kMap);
+
+  Handle<Map> NewContextfulMap(
+      Handle<JSReceiver> creation_context_holder, InstanceType type,
+      int instance_size,
+      ElementsKind elements_kind = TERMINAL_FAST_ELEMENTS_KIND,
+      int inobject_properties = 0,
+      AllocationType allocation_type = AllocationType::kMap);
+
+  Handle<Map> NewContextfulMap(
+      Handle<NativeContext> native_context, InstanceType type,
+      int instance_size,
+      ElementsKind elements_kind = TERMINAL_FAST_ELEMENTS_KIND,
+      int inobject_properties = 0,
+      AllocationType allocation_type = AllocationType::kMap);
+
+  Handle<Map> NewContextfulMapForCurrentContext(
+      InstanceType type, int instance_size,
+      ElementsKind elements_kind = TERMINAL_FAST_ELEMENTS_KIND,
+      int inobject_properties = 0,
+      AllocationType allocation_type = AllocationType::kMap);
+
+  Handle<Map> NewContextlessMap(
+      InstanceType type, int instance_size,
+      ElementsKind elements_kind = TERMINAL_FAST_ELEMENTS_KIND,
+      int inobject_properties = 0,
+      AllocationType allocation_type = AllocationType::kMap);
+
   // Initializes the fields of a newly created Map using roots from the
   // passed-in Heap. Exposed for tests and heap setup; other code should just
   // call NewMap which takes care of it.
   Tagged<Map> InitializeMap(Tagged<Map> map, InstanceType type,
                             int instance_size, ElementsKind elements_kind,
-                            int inobject_properties, Heap* roots);
+                            int inobject_properties, ReadOnlyRoots roots);
 
   // Allocate a block of memory of the given AllocationType (filled with a
   // filler). Used as a fall-back for generated code when the space is full.
@@ -747,7 +781,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   // Allocates a bound function.
   MaybeHandle<JSBoundFunction> NewJSBoundFunction(
       Handle<JSReceiver> target_function, Handle<Object> bound_this,
-      base::Vector<Handle<Object>> bound_args);
+      base::Vector<Handle<Object>> bound_args, Handle<HeapObject> prototype);
 
   // Allocates a Harmony proxy.
   Handle<JSProxy> NewJSProxy(Handle<JSReceiver> target,
@@ -849,6 +883,9 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
       MaybeHandle<String> name, Builtin builtin,
       FunctionKind kind = FunctionKind::kNormalFunction);
 
+  Handle<InterpreterData> NewInterpreterData(
+      Handle<BytecodeArray> bytecode_array, Handle<Code> code);
+
   static bool IsFunctionModeWithPrototype(FunctionMode function_mode) {
     return (function_mode & kWithPrototypeBits) != 0;
   }
@@ -922,7 +959,8 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   }
 
   Handle<JSSharedStruct> NewJSSharedStruct(
-      Handle<JSFunction> constructor, Handle<Object> maybe_elements_template);
+      Handle<JSFunction> constructor,
+      MaybeHandle<NumberDictionary> maybe_elements_template);
 
   Handle<JSSharedArray> NewJSSharedArray(Handle<JSFunction> constructor,
                                          int length);
@@ -1101,16 +1139,6 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
     return (Isolate*)this;  // NOLINT(readability/casting)
   }
 
-  // This is the real Isolate that will be used for allocating and accessing
-  // external pointer entries when the sandbox is enabled.
-  Isolate* isolate_for_sandbox() const {
-#ifdef V8_ENABLE_SANDBOX
-    return isolate();
-#else
-    return nullptr;
-#endif  // V8_ENABLE_SANDBOX
-  }
-
   V8_INLINE HeapAllocator* allocator() const;
 
   bool CanAllocateInReadOnlySpace();
@@ -1120,6 +1148,16 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   void ProcessNewScript(Handle<Script> shared,
                         ScriptEventType script_event_type);
   // ------
+
+  // MetaMapProviderFunc is supposed to be a function returning Tagged<Map>.
+  // For example,  std::function<Tagged<Map>()>.
+  template <typename MetaMapProviderFunc>
+  V8_INLINE Handle<Map> NewMapImpl(
+      MetaMapProviderFunc&& meta_map_provider, InstanceType type,
+      int instance_size,
+      ElementsKind elements_kind = TERMINAL_FAST_ELEMENTS_KIND,
+      int inobject_properties = 0,
+      AllocationType allocation_type = AllocationType::kMap);
 
   Tagged<HeapObject> AllocateRawWithAllocationSite(
       Handle<Map> map, AllocationType allocation,

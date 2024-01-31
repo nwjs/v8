@@ -59,6 +59,8 @@ const char* WellKnownImportName(WellKnownImport wki) {
       return "DataView.setUint16";
     case WellKnownImport::kDataViewSetUint32:
       return "DataView.setUint32";
+    case WellKnownImport::kDataViewByteLength:
+      return "DataView.byteLength";
 
       // String-related functions:
     case WellKnownImport::kDoubleToString:
@@ -69,6 +71,10 @@ const char* WellKnownImportName(WellKnownImport wki) {
       return "ParseFloat";
 
       // JS String Builtins:
+    case WellKnownImport::kStringCast:
+      return "String.cast";
+    case WellKnownImport::kStringTest:
+      return "String.test";
     case WellKnownImport::kStringCharCodeAt:
       return "String.charCodeAt";
     case WellKnownImport::kStringCodePointAt:
@@ -88,6 +94,7 @@ const char* WellKnownImportName(WellKnownImport wki) {
     case WellKnownImport::kStringFromWtf8Array:
       return "String.fromWtf8Array";
     case WellKnownImport::kStringIndexOf:
+    case WellKnownImport::kStringIndexOfImported:
       return "String.indexOf";
     case WellKnownImport::kStringLength:
       return "String.length";
@@ -96,6 +103,7 @@ const char* WellKnownImportName(WellKnownImport wki) {
     case WellKnownImport::kStringToLocaleLowerCaseStringref:
       return "String.toLocaleLowerCase";
     case WellKnownImport::kStringToLowerCaseStringref:
+    case WellKnownImport::kStringToLowerCaseImported:
       return "String.toLowerCase";
     case WellKnownImport::kStringToWtf16Array:
       return "String.toWtf16Array";

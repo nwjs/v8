@@ -252,6 +252,7 @@ bool Heap::CreateMutableHeapObjects() {
   return true;
 }
 
+// Allocates contextless map in read-only or map (old) space.
 AllocationResult Heap::AllocateMap(AllocationType allocation_type,
                                    InstanceType instance_type,
                                    int instance_size,
@@ -265,11 +266,11 @@ AllocationResult Heap::AllocateMap(AllocationType allocation_type,
   AllocationResult allocation = AllocateRaw(Map::kSize, allocation_type);
   if (!allocation.To(&result)) return allocation;
 
-  result->set_map_after_allocation(ReadOnlyRoots(this).meta_map(),
-                                   SKIP_WRITE_BARRIER);
+  ReadOnlyRoots roots(this);
+  result->set_map_after_allocation(roots.meta_map(), SKIP_WRITE_BARRIER);
   Tagged<Map> map = isolate()->factory()->InitializeMap(
       Map::cast(result), instance_type, instance_size, elements_kind,
-      inobject_properties, this);
+      inobject_properties, roots);
 
   return AllocationResult::FromObject(map);
 }
@@ -382,11 +383,11 @@ bool Heap::CreateEarlyReadOnlyMapsAndObjects() {
   Tagged<Type> name = Type::unchecked_cast(obj);                           \
   set_##name(name)
 
-    ALLOCATE_AND_SET_ROOT(Undefined, undefined_value, Undefined::kSize);
-    ALLOCATE_AND_SET_ROOT(Null, null_value, Null::kSize);
+    ALLOCATE_AND_SET_ROOT(Undefined, undefined_value, sizeof(Undefined));
+    ALLOCATE_AND_SET_ROOT(Null, null_value, sizeof(Null));
     ALLOCATE_AND_SET_ROOT(SeqOneByteString, empty_string, String::kHeaderSize);
-    ALLOCATE_AND_SET_ROOT(False, false_value, False::kSize);
-    ALLOCATE_AND_SET_ROOT(True, true_value, True::kSize);
+    ALLOCATE_AND_SET_ROOT(False, false_value, sizeof(False));
+    ALLOCATE_AND_SET_ROOT(True, true_value, sizeof(True));
 
     for (const StringTypeInit& entry : kStringTypeTable) {
       {
@@ -409,9 +410,9 @@ bool Heap::CreateEarlyReadOnlyMapsAndObjects() {
     // Then, initialise the initial maps.
     InitializePartialMap(meta_map, meta_map, MAP_TYPE, Map::kSize);
     InitializePartialMap(undefined_map, meta_map, ODDBALL_TYPE,
-                         Undefined::kSize);
-    InitializePartialMap(null_map, meta_map, ODDBALL_TYPE, Null::kSize);
-    InitializePartialMap(boolean_map, meta_map, ODDBALL_TYPE, Boolean::kSize);
+                         sizeof(Undefined));
+    InitializePartialMap(null_map, meta_map, ODDBALL_TYPE, sizeof(Null));
+    InitializePartialMap(boolean_map, meta_map, ODDBALL_TYPE, sizeof(Boolean));
     boolean_map->SetConstructorFunctionIndex(Context::BOOLEAN_FUNCTION_INDEX);
 
     for (const StringTypeInit& entry : kStringTypeTable) {
@@ -460,6 +461,8 @@ bool Heap::CreateEarlyReadOnlyMapsAndObjects() {
 
   {  // Partial map allocation
     ALLOCATE_PARTIAL_MAP(FIXED_ARRAY_TYPE, kVariableSizeSentinel, fixed_array);
+    ALLOCATE_PARTIAL_MAP(TRUSTED_FIXED_ARRAY_TYPE, kVariableSizeSentinel,
+                         trusted_fixed_array);
     ALLOCATE_PARTIAL_MAP(WEAK_FIXED_ARRAY_TYPE, kVariableSizeSentinel,
                          weak_fixed_array);
     ALLOCATE_PARTIAL_MAP(WEAK_ARRAY_LIST_TYPE, kVariableSizeSentinel,
@@ -549,6 +552,7 @@ bool Heap::CreateEarlyReadOnlyMapsAndObjects() {
   // Fix the instance_descriptors for the existing maps.
   FinalizePartialMap(roots.meta_map());
   FinalizePartialMap(roots.fixed_array_map());
+  FinalizePartialMap(roots.trusted_fixed_array_map());
   FinalizePartialMap(roots.weak_fixed_array_map());
   FinalizePartialMap(roots.weak_array_list_map());
   FinalizePartialMap(roots.fixed_cow_array_map());
@@ -608,6 +612,7 @@ bool Heap::CreateEarlyReadOnlyMapsAndObjects() {
     roots.fixed_double_array_map()->set_elements_kind(HOLEY_DOUBLE_ELEMENTS);
     ALLOCATE_VARSIZE_MAP(FEEDBACK_METADATA_TYPE, feedback_metadata)
     ALLOCATE_VARSIZE_MAP(BYTE_ARRAY_TYPE, byte_array)
+    ALLOCATE_VARSIZE_MAP(TRUSTED_BYTE_ARRAY_TYPE, trusted_byte_array)
     ALLOCATE_VARSIZE_MAP(BYTECODE_ARRAY_TYPE, bytecode_array)
     ALLOCATE_VARSIZE_MAP(FREE_SPACE_TYPE, free_space)
     ALLOCATE_VARSIZE_MAP(PROPERTY_ARRAY_TYPE, property_array)
@@ -744,6 +749,8 @@ bool Heap::CreateLateReadOnlyNonJSReceiverMaps() {
 
     ALLOCATE_MAP(WEAK_CELL_TYPE, WeakCell::kSize, weak_cell)
     ALLOCATE_VARSIZE_MAP(EXTERNAL_POINTER_ARRAY_TYPE, external_pointer_array)
+    ALLOCATE_MAP(INTERPRETER_DATA_TYPE, InterpreterData::kSize,
+                 interpreter_data)
   }
 
   return true;
@@ -1050,6 +1057,7 @@ bool Heap::CreateReadOnlyObjects() {
 
   set_property_cell_hole_value(*factory->NewHole());
   set_hash_table_hole_value(*factory->NewHole());
+  set_promise_hole_value(*factory->NewHole());
   set_uninitialized_value(*factory->NewHole());
   set_arguments_marker(*factory->NewHole());
   set_termination_exception(*factory->NewHole());

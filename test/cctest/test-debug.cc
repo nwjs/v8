@@ -2955,8 +2955,7 @@ TEST(PauseInScript) {
   const char* src = "(function (evt) {})";
   const char* script_name = "StepInHandlerTest";
 
-  v8::ScriptOrigin origin(env->GetIsolate(),
-                          v8_str(env->GetIsolate(), script_name));
+  v8::ScriptOrigin origin(v8_str(env->GetIsolate(), script_name));
   v8::Local<v8::Script> script =
       v8::Script::Compile(context, v8_str(env->GetIsolate(), src), &origin)
           .ToLocalChecked();
@@ -3334,7 +3333,7 @@ TEST(DebugScriptLineEndsAreAscending) {
                                                "  debugger;\n"
                                                "}\n");
 
-  v8::ScriptOrigin origin1 = v8::ScriptOrigin(isolate, v8_str(isolate, "name"));
+  v8::ScriptOrigin origin1 = v8::ScriptOrigin(v8_str(isolate, "name"));
   v8::Local<v8::Script> script =
       v8::Script::Compile(env.local(), script_source, &origin1)
           .ToLocalChecked();
@@ -3365,8 +3364,8 @@ TEST(DebugScriptLineEndsAreAscending) {
   }
 }
 
-static v8::Local<v8::Context> expected_context;
-static v8::Local<v8::Value> expected_context_data;
+static v8::Global<v8::Context> expected_context_global;
+static v8::Global<v8::Value> expected_context_data_global;
 
 class ContextCheckEventListener : public v8::debug::DebugDelegate {
  public:
@@ -3396,8 +3395,9 @@ class ContextCheckEventListener : public v8::debug::DebugDelegate {
  private:
   void CheckContext() {
     v8::Local<v8::Context> context = CcTest::isolate()->GetCurrentContext();
-    CHECK(context == expected_context);
-    CHECK(context->GetEmbedderData(0)->StrictEquals(expected_context_data));
+    CHECK_EQ(context, expected_context_global.Get(CcTest::isolate()));
+    CHECK(context->GetEmbedderData(0)->StrictEquals(
+        expected_context_data_global.Get(CcTest::isolate())));
     event_listener_hit_count++;
   }
 };
@@ -3441,8 +3441,8 @@ TEST(ContextData) {
   // Enter and run function in the first context.
   {
     v8::Context::Scope context_scope(context_1);
-    expected_context = context_1;
-    expected_context_data = data_1;
+    expected_context_global.Reset(isolate, context_1);
+    expected_context_data_global.Reset(isolate, data_1);
     v8::Local<v8::Function> f = CompileFunction(isolate, source, "f");
     f->Call(context_1, context_1->Global(), 0, nullptr).ToLocalChecked();
   }
@@ -3450,8 +3450,8 @@ TEST(ContextData) {
   // Enter and run function in the second context.
   {
     v8::Context::Scope context_scope(context_2);
-    expected_context = context_2;
-    expected_context_data = data_2;
+    expected_context_global.Reset(isolate, context_2);
+    expected_context_data_global.Reset(isolate, data_2);
     v8::Local<v8::Function> f = CompileFunction(isolate, source, "f");
     f->Call(context_2, context_2->Global(), 0, nullptr).ToLocalChecked();
   }
@@ -3461,6 +3461,9 @@ TEST(ContextData) {
 
   v8::debug::SetDebugDelegate(isolate, nullptr);
   CheckDebuggerUnloaded();
+
+  expected_context_global.Reset();
+  expected_context_data_global.Reset();
 }
 
 // Test which creates a context and sets embedder data on it. Checks that this
@@ -3468,21 +3471,22 @@ TEST(ContextData) {
 // break event in an eval statement the expected context is the one returned by
 // Message.GetEventContext.
 TEST(EvalContextData) {
-  v8::HandleScope scope(CcTest::isolate());
+  v8::Isolate* isolate = CcTest::isolate();
+  v8::HandleScope scope(isolate);
 
   v8::Local<v8::Context> context_1;
   v8::Local<v8::ObjectTemplate> global_template =
       v8::Local<v8::ObjectTemplate>();
-  context_1 = v8::Context::New(CcTest::isolate(), nullptr, global_template);
+  context_1 = v8::Context::New(isolate, nullptr, global_template);
 
   ContextCheckEventListener delegate;
-  v8::debug::SetDebugDelegate(CcTest::isolate(), &delegate);
+  v8::debug::SetDebugDelegate(isolate, &delegate);
 
   // Contexts initially do not have embedder data fields.
   CHECK_EQ(0, context_1->GetNumberOfEmbedderDataFields());
 
   // Set and check a data value.
-  v8::Local<v8::String> data_1 = v8_str(CcTest::isolate(), "1");
+  v8::Local<v8::String> data_1 = v8_str(isolate, "1");
   context_1->SetEmbedderData(0, data_1);
   CHECK(context_1->GetEmbedderData(0)->StrictEquals(data_1));
 
@@ -3492,17 +3496,20 @@ TEST(EvalContextData) {
   // Enter and run function in the context.
   {
     v8::Context::Scope context_scope(context_1);
-    expected_context = context_1;
-    expected_context_data = data_1;
-    v8::Local<v8::Function> f = CompileFunction(CcTest::isolate(), source, "f");
+    expected_context_global.Reset(isolate, context_1);
+    expected_context_data_global.Reset(isolate, data_1);
+    v8::Local<v8::Function> f = CompileFunction(isolate, source, "f");
     f->Call(context_1, context_1->Global(), 0, nullptr).ToLocalChecked();
   }
 
-  v8::debug::SetDebugDelegate(CcTest::isolate(), nullptr);
+  v8::debug::SetDebugDelegate(isolate, nullptr);
 
   // One time compile event and one time break event.
   CHECK_GT(event_listener_hit_count, 2);
   CheckDebuggerUnloaded();
+
+  expected_context_global.Reset();
+  expected_context_data_global.Reset();
 }
 
 // Debug event listener which counts script compiled events.
@@ -4617,7 +4624,7 @@ TEST(DebugEvaluateNoSideEffect) {
     failed = !isolate->debug()->PerformSideEffectCheck(
         fun, v8::Utils::OpenHandle(*env->Global()));
     isolate->debug()->StopSideEffectCheckMode();
-    if (failed) isolate->clear_pending_exception();
+    if (failed) isolate->clear_exception();
   }
   DisableDebugger(env->GetIsolate());
 }
@@ -4952,8 +4959,8 @@ TEST(GetPrivateFields) {
       env->Global()
           ->Get(context, v8_str(env->GetIsolate(), "x"))
           .ToLocalChecked());
-  std::vector<v8::Local<v8::Value>> names;
-  std::vector<v8::Local<v8::Value>> values;
+  v8::LocalVector<v8::Value> names(v8_isolate);
+  v8::LocalVector<v8::Value> values(v8_isolate);
   int filter = static_cast<int>(v8::debug::PrivateMemberFilter::kPrivateFields);
   CHECK(v8::debug::GetPrivateMembers(context, object, filter, &names, &values));
 
@@ -5059,8 +5066,8 @@ TEST(GetPrivateMethodsAndAccessors) {
       env->Global()
           ->Get(context, v8_str(env->GetIsolate(), "x"))
           .ToLocalChecked());
-  std::vector<v8::Local<v8::Value>> names;
-  std::vector<v8::Local<v8::Value>> values;
+  v8::LocalVector<v8::Value> names(v8_isolate);
+  v8::LocalVector<v8::Value> values(v8_isolate);
 
   int accessor_filter =
       static_cast<int>(v8::debug::PrivateMemberFilter::kPrivateAccessors);
@@ -5229,8 +5236,8 @@ TEST(GetPrivateStaticMethodsAndAccessors) {
       env->Global()
           ->Get(context, v8_str(env->GetIsolate(), "X"))
           .ToLocalChecked());
-  std::vector<v8::Local<v8::Value>> names;
-  std::vector<v8::Local<v8::Value>> values;
+  v8::LocalVector<v8::Value> names(v8_isolate);
+  v8::LocalVector<v8::Value> values(v8_isolate);
 
   int accessor_filter =
       static_cast<int>(v8::debug::PrivateMemberFilter::kPrivateAccessors);
@@ -5302,8 +5309,8 @@ TEST(GetPrivateStaticAndInstanceMethodsAndAccessors) {
       env->Global()
           ->Get(context, v8_str(env->GetIsolate(), "X"))
           .ToLocalChecked());
-  std::vector<v8::Local<v8::Value>> names;
-  std::vector<v8::Local<v8::Value>> values;
+  v8::LocalVector<v8::Value> names(v8_isolate);
+  v8::LocalVector<v8::Value> values(v8_isolate);
   int accessor_filter =
       static_cast<int>(v8::debug::PrivateMemberFilter::kPrivateAccessors);
   int method_filter =

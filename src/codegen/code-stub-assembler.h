@@ -177,6 +177,7 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
     EmptySlowElementDictionary)                                              \
   V(empty_string, empty_string, EmptyString)                                 \
   V(error_to_string, error_to_string, ErrorToString)                         \
+  V(error_string, error_string, ErrorString)                                 \
   V(errors_string, errors_string, ErrorsString)                              \
   V(FalseValue, false_value, False)                                          \
   V(FixedArrayMap, fixed_array_map, FixedArrayMap)                           \
@@ -241,10 +242,12 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
   V(StoreHandler0Map, store_handler0_map, StoreHandler0Map)                  \
   V(string_string, string_string, StringString)                              \
   V(string_to_string, string_to_string, StringToString)                      \
+  V(suppressed_string, suppressed_string, SuppressedString)                  \
   V(SeqTwoByteStringMap, seq_two_byte_string_map, SeqTwoByteStringMap)       \
   V(TheHoleValue, the_hole_value, TheHole)                                   \
   V(PropertyCellHoleValue, property_cell_hole_value, PropertyCellHole)       \
   V(HashTableHoleValue, hash_table_hole_value, HashTableHole)                \
+  V(PromiseHoleValue, promise_hole_value, PromiseHole)                       \
   V(then_string, then_string, ThenString)                                    \
   V(toJSON_string, toJSON_string, ToJSONString)                              \
   V(toString_string, toString_string, ToStringString)                        \
@@ -1190,12 +1193,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                     TNode<RawPtrT> pointer,
                                     ExternalPointerTag tag);
 
-  // Load an indirect pointer field.
-  // Only available when the sandbox is enabled.
-  TNode<HeapObject> LoadIndirectPointerFromObject(TNode<HeapObject> object,
-                                                  int offset,
-                                                  IndirectPointerTag tag);
-
   // Load a trusted pointer field.
   // When the sandbox is enabled, these are indirect pointers using the trusted
   // pointer table. Otherwise they are regular tagged fields.
@@ -1208,6 +1205,33 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   // enabled, reference code objects through the code pointer table.
   TNode<Code> LoadCodePointerFromObject(TNode<HeapObject> object, int offset);
 
+#ifdef V8_ENABLE_SANDBOX
+  // Load an indirect pointer field.
+  TNode<HeapObject> LoadIndirectPointerFromObject(TNode<HeapObject> object,
+                                                  int offset,
+                                                  IndirectPointerTag tag);
+
+  // Determines whether the given indirect pointer handle is a trusted pointer
+  // handle or a code pointer handle.
+  TNode<BoolT> IsTrustedPointerHandle(TNode<IndirectPointerHandleT> handle);
+
+  // Retrieve the heap object referenced by the given indirect pointer handle,
+  // which can either be a trusted pointer handle or a code pointer handle.
+  TNode<HeapObject> ResolveIndirectPointerHandle(
+      TNode<IndirectPointerHandleT> handle, IndirectPointerTag tag);
+
+  // Retrieve the Code object referenced by the given trusted pointer handle.
+  TNode<Code> ResolveCodePointerHandle(TNode<IndirectPointerHandleT> handle);
+
+  // Retrieve the heap object referenced by the given trusted pointer handle.
+  TNode<HeapObject> ResolveTrustedPointerHandle(
+      TNode<IndirectPointerHandleT> handle, IndirectPointerTag tag);
+
+  // Helper function to compute the offset into the code pointer table from a
+  // code pointer handle.
+  TNode<UintPtrT> ComputeCodePointerTableEntryOffset(
+      TNode<IndirectPointerHandleT> handle);
+
   // Load the pointer to a Code's entrypoint via code pointer.
   // Only available when the sandbox is enabled as it requires the code pointer
   // table.
@@ -1218,12 +1242,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   }
   TNode<RawPtrT> LoadCodeEntrypointViaCodePointerField(TNode<HeapObject> object,
                                                        TNode<IntPtrT> offset);
-
-#ifdef V8_ENABLE_SANDBOX
-  // Helper function to load a CodePointerHandle from an object and compute the
-  // offset into the code pointer table from it.
-  TNode<UintPtrT> ComputeCodePointerTableEntryOffset(
-      TNode<HeapObject> object, TNode<IntPtrT> field_offset);
 #endif
 
   TNode<RawPtrT> LoadForeignForeignAddressPtr(TNode<Foreign> object) {
@@ -1823,8 +1841,17 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   // Load the "code" property of a JSFunction.
   TNode<Code> LoadJSFunctionCode(TNode<JSFunction> function);
 
+  // Load the data object associated with a SFI.
+  // If the (expected) data type is known, prefer using one of the specialized
+  // accessors (e.g. LoadSharedFunctionInfoBuiltinId).
+  TNode<Object> LoadSharedFunctionInfoData(TNode<SharedFunctionInfo> sfi);
+
+  TNode<BoolT> SharedFunctionInfoHasBaselineCode(TNode<SharedFunctionInfo> sfi);
+
+  TNode<Smi> LoadSharedFunctionInfoBuiltinId(TNode<SharedFunctionInfo> sfi);
+
   TNode<BytecodeArray> LoadSharedFunctionInfoBytecodeArray(
-      TNode<SharedFunctionInfo> shared);
+      TNode<SharedFunctionInfo> sfi);
 
   void StoreObjectByteNoWriteBarrier(TNode<HeapObject> object, int offset,
                                      TNode<Word32T> value);
@@ -2260,6 +2287,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
       AllocationFlags flags = AllocationFlag::kNone,
       base::Optional<TNode<Map>> fixed_array_map = base::nullopt);
 
+  TNode<NativeContext> GetCreationContextFromMap(TNode<Map> map,
+                                                 Label* if_bailout);
   TNode<NativeContext> GetCreationContext(TNode<JSReceiver> receiver,
                                           Label* if_bailout);
   TNode<NativeContext> GetFunctionRealm(TNode<Context> context,
@@ -2801,6 +2830,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   void SetPendingMessage(TNode<HeapObject> message);
   TNode<BoolT> IsExecutionTerminating();
 
+  TNode<Object> GetContinuationPreservedEmbedderData();
+  void SetContinuationPreservedEmbedderData(TNode<Object> value);
+
   // Type checks.
   // Check whether the map is for an object with special properties, such as a
   // JSProxy or an object with interceptors.
@@ -2816,6 +2848,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<BoolT> IsCallableMap(TNode<Map> map);
   TNode<BoolT> IsCallable(TNode<HeapObject> object);
   TNode<BoolT> TaggedIsCallable(TNode<Object> object);
+  TNode<BoolT> IsCode(TNode<HeapObject> object);
+  TNode<BoolT> TaggedIsCode(TNode<Object> object);
   TNode<BoolT> IsConsStringInstanceType(TNode<Int32T> instance_type);
   TNode<BoolT> IsConstructorMap(TNode<Map> map);
   TNode<BoolT> IsConstructor(TNode<HeapObject> object);
@@ -3011,8 +3045,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   template <typename TIndex>
   TNode<BoolT> FixedArraySizeDoesntFitInNewSpace(TNode<TIndex> element_count,
                                                  int base_size);
-
-  TNode<BoolT> IsMetaMap(TNode<HeapObject> o) { return IsMapMap(o); }
 
   // ElementsKind helpers:
   TNode<BoolT> ElementsKindEqual(TNode<Int32T> a, TNode<Int32T> b) {
@@ -4582,6 +4614,10 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                               TNode<Uint8T> property_details,
                               Label* needs_resize);
 
+  TNode<Object> CallOnCentralStack(TNode<Context> context, TNode<Object> target,
+                                   TNode<Int32T> num_args,
+                                   TNode<FixedArray> args);
+
  private:
   friend class CodeStubArguments;
 
@@ -4733,6 +4769,10 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   void EmitElementStoreTypedArrayUpdateValue(
       TNode<Object> value, ElementsKind elements_kind,
       TNode<TValue> converted_value, TVariable<Object>* maybe_converted_value);
+
+  TNode<RawPtrT> SwitchToTheCentralStackForJS(TNode<Object> callable_node);
+  void SwitchFromTheCentralStackForJS(TNode<RawPtrT> old_sp,
+                                      TNode<Object> callable);
 };
 
 class V8_EXPORT_PRIVATE CodeStubArguments {

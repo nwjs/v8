@@ -11,6 +11,7 @@
 
 #include "src/compiler/turboshaft/assembler.h"
 #include "src/compiler/turboshaft/operations.h"
+#include "src/compiler/turboshaft/phase.h"
 #include "src/compiler/wasm-compiler.h"
 #include "src/compiler/wasm-graph-assembler.h"
 
@@ -74,21 +75,6 @@ class Int64LoweringReducer : public Next {
     return Next::ReduceShift(left, right, kind, rep);
   }
 
-  OpIndex REDUCE(Equal)(OpIndex left, OpIndex right,
-                        RegisterRepresentation rep) {
-    if (rep != WordRepresentation::Word64()) {
-      return Next::ReduceEqual(left, right, rep);
-    }
-
-    auto [left_low, left_high] = Unpack(left);
-    auto [right_low, right_high] = Unpack(right);
-    // TODO(wasm): Use explicit comparisons and && here?
-    return __ Word32Equal(
-        __ Word32BitwiseOr(__ Word32BitwiseXor(left_low, right_low),
-                           __ Word32BitwiseXor(left_high, right_high)),
-        0);
-  }
-
   OpIndex REDUCE(Comparison)(OpIndex left, OpIndex right,
                              ComparisonOp::Kind kind,
                              RegisterRepresentation rep) {
@@ -101,6 +87,12 @@ class Int64LoweringReducer : public Next {
     V<Word32> high_comparison;
     V<Word32> low_comparison;
     switch (kind) {
+      case ComparisonOp::Kind::kEqual:
+        // TODO(wasm): Use explicit comparisons and && here?
+        return __ Word32Equal(
+            __ Word32BitwiseOr(__ Word32BitwiseXor(left_low, right_low),
+                               __ Word32BitwiseXor(left_high, right_high)),
+            0);
       case ComparisonOp::Kind::kSignedLessThan:
         high_comparison = __ Int32LessThan(left_high, right_high);
         low_comparison = __ Uint32LessThan(left_low, right_low);

@@ -103,12 +103,6 @@ bool Heap::IsMainThread() const {
   return isolate()->thread_id() == ThreadId::Current();
 }
 
-bool Heap::IsSharedMainThread() const {
-  if (!isolate()->has_shared_space()) return false;
-  Isolate* shared_space_isolate = isolate()->shared_space_isolate();
-  return shared_space_isolate->thread_id() == ThreadId::Current();
-}
-
 int64_t Heap::external_memory() { return external_memory_.total(); }
 
 int64_t Heap::update_external_memory(int64_t delta) {
@@ -242,15 +236,15 @@ int Heap::MaxRegularHeapObjectSize(AllocationType allocation) {
 AllocationResult Heap::AllocateRaw(int size_in_bytes, AllocationType type,
                                    AllocationOrigin origin,
                                    AllocationAlignment alignment) {
-  return heap_allocator_.AllocateRaw(size_in_bytes, type, origin, alignment);
+  return heap_allocator_->AllocateRaw(size_in_bytes, type, origin, alignment);
 }
 
 Address Heap::AllocateRawOrFail(int size, AllocationType allocation,
                                 AllocationOrigin origin,
                                 AllocationAlignment alignment) {
   return heap_allocator_
-      .AllocateRawWith<HeapAllocator::kRetryOrFail>(size, allocation, origin,
-                                                    alignment)
+      ->AllocateRawWith<HeapAllocator::kRetryOrFail>(size, allocation, origin,
+                                                     alignment)
       .address();
 }
 

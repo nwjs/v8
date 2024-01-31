@@ -37,8 +37,10 @@ namespace internal {
 #define SIMPLE_HEAP_OBJECT_LIST_GENERATOR(APPLY, V)                      \
   APPLY(V, ArrayList, ARRAY_LIST)                                        \
   APPLY(V, ByteArray, BYTE_ARRAY)                                        \
+  APPLY(V, TrustedByteArray, TRUSTED_BYTE_ARRAY)                         \
   APPLY(V, ClosureFeedbackCellArray, CLOSURE_FEEDBACK_CELL_ARRAY)        \
   APPLY(V, FixedArray, FIXED_ARRAY)                                      \
+  APPLY(V, TrustedFixedArray, TRUSTED_FIXED_ARRAY)                       \
   APPLY(V, FixedDoubleArray, FIXED_DOUBLE_ARRAY)                         \
   APPLY(V, ObjectBoilerplateDescription, OBJECT_BOILERPLATE_DESCRIPTION) \
   APPLY(V, RegExpMatchInfo, REG_EXP_MATCH_INFO)                          \
@@ -93,6 +95,7 @@ namespace internal {
   IF_WASM(V, WasmStruct)
 
 // TODO(jgruber): Move more types to SIMPLE_HEAP_OBJECT_LIST_GENERATOR.
+// TODO(saelo): Consider adding a TRUSTED_OBJECT_TYPE_LIST_BASE(V).
 #define HEAP_OBJECT_ORDINARY_TYPE_LIST_BASE(V)  \
   V(AbstractCode)                               \
   V(AccessCheckNeeded)                          \
@@ -241,6 +244,7 @@ namespace internal {
   V(SeqOneByteString)                           \
   V(SeqString)                                  \
   V(SeqTwoByteString)                           \
+  V(InterpreterData)                            \
   V(SharedFunctionInfo)                         \
   V(SimpleNumberDictionary)                     \
   V(SlicedString)                               \
@@ -398,6 +402,7 @@ namespace internal {
   V(TheHole, the_hole_value, TheHoleValue)                             \
   V(PropertyCellHole, property_cell_hole_value, PropertyCellHoleValue) \
   V(HashTableHole, hash_table_hole_value, HashTableHoleValue)          \
+  V(PromiseHole, promise_hole_value, PromiseHoleValue)                 \
   V(Exception, exception, Exception)                                   \
   V(TerminationException, termination_exception, TerminationException) \
   V(Uninitialized, uninitialized_value, UninitializedValue)            \

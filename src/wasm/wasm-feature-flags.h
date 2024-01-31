@@ -49,7 +49,7 @@
   /* https://github.com/WebAssembly/design/issues/1480 */                      \
   /* Prototype spec: https://bit.ly/wasm-imported-strings */                   \
   /* V8 side owner: jkummerow */                                               \
-  V(imported_strings, "imported strings", false)
+  V(imported_strings, "imported strings", false)                               \
 
 // #############################################################################
 // Staged features (disabled by default, but enabled via --wasm-staging (also
@@ -89,8 +89,7 @@
   V(js_inlining, "inline small wasm functions into JS", false)                 \
                                                                                \
   /* Exnref */                                                                 \
-  /* This flag enables the new exception handling proposal discussed here: */  \
-  /* https://github.com/WebAssembly/exception-handling/issues/281 */           \
+  /* This flag enables the new exception handling proposal */                  \
   /* V8 side owner: thibaudm */                                                \
   V(exnref, "exnref", false)
 

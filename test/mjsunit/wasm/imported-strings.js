@@ -17,6 +17,7 @@ let kSig_e_v = makeSig([], [kRefExtern]);
 let kSig_i_ri = makeSig([kWasmExternRef, kWasmI32], [kWasmI32]);
 let kSig_i_rii = makeSig([kWasmExternRef, kWasmI32, kWasmI32], [kWasmI32]);
 let kSig_i_rr = makeSig([kWasmExternRef, kWasmExternRef], [kWasmI32]);
+let kSig_i_rri = makeSig([kWasmExternRef, kWasmExternRef, kWasmI32], [kWasmI32]);
 let kSig_i_riii = makeSig([kWasmExternRef, kWasmI32, kWasmI32, kWasmI32],
                           [kWasmI32]);
 let kSig_ii_riii = makeSig([kWasmExternRef, kWasmI32, kWasmI32, kWasmI32],
@@ -67,6 +68,8 @@ function encodeWtf16LE(str) {
 
 let kArrayI16;
 let kArrayI8;
+let kStringCast;
+let kStringTest;
 let kStringFromWtf16Array;
 let kStringFromWtf8Array;
 let kStringToWtf16Array;
@@ -79,6 +82,8 @@ let kStringConcat;
 let kStringSubstring;
 let kStringEquals;
 let kStringCompare;
+let kStringIndexOfImported;
+let kStringToLowerCaseImported;
 
 function MakeBuilder() {
   let builder = new WasmModuleBuilder();
@@ -91,6 +96,8 @@ function MakeBuilder() {
   let arrayref = wasmRefNullType(kArrayI16);
   let array8ref = wasmRefNullType(kArrayI8);
 
+  kStringCast = builder.addImport('String', 'cast', kSig_e_r);
+  kStringTest = builder.addImport('String', 'test', kSig_i_r);
   kStringFromWtf16Array = builder.addImport(
       'String', 'fromWtf16Array',
       makeSig([arrayref, kWasmI32, kWasmI32], [kRefExtern]));
@@ -109,6 +116,8 @@ function MakeBuilder() {
   kStringSubstring = builder.addImport('String', 'substring', kSig_e_rii);
   kStringEquals = builder.addImport('String', 'equals', kSig_i_rr);
   kStringCompare = builder.addImport('String', 'compare', kSig_i_rr);
+  kStringIndexOfImported = builder.addImport('m', 'indexOf', kSig_i_rri);
+  kStringToLowerCaseImported = builder.addImport('m', 'toLowerCase', kSig_r_r);
 
   return builder;
 }
@@ -116,7 +125,141 @@ function MakeBuilder() {
 let kImports = {
   String: WebAssembly.String,
   strings: interestingStrings,
+  m: {
+    indexOf: Function.prototype.call.bind(String.prototype.indexOf),
+    toLowerCase: Function.prototype.call.bind(String.prototype.toLowerCase),
+  },
 };
+
+(function TestStringCast() {
+  print(arguments.callee.name);
+  let builder = MakeBuilder();
+
+  builder.addFunction("cast", kSig_e_r)
+    .exportFunc()
+    .addBody([
+      kExprLocalGet, 0,
+      kExprCallFunction, kStringCast,
+    ]);
+
+  builder.addFunction("cast_null", kSig_e_v)
+    .exportFunc()
+    .addBody([
+      kExprRefNull, kExternRefCode,
+      kExprCallFunction, kStringCast,
+    ]);
+
+  let instance = builder.instantiate(kImports);
+
+  assertEquals('foo', instance.exports.cast('foo'));
+  assertThrows(
+      () => instance.exports.cast(123), WebAssembly.RuntimeError,
+      'illegal cast');
+  assertThrows(
+      () => instance.exports.cast(undefined), WebAssembly.RuntimeError,
+      'illegal cast');
+  assertThrows(
+      () => instance.exports.cast(true), WebAssembly.RuntimeError,
+      'illegal cast');
+  assertThrows(
+      () => instance.exports.cast(null), WebAssembly.RuntimeError,
+      'illegal cast');
+  assertThrows(
+      () => instance.exports.cast_null(), WebAssembly.RuntimeError,
+      'illegal cast');
+})();
+
+(function TestStringTest() {
+  print(arguments.callee.name);
+  let builder = MakeBuilder();
+
+  builder.addFunction("test", kSig_i_r)
+    .exportFunc()
+    .addBody([
+      kExprLocalGet, 0,
+      kExprCallFunction, kStringTest,
+    ]);
+
+  builder.addFunction("test_null", kSig_i_v)
+    .exportFunc()
+    .addBody([
+      kExprRefNull, kExternRefCode,
+      kExprCallFunction, kStringTest,
+    ]);
+
+  let instance = builder.instantiate(kImports);
+
+  assertEquals(1, instance.exports.test("foo"));
+  assertEquals(0, instance.exports.test(123));
+  assertEquals(0, instance.exports.test(undefined));
+  assertEquals(0, instance.exports.test(true));
+  assertEquals(0, instance.exports.test(null));
+  assertEquals(0, instance.exports.test_null());
+})();
+
+(function TestIndexOfImportedStrings() {
+  print(arguments.callee.name);
+  let builder = new MakeBuilder();
+
+  builder.addFunction('indexOf', kSig_i_rri).exportFunc().addBody([
+    kExprLocalGet, 0,
+    kExprCallFunction, kStringCast,
+    kExprLocalGet, 1,
+    kExprCallFunction, kStringCast,
+    kExprLocalGet, 2,
+    kExprCallFunction, kStringIndexOfImported,
+  ]);
+  let instance = builder.instantiate(kImports);
+
+  assertEquals(2, instance.exports.indexOf('xxfooxx', 'foo', 0));
+  assertEquals(2, instance.exports.indexOf('xxfooxx', 'foo', -2));
+  assertEquals(-1, instance.exports.indexOf('xxfooxx', 'foo', 100));
+  // Make sure we don't lose bits when Smi-tagging of the start position.
+  assertEquals(-1, instance.exports.indexOf('xxfooxx', 'foo', 0x4000_0000));
+  assertEquals(-1, instance.exports.indexOf('xxfooxx', 'foo', 0x2000_0000));
+  assertEquals(
+      2,
+      instance.exports.indexOf(
+          'xxfooxx', 'foo', 0x8000_0000));  // Negative i32.
+
+  // Both first and second args should be non-null strings.
+  assertThrows(
+      () => instance.exports.indexOf('xxnullxx', null, 0),
+      WebAssembly.RuntimeError, 'illegal cast');
+  assertThrows(
+      () => instance.exports.indexOf(12345, 234, 0), WebAssembly.RuntimeError,
+      'illegal cast');
+  assertThrows(
+      () => instance.exports.indexOf(null, 'foo', 0), WebAssembly.RuntimeError,
+      'illegal cast');
+  assertThrows(
+      () => instance.exports.indexOf(null, 'null', 0), WebAssembly.RuntimeError,
+      'illegal cast');
+})();
+
+(function TestStringToLowerCaseImported() {
+  print(arguments.callee.name);
+  let builder = new MakeBuilder();
+
+  builder.addFunction('toLowerCase', kSig_r_r).exportFunc().addBody([
+    kExprLocalGet, 0,
+    kExprCallFunction, kStringCast,
+    kExprCallFunction, kStringToLowerCaseImported,
+  ]);
+  let instance = builder.instantiate(kImports);
+
+  assertEquals(
+      'make this lowercase!',
+      instance.exports.toLowerCase('MAKE THIS LOWERCASE!'));
+
+  // The argument should be a non-null string.
+  assertThrows(
+      () => instance.exports.toLowerCase(null), WebAssembly.RuntimeError,
+      'illegal cast');
+  assertThrows(
+      () => instance.exports.toLowerCase(123), WebAssembly.RuntimeError,
+      'illegal cast');
+})();
 
 (function TestStringConst() {
   print(arguments.callee.name);

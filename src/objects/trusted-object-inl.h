@@ -20,7 +20,8 @@ OBJECT_CONSTRUCTORS_IMPL(TrustedObject, HeapObject)
 CAST_ACCESSOR(ExposedTrustedObject)
 OBJECT_CONSTRUCTORS_IMPL(ExposedTrustedObject, TrustedObject)
 
-void ExposedTrustedObject::init_self_indirect_pointer(LocalIsolate* isolate) {
+void ExposedTrustedObject::init_self_indirect_pointer(
+    IsolateForSandbox isolate) {
 #ifdef V8_ENABLE_SANDBOX
   InitSelfIndirectPointerField(kSelfIndirectPointerOffset, isolate);
 #endif
@@ -28,7 +29,7 @@ void ExposedTrustedObject::init_self_indirect_pointer(LocalIsolate* isolate) {
 
 IndirectPointerHandle ExposedTrustedObject::self_indirect_pointer() const {
 #ifdef V8_ENABLE_SANDBOX
-  return ReadField<IndirectPointerHandle>(kSelfIndirectPointerOffset);
+  return Relaxed_ReadField<IndirectPointerHandle>(kSelfIndirectPointerOffset);
 #else
   UNREACHABLE();
 #endif

@@ -21,7 +21,9 @@ class CallWithReduceArgsHelper {
 #undef TEST
   }
 
-  OpIndex operator()(const GotoOp& op) { return callback_(op.destination); }
+  OpIndex operator()(const GotoOp& op) {
+    return callback_(op.destination, op.is_backedge);
+  }
 
   OpIndex operator()(const BranchOp& op) {
     return callback_(op.condition(), op.if_true, op.if_false, op.hint);
@@ -80,10 +82,6 @@ class CallWithReduceArgsHelper {
 
   OpIndex operator()(const ShiftOp& op) {
     return callback_(op.left(), op.right(), op.kind, op.rep);
-  }
-
-  OpIndex operator()(const EqualOp& op) {
-    return callback_(op.left(), op.right(), op.rep);
   }
 
   OpIndex operator()(const ComparisonOp& op) {
@@ -265,12 +263,10 @@ class CallWithReduceArgsHelper {
     return callback_(op.input(), op.rep);
   }
 
+  OpIndex operator()(const CommentOp& op) { return callback_(op.message); }
+
   OpIndex operator()(const BigIntBinopOp& op) {
     return callback_(op.left(), op.right(), op.frame_state(), op.kind);
-  }
-
-  OpIndex operator()(const BigIntEqualOp& op) {
-    return callback_(op.left(), op.right());
   }
 
   OpIndex operator()(const BigIntComparisonOp& op) {
@@ -310,10 +306,6 @@ class CallWithReduceArgsHelper {
   }
 
   OpIndex operator()(const StringConcatOp& op) {
-    return callback_(op.left(), op.right());
-  }
-
-  OpIndex operator()(const StringEqualOp& op) {
     return callback_(op.left(), op.right());
   }
 
@@ -465,7 +457,7 @@ class CallWithReduceArgsHelper {
   }
 
   OpIndex operator()(const RttCanonOp& op) {
-    return callback_(op.instance(), op.type_index);
+    return callback_(op.rtts(), op.type_index);
   }
 
   OpIndex operator()(const WasmTypeCheckOp& op) {

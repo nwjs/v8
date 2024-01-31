@@ -85,15 +85,7 @@ class ValueSerializerTest : public TestWithIsolate {
     isolate_ = reinterpret_cast<i::Isolate*>(isolate());
   }
 
-  ~ValueSerializerTest() override {
-    // In some cases unhandled scheduled exceptions from current test produce
-    // that Context::New(isolate()) from next test's constructor returns NULL.
-    // In order to prevent that, we added destructor which will clear scheduled
-    // exceptions just for the current test from test case.
-    if (isolate_->has_scheduled_exception()) {
-      isolate_->clear_scheduled_exception();
-    }
-  }
+  ~ValueSerializerTest() override { DCHECK(!isolate_->has_exception()); }
 
   const Local<Context>& serialization_context() {
     return serialization_context_;
@@ -1725,6 +1717,32 @@ TEST_F(ValueSerializerTest, DecodeHasIndicesRegExp) {
         ExpectScriptTrue("Object.getPrototypeOf(result) === RegExp.prototype");
         ExpectScriptTrue("result.toString() === '/foo/dgmsy'");
       });
+}
+
+TEST_F(ValueSerializerTest, DecodeRegExpUnicodeSets) {
+  // The last two bytes encode the regexp flags.
+  std::vector<uint8_t> regexp_encoding = {
+      0xFF, 0x0C,        // Version 12
+      0x52,              // RegExp
+      0x22, 0x03,        // 3 char OneByteString
+      0x66, 0x6F, 0x6F,  // String content "foo"
+      0x83, 0x02         // Flags giv
+  };
+  DecodeTestUpToVersion(
+      15, std::move(regexp_encoding), [this](Local<Value> value) {
+        ASSERT_TRUE(value->IsRegExp());
+        ExpectScriptTrue("Object.getPrototypeOf(result) === RegExp.prototype");
+        ExpectScriptTrue("result.toString() === '/foo/giv'");
+      });
+
+  // Flags u and v are mutually exclusive.
+  InvalidDecodeTest({
+      0xFF, 0x0C,        // Version 12
+      0x52,              // RegExp
+      0x22, 0x03,        // 3 char OneByteString
+      0x66, 0x6F, 0x6F,  // String content "foo"
+      0x93, 0x02         // Flags giuv
+  });
 }
 
 TEST_F(ValueSerializerTest, RoundTripMap) {

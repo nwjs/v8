@@ -97,6 +97,7 @@ class RootVisitor;
   V(Hole, stale_register, StaleRegister)                                       \
   V(Hole, property_cell_hole_value, PropertyCellHoleValue)                     \
   V(Hole, hash_table_hole_value, HashTableHoleValue)                           \
+  V(Hole, promise_hole_value, PromiseHoleValue)                                \
   /* Maps */                                                                   \
   V(Map, script_context_table_map, ScriptContextTableMap)                      \
   V(Map, closure_feedback_cell_array_map, ClosureFeedbackCellArrayMap)         \
@@ -150,6 +151,9 @@ class RootVisitor;
   V(Map, embedder_data_array_map, EmbedderDataArrayMap)                        \
   V(Map, weak_cell_map, WeakCellMap)                                           \
   V(Map, external_pointer_array_map, ExternalPointerArrayMap)                  \
+  V(Map, trusted_fixed_array_map, TrustedFixedArrayMap)                        \
+  V(Map, trusted_byte_array_map, TrustedByteArrayMap)                          \
+  V(Map, interpreter_data_map, InterpreterDataMap)                             \
   /* String maps */                                                            \
   V(Map, seq_two_byte_string_map, SeqTwoByteStringMap)                         \
   V(Map, cons_two_byte_string_map, ConsTwoByteStringMap)                       \

@@ -156,6 +156,7 @@ class V8_EXPORT_PRIVATE WasmEngine {
   // asm.js module.
   MaybeHandle<AsmWasmData> SyncCompileTranslatedAsmJs(
       Isolate* isolate, ErrorThrower* thrower, ModuleWireBytes bytes,
+      Handle<Script> script,
       base::Vector<const uint8_t> asm_js_offset_table_bytes,
       Handle<HeapNumber> uses_bitset, LanguageMode language_mode);
   Handle<WasmModuleObject> FinalizeTranslatedAsmJs(
@@ -325,6 +326,8 @@ class V8_EXPORT_PRIVATE WasmEngine {
   void StreamingCompilationFailed(size_t prefix_hash);
 
   void FreeNativeModule(NativeModule*);
+  void ClearWeakScriptHandle(Isolate* isolate,
+                             std::unique_ptr<Address*> location);
 
   // Sample the code size of the given {NativeModule} in all isolates that have
   // access to it. Call this after top-tier compilation finished.
@@ -356,10 +359,6 @@ class V8_EXPORT_PRIVATE WasmEngine {
   // Returns a barrier allowing background compile operations if valid and
   // preventing this object from being destroyed.
   std::shared_ptr<OperationsBarrier> GetBarrierForBackgroundCompile();
-
-  void SampleThrowEvent(Isolate*);
-  void SampleRethrowEvent(Isolate*);
-  void SampleCatchEvent(Isolate*);
 
   TypeCanonicalizer* type_canonicalizer() { return &type_canonicalizer_; }
 

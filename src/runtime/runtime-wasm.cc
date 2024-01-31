@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "src/builtins/data-view-ops.h"
 #include "src/common/assert-scope.h"
 #include "src/common/message-template.h"
 #include "src/compiler/wasm-compiler.h"
@@ -74,13 +75,17 @@ class FrameFinder {
   StackFrameIterator frame_iterator_;
 };
 
-Tagged<WasmInstanceObject> GetWasmInstanceOnStackTop(
-    Isolate* isolate,
-    std::initializer_list<StackFrame::Type> skipped_frame_types = {
-        StackFrame::EXIT}) {
-  return FrameFinder<WasmFrame>(isolate, skipped_frame_types)
-      .frame()
-      ->wasm_instance();
+Tagged<WasmInstanceObject> GetWasmInstanceOnStackTop(Isolate* isolate) {
+  Address fp = Isolate::c_entry_fp(isolate->thread_local_top());
+  fp = Memory<Address>(fp + ExitFrameConstants::kCallerFPOffset);
+#ifdef DEBUG
+  intptr_t marker =
+      Memory<intptr_t>(fp + CommonFrameConstants::kContextOrFrameTypeOffset);
+  DCHECK(StackFrame::MarkerToType(marker) == StackFrame::WASM);
+#endif
+  const int offset = WasmFrameConstants::kWasmInstanceOffset;
+  Tagged<Object> instance(Memory<Address>(fp + offset));
+  return WasmInstanceObject::cast(instance);
 }
 
 Tagged<Context> GetNativeContextFromWasmInstanceOnStackTop(Isolate* isolate) {
@@ -100,7 +105,7 @@ class V8_NODISCARD ClearThreadInWasmScope {
   ~ClearThreadInWasmScope() {
     DCHECK_IMPLIES(trap_handler::IsTrapHandlerEnabled(),
                    !trap_handler::IsThreadInWasm());
-    if (!isolate_->has_pending_exception() && is_thread_in_wasm_) {
+    if (!isolate_->has_exception() && is_thread_in_wasm_) {
       trap_handler::SetThreadInWasm();
     }
     // Otherwise we only want to set the flag if the exception is caught in
@@ -196,7 +201,7 @@ RUNTIME_FUNCTION(Runtime_WasmJSToWasmObject) {
                            ? *result
                            : isolate->Throw(*isolate->factory()->NewTypeError(
                                  MessageTemplate::kWasmTrapJSTypeError));
-  if (thread_in_wasm && !isolate->has_pending_exception()) {
+  if (thread_in_wasm && !isolate->has_exception()) {
     trap_handler::SetThreadInWasm();
   }
   return ret;
@@ -217,7 +222,7 @@ RUNTIME_FUNCTION(Runtime_WasmMemoryGrow) {
   int ret = WasmMemoryObject::Grow(isolate, memory_object, delta_pages);
   // The WasmMemoryGrow builtin which calls this runtime function expects us to
   // always return a Smi.
-  DCHECK(!isolate->has_pending_exception());
+  DCHECK(!isolate->has_exception());
   return Smi::FromInt(ret);
 }
 
@@ -301,6 +306,32 @@ RUNTIME_FUNCTION(Runtime_WasmThrowRangeError) {
   THROW_NEW_ERROR_RETURN_FAILURE(isolate, NewRangeError(message_id));
 }
 
+RUNTIME_FUNCTION(Runtime_WasmThrowDataViewTypeError) {
+  ClearThreadInWasmScope clear_wasm_flag(isolate);
+  HandleScope scope(isolate);
+  DCHECK_EQ(2, args.length());
+  MessageTemplate message_id = MessageTemplateFromInt(args.smi_value_at(0));
+  DataViewOp op = static_cast<DataViewOp>(isolate->error_message_param());
+  Handle<String> op_name =
+      isolate->factory()->NewStringFromAsciiChecked(ToString(op));
+  Handle<Object> value(args[1], isolate);
+
+  THROW_NEW_ERROR_RETURN_FAILURE(isolate,
+                                 NewTypeError(message_id, op_name, value));
+}
+
+RUNTIME_FUNCTION(Runtime_WasmThrowDataViewDetachedError) {
+  ClearThreadInWasmScope clear_wasm_flag(isolate);
+  HandleScope scope(isolate);
+  DCHECK_EQ(1, args.length());
+  MessageTemplate message_id = MessageTemplateFromInt(args.smi_value_at(0));
+  DataViewOp op = static_cast<DataViewOp>(isolate->error_message_param());
+  Handle<String> op_name =
+      isolate->factory()->NewStringFromAsciiChecked(ToString(op));
+
+  THROW_NEW_ERROR_RETURN_FAILURE(isolate, NewTypeError(message_id, op_name));
+}
+
 RUNTIME_FUNCTION(Runtime_WasmThrowTypeError) {
   ClearThreadInWasmScope clear_wasm_flag(isolate);
   HandleScope scope(isolate);
@@ -308,16 +339,6 @@ RUNTIME_FUNCTION(Runtime_WasmThrowTypeError) {
   MessageTemplate message_id = MessageTemplateFromInt(args.smi_value_at(0));
   Handle<Object> arg(args[1], isolate);
   THROW_NEW_ERROR_RETURN_FAILURE(isolate, NewTypeError(message_id, arg));
-}
-
-RUNTIME_FUNCTION(Runtime_WasmThrowTypeErrorTwoArgs) {
-  ClearThreadInWasmScope clear_wasm_flag(isolate);
-  HandleScope scope(isolate);
-  DCHECK_EQ(3, args.length());
-  MessageTemplate message_id = MessageTemplateFromInt(args.smi_value_at(0));
-  Handle<Object> arg(args[1], isolate);
-  Handle<Object> arg2(args[2], isolate);
-  THROW_NEW_ERROR_RETURN_FAILURE(isolate, NewTypeError(message_id, arg, arg2));
 }
 
 RUNTIME_FUNCTION(Runtime_WasmThrow) {
@@ -329,7 +350,6 @@ RUNTIME_FUNCTION(Runtime_WasmThrow) {
   Handle<FixedArray> values(FixedArray::cast(args[1]), isolate);
   Handle<WasmExceptionPackage> exception =
       WasmExceptionPackage::New(isolate, tag, values);
-  wasm::GetWasmEngine()->SampleThrowEvent(isolate);
   return isolate->Throw(*exception);
 }
 
@@ -337,7 +357,6 @@ RUNTIME_FUNCTION(Runtime_WasmReThrow) {
   ClearThreadInWasmScope clear_wasm_flag(isolate);
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
-  wasm::GetWasmEngine()->SampleRethrowEvent(isolate);
   return isolate->ReThrow(args[0]);
 }
 
@@ -372,7 +391,7 @@ RUNTIME_FUNCTION(Runtime_WasmCompileLazy) {
     AllowHeapAllocation throwing_unwinds_the_stack;
     wasm::ThrowLazyCompilationError(
         isolate, instance->module_object()->native_module(), func_index);
-    DCHECK(isolate->has_pending_exception());
+    DCHECK(isolate->has_exception());
     return ReadOnlyRoots{isolate}.exception();
   }
 
@@ -834,6 +853,9 @@ RUNTIME_FUNCTION(Runtime_WasmTableCopy) {
 
 RUNTIME_FUNCTION(Runtime_WasmTableGrow) {
   ClearThreadInWasmScope flag_scope(isolate);
+#if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64
+  DCHECK(isolate->IsOnCentralStack());
+#endif
   HandleScope scope(isolate);
   DCHECK_EQ(4, args.length());
   Tagged<WasmInstanceObject> instance = WasmInstanceObject::cast(args[0]);
@@ -1209,9 +1231,9 @@ RUNTIME_FUNCTION(Runtime_WasmAllocateSuspender) {
   do {                                                                         \
     Handle<Object> result;                                                     \
     if (!(call).ToHandle(&result)) {                                           \
-      DCHECK(isolate->has_pending_exception());                                \
+      DCHECK(isolate->has_exception());                                        \
       /* Mark any exception as uncatchable by Wasm. */                         \
-      Handle<JSObject> exception(JSObject::cast(isolate->pending_exception()), \
+      Handle<JSObject> exception(JSObject::cast(isolate->exception()),         \
                                  isolate);                                     \
       Handle<Name> uncatchable =                                               \
           isolate->factory()->wasm_uncatchable_symbol();                       \
@@ -1222,7 +1244,7 @@ RUNTIME_FUNCTION(Runtime_WasmAllocateSuspender) {
       }                                                                        \
       return ReadOnlyRoots(isolate).exception();                               \
     }                                                                          \
-    DCHECK(!isolate->has_pending_exception());                                 \
+    DCHECK(!isolate->has_exception());                                         \
     return *result;                                                            \
   } while (false)
 
@@ -1284,7 +1306,7 @@ RUNTIME_FUNCTION(Runtime_WasmStringNewWtf8) {
   MaybeHandle<v8::internal::String> result_string =
       isolate->factory()->NewStringFromUtf8(bytes, utf8_variant);
   if (utf8_variant == unibrow::Utf8Variant::kUtf8NoTrap) {
-    DCHECK(!isolate->has_pending_exception());
+    DCHECK(!isolate->has_exception());
     if (result_string.is_null()) {
       return *isolate->factory()->wasm_null();
     }
@@ -1309,7 +1331,7 @@ RUNTIME_FUNCTION(Runtime_WasmStringNewWtf8Array) {
   MaybeHandle<v8::internal::String> result_string =
       isolate->factory()->NewStringFromUtf8(array, start, end, utf8_variant);
   if (utf8_variant == unibrow::Utf8Variant::kUtf8NoTrap) {
-    DCHECK(!isolate->has_pending_exception());
+    DCHECK(!isolate->has_exception());
     if (result_string.is_null()) {
       return *isolate->factory()->wasm_null();
     }

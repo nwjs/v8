@@ -460,9 +460,9 @@ Response InjectedScript::getProperties(
       Response response =
           mirror.getter->buildRemoteObject(context, wrapOptions, &remoteObject);
       if (!response.IsSuccess()) return response;
-      response =
-          bindRemoteObjectIfNeeded(sessionId, context, mirror.getter->v8Value(),
-                                   groupName, remoteObject.get());
+      response = bindRemoteObjectIfNeeded(sessionId, context,
+                                          mirror.getter->v8Value(isolate),
+                                          groupName, remoteObject.get());
       if (!response.IsSuccess()) return response;
       descriptor->setGet(std::move(remoteObject));
     }
@@ -470,9 +470,9 @@ Response InjectedScript::getProperties(
       Response response =
           mirror.setter->buildRemoteObject(context, wrapOptions, &remoteObject);
       if (!response.IsSuccess()) return response;
-      response =
-          bindRemoteObjectIfNeeded(sessionId, context, mirror.setter->v8Value(),
-                                   groupName, remoteObject.get());
+      response = bindRemoteObjectIfNeeded(sessionId, context,
+                                          mirror.setter->v8Value(isolate),
+                                          groupName, remoteObject.get());
       if (!response.IsSuccess()) return response;
       descriptor->setSet(std::move(remoteObject));
     }
@@ -480,9 +480,9 @@ Response InjectedScript::getProperties(
       Response response =
           mirror.symbol->buildRemoteObject(context, wrapOptions, &remoteObject);
       if (!response.IsSuccess()) return response;
-      response =
-          bindRemoteObjectIfNeeded(sessionId, context, mirror.symbol->v8Value(),
-                                   groupName, remoteObject.get());
+      response = bindRemoteObjectIfNeeded(sessionId, context,
+                                          mirror.symbol->v8Value(isolate),
+                                          groupName, remoteObject.get());
       if (!response.IsSuccess()) return response;
       descriptor->setSymbol(std::move(remoteObject));
     }
@@ -491,7 +491,7 @@ Response InjectedScript::getProperties(
           context, wrapOptions, &remoteObject);
       if (!response.IsSuccess()) return response;
       response = bindRemoteObjectIfNeeded(sessionId, context,
-                                          mirror.exception->v8Value(),
+                                          mirror.exception->v8Value(isolate),
                                           groupName, remoteObject.get());
       if (!response.IsSuccess()) return response;
       descriptor->setValue(std::move(remoteObject));
@@ -529,9 +529,10 @@ Response InjectedScript::getInternalAndPrivateProperties(
           m_context->context(), WrapOptions({WrapMode::kIdOnly}),
           &remoteObject);
       if (!response.IsSuccess()) return response;
-      response = bindRemoteObjectIfNeeded(sessionId, context,
-                                          internalProperty.value->v8Value(),
-                                          groupName, remoteObject.get());
+      response = bindRemoteObjectIfNeeded(
+          sessionId, context,
+          internalProperty.value->v8Value(context->GetIsolate()), groupName,
+          remoteObject.get());
       if (!response.IsSuccess()) return response;
       (*internalProperties)
           ->emplace_back(InternalPropertyDescriptor::create()
@@ -557,9 +558,10 @@ Response InjectedScript::getInternalAndPrivateProperties(
       Response response = privateProperty.value->buildRemoteObject(
           context, WrapOptions({WrapMode::kIdOnly}), &remoteObject);
       if (!response.IsSuccess()) return response;
-      response = bindRemoteObjectIfNeeded(sessionId, context,
-                                          privateProperty.value->v8Value(),
-                                          groupName, remoteObject.get());
+      response = bindRemoteObjectIfNeeded(
+          sessionId, context,
+          privateProperty.value->v8Value(context->GetIsolate()), groupName,
+          remoteObject.get());
       if (!response.IsSuccess()) return response;
       descriptor->setValue(std::move(remoteObject));
     }
@@ -568,9 +570,10 @@ Response InjectedScript::getInternalAndPrivateProperties(
       Response response = privateProperty.getter->buildRemoteObject(
           context, WrapOptions({WrapMode::kIdOnly}), &remoteObject);
       if (!response.IsSuccess()) return response;
-      response = bindRemoteObjectIfNeeded(sessionId, context,
-                                          privateProperty.getter->v8Value(),
-                                          groupName, remoteObject.get());
+      response = bindRemoteObjectIfNeeded(
+          sessionId, context,
+          privateProperty.getter->v8Value(context->GetIsolate()), groupName,
+          remoteObject.get());
       if (!response.IsSuccess()) return response;
       descriptor->setGet(std::move(remoteObject));
     }
@@ -579,9 +582,10 @@ Response InjectedScript::getInternalAndPrivateProperties(
       Response response = privateProperty.setter->buildRemoteObject(
           context, WrapOptions({WrapMode::kIdOnly}), &remoteObject);
       if (!response.IsSuccess()) return response;
-      response = bindRemoteObjectIfNeeded(sessionId, context,
-                                          privateProperty.setter->v8Value(),
-                                          groupName, remoteObject.get());
+      response = bindRemoteObjectIfNeeded(
+          sessionId, context,
+          privateProperty.setter->v8Value(context->GetIsolate()), groupName,
+          remoteObject.get());
       if (!response.IsSuccess()) return response;
       descriptor->setSet(std::move(remoteObject));
     }
@@ -629,7 +633,7 @@ Response InjectedScript::wrapObjectMirror(
   v8::Context::Scope contextScope(context);
   Response response = mirror.buildRemoteObject(context, wrapOptions, result);
   if (!response.IsSuccess()) return response;
-  v8::Local<v8::Value> value = mirror.v8Value();
+  v8::Local<v8::Value> value = mirror.v8Value(context->GetIsolate());
   response = bindRemoteObjectIfNeeded(sessionId, context, value, groupName,
                                       result->get());
   if (!response.IsSuccess()) return response;
@@ -680,10 +684,10 @@ Response InjectedScript::wrapObjectMirror(
 
 std::unique_ptr<protocol::Runtime::RemoteObject> InjectedScript::wrapTable(
     v8::Local<v8::Object> table, v8::MaybeLocal<v8::Array> maybeColumns) {
-  using protocol::Runtime::RemoteObject;
+  using protocol::Array;
   using protocol::Runtime::ObjectPreview;
   using protocol::Runtime::PropertyPreview;
-  using protocol::Array;
+  using protocol::Runtime::RemoteObject;
 
   v8::Isolate* isolate = m_context->isolate();
   v8::HandleScope handles(isolate);
@@ -949,8 +953,12 @@ Response InjectedScript::wrapEvaluateResult(
     Maybe<protocol::Runtime::ExceptionDetails>* exceptionDetails) {
   v8::Local<v8::Value> resultValue;
   if (!tryCatch.HasCaught()) {
-    if (!maybeResultValue.ToLocal(&resultValue))
+    if (!maybeResultValue.ToLocal(&resultValue)) {
+      if (!tryCatch.CanContinue()) {
+        return Response::ServerError("Execution was terminated");
+      }
       return Response::InternalError();
+    }
     Response response =
         wrapObject(resultValue, objectGroup, wrapOptions, result);
     if (!response.IsSuccess()) return response;
@@ -996,8 +1004,9 @@ v8::Local<v8::Object> InjectedScript::commandLineAPI() {
 InjectedScript::Scope::Scope(V8InspectorSessionImpl* session)
     : m_inspector(session->inspector()),
       m_injectedScript(nullptr),
-      m_handleScope(m_inspector->isolate()),
-      m_tryCatch(m_inspector->isolate()),
+      m_isolate(m_inspector->isolate()),
+      m_handleScope(m_isolate),
+      m_tryCatch(m_isolate),
       m_ignoreExceptionsAndMuteConsole(false),
       m_previousPauseOnExceptionsState(v8::debug::NoBreakOnException),
       m_userGesture(false),
@@ -1012,9 +1021,10 @@ Response InjectedScript::Scope::initialize() {
   if (!session) return Response::InternalError();
   Response response = findInjectedScript(session);
   if (!response.IsSuccess()) return response;
-  m_context = m_injectedScript->context()->context();
-  m_context->Enter();
-  if (m_allowEval) m_context->AllowCodeGenerationFromStrings(true);
+  m_context = v8::Global<v8::Context>(m_isolate,
+                                      m_injectedScript->context()->context());
+  context()->Enter();
+  if (m_allowEval) context()->AllowCodeGenerationFromStrings(true);
   return Response::Success();
 }
 
@@ -1027,7 +1037,7 @@ void InjectedScript::Scope::installCommandLineAPI() {
     return;
   }
   m_commandLineAPIScope.reset(new V8Console::CommandLineAPIScope(
-      m_context, m_injectedScript->commandLineAPI(), m_context->Global()));
+      context(), m_injectedScript->commandLineAPI(), context()->Global()));
 }
 
 void InjectedScript::Scope::ignoreExceptionsAndMuteConsole() {
@@ -1057,16 +1067,16 @@ void InjectedScript::Scope::pretendUserGesture() {
 
 void InjectedScript::Scope::allowCodeGenerationFromStrings() {
   DCHECK(!m_allowEval);
-  if (m_context->IsCodeGenerationFromStringsAllowed()) return;
+  if (context()->IsCodeGenerationFromStringsAllowed()) return;
   m_allowEval = true;
-  m_context->AllowCodeGenerationFromStrings(true);
+  context()->AllowCodeGenerationFromStrings(true);
 }
 
 void InjectedScript::Scope::cleanup() {
   m_commandLineAPIScope.reset();
   if (!m_context.IsEmpty()) {
-    if (m_allowEval) m_context->AllowCodeGenerationFromStrings(false);
-    m_context->Exit();
+    if (m_allowEval) context()->AllowCodeGenerationFromStrings(false);
+    context()->Exit();
     m_context.Clear();
   }
 }

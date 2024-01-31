@@ -151,17 +151,18 @@ void IC::TraceIC(const char* type, Handle<Object> name, State old_state,
 
   int code_offset = 0;
   Tagged<AbstractCode> code = function->abstract_code(isolate_);
-  if (function->ActiveTierIsIgnition()) {
+  if (function->ActiveTierIsIgnition(isolate())) {
     code_offset = InterpretedFrame::GetBytecodeOffset(frame->fp());
-  } else if (function->ActiveTierIsBaseline()) {
+  } else if (function->ActiveTierIsBaseline(isolate())) {
     // TODO(pthier): AbstractCode should fully support Baseline code.
     BaselineFrame* baseline_frame = BaselineFrame::cast(frame);
     code_offset = baseline_frame->GetBytecodeOffset();
     code = AbstractCode::cast(baseline_frame->GetBytecodeArray());
   } else {
-    code_offset = static_cast<int>(frame->pc() - function->instruction_start());
+    code_offset =
+        static_cast<int>(frame->pc() - function->instruction_start(isolate()));
   }
-  JavaScriptFrame::CollectFunctionAndOffsetForICStats(function, code,
+  JavaScriptFrame::CollectFunctionAndOffsetForICStats(isolate(), function, code,
                                                       code_offset);
 
   // Reserve enough space for IC transition state, the longest length is 17.
@@ -2268,7 +2269,8 @@ Handle<Object> KeyedStoreIC::StoreElementHandler(
   // initializing store to array literal.
   DCHECK_IMPLIES(
       !receiver_map->has_dictionary_elements() &&
-          receiver_map->MayHaveReadOnlyElementsInPrototypeChain(isolate()),
+          receiver_map->ShouldCheckForReadOnlyElementsInPrototypeChain(
+              isolate()),
       IsStoreInArrayLiteralIC());
 
   if (IsJSProxyMap(*receiver_map)) {
@@ -2349,7 +2351,8 @@ void KeyedStoreIC::StoreElementPolymorphicHandlers(
     Handle<Map> transition;
 
     if (receiver_map->instance_type() < FIRST_JS_RECEIVER_TYPE ||
-        receiver_map->MayHaveReadOnlyElementsInPrototypeChain(isolate())) {
+        receiver_map->ShouldCheckForReadOnlyElementsInPrototypeChain(
+            isolate())) {
       // TODO(mvstanton): Consider embedding store_mode in the state of the slow
       // keyed store ic for uniformity.
       TRACE_HANDLER_STATS(isolate(), KeyedStoreIC_SlowStub);
@@ -2520,7 +2523,7 @@ MaybeHandle<Object> KeyedStoreIC::Store(Handle<Object> object,
           : Runtime::SetObjectProperty(isolate(), object, key, value,
                                        StoreOrigin::kMaybeKeyed);
   if (result.is_null()) {
-    DCHECK(isolate()->has_pending_exception());
+    DCHECK(isolate()->has_exception());
     set_slow_stub_reason("failed to set property");
     use_ic = false;
   }
@@ -2542,8 +2545,9 @@ MaybeHandle<Object> KeyedStoreIC::Store(Handle<Object> object,
         if (old_receiver_map->is_abandoned_prototype_map()) {
           set_slow_stub_reason("receiver with prototype map");
         } else if (old_receiver_map->has_dictionary_elements() ||
-                   !old_receiver_map->MayHaveReadOnlyElementsInPrototypeChain(
-                       isolate())) {
+                   !old_receiver_map
+                        ->ShouldCheckForReadOnlyElementsInPrototypeChain(
+                            isolate())) {
           // We should go generic if receiver isn't a dictionary, but our
           // prototype chain does have dictionary elements. This ensures that
           // other non-dictionary receivers in the polymorphic case benefit
@@ -3377,7 +3381,7 @@ RUNTIME_FUNCTION(Runtime_StoreCallbackProperty) {
   PropertyCallbackArguments arguments(isolate, info->data(), *receiver, *holder,
                                       Nothing<ShouldThrow>());
   arguments.CallAccessorSetter(info, name, value);
-  RETURN_FAILURE_IF_SCHEDULED_EXCEPTION(isolate);
+  RETURN_FAILURE_IF_EXCEPTION(isolate);
   return *value;
 }
 
@@ -3404,7 +3408,7 @@ RUNTIME_FUNCTION(Runtime_LoadPropertyWithInterceptor) {
 
     Handle<Object> result = arguments.CallNamedGetter(interceptor, name);
 
-    RETURN_FAILURE_IF_SCHEDULED_EXCEPTION_DETECTOR(isolate, arguments);
+    RETURN_FAILURE_IF_EXCEPTION_DETECTOR(isolate, arguments);
 
     if (!result.is_null()) {
       arguments.AcceptSideEffects();
@@ -3470,7 +3474,7 @@ RUNTIME_FUNCTION(Runtime_StorePropertyWithInterceptor) {
                                         *receiver, Just(kDontThrow));
 
     Handle<Object> result = arguments.CallNamedSetter(interceptor, name, value);
-    RETURN_FAILURE_IF_SCHEDULED_EXCEPTION_DETECTOR(isolate, arguments);
+    RETURN_FAILURE_IF_EXCEPTION_DETECTOR(isolate, arguments);
     if (!result.is_null()) return *value;
     // If the interceptor didn't handle the request, then there must be no
     // side effects.
@@ -3504,7 +3508,7 @@ RUNTIME_FUNCTION(Runtime_LoadElementWithInterceptor) {
                                       *receiver, Just(kDontThrow));
   Handle<Object> result = arguments.CallIndexedGetter(interceptor, index);
 
-  RETURN_FAILURE_IF_SCHEDULED_EXCEPTION_DETECTOR(isolate, arguments);
+  RETURN_FAILURE_IF_EXCEPTION_DETECTOR(isolate, arguments);
 
   if (result.is_null()) {
     LookupIterator it(isolate, receiver, index, receiver);

@@ -1166,8 +1166,8 @@ TEST_F(RegExpTest, MacroAssemblerStackOverflow) {
       *regexp, *input, 0, start_adr, start_adr + input->length(), nullptr);
 
   CHECK_EQ(NativeRegExpMacroAssembler::EXCEPTION, result);
-  CHECK(isolate()->has_pending_exception());
-  isolate()->clear_pending_exception();
+  CHECK(isolate()->has_exception());
+  isolate()->clear_exception();
 }
 
 TEST_F(RegExpTest, MacroAssemblerNativeLotsOfRegisters) {
@@ -1210,7 +1210,7 @@ TEST_F(RegExpTest, MacroAssemblerNativeLotsOfRegisters) {
   CHECK_EQ(0, captures[0]);
   CHECK_EQ(42, captures[1]);
 
-  isolate()->clear_pending_exception();
+  isolate()->clear_exception();
 }
 
 TEST_F(RegExpTest, MacroAssembler) {
@@ -2308,7 +2308,7 @@ TEST_F(RegExpTestWithContext, UnicodePropertyEscapeCodeSize) {
 
   static constexpr int kMaxSize = 200 * KB;
   static constexpr bool kIsNotLatin1 = false;
-  Tagged<Object> maybe_code = re->code(kIsNotLatin1);
+  Tagged<Object> maybe_code = re->code(i_isolate(), kIsNotLatin1);
   Tagged<Object> maybe_bytecode = re->bytecode(kIsNotLatin1);
   if (IsByteArray(maybe_bytecode)) {
     // On x64, excessive inlining produced >250KB.

@@ -279,6 +279,8 @@ class MaglevGraphBuilder {
 
     BuildMergeStates();
     EndPrologue();
+    in_prologue_ = false;
+
     BuildBody();
   }
 
@@ -394,6 +396,10 @@ class MaglevGraphBuilder {
 
   DeoptFrame GetLatestCheckpointedFrame();
 
+  bool need_checkpointed_loop_entry() {
+    return v8_flags.maglev_speculative_hoist_phi_untagging;
+  }
+
   void RecordUseReprHint(Phi* phi, UseRepresentationSet reprs) {
     phi->RecordUseReprHint(reprs, iterator_.current_offset());
   }
@@ -429,6 +435,7 @@ class MaglevGraphBuilder {
                      std::initializer_list<ValueNode*> control_inputs,
                      Args&&... args);
     void Goto(Label* label);
+    void ReducePredecessorCount(Label* label);
     void EndLoop(LoopLabel* loop_label);
     void Bind(Label* label);
     void set(Variable& var, ValueNode* value);
@@ -678,7 +685,14 @@ class MaglevGraphBuilder {
         // TODO(leszeks): Re-evaluate this DCHECK, we might hit it if the only
         // bytecodes in this basic block were only register juggling.
         // DCHECK(!current_block_->nodes().is_empty());
-        BasicBlock* predecessor = FinishBlock<Jump>({}, &jump_targets_[offset]);
+        BasicBlock* predecessor;
+        if (merge_state->is_loop() && !merge_state->is_resumable_loop() &&
+            need_checkpointed_loop_entry()) {
+          predecessor =
+              FinishBlock<CheckpointedJump>({}, &jump_targets_[offset]);
+        } else {
+          predecessor = FinishBlock<Jump>({}, &jump_targets_[offset]);
+        }
         merge_state->Merge(this, current_interpreter_frame_, predecessor);
       }
       if (v8_flags.trace_maglev_graph_building) {
@@ -840,12 +854,24 @@ class MaglevGraphBuilder {
 
   template <typename NodeT>
   NodeT* AttachExtraInfoAndAddToGraph(NodeT* node) {
+    static_assert(NodeT::kProperties.is_deopt_checkpoint() +
+                      NodeT::kProperties.can_eager_deopt() +
+                      NodeT::kProperties.can_lazy_deopt() <=
+                  1);
+    AttachDeoptCheckpoint(node);
     AttachEagerDeoptInfo(node);
     AttachLazyDeoptInfo(node);
     AttachExceptionHandlerInfo(node);
     MarkPossibleSideEffect(node);
     AddInitializedNodeToGraph(node);
     return node;
+  }
+
+  template <typename NodeT>
+  void AttachDeoptCheckpoint(NodeT* node) {
+    if constexpr (NodeT::kProperties.is_deopt_checkpoint()) {
+      node->SetEagerDeoptInfo(zone(), GetLatestCheckpointedFrame());
+    }
   }
 
   template <typename NodeT>
@@ -1507,6 +1533,7 @@ class MaglevGraphBuilder {
     ControlNodeT* control_node = NodeBase::New<ControlNodeT>(
         zone(), control_inputs, std::forward<Args>(args)...);
     AttachEagerDeoptInfo(control_node);
+    AttachDeoptCheckpoint(control_node);
     static_assert(!ControlNodeT::kProperties.can_lazy_deopt());
     static_assert(!ControlNodeT::kProperties.can_throw());
     static_assert(!ControlNodeT::kProperties.can_write());
@@ -1756,9 +1783,16 @@ class MaglevGraphBuilder {
   ReduceResult BuildCheckMaps(ValueNode* object,
                               base::Vector<const compiler::MapRef> maps);
   ReduceResult BuildTransitionElementsKindOrCheckMap(
-      ValueNode* object,
-      base::Vector<const compiler::MapRef> transition_sources,
+      ValueNode* object, const ZoneVector<compiler::MapRef>& transition_sources,
       compiler::MapRef transition_target);
+  ReduceResult BuildCompareMaps(
+      ValueNode* object, base::Vector<const compiler::MapRef> maps,
+      MaglevSubGraphBuilder* sub_graph,
+      base::Optional<MaglevSubGraphBuilder::Label>& if_not_matched);
+  ReduceResult BuildTransitionElementsKindAndCompareMaps(
+      ValueNode* object, const ZoneVector<compiler::MapRef>& transition_sources,
+      compiler::MapRef transition_target, MaglevSubGraphBuilder* sub_graph,
+      base::Optional<MaglevSubGraphBuilder::Label>& if_not_matched);
   // Emits an unconditional deopt and returns false if the node is a constant
   // that doesn't match the ref.
   ReduceResult BuildCheckValue(ValueNode* node, compiler::ObjectRef ref);
@@ -1848,10 +1882,18 @@ class MaglevGraphBuilder {
       ValueNode* object, ValueNode* index,
       const compiler::ElementAccessInfo& access_info,
       compiler::KeyedAccessMode const& keyed_mode);
+  template <typename GenericAccessFunc>
   ReduceResult TryBuildElementAccess(
       ValueNode* object, ValueNode* index,
       compiler::ElementAccessFeedback const& feedback,
-      compiler::FeedbackSource const& feedback_source);
+      compiler::FeedbackSource const& feedback_source,
+      GenericAccessFunc&& build_generic_access);
+  template <typename GenericAccessFunc>
+  ReduceResult TryBuildPolymorphicElementAccess(
+      ValueNode* object, ValueNode* index,
+      const compiler::KeyedAccessMode& keyed_mode,
+      const ZoneVector<compiler::ElementAccessInfo>& access_infos,
+      GenericAccessFunc&& build_generic_access);
 
   // Load elimination -- when loading or storing a simple property without
   // side effects, record its value, and allow that value to be re-used on
@@ -2000,7 +2042,11 @@ class MaglevGraphBuilder {
             bytecode_analysis().GetLoopInfoFor(iterator.current_offset());
         // Generators use irreducible control flow, which makes loop peeling too
         // complicated.
-        if (loop_info.innermost() && !loop_info.resumable()) {
+        if (loop_info.innermost() && !loop_info.resumable() &&
+            (loop_info.loop_end() - loop_info.loop_start()) <
+                v8_flags.maglev_loop_peeling_max_size &&
+            (!v8_flags.maglev_loop_peeling_only_trivial ||
+             loop_info.trivial())) {
           DCHECK(!is_loop_peeling_iteration);
           is_loop_peeling_iteration = true;
           loop_headers_to_peel_.Add(iterator.current_offset());
@@ -2111,6 +2157,7 @@ class MaglevGraphBuilder {
   uint32_t* predecessors_;
 
   bool in_peeled_iteration_ = false;
+  bool any_peeled_loop_ = false;
   bool allow_loop_peeling_;
 
   // When processing the peeled iteration of a loop, we need to reset the
@@ -2122,7 +2169,9 @@ class MaglevGraphBuilder {
   BitVector loop_headers_to_peel_;
 
   // Current block information.
+  bool in_prologue_ = true;
   BasicBlock* current_block_ = nullptr;
+  base::Optional<InterpretedDeoptFrame> entry_stack_check_frame_;
   base::Optional<DeoptFrame> latest_checkpointed_frame_;
   SourcePosition current_source_position_;
   struct ForInState {
@@ -2155,6 +2204,10 @@ class MaglevGraphBuilder {
 
   // Bytecode offset at which compilation should start.
   int entrypoint_;
+  int bailout_for_entrypoint() {
+    if (!graph_->is_osr()) return kFunctionEntryBytecodeOffset;
+    return bytecode_analysis_.osr_bailout_id().ToInt();
+  }
 
   int inlining_id_;
 

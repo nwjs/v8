@@ -132,14 +132,17 @@ Node* GraphAssembler::LoadFramePointer() {
   return AddNode(graph()->NewNode(machine()->LoadFramePointer()));
 }
 
+#if V8_ENABLE_WEBASSEMBLY
 Node* GraphAssembler::LoadStackPointer() {
   return AddNode(graph()->NewNode(machine()->LoadStackPointer(), effect()));
 }
 
-Node* GraphAssembler::SetStackPointer(Node* node) {
-  return AddNode(graph()->NewNode(machine()->SetStackPointer(), node, effect(),
-                                  control()));
+Node* GraphAssembler::SetStackPointer(Node* node,
+                                      wasm::FPRelativeScope fp_scope) {
+  return AddNode(
+      graph()->NewNode(machine()->SetStackPointer(fp_scope), node, effect()));
 }
+#endif
 
 Node* GraphAssembler::LoadHeapNumberValue(Node* heap_number) {
   return Load(MachineType::Float64(), heap_number,
@@ -320,6 +323,14 @@ Node* JSGraphAssembler::StoreField(FieldAccess const& access, Node* object,
                                    Node* value) {
   return AddNode(graph()->NewNode(simplified()->StoreField(access), object,
                                   value, effect(), control()));
+}
+
+Node* JSGraphAssembler::ClearPendingMessage() {
+  ExternalReference const ref =
+      ExternalReference::address_of_pending_message(isolate());
+  return AddNode(graph()->NewNode(
+      simplified()->StoreMessage(), jsgraph()->ExternalConstant(ref),
+      jsgraph()->TheHoleConstant(), effect(), control()));
 }
 
 #ifdef V8_MAP_PACKING

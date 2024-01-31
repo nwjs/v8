@@ -157,16 +157,17 @@ namespace internal {
     async_generator_request)                                                   \
   V(_, BREAK_POINT_TYPE, BreakPoint, break_point)                              \
   V(_, BREAK_POINT_INFO_TYPE, BreakPointInfo, break_point_info)                \
+  V(_, BYTECODE_WRAPPER_TYPE, BytecodeWrapper, bytecode_wrapper)               \
   V(_, CALL_SITE_INFO_TYPE, CallSiteInfo, call_site_info)                      \
   V(_, CLASS_BOILERPLATE_TYPE, ClassBoilerplate, class_boilerplate)            \
   V(_, CLASS_POSITIONS_TYPE, ClassPositions, class_positions)                  \
+  V(_, CODE_WRAPPER_TYPE, CodeWrapper, code_wrapper)                           \
   V(_, DEBUG_INFO_TYPE, DebugInfo, debug_info)                                 \
   V(_, ENUM_CACHE_TYPE, EnumCache, enum_cache)                                 \
   V(_, ERROR_STACK_DATA_TYPE, ErrorStackData, error_stack_data)                \
   V(_, FUNCTION_TEMPLATE_RARE_DATA_TYPE, FunctionTemplateRareData,             \
     function_template_rare_data)                                               \
   V(_, INTERCEPTOR_INFO_TYPE, InterceptorInfo, interceptor_info)               \
-  V(_, INTERPRETER_DATA_TYPE, InterpreterData, interpreter_data)               \
   V(_, MODULE_REQUEST_TYPE, ModuleRequest, module_request)                     \
   V(_, PROMISE_CAPABILITY_TYPE, PromiseCapability, promise_capability)         \
   V(_, PROMISE_ON_STACK_TYPE, PromiseOnStack, promise_on_stack)                \

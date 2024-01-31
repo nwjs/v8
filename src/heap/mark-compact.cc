@@ -1100,7 +1100,6 @@ class InternalizedStringTableCleaner final : public RootVisitor {
         if (!heap_object.InReadOnlySpace() &&
             marking_state->IsUnmarked(heap_object)) {
           pointers_removed_++;
-          // Set the entry to the_hole_value (as deleted).
           p.store(StringTable::deleted_element());
         }
       }
@@ -1313,24 +1312,22 @@ class RecordMigratedSlotVisitor : public ObjectVisitorWithCageBases {
   inline void VisitTrustedPointerTableEntry(Tagged<HeapObject> host,
                                             IndirectPointerSlot slot) final {
 #ifdef V8_ENABLE_SANDBOX
+    DCHECK(IsValidIndirectPointerTag(slot.tag()));
+
     // When an object with a "self" indirect pointer is relocated, it needs to
     // update the pointer table entry to point to its new location.
     // TODO(saelo): This is probably not quite the right place for this code,
     // since this visitor is for recording slots, not updating them. Figure
     // out if there's a better place for this logic.
     IndirectPointerHandle handle = slot.Relaxed_LoadHandle();
-
-    // We can see an uninitialized slot here, for example if GC is triggered
-    // during snapshot deserialization. In this case, there is nothing to do
-    // since the slot will be initialized later with the correct pointer.
-    if (handle == kNullIndirectPointerHandle) return;
+    DCHECK_NE(handle, kNullIndirectPointerHandle);
 
     if (slot.tag() == kCodeIndirectPointerTag) {
       DCHECK(IsCode(host));
-      GetProcessWideCodePointerTable()->SetCodeObject(handle, host.ptr());
+      GetProcessWideCodePointerTable()->SetCodeObject(handle, host.address());
     } else {
       TrustedPointerTable& table = heap_->isolate()->trusted_pointer_table();
-      table.Set(handle, host.ptr());
+      table.Set(handle, host.address(), slot.tag());
     }
 #else
     UNREACHABLE();
@@ -1525,7 +1522,7 @@ class EvacuateVisitorBase : public HeapObjectVisitor {
   }
 
   EvacuateVisitorBase(Heap* heap, EvacuationAllocator* local_allocator,
-                      ConcurrentAllocator* shared_old_allocator,
+                      MainAllocator* shared_old_allocator,
                       RecordMigratedSlotVisitor* record_visitor)
       : heap_(heap),
         local_allocator_(local_allocator),
@@ -1597,7 +1594,7 @@ class EvacuateVisitorBase : public HeapObjectVisitor {
 
   Heap* heap_;
   EvacuationAllocator* local_allocator_;
-  ConcurrentAllocator* shared_old_allocator_;
+  MainAllocator* shared_old_allocator_;
   RecordMigratedSlotVisitor* record_visitor_;
   std::vector<MigrationObserver*> observers_;
   MigrateFunction migration_function_;
@@ -1612,12 +1609,11 @@ class EvacuateNewSpaceVisitor final : public EvacuateVisitorBase {
  public:
   explicit EvacuateNewSpaceVisitor(
       Heap* heap, EvacuationAllocator* local_allocator,
-      ConcurrentAllocator* shared_old_allocator,
+      MainAllocator* shared_old_allocator,
       RecordMigratedSlotVisitor* record_visitor,
       PretenuringHandler::PretenuringFeedbackMap* local_pretenuring_feedback)
       : EvacuateVisitorBase(heap, local_allocator, shared_old_allocator,
                             record_visitor),
-        buffer_(LocalAllocationBuffer::InvalidBuffer()),
         promoted_size_(0),
         semispace_copied_size_(0),
         pretenuring_handler_(heap_->pretenuring_handler()),
@@ -1697,7 +1693,6 @@ class EvacuateNewSpaceVisitor final : public EvacuateVisitorBase {
     return allocation;
   }
 
-  LocalAllocationBuffer buffer_;
   intptr_t promoted_size_;
   intptr_t semispace_copied_size_;
   PretenuringHandler* const pretenuring_handler_;
@@ -1746,7 +1741,7 @@ class EvacuateNewToOldSpacePageVisitor final : public HeapObjectVisitor {
 class EvacuateOldSpaceVisitor final : public EvacuateVisitorBase {
  public:
   EvacuateOldSpaceVisitor(Heap* heap, EvacuationAllocator* local_allocator,
-                          ConcurrentAllocator* shared_old_allocator,
+                          MainAllocator* shared_old_allocator,
                           RecordMigratedSlotVisitor* record_visitor)
       : EvacuateVisitorBase(heap, local_allocator, shared_old_allocator,
                             record_visitor) {}
@@ -1851,6 +1846,7 @@ void MarkCompactCollector::MarkRoots(RootVisitor* root_visitor) {
 
 void MarkCompactCollector::MarkRootsFromConservativeStack(
     RootVisitor* root_visitor) {
+  TRACE_GC(heap_->tracer(), GCTracer::Scope::CONSERVATIVE_STACK_SCANNING);
   heap_->IterateConservativeStackRoots(root_visitor,
                                        Heap::IterateRootsMode::kMainIsolate);
 
@@ -2716,6 +2712,69 @@ class FullStringForwardingTableCleaner final
   Heap* const heap_;
 };
 
+class SharedStructTypeRegistryCleaner final : public RootVisitor {
+ public:
+  explicit SharedStructTypeRegistryCleaner(Heap* heap) : heap_(heap) {}
+
+  void VisitRootPointers(Root root, const char* description,
+                         FullObjectSlot start, FullObjectSlot end) override {
+    UNREACHABLE();
+  }
+
+  void VisitRootPointers(Root root, const char* description,
+                         OffHeapObjectSlot start,
+                         OffHeapObjectSlot end) override {
+    DCHECK_EQ(root, Root::kSharedStructTypeRegistry);
+    // The SharedStructTypeRegistry holds the canonical SharedStructType
+    // instance maps weakly. Visit all Map pointers in [start, end), deleting
+    // it if unmarked.
+    auto* marking_state = heap_->marking_state();
+    Isolate* const isolate = heap_->isolate();
+    for (OffHeapObjectSlot p = start; p < end; p++) {
+      Tagged<Object> o = p.load(isolate);
+      DCHECK(!IsString(o));
+      if (IsMap(o)) {
+        Tagged<HeapObject> map = Map::cast(o);
+        DCHECK(map.InAnySharedSpace());
+        if (!map.InReadOnlySpace() && marking_state->IsUnmarked(map)) {
+          elements_removed_++;
+          p.store(SharedStructTypeRegistry::deleted_element());
+        }
+      }
+    }
+  }
+
+  int ElementsRemoved() const { return elements_removed_; }
+
+ private:
+  Heap* heap_;
+  int elements_removed_ = 0;
+};
+
+class ClearSharedStructTypeRegistryJobItem final
+    : public ParallelClearingJob::ClearingItem {
+ public:
+  explicit ClearSharedStructTypeRegistryJobItem(Isolate* isolate)
+      : isolate_(isolate) {
+    DCHECK(isolate->is_shared_space_isolate());
+    DCHECK_NOT_NULL(isolate->shared_struct_type_registry());
+  }
+
+  void Run(JobDelegate* delegate) final {
+    // In case multi-cage pointer compression mode is enabled ensure that
+    // current thread's cage base values are properly initialized.
+    PtrComprCageAccessScope ptr_compr_cage_access_scope(isolate_);
+
+    auto* registry = isolate_->shared_struct_type_registry();
+    SharedStructTypeRegistryCleaner cleaner(isolate_->heap());
+    registry->IterateElements(isolate_, &cleaner);
+    registry->NotifyElementsRemoved(cleaner.ElementsRemoved());
+  }
+
+ private:
+  Isolate* const isolate_;
+};
+
 }  // namespace
 
 void MarkCompactCollector::ClearNonLiveReferences() {
@@ -2747,6 +2806,12 @@ void MarkCompactCollector::ClearNonLiveReferences() {
   clearing_job->Add(std::move(clear_string_table_job_item));
   TRACE_GC_NOTE_WITH_FLOW("ClearStringTableJob started", trace_id,
                           TRACE_EVENT_FLAG_FLOW_OUT);
+  if (isolate->is_shared_space_isolate() &&
+      isolate->shared_struct_type_registry()) {
+    auto clear_shared_struct_type_registry_job_item =
+        std::make_unique<ClearSharedStructTypeRegistryJobItem>(isolate);
+    clearing_job->Add(std::move(clear_shared_struct_type_registry_job_item));
+  }
   auto clearing_job_handle = V8::GetCurrentPlatform()->CreateJob(
       TaskPriority::kUserBlocking, std::move(clearing_job));
   if (v8_flags.parallel_weak_ref_clearing && UseBackgroundThreadsInCycle()) {
@@ -2841,6 +2906,14 @@ void MarkCompactCollector::ClearNonLiveReferences() {
 
 #ifdef V8_ENABLE_SANDBOX
   {
+    TRACE_GC(heap_->tracer(), GCTracer::Scope::MC_SWEEP_TRUSTED_POINTER_TABLE);
+    isolate->trusted_pointer_table().Sweep(heap_->trusted_pointer_space(),
+                                           isolate->counters());
+  }
+#endif  // V8_ENABLE_SANDBOX
+
+#ifdef V8_ENABLE_SANDBOX
+  {
     TRACE_GC(heap_->tracer(), GCTracer::Scope::MC_SWEEP_CODE_POINTER_TABLE);
     GetProcessWideCodePointerTable()->Sweep(heap_->code_pointer_space(),
                                             isolate->counters());
@@ -2925,14 +2998,19 @@ void MarkCompactCollector::FlushBytecodeFromSFI(
       [](Tagged<HeapObject> object, ObjectSlot slot,
          Tagged<HeapObject> target) { RecordSlot(object, slot, target); });
 
-  // The size of the bytecode array should always be larger than an
-  // UncompiledData object.
-  static_assert(BytecodeArray::SizeFor(0) >=
+  // Replace the bytecode with an uncompiled data object.
+  // As the bytecode arrays itself is located in trusted space, we cannot
+  // convert that object, but instead need to convert another object living
+  // inside the main pointer compression cage. The wrapper object is suitable
+  // for that purpose. The size of the bytecode wrapper must therefore match
+  // that of an UncompiledData object (it could also be larger, but it's most
+  // efficient if the sizes match because then we can avoid creating a filler
+  // object for the leftover space in the wrapper object).
+  static_assert(BytecodeWrapper::kSize ==
                 UncompiledDataWithoutPreparseData::kSize);
-
-  // Replace bytecode array with an uncompiled data array.
-  Tagged<HeapObject> compiled_data =
+  Tagged<BytecodeArray> bytecode_array =
       shared_info->GetBytecodeArray(heap_->isolate());
+  Tagged<HeapObject> compiled_data = bytecode_array->wrapper();
   Address compiled_data_start = compiled_data.address();
   int compiled_data_size = ALIGN_TO_ALLOCATION_ALIGNMENT(compiled_data->Size());
   MemoryChunk* chunk = MemoryChunk::FromAddress(compiled_data_start);
@@ -2957,14 +3035,6 @@ void MarkCompactCollector::FlushBytecodeFromSFI(
       ReadOnlyRoots(heap_).uncompiled_data_without_preparse_data_map(),
       SKIP_WRITE_BARRIER);
 
-  // Create a filler object for any left over space in the bytecode array.
-  if (!heap_->IsLargeObject(compiled_data)) {
-    const int aligned_filler_offset =
-        ALIGN_TO_ALLOCATION_ALIGNMENT(UncompiledDataWithoutPreparseData::kSize);
-    heap_->CreateFillerObjectAt(compiled_data.address() + aligned_filler_offset,
-                                compiled_data_size - aligned_filler_offset);
-  }
-
   // Initialize the uncompiled data.
   Tagged<UncompiledData> uncompiled_data = UncompiledData::cast(compiled_data);
   uncompiled_data->InitAfterBytecodeFlush(
@@ -2978,9 +3048,7 @@ void MarkCompactCollector::FlushBytecodeFromSFI(
          marking_state_->IsMarked(inferred_name));
   marking_state_->TryMarkAndAccountLiveBytes(uncompiled_data);
 
-  // Use the raw function data setter to avoid validity checks, since we're
-  // performing the unusual task of decompiling.
-  shared_info->set_function_data(uncompiled_data, kReleaseStore);
+  shared_info->set_uncompiled_data(uncompiled_data);
   DCHECK(!shared_info->is_compiled());
 }
 
@@ -3001,10 +3069,14 @@ void MarkCompactCollector::ProcessOldCodeCandidates() {
     if (!is_bytecode_live) number_of_flushed_sfis++;
 
     // Now record the slot, which has either been updated to an uncompiled data,
-    // Baseline code or BytecodeArray which is still alive.
+    // Baseline code or BytecodeArray which is still alive. If the sandbox is
+    // enabled, the slot may be empty though as BytecodeArrays are referenced
+    // through an indirect pointer. In that case, no action is necessary here.
     ObjectSlot slot =
         flushing_candidate->RawField(SharedFunctionInfo::kFunctionDataOffset);
-    RecordSlot(flushing_candidate, slot, HeapObject::cast(*slot));
+    if (IsHeapObject(*slot)) {
+      RecordSlot(flushing_candidate, slot, HeapObject::cast(*slot));
+    }
   }
 
   if (v8_flags.trace_flush_code) {
@@ -3021,8 +3093,8 @@ bool MarkCompactCollector::ProcessOldBytecodeSFI(
   // flushed it before processing this candidate. This can happen when using
   // CloneSharedFunctionInfo().
   Isolate* const isolate = heap_->isolate();
-  const bool bytecode_already_decompiled = IsUncompiledData(
-      flushing_candidate->function_data(isolate, kAcquireLoad), isolate);
+  const bool bytecode_already_decompiled =
+      flushing_candidate->HasUncompiledData();
   const bool is_bytecode_live =
       !bytecode_already_decompiled &&
       non_atomic_marking_state_->IsMarked(
@@ -3036,14 +3108,13 @@ bool MarkCompactCollector::ProcessOldBytecodeSFI(
 
 bool MarkCompactCollector::ProcessOldBaselineSFI(
     Tagged<SharedFunctionInfo> flushing_candidate) {
-  Tagged<Code> baseline_code =
-      Code::cast(flushing_candidate->function_data(kAcquireLoad));
+  Tagged<Code> baseline_code = flushing_candidate->baseline_code(kAcquireLoad);
   // Safe to do a relaxed load here since the Code was acquire-loaded.
   Tagged<InstructionStream> baseline_istream =
       baseline_code->instruction_stream(baseline_code->code_cage_base(),
                                         kRelaxedLoad);
   Tagged<HeapObject> baseline_bytecode_or_interpreter_data =
-      baseline_code->bytecode_or_interpreter_data();
+      baseline_code->bytecode_or_interpreter_data(heap_->isolate());
 
   // During flushing a BytecodeArray is transformed into an UncompiledData
   // in place. Seeing an UncompiledData here implies that another
@@ -3076,8 +3147,7 @@ bool MarkCompactCollector::ProcessOldBaselineSFI(
     // or UncompiledData found on the baseline code. We can skip this step
     // if the BytecodeArray is not live and not already decompiled, because
     // FlushBytecodeFromSFI below will set the function_data field.
-    flushing_candidate->set_function_data(baseline_bytecode_or_interpreter_data,
-                                          kReleaseStore);
+    flushing_candidate->FlushBaselineCode(heap_->isolate());
   }
 
   if (!is_bytecode_live) {
@@ -3114,7 +3184,8 @@ void MarkCompactCollector::ClearFlushedJsFunctions() {
                                      Tagged<Object> target) {
       RecordSlot(object, slot, HeapObject::cast(target));
     };
-    flushed_js_function->ResetIfCodeFlushed(gc_notify_updated_slot);
+    flushed_js_function->ResetIfCodeFlushed(heap_->isolate(),
+                                            gc_notify_updated_slot);
   }
 }
 
@@ -3128,7 +3199,8 @@ void MarkCompactCollector::ProcessFlushedBaselineCandidates() {
                                      Tagged<Object> target) {
       RecordSlot(object, slot, HeapObject::cast(target));
     };
-    flushed_js_function->ResetIfCodeFlushed(gc_notify_updated_slot);
+    flushed_js_function->ResetIfCodeFlushed(heap_->isolate(),
+                                            gc_notify_updated_slot);
 
 #ifndef V8_ENABLE_SANDBOX
     // Record the code slot that has been updated either to CompileLazy,
@@ -3733,8 +3805,8 @@ static inline void UpdateStrongCodeSlot(Tagged<HeapObject> host,
         slot.address() - Code::kInstructionStreamOffset));
     Tagged<InstructionStream> instruction_stream =
         code->instruction_stream(code_cage_base);
-    Isolate* isolate_for_sandbox = GetIsolateForSandbox(host);
-    code->UpdateInstructionStart(isolate_for_sandbox, instruction_stream);
+    code->UpdateInstructionStart(GetIsolateForSandbox(host),
+                                 instruction_stream);
   }
 }
 
@@ -3901,11 +3973,11 @@ void MarkCompactCollector::EvacuateEpilogue() {
 }
 
 namespace {
-ConcurrentAllocator* CreateSharedOldAllocator(Heap* heap) {
+MainAllocator* CreateSharedOldAllocator(Heap* heap) {
   if (v8_flags.shared_string_table && heap->isolate()->has_shared_space() &&
       !heap->isolate()->is_shared_space_isolate()) {
-    return new ConcurrentAllocator(nullptr, heap->shared_allocation_space(),
-                                   ConcurrentAllocator::Context::kGC);
+    return new MainAllocator(heap, heap->shared_allocation_space(),
+                             MainAllocator::kInGC);
   }
 
   return nullptr;
@@ -3988,7 +4060,7 @@ class Evacuator final : public Malloced {
   EvacuationAllocator local_allocator_;
 
   // Allocator for the shared heap.
-  std::unique_ptr<ConcurrentAllocator> shared_old_allocator_;
+  std::unique_ptr<MainAllocator> shared_old_allocator_;
 
   RecordMigratedSlotVisitor record_visitor_;
 

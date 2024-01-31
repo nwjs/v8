@@ -22,6 +22,7 @@
 #include "src/compiler/feedback-source.h"
 #include "src/compiler/graph-assembler.h"
 #include "src/compiler/js-graph.h"
+#include "src/compiler/js-operator.h"
 #include "src/compiler/linkage.h"
 #include "src/compiler/map-inference.h"
 #include "src/compiler/node-matchers.h"
@@ -2453,6 +2454,8 @@ TNode<Object> PromiseBuiltinReducerAssembler::ReducePromiseConstructor(
   Try(_ {
     CallPromiseExecutor(executor, resolve, reject, lazy_with_catch_frame_state);
   }).Catch([&](TNode<Object> exception) {
+    // Clear pending message since the exception is not going to be rethrown.
+    ClearPendingMessage();
     CallPromiseReject(reject, exception, lazy_with_catch_frame_state);
   });
 
@@ -2644,6 +2647,8 @@ Reduction JSCallReducer::Reduce(Node* node) {
       return ReduceJSConstructWithArrayLike(node);
     case IrOpcode::kJSConstructWithSpread:
       return ReduceJSConstructWithSpread(node);
+    case IrOpcode::kJSConstructForwardAllArgs:
+      return ReduceJSConstructForwardAllArgs(node);
     case IrOpcode::kJSCall:
       return ReduceJSCall(node);
     case IrOpcode::kJSCallWithArrayLike:
@@ -5705,6 +5710,40 @@ Reduction JSCallReducer::ReduceJSConstructWithSpread(Node* node) {
       n.target(), n.effect(), n.control());
 }
 
+Reduction JSCallReducer::ReduceJSConstructForwardAllArgs(Node* node) {
+  JSConstructForwardAllArgsNode n(node);
+  DCHECK_EQ(n.ArgumentCount(), 0);
+
+  // If this frame is not being inlined, JSConstructForwardAllArgs will be
+  // lowered later in JSGenericLowering to a builtin call.
+  FrameState frame_state = n.frame_state();
+  if (frame_state.outer_frame_state()->opcode() != IrOpcode::kFrameState) {
+    return NoChange();
+  }
+
+  // Hook up the arguments directly when forwarding arguments of inlined frames.
+  FrameState outer_state{frame_state.outer_frame_state()};
+  FrameStateInfo outer_info = outer_state.frame_state_info();
+  if (outer_info.type() == FrameStateType::kInlinedExtraArguments) {
+    frame_state = outer_state;
+  }
+
+  int argc = 0;
+  StateValuesAccess parameters_access(frame_state.parameters());
+  for (auto it = parameters_access.begin_without_receiver(); !it.done(); ++it) {
+    DCHECK_NOT_NULL(it.node());
+    node->InsertInput(graph()->zone(),
+                      JSCallOrConstructNode::ArgumentIndex(argc++), it.node());
+  }
+
+  ConstructParameters const& p = n.Parameters();
+  NodeProperties::ChangeOp(
+      node, javascript()->Construct(JSConstructNode::ArityForArgc(argc),
+                                    p.frequency(), p.feedback()));
+  CheckIfConstructor(node);
+  return Changed(node).FollowedBy(ReduceJSConstruct(node));
+}
+
 Reduction JSCallReducer::ReduceReturnReceiver(Node* node) {
   JSCallNode n(node);
   Node* receiver = n.receiver();
@@ -7545,9 +7584,14 @@ Reduction JSCallReducer::ReduceArrayBufferViewByteLengthAccessor(
     return inference.NoChange();
   }
 
+  const CallParameters& p = CallParametersOf(node->op());
+  if (p.speculation_mode() == SpeculationMode::kDisallowSpeculation) {
+    return inference.NoChange();
+  }
+  DCHECK(p.feedback().IsValid());
+
   inference.RelyOnMapsPreferStability(dependencies(), jsgraph(), &effect,
-                                      control,
-                                      CallParametersOf(node->op()).feedback());
+                                      control, p.feedback());
 
   const bool depended_on_detaching_protector =
       dependencies()->DependOnArrayBufferDetachingProtector();

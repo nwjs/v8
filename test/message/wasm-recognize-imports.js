@@ -95,6 +95,9 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
   let kSig_e_d = makeSig([kWasmF64], [kRefExtern]);
   let kSig_i_ri = makeSig([kWasmExternRef, kWasmI32], [kWasmI32]);
   let kSig_i_rr = makeSig([kWasmExternRef, kWasmExternRef], [kWasmI32]);
+  let kSig_i_rri =
+      makeSig([kWasmExternRef, kWasmExternRef, kWasmI32], [kWasmI32]);
+  let kSig_e_r = makeSig([kWasmExternRef], [kRefExtern]);
   let kSig_e_i = makeSig([kWasmI32], [kRefExtern]);
   let kSig_e_rii = makeSig([kWasmExternRef, kWasmI32, kWasmI32],
                           [kRefExtern]);
@@ -110,6 +113,8 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
   let a16ref = wasmRefNullType(kArrayI16);
   let a8ref = wasmRefNullType(kArrayI8);
 
+  builder.addImport('String', 'cast', kSig_e_r);
+  builder.addImport('String', 'test', kSig_i_r);
   builder.addImport('String', 'fromWtf16Array',
                     makeSig([a16ref, kWasmI32, kWasmI32], [kRefExtern]));
   builder.addImport('String', 'fromWtf8Array',
@@ -128,13 +133,19 @@ d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
 
   builder.addImport('related', 'intToString', kSig_e_ii);
   builder.addImport('related', 'doubleToString', kSig_e_d);
+  builder.addImport('related', 'stringIndexOf', kSig_i_rri);
+  builder.addImport('related', 'stringToLowerCase', kSig_r_r);
+
   // String-consuming imports like "toLowerCase" are not (yet?) supported for
   // special-casing with imported strings due to lack of static typing.
   let intToString = Function.prototype.call.bind(Number.prototype.toString);
   let doubleToString = intToString;
+  let stringIndexOf = Function.prototype.call.bind(String.prototype.indexOf);
+  let stringToLowerCase =
+      Function.prototype.call.bind(String.prototype.toLowerCase);
 
   builder.instantiate({
     String: WebAssembly.String,
-    related: { intToString, doubleToString }
+    related: {intToString, doubleToString, stringIndexOf, stringToLowerCase}
   });
 })();

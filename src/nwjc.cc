@@ -165,6 +165,7 @@ int main(int argc, char** argv) {
     i::Handle<i::String> orig_source = iso->factory()
       ->NewStringFromUtf8(base::CStrVector(chars)).ToHandleChecked();
 
+    ScriptCompiler::CompilationDetails compilation_details;
     ScriptCompiler::CachedData* cache = NULL;
     i::ScriptDetails script_details(iso->factory()->empty_string(),
                                  v8::ScriptOriginOptions(false, false, false, i::v8_flags.nw_module));
@@ -172,7 +173,7 @@ int main(int argc, char** argv) {
                                                 script_details,
                                                 v8::ScriptCompiler::kEagerCompile,
                                                 v8::ScriptCompiler::kNoCacheBecauseDeferredProduceCodeCache,
-                                                i::NOT_NATIVES_CODE);
+						i::NOT_NATIVES_CODE, &compilation_details);
     if (try_catch.HasCaught()) {
       ReportUncaughtException(isolate, try_catch);
       fprintf(stderr, "Failure compiling '%s' (see above)\n", argv[1]);

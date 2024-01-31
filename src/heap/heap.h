@@ -415,9 +415,8 @@ class Heap final {
 
   void NotifyBootstrapComplete();
 
-  void NotifyOldGenerationExpansion(AllocationSpace space, MemoryChunk* chunk);
-  void NotifyOldGenerationExpansionBackground(AllocationSpace space,
-                                              MemoryChunk* chunk);
+  void NotifyOldGenerationExpansion(LocalHeap* local_heap,
+                                    AllocationSpace space, MemoryChunk* chunk);
 
   inline Address* NewSpaceAllocationTopAddress();
   inline Address* NewSpaceAllocationLimitAddress();
@@ -566,10 +565,13 @@ class Heap final {
   inline HeapState gc_state() const {
     return gc_state_.load(std::memory_order_relaxed);
   }
-  void SetGCState(HeapState state);
+  V8_EXPORT_PRIVATE void SetGCState(HeapState state);
   bool IsTearingDown() const { return gc_state() == TEAR_DOWN; }
   bool IsInGC() const {
-    return gc_state() != NOT_IN_GC && gc_state() != TEAR_DOWN;
+    // Load state only once and store it in local variable. Otherwise multiples
+    // loads could return different states on background threads.
+    HeapState state = gc_state();
+    return state != NOT_IN_GC && state != TEAR_DOWN;
   }
   bool force_oom() const { return force_oom_; }
 
@@ -686,6 +688,9 @@ class Heap final {
 
   V8_EXPORT_PRIVATE bool ShouldOptimizeForMemoryUsage();
 
+  // Returns true when GC should optimize for battery.
+  V8_EXPORT_PRIVATE bool ShouldOptimizeForBattery() const;
+
   bool HighMemoryPressure() {
     return memory_pressure_level_.load(std::memory_order_relaxed) !=
            v8::MemoryPressureLevel::kNone;
@@ -712,7 +717,8 @@ class Heap final {
   // Initialization. ===========================================================
   // ===========================================================================
 
-  void ConfigureHeap(const v8::ResourceConstraints& constraints);
+  void ConfigureHeap(const v8::ResourceConstraints& constraints,
+                     v8::CppHeap* cpp_heap);
   void ConfigureHeapDefault();
 
   // Prepares the heap, setting up for deserialization.
@@ -796,13 +802,13 @@ class Heap final {
   ExternalPointerTable::Space* read_only_external_pointer_space() {
     return &read_only_external_pointer_space_;
   }
-
-  TrustedPointerTable::Space* trusted_pointer_space() {
-    return &trusted_pointer_space_;
-  }
 #endif  // V8_COMPRESS_POINTERS
 
 #ifdef V8_ENABLE_SANDBOX
+  TrustedPointerTable::Space* trusted_pointer_space() {
+    return &trusted_pointer_space_;
+  }
+
   CodePointerTable::Space* code_pointer_space() { return &code_pointer_space_; }
 #endif  // V8_ENABLE_SANDBOX
 
@@ -821,9 +827,6 @@ class Heap final {
 
   // Check if we run on isolate's main thread.
   inline bool IsMainThread() const;
-  // Check if we run on the current main thread of the shared isolate during
-  // shared GC.
-  inline bool IsSharedMainThread() const;
 
   MarkCompactCollector* mark_compact_collector() {
     return mark_compact_collector_.get();
@@ -1048,9 +1051,8 @@ class Heap final {
   V8_EXPORT_PRIVATE void StartIncrementalMarkingOnInterrupt();
 
   V8_EXPORT_PRIVATE void StartIncrementalMarkingIfAllocationLimitIsReached(
-      GCFlags gc_flags,
+      LocalHeap* local_heap, GCFlags gc_flags,
       GCCallbackFlags gc_callback_flags = GCCallbackFlags::kNoGCCallbackFlags);
-  void StartIncrementalMarkingIfAllocationLimitIsReachedBackground();
 
   // Synchronously finalizes incremental marking.
   V8_EXPORT_PRIVATE void FinalizeIncrementalMarkingAtomically(
@@ -1633,7 +1635,7 @@ class Heap final {
 
   bool ShouldUseBackgroundThreads() const;
 
-  HeapAllocator* allocator() { return &heap_allocator_; }
+  HeapAllocator* allocator() { return heap_allocator_; }
 
  private:
   class AllocationTrackerForDebugging;
@@ -1910,7 +1912,19 @@ class Heap final {
     return old_generation_allocation_limit_.load(std::memory_order_relaxed);
   }
 
-  size_t global_allocation_limit() const { return global_allocation_limit_; }
+  size_t global_allocation_limit() const {
+    return global_allocation_limit_.load(std::memory_order_relaxed);
+  }
+
+  bool old_generation_allocation_limit_configured() const {
+    return old_generation_allocation_limit_configured_.load(
+        std::memory_order_relaxed);
+  }
+
+  void set_old_generation_allocation_limit_configured(bool value) {
+    old_generation_allocation_limit_configured_.store(
+        value, std::memory_order_relaxed);
+  }
 
   size_t max_old_generation_size() const {
     return max_old_generation_size_.load(std::memory_order_relaxed);
@@ -2057,7 +2071,7 @@ class Heap final {
   // more expedient to get at the isolate directly from within Heap methods.
   Isolate* isolate_ = nullptr;
 
-  HeapAllocator heap_allocator_;
+  HeapAllocator* heap_allocator_ = nullptr;
 
   // These limits are initialized in Heap::ConfigureHeap based on the resource
   // constraints and flags.
@@ -2087,7 +2101,7 @@ class Heap final {
   // limit in Heap::RecomputeLimits. The old generation allocation limit is then
   // considered to be configured for all subsequent GCs. After the first full GC
   // this field is only ever reset for top context disposals.
-  bool old_generation_allocation_limit_configured_ = false;
+  std::atomic<bool> old_generation_allocation_limit_configured_ = false;
 
   size_t maximum_committed_ = 0;
   size_t old_generation_capacity_after_bootstrap_ = 0;
@@ -2142,12 +2156,12 @@ class Heap final {
   ExternalPointerTable::Space external_pointer_space_;
   // Likewise but for slots in host objects in ReadOnlySpace.
   ExternalPointerTable::Space read_only_external_pointer_space_;
-
-  // Likewise, but for the trusted pointer table.
-  TrustedPointerTable::Space trusted_pointer_space_;
 #endif  // V8_COMPRESS_POINTERS
 
 #ifdef V8_ENABLE_SANDBOX
+  // Likewise, but for the trusted pointer table.
+  TrustedPointerTable::Space trusted_pointer_space_;
+
   // The space in the process-wide code pointer table managed by this heap.
   CodePointerTable::Space code_pointer_space_;
 #endif  // V8_ENABLE_SANDBOX
@@ -2169,7 +2183,7 @@ class Heap final {
 
   // The maximum percent of the marking limit reached without causing marking.
   // This is tracked when specifying --fuzzer-gc-analysis.
-  double max_marking_limit_reached_ = 0.0;
+  std::atomic<double> max_marking_limit_reached_ = 0.0;
 
   // How many mark-sweep collections happened.
   unsigned int ms_count_ = 0;
@@ -2193,7 +2207,7 @@ class Heap final {
   // which collector to invoke, before expanding a paged space in the old
   // generation and on every allocation in large object space.
   std::atomic<size_t> old_generation_allocation_limit_{0};
-  size_t global_allocation_limit_ = 0;
+  std::atomic<size_t> global_allocation_limit_{0};
 
   // Weak list heads, threaded through the objects.
   // List heads are initialized lazily and contain the undefined_value at start.
@@ -2269,7 +2283,14 @@ class Heap final {
   TrustedRange* trusted_range_ = nullptr;
 #endif
 
-  v8::CppHeap* cpp_heap_ = nullptr;  // Owned by the embedder.
+  // V8 configuration where V8 owns the heap which is either created or passed
+  // in during Isolate initialization.
+  std::unique_ptr<CppHeap> owning_cpp_heap_;
+  // Deprecated API where the heap is owned by the embedder. This field is
+  // always set, independent of which CppHeap configuration (owned, unowned) is
+  // used. As soon as Isolate::AttachCppHeap() is removed, this field should
+  // also be removed and we should exclusively rely on the owning version.
+  v8::CppHeap* cpp_heap_ = nullptr;
   EmbedderRootsHandler* embedder_roots_handler_ =
       nullptr;  // Owned by the embedder.
 

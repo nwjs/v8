@@ -65,10 +65,6 @@ Address GcSafeCode::InstructionEnd(Isolate* isolate, Address pc) const {
   return UnsafeCastToCode()->InstructionEnd(isolate, pc);
 }
 
-Address GcSafeCode::constant_pool(Tagged<InstructionStream> istream) const {
-  return UnsafeCastToCode()->constant_pool(istream);
-}
-
 bool GcSafeCode::CanDeoptAt(Isolate* isolate, Address pc) const {
   Tagged<DeoptimizationData> deopt_data = DeoptimizationData::unchecked_cast(
       UnsafeCastToCode()->unchecked_deoptimization_data());
@@ -99,11 +95,31 @@ ACCESSORS_CHECKED2(Code, deoptimization_data, Tagged<FixedArray>,
                    kind() != CodeKind::BASELINE,
                    kind() != CodeKind::BASELINE &&
                        !ObjectInYoungGeneration(value))
-ACCESSORS_CHECKED2(Code, bytecode_or_interpreter_data, Tagged<HeapObject>,
-                   kDeoptimizationDataOrInterpreterDataOffset,
-                   kind() == CodeKind::BASELINE,
-                   kind() == CodeKind::BASELINE &&
-                       !ObjectInYoungGeneration(value))
+
+Tagged<HeapObject> Code::bytecode_or_interpreter_data(
+    IsolateForSandbox isolate) const {
+  DCHECK_EQ(kind(), CodeKind::BASELINE);
+  PtrComprCageBase cage_base = GetPtrComprCageBase(*this);
+  Tagged<HeapObject> value =
+      TaggedField<HeapObject, kDeoptimizationDataOrInterpreterDataOffset>::load(
+          cage_base, *this);
+  if (IsBytecodeWrapper(value)) {
+    return BytecodeWrapper::cast(value)->bytecode(isolate);
+  }
+  return value;
+}
+void Code::set_bytecode_or_interpreter_data(Tagged<HeapObject> value,
+                                            WriteBarrierMode mode) {
+  DCHECK(kind() == CodeKind::BASELINE && !ObjectInYoungGeneration(value));
+  if (IsBytecodeArray(value)) {
+    value = BytecodeArray::cast(value)->wrapper();
+  }
+  TaggedField<HeapObject, kDeoptimizationDataOrInterpreterDataOffset>::store(
+      *this, value);
+  CONDITIONAL_WRITE_BARRIER(*this, kDeoptimizationDataOrInterpreterDataOffset,
+                            value, mode);
+}
+
 ACCESSORS_CHECKED2(Code, source_position_table, Tagged<ByteArray>,
                    kPositionTableOffset, kind() != CodeKind::BASELINE,
                    kind() != CodeKind::BASELINE &&
@@ -112,6 +128,8 @@ ACCESSORS_CHECKED2(Code, bytecode_offset_table, Tagged<ByteArray>,
                    kPositionTableOffset, kind() == CodeKind::BASELINE,
                    kind() == CodeKind::BASELINE &&
                        !ObjectInYoungGeneration(value))
+
+ACCESSORS(Code, wrapper, Tagged<CodeWrapper>, kWrapperOffset)
 
 Tagged<ByteArray> Code::SourcePositionTable(
     Isolate* isolate, Tagged<SharedFunctionInfo> sfi) const {
@@ -428,14 +446,6 @@ Address Code::constant_pool() const {
   return metadata_start() + constant_pool_offset();
 }
 
-Address Code::constant_pool(
-    Tagged<InstructionStream> instruction_stream) const {
-  if (!has_constant_pool()) return kNullAddress;
-  static_assert(InstructionStream::kOnHeapBodyIsContiguous);
-  return instruction_stream->instruction_start() + instruction_size() +
-         constant_pool_offset();
-}
-
 Address Code::code_comments() const {
   return metadata_start() + code_comments_offset();
 }
@@ -600,17 +610,7 @@ DEF_GETTER(Code, instruction_start, Address) {
 #endif
 }
 
-void Code::init_instruction_start(Isolate* isolate, Address value) {
-#ifdef V8_ENABLE_SANDBOX
-  // In this case, the instruction_start is stored in this Code's code pointer
-  // table entry, so initialize that instead.
-  InitSelfCodePointerField(kSelfIndirectPointerOffset, isolate, *this, value);
-#else
-  set_instruction_start(isolate, value);
-#endif
-}
-
-void Code::set_instruction_start(Isolate* isolate, Address value) {
+void Code::set_instruction_start(IsolateForSandbox isolate, Address value) {
 #ifdef V8_ENABLE_SANDBOX
   WriteCodeEntrypointViaCodePointerField(kSelfIndirectPointerOffset, value);
 #else
@@ -619,19 +619,19 @@ void Code::set_instruction_start(Isolate* isolate, Address value) {
 }
 
 void Code::SetInstructionStreamAndInstructionStart(
-    Isolate* isolate_for_sandbox, Tagged<InstructionStream> code,
+    IsolateForSandbox isolate, Tagged<InstructionStream> code,
     WriteBarrierMode mode) {
   set_raw_instruction_stream(code, mode);
-  set_instruction_start(isolate_for_sandbox, code->instruction_start());
+  set_instruction_start(isolate, code->instruction_start());
 }
 
-void Code::SetInstructionStartForOffHeapBuiltin(Isolate* isolate_for_sandbox,
+void Code::SetInstructionStartForOffHeapBuiltin(IsolateForSandbox isolate,
                                                 Address entry) {
   DCHECK(!has_instruction_stream());
-  set_instruction_start(isolate_for_sandbox, entry);
+  set_instruction_start(isolate, entry);
 }
 
-void Code::ClearInstructionStartForSerialization(Isolate* isolate) {
+void Code::ClearInstructionStartForSerialization(IsolateForSandbox isolate) {
 #ifdef V8_ENABLE_SANDBOX
   // The instruction start is stored in this object's code pointer table.
   WriteField<CodePointerHandle>(kSelfIndirectPointerOffset,
@@ -641,10 +641,10 @@ void Code::ClearInstructionStartForSerialization(Isolate* isolate) {
 #endif  // V8_ENABLE_SANDBOX
 }
 
-void Code::UpdateInstructionStart(Isolate* isolate_for_sandbox,
+void Code::UpdateInstructionStart(IsolateForSandbox isolate,
                                   Tagged<InstructionStream> istream) {
   DCHECK_EQ(raw_instruction_stream(), istream);
-  set_instruction_start(isolate_for_sandbox, istream->instruction_start());
+  set_instruction_start(isolate, istream->instruction_start());
 }
 
 void Code::clear_padding() {
@@ -706,6 +706,10 @@ inline bool Code::is_baseline_trampoline_builtin() const {
 inline bool Code::is_baseline_leave_frame_builtin() const {
   return builtin_id() == Builtin::kBaselineLeaveFrame;
 }
+
+CAST_ACCESSOR(CodeWrapper)
+OBJECT_CONSTRUCTORS_IMPL(CodeWrapper, Struct)
+CODE_POINTER_ACCESSORS(CodeWrapper, code, kCodeOffset)
 
 }  // namespace internal
 }  // namespace v8

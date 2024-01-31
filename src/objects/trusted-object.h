@@ -75,10 +75,8 @@ class TrustedObject : public HeapObject {
 // document the potential pitfalls when doing so.
 class ExposedTrustedObject : public TrustedObject {
  public:
-  // Initializes this object by creating its pointer table entry. As these
-  // objects can be created on background threads, this method requires a
-  // LocalIsolate* instead of an Isolate*.
-  inline void init_self_indirect_pointer(LocalIsolate* isolate);
+  // Initializes this object by creating its pointer table entry.
+  inline void init_self_indirect_pointer(IsolateForSandbox isolate);
 
   // Returns the 'self' indirect pointer of this object.
   // This indirect pointer references a pointer table entry (either in the
@@ -93,7 +91,7 @@ class ExposedTrustedObject : public TrustedObject {
   // The 'self' indirect pointer is only available when the sandbox is enabled.
   // Otherwise, these objects are referenced through direct pointers.
 #define FIELD_LIST(V)                                                   \
-  V(kSelfIndirectPointerOffset, kIndirectPointerSlotSize)               \
+  V(kSelfIndirectPointerOffset, kIndirectPointerSize)                   \
   V(kUnalignedHeaderSize, OBJECT_POINTER_PADDING(kUnalignedHeaderSize)) \
   V(kHeaderSize, 0)                                                     \
   V(kSize, 0)

@@ -245,9 +245,15 @@ class LocalBase : public IndirectHandleBase {
  * to these values as to their handles.
  */
 template <class T>
-class Local : public LocalBase<T> {
+class V8_TRIVIAL_ABI Local : public LocalBase<T> {
  public:
   V8_INLINE Local() : LocalBase<T>() { VerifyOnStack(); }
+
+#if defined(V8_ENABLE_LOCAL_OFF_STACK_CHECK) && V8_HAS_ATTRIBUTE_TRIVIAL_ABI
+  // In this case, Local<T> becomes not trivially copyable.
+  V8_INLINE Local(const Local& other) : LocalBase<T>(other) { VerifyOnStack(); }
+  Local& operator=(const Local&) = default;
+#endif
 
   template <class S>
   V8_INLINE Local(Local<S> that) : LocalBase<T>(that) {
@@ -429,11 +435,15 @@ namespace internal {
 // A local variant that is suitable for off-stack allocation.
 // Used internally by LocalVector<T>. Not to be used directly!
 template <typename T>
-class LocalUnchecked : public Local<T> {
+class V8_TRIVIAL_ABI LocalUnchecked : public Local<T> {
  public:
   LocalUnchecked() : Local<T>(do_not_check) {}
+
+#if defined(V8_ENABLE_LOCAL_OFF_STACK_CHECK) && V8_HAS_ATTRIBUTE_TRIVIAL_ABI
+  // In this case, LocalUnchecked<T> becomes not trivially copyable.
   LocalUnchecked(const LocalUnchecked& other) : Local<T>(other, do_not_check) {}
   LocalUnchecked& operator=(const LocalUnchecked&) = default;
+#endif
 
   // Implicit conversion from Local.
   LocalUnchecked(const Local<T>& other)  // NOLINT(runtime/explicit)
@@ -643,8 +653,37 @@ class MaybeLocal {
     return IsEmpty() ? default_value : Local<S>(local_);
   }
 
+  /**
+   * Cast a handle to a subclass, e.g. MaybeLocal<Value> to MaybeLocal<Object>.
+   * This is only valid if the handle actually refers to a value of the target
+   * type.
+   */
+  template <class S>
+  V8_INLINE static MaybeLocal<T> Cast(MaybeLocal<S> that) {
+#ifdef V8_ENABLE_CHECKS
+    // If we're going to perform the type check then we have to check
+    // that the handle isn't empty before doing the checked cast.
+    if (that.IsEmpty()) return MaybeLocal<T>();
+    T::Cast(that.local_.template value<S>());
+#endif
+    return MaybeLocal<T>(that.local_);
+  }
+
+  /**
+   * Calling this is equivalent to MaybeLocal<S>::Cast().
+   * In particular, this is only valid if the handle actually refers to a value
+   * of the target type.
+   */
+  template <class S>
+  V8_INLINE MaybeLocal<S> As() const {
+    return MaybeLocal<S>::Cast(*this);
+  }
+
  private:
   Local<T> local_;
+
+  template <typename S>
+  friend class MaybeLocal;
 };
 
 /**

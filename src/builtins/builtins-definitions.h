@@ -143,6 +143,10 @@ namespace internal {
   TFC(ConstructWithArrayLike_WithFeedback,                                     \
       ConstructWithArrayLike_WithFeedback)                                     \
   ASM(ConstructForwardVarargs, ConstructForwardVarargs)                        \
+  ASM(ConstructForwardAllArgs, ConstructForwardAllArgs)                        \
+  TFC(ConstructForwardAllArgs_Baseline, ConstructForwardAllArgs_Baseline)      \
+  TFC(ConstructForwardAllArgs_WithFeedback,                                    \
+      ConstructForwardAllArgs_WithFeedback)                                    \
   ASM(ConstructFunctionForwardVarargs, ConstructForwardVarargs)                \
   TFC(Construct_Baseline, Construct_Baseline)                                  \
   TFC(Construct_WithFeedback, Construct_WithFeedback)                          \
@@ -181,6 +185,7 @@ namespace internal {
   /* JSFunction in the form of bytecodes */                                    \
   ASM(InterpreterEntryTrampoline, JSTrampoline)                                \
   ASM(InterpreterEntryTrampolineForProfiling, JSTrampoline)                    \
+  ASM(InterpreterForwardAllArgsThenConstruct, ConstructForwardAllArgs)         \
   ASM(InterpreterPushArgsThenCall, InterpreterPushArgsThenCall)                \
   ASM(InterpreterPushUndefinedAndArgsThenCall, InterpreterPushArgsThenCall)    \
   ASM(InterpreterPushArgsThenCallWithFinalSpread, InterpreterPushArgsThenCall) \
@@ -255,6 +260,8 @@ namespace internal {
   /* Adapters for Turbofan into runtime */                                     \
   TFC(AllocateInYoungGeneration, Allocate)                                     \
   TFC(AllocateInOldGeneration, Allocate)                                       \
+  IF_WASM(TFC, WasmAllocateInYoungGeneration, Allocate)                        \
+  IF_WASM(TFC, WasmAllocateInOldGeneration, Allocate)                          \
                                                                                \
   TFC(NewHeapNumber, NewHeapNumber)                                            \
                                                                                \
@@ -426,15 +433,6 @@ namespace internal {
   TFJ(ArrayPrototypeValues, kJSArgcReceiverSlots, kReceiver)                   \
   /* ES6 #sec-%arrayiteratorprototype%.next */                                 \
   TFJ(ArrayIteratorPrototypeNext, kJSArgcReceiverSlots, kReceiver)             \
-  /* https://tc39.github.io/proposal-flatMap/#sec-FlattenIntoArray */          \
-  TFS(FlattenIntoArray, NeedsContext::kYes, kTarget, kSource, kSourceLength,   \
-      kStart, kDepth)                                                          \
-  TFS(FlatMapIntoArray, NeedsContext::kYes, kTarget, kSource, kSourceLength,   \
-      kStart, kDepth, kMapperFunction, kThisArg)                               \
-  /* https://tc39.github.io/proposal-flatMap/#sec-Array.prototype.flat */      \
-  TFJ(ArrayPrototypeFlat, kDontAdaptArgumentsSentinel)                         \
-  /* https://tc39.github.io/proposal-flatMap/#sec-Array.prototype.flatMap */   \
-  TFJ(ArrayPrototypeFlatMap, kDontAdaptArgumentsSentinel)                      \
                                                                                \
   /* ArrayBuffer */                                                            \
   /* ES #sec-arraybuffer-constructor */                                        \
@@ -601,6 +599,7 @@ namespace internal {
   CPP(FunctionConstructor)                                                     \
   ASM(FunctionPrototypeApply, JSTrampoline)                                    \
   CPP(FunctionPrototypeBind)                                                   \
+  IF_WASM(CPP, WebAssemblyFunctionPrototypeBind)                               \
   ASM(FunctionPrototypeCall, JSTrampoline)                                     \
   /* ES6 #sec-function.prototype.tostring */                                   \
   CPP(FunctionPrototypeToString)                                               \
@@ -1048,6 +1047,7 @@ namespace internal {
   CPP(AtomicsMutexConstructor)                                                 \
   CPP(AtomicsMutexIsMutex)                                                     \
   CPP(AtomicsMutexLock)                                                        \
+  CPP(AtomicsMutexLockWithTimeout)                                             \
   CPP(AtomicsMutexTryLock)                                                     \
   CPP(AtomicsConditionConstructor)                                             \
   CPP(AtomicsConditionIsCondition)                                             \

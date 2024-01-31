@@ -229,6 +229,8 @@ struct ref_traits<ByteArray> : public ref_traits<HeapObject> {};
 template <>
 struct ref_traits<ExternalPointerArray> : public ref_traits<HeapObject> {};
 template <>
+struct ref_traits<TrustedFixedArray> : public ref_traits<HeapObject> {};
+template <>
 struct ref_traits<ClosureFeedbackCellArray> : public ref_traits<HeapObject> {};
 template <>
 struct ref_traits<NumberDictionary> : public ref_traits<HeapObject> {};
@@ -371,6 +373,7 @@ class V8_EXPORT_PRIVATE ObjectRef {
   bool IsTheHole() const;
   bool IsPropertyCellHole() const;
   bool IsHashTableHole() const;
+  bool IsPromiseHole() const;
   bool IsNullOrUndefined() const;
 
   base::Optional<bool> TryGetBooleanValue(JSHeapBroker* broker) const;
@@ -695,6 +698,7 @@ class ContextRef : public HeapObjectRef {
   V(Map, map_key_iterator_map)                   \
   V(Map, map_key_value_iterator_map)             \
   V(Map, map_value_iterator_map)                 \
+  V(Map, meta_map)                               \
   V(Map, set_key_value_iterator_map)             \
   V(Map, set_value_iterator_map)                 \
   V(Map, sloppy_arguments_map)                   \

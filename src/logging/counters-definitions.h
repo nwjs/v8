@@ -74,12 +74,6 @@ namespace internal {
   /* Support for PKEYs/PKU by testing result of pkey_alloc(). */               \
   HR(wasm_memory_protection_keys_support, V8.WasmMemoryProtectionKeysSupport,  \
      0, 1, 2)                                                                  \
-  /* Number of thrown exceptions per isolate. */                               \
-  HR(wasm_throw_count, V8.WasmThrowCount, 0, 100000, 30)                       \
-  /* Number of rethrown exceptions per isolate. */                             \
-  HR(wasm_rethrow_count, V8.WasmReThrowCount, 0, 100000, 30)                   \
-  /* Number of caught exceptions per isolate. */                               \
-  HR(wasm_catch_count, V8.WasmCatchCount, 0, 100000, 30)                       \
   /* Ticks observed in a single Turbofan compilation, in 1K. */                \
   HR(turbofan_ticks, V8.TurboFan1KTicks, 0, 100000, 200)                       \
   /* Backtracks observed in a single regexp interpreter execution. */          \
@@ -275,12 +269,6 @@ namespace internal {
      V8.WasmInstantiateModuleMicroSeconds.wasm, 10000000, MICROSECOND)         \
   HT(wasm_instantiate_asm_module_time,                                         \
      V8.WasmInstantiateModuleMicroSeconds.asm, 10000000, MICROSECOND)          \
-  HT(wasm_time_between_throws, V8.WasmTimeBetweenThrowsMilliseconds, 1000,     \
-     MILLISECOND)                                                              \
-  HT(wasm_time_between_rethrows, V8.WasmTimeBetweenRethrowsMilliseconds, 1000, \
-     MILLISECOND)                                                              \
-  HT(wasm_time_between_catch, V8.WasmTimeBetweenCatchMilliseconds, 1000,       \
-     MILLISECOND)                                                              \
   HT(wasm_lazy_compile_time, V8.WasmLazyCompileTimeMicroSeconds, 100000000,    \
      MICROSECOND)                                                              \
   HT(wasm_compile_after_deserialize,                                           \
@@ -309,6 +297,9 @@ namespace internal {
      V8.CompileScriptMicroSeconds.BackgroundThread, 1000000, MICROSECOND)      \
   HT(compile_function_on_background,                                           \
      V8.CompileFunctionMicroSeconds.BackgroundThread, 1000000, MICROSECOND)    \
+  HT(deserialize_script_on_background,                                         \
+     V8.CompileScriptMicroSeconds.ConsumeCache.BackgroundThread, 1000000,      \
+     MICROSECOND)                                                              \
   HT(wasm_max_lazy_compilation_time_5sec,                                      \
      V8.WasmMaxLazyCompilationTime5SecMilliSeconds, 5000, MILLISECOND)         \
   HT(wasm_max_lazy_compilation_time_20sec,                                     \

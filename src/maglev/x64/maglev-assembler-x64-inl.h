@@ -232,7 +232,9 @@ void MaglevAssembler::PushReverse(T... vals) {
   detail::PushAllHelper<T...>::PushReverse(this, vals...);
 }
 
-inline void MaglevAssembler::BindJumpTarget(Label* label) { bind(label); }
+inline void MaglevAssembler::BindJumpTarget(Label* label) {
+  MacroAssembler::BindJumpTarget(label);
+}
 
 inline void MaglevAssembler::BindBlock(BasicBlock* block) {
   bind(block->label());
@@ -521,11 +523,7 @@ inline void MaglevAssembler::LoadAddress(Register dst, MemOperand location) {
   leaq(dst, location);
 }
 
-inline int MaglevAssembler::PushOrSetReturnAddressTo(Label* target) {
-  leaq(kScratchRegister, Operand(target));
-  pushq(kScratchRegister);
-  return 1;
-}
+inline void MaglevAssembler::Call(Label* target) { call(target); }
 
 inline void MaglevAssembler::EmitEnterExitFrame(int extra_slots,
                                                 StackFrame::Type frame_type,
@@ -593,6 +591,14 @@ inline void MaglevAssembler::Move(DoubleRegister dst, Float64 n) {
 
 inline void MaglevAssembler::Move(Register dst, Handle<HeapObject> obj) {
   MacroAssembler::Move(dst, obj);
+}
+
+void MaglevAssembler::MoveTagged(Register dst, Handle<HeapObject> obj) {
+#ifdef V8_COMPRESS_POINTERS
+  MacroAssembler::Move(dst, obj, RelocInfo::COMPRESSED_EMBEDDED_OBJECT);
+#else
+  MacroAssembler::Move(dst, obj);
+#endif
 }
 
 inline void MaglevAssembler::LoadFloat32(DoubleRegister dst, MemOperand src) {

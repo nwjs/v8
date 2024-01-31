@@ -97,6 +97,8 @@ class FactoryBase : public TorqueGeneratedFactory<Impl> {
  public:
   Handle<Code> NewCode(const NewCodeOptions& options);
 
+  Handle<CodeWrapper> NewCodeWrapper();
+
   // Converts the given boolean condition to JavaScript boolean value.
   inline Handle<Boolean> ToBoolean(bool value);
 
@@ -136,6 +138,9 @@ class FactoryBase : public TorqueGeneratedFactory<Impl> {
   Handle<FixedArray> NewFixedArray(
       int length, AllocationType allocation = AllocationType::kYoung);
 
+  // Allocates a trusted fixed array in trusted space, initialized with zeros.
+  Handle<TrustedFixedArray> NewTrustedFixedArray(int length);
+
   // Allocates a fixed array-like object with given map and initialized with
   // undefined values.
   Handle<FixedArray> NewFixedArrayWithMap(
@@ -172,6 +177,9 @@ class FactoryBase : public TorqueGeneratedFactory<Impl> {
   Handle<ByteArray> NewByteArray(
       int length, AllocationType allocation = AllocationType::kYoung);
 
+  // Allocates a trusted byte array in trusted space, initialized with zeros.
+  Handle<TrustedByteArray> NewTrustedByteArray(int length);
+
   Handle<ExternalPointerArray> NewExternalPointerArray(
       int length, AllocationType allocation = AllocationType::kYoung);
 
@@ -183,6 +191,8 @@ class FactoryBase : public TorqueGeneratedFactory<Impl> {
                                          const uint8_t* raw_bytecodes,
                                          int frame_size, int parameter_count,
                                          Handle<FixedArray> constant_pool);
+
+  Handle<BytecodeWrapper> NewBytecodeWrapper();
 
   // Allocates a fixed array for name-value pairs of boilerplate properties and
   // calculates the number of properties we need to store in the backing store.
@@ -393,9 +403,9 @@ class FactoryBase : public TorqueGeneratedFactory<Impl> {
       AllocationAlignment alignment = kTaggedAligned);
 
   friend TorqueGeneratedFactory<Impl>;
-  template <class Derived, class Shape>
+  template <class Derived, class Shape, class Super>
   friend class TaggedArrayBase;
-  template <class Derived, class Shape>
+  template <class Derived, class Shape, class Super>
   friend class PrimitiveArrayBase;
 };
 

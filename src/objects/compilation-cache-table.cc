@@ -270,6 +270,13 @@ bool ScriptCacheKey::MatchesOrigin(Tagged<Script> script) {
     return false;
   }
 
+  // Don't compare host options if the script was deserialized because we didn't
+  // serialize host options (see CodeSerializer::SerializeObjectImpl())
+  if (script->deserialized() &&
+      script->host_defined_options() ==
+          ReadOnlyRoots(isolate_).empty_fixed_array()) {
+    return true;
+  }
   // TODO(cbruni, chromium:1244145): Remove once migrated to the context
   Handle<Object> maybe_host_defined_options;
   if (!host_defined_options_.ToHandle(&maybe_host_defined_options)) {
@@ -524,7 +531,13 @@ Handle<CompilationCacheTable> CompilationCacheTable::PutEval(
     InternalIndex entry = cache->FindEntry(isolate, &key);
     if (entry.is_found()) {
       cache->SetKeyAt(entry, *k);
-      cache->SetPrimaryValueAt(entry, *value);
+      if (cache->PrimaryValueAt(entry) != *value) {
+        cache->SetPrimaryValueAt(entry, *value);
+        // The SFI is changing because the code was aged. Nuke existing feedback
+        // since it can't be reused after this point.
+        cache->SetEvalFeedbackValueAt(entry,
+                                      ReadOnlyRoots(isolate).the_hole_value());
+      }
       // AddToFeedbackCellsMap may allocate a new sub-array to live in the
       // entry, but it won't change the cache array. Therefore EntryToIndex
       // and entry remains correct.

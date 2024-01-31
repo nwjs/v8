@@ -129,7 +129,8 @@ void PagedSpaceBase::MergeCompactionSpace(CompactionSpace* other) {
     // before shipping, which will likely be using LocalHeap.
   }
   for (auto p : other->GetNewPages()) {
-    heap()->NotifyOldGenerationExpansion(identity(), p);
+    heap()->NotifyOldGenerationExpansion(heap()->main_thread_local_heap(),
+                                         identity(), p);
   }
 
   DCHECK_EQ(0u, other->Size());
@@ -286,50 +287,37 @@ void PagedSpaceBase::ShrinkImmortalImmovablePages() {
   }
 }
 
-Page* PagedSpaceBase::TryExpandImpl(
-    MemoryAllocator::AllocationMode allocation_mode) {
-  base::MutexGuard expansion_guard(heap_->heap_expansion_mutex());
+bool PagedSpaceBase::TryExpand(LocalHeap* local_heap, AllocationOrigin origin) {
+  DCHECK_EQ(!local_heap, origin == AllocationOrigin::kGC);
+  base::Optional<CodePageHeaderModificationScope> optional_scope;
+  if (identity() == CODE_SPACE) {
+    optional_scope.emplace("TryExpand writes to the page header.");
+  }
   const size_t accounted_size =
       MemoryChunkLayout::AllocatableMemoryInMemoryChunk(identity());
-  if (identity() != NEW_SPACE && !is_compaction_space() &&
-      !heap()->IsOldGenerationExpansionAllowed(accounted_size,
-                                               expansion_guard)) {
-    return nullptr;
+  if (origin != AllocationOrigin::kGC && identity() != NEW_SPACE) {
+    base::MutexGuard expansion_guard(heap_->heap_expansion_mutex());
+    if (!heap()->IsOldGenerationExpansionAllowed(accounted_size,
+                                                 expansion_guard)) {
+      return false;
+    }
   }
+  const MemoryAllocator::AllocationMode allocation_mode =
+      identity() == NEW_SPACE ? MemoryAllocator::AllocationMode::kUsePool
+                              : MemoryAllocator::AllocationMode::kRegular;
   Page* page = heap()->memory_allocator()->AllocatePage(allocation_mode, this,
                                                         executable());
-  if (page == nullptr) return nullptr;
+  if (page == nullptr) return false;
   DCHECK_EQ(page->area_size(), accounted_size);
   ConcurrentAllocationMutex guard(this);
   AddPage(page);
+  if (origin != AllocationOrigin::kGC && identity() != NEW_SPACE) {
+    heap()->NotifyOldGenerationExpansion(local_heap, identity(), page);
+  }
   Free(page->area_start(), page->area_size(),
        SpaceAccountingMode::kSpaceAccounted);
-  return page;
-}
-
-base::Optional<std::pair<Address, size_t>> PagedSpaceBase::TryExpandBackground(
-    size_t size_in_bytes) {
-  DCHECK_NE(NEW_SPACE, identity());
-  base::MutexGuard expansion_guard(heap_->heap_expansion_mutex());
-  const size_t accounted_size =
-      MemoryChunkLayout::AllocatableMemoryInMemoryChunk(identity());
-  if (!heap()->IsOldGenerationExpansionAllowed(accounted_size,
-                                               expansion_guard)) {
-    return {};
-  }
-  Page* page = heap()->memory_allocator()->AllocatePage(
-      MemoryAllocator::AllocationMode::kRegular, this, executable());
-  if (page == nullptr) return {};
-  DCHECK_EQ(page->area_size(), accounted_size);
-  base::MutexGuard lock(&space_mutex_);
-  AddPage(page);
-  heap()->NotifyOldGenerationExpansionBackground(identity(), page);
-  Address object_start = page->area_start();
-  CHECK_LE(size_in_bytes, page->area_size());
-  Free(page->area_start() + size_in_bytes, page->area_size() - size_in_bytes,
-       SpaceAccountingMode::kSpaceAccounted);
-  AddRangeToActiveSystemPages(page, object_start, object_start + size_in_bytes);
-  return std::make_pair(object_start, size_in_bytes);
+  NotifyNewPage(page);
+  return true;
 }
 
 int PagedSpaceBase::CountTotalPages() const {
@@ -528,20 +516,6 @@ void PagedSpaceBase::VerifyCountersBeforeConcurrentSweeping() const {
 }
 #endif
 
-bool PagedSpaceBase::TryExpand(int size_in_bytes, AllocationOrigin origin) {
-  DCHECK_NE(NEW_SPACE, identity());
-  base::Optional<CodePageHeaderModificationScope> optional_scope;
-  if (identity() == CODE_SPACE) {
-    optional_scope.emplace("TryExpand writes to the page header.");
-  }
-  Page* page = TryExpandImpl(MemoryAllocator::AllocationMode::kRegular);
-  if (!page) return false;
-  if (!is_compaction_space() && identity() != NEW_SPACE) {
-    heap()->NotifyOldGenerationExpansion(identity(), page);
-  }
-  return true;
-}
-
 void PagedSpaceBase::AddRangeToActiveSystemPages(Page* page, Address start,
                                                  Address end) {
   DCHECK_LE(page->address(), start);
@@ -605,10 +579,7 @@ void PagedSpaceBase::RefillFreeList() {
   DCHECK(identity() == OLD_SPACE || identity() == CODE_SPACE ||
          identity() == SHARED_SPACE || identity() == NEW_SPACE ||
          identity() == TRUSTED_SPACE);
-  DCHECK_IMPLIES(
-      identity() == NEW_SPACE,
-      heap_->IsMainThread() || (heap_->IsSharedMainThread() &&
-                                !heap_->isolate()->is_shared_space_isolate()));
+  DCHECK_IMPLIES(identity() == NEW_SPACE, heap_->IsMainThread());
   DCHECK(!is_compaction_space());
 
   for (Page* p : heap()->sweeper()->GetAllSweptPagesSafe(this)) {
@@ -632,13 +603,7 @@ AllocatorPolicy* PagedSpace::CreateAllocatorPolicy(MainAllocator* allocator) {
 // -----------------------------------------------------------------------------
 // CompactionSpace implementation
 
-Page* CompactionSpace::TryExpandImpl(
-    MemoryAllocator::AllocationMode allocation_mode) {
-  DCHECK_NE(NEW_SPACE, identity());
-  Page* page = PagedSpaceBase::TryExpandImpl(allocation_mode);
-  new_pages_.push_back(page);
-  return page;
-}
+void CompactionSpace::NotifyNewPage(Page* page) { new_pages_.push_back(page); }
 
 void CompactionSpace::RefillFreeList() {
   DCHECK_NE(NEW_SPACE, identity());

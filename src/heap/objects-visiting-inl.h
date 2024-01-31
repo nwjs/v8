@@ -46,10 +46,12 @@ inline bool ContainsReadOnlyMap(PtrComprCageBase, Tagged<HeapObject>) {
   V(AllocationSite)                       \
   V(BigInt)                               \
   V(BytecodeArray)                        \
+  V(BytecodeWrapper)                      \
   V(ByteArray)                            \
   V(CallHandlerInfo)                      \
   V(Cell)                                 \
   V(Code)                                 \
+  V(CodeWrapper)                          \
   V(DataHandler)                          \
   V(DataObject)                           \
   V(DescriptorArray)                      \
@@ -182,11 +184,13 @@ void HeapVisitor<ResultType, ConcreteVisitor>::VisitMapPointerIfNeeded(
      * reasons. The fix likely involves adding a padding field in the object \
      * defintions. */                                                        \
     DCHECK_EQ(object->SizeFromMap(map),                                      \
-              TypeName::BodyDescriptor::SizeOf(map, object));                \
+              ObjectTraits<TypeName>::BodyDescriptor::SizeOf(map, object));  \
     visitor->template VisitMapPointerIfNeeded<VisitorId::kVisit##TypeName>(  \
         object);                                                             \
-    const int size = TypeName::BodyDescriptor::SizeOf(map, object);          \
-    TypeName::BodyDescriptor::IterateBody(map, object, size, visitor);       \
+    const int size =                                                         \
+        ObjectTraits<TypeName>::BodyDescriptor::SizeOf(map, object);         \
+    ObjectTraits<TypeName>::BodyDescriptor::IterateBody(map, object, size,   \
+                                                        visitor);            \
     return static_cast<ResultType>(size);                                    \
   }
 TYPED_VISITOR_ID_LIST(VISIT)

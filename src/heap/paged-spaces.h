@@ -322,11 +322,8 @@ class V8_EXPORT_PRIVATE PagedSpaceBase
   void ReduceActiveSystemPages(Page* page,
                                ActiveSystemPages active_system_pages);
 
-  // Expands the space by a single page from a background thread and allocates
-  // a memory area of the given size in it. If successful the method returns
-  // the address and size of the area.
-  base::Optional<std::pair<Address, size_t>> TryExpandBackground(
-      size_t size_in_bytes);
+  // Expands the space by a single page and returns true on success.
+  bool TryExpand(LocalHeap* local_heap, AllocationOrigin origin);
 
   void RefineAllocatedBytesAfterSweeping(Page* page);
 
@@ -341,13 +338,8 @@ class V8_EXPORT_PRIVATE PagedSpaceBase
   // to the initial chunk, uncommits addresses in the initial chunk.
   void TearDown();
 
-  // Expands the space by allocating a fixed number of pages. Returns false if
-  // it cannot allocate requested number of pages from OS, or if the hard heap
-  // size limit has been hit.
-  virtual Page* TryExpandImpl(MemoryAllocator::AllocationMode allocation_mode);
-
-  V8_WARN_UNUSED_RESULT bool TryExpand(int size_in_bytes,
-                                       AllocationOrigin origin);
+  // Spaces can use this method to get notified about pages added to it.
+  virtual void NotifyNewPage(Page* page) {}
 
   size_t committed_physical_memory() const {
     return committed_physical_memory_.load(std::memory_order_relaxed);
@@ -427,7 +419,8 @@ class V8_EXPORT_PRIVATE CompactionSpace final : public PagedSpace {
   void RefillFreeList() final;
 
  protected:
-  Page* TryExpandImpl(MemoryAllocator::AllocationMode allocation_mode) final;
+  void NotifyNewPage(Page* page) final;
+
   // The space is temporary and not included in any snapshots.
   bool snapshotable() const final { return false; }
   // Pages that were allocated in this local space and need to be merged

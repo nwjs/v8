@@ -76,13 +76,13 @@ Handle<AccessorPair> FactoryBase<Impl>::NewAccessorPair() {
 
 template <typename Impl>
 Handle<Code> FactoryBase<Impl>::NewCode(const NewCodeOptions& options) {
-  Isolate* isolate_for_sandbox = impl()->isolate_for_sandbox();
+  Handle<CodeWrapper> wrapper = NewCodeWrapper();
   Tagged<Map> map = read_only_roots().code_map();
   int size = map->instance_size();
   Tagged<Code> code = Tagged<Code>::cast(
       AllocateRawWithImmortalMap(size, AllocationType::kOld, map));
   DisallowGarbageCollection no_gc;
-  code->init_instruction_start(isolate_for_sandbox, kNullAddress);
+  code->init_self_indirect_pointer(isolate());
   code->initialize_flags(options.kind, options.is_turbofanned,
                          options.stack_slots);
   code->set_builtin_id(options.builtin);
@@ -113,23 +113,43 @@ Handle<Code> FactoryBase<Impl>::NewCode(const NewCodeOptions& options) {
         "Setting the instruction_stream can trigger a write to the marking "
         "bitmap.");
     DCHECK_EQ(options.instruction_start, kNullAddress);
-    code->SetInstructionStreamAndInstructionStart(isolate_for_sandbox,
-                                                  *istream);
+    code->SetInstructionStreamAndInstructionStart(isolate(), *istream);
   } else {
     DCHECK_NE(options.instruction_start, kNullAddress);
     code->set_raw_instruction_stream(Smi::zero(), SKIP_WRITE_BARRIER);
-    code->SetInstructionStartForOffHeapBuiltin(isolate_for_sandbox,
+    code->SetInstructionStartForOffHeapBuiltin(isolate(),
                                                options.instruction_start);
   }
+
+  wrapper->set_code(code);
+  code->set_wrapper(*wrapper);
 
   code->clear_padding();
   return handle(code, isolate());
 }
 
 template <typename Impl>
+Handle<CodeWrapper> FactoryBase<Impl>::NewCodeWrapper() {
+  Handle<CodeWrapper> wrapper(
+      CodeWrapper::cast(NewWithImmortalMap(read_only_roots().code_wrapper_map(),
+                                           AllocationType::kOld)),
+      isolate());
+  // The CodeWrapper is typically created before the Code object it wraps, so
+  // the code field cannot yet be set. However, as a heap verifier might see
+  // the wrapper before the field can be set, we need to clear the field here.
+  wrapper->clear_code();
+  return wrapper;
+}
+
+template <typename Impl>
 Handle<FixedArray> FactoryBase<Impl>::NewFixedArray(int length,
                                                     AllocationType allocation) {
   return FixedArray::New(isolate(), length, allocation);
+}
+
+template <typename Impl>
+Handle<TrustedFixedArray> FactoryBase<Impl>::NewTrustedFixedArray(int length) {
+  return TrustedFixedArray::New(isolate(), length);
 }
 
 template <typename Impl>
@@ -223,6 +243,11 @@ Handle<ByteArray> FactoryBase<Impl>::NewByteArray(int length,
 }
 
 template <typename Impl>
+Handle<TrustedByteArray> FactoryBase<Impl>::NewTrustedByteArray(int length) {
+  return TrustedByteArray::New(isolate(), length);
+}
+
+template <typename Impl>
 Handle<ExternalPointerArray> FactoryBase<Impl>::NewExternalPointerArray(
     int length, AllocationType allocation) {
   if (length < 0 || length > ExternalPointerArray::kMaxLength) {
@@ -272,12 +297,13 @@ Handle<BytecodeArray> FactoryBase<Impl>::NewBytecodeArray(
   // too.
   DCHECK(!Heap::InYoungGeneration(*constant_pool));
 
+  Handle<BytecodeWrapper> wrapper = NewBytecodeWrapper();
   int size = BytecodeArray::SizeFor(length);
   Tagged<HeapObject> result = AllocateRawWithImmortalMap(
-      size, AllocationType::kOld, read_only_roots().bytecode_array_map());
+      size, AllocationType::kTrusted, read_only_roots().bytecode_array_map());
   DisallowGarbageCollection no_gc;
-  Tagged<BytecodeArray> instance = Tagged<BytecodeArray>::cast(result);
-  instance->init_self_indirect_pointer(isolate()->AsLocalIsolate());
+  Tagged<BytecodeArray> instance = BytecodeArray::cast(result);
+  instance->init_self_indirect_pointer(isolate());
   instance->set_length(length);
   instance->set_frame_size(frame_size);
   instance->set_parameter_count(parameter_count);
@@ -286,12 +312,29 @@ Handle<BytecodeArray> FactoryBase<Impl>::NewBytecodeArray(
   instance->set_constant_pool(*constant_pool);
   instance->set_handler_table(read_only_roots().empty_byte_array(),
                               SKIP_WRITE_BARRIER);
+  instance->set_wrapper(*wrapper);
   instance->set_source_position_table(read_only_roots().undefined_value(),
                                       kReleaseStore, SKIP_WRITE_BARRIER);
   CopyBytes(reinterpret_cast<uint8_t*>(instance->GetFirstBytecodeAddress()),
             raw_bytecodes, length);
   instance->clear_padding();
+  wrapper->set_bytecode(instance);
   return handle(instance, isolate());
+}
+
+template <typename Impl>
+Handle<BytecodeWrapper> FactoryBase<Impl>::NewBytecodeWrapper() {
+  Handle<BytecodeWrapper> wrapper(
+      BytecodeWrapper::cast(NewWithImmortalMap(
+          read_only_roots().bytecode_wrapper_map(), AllocationType::kOld)),
+      isolate());
+  // The BytecodeWrapper is typically created before the BytecodeArray it
+  // wraps, so the bytecode field cannot yet be set. However, as a heap
+  // verifier might see the wrapper before the field can be set, we need to
+  // clear the field here.
+  wrapper->clear_bytecode();
+  wrapper->clear_padding();
+  return wrapper;
 }
 
 template <typename Impl>
@@ -389,7 +432,7 @@ Handle<SharedFunctionInfo> FactoryBase<Impl>::CloneSharedFunctionInfo(
   DisallowGarbageCollection no_gc;
 
   shared->clear_padding();
-  shared->CopyFrom(*other);
+  shared->CopyFrom(*other, isolate());
 
   return handle(shared, isolate());
 }
@@ -477,7 +520,9 @@ Handle<SharedFunctionInfo> FactoryBase<Impl>::NewSharedFunctionInfo(
     // the function_data should not be code with a builtin.
     DCHECK(!Builtins::IsBuiltinId(builtin));
     DCHECK(!IsInstructionStream(*function_data));
-    raw->set_function_data(*function_data, kReleaseStore);
+    DCHECK(!IsCode(*function_data));
+    raw->SetData(*function_data, kReleaseStore,
+                 SharedFunctionInfo::DataType::kRegular);
   } else if (Builtins::IsBuiltinId(builtin)) {
     raw->set_builtin_id(builtin);
   } else {

@@ -35,9 +35,10 @@ static MaybeHandle<SharedFunctionInfo> GetFunctionInfo(Isolate* isolate,
   ScriptDetails script_details(isolate->factory()->empty_string(),
                                ScriptOriginOptions(true, true));
   script_details.repl_mode = repl_mode;
+  ScriptCompiler::CompilationDetails compilation_details;
   return Compiler::GetSharedFunctionInfoForScript(
       isolate, source, script_details, ScriptCompiler::kNoCompileOptions,
-      ScriptCompiler::kNoCacheNoReason, NOT_NATIVES_CODE);
+      ScriptCompiler::kNoCacheNoReason, NOT_NATIVES_CODE, &compilation_details);
 }
 }  // namespace
 
@@ -121,7 +122,7 @@ MaybeHandle<Object> DebugEvaluate::Local(Isolate* isolate,
   // Note that the native context is taken from the original context chain,
   // which may not be the current native context of the isolate.
   ContextBuilder context_builder(isolate, frame, inlined_jsframe_index);
-  if (isolate->has_pending_exception()) return {};
+  if (isolate->has_exception()) return {};
 
   Handle<Context> context = context_builder.evaluation_context();
   Handle<JSObject> receiver(context->global_proxy(), isolate);
@@ -197,7 +198,7 @@ MaybeHandle<Object> DebugEvaluate::Evaluate(
   success = Execution::Call(isolate, eval_fun, receiver, 0, nullptr)
                 .ToHandle(&result);
   if (throw_on_side_effect) isolate->debug()->StopSideEffectCheckMode();
-  if (!success) DCHECK(isolate->has_pending_exception());
+  if (!success) DCHECK(isolate->has_exception());
   return success ? result : MaybeHandle<Object>();
 }
 
@@ -1141,8 +1142,8 @@ static bool TransitivelyCalledBuiltinHasNoSideEffect(Builtin caller,
     case Builtin::kFastNewObject:
     case Builtin::kFindOrderedHashMapEntry:
     case Builtin::kFindOrderedHashSetEntry:
-    case Builtin::kFlatMapIntoArray:
-    case Builtin::kFlattenIntoArray:
+    case Builtin::kFlattenIntoArrayWithMapFn:
+    case Builtin::kFlattenIntoArrayWithoutMapFn:
     case Builtin::kGenericArrayToReversed:
     case Builtin::kGenericArrayWith:
     case Builtin::kGetProperty:

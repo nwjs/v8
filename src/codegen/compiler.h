@@ -191,7 +191,8 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
       const ScriptDetails& script_details,
       ScriptCompiler::CompileOptions compile_options,
       ScriptCompiler::NoCacheReason no_cache_reason,
-      NativesFlag is_natives_code);
+      NativesFlag is_natives_code,
+      ScriptCompiler::CompilationDetails* compilation_details);
 
   // Create a shared function info object for a String source.
   static MaybeHandle<SharedFunctionInfo>
@@ -199,7 +200,8 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
       Isolate* isolate, Handle<String> source,
       const ScriptDetails& script_details, v8::Extension* extension,
       ScriptCompiler::CompileOptions compile_options,
-      NativesFlag is_natives_code);
+      NativesFlag is_natives_code,
+      ScriptCompiler::CompilationDetails* compilation_details);
 
   // Create a shared function info object for a String source and serialized
   // cached data. The cached data may be rejected, in which case this function
@@ -210,7 +212,8 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
       const ScriptDetails& script_details, AlignedCachedData* cached_data,
       ScriptCompiler::CompileOptions compile_options,
       ScriptCompiler::NoCacheReason no_cache_reason,
-      NativesFlag is_natives_code);
+      NativesFlag is_natives_code,
+      ScriptCompiler::CompilationDetails* compilation_details);
 
   // Create a shared function info object for a String source and a task that
   // has deserialized cached data on a background thread. The cached data from
@@ -223,7 +226,8 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
       BackgroundDeserializeTask* deserialize_task,
       ScriptCompiler::CompileOptions compile_options,
       ScriptCompiler::NoCacheReason no_cache_reason,
-      NativesFlag is_natives_code);
+      NativesFlag is_natives_code,
+      ScriptCompiler::CompilationDetails* compilation_details);
 
   static MaybeHandle<SharedFunctionInfo>
   GetSharedFunctionInfoForScriptWithCompileHints(
@@ -233,7 +237,8 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
       void* compile_hint_callback_data,
       ScriptCompiler::CompileOptions compile_options,
       ScriptCompiler::NoCacheReason no_cache_reason,
-      NativesFlag is_natives_code);
+      NativesFlag is_natives_code,
+      ScriptCompiler::CompilationDetails* compilation_details);
 
   // Create a shared function info object for a Script source that has already
   // been parsed and possibly compiled on a background thread while being loaded
@@ -242,7 +247,8 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
   // owned by the caller.
   static MaybeHandle<SharedFunctionInfo> GetSharedFunctionInfoForStreamedScript(
       Isolate* isolate, Handle<String> source,
-      const ScriptDetails& script_details, ScriptStreamingData* streaming_data);
+      const ScriptDetails& script_details, ScriptStreamingData* streaming_data,
+      ScriptCompiler::CompilationDetails* compilation_details);
 
   // Create a shared function info object for the given function literal
   // node (the code may be lazily compiled).
@@ -559,6 +565,7 @@ class V8_EXPORT_PRIVATE BackgroundCompileTask {
   BackgroundCompileTask(ScriptStreamingData* data, Isolate* isolate,
                         v8::ScriptType type,
                         ScriptCompiler::CompileOptions options,
+                        ScriptCompiler::CompilationDetails* compilation_details,
                         CompileHintCallback compile_hint_callback = nullptr,
                         void* compile_hint_callback_data = nullptr);
   BackgroundCompileTask(const BackgroundCompileTask&) = delete;
@@ -606,6 +613,7 @@ class V8_EXPORT_PRIVATE BackgroundCompileTask {
   int stack_size_;
   WorkerThreadRuntimeCallStats* worker_thread_runtime_call_stats_;
   TimedHistogram* timer_;
+  ScriptCompiler::CompilationDetails* compilation_details_;
 
   // Data needed for merging onto the main thread after background finalization.
   std::unique_ptr<PersistentHandles> persistent_handles_;
@@ -679,11 +687,17 @@ class V8_EXPORT_PRIVATE BackgroundDeserializeTask {
 
   bool rejected() const { return cached_data_.rejected(); }
 
+  int64_t background_time_in_microseconds() const {
+    return background_time_in_microseconds_;
+  }
+
  private:
   Isolate* isolate_for_local_isolate_;
   AlignedCachedData cached_data_;
   CodeSerializer::OffThreadDeserializeData off_thread_data_;
   BackgroundMergeTask background_merge_task_;
+  TimedHistogram* timer_;
+  int64_t background_time_in_microseconds_ = 0;
 };
 
 }  // namespace internal

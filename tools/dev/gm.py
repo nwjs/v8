@@ -547,6 +547,7 @@ class ArgumentParser(object):
       else:
         break
       path_end -= 1
+    targets = targets or DEFAULT_TARGETS
     path = Path('.'.join(words[:path_end]))
     args_gn = path / "args.gn"
     # Only accept existing build output directories, otherwise fall back
@@ -554,7 +555,8 @@ class ArgumentParser(object):
     if not args_gn.is_file():
       return False
     if path not in self.configs:
-      self.configs[path] = RawConfig(path, targets, tests, clean)
+      self.configs[path] = RawConfig(path, targets, tests, clean,
+                                     self.testrunner_args)
     else:
       self.configs[path].extend(targets, tests, clean)
     return True

@@ -74,7 +74,7 @@ constexpr DoubleRegister kFpReturnRegisters[] = {f2, f4};
 // ===========================================================================
 // == LOONG64 ================================================================
 // ===========================================================================
-constexpr Register kGpParamRegisters[] = {a0, a2, a3, a4, a5, a6, a7};
+constexpr Register kGpParamRegisters[] = {a7, a0, a2, a3, a4, a5, a6};
 constexpr Register kGpReturnRegisters[] = {a0, a1};
 constexpr DoubleRegister kFpParamRegisters[] = {f0, f1, f2, f3, f4, f5, f6, f7};
 constexpr DoubleRegister kFpReturnRegisters[] = {f0, f1};
@@ -112,7 +112,7 @@ constexpr DoubleRegister kFpReturnRegisters[] = {d0, d2};
 // ===========================================================================
 // Note that kGpParamRegisters and kFpParamRegisters are used in
 // Builtins::Generate_WasmCompileLazy (builtins-riscv.cc)
-constexpr Register kGpParamRegisters[] = {a0, a2, a3, a4, a5, a6, a7};
+constexpr Register kGpParamRegisters[] = {a7, a0, a2, a3, a4, a5, a6};
 constexpr Register kGpReturnRegisters[] = {a0, a1};
 constexpr DoubleRegister kFpParamRegisters[] = {fa0, fa1, fa2, fa3,
                                                 fa4, fa5, fa6, fa7};
@@ -128,6 +128,24 @@ constexpr Register kGpReturnRegisters[] = {};
 constexpr DoubleRegister kFpParamRegisters[] = {};
 constexpr DoubleRegister kFpReturnRegisters[] = {};
 
+#endif
+
+#if V8_TARGET_ARCH_PPC64
+// Platforms where a Floating Point value is represented in Double Precision
+// format in a FP register.
+constexpr bool kIsFpAlwaysDouble = true;
+#else
+constexpr bool kIsFpAlwaysDouble = false;
+#endif
+#if V8_TARGET_BIG_ENDIAN
+constexpr bool kIsBigEndian = true;
+#else
+constexpr bool kIsBigEndian = false;
+#endif
+#if V8_TARGET_ARCH_S390_LE_SIM
+constexpr bool kIsBigEndianOnSim = true;
+#else
+constexpr bool kIsBigEndianOnSim = false;
 #endif
 
 // The parameter index where the instance parameter should be placed in wasm

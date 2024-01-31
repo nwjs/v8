@@ -301,13 +301,14 @@ Handle<PrimitiveHeapObject> CallSiteInfo::GetFunctionName(
   if (info->IsBuiltin()) {
     Builtin builtin = Builtins::FromInt(Smi::cast(info->function()).value());
     return isolate->factory()->NewStringFromAsciiChecked(
-        Builtins::NameForStackTrace(builtin));
+        Builtins::NameForStackTrace(isolate, builtin));
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
   Handle<JSFunction> function(JSFunction::cast(info->function()), isolate);
   if (function->shared()->HasBuiltinId()) {
     Builtin builtin = function->shared()->builtin_id();
-    const char* maybe_known_name = Builtins::NameForStackTrace(builtin);
+    const char* maybe_known_name =
+        Builtins::NameForStackTrace(isolate, builtin);
     if (maybe_known_name) {
       // This is for cases where using the builtin's name allows us to print
       // e.g. "String.indexOf", instead of just "indexOf" which is what we
@@ -608,8 +609,9 @@ int CallSiteInfo::ComputeSourcePosition(Handle<CallSiteInfo> info, int offset) {
 #endif  // V8_ENABLE_WEBASSEMBLY
   Handle<SharedFunctionInfo> shared(info->GetSharedFunctionInfo(), isolate);
   SharedFunctionInfo::EnsureSourcePositionsAvailable(isolate, shared);
-  return AbstractCode::cast(info->code_object())
-      ->SourcePosition(isolate, offset);
+  Tagged<HeapObject> code = info->code_object(isolate);
+  DCHECK(IsCode(code) || IsBytecodeArray(code));
+  return AbstractCode::cast(code)->SourcePosition(isolate, offset);
 }
 
 base::Optional<Tagged<Script>> CallSiteInfo::GetScript() const {
@@ -683,7 +685,7 @@ void AppendFileLocation(Isolate* isolate, Handle<CallSiteInfo> frame,
 }
 
 // Returns true iff
-// 1. the subject ends with '.' + pattern, or
+// 1. the subject ends with '.' + pattern or ' ' + pattern, or
 // 2. subject == pattern.
 bool StringEndsWithMethodName(Isolate* isolate, Handle<String> subject,
                               Handle<String> pattern) {
@@ -701,7 +703,7 @@ bool StringEndsWithMethodName(Isolate* isolate, Handle<String> subject,
 
     const base::uc32 subject_char = subject_reader.Get(subject_index);
     if (i == pattern_reader.length()) {
-      if (subject_char != '.') return false;
+      if (subject_char != '.' && subject_char != ' ') return false;
     } else if (subject_char != pattern_reader.Get(pattern_index)) {
       return false;
     }

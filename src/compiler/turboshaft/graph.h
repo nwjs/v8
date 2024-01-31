@@ -305,6 +305,8 @@ class Block : public RandomAccessStackDominatorNode<Block> {
  public:
   enum class Kind : uint8_t { kMerge, kLoopHeader, kBranchTarget };
 
+  explicit Block(Kind kind) : kind_(kind) {}
+
   bool IsLoopOrMerge() const { return IsLoop() || IsMerge(); }
   bool IsLoop() const { return kind_ == Kind::kLoopHeader; }
   bool IsMerge() const { return kind_ == Kind::kMerge; }
@@ -387,7 +389,7 @@ class Block : public RandomAccessStackDominatorNode<Block> {
 
   // The block from the previous graph which produced the current block. This
   // has to be updated to be the last block that contributed operations to the
-  // current block to ensure that phi nodes are created correctly.git cl
+  // current block to ensure that phi nodes are created correctly.
   void SetOrigin(const Block* origin) {
     DCHECK_IMPLIES(origin != nullptr,
                    origin->graph_generation_ + 1 == graph_generation_);
@@ -428,12 +430,26 @@ class Block : public RandomAccessStackDominatorNode<Block> {
 
   bool HasPhis(const Graph& graph) const;
 
-#ifdef DEBUG
   bool HasBackedge(const Graph& graph) const {
     if (const GotoOp* gto = LastOperation(graph).TryCast<GotoOp>()) {
       return gto->destination->index().id() < index().id();
     }
     return false;
+  }
+
+#ifdef DEBUG
+  // {has_peeled_iteration_} is currently only updated for loops peeled in
+  // Turboshaft (it is true only for loop headers of loops that have had their
+  // first iteration peeled). So be aware that while Turbofan loop peeling is
+  // enabled, this is not a reliable way to check if a loop has a peeled
+  // iteration.
+  bool has_peeled_iteration() const {
+    DCHECK(IsLoop());
+    return has_peeled_iteration_;
+  }
+  void set_has_peeled_iteration() {
+    DCHECK(IsLoop());
+    has_peeled_iteration_ = true;
   }
 #endif
 
@@ -445,8 +461,6 @@ class Block : public RandomAccessStackDominatorNode<Block> {
   void PrintDominatorTree(
       std::vector<const char*> tree_symbols = std::vector<const char*>(),
       bool has_next = false) const;
-
-  explicit Block(Kind kind) : kind_(kind) {}
 
   enum class CustomDataKind {
     kUnset,  // No custom data has been set for this block.
@@ -504,6 +518,8 @@ class Block : public RandomAccessStackDominatorNode<Block> {
 #ifdef DEBUG
   CustomDataKind custom_data_kind_for_debug_check_ = CustomDataKind::kUnset;
   size_t graph_generation_ = 0;
+  // True if this is a loop header of a loop with a peeled iteration.
+  bool has_peeled_iteration_ = false;
 #endif
 
   template <class Assembler>
@@ -525,7 +541,7 @@ class Graph {
   explicit Graph(Zone* graph_zone, size_t initial_capacity = 2048)
       : operations_(graph_zone, initial_capacity),
         bound_blocks_(graph_zone),
-        all_blocks_(graph_zone),
+        all_blocks_(),
         block_permutation_(graph_zone),
         graph_zone_(graph_zone),
         source_positions_(graph_zone, this),
@@ -542,11 +558,13 @@ class Graph {
   void Reset() {
     operations_.Reset();
     bound_blocks_.clear();
+    // No need to explicitly reset `all_blocks_`, since we will placement-new
+    // new blocks into it, reusing the already allocated backing storage.
+    next_block_ = 0;
     block_permutation_.clear();
     source_positions_.Reset();
     operation_origins_.Reset();
     operation_types_.Reset();
-    next_block_ = 0;
     dominator_tree_depth_ = 0;
 #ifdef DEBUG
     block_type_refinement_.Reset();
@@ -554,6 +572,7 @@ class Graph {
   }
 
   V8_INLINE const Operation& Get(OpIndex i) const {
+    DCHECK(i.valid());
     DCHECK(BelongsToThisGraph(i));
     // `Operation` contains const fields and can be overwritten with placement
     // new. Therefore, std::launder is necessary to avoid undefined behavior.
@@ -564,6 +583,7 @@ class Graph {
     return *ptr;
   }
   V8_INLINE Operation& Get(OpIndex i) {
+    DCHECK(i.valid());
     DCHECK(BelongsToThisGraph(i));
     // `Operation` contains const fields and can be overwritten with placement
     // new. Therefore, std::launder is necessary to avoid undefined behavior.
@@ -601,13 +621,14 @@ class Graph {
       it = std::upper_bound(
           bound_blocks_.begin(), bound_blocks_.end(), index,
           [](OpIndex value, const Block* b) { return value < b->begin_; });
+      DCHECK_NE(it, bound_blocks_.begin());
     } else {
       it = std::upper_bound(
           block_permutation_.begin(), block_permutation_.end(), index,
           [](OpIndex value, const Block* b) { return value < b->begin_; });
+      DCHECK_NE(it, block_permutation_.begin());
     }
-    DCHECK_NE(it, bound_blocks_.begin());
-    --it;
+    it = std::prev(it);
     DCHECK((*it)->Contains(index));
     return (*it)->index();
   }
@@ -690,15 +711,10 @@ class Graph {
 
   V8_INLINE Block* NewBlock(Block::Kind kind, const Block* origin = nullptr) {
     if (V8_UNLIKELY(next_block_ == all_blocks_.size())) {
-      constexpr size_t new_block_count = 64;
-      base::Vector<Block> blocks =
-          graph_zone_->NewVector<Block>(new_block_count, Block(kind));
-      for (size_t i = 0; i < new_block_count; ++i) {
-        all_blocks_.push_back(&blocks[i]);
-      }
+      AllocateNewBlocks();
     }
     Block* result = all_blocks_[next_block_++];
-    *result = Block(kind);
+    new (result) Block(kind);
 #ifdef DEBUG
     result->graph_generation_ = generation_;
 #endif
@@ -968,8 +984,8 @@ class Graph {
     std::swap(operations_, companion.operations_);
     std::swap(bound_blocks_, companion.bound_blocks_);
     std::swap(all_blocks_, companion.all_blocks_);
-    std::swap(block_permutation_, companion.block_permutation_);
     std::swap(next_block_, companion.next_block_);
+    std::swap(block_permutation_, companion.block_permutation_);
     std::swap(graph_zone_, companion.graph_zone_);
     source_positions_.SwapData(companion.source_positions_);
     operation_origins_.SwapData(companion.operation_origins_);
@@ -1013,14 +1029,49 @@ class Graph {
     }
   }
 
+  // Allocates pointer-stable storage for new blocks, and pushes the pointers
+  // to that storage to `bound_blocks_`. Initialization of the blocks is defered
+  // to when they are actually constructed in `NewBlocks`.
+  V8_NOINLINE V8_PRESERVE_MOST void AllocateNewBlocks() {
+    constexpr size_t kMinCapacity = 32;
+    size_t next_capacity = std::max(kMinCapacity, all_blocks_.size() * 2);
+    size_t new_block_count = next_capacity - all_blocks_.size();
+    DCHECK_GT(new_block_count, 0);
+    base::Vector<Block> block_storage =
+        graph_zone_->AllocateVector<Block>(new_block_count);
+    base::Vector<Block*> new_all_blocks =
+        graph_zone_->AllocateVector<Block*>(next_capacity);
+    DCHECK_EQ(new_all_blocks.size(), all_blocks_.size() + new_block_count);
+    std::copy(all_blocks_.begin(), all_blocks_.end(), new_all_blocks.begin());
+    Block** insert_begin = new_all_blocks.begin() + all_blocks_.size();
+    DCHECK_EQ(insert_begin + new_block_count, new_all_blocks.end());
+    for (size_t i = 0; i < new_block_count; ++i) {
+      insert_begin[i] = &block_storage[i];
+    }
+    base::Vector<Block*> old_all_blocks = all_blocks_;
+    all_blocks_ = new_all_blocks;
+    if (!old_all_blocks.empty()) {
+      graph_zone_->DeleteArray(old_all_blocks.data(), old_all_blocks.length());
+    }
+
+    // Eventually most new blocks will be bound anyway, so pre-allocate as well.
+    DCHECK_LE(bound_blocks_.size(), all_blocks_.size());
+    bound_blocks_.reserve(all_blocks_.size());
+  }
+
   OperationBuffer operations_;
   ZoneVector<Block*> bound_blocks_;
-  ZoneVector<Block*> all_blocks_;
+  // The next two fields essentially form a `ZoneVector` but with pointer
+  // stability for the `Block` elements. That is, `all_blocks_` contains
+  // pointers to (potentially non-contiguous) Zone-allocated `Block`s.
+  // Each pointer in `all_blocks_` points to already allocated space, but they
+  // are only properly value-initialized up to index `next_block_`.
+  base::Vector<Block*> all_blocks_;
+  size_t next_block_ = 0;
   // When `ReorderBlocks` is called, `block_permutation_` contains the original
   // order of blocks in order to provide a proper OpIndex->Block mapping for
   // `BlockOf`. In non-reordered graphs, this vector is empty.
   ZoneVector<Block*> block_permutation_;
-  size_t next_block_ = 0;
   Zone* graph_zone_;
   GrowingOpIndexSidetable<SourcePosition> source_positions_;
   GrowingOpIndexSidetable<OpIndex> operation_origins_;

@@ -1372,8 +1372,7 @@ void TryUnboxNumberOrOddball(MaglevAssembler* masm, DoubleRegister dst,
   __ bind(&is_not_smi);
   JumpToFailIfNotHeapNumberOrOddball(masm, clobbered_src, conversion_type,
                                      fail);
-  static_assert(HeapNumber::kValueOffset == Oddball::kToNumberRawOffset);
-  __ LoadHeapNumberValue(dst, clobbered_src);
+  __ LoadHeapNumberOrOddballValue(dst, clobbered_src);
   __ bind(&done);
 }
 
@@ -1416,10 +1415,9 @@ void EmitTruncateNumberOrOddballToInt32(
   __ bind(&is_not_smi);
   JumpToFailIfNotHeapNumberOrOddball(masm, value, conversion_type,
                                      not_a_number);
-  static_assert(HeapNumber::kValueOffset == Oddball::kToNumberRawOffset);
   MaglevAssembler::ScratchRegisterScope temps(masm);
   DoubleRegister double_value = temps.GetDefaultScratchDoubleRegister();
-  __ LoadHeapNumberValue(double_value, value);
+  __ LoadHeapNumberOrOddballValue(double_value, value);
   __ TruncateDoubleToInt32(result_reg, double_value);
   __ bind(&done);
 }
@@ -1444,11 +1442,7 @@ void CheckedObjectToIndex::GenerateCode(MaglevAssembler* masm,
             MaglevAssembler::ScratchRegisterScope temps(masm);
             Register map = temps.GetDefaultScratchRegister();
             Label check_string;
-#ifdef V8_COMPRESS_POINTERS
-            __ LoadCompressedMap(map, object);
-#else
-            __ LoadMap(map, object);
-#endif
+            __ LoadMapForCompare(map, object);
             __ JumpIfNotRoot(
                 map, RootIndex::kHeapNumberMap, &check_string,
                 v8_flags.deopt_every_n_times > 0 ? Label::kFar : Label::kNear);
@@ -1476,7 +1470,7 @@ void CheckedObjectToIndex::GenerateCode(MaglevAssembler* masm,
                 SaveRegisterStateForCall save_register_state(masm, snapshot);
                 AllowExternalCallThatCantCauseGC scope(masm);
                 __ PrepareCallCFunction(1);
-                __ Move(arg_reg_1, object);
+                __ Move(kCArgRegs[0], object);
                 __ CallCFunction(
                     ExternalReference::string_to_array_index_function(), 1);
                 // No need for safepoint since this is a fast C call.
@@ -1556,10 +1550,12 @@ void CheckMaps::GenerateCode(MaglevAssembler* masm,
 
   bool maps_include_heap_number = AnyMapIsHeapNumber(maps());
 
-  // Exprimentally figured out map limit (with slack) which allows us to use
-  // near jumps in the code below
+  // Experimentally figured out map limit (with slack) which allows us to use
+  // near jumps in the code below. If --deopt-every-n-times is on, we generate
+  // a bit more code, so disable the near jump optimization.
   constexpr int kMapCountForNearJumps = kTaggedSize == 4 ? 10 : 5;
-  Label::Distance jump_distance = maps().size() <= kMapCountForNearJumps
+  Label::Distance jump_distance = (maps().size() <= kMapCountForNearJumps &&
+                                   v8_flags.deopt_every_n_times <= 0)
                                       ? Label::Distance::kNear
                                       : Label::Distance::kFar;
 
@@ -1631,12 +1627,6 @@ void CheckMapsWithMigration::GenerateCode(MaglevAssembler* masm,
   // where the object map is, since the map is reloaded after the runtime call.
   save_registers.live_registers.set(object);
   save_registers.live_tagged_registers.set(object);
-
-  // We can eager deopt after the snapshot, so make sure the nodes used by the
-  // deopt are included in it.
-  // TODO(leszeks): This is a bit of a footgun -- we likely want the snapshot to
-  // always include eager deopt input registers.
-  AddDeoptRegistersToSnapshot(&save_registers, eager_deopt_info());
 
   size_t map_count = maps().size();
   bool has_migration_targets = false;
@@ -2119,7 +2109,7 @@ void LoadTaggedFieldByFieldIndex::GenerateCode(MaglevAssembler* masm,
               DCHECK_NE(map, field_index);
               map = field_index;
             }
-            __ LoadMap(map, result_reg);
+            __ LoadMapForCompare(map, result_reg);
             __ JumpIfNotRoot(map, RootIndex::kHeapNumberMap, *done);
             DoubleRegister double_value = temps.AcquireDouble();
             __ LoadHeapNumberValue(double_value, result_reg);
@@ -2269,12 +2259,11 @@ void StoreMap::GenerateCode(MaglevAssembler* masm,
   Register object = WriteBarrierDescriptor::ObjectRegister();
   DCHECK_EQ(object, ToRegister(object_input()));
   Register value = temps.Acquire();
-  __ Move(value, map_.object());
+  __ MoveTagged(value, map_.object());
 
-  __ StoreTaggedFieldWithWriteBarrier(object, HeapObject::kMapOffset, value,
-                                      register_snapshot(),
-                                      MaglevAssembler::kValueIsDecompressed,
-                                      MaglevAssembler::kValueCannotBeSmi);
+  __ StoreTaggedFieldWithWriteBarrier(
+      object, HeapObject::kMapOffset, value, register_snapshot(),
+      MaglevAssembler::kValueIsCompressed, MaglevAssembler::kValueCannotBeSmi);
 }
 
 int StoreTaggedFieldWithWriteBarrier::MaxCallStackArgs() const {
@@ -2639,7 +2628,11 @@ void LoadPolymorphicTaggedField::GenerateCode(MaglevAssembler* masm,
               __ Move(result, Smi::cast(*constant));
             } else {
               DCHECK(IsHeapObject(*access_info.constant()));
-              __ Move(result, Handle<HeapObject>::cast(constant));
+              if (node->decompresses_tagged_result()) {
+                __ Move(result, Handle<HeapObject>::cast(constant));
+              } else {
+                __ MoveTagged(result, Handle<HeapObject>::cast(constant));
+              }
             }
             break;
           }
@@ -2853,7 +2846,6 @@ void CheckValueEqualsString::GenerateCode(MaglevAssembler* masm,
             __ CompareInt32AndJumpIf(string_length, node->value().length(),
                                      kNotEqual, fail);
             RegisterSnapshot snapshot = node->register_snapshot();
-            AddDeoptRegistersToSnapshot(&snapshot, node->eager_deopt_info());
             {
               SaveRegisterStateForCall save_register_state(masm, snapshot);
               __ CallBuiltin<Builtin::kStringEqual>(
@@ -3641,7 +3633,6 @@ void MaybeGrowAndEnsureWritableFastElements::GenerateCode(
              MaybeGrowAndEnsureWritableFastElements* node) {
             {
               RegisterSnapshot snapshot = node->register_snapshot();
-              AddDeoptRegistersToSnapshot(&snapshot, node->eager_deopt_info());
               snapshot.live_registers.clear(result_reg);
               snapshot.live_tagged_registers.clear(result_reg);
               SaveRegisterStateForCall save_register_state(masm, snapshot);
@@ -4676,12 +4667,12 @@ void CheckNumber::GenerateCode(MaglevAssembler* masm,
   // If {value} is a Smi or a HeapNumber, we're done.
   __ JumpIfSmi(value, &done, Label::Distance::kNear);
   if (mode() == Object::Conversion::kToNumeric) {
-    __ LoadMap(scratch, value);
-    __ CompareRoot(scratch, RootIndex::kHeapNumberMap);
+    __ LoadMapForCompare(scratch, value);
+    __ CompareTaggedRoot(scratch, RootIndex::kHeapNumberMap);
     // Jump to done if it is a HeapNumber.
     __ JumpIf(kEqual, &done, Label::Distance::kNear);
     // Check if it is a BigInt.
-    __ CompareRoot(scratch, RootIndex::kBigIntMap);
+    __ CompareTaggedRoot(scratch, RootIndex::kBigIntMap);
   } else {
     __ CompareMapWithRoot(value, RootIndex::kHeapNumberMap, scratch);
   }
@@ -5117,14 +5108,15 @@ void CallKnownApiFunction::GenerateCallApiCallbackOptimizedInline(
   static_assert((kApiStackSpace - 1) * kSystemPointerSize == FCA::kSize);
   const int exit_frame_params_size = 0;
 
-  Label done;
-  // Make it look like as if the code starting from EnterExitFrame was called
-  // by an instruction right before the |done| label. Depending on the current
-  // architecture it will either push the "return address" between
-  // FunctonCallbackInfo and ExitFrame or set the link register to the
-  // "return address". This is necessary for lazy deopting of current code.
-  const int kMaybePCOnTheStack = __ PushOrSetReturnAddressTo(&done);
-  DCHECK(kMaybePCOnTheStack == 0 || kMaybePCOnTheStack == 1);
+  Label done, call_api_callback_builtin_inline;
+  __ Call(&call_api_callback_builtin_inline);
+  masm->DefineExceptionHandlerAndLazyDeoptPoint(this);
+  __ jmp(&done);
+
+  //
+  // Generate a CallApiCallback builtin inline.
+  //
+  __ bind(&call_api_callback_builtin_inline);
 
   FrameScope frame_scope(masm, StackFrame::MANUAL);
   __ EmitEnterExitFrame(kApiStackSpace, StackFrame::EXIT, api_function_address,
@@ -5147,7 +5139,7 @@ void CallKnownApiFunction::GenerateCallApiCallbackOptimizedInline(
     __ Move(ExitFrameStackSlotOperand(FCA::kLengthOffset), scratch);
   }
 
-  Register function_callback_info_arg = arg_reg_1;
+  Register function_callback_info_arg = kCArgRegs[0];
 
   __ RecordComment("v8::FunctionCallback's argument.");
   __ LoadAddress(function_callback_info_arg,
@@ -5157,8 +5149,7 @@ void CallKnownApiFunction::GenerateCallApiCallbackOptimizedInline(
 
   MemOperand return_value_operand = ExitFrameCallerStackSlotOperand(
       FCA::kReturnValueIndex + exit_frame_params_size);
-  const int kStackUnwindSpace =
-      FCA::kArgsLengthWithReceiver + num_args() + kMaybePCOnTheStack;
+  const int kStackUnwindSpace = FCA::kArgsLengthWithReceiver + num_args();
 
   const bool with_profiling = false;
   ExternalReference no_thunk_ref;
@@ -5166,11 +5157,10 @@ void CallKnownApiFunction::GenerateCallApiCallbackOptimizedInline(
 
   CallApiFunctionAndReturn(masm, with_profiling, api_function_address,
                            no_thunk_ref, no_thunk_arg, kStackUnwindSpace,
-                           nullptr, return_value_operand, &done);
+                           nullptr, return_value_operand);
+  __ RecordComment("end of inlined CallApiCallbackOptimized builtin");
 
   __ bind(&done);
-  __ RecordComment("end of inlined CallApiCallbackOptimized builtin");
-  masm->DefineExceptionHandlerAndLazyDeoptPoint(this);
 }
 
 int CallBuiltin::MaxCallStackArgs() const {
@@ -5330,11 +5320,7 @@ void CallCPPBuiltin::GenerateCode(MaglevAssembler* masm,
 
   DCHECK_EQ(Builtins::CallInterfaceDescriptorFor(builtin()).GetReturnCount(),
             1);
-  constexpr int kResultSize = 1;
-  constexpr bool kBuiltinExitFrame = true;
-  Handle<Code> code = CodeFactory::CEntry(masm->isolate(), kResultSize,
-                                          ArgvMode::kStack, kBuiltinExitFrame);
-  __ Call(code, RelocInfo::CODE_TARGET);
+  __ CallBuiltin(Builtin::kCEntry_Return1_ArgvOnStack_BuiltinExit);
 }
 
 int CallRuntime::MaxCallStackArgs() const { return num_args(); }
@@ -5519,6 +5505,76 @@ void StoreDoubleField::GenerateCode(MaglevAssembler* masm,
   __ StoreFloat64(FieldMemOperand(tmp, HeapNumber::kValueOffset), value);
 }
 
+namespace {
+
+template <typename NodeT>
+void GenerateTransitionElementsKind(
+    MaglevAssembler* masm, NodeT* node, Register object, Register map,
+    base::Vector<const compiler::MapRef> transition_sources,
+    const compiler::MapRef transition_target, ZoneLabelRef done) {
+  DCHECK(!AnyMapIsHeapNumber(transition_sources));
+  DCHECK(!IsHeapNumberMap(*transition_target.object()));
+
+  for (const compiler::MapRef transition_source : transition_sources) {
+    bool is_simple = IsSimpleMapChangeTransition(
+        transition_source.elements_kind(), transition_target.elements_kind());
+
+    // TODO(leszeks): If there are a lot of transition source maps, move the
+    // source into a register and share the deferred code between maps.
+    __ CompareTaggedAndJumpIf(
+        map, transition_source.object(), kEqual,
+        __ MakeDeferredCode(
+            [](MaglevAssembler* masm, Register object, Register map,
+               RegisterSnapshot register_snapshot,
+               compiler::MapRef transition_target, bool is_simple,
+               ZoneLabelRef done) {
+              if (is_simple) {
+                __ MoveTagged(map, transition_target.object());
+                __ StoreTaggedFieldWithWriteBarrier(
+                    object, HeapObject::kMapOffset, map, register_snapshot,
+                    MaglevAssembler::kValueIsCompressed,
+                    MaglevAssembler::kValueCannotBeSmi);
+              } else {
+                SaveRegisterStateForCall save_state(masm, register_snapshot);
+                __ Push(object, transition_target.object());
+                __ Move(kContextRegister, masm->native_context().object());
+                __ CallRuntime(Runtime::kTransitionElementsKind);
+                save_state.DefineSafepoint();
+              }
+              __ Jump(*done);
+            },
+            object, map, node->register_snapshot(), transition_target,
+            is_simple, done));
+  }
+}
+
+}  // namespace
+
+int TransitionElementsKind::MaxCallStackArgs() const {
+  return std::max(WriteBarrierDescriptor::GetStackParameterCount(), 2);
+}
+
+void TransitionElementsKind::SetValueLocationConstraints() {
+  UseRegister(object_input());
+  set_temporaries_needed(1);
+}
+
+void TransitionElementsKind::GenerateCode(MaglevAssembler* masm,
+                                          const ProcessingState& state) {
+  MaglevAssembler::ScratchRegisterScope temps(masm);
+  Register object = ToRegister(object_input());
+  Register map = temps.Acquire();
+
+  ZoneLabelRef done(masm);
+
+  __ JumpIfSmi(object, *done, Label::kNear);
+  __ LoadMapForCompare(map, object);
+  GenerateTransitionElementsKind(masm, this, object, map,
+                                 base::VectorOf(transition_sources_),
+                                 transition_target_, done);
+  __ bind(*done);
+}
+
 int TransitionElementsKindOrCheckMap::MaxCallStackArgs() const {
   return std::max(WriteBarrierDescriptor::GetStackParameterCount(), 2);
 }
@@ -5535,9 +5591,6 @@ void TransitionElementsKindOrCheckMap::GenerateCode(
 
   ZoneLabelRef done(masm);
 
-  DCHECK(!AnyMapIsHeapNumber(transition_sources_));
-  DCHECK(!IsHeapNumberMap(*transition_target_.object()));
-
   if (check_type() == CheckType::kOmitHeapObjectCheck) {
     __ AssertNotSmi(object);
   } else {
@@ -5545,41 +5598,11 @@ void TransitionElementsKindOrCheckMap::GenerateCode(
   }
 
   Register map = temps.Acquire();
-  __ LoadMap(map, object);
+  __ LoadMapForCompare(map, object);
 
-  for (compiler::MapRef transition_source : transition_sources_) {
-    bool is_simple = IsSimpleMapChangeTransition(
-        transition_source.elements_kind(), transition_target_.elements_kind());
-
-    // TODO(leszeks): If there are a lot of transition source maps, move the
-    // source into a register and share the deferred code between maps.
-    __ CompareTaggedAndJumpIf(
-        map, transition_source.object(), kEqual,
-        // We can use `map` as a temporary register, since the deferred
-        // code will jump to `done`, so we won't use it afterwards.
-        __ MakeDeferredCode(
-            [](MaglevAssembler* masm, Register object, Register temp,
-               RegisterSnapshot register_snapshot,
-               compiler::MapRef transition_target, bool is_simple,
-               ZoneLabelRef done) {
-              if (is_simple) {
-                __ Move(temp, transition_target.object());
-                __ StoreTaggedFieldWithWriteBarrier(
-                    object, HeapObject::kMapOffset, temp, register_snapshot,
-                    MaglevAssembler::kValueIsDecompressed,
-                    MaglevAssembler::kValueCannotBeSmi);
-              } else {
-                SaveRegisterStateForCall save_state(masm, register_snapshot);
-                __ Push(object, transition_target.object());
-                __ Move(kContextRegister, masm->native_context().object());
-                __ CallRuntime(Runtime::kTransitionElementsKind);
-                save_state.DefineSafepoint();
-              }
-              __ Jump(*done);
-            },
-            object, map, register_snapshot(), transition_target_, is_simple,
-            done));
-  }
+  GenerateTransitionElementsKind(masm, this, object, map,
+                                 base::VectorOf(transition_sources_),
+                                 transition_target_, done);
   Label* fail = __ GetDeoptLabel(this, DeoptimizeReason::kWrongMap);
   __ CompareTaggedAndJumpIf(map, transition_target_.object(), kNotEqual, fail);
   __ bind(*done);
@@ -5763,6 +5786,15 @@ void Jump::GenerateCode(MaglevAssembler* masm, const ProcessingState& state) {
   }
 }
 
+void CheckpointedJump::SetValueLocationConstraints() {}
+void CheckpointedJump::GenerateCode(MaglevAssembler* masm,
+                                    const ProcessingState& state) {
+  // Avoid emitting a jump to the next block.
+  if (target() != state.next_block()) {
+    __ Jump(target()->label());
+  }
+}
+
 namespace {
 
 void AttemptOnStackReplacement(MaglevAssembler* masm,
@@ -5800,14 +5832,7 @@ void AttemptOnStackReplacement(MaglevAssembler* masm,
     // The osr_urgency exceeds the current loop_depth, signaling an OSR
     // request. Call into runtime to compile.
     {
-      // At this point we need a custom register snapshot since additional
-      // registers may be live at the eager deopt below (the normal
-      // register_snapshot only contains live registers *after this
-      // node*).
-      // TODO(v8:7700): Consider making the snapshot location
-      // configurable.
       RegisterSnapshot snapshot = node->register_snapshot();
-      AddDeoptRegistersToSnapshot(&snapshot, node->eager_deopt_info());
       DCHECK(!snapshot.live_registers.has(maybe_target_code));
       SaveRegisterStateForCall save_register_state(masm, snapshot);
       if (node->unit()->is_inline()) {

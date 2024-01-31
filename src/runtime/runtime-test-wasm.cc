@@ -333,7 +333,7 @@ RUNTIME_FUNCTION(Runtime_IsWasmCode) {
   SealHandleScope shs(isolate);
   DCHECK_EQ(1, args.length());
   auto function = JSFunction::cast(args[0]);
-  Tagged<Code> code = function->code();
+  Tagged<Code> code = function->code(isolate);
   bool is_js_to_wasm = code->kind() == CodeKind::JS_TO_WASM_FUNCTION ||
                        (code->builtin_id() == Builtin::kJSToWasmWrapper);
   return isolate->heap()->ToBoolean(is_js_to_wasm);
@@ -634,6 +634,16 @@ RUNTIME_FUNCTION(Runtime_WasmCompiledExportWrappersCount) {
 RUNTIME_FUNCTION(Runtime_WasmSwitchToTheCentralStackCount) {
   int count = isolate->wasm_switch_to_the_central_stack_counter();
   return Smi::FromInt(count);
+}
+
+RUNTIME_FUNCTION(Runtime_CheckIsOnCentralStack) {
+  // This function verifies that itself, and therefore the JS function that
+  // called it, is running on the central stack. This is used to check that wasm
+  // switches to the central stack to run JS imports.
+#if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64
+  CHECK(isolate->IsOnCentralStack());
+#endif
+  return ReadOnlyRoots(isolate).undefined_value();
 }
 
 }  // namespace internal
