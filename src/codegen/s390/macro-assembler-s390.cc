@@ -351,6 +351,10 @@ void MacroAssembler::LoadRootRelative(Register destination, int32_t offset) {
   LoadU64(destination, MemOperand(kRootRegister, offset));
 }
 
+void MacroAssembler::StoreRootRelative(int32_t offset, Register value) {
+  StoreU64(value, MemOperand(kRootRegister, offset));
+}
+
 void MacroAssembler::LoadRootRegisterOffset(Register destination,
                                             intptr_t offset) {
   if (offset == 0) {
@@ -1962,7 +1966,7 @@ void MacroAssembler::TruncateDoubleToI(Isolate* isolate, Zone* zone,
   if (false) {
 #endif  // V8_ENABLE_WEBASSEMBLY
   } else {
-    Call(BUILTIN_CODE(isolate, DoubleToI), RelocInfo::CODE_TARGET);
+    CallBuiltin(Builtin::kDoubleToI);
   }
 
   LoadU64(result, MemOperand(sp, 0));
@@ -2001,6 +2005,11 @@ void TailCallOptimizedCodeSlot(MacroAssembler* masm,
   // marker field.
   __ LoadWeakValue(optimized_code_entry, optimized_code_entry,
                    &heal_optimized_code_slot);
+
+  // The entry references a CodeWrapper object. Unwrap it now.
+  __ LoadTaggedField(
+      optimized_code_entry,
+      FieldMemOperand(optimized_code_entry, CodeWrapper::kCodeOffset));
 
   // Check if the optimized code is marked for deopt. If it is, call the
   // runtime to clear it.
@@ -2149,12 +2158,10 @@ void MacroAssembler::CallRuntime(const Runtime::Function* f,
   mov(r2, Operand(num_arguments));
   Move(r3, ExternalReference::Create(f));
 #if V8_TARGET_ARCH_S390X
-  Handle<Code> code = CodeFactory::CEntry(isolate(), f->result_size);
+  CallBuiltin(Builtins::RuntimeCEntry(f->result_size));
 #else
-  Handle<Code> code = CodeFactory::CEntry(isolate(), 1);
+  CallBuiltin(Builtins::RuntimeCEntry(1));
 #endif
-
-  Call(code, RelocInfo::CODE_TARGET);
 }
 
 void MacroAssembler::TailCallRuntime(Runtime::FunctionId fid) {
@@ -2169,9 +2176,7 @@ void MacroAssembler::TailCallRuntime(Runtime::FunctionId fid) {
 void MacroAssembler::JumpToExternalReference(const ExternalReference& builtin,
                                              bool builtin_exit_frame) {
   Move(r3, builtin);
-  Handle<Code> code =
-      CodeFactory::CEntry(isolate(), 1, ArgvMode::kStack, builtin_exit_frame);
-  Jump(code, RelocInfo::CODE_TARGET);
+  TailCallBuiltin(Builtins::CEntry(1, ArgvMode::kStack, builtin_exit_frame));
 }
 
 void MacroAssembler::LoadWeakValue(Register out, Register in,
@@ -2257,7 +2262,7 @@ void MacroAssembler::Abort(AbortReason reason) {
       LoadEntryFromBuiltin(Builtin::kAbort, ip);
       Call(ip);
     } else {
-      Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
+      CallBuiltin(Builtin::kAbort);
     }
   }
   // will not return here

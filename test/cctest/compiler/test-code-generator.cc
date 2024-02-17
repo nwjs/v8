@@ -6,7 +6,7 @@
 
 #include "src/base/utils/random-number-generator.h"
 #include "src/codegen/assembler-inl.h"
-#include "src/codegen/code-stub-assembler.h"
+#include "src/codegen/code-stub-assembler-inl.h"
 #include "src/codegen/machine-type.h"
 #include "src/codegen/macro-assembler-inl.h"
 #include "src/codegen/optimized-compilation-info.h"
@@ -241,9 +241,8 @@ Handle<Code> BuildTeardownFunction(
             tester.raw_assembler_for_testing()->ChangeFloat32ToFloat64(param);
         V8_FALLTHROUGH;
       case MachineRepresentation::kFloat64: {
-        __ StoreObjectFieldNoWriteBarrier(
+        __ StoreHeapNumberValue(
             __ Cast(__ LoadFixedArrayElement(result_array, i)),
-            __ IntPtrConstant(HeapNumber::kValueOffset),
             __ UncheckedCast<Float64T>(param));
       } break;
 #if V8_ENABLE_WEBASSEMBLY
@@ -1621,7 +1620,8 @@ std::shared_ptr<wasm::NativeModule> AllocateNativeModule(Isolate* isolate,
   // WasmCallDescriptor assumes that code is on the native heap and not
   // within a code object.
   auto native_module = wasm::GetWasmEngine()->NewNativeModule(
-      isolate, wasm::WasmFeatures::All(), std::move(module), code_size);
+      isolate, wasm::WasmFeatures::All(), wasm::CompileTimeImports{},
+      std::move(module), code_size);
   native_module->SetWireBytes({});
   return native_module;
 }

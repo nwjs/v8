@@ -87,7 +87,8 @@ class TestModuleBuilder {
   }
   uint8_t AddSignature(const FunctionSig* sig,
                        uint32_t supertype = kNoSuperType) {
-    mod.AddSignatureForTesting(sig, supertype, v8_flags.wasm_final_types);
+    const bool is_final = true;
+    mod.AddSignatureForTesting(sig, supertype, is_final);
     CHECK_LE(mod.types.size(), kMaxByteSizedLeb128);
     GetTypeCanonicalizer()->AddRecursiveSingletonGroup(module());
     return static_cast<uint8_t>(mod.types.size() - 1);
@@ -131,15 +132,16 @@ class TestModuleBuilder {
     for (F field : fields) {
       type_builder.AddField(field.first, field.second);
     }
-    mod.AddStructTypeForTesting(type_builder.Build(), supertype,
-                                v8_flags.wasm_final_types);
+    const bool is_final = true;
+    mod.AddStructTypeForTesting(type_builder.Build(), supertype, is_final);
     GetTypeCanonicalizer()->AddRecursiveSingletonGroup(module());
     return static_cast<uint8_t>(mod.types.size() - 1);
   }
 
   uint8_t AddArray(ValueType type, bool mutability) {
     ArrayType* array = mod.signature_zone.New<ArrayType>(type, mutability);
-    mod.AddArrayTypeForTesting(array, kNoSuperType, v8_flags.wasm_final_types);
+    const bool is_final = true;
+    mod.AddArrayTypeForTesting(array, kNoSuperType, is_final);
     GetTypeCanonicalizer()->AddRecursiveSingletonGroup(module());
     return static_cast<uint8_t>(mod.types.size() - 1);
   }
@@ -1113,7 +1115,6 @@ TEST_F(FunctionBodyDecoderTest, Unreachable_select2) {
 TEST_F(FunctionBodyDecoderTest, UnreachableRefTypes) {
   WASM_FEATURE_SCOPE(typed_funcref);
   WASM_FEATURE_SCOPE(gc);
-  WASM_FEATURE_SCOPE(return_call);
 
   uint8_t sig_index = builder.AddSignature(sigs.i_ii());
   uint8_t function_index = builder.AddFunction(sig_index);
@@ -1684,8 +1685,6 @@ TEST_F(FunctionBodyDecoderTest, CallsWithMismatchedSigs3) {
 }
 
 TEST_F(FunctionBodyDecoderTest, SimpleReturnCalls) {
-  WASM_FEATURE_SCOPE(return_call);
-
   const FunctionSig* sig = sigs.i_i();
 
   builder.AddFunction(sigs.i_v());
@@ -1699,8 +1698,6 @@ TEST_F(FunctionBodyDecoderTest, SimpleReturnCalls) {
 }
 
 TEST_F(FunctionBodyDecoderTest, ReturnCallsWithTooFewArguments) {
-  WASM_FEATURE_SCOPE(return_call);
-
   const FunctionSig* sig = sigs.i_i();
 
   builder.AddFunction(sigs.i_i());
@@ -1713,8 +1710,6 @@ TEST_F(FunctionBodyDecoderTest, ReturnCallsWithTooFewArguments) {
 }
 
 TEST_F(FunctionBodyDecoderTest, ReturnCallWithSubtype) {
-  WASM_FEATURE_SCOPE(return_call);
-
   auto sig = MakeSig::Returns(kWasmAnyRef);
   auto callee_sig = MakeSig::Returns(kWasmAnyRef.AsNonNull());
   builder.AddFunction(&callee_sig);
@@ -1723,8 +1718,6 @@ TEST_F(FunctionBodyDecoderTest, ReturnCallWithSubtype) {
 }
 
 TEST_F(FunctionBodyDecoderTest, ReturnCallsWithMismatchedSigs) {
-  WASM_FEATURE_SCOPE(return_call);
-
   const FunctionSig* sig = sigs.i_i();
 
   builder.AddFunction(sigs.i_f());
@@ -1740,8 +1733,6 @@ TEST_F(FunctionBodyDecoderTest, ReturnCallsWithMismatchedSigs) {
 }
 
 TEST_F(FunctionBodyDecoderTest, SimpleIndirectReturnCalls) {
-  WASM_FEATURE_SCOPE(return_call);
-
   const FunctionSig* sig = sigs.i_i();
   builder.AddTable(kWasmFuncRef, 20, true, 30);
 
@@ -1757,8 +1748,6 @@ TEST_F(FunctionBodyDecoderTest, SimpleIndirectReturnCalls) {
 }
 
 TEST_F(FunctionBodyDecoderTest, IndirectReturnCallsOutOfBounds) {
-  WASM_FEATURE_SCOPE(return_call);
-
   const FunctionSig* sig = sigs.i_i();
   builder.AddTable(kWasmFuncRef, 20, false, 20);
 
@@ -1777,8 +1766,6 @@ TEST_F(FunctionBodyDecoderTest, IndirectReturnCallsOutOfBounds) {
 }
 
 TEST_F(FunctionBodyDecoderTest, IndirectReturnCallsWithMismatchedSigs3) {
-  WASM_FEATURE_SCOPE(return_call);
-
   const FunctionSig* sig = sigs.i_i();
   builder.InitializeTable(wasm::kWasmVoid);
 
@@ -1806,8 +1793,6 @@ TEST_F(FunctionBodyDecoderTest, IndirectReturnCallsWithMismatchedSigs3) {
 }
 
 TEST_F(FunctionBodyDecoderTest, IndirectReturnCallsWithoutTableCrash) {
-  WASM_FEATURE_SCOPE(return_call);
-
   const FunctionSig* sig = sigs.i_i();
 
   uint8_t sig0 = builder.AddSignature(sigs.i_v());

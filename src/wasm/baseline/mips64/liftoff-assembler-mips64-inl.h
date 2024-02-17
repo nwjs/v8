@@ -43,12 +43,14 @@ namespace liftoff {
 //  -----+--------------------+  <-- stack ptr (sp)
 //
 
-constexpr int kInstanceOffset = 2 * kSystemPointerSize;
+constexpr int kInstanceDataOffset = 2 * kSystemPointerSize;
 constexpr int kFeedbackVectorOffset = 3 * kSystemPointerSize;
 
 inline MemOperand GetStackSlot(int offset) { return MemOperand(fp, -offset); }
 
-inline MemOperand GetInstanceOperand() { return GetStackSlot(kInstanceOffset); }
+inline MemOperand GetInstanceDataOperand() {
+  return GetStackSlot(kInstanceDataOffset);
+}
 
 template <typename T>
 inline MemOperand GetMemOp(LiftoffAssembler* assm, Register addr,
@@ -434,15 +436,15 @@ void LiftoffAssembler::CheckTierUp(int declared_func_index, int budget_used,
                                    const FreezeCacheState& frozen) {
   Register budget_array = kScratchReg;
 
-  Register instance = cache_state_.cached_instance;
-  if (instance == no_reg) {
-    instance = budget_array;  // Reuse the scratch register.
-    LoadInstanceFromFrame(instance);
+  Register instance_data = cache_state_.cached_instance_data;
+  if (instance_data == no_reg) {
+    instance_data = budget_array;  // Reuse the scratch register.
+    LoadInstanceDataFromFrame(instance_data);
   }
 
   constexpr int kArrayOffset = wasm::ObjectAccess::ToTagged(
-      WasmInstanceObject::kTieringBudgetArrayOffset);
-  Ld(budget_array, MemOperand(instance, kArrayOffset));
+      WasmTrustedInstanceData::kTieringBudgetArrayOffset);
+  Ld(budget_array, MemOperand(instance_data, kArrayOffset));
 
   int budget_arr_offset = kInt32Size * declared_func_index;
 
@@ -474,8 +476,15 @@ void LiftoffAssembler::LoadConstant(LiftoffRegister reg, WasmValue value) {
   }
 }
 
-void LiftoffAssembler::LoadInstanceFromFrame(Register dst) {
-  Ld(dst, liftoff::GetInstanceOperand());
+void LiftoffAssembler::LoadInstanceDataFromFrame(Register dst) {
+  Ld(dst, liftoff::GetInstanceDataOperand());
+}
+
+void LiftoffAssembler::LoadTrustedDataFromInstanceObject(
+    Register dst, Register instance_object) {
+  LoadTaggedPointerFromInstance(
+      dst, instance_object,
+      wasm::ObjectAccess::ToTagged(WasmInstanceObject::kTrustedDataOffset));
 }
 
 void LiftoffAssembler::LoadFromInstance(Register dst, Register instance,
@@ -518,20 +527,29 @@ void LiftoffAssembler::LoadExternalPointer(Register dst, Register src_addr,
   Ld(dst, src_op);
 }
 
-void LiftoffAssembler::SpillInstance(Register instance) {
-  Sd(instance, liftoff::GetInstanceOperand());
+void LiftoffAssembler::SpillInstanceData(Register instance) {
+  Sd(instance, liftoff::GetInstanceDataOperand());
 }
 
 void LiftoffAssembler::ResetOSRTarget() {}
 
 void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
                                          Register offset_reg,
-                                         int32_t offset_imm, bool needs_shift) {
+                                         int32_t offset_imm,
+                                         uint32_t* protected_load_pc,
+                                         bool needs_shift) {
   static_assert(kTaggedSize == kInt64Size);
   unsigned shift_amount = !needs_shift ? 0 : 3;
   MemOperand src_op = liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm,
                                         false, shift_amount);
   Ld(dst, src_op);
+
+  // Since LoadTaggedField might start with an instruction loading an immediate
+  // argument to a register, we have to compute the {protected_load_pc} after
+  // calling it.
+  if (protected_load_pc) {
+    *protected_load_pc = pc_offset() - kInstrSize;
+  }
 }
 
 void LiftoffAssembler::LoadFullPointer(Register dst, Register src_addr,
@@ -544,11 +562,19 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
                                           Register offset_reg,
                                           int32_t offset_imm, Register src,
                                           LiftoffRegList pinned,
+                                          uint32_t* protected_store_pc,
                                           SkipWriteBarrier skip_write_barrier) {
   static_assert(kTaggedSize == kInt64Size);
   Register scratch = kScratchReg2;
   MemOperand dst_op = liftoff::GetMemOp(this, dst_addr, offset_reg, offset_imm);
   Sd(src, dst_op);
+
+  // Since StoreTaggedField might start with an instruction loading an immediate
+  // argument to a register, we have to compute the {protected_load_pc} after
+  // calling it.
+  if (protected_store_pc) {
+    *protected_store_pc = pc_offset() - kInstrSize;
+  }
 
   if (skip_write_barrier || v8_flags.disable_write_barriers) return;
 
@@ -573,7 +599,6 @@ void LiftoffAssembler::Load(LiftoffRegister dst, Register src_addr,
   MemOperand src_op = liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm,
                                         i64_offset, shift_amount);
 
-  if (protected_load_pc) *protected_load_pc = pc_offset();
   switch (type.value()) {
     case LoadType::kI32Load8U:
     case LoadType::kI64Load8U:
@@ -620,6 +645,12 @@ void LiftoffAssembler::Load(LiftoffRegister dst, Register src_addr,
     liftoff::ChangeEndiannessLoad(this, dst, type, pinned);
   }
 #endif
+  // Since load macros might start with an instruction loading an immediate
+  // argument to a register, we have to compute the {protected_load_pc} after
+  // calling them.
+  if (protected_load_pc) {
+    *protected_load_pc = pc_offset() - kInstrSize;
+  }
 }
 
 void LiftoffAssembler::Store(Register dst_addr, Register offset_reg,
@@ -643,7 +674,6 @@ void LiftoffAssembler::Store(Register dst_addr, Register offset_reg,
   }
 #endif
 
-  if (protected_store_pc) *protected_store_pc = pc_offset();
   switch (type.value()) {
     case StoreType::kI32Store8:
     case StoreType::kI64Store8:
@@ -671,6 +701,13 @@ void LiftoffAssembler::Store(Register dst_addr, Register offset_reg,
       break;
     default:
       UNREACHABLE();
+  }
+
+  // Since store macros might start with an instruction loading an immediate
+  // argument to a register, we have to compute the {protected_store_pc} after
+  // calling them.
+  if (protected_store_pc) {
+    *protected_store_pc = pc_offset() - kInstrSize;
   }
 }
 
@@ -785,7 +822,8 @@ void LiftoffAssembler::AtomicStore(Register dst_addr, Register offset_reg,
       Register dst_addr, Register offset_reg, uintptr_t offset_imm,            \
       LiftoffRegister value, LiftoffRegister result, StoreType type,           \
       bool i64_offset) {                                                       \
-    LiftoffRegList pinned{dst_addr, offset_reg, value, result};                \
+    LiftoffRegList pinned{dst_addr, value, result};                            \
+    if (offset_reg != no_reg) pinned.set(offset_reg);                          \
     Register temp0 = pinned.set(GetUnusedRegister(kGpReg, pinned)).gp();       \
     Register temp1 = pinned.set(GetUnusedRegister(kGpReg, pinned)).gp();       \
     Register temp2 = pinned.set(GetUnusedRegister(kGpReg, pinned)).gp();       \
@@ -863,7 +901,8 @@ void LiftoffAssembler::AtomicExchange(Register dst_addr, Register offset_reg,
                                       LiftoffRegister value,
                                       LiftoffRegister result, StoreType type,
                                       bool i64_offset) {
-  LiftoffRegList pinned{dst_addr, offset_reg, value, result};
+  LiftoffRegList pinned{dst_addr, value, result};
+  if (offset_reg != no_reg) pinned.set(offset_reg);
   Register temp0 = pinned.set(GetUnusedRegister(kGpReg, pinned)).gp();
   Register temp1 = pinned.set(GetUnusedRegister(kGpReg, pinned)).gp();
   Register temp2 = pinned.set(GetUnusedRegister(kGpReg, pinned)).gp();
@@ -940,7 +979,8 @@ void LiftoffAssembler::AtomicCompareExchange(
     Register dst_addr, Register offset_reg, uintptr_t offset_imm,
     LiftoffRegister expected, LiftoffRegister new_value, LiftoffRegister result,
     StoreType type, bool i64_offset) {
-  LiftoffRegList pinned{dst_addr, offset_reg, expected, new_value, result};
+  LiftoffRegList pinned{dst_addr, expected, new_value, result};
+  if (offset_reg != no_reg) pinned.set(offset_reg);
   Register temp0 = pinned.set(GetUnusedRegister(kGpReg, pinned)).gp();
   Register temp1 = pinned.set(GetUnusedRegister(kGpReg, pinned)).gp();
   Register temp2 = pinned.set(GetUnusedRegister(kGpReg, pinned)).gp();

@@ -18,8 +18,6 @@
 #include "src/common/code-memory-access-inl.h"
 #include "src/execution/isolate-data.h"
 #include "src/execution/isolate.h"
-#include "src/heap/concurrent-allocator-inl.h"
-#include "src/heap/concurrent-allocator.h"
 #include "src/heap/heap-allocator-inl.h"
 #include "src/heap/heap-write-barrier.h"
 #include "src/heap/heap.h"
@@ -306,13 +304,6 @@ bool Heap::InYoungGeneration(Tagged<HeapObject> heap_object) {
 }
 
 // static
-bool Heap::InWritableSharedSpace(MaybeObject object) {
-  Tagged<HeapObject> heap_object;
-  return object.GetHeapObject(&heap_object) &&
-         heap_object.InWritableSharedSpace();
-}
-
-// static
 bool Heap::InFromPage(Tagged<Object> object) {
   DCHECK(!HasWeakHeapObjectTag(object));
   return IsHeapObject(object) && InFromPage(HeapObject::cast(object));
@@ -554,50 +545,6 @@ PagedNewSpace* Heap::paged_new_space() const {
 
 SemiSpaceNewSpace* Heap::semi_space_new_space() const {
   return SemiSpaceNewSpace::From(new_space());
-}
-
-#ifdef V8_ENABLE_THIRD_PARTY_HEAP
-CodePageMemoryModificationScope::CodePageMemoryModificationScope(
-    InstructionStream code)
-    :
-#if V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT || V8_HEAP_USE_PKU_JIT_WRITE_PROTECT
-      rwx_write_scope_("A part of CodePageMemoryModificationScope"),
-#endif
-      chunk_(nullptr),
-      scope_active_(false) {
-}
-#else
-CodePageMemoryModificationScope::CodePageMemoryModificationScope(
-    Tagged<InstructionStream> code)
-    : CodePageMemoryModificationScope(BasicMemoryChunk::FromHeapObject(code)) {}
-#endif
-
-#if V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT || V8_HEAP_USE_PKU_JIT_WRITE_PROTECT
-CodePageMemoryModificationScope::CodePageMemoryModificationScope(
-    BasicMemoryChunk* chunk) {
-  if (chunk->IsFlagSet(BasicMemoryChunk::IS_EXECUTABLE)) {
-    rwx_write_scope_.emplace("A part of CodePageMemoryModificationScope");
-  }
-}
-#else
-CodePageMemoryModificationScope::CodePageMemoryModificationScope(
-    BasicMemoryChunk* chunk)
-    : chunk_(chunk),
-      scope_active_(chunk_->IsFlagSet(BasicMemoryChunk::IS_EXECUTABLE) &&
-                    chunk_->heap()->write_protect_code_memory()) {
-  if (scope_active_) {
-    DCHECK(IsAnyCodeSpace(chunk_->owner()->identity()));
-    guard_.emplace(MemoryChunk::cast(chunk_)->SetCodeModificationPermissions());
-  }
-}
-#endif
-
-CodePageMemoryModificationScope::~CodePageMemoryModificationScope() {
-#if !V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT && !V8_HEAP_USE_PKU_JIT_WRITE_PROTECT
-  if (scope_active_) {
-    MemoryChunk::cast(chunk_)->SetDefaultCodePermissions();
-  }
-#endif
 }
 
 IgnoreLocalGCRequests::IgnoreLocalGCRequests(Heap* heap) : heap_(heap) {

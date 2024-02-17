@@ -85,15 +85,6 @@ struct is_subtype<Base, HeapObject,
                       std::is_base_of<HeapObjectLayout, Base>>>>
     : public std::true_type {};
 
-class PrimitiveHeapObject;
-class PrimitiveHeapObjectLayout;
-template <typename Base>
-struct is_subtype<Base, PrimitiveHeapObject,
-                  std::enable_if_t<std::disjunction_v<
-                      std::is_base_of<PrimitiveHeapObject, Base>,
-                      std::is_base_of<PrimitiveHeapObjectLayout, Base>>>>
-    : public std::true_type {};
-
 // For reasons (the tnode.h type hierarchy), the Object hierarchy is considered
 // to be part of the MaybeObject hierarchy wrt is_subtype.
 // But `Tagged<MaybeObject>` is invalid. Currently, just `MaybeObject` should
@@ -224,6 +215,13 @@ class Tagged<Object> : public TaggedBase {
   // Tagged<Object> implicitly initialises to Smi::zero().
   V8_INLINE constexpr Tagged() : TaggedBase(kNullAddress) {}
 
+  // Allow implicit conversion from const HeapObjectLayout* to Tagged<Object>.
+  // TODO(leszeks): Make this more const-correct.
+  // TODO(leszeks): Consider making this an explicit conversion.
+  // NOLINTNEXTLINE
+  V8_INLINE Tagged(const HeapObjectLayout* ptr)
+      : Tagged(reinterpret_cast<Address>(ptr) + kHeapObjectTag) {}
+
   // Implicit conversion for subclasses -- all classes are subclasses of Object,
   // so allow all tagged pointers.
   // NOLINTNEXTLINE
@@ -333,7 +331,12 @@ class Tagged<HeapObject> : public TaggedBase {
   }
 
   V8_INLINE constexpr Tagged() = default;
-  V8_INLINE explicit Tagged(const HeapObjectLayout* ptr)
+  // Allow implicit conversion from const HeapObjectLayout* to
+  // Tagged<HeapObject>.
+  // TODO(leszeks): Make this more const-correct.
+  // TODO(leszeks): Consider making this an explicit conversion.
+  // NOLINTNEXTLINE
+  V8_INLINE Tagged(const HeapObjectLayout* ptr)
       : Tagged(reinterpret_cast<Address>(ptr) + kHeapObjectTag) {}
 
   // Implicit conversion for subclasses.
@@ -360,10 +363,6 @@ class Tagged<HeapObject> : public TaggedBase {
 
   constexpr V8_INLINE bool IsHeapObject() const { return true; }
   constexpr V8_INLINE bool IsSmi() const { return false; }
-
-  inline bool InAnySharedSpace() const;
-  inline bool InWritableSharedSpace() const;
-  inline bool InReadOnlySpace() const;
 
   // Implicit conversions and explicit casts to/from raw pointers
   // TODO(leszeks): Remove once we're using Tagged everywhere.
@@ -432,7 +431,11 @@ class Tagged : public detail::BaseForTagged<T>::type {
 
   V8_INLINE constexpr Tagged() = default;
   template <typename U = T>
-  V8_INLINE explicit Tagged(const T* ptr)
+  // Allow implicit conversion from const T* to Tagged<T>.
+  // TODO(leszeks): Make this more const-correct.
+  // TODO(leszeks): Consider making this an explicit conversion.
+  // NOLINTNEXTLINE
+  V8_INLINE Tagged(const T* ptr)
       : Tagged(reinterpret_cast<Address>(ptr) + kHeapObjectTag) {
     static_assert(std::is_base_of_v<HeapObjectLayout, U>);
   }
@@ -524,7 +527,6 @@ template <class T>
 Tagged(T object) -> Tagged<T>;
 
 Tagged(const HeapObjectLayout* object) -> Tagged<HeapObject>;
-Tagged(const PrimitiveHeapObjectLayout* object) -> Tagged<PrimitiveHeapObject>;
 
 template <class T>
 Tagged(const T* object) -> Tagged<T>;

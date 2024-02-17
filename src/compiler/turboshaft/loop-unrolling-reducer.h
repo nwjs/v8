@@ -151,6 +151,8 @@ class LoopUnrollingAnalyzer {
     return loop_finder_.GetLoopHeader(block);
   }
 
+  bool CanUnrollAtLeastOneLoop() const { return can_unroll_at_least_one_loop_; }
+
   // TODO(dmercadier): consider tweaking these value for a better size-speed
   // trade-off. In particular, having the number of iterations to unroll be a
   // function of the loop's size and a MaxLoopSize could make sense.
@@ -176,6 +178,7 @@ class LoopUnrollingAnalyzer {
   const size_t kMaxLoopSizeForPartialUnrolling =
       PipelineData::Get().is_wasm() ? kWasmMaxLoopSizeForPartialUnrolling
                                     : kJSMaxLoopSizeForPartialUnrolling;
+  bool can_unroll_at_least_one_loop_ = false;
 };
 
 template <class Next>
@@ -266,14 +269,16 @@ class LoopUnrollingReducer : public Next {
     LABEL_BLOCK(no_change) { return Next::ReduceInputGraphCall(ig_idx, call); }
     if (ShouldSkipOptimizationStep()) goto no_change;
 
-    if (unrolling_ == UnrollingStatus::kUnrolling) {
-      if (call.IsStackCheck(__ input_graph(), broker_,
-                            StackCheckKind::kJSIterationBody)) {
-        // When we unroll a loop, we get rid of its stack checks. (note that we
-        // don't do this for the 1st folded body of partially unrolled loops so
-        // that the loop keeps a stack check).
-        DCHECK_NE(unrolling_, UnrollingStatus::kUnrollingFirstIteration);
-        return OpIndex::Invalid();
+    if (V8_LIKELY(!IsRunningBuiltinPipeline())) {
+      if (unrolling_ == UnrollingStatus::kUnrolling) {
+        if (call.IsStackCheck(__ input_graph(), broker_,
+                              StackCheckKind::kJSIterationBody)) {
+          // When we unroll a loop, we get rid of its stack checks. (note that
+          // we don't do this for the 1st folded body of partially unrolled
+          // loops so that the loop keeps a stack check).
+          DCHECK_NE(unrolling_, UnrollingStatus::kUnrollingFirstIteration);
+          return OpIndex::Invalid();
+        }
       }
     }
 
@@ -288,6 +293,7 @@ class LoopUnrollingReducer : public Next {
     if (ShouldSkipOptimizationStep()) goto no_change;
 
     if (unrolling_ == UnrollingStatus::kUnrolling) {
+      DCHECK(!IsRunningBuiltinPipeline());
       if (check.check_kind == StackCheckOp::CheckKind::kLoopCheck) {
         // When we unroll a loop, we get rid of its stack checks. (note that we
         // don't do this for the 1st folded body of partially unrolled loops so
@@ -321,10 +327,15 @@ class LoopUnrollingReducer : public Next {
   void PartiallyUnrollLoop(Block* header);
   void FixLoopPhis(Block* input_graph_loop, Block* output_graph_loop,
                    Block* backedge_block);
+  bool IsRunningBuiltinPipeline() const {
+    return PipelineData::Get().pipeline_kind() == TurboshaftPipelineKind::kCSA;
+  }
 
   ZoneUnorderedSet<Block*> loop_body_{__ phase_zone()};
-  LoopUnrollingAnalyzer analyzer_{__ phase_zone(),
-                                  &__ modifiable_input_graph()};
+  // The analysis should be ran ahead of time so that the LoopUnrollingPhase
+  // doesn't trigger the CopyingPhase if there are no loops to unroll.
+  LoopUnrollingAnalyzer& analyzer_ =
+      *PipelineData::Get().loop_unrolling_analyzer();
   // {unrolling_} is true if a loop is currently being unrolled.
   UnrollingStatus unrolling_ = UnrollingStatus::kNotUnrolling;
   void* current_loop_header_ = nullptr;

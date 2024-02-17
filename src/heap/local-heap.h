@@ -17,7 +17,7 @@
 #include "src/execution/isolate.h"
 #include "src/handles/global-handles.h"
 #include "src/handles/persistent-handles.h"
-#include "src/heap/concurrent-allocator.h"
+#include "src/heap/base/stack.h"
 #include "src/heap/gc-callbacks.h"
 
 namespace v8 {
@@ -297,7 +297,9 @@ class V8_EXPORT_PRIVATE LocalHeap {
       int object_size, AllocationType type, AllocationOrigin origin,
       AllocationAlignment alignment);
 
-  bool IsMainThreadOfClientIsolate() const;
+#ifdef DEBUG
+  bool IsSafeForConservativeStackScanning() const;
+#endif
 
   template <typename Callback>
   V8_INLINE void ExecuteWithStackMarker(Callback callback);
@@ -306,7 +308,7 @@ class V8_EXPORT_PRIVATE LocalHeap {
 
   void Park() {
     DCHECK(AllowSafepoints::IsAllowed());
-    DCHECK_IMPLIES(IsMainThreadOfClientIsolate(), is_in_trampoline());
+    DCHECK(IsSafeForConservativeStackScanning());
     ThreadState expected = ThreadState::Running();
     if (!state_.CompareExchangeWeak(expected, ThreadState::Parked())) {
       ParkSlowPath();
@@ -365,8 +367,10 @@ class V8_EXPORT_PRIVATE LocalHeap {
 
   MarkingBarrier* saved_marking_barrier_ = nullptr;
 
+  // Stack information for the thread using this local heap.
+  ::heap::base::Stack stack_;
+
   friend class CollectionBarrier;
-  friend class ConcurrentAllocator;
   friend class GlobalSafepoint;
   friend class Heap;
   friend class Isolate;

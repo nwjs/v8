@@ -186,6 +186,7 @@ bool Runtime::MayAllocate(FunctionId id) {
   switch (id) {
     case Runtime::kCompleteInobjectSlackTracking:
     case Runtime::kCompleteInobjectSlackTrackingForMap:
+    case Runtime::kGlobalPrint:
       return false;
     default:
       return true;
@@ -214,6 +215,10 @@ bool Runtime::IsAllowListedForFuzzing(FunctionId id) {
     case Runtime::kSetForceSlowPath:
     case Runtime::kSimulateNewspaceFull:
     case Runtime::kWaitForBackgroundOptimization:
+    case Runtime::kSetBatterySaverMode:
+    case Runtime::kNotifyIsolateForeground:
+    case Runtime::kNotifyIsolateBackground:
+    case Runtime::kIsEfficiencyModeEnabled:
       return true;
     // Runtime functions only permitted for non-differential fuzzers.
     // This list may contain functions performing extra checks or returning

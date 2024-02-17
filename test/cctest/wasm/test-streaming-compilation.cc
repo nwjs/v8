@@ -34,17 +34,9 @@ class MockPlatform final : public TestPlatform {
     for (auto* job_handle : job_handles_) job_handle->ResetPlatform();
   }
 
-  std::unique_ptr<v8::JobHandle> PostJob(
-      v8::TaskPriority priority,
-      std::unique_ptr<v8::JobTask> job_task) override {
-    auto job_handle = CreateJob(priority, std::move(job_task));
-    job_handle->NotifyConcurrencyIncrease();
-    return job_handle;
-  }
-
-  std::unique_ptr<v8::JobHandle> CreateJob(
-      v8::TaskPriority priority,
-      std::unique_ptr<v8::JobTask> job_task) override {
+  std::unique_ptr<v8::JobHandle> CreateJobImpl(
+      v8::TaskPriority priority, std::unique_ptr<v8::JobTask> job_task,
+      const v8::SourceLocation& location) override {
     auto orig_job_handle = v8::platform::NewDefaultJobHandle(
         this, priority, std::move(job_task), 1);
     auto job_handle =
@@ -58,7 +50,9 @@ class MockPlatform final : public TestPlatform {
     return task_runner_;
   }
 
-  void CallOnWorkerThread(std::unique_ptr<v8::Task> task) override {
+  void PostTaskOnWorkerThreadImpl(v8::TaskPriority priority,
+                                  std::unique_ptr<v8::Task> task,
+                                  const v8::SourceLocation& location) override {
     task_runner_->PostTask(std::move(task));
   }
 
@@ -217,8 +211,8 @@ class StreamTester {
 
     WasmFeatures features = WasmFeatures::FromIsolate(i_isolate);
     stream_ = GetWasmEngine()->StartStreamingCompilation(
-        i_isolate, features, v8::Utils::OpenHandle(*context),
-        "WebAssembly.compileStreaming()",
+        i_isolate, features, CompileTimeImports{},
+        v8::Utils::OpenHandle(*context), "WebAssembly.compileStreaming()",
         std::make_shared<TestResolver>(i_isolate, &state_, &error_message_,
                                        &module_object_));
   }
@@ -1290,7 +1284,7 @@ STREAM_TEST(TestIncrementalCaching) {
   CHECK(module->GetCode(2) == nullptr || module->GetCode(2)->is_liftoff());
   // No TurboFan compilation happened yet, and therefore no call to the cache.
   CHECK_EQ(0, call_cache_counter);
-  i::wasm::TriggerTierUp(*instance, 0);
+  i::wasm::TriggerTierUp(instance->trusted_data(i_isolate), 0);
   tester.RunCompilerTasks();
   CHECK(!module->GetCode(0)->is_liftoff());
   CHECK(module->GetCode(1) == nullptr || module->GetCode(1)->is_liftoff());
@@ -1301,7 +1295,7 @@ STREAM_TEST(TestIncrementalCaching) {
     i::wasm::WasmSerializer serializer(tester.native_module());
     serialized_size = serializer.GetSerializedNativeModuleSize();
   }
-  i::wasm::TriggerTierUp(*instance, 1);
+  i::wasm::TriggerTierUp(instance->trusted_data(i_isolate), 1);
   tester.RunCompilerTasks();
   CHECK(!module->GetCode(0)->is_liftoff());
   CHECK(!module->GetCode(1)->is_liftoff());

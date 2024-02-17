@@ -86,7 +86,6 @@ class Boolean;
 class CodeLargeObjectSpace;
 class CodeRange;
 class CollectionBarrier;
-class ConcurrentAllocator;
 class ConcurrentMarking;
 class CppHeap;
 class EphemeronRememberedSet;
@@ -451,12 +450,7 @@ class Heap final {
   // Initialize a filler object at a specific address. Unlike
   // `CreateFillerObjectAt` this method will not perform slot verification since
   // this would race on background threads.
-  void CreateFillerObjectAtBackground(Address addr, int size);
-
-  // This method is used by the sweeper on free memory ranges to make the page
-  // iterable again. Unlike `CreateFillerObjectAt` this method will not verify
-  // slots since the sweeper can run concurrently.
-  void CreateFillerObjectAtSweeper(Address addr, int size);
+  void CreateFillerObjectAtBackground(const WritableFreeSpace& free_space);
 
   bool CanMoveObjectStart(Tagged<HeapObject> object);
 
@@ -547,20 +541,6 @@ class Heap final {
 
   // Dump heap statistics in JSON format.
   void DumpJSONHeapStatistics(std::stringstream& stream);
-
-  bool write_protect_code_memory() const {
-    if (V8_HAS_PTHREAD_JIT_WRITE_PROTECT) {
-      // On MacOS on ARM64 ("Apple M1"/Apple Silicon) code modification
-      // protection must be used. It can be achieved by one of the following
-      // approaches:
-      // 1) switching memory protection between RW-RX as on other architectures
-      //    => return true,
-      // 2) fast W^X machinery (see V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT) which
-      //    doesn not require memory protection changes => return false.
-      return !V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT;
-    }
-    return write_protect_code_memory_;
-  }
 
   inline HeapState gc_state() const {
     return gc_state_.load(std::memory_order_relaxed);
@@ -1122,6 +1102,7 @@ class Heap final {
 
   V8_EXPORT_PRIVATE void SetStackStart(void* stack_start);
 
+  // Stack information of the main thread.
   V8_EXPORT_PRIVATE ::heap::base::Stack& stack();
 
   // ===========================================================================
@@ -1178,9 +1159,6 @@ class Heap final {
   // Same as above, but checks whether the object resides in any of the code
   // spaces.
   V8_EXPORT_PRIVATE bool ContainsCode(Tagged<HeapObject> value) const;
-
-  // Checks whether object resides in the non-read-only shared heap.
-  static inline bool InWritableSharedSpace(MaybeObject object);
 
   // Checks whether an address/object is in the non-read-only heap (including
   // auxiliary area and unused area). Use IsValidHeapObject if checking both
@@ -1272,8 +1250,8 @@ class Heap final {
 
   base::Mutex* heap_expansion_mutex() { return &heap_expansion_mutex_; }
 
-  // Returns the amount of memory currently held alive by the unmapper.
-  size_t CommittedMemoryOfUnmapper();
+  // Returns the amount of memory currently held alive by the pool.
+  size_t CommittedMemoryOfPool();
 
   // Returns the amount of memory currently committed for the heap.
   size_t CommittedMemory();
@@ -1755,7 +1733,7 @@ class Heap final {
 
   // Creates a filler object in the specified memory area. This method is the
   // internal method used by all CreateFillerObjectAtXXX-methods.
-  void CreateFillerObjectAtRaw(Address addr, int size,
+  void CreateFillerObjectAtRaw(const WritableFreeSpace& free_space,
                                ClearFreedMemoryMode clear_memory_mode,
                                ClearRecordedSlots clear_slots_mode,
                                VerifyNoSlotsRecorded verify_no_slots_recorded);
@@ -1887,6 +1865,7 @@ class Heap final {
                                 double mutator_utilization);
   void CheckIneffectiveMarkCompact(size_t old_generation_size,
                                    double mutator_utilization);
+  void ReportIneffectiveMarkCompactIfNeeded();
 
   inline void IncrementExternalBackingStoreBytes(ExternalBackingStoreType type,
                                                  size_t amount);
@@ -2168,10 +2147,6 @@ class Heap final {
 
   LocalHeap* main_thread_local_heap_ = nullptr;
 
-  // Determines whether code space is write-protected. This is essentially a
-  // race-free copy of the {v8_flags.write_protect_code_memory} flag.
-  bool write_protect_code_memory_ = false;
-
   std::atomic<HeapState> gc_state_{NOT_IN_GC};
 
   // Starts marking when stress_marking_percentage_% of the marking start limit
@@ -2401,7 +2376,6 @@ class Heap final {
   friend class AlwaysAllocateScope;
   friend class ArrayBufferCollector;
   friend class ArrayBufferSweeper;
-  friend class ConcurrentAllocator;
   friend class ConcurrentMarking;
   friend class ConservativeTracedHandlesMarkingVisitor;
   friend class EmbedderStackStateScope;
@@ -2569,30 +2543,6 @@ using CodePageHeaderModificationScope = RwxMemoryWriteScope;
 using CodePageHeaderModificationScope = NopRwxMemoryWriteScope;
 #endif  // V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT
 
-// The CodePageMemoryModificationScope does not check if transitions to
-// writeable and back to executable are actually allowed, i.e. the MemoryChunk
-// was registered to be executable. It can be used by concurrent threads.
-class V8_NODISCARD CodePageMemoryModificationScope {
- public:
-  explicit inline CodePageMemoryModificationScope(BasicMemoryChunk* chunk);
-  explicit inline CodePageMemoryModificationScope(
-      Tagged<InstructionStream> object);
-  inline ~CodePageMemoryModificationScope();
-
- private:
-#if V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT || V8_HEAP_USE_PKU_JIT_WRITE_PROTECT
-  base::Optional<RwxMemoryWriteScope> rwx_write_scope_;
-#else
-  BasicMemoryChunk* chunk_;
-  bool scope_active_;
-  base::Optional<base::MutexGuard> guard_;
-#endif
-
-  // Disallow any GCs inside this scope, as a relocation of the underlying
-  // object would change the {MemoryChunk} that this scope targets.
-  DISALLOW_GARBAGE_COLLECTION(no_heap_allocation_)
-};
-
 class CodePageMemoryModificationScopeForDebugging {
  public:
   // When we zap newly allocated MemoryChunks, the chunk is not initialized yet
@@ -2606,10 +2556,6 @@ class CodePageMemoryModificationScopeForDebugging {
  private:
 #if V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT || V8_HEAP_USE_PKU_JIT_WRITE_PROTECT
   RwxMemoryWriteScope rwx_write_scope_;
-#else
-  VirtualMemory* reservation_ = nullptr;
-  base::Optional<base::AddressRegion> region_;
-  base::Optional<CodePageMemoryModificationScope> memory_modification_scope_;
 #endif
 };
 

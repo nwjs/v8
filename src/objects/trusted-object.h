@@ -35,6 +35,13 @@ class TrustedObject : public HeapObject {
   DECL_CAST(TrustedObject)
   DECL_VERIFIER(TrustedObject)
 
+  // Protected pointers, i.e. pointers between objects in trusted space, must
+  // only be used to reference a trusted object from another trusted object.
+  // Using them from inside the sandbox would not be safe (they would not be
+  // "protected"). As such, the slot accessor for these slots only exists on
+  // TrustedObjects but not on any other HeapObjects.
+  inline ProtectedPointerSlot RawProtectedPointerField(int byte_offset) const;
+
   static constexpr int kHeaderSize = HeapObject::kHeaderSize;
   static constexpr int kize = kHeaderSize;
 
@@ -82,7 +89,7 @@ class ExposedTrustedObject : public TrustedObject {
   // This indirect pointer references a pointer table entry (either in the
   // trusted pointer table or the code pointer table for Code objects) through
   // which this object can be referenced from inside the sandbox.
-  inline IndirectPointerHandle self_indirect_pointer() const;
+  inline IndirectPointerHandle self_indirect_pointer_handle() const;
 
   DECL_CAST(ExposedTrustedObject)
   DECL_VERIFIER(ExposedTrustedObject)

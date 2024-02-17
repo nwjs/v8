@@ -38,6 +38,9 @@ namespace v8::internal::compiler::turboshaft {
 
 #include "src/compiler/turboshaft/define-assembler-macros.inc"
 
+template <typename>
+class VariableReducer;
+
 // The MachineOptimizationAssembler performs basic optimizations on low-level
 // operations that can be performed on-the-fly, without requiring type analysis
 // or analyzing uses. It largely corresponds to MachineOperatorReducer in
@@ -52,6 +55,9 @@ template <class Next>
 class MachineOptimizationReducer : public Next {
  public:
   TURBOSHAFT_REDUCER_BOILERPLATE()
+#if defined(__clang__)
+  static_assert(reducer_list_contains<ReducerList, VariableReducer>::value);
+#endif
 
   // TODO(mslekova): Implement ReduceSelect and ReducePhi,
   // by reducing `(f > 0) ? f : -f` to `fabs(f)`.
@@ -183,9 +189,10 @@ class MachineOptimizationReducer : public Next {
   }
 
   OpIndex REDUCE(TaggedBitcast)(OpIndex input, RegisterRepresentation from,
-                                RegisterRepresentation to) {
+                                RegisterRepresentation to,
+                                TaggedBitcastOp::Kind kind) {
     if (ShouldSkipOptimizationStep()) {
-      return Next::ReduceTaggedBitcast(input, from, to);
+      return Next::ReduceTaggedBitcast(input, from, to, kind);
     }
     // A Tagged -> Untagged -> Tagged sequence can be short-cut.
     // An Untagged -> Tagged -> Untagged sequence however cannot be removed,
@@ -196,6 +203,20 @@ class MachineOptimizationReducer : public Next {
           all_of(input_bitcast->from, to) == RegisterRepresentation::Tagged()) {
         return input_bitcast->input();
       }
+    }
+    // An Untagged -> Smi -> Untagged sequence can be short-cut.
+    if (auto* input_bitcast = matcher.TryCast<TaggedBitcastOp>(input);
+        input_bitcast && to.IsWord() &&
+        (kind == TaggedBitcastOp::Kind::kSmi ||
+         input_bitcast->kind == TaggedBitcastOp::Kind::kSmi)) {
+      if (input_bitcast->from == to) return input_bitcast->input();
+      if (input_bitcast->from == RegisterRepresentation::Word32()) {
+        DCHECK_EQ(to, RegisterRepresentation::Word64());
+        return __ BitcastWord32ToWord64(input_bitcast->input());
+      }
+      DCHECK(input_bitcast->from == RegisterRepresentation::Word64() &&
+             to == RegisterRepresentation::Word32());
+      return __ TruncateWord64ToWord32(input_bitcast->input());
     }
     // Try to constant-fold TaggedBitcast from Word Constant to Word.
     if (to.IsWord()) {
@@ -211,7 +232,7 @@ class MachineOptimizationReducer : public Next {
         }
       }
     }
-    return Next::ReduceTaggedBitcast(input, from, to);
+    return Next::ReduceTaggedBitcast(input, from, to, kind);
   }
 
   OpIndex REDUCE(FloatUnary)(OpIndex input, FloatUnaryOp::Kind kind,
@@ -849,6 +870,13 @@ class MachineOptimizationReducer : public Next {
               // => (x & (-1 << K)) + (y1 << K)
               if (matcher.MatchConstantLeftShift(y, &y1, rep, &K2) && K2 == K) {
                 return __ WordAdd(__ WordBitwiseAnd(x, right, rep), y, rep);
+              }
+            } else if (matcher.MatchWordMul(left, &x, &y, rep)) {
+              // (x * (M << K)) & (-1 << K) => x * (M << K)
+              uint64_t L;  // L == (M << K) iff (L & mask) == L.
+              if (matcher.MatchIntegralWordConstant(y, rep, &L) &&
+                  (L & mask) == L) {
+                return left;
               }
             }
           }
@@ -1672,12 +1700,19 @@ class MachineOptimizationReducer : public Next {
                                maybe_indirect_pointer_tag);
     }
     if (ShouldSkipOptimizationStep()) goto no_change;
-
+#if V8_TARGET_ARCH_32_BIT
+    if (kind.is_atomic && stored_rep.SizeInBytes() == 8) {
+      // AtomicWord32PairOp (as used by Int64Lowering) cannot handle
+      // element_scale != 0 currently.
+      // TODO(jkummerow): Add support for element_scale in AtomicWord32PairOp.
+      goto no_change;
+    }
+#endif
     if (stored_rep.SizeInBytes() <= 4) {
       value = TryRemoveWord32ToWord64Conversion(value);
     }
-    index =
-        ReduceMemoryIndex(index.value_or_invalid(), &offset, &element_scale);
+    index = ReduceMemoryIndex(index.value_or_invalid(), &offset, &element_scale,
+                              kind.tagged_base);
     switch (stored_rep) {
       case MemoryRepresentation::Uint8():
       case MemoryRepresentation::Int8():
@@ -1707,6 +1742,12 @@ class MachineOptimizationReducer : public Next {
       const WordBinopOp& base = matcher.Cast<WordBinopOp>(base_idx);
       base_idx = base.left();
       index = base.right();
+      // We go through the Store stack again, which might merge {index} into
+      // {offset}, or just do other optimizations on this Store.
+      __ Store(base_idx, index, value, kind, stored_rep, write_barrier, offset,
+               element_scale, maybe_initializing_or_transitioning,
+               maybe_indirect_pointer_tag);
+      return OpIndex::Invalid();
     }
 
     return Next::ReduceStore(base_idx, index, value, kind, stored_rep,
@@ -1724,15 +1765,24 @@ class MachineOptimizationReducer : public Next {
                               offset, element_scale);
     }
     if (ShouldSkipOptimizationStep()) goto no_change;
+#if V8_TARGET_ARCH_32_BIT
+    if (kind.is_atomic && loaded_rep.SizeInBytes() == 8) {
+      // AtomicWord32PairOp (as used by Int64Lowering) cannot handle
+      // element_scale != 0 currently.
+      // TODO(jkummerow): Add support for element_scale in AtomicWord32PairOp.
+      goto no_change;
+    }
+#endif
 
     while (true) {
-      index =
-          ReduceMemoryIndex(index.value_or_invalid(), &offset, &element_scale);
+      index = ReduceMemoryIndex(index.value_or_invalid(), &offset,
+                                &element_scale, kind.tagged_base);
       if (!kind.tagged_base && !index.valid()) {
         if (OpIndex left, right;
             matcher.MatchWordAdd(base_idx, &left, &right,
                                  WordRepresentation::PointerSized()) &&
-            TryAdjustOffset(&offset, matcher.Get(right), element_scale)) {
+            TryAdjustOffset(&offset, matcher.Get(right), element_scale,
+                            kind.tagged_base)) {
           base_idx = left;
           continue;
         }
@@ -1778,6 +1828,10 @@ class MachineOptimizationReducer : public Next {
       const WordBinopOp& base = matcher.Cast<WordBinopOp>(base_idx);
       base_idx = base.left();
       index = base.right();
+      // We go through the Load stack again, which might merge {index} into
+      // {offset}, or just do other optimizations on this Load.
+      return __ Load(base_idx, index, kind, loaded_rep, result_rep, offset,
+                     element_scale);
     }
 
     return Next::ReduceLoad(base_idx, index, kind, loaded_rep, result_rep,
@@ -1901,7 +1955,7 @@ class MachineOptimizationReducer : public Next {
   // Try to match a constant and add it to `offset`. Return `true` if
   // successful.
   bool TryAdjustOffset(int32_t* offset, const Operation& maybe_constant,
-                       uint8_t element_scale) {
+                       uint8_t element_scale, bool tagged_base) {
     if (!maybe_constant.Is<ConstantOp>()) return false;
     const ConstantOp& constant = maybe_constant.Cast<ConstantOp>();
     if (constant.rep != WordRepresentation::PointerSized() ||
@@ -1918,8 +1972,30 @@ class MachineOptimizationReducer : public Next {
         !base::bits::SignedAddOverflow32(
             *offset,
             static_cast<int32_t>(base::bits::Unsigned(diff) << element_scale),
-            &new_offset)) {
+            &new_offset) &&
+        LoadOp::OffsetIsValid(new_offset, tagged_base)) {
       *offset = new_offset;
+      return true;
+    }
+    return false;
+  }
+
+  bool TryAdjustIndex(int32_t offset, OpIndex* index,
+                      const Operation& maybe_constant, uint8_t element_scale) {
+    if (!maybe_constant.Is<ConstantOp>()) return false;
+    const ConstantOp& constant = maybe_constant.Cast<ConstantOp>();
+    if (constant.rep != WordRepresentation::PointerSized() ||
+        !constant.IsIntegral()) {
+      // This can only happen in unreachable code. Ideally, we identify this
+      // situation and use `__ Unreachable()`. However, this is difficult to
+      // do from within this helper, so we just don't perform the reduction.
+      return false;
+    }
+    int64_t diff = constant.signed_integral();
+    int64_t new_index;
+    if (!base::bits::SignedAddOverflow64(offset, diff << element_scale,
+                                         &new_index)) {
+      *index = __ IntPtrConstant(new_index);
       return true;
     }
     return false;
@@ -1945,12 +2021,18 @@ class MachineOptimizationReducer : public Next {
   // `element_scale` and returning the updated `index`.
   // Return `OpIndex::Invalid()` if the resulting index is zero.
   OpIndex ReduceMemoryIndex(OpIndex index, int32_t* offset,
-                            uint8_t* element_scale) {
+                            uint8_t* element_scale, bool tagged_base) {
     while (index.valid()) {
       const Operation& index_op = matcher.Get(index);
-      if (TryAdjustOffset(offset, index_op, *element_scale)) {
+      if (TryAdjustOffset(offset, index_op, *element_scale, tagged_base)) {
         index = OpIndex::Invalid();
         *element_scale = 0;
+      } else if (TryAdjustIndex(*offset, &index, index_op, *element_scale)) {
+        *element_scale = 0;
+        *offset = 0;
+        // This function cannot optimize the index further since at this point
+        // it's just a WordPtrConstant.
+        return index;
       } else if (const ShiftOp* shift_op = index_op.TryCast<ShiftOp>()) {
         if (shift_op->kind == ShiftOp::Kind::kShiftLeft &&
             TryAdjustElementScale(element_scale, shift_op->right())) {
@@ -1959,9 +2041,14 @@ class MachineOptimizationReducer : public Next {
         }
       } else if (const WordBinopOp* binary_op =
                      index_op.TryCast<WordBinopOp>()) {
+        // TODO(jkummerow): This doesn't trigger for wasm32 memory operations
+        // on 64-bit platforms, because `index_op` is a `Change` (from uint32
+        // to uint64) in that case, and that Change's input is the addition
+        // we're looking for. When we fix that, we must also teach the x64
+        // instruction selector to support xchg with index *and* offset.
         if (binary_op->kind == WordBinopOp::Kind::kAdd &&
             TryAdjustOffset(offset, matcher.Get(binary_op->right()),
-                            *element_scale)) {
+                            *element_scale, tagged_base)) {
           index = binary_op->left();
           continue;
         }

@@ -100,7 +100,7 @@ void MarkingVisitorBase<ConcreteVisitor>::ProcessWeakHeapObject(
 template <typename ConcreteVisitor>
 // method template arguments
 template <typename TSlot>
-V8_INLINE void MarkingVisitorBase<ConcreteVisitor>::VisitPointersImpl(
+void MarkingVisitorBase<ConcreteVisitor>::VisitPointersImpl(
     Tagged<HeapObject> host, TSlot start, TSlot end) {
   using THeapObjectSlot = typename TSlot::THeapObjectSlot;
   for (TSlot slot = start; slot < end; ++slot) {
@@ -118,18 +118,18 @@ V8_INLINE void MarkingVisitorBase<ConcreteVisitor>::VisitPointersImpl(
   }
 }
 
+// class template arguments
 template <typename ConcreteVisitor>
-V8_INLINE void
-MarkingVisitorBase<ConcreteVisitor>::VisitInstructionStreamPointerImpl(
-    Tagged<Code> host, InstructionStreamSlot slot) {
-  Tagged<Object> object =
-      slot.Relaxed_Load(ObjectVisitorWithCageBases::code_cage_base());
+// method template arguments
+template <typename TSlot>
+void MarkingVisitorBase<ConcreteVisitor>::VisitStrongPointerImpl(
+    Tagged<HeapObject> host, TSlot slot) {
+  static_assert(!TSlot::kCanBeWeak);
+  using THeapObjectSlot = typename TSlot::THeapObjectSlot;
+  typename TSlot::TObject object = slot.Relaxed_Load();
   Tagged<HeapObject> heap_object;
-  if (object.GetHeapObjectIfStrong(&heap_object)) {
-    // If the reference changes concurrently from strong to weak, the write
-    // barrier will treat the weak reference as strong, so we won't miss the
-    // weak reference.
-    ProcessStrongHeapObject(host, HeapObjectSlot(slot), heap_object);
+  if (object.GetHeapObject(&heap_object)) {
+    ProcessStrongHeapObject(host, THeapObjectSlot(slot), heap_object);
   }
 }
 
@@ -577,8 +577,8 @@ int MarkingVisitorBase<ConcreteVisitor>::VisitEphemeronHashTable(
     // Objects in the shared heap are prohibited from being used as keys in
     // WeakMaps and WeakSets and therefore cannot be ephemeron keys. See also
     // MarkCompactCollector::ProcessEphemeron.
-    DCHECK(!key.InWritableSharedSpace());
-    if (key.InReadOnlySpace() || concrete_visitor()->IsMarked(key)) {
+    DCHECK(!InWritableSharedSpace(key));
+    if (InReadOnlySpace(key) || concrete_visitor()->IsMarked(key)) {
       VisitPointer(table, value_slot);
     } else {
       Tagged<Object> value_obj = table->ValueAt(i);
@@ -612,7 +612,7 @@ int MarkingVisitorBase<ConcreteVisitor>::VisitJSWeakRef(
   if (IsHeapObject(weak_ref->target())) {
     Tagged<HeapObject> target = HeapObject::cast(weak_ref->target());
     SynchronizePageAccess(target);
-    if (target.InReadOnlySpace() || concrete_visitor()->IsMarked(target)) {
+    if (InReadOnlySpace(target) || concrete_visitor()->IsMarked(target)) {
       // Record the slot inside the JSWeakRef, since the
       // VisitJSObjectSubclass above didn't visit it.
       ObjectSlot slot = weak_ref->RawField(JSWeakRef::kTargetOffset);
@@ -638,8 +638,8 @@ int MarkingVisitorBase<ConcreteVisitor>::VisitWeakCell(
   Tagged<HeapObject> unregister_token = weak_cell->relaxed_unregister_token();
   SynchronizePageAccess(target);
   SynchronizePageAccess(unregister_token);
-  if ((target.InReadOnlySpace() || concrete_visitor()->IsMarked(target)) &&
-      (unregister_token.InReadOnlySpace() ||
+  if ((InReadOnlySpace(target) || concrete_visitor()->IsMarked(target)) &&
+      (InReadOnlySpace(unregister_token) ||
        concrete_visitor()->IsMarked(unregister_token))) {
     // Record the slots inside the WeakCell, since the IterateBody above
     // didn't visit it.
@@ -744,7 +744,7 @@ void MarkingVisitorBase<ConcreteVisitor>::VisitDescriptorsForMap(
   // follows this call:
   // - Array in read only space;
   // - StrongDescriptor array;
-  if (descriptors.InReadOnlySpace() || IsStrongDescriptorArray(descriptors)) {
+  if (InReadOnlySpace(descriptors) || IsStrongDescriptorArray(descriptors)) {
     return;
   }
 

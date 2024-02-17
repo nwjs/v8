@@ -521,10 +521,10 @@ extras_accessors = [
     'Map, bit_field3, int, kBitField3Offset',
     'Map, prototype, Object, kPrototypeOffset',
     'Oddball, kind, int, offsetof(Oddball, kind_)',
-    'HeapNumber, value, double, kValueOffset',
-    'ExternalString, resource, Object, kResourceOffset',
-    'SeqOneByteString, chars, char, kHeaderSize',
-    'SeqTwoByteString, chars, char, kHeaderSize',
+    'HeapNumber, value, double, offsetof(HeapNumber, value_)',
+    'ExternalString, resource, Object, offsetof(ExternalString, resource_)',
+    'SeqOneByteString, chars, char, OFFSET_OF_DATA_START(SeqOneByteString)',
+    'SeqTwoByteString, chars, char, OFFSET_OF_DATA_START(SeqTwoByteString)',
     'UncompiledData, inferred_name, String, kInferredNameOffset',
     'UncompiledData, start_position, int32_t, kStartPositionOffset',
     'UncompiledData, end_position, int32_t, kEndPositionOffset',
@@ -535,19 +535,19 @@ extras_accessors = [
     'SharedFunctionInfo, internal_formal_parameter_count, uint16_t, kFormalParameterCountOffset',
     'SharedFunctionInfo, flags, int, kFlagsOffset',
     'SharedFunctionInfo, length, uint16_t, kLengthOffset',
-    'SlicedString, parent, String, kParentOffset',
+    'SlicedString, parent, String, offsetof(SlicedString, parent_)',
     'Code, flags, uint32_t, kFlagsOffset',
     'Code, instruction_start, Address, kInstructionStartOffset',
     'Code, instruction_stream, Tagged<InstructionStream>, kInstructionStreamOffset',
     'Code, instruction_size, int, kInstructionSizeOffset',
     'InstructionStream, instruction_start, uintptr_t, kHeaderSize',
-    'String, length, int32_t, kLengthOffset',
+    'String, length, int32_t, offsetof(String, length_)',
     'DescriptorArray, header_size, uintptr_t, kHeaderSize',
-    'ConsString, first, String, kFirstOffset',
-    'ConsString, second, String, kSecondOffset',
-    'SlicedString, offset, SMI, kOffsetOffset',
-    'ThinString, actual, String, kActualOffset',
-    'Symbol, name, Object, kDescriptionOffset',
+    'ConsString, first, String, offsetof(ConsString, first_)',
+    'ConsString, second, String, offsetof(ConsString, second_)',
+    'SlicedString, offset, SMI, offsetof(SlicedString, offset_)',
+    'ThinString, actual, String, offsetof(ThinString, actual_)',
+    'Symbol, name, Object, offsetof(Symbol, description_)',
     'FixedArrayBase, length, SMI, kLengthOffset',
 ]
 
@@ -844,7 +844,8 @@ def parse_field(call):
     offset = args[2];
     dtype = 'SMI'
 
-  if offset.startswith("offsetof("):
+  if offset.startswith("offsetof(") or offset.startswith(
+      "OFFSET_OF_DATA_START("):
     offsetof_fields.append((klass, field, offset))
     value = 'OffsetsForDebug::%s_%s' % (klass, field)
   else:

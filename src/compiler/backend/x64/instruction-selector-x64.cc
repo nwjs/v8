@@ -117,8 +117,8 @@ bool MatchScaledIndex(InstructionSelectorT<TurboshaftAdapter>* selector,
   DCHECK_NOT_NULL(scale);
   using namespace turboshaft;  // NOLINT(build/namespaces)
 
-  auto MatchScaleConstant = [=](const Operation& op, int& scale,
-                                bool* plus_one) {
+  auto MatchScaleConstant = [](const Operation& op, int& scale,
+                               bool* plus_one) {
     const ConstantOp* constant = op.TryCast<ConstantOp>();
     if (constant == nullptr) return false;
     if (constant->kind != ConstantOp::Kind::kWord32 &&
@@ -196,8 +196,8 @@ template <typename Adapter>
 struct BaseWithScaledIndexAndDisplacementMatch {
   using node_t = typename Adapter::node_t;
 
-  node_t base;
-  node_t index;
+  node_t base = {};
+  node_t index = {};
   int scale = 0;
   int64_t displacement = 0;
   DisplacementMode displacement_mode = kPositiveDisplacement;
@@ -557,6 +557,7 @@ class X64OperandGeneratorT final : public OperandGeneratorT<Adapter> {
   }
 
   bool ValueFitsIntoImmediate(int64_t value) const {
+    // int32_t min will overflow if displacement mode is kNegativeDisplacement.
     return std::numeric_limits<int32_t>::min() < value &&
            value <= std::numeric_limits<int32_t>::max();
   }
@@ -770,7 +771,7 @@ X64OperandGeneratorT<TurboshaftAdapter>::GetEffectiveAddressMemoryOperand(
 
   const Operation& op = Get(operand);
   if (op.Is<LoadOp>() || op.Is<StoreOp>()) {
-    LoadStoreView load_or_store = LoadStoreView(op);
+    LoadStoreView load_or_store(op);
     if (ExternalReference reference;
         MatchExternalConstant(load_or_store.base, &reference) &&
         !load_or_store.index.valid()) {
@@ -1441,18 +1442,16 @@ void VisitStoreCommon(InstructionSelectorT<Adapter>* selector,
       // fewer addressing modes available.
       inputs[input_count++] = g.UseUniqueRegister(value);
       inputs[input_count++] = g.UseUniqueRegister(base);
+      DCHECK_EQ(element_size_log2, 0);
       if (selector->valid(index)) {
         DCHECK_EQ(displacement, 0);
-        DCHECK_EQ(element_size_log2, 0);
         inputs[input_count++] = g.GetEffectiveIndexOperand(
             selector->value(index), &addressing_mode);
       } else if (displacement != 0) {
-        DCHECK_EQ(element_size_log2, 0);
         DCHECK(g.ValueFitsIntoImmediate(displacement));
         inputs[input_count++] = g.UseImmediate(displacement);
         addressing_mode = kMode_MRI;
       } else {
-        DCHECK_EQ(element_size_log2, 0);
         addressing_mode = kMode_MR;
       }
       opcode = GetSeqCstStoreOpcode(store_rep);
@@ -1679,12 +1678,6 @@ base::Optional<int32_t> GetWord32Constant(
   return base::nullopt;
 }
 
-void VisitBinop(InstructionSelectorT<TurboshaftAdapter>* selector, Node* node,
-                InstructionCode code) {
-  // TODO(nicohartmann@): Remove once everything is ported.
-  UNREACHABLE();
-}
-
 template <typename Adapter>
 static void VisitBinop(InstructionSelectorT<Adapter>* selector,
                        typename Adapter::node_t node, InstructionCode opcode) {
@@ -1812,8 +1805,7 @@ void InstructionSelectorT<Adapter>::VisitStackPointerGreaterThan(
     node_t node, FlagsContinuation* cont) {
   StackCheckKind kind;
   if constexpr (Adapter::IsTurboshaft) {
-    kind = this->turboshaft_graph()
-               ->Get(node)
+    kind = this->Get(node)
                .template Cast<turboshaft::StackPointerGreaterThanOp>()
                .kind;
   } else {
@@ -2308,7 +2300,7 @@ void InstructionSelectorT<Adapter>::VisitInt32Add(node_t node) {
   }
 
   if (m.has_value()) {
-    if (m->displacement == 0 || g.ValueFitsIntoImmediate(m->displacement)) {
+    if (g.ValueFitsIntoImmediate(m->displacement)) {
       EmitLea(this, kX64Lea32, node, m->index, m->scale, m->base,
               m->displacement, m->displacement_mode);
       return;
@@ -3483,9 +3475,9 @@ turboshaft::OpIndex InstructionSelectorT<TurboshaftAdapter>::FindProjection(
   // operation, then there shouldn't be any such Projection in the graph. We
   // verify this in Debug mode.
 #ifdef DEBUG
-  for (turboshaft::OpIndex use : turboshaft_uses(node)) {
-    if (const turboshaft::ProjectionOp* projection =
-            this->Get(use).TryCast<turboshaft::ProjectionOp>()) {
+  for (OpIndex use : turboshaft_uses(node)) {
+    if (const ProjectionOp* projection =
+            this->Get(use).TryCast<ProjectionOp>()) {
       DCHECK_EQ(projection->input(), node);
       if (projection->index == projection_index) {
         UNREACHABLE();
@@ -3493,7 +3485,7 @@ turboshaft::OpIndex InstructionSelectorT<TurboshaftAdapter>::FindProjection(
     }
   }
 #endif  // DEBUG
-  return turboshaft::OpIndex::Invalid();
+  return OpIndex::Invalid();
 }
 
 namespace {
@@ -4193,6 +4185,7 @@ template <>
 void InstructionSelectorT<TurboshaftAdapter>::VisitWordCompareZero(
     node_t user, node_t value, FlagsContinuation* cont) {
   using namespace turboshaft;  // NOLINT(build/namespaces)
+  // Try to combine with comparisons against 0 by simply inverting the branch.
   while (const ComparisonOp* equal =
              this->TryCast<Opmask::kWord32Equal>(value)) {
     if (!CanCover(user, value)) break;
@@ -6516,9 +6509,7 @@ void InstructionSelectorT<TurbofanAdapter>::VisitI8x32Shuffle(node_t node) {
 
   UNIMPLEMENTED();
 }
-#endif  // V8_ENABLE_WEBASSEMBLY
 
-#if V8_ENABLE_WEBASSEMBLY
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitI8x16Swizzle(node_t node) {
   InstructionCode op = kX64I8x16Swizzle;
@@ -6833,7 +6824,16 @@ void InstructionSelectorT<Adapter>::VisitI32x4RelaxedTruncF32x4S(node_t node) {
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitI32x4RelaxedTruncF32x4U(node_t node) {
   DCHECK_EQ(this->value_input_count(node), 1);
-  VisitFloatUnop(this, node, this->input_at(node, 0), kX64I32x4TruncF32x4U);
+  X64OperandGeneratorT<Adapter> g(this);
+  node_t input = this->input_at(node, 0);
+  InstructionOperand temps[] = {g.TempSimd128Register()};
+  if (IsSupported(AVX)) {
+    Emit(kX64I32x4TruncF32x4U, g.DefineAsRegister(node), g.UseRegister(input),
+         arraysize(temps), temps);
+  } else {
+    Emit(kX64I32x4TruncF32x4U, g.DefineSameAsFirst(node), g.UseRegister(input),
+         arraysize(temps), temps);
+  }
 }
 
 template <typename Adapter>
@@ -6955,10 +6955,11 @@ void InstructionSelectorT<Adapter>::VisitI32x4DotI8x16I7x16AddS(node_t node) {
        g.UseUniqueRegister(this->input_at(node, 2)), arraysize(temps), temps);
 }
 
-template <>
-void InstructionSelectorT<TurbofanAdapter>::VisitSetStackPointer(Node* node) {
-  OperandGenerator g(this);
-  auto input = g.UseAny(node->InputAt(0));
+template <typename Adapter>
+void InstructionSelectorT<Adapter>::VisitSetStackPointer(node_t node) {
+  X64OperandGeneratorT<Adapter> g(this);
+  DCHECK_EQ(this->value_input_count(node), 1);
+  auto input = g.UseAny(this->input_at(node, 0));
   Emit(kArchSetStackPointer, 0, nullptr, 1, &input);
 }
 

@@ -69,7 +69,7 @@ V8_INLINE bool ValidateAssumeTrue(bool condition, const char* message) {
         opcode);                                                             \
     return 0;                                                                \
   }                                                                          \
-  this->detected_->Add(kFeature_##feat);
+  this->detected_->Add(kFeature_##feat)
 
 static constexpr LoadType GetLoadType(WasmOpcode opcode) {
   // Hard-code the list of load types. The opcodes are highly unlikely to
@@ -1068,6 +1068,8 @@ struct ControlBase : public PcForErrors<ValidationTag::full_validation> {
   Merge<Value> start_merge;
   Merge<Value> end_merge;
 
+  bool might_throw = false;
+
   MOVE_ONLY_NO_DEFAULT_CONSTRUCTOR(ControlBase);
 
   ControlBase(Zone* zone, ControlKind kind, uint32_t stack_depth,
@@ -1206,9 +1208,9 @@ struct ControlBase : public PcForErrors<ValidationTag::full_validation> {
   F(CallIndirect, const Value& index, const CallIndirectImmediate& imm,        \
     const Value args[], Value returns[])                                       \
   F(CallRef, const Value& func_ref, const FunctionSig* sig,                    \
-    uint32_t sig_index, const Value args[], const Value returns[])             \
+    const Value args[], const Value returns[])                                 \
   F(ReturnCallRef, const Value& func_ref, const FunctionSig* sig,              \
-    uint32_t sig_index, const Value args[])                                    \
+    const Value args[])                                                        \
   F(ReturnCall, const CallFunctionImmediate& imm, const Value args[])          \
   F(ReturnCallIndirect, const Value& index, const CallIndirectImmediate& imm,  \
     const Value args[])                                                        \
@@ -1489,6 +1491,9 @@ class WasmDecoder : public Decoder {
 
   uint32_t num_locals() const { return num_locals_; }
 
+  base::Vector<ValueType> local_types() const {
+    return base::VectorOf(local_types_, num_locals_);
+  }
   ValueType local_type(uint32_t index) const {
     DCHECK_GE(num_locals_, index);
     return local_types_[index];
@@ -1615,6 +1620,7 @@ class WasmDecoder : public Decoder {
         case kExprIf:
         case kExprBlock:
         case kExprTry:
+        case kExprTryTable:
           depth++;
           break;
         case kExprLocalSet:
@@ -2728,14 +2734,6 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
     return control_depth() - 1 - current_catch();
   }
 
-  void SetSucceedingCodeDynamicallyUnreachable() {
-    Control* current = &control_.back();
-    if (current->reachable()) {
-      current->reachability = kSpecOnlyReachable;
-      current_code_reachable_and_ok_ = false;
-    }
-  }
-
   uint32_t pc_relative_offset() const {
     return this->pc_offset() - locals_offset_;
   }
@@ -2926,15 +2924,19 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
     return Value{pc, kWasmBottom};
   }
 
-  bool CheckSimdFeatureFlagOpcode(WasmOpcode opcode) {
-    if (!v8_flags.experimental_wasm_relaxed_simd &&
-        WasmOpcodes::IsRelaxedSimdOpcode(opcode)) {
-      this->DecodeError(
-          "simd opcode not available, enable with --experimental-relaxed-simd");
-      return false;
+  void SetSucceedingCodeDynamicallyUnreachable() {
+    Control* current = &control_.back();
+    if (current->reachable()) {
+      current->reachability = kSpecOnlyReachable;
+      current_code_reachable_and_ok_ = false;
     }
+  }
 
-    return true;
+  // Mark that the current try-catch block might throw.
+  // We only generate catch handlers for blocks that might throw.
+  void MarkMightThrow() {
+    if (!current_code_reachable_and_ok_ || current_catch() == -1) return;
+    control_at(control_depth_of_current_catch())->might_throw = true;
   }
 
   V8_INLINE ValueType MemoryIndexType(const WasmMemory* memory) {
@@ -3069,15 +3071,12 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
   FOREACH_SIMPLE_NON_CONST_OPCODE(BUILD_SIMPLE_OPCODE)
 #undef BUILD_SIMPLE_OPCODE
 
-#define BUILD_SIMPLE_OPCODE(op, _, sig, ...)                \
-  DECODE(op) {                                              \
-    if constexpr (decoding_mode == kConstantExpression) {   \
-      if (!VALIDATE(this->enabled_.has_extended_const())) { \
-        NonConstError(this, kExpr##op);                     \
-        return 0;                                           \
-      }                                                     \
-    }                                                       \
-    return BuildSimpleOperator_##sig(kExpr##op);            \
+#define BUILD_SIMPLE_OPCODE(op, _, sig, ...)              \
+  DECODE(op) {                                            \
+    if constexpr (decoding_mode == kConstantExpression) { \
+      this->detected_->Add(kFeature_extended_const);      \
+    }                                                     \
+    return BuildSimpleOperator_##sig(kExpr##op);          \
   }
   FOREACH_SIMPLE_EXTENDED_CONST_OPCODE(BUILD_SIMPLE_OPCODE)
 #undef BUILD_SIMPLE_OPCODE
@@ -3100,6 +3099,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
       return 0;
     }
     CALL_INTERFACE_IF_OK_AND_REACHABLE(Rethrow, c);
+    MarkMightThrow();
     EndControl();
     return 1 + imm.length;
   }
@@ -3114,6 +3114,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
     if (!this->Validate(this->pc_ + 1, imm)) return 0;
     PoppedArgVector args = PopArgs(imm.tag->ToFunctionSig());
     CALL_INTERFACE_IF_OK_AND_REACHABLE(Throw, imm, args.data());
+    MarkMightThrow();
     EndControl();
     return 1 + imm.length;
   }
@@ -3147,6 +3148,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
     c->kind = kControlTryCatch;
     stack_.shrink_to(c->stack_depth);
     c->reachability = control_at(1)->innerReachability();
+    current_code_reachable_and_ok_ = VALIDATE(this->ok()) && c->reachable();
     RollbackLocalsInitialization(c);
     const WasmTagSig* sig = imm.tag->sig;
     stack_.EnsureMoreCapacity(static_cast<int>(sig->parameter_count()),
@@ -3155,8 +3157,13 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
     base::Vector<Value> values(stack_.begin() + c->stack_depth,
                                sig->parameter_count());
     current_catch_ = c->previous_catch;  // Pop try scope.
-    CALL_INTERFACE_IF_OK_AND_PARENT_REACHABLE(CatchException, imm, c, values);
-    current_code_reachable_and_ok_ = VALIDATE(this->ok()) && c->reachable();
+    // If there is a throwing instruction in `c`, generate the header for a
+    // catch block. Otherwise, the catch block is unreachable.
+    if (c->might_throw) {
+      CALL_INTERFACE_IF_OK_AND_PARENT_REACHABLE(CatchException, imm, c, values);
+    } else {
+      SetSucceedingCodeDynamicallyUnreachable();
+    }
     return 1 + imm.length;
   }
 
@@ -3179,7 +3186,13 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
       target_depth++;
     }
     FallThrough();
-    CALL_INTERFACE_IF_OK_AND_PARENT_REACHABLE(Delegate, target_depth, c);
+    if (c->might_throw) {
+      CALL_INTERFACE_IF_OK_AND_PARENT_REACHABLE(Delegate, target_depth, c);
+      // Delegate propagates the `might_throw` status to the delegated-to block.
+      if (control_at(1)->reachable() && target_depth != control_depth() - 1) {
+        control_at(target_depth)->might_throw = true;
+      }
+    }
     current_catch_ = c->previous_catch;
     EndControl();
     PopControl();
@@ -3201,11 +3214,17 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
     FallThrough();
     c->kind = kControlTryCatchAll;
     c->reachability = control_at(1)->innerReachability();
+    current_code_reachable_and_ok_ = VALIDATE(this->ok()) && c->reachable();
     RollbackLocalsInitialization(c);
     current_catch_ = c->previous_catch;  // Pop try scope.
-    CALL_INTERFACE_IF_OK_AND_PARENT_REACHABLE(CatchAll, c);
+    // If there is a throwing instruction in `c`, generate the header for a
+    // catch block. Otherwise, the catch block is unreachable.
+    if (c->might_throw) {
+      CALL_INTERFACE_IF_OK_AND_PARENT_REACHABLE(CatchAll, c);
+    } else {
+      SetSucceedingCodeDynamicallyUnreachable();
+    }
     stack_.shrink_to(c->stack_depth);
-    current_code_reachable_and_ok_ = VALIDATE(this->ok()) && c->reachable();
     return 1;
   }
 
@@ -3283,6 +3302,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
       return 0;
     }
     CALL_INTERFACE_IF_OK_AND_REACHABLE(ThrowRef, &value);
+    MarkMightThrow();
     EndControl();
     return 1;
   }
@@ -3427,12 +3447,22 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
         // Emulate catch-all + re-throw.
         FallThrough();
         c->reachability = control_at(1)->innerReachability();
-        CALL_INTERFACE_IF_OK_AND_PARENT_REACHABLE(CatchAll, c);
-        current_code_reachable_and_ok_ =
-            VALIDATE(this->ok()) && control_.back().reachable();
-        CALL_INTERFACE_IF_OK_AND_REACHABLE(Rethrow, c);
+        current_code_reachable_and_ok_ = VALIDATE(this->ok()) && c->reachable();
+        // Cache `c->might_throw` so we can access it safely after `c`'s
+        // destructor is called in `PopContol()`.
+        bool might_throw = c->might_throw;
+        if (might_throw) {
+          CALL_INTERFACE_IF_OK_AND_PARENT_REACHABLE(CatchAll, c);
+          CALL_INTERFACE_IF_OK_AND_REACHABLE(Rethrow, c);
+        }
         EndControl();
         PopControl();
+        // We must mark the parent catch block as `might_throw`, since this
+        // conceptually rethrows. Note that we do this regardless of whether
+        // the code at this point is reachable.
+        if (might_throw && current_catch() != -1) {
+          control_at(control_depth_of_current_catch())->might_throw = true;
+        }
         return 1;
       }
       if (c->is_onearmed_if()) {
@@ -3463,13 +3493,14 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
           }
           base::Vector<Value> values(
               stack_.begin() + stack_.size() - push_count, push_count);
-          // Already type checked on block entry.
-          CALL_INTERFACE_IF_OK_AND_PARENT_REACHABLE(CatchCase, c, catch_case,
-                                                    values);
-
-          Control* target = control_at(catch_case.br_imm.depth);
-          if (current_code_reachable_and_ok_) {
-            target->br_merge()->reached = true;
+          if (c->might_throw) {
+            // Already type checked on block entry.
+            CALL_INTERFACE_IF_OK_AND_PARENT_REACHABLE(CatchCase, c, catch_case,
+                                                      values);
+            if (current_code_reachable_and_ok_) {
+              Control* target = control_at(catch_case.br_imm.depth);
+              target->br_merge()->reached = true;
+            }
           }
           stack_.shrink_to(stack_size);
           if (catch_case.kind == kCatchAll || catch_case.kind == kCatchAllRef) {
@@ -3477,6 +3508,12 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
           }
         }
         c->reachability = reachability_at_end;
+        // If there is no catch-all case, we must mark the parent catch block as
+        // `might_throw`, since this conceptually rethrows. Note that we do this
+        // regardless of whether the code at this point is reachable.
+        if (c->might_throw && !HasCatchAll(c) && current_catch() != -1) {
+          control_at(control_depth_of_current_catch())->might_throw = true;
+        }
         EndControl();
         PopControl();
         return 1;
@@ -3569,7 +3606,8 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
 
     // Cache the branch targets during the iteration, so that we can set
     // all branch targets as reachable after the {CALL_INTERFACE} call.
-    std::vector<bool> br_targets(control_.size());
+    SmallZoneVector<bool, 32> br_targets(control_.size(), this->zone());
+    std::uninitialized_fill(br_targets.begin(), br_targets.end(), false);
 
     uint32_t arity = 0;
 
@@ -3822,6 +3860,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
     PoppedArgVector args = PopArgs(imm.sig);
     Value* returns = PushReturns(imm.sig);
     CALL_INTERFACE_IF_OK_AND_REACHABLE(CallDirect, imm, args.data(), returns);
+    MarkMightThrow();
     return 1 + imm.length;
   }
 
@@ -3833,6 +3872,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
     Value* returns = PushReturns(imm.sig);
     CALL_INTERFACE_IF_OK_AND_REACHABLE(CallIndirect, index, imm, args.data(),
                                        returns);
+    MarkMightThrow();
     if (this->enabled_.has_gc() &&
         !this->module_->types[imm.sig_imm.index].is_final) {
       // In this case we emit an rtt.canon as part of the indirect call.
@@ -3842,7 +3882,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
   }
 
   DECODE(ReturnCall) {
-    CHECK_PROTOTYPE_OPCODE(return_call);
+    this->detected_->Add(kFeature_return_call);
     CallFunctionImmediate imm(this, this->pc_ + 1, validate);
     if (!this->Validate(this->pc_ + 1, imm)) return 0;
     if (!VALIDATE(this->CanReturnCall(imm.sig))) {
@@ -3857,7 +3897,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
   }
 
   DECODE(ReturnCallIndirect) {
-    CHECK_PROTOTYPE_OPCODE(return_call);
+    this->detected_->Add(kFeature_return_call);
     CallIndirectImmediate imm(this, this->pc_ + 1, validate);
     if (!this->Validate(this->pc_ + 1, imm)) return 0;
     if (!VALIDATE(this->CanReturnCall(imm.sig))) {
@@ -3886,14 +3926,15 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
     Value func_ref = Pop(ValueType::RefNull(imm.index));
     PoppedArgVector args = PopArgs(imm.sig);
     Value* returns = PushReturns(imm.sig);
-    CALL_INTERFACE_IF_OK_AND_REACHABLE(CallRef, func_ref, imm.sig, imm.index,
-                                       args.data(), returns);
+    CALL_INTERFACE_IF_OK_AND_REACHABLE(CallRef, func_ref, imm.sig, args.data(),
+                                       returns);
+    MarkMightThrow();
     return 1 + imm.length;
   }
 
   DECODE(ReturnCallRef) {
     CHECK_PROTOTYPE_OPCODE(typed_funcref);
-    CHECK_PROTOTYPE_OPCODE(return_call);
+    this->detected_->Add(kFeature_return_call);
     SigIndexImmediate imm(this, this->pc_ + 1, validate);
     if (!this->Validate(this->pc_ + 1, imm)) return 0;
     if (!VALIDATE(this->CanReturnCall(imm.sig))) {
@@ -3904,7 +3945,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
     Value func_ref = Pop(ValueType::RefNull(imm.index));
     PoppedArgVector args = PopArgs(imm.sig);
     CALL_INTERFACE_IF_OK_AND_REACHABLE(ReturnCallRef, func_ref, imm.sig,
-                                       imm.index, args.data());
+                                       args.data());
     EndControl();
     return 1 + imm.length;
   }
@@ -3934,8 +3975,8 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
         this->template read_prefixed_opcode<ValidationTag>(this->pc_);
     if (!VALIDATE(this->ok())) return 0;
     trace_msg->AppendOpcode(full_opcode);
-    if (!CheckSimdFeatureFlagOpcode(full_opcode)) {
-      return 0;
+    if (WasmOpcodes::IsRelaxedSimdOpcode(full_opcode)) {
+      this->detected_->Add(kFeature_relaxed_simd);
     }
     return DecodeSimdOpcode(full_opcode, opcode_length);
   }
@@ -4558,7 +4599,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
     return (types_unrelated &&
             (!null_succeeds || !obj.type.is_nullable() ||
              obj.type.is_string_view() || expected_type.is_string_view())) ||
-           (!null_succeeds &&
+           ((!null_succeeds || !obj.type.is_nullable()) &&
             (expected_type.representation() == HeapType::kNone ||
              expected_type.representation() == HeapType::kNoFunc ||
              expected_type.representation() == HeapType::kNoExtern));
@@ -5834,9 +5875,17 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
         return 0;
     }
 
-    MemoryAccessImmediate imm = MakeMemoryAccessImmediate(
-        opcode_length, ElementSizeLog2Of(memtype.representation()));
+    const uint32_t element_size_log2 =
+        ElementSizeLog2Of(memtype.representation());
+    MemoryAccessImmediate imm =
+        MakeMemoryAccessImmediate(opcode_length, element_size_log2);
     if (!this->Validate(this->pc_ + opcode_length, imm)) return false;
+    if (!VALIDATE(imm.alignment == element_size_log2)) {
+      this->DecodeError(this->pc_,
+                        "invalid alignment for atomic operation; expected "
+                        "alignment is %u, actual alignment is %u",
+                        element_size_log2, imm.alignment);
+    }
 
     const FunctionSig* sig =
         WasmOpcodes::SignatureForAtomicOp(opcode, imm.memory->is_memory64);

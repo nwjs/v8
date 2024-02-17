@@ -377,6 +377,10 @@ void StraightForwardRegisterAllocator::AllocateRegisters() {
     constant->SetConstantLocation();
     USE(value);
   }
+  for (const auto& [value, constant] : graph_->uint32()) {
+    constant->SetConstantLocation();
+    USE(value);
+  }
   for (const auto& [value, constant] : graph_->float64()) {
     constant->SetConstantLocation();
     USE(value);
@@ -654,12 +658,10 @@ void StraightForwardRegisterAllocator::UpdateUse(
 }
 
 void StraightForwardRegisterAllocator::AllocateEagerDeopt(
-    EagerDeoptInfo& deopt_info) {
+    const EagerDeoptInfo& deopt_info) {
   detail::DeepForEachInput(
-      &deopt_info, [&](ValueNode*& node, InputLocation* input) {
-        if (node->Is<Identity>()) {
-          node = node->input(0).node();
-        }
+      &deopt_info, [&](ValueNode* node, InputLocation* input) {
+        DCHECK(!node->Is<Identity>());
         // We might have dropped this node without spilling it. Spill it now.
         if (!node->has_register() && !node->is_loadable()) {
           Spill(node);
@@ -670,12 +672,10 @@ void StraightForwardRegisterAllocator::AllocateEagerDeopt(
 }
 
 void StraightForwardRegisterAllocator::AllocateLazyDeopt(
-    LazyDeoptInfo& deopt_info) {
+    const LazyDeoptInfo& deopt_info) {
   detail::DeepForEachInput(&deopt_info,
-                           [&](ValueNode*& node, InputLocation* input) {
-                             if (node->Is<Identity>()) {
-                               node = node->input(0).node();
-                             }
+                           [&](ValueNode* node, InputLocation* input) {
+                             DCHECK(!node->Is<Identity>());
                              // Lazy deopts always need spilling, and should
                              // always be loaded from their loadable slot.
                              Spill(node);

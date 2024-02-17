@@ -388,13 +388,11 @@ static void VisitBinop(InstructionSelectorT<Adapter>* selector,
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitStackSlot(node_t node) {
   StackSlotRepresentation rep = this->stack_slot_representation_of(node);
-  int alignment = rep.alignment();
-  int slot = frame_->AllocateSpillSlot(rep.size(), alignment);
+  int slot = frame_->AllocateSpillSlot(rep.size(), rep.alignment());
   OperandGenerator g(this);
 
   Emit(kArchStackSlot, g.DefineAsRegister(node),
-       sequence()->AddImmediate(Constant(slot)),
-       sequence()->AddImmediate(Constant(alignment)), 0, nullptr);
+       sequence()->AddImmediate(Constant(slot)), 0, nullptr);
 }
 
 template <typename Adapter>
@@ -2383,6 +2381,23 @@ void InstructionSelectorT<Adapter>::AddOutputToSelectContinuation(
     OperandGenerator* g, int first_input_index, node_t node) {
   UNREACHABLE();
 }
+
+#if V8_ENABLE_WEBASSEMBLY
+template <typename Adapter>
+void InstructionSelectorT<Adapter>::VisitSetStackPointer(node_t node) {
+  OperandGenerator g(this);
+  auto input = g.UseRegister(this->input_at(node, 0));
+  wasm::FPRelativeScope fp_scope;
+  if constexpr (Adapter::IsTurboshaft) {
+    fp_scope =
+        this->Get(node).template Cast<turboshaft::SetStackPointerOp>().fp_scope;
+  } else {
+    fp_scope = OpParameter<wasm::FPRelativeScope>(node->op());
+  }
+  Emit(kArchSetStackPointer | MiscField::encode(fp_scope), 0, nullptr, 1,
+       &input);
+}
+#endif
 }  // namespace compiler
 }  // namespace internal
 }  // namespace v8

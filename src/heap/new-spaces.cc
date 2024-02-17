@@ -76,8 +76,8 @@ bool SemiSpace::EnsureCurrentCapacity() {
       // Clear new space flags to avoid this page being treated as a new
       // space page that is potentially being swept.
       current_page->ClearFlags(Page::kIsInYoungGenerationMask);
-      heap()->memory_allocator()->Free(
-          MemoryAllocator::FreeMode::kConcurrentlyAndPool, current_page);
+      heap()->memory_allocator()->Free(MemoryAllocator::FreeMode::kPool,
+                                       current_page);
       current_page = next_current;
     }
 
@@ -157,8 +157,7 @@ void SemiSpace::Uncommit() {
     MemoryChunk* chunk = memory_chunk_list_.front();
     DecrementCommittedPhysicalMemory(chunk->CommittedPhysicalMemory());
     memory_chunk_list_.Remove(chunk);
-    heap()->memory_allocator()->Free(
-        MemoryAllocator::FreeMode::kConcurrentlyAndPool, chunk);
+    heap()->memory_allocator()->Free(MemoryAllocator::FreeMode::kPool, chunk);
   }
   current_page_ = nullptr;
   current_capacity_ = 0;
@@ -214,8 +213,7 @@ void SemiSpace::RewindPages(int num_pages) {
     MemoryChunk* last = last_page();
     memory_chunk_list_.Remove(last);
     DecrementCommittedPhysicalMemory(last->CommittedPhysicalMemory());
-    heap()->memory_allocator()->Free(
-        MemoryAllocator::FreeMode::kConcurrentlyAndPool, last);
+    heap()->memory_allocator()->Free(MemoryAllocator::FreeMode::kPool, last);
     num_pages--;
   }
 }
@@ -909,9 +907,8 @@ void PagedSpaceForNewSpace::FinishShrinking() {
 
 size_t PagedSpaceForNewSpace::AddPage(Page* page) {
   current_capacity_ += Page::kPageSize;
-  DCHECK_IMPLIES(!should_exceed_target_capacity_,
+  DCHECK_IMPLIES(!force_allocation_success_,
                  UsableCapacity() <= TotalCapacity());
-  should_exceed_target_capacity_ = false;
   return PagedSpaceBase::AddPage(page);
 }
 
@@ -924,40 +921,42 @@ void PagedSpaceForNewSpace::RemovePage(Page* page) {
 void PagedSpaceForNewSpace::ReleasePage(Page* page) {
   DCHECK_LE(Page::kPageSize, current_capacity_);
   current_capacity_ -= Page::kPageSize;
-  PagedSpaceBase::ReleasePageImpl(
-      page, MemoryAllocator::FreeMode::kConcurrentlyAndPool);
-}
-
-bool PagedSpaceForNewSpace::AddFreshPage() {
-  if (current_capacity_ >= target_capacity_) return false;
-  return AllocatePage();
+  PagedSpaceBase::ReleasePageImpl(page, MemoryAllocator::FreeMode::kPool);
 }
 
 bool PagedSpaceForNewSpace::ShouldReleaseEmptyPage() const {
   return current_capacity_ > target_capacity_;
 }
 
-bool PagedSpaceForNewSpace::AddPageBeyondCapacity(int size_in_bytes,
-                                                  AllocationOrigin origin) {
+bool PagedSpaceForNewSpace::ShouldAllocatedPage() const {
+  if (current_capacity_ < target_capacity_) {
+    return true;
+  }
   DCHECK(heap()->sweeper()->IsSweepingDoneForSpace(NEW_SPACE));
   // Allocate another page is `force_allocation_success_` is true,
-  // `UsableCapacity()` is below `TotalCapacity()` and allocating another page
-  // won't exceed `TotalCapacity()`, or `ShouldOptimizeForLoadTime()` is true.
-  should_exceed_target_capacity_ =
-      force_allocation_success_ || heap_->ShouldOptimizeForLoadTime();
-  if (should_exceed_target_capacity_ ||
-      ((UsableCapacity() < TotalCapacity()) &&
-       (TotalCapacity() - UsableCapacity() >= Page::kPageSize))) {
-    if (!heap()->CanExpandOldGeneration(
-            Size() + heap()->new_lo_space()->Size() + Page::kPageSize)) {
-      // Assuming all of new space is alive, doing a full GC and promoting all
-      // objects should still succeed. Don't let new space grow if it means it
-      // will exceed the available size of old space.
-      return false;
-    }
-    return AllocatePage();
+  // `UsableCapacity()` is below `target_capacity_` and allocating another page
+  // won't exceed `target_capacity_`.
+  if (force_allocation_success_ ||
+      ((UsableCapacity() < target_capacity_) &&
+       (target_capacity_ - UsableCapacity() >= Page::kPageSize))) {
+    // Assuming all of new space is alive, doing a full GC and promoting all
+    // objects should still succeed. Don't let new space grow if it means it
+    // will exceed the available size of old space.
+    return heap()->CanExpandOldGeneration(
+        Size() + heap()->new_lo_space()->Size() + Page::kPageSize);
   }
   return false;
+}
+
+bool PagedSpaceForNewSpace::TryAllocatePage() {
+  if (!ShouldAllocatedPage()) return false;
+  return AllocatePage();
+}
+
+void PagedSpaceForNewSpace::AllocatePageUpToCapacityForTesting() {
+  while (current_capacity_ < target_capacity_) {
+    if (!AllocatePage()) return;
+  }
 }
 
 bool PagedSpaceForNewSpace::AllocatePage() {

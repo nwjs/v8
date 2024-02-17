@@ -1386,8 +1386,7 @@ void MacroAssembler::PopCalleeSavedRegisters() {
   ldp(x29, x30, tos);  // fp, lr
 
 #ifdef V8_ENABLE_CONTROL_FLOW_INTEGRITY
-                       // The context (stack pointer value) for authenticating
-                       // the LR here must
+  // The context (stack pointer value) for authenticating the LR here must
   // match the one used for signing it (see `PushCalleeSavedRegisters`).
   autibsp();
 #endif
@@ -1424,6 +1423,11 @@ void TailCallOptimizedCodeSlot(MacroAssembler* masm,
   // marker field.
   __ LoadWeakValue(optimized_code_entry, optimized_code_entry,
                    &heal_optimized_code_slot);
+
+  // The entry references a CodeWrapper object. Unwrap it now.
+  __ LoadCodePointerField(
+      optimized_code_entry,
+      FieldMemOperand(optimized_code_entry, CodeWrapper::kCodeOffset));
 
   // Check if the optimized code is marked for deopt. If it is, call the
   // runtime to clear it.
@@ -1701,18 +1705,24 @@ void MacroAssembler::AssertBoundFunction(Register object) {
   Check(eq, AbortReason::kOperandIsNotABoundFunction);
 }
 
-void MacroAssembler::AssertSmiOrHeapObjectInCompressionCage(Register object) {
-  DCHECK(PointerCompressionIsEnabled());
+void MacroAssembler::AssertSmiOrHeapObjectInMainCompressionCage(
+    Register object) {
+  if (!PointerCompressionIsEnabled()) return;
   if (!v8_flags.debug_code) return;
   ASM_CODE_COMMENT(this);
-  Label is_smi;
-  B(&is_smi, CheckSmi(object));
-  UseScratchRegisterScope temps(this);
-  Register temp = temps.AcquireX();
-  sub(temp, object, kPtrComprCageBaseRegister);
-  Cmp(temp, Immediate(UINT32_MAX));
-  Check(lo, AbortReason::kObjectNotTagged);
-  bind(&is_smi);
+  // We may not have any scratch registers so we preserve our input register.
+  Push(object, xzr);
+  Label ok;
+  B(&ok, CheckSmi(object));
+  Mov(object, Operand(object, LSR, 32));
+  // Either the value is now equal to the right-shifted pointer compression
+  // cage base or it's zero if we got a compressed pointer register as input.
+  Cmp(object, 0);
+  B(kEqual, &ok);
+  Cmp(object, Operand(kPtrComprCageBaseRegister, LSR, 32));
+  Check(kEqual, AbortReason::kObjectNotTagged);
+  bind(&ok);
+  Pop(xzr, object);
 }
 
 void MacroAssembler::AssertGeneratorObject(Register object) {
@@ -2011,18 +2021,14 @@ void MacroAssembler::CallRuntime(const Runtime::Function* f,
   Mov(x1, ExternalReference::Create(f));
 
   bool switch_to_central = this->options().is_wasm;
-  Handle<Code> code = CodeFactory::CEntry(
-      isolate(), f->result_size, ArgvMode::kStack, false, switch_to_central);
-  Call(code, RelocInfo::CODE_TARGET);
+  CallBuiltin(Builtins::RuntimeCEntry(f->result_size, switch_to_central));
 }
 
 void MacroAssembler::JumpToExternalReference(const ExternalReference& builtin,
                                              bool builtin_exit_frame) {
   ASM_CODE_COMMENT(this);
   Mov(x1, builtin);
-  Handle<Code> code =
-      CodeFactory::CEntry(isolate(), 1, ArgvMode::kStack, builtin_exit_frame);
-  Jump(code, RelocInfo::CODE_TARGET);
+  TailCallBuiltin(Builtins::CEntry(1, ArgvMode::kStack, builtin_exit_frame));
 }
 
 void MacroAssembler::TailCallRuntime(Runtime::FunctionId fid) {
@@ -2156,6 +2162,10 @@ void MacroAssembler::LoadFromConstantsTable(Register destination,
 
 void MacroAssembler::LoadRootRelative(Register destination, int32_t offset) {
   Ldr(destination, MemOperand(kRootRegister, offset));
+}
+
+void MacroAssembler::StoreRootRelative(int32_t offset, Register value) {
+  Str(value, MemOperand(kRootRegister, offset));
 }
 
 void MacroAssembler::LoadRootRegisterOffset(Register destination,
@@ -2576,13 +2586,12 @@ void MacroAssembler::BailoutIfDeoptimized() {
   UseScratchRegisterScope temps(this);
   Register scratch = temps.AcquireX();
   int offset = InstructionStream::kCodeOffset - InstructionStream::kHeaderSize;
-  LoadTaggedField(scratch,
-                  MemOperand(kJavaScriptCallCodeStartRegister, offset));
+  LoadProtectedPointerField(
+      scratch, MemOperand(kJavaScriptCallCodeStartRegister, offset));
   Ldr(scratch.W(), FieldMemOperand(scratch, Code::kFlagsOffset));
   Label not_deoptimized;
   Tbz(scratch.W(), Code::kMarkedForDeoptimizationBit, &not_deoptimized);
-  Jump(BUILTIN_CODE(isolate(), CompileLazyDeoptimizedCode),
-       RelocInfo::CODE_TARGET);
+  TailCallBuiltin(Builtin::kCompileLazyDeoptimizedCode);
   Bind(&not_deoptimized);
 }
 
@@ -3279,6 +3288,7 @@ void MacroAssembler::LoadElementsKindFromMap(Register result, Register map) {
 
 void MacroAssembler::CompareTaggedRoot(const Register& obj, RootIndex index) {
   ASM_CODE_COMMENT(this);
+  AssertSmiOrHeapObjectInMainCompressionCage(obj);
   UseScratchRegisterScope temps(this);
   if (V8_STATIC_ROOTS_BOOL && RootsTable::IsReadOnly(index)) {
     CmpTagged(obj, Immediate(ReadOnlyRootPtr(index)));
@@ -3293,9 +3303,11 @@ void MacroAssembler::CompareTaggedRoot(const Register& obj, RootIndex index) {
   CmpTagged(obj, temp);
 }
 
-void MacroAssembler::CompareRoot(const Register& obj, RootIndex index) {
+void MacroAssembler::CompareRoot(const Register& obj, RootIndex index,
+                                 ComparisonMode mode) {
   ASM_CODE_COMMENT(this);
-  if (!base::IsInRange(index, RootIndex::kFirstStrongOrReadOnlyRoot,
+  if (mode == ComparisonMode::kFullPointer ||
+      !base::IsInRange(index, RootIndex::kFirstStrongOrReadOnlyRoot,
                        RootIndex::kLastStrongOrReadOnlyRoot)) {
     // Some smi roots contain system pointer size values like stack limits.
     UseScratchRegisterScope temps(this);
@@ -3665,9 +3677,10 @@ void MacroAssembler::ResolveTrustedPointerHandle(Register destination,
   DCHECK_NE(tag, kCodeIndirectPointerTag);
   DCHECK(!AreAliased(handle, destination));
 
-  CHECK(root_array_available_);
   Register table = destination;
-  Mov(table, ExternalReference::trusted_pointer_table_base_address(isolate()));
+  DCHECK(root_array_available_);
+  Ldr(table,
+      MemOperand{kRootRegister, IsolateData::trusted_pointer_table_offset()});
   Mov(handle, Operand(handle, LSR, kTrustedPointerHandleShift));
   Ldr(destination,
       MemOperand(table, handle, LSL, kTrustedPointerTableEntrySizeLog2));
@@ -3705,6 +3718,22 @@ void MacroAssembler::LoadCodeEntrypointViaCodePointer(
   Ldr(destination, MemOperand(table, destination));
 }
 #endif  // V8_ENABLE_SANDBOX
+
+void MacroAssembler::LoadProtectedPointerField(Register destination,
+                                               MemOperand field_operand) {
+  DCHECK(root_array_available());
+#ifdef V8_ENABLE_SANDBOX
+  ASM_CODE_COMMENT(this);
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.AcquireX();
+  Ldr(destination.W(), field_operand);
+  Ldr(scratch,
+      MemOperand(kRootRegister, IsolateData::trusted_cage_base_offset()));
+  Orr(destination, destination, scratch);
+#else
+  LoadTaggedField(destination, field_operand);
+#endif
+}
 
 void MacroAssembler::MaybeSaveRegisters(RegList registers) {
   if (registers.is_empty()) return;
@@ -3958,7 +3987,7 @@ void MacroAssembler::Abort(AbortReason reason) {
       LoadEntryFromBuiltin(Builtin::kAbort, scratch);
       Call(scratch);
     } else {
-      Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
+      CallBuiltin(Builtin::kAbort);
     }
   }
 
@@ -3989,6 +4018,12 @@ void MacroAssembler::TryLoadOptimizedOsrCode(Register scratch_and_result,
   // Is it marked_for_deoptimization? If yes, clear the slot.
   {
     UseScratchRegisterScope temps(this);
+
+    // The entry references a CodeWrapper object. Unwrap it now.
+    LoadCodePointerField(
+        scratch_and_result,
+        FieldMemOperand(scratch_and_result, CodeWrapper::kCodeOffset));
+
     Register temp = temps.AcquireX();
     JumpIfCodeIsMarkedForDeoptimization(scratch_and_result, temp, &clear_slot);
     if (min_opt_level == CodeKind::TURBOFAN) {

@@ -179,7 +179,11 @@ class InterpreterData
     : public TorqueGeneratedInterpreterData<InterpreterData,
                                             ExposedTrustedObject> {
  public:
+  // TODO(saelo): once InterpreterData objects are moved into TrustedSpace,
+  // these two references can become protected pointers.
+  static_assert(!kInterpreterDataObjectsLiveInTrustedSpace);
   DECL_TRUSTED_POINTER_ACCESSORS(bytecode_array, BytecodeArray)
+  DECL_CODE_POINTER_ACCESSORS(interpreter_trampoline)
 
   class BodyDescriptor;
 
@@ -533,6 +537,9 @@ class SharedFunctionInfo
   DECL_BOOLEAN_ACCESSORS(maglev_compilation_failed)
 
   DECL_BOOLEAN_ACCESSORS(sparkplug_compiled)
+
+  CachedTieringDecision cached_tiering_decision();
+  void set_cached_tiering_decision(CachedTieringDecision decision);
 
   // Is this function a top-level function (scripts, evals).
   DECL_BOOLEAN_ACCESSORS(is_toplevel)

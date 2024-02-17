@@ -7,6 +7,7 @@
 #include <limits>
 
 #include "src/base/iterator.h"
+#include "src/base/v8-fallthrough.h"
 #include "src/codegen/machine-type.h"
 #include "src/codegen/tick-counter.h"
 #include "src/common/globals.h"
@@ -23,6 +24,7 @@
 #include "src/compiler/turboshaft/opmasks.h"
 #include "src/compiler/turboshaft/representations.h"
 #include "src/numbers/conversions-inl.h"
+#include "v8-internal.h"
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/wasm/simd-shuffle.h"
@@ -633,15 +635,27 @@ InstructionOperand OperandForDeopt(Isolate* isolate,
       default:
         UNIMPLEMENTED();
     }
-  } else {
-    switch (kind) {
-      case FrameStateInputKind::kStackSlot:
-        return g->UseUniqueSlot(input);
-      case FrameStateInputKind::kAny:
-        // Currently deopts "wrap" other operations, so the deopt's inputs
-        // are potentially needed until the end of the deoptimising code.
-        return g->UseAnyAtEnd(input);
+  } else if (const turboshaft::TaggedBitcastOp* bitcast =
+                 op.TryCast<turboshaft::Opmask::kTaggedBitcastSmi>()) {
+    const turboshaft::Operation& input =
+        g->turboshaft_graph()->Get(bitcast->input());
+    if (const turboshaft::ConstantOp* cst =
+            input.TryCast<turboshaft::Opmask::kWord32Constant>()) {
+      if constexpr (Is64()) {
+        return g->UseImmediate64(cst->word32());
+      } else {
+        return g->UseImmediate(cst->word32());
+      }
     }
+  }
+
+  switch (kind) {
+    case FrameStateInputKind::kStackSlot:
+      return g->UseUniqueSlot(input);
+    case FrameStateInputKind::kAny:
+      // Currently deopts "wrap" other operations, so the deopt's inputs
+      // are potentially needed until the end of the deoptimising code.
+      return g->UseAnyAtEnd(input);
   }
 }
 
@@ -695,6 +709,17 @@ InstructionOperand OperandForDeopt(Isolate* isolate,
     case IrOpcode::kObjectState:
     case IrOpcode::kTypedObjectState:
       UNREACHABLE();
+    case IrOpcode::kBitcastWordToTaggedSigned: {
+      if (input->InputAt(0)->opcode() == IrOpcode::kInt32Constant) {
+        int32_t value = OpParameter<int32_t>(input->InputAt(0)->op());
+        if constexpr (Is64()) {
+          return g->UseImmediate64(value);
+        } else {
+          return g->UseImmediate(value);
+        }
+      }
+    }
+      V8_FALLTHROUGH;
     default:
       switch (kind) {
         case FrameStateInputKind::kStackSlot:
@@ -1831,8 +1856,8 @@ void InstructionSelectorT<Adapter>::VisitLoadFramePointer(node_t node) {
 }
 
 #if V8_ENABLE_WEBASSEMBLY
-template <>
-void InstructionSelectorT<TurbofanAdapter>::VisitLoadStackPointer(Node* node) {
+template <typename Adapter>
+void InstructionSelectorT<Adapter>::VisitLoadStackPointer(node_t node) {
   OperandGenerator g(this);
   Emit(kArchStackPointer, g.DefineAsRegister(node));
 }
@@ -2085,48 +2110,48 @@ VISIT_UNSUPPORTED_OP(BitcastWord32PairToFloat64)
 
 #if !V8_TARGET_ARCH_IA32 && !V8_TARGET_ARCH_ARM && !V8_TARGET_ARCH_RISCV32
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitWord32AtomicPairLoad(Node* node) {
+void InstructionSelectorT<Adapter>::VisitWord32AtomicPairLoad(node_t node) {
   UNIMPLEMENTED();
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitWord32AtomicPairStore(Node* node) {
+void InstructionSelectorT<Adapter>::VisitWord32AtomicPairStore(node_t node) {
   UNIMPLEMENTED();
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitWord32AtomicPairAdd(Node* node) {
+void InstructionSelectorT<Adapter>::VisitWord32AtomicPairAdd(node_t node) {
   UNIMPLEMENTED();
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitWord32AtomicPairSub(Node* node) {
+void InstructionSelectorT<Adapter>::VisitWord32AtomicPairSub(node_t node) {
   UNIMPLEMENTED();
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitWord32AtomicPairAnd(Node* node) {
+void InstructionSelectorT<Adapter>::VisitWord32AtomicPairAnd(node_t node) {
   UNIMPLEMENTED();
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitWord32AtomicPairOr(Node* node) {
+void InstructionSelectorT<Adapter>::VisitWord32AtomicPairOr(node_t node) {
   UNIMPLEMENTED();
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitWord32AtomicPairXor(Node* node) {
+void InstructionSelectorT<Adapter>::VisitWord32AtomicPairXor(node_t node) {
   UNIMPLEMENTED();
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitWord32AtomicPairExchange(Node* node) {
+void InstructionSelectorT<Adapter>::VisitWord32AtomicPairExchange(node_t node) {
   UNIMPLEMENTED();
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitWord32AtomicPairCompareExchange(
-    Node* node) {
+    node_t node) {
   UNIMPLEMENTED();
 }
 #endif  // !V8_TARGET_ARCH_IA32 && !V8_TARGET_ARCH_ARM
@@ -2250,7 +2275,8 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitProjection(
   using namespace turboshaft;  // NOLINT(build/namespaces)
   const ProjectionOp& projection = this->Get(node).Cast<ProjectionOp>();
   const Operation& value_op = this->Get(projection.input());
-  if (value_op.Is<OverflowCheckedBinopOp>() || value_op.Is<TryChangeOp>()) {
+  if (value_op.Is<OverflowCheckedBinopOp>() || value_op.Is<TryChangeOp>() ||
+      value_op.Is<Word32PairBinopOp>()) {
     if (projection.index == 0u) {
       EmitIdentity(node);
     } else {
@@ -2262,6 +2288,8 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitProjection(
   } else if (value_op.Is<CallOp>()) {
     // Call projections need to be behind the call's DidntThrow.
     UNREACHABLE();
+  } else if (value_op.Is<AtomicWord32PairOp>()) {
+    // Nothing to do here.
   } else {
     UNIMPLEMENTED();
   }
@@ -2786,8 +2814,20 @@ void InstructionSelectorT<Adapter>::VisitDeadValue(Node* node) {
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitComment(node_t node) {
   OperandGenerator g(this);
-  InstructionOperand operand(g.UseImmediate(node));
-  Emit(kArchComment, 0, nullptr, 1, &operand);
+  if constexpr (Adapter::IsTurboshaft) {
+    const turboshaft::CommentOp& comment =
+        this->turboshaft_graph()
+            ->Get(node)
+            .template Cast<turboshaft::CommentOp>();
+    using ptrsize_int_t =
+        std::conditional<kSystemPointerSize == 8, int64_t, int32_t>::type;
+    InstructionOperand operand = sequence()->AddImmediate(
+        Constant{reinterpret_cast<ptrsize_int_t>(comment.message)});
+    Emit(kArchComment, 0, nullptr, 1, &operand);
+  } else {
+    InstructionOperand operand(g.UseImmediate(node));
+    Emit(kArchComment, 0, nullptr, 1, &operand);
+  }
 }
 
 template <typename Adapter>
@@ -4984,20 +5024,33 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitNode(
     }
     case Opcode::kTaggedBitcast: {
       const TaggedBitcastOp& cast = op.Cast<TaggedBitcastOp>();
-      if (cast.from == RegisterRepresentation::Tagged() &&
-          cast.to == RegisterRepresentation::PointerSized()) {
-        MarkAsRepresentation(MachineType::PointerRepresentation(), node);
-        return VisitBitcastTaggedToWord(node);
-      } else if (cast.from.IsWord() &&
-                 cast.to == RegisterRepresentation::Tagged()) {
-        MarkAsTagged(node);
-        return VisitBitcastWordToTagged(node);
-      } else if (cast.from == RegisterRepresentation::Compressed() &&
-                 cast.to == RegisterRepresentation::Word32()) {
-        MarkAsRepresentation(MachineType::PointerRepresentation(), node);
-        return VisitBitcastTaggedToWord(node);
-      } else {
-        UNIMPLEMENTED();
+      switch (multi(cast.from, cast.to)) {
+        case multi(Rep::Tagged(), Rep::Word32()):
+          MarkAsWord32(node);
+          if constexpr (Is64()) {
+            DCHECK_EQ(cast.kind, TaggedBitcastOp::Kind::kSmi);
+            DCHECK(SmiValuesAre31Bits());
+            return EmitIdentity(node);
+          } else {
+            return VisitBitcastTaggedToWord(node);
+          }
+        case multi(Rep::Tagged(), Rep::Word64()):
+          MarkAsWord64(node);
+          return VisitBitcastTaggedToWord(node);
+        case multi(Rep::Word32(), Rep::Tagged()):
+        case multi(Rep::Word64(), Rep::Tagged()):
+          if (cast.kind == TaggedBitcastOp::Kind::kSmi) {
+            MarkAsRepresentation(MachineRepresentation::kTaggedSigned, node);
+            return EmitIdentity(node);
+          } else {
+            MarkAsTagged(node);
+            return VisitBitcastWordToTagged(node);
+          }
+        case multi(Rep::Compressed(), Rep::Word32()):
+          MarkAsWord32(node);
+          return VisitBitcastTaggedToWord(node);
+        default:
+          UNIMPLEMENTED();
       }
     }
     case Opcode::kPhi:
@@ -5068,8 +5121,35 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitNode(
       }
       UNREACHABLE();
     }
+    case Opcode::kAtomicWord32Pair: {
+      const AtomicWord32PairOp& atomic_op = op.Cast<AtomicWord32PairOp>();
+      if (atomic_op.kind != AtomicWord32PairOp::Kind::kStore) {
+        MarkAsWord32(node);
+        MarkPairProjectionsAsWord32(node);
+      }
+      switch (atomic_op.kind) {
+        case AtomicWord32PairOp::Kind::kAdd:
+          return VisitWord32AtomicPairAdd(node);
+        case AtomicWord32PairOp::Kind::kAnd:
+          return VisitWord32AtomicPairAnd(node);
+        case AtomicWord32PairOp::Kind::kCompareExchange:
+          return VisitWord32AtomicPairCompareExchange(node);
+        case AtomicWord32PairOp::Kind::kExchange:
+          return VisitWord32AtomicPairExchange(node);
+        case AtomicWord32PairOp::Kind::kLoad:
+          return VisitWord32AtomicPairLoad(node);
+        case AtomicWord32PairOp::Kind::kOr:
+          return VisitWord32AtomicPairOr(node);
+        case AtomicWord32PairOp::Kind::kSub:
+          return VisitWord32AtomicPairSub(node);
+        case AtomicWord32PairOp::Kind::kXor:
+          return VisitWord32AtomicPairXor(node);
+        case AtomicWord32PairOp::Kind::kStore:
+          return VisitWord32AtomicPairStore(node);
+      }
+    }
     case Opcode::kBitcastWord32PairToFloat64:
-      return VisitBitcastWord32PairToFloat64(node);
+      return MarkAsFloat64(node), VisitBitcastWord32PairToFloat64(node);
     case Opcode::kAtomicRMW: {
       const AtomicRMWOp& atomic_op = op.Cast<AtomicRMWOp>();
       MarkAsRepresentation(atomic_op.input_rep.ToRegisterRepresentation(),
@@ -5117,6 +5197,7 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitNode(
 
     case Opcode::kComment:
       return VisitComment(node);
+
 #ifdef V8_ENABLE_WEBASSEMBLY
     case Opcode::kSimd128Constant: {
       const Simd128ConstantOp& constant = op.Cast<Simd128ConstantOp>();
@@ -5253,19 +5334,19 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitNode(
 #undef VISIT_SIMD_TERNARY
       }
     }
+
+    case Opcode::kLoadStackPointer:
+      return VisitLoadStackPointer(node);
+
+    case Opcode::kSetStackPointer:
+      return VisitSetStackPointer(node);
+
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-#define UNIMPLEMENTED_CASE(op) case Opcode::k##op:
-      TURBOSHAFT_WASM_OPERATION_LIST(UNIMPLEMENTED_CASE)
-#undef UNIMPLEMENTED_CASE
-    case Opcode::kAtomicWord32Pair: {
-      const std::string op_string = op.ToString();
-      PrintF("\033[31mNo ISEL support for: %s\033[m\n", op_string.c_str());
-      FATAL("Unexpected operation #%d:%s", node.id(), op_string.c_str());
-    }
-
 #define UNREACHABLE_CASE(op) case Opcode::k##op:
+      TURBOSHAFT_JS_OPERATION_LIST(UNREACHABLE_CASE)
       TURBOSHAFT_SIMPLIFIED_OPERATION_LIST(UNREACHABLE_CASE)
+      TURBOSHAFT_WASM_OPERATION_LIST(UNREACHABLE_CASE)
       TURBOSHAFT_OTHER_OPERATION_LIST(UNREACHABLE_CASE)
       UNREACHABLE_CASE(PendingLoopPhi)
       UNREACHABLE_CASE(Tuple)

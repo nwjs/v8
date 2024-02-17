@@ -10,7 +10,7 @@
 #endif
 
 #include "src/codegen/code-desc.h"
-#include "src/objects/heap-object.h"
+#include "src/objects/trusted-object.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -27,7 +27,11 @@ class WritableJitAllocation;
 // When V8_EXTERNAL_CODE_SPACE is enabled, InstructionStream objects are
 // allocated in a separate pointer compression cage instead of the cage where
 // all the other objects are allocated.
-class InstructionStream : public HeapObject {
+//
+// An InstructionStream is a trusted object as it lives outside of the sandbox
+// and contains trusted content (machine code). However, it is special in that
+// it doesn't live in the trusted space but instead in the code space.
+class InstructionStream : public TrustedObject {
  public:
   NEVER_READ_ONLY_SPACE
 
@@ -123,8 +127,8 @@ class InstructionStream : public HeapObject {
 
   // Layout description.
 #define ISTREAM_FIELDS(V)                                                     \
+  V(kCodeOffset, kCodePointerSize)                                            \
   V(kStartOfStrongFieldsOffset, 0)                                            \
-  V(kCodeOffset, kTaggedSize)                                                 \
   V(kRelocationInfoOffset, kTaggedSize)                                       \
   V(kEndOfStrongFieldsOffset, 0)                                              \
   /* Data or code not directly visited by GC directly starts here. */         \
@@ -133,7 +137,7 @@ class InstructionStream : public HeapObject {
   V(kConstantPoolOffsetOffset, V8_EMBEDDED_CONSTANT_POOL_BOOL ? kIntSize : 0) \
   V(kUnalignedSize, OBJECT_POINTER_PADDING(kUnalignedSize))                   \
   V(kHeaderSize, 0)
-  DEFINE_FIELD_OFFSET_CONSTANTS(HeapObject::kHeaderSize, ISTREAM_FIELDS)
+  DEFINE_FIELD_OFFSET_CONSTANTS(TrustedObject::kHeaderSize, ISTREAM_FIELDS)
 #undef ISTREAM_FIELDS
 
   static_assert(kCodeAlignment >= kHeaderSize);
@@ -190,7 +194,7 @@ class InstructionStream : public HeapObject {
   // Must be used when loading any of InstructionStream's tagged fields.
   static inline PtrComprCageBase main_cage_base();
 
-  OBJECT_CONSTRUCTORS(InstructionStream, HeapObject);
+  OBJECT_CONSTRUCTORS(InstructionStream, TrustedObject);
 };
 
 }  // namespace internal

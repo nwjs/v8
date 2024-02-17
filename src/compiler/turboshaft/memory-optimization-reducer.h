@@ -66,6 +66,7 @@ struct MemoryAnalyzer {
   ZoneAbslFlatHashMap<const AllocateOp*, uint32_t> reserved_size{phase_zone};
   BlockIndex current_block = BlockIndex(0);
   BlockState state;
+  TurboshaftPipelineKind pipeline_kind = PipelineData::Get().pipeline_kind();
 
   bool SkipWriteBarrier(const StoreOp& store) {
     const Operation& object = input_graph.Get(store.base());
@@ -73,6 +74,11 @@ struct MemoryAnalyzer {
 
     auto CannotEliminate = [&](WriteBarrierKind kind) {
       if (kind == WriteBarrierKind::kAssertNoWriteBarrier) {
+        // TODO(nicohartmann@): We should reenable this once we have no false
+        // positives anymore in the CSA pipeline.
+        if (pipeline_kind == TurboshaftPipelineKind::kCSA) {
+          return true;
+        }
         std::stringstream str;
         str << "MemoryOptimizationReducer could not remove write barrier for "
                "operation\n  #"
@@ -139,6 +145,9 @@ template <class Next>
 class MemoryOptimizationReducer : public Next {
  public:
   TURBOSHAFT_REDUCER_BOILERPLATE()
+#if defined(__clang__)
+  static_assert(reducer_list_contains<ReducerList, VariableReducer>::value);
+#endif
 
   void Analyze() {
     auto* info = PipelineData::Get().info();
@@ -195,11 +204,11 @@ class MemoryOptimizationReducer : public Next {
       // Wasm mode: producing isolate-independent code, loading the isolate
       // address at runtime.
 #if V8_ENABLE_WEBASSEMBLY
-      V<WasmInstanceObject> instance_node = __ WasmInstanceParameter();
+      V<WasmTrustedInstanceData> instance_node = __ WasmInstanceParameter();
       int top_address_offset =
           type == AllocationType::kYoung
-              ? WasmInstanceObject::kNewAllocationTopAddressOffset
-              : WasmInstanceObject::kOldAllocationTopAddressOffset;
+              ? WasmTrustedInstanceData::kNewAllocationTopAddressOffset
+              : WasmTrustedInstanceData::kOldAllocationTopAddressOffset;
       top_address =
           __ Load(instance_node, LoadOp::Kind::TaggedBase().Immutable(),
                   MemoryRepresentation::PointerSized(), top_address_offset);
@@ -214,7 +223,7 @@ class MemoryOptimizationReducer : public Next {
       __ SetVariable(top(type), __ PointerAdd(__ GetVariable(top(type)), size));
       __ StoreOffHeap(top_address, __ GetVariable(top(type)),
                       MemoryRepresentation::PointerSized());
-      return __ BitcastWordPtrToTagged(
+      return __ BitcastWordPtrToHeapObject(
           __ PointerAdd(obj_addr, __ IntPtrConstant(kHeapObjectTag)));
     }
 
@@ -279,7 +288,7 @@ class MemoryOptimizationReducer : public Next {
         // Check if we can do bump pointer allocation here.
         OpIndex top_value = __ GetVariable(top(type));
         __ SetVariable(result,
-                       __ BitcastWordPtrToTagged(__ WordPtrAdd(
+                       __ BitcastWordPtrToHeapObject(__ WordPtrAdd(
                            top_value, __ IntPtrConstant(kHeapObjectTag))));
         OpIndex new_top = __ PointerAdd(top_value, size);
         OpIndex limit =
@@ -329,7 +338,7 @@ class MemoryOptimizationReducer : public Next {
       OpIndex allocated = __ Call(allocate_builtin, {reservation_size},
                                   AllocateBuiltinDescriptor());
       __ SetVariable(top(type),
-                     __ PointerSub(__ BitcastTaggedToWord(allocated),
+                     __ PointerSub(__ BitcastHeapObjectToWordPtr(allocated),
                                    __ IntPtrConstant(kHeapObjectTag)));
       __ Goto(done);
     }
@@ -340,7 +349,7 @@ class MemoryOptimizationReducer : public Next {
     __ SetVariable(top(type), __ PointerAdd(__ GetVariable(top(type)), size));
     __ StoreOffHeap(top_address, __ GetVariable(top(type)),
                     MemoryRepresentation::PointerSized());
-    return __ BitcastWordPtrToTagged(
+    return __ BitcastWordPtrToHeapObject(
         __ PointerAdd(obj_addr, __ IntPtrConstant(kHeapObjectTag)));
   }
 
@@ -442,11 +451,11 @@ class MemoryOptimizationReducer : public Next {
       // Wasm mode: producing isolate-independent code, loading the isolate
       // address at runtime.
 #if V8_ENABLE_WEBASSEMBLY
-      V<WasmInstanceObject> instance_node = __ WasmInstanceParameter();
+      V<WasmTrustedInstanceData> instance_node = __ WasmInstanceParameter();
       int limit_address_offset =
           type == AllocationType::kYoung
-              ? WasmInstanceObject::kNewAllocationLimitAddressOffset
-              : WasmInstanceObject::kOldAllocationLimitAddressOffset;
+              ? WasmTrustedInstanceData::kNewAllocationLimitAddressOffset
+              : WasmTrustedInstanceData::kOldAllocationLimitAddressOffset;
       limit_address =
           __ Load(instance_node, LoadOp::Kind::TaggedBase(),
                   MemoryRepresentation::PointerSized(), limit_address_offset);

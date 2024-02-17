@@ -819,15 +819,26 @@ void InstructionSelectorT<Adapter>::VisitWord64ReverseBits(node_t node) {
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitWord64ReverseBytes(node_t node) {
     RiscvOperandGeneratorT<Adapter> g(this);
+#ifdef CAN_USE_ZBB_INSTRUCTIONS
+    Emit(kRiscvRev8, g.DefineAsRegister(node),
+         g.UseRegister(this->input_at(node, 0)));
+#else
     Emit(kRiscvByteSwap64, g.DefineAsRegister(node),
          g.UseRegister(this->input_at(node, 0)));
+#endif
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitWord32ReverseBytes(node_t node) {
     RiscvOperandGeneratorT<Adapter> g(this);
+#ifdef CAN_USE_ZBB_INSTRUCTIONS
+    InstructionOperand temp = g.TempRegister();
+    Emit(kRiscvRev8, temp, g.UseRegister(this->input_at(node, 0)));
+    Emit(kRiscvShr64, g.DefineAsRegister(node), temp, g.TempImmediate(32));
+#else
     Emit(kRiscvByteSwap32, g.DefineAsRegister(node),
          g.UseRegister(this->input_at(node, 0)));
+#endif
 }
 
 template <typename Adapter>
@@ -1496,10 +1507,6 @@ void InstructionSelectorT<Adapter>::VisitChangeInt32ToInt64(node_t node) {
       }
       EmitLoad(this, change_op.input(), opcode, node);
       return;
-    }
-    if (input_op.Is<Opmask::kWord32ShiftRightArithmetic>() &&
-        CanCover(node, change_op.input())) {
-      UNIMPLEMENTED();  // TODO(riscv)
     }
     EmitSignExtendWord(this, node);
   } else {
@@ -3143,13 +3150,6 @@ template class EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)
     InstructionSelectorT<TurbofanAdapter>;
 template class EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)
     InstructionSelectorT<TurboshaftAdapter>;
-
-template <>
-void InstructionSelectorT<TurbofanAdapter>::VisitSetStackPointer(Node* node) {
-  // TODO(thibaudm): Implement.
-  UNREACHABLE();
-}
-
 }  // namespace compiler
 }  // namespace internal
 }  // namespace v8

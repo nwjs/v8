@@ -291,6 +291,12 @@ void MacroAssembler::LoadRootRelative(Register destination, int32_t offset) {
   mov(destination, Operand(kRootRegister, offset));
 }
 
+void MacroAssembler::StoreRootRelative(int32_t offset, Register value) {
+  ASM_CODE_COMMENT(this);
+  DCHECK(root_array_available());
+  mov(Operand(kRootRegister, offset), value);
+}
+
 void MacroAssembler::LoadAddress(Register destination,
                                  ExternalReference source) {
   // TODO(jgruber): Add support for enable_root_relative_access.
@@ -755,6 +761,10 @@ void TailCallOptimizedCodeSlot(MacroAssembler* masm,
   // If the optimized code is cleared, go to runtime to update the optimization
   // marker field.
   __ LoadWeakValue(optimized_code_entry, &heal_optimized_code_slot);
+
+  // The entry references a CodeWrapper object. Unwrap it now.
+  __ mov(optimized_code_entry,
+         FieldOperand(optimized_code_entry, CodeWrapper::kCodeOffset));
 
   // Check if the optimized code is marked for deopt. If it is, bailout to a
   // given label.
@@ -1304,8 +1314,7 @@ void MacroAssembler::CallRuntime(const Runtime::Function* f,
   // smarter.
   Move(kRuntimeCallArgCountRegister, Immediate(num_arguments));
   Move(kRuntimeCallFunctionRegister, Immediate(ExternalReference::Create(f)));
-  Handle<Code> code = CodeFactory::CEntry(isolate(), f->result_size);
-  Call(code, RelocInfo::CODE_TARGET);
+  CallBuiltin(Builtins::RuntimeCEntry(f->result_size));
 }
 
 void MacroAssembler::TailCallRuntime(Runtime::FunctionId fid) {
@@ -1336,9 +1345,7 @@ void MacroAssembler::JumpToExternalReference(const ExternalReference& ext,
   ASM_CODE_COMMENT(this);
   // Set the entry point and jump to the C entry runtime stub.
   Move(kRuntimeCallFunctionRegister, Immediate(ext));
-  Handle<Code> code =
-      CodeFactory::CEntry(isolate(), 1, ArgvMode::kStack, builtin_exit_frame);
-  Jump(code, RelocInfo::CODE_TARGET);
+  TailCallBuiltin(Builtins::CEntry(1, ArgvMode::kStack, builtin_exit_frame));
 }
 
 Operand MacroAssembler::StackLimitAsOperand(StackLimitKind kind) {
@@ -1918,7 +1925,7 @@ void MacroAssembler::Abort(AbortReason reason) {
       // when v8_flags.debug_code is enabled.
       Call(EntryFromBuiltinAsOperand(Builtin::kAbort));
     } else {
-      Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
+      CallBuiltin(Builtin::kAbort);
     }
   }
 

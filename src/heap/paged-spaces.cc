@@ -303,8 +303,9 @@ bool PagedSpaceBase::TryExpand(LocalHeap* local_heap, AllocationOrigin origin) {
     }
   }
   const MemoryAllocator::AllocationMode allocation_mode =
-      identity() == NEW_SPACE ? MemoryAllocator::AllocationMode::kUsePool
-                              : MemoryAllocator::AllocationMode::kRegular;
+      (identity() == NEW_SPACE || identity() == OLD_SPACE)
+          ? MemoryAllocator::AllocationMode::kUsePool
+          : MemoryAllocator::AllocationMode::kRegular;
   Page* page = heap()->memory_allocator()->AllocatePage(allocation_mode, this,
                                                         executable());
   if (page == nullptr) return false;
@@ -314,8 +315,7 @@ bool PagedSpaceBase::TryExpand(LocalHeap* local_heap, AllocationOrigin origin) {
   if (origin != AllocationOrigin::kGC && identity() != NEW_SPACE) {
     heap()->NotifyOldGenerationExpansion(local_heap, identity(), page);
   }
-  Free(page->area_start(), page->area_size(),
-       SpaceAccountingMode::kSpaceAccounted);
+  Free(page->area_start(), page->area_size());
   NotifyNewPage(page);
   return true;
 }
@@ -335,7 +335,7 @@ size_t PagedSpaceBase::Available() const {
 }
 
 void PagedSpaceBase::ReleasePage(Page* page) {
-  ReleasePageImpl(page, MemoryAllocator::FreeMode::kConcurrently);
+  ReleasePageImpl(page, MemoryAllocator::FreeMode::kPostpone);
 }
 
 void PagedSpaceBase::ReleasePageImpl(Page* page,
@@ -358,22 +358,6 @@ void PagedSpaceBase::ReleasePageImpl(Page* page,
   DecrementCommittedPhysicalMemory(page->CommittedPhysicalMemory());
   accounting_stats_.DecreaseCapacity(page->area_size());
   heap()->memory_allocator()->Free(free_mode, page);
-}
-
-void PagedSpaceBase::SetReadable() {
-  DCHECK(identity() == CODE_SPACE);
-  for (Page* page : *this) {
-    DCHECK(heap()->memory_allocator()->IsMemoryChunkExecutable(page));
-    page->SetReadable();
-  }
-}
-
-void PagedSpaceBase::SetReadAndExecutable() {
-  DCHECK(identity() == CODE_SPACE);
-  for (Page* page : *this) {
-    DCHECK(heap()->memory_allocator()->IsMemoryChunkExecutable(page));
-    page->SetReadAndExecutable();
-  }
 }
 
 std::unique_ptr<ObjectIterator> PagedSpaceBase::GetObjectIterator(Heap* heap) {
@@ -657,6 +641,10 @@ void OldSpace::AddPromotedPage(Page* page) {
   if (!v8_flags.minor_ms) {
     RelinkFreeListCategories(page);
   }
+}
+
+void OldSpace::ReleasePage(Page* page) {
+  ReleasePageImpl(page, MemoryAllocator::FreeMode::kPool);
 }
 
 }  // namespace internal

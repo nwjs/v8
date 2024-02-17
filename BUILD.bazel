@@ -48,7 +48,7 @@ load(":bazel/v8-non-pointer-compression.bzl", "v8_binary_non_pointer_compression
 # v8_enable_builtins_profiling
 # v8_enable_builtins_profiling_verbose
 # v8_builtins_profiling_log_file
-# v8_enable_external_code_space
+# v8_enable_builtins_reordering
 # v8_postmortem_support
 # v8_use_siphash
 # v8_no_inline
@@ -148,6 +148,53 @@ v8_flag(name = "v8_enable_verify_heap")
 v8_flag(name = "v8_enable_verify_predictable")
 
 v8_flag(name = "v8_enable_test_features")
+
+v8_flag(
+    name = "v8_enable_maglev",
+    default = True,
+)
+
+# Default setting for v8_enable_maglev
+selects.config_setting_group(
+    name = "maglev_by_default",
+    match_any = [
+        "@v8//bazel/config:v8_target_x64",
+        "@v8//bazel/config:v8_target_arm64",
+    ],
+)
+
+# Maglev enabled option.
+selects.config_setting_group(
+    name = "enable_maglev",
+    match_all = [
+        ":is_v8_enable_maglev",
+        ":maglev_by_default",
+    ],
+)
+
+selects.config_setting_group(
+    name = "enable_maglev_x64",
+    match_all = [
+        ":enable_maglev",
+        "@v8//bazel/config:v8_target_x64",
+    ],
+)
+
+selects.config_setting_group(
+    name = "enable_maglev_arm64",
+    match_all = [
+        ":enable_maglev",
+        "@v8//bazel/config:v8_target_arm64",
+    ],
+)
+
+selects.config_setting_group(
+    name = "enable_maglev_arm",
+    match_all = [
+        ":enable_maglev",
+        "@v8//bazel/config:v8_target_arm",
+    ],
+)
 
 v8_flag(
     name = "v8_enable_turbofan",
@@ -256,6 +303,23 @@ selects.config_setting_group(
     match_all = [
         ":is_v8_enable_pointer_compression",
         ":is_not_v8_enable_pointer_compression_shared_cage",
+    ],
+)
+
+# Enable support for external code range relative to the pointer compression
+# cage.
+v8_flag(
+    name = "v8_enable_external_code_space",
+    default = True,
+)
+
+# Enable support for external code range if enable_pointer_compression_shared_cage and
+# v8_enable_external_code_space.
+selects.config_setting_group(
+    name = "enable_external_code_space",
+    match_all = [
+        ":enable_pointer_compression_shared_cage",
+        ":is_v8_enable_external_code_space",
     ],
 )
 
@@ -443,6 +507,16 @@ v8_config(
     }) + select({
         ":is_v8_enable_short_builtin_calls": [
             "V8_SHORT_BUILTIN_CALLS",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        ":enable_external_code_space": [
+            "V8_EXTERNAL_CODE_SPACE",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        ":enable_maglev": [
+            "V8_ENABLE_MAGLEV",
         ],
         "//conditions:default": [],
     }) + select({
@@ -1045,6 +1119,7 @@ filegroup(
         "third_party/v8/builtins/array-sort.tq",
     ] + select({
         ":is_v8_enable_webassembly": [
+            "src/builtins/js-to-js.tq",
             "src/builtins/js-to-wasm.tq",
             "src/builtins/wasm.tq",
             "src/builtins/wasm-strings.tq",
@@ -1506,9 +1581,6 @@ filegroup(
         "src/heap/collection-barrier.h",
         "src/heap/combined-heap.cc",
         "src/heap/combined-heap.h",
-        "src/heap/concurrent-allocator.cc",
-        "src/heap/concurrent-allocator.h",
-        "src/heap/concurrent-allocator-inl.h",
         "src/heap/concurrent-marking.cc",
         "src/heap/concurrent-marking.h",
         "src/heap/cppgc-js/cpp-heap.cc",
@@ -2230,6 +2302,7 @@ filegroup(
         "src/sandbox/indirect-pointer.h",
         "src/sandbox/indirect-pointer-tag.h",
         "src/sandbox/indirect-pointer-inl.h",
+        "src/sandbox/code-entrypoint-tag.h",
         "src/sandbox/external-entity-table.h",
         "src/sandbox/external-entity-table-inl.h",
         "src/sandbox/sandbox.cc",
@@ -2614,6 +2687,69 @@ filegroup(
         "@v8//bazel/config:is_windows_64bit": [
             "src/diagnostics/unwinding-info-win64.cc",
             "src/diagnostics/unwinding-info-win64.h",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        ":enable_maglev": [
+            "src/maglev/maglev-assembler-inl.h",
+            "src/maglev/maglev-assembler.h",
+            "src/maglev/maglev-basic-block.h",
+            "src/maglev/maglev-code-gen-state.h",
+            "src/maglev/maglev-code-generator.h",
+            "src/maglev/maglev-compilation-info.h",
+            "src/maglev/maglev-compilation-unit.h",
+            "src/maglev/maglev-compiler.h",
+            "src/maglev/maglev-concurrent-dispatcher.h",
+            "src/maglev/maglev-graph-builder.h",
+            "src/maglev/maglev-graph-labeller.h",
+            "src/maglev/maglev-graph-printer.h",
+            "src/maglev/maglev-graph-processor.h",
+            "src/maglev/maglev-graph-verifier.h",
+            "src/maglev/maglev-graph.h",
+            "src/maglev/maglev-interpreter-frame-state.h",
+            "src/maglev/maglev-ir-inl.h",
+            "src/maglev/maglev-ir.h",
+            "src/maglev/maglev-phi-representation-selector.h",
+            "src/maglev/maglev-pipeline-statistics.h",
+            "src/maglev/maglev-regalloc-data.h",
+            "src/maglev/maglev-regalloc.h",
+            "src/maglev/maglev-register-frame-array.h",
+            "src/maglev/maglev.h",
+            "src/maglev/maglev-assembler.cc",
+            "src/maglev/maglev-code-generator.cc",
+            "src/maglev/maglev-compilation-info.cc",
+            "src/maglev/maglev-compilation-unit.cc",
+            "src/maglev/maglev-compiler.cc",
+            "src/maglev/maglev-concurrent-dispatcher.cc",
+            "src/maglev/maglev-graph-builder.cc",
+            "src/maglev/maglev-graph-printer.cc",
+            "src/maglev/maglev-interpreter-frame-state.cc",
+            "src/maglev/maglev-ir.cc",
+            "src/maglev/maglev-phi-representation-selector.cc",
+            "src/maglev/maglev-pipeline-statistics.cc",
+            "src/maglev/maglev-regalloc.cc",
+            "src/maglev/maglev.cc",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        ":enable_maglev_x64": [
+            "src/maglev/x64/maglev-assembler-x64-inl.h",
+            "src/maglev/x64/maglev-assembler-x64.cc",
+            "src/maglev/x64/maglev-ir-x64.cc",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        ":enable_maglev_arm64": [
+            "src/maglev/arm64/maglev-assembler-arm64-inl.h",
+            "src/maglev/arm64/maglev-assembler-arm64.cc",
+            "src/maglev/arm64/maglev-ir-arm64.cc",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        ":enable_maglev_arm": [
+            "src/maglev/arm/maglev-assembler-arm-inl.h",
+            "src/maglev/arm/maglev-assembler-arm.cc",
+            "src/maglev/arm/maglev-ir-arm.cc",
         ],
         "//conditions:default": [],
     }) + select({
@@ -3042,14 +3178,16 @@ filegroup(
         "src/compiler/turboshaft/assembler.cc",
         "src/compiler/turboshaft/assembler.h",
         "src/compiler/turboshaft/assert-types-reducer.h",
-        "src/compiler/turboshaft/branch-condition-duplication-reducer.h",
+        "src/compiler/turboshaft/duplication-optimization-reducer.h",
         "src/compiler/turboshaft/branch-elimination-reducer.h",
         "src/compiler/turboshaft/build-graph-phase.cc",
         "src/compiler/turboshaft/build-graph-phase.h",
         "src/compiler/turboshaft/builtin-call-descriptors.h",
+        "src/compiler/turboshaft/csa-optimize-phase.cc",
+        "src/compiler/turboshaft/csa-optimize-phase.h",
         "src/compiler/turboshaft/dataview-reducer.h",
-        "src/compiler/turboshaft/dead-code-elimination-phase.cc",
-        "src/compiler/turboshaft/dead-code-elimination-phase.h",
+        "src/compiler/turboshaft/code-elimination-and-simplification-phase.cc",
+        "src/compiler/turboshaft/code-elimination-and-simplification-phase.h",
         "src/compiler/turboshaft/dead-code-elimination-reducer.h",
         "src/compiler/turboshaft/debug-feature-lowering-phase.cc",
         "src/compiler/turboshaft/debug-feature-lowering-phase.h",
@@ -3090,6 +3228,8 @@ filegroup(
         "src/compiler/turboshaft/machine-lowering-phase.cc",
         "src/compiler/turboshaft/machine-lowering-phase.h",
         "src/compiler/turboshaft/machine-lowering-reducer-inl.h",
+        "src/compiler/turboshaft/maglev-graph-building-phase.cc",
+        "src/compiler/turboshaft/maglev-graph-building-phase.h",
         "src/compiler/turboshaft/machine-optimization-reducer.h",
         "src/compiler/turboshaft/memory-optimization-reducer.cc",
         "src/compiler/turboshaft/memory-optimization-reducer.h",
@@ -3120,6 +3260,7 @@ filegroup(
         "src/compiler/turboshaft/sidetable.h",
         "src/compiler/turboshaft/simplified-lowering-phase.cc",
         "src/compiler/turboshaft/simplified-lowering-phase.h",
+        "src/compiler/turboshaft/simplified-lowering-reducer.h",
         "src/compiler/turboshaft/simplify-tf-loops.cc",
         "src/compiler/turboshaft/simplify-tf-loops.h",
         "src/compiler/turboshaft/snapshot-table.h",
@@ -3333,6 +3474,7 @@ filegroup(
         "src/builtins/setup-builtins-internal.cc",
         "src/builtins/torque-csa-header-includes.h",
         "src/codegen/code-stub-assembler.cc",
+        "src/codegen/code-stub-assembler-inl.h",
         "src/codegen/code-stub-assembler.h",
         "src/heap/setup-heap-internal.cc",
         "src/ic/accessor-assembler.cc",
@@ -3365,6 +3507,32 @@ filegroup(
             "src/builtins/builtins-wasm-gen.h",
         ],
         "//conditions:default": [],
+    }) + select({
+        # Turboshaft's Maglev graph builder needs some Maglev files. We only
+        # include them explicitely when Maglev is disabled.
+        ":enable_maglev": [],
+        "//conditions:default": [
+            "src/maglev/maglev-basic-block.h",
+            "src/maglev/maglev-code-gen-state.h",
+            "src/maglev/maglev-compilation-info.cc",
+            "src/maglev/maglev-compilation-info.h",
+            "src/maglev/maglev-compilation-unit.cc",
+            "src/maglev/maglev-compilation-unit.h",
+            "src/maglev/maglev-graph-builder.cc",
+            "src/maglev/maglev-graph-builder.h",
+            "src/maglev/maglev-graph.h",
+            "src/maglev/maglev-graph-labeller.h",
+            "src/maglev/maglev-graph-printer.cc",
+            "src/maglev/maglev-graph-printer.h",
+            "src/maglev/maglev-graph-processor.h",
+            "src/maglev/maglev-graph-verifier.h",
+            "src/maglev/maglev-interpreter-frame-state.cc",
+            "src/maglev/maglev-interpreter-frame-state.h",
+            "src/maglev/maglev-ir.cc",
+            "src/maglev/maglev-ir.h",
+            "src/maglev/maglev-ir-inl.h",
+            "src/maglev/maglev-register-frame-array.h",
+        ],
     }),
 )
 
@@ -3996,6 +4164,7 @@ v8_library(
     deps = [
         ":v8_libbase",
         "//external:base_trace_event_common",
+        "//external:absl_btree",
         "//external:absl_flat_hash_map",
         "//external:absl_flat_hash_set",
     ],

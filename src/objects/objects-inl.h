@@ -24,7 +24,7 @@
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/heap/read-only-heap-inl.h"
 #include "src/numbers/conversions-inl.h"
-#include "src/objects/bigint.h"
+#include "src/objects/bigint-inl.h"
 #include "src/objects/deoptimization-data.h"
 #include "src/objects/heap-number-inl.h"
 #include "src/objects/heap-object.h"
@@ -76,16 +76,6 @@ int PropertyDetails::field_width_in_words() const {
 bool IsTaggedIndex(Tagged<Object> obj) {
   return IsSmi(obj) &&
          TaggedIndex::IsValid(Tagged<TaggedIndex>(obj.ptr()).value());
-}
-
-// static
-bool Object::InSharedHeap(Tagged<Object> obj) {
-  return IsHeapObject(obj) && HeapObject::cast(obj).InAnySharedSpace();
-}
-
-// static
-bool Object::InWritableSharedSpace(Tagged<Object> obj) {
-  return IsHeapObject(obj) && HeapObject::cast(obj).InWritableSharedSpace();
 }
 
 bool IsJSObjectThatCanBeTrackedAsPrototype(Tagged<Object> obj) {
@@ -255,36 +245,24 @@ Tagged<Object> HeapObject::SeqCst_CompareAndSwapField(
   } while (true);
 }
 
-bool HeapObject::InAnySharedSpace() const {
-  return Tagged<HeapObject>(*this).InAnySharedSpace();
+bool InAnySharedSpace(Tagged<HeapObject> obj) {
+  if (IsReadOnlyHeapObject(obj)) return V8_SHARED_RO_HEAP_BOOL;
+  return InWritableSharedSpace(obj);
 }
 
-bool HeapObject::InWritableSharedSpace() const {
-  return Tagged<HeapObject>(*this).InWritableSharedSpace();
+bool InWritableSharedSpace(Tagged<HeapObject> obj) {
+  return BasicMemoryChunk::FromHeapObject(obj)->InWritableSharedSpace();
 }
 
-bool HeapObject::InReadOnlySpace() const {
-  return Tagged<HeapObject>(*this).InReadOnlySpace();
-}
-
-bool Tagged<HeapObject>::InAnySharedSpace() const {
-  if (IsReadOnlyHeapObject(*this)) return V8_SHARED_RO_HEAP_BOOL;
-  return InWritableSharedSpace();
-}
-
-bool Tagged<HeapObject>::InWritableSharedSpace() const {
-  return BasicMemoryChunk::FromHeapObject(*this)->InWritableSharedSpace();
-}
-
-bool Tagged<HeapObject>::InReadOnlySpace() const {
-  return IsReadOnlyHeapObject(*this);
+bool InReadOnlySpace(Tagged<HeapObject> obj) {
+  return IsReadOnlyHeapObject(obj);
 }
 
 bool IsJSObjectThatCanBeTrackedAsPrototype(Tagged<HeapObject> obj) {
   // Do not optimize objects in the shared heap because it is not
   // threadsafe. Objects in the shared heap have fixed layouts and their maps
   // never change.
-  return IsJSObject(obj) && !obj->InWritableSharedSpace();
+  return IsJSObject(obj) && !InWritableSharedSpace(*obj);
 }
 
 DEF_HEAP_OBJECT_PREDICATE(HeapObject, IsUniqueName) {
@@ -320,42 +298,42 @@ DEF_HEAP_OBJECT_PREDICATE(HeapObject, IsSourceTextModuleInfo) {
 
 DEF_HEAP_OBJECT_PREDICATE(HeapObject, IsConsString) {
   if (!IsString(obj, cage_base)) return false;
-  return StringShape(Tagged<String>::cast(obj)->map(cage_base)).IsCons();
+  return StringShape(Tagged<String>::cast(obj)->map()).IsCons();
 }
 
 DEF_HEAP_OBJECT_PREDICATE(HeapObject, IsThinString) {
   if (!IsString(obj, cage_base)) return false;
-  return StringShape(String::cast(obj)->map(cage_base)).IsThin();
+  return StringShape(String::cast(obj)->map()).IsThin();
 }
 
 DEF_HEAP_OBJECT_PREDICATE(HeapObject, IsSlicedString) {
   if (!IsString(obj, cage_base)) return false;
-  return StringShape(String::cast(obj)->map(cage_base)).IsSliced();
+  return StringShape(String::cast(obj)->map()).IsSliced();
 }
 
 DEF_HEAP_OBJECT_PREDICATE(HeapObject, IsSeqString) {
   if (!IsString(obj, cage_base)) return false;
-  return StringShape(String::cast(obj)->map(cage_base)).IsSequential();
+  return StringShape(String::cast(obj)->map()).IsSequential();
 }
 
 DEF_HEAP_OBJECT_PREDICATE(HeapObject, IsSeqOneByteString) {
   if (!IsString(obj, cage_base)) return false;
-  return StringShape(String::cast(obj)->map(cage_base)).IsSequentialOneByte();
+  return StringShape(String::cast(obj)->map()).IsSequentialOneByte();
 }
 
 DEF_HEAP_OBJECT_PREDICATE(HeapObject, IsSeqTwoByteString) {
   if (!IsString(obj, cage_base)) return false;
-  return StringShape(String::cast(obj)->map(cage_base)).IsSequentialTwoByte();
+  return StringShape(String::cast(obj)->map()).IsSequentialTwoByte();
 }
 
 DEF_HEAP_OBJECT_PREDICATE(HeapObject, IsExternalOneByteString) {
   if (!IsString(obj, cage_base)) return false;
-  return StringShape(String::cast(obj)->map(cage_base)).IsExternalOneByte();
+  return StringShape(String::cast(obj)->map()).IsExternalOneByte();
 }
 
 DEF_HEAP_OBJECT_PREDICATE(HeapObject, IsExternalTwoByteString) {
   if (!IsString(obj, cage_base)) return false;
-  return StringShape(String::cast(obj)->map(cage_base)).IsExternalTwoByte();
+  return StringShape(String::cast(obj)->map()).IsExternalTwoByte();
 }
 
 bool IsNumber(Tagged<Object> obj) {
@@ -553,16 +531,6 @@ bool IsNaN(Tagged<Object> obj) {
 bool IsMinusZero(Tagged<Object> obj) {
   return IsHeapNumber(obj) && i::IsMinusZero(HeapNumber::cast(obj)->value());
 }
-
-OBJECT_CONSTRUCTORS_IMPL(BigIntBase, PrimitiveHeapObject)
-OBJECT_CONSTRUCTORS_IMPL(BigInt, BigIntBase)
-OBJECT_CONSTRUCTORS_IMPL(FreshlyAllocatedBigInt, BigIntBase)
-
-// ------------------------------------
-// Cast operations
-
-CAST_ACCESSOR(BigIntBase)
-CAST_ACCESSOR(BigInt)
 
 // static
 bool Object::HasValidElements(Tagged<Object> obj) {
@@ -878,13 +846,23 @@ void HeapObject::WriteCodePointerField(size_t offset, Tagged<Code> value) {
   WriteTrustedPointerField<kCodeIndirectPointerTag>(offset, value);
 }
 
-Address HeapObject::ReadCodeEntrypointViaCodePointerField(size_t offset) const {
-  return i::ReadCodeEntrypointViaCodePointerField(field_address(offset));
+bool HeapObject::IsCodePointerFieldCleared(size_t offset) const {
+  return IsTrustedPointerFieldCleared(offset);
+}
+
+void HeapObject::ClearCodePointerField(size_t offset) {
+  ClearTrustedPointerField(offset);
+}
+
+Address HeapObject::ReadCodeEntrypointViaCodePointerField(
+    size_t offset, CodeEntrypointTag tag) const {
+  return i::ReadCodeEntrypointViaCodePointerField(field_address(offset), tag);
 }
 
 void HeapObject::WriteCodeEntrypointViaCodePointerField(size_t offset,
-                                                        Address value) {
-  i::WriteCodeEntrypointViaCodePointerField(field_address(offset), value);
+                                                        Address value,
+                                                        CodeEntrypointTag tag) {
+  i::WriteCodeEntrypointViaCodePointerField(field_address(offset), value, tag);
 }
 
 ObjectSlot HeapObject::RawField(int byte_offset) const {
@@ -958,14 +936,17 @@ Tagged<HeapObject> MapWord::ToForwardingAddress(
     Tagged<HeapObject> map_word_host) {
   DCHECK(IsForwardingAddress());
 #ifdef V8_EXTERNAL_CODE_SPACE
-  // When external code space is enabled forwarding pointers are encoded as
-  // Smi representing a diff from the source object address in kObjectAlignment
-  // chunks.
+  // When the sandbox or the external code space is enabled, forwarding
+  // pointers are encoded as Smi representing a diff from the source object
+  // address in kObjectAlignment chunks. This is required as we are using
+  // multiple pointer compression cages in these scenarios.
   intptr_t diff =
       static_cast<intptr_t>(Tagged<Smi>(value_).value()) * kObjectAlignment;
   Address address = map_word_host.address() + diff;
   return HeapObject::FromAddress(address);
 #else
+  // The sandbox requires the external code space.
+  DCHECK(!V8_ENABLE_SANDBOX_BOOL);
   return HeapObject::FromAddress(value_);
 #endif  // V8_EXTERNAL_CODE_SPACE
 }
@@ -994,8 +975,16 @@ ReadOnlyRoots HeapObject::EarlyGetReadOnlyRoots() const {
   return ReadOnlyHeap::EarlyGetReadOnlyRoots(*this);
 }
 
+ReadOnlyRoots HeapObjectLayout::EarlyGetReadOnlyRoots() const {
+  return ReadOnlyHeap::EarlyGetReadOnlyRoots(Tagged(this));
+}
+
 ReadOnlyRoots HeapObject::GetReadOnlyRoots() const {
   return ReadOnlyHeap::GetReadOnlyRoots(*this);
+}
+
+ReadOnlyRoots HeapObjectLayout::GetReadOnlyRoots() const {
+  return ReadOnlyHeap::GetReadOnlyRoots(Tagged(this));
 }
 
 // TODO(v8:13788): Remove this cage-ful accessor.
@@ -1021,6 +1010,28 @@ Tagged<Map> HeapObjectLayout::map() const {
   return Tagged<HeapObject>(this)->map();
 }
 
+Tagged<Map> HeapObjectLayout::map(AcquireLoadTag) const {
+  // TODO(leszeks): Support MapWord members and access via that instead.
+  return Tagged<HeapObject>(this)->map(kAcquireLoad);
+}
+
+void HeapObjectLayout::set_map(Tagged<Map> value) {
+  // TODO(leszeks): Support MapWord members and access via that instead.
+  return Tagged<HeapObject>(this)->set_map(value);
+}
+
+void HeapObjectLayout::set_map(Tagged<Map> value, ReleaseStoreTag) {
+  // TODO(leszeks): Support MapWord members and access via that instead.
+  return Tagged<HeapObject>(this)->set_map(value, kReleaseStore);
+}
+
+void HeapObjectLayout::set_map_safe_transition(Tagged<Map> value,
+                                               ReleaseStoreTag) {
+  // TODO(leszeks): Support MapWord members and access via that instead.
+  return Tagged<HeapObject>(this)->set_map_safe_transition(value,
+                                                           kReleaseStore);
+}
+
 void HeapObject::set_map(Tagged<Map> value) {
   set_map<EmitWriteBarrier::kYes>(value, kRelaxedStore,
                                   VerificationMode::kPotentialLayoutChange);
@@ -1042,6 +1053,13 @@ void HeapObject::set_map_safe_transition(Tagged<Map> value,
                                   VerificationMode::kSafeMapTransition);
 }
 
+void HeapObjectLayout::set_map_safe_transition_no_write_barrier(
+    Tagged<Map> value, RelaxedStoreTag tag) {
+  // TODO(leszeks): Support MapWord members and access via that instead.
+  return Tagged<HeapObject>(this)->set_map_safe_transition_no_write_barrier(
+      value, tag);
+}
+
 void HeapObject::set_map_safe_transition_no_write_barrier(Tagged<Map> value,
                                                           RelaxedStoreTag tag) {
   set_map<EmitWriteBarrier::kNo>(value, kRelaxedStore,
@@ -1052,6 +1070,12 @@ void HeapObject::set_map_safe_transition_no_write_barrier(Tagged<Map> value,
                                                           ReleaseStoreTag tag) {
   set_map<EmitWriteBarrier::kNo>(value, kReleaseStore,
                                  VerificationMode::kSafeMapTransition);
+}
+
+void HeapObjectLayout::set_map_no_write_barrier(Tagged<Map> value,
+                                                RelaxedStoreTag tag) {
+  // TODO(leszeks): Support MapWord members and access via that instead.
+  Tagged<HeapObject>(this)->set_map_no_write_barrier(value, tag);
 }
 
 // Unsafe accessor omitting write barrier.
@@ -1127,6 +1151,12 @@ void HeapObject::set_map_after_allocation(Tagged<Map> value,
 #endif
 }
 
+// static
+void HeapObject::SetFillerMap(const WritableFreeSpace& writable_space,
+                              Tagged<Map> value) {
+  writable_space.WriteHeaderSlot<Map, kMapOffset>(value, kRelaxedStore);
+}
+
 DEF_ACQUIRE_GETTER(HeapObject, map, Tagged<Map>) {
   return map_word(cage_base, kAcquireLoad).ToMap();
 }
@@ -1175,6 +1205,12 @@ void HeapObject::set_map_word(Tagged<Map> map, ReleaseStoreTag) {
   MapField::Release_Store_Map_Word(*this, MapWord::FromMap(map));
 }
 
+void HeapObjectLayout::set_map_word_forwarded(Tagged<HeapObject> target_object,
+                                              ReleaseStoreTag tag) {
+  // TODO(leszeks): Support MapWord members and access via that instead.
+  Tagged<HeapObject>(this)->set_map_word_forwarded(target_object, tag);
+}
+
 void HeapObject::set_map_word_forwarded(Tagged<HeapObject> target_object,
                                         ReleaseStoreTag) {
   MapField::Release_Store_Map_Word(
@@ -1188,6 +1224,8 @@ bool HeapObject::release_compare_and_swap_map_word_forwarded(
       MapWord::FromForwardingAddress(*this, new_target_object));
   return result == static_cast<Tagged_t>(old_map_word.ptr());
 }
+
+int HeapObjectLayout::Size() const { return Tagged<HeapObject>(this)->Size(); }
 
 // TODO(v8:11880): consider dropping parameterless version.
 int HeapObject::Size() const {
@@ -1256,6 +1294,11 @@ bool Object::ToIntegerIndex(Tagged<Object> obj, size_t* index) {
   return false;
 }
 
+WriteBarrierMode HeapObjectLayout::GetWriteBarrierMode(
+    const DisallowGarbageCollection& promise) {
+  return GetWriteBarrierModeForObject(this, &promise);
+}
+
 WriteBarrierMode HeapObject::GetWriteBarrierMode(
     const DisallowGarbageCollection& promise) {
   return GetWriteBarrierModeForObject(*this, &promise);
@@ -1269,7 +1312,15 @@ AllocationAlignment HeapObject::RequiredAlignment(Tagged<Map> map) {
   // TODO(ishell, v8:8875): Consider using aligned allocations for BigInt.
   if (USE_ALLOCATION_ALIGNMENT_BOOL) {
     int instance_type = map->instance_type();
+
+    static_assert(!USE_ALLOCATION_ALIGNMENT_BOOL ||
+                  (FixedDoubleArray::kHeaderSize & kDoubleAlignmentMask) ==
+                      kTaggedSize);
     if (instance_type == FIXED_DOUBLE_ARRAY_TYPE) return kDoubleAligned;
+
+    static_assert(!USE_ALLOCATION_ALIGNMENT_BOOL ||
+                  (offsetof(HeapNumber, value_) & kDoubleAlignmentMask) ==
+                      kTaggedSize);
     if (instance_type == HEAP_NUMBER_TYPE) return kDoubleUnaligned;
   }
   return kTaggedAligned;
@@ -1455,7 +1506,7 @@ bool IsShared(Tagged<Object> obj) {
   // Check if this object is already shared.
   InstanceType instance_type = object->map()->instance_type();
   if (InstanceTypeChecker::IsAlwaysSharedSpaceJSObject(instance_type)) {
-    DCHECK(object.InAnySharedSpace());
+    DCHECK(InAnySharedSpace(object));
     return true;
   }
   switch (instance_type) {
@@ -1465,7 +1516,7 @@ bool IsShared(Tagged<Object> obj) {
     case SHARED_EXTERNAL_ONE_BYTE_STRING_TYPE:
     case SHARED_UNCACHED_EXTERNAL_TWO_BYTE_STRING_TYPE:
     case SHARED_UNCACHED_EXTERNAL_ONE_BYTE_STRING_TYPE:
-      DCHECK(object.InAnySharedSpace());
+      DCHECK(InAnySharedSpace(object));
       return true;
     case INTERNALIZED_TWO_BYTE_STRING_TYPE:
     case INTERNALIZED_ONE_BYTE_STRING_TYPE:
@@ -1474,12 +1525,12 @@ bool IsShared(Tagged<Object> obj) {
     case UNCACHED_EXTERNAL_INTERNALIZED_TWO_BYTE_STRING_TYPE:
     case UNCACHED_EXTERNAL_INTERNALIZED_ONE_BYTE_STRING_TYPE:
       if (v8_flags.shared_string_table) {
-        DCHECK(object.InAnySharedSpace());
+        DCHECK(InAnySharedSpace(object));
         return true;
       }
       return false;
     case HEAP_NUMBER_TYPE:
-      return object.InWritableSharedSpace();
+      return InWritableSharedSpace(object);
     default:
       return false;
   }
@@ -1553,12 +1604,6 @@ static inline Handle<Object> MakeEntryPair(Isolate* isolate, Handle<Object> key,
   }
   return isolate->factory()->NewJSArrayWithElements(entry_storage,
                                                     PACKED_ELEMENTS, 2);
-}
-
-Tagged<FreshlyAllocatedBigInt> FreshlyAllocatedBigInt::cast(
-    Tagged<Object> object) {
-  SLOW_DCHECK(IsBigInt(object));
-  return FreshlyAllocatedBigInt(object.ptr());
 }
 
 }  // namespace internal

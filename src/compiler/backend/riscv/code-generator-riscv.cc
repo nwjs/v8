@@ -646,8 +646,8 @@ void CodeGenerator::BailoutIfDeoptimized() {
   __ Lw(kScratchReg, FieldMemOperand(kScratchReg, Code::kFlagsOffset));
   __ And(kScratchReg, kScratchReg,
          Operand(1 << Code::kMarkedForDeoptimizationBit));
-  __ Jump(BUILTIN_CODE(isolate(), CompileLazyDeoptimizedCode),
-          RelocInfo::CODE_TARGET, ne, kScratchReg, Operand(zero_reg));
+  __ TailCallBuiltin(Builtin::kCompileLazyDeoptimizedCode, ne, kScratchReg,
+                     Operand(zero_reg));
 }
 
 // Assembles an instruction after register allocation, producing machine code.
@@ -851,7 +851,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ DebugBreak();
       break;
     case kArchComment:
-      __ RecordComment(reinterpret_cast<const char*>(i.InputInt64(0)));
+      __ RecordComment(reinterpret_cast<const char*>(i.InputInt64(0)),
+                       SourceLocation());
       break;
     case kArchNop:
     case kArchThrowTerminator:
@@ -866,9 +867,28 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArchRet:
       AssembleReturn(instr->InputAt(0));
       break;
+#if V8_ENABLE_WEBASSEMBLY
     case kArchStackPointer:
-    case kArchSetStackPointer:
-      UNREACHABLE();
+      // The register allocator expects an allocatable register for the output,
+      // we cannot use sp directly.
+      __ Move(i.OutputRegister(), sp);
+      break;
+    case kArchSetStackPointer: {
+      DCHECK(instr->InputAt(0)->IsRegister());
+      __ Move(sp, i.InputRegister(0));
+      auto fp_scope = static_cast<wasm::FPRelativeScope>(
+          MiscField::decode(instr->opcode()));
+      if (fp_scope == wasm::kEnterFPRelativeOnlyScope) {
+        DCHECK(frame_access_state()->has_frame());
+        frame_access_state()->SetFrameAccessToFP();
+      } else {
+        frame_access_state()->SetFrameAccessToDefault();
+      }
+      frame_access_state()->SetFPRelativeOnly(fp_scope ==
+                                              wasm::kEnterFPRelativeOnlyScope);
+      break;
+    }
+#endif  // V8_ENABLE_WEBASSEMBLY
     case kArchStackPointerGreaterThan:
       // Pseudo-instruction used for cmp/branch. No opcode emitted here.
       break;
@@ -925,34 +945,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
           frame_access_state()->GetFrameOffset(i.InputInt32(0));
       Register base_reg = offset.from_stack_pointer() ? sp : fp;
       __ AddWord(i.OutputRegister(), base_reg, Operand(offset.offset()));
-      int alignment = i.InputInt32(1);
-      DCHECK(alignment == 0 || alignment == 4 || alignment == 8 ||
-             alignment == 16);
-      if (v8_flags.debug_code && alignment > 0) {
-        // Verify that the output_register is properly aligned
-        __ And(kScratchReg, i.OutputRegister(),
-               Operand(kSystemPointerSize - 1));
-        __ Assert(eq, AbortReason::kAllocationIsNotDoubleAligned, kScratchReg,
-                  Operand(zero_reg));
-      }
-      if (alignment == 2 * kSystemPointerSize) {
-        Label done;
-        __ AddWord(kScratchReg, base_reg, Operand(offset.offset()));
-        __ And(kScratchReg, kScratchReg, Operand(alignment - 1));
-        __ BranchShort(&done, eq, kScratchReg, Operand(zero_reg));
-        __ AddWord(i.OutputRegister(), i.OutputRegister(), kSystemPointerSize);
-        __ bind(&done);
-      } else if (alignment > 2 * kSystemPointerSize) {
-        Label done;
-        __ AddWord(kScratchReg, base_reg, Operand(offset.offset()));
-        __ And(kScratchReg, kScratchReg, Operand(alignment - 1));
-        __ BranchShort(&done, eq, kScratchReg, Operand(zero_reg));
-        __ li(kScratchReg2, alignment);
-        __ SubWord(kScratchReg2, kScratchReg2, Operand(kScratchReg));
-        __ AddWord(i.OutputRegister(), i.OutputRegister(), kScratchReg2);
-        __ bind(&done);
-      }
-
       break;
     }
     case kIeee754Float64Acos:
@@ -1263,6 +1255,61 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kRiscvTst64:
       __ And(kScratchReg, i.InputRegister(0), i.InputOperand(1));
       // Pseudo-instruction used for cmp/branch. No opcode emitted here.
+      break;
+#endif
+#ifdef CAN_USE_ZBB_INSTRUCTIONS
+    case kRiscvRev8:
+      __ rev8(i.OutputRegister(), i.InputRegister(0));
+      break;
+    case kRiscvAndn:
+      __ andn(i.OutputRegister(), i.InputRegister(0), i.InputRegister(1));
+      break;
+    case kRiscvOrn:
+      __ orn(i.OutputRegister(), i.InputRegister(0), i.InputRegister(1));
+      break;
+    case kRiscvXnor:
+      __ xnor(i.OutputRegister(), i.InputRegister(0), i.InputRegister(1));
+      break;
+    case kRiscvClz:
+      __ clz(i.OutputRegister(), i.InputRegister(0));
+      break;
+    case kRiscvCtz:
+      __ ctz(i.OutputRegister(), i.InputRegister(0));
+      break;
+    case kRiscvCpop:
+      __ cpop(i.OutputRegister(), i.InputRegister(0));
+      break;
+#if V8_TARGET_ARCH_RISCV64
+    case kRiscvClzw:
+      __ clzw(i.OutputRegister(), i.InputRegister(0));
+      break;
+    case kRiscvCtzw:
+      __ ctzw(i.OutputRegister(), i.InputRegister(0));
+      break;
+    case kRiscvCpopw:
+      __ cpopw(i.OutputRegister(), i.InputRegister(0));
+      break;
+#endif
+    case kRiscvMax:
+      __ max(i.OutputRegister(), i.InputRegister(0), i.InputRegister(1));
+      break;
+    case kRiscvMaxu:
+      __ maxu(i.OutputRegister(), i.InputRegister(0), i.InputRegister(1));
+      break;
+    case kRiscvMin:
+      __ min(i.OutputRegister(), i.InputRegister(0), i.InputRegister(1));
+      break;
+    case kRiscvMinu:
+      __ minu(i.OutputRegister(), i.InputRegister(0), i.InputRegister(1));
+      break;
+    case kRiscvSextb:
+      __ sextb(i.OutputRegister(), i.InputRegister(0));
+      break;
+    case kRiscvSexth:
+      __ sexth(i.OutputRegister(), i.InputRegister(0));
+      break;
+    case kRiscvZexth:
+      __ zexth(i.OutputRegister(), i.InputRegister(0));
       break;
 #endif
     case kRiscvTst32:
@@ -4095,7 +4142,24 @@ void CodeGenerator::AssembleConstructFrame() {
           call_descriptor->IsWasmCapiFunction()) {
         __ Push(kWasmInstanceRegister);
       }
-      if (call_descriptor->IsWasmCapiFunction()) {
+      if (call_descriptor->IsWasmImportWrapper()) {
+        // If the wrapper is running on a secondary stack, it will switch to the
+        // central stack and fill these slots with the central stack pointer and
+        // secondary stack limit. Otherwise the slots remain empty.
+#if V8_TARGET_ARCH_RISCV64
+        static_assert(WasmImportWrapperFrameConstants::kCentralStackSPOffset ==
+                      -24);
+        static_assert(
+            WasmImportWrapperFrameConstants::kSecondaryStackLimitOffset == -32);
+#elif V8_TARGET_ARCH_RISCV32
+        static_assert(WasmImportWrapperFrameConstants::kCentralStackSPOffset ==
+                      -12);
+        static_assert(
+            WasmImportWrapperFrameConstants::kSecondaryStackLimitOffset == -16);
+#endif
+        __ push(zero_reg);
+        __ push(zero_reg);
+      } else if (call_descriptor->IsWasmCapiFunction()) {
         // Reserve space for saving the PC later.
         __ SubWord(sp, sp, Operand(kSystemPointerSize));
       }

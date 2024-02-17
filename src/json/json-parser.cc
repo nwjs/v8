@@ -319,17 +319,17 @@ JsonParser<Char>::JsonParser(Isolate* isolate, Handle<String> source)
   if (IsSlicedString(*source, cage_base)) {
     Tagged<SlicedString> string = SlicedString::cast(*source);
     start = string->offset();
-    Tagged<String> parent = string->parent(cage_base);
+    Tagged<String> parent = string->parent();
     if (IsThinString(parent, cage_base))
-      parent = ThinString::cast(parent)->actual(cage_base);
+      parent = ThinString::cast(parent)->actual();
     source_ = handle(parent, isolate);
   } else {
     source_ = String::Flatten(isolate, source);
   }
 
   if (StringShape(*source_, cage_base).IsExternal()) {
-    chars_ = static_cast<const Char*>(
-        SeqExternalString::cast(*source_)->GetChars(cage_base));
+    chars_ =
+        static_cast<const Char*>(SeqExternalString::cast(*source_)->GetChars());
     chars_may_relocate_ = false;
   } else {
     DisallowGarbageCollection no_gc;
@@ -660,8 +660,10 @@ Handle<Object> JsonParser<Char>::BuildJsonObject(
     const JsonContinuation& cont,
     const SmallVector<JsonProperty>& property_stack, Handle<Map> feedback) {
   size_t start = cont.index;
+  DCHECK_LE(start, property_stack.size());
   int length = static_cast<int>(property_stack.size() - start);
   int named_length = length - cont.elements;
+  DCHECK_LE(0, named_length);
 
   Handle<Map> initial_map = factory()->ObjectLiteralMapFromCache(
       isolate_->native_context(), named_length);
@@ -810,7 +812,7 @@ Handle<Object> JsonParser<Char>::BuildJsonObject(
   Handle<ByteArray> mutable_double_buffer;
   // Allocate enough space so we can double-align the payload.
   const int kMutableDoubleSize = sizeof(double) * 2;
-  static_assert(HeapNumber::kSize <= kMutableDoubleSize);
+  static_assert(sizeof(HeapNumber) <= kMutableDoubleSize);
   if (new_mutable_double > 0) {
     mutable_double_buffer =
         factory()->NewByteArray(kMutableDoubleSize * new_mutable_double);
@@ -836,7 +838,7 @@ Handle<Object> JsonParser<Char>::BuildJsonObject(
       if (IsAligned(mutable_double_address, kDoubleAlignment)) {
         mutable_double_address += kTaggedSize;
       } else {
-        filler_address += HeapNumber::kSize;
+        filler_address += sizeof(HeapNumber);
       }
     }
     for (int j = 0; j < i; j++) {
@@ -867,7 +869,7 @@ Handle<Object> JsonParser<Char>::BuildJsonObject(
           Tagged<HeapObject> hn =
               HeapObject::FromAddress(mutable_double_address);
           hn->set_map_after_allocation(roots().heap_number_map());
-          HeapNumber::cast(hn)->set_value_as_bits(bits, kRelaxedStore);
+          HeapNumber::cast(hn)->set_value_as_bits(bits);
           value = hn;
           mutable_double_address +=
               ALIGN_TO_ALLOCATION_ALIGNMENT(kMutableDoubleSize);

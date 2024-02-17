@@ -8,6 +8,7 @@
 #include "src/common/globals.h"
 #include "src/diagnostics/disasm.h"
 #include "src/diagnostics/disassembler.h"
+#include "src/execution/frames-inl.h"
 #include "src/execution/isolate-utils-inl.h"
 #include "src/heap/heap-inl.h"                // For InOldSpace.
 #include "src/heap/heap-write-barrier-inl.h"  // For GetIsolateFromWritableObj.
@@ -106,6 +107,10 @@ void PrintDictionaryContents(std::ostream& os, Tagged<T> dict) {
 }
 }  // namespace
 
+void HeapObjectLayout::PrintHeader(std::ostream& os, const char* id) {
+  Tagged<HeapObject>(this)->PrintHeader(os, id);
+}
+
 void HeapObject::PrintHeader(std::ostream& os, const char* id) {
   PrintHeapObjectHeaderWithoutMap(*this, os, id);
   PtrComprCageBase cage_base = GetPtrComprCageBase();
@@ -196,8 +201,8 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {
       JSObject::cast(*this)->JSObjectPrint(os);
       break;
 #if V8_ENABLE_WEBASSEMBLY
-    case WASM_INSTANCE_OBJECT_TYPE:
-      WasmInstanceObject::cast(*this)->WasmInstanceObjectPrint(os);
+    case WASM_TRUSTED_INSTANCE_DATA_TYPE:
+      WasmTrustedInstanceData::cast(*this)->WasmTrustedInstanceDataPrint(os);
       break;
     case WASM_VALUE_OBJECT_TYPE:
       WasmValueObject::cast(*this)->WasmValueObjectPrint(os);
@@ -1342,7 +1347,8 @@ void FeedbackVector::FeedbackVectorPrint(std::ostream& os) {
 
   os << "\n - shared function info: " << Brief(shared_function_info());
   if (has_optimized_code()) {
-    os << "\n - optimized code: " << Brief(optimized_code());
+    os << "\n - optimized code: "
+       << Brief(optimized_code(GetIsolateForSandbox(*this)));
   } else {
     os << "\n - no optimized code";
   }
@@ -1582,7 +1588,7 @@ void JSMessageObject::JSMessageObjectPrint(std::ostream& os) {
 }
 
 void String::StringPrint(std::ostream& os) {
-  PrintHeapObjectHeaderWithoutMap(*this, os, "String");
+  PrintHeapObjectHeaderWithoutMap(this, os, "String");
   os << ": ";
   os << PrefixForDebugPrint();
   PrintUC16(os, 0, length());
@@ -1590,10 +1596,10 @@ void String::StringPrint(std::ostream& os) {
 }
 
 void Name::NamePrint(std::ostream& os) {
-  if (IsString(*this)) {
-    String::cast(*this)->StringPrint(os);
+  if (IsString(this)) {
+    String::cast(this)->StringPrint(os);
   } else {
-    os << Brief(*this);
+    os << Brief(this);
   }
 }
 
@@ -1691,7 +1697,7 @@ void JSSharedArray::JSSharedArrayPrint(std::ostream& os) {
   JSObjectPrintHeader(os, *this, "JSSharedArray");
   Isolate* isolate = GetIsolateFromWritableObject(*this);
   os << "\n - isolate: " << isolate;
-  if (InWritableSharedSpace()) os << " (shared)";
+  if (InWritableSharedSpace(*this)) os << " (shared)";
   JSObjectPrintBody(os, *this);
 }
 
@@ -1699,7 +1705,7 @@ void JSSharedStruct::JSSharedStructPrint(std::ostream& os) {
   JSObjectPrintHeader(os, *this, "JSSharedStruct");
   Isolate* isolate = GetIsolateFromWritableObject(*this);
   os << "\n - isolate: " << isolate;
-  if (InWritableSharedSpace()) os << " (shared)";
+  if (InWritableSharedSpace(*this)) os << " (shared)";
   JSObjectPrintBody(os, *this);
 }
 
@@ -1707,7 +1713,7 @@ void JSAtomicsMutex::JSAtomicsMutexPrint(std::ostream& os) {
   JSObjectPrintHeader(os, *this, "JSAtomicsMutex");
   Isolate* isolate = GetIsolateFromWritableObject(*this);
   os << "\n - isolate: " << isolate;
-  if (InWritableSharedSpace()) os << " (shared)";
+  if (InWritableSharedSpace(*this)) os << " (shared)";
   os << "\n - state: " << this->state();
   os << "\n - owner_thread_id: " << this->owner_thread_id();
   JSObjectPrintBody(os, *this);
@@ -1717,7 +1723,7 @@ void JSAtomicsCondition::JSAtomicsConditionPrint(std::ostream& os) {
   JSObjectPrintHeader(os, *this, "JSAtomicsCondition");
   Isolate* isolate = GetIsolateFromWritableObject(*this);
   os << "\n - isolate: " << isolate;
-  if (InWritableSharedSpace()) os << " (shared)";
+  if (InWritableSharedSpace(*this)) os << " (shared)";
   os << "\n - state: " << this->state();
   JSObjectPrintBody(os, *this);
 }
@@ -1994,17 +2000,11 @@ void SharedFunctionInfo::SharedFunctionInfoPrint(std::ostream& os) {
 
 void JSGlobalProxy::JSGlobalProxyPrint(std::ostream& os) {
   JSObjectPrintHeader(os, *this, "JSGlobalProxy");
-  if (!GetIsolate()->bootstrapper()->IsActive()) {
-    os << "\n - native context: " << Brief(native_context());
-  }
   JSObjectPrintBody(os, *this);
 }
 
 void JSGlobalObject::JSGlobalObjectPrint(std::ostream& os) {
   JSObjectPrintHeader(os, *this, "JSGlobalObject");
-  if (!GetIsolate()->bootstrapper()->IsActive()) {
-    os << "\n - native context: " << Brief(native_context());
-  }
   os << "\n - global proxy: " << Brief(global_proxy());
   JSObjectPrintBody(os, *this);
 }
@@ -2145,7 +2145,7 @@ void PrototypeInfo::PrototypeInfoPrint(std::ostream& os) {
   os << "\n - module namespace: " << Brief(module_namespace());
   os << "\n - prototype users: " << Brief(prototype_users());
   os << "\n - registry slot: " << registry_slot();
-  os << "\n - object create map: " << Brief(object_create_map());
+  os << "\n - derived maps: " << Brief(derived_maps());
   os << "\n - should_be_fast_map: " << should_be_fast_map();
   os << "\n";
 }
@@ -2328,11 +2328,11 @@ void WasmSuspenderObject::WasmSuspenderObjectPrint(std::ostream& os) {
   os << "\n - resume: " << resume();
   os << "\n - reject: " << reject();
   os << "\n - state: " << state();
-  os << "\n - wasm_to_js_counter: " << wasm_to_js_counter();
+  os << "\n - has_js_frames: " << has_js_frames();
   os << "\n";
 }
 
-void WasmInstanceObject::WasmInstanceObjectPrint(std::ostream& os) {
+void WasmTrustedInstanceData::WasmTrustedInstanceDataPrint(std::ostream& os) {
 #define PRINT_WASM_INSTANCE_FIELD(name, convert) \
   os << "\n - " #name ": " << convert(name());
 #define PRINT_OPTIONAL_WASM_INSTANCE_FIELD(name, convert) \
@@ -2343,9 +2343,8 @@ void WasmInstanceObject::WasmInstanceObjectPrint(std::ostream& os) {
     return reinterpret_cast<void*>(value);
   };
 
-  JSObjectPrintHeader(os, *this, "WasmInstanceObject");
-  PRINT_WASM_INSTANCE_FIELD(module_object, Brief);
-  PRINT_WASM_INSTANCE_FIELD(exports_object, Brief);
+  PrintHeader(os, "WasmTrustedInstanceData");
+  PRINT_WASM_INSTANCE_FIELD(instance_object, Brief);
   PRINT_WASM_INSTANCE_FIELD(native_context, Brief);
   PRINT_WASM_INSTANCE_FIELD(memory_objects, Brief);
   PRINT_OPTIONAL_WASM_INSTANCE_FIELD(untagged_globals_buffer, Brief);
@@ -2382,7 +2381,6 @@ void WasmInstanceObject::WasmInstanceObjectPrint(std::ostream& os) {
   PRINT_WASM_INSTANCE_FIELD(tiering_budget_array, to_void_ptr);
   PRINT_WASM_INSTANCE_FIELD(memory_bases_and_sizes, Brief);
   PRINT_WASM_INSTANCE_FIELD(break_on_entry, static_cast<int>);
-  JSObjectPrintBody(os, *this);
   os << "\n";
 
 #undef PRINT_OPTIONAL_WASM_INSTANCE_FIELD
@@ -2391,8 +2389,9 @@ void WasmInstanceObject::WasmInstanceObjectPrint(std::ostream& os) {
 
 // Never called directly, as WasmFunctionData is an "abstract" class.
 void WasmFunctionData::WasmFunctionDataPrint(std::ostream& os) {
+  Isolate* isolate = GetIsolateForSandbox(*this);
   os << "\n - internal: " << Brief(internal());
-  os << "\n - wrapper_code: " << Brief(TorqueGeneratedClass::wrapper_code());
+  os << "\n - wrapper_code: " << Brief(wrapper_code(isolate));
   os << "\n - js_promise_flags: " << js_promise_flags();
 }
 
@@ -2437,7 +2436,7 @@ void WasmInternalFunction::WasmInternalFunctionPrint(std::ostream& os) {
   os << "\n - call target: " << reinterpret_cast<void*>(call_target(isolate));
   os << "\n - ref: " << Brief(ref());
   os << "\n - external: " << Brief(external());
-  os << "\n - code: " << Brief(code());
+  os << "\n - code: " << Brief(code(isolate));
   os << "\n";
 }
 
@@ -3279,11 +3278,11 @@ void HeapNumber::HeapNumberShortPrint(std::ostream& os) {
 
 // TODO(cbruni): remove once the new maptracer is in place.
 void Name::NameShortPrint() {
-  if (IsString(*this)) {
-    PrintF("%s", String::cast(*this)->ToCString().get());
+  if (IsString(this)) {
+    PrintF("%s", String::cast(this)->ToCString().get());
   } else {
-    DCHECK(IsSymbol(*this));
-    Tagged<Symbol> s = Symbol::cast(*this);
+    DCHECK(IsSymbol(this));
+    Tagged<Symbol> s = Symbol::cast(this);
     if (IsUndefined(s->description())) {
       PrintF("#<%s>", s->PrivateSymbolToName());
     } else {
@@ -3294,11 +3293,11 @@ void Name::NameShortPrint() {
 
 // TODO(cbruni): remove once the new maptracer is in place.
 int Name::NameShortPrint(base::Vector<char> str) {
-  if (IsString(*this)) {
-    return SNPrintF(str, "%s", String::cast(*this)->ToCString().get());
+  if (IsString(this)) {
+    return SNPrintF(str, "%s", String::cast(this)->ToCString().get());
   } else {
-    DCHECK(IsSymbol(*this));
-    Tagged<Symbol> s = Symbol::cast(*this);
+    DCHECK(IsSymbol(this));
+    Tagged<Symbol> s = Symbol::cast(this);
     if (IsUndefined(s->description())) {
       return SNPrintF(str, "#<%s>", s->PrivateSymbolToName());
     } else {
@@ -3470,7 +3469,7 @@ char* String::ToAsciiArray() {
   static char* buffer = nullptr;
   if (buffer != nullptr) delete[] buffer;
   buffer = new char[length() + 1];
-  WriteToFlat(*this, reinterpret_cast<uint8_t*>(buffer), 0, length());
+  WriteToFlat(this, reinterpret_cast<uint8_t*>(buffer), 0, length());
   buffer[length()] = 0;
   return buffer;
 }
@@ -3638,6 +3637,15 @@ V8_EXPORT_PRIVATE extern void _v8_internal_Print_Object(void* object) {
   i::Print(GetObjectFromRaw(object));
 }
 
+// Used by lldb_visualizers.py to create a representation of a V8 object.
+V8_DONT_STRIP_SYMBOL
+V8_EXPORT_PRIVATE extern std::string _v8_internal_Print_Object_To_String(
+    void* object) {
+  std::stringstream strm;
+  i::Print(GetObjectFromRaw(object), strm);
+  return strm.str();
+}
+
 V8_DONT_STRIP_SYMBOL
 V8_EXPORT_PRIVATE extern void _v8_internal_Print_LoadHandler(void* object) {
 #ifdef OBJECT_PRINT
@@ -3727,6 +3735,52 @@ V8_DONT_STRIP_SYMBOL
 V8_EXPORT_PRIVATE extern void _v8_internal_Print_StackTrace() {
   i::Isolate* isolate = i::Isolate::Current();
   isolate->PrintStack(stdout);
+}
+
+namespace _v8_internal_debugonly {
+// This class is easy to navigate in a GUI debugger and not intended for
+// use elsewhere.
+struct StackTraceDebugDetails {
+  i::StackFrame::Type type;
+  std::string summary;
+  std::vector<i::Tagged<i::SharedFunctionInfo>> functions;
+  std::vector<i::Tagged<i::Object>> expressions;
+};
+}  // namespace _v8_internal_debugonly
+
+// Used by lldb_visualizers.py to create a representation of the V8 stack.
+V8_DONT_STRIP_SYMBOL
+V8_EXPORT_PRIVATE extern std::vector<
+    _v8_internal_debugonly::StackTraceDebugDetails>
+_v8_internal_Expand_StackTrace(i::Isolate* isolate) {
+  std::vector<_v8_internal_debugonly::StackTraceDebugDetails> stack;
+  i::DisallowGarbageCollection no_gc;
+  int i = 0;
+
+  for (i::StackFrameIterator it(isolate); !it.done(); it.Advance()) {
+    i::CommonFrame* frame = i::CommonFrame::cast(it.frame());
+    _v8_internal_debugonly::StackTraceDebugDetails details;
+    details.type = frame->type();
+
+    if (frame->is_java_script()) {
+      i::JavaScriptFrame::cast(frame)->GetFunctions(&details.functions);
+    }
+
+    int exprcount = frame->ComputeExpressionsCount();
+    for (int i = 0; i < exprcount; i++) {
+      details.expressions.push_back(frame->GetExpression(i));
+    }
+
+    i::HandleScope scope(isolate);
+    i::StringStream::ClearMentionedObjectCache(isolate);
+    i::HeapStringAllocator allocator;
+    i::StringStream accumulator(&allocator);
+    frame->Print(&accumulator, i::StackFrame::OVERVIEW, i++);
+    std::unique_ptr<char[]> overview = accumulator.ToCString();
+    details.summary = overview.get();
+    stack.push_back(std::move(details));
+  }
+  return stack;
 }
 
 V8_DONT_STRIP_SYMBOL

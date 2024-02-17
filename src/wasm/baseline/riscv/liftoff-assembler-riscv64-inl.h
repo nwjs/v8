@@ -276,11 +276,25 @@ void LiftoffAssembler::LoadConstant(LiftoffRegister reg, WasmValue value) {
 
 void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
                                          Register offset_reg,
-                                         int32_t offset_imm, bool needs_shift) {
+                                         int32_t offset_imm,
+                                         uint32_t* protected_load_pc,
+                                         bool needs_shift) {
   unsigned shift_amount = !needs_shift ? 0 : COMPRESS_POINTERS_BOOL ? 2 : 3;
   MemOperand src_op = liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm,
                                         false, shift_amount);
   LoadTaggedField(dst, src_op);
+
+  // Since LoadTaggedField might start with an instruction loading an immediate
+  // argument to a register, we have to compute the {protected_load_pc} after
+  // calling it.
+  // In case of compressed pointers, there is an additional instruction
+  // (pointer decompression) after the load.
+  uint8_t protected_instruction_offset_bias =
+      COMPRESS_POINTERS_BOOL ? 2 * kInstrSize : kInstrSize;
+  if (protected_load_pc) {
+    *protected_load_pc = pc_offset() - protected_instruction_offset_bias;
+    DCHECK(InstructionAt(*protected_load_pc)->IsLoad());
+  }
 }
 
 void LiftoffAssembler::LoadFullPointer(Register dst, Register src_addr,
@@ -293,11 +307,21 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
                                           Register offset_reg,
                                           int32_t offset_imm, Register src,
                                           LiftoffRegList pinned,
+                                          uint32_t* protected_store_pc,
                                           SkipWriteBarrier skip_write_barrier) {
   UseScratchRegisterScope temps(this);
   Register scratch = temps.Acquire();
   MemOperand dst_op = liftoff::GetMemOp(this, dst_addr, offset_reg, offset_imm);
+
   StoreTaggedField(src, dst_op);
+
+  // Since StoreTaggedField might start with an instruction loading an immediate
+  // argument to a register, we have to compute the {protected_load_pc} after
+  // calling it.
+  if (protected_store_pc) {
+    *protected_store_pc = pc_offset() - kInstrSize;
+    DCHECK(InstructionAt(*protected_store_pc)->IsStore());
+  }
 
   if (skip_write_barrier || v8_flags.disable_write_barriers) return;
   Label exit;
@@ -321,7 +345,6 @@ void LiftoffAssembler::Load(LiftoffRegister dst, Register src_addr,
   MemOperand src_op = liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm,
                                         i64_offset, shift_amount);
 
-  if (protected_load_pc) *protected_load_pc = pc_offset();
   switch (type.value()) {
     case LoadType::kI32Load8U:
     case LoadType::kI64Load8U:
@@ -367,7 +390,13 @@ void LiftoffAssembler::Load(LiftoffRegister dst, Register src_addr,
     default:
       UNREACHABLE();
   }
-
+  // Since {Ldr*} macros might start with an instruction loading an immediate
+  // argument to a register, we have to compute the {protected_load_pc} after
+  // calling them.
+  if (protected_load_pc) {
+    *protected_load_pc = pc_offset() - kInstrSize;
+    DCHECK(InstructionAt(*protected_load_pc)->IsLoad());
+  }
 #if defined(V8_TARGET_BIG_ENDIAN)
   if (is_load_mem) {
     pinned.set(src_op.rm());
@@ -397,7 +426,6 @@ void LiftoffAssembler::Store(Register dst_addr, Register offset_reg,
   }
 #endif
 
-  if (protected_store_pc) *protected_store_pc = pc_offset();
 
   switch (type.value()) {
     case StoreType::kI32Store8:
@@ -433,22 +461,32 @@ void LiftoffAssembler::Store(Register dst_addr, Register offset_reg,
     default:
       UNREACHABLE();
   }
+  // Since {Str*} macros might start with an instruction loading an immediate
+  // argument to a register, we have to compute the {protected_load_pc} after
+  // calling them.
+  if (protected_store_pc) {
+    *protected_store_pc = pc_offset() - kInstrSize;
+    DCHECK(InstructionAt(*protected_store_pc)->IsStore());
+  }
 }
 
 namespace liftoff {
 #define __ lasm->
 
 inline Register CalculateActualAddress(LiftoffAssembler* lasm,
+                                       UseScratchRegisterScope& temps,
                                        Register addr_reg, Register offset_reg,
-                                       uintptr_t offset_imm,
-                                       Register result_reg) {
-  DCHECK_NE(offset_reg, no_reg);
+                                       uintptr_t offset_imm) {
   DCHECK_NE(addr_reg, no_reg);
-  __ AddWord(result_reg, addr_reg, Operand(offset_reg));
-  if (offset_imm != 0) {
-    __ AddWord(result_reg, result_reg, Operand(offset_imm));
+  if (offset_reg == no_reg && offset_imm == 0) return addr_reg;
+  Register result = temps.Acquire();
+  if (offset_reg == no_reg) {
+    __ AddWord(result, addr_reg, Operand(offset_imm));
+  } else {
+    __ AddWord(result, addr_reg, Operand(offset_reg));
+    if (offset_imm != 0) __ AddWord(result, result, Operand(offset_imm));
   }
-  return result_reg;
+  return result;
 }
 
 enum class Binop { kAdd, kSub, kAnd, kOr, kXor, kExchange };
@@ -457,7 +495,8 @@ inline void AtomicBinop(LiftoffAssembler* lasm, Register dst_addr,
                         Register offset_reg, uintptr_t offset_imm,
                         LiftoffRegister value, LiftoffRegister result,
                         StoreType type, Binop op) {
-  LiftoffRegList pinned{dst_addr, offset_reg, value, result};
+  LiftoffRegList pinned{dst_addr, value, result};
+  if (offset_reg != no_reg) pinned.set(offset_reg);
   Register store_result = pinned.set(__ GetUnusedRegister(kGpReg, pinned)).gp();
 
   // Make sure that {result} is unique.
@@ -469,7 +508,7 @@ inline void AtomicBinop(LiftoffAssembler* lasm, Register dst_addr,
 
   UseScratchRegisterScope temps(lasm);
   Register actual_addr = liftoff::CalculateActualAddress(
-      lasm, dst_addr, offset_reg, offset_imm, temps.Acquire());
+      lasm, temps, dst_addr, offset_reg, offset_imm);
 
   // Allocate an additional {temp} register to hold the result that should be
   // stored to memory. Note that {temp} and {store_result} are not allowed to be
@@ -563,8 +602,8 @@ void LiftoffAssembler::AtomicLoad(LiftoffRegister dst, Register src_addr,
                                   LoadType type, LiftoffRegList pinned,
                                   bool i64_offset) {
   UseScratchRegisterScope temps(this);
-  Register src_reg = liftoff::CalculateActualAddress(
-      this, src_addr, offset_reg, offset_imm, temps.Acquire());
+  Register src_reg = liftoff::CalculateActualAddress(this, temps, src_addr,
+                                                     offset_reg, offset_imm);
   switch (type.value()) {
     case LoadType::kI32Load8U:
     case LoadType::kI64Load8U:
@@ -598,8 +637,8 @@ void LiftoffAssembler::AtomicStore(Register dst_addr, Register offset_reg,
                                    StoreType type, LiftoffRegList pinned,
                                    bool i64_offset) {
   UseScratchRegisterScope temps(this);
-  Register dst_reg = liftoff::CalculateActualAddress(
-      this, dst_addr, offset_reg, offset_imm, temps.Acquire());
+  Register dst_reg = liftoff::CalculateActualAddress(this, temps, dst_addr,
+                                                     offset_reg, offset_imm);
   switch (type.value()) {
     case StoreType::kI64Store8:
     case StoreType::kI32Store8:
@@ -715,7 +754,9 @@ void LiftoffAssembler::AtomicCompareExchange(
     Register dst_addr, Register offset_reg, uintptr_t offset_imm,
     LiftoffRegister expected, LiftoffRegister new_value, LiftoffRegister result,
     StoreType type, bool i64_offset) {
-  LiftoffRegList pinned{dst_addr, offset_reg, expected, new_value, result};
+  LiftoffRegList pinned{dst_addr, expected, new_value, result};
+  if (offset_reg != no_reg) pinned.set(offset_reg);
+
   Register temp0 = pinned.set(GetUnusedRegister(kGpReg, pinned)).gp();
   Register temp1 = pinned.set(GetUnusedRegister(kGpReg, pinned)).gp();
   Register temp2 = pinned.set(GetUnusedRegister(kGpReg, pinned)).gp();

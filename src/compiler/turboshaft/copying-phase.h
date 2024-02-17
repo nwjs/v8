@@ -29,11 +29,12 @@ namespace v8::internal::compiler::turboshaft {
 
 using MaybeVariable = base::Optional<Variable>;
 
-int CountDecimalDigits(uint32_t value);
+V8_EXPORT_PRIVATE int CountDecimalDigits(uint32_t value);
 struct PaddingSpace {
   int spaces;
 };
-std::ostream& operator<<(std::ostream& os, PaddingSpace padding);
+V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os,
+                                           PaddingSpace padding);
 
 template <typename Next>
 class ReducerBaseForwarder;
@@ -55,7 +56,8 @@ class GraphVisitor : public Next {
                     Asm().phase_zone(), &Asm().input_graph()),
         block_mapping_(Asm().input_graph().block_count(), nullptr,
                        Asm().phase_zone()),
-        blocks_needing_variables_(Asm().phase_zone()),
+        blocks_needing_variables_(Asm().input_graph().block_count(),
+                                  Asm().phase_zone()),
         old_opindex_to_variables(Asm().input_graph().op_id_count(),
                                  Asm().phase_zone(), &Asm().input_graph()) {
     Asm().output_graph().Reset();
@@ -129,13 +131,13 @@ class GraphVisitor : public Next {
     // normally, Variables are used when emitting its content, so that
     // they can later be merged when control flow merges with the current
     // version of {input_block} that we just cloned.
-    blocks_needing_variables_.insert(input_block->index());
+    blocks_needing_variables_.Add(input_block->index().id());
 
     ScopedModification<bool> set_true(&current_block_needs_variables_, true);
 
     // Similarly as VisitBlock does, we visit the Phis first, then update all of
     // the Phi mappings at once and visit the rest of the block.
-    base::SmallVector<OpIndex, 16> new_phi_values;
+    base::SmallVector<OpIndex, 64> new_phi_values;
     // Emitting new phis and recording mapping.
     DCHECK_NOT_NULL(Asm().current_block());
     for (OpIndex index : Asm().input_graph().OperationIndices(*input_block)) {
@@ -259,7 +261,7 @@ class GraphVisitor : public Next {
     Asm().Goto(start);
     // Visiting `sub_graph`.
     for (Block* block : sub_graph) {
-      blocks_needing_variables_.insert(block->index());
+      blocks_needing_variables_.Add(block->index().id());
       VisitBlock<false>(block);
     }
 
@@ -308,8 +310,7 @@ class GraphVisitor : public Next {
   void VisitBlock(const Block* input_block) {
     current_input_block_ = input_block;
     current_block_needs_variables_ =
-        blocks_needing_variables_.find(input_block->index()) !=
-        blocks_needing_variables_.end();
+        blocks_needing_variables_.Contains(input_block->index().id());
     if constexpr (trace_reduction) {
       std::cout << "\nold " << PrintAsBlockHeader{*input_block} << "\n";
       std::cout << "new "
@@ -336,7 +337,7 @@ class GraphVisitor : public Next {
       // the other operations will use the new mapping (as they should).
 
       // Visiting Phis and collecting their new OpIndices.
-      base::SmallVector<OpIndex, 16> new_phi_values;
+      base::SmallVector<OpIndex, 64> new_phi_values;
       for (OpIndex index : Asm().input_graph().OperationIndices(*input_block)) {
         DCHECK_NOT_NULL(Asm().current_block());
         if (Asm().input_graph().Get(index).template Is<PhiOp>()) {
@@ -541,7 +542,7 @@ class GraphVisitor : public Next {
     }
 
     base::Vector<const OpIndex> old_inputs = op.inputs();
-    base::SmallVector<OpIndex, 8> new_inputs;
+    base::SmallVector<OpIndex, 64> new_inputs;
     int predecessor_count = Asm().current_block()->PredecessorCount();
     Block* old_pred = current_input_block_->LastPredecessor();
     Block* new_pred = Asm().current_block()->LastPredecessor();
@@ -747,7 +748,8 @@ class GraphVisitor : public Next {
         MapToNewGraph(op.high_word32()), MapToNewGraph(op.low_word32()));
   }
   OpIndex AssembleOutputGraphTaggedBitcast(const TaggedBitcastOp& op) {
-    return Asm().ReduceTaggedBitcast(MapToNewGraph(op.input()), op.from, op.to);
+    return Asm().ReduceTaggedBitcast(MapToNewGraph(op.input()), op.from, op.to,
+                                     op.kind);
   }
   OpIndex AssembleOutputGraphObjectIs(const ObjectIsOp& op) {
     return Asm().ReduceObjectIs(MapToNewGraph(op.input()), op.kind,
@@ -802,7 +804,8 @@ class GraphVisitor : public Next {
   OpIndex AssembleOutputGraphConvertJSPrimitiveToObject(
       const ConvertJSPrimitiveToObjectOp& op) {
     return Asm().ReduceConvertJSPrimitiveToObject(
-        MapToNewGraph(op.value()), MapToNewGraph(op.global_proxy()), op.mode);
+        MapToNewGraph(op.value()), MapToNewGraph(op.native_context()),
+        MapToNewGraph(op.global_proxy()), op.mode);
   }
   OpIndex AssembleOutputGraphSelect(const SelectOp& op) {
     return Asm().ReduceSelect(
@@ -1101,6 +1104,12 @@ class GraphVisitor : public Next {
     return Asm().ReduceFindOrderedHashEntry(MapToNewGraph(op.data_structure()),
                                             MapToNewGraph(op.key()), op.kind);
   }
+  OpIndex AssembleOutputGraphSpeculativeNumberBinop(
+      const SpeculativeNumberBinopOp& op) {
+    return Asm().ReduceSpeculativeNumberBinop(
+        MapToNewGraph(op.left()), MapToNewGraph(op.right()),
+        MapToNewGraph(op.frame_state()), op.kind);
+  }
   OpIndex AssembleOutputGraphWord32PairBinop(const Word32PairBinopOp& op) {
     return Asm().ReduceWord32PairBinop(
         MapToNewGraph(op.left_low()), MapToNewGraph(op.left_high()),
@@ -1175,7 +1184,7 @@ class GraphVisitor : public Next {
 
   OpIndex AssembleOutputGraphArrayGet(const ArrayGetOp& op) {
     return Asm().ReduceArrayGet(MapToNewGraph(op.array()),
-                                MapToNewGraph(op.index()), op.element_type,
+                                MapToNewGraph(op.index()), op.array_type,
                                 op.is_signed);
   }
 
@@ -1272,6 +1281,12 @@ class GraphVisitor : public Next {
     return Asm().ReduceSimd128Shuffle(MapToNewGraph(op.left()),
                                       MapToNewGraph(op.right()), op.shuffle);
   }
+  OpIndex AssembleOutputGraphLoadStackPointer(const LoadStackPointerOp& op) {
+    return Asm().ReduceLoadStackPointer();
+  }
+  OpIndex AssembleOutputGraphSetStackPointer(const SetStackPointerOp& op) {
+    return Asm().ReduceSetStackPointer(MapToNewGraph(op.value()), op.fp_scope);
+  }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
   void CreateOldToNewMapping(OpIndex old_index, OpIndex new_index) {
@@ -1365,7 +1380,7 @@ class GraphVisitor : public Next {
 
   // Set of Blocks for which Variables should be used rather than
   // {op_mapping}.
-  ZoneSet<BlockIndex> blocks_needing_variables_;
+  BitVector blocks_needing_variables_;
 
   // Mapping from old OpIndex to Variables.
   FixedOpIndexSidetable<MaybeVariable> old_opindex_to_variables;
@@ -1377,13 +1392,12 @@ class TSAssembler;
 template <template <class> class... Reducers>
 class CopyingPhaseImpl {
  public:
-  static void Run(Zone* phase_zone) {
-    PipelineData& data = PipelineData::Get();
-    Graph& input_graph = data.graph();
+  static void Run(Graph& input_graph, Zone* phase_zone,
+                  bool trace_reductions = false) {
     TSAssembler<GraphVisitor, Reducers...> phase(
         input_graph, input_graph.GetOrCreateCompanion(), phase_zone);
 #ifdef DEBUG
-    if (data.info()->turboshaft_trace_reduction()) {
+    if (trace_reductions) {
       phase.template VisitGraph<true>();
     } else {
       phase.template VisitGraph<false>();
@@ -1398,7 +1412,10 @@ template <template <typename> typename... Reducers>
 class CopyingPhase {
  public:
   static void Run(Zone* phase_zone) {
-    CopyingPhaseImpl<Reducers...>::Run(phase_zone);
+    PipelineData& data = PipelineData::Get();
+    Graph& input_graph = data.graph();
+    CopyingPhaseImpl<Reducers...>::Run(
+        input_graph, phase_zone, data.info()->turboshaft_trace_reduction());
   }
 };
 

@@ -12,6 +12,7 @@
 #include "src/base/ieee754.h"
 #include "src/base/safe_conversions.h"
 #include "src/common/assert-scope.h"
+#include "src/roots/roots.h"
 #include "src/utils/memcopy.h"
 #include "src/wasm/wasm-objects-inl.h"
 
@@ -431,9 +432,9 @@ class V8_NODISCARD ThreadNotInWasmScope {
 #endif
 };
 
-inline uint8_t* EffectiveAddress(Tagged<WasmInstanceObject> instance,
+inline uint8_t* EffectiveAddress(Tagged<WasmTrustedInstanceData> trusted_data,
                                  uint32_t mem_index, uintptr_t index) {
-  return instance->memory_base(mem_index) + index;
+  return trusted_data->memory_base(mem_index) + index;
 }
 
 template <typename V>
@@ -447,58 +448,58 @@ constexpr int32_t kSuccess = 1;
 constexpr int32_t kOutOfBounds = 0;
 }  // namespace
 
-int32_t memory_init_wrapper(Address instance_addr, uint32_t mem_index,
+int32_t memory_init_wrapper(Address trusted_data_addr, uint32_t mem_index,
                             uintptr_t dst, uint32_t src, uint32_t seg_index,
                             uint32_t size) {
   ThreadNotInWasmScope thread_not_in_wasm_scope;
   DisallowGarbageCollection no_gc;
-  Tagged<WasmInstanceObject> instance =
-      Tagged<WasmInstanceObject>::cast(Tagged<Object>{instance_addr});
+  Tagged<WasmTrustedInstanceData> trusted_data =
+      Tagged<WasmTrustedInstanceData>::cast(Tagged<Object>{trusted_data_addr});
 
-  uint64_t mem_size = instance->memory_size(mem_index);
+  uint64_t mem_size = trusted_data->memory_size(mem_index);
   if (!base::IsInBounds<uint64_t>(dst, size, mem_size)) return kOutOfBounds;
 
-  uint32_t seg_size = instance->data_segment_sizes()->get(seg_index);
+  uint32_t seg_size = trusted_data->data_segment_sizes()->get(seg_index);
   if (!base::IsInBounds<uint32_t>(src, size, seg_size)) return kOutOfBounds;
 
   uint8_t* seg_start = reinterpret_cast<uint8_t*>(
-      instance->data_segment_starts()->get(seg_index));
-  std::memcpy(EffectiveAddress(instance, mem_index, dst), seg_start + src,
+      trusted_data->data_segment_starts()->get(seg_index));
+  std::memcpy(EffectiveAddress(trusted_data, mem_index, dst), seg_start + src,
               size);
   return kSuccess;
 }
 
-int32_t memory_copy_wrapper(Address instance_addr, uint32_t dst_mem_index,
+int32_t memory_copy_wrapper(Address trusted_data_addr, uint32_t dst_mem_index,
                             uint32_t src_mem_index, uintptr_t dst,
                             uintptr_t src, uintptr_t size) {
   ThreadNotInWasmScope thread_not_in_wasm_scope;
   DisallowGarbageCollection no_gc;
-  Tagged<WasmInstanceObject> instance =
-      Tagged<WasmInstanceObject>::cast(Tagged<Object>{instance_addr});
+  Tagged<WasmTrustedInstanceData> trusted_data =
+      Tagged<WasmTrustedInstanceData>::cast(Tagged<Object>{trusted_data_addr});
 
-  uint64_t dst_mem_size = instance->memory_size(dst_mem_index);
-  uint64_t src_mem_size = instance->memory_size(src_mem_index);
+  uint64_t dst_mem_size = trusted_data->memory_size(dst_mem_index);
+  uint64_t src_mem_size = trusted_data->memory_size(src_mem_index);
   if (!base::IsInBounds<uint64_t>(dst, size, dst_mem_size)) return kOutOfBounds;
   if (!base::IsInBounds<uint64_t>(src, size, src_mem_size)) return kOutOfBounds;
 
   // Use std::memmove, because the ranges can overlap.
-  std::memmove(EffectiveAddress(instance, dst_mem_index, dst),
-               EffectiveAddress(instance, src_mem_index, src), size);
+  std::memmove(EffectiveAddress(trusted_data, dst_mem_index, dst),
+               EffectiveAddress(trusted_data, src_mem_index, src), size);
   return kSuccess;
 }
 
-int32_t memory_fill_wrapper(Address instance_addr, uint32_t mem_index,
+int32_t memory_fill_wrapper(Address trusted_data_addr, uint32_t mem_index,
                             uintptr_t dst, uint8_t value, uintptr_t size) {
   ThreadNotInWasmScope thread_not_in_wasm_scope;
   DisallowGarbageCollection no_gc;
 
-  Tagged<WasmInstanceObject> instance =
-      Tagged<WasmInstanceObject>::cast(Tagged<Object>{instance_addr});
+  Tagged<WasmTrustedInstanceData> trusted_data =
+      Tagged<WasmTrustedInstanceData>::cast(Tagged<Object>{trusted_data_addr});
 
-  uint64_t mem_size = instance->memory_size(mem_index);
+  uint64_t mem_size = trusted_data->memory_size(mem_index);
   if (!base::IsInBounds<uint64_t>(dst, size, mem_size)) return kOutOfBounds;
 
-  std::memset(EffectiveAddress(instance, mem_index, dst), value, size);
+  std::memset(EffectiveAddress(trusted_data, mem_index, dst), value, size);
   return kSuccess;
 }
 
@@ -514,9 +515,11 @@ inline void* ArrayElementAddress(Tagged<WasmArray> array, uint32_t index,
 }
 }  // namespace
 
-void array_copy_wrapper(Address raw_instance, Address raw_dst_array,
+void array_copy_wrapper(Address raw_trusted_data, Address raw_dst_array,
                         uint32_t dst_index, Address raw_src_array,
                         uint32_t src_index, uint32_t length) {
+  // TODO(clemensb): Remove the raw_trusted_data argument.
+  USE(raw_trusted_data);
   DCHECK_GT(length, 0);
   ThreadNotInWasmScope thread_not_in_wasm_scope;
   DisallowGarbageCollection no_gc;
@@ -529,17 +532,15 @@ void array_copy_wrapper(Address raw_instance, Address raw_dst_array,
                              : src_index + length > dst_index);
   wasm::ValueType element_type = src_array->type()->element_type();
   if (element_type.is_reference()) {
-    Tagged<WasmInstanceObject> instance =
-        WasmInstanceObject::cast(Tagged<Object>(raw_instance));
-    Isolate* isolate = instance->GetIsolate();
     ObjectSlot dst_slot = dst_array->ElementSlot(dst_index);
     ObjectSlot src_slot = src_array->ElementSlot(src_index);
+    Heap* heap = dst_array->GetIsolate()->heap();
     if (overlapping_ranges) {
-      isolate->heap()->MoveRange(dst_array, dst_slot, src_slot, length,
-                                 UPDATE_WRITE_BARRIER);
+      heap->MoveRange(dst_array, dst_slot, src_slot, length,
+                      UPDATE_WRITE_BARRIER);
     } else {
-      isolate->heap()->CopyRange(dst_array, dst_slot, src_slot, length,
-                                 UPDATE_WRITE_BARRIER);
+      heap->CopyRange(dst_array, dst_slot, src_slot, length,
+                      UPDATE_WRITE_BARRIER);
     }
   } else {
     int element_size_bytes = element_type.value_kind_size();
@@ -697,10 +698,17 @@ void switch_from_the_central_stack(Isolate* isolate) {
   stack_guard->SetStackLimitForStackSwitching(secondary_stack_limit);
 }
 
-intptr_t switch_to_the_central_stack_for_js(Address raw_callable,
+intptr_t switch_to_the_central_stack_for_js(Address raw_receiver,
                                             uintptr_t* stack_limit_slot) {
-  Tagged<JSReceiver> callable = JSReceiver::cast(Tagged<Object>(raw_callable));
-  Isolate* isolate = callable->GetIsolate();
+  Tagged<JSReceiver> receiver = JSReceiver::cast(Tagged<Object>(raw_receiver));
+  Isolate* isolate = receiver->GetIsolate();
+  // Set the suspender's {has_js_frames} field. The suspender contains JS
+  // frames iff it is currently on the central stack.
+  // The wasm-to-js wrapper checks this field when calling a suspending import
+  // and traps if the stack contains JS frames.
+  auto active_suspender =
+      WasmSuspenderObject::cast(isolate->root(RootIndex::kActiveSuspender));
+  active_suspender->set_has_js_frames(1);
   ThreadLocalTop* thread_local_top = isolate->thread_local_top();
   StackGuard* stack_guard = isolate->stack_guard();
   *stack_limit_slot = stack_guard->real_jslimit();
@@ -710,10 +718,14 @@ intptr_t switch_to_the_central_stack_for_js(Address raw_callable,
   return thread_local_top->central_stack_sp_;
 }
 
-void switch_from_the_central_stack_for_js(Address raw_callable,
+void switch_from_the_central_stack_for_js(Address raw_receiver,
                                           uintptr_t stack_limit) {
-  Tagged<JSReceiver> callable = JSReceiver::cast(Tagged<Object>(raw_callable));
-  Isolate* isolate = callable->GetIsolate();
+  Tagged<JSReceiver> receiver = JSReceiver::cast(Tagged<Object>(raw_receiver));
+  Isolate* isolate = receiver->GetIsolate();
+  // The stack only contains wasm frames after this JS call.
+  auto active_suspender =
+      WasmSuspenderObject::cast(isolate->root(RootIndex::kActiveSuspender));
+  active_suspender->set_has_js_frames(0);
   ThreadLocalTop* thread_local_top = isolate->thread_local_top();
   thread_local_top->is_on_central_stack_flag_ = false;
   StackGuard* stack_guard = isolate->stack_guard();

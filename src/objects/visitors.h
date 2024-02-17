@@ -43,6 +43,7 @@ class Code;
   V(kStrongRoots, "(Strong roots)")                            \
   V(kThreadManager, "(Thread manager)")                        \
   V(kTracedHandles, "(Traced handles)")                        \
+  V(kWeakRoots, "(Weak roots)")                                \
   V(kWriteBarrier, "(Write barrier)")
 
 class VisitorSynchronization : public AllStatic {
@@ -191,6 +192,9 @@ class ObjectVisitor {
                                     IndirectPointerSlot slot,
                                     IndirectPointerMode mode) {}
 
+  virtual void VisitProtectedPointer(Tagged<TrustedObject> host,
+                                     ProtectedPointerSlot slot) {}
+
   virtual void VisitTrustedPointerTableEntry(Tagged<HeapObject> host,
                                              IndirectPointerSlot slot) {}
 
@@ -209,7 +213,7 @@ class ObjectVisitorWithCageBases : public ObjectVisitor {
   // The pointer compression cage base value used for decompression of all
   // tagged values except references to InstructionStream objects.
   PtrComprCageBase cage_base() const {
-#if V8_COMPRESS_POINTERS
+#ifdef V8_COMPRESS_POINTERS
     return cage_base_;
 #else
     return PtrComprCageBase{};
@@ -227,7 +231,7 @@ class ObjectVisitorWithCageBases : public ObjectVisitor {
   }
 
  private:
-#if V8_COMPRESS_POINTERS
+#ifdef V8_COMPRESS_POINTERS
   const PtrComprCageBase cage_base_;
 #ifdef V8_EXTERNAL_CODE_SPACE
   const PtrComprCageBase code_cage_base_;
@@ -273,7 +277,7 @@ class ClientRootVisitor final : public RootVisitor {
  private:
   V8_INLINE static bool IsSharedHeapObject(Tagged<Object> object) {
     return IsHeapObject(object) &&
-           HeapObject::cast(object).InWritableSharedSpace();
+           InWritableSharedSpace(HeapObject::cast(object));
   }
 
   Visitor* const actual_visitor_;
@@ -315,7 +319,7 @@ class ClientObjectVisitor final : public ObjectVisitorWithCageBases {
     Tagged<Object> istream_object = slot.load(code_cage_base());
     Tagged<InstructionStream> istream;
     if (istream_object.GetHeapObject(&istream)) {
-      DCHECK(!istream.InWritableSharedSpace());
+      DCHECK(!InWritableSharedSpace(istream));
     }
 #endif
   }
@@ -335,7 +339,7 @@ class ClientObjectVisitor final : public ObjectVisitorWithCageBases {
  private:
   V8_INLINE static bool IsSharedHeapObject(Tagged<Object> object) {
     return IsHeapObject(object) &&
-           HeapObject::cast(object).InWritableSharedSpace();
+           InWritableSharedSpace(HeapObject::cast(object));
   }
 
   Visitor* const actual_visitor_;

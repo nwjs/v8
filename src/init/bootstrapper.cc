@@ -80,6 +80,10 @@
 #include "src/snapshot/snapshot.h"
 #include "src/zone/zone-hashmap.h"
 
+#ifdef V8_FUZZILLI
+#include "src/fuzzilli/fuzzilli.h"
+#endif
+
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/wasm/wasm-js.h"
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -152,6 +156,9 @@ static bool isValidCpuTraceMarkFunctionName() {
 
 void Bootstrapper::InitializeOncePerProcess() {
   v8::RegisterExtension(std::make_unique<GCExtension>(GCFunctionName()));
+#ifdef V8_FUZZILLI
+  v8::RegisterExtension(std::make_unique<FuzzilliExtension>("fuzzilli"));
+#endif
   v8::RegisterExtension(std::make_unique<ExternalizeStringExtension>());
   v8::RegisterExtension(std::make_unique<StatisticsExtension>());
   v8::RegisterExtension(std::make_unique<TriggerFailureExtension>());
@@ -297,7 +304,7 @@ class Genesis {
                                v8::RegisteredExtension* current,
                                ExtensionStates* extension_states);
   static bool InstallSpecialObjects(Isolate* isolate,
-                                    Handle<Context> native_context);
+                                    Handle<NativeContext> native_context);
   bool ConfigureApiObject(Handle<JSObject> object,
                           Handle<ObjectTemplateInfo> object_template);
   bool ConfigureGlobalObject(
@@ -620,7 +627,7 @@ V8_NOINLINE Handle<JSFunction> CreateSharedObjectConstructor(
 
 V8_NOINLINE void SimpleInstallGetterSetter(Isolate* isolate,
                                            Handle<JSObject> base,
-                                           Handle<String> name,
+                                           Handle<Name> name,
                                            Builtin call_getter,
                                            Builtin call_setter) {
   Handle<String> getter_name =
@@ -1428,11 +1435,10 @@ Handle<JSGlobalObject> Genesis::CreateNewGlobals(
   // ConfigureGlobalObject
   factory()->ReinitializeJSGlobalProxy(global_proxy, global_proxy_function);
 
-  // Set the native context for the global object.
-  global_object->set_native_context(*native_context());
+  // Set up the pointer back from the global object to the global proxy.
   global_object->set_global_proxy(*global_proxy);
   // Set the native context of the global proxy.
-  global_proxy->set_native_context(*native_context());
+  global_proxy->map()->set_map(native_context()->meta_map());
   // Set the global proxy of the native context. If the native context has been
   // deserialized, the global proxy is already correctly set up by the
   // deserializer. Otherwise it's undefined.
@@ -1453,7 +1459,7 @@ void Genesis::HookUpGlobalProxy(Handle<JSGlobalProxy> global_proxy) {
   Handle<JSObject> global_object(
       JSObject::cast(native_context()->global_object()), isolate());
   JSObject::ForceSetPrototype(isolate(), global_proxy, global_object);
-  global_proxy->set_native_context(*native_context());
+  global_proxy->map()->set_map(native_context()->meta_map());
   DCHECK(native_context()->global_proxy() == *global_proxy);
 }
 
@@ -5292,6 +5298,7 @@ void Genesis::InitializeConsole(Handle<JSObject> extras_binding) {
 EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(harmony_import_assertions)
 EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(harmony_import_attributes)
 EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(harmony_rab_gsab_transfer)
+EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(js_regexp_modifiers)
 
 #ifdef V8_INTL_SUPPORT
 EMPTY_INITIALIZE_GLOBAL_FOR_FEATURE(harmony_intl_best_fit_matcher)
@@ -5362,14 +5369,16 @@ void Genesis::InitializeGlobal_harmony_iterator_helpers() {
   SimpleInstallFunction(isolate(), iterator_prototype, "find",
                         Builtin::kIteratorPrototypeFind, 1, true);
 
-  // Add @@toStringTag to Iterator.prototype
-  // https://tc39.es/proposal-iterator-helpers/#sec-iteratorprototype-@@tostringtag
-  // We cannot use `InstallToStringTag` because this toStringTag, unlike other
-  // toStringTag values, is writable.
-  JSObject::AddProperty(isolate(), iterator_prototype,
-                        isolate()->factory()->to_string_tag_symbol(),
-                        isolate()->factory()->InternalizeUtf8String("Iterator"),
-                        static_cast<PropertyAttributes>(DONT_ENUM));
+  // https://github.com/tc39/proposal-iterator-helpers/pull/287
+  SimpleInstallGetterSetter(isolate(), iterator_prototype,
+                            isolate()->factory()->to_string_tag_symbol(),
+                            Builtin::kIteratorPrototypeGetToStringTag,
+                            Builtin::kIteratorPrototypeSetToStringTag);
+
+  SimpleInstallGetterSetter(isolate(), iterator_prototype,
+                            isolate()->factory()->constructor_string(),
+                            Builtin::kIteratorPrototypeGetConstructor,
+                            Builtin::kIteratorPrototypeSetConstructor);
 
   // --- Helper maps
 #define INSTALL_ITERATOR_HELPER(lowercase_name, Capitalized_name,              \
@@ -5437,6 +5446,11 @@ void Genesis::InitializeGlobal_harmony_set_methods() {
                         Builtin::kSetPrototypeIsSupersetOf, 1, true);
   SimpleInstallFunction(isolate(), set_prototype, "isDisjointFrom",
                         Builtin::kSetPrototypeIsDisjointFrom, 1, true);
+
+  // The fast path in the Set constructor builtin checks for Set.prototype
+  // having been modified from its initial state. So, after adding new methods,
+  // we should reset the Set.prototype initial map.
+  native_context()->set_initial_set_prototype_map(set_prototype->map());
 }
 
 void Genesis::InitializeGlobal_harmony_json_parse_with_source() {
@@ -6376,18 +6390,18 @@ void Genesis::InitializeMapCaches() {
   }
 }
 
-bool Bootstrapper::InstallExtensions(Handle<Context> native_context,
+bool Bootstrapper::InstallExtensions(Handle<NativeContext> native_context,
                                      v8::ExtensionConfiguration* extensions) {
   // Don't install extensions into the snapshot.
   if (isolate_->serializer_enabled()) return true;
   BootstrapperActive active(this);
-  SaveAndSwitchContext saved_context(isolate_, *native_context);
+  v8::Context::Scope context_scope(Utils::ToLocal(native_context));
   return Genesis::InstallExtensions(isolate_, native_context, extensions) &&
          Genesis::InstallSpecialObjects(isolate_, native_context);
 }
 
 bool Genesis::InstallSpecialObjects(Isolate* isolate,
-                                    Handle<Context> native_context) {
+                                    Handle<NativeContext> native_context) {
   HandleScope scope(isolate);
 
   // Error.stackTraceLimit.
@@ -6453,6 +6467,9 @@ bool Genesis::InstallExtensions(Isolate* isolate,
                            &extension_states)) &&
          (!isValidCpuTraceMarkFunctionName() ||
           InstallExtension(isolate, "v8/cpumark", &extension_states)) &&
+#ifdef V8_FUZZILLI
+         InstallExtension(isolate, "v8/fuzzilli", &extension_states) &&
+#endif
 #ifdef ENABLE_VTUNE_TRACEMARK
          (!v8_flags.enable_vtune_domain_support ||
           InstallExtension(isolate, "v8/vtunedomain", &extension_states)) &&
@@ -6842,7 +6859,7 @@ Genesis::Genesis(
       // The global proxy needs to be integrated into the native context.
       HookUpGlobalProxy(global_proxy);
     }
-    DCHECK_EQ(global_proxy->native_context(), *native_context());
+    DCHECK_EQ(global_proxy->GetCreationContext(), *native_context());
     DCHECK(!global_proxy->IsDetachedFrom(native_context()->global_object()));
   } else {
     DCHECK(native_context().is_null());
@@ -6933,7 +6950,9 @@ Genesis::Genesis(Isolate* isolate,
       global_proxy_template->InternalFieldCount());
 
   Handle<JSGlobalProxy> global_proxy;
-  if (!maybe_global_proxy.ToHandle(&global_proxy)) {
+  if (maybe_global_proxy.ToHandle(&global_proxy)) {
+    global_proxy->map()->set_map(ReadOnlyRoots(isolate).meta_map());
+  } else {
     global_proxy = factory()->NewUninitializedJSGlobalProxy(proxy_size);
   }
 
@@ -6957,9 +6976,6 @@ Genesis::Genesis(Isolate* isolate,
       JS_GLOBAL_PROXY_TYPE, proxy_size, TERMINAL_FAST_ELEMENTS_KIND);
   global_proxy_map->set_is_access_check_needed(true);
   global_proxy_map->set_may_have_interesting_properties(true);
-
-  // A remote global proxy has no native context.
-  global_proxy->set_native_context(ReadOnlyRoots(heap()).null_value());
 
   // Configure the hidden prototype chain of the global proxy.
   JSObject::ForceSetPrototype(isolate, global_proxy, global_object);

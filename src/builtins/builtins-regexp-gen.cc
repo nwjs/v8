@@ -8,8 +8,7 @@
 #include "src/builtins/builtins-utils-gen.h"
 #include "src/builtins/builtins.h"
 #include "src/builtins/growable-fixed-array-gen.h"
-#include "src/codegen/code-factory.h"
-#include "src/codegen/code-stub-assembler.h"
+#include "src/codegen/code-stub-assembler-inl.h"
 #include "src/codegen/macro-assembler.h"
 #include "src/common/globals.h"
 #include "src/execution/protectors.h"
@@ -575,6 +574,10 @@ TNode<HeapObject> RegExpBuiltinsAssembler::RegExpExecInternal(
     MachineType arg8_type = type_tagged;
     TNode<JSRegExp> arg8 = regexp;
 
+    // TODO(saelo): if we refactor RegExp objects to contain a code pointer
+    // instead of referencing the CodeWrapper object, we could directly load
+    // the entrypoint from that via LoadCodeEntrypointViaCodePointerField. This
+    // will save an indirection when the sandbox is enabled.
     TNode<RawPtrT> code_entry = LoadCodeInstructionStart(code);
 
     // AIX uses function descriptors on CFunction calls. code_entry in this case
@@ -1055,10 +1058,12 @@ TNode<String> RegExpBuiltinsAssembler::FlagsGetter(TNode<Context> context,
   // corresponding char for each set flag.
 
   {
-    const TNode<String> string = AllocateSeqOneByteString(var_length.value());
+    const TNode<SeqOneByteString> string =
+        CAST(AllocateSeqOneByteString(var_length.value()));
 
     TVARIABLE(IntPtrT, var_offset,
-              IntPtrConstant(SeqOneByteString::kHeaderSize - kHeapObjectTag));
+              IntPtrSub(FieldSliceSeqOneByteStringChars(string).offset,
+                        IntPtrConstant(1)));
 
 #define CASE_FOR_FLAG(Lower, Camel, LowerCamel, Char, ...)              \
   do {                                                                  \

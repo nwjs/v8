@@ -27,12 +27,6 @@
  * PREPARE_FOR_DEBUG_INTERFACE_EXECUTION_WITH_ISOLATE
  *
  * in a similar fashion to ENTER_V8.
- *
- * Don't use macros with DO_NOT_USE in their name.
- *
- * TODO(cbruni): Document LOG_API and other RuntimeCallStats macros.
- * TODO(verwaest): All API methods should invoke one of the ENTER_V8* macros.
- * TODO(verwaest): Remove calls form API methods to DO_NOT_USE macros.
  */
 
 #define API_RCS_SCOPE(i_isolate, class_name, function_name) \
@@ -54,16 +48,17 @@
   i::VMState<v8::OTHER> __state__((i_isolate));                                \
   bool has_exception = false
 
-#define PREPARE_FOR_DEBUG_INTERFACE_EXECUTION_WITH_ISOLATE(i_isolate, T)       \
+#define PREPARE_FOR_DEBUG_INTERFACE_EXECUTION_WITH_ISOLATE(i_isolate, context, \
+                                                           T)                  \
   DCHECK(!i_isolate->is_execution_terminating());                              \
   InternalEscapableScope handle_scope(i_isolate);                              \
-  CallDepthScope<false> call_depth_scope(i_isolate, v8::Local<v8::Context>()); \
+  CallDepthScope<false> call_depth_scope(i_isolate, context);                  \
   i::VMState<v8::OTHER> __state__((i_isolate));                                \
   bool has_exception = false
 
 #define PREPARE_FOR_EXECUTION(context, class_name, function_name)         \
   auto i_isolate = reinterpret_cast<i::Isolate*>(context->GetIsolate());  \
-  i_isolate->clear_exception();                                           \
+  i_isolate->clear_internal_exception();                                  \
   ENTER_V8_HELPER_INTERNAL(i_isolate, context, class_name, function_name, \
                            InternalEscapableScope, false);
 
@@ -108,13 +103,10 @@
   i::VMState<v8::OTHER> __state__((i_isolate));
 #endif  // DEBUG
 
-#define EXCEPTION_BAILOUT_CHECK_SCOPED_DO_NOT_USE(i_isolate, value) \
-  if (has_exception) return value;
-
 #define RETURN_ON_FAILED_EXECUTION(T) \
-  EXCEPTION_BAILOUT_CHECK_SCOPED_DO_NOT_USE(i_isolate, MaybeLocal<T>())
+  if (has_exception) return MaybeLocal<T>();
 
 #define RETURN_ON_FAILED_EXECUTION_PRIMITIVE(T) \
-  EXCEPTION_BAILOUT_CHECK_SCOPED_DO_NOT_USE(i_isolate, Nothing<T>())
+  if (has_exception) return Nothing<T>();
 
 #define RETURN_ESCAPED(value) return handle_scope.Escape(value);

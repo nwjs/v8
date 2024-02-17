@@ -29,7 +29,7 @@ V8_INLINE void InitSelfIndirectPointerField(Address field_address,
     CodePointerTable::Space* space =
         isolate.GetCodePointerTableSpaceFor(field_address);
     handle = GetProcessWideCodePointerTable()->AllocateAndInitializeEntry(
-        space, host.address(), kNullAddress);
+        space, host.address(), kNullAddress, kDefaultCodeEntrypointTag);
   } else {
     TrustedPointerTable::Space* space = isolate.GetTrustedPointerTableSpace();
     handle = isolate.GetTrustedPointerTable().AllocateAndInitializeEntry(
@@ -104,7 +104,7 @@ V8_INLINE void WriteIndirectPointerField(Address field_address,
                                          Tagged<ExposedTrustedObject> value) {
 #ifdef V8_ENABLE_SANDBOX
   static_assert(tag != kIndirectPointerNullTag);
-  IndirectPointerHandle handle = value->self_indirect_pointer();
+  IndirectPointerHandle handle = value->self_indirect_pointer_handle();
   DCHECK_NE(handle, kNullIndirectPointerHandle);
   auto location = reinterpret_cast<IndirectPointerHandle*>(field_address);
   base::AsAtomic32::Release_Store(location, handle);

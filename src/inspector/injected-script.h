@@ -158,7 +158,8 @@ class InjectedScript final {
     void ignoreExceptionsAndMuteConsole();
     void pretendUserGesture();
     void allowCodeGenerationFromStrings();
-    v8::Local<v8::Context> context() const { return m_context.Get(m_isolate); }
+    void setTryCatchVerbose();
+    v8::Local<v8::Context> context() const { return m_context; }
     InjectedScript* injectedScript() const { return m_injectedScript; }
     const v8::TryCatch& tryCatch() const { return m_tryCatch; }
     V8InspectorImpl* inspector() const { return m_inspector; }
@@ -170,7 +171,6 @@ class InjectedScript final {
 
     V8InspectorImpl* m_inspector;
     InjectedScript* m_injectedScript;
-    v8::Isolate* m_isolate;
 
    private:
     void cleanup();
@@ -179,9 +179,7 @@ class InjectedScript final {
 
     v8::HandleScope m_handleScope;
     v8::TryCatch m_tryCatch;
-    // TODO(crbug.com/1505767): Turn this into a v8::Local after we no longer
-    //     dynamically allocate CommandLineAPI scopes via inspector API.
-    v8::Global<v8::Context> m_context;
+    v8::Local<v8::Context> m_context;
     std::unique_ptr<V8Console::CommandLineAPIScope> m_commandLineAPIScope;
     bool m_ignoreExceptionsAndMuteConsole;
     v8::debug::ExceptionBreakState m_previousPauseOnExceptionsState;
@@ -191,8 +189,7 @@ class InjectedScript final {
     int m_sessionId;
   };
 
-  class ContextScope : public Scope,
-                       public V8InspectorSession::CommandLineAPIScope {
+  class ContextScope : public Scope {
    public:
     ContextScope(V8InspectorSessionImpl*, int executionContextId);
     ~ContextScope() override;

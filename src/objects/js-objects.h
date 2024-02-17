@@ -6,6 +6,7 @@
 #define V8_OBJECTS_JS_OBJECTS_H_
 
 #include "src/base/optional.h"
+#include "src/common/globals.h"
 #include "src/handles/handles.h"
 #include "src/objects/embedder-data-slot.h"
 // TODO(jkummerow): Consider forward-declaring instead.
@@ -876,6 +877,8 @@ class JSObject : public TorqueGeneratedJSObject<JSObject, JSReceiver> {
   static const int kInitialGlobalObjectUnusedPropertiesCount = 4;
 
   static const int kMaxInstanceSize = 255 * kTaggedSize;
+  // kMaxInstanceSize in words must fit in one byte.
+  static_assert((kMaxInstanceSize >> kTaggedSizeLog2) <= kMaxUInt8);
 
   static const int kMapCacheSize = 128;
 
@@ -1093,7 +1096,7 @@ class JSGlobalProxy
     : public TorqueGeneratedJSGlobalProxy<JSGlobalProxy, JSSpecialObject> {
  public:
   inline bool IsDetachedFrom(Tagged<JSGlobalObject> global) const;
-  V8_EXPORT_PRIVATE bool IsDetached() const;
+  V8_EXPORT_PRIVATE bool IsDetached();
 
   static int SizeWithEmbedderFields(int embedder_field_count);
 
@@ -1114,10 +1117,7 @@ class JSGlobalObject
                                      Handle<Name> name);
 
   inline bool IsDetached();
-
-  // May be called by the concurrent GC when the global object is not
-  // fully initialized.
-  DECL_GETTER(native_context_unchecked, Tagged<Object>)
+  inline Tagged<NativeContext> native_context();
 
   // Dispatched behavior.
   DECL_PRINTER(JSGlobalObject)

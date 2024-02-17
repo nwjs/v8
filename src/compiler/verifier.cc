@@ -380,6 +380,7 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
     case IrOpcode::kPlug:
     case IrOpcode::kTrapIf:
     case IrOpcode::kTrapUnless:
+    case IrOpcode::kAssert:
       CheckNotTyped(node);
       break;
     case IrOpcode::kDeoptimize:
@@ -1538,6 +1539,7 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
     case IrOpcode::kConvertReceiver:
       CheckValueInputIs(node, 0, Type::Any());
       CheckValueInputIs(node, 1, Type::Any());
+      CheckValueInputIs(node, 2, Type::Any());
       CheckTypeIs(node, Type::Receiver());
       break;
 

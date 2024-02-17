@@ -254,7 +254,7 @@ V8ConsoleMessage::wrapArguments(V8InspectorSessionImpl* session,
   V8InspectorImpl* inspector = session->inspector();
   int contextGroupId = session->contextGroupId();
   int contextId = m_contextId;
-  if (!m_arguments.size() || !contextId) return nullptr;
+  if (m_arguments.empty() || !contextId) return nullptr;
   InspectedContext* inspectedContext =
       inspector->getContext(contextGroupId, contextId);
   if (!inspectedContext) return nullptr;
@@ -313,6 +313,8 @@ void V8ConsoleMessage::reportToFrontend(protocol::Runtime::Frontend* frontend,
                                         bool generatePreview) const {
   int contextGroupId = session->contextGroupId();
   V8InspectorImpl* inspector = session->inspector();
+  // Protect against reentrant debugger calls via interrupts.
+  v8::debug::PostponeInterruptsScope no_interrupts(inspector->isolate());
 
   if (m_origin == V8MessageOrigin::kException) {
     std::unique_ptr<protocol::Runtime::RemoteObject> exception =
@@ -389,7 +391,7 @@ void V8ConsoleMessage::reportToFrontend(protocol::Runtime::Frontend* frontend,
 std::unique_ptr<protocol::DictionaryValue>
 V8ConsoleMessage::getAssociatedExceptionData(
     V8InspectorImpl* inspector, V8InspectorSessionImpl* session) const {
-  if (!m_arguments.size() || !m_contextId) return nullptr;
+  if (m_arguments.empty() || !m_contextId) return nullptr;
   DCHECK_EQ(1u, m_arguments.size());
 
   v8::Isolate* isolate = inspector->isolate();
@@ -404,7 +406,7 @@ V8ConsoleMessage::getAssociatedExceptionData(
 std::unique_ptr<protocol::Runtime::RemoteObject>
 V8ConsoleMessage::wrapException(V8InspectorSessionImpl* session,
                                 bool generatePreview) const {
-  if (!m_arguments.size() || !m_contextId) return nullptr;
+  if (m_arguments.empty() || !m_contextId) return nullptr;
   DCHECK_EQ(1u, m_arguments.size());
   InspectedContext* inspectedContext =
       session->inspector()->getContext(session->contextGroupId(), m_contextId);

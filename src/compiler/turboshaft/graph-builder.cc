@@ -37,6 +37,7 @@
 #include "src/compiler/turboshaft/operations.h"
 #include "src/compiler/turboshaft/phase.h"
 #include "src/compiler/turboshaft/representations.h"
+#include "src/flags/flags.h"
 #include "src/heap/factory-inl.h"
 #include "src/objects/map.h"
 #include "src/zone/zone-containers.h"
@@ -158,7 +159,18 @@ struct GraphBuilder {
               ReadOnlyRoots(isolate->heap()).optimized_out()) {
         // Nothing to do in this case.
       } else {
-        ProcessDeoptInput(builder, stack, MachineType::AnyTagged());
+        const Operation& accumulator_op = __ output_graph().Get(Map(stack));
+        const RegisterRepresentation accumulator_rep =
+            accumulator_op.outputs_rep()[0];
+        MachineType type;
+        switch (accumulator_rep.value()) {
+          case RegisterRepresentation::Tagged():
+            type = MachineType::AnyTagged();
+            break;
+          default:
+            UNIMPLEMENTED();
+        }
+        ProcessDeoptInput(builder, stack, type);
       }
     } else {
       ProcessStateValues(builder, stack);
@@ -319,6 +331,7 @@ V<Word32> GraphBuilder::BuildUint32Mod(V<Word32> lhs, V<Word32> rhs) {
     // The {rhs} is not a power of two, do a generic Uint32Mod.
     GOTO(done, __ Uint32Mod(lhs, rhs));
   }
+  END_IF
 
   BIND(done, result);
   return result;
@@ -672,13 +685,9 @@ OpIndex GraphBuilder::Process(
       return __ BitcastWord32PairToFloat64(high, low);
     }
     case IrOpcode::kBitcastTaggedToWord:
-      return __ TaggedBitcast(Map(node->InputAt(0)),
-                              RegisterRepresentation::Tagged(),
-                              RegisterRepresentation::PointerSized());
+      return __ BitcastTaggedToWordPtr(Map(node->InputAt(0)));
     case IrOpcode::kBitcastWordToTagged:
-      return __ TaggedBitcast(Map(node->InputAt(0)),
-                              RegisterRepresentation::PointerSized(),
-                              RegisterRepresentation::Tagged());
+      return __ BitcastWordPtrToTagged(Map(node->InputAt(0)));
     case IrOpcode::kNumberIsFinite:
       return __ FloatIs(Map(node->InputAt(0)), NumericKind::kFinite,
                         FloatRepresentation::Float64());
@@ -788,9 +797,9 @@ OpIndex GraphBuilder::Process(
     }
 
     case IrOpcode::kConvertReceiver:
-      return __ ConvertJSPrimitiveToObject(Map(node->InputAt(0)),
-                                           Map(node->InputAt(1)),
-                                           ConvertReceiverModeOf(node->op()));
+      return __ ConvertJSPrimitiveToObject(
+          Map(node->InputAt(0)), Map(node->InputAt(1)), Map(node->InputAt(2)),
+          ConvertReceiverModeOf(node->op()));
 
     case IrOpcode::kToBoolean:
       return __ ConvertToBoolean(Map(node->InputAt(0)));
@@ -1109,7 +1118,7 @@ OpIndex GraphBuilder::Process(
         // builtins. We should fix them and remove this.
         if (__ output_graph().Get(base).outputs_rep()[0] ==
             RegisterRepresentation::Tagged()) {
-          base = __ BitcastTaggedToWord(base);
+          base = __ BitcastTaggedToWordPtr(base);
         }
       }
       bool aligned = opcode != IrOpcode::kUnalignedStore;
@@ -1229,15 +1238,17 @@ OpIndex GraphBuilder::Process(
         Block* catch_block = Map(block->SuccessorAt(1));
         catch_scope.emplace(assembler, catch_block);
       }
-      OpEffects effects = OpEffects().CanCallAnything();
-      // TODO(nicohartmann@): Disabling `can_allocate` effect is currently
-      // broken and causes crashes. We think there is a builtin that has the
-      // `CallDescriptor::kNoAllocate` flag set incorrectly. See:
-      // https://crbug.com/1489500
-      //
-      // if ((call_descriptor->flags() & CallDescriptor::kNoAllocate) != 0) {
-      //   effects.can_allocate = false;
-      // }
+      OpEffects effects =
+          OpEffects().CanDependOnChecks().CanChangeControlFlow().CanDeopt();
+      if ((call_descriptor->flags() & CallDescriptor::kNoAllocate) == 0) {
+        effects = effects.CanAllocate();
+      }
+      if (!op->HasProperty(Operator::kNoWrite)) {
+        effects = effects.CanWriteMemory();
+      }
+      if (!op->HasProperty(Operator::kNoRead)) {
+        effects = effects.CanReadMemory();
+      }
       OpIndex result =
           __ Call(callee, frame_state_idx, base::VectorOf(arguments),
                   ts_descriptor, effects);
@@ -1350,6 +1361,13 @@ OpIndex GraphBuilder::Process(
     }
 
     case IrOpcode::kStaticAssert: {
+      if (V8_UNLIKELY(PipelineData::Get().pipeline_kind() ==
+                      TurboshaftPipelineKind::kCSA)) {
+        // TODO(nicohartmann@): CSA code contains some static asserts (even in
+        // release builds) that we cannot prove currently, so we skip them here
+        // for now.
+        return OpIndex::Invalid();
+      }
       __ StaticAssert(Map(node->InputAt(0)), StaticAssertSourceOf(node->op()));
       return OpIndex::Invalid();
     }
@@ -2185,6 +2203,12 @@ OpIndex GraphBuilder::Process(
       return __ FindOrderedHashMapEntryForInt32Key(Map(node->InputAt(0)),
                                                    Map(node->InputAt(1)));
 
+    case IrOpcode::kSpeculativeSafeIntegerAdd:
+      DCHECK(dominating_frame_state.valid());
+      return __ SpeculativeNumberBinop(
+          Map(node->InputAt(0)), Map(node->InputAt(1)), dominating_frame_state,
+          SpeculativeNumberBinopOp::Kind::kSafeIntegerAdd);
+
     case IrOpcode::kBeginRegion:
       inside_region = true;
       return OpIndex::Invalid();
@@ -2207,18 +2231,21 @@ OpIndex GraphBuilder::Process(
       __ Comment(OpParameter<const char*>(node->op()));
       return OpIndex::Invalid();
 
+    case IrOpcode::kAssert: {
+      const AssertParameters& p = AssertParametersOf(node->op());
+      __ AssertImpl(Map(node->InputAt(0)), p.condition_string(), p.file(),
+                    p.line());
+      return OpIndex::Invalid();
+    }
+
     case IrOpcode::kBitcastTaggedToWordForTagAndSmiBits:
       // TODO(nicohartmann@): We might want a dedicated operation/kind for that
       // as well.
       DCHECK_EQ(PipelineData::Get().pipeline_kind(),
                 TurboshaftPipelineKind::kCSA);
-      return __ TaggedBitcast(Map(node->InputAt(0)),
-                              RegisterRepresentation::Tagged(),
-                              RegisterRepresentation::PointerSized());
+      return __ BitcastTaggedToWordPtr(Map(node->InputAt(0)));
     case IrOpcode::kBitcastWordToTaggedSigned:
-      return __ TaggedBitcast(Map(node->InputAt(0)),
-                              RegisterRepresentation::PointerSized(),
-                              RegisterRepresentation::Tagged());
+      return __ BitcastWordPtrToSmi(Map(node->InputAt(0)));
 
     case IrOpcode::kWord32AtomicLoad:
     case IrOpcode::kWord64AtomicLoad: {
@@ -2431,6 +2458,15 @@ OpIndex GraphBuilder::Process(
       SIMD128_REPLACE_LANE(F32x4)
       SIMD128_REPLACE_LANE(F64x2)
 #undef SIMD128_REPLACE_LANE
+
+    case IrOpcode::kLoadStackPointer:
+      return __ LoadStackPointer();
+
+    case IrOpcode::kSetStackPointer:
+      __ SetStackPointer(Map(node->InputAt(0)),
+                         OpParameter<wasm::FPRelativeScope>(node->op()));
+      return OpIndex::Invalid();
+
 #endif  // V8_ENABLE_WEBASSEMBLY
 
     case IrOpcode::kJSStackCheck: {

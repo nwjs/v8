@@ -25,7 +25,7 @@ class LoadStoreSimplificationReducer : public Next {
   // Turboshaft's loads and stores follow the pattern of
   // *(base + index * element_size_log2 + displacement), but architectures
   // typically support only a limited `element_size_log2`.
-#if V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_RISCV64 || \
+#if V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_RISCV64 || \
     V8_TARGET_ARCH_LOONG64 || V8_TARGET_ARCH_MIPS64
   static constexpr int kMaxElementSizeLog2 = 0;
 #else
@@ -54,6 +54,28 @@ class LoadStoreSimplificationReducer : public Next {
                              maybe_indirect_pointer_tag);
   }
 
+  OpIndex REDUCE(AtomicWord32Pair)(V<WordPtr> base, OptionalV<WordPtr> index,
+                                   OptionalV<Word32> value_low,
+                                   OptionalV<Word32> value_high,
+                                   OptionalV<Word32> expected_low,
+                                   OptionalV<Word32> expected_high,
+                                   AtomicWord32PairOp::Kind kind,
+                                   int32_t offset) {
+    if (kind == AtomicWord32PairOp::Kind::kStore ||
+        kind == AtomicWord32PairOp::Kind::kLoad) {
+      if (!index.valid()) {
+        index = __ IntPtrConstant(offset);
+        offset = 0;
+      } else if (offset != 0) {
+        index = __ WordPtrAdd(index.value(), offset);
+        offset = 0;
+      }
+    }
+    return Next::ReduceAtomicWord32Pair(base, index, value_low, value_high,
+                                        expected_low, expected_high, kind,
+                                        offset);
+  }
+
  private:
   void SimplifyLoadStore(OpIndex& base, OptionalOpIndex& index,
                          LoadOp::Kind& kind, int32_t& offset,
@@ -67,7 +89,7 @@ class LoadStoreSimplificationReducer : public Next {
 
       // TODO(12783): This needs to be extended for all architectures that don't
       // have loads with the base + index * element_size + offset pattern.
-#if V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_RISCV64 || \
+#if V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_RISCV64 || \
     V8_TARGET_ARCH_LOONG64 || V8_TARGET_ARCH_MIPS64
       // If an index is present, the element_size_log2 is changed to zero
       // (above). So any load follows the form *(base + offset). To simplify
@@ -79,7 +101,7 @@ class LoadStoreSimplificationReducer : public Next {
       if (kind.tagged_base) {
         kind.tagged_base = false;
         offset -= kHeapObjectTag;
-        base = __ BitcastTaggedToWord(base);
+        base = __ BitcastHeapObjectToWordPtr(base);
       }
 
       DCHECK_EQ(element_size_log2, 0);
@@ -96,6 +118,17 @@ class LoadStoreSimplificationReducer : public Next {
       // as that is encoded by the MemoryRepresentation, it only specifies a
       // factor as a power of 2 to multiply the index with.
       DCHECK_IMPLIES(index.has_value(), element_size_log2 == 0);
+#elif V8_TARGET_ARCH_X64
+      if (kind.is_atomic && index.valid() && offset != 0) {
+        // Atomic stores/loads should not have both an index and an offset. We
+        // fold the offset into the index when this happens.
+        if (element_size_log2 != 0) {
+          index = __ WordPtrShiftLeft(index.value(), element_size_log2);
+          element_size_log2 = 0;
+        }
+        index = __ WordPtrAdd(index.value(), offset);
+        offset = 0;
+      }
 #endif
     }
   }
@@ -103,7 +136,8 @@ class LoadStoreSimplificationReducer : public Next {
   bool is_wasm_ = PipelineData::Get().is_wasm();
   // TODO(12783): Remove this flag once the Turbofan instruction selection has
   // been replaced.
-#if V8_TARGET_ARCH_X64
+#if V8_TARGET_ARCH_X64 or V8_TARGET_ARCH_ARM64 or V8_TARGET_ARCH_ARM or \
+    V8_TARGET_ARCH_IA32
   bool lowering_enabled_ =
       (is_wasm_ && v8_flags.turboshaft_wasm_instruction_selection_staged) ||
       (!is_wasm_ && v8_flags.turboshaft_instruction_selection);

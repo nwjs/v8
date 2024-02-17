@@ -108,6 +108,10 @@ void MacroAssembler::LoadRootRelative(Register destination, int32_t offset) {
   ldr(destination, MemOperand(kRootRegister, offset));
 }
 
+void MacroAssembler::StoreRootRelative(int32_t offset, Register value) {
+  str(value, MemOperand(kRootRegister, offset));
+}
+
 void MacroAssembler::LoadRootRegisterOffset(Register destination,
                                             intptr_t offset) {
   if (offset == 0) {
@@ -144,6 +148,27 @@ MemOperand MacroAssembler::ExternalReferenceAsOperand(
   }
   Move(scratch, reference);
   return MemOperand(scratch, 0);
+}
+
+void MacroAssembler::GetLabelAddress(Register dest, Label* target) {
+  // This should be just a
+  //    add(dest, pc, branch_offset(target));
+  // but current implementation of Assembler::bind_to()/target_at_put() add
+  // (InstructionStream::kHeaderSize - kHeapObjectTag) to a position of a label
+  // in a "linked" state and thus making it usable only for mov_label_offset().
+  // TODO(ishell): fix branch_offset() and re-implement
+  // RegExpMacroAssemblerARM::PushBacktrack() without mov_label_offset().
+  mov_label_offset(dest, target);
+  // mov_label_offset computes offset of the |target| relative to the "current
+  // InstructionStream object pointer" which is essentally pc_offset() of the
+  // label added with (InstructionStream::kHeaderSize - kHeapObjectTag).
+  // Compute "current InstructionStream object pointer" and add it to the
+  // offset in |lr| register.
+  int current_instr_code_object_relative_offset =
+      pc_offset() + Instruction::kPcLoadDelta +
+      (InstructionStream::kHeaderSize - kHeapObjectTag);
+  add(dest, pc, dest);
+  sub(dest, dest, Operand(current_instr_code_object_relative_offset));
 }
 
 void MacroAssembler::Jump(Register target, Condition cond) { bx(target, cond); }
@@ -397,6 +422,15 @@ void MacroAssembler::Drop(int count, Condition cond) {
 
 void MacroAssembler::Drop(Register count, Condition cond) {
   add(sp, sp, Operand(count, LSL, kPointerSizeLog2), LeaveCC, cond);
+}
+
+// Enforce alignment of sp.
+void MacroAssembler::EnforceStackAlignment() {
+  int frame_alignment = ActivationFrameAlignment();
+  DCHECK(base::bits::IsPowerOfTwo(frame_alignment));
+
+  uint32_t frame_alignment_mask = ~(static_cast<uint32_t>(frame_alignment) - 1);
+  and_(sp, sp, Operand(frame_alignment_mask));
 }
 
 void MacroAssembler::TestCodeIsMarkedForDeoptimization(Register code,
@@ -682,6 +716,24 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
               save_fp, SmiCheck::kOmit);
 
   bind(&done);
+}
+
+void MacroAssembler::Zero(const MemOperand& dest) {
+  ASM_CODE_COMMENT(this);
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.Acquire();
+
+  mov(scratch, Operand::Zero());
+  str(scratch, dest);
+}
+void MacroAssembler::Zero(const MemOperand& dest1, const MemOperand& dest2) {
+  ASM_CODE_COMMENT(this);
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.Acquire();
+
+  mov(scratch, Operand::Zero());
+  str(scratch, dest1);
+  str(scratch, dest2);
 }
 
 void MacroAssembler::MaybeSaveRegisters(RegList registers) {
@@ -1465,12 +1517,8 @@ void MacroAssembler::EnterExitFrame(int stack_space,
 
   // Reserve place for the return address and stack space and align the frame
   // preparing for calling the runtime function.
-  const int frame_alignment = MacroAssembler::ActivationFrameAlignment();
   AllocateStackSpace((stack_space + 1) * kPointerSize);
-  if (frame_alignment > 0) {
-    DCHECK(base::bits::IsPowerOfTwo(frame_alignment));
-    and_(sp, sp, Operand(-frame_alignment));
-  }
+  EnforceStackAlignment();
 
   // Set the exit frame sp value to point just before the return address
   // location.
@@ -1923,6 +1971,10 @@ void TailCallOptimizedCodeSlot(MacroAssembler* masm,
   __ LoadWeakValue(optimized_code_entry, optimized_code_entry,
                    &heal_optimized_code_slot);
 
+  // The entry references a CodeWrapper object. Unwrap it now.
+  __ ldr(optimized_code_entry,
+         FieldMemOperand(optimized_code_entry, CodeWrapper::kCodeOffset));
+
   // Check if the optimized code is marked for deopt. If it is, call the
   // runtime to clear it.
   {
@@ -2069,8 +2121,7 @@ void MacroAssembler::CallRuntime(const Runtime::Function* f,
   // smarter.
   mov(r0, Operand(num_arguments));
   Move(r1, ExternalReference::Create(f));
-  Handle<Code> code = CodeFactory::CEntry(isolate(), f->result_size);
-  Call(code, RelocInfo::CODE_TARGET);
+  CallBuiltin(Builtins::RuntimeCEntry(f->result_size));
 }
 
 void MacroAssembler::TailCallRuntime(Runtime::FunctionId fid) {
@@ -2094,9 +2145,7 @@ void MacroAssembler::JumpToExternalReference(const ExternalReference& builtin,
   DCHECK_EQ(builtin.address() & 1, 1);
 #endif
   Move(r1, builtin);
-  Handle<Code> code =
-      CodeFactory::CEntry(isolate(), 1, ArgvMode::kStack, builtin_exit_frame);
-  Jump(code, RelocInfo::CODE_TARGET);
+  TailCallBuiltin(Builtins::CEntry(1, ArgvMode::kStack, builtin_exit_frame));
 }
 
 void MacroAssembler::LoadWeakValue(Register out, Register in,
@@ -2350,7 +2399,7 @@ void MacroAssembler::Abort(AbortReason reason) {
       LoadEntryFromBuiltin(Builtin::kAbort, ip);
       Call(ip);
     } else {
-      Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
+      CallBuiltin(Builtin::kAbort);
     }
   }
   // will not return here
@@ -2651,8 +2700,7 @@ void MacroAssembler::PrepareCallCFunction(int num_reg_arguments,
     // and the original value of sp.
     mov(scratch, sp);
     AllocateStackSpace((stack_passed_arguments + 1) * kPointerSize);
-    DCHECK(base::bits::IsPowerOfTwo(frame_alignment));
-    and_(sp, sp, Operand(-frame_alignment));
+    EnforceStackAlignment();
     str(scratch, MemOperand(sp, stack_passed_arguments * kPointerSize));
   } else if (stack_passed_arguments > 0) {
     AllocateStackSpace(stack_passed_arguments * kPointerSize);
@@ -2840,8 +2888,7 @@ void MacroAssembler::BailoutIfDeoptimized() {
   ldr(scratch, MemOperand(kJavaScriptCallCodeStartRegister, offset));
   ldr(scratch, FieldMemOperand(scratch, Code::kFlagsOffset));
   tst(scratch, Operand(1 << Code::kMarkedForDeoptimizationBit));
-  Jump(BUILTIN_CODE(isolate(), CompileLazyDeoptimizedCode),
-       RelocInfo::CODE_TARGET, ne);
+  TailCallBuiltin(Builtin::kCompileLazyDeoptimizedCode, ne);
 }
 
 void MacroAssembler::CallForDeoptimization(Builtin target, int, Label* exit,
@@ -3032,6 +3079,11 @@ void MacroAssembler::TryLoadOptimizedOsrCode(Register scratch_and_result,
   // Is it marked_for_deoptimization? If yes, clear the slot.
   {
     UseScratchRegisterScope temps(this);
+
+    // The entry references a CodeWrapper object. Unwrap it now.
+    ldr(scratch_and_result,
+        FieldMemOperand(scratch_and_result, CodeWrapper::kCodeOffset));
+
     Register temp = temps.Acquire();
     JumpIfCodeIsMarkedForDeoptimization(scratch_and_result, temp, &clear_slot);
     if (min_opt_level == CodeKind::TURBOFAN) {

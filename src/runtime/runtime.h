@@ -568,6 +568,7 @@ namespace internal {
   F(IsConcatSpreadableProtector, 0, 1)        \
   F(IsConcurrentRecompilationSupported, 0, 1) \
   F(IsDictPropertyConstTrackingEnabled, 0, 1) \
+  F(IsEfficiencyModeEnabled, 0, 1)            \
   F(IsInPlaceInternalizableString, 1, 1)      \
   F(IsInternalizedString, 1, 1)               \
   F(IsMaglevEnabled, 0, 1)                    \
@@ -580,6 +581,8 @@ namespace internal {
   F(NewRegExpWithBacktrackLimit, 3, 1)        \
   F(NoElementsProtector, 0, 1)                \
   F(NotifyContextDisposed, 0, 1)              \
+  F(NotifyIsolateForeground, 0, 1)            \
+  F(NotifyIsolateBackground, 0, 1)            \
   F(OptimizeMaglevOnNextCall, 1, 1)           \
   F(OptimizeFunctionOnNextCall, -1, 1)        \
   F(OptimizeOsr, -1, 1)                       \
@@ -597,6 +600,7 @@ namespace internal {
   F(ScheduleGCInStackCheck, 0, 1)             \
   F(SerializeDeserializeNow, 0, 1)            \
   F(SetAllocationTimeout, -1 /* 2 || 3 */, 1) \
+  F(SetBatterySaverMode, 1, 1)                \
   F(SetForceSlowPath, 1, 1)                   \
   F(SetIteratorProtector, 0, 1)               \
   F(SharedGC, 0, 1)                           \
@@ -652,6 +656,8 @@ namespace internal {
   F(WasmCompileLazy, 2, 1)                    \
   F(WasmAllocateFeedbackVector, 3, 1)         \
   F(WasmCompileWrapper, 1, 1)                 \
+  F(TierUpJSToJSWrapper, 1, 1)                \
+  F(IsWasmExternalFunction, 1, 1)             \
   F(TierUpWasmToJSWrapper, 1, 1)              \
   F(WasmTriggerTierUp, 1, 1)                  \
   F(WasmDebugBreak, 0, 1)                     \
@@ -688,6 +694,7 @@ namespace internal {
   F(GetWasmExceptionValues, 1, 1)           \
   F(GetWasmRecoveredTrapCount, 0, 1)        \
   F(HasUnoptimizedWasmToJSWrapper, 1, 1)    \
+  F(HasUnoptimizedJSToJSWrapper, 1, 1)      \
   F(IsAsmWasmCode, 1, 1)                    \
   F(IsLiftoffFunction, 1, 1)                \
   F(IsTurboFanFunction, 1, 1)               \

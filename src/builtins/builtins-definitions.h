@@ -121,7 +121,7 @@ namespace internal {
   ASM(CallFunctionForwardVarargs, CallForwardVarargs)                          \
   /* Call an API callback via a {FunctionTemplateInfo}, doing appropriate */   \
   /* access and compatible receiver checks. */                                 \
-  TFC(CallFunctionTemplate_Generic, CallFunctionTemplate)                      \
+  TFC(CallFunctionTemplate_Generic, CallFunctionTemplateGeneric)               \
   TFC(CallFunctionTemplate_CheckAccess, CallFunctionTemplate)                  \
   TFC(CallFunctionTemplate_CheckCompatibleReceiver, CallFunctionTemplate)      \
   TFC(CallFunctionTemplate_CheckAccessAndCompatibleReceiver,                   \
@@ -308,17 +308,21 @@ namespace internal {
   TFH(DefineNamedOwnIC_NoFeedback, StoreNoFeedback)                            \
   TFH(KeyedLoadIC_SloppyArguments, LoadWithVector)                             \
   TFH(LoadIndexedInterceptorIC, LoadWithVector)                                \
-  TFH(KeyedStoreIC_SloppyArguments_Standard, StoreWithVector)                  \
-  TFH(KeyedStoreIC_SloppyArguments_GrowNoTransitionHandleCOW, StoreWithVector) \
-  TFH(KeyedStoreIC_SloppyArguments_NoTransitionIgnoreOOB, StoreWithVector)     \
+  TFH(KeyedStoreIC_SloppyArguments_InBounds, StoreWithVector)                  \
+  TFH(KeyedStoreIC_SloppyArguments_NoTransitionGrowAndHandleCOW,               \
+      StoreWithVector)                                                         \
+  TFH(KeyedStoreIC_SloppyArguments_NoTransitionIgnoreTypedArrayOOB,            \
+      StoreWithVector)                                                         \
   TFH(KeyedStoreIC_SloppyArguments_NoTransitionHandleCOW, StoreWithVector)     \
-  TFH(StoreFastElementIC_Standard, StoreWithVector)                            \
-  TFH(StoreFastElementIC_GrowNoTransitionHandleCOW, StoreWithVector)           \
-  TFH(StoreFastElementIC_NoTransitionIgnoreOOB, StoreWithVector)               \
+  TFH(StoreFastElementIC_InBounds, StoreWithVector)                            \
+  TFH(StoreFastElementIC_NoTransitionGrowAndHandleCOW, StoreWithVector)        \
+  TFH(StoreFastElementIC_NoTransitionIgnoreTypedArrayOOB, StoreWithVector)     \
   TFH(StoreFastElementIC_NoTransitionHandleCOW, StoreWithVector)               \
-  TFH(ElementsTransitionAndStore_Standard, StoreTransition)                    \
-  TFH(ElementsTransitionAndStore_GrowNoTransitionHandleCOW, StoreTransition)   \
-  TFH(ElementsTransitionAndStore_NoTransitionIgnoreOOB, StoreTransition)       \
+  TFH(ElementsTransitionAndStore_InBounds, StoreTransition)                    \
+  TFH(ElementsTransitionAndStore_NoTransitionGrowAndHandleCOW,                 \
+      StoreTransition)                                                         \
+  TFH(ElementsTransitionAndStore_NoTransitionIgnoreTypedArrayOOB,              \
+      StoreTransition)                                                         \
   TFH(ElementsTransitionAndStore_NoTransitionHandleCOW, StoreTransition)       \
   TFH(KeyedHasIC_PolymorphicName, LoadWithVector)                              \
   TFH(KeyedHasIC_SloppyArguments, LoadWithVector)                              \
@@ -1109,10 +1113,10 @@ namespace internal {
   TFJ(AsyncIteratorValueUnwrap, kJSArgcReceiverSlots + 1, kReceiver, kValue)   \
                                                                                \
   /* CEntry */                                                                 \
-  ASM(CEntry_Return1_ArgvInRegister_NoBuiltinExit, CEntryDummy)                \
+  ASM(CEntry_Return1_ArgvInRegister_NoBuiltinExit, InterpreterCEntry1)         \
   ASM(CEntry_Return1_ArgvOnStack_BuiltinExit, CEntry1ArgvOnStack)              \
   ASM(CEntry_Return1_ArgvOnStack_NoBuiltinExit, CEntryDummy)                   \
-  ASM(CEntry_Return2_ArgvInRegister_NoBuiltinExit, CEntryDummy)                \
+  ASM(CEntry_Return2_ArgvInRegister_NoBuiltinExit, InterpreterCEntry2)         \
   ASM(CEntry_Return2_ArgvOnStack_BuiltinExit, CEntryDummy)                     \
   ASM(CEntry_Return2_ArgvOnStack_NoBuiltinExit, CEntryDummy)                   \
   ASM(WasmCEntry, CEntryDummy)                                                 \

@@ -6,6 +6,7 @@
 #define V8_COMPILER_TURBOSHAFT_OPMASKS_H_
 
 #include "src/compiler/turboshaft/operations.h"
+#include "src/compiler/turboshaft/representations.h"
 
 // The Opmasks allow performing a type check or cast with an operation mask
 // that doesn't only encode the opcode but also additional properties, i.e.
@@ -79,12 +80,22 @@ struct MaskBuilder {
     static_assert(OFFSET_OF(Operation, opcode) == 0);
     static_assert(sizeof(Operation::opcode) == sizeof(uint8_t));
     static_assert(sizeof(Operation) == 4);
+#if V8_TARGET_BIG_ENDIAN
+    return static_cast<uint64_t>(0xFF)
+           << ((sizeof(uint64_t) - sizeof(uint8_t)) * kBitsPerByte);
+#else
     return static_cast<uint64_t>(0xFF);
+#endif
   }
 
   static constexpr uint64_t EncodeBaseValue(Opcode opcode) {
     static_assert(OFFSET_OF(Operation, opcode) == 0);
+#if V8_TARGET_BIG_ENDIAN
+    return static_cast<uint64_t>(opcode)
+           << ((sizeof(uint64_t) - sizeof(Operation::opcode)) * kBitsPerByte);
+#else
     return static_cast<uint64_t>(opcode);
+#endif
   }
 
   static constexpr uint64_t BuildMask() {
@@ -104,12 +115,21 @@ struct MaskBuilder {
     static_assert(F::offset + F::size <= sizeof(uint64_t));
     constexpr uint64_t ones = static_cast<uint64_t>(-1) >>
                               ((sizeof(uint64_t) - F::size) * kBitsPerByte);
+#if V8_TARGET_BIG_ENDIAN
+    return ones << ((sizeof(uint64_t) - F::size - F::offset) * kBitsPerByte);
+#else
     return ones << (F::offset * kBitsPerByte);
+#endif
   }
 
   template <typename F>
   static constexpr uint64_t EncodeFieldValue(typename F::type value) {
+#if V8_TARGET_BIG_ENDIAN
+    return encode_for_mask(value)
+           << ((sizeof(uint64_t) - F::size - F::offset) * kBitsPerByte);
+#else
     return encode_for_mask(value) << (F::offset * kBitsPerByte);
+#endif
   }
 
   template <typename Fields::type... Args>
@@ -140,6 +160,10 @@ using kWord32UnsignedMulOverflownBits =
                        WordRepresentation::Word32()>;
 
 using kWord32BitwiseAnd = WordBinopMask::For<WordBinopOp::Kind::kBitwiseAnd,
+                                             WordRepresentation::Word32()>;
+using kWord32BitwiseOr = WordBinopMask::For<WordBinopOp::Kind::kBitwiseOr,
+                                            WordRepresentation::Word32()>;
+using kWord32BitwiseXor = WordBinopMask::For<WordBinopOp::Kind::kBitwiseXor,
                                              WordRepresentation::Word32()>;
 using kWord64Add =
     WordBinopMask::For<WordBinopOp::Kind::kAdd, WordRepresentation::Word64()>;
@@ -184,9 +208,14 @@ using kWord32ShiftLeft =
 using kWord32ShiftRightArithmetic =
     ShiftMask::For<ShiftOp::Kind::kShiftRightArithmetic,
                    WordRepresentation::Word32()>;
+using kWord32ShiftRightArithmeticShiftOutZeros =
+    ShiftMask::For<ShiftOp::Kind::kShiftRightArithmeticShiftOutZeros,
+                   WordRepresentation::Word32()>;
 using kWord32ShiftRightLogical =
     ShiftMask::For<ShiftOp::Kind::kShiftRightLogical,
                    WordRepresentation::Word32()>;
+using kWord32RotateRight =
+    ShiftMask::For<ShiftOp::Kind::kRotateRight, WordRepresentation::Word32()>;
 using kWord64ShiftRightArithmetic =
     ShiftMask::For<ShiftOp::Kind::kShiftRightArithmetic,
                    WordRepresentation::Word64()>;
@@ -247,6 +276,17 @@ using kTruncateInt64ToInt32 = ChangeOpMask::For<
     ChangeOp::Kind::kTruncate, ChangeOp::Assumption::kNoAssumption,
     RegisterRepresentation::Word64(), RegisterRepresentation::Word32()>;
 
+using TaggedBicastMask =
+    MaskBuilder<TaggedBitcastOp, FIELD(TaggedBitcastOp, kind)>;
+using kTaggedBitcastSmi = TaggedBicastMask::For<TaggedBitcastOp::Kind::kSmi>;
+
+using OverflowCheckedBinopMask =
+    MaskBuilder<OverflowCheckedBinopOp, FIELD(OverflowCheckedBinopOp, kind),
+                FIELD(OverflowCheckedBinopOp, rep)>;
+using kOverflowCheckedWord32Add =
+    OverflowCheckedBinopMask::For<OverflowCheckedBinopOp::Kind::kSignedAdd,
+                                  WordRepresentation::Word32()>;
+
 #if V8_ENABLE_WEBASSEMBLY
 
 using Simd128BinopMask =
@@ -274,7 +314,9 @@ FOREACH_SIMD_128_SHIFT_OPCODE(SIMD_SHIFT_MASK)
 
 #endif  // V8_ENABLE_WEBASSEMBLY
 
+#ifndef TURBOSHAFT_OPMASK_EXPORT_FIELD_MACRO_FOR_UNITTESTS
 #undef FIELD
+#endif
 
 }  // namespace v8::internal::compiler::turboshaft::Opmask
 

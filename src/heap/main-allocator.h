@@ -75,22 +75,17 @@ class PagedSpaceAllocatorPolicy final : public AllocatorPolicy {
   void FreeLinearAllocationArea() final;
 
  private:
-  bool RefillLabMain(int size_in_bytes, AllocationOrigin origin);
+  bool RefillLab(int size_in_bytes, AllocationOrigin origin);
 
-  bool ContributeToSweepingMain(int required_freed_bytes, int max_pages,
-                                int size_in_bytes, AllocationOrigin origin,
-                                GCTracer::Scope::ScopeId sweeping_scope_id,
-                                ThreadKind sweeping_scope_kind);
+  void ContributeToSweeping(int max_pages);
 
-  bool TryAllocationFromFreeListMain(size_t size_in_bytes,
-                                     AllocationOrigin origin);
+  bool TryAllocationFromFreeList(size_t size_in_bytes, AllocationOrigin origin);
 
   bool TryExpandAndAllocate(size_t size_in_bytes, AllocationOrigin origin);
 
   V8_WARN_UNUSED_RESULT bool TryExtendLAB(int size_in_bytes);
 
   void SetLinearAllocationArea(Address top, Address limit, Address end);
-  void DecreaseLimit(Address new_limit);
 
   void FreeLinearAllocationAreaUnsynchronized();
 
@@ -110,7 +105,7 @@ class PagedNewSpaceAllocatorPolicy final : public AllocatorPolicy {
   bool SupportsExtendingLAB() const final { return true; }
 
  private:
-  bool AddPageBeyondCapacity(int size_in_bytes, AllocationOrigin origin);
+  bool TryAllocatePage(int size_in_bytes, AllocationOrigin origin);
   bool WaitForSweepingForAllocation(int size_in_bytes, AllocationOrigin origin);
 
   PagedNewSpace* const space_;

@@ -555,6 +555,11 @@ Address Isolate::get_address_from_id(IsolateAddressId id) {
 char* Isolate::Iterate(RootVisitor* v, char* thread_storage) {
   ThreadLocalTop* thread = reinterpret_cast<ThreadLocalTop*>(thread_storage);
   Iterate(v, thread);
+  // Normally, ThreadLocalTop::topmost_script_having_context_ is visited weakly
+  // but in order to simplify handling of frozen threads we just clear it.
+  // Otherwise, we'd need to traverse the thread_storage again just to find this
+  // one field.
+  thread->topmost_script_having_context_ = Context();
   return thread_storage + sizeof(ThreadLocalTop);
 }
 
@@ -717,7 +722,11 @@ bool IsBuiltinFunction(Isolate* isolate, Tagged<HeapObject> object,
                        Builtin builtin) {
   if (!IsJSFunction(object)) return false;
   Tagged<JSFunction> const function = JSFunction::cast(object);
-  return function->code(isolate) == isolate->builtins()->code(builtin);
+  // Currently we have to use full pointer comparison here as builtin Code
+  // objects are still inside the sandbox while runtime-generated Code objects
+  // are in trusted space.
+  static_assert(!kAllCodeObjectsLiveInTrustedSpace);
+  return function->code(isolate).SafeEquals(isolate->builtins()->code(builtin));
 }
 
 // Check if the function is one of the known async function or
@@ -1587,13 +1596,13 @@ bool Isolate::MayAccess(Handle<NativeContext> accessing_context,
     DisallowGarbageCollection no_gc;
 
     if (IsJSGlobalProxy(*receiver)) {
-      Tagged<Object> receiver_context =
-          JSGlobalProxy::cast(*receiver)->native_context();
-      if (!IsContext(receiver_context)) return false;
+      base::Optional<Tagged<Object>> receiver_context =
+          JSGlobalProxy::cast(*receiver)->GetCreationContext();
+      if (!receiver_context) return false;
 
-      if (receiver_context == *accessing_context) return true;
+      if (*receiver_context == *accessing_context) return true;
 
-      if (Context::cast(receiver_context)->security_token() ==
+      if (Context::cast(*receiver_context)->security_token() ==
           accessing_context->security_token())
         return true;
     }
@@ -1698,10 +1707,9 @@ Tagged<Object> Isolate::TerminateExecution() {
 }
 
 void Isolate::CancelTerminateExecution() {
-  if (is_execution_terminating()) {
-    clear_exception();
-    if (try_catch_handler()) try_catch_handler()->Reset();
-  }
+  if (!is_execution_terminating()) return;
+  clear_internal_exception();
+  if (try_catch_handler()) try_catch_handler()->ResetInternal();
 }
 
 void Isolate::RequestInterrupt(InterruptCallback callback, void* data) {
@@ -1971,6 +1979,11 @@ Tagged<Object> Isolate::UnwindAndFindHandler() {
   // TODO(v8:12676): Fix gcmole failures in this function.
   DisableGCMole no_gcmole;
   DisallowGarbageCollection no_gc;
+
+  // The topmost_script_having_context value becomes outdated after frames
+  // unwinding.
+  clear_topmost_script_having_context();
+
 #if V8_ENABLE_WEBASSEMBLY
   // Create the {SetThreadInWasmFlagScope} first in this function so that its
   // destructor gets called after all the other destructors. It is important
@@ -2002,7 +2015,7 @@ Tagged<Object> Isolate::UnwindAndFindHandler() {
     // If/when we unwind back into C++ (returning to the JSEntry stub,
     // or to Execution::CallWasm), the returned exception will be sent
     // back to isolate->set_exception(...).
-    clear_exception();
+    clear_internal_exception();
     return exception;
   };
 
@@ -2161,16 +2174,10 @@ Tagged<Object> Isolate::UnwindAndFindHandler() {
       }
       case StackFrame::WASM_TO_JS:
         if (v8_flags.experimental_wasm_stack_switching) {
-          // Decrement the Wasm-to-JS counter and reset the central-stack info.
           Tagged<Object> suspender_obj = root(RootIndex::kActiveSuspender);
           if (!IsUndefined(suspender_obj)) {
             Tagged<WasmSuspenderObject> suspender =
                 WasmSuspenderObject::cast(suspender_obj);
-            int wasm_to_js_counter = suspender->wasm_to_js_counter();
-            DCHECK_LT(0, wasm_to_js_counter);
-            suspender->set_wasm_to_js_counter(wasm_to_js_counter - 1);
-
-#if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64
             // If the wasm-to-js wrapper was on a secondary stack and switched
             // to the central stack, handle the implicit switch back.
             Address central_stack_sp = *reinterpret_cast<Address*>(
@@ -2178,6 +2185,8 @@ Tagged<Object> Isolate::UnwindAndFindHandler() {
                 WasmImportWrapperFrameConstants::kCentralStackSPOffset);
             bool switched_stacks = central_stack_sp != kNullAddress;
             if (switched_stacks) {
+              DCHECK_EQ(1, suspender->has_js_frames());
+              suspender->set_has_js_frames(0);
               thread_local_top()->is_on_central_stack_flag_ = false;
               Address secondary_stack_limit = Memory<Address>(
                   frame->fp() +
@@ -2185,7 +2194,6 @@ Tagged<Object> Isolate::UnwindAndFindHandler() {
               stack_guard()->SetStackLimitForStackSwitching(
                   secondary_stack_limit);
             }
-#endif
           }
         }
         break;
@@ -2230,7 +2238,6 @@ Tagged<Object> Isolate::UnwindAndFindHandler() {
 #if DEBUG
         DCHECK_NULL(wasm::GetWasmCodeManager()->LookupCode(this, frame->pc()));
 #endif
-#if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64
         if (v8_flags.experimental_wasm_stack_switching) {
           Tagged<Code> code = stub_frame->LookupCode();
           if (code->builtin_id() == Builtin::kWasmToJsWrapperCSA) {
@@ -2249,7 +2256,6 @@ Tagged<Object> Isolate::UnwindAndFindHandler() {
             }
           }
         }
-#endif  // V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64
 #endif  // V8_ENABLE_WEBASSEMBLY
 
         // The code might be a dynamically generated stub or a turbofanned
@@ -3126,7 +3132,7 @@ bool Isolate::IsWasmImportedStringsEnabled(Handle<NativeContext> context) {
 #endif
 }
 
-Handle<NativeContext> Isolate::GetIncumbentContext() {
+Handle<NativeContext> Isolate::GetIncumbentContextSlow() {
   JavaScriptStackFrameIterator it(this);
 
   // 1st candidate: most-recently-entered author function's context
@@ -3140,13 +3146,20 @@ Handle<NativeContext> Isolate::GetIncumbentContext() {
   if (!it.done() &&
       (!top_backup_incumbent || it.frame()->sp() < top_backup_incumbent)) {
     Tagged<Context> context = Context::cast(it.frame()->context());
+    // If the topmost_script_having_context is set then it must be correct.
+    if (DEBUG_BOOL && !topmost_script_having_context().is_null()) {
+      DCHECK_EQ(topmost_script_having_context()->native_context(),
+                context->native_context());
+    }
     return Handle<NativeContext>(context->native_context(), this);
   }
+  DCHECK(topmost_script_having_context().is_null());
 
   // 2nd candidate: the last Context::Scope's incumbent context if any.
   if (top_backup_incumbent_scope()) {
-    return Utils::OpenHandle(
-        *top_backup_incumbent_scope()->backup_incumbent_context_);
+    v8::Local<v8::Context> incumbent_context =
+        top_backup_incumbent_scope()->backup_incumbent_context_;
+    return Utils::OpenHandle(*incumbent_context);
   }
 
   // Last candidate: the entered context or microtask context.
@@ -3284,10 +3297,6 @@ void Isolate::UpdateCentralStackInfo() {
   // only contain frames that use precise scanning.
   // Otherwise register the active secondary stack start and the bounds of the
   // inactive stacks in the Stack object.
-#if !V8_TARGET_ARCH_X64 && !V8_TARGET_ARCH_ARM64
-  stack().ClearStackSegments();
-  heap()->SetStackStart(reinterpret_cast<void*>(wasm_stack->base()));
-#endif
   current = WasmContinuationObject::cast(current)->parent();
   thread_local_top()->is_on_central_stack_flag_ =
       IsOnCentralStack(wasm_stack->base());
@@ -3299,11 +3308,6 @@ void Isolate::UpdateCentralStackInfo() {
     auto cont = WasmContinuationObject::cast(current);
     auto* wasm_stack =
         Managed<wasm::StackMemory>::cast(cont->stack())->get().get();
-#if !V8_TARGET_ARCH_X64 && !V8_TARGET_ARCH_ARM64
-    stack().AddStackSegment(
-        reinterpret_cast<const void*>(wasm_stack->base()),
-        reinterpret_cast<const void*>(wasm_stack->jmpbuf()->sp));
-#endif
     // On x64 and arm64 we don't need to record the stack segments for
     // conservative stack scanning. We switch to the central stack for foreign
     // calls, so secondary stacks only contain wasm frames which use the precise
@@ -3574,7 +3578,8 @@ v8::PageAllocator* Isolate::page_allocator() const {
 }
 
 Isolate::Isolate(std::unique_ptr<i::IsolateAllocator> isolate_allocator)
-    : isolate_data_(this, isolate_allocator->GetPtrComprCageBase()),
+    : isolate_data_(this, isolate_allocator->GetPtrComprCageBase(),
+                    isolate_allocator->GetTrustedPtrComprCageBase()),
       isolate_allocator_(std::move(isolate_allocator)),
       id_(isolate_counter.fetch_add(1, std::memory_order_relaxed)),
       allocator_(new TracingAccountingAllocator(this)),
@@ -3702,6 +3707,10 @@ void Isolate::CheckIsolateLayout() {
            Internals::kIsolateExternalPointerTableOffset);
 #endif
 #ifdef V8_ENABLE_SANDBOX
+  CHECK_EQ(
+      static_cast<int>(OFFSET_OF(Isolate, isolate_data_.trusted_cage_base_)),
+      Internals::kIsolateTrustedCageBaseOffset);
+
   CHECK_EQ(static_cast<int>(
                OFFSET_OF(Isolate, isolate_data_.trusted_pointer_table_)),
            Internals::kIsolateTrustedPointerTableOffset);
@@ -3709,15 +3718,63 @@ void Isolate::CheckIsolateLayout() {
   CHECK_EQ(static_cast<int>(
                OFFSET_OF(Isolate, isolate_data_.api_callback_thunk_argument_)),
            Internals::kIsolateApiCallbackThunkArgumentOffset);
+  CHECK_EQ(static_cast<int>(OFFSET_OF(
+               Isolate, isolate_data_.continuation_preserved_embedder_data_)),
+           Internals::kContinuationPreservedEmbedderDataOffset);
+  CHECK_EQ(
+      static_cast<int>(OFFSET_OF(Isolate, isolate_data_.wasm64_oob_offset_)),
+      Internals::kWasm64OOBOffsetOffset);
 
   CHECK_EQ(static_cast<int>(OFFSET_OF(Isolate, isolate_data_.roots_table_)),
            Internals::kIsolateRootsOffset);
+
+  CHECK(IsAligned(reinterpret_cast<Address>(&isolate_data_),
+                  kIsolateDataAlignment));
 
   static_assert(Internals::kStackGuardSize == sizeof(StackGuard));
   static_assert(Internals::kBuiltinTier0TableSize ==
                 Builtins::kBuiltinTier0Count * kSystemPointerSize);
   static_assert(Internals::kBuiltinTier0EntryTableSize ==
                 Builtins::kBuiltinTier0Count * kSystemPointerSize);
+
+  // Ensure that certain hot IsolateData fields fall into the same CPU cache
+  // line.
+  constexpr size_t kCacheLineSize = 64;
+  static_assert(OFFSET_OF(Isolate, isolate_data_) == 0);
+
+  // Fields written on every CEntry/CallApiCallback/CallApiGetter call.
+  // See MacroAssembler::EnterExitFrame/LeaveExitFrame.
+  constexpr size_t kCEntryFPCacheLine = RoundDown<kCacheLineSize>(
+      OFFSET_OF(IsolateData, thread_local_top_.c_entry_fp_));
+  static_assert(kCEntryFPCacheLine ==
+                RoundDown<kCacheLineSize>(
+                    OFFSET_OF(IsolateData, thread_local_top_.c_function_)));
+  static_assert(kCEntryFPCacheLine ==
+                RoundDown<kCacheLineSize>(
+                    OFFSET_OF(IsolateData, thread_local_top_.context_)));
+  static_assert(
+      kCEntryFPCacheLine ==
+      RoundDown<kCacheLineSize>(OFFSET_OF(
+          IsolateData, thread_local_top_.topmost_script_having_context_)));
+  static_assert(kCEntryFPCacheLine ==
+                RoundDown<kCacheLineSize>(
+                    OFFSET_OF(IsolateData, thread_local_top_.last_api_entry_)));
+
+  // Fields written on every MacroAssembler::CallCFunction call.
+  static_assert(RoundDown<kCacheLineSize>(
+                    OFFSET_OF(IsolateData, fast_c_call_caller_fp_)) ==
+                RoundDown<kCacheLineSize>(
+                    OFFSET_OF(IsolateData, fast_c_call_caller_pc_)));
+
+  // LinearAllocationArea objects must not cross cache line boundary.
+  static_assert(
+      RoundDown<kCacheLineSize>(OFFSET_OF(IsolateData, new_allocation_info_)) ==
+      RoundDown<kCacheLineSize>(OFFSET_OF(IsolateData, new_allocation_info_) +
+                                sizeof(LinearAllocationArea) - 1));
+  static_assert(
+      RoundDown<kCacheLineSize>(OFFSET_OF(IsolateData, old_allocation_info_)) ==
+      RoundDown<kCacheLineSize>(OFFSET_OF(IsolateData, old_allocation_info_) +
+                                sizeof(LinearAllocationArea) - 1));
 }
 
 void Isolate::ClearSerializerData() {
@@ -3785,9 +3842,9 @@ void Isolate::Deinit() {
   // We must stop the logger before we tear down other components.
   sampler::Sampler* sampler = v8_file_logger_->sampler();
   if (sampler && sampler->IsActive()) sampler->Stop();
+  v8_file_logger_->StopProfilerThread();
 
   FreeThreadResources();
-  v8_file_logger_->StopProfilerThread();
 
   // We start with the heap tear down so that releasing managed objects does
   // not cause a GC.
@@ -4941,6 +4998,18 @@ void Isolate::Enter() {
   Isolate* current_isolate = nullptr;
   PerIsolateThreadData* current_data = CurrentPerIsolateThreadData();
 
+#ifdef V8_ENABLE_CHECKS
+  // No different thread must have entered the isolate. Allow re-entering.
+  ThreadId thread_id = ThreadId::Current();
+  if (current_thread_id_.IsValid()) {
+    CHECK_EQ(current_thread_id_, thread_id);
+  } else {
+    CHECK_EQ(0, current_thread_counter_);
+    current_thread_id_ = thread_id;
+  }
+  current_thread_counter_++;
+#endif
+
   // Set the stack start for the main thread that enters the isolate.
   heap()->SetStackStart(base::Stack::GetStackStart());
 
@@ -4980,6 +5049,12 @@ void Isolate::Exit() {
   DCHECK(current_entry_stack->previous_thread_data == nullptr ||
          current_entry_stack->previous_thread_data->thread_id() ==
              ThreadId::Current());
+
+#ifdef V8_ENABLE_CHECKS
+  // The current thread must have entered the isolate.
+  CHECK_EQ(current_thread_id_, ThreadId::Current());
+  if (--current_thread_counter_ == 0) current_thread_id_ = ThreadId::Invalid();
+#endif
 
   if (--current_entry_stack->entry_count > 0) return;
 
@@ -6077,10 +6152,12 @@ void Isolate::DetachGlobal(Handle<Context> env) {
 
   ReadOnlyRoots roots(this);
   Handle<JSGlobalProxy> global_proxy(env->global_proxy(), this);
-  global_proxy->set_native_context(roots.null_value());
   // NOTE: Turbofan's JSNativeContextSpecialization and Maglev depend on
   // DetachGlobal causing a map change.
   JSObject::ForceSetPrototype(this, global_proxy, factory()->null_value());
+  // Detach the global object from the native context by making its map
+  // contextless (use the global metamap instead of the contextful one).
+  global_proxy->map()->set_map(roots.meta_map());
   global_proxy->map()->set_constructor_or_back_pointer(roots.null_value(),
                                                        kRelaxedStore);
   if (v8_flags.track_detached_contexts) AddDetachedContext(env);
@@ -6111,9 +6188,6 @@ void Isolate::SetRAILMode(RAILMode rail_mode) {
       // The task will start incremental marking (if needed not already started)
       // and advance marking if incremental marking is active.
       job->ScheduleTask();
-    }
-    if (auto* job = heap()->minor_gc_job()) {
-      job->SchedulePreviouslyRequestedTask();
     }
   }
   if (v8_flags.trace_rail) {
@@ -6188,7 +6262,7 @@ std::string GetStringFromLocales(Isolate* isolate, Handle<Object> locales) {
 
 bool StringEqualsLocales(Isolate* isolate, const std::string& str,
                          Handle<Object> locales) {
-  if (IsUndefined(*locales, isolate)) return str == "";
+  if (IsUndefined(*locales, isolate)) return str.empty();
   return Handle<String>::cast(locales)->IsEqualTo(
       base::VectorOf(str.c_str(), str.length()));
 }
@@ -6294,10 +6368,18 @@ SaveContext::SaveContext(Isolate* isolate) : isolate_(isolate) {
   if (!isolate->context().is_null()) {
     context_ = Handle<Context>(isolate->context(), isolate);
   }
+  if (!isolate->topmost_script_having_context().is_null()) {
+    topmost_script_having_context_ =
+        Handle<Context>(isolate->topmost_script_having_context(), isolate);
+  }
 }
 
 SaveContext::~SaveContext() {
   isolate_->set_context(context_.is_null() ? Tagged<Context>() : *context_);
+  isolate_->set_topmost_script_having_context(
+      topmost_script_having_context_.is_null()
+          ? Tagged<Context>()
+          : *topmost_script_having_context_);
 }
 
 SaveAndSwitchContext::SaveAndSwitchContext(Isolate* isolate,
@@ -6308,7 +6390,10 @@ SaveAndSwitchContext::SaveAndSwitchContext(Isolate* isolate,
 
 #ifdef DEBUG
 AssertNoContextChange::AssertNoContextChange(Isolate* isolate)
-    : isolate_(isolate), context_(isolate->context(), isolate) {}
+    : isolate_(isolate),
+      context_(isolate->context(), isolate),
+      topmost_script_having_context_(isolate->topmost_script_having_context(),
+                                     isolate) {}
 
 namespace {
 
@@ -6363,9 +6448,7 @@ void Isolate::AddCodeMemoryRange(MemoryRange range) {
 void Isolate::AddCodeMemoryChunk(MemoryChunk* chunk) {
   // We only keep track of individual code pages/allocations if we are on arm32,
   // because on x64 and arm64 we have a code range which makes this unnecessary.
-#if !defined(V8_TARGET_ARCH_ARM)
-  return;
-#else
+#if defined(V8_TARGET_ARCH_ARM)
   void* new_page_start = reinterpret_cast<void*>(chunk->area_start());
   size_t new_page_size = chunk->area_size();
 
@@ -6450,9 +6533,7 @@ LocalHeap* Isolate::CurrentLocalHeap() {
 void Isolate::RemoveCodeMemoryChunk(MemoryChunk* chunk) {
   // We only keep track of individual code pages/allocations if we are on arm32,
   // because on x64 and arm64 we have a code range which makes this unnecessary.
-#if !defined(V8_TARGET_ARCH_ARM)
-  return;
-#else
+#if defined(V8_TARGET_ARCH_ARM)
   void* removed_page_start = reinterpret_cast<void*>(chunk->area_start());
   std::vector<MemoryRange>* old_code_pages = GetCodePages();
   DCHECK_NOT_NULL(old_code_pages);

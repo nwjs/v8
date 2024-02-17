@@ -108,6 +108,16 @@ void TrustedPointerTable::Mark(Space* space, TrustedPointerHandle handle) {
   at(index).Mark();
 }
 
+template <typename Callback>
+void TrustedPointerTable::IterateActiveEntriesIn(Space* space,
+                                                 Callback callback) {
+  IterateEntriesIn(space, [&](uint32_t index) {
+    if (!at(index).IsFreelistEntry()) {
+      callback(IndexToHandle(index), at(index).GetContent());
+    }
+  });
+}
+
 uint32_t TrustedPointerTable::HandleToIndex(TrustedPointerHandle handle) const {
   uint32_t index = handle >> kTrustedPointerHandleShift;
   DCHECK_EQ(handle, index << kTrustedPointerHandleShift);
@@ -131,12 +141,7 @@ void TrustedPointerTable::Validate(Address pointer, IndirectPointerTag tag) {
 
   // Entries must never point into the sandbox, as they couldn't be trusted in
   // that case. This CHECK is a defense-in-depth mechanism to guarantee this.
-  // However, on some platforms we cannot (always) reserve the full address
-  // space for the sandbox. In that case, the trusted space may legitimately
-  // end up inside the sandbox address space. This is ok since these
-  // configurations are anyway considered unsafe.
-  Sandbox* sandbox = GetProcessWideSandbox();
-  CHECK(!sandbox->Contains(pointer) || sandbox->is_partially_reserved());
+  CHECK(!InsideSandbox(pointer));
 }
 
 }  // namespace internal

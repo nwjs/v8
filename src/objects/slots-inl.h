@@ -42,8 +42,10 @@ Tagged<Object> FullObjectSlot::operator*() const {
   return Tagged<Object>(*location());
 }
 
+Tagged<Object> FullObjectSlot::load() const { return **this; }
+
 Tagged<Object> FullObjectSlot::load(PtrComprCageBase cage_base) const {
-  return **this;
+  return load();
 }
 
 void FullObjectSlot::store(Tagged<Object> value) const {
@@ -364,6 +366,11 @@ Tagged<Object> IndirectPointerSlot::ResolveCodePointerHandle(
   return Tagged<Object>(addr);
 }
 #endif  // V8_ENABLE_SANDBOX
+
+template <typename SlotT>
+void WriteProtectedSlot<SlotT>::Relaxed_Store(TObject value) const {
+  jit_allocation_.WriteHeaderSlot(this->address(), value, kRelaxedStore);
+}
 
 //
 // Utils.

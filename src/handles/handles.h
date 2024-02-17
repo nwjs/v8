@@ -13,7 +13,7 @@
 #include "src/common/globals.h"
 #include "src/objects/tagged.h"
 #include "src/zone/zone.h"
-#include "v8-internal.h"  // NOLINT(build/include_directory)
+#include "v8-handle-base.h"  // NOLINT(build/include_directory)
 
 #ifdef V8_ENABLE_DIRECT_HANDLE
 #include "src/flags/flags.h"
@@ -61,7 +61,7 @@ class HandleBase {
   // Returns the raw address where this handle is stored. This should only be
   // used for hashing handles; do not ever try to dereference it.
   V8_INLINE Address address() const {
-    return base::bit_cast<Address>(location_);
+    return reinterpret_cast<Address>(location_);
   }
 
   // Returns the address to where the raw pointer is stored.
@@ -271,6 +271,10 @@ class V8_NODISCARD HandleScope {
   Address* prev_next_;
   Address* prev_limit_;
 
+#ifdef V8_ENABLE_CHECKS
+  int scope_level_ = 0;
+#endif
+
   // Close the handle scope resetting limits to a previous state.
   static V8_INLINE void CloseScope(Isolate* isolate, Address* prev_next,
                                    Address* prev_limit);
@@ -339,7 +343,13 @@ static_assert(V8_ENABLE_CONSERVATIVE_STACK_SCANNING_BOOL);
 
 // ----------------------------------------------------------------------------
 // Base class for DirectHandle instantiations. Don't use directly.
-class V8_TRIVIAL_ABI DirectHandleBase {
+class V8_TRIVIAL_ABI DirectHandleBase :
+#ifdef DEBUG
+    public api_internal::StackAllocated<true>
+#else
+    public api_internal::StackAllocated<false>
+#endif
+{
  public:
   // Check if this handle refers to the exact same object as the other handle.
   V8_INLINE bool is_identical_to(const HandleBase& that) const;
@@ -348,6 +358,13 @@ class V8_TRIVIAL_ABI DirectHandleBase {
 
   V8_INLINE Address address() const { return obj_; }
 
+#ifdef DEBUG
+  // Counts the number of allocated handles for the current thread.
+  // The number is only accurate if V8_HAS_ATTRIBUTE_TRIVIAL_ABI,
+  // otherwise it's zero.
+  V8_INLINE static int NumberOfHandles() { return number_of_handles_; }
+#endif
+
  protected:
   friend class HandleBase;
 
@@ -355,13 +372,14 @@ class V8_TRIVIAL_ABI DirectHandleBase {
   // In this case, DirectHandleBase becomes not trivially copyable.
   V8_INLINE DirectHandleBase(const DirectHandleBase& other) V8_NOEXCEPT
       : obj_(other.obj_) {
-    VerifyOnStackAndMainThread();
+    Register();
   }
   DirectHandleBase& operator=(const DirectHandleBase&) V8_NOEXCEPT = default;
+  V8_INLINE ~DirectHandleBase() V8_NOEXCEPT { Unregister(); }
 #endif
 
   V8_INLINE explicit DirectHandleBase(Address object) : obj_(object) {
-    VerifyOnStackAndMainThread();
+    Register();
   }
 
 #ifdef DEBUG
@@ -370,16 +388,27 @@ class V8_TRIVIAL_ABI DirectHandleBase {
   V8_INLINE bool IsDereferenceAllowed() const { return true; }
 #endif  // DEBUG
 
-  V8_INLINE void VerifyOnStackAndMainThread() const {
-#ifdef DEBUG
-    internal::HandleHelper::VerifyOnStack(this);
-    internal::HandleHelper::VerifyOnMainThread();
-#endif
-  }
-
   // This is a direct pointer to either a tagged object or SMI. Design overview:
   // https://docs.google.com/document/d/1uRGYQM76vk1fc_aDqDH3pm2qhaJtnK2oyzeVng4cS6I/
   Address obj_;
+
+ private:
+  V8_INLINE void Register() {
+#if defined(DEBUG) && V8_HAS_ATTRIBUTE_TRIVIAL_ABI
+    ++number_of_handles_;
+#endif
+  }
+
+  V8_INLINE void Unregister() {
+#if defined(DEBUG) && V8_HAS_ATTRIBUTE_TRIVIAL_ABI
+    DCHECK_LT(0, number_of_handles_);
+    --number_of_handles_;
+#endif
+  }
+
+#ifdef DEBUG
+  inline static thread_local int number_of_handles_ = 0;
+#endif
 };
 
 // ----------------------------------------------------------------------------

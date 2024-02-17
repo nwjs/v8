@@ -234,13 +234,12 @@ Handle<Object> Object::NewStorageFor(Isolate* isolate, Handle<Object> object,
   if (!representation.IsDouble()) return object;
   Handle<HeapNumber> result = isolate->factory()->NewHeapNumberWithHoleNaN();
   if (IsUninitialized(*object, isolate)) {
-    result->set_value_as_bits(kHoleNanInt64, kRelaxedStore);
+    result->set_value_as_bits(kHoleNanInt64);
   } else if (IsHeapNumber(*object)) {
     // Ensure that all bits of the double value are preserved.
-    result->set_value_as_bits(
-        HeapNumber::cast(*object)->value_as_bits(kRelaxedLoad), kRelaxedStore);
+    result->set_value_as_bits(HeapNumber::cast(*object)->value_as_bits());
   } else {
-    result->set_value(Object::Number(*object), kRelaxedStore);
+    result->set_value(Object::Number(*object));
   }
   return result;
 }
@@ -254,7 +253,7 @@ Handle<Object> Object::WrapForRead(IsolateT* isolate, Handle<Object> object,
     return object;
   }
   return isolate->factory()->template NewHeapNumberFromBits<allocation_type>(
-      HeapNumber::cast(*object)->value_as_bits(kRelaxedLoad));
+      HeapNumber::cast(*object)->value_as_bits());
 }
 
 template Handle<Object> Object::WrapForRead<AllocationType::kYoung>(
@@ -2498,8 +2497,8 @@ Maybe<bool> Object::RedefineIncompatibleProperty(
 Maybe<bool> Object::SetDataProperty(LookupIterator* it, Handle<Object> value) {
   Isolate* isolate = it->isolate();
   DCHECK_IMPLIES(IsJSProxy(*it->GetReceiver(), isolate),
-                 it->GetName()->IsPrivateName(isolate));
-  DCHECK_IMPLIES(!it->IsElement() && it->GetName()->IsPrivateName(isolate),
+                 it->GetName()->IsPrivateName());
+  DCHECK_IMPLIES(!it->IsElement() && it->GetName()->IsPrivateName(),
                  it->state() == LookupIterator::DATA);
   Handle<JSReceiver> receiver = Handle<JSReceiver>::cast(it->GetReceiver());
 
@@ -2663,7 +2662,7 @@ MaybeHandle<Object> Object::ShareSlow(Isolate* isolate,
   }
 
   if (IsHeapNumber(*value)) {
-    uint64_t bits = HeapNumber::cast(*value)->value_as_bits(kRelaxedLoad);
+    uint64_t bits = HeapNumber::cast(*value)->value_as_bits();
     return isolate->factory()
         ->NewHeapNumberFromBits<AllocationType::kSharedOld>(bits);
   }
@@ -2998,9 +2997,12 @@ Maybe<bool> JSArray::DefineOwnProperty(Isolate* isolate, Handle<JSArray> o,
                                        Handle<Object> name,
                                        PropertyDescriptor* desc,
                                        Maybe<ShouldThrow> should_throw) {
+  if (IsName(*name)) {
+    name = isolate->factory()->InternalizeName(Handle<Name>::cast(name));
+  }
+
   // 1. Assert: IsPropertyKey(P) is true. ("P" is |name|.)
   // 2. If P is "length", then:
-  // TODO(jkummerow): Check if we need slow string comparison.
   if (*name == ReadOnlyRoots(isolate).length_string()) {
     // 2a. Return ArraySetLength(A, Desc).
     return ArraySetLength(isolate, o, desc, should_throw);
@@ -4165,16 +4167,13 @@ uint32_t StringHasher::MakeArrayIndexHash(uint32_t value, int length) {
 void Oddball::Initialize(Isolate* isolate, Handle<Oddball> oddball,
                          const char* to_string, Handle<Object> to_number,
                          const char* type_of, uint8_t kind) {
-  STATIC_ASSERT_FIELD_OFFSETS_EQUAL(HeapNumber::kValueOffset,
-                                    offsetof(Oddball, to_number_raw_));
-
   Handle<String> internalized_to_string =
       isolate->factory()->InternalizeUtf8String(to_string);
   Handle<String> internalized_type_of =
       isolate->factory()->InternalizeUtf8String(type_of);
   if (IsHeapNumber(*to_number)) {
     oddball->set_to_number_raw_as_bits(
-        Handle<HeapNumber>::cast(to_number)->value_as_bits(kRelaxedLoad));
+        Handle<HeapNumber>::cast(to_number)->value_as_bits());
   } else {
     oddball->set_to_number_raw(Object::Number(*to_number));
   }
@@ -4336,7 +4335,7 @@ bool Script::GetPositionInfo(int position, PositionInfo* info,
     DCHECK_LE(0, position);
     wasm::NativeModule* native_module = wasm_native_module();
     const wasm::WasmModule* module = native_module->module();
-    if (module->functions.size() == 0) return false;
+    if (module->functions.empty()) return false;
     info->line = 0;
     info->column = position;
     info->line_start = module->functions[0].code.offset();
@@ -4376,7 +4375,7 @@ bool Script::GetPositionInfo(int position, PositionInfo* info,
 
       while (right > 0) {
         DCHECK_LE(left, right);
-        const int mid = (left + right) / 2;
+        const int mid = left + (right - left) / 2;
         if (position > Smi::ToInt(ends->get(mid))) {
           left = mid + 1;
         } else if (position <= Smi::ToInt(ends->get(mid - 1))) {
@@ -4708,7 +4707,7 @@ bool JSArray::WouldChangeReadOnlyLength(Handle<JSArray> array, uint32_t index) {
 const char* Symbol::PrivateSymbolToName() const {
   ReadOnlyRoots roots = GetReadOnlyRoots();
 #define SYMBOL_CHECK_AND_PRINT(_, name) \
-  if (*this == roots.name()) return #name;
+  if (this == roots.name()) return #name;
   PRIVATE_SYMBOL_LIST_GENERATOR(SYMBOL_CHECK_AND_PRINT, /* not used */)
 #undef SYMBOL_CHECK_AND_PRINT
   return "UNKNOWN";

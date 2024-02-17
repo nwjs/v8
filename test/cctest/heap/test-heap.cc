@@ -102,7 +102,7 @@ TEST(HeapMaps) {
   CcTest::InitializeVM();
   ReadOnlyRoots roots(CcTest::heap());
   CheckMap(roots.meta_map(), MAP_TYPE, Map::kSize);
-  CheckMap(roots.heap_number_map(), HEAP_NUMBER_TYPE, HeapNumber::kSize);
+  CheckMap(roots.heap_number_map(), HEAP_NUMBER_TYPE, sizeof(HeapNumber));
   CheckMap(roots.fixed_array_map(), FIXED_ARRAY_TYPE, kVariableSizeSentinel);
   CheckMap(roots.hash_table_map(), HASH_TABLE_TYPE, kVariableSizeSentinel);
   CheckMap(roots.seq_two_byte_string_map(), SEQ_TWO_BYTE_STRING_TYPE,
@@ -252,7 +252,7 @@ TEST(HandleNull) {
   Isolate* isolate = CcTest::i_isolate();
   HandleScope outer_scope(isolate);
   LocalContext context;
-  Handle<Object> n(Tagged<Object>(0), isolate);
+  Handle<Object> n(Tagged<Object>(kNullAddress), isolate);
   CHECK(!n.is_null());
 }
 
@@ -640,15 +640,19 @@ TEST(BytecodeArray) {
     constant_pool->set(i, *number);
   }
 
+  Handle<TrustedByteArray> handler_table = factory->NewTrustedByteArray(3);
+
   // Allocate and initialize BytecodeArray
-  Handle<BytecodeArray> array = factory->NewBytecodeArray(
-      kRawBytesSize, kRawBytes, kFrameSize, kParameterCount, constant_pool);
+  Handle<BytecodeArray> array =
+      factory->NewBytecodeArray(kRawBytesSize, kRawBytes, kFrameSize,
+                                kParameterCount, constant_pool, handler_table);
 
   CHECK(IsBytecodeArray(*array));
   CHECK_EQ(array->length(), (int)sizeof(kRawBytes));
   CHECK_EQ(array->frame_size(), kFrameSize);
   CHECK_EQ(array->parameter_count(), kParameterCount);
   CHECK_EQ(array->constant_pool(), *constant_pool);
+  CHECK_EQ(array->handler_table(), *handler_table);
   CHECK_LE(array->address(), array->GetFirstBytecodeAddress());
   CHECK_GE(array->address() + array->BytecodeArraySize(),
            array->GetFirstBytecodeAddress() + array->length());
@@ -2996,10 +3000,12 @@ TEST(OptimizedPretenuringNestedObjectLiterals) {
   CcTest::InitializeVM();
   if (!CcTest::i_isolate()->use_optimizer() || v8_flags.always_turbofan) return;
   if (v8_flags.gc_global || v8_flags.stress_compaction ||
-      v8_flags.stress_incremental_marking || v8_flags.single_generation)
+      v8_flags.stress_incremental_marking || v8_flags.single_generation ||
+      v8_flags.stress_concurrent_allocation)
     return;
   v8::HandleScope scope(CcTest::isolate());
   v8::Local<v8::Context> ctx = CcTest::isolate()->GetCurrentContext();
+  ManualGCScope manual_gc_scope;
   GrowNewSpaceToMaximumCapacity(CcTest::heap());
 
   base::ScopedVector<char> source(1024);
@@ -5816,7 +5822,7 @@ TEST(Regress598319) {
   // progress bar, we would fail here.
   for (int i = 0; i < arr.get()->length(); i++) {
     Tagged<HeapObject> arr_value = HeapObject::cast(arr.get()->get(i));
-    CHECK(arr_value.InReadOnlySpace() || marking_state->IsMarked(arr_value));
+    CHECK(InReadOnlySpace(arr_value) || marking_state->IsMarked(arr_value));
   }
 }
 
@@ -6819,7 +6825,7 @@ UNINITIALIZED_TEST(RestoreHeapLimit) {
 
 void HeapTester::UncommitUnusedMemory(Heap* heap) {
   if (!v8_flags.minor_ms) SemiSpaceNewSpace::From(heap->new_space())->Shrink();
-  heap->memory_allocator()->unmapper()->EnsureUnmappingCompleted();
+  heap->memory_allocator()->pool()->ReleasePooledChunks();
 }
 
 class DeleteNative {

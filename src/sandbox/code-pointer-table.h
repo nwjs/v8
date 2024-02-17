@@ -10,6 +10,7 @@
 #include "src/base/memory.h"
 #include "src/base/platform/mutex.h"
 #include "src/common/globals.h"
+#include "src/sandbox/code-entrypoint-tag.h"
 #include "src/sandbox/external-entity-table.h"
 
 #ifdef V8_COMPRESS_POINTERS
@@ -30,7 +31,7 @@ struct CodePointerTableEntry {
   // Make this entry a code pointer entry for the given code object and
   // entrypoint.
   inline void MakeCodePointerEntry(Address code, Address entrypoint,
-                                   bool mark_as_alive);
+                                   CodeEntrypointTag tag, bool mark_as_alive);
 
   // Make this entry a freelist entry, containing the index of the next entry
   // on the freelist.
@@ -38,11 +39,11 @@ struct CodePointerTableEntry {
 
   // Load code entrypoint pointer stored in this entry.
   // This entry must be a code pointer entry.
-  inline Address GetEntrypoint() const;
+  inline Address GetEntrypoint(CodeEntrypointTag tag) const;
 
   // Store the given code entrypoint pointer in this entry.
   // This entry must be a code pointer entry.
-  inline void SetEntrypoint(Address value);
+  inline void SetEntrypoint(Address value, CodeEntrypointTag tag);
 
   // Load the code object pointer stored in this entry.
   // This entry must be a code pointer entry.
@@ -130,7 +131,8 @@ class V8_EXPORT_PRIVATE CodePointerTable
 
   //
   // This method is atomic and can be called from background threads.
-  inline Address GetEntrypoint(CodePointerHandle handle) const;
+  inline Address GetEntrypoint(CodePointerHandle handle,
+                               CodeEntrypointTag tag) const;
 
   // Retrieves the code object of the entry referenced by the given handle.
   //
@@ -140,7 +142,8 @@ class V8_EXPORT_PRIVATE CodePointerTable
   // Sets the entrypoint of the entry referenced by the given handle.
   //
   // This method is atomic and can be called from background threads.
-  inline void SetEntrypoint(CodePointerHandle handle, Address value);
+  inline void SetEntrypoint(CodePointerHandle handle, Address value,
+                            CodeEntrypointTag tag);
 
   // Sets the code object of the entry referenced by the given handle.
   //
@@ -152,7 +155,8 @@ class V8_EXPORT_PRIVATE CodePointerTable
   // This method is atomic and can be called from background threads.
   inline CodePointerHandle AllocateAndInitializeEntry(Space* space,
                                                       Address code,
-                                                      Address entrypoint);
+                                                      Address entrypoint,
+                                                      CodeEntrypointTag tag);
 
   // Marks the specified entry as alive.
   //
@@ -166,6 +170,14 @@ class V8_EXPORT_PRIVATE CodePointerTable
   //
   // Returns the number of live entries after sweeping.
   uint32_t Sweep(Space* space, Counters* counters);
+
+  // Iterate over all active entries in the given space.
+  //
+  // The callback function will be invoked once for every entry that is
+  // currently in use, i.e. has been allocated and not yet freed, and will
+  // receive the handle and content (Code object pointer) of that entry.
+  template <typename Callback>
+  void IterateActiveEntriesIn(Space* space, Callback callback);
 
   // The base address of this table, for use in JIT compilers.
   Address base_address() const { return base(); }

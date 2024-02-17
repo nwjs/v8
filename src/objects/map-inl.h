@@ -57,7 +57,7 @@ RELEASE_ACQUIRE_WEAK_ACCESSORS(Map, raw_transitions,
 ACCESSORS_CHECKED2(Map, prototype, Tagged<HeapObject>, kPrototypeOffset, true,
                    IsNull(value) || IsJSProxy(value) || IsWasmObject(value) ||
                        (IsJSObject(value) &&
-                        (value.InWritableSharedSpace() ||
+                        (InWritableSharedSpace(value) ||
                          value->map()->is_prototype_map())))
 
 DEF_GETTER(Map, prototype_info, Tagged<Object>) {
@@ -299,11 +299,12 @@ int Map::instance_size() const {
   return instance_size_in_words() << kTaggedSizeLog2;
 }
 
-void Map::set_instance_size(int value) {
-  CHECK(IsAligned(value, kTaggedSize));
-  value >>= kTaggedSizeLog2;
-  CHECK_LT(static_cast<unsigned>(value), 256);
-  set_instance_size_in_words(value);
+void Map::set_instance_size(int size_in_bytes) {
+  CHECK(IsAligned(size_in_bytes, kTaggedSize));
+  DCHECK_LE(static_cast<unsigned>(size_in_bytes), JSObject::kMaxInstanceSize);
+  int size_in_words = size_in_bytes >>= kTaggedSizeLog2;
+  CHECK_LE(static_cast<unsigned>(size_in_words), kMaxUInt8);
+  set_instance_size_in_words(size_in_words);
 }
 
 int Map::inobject_properties_start_or_constructor_function_index() const {
@@ -315,7 +316,7 @@ int Map::inobject_properties_start_or_constructor_function_index() const {
 
 void Map::set_inobject_properties_start_or_constructor_function_index(
     int value) {
-  CHECK_LT(static_cast<unsigned>(value), 256);
+  CHECK_LE(static_cast<unsigned>(value), kMaxUInt8);
   RELAXED_WRITE_BYTE_FIELD(
       *this, kInobjectPropertiesStartOrConstructorFunctionIndexOffset,
       static_cast<uint8_t>(value));
@@ -724,7 +725,7 @@ bool Map::CanTransition() const {
   // Shared JS objects have fixed shapes and do not transition. Their maps are
   // either in shared space or RO space.
   DCHECK_IMPLIES(InstanceTypeChecker::IsAlwaysSharedSpaceJSObject(type),
-                 InAnySharedSpace());
+                 InAnySharedSpace(*this));
   return InstanceTypeChecker::IsJSObject(type) &&
          !InstanceTypeChecker::IsAlwaysSharedSpaceJSObject(type);
 }

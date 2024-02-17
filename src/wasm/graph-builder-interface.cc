@@ -19,9 +19,7 @@
 #include "src/wasm/wasm-opcodes-inl.h"
 #include "src/wasm/well-known-imports.h"
 
-namespace v8 {
-namespace internal {
-namespace wasm {
+namespace v8::internal::wasm {
 
 namespace {
 
@@ -49,7 +47,7 @@ class LocalsVector {
 
   LocalsVector& operator=(const LocalsVector& other) V8_NOEXCEPT {
     allocator_ = other.allocator_;
-    if (!data_.size()) {
+    if (data_.empty()) {
       data_ = base::Vector<TFNode*>(allocator_->allocate(other.size()),
                                     other.size());
     }
@@ -133,8 +131,6 @@ class WasmGraphBuildingInterface {
   struct TryInfo : public ZoneObject {
     SsaEnv* catch_env;
     TFNode* exception = nullptr;
-
-    bool might_throw() const { return exception != nullptr; }
 
     MOVE_ONLY_NO_DEFAULT_CONSTRUCTOR(TryInfo);
 
@@ -755,7 +751,7 @@ class WasmGraphBuildingInterface {
                              const Value args[], Value returns[]) {
     if (!decoder->module_) return false;  // Only needed for tests.
     if (index >= decoder->module_->num_imported_functions) return false;
-    WellKnownImportsList& well_known_imports =
+    const WellKnownImportsList& well_known_imports =
         decoder->module_->type_feedback.well_known_imports;
     using WKI = WellKnownImport;
     WKI import = well_known_imports.get(index);
@@ -766,11 +762,17 @@ class WasmGraphBuildingInterface {
       case WKI::kLinkError:
         return false;
 
-      // WebAssembly.String.* imports.
+      // JS String Builtins proposal.
       case WKI::kStringCast:
-      case WKI::kStringTest:
-        // Implemented only for Turboshaft.
-        return false;
+        result = ExternRefToString(decoder, args[0]);
+        decoder->detected_->Add(kFeature_imported_strings);
+        break;
+      case WKI::kStringTest: {
+        WasmTypeCheckConfig config{args[0].type, kWasmRefString};
+        result = builder_->RefTestAbstract(args[0].node, config);
+        decoder->detected_->Add(kFeature_imported_strings);
+        break;
+      }
       case WKI::kStringCharCodeAt: {
         TFNode* string = ExternRefToString(decoder, args[0]);
         TFNode* view = builder_->StringAsWtf16(
@@ -839,18 +841,34 @@ class WasmGraphBuildingInterface {
         builder_->SetType(result, kWasmRefString);
         decoder->detected_->Add(kFeature_imported_strings);
         break;
-      case WKI::kStringFromWtf8Array:
+      case WKI::kStringFromUtf8Array:
         result = builder_->StringNewWtf8Array(
-            unibrow::Utf8Variant::kWtf8, args[0].node,
+            unibrow::Utf8Variant::kLossyUtf8, args[0].node,
             NullCheckFor(args[0].type), args[1].node, args[2].node,
             decoder->position());
         builder_->SetType(result, kWasmRefString);
         decoder->detected_->Add(kFeature_imported_strings);
         break;
+      case WKI::kStringIntoUtf8Array: {
+        TFNode* string = ExternRefToString(decoder, args[0]);
+        result = builder_->StringEncodeWtf8Array(
+            unibrow::Utf8Variant::kLossyUtf8, string,
+            compiler::kWithoutNullCheck, args[1].node,
+            NullCheckFor(args[1].type), args[2].node, decoder->position());
+        decoder->detected_->Add(kFeature_imported_strings);
+        break;
+      }
       case WKI::kStringLength: {
         TFNode* string = ExternRefToString(decoder, args[0]);
         result = builder_->StringMeasureWtf16(
             string, compiler::kWithoutNullCheck, decoder->position());
+        decoder->detected_->Add(kFeature_imported_strings);
+        break;
+      }
+      case WKI::kStringMeasureUtf8: {
+        TFNode* string = ExternRefToString(decoder, args[0]);
+        result = builder_->StringMeasureWtf8(string, compiler::kWithNullCheck,
+                                             decoder->position());
         decoder->detected_->Add(kFeature_imported_strings);
         break;
       }
@@ -944,7 +962,7 @@ class WasmGraphBuildingInterface {
   void CallDirect(FullDecoder* decoder, const CallFunctionImmediate& imm,
                   const Value args[], Value returns[]) {
     int maybe_call_count = -1;
-    if (inlining_enabled(decoder) && type_feedback_.size() > 0) {
+    if (inlining_enabled(decoder) && !type_feedback_.empty()) {
       const CallSiteFeedback& feedback = next_call_feedback();
       DCHECK_EQ(feedback.num_cases(), 1);
       maybe_call_count = feedback.call_count(0);
@@ -959,7 +977,7 @@ class WasmGraphBuildingInterface {
   void ReturnCall(FullDecoder* decoder, const CallFunctionImmediate& imm,
                   const Value args[]) {
     int maybe_call_count = -1;
-    if (inlining_enabled(decoder) && type_feedback_.size() > 0) {
+    if (inlining_enabled(decoder) && !type_feedback_.empty()) {
       const CallSiteFeedback& feedback = next_call_feedback();
       DCHECK_EQ(feedback.num_cases(), 1);
       maybe_call_count = feedback.call_count(0);
@@ -987,10 +1005,9 @@ class WasmGraphBuildingInterface {
   }
 
   void CallRef(FullDecoder* decoder, const Value& func_ref,
-               const FunctionSig* sig, uint32_t sig_index, const Value args[],
-               Value returns[]) {
+               const FunctionSig* sig, const Value args[], Value returns[]) {
     const CallSiteFeedback* feedback = nullptr;
-    if (inlining_enabled(decoder) && type_feedback_.size() > 0) {
+    if (inlining_enabled(decoder) && !type_feedback_.empty()) {
       feedback = &next_call_feedback();
     }
     if (feedback == nullptr || feedback->num_cases() == 0) {
@@ -1034,7 +1051,7 @@ class WasmGraphBuildingInterface {
       DoCall(decoder,
              CallInfo::CallDirect(expected_function_index,
                                   feedback->call_count(i)),
-             decoder->module_->signature(sig_index), args, returns_direct);
+             sig, args, returns_direct);
       control_args.push_back(control());
       effect_args.push_back(effect());
       returns_values.push_back(returns_direct);
@@ -1069,6 +1086,7 @@ class WasmGraphBuildingInterface {
 
     for (uint32_t i = 0; i < sig->return_count(); i++) {
       std::vector<TFNode*> phi_args;
+      phi_args.reserve(num_cases + 2);
       for (int j = 0; j < num_cases; j++) {
         phi_args.push_back(returns_values[j][i].node);
       }
@@ -1081,10 +1099,9 @@ class WasmGraphBuildingInterface {
   }
 
   void ReturnCallRef(FullDecoder* decoder, const Value& func_ref,
-                     const FunctionSig* sig, uint32_t sig_index,
-                     const Value args[]) {
+                     const FunctionSig* sig, const Value args[]) {
     const CallSiteFeedback* feedback = nullptr;
-    if (inlining_enabled(decoder) && type_feedback_.size() > 0) {
+    if (inlining_enabled(decoder) && !type_feedback_.empty()) {
       feedback = &next_call_feedback();
     }
     if (feedback == nullptr || feedback->num_cases() == 0) {
@@ -1231,14 +1248,6 @@ class WasmGraphBuildingInterface {
   void CatchException(FullDecoder* decoder, const TagIndexImmediate& imm,
                       Control* block, base::Vector<Value> values) {
     DCHECK(block->is_try_catch());
-    // The catch block is unreachable if no possible throws in the try block
-    // exist. We only build a landing pad if some node in the try block can
-    // (possibly) throw. Otherwise the catch environments remain empty.
-    if (!block->try_info->might_throw()) {
-      block->reachability = kSpecOnlyReachable;
-      return;
-    }
-
     TFNode* exception = block->try_info->exception;
     SetEnv(block->try_info->catch_env);
 
@@ -1299,7 +1308,7 @@ class WasmGraphBuildingInterface {
     DCHECK_EQ(decoder->control_at(0), block);
     DCHECK(block->is_incomplete_try());
 
-    if (block->try_info->might_throw()) {
+    if (block->try_info->exception) {
       // Merge the current env into the target handler's env.
       SetEnv(block->try_info->catch_env);
       if (depth == decoder->control_depth() - 1) {
@@ -1333,15 +1342,6 @@ class WasmGraphBuildingInterface {
   void CatchAll(FullDecoder* decoder, Control* block) {
     DCHECK(block->is_try_catchall() || block->is_try_catch());
     DCHECK_EQ(decoder->control_at(0), block);
-
-    // The catch block is unreachable if no possible throws in the try block
-    // exist. We only build a landing pad if some node in the try block can
-    // (possibly) throw. Otherwise the catch environments remain empty.
-    if (!block->try_info->might_throw()) {
-      decoder->SetSucceedingCodeDynamicallyUnreachable();
-      return;
-    }
-
     SetEnv(block->try_info->catch_env);
   }
 
@@ -1350,14 +1350,6 @@ class WasmGraphBuildingInterface {
   void CatchCase(FullDecoder* decoder, Control* block,
                  const CatchCase& catch_case, base::Vector<Value> values) {
     DCHECK(block->is_try_table());
-    // The catch block is unreachable if no possible throws in the try block
-    // exist. We only build a landing pad if some node in the try block can
-    // (possibly) throw. Otherwise the catch environments remain empty.
-    if (!block->try_info->might_throw()) {
-      decoder->SetSucceedingCodeDynamicallyUnreachable();
-      return;
-    }
-
     TFNode* exception = block->try_info->exception;
     SetEnv(block->try_info->catch_env);
 
@@ -2740,6 +2732,4 @@ void BuildTFGraph(AccountingAllocator* allocator, WasmFeatures enabled,
   CHECK(decoder.ok());
 }
 
-}  // namespace wasm
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal::wasm

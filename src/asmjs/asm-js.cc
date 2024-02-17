@@ -351,8 +351,7 @@ MaybeHandle<Object> AsmJs::InstantiateAsmWasm(Isolate* isolate,
   // Check that all used stdlib members are valid.
   bool stdlib_use_of_typed_array_present = false;
   wasm::AsmJsParser::StdlibSet stdlib_uses =
-      wasm::AsmJsParser::StdlibSet::FromIntegral(
-          uses_bitset->value_as_bits(kRelaxedLoad));
+      wasm::AsmJsParser::StdlibSet::FromIntegral(uses_bitset->value_as_bits());
   if (!stdlib_uses.empty()) {  // No checking needed if no uses.
     if (stdlib.is_null()) {
       ReportInstantiationFailure(script, position, "Requires standard library");
@@ -410,7 +409,9 @@ MaybeHandle<Object> AsmJs::InstantiateAsmWasm(Isolate* isolate,
       wasm_engine->SyncInstantiate(isolate, &thrower, module, foreign, memory);
   if (maybe_instance.is_null()) {
     // Clear a possible stack overflow from function entry that would have
-    // bypassed the {ErrorThrower}.
+    // bypassed the {ErrorThrower}. Be careful not to clear a termination
+    // exception.
+    if (isolate->is_execution_terminating()) return {};
     if (isolate->has_exception()) isolate->clear_exception();
     if (thrower.error()) {
       base::ScopedVector<char> error_reason(100);
@@ -420,7 +421,7 @@ MaybeHandle<Object> AsmJs::InstantiateAsmWasm(Isolate* isolate,
       ReportInstantiationFailure(script, position, "Internal wasm failure");
     }
     thrower.Reset();  // Ensure exceptions do not propagate.
-    return MaybeHandle<Object>();
+    return {};
   }
   DCHECK(!thrower.error());
   Handle<WasmInstanceObject> instance = maybe_instance.ToHandleChecked();

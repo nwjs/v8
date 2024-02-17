@@ -259,7 +259,7 @@ class V8_NODISCARD BytecodeGenerator::ControlScope::DeferredCommands final {
   // Applies all recorded control-flow commands after the finally-block again.
   // This generates a dynamic dispatch on the token from the entry point.
   void ApplyDeferredCommands() {
-    if (deferred_.size() == 0) return;
+    if (deferred_.empty()) return;
 
     BytecodeLabel fall_through;
 
@@ -517,6 +517,39 @@ class BytecodeGenerator::ControlScopeForTryFinally final
  private:
   TryFinallyBuilder* try_finally_builder_;
   DeferredCommands* commands_;
+};
+
+// Scoped class for collecting 'return' statments in a derived constructor.
+// Derived constructors can only return undefined or objects, and this check
+// must occur right before return (e.g., after `finally` blocks execute).
+class BytecodeGenerator::ControlScopeForDerivedConstructor final
+    : public BytecodeGenerator::ControlScope {
+ public:
+  ControlScopeForDerivedConstructor(BytecodeGenerator* generator,
+                                    Register result_register,
+                                    BytecodeLabels* check_return_value_labels)
+      : ControlScope(generator),
+        result_register_(result_register),
+        check_return_value_labels_(check_return_value_labels) {}
+
+ protected:
+  bool Execute(Command command, Statement* statement,
+               int source_position) override {
+    // Constructors are never async.
+    DCHECK_NE(CMD_ASYNC_RETURN, command);
+    if (command == CMD_RETURN) {
+      PopContextToExpectedDepth();
+      generator()->builder()->SetStatementPosition(source_position);
+      generator()->builder()->StoreAccumulatorInRegister(result_register_);
+      generator()->builder()->Jump(check_return_value_labels_->New());
+      return true;
+    }
+    return false;
+  }
+
+ private:
+  Register result_register_;
+  BytecodeLabels* check_return_value_labels_;
 };
 
 // Allocate and fetch the coverage indices tracking NaryLogical Expressions.
@@ -1512,6 +1545,81 @@ void BytecodeGenerator::GenerateBytecode(uintptr_t stack_limit) {
 }
 
 void BytecodeGenerator::GenerateBytecodeBody() {
+  FunctionLiteral* literal = info()->literal();
+
+  if (literal->kind() == FunctionKind::kDerivedConstructor) {
+    // Per spec, derived constructors can only return undefined or an object;
+    // other primitives trigger an exception in ConstructStub.
+    //
+    // Since the receiver is popped by the callee, derived constructors return
+    // <this> if the original return value was undefined.
+    //
+    // Also per spec, this return value check is done after all user code (e.g.,
+    // finally blocks) are executed. For example, the following code does not
+    // throw.
+    //
+    //   class C extends class {} {
+    //     constructor() {
+    //       try { throw 42; }
+    //       catch(e) { return; }
+    //       finally { super(); }
+    //     }
+    //   }
+    //   new C();
+    //
+    // This check is implemented by jumping to the check instead of emitting a
+    // return bytecode in-place inside derived constructors.
+    //
+    // Note that default derived constructors do not need this check as they
+    // just forward a super call.
+
+    BytecodeLabels check_return_value(zone());
+    Register result = register_allocator()->NewRegister();
+    ControlScopeForDerivedConstructor control(this, result,
+                                              &check_return_value);
+
+    {
+      HoleCheckElisionScope elider(this);
+      GenerateBytecodeBodyWithoutImplicitFinalReturn();
+    }
+
+    if (check_return_value.empty()) {
+      if (!builder()->RemainderOfBlockIsDead()) {
+        BuildThisVariableLoad();
+        BuildReturn(literal->return_position());
+      }
+    } else {
+      BytecodeLabels return_this(zone());
+
+      if (!builder()->RemainderOfBlockIsDead()) {
+        builder()->Jump(return_this.New());
+      }
+
+      check_return_value.Bind(builder());
+      builder()->LoadAccumulatorWithRegister(result);
+      builder()->JumpIfUndefined(return_this.New());
+      BuildReturn(literal->return_position());
+
+      {
+        return_this.Bind(builder());
+        BuildThisVariableLoad();
+        BuildReturn(literal->return_position());
+      }
+    }
+  } else {
+    GenerateBytecodeBodyWithoutImplicitFinalReturn();
+
+    // Emit an implicit return instruction in case control flow can fall off the
+    // end of the function without an explicit return being present on all
+    // paths.
+    if (!builder()->RemainderOfBlockIsDead()) {
+      builder()->LoadUndefined();
+      BuildReturn(literal->return_position());
+    }
+  }
+}
+
+void BytecodeGenerator::GenerateBytecodeBodyWithoutImplicitFinalReturn() {
   // Build the arguments object if it is used.
   VisitArgumentsObject(closure_scope()->arguments());
 
@@ -1568,13 +1676,6 @@ void BytecodeGenerator::GenerateBytecodeBody() {
 
   // Visit statements in the function body.
   VisitStatements(literal->body());
-
-  // Emit an implicit return instruction in case control flow can fall off the
-  // end of the function without an explicit return being present on all paths.
-  if (!builder()->RemainderOfBlockIsDead()) {
-    builder()->LoadUndefined();
-    BuildReturn(literal->return_position());
-  }
 }
 
 void BytecodeGenerator::AllocateTopLevelRegisters() {
@@ -1985,10 +2086,10 @@ struct SwitchInfo {
            clause != GetClause(ReduceToSmiSwitchCaseValue(clause->label()));
   }
   int MinCase() {
-    return covered_cases.size() == 0 ? INT_MAX : covered_cases.begin()->first;
+    return covered_cases.empty() ? INT_MAX : covered_cases.begin()->first;
   }
   int MaxCase() {
-    return covered_cases.size() == 0 ? INT_MIN : covered_cases.rbegin()->first;
+    return covered_cases.empty() ? INT_MIN : covered_cases.rbegin()->first;
   }
   void Print() {
     std::cout << "Covered_cases: " << '\n';

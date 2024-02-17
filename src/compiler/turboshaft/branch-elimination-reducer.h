@@ -18,6 +18,9 @@ namespace v8::internal::compiler::turboshaft {
 
 #include "src/compiler/turboshaft/define-assembler-macros.inc"
 
+template <typename>
+class VariableReducer;
+
 template <class Next>
 class BranchEliminationReducer : public Next {
   // # General overview
@@ -192,6 +195,9 @@ class BranchEliminationReducer : public Next {
   // optimization will replace its final Branch by a Goto when reaching it.
  public:
   TURBOSHAFT_REDUCER_BOILERPLATE()
+#if defined(__clang__)
+  static_assert(reducer_list_contains<ReducerList, VariableReducer>::value);
+#endif
 
   void Bind(Block* new_block) {
     Next::Bind(new_block);
@@ -298,7 +304,7 @@ class BranchEliminationReducer : public Next {
       goto no_change;
     }
 
-    if (destination_origin->HasExactlyNPredecessors(1)) {
+    if (destination_origin->PredecessorCount() == 1) {
       // This block has a single successor and `destination_origin` has a single
       // predecessor. We can merge these blocks (optimization 5).
       __ CloneAndInlineBlock(destination_origin);
@@ -355,8 +361,8 @@ class BranchEliminationReducer : public Next {
       // TODO(nicohartmann@): Temporarily disable this "optimization" because
       // it prevents dead code elimination in some cases. Reevaluate this and
       // reenable if phases have been reordered properly.
-      // Asm().CloneAndInlineBlock(old_dst);
-      // return OpIndex::Invalid();
+      Asm().CloneAndInlineBlock(destination_origin);
+      return OpIndex::Invalid();
     }
 
     goto no_change;

@@ -27,6 +27,7 @@
 #include "src/compiler/turboshaft/deopt-data.h"
 #include "src/compiler/turboshaft/graph.h"
 #include "src/compiler/turboshaft/operations.h"
+#include "src/compiler/turboshaft/opmasks.h"
 #include "src/compiler/turboshaft/phase.h"
 #include "src/compiler/turboshaft/representations.h"
 #include "src/compiler/write-barrier-kind.h"
@@ -187,6 +188,7 @@ void ScheduleBuilder::ProcessOperation(const Operation& op) {
 #define SHOULD_HAVE_BEEN_LOWERED(op) \
   Node* ScheduleBuilder::ProcessOperation(const op##Op&) { UNREACHABLE(); }
 // These operations should have been lowered in previous reducers already.
+TURBOSHAFT_JS_OPERATION_LIST(SHOULD_HAVE_BEEN_LOWERED)
 TURBOSHAFT_SIMPLIFIED_OPERATION_LIST(SHOULD_HAVE_BEEN_LOWERED)
 TURBOSHAFT_OTHER_OPERATION_LIST(SHOULD_HAVE_BEEN_LOWERED)
 TURBOSHAFT_WASM_OPERATION_LIST(SHOULD_HAVE_BEEN_LOWERED)
@@ -527,9 +529,6 @@ Node* ScheduleBuilder::ProcessOperation(const ShiftOp& op) {
          op.rep == WordRepresentation::Word64());
   bool word64 = op.rep == WordRepresentation::Word64();
   Node* right = GetNode(op.right());
-  // TODO(chromium:1489500, nicohartmann@): Reenable once turboshaft csa
-  // pipeline crashes are fixed.
-#if 0
   if (word64) {
     // In Turboshaft's ShiftOp, the right hand side always has Word32
     // representation, so for 64 bit shifts, we have to zero-extend when
@@ -542,7 +541,6 @@ Node* ScheduleBuilder::ProcessOperation(const ShiftOp& op) {
       right = AddNode(machine.ChangeUint32ToUint64(), {right});
     }
   }
-#endif
   const Operator* o;
   switch (op.kind) {
     case ShiftOp::Kind::kShiftRightArithmeticShiftOutZeros:
@@ -867,17 +865,34 @@ Node* ScheduleBuilder::ProcessOperation(
                  {temp, GetNode(op.low_word32())});
 }
 Node* ScheduleBuilder::ProcessOperation(const TaggedBitcastOp& op) {
+  using Rep = RegisterRepresentation;
   const Operator* o;
-  if (op.from == RegisterRepresentation::Tagged() &&
-      op.to == RegisterRepresentation::PointerSized()) {
-    o = machine.BitcastTaggedToWord();
-  } else if (op.from.IsWord() && op.to == RegisterRepresentation::Tagged()) {
-    o = machine.BitcastWordToTagged();
-  } else if (op.from == RegisterRepresentation::Compressed() &&
-             op.to == RegisterRepresentation::Word32()) {
-    o = machine.BitcastTaggedToWord();
-  } else {
-    UNIMPLEMENTED();
+  switch (multi(op.from, op.to)) {
+    case multi(Rep::Tagged(), Rep::Word32()):
+      if constexpr (Is64()) {
+        DCHECK_EQ(op.kind, TaggedBitcastOp::Kind::kSmi);
+        DCHECK(SmiValuesAre31Bits());
+        o = machine.TruncateInt64ToInt32();
+      } else {
+        o = machine.BitcastTaggedToWord();
+      }
+      break;
+    case multi(Rep::Tagged(), Rep::Word64()):
+      o = machine.BitcastTaggedToWord();
+      break;
+    case multi(Rep::Word32(), Rep::Tagged()):
+    case multi(Rep::Word64(), Rep::Tagged()):
+      if (op.kind == TaggedBitcastOp::Kind::kSmi) {
+        o = machine.BitcastWordToTaggedSigned();
+      } else {
+        o = machine.BitcastWordToTagged();
+      }
+      break;
+    case multi(Rep::Compressed(), Rep::Word32()):
+      o = machine.BitcastTaggedToWord();
+      break;
+    default:
+      UNIMPLEMENTED();
   }
   return AddNode(o, {GetNode(op.input())});
 }
@@ -1788,6 +1803,14 @@ Node* ScheduleBuilder::ProcessOperation(const Simd128LoadTransformOp& op) {
 Node* ScheduleBuilder::ProcessOperation(const Simd128ShuffleOp& op) {
   return AddNode(machine.I8x16Shuffle(op.shuffle),
                  {GetNode(op.left()), GetNode(op.right())});
+}
+
+Node* ScheduleBuilder::ProcessOperation(const LoadStackPointerOp& op) {
+  return AddNode(machine.LoadStackPointer(), {});
+}
+
+Node* ScheduleBuilder::ProcessOperation(const SetStackPointerOp& op) {
+  return AddNode(machine.SetStackPointer(op.fp_scope), {GetNode(op.value())});
 }
 
 #endif  // V8_ENABLE_WEBASSEMBLY

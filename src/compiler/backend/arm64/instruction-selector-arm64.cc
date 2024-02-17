@@ -15,6 +15,7 @@
 #include "src/compiler/node-properties.h"
 #include "src/compiler/turboshaft/operations.h"
 #include "src/compiler/turboshaft/opmasks.h"
+#include "src/flags/flags.h"
 
 namespace v8 {
 namespace internal {
@@ -549,18 +550,42 @@ bool TryMatchAnyExtend(Arm64OperandGeneratorT<TurboshaftAdapter>* g,
   using namespace turboshaft;  // NOLINT(build/namespaces)
   if (!selector->CanCover(node, right_node)) return false;
 
-  const Operation& right = selector->Get(node);
-  if (right.Is<Opmask::kWord32BitwiseAnd>()) {
-    UNIMPLEMENTED();  // TODO(mliedtke)
-  } else if (right.Is<Opmask::kWord32ShiftRightArithmetic>()) {
-    UNIMPLEMENTED();  // TODO(mliedtke)
-  } else if (const ChangeOp* change_op = right.TryCast<ChangeOp>()) {
-    // IsChangeInt32ToInt64
-    if (change_op->kind == ChangeOp::Kind::kSignExtend &&
-        change_op->from == WordRepresentation::Word32() &&
-        change_op->to == WordRepresentation::Word64()) {
-      UNIMPLEMENTED();  // TODO(mliedtke)
+  const Operation& right = selector->Get(right_node);
+  if (const WordBinopOp* bitwise_and =
+          right.TryCast<Opmask::kWord32BitwiseAnd>()) {
+    int32_t mask;
+    if (selector->MatchIntegralWord32Constant(bitwise_and->right(), &mask) &&
+        (mask == 0xFF || mask == 0xFFFF)) {
+      *left_op = g->UseRegister(left_node);
+      *right_op = g->UseRegister(bitwise_and->left());
+      *opcode |= AddressingModeField::encode(
+          (mask == 0xFF) ? kMode_Operand2_R_UXTB : kMode_Operand2_R_UXTH);
+      return true;
     }
+  } else if (const ShiftOp* sar =
+                 right.TryCast<Opmask::kWord32ShiftRightArithmetic>()) {
+    const Operation& sar_lhs = selector->Get(sar->left());
+    if (sar_lhs.Is<Opmask::kWord32ShiftLeft>() &&
+        selector->CanCover(right_node, sar->left())) {
+      const ShiftOp& shl = sar_lhs.Cast<ShiftOp>();
+      int32_t sar_by, shl_by;
+      if (selector->MatchIntegralWord32Constant(sar->right(), &sar_by) &&
+          selector->MatchIntegralWord32Constant(shl.right(), &shl_by) &&
+          sar_by == shl_by && (sar_by == 16 || sar_by == 24)) {
+        *left_op = g->UseRegister(left_node);
+        *right_op = g->UseRegister(shl.left());
+        *opcode |= AddressingModeField::encode(
+            (sar_by == 24) ? kMode_Operand2_R_SXTB : kMode_Operand2_R_SXTH);
+        return true;
+      }
+    }
+  } else if (const ChangeOp* change_op =
+                 right.TryCast<Opmask::kChangeInt32ToInt64>()) {
+    // Use extended register form.
+    *opcode |= AddressingModeField::encode(kMode_Operand2_R_SXTW);
+    *left_op = g->UseRegister(left_node);
+    *right_op = g->UseRegister(change_op->input());
+    return true;
   }
   return false;
 }
@@ -2024,8 +2049,8 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitWord32And(
       CanCover(node, bitwise_and.left()) &&
       this->is_integer_constant(bitwise_and.right())) {
     int64_t constant_rhs = this->integer_constant(bitwise_and.right());
-    DCHECK(base::IsInRange(constant_rhs, uint32_t{0},
-                           std::numeric_limits<uint32_t>::max()));
+    DCHECK(base::IsInRange(constant_rhs, std::numeric_limits<int32_t>::min(),
+                           std::numeric_limits<int32_t>::max()));
     uint32_t mask = static_cast<uint32_t>(constant_rhs);
     uint32_t mask_width = base::bits::CountPopulation(mask);
     uint32_t mask_msb = base::bits::CountLeadingZeros32(mask);
@@ -2458,8 +2483,8 @@ bool TryEmitBitfieldExtract32(InstructionSelectorT<TurboshaftAdapter>* selector,
                                               &shift_by_constant) &&
         (lhs_shift_by_constant & 0x1F) != 0 &&
         (lhs_shift_by_constant & 0x1F) == (shift_by_constant & 0x1F)) {
-      // TODO(12783): Can this also be ShiftRightArithmeticShiftOutZeros?
       DCHECK(shift.Is<Opmask::kWord32ShiftRightArithmetic>() ||
+             shift.Is<Opmask::kWord32ShiftRightArithmeticShiftOutZeros>() ||
              shift.Is<Opmask::kWord32ShiftRightLogical>());
 
       ArchOpcode opcode = shift.kind == ShiftOp::Kind::kShiftRightLogical
@@ -3111,11 +3136,31 @@ void EmitInt32MulWithOverflow(InstructionSelectorT<Adapter>* selector,
   selector->EmitWithContinuation(opcode, result, result, cont);
 }
 
-template <>
 void EmitInt32MulWithOverflow(InstructionSelectorT<TurboshaftAdapter>* selector,
-                              typename TurboshaftAdapter::node_t node,
+                              turboshaft::OpIndex node,
                               FlagsContinuationT<TurboshaftAdapter>* cont) {
-  UNIMPLEMENTED();
+  using namespace turboshaft;  // NOLINT(build/namespaces)
+  Arm64OperandGeneratorT<TurboshaftAdapter> g(selector);
+  const OverflowCheckedBinopOp& mul =
+      selector->Get(node).Cast<OverflowCheckedBinopOp>();
+  InstructionOperand result = g.DefineAsRegister(node);
+  InstructionOperand left = g.UseRegister(mul.left());
+
+  int32_t constant_rhs;
+  if (selector->MatchIntegralWord32Constant(mul.right(), &constant_rhs) &&
+      base::bits::IsPowerOfTwo(constant_rhs)) {
+    // Sign extend the bottom 32 bits and shift left.
+    int32_t shift = base::bits::WhichPowerOfTwo(constant_rhs);
+    selector->Emit(kArm64Sbfiz, result, left, g.TempImmediate(shift),
+                   g.TempImmediate(32));
+  } else {
+    InstructionOperand right = g.UseRegister(mul.right());
+    selector->Emit(kArm64Smull, result, left, right);
+  }
+
+  InstructionCode opcode =
+      kArm64Cmp | AddressingModeField::encode(kMode_Operand2_R_SXTW);
+  selector->EmitWithContinuation(opcode, result, result, cont);
 }
 
 template <typename Adapter>
@@ -3123,12 +3168,11 @@ void EmitInt64MulWithOverflow(InstructionSelectorT<Adapter>* selector,
                               typename Adapter::node_t node,
                               FlagsContinuationT<Adapter>* cont) {
   Arm64OperandGeneratorT<Adapter> g(selector);
-  Int64BinopMatcher m(node);
   InstructionOperand result = g.DefineAsRegister(node);
-  InstructionOperand left = g.UseRegister(m.left().node());
+  InstructionOperand left = g.UseRegister(selector->input_at(node, 0));
   InstructionOperand high = g.TempRegister();
 
-  InstructionOperand right = g.UseRegister(m.right().node());
+  InstructionOperand right = g.UseRegister(selector->input_at(node, 1));
   selector->Emit(kArm64Mul, result, left, right);
   selector->Emit(kArm64Smulh, high, left, right);
 
@@ -3137,13 +3181,6 @@ void EmitInt64MulWithOverflow(InstructionSelectorT<Adapter>* selector,
       kArm64Cmp | AddressingModeField::encode(kMode_Operand2_R_ASR_I);
   selector->EmitWithContinuation(opcode, high, result, g.TempImmediate(63),
                                  cont);
-}
-
-template <>
-void EmitInt64MulWithOverflow(InstructionSelectorT<TurboshaftAdapter>* selector,
-                              typename TurboshaftAdapter::node_t node,
-                              FlagsContinuationT<TurboshaftAdapter>* cont) {
-  UNIMPLEMENTED();
 }
 
 }  // namespace
@@ -3599,43 +3636,35 @@ void InstructionSelectorT<Adapter>::VisitTryTruncateFloat64ToUint64(
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitTryTruncateFloat64ToInt32(
     node_t node) {
-  if constexpr (Adapter::IsTurboshaft) {
-    UNIMPLEMENTED();
-  } else {
-    Arm64OperandGeneratorT<Adapter> g(this);
-    InstructionOperand inputs[] = {g.UseRegister(node->InputAt(0))};
-    InstructionOperand outputs[2];
-    size_t output_count = 0;
-    outputs[output_count++] = g.DefineAsRegister(node);
+  Arm64OperandGeneratorT<Adapter> g(this);
+  InstructionOperand inputs[] = {g.UseRegister(this->input_at(node, 0))};
+  InstructionOperand outputs[2];
+  size_t output_count = 0;
+  outputs[output_count++] = g.DefineAsRegister(node);
 
-    Node* success_output = NodeProperties::FindProjection(node, 1);
-    if (success_output) {
-      outputs[output_count++] = g.DefineAsRegister(success_output);
-    }
-
-    Emit(kArm64Float64ToInt32, output_count, outputs, 1, inputs);
+  node_t success_output = FindProjection(node, 1);
+  if (this->valid(success_output)) {
+    outputs[output_count++] = g.DefineAsRegister(success_output);
   }
+
+  Emit(kArm64Float64ToInt32, output_count, outputs, 1, inputs);
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitTryTruncateFloat64ToUint32(
     node_t node) {
-  if constexpr (Adapter::IsTurboshaft) {
-    UNIMPLEMENTED();
-  } else {
-    Arm64OperandGeneratorT<Adapter> g(this);
-    InstructionOperand inputs[] = {g.UseRegister(node->InputAt(0))};
-    InstructionOperand outputs[2];
-    size_t output_count = 0;
-    outputs[output_count++] = g.DefineAsRegister(node);
+  Arm64OperandGeneratorT<Adapter> g(this);
+  InstructionOperand inputs[] = {g.UseRegister(this->input_at(node, 0))};
+  InstructionOperand outputs[2];
+  size_t output_count = 0;
+  outputs[output_count++] = g.DefineAsRegister(node);
 
-    Node* success_output = NodeProperties::FindProjection(node, 1);
-    if (success_output) {
-      outputs[output_count++] = g.DefineAsRegister(success_output);
-    }
-
-    Emit(kArm64Float64ToUint32, output_count, outputs, 1, inputs);
+  node_t success_output = FindProjection(node, 1);
+  if (this->valid(success_output)) {
+    outputs[output_count++] = g.DefineAsRegister(success_output);
   }
+
+  Emit(kArm64Float64ToUint32, output_count, outputs, 1, inputs);
 }
 
 template <typename Adapter>
@@ -3684,9 +3713,18 @@ void InstructionSelectorT<Adapter>::VisitChangeInt32ToInt64(node_t node) {
       EmitLoad(this, change_op.input(), opcode, immediate_mode, rep, node);
       return;
     }
-    if (input_op.Is<Opmask::kWord32ShiftRightArithmetic>() &&
+    if ((input_op.Is<Opmask::kWord32ShiftRightArithmetic>() ||
+         input_op.Is<Opmask::kWord32ShiftRightArithmeticShiftOutZeros>()) &&
         CanCover(node, change_op.input())) {
-      UNIMPLEMENTED();  // TODO(mliedtke)
+      const ShiftOp& sar = input_op.Cast<ShiftOp>();
+      if (this->is_integer_constant(sar.right())) {
+        Arm64OperandGeneratorT<Adapter> g(this);
+        // Mask the shift amount, to keep the same semantics as Word32Sar.
+        int right = this->integer_constant(sar.right()) & 0x1F;
+        Emit(kArm64Sbfx, g.DefineAsRegister(node), g.UseRegister(sar.left()),
+             g.TempImmediate(right), g.TempImmediate(32 - right));
+        return;
+      }
     }
     VisitRR(this, kArm64Sxtw, node);
   } else {
@@ -3844,14 +3882,11 @@ void InstructionSelectorT<Adapter>::VisitTruncateInt64ToInt32(node_t node) {
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitFloat64Mod(node_t node) {
-  if constexpr (Adapter::IsTurboshaft) {
-    UNIMPLEMENTED();
-  } else {
-    Arm64OperandGeneratorT<Adapter> g(this);
-    Emit(kArm64Float64Mod, g.DefineAsFixed(node, d0),
-         g.UseFixed(node->InputAt(0), d0), g.UseFixed(node->InputAt(1), d1))
-        ->MarkAsCall();
-  }
+  Arm64OperandGeneratorT<Adapter> g(this);
+  Emit(kArm64Float64Mod, g.DefineAsFixed(node, d0),
+       g.UseFixed(this->input_at(node, 0), d0),
+       g.UseFixed(this->input_at(node, 1), d1))
+      ->MarkAsCall();
 }
 
 template <typename Adapter>
@@ -4542,9 +4577,9 @@ void VisitFloat32Compare(InstructionSelectorT<Adapter>* selector,
   Arm64OperandGeneratorT<Adapter> g(selector);
   if constexpr (Adapter::IsTurboshaft) {
     using namespace turboshaft;  // NOLINT(build/namespaces)
-    const Operation& op = selector->Get(node);
-    OpIndex left = op.input(0);
-    OpIndex right = op.input(1);
+    const ComparisonOp& op = selector->Get(node).template Cast<ComparisonOp>();
+    OpIndex left = op.left();
+    OpIndex right = op.right();
     if (selector->MatchZero(right)) {
       VisitCompare(selector, kArm64Float32Cmp, g.UseRegister(left),
                    g.UseImmediate(right), cont);
@@ -5521,7 +5556,16 @@ void InstructionSelectorT<Adapter>::VisitWord64Equal(node_t node) {
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitInt32AddWithOverflow(node_t node) {
   if constexpr (Adapter::IsTurboshaft) {
-    UNIMPLEMENTED();
+    using namespace turboshaft;  // NOLINT(build/namespaces)
+    OpIndex ovf = FindProjection(node, 1);
+    if (ovf.valid()) {
+      FlagsContinuation cont = FlagsContinuation::ForSet(kOverflow, ovf);
+      return VisitBinop(this, node, RegisterRepresentation::Word32(),
+                        kArm64Add32, kArithmeticImm, &cont);
+    }
+    FlagsContinuation cont;
+    VisitBinop(this, node, RegisterRepresentation::Word32(), kArm64Add32,
+               kArithmeticImm, &cont);
   } else {
     if (Node* ovf = NodeProperties::FindProjection(node, 1)) {
       FlagsContinuation cont = FlagsContinuation::ForSet(kOverflow, ovf);
@@ -5537,7 +5581,16 @@ void InstructionSelectorT<Adapter>::VisitInt32AddWithOverflow(node_t node) {
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitInt32SubWithOverflow(node_t node) {
   if constexpr (Adapter::IsTurboshaft) {
-    UNIMPLEMENTED();
+    using namespace turboshaft;  // NOLINT(build/namespaces)
+    OpIndex ovf = FindProjection(node, 1);
+    if (ovf.valid()) {
+      FlagsContinuation cont = FlagsContinuation::ForSet(kOverflow, ovf);
+      return VisitBinop(this, node, RegisterRepresentation::Word32(),
+                        kArm64Sub32, kArithmeticImm, &cont);
+    }
+    FlagsContinuation cont;
+    VisitBinop(this, node, RegisterRepresentation::Word32(), kArm64Sub32,
+               kArithmeticImm, &cont);
   } else {
     if (Node* ovf = NodeProperties::FindProjection(node, 1)) {
       FlagsContinuation cont = FlagsContinuation::ForSet(kOverflow, ovf);
@@ -5552,26 +5605,32 @@ void InstructionSelectorT<Adapter>::VisitInt32SubWithOverflow(node_t node) {
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitInt32MulWithOverflow(node_t node) {
-  if constexpr (Adapter::IsTurboshaft) {
-    UNIMPLEMENTED();
-  } else {
-    if (Node* ovf = NodeProperties::FindProjection(node, 1)) {
-      // ARM64 doesn't set the overflow flag for multiplication, so we need to
-      // test on kNotEqual. Here is the code sequence used:
-      //   smull result, left, right
-      //   cmp result.X(), Operand(result, SXTW)
-      FlagsContinuation cont = FlagsContinuation::ForSet(kNotEqual, ovf);
-      return EmitInt32MulWithOverflow(this, node, &cont);
-    }
-    FlagsContinuation cont;
-    EmitInt32MulWithOverflow(this, node, &cont);
+  node_t ovf = FindProjection(node, 1);
+  if (this->valid(ovf)) {
+    // ARM64 doesn't set the overflow flag for multiplication, so we need to
+    // test on kNotEqual. Here is the code sequence used:
+    //   smull result, left, right
+    //   cmp result.X(), Operand(result, SXTW)
+    FlagsContinuation cont = FlagsContinuation::ForSet(kNotEqual, ovf);
+    return EmitInt32MulWithOverflow(this, node, &cont);
   }
+  FlagsContinuation cont;
+  EmitInt32MulWithOverflow(this, node, &cont);
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitInt64AddWithOverflow(node_t node) {
   if constexpr (Adapter::IsTurboshaft) {
-    UNIMPLEMENTED();
+    using namespace turboshaft;  // NOLINT(build/namespaces)
+    OpIndex ovf = FindProjection(node, 1);
+    if (ovf.valid()) {
+      FlagsContinuation cont = FlagsContinuation::ForSet(kOverflow, ovf);
+      return VisitBinop(this, node, RegisterRepresentation::Word64(), kArm64Add,
+                        kArithmeticImm, &cont);
+    }
+    FlagsContinuation cont;
+    VisitBinop(this, node, RegisterRepresentation::Word64(), kArm64Add,
+               kArithmeticImm, &cont);
   } else {
     if (Node* ovf = NodeProperties::FindProjection(node, 1)) {
       FlagsContinuation cont = FlagsContinuation::ForSet(kOverflow, ovf);
@@ -5587,7 +5646,16 @@ void InstructionSelectorT<Adapter>::VisitInt64AddWithOverflow(node_t node) {
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitInt64SubWithOverflow(node_t node) {
   if constexpr (Adapter::IsTurboshaft) {
-    UNIMPLEMENTED();
+    using namespace turboshaft;  // NOLINT(build/namespaces)
+    OpIndex ovf = FindProjection(node, 1);
+    if (ovf.valid()) {
+      FlagsContinuation cont = FlagsContinuation::ForSet(kOverflow, ovf);
+      return VisitBinop(this, node, RegisterRepresentation::Word64(), kArm64Sub,
+                        kArithmeticImm, &cont);
+    }
+    FlagsContinuation cont;
+    VisitBinop(this, node, RegisterRepresentation::Word64(), kArm64Sub,
+               kArithmeticImm, &cont);
   } else {
     if (Node* ovf = NodeProperties::FindProjection(node, 1)) {
       FlagsContinuation cont = FlagsContinuation::ForSet(kOverflow, ovf);
@@ -5602,21 +5670,18 @@ void InstructionSelectorT<Adapter>::VisitInt64SubWithOverflow(node_t node) {
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitInt64MulWithOverflow(node_t node) {
-  if constexpr (Adapter::IsTurboshaft) {
-    UNIMPLEMENTED();
-  } else {
-    if (Node* ovf = NodeProperties::FindProjection(node, 1)) {
-      // ARM64 doesn't set the overflow flag for multiplication, so we need to
-      // test on kNotEqual. Here is the code sequence used:
-      //   mul result, left, right
-      //   smulh high, left, right
-      //   cmp high, result, asr 63
-      FlagsContinuation cont = FlagsContinuation::ForSet(kNotEqual, ovf);
-      return EmitInt64MulWithOverflow(this, node, &cont);
-    }
-    FlagsContinuation cont;
-    EmitInt64MulWithOverflow(this, node, &cont);
+  node_t ovf = FindProjection(node, 1);
+  if (this->valid(ovf)) {
+    // ARM64 doesn't set the overflow flag for multiplication, so we need to
+    // test on kNotEqual. Here is the code sequence used:
+    //   mul result, left, right
+    //   smulh high, left, right
+    //   cmp high, result, asr 63
+    FlagsContinuation cont = FlagsContinuation::ForSet(kNotEqual, ovf);
+    return EmitInt64MulWithOverflow(this, node, &cont);
   }
+  FlagsContinuation cont;
+  EmitInt64MulWithOverflow(this, node, &cont);
 }
 
 template <typename Adapter>
@@ -5819,11 +5884,10 @@ void InstructionSelectorT<Adapter>::VisitFloat64InsertLowWord32(node_t node) {
     if (left->opcode() == IrOpcode::kFloat64InsertHighWord32 &&
         CanCover(node, left)) {
       Node* right_of_left = left->InputAt(1);
-      Emit(kArm64Bfi, g.DefineSameAsFirst(right), g.UseRegister(right),
+      Emit(kArm64Bfi, g.DefineSameAsFirst(left), g.UseRegister(right),
            g.UseRegister(right_of_left), g.TempImmediate(32),
            g.TempImmediate(32));
-      Emit(kArm64Float64MoveU64, g.DefineAsRegister(node),
-           g.UseRegister(right));
+      Emit(kArm64Float64MoveU64, g.DefineAsRegister(node), g.UseRegister(left));
       return;
     }
     Emit(kArm64Float64InsertLowWord32, g.DefineSameAsFirst(node),
@@ -7439,11 +7503,17 @@ void InstructionSelectorT<Adapter>::VisitI8x16Shuffle(node_t node) {
        g.UseImmediate(wasm::SimdShuffle::Pack4Lanes(shuffle + 12)));
 }
 
-template <>
-void InstructionSelectorT<TurbofanAdapter>::VisitSetStackPointer(Node* node) {
+template <typename Adapter>
+void InstructionSelectorT<Adapter>::VisitSetStackPointer(node_t node) {
   OperandGenerator g(this);
-  auto input = g.UseRegister(node->InputAt(0));
-  auto fp_scope = OpParameter<wasm::FPRelativeScope>(node->op());
+  auto input = g.UseRegister(this->input_at(node, 0));
+  wasm::FPRelativeScope fp_scope;
+  if constexpr (Adapter::IsTurboshaft) {
+    fp_scope =
+        this->Get(node).template Cast<turboshaft::SetStackPointerOp>().fp_scope;
+  } else {
+    fp_scope = OpParameter<wasm::FPRelativeScope>(node->op());
+  }
   Emit(kArchSetStackPointer | MiscField::encode(fp_scope), 0, nullptr, 1,
        &input);
 }

@@ -114,6 +114,10 @@ void MacroAssembler::LoadRootRelative(Register destination, int32_t offset) {
   movq(destination, Operand(kRootRegister, offset));
 }
 
+void MacroAssembler::StoreRootRelative(int32_t offset, Register value) {
+  movq(Operand(kRootRegister, offset), value);
+}
+
 void MacroAssembler::LoadAddress(Register destination,
                                  ExternalReference source) {
   if (root_array_available_ && options().enable_root_relative_access) {
@@ -200,16 +204,20 @@ void MacroAssembler::PushRoot(RootIndex index) {
   Push(RootAsOperand(index));
 }
 
-void MacroAssembler::CompareRoot(Register with, RootIndex index) {
-  if (!base::IsInRange(index, RootIndex::kFirstStrongOrReadOnlyRoot,
+void MacroAssembler::CompareRoot(Register with, RootIndex index,
+                                 ComparisonMode mode) {
+  if (mode == ComparisonMode::kFullPointer ||
+      !base::IsInRange(index, RootIndex::kFirstStrongOrReadOnlyRoot,
                        RootIndex::kLastStrongOrReadOnlyRoot)) {
     // Some smi roots contain system pointer size values like stack limits.
     cmpq(with, RootAsOperand(index));
+    return;
   }
-  return CompareTaggedRoot(with, index);
+  CompareTaggedRoot(with, index);
 }
 
 void MacroAssembler::CompareTaggedRoot(Register with, RootIndex index) {
+  AssertSmiOrHeapObjectInMainCompressionCage(with);
   if (CanBeImmediate(index)) {
     cmp_tagged(with, Immediate(static_cast<uint32_t>(ReadOnlyRootPtr(index))));
     return;
@@ -580,13 +588,12 @@ void MacroAssembler::ResolveTrustedPointerHandle(Register destination,
                                                  IndirectPointerTag tag) {
   DCHECK_NE(tag, kCodeIndirectPointerTag);
   DCHECK(!AreAliased(handle, destination));
-  CHECK(root_array_available_);
-  Register table = destination;
-  LoadAddress(table,
-              ExternalReference::trusted_pointer_table_base_address(isolate()));
   shrl(handle, Immediate(kTrustedPointerHandleShift));
   static_assert(kTrustedPointerTableEntrySize == 8);
-  movq(destination, Operand(table, handle, times_8, 0));
+  DCHECK(root_array_available_);
+  movq(destination,
+       Operand{kRootRegister, IsolateData::trusted_pointer_table_offset()});
+  movq(destination, Operand{destination, handle, times_8, 0});
   // The LSB is used as marking bit by the trusted pointer table, so here we
   // have to set it using a bitwise OR as it may or may not be set.
   orq(destination, Immediate(kHeapObjectTag));
@@ -620,6 +627,20 @@ void MacroAssembler::LoadCodeEntrypointViaCodePointer(Register destination,
   movq(destination, Operand(kScratchRegister, destination, times_1, 0));
 }
 #endif  // V8_ENABLE_SANDBOX
+
+void MacroAssembler::LoadProtectedPointerField(Register destination,
+                                               Operand field_operand) {
+  DCHECK(root_array_available());
+#ifdef V8_ENABLE_SANDBOX
+  DCHECK(!AreAliased(destination, kScratchRegister));
+  movl(destination, field_operand);
+  movq(kScratchRegister,
+       Operand(kRootRegister, IsolateData::trusted_cage_base_offset()));
+  orq(destination, kScratchRegister);
+#else
+  LoadTaggedField(destination, field_operand);
+#endif
+}
 
 void MacroAssembler::CallEphemeronKeyBarrier(Register object,
                                              Register slot_address,
@@ -937,7 +958,7 @@ void MacroAssembler::Abort(AbortReason reason) {
       // when v8_flags.debug_code is enabled.
       Call(EntryFromBuiltinAsOperand(Builtin::kAbort));
     } else {
-      Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
+      CallBuiltin(Builtin::kAbort);
     }
   }
 
@@ -959,10 +980,9 @@ void MacroAssembler::CallRuntime(const Runtime::Function* f,
   // smarter.
   Move(rax, num_arguments);
   LoadAddress(rbx, ExternalReference::Create(f));
+
   bool switch_to_central = this->options().is_wasm;
-  Handle<Code> code = CodeFactory::CEntry(
-      isolate(), f->result_size, ArgvMode::kStack, false, switch_to_central);
-  Call(code, RelocInfo::CODE_TARGET);
+  CallBuiltin(Builtins::RuntimeCEntry(f->result_size, switch_to_central));
 }
 
 void MacroAssembler::TailCallRuntime(Runtime::FunctionId fid) {
@@ -989,9 +1009,7 @@ void MacroAssembler::JumpToExternalReference(const ExternalReference& ext,
   ASM_CODE_COMMENT(this);
   // Set the entry point and jump to the C entry runtime stub.
   LoadAddress(rbx, ext);
-  Handle<Code> code =
-      CodeFactory::CEntry(isolate(), 1, ArgvMode::kStack, builtin_exit_frame);
-  Jump(code, RelocInfo::CODE_TARGET);
+  TailCallBuiltin(Builtins::CEntry(1, ArgvMode::kStack, builtin_exit_frame));
 }
 
 namespace {
@@ -1016,6 +1034,11 @@ void TailCallOptimizedCodeSlot(MacroAssembler* masm,
   // If the optimized code is cleared, go to runtime to update the optimization
   // marker field.
   __ LoadWeakValue(optimized_code_entry, &heal_optimized_code_slot);
+
+  // The entry references a CodeWrapper object. Unwrap it now.
+  __ LoadCodePointerField(
+      optimized_code_entry,
+      FieldOperand(optimized_code_entry, CodeWrapper::kCodeOffset), scratch1);
 
   // Check if the optimized code is marked for deopt. If it is, call the
   // runtime to clear it.
@@ -3236,17 +3259,25 @@ void MacroAssembler::AssertCode(Register object) {
   Check(equal, AbortReason::kOperandIsNotACode);
 }
 
-void MacroAssembler::AssertSmiOrHeapObjectInCompressionCage(Register object) {
-  DCHECK(PointerCompressionIsEnabled());
+void MacroAssembler::AssertSmiOrHeapObjectInMainCompressionCage(
+    Register object) {
+  if (!PointerCompressionIsEnabled()) return;
   if (!v8_flags.debug_code) return;
   ASM_CODE_COMMENT(this);
-  Label is_smi;
-  j(CheckSmi(object), &is_smi, Label::kNear);
-  movq(kScratchRegister, object);
-  subq(kScratchRegister, kPtrComprCageBaseRegister);
-  cmpq(kScratchRegister, Immediate(UINT32_MAX));
-  Check(below, AbortReason::kObjectNotTagged);
-  bind(&is_smi);
+  Label ok;
+  // We may not have any scratch registers so we preserve our input register.
+  pushq(object);
+  j(CheckSmi(object), &ok);
+  // Clear the lower 32 bits.
+  shrq(object, Immediate(32));
+  shlq(object, Immediate(32));
+  // Either the value is now equal to the pointer compression cage base or it's
+  // zero if we got a compressed pointer register as input.
+  j(zero, &ok);
+  cmpq(object, kPtrComprCageBaseRegister);
+  Check(equal, AbortReason::kObjectNotTagged);
+  bind(&ok);
+  popq(object);
 }
 
 void MacroAssembler::AssertConstructor(Register object) {
@@ -3342,32 +3373,34 @@ void MacroAssembler::AssertJSAny(Register object, Register map_tmp,
   DCHECK(!AreAliased(object, map_tmp));
   Label ok;
 
-  JumpIfSmi(object, &ok, Label::kNear);
+  Label::Distance dist = DEBUG_BOOL ? Label::kFar : Label::kNear;
+
+  JumpIfSmi(object, &ok, dist);
 
   LoadMap(map_tmp, object);
   CmpInstanceType(map_tmp, LAST_NAME_TYPE);
-  j(below_equal, &ok, Label::kNear);
+  j(below_equal, &ok, dist);
 
   CmpInstanceType(map_tmp, FIRST_JS_RECEIVER_TYPE);
-  j(above_equal, &ok, Label::kNear);
+  j(above_equal, &ok, dist);
 
   CompareRoot(map_tmp, RootIndex::kHeapNumberMap);
-  j(equal, &ok, Label::kNear);
+  j(equal, &ok, dist);
 
   CompareRoot(map_tmp, RootIndex::kBigIntMap);
-  j(equal, &ok, Label::kNear);
+  j(equal, &ok, dist);
 
   CompareRoot(object, RootIndex::kUndefinedValue);
-  j(equal, &ok, Label::kNear);
+  j(equal, &ok, dist);
 
   CompareRoot(object, RootIndex::kTrueValue);
-  j(equal, &ok, Label::kNear);
+  j(equal, &ok, dist);
 
   CompareRoot(object, RootIndex::kFalseValue);
-  j(equal, &ok, Label::kNear);
+  j(equal, &ok, dist);
 
   CompareRoot(object, RootIndex::kNullValue);
-  j(equal, &ok, Label::kNear);
+  j(equal, &ok, dist);
 
   Abort(abort_reason);
 
@@ -3809,6 +3842,12 @@ void MacroAssembler::TryLoadOptimizedOsrCode(Register scratch_and_result,
 
   // Is it marked_for_deoptimization? If yes, clear the slot.
   {
+    // The entry references a CodeWrapper object. Unwrap it now.
+    LoadCodePointerField(
+        scratch_and_result,
+        FieldOperand(scratch_and_result, CodeWrapper::kCodeOffset),
+        kScratchRegister);
+
     TestCodeIsMarkedForDeoptimization(scratch_and_result);
 
     if (min_opt_level == CodeKind::TURBOFAN) {
@@ -3985,10 +4024,10 @@ void MacroAssembler::ComputeCodeStartAddress(Register dst) {
 //    3. if it is not zero then it jumps to the builtin.
 void MacroAssembler::BailoutIfDeoptimized(Register scratch) {
   int offset = InstructionStream::kCodeOffset - InstructionStream::kHeaderSize;
-  LoadTaggedField(scratch, Operand(kJavaScriptCallCodeStartRegister, offset));
+  LoadProtectedPointerField(scratch,
+                            Operand(kJavaScriptCallCodeStartRegister, offset));
   TestCodeIsMarkedForDeoptimization(scratch);
-  Jump(BUILTIN_CODE(isolate(), CompileLazyDeoptimizedCode),
-       RelocInfo::CODE_TARGET, not_zero);
+  TailCallBuiltin(Builtin::kCompileLazyDeoptimizedCode, not_zero);
 }
 
 void MacroAssembler::CallForDeoptimization(Builtin target, int, Label* exit,

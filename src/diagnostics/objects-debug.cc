@@ -192,7 +192,7 @@ void HeapObject::HeapObjectVerify(Isolate* isolate) {
   CHECK(CheckRequiredAlignment(isolate));
 
   // Only TrustedObjects live in trusted space. See also TrustedObjectVerify.
-  CHECK_IMPLIES(!IsTrustedObject(*this) && !IsFreeSpace(*this),
+  CHECK_IMPLIES(!IsTrustedObject(*this) && !IsFreeSpaceOrFiller(*this),
                 !IsTrustedSpaceObject(*this));
 
   switch (map(cage_base)->instance_type()) {
@@ -268,8 +268,9 @@ void HeapObject::HeapObjectVerify(Isolate* isolate) {
       JSObject::cast(*this)->JSObjectVerify(isolate);
       break;
 #if V8_ENABLE_WEBASSEMBLY
-    case WASM_INSTANCE_OBJECT_TYPE:
-      WasmInstanceObject::cast(*this)->WasmInstanceObjectVerify(isolate);
+    case WASM_TRUSTED_INSTANCE_DATA_TYPE:
+      WasmTrustedInstanceData::cast(*this)->WasmTrustedInstanceDataVerify(
+          isolate);
       break;
     case WASM_VALUE_OBJECT_TYPE:
       WasmValueObject::cast(*this)->WasmValueObjectVerify(isolate);
@@ -354,8 +355,14 @@ void HeapObject::VerifyCodePointer(Isolate* isolate, Tagged<Object> p) {
   CHECK(IsInstructionStream(HeapObject::cast(p), cage_base));
 }
 
+void Name::NameVerify(Isolate* isolate) {
+  PrimitiveHeapObjectVerify(isolate);
+  CHECK(IsName(this));
+}
+
 void Symbol::SymbolVerify(Isolate* isolate) {
-  TorqueGeneratedClassVerifiers::SymbolVerify(*this, isolate);
+  NameVerify(isolate);
+  CHECK(IsSymbol(this));
   uint32_t hash;
   const bool has_hash = TryGetHash(&hash);
   CHECK(has_hash);
@@ -381,7 +388,7 @@ void BytecodeArray::BytecodeArrayVerify(Isolate* isolate) {
   {
     auto o = handler_table();
     Object::VerifyPointer(isolate, o);
-    CHECK(IsByteArray(o));
+    CHECK(IsTrustedByteArray(o));
   }
   {
     auto o = wrapper();
@@ -649,14 +656,14 @@ void Map::MapVerify(Isolate* isolate) {
           CHECK(has_shared_array_elements());
         }
       } else {
-        CHECK(Object::InSharedHeap(*this));
+        CHECK(InAnySharedSpace(*this));
         CHECK(IsUndefined(GetBackPointer(), isolate));
         Tagged<Object> maybe_cell = prototype_validity_cell(kRelaxedLoad);
-        if (IsCell(maybe_cell)) CHECK(Object::InSharedHeap(maybe_cell));
+        if (IsCell(maybe_cell)) CHECK(InAnySharedSpace(Cell::cast(maybe_cell)));
         CHECK(!is_extensible());
         CHECK(!is_prototype_map());
         CHECK(OnlyHasSimpleProperties());
-        CHECK(Object::InSharedHeap(instance_descriptors(isolate)));
+        CHECK(InAnySharedSpace(instance_descriptors(isolate)));
         if (IsJSSharedArrayMap(*this)) {
           CHECK(has_shared_array_elements());
         }
@@ -826,6 +833,7 @@ void ByteArray::ByteArrayVerify(Isolate* isolate) {
 }
 
 void TrustedByteArray::TrustedByteArrayVerify(Isolate* isolate) {
+  TrustedObjectVerify(isolate);
   CHECK(IsSmi(TaggedField<Object>::load(*this, kLengthOffset)));
 }
 
@@ -1036,20 +1044,22 @@ void JSDate::JSDateVerify(Isolate* isolate) {
 }
 
 void String::StringVerify(Isolate* isolate) {
-  TorqueGeneratedClassVerifiers::StringVerify(*this, isolate);
+  PrimitiveHeapObjectVerify(isolate);
+  CHECK(IsString(this, isolate));
   CHECK(length() >= 0 && length() <= Smi::kMaxValue);
-  CHECK_IMPLIES(length() == 0, *this == ReadOnlyRoots(isolate).empty_string());
-  if (IsInternalizedString(*this)) {
+  CHECK_IMPLIES(length() == 0, this == ReadOnlyRoots(isolate).empty_string());
+  if (IsInternalizedString(this)) {
     CHECK(HasHashCode());
-    CHECK(!ObjectInYoungGeneration(*this));
+    CHECK(!ObjectInYoungGeneration(this));
   }
 }
 
 void ConsString::ConsStringVerify(Isolate* isolate) {
-  TorqueGeneratedClassVerifiers::ConsStringVerify(*this, isolate);
+  StringVerify(isolate);
+  CHECK(IsConsString(this, isolate));
   CHECK_GE(length(), ConsString::kMinLength);
   CHECK(length() == first()->length() + second()->length());
-  if (IsFlat(isolate)) {
+  if (IsFlat()) {
     // A flat cons can only be created by String::SlowFlatten.
     // Afterwards, the first part may be externalized or internalized.
     CHECK(IsSeqString(first()) || IsExternalString(first()) ||
@@ -1058,14 +1068,16 @@ void ConsString::ConsStringVerify(Isolate* isolate) {
 }
 
 void ThinString::ThinStringVerify(Isolate* isolate) {
-  TorqueGeneratedClassVerifiers::ThinStringVerify(*this, isolate);
+  StringVerify(isolate);
+  CHECK(IsThinString(this, isolate));
   CHECK(!HasForwardingIndex(kAcquireLoad));
   CHECK(IsInternalizedString(actual()));
   CHECK(IsSeqString(actual()) || IsExternalString(actual()));
 }
 
 void SlicedString::SlicedStringVerify(Isolate* isolate) {
-  TorqueGeneratedClassVerifiers::SlicedStringVerify(*this, isolate);
+  StringVerify(isolate);
+  CHECK(IsSlicedString(this, isolate));
   CHECK(!IsConsString(parent()));
   CHECK(!IsSlicedString(parent()));
 #ifdef DEBUG
@@ -1079,7 +1091,10 @@ void SlicedString::SlicedStringVerify(Isolate* isolate) {
 #endif
 }
 
-USE_TORQUE_VERIFIER(ExternalString)
+void ExternalString::ExternalStringVerify(Isolate* isolate) {
+  StringVerify(isolate);
+  CHECK(IsExternalString(this, isolate));
+}
 
 void JSBoundFunction::JSBoundFunctionVerify(Isolate* isolate) {
   TorqueGeneratedClassVerifiers::JSBoundFunctionVerify(*this, isolate);
@@ -1239,8 +1254,13 @@ void JSGlobalObject::JSGlobalObjectVerify(Isolate* isolate) {
   JSObjectVerify(isolate);
 }
 
-void PrimitiveHeapObjectLayout::PrimitiveHeapObjectVerify(Isolate* isolate) {
+void PrimitiveHeapObject::PrimitiveHeapObjectVerify(Isolate* isolate) {
   CHECK(IsPrimitiveHeapObject(this, isolate));
+}
+
+void HeapNumber::HeapNumberVerify(Isolate* isolate) {
+  PrimitiveHeapObjectVerify(isolate);
+  CHECK(IsHeapNumber(this, isolate));
 }
 
 void Oddball::OddballVerify(Isolate* isolate) {
@@ -1332,7 +1352,6 @@ void ExposedTrustedObject::ExposedTrustedObjectVerify(Isolate* isolate) {
 void Code::CodeVerify(Isolate* isolate) {
   ExposedTrustedObjectVerify(isolate);
   CHECK(IsCode(*this));
-  CHECK_EQ(IsTrustedSpaceObject(*this), kCodeObjectLiveInTrustedSpace);
   if (has_instruction_stream()) {
     Tagged<InstructionStream> istream = instruction_stream();
     CHECK_EQ(istream->code(kAcquireLoad), *this);
@@ -1378,6 +1397,7 @@ void CodeWrapper::CodeWrapperVerify(Isolate* isolate) {
 }
 
 void InstructionStream::InstructionStreamVerify(Isolate* isolate) {
+  TrustedObjectVerify(isolate);
   Tagged<Code> code;
   if (!TryGetCode(&code, kAcquireLoad)) return;
   CHECK(
@@ -1488,7 +1508,7 @@ void VerifyElementIsShared(Tagged<Object> element) {
   // string was in shared space.
   if (IsThinString(element)) {
     CHECK(v8_flags.shared_string_table);
-    CHECK(Object::InWritableSharedSpace(element));
+    CHECK(InWritableSharedSpace(ThinString::cast(element)));
   } else {
     CHECK(IsShared(element));
   }
@@ -1498,13 +1518,13 @@ void VerifyElementIsShared(Tagged<Object> element) {
 
 void JSSharedStruct::JSSharedStructVerify(Isolate* isolate) {
   CHECK(IsJSSharedStruct(*this));
-  CHECK(InWritableSharedSpace());
+  CHECK(InWritableSharedSpace(*this));
   JSObjectVerify(isolate);
   CHECK(HasFastProperties());
   // Shared structs can only point to primitives or other shared HeapObjects,
   // even internally.
   Tagged<Map> struct_map = map();
-  CHECK(Object::InSharedHeap(property_array()));
+  CHECK(InAnySharedSpace(property_array()));
   Tagged<DescriptorArray> descriptors =
       struct_map->instance_descriptors(isolate);
   for (InternalIndex i : struct_map->IterateOwnDescriptors()) {
@@ -1531,13 +1551,13 @@ void JSSharedStruct::JSSharedStructVerify(Isolate* isolate) {
 
 void JSAtomicsMutex::JSAtomicsMutexVerify(Isolate* isolate) {
   CHECK(IsJSAtomicsMutex(*this));
-  CHECK(InWritableSharedSpace());
+  CHECK(InWritableSharedSpace(*this));
   JSObjectVerify(isolate);
 }
 
 void JSAtomicsCondition::JSAtomicsConditionVerify(Isolate* isolate) {
   CHECK(IsJSAtomicsCondition(*this));
-  CHECK(Object::InSharedHeap(*this));
+  CHECK(InAnySharedSpace(*this));
   JSObjectVerify(isolate);
 }
 
@@ -2064,6 +2084,14 @@ void PrototypeInfo::PrototypeInfoVerify(Isolate* isolate) {
   } else {
     CHECK(IsSmi(prototype_users()));
   }
+  Tagged<HeapObject> derived = derived_maps(isolate);
+  if (!IsUndefined(derived)) {
+    auto derived_list = WeakArrayList::cast(derived);
+    CHECK_GT(derived_list->length(), 0);
+    for (int i = 0; i < derived_list->length(); ++i) {
+      derived_list->Get(i)->IsWeakOrCleared();
+    }
+  }
 }
 
 void PrototypeUsers::Verify(Tagged<WeakArrayList> array) {
@@ -2132,15 +2160,9 @@ void ClassBoilerplate::ClassBoilerplateVerify(Isolate* isolate) {
 
 #if V8_ENABLE_WEBASSEMBLY
 
-void WasmInstanceObject::WasmInstanceObjectVerify(Isolate* isolate) {
-  JSObjectVerify(isolate);
-  CHECK(IsWasmInstanceObject(*this));
-
-  // Just generically check all tagged fields. Don't check the untagged fields,
-  // as some of them might still contain the "undefined" value if the
-  // WasmInstanceObject is not fully set up yet.
-  for (int offset = kHeaderSize; offset < kEndOfStrongFieldsOffset;
-       offset += kTaggedSize) {
+void WasmTrustedInstanceData::WasmTrustedInstanceDataVerify(Isolate* isolate) {
+  // Check all tagged fields.
+  for (uint16_t offset : kTaggedFieldOffsets) {
     VerifyObjectField(isolate, offset);
   }
 }
@@ -2158,12 +2180,12 @@ void WasmExceptionPackage::WasmExceptionPackageVerify(Isolate* isolate) {
 void WasmExportedFunctionData::WasmExportedFunctionDataVerify(
     Isolate* isolate) {
   TorqueGeneratedClassVerifiers::WasmExportedFunctionDataVerify(*this, isolate);
-  CHECK(
-      wrapper_code()->kind() == CodeKind::JS_TO_WASM_FUNCTION ||
-      wrapper_code()->kind() == CodeKind::C_WASM_ENTRY ||
-      (wrapper_code()->is_builtin() &&
-       (wrapper_code()->builtin_id() == Builtin::kJSToWasmWrapper ||
-        wrapper_code()->builtin_id() == Builtin::kWasmReturnPromiseOnSuspend)));
+  Tagged<Code> wrapper = wrapper_code(isolate);
+  CHECK(wrapper->kind() == CodeKind::JS_TO_WASM_FUNCTION ||
+        wrapper->kind() == CodeKind::C_WASM_ENTRY ||
+        (wrapper->is_builtin() &&
+         (wrapper->builtin_id() == Builtin::kJSToWasmWrapper ||
+          wrapper->builtin_id() == Builtin::kWasmReturnPromiseOnSuspend)));
 }
 
 #endif  // V8_ENABLE_WEBASSEMBLY

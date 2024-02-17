@@ -77,9 +77,14 @@ const Type* ImplementationVisitor::Visit(Statement* stmt) {
 
 void ImplementationVisitor::BeginGeneratedFiles() {
   std::set<SourceId> contains_class_definitions;
+  std::set<SourceId> contains_class_asserts;
   for (const ClassType* type : TypeOracle::GetClasses()) {
     if (type->ShouldGenerateCppClassDefinitions()) {
       contains_class_definitions.insert(type->AttributedToFile());
+    }
+    if (type->ShouldGenerateCppObjectDefinitionAsserts() ||
+        type->ShouldGenerateCppObjectLayoutDefinitionAsserts()) {
+      contains_class_asserts.insert(type->AttributedToFile());
     }
   }
 
@@ -92,6 +97,7 @@ void ImplementationVisitor::BeginGeneratedFiles() {
       for (const std::string& include_path : GlobalContext::CppIncludes()) {
         file << "#include " << StringLiteralQuote(include_path) << "\n";
       }
+      file << "#include \"src/codegen/code-stub-assembler-inl.h\"\n";
 
       file << "// Required Builtins:\n";
       file << "#include \"torque-generated/" +
@@ -131,6 +137,11 @@ void ImplementationVisitor::BeginGeneratedFiles() {
              << "-inl.h\"\n\n";
         file << "#include \"torque-generated/class-verifiers.h\"\n";
         file << "#include \"src/objects/instance-type-inl.h\"\n\n";
+      }
+      if (contains_class_asserts.count(source) != 0) {
+        file << "#include \""
+             << SourceFileMap::PathFromV8RootWithoutExtension(source)
+             << ".h\"\n\n";
       }
 
       streams.class_definition_cc.BeginNamespace("v8", "internal");
@@ -1937,7 +1948,7 @@ void FailCallableLookup(
         inapplicable_generics) {
   std::stringstream stream;
   stream << "\n" << reason << ": \n  " << name << "(" << parameter_types << ")";
-  if (labels.size() != 0) {
+  if (!labels.empty()) {
     stream << " labels ";
     for (size_t i = 0; i < labels.size(); ++i) {
       stream << labels[i]->name() << "(" << labels[i]->parameter_types << ")";
@@ -1948,7 +1959,7 @@ void FailCallableLookup(
     stream << "\n  " << name;
     PrintSignature(stream, signature, false);
   }
-  if (inapplicable_generics.size() != 0) {
+  if (!inapplicable_generics.empty()) {
     stream << "\nfailed to instantiate all of these generic declarations:";
     for (auto& failure : inapplicable_generics) {
       GenericCallable* generic = failure.first;
@@ -2422,7 +2433,7 @@ LocationReference ImplementationVisitor::GetLocationReference(
           KytheData::AddBindingUse(expr->name->pos, *value);
         }
       }
-      if (expr->generic_arguments.size() != 0) {
+      if (!expr->generic_arguments.empty()) {
         ReportError("cannot have generic parameters on local name ",
                     expr->name);
       }
@@ -2444,7 +2455,7 @@ LocationReference ImplementationVisitor::GetLocationReference(
     return LocationReference::Temporary(GetBuiltinCode(*builtin),
                                         "builtin " + expr->name->value);
   }
-  if (expr->generic_arguments.size() != 0) {
+  if (!expr->generic_arguments.empty()) {
     GenericCallable* generic = Declarations::LookupUniqueGeneric(name);
     Callable* specialization =
         GetOrCreateSpecialization(SpecializationKey<GenericCallable>{
@@ -3505,13 +3516,17 @@ void ImplementationVisitor::VisitAllDeclarables() {
   // Do the same for macros which generate C++ debug code.
   // The set of macros is the same as C++ macros.
   output_type_ = OutputType::kCCDebug;
-  for (size_t i = 0; i < cc_macros.size(); ++i) {
+  const std::vector<std::pair<TorqueMacro*, SourceId>>& cc_debug_macros =
+      GlobalContext::AllMacrosForCCDebugOutput();
+  for (size_t i = 0; i < cc_debug_macros.size(); ++i) {
     try {
-      Visit(static_cast<Declarable*>(cc_macros[i].first), cc_macros[i].second);
+      Visit(static_cast<Declarable*>(cc_debug_macros[i].first),
+            cc_debug_macros[i].second);
     } catch (TorqueAbortCompilation&) {
       // Recover from compile errors here. The error is recorded already.
     }
   }
+
   output_type_ = OutputType::kCSA;
 }
 
@@ -3952,13 +3967,11 @@ class ClassFieldOffsetGenerator : public FieldOffsetsGenerator {
  public:
   ClassFieldOffsetGenerator(std::ostream& header, std::ostream& inline_header,
                             const ClassType* type, std::string gen_name,
-                            const ClassType* parent)
+                            const ClassType* parent, bool use_templates = true)
       : FieldOffsetsGenerator(type),
         hdr_(header),
         inl_(inline_header),
-        previous_field_end_(type->IsLayoutDefinedInCpp()    ? "sizeof(P)"
-                            : (parent && parent->IsShape()) ? "P::kSize"
-                                                            : "P::kHeaderSize"),
+        previous_field_end_(FirstFieldStart(type, parent, use_templates)),
         gen_name_(gen_name) {}
 
   void WriteField(const Field& f, const std::string& size_string) override {
@@ -3998,6 +4011,28 @@ class ClassFieldOffsetGenerator : public FieldOffsetsGenerator {
   }
 
  private:
+  static std::string FirstFieldStart(const ClassType* type,
+                                     const ClassType* parent,
+                                     bool use_templates = true) {
+    std::string parent_name = use_templates ? "P" : parent->name();
+
+    if (type->IsLayoutDefinedInCpp()) {
+      // TODO(leszeks): Hacked in support for some classes (e.g.
+      // HeapObject) being mirrored by a *Layout class. Remove once
+      // everything is ported to layout classes.
+      if (parent_name == "HeapObject") {
+        parent_name += "Layout";
+      }
+
+      return "sizeof(" + parent_name + ")";
+    }
+
+    if (parent && parent->IsShape()) {
+      return parent_name + "::kSize";
+    }
+    return parent_name + "::kHeaderSize";
+  }
+
   std::ostream& hdr_;
   std::ostream& inl_;
   std::string previous_field_end_;
@@ -4268,62 +4303,64 @@ void CppClassGenerator::GenerateClass() {
 }
 
 void CppClassGenerator::GenerateCppObjectDefinitionAsserts() {
-  hdr_ << "// Definition " << Position() << "\n"
-       << template_decl() << "\n"
-       << "class " << gen_name_ << "Asserts {\n";
+  impl_ << "// Definition " << Position() << "\n"
+        << "class " << gen_name_ << "Asserts {\n";
 
-  ClassFieldOffsetGenerator g(hdr_, inl_, type_, gen_name_,
-                              type_->GetSuperClass());
+  ClassFieldOffsetGenerator g(impl_, impl_, type_, gen_name_,
+                              type_->GetSuperClass(), false);
   for (const auto& f : type_->fields()) {
     CurrentSourcePosition::Scope scope(f.pos);
     g.RecordOffsetFor(f);
   }
   g.Finish();
-  hdr_ << "\n";
+  impl_ << "\n";
 
   for (const auto& f : type_->fields()) {
     std::string field_offset =
         "k" + CamelifyString(f.name_and_type.name) + "Offset";
-    hdr_ << "  static_assert(" << field_offset << " == D::" << field_offset
-         << ",\n"
-         << "                \"Values of " << name_ << "::" << field_offset
-         << " defined in Torque and C++ do not match\");\n";
+    impl_ << "  static_assert(" << field_offset << " == " << name_
+          << "::" << field_offset << ",\n"
+          << "                \"Values of " << name_ << "::" << field_offset
+          << " defined in Torque and C++ do not match\");\n";
   }
   if (!type_->IsAbstract() && type_->HasStaticSize()) {
-    hdr_ << "  static_assert(kSize == D::kSize);\n";
+    impl_ << "  static_assert(kSize == " << name_ << "::kSize);\n";
   }
 
-  hdr_ << "};\n\n";
+  impl_ << "};\n\n";
 }
 
 void CppClassGenerator::GenerateCppObjectLayoutDefinitionAsserts() {
-  inl_ << "// Definition " << Position() << "\n"
-       << template_decl() << "\n"
-       << "class " << gen_name_ << "Asserts {\n";
+  impl_ << "// Definition " << Position() << "\n"
+        << "class " << gen_name_ << "Asserts {\n";
 
-  ClassFieldOffsetGenerator g(inl_, inl_, type_, gen_name_,
-                              type_->GetSuperClass());
+  ClassFieldOffsetGenerator g(impl_, impl_, type_, gen_name_,
+                              type_->GetSuperClass(), false);
   for (auto f : type_->fields()) {
     CurrentSourcePosition::Scope scope(f.pos);
     g.RecordOffsetFor(f);
   }
   g.Finish();
-  inl_ << "\n";
+  impl_ << "\n";
 
   for (auto f : type_->fields()) {
     std::string field_offset =
         "k" + CamelifyString(f.name_and_type.name) + "Offset";
-    inl_ << "  static_assert(" << field_offset << " == offsetof(D, "
-         << f.name_and_type.name << "_),\n"
-         << "                \"Value of " << name_ << "::" << field_offset
-         << " defined in Torque and offset of field " << name_
-         << "::" << f.name_and_type.name << " in C++ do not match\");\n";
+    std::string cpp_field_offset =
+        f.index.has_value()
+            ? "OFFSET_OF_DATA_START(" + name_ + ")"
+            : "offsetof(" + name_ + ", " + f.name_and_type.name + "_)";
+    impl_ << "  static_assert(" << field_offset << " == " << cpp_field_offset
+          << ",\n"
+          << "                \"Value of " << name_ << "::" << field_offset
+          << " defined in Torque and offset of field " << name_
+          << "::" << f.name_and_type.name << " in C++ do not match\");\n";
   }
   if (!type_->IsAbstract() && type_->HasStaticSize()) {
-    inl_ << "  static_assert(kSize == sizeof(D));\n";
+    impl_ << "  static_assert(kSize == sizeof(" + name_ + "));\n";
   }
 
-  inl_ << "};\n\n";
+  impl_ << "};\n\n";
 }
 
 void CppClassGenerator::GenerateClassCasts() {
@@ -4802,14 +4839,16 @@ void ImplementationVisitor::GenerateClassDefinitions(
         }
       }
       if (type->ShouldGenerateFactoryFunction()) {
-        std::string return_type = type->HandlifiedCppTypeName();
+        std::string return_type =
+            type->HandlifiedCppTypeName(Type::HandleKind::kIndirect);
         std::string function_name = "New" + type->name();
         std::stringstream parameters;
         for (const Field& f : type->ComputeAllFields()) {
           if (f.name_and_type.name == "map") continue;
           if (!f.index) {
             std::string type_string =
-                f.name_and_type.type->HandlifiedCppTypeName();
+                f.name_and_type.type->HandlifiedCppTypeName(
+                    Type::HandleKind::kDirect);
             parameters << type_string << " " << f.name_and_type.name << ", ";
           }
         }
@@ -4822,7 +4861,7 @@ void ImplementationVisitor::GenerateClassDefinitions(
                      << " TorqueGeneratedFactory<Impl>::" << function_name
                      << "(" << parameters.str() << ") {\n";
 
-        factory_impl << " int size = ";
+        factory_impl << "  int size = ";
         const ClassType* super = type->GetSuperClass();
         std::string gen_name = "TorqueGenerated" + type->name();
         std::string gen_name_T =
@@ -4842,14 +4881,14 @@ void ImplementationVisitor::GenerateClassDefinitions(
 
         factory_impl << ");\n";
         factory_impl << "  Tagged<Map> map = factory()->read_only_roots()."
-                     << SnakeifyString(type->name()) << "_map();";
+                     << SnakeifyString(type->name()) << "_map();\n";
         factory_impl << "  Tagged<HeapObject> raw_object =\n";
         factory_impl << "    factory()->AllocateRawWithImmortalMap(size, "
                         "allocation_type, map);\n";
         factory_impl << "  " << type->TagglifiedCppTypeName()
                      << " result = " << type->GetConstexprGeneratedTypeName()
                      << "::cast(raw_object);\n";
-        factory_impl << "  DisallowGarbageCollection no_gc;";
+        factory_impl << "  DisallowGarbageCollection no_gc;\n";
         factory_impl << "  WriteBarrierMode write_barrier_mode =\n"
                      << "     allocation_type == AllocationType::kYoung\n"
                      << "     ? SKIP_WRITE_BARRIER : UPDATE_WRITE_BARRIER;\n"
@@ -4877,10 +4916,10 @@ void ImplementationVisitor::GenerateClassDefinitions(
 
         factory_impl << "template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) "
                      << return_type
-                     << "TorqueGeneratedFactory<Factory>::" << function_name
+                     << " TorqueGeneratedFactory<Factory>::" << function_name
                      << "(" << parameters.str() << ");\n";
         factory_impl << "template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) "
-                     << return_type << "TorqueGeneratedFactory<LocalFactory>::"
+                     << return_type << " TorqueGeneratedFactory<LocalFactory>::"
                      << function_name << "(" << parameters.str() << ");\n";
 
         factory_impl << "\n\n";
@@ -5355,16 +5394,26 @@ void ImplementationVisitor::GenerateEnumVerifiers(
 
     cc_contents << "class EnumVerifier {\n";
     for (const auto& desc : GlobalContext::Get().ast()->EnumDescriptions()) {
+      std::stringstream alias_checks;
       cc_contents << "  // " << desc.name << " (" << desc.pos << ")\n";
       cc_contents << "  void VerifyEnum_" << desc.name << "("
                   << desc.constexpr_generates
                   << " x) {\n"
                      "    switch(x) {\n";
       for (const auto& entry : desc.entries) {
-        cc_contents << "      case " << entry << ": break;\n";
+        if (entry.alias_entry.empty()) {
+          cc_contents << "      case " << entry.name << ": break;\n";
+        } else {
+          // We don't add a case for this, because it aliases another entry, so
+          // we would have two cases for the same value.
+          alias_checks << "    static_assert(" << entry.name
+                       << " == " << entry.alias_entry << ");\n";
+        }
       }
       if (desc.is_open) cc_contents << "      default: break;\n";
-      cc_contents << "    }\n  }\n\n";
+      cc_contents << "    }\n";
+      cc_contents << alias_checks.str();
+      cc_contents << "  }\n\n";
     }
     cc_contents << "};\n";
   }

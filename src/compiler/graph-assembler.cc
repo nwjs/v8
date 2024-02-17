@@ -146,7 +146,7 @@ Node* GraphAssembler::SetStackPointer(Node* node,
 
 Node* GraphAssembler::LoadHeapNumberValue(Node* heap_number) {
   return Load(MachineType::Float64(), heap_number,
-              IntPtrConstant(HeapNumber::kValueOffset - kHeapObjectTag));
+              IntPtrConstant(offsetof(HeapNumber, value_) - kHeapObjectTag));
 }
 
 #define SINGLETON_CONST_DEF(Name, Type)              \
@@ -467,6 +467,13 @@ Node* JSGraphAssembler::CheckIf(Node* cond, DeoptimizeReason reason,
                                 const FeedbackSource& feedback) {
   return AddNode(graph()->NewNode(simplified()->CheckIf(reason, feedback), cond,
                                   effect(), control()));
+}
+
+Node* JSGraphAssembler::Assert(Node* cond, const char* condition_string,
+                               const char* file, int line) {
+  return AddNode(graph()->NewNode(
+      common()->Assert(BranchSemantics::kJS, condition_string, file, line),
+      cond, effect(), control()));
 }
 
 TNode<Boolean> JSGraphAssembler::NumberIsFloat64Hole(TNode<Number> value) {

@@ -969,7 +969,7 @@ struct EntryMirror {
       mirrors->emplace_back(
           EntryMirror{std::move(keyMirror), std::move(valueMirror)});
     }
-    return mirrors->size() > 0;
+    return !mirrors->empty();
   }
 };
 
@@ -1047,6 +1047,7 @@ bool getPropertiesForPreview(v8::Local<v8::Context> context,
     blocklist.push_back("[[Int16Array]]");
     blocklist.push_back("[[Int32Array]]");
   }
+  blocklist.push_back("constructor");
   int skipIndex = object->IsStringObject()
                       ? object.As<v8::StringObject>()->ValueOf()->Length() + 1
                       : -1;
@@ -1238,9 +1239,9 @@ class ObjectMirror final : public ValueMirrorBase {
     }
 
     // No embedder-implemented serialization. Serialize as V8 Object.
-    return V8DeepSerializer::serializeV8Value(
-        value, context, maxDepth, additionalParameters, duplicateTracker,
-        *(result->get()));
+    return V8DeepSerializer::serializeV8Value(value, context, maxDepth,
+                                              additionalParameters,
+                                              duplicateTracker, *(*result));
   }
 
  private:

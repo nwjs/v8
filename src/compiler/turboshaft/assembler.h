@@ -14,6 +14,7 @@
 #include "src/base/logging.h"
 #include "src/base/macros.h"
 #include "src/base/small-vector.h"
+#include "src/base/string-format.h"
 #include "src/base/template-utils.h"
 #include "src/base/vector.h"
 #include "src/codegen/callable.h"
@@ -27,6 +28,7 @@
 #include "src/compiler/turboshaft/graph.h"
 #include "src/compiler/turboshaft/operation-matcher.h"
 #include "src/compiler/turboshaft/operations.h"
+#include "src/compiler/turboshaft/phase.h"
 #include "src/compiler/turboshaft/reducer-traits.h"
 #include "src/compiler/turboshaft/representations.h"
 #include "src/compiler/turboshaft/runtime-call-descriptors.h"
@@ -34,6 +36,7 @@
 #include "src/compiler/turboshaft/snapshot-table.h"
 #include "src/compiler/turboshaft/uniform-reducer-adapter.h"
 #include "src/compiler/turboshaft/utils.h"
+#include "src/flags/flags.h"
 #include "src/logging/runtime-call-stats.h"
 #include "src/objects/heap-number.h"
 #include "src/objects/oddball.h"
@@ -49,6 +52,8 @@ enum class Builtin : int32_t;
 }
 
 namespace v8::internal::compiler::turboshaft {
+
+#include "src/compiler/turboshaft/define-assembler-macros.inc"
 
 template <class AssemblerT>
 class CatchScopeImpl;
@@ -133,6 +138,18 @@ auto ResolveAll(A& assembler, const ConstOrValues& const_or_values) {
       [&](auto&... args) { return std::tuple{assembler.resolve(args)...}; },
       const_or_values);
 }
+
+template <typename T>
+struct IndexTypeFor {
+  using type = OpIndex;
+};
+template <typename T>
+struct IndexTypeFor<std::tuple<T>> {
+  using type = T;
+};
+
+template <typename T>
+using index_type_for_t = typename IndexTypeFor<T>::type;
 
 inline bool SuppressUnusedWarning(bool b) { return b; }
 }  // namespace detail
@@ -451,7 +468,7 @@ class TurboshaftAssemblerOpInterface;
 
 template <typename T>
 class Uninitialized {
-  static_assert(std::is_base_of_v<HeapObject, T>);
+  static_assert(is_subtype_v<T, HeapObject>);
 
  public:
   explicit Uninitialized(V<T> object) : object_(object) {}
@@ -953,6 +970,11 @@ template <class Next>
 class GenericAssemblerOpInterface : public Next {
  public:
   TURBOSHAFT_REDUCER_BOILERPLATE()
+
+  ~GenericAssemblerOpInterface() {
+    // If the {if_scope_stack_} is not empty, it means that a END_IF is missing.
+    DCHECK(if_scope_stack_.empty());
+  }
 
   // These methods are used by the assembler macros (IF, ELSE, ELSE_IF, END_IF).
   template <typename L>
@@ -1467,21 +1489,24 @@ class TurboshaftAssemblerOpInterface
   }
 
   OpIndex TaggedBitcast(OpIndex input, RegisterRepresentation from,
-                        RegisterRepresentation to) {
-    return ReduceIfReachableTaggedBitcast(input, from, to);
+                        RegisterRepresentation to, TaggedBitcastOp::Kind kind) {
+    return ReduceIfReachableTaggedBitcast(input, from, to, kind);
   }
-  V<WordPtr> BitcastTaggedToWord(V<Object> tagged) {
-    return TaggedBitcast(tagged, RegisterRepresentation::Tagged(),
-                         RegisterRepresentation::PointerSized());
+
+#define DECL_TAGGED_BITCAST(FromT, ToT, kind)              \
+  V<ToT> Bitcast##FromT##To##ToT(V<FromT> from) {          \
+    return TaggedBitcast(from, V<FromT>::rep, V<ToT>::rep, \
+                         TaggedBitcastOp::Kind::kind);     \
   }
-  V<Object> BitcastWordPtrToTagged(V<WordPtr> word) {
-    return TaggedBitcast(word, RegisterRepresentation::PointerSized(),
-                         RegisterRepresentation::Tagged());
-  }
-  V<Object> BitcastWord32ToTagged(V<Word32> word) {
-    return TaggedBitcast(word, RegisterRepresentation::Word32(),
-                         RegisterRepresentation::Tagged());
-  }
+  DECL_TAGGED_BITCAST(Smi, Word32, kSmi)
+  DECL_TAGGED_BITCAST(Word32, Smi, kSmi)
+  DECL_TAGGED_BITCAST(Smi, WordPtr, kSmi)
+  DECL_TAGGED_BITCAST(WordPtr, Smi, kSmi)
+  DECL_TAGGED_BITCAST(WordPtr, HeapObject, kHeapObject)
+  DECL_TAGGED_BITCAST(HeapObject, WordPtr, kHeapObject)
+  DECL_TAGGED_BITCAST(WordPtr, Tagged, kAny)
+  DECL_TAGGED_BITCAST(Tagged, WordPtr, kAny)
+#undef DECL_TAGGED_BITCAST
 
   V<Word32> ObjectIs(V<Object> input, ObjectIsOp::Kind kind,
                      ObjectIsOp::InputAssumptions input_assumptions) {
@@ -1582,6 +1607,14 @@ class TurboshaftAssemblerOpInterface
     return ReduceIfReachableConvertJSPrimitiveToUntaggedOrDeopt(
         object, frame_state, from_kind, to_kind, minus_zero_mode, feedback);
   }
+  V<Word32> CheckedSmiUntag(V<Object> object, OpIndex frame_state,
+                            const FeedbackSource& feedback) {
+    return ConvertJSPrimitiveToUntaggedOrDeopt(
+        object, frame_state,
+        ConvertJSPrimitiveToUntaggedOrDeoptOp::JSPrimitiveKind::kSmi,
+        ConvertJSPrimitiveToUntaggedOrDeoptOp::UntaggedKind::kInt32,
+        CheckForMinusZeroMode::kDontCheckForMinusZero, feedback);
+  }
 
   OpIndex TruncateJSPrimitiveToUntagged(
       V<Object> object, TruncateJSPrimitiveToUntaggedOp::UntaggedKind kind,
@@ -1600,10 +1633,12 @@ class TurboshaftAssemblerOpInterface
         object, frame_state, kind, input_requirement, feedback);
   }
 
-  V<Object> ConvertJSPrimitiveToObject(V<Object> value, V<Object> global_proxy,
+  V<Object> ConvertJSPrimitiveToObject(V<Object> value,
+                                       V<Object> native_context,
+                                       V<Object> global_proxy,
                                        ConvertReceiverMode mode) {
-    return ReduceIfReachableConvertJSPrimitiveToObject(value, global_proxy,
-                                                       mode);
+    return ReduceIfReachableConvertJSPrimitiveToObject(value, native_context,
+                                                       global_proxy, mode);
   }
 
   V<Word32> Word32Constant(uint32_t value) {
@@ -1634,7 +1669,7 @@ class TurboshaftAssemblerOpInterface
     return WordConstant(static_cast<uint64_t>(value),
                         WordRepresentation::PointerSized());
   }
-  V<Object> SmiConstant(i::Tagged<Smi> value) {
+  V<Smi> SmiConstant(i::Tagged<Smi> value) {
     return V<Smi>::Cast(UintPtrConstant(value.ptr()));
   }
   V<Float32> Float32Constant(float value) {
@@ -1905,24 +1940,21 @@ class TurboshaftAssemblerOpInterface
       V<Word32> shifted = Word32ShiftLeft(resolve(input), kSmiShiftBits);
       // In pointer compression, we smi-corrupt. Then, the upper bits are not
       // important.
-      return V<Smi>::Cast(
-          COMPRESS_POINTERS_BOOL
-              ? BitcastWord32ToTagged(shifted)
-              : BitcastWordPtrToTagged(ChangeInt32ToIntPtr(shifted)));
+      return BitcastWord32ToSmi(shifted);
     } else {
-      return V<Smi>::Cast(BitcastWordPtrToTagged(WordPtrShiftLeft(
-          ChangeInt32ToIntPtr(resolve(input)), kSmiShiftBits)));
+      return BitcastWordPtrToSmi(
+          WordPtrShiftLeft(ChangeInt32ToIntPtr(resolve(input)), kSmiShiftBits));
     }
   }
 
-  V<Word32> UntagSmi(V<Tagged> input) {
+  V<Word32> UntagSmi(V<Smi> input) {
     constexpr int kSmiShiftBits = kSmiShiftSize + kSmiTagSize;
     if constexpr (Is64() && SmiValuesAre31Bits()) {
-      return Word32ShiftRightArithmeticShiftOutZeros(
-          TruncateWordPtrToWord32(BitcastTaggedToWord(input)), kSmiShiftBits);
+      return Word32ShiftRightArithmeticShiftOutZeros(BitcastSmiToWord32(input),
+                                                     kSmiShiftBits);
     }
     return TruncateWordPtrToWord32(WordPtrShiftRightArithmeticShiftOutZeros(
-        BitcastTaggedToWord(input), kSmiShiftBits));
+        BitcastSmiToWordPtr(input), kSmiShiftBits));
   }
 
   OpIndex AtomicRMW(V<WordPtr> base, V<WordPtr> index, OpIndex value,
@@ -2086,8 +2118,11 @@ class TurboshaftAssemblerOpInterface
       rep = MemoryRepresentation::Uint32();
     }
 #endif  // V8_ENABLE_SANDBOX
-    V<Rep> value = Load(object, LoadOp::Kind::Aligned(access.base_is_tagged),
-                        rep, access.offset);
+    LoadOp::Kind kind = LoadOp::Kind::Aligned(access.base_is_tagged);
+    if (access.is_immutable) {
+      kind = kind.Immutable();
+    }
+    V<Rep> value = Load(object, kind, rep, access.offset);
 #ifdef V8_ENABLE_SANDBOX
     if (is_sandboxed_external) {
       value = DecodeExternalPointer(value, access.external_pointer_tag);
@@ -2174,6 +2209,12 @@ class TurboshaftAssemblerOpInterface
                                  V<WordPtr> index) {
     return LoadElement<T>(object, access, index, false);
   }
+  template <typename Base>
+  V<WordPtr> GetElementStartPointer(V<Base> object,
+                                    const ElementAccess& access) {
+    return WordPtrAdd(BitcastHeapObjectToWordPtr(object),
+                      access.header_size - access.tag());
+  }
 
   template <typename Base>
   void StoreArrayBufferElement(V<Base> object, const ElementAccess& access,
@@ -2186,9 +2227,22 @@ class TurboshaftAssemblerOpInterface
     return StoreElement(object, access, index, value, false);
   }
 
+  template <typename Base>
+  void InitializeArrayBufferElement(Uninitialized<Base>& object,
+                                    const ElementAccess& access,
+                                    V<WordPtr> index, V<Any> value) {
+    StoreArrayBufferElement(object.object(), access, index, value);
+  }
+  template <typename Base>
+  void InitializeNonArrayBufferElement(Uninitialized<Base>& object,
+                                       const ElementAccess& access,
+                                       V<WordPtr> index, V<Any> value) {
+    StoreNonArrayBufferElement(object.object(), access, index, value);
+  }
+
   template <typename T = HeapObject>
   Uninitialized<T> Allocate(ConstOrV<WordPtr> size, AllocationType type) {
-    static_assert(std::is_base_of_v<HeapObject, T>);
+    static_assert(is_subtype_v<T, HeapObject>);
     DCHECK(!in_object_initialization_);
     in_object_initialization_ = true;
     return Uninitialized<T>{ReduceIfReachableAllocate(resolve(size), type)};
@@ -2296,7 +2350,7 @@ class TurboshaftAssemblerOpInterface
 
   template <typename Descriptor>
   std::enable_if_t<Descriptor::kNeedsFrameState && Descriptor::kNeedsContext,
-                   typename Descriptor::result_t>
+                   detail::index_type_for_t<typename Descriptor::results_t>>
   CallBuiltin(Isolate* isolate, OpIndex frame_state, OpIndex context,
               const typename Descriptor::arguments_t& args) {
     if (V8_UNLIKELY(Asm().generating_unreachable_operations())) {
@@ -2304,74 +2358,146 @@ class TurboshaftAssemblerOpInterface
     }
     DCHECK(frame_state.valid());
     DCHECK(context.valid());
-    return CallBuiltinImpl<typename Descriptor::result_t>(
-        isolate, Descriptor::kFunction,
-        Descriptor::Create(isolate, Asm().output_graph().graph_zone()),
-        Descriptor::kEffects, frame_state, context, args);
+    auto arguments = std::apply(
+        [context](auto&&... as) {
+          return base::SmallVector<OpIndex,
+                                   std::tuple_size_v<decltype(args)> + 1>{
+              std::forward<decltype(as)>(as)..., context};
+        },
+        args);
+    return CallBuiltinImpl(
+        isolate, Descriptor::kFunction, frame_state, base::VectorOf(arguments),
+        Descriptor::Create(StubCallMode::kCallCodeObject,
+                           Asm().output_graph().graph_zone()),
+        Descriptor::kEffects);
   }
+
   template <typename Descriptor>
   std::enable_if_t<!Descriptor::kNeedsFrameState && Descriptor::kNeedsContext,
-                   typename Descriptor::result_t>
+                   detail::index_type_for_t<typename Descriptor::results_t>>
   CallBuiltin(Isolate* isolate, OpIndex context,
               const typename Descriptor::arguments_t& args) {
     if (V8_UNLIKELY(Asm().generating_unreachable_operations())) {
       return OpIndex::Invalid();
     }
     DCHECK(context.valid());
-    return CallBuiltinImpl<typename Descriptor::result_t>(
-        isolate, Descriptor::kFunction,
-        Descriptor::Create(isolate, Asm().output_graph().graph_zone()),
-        Descriptor::kEffects, {}, context, args);
+    auto arguments = std::apply(
+        [context](auto&&... as) {
+          return base::SmallVector<
+              OpIndex, std::tuple_size_v<typename Descriptor::arguments_t> + 1>{
+              std::forward<decltype(as)>(as)..., context};
+        },
+        args);
+    return CallBuiltinImpl(
+        isolate, Descriptor::kFunction, OpIndex::Invalid(),
+        base::VectorOf(arguments),
+        Descriptor::Create(StubCallMode::kCallCodeObject,
+                           Asm().output_graph().graph_zone()),
+        Descriptor::kEffects);
   }
   template <typename Descriptor>
   std::enable_if_t<Descriptor::kNeedsFrameState && !Descriptor::kNeedsContext,
-                   typename Descriptor::result_t>
+                   detail::index_type_for_t<typename Descriptor::results_t>>
   CallBuiltin(Isolate* isolate, OpIndex frame_state,
               const typename Descriptor::arguments_t& args) {
     if (V8_UNLIKELY(Asm().generating_unreachable_operations())) {
       return OpIndex::Invalid();
     }
     DCHECK(frame_state.valid());
-    return CallBuiltinImpl<typename Descriptor::result_t>(
-        isolate, Descriptor::kFunction,
-        Descriptor::Create(isolate, Asm().output_graph().graph_zone()),
-        Descriptor::kEffects, frame_state, {}, args);
+    auto arguments = std::apply(
+        [](auto&&... as) {
+          return base::SmallVector<OpIndex, std::tuple_size_v<decltype(args)>>{
+              std::forward<decltype(as)>(as)...};
+        },
+        args);
+    return CallBuiltinImpl(
+        isolate, Descriptor::kFunction, frame_state, base::VectorOf(arguments),
+        Descriptor::Create(StubCallMode::kCallCodeObject,
+                           Asm().output_graph().graph_zone()),
+        Descriptor::kEffects);
   }
   template <typename Descriptor>
   std::enable_if_t<!Descriptor::kNeedsFrameState && !Descriptor::kNeedsContext,
-                   typename Descriptor::result_t>
+                   detail::index_type_for_t<typename Descriptor::results_t>>
   CallBuiltin(Isolate* isolate, const typename Descriptor::arguments_t& args) {
     if (V8_UNLIKELY(Asm().generating_unreachable_operations())) {
       return OpIndex::Invalid();
     }
-    return CallBuiltinImpl<typename Descriptor::result_t>(
-        isolate, Descriptor::kFunction,
-        Descriptor::Create(isolate, Asm().output_graph().graph_zone()),
-        Descriptor::kEffects, {}, {}, args);
-  }
-
-  template <typename Ret, typename Args>
-  Ret CallBuiltinImpl(Isolate* isolate, Builtin function,
-                      const TSCallDescriptor* desc, OpEffects effects,
-                      OpIndex frame_state, V<Context> context,
-                      const Args& args) {
-    Callable callable = Builtins::CallableFor(isolate, function);
-    // Convert arguments from `args` tuple into a `SmallVector<OpIndex>`.
-    auto inputs = std::apply(
+    auto arguments = std::apply(
         [](auto&&... as) {
-          return base::SmallVector<OpIndex, std::tuple_size_v<Args> + 1>{
+          return base::SmallVector<
+              OpIndex, std::tuple_size_v<typename Descriptor::arguments_t>>{
               std::forward<decltype(as)>(as)...};
         },
         args);
-    if (context.valid()) inputs.push_back(context);
+    return CallBuiltinImpl(
+        isolate, Descriptor::kFunction, OpIndex::Invalid(),
+        base::VectorOf(arguments),
+        Descriptor::Create(StubCallMode::kCallCodeObject,
+                           Asm().output_graph().graph_zone()),
+        Descriptor::kEffects);
+  }
 
-    if constexpr (std::is_same_v<Ret, void>) {
-      Call(HeapConstant(callable.code()), frame_state, base::VectorOf(inputs),
-           desc, effects);
-    } else {
-      return Call(HeapConstant(callable.code()), frame_state,
-                  base::VectorOf(inputs), desc, effects);
+#if V8_ENABLE_WEBASSEMBLY
+
+  template <typename Descriptor>
+  std::enable_if_t<!Descriptor::kNeedsContext,
+                   detail::index_type_for_t<typename Descriptor::results_t>>
+  WasmCallBuiltinThroughJumptable(
+      const typename Descriptor::arguments_t& args) {
+    static_assert(!Descriptor::kNeedsFrameState);
+    if (V8_UNLIKELY(Asm().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
     }
+    auto arguments = std::apply(
+        [](auto&&... as) {
+          return base::SmallVector<
+              OpIndex, std::tuple_size_v<typename Descriptor::arguments_t>>{
+              std::forward<decltype(as)>(as)...};
+        },
+        args);
+    V<WordPtr> call_target =
+        RelocatableWasmBuiltinCallTarget(Descriptor::kFunction);
+    return Call(call_target, OpIndex::Invalid(), base::VectorOf(arguments),
+                Descriptor::Create(StubCallMode::kCallWasmRuntimeStub,
+                                   Asm().output_graph().graph_zone()),
+                Descriptor::kEffects);
+  }
+
+  template <typename Descriptor>
+  std::enable_if_t<Descriptor::kNeedsContext,
+                   detail::index_type_for_t<typename Descriptor::results_t>>
+  WasmCallBuiltinThroughJumptable(
+      OpIndex context, const typename Descriptor::arguments_t& args) {
+    static_assert(!Descriptor::kNeedsFrameState);
+    if (V8_UNLIKELY(Asm().generating_unreachable_operations())) {
+      return OpIndex::Invalid();
+    }
+    DCHECK(context.valid());
+    auto arguments = std::apply(
+        [context](auto&&... as) {
+          return base::SmallVector<
+              OpIndex, std::tuple_size_v<typename Descriptor::arguments_t> + 1>{
+              std::forward<decltype(as)>(as)..., context};
+        },
+        args);
+    V<WordPtr> call_target =
+        RelocatableWasmBuiltinCallTarget(Descriptor::kFunction);
+    return Call(call_target, OpIndex::Invalid(), base::VectorOf(arguments),
+                Descriptor::Create(StubCallMode::kCallWasmRuntimeStub,
+                                   Asm().output_graph().graph_zone()),
+                Descriptor::kEffects);
+  }
+
+#endif  // V8_ENABLE_WEBASSEMBLY
+
+  OpIndex CallBuiltinImpl(Isolate* isolate, Builtin builtin,
+                          OptionalOpIndex frame_state,
+                          base::Vector<const OpIndex> arguments,
+                          const TSCallDescriptor* desc, OpEffects effects) {
+    Callable callable = Builtins::CallableFor(isolate, builtin);
+    return Call(HeapConstant(callable.code()), frame_state.value_or_invalid(),
+                arguments, desc, effects);
   }
 
   void CallBuiltin_CheckTurbofanType(Isolate* isolate, V<Context> context,
@@ -2837,6 +2963,28 @@ class TurboshaftAssemblerOpInterface
 
   void DebugBreak() { ReduceIfReachableDebugBreak(); }
 
+  void AssertImpl(V<Word32> condition, const char* condition_string,
+                  const char* file, int line) {
+#ifdef DEBUG
+    // We use 256 characters as a buffer size. This can be increased if
+    // necessary.
+    static constexpr size_t kMaxAssertCommentLength = 256;
+    base::Vector<char> buffer =
+        PipelineData::Get().shared_zone()->AllocateVector<char>(
+            kMaxAssertCommentLength);
+    int result = base::SNPrintF(buffer, "Assert: %s    [%s:%d]",
+                                condition_string, file, line);
+    DCHECK_LT(0, result);
+    Comment(buffer.data());
+    IF_NOT (LIKELY(condition)) {
+      Comment(buffer.data());
+      Comment("ASSERT FAILED");
+      DebugBreak();
+    }
+    END_IF
+#endif
+  }
+
   void DebugPrint(OpIndex input, RegisterRepresentation rep) {
     CHECK(v8_flags.turboshaft_enable_debug_features);
     ReduceIfReachableDebugPrint(input, rep);
@@ -3113,16 +3261,22 @@ class TurboshaftAssemblerOpInterface
         table, key,
         FindOrderedHashEntryOp::Kind::kFindOrderedHashMapEntryForInt32Key);
   }
-
-#ifdef V8_ENABLE_WEBASSEMBLY
-  OpIndex GlobalGet(V<WasmInstanceObject> instance,
-                    const wasm::WasmGlobal* global) {
-    return ReduceIfReachableGlobalGet(instance, global);
+  V<Object> SpeculativeNumberBinop(V<Object> left, V<Object> right,
+                                   OpIndex frame_state,
+                                   SpeculativeNumberBinopOp::Kind kind) {
+    return ReduceIfReachableSpeculativeNumberBinop(left, right, frame_state,
+                                                   kind);
   }
 
-  OpIndex GlobalSet(V<WasmInstanceObject> instance, OpIndex value,
+#ifdef V8_ENABLE_WEBASSEMBLY
+  OpIndex GlobalGet(V<WasmTrustedInstanceData> trusted_instance_data,
                     const wasm::WasmGlobal* global) {
-    return ReduceIfReachableGlobalSet(instance, value, global);
+    return ReduceIfReachableGlobalGet(trusted_instance_data, global);
+  }
+
+  OpIndex GlobalSet(V<WasmTrustedInstanceData> trusted_instance_data,
+                    OpIndex value, const wasm::WasmGlobal* global) {
+    return ReduceIfReachableGlobalSet(trusted_instance_data, value, global);
   }
 
   V<HeapObject> Null(wasm::ValueType type) {
@@ -3179,8 +3333,8 @@ class TurboshaftAssemblerOpInterface
   }
 
   OpIndex ArrayGet(V<HeapObject> array, V<Word32> index,
-                   wasm::ValueType element_type, bool is_signed) {
-    return ReduceIfReachableArrayGet(array, index, element_type, is_signed);
+                   const wasm::ArrayType* array_type, bool is_signed) {
+    return ReduceIfReachableArrayGet(array, index, array_type, is_signed);
   }
 
   void ArraySet(V<HeapObject> array, V<Word32> index, OpIndex value,
@@ -3277,25 +3431,7 @@ class TurboshaftAssemblerOpInterface
     return ReduceIfReachableSimd128Shuffle(left, right, shuffle);
   }
 
-  OpIndex CallBuiltin(Builtin builtin, std::initializer_list<OpIndex> args,
-                      Operator::Properties properties) {
-    CallInterfaceDescriptor interface_descriptor =
-        Builtins::CallInterfaceDescriptorFor(builtin);
-    const CallDescriptor* call_descriptor =
-        compiler::Linkage::GetStubCallDescriptor(
-            Asm().output_graph().graph_zone(), interface_descriptor,
-            interface_descriptor.GetStackParameterCount(),
-            CallDescriptor::kNoFlags, properties,
-            StubCallMode::kCallWasmRuntimeStub);
-    const TSCallDescriptor* ts_call_descriptor =
-        TSCallDescriptor::Create(call_descriptor, compiler::CanThrow::kYes,
-                                 Asm().output_graph().graph_zone());
-    V<WordPtr> call_target = RelocatableWasmBuiltinCallTarget(builtin);
-    return Call(call_target, OpIndex::Invalid(), base::VectorOf(args),
-                ts_call_descriptor);
-  }
-
-  V<WasmInstanceObject> WasmInstanceParameter() {
+  V<WasmTrustedInstanceData> WasmInstanceParameter() {
     return Parameter(wasm::kWasmInstanceParameterIndex,
                      RegisterRepresentation::Tagged());
   }
@@ -3327,6 +3463,11 @@ class TurboshaftAssemblerOpInterface
           FixedArray::kHeaderSize, kTaggedSizeLog2);
   }
 
+  OpIndex LoadStackPointer() { return ReduceIfReachableLoadStackPointer(); }
+
+  void SetStackPointer(V<WordPtr> value, wasm::FPRelativeScope fp_scope) {
+    ReduceIfReachableSetStackPointer(value, fp_scope);
+  }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
   template <typename Rep>
@@ -3511,7 +3652,7 @@ class Assembler : public AssemblerData,
   // Every loop should be finalized once, after it is certain that no backedge
   // can be added anymore.
   void FinalizeLoop(Block* loop_header) {
-    if (loop_header->IsLoop() && loop_header->HasExactlyNPredecessors(1)) {
+    if (loop_header->IsLoop() && loop_header->PredecessorCount() == 1) {
       this->output_graph().TurnLoopIntoMerge(loop_header);
     }
   }
@@ -3796,6 +3937,8 @@ class TSAssembler
   using Assembler<reducer_list<TurboshaftAssemblerOpInterface, Reducers...,
                                TSReducerBase>>::Assembler;
 };
+
+#include "src/compiler/turboshaft/undef-assembler-macros.inc"
 
 }  // namespace v8::internal::compiler::turboshaft
 

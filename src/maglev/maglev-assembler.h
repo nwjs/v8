@@ -67,7 +67,7 @@ class MapCompare {
   Register map_ = Register::no_reg();
 };
 
-class MaglevAssembler : public MacroAssembler {
+class V8_EXPORT_PRIVATE MaglevAssembler : public MacroAssembler {
  public:
   class ScratchRegisterScope;
 
@@ -356,6 +356,7 @@ class MaglevAssembler : public MacroAssembler {
   inline void Move(Register dst, Register src);
   inline void Move(Register dst, Tagged<TaggedIndex> i);
   inline void Move(Register dst, int32_t i);
+  inline void Move(Register dst, uint32_t i);
   inline void Move(DoubleRegister dst, double n);
   inline void Move(DoubleRegister dst, Float64 n);
   inline void Move(Register dst, Handle<HeapObject> obj);
@@ -502,6 +503,9 @@ class MaglevAssembler : public MacroAssembler {
   inline void CompareInt32AndJumpIf(Register r1, Register r2, Condition cond,
                                     Label* target,
                                     Label::Distance distance = Label::kFar);
+  inline void CompareIntPtrAndJumpIf(Register r1, Register r2, Condition cond,
+                                     Label* target,
+                                     Label::Distance distance = Label::kFar);
   inline void CompareInt32AndJumpIf(Register r1, int32_t value, Condition cond,
                                     Label* target,
                                     Label::Distance distance = Label::kFar);

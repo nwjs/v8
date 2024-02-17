@@ -397,16 +397,13 @@ class V8_EXPORT Isolate {
    */
   class V8_EXPORT V8_NODISCARD SafeForTerminationScope {
    public:
-    explicit SafeForTerminationScope(v8::Isolate* v8_isolate);
-    ~SafeForTerminationScope();
+    V8_DEPRECATE_SOON("All code should be safe for termination")
+    explicit SafeForTerminationScope(v8::Isolate* v8_isolate) {}
+    ~SafeForTerminationScope() {}
 
     // Prevent copying of Scope objects.
     SafeForTerminationScope(const SafeForTerminationScope&) = delete;
     SafeForTerminationScope& operator=(const SafeForTerminationScope&) = delete;
-
-   private:
-    internal::Isolate* i_isolate_;
-    bool prev_value_;
   };
 
   /**
@@ -560,6 +557,13 @@ class V8_EXPORT Isolate {
     kTemporalObject = 130,
     kWasmModuleCompilation = 131,
     kInvalidatedNoUndetectableObjectsProtector = 132,
+    kWasmJavaScriptPromiseIntegration = 133,
+    kWasmReturnCall = 134,
+    kWasmExtendedConst = 135,
+    kWasmRelaxedSimd = 136,
+    kWasmTypeReflection = 137,
+    kWasmExnRef = 138,
+    kWasmTypedFuncRef = 139,
 
     // If you add new values here, you'll also need to update Chromium's:
     // web_feature.mojom, use_counter_callback.cc, and enums.xml. V8 changes to
@@ -587,7 +591,7 @@ class V8_EXPORT Isolate {
    * Only Isolate::GetData() and Isolate::SetData(), which access the
    * embedder-controlled parts of the isolate, are allowed to be called on the
    * uninitialized isolate. To initialize the isolate, call
-   * Isolate::Initialize().
+   * `Isolate::Initialize()` or initialize a `SnapshotCreator`.
    *
    * When an isolate is no longer used its resources should be freed
    * by calling Dispose().  Using the delete operator is not allowed.
@@ -702,6 +706,14 @@ class V8_EXPORT Isolate {
    * the isolate is executing long running JavaScript code.
    */
   void MemoryPressureNotification(MemoryPressureLevel level);
+
+  /**
+   * Optional request from the embedder to tune v8 towards energy efficiency
+   * rather than speed if `battery_saver_mode_enabled` is true, because the
+   * embedder is in battery saver mode. If false, the correct tuning is left
+   * to v8 to decide.
+   */
+  void SetBatterySaverMode(bool battery_saver_mode_enabled);
 
   /**
    * Drop non-essential caches. Should only be called from testing code.

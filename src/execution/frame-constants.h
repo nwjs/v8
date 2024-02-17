@@ -263,16 +263,12 @@ class WasmFrameConstants : public TypedFrameConstants {
 
 class WasmImportWrapperFrameConstants : public WasmFrameConstants {
  public:
-#if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64
   // FP-relative.
   static constexpr int kCentralStackSPOffset =
       TYPED_FRAME_PUSHED_VALUE_OFFSET(1);
   static constexpr int kSecondaryStackLimitOffset =
       TYPED_FRAME_PUSHED_VALUE_OFFSET(2);
   DEFINE_TYPED_FRAME_SIZES(3);
-#else
-  DEFINE_TYPED_FRAME_SIZES(1);
-#endif
 };
 
 class WasmExitFrameConstants : public WasmFrameConstants {
@@ -287,7 +283,7 @@ class JSToWasmWrapperFrameConstants : public TypedFrameConstants {
  public:
   // FP-relative.
   static constexpr int kResultArrayParamOffset = 2 * kSystemPointerSize;
-  static constexpr int kInstanceParamOffset = 3 * kSystemPointerSize;
+  static constexpr int kInstanceDataParamOffset = 3 * kSystemPointerSize;
 
   // Contains RawPtr to stack-allocated buffer.
   static constexpr int kWrapperBufferOffset =

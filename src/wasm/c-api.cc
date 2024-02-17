@@ -1149,7 +1149,9 @@ auto Module::validate(Store* store_abs, const vec<byte_t>& binary) -> bool {
   PtrComprCageAccessScope ptr_compr_cage_access_scope(isolate);
   i::HandleScope scope(isolate);
   i::wasm::WasmFeatures features = i::wasm::WasmFeatures::FromIsolate(isolate);
-  return i::wasm::GetWasmEngine()->SyncValidate(isolate, features, bytes);
+  i::wasm::CompileTimeImports imports;
+  return i::wasm::GetWasmEngine()->SyncValidate(isolate, features, imports,
+                                                bytes);
 }
 
 auto Module::make(Store* store_abs, const vec<byte_t>& binary) -> own<Module> {
@@ -1161,10 +1163,11 @@ auto Module::make(Store* store_abs, const vec<byte_t>& binary) -> own<Module> {
   i::wasm::ModuleWireBytes bytes(
       {reinterpret_cast<const uint8_t*>(binary.get()), binary.size()});
   i::wasm::WasmFeatures features = i::wasm::WasmFeatures::FromIsolate(isolate);
+  i::wasm::CompileTimeImports imports;
   i::wasm::ErrorThrower thrower(isolate, "ignored");
   i::Handle<i::WasmModuleObject> module;
   if (!i::wasm::GetWasmEngine()
-           ->SyncCompile(isolate, features, &thrower, bytes)
+           ->SyncCompile(isolate, features, imports, &thrower, bytes)
            .ToHandle(&module)) {
     thrower.Reset();  // The API provides no way to expose the error.
     return nullptr;
@@ -1265,7 +1268,8 @@ auto Module::deserialize(Store* store_abs, const vec<byte_t>& serialized)
     if (!i::wasm::DeserializeNativeModule(
              isolate,
              {reinterpret_cast<const uint8_t*>(ptr + data_size), serial_size},
-             {reinterpret_cast<const uint8_t*>(ptr), data_size}, {})
+             {reinterpret_cast<const uint8_t*>(ptr), data_size},
+             i::wasm::CompileTimeImports{}, {})
              .ToHandle(&module_obj)) {
       // We were given a serialized module, but failed to deserialize. Report
       // this as an error.
@@ -1559,7 +1563,11 @@ void PrepareFunctionData(i::Isolate* isolate,
                          const i::wasm::FunctionSig* sig,
                          const i::wasm::WasmModule* module) {
   // If the data is already populated, return immediately.
-  if (function_data->c_wrapper_code() != *BUILTIN_CODE(isolate, Illegal)) {
+  // TODO(saelo): We need to use full pointer comparison here while not all Code
+  // objects have migrated into trusted space.
+  static_assert(!i::kAllCodeObjectsLiveInTrustedSpace);
+  if (!function_data->c_wrapper_code(isolate).SafeEquals(
+          *BUILTIN_CODE(isolate, Illegal))) {
     return;
   }
   // Compile wrapper code.
@@ -1697,21 +1705,23 @@ auto Func::call(const Val args[], Val results[]) const -> own<Trap> {
       i::WasmExportedFunctionData::cast(raw_function_data), isolate);
   i::Handle<i::WasmInstanceObject> instance(function_data->instance(), isolate);
   int function_index = function_data->function_index();
+  const i::wasm::WasmModule* module = instance->module();
   // Caching {sig} would give a ~10% reduction in overhead.
-  const i::wasm::FunctionSig* sig =
-      instance->module()->functions[function_index].sig;
-  PrepareFunctionData(isolate, function_data, sig, instance->module());
-  i::Handle<i::Code> wrapper_code(function_data->c_wrapper_code(), isolate);
+  const i::wasm::FunctionSig* sig = module->functions[function_index].sig;
+  PrepareFunctionData(isolate, function_data, sig, module);
+  i::Handle<i::Code> wrapper_code(function_data->c_wrapper_code(isolate),
+                                  isolate);
   i::Address call_target = function_data->internal()->call_target(isolate);
 
   i::wasm::CWasmArgumentsPacker packer(function_data->packed_args_size());
   PushArgs(sig, args, &packer, store);
 
   i::Handle<i::Object> object_ref = instance;
-  if (function_index <
-      static_cast<int>(instance->module()->num_imported_functions)) {
+  if (function_index < static_cast<int>(module->num_imported_functions)) {
     object_ref = i::handle(
-        instance->imported_function_refs()->get(function_index), isolate);
+        instance->trusted_data(isolate)->imported_function_refs()->get(
+            function_index),
+        isolate);
     if (IsWasmApiFunctionRef(*object_ref)) {
       i::Tagged<i::JSFunction> jsfunc = i::JSFunction::cast(
           i::WasmApiFunctionRef::cast(*object_ref)->callable());
@@ -1998,12 +2008,12 @@ auto Table::make(Store* store_abs, const TableType* type, const Ref* ref)
     if (maximum > i::wasm::max_table_init_entries()) return nullptr;
   }
 
-  i::Handle<i::FixedArray> backing_store;
   i::Handle<i::WasmTableObject> table_obj = i::WasmTableObject::New(
       isolate, i::Handle<i::WasmInstanceObject>(), i_type, minimum, has_maximum,
-      maximum, &backing_store, isolate->factory()->null_value());
+      maximum, isolate->factory()->null_value());
 
   if (ref) {
+    i::Handle<i::FixedArray> entries{table_obj->entries(), isolate};
     i::Handle<i::JSReceiver> init = impl(ref)->v8_object();
     DCHECK(i::wasm::max_table_init_entries() <= i::kMaxInt);
     for (int i = 0; i < static_cast<int>(minimum); i++) {
@@ -2011,7 +2021,7 @@ auto Table::make(Store* store_abs, const TableType* type, const Ref* ref)
       // just been created, so it can't be imported by any instances
       // yet that might require updating.
       DCHECK_EQ(table_obj->dispatch_tables()->length(), 0);
-      backing_store->set(i, *init);
+      entries->set(i, *init);
     }
   }
   return implement<Table>::type::make(store, table_obj);

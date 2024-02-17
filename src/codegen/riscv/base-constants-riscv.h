@@ -428,7 +428,7 @@ const uint32_t kImm16Mask = ((1 << kImm16Bits) - 1) << kImm16Shift;
 // The 'U' prefix is used to specify unsigned comparisons.
 // Opposite conditions must be paired as odd/even numbers
 // because 'NegateCondition' function flips LSB to negate condition.
-enum Condition {  // Any value < 0 is considered no_condition.
+enum Condition : int {  // Any value < 0 is considered no_condition.
   overflow = 0,
   no_overflow = 1,
   Uless = 2,
@@ -794,6 +794,11 @@ class InstructionBase {
 template <class T>
 class InstructionGetters : public T {
  public:
+  uint32_t OperandFunct3() const {
+    return this->InstructionBits() & (kBaseOpcodeMask | kFunct3Mask);
+  }
+  bool IsLoad();
+  bool IsStore();
   inline int BaseOpcode() const {
     return this->InstructionBits() & kBaseOpcodeMask;
   }

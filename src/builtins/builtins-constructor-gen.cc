@@ -7,10 +7,9 @@
 #include "src/ast/ast.h"
 #include "src/builtins/builtins-call-gen.h"
 #include "src/builtins/builtins-constructor.h"
+#include "src/builtins/builtins-inl.h"
 #include "src/builtins/builtins-utils-gen.h"
-#include "src/builtins/builtins.h"
-#include "src/codegen/code-factory.h"
-#include "src/codegen/code-stub-assembler.h"
+#include "src/codegen/code-stub-assembler-inl.h"
 #include "src/codegen/interface-descriptors.h"
 #include "src/codegen/macro-assembler.h"
 #include "src/common/globals.h"
@@ -21,20 +20,17 @@ namespace v8 {
 namespace internal {
 
 void Builtins::Generate_ConstructVarargs(MacroAssembler* masm) {
-  Generate_CallOrConstructVarargs(masm,
-                                  BUILTIN_CODE(masm->isolate(), Construct));
+  Generate_CallOrConstructVarargs(masm, Builtin::kConstruct);
 }
 
 void Builtins::Generate_ConstructForwardVarargs(MacroAssembler* masm) {
-  Generate_CallOrConstructForwardVarargs(
-      masm, CallOrConstructMode::kConstruct,
-      BUILTIN_CODE(masm->isolate(), Construct));
+  Generate_CallOrConstructForwardVarargs(masm, CallOrConstructMode::kConstruct,
+                                         Builtin::kConstruct);
 }
 
 void Builtins::Generate_ConstructFunctionForwardVarargs(MacroAssembler* masm) {
-  Generate_CallOrConstructForwardVarargs(
-      masm, CallOrConstructMode::kConstruct,
-      BUILTIN_CODE(masm->isolate(), ConstructFunction));
+  Generate_CallOrConstructForwardVarargs(masm, CallOrConstructMode::kConstruct,
+                                         Builtin::kConstructFunction);
 }
 
 // static
@@ -104,6 +100,7 @@ TF_BUILTIN(ConstructWithArrayLike, CallOrConstructBuiltinsAssembler) {
   CallOrConstructWithArrayLike(target, new_target, arguments_list, context);
 }
 
+// TODO(ishell): not used, consider removing.
 TF_BUILTIN(ConstructWithArrayLike_WithFeedback,
            CallOrConstructBuiltinsAssembler) {
   auto target = Parameter<Object>(Descriptor::kTarget);

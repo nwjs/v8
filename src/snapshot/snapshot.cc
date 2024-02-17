@@ -15,6 +15,7 @@
 #include "src/heap/read-only-promotion.h"
 #include "src/heap/safepoint.h"
 #include "src/init/bootstrapper.h"
+#include "src/logging/counters-scopes.h"
 #include "src/logging/runtime-call-stats-scope.h"
 #include "src/objects/js-regexp-inl.h"
 #include "src/snapshot/context-deserializer.h"
@@ -136,6 +137,8 @@ SnapshotData MaybeDecompress(Isolate* isolate,
 #ifdef V8_SNAPSHOT_COMPRESSION
   TRACE_EVENT0("v8", "V8.SnapshotDecompress");
   RCS_SCOPE(isolate, RuntimeCallCounterId::kSnapshotDecompress);
+  NestedTimedHistogramScope histogram_timer(
+      isolate->counters()->snapshot_decompress());
   return SnapshotCompression::Decompress(snapshot_data);
 #else
   return SnapshotData(snapshot_data);
@@ -881,6 +884,25 @@ SnapshotCreatorImpl::SnapshotCreatorImpl(
 SnapshotCreatorImpl::SnapshotCreatorImpl(
     const v8::Isolate::CreateParams& params)
     : owns_isolate_(true), isolate_(Isolate::New()) {
+  if (auto allocator = params.array_buffer_allocator_shared) {
+    CHECK(params.array_buffer_allocator == nullptr ||
+          params.array_buffer_allocator == allocator.get());
+    isolate_->set_array_buffer_allocator(allocator.get());
+    isolate_->set_array_buffer_allocator_shared(std::move(allocator));
+  } else {
+    CHECK_NOT_NULL(params.array_buffer_allocator);
+    isolate_->set_array_buffer_allocator(params.array_buffer_allocator);
+  }
+  isolate_->set_api_external_references(params.external_references);
+  isolate_->heap()->ConfigureHeap(params.constraints, params.cpp_heap);
+
+  InitInternal(params.snapshot_blob ? params.snapshot_blob
+                                    : Snapshot::DefaultSnapshotBlob());
+}
+
+SnapshotCreatorImpl::SnapshotCreatorImpl(
+    Isolate* isolate, const v8::Isolate::CreateParams& params)
+    : owns_isolate_(false), isolate_(isolate) {
   if (auto allocator = params.array_buffer_allocator_shared) {
     CHECK(params.array_buffer_allocator == nullptr ||
           params.array_buffer_allocator == allocator.get());

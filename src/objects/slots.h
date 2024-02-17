@@ -9,6 +9,7 @@
 #include "src/common/assert-scope.h"
 #include "src/common/globals.h"
 #include "src/sandbox/external-pointer-table.h"
+#include "src/sandbox/external-pointer.h"
 #include "src/sandbox/indirect-pointer-tag.h"
 #include "src/sandbox/isolate.h"
 
@@ -117,6 +118,7 @@ class FullObjectSlot : public SlotBase<FullObjectSlot, Address> {
   inline bool Relaxed_ContainsMapValue(Address raw_value) const;
 
   inline Tagged<Object> operator*() const;
+  inline Tagged<Object> load() const;
   inline Tagged<Object> load(PtrComprCageBase cage_base) const;
   inline void store(Tagged<Object> value) const;
   inline void store_map(Tagged<Map> map) const;
@@ -283,7 +285,6 @@ class OffHeapFullObjectSlot : public FullObjectSlot {
   inline Tagged<Object> operator*() const = delete;
 
   using FullObjectSlot::Relaxed_Load;
-  inline Tagged<Object> Relaxed_Load() const = delete;
 };
 
 // An ExternalPointerSlot instance describes a kExternalPointerSlotSize-sized
@@ -307,6 +308,16 @@ class ExternalPointerSlot
 
   explicit ExternalPointerSlot(Address ptr, ExternalPointerTag tag)
       : SlotBase(ptr)
+#ifdef V8_ENABLE_SANDBOX
+        ,
+        tag_(tag)
+#endif
+  {
+  }
+
+  template <ExternalPointerTag tag>
+  explicit ExternalPointerSlot(ExternalPointerMember<tag>* member)
+      : SlotBase(member->storage_address())
 #ifdef V8_ENABLE_SANDBOX
         ,
         tag_(tag)
@@ -442,6 +453,29 @@ class IndirectPointerSlot
   // The tag associated with this slot.
   IndirectPointerTag tag_;
 #endif  // V8_ENABLE_SANDBOX
+};
+
+class WritableJitAllocation;
+
+template <typename SlotT>
+class WriteProtectedSlot : public SlotT {
+ public:
+  using TObject = typename SlotT::TObject;
+  using SlotT::kCanBeWeak;
+
+  explicit WriteProtectedSlot(WritableJitAllocation& jit_allocation,
+                              Address ptr)
+      : SlotT(ptr), jit_allocation_(jit_allocation) {}
+
+  inline TObject Relaxed_Load() const { return SlotT::Relaxed_Load(); }
+  inline TObject Relaxed_Load(PtrComprCageBase cage_base) const {
+    return SlotT::Relaxed_Load(cage_base);
+  }
+
+  inline void Relaxed_Store(TObject value) const;
+
+ private:
+  WritableJitAllocation& jit_allocation_;
 };
 
 }  // namespace internal

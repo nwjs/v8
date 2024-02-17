@@ -6,8 +6,7 @@
 
 #include <ostream>
 
-#include "src/builtins/builtins.h"
-#include "src/codegen/code-factory.h"
+#include "src/builtins/builtins-inl.h"
 #include "src/codegen/interface-descriptors-inl.h"
 #include "src/codegen/machine-type.h"
 #include "src/compiler/backend/instruction-selector.h"
@@ -536,7 +535,7 @@ void CodeAssembler::Unreachable() {
   raw_assembler()->Unreachable();
 }
 
-void CodeAssembler::Comment(std::string str) {
+void CodeAssembler::EmitComment(std::string str) {
   if (!v8_flags.code_comments) return;
   raw_assembler()->Comment(str);
 }
@@ -1030,7 +1029,7 @@ TNode<HeapObject> CodeAssembler::OptimizedAllocate(TNode<IntPtrT> size,
 }
 
 void CodeAssembler::HandleException(Node* node) {
-  if (state_->exception_handler_labels_.size() == 0) return;
+  if (state_->exception_handler_labels_.empty()) return;
   CodeAssemblerExceptionHandlerLabel* label =
       state_->exception_handler_labels_.back();
 
@@ -1089,8 +1088,10 @@ Node* CodeAssembler::CallRuntimeImpl(
 #else
   bool switch_to_the_central_stack = false;
 #endif
-  TNode<Code> centry = HeapConstantNoHole(CodeFactory::RuntimeCEntry(
-      isolate(), result_size, switch_to_the_central_stack));
+  Builtin centry =
+      Builtins::RuntimeCEntry(result_size, switch_to_the_central_stack);
+  TNode<Code> centry_code =
+      HeapConstantNoHole(isolate()->builtins()->code_handle(centry));
   constexpr size_t kMaxNumArgs = 6;
   DCHECK_GE(kMaxNumArgs, args.size());
   int argc = static_cast<int>(args.size());
@@ -1104,7 +1105,7 @@ Node* CodeAssembler::CallRuntimeImpl(
   TNode<Int32T> arity = Int32Constant(argc);
 
   NodeArray<kMaxNumArgs + 4> inputs;
-  inputs.Add(centry);
+  inputs.Add(centry_code);
   for (const auto& arg : args) inputs.Add(arg);
   inputs.Add(ref);
   inputs.Add(arity);
@@ -1134,8 +1135,11 @@ void CodeAssembler::TailCallRuntimeImpl(
 #else
   bool switch_to_the_central_stack = false;
 #endif
-  TNode<Code> centry = HeapConstantNoHole(CodeFactory::RuntimeCEntry(
-      isolate(), result_size, switch_to_the_central_stack));
+  Builtin centry =
+      Builtins::RuntimeCEntry(result_size, switch_to_the_central_stack);
+  TNode<Code> centry_code =
+      HeapConstantNoHole(isolate()->builtins()->code_handle(centry));
+
   constexpr size_t kMaxNumArgs = 6;
   DCHECK_GE(kMaxNumArgs, args.size());
   int argc = static_cast<int>(args.size());
@@ -1147,7 +1151,7 @@ void CodeAssembler::TailCallRuntimeImpl(
       ExternalConstant(ExternalReference::Create(function));
 
   NodeArray<kMaxNumArgs + 4> inputs;
-  inputs.Add(centry);
+  inputs.Add(centry_code);
   for (const auto& arg : args) inputs.Add(arg);
   inputs.Add(ref);
   inputs.Add(arity);
@@ -1442,7 +1446,7 @@ Factory* CodeAssembler::factory() const { return isolate()->factory(); }
 Zone* CodeAssembler::zone() const { return raw_assembler()->zone(); }
 
 bool CodeAssembler::IsExceptionHandlerActive() const {
-  return state_->exception_handler_labels_.size() != 0;
+  return !state_->exception_handler_labels_.empty();
 }
 
 RawMachineAssembler* CodeAssembler::raw_assembler() const {

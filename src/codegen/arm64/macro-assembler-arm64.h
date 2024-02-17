@@ -1030,6 +1030,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void LoadFromConstantsTable(Register destination, int constant_index) final;
   void LoadRootRegisterOffset(Register destination, intptr_t offset) final;
   void LoadRootRelative(Register destination, int32_t offset) final;
+  void StoreRootRelative(int32_t offset, Register value) final;
 
   // Operand pointing to an external reference.
   // May emit code to set up the scratch register. The operand is
@@ -1591,9 +1592,14 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   // Store a trusted pointer field.
   void StoreTrustedPointerField(Register value, MemOperand dst_field_operand);
 
-  // Store a code pointer field.
+  // Load a code pointer field.
   // These are special versions of trusted pointers that, when the sandbox is
   // enabled, reference code objects through the code pointer table.
+  void LoadCodePointerField(Register destination, MemOperand field_operand) {
+    LoadTrustedPointerField(destination, field_operand,
+                            kCodeIndirectPointerTag);
+  }
+  // Store a code pointer field.
   void StoreCodePointerField(Register value, MemOperand dst_field_operand) {
     StoreTrustedPointerField(value, dst_field_operand);
   }
@@ -1628,6 +1634,10 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void LoadCodeEntrypointViaCodePointer(Register destination,
                                         MemOperand field_operand);
 #endif
+
+  // Load a protected pointer field.
+  void LoadProtectedPointerField(Register destination,
+                                 MemOperand field_operand);
 
   // Instruction set functions ------------------------------------------------
   // Logical macros.
@@ -2008,7 +2018,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
 
   // Abort execution if argument is not smi nor in the pointer compresssion
   // cage, enabled via --debug-code.
-  void AssertSmiOrHeapObjectInCompressionCage(Register object)
+  void AssertSmiOrHeapObjectInMainCompressionCage(Register object)
       NOOP_UNLESS_DEBUG_CODE;
 
   // ---- Calling / Jumping helpers ----
@@ -2128,7 +2138,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void LoadElementsKindFromMap(Register result, Register map);
 
   // Compare the object in a register to a value from the root list.
-  void CompareRoot(const Register& obj, RootIndex index);
+  void CompareRoot(const Register& obj, RootIndex index,
+                   ComparisonMode mode = ComparisonMode::kDefault);
   void CompareTaggedRoot(const Register& with, RootIndex index);
 
   // Compare the object in a register to a value and jump if they are equal.

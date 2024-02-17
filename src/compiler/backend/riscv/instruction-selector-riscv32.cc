@@ -403,8 +403,13 @@ void InstructionSelectorT<Adapter>::VisitWord32ReverseBytes(node_t node) {
     UNIMPLEMENTED();
   } else {
     RiscvOperandGeneratorT<Adapter> g(this);
+#ifdef CAN_USE_ZBB_INSTRUCTIONS
+    Emit(kRiscvRev8, g.DefineAsRegister(node),
+         g.UseRegister(this->input_at(node, 0)));
+#else
     Emit(kRiscvByteSwap32, g.DefineAsRegister(node),
          g.UseRegister(node->InputAt(0)));
+#endif
   }
 }
 
@@ -1574,8 +1579,14 @@ void InstructionSelectorT<Adapter>::VisitWord32PairSar(node_t node) {
   }
 }
 
+template <>
+void InstructionSelectorT<TurboshaftAdapter>::VisitWord32AtomicPairLoad(
+    node_t node) {
+  UNIMPLEMENTED();
+}
+
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitWord32AtomicPairLoad(Node* node) {
+void InstructionSelectorT<Adapter>::VisitWord32AtomicPairLoad(node_t node) {
   RiscvOperandGeneratorT<Adapter> g(this);
   Node* base = node->InputAt(0);
   Node* index = node->InputAt(1);
@@ -1605,8 +1616,14 @@ void InstructionSelectorT<Adapter>::VisitWord32AtomicPairLoad(Node* node) {
        temps);
 }
 
+template <>
+void InstructionSelectorT<TurboshaftAdapter>::VisitWord32AtomicPairStore(
+    node_t node) {
+  UNIMPLEMENTED();
+}
+
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitWord32AtomicPairStore(Node* node) {
+void InstructionSelectorT<Adapter>::VisitWord32AtomicPairStore(node_t node) {
   RiscvOperandGeneratorT<Adapter> g(this);
   Node* base = node->InputAt(0);
   Node* index = node->InputAt(1);
@@ -1622,10 +1639,16 @@ void InstructionSelectorT<Adapter>::VisitWord32AtomicPairStore(Node* node) {
        nullptr, arraysize(inputs), inputs, arraysize(temps), temps);
 }
 
-template <typename Adapter>
-static void VisitPairAtomicBinop(InstructionSelectorT<Adapter>* selector,
-                                 Node* node, ArchOpcode opcode) {
-  RiscvOperandGeneratorT<Adapter> g(selector);
+static void VisitPairAtomicBinop(
+    InstructionSelectorT<TurboshaftAdapter>* selector, turboshaft::OpIndex node,
+    ArchOpcode opcode) {
+  UNIMPLEMENTED();
+}
+
+static void VisitPairAtomicBinop(
+    InstructionSelectorT<TurbofanAdapter>* selector, Node* node,
+    ArchOpcode opcode) {
+  RiscvOperandGeneratorT<TurbofanAdapter> g(selector);
   Node* base = node->InputAt(0);
   Node* index = node->InputAt(1);
   Node* value = node->InputAt(2);
@@ -1658,38 +1681,44 @@ static void VisitPairAtomicBinop(InstructionSelectorT<Adapter>* selector,
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitWord32AtomicPairAdd(Node* node) {
+void InstructionSelectorT<Adapter>::VisitWord32AtomicPairAdd(node_t node) {
   VisitPairAtomicBinop(this, node, kRiscvWord32AtomicPairAdd);
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitWord32AtomicPairSub(Node* node) {
+void InstructionSelectorT<Adapter>::VisitWord32AtomicPairSub(node_t node) {
   VisitPairAtomicBinop(this, node, kRiscvWord32AtomicPairSub);
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitWord32AtomicPairAnd(Node* node) {
+void InstructionSelectorT<Adapter>::VisitWord32AtomicPairAnd(node_t node) {
   VisitPairAtomicBinop(this, node, kRiscvWord32AtomicPairAnd);
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitWord32AtomicPairOr(Node* node) {
+void InstructionSelectorT<Adapter>::VisitWord32AtomicPairOr(node_t node) {
   VisitPairAtomicBinop(this, node, kRiscvWord32AtomicPairOr);
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitWord32AtomicPairXor(Node* node) {
+void InstructionSelectorT<Adapter>::VisitWord32AtomicPairXor(node_t node) {
   VisitPairAtomicBinop(this, node, kRiscvWord32AtomicPairXor);
 }
 
 template <typename Adapter>
-void InstructionSelectorT<Adapter>::VisitWord32AtomicPairExchange(Node* node) {
+void InstructionSelectorT<Adapter>::VisitWord32AtomicPairExchange(node_t node) {
   VisitPairAtomicBinop(this, node, kRiscvWord32AtomicPairExchange);
+}
+
+template <>
+void InstructionSelectorT<
+    TurboshaftAdapter>::VisitWord32AtomicPairCompareExchange(node_t node) {
+  UNIMPLEMENTED();
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitWord32AtomicPairCompareExchange(
-    Node* node) {
+    node_t node) {
   RiscvOperandGeneratorT<Adapter> g(this);
   InstructionOperand inputs[] = {
       g.UseRegister(node->InputAt(0)),  g.UseRegister(node->InputAt(1)),
@@ -1807,12 +1836,6 @@ template class EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)
     InstructionSelectorT<TurbofanAdapter>;
 template class EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)
     InstructionSelectorT<TurboshaftAdapter>;
-
-template <>
-void InstructionSelectorT<TurbofanAdapter>::VisitSetStackPointer(Node* node) {
-  // TODO(thibaudm): Implement.
-  UNREACHABLE();
-}
 }  // namespace compiler
 }  // namespace internal
 }  // namespace v8

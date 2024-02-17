@@ -537,8 +537,8 @@ CompilationJob::Status TurbofanCompilationJob::AbortOptimization(
 void TurbofanCompilationJob::RecordCompilationStats(ConcurrencyMode mode,
                                                     Isolate* isolate) const {
   DCHECK(compilation_info()->IsOptimizing());
+  Handle<SharedFunctionInfo> shared = compilation_info()->shared_info();
   if (v8_flags.trace_opt || v8_flags.trace_opt_stats) {
-    Handle<JSFunction> function = compilation_info()->closure();
     double ms_creategraph = time_taken_to_prepare_.InMillisecondsF();
     double ms_optimize = time_taken_to_execute_.InMillisecondsF();
     double ms_codegen = time_taken_to_finalize_.InMillisecondsF();
@@ -553,7 +553,7 @@ void TurbofanCompilationJob::RecordCompilationStats(ConcurrencyMode mode,
 
       compilation_time += (ms_creategraph + ms_optimize + ms_codegen);
       compiled_functions++;
-      code_size += function->shared()->SourceSize();
+      code_size += shared->SourceSize();
       PrintF(
           "[turbofan] Compiled: %d functions with %d byte source size in "
           "%fms.\n",
@@ -610,6 +610,12 @@ void TurbofanCompilationJob::RecordCompilationStats(ConcurrencyMode mode,
       static_cast<int>(time_background.InMicroseconds()));
   counters->turbofan_optimize_total_foreground()->AddSample(
       static_cast<int>(time_foreground.InMicroseconds()));
+
+  if (v8_flags.profile_guided_optimization &&
+      shared->cached_tiering_decision() ==
+          CachedTieringDecision::kEarlyMaglev) {
+    shared->set_cached_tiering_decision(CachedTieringDecision::kEarlyTurbofan);
+  }
 }
 
 void TurbofanCompilationJob::RecordFunctionCompilation(
@@ -1001,7 +1007,7 @@ class OptimizedCodeCache : public AllStatic {
     } else {
       feedback_vector->EvictOptimizedCodeMarkedForDeoptimization(
           isolate, shared, "OptimizedCodeCache::Get");
-      code = feedback_vector->optimized_code();
+      code = feedback_vector->optimized_code(isolate);
     }
 
     if (code.is_null() || code->kind() != code_kind) return {};
@@ -1043,13 +1049,13 @@ class OptimizedCodeCache : public AllStatic {
       // sharing can occur. Make sure the optimized code cache is cleared.
       // Only do so if the specialized code's kind matches the cached code kind.
       if (feedback_vector->has_optimized_code() &&
-          feedback_vector->optimized_code()->kind() == code->kind()) {
+          feedback_vector->optimized_code(isolate)->kind() == code->kind()) {
         feedback_vector->ClearOptimizedCode();
       }
       return;
     }
 
-    feedback_vector->SetOptimizedCode(code);
+    feedback_vector->SetOptimizedCode(isolate, code);
   }
 };
 
@@ -1408,7 +1414,7 @@ void SpawnDuplicateConcurrentJobForStressTesting(Isolate* isolate,
 }
 
 bool FailAndClearException(Isolate* isolate) {
-  isolate->clear_exception();
+  isolate->clear_internal_exception();
   return false;
 }
 
@@ -3367,14 +3373,13 @@ struct ScriptCompileTimerScope {
   }
 };
 
-Handle<Script> NewScript(
-    Isolate* isolate, ParseInfo* parse_info, Handle<String> source,
-    ScriptDetails script_details, NativesFlag natives,
-    MaybeHandle<FixedArray> maybe_wrapped_arguments = kNullMaybeHandle) {
+Handle<Script> NewScript(Isolate* isolate, ParseInfo* parse_info,
+                         Handle<String> source, ScriptDetails script_details,
+                         NativesFlag natives) {
   // Create a script object describing the script to be compiled.
-  Handle<Script> script =
-      parse_info->CreateScript(isolate, source, maybe_wrapped_arguments,
-                               script_details.origin_options, natives);
+  Handle<Script> script = parse_info->CreateScript(
+      isolate, source, script_details.wrapped_arguments,
+      script_details.origin_options, natives);
   DisallowGarbageCollection no_gc;
   SetScriptFieldsFromDetails(isolate, *script, script_details, &no_gc);
   LOG(isolate, ScriptDetails(*script));
@@ -3786,9 +3791,8 @@ Compiler::GetSharedFunctionInfoForScriptWithCompileHints(
 
 // static
 MaybeHandle<JSFunction> Compiler::GetWrappedFunction(
-    Handle<String> source, Handle<FixedArray> arguments,
-    Handle<Context> context, const ScriptDetails& script_details,
-    AlignedCachedData* cached_data,
+    Handle<String> source, Handle<Context> context,
+    const ScriptDetails& script_details, AlignedCachedData* cached_data,
     v8::ScriptCompiler::CompileOptions compile_options,
     v8::ScriptCompiler::NoCacheReason no_cache_reason) {
   Isolate* isolate = context->GetIsolate();
@@ -3798,16 +3802,28 @@ MaybeHandle<JSFunction> Compiler::GetWrappedFunction(
 
   if (compile_options == ScriptCompiler::kConsumeCodeCache) {
     DCHECK(cached_data);
+    DCHECK_EQ(script_details.repl_mode, REPLMode::kNo);
   } else {
     DCHECK_NULL(cached_data);
   }
 
   LanguageMode language_mode = construct_language_mode(v8_flags.use_strict);
-
+  DCHECK(!script_details.wrapped_arguments.is_null());
   MaybeHandle<SharedFunctionInfo> maybe_result;
+  Handle<SharedFunctionInfo> result;
+  Handle<Script> script;
+  IsCompiledScope is_compiled_scope;
   bool can_consume_code_cache =
       compile_options == ScriptCompiler::kConsumeCodeCache;
-  if (can_consume_code_cache) {
+  CompilationCache* compilation_cache = isolate->compilation_cache();
+  // First check per-isolate compilation cache.
+  CompilationCacheScript::LookupResult lookup_result =
+      compilation_cache->LookupScript(source, script_details, language_mode);
+  maybe_result = lookup_result.toplevel_sfi();
+  if (maybe_result.ToHandle(&result)) {
+    is_compiled_scope = result->is_compiled_scope(isolate);
+    compile_timer.set_hit_isolate_cache();
+  } else if (can_consume_code_cache) {
     compile_timer.set_consuming_code_cache();
     // Then check cached code provided by embedder.
     NestedTimedHistogramScope timer(isolate->counters()->compile_deserialize());
@@ -3816,16 +3832,22 @@ MaybeHandle<JSFunction> Compiler::GetWrappedFunction(
                  "V8.CompileDeserialize");
     maybe_result = CodeSerializer::Deserialize(isolate, cached_data, source,
                                                script_details.origin_options);
-    if (maybe_result.is_null()) {
+    bool consuming_code_cache_succeeded = false;
+    if (maybe_result.ToHandle(&result)) {
+      is_compiled_scope = result->is_compiled_scope(isolate);
+      if (is_compiled_scope.is_compiled()) {
+        consuming_code_cache_succeeded = true;
+        // Promote to per-isolate compilation cache.
+        compilation_cache->PutScript(source, language_mode, result);
+      }
+    }
+    if (!consuming_code_cache_succeeded) {
       // Deserializer failed. Fall through to compile.
       compile_timer.set_consuming_code_cache_failed();
     }
   }
 
-  Handle<SharedFunctionInfo> wrapped;
-  Handle<Script> script;
-  IsCompiledScope is_compiled_scope;
-  if (!maybe_result.ToHandle(&wrapped)) {
+  if (maybe_result.is_null()) {
     UnoptimizedCompileFlags flags = UnoptimizedCompileFlags::ForToplevelCompile(
         isolate, true, language_mode, script_details.repl_mode,
         ScriptType::kClassic, v8_flags.lazy);
@@ -3845,9 +3867,8 @@ MaybeHandle<JSFunction> Compiler::GetWrappedFunction(
     if (!IsNativeContext(*context)) {
       maybe_outer_scope_info = handle(context->scope_info(), isolate);
     }
-
     script = NewScript(isolate, &parse_info, source, script_details,
-                       NOT_NATIVES_CODE, arguments);
+                       NOT_NATIVES_CODE);
 
     Handle<SharedFunctionInfo> top_level;
     maybe_result = v8::internal::CompileToplevel(&parse_info, script,
@@ -3860,18 +3881,23 @@ MaybeHandle<JSFunction> Compiler::GetWrappedFunction(
     for (Tagged<SharedFunctionInfo> info = infos.Next(); !info.is_null();
          info = infos.Next()) {
       if (info->is_wrapped()) {
-        wrapped = Handle<SharedFunctionInfo>(info, isolate);
+        result = Handle<SharedFunctionInfo>(info, isolate);
         break;
       }
     }
-    DCHECK(!wrapped.is_null());
-  } else {
-    is_compiled_scope = wrapped->is_compiled_scope(isolate);
-    script = Handle<Script>(Script::cast(wrapped->script()), isolate);
+    DCHECK(!result.is_null());
+
+    is_compiled_scope = result->is_compiled_scope(isolate);
+    script = Handle<Script>(Script::cast(result->script()), isolate);
+    // Add the result to the isolate cache if there's no context extension.
+    if (maybe_outer_scope_info.is_null()) {
+      compilation_cache->PutScript(source, language_mode, result);
+    }
   }
+
   DCHECK(is_compiled_scope.is_compiled());
 
-  return Factory::JSFunctionBuilder{isolate, wrapped, context}
+  return Factory::JSFunctionBuilder{isolate, result, context}
       .set_allocation_type(AllocationType::kYoung)
       .Build();
 }
@@ -4146,6 +4172,10 @@ void Compiler::FinalizeMaglevCompilationJob(maglev::MaglevCompilationJob* job,
     RecordMaglevFunctionCompilation(isolate, function,
                                     Handle<AbstractCode>::cast(code));
     job->RecordCompilationStats(isolate);
+    if (v8_flags.profile_guided_optimization &&
+        shared->cached_tiering_decision() == CachedTieringDecision::kPending) {
+      shared->set_cached_tiering_decision(CachedTieringDecision::kEarlyMaglev);
+    }
     CompilerTracer::TraceFinishMaglevCompile(
         isolate, function, job->is_osr(), job->prepare_in_ms(),
         job->execute_in_ms(), job->finalize_in_ms());
@@ -4173,7 +4203,7 @@ void Compiler::PostInstantiation(Handle<JSFunction> function,
       // deoptimized code just before installing it on the funciton.
       function->feedback_vector()->EvictOptimizedCodeMarkedForDeoptimization(
           isolate, *shared, "new function from shared function info");
-      Tagged<Code> code = function->feedback_vector()->optimized_code();
+      Tagged<Code> code = function->feedback_vector()->optimized_code(isolate);
       if (!code.is_null()) {
         // Caching of optimized code enabled and optimized code found.
         DCHECK(!code->marked_for_deoptimization());

@@ -345,7 +345,8 @@ inline void MaglevAssembler::LoadAndUntagTaggedSignedField(Register result,
 
 inline void MaglevAssembler::LoadHeapNumberOrOddballValue(DoubleRegister result,
                                                           Register object) {
-  static_assert(HeapNumber::kValueOffset == offsetof(Oddball, to_number_raw_));
+  static_assert(offsetof(HeapNumber, value_) ==
+                offsetof(Oddball, to_number_raw_));
   LoadHeapNumberValue(result, object);
 }
 
@@ -864,7 +865,7 @@ inline void MaglevAssembler::StringLength(Register result, Register string) {
                              LAST_STRING_TYPE);
     Check(kUnsignedLessThanEqual, AbortReason::kUnexpectedValue);
   }
-  LoadSignedField(result, FieldMemOperand(string, String::kLengthOffset),
+  LoadSignedField(result, FieldMemOperand(string, offsetof(String, length_)),
                   sizeof(int32_t));
 }
 

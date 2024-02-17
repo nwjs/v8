@@ -17,12 +17,6 @@
 namespace v8 {
 namespace internal {
 
-#include "torque-generated/src/objects/oddball-tq-inl.inc"
-
-TQ_CPP_OBJECT_DEFINITION_ASSERTS(Oddball, PrimitiveHeapObjectLayout)
-
-inline Oddball::Oddball() { SLOW_DCHECK(IsOddball(this)); }
-
 Tagged<Oddball> Oddball::cast(Tagged<Object> object) {
   SLOW_DCHECK(IsOddball(object));
   return Tagged<Oddball>(object.ptr());
@@ -69,22 +63,16 @@ DEF_HEAP_OBJECT_PREDICATE(HeapObject, IsBoolean) {
          ((Oddball::cast(obj)->kind() & Oddball::kNotBooleanMask) == 0);
 }
 
-TQ_CPP_OBJECT_DEFINITION_ASSERTS(Null, Oddball)
-Null::Null() { SLOW_DCHECK(IsNull(this)); }
 Tagged<Null> Null::cast(Tagged<Object> object) {
   SLOW_DCHECK(IsNull(object));
   return Tagged<Null>(object.ptr());
 }
 
-TQ_CPP_OBJECT_DEFINITION_ASSERTS(Undefined, Oddball)
-Undefined::Undefined() { SLOW_DCHECK(IsUndefined(this)); }
 Tagged<Undefined> Undefined::cast(Tagged<Object> object) {
   SLOW_DCHECK(IsUndefined(object));
   return Tagged<Undefined>(object.ptr());
 }
 
-TQ_CPP_OBJECT_DEFINITION_ASSERTS(Boolean, Oddball)
-Boolean::Boolean() { SLOW_DCHECK(IsBoolean(this)); }
 Tagged<Boolean> Boolean::cast(Tagged<Object> object) {
   SLOW_DCHECK(IsBoolean(object));
   return Tagged<Boolean>(object.ptr());
@@ -95,15 +83,11 @@ bool Boolean::ToBool(Isolate* isolate) const {
   return IsTrue(this, isolate);
 }
 
-TQ_CPP_OBJECT_DEFINITION_ASSERTS(True, Boolean)
-True::True() { SLOW_DCHECK(IsTrue(this)); }
 Tagged<True> True::cast(Tagged<Object> object) {
   SLOW_DCHECK(IsTrue(object));
   return Tagged<True>(object.ptr());
 }
 
-TQ_CPP_OBJECT_DEFINITION_ASSERTS(False, Boolean)
-False::False() { SLOW_DCHECK(IsFalse(this)); }
 Tagged<False> False::cast(Tagged<Object> object) {
   SLOW_DCHECK(IsFalse(object));
   return Tagged<False>(object.ptr());

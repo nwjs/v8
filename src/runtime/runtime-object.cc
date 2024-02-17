@@ -43,7 +43,10 @@ MaybeHandle<Object> Runtime::GetObjectProperty(
   if (result.is_null()) {
     return result;
   }
-  if (is_found) *is_found = it.IsFound();
+  if (is_found) {
+    *is_found = it.state() != LookupIterator::INTEGER_INDEXED_EXOTIC &&
+                it.state() != LookupIterator::NOT_FOUND;
+  }
 
   return result;
 }
@@ -1423,7 +1426,7 @@ Maybe<bool> FindPrivateMembersFromReceiver(Isolate* isolate,
       CollectPrivateMembersFromReceiver(isolate, receiver, desc, &results),
       Nothing<bool>());
 
-  if (results.size() == 0) {
+  if (results.empty()) {
     THROW_NEW_ERROR_RETURN_VALUE(isolate, NewError(not_found_message, desc),
                                  Nothing<bool>());
   } else if (results.size() > 1) {

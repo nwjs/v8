@@ -175,11 +175,15 @@ using SandboxedPointer_t = Address;
 #ifdef V8_ENABLE_SANDBOX
 
 // Size of the sandbox, excluding the guard regions surrounding it.
-#ifdef V8_TARGET_OS_ANDROID
+#if defined(V8_TARGET_OS_ANDROID)
 // On Android, most 64-bit devices seem to be configured with only 39 bits of
 // virtual address space for userspace. As such, limit the sandbox to 128GB (a
 // quarter of the total available address space).
 constexpr size_t kSandboxSizeLog2 = 37;  // 128 GB
+#elif defined(V8_TARGET_ARCH_LOONG64)
+// Some Linux distros on LoongArch64 configured with only 40 bits of virtual
+// address space for userspace. Limit the sandbox to 256GB here.
+constexpr size_t kSandboxSizeLog2 = 38;  // 256 GB
 #else
 // Everywhere else use a 1TB sandbox.
 constexpr size_t kSandboxSizeLog2 = 40;  // 1 TB
@@ -606,7 +610,13 @@ constexpr int kCodePointerTableEntryCodeObjectOffset = 8;
 
 // Constants that can be used to mark places that should be modified once
 // certain types of objects are moved out of the sandbox and into trusted space.
-constexpr bool kCodeObjectLiveInTrustedSpace = false;
+constexpr bool kRuntimeGeneratedCodeObjectsLiveInTrustedSpace = true;
+constexpr bool kBuiltinCodeObjectsLiveInTrustedSpace = false;
+constexpr bool kAllCodeObjectsLiveInTrustedSpace =
+    kRuntimeGeneratedCodeObjectsLiveInTrustedSpace &&
+    kBuiltinCodeObjectsLiveInTrustedSpace;
+
+constexpr bool kInterpreterDataObjectsLiveInTrustedSpace = false;
 
 // {obj} must be the raw tagged pointer representation of a HeapObject
 // that's guaranteed to never be in ReadOnlySpace.
@@ -661,7 +671,7 @@ class Internals {
   static const int kBuiltinTier0EntryTableSize = 7 * kApiSystemPointerSize;
   static const int kBuiltinTier0TableSize = 7 * kApiSystemPointerSize;
   static const int kLinearAllocationAreaSize = 3 * kApiSystemPointerSize;
-  static const int kThreadLocalTopSize = 28 * kApiSystemPointerSize;
+  static const int kThreadLocalTopSize = 30 * kApiSystemPointerSize;
   static const int kHandleScopeDataSize =
       2 * kApiSystemPointerSize + 2 * kApiInt32Size;
 
@@ -688,8 +698,12 @@ class Internals {
       kBuiltinTier0TableOffset + kBuiltinTier0TableSize;
   static const int kOldAllocationInfoOffset =
       kNewAllocationInfoOffset + kLinearAllocationAreaSize;
+
+  static const int kFastCCallAlignmentPaddingSize =
+      kApiSystemPointerSize == 8 ? 0 : kApiSystemPointerSize;
   static const int kIsolateFastCCallCallerFpOffset =
-      kOldAllocationInfoOffset + kLinearAllocationAreaSize;
+      kOldAllocationInfoOffset + kLinearAllocationAreaSize +
+      kFastCCallAlignmentPaddingSize;
   static const int kIsolateFastCCallCallerPcOffset =
       kIsolateFastCCallCallerFpOffset + kApiSystemPointerSize;
   static const int kIsolateFastApiCallTargetOffset =
@@ -708,8 +722,10 @@ class Internals {
   static const int kIsolateSharedExternalPointerTableAddressOffset =
       kIsolateExternalPointerTableOffset + kExternalPointerTableSize;
 #ifdef V8_ENABLE_SANDBOX
-  static const int kIsolateTrustedPointerTableOffset =
+  static const int kIsolateTrustedCageBaseOffset =
       kIsolateSharedExternalPointerTableAddressOffset + kApiSystemPointerSize;
+  static const int kIsolateTrustedPointerTableOffset =
+      kIsolateTrustedCageBaseOffset + kApiSystemPointerSize;
   static const int kIsolateApiCallbackThunkArgumentOffset =
       kIsolateTrustedPointerTableOffset + kTrustedPointerTableSize;
 #else
@@ -720,12 +736,15 @@ class Internals {
   static const int kIsolateApiCallbackThunkArgumentOffset =
       kIsolateEmbedderDataOffset + kNumIsolateDataSlots * kApiSystemPointerSize;
 #endif  // V8_COMPRESS_POINTERS
-  static const int kWasm64OOBOffsetOffset =
-      kIsolateApiCallbackThunkArgumentOffset + kApiSystemPointerSize;
   static const int kContinuationPreservedEmbedderDataOffset =
-      kWasm64OOBOffsetOffset + sizeof(int64_t);
+      kIsolateApiCallbackThunkArgumentOffset + kApiSystemPointerSize;
+
+  static const int kWasm64OOBOffsetAlignmentPaddingSize = 0;
+  static const int kWasm64OOBOffsetOffset =
+      kContinuationPreservedEmbedderDataOffset + kApiSystemPointerSize +
+      kWasm64OOBOffsetAlignmentPaddingSize;
   static const int kIsolateRootsOffset =
-      kContinuationPreservedEmbedderDataOffset + kApiSystemPointerSize;
+      kWasm64OOBOffsetOffset + sizeof(int64_t);
 
 #if V8_STATIC_ROOTS_BOOL
 
@@ -1355,6 +1374,7 @@ class HandleHelper final {
     return lhs.ptr() == rhs.ptr();
   }
 
+  static V8_EXPORT bool IsOnStack(const void* ptr);
   static V8_EXPORT void VerifyOnStack(const void* ptr);
   static V8_EXPORT void VerifyOnMainThread();
 };

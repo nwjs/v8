@@ -53,8 +53,10 @@ CodeKinds JSFunction::GetAvailableCodeKinds(IsolateForSandbox isolate) const {
 
   // Check the optimized code cache.
   if (has_feedback_vector() && feedback_vector()->has_optimized_code() &&
-      !feedback_vector()->optimized_code()->marked_for_deoptimization()) {
-    Tagged<Code> code = feedback_vector()->optimized_code();
+      !feedback_vector()
+           ->optimized_code(isolate)
+           ->marked_for_deoptimization()) {
+    Tagged<Code> code = feedback_vector()->optimized_code(isolate);
     DCHECK(CodeKindIsOptimizedJSFunction(code->kind()));
     result |= CodeKindToCodeKindFlag(code->kind());
   }
@@ -660,6 +662,20 @@ void JSFunction::InitializeFeedbackCell(
     }
   }
 #endif  // V8_ENABLE_SPARKPLUG
+
+  if (v8_flags.profile_guided_optimization &&
+      v8_flags.profile_guided_optimization_for_empty_feedback_vector &&
+      function->feedback_vector()->length() == 0) {
+    if (function->shared()->cached_tiering_decision() ==
+        CachedTieringDecision::kEarlyMaglev) {
+      function->MarkForOptimization(isolate, CodeKind::MAGLEV,
+                                    ConcurrencyMode::kConcurrent);
+    } else if (function->shared()->cached_tiering_decision() ==
+               CachedTieringDecision::kEarlyTurbofan) {
+      function->MarkForOptimization(isolate, CodeKind::TURBOFAN,
+                                    ConcurrencyMode::kConcurrent);
+    }
+  }
 }
 
 namespace {
@@ -961,8 +977,9 @@ bool CanSubclassHaveInobjectProperties(InstanceType instance_type) {
 #undef MAKE_STRUCT_CASE
       // We must not end up here for these instance types at all.
       UNREACHABLE();
-    // Fall through.
+
     default:
+      if (InstanceTypeChecker::IsJSApiObject(instance_type)) return true;
       return false;
   }
 }
@@ -1088,14 +1105,10 @@ MaybeHandle<Map> JSFunction::GetDerivedMap(Isolate* isolate,
         JSFunction::cast(native_context->get(index)), isolate);
     prototype = handle(realm_constructor->prototype(), isolate);
   }
-
-  Handle<Map> map = Map::CopyInitialMap(isolate, constructor_initial_map);
-  map->set_new_target_is_base(false);
-  CHECK(IsJSReceiver(*prototype));
-  if (map->prototype() != *prototype)
-    Map::SetPrototype(isolate, map, Handle<HeapObject>::cast(prototype));
-  map->SetConstructor(*constructor);
-  return map;
+  DCHECK_EQ(constructor_initial_map->constructor_or_back_pointer(),
+            *constructor);
+  return Map::GetDerivedMap(isolate, constructor_initial_map,
+                            Handle<JSReceiver>::cast(prototype));
 }
 
 namespace {

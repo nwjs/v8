@@ -2482,7 +2482,7 @@ void Simulator::set_fpu_register_float(int fpureg, Float32 value) {
 
 void Simulator::set_fpu_register_double(int fpureg, double value) {
   DCHECK((fpureg >= 0) && (fpureg < kNumFPURegisters));
-  *base::bit_cast<double*>(&FPUregisters_[fpureg]) = value;
+  FPUregisters_[fpureg] = base::bit_cast<int64_t>(value);
 }
 
 void Simulator::set_fpu_register_double(int fpureg, Float64 value) {
@@ -2537,7 +2537,7 @@ float Simulator::get_fpu_register_float(int fpureg) const {
   if (!is_boxed_float(FPUregisters_[fpureg])) {
     return std::numeric_limits<float>::quiet_NaN();
   }
-  return *base::bit_cast<float*>(const_cast<int64_t*>(&FPUregisters_[fpureg]));
+  return Float32::FromBits(FPUregisters_[fpureg] & 0xFFFF'FFFF).get_scalar();
 }
 
 // Fix NaN boxing error according to
@@ -2549,13 +2549,12 @@ Float32 Simulator::get_fpu_register_Float32(int fpureg,
     std::cout << std::hex << FPUregisters_[fpureg] << std::endl;
     return Float32::FromBits(0x7fc00000);
   }
-  return Float32::FromBits(
-      *base::bit_cast<uint32_t*>(const_cast<int64_t*>(&FPUregisters_[fpureg])));
+  return Float32::FromBits(FPUregisters_[fpureg] & 0xFFFF'FFFF);
 }
 
 double Simulator::get_fpu_register_double(int fpureg) const {
   DCHECK((fpureg >= 0) && (fpureg < kNumFPURegisters));
-  return *base::bit_cast<double*>(&FPUregisters_[fpureg]);
+  return base::bit_cast<double>(FPUregisters_[fpureg]);
 }
 
 Float64 Simulator::get_fpu_register_Float64(int fpureg) const {
@@ -5099,6 +5098,20 @@ void Simulator::DecodeRVIType() {
           sreg_t index = shamt6() & (xlen - 1);
           set_rd((rs1() >> index) & 1);
           break;
+        }
+        case RO_REV8: {
+          if (imm12() == RO_REV8_IMM12) {
+            reg_t input = rs1();
+            reg_t output = 0;
+            reg_t j = xlen - 1;
+            for (int i = 0; i < xlen; i += 8) {
+              output |= ((input >> (j - 7)) & 0xff) << i;
+              j -= 8;
+            }
+            set_rd(output);
+            break;
+          }
+          UNSUPPORTED_RISCV();
         }
         default:
           UNSUPPORTED_RISCV();

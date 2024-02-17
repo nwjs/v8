@@ -32,7 +32,6 @@
 #include "src/execution/stack-guard.h"
 #include "src/handles/handles.h"
 #include "src/handles/traced-handles.h"
-#include "src/heap/base/stack.h"
 #include "src/heap/factory.h"
 #include "src/heap/heap.h"
 #include "src/heap/read-only-heap.h"
@@ -535,8 +534,6 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
   V(bool, disable_bytecode_flushing, false)                                   \
   V(int, last_console_context_id, 0)                                          \
   V(v8_inspector::V8Inspector*, inspector, nullptr)                           \
-  V(bool, next_v8_call_is_safe_for_termination, false)                        \
-  V(bool, only_terminate_in_safe_scope, false)                                \
   V(int, embedder_wrapper_type_index, -1)                                     \
   V(int, embedder_wrapper_object_index, -1)                                   \
   V(compiler::NodeObserver*, node_observer, nullptr)                          \
@@ -780,6 +777,19 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   inline void set_context(Tagged<Context> context);
   Tagged<Context>* context_address() { return &thread_local_top()->context_; }
 
+  // The "topmost script-having execution context" from the Web IDL spec
+  // (i.e. the context of the topmost user JavaScript code, see
+  // https://html.spec.whatwg.org/multipage/webappapis.html#topmost-script-having-execution-context)
+  // if known or Context::kNoContext otherwise.
+  Tagged<Context> topmost_script_having_context() const {
+    return thread_local_top()->topmost_script_having_context_;
+  }
+  inline void set_topmost_script_having_context(Tagged<Context> context);
+  inline void clear_topmost_script_having_context();
+  Tagged<Context>* topmost_script_having_context_address() {
+    return &thread_local_top()->topmost_script_having_context_;
+  }
+
   // Access to current thread id.
   inline void set_thread_id(ThreadId id) {
     thread_local_top()->thread_id_.store(id, std::memory_order_relaxed);
@@ -815,7 +825,11 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   THREAD_LOCAL_TOP_ADDRESS(Tagged<Object>, exception)
   inline Tagged<Object> exception();
   inline void set_exception(Tagged<Object> exception_obj);
+  // Clear thrown exception from V8 and a possible TryCatch.
   inline void clear_exception();
+
+  // Clear the exception only from V8, not from a possible external try-catch.
+  inline void clear_internal_exception();
   inline bool has_exception();
 
   THREAD_LOCAL_TOP_ADDRESS(Tagged<Object>, pending_message)
@@ -1089,7 +1103,8 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   inline Handle<NativeContext> native_context();
   inline Tagged<NativeContext> raw_native_context();
 
-  Handle<NativeContext> GetIncumbentContext();
+  inline Handle<NativeContext> GetIncumbentContext();
+  Handle<NativeContext> GetIncumbentContextSlow();
 
   void RegisterTryCatchHandler(v8::TryCatch* that);
   void UnregisterTryCatchHandler(v8::TryCatch* that);
@@ -1943,6 +1958,36 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   bool IsIsolateInBackground() { return is_isolate_in_background_; }
 
+  // When efficiency mode is enabled we can favor single core throughput without
+  // latency requirements. Any decision based on this flag must be quickly
+  // reversible as we have to expect to migrate out of efficiency mode on short
+  // notice. E.g., it would not be advisable to generate worse code in
+  // efficiency mode. The decision when to enable efficiency mode is steered by
+  // the embedder. Currently the only signal (potentially) being considered is
+  // if an isolate is in foreground or background mode.
+  bool UseEfficiencyMode() {
+    if (V8_UNLIKELY(v8_flags.efficiency_mode.value().has_value())) {
+      return *v8_flags.efficiency_mode.value();
+    }
+    return IsIsolateInBackground();
+  }
+  // This is a temporary api until we use it by default.
+  bool UseEfficiencyModeForTiering() {
+    if (!v8_flags.efficiency_mode_for_tiering_heuristics) return false;
+    return UseEfficiencyMode();
+  }
+
+  // In battery saver mode we optimize to reduce total cpu cycles spent. Battery
+  // saver mode is opt-in by the embedder. As with efficiency mode we must
+  // expect that the mode is toggled off again and we should be able to ramp up
+  // quickly after that.
+  bool UseBatterySaverMode() {
+    if (V8_UNLIKELY(v8_flags.battery_saver_mode.value().has_value())) {
+      return *v8_flags.battery_saver_mode.value();
+    }
+    return V8_UNLIKELY(battery_saver_mode_enabled());
+  }
+
   PRINTF_FORMAT(2, 3) void PrintWithTimestamp(const char* format, ...);
 
   void set_allow_atomics_wait(bool set) { allow_atomics_wait_ = set; }
@@ -1964,11 +2009,12 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 #endif  // V8_ENABLE_WEBASSEMBLY
 
   const v8::Context::BackupIncumbentScope* top_backup_incumbent_scope() const {
-    return top_backup_incumbent_scope_;
+    return thread_local_top()->top_backup_incumbent_scope_;
   }
   void set_top_backup_incumbent_scope(
       const v8::Context::BackupIncumbentScope* top_backup_incumbent_scope) {
-    top_backup_incumbent_scope_ = top_backup_incumbent_scope;
+    thread_local_top()->top_backup_incumbent_scope_ =
+        top_backup_incumbent_scope;
   }
 
   void SetIdle(bool is_idle);
@@ -2099,8 +2145,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   SimulatorData* simulator_data() { return simulator_data_; }
 #endif
 
-  ::heap::base::Stack& stack() { return stack_; }
-
 #ifdef V8_ENABLE_WEBASSEMBLY
   bool IsOnCentralStack();
   wasm::StackMemory*& wasm_stacks() { return wasm_stacks_; }
@@ -2176,6 +2220,14 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // Called by d8 right before Dispose, if the shell is quitting with a dirty
   // stack.
   void PrepareForSuddenShutdown();
+
+  bool battery_saver_mode_enabled() const {
+    return battery_saver_mode_enabled_;
+  }
+
+  void set_battery_saver_mode_enabled(bool battery_saver_mode_enabled) {
+    battery_saver_mode_enabled_ = battery_saver_mode_enabled;
+  }
 
  private:
   explicit Isolate(std::unique_ptr<IsolateAllocator> isolate_allocator);
@@ -2368,6 +2420,8 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
       host_import_module_dynamically_with_import_assertions_callback_ = nullptr;
   std::atomic<debug::CoverageMode> code_coverage_mode_{
       debug::CoverageMode::kBestEffort};
+
+  std::atomic<bool> battery_saver_mode_enabled_ = false;
 
   // Helper function for RunHostImportModuleDynamicallyCallback.
   // Unpacks import assertions, if present, from the second argument to dynamic
@@ -2596,10 +2650,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   EmbeddedFileWriterInterface* embedded_file_writer_ = nullptr;
 
-  // The top entry of the v8::Context::BackupIncumbentScope stack.
-  const v8::Context::BackupIncumbentScope* top_backup_incumbent_scope_ =
-      nullptr;
-
   PrepareStackTraceCallback prepare_stack_trace_callback_ = nullptr;
 
 #if defined(V8_OS_WIN) && defined(V8_ENABLE_ETW_STACK_WALKING)
@@ -2646,9 +2696,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // The mutex only guards adding pages, the retrieval is signal safe.
   base::Mutex code_pages_mutex_;
 
-  // Stack information for the main thread.
-  ::heap::base::Stack stack_;
-
 #ifdef V8_ENABLE_WEBASSEMBLY
   wasm::WasmCodeLookupCache* wasm_code_look_up_cache_ = nullptr;
   wasm::StackMemory* wasm_stacks_;
@@ -2668,6 +2715,11 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
 #if USE_SIMULATOR
   SimulatorData* simulator_data_ = nullptr;
+#endif
+
+#ifdef V8_ENABLE_CHECKS
+  ThreadId current_thread_id_;
+  int current_thread_counter_ = 0;
 #endif
 
   friend class heap::HeapTester;
@@ -2702,6 +2754,7 @@ class V8_EXPORT_PRIVATE SaveContext {
  private:
   Isolate* const isolate_;
   Handle<Context> context_;
+  Handle<Context> topmost_script_having_context_;
 };
 
 // Like SaveContext, but also switches the Context to a new one in the
@@ -2723,11 +2776,19 @@ class AssertNoContextChange {
 #ifdef DEBUG
  public:
   explicit AssertNoContextChange(Isolate* isolate);
-  ~AssertNoContextChange() { DCHECK(isolate_->context() == *context_); }
+  ~AssertNoContextChange() {
+    CHECK_EQ(isolate_->context(), *context_);
+    // The caller context is either cleared or not modified.
+    if (!isolate_->topmost_script_having_context().is_null()) {
+      CHECK_EQ(isolate_->topmost_script_having_context(),
+               *topmost_script_having_context_);
+    }
+  }
 
  private:
   Isolate* isolate_;
   Handle<Context> context_;
+  Handle<Context> topmost_script_having_context_;
 #else
  public:
   explicit AssertNoContextChange(Isolate* isolate) {}

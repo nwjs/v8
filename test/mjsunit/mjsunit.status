@@ -229,7 +229,7 @@
     ['system != linux or arch not in (arm, arm64, x64, s390x, ppc64)', SKIP]],
 
   # TODO(v8:12783): Turboshaft instruction selection not ported to these platforms yet.
-  'wasm/turboshaft/instruction-selection': [PASS, ['arch in [arm, ia32, ppc64, s390x, riscv32]', SKIP]],
+  'wasm/turboshaft/instruction-selection': [PASS, ['arch in [ppc64, s390x, riscv32]', SKIP]],
 }],  # ALWAYS
 
 ################################################################################
@@ -1693,6 +1693,7 @@
   'regress/wasm/regress-crbug-1356718': [SKIP],
   'regress/wasm/regress-crbug-1465386': [SKIP],
   'regress/wasm/regress-crbug-1491815': [SKIP],
+  'regress/wasm/regress-crbug-1520130': [SKIP],
 }],  # no_simd_hardware == True
 
 ##############################################################################
@@ -1718,6 +1719,8 @@
 ['variant == stress_concurrent_inlining', {
   # Flaky under this variant, skipping per https://crbug.com/v8/12267#c4
   'compiler/inlined-call-polymorphic': [SKIP],
+  # Flaky under this variant, skipping per https://crbug.com/v8/14560#c2
+  'turboshaft/turboshaft-frontend-test': [SKIP]
 }],  # variant == stress_concurrent_inlining
 
 ##############################################################################
@@ -1902,13 +1905,13 @@
 }],  # arch != x64 or gc_fuzzer or deopt_fuzzer or interrupt_fuzzer
 
 ##############################################################################
-['((arch != x64 and arch != arm64 and arch != ia32) or (simulator_run and conservative_stack_scanning))', {
+['((arch != x64 and arch != arm64 and arch != ia32 and arch != arm) or (simulator_run and conservative_stack_scanning))', {
   # Stack switching is only supported on x64/arm64.
   'wasm/stack-switching': [SKIP],
   'wasm/stack-switching-export': [SKIP],
   'wasm/stack-switching-generic-wrapper': [SKIP],
   'regress/wasm/regress-v8-14471': [SKIP]
-}],  # (arch != x64 and arch != arm64 and arch != ia32)
+}],  # (arch != x64 and arch != arm64 and arch != ia32 and arch != arm)
 
 ##############################################################################
 ['arch != x64 and arch != arm64 and arch != loong64 and arch != mips64', {
@@ -1927,6 +1930,7 @@
   'math-floor-part1': [SKIP],
   'compiler/regress-1125145': [SKIP],
   'compiler/regress-crbug-1399627': [SKIP],
+  'json2': [SKIP],
   'es6/typedarray-of': [PASS, SLOW],
 
   # TODO(victorgomes):

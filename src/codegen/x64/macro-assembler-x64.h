@@ -448,6 +448,7 @@ class V8_EXPORT_PRIVATE MacroAssembler
   void LoadFromConstantsTable(Register destination, int constant_index) final;
   void LoadRootRegisterOffset(Register destination, intptr_t offset) final;
   void LoadRootRelative(Register destination, int32_t offset) final;
+  void StoreRootRelative(int32_t offset, Register value) final;
 
   // Operand pointing to an external reference.
   // May emit code to set up the scratch register. The operand is
@@ -499,7 +500,8 @@ class V8_EXPORT_PRIVATE MacroAssembler
   void Trap();
   void DebugBreak();
 
-  void CompareRoot(Register with, RootIndex index);
+  void CompareRoot(Register with, RootIndex index,
+                   ComparisonMode mode = ComparisonMode::kDefault);
   void CompareTaggedRoot(Register with, RootIndex index);
   void CompareRoot(Operand with, RootIndex index);
 
@@ -552,9 +554,9 @@ class V8_EXPORT_PRIVATE MacroAssembler
   // --debug-code.
   void AssertCode(Register object) NOOP_UNLESS_DEBUG_CODE;
 
-  // Abort execution if argument is not smi nor in the pointer compresssion
+  // Abort execution if argument is not smi nor in the main pointer compresssion
   // cage, enabled via --debug-code.
-  void AssertSmiOrHeapObjectInCompressionCage(Register object)
+  void AssertSmiOrHeapObjectInMainCompressionCage(Register object)
       NOOP_UNLESS_DEBUG_CODE;
 
   // Print a message to stdout and abort execution.
@@ -735,9 +737,15 @@ class V8_EXPORT_PRIVATE MacroAssembler
   // Store a trusted pointer field.
   void StoreTrustedPointerField(Operand dst_field_operand, Register value);
 
-  // Store a code pointer field.
+  // Load a code pointer field.
   // These are special versions of trusted pointers that, when the sandbox is
   // enabled, reference code objects through the code pointer table.
+  void LoadCodePointerField(Register destination, Operand field_operand,
+                            Register scratch) {
+    LoadTrustedPointerField(destination, field_operand, kCodeIndirectPointerTag,
+                            scratch);
+  }
+  // Store a code pointer field.
   void StoreCodePointerField(Operand dst_field_operand, Register value) {
     StoreTrustedPointerField(dst_field_operand, value);
   }
@@ -772,6 +780,8 @@ class V8_EXPORT_PRIVATE MacroAssembler
   void LoadCodeEntrypointViaCodePointer(Register destination,
                                         Operand field_operand);
 #endif  // V8_ENABLE_SANDBOX
+
+  void LoadProtectedPointerField(Register destination, Operand field_operand);
 
   // Loads and stores the value of an external reference.
   // Special case code for load and store to take advantage of

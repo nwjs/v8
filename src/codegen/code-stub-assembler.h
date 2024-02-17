@@ -9,7 +9,6 @@
 
 #include "src/base/macros.h"
 #include "src/codegen/bailout-reason.h"
-#include "src/codegen/code-factory.h"
 #include "src/codegen/tnode.h"
 #include "src/common/globals.h"
 #include "src/common/message-template.h"
@@ -166,6 +165,7 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
   V(EmptyArrayList, empty_array_list, EmptyArrayList)                        \
   V(EmptyByteArray, empty_byte_array, EmptyByteArray)                        \
   V(EmptyFixedArray, empty_fixed_array, EmptyFixedArray)                     \
+  V(EmptyOrderedHashSet, empty_ordered_hash_set, EmptyOrderedHashSet)        \
   V(EmptyScopeInfo, empty_scope_info, EmptyScopeInfo)                        \
   V(EmptyPropertyDictionary, empty_property_dictionary,                      \
     EmptyPropertyDictionary)                                                 \
@@ -190,6 +190,7 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
   V(Infinity_string, Infinity_string, InfinityString)                        \
   V(is_concat_spreadable_symbol, is_concat_spreadable_symbol,                \
     IsConcatSpreadableSymbol)                                                \
+  V(Iterator_string, Iterator_string, IteratorString)                        \
   V(iterator_symbol, iterator_symbol, IteratorSymbol)                        \
   V(keys_string, keys_string, KeysString)                                    \
   V(async_iterator_symbol, async_iterator_symbol, AsyncIteratorSymbol)       \
@@ -212,6 +213,7 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
   V(number_string, number_string, NumberString)                              \
   V(number_to_string, number_to_string, NumberToString)                      \
   V(Object_string, Object_string, ObjectString)                              \
+  V(object_string, object_string, objectString)                              \
   V(object_to_string, object_to_string, ObjectToString)                      \
   V(SeqOneByteStringMap, seq_one_byte_string_map, SeqOneByteStringMap)       \
   V(OneClosureCellMap, one_closure_cell_map, OneClosureCellMap)              \
@@ -891,25 +893,32 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
   void Dcheck(const BranchGenerator& branch, const char* message,
               const char* file, int line,
-              std::initializer_list<ExtraNode> extra_nodes = {});
+              std::initializer_list<ExtraNode> extra_nodes = {},
+              SourceLocation loc = SourceLocation::Current());
   void Dcheck(const NodeGenerator<BoolT>& condition_body, const char* message,
               const char* file, int line,
-              std::initializer_list<ExtraNode> extra_nodes = {});
+              std::initializer_list<ExtraNode> extra_nodes = {},
+              SourceLocation loc = SourceLocation::Current());
   void Dcheck(TNode<Word32T> condition_node, const char* message,
               const char* file, int line,
-              std::initializer_list<ExtraNode> extra_nodes = {});
+              std::initializer_list<ExtraNode> extra_nodes = {},
+              SourceLocation loc = SourceLocation::Current());
   void Check(const BranchGenerator& branch, const char* message,
              const char* file, int line,
-             std::initializer_list<ExtraNode> extra_nodes = {});
+             std::initializer_list<ExtraNode> extra_nodes = {},
+             SourceLocation loc = SourceLocation::Current());
   void Check(const NodeGenerator<BoolT>& condition_body, const char* message,
              const char* file, int line,
-             std::initializer_list<ExtraNode> extra_nodes = {});
+             std::initializer_list<ExtraNode> extra_nodes = {},
+             SourceLocation loc = SourceLocation::Current());
   void Check(TNode<Word32T> condition_node, const char* message,
              const char* file, int line,
-             std::initializer_list<ExtraNode> extra_nodes = {});
+             std::initializer_list<ExtraNode> extra_nodes = {},
+             SourceLocation loc = SourceLocation::Current());
   void FailAssert(const char* message,
                   const std::vector<FileAndLine>& files_and_lines,
-                  std::initializer_list<ExtraNode> extra_nodes = {});
+                  std::initializer_list<ExtraNode> extra_nodes = {},
+                  SourceLocation loc = SourceLocation::Current());
 
   void FastCheck(TNode<BoolT> condition);
 
@@ -920,23 +929,11 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   // one finds in the EcmaScript spec, operating on an Callable (e.g. a
   // JSFunction or proxy) rather than a InstructionStream object.
   template <class... TArgs>
-  TNode<Object> Call(TNode<Context> context, TNode<Object> callable,
-                     TNode<JSReceiver> receiver, TArgs... args) {
-    return CallJS(
-        CodeFactory::Call(isolate(), ConvertReceiverMode::kNotNullOrUndefined),
-        context, callable, receiver, args...);
-  }
+  inline TNode<Object> Call(TNode<Context> context, TNode<Object> callable,
+                            TNode<JSReceiver> receiver, TArgs... args);
   template <class... TArgs>
-  TNode<Object> Call(TNode<Context> context, TNode<Object> callable,
-                     TNode<Object> receiver, TArgs... args) {
-    if (IsUndefinedConstant(receiver) || IsNullConstant(receiver)) {
-      return CallJS(
-          CodeFactory::Call(isolate(), ConvertReceiverMode::kNullOrUndefined),
-          context, callable, receiver, args...);
-    }
-    return CallJS(CodeFactory::Call(isolate()), context, callable, receiver,
-                  args...);
-  }
+  inline TNode<Object> Call(TNode<Context> context, TNode<Object> callable,
+                            TNode<Object> receiver, TArgs... args);
 
   TNode<Object> CallApiCallback(TNode<Object> context, TNode<RawPtrT> callback,
                                 TNode<Int32T> argc, TNode<Object> data,
@@ -962,8 +959,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                         TNode<JSReceiver> target,
                                         TNode<JSReceiver> new_target,
                                         TArgs... args) {
-    return CAST(ConstructJSWithTarget(CodeFactory::Construct(isolate()),
-                                      context, target, new_target,
+    return CAST(ConstructJSWithTarget(Builtin::kConstruct, context, target,
+                                      new_target,
                                       implicit_cast<TNode<Object>>(args)...));
   }
   template <class... TArgs>
@@ -1257,8 +1254,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   }
 
   TNode<RawPtrT> LoadExternalStringResourcePtr(TNode<ExternalString> object) {
-    return LoadExternalPointerFromObject(
-        object, ExternalString::kResourceOffset, kExternalStringResourceTag);
+    return LoadExternalPointerFromObject(object,
+                                         offsetof(ExternalString, resource_),
+                                         kExternalStringResourceTag);
   }
 
   TNode<RawPtrT> LoadExternalStringResourceDataPtr(
@@ -1269,9 +1267,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                          Word32And(LoadInstanceType(object),
                                    Int32Constant(kUncachedExternalStringMask)),
                          Int32Constant(kUncachedExternalStringTag)));
-    return LoadExternalPointerFromObject(object,
-                                         ExternalString::kResourceDataOffset,
-                                         kExternalStringResourceDataTag);
+    return LoadExternalPointerFromObject(
+        object, offsetof(ExternalString, resource_data_),
+        kExternalStringResourceDataTag);
   }
 
   TNode<RawPtr<Uint64T>> Log10OffsetTable() {
@@ -1285,6 +1283,18 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
     return LoadExternalPointerFromObject(
         object, WasmInternalFunction::kCallTargetOffset,
         kWasmInternalFunctionCallTargetTag);
+  }
+
+  TNode<RawPtrT> LoadWasmInternalFunctionInstructionStart(
+      TNode<WasmInternalFunction> object) {
+#ifdef V8_ENABLE_SANDBOX
+    return LoadCodeEntrypointViaCodePointerField(
+        object, WasmInternalFunction::kCodeOffset);
+#else
+    TNode<Code> code =
+        LoadObjectField<Code>(object, WasmInternalFunction::kCodeOffset);
+    return LoadCodeInstructionStart(code);
+#endif  // V8_ENABLE_SANDBOX
   }
 
   TNode<RawPtrT> LoadWasmTypeInfoNativeTypePtr(TNode<WasmTypeInfo> object) {
@@ -2186,6 +2196,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                            Label* large_object_fallback);
 
   TNode<OrderedHashSet> AllocateOrderedHashSet();
+  TNode<OrderedHashSet> AllocateOrderedHashSet(TNode<IntPtrT> capacity);
 
   TNode<OrderedHashMap> AllocateOrderedHashMap();
 
@@ -3640,17 +3651,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<JSObject> CreateAsyncFromSyncIterator(TNode<Context> context,
                                               TNode<JSReceiver> sync_iterator,
                                               TNode<Object> next);
-
-  template <class... TArgs>
-  TNode<Object> CallBuiltin(Builtin id, TNode<Object> context, TArgs... args) {
-    return CallStub<Object>(Builtins::CallableFor(isolate(), id), context,
-                            args...);
-  }
-
-  template <class... TArgs>
-  void TailCallBuiltin(Builtin id, TNode<Object> context, TArgs... args) {
-    return TailCallStub(Builtins::CallableFor(isolate(), id), context, args...);
-  }
 
   void LoadPropertyFromFastObject(TNode<HeapObject> object, TNode<Map> map,
                                   TNode<DescriptorArray> descriptors,

@@ -1156,25 +1156,25 @@ class IndexedReferencesExtractor : public ObjectVisitorWithCageBases {
 
   void VisitIndirectPointer(Tagged<HeapObject> host, IndirectPointerSlot slot,
                             IndirectPointerMode mode) override {
-    int field_index =
-        static_cast<int>(slot.address() - parent_start_.address()) /
-        kIndirectPointerSize;
-    DCHECK_GE(field_index, 0);
-    if (generator_->visited_fields_[field_index]) {
-      generator_->visited_fields_[field_index] = false;
-    } else {
-      Tagged<Object> content = slot.load(generator_->isolate());
-      if (IsHeapObject(content)) {
-        VisitHeapObjectImpl(HeapObject::cast(content), field_index);
-      }
-    }
+    VisitSlotImpl(generator_->isolate(), slot);
+  }
+
+  void VisitProtectedPointer(Tagged<TrustedObject> host,
+                             ProtectedPointerSlot slot) override {
+    // TODO(saelo): the cage base doesn't currently matter as it isn't used,
+    // but technically we should either use the trusted cage base here or
+    // remove the cage_base parameter.
+    const PtrComprCageBase unused_cage_base(kNullAddress);
+    VisitSlotImpl(unused_cage_base, slot);
   }
 
  private:
-  template <typename TSlot>
-  V8_INLINE void VisitSlotImpl(PtrComprCageBase cage_base, TSlot slot) {
+  template <typename TIsolateOrCageBase, typename TSlot>
+  V8_INLINE void VisitSlotImpl(TIsolateOrCageBase isolate_or_cage_base,
+                               TSlot slot) {
     int field_index =
-        static_cast<int>(MaybeObjectSlot(slot.address()) - parent_start_);
+        static_cast<int>(slot.address() - parent_start_.address()) /
+        TSlot::kSlotDataSize;
 #ifdef V8_TARGET_BIG_ENDIAN
     field_index += AdjustEmbedderFieldIndex(parent_obj_, field_index);
 #endif
@@ -1183,7 +1183,7 @@ class IndexedReferencesExtractor : public ObjectVisitorWithCageBases {
       generator_->visited_fields_[field_index] = false;
     } else {
       Tagged<HeapObject> heap_object;
-      auto loaded_value = slot.load(cage_base);
+      auto loaded_value = slot.load(isolate_or_cage_base);
       if (loaded_value.GetHeapObjectIfStrong(&heap_object)) {
         VisitHeapObjectImpl(heap_object, field_index);
       } else if (loaded_value.GetHeapObjectIfWeak(&heap_object)) {
@@ -1312,8 +1312,6 @@ void V8HeapExplorer::ExtractReferences(HeapEntry* entry,
 
 void V8HeapExplorer::ExtractJSGlobalProxyReferences(
     HeapEntry* entry, Tagged<JSGlobalProxy> proxy) {
-  SetInternalReference(entry, "native_context", proxy->native_context(),
-                       JSGlobalProxy::kNativeContextOffset);
 }
 
 void V8HeapExplorer::ExtractJSObjectReferences(HeapEntry* entry,
@@ -1373,12 +1371,8 @@ void V8HeapExplorer::ExtractJSObjectReferences(HeapEntry* entry,
                          JSFunction::kCodeOffset);
   } else if (IsJSGlobalObject(obj)) {
     Tagged<JSGlobalObject> global_obj = JSGlobalObject::cast(obj);
-    SetInternalReference(entry, "native_context", global_obj->native_context(),
-                         JSGlobalObject::kNativeContextOffset);
     SetInternalReference(entry, "global_proxy", global_obj->global_proxy(),
                          JSGlobalObject::kGlobalProxyOffset);
-    static_assert(JSGlobalObject::kHeaderSize - JSObject::kHeaderSize ==
-                  2 * kTaggedSize);
   } else if (IsJSArrayBufferView(obj)) {
     Tagged<JSArrayBufferView> view = JSArrayBufferView::cast(obj);
     SetInternalReference(entry, "buffer", view->buffer(),
@@ -1398,24 +1392,25 @@ void V8HeapExplorer::ExtractStringReferences(HeapEntry* entry,
                                              Tagged<String> string) {
   if (IsConsString(string)) {
     Tagged<ConsString> cs = ConsString::cast(string);
-    SetInternalReference(entry, "first", cs->first(), ConsString::kFirstOffset);
+    SetInternalReference(entry, "first", cs->first(),
+                         offsetof(ConsString, first_));
     SetInternalReference(entry, "second", cs->second(),
-                         ConsString::kSecondOffset);
+                         offsetof(ConsString, second_));
   } else if (IsSlicedString(string)) {
     Tagged<SlicedString> ss = SlicedString::cast(string);
     SetInternalReference(entry, "parent", ss->parent(),
-                         SlicedString::kParentOffset);
+                         offsetof(SlicedString, parent_));
   } else if (IsThinString(string)) {
     Tagged<ThinString> ts = ThinString::cast(string);
     SetInternalReference(entry, "actual", ts->actual(),
-                         ThinString::kActualOffset);
+                         offsetof(ThinString, actual_));
   }
 }
 
 void V8HeapExplorer::ExtractSymbolReferences(HeapEntry* entry,
                                              Tagged<Symbol> symbol) {
   SetInternalReference(entry, "name", symbol->description(),
-                       Symbol::kDescriptionOffset);
+                       offsetof(Symbol, description_));
 }
 
 void V8HeapExplorer::ExtractJSCollectionReferences(
@@ -1688,10 +1683,10 @@ void V8HeapExplorer::ExtractCodeReferences(HeapEntry* entry,
   if (code->kind() == CodeKind::BASELINE) {
     // TODO(saelo): Currently, the BytecodeArray (living in trusted space) is
     // referenced from this field through its wrapper object, so we need to
-    // handle this here. Once Code objects move into trusted space as well,
-    // they will again directly reference the BytecodeArray, at which point
-    // this special handling can be removed again.
-    static_assert(!kCodeObjectLiveInTrustedSpace);
+    // handle this here. Once InterpreterData objects move into trusted space
+    // as well, we can again directly reference the BytecodeArray, at which
+    // point this special handling can be removed.
+    static_assert(!kInterpreterDataObjectsLiveInTrustedSpace);
     Tagged<Object> bytecode_or_interpreter_data =
         code->bytecode_or_interpreter_data(isolate());
     if (IsBytecodeArray(bytecode_or_interpreter_data)) {
@@ -2175,13 +2170,16 @@ void V8HeapExplorer::ExtractWasmArrayReferences(Tagged<WasmArray> obj,
 }
 
 void V8HeapExplorer::ExtractWasmInstanceObjectReference(
-    Tagged<WasmInstanceObject> obj, HeapEntry* entry) {
+    Tagged<WasmInstanceObject> instance_object, HeapEntry* entry) {
   PtrComprCageBase cage_base(heap_->isolate());
-  for (size_t i = 0; i < WasmInstanceObject::kTaggedFieldOffsets.size(); i++) {
-    const uint16_t offset = WasmInstanceObject::kTaggedFieldOffsets[i];
-    SetInternalReference(entry, WasmInstanceObject::kTaggedFieldNames[i],
-                         TaggedField<Object>::load(cage_base, obj, offset),
-                         offset);
+  Tagged<WasmTrustedInstanceData> trusted_data =
+      instance_object->trusted_data(heap_->isolate());
+  for (size_t i = 0; i < WasmTrustedInstanceData::kTaggedFieldOffsets.size();
+       i++) {
+    const uint16_t offset = WasmTrustedInstanceData::kTaggedFieldOffsets[i];
+    SetInternalReference(
+        entry, WasmTrustedInstanceData::kTaggedFieldNames[i],
+        TaggedField<Object>::load(cage_base, trusted_data, offset), offset);
   }
 }
 
@@ -2201,7 +2199,6 @@ Tagged<JSFunction> V8HeapExplorer::GetConstructor(Isolate* isolate,
 
 Tagged<String> V8HeapExplorer::GetConstructorName(Isolate* isolate,
                                                   Tagged<JSObject> object) {
-  if (IsJSFunction(object)) return ReadOnlyRoots(isolate).closure_string();
   DisallowGarbageCollection no_gc;
   HandleScope scope(isolate);
   return *JSReceiver::GetConstructorName(isolate, handle(object, isolate));
@@ -3551,7 +3548,7 @@ void HeapSnapshotJSONSerializer::SerializeStrings() {
 }
 
 void HeapSnapshotJSONSerializer::SerializeLocation(
-    const SourceLocation& location) {
+    const EntrySourceLocation& location) {
   // The buffer needs space for 4 unsigned ints, 3 commas, \n and \0
   static const int kBufferSize =
       MaxDecimalDigitsIn<sizeof(unsigned)>::kUnsigned * 4 + 3 + 2;
@@ -3570,7 +3567,7 @@ void HeapSnapshotJSONSerializer::SerializeLocation(
 }
 
 void HeapSnapshotJSONSerializer::SerializeLocations() {
-  const std::vector<SourceLocation>& locations = snapshot_->locations();
+  const std::vector<EntrySourceLocation>& locations = snapshot_->locations();
   for (size_t i = 0; i < locations.size(); i++) {
     if (i > 0) writer_->AddCharacter(',');
     SerializeLocation(locations[i]);

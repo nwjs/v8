@@ -247,9 +247,7 @@ void i::V8::FatalProcessOutOfMemory(i::Isolate* i_isolate, const char* location,
     // Give the embedder a chance to handle the condition. If it doesn't,
     // just crash.
     if (g_oom_error_callback) g_oom_error_callback(location, details);
-    // Note: The error message needs to be consistent with other OOM error
-    // messages (e.g. below) so that ClusterFuzz recognizes it.
-    FATAL("Fatal process out of memory: %s", location);
+    base::FatalOOM(base::OOMType::kProcess, location);
     UNREACHABLE();
   }
 
@@ -360,18 +358,10 @@ void Utils::ReportOOMFailure(i::Isolate* i_isolate, const char* location,
     // crbug.com/614440.
     FatalErrorCallback fatal_callback = i_isolate->exception_behavior();
     if (fatal_callback == nullptr) {
-      // Be careful when changing the error message below; it's matched by
-      // ClusterFuzz.
-      base::OS::PrintError("\n#\n# Fatal %s out of memory: %s\n#\n\n",
-                           details.is_heap_oom ? "JavaScript" : "process",
-                           location);
-#ifdef V8_FUZZILLI
-      // Ignore OOM crashes for fuzzing but exit with an error such that
-      // samples are discarded by Fuzzilli.
-      _exit(1);
-#else
-      base::OS::Abort();
-#endif  // V8_FUZZILLI
+      base::OOMType type = details.is_heap_oom ? base::OOMType::kJavaScript
+                                               : base::OOMType::kProcess;
+      base::FatalOOM(type, location);
+      UNREACHABLE();
     } else {
       fatal_callback(location,
                      details.is_heap_oom
@@ -588,6 +578,11 @@ SnapshotCreator::SnapshotCreator(const intptr_t* external_references,
 SnapshotCreator::SnapshotCreator(const v8::Isolate::CreateParams& params)
     : data_(new i::SnapshotCreatorImpl(params)) {}
 
+SnapshotCreator::SnapshotCreator(v8::Isolate* isolate,
+                                 const v8::Isolate::CreateParams& params)
+    : data_(new i::SnapshotCreatorImpl(reinterpret_cast<i::Isolate*>(isolate),
+                                       params)) {}
+
 SnapshotCreator::~SnapshotCreator() {
   DCHECK_NOT_NULL(data_);
   auto impl = static_cast<i::SnapshotCreatorImpl*>(data_);
@@ -752,6 +747,14 @@ void ResourceConstraints::ConfigureDefaults(uint64_t physical_memory,
   }
 }
 
+namespace api_internal {
+void StackAllocated<true>::VerifyOnStack() const {
+  if (internal::StackAllocatedCheck::Get()) {
+    internal::HandleHelper::VerifyOnStack(this);
+  }
+}
+}  // namespace api_internal
+
 namespace internal {
 
 void VerifyHandleIsNonEmpty(bool is_empty) {
@@ -782,13 +785,16 @@ void DisposeTracedReference(internal::Address* location) {
 }
 
 // static
-void v8::internal::HandleHelper::VerifyOnStack(const void* ptr) {
-  DCHECK_LE(v8::base::Stack::GetCurrentStackPosition(), ptr);
-  DCHECK_GE(v8::base::Stack::GetStackStartUnchecked(), ptr);
+bool HandleHelper::IsOnStack(const void* ptr) {
+  return v8::base::Stack::GetCurrentStackPosition() <= ptr &&
+         ptr <= v8::base::Stack::GetStackStartUnchecked();
 }
 
 // static
-void v8::internal::HandleHelper::VerifyOnMainThread() {
+void HandleHelper::VerifyOnStack(const void* ptr) { DCHECK(IsOnStack(ptr)); }
+
+// static
+void HandleHelper::VerifyOnMainThread() {
   // The following verifies that we are on the main thread, as
   // LocalHeap::Current is not set in that case.
   DCHECK_NULL(LocalHeap::Current());
@@ -917,9 +923,15 @@ void HandleScope::Initialize(Isolate* v8_isolate) {
   prev_next_ = current->next;
   prev_limit_ = current->limit;
   current->level++;
+#ifdef V8_ENABLE_CHECKS
+  scope_level_ = current->level;
+#endif
 }
 
 HandleScope::~HandleScope() {
+#ifdef V8_ENABLE_CHECKS
+  CHECK_EQ(scope_level_, i_isolate_->handle_scope_data()->level);
+#endif
   i::HandleScope::CloseScope(i_isolate_, prev_next_, prev_limit_);
 }
 
@@ -946,31 +958,19 @@ i::Address* HandleScope::CreateHandleForCurrentIsolate(i::Address value) {
 
 #endif  // V8_ENABLE_DIRECT_LOCAL
 
-EscapableHandleScope::EscapableHandleScope(Isolate* v8_isolate) {
+EscapableHandleScopeBase::EscapableHandleScopeBase(Isolate* v8_isolate) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
   escape_slot_ = CreateHandle(
       i_isolate, i::ReadOnlyRoots(i_isolate).the_hole_value().ptr());
   Initialize(v8_isolate);
 }
 
-i::Address* EscapableHandleScope::Escape(i::Address* escape_value) {
-  i::Heap* heap = reinterpret_cast<i::Isolate*>(GetIsolate())->heap();
-  Utils::ApiCheck(
-      i::IsTheHole(i::Tagged<i::Object>(*escape_slot_), heap->isolate()),
-      "EscapableHandleScope::Escape", "Escape value set twice");
-  if (escape_value == nullptr) {
-    *escape_slot_ = i::ReadOnlyRoots(heap).undefined_value().ptr();
-    return nullptr;
-  }
+i::Address* EscapableHandleScopeBase::EscapeSlot(i::Address* escape_value) {
+  DCHECK_NOT_NULL(escape_value);
+  DCHECK(i::IsTheHole(i::Tagged<i::Object>(*escape_slot_),
+                      reinterpret_cast<i::Isolate*>(GetIsolate())));
   *escape_slot_ = *escape_value;
   return escape_slot_;
-}
-
-void* EscapableHandleScope::operator new(size_t) { base::OS::Abort(); }
-void* EscapableHandleScope::operator new[](size_t) { base::OS::Abort(); }
-void EscapableHandleScope::operator delete(void*, size_t) { base::OS::Abort(); }
-void EscapableHandleScope::operator delete[](void*, size_t) {
-  base::OS::Abort();
 }
 
 SealHandleScope::SealHandleScope(Isolate* v8_isolate)
@@ -989,11 +989,6 @@ SealHandleScope::~SealHandleScope() {
   DCHECK_EQ(current->level, current->sealed_level);
   current->sealed_level = prev_sealed_level_;
 }
-
-void* SealHandleScope::operator new(size_t) { base::OS::Abort(); }
-void* SealHandleScope::operator new[](size_t) { base::OS::Abort(); }
-void SealHandleScope::operator delete(void*, size_t) { base::OS::Abort(); }
-void SealHandleScope::operator delete[](void*, size_t) { base::OS::Abort(); }
 
 bool Data::IsModule() const {
   return i::IsModule(*Utils::OpenDirectHandle(this));
@@ -1067,6 +1062,9 @@ Context::BackupIncumbentScope::BackupIncumbentScope(
 
   prev_ = i_isolate->top_backup_incumbent_scope();
   i_isolate->set_top_backup_incumbent_scope(this);
+  // Enforce slow incumbent computation in order to make it find this
+  // BackupIncumbentScope.
+  i_isolate->clear_topmost_script_having_context();
 }
 
 Context::BackupIncumbentScope::~BackupIncumbentScope() {
@@ -1407,7 +1405,7 @@ Local<FunctionTemplate> FunctionTemplate::NewWithCFunctionOverloads(
   API_RCS_SCOPE(i_isolate, FunctionTemplate, New);
 
   if (!Utils::ApiCheck(
-          c_function_overloads.size() == 0 ||
+          c_function_overloads.empty() ||
               behavior == ConstructorBehavior::kThrow,
           "FunctionTemplate::NewWithCFunctionOverloads",
           "Fast API calls are not supported for constructor functions")) {
@@ -1460,7 +1458,7 @@ void FunctionTemplate::SetCallHandler(
     data = v8::Undefined(reinterpret_cast<v8::Isolate*>(i_isolate));
   }
   obj->set_data(*Utils::OpenDirectHandle(*data));
-  if (c_function_overloads.size() > 0) {
+  if (!c_function_overloads.empty()) {
     // Stores the data for a sequence of CFunction overloads into a single
     // FixedArray, as [address_0, signature_0, ... address_n-1, signature_n-1].
     i::Handle<i::FixedArray> function_overloads =
@@ -2020,7 +2018,7 @@ ScriptCompiler::StreamedSource::~StreamedSource() = default;
 Local<Script> UnboundScript::BindToCurrentContext() {
   auto function_info = Utils::OpenHandle(this);
   // TODO(jgruber): Remove this DCHECK once Function::GetUnboundScript is gone.
-  DCHECK(!function_info->InReadOnlySpace());
+  DCHECK(!InReadOnlySpace(*function_info));
   i::Isolate* i_isolate = i::GetIsolateFromWritableObject(*function_info);
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
   i::Handle<i::JSFunction> function =
@@ -2033,7 +2031,7 @@ Local<Script> UnboundScript::BindToCurrentContext() {
 int UnboundScript::GetId() const {
   auto function_info = Utils::OpenDirectHandle(this);
   // TODO(jgruber): Remove this DCHECK once Function::GetUnboundScript is gone.
-  DCHECK(!function_info->InReadOnlySpace());
+  DCHECK(!InReadOnlySpace(*function_info));
   API_RCS_SCOPE(i::GetIsolateFromWritableObject(*function_info), UnboundScript,
                 GetId);
   return i::Script::cast(function_info->script())->id();
@@ -2044,7 +2042,7 @@ int UnboundScript::GetLineNumber(int code_pos) {
   if (i::IsScript(obj->script())) {
     // TODO(jgruber): Remove this DCHECK once Function::GetUnboundScript is
     // gone.
-    DCHECK(!obj->InReadOnlySpace());
+    DCHECK(!InReadOnlySpace(*obj));
     i::Isolate* i_isolate = i::GetIsolateFromWritableObject(*obj);
     ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
     API_RCS_SCOPE(i_isolate, UnboundScript, GetLineNumber);
@@ -2060,7 +2058,7 @@ int UnboundScript::GetColumnNumber(int code_pos) {
   if (i::IsScript(obj->script())) {
     // TODO(jgruber): Remove this DCHECK once Function::GetUnboundScript is
     // gone.
-    DCHECK(!obj->InReadOnlySpace());
+    DCHECK(!InReadOnlySpace(*obj));
     i::Isolate* i_isolate = i::GetIsolateFromWritableObject(*obj);
     ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
     API_RCS_SCOPE(i_isolate, UnboundScript, GetColumnNumber);
@@ -2076,7 +2074,7 @@ Local<Value> UnboundScript::GetScriptName() {
   if (i::IsScript(obj->script())) {
     // TODO(jgruber): Remove this DCHECK once Function::GetUnboundScript is
     // gone.
-    DCHECK(!obj->InReadOnlySpace());
+    DCHECK(!InReadOnlySpace(*obj));
     i::Isolate* i_isolate = i::GetIsolateFromWritableObject(*obj);
     ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
     API_RCS_SCOPE(i_isolate, UnboundScript, GetName);
@@ -2092,7 +2090,7 @@ Local<Value> UnboundScript::GetSourceURL() {
   if (i::IsScript(obj->script())) {
     // TODO(jgruber): Remove this DCHECK once Function::GetUnboundScript is
     // gone.
-    DCHECK(!obj->InReadOnlySpace());
+    DCHECK(!InReadOnlySpace(*obj));
     i::Isolate* i_isolate = i::GetIsolateFromWritableObject(*obj);
     API_RCS_SCOPE(i_isolate, UnboundScript, GetSourceURL);
     ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
@@ -2108,7 +2106,7 @@ Local<Value> UnboundScript::GetSourceMappingURL() {
   if (i::IsScript(obj->script())) {
     // TODO(jgruber): Remove this DCHECK once Function::GetUnboundScript is
     // gone.
-    DCHECK(!obj->InReadOnlySpace());
+    DCHECK(!InReadOnlySpace(*obj));
     i::Isolate* i_isolate = i::GetIsolateFromWritableObject(*obj);
     API_RCS_SCOPE(i_isolate, UnboundScript, GetSourceMappingURL);
     ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
@@ -2125,7 +2123,7 @@ Local<Value> UnboundModuleScript::GetSourceURL() {
   if (i::IsScript(obj->script())) {
     // TODO(jgruber): Remove this DCHECK once Function::GetUnboundScript is
     // gone.
-    DCHECK(!obj->InReadOnlySpace());
+    DCHECK(!InReadOnlySpace(*obj));
     i::Isolate* i_isolate = i::GetIsolateFromWritableObject(*obj);
     API_RCS_SCOPE(i_isolate, UnboundModuleScript, GetSourceURL);
     ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
@@ -2141,7 +2139,7 @@ Local<Value> UnboundModuleScript::GetSourceMappingURL() {
   if (i::IsScript(obj->script())) {
     // TODO(jgruber): Remove this DCHECK once Function::GetUnboundScript is
     // gone.
-    DCHECK(!obj->InReadOnlySpace());
+    DCHECK(!InReadOnlySpace(*obj));
     i::Isolate* i_isolate = i::GetIsolateFromWritableObject(*obj);
     API_RCS_SCOPE(i_isolate, UnboundModuleScript, GetSourceMappingURL);
     ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
@@ -2216,7 +2214,7 @@ Local<UnboundScript> Script::GetUnboundScript() {
   i::DisallowGarbageCollection no_gc;
   auto obj = Utils::OpenDirectHandle(this);
   i::DirectHandle<i::SharedFunctionInfo> sfi(obj->shared(), obj->GetIsolate());
-  DCHECK(!sfi->InReadOnlySpace());
+  DCHECK(!InReadOnlySpace(*sfi));
   return ToApiHandle<UnboundScript>(sfi, obj->GetIsolate());
 }
 
@@ -2687,7 +2685,7 @@ MaybeLocal<UnboundScript> ScriptCompiler::CompileUnboundInternal(
   }
 
   has_exception = !maybe_function_info.ToHandle(&result);
-  DCHECK_IMPLIES(!has_exception, !result->InReadOnlySpace());
+  DCHECK_IMPLIES(!has_exception, !InReadOnlySpace(*result));
   RETURN_ON_FAILED_EXECUTION(UnboundScript);
   RETURN_ESCAPED(ToApiHandle<UnboundScript>(result));
 }
@@ -2824,6 +2822,7 @@ MaybeLocal<Function> ScriptCompiler::CompileFunctionInternal(
         i_isolate, source->resource_name, source->resource_line_offset,
         source->resource_column_offset, source->source_map_url,
         source->host_defined_options, source->resource_options);
+    script_details.wrapped_arguments = arguments_list;
 
     std::unique_ptr<i::AlignedCachedData> cached_data;
     if (options == kConsumeCodeCache) {
@@ -2836,8 +2835,8 @@ MaybeLocal<Function> ScriptCompiler::CompileFunctionInternal(
     i::Handle<i::JSFunction> scoped_result;
     has_exception =
         !i::Compiler::GetWrappedFunction(
-             Utils::OpenHandle(*source->source_string), arguments_list, context,
-             script_details, cached_data.get(), options, no_cache_reason)
+             Utils::OpenHandle(*source->source_string), context, script_details,
+             cached_data.get(), options, no_cache_reason)
              .ToHandle(&scoped_result);
     if (options == kConsumeCodeCache) {
       source->cached_data->rejected = cached_data->rejected();
@@ -2999,7 +2998,7 @@ ScriptCompiler::CachedData* ScriptCompiler::CreateCodeCache(
     Local<UnboundScript> unbound_script) {
   auto shared = Utils::OpenHandle(*unbound_script);
   // TODO(jgruber): Remove this DCHECK once Function::GetUnboundScript is gone.
-  DCHECK(!shared->InReadOnlySpace());
+  DCHECK(!InReadOnlySpace(*shared));
   i::Isolate* i_isolate = i::GetIsolateFromWritableObject(*shared);
   DCHECK_NO_SCRIPT_NO_EXCEPTION(i_isolate);
   DCHECK(shared->is_toplevel());
@@ -3012,7 +3011,7 @@ ScriptCompiler::CachedData* ScriptCompiler::CreateCodeCache(
   i::Handle<i::SharedFunctionInfo> shared =
       Utils::OpenHandle(*unbound_module_script);
   // TODO(jgruber): Remove this DCHECK once Function::GetUnboundScript is gone.
-  DCHECK(!shared->InReadOnlySpace());
+  DCHECK(!InReadOnlySpace(*shared));
   i::Isolate* i_isolate = i::GetIsolateFromWritableObject(*shared);
   DCHECK_NO_SCRIPT_NO_EXCEPTION(i_isolate);
   DCHECK(shared->is_toplevel());
@@ -3079,7 +3078,7 @@ v8::TryCatch::~TryCatch() {
         i_isolate_->set_pending_message(ToObject(message_obj_));
       }
       i_isolate_->UnregisterTryCatchHandler(this);
-      i_isolate_->clear_exception();
+      i_isolate_->clear_internal_exception();
       i_isolate_->Throw(ToObject(exception_));
       return;
     }
@@ -3159,7 +3158,7 @@ void v8::TryCatch::Reset() {
       !i_isolate_->thread_local_top()->CallDepthIsZero()) {
     return;
   }
-  i_isolate_->clear_exception();
+  i_isolate_->clear_internal_exception();
   i_isolate_->clear_pending_message();
   ResetInternal();
 }
@@ -3182,7 +3181,7 @@ Local<String> Message::Get() const {
   auto self = Utils::OpenHandle(this);
   i::Isolate* i_isolate = self->GetIsolate();
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
-  EscapableHandleScope scope(reinterpret_cast<Isolate*>(i_isolate));
+  InternalEscapableScope scope(i_isolate);
   i::Handle<i::String> raw_result =
       i::MessageHandler::GetMessage(i_isolate, self);
   Local<String> result = Utils::ToLocal(raw_result);
@@ -3225,7 +3224,7 @@ v8::Local<v8::StackTrace> Message::GetStackTrace() const {
   auto self = Utils::OpenDirectHandle(this);
   i::Isolate* i_isolate = self->GetIsolate();
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
-  EscapableHandleScope scope(reinterpret_cast<Isolate*>(i_isolate));
+  InternalEscapableScope scope(i_isolate);
   i::Handle<i::Object> stackFramesObj(self->stack_frames(), i_isolate);
   if (!IsFixedArray(*stackFramesObj)) return v8::Local<v8::StackTrace>();
   auto stackTrace = i::Handle<i::FixedArray>::cast(stackFramesObj);
@@ -3337,7 +3336,7 @@ MaybeLocal<String> Message::GetSource(Local<Context> context) const {
   auto self = Utils::OpenDirectHandle(this);
   i::Isolate* i_isolate = self->GetIsolate();
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
-  EscapableHandleScope handle_scope(reinterpret_cast<Isolate*>(i_isolate));
+  InternalEscapableScope handle_scope(i_isolate);
   RETURN_ESCAPED(Utils::ToLocal(i::direct_handle(self->GetSource(), i_isolate),
                                 i_isolate));
 }
@@ -3346,7 +3345,7 @@ MaybeLocal<String> Message::GetSourceLine(Local<Context> context) const {
   auto self = Utils::OpenHandle(this);
   i::Isolate* i_isolate = self->GetIsolate();
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
-  EscapableHandleScope handle_scope(reinterpret_cast<Isolate*>(i_isolate));
+  InternalEscapableScope handle_scope(i_isolate);
   i::JSMessageObject::EnsureSourcePositionsAvailable(i_isolate, self);
   RETURN_ESCAPED(Utils::ToLocal(self->GetSourceLine()));
 }
@@ -3816,13 +3815,13 @@ bool Value::FullIsNull() const {
   return result;
 }
 
-bool Value::IsTrue() const {
+bool Value::FullIsTrue() const {
   auto object = *Utils::OpenDirectHandle(this);
   if (i::IsSmi(object)) return false;
   return i::IsTrue(object);
 }
 
-bool Value::IsFalse() const {
+bool Value::FullIsFalse() const {
   i::Tagged<i::Object> object = *Utils::OpenDirectHandle(this);
   if (i::IsSmi(object)) return false;
   return i::IsFalse(object);
@@ -5046,7 +5045,7 @@ Local<String> v8::Object::GetConstructorName() {
   // TODO(v8:12547): Consider adding GetConstructorName(Local<Context>).
   auto self = Utils::OpenHandle(this);
   i::Isolate* i_isolate;
-  if (self->InWritableSharedSpace()) {
+  if (InWritableSharedSpace(*self)) {
     i_isolate = i::Isolate::Current();
   } else {
     i_isolate = self->GetIsolate();
@@ -7779,7 +7778,7 @@ bool v8::String::MakeExternal(v8::String::ExternalStringResource* resource) {
   // TODO(v8:12007): Consider adding
   // MakeExternal(Isolate*, ExternalStringResource*).
   i::Isolate* i_isolate;
-  if (obj.InWritableSharedSpace()) {
+  if (InWritableSharedSpace(obj)) {
     i_isolate = i::Isolate::Current();
   } else {
     // It is safe to call GetIsolateFromWritableHeapObject because
@@ -7812,7 +7811,7 @@ bool v8::String::MakeExternal(
   // TODO(v8:12007): Consider adding
   // MakeExternal(Isolate*, ExternalOneByteStringResource*).
   i::Isolate* i_isolate;
-  if (obj.InWritableSharedSpace()) {
+  if (InWritableSharedSpace(obj)) {
     i_isolate = i::Isolate::Current();
   } else {
     // It is safe to call GetIsolateFromWritableHeapObject because
@@ -8945,8 +8944,9 @@ MaybeLocal<WasmModuleObject> WasmModuleObject::Compile(
   {
     i::wasm::ErrorThrower thrower(i_isolate, "WasmModuleObject::Compile()");
     auto enabled_features = i::wasm::WasmFeatures::FromIsolate(i_isolate);
+    // TODO(14179): Provide an API method that supports compile options.
     maybe_compiled = i::wasm::GetWasmEngine()->SyncCompile(
-        i_isolate, enabled_features, &thrower,
+        i_isolate, enabled_features, i::wasm::CompileTimeImports{}, &thrower,
         i::wasm::ModuleWireBytes(start, start + length));
   }
   CHECK_EQ(maybe_compiled.is_null(), i_isolate->has_exception());
@@ -9002,9 +9002,22 @@ Maybe<bool> v8::ArrayBuffer::Detach(v8::Local<v8::Value> key) {
   i::Isolate* i_isolate = obj->GetIsolate();
   Utils::ApiCheck(obj->is_detachable(), "v8::ArrayBuffer::Detach",
                   "Only detachable ArrayBuffers can be detached");
-  ENTER_V8_NO_SCRIPT(
-      i_isolate, reinterpret_cast<v8::Isolate*>(i_isolate)->GetCurrentContext(),
-      ArrayBuffer, Detach, i::HandleScope);
+  Local<Context> context =
+      reinterpret_cast<v8::Isolate*>(i_isolate)->GetCurrentContext();
+  // TODO(verwaest): Remove this case after forcing the embedder to enter the
+  // context.
+  if (context.IsEmpty()) {
+    ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
+    if (key.IsEmpty()) {
+      i::JSArrayBuffer::Detach(obj).Check();
+    } else {
+      auto i_key = Utils::OpenHandle(*key);
+      constexpr bool kForceForWasmMemory = false;
+      i::JSArrayBuffer::Detach(obj, kForceForWasmMemory, i_key).Check();
+    }
+    return Just(true);
+  }
+  ENTER_V8_NO_SCRIPT(i_isolate, context, ArrayBuffer, Detach, i::HandleScope);
   if (!key.IsEmpty()) {
     auto i_key = Utils::OpenHandle(*key);
     constexpr bool kForceForWasmMemory = false;
@@ -9605,7 +9618,7 @@ v8::Local<Value> Isolate::ThrowError(v8::Local<v8::String> message) {
 v8::Local<Value> Isolate::ThrowException(v8::Local<v8::Value> value) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
   ENTER_V8_BASIC(i_isolate);
-  i_isolate->clear_exception();
+  i_isolate->clear_internal_exception();
   // If we're passed an empty handle, we throw an undefined exception
   // to deal more gracefully with out of memory situations.
   if (value.IsEmpty()) {
@@ -9870,8 +9883,6 @@ void Isolate::Initialize(Isolate* v8_isolate,
     }
   }
 
-  i_isolate->set_only_terminate_in_safe_scope(
-      params.only_terminate_in_safe_scope);
   i_isolate->set_embedder_wrapper_type_index(
       params.embedder_wrapper_type_index);
   i_isolate->set_embedder_wrapper_object_index(
@@ -10014,17 +10025,6 @@ Isolate::SuppressMicrotaskExecutionScope::SuppressMicrotaskExecutionScope(
 Isolate::SuppressMicrotaskExecutionScope::~SuppressMicrotaskExecutionScope() {
   microtask_queue_->DecrementMicrotasksSuppressions();
   i_isolate_->thread_local_top()->DecrementCallDepth(this);
-}
-
-Isolate::SafeForTerminationScope::SafeForTerminationScope(
-    v8::Isolate* v8_isolate)
-    : i_isolate_(reinterpret_cast<i::Isolate*>(v8_isolate)),
-      prev_value_(i_isolate_->next_v8_call_is_safe_for_termination()) {
-  i_isolate_->set_next_v8_call_is_safe_for_termination(true);
-}
-
-Isolate::SafeForTerminationScope::~SafeForTerminationScope() {
-  i_isolate_->set_next_v8_call_is_safe_for_termination(prev_value_);
 }
 
 i::Address* Isolate::GetDataFromSnapshotOnce(size_t index) {
@@ -10459,6 +10459,11 @@ void Isolate::MemoryPressureNotification(MemoryPressureLevel level) {
           ? i_isolate->thread_manager()->IsLockedByCurrentThread()
           : i::ThreadId::Current() == i_isolate->thread_id();
   i_isolate->heap()->MemoryPressureNotification(level, on_isolate_thread);
+}
+
+void Isolate::SetBatterySaverMode(bool battery_saver_mode_enabled) {
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
+  i_isolate->set_battery_saver_mode_enabled(battery_saver_mode_enabled);
 }
 
 void Isolate::ClearCachesForTesting() {
@@ -11965,7 +11970,7 @@ bool ConvertDouble(double d) {
 template <typename T>
 bool ValidateFunctionCallbackInfo(const FunctionCallbackInfo<T>& info) {
   CHECK_GE(info.Length(), 0);
-  // Theorticall args-length is unlimited, practically we run out of stack
+  // Theortically args-length is unlimited, practically we run out of stack
   // space. This should guard against accidentally used raw pointers.
   CHECK_LE(info.Length(), 0xFFFFF);
   if (info.Length() > 0) {
@@ -11974,6 +11979,7 @@ bool ValidateFunctionCallbackInfo(const FunctionCallbackInfo<T>& info) {
   }
   auto* i_isolate = reinterpret_cast<i::Isolate*>(info.GetIsolate());
   CHECK_EQ(i_isolate, Isolate::Current());
+  CHECK(!i_isolate->GetIncumbentContext().is_null());
   CHECK(info.This()->IsValue());
   CHECK(info.Holder()->IsObject());
   CHECK(!info.Data().IsEmpty());
@@ -12089,5 +12095,7 @@ std::string SourceLocation::ToString() const {
 }
 
 }  // namespace v8
+
+EXPORT_CONTEXTUAL_VARIABLE(v8::internal::StackAllocatedCheck)
 
 #include "src/api/api-macros-undef.h"

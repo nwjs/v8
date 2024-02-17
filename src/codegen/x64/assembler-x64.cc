@@ -114,6 +114,8 @@ void CpuFeatures::ProbeImpl(bool cross_compile) {
   } else if (strcmp(v8_flags.mcpu, "atom") == 0) {
     SetSupported(INTEL_ATOM);
   }
+  if (cpu.has_intel_jcc_erratum() && v8_flags.intel_jcc_erratum_mitigation)
+    SetSupported(INTEL_JCC_ERRATUM_MITIGATION);
 
   // Ensure that supported cpu features make sense. E.g. it is wrong to support
   // AVX but not SSE4_2, if we have --enable-avx and --no-enable-sse4-2, the
@@ -452,6 +454,35 @@ void Assembler::Align(int m) {
   DCHECK(base::bits::IsPowerOfTwo(m));
   int delta = (m - (pc_offset() & (m - 1))) & (m - 1);
   Nop(delta);
+}
+
+void Assembler::AlignForJCCErratum(int inst_size) {
+  DCHECK(CpuFeatures::IsSupported(INTEL_JCC_ERRATUM_MITIGATION));
+  // Code alignment can break jump optimization info, so we early return in this
+  // case. This is because jump optimization will do the code generation twice:
+  // the first run collects the optimizable far jumps and the second run
+  // replaces them by near jumps. For example, if aaa is a far jump and bbb is
+  // another instruction at the jump target, aaa will be recorded in
+  // |jump_optimization_info|:
+  //
+  // ...aaa...bbb
+  //       ^  ^
+  //       |  jump target (start of a 32-byte boundary)
+  //       |  pc_offset + 127
+  //       pc_offset
+  //
+  // However, if bbb need to be aligned at the start of a 32-byte boundary,
+  // the second run might crash because the distance is no longer a int8:
+  //
+  //   aaa......bbb
+  //      ^     ^
+  //      |     jump target (start of a 32-byte boundary)
+  //      |     pc_offset + 127
+  //      pc_offset - delta
+  if (jump_optimization_info()) return;
+  constexpr int kJCCErratumAlignment = 32;
+  int delta = kJCCErratumAlignment - (pc_offset() & (kJCCErratumAlignment - 1));
+  if (delta <= inst_size) Nop(delta);
 }
 
 void Assembler::CodeTargetAlign() {

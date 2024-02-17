@@ -4,7 +4,6 @@
 
 #include <stdio.h>
 
-#include <fstream>
 #include <iomanip>
 #include <memory>
 
@@ -852,7 +851,7 @@ RUNTIME_FUNCTION(Runtime_NeverOptimizeFunction) {
     case CodeKind::INTERPRETED_FUNCTION:
       break;
     case CodeKind::BUILTIN:
-      if (sfi->InReadOnlySpace()) {
+      if (InReadOnlySpace(*sfi)) {
         // SFIs for builtin functions are in RO space and thus we cannot set
         // the never-optimize bit. But such SFIs cannot be optimized anyways.
         return CrashUnlessFuzzing(isolate);
@@ -1168,8 +1167,7 @@ RUNTIME_FUNCTION(Runtime_SimulateNewspaceFull) {
       heap->EnsureYoungSweepingCompleted();
     }
     auto* space = heap->paged_new_space()->paged_space();
-    while (space->AddFreshPage()) {
-    }
+    space->AllocatePageUpToCapacityForTesting();
     space->ResetFreeList();
   } else {
     SemiSpaceNewSpace* space = heap->semi_space_new_space();
@@ -1194,22 +1192,6 @@ RUNTIME_FUNCTION(Runtime_ScheduleGCInStackCheck) {
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
-class FileOutputStream : public v8::OutputStream {
- public:
-  explicit FileOutputStream(const char* filename) : os_(filename) {}
-  ~FileOutputStream() override { os_.close(); }
-
-  WriteResult WriteAsciiChunk(char* data, int size) override {
-    os_.write(data, size);
-    return kContinue;
-  }
-
-  void EndOfStream() override { os_.close(); }
-
- private:
-  std::ofstream os_;
-};
-
 RUNTIME_FUNCTION(Runtime_TakeHeapSnapshot) {
   if (v8_flags.fuzzing) {
     // We don't want to create snapshots in fuzzers.
@@ -1231,10 +1213,7 @@ RUNTIME_FUNCTION(Runtime_TakeHeapSnapshot) {
   v8::HeapProfiler::HeapSnapshotOptions options;
   options.numerics_mode = v8::HeapProfiler::NumericsMode::kExposeNumericValues;
   options.snapshot_mode = v8::HeapProfiler::HeapSnapshotMode::kExposeInternals;
-  HeapSnapshot* snapshot = heap_profiler->TakeSnapshot(options);
-  FileOutputStream stream(filename.c_str());
-  HeapSnapshotJSONSerializer serializer(snapshot);
-  serializer.Serialize(&stream);
+  heap_profiler->TakeSnapshotToFile(options, filename);
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
@@ -1264,6 +1243,12 @@ static void DebugPrintImpl(MaybeObject maybe_object, std::ostream& os) {
 RUNTIME_FUNCTION(Runtime_DebugPrint) {
   SealHandleScope shs(isolate);
 
+  if (args.length() == 0) {
+    // This runtime method has variable number of arguments, but if there is no
+    // argument, undefined behavior may happen.
+    return ReadOnlyRoots(isolate).undefined_value();
+  }
+
   // This is exposed to tests / fuzzers; handle variable arguments gracefully.
   std::unique_ptr<std::ostream> output_stream(new StdoutStream());
   if (args.length() >= 2) {
@@ -1277,7 +1262,7 @@ RUNTIME_FUNCTION(Runtime_DebugPrint) {
   }
 
   MaybeObject maybe_object(*args.address_of_arg_at(0));
-  DebugPrintImpl(maybe_object, *output_stream.get());
+  DebugPrintImpl(maybe_object, *output_stream);
   return args[0];
 }
 
@@ -1525,7 +1510,7 @@ RUNTIME_FUNCTION(Runtime_DisassembleFunction) {
   Handle<JSFunction> func = args.at<JSFunction>(0);
   IsCompiledScope is_compiled_scope;
   if (!func->is_compiled(isolate) && func->HasAvailableOptimizedCode(isolate)) {
-    func->set_code(func->feedback_vector()->optimized_code());
+    func->set_code(func->feedback_vector()->optimized_code(isolate));
   }
   CHECK(func->shared()->is_compiled() ||
         Compiler::Compile(isolate, func, Compiler::KEEP_EXCEPTION,
@@ -2095,6 +2080,46 @@ RUNTIME_FUNCTION(Runtime_GetWeakCollectionSize) {
 
   return Smi::FromInt(
       EphemeronHashTable::cast(collection->table())->NumberOfElements());
+}
+
+RUNTIME_FUNCTION(Runtime_NotifyIsolateForeground) {
+  if (args.length() != 0) {
+    return CrashUnlessFuzzing(isolate);
+  }
+  isolate->IsolateInForegroundNotification();
+  return ReadOnlyRoots(isolate).undefined_value();
+}
+
+RUNTIME_FUNCTION(Runtime_NotifyIsolateBackground) {
+  if (args.length() != 0) {
+    return CrashUnlessFuzzing(isolate);
+  }
+  isolate->IsolateInBackgroundNotification();
+  return ReadOnlyRoots(isolate).undefined_value();
+}
+
+RUNTIME_FUNCTION(Runtime_IsEfficiencyModeEnabled) {
+  if (isolate->UseEfficiencyMode()) {
+    return ReadOnlyRoots(isolate).true_value();
+  }
+  return ReadOnlyRoots(isolate).false_value();
+}
+
+RUNTIME_FUNCTION(Runtime_SetBatterySaverMode) {
+  HandleScope scope(isolate);
+  if (args.length() != 1) {
+    return CrashUnlessFuzzing(isolate);
+  }
+  if (*args.at<Object>(0) == ReadOnlyRoots(isolate).true_value()) {
+    isolate->set_battery_saver_mode_enabled(true);
+  } else {
+    isolate->set_battery_saver_mode_enabled(false);
+  }
+  // If the override flag is set changing the mode has no effect.
+  if (v8_flags.battery_saver_mode.value().has_value()) {
+    return ReadOnlyRoots(isolate).false_value();
+  }
+  return ReadOnlyRoots(isolate).true_value();
 }
 
 }  // namespace internal

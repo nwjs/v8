@@ -555,6 +555,9 @@ inline void MaglevAssembler::Move(Register dst, Tagged<TaggedIndex> i) {
 inline void MaglevAssembler::Move(Register dst, int32_t i) {
   mov(dst, Operand(i));
 }
+inline void MaglevAssembler::Move(Register dst, uint32_t i) {
+  mov(dst, Operand(static_cast<int32_t>(i)));
+}
 inline void MaglevAssembler::Move(DoubleRegister dst, double n) {
   vmov(dst, base::Double(n));
 }
@@ -676,10 +679,6 @@ template <typename NodeT>
 inline void MaglevAssembler::DeoptIfBufferDetached(Register array,
                                                    Register scratch,
                                                    NodeT* node) {
-  if (!code_gen_state()
-           ->broker()
-           ->dependencies()
-           ->DependOnArrayBufferDetachingProtector()) {
     // A detached buffer leads to megamorphic feedback, so we won't have a deopt
     // loop if we deopt here.
     LoadTaggedField(scratch,
@@ -688,7 +687,6 @@ inline void MaglevAssembler::DeoptIfBufferDetached(Register array,
                     FieldMemOperand(scratch, JSArrayBuffer::kBitFieldOffset));
     tst(scratch, Operand(JSArrayBuffer::WasDetachedBit::kMask));
     EmitEagerDeoptIf(ne, DeoptimizeReason::kArrayBufferWasDetached, node);
-  }
 }
 
 inline void MaglevAssembler::LoadByte(Register dst, MemOperand src) {
@@ -930,6 +928,14 @@ inline void MaglevAssembler::CompareInt32AndJumpIf(Register r1, Register r2,
   JumpIf(cond, target);
 }
 
+inline void MaglevAssembler::CompareIntPtrAndJumpIf(Register r1, Register r2,
+                                                    Condition cond,
+                                                    Label* target,
+                                                    Label::Distance distance) {
+  cmp(r1, r2);
+  JumpIf(cond, target);
+}
+
 inline void MaglevAssembler::CompareInt32AndJumpIf(Register r1, int32_t value,
                                                    Condition cond,
                                                    Label* target,
@@ -1066,7 +1072,7 @@ inline void MaglevAssembler::TestInt32AndJumpIfAllClear(
 
 inline void MaglevAssembler::LoadHeapNumberValue(DoubleRegister result,
                                                  Register heap_number) {
-  vldr(result, FieldMemOperand(heap_number, HeapNumber::kValueOffset));
+  vldr(result, FieldMemOperand(heap_number, offsetof(HeapNumber, value_)));
 }
 
 inline void MaglevAssembler::Int32ToDouble(DoubleRegister result,

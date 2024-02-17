@@ -3917,9 +3917,10 @@ Reduction JSCallReducer::ReduceCallApiFunction(Node* node,
     //     are considered compatible at that point, and the {receiver}
     //     will be pass as the {holder}.
     //
-    receiver = holder = effect =
-        graph()->NewNode(simplified()->ConvertReceiver(p.convert_mode()),
-                         receiver, global_proxy, effect, control);
+    receiver = holder = effect = graph()->NewNode(
+        simplified()->ConvertReceiver(p.convert_mode()), receiver,
+        jsgraph()->ConstantNoHole(native_context(), broker()), global_proxy,
+        effect, control);
   } else {
     // Try to infer the {receiver} maps from the graph.
     MapInference inference(broker(), receiver, effect);
@@ -4014,9 +4015,10 @@ Reduction JSCallReducer::ReduceCallApiFunction(Node* node,
       // The CallFunctionTemplate builtin requires the {receiver} to be
       // an actual JSReceiver, so make sure we do the proper conversion
       // first if necessary.
-      receiver = holder = effect =
-          graph()->NewNode(simplified()->ConvertReceiver(p.convert_mode()),
-                           receiver, global_proxy, effect, control);
+      receiver = holder = effect = graph()->NewNode(
+          simplified()->ConvertReceiver(p.convert_mode()), receiver,
+          jsgraph()->ConstantNoHole(native_context(), broker()), global_proxy,
+          effect, control);
 
       Callable callable = Builtins::CallableFor(isolate(), builtin_name);
       auto call_descriptor = Linkage::GetStubCallDescriptor(
@@ -8561,9 +8563,10 @@ Reduction JSCallReducer::ReduceRegExpPrototypeTest(Node* node) {
   if (!holder.has_value()) return inference.NoChange();
 
   // Bail out if the exec method is not the original one.
-  OptionalObjectRef constant =
-      holder->GetOwnFastDataProperty(broker(), ai_exec.field_representation(),
-                                     ai_exec.field_index(), dependencies());
+  if (ai_exec.field_representation().IsDouble()) return inference.NoChange();
+  OptionalObjectRef constant = holder->GetOwnFastConstantDataProperty(
+      broker(), ai_exec.field_representation(), ai_exec.field_index(),
+      dependencies());
   if (!constant.has_value() ||
       !constant->equals(native_context().regexp_exec_function(broker()))) {
     return inference.NoChange();

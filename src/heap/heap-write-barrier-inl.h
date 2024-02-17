@@ -8,7 +8,6 @@
 // Clients of this interface shouldn't depend on lots of heap internals.
 // Do not include anything from src/heap here!
 
-#include "src/common/code-memory-access-inl.h"
 #include "src/common/globals.h"
 #include "src/heap/cppgc-js/cpp-heap.h"
 #include "src/heap/heap-write-barrier.h"
@@ -53,8 +52,8 @@ struct MemoryChunk {
   static constexpr uintptr_t kToPageBit = uintptr_t{1} << 4;
   static constexpr uintptr_t kMarkingBit = uintptr_t{1} << 5;
   static constexpr uintptr_t kReadOnlySpaceBit = uintptr_t{1} << 6;
-  static constexpr uintptr_t kIsExecutableBit = uintptr_t{1} << 19;
-  static constexpr uintptr_t kIsTrustedBit = uintptr_t{1} << 20;
+  static constexpr uintptr_t kIsExecutableBit = uintptr_t{1} << 18;
+  static constexpr uintptr_t kIsTrustedBit = uintptr_t{1} << 19;
 
   V8_INLINE static heap_internals::MemoryChunk* FromHeapObject(
       Tagged<HeapObject> object) {
@@ -137,8 +136,7 @@ inline void CombinedWriteBarrierInternal(Tagged<HeapObject> host,
     // CodePageHeaderModificationScope is not required because the only case
     // when a InstructionStream value is stored somewhere is during creation of
     // a new InstructionStream object which is then stored to
-    // Code's code field and this case is already guarded by
-    // CodePageMemoryModificationScope.
+    // Code's code field and in this case the code space is already unlocked.
     WriteBarrier::MarkingSlow(host, HeapObjectSlot(slot), value);
   }
 }
@@ -272,6 +270,22 @@ inline void IndirectPointerWriteBarrier(Tagged<HeapObject> host,
   WriteBarrier::Marking(host, slot);
 }
 
+inline void ProtectedPointerWriteBarrier(Tagged<TrustedObject> host,
+                                         ProtectedPointerSlot slot,
+                                         Tagged<TrustedObject> value,
+                                         WriteBarrierMode mode) {
+  if (mode == SKIP_WRITE_BARRIER) {
+    SLOW_DCHECK(!WriteBarrier::IsRequired(host, value));
+    return;
+  }
+
+  // Protected pointers are only used within trusted space.
+  DCHECK(!heap_internals::MemoryChunk::FromHeapObject(value)
+              ->IsYoungOrSharedChunk());
+
+  WriteBarrier::Marking(host, slot, value);
+}
+
 inline void GenerationalBarrierForCode(Tagged<InstructionStream> host,
                                        RelocInfo* rinfo,
                                        Tagged<HeapObject> object) {
@@ -390,6 +404,13 @@ void WriteBarrier::Marking(Tagged<DescriptorArray> descriptor_array,
 void WriteBarrier::Marking(Tagged<HeapObject> host, IndirectPointerSlot slot) {
   if (!IsMarking(host)) return;
   MarkingSlow(host, slot);
+}
+
+void WriteBarrier::Marking(Tagged<TrustedObject> host,
+                           ProtectedPointerSlot slot,
+                           Tagged<TrustedObject> value) {
+  if (!IsMarking(host)) return;
+  MarkingSlow(host, slot, value);
 }
 
 // static
