@@ -14,6 +14,7 @@
 #include "src/objects/objects-inl.h"
 #include "src/strings/unicode-inl.h"
 #include "src/trap-handler/trap-handler.h"
+#include "src/wasm/compilation-environment-inl.h"
 #include "src/wasm/module-compiler.h"
 #include "src/wasm/serialized-signature-inl.h"
 #include "src/wasm/value-type.h"
@@ -560,7 +561,6 @@ RUNTIME_FUNCTION(Runtime_TierUpWasmToJSWrapper) {
 
   if (IsWasmInternalFunction(*origin)) {
     // The tierup for `WasmInternalFunction is special, as there is no instance.
-    DCHECK(wasm::WasmFeatures::FromIsolate(isolate).has_typed_funcref());
     size_t expected_arity = sig.parameter_count();
     wasm::ImportCallKind kind = wasm::kDefaultImportCallKind;
     if (IsJSFunction(ref->callable())) {
@@ -597,10 +597,31 @@ RUNTIME_FUNCTION(Runtime_TierUpWasmToJSWrapper) {
   }
   Handle<WasmTrustedInstanceData> trusted_data(
       instance_object->trusted_data(isolate), isolate);
-  // Get the function's canonical signature index. Note that the function's
-  // signature may not be present in the importing module.
-  uint32_t canonical_sig_index =
-      wasm::GetTypeCanonicalizer()->AddRecursiveGroup(&sig);
+
+  // Get the function's canonical signature index.
+  uint32_t canonical_sig_index = std::numeric_limits<uint32_t>::max();
+  const wasm::WasmModule* module = trusted_data->module();
+  if (WasmApiFunctionRef::CallOriginIsImportIndex(origin)) {
+    int func_index = WasmApiFunctionRef::CallOriginAsIndex(origin);
+    canonical_sig_index =
+        module->isorecursive_canonical_type_ids[module->functions[func_index]
+                                                    .sig_index];
+  } else {
+    // Indirect function table index.
+    int entry_index = WasmApiFunctionRef::CallOriginAsIndex(origin);
+    int table_count = trusted_data->dispatch_tables()->length();
+    // We have to find the table which contains the correct entry.
+    for (int table_index = 0; table_index < table_count; ++table_index) {
+      if (!trusted_data->has_dispatch_table(table_index)) continue;
+      Tagged<WasmDispatchTable> table =
+          trusted_data->dispatch_table(table_index);
+      if (entry_index < table->length() && table->ref(entry_index) == *ref) {
+        canonical_sig_index = table->sig(entry_index);
+        break;
+      }
+    }
+  }
+  DCHECK_NE(canonical_sig_index, std::numeric_limits<uint32_t>::max());
 
   // Compile a wrapper for the target callable.
   Handle<JSReceiver> callable(JSReceiver::cast(ref->callable()), isolate);
@@ -615,7 +636,7 @@ RUNTIME_FUNCTION(Runtime_TierUpWasmToJSWrapper) {
   wasm::ImportCallKind kind = resolved.kind();
   callable = resolved.callable();  // Update to ultimate target.
   DCHECK_NE(wasm::ImportCallKind::kLinkError, kind);
-  wasm::CompilationEnv env = native_module->CreateCompilationEnv();
+  wasm::CompilationEnv env = wasm::CompilationEnv::ForModule(native_module);
   // {expected_arity} should only be used if kind != kJSFunctionArityMismatch.
   int expected_arity = -1;
   if (kind == wasm::ImportCallKind ::kJSFunctionArityMismatch) {
@@ -660,20 +681,20 @@ RUNTIME_FUNCTION(Runtime_TierUpWasmToJSWrapper) {
   } else {
     // Indirect function table index.
     int entry_index = WasmApiFunctionRef::CallOriginAsIndex(origin);
-    int table_count = trusted_data->indirect_function_tables()->length();
+    int table_count = trusted_data->dispatch_tables()->length();
     // We have to find the table which contains the correct entry.
     for (int table_index = 0; table_index < table_count; ++table_index) {
-      Tagged<WasmIndirectFunctionTable> table =
-          trusted_data->indirect_function_table(table_index);
-      if (table->refs()->get(entry_index) == *ref) {
-        table->targets()
-            ->set<ExternalPointerTag::kWasmIndirectFunctionTargetTag>(
-                entry_index, isolate, wasm_code->instruction_start());
+      if (!trusted_data->has_dispatch_table(table_index)) continue;
+      Tagged<WasmDispatchTable> table =
+          trusted_data->dispatch_table(table_index);
+      if (entry_index < table->length() && table->ref(entry_index) == *ref) {
+        table->SetTarget(entry_index, wasm_code->instruction_start());
         // {ref} is used in at most one table.
         break;
       }
     }
   }
+
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
@@ -1259,7 +1280,6 @@ RUNTIME_FUNCTION(Runtime_WasmArrayInitSegment) {
 // Allocate a new suspender, and prepare for stack switching by updating the
 // active continuation, active suspender and stack limit.
 RUNTIME_FUNCTION(Runtime_WasmAllocateSuspender) {
-  CHECK(v8_flags.experimental_wasm_stack_switching);
   HandleScope scope(isolate);
   Handle<WasmSuspenderObject> suspender = WasmSuspenderObject::New(isolate);
 
@@ -1696,6 +1716,34 @@ RUNTIME_FUNCTION(Runtime_WasmStringEncodeWtf8Array) {
                     MessageTemplate::kWasmTrapArrayOutOfBounds);
 }
 
+RUNTIME_FUNCTION(Runtime_WasmStringToUtf8Array) {
+  ClearThreadInWasmScope flag_scope(isolate);
+  DCHECK_EQ(1, args.length());
+  HandleScope scope(isolate);
+  Handle<String> string(String::cast(args[0]), isolate);
+  uint32_t length = MeasureWtf8(isolate, string);
+  wasm::WasmValue initial_value(int8_t{0});
+  Tagged<WeakArrayList> rtts = isolate->heap()->wasm_canonical_rtts();
+  // This function can only get called from Wasm code, so we can safely assume
+  // that the canonical RTT is still around.
+  Handle<Map> map = handle(
+      Map::cast(rtts->Get(wasm::TypeCanonicalizer::kPredefinedArrayI8Index)
+                    .GetHeapObject()),
+      isolate);
+  Handle<WasmArray> array = isolate->factory()->NewWasmArray(
+      wasm::kWasmI8, length, initial_value, map);
+  auto get_writable_bytes =
+      [&](const DisallowGarbageCollection&) -> base::Vector<char> {
+    return {reinterpret_cast<char*>(array->ElementAddress(0)), length};
+  };
+  Tagged<Object> write_result =
+      EncodeWtf8(isolate, unibrow::Utf8Variant::kLossyUtf8, string,
+                 get_writable_bytes, 0, MessageTemplate::kNone);
+  DCHECK(IsNumber(write_result) && Object::Number(write_result) == length);
+  USE(write_result);
+  return *array;
+}
+
 RUNTIME_FUNCTION(Runtime_WasmStringEncodeWtf16) {
   ClearThreadInWasmScope flag_scope(isolate);
   DCHECK_EQ(6, args.length());
@@ -1843,8 +1891,10 @@ RUNTIME_FUNCTION(Runtime_WasmStringFromCodePoint) {
     return *isolate->factory()->LookupSingleCharacterStringFromCode(code_point);
   }
   if (code_point > 0x10FFFF) {
+    // Allocate a new number to preserve the to-uint conversion (e.g. if
+    // args[0] == -1, we want the error message to report 4294967295).
     return ThrowWasmError(isolate, MessageTemplate::kInvalidCodePoint,
-                          {handle(args[0], isolate)});
+                          {isolate->factory()->NewNumberFromUint(code_point)});
   }
 
   base::uc16 char_buffer[] = {

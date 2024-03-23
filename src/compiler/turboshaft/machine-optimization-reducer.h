@@ -30,6 +30,7 @@
 #include "src/compiler/turboshaft/operations.h"
 #include "src/compiler/turboshaft/opmasks.h"
 #include "src/compiler/turboshaft/phase.h"
+#include "src/compiler/turboshaft/reducer-traits.h"
 #include "src/compiler/turboshaft/representations.h"
 #include "src/handles/handles.h"
 #include "src/numbers/conversions.h"
@@ -40,6 +41,8 @@ namespace v8::internal::compiler::turboshaft {
 
 template <typename>
 class VariableReducer;
+template <typename>
+class GraphVisitor;
 
 // The MachineOptimizationAssembler performs basic optimizations on low-level
 // operations that can be performed on-the-fly, without requiring type analysis
@@ -54,9 +57,16 @@ class VariableReducer;
 template <class Next>
 class MachineOptimizationReducer : public Next {
  public:
-  TURBOSHAFT_REDUCER_BOILERPLATE()
+  TURBOSHAFT_REDUCER_BOILERPLATE(MachineOptimization)
 #if defined(__clang__)
-  static_assert(reducer_list_contains<ReducerList, VariableReducer>::value);
+  // TODO(dmercadier): this static_assert ensures that the stack contains a
+  // VariableReducer. It is currently not very clean, because when GraphVisitor
+  // is on the stack, it implicitly adds a VariableReducer that isn't detected
+  // by reducer_list_contains. It would be cleaner to have a single "reducer
+  // list contains VariableReducer" check that sees the VariableReducer
+  // introduced by GraphVisitor.
+  static_assert(reducer_list_contains<ReducerList, VariableReducer>::value ||
+                reducer_list_contains<ReducerList, GraphVisitor>::value);
 #endif
 
   // TODO(mslekova): Implement ReduceSelect and ReducePhi,
@@ -199,7 +209,7 @@ class MachineOptimizationReducer : public Next {
     // because the GC might have modified the pointer.
     if (auto* input_bitcast = matcher.TryCast<TaggedBitcastOp>(input)) {
       if (all_of(input_bitcast->to, from) ==
-              RegisterRepresentation::PointerSized() &&
+              RegisterRepresentation::WordPtr() &&
           all_of(input_bitcast->from, to) == RegisterRepresentation::Tagged()) {
         return input_bitcast->input();
       }
@@ -230,6 +240,12 @@ class MachineOptimizationReducer : public Next {
             return __ Word32Constant(static_cast<uint32_t>(cst->integral()));
           }
         }
+      }
+    }
+    if (const ConstantOp* cst = matcher.TryCast<ConstantOp>(input);
+        cst && cst->IsIntegral() && to == RegisterRepresentation::Tagged()) {
+      if (Smi::IsValid(cst->integral())) {
+        return __ SmiConstant(static_cast<intptr_t>(cst->integral()));
       }
     }
     return Next::ReduceTaggedBitcast(input, from, to, kind);
@@ -699,7 +715,7 @@ class MachineOptimizationReducer : public Next {
       }
       switch (kind) {
         case Kind::kSub:
-          // left - k  => left + -k
+          // left - k  =>  left + -k
           return ReduceWordBinop(left, __ WordConstant(-right_value, rep),
                                  Kind::kAdd, rep);
         case Kind::kAdd:
@@ -1612,8 +1628,8 @@ class MachineOptimizationReducer : public Next {
   }
 
 #if V8_ENABLE_WEBASSEMBLY
-  OpIndex REDUCE(TrapIf)(OpIndex condition, OpIndex frame_state, bool negated,
-                         TrapId trap_id) {
+  OpIndex REDUCE(TrapIf)(OpIndex condition, OptionalOpIndex frame_state,
+                         bool negated, TrapId trap_id) {
     LABEL_BLOCK(no_change) {
       return Next::ReduceTrapIf(condition, frame_state, negated, trap_id);
     }
@@ -1780,7 +1796,7 @@ class MachineOptimizationReducer : public Next {
       if (!kind.tagged_base && !index.valid()) {
         if (OpIndex left, right;
             matcher.MatchWordAdd(base_idx, &left, &right,
-                                 WordRepresentation::PointerSized()) &&
+                                 WordRepresentation::WordPtr()) &&
             TryAdjustOffset(&offset, matcher.Get(right), element_scale,
                             kind.tagged_base)) {
           base_idx = left;
@@ -1958,7 +1974,7 @@ class MachineOptimizationReducer : public Next {
                        uint8_t element_scale, bool tagged_base) {
     if (!maybe_constant.Is<ConstantOp>()) return false;
     const ConstantOp& constant = maybe_constant.Cast<ConstantOp>();
-    if (constant.rep != WordRepresentation::PointerSized() ||
+    if (constant.rep != WordRepresentation::WordPtr() ||
         !constant.IsIntegral()) {
       // This can only happen in unreachable code. Ideally, we identify this
       // situation and use `__ Unreachable()`. However, this is difficult to
@@ -1984,7 +2000,7 @@ class MachineOptimizationReducer : public Next {
                       const Operation& maybe_constant, uint8_t element_scale) {
     if (!maybe_constant.Is<ConstantOp>()) return false;
     const ConstantOp& constant = maybe_constant.Cast<ConstantOp>();
-    if (constant.rep != WordRepresentation::PointerSized() ||
+    if (constant.rep != WordRepresentation::WordPtr() ||
         !constant.IsIntegral()) {
       // This can only happen in unreachable code. Ideally, we identify this
       // situation and use `__ Unreachable()`. However, this is difficult to
@@ -2004,11 +2020,11 @@ class MachineOptimizationReducer : public Next {
   bool TryAdjustElementScale(uint8_t* element_scale, OpIndex maybe_constant) {
     uint64_t diff;
     if (!matcher.MatchIntegralWordConstant(
-            maybe_constant, WordRepresentation::PointerSized(), &diff)) {
+            maybe_constant, WordRepresentation::WordPtr(), &diff)) {
       return false;
     }
-    DCHECK_LT(*element_scale, WordRepresentation::PointerSized().bit_width());
-    if (diff < (WordRepresentation::PointerSized().bit_width() -
+    DCHECK_LT(*element_scale, WordRepresentation::WordPtr().bit_width());
+    if (diff < (WordRepresentation::WordPtr().bit_width() -
                 uint64_t{*element_scale})) {
       *element_scale += diff;
       return true;

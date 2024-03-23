@@ -34,6 +34,9 @@ class TaggedArrayBase : public Super {
   static_assert(is_subtype_v<ElementT, Object> ||
                 is_subtype_v<ElementT, MaybeObject>);
 
+  using ElementFieldT =
+      TaggedField<ElementT, 0, typename ShapeT::CompressionScheme>;
+
   static constexpr bool kSupportsSmiElements =
       std::is_convertible_v<Smi, ElementT>;
   static constexpr WriteBarrierMode kDefaultMode =
@@ -166,6 +169,7 @@ class TaggedArrayShape final : public AllStatic {
  public:
   static constexpr int kElementSize = kTaggedSize;
   using ElementT = Object;
+  using CompressionScheme = V8HeapCompressionScheme;
   static constexpr RootIndex kMapRootIndex = RootIndex::kFixedArrayMap;
   static constexpr bool kLengthEqualsCapacity = true;
 
@@ -243,6 +247,7 @@ class TrustedArrayShape final : public AllStatic {
  public:
   static constexpr int kElementSize = kTaggedSize;
   using ElementT = Object;
+  using CompressionScheme = V8HeapCompressionScheme;
   static constexpr RootIndex kMapRootIndex = RootIndex::kTrustedFixedArrayMap;
   static constexpr bool kLengthEqualsCapacity = true;
 
@@ -250,19 +255,21 @@ class TrustedArrayShape final : public AllStatic {
   V(kCapacityOffset, kTaggedSize)                                       \
   V(kUnalignedHeaderSize, OBJECT_POINTER_PADDING(kUnalignedHeaderSize)) \
   V(kHeaderSize, 0)
-  DEFINE_FIELD_OFFSET_CONSTANTS(ExposedTrustedObject::kHeaderSize, FIELD_LIST)
+  DEFINE_FIELD_OFFSET_CONSTANTS(TrustedObject::kHeaderSize, FIELD_LIST)
 #undef FIELD_LIST
 };
 
 // A FixedArray in trusted space and with a unique instance type.
-// TODO(saelo): we should probably not expose trusted fixed arrays directly to
-// objects inside the sandbox, so consider using TrustedObject as parent class
-// once we support direct trusted -> trusted references without an indirection.
+//
+// Note: while the array itself is trusted, it contains tagged pointers into
+// the main pointer compression heap and therefore to _untrusted_ objects.
+// If you are storing references to other trusted object (i.e. protected
+// pointers), use ProtectedFixedArray.
 class TrustedFixedArray
     : public TaggedArrayBase<TrustedFixedArray, TrustedArrayShape,
-                             ExposedTrustedObject> {
-  using Super = TaggedArrayBase<TrustedFixedArray, TrustedArrayShape,
-                                ExposedTrustedObject>;
+                             TrustedObject> {
+  using Super =
+      TaggedArrayBase<TrustedFixedArray, TrustedArrayShape, TrustedObject>;
   OBJECT_CONSTRUCTORS(TrustedFixedArray, Super);
 
  public:
@@ -280,6 +287,54 @@ class TrustedFixedArray
   static constexpr int kMaxLength = TrustedFixedArray::kMaxCapacity;
   static constexpr int kMaxRegularLength =
       TrustedFixedArray::kMaxRegularCapacity;
+};
+
+class ProtectedArrayShape final : public AllStatic {
+ public:
+  static constexpr int kElementSize = kTaggedSize;
+  // Elements are of type TrustedObject or Smi, so we must declare it as Object
+  // here.
+  using ElementT = Object;
+  using CompressionScheme = TrustedSpaceCompressionScheme;
+  static constexpr RootIndex kMapRootIndex = RootIndex::kProtectedFixedArrayMap;
+  static constexpr bool kLengthEqualsCapacity = true;
+
+#define FIELD_LIST(V)                                                   \
+  V(kCapacityOffset, kTaggedSize)                                       \
+  V(kUnalignedHeaderSize, OBJECT_POINTER_PADDING(kUnalignedHeaderSize)) \
+  V(kHeaderSize, 0)
+  DEFINE_FIELD_OFFSET_CONSTANTS(TrustedObject::kHeaderSize, FIELD_LIST)
+#undef FIELD_LIST
+};
+
+// A FixedArray in trusted space, holding protected pointers (to other trusted
+// objects). If you want to store JS-heap references, use TrustedFixedArray.
+// ProtectedFixedArray has a unique instance type.
+class ProtectedFixedArray
+    : public TaggedArrayBase<ProtectedFixedArray, ProtectedArrayShape,
+                             TrustedObject> {
+  using Super =
+      TaggedArrayBase<ProtectedFixedArray, ProtectedArrayShape, TrustedObject>;
+  OBJECT_CONSTRUCTORS(ProtectedFixedArray, Super);
+
+ public:
+  // Allocate a new ProtectedFixedArray of the given capacity, initialized with
+  // Smi::zero().
+  template <class IsolateT>
+  static inline Handle<ProtectedFixedArray> New(IsolateT* isolate,
+                                                int capacity);
+
+  DECL_CAST(ProtectedFixedArray)
+  DECL_PRINTER(ProtectedFixedArray)
+  DECL_VERIFIER(ProtectedFixedArray)
+
+  class BodyDescriptor;
+
+  static constexpr int kLengthOffset =
+      ProtectedFixedArray::Shape::kCapacityOffset;
+  static constexpr int kMaxLength = ProtectedFixedArray::kMaxCapacity;
+  static constexpr int kMaxRegularLength =
+      ProtectedFixedArray::kMaxRegularCapacity;
 };
 
 // FixedArray alias added only because of IsFixedArrayExact() predicate, which
@@ -449,6 +504,7 @@ class WeakFixedArrayShape final : public AllStatic {
  public:
   static constexpr int kElementSize = kTaggedSize;
   using ElementT = MaybeObject;
+  using CompressionScheme = V8HeapCompressionScheme;
   static constexpr RootIndex kMapRootIndex = RootIndex::kWeakFixedArrayMap;
   static constexpr bool kLengthEqualsCapacity = true;
 
@@ -595,6 +651,7 @@ class ArrayListShape final : public AllStatic {
  public:
   static constexpr int kElementSize = kTaggedSize;
   using ElementT = Object;
+  using CompressionScheme = V8HeapCompressionScheme;
   static constexpr RootIndex kMapRootIndex = RootIndex::kArrayListMap;
   static constexpr bool kLengthEqualsCapacity = false;
 

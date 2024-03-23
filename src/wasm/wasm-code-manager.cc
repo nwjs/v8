@@ -541,15 +541,18 @@ int WasmCode::GetSourceOffsetBefore(int code_offset) {
   return GetSourcePositionBefore(code_offset).ScriptOffset();
 }
 
-std::pair<int, SourcePosition> WasmCode::GetInliningPosition(
+std::tuple<int, bool, SourcePosition> WasmCode::GetInliningPosition(
     int inlining_id) const {
-  const size_t elem_size = sizeof(int) + sizeof(SourcePosition);
+  const size_t elem_size = sizeof(int) + sizeof(bool) + sizeof(SourcePosition);
   const uint8_t* start = inlining_positions().begin() + elem_size * inlining_id;
   DCHECK_LE(start, inlining_positions().end());
-  std::pair<int, SourcePosition> result;
-  std::memcpy(&result.first, start, sizeof result.first);
-  std::memcpy(&result.second, start + sizeof result.first,
-              sizeof result.second);
+  std::tuple<int, bool, SourcePosition> result;
+  std::memcpy(&std::get<0>(result), start, sizeof std::get<0>(result));
+  std::memcpy(&std::get<1>(result), start + sizeof std::get<0>(result),
+              sizeof std::get<1>(result));
+  std::memcpy(&std::get<2>(result),
+              start + sizeof std::get<0>(result) + sizeof std::get<1>(result),
+              sizeof std::get<2>(result));
   return result;
 }
 
@@ -911,10 +914,6 @@ void NativeModule::LogWasmCodes(Isolate* isolate, Tagged<Script> script) {
   for (auto& code : SnapshotAllOwnedCode()) {
     code->LogCode(isolate, source_url.get(), script->id());
   }
-}
-
-CompilationEnv NativeModule::CreateCompilationEnv() const {
-  return {module(), enabled_features_, compilation_state()->dynamic_tiering()};
 }
 
 WasmCode* NativeModule::AddCodeForTesting(Handle<Code> code) {
@@ -2538,21 +2537,27 @@ std::pair<WasmCode*, SafepointEntry> WasmCodeManager::LookupCodeAndSafepoint(
     Isolate* isolate, Address pc) {
   auto* entry = isolate->wasm_code_look_up_cache()->GetCacheEntry(pc);
   WasmCode* code = entry->code;
-  DCHECK(code);
-  if (!entry->safepoint_entry.is_initialized()) {
-    SafepointTable table(code);
-    entry->safepoint_entry = table.TryFindEntry(pc);
-    if (!entry->safepoint_entry.is_initialized()) {
-      // Only for protected instructions the safepoint entry is not mandatory.
-      // This is rare, so we don't bother caching the result in this case.
-      CHECK(code->IsProtectedInstruction(
-          pc - WasmFrameConstants::kProtectedInstructionReturnAddressOffset));
-    }
+  DCHECK_NOT_NULL(code);
+  // For protected instructions we usually do not emit a safepoint because the
+  // frame will be unwound anyway. The exception is debugging code, where the
+  // frame might be inspected if "pause on exception" is set.
+  // For those instructions, we thus need to explicitly return an empty
+  // safepoint; using any previously registered safepoint can lead to crashes
+  // when we try to visit spill slots that do not hold tagged values at this
+  // point.
+  // Evaluate this condition only on demand (the fast path does not need it).
+  auto expect_safepoint = [code, pc]() {
+    const bool is_protected_instruction = code->IsProtectedInstruction(
+        pc - WasmFrameConstants::kProtectedInstructionReturnAddressOffset);
+    return !is_protected_instruction || code->for_debugging();
+  };
+  if (!entry->safepoint_entry.is_initialized() && expect_safepoint()) {
+    entry->safepoint_entry = SafepointTable{code}.TryFindEntry(pc);
+    CHECK(entry->safepoint_entry.is_initialized());
+  } else if (expect_safepoint()) {
+    DCHECK_EQ(entry->safepoint_entry, SafepointTable{code}.TryFindEntry(pc));
   } else {
-#ifdef DEBUG
-    SafepointTable table(code);
-    DCHECK_EQ(entry->safepoint_entry, table.TryFindEntry(pc));
-#endif  // DEBUG
+    DCHECK(!entry->safepoint_entry.is_initialized());
   }
   return std::make_pair(code, entry->safepoint_entry);
 }

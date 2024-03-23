@@ -1163,9 +1163,8 @@ MaybeHandle<Object> Object::GetLengthFromArrayLike(Isolate* isolate,
 // static
 MaybeHandle<Object> Object::GetProperty(LookupIterator* it,
                                         bool is_global_reference) {
-  for (; it->IsFound(); it->Next()) {
+  for (;; it->Next()) {
     switch (it->state()) {
-      case LookupIterator::NOT_FOUND:
       case LookupIterator::TRANSITION:
         UNREACHABLE();
       case LookupIterator::JSPROXY: {
@@ -1201,42 +1200,44 @@ MaybeHandle<Object> Object::GetProperty(LookupIterator* it,
             it->isolate(), result,
             JSObject::GetPropertyWithInterceptor(it, &done), Object);
         if (done) return result;
-        break;
+        continue;
       }
       case LookupIterator::ACCESS_CHECK:
-        if (it->HasAccess()) break;
+        if (it->HasAccess()) continue;
         return JSObject::GetPropertyWithFailedAccessCheck(it);
       case LookupIterator::ACCESSOR:
         return GetPropertyWithAccessor(it);
-      case LookupIterator::INTEGER_INDEXED_EXOTIC:
+      case LookupIterator::TYPED_ARRAY_INDEX_NOT_FOUND:
         return it->isolate()->factory()->undefined_value();
       case LookupIterator::DATA:
         return it->GetDataValue();
-    }
-  }
+      case LookupIterator::NOT_FOUND:
+        if (it->IsPrivateName()) {
+          Handle<Symbol> private_symbol = Handle<Symbol>::cast(it->name());
+          Handle<String> name_string(
+              String::cast(private_symbol->description()), it->isolate());
+          if (private_symbol->is_private_brand()) {
+            Handle<String> class_name =
+                (name_string->length() == 0)
+                    ? it->isolate()->factory()->anonymous_string()
+                    : name_string;
+            THROW_NEW_ERROR(
+                it->isolate(),
+                NewTypeError(MessageTemplate::kInvalidPrivateBrandInstance,
+                             class_name),
+                Object);
+          }
+          THROW_NEW_ERROR(
+              it->isolate(),
+              NewTypeError(MessageTemplate::kInvalidPrivateMemberRead,
+                           name_string),
+              Object);
+        }
 
-  if (it->IsPrivateName()) {
-    Handle<Symbol> private_symbol = Handle<Symbol>::cast(it->name());
-    Handle<String> name_string(String::cast(private_symbol->description()),
-                               it->isolate());
-    if (private_symbol->is_private_brand()) {
-      Handle<String> class_name =
-          (name_string->length() == 0)
-              ? it->isolate()->factory()->anonymous_string()
-              : name_string;
-      THROW_NEW_ERROR(
-          it->isolate(),
-          NewTypeError(MessageTemplate::kInvalidPrivateBrandInstance,
-                       class_name),
-          Object);
+        return it->isolate()->factory()->undefined_value();
     }
-    THROW_NEW_ERROR(
-        it->isolate(),
-        NewTypeError(MessageTemplate::kInvalidPrivateMemberRead, name_string),
-        Object);
+    UNREACHABLE();
   }
-
-  return it->isolate()->factory()->undefined_value();
 }
 
 // static
@@ -1936,6 +1937,15 @@ int HeapObject::SizeFromMap(Tagged<Map> map) const {
   if (instance_type == FIXED_DOUBLE_ARRAY_TYPE) {
     return FixedDoubleArray::unchecked_cast(*this)->AllocatedSize();
   }
+  if (instance_type == TRUSTED_FIXED_ARRAY_TYPE) {
+    return TrustedFixedArray::unchecked_cast(*this)->AllocatedSize();
+  }
+  if (instance_type == PROTECTED_FIXED_ARRAY_TYPE) {
+    return ProtectedFixedArray::unchecked_cast(*this)->AllocatedSize();
+  }
+  if (instance_type == TRUSTED_BYTE_ARRAY_TYPE) {
+    return TrustedByteArray::unchecked_cast(*this)->AllocatedSize();
+  }
   if (instance_type == FEEDBACK_METADATA_TYPE) {
     return FeedbackMetadata::SizeFor(
         FeedbackMetadata::unchecked_cast(*this)->slot_count(kAcquireLoad));
@@ -2011,6 +2021,10 @@ int HeapObject::SizeFromMap(Tagged<Map> map) const {
   }
   if (instance_type == WASM_NULL_TYPE) {
     return WasmNull::kSize;
+  }
+  if (instance_type == WASM_DISPATCH_TABLE_TYPE) {
+    return WasmDispatchTable::SizeFor(
+        WasmDispatchTable::unchecked_cast(*this)->capacity());
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
   DCHECK_EQ(instance_type, EMBEDDER_DATA_ARRAY_TYPE);
@@ -2194,13 +2208,10 @@ Maybe<bool> Object::SetPropertyInternal(LookupIterator* it,
   // interceptor calls.
   AssertNoContextChange ncc(it->isolate());
 
-  do {
+  for (;; it->Next()) {
     switch (it->state()) {
-      case LookupIterator::NOT_FOUND:
-        UNREACHABLE();
-
       case LookupIterator::ACCESS_CHECK:
-        if (it->HasAccess()) break;
+        if (it->HasAccess()) continue;
         // Check whether it makes sense to reuse the lookup iterator. Here it
         // might still call into setters up the prototype chain.
         return JSObject::SetPropertyWithFailedAccessCheck(it, value,
@@ -2270,7 +2281,7 @@ Maybe<bool> Object::SetPropertyInternal(LookupIterator* it,
         }
         return SetPropertyWithAccessor(it, value, should_throw);
       }
-      case LookupIterator::INTEGER_INDEXED_EXOTIC: {
+      case LookupIterator::TYPED_ARRAY_INDEX_NOT_FOUND: {
         // IntegerIndexedElementSet converts value to a Number/BigInt prior to
         // the bounds check. The bounds check has already happened here, but
         // perform the possibly effectful ToNumber (or ToBigInt) operation
@@ -2306,15 +2317,13 @@ Maybe<bool> Object::SetPropertyInternal(LookupIterator* it,
           return SetDataProperty(it, value);
         }
         V8_FALLTHROUGH;
+      case LookupIterator::NOT_FOUND:
       case LookupIterator::TRANSITION:
         *found = false;
         return Nothing<bool>();
     }
-    it->Next();
-  } while (it->IsFound());
-
-  *found = false;
-  return Nothing<bool>();
+    UNREACHABLE();
+  }
 }
 
 bool Object::CheckContextualStoreToJSGlobalObject(
@@ -2379,14 +2388,14 @@ Maybe<bool> Object::SetSuperProperty(LookupIterator* it, Handle<Object> value,
   // lookup from scratch.
   LookupIterator own_lookup(isolate, receiver, it->GetKey(),
                             LookupIterator::OWN);
-  for (; own_lookup.IsFound(); own_lookup.Next()) {
+  for (;; own_lookup.Next()) {
     switch (own_lookup.state()) {
       case LookupIterator::ACCESS_CHECK:
         if (!own_lookup.HasAccess()) {
           return JSObject::SetPropertyWithFailedAccessCheck(&own_lookup, value,
                                                             should_throw);
         }
-        break;
+        continue;
 
       case LookupIterator::ACCESSOR:
         if (IsAccessorInfo(*own_lookup.GetAccessors())) {
@@ -2397,7 +2406,7 @@ Maybe<bool> Object::SetSuperProperty(LookupIterator* it, Handle<Object> value,
                                                  should_throw);
         }
         V8_FALLTHROUGH;
-      case LookupIterator::INTEGER_INDEXED_EXOTIC:
+      case LookupIterator::TYPED_ARRAY_INDEX_NOT_FOUND:
         return RedefineIncompatibleProperty(isolate, it->GetName(), value,
                                             should_throw);
 
@@ -2437,16 +2446,21 @@ Maybe<bool> Object::SetSuperProperty(LookupIterator* it, Handle<Object> value,
       }
 
       case LookupIterator::NOT_FOUND:
-      case LookupIterator::TRANSITION:
+        if (!CheckContextualStoreToJSGlobalObject(&own_lookup, should_throw)) {
+          return Nothing<bool>();
+        }
+        return AddDataProperty(&own_lookup, value, NONE, should_throw,
+                               store_origin);
+
       case LookupIterator::WASM_OBJECT:
+        RETURN_FAILURE(it->isolate(), kThrowOnError,
+                       NewTypeError(MessageTemplate::kWasmObjectsAreOpaque));
+
+      case LookupIterator::TRANSITION:
         UNREACHABLE();
     }
+    UNREACHABLE();
   }
-
-  if (!CheckContextualStoreToJSGlobalObject(&own_lookup, should_throw)) {
-    return Nothing<bool>();
-  }
-  return AddDataProperty(&own_lookup, value, NONE, should_throw, store_origin);
 }
 
 Maybe<bool> Object::CannotCreateProperty(Isolate* isolate,
@@ -2574,7 +2588,7 @@ Maybe<bool> Object::AddDataProperty(LookupIterator* it, Handle<Object> value,
                    NewTypeError(MessageTemplate::kProxyPrivate));
   }
 
-  DCHECK_NE(LookupIterator::INTEGER_INDEXED_EXOTIC, it->state());
+  DCHECK_NE(LookupIterator::TYPED_ARRAY_INDEX_NOT_FOUND, it->state());
 
   Handle<JSReceiver> receiver = it->GetStoreTarget<JSReceiver>();
   DCHECK_IMPLIES(IsJSProxy(*receiver), it->GetName()->IsPrivateName());

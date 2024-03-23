@@ -8,9 +8,7 @@
 #include "src/wasm/canonical-types.h"
 #include "src/wasm/wasm-module.h"
 
-namespace v8 {
-namespace internal {
-namespace wasm {
+namespace v8::internal::wasm {
 
 namespace {
 
@@ -115,6 +113,7 @@ HeapType::Representation NullSentinelImpl(HeapType type,
       return HeapType::kNone;
     case HeapType::kExtern:
     case HeapType::kNoExtern:
+    case HeapType::kExternString:
       return HeapType::kNoExtern;
     case HeapType::kExn:
     case HeapType::kNoExn:
@@ -148,6 +147,7 @@ bool ValidSubtypeDefinition(uint32_t subtype_index, uint32_t supertype_index,
   const TypeDefinition& supertype = super_module->types[supertype_index];
   if (subtype.kind != supertype.kind) return false;
   if (supertype.is_final) return false;
+  if (subtype.is_shared != supertype.is_shared) return false;
   switch (subtype.kind) {
     case TypeDefinition::kFunction:
       return ValidFunctionSubtypeDefinition(subtype_index, supertype_index,
@@ -158,6 +158,21 @@ bool ValidSubtypeDefinition(uint32_t subtype_index, uint32_t supertype_index,
     case TypeDefinition::kArray:
       return ValidArraySubtypeDefinition(subtype_index, supertype_index,
                                          sub_module, super_module);
+  }
+}
+
+V8_EXPORT_PRIVATE bool IsShared(ValueType type, const WasmModule* module) {
+  switch (type.kind()) {
+    case kRef:
+    case kRefNull:
+      if (type.has_index()) {
+        return module->types[type.ref_index()].is_shared;
+      } else {
+        // TODO(14616): Extend this once we have shared abstract types.
+        return false;
+      }
+    default:
+      return true;
   }
 }
 
@@ -215,6 +230,8 @@ V8_NOINLINE V8_EXPORT_PRIVATE bool IsHeapSubtypeOfImpl(
       return super_heap == HeapType::kAny;
     case HeapType::kExtern:
       return super_heap == HeapType::kExtern;
+    case HeapType::kExternString:
+      return super_heap == sub_heap || super_heap == HeapType::kExtern;
     case HeapType::kExn:
       return super_heap == HeapType::kExn;
     case HeapType::kI31:
@@ -239,11 +256,13 @@ V8_NOINLINE V8_EXPORT_PRIVATE bool IsHeapSubtypeOfImpl(
       }
       return super_heap != HeapType::kFunc && super_heap != HeapType::kNoFunc &&
              super_heap != HeapType::kExtern &&
+             super_heap != HeapType::kExternString &&
              super_heap != HeapType::kNoExtern &&
              super_heap != HeapType::kExn && super_heap != HeapType::kNoExn;
     case HeapType::kNoExtern:
       return super_heap == HeapType::kNoExtern ||
-             super_heap == HeapType::kExtern;
+             super_heap == HeapType::kExtern ||
+             super_heap == HeapType::kExternString;
     case HeapType::kNoExn:
       return super_heap == HeapType::kExn || super_heap == HeapType::kNoExn;
     case HeapType::kNoFunc:
@@ -262,17 +281,22 @@ V8_NOINLINE V8_EXPORT_PRIVATE bool IsHeapSubtypeOfImpl(
 
   switch (super_heap.representation()) {
     case HeapType::kFunc:
-      return sub_module->has_signature(sub_index);
+      return sub_module->has_signature(sub_index) &&
+             !sub_module->types[sub_index].is_shared;
     case HeapType::kStruct:
-      return sub_module->has_struct(sub_index);
+      return sub_module->has_struct(sub_index) &&
+             !sub_module->types[sub_index].is_shared;
     case HeapType::kEq:
     case HeapType::kAny:
-      return !sub_module->has_signature(sub_index);
+      return !sub_module->has_signature(sub_index) &&
+             !sub_module->types[sub_index].is_shared;
     case HeapType::kArray:
-      return sub_module->has_array(sub_index);
+      return sub_module->has_array(sub_index) &&
+             !sub_module->types[sub_index].is_shared;
     case HeapType::kI31:
       return false;
     case HeapType::kExtern:
+    case HeapType::kExternString:
     case HeapType::kExn:
       return false;
     case HeapType::kString:
@@ -407,6 +431,7 @@ HeapType::Representation CommonAncestorWithGeneric(HeapType heap1,
           return HeapType::kAny;
         case HeapType::kFunc:
         case HeapType::kExtern:
+        case HeapType::kExternString:
         case HeapType::kNoExtern:
         case HeapType::kNoFunc:
         case HeapType::kStringViewIter:
@@ -434,6 +459,7 @@ HeapType::Representation CommonAncestorWithGeneric(HeapType heap1,
           return HeapType::kAny;
         case HeapType::kFunc:
         case HeapType::kExtern:
+        case HeapType::kExternString:
         case HeapType::kNoExtern:
         case HeapType::kNoFunc:
         case HeapType::kStringViewIter:
@@ -462,6 +488,7 @@ HeapType::Representation CommonAncestorWithGeneric(HeapType heap1,
           return HeapType::kAny;
         case HeapType::kFunc:
         case HeapType::kExtern:
+        case HeapType::kExternString:
         case HeapType::kNoExtern:
         case HeapType::kNoFunc:
         case HeapType::kStringViewIter:
@@ -489,6 +516,7 @@ HeapType::Representation CommonAncestorWithGeneric(HeapType heap1,
           return HeapType::kAny;
         case HeapType::kFunc:
         case HeapType::kExtern:
+        case HeapType::kExternString:
         case HeapType::kNoExtern:
         case HeapType::kNoFunc:
         case HeapType::kStringViewIter:
@@ -517,6 +545,7 @@ HeapType::Representation CommonAncestorWithGeneric(HeapType heap1,
           return HeapType::kAny;
         case HeapType::kFunc:
         case HeapType::kExtern:
+        case HeapType::kExternString:
         case HeapType::kNoExtern:
         case HeapType::kNoFunc:
         case HeapType::kStringViewIter:
@@ -544,6 +573,7 @@ HeapType::Representation CommonAncestorWithGeneric(HeapType heap1,
         case HeapType::kString:
           return heap2.representation();
         case HeapType::kExtern:
+        case HeapType::kExternString:
         case HeapType::kNoExtern:
         case HeapType::kNoFunc:
         case HeapType::kFunc:
@@ -565,12 +595,20 @@ HeapType::Representation CommonAncestorWithGeneric(HeapType heap1,
                  ? heap2.representation()
                  : HeapType::kBottom;
     case HeapType::kNoExtern:
-      return heap2 == HeapType::kExtern || heap2 == HeapType::kNoExtern
+      return heap2 == HeapType::kExtern || heap2 == HeapType::kNoExtern ||
+                     heap2 == HeapType::kExternString
                  ? heap2.representation()
                  : HeapType::kBottom;
     case HeapType::kExtern:
-      return heap2 == HeapType::kExtern || heap2 == HeapType::kNoExtern
+      return heap2 == HeapType::kExtern || heap2 == HeapType::kNoExtern ||
+                     heap2 == HeapType::kExternString
                  ? HeapType::kExtern
+                 : HeapType::kBottom;
+    case HeapType::kExternString:
+      return heap2 == HeapType::kExtern ? HeapType::kExtern
+             : (heap2 == HeapType::kNoExtern ||
+                heap2 == HeapType::kExternString)
+                 ? HeapType::kExternString
                  : HeapType::kBottom;
     case HeapType::kNoExn:
       return heap2 == HeapType::kExn || heap2 == HeapType::kNoExn
@@ -593,6 +631,7 @@ HeapType::Representation CommonAncestorWithGeneric(HeapType heap1,
           return HeapType::kString;
         case HeapType::kFunc:
         case HeapType::kExtern:
+        case HeapType::kExternString:
         case HeapType::kNoExtern:
         case HeapType::kNoFunc:
         case HeapType::kStringViewIter:
@@ -697,15 +736,4 @@ bool IsSameTypeHierarchy(HeapType type1, HeapType type2,
   return NullSentinelImpl(type1, module) == NullSentinelImpl(type2, module);
 }
 
-bool IsImplicitInternalization(wasm::ValueType from, wasm::ValueType to,
-                               const wasm::WasmModule* to_module) {
-  return from.is_object_reference() &&
-         from.heap_representation() == wasm::HeapType::kExtern &&
-         to.is_object_reference() &&
-         wasm::IsHeapSubtypeOf(to.heap_type(),
-                               wasm::HeapType(wasm::HeapType::kAny), to_module);
-}
-
-}  // namespace wasm
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal::wasm

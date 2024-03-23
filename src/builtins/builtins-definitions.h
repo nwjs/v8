@@ -665,7 +665,9 @@ namespace internal {
   TFH(StoreGlobalICTrampoline, StoreGlobal)                                    \
   TFH(StoreGlobalICBaseline, StoreGlobalBaseline)                              \
   TFH(StoreIC, StoreWithVector)                                                \
+  TFH(StoreIC_Megamorphic, StoreWithVector)                                    \
   TFH(StoreICTrampoline, Store)                                                \
+  TFH(StoreICTrampoline_Megamorphic, Store)                                    \
   TFH(StoreICBaseline, StoreBaseline)                                          \
   TFH(DefineNamedOwnIC, StoreWithVector)                                       \
   TFH(DefineNamedOwnICTrampoline, Store)                                       \
@@ -892,8 +894,8 @@ namespace internal {
       kMatchInfo)                                                              \
   TFS(RegExpExecInternal, NeedsContext::kYes, kRegExp, kString, kLastIndex,    \
       kMatchInfo)                                                              \
-  ASM(RegExpInterpreterTrampoline, CCall)                                      \
-  ASM(RegExpExperimentalTrampoline, CCall)                                     \
+  ASM(RegExpInterpreterTrampoline, RegExpTrampoline)                           \
+  ASM(RegExpExperimentalTrampoline, RegExpTrampoline)                          \
                                                                                \
   /* Set */                                                                    \
   TFS(FindOrderedHashSetEntry, NeedsContext::kYes, kTable, kKey)               \
@@ -1010,6 +1012,7 @@ namespace internal {
   IF_WASM(ASM, WasmReturnPromiseOnSuspendAsm, WasmJSToWasmWrapper)             \
   IF_WASM(ASM, WasmToJsWrapperAsm, WasmDummy)                                  \
   IF_WASM(TFC, WasmToJsWrapperCSA, WasmToJSWrapper)                            \
+  IF_WASM(TFC, WasmToJsWrapperInvalidSig, WasmToJSWrapper)                     \
   IF_WASM(ASM, WasmSuspend, WasmSuspend)                                       \
   IF_WASM(ASM, WasmResume, WasmDummy)                                          \
   IF_WASM(ASM, WasmReject, WasmDummy)                                          \
@@ -2028,14 +2031,6 @@ namespace internal {
   BUILTIN_LIST(V, IGNORE_BUILTIN, IGNORE_BUILTIN, IGNORE_BUILTIN, \
                IGNORE_BUILTIN, IGNORE_BUILTIN, IGNORE_BUILTIN)
 
-#define BUILTIN_LIST_A(V)                                                      \
-  BUILTIN_LIST(IGNORE_BUILTIN, IGNORE_BUILTIN, IGNORE_BUILTIN, IGNORE_BUILTIN, \
-               IGNORE_BUILTIN, IGNORE_BUILTIN, V)
-
-#define BUILTIN_LIST_TFS(V)                                       \
-  BUILTIN_LIST(IGNORE_BUILTIN, IGNORE_BUILTIN, IGNORE_BUILTIN, V, \
-               IGNORE_BUILTIN, IGNORE_BUILTIN, IGNORE_BUILTIN)
-
 #define BUILTIN_LIST_TFJ(V)                                       \
   BUILTIN_LIST(IGNORE_BUILTIN, V, IGNORE_BUILTIN, IGNORE_BUILTIN, \
                IGNORE_BUILTIN, IGNORE_BUILTIN, IGNORE_BUILTIN)
@@ -2043,6 +2038,22 @@ namespace internal {
 #define BUILTIN_LIST_TFC(V)                                       \
   BUILTIN_LIST(IGNORE_BUILTIN, IGNORE_BUILTIN, V, IGNORE_BUILTIN, \
                IGNORE_BUILTIN, IGNORE_BUILTIN, IGNORE_BUILTIN)
+
+#define BUILTIN_LIST_TFS(V)                                       \
+  BUILTIN_LIST(IGNORE_BUILTIN, IGNORE_BUILTIN, IGNORE_BUILTIN, V, \
+               IGNORE_BUILTIN, IGNORE_BUILTIN, IGNORE_BUILTIN)
+
+#define BUILTIN_LIST_TFH(V)                                                    \
+  BUILTIN_LIST(IGNORE_BUILTIN, IGNORE_BUILTIN, IGNORE_BUILTIN, IGNORE_BUILTIN, \
+               V, IGNORE_BUILTIN, IGNORE_BUILTIN)
+
+#define BUILTIN_LIST_BCH(V)                                                    \
+  BUILTIN_LIST(IGNORE_BUILTIN, IGNORE_BUILTIN, IGNORE_BUILTIN, IGNORE_BUILTIN, \
+               IGNORE_BUILTIN, V, IGNORE_BUILTIN)
+
+#define BUILTIN_LIST_A(V)                                                      \
+  BUILTIN_LIST(IGNORE_BUILTIN, IGNORE_BUILTIN, IGNORE_BUILTIN, IGNORE_BUILTIN, \
+               IGNORE_BUILTIN, IGNORE_BUILTIN, V)
 
 }  // namespace internal
 }  // namespace v8
