@@ -1040,14 +1040,21 @@ MapUpdater::State MapUpdater::ConstructNewMap() {
   Handle<Map> new_map =
       Map::AddMissingTransitions(isolate_, split_map, new_descriptors);
 
+  bool had_any_enum_cache =
+      split_map->instance_descriptors(isolate_)
+              ->enum_cache()
+              ->keys()
+              ->length() > 0 ||
+      old_descriptors_->enum_cache()->keys()->length() > 0;
+
   // Deprecated part of the transition tree is no longer reachable, so replace
   // current instance descriptors in the "survived" part of the tree with
   // the new descriptors to maintain descriptors sharing invariant.
   split_map->ReplaceDescriptors(isolate_, *new_descriptors);
 
-  // If the old descriptors had an enum cache, make sure the new ones do too.
-  if (old_descriptors_->enum_cache()->keys()->length() > 0 &&
-      new_map->NumberOfEnumerableProperties() > 0) {
+  // If the old descriptors had an enum cache (or if {split_map}'s descriptors
+  // had one), make sure the new ones do too.
+  if (had_any_enum_cache && new_map->NumberOfEnumerableProperties() > 0) {
     FastKeyAccumulator::InitializeFastPropertyEnumCache(
         isolate_, new_map, new_map->NumberOfEnumerableProperties());
   }
@@ -1139,7 +1146,7 @@ void MapUpdater::UpdateFieldType(Isolate* isolate, Handle<Map> map,
                                  PropertyConstness new_constness,
                                  Representation new_representation,
                                  const MaybeObjectHandle& new_wrapped_type) {
-  DCHECK(new_wrapped_type->IsSmi() || new_wrapped_type->IsWeak());
+  DCHECK(IsSmi(*new_wrapped_type) || IsWeak(*new_wrapped_type));
   // We store raw pointers in the queue, so no allocations are allowed.
   PropertyDetails details =
       map->instance_descriptors(isolate)->GetDetails(descriptor);

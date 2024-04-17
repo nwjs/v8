@@ -1796,7 +1796,7 @@ class MergeAssumptionChecker final : public ObjectVisitor {
   void VisitPointers(Tagged<HeapObject> host, MaybeObjectSlot start,
                      MaybeObjectSlot end) override {
     for (MaybeObjectSlot current = start; current != end; ++current) {
-      MaybeObject maybe_obj = current.load(cage_base_);
+      Tagged<MaybeObject> maybe_obj = current.load(cage_base_);
       Tagged<HeapObject> obj;
       bool is_weak = maybe_obj.IsWeak();
       if (maybe_obj.GetHeapObject(&obj)) {
@@ -1946,8 +1946,6 @@ void BackgroundCompileTask::Run(
   // Update the character stream's runtime call stats.
   info.character_stream()->set_runtime_call_stats(info.runtime_call_stats());
 
-  // Parser needs to stay alive for finalizing the parsing on the main
-  // thread.
   Parser parser(isolate, &info, script_);
   if (flags().is_toplevel()) {
     parser.InitializeEmptyScopeChain(&info);
@@ -2132,7 +2130,7 @@ void BackgroundMergeTask::BeginMergeInBackground(LocalIsolate* isolate,
 
   {
     DisallowGarbageCollection no_gc;
-    MaybeObject maybe_old_toplevel_sfi =
+    Tagged<MaybeObject> maybe_old_toplevel_sfi =
         old_script->shared_function_infos()->get(kFunctionLiteralIdTopLevel);
     if (maybe_old_toplevel_sfi.IsWeak()) {
       Tagged<SharedFunctionInfo> old_toplevel_sfi = SharedFunctionInfo::cast(
@@ -2148,11 +2146,13 @@ void BackgroundMergeTask::BeginMergeInBackground(LocalIsolate* isolate,
            new_script->shared_function_infos()->length());
   for (int i = 0; i < old_script->shared_function_infos()->length(); ++i) {
     DisallowGarbageCollection no_gc;
-    MaybeObject maybe_new_sfi = new_script->shared_function_infos()->get(i);
+    Tagged<MaybeObject> maybe_new_sfi =
+        new_script->shared_function_infos()->get(i);
     if (maybe_new_sfi.IsWeak()) {
       Tagged<SharedFunctionInfo> new_sfi =
           SharedFunctionInfo::cast(maybe_new_sfi.GetHeapObjectAssumeWeak());
-      MaybeObject maybe_old_sfi = old_script->shared_function_infos()->get(i);
+      Tagged<MaybeObject> maybe_old_sfi =
+          old_script->shared_function_infos()->get(i);
       if (maybe_old_sfi.IsWeak()) {
         // The old script and the new script both have SharedFunctionInfos for
         // this function literal.
@@ -2225,8 +2225,9 @@ Handle<SharedFunctionInfo> BackgroundMergeTask::CompleteMergeInForeground(
   for (Handle<SharedFunctionInfo> new_sfi : used_new_sfis_) {
     DisallowGarbageCollection no_gc;
     DCHECK_GE(new_sfi->function_literal_id(), 0);
-    MaybeObject maybe_old_sfi = old_script->shared_function_infos()->get(
-        new_sfi->function_literal_id());
+    Tagged<MaybeObject> maybe_old_sfi =
+        old_script->shared_function_infos()->get(
+            new_sfi->function_literal_id());
     if (maybe_old_sfi.IsWeak()) {
       // The old script's SFI didn't exist during the background work, but
       // does now. This means a re-merge is necessary so that any pointers to
@@ -2235,9 +2236,8 @@ Handle<SharedFunctionInfo> BackgroundMergeTask::CompleteMergeInForeground(
           SharedFunctionInfo::cast(maybe_old_sfi.GetHeapObjectAssumeWeak());
       forwarder.Forward(*new_sfi, old_sfi);
     } else {
-      old_script->shared_function_infos()->set(
-          new_sfi->function_literal_id(),
-          MaybeObject::MakeWeak(MaybeObject::FromObject(*new_sfi)));
+      old_script->shared_function_infos()->set(new_sfi->function_literal_id(),
+                                               MakeWeak(*new_sfi));
     }
   }
 
@@ -2259,7 +2259,7 @@ Handle<SharedFunctionInfo> BackgroundMergeTask::CompleteMergeInForeground(
     forwarder.IterateAndForwardPointers();
   }
 
-  MaybeObject maybe_toplevel_sfi =
+  Tagged<MaybeObject> maybe_toplevel_sfi =
       old_script->shared_function_infos()->get(kFunctionLiteralIdTopLevel);
   CHECK(maybe_toplevel_sfi.IsWeak());
   Handle<SharedFunctionInfo> result = handle(
@@ -2309,8 +2309,7 @@ MaybeHandle<SharedFunctionInfo> BackgroundCompileTask::FinalizeScript(
     maybe_result = result;
     script = handle(Script::cast(result->script()), isolate);
     DCHECK(Object::StrictEquals(script->source(), *source));
-    DCHECK(isolate->factory()->script_list()->Contains(
-        MaybeObject::MakeWeak(MaybeObject::FromObject(*script))));
+    DCHECK(isolate->factory()->script_list()->Contains(MakeWeak(*script)));
   } else {
     Script::SetSource(isolate, script, source);
     script->set_origin_options(origin_options);
@@ -2564,7 +2563,7 @@ bool Compiler::CollectSourcePositions(Isolate* isolate,
   if (base::Optional<Tagged<DebugInfo>> debug_info =
           shared_info->TryGetDebugInfo(isolate)) {
     if (debug_info.value()->HasInstrumentedBytecodeArray()) {
-      Tagged<ByteArray> source_position_table =
+      Tagged<TrustedByteArray> source_position_table =
           job->compilation_info()->bytecode_array()->SourcePositionTable();
       shared_info->GetActiveBytecodeArray(isolate)->set_source_position_table(
           source_position_table, kReleaseStore);
