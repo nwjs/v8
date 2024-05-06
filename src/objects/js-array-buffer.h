@@ -23,7 +23,7 @@ class ArrayBufferExtension;
 
 class JSArrayBuffer
     : public TorqueGeneratedJSArrayBuffer<JSArrayBuffer,
-                                          JSObjectWithEmbedderSlots> {
+                                          JSAPIObjectWithEmbedderSlots> {
  public:
 // The maximum length for JSArrayBuffer's supported by V8.
 // On 32-bit architectures we limit this to 2GiB, so that
@@ -155,8 +155,6 @@ class JSArrayBuffer
   DECL_PRINTER(JSArrayBuffer)
   DECL_VERIFIER(JSArrayBuffer)
 
-  static constexpr int kEndOfTaggedFieldsOffset = kRawByteLengthOffset;
-
   static const int kSizeWithEmbedderFields =
       kHeaderSize +
       v8::ArrayBuffer::kEmbedderFieldCount * kEmbedderDataSlotSize;
@@ -185,7 +183,12 @@ class JSArrayBuffer
 // extension-object. The GC periodically iterates all extensions concurrently
 // and frees unmarked ones.
 // https://docs.google.com/document/d/1-ZrLdlFX1nXT3z-FAgLbKal1gI8Auiaya_My-a0UJ28/edit
-class ArrayBufferExtension final : public Malloced {
+class ArrayBufferExtension final
+#ifdef V8_COMPRESS_POINTERS
+    : public ExternalPointerTable::ManagedResource {
+#else
+    : public Malloced {
+#endif  // V8_COMPRESS_POINTERS
  public:
   ArrayBufferExtension() : backing_store_(std::shared_ptr<BackingStore>()) {}
   explicit ArrayBufferExtension(std::shared_ptr<BackingStore> backing_store)
@@ -250,8 +253,10 @@ class ArrayBufferExtension final : public Malloced {
 
 class JSArrayBufferView
     : public TorqueGeneratedJSArrayBufferView<JSArrayBufferView,
-                                              JSObjectWithEmbedderSlots> {
+                                              JSAPIObjectWithEmbedderSlots> {
  public:
+  class BodyDescriptor;
+
   // [byte_offset]: offset of typed array in bytes.
   DECL_PRIMITIVE_ACCESSORS(byte_offset, size_t)
 
@@ -268,8 +273,6 @@ class JSArrayBufferView
   DECL_BOOLEAN_ACCESSORS(is_length_tracking)
   DECL_BOOLEAN_ACCESSORS(is_backed_by_rab)
   inline bool IsVariableLength() const;
-
-  static constexpr int kEndOfTaggedFieldsOffset = kRawByteOffsetOffset;
 
   static_assert(IsAligned(kRawByteOffsetOffset, kUIntptrSize));
   static_assert(IsAligned(kRawByteLengthOffset, kUIntptrSize));
