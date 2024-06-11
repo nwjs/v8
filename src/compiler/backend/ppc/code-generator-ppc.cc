@@ -37,8 +37,10 @@ class PPCOperandConverter final : public InstructionOperandConverter {
   RCBit OutputRCBit() const {
     switch (instr_->flags_mode()) {
       case kFlags_branch:
+      case kFlags_conditional_branch:
       case kFlags_deoptimize:
       case kFlags_set:
+      case kFlags_conditional_set:
       case kFlags_trap:
       case kFlags_select:
         return SetRC;
@@ -976,6 +978,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                        SourceLocation());
 #endif
       break;
+    case kArchCallCFunctionWithFrameState:
     case kArchCallCFunction: {
       int const num_gp_parameters = ParamField::decode(instr->opcode());
       int const fp_param_field = FPParamField::decode(instr->opcode());
@@ -1036,6 +1039,13 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       }
 #endif  // V8_ENABLE_WEBASSEMBLY
       RecordSafepoint(instr->reference_map(), pc_offset);
+
+      bool const needs_frame_state =
+          (opcode == kArchCallCFunctionWithFrameState);
+      if (needs_frame_state) {
+        RecordDeoptInfo(instr, pc_offset);
+      }
+
       frame_access_state()->SetFrameAccessToDefault();
       // Ideally, we should decrement SP delta to match the change of stack
       // pointer in CallCFunction. However, for certain architectures (e.g.
@@ -3135,6 +3145,15 @@ void CodeGenerator::AssembleArchBoolean(Instruction* instr,
     __ li(reg, Operand(1));
   }
   __ bind(&done);
+}
+
+void CodeGenerator::AssembleArchConditionalBoolean(Instruction* instr) {
+  UNREACHABLE();
+}
+
+void CodeGenerator::AssembleArchConditionalBranch(Instruction* instr,
+                                                  BranchInfo* branch) {
+  UNREACHABLE();
 }
 
 void CodeGenerator::AssembleArchBinarySearchSwitch(Instruction* instr) {

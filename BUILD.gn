@@ -426,6 +426,13 @@ declare_args() {
   # Whether custom embedder snapshots may extend (= allocate new objects in)
   # ReadOnlySpace.
   v8_enable_extensible_ro_snapshot = true
+
+  # Use sticky mark-bits for separating object generations.
+  v8_enable_sticky_mark_bits = false
+
+  # Always move prototype transitions to the start of the transition tree
+  # (see issue 332914927).
+  v8_move_prototype_transitions_first = false
 }
 
 # Derived defaults.
@@ -1297,6 +1304,12 @@ config("features") {
   if (v8_enable_local_off_stack_check) {
     defines += [ "V8_ENABLE_LOCAL_OFF_STACK_CHECK" ]
   }
+  if (v8_enable_sticky_mark_bits) {
+    defines += [ "V8_ENABLE_STICKY_MARK_BITS" ]
+  }
+  if (v8_move_prototype_transitions_first) {
+    defines += [ "V8_MOVE_PROTOYPE_TRANSITIONS_FIRST" ]
+  }
 }
 
 config("toolchain") {
@@ -1429,20 +1442,10 @@ config("toolchain") {
       defines += [ "CAN_USE_RVV_INSTRUCTIONS" ]
       defines += [ "RVV_VLEN=${riscv_rvv_vlen}" ]
     }
-    if (riscv_use_zba || target_is_simulator) {
-      defines += [ "CAN_USE_ZBA_INSTRUCTIONS" ]
-    }
-    if (riscv_use_zbb || target_is_simulator) {
-      defines += [ "CAN_USE_ZBB_INSTRUCTIONS" ]
-    }
-    if (riscv_use_zbs || target_is_simulator) {
-      defines += [ "CAN_USE_ZBS_INSTRUCTIONS" ]
-    }
   }
   if (v8_current_cpu == "riscv64") {
     defines += [ "V8_TARGET_ARCH_RISCV64" ]
     defines += [ "__riscv_xlen=64" ]
-    defines += [ "CAN_USE_FPU_INSTRUCTIONS" ]
     if (!is_clang) {
       cflags += [ "-ffp-contract=off" ]
     }
@@ -1451,7 +1454,6 @@ config("toolchain") {
   if (v8_current_cpu == "riscv32") {
     defines += [ "V8_TARGET_ARCH_RISCV32" ]
     defines += [ "__riscv_xlen=32" ]
-    defines += [ "CAN_USE_FPU_INSTRUCTIONS" ]
   }
 
   if (v8_current_cpu == "x86") {
@@ -2745,6 +2747,7 @@ action("v8_dump_build_config") {
     "verify_csa=$v8_enable_verify_csa",
     "verify_heap=$v8_enable_verify_heap",
     "verify_predictable=$v8_enable_verify_predictable",
+    "memory_corruption_api=$v8_enable_memory_corruption_api",
   ]
 }
 
@@ -3209,7 +3212,6 @@ v8_header_set("v8_internal_headers") {
   sources = [
     ### gcmole(all) ###
     "$target_gen_dir/builtins-generated/bytecodes-builtins-list.h",
-    "//base/trace_event/common/trace_event_common.h",
     "include/cppgc/common.h",
     "include/v8-inspector-protocol.h",
     "include/v8-inspector.h",
@@ -3750,7 +3752,7 @@ v8_header_set("v8_internal_headers") {
     "src/interpreter/bytecode-array-random-iterator.h",
     "src/interpreter/bytecode-array-writer.h",
     "src/interpreter/bytecode-decoder.h",
-    "src/interpreter/bytecode-flags.h",
+    "src/interpreter/bytecode-flags-and-tokens.h",
     "src/interpreter/bytecode-generator.h",
     "src/interpreter/bytecode-jump-table.h",
     "src/interpreter/bytecode-label.h",
@@ -4084,6 +4086,11 @@ v8_header_set("v8_internal_headers") {
     "src/sandbox/code-pointer.h",
     "src/sandbox/compactible-external-entity-table-inl.h",
     "src/sandbox/compactible-external-entity-table.h",
+    "src/sandbox/external-buffer-inl.h",
+    "src/sandbox/external-buffer-table-inl.h",
+    "src/sandbox/external-buffer-table.h",
+    "src/sandbox/external-buffer-tag.h",
+    "src/sandbox/external-buffer.h",
     "src/sandbox/external-entity-table-inl.h",
     "src/sandbox/external-entity-table.h",
     "src/sandbox/external-pointer-inl.h",
@@ -4129,6 +4136,7 @@ v8_header_set("v8_internal_headers") {
     "src/strings/char-predicates-inl.h",
     "src/strings/char-predicates.h",
     "src/strings/string-builder-inl.h",
+    "src/strings/string-builder.h",
     "src/strings/string-case.h",
     "src/strings/string-hasher-inl.h",
     "src/strings/string-hasher.h",
@@ -4146,6 +4154,7 @@ v8_header_set("v8_internal_headers") {
     "src/third_party/utf8-decoder/utf8-decoder.h",
     "src/torque/runtime-macro-shims.h",
     "src/tracing/trace-event.h",
+    "src/tracing/trace-event-no-perfetto.h",
     "src/tracing/traced-value.h",
     "src/tracing/tracing-category-observer.h",
     "src/utils/address-map.h",
@@ -4187,7 +4196,7 @@ v8_header_set("v8_internal_headers") {
   }
 
   if (v8_use_perfetto) {
-    sources -= [ "//base/trace_event/common/trace_event_common.h" ]
+    sources -= [ "src/tracing/trace-event-no-perfetto.h" ]
     sources += [
       "src/tracing/code-data-source.h",
       "src/tracing/code-trace-context.h",
@@ -4284,6 +4293,7 @@ v8_header_set("v8_internal_headers") {
       "src/wasm/baseline/liftoff-assembler.h",
       "src/wasm/baseline/liftoff-compiler.h",
       "src/wasm/baseline/liftoff-register.h",
+      "src/wasm/baseline/liftoff-varstate.h",
       "src/wasm/baseline/parallel-move-inl.h",
       "src/wasm/baseline/parallel-move.h",
       "src/wasm/canonical-types.h",
@@ -4324,6 +4334,7 @@ v8_header_set("v8_internal_headers") {
       "src/wasm/wasm-builtin-list.h",
       "src/wasm/wasm-code-manager.h",
       "src/wasm/wasm-debug.h",
+      "src/wasm/wasm-deopt-data.h",
       "src/wasm/wasm-disassembler-impl.h",
       "src/wasm/wasm-disassembler.h",
       "src/wasm/wasm-engine.h",
@@ -5245,6 +5256,7 @@ v8_source_set("v8_base_without_compiler") {
     "src/builtins/builtins-console.cc",
     "src/builtins/builtins-dataview.cc",
     "src/builtins/builtins-date.cc",
+    "src/builtins/builtins-disposable-stack.cc",
     "src/builtins/builtins-error.cc",
     "src/builtins/builtins-function.cc",
     "src/builtins/builtins-global.cc",
@@ -5446,7 +5458,7 @@ v8_source_set("v8_base_without_compiler") {
     "src/interpreter/bytecode-array-random-iterator.cc",
     "src/interpreter/bytecode-array-writer.cc",
     "src/interpreter/bytecode-decoder.cc",
-    "src/interpreter/bytecode-flags.cc",
+    "src/interpreter/bytecode-flags-and-tokens.cc",
     "src/interpreter/bytecode-generator.cc",
     "src/interpreter/bytecode-label.cc",
     "src/interpreter/bytecode-node.cc",
@@ -5498,6 +5510,7 @@ v8_source_set("v8_base_without_compiler") {
     "src/objects/js-collator.cc",
     "src/objects/js-date-time-format.cc",
     "src/objects/js-display-names.cc",
+    "src/objects/js-disposable-stack.cc",
     "src/objects/js-duration-format.cc",
     "src/objects/js-function.cc",
     "src/objects/js-list-format.cc",
@@ -5626,6 +5639,7 @@ v8_source_set("v8_base_without_compiler") {
     "src/runtime/runtime-weak-refs.cc",
     "src/runtime/runtime.cc",
     "src/sandbox/code-pointer-table.cc",
+    "src/sandbox/external-buffer-table.cc",
     "src/sandbox/external-pointer-table.cc",
     "src/sandbox/sandbox.cc",
     "src/sandbox/testing.cc",
@@ -5776,6 +5790,7 @@ v8_source_set("v8_base_without_compiler") {
       "src/wasm/value-type.cc",
       "src/wasm/wasm-code-manager.cc",
       "src/wasm/wasm-debug.cc",
+      "src/wasm/wasm-deopt-data.cc",
       "src/wasm/wasm-disassembler.cc",
       "src/wasm/wasm-engine.cc",
       "src/wasm/wasm-external-refs.cc",
@@ -6443,6 +6458,7 @@ v8_static_lib("v8_libbase") {
     "src/base/sys-info.cc",
     "src/base/sys-info.h",
     "src/base/template-meta-programming/algorithm.h",
+    "src/base/template-meta-programming/functional.h",
     "src/base/template-meta-programming/list.h",
     "src/base/template-utils.h",
     "src/base/threaded-list.h",
@@ -6634,7 +6650,6 @@ if (v8_use_libm_trig_functions) {
 
 v8_static_lib("v8_libplatform") {
   sources = [
-    "//base/trace_event/common/trace_event_common.h",
     "include/libplatform/libplatform-export.h",
     "include/libplatform/libplatform.h",
     "include/libplatform/v8-tracing.h",
@@ -6661,6 +6676,7 @@ v8_static_lib("v8_libplatform") {
     "src/libplatform/tracing/tracing-controller.cc",
     "src/libplatform/worker-thread.cc",
     "src/libplatform/worker-thread.h",
+    "src/tracing/trace-event-no-perfetto.h",
   ]
 
   configs = [ ":internal_config_base" ]
@@ -6681,12 +6697,12 @@ v8_static_lib("v8_libplatform") {
 
   if (v8_use_perfetto) {
     sources -= [
-      "//base/trace_event/common/trace_event_common.h",
       "src/libplatform/tracing/trace-buffer.cc",
       "src/libplatform/tracing/trace-buffer.h",
       "src/libplatform/tracing/trace-object.cc",
       "src/libplatform/tracing/trace-writer.cc",
       "src/libplatform/tracing/trace-writer.h",
+      "src/tracing/trace-event-no-perfetto.h",
     ]
     sources += [ "src/libplatform/tracing/trace-event-listener.h" ]
   }
@@ -7009,7 +7025,7 @@ v8_source_set("cppgc_base") {
   ]
 
   if (cppgc_is_standalone && !v8_use_perfetto) {
-    sources += [ "//base/trace_event/common/trace_event_common.h" ]
+    sources += [ "src/tracing/trace-event-no-perfetto.h" ]
   } else {
     public_deps += [ ":v8_tracing" ]
   }
@@ -7178,7 +7194,10 @@ if (current_toolchain == v8_snapshot_toolchain) {
       sources += [ "src/deoptimizer/deoptimizer-cfi-empty.cc" ]
     }
 
-    configs = [ ":internal_config" ]
+    configs = [
+      ":internal_config",
+      ":disable_icf",
+    ]
 
     deps = [
       ":v8_base_without_compiler",
@@ -7192,6 +7211,23 @@ if (current_toolchain == v8_snapshot_toolchain) {
       ":v8_turboshaft",
       "//build/win:default_exe_manifest",
     ]
+  }
+
+  # This config disables a link time optimization "ICF", which may merge
+  # different functions into one if the function signature and body of them are
+  # identical.
+  #
+  # ICF breaks 1:1 mappings of the external references for V8 snapshot, so we
+  # disable it while taking a V8 snapshot.
+  config("disable_icf") {
+    visibility = [ ":*" ]  # Only targets in this file can depend on this.
+    if (is_win) {
+      ldflags = [ "/OPT:NOICF" ]  # link.exe, but also lld-link.exe.
+    } else if (is_apple && !use_lld) {
+      ldflags = [ "-Wl,-no_deduplicate" ]  # ld64.
+    } else if (use_gold || use_lld) {
+      ldflags = [ "-Wl,--icf=none" ]
+    }
   }
 }
 
@@ -7759,6 +7795,7 @@ if (v8_enable_webassembly) {
     sources = [
       "test/fuzzer/wasm-fuzzer-common.cc",
       "test/fuzzer/wasm-fuzzer-common.h",
+      "tools/wasm/mjsunit-module-disassembler-impl.h",
     ]
 
     deps = [
@@ -7862,334 +7899,6 @@ group("v8_generated_cc_files") {
 # Protobuf targets, used only when building outside of chromium.
 
 if (!build_with_chromium && v8_use_perfetto) {
-  # This config is applied to the autogenerated .pb.{cc,h} files in
-  # proto_library.gni. This config is propagated up to the source sets
-  # that depend on generated proto headers.
-  config("protobuf_gen_config") {
-    defines = [
-      "GOOGLE_PROTOBUF_NO_RTTI",
-      "GOOGLE_PROTOBUF_NO_STATIC_INITIALIZER",
-    ]
-    cflags = [
-      "-Wno-unknown-warning-option",
-      "-Wno-deprecated",
-      "-Wno-undef",
-      "-Wno-zero-as-null-pointer-constant",
-      "-Wno-thread-safety-attributes",
-    ]
-    include_dirs = [ "third_party/protobuf/src" ]
-  }
-
-  # Configuration used to build libprotobuf_* and the protoc compiler.
-  config("protobuf_config") {
-    # Apply the lighter supressions and macro definitions from above.
-    configs = [ ":protobuf_gen_config" ]
-
-    if (!is_win) {
-      defines = [ "HAVE_PTHREAD=1" ]
-    }
-    if (is_clang) {
-      cflags = [
-        "-Wno-unused-private-field",
-        "-Wno-unused-function",
-        "-Wno-inconsistent-missing-override",
-        "-Wno-unknown-warning-option",
-        "-Wno-enum-compare-switch",
-        "-Wno-user-defined-warnings",
-        "-Wno-tautological-constant-compare",
-      ]
-    }
-    if (is_win && is_clang) {
-      cflags += [ "-Wno-microsoft-unqualified-friend" ]
-    }
-  }
-
-  source_set("protobuf_lite") {
-    sources = [
-      "third_party/protobuf/src/google/protobuf/any_lite.cc",
-      "third_party/protobuf/src/google/protobuf/arena.cc",
-      "third_party/protobuf/src/google/protobuf/arena.h",
-      "third_party/protobuf/src/google/protobuf/arena_impl.h",
-      "third_party/protobuf/src/google/protobuf/arenastring.h",
-      "third_party/protobuf/src/google/protobuf/extension_set.cc",
-      "third_party/protobuf/src/google/protobuf/extension_set.h",
-      "third_party/protobuf/src/google/protobuf/generated_enum_util.cc",
-      "third_party/protobuf/src/google/protobuf/generated_enum_util.h",
-      "third_party/protobuf/src/google/protobuf/generated_message_table_driven_lite.cc",
-      "third_party/protobuf/src/google/protobuf/generated_message_table_driven_lite.h",
-      "third_party/protobuf/src/google/protobuf/generated_message_util.cc",
-      "third_party/protobuf/src/google/protobuf/generated_message_util.h",
-      "third_party/protobuf/src/google/protobuf/has_bits.h",
-      "third_party/protobuf/src/google/protobuf/implicit_weak_message.cc",
-      "third_party/protobuf/src/google/protobuf/implicit_weak_message.h",
-      "third_party/protobuf/src/google/protobuf/inlined_string_field.h",
-      "third_party/protobuf/src/google/protobuf/io/coded_stream.cc",
-      "third_party/protobuf/src/google/protobuf/io/coded_stream.h",
-      "third_party/protobuf/src/google/protobuf/io/coded_stream_inl.h",
-      "third_party/protobuf/src/google/protobuf/io/io_win32.cc",
-      "third_party/protobuf/src/google/protobuf/io/io_win32.h",
-      "third_party/protobuf/src/google/protobuf/io/strtod.cc",
-      "third_party/protobuf/src/google/protobuf/io/strtod.h",
-      "third_party/protobuf/src/google/protobuf/io/zero_copy_stream.cc",
-      "third_party/protobuf/src/google/protobuf/io/zero_copy_stream.h",
-      "third_party/protobuf/src/google/protobuf/io/zero_copy_stream_impl.cc",
-      "third_party/protobuf/src/google/protobuf/io/zero_copy_stream_impl.h",
-      "third_party/protobuf/src/google/protobuf/io/zero_copy_stream_impl_lite.cc",
-      "third_party/protobuf/src/google/protobuf/io/zero_copy_stream_impl_lite.h",
-      "third_party/protobuf/src/google/protobuf/map.h",
-      "third_party/protobuf/src/google/protobuf/map_entry_lite.h",
-      "third_party/protobuf/src/google/protobuf/map_field_lite.h",
-      "third_party/protobuf/src/google/protobuf/map_type_handler.h",
-      "third_party/protobuf/src/google/protobuf/message_lite.cc",
-      "third_party/protobuf/src/google/protobuf/message_lite.h",
-      "third_party/protobuf/src/google/protobuf/repeated_field.cc",
-      "third_party/protobuf/src/google/protobuf/repeated_field.h",
-      "third_party/protobuf/src/google/protobuf/stubs/bytestream.cc",
-      "third_party/protobuf/src/google/protobuf/stubs/bytestream.h",
-      "third_party/protobuf/src/google/protobuf/stubs/callback.h",
-      "third_party/protobuf/src/google/protobuf/stubs/casts.h",
-      "third_party/protobuf/src/google/protobuf/stubs/common.cc",
-      "third_party/protobuf/src/google/protobuf/stubs/common.h",
-      "third_party/protobuf/src/google/protobuf/stubs/fastmem.h",
-      "third_party/protobuf/src/google/protobuf/stubs/hash.h",
-      "third_party/protobuf/src/google/protobuf/stubs/int128.cc",
-      "third_party/protobuf/src/google/protobuf/stubs/int128.h",
-      "third_party/protobuf/src/google/protobuf/stubs/logging.h",
-      "third_party/protobuf/src/google/protobuf/stubs/macros.h",
-      "third_party/protobuf/src/google/protobuf/stubs/map_util.h",
-      "third_party/protobuf/src/google/protobuf/stubs/mutex.h",
-      "third_party/protobuf/src/google/protobuf/stubs/once.h",
-      "third_party/protobuf/src/google/protobuf/stubs/platform_macros.h",
-      "third_party/protobuf/src/google/protobuf/stubs/port.h",
-      "third_party/protobuf/src/google/protobuf/stubs/status.cc",
-      "third_party/protobuf/src/google/protobuf/stubs/status.h",
-      "third_party/protobuf/src/google/protobuf/stubs/status_macros.h",
-      "third_party/protobuf/src/google/protobuf/stubs/statusor.cc",
-      "third_party/protobuf/src/google/protobuf/stubs/statusor.h",
-      "third_party/protobuf/src/google/protobuf/stubs/stl_util.h",
-      "third_party/protobuf/src/google/protobuf/stubs/stringpiece.cc",
-      "third_party/protobuf/src/google/protobuf/stubs/stringpiece.h",
-      "third_party/protobuf/src/google/protobuf/stubs/stringprintf.cc",
-      "third_party/protobuf/src/google/protobuf/stubs/stringprintf.h",
-      "third_party/protobuf/src/google/protobuf/stubs/structurally_valid.cc",
-      "third_party/protobuf/src/google/protobuf/stubs/strutil.cc",
-      "third_party/protobuf/src/google/protobuf/stubs/strutil.h",
-      "third_party/protobuf/src/google/protobuf/stubs/template_util.h",
-      "third_party/protobuf/src/google/protobuf/stubs/time.cc",
-      "third_party/protobuf/src/google/protobuf/stubs/time.h",
-      "third_party/protobuf/src/google/protobuf/wire_format_lite.cc",
-      "third_party/protobuf/src/google/protobuf/wire_format_lite.h",
-    ]
-    configs -= [ "//build/config/compiler:chromium_code" ]
-    configs += [
-      "//build/config/compiler:no_chromium_code",
-      ":protobuf_config",
-    ]
-    if (is_win) {
-      configs -= [ "//build/config/win:lean_and_mean" ]
-    }
-    public_configs = [ ":protobuf_gen_config" ]
-  }
-
-  # This target should be used only by the protoc compiler and by test targets.
-  source_set("protobuf_full") {
-    deps = [ ":protobuf_lite" ]
-    sources = [
-      "third_party/protobuf/src/google/protobuf/any.cc",
-      "third_party/protobuf/src/google/protobuf/any.h",
-      "third_party/protobuf/src/google/protobuf/any.pb.cc",
-      "third_party/protobuf/src/google/protobuf/any.pb.h",
-      "third_party/protobuf/src/google/protobuf/api.pb.cc",
-      "third_party/protobuf/src/google/protobuf/api.pb.h",
-      "third_party/protobuf/src/google/protobuf/compiler/importer.cc",
-      "third_party/protobuf/src/google/protobuf/compiler/importer.h",
-      "third_party/protobuf/src/google/protobuf/compiler/parser.cc",
-      "third_party/protobuf/src/google/protobuf/compiler/parser.h",
-      "third_party/protobuf/src/google/protobuf/descriptor.cc",
-      "third_party/protobuf/src/google/protobuf/descriptor.h",
-      "third_party/protobuf/src/google/protobuf/descriptor.pb.cc",
-      "third_party/protobuf/src/google/protobuf/descriptor.pb.h",
-      "third_party/protobuf/src/google/protobuf/descriptor_database.cc",
-      "third_party/protobuf/src/google/protobuf/descriptor_database.h",
-      "third_party/protobuf/src/google/protobuf/duration.pb.cc",
-      "third_party/protobuf/src/google/protobuf/duration.pb.h",
-      "third_party/protobuf/src/google/protobuf/dynamic_message.cc",
-      "third_party/protobuf/src/google/protobuf/dynamic_message.h",
-      "third_party/protobuf/src/google/protobuf/empty.pb.cc",
-      "third_party/protobuf/src/google/protobuf/empty.pb.h",
-      "third_party/protobuf/src/google/protobuf/extension_set_heavy.cc",
-      "third_party/protobuf/src/google/protobuf/field_mask.pb.cc",
-      "third_party/protobuf/src/google/protobuf/field_mask.pb.h",
-      "third_party/protobuf/src/google/protobuf/generated_enum_reflection.h",
-      "third_party/protobuf/src/google/protobuf/generated_message_reflection.cc",
-      "third_party/protobuf/src/google/protobuf/generated_message_reflection.h",
-      "third_party/protobuf/src/google/protobuf/io/gzip_stream.cc",
-      "third_party/protobuf/src/google/protobuf/io/gzip_stream.h",
-      "third_party/protobuf/src/google/protobuf/io/printer.cc",
-      "third_party/protobuf/src/google/protobuf/io/printer.h",
-      "third_party/protobuf/src/google/protobuf/io/tokenizer.cc",
-      "third_party/protobuf/src/google/protobuf/io/tokenizer.h",
-      "third_party/protobuf/src/google/protobuf/map_entry.h",
-      "third_party/protobuf/src/google/protobuf/map_field.cc",
-      "third_party/protobuf/src/google/protobuf/map_field.h",
-      "third_party/protobuf/src/google/protobuf/map_field_inl.h",
-      "third_party/protobuf/src/google/protobuf/message.cc",
-      "third_party/protobuf/src/google/protobuf/message.h",
-      "third_party/protobuf/src/google/protobuf/metadata.h",
-      "third_party/protobuf/src/google/protobuf/reflection.h",
-      "third_party/protobuf/src/google/protobuf/reflection_internal.h",
-      "third_party/protobuf/src/google/protobuf/reflection_ops.cc",
-      "third_party/protobuf/src/google/protobuf/reflection_ops.h",
-      "third_party/protobuf/src/google/protobuf/service.cc",
-      "third_party/protobuf/src/google/protobuf/service.h",
-      "third_party/protobuf/src/google/protobuf/source_context.pb.cc",
-      "third_party/protobuf/src/google/protobuf/source_context.pb.h",
-      "third_party/protobuf/src/google/protobuf/struct.pb.cc",
-      "third_party/protobuf/src/google/protobuf/struct.pb.h",
-      "third_party/protobuf/src/google/protobuf/stubs/mathlimits.cc",
-      "third_party/protobuf/src/google/protobuf/stubs/mathlimits.h",
-      "third_party/protobuf/src/google/protobuf/stubs/mathutil.h",
-      "third_party/protobuf/src/google/protobuf/stubs/substitute.cc",
-      "third_party/protobuf/src/google/protobuf/stubs/substitute.h",
-      "third_party/protobuf/src/google/protobuf/text_format.cc",
-      "third_party/protobuf/src/google/protobuf/text_format.h",
-      "third_party/protobuf/src/google/protobuf/timestamp.pb.cc",
-      "third_party/protobuf/src/google/protobuf/timestamp.pb.h",
-      "third_party/protobuf/src/google/protobuf/type.pb.cc",
-      "third_party/protobuf/src/google/protobuf/type.pb.h",
-      "third_party/protobuf/src/google/protobuf/unknown_field_set.cc",
-      "third_party/protobuf/src/google/protobuf/unknown_field_set.h",
-      "third_party/protobuf/src/google/protobuf/util/field_comparator.cc",
-      "third_party/protobuf/src/google/protobuf/util/field_comparator.h",
-      "third_party/protobuf/src/google/protobuf/util/field_mask_util.cc",
-      "third_party/protobuf/src/google/protobuf/util/field_mask_util.h",
-      "third_party/protobuf/src/google/protobuf/util/internal/constants.h",
-      "third_party/protobuf/src/google/protobuf/util/internal/datapiece.cc",
-      "third_party/protobuf/src/google/protobuf/util/internal/datapiece.h",
-      "third_party/protobuf/src/google/protobuf/util/internal/default_value_objectwriter.cc",
-      "third_party/protobuf/src/google/protobuf/util/internal/default_value_objectwriter.h",
-      "third_party/protobuf/src/google/protobuf/util/internal/error_listener.cc",
-      "third_party/protobuf/src/google/protobuf/util/internal/error_listener.h",
-      "third_party/protobuf/src/google/protobuf/util/internal/field_mask_utility.cc",
-      "third_party/protobuf/src/google/protobuf/util/internal/field_mask_utility.h",
-      "third_party/protobuf/src/google/protobuf/util/internal/json_escaping.cc",
-      "third_party/protobuf/src/google/protobuf/util/internal/json_escaping.h",
-      "third_party/protobuf/src/google/protobuf/util/internal/json_objectwriter.cc",
-      "third_party/protobuf/src/google/protobuf/util/internal/json_objectwriter.h",
-      "third_party/protobuf/src/google/protobuf/util/internal/json_stream_parser.cc",
-      "third_party/protobuf/src/google/protobuf/util/internal/json_stream_parser.h",
-      "third_party/protobuf/src/google/protobuf/util/internal/location_tracker.h",
-      "third_party/protobuf/src/google/protobuf/util/internal/object_location_tracker.h",
-      "third_party/protobuf/src/google/protobuf/util/internal/object_source.h",
-      "third_party/protobuf/src/google/protobuf/util/internal/object_writer.cc",
-      "third_party/protobuf/src/google/protobuf/util/internal/object_writer.h",
-      "third_party/protobuf/src/google/protobuf/util/internal/proto_writer.cc",
-      "third_party/protobuf/src/google/protobuf/util/internal/proto_writer.h",
-      "third_party/protobuf/src/google/protobuf/util/internal/protostream_objectsource.cc",
-      "third_party/protobuf/src/google/protobuf/util/internal/protostream_objectsource.h",
-      "third_party/protobuf/src/google/protobuf/util/internal/protostream_objectwriter.cc",
-      "third_party/protobuf/src/google/protobuf/util/internal/protostream_objectwriter.h",
-      "third_party/protobuf/src/google/protobuf/util/internal/structured_objectwriter.h",
-      "third_party/protobuf/src/google/protobuf/util/internal/type_info.cc",
-      "third_party/protobuf/src/google/protobuf/util/internal/type_info.h",
-      "third_party/protobuf/src/google/protobuf/util/internal/type_info_test_helper.cc",
-      "third_party/protobuf/src/google/protobuf/util/internal/type_info_test_helper.h",
-      "third_party/protobuf/src/google/protobuf/util/internal/utility.cc",
-      "third_party/protobuf/src/google/protobuf/util/internal/utility.h",
-      "third_party/protobuf/src/google/protobuf/util/json_util.cc",
-      "third_party/protobuf/src/google/protobuf/util/json_util.h",
-      "third_party/protobuf/src/google/protobuf/util/message_differencer.cc",
-      "third_party/protobuf/src/google/protobuf/util/message_differencer.h",
-      "third_party/protobuf/src/google/protobuf/util/time_util.cc",
-      "third_party/protobuf/src/google/protobuf/util/time_util.h",
-      "third_party/protobuf/src/google/protobuf/util/type_resolver.h",
-      "third_party/protobuf/src/google/protobuf/util/type_resolver_util.cc",
-      "third_party/protobuf/src/google/protobuf/util/type_resolver_util.h",
-      "third_party/protobuf/src/google/protobuf/wire_format.cc",
-      "third_party/protobuf/src/google/protobuf/wire_format.h",
-      "third_party/protobuf/src/google/protobuf/wrappers.pb.cc",
-      "third_party/protobuf/src/google/protobuf/wrappers.pb.h",
-    ]
-    configs -= [ "//build/config/compiler:chromium_code" ]
-    configs += [
-      "//build/config/compiler:no_chromium_code",
-      ":protobuf_config",
-    ]
-    if (is_win) {
-      configs -= [ "//build/config/win:lean_and_mean" ]
-    }
-    public_configs = [ ":protobuf_gen_config" ]
-  }
-
-  if (current_toolchain == host_toolchain) {
-    source_set("protoc_lib") {
-      deps = [ ":protobuf_full" ]
-      sources = [
-        "third_party/protobuf/src/google/protobuf/compiler/code_generator.cc",
-        "third_party/protobuf/src/google/protobuf/compiler/code_generator.h",
-        "third_party/protobuf/src/google/protobuf/compiler/command_line_interface.cc",
-        "third_party/protobuf/src/google/protobuf/compiler/command_line_interface.h",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_enum.cc",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_enum.h",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_enum_field.cc",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_enum_field.h",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_extension.cc",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_extension.h",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_field.cc",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_field.h",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_file.cc",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_file.h",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_generator.cc",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_generator.h",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_helpers.cc",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_helpers.h",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_map_field.cc",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_map_field.h",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_message.cc",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_message.h",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_message_field.cc",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_message_field.h",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_message_layout_helper.h",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_options.h",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_padding_optimizer.cc",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_padding_optimizer.h",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_primitive_field.cc",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_primitive_field.h",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_service.cc",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_service.h",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_string_field.cc",
-        "third_party/protobuf/src/google/protobuf/compiler/cpp/cpp_string_field.h",
-        "third_party/protobuf/src/google/protobuf/compiler/plugin.cc",
-        "third_party/protobuf/src/google/protobuf/compiler/plugin.h",
-        "third_party/protobuf/src/google/protobuf/compiler/plugin.pb.cc",
-        "third_party/protobuf/src/google/protobuf/compiler/plugin.pb.h",
-        "third_party/protobuf/src/google/protobuf/compiler/subprocess.cc",
-        "third_party/protobuf/src/google/protobuf/compiler/subprocess.h",
-        "third_party/protobuf/src/google/protobuf/compiler/zip_writer.cc",
-        "third_party/protobuf/src/google/protobuf/compiler/zip_writer.h",
-      ]
-      configs -= [ "//build/config/compiler:chromium_code" ]
-      configs += [
-        "//build/config/compiler:no_chromium_code",
-        ":protobuf_config",
-      ]
-      if (is_win) {
-        configs -= [ "//build/config/win:lean_and_mean" ]
-      }
-      public_configs = [ ":protobuf_gen_config" ]
-    }
-
-    executable("protoc") {
-      deps = [
-        ":protoc_lib",
-        "//build/win:default_exe_manifest",
-      ]
-      sources = [ "src/protobuf/protobuf-compiler-main.cc" ]
-      configs -= [ "//build/config/compiler:chromium_code" ]
-      configs += [ "//build/config/compiler:no_chromium_code" ]
-    }
-  }  # host_toolchain
-
   v8_component("v8_libperfetto") {
     configs = [ ":v8_tracing_config" ]
     public_configs = [ "//third_party/perfetto/gn:public_config" ]

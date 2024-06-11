@@ -209,7 +209,8 @@ int Deserializer<IsolateT>::WriteHeapPointer(SlotAccessor slot_accessor,
 }
 
 template <typename IsolateT>
-int Deserializer<IsolateT>::WriteExternalPointer(ExternalPointerSlot dest,
+int Deserializer<IsolateT>::WriteExternalPointer(Tagged<HeapObject> host,
+                                                 ExternalPointerSlot dest,
                                                  Address value) {
   DCHECK(!next_reference_is_weak_ && !next_reference_is_indirect_pointer_ &&
          !next_reference_is_protected_pointer);
@@ -237,7 +238,7 @@ int Deserializer<IsolateT>::WriteExternalPointer(ExternalPointerSlot dest,
   }
 #endif  // V8_ENABLE_SANDBOX
 
-  dest.init(main_thread_isolate(), value);
+  dest.init(main_thread_isolate(), host, value);
 
 #ifdef V8_ENABLE_SANDBOX
   if (managed_resource) {
@@ -381,7 +382,7 @@ uint32_t ComputeRawHashField(IsolateT* isolate, Tagged<String> string) {
 }  // namespace
 
 StringTableInsertionKey::StringTableInsertionKey(
-    Isolate* isolate, Handle<String> string,
+    Isolate* isolate, DirectHandle<String> string,
     DeserializingUserCodeOption deserializing_user_code)
     : StringTableKey(ComputeRawHashField(isolate, *string), string->length()),
       string_(string) {
@@ -392,7 +393,7 @@ StringTableInsertionKey::StringTableInsertionKey(
 }
 
 StringTableInsertionKey::StringTableInsertionKey(
-    LocalIsolate* isolate, Handle<String> string,
+    LocalIsolate* isolate, DirectHandle<String> string,
     DeserializingUserCodeOption deserializing_user_code)
     : StringTableKey(ComputeRawHashField(isolate, *string), string->length()),
       string_(string) {
@@ -483,8 +484,8 @@ void Deserializer<Isolate>::PostProcessNewJSReceiver(Tagged<Map> map,
   } else if (InstanceTypeChecker::IsJSArrayBuffer(instance_type)) {
     auto buffer = JSArrayBuffer::cast(*obj);
     uint32_t store_index = buffer->GetBackingStoreRefForDeserialization();
+    buffer->init_extension();
     if (store_index == kEmptyBackingStoreRefSentinel) {
-      buffer->set_extension(nullptr);
       buffer->set_backing_store(main_thread_isolate(),
                                 EmptyBackingStoreBuffer());
     } else {
@@ -1085,7 +1086,8 @@ int Deserializer<IsolateT>::ReadExternalReference(uint8_t data,
   if (data == kSandboxedExternalReference) {
     tag = ReadExternalPointerTag();
   }
-  return WriteExternalPointer(slot_accessor.external_pointer_slot(tag),
+  return WriteExternalPointer(*slot_accessor.object(),
+                              slot_accessor.external_pointer_slot(tag),
                               address);
 }
 
@@ -1100,7 +1102,8 @@ int Deserializer<IsolateT>::ReadRawExternalReference(
   if (data == kSandboxedRawExternalReference) {
     tag = ReadExternalPointerTag();
   }
-  return WriteExternalPointer(slot_accessor.external_pointer_slot(tag),
+  return WriteExternalPointer(*slot_accessor.object(),
+                              slot_accessor.external_pointer_slot(tag),
                               address);
 }
 
@@ -1226,7 +1229,8 @@ int Deserializer<IsolateT>::ReadApiReference(uint8_t data,
   if (data == kSandboxedApiReference) {
     tag = ReadExternalPointerTag();
   }
-  return WriteExternalPointer(slot_accessor.external_pointer_slot(tag),
+  return WriteExternalPointer(*slot_accessor.object(),
+                              slot_accessor.external_pointer_slot(tag),
                               address);
 }
 

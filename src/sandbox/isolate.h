@@ -6,6 +6,7 @@
 #define V8_SANDBOX_ISOLATE_H_
 
 #include "src/sandbox/code-pointer-table.h"
+#include "src/sandbox/external-buffer-table.h"
 #include "src/sandbox/external-pointer-table.h"
 #include "src/sandbox/trusted-pointer-table.h"
 
@@ -26,7 +27,11 @@ class V8_EXPORT_PRIVATE IsolateForSandbox final {
   inline ExternalPointerTable& GetExternalPointerTableFor(
       ExternalPointerTag tag);
   inline ExternalPointerTable::Space* GetExternalPointerTableSpaceFor(
-      ExternalPointerTag tag, Address owning_slot);
+      ExternalPointerTag tag, Address host);
+
+  inline ExternalBufferTable& GetExternalBufferTableFor(ExternalBufferTag tag);
+  inline ExternalBufferTable::Space* GetExternalBufferTableSpaceFor(
+      ExternalBufferTag tag, Address host);
 
   inline CodePointerTable::Space* GetCodePointerTableSpaceFor(
       Address owning_slot);
@@ -48,6 +53,11 @@ class V8_EXPORT_PRIVATE IsolateForPointerCompression final {
   IsolateForPointerCompression(IsolateT* isolate);  // NOLINT(runtime/explicit)
 
 #ifdef V8_COMPRESS_POINTERS
+  inline ExternalPointerTable& GetExternalPointerTableFor(
+      ExternalPointerTag tag);
+  inline ExternalPointerTable::Space* GetExternalPointerTableSpaceFor(
+      ExternalPointerTag tag, Address host);
+
   inline ExternalPointerTable& GetCppHeapPointerTable();
   inline ExternalPointerTable::Space* GetCppHeapPointerTableSpace();
 #endif  // V8_COMPRESS_POINTERS

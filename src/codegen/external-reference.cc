@@ -425,19 +425,19 @@ FUNCTION_REFERENCE(delete_handle_scope_extensions,
 FUNCTION_REFERENCE(ephemeron_key_write_barrier_function,
                    Heap::EphemeronKeyWriteBarrierFromCode)
 
-ExternalPointerHandle AllocateAndInitializeExternalPointerTableEntry(
+ExternalPointerHandle AllocateAndInitializeYoungExternalPointerTableEntry(
     Isolate* isolate, Address pointer) {
 #ifdef V8_ENABLE_SANDBOX
   return isolate->external_pointer_table().AllocateAndInitializeEntry(
-      isolate->heap()->external_pointer_space(), pointer,
+      isolate->heap()->young_external_pointer_space(), pointer,
       kExternalObjectValueTag);
 #else
   return 0;
 #endif  // V8_ENABLE_SANDBOX
 }
 
-FUNCTION_REFERENCE(allocate_and_initialize_external_pointer_table_entry,
-                   AllocateAndInitializeExternalPointerTableEntry)
+FUNCTION_REFERENCE(allocate_and_initialize_young_external_pointer_table_entry,
+                   AllocateAndInitializeYoungExternalPointerTableEntry)
 
 FUNCTION_REFERENCE(get_date_field_function, JSDate::GetField)
 
@@ -484,6 +484,7 @@ FUNCTION_REFERENCE(compute_output_frames_function,
                    Deoptimizer::ComputeOutputFrames)
 
 #ifdef V8_ENABLE_WEBASSEMBLY
+FUNCTION_REFERENCE(wasm_delete_deoptimizer, Deoptimizer::DeleteForWasm)
 FUNCTION_REFERENCE(wasm_sync_stack_limit, wasm::sync_stack_limit)
 FUNCTION_REFERENCE(wasm_switch_to_the_central_stack,
                    wasm::switch_to_the_central_stack)
@@ -960,11 +961,6 @@ ExternalReference ExternalReference::address_of_regexp_stack_memory_top_address(
 ExternalReference ExternalReference::address_of_regexp_stack_stack_pointer(
     Isolate* isolate) {
   return ExternalReference(isolate->regexp_stack()->stack_pointer_address());
-}
-
-ExternalReference ExternalReference::javascript_execution_assert(
-    Isolate* isolate) {
-  return ExternalReference(isolate->javascript_execution_assert_address());
 }
 
 FUNCTION_REFERENCE_WITH_TYPE(ieee754_acos_function, base::ieee754::acos,

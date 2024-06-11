@@ -323,8 +323,8 @@ class HeapObject : public TaggedImpl<HeapObjectReferenceType::STRONG, Address> {
   inline void WriteLazilyInitializedExternalPointerField(
       size_t offset, IsolateForSandbox isolate, Address value);
 
-  inline void ResetLazilyInitializedExternalPointerField(size_t offset);
-  inline void ResetLazilyInitializedCppHeapPointerField(size_t offset);
+  inline void SetupLazilyInitializedExternalPointerField(size_t offset);
+  inline void SetupLazilyInitializedCppHeapPointerField(size_t offset);
 
   template <ExternalPointerTag tag>
   inline void WriteLazilyInitializedCppHeapPointerField(
@@ -576,6 +576,12 @@ V8_INLINE bool InReadOnlySpace(Tagged<HeapObject> obj);
 // migrated into trusted space, this can be replaced by !InsideSandbox().
 static_assert(!kAllCodeObjectsLiveInTrustedSpace);
 V8_INLINE bool OutsideSandboxOrInReadonlySpace(Tagged<HeapObject> obj);
+
+// Returns true if obj is guaranteed to be a read-only object or a specific
+// (small) Smi. If the method returns false, we need more checks for RO space
+// objects or Smis. This can be used for a fast RO space/Smi check which are
+// objects for e.g. GC than can be exlucded for processing.
+V8_INLINE constexpr bool FastInReadOnlySpaceOrSmallSmi(Tagged_t obj);
 
 }  // namespace internal
 }  // namespace v8

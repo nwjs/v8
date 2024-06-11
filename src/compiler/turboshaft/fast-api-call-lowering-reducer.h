@@ -23,7 +23,8 @@ class FastApiCallLoweringReducer : public Next {
  public:
   TURBOSHAFT_REDUCER_BOILERPLATE(FastApiCallLowering)
 
-  OpIndex REDUCE(FastApiCall)(OpIndex data_argument,
+  OpIndex REDUCE(FastApiCall)(V<FrameState> frame_state, OpIndex data_argument,
+                              V<Context> context,
                               base::Vector<const OpIndex> arguments,
                               const FastApiCallParameters* parameters) {
     const auto& c_functions = parameters->c_functions;
@@ -108,10 +109,23 @@ class FastApiCallLoweringReducer : public Next {
 
       // Build the actual call.
       const TSCallDescriptor* call_descriptor = TSCallDescriptor::Create(
-          Linkage::GetSimplifiedCDescriptor(__ graph_zone(), builder.Build()),
+          Linkage::GetSimplifiedCDescriptor(__ graph_zone(), builder.Build(),
+                                            CallDescriptor::kNeedsFrameState),
           CanThrow::kNo, __ graph_zone());
-      OpIndex c_call_result =
-          WrapFastCall(call_descriptor, callee, base::VectorOf(args));
+      OpIndex c_call_result = WrapFastCall(call_descriptor, callee, frame_state,
+                                           context, base::VectorOf(args));
+
+      Label<> trigger_exception(this);
+
+      V<Object> exception =
+          __ Load(__ ExternalConstant(ExternalReference::Create(
+                      IsolateAddressId::kExceptionAddress, isolate_)),
+                  LoadOp::Kind::RawAligned(), MemoryRepresentation::UintPtr());
+      GOTO_IF_NOT(LIKELY(__ TaggedEqual(
+                      exception,
+                      __ HeapConstant(isolate_->factory()->the_hole_value()))),
+                  trigger_exception);
+
       V<Object> fast_call_result =
           ConvertReturnValue(c_signature, c_call_result);
 
@@ -123,6 +137,12 @@ class FastApiCallLoweringReducer : public Next {
         GOTO_IF(error, handle_error);
       }
       GOTO(done, FastApiCallOp::kSuccessValue, fast_call_result);
+      BIND(trigger_exception);
+      __ template CallRuntime<
+          typename RuntimeCallDescriptor::PropagateException>(
+          isolate_, frame_state, __ NoContextConstant(), {});
+
+      GOTO(done, FastApiCallOp::kFailureValue, __ TagSmi(0));
     }
 
     if (BIND(handle_error)) {
@@ -566,14 +586,14 @@ class FastApiCallLoweringReducer : public Next {
     builder.AddReturn(MachineType::Uint32());
     builder.AddParam(MachineType::Pointer());
     builder.AddParam(MachineType::Pointer());
-    OpIndex allocate_and_initialize_external_pointer_table_entry =
+    OpIndex allocate_and_initialize_young_external_pointer_table_entry =
         __ ExternalConstant(
             ExternalReference::
-                allocate_and_initialize_external_pointer_table_entry());
+                allocate_and_initialize_young_external_pointer_table_entry());
     auto call_descriptor =
         Linkage::GetSimplifiedCDescriptor(__ graph_zone(), builder.Build());
     OpIndex handle =
-        __ Call(allocate_and_initialize_external_pointer_table_entry,
+        __ Call(allocate_and_initialize_young_external_pointer_table_entry,
                 {isolate_ptr, pointer},
                 TSCallDescriptor::Create(call_descriptor, CanThrow::kNo,
                                          __ graph_zone()));
@@ -590,6 +610,7 @@ class FastApiCallLoweringReducer : public Next {
   }
 
   OpIndex WrapFastCall(const TSCallDescriptor* descriptor, OpIndex callee,
+                       V<FrameState> frame_state, V<Context> context,
                        base::Vector<const OpIndex> arguments) {
     // CPU profiler support.
     OpIndex target_address = __ ExternalConstant(
@@ -597,36 +618,31 @@ class FastApiCallLoweringReducer : public Next {
     __ StoreOffHeap(target_address, __ BitcastHeapObjectToWordPtr(callee),
                     MemoryRepresentation::UintPtr());
 
-    // Disable JS execution.
-    OpIndex js_execution_assert = __ ExternalConstant(
-        ExternalReference::javascript_execution_assert(isolate_));
-    static_assert(sizeof(bool) == 1, "Wrong assumption about boolean size.");
-    if (v8_flags.debug_code) {
-      V<Word32> old_value =
-          __ LoadOffHeap(js_execution_assert, MemoryRepresentation::Int8());
-      IF_NOT(LIKELY(__ Word32Equal(old_value, 1))) {
-        // We expect that JS execution is enabled, otherwise assert.
-        __ Unreachable();
-      }
-    }
-    __ StoreOffHeap(js_execution_assert, __ Word32Constant(0),
-                    MemoryRepresentation::Int8());
+    OpIndex context_address = __ ExternalConstant(
+        ExternalReference::Create(IsolateAddressId::kContextAddress, isolate_));
+
+    __ StoreOffHeap(context_address, __ BitcastHeapObjectToWordPtr(context),
+                    MemoryRepresentation::UintPtr());
 
     // Create the fast call.
-    OpIndex result = __ Call(callee, OpIndex::Invalid(), arguments, descriptor);
-
-    // Reenable JS exeuction.
-    __ StoreOffHeap(js_execution_assert, __ Word32Constant(1),
-                    MemoryRepresentation::Int8());
+    OpIndex result = __ Call(callee, frame_state, arguments, descriptor);
 
     // Reset the CPU profiler target address.
     __ StoreOffHeap(target_address, __ IntPtrConstant(0),
                     MemoryRepresentation::UintPtr());
 
+#if DEBUG
+    // Reset the context again after the call, to make sure nobody is using the
+    // leftover context in the isolate.
+    __ StoreOffHeap(context_address,
+                    __ WordPtrConstant(Context::kInvalidContext),
+                    MemoryRepresentation::UintPtr());
+#endif
+
     return result;
   }
 
-  Isolate* isolate_ = PipelineData::Get().isolate();
+  Isolate* isolate_ = __ data() -> isolate();
   Factory* factory_ = isolate_->factory();
 };
 

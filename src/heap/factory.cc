@@ -107,9 +107,8 @@ Factory::CodeBuilder::CodeBuilder(LocalIsolate* local_isolate,
       code_desc_(desc),
       kind_(kind) {}
 
-Handle<ByteArray> Factory::CodeBuilder::NewByteArray(
-    int length, AllocationType allocation) {
-  return local_isolate_->factory()->NewByteArray(length, allocation);
+Handle<TrustedByteArray> Factory::CodeBuilder::NewTrustedByteArray(int length) {
+  return local_isolate_->factory()->NewTrustedByteArray(length);
 }
 
 Handle<Code> Factory::CodeBuilder::NewCode(const NewCodeOptions& options) {
@@ -118,8 +117,8 @@ Handle<Code> Factory::CodeBuilder::NewCode(const NewCodeOptions& options) {
 
 MaybeHandle<Code> Factory::CodeBuilder::BuildInternal(
     bool retry_allocation_or_fail) {
-  Handle<ByteArray> reloc_info =
-      NewByteArray(code_desc_.reloc_size, AllocationType::kOld);
+  Handle<TrustedByteArray> reloc_info =
+      NewTrustedByteArray(code_desc_.reloc_size);
 
   // Basic block profiling data for builtins is stored in the JS heap rather
   // than in separately-allocated C++ objects. Allocate that data now if
@@ -170,6 +169,7 @@ MaybeHandle<Code> Factory::CodeBuilder::BuildInternal(
         builtin_,
         is_turbofanned_,
         stack_slots_,
+        parameter_count_,
         code_desc_.instruction_size(),
         code_desc_.metadata_size(),
         inlined_bytecode_size_,
@@ -914,7 +914,7 @@ Handle<String> Factory::NewInternalizedStringImpl(DirectHandle<String> string,
 }
 
 StringTransitionStrategy Factory::ComputeInternalizationStrategyForString(
-    DirectHandle<String> string, MaybeHandle<Map>* internalized_map) {
+    DirectHandle<String> string, MaybeDirectHandle<Map>* internalized_map) {
   // The serializer requires internalized strings to be in ReadOnlySpace s.t.
   // other objects referencing the string can be allocated in RO space
   // themselves.
@@ -951,7 +951,7 @@ StringTransitionStrategy Factory::ComputeInternalizationStrategyForString(
 template <class StringClass>
 Handle<StringClass> Factory::InternalizeExternalString(
     DirectHandle<String> string) {
-  Handle<Map> map =
+  DirectHandle<Map> map =
       GetInPlaceInternalizedStringMap(string->map()).ToHandleChecked();
   Tagged<StringClass> external_string =
       Tagged<StringClass>::cast(New(map, AllocationType::kOld));
@@ -971,7 +971,7 @@ template Handle<ExternalTwoByteString> Factory::InternalizeExternalString<
     ExternalTwoByteString>(DirectHandle<String>);
 
 StringTransitionStrategy Factory::ComputeSharingStrategyForString(
-    DirectHandle<String> string, MaybeHandle<Map>* shared_map) {
+    DirectHandle<String> string, MaybeDirectHandle<Map>* shared_map) {
   DCHECK(v8_flags.shared_string_table);
   // TODO(pthier): Avoid copying LO-space strings. Update page flags instead.
   if (!InAnySharedSpace(*string)) {
@@ -1289,6 +1289,7 @@ Handle<NativeContext> Factory::NewNativeContext() {
   context->set_extension(*undefined_value());
   context->set_errors_thrown(Smi::zero());
   context->set_is_wasm_js_installed(Smi::zero());
+  context->set_is_wasm_jspi_installed(Smi::zero());
   context->set_math_random_index(Smi::zero());
   context->set_serialized_objects(*empty_fixed_array());
   context->init_microtask_queue(isolate(), nullptr);
@@ -1364,6 +1365,17 @@ Handle<Context> Factory::NewFunctionContext(
   return handle(context, isolate());
 }
 
+#if V8_SINGLE_GENERATION_BOOL
+#define DCHECK_NEWLY_ALLOCATED_OBJECT_IS_YOUNG(isolate, object)
+#elif V8_ENABLE_STICKY_MARK_BITS_BOOL
+#define DCHECK_NEWLY_ALLOCATED_OBJECT_IS_YOUNG(isolate, object)             \
+  DCHECK_IMPLIES(!isolate->heap()->incremental_marking()->IsMajorMarking(), \
+                 Heap::InYoungGeneration(object))
+#else
+#define DCHECK_NEWLY_ALLOCATED_OBJECT_IS_YOUNG(isolate, object) \
+  DCHECK(Heap::InYoungGeneration(object))
+#endif
+
 Handle<Context> Factory::NewCatchContext(DirectHandle<Context> previous,
                                          DirectHandle<ScopeInfo> scope_info,
                                          DirectHandle<Object> thrown_object) {
@@ -1375,7 +1387,7 @@ Handle<Context> Factory::NewCatchContext(DirectHandle<Context> previous,
       isolate()->catch_context_map(), Context::SizeFor(variadic_part_length),
       variadic_part_length, AllocationType::kYoung);
   DisallowGarbageCollection no_gc;
-  DCHECK_IMPLIES(!v8_flags.single_generation, Heap::InYoungGeneration(context));
+  DCHECK_NEWLY_ALLOCATED_OBJECT_IS_YOUNG(isolate(), context);
   context->set_scope_info(*scope_info, SKIP_WRITE_BARRIER);
   context->set_previous(*previous, SKIP_WRITE_BARRIER);
   context->set(Context::THROWN_OBJECT_INDEX, *thrown_object,
@@ -1397,7 +1409,7 @@ Handle<Context> Factory::NewDebugEvaluateContext(
                          Context::SizeFor(variadic_part_length),
                          variadic_part_length, AllocationType::kYoung);
   DisallowGarbageCollection no_gc;
-  DCHECK_IMPLIES(!v8_flags.single_generation, Heap::InYoungGeneration(context));
+  DCHECK_NEWLY_ALLOCATED_OBJECT_IS_YOUNG(isolate(), context);
   context->set_scope_info(*scope_info, SKIP_WRITE_BARRIER);
   context->set_previous(*previous, SKIP_WRITE_BARRIER);
   context->set_extension(*ext, SKIP_WRITE_BARRIER);
@@ -1417,7 +1429,7 @@ Handle<Context> Factory::NewWithContext(DirectHandle<Context> previous,
       isolate()->with_context_map(), Context::SizeFor(variadic_part_length),
       variadic_part_length, AllocationType::kYoung);
   DisallowGarbageCollection no_gc;
-  DCHECK_IMPLIES(!v8_flags.single_generation, Heap::InYoungGeneration(context));
+  DCHECK_NEWLY_ALLOCATED_OBJECT_IS_YOUNG(isolate(), context);
   context->set_scope_info(*scope_info, SKIP_WRITE_BARRIER);
   context->set_previous(*previous, SKIP_WRITE_BARRIER);
   context->set_extension(*extension, SKIP_WRITE_BARRIER);
@@ -1433,7 +1445,7 @@ Handle<Context> Factory::NewBlockContext(DirectHandle<Context> previous,
       isolate()->block_context_map(), Context::SizeFor(variadic_part_length),
       variadic_part_length, AllocationType::kYoung);
   DisallowGarbageCollection no_gc;
-  DCHECK_IMPLIES(!v8_flags.single_generation, Heap::InYoungGeneration(context));
+  DCHECK_NEWLY_ALLOCATED_OBJECT_IS_YOUNG(isolate(), context);
   context->set_scope_info(*scope_info, SKIP_WRITE_BARRIER);
   context->set_previous(*previous, SKIP_WRITE_BARRIER);
   return handle(context, isolate());
@@ -1446,7 +1458,7 @@ Handle<Context> Factory::NewBuiltinContext(
       isolate()->function_context_map(), Context::SizeFor(variadic_part_length),
       variadic_part_length, AllocationType::kYoung);
   DisallowGarbageCollection no_gc;
-  DCHECK_IMPLIES(!v8_flags.single_generation, Heap::InYoungGeneration(context));
+  DCHECK_NEWLY_ALLOCATED_OBJECT_IS_YOUNG(isolate(), context);
   context->set_scope_info(read_only_roots().empty_scope_info(),
                           SKIP_WRITE_BARRIER);
   context->set_previous(*native_context, SKIP_WRITE_BARRIER);
@@ -1734,9 +1746,11 @@ Handle<WasmJSFunctionData> Factory::NewWasmJSFunctionData(
   Tagged<Map> map = *wasm_js_function_data_map();
   Tagged<WasmJSFunctionData> result =
       Tagged<WasmJSFunctionData>::cast(AllocateRawWithImmortalMap(
-          map->instance_size(), AllocationType::kOld, map));
+          map->instance_size(), AllocationType::kTrusted, map));
+  result->init_self_indirect_pointer(isolate());
   DisallowGarbageCollection no_gc;
   result->set_func_ref(*func_ref);
+  result->set_internal(*internal);
   result->set_wrapper_code(*wrapper_code);
   result->set_serialized_signature(*serialized_sig);
   result->set_js_promise_flags(WasmFunctionData::SuspendField::encode(suspend) |
@@ -1759,21 +1773,26 @@ Handle<WasmResumeData> Factory::NewWasmResumeData(
 Handle<WasmExportedFunctionData> Factory::NewWasmExportedFunctionData(
     DirectHandle<Code> export_wrapper,
     DirectHandle<WasmInstanceObject> instance,
-    DirectHandle<WasmFuncRef> func_ref, int func_index,
+    DirectHandle<WasmFuncRef> func_ref,
+    DirectHandle<WasmInternalFunction> internal_function,
     const wasm::FunctionSig* sig, uint32_t canonical_type_index,
     int wrapper_budget, wasm::Promise promise) {
+  int func_index = internal_function->function_index();
+  Handle<Cell> wrapper_budget_cell = NewCell(Smi::FromInt(wrapper_budget));
   Tagged<Map> map = *wasm_exported_function_data_map();
   Tagged<WasmExportedFunctionData> result =
       Tagged<WasmExportedFunctionData>::cast(AllocateRawWithImmortalMap(
-          map->instance_size(), AllocationType::kOld, map));
+          map->instance_size(), AllocationType::kTrusted, map));
+  result->init_self_indirect_pointer(isolate());
   DisallowGarbageCollection no_gc;
   result->set_func_ref(*func_ref);
+  result->set_internal(*internal_function);
   result->set_wrapper_code(*export_wrapper);
   result->set_instance(*instance);
   result->set_function_index(func_index);
-  result->init_sig(isolate(), sig);
+  result->set_sig(sig);
   result->set_canonical_type_index(canonical_type_index);
-  result->set_wrapper_budget(wrapper_budget);
+  result->set_wrapper_budget(*wrapper_budget_cell);
   // We can't skip the write barrier because Code objects are not immovable.
   result->set_c_wrapper_code(*BUILTIN_CODE(isolate(), Illegal),
                              UPDATE_WRITE_BARRIER);
@@ -1797,9 +1816,11 @@ Handle<WasmCapiFunctionData> Factory::NewWasmCapiFunctionData(
   Tagged<Map> map = *wasm_capi_function_data_map();
   Tagged<WasmCapiFunctionData> result =
       Tagged<WasmCapiFunctionData>::cast(AllocateRawWithImmortalMap(
-          map->instance_size(), AllocationType::kOld, map));
+          map->instance_size(), AllocationType::kTrusted, map));
+  result->init_self_indirect_pointer(isolate());
   DisallowGarbageCollection no_gc;
   result->set_func_ref(*func_ref);
+  result->set_internal(*internal);
   result->set_wrapper_code(*wrapper_code);
   result->set_embedder_data(*embedder_data);
   result->set_serialized_signature(*serialized_sig);
@@ -1891,6 +1912,7 @@ Handle<WasmArray> Factory::NewWasmArrayFromMemory(uint32_t length,
 
 Handle<Object> Factory::NewWasmArrayFromElementSegment(
     Handle<WasmTrustedInstanceData> trusted_instance_data,
+    Handle<WasmTrustedInstanceData> shared_trusted_instance_data,
     uint32_t segment_index, uint32_t start_offset, uint32_t length,
     DirectHandle<Map> map) {
   DCHECK(WasmArray::type(*map)->element_type().is_reference());
@@ -1900,7 +1922,8 @@ Handle<Object> Factory::NewWasmArrayFromElementSegment(
   AccountingAllocator allocator;
   Zone zone(&allocator, ZONE_NAME);
   base::Optional<MessageTemplate> opt_error = wasm::InitializeElementSegment(
-      &zone, isolate(), trusted_instance_data, segment_index);
+      &zone, isolate(), trusted_instance_data, shared_trusted_instance_data,
+      segment_index);
   if (opt_error.has_value()) {
     return handle(Smi::FromEnum(opt_error.value()), isolate());
   }
@@ -2332,7 +2355,7 @@ Handle<JSObject> Factory::CopyJSObjectWithAllocationSite(
       allocator()->AllocateRawWith<HeapAllocator::kRetryOrFail>(
           adjusted_object_size, AllocationType::kYoung);
 
-  DCHECK(Heap::InYoungGeneration(raw_clone) || v8_flags.single_generation);
+  DCHECK_NEWLY_ALLOCATED_OBJECT_IS_YOUNG(isolate(), raw_clone);
 
   Heap::CopyBlock(raw_clone.address(), source->address(), object_size);
   Handle<JSObject> clone(JSObject::cast(raw_clone), isolate());
@@ -2586,9 +2609,9 @@ Handle<HeapNumber> Factory::NewHeapNumberForCodeAssembler(double value) {
   return NewHeapNumber<AllocationType::kOld>(value);
 }
 
-Handle<JSObject> Factory::NewError(Handle<JSFunction> constructor,
-                                   MessageTemplate template_index,
-                                   base::Vector<const Handle<Object>> args) {
+Handle<JSObject> Factory::NewError(
+    Handle<JSFunction> constructor, MessageTemplate template_index,
+    base::Vector<const DirectHandle<Object>> args) {
   HandleScope scope(isolate());
 
   return scope.CloseAndEscape(ErrorUtils::MakeGenericError(
@@ -2596,7 +2619,7 @@ Handle<JSObject> Factory::NewError(Handle<JSFunction> constructor,
 }
 
 Handle<JSObject> Factory::NewError(Handle<JSFunction> constructor,
-                                   Handle<String> message,
+                                   DirectHandle<String> message,
                                    Handle<Object> options) {
   // Construct a new error object. If an exception is thrown, use the exception
   // as the result.
@@ -2620,10 +2643,26 @@ Handle<Object> Factory::NewInvalidStringLengthError() {
   return NewRangeError(MessageTemplate::kInvalidStringLength);
 }
 
+Handle<JSObject> Factory::NewSuppressedErrorAtDisposal(
+    Isolate* isolate, Handle<Object> error, Handle<Object> suppressed_error) {
+  Handle<JSObject> err =
+      NewSuppressedError(MessageTemplate::kSuppressedErrorDuringDisposal);
+
+  JSObject::SetOwnPropertyIgnoreAttributes(
+      err, isolate->factory()->error_string(), error, DONT_ENUM)
+      .Assert();
+
+  JSObject::SetOwnPropertyIgnoreAttributes(
+      err, isolate->factory()->suppressed_string(), suppressed_error, DONT_ENUM)
+      .Assert();
+
+  return err;
+}
+
 #define DEFINE_ERROR(NAME, name)                                         \
   Handle<JSObject> Factory::New##NAME(                                   \
       MessageTemplate template_index,                                    \
-      base::Vector<const Handle<Object>> args) {                         \
+      base::Vector<const DirectHandle<Object>> args) {                   \
     return NewError(isolate()->name##_function(), template_index, args); \
   }
 DEFINE_ERROR(Error, error)
@@ -2631,6 +2670,7 @@ DEFINE_ERROR(EvalError, eval_error)
 DEFINE_ERROR(RangeError, range_error)
 DEFINE_ERROR(ReferenceError, reference_error)
 DEFINE_ERROR(SyntaxError, syntax_error)
+DEFINE_ERROR(SuppressedError, suppressed_error)
 DEFINE_ERROR(TypeError, type_error)
 DEFINE_ERROR(WasmCompileError, wasm_compile_error)
 DEFINE_ERROR(WasmLinkError, wasm_link_error)
@@ -2702,6 +2742,7 @@ Handle<Code> Factory::NewCodeObjectForEmbeddedBuiltin(DirectHandle<Code> code,
       code->builtin_id(),
       code->is_turbofanned(),
       code->stack_slots(),
+      code->parameter_count(),
       code->instruction_size(),
       code->metadata_size(),
       code->inlined_bytecode_size(),
@@ -2846,7 +2887,7 @@ void Factory::InitializeCppHeapWrapper(Tagged<JSObject> obj) {
   DCHECK(IsJSAPIObjectWithEmbedderSlots(obj) || IsJSSpecialObject(obj));
   static_assert(JSSpecialObject::kCppHeapWrappableOffset ==
                 JSAPIObjectWithEmbedderSlots::kCppHeapWrappableOffset);
-  obj->ResetLazilyInitializedCppHeapPointerField(
+  obj->SetupLazilyInitializedCppHeapPointerField(
       JSAPIObjectWithEmbedderSlots::kCppHeapWrappableOffset);
 }
 
@@ -3787,16 +3828,6 @@ Handle<StackFrameInfo> Factory::NewStackFrameInfo(
   info->set_function_name(*function_name, SKIP_WRITE_BARRIER);
   info->set_is_constructor(is_constructor);
   return handle(info, isolate());
-}
-
-Handle<PromiseOnStack> Factory::NewPromiseOnStack(DirectHandle<Object> prev,
-                                                  Handle<JSObject> promise) {
-  Tagged<PromiseOnStack> promise_on_stack = NewStructInternal<PromiseOnStack>(
-      PROMISE_ON_STACK_TYPE, AllocationType::kYoung);
-  DisallowGarbageCollection no_gc;
-  promise_on_stack->set_prev(*prev, SKIP_WRITE_BARRIER);
-  promise_on_stack->set_promise(*MaybeObjectHandle::Weak(promise));
-  return handle(promise_on_stack, isolate());
 }
 
 Handle<JSObject> Factory::NewArgumentsObject(Handle<JSFunction> callee,

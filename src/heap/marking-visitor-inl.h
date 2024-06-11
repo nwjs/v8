@@ -15,6 +15,7 @@
 #include "src/heap/pretenuring-handler-inl.h"
 #include "src/heap/progress-bar.h"
 #include "src/heap/spaces.h"
+#include "src/objects/compressed-slots.h"
 #include "src/objects/descriptor-array.h"
 #include "src/objects/js-objects.h"
 #include "src/objects/objects.h"
@@ -106,8 +107,12 @@ void MarkingVisitorBase<ConcreteVisitor>::VisitPointersImpl(
     Tagged<HeapObject> host, TSlot start, TSlot end) {
   using THeapObjectSlot = typename TSlot::THeapObjectSlot;
   for (TSlot slot = start; slot < end; ++slot) {
-    typename TSlot::TObject object =
-        slot.Relaxed_Load(ObjectVisitorWithCageBases::cage_base());
+    const std::optional<Tagged<Object>> optional_object =
+        this->GetObjectFilterReadOnlyAndSmiFast(slot);
+    if (!optional_object) {
+      continue;
+    }
+    typename TSlot::TObject object = *optional_object;
     Tagged<HeapObject> heap_object;
     if (object.GetHeapObjectIfStrong(&heap_object)) {
       // If the reference changes concurrently from strong to weak, the write
@@ -175,12 +180,30 @@ void MarkingVisitorBase<ConcreteVisitor>::VisitExternalPointer(
   DCHECK_NE(slot.tag(), kExternalPointerNullTag);
   if (slot.HasExternalPointerHandle()) {
     ExternalPointerHandle handle = slot.Relaxed_LoadHandle();
-    ExternalPointerTable* table = IsSharedExternalPointerType(slot.tag())
-                                      ? shared_external_pointer_table_
-                                      : external_pointer_table_;
-    ExternalPointerTable::Space* space = IsSharedExternalPointerType(slot.tag())
-                                             ? shared_external_pointer_space_
-                                             : heap_->external_pointer_space();
+    ExternalPointerTable* table;
+    ExternalPointerTable::Space* space;
+    if (IsSharedExternalPointerType(slot.tag())) {
+      table = shared_external_pointer_table_;
+      space = shared_external_pointer_space_;
+    } else {
+      table = external_pointer_table_;
+      if (v8_flags.sticky_mark_bits) {
+        // Everything is considered old during major GC.
+        DCHECK(!Heap::InYoungGeneration(host));
+        if (handle == kNullExternalPointerHandle) return;
+        // The object may either be in young or old EPT.
+        if (table->Contains(heap_->young_external_pointer_space(), handle)) {
+          space = heap_->young_external_pointer_space();
+        } else {
+          DCHECK(table->Contains(heap_->old_external_pointer_space(), handle));
+          space = heap_->old_external_pointer_space();
+        }
+      } else {
+        space = Heap::InYoungGeneration(host)
+                    ? heap_->young_external_pointer_space()
+                    : heap_->old_external_pointer_space();
+      }
+    }
     table->Mark(space, handle, slot.address());
   }
 #endif  // V8_COMPRESS_POINTERS
@@ -514,9 +537,9 @@ inline int MarkingVisitorBase<ConcreteVisitor>::
   if (size == 0) {
     return 0;
   }
-  if (!local_marking_worklists_->SupportsExtractWrapper()) {
-    return size;
-  }
+
+  DCHECK(local_marking_worklists_->SupportsExtractWrapper());
+
   // Process embedder fields
   MarkingWorklists::Local::WrapperSnapshot wrapper_snapshot;
   if (local_marking_worklists_->ExtractWrapper(map, object, wrapper_snapshot)) {
@@ -530,7 +553,7 @@ template <typename T, typename TBodyDescriptor>
 int MarkingVisitorBase<ConcreteVisitor>::VisitEmbedderTracingSubclass(
     Tagged<Map> map, Tagged<T> object) {
   DCHECK(object->MayHaveEmbedderFields());
-  if (V8_LIKELY(trace_embedder_fields_)) {
+  if (V8_UNLIKELY(trace_embedder_fields_)) {
     return VisitEmbedderTracingSubClassWithEmbedderTracing<T, TBodyDescriptor>(
         map, object);
   }

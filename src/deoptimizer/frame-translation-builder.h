@@ -29,6 +29,7 @@ class FrameTranslationBuilder {
 
   Handle<DeoptimizationFrameTranslation> ToFrameTranslation(
       LocalFactory* factory);
+  base::Vector<const uint8_t> ToFrameTranslationWasm();
 
   int BeginTranslation(int frame_count, int jsframe_count,
                        bool update_feedback);
@@ -55,6 +56,7 @@ class FrameTranslationBuilder {
       BytecodeOffset bailout_id, int literal_id, unsigned height);
   void ArgumentsElements(CreateArgumentsType type);
   void ArgumentsLength();
+  void RestLength();
   void BeginCapturedObject(int length);
   void AddUpdateFeedback(int vector_literal, int slot);
   void DuplicateObject(int object_index);
@@ -139,6 +141,7 @@ class FrameTranslationBuilder {
   Zone* zone() const { return zone_; }
 
   void FinishPendingInstructionIfNeeded();
+  void ValidateBytes(DeoptTranslationIterator& iter) const;
 
   ZoneVector<uint8_t> contents_;
   ZoneVector<int32_t> contents_for_compression_;

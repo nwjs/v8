@@ -151,11 +151,13 @@ class RuntimeCallTimer final {
   V(DataView_New)                                          \
   V(Date_New)                                              \
   V(Date_NumberValue)                                      \
+  V(Date_Parse)                                            \
   V(Debug_Call)                                            \
   V(debug_GetPrivateMembers)                               \
   V(DictionaryTemplate_New)                                \
   V(DictionaryTemplate_NewInstance)                        \
   V(Error_New)                                             \
+  V(Exception_CaptureStackTrace)                           \
   V(External_New)                                          \
   V(Float16Array_New)                                      \
   V(Float32Array_New)                                      \
@@ -383,7 +385,8 @@ class RuntimeCallTimer final {
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftCsaLoadElimination)      \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftCsaOptimize)             \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftDebugFeatureLowering)    \
-  ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftDecompressionOpt)        \
+  ADD_THREAD_SPECIFIC_COUNTER(V, Optimize,                                    \
+                              TurboshaftDecompressionOptimization)            \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftInstructionSelection)    \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftInt64Lowering)           \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftLateOptimization)        \
@@ -395,7 +398,7 @@ class RuntimeCallTimer final {
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftRecreateSchedule)        \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftSimplifiedLowering)      \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftSpecialRPOScheduling)    \
-  ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftStoreStoreElim)          \
+  ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftStoreStoreElimination)   \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftTagUntagLowering)        \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftTypeAssertions)          \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftTypedOptimizations)      \
@@ -433,12 +436,15 @@ class RuntimeCallTimer final {
   V(BoundFunctionLengthGetter)                 \
   V(BoundFunctionNameGetter)                   \
   V(CodeGenerationFromStringsCallbacks)        \
+  V(CompileBackgroundBaseline)                 \
   V(CompileBackgroundBaselinePreVisit)         \
   V(CompileBackgroundBaselineVisit)            \
+  V(CompileBackgroundBaselineBuild)            \
   V(CompileBaseline)                           \
   V(CompileBaselineFinalization)               \
   V(CompileBaselinePreVisit)                   \
   V(CompileBaselineVisit)                      \
+  V(CompileBaselineBuild)                      \
   V(CompileCollectSourcePositions)             \
   V(CompileDeserialize)                        \
   V(CompileEnqueueOnDispatcher)                \

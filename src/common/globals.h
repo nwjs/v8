@@ -146,6 +146,12 @@ namespace internal {
 #define ENABLE_CONTROL_FLOW_INTEGRITY_BOOL false
 #endif
 
+#ifdef V8_MOVE_PROTOYPE_TRANSITIONS_FIRST
+#define V8_MOVE_PROTOYPE_TRANSITIONS_FIRST_BOOL true
+#else
+#define V8_MOVE_PROTOYPE_TRANSITIONS_FIRST_BOOL false
+#endif
+
 #if V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_ARM64
 // Set stack limit lower for ARM and ARM64 than for other architectures because:
 //  - on Arm stack allocating MacroAssembler takes 120K bytes.
@@ -949,6 +955,8 @@ class DescriptorArray;
 #ifdef V8_ENABLE_DIRECT_HANDLE
 template <typename T>
 class DirectHandle;
+template <typename T>
+class DirectHandleVector;
 #endif
 class TransitionArray;
 class ExternalReference;
@@ -1148,11 +1156,13 @@ enum AllocationSpace {
   TRUSTED_SPACE,  // Space for trusted objects. When the sandbox is enabled,
                   // this space will be located outside of it so that objects in
                   // it cannot directly be corrupted by an attacker.
-  NEW_LO_SPACE,   // Young generation large object space.
-  LO_SPACE,       // Old generation large object space.
-  CODE_LO_SPACE,  // Old generation large code object space.
-  SHARED_LO_SPACE,   // Space shared between multiple isolates. Optional.
-  TRUSTED_LO_SPACE,  // Like TRUSTED_SPACE but for large objects.
+  SHARED_TRUSTED_SPACE,     // Trusted space but for shared objects. Optional.
+  NEW_LO_SPACE,             // Young generation large object space.
+  LO_SPACE,                 // Old generation large object space.
+  CODE_LO_SPACE,            // Old generation large code object space.
+  SHARED_LO_SPACE,          // Space shared between multiple isolates. Optional.
+  SHARED_TRUSTED_LO_SPACE,  // Like TRUSTED_SPACE but for shared large objects.
+  TRUSTED_LO_SPACE,         // Like TRUSTED_SPACE but for large objects.
 
   FIRST_SPACE = RO_SPACE,
   LAST_SPACE = TRUSTED_LO_SPACE,
@@ -1170,7 +1180,12 @@ constexpr bool IsAnyCodeSpace(AllocationSpace space) {
   return space == CODE_SPACE || space == CODE_LO_SPACE;
 }
 constexpr bool IsAnyTrustedSpace(AllocationSpace space) {
-  return space == TRUSTED_SPACE || space == TRUSTED_LO_SPACE;
+  return space == TRUSTED_SPACE || space == TRUSTED_LO_SPACE ||
+         space == SHARED_TRUSTED_SPACE || space == SHARED_TRUSTED_LO_SPACE;
+}
+constexpr bool IsAnySharedSpace(AllocationSpace space) {
+  return space == SHARED_SPACE || space == SHARED_LO_SPACE ||
+         space == SHARED_TRUSTED_SPACE || space == SHARED_TRUSTED_LO_SPACE;
 }
 
 constexpr const char* ToString(AllocationSpace space) {
@@ -1187,6 +1202,8 @@ constexpr const char* ToString(AllocationSpace space) {
       return "shared_space";
     case AllocationSpace::TRUSTED_SPACE:
       return "trusted_space";
+    case AllocationSpace::SHARED_TRUSTED_SPACE:
+      return "shared_trusted_space";
     case AllocationSpace::NEW_LO_SPACE:
       return "new_large_object_space";
     case AllocationSpace::LO_SPACE:
@@ -1195,6 +1212,8 @@ constexpr const char* ToString(AllocationSpace space) {
       return "code_large_object_space";
     case AllocationSpace::SHARED_LO_SPACE:
       return "shared_large_object_space";
+    case AllocationSpace::SHARED_TRUSTED_LO_SPACE:
+      return "shared_trusted_large_object_space";
     case AllocationSpace::TRUSTED_LO_SPACE:
       return "trusted_large_object_space";
   }
@@ -1209,10 +1228,11 @@ enum class AllocationType : uint8_t {
   kOld,    // Regular object allocated in OLD_SPACE or LO_SPACE.
   kCode,   // InstructionStream object allocated in CODE_SPACE or CODE_LO_SPACE.
   kMap,    // Map object allocated in OLD_SPACE.
-  kReadOnly,   // Object allocated in RO_SPACE.
-  kSharedOld,  // Regular object allocated in OLD_SPACE in the shared heap.
-  kSharedMap,  // Map object in OLD_SPACE in the shared heap.
-  kTrusted,    // Object allocated in TRUSTED_SPACE or TRUSTED_LO_SPACE.
+  kReadOnly,       // Object allocated in RO_SPACE.
+  kSharedOld,      // Regular object allocated in OLD_SPACE in the shared heap.
+  kSharedMap,      // Map object in OLD_SPACE in the shared heap.
+  kSharedTrusted,  // Trusted objects in TRUSTED_SPACE in the shared heap.
+  kTrusted,        // Object allocated in TRUSTED_SPACE or TRUSTED_LO_SPACE.
 };
 
 constexpr const char* ToString(AllocationType kind) {
@@ -1233,6 +1253,8 @@ constexpr const char* ToString(AllocationType kind) {
       return "SharedMap";
     case AllocationType::kTrusted:
       return "Trusted";
+    case AllocationType::kSharedTrusted:
+      return "SharedTrusted";
   }
 }
 

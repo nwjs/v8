@@ -29,10 +29,10 @@ class Int64LoweringReducer : public Next {
   TURBOSHAFT_REDUCER_BOILERPLATE(Int64Lowering)
 
   Int64LoweringReducer() {
-    PipelineData& data = PipelineData::Get();
-    wasm::CallOrigin origin =
-        data.is_js_to_wasm() ? wasm::kCalledFromJS : wasm::kCalledFromWasm;
-    sig_ = CreateMachineSignature(zone_, data.wasm_sig(), origin);
+    wasm::CallOrigin origin = __ data() -> is_js_to_wasm()
+                                  ? wasm::kCalledFromJS
+                                  : wasm::kCalledFromWasm;
+    sig_ = CreateMachineSignature(zone_, __ data()->wasm_sig(), origin);
 
     InitializeIndexMaps();
   }
@@ -89,15 +89,15 @@ class Int64LoweringReducer : public Next {
     return Next::ReduceShift(left, right, kind, rep);
   }
 
-  OpIndex REDUCE(Comparison)(OpIndex left, OpIndex right,
-                             ComparisonOp::Kind kind,
-                             RegisterRepresentation rep) {
+  V<Word32> REDUCE(Comparison)(V<Any> left, V<Any> right,
+                               ComparisonOp::Kind kind,
+                               RegisterRepresentation rep) {
     if (rep != WordRepresentation::Word64()) {
       return Next::ReduceComparison(left, right, kind, rep);
     }
 
-    auto [left_low, left_high] = Unpack(left);
-    auto [right_low, right_high] = Unpack(right);
+    auto [left_low, left_high] = Unpack(V<Word64>::Cast(left));
+    auto [right_low, right_high] = Unpack(V<Word64>::Cast(right));
     V<Word32> high_comparison;
     V<Word32> low_comparison;
     switch (kind) {
@@ -434,12 +434,12 @@ class Int64LoweringReducer : public Next {
     return Next::FixLoopPhi(input_phi, output_index, output_graph_loop);
   }
 
-  OpIndex REDUCE(Simd128Splat)(OpIndex input, Simd128SplatOp::Kind kind) {
+  V<Simd128> REDUCE(Simd128Splat)(V<Any> input, Simd128SplatOp::Kind kind) {
     // TODO(14108): Introduce I32-pair splat for better codegen.
     if (kind != Simd128SplatOp::Kind::kI64x2) {
       return Next::ReduceSimd128Splat(input, kind);
     }
-    auto [low, high] = Unpack(input);
+    auto [low, high] = Unpack(V<Word64>::Cast(input));
     V<Simd128> base = __ Simd128Splat(low, Simd128SplatOp::Kind::kI32x4);
     V<Simd128> first_replaced = __ Simd128ReplaceLane(
         base, high, Simd128ReplaceLaneOp::Kind::kI32x4, 1);
@@ -447,27 +447,27 @@ class Int64LoweringReducer : public Next {
                                  Simd128ReplaceLaneOp::Kind::kI32x4, 3);
   }
 
-  OpIndex REDUCE(Simd128ExtractLane)(OpIndex input,
-                                     Simd128ExtractLaneOp::Kind kind,
-                                     uint8_t lane) {
+  V<Any> REDUCE(Simd128ExtractLane)(V<Simd128> input,
+                                    Simd128ExtractLaneOp::Kind kind,
+                                    uint8_t lane) {
     if (kind != Simd128ExtractLaneOp::Kind::kI64x2) {
       return Next::ReduceSimd128ExtractLane(input, kind, lane);
     }
-    OpIndex low = __ Simd128ExtractLane(
-        input, Simd128ExtractLaneOp::Kind::kI32x4, 2 * lane);
-    OpIndex high = __ Simd128ExtractLane(
-        input, Simd128ExtractLaneOp::Kind::kI32x4, 2 * lane + 1);
+    V<Word32> low = V<Word32>::Cast(__ Simd128ExtractLane(
+        input, Simd128ExtractLaneOp::Kind::kI32x4, 2 * lane));
+    V<Word32> high = V<Word32>::Cast(__ Simd128ExtractLane(
+        input, Simd128ExtractLaneOp::Kind::kI32x4, 2 * lane + 1));
     return __ Tuple(low, high);
   }
 
-  OpIndex REDUCE(Simd128ReplaceLane)(OpIndex into, OpIndex new_lane,
-                                     Simd128ReplaceLaneOp::Kind kind,
-                                     uint8_t lane) {
+  V<Simd128> REDUCE(Simd128ReplaceLane)(V<Simd128> into, V<Any> new_lane,
+                                        Simd128ReplaceLaneOp::Kind kind,
+                                        uint8_t lane) {
     // TODO(14108): Introduce I32-pair lane replacement for better codegen.
     if (kind != Simd128ReplaceLaneOp::Kind::kI64x2) {
       return Next::ReduceSimd128ReplaceLane(into, new_lane, kind, lane);
     }
-    auto [low, high] = Unpack(new_lane);
+    auto [low, high] = Unpack(V<Word64>::Cast(new_lane));
     V<Simd128> low_replaced = __ Simd128ReplaceLane(
         into, low, Simd128ReplaceLaneOp::Kind::kI32x4, 2 * lane);
     return __ Simd128ReplaceLane(
@@ -784,7 +784,7 @@ class Int64LoweringReducer : public Next {
   }
 
   const Signature<MachineRepresentation>* sig_;
-  Zone* zone_ = PipelineData::Get().graph_zone();
+  Zone* zone_ = __ graph_zone();
   ZoneVector<int32_t> param_index_map_{__ phase_zone()};
   bool returns_i64_ = false;  // Returns at least one i64.
   const OperationMatcher& matcher_{__ matcher()};

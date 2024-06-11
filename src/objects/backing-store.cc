@@ -349,7 +349,6 @@ std::unique_ptr<BackingStore> BackingStore::TryAllocateAndPartiallyCommitMemory(
       if (fn()) return true;
       // Collect garbage and retry.
       did_retry = true;
-      // TODO(wasm): try Heap::EagerlyFreeExternalMemory() first?
       if (isolate != nullptr) {
         isolate->heap()->MemoryPressureNotification(
             MemoryPressureLevel::kCritical, true);

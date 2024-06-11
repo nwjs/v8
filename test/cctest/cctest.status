@@ -219,6 +219,12 @@
 }],  # variant == nooptimization
 
 ##############################################################################
+['variant == stress_concurrent_allocation', {
+  # https://crbug.com/42204548
+  'test-mark-compact/MarkCompactCollector': [PASS, ['tsan', SKIP]],
+}],  # variant == stress_concurrent_allocation
+
+##############################################################################
 ['asan == True', {
   # Skip tests not suitable for ASAN.
 
@@ -395,6 +401,8 @@
   'test-run-wasm/RunWasmTurbofan_F32ReinterpretI32': [SKIP],
 
   'test-serialize/StaticRootsPredictableSnapshot': ['pointer_compression', SKIP],
+
+  'turboshaft-test-compare-combine/CombineCompareTwoLogicInputs':[SKIP],
 }],  # 'arch == riscv64 or (arch == riscv32)'
 ['arch == riscv32', {
   # Some wasm functionality is not implemented yet.
@@ -453,6 +461,8 @@
   'test-api/Threading*': [PASS, SLOW],
   'test-api/ExternalArrays': [PASS, SLOW],
   'test-debug/DebugBreakStackTrace': [PASS, SLOW],
+  'turboshaft-test-compare-combine/CombineCompareWord64Logic1': [PASS, SLOW],
+  'turboshaft-test-compare-combine/CombineCompareTwoLogicInputs': [PASS, SLOW],
 
 }],  # 'arch == ppc64 and simulator_run'
 
@@ -566,6 +576,7 @@
   'test-sync-primitives-arm/*': [SKIP],
   'test-sync-primitives-arm64/*': [SKIP],
   'turboshaft-test-branch-combine/*': [SKIP],
+  'turboshaft-test-compare-combine/*': [SKIP],
   'turboshaft-test-select-combine/*': [SKIP],
 
   'test-unwinder-code-pages/PCIsInV8_LargeCodeObject_CodePagesAPI': [SKIP],
@@ -1076,10 +1087,6 @@
 
 ##############################################################################
 ['variant == turboshaft', {
-  # TODO(v8:12783, nicohartmann@): FastApiCalls temporarily disabled on
-  # Turboshaft until support has been properly ported.
-  'test-api/FastApiCalls': [SKIP],
-
   # The 'turboshaft' variant sets the '--no-liftoff' flag, which means that Wasm
   # compiles directly to Turboshaft. This makes the cache no longer incremental,
   # and these tests don't make sense.
@@ -1090,12 +1097,6 @@
 }],  # variant == turboshaft
 
 ##############################################################################
-['variant == turboshaft or variant == future', {
-  # Revectorization is not supported yet in Turboshaft.
-  # TODO(14108): Remove once supported.
-}],  # variant == turboshaft or variant == future
-
-##############################################################################
 ['variant != turboshaft and variant != future', {
   # Some ops' revectorization support only implemented in turboshaft.
   'test-run-wasm-simd/RunWasmTurbofan_I16x16ExtMulI8x16S': [SKIP],
@@ -1104,6 +1105,12 @@
   'test-run-wasm-simd/RunWasmTurbofan_I32x8ExtMulI16x8U': [SKIP],
   'test-run-wasm-simd/RunWasmTurbofan_I64x4ExtMulI32x4S': [SKIP],
   'test-run-wasm-simd/RunWasmTurbofan_I64x4ExtMulI32x4U': [SKIP],
+  'test-run-wasm-relaxed-simd/RunWasm_I8x32RelaxedLaneSelect': [SKIP],
+  'test-run-wasm-relaxed-simd/RunWasm_I16x16RelaxedLaneSelect': [SKIP],
+  'test-run-wasm-relaxed-simd/RunWasm_I32x8RelaxedLaneSelect': [SKIP],
+  'test-run-wasm-relaxed-simd/RunWasm_I64x4RelaxedLaneSelect': [SKIP],
+  'test-run-wasm-relaxed-simd/RunWasm_I32x8DotI8x32I7x32AddS': [SKIP],
+  'test-run-wasm-relaxed-simd/RunWasm_I16x16DotI8x32I7x32S': [SKIP],
 }],  # variant != turboshaft and variant != future
 
 ##############################################################################
@@ -1144,11 +1151,12 @@
   'test-verify-type/TestVerifyType': [FAIL],
   # Maglev doesn't support FastApi calls.
   'test-api/FastApiCalls': [FAIL],
-  'test-api/FastApiCallWithAllocationAndGC': [FAIL],
+  'test-api/FastApiCallWithAllocationAndGCInJS': [FAIL],
+  'test-api/FastApiCallWithAllocationAndGCInC': [FAIL],
   'test-api/FastApiSequenceOverloads': [FAIL],
-  # Maglev doesn't produce optimized enough code to match heap tests
-  # expectations.
-  'test-heap/EnsureAllocationSiteDependentCodesProcessed': [FAIL],
+  'test-api/FastApiCallRecursionNoException': [FAIL],
+  'test-api/FastApiCallRecursionWithException': [FAIL],
+  'test-api/FastApiCallWithThrowInReentrantCode': [FAIL],
 }],  # variant in (stress_maglev, stress_maglev_future, stress_maglev_no_turbofan, maglev_no_turbofan)
 
 ['conservative_stack_scanning', {

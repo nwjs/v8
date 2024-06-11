@@ -55,6 +55,7 @@ TQ_OBJECT_CONSTRUCTORS_IMPL(WasmObject)
 TQ_OBJECT_CONSTRUCTORS_IMPL(WasmResumeData)
 TQ_OBJECT_CONSTRUCTORS_IMPL(WasmStruct)
 TQ_OBJECT_CONSTRUCTORS_IMPL(WasmSuspenderObject)
+TQ_OBJECT_CONSTRUCTORS_IMPL(WasmSuspendingObject)
 TQ_OBJECT_CONSTRUCTORS_IMPL(WasmTableObject)
 TQ_OBJECT_CONSTRUCTORS_IMPL(WasmTagObject)
 TQ_OBJECT_CONSTRUCTORS_IMPL(WasmTypeInfo)
@@ -174,6 +175,11 @@ PRIMITIVE_ACCESSORS(WasmTrustedInstanceData, memory0_start, uint8_t*,
                     kMemory0StartOffset)
 PRIMITIVE_ACCESSORS(WasmTrustedInstanceData, memory0_size, size_t,
                     kMemory0SizeOffset)
+// Sandbox-safe alternative to going through the chain
+// instance_object()->module_object()->native_module(), i.e. doesn't rely on
+// potentially-corrupted heap objects.
+PRIMITIVE_ACCESSORS(WasmTrustedInstanceData, native_module, wasm::NativeModule*,
+                    kNativeModuleOffset)
 PRIMITIVE_ACCESSORS(WasmTrustedInstanceData, new_allocation_limit_address,
                     Address*, kNewAllocationLimitAddressOffset)
 PRIMITIVE_ACCESSORS(WasmTrustedInstanceData, new_allocation_top_address,
@@ -220,6 +226,8 @@ OPTIONAL_ACCESSORS(WasmTrustedInstanceData, imported_mutable_globals_buffers,
                    Tagged<FixedArray>, kImportedMutableGlobalsBuffersOffset)
 OPTIONAL_ACCESSORS(WasmTrustedInstanceData, tables, Tagged<FixedArray>,
                    kTablesOffset)
+PROTECTED_POINTER_ACCESSORS(WasmTrustedInstanceData, shared_part,
+                            WasmTrustedInstanceData, kProtectedSharedPartOffset)
 PROTECTED_POINTER_ACCESSORS(WasmTrustedInstanceData, dispatch_table0,
                             WasmDispatchTable, kProtectedDispatchTable0Offset)
 PROTECTED_POINTER_ACCESSORS(WasmTrustedInstanceData, dispatch_tables,
@@ -281,7 +289,7 @@ Tagged<WasmModuleObject> WasmTrustedInstanceData::module_object() const {
 }
 
 const wasm::WasmModule* WasmTrustedInstanceData::module() const {
-  return module_object()->module();
+  return native_module()->module();
 }
 
 // WasmInstanceObject
@@ -289,6 +297,9 @@ TRUSTED_POINTER_ACCESSORS(WasmInstanceObject, trusted_data,
                           WasmTrustedInstanceData, kTrustedDataOffset,
                           kWasmTrustedInstanceDataIndirectPointerTag)
 
+// Note: in case of existing in-sandbox corruption, this could return an
+// incorrect WasmModule! For security-relevant code, prefer going via
+// WasmTrustedInstanceData::native_module().
 const wasm::WasmModule* WasmInstanceObject::module() const {
   return module_object()->module();
 }
@@ -372,12 +383,15 @@ TRUSTED_POINTER_ACCESSORS(WasmFuncRef, internal, WasmInternalFunction,
 // WasmFunctionData
 CODE_POINTER_ACCESSORS(WasmFunctionData, wrapper_code, kWrapperCodeOffset)
 
+PROTECTED_POINTER_ACCESSORS(WasmFunctionData, internal, WasmInternalFunction,
+                            kProtectedInternalOffset)
+
 // WasmExportedFunctionData
 CODE_POINTER_ACCESSORS(WasmExportedFunctionData, c_wrapper_code,
                        kCWrapperCodeOffset)
 
-EXTERNAL_POINTER_ACCESSORS(WasmExportedFunctionData, sig, wasm::FunctionSig*,
-                           kSigOffset, kWasmExportedFunctionDataSignatureTag)
+PRIMITIVE_ACCESSORS(WasmExportedFunctionData, sig, const wasm::FunctionSig*,
+                    kSigOffset)
 
 // WasmJSFunction
 WasmJSFunction::WasmJSFunction(Address ptr) : JSFunction(ptr) {

@@ -86,8 +86,8 @@ class StructType;
 struct WasmElemSegment;
 class WasmValue;
 enum class OnResume : int;
-enum Suspend : bool;
-enum Promise : bool;
+enum Suspend : int;
+enum Promise : int;
 class ValueType;
 using FunctionSig = Signature<ValueType>;
 }  // namespace wasm
@@ -215,9 +215,31 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
                                    bool convert_encoding = false);
 
   // Internalized strings are created in the old generation (data space).
-  inline Handle<String> InternalizeString(Handle<String> string);
+  // TODO(b/42203211): InternalizeString and InternalizeName are templatized so
+  // that passing a Handle<T> is not ambiguous when T is a subtype of String or
+  // Name (it could be implicitly converted both to Handle<String> and to
+  // DirectHandle<String>). Here, T should be a subtype of String, which is
+  // enforced by the second template argument and the similar restriction on
+  // Handle's constructor. When the migration to DirectHandle is complete,
+  // these functions can accept simply a DirectHandle<String> or
+  // DirectHandle<Name>.
+  template <typename T, typename = std::enable_if_t<
+                            std::is_convertible_v<Handle<T>, Handle<String>>>>
+  inline Handle<String> InternalizeString(Handle<T> string);
 
-  inline Handle<Name> InternalizeName(Handle<Name> name);
+  template <typename T, typename = std::enable_if_t<
+                            std::is_convertible_v<Handle<T>, Handle<Name>>>>
+  inline Handle<Name> InternalizeName(Handle<T> name);
+
+#ifdef V8_ENABLE_DIRECT_HANDLE
+  template <typename T, typename = std::enable_if_t<std::is_convertible_v<
+                            DirectHandle<T>, DirectHandle<String>>>>
+  inline DirectHandle<String> InternalizeString(DirectHandle<T> string);
+
+  template <typename T, typename = std::enable_if_t<std::is_convertible_v<
+                            DirectHandle<T>, DirectHandle<Name>>>>
+  inline DirectHandle<Name> InternalizeName(DirectHandle<T> name);
+#endif
 
   // String creation functions.  Most of the string creation functions take
   // an AllocationType argument to optionally request that they be
@@ -306,8 +328,8 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   // All other strings are internalized by flattening and copying and return
   // kCopy.
   V8_WARN_UNUSED_RESULT StringTransitionStrategy
-  ComputeInternalizationStrategyForString(DirectHandle<String> string,
-                                          MaybeHandle<Map>* internalized_map);
+  ComputeInternalizationStrategyForString(
+      DirectHandle<String> string, MaybeDirectHandle<Map>* internalized_map);
 
   // Creates an internalized copy of an external string. |string| must be
   // of type StringClass.
@@ -326,7 +348,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   // string then sharing that sequential string, and return kCopy.
   V8_WARN_UNUSED_RESULT StringTransitionStrategy
   ComputeSharingStrategyForString(DirectHandle<String> string,
-                                  MaybeHandle<Map>* shared_map);
+                                  MaybeDirectHandle<Map>* shared_map);
 
   // Create or lookup a single character string made up of a utf16 surrogate
   // pair.
@@ -427,9 +449,6 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
       DirectHandle<HeapObject> shared_or_script,
       int bytecode_offset_or_source_position,
       DirectHandle<String> function_name, bool is_constructor);
-
-  Handle<PromiseOnStack> NewPromiseOnStack(DirectHandle<Object> prev,
-                                           Handle<JSObject> promise);
 
   // Allocate various microtasks.
   Handle<CallableTask> NewCallableTask(DirectHandle<JSReceiver> callable,
@@ -710,7 +729,8 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   Handle<WasmExportedFunctionData> NewWasmExportedFunctionData(
       DirectHandle<Code> export_wrapper,
       DirectHandle<WasmInstanceObject> instance_object,
-      DirectHandle<WasmFuncRef> func_ref, int func_index,
+      DirectHandle<WasmFuncRef> func_ref,
+      DirectHandle<WasmInternalFunction> internal_function,
       const wasm::FunctionSig* sig, uint32_t canonical_type_index,
       int wrapper_budget, wasm::Promise promise);
   Handle<WasmApiFunctionRef> NewWasmApiFunctionRef(
@@ -748,6 +768,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   // {MessageTemplate} if computing the array's elements leads to an error.
   Handle<Object> NewWasmArrayFromElementSegment(
       Handle<WasmTrustedInstanceData> trusted_instance_data,
+      Handle<WasmTrustedInstanceData> shared_trusted_instance_data,
       uint32_t segment_index, uint32_t start_offset, uint32_t length,
       DirectHandle<Map> map);
   Handle<WasmContinuationObject> NewWasmContinuationObject(
@@ -852,7 +873,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
 
   // Interface for creating error objects.
   Handle<JSObject> NewError(Handle<JSFunction> constructor,
-                            Handle<String> message,
+                            DirectHandle<String> message,
                             Handle<Object> options = {});
 
   Handle<Object> NewInvalidStringLengthError();
@@ -861,32 +882,36 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
 
   Handle<JSObject> NewError(Handle<JSFunction> constructor,
                             MessageTemplate template_index,
-                            base::Vector<const Handle<Object>> args);
+                            base::Vector<const DirectHandle<Object>> args);
+
+  Handle<JSObject> NewSuppressedErrorAtDisposal(
+      Isolate* isolate, Handle<Object> error, Handle<Object> suppressed_error);
 
   template <typename... Args,
             typename = std::enable_if_t<std::conjunction_v<
-                std::is_convertible<Args, Handle<Object>>...>>>
+                std::is_convertible<Args, DirectHandle<Object>>...>>>
   Handle<JSObject> NewError(Handle<JSFunction> constructor,
                             MessageTemplate template_index, Args... args) {
     return NewError(constructor, template_index,
-                    base::VectorOf<Handle<Object>>({args...}));
+                    base::VectorOf<DirectHandle<Object>>({args...}));
   }
 
 #define DECLARE_ERROR(NAME)                                                  \
   Handle<JSObject> New##NAME(MessageTemplate template_index,                 \
-                             base::Vector<const Handle<Object>> args);       \
+                             base::Vector<const DirectHandle<Object>> args); \
                                                                              \
   template <typename... Args,                                                \
             typename = std::enable_if_t<std::conjunction_v<                  \
-                std::is_convertible<Args, Handle<Object>>...>>>              \
+                std::is_convertible<Args, DirectHandle<Object>>...>>>        \
   Handle<JSObject> New##NAME(MessageTemplate template_index, Args... args) { \
     return New##NAME(template_index,                                         \
-                     base::VectorOf<Handle<Object>>({args...}));             \
+                     base::VectorOf<DirectHandle<Object>>({args...}));       \
   }
   DECLARE_ERROR(Error)
   DECLARE_ERROR(EvalError)
   DECLARE_ERROR(RangeError)
   DECLARE_ERROR(ReferenceError)
+  DECLARE_ERROR(SuppressedError)
   DECLARE_ERROR(SyntaxError)
   DECLARE_ERROR(TypeError)
   DECLARE_ERROR(WasmCompileError)
@@ -1133,6 +1158,11 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
       return *this;
     }
 
+    CodeBuilder& set_parameter_count(uint16_t parameter_count) {
+      parameter_count_ = parameter_count;
+      return *this;
+    }
+
     CodeBuilder& set_profiler_data(BasicBlockProfilerData* profiler_data) {
       profiler_data_ = profiler_data;
       return *this;
@@ -1141,7 +1171,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
    private:
     MaybeHandle<Code> BuildInternal(bool retry_allocation_or_fail);
 
-    Handle<ByteArray> NewByteArray(int length, AllocationType allocation);
+    Handle<TrustedByteArray> NewTrustedByteArray(int length);
     // Return an allocation suitable for InstructionStreams but without writing
     // the map.
     Tagged<HeapObject> AllocateUninitializedInstructionStream(
@@ -1164,6 +1194,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
     BasicBlockProfilerData* profiler_data_ = nullptr;
     bool is_turbofanned_ = false;
     int stack_slots_ = 0;
+    uint16_t parameter_count_ = 0;
   };
 
  private:

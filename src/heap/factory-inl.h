@@ -34,16 +34,43 @@ namespace internal {
 MUTABLE_ROOT_LIST(ROOT_ACCESSOR)
 #undef ROOT_ACCESSOR
 
-Handle<String> Factory::InternalizeString(Handle<String> string) {
+template <typename T, typename>
+Handle<String> Factory::InternalizeString(Handle<T> string) {
+  // T should be a subtype of String, which is enforced by the second template
+  // argument.
+  if (IsInternalizedString(*string)) return string;
+  return indirect_handle(
+      isolate()->string_table()->LookupString(isolate(), string), isolate());
+}
+
+template <typename T, typename>
+Handle<Name> Factory::InternalizeName(Handle<T> name) {
+  // T should be a subtype of Name, which is enforced by the second template
+  // argument.
+  if (IsUniqueName(*name)) return name;
+  return indirect_handle(isolate()->string_table()->LookupString(
+                             isolate(), DirectHandle<String>::cast(name)),
+                         isolate());
+}
+
+#ifdef V8_ENABLE_DIRECT_HANDLE
+template <typename T, typename>
+DirectHandle<String> Factory::InternalizeString(DirectHandle<T> string) {
+  // T should be a subtype of String, which is enforced by the second template
+  // argument.
   if (IsInternalizedString(*string)) return string;
   return isolate()->string_table()->LookupString(isolate(), string);
 }
 
-Handle<Name> Factory::InternalizeName(Handle<Name> name) {
+template <typename T, typename>
+DirectHandle<Name> Factory::InternalizeName(DirectHandle<T> name) {
+  // T should be a subtype of Name, which is enforced by the second template
+  // argument.
   if (IsUniqueName(*name)) return name;
-  return isolate()->string_table()->LookupString(isolate(),
-                                                 Handle<String>::cast(name));
+  return isolate()->string_table()->LookupString(
+      isolate(), DirectHandle<String>::cast(name));
 }
+#endif
 
 template <size_t N>
 Handle<String> Factory::NewStringFromStaticChars(const char (&str)[N],

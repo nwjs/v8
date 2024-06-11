@@ -578,6 +578,10 @@ void Map::MapVerify(Isolate* isolate) {
       Tagged<Map> parent = Map::cast(GetBackPointer());
       CHECK(!parent->is_stable());
       Tagged<DescriptorArray> descriptors = instance_descriptors(isolate);
+      if (!is_deprecated() && !parent->is_deprecated()) {
+        CHECK_EQ(IsInobjectSlackTrackingInProgress(),
+                 parent->IsInobjectSlackTrackingInProgress());
+      }
       if (descriptors == parent->instance_descriptors(isolate)) {
         if (NumberOfOwnDescriptors() == parent->NumberOfOwnDescriptors() + 1) {
           // Descriptors sharing through property transitions takes over
@@ -706,6 +710,7 @@ void Map::MapVerify(Isolate* isolate) {
   }
   CHECK_IMPLIES(has_named_interceptor(), may_have_interesting_properties());
   CHECK_IMPLIES(is_dictionary_map(), may_have_interesting_properties());
+  CHECK_IMPLIES(is_dictionary_map(), owns_descriptors());
   CHECK_IMPLIES(is_access_check_needed(), may_have_interesting_properties());
   CHECK_IMPLIES(
       IsJSObjectMap(*this) && !CanHaveFastTransitionableElementsKind(),
@@ -1194,15 +1199,6 @@ void JSWrappedFunction::JSWrappedFunctionVerify(Isolate* isolate) {
   CHECK_EQ(map()->map()->native_context_or_null(), context());
 }
 
-void SharedFunctionInfo::SharedFunctionInfoVerify(Isolate* isolate) {
-  // TODO(leszeks): Add a TorqueGeneratedClassVerifier for LocalIsolate.
-  SharedFunctionInfoVerify(ReadOnlyRoots(isolate));
-}
-
-void SharedFunctionInfo::SharedFunctionInfoVerify(LocalIsolate* isolate) {
-  SharedFunctionInfoVerify(ReadOnlyRoots(isolate));
-}
-
 namespace {
 
 bool ShouldVerifySharedFunctionInfoFunctionIndex(
@@ -1221,7 +1217,9 @@ bool ShouldVerifySharedFunctionInfoFunctionIndex(
 
 }  // namespace
 
-void SharedFunctionInfo::SharedFunctionInfoVerify(ReadOnlyRoots roots) {
+void SharedFunctionInfo::SharedFunctionInfoVerify(LocalIsolate* isolate) {
+  ReadOnlyRoots roots(isolate);
+
   Tagged<Object> value = name_or_scope_info(kAcquireLoad);
   if (IsScopeInfo(value)) {
     CHECK(!ScopeInfo::cast(value)->IsEmpty());
@@ -1252,6 +1250,11 @@ void SharedFunctionInfo::SharedFunctionInfoVerify(ReadOnlyRoots roots) {
     CHECK(IsFeedbackMetadata(feedback_metadata()));
   }
 
+  if (HasBytecodeArray() && !IsDontAdaptArguments()) {
+    CHECK_EQ(GetBytecodeArray(isolate)->parameter_count(),
+             internal_formal_parameter_count_with_receiver());
+  }
+
   if (ShouldVerifySharedFunctionInfoFunctionIndex(*this)) {
     int expected_map_index =
         Context::FunctionMapIndex(language_mode(), kind(), HasSharedName());
@@ -1276,6 +1279,11 @@ void SharedFunctionInfo::SharedFunctionInfoVerify(ReadOnlyRoots roots) {
       CHECK(!construct_as_builtin());
     }
   }
+}
+
+void SharedFunctionInfo::SharedFunctionInfoVerify(Isolate* isolate) {
+  // TODO(leszeks): Add a TorqueGeneratedClassVerifier for LocalIsolate.
+  SharedFunctionInfoVerify(isolate->AsLocalIsolate());
 }
 
 void SharedFunctionInfoWrapper::SharedFunctionInfoWrapperVerify(
@@ -2283,7 +2291,8 @@ void WasmExportedFunctionData::WasmExportedFunctionDataVerify(
         wrapper->kind() == CodeKind::C_WASM_ENTRY ||
         (wrapper->is_builtin() &&
          (wrapper->builtin_id() == Builtin::kJSToWasmWrapper ||
-          wrapper->builtin_id() == Builtin::kWasmReturnPromiseOnSuspend)));
+          wrapper->builtin_id() == Builtin::kWasmPromising ||
+          wrapper->builtin_id() == Builtin::kWasmPromisingWithSuspender)));
 }
 
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -2654,14 +2663,32 @@ static bool CheckOneBackPointer(Tagged<Map> current_map, Tagged<Map> target) {
 }
 
 bool TransitionsAccessor::IsConsistentWithBackPointers() {
-  int num_transitions = NumberOfTransitions();
-  for (int i = 0; i < num_transitions; i++) {
-    Tagged<Map> target = GetTarget(i);
-    // Ensure maps belong to the same NativeContext (i.e. have the same
-    // meta map).
-    DCHECK_EQ(map_->map(), target->map());
-    if (!CheckOneBackPointer(map_, target)) return false;
-  }
+  DisallowGarbageCollection no_gc;
+  bool success = true;
+  ForEachTransition(
+      &no_gc,
+      [&](Tagged<Map> target) {
+        // Ensure maps belong to the same NativeContext (i.e. have
+        // the same meta map).
+        DCHECK_EQ(map_->map(), target->map());
+#ifdef DEBUG
+        if (!map_->is_deprecated() && !target->is_deprecated()) {
+          DCHECK_EQ(map_->IsInobjectSlackTrackingInProgress(),
+                    target->IsInobjectSlackTrackingInProgress());
+          // Check prototype transitions are first.
+          DCHECK_IMPLIES(map_->prototype() != target->prototype(),
+                         IsUndefined(map_->GetBackPointer()));
+        }
+#endif  // DEBUG
+        if (!CheckOneBackPointer(map_, target)) {
+          success = false;
+        }
+      }
+#ifndef V8_MOVE_PROTOYPE_TRANSITIONS_FIRST
+      ,
+      nullptr
+#endif  // V8_MOVE_PROTOYPE_TRANSITIONS_FIRST
+  );
   return true;
 }
 

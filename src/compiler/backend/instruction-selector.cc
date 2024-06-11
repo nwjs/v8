@@ -1284,7 +1284,7 @@ Instruction* InstructionSelectorT<Adapter>::EmitWithContinuation(
     continuation_temps_.push_back(temps[i]);
   }
 
-  if (cont->IsBranch()) {
+  if (cont->IsBranch() || cont->IsConditionalBranch()) {
     continuation_inputs_.push_back(g.Label(cont->true_block()));
     continuation_inputs_.push_back(g.Label(cont->false_block()));
   } else if (cont->IsDeoptimize()) {
@@ -1294,7 +1294,7 @@ Instruction* InstructionSelectorT<Adapter>::EmitWithContinuation(
     AppendDeoptimizeArguments(&continuation_inputs_, cont->reason(),
                               cont->node_id(), cont->feedback(),
                               cont->frame_state());
-  } else if (cont->IsSet()) {
+  } else if (cont->IsSet() || cont->IsConditionalSet()) {
     continuation_outputs_.push_back(g.DefineAsRegister(cont->result()));
   } else if (cont->IsSelect()) {
     // The {Select} should put one of two values into the output register,
@@ -2471,7 +2471,9 @@ void InstructionSelectorT<Adapter>::VisitCall(node_t node, block_t handler) {
   }
 
   FrameStateDescriptor* frame_state_descriptor = nullptr;
+  bool needs_frame_state = false;
   if (call_descriptor->NeedsFrameState()) {
+    needs_frame_state = true;
     frame_state_descriptor = GetFrameStateDescriptor(call.frame_state());
   }
 
@@ -2522,8 +2524,10 @@ void InstructionSelectorT<Adapter>::VisitCall(node_t node, block_t handler) {
         fp_param_count |= 1 << kHasFunctionDescriptorBitShift;
       }
 #endif
-      opcode = kArchCallCFunction | ParamField::encode(gp_param_count) |
-               FPParamField::encode(fp_param_count);
+      opcode = needs_frame_state ? kArchCallCFunctionWithFrameState
+                                 : kArchCallCFunction;
+      opcode |= ParamField::encode(gp_param_count) |
+                FPParamField::encode(fp_param_count);
       break;
     }
     case CallDescriptor::kCallCodeObject:
@@ -4484,6 +4488,18 @@ void InstructionSelectorT<TurbofanAdapter>::VisitNode(Node* node) {
       return MarkAsSimd256(node), VisitF64x4Qfma(node);
     case IrOpcode::kF64x4Qfms:
       return MarkAsSimd256(node), VisitF64x4Qfms(node);
+    case IrOpcode::kI64x4RelaxedLaneSelect:
+      return MarkAsSimd256(node), VisitI64x4RelaxedLaneSelect(node);
+    case IrOpcode::kI32x8RelaxedLaneSelect:
+      return MarkAsSimd256(node), VisitI32x8RelaxedLaneSelect(node);
+    case IrOpcode::kI16x16RelaxedLaneSelect:
+      return MarkAsSimd256(node), VisitI16x16RelaxedLaneSelect(node);
+    case IrOpcode::kI8x32RelaxedLaneSelect:
+      return MarkAsSimd256(node), VisitI8x32RelaxedLaneSelect(node);
+    case IrOpcode::kI32x8DotI8x32I7x32AddS:
+      return MarkAsSimd256(node), VisitI32x8DotI8x32I7x32AddS(node);
+    case IrOpcode::kI16x16DotI8x32I7x32S:
+      return MarkAsSimd256(node), VisitI16x16DotI8x32I7x32S(node);
 #endif  // V8_TARGET_ARCH_X64 && V8_ENABLE_WASM_SIMD256_REVEC
 #endif  // V8_ENABLE_WEBASSEMBLY
     default:
@@ -5559,6 +5575,10 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitNode(
     case Opcode::kSimd256Unpack: {
       MarkAsSimd256(node);
       return VisitSimd256Unpack(node);
+    }
+    case Opcode::kSimdPack128To256: {
+      MarkAsSimd256(node);
+      return VisitSimdPack128To256(node);
     }
 #endif  // V8_TARGET_ARCH_X64
 #endif  // V8_ENABLE_WASM_SIMD256_REVEC

@@ -433,6 +433,10 @@ void InstructionSelectorT<Adapter>::VisitLoad(node_t node) {
         break;
 #else
 #endif
+      case MachineRepresentation::kProtectedPointer:
+        CHECK(V8_ENABLE_SANDBOX_BOOL);
+        opcode = kRiscvLoadDecompressProtected;
+        break;
       case MachineRepresentation::kSandboxedPointer:
         opcode = kRiscvLoadDecodeSandboxedPointer;
         break;
@@ -554,6 +558,7 @@ void InstructionSelectorT<Adapter>::VisitStore(typename Adapter::node_t node) {
       case MachineRepresentation::kSimd256:  // Fall through.
       case MachineRepresentation::kMapWord:  // Fall through.
       case MachineRepresentation::kNone:
+      case MachineRepresentation::kProtectedPointer:
         UNREACHABLE();
     }
 
@@ -642,28 +647,22 @@ void InstructionSelectorT<Adapter>::VisitWord64And(node_t node) {
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitWord32Or(node_t node) {
-  if constexpr (Adapter::IsTurboshaft) {
-    UNIMPLEMENTED();
-  } else {
     VisitBinop<Adapter, Int32BinopMatcher>(this, node, kRiscvOr32, true,
                                            kRiscvOr32);
-  }
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitWord64Or(node_t node) {
-  if constexpr (Adapter::IsTurboshaft) {
-    UNIMPLEMENTED();
-  } else {
     VisitBinop<Adapter, Int64BinopMatcher>(this, node, kRiscvOr, true,
                                            kRiscvOr);
-  }
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitWord32Xor(node_t node) {
   if constexpr (Adapter::IsTurboshaft) {
-    UNIMPLEMENTED();
+    using namespace turboshaft;  // NOLINT(build/namespaces)
+    VisitBinop<Adapter, Int32BinopMatcher>(this, node, kRiscvXor32, true,
+                                           kRiscvXor32);
   } else {
     Int32BinopMatcher m(node);
     if (m.left().IsWord32Or() && CanCover(node, m.left().node()) &&
@@ -692,7 +691,10 @@ void InstructionSelectorT<Adapter>::VisitWord32Xor(node_t node) {
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitWord64Xor(node_t node) {
   if constexpr (Adapter::IsTurboshaft) {
-    UNIMPLEMENTED();
+    using namespace turboshaft;  // NOLINT(build/namespaces)
+    // const WordBinopOp& op = this->Get(node).template Cast<WordBinopOp>();
+    VisitBinop<Adapter, Int64BinopMatcher>(this, node, kRiscvXor, true,
+                                           kRiscvXor);
   } else {
     Int64BinopMatcher m(node);
     if (m.left().IsWord64Or() && CanCover(node, m.left().node()) &&
@@ -867,26 +869,26 @@ void InstructionSelectorT<Adapter>::VisitWord64ReverseBits(node_t node) {
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitWord64ReverseBytes(node_t node) {
     RiscvOperandGeneratorT<Adapter> g(this);
-#ifdef CAN_USE_ZBB_INSTRUCTIONS
-    Emit(kRiscvRev8, g.DefineAsRegister(node),
-         g.UseRegister(this->input_at(node, 0)));
-#else
-    Emit(kRiscvByteSwap64, g.DefineAsRegister(node),
-         g.UseRegister(this->input_at(node, 0)));
-#endif
+    if (CpuFeatures::IsSupported(ZBB)) {
+      Emit(kRiscvRev8, g.DefineAsRegister(node),
+           g.UseRegister(this->input_at(node, 0)));
+    } else {
+      Emit(kRiscvByteSwap64, g.DefineAsRegister(node),
+           g.UseRegister(this->input_at(node, 0)));
+    }
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitWord32ReverseBytes(node_t node) {
     RiscvOperandGeneratorT<Adapter> g(this);
-#ifdef CAN_USE_ZBB_INSTRUCTIONS
-    InstructionOperand temp = g.TempRegister();
-    Emit(kRiscvRev8, temp, g.UseRegister(this->input_at(node, 0)));
-    Emit(kRiscvShr64, g.DefineAsRegister(node), temp, g.TempImmediate(32));
-#else
-    Emit(kRiscvByteSwap32, g.DefineAsRegister(node),
-         g.UseRegister(this->input_at(node, 0)));
-#endif
+    if (CpuFeatures::IsSupported(ZBB)) {
+      InstructionOperand temp = g.TempRegister();
+      Emit(kRiscvRev8, temp, g.UseRegister(this->input_at(node, 0)));
+      Emit(kRiscvShr64, g.DefineAsRegister(node), temp, g.TempImmediate(32));
+    } else {
+      Emit(kRiscvByteSwap32, g.DefineAsRegister(node),
+           g.UseRegister(this->input_at(node, 0)));
+    }
 }
 
 template <typename Adapter>
@@ -1919,6 +1921,7 @@ void InstructionSelectorT<Adapter>::VisitUnalignedLoad(node_t node) {
       case MachineRepresentation::kSandboxedPointer:   // Fall through.
       case MachineRepresentation::kMapWord:            // Fall through.
       case MachineRepresentation::kIndirectPointer:    // Fall through.
+      case MachineRepresentation::kProtectedPointer:   // Fall through.
       case MachineRepresentation::kNone:
         UNREACHABLE();
     }
@@ -1991,6 +1994,7 @@ void InstructionSelectorT<Adapter>::VisitUnalignedStore(node_t node) {
       case MachineRepresentation::kSandboxedPointer:   // Fall through.
       case MachineRepresentation::kMapWord:            // Fall through.
       case MachineRepresentation::kIndirectPointer:    // Fall through.
+      case MachineRepresentation::kProtectedPointer:   // Fall through.
       case MachineRepresentation::kNone:
         UNREACHABLE();
     }
@@ -2205,15 +2209,28 @@ void VisitAtomicLoad(InstructionSelectorT<TurbofanAdapter>* selector,
 }
 
 template <typename Adapter>
-void VisitAtomicStore(InstructionSelectorT<Adapter>* selector, Node* node,
-                      AtomicWidth width) {
+AtomicStoreParameters AtomicStoreParametersOf(
+    InstructionSelectorT<Adapter>* selector, typename Adapter::node_t node) {
+  auto store = selector->store_view(node);
+  return AtomicStoreParameters(store.stored_rep().representation(),
+                               store.stored_rep().write_barrier_kind(),
+                               store.memory_order().value(),
+                               store.access_kind());
+}
+
+template <typename Adapter>
+void VisitAtomicStore(InstructionSelectorT<Adapter>* selector,
+                      typename Adapter::node_t node, AtomicWidth width) {
+  using node_t = typename Adapter::node_t;
   RiscvOperandGeneratorT<Adapter> g(selector);
-  Node* base = node->InputAt(0);
-  Node* index = node->InputAt(1);
-  Node* value = node->InputAt(2);
+  auto store = selector->store_view(node);
+  node_t base = store.base();
+  node_t index = selector->value(store.index());
+  node_t value = store.value();
+  DCHECK_EQ(store.displacement(), 0);
 
   // The memory order is ignored.
-  AtomicStoreParameters store_params = AtomicStoreParametersOf(node->op());
+  AtomicStoreParameters store_params = AtomicStoreParametersOf(selector, node);
   WriteBarrierKind write_barrier_kind = store_params.write_barrier_kind();
   MachineRepresentation rep = store_params.representation();
 
@@ -2366,7 +2383,7 @@ bool CanCoverTrap(Node* user, Node* value) {
       user->opcode() != IrOpcode::kTrapIf)
     return true;
   if (value->opcode() == IrOpcode::kWord32Equal ||
-      value->opcode() == IrOpcode::kInt32LessThanOrEqual ||
+      value->opcode() == IrOpcode::kInt32LessThan ||
       value->opcode() == IrOpcode::kInt32LessThanOrEqual ||
       value->opcode() == IrOpcode::kUint32LessThan ||
       value->opcode() == IrOpcode::kUint32LessThanOrEqual)
@@ -2500,7 +2517,33 @@ void InstructionSelectorT<TurbofanAdapter>::VisitWordCompareZero(
 
     // Continuation could not be combined with a compare, emit compare against
     // 0.
+#ifdef V8_TARGET_ARCH_RISCV64
+#ifdef V8_COMPRESS_POINTERS
+    switch (user->opcode()) {
+      case IrOpcode::kWord64Equal:
+      case IrOpcode::kInt64LessThan:
+      case IrOpcode::kInt64LessThanOrEqual:
+      case IrOpcode::kUint64LessThan:
+      case IrOpcode::kUint64LessThanOrEqual:
+        return EmitWordCompareZero(this, value, cont);
+      default:
+        return EmitWord32CompareZero(this, value, cont);
+    }
+#else
+    switch (user->opcode()) {
+      case IrOpcode::kWord32Equal:
+      case IrOpcode::kInt32LessThan:
+      case IrOpcode::kInt32LessThanOrEqual:
+      case IrOpcode::kUint32LessThan:
+      case IrOpcode::kUint32LessThanOrEqual:
+        return EmitWord32CompareZero(this, value, cont);
+      default:
+        return EmitWordCompareZero(this, value, cont);
+    }
+#endif
+#else
     EmitWordCompareZero(this, value, cont);
+#endif
 }
 
 template <>
@@ -2834,80 +2877,48 @@ void InstructionSelectorT<Adapter>::VisitWord64Equal(node_t node) {
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitInt64LessThan(node_t node) {
-  if constexpr (Adapter::IsTurboshaft) {
-    UNIMPLEMENTED();
-  } else {
     FlagsContinuation cont = FlagsContinuation::ForSet(kSignedLessThan, node);
     VisitWord64Compare(this, node, &cont);
-  }
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitInt64LessThanOrEqual(node_t node) {
-  if constexpr (Adapter::IsTurboshaft) {
-    UNIMPLEMENTED();
-  } else {
     FlagsContinuation cont =
         FlagsContinuation::ForSet(kSignedLessThanOrEqual, node);
     VisitWord64Compare(this, node, &cont);
-  }
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitUint64LessThan(node_t node) {
-  if constexpr (Adapter::IsTurboshaft) {
-    UNIMPLEMENTED();
-  } else {
     FlagsContinuation cont = FlagsContinuation::ForSet(kUnsignedLessThan, node);
     VisitWord64Compare(this, node, &cont);
-  }
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitUint64LessThanOrEqual(node_t node) {
-  if constexpr (Adapter::IsTurboshaft) {
-    UNIMPLEMENTED();
-  } else {
     FlagsContinuation cont =
         FlagsContinuation::ForSet(kUnsignedLessThanOrEqual, node);
     VisitWord64Compare(this, node, &cont);
-  }
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitWord32AtomicLoad(node_t node) {
-  if constexpr (Adapter::IsTurboshaft) {
-    UNIMPLEMENTED();
-  } else {
     VisitAtomicLoad(this, node, AtomicWidth::kWord32);
-  }
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitWord32AtomicStore(node_t node) {
-  if constexpr (Adapter::IsTurboshaft) {
-    UNIMPLEMENTED();
-  } else {
     VisitAtomicStore(this, node, AtomicWidth::kWord32);
-  }
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitWord64AtomicLoad(node_t node) {
-  if constexpr (Adapter::IsTurboshaft) {
-    UNIMPLEMENTED();
-  } else {
     VisitAtomicLoad(this, node, AtomicWidth::kWord64);
-  }
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitWord64AtomicStore(node_t node) {
-  if constexpr (Adapter::IsTurboshaft) {
-    UNIMPLEMENTED();
-  } else {
     VisitAtomicStore(this, node, AtomicWidth::kWord64);
-  }
 }
 
 template <typename Adapter>

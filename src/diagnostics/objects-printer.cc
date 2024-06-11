@@ -752,7 +752,6 @@ void JSPromise::JSPromisePrint(std::ostream& os) {
     os << "\n - result: " << Brief(result());
   }
   os << "\n - has_handler: " << has_handler();
-  os << "\n - handled_hint: " << handled_hint();
   os << "\n - is_silent: " << is_silent();
   JSObjectPrintBody(os, *this);
 }
@@ -2434,11 +2433,18 @@ void WasmSuspenderObject::WasmSuspenderObjectPrint(std::ostream& os) {
   os << "\n";
 }
 
+void WasmSuspendingObject::WasmSuspendingObjectPrint(std::ostream& os) {
+  PrintHeader(os, "WasmSuspendingObject");
+  os << "\n - callable: " << callable();
+  os << "\n";
+}
+
 void WasmInstanceObject::WasmInstanceObjectPrint(std::ostream& os) {
   Isolate* isolate = GetIsolateForSandbox(*this);
   JSObjectPrintHeader(os, *this, "WasmInstanceObject");
   os << "\n - trusted_data: " << Brief(trusted_data(isolate));
   os << "\n - module_object: " << Brief(module_object());
+  os << "\n - shared_part: " << Brief(shared_part());
   os << "\n - exports_object: " << Brief(exports_object());
   JSObjectPrintBody(os, *this);
   os << "\n";
@@ -2458,6 +2464,7 @@ void WasmTrustedInstanceData::WasmTrustedInstanceDataPrint(std::ostream& os) {
   PrintHeader(os, "WasmTrustedInstanceData");
   PRINT_WASM_INSTANCE_FIELD(instance_object, Brief);
   PRINT_WASM_INSTANCE_FIELD(native_context, Brief);
+  PRINT_WASM_INSTANCE_FIELD(shared_part, Brief);
   PRINT_WASM_INSTANCE_FIELD(memory_objects, Brief);
   PRINT_OPTIONAL_WASM_INSTANCE_FIELD(untagged_globals_buffer, Brief);
   PRINT_OPTIONAL_WASM_INSTANCE_FIELD(tagged_globals_buffer, Brief);
@@ -2515,6 +2522,7 @@ void WasmDispatchTable::WasmDispatchTablePrint(std::ostream& os) {
 void WasmFunctionData::WasmFunctionDataPrint(std::ostream& os) {
   Isolate* isolate = GetIsolateForSandbox(*this);
   os << "\n - func_ref: " << Brief(func_ref());
+  os << "\n - internal: " << Brief(internal());
   os << "\n - wrapper_code: " << Brief(wrapper_code(isolate));
   os << "\n - js_promise_flags: " << js_promise_flags();
   // No newline here; the caller prints it after printing additional fields.
@@ -2523,11 +2531,10 @@ void WasmFunctionData::WasmFunctionDataPrint(std::ostream& os) {
 void WasmExportedFunctionData::WasmExportedFunctionDataPrint(std::ostream& os) {
   PrintHeader(os, "WasmExportedFunctionData");
   WasmFunctionDataPrint(os);
-  Isolate* isolate = GetIsolateForSandbox(*this);
   os << "\n - instance: " << Brief(instance());
   os << "\n - function_index: " << function_index();
-  os << "\n - signature: " << reinterpret_cast<void*>(sig(isolate));
-  os << "\n - wrapper_budget: " << wrapper_budget();
+  os << "\n - signature: " << reinterpret_cast<const void*>(sig());
+  os << "\n - wrapper_budget: " << wrapper_budget()->value();
   os << "\n";
 }
 

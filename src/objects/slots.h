@@ -129,6 +129,9 @@ class FullObjectSlot : public SlotBase<FullObjectSlot, Address> {
   inline Tagged<Object> Acquire_Load(PtrComprCageBase cage_base) const;
   inline Tagged<Object> Relaxed_Load() const;
   inline Tagged<Object> Relaxed_Load(PtrComprCageBase cage_base) const;
+  inline Address Relaxed_Load_Raw() const;
+  static inline Tagged<Object> RawToTagged(PtrComprCageBase cage_base,
+                                           Address raw);
   inline void Relaxed_Store(Tagged<Object> value) const;
   inline void Release_Store(Tagged<Object> value) const;
   inline Tagged<Object> Relaxed_CompareAndSwap(Tagged<Object> old,
@@ -166,6 +169,9 @@ class FullMaybeObjectSlot
 
   inline Tagged<MaybeObject> Relaxed_Load() const;
   inline Tagged<MaybeObject> Relaxed_Load(PtrComprCageBase cage_base) const;
+  inline Address Relaxed_Load_Raw() const;
+  static inline Tagged<Object> RawToTagged(PtrComprCageBase cage_base,
+                                           Address raw);
   inline void Relaxed_Store(Tagged<MaybeObject> value) const;
   inline void Release_CompareAndSwap(Tagged<MaybeObject> old,
                                      Tagged<MaybeObject> target) const;
@@ -326,7 +332,8 @@ class ExternalPointerSlot
   {
   }
 
-  inline void init(IsolateForSandbox isolate, Address value);
+  inline void init(IsolateForSandbox isolate, Tagged<HeapObject> host,
+                   Address value);
 
 #ifdef V8_COMPRESS_POINTERS
   // When the external pointer is sandboxed, or for array buffer extensions when
@@ -427,7 +434,7 @@ class CppHeapPointerSlot
 
   inline Address try_load(IsolateForPointerCompression isolate) const;
   inline void store(IsolateForPointerCompression isolate, Address value) const;
-  inline void reset() const;
+  inline void init() const;
 
 #ifdef V8_COMPRESS_POINTERS
   ExternalPointerTag tag() const { return tag_; }

@@ -29,6 +29,9 @@
 #define DEFINE_NEG_NEG_IMPLICATION(whenflag, thenflag) \
   DEFINE_NEG_VALUE_IMPLICATION(whenflag, thenflag, false)
 
+#define DEFINE_WEAK_NEG_NEG_IMPLICATION(whenflag, thenflag) \
+  DEFINE_WEAK_NEG_VALUE_IMPLICATION(whenflag, thenflag, false)
+
 // With FLAG_MODE_DECLARE we declare the fields in the {FlagValues} struct.
 // Read-only flags are static constants instead of fields.
 #if defined(FLAG_MODE_DECLARE)
@@ -77,6 +80,10 @@
   changed |= TriggerImplication(!v8_flags.whenflag, "!" #whenflag, \
                                 &v8_flags.thenflag, #thenflag, value, false);
 
+#define DEFINE_WEAK_NEG_VALUE_IMPLICATION(whenflag, thenflag, value) \
+  changed |= TriggerImplication(!v8_flags.whenflag, "!" #whenflag,   \
+                                &v8_flags.thenflag, #thenflag, value, true);
+
 // We apply a generic macro to the flags.
 #elif defined(FLAG_MODE_APPLY)
 
@@ -113,6 +120,10 @@
 
 #ifndef DEFINE_NEG_VALUE_IMPLICATION
 #define DEFINE_NEG_VALUE_IMPLICATION(whenflag, thenflag, value)
+#endif
+
+#ifndef DEFINE_WEAK_NEG_VALUE_IMPLICATION
+#define DEFINE_WEAK_NEG_VALUE_IMPLICATION(whenflag, thenflag, value)
 #endif
 
 #ifndef DEBUG_BOOL
@@ -242,7 +253,8 @@ DEFINE_BOOL(js_shipping, true, "enable all shipped JavaScript features")
     "harmony weak references with FinalizationRegistry.prototype.cleanupSome") \
   V(harmony_temporal, "Temporal")                                              \
   V(harmony_shadow_realm, "harmony ShadowRealm")                               \
-  V(harmony_struct, "harmony structs, shared structs, and shared arrays")
+  V(harmony_struct, "harmony structs, shared structs, and shared arrays")      \
+  V(harmony_import_assertions, "harmony import assertions (deprecated)")
 
 #define JAVASCRIPT_INPROGRESS_FEATURES_BASE(V)                       \
   V(js_explicit_resource_management, "explicit resource management") \
@@ -283,7 +295,6 @@ DEFINE_WEAK_IMPLICATION(harmony_rab_gsab_transfer, harmony_rab_gsab)
 
 // Features that are shipping (turned on by default, but internal flag remains).
 #define HARMONY_SHIPPING_BASE(V)                                      \
-  V(harmony_import_assertions, "harmony import assertions")           \
   V(harmony_rab_gsab,                                                 \
     "harmony ResizableArrayBuffer / GrowableSharedArrayBuffer")       \
   V(harmony_rab_gsab_transfer, "harmony ArrayBuffer.transfer")        \
@@ -848,10 +859,11 @@ DEFINE_INT(invocation_count_for_feedback_allocation, 8,
 // Tiering: Maglev.
 #if defined(ANDROID)
 DEFINE_INT(invocation_count_for_maglev, 1000,
+           "invocation count required for optimizing with Maglev")
 #else
 DEFINE_INT(invocation_count_for_maglev, 400,
-#endif  // ANDROID
            "invocation count required for optimizing with Maglev")
+#endif  // ANDROID
 DEFINE_INT(invocation_count_for_maglev_osr, 100,
            "invocation count required for maglev OSR")
 DEFINE_BOOL(osr_from_maglev, false,
@@ -1322,10 +1334,10 @@ DEFINE_WEAK_IMPLICATION(turboshaft_wasm, turboshaft_wasm_load_elimination)
 DEFINE_BOOL(turboshaft_instruction_selection, true,
             "run instruction selection on Turboshaft IR directly")
 
-DEFINE_BOOL(turboshaft_load_elimination, false,
+DEFINE_BOOL(turboshaft_load_elimination, true,
             "enable Turboshaft's low-level load elimination for JS")
 DEFINE_BOOL(turboshaft_loop_peeling, false, "enable Turboshaft's loop peeling")
-DEFINE_BOOL(turboshaft_loop_unrolling, false,
+DEFINE_BOOL(turboshaft_loop_unrolling, true,
             "enable Turboshaft's loop unrolling")
 
 DEFINE_EXPERIMENTAL_FEATURE(turboshaft_typed_optimizations,
@@ -1349,8 +1361,6 @@ DEFINE_EXPERIMENTAL_FEATURE(
     turboshaft_future,
     "enable Turboshaft features that we want to ship in the not-too-far future")
 DEFINE_IMPLICATION(turboshaft_future, turboshaft)
-DEFINE_WEAK_IMPLICATION(turboshaft_future, turboshaft_load_elimination)
-DEFINE_WEAK_IMPLICATION(turboshaft_future, turboshaft_loop_unrolling)
 DEFINE_WEAK_IMPLICATION(turboshaft_future, turboshaft_loop_peeling)
 DEFINE_WEAK_IMPLICATION(turboshaft_future, turboshaft_wasm)
 #if V8_TARGET_ARCH_X64 or V8_TARGET_ARCH_ARM64 or V8_TARGET_ARCH_ARM or \
@@ -1363,7 +1373,14 @@ DEFINE_WEAK_IMPLICATION(turboshaft_csa, turboshaft_instruction_selection)
 DEFINE_WEAK_IMPLICATION(turboshaft_future,
                         turboshaft_wasm_instruction_selection_staged)
 
+#if V8_ENABLE_WEBASSEMBLY
+// Shared-everything is implemented on turboshaft only for now.
+DEFINE_IMPLICATION(experimental_wasm_shared, turboshaft_wasm)
+DEFINE_NEG_IMPLICATION(experimental_wasm_shared, liftoff)
+#endif
+
 #ifdef DEBUG
+
 DEFINE_UINT64(turboshaft_opt_bisect_limit, std::numeric_limits<uint64_t>::max(),
               "stop applying optional optimizations after a specified number "
               "of steps, useful for bisecting optimization bugs")
@@ -1594,6 +1611,18 @@ DEFINE_NEG_NEG_IMPLICATION(wasm_bounds_checks, wasm_enforce_bounds_checks)
 DEFINE_BOOL(wasm_math_intrinsics, true,
             "intrinsify some Math imports into wasm")
 
+DEFINE_EXPERIMENTAL_FEATURE(
+    experimental_wasm_inlining_call_indirect,
+    "enable speculative inlining of Wasm indirect calls, also enables "
+    "--experimental-wasm-inlining and requires --turboshaft-wasm")
+// Requires basic inlining machinery, e.g., for allocating feedback vectors.
+DEFINE_IMPLICATION(experimental_wasm_inlining_call_indirect,
+                   experimental_wasm_inlining)
+// This is not implemented for Turbofan, so make sure users are aware by
+// forcing them to explicitly enable Turboshaft (until it's the default anyway).
+DEFINE_NEG_NEG_IMPLICATION(turboshaft_wasm,
+                           experimental_wasm_inlining_call_indirect)
+
 DEFINE_SIZE_T(wasm_inlining_budget, 5000,
               "maximum graph size (in TF nodes) that allows inlining more")
 DEFINE_SIZE_T(wasm_inlining_max_size, 500,
@@ -1629,8 +1658,9 @@ DEFINE_BOOL(wasm_lazy_compilation, true,
             "enable lazy compilation for all wasm modules")
 DEFINE_DEBUG_BOOL(trace_wasm_lazy_compilation, false,
                   "trace lazy compilation of wasm functions")
-DEFINE_BOOL(wasm_lazy_validation, false,
-            "enable lazy validation for lazily compiled wasm functions")
+DEFINE_EXPERIMENTAL_FEATURE(
+    wasm_lazy_validation,
+    "enable lazy validation for lazily compiled wasm functions")
 DEFINE_WEAK_IMPLICATION(wasm_lazy_validation, wasm_lazy_compilation)
 DEFINE_BOOL(wasm_simd_ssse3_codegen, false, "allow wasm SIMD SSSE3 codegen")
 
@@ -1642,6 +1672,8 @@ DEFINE_INT(wasm_max_initial_code_space_reservation, 0,
            "maximum size of the initial wasm code space reservation (in MB)")
 DEFINE_BOOL(stress_wasm_memory_moving, false,
             "always move non-shared bounds-checked Wasm memory on grow")
+DEFINE_BOOL(flush_liftoff_code, false,
+            "enable flushing liftoff code on memory pressure signal")
 
 DEFINE_SIZE_T(wasm_max_module_size, wasm::kV8MaxWasmModuleSize,
               "maximum allowed size of wasm modules")
@@ -1678,7 +1710,7 @@ DEFINE_EXPERIMENTAL_FEATURE(
 DEFINE_BOOL(trace_wasm_revectorize, false, "trace wasm revectorize")
 #endif  // V8_ENABLE_WASM_SIMD256_REVEC
 
-#if (V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_X64) && !V8_OS_DARWIN
+#if V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_X64
 DEFINE_EXPERIMENTAL_FEATURE(wasm_memory64_trap_handling,
                             "Use trap handling for Wasm memory64 bounds checks")
 #else
@@ -1978,6 +2010,10 @@ DEFINE_BOOL(manual_evacuation_candidates_selection, false,
 
 DEFINE_BOOL(clear_free_memory, false, "initialize free memory with 0")
 
+DEFINE_BOOL(idle_gc_on_context_disposal, false, "idle gc on context disposal")
+
+DEFINE_BOOL(trace_context_disposal, false, "trace context disposal")
+
 // v8::CppHeap flags that allow fine-grained control of how C++ memory is
 // reclaimed in the garbage collector.
 DEFINE_BOOL(cppheap_incremental_marking, false,
@@ -1991,6 +2027,9 @@ DEFINE_NEG_NEG_IMPLICATION(cppheap_incremental_marking,
                            cppheap_concurrent_marking)
 DEFINE_NEG_NEG_IMPLICATION(concurrent_marking, cppheap_concurrent_marking)
 DEFINE_WEAK_IMPLICATION(concurrent_marking, cppheap_concurrent_marking)
+DEFINE_BOOL(cppheap_optimize_sweep_for_mutator, false,
+            "optimize sweeping for mutator time (i.e. spend less time in "
+            "synchronous sweeping and idle time)")
 
 DEFINE_BOOL(memory_balancer, false,
             "use membalancer, "
@@ -2026,6 +2065,8 @@ DEFINE_BOOL(enable_sahf, true,
             "enable use of SAHF instruction if available (X64 only)")
 DEFINE_BOOL(enable_avx, true, "enable use of AVX instructions if available")
 DEFINE_BOOL(enable_avx2, true, "enable use of AVX2 instructions if available")
+DEFINE_BOOL(enable_avx_vnni, true,
+            "enable use of AVX-VNNI instructions if available")
 DEFINE_BOOL(enable_fma3, true, "enable use of FMA3 instructions if available")
 DEFINE_BOOL(enable_bmi1, true, "enable use of BMI1 instructions if available")
 DEFINE_BOOL(enable_bmi2, true, "enable use of BMI2 instructions if available")
@@ -2626,12 +2667,23 @@ DEFINE_BOOL(trace_minor_ms_parallel_marking, false,
             "trace parallel marking for the young generation")
 DEFINE_BOOL(minor_ms, false, "perform young generation mark sweep GCs")
 DEFINE_IMPLICATION(minor_ms, separate_gc_phases)
-DEFINE_NEG_NEG_IMPLICATION(minor_ms, separate_gc_phases)
+DEFINE_WEAK_NEG_NEG_IMPLICATION(minor_ms, separate_gc_phases)
 DEFINE_IMPLICATION(minor_ms, page_promotion)
 
 DEFINE_BOOL(concurrent_minor_ms_marking, true,
             "perform young generation marking concurrently")
 DEFINE_NEG_NEG_IMPLICATION(concurrent_marking, concurrent_minor_ms_marking)
+
+#ifdef V8_ENABLE_STICKY_MARK_BITS
+#define V8_ENABLE_STICKY_MARK_BITS_BOOL true
+#else
+#define V8_ENABLE_STICKY_MARK_BITS_BOOL false
+#endif
+DEFINE_BOOL_READONLY(sticky_mark_bits, V8_ENABLE_STICKY_MARK_BITS_BOOL,
+                     "use sticky mark bits for separation of generations")
+DEFINE_IMPLICATION(sticky_mark_bits, minor_ms)
+// TODO(333906585): Copy mark bits and live bytes on compaction.
+DEFINE_NEG_IMPLICATION(sticky_mark_bits, compact)
 
 #ifndef DEBUG
 #define V8_MINOR_MS_CONCURRENT_MARKING_MIN_CAPACITY_DEFAULT 8
@@ -3043,9 +3095,12 @@ DEFINE_INT(dump_allocations_digest_at_alloc, -1,
 #undef DEFINE_FLOAT
 #undef DEFINE_IMPLICATION
 #undef DEFINE_WEAK_IMPLICATION
-#undef DEFINE_WEAK_NEG_IMPLICATION
 #undef DEFINE_NEG_IMPLICATION
+#undef DEFINE_WEAK_NEG_IMPLICATION
+#undef DEFINE_NEG_NEG_IMPLICATION
+#undef DEFINE_WEAK_NEG_NEG_IMPLICATION
 #undef DEFINE_NEG_VALUE_IMPLICATION
+#undef DEFINE_WEAK_NEG_VALUE_IMPLICATION
 #undef DEFINE_VALUE_IMPLICATION
 #undef DEFINE_WEAK_VALUE_IMPLICATION
 #undef DEFINE_GENERIC_IMPLICATION

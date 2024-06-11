@@ -224,6 +224,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kX64I32x4DotI16x8S:
     case kX64I32x8DotI16x16S:
     case kX64I32x4DotI8x16I7x16AddS:
+    case kX64I32x8DotI8x32I7x32AddS:
     case kX64I32x4ExtMulLowI16x8S:
     case kX64I32x4ExtMulHighI16x8S:
     case kX64I32x8ExtMulI16x8S:
@@ -266,6 +267,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kX64I16x8Q15MulRSatS:
     case kX64I16x8RelaxedQ15MulRS:
     case kX64I16x8DotI8x16I7x16S:
+    case kX64I16x16DotI8x32I7x32S:
     case kX64I8x16SConvertI16x8:
     case kX64I8x32SConvertI16x16:
     case kX64I8x16UConvertI16x8:
@@ -319,6 +321,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kX64Blendvps:
     case kX64Pblendvb:
     case kX64ExtractF128:
+    case kX64InsertI128:
       return (instr->addressing_mode() == kMode_None)
                  ? kNoOpcodeFlags
                  : kIsLoadOperation | kHasSideEffect;
@@ -363,6 +366,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
 
     case kX64MovqDecompressTaggedSigned:
     case kX64MovqDecompressTagged:
+    case kX64MovqDecompressProtected:
     case kX64MovqCompressTagged:
     case kX64MovqStoreIndirectPointer:
     case kX64MovqDecodeSandboxedPointer:

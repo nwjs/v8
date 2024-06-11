@@ -95,6 +95,7 @@ Handle<Code> FactoryBase<Impl>::NewCode(const NewCodeOptions& options) {
   code->set_constant_pool_offset(options.constant_pool_offset);
   code->set_code_comments_offset(options.code_comments_offset);
   code->set_unwinding_info_offset(options.unwinding_info_offset);
+  code->set_parameter_count(options.parameter_count);
 
   // Set bytecode/interpreter data or deoptimization data.
   if (CodeKindUsesBytecodeOrInterpreterData(options.kind)) {
@@ -331,7 +332,7 @@ FactoryBase<Impl>::NewDeoptimizationFrameTranslation(int length) {
 template <typename Impl>
 Handle<BytecodeArray> FactoryBase<Impl>::NewBytecodeArray(
     int length, const uint8_t* raw_bytecodes, int frame_size,
-    int parameter_count, DirectHandle<TrustedFixedArray> constant_pool,
+    uint16_t parameter_count, DirectHandle<TrustedFixedArray> constant_pool,
     DirectHandle<TrustedByteArray> handler_table) {
   if (length < 0 || length > BytecodeArray::kMaxLength) {
     FATAL("Fatal JavaScript invalid size error %d", length);
@@ -607,8 +608,11 @@ Handle<SharedFunctionInfo> FactoryBase<Impl>::NewSharedFunctionInfo(
     DCHECK(!Builtins::IsBuiltinId(builtin));
     DCHECK(!IsInstructionStream(*function_data));
     DCHECK(!IsCode(*function_data));
-    raw->SetData(*function_data, kReleaseStore,
-                 SharedFunctionInfo::DataType::kRegular);
+    SharedFunctionInfo::DataType type =
+        IsExposedTrustedObject(*function_data)
+            ? SharedFunctionInfo::DataType::kTrusted
+            : SharedFunctionInfo::DataType::kRegular;
+    raw->SetData(*function_data, kReleaseStore, type);
   } else if (Builtins::IsBuiltinId(builtin)) {
     raw->set_builtin_id(builtin);
   } else {
@@ -729,7 +733,8 @@ template <typename Impl>
 template <class StringTableKey>
 Handle<String> FactoryBase<Impl>::InternalizeStringWithKey(
     StringTableKey* key) {
-  return isolate()->string_table()->LookupKey(isolate(), key);
+  return indirect_handle(isolate()->string_table()->LookupKey(isolate(), key),
+                         isolate());
 }
 
 template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)
@@ -1354,10 +1359,10 @@ FactoryBase<Impl>::NewFunctionTemplateRareData() {
 }
 
 template <typename Impl>
-MaybeHandle<Map> FactoryBase<Impl>::GetInPlaceInternalizedStringMap(
+MaybeDirectHandle<Map> FactoryBase<Impl>::GetInPlaceInternalizedStringMap(
     Tagged<Map> from_string_map) {
   InstanceType instance_type = from_string_map->instance_type();
-  MaybeHandle<Map> map;
+  MaybeDirectHandle<Map> map;
   switch (instance_type) {
     case SEQ_TWO_BYTE_STRING_TYPE:
     case SHARED_SEQ_TWO_BYTE_STRING_TYPE:

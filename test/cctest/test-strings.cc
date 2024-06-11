@@ -1434,7 +1434,7 @@ static void ExternalizeDuringJsonStringifyCallback(
   v8::Local<v8::Value> key = v8_compile("p")
                                  ->Run(CcTest::isolate()->GetCurrentContext())
                                  .ToLocalChecked();
-  const static char ext_string_content[] = "prop-1234567890asdf";
+  static const char ext_string_content[] = "prop-1234567890asdf";
   OneByteVectorResource* resource =
       new OneByteVectorResource(v8::base::Vector<const char>(
           ext_string_content, strlen(ext_string_content)));
@@ -1731,9 +1731,12 @@ TEST(FormatMessage) {
   LocalContext context;
   Isolate* isolate = CcTest::i_isolate();
   HandleScope scope(isolate);
-  Handle<String> arg0 = isolate->factory()->NewStringFromAsciiChecked("arg0");
-  Handle<String> arg1 = isolate->factory()->NewStringFromAsciiChecked("arg1");
-  Handle<String> arg2 = isolate->factory()->NewStringFromAsciiChecked("arg2");
+  DirectHandle<String> arg0 =
+      isolate->factory()->NewStringFromAsciiChecked("arg0");
+  DirectHandle<String> arg1 =
+      isolate->factory()->NewStringFromAsciiChecked("arg1");
+  DirectHandle<String> arg2 =
+      isolate->factory()->NewStringFromAsciiChecked("arg2");
   Handle<String> result = MessageFormatter::TryFormat(
                               isolate, MessageTemplate::kPropertyNotFunction,
                               base::VectorOf({arg0, arg1, arg2}))
@@ -1916,16 +1919,17 @@ TEST(InternalizeExternalString) {
   const char* raw_string = "external";
   OneByteResource* resource =
       new OneByteResource(i::StrDup(raw_string), strlen(raw_string));
-  Handle<String> string =
+  DirectHandle<String> string =
       factory->NewExternalStringFromOneByte(resource).ToHandleChecked();
   CHECK(IsExternalString(*string));
 
   // Check it is not uncached.
-  Handle<ExternalString> external = Handle<ExternalString>::cast(string);
+  DirectHandle<ExternalString> external =
+      DirectHandle<ExternalString>::cast(string);
   CHECK(!external->is_uncached());
 
   // Internalize succesfully, without a copy.
-  Handle<String> internal = factory->InternalizeString(external);
+  DirectHandle<String> internal = factory->InternalizeString(external);
   CHECK(IsInternalizedString(*string));
   CHECK(string.equals(internal));
 }
@@ -1941,16 +1945,17 @@ TEST(InternalizeExternalStringTwoByte) {
   const char* raw_string = "external";
   Resource* resource =
       new Resource(AsciiToTwoByteString(raw_string), strlen(raw_string));
-  Handle<String> string =
+  DirectHandle<String> string =
       factory->NewExternalStringFromTwoByte(resource).ToHandleChecked();
   CHECK(IsExternalString(*string));
 
   // Check it is not uncached.
-  Handle<ExternalString> external = Handle<ExternalString>::cast(string);
+  DirectHandle<ExternalString> external =
+      DirectHandle<ExternalString>::cast(string);
   CHECK(!external->is_uncached());
 
   // Internalize succesfully, without a copy.
-  Handle<String> internal = factory->InternalizeString(external);
+  DirectHandle<String> internal = factory->InternalizeString(external);
   CHECK(IsInternalizedString(*string));
   CHECK(string.equals(internal));
 }

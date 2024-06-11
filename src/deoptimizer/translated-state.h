@@ -22,6 +22,7 @@
 namespace v8 {
 namespace internal {
 
+class DeoptimizationLiteral;
 class RegisterValues;
 class TranslatedState;
 
@@ -67,6 +68,7 @@ class TranslatedValue {
   friend class TranslatedState;
   friend class TranslatedFrame;
   friend class Deoptimizer;
+  friend class DeoptimizationLiteralProvider;
 
   enum Kind : uint8_t {
     kInvalid,
@@ -75,7 +77,8 @@ class TranslatedValue {
     kInt64,
     kInt64ToBigInt,
     kUint64ToBigInt,
-    kUInt32,
+    kUint32,
+    kUint64,
     kBoolBit,
     kFloat,
     kDouble,
@@ -118,7 +121,8 @@ class TranslatedValue {
                                           int64_t value);
   static TranslatedValue NewUint64ToBigInt(TranslatedState* container,
                                            uint64_t value);
-  static TranslatedValue NewUInt32(TranslatedState* container, uint32_t value);
+  static TranslatedValue NewUint32(TranslatedState* container, uint32_t value);
+  static TranslatedValue NewUint64(TranslatedState* container, uint64_t value);
   static TranslatedValue NewBool(TranslatedState* container, uint32_t value);
   static TranslatedValue NewTagged(TranslatedState* container,
                                    Tagged<Object> literal);
@@ -351,6 +355,31 @@ class TranslatedFrame {
 #endif  // V8_ENABLE_WEBASSEMBLY
 };
 
+class DeoptimizationLiteralProvider {
+ public:
+  explicit DeoptimizationLiteralProvider(
+      Tagged<DeoptimizationLiteralArray> literal_array);
+
+  explicit DeoptimizationLiteralProvider(
+      std::vector<DeoptimizationLiteral> literals);
+
+  ~DeoptimizationLiteralProvider();
+  // Prevent expensive copying.
+  DeoptimizationLiteralProvider(const DeoptimizationLiteralProvider&) = delete;
+  void operator=(const DeoptimizationLiteralProvider&) = delete;
+
+  TranslatedValue Get(TranslatedState* container, int literal_index) const;
+
+  Tagged<DeoptimizationLiteralArray> get_on_heap_literals() const {
+    DCHECK(!literals_on_heap_.is_null());
+    return literals_on_heap_;
+  }
+
+ private:
+  Tagged<DeoptimizationLiteralArray> literals_on_heap_;
+  std::vector<DeoptimizationLiteral> literals_off_heap_;
+};
+
 // Auxiliary class for translating deoptimization values.
 // Typical usage sequence:
 //
@@ -401,9 +430,8 @@ class TranslatedState {
   Isolate* isolate() { return isolate_; }
 
   void Init(Isolate* isolate, Address input_frame_pointer,
-            Address stack_frame_pointer,
-            DeoptimizationFrameTranslation::Iterator* iterator,
-            Tagged<DeoptimizationLiteralArray> literal_array,
+            Address stack_frame_pointer, DeoptTranslationIterator* iterator,
+            const DeoptimizationLiteralProvider& literal_array,
             RegisterValues* registers, FILE* trace_file, int parameter_count,
             int actual_argument_count);
 
@@ -420,12 +448,12 @@ class TranslatedState {
   enum Purpose { kDeoptimization, kFrameInspection };
 
   TranslatedFrame CreateNextTranslatedFrame(
-      DeoptimizationFrameTranslation::Iterator* iterator,
-      Tagged<DeoptimizationLiteralArray> literal_array, Address fp,
+      DeoptTranslationIterator* iterator,
+      const DeoptimizationLiteralProvider& literal_array, Address fp,
       FILE* trace_file);
   int CreateNextTranslatedValue(
-      int frame_index, DeoptimizationFrameTranslation::Iterator* iterator,
-      Tagged<DeoptimizationLiteralArray> literal_array, Address fp,
+      int frame_index, DeoptTranslationIterator* iterator,
+      const DeoptimizationLiteralProvider& literal_array, Address fp,
       RegisterValues* registers, FILE* trace_file);
   Address DecompressIfNeeded(intptr_t value);
   void CreateArgumentsElementsTranslatedValues(int frame_index,
@@ -461,7 +489,7 @@ class TranslatedState {
       TranslatedFrame* frame, int* value_index, TranslatedValue* slot,
       Handle<Map> map, const DisallowGarbageCollection& no_gc);
 
-  void ReadUpdateFeedback(DeoptimizationFrameTranslation::Iterator* iterator,
+  void ReadUpdateFeedback(DeoptTranslationIterator* iterator,
                           Tagged<DeoptimizationLiteralArray> literal_array,
                           FILE* trace_file);
 

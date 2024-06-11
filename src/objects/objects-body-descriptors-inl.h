@@ -770,21 +770,6 @@ class CallSiteInfo::BodyDescriptor final : public BodyDescriptorBase {
   }
 };
 
-class PromiseOnStack::BodyDescriptor final : public BodyDescriptorBase {
- public:
-  template <typename ObjectVisitor>
-  static inline void IterateBody(Tagged<Map> map, Tagged<HeapObject> obj,
-                                 int object_size, ObjectVisitor* v) {
-    IteratePointers(obj, Struct::kHeaderSize, kPromiseOffset, v);
-    IterateMaybeWeakPointer(obj, kPromiseOffset, v);
-    static_assert(kPromiseOffset + kTaggedSize == kHeaderSize);
-  }
-
-  static inline int SizeOf(Tagged<Map> map, Tagged<HeapObject> obj) {
-    return obj->SizeFromMap(map);
-  }
-};
-
 class PrototypeInfo::BodyDescriptor final : public BodyDescriptorBase {
  public:
   template <typename ObjectVisitor>
@@ -874,6 +859,7 @@ class WasmInstanceObject::BodyDescriptor final : public BodyDescriptorBase {
                           IndirectPointerMode::kStrong,
                           kWasmTrustedInstanceDataIndirectPointerTag);
     IteratePointer(obj, kModuleObjectOffset, v);
+    IteratePointer(obj, kSharedPartOffset, v);
     IteratePointer(obj, kExportsObjectOffset, v);
     IterateJSObjectBodyImpl(map, obj, kHeaderSize, object_size, v);
   }
@@ -958,6 +944,19 @@ class WasmStruct::BodyDescriptor final : public BodyDescriptorBase {
     return WasmStruct::GcSafeSize(map);
   }
 };
+
+class WasmNull::BodyDescriptor : public DataOnlyBodyDescriptor {
+ public:
+  static_assert(WasmNull::kStartOfStrongFieldsOffset ==
+                WasmNull::kEndOfStrongFieldsOffset);
+
+  static constexpr int kSize = WasmNull::kSize;
+
+  static constexpr int SizeOf(Tagged<Map> map, Tagged<HeapObject> object) {
+    return kSize;
+  }
+};
+
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 class ExternalString::BodyDescriptor final : public BodyDescriptorBase {
@@ -1010,9 +1009,7 @@ class InstructionStream::BodyDescriptor final : public BodyDescriptorBase {
   static inline void IterateBody(Tagged<Map> map, Tagged<HeapObject> obj,
                                  ObjectVisitor* v) {
     IterateProtectedPointer(obj, kCodeOffset, v);
-    // GC does not visit data/code in the header and in the body directly.
-    IteratePointers(obj, kStartOfStrongFieldsOffset, kEndOfStrongFieldsOffset,
-                    v);
+    IterateProtectedPointer(obj, kRelocationInfoOffset, v);
 
     Tagged<InstructionStream> istream = InstructionStream::unchecked_cast(obj);
     if (istream->IsFullyInitialized()) {
@@ -1232,16 +1229,10 @@ auto BodyDescriptorApply(InstanceType type, Args&&... args) {
 #if V8_ENABLE_WEBASSEMBLY
     case WASM_ARRAY_TYPE:
       return CALL_APPLY(WasmArray);
-    case WASM_CAPI_FUNCTION_DATA_TYPE:
-      return CALL_APPLY(WasmCapiFunctionData);
     case WASM_EXCEPTION_PACKAGE_TYPE:
       return CALL_APPLY(WasmExceptionPackage);
-    case WASM_EXPORTED_FUNCTION_DATA_TYPE:
-      return CALL_APPLY(WasmExportedFunctionData);
     case WASM_FUNC_REF_TYPE:
       return CALL_APPLY(WasmFuncRef);
-    case WASM_JS_FUNCTION_DATA_TYPE:
-      return CALL_APPLY(WasmJSFunctionData);
     case WASM_RESUME_DATA_TYPE:
       return CALL_APPLY(WasmResumeData);
     case WASM_CONTINUATION_OBJECT_TYPE:
@@ -1252,6 +1243,8 @@ auto BodyDescriptorApply(InstanceType type, Args&&... args) {
       return CALL_APPLY(WasmTypeInfo);
     case WASM_SUSPENDER_OBJECT_TYPE:
       return CALL_APPLY(WasmSuspenderObject);
+    case WASM_SUSPENDING_OBJECT_TYPE:
+      return CALL_APPLY(WasmSuspendingObject);
 #endif  // V8_ENABLE_WEBASSEMBLY
     case JS_ARGUMENTS_OBJECT_TYPE:
     case JS_ARRAY_ITERATOR_PROTOTYPE_TYPE:

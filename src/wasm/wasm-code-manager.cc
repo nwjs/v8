@@ -22,6 +22,7 @@
 #include "src/codegen/macro-assembler.h"
 #include "src/common/code-memory-access.h"
 #include "src/common/globals.h"
+#include "src/deoptimizer/deoptimizer.h"
 #include "src/diagnostics/disassembler.h"
 #include "src/logging/counters.h"
 #include "src/logging/log.h"
@@ -38,6 +39,7 @@
 #include "src/wasm/std-object-sizes.h"
 #include "src/wasm/wasm-builtin-list.h"
 #include "src/wasm/wasm-debug.h"
+#include "src/wasm/wasm-deopt-data.h"
 #include "src/wasm/wasm-engine.h"
 #include "src/wasm/wasm-import-wrapper-cache.h"
 #include "src/wasm/wasm-module-sourcemap.h"
@@ -66,7 +68,7 @@ using trap_handler::ProtectedInstructionData;
 // Increase the limit if needed, but first check if the size increase is
 // justified.
 #ifndef V8_GC_MOLE
-static_assert(sizeof(WasmCode) <= 88);
+static_assert(sizeof(WasmCode) <= 96);
 #endif
 
 base::AddressRegion DisjointAllocationPool::Merge(
@@ -461,6 +463,23 @@ void WasmCode::Disassemble(const char* name, std::ostream& os,
     os << "\n";
   }
 
+  if (deopt_data_size_ > 0) {
+    // TODO(mliedtke): It'd be more readable to format this as a table.
+    WasmDeoptView view(deopt_data());
+    const WasmDeoptData data = view.GetDeoptData();
+    os << "Deopt exits (entries = " << data.entry_count
+       << ", byte size = " << deopt_data_size_ << ")\n";
+    uint32_t deopt_offset = data.deopt_exit_start_offset;
+    for (uint32_t i = 0; i < data.entry_count; ++i) {
+      WasmDeoptEntry entry = view.GetDeoptEntry(i);
+      os << std::hex << deopt_offset << std::dec
+         << ": function offset = " << entry.bytecode_offset
+         << ", translation = " << entry.translation_index << '\n';
+      deopt_offset += Deoptimizer::kEagerDeoptExitSize;
+    }
+    os << '\n';
+  }
+
   if (safepoint_table_offset_ > 0) {
     SafepointTable table(this);
     table.Print(os);
@@ -553,6 +572,16 @@ std::tuple<int, bool, SourcePosition> WasmCode::GetInliningPosition(
   std::memcpy(&std::get<2>(result),
               start + sizeof std::get<0>(result) + sizeof std::get<1>(result),
               sizeof std::get<2>(result));
+  return result;
+}
+
+size_t WasmCode::EstimateCurrentMemoryConsumption() const {
+  UPDATE_WHEN_CLASS_CHANGES(WasmCode, 96);
+  size_t result = sizeof(WasmCode);
+  // For meta_data_.
+  result += protected_instructions_size_ + reloc_info_size_ +
+            source_positions_size_ + inlining_positions_size_ +
+            deopt_data_size_;
   return result;
 }
 
@@ -998,6 +1027,7 @@ WasmCode* NativeModule::AddCodeForTesting(Handle<Code> code) {
                    kAnonymousFuncIndex,      // index
                    dst_code_bytes,           // instructions
                    stack_slots,              // stack_slots
+                   0,                        // ool_spills
                    0,                        // tagged_parameter_slots
                    safepoint_table_offset,   // safepoint_table_offset
                    handler_table_offset,     // handler_table_offset
@@ -1008,6 +1038,7 @@ WasmCode* NativeModule::AddCodeForTesting(Handle<Code> code) {
                    reloc_info.as_vector(),   // reloc_info
                    source_pos.as_vector(),   // source positions
                    {},                       // inlining positions
+                   {},                       // deopt data
                    WasmCode::kWasmFunction,  // kind
                    ExecutionTier::kNone,     // tier
                    kNotForDebugging}};       // for_debugging
@@ -1066,11 +1097,12 @@ void NativeModule::UseLazyStubLocked(uint32_t func_index) {
 }
 
 std::unique_ptr<WasmCode> NativeModule::AddCode(
-    int index, const CodeDesc& desc, int stack_slots,
+    int index, const CodeDesc& desc, int stack_slots, int ool_spill_count,
     uint32_t tagged_parameter_slots,
     base::Vector<const uint8_t> protected_instructions_data,
     base::Vector<const uint8_t> source_position_table,
-    base::Vector<const uint8_t> inlining_positions, WasmCode::Kind kind,
+    base::Vector<const uint8_t> inlining_positions,
+    base::Vector<const uint8_t> deopt_data, WasmCode::Kind kind,
     ExecutionTier tier, ForDebugging for_debugging) {
   base::Vector<uint8_t> code_space;
   NativeModule::JumpTablesRef jump_table_ref;
@@ -1086,19 +1118,20 @@ std::unique_ptr<WasmCode> NativeModule::AddCode(
   ThreadIsolation::RegisterJitAllocation(
       reinterpret_cast<Address>(code_space.begin()), code_space.size(),
       ThreadIsolation::JitAllocationType::kWasmCode);
-  return AddCodeWithCodeSpace(index, desc, stack_slots, tagged_parameter_slots,
-                              protected_instructions_data,
-                              source_position_table, inlining_positions, kind,
-                              tier, for_debugging, frame_has_feedback_slot,
-                              code_space, jump_table_ref);
+  return AddCodeWithCodeSpace(
+      index, desc, stack_slots, ool_spill_count, tagged_parameter_slots,
+      protected_instructions_data, source_position_table, inlining_positions,
+      deopt_data, kind, tier, for_debugging, frame_has_feedback_slot,
+      code_space, jump_table_ref);
 }
 
 std::unique_ptr<WasmCode> NativeModule::AddCodeWithCodeSpace(
-    int index, const CodeDesc& desc, int stack_slots,
+    int index, const CodeDesc& desc, int stack_slots, int ool_spill_count,
     uint32_t tagged_parameter_slots,
     base::Vector<const uint8_t> protected_instructions_data,
     base::Vector<const uint8_t> source_position_table,
-    base::Vector<const uint8_t> inlining_positions, WasmCode::Kind kind,
+    base::Vector<const uint8_t> inlining_positions,
+    base::Vector<const uint8_t> deopt_data, WasmCode::Kind kind,
     ExecutionTier tier, ForDebugging for_debugging,
     bool frame_has_feedback_slot, base::Vector<uint8_t> dst_code_bytes,
     const JumpTablesRef& jump_tables) {
@@ -1159,12 +1192,26 @@ std::unique_ptr<WasmCode> NativeModule::AddCodeWithCodeSpace(
   // relocation information.
   if (tier == ExecutionTier::kLiftoff) reloc_info = {};
 
-  std::unique_ptr<WasmCode> code{new WasmCode{
-      this, index, dst_code_bytes, stack_slots, tagged_parameter_slots,
-      safepoint_table_offset, handler_table_offset, constant_pool_offset,
-      code_comments_offset, instr_size, protected_instructions_data, reloc_info,
-      source_position_table, inlining_positions, kind, tier, for_debugging,
-      frame_has_feedback_slot}};
+  std::unique_ptr<WasmCode> code{new WasmCode{this,
+                                              index,
+                                              dst_code_bytes,
+                                              stack_slots,
+                                              ool_spill_count,
+                                              tagged_parameter_slots,
+                                              safepoint_table_offset,
+                                              handler_table_offset,
+                                              constant_pool_offset,
+                                              code_comments_offset,
+                                              instr_size,
+                                              protected_instructions_data,
+                                              reloc_info,
+                                              source_position_table,
+                                              inlining_positions,
+                                              deopt_data,
+                                              kind,
+                                              tier,
+                                              for_debugging,
+                                              frame_has_feedback_slot}};
 
   code->MaybePrint();
   code->Validate();
@@ -1297,8 +1344,9 @@ bool NativeModule::should_update_code_table(WasmCode* new_code,
   // In kNoDebugging:
   // Install if the tier is higher than before or we replace debugging code with
   // non-debugging code.
+  // Also allow installing a lower tier if deopt support is enabled
   if (prior_code && !prior_code->for_debugging() &&
-      prior_code->tier() > new_code->tier()) {
+      prior_code->tier() > new_code->tier() && !v8_flags.wasm_deopt) {
     return false;
   }
   return true;
@@ -1341,22 +1389,23 @@ NativeModule::AllocateForDeserializedCode(size_t total_code_size) {
 
 std::unique_ptr<WasmCode> NativeModule::AddDeserializedCode(
     int index, base::Vector<uint8_t> instructions, int stack_slots,
-    uint32_t tagged_parameter_slots, int safepoint_table_offset,
+    int ool_spills, uint32_t tagged_parameter_slots, int safepoint_table_offset,
     int handler_table_offset, int constant_pool_offset,
     int code_comments_offset, int unpadded_binary_size,
     base::Vector<const uint8_t> protected_instructions_data,
     base::Vector<const uint8_t> reloc_info,
     base::Vector<const uint8_t> source_position_table,
-    base::Vector<const uint8_t> inlining_positions, WasmCode::Kind kind,
+    base::Vector<const uint8_t> inlining_positions,
+    base::Vector<const uint8_t> deopt_data, WasmCode::Kind kind,
     ExecutionTier tier) {
   UpdateCodeSize(instructions.size(), tier, kNotForDebugging);
 
   return std::unique_ptr<WasmCode>{new WasmCode{
-      this, index, instructions, stack_slots, tagged_parameter_slots,
-      safepoint_table_offset, handler_table_offset, constant_pool_offset,
-      code_comments_offset, unpadded_binary_size, protected_instructions_data,
-      reloc_info, source_position_table, inlining_positions, kind, tier,
-      kNotForDebugging}};
+      this, index, instructions, stack_slots, ool_spills,
+      tagged_parameter_slots, safepoint_table_offset, handler_table_offset,
+      constant_pool_offset, code_comments_offset, unpadded_binary_size,
+      protected_instructions_data, reloc_info, source_position_table,
+      inlining_positions, deopt_data, kind, tier, kNotForDebugging}};
 }
 
 std::pair<std::vector<WasmCode*>, std::vector<WellKnownImport>>
@@ -1455,6 +1504,7 @@ WasmCode* NativeModule::CreateEmptyJumpTableInRegionLocked(
                    kAnonymousFuncIndex,   // index
                    code_space,            // instructions
                    0,                     // stack_slots
+                   0,                     // ool_spills
                    0,                     // tagged_parameter_slots
                    0,                     // safepoint_table_offset
                    jump_table_size,       // handler_table_offset
@@ -1465,6 +1515,7 @@ WasmCode* NativeModule::CreateEmptyJumpTableInRegionLocked(
                    {},                    // reloc_info
                    {},                    // source_pos
                    {},                    // inlining pos
+                   {},                    // deopt data
                    WasmCode::kJumpTable,  // kind
                    ExecutionTier::kNone,  // tier
                    kNotForDebugging}};    // for_debugging
@@ -2171,6 +2222,7 @@ std::shared_ptr<NativeModule> WasmCodeManager::NewNativeModule(
     size_t code_size_estimate, std::shared_ptr<const WasmModule> module) {
   if (total_committed_code_space_.load() >
       critical_committed_code_space_.load()) {
+    GetWasmEngine()->FlushCode();
     (reinterpret_cast<v8::Isolate*>(isolate))
         ->MemoryPressureNotification(MemoryPressureLevel::kCritical);
     size_t committed = total_committed_code_space_.load();
@@ -2323,11 +2375,11 @@ std::vector<std::unique_ptr<WasmCode>> NativeModule::AddCompiledCode(
     code_space += code_size;
     generated_code.emplace_back(AddCodeWithCodeSpace(
         result.func_index, result.code_desc, result.frame_slot_count,
-        result.tagged_parameter_slots,
+        result.ool_spill_count, result.tagged_parameter_slots,
         result.protected_instructions_data.as_vector(),
         result.source_positions.as_vector(),
-        result.inlining_positions.as_vector(), GetCodeKind(result),
-        result.result_tier, result.for_debugging,
+        result.inlining_positions.as_vector(), result.deopt_data.as_vector(),
+        GetCodeKind(result), result.result_tier, result.for_debugging,
         result.frame_has_feedback_slot, this_code_space, jump_tables));
   }
   DCHECK_EQ(0, code_space.size());
@@ -2393,6 +2445,19 @@ void NativeModule::RemoveCompiledCode(RemoveFilter filter) {
       filter == RemoveFilter::kRemoveTurbofanCode) {
     compilation_state_->AllowAnotherTopTierJobForAllFunctions();
   }
+}
+
+size_t NativeModule::SumLiftoffCodeSize() {
+  const uint32_t num_functions = module_->num_declared_functions;
+  size_t codesize_liftoff = 0;
+  for (uint32_t i = 0; i < num_functions; i++) {
+    WasmCode* code = code_table_[i];
+    if (code && code->is_liftoff()) {
+      codesize_liftoff +=
+          code->instructions_size() + code->EstimateCurrentMemoryConsumption();
+    }
+  }
+  return codesize_liftoff;
 }
 
 void NativeModule::FreeCode(base::Vector<WasmCode* const> codes) {
@@ -2462,7 +2527,13 @@ size_t NativeModule::EstimateCurrentMemoryConsumption() const {
   {
     base::RecursiveMutexGuard lock(&allocation_mutex_);
     result += ContentSize(owned_code_);
+    for (auto& [address, unique_code_ptr] : owned_code_) {
+      result += unique_code_ptr->EstimateCurrentMemoryConsumption();
+    }
     result += ContentSize(new_owned_code_);
+    for (std::unique_ptr<WasmCode>& code : new_owned_code_) {
+      result += code->EstimateCurrentMemoryConsumption();
+    }
     // For {code_table_}.
     result += module_->num_declared_functions * sizeof(void*);
     result += ContentSize(code_space_data_);

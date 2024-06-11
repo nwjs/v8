@@ -12,7 +12,7 @@
 %NeverOptimizeFunction(assertOptimized);
 %NeverOptimizeFunction(assertUnoptimized);
 
-function math_smi(x, y) {
+function math_smi(x, y, z) {
   let a = x * y;
   a = a + 152;
   a = a / x;
@@ -20,13 +20,14 @@ function math_smi(x, y) {
   a = a - y;
   a = a % 5;
   a--;
+  a = -z + a;
   return a;
 }
 %PrepareFunctionForOptimization(math_smi);
-assertEquals(3, math_smi(4, 3));
-assertEquals(3, math_smi(4, 3));
+assertEquals(8, math_smi(4, 3, -5));
+assertEquals(8, math_smi(4, 3, -5));
 %OptimizeFunctionOnNextCall(math_smi);
-assertEquals(3, math_smi(4, 3));
+assertEquals(8, math_smi(4, 3, -5));
 assertOptimized(math_smi);
 assertEquals(NaN, math_smi("a", "b"));
 assertUnoptimized(math_smi);
@@ -135,6 +136,18 @@ assertOptimized(math_float);
   assertEquals(false, cmp_float64(3, 20.25, 10.25));
   assertEquals(true, cmp_float64(3, 15.25, 15.25));
   assertOptimized(cmp_float64);
+
+  // Number equality should deopt when passed an Oddball (because undefined's
+  // value is NaN, which leads to undefined != undefined without the deopt).
+  function equal_num(a, b) { return a == b; }
+
+  %PrepareFunctionForOptimization(equal_num);
+  assertEquals(true, equal_num(.5, .5));
+  %OptimizeFunctionOnNextCall(equal_num);
+  assertEquals(true, equal_num(.5, .5));
+  assertOptimized(equal_num);
+  assertEquals(true, equal_num(undefined, undefined));
+  assertUnoptimized(equal_num);
 }
 
 function bitwise_smi(a, b) {
@@ -366,7 +379,7 @@ assertOptimized(simple_loop);
   assertUnoptimized(f);
 }
 
-// Testing exceptions.
+// Testing exceptions (but ignoring the exception value).
 {
   function h(x) {
     if (x) { willThrow(); }
@@ -379,8 +392,7 @@ assertOptimized(simple_loop);
     try {
       r = h(a);
       return h(b) + r;
-    }
-    catch {
+    } catch {
       return r * b;
     }
   }
@@ -394,6 +406,63 @@ assertOptimized(simple_loop);
   assertEquals(187, f(0, 11));
   assertEquals(0, f(7, 0));
   assertOptimized(f);
+}
+
+// Testing exceptions (single throwing point, using the exception value).
+{
+  function h(x) {
+    if (x) { willThrow(); }
+    else { return 17; }
+  }
+  %NeverOptimizeFunction(h);
+
+  function exc_f(a) {
+    try {
+      return h(a);
+    } catch(e) {
+      // Stringifying the exception for easier comparison.
+      return "abc" + e;
+    }
+  }
+
+  %PrepareFunctionForOptimization(exc_f);
+  assertEquals(17, exc_f(0));
+  let err = exc_f(1); // Will cause an exception.
+  %OptimizeFunctionOnNextCall(exc_f);
+  assertEquals(17, exc_f(0));
+  assertEquals(err, exc_f(1));
+  assertOptimized(exc_f);
+}
+
+// Testing exceptions (multiple throwing points, using the exception value).
+{
+  function h(x) {
+    if (x) { willThrow(); }
+    else { return 17; }
+  }
+  %NeverOptimizeFunction(h);
+
+  function multi_exc_f(a, b) {
+    let r = a;
+    try {
+      r = h(a);
+      return h(b) + r;
+    }
+    catch(e) {
+      // Stringifying the exception for easier comparison.
+      return "abc" + e + r;
+    }
+  }
+
+  %PrepareFunctionForOptimization(multi_exc_f);
+  assertEquals(34, multi_exc_f(0, 0)); // Won't cause an exception.
+  let err1 = multi_exc_f(0, 11); // Will cause an exception on the 2nd call to h.
+  let err2 = multi_exc_f(7, 0); // Will cause an exception on the 1st call to h.
+  %OptimizeFunctionOnNextCall(multi_exc_f);
+  assertEquals(34, multi_exc_f(0, 0));
+  assertEquals(err1, multi_exc_f(0, 11));
+  assertEquals(err2, multi_exc_f(7, 0));
+  assertOptimized(multi_exc_f);
 }
 
 // Testing builtin calls
@@ -879,6 +948,67 @@ assertOptimized(simple_loop);
   assertOptimized(typed_arr);
 }
 
+// Testing clamped Uint8 typed array.
+{
+  let uint32_arr = new Uint32Array(5);
+  uint32_arr[1] = 168;
+  uint32_arr[2] = 5896;
+  let uint8_clamped_arr = new Uint8ClampedArray(10);
+
+  function store_clamped_array(x, small_num, large_num, nan) {
+    // Storing Float64 (< 255)
+    let f64_small = x + 3.45;
+    uint8_clamped_arr[0] = f64_small;
+    // Storing Float64 (> 255);
+    let f64_large = x + 18956.586;
+    uint8_clamped_arr[1] = f64_large;
+
+    // Storing Int32 (< 255)
+    let i32_small = x + 17;
+    uint8_clamped_arr[2] = i32_small;
+    // Storing Int32 (> 255)
+    let i32_large = x + 25896;
+    uint8_clamped_arr[3] = i32_large;
+
+    // Storing uint32 (< 255)
+    let uint32_small = uint32_arr[1];
+    uint8_clamped_arr[4] = uint32_small;
+    let uint32_large = uint32_arr[2];
+    uint8_clamped_arr[5] = uint32_large;
+
+    // Storing number (small)
+    uint8_clamped_arr[6] = small_num;
+    // Storing number (large)
+    uint8_clamped_arr[7] = large_num;
+    // Storing number (NaN)
+    uint8_clamped_arr[8] = nan;
+  }
+
+  let expected = new Uint8ClampedArray([7,255,21,255,168,255,6,255,0,0]);
+
+  %PrepareFunctionForOptimization(store_clamped_array);
+  store_clamped_array(4, 6, 1896.365, NaN);
+  assertEquals(expected, uint8_clamped_arr);
+
+  // Reseting the array
+  uint8_clamped_arr = new Uint8ClampedArray(10);
+
+  %OptimizeFunctionOnNextCall(store_clamped_array);
+  store_clamped_array(4, 6, 1896.365, NaN);
+  assertEquals(expected, uint8_clamped_arr);
+  assertOptimized(store_clamped_array);
+
+  // Triggering deopt when trying to store a non-number
+  store_clamped_array(4, "abc", 1896.365);
+  expected[6] = 0;
+  assertEquals(expected, uint8_clamped_arr);
+  // Note: we don't assertUnoptimized here because in some configurations where
+  // some clamped Uint8 operations are not supported, the stores of
+  // `store_clamped_array` are compiled to SetKeyedGeneric by Maglev, and thus
+  // do not deopt for non-numbers. If the result is correct, then deopt or not,
+  // the correct thing probably happened.
+}
+
 // Testing dataview creation, loads and stores.
 {
   function dataview() {
@@ -1022,4 +1152,474 @@ assertOptimized(simple_loop);
 
   %PrepareFunctionForOptimization(test_osr);
   assertEquals(570, test_osr(3, 42.42));
+}
+
+// Testing Array.prototype.push/pop.
+{
+  function array_push_pop(arr, x) {
+    let v = arr.pop();
+    arr.push(x); // This doesn't require growing the array.
+    return v + arr[5];
+  }
+
+  let arr = [0, 1, 2, 3, 4, 5];
+
+  %PrepareFunctionForOptimization(array_push_pop);
+  assertEquals(16, array_push_pop(arr, 11));
+
+  arr[5] = 5;
+  %OptimizeFunctionOnNextCall(array_push_pop);
+  assertEquals(16, array_push_pop(arr, 11));
+  assertOptimized(array_push_pop);
+
+  function array_push_grow_once(arr, x, y) {
+    // The 1st push will have to grow the array.
+    arr.push(x);
+    arr.push(y);
+    return arr.at(-1) + arr.at(-2) + arr.at(-3);
+  }
+
+  arr = [0, 1, 2, 3, 4, 5];
+
+  %PrepareFunctionForOptimization(array_push_grow_once);
+  assertEquals(29, array_push_grow_once(arr, 11, 13));
+
+  arr = [0, 1, 2, 3, 4, 5];
+  %OptimizeFunctionOnNextCall(array_push_grow_once);
+  assertEquals(29, array_push_grow_once(arr, 11, 13));
+  assertOptimized(array_push_grow_once);
+}
+
+// Testing some number/float to int32 truncations.
+{
+  function truncate_number_to_int32(d, b) {
+    let v1 = d ^ 42; // Checked NumberOrOddball truncation
+    let p1 = b ? 4.26 : undefined;
+    let v2 = p1 | 11; // (unchecked) NumberOrOddball truncation
+    let p2 = b ? 3.35 : 4.59;
+    let v3 = p2 & 255; // (unchecked) Float64 truncation
+    return v1 + v2 + v3;
+  }
+
+  %PrepareFunctionForOptimization(truncate_number_to_int32);
+  assertEquals(61, truncate_number_to_int32(1.253, 1));
+  assertEquals(58, truncate_number_to_int32(1.253, 0));
+  %OptimizeFunctionOnNextCall(truncate_number_to_int32);
+  assertEquals(61, truncate_number_to_int32(1.253, 1));
+  assertEquals(58, truncate_number_to_int32(1.253, 0));
+  assertOptimized(truncate_number_to_int32);
+}
+
+// Testing construct (= new).
+{
+  function A() { this.x = 42; return 42; }
+  %NeverOptimizeFunction(A);
+
+  function create(c) {
+    let x = { "a" : 42, c }; // Creating an object before the Construct call so
+                             // that the frame state has more interesting data.
+    let y = new A(c);
+    return [x, y];
+  }
+
+  %PrepareFunctionForOptimization(create);
+  create();
+  let o1 = create();
+
+  %OptimizeFunctionOnNextCall(create);
+  let o2 = create();
+  assertEquals(o1, o2);
+  assertOptimized(create);
+
+  // Triggering deopt (before the construction) by changing the target.
+  let new_A_called = false;
+  A = function() { new_A_called = true; }
+  let o3 = create();
+  assertUnoptimized(create);
+  assertTrue(new_A_called);
+
+  // Falling back to generic Construct call.
+  %OptimizeFunctionOnNextCall(create);
+  let o4 = create();
+  assertEquals(o3, o4);
+  assertOptimized(create);
+}
+
+// Testing construct (= new).
+{
+  function A(c) {
+    if (c) {
+      %DeoptimizeFunction(create_deopt);
+    }
+    this.x = "abc";
+  }
+  %NeverOptimizeFunction(A);
+
+  function create_deopt(c) {
+    let x = { "a" : 42, c }; // Creating an object before the Construct call so
+                             // that the frame state has more interesting data.
+    let y = new A(c);
+    return [x, y];
+  }
+
+  %PrepareFunctionForOptimization(create_deopt);
+  create_deopt(false);
+  let o1 = create_deopt(false);
+
+  %OptimizeFunctionOnNextCall(create_deopt);
+  let o2 = create_deopt(false);
+  assertEquals(o1, o2);
+  assertOptimized(create_deopt);
+
+  // Triggering deopt during the construction
+  let o3 = create_deopt(true);
+  assertUnoptimized(create_deopt);
+  o1[0].c = true; // Fixing {o1} for the comparison, since {o3} was created with
+                  // `true` as input to `create_deopt`.
+  assertEquals(o1, o3);
+}
+
+// Testing SetNamedGeneric.
+{
+  function set_named_generic() {
+    let iterator = new Set().values();
+    iterator.x = 0;
+    return iterator;
+  }
+
+  %PrepareFunctionForOptimization(set_named_generic);
+  let before = set_named_generic();
+  %OptimizeFunctionOnNextCall(set_named_generic);
+  let after = set_named_generic();
+  assertEquals(before, after);
+  assertOptimized(set_named_generic);
+}
+
+// Testing LoadNamedGeneric.
+{
+  let v1 = {};
+
+  function load_named_generic() {
+    let v2 = v1.Intl;
+    try {
+      return v2.supportedValuesOf();
+    } catch(e) {
+      // Stringifying the exception for easier comparison.
+      return "123" + e + v2;
+    }
+  }
+
+  %PrepareFunctionForOptimization(load_named_generic);
+  let before = load_named_generic();
+  %OptimizeFunctionOnNextCall(load_named_generic);
+  let after = load_named_generic();
+  assertEquals(before, after);
+  assertOptimized(load_named_generic);
+}
+
+// Testing function over- and and under-application (calling a function with
+// more or fewer arguments that it expects).
+{
+  function h() { return 42; }
+  function g(x, y) {
+    if (x == 0) {
+      %DeoptimizeNow();
+    }
+    return x + (y | 17);
+  }
+
+  function f(x, y) {
+    return h(x) + g(x) * y;
+  }
+
+  %PrepareFunctionForOptimization(h);
+  %PrepareFunctionForOptimization(g);
+  %PrepareFunctionForOptimization(f);
+  assertEquals(108, f(5, 3));
+  %OptimizeFunctionOnNextCall(f);
+  assertEquals(108, f(5, 3));
+  assertOptimized(f);
+  assertEquals(93, f(0, 3));
+  assertUnoptimized(f);
+}
+
+// Testing const tracking let.
+let glob_a = 0;
+let glob_b = 3.35;
+{
+  function compute_val(v) { return v + 1.15; }
+  function read() { return glob_a + glob_b; }
+  function write(v, w) {
+    glob_a = v;
+    let f64 = compute_val(w);
+    glob_b = f64;
+  }
+
+  %PrepareFunctionForOptimization(compute_val);
+
+  %PrepareFunctionForOptimization(read);
+  assertEquals(3.35, read());
+  %OptimizeFunctionOnNextCall(read);
+  assertEquals(3.35, read());
+  assertOptimized(read);
+
+  %PrepareFunctionForOptimization(write);
+  // Write the same value. This won't invalidate the constness.
+  write(0, 2.25);
+  glob_b = 3.35;
+  assertEquals(3.35, read());
+
+  %OptimizeFunctionOnNextCall(write);
+  write(0, 2.2);
+  assertEquals(3.35, read());
+  assertOptimized(read);
+
+  // Invalidating {glob_a} constness.
+  write(1, 2.2);
+  assertUnoptimized(write);
+  assertEquals(4.35, read());
+
+  %OptimizeFunctionOnNextCall(write);
+  write(1, 2.2);
+  assertEquals(4.35, read());
+  assertOptimized(write);
+}
+
+// Test inner functions.
+{
+  function fun_with_inner(x) {
+    let v = 42;
+    function inner() {
+      v += 3;
+      return x + v;
+    }
+    let r1 = inner();
+    v += 2;
+    let r2 = inner();
+    return r1 + r2;
+  }
+
+  %PrepareFunctionForOptimization(fun_with_inner);
+  assertEquals(105, fun_with_inner(5));
+  %OptimizeFunctionOnNextCall(fun_with_inner);
+  assertEquals(105, fun_with_inner(5));
+}
+
+// Testing CallWithArrayLike and CallWithSpread.
+{
+  function f(x, y, z) {
+    return x + y + z;
+  }
+  %NeverOptimizeFunction(f);
+  let arr = [17, 13, 5, 23];
+
+  function f_apply(arr) {
+    return f.apply(null, arr);
+  }
+
+  %PrepareFunctionForOptimization(f_apply);
+  assertEquals(35, f_apply(arr));
+  %OptimizeFunctionOnNextCall(f_apply);
+  assertEquals(35, f_apply(arr));
+  assertOptimized(f_apply);
+
+  function f_spread(arr) {
+    return f(...arr);
+  }
+
+  %PrepareFunctionForOptimization(f_spread);
+  assertEquals(35, f_spread(arr));
+  %OptimizeFunctionOnNextCall(f_spread);
+  assertEquals(35, f_spread(arr));
+  assertOptimized(f_spread);
+
+  let small_arr = [3, 5];
+  assertEquals(NaN, f_spread(small_arr));
+  assertOptimized(f_spread);
+
+  function f_forward_args() {
+    return f.apply(null, arguments);
+  }
+
+  %PrepareFunctionForOptimization(f_forward_args);
+  assertEquals(24, f_forward_args(12, 5, 7));
+  assertEquals(24, f_forward_args(12, 5, 7, 19));
+  %OptimizeFunctionOnNextCall(f_forward_args);
+  assertEquals(24, f_forward_args(12, 5, 7));
+  assertEquals(24, f_forward_args(12, 5, 7, 19));
+  assertOptimized(f_forward_args);
+}
+
+// Testing UpdateJSArrayLength.
+{
+  function f(a, b, c) {
+    return a + b + c;
+  }
+
+  let short_arr = [11, 27];
+  function f_spread_plus_args(short_arr, x) {
+    return f(...short_arr, x);
+  }
+
+  %PrepareFunctionForOptimization(f_spread_plus_args);
+  assertEquals(41, f_spread_plus_args(short_arr, 3));
+  %OptimizeFunctionOnNextCall(f_spread_plus_args);
+  assertEquals(41, f_spread_plus_args(short_arr, 3));
+  assertOptimized(f_spread_plus_args);
+}
+
+// Testing generic function call.
+{
+  function add3(a, b, c) { return a + b + c; }
+  function add2(a, b) { return a + b; }
+
+  function call_arg(f, a, b, c) {
+    return f(a, b, c);
+  }
+
+  %PrepareFunctionForOptimization(call_arg);
+  assertEquals(15, call_arg(add3, 3, 5, 7));
+  assertEquals(8, call_arg(add2, 3, 5, 7));
+  %OptimizeFunctionOnNextCall(call_arg);
+  assertEquals(15, call_arg(add3, 3, 5, 7));
+  assertEquals(8, call_arg(add2, 3, 5, 7));
+  assertOptimized(call_arg);
+}
+
+// Testing Undetectable detection.
+{
+  function check_undetectable(x) {
+    let r = x == null;
+    if (x == null) return 17;
+    return r;
+  };
+
+  %PrepareFunctionForOptimization(check_undetectable);
+  assertEquals(false, check_undetectable(42));
+  %OptimizeFunctionOnNextCall(check_undetectable);
+  assertEquals(false, check_undetectable(42));
+  assertOptimized(check_undetectable);
+  assertEquals(17, check_undetectable(%GetUndetectable()));
+  // Should deoptimize because of invalidated NoUndetectableObjects protector.
+  assertUnoptimized(check_undetectable);
+  %OptimizeFunctionOnNextCall(check_undetectable);
+  assertEquals(17, check_undetectable(%GetUndetectable()));
+  assertOptimized(check_undetectable);
+}
+
+// Testing switches.
+{
+  function f_switch(x) {
+    switch(x) {
+      // Need at least v8_flags.switch_table_min_cases (= 6) cases so that the
+      // bytecode optimizes this switch with a jumptable rather than generating
+      // cascading ifs/elses.
+      case 3: return 3;
+      case 4: return 5;
+      case 5: return 7;
+      case 6: return 11;
+      // hole between 6 and 9
+      case 9: return 13;
+      // hole between 9 and 13
+      case 13: return 17;
+      default: return 19;
+    }
+  }
+
+  %PrepareFunctionForOptimization(f_switch);
+  assertEquals(3, f_switch(3));
+  assertEquals(5, f_switch(4));
+  assertEquals(7, f_switch(5));
+  assertEquals(11, f_switch(6));
+  assertEquals(13, f_switch(9));
+  assertEquals(17, f_switch(13));
+  // Testing holes/default case
+  assertEquals(19, f_switch(0));
+  assertEquals(19, f_switch(2));
+  assertEquals(19, f_switch(7));
+  assertEquals(19, f_switch(8));
+  assertEquals(19, f_switch(10));
+  assertEquals(19, f_switch(12));
+  assertEquals(19, f_switch(42));
+
+  %OptimizeFunctionOnNextCall(f_switch);
+  assertEquals(3, f_switch(3));
+  assertOptimized(f_switch);
+  assertEquals(5, f_switch(4));
+  assertEquals(7, f_switch(5));
+  assertEquals(11, f_switch(6));
+  assertEquals(13, f_switch(9));
+  assertEquals(17, f_switch(13));
+  assertOptimized(f_switch);
+  // Testing holes/default case
+  assertEquals(19, f_switch(0));
+  assertEquals(19, f_switch(2));
+  assertEquals(19, f_switch(7));
+  assertEquals(19, f_switch(8));
+  assertEquals(19, f_switch(10));
+  assertEquals(19, f_switch(12));
+  assertEquals(19, f_switch(42));
+  assertOptimized(f_switch);
+}
+
+// Testing load named on numbers.
+{
+  function array_length(arr) {
+    return arr.length;
+  }
+
+  %PrepareFunctionForOptimization(array_length);
+  assertEquals(3, array_length([1, 2, 3]));
+  assertEquals(undefined, array_length(3.45));
+  %OptimizeFunctionOnNextCall(array_length);
+  assertEquals(3, array_length([1, 2, 3]));
+  assertEquals(undefined, array_length(3.45));
+  assertEquals(undefined, array_length(1));
+  assertOptimized(array_length);
+}
+
+// Testing load with constant string key.
+{
+  let o = { "a" : 42, "b": 17 };
+
+  function load_const_key(k) {
+    return o[k];
+  }
+
+  %PrepareFunctionForOptimization(load_const_key);
+  assertEquals(42, load_const_key("a"));
+  %OptimizeFunctionOnNextCall(load_const_key);
+  assertEquals(42, load_const_key("a"));
+  assertOptimized(load_const_key);
+  assertEquals(17, load_const_key("b"));
+  assertUnoptimized(load_const_key);
+}
+
+// Testing StoreGlobal.
+{
+  function store_glob() {
+    glob_a = 42;
+  }
+
+  %PrepareFunctionForOptimization(store_glob);
+  store_glob();
+  assertEquals(glob_a, 42);
+  glob_a = 25;
+  %OptimizeFunctionOnNextCall(store_glob);
+  store_glob();
+  assertEquals(glob_a, 42);
+  assertOptimized(store_glob);
+}
+
+// Testing RestLength.
+{
+  function rest_len(a, ...rest) {
+    return rest.length;
+  }
+
+  %PrepareFunctionForOptimization(rest_len);
+  assertEquals(4, rest_len("a", 1, {}, 15.25, []));
+  %OptimizeFunctionOnNextCall(rest_len);
+  assertEquals(4, rest_len("a", 1, {}, 15.25, []));
+  assertOptimized(rest_len);
 }

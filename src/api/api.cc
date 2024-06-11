@@ -1153,8 +1153,8 @@ void Context::SetAlignedPointerInEmbedderData(int index, void* value) {
   i::Isolate* i_isolate = Utils::OpenDirectHandle(this)->GetIsolate();
   i::Handle<i::EmbedderDataArray> data =
       EmbedderDataFor(this, index, true, location);
-  bool ok =
-      i::EmbedderDataSlot(*data, index).store_aligned_pointer(i_isolate, value);
+  bool ok = i::EmbedderDataSlot(*data, index)
+                .store_aligned_pointer(i_isolate, *data, value);
   Utils::ApiCheck(ok, location, "Pointer is not aligned");
   DCHECK_EQ(value, GetAlignedPointerFromEmbedderData(index));
 }
@@ -1618,41 +1618,6 @@ void TemplateSetAccessor(Template* template_obj, v8::Local<Name> name,
 }
 }  // namespace
 
-void Template::SetNativeDataProperty(v8::Local<String> name,
-                                     AccessorGetterCallback getter,
-                                     AccessorSetterCallback setter,
-                                     v8::Local<Value> data,
-                                     PropertyAttribute attribute,
-                                     v8::AccessControl settings,
-                                     SideEffectType getter_side_effect_type,
-                                     SideEffectType setter_side_effect_type) {
-  TemplateSetAccessor(this, name, getter, setter, data, attribute, true, false,
-                      getter_side_effect_type, setter_side_effect_type);
-}
-
-void Template::SetNativeDataProperty(v8::Local<Name> name,
-                                     AccessorNameGetterCallback getter,
-                                     AccessorNameSetterCallback setter,
-                                     v8::Local<Value> data,
-                                     PropertyAttribute attribute,
-                                     v8::AccessControl settings,
-                                     SideEffectType getter_side_effect_type,
-                                     SideEffectType setter_side_effect_type) {
-  TemplateSetAccessor(this, name, getter, setter, data, attribute, true, false,
-                      getter_side_effect_type, setter_side_effect_type);
-}
-
-void Template::SetNativeDataProperty(v8::Local<String> name,
-                                     AccessorGetterCallback getter,
-                                     AccessorSetterCallback setter,
-                                     v8::Local<Value> data,
-                                     PropertyAttribute attribute,
-                                     SideEffectType getter_side_effect_type,
-                                     SideEffectType setter_side_effect_type) {
-  TemplateSetAccessor(this, name, getter, setter, data, attribute, true, false,
-                      getter_side_effect_type, setter_side_effect_type);
-}
-
 void Template::SetNativeDataProperty(v8::Local<Name> name,
                                      AccessorNameGetterCallback getter,
                                      AccessorNameSetterCallback setter,
@@ -1685,18 +1650,6 @@ void Template::SetIntrinsicDataProperty(Local<Name> name, Intrinsic intrinsic,
   i::ApiNatives::AddDataProperty(i_isolate, templ, Utils::OpenHandle(*name),
                                  intrinsic,
                                  static_cast<i::PropertyAttributes>(attribute));
-}
-
-void ObjectTemplate::SetAccessor(v8::Local<String> name,
-                                 AccessorGetterCallback getter,
-                                 AccessorSetterCallback setter,
-                                 v8::Local<Value> data,
-                                 PropertyAttribute attribute,
-                                 SideEffectType getter_side_effect_type,
-                                 SideEffectType setter_side_effect_type) {
-  TemplateSetAccessor(this, name, getter, setter, data, attribute,
-                      i::v8_flags.disable_old_api_accessors, false,
-                      getter_side_effect_type, setter_side_effect_type);
 }
 
 void ObjectTemplate::SetAccessor(v8::Local<Name> name,
@@ -2233,6 +2186,36 @@ std::vector<int> Script::GetProducedCompileHints() const {
   i::Tagged<i::SharedFunctionInfo> sfi = func->shared();
   CHECK(IsScript(sfi->script()));
   i::Tagged<i::Script> script = i::Script::cast(sfi->script());
+  i::Tagged<i::Object> maybe_array_list =
+      script->compiled_lazy_function_positions();
+  std::vector<int> result;
+  if (!IsUndefined(maybe_array_list, i_isolate)) {
+    i::Tagged<i::ArrayList> array_list = i::ArrayList::cast(maybe_array_list);
+    result.reserve(array_list->length());
+    for (int i = 0; i < array_list->length(); ++i) {
+      i::Tagged<i::Object> item = array_list->get(i);
+      CHECK(IsSmi(item));
+      result.push_back(i::Smi::ToInt(item));
+    }
+  }
+  return result;
+}
+
+Local<CompileHintsCollector> Script::GetCompileHintsCollector() const {
+  i::DisallowGarbageCollection no_gc;
+  auto func = Utils::OpenDirectHandle(this);
+  i::Isolate* i_isolate = func->GetIsolate();
+  i::Tagged<i::SharedFunctionInfo> sfi = func->shared();
+  CHECK(IsScript(sfi->script()));
+  i::Handle<i::Script> script(i::Script::cast(sfi->script()), i_isolate);
+  return ToApiHandle<CompileHintsCollector>(script);
+}
+
+std::vector<int> CompileHintsCollector::GetCompileHints(
+    Isolate* v8_isolate) const {
+  i::DisallowGarbageCollection no_gc;
+  auto script = Utils::OpenDirectHandle(this);
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
   i::Tagged<i::Object> maybe_array_list =
       script->compiled_lazy_function_positions();
   std::vector<int> result;
@@ -3934,7 +3917,8 @@ MaybeLocal<String> Value::ToDetailString(Local<Context> context) const {
   }
   if (i::IsString(*obj)) return ToApiHandle<String>(obj);
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
-  return Utils::ToLocal(i::Object::NoSideEffectsToString(i_isolate, obj));
+  return Utils::ToLocal(i::Object::NoSideEffectsToString(i_isolate, obj),
+                        i_isolate);
 }
 
 MaybeLocal<Object> Value::ToObject(Local<Context> context) const {
@@ -4584,14 +4568,7 @@ Maybe<bool> v8::Object::CreateDataProperty(v8::Local<v8::Context> context,
   auto value_obj = Utils::OpenHandle(*value);
 
   i::PropertyKey lookup_key(i_isolate, key_obj);
-  if (i::IsJSProxy(*self)) {
-    ENTER_V8(i_isolate, context, Object, CreateDataProperty, i::HandleScope);
-    Maybe<bool> result = i::JSReceiver::CreateDataProperty(
-        i_isolate, self, lookup_key, value_obj, Just(i::kDontThrow));
-    has_exception = result.IsNothing();
-    RETURN_ON_FAILED_EXECUTION_PRIMITIVE(bool);
-    return result;
-  } else {
+  if (i::IsJSObject(*self)) {
     ENTER_V8_NO_SCRIPT(i_isolate, context, Object, CreateDataProperty,
                        i::HandleScope);
     Maybe<bool> result = i::JSObject::CreateDataProperty(
@@ -4601,6 +4578,13 @@ Maybe<bool> v8::Object::CreateDataProperty(v8::Local<v8::Context> context,
     RETURN_ON_FAILED_EXECUTION_PRIMITIVE(bool);
     return result;
   }
+  // JSProxy or WasmObject or other non-JSObject.
+  ENTER_V8(i_isolate, context, Object, CreateDataProperty, i::HandleScope);
+  Maybe<bool> result = i::JSReceiver::CreateDataProperty(
+      i_isolate, self, lookup_key, value_obj, Just(i::kDontThrow));
+  has_exception = result.IsNothing();
+  RETURN_ON_FAILED_EXECUTION_PRIMITIVE(bool);
+  return result;
 }
 
 Maybe<bool> v8::Object::CreateDataProperty(v8::Local<v8::Context> context,
@@ -4611,14 +4595,7 @@ Maybe<bool> v8::Object::CreateDataProperty(v8::Local<v8::Context> context,
   auto value_obj = Utils::OpenHandle(*value);
 
   i::PropertyKey lookup_key(i_isolate, index);
-  if (i::IsJSProxy(*self)) {
-    ENTER_V8(i_isolate, context, Object, CreateDataProperty, i::HandleScope);
-    Maybe<bool> result = i::JSReceiver::CreateDataProperty(
-        i_isolate, self, lookup_key, value_obj, Just(i::kDontThrow));
-    has_exception = result.IsNothing();
-    RETURN_ON_FAILED_EXECUTION_PRIMITIVE(bool);
-    return result;
-  } else {
+  if (i::IsJSObject(*self)) {
     ENTER_V8_NO_SCRIPT(i_isolate, context, Object, CreateDataProperty,
                        i::HandleScope);
     Maybe<bool> result = i::JSObject::CreateDataProperty(
@@ -4628,6 +4605,13 @@ Maybe<bool> v8::Object::CreateDataProperty(v8::Local<v8::Context> context,
     RETURN_ON_FAILED_EXECUTION_PRIMITIVE(bool);
     return result;
   }
+  // JSProxy or WasmObject or other non-JSObject.
+  ENTER_V8(i_isolate, context, Object, CreateDataProperty, i::HandleScope);
+  Maybe<bool> result = i::JSReceiver::CreateDataProperty(
+      i_isolate, self, lookup_key, value_obj, Just(i::kDontThrow));
+  has_exception = result.IsNothing();
+  RETURN_ON_FAILED_EXECUTION_PRIMITIVE(bool);
+  return result;
 }
 
 struct v8::PropertyDescriptor::PrivateData {
@@ -4738,15 +4722,7 @@ Maybe<bool> v8::Object::DefineOwnProperty(v8::Local<v8::Context> context,
   desc.set_configurable(!(attributes & v8::DontDelete));
   desc.set_value(value_obj);
 
-  if (i::IsJSProxy(*self)) {
-    ENTER_V8(i_isolate, context, Object, DefineOwnProperty, i::HandleScope);
-    Maybe<bool> success = i::JSReceiver::DefineOwnProperty(
-        i_isolate, self, key_obj, &desc, Just(i::kDontThrow));
-    // Even though we said kDontThrow, there might be accessors that do throw.
-    has_exception = success.IsNothing();
-    RETURN_ON_FAILED_EXECUTION_PRIMITIVE(bool);
-    return success;
-  } else {
+  if (i::IsJSObject(*self)) {
     // If it's not a JSProxy, i::JSReceiver::DefineOwnProperty should never run
     // a script.
     ENTER_V8_NO_SCRIPT(i_isolate, context, Object, DefineOwnProperty,
@@ -4757,6 +4733,14 @@ Maybe<bool> v8::Object::DefineOwnProperty(v8::Local<v8::Context> context,
     RETURN_ON_FAILED_EXECUTION_PRIMITIVE(bool);
     return success;
   }
+  // JSProxy or WasmObject or other non-JSObject.
+  ENTER_V8(i_isolate, context, Object, DefineOwnProperty, i::HandleScope);
+  Maybe<bool> success = i::JSReceiver::DefineOwnProperty(
+      i_isolate, self, key_obj, &desc, Just(i::kDontThrow));
+  // Even though we said kDontThrow, there might be accessors that do throw.
+  has_exception = success.IsNothing();
+  RETURN_ON_FAILED_EXECUTION_PRIMITIVE(bool);
+  return success;
 }
 
 Maybe<bool> v8::Object::DefineProperty(v8::Local<v8::Context> context,
@@ -4782,6 +4766,15 @@ Maybe<bool> v8::Object::SetPrivate(Local<Context> context, Local<Private> key,
   auto self = Utils::OpenHandle(this);
   auto key_obj = Utils::OpenHandle(reinterpret_cast<Name*>(*key));
   auto value_obj = Utils::OpenHandle(*value);
+  if (i::IsJSObject(*self)) {
+    auto js_object = i::Handle<i::JSObject>::cast(self);
+    i::LookupIterator it(i_isolate, js_object, key_obj, js_object);
+    has_exception = i::JSObject::DefineOwnPropertyIgnoreAttributes(
+                        &it, value_obj, i::DONT_ENUM)
+                        .is_null();
+    RETURN_ON_FAILED_EXECUTION_PRIMITIVE(bool);
+    return Just(true);
+  }
   if (i::IsJSProxy(*self)) {
     i::PropertyDescriptor desc;
     desc.set_writable(true);
@@ -4792,13 +4785,8 @@ Maybe<bool> v8::Object::SetPrivate(Local<Context> context, Local<Private> key,
         i_isolate, i::Handle<i::JSProxy>::cast(self),
         i::Handle<i::Symbol>::cast(key_obj), &desc, Just(i::kDontThrow));
   }
-  auto js_object = i::Handle<i::JSObject>::cast(self);
-  i::LookupIterator it(i_isolate, js_object, key_obj, js_object);
-  has_exception = i::JSObject::DefineOwnPropertyIgnoreAttributes(&it, value_obj,
-                                                                 i::DONT_ENUM)
-                      .is_null();
-  RETURN_ON_FAILED_EXECUTION_PRIMITIVE(bool);
-  return Just(true);
+  // Wasm object, or other kind of special object not supported here.
+  return Just(false);
 }
 
 MaybeLocal<Value> v8::Object::Get(Local<v8::Context> context,
@@ -4894,6 +4882,17 @@ Maybe<bool> SetPrototypeImpl(v8::Object* this_, Local<Context> context,
   // TODO(333672197): turn this to DCHECK once it's no longer possible
   // to get JSGlobalObject via API.
   CHECK_IMPLIES(from_javascript, !i::IsJSGlobalObject(*value_obj));
+  if (i::IsJSObject(*self)) {
+    ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
+    // TODO(333672197): turn this to DCHECK once it's no longer possible
+    // to get JSGlobalObject via API.
+    CHECK_IMPLIES(from_javascript, !i::IsJSGlobalObject(*self));
+    auto result =
+        i::JSObject::SetPrototype(i_isolate, i::Handle<i::JSObject>::cast(self),
+                                  value_obj, from_javascript, i::kDontThrow);
+    if (!result.FromJust()) return Nothing<bool>();
+    return Just(true);
+  }
   if (i::IsJSProxy(*self)) {
     ENTER_V8(i_isolate, context, Object, SetPrototype, i::HandleScope);
     // We do not allow exceptions thrown while setting the prototype
@@ -4904,17 +4903,10 @@ Maybe<bool> SetPrototypeImpl(v8::Object* this_, Local<Context> context,
                                  value_obj, from_javascript, i::kThrowOnError);
     has_exception = result.IsNothing();
     RETURN_ON_FAILED_EXECUTION_PRIMITIVE(bool);
-  } else {
-    ENTER_V8_NO_SCRIPT_NO_EXCEPTION(i_isolate);
-    // TODO(333672197): turn this to DCHECK once it's no longer possible
-    // to get JSGlobalObject via API.
-    CHECK_IMPLIES(from_javascript, !i::IsJSGlobalObject(*self));
-    auto result =
-        i::JSObject::SetPrototype(i_isolate, i::Handle<i::JSObject>::cast(self),
-                                  value_obj, from_javascript, i::kDontThrow);
-    if (!result.FromJust()) return Nothing<bool>();
+    return Just(true);
   }
-  return Just(true);
+  // Wasm object or other kind of special object not supported here.
+  return Nothing<bool>();
 }
 
 }  // namespace
@@ -5044,6 +5036,7 @@ Maybe<bool> v8::Object::Delete(Local<Context> context, Local<Value> key) {
   } else {
     // If it's not a JSProxy, i::Runtime::DeleteObjectProperty should never run
     // a script.
+    DCHECK(i::IsJSObject(*self) || i::IsWasmObject(*self));
     ENTER_V8_NO_SCRIPT(i_isolate, context, Object, Delete, i::HandleScope);
     Maybe<bool> result = i::Runtime::DeleteObjectProperty(
         i_isolate, self, key_obj, i::LanguageMode::kSloppy);
@@ -5377,39 +5370,77 @@ Local<v8::Object> v8::Object::Clone() {
   return Utils::ToLocal(result);
 }
 
-MaybeLocal<v8::Context> v8::Object::GetCreationContext() {
-  auto self = Utils::OpenDirectHandle(this);
-  auto i_isolate = self->GetIsolate();
+namespace {
+V8_INLINE MaybeLocal<v8::Context> GetCreationContextImpl(
+    i::DirectHandle<i::JSReceiver> object, i::Isolate* i_isolate) {
   i::Handle<i::NativeContext> context;
-  if (self->GetCreationContext(i_isolate).ToHandle(&context)) {
+  if (object->GetCreationContext(i_isolate).ToHandle(&context)) {
     return Utils::ToLocal(context);
   }
   return MaybeLocal<v8::Context>();
 }
+}  // namespace
 
-void* v8::Object::GetAlignedPointerFromEmbedderDataInCreationContext(
+MaybeLocal<v8::Context> v8::Object::GetCreationContext(v8::Isolate* isolate) {
+  auto self = Utils::OpenDirectHandle(this);
+  auto i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+  return GetCreationContextImpl(self, i_isolate);
+}
+
+MaybeLocal<v8::Context> v8::Object::GetCreationContext() {
+  auto self = Utils::OpenDirectHandle(this);
+  return GetCreationContextImpl(self, self->GetIsolate());
+}
+
+namespace {
+V8_INLINE Local<v8::Context> GetCreationContextCheckedImpl(
+    i::DirectHandle<i::JSReceiver> object, i::Isolate* i_isolate) {
+  i::Handle<i::NativeContext> context;
+  Utils::ApiCheck(object->GetCreationContext(i_isolate).ToHandle(&context),
+                  "v8::Object::GetCreationContextChecked",
+                  "No creation context available");
+  return Utils::ToLocal(context);
+}
+}  // namespace
+
+Local<v8::Context> v8::Object::GetCreationContextChecked(v8::Isolate* isolate) {
+  auto self = Utils::OpenDirectHandle(this);
+  auto i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+  return GetCreationContextCheckedImpl(self, i_isolate);
+}
+
+Local<v8::Context> v8::Object::GetCreationContextChecked() {
+  auto self = Utils::OpenDirectHandle(this);
+  return GetCreationContextCheckedImpl(self, self->GetIsolate());
+}
+
+namespace {
+V8_INLINE void* GetAlignedPointerFromEmbedderDataInCreationContextImpl(
+    i::DirectHandle<i::JSReceiver> object, i::Isolate* i_isolate_for_sandbox,
     int index) {
   const char* location =
       "v8::Object::GetAlignedPointerFromEmbedderDataInCreationContext()";
-  auto maybe_context = Utils::OpenDirectHandle(this)->GetCreationContext();
+  auto maybe_context = object->GetCreationContext();
   if (!maybe_context.has_value()) return nullptr;
 
   // The code below mostly mimics Context::GetAlignedPointerFromEmbedderData()
   // but it doesn't try to expand the EmbedderDataArray instance.
   i::DisallowGarbageCollection no_gc;
   i::Tagged<i::NativeContext> native_context = maybe_context.value();
-  i::Isolate* i_isolate = native_context->GetIsolate();
 
-  DCHECK_NO_SCRIPT_NO_EXCEPTION(i_isolate);
+  // This macro requires a real Isolate while |i_isolate_for_sandbox| might be
+  // nullptr if the V8 sandbox is not enabled.
+  DCHECK_NO_SCRIPT_NO_EXCEPTION(native_context->GetIsolate());
+
   // TODO(ishell): remove cast once embedder_data slot has a proper type.
   i::Tagged<i::EmbedderDataArray> data =
       i::EmbedderDataArray::cast(native_context->embedder_data());
   if (V8_LIKELY(static_cast<unsigned>(index) <
                 static_cast<unsigned>(data->length()))) {
     void* result;
-    Utils::ApiCheck(
-        i::EmbedderDataSlot(data, index).ToAlignedPointer(i_isolate, &result),
-        location, "Pointer is not aligned");
+    Utils::ApiCheck(i::EmbedderDataSlot(data, index)
+                        .ToAlignedPointer(i_isolate_for_sandbox, &result),
+                    location, "Pointer is not aligned");
     return result;
   }
   // Bad index, report an API error.
@@ -5418,13 +5449,23 @@ void* v8::Object::GetAlignedPointerFromEmbedderDataInCreationContext(
                   "Index too large");
   return nullptr;
 }
+}  // namespace
 
-Local<v8::Context> v8::Object::GetCreationContextChecked() {
-  Local<Context> context;
-  Utils::ApiCheck(GetCreationContext().ToLocal(&context),
-                  "v8::Object::GetCreationContextChecked",
-                  "No creation context available");
-  return context;
+void* v8::Object::GetAlignedPointerFromEmbedderDataInCreationContext(
+    v8::Isolate* isolate, int index) {
+  auto self = Utils::OpenDirectHandle(this);
+  auto i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+  return GetAlignedPointerFromEmbedderDataInCreationContextImpl(self, i_isolate,
+                                                                index);
+}
+
+void* v8::Object::GetAlignedPointerFromEmbedderDataInCreationContext(
+    int index) {
+  auto self = Utils::OpenDirectHandle(this);
+  auto i_isolate_for_sandbox =
+      reinterpret_cast<i::Isolate*>(GetIsolateForSandbox(*self));
+  return GetAlignedPointerFromEmbedderDataInCreationContextImpl(
+      self, i_isolate_for_sandbox, index);
 }
 
 int v8::Object::GetIdentityHash() {
@@ -5445,13 +5486,15 @@ bool v8::Object::IsConstructor() const {
 }
 
 bool v8::Object::IsApiWrapper() const {
-  auto self = i::DirectHandle<i::JSObject>::cast(Utils::OpenDirectHandle(this));
-  // Objects with embedder fields can wrap API objects.
-  return self->MayHaveEmbedderFields();
+  auto self = Utils::OpenDirectHandle(this);
+  // This checks whether an object of a given instance type can serve as API
+  // object. It does not check whether the JS object is wrapped via embedder
+  // fields or Wrap()/Unwrap() API.
+  return IsJSApiWrapperObject(*self);
 }
 
 bool v8::Object::IsUndetectable() const {
-  auto self = i::DirectHandle<i::JSObject>::cast(Utils::OpenDirectHandle(this));
+  auto self = Utils::OpenDirectHandle(this);
   return i::IsUndetectable(*self);
 }
 
@@ -6449,7 +6492,7 @@ void v8::Object::SetAlignedPointerInInternalField(int index, void* value) {
 
   i::DisallowGarbageCollection no_gc;
   Utils::ApiCheck(i::EmbedderDataSlot(i::JSObject::cast(*obj), index)
-                      .store_aligned_pointer(obj->GetIsolate(), value),
+                      .store_aligned_pointer(obj->GetIsolate(), *obj, value),
                   location, "Unaligned pointer");
   DCHECK_EQ(value, GetAlignedPointerFromInternalField(index));
   internal::WriteBarrier::CombinedBarrierFromInternalFields(
@@ -6459,7 +6502,7 @@ void v8::Object::SetAlignedPointerInInternalField(int index, void* value) {
 void v8::Object::SetAlignedPointerInInternalFields(int argc, int indices[],
                                                    void* values[]) {
   auto obj = Utils::OpenDirectHandle(this);
-
+  if (!IsJSObject(*obj)) return;
   i::DisallowGarbageCollection no_gc;
   const char* location = "v8::Object::SetAlignedPointerInInternalFields()";
   auto js_obj = i::JSObject::cast(*obj);
@@ -6472,7 +6515,7 @@ void v8::Object::SetAlignedPointerInInternalFields(int argc, int indices[],
     }
     void* value = values[i];
     Utils::ApiCheck(i::EmbedderDataSlot(js_obj, index)
-                        .store_aligned_pointer(obj->GetIsolate(), value),
+                        .store_aligned_pointer(obj->GetIsolate(), *obj, value),
                     location, "Unaligned pointer");
     DCHECK_EQ(value, GetAlignedPointerFromInternalField(index));
   }
@@ -6483,8 +6526,7 @@ void v8::Object::SetAlignedPointerInInternalFields(int argc, int indices[],
 // static
 void* v8::Object::Unwrap(v8::Isolate* isolate, i::Address wrapper_obj,
                          CppHeapPointerTag tag) {
-  return i::JSApiWrapper(i::JSObject::cast(i::Tagged<i::Object>(
-                             reinterpret_cast<i::Address>(wrapper_obj))))
+  return i::JSApiWrapper(i::JSObject::cast(i::Tagged<i::Object>(wrapper_obj)))
       .GetCppHeapWrappable(reinterpret_cast<i::Isolate*>(isolate),
                            static_cast<i::ExternalPointerTag>(tag));
 }
@@ -6492,8 +6534,7 @@ void* v8::Object::Unwrap(v8::Isolate* isolate, i::Address wrapper_obj,
 // static
 void v8::Object::Wrap(v8::Isolate* isolate, i::Address wrapper_obj,
                       CppHeapPointerTag tag, void* wrappable) {
-  return i::JSApiWrapper(i::JSObject::cast(i::Tagged<i::Object>(
-                             reinterpret_cast<i::Address>(wrapper_obj))))
+  return i::JSApiWrapper(i::JSObject::cast(i::Tagged<i::Object>(wrapper_obj)))
       .SetCppHeapWrappable(reinterpret_cast<i::Isolate*>(isolate), wrappable,
                            static_cast<i::ExternalPointerTag>(tag));
 }
@@ -8078,6 +8119,22 @@ MaybeLocal<v8::Value> v8::Date::New(Local<Context> context, double time) {
   RETURN_ESCAPED(result);
 }
 
+MaybeLocal<Value> v8::Date::Parse(Local<Context> context,
+                                  Local<String> value) {
+  PREPARE_FOR_EXECUTION(context, Date, Parse);
+  auto string = Utils::OpenHandle(*value);
+  double time = ParseDateTimeString(i_isolate, string);
+
+  Local<Value> result;
+  has_exception =
+      !ToLocal<Value>(i::JSDate::New(i_isolate->date_function(),
+                                     i_isolate->date_function(), time),
+                      &result);
+
+  RETURN_ON_FAILED_EXECUTION(Value)
+  RETURN_ESCAPED(result);
+}
+
 double v8::Date::ValueOf() const {
   auto obj = Utils::OpenDirectHandle(this);
   auto jsdate = i::DirectHandle<i::JSDate>::cast(obj);
@@ -8093,6 +8150,20 @@ v8::Local<v8::String> v8::Date::ToISOString() const {
   i::DateBuffer buffer = i::ToDateString(i::Object::Number(jsdate->value()),
                                          i_isolate->date_cache(),
                                          i::ToDateStringMode::kISODateAndTime);
+  i::Handle<i::String> str = i_isolate->factory()
+                                 ->NewStringFromUtf8(base::VectorOf(buffer))
+                                 .ToHandleChecked();
+  return Utils::ToLocal(str);
+}
+
+v8::Local<v8::String> v8::Date::ToUTCString() const {
+  auto obj = Utils::OpenDirectHandle(this);
+  auto jsdate = i::DirectHandle<i::JSDate>::cast(obj);
+  i::Isolate* i_isolate = jsdate->GetIsolate();
+  API_RCS_SCOPE(i_isolate, Date, NumberValue);
+  i::DateBuffer buffer = i::ToDateString(i::Object::Number(jsdate->value()),
+                                         i_isolate->date_cache(),
+                                         i::ToDateStringMode::kUTCDateAndTime);
   i::Handle<i::String> str = i_isolate->factory()
                                  ->NewStringFromUtf8(base::VectorOf(buffer))
                                  .ToHandleChecked();
@@ -8931,8 +9002,7 @@ MaybeLocal<WasmModuleObject> WasmModuleObject::FromCompiledModule(
       i::wasm::GetWasmEngine()->ImportNativeModule(
           i_isolate, compiled_module.native_module_,
           base::VectorOf(compiled_module.source_url()));
-  return Local<WasmModuleObject>::Cast(
-      Utils::ToLocal(i::Handle<i::JSObject>::cast(module_object)));
+  return Utils::ToLocal(module_object);
 #else
   UNREACHABLE();
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -8947,7 +9017,7 @@ MaybeLocal<WasmModuleObject> WasmModuleObject::Compile(
   if (!i::wasm::IsWasmCodegenAllowed(i_isolate, i_isolate->native_context())) {
     return MaybeLocal<WasmModuleObject>();
   }
-  i::MaybeHandle<i::JSObject> maybe_compiled;
+  i::MaybeHandle<i::WasmModuleObject> maybe_compiled;
   {
     i::wasm::ErrorThrower thrower(i_isolate, "WasmModuleObject::Compile()");
     auto enabled_features = i::wasm::WasmFeatures::FromIsolate(i_isolate);
@@ -8960,8 +9030,7 @@ MaybeLocal<WasmModuleObject> WasmModuleObject::Compile(
   if (maybe_compiled.is_null()) {
     return MaybeLocal<WasmModuleObject>();
   }
-  return Local<WasmModuleObject>::Cast(
-      Utils::ToLocal(maybe_compiled.ToHandleChecked()));
+  return Utils::ToLocal(maybe_compiled.ToHandleChecked());
 #else
   Utils::ApiCheck(false, "WasmModuleObject::Compile",
                   "WebAssembly support is not enabled");
@@ -10967,6 +11036,27 @@ Local<StackTrace> Exception::GetStackTrace(Local<Value> exception) {
   return Utils::StackTraceToLocal(i_isolate->GetDetailedStackTrace(js_obj));
 }
 
+Maybe<bool> Exception::CaptureStackTrace(Local<Context> context,
+                                         Local<Object> object) {
+  auto i_isolate = reinterpret_cast<i::Isolate*>(context->GetIsolate());
+  ENTER_V8_NO_SCRIPT(i_isolate, context, Exception, CaptureStackTrace,
+                     i::HandleScope);
+  auto obj = Utils::OpenHandle(*object);
+  if (!IsJSObject(*obj)) return Just(false);
+
+  auto js_obj = i::Handle<i::JSObject>::cast(obj);
+
+  i::FrameSkipMode mode = i::FrameSkipMode::SKIP_FIRST;
+
+  auto result = i::ErrorUtils::CaptureStackTrace(i_isolate, js_obj, mode,
+      i::Handle<i::Object>());
+
+  i::Handle<i::Object> handle;
+  has_exception = !result.ToHandle(&handle);
+  RETURN_ON_FAILED_EXECUTION_PRIMITIVE(bool);
+  return Just(true);
+}
+
 v8::MaybeLocal<v8::Array> v8::Object::PreviewEntries(bool* is_key_value) {
   auto object = Utils::OpenHandle(this);
   i::Isolate* i_isolate = object->GetIsolate();
@@ -11573,6 +11663,12 @@ AllocationProfile* HeapProfiler::GetAllocationProfile() {
 
 void HeapProfiler::DeleteAllHeapSnapshots() {
   reinterpret_cast<i::HeapProfiler*>(this)->DeleteAllSnapshots();
+}
+
+v8::EmbedderGraph::Node* v8::EmbedderGraph::V8Node(
+    const v8::Local<v8::Data>& data) {
+  CHECK(data->IsValue());
+  return V8Node(data.As<v8::Value>());
 }
 
 void HeapProfiler::AddBuildEmbedderGraphCallback(

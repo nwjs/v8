@@ -53,16 +53,27 @@ struct GraphBuilder {
   Schedule& schedule;
   Linkage* linkage;
 
-  Isolate* isolate = PipelineData::Get().isolate();
-  JSHeapBroker* broker = PipelineData::Get().broker();
-  Zone* graph_zone = PipelineData::Get().graph_zone();
+  Isolate* isolate;
+  JSHeapBroker* broker;
+  Zone* graph_zone;
   using AssemblerT = TSAssembler<ExplicitTruncationReducer>;
-  AssemblerT assembler{PipelineData::Get().graph(), PipelineData::Get().graph(),
-                       phase_zone};
-  SourcePositionTable* source_positions =
-      PipelineData::Get().source_positions();
-  NodeOriginTable* origins = PipelineData::Get().node_origins();
-  TurboshaftPipelineKind pipeline_kind = PipelineData::Get().pipeline_kind();
+  AssemblerT assembler;
+  SourcePositionTable* source_positions;
+  NodeOriginTable* origins;
+  TurboshaftPipelineKind pipeline_kind;
+
+  GraphBuilder(PipelineData* data, Zone* phase_zone, Schedule& schedule,
+               Linkage* linkage)
+      : phase_zone(phase_zone),
+        schedule(schedule),
+        linkage(linkage),
+        isolate(data->isolate()),
+        broker(data->broker()),
+        graph_zone(data->graph_zone()),
+        assembler(data, data->graph(), data->graph(), phase_zone),
+        source_positions(data->source_positions()),
+        origins(data->node_origins()),
+        pipeline_kind(data->pipeline_kind()) {}
 
   struct BlockData {
     Block* block;
@@ -1100,9 +1111,9 @@ OpIndex GraphBuilder::Process(
     }
 
     case IrOpcode::kSelect: {
-      OpIndex cond = Map(node->InputAt(0));
-      OpIndex vtrue = Map(node->InputAt(1));
-      OpIndex vfalse = Map(node->InputAt(2));
+      V<Word32> cond = Map(node->InputAt(0));
+      V<Any> vtrue = Map(node->InputAt(1));
+      V<Any> vfalse = Map(node->InputAt(2));
       const SelectParameters& params = SelectParametersOf(op);
       return __ Select(cond, vtrue, vfalse,
                        RegisterRepresentation::FromMachineRepresentation(
@@ -1110,13 +1121,15 @@ OpIndex GraphBuilder::Process(
                        params.hint(), SelectOp::Implementation::kBranch);
     }
     case IrOpcode::kWord32Select:
-      return __ Select(Map(node->InputAt(0)), Map(node->InputAt(1)),
-                       Map(node->InputAt(2)), RegisterRepresentation::Word32(),
-                       BranchHint::kNone, SelectOp::Implementation::kCMove);
+      return __ Select(
+          Map<Word32>(node->InputAt(0)), Map<Word32>(node->InputAt(1)),
+          Map<Word32>(node->InputAt(2)), RegisterRepresentation::Word32(),
+          BranchHint::kNone, SelectOp::Implementation::kCMove);
     case IrOpcode::kWord64Select:
-      return __ Select(Map(node->InputAt(0)), Map(node->InputAt(1)),
-                       Map(node->InputAt(2)), RegisterRepresentation::Word64(),
-                       BranchHint::kNone, SelectOp::Implementation::kCMove);
+      return __ Select(
+          Map<Word32>(node->InputAt(0)), Map<Word64>(node->InputAt(1)),
+          Map<Word64>(node->InputAt(2)), RegisterRepresentation::Word64(),
+          BranchHint::kNone, SelectOp::Implementation::kCMove);
 
     case IrOpcode::kLoad:
     case IrOpcode::kLoadImmutable:
@@ -1938,6 +1951,11 @@ OpIndex GraphBuilder::Process(
         slow_call_arguments.push_back(Map(n.SlowCallArgument(i)));
       }
 
+      base::Optional<decltype(assembler)::CatchScope> catch_scope;
+      if (is_final_control) {
+        Block* catch_block = Map(block->SuccessorAt(1));
+        catch_scope.emplace(assembler, catch_block);
+      }
       // Overload resolution.
       auto resolution_result =
           fast_api_call::OverloadsResolutionResult::Invalid();
@@ -1946,11 +1964,20 @@ OpIndex GraphBuilder::Process(
         resolution_result =
             fast_api_call::ResolveOverloads(c_functions, c_arg_count);
         if (!resolution_result.is_valid()) {
-          return __ Call(
+          auto result = __ Call(
               slow_call_callee, dominating_frame_state,
               base::VectorOf(slow_call_arguments),
               TSCallDescriptor::Create(params.descriptor(), CanThrow::kYes,
                                        __ graph_zone()));
+
+          if (is_final_control) {
+            // The `__ Call()` before has already created exceptional
+            // control flow and bound a new block for the success case. So we
+            // can just `Goto` the block that Turbofan designated as the
+            // `IfSuccess` successor.
+            __ Goto(Map(block->SuccessorAt(0)));
+          }
+          return result;
         }
       }
 
@@ -1961,13 +1988,21 @@ OpIndex GraphBuilder::Process(
       }
       OpIndex data_argument =
           Map(n.SlowCallArgument(FastApiCallNode::kSlowCallDataArgumentIndex));
+
+      // The last slow call argument is the frame state, the one before is the
+      // context.
+      V<Context> context =
+          Map(n.SlowCallArgument(n.SlowCallArgumentCount() - 2));
+
       const FastApiCallParameters* parameters = FastApiCallParameters::Create(
           c_functions, resolution_result, __ graph_zone());
 
       Label<Object> done(this);
 
       V<Tuple<Word32, Any>> fast_call_result =
-          __ FastApiCall(data_argument, base::VectorOf(arguments), parameters);
+          __ FastApiCall(dominating_frame_state, data_argument, context,
+                         base::VectorOf(arguments), parameters);
+
       V<Word32> result_state = __ template Projection<0>(fast_call_result);
 
       IF (LIKELY(__ Word32Equal(result_state, FastApiCallOp::kSuccessValue))) {
@@ -1980,6 +2015,7 @@ OpIndex GraphBuilder::Process(
         // 2) the embedder requested fallback possibility via providing options
         // arg. None of the above usually holds true for Wasm functions with
         // primitive types only, so we avoid generating an extra branch here.
+
         V<Object> slow_call_result = V<Object>::Cast(
             __ Call(slow_call_callee, dominating_frame_state,
                     base::VectorOf(slow_call_arguments),
@@ -1987,8 +2023,14 @@ OpIndex GraphBuilder::Process(
                                              CanThrow::kYes, __ graph_zone())));
         GOTO(done, slow_call_result);
       }
-
       BIND(done, result);
+      if (is_final_control) {
+        // The `__ FastApiCall()` before has already created exceptional control
+        // flow and bound a new block for the success case. So we can just
+        // `Goto` the block that Turbofan designated as the `IfSuccess`
+        // successor.
+        __ Goto(Map(block->SuccessorAt(0)));
+      }
       return result;
     }
 
@@ -2238,29 +2280,31 @@ OpIndex GraphBuilder::Process(
                                  : Simd128BinopOp::Kind::kI8x16Swizzle);
     }
 
-#define SIMD128_UNOP(name)                        \
-  case IrOpcode::k##name:                         \
-    return __ Simd128Unary(Map(node->InputAt(0)), \
+#define SIMD128_UNOP(name)                                 \
+  case IrOpcode::k##name:                                  \
+    return __ Simd128Unary(Map<Simd128>(node->InputAt(0)), \
                            Simd128UnaryOp::Kind::k##name);
       FOREACH_SIMD_128_UNARY_OPCODE(SIMD128_UNOP)
 #undef SIMD128_UNOP
 
-#define SIMD128_SHIFT(name)                                              \
-  case IrOpcode::k##name:                                                \
-    return __ Simd128Shift(Map(node->InputAt(0)), Map(node->InputAt(1)), \
+#define SIMD128_SHIFT(name)                                \
+  case IrOpcode::k##name:                                  \
+    return __ Simd128Shift(Map<Simd128>(node->InputAt(0)), \
+                           Map<Word32>(node->InputAt(1)),  \
                            Simd128ShiftOp::Kind::k##name);
       FOREACH_SIMD_128_SHIFT_OPCODE(SIMD128_SHIFT)
 #undef SIMD128_UNOP
 
-#define SIMD128_TEST(name) \
-  case IrOpcode::k##name:  \
-    return __ Simd128Test(Map(node->InputAt(0)), Simd128TestOp::Kind::k##name);
+#define SIMD128_TEST(name)                                \
+  case IrOpcode::k##name:                                 \
+    return __ Simd128Test(Map<Simd128>(node->InputAt(0)), \
+                          Simd128TestOp::Kind::k##name);
       FOREACH_SIMD_128_TEST_OPCODE(SIMD128_TEST)
 #undef SIMD128_UNOP
 
-#define SIMD128_SPLAT(name)                       \
-  case IrOpcode::k##name##Splat:                  \
-    return __ Simd128Splat(Map(node->InputAt(0)), \
+#define SIMD128_SPLAT(name)                            \
+  case IrOpcode::k##name##Splat:                       \
+    return __ Simd128Splat(Map<Any>(node->InputAt(0)), \
                            Simd128SplatOp::Kind::k##name);
       FOREACH_SIMD_128_SPLAT_OPCODE(SIMD128_SPLAT)
 #undef SIMD128_SPLAT
@@ -2275,7 +2319,7 @@ OpIndex GraphBuilder::Process(
 
 #define SIMD128_EXTRACT_LANE(name, suffix)                                    \
   case IrOpcode::k##name##ExtractLane##suffix:                                \
-    return __ Simd128ExtractLane(Map(node->InputAt(0)),                       \
+    return __ Simd128ExtractLane(Map<Simd128>(node->InputAt(0)),              \
                                  Simd128ExtractLaneOp::Kind::k##name##suffix, \
                                  OpParameter<int32_t>(node->op()));
       SIMD128_EXTRACT_LANE(I8x16, S)
@@ -2288,10 +2332,11 @@ OpIndex GraphBuilder::Process(
       SIMD128_EXTRACT_LANE(F64x2, )
 #undef SIMD128_LANE
 
-#define SIMD128_REPLACE_LANE(name)                                             \
-  case IrOpcode::k##name##ReplaceLane:                                         \
-    return __ Simd128ReplaceLane(Map(node->InputAt(0)), Map(node->InputAt(1)), \
-                                 Simd128ReplaceLaneOp::Kind::k##name,          \
+#define SIMD128_REPLACE_LANE(name)                                    \
+  case IrOpcode::k##name##ReplaceLane:                                \
+    return __ Simd128ReplaceLane(Map<Simd128>(node->InputAt(0)),      \
+                                 Map<Any>(node->InputAt(1)),          \
+                                 Simd128ReplaceLaneOp::Kind::k##name, \
                                  OpParameter<int32_t>(node->op()));
       SIMD128_REPLACE_LANE(I8x16)
       SIMD128_REPLACE_LANE(I16x8)
@@ -2364,11 +2409,11 @@ OpIndex GraphBuilder::Process(
 
 }  // namespace
 
-base::Optional<BailoutReason> BuildGraph(Schedule* schedule, Zone* phase_zone,
-                                         Linkage* linkage) {
-  GraphBuilder builder{phase_zone, *schedule, linkage};
+base::Optional<BailoutReason> BuildGraph(PipelineData* data, Schedule* schedule,
+                                         Zone* phase_zone, Linkage* linkage) {
+  GraphBuilder builder{data, phase_zone, *schedule, linkage};
 #if DEBUG
-  PipelineData::Get().graph().SetCreatedFromTurbofan();
+  data->graph().SetCreatedFromTurbofan();
 #endif
   return builder.Run();
 }

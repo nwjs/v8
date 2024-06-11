@@ -194,8 +194,13 @@ void PagedSpaceBase::RefineAllocatedBytesAfterSweeping(PageMetadata* page) {
     size_t counter_diff = old_counter - new_counter;
     if (identity() == NEW_SPACE) size_at_last_gc_ -= counter_diff;
     DecreaseAllocatedBytes(counter_diff, page);
+    DCHECK_EQ(new_counter, accounting_stats_.AllocatedOnPage(page));
+    AdjustDifferenceInAllocatedBytes(counter_diff);
   }
-  page->SetLiveBytes(0);
+  if (!v8_flags.sticky_mark_bits) {
+    // With sticky mark-bits the counter is reset on unmarking.
+    page->SetLiveBytes(0);
+  }
 }
 
 PageMetadata* PagedSpaceBase::RemovePageSafe(int size_in_bytes) {
@@ -640,6 +645,14 @@ void OldSpace::AddPromotedPage(PageMetadata* page) {
 
 void OldSpace::ReleasePage(PageMetadata* page) {
   ReleasePageImpl(page, MemoryAllocator::FreeMode::kPool);
+}
+
+// -----------------------------------------------------------------------------
+// StickySpace implementation
+
+void StickySpace::AdjustDifferenceInAllocatedBytes(size_t diff) {
+  DCHECK_GE(allocated_old_size_, diff);
+  allocated_old_size_ -= diff;
 }
 
 // -----------------------------------------------------------------------------

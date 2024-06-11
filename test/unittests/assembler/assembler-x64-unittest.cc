@@ -3188,9 +3188,62 @@ TEST_F(AssemblerX64Test, AssemblerX64BinOp256bit) {
   }
 }
 
+TEST_F(AssemblerX64Test, F16C) {
+  if (!CpuFeatures::IsSupported(F16C)) return;
+
+  auto buffer = AllocateAssemblerBuffer();
+  Isolate* isolate = i_isolate();
+  Assembler masm(AssemblerOptions{}, buffer->CreateView());
+  CpuFeatureScope fscope(&masm, F16C);
+
+  __ vcvtph2ps(ymm0, xmm1);
+  __ vcvtph2ps(xmm2, xmm3);
+  __ vcvtps2ph(xmm4, ymm5, 0);
+  __ vcvtps2ph(xmm6, xmm7, 0);
+
+  CodeDesc desc;
+  masm.GetCode(isolate, &desc);
+
+  uint8_t expected[] = {// vcvtph2ps ymm0,xmm1,
+                        0xc4, 0xe2, 0x7d, 0x13, 0xc1,
+                        // vcvtph2ps xymm2,xmm3,
+                        0xc4, 0xe2, 0x79, 0x13, 0xd3,
+                        // vcvtps2ph xmm4,ymm5,0x0
+                        0xc4, 0xe3, 0x7d, 0x1d, 0xec, 0x00,
+                        // vcvtps2ph xmm6,xmm7,0x0
+                        0xc4, 0xe3, 0x79, 0x1d, 0xfe, 0x00};
+  CHECK_EQ(0, memcmp(expected, desc.buffer, sizeof(expected)));
+}
+
+TEST_F(AssemblerX64Test, AssemblerX64AVXVNNI) {
+  if (!CpuFeatures::IsSupported(AVX_VNNI)) return;
+
+  auto buffer = AllocateAssemblerBuffer();
+  Isolate* isolate = i_isolate();
+  Assembler masm(AssemblerOptions{}, buffer->CreateView());
+  CpuFeatureScope fscope(&masm, AVX_VNNI);
+
+  __ vpdpbusd(xmm1, xmm2, xmm3);
+
+  CodeDesc desc;
+  masm.GetCode(isolate, &desc);
+#ifdef OBJECT_PRINT
+  Handle<Code> code =
+      Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
+  StdoutStream os;
+  Print(*code, os);
+#endif
+
+  uint8_t expected[] = {// vpdpbusd xmm1, xmm2, xmm3
+                        0xc4, 0xe2, 0x69, 0x50, 0xcb};
+  CHECK_EQ(0, memcmp(expected, desc.buffer, sizeof(expected)));
+}
+
 TEST_F(AssemblerX64Test, CpuFeatures_ProbeImpl) {
   // Support for a newer extension implies support for the older extensions.
   CHECK_IMPLIES(CpuFeatures::IsSupported(FMA3), CpuFeatures::IsSupported(AVX));
+  CHECK_IMPLIES(CpuFeatures::IsSupported(AVX_VNNI),
+                CpuFeatures::IsSupported(AVX));
   CHECK_IMPLIES(CpuFeatures::IsSupported(AVX2), CpuFeatures::IsSupported(AVX));
   CHECK_IMPLIES(CpuFeatures::IsSupported(AVX),
                 CpuFeatures::IsSupported(SSE4_2));
@@ -3213,6 +3266,8 @@ TEST_F(AssemblerX64Test, CpuFeatures_ProbeImpl) {
                 !CpuFeatures::IsSupported(AVX));
   CHECK_IMPLIES(!CpuFeatures::IsSupported(AVX),
                 !CpuFeatures::IsSupported(AVX2));
+  CHECK_IMPLIES(!CpuFeatures::IsSupported(AVX),
+                !CpuFeatures::IsSupported(AVX_VNNI));
   CHECK_IMPLIES(!CpuFeatures::IsSupported(AVX),
                 !CpuFeatures::IsSupported(FMA3));
 }

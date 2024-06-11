@@ -96,6 +96,16 @@ struct SmiTagging<4> {
            (static_cast<uintptr_t>(kSmiMaxValue) -
             static_cast<uintptr_t>(kSmiMinValue));
   }
+#ifndef V8_HOST_ARCH_64_BIT
+  // Same as the `intptr_t` version but works with int64_t on 32-bit builds
+  // without slowing down anything else.
+  V8_INLINE static constexpr bool IsValidSmi(int64_t value) {
+    return (static_cast<uint64_t>(value) -
+            static_cast<uint64_t>(kSmiMinValue)) <=
+           (static_cast<uint64_t>(kSmiMaxValue) -
+            static_cast<uint64_t>(kSmiMinValue));
+  }
+#endif
 };
 
 // Smi constants for systems where tagged pointer is a 64-bit value.
@@ -321,6 +331,48 @@ using CppHeapPointer_t = Address;
 constexpr CppHeapPointer_t kNullCppHeapPointer = 0;
 constexpr CppHeapPointerHandle kNullCppHeapPointerHandle = 0;
 
+// See `ExternalPointerHandle` for the main documentation. The difference to
+// `ExternalPointerHandle` is that the handle always refers to a
+// (external pointer, size) tuple. The handles are used in combination with a
+// dedicated external buffer table (EBT).
+using ExternalBufferHandle = uint32_t;
+
+// ExternalBuffer point to buffer located outside the sandbox. When the V8
+// sandbox is enabled, these are stored on heap as ExternalBufferHandles,
+// otherwise they are simply raw pointers.
+#ifdef V8_ENABLE_SANDBOX
+using ExternalBuffer_t = ExternalBufferHandle;
+#else
+using ExternalBuffer_t = Address;
+#endif
+
+#ifdef V8_TARGET_OS_ANDROID
+// The size of the virtual memory reservation for the external buffer table.
+// As with the external pointer table, a maximum table size in combination with
+// shifted indices allows omitting bounds checks.
+constexpr size_t kExternalBufferTableReservationSize = 64 * MB;
+
+// The external buffer handles are stores shifted to the left by this amount
+// to guarantee that they are smaller than the maximum table size.
+constexpr uint32_t kExternalBufferHandleShift = 10;
+#else
+constexpr size_t kExternalBufferTableReservationSize = 128 * MB;
+constexpr uint32_t kExternalBufferHandleShift = 9;
+#endif  // V8_TARGET_OS_ANDROID
+
+// A null handle always references an entry that contains nullptr.
+constexpr ExternalBufferHandle kNullExternalBufferHandle = 0;
+
+// The maximum number of entries in an external buffer table.
+constexpr int kExternalBufferTableEntrySize = 16;
+constexpr int kExternalBufferTableEntrySizeLog2 = 4;
+constexpr size_t kMaxExternalBufferPointers =
+    kExternalBufferTableReservationSize / kExternalBufferTableEntrySize;
+static_assert((1 << (32 - kExternalBufferHandleShift)) ==
+                  kMaxExternalBufferPointers,
+              "kExternalBufferTableReservationSize and "
+              "kExternalBufferHandleShift don't match");
+
 //
 // External Pointers.
 //
@@ -476,8 +528,8 @@ constexpr uint64_t kAllExternalPointerTypeTags[] = {
   /* External resources whose lifetime is tied to */     \
   /* their entry in the external pointer table but */    \
   /* which are not referenced via a Managed */           \
-  V(kLastManagedResourceTag,                    TAG(56)) \
-  V(kArrayBufferExtensionTag,                   TAG(57))
+  V(kArrayBufferExtensionTag,                   TAG(57)) \
+  V(kLastManagedResourceTag,                    TAG(57)) \
 
 // All external pointer tags.
 #define ALL_EXTERNAL_POINTER_TAGS(V) \
@@ -742,6 +794,7 @@ class Internals {
   // ExternalPointerTable and TrustedPointerTable layout guarantees.
   static const int kExternalPointerTableBasePointerOffset = 0;
   static const int kExternalPointerTableSize = 2 * kApiSystemPointerSize;
+  static const int kExternalBufferTableSize = 2 * kApiSystemPointerSize;
   static const int kTrustedPointerTableSize = 2 * kApiSystemPointerSize;
   static const int kTrustedPointerTableBasePointerOffset = 0;
 
@@ -792,8 +845,12 @@ class Internals {
       kIsolateCppHeapPointerTableOffset + kExternalPointerTableSize;
   static const int kIsolateTrustedPointerTableOffset =
       kIsolateTrustedCageBaseOffset + kApiSystemPointerSize;
-  static const int kIsolateApiCallbackThunkArgumentOffset =
+  static const int kIsolateExternalBufferTableOffset =
       kIsolateTrustedPointerTableOffset + kTrustedPointerTableSize;
+  static const int kIsolateSharedExternalBufferTableAddressOffset =
+      kIsolateExternalBufferTableOffset + kExternalBufferTableSize;
+  static const int kIsolateApiCallbackThunkArgumentOffset =
+      kIsolateSharedExternalBufferTableAddressOffset + kApiSystemPointerSize;
 #else
   static const int kIsolateApiCallbackThunkArgumentOffset =
       kIsolateCppHeapPointerTableOffset + kExternalPointerTableSize;
@@ -804,13 +861,8 @@ class Internals {
 #endif  // V8_COMPRESS_POINTERS
   static const int kContinuationPreservedEmbedderDataOffset =
       kIsolateApiCallbackThunkArgumentOffset + kApiSystemPointerSize;
-
-  static const int kWasm64OOBOffsetAlignmentPaddingSize = 0;
-  static const int kWasm64OOBOffsetOffset =
-      kContinuationPreservedEmbedderDataOffset + kApiSystemPointerSize +
-      kWasm64OOBOffsetAlignmentPaddingSize;
   static const int kIsolateRootsOffset =
-      kWasm64OOBOffsetOffset + sizeof(int64_t);
+      kContinuationPreservedEmbedderDataOffset + kApiSystemPointerSize;
 
 #if V8_STATIC_ROOTS_BOOL
 
@@ -911,6 +963,12 @@ class Internals {
   V8_INLINE static constexpr bool IsValidSmi(intptr_t value) {
     return PlatformSmiTagging::IsValidSmi(value);
   }
+
+#ifndef V8_HOST_ARCH_64_BIT
+  V8_INLINE static constexpr bool IsValidSmi(int64_t value) {
+    return PlatformSmiTagging::IsValidSmi(value);
+  }
+#endif
 
 #if V8_STATIC_ROOTS_BOOL
   V8_INLINE static bool is_identical(Address obj, Tagged_t constant) {
@@ -1184,7 +1242,7 @@ class V8_EXPORT StrongRootAllocatorBase {
 
  protected:
   explicit StrongRootAllocatorBase(Heap* heap) : heap_(heap) {}
-  explicit StrongRootAllocatorBase(v8::Isolate* isolate);
+  explicit StrongRootAllocatorBase(Isolate* isolate);
 
   // Allocate/deallocate a range of n elements of type internal::Address.
   Address* allocate_impl(size_t n);
@@ -1200,17 +1258,15 @@ class V8_EXPORT StrongRootAllocatorBase {
 // and internal::StrongRootAllocator<v8::Local<T>> register the allocated range
 // as strong roots.
 template <typename T>
-class StrongRootAllocator : public StrongRootAllocatorBase,
-                            private std::allocator<T> {
+class StrongRootAllocator : private std::allocator<T> {
  public:
   using value_type = T;
 
-  explicit StrongRootAllocator(Heap* heap) : StrongRootAllocatorBase(heap) {}
-  explicit StrongRootAllocator(v8::Isolate* isolate)
-      : StrongRootAllocatorBase(isolate) {}
+  explicit StrongRootAllocator(Heap* heap) {}
+  explicit StrongRootAllocator(Isolate* isolate) {}
+  explicit StrongRootAllocator(v8::Isolate* isolate) {}
   template <typename U>
-  StrongRootAllocator(const StrongRootAllocator<U>& other) noexcept
-      : StrongRootAllocatorBase(other) {}
+  StrongRootAllocator(const StrongRootAllocator<U>& other) noexcept {}
 
   using std::allocator<T>::allocate;
   using std::allocator<T>::deallocate;

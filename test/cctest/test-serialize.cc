@@ -3689,7 +3689,8 @@ v8::StartupData CreateSnapshotWithDefaultAndCustom() {
       CHECK(context->Global()->Set(context, v8_str("f"), function).FromJust());
       v8::Local<v8::ObjectTemplate> object_template =
           v8::ObjectTemplate::New(isolate);
-      object_template->SetAccessor(v8_str("x"), AccessorForSerialization);
+      object_template->SetNativeDataProperty(v8_str("x"),
+                                             AccessorForSerialization);
       v8::Local<v8::Object> object =
           object_template->NewInstance(context).ToLocalChecked();
       CHECK(context->Global()->Set(context, v8_str("o"), object).FromJust());
@@ -4382,6 +4383,8 @@ static void DeserializeAPIWrapperCallback(Local<v8::Object> holder,
   }
 }
 
+START_ALLOW_USE_DEPRECATED()
+
 UNINITIALIZED_TEST(SerializeApiWrapperData) {
   DisableAlwaysOpt();
   DisableEmbeddedBlobRefcounting();
@@ -4477,6 +4480,8 @@ UNINITIALIZED_TEST(SerializeApiWrapperData) {
   delete[] blob.data;
   FreeCurrentEmbeddedBlob();
 }
+
+END_ALLOW_USE_DEPRECATED()
 
 MaybeLocal<v8::Module> ResolveCallback(Local<v8::Context> context,
                                        Local<v8::String> specifier,
@@ -4840,7 +4845,8 @@ UNINITIALIZED_TEST(SnapshotCreatorIncludeGlobalProxy) {
       global_template->Set(isolate, "f", callback);
       global_template->SetHandler(v8::NamedPropertyHandlerConfiguration(
           NamedPropertyGetterForSerialization));
-      global_template->SetAccessor(v8_str("y"), AccessorForSerialization);
+      global_template->SetNativeDataProperty(v8_str("y"),
+                                             AccessorForSerialization);
       v8::Local<v8::Private> priv =
           v8::Private::ForApi(isolate, v8_str("cached"));
       global_template->SetAccessorProperty(

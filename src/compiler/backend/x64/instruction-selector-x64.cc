@@ -1047,6 +1047,10 @@ ArchOpcode GetLoadOpcode(LoadRepresentation load_rep) {
     case MachineRepresentation::kWord64:
       opcode = kX64Movq;
       break;
+    case MachineRepresentation::kProtectedPointer:
+      CHECK(V8_ENABLE_SANDBOX_BOOL);
+      opcode = kX64MovqDecompressProtected;
+      break;
     case MachineRepresentation::kSandboxedPointer:
       opcode = kX64MovqDecodeSandboxedPointer;
       break;
@@ -1070,22 +1074,22 @@ ArchOpcode GetStoreOpcode(StoreRepresentation store_rep) {
       return kX64Movss;
     case MachineRepresentation::kFloat64:
       return kX64Movsd;
-    case MachineRepresentation::kBit:  // Fall through.
+    case MachineRepresentation::kBit:
     case MachineRepresentation::kWord8:
       return kX64Movb;
     case MachineRepresentation::kWord16:
       return kX64Movw;
     case MachineRepresentation::kWord32:
       return kX64Movl;
-    case MachineRepresentation::kCompressedPointer:  // Fall through.
+    case MachineRepresentation::kCompressedPointer:
     case MachineRepresentation::kCompressed:
 #ifdef V8_COMPRESS_POINTERS
       return kX64MovqCompressTagged;
 #else
       UNREACHABLE();
 #endif
-    case MachineRepresentation::kTaggedSigned:   // Fall through.
-    case MachineRepresentation::kTaggedPointer:  // Fall through.
+    case MachineRepresentation::kTaggedSigned:
+    case MachineRepresentation::kTaggedPointer:
     case MachineRepresentation::kTagged:
       return kX64MovqCompressTagged;
     case MachineRepresentation::kWord64:
@@ -1096,13 +1100,14 @@ ArchOpcode GetStoreOpcode(StoreRepresentation store_rep) {
       return kX64MovqEncodeSandboxedPointer;
     case MachineRepresentation::kSimd128:
       return kX64Movdqu;
-    case MachineRepresentation::kSimd256:  // Fall through.
+    case MachineRepresentation::kSimd256:
       return kX64Movdqu256;
-    case MachineRepresentation::kNone:     // Fall through.
-    case MachineRepresentation::kMapWord:  // Fall through.
+    case MachineRepresentation::kNone:
+    case MachineRepresentation::kMapWord:
+      // We never store directly to protected pointers from generated code.
+    case MachineRepresentation::kProtectedPointer:
       UNREACHABLE();
   }
-  UNREACHABLE();
 }
 
 ArchOpcode GetSeqCstStoreOpcode(StoreRepresentation store_rep) {
@@ -1496,6 +1501,10 @@ template <>
 void InstructionSelectorT<TurbofanAdapter>::VisitSimd256Unpack(Node* node) {
   UNIMPLEMENTED();
 }
+template <>
+void InstructionSelectorT<TurbofanAdapter>::VisitSimdPack128To256(Node* node) {
+  UNIMPLEMENTED();
+}
 
 template <>
 void InstructionSelectorT<TurboshaftAdapter>::VisitSimd256Shufd(node_t node) {
@@ -1545,6 +1554,27 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitSimd256Unpack(node_t node) {
   Emit(code, 1, &dst, 2, inputs);
 }
 
+template <>
+void InstructionSelectorT<TurboshaftAdapter>::VisitSimdPack128To256(
+    node_t node) {
+  X64OperandGeneratorT<TurboshaftAdapter> g(this);
+
+  const turboshaft::SimdPack128To256Op& op =
+      Get(node).Cast<turboshaft::SimdPack128To256Op>();
+
+  turboshaft::OpIndex input0 = op.input(0);
+  turboshaft::OpIndex input1 = op.input(1);
+  constexpr int kHighLaneIndex = 1;
+
+  InstructionOperand dst = g.DefineAsRegister(node);
+  InstructionOperand src0 = g.UseUniqueRegister(input0);
+  InstructionOperand src1 = g.UseUniqueRegister(input1);
+  InstructionOperand imm = g.UseImmediate(kHighLaneIndex);
+
+  InstructionOperand inputs[] = {src0, src1, imm};
+
+  Emit(kX64InsertI128, 1, &dst, 3, inputs);
+}
 #endif  // V8_TARGET_ARCH_X64
 
 #endif  // V8_ENABLE_WASM_SIMD256_REVEC
@@ -6413,8 +6443,12 @@ template <>
 void InstructionSelectorT<TurbofanAdapter>::VisitExtractF128(node_t node) {
   X64OperandGeneratorT<TurbofanAdapter> g(this);
   int32_t lane = OpParameter<int32_t>(node->op());
-  Emit(kX64ExtractF128, g.DefineAsRegister(node),
-       g.UseRegister(node->InputAt(0)), g.UseImmediate(lane));
+  if (lane == 0) {
+    EmitIdentity(node);
+  } else {
+    Emit(kX64ExtractF128, g.DefineAsRegister(node),
+         g.UseRegister(node->InputAt(0)), g.UseImmediate(lane));
+  }
 }
 
 #if V8_ENABLE_WASM_SIMD256_REVEC
@@ -6423,8 +6457,12 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitExtractF128(node_t node) {
   X64OperandGeneratorT<TurboshaftAdapter> g(this);
   const turboshaft::Simd256Extract128LaneOp& op =
       this->Get(node).template Cast<turboshaft::Simd256Extract128LaneOp>();
-  Emit(kX64ExtractF128, g.DefineAsRegister(node), g.UseRegister(op.input()),
-       g.UseImmediate(op.lane));
+  if (op.lane == 0) {
+    EmitIdentity(node);
+  } else {
+    Emit(kX64ExtractF128, g.DefineAsRegister(node), g.UseRegister(op.input()),
+         g.UseImmediate(op.lane));
+  }
 }
 
 template <>
@@ -6755,7 +6793,7 @@ namespace {
 template <typename Adapter>
 void VisitRelaxedLaneSelect(InstructionSelectorT<Adapter>* selector,
                             typename Adapter::node_t node,
-                            InstructionCode code = kX64Pblendvb) {
+                            InstructionCode code) {
   X64OperandGeneratorT<Adapter> g(selector);
   DCHECK_EQ(selector->value_input_count(node), 3);
   // pblendvb/blendvps/blendvpd copies src2 when mask is set, opposite from Wasm
@@ -6779,21 +6817,50 @@ void VisitRelaxedLaneSelect(InstructionSelectorT<Adapter>* selector,
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitI8x16RelaxedLaneSelect(node_t node) {
-  VisitRelaxedLaneSelect(this, node);
+  VisitRelaxedLaneSelect(this, node,
+                         kX64Pblendvb | VectorLengthField::encode(kV128));
 }
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitI16x8RelaxedLaneSelect(node_t node) {
-  VisitRelaxedLaneSelect(this, node);
+  VisitRelaxedLaneSelect(this, node,
+                         kX64Pblendvb | VectorLengthField::encode(kV128));
 }
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitI32x4RelaxedLaneSelect(node_t node) {
-  VisitRelaxedLaneSelect(this, node, kX64Blendvps);
+  VisitRelaxedLaneSelect(this, node,
+                         kX64Blendvps | VectorLengthField::encode(kV128));
 }
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitI64x2RelaxedLaneSelect(node_t node) {
-  VisitRelaxedLaneSelect(this, node, kX64Blendvpd);
+  VisitRelaxedLaneSelect(this, node,
+                         kX64Blendvpd | VectorLengthField::encode(kV128));
 }
+
+#ifdef V8_ENABLE_WASM_SIMD256_REVEC
+template <typename Adapter>
+void InstructionSelectorT<Adapter>::VisitI8x32RelaxedLaneSelect(node_t node) {
+  VisitRelaxedLaneSelect(this, node,
+                         kX64Pblendvb | VectorLengthField::encode(kV256));
+}
+template <typename Adapter>
+void InstructionSelectorT<Adapter>::VisitI16x16RelaxedLaneSelect(node_t node) {
+  VisitRelaxedLaneSelect(this, node,
+                         kX64Pblendvb | VectorLengthField::encode(kV256));
+}
+
+template <typename Adapter>
+void InstructionSelectorT<Adapter>::VisitI32x8RelaxedLaneSelect(node_t node) {
+  VisitRelaxedLaneSelect(this, node,
+                         kX64Blendvps | VectorLengthField::encode(kV256));
+}
+
+template <typename Adapter>
+void InstructionSelectorT<Adapter>::VisitI64x4RelaxedLaneSelect(node_t node) {
+  VisitRelaxedLaneSelect(this, node,
+                         kX64Blendvpd | VectorLengthField::encode(kV256));
+}
+#endif  // V8_ENABLE_WASM_SIMD256_REVEC
 
 namespace {
 // Used for pmin/pmax and relaxed min/max.
@@ -7150,12 +7217,41 @@ template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitI32x4DotI8x16I7x16AddS(node_t node) {
   X64OperandGeneratorT<Adapter> g(this);
   DCHECK_EQ(this->value_input_count(node), 3);
-  InstructionOperand temps[] = {g.TempSimd128Register()};
-  Emit(kX64I32x4DotI8x16I7x16AddS, g.DefineSameAsInput(node, 2),
+  if (CpuFeatures::IsSupported(AVX_VNNI)) {
+    Emit(kX64I32x4DotI8x16I7x16AddS, g.DefineSameAsInput(node, 2),
+         g.UseRegister(this->input_at(node, 0)),
+         g.UseRegister(this->input_at(node, 1)),
+         g.UseRegister(this->input_at(node, 2)));
+  } else {
+    InstructionOperand temps[] = {g.TempSimd128Register()};
+    Emit(kX64I32x4DotI8x16I7x16AddS, g.DefineSameAsInput(node, 2),
+         g.UseUniqueRegister(this->input_at(node, 0)),
+         g.UseUniqueRegister(this->input_at(node, 1)),
+         g.UseUniqueRegister(this->input_at(node, 2)), arraysize(temps), temps);
+  }
+}
+
+#ifdef V8_ENABLE_WASM_SIMD256_REVEC
+template <typename Adapter>
+void InstructionSelectorT<Adapter>::VisitI16x16DotI8x32I7x32S(node_t node) {
+  X64OperandGeneratorT<Adapter> g(this);
+  DCHECK_EQ(this->value_input_count(node), 2);
+  Emit(kX64I16x16DotI8x32I7x32S, g.DefineAsRegister(node),
+       g.UseUniqueRegister(this->input_at(node, 0)),
+       g.UseRegister(this->input_at(node, 1)));
+}
+
+template <typename Adapter>
+void InstructionSelectorT<Adapter>::VisitI32x8DotI8x32I7x32AddS(node_t node) {
+  X64OperandGeneratorT<Adapter> g(this);
+  DCHECK_EQ(this->value_input_count(node), 3);
+  InstructionOperand temps[] = {g.TempSimd256Register()};
+  Emit(kX64I32x8DotI8x32I7x32AddS, g.DefineSameAsInput(node, 2),
        g.UseUniqueRegister(this->input_at(node, 0)),
        g.UseUniqueRegister(this->input_at(node, 1)),
        g.UseUniqueRegister(this->input_at(node, 2)), arraysize(temps), temps);
 }
+#endif
 
 template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitSetStackPointer(node_t node) {

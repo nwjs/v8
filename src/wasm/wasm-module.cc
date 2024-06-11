@@ -252,9 +252,9 @@ bool IsWasmCodegenAllowed(Isolate* isolate, Handle<NativeContext> context) {
              v8::Utils::ToLocal(isolate->factory()->empty_string()));
 }
 
-Handle<String> ErrorStringForCodegen(Isolate* isolate,
-                                     Handle<Context> context) {
-  Handle<Object> error = context->ErrorMessageForWasmCodeGeneration();
+DirectHandle<String> ErrorStringForCodegen(Isolate* isolate,
+                                           DirectHandle<Context> context) {
+  DirectHandle<Object> error = context->ErrorMessageForWasmCodeGeneration();
   DCHECK(!error.is_null());
   return Object::NoSideEffectsToString(isolate, error);
 }
@@ -654,12 +654,11 @@ int GetSourcePosition(const WasmModule* module, uint32_t func_index,
 }
 
 size_t WasmModule::EstimateStoredSize() const {
-  UPDATE_WHEN_CLASS_CHANGES(WasmModule, 864);
+  UPDATE_WHEN_CLASS_CHANGES(WasmModule, 824);
   return sizeof(WasmModule) +                            // --
          signature_zone.allocation_size_for_tracing() +  // --
          ContentSize(types) +                            // --
          ContentSize(isorecursive_canonical_type_ids) +  // --
-         ContentSize(explicit_recursive_type_groups) +   // --
          ContentSize(functions) +                        // --
          ContentSize(globals) +                          // --
          ContentSize(data_segments) +                    // --
@@ -727,7 +726,7 @@ size_t TypeFeedbackStorage::EstimateCurrentMemoryConsumption() const {
 }
 
 size_t WasmModule::EstimateCurrentMemoryConsumption() const {
-  UPDATE_WHEN_CLASS_CHANGES(WasmModule, 864);
+  UPDATE_WHEN_CLASS_CHANGES(WasmModule, 824);
   size_t result = EstimateStoredSize();
 
   result += type_feedback.EstimateCurrentMemoryConsumption();

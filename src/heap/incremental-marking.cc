@@ -315,11 +315,6 @@ void IncrementalMarking::StartMarkingMajor() {
   is_compacting_ = major_collector_->StartCompaction(
       MarkCompactCollector::StartCompactionMode::kIncremental);
 
-#ifdef V8_COMPRESS_POINTERS
-  heap_->external_pointer_space()->StartCompactingIfNeeded();
-  heap_->cpp_heap_pointer_space()->StartCompactingIfNeeded();
-#endif  // V8_COMPRESS_POINTERS
-
   major_collector_->StartMarking();
   current_local_marking_worklists_ =
       major_collector_->local_marking_worklists();
@@ -864,6 +859,8 @@ void IncrementalMarking::Step(v8::base::TimeDelta max_duration,
     // before invoking an AllocationObserver. This allocation had no way to
     // escape and get marked though.
     local_marking_worklists()->MergeOnHold();
+
+    heap()->mark_compact_collector()->MaybeEnableBackgroundThreadsInCycle();
   }
   if (step_origin == StepOrigin::kTask) {
     // We cannot publish the pending allocations for V8 step origin because the

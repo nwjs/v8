@@ -1452,8 +1452,6 @@ Maybe<bool> JSReceiver::ValidateAndApplyPropertyDescriptor(
     Maybe<ShouldThrow> should_throw, Handle<Name> property_name) {
   // We either need a LookupIterator, or a property name.
   DCHECK((it == nullptr) != property_name.is_null());
-  Handle<JSObject> object;
-  if (it != nullptr) object = Handle<JSObject>::cast(it->GetReceiver());
   bool desc_is_data_descriptor = PropertyDescriptor::IsDataDescriptor(desc);
   bool desc_is_accessor_descriptor =
       PropertyDescriptor::IsAccessorDescriptor(desc);
@@ -2629,6 +2627,8 @@ int JSObject::GetHeaderSize(InstanceType type,
       return WasmTagObject::kHeaderSize;
     case WASM_EXCEPTION_PACKAGE_TYPE:
       return WasmExceptionPackage::kHeaderSize;
+    case WASM_SUSPENDING_OBJECT_TYPE:
+      return WasmSuspendingObject::kHeaderSize;
 #endif  // V8_ENABLE_WEBASSEMBLY
     default: {
       // Special type check for API Objects because they are in a large variable
@@ -3547,7 +3547,12 @@ bool TryFastAddDataProperty(Isolate* isolate, Handle<JSObject> object,
   DCHECK(!map->is_dictionary_map());
 
   Handle<Map> new_map = handle(map, isolate);
-  InternalIndex descriptor = map->LastAdded();
+  if (map->is_deprecated()) {
+    new_map = Map::Update(isolate, new_map);
+    if (new_map->is_dictionary_map()) return false;
+  }
+
+  InternalIndex descriptor = new_map->LastAdded();
   new_map = Map::PrepareForDataProperty(isolate, new_map, descriptor,
                                         PropertyConstness::kConst, value);
   JSObject::MigrateToMap(isolate, object, new_map);
@@ -3575,6 +3580,7 @@ void JSObject::AddProperty(Isolate* isolate, Handle<JSObject> object,
 #ifdef DEBUG
   uint32_t index;
   DCHECK(!IsJSProxy(*object));
+  DCHECK(!IsWasmObject(*object));
   DCHECK(!name->AsArrayIndex(&index));
   Maybe<PropertyAttributes> maybe = GetPropertyAttributes(&it);
   DCHECK(maybe.IsJust());
@@ -3769,8 +3775,9 @@ void JSObject::NormalizeProperties(Isolate* isolate, Handle<JSObject> object,
   if (!object->HasFastProperties()) return;
 
   Handle<Map> map(object->map(), isolate);
-  Handle<Map> new_map = Map::Normalize(isolate, map, map->elements_kind(), mode,
-                                       use_cache, reason);
+  Handle<Map> new_map =
+      Map::Normalize(isolate, map, map->elements_kind(), Handle<HeapObject>(),
+                     mode, use_cache, reason);
 
   JSObject::MigrateToMap(isolate, object, new_map,
                          expected_additional_properties);
@@ -5173,7 +5180,7 @@ Maybe<bool> JSObject::SetPrototype(Isolate* isolate, Handle<JSObject> object,
     DCHECK(!IsAccessCheckNeeded(*object));
   }
 
-  // Silently ignore the change if value is not a JSObject or null.
+  // Silently ignore the change if value is not a JSReceiver or null.
   // SpiderMonkey behaves this way.
   if (!IsJSReceiver(*value) && !IsNull(*value, isolate)) return Just(true);
 
@@ -5240,12 +5247,20 @@ Maybe<bool> JSObject::SetPrototype(Isolate* isolate, Handle<JSObject> object,
 
   isolate->UpdateProtectorsOnSetPrototype(real_receiver, value);
 
+#ifdef V8_MOVE_PROTOYPE_TRANSITIONS_FIRST
+  Handle<Map> new_map =
+      MapUpdater(isolate, map)
+          .ApplyPrototypeTransition(Handle<HeapObject>::cast(value));
+#else
   Handle<Map> new_map = Map::TransitionToUpdatePrototype(
       isolate, map, Handle<HeapObject>::cast(value));
+#endif  // V8_MOVE_PROTOYPE_TRANSITIONS_FIRST
+
   DCHECK(new_map->prototype() == *value);
   JSObject::MigrateToMap(isolate, real_receiver, new_map);
 
-  DCHECK(size == object->Size());
+  DCHECK_IMPLIES(!new_map->is_dictionary_map() && !map->is_deprecated(),
+                 size == object->Size());
   return Just(true);
 }
 

@@ -402,6 +402,19 @@ void MacroAssembler::DecompressTagged(Register destination,
        Operand(kPtrComprCageBaseRegister, static_cast<int32_t>(immediate)));
 }
 
+void MacroAssembler::DecompressProtected(Register destination,
+                                         Operand field_operand) {
+#if V8_ENABLE_SANDBOX
+  ASM_CODE_COMMENT(this);
+  movl(destination, field_operand);
+  DCHECK(root_array_available_);
+  orq(destination,
+      Operand{kRootRegister, IsolateData::trusted_cage_base_offset()});
+#else
+  UNREACHABLE();
+#endif  // V8_ENABLE_SANDBOX
+}
+
 void MacroAssembler::RecordWriteField(Register object, int offset,
                                       Register value, Register slot_address,
                                       SaveFPRegsMode save_fp,
@@ -640,10 +653,7 @@ void MacroAssembler::LoadProtectedPointerField(Register destination,
                                                Operand field_operand) {
   DCHECK(root_array_available());
 #ifdef V8_ENABLE_SANDBOX
-  DCHECK(!AreAliased(destination, kScratchRegister));
-  movl(destination, field_operand);
-  orq(destination,
-      Operand(kRootRegister, IsolateData::trusted_cage_base_offset()));
+  DecompressProtected(destination, field_operand);
 #else
   LoadTaggedField(destination, field_operand);
 #endif
@@ -866,6 +876,24 @@ void MacroAssembler::RecordWrite(Register object, Register slot_address,
     JumpIfSmi(value, &done);
   }
 
+#if V8_ENABLE_STICKY_MARK_BITS_BOOL
+  DCHECK(!AreAliased(kScratchRegister, object, slot_address, value));
+  Label stub_call;
+
+  testb(Operand(kRootRegister, IsolateData::is_marking_flag_offset()),
+        Immediate(static_cast<uint8_t>(1)));
+  j(not_zero, &stub_call, Label::kFar);
+
+  // Save the slot_address in the xmm scratch register.
+  movq(kScratchDoubleReg, slot_address);
+  Register scratch0 = slot_address;
+  CheckMarkBit(object, kScratchRegister, scratch0, carry, &done);
+  CheckPageFlag(value, kScratchRegister, MemoryChunk::kIsInReadOnlyHeapMask,
+                not_zero, &done, Label::kFar);
+  CheckMarkBit(value, kScratchRegister, scratch0, carry, &done);
+  movq(slot_address, kScratchDoubleReg);
+  bind(&stub_call);
+#else   // !V8_ENABLE_STICKY_MARK_BITS_BOOL
   CheckPageFlag(value,
                 value,  // Used as scratch.
                 MemoryChunk::kPointersToHereAreInterestingMask, zero, &done,
@@ -875,6 +903,7 @@ void MacroAssembler::RecordWrite(Register object, Register slot_address,
                 value,  // Used as scratch.
                 MemoryChunk::kPointersFromHereAreInterestingMask, zero, &done,
                 Label::kNear);
+#endif  // !V8_ENABLE_STICKY_MARK_BITS_BOOL
 
   if (slot.contains_direct_pointer()) {
     CallRecordWriteStub(object, slot_address, fp_mode,
@@ -2054,6 +2083,23 @@ void MacroAssembler::F64x4Qfms(YMMRegister dst, YMMRegister src1,
                                YMMRegister src2, YMMRegister src3,
                                YMMRegister tmp) {
   QFMS(pd);
+}
+
+void MacroAssembler::I32x8DotI8x32I7x32AddS(YMMRegister dst, YMMRegister src1,
+                                            YMMRegister src2, YMMRegister src3,
+                                            YMMRegister scratch,
+                                            YMMRegister splat_reg) {
+  ASM_CODE_COMMENT(this);
+  DCHECK(CpuFeatures::IsSupported(AVX) && CpuFeatures::IsSupported(AVX2));
+  DCHECK_EQ(dst, src3);
+  CpuFeatureScope avx_scope(this, AVX);
+  CpuFeatureScope avx2_scope(this, AVX2);
+  // splat_reg = i16x16.splat(1)
+  vpcmpeqd(splat_reg, splat_reg, splat_reg);
+  vpsrlw(splat_reg, splat_reg, uint8_t{15});
+  vpmaddubsw(scratch, src2, src1);
+  vpmaddwd(scratch, splat_reg, scratch);
+  vpaddd(dst, src3, scratch);
 }
 
 void MacroAssembler::SmiTag(Register reg) {
@@ -3818,7 +3864,11 @@ void MacroAssembler::LeaveFrame(StackFrame::Type type) {
   // TODO(v8:11429): Consider passing BASELINE instead, and checking for
   // IsJSFrame or similar. Could then unify with manual frame leaves in the
   // interpreter too.
-  if (v8_flags.debug_code && !StackFrame::IsJavaScript(type)) {
+  if (v8_flags.debug_code && !StackFrame::IsJavaScript(type)
+#if V8_ENABLE_WEBASSEMBLY
+      && (type != StackFrame::Type::WASM || !v8_flags.wasm_deopt)
+#endif
+  ) {
     cmpq(Operand(rbp, CommonFrameConstants::kContextOrFrameTypeOffset),
          Immediate(StackFrame::TypeToMarker(type)));
     Check(equal, AbortReason::kStackFrameTypesMustMatch);
@@ -4061,13 +4111,6 @@ int MacroAssembler::CallCFunction(Register function, int num_arguments,
            kScratchRegister);
       movq(Operand(kRootRegister, IsolateData::fast_c_call_caller_fp_offset()),
            rbp);
-#if DEBUG
-      // Reset Isolate::context field right before the fast C call such that the
-      // GC can visit this field unconditionally. This is necessary because
-      // CEntry sets it to kInvalidContext in debug build only.
-      movq(Operand(kRootRegister, IsolateData::context_offset()),
-           Immediate(Context::kNoContext));
-#endif
     } else {
       DCHECK_NOT_NULL(isolate());
       // Use alternative scratch register in order not to overwrite
@@ -4082,14 +4125,6 @@ int MacroAssembler::CallCFunction(Register function, int num_arguments,
       movq(ExternalReferenceAsOperand(
                ExternalReference::fast_c_call_caller_fp_address(isolate())),
            rbp);
-#if DEBUG
-      // Reset Isolate::context field right before the fast C call such that the
-      // GC can visit this field unconditionally. This is necessary because
-      // CEntry sets it to kInvalidContext in debug build only.
-      movq(ExternalReferenceAsOperand(
-               ExternalReference::context_address(isolate()), kScratchRegister),
-           Immediate(Context::kNoContext));
-#endif
       popq(scratch);
     }
   }
@@ -4145,6 +4180,54 @@ void MacroAssembler::CheckPageFlag(Register object, Register scratch, int mask,
   } else {
     testl(Operand(scratch, MemoryChunkLayout::kFlagsOffset), Immediate(mask));
   }
+  j(cc, condition_met, condition_met_distance);
+}
+
+void MacroAssembler::CheckMarkBit(Register object, Register scratch0,
+                                  Register scratch1, Condition cc,
+                                  Label* condition_met,
+                                  Label::Distance condition_met_distance) {
+  ASM_CODE_COMMENT(this);
+  DCHECK(cc == carry || cc == not_carry);
+  DCHECK(!AreAliased(object, scratch0, scratch1));
+
+  // Computing cell.
+  MemoryChunkHeaderFromObject(object, scratch0);
+#ifdef V8_ENABLE_SANDBOX
+  movl(scratch0, Operand(scratch0, MemoryChunkLayout::kMetadataIndexOffset));
+  andl(scratch0, Immediate(MemoryChunk::kMetadataPointerTableSizeMask));
+  shll(scratch0, Immediate(kSystemPointerSizeLog2));
+  LoadAddress(scratch1,
+              ExternalReference::memory_chunk_metadata_table_address());
+  movq(scratch0, Operand(scratch1, scratch0, times_1, 0));
+#else   // !V8_ENABLE_SANDBOX
+  movq(scratch0, Operand(scratch0, MemoryChunkLayout::kMetadataOffset));
+#endif  // !V8_ENABLE_SANDBOX
+  if (v8_flags.debug_code) {
+    Push(object);
+    movq(scratch1, Operand(scratch0, MemoryChunkLayout::kAreaStartOffset));
+    MemoryChunkHeaderFromObject(scratch1, scratch1);
+    MemoryChunkHeaderFromObject(object, object);
+    cmpq(object, scratch1);
+    Check(equal, AbortReason::kMetadataAreaStartDoesNotMatch);
+    Pop(object);
+  }
+  addq(scratch0, Immediate(MemoryChunkLayout::kMarkingBitmapOffset));
+
+  movq(scratch1, object);
+  andq(scratch1, Immediate(MemoryChunk::GetAlignmentMaskForAssembler()));
+  // It's important not to fold the next two shifts.
+  shrq(scratch1, Immediate(kTaggedSizeLog2 + MarkingBitmap::kBitsPerCellLog2));
+  shlq(scratch1, Immediate(kBitsPerByteLog2));
+  addq(scratch0, scratch1);
+
+  // Computing mask.
+  movq(scratch1, object);
+  andq(scratch1, Immediate(MemoryChunk::GetAlignmentMaskForAssembler()));
+  shrq(scratch1, Immediate(kTaggedSizeLog2));
+  andq(scratch1, Immediate(MarkingBitmap::kBitIndexMask));
+  btq(Operand(scratch0, 0), scratch1);
+
   j(cc, condition_met, condition_met_distance);
 }
 

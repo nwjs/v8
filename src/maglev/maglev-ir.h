@@ -7,6 +7,7 @@
 
 #include "src/base/bit-field.h"
 #include "src/base/bits.h"
+#include "src/base/bounds.h"
 #include "src/base/discriminated-union.h"
 #include "src/base/enum-set.h"
 #include "src/base/logging.h"
@@ -22,18 +23,21 @@
 #include "src/common/operation.h"
 #include "src/compiler/access-info.h"
 #include "src/compiler/backend/instruction.h"
+#include "src/compiler/compilation-dependencies.h"
 #include "src/compiler/feedback-source.h"
 #include "src/compiler/heap-refs.h"
 // TODO(dmercadier): move the Turboshaft utils functions to shared code (in
 // particular, any_of, which is the reason we're including this Turboshaft
 // header)
+#include "src/compiler/js-heap-broker.h"
 #include "src/compiler/turboshaft/snapshot-table.h"
 #include "src/compiler/turboshaft/utils.h"
 #include "src/deoptimizer/deoptimize-reason.h"
-#include "src/interpreter/bytecode-flags.h"
+#include "src/interpreter/bytecode-flags-and-tokens.h"
 #include "src/interpreter/bytecode-register.h"
 #include "src/maglev/maglev-compilation-unit.h"
 #include "src/objects/arguments.h"
+#include "src/objects/heap-number.h"
 #include "src/objects/property-details.h"
 #include "src/objects/smi.h"
 #include "src/objects/tagged-index.h"
@@ -148,6 +152,7 @@ class MergePointInterpreterFrameState;
   V(Call)                                           \
   V(CallBuiltin)                                    \
   V(CallCPPBuiltin)                                 \
+  V(CallForwardVarargs)                             \
   V(CallRuntime)                                    \
   V(CallWithArrayLike)                              \
   V(CallWithSpread)                                 \
@@ -197,7 +202,7 @@ class MergePointInterpreterFrameState;
   V(LoadGlobal)                                     \
   V(LoadNamedGeneric)                               \
   V(LoadNamedFromSuperGeneric)                      \
-  V(MaybeGrowAndEnsureWritableFastElements)         \
+  V(MaybeGrowFastElements)                          \
   V(SetNamedGeneric)                                \
   V(DefineNamedOwnGeneric)                          \
   V(StoreInArrayLiteralGeneric)                     \
@@ -251,6 +256,7 @@ class MergePointInterpreterFrameState;
   V(StringConcat)                                   \
   V(ToBoolean)                                      \
   V(ToBooleanLogicalNot)                            \
+  V(AllocateElementsArray)                          \
   V(TaggedEqual)                                    \
   V(TaggedNotEqual)                                 \
   V(TestInstanceOf)                                 \
@@ -649,6 +655,14 @@ inline std::ostream& operator<<(std::ostream& out, const NodeType& type) {
 NODE_TYPE_LIST(DEFINE_NODE_TYPE_CHECK)
 #undef DEFINE_NODE_TYPE_CHECK
 
+inline bool NodeTypeMayBeNullOrUndefined(NodeType type) {
+  if (NodeTypeIsBoolean(type)) return false;
+  if (NodeTypeIsNumber(type)) return false;
+  if (NodeTypeIsJSReceiver(type)) return false;
+  if (NodeTypeIsName(type)) return false;
+  return true;
+}
+
 enum class TaggedToFloat64ConversionType : uint8_t {
   kOnlyNumber,
   kNumberOrOddball,
@@ -854,259 +868,230 @@ class BasicBlockRef {
 #endif  // DEBUG
 };
 
-struct FastField;
+struct CapturedValue;
 
-// Encoding of a fast allocation site object's element fixed array.
-struct FastFixedArray {
-  FastFixedArray() : type(kEmpty) {}
-  explicit FastFixedArray(compiler::ObjectRef cow_value)
-      : type(kCoW), cow_value(cow_value) {}
-  explicit FastFixedArray(int id, int length, Zone* zone)
-      : type(kTagged),
-        id(id),
-        length(length),
-        values(zone->AllocateArray<FastField>(length)) {}
-  explicit FastFixedArray(int id, int length, Zone* zone, double)
-      : type(kDouble),
-        id(id),
-        length(length),
-        double_values(zone->AllocateArray<Float64>(length)) {}
-
-  enum { kEmpty, kCoW, kTagged, kDouble } type;
-
-  int id = -1;  // Only for kTagged and kDouble.
-  union {
-    compiler::ObjectRef cow_value;
-    struct {
-      int length;
-      union {
-        FastField* values;
-        Float64* double_values;
-      };
-    };
+class CapturedObject {
+ public:
+  enum Tag {
+    kDefault,
+    kFixedArray,
+    kStrictArgumentsObject,
+    kSloppyUnmappedArgumentsObject,
+    kSloppyMappedArgumentsObject,
+    kRestParameter,
   };
-};
 
-struct FastContext {
-  FastContext(int id, compiler::MapRef map, int length,
-              compiler::ScopeInfoRef scope_info, ValueNode* previous_context,
-              base::Optional<ValueNode*> extension = {})
-      : id(id),
-        map(map),
-        length(length),
-        scope_info(scope_info),
-        previous_context(previous_context),
-        extension(extension) {
-    DCHECK_GE(length, Context::MIN_CONTEXT_SLOTS);
-    DCHECK_IMPLIES(extension.has_value(),
-                   length >= Context::MIN_CONTEXT_EXTENDED_SLOTS);
+  static CapturedObject CreateJSObject(Zone* zone, compiler::MapRef map);
+  static CapturedObject CreateJSArray(Zone* zone, compiler::MapRef map,
+                                      int instance_size, ValueNode* length);
+  static CapturedObject CreateJSConstructor(
+      Zone* zone, compiler::JSHeapBroker* broker,
+      compiler::JSFunctionRef constructor);
+  static CapturedObject CreateFixedArray(Zone* zone, compiler::MapRef map,
+                                         int length);
+  static CapturedObject CreateContext(
+      Zone* zone, compiler::MapRef map, int length,
+      compiler::ScopeInfoRef scope_info, ValueNode* previous_context,
+      base::Optional<ValueNode*> extension = {});
+  static CapturedObject CreateArgumentsObject(
+      Zone* zone, Tag tag, compiler::MapRef map, CapturedValue length,
+      CapturedValue elements, base::Optional<ValueNode*> callee = {});
+  static CapturedObject CreateMappedArgumentsElements(
+      Zone* zone, compiler::MapRef map, int mapped_count, ValueNode* context,
+      CapturedValue unmapped_elements);
+  static CapturedObject CreateRegExpLiteral(
+      Zone* zone, compiler::JSHeapBroker* broker, compiler::MapRef map,
+      compiler::RegExpBoilerplateDescriptionRef literal);
+  static CapturedObject CreateJSGeneratorObject(
+      Zone* zone, compiler::MapRef map, int instance_size, ValueNode* context,
+      ValueNode* closure, ValueNode* receiver, CapturedObject register_file);
+  static CapturedObject CreateJSIteratorResult(Zone* zone, compiler::MapRef map,
+                                               ValueNode* value,
+                                               ValueNode* done);
+  static CapturedObject CreateJSStringIterator(Zone* zone, compiler::MapRef map,
+                                               ValueNode* string);
+
+  bool IsArgumentsObject() const {
+    return base::IsInRange(tag_, kStrictArgumentsObject, kRestParameter);
   }
 
-  size_t GetInputLocationsArraySize() const;
+  bool IsSloppyMappedArgumentsObject() const {
+    return tag_ == kSloppyMappedArgumentsObject;
+  }
+  bool IsRestParameter() const { return tag_ == kRestParameter; }
+  bool IsFixedArray() const { return tag_ == kFixedArray; }
 
-  int id;
-  compiler::MapRef map;
+  template <typename T>
+  inline void set(unsigned int offset, T value);
+  void set(unsigned int offset, ValueNode* value);
+
+  CapturedValue& get(unsigned int offset) const;
+  int slot_count() const { return slot_count_; }
+
+  compiler::MapRef GetMap() const;
+  size_t InputLocationSizeNeeded() const;
+
+  struct Iterator {
+    inline Iterator& operator++();
+    inline CapturedValue& operator*() const;
+    inline bool operator==(const Iterator& that) const {
+      return value == that.value;
+    }
+    inline bool operator!=(const Iterator& that) const {
+      return !(*this == that);
+    }
+    CapturedValue* value;
+  };
+
+  inline Iterator begin() const;
+  inline Iterator end() const;
+
+ private:
+  CapturedObject(Zone* zone, int slot_count, Tag tag = kDefault)
+      : tag_(tag),
+        slot_count_(slot_count),
+        slots_(zone->AllocateArray<CapturedValue>(slot_count)) {}
+
+  void ClearSlots(int last_init_slot);
+  void set(unsigned int offset, CapturedValue&& value);
+
+  Tag tag_;
+  int slot_count_;
+  CapturedValue* slots_;
+};
+
+struct CapturedFixedDoubleArray {
+  CapturedFixedDoubleArray(Zone* zone, compiler::FixedDoubleArrayRef elements,
+                           int length);
   int length;
-  compiler::ScopeInfoRef scope_info;
-  ValueNode* previous_context;
-  base::Optional<ValueNode*> extension;
+  Float64* values;
 };
 
-// Encoding of a fast allocation site boilerplate object.
-struct FastObject {
-  FastObject(int id, compiler::MapRef map, Zone* zone, FastFixedArray elements)
-      : id(id),
-        map(map),
-        inobject_properties(map.GetInObjectProperties()),
-        instance_size(map.instance_size()),
-        fields(zone->AllocateArray<FastField>(inobject_properties)),
-        elements(elements) {
-    DCHECK(!map.is_dictionary_map());
-    DCHECK(!map.IsInobjectSlackTrackingInProgress());
+struct CapturedValue {
+  CapturedValue() : type(kUninitalized) {}
+  explicit CapturedValue(ValueNode* runtime_value)
+      : type(kRuntimeValue), runtime_value(runtime_value) {
+    DCHECK(IsValidRuntimeValue());
   }
-  FastObject(int id, compiler::JSFunctionRef constructor, Zone* zone,
-             compiler::JSHeapBroker* broker);
+  explicit CapturedValue(compiler::ObjectRef constant)
+      : type(kConstant), constant(constant) {}
+  explicit CapturedValue(RootIndex root_constant)
+      : type(kRootConstant), root_constant(root_constant) {}
+  explicit CapturedValue(int smi) : type(kSmi), smi(smi) {}
+  explicit CapturedValue(ArgumentsElements* arguments_elements)
+      : type(kArgumentsElements), arguments_elements(arguments_elements) {}
+  explicit CapturedValue(ArgumentsLength* arguments_length)
+      : type(kArgumentsLength), arguments_length(arguments_length) {}
+  explicit CapturedValue(RestLength* rest_length)
+      : type(kRestLength), rest_length(rest_length) {}
+  explicit CapturedValue(CapturedObject captured_object)
+      : type(kCapturedObject), captured_object(captured_object) {}
+  explicit CapturedValue(CapturedFixedDoubleArray fixed_double_array)
+      : type(kFixedDoubleArray), fixed_double_array(fixed_double_array) {}
+  explicit CapturedValue(Float64 number) : type(kNumber), number(number) {}
 
-  void ClearFields();
+  bool IsValidRuntimeValue() const;
+  size_t InputLocationSizeNeeded() const;
+  std::optional<CapturedObject> GetObjectFromAllocation() const;
 
-  int id;
-  compiler::MapRef map;
-  int inobject_properties;
-  int instance_size;
-  FastField* fields;
-  FastFixedArray elements;
-  compiler::OptionalObjectRef js_array_length;
-};
-
-// Encoding of a fast allocation site literal value.
-struct FastField {
-  FastField() : type(kUninitialized) {}
-  explicit FastField(FastObject object) : type(kObject), object(object) {}
-  explicit FastField(Float64 mutable_double_value)
-      : type(kMutableDouble), mutable_double_value(mutable_double_value) {}
-  explicit FastField(compiler::ObjectRef constant_value)
-      : type(kConstant), constant_value(constant_value) {}
-
-  enum {
-    kUninitialized,
-    kObject,
-    kMutableDouble,
-    kConstant
+  enum Type {
+    kUninitalized,
+    kRuntimeValue,  // This capture value might need more input locations.
+    // These captured values do not need input locations in DeoptInfo.
+    kConstant,
+    kRootConstant,
+    kSmi,
+    kArgumentsElements,
+    kArgumentsLength,
+    kRestLength,
+    // These captured values are used while contructing a CapturedObject, they
+    // are wrap into a nested allocation (RuntimeValue) once we allocate the
+    // object.
+    kCapturedObject,
+    kFixedDoubleArray,
+    kNumber,
   } type;
-
-  bool IsInitialized();
 
   union {
     char uninitialized_marker;
-    FastObject object;
-    Float64 mutable_double_value;
-    compiler::ObjectRef constant_value;
-  };
-};
-
-struct FastRuntimeUnmappedArgumentsElements {
-  ArgumentsElements* value;
-  ValueNode* length;
-};
-
-struct FastInlinedUnmappedArgumentsElements {
-  CreateArgumentsType type;
-  int start_index;
-  int argument_count_without_receiver;
-
-  // Number of arguments to be copied.
-  int unmapped_argument_count() const {
-    return argument_count_without_receiver - start_index;
-  }
-
-  // The total length of the fixed array representing the arguments elements. In
-  // the case of kMappedArguments, it counts the hole values that are stored up
-  // to {start_index}.
-  int length() const {
-    if (type == CreateArgumentsType::kRestParameter) {
-      return std::max(0, argument_count_without_receiver - start_index);
-    }
-    return argument_count_without_receiver;
-  }
-};
-
-struct FastUnmappedArgumentsElements {
-  enum Type {
-    kMainFunction,
-    kInlinedFunction,
-  };
-
-  using Data =
-      base::DiscriminatedUnion<Type, FastRuntimeUnmappedArgumentsElements,
-                               FastInlinedUnmappedArgumentsElements>;
-
-  FastUnmappedArgumentsElements(ArgumentsElements* value, ValueNode* length)
-      : data(FastRuntimeUnmappedArgumentsElements{value, length}) {}
-
-  explicit FastUnmappedArgumentsElements(int argument_count_without_receiver)
-      : data(FastInlinedUnmappedArgumentsElements{
-            CreateArgumentsType::kUnmappedArguments, 0,
-            argument_count_without_receiver}) {}
-
-  FastUnmappedArgumentsElements(CreateArgumentsType type, int start_index,
-                                int argument_count_without_receiver)
-      : data(FastInlinedUnmappedArgumentsElements{
-            type, start_index, argument_count_without_receiver}) {}
-
-  Type type() { return data.tag(); }
-
-  const FastRuntimeUnmappedArgumentsElements& main() const {
-    return data.get<FastRuntimeUnmappedArgumentsElements>();
-  }
-
-  const FastInlinedUnmappedArgumentsElements& inlined() const {
-    return data.get<FastInlinedUnmappedArgumentsElements>();
-  }
-
-  Data data;
-};
-
-struct FastMappedArgumentsElements {
-  FastMappedArgumentsElements(int id, int mapped_count, ValueNode* context,
-                              FastUnmappedArgumentsElements unmapped_elements)
-      : id(id),
-        mapped_count(mapped_count),
-        context(context),
-        unmapped_elements({unmapped_elements}) {}
-  int id;
-  int mapped_count;
-  ValueNode* context;
-  FastUnmappedArgumentsElements unmapped_elements;
-};
-
-enum class FastArgumentsElementsType {
-  kUnmapped,
-  kMapped,
-};
-
-using FastArgumentsElements =
-    base::DiscriminatedUnion<FastArgumentsElementsType,
-                             FastUnmappedArgumentsElements,
-                             FastMappedArgumentsElements>;
-
-struct FastArgumentsObject {
-  FastArgumentsObject(int id, compiler::MapRef map,
-                      FastArgumentsElements elements,
-                      base::Optional<ValueNode*> callee = {})
-      : id(id), map(map), elements({elements}), callee(callee) {}
-
-  int id;
-  compiler::MapRef map;
-  FastArgumentsElements elements;
-  base::Optional<ValueNode*> callee;
-};
-
-struct DeoptObject {
-  explicit DeoptObject(FastObject object) : type(kObject), object(object) {}
-  explicit DeoptObject(FastFixedArray fixed_array)
-      : type(kFixedArray), fixed_array(fixed_array) {}
-  explicit DeoptObject(Float64 number) : type(kNumber), number(number) {}
-  explicit DeoptObject(FastArgumentsObject arguments)
-      : type(kArguments), arguments(arguments) {}
-  explicit DeoptObject(FastMappedArgumentsElements mapped_elements)
-      : type(kMappedArgumentsElements), mapped_elements(mapped_elements) {}
-  explicit DeoptObject(FastInlinedUnmappedArgumentsElements elements)
-      : type(kInlinedUnmappedArgumentsElements),
-        inlined_unmapped_elements(elements) {}
-  explicit DeoptObject(FastContext context)
-      : type(kContext), context(context) {}
-
-  size_t GetInputLocationsArraySize() const {
-    switch (type) {
-      case DeoptObject::kObject:
-      case DeoptObject::kNumber:
-      case DeoptObject::kFixedArray:
-      case DeoptObject::kArguments:
-      case DeoptObject::kMappedArgumentsElements:
-      case DeoptObject::kInlinedUnmappedArgumentsElements:
-        return 0;
-      case DeoptObject::kContext:
-        return context.GetInputLocationsArraySize();
-    }
-  }
-
-  enum {
-    kObject,
-    kNumber,
-    kFixedArray,
-    kArguments,
-    kMappedArgumentsElements,
-    kInlinedUnmappedArgumentsElements,
-    kContext,
-  } type;
-  union {
-    FastObject object;
-    FastFixedArray fixed_array;
+    ValueNode* runtime_value;
+    compiler::ObjectRef constant;
+    RootIndex root_constant;
+    int smi;
+    ArgumentsElements* arguments_elements;
+    ArgumentsLength* arguments_length;
+    RestLength* rest_length;
+    CapturedObject captured_object;
+    CapturedFixedDoubleArray fixed_double_array;
     Float64 number;
-    FastArgumentsObject arguments;
-    FastMappedArgumentsElements mapped_elements;
-    FastInlinedUnmappedArgumentsElements inlined_unmapped_elements;
-    FastContext context;
+  };
+};
+
+template <typename T>
+inline void CapturedObject::set(unsigned int offset, T value) {
+  set(offset, CapturedValue(value));
+}
+
+inline void CapturedObject::set(unsigned int offset, CapturedValue&& value) {
+  SBXCHECK_LT(offset / kTaggedSize, slot_count_);
+  slots_[offset / kTaggedSize] = value;
+}
+
+inline CapturedValue& CapturedObject::get(unsigned int offset) const {
+  SBXCHECK_LT(offset / kTaggedSize, slot_count_);
+  return slots_[offset / kTaggedSize];
+}
+
+inline CapturedObject::Iterator& CapturedObject::Iterator::operator++() {
+  ++value;
+  return *this;
+}
+
+inline CapturedValue& CapturedObject::Iterator::operator*() const {
+  return *value;
+}
+
+inline CapturedObject::Iterator CapturedObject::begin() const {
+  return Iterator{&slots_[0]};
+}
+
+inline CapturedObject::Iterator CapturedObject::end() const {
+  CapturedValue* start = &slots_[0];
+  return Iterator{start + slot_count_};
+}
+
+struct CapturedAllocation {
+  CapturedAllocation(int id, CapturedObject& object)
+      : id(id), type(kObject), object(object) {}
+  CapturedAllocation(int id, CapturedFixedDoubleArray& fixed_double_array)
+      : id(id),
+        type(kFixedDoubleArray),
+        fixed_double_array(fixed_double_array) {}
+  explicit CapturedAllocation(Float64 number)
+      : id(-1), type(kHeapNumber), number(number) {}
+
+  size_t InputLocationSizeNeeded() const {
+    if (type != kObject) return 0;
+    return object.InputLocationSizeNeeded();
+  }
+
+  int size() const {
+    switch (type) {
+      case kObject:
+        return object.slot_count() * kTaggedSize;
+      case kFixedDoubleArray:
+        return FixedDoubleArray::SizeFor(fixed_double_array.length);
+      case kHeapNumber:
+        return sizeof(HeapNumber);
+    }
+  }
+
+  int id;
+  enum Type { kObject, kFixedDoubleArray, kHeapNumber } type;
+  union {
+    CapturedObject object;
+    CapturedFixedDoubleArray fixed_double_array;
+    Float64 number;
   };
 };
 
@@ -1789,20 +1774,24 @@ class LazyDeoptInfo : public DeoptInfo {
 
 class ExceptionHandlerInfo {
  public:
-  const int kNoExceptionHandlerPCOffsetMarker = 0xdeadbeef;
+  static const int kNoExceptionHandlerPCOffsetMarker = 0xdeadbeef;
+  static const int kLazyDeopt = -1;
 
   ExceptionHandlerInfo()
-      : catch_block(), pc_offset(kNoExceptionHandlerPCOffsetMarker) {}
+      : catch_block(), depth(0), pc_offset(kNoExceptionHandlerPCOffsetMarker) {}
 
-  explicit ExceptionHandlerInfo(BasicBlockRef* catch_block_ref)
-      : catch_block(catch_block_ref), pc_offset(-1) {}
+  ExceptionHandlerInfo(BasicBlockRef* catch_block_ref, int depth)
+      : catch_block(catch_block_ref), depth(depth), pc_offset(-1) {}
 
   bool HasExceptionHandler() const {
     return pc_offset != kNoExceptionHandlerPCOffsetMarker;
   }
 
+  bool ShouldLazyDeopt() const { return depth == kLazyDeopt; }
+
   BasicBlockRef catch_block;
   Label trampoline_entry;
+  int depth;
   int pc_offset;
 };
 
@@ -4381,6 +4370,8 @@ class TestTypeOf : public FixedInputValueNodeT<1, TestTypeOf> {
 
   auto options() const { return std::tuple{literal_}; }
 
+  interpreter::TestTypeOfFlags::LiteralFlag literal() const { return literal_; }
+
  private:
   interpreter::TestTypeOfFlags::LiteralFlag literal_;
 };
@@ -5066,14 +5057,23 @@ class CreateShallowObjectLiteral
   const int flags_;
 };
 
+enum class EscapeAnalysisResult {
+  kUnknown,
+  kElided,
+  kEscaped,
+};
+
 class InlinedAllocation : public FixedInputValueNodeT<1, InlinedAllocation> {
   using Base = FixedInputValueNodeT<1, InlinedAllocation>;
 
  public:
   using List = base::ThreadedList<InlinedAllocation>;
 
-  explicit InlinedAllocation(uint64_t bitfield, int size, DeoptObject value)
-      : Base(bitfield), size_(size), value_(value) {}
+  explicit InlinedAllocation(uint64_t bitfield,
+                             CapturedAllocation captured_allocation)
+      : Base(bitfield),
+        captured_allocation_(captured_allocation),
+        escape_analysis_result_(EscapeAnalysisResult::kUnknown) {}
 
   Input& allocation_block() { return input(0); }
 
@@ -5087,9 +5087,11 @@ class InlinedAllocation : public FixedInputValueNodeT<1, InlinedAllocation> {
 
   void VerifyInputs(MaglevGraphLabeller* graph_labeller) const;
 
-  int size() const { return size_; }
-  const DeoptObject& value() const { return value_; }
-  DeoptObject& value() { return value_; }
+  int size() const { return captured_allocation_.size(); }
+
+  const CapturedAllocation& captured_allocation() const {
+    return captured_allocation_;
+  }
 
   int offset() const {
     DCHECK_NE(offset_, -1);
@@ -5099,18 +5101,44 @@ class InlinedAllocation : public FixedInputValueNodeT<1, InlinedAllocation> {
 
   int non_escaping_use_count() const { return non_escaping_use_count_; }
 
-  void AddNonEscapingUses(int n = 1) { non_escaping_use_count_ += n; }
-  bool IsEscaping() const { return use_count_ > non_escaping_use_count_; }
-  void ForceEscaping() { non_escaping_use_count_ = 0; }
+  void AddNonEscapingUses(int n = 1) {
+    DCHECK(!HasBeenAnalysed());
+    non_escaping_use_count_ += n;
+  }
+  bool IsEscaping() const {
+    DCHECK(!HasBeenAnalysed());
+    return use_count_ > non_escaping_use_count_;
+  }
+  void ForceEscaping() {
+    DCHECK(!HasBeenAnalysed());
+    non_escaping_use_count_ = 0;
+  }
 
-  void SetHasEscaped(bool value) { has_escaped_ = value; }
-  bool HasEscaped() const { return has_escaped_; }
+  void SetElided() {
+    DCHECK_EQ(escape_analysis_result_, EscapeAnalysisResult::kUnknown);
+    escape_analysis_result_ = EscapeAnalysisResult::kElided;
+  }
+  void SetEscaped() {
+    // We allow transitions from elided to escaped.
+    DCHECK_NE(escape_analysis_result_, EscapeAnalysisResult::kEscaped);
+    escape_analysis_result_ = EscapeAnalysisResult::kEscaped;
+  }
+  bool HasBeenElided() const {
+    DCHECK(HasBeenAnalysed());
+    return escape_analysis_result_ == EscapeAnalysisResult::kElided;
+  }
+  bool HasEscaped() const {
+    DCHECK(HasBeenAnalysed());
+    return escape_analysis_result_ == EscapeAnalysisResult::kEscaped;
+  }
+  bool HasBeenAnalysed() const {
+    return escape_analysis_result_ != EscapeAnalysisResult::kUnknown;
+  }
 
  private:
-  int size_;
-  DeoptObject value_;
+  CapturedAllocation captured_allocation_;
+  EscapeAnalysisResult escape_analysis_result_;
   int non_escaping_use_count_ = 0;
-  bool has_escaped_ = true;  // Escaped by default.
   int offset_ = -1;  // Set by AllocationBlock.
 
   InlinedAllocation* next_ = nullptr;
@@ -5173,8 +5201,6 @@ class RestLength : public FixedInputValueNodeT<0, RestLength> {
   explicit RestLength(uint64_t bitfield, int formal_parameter_count)
       : Base(bitfield), formal_parameter_count_(formal_parameter_count) {}
 
-  static constexpr OpProperties kProperties = OpProperties::Int32();
-
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
@@ -5216,6 +5242,35 @@ class ArgumentsElements : public FixedInputValueNodeT<1, ArgumentsElements> {
  private:
   CreateArgumentsType type_;
   int formal_parameter_count_;
+};
+
+// TODO(victorgomes): This node is currently not eliminated by the escape
+// analysis.
+class AllocateElementsArray
+    : public FixedInputValueNodeT<1, AllocateElementsArray> {
+  using Base = FixedInputValueNodeT<1, AllocateElementsArray>;
+
+ public:
+  explicit AllocateElementsArray(uint64_t bitfield,
+                                 AllocationType allocation_type)
+      : Base(bitfield), allocation_type_(allocation_type) {}
+
+  static constexpr OpProperties kProperties =
+      OpProperties::CanAllocate() | OpProperties::EagerDeopt() |
+      OpProperties::DeferredCall() | OpProperties::NotIdempotent();
+
+  Input& length_input() { return input(0); }
+
+  static constexpr
+      typename Base::InputTypes kInputTypes{ValueRepresentation::kInt32};
+
+  int MaxCallStackArgs() const { return 0; }
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+
+ private:
+  AllocationType allocation_type_;
 };
 
 class CreateFunctionContext
@@ -5304,8 +5359,9 @@ class CreateRegExpLiteral
   int flags() const { return flags_; }
 
   // The implementation currently calls runtime.
-  static constexpr OpProperties kProperties =
-      OpProperties::Call() | OpProperties::NotIdempotent();
+  static constexpr OpProperties kProperties = OpProperties::Call() |
+                                              OpProperties::NotIdempotent() |
+                                              OpProperties::CanThrow();
 
   int MaxCallStackArgs() const;
   void SetValueLocationConstraints();
@@ -5994,6 +6050,8 @@ class CheckConstTrackingLetCell
 
   auto options() const { return std::tuple{index_}; }
 
+  int index() const { return index_; }
+
  private:
   int index_;
 };
@@ -6027,6 +6085,8 @@ class CheckConstTrackingLetCellTagged
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
   auto options() const { return std::tuple{index_}; }
+
+  int index() const { return index_; }
 
  private:
   int index_;
@@ -6553,13 +6613,12 @@ class EnsureWritableFastElements
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 };
 
-class MaybeGrowAndEnsureWritableFastElements
-    : public FixedInputValueNodeT<4, MaybeGrowAndEnsureWritableFastElements> {
-  using Base = FixedInputValueNodeT<4, MaybeGrowAndEnsureWritableFastElements>;
+class MaybeGrowFastElements
+    : public FixedInputValueNodeT<4, MaybeGrowFastElements> {
+  using Base = FixedInputValueNodeT<4, MaybeGrowFastElements>;
 
  public:
-  explicit MaybeGrowAndEnsureWritableFastElements(uint64_t bitfield,
-                                                  ElementsKind elements_kind)
+  explicit MaybeGrowFastElements(uint64_t bitfield, ElementsKind elements_kind)
       : Base(bitfield), elements_kind_(elements_kind) {}
 
   static constexpr OpProperties kProperties =
@@ -7865,6 +7924,9 @@ class Call : public ValueNodeT<Call> {
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
+  ConvertReceiverMode receiver_mode() const { return receiver_mode_; }
+  TargetType target_type() const { return target_type_; }
+
  private:
   ConvertReceiverMode receiver_mode_;
   TargetType target_type_;
@@ -8094,6 +8156,61 @@ class CallCPPBuiltin : public ValueNodeT<CallCPPBuiltin> {
 
  private:
   Builtin builtin_;
+};
+
+class CallForwardVarargs : public ValueNodeT<CallForwardVarargs> {
+  using Base = ValueNodeT<CallForwardVarargs>;
+
+ public:
+  static constexpr int kFunctionIndex = 0;
+  static constexpr int kContextIndex = 1;
+  static constexpr int kFixedInputCount = 2;
+
+  // We need enough inputs to have these fixed inputs plus the maximum arguments
+  // to a function call.
+  static_assert(kMaxInputs >= kFixedInputCount + Code::kMaxArguments);
+
+  // This ctor is used when for variable input counts.
+  // Inputs must be initialized manually.
+  CallForwardVarargs(uint64_t bitfield, ValueNode* function, ValueNode* context,
+                     int start_index, Call::TargetType target_type)
+      : Base(bitfield), start_index_(start_index), target_type_(target_type) {
+    set_input(kFunctionIndex, function);
+    set_input(kContextIndex, context);
+  }
+
+  static constexpr OpProperties kProperties = OpProperties::JSCall();
+
+  Input& function() { return input(kFunctionIndex); }
+  const Input& function() const { return input(kFunctionIndex); }
+  Input& context() { return input(kContextIndex); }
+  const Input& context() const { return input(kContextIndex); }
+  int num_args() const { return input_count() - kFixedInputCount; }
+  Input& arg(int i) { return input(i + kFixedInputCount); }
+  void set_arg(int i, ValueNode* node) {
+    set_input(i + kFixedInputCount, node);
+  }
+  auto args() {
+    return base::make_iterator_range(
+        std::make_reverse_iterator(&arg(-1)),
+        std::make_reverse_iterator(&arg(num_args() - 1)));
+  }
+
+  void VerifyInputs(MaglevGraphLabeller* graph_labeller) const;
+#ifdef V8_COMPRESS_POINTERS
+  void MarkTaggedInputsAsDecompressing();
+#endif
+  int MaxCallStackArgs() const;
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
+
+  int start_index() const { return start_index_; }
+  Call::TargetType target_type() const { return target_type_; }
+
+ private:
+  int start_index_;
+  Call::TargetType target_type_;
 };
 
 class CallRuntime : public ValueNodeT<CallRuntime> {
@@ -8534,7 +8651,8 @@ class ConvertReceiver : public FixedInputValueNodeT<1, ConvertReceiver> {
   Input& receiver_input() { return input(0); }
 
   // The implementation currently calls runtime.
-  static constexpr OpProperties kProperties = OpProperties::Call();
+  static constexpr OpProperties kProperties =
+      OpProperties::Call() | OpProperties::NotIdempotent();
   static constexpr
       typename Base::InputTypes kInputTypes{ValueRepresentation::kTagged};
 

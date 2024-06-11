@@ -126,7 +126,10 @@ class SemiSpaceNewSpace;
 class SharedLargeObjectSpace;
 class SharedReadOnlySpace;
 class SharedSpace;
+class SharedTrustedLargeObjectSpace;
+class SharedTrustedSpace;
 class Space;
+class StickySpace;
 class StressScavengeObserver;
 class TimedHistogram;
 class TrustedLargeObjectSpace;
@@ -762,6 +765,7 @@ class Heap final {
   inline PagedNewSpace* paged_new_space() const;
   inline SemiSpaceNewSpace* semi_space_new_space() const;
   OldSpace* old_space() const { return old_space_; }
+  inline StickySpace* sticky_space() const;
   CodeSpace* code_space() const { return code_space_; }
   SharedSpace* shared_space() const { return shared_space_; }
   OldLargeObjectSpace* lo_space() const { return lo_space_; }
@@ -780,13 +784,22 @@ class Heap final {
   OldLargeObjectSpace* shared_lo_allocation_space() const {
     return shared_lo_allocation_space_;
   }
+  SharedTrustedSpace* shared_trusted_allocation_space() const {
+    return shared_trusted_allocation_space_;
+  }
+  SharedTrustedLargeObjectSpace* shared_trusted_lo_allocation_space() const {
+    return shared_trusted_lo_allocation_space_;
+  }
 
   inline PagedSpace* paged_space(int idx) const;
   inline Space* space(int idx) const;
 
 #ifdef V8_COMPRESS_POINTERS
-  ExternalPointerTable::Space* external_pointer_space() {
-    return &external_pointer_space_;
+  ExternalPointerTable::Space* young_external_pointer_space() {
+    return &young_external_pointer_space_;
+  }
+  ExternalPointerTable::Space* old_external_pointer_space() {
+    return &old_external_pointer_space_;
   }
   ExternalPointerTable::Space* read_only_external_pointer_space() {
     return &read_only_external_pointer_space_;
@@ -802,6 +815,10 @@ class Heap final {
   }
 
   CodePointerTable::Space* code_pointer_space() { return &code_pointer_space_; }
+
+  ExternalBufferTable::Space* external_buffer_space() {
+    return &external_buffer_space_;
+  }
 #endif  // V8_ENABLE_SANDBOX
 
   // ===========================================================================
@@ -1596,6 +1613,9 @@ class Heap final {
   // over all objects.
   V8_EXPORT_PRIVATE void MakeHeapIterable();
 
+  V8_EXPORT_PRIVATE void Unmark();
+  V8_EXPORT_PRIVATE void DeactivateMajorGCInProgressFlag();
+
   // Free all LABs in the heap.
   V8_EXPORT_PRIVATE void FreeLinearAllocationAreas();
 
@@ -1633,6 +1653,11 @@ class Heap final {
   bool ShouldUseBackgroundThreads() const;
 
   HeapAllocator* allocator() { return heap_allocator_; }
+
+  bool use_new_space() const {
+    DCHECK_IMPLIES(new_space(), !v8_flags.sticky_mark_bits);
+    return new_space() || v8_flags.sticky_mark_bits;
+  }
 
  private:
   class AllocationTrackerForDebugging;
@@ -1815,7 +1840,7 @@ class Heap final {
 
   void CollectGarbageOnMemoryPressure();
 
-  void EagerlyFreeExternalMemory();
+  void EagerlyFreeExternalMemoryAndWasmCode();
 
   bool InvokeNearHeapLimitCallback();
 
@@ -1951,8 +1976,8 @@ class Heap final {
 
   HeapGrowingMode CurrentHeapGrowingMode();
 
-  double PercentToOldGenerationLimit();
-  double PercentToGlobalMemoryLimit();
+  double PercentToOldGenerationLimit() const;
+  double PercentToGlobalMemoryLimit() const;
   enum class IncrementalMarkingLimit {
     kNoLimit,
     kSoftLimit,
@@ -2138,20 +2163,25 @@ class Heap final {
   SharedLargeObjectSpace* shared_lo_space_ = nullptr;
   ReadOnlySpace* read_only_space_ = nullptr;
   TrustedSpace* trusted_space_ = nullptr;
+  SharedTrustedSpace* shared_trusted_space_ = nullptr;
   TrustedLargeObjectSpace* trusted_lo_space_ = nullptr;
+  SharedTrustedLargeObjectSpace* shared_trusted_lo_space_ = nullptr;
 
   // Either pointer to owned shared spaces or pointer to unowned shared spaces
   // in another isolate.
   PagedSpace* shared_allocation_space_ = nullptr;
   OldLargeObjectSpace* shared_lo_allocation_space_ = nullptr;
+  SharedTrustedSpace* shared_trusted_allocation_space_ = nullptr;
+  SharedTrustedLargeObjectSpace* shared_trusted_lo_allocation_space_ = nullptr;
 
   // Map from the space id to the space.
   std::unique_ptr<Space> space_[LAST_SPACE + 1];
 
 #ifdef V8_COMPRESS_POINTERS
-  // The space in the ExternalPointerTable containing entries owned by objects
+  // The spaces in the ExternalPointerTable containing entries owned by objects
   // in this heap.
-  ExternalPointerTable::Space external_pointer_space_;
+  ExternalPointerTable::Space young_external_pointer_space_;
+  ExternalPointerTable::Space old_external_pointer_space_;
   // Likewise but for slots in host objects in ReadOnlySpace.
   ExternalPointerTable::Space read_only_external_pointer_space_;
   // Space in the ExternalPointerTable containing entries owned by objects in
@@ -2165,6 +2195,10 @@ class Heap final {
 
   // The space in the process-wide code pointer table managed by this heap.
   CodePointerTable::Space code_pointer_space_;
+
+  // The space in the ExternalBufferTable containing entries owned by objects
+  // in this heap.
+  ExternalBufferTable::Space external_buffer_space_;
 #endif  // V8_ENABLE_SANDBOX
 
   LocalHeap* main_thread_local_heap_ = nullptr;
@@ -2400,6 +2434,7 @@ class Heap final {
   friend class ArrayBufferSweeper;
   friend class ConcurrentMarking;
   friend class ConservativeTracedHandlesMarkingVisitor;
+  friend class CppHeap;
   friend class EmbedderStackStateScope;
   friend class EvacuateVisitorBase;
   friend class GCCallbacksScope;
@@ -2663,8 +2698,10 @@ class StrongRootAllocator<Address> : public StrongRootAllocatorBase {
   using value_type = Address;
 
   explicit StrongRootAllocator(Heap* heap) : StrongRootAllocatorBase(heap) {}
-  explicit StrongRootAllocator(v8::Isolate* isolate)
+  explicit StrongRootAllocator(Isolate* isolate)
       : StrongRootAllocatorBase(isolate) {}
+  explicit StrongRootAllocator(v8::Isolate* isolate)
+      : StrongRootAllocatorBase(reinterpret_cast<Isolate*>(isolate)) {}
   template <typename U>
   StrongRootAllocator(const StrongRootAllocator<U>& other) V8_NOEXCEPT
       : StrongRootAllocatorBase(other) {}

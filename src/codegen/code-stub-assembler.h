@@ -101,6 +101,9 @@ enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
   V(AsyncGeneratorYieldWithAwaitResolveSharedFun,                              \
     async_generator_yield_with_await_resolve_shared_fun,                       \
     AsyncGeneratorYieldWithAwaitResolveSharedFun)                              \
+  V(AsyncFromSyncIteratorCloseSyncAndRethrowSharedFun,                         \
+    async_from_sync_iterator_close_sync_and_rethrow_shared_fun,                \
+    AsyncFromSyncIteratorCloseSyncAndRethrowSharedFun)                         \
   V(AsyncIteratorValueUnwrapSharedFun, async_iterator_value_unwrap_shared_fun, \
     AsyncIteratorValueUnwrapSharedFun)                                         \
   V(PromiseAllResolveElementSharedFun, promise_all_resolve_element_shared_fun, \
@@ -733,9 +736,20 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<Smi> TrySmiSub(TNode<Smi> a, TNode<Smi> b, Label* if_overflow);
   TNode<Smi> TrySmiAbs(TNode<Smi> a, Label* if_overflow);
 
+  TNode<Smi> UnsignedSmiShl(TNode<Smi> a, int shift) {
+    if (SmiValuesAre32Bits()) {
+      return BitcastWordToTaggedSigned(
+          WordShl(BitcastTaggedToWordForTagAndSmiBits(a), shift));
+    } else {
+      DCHECK(SmiValuesAre31Bits());
+      return BitcastWordToTaggedSigned(ChangeInt32ToIntPtr(Word32Shl(
+          TruncateIntPtrToInt32(BitcastTaggedToWordForTagAndSmiBits(a)),
+          Int32Constant(shift))));
+    }
+  }
+
   TNode<Smi> SmiShl(TNode<Smi> a, int shift) {
-    TNode<Smi> result = BitcastWordToTaggedSigned(
-        WordShl(BitcastTaggedToWordForTagAndSmiBits(a), shift));
+    TNode<Smi> result = UnsignedSmiShl(a, shift);
     // Smi shift have different result to int32 shift when the inputs are not
     // strictly limited. The CSA_DCHECK is to ensure valid inputs.
     CSA_DCHECK(
@@ -942,15 +956,34 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                           CodeEntrypointTag tag);
   TNode<BoolT> IsMarkedForDeoptimization(TNode<Code> code);
 
+  void DCheckReceiver(ConvertReceiverMode mode, TNode<Object> receiver);
+
   // The following Call wrappers call an object according to the semantics that
   // one finds in the EcmaScript spec, operating on an Callable (e.g. a
   // JSFunction or proxy) rather than a InstructionStream object.
-  template <class... TArgs>
-  inline TNode<Object> Call(TNode<Context> context, TNode<Object> callable,
+  template <typename TCallable, class... TArgs>
+  inline TNode<Object> Call(TNode<Context> context, TNode<TCallable> callable,
+                            ConvertReceiverMode mode, TNode<Object> receiver,
+                            TArgs... args);
+  template <typename TCallable, class... TArgs>
+  inline TNode<Object> Call(TNode<Context> context, TNode<TCallable> callable,
                             TNode<JSReceiver> receiver, TArgs... args);
-  template <class... TArgs>
-  inline TNode<Object> Call(TNode<Context> context, TNode<Object> callable,
+  template <typename TCallable, class... TArgs>
+  inline TNode<Object> Call(TNode<Context> context, TNode<TCallable> callable,
                             TNode<Object> receiver, TArgs... args);
+  template <class... TArgs>
+  inline TNode<Object> CallFunction(TNode<Context> context,
+                                    TNode<JSFunction> callable,
+                                    ConvertReceiverMode mode,
+                                    TNode<Object> receiver, TArgs... args);
+  template <class... TArgs>
+  inline TNode<Object> CallFunction(TNode<Context> context,
+                                    TNode<JSFunction> callable,
+                                    TNode<JSReceiver> receiver, TArgs... args);
+  template <class... TArgs>
+  inline TNode<Object> CallFunction(TNode<Context> context,
+                                    TNode<JSFunction> callable,
+                                    TNode<Object> receiver, TArgs... args);
 
   TNode<Object> CallApiCallback(TNode<Object> context, TNode<RawPtrT> callback,
                                 TNode<Int32T> argc, TNode<Object> data,
@@ -1330,18 +1363,17 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
         object, WasmTypeInfo::kNativeTypeOffset, kWasmTypeInfoNativeTypeTag);
   }
 
-  TNode<RawPtrT> LoadWasmExportedFunctionDataSigPtr(
-      TNode<WasmExportedFunctionData> object) {
-    return LoadExternalPointerFromObject(object,
-                                         WasmExportedFunctionData::kSigOffset,
-                                         kWasmExportedFunctionDataSignatureTag);
-  }
-
   TNode<WasmInternalFunction> LoadWasmInternalFunctionFromFuncRef(
       TNode<WasmFuncRef> func_ref) {
     return CAST(LoadTrustedPointerFromObject(
         func_ref, WasmFuncRef::kTrustedInternalOffset,
         kWasmInternalFunctionIndirectPointerTag));
+  }
+
+  TNode<WasmInternalFunction> LoadWasmInternalFunctionFromFunctionData(
+      TNode<WasmFunctionData> data) {
+    return CAST(LoadProtectedPointerField(
+        data, WasmFunctionData::kProtectedInternalOffset));
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
@@ -3990,6 +4022,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<Smi> LoadTransitionInfo(TNode<AllocationSite> allocation_site);
   TNode<JSObject> LoadBoilerplate(TNode<AllocationSite> allocation_site);
   TNode<Int32T> LoadElementsKind(TNode<AllocationSite> allocation_site);
+  TNode<Object> LoadNestedAllocationSite(TNode<AllocationSite> allocation_site);
 
   enum class IndexAdvanceMode { kPre, kPost };
   enum class LoopUnrollingMode { kNo, kYes };
@@ -4591,11 +4624,12 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
       TNode<DescriptorArray> descriptors, TNode<IntPtrT> descriptor);
 
   using ForEachKeyValueFunction =
-      std::function<void(TNode<Name> key, TNode<Object> value)>;
+      std::function<void(TNode<Name> key, LazyNode<Object> value)>;
 
   // For each JSObject property (in DescriptorArray order), check if the key is
   // enumerable, and if so, load the value from the receiver and evaluate the
-  // closure.
+  // closure. The value is provided as a LazyNode, which lazily evaluates
+  // accessors if present.
   void ForEachEnumerableOwnProperty(TNode<Context> context, TNode<Map> map,
                                     TNode<JSObject> object,
                                     PropertiesEnumerationMode mode,
@@ -4717,6 +4751,11 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<Object> CallOnCentralStack(TNode<Context> context, TNode<Object> target,
                                    TNode<Int32T> num_args,
                                    TNode<FixedArray> args);
+
+  TNode<BoolT> IsMarked(TNode<Object> object);
+
+  void GetMarkBit(TNode<IntPtrT> object, TNode<IntPtrT>* cell,
+                  TNode<IntPtrT>* mask);
 
  private:
   friend class CodeStubArguments;

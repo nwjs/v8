@@ -959,7 +959,8 @@ MaybeObjectHandle LoadIC::ComputeHandler(LookupIterator* lookup) {
         }
 
         Handle<Object> getter(accessor_pair->getter(), isolate());
-        if (!IsJSFunction(*getter) && !IsFunctionTemplateInfo(*getter)) {
+        if (!IsCallableJSFunction(*getter) &&
+            !IsFunctionTemplateInfo(*getter)) {
           // TODO(jgruber): Update counter name.
           TRACE_HANDLER_STATS(isolate(), LoadIC_SlowStub);
           return MaybeObjectHandle(LoadHandler::LoadSlow(isolate()));
@@ -1005,9 +1006,11 @@ MaybeObjectHandle LoadIC::ComputeHandler(LookupIterator* lookup) {
         }
 
         if (holder->HasFastProperties()) {
-          TRACE_HANDLER_STATS(isolate(), LoadIC_LoadAccessorDH);
-          if (holder_is_lookup_start_object)
+          DCHECK(IsCallableJSFunction(*getter));
+          if (holder_is_lookup_start_object) {
+            TRACE_HANDLER_STATS(isolate(), LoadIC_LoadAccessorDH);
             return MaybeObjectHandle::Weak(accessor_pair);
+          }
           TRACE_HANDLER_STATS(isolate(), LoadIC_LoadAccessorFromPrototypeDH);
           return MaybeObjectHandle(LoadHandler::LoadFromPrototype(
               isolate(), map, holder,
@@ -1719,12 +1722,6 @@ MaybeHandle<Object> StoreGlobalIC::Store(Handle<Name> name,
       AllowGarbageCollection yes_gc;
       return TypeError(MessageTemplate::kConstAssign, global, name);
     }
-    if (lookup_result.mode == VariableMode::kLet &&
-        v8_flags.const_tracking_let) {
-      Context::UpdateConstTrackingLetSideData(handle(script_context, isolate()),
-                                              lookup_result.slot_index, value,
-                                              isolate());
-    }
 
     Tagged<Object> previous_value =
         script_context->get(lookup_result.slot_index);
@@ -1738,6 +1735,13 @@ MaybeHandle<Object> StoreGlobalIC::Store(Handle<Name> name,
           NewReferenceError(MessageTemplate::kAccessedUninitializedVariable,
                             name),
           Object);
+    }
+
+    if (lookup_result.mode == VariableMode::kLet &&
+        v8_flags.const_tracking_let) {
+      Context::UpdateConstTrackingLetSideData(handle(script_context, isolate()),
+                                              lookup_result.slot_index, value,
+                                              isolate());
     }
 
     bool use_ic = (state() != NO_FEEDBACK) && v8_flags.use_ic;
@@ -1900,7 +1904,7 @@ MaybeHandle<Object> StoreIC::Store(Handle<Object> object, Handle<Name> name,
   // present. We can also skip this for private names since they are not
   // bound by configurability or extensibility checks, and errors would've
   // been thrown if the private field already exists in the object.
-  if (IsAnyDefineOwn() && !name->IsPrivateName() && !IsJSProxy(*object) &&
+  if (IsAnyDefineOwn() && !name->IsPrivateName() && IsJSObject(*object) &&
       !Handle<JSObject>::cast(object)->HasNamedInterceptor()) {
     Maybe<bool> can_define = JSObject::CheckIfCanDefineAsConfigurable(
         isolate(), &it, value, Nothing<ShouldThrow>());
@@ -2046,6 +2050,11 @@ MaybeObjectHandle StoreIC::ComputeHandler(LookupIterator* lookup) {
       Handle<JSObject> holder = lookup->GetHolder<JSObject>();
       DCHECK(!IsAccessCheckNeeded(*receiver) || lookup->name()->IsPrivate());
 
+      if (IsAnyDefineOwn()) {
+        set_slow_stub_reason("define own with existing accessor");
+        TRACE_HANDLER_STATS(isolate(), StoreIC_SlowStub);
+        return MaybeObjectHandle(StoreHandler::StoreSlow(isolate()));
+      }
       if (!holder->HasFastProperties()) {
         set_slow_stub_reason("accessor on slow map");
         TRACE_HANDLER_STATS(isolate(), StoreIC_SlowStub);
@@ -2080,9 +2089,11 @@ MaybeObjectHandle StoreIC::ComputeHandler(LookupIterator* lookup) {
             isolate(), lookup_start_object_map(), holder, *smi_handler));
 
       } else if (IsAccessorPair(*accessors)) {
-        Handle<Object> setter(Handle<AccessorPair>::cast(accessors)->setter(),
-                              isolate());
-        if (!IsJSFunction(*setter) && !IsFunctionTemplateInfo(*setter)) {
+        Handle<AccessorPair> accessor_pair =
+            Handle<AccessorPair>::cast(accessors);
+        Handle<Object> setter(accessor_pair->setter(), isolate());
+        if (!IsCallableJSFunction(*setter) &&
+            !IsFunctionTemplateInfo(*setter)) {
           set_slow_stub_reason("setter not a function");
           TRACE_HANDLER_STATS(isolate(), StoreIC_SlowStub);
           return MaybeObjectHandle(StoreHandler::StoreSlow(isolate()));
@@ -2127,17 +2138,17 @@ MaybeObjectHandle StoreIC::ComputeHandler(LookupIterator* lookup) {
           return MaybeObjectHandle(StoreHandler::StoreSlow(isolate()));
         }
 
-        Handle<Smi> smi_handler =
-            StoreHandler::StoreAccessor(isolate(), lookup->GetAccessorIndex());
-
-        TRACE_HANDLER_STATS(isolate(), StoreIC_StoreAccessorDH);
+        DCHECK(IsCallableJSFunction(*setter));
         if (receiver.is_identical_to(holder)) {
-          return MaybeObjectHandle(smi_handler);
+          TRACE_HANDLER_STATS(isolate(), StoreIC_StoreAccessorDH);
+          return MaybeObjectHandle::Weak(accessor_pair);
         }
         TRACE_HANDLER_STATS(isolate(), StoreIC_StoreAccessorOnPrototypeDH);
 
         return MaybeObjectHandle(StoreHandler::StoreThroughPrototype(
-            isolate(), lookup_start_object_map(), holder, *smi_handler));
+            isolate(), lookup_start_object_map(), holder,
+            *StoreHandler::StoreAccessorFromPrototype(isolate()),
+            MaybeObjectHandle::Weak(setter)));
       }
       TRACE_HANDLER_STATS(isolate(), StoreIC_SlowStub);
       return MaybeObjectHandle(StoreHandler::StoreSlow(isolate()));
@@ -2377,15 +2388,16 @@ Handle<Object> KeyedStoreIC::StoreElementHandler(
               isolate()),
       IsStoreInArrayLiteralIC());
 
-  if (IsJSProxyMap(*receiver_map)) {
+  if (!IsJSObjectMap(*receiver_map)) {
     // DefineKeyedOwnIC, which is used to define computed fields in instances,
-    // should be handled by the slow stub.
-    if (IsDefineKeyedOwnIC()) {
-      TRACE_HANDLER_STATS(isolate(), KeyedStoreIC_SlowStub);
-      return StoreHandler::StoreSlow(isolate(), store_mode);
+    // should handled by the slow stub below instead of the proxy stub.
+    if (IsJSProxyMap(*receiver_map) && !IsDefineKeyedOwnIC()) {
+      return StoreHandler::StoreProxy(isolate());
     }
 
-    return StoreHandler::StoreProxy(isolate());
+    // Wasm objects or other kind of special objects go through the slow stub.
+    TRACE_HANDLER_STATS(isolate(), KeyedStoreIC_SlowStub);
+    return StoreHandler::StoreSlow(isolate(), store_mode);
   }
 
   // TODO(ishell): move to StoreHandler::StoreElement().
@@ -2610,14 +2622,12 @@ MaybeHandle<Object> KeyedStoreIC::Store(Handle<Object> object,
     Handle<JSReceiver> receiver = Handle<JSReceiver>::cast(object);
     old_receiver_map = handle(receiver->map(), isolate());
     is_arguments = IsJSArgumentsObject(*receiver);
-    bool is_proxy = IsJSProxy(*receiver);
+    bool is_jsobject = IsJSObject(*receiver);
     size_t index;
     key_is_valid_index = IntPtrKeyToSize(maybe_index, receiver, &index);
-    if (!is_arguments && !is_proxy) {
-      if (key_is_valid_index) {
-        Handle<JSObject> receiver_object = Handle<JSObject>::cast(object);
-        store_mode = GetStoreMode(receiver_object, index);
-      }
+    if (is_jsobject && !is_arguments && key_is_valid_index) {
+      Handle<JSObject> receiver_object = Handle<JSObject>::cast(object);
+      store_mode = GetStoreMode(receiver_object, index);
     }
   }
 
@@ -3252,8 +3262,12 @@ FastCloneObjectMode GetCloneModeForMap(Handle<Map> map, int flags,
                ? FastCloneObjectMode::kEmptyObject
                : FastCloneObjectMode::kNotSupported;
   }
-  if (!IsSmiOrObjectElementsKind(map->elements_kind()) ||
-      !map->OnlyHasSimpleProperties()) {
+  ElementsKind elements_kind = map->elements_kind();
+  if (!IsSmiOrObjectElementsKind(elements_kind) &&
+      !IsAnyNonextensibleElementsKind(elements_kind)) {
+    return FastCloneObjectMode::kNotSupported;
+  }
+  if (!map->OnlyHasSimpleProperties()) {
     return FastCloneObjectMode::kNotSupported;
   }
 
@@ -3263,6 +3277,7 @@ FastCloneObjectMode GetCloneModeForMap(Handle<Map> map, int flags,
   // directly use it as the target map.
   FastCloneObjectMode mode =
       map->instance_type() == JS_OBJECT_TYPE &&
+              !IsAnyNonextensibleElementsKind(elements_kind) &&
               map->GetConstructor() == *isolate->object_function() &&
               map->prototype() == *isolate->object_function_prototype() &&
               !map->is_prototype_map()
@@ -3296,17 +3311,21 @@ bool CanFastCloneObjectWithDifferentMaps(Handle<Map> source_map,
                                          Handle<Map> target_map,
                                          Isolate* isolate) {
   DisallowGarbageCollection no_gc;
+  DCHECK(source_map->OnlyHasSimpleProperties());
   // Ensure source and target have identical binary represenation of properties
   // and elements as the IC relies on copying the raw bytes. This also excludes
   // cases with non-enumerable properties or accessors on the source object.
   if (source_map->instance_type() != JS_OBJECT_TYPE ||
       target_map->instance_type() != JS_OBJECT_TYPE ||
-      !source_map->OnlyHasSimpleProperties() ||
       !target_map->OnlyHasSimpleProperties() ||
-      source_map->elements_kind() != target_map->elements_kind() ||
-      !source_map->has_fast_elements()) {
+      !target_map->has_fast_elements()) {
     return false;
   }
+  DCHECK(IsSmiOrObjectElementsKind(source_map->elements_kind()) ||
+         IsAnyNonextensibleElementsKind(source_map->elements_kind()));
+  DCHECK(IsSmiOrObjectElementsKind(target_map->elements_kind()));
+  DCHECK_IMPLIES(IsHoleyElementsKindForRead(source_map->elements_kind()),
+                 IsHoleyElementsKind(target_map->elements_kind()));
   // Check that the source inobject properties are big enough to initialize all
   // target slots, but not too big to fit.
   // TODO(olivf): This restriction (and the same restriction on the backing

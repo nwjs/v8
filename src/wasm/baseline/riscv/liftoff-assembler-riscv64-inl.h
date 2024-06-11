@@ -1278,6 +1278,12 @@ void LiftoffAssembler::emit_u32_to_uintptr(Register dst, Register src) {
   ZeroExtendWord(dst, src);
 }
 
+void LiftoffAssembler::clear_i32_upper_half(Register dst) {
+  // Don't need to clear the upper halves of i32 values for sandbox on riscv64,
+  // because we'll explicitly zero-extend their lower halves before using them
+  // for memory accesses anyway.
+}
+
 #define FP_UNOP_RETURN_TRUE(name, instruction)                                 \
   bool LiftoffAssembler::emit_##name(DoubleRegister dst, DoubleRegister src) { \
     instruction(dst, src, kScratchDoubleReg);                                  \

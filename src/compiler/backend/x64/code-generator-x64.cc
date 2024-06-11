@@ -391,6 +391,10 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
     DCHECK(!AreAliased(value, scratch0, scratch1));
   }
 
+#if V8_ENABLE_STICKY_MARK_BITS_BOOL
+  Label* stub_call() { return &stub_call_; }
+#endif  // V8_ENABLE_STICKY_MARK_BITS_BOOL
+
   void Generate() final {
     // When storing an indirect pointer, the value will always be a
     // full/decompressed pointer.
@@ -399,9 +403,26 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
       __ DecompressTagged(value_, value_);
     }
 
+#if V8_ENABLE_STICKY_MARK_BITS_BOOL
+    // TODO(333906585): Optimize this path.
+    Label stub_call_with_decompressed_value;
+    __ CheckPageFlag(value_, scratch0_, MemoryChunk::kIsInReadOnlyHeapMask,
+                     not_zero, exit());
+    __ CheckMarkBit(value_, scratch0_, scratch1_, carry, exit());
+    __ jmp(&stub_call_with_decompressed_value);
+
+    __ bind(&stub_call_);
+    if (COMPRESS_POINTERS_BOOL &&
+        mode_ != RecordWriteMode::kValueIsIndirectPointer) {
+      __ DecompressTagged(value_, value_);
+    }
+
+    __ bind(&stub_call_with_decompressed_value);
+#else   // !V8_ENABLE_STICKY_MARK_BITS_BOOL
     __ CheckPageFlag(value_, scratch0_,
                      MemoryChunk::kPointersToHereAreInterestingMask, zero,
                      exit());
+#endif  // !V8_ENABLE_STICKY_MARK_BITS_BOOL
 
     __ leaq(scratch1_, operand_);
 
@@ -442,6 +463,9 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
 #endif  // V8_ENABLE_WEBASSEMBLY
   Zone* zone_;
   IndirectPointerTag indirect_pointer_tag_;
+#if V8_ENABLE_STICKY_MARK_BITS_BOOL
+  Label stub_call_;
+#endif  // V8_ENABLE_STICKY_MARK_BITS_BOOL
 };
 
 template <std::memory_order order>
@@ -1544,6 +1568,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArchPrepareTailCall:
       AssemblePrepareTailCall();
       break;
+    case kArchCallCFunctionWithFrameState:
     case kArchCallCFunction: {
       int const num_gp_parameters = ParamField::decode(instr->opcode());
       int const num_fp_parameters = FPParamField::decode(instr->opcode());
@@ -1569,7 +1594,15 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
             __ CallCFunction(func, num_gp_parameters + num_fp_parameters,
                              set_isolate_data_slots, &return_location);
       }
+
       RecordSafepoint(instr->reference_map(), pc_offset);
+
+      bool const needs_frame_state =
+          (arch_opcode == kArchCallCFunctionWithFrameState);
+      if (needs_frame_state) {
+        RecordDeoptInfo(instr, pc_offset);
+      }
+
       frame_access_state()->SetFrameAccessToDefault();
       // Ideally, we should decrement SP delta to match the change of stack
       // pointer in CallCFunction. However, for certain architectures (e.g.
@@ -1730,9 +1763,15 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       if (mode > RecordWriteMode::kValueIsPointer) {
         __ JumpIfSmi(value, ool->exit());
       }
+#if V8_ENABLE_STICKY_MARK_BITS_BOOL
+      __ CheckPageFlag(object, scratch0, MemoryChunk::kIncrementalMarking,
+                       not_zero, ool->stub_call());
+      __ CheckMarkBit(object, scratch0, scratch1, carry, ool->entry());
+#else   // !V8_ENABLE_STICKY_MARK_BITS_BOOL
       __ CheckPageFlag(object, scratch0,
                        MemoryChunk::kPointersFromHereAreInterestingMask,
                        not_zero, ool->entry());
+#endif  // !V8_ENABLE_STICKY_MARK_BITS_BOOL
       __ bind(ool->exit());
       break;
     }
@@ -1755,9 +1794,15 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       EmitTSANAwareStore<std::memory_order_relaxed>(
           zone(), this, masm(), operand, value, i, DetermineStubCallMode(),
           MachineRepresentation::kIndirectPointer, instr);
+#if V8_ENABLE_STICKY_MARK_BITS_BOOL
+      __ CheckPageFlag(object, scratch0, MemoryChunk::kIncrementalMarking,
+                       not_zero, ool->stub_call());
+      __ CheckMarkBit(object, scratch0, scratch1, carry, ool->entry());
+#else   // !V8_ENABLE_STICKY_MARK_BITS_BOOL
       __ CheckPageFlag(object, scratch0,
                        MemoryChunk::kPointersFromHereAreInterestingMask,
                        not_zero, ool->entry());
+#endif  // !V8_ENABLE_STICKY_MARK_BITS_BOOL
       __ bind(ool->exit());
       break;
     }
@@ -2918,6 +2963,14 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
             zone(), this, masm(), operand, value, i, DetermineStubCallMode(),
             MachineRepresentation::kTagged, instr);
       }
+      break;
+    }
+    case kX64MovqDecompressProtected: {
+      CHECK(instr->HasOutput());
+      Operand address(i.MemoryOperand());
+      __ DecompressProtected(i.OutputRegister(), address);
+      EmitTSANRelaxedLoadOOLIfNeeded(zone(), this, masm(), address, i,
+                                     DetermineStubCallMode(), kTaggedSize);
       break;
     }
     case kX64MovqStoreIndirectPointer: {
@@ -5391,10 +5444,24 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
     case kX64I32x4DotI8x16I7x16AddS: {
       DCHECK_EQ(i.OutputSimd128Register(), i.InputSimd128Register(2));
+      // If AVX_VNNI supported, pass kScratchDoubleReg twice as unused
+      // arguments.
+      XMMRegister tmp = kScratchDoubleReg;
+      if (!CpuFeatures::IsSupported(AVX_VNNI)) {
+        tmp = i.TempSimd128Register(0);
+      }
       __ I32x4DotI8x16I7x16AddS(
           i.OutputSimd128Register(), i.InputSimd128Register(0),
           i.InputSimd128Register(1), i.InputSimd128Register(2),
-          kScratchDoubleReg, i.TempSimd128Register(0));
+          kScratchDoubleReg, tmp);
+      break;
+    }
+    case kX64I32x8DotI8x32I7x32AddS: {
+      DCHECK_EQ(i.OutputSimd256Register(), i.InputSimd256Register(2));
+      __ I32x8DotI8x32I7x32AddS(
+          i.OutputSimd256Register(), i.InputSimd256Register(0),
+          i.InputSimd256Register(1), i.InputSimd256Register(2),
+          kScratchSimd256Reg, i.TempSimd256Register(0));
       break;
     }
     case kX64I32x4ExtAddPairwiseI16x8S: {
@@ -5785,6 +5852,12 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ I16x8DotI8x16I7x16S(i.OutputSimd128Register(),
                              i.InputSimd128Register(0),
                              i.InputSimd128Register(1));
+      break;
+    }
+    case kX64I16x16DotI8x32I7x32S: {
+      CpuFeatureScope avx_scope(masm(), AVX2);
+      __ vpmaddubsw(i.OutputSimd256Register(), i.InputSimd256Register(1),
+                    i.InputSimd256Register(0));
       break;
     }
     case kX64Pextrb: {
@@ -6370,18 +6443,42 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     }
     case kX64Blendvpd: {
-      __ Blendvpd(i.OutputSimd128Register(), i.InputSimd128Register(0),
-                  i.InputSimd128Register(1), i.InputSimd128Register(2));
+      VectorLength vec_len = VectorLengthField::decode(opcode);
+      if (vec_len == kV128) {
+        __ Blendvpd(i.OutputSimd128Register(), i.InputSimd128Register(0),
+                    i.InputSimd128Register(1), i.InputSimd128Register(2));
+      } else {
+        DCHECK_EQ(vec_len, kV256);
+        CpuFeatureScope avx_scope(masm(), AVX);
+        __ vblendvpd(i.OutputSimd256Register(), i.InputSimd256Register(0),
+                     i.InputSimd256Register(1), i.InputSimd256Register(2));
+      }
       break;
     }
     case kX64Blendvps: {
-      __ Blendvps(i.OutputSimd128Register(), i.InputSimd128Register(0),
-                  i.InputSimd128Register(1), i.InputSimd128Register(2));
+      VectorLength vec_len = VectorLengthField::decode(opcode);
+      if (vec_len == kV128) {
+        __ Blendvps(i.OutputSimd128Register(), i.InputSimd128Register(0),
+                    i.InputSimd128Register(1), i.InputSimd128Register(2));
+      } else {
+        DCHECK_EQ(vec_len, kV256);
+        CpuFeatureScope avx_scope(masm(), AVX);
+        __ vblendvps(i.OutputSimd256Register(), i.InputSimd256Register(0),
+                     i.InputSimd256Register(1), i.InputSimd256Register(2));
+      }
       break;
     }
     case kX64Pblendvb: {
-      __ Pblendvb(i.OutputSimd128Register(), i.InputSimd128Register(0),
-                  i.InputSimd128Register(1), i.InputSimd128Register(2));
+      VectorLength vec_len = VectorLengthField::decode(opcode);
+      if (vec_len == kV128) {
+        __ Pblendvb(i.OutputSimd128Register(), i.InputSimd128Register(0),
+                    i.InputSimd128Register(1), i.InputSimd128Register(2));
+      } else {
+        DCHECK_EQ(vec_len, kV256);
+        CpuFeatureScope avx_scope(masm(), AVX2);
+        __ vpblendvb(i.OutputSimd256Register(), i.InputSimd256Register(0),
+                     i.InputSimd256Register(1), i.InputSimd256Register(2));
+      }
       break;
     }
     case kX64I32x4TruncF64x2UZero: {
@@ -6749,6 +6846,21 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                       lane);
       break;
     }
+    case kX64InsertI128: {
+      CpuFeatureScope avx_scope(masm(), AVX2);
+      uint8_t imm = i.InputInt8(2);
+      InstructionOperand* input0 = instr->InputAt(0);
+      if (input0->IsSimd128Register()) {
+        __ vinserti128(i.OutputSimd256Register(),
+                       YMMRegister::from_xmm(i.InputSimd128Register(0)),
+                       i.InputSimd128Register(1), imm);
+      } else {
+        DCHECK(instr->InputAt(0)->IsSimd256Register());
+        __ vinserti128(i.OutputSimd256Register(), i.InputSimd256Register(0),
+                       i.InputSimd128Register(1), imm);
+      }
+      break;
+    }
   }
   return kSuccess;
 }  // NOLadability/fn_size)
@@ -6948,6 +7060,15 @@ void CodeGenerator::AssembleArchBoolean(Instruction* instr,
     __ movzxbl(reg, reg);
   }
   __ bind(&done);
+}
+
+void CodeGenerator::AssembleArchConditionalBoolean(Instruction* instr) {
+  UNREACHABLE();
+}
+
+void CodeGenerator::AssembleArchConditionalBranch(Instruction* instr,
+                                                  BranchInfo* branch) {
+  UNREACHABLE();
 }
 
 void CodeGenerator::AssembleArchBinarySearchSwitchRange(

@@ -85,6 +85,16 @@ Tagged<Object> FullObjectSlot::Relaxed_Load(PtrComprCageBase cage_base) const {
   return Relaxed_Load();
 }
 
+Address FullObjectSlot::Relaxed_Load_Raw() const {
+  return static_cast<Address>(base::AsAtomicPointer::Relaxed_Load(location()));
+}
+
+// static
+Tagged<Object> FullObjectSlot::RawToTagged(PtrComprCageBase cage_base,
+                                           Address raw) {
+  return Tagged<Object>(raw);
+}
+
 void FullObjectSlot::Relaxed_Store(Tagged<Object> value) const {
   base::AsAtomicPointer::Relaxed_Store(location(), value.ptr());
 }
@@ -133,6 +143,16 @@ Tagged<MaybeObject> FullMaybeObjectSlot::Relaxed_Load(
   return Relaxed_Load();
 }
 
+Address FullMaybeObjectSlot::Relaxed_Load_Raw() const {
+  return static_cast<Address>(base::AsAtomicPointer::Relaxed_Load(location()));
+}
+
+// static
+Tagged<Object> FullMaybeObjectSlot::RawToTagged(PtrComprCageBase cage_base,
+                                                Address raw) {
+  return Tagged<Object>(raw);
+}
+
 void FullMaybeObjectSlot::Relaxed_Store(Tagged<MaybeObject> value) const {
   base::AsAtomicPointer::Relaxed_Store(location(), value.ptr());
 }
@@ -170,11 +190,13 @@ void FullHeapObjectSlot::StoreHeapObject(Tagged<HeapObject> value) const {
   *location() = value.ptr();
 }
 
-void ExternalPointerSlot::init(IsolateForSandbox isolate, Address value) {
+void ExternalPointerSlot::init(IsolateForSandbox isolate,
+                               Tagged<HeapObject> host, Address value) {
 #ifdef V8_ENABLE_SANDBOX
   ExternalPointerTable& table = isolate.GetExternalPointerTableFor(tag_);
   ExternalPointerHandle handle = table.AllocateAndInitializeEntry(
-      isolate.GetExternalPointerTableSpaceFor(tag_, address()), value, tag_);
+      isolate.GetExternalPointerTableSpaceFor(tag_, host.address()), value,
+      tag_);
   // Use a Release_Store to ensure that the store of the pointer into the
   // table is not reordered after the store of the handle. Otherwise, other
   // threads may access an uninitialized table entry and crash.
@@ -304,7 +326,7 @@ void CppHeapPointerSlot::store(IsolateForPointerCompression isolate,
 #endif  // !V8_COMPRESS_POINTERS
 }
 
-void CppHeapPointerSlot::reset() const {
+void CppHeapPointerSlot::init() const {
 #ifdef V8_COMPRESS_POINTERS
   base::AsAtomic32::Release_Store(location(), kNullCppHeapPointerHandle);
 #else   // !V8_COMPRESS_POINTERS

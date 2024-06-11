@@ -263,6 +263,19 @@ bool InReadOnlySpace(Tagged<HeapObject> obj) {
   return IsReadOnlyHeapObject(obj);
 }
 
+constexpr bool FastInReadOnlySpaceOrSmallSmi(Tagged_t obj) {
+#if V8_STATIC_ROOTS_BOOL
+  // The following assert ensures that the page size check covers all our static
+  // roots. This is not strictly necessary and can be relaxed in future as the
+  // most prominent static roots are anyways allocated at the beginning of the
+  // first page.
+  static_assert(StaticReadOnlyRoot::kLastAllocatedRoot < kRegularPageSize);
+  return obj < kRegularPageSize;
+#else   // !V8_STATIC_ROOTS_BOOL
+  return false;
+#endif  // !V8_STATIC_ROOTS_BOOL
+}
+
 bool OutsideSandboxOrInReadonlySpace(Tagged<HeapObject> obj) {
 #ifdef V8_ENABLE_SANDBOX
   return !InsideSandbox(obj.address()) || InReadOnlySpace(obj);
@@ -284,7 +297,7 @@ bool IsJSApiWrapperObject(Tagged<Map> map) {
          InstanceTypeChecker::IsJSSpecialObject(instance_type);
 }
 
-bool IsJSApiWrapperObject(Tagged<JSObject> js_obj) {
+bool IsJSApiWrapperObject(Tagged<HeapObject> js_obj) {
   return IsJSApiWrapperObject(js_obj->map());
 }
 
@@ -704,10 +717,22 @@ MaybeHandle<Object> Object::ToUint32(Isolate* isolate, Handle<Object> input) {
 }
 
 // static
-MaybeHandle<String> Object::ToString(Isolate* isolate, Handle<Object> input) {
+template <typename T, typename>
+MaybeHandle<String> Object::ToString(Isolate* isolate, Handle<T> input) {
+  // T should be a subtype of Object, which is enforced by the second template
+  // argument.
   if (IsString(*input)) return Handle<String>::cast(input);
   return ConvertToString(isolate, input);
 }
+
+#ifdef V8_ENABLE_DIRECT_HANDLE
+template <typename T, typename>
+MaybeDirectHandle<String> Object::ToString(Isolate* isolate,
+                                           DirectHandle<T> input) {
+  if (IsString(*input)) return DirectHandle<String>::cast(input);
+  return ConvertToString(isolate, indirect_handle(input, isolate));
+}
+#endif
 
 // static
 MaybeHandle<Object> Object::ToLength(Isolate* isolate, Handle<Object> input) {
@@ -777,7 +802,8 @@ template <ExternalPointerTag tag>
 void HeapObject::InitExternalPointerField(size_t offset,
                                           IsolateForSandbox isolate,
                                           Address value) {
-  i::InitExternalPointerField<tag>(field_address(offset), isolate, value);
+  i::InitExternalPointerField<tag>(address(), field_address(offset), isolate,
+                                   value);
 }
 
 template <ExternalPointerTag tag>
@@ -808,16 +834,16 @@ void HeapObject::WriteExternalPointerField(size_t offset,
 template <ExternalPointerTag tag>
 void HeapObject::WriteLazilyInitializedExternalPointerField(
     size_t offset, IsolateForSandbox isolate, Address value) {
-  i::WriteLazilyInitializedExternalPointerField<tag>(field_address(offset),
-                                                     isolate, value);
+  i::WriteLazilyInitializedExternalPointerField<tag>(
+      address(), field_address(offset), isolate, value);
 }
 
-void HeapObject::ResetLazilyInitializedExternalPointerField(size_t offset) {
-  i::ResetLazilyInitializedExternalPointerField(field_address(offset));
+void HeapObject::SetupLazilyInitializedExternalPointerField(size_t offset) {
+  i::SetupLazilyInitializedExternalPointerField(field_address(offset));
 }
 
-void HeapObject::ResetLazilyInitializedCppHeapPointerField(size_t offset) {
-  CppHeapPointerSlot(field_address(offset), kAnyExternalPointerTag).reset();
+void HeapObject::SetupLazilyInitializedCppHeapPointerField(size_t offset) {
+  CppHeapPointerSlot(field_address(offset), kAnyExternalPointerTag).init();
 }
 
 template <ExternalPointerTag tag>

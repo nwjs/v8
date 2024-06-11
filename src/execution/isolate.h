@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstddef>
 #include <functional>
+#include <list>
 #include <memory>
 #include <queue>
 #include <unordered_map>
@@ -43,6 +44,7 @@
 #include "src/objects/tagged.h"
 #include "src/runtime/runtime.h"
 #include "src/sandbox/code-pointer-table.h"
+#include "src/sandbox/external-buffer-table.h"
 #include "src/sandbox/external-pointer-table.h"
 #include "src/sandbox/trusted-pointer-table.h"
 #include "src/utils/allocation.h"
@@ -186,6 +188,10 @@ class WasmCodeLookupCache;
 class WasmOrphanedGlobalHandle;
 }
 
+namespace detail {
+class WaiterQueueNode;
+}  // namespace detail
+
 #define RETURN_FAILURE_IF_EXCEPTION(isolate)         \
   do {                                               \
     Isolate* __isolate__ = (isolate);                \
@@ -247,7 +253,7 @@ class WasmOrphanedGlobalHandle;
  */
 #define RETURN_RESULT_OR_FAILURE(isolate, call)      \
   do {                                               \
-    Handle<Object> __result__;                       \
+    DirectHandle<Object> __result__;                 \
     Isolate* __isolate__ = (isolate);                \
     if (!(call).ToHandle(&__result__)) {             \
       DCHECK(__isolate__->has_exception());          \
@@ -809,6 +815,10 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   bool IsWasmStringRefEnabled(Handle<NativeContext> context);
   bool IsWasmInliningEnabled(Handle<NativeContext> context);
   bool IsWasmImportedStringsEnabled(Handle<NativeContext> context);
+  // Has the JSPI flag been requested?
+  // Used only during initialization of contexts.
+  bool IsWasmJSPIRequested(Handle<NativeContext> context);
+  // Has JSPI been enabled successfully?
   bool IsWasmJSPIEnabled(Handle<NativeContext> context);
   bool IsCompileHintsMagicEnabled(Handle<NativeContext> context);
 
@@ -918,11 +928,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   static int ArchiveSpacePerThread() { return sizeof(ThreadLocalTop); }
   void FreeThreadResources() { thread_local_top()->Free(); }
-
-  // Push and pop a promise and the current try-catch handler.
-  void PushPromise(Handle<JSObject> promise);
-  void PopPromise();
-  bool IsPromiseStackEmpty() const;
 
   // Walks the call stack and promise tree and calls a callback on every
   // function an exception is likely to hit. Used in catch prediction.
@@ -1212,7 +1217,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // data (for example, roots, external references, builtins, etc.).
   // The kRootRegister is set to this value.
   Address isolate_root() const { return isolate_data()->isolate_root(); }
-  static size_t isolate_root_bias() {
+  constexpr static size_t isolate_root_bias() {
     return OFFSET_OF(Isolate, isolate_data_) + IsolateData::kIsolateRootBias;
   }
   static Isolate* FromRootAddress(Address isolate_root) {
@@ -1296,6 +1301,14 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
         OFFSET_OF(Isolate, isolate_data_) +
         OFFSET_OF(IsolateData, thread_local_top_) +
         OFFSET_OF(ThreadLocalTop, thread_in_wasm_flag_address_) -
+        isolate_root_bias());
+  }
+
+  constexpr static uint32_t context_offset() {
+    return static_cast<uint32_t>(
+        OFFSET_OF(Isolate, isolate_data_) +
+        OFFSET_OF(IsolateData, thread_local_top_) +
+        OFFSET_OF(ThreadLocalTop, context_) -
         isolate_root_bias());
   }
 
@@ -2106,6 +2119,18 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   Address trusted_pointer_table_base_address() const {
     return isolate_data_.trusted_pointer_table_.base_address();
   }
+
+  ExternalBufferTable& external_buffer_table() {
+    return isolate_data_.external_buffer_table_;
+  }
+
+  ExternalBufferTable& shared_external_buffer_table() {
+    return *isolate_data_.shared_external_buffer_table_;
+  }
+
+  ExternalBufferTable::Space* shared_external_buffer_space() {
+    return shared_external_buffer_space_;
+  }
 #endif  // V8_ENABLE_SANDBOX
 
   Address continuation_preserved_embedder_data_address() {
@@ -2197,38 +2222,12 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     return enable_ro_allocation_for_snapshot_;
   }
 
-  // If script calls quit(), then it is possible that the Isolate is disposed
-  // without giving on-stack objects any chance to clean up after themselves. By
-  // inheriting from this class, a class ensures that its destructor will be
-  // called before Isolate::Dispose.
-  class ToDestroyBeforeSuddenShutdown {
-   public:
-    explicit ToDestroyBeforeSuddenShutdown(Isolate* isolate);
-    virtual ~ToDestroyBeforeSuddenShutdown();
-
-    // This class only supports being allocated on the stack.
-    void* operator new(size_t) = delete;
-    void* operator new(size_t, void*) = delete;
-
-    // Copying is not allowed.
-    ToDestroyBeforeSuddenShutdown(const ToDestroyBeforeSuddenShutdown& other) =
-        delete;
-    ToDestroyBeforeSuddenShutdown& operator=(
-        const ToDestroyBeforeSuddenShutdown& other) = delete;
-
-    Isolate* isolate() const { return isolate_; }
-
-   private:
-    Isolate* isolate_;
-  };
-
-  // Called by d8 right before Dispose, if the shell is quitting with a dirty
-  // stack.
-  void PrepareForSuddenShutdown();
-
   void set_battery_saver_mode_enabled(bool battery_saver_mode_enabled) {
     battery_saver_mode_enabled_ = battery_saver_mode_enabled;
   }
+
+  std::list<std::unique_ptr<detail::WaiterQueueNode>>&
+  async_waiter_queue_nodes();
 
  private:
   explicit Isolate(IsolateGroup* isolate_group);
@@ -2676,6 +2675,16 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   ExternalPointerTable::Space* shared_external_pointer_space_ = nullptr;
 #endif  // V8_COMPRESS_POINTERS
 
+#ifdef V8_ENABLE_SANDBOX
+  // Stores the external buffer table space for the shared external buffer
+  // table.
+  ExternalBufferTable::Space* shared_external_buffer_space_ = nullptr;
+#endif  // V8_ENABLE_SANDBOX
+
+  // List to manage the lifetime of the WaiterQueueNodes used to track async
+  // waiters for JSSynchronizationPrimitives.
+  std::list<std::unique_ptr<detail::WaiterQueueNode>> async_waiter_queue_nodes_;
+
   // Used to track and safepoint all client isolates attached to this shared
   // isolate.
   std::unique_ptr<GlobalSafepoint> global_safepoint_;
@@ -2701,9 +2710,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // predefined set of data as crash keys to be used in postmortem debugging
   // in case of a crash.
   AddCrashKeyCallback add_crash_key_callback_ = nullptr;
-
-  std::vector<ToDestroyBeforeSuddenShutdown*>
-      to_destroy_before_sudden_shutdown_;
 
   // Delete new/delete operators to ensure that Isolate::New() and
   // Isolate::Delete() are used for Isolate creation and deletion.

@@ -35,6 +35,8 @@ constexpr int kMaxReturns = 15;
 constexpr int kMaxExceptions = 4;
 constexpr int kMaxTableSize = 32;
 constexpr int kMaxTables = 4;
+constexpr int kMaxMemories = 4;
+constexpr int kMaxMemorySize = 32;
 constexpr int kMaxArraySize = 20;
 constexpr int kMaxPassiveDataSegments = 2;
 constexpr uint32_t kMaxRecursionDepth = 64;
@@ -918,39 +920,34 @@ class BodyGen {
     const uint8_t align = is_atomic ? max_alignment(memory_op)
                                     : data->getPseudoRandom<uint8_t>() %
                                           (max_alignment(memory_op) + 1);
-    uint32_t offset = data->get<uint16_t>();
+
+    uint8_t memory_index =
+        data->get<uint8_t>() % builder_->builder()->NumMemories();
+
+    uint64_t offset = data->get<uint16_t>();
     // With a 1/256 chance generate potentially very large offsets.
     if ((offset & 0xff) == 0xff) {
-      offset = data->getPseudoRandom<uint32_t>();
+      offset = builder_->builder()->IsMemory64(memory_index)
+                   ? data->getPseudoRandom<uint64_t>() & 0x1ffffffff
+                   : data->getPseudoRandom<uint32_t>();
     }
 
     // Generate the index and the arguments, if any.
-    Generate<kI32, arg_kinds...>(data);
+    builder_->builder()->IsMemory64(memory_index)
+        ? Generate<kI64, arg_kinds...>(data)
+        : Generate<kI32, arg_kinds...>(data);
 
+    // Format of the instruction (supports multi-memory):
+    // memory_op (align | 0x40) memory_index offset
     if (WasmOpcodes::IsPrefixOpcode(static_cast<WasmOpcode>(memory_op >> 8))) {
       DCHECK(memory_op >> 8 == kAtomicPrefix || memory_op >> 8 == kSimdPrefix);
       builder_->EmitWithPrefix(memory_op);
     } else {
       builder_->Emit(memory_op);
     }
-    builder_->EmitU32V(align);
-    builder_->EmitU32V(offset);
-  }
-
-  template <WasmOpcode Op, ValueKind... Args>
-  void atomic_op(DataRange* data) {
-    const uint8_t align = max_alignment(Op);
-    uint32_t offset = data->get<uint16_t>();
-    // With a 1/256 chance generate potentially very large offsets.
-    if ((offset & 0xff) == 0xff) {
-      offset = data->getPseudoRandom<uint32_t>();
-    }
-
-    Generate<Args...>(data);
-    builder_->EmitWithPrefix(Op);
-
-    builder_->EmitU32V(align);
-    builder_->EmitU32V(offset);
+    builder_->EmitU32V(align | 0x40);
+    builder_->EmitU32V(memory_index);
+    builder_->EmitU64V(offset);
   }
 
   template <WasmOpcode Op, ValueKind... Args>
@@ -1258,13 +1255,31 @@ class BodyGen {
     Generate<Types...>(data);
   }
 
-  void current_memory(DataRange* data) {
-    builder_->EmitWithU8(kExprMemorySize, 0);
+  void memory_size(DataRange* data) {
+    uint8_t memory_index =
+        data->get<uint8_t>() % builder_->builder()->NumMemories();
+
+    builder_->EmitWithU8(kExprMemorySize, memory_index);
+    // The `memory_size` returns an I32. However, `kExprMemorySize` for memory64
+    // returns an I64, so we should convert it.
+    if (builder_->builder()->IsMemory64(memory_index)) {
+      builder_->Emit(kExprI32ConvertI64);
+    }
   }
 
   void grow_memory(DataRange* data) {
-    Generate<kI32>(data);
-    builder_->EmitWithU8(kExprMemoryGrow, 0);
+    uint8_t memory_index =
+        data->get<uint8_t>() % builder_->builder()->NumMemories();
+
+    // Generate the index and the arguments, if any.
+    builder_->builder()->IsMemory64(memory_index) ? Generate<kI64>(data)
+                                                  : Generate<kI32>(data);
+    builder_->EmitWithU8(kExprMemoryGrow, memory_index);
+    // The `grow_memory` returns an I32. However, `kExprMemoryGrow` for memory64
+    // returns an I64, so we should convert it.
+    if (builder_->builder()->IsMemory64(memory_index)) {
+      builder_->Emit(kExprI32ConvertI64);
+    }
   }
 
   void ref_null(HeapType type, DataRange* data) {
@@ -2329,39 +2344,39 @@ class BodyGen {
         &BodyGen::br_on_non_null<kI32>,  //
         &BodyGen::br_table<kI32>,        //
 
-        &BodyGen::memop<kExprI32LoadMem>,        //
-        &BodyGen::memop<kExprI32LoadMem8S>,      //
-        &BodyGen::memop<kExprI32LoadMem8U>,      //
-        &BodyGen::memop<kExprI32LoadMem16S>,     //
-        &BodyGen::memop<kExprI32LoadMem16U>,     //
-        &BodyGen::memop<kExprI32AtomicLoad>,     //
-        &BodyGen::memop<kExprI32AtomicLoad8U>,   //
-        &BodyGen::memop<kExprI32AtomicLoad16U>,  //
+        &BodyGen::memop<kExprI32LoadMem>,                               //
+        &BodyGen::memop<kExprI32LoadMem8S>,                             //
+        &BodyGen::memop<kExprI32LoadMem8U>,                             //
+        &BodyGen::memop<kExprI32LoadMem16S>,                            //
+        &BodyGen::memop<kExprI32LoadMem16U>,                            //
+                                                                        //
+        &BodyGen::memop<kExprI32AtomicLoad>,                            //
+        &BodyGen::memop<kExprI32AtomicLoad8U>,                          //
+        &BodyGen::memop<kExprI32AtomicLoad16U>,                         //
+        &BodyGen::memop<kExprI32AtomicAdd, kI32>,                       //
+        &BodyGen::memop<kExprI32AtomicSub, kI32>,                       //
+        &BodyGen::memop<kExprI32AtomicAnd, kI32>,                       //
+        &BodyGen::memop<kExprI32AtomicOr, kI32>,                        //
+        &BodyGen::memop<kExprI32AtomicXor, kI32>,                       //
+        &BodyGen::memop<kExprI32AtomicExchange, kI32>,                  //
+        &BodyGen::memop<kExprI32AtomicCompareExchange, kI32, kI32>,     //
+        &BodyGen::memop<kExprI32AtomicAdd8U, kI32>,                     //
+        &BodyGen::memop<kExprI32AtomicSub8U, kI32>,                     //
+        &BodyGen::memop<kExprI32AtomicAnd8U, kI32>,                     //
+        &BodyGen::memop<kExprI32AtomicOr8U, kI32>,                      //
+        &BodyGen::memop<kExprI32AtomicXor8U, kI32>,                     //
+        &BodyGen::memop<kExprI32AtomicExchange8U, kI32>,                //
+        &BodyGen::memop<kExprI32AtomicCompareExchange8U, kI32, kI32>,   //
+        &BodyGen::memop<kExprI32AtomicAdd16U, kI32>,                    //
+        &BodyGen::memop<kExprI32AtomicSub16U, kI32>,                    //
+        &BodyGen::memop<kExprI32AtomicAnd16U, kI32>,                    //
+        &BodyGen::memop<kExprI32AtomicOr16U, kI32>,                     //
+        &BodyGen::memop<kExprI32AtomicXor16U, kI32>,                    //
+        &BodyGen::memop<kExprI32AtomicExchange16U, kI32>,               //
+        &BodyGen::memop<kExprI32AtomicCompareExchange16U, kI32, kI32>,  //
 
-        &BodyGen::atomic_op<kExprI32AtomicAdd, kI32, kI32>,
-        &BodyGen::atomic_op<kExprI32AtomicSub, kI32, kI32>,
-        &BodyGen::atomic_op<kExprI32AtomicAnd, kI32, kI32>,
-        &BodyGen::atomic_op<kExprI32AtomicOr, kI32, kI32>,
-        &BodyGen::atomic_op<kExprI32AtomicXor, kI32, kI32>,
-        &BodyGen::atomic_op<kExprI32AtomicExchange, kI32, kI32>,
-        &BodyGen::atomic_op<kExprI32AtomicCompareExchange, kI32, kI32, kI32>,
-        &BodyGen::atomic_op<kExprI32AtomicAdd8U, kI32, kI32>,
-        &BodyGen::atomic_op<kExprI32AtomicSub8U, kI32, kI32>,
-        &BodyGen::atomic_op<kExprI32AtomicAnd8U, kI32, kI32>,
-        &BodyGen::atomic_op<kExprI32AtomicOr8U, kI32, kI32>,
-        &BodyGen::atomic_op<kExprI32AtomicXor8U, kI32, kI32>,
-        &BodyGen::atomic_op<kExprI32AtomicExchange8U, kI32, kI32>,
-        &BodyGen::atomic_op<kExprI32AtomicCompareExchange8U, kI32, kI32, kI32>,
-        &BodyGen::atomic_op<kExprI32AtomicAdd16U, kI32, kI32>,
-        &BodyGen::atomic_op<kExprI32AtomicSub16U, kI32, kI32>,
-        &BodyGen::atomic_op<kExprI32AtomicAnd16U, kI32, kI32>,
-        &BodyGen::atomic_op<kExprI32AtomicOr16U, kI32, kI32>,
-        &BodyGen::atomic_op<kExprI32AtomicXor16U, kI32, kI32>,
-        &BodyGen::atomic_op<kExprI32AtomicExchange16U, kI32, kI32>,
-        &BodyGen::atomic_op<kExprI32AtomicCompareExchange16U, kI32, kI32, kI32>,
-
-        &BodyGen::current_memory,  //
-        &BodyGen::grow_memory,     //
+        &BodyGen::memory_size,  //
+        &BodyGen::grow_memory,  //
 
         &BodyGen::get_local<kI32>,                    //
         &BodyGen::tee_local<kI32>,                    //
@@ -2479,46 +2494,46 @@ class BodyGen {
         &BodyGen::br_on_non_null<kI64>,  //
         &BodyGen::br_table<kI64>,        //
 
-        &BodyGen::memop<kExprI64LoadMem>,        //
-        &BodyGen::memop<kExprI64LoadMem8S>,      //
-        &BodyGen::memop<kExprI64LoadMem8U>,      //
-        &BodyGen::memop<kExprI64LoadMem16S>,     //
-        &BodyGen::memop<kExprI64LoadMem16U>,     //
-        &BodyGen::memop<kExprI64LoadMem32S>,     //
-        &BodyGen::memop<kExprI64LoadMem32U>,     //
-        &BodyGen::memop<kExprI64AtomicLoad>,     //
-        &BodyGen::memop<kExprI64AtomicLoad8U>,   //
-        &BodyGen::memop<kExprI64AtomicLoad16U>,  //
-        &BodyGen::memop<kExprI64AtomicLoad32U>,  //
-
-        &BodyGen::atomic_op<kExprI64AtomicAdd, kI32, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicSub, kI32, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicAnd, kI32, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicOr, kI32, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicXor, kI32, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicExchange, kI32, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicCompareExchange, kI32, kI64, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicAdd8U, kI32, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicSub8U, kI32, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicAnd8U, kI32, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicOr8U, kI32, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicXor8U, kI32, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicExchange8U, kI32, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicCompareExchange8U, kI32, kI64, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicAdd16U, kI32, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicSub16U, kI32, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicAnd16U, kI32, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicOr16U, kI32, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicXor16U, kI32, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicExchange16U, kI32, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicCompareExchange16U, kI32, kI64, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicAdd32U, kI32, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicSub32U, kI32, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicAnd32U, kI32, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicOr32U, kI32, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicXor32U, kI32, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicExchange32U, kI32, kI64>,
-        &BodyGen::atomic_op<kExprI64AtomicCompareExchange32U, kI32, kI64, kI64>,
+        &BodyGen::memop<kExprI64LoadMem>,                               //
+        &BodyGen::memop<kExprI64LoadMem8S>,                             //
+        &BodyGen::memop<kExprI64LoadMem8U>,                             //
+        &BodyGen::memop<kExprI64LoadMem16S>,                            //
+        &BodyGen::memop<kExprI64LoadMem16U>,                            //
+        &BodyGen::memop<kExprI64LoadMem32S>,                            //
+        &BodyGen::memop<kExprI64LoadMem32U>,                            //
+                                                                        //
+        &BodyGen::memop<kExprI64AtomicLoad>,                            //
+        &BodyGen::memop<kExprI64AtomicLoad8U>,                          //
+        &BodyGen::memop<kExprI64AtomicLoad16U>,                         //
+        &BodyGen::memop<kExprI64AtomicLoad32U>,                         //
+        &BodyGen::memop<kExprI64AtomicAdd, kI64>,                       //
+        &BodyGen::memop<kExprI64AtomicSub, kI64>,                       //
+        &BodyGen::memop<kExprI64AtomicAnd, kI64>,                       //
+        &BodyGen::memop<kExprI64AtomicOr, kI64>,                        //
+        &BodyGen::memop<kExprI64AtomicXor, kI64>,                       //
+        &BodyGen::memop<kExprI64AtomicExchange, kI64>,                  //
+        &BodyGen::memop<kExprI64AtomicCompareExchange, kI64, kI64>,     //
+        &BodyGen::memop<kExprI64AtomicAdd8U, kI64>,                     //
+        &BodyGen::memop<kExprI64AtomicSub8U, kI64>,                     //
+        &BodyGen::memop<kExprI64AtomicAnd8U, kI64>,                     //
+        &BodyGen::memop<kExprI64AtomicOr8U, kI64>,                      //
+        &BodyGen::memop<kExprI64AtomicXor8U, kI64>,                     //
+        &BodyGen::memop<kExprI64AtomicExchange8U, kI64>,                //
+        &BodyGen::memop<kExprI64AtomicCompareExchange8U, kI64, kI64>,   //
+        &BodyGen::memop<kExprI64AtomicAdd16U, kI64>,                    //
+        &BodyGen::memop<kExprI64AtomicSub16U, kI64>,                    //
+        &BodyGen::memop<kExprI64AtomicAnd16U, kI64>,                    //
+        &BodyGen::memop<kExprI64AtomicOr16U, kI64>,                     //
+        &BodyGen::memop<kExprI64AtomicXor16U, kI64>,                    //
+        &BodyGen::memop<kExprI64AtomicExchange16U, kI64>,               //
+        &BodyGen::memop<kExprI64AtomicCompareExchange16U, kI64, kI64>,  //
+        &BodyGen::memop<kExprI64AtomicAdd32U, kI64>,                    //
+        &BodyGen::memop<kExprI64AtomicSub32U, kI64>,                    //
+        &BodyGen::memop<kExprI64AtomicAnd32U, kI64>,                    //
+        &BodyGen::memop<kExprI64AtomicOr32U, kI64>,                     //
+        &BodyGen::memop<kExprI64AtomicXor32U, kI64>,                    //
+        &BodyGen::memop<kExprI64AtomicExchange32U, kI64>,               //
+        &BodyGen::memop<kExprI64AtomicCompareExchange32U, kI64, kI64>,  //
 
         &BodyGen::get_local<kI64>,                    //
         &BodyGen::tee_local<kI64>,                    //
@@ -3250,6 +3265,7 @@ class BodyGen {
   std::vector<ValueType> GenerateTypes(DataRange* data) {
     std::vector<ValueType> types;
     int num_params = int{data->get<uint8_t>()} % (kMaxParameters + 1);
+    types.reserve(num_params);
     for (int i = 0; i < num_params; ++i) {
       types.push_back(GetValueType<options>(
           data, static_cast<uint32_t>(functions_.size() + structs_.size() +
@@ -3402,6 +3418,23 @@ class ModuleGen {
         num_structs_(num_structs),
         num_arrays_(num_arrays),
         num_types_(num_functions + num_structs + num_arrays) {}
+
+  // Generates and adds random number of memories.
+  void GenerateRandomMemories() {
+    int random_uint8_t = module_range_->get<uint8_t>();
+    static_assert(
+        kMaxMemories <= 5,
+        "Too many memories. Use more random bits to chose their types!");
+    // Use the lower 3 bits to get the number of memories.
+    int num_memories = 1 + ((random_uint8_t & 7) % kMaxMemories);
+    // Use the unused upper 5 bits to decide about each memory's type.
+    random_uint8_t >>= 3;
+    for (int i = 0; i < num_memories; i++) {
+      (random_uint8_t & 1) ? builder_->AddMemory64(0, kMaxMemorySize)
+                           : builder_->AddMemory(0, kMaxMemorySize);
+      random_uint8_t >>= 1;
+    }
+  }
 
   // Puts the types into random recursive groups.
   std::map<uint8_t, uint8_t> GenerateRandomRecursiveGroups(
@@ -4022,6 +4055,11 @@ base::Vector<uint8_t> GenerateRandomWasmModule(
   ModuleGen<options> gen_module(zone, &builder, &module_range, num_functions,
                                 num_structs, num_arrays);
 
+  // Add random number of memories.
+  // TODO(v8:14674): Add a mode without declaring any memory or memory
+  // instructions.
+  gen_module.GenerateRandomMemories();
+
   uint8_t current_type_index = 0;
   // In case of WasmGC expressions, we create recursive groups for the recursive
   // types.
@@ -4137,7 +4175,6 @@ base::Vector<uint8_t> GenerateRandomWasmModule(
   }
 
   ZoneBuffer buffer{zone};
-  builder.AddMemory(0, 32);
   builder.WriteTo(&buffer);
   return base::VectorOf(buffer);
 }
@@ -4275,7 +4312,6 @@ base::Vector<uint8_t> GenerateWasmModuleForInitExpressions(
   }
 
   ZoneBuffer buffer{zone};
-  builder.AddMemory(0, 32);
   builder.WriteTo(&buffer);
   return base::VectorOf(buffer);
 }

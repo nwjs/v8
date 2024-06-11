@@ -5,10 +5,10 @@
 #ifndef V8_OBJECTS_JS_DISPOSABLE_STACK_INL_H_
 #define V8_OBJECTS_JS_DISPOSABLE_STACK_INL_H_
 
-#include "src/base/logging.h"
+#include "src/execution/isolate.h"
 #include "src/handles/handles.h"
+#include "src/heap/factory.h"
 #include "src/objects/fixed-array-inl.h"
-#include "src/objects/fixed-array.h"
 #include "src/objects/js-disposable-stack.h"
 #include "src/objects/objects-inl.h"
 
@@ -43,30 +43,43 @@ inline void JSDisposableStack::Add(Isolate* isolate,
   disposable_stack->set_stack(*array);
 }
 
-inline Tagged<Object> JSDisposableStack::DisposeResources(
-    Isolate* isolate, Handle<JSDisposableStack> disposable_stack) {
-  DCHECK(!IsUndefined(disposable_stack->stack()));
-  Handle<FixedArray> stack(disposable_stack->stack(), isolate);
+// part of
+// https://arai-a.github.io/ecma262-compare/?pr=3000&id=sec-createdisposableresource
+inline MaybeHandle<Object> JSDisposableStack::CheckValueAndGetDisposeMethod(
+    Isolate* isolate, Handle<Object> value) {
+  // 1. If method is not present, then
+  //   a. If V is either null or undefined, then
+  //    i. Set V to undefined.
+  //    ii. Set method to undefined.
+  // We has already returned from the caller if V is null or undefined.
+  DCHECK(!IsNullOrUndefined(*value));
 
-  int length = disposable_stack->length();
-  Handle<Object> exception_obj;
-
-  while (length > 0) {
-    Tagged<Object> tagged_method = stack->get(--length);
-    Handle<Object> method(tagged_method, isolate);
-
-    Tagged<Object> tagged_value = stack->get(--length);
-    Handle<Object> value(tagged_value, isolate);
-
-    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
-        isolate, exception_obj,
-        Execution::Call(isolate, method, value, 0, nullptr));
+  //   b. Else,
+  //    i. If V is not an Object, throw a TypeError exception.
+  if (!IsJSReceiver(*value)) {
+    THROW_NEW_ERROR(isolate,
+                    NewTypeError(MessageTemplate::kExpectAnObjectWithUsing),
+                    Object);
   }
 
-  disposable_stack->set_length(0);
-  disposable_stack->set_state(DisposableStackState::kDisposed);
+  //   ii. Set method to ? GetDisposeMethod(V, hint).
+  Handle<Object> method;
+  ASSIGN_RETURN_ON_EXCEPTION(
+      isolate, method,
+      Object::GetProperty(isolate, value, isolate->factory()->dispose_symbol()),
+      Object);
+  //   (GetMethod)3. If IsCallable(func) is false, throw a TypeError exception.
+  if (!IsJSFunction(*method)) {
+    THROW_NEW_ERROR(isolate,
+                    NewTypeError(MessageTemplate::kNotCallable,
+                                 isolate->factory()->dispose_symbol()),
+                    Object);
+  }
 
-  return ReadOnlyRoots(isolate).undefined_value();
+  //   iii. If method is undefined, throw a TypeError exception.
+  //   It is already checked in step ii.
+
+  return method;
 }
 
 }  // namespace internal

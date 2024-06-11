@@ -1452,6 +1452,13 @@ void Heap::CreateInitialMutableObjects() {
     set_async_iterator_value_unwrap_shared_fun(*info);
   }
 
+  // AsyncFromSyncIterator:
+  {
+    Handle<SharedFunctionInfo> info = CreateSharedFunctionInfo(
+        isolate_, Builtin::kAsyncFromSyncIteratorCloseSyncAndRethrow, 1);
+    set_async_from_sync_iterator_close_sync_and_rethrow_shared_fun(*info);
+  }
+
   // Promises:
   {
     Handle<SharedFunctionInfo> info = CreateSharedFunctionInfo(
@@ -1557,6 +1564,23 @@ void Heap::CreateInitialMutableObjects() {
     info = CreateSharedFunctionInfo(
         isolate_, Builtin::kArrayFromAsyncArrayLikeOnRejected, 0);
     set_array_from_async_array_like_on_rejected_shared_fun(*info);
+  }
+
+  // Atomics.Mutex
+  {
+    Handle<SharedFunctionInfo> info = CreateSharedFunctionInfo(
+        isolate_, Builtin::kAtomicsMutexAsyncUnlockResolveHandler, 1);
+    set_atomics_mutex_async_unlock_resolve_handler_sfi(*info);
+    info = CreateSharedFunctionInfo(
+        isolate_, Builtin::kAtomicsMutexAsyncUnlockRejectHandler, 1);
+    set_atomics_mutex_async_unlock_reject_handler_sfi(*info);
+  }
+
+  // Atomics.Condition
+  {
+    Handle<SharedFunctionInfo> info = CreateSharedFunctionInfo(
+        isolate_, Builtin::kAtomicsConditionAcquireLock, 0);
+    set_atomics_condition_acquire_lock_sfi(*info);
   }
 
   // Trusted roots:

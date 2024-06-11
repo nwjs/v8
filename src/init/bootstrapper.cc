@@ -5062,6 +5062,9 @@ bool Genesis::CompileExtension(Isolate* isolate, v8::Extension* extension) {
   Handle<FixedArray> host_defined_options =
       isolate->factory()->empty_fixed_array();
   TryCallScope try_call_scope(isolate);
+  // Blink generally assumes that context creation (where extension compilation
+  // is part) cannot be interrupted.
+  PostponeInterruptsScope postpone(isolate);
   return !Execution::TryCallScript(isolate, fun, receiver, host_defined_options)
               .is_null();
 }
@@ -5692,6 +5695,8 @@ void Genesis::InitializeGlobal_harmony_struct() {
                           Builtin::kAtomicsMutexTryLock, 2, true);
     SimpleInstallFunction(isolate(), mutex_fun, "isMutex",
                           Builtin::kAtomicsMutexIsMutex, 1, true);
+    SimpleInstallFunction(isolate(), mutex_fun, "lockAsync",
+                          Builtin::kAtomicsMutexLockAsync, 2, true);
   }
 
   {  // Atomics.Condition
@@ -5712,6 +5717,8 @@ void Genesis::InitializeGlobal_harmony_struct() {
                           Builtin::kAtomicsConditionNotify, 2, false);
     SimpleInstallFunction(isolate(), condition_fun, "isCondition",
                           Builtin::kAtomicsConditionIsCondition, 1, true);
+    SimpleInstallFunction(isolate(), condition_fun, "waitAsync",
+                          Builtin::kAtomicsConditionWaitAsync, 2, false);
   }
 }
 
@@ -5790,6 +5797,17 @@ void Genesis::InitializeGlobal_js_explicit_resource_management() {
   js_disposable_stack_map->SetConstructor(native_context()->object_function());
   native_context()->set_js_disposable_stack_map(*js_disposable_stack_map);
   LOG(isolate(), MapDetails(*js_disposable_stack_map));
+
+  Handle<JSFunction> disposable_stack_function =
+      InstallFunction(isolate(), global, "DisposableStack", JS_OBJECT_TYPE,
+                      JSObject::kHeaderSize, 0, disposable_stack_prototype,
+                      Builtin::kDisposableStackConstructor);
+  disposable_stack_function->shared()->DontAdaptArguments();
+  disposable_stack_function->shared()->set_length(0);
+  SimpleInstallFunction(isolate(), disposable_stack_prototype, "use",
+                        Builtin::kDisposableStackPrototypeUse, 1, true);
+  SimpleInstallFunction(isolate(), disposable_stack_prototype, "dispose",
+                        Builtin::kDisposableStackPrototypeDispose, 0, true);
 }
 
 void Genesis::InitializeGlobal_js_float16array() {
