@@ -96,6 +96,8 @@ namespace internal {
      101)                                                                      \
   HR(trusted_pointers_count, V8.SandboxedTrustedPointersCount, 0,              \
      kMaxTrustedPointers, 101)                                                 \
+  HR(cppheap_pointers_count, V8.SandboxedCppHeapPointersCount, 0,              \
+     kMaxCppHeapPointers, 101)                                                 \
   HR(wasm_num_lazy_compilations_5sec, V8.WasmNumLazyCompilations5Sec, 0,       \
      200000, 50)                                                               \
   HR(wasm_num_lazy_compilations_20sec, V8.WasmNumLazyCompilations20Sec, 0,     \
@@ -116,7 +118,6 @@ namespace internal {
 // HT(name, caption, max, unit)
 #define NESTED_TIMED_HISTOGRAM_LIST(HT)                                       \
   /* Garbage collection timers. */                                            \
-  HT(gc_idle_notification, V8.GCIdleNotification, 10000, MILLISECOND)         \
   HT(gc_incremental_marking, V8.GCIncrementalMarking, 10000, MILLISECOND)     \
   HT(gc_incremental_marking_start, V8.GCIncrementalMarkingStart, 10000,       \
      MILLISECOND)                                                             \

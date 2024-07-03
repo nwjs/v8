@@ -58,15 +58,13 @@ MaybeHandle<Object> Runtime::HasProperty(Isolate* isolate,
   if (!IsJSReceiver(*object)) {
     THROW_NEW_ERROR(
         isolate,
-        NewTypeError(MessageTemplate::kInvalidInOperatorUse, key, object),
-        Object);
+        NewTypeError(MessageTemplate::kInvalidInOperatorUse, key, object));
   }
   Handle<JSReceiver> receiver = Handle<JSReceiver>::cast(object);
 
   // Convert the {key} to a name.
   Handle<Name> name;
-  ASSIGN_RETURN_ON_EXCEPTION(isolate, name, Object::ToName(isolate, key),
-                             Object);
+  ASSIGN_RETURN_ON_EXCEPTION(isolate, name, Object::ToName(isolate, key));
 
   // Lookup the {name} on {receiver}.
   Maybe<bool> maybe = JSReceiver::HasProperty(isolate, receiver, name);
@@ -377,13 +375,11 @@ MaybeHandle<Object> Runtime::SetObjectProperty(
       THROW_NEW_ERROR(
           isolate,
           NewTypeError(MessageTemplate::kNonObjectPropertyStoreWithProperty,
-                       object, property_name),
-          Object);
+                       object, property_name));
     } else {
       THROW_NEW_ERROR(
           isolate,
-          NewTypeError(MessageTemplate::kNonObjectPropertyStore, object),
-          Object);
+          NewTypeError(MessageTemplate::kNonObjectPropertyStore, object));
     }
   }
 
@@ -414,8 +410,7 @@ MaybeHandle<Object> Runtime::DefineObjectOwnProperty(Isolate* isolate,
   if (IsNullOrUndefined(*object, isolate)) {
     THROW_NEW_ERROR(
         isolate,
-        NewTypeError(MessageTemplate::kNonObjectPropertyStore, key, object),
-        Object);
+        NewTypeError(MessageTemplate::kNonObjectPropertyStore, key, object));
   }
 
   // Check if the given key is an array index.
@@ -1286,22 +1281,6 @@ RUNTIME_FUNCTION(Runtime_SetOwnPropertyIgnoreAttributes) {
                                o, key, value, PropertyAttributes(attributes)));
 }
 
-RUNTIME_FUNCTION(Runtime_GetOwnPropertyDescriptor) {
-  HandleScope scope(isolate);
-
-  DCHECK_EQ(2, args.length());
-  Handle<JSReceiver> object = args.at<JSReceiver>(0);
-  Handle<Name> name = args.at<Name>(1);
-
-  PropertyDescriptor desc;
-  Maybe<bool> found =
-      JSReceiver::GetOwnPropertyDescriptor(isolate, object, name, &desc);
-  MAYBE_RETURN(found, ReadOnlyRoots(isolate).exception());
-
-  if (!found.FromJust()) return ReadOnlyRoots(isolate).undefined_value();
-  return *desc.ToObject(isolate);
-}
-
 // Returns a PropertyDescriptorObject (property-descriptor-object.h)
 RUNTIME_FUNCTION(Runtime_GetOwnPropertyDescriptorObject) {
   HandleScope scope(isolate);
@@ -1460,8 +1439,7 @@ MaybeHandle<Object> Runtime::GetPrivateMember(Isolate* isolate,
       if (IsNull(pair->getter())) {
         THROW_NEW_ERROR(
             isolate,
-            NewError(MessageTemplate::kInvalidPrivateGetterAccess, desc),
-            Object);
+            NewError(MessageTemplate::kInvalidPrivateGetterAccess, desc));
       }
       DCHECK(IsJSFunction(pair->getter()));
       Handle<JSFunction> getter(JSFunction::cast(pair->getter()), isolate);
@@ -1488,8 +1466,7 @@ MaybeHandle<Object> Runtime::SetPrivateMember(Isolate* isolate,
     }
     case PrivateMemberType::kPrivateMethod: {
       THROW_NEW_ERROR(
-          isolate, NewError(MessageTemplate::kInvalidPrivateMethodWrite, desc),
-          Object);
+          isolate, NewError(MessageTemplate::kInvalidPrivateMethodWrite, desc));
     }
     case PrivateMemberType::kPrivateAccessor: {
       // The accessors are collected from the contexts, so there is no need to
@@ -1498,8 +1475,7 @@ MaybeHandle<Object> Runtime::SetPrivateMember(Isolate* isolate,
       if (IsNull(pair->setter())) {
         THROW_NEW_ERROR(
             isolate,
-            NewError(MessageTemplate::kInvalidPrivateSetterAccess, desc),
-            Object);
+            NewError(MessageTemplate::kInvalidPrivateSetterAccess, desc));
       }
       DCHECK(IsJSFunction(pair->setter()));
       Handle<Object> argv[] = {value};

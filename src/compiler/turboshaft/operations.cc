@@ -381,6 +381,8 @@ std::ostream& operator<<(std::ostream& os, ChangeOrDeoptOp::Kind kind) {
       return os << "Uint64ToInt64";
     case ChangeOrDeoptOp::Kind::kFloat64ToInt32:
       return os << "Float64ToInt32";
+    case ChangeOrDeoptOp::Kind::kFloat64ToUint32:
+      return os << "Float64ToUint32";
     case ChangeOrDeoptOp::Kind::kFloat64ToInt64:
       return os << "Float64ToInt64";
     case ChangeOrDeoptOp::Kind::kFloat64NotHole:
@@ -1049,6 +1051,8 @@ std::ostream& operator<<(std::ostream& os, ObjectIsOp::Kind kind) {
       return os << "NonCallable";
     case ObjectIsOp::Kind::kNumber:
       return os << "Number";
+    case ObjectIsOp::Kind::kNumberOrBigInt:
+      return os << "NumberOrBigInt";
     case ObjectIsOp::Kind::kReceiver:
       return os << "Receiver";
     case ObjectIsOp::Kind::kReceiverOrNullOrUndefined:
@@ -1651,6 +1655,10 @@ void Simd128ShuffleOp::PrintOptions(std::ostream& os) const {
 #if V8_ENABLE_WASM_SIMD256_REVEC
 void Simd256ConstantOp::PrintOptions(std::ostream& os) const {
   PrintSimdValue(os, value);
+}
+
+void Simd256Extract128LaneOp::PrintOptions(std::ostream& os) const {
+  os << '[' << static_cast<int>(lane) << ']';
 }
 
 void Simd256LoadTransformOp::PrintOptions(std::ostream& os) const {

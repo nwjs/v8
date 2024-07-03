@@ -21,10 +21,10 @@ namespace internal {
 template <typename T>
 class Signature;
 
-namespace wasm {
-
-// Type for holding simd values, defined in wasm-value.h.
+// Type for holding simd values, defined in simd128.h.
 class Simd128;
+
+namespace wasm {
 
 // Format: kind, log2Size, code, machineType, shortName, typeName
 //
@@ -442,6 +442,8 @@ constexpr bool is_numeric(ValueKind kind) {
       return false;
   }
 }
+
+constexpr bool is_valid(ValueKind kind) { return kind <= kBottom; }
 
 constexpr bool is_reference(ValueKind kind) {
   return kind == kRef || kind == kRefNull || kind == kRtt;

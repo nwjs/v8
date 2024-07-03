@@ -136,6 +136,7 @@ class StackHandler {
   V(BUILTIN, BuiltinFrame)                                                \
   V(BUILTIN_EXIT, BuiltinExitFrame)                                       \
   V(API_CALLBACK_EXIT, ApiCallbackExitFrame)                              \
+  V(API_ACCESSOR_EXIT, ApiAccessorExitFrame)                              \
   V(NATIVE, NativeFrame)                                                  \
   V(IRREGEXP, IrregexpFrame)
 
@@ -169,8 +170,9 @@ class StackFrame {
     Address fp = kNullAddress;
     Address* pc_address = nullptr;
     Address callee_fp = kNullAddress;
-    Address* callee_pc_address = nullptr;
+    Address callee_pc = kNullAddress;
     Address* constant_pool_address = nullptr;
+    bool is_profiler_entry_frame = false;
   };
 
   // Convert a stack frame type to a marker that can be stored on the stack.
@@ -266,6 +268,7 @@ class StackFrame {
   bool is_construct() const { return type() == CONSTRUCT; }
   bool is_fast_construct() const { return type() == FAST_CONSTRUCT; }
   bool is_builtin_exit() const { return type() == BUILTIN_EXIT; }
+  bool is_api_accessor_exit() const { return type() == API_ACCESSOR_EXIT; }
   bool is_api_callback_exit() const { return type() == API_CALLBACK_EXIT; }
   bool is_irregexp() const { return type() == IRREGEXP; }
 
@@ -281,9 +284,12 @@ class StackFrame {
   Address sp() const { return state_.sp; }
   Address fp() const { return state_.fp; }
   Address callee_fp() const { return state_.callee_fp; }
-  inline Address callee_pc() const;
+  Address callee_pc() const { return state_.callee_pc; }
   Address caller_sp() const { return GetCallerStackPointer(); }
   inline Address pc() const;
+  bool is_profiler_entry_frame() const {
+    return state_.is_profiler_entry_frame;
+  }
 
   // Skip authentication of the PC, when using CFI. Used in the profiler, where
   // in certain corner-cases we do not use an address on the stack, which would
@@ -446,7 +452,8 @@ class V8_EXPORT_PRIVATE FrameSummary {
 #if V8_ENABLE_WEBASSEMBLY
   class WasmFrameSummary : public FrameSummaryBase {
    public:
-    WasmFrameSummary(Isolate* isolate, Handle<WasmInstanceObject> instance,
+    WasmFrameSummary(Isolate* isolate,
+                     Handle<WasmTrustedInstanceData> instance_data,
                      wasm::WasmCode* code, int byte_offset, int function_index,
                      bool at_to_number_conversion);
 
@@ -460,14 +467,16 @@ class V8_EXPORT_PRIVATE FrameSummary {
     int SourcePosition() const;
     int SourceStatementPosition() const { return SourcePosition(); }
     Handle<Script> script() const;
-    Handle<WasmInstanceObject> wasm_instance() const { return wasm_instance_; }
-    Handle<WasmTrustedInstanceData> wasm_trusted_instance_data() const;
+    Handle<WasmInstanceObject> wasm_instance() const;
+    Handle<WasmTrustedInstanceData> wasm_trusted_instance_data() const {
+      return instance_data_;
+    }
     Handle<Context> native_context() const;
     bool at_to_number_conversion() const { return at_to_number_conversion_; }
     Handle<StackFrameInfo> CreateStackFrameInfo() const;
 
    private:
-    Handle<WasmInstanceObject> wasm_instance_;
+    Handle<WasmTrustedInstanceData> instance_data_;
     bool at_to_number_conversion_;
     wasm::WasmCode* code_;
     int byte_offset_;
@@ -479,11 +488,13 @@ class V8_EXPORT_PRIVATE FrameSummary {
   class WasmInlinedFrameSummary : public FrameSummaryBase {
    public:
     WasmInlinedFrameSummary(Isolate* isolate,
-                            Handle<WasmInstanceObject> instance,
+                            Handle<WasmTrustedInstanceData> instance_data,
                             int function_index, int op_wire_bytes_offset);
 
-    Handle<WasmInstanceObject> wasm_instance() const { return wasm_instance_; }
-    Handle<WasmTrustedInstanceData> wasm_trusted_instance_data() const;
+    Handle<WasmInstanceObject> wasm_instance() const;
+    Handle<WasmTrustedInstanceData> wasm_trusted_instance_data() const {
+      return instance_data_;
+    }
     Handle<Object> receiver() const;
     uint32_t function_index() const;
     int code_offset() const { return op_wire_bytes_offset_; }
@@ -496,7 +507,7 @@ class V8_EXPORT_PRIVATE FrameSummary {
     Handle<StackFrameInfo> CreateStackFrameInfo() const;
 
    private:
-    Handle<WasmInstanceObject> wasm_instance_;
+    Handle<WasmTrustedInstanceData> instance_data_;
     int function_index_;
     int op_wire_bytes_offset_;  // relative to function offset.
   };
@@ -883,8 +894,9 @@ class BuiltinExitFrame : public ExitFrame {
 
 // Api callback exit frames are a special case of exit frames, which are used
 // whenever an Api functions (such as v8::Function or v8::FunctionTemplate) are
-// called. Their main purpose is to allow these functions to appear in stack
-// traces.
+// called. Their main purpose is to support preprocessing of exceptions thrown
+// from Api functions and to allow these functions to appear in stack traces
+// (see v8_flags.experimental_stack_trace_frames).
 class ApiCallbackExitFrame : public ExitFrame {
  public:
   Type type() const override { return API_CALLBACK_EXIT; }
@@ -931,6 +943,41 @@ class ApiCallbackExitFrame : public ExitFrame {
   friend class StackFrameIteratorBase;
 };
 
+// Api accessor exit frames are a special case of exit frames, which are used
+// whenever an Api property accessor callbacks (v8::AccessorGetterCallback or
+// v8::AccessorSetterCallback) are called. Their main purpose is to support
+// preprocessing of exceptions thrown from these callbacks.
+class ApiAccessorExitFrame : public ExitFrame {
+ public:
+  Type type() const override { return API_ACCESSOR_EXIT; }
+
+  inline Tagged<Name> property_name() const;
+
+  inline Tagged<Object> receiver() const;
+  inline Tagged<Object> holder() const;
+
+  void Print(StringStream* accumulator, PrintMode mode,
+             int index) const override;
+
+  // Summarize Frame
+  void Summarize(std::vector<FrameSummary>* frames) const override;
+
+  static ApiAccessorExitFrame* cast(StackFrame* frame) {
+    DCHECK(frame->is_api_accessor_exit());
+    return static_cast<ApiAccessorExitFrame*>(frame);
+  }
+
+ protected:
+  inline explicit ApiAccessorExitFrame(StackFrameIteratorBase* iterator);
+
+ private:
+  inline FullObjectSlot property_name_slot() const;
+  inline FullObjectSlot receiver_slot() const;
+  inline FullObjectSlot holder_slot() const;
+
+  friend class StackFrameIteratorBase;
+};
+
 class StubFrame : public TypedFrame {
  public:
   Type type() const override { return STUB; }
@@ -960,7 +1007,8 @@ class OptimizedFrame : public JavaScriptFrame {
 
   void Summarize(std::vector<FrameSummary>* frames) const override;
 
-  Tagged<DeoptimizationData> GetDeoptimizationData(int* deopt_index) const;
+  Tagged<DeoptimizationData> GetDeoptimizationData(Tagged<Code> code,
+                                                   int* deopt_index) const;
 
   static int StackSlotOffsetRelativeToFp(int slot_index);
 
@@ -1336,6 +1384,8 @@ class ConstructFrame : public InternalFrame {
     DCHECK(frame->is_construct());
     return static_cast<ConstructFrame*>(frame);
   }
+
+  void Iterate(RootVisitor* v) const override;
 
  protected:
   inline explicit ConstructFrame(StackFrameIteratorBase* iterator);

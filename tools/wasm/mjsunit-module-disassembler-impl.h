@@ -35,6 +35,25 @@ enum PreferShortCode : bool {
   kFullType = false,
 };
 
+// Helper to surround a value by an optional ...wasmUnsignedLeb() call.
+class MaybeLebScope {
+ public:
+  MaybeLebScope(StringBuilder& out, uint32_t index) : out(out), index(index) {
+    if (index > 0x7F) {
+      out << "...wasmUnsignedLeb(";
+    }
+  }
+  ~MaybeLebScope() {
+    if (index > 0x7F) {
+      out << ')';
+    }
+  }
+
+ private:
+  StringBuilder& out;
+  uint32_t index;
+};
+
 class MjsunitNamesProvider {
  public:
   static constexpr const char* kLocalPrefix = "$var";
@@ -92,6 +111,21 @@ class MjsunitNamesProvider {
     return memcmp(name.begin(), question.begin(), name.length()) == 0;
   }
 
+  void PrintTypeVariableName(StringBuilder& out, uint32_t index) {
+    // The name creation scheme must be in sync with {PrintStructType} etc.
+    // below!
+    if (module_->has_struct(index)) {
+      out << "$struct" << index;
+    } else if (module_->has_array(index)) {
+      out << "$array" << index;
+    } else {
+      // This function is meant for dumping the type section, so we can assume
+      // validity.
+      DCHECK(module_->has_signature(index));
+      out << "$sig" << index;
+    }
+  }
+
   void PrintStructType(StringBuilder& out, uint32_t index) {
     DCHECK(module_->has_struct(index));
     PrintMaybeLEB(out, "$struct", index);
@@ -132,14 +166,14 @@ class MjsunitNamesProvider {
   void PrintFunctionVariableName(StringBuilder& out, uint32_t index) {
     if (index >= function_variable_names_.size()) {
       // Invalid module.
-      PrintMaybeLEB(out, "", index);
+      out << "$invalid" << index;
       return;
     }
     WasmName name = wire_bytes_.GetNameOrNull(function_variable_names_[index]);
     if (name.size() > 0) {
-      PrintMaybeLEB(out, name, index);
+      out << name << index;
     } else {
-      PrintMaybeLEB(out, "$func", index);
+      out << "$func" << index;
     }
   }
 
@@ -152,6 +186,10 @@ class MjsunitNamesProvider {
       out << ".index";
     }
   }
+  void PrintFunctionReferenceLeb(StringBuilder& out, uint32_t index) {
+    MaybeLebScope leb_scope(out, index);
+    PrintFunctionReference(out, index);
+  }
 
   // We only use this for comments, so it doesn't need to bother with LEBs.
   void PrintLocalName(StringBuilder& out, uint32_t index) {
@@ -159,7 +197,7 @@ class MjsunitNamesProvider {
   }
 
   void PrintGlobalName(StringBuilder& out, uint32_t index) {
-    PrintMaybeLEB(out, "$global", index);
+    out << "$global" << index;
   }
   void PrintGlobalReference(StringBuilder& out, uint32_t index) {
     PrintGlobalName(out, index);
@@ -167,9 +205,13 @@ class MjsunitNamesProvider {
       out << ".index";
     }
   }
+  void PrintGlobalReferenceLeb(StringBuilder& out, uint32_t index) {
+    MaybeLebScope leb_scope(out, index);
+    PrintGlobalReference(out, index);
+  }
 
   void PrintTableName(StringBuilder& out, uint32_t index) {
-    PrintMaybeLEB(out, "$table", index);
+    out << "$table" << index;
   }
   void PrintTableReference(StringBuilder& out, uint32_t index) {
     PrintTableName(out, index);
@@ -178,20 +220,41 @@ class MjsunitNamesProvider {
     }
   }
 
+  void PrintTableReferenceLeb(StringBuilder& out, uint32_t index) {
+    MaybeLebScope leb_scope(out, index);
+    PrintTableReference(out, index);
+  }
+
   void PrintMemoryName(StringBuilder& out, uint32_t index) {
-    PrintMaybeLEB(out, "$mem", index);
+    out << "$mem" << index;
+  }
+  void PrintMemoryReferenceLeb(StringBuilder& out, uint32_t index) {
+    MaybeLebScope leb_scope(out, index);
+    PrintMemoryName(out, index);
   }
 
   void PrintTagName(StringBuilder& out, uint32_t index) {
-    PrintMaybeLEB(out, "$tag", index);
+    out << "$tag" << index;
+  }
+  void PrintTagReferenceLeb(StringBuilder& out, uint32_t index) {
+    MaybeLebScope leb_scope(out, index);
+    PrintTagName(out, index);
   }
 
   void PrintDataSegmentName(StringBuilder& out, uint32_t index) {
-    PrintMaybeLEB(out, "$data", index);
+    out << "$data" << index;
+  }
+  void PrintDataSegmentReferenceLeb(StringBuilder& out, uint32_t index) {
+    MaybeLebScope leb_scope(out, index);
+    PrintDataSegmentName(out, index);
   }
 
   void PrintElementSegmentName(StringBuilder& out, uint32_t index) {
-    PrintMaybeLEB(out, "$segment", index);
+    out << "$segment" << index;
+  }
+  void PrintElementSegmentReferenceLeb(StringBuilder& out, uint32_t index) {
+    MaybeLebScope leb_scope(out, index);
+    PrintElementSegmentName(out, index);
   }
 
   // Format: HeapType::* enum value, JS global constant.
@@ -734,6 +797,9 @@ class MjsunitImmediatesPrinter {
       out_ << " kWasmVoid,";
     } else {
       out_ << " ";
+      // TODO(mliedtke): For reference types this prints `wasmRefType(index)`
+      // which is an object, while it should print
+      // `kWasmRefType, ...wasmUnsignedLeb(index)`.
       names()->PrintValueType(out_, imm.sig.GetReturn(), kCode);
       out_ << ",";
     }
@@ -745,6 +811,8 @@ class MjsunitImmediatesPrinter {
     out_ << ",";
   }
 
+  // TODO(mliedtke): This is used for br_on_cast[_fail] and currently does not
+  // create a valid br_on_cast instruction.
   void ValueType(HeapTypeImmediate& imm, bool is_nullable) {
     out_ << " ";
     names()->PrintValueType(
@@ -795,7 +863,7 @@ class MjsunitImmediatesPrinter {
       if (kind == kCatch || kind == kCatchRef) {
         auto [tag, length] = owner_->read_u32v<ValidationTag>(pc);
         pc += length;
-        names()->PrintTagName(out_, tag);
+        names()->PrintTagReferenceLeb(out_, tag);
         out_ << ", ";
       }
       auto [target, length] = owner_->read_u32v<ValidationTag>(pc);
@@ -846,13 +914,13 @@ class MjsunitImmediatesPrinter {
 
   void TagIndex(TagIndexImmediate& imm) {
     out_ << " ";
-    names()->PrintTagName(out_, imm.index);
+    names()->PrintTagReferenceLeb(out_, imm.index);
     out_ << ",";
   }
 
   void FunctionIndex(IndexImmediate& imm) {
     out_ << " ";
-    names()->PrintFunctionReference(out_, imm.index);
+    names()->PrintFunctionReferenceLeb(out_, imm.index);
     out_ << ",";
   }
 
@@ -870,31 +938,31 @@ class MjsunitImmediatesPrinter {
 
   void GlobalIndex(IndexImmediate& imm) {
     out_ << " ";
-    names()->PrintGlobalReference(out_, imm.index);
+    names()->PrintGlobalReferenceLeb(out_, imm.index);
     out_ << ",";
   }
 
   void TableIndex(IndexImmediate& imm) {
     out_ << " ";
-    names()->PrintTableReference(out_, imm.index);
+    names()->PrintTableReferenceLeb(out_, imm.index);
     out_ << ",";
   }
 
   void MemoryIndex(MemoryIndexImmediate& imm) {
     out_ << " ";
-    names()->PrintMemoryName(out_, imm.index);
+    names()->PrintMemoryReferenceLeb(out_, imm.index);
     out_ << ",";
   }
 
   void DataSegmentIndex(IndexImmediate& imm) {
     out_ << " ";
-    names()->PrintDataSegmentName(out_, imm.index);
+    names()->PrintDataSegmentReferenceLeb(out_, imm.index);
     out_ << ",";
   }
 
   void ElemSegmentIndex(IndexImmediate& imm) {
     out_ << " ";
-    names()->PrintElementSegmentName(out_, imm.index);
+    names()->PrintElementSegmentReferenceLeb(out_, imm.index);
     out_ << ",";
   }
 
@@ -957,25 +1025,25 @@ class MjsunitImmediatesPrinter {
 
   void MemoryCopy(MemoryCopyImmediate& imm) {
     out_ << " ";
-    names()->PrintMemoryName(out_, imm.memory_dst.index);
+    names()->PrintMemoryReferenceLeb(out_, imm.memory_dst.index);
     out_ << ", ";
-    names()->PrintMemoryName(out_, imm.memory_src.index);
+    names()->PrintMemoryReferenceLeb(out_, imm.memory_src.index);
     out_ << ",";
   }
 
   void TableInit(TableInitImmediate& imm) {
     out_ << " ";
-    names()->PrintElementSegmentName(out_, imm.element_segment.index);
+    names()->PrintElementSegmentReferenceLeb(out_, imm.element_segment.index);
     out_ << ", ";
-    names()->PrintTableName(out_, imm.table.index);
+    names()->PrintTableReferenceLeb(out_, imm.table.index);
     out_ << ",";
   }
 
   void TableCopy(TableCopyImmediate& imm) {
     out_ << " ";
-    names()->PrintTableName(out_, imm.table_dst.index);
+    names()->PrintTableReferenceLeb(out_, imm.table_dst.index);
     out_ << ", ";
-    names()->PrintTableName(out_, imm.table_src.index);
+    names()->PrintTableReferenceLeb(out_, imm.table_src.index);
     out_ << ",";
   }
 
@@ -1068,8 +1136,37 @@ class MjsunitModuleDis {
 
     // Types.
     // TODO(14616): Support shared types.
-    // TODO(jkummerow): Support self-referential types, i.e. structs/sigs
-    // that contain a (ref $self).
+
+    // Support self-referential and mutually-recursive types.
+    std::vector<uint32_t> needed_at(module_->types.size(), kMaxUInt32);
+    auto MarkAsNeededHere = [&needed_at](ValueType vt, uint32_t here) {
+      if (!vt.is_object_reference()) return;
+      HeapType ht = vt.heap_type();
+      if (!ht.is_index()) return;
+      if (ht.ref_index() < here) return;
+      if (needed_at[ht.ref_index()] < here) return;
+      needed_at[ht.ref_index()] = here;
+    };
+    for (uint32_t i = 0; i < module_->types.size(); i++) {
+      if (module_->has_struct(i)) {
+        const StructType* struct_type = module_->types[i].struct_type;
+        for (uint32_t fi = 0; fi < struct_type->field_count(); fi++) {
+          MarkAsNeededHere(struct_type->field(fi), i);
+        }
+      } else if (module_->has_array(i)) {
+        MarkAsNeededHere(module_->types[i].array_type->element_type(), i);
+      } else {
+        DCHECK(module_->has_signature(i));
+        const FunctionSig* sig = module_->types[i].function_sig;
+        for (size_t pi = 0; pi < sig->parameter_count(); pi++) {
+          MarkAsNeededHere(sig->GetParam(pi), i);
+        }
+        for (size_t ri = 0; ri < sig->return_count(); ri++) {
+          MarkAsNeededHere(sig->GetReturn(ri), i);
+        }
+      }
+    }
+
     uint32_t recgroup_index = 0;
     OffsetsProvider::RecGroup recgroup = offsets_.recgroup(recgroup_index++);
     bool in_explicit_recgroup = false;
@@ -1089,13 +1186,32 @@ class MjsunitModuleDis {
           break;
         }
       }
+      for (uint32_t pre = i; pre < recgroup.end_type_index; pre++) {
+        if (needed_at[pre] == i) {
+          out_ << "let ";
+          names()->PrintTypeVariableName(out_, pre);
+          if (pre == i) {
+            out_ << " = builder.nextTypeIndex();";
+          } else {
+            out_ << " = builder.nextTypeIndex() + " << (pre - i) << ";";
+          }
+          out_.NextLine(0);
+        }
+      }
       uint32_t supertype = module_->types[i].supertype;
       bool is_final = module_->types[i].is_final;
-      out_ << "let ";
+      if (needed_at[i] == kMaxUInt32) {
+        out_ << "let ";
+        names()->PrintTypeVariableName(out_, i);
+        out_ << " = ";
+      } else {
+        out_ << "/* ";
+        names()->PrintTypeVariableName(out_, i);
+        out_ << " */ ";
+      }
       if (module_->has_struct(i)) {
         const StructType* struct_type = module_->types[i].struct_type;
-        names()->PrintStructType(out_, i);
-        out_ << " = builder.addStruct([";
+        out_ << "builder.addStruct([";
         for (uint32_t fi = 0; fi < struct_type->field_count(); fi++) {
           if (fi > 0) out_ << ", ";
           out_ << "makeField(";
@@ -1113,8 +1229,7 @@ class MjsunitModuleDis {
         out_.NextLine(0);
       } else if (module_->has_array(i)) {
         const ArrayType* array_type = module_->types[i].array_type;
-        names()->PrintArrayType(out_, i);
-        out_ << " = builder.addArray(";
+        out_ << "builder.addArray(";
         names()->PrintValueType(out_, array_type->element_type(), kFullType);
         out_ << ", ";
         out_ << (array_type->mutability() ? "true" : "false") << ", ";
@@ -1128,8 +1243,7 @@ class MjsunitModuleDis {
       } else {
         DCHECK(module_->has_signature(i));
         const FunctionSig* sig = module_->types[i].function_sig;
-        names()->PrintSigType(out_, i);
-        out_ << " = builder.addType(";
+        out_ << "builder.addType(";
         names()->PrintMakeSignature(out_, sig);
         if (!is_final || supertype != kNoSuperType) {
           out_ << ", ";
@@ -1264,7 +1378,7 @@ class MjsunitModuleDis {
         out_ << "undefined";
       }
       out_ << ", ";
-      names()->PrintSigType(out_, func.sig_index);
+      out_ << "$sig" << func.sig_index;
       out_ << ")";
       if (func.exported && !export_functions_late) {
         for (const WasmExport& ex : module_->export_table) {
@@ -1585,7 +1699,7 @@ class MjsunitModuleDis {
         break;
       case ConstantExpression::kRefFunc:
         out_ << "[kExprRefFunc, ";
-        names()->PrintFunctionReference(out_, init.index());
+        names()->PrintFunctionReferenceLeb(out_, init.index());
         out_ << "]";
         break;
       case ConstantExpression::kWireBytesRef: {

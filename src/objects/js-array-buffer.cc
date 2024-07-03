@@ -35,7 +35,8 @@ bool CanonicalNumericIndexString(Isolate* isolate,
     *is_minus_zero = true;
   } else {
     // 4. If SameValue(! ToString(n), argument) is false, return undefined.
-    Handle<String> str = Object::ToString(isolate, result).ToHandleChecked();
+    DirectHandle<String> str =
+        Object::ToString(isolate, result).ToHandleChecked();
     // Avoid treating strings like "2E1" and "20" as the same key.
     if (!Object::SameValue(*str, *key)) return false;
   }
@@ -116,12 +117,12 @@ void JSArrayBuffer::Attach(std::shared_ptr<BackingStore> backing_store) {
   isolate->heap()->AppendArrayBufferExtension(*this, extension);
 }
 
-Maybe<bool> JSArrayBuffer::Detach(Handle<JSArrayBuffer> buffer,
+Maybe<bool> JSArrayBuffer::Detach(DirectHandle<JSArrayBuffer> buffer,
                                   bool force_for_wasm_memory,
                                   Handle<Object> maybe_key) {
   Isolate* const isolate = buffer->GetIsolate();
 
-  Handle<Object> detach_key = handle(buffer->detach_key(), isolate);
+  DirectHandle<Object> detach_key(buffer->detach_key(), isolate);
 
   bool key_mismatch = false;
 
@@ -179,7 +180,6 @@ size_t JSArrayBuffer::GsabByteLength(Isolate* isolate,
                                      Address raw_array_buffer) {
   // TODO(v8:11111): Cache the last seen length in JSArrayBuffer and use it
   // in bounds checks to minimize the need for calling this function.
-  DCHECK(v8_flags.harmony_rab_gsab);
   DisallowGarbageCollection no_gc;
   DisallowJavascriptExecution no_js(isolate);
   Tagged<JSArrayBuffer> buffer =
@@ -261,7 +261,7 @@ void JSArrayBuffer::YoungMarkExtensionPromoted() {
 
 Handle<JSArrayBuffer> JSTypedArray::GetBuffer() {
   Isolate* isolate = GetIsolate();
-  Handle<JSTypedArray> self(*this, isolate);
+  DirectHandle<JSTypedArray> self(*this, isolate);
   DCHECK(IsTypedArrayOrRabGsabTypedArrayElementsKind(self->GetElementsKind()));
   Handle<JSArrayBuffer> array_buffer(JSArrayBuffer::cast(self->buffer()),
                                      isolate);
@@ -407,7 +407,6 @@ size_t JSTypedArray::LengthTrackingGsabBackedTypedArrayLength(
     Isolate* isolate, Address raw_array) {
   // TODO(v8:11111): Cache the last seen length in JSArrayBuffer and use it
   // in bounds checks to minimize the need for calling this function.
-  DCHECK(v8_flags.harmony_rab_gsab);
   DisallowGarbageCollection no_gc;
   DisallowJavascriptExecution no_js(isolate);
   Tagged<JSTypedArray> array = JSTypedArray::cast(Tagged<Object>(raw_array));

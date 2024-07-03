@@ -263,6 +263,8 @@ class V8_EXPORT_PRIVATE MaglevAssembler : public MacroAssembler {
   inline MemOperand DataViewElementOperand(Register data_pointer,
                                            Register index);
 
+  enum class CharCodeMaskMode { kValueIsInRange, kMustApplyMask };
+
   // Warning: Input registers {string} and {index} will be scratched.
   // {result} is allowed to alias with one the other 3 input registers.
   // {result} is an int32.
@@ -273,7 +275,8 @@ class V8_EXPORT_PRIVATE MaglevAssembler : public MacroAssembler {
   // Warning: Input {char_code} will be scratched.
   void StringFromCharCode(RegisterSnapshot register_snapshot,
                           Label* char_code_fits_one_byte, Register result,
-                          Register char_code, Register scratch);
+                          Register char_code, Register scratch,
+                          CharCodeMaskMode mask_mode);
 
   void ToBoolean(Register value, CheckType check_type, ZoneLabelRef is_true,
                  ZoneLabelRef is_false, bool fallthrough_when_true);
@@ -341,6 +344,9 @@ class V8_EXPORT_PRIVATE MaglevAssembler : public MacroAssembler {
   template <typename Function, typename... Args>
   inline void JumpToDeferredIf(Condition cond, Function&& deferred_code_gen,
                                Args&&... args);
+  void JumpIfNotCallable(Register object, Register scratch,
+                         CheckType check_type, Label* target,
+                         Label::Distance distance = Label::kFar);
   void JumpIfUndetectable(Register object, Register scratch,
                           CheckType check_type, Label* target,
                           Label::Distance distance = Label::kFar);

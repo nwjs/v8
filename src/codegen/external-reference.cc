@@ -62,6 +62,30 @@ constexpr double double_uint32_bias_constant =
     static_cast<double>(kMaxUInt32) + 1;
 
 constexpr struct alignas(16) {
+  uint16_t a;
+  uint16_t b;
+  uint16_t c;
+  uint16_t d;
+  uint16_t e;
+  uint16_t f;
+  uint16_t g;
+  uint16_t h;
+} fp16_absolute_constant = {0x7FFF, 0x7FFF, 0x7FFF, 0x7FFF,
+                            0x7FFF, 0x7FFF, 0x7FFF, 0x7FFF};
+
+constexpr struct alignas(16) {
+  uint16_t a;
+  uint16_t b;
+  uint16_t c;
+  uint16_t d;
+  uint16_t e;
+  uint16_t f;
+  uint16_t g;
+  uint16_t h;
+} fp16_negate_constant = {0x8000, 0x8000, 0x8000, 0x8000,
+                          0x8000, 0x8000, 0x8000, 0x8000};
+
+constexpr struct alignas(16) {
   uint32_t a;
   uint32_t b;
   uint32_t c;
@@ -546,8 +570,22 @@ FUNCTION_REFERENCE(wasm_array_copy, wasm::array_copy_wrapper)
 FUNCTION_REFERENCE(wasm_array_fill, wasm::array_fill_wrapper)
 FUNCTION_REFERENCE_WITH_TYPE(wasm_string_to_f64, wasm::flat_string_to_f64,
                              BUILTIN_FP_POINTER_CALL)
+
 int32_t (&futex_emulation_wake)(void*, uint32_t) = FutexEmulation::Wake;
 FUNCTION_REFERENCE(wasm_atomic_notify, futex_emulation_wake)
+
+void WasmSignatureCheckFail(Address raw_internal_function,
+                            uintptr_t expected_hash) {
+  // WasmInternalFunction::signature_hash doesn't exist in non-sandbox builds.
+#if V8_ENABLE_SANDBOX
+  Tagged<WasmInternalFunction> internal_function =
+      WasmInternalFunction::cast(Tagged<Object>(raw_internal_function));
+  PrintF("Wasm sandbox violation! Expected signature hash %lx, got %lx\n",
+         expected_hash, internal_function->signature_hash());
+  SBXCHECK_EQ(expected_hash, internal_function->signature_hash());
+#endif
+}
+FUNCTION_REFERENCE(wasm_signature_check_fail, WasmSignatureCheckFail)
 
 #define V(Name) RAW_FUNCTION_REFERENCE(wasm_##Name, wasm::Name)
 WASM_JS_EXTERNAL_REFERENCE_LIST(V)
@@ -734,6 +772,14 @@ ExternalReference ExternalReference::address_of_the_hole_nan() {
 ExternalReference ExternalReference::address_of_uint32_bias() {
   return ExternalReference(
       reinterpret_cast<Address>(&double_uint32_bias_constant));
+}
+
+ExternalReference ExternalReference::address_of_fp16_abs_constant() {
+  return ExternalReference(reinterpret_cast<Address>(&fp16_absolute_constant));
+}
+
+ExternalReference ExternalReference::address_of_fp16_neg_constant() {
+  return ExternalReference(reinterpret_cast<Address>(&fp16_negate_constant));
 }
 
 ExternalReference ExternalReference::address_of_float_abs_constant() {

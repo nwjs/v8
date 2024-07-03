@@ -22,7 +22,7 @@
 #include "src/heap/heap-verifier.h"
 #include "src/heap/heap.h"
 #include "src/heap/memory-chunk-layout.h"
-#include "src/heap/mutable-page.h"
+#include "src/heap/mutable-page-metadata.h"
 #include "src/heap/spaces.h"
 
 namespace v8 {
@@ -167,7 +167,7 @@ class V8_EXPORT_PRIVATE PagedSpaceBase
 
   // Wasted bytes in this space.  These are just the bytes that were thrown away
   // due to being too small to use for allocation.
-  virtual size_t Waste() const { return free_list_->wasted_bytes(); }
+  size_t Waste() const;
 
   // Allocate the requested number of bytes in the space from a background
   // thread.

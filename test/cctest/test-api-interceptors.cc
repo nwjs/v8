@@ -2802,8 +2802,8 @@ THREADED_TEST(PropertyHandlerInPrototype) {
                                  ->NewInstance(env.local())
                                  .ToLocalChecked();
 
-  bottom->SetPrototype(env.local(), middle).FromJust();
-  middle->SetPrototype(env.local(), top).FromJust();
+  bottom->SetPrototypeV2(env.local(), middle).FromJust();
+  middle->SetPrototypeV2(env.local(), top).FromJust();
   env->Global()->Set(env.local(), v8_str("obj"), bottom).FromJust();
 
   // Indexed and named get.
@@ -2858,8 +2858,8 @@ TEST(PropertyHandlerInPrototypeWithDefine) {
                                  ->NewInstance(env.local())
                                  .ToLocalChecked();
 
-  bottom->SetPrototype(env.local(), middle).FromJust();
-  middle->SetPrototype(env.local(), top).FromJust();
+  bottom->SetPrototypeV2(env.local(), middle).FromJust();
+  middle->SetPrototypeV2(env.local(), top).FromJust();
   env->Global()->Set(env.local(), v8_str("obj"), bottom).FromJust();
 
   // Indexed and named get.
@@ -3451,7 +3451,7 @@ namespace {
 v8::Intercepted SetXOnPrototypeGetter(
     Local<Name> property, const v8::PropertyCallbackInfo<v8::Value>& info) {
   // Set x on the prototype object and do not handle the get request.
-  v8::Local<v8::Value> proto = info.Holder()->GetPrototype();
+  v8::Local<v8::Value> proto = info.HolderV2()->GetPrototypeV2();
   proto.As<v8::Object>()
       ->Set(info.GetIsolate()->GetCurrentContext(), v8_str("x"),
             v8::Integer::New(info.GetIsolate(), 23))
@@ -5941,7 +5941,7 @@ v8::Intercepted DatabaseGetter(Local<Name> name,
                                const v8::PropertyCallbackInfo<Value>& info) {
   auto context = info.GetIsolate()->GetCurrentContext();
   v8::MaybeLocal<Value> maybe_db =
-      info.Holder()->GetRealNamedProperty(context, v8_str("db"));
+      info.HolderV2()->GetRealNamedProperty(context, v8_str("db"));
   if (maybe_db.IsEmpty()) return v8::Intercepted::kNo;
   Local<v8::Object> db = maybe_db.ToLocalChecked().As<v8::Object>();
   if (!db->Has(context, name).FromJust()) return v8::Intercepted::kNo;
@@ -5960,7 +5960,7 @@ v8::Intercepted DatabaseSetter(Local<Name> name, Local<Value> value,
 
   // Side effects are allowed only when the property is present or throws.
   ApiTestFuzzer::Fuzz();
-  Local<v8::Object> db = info.Holder()
+  Local<v8::Object> db = info.HolderV2()
                              ->GetRealNamedProperty(context, v8_str("db"))
                              .ToLocalChecked()
                              .As<v8::Object>();

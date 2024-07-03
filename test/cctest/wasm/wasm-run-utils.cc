@@ -97,7 +97,7 @@ TestingModuleBuilder::TestingModuleBuilder(
           static_cast<int>(sig->parameter_count()), kNoSuspend, &cache_scope);
     }
 
-    ImportedFunctionEntry(instance_object_, maybe_import_index)
+    ImportedFunctionEntry(trusted_instance_data_, maybe_import_index)
         .SetWasmToJs(isolate_, callable, import_wrapper, resolved.suspend(),
                      sig);
   }
@@ -111,7 +111,8 @@ TestingModuleBuilder::~TestingModuleBuilder() {
 }
 
 uint8_t* TestingModuleBuilder::AddMemory(uint32_t size, SharedFlag shared,
-                                         TestingModuleMemoryType mem_type) {
+                                         TestingModuleMemoryType mem_type,
+                                         std::optional<size_t> max_size) {
   // The TestingModuleBuilder only supports one memory currently.
   CHECK_EQ(0, test_module_->memories.size());
   CHECK_NULL(mem0_start_);
@@ -119,7 +120,11 @@ uint8_t* TestingModuleBuilder::AddMemory(uint32_t size, SharedFlag shared,
   CHECK_EQ(0, trusted_instance_data_->memory_objects()->length());
 
   uint32_t initial_pages = RoundUp(size, kWasmPageSize) / kWasmPageSize;
-  uint32_t maximum_pages = initial_pages;
+  uint32_t maximum_pages =
+      max_size.has_value()
+          ? static_cast<uint32_t>(RoundUp(max_size.value(), kWasmPageSize) /
+                                  kWasmPageSize)
+          : initial_pages;
   test_module_->memories.resize(1);
   WasmMemory* memory = &test_module_->memories[0];
   memory->initial_pages = initial_pages;
@@ -281,7 +286,8 @@ void TestingModuleBuilder::AddIndirectFunctionTable(
       WasmFunction& function = test_module_->functions[function_indexes[i]];
       int sig_id =
           test_module_->isorecursive_canonical_type_ids[function.sig_index];
-      FunctionTargetAndRef entry(instance_object_, function.func_index);
+      FunctionTargetAndRef entry(isolate_, trusted_instance_data_,
+                                 function.func_index);
       trusted_instance_data_->dispatch_table(table_index)
           ->Set(i, *entry.ref(), entry.call_target(), sig_id);
       WasmTableObject::SetFunctionTablePlaceholder(

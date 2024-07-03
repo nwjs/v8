@@ -4,7 +4,7 @@
 
 // Flags: --wasm-deopt --allow-natives-syntax --turboshaft-wasm
 // Flags: --experimental-wasm-inlining --liftoff
-// Flags: --turboshaft-wasm-instruction-selection-staged
+// Flags: --turboshaft-wasm-instruction-selection-staged --no-jit-fuzzing
 
 d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
@@ -47,7 +47,7 @@ d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
   // This causes sub() to take the slow call_ref implementation and no deopt
   // point is created.
   %WasmTierUpFunction(wasm.main);
-  // Calling with a new call targe therefore doesn't trigger a deopt.
+  // Calling with a new call target therefore doesn't trigger a deopt.
   assertEquals(200, wasm.main(10, 20, wasm.mul));
   assertTrue(%IsTurboFanFunction(wasm.main));
 })();

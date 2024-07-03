@@ -112,7 +112,7 @@ class JSArrayBuffer
   // is used by the implementation of Wasm memory growth in order to bypass the
   // non-detachable check.
   V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static Maybe<bool> Detach(
-      Handle<JSArrayBuffer> buffer, bool force_for_wasm_memory = false,
+      DirectHandle<JSArrayBuffer> buffer, bool force_for_wasm_memory = false,
       Handle<Object> key = Handle<Object>());
 
   // Get a reference to backing store of this array buffer, if there is a
@@ -131,7 +131,7 @@ class JSArrayBuffer
 
   // Allocates an ArrayBufferExtension for this array buffer, unless it is
   // already associated with an extension.
-  ArrayBufferExtension* EnsureExtension();
+  V8_EXPORT_PRIVATE ArrayBufferExtension* EnsureExtension();
 
   // Frees the associated ArrayBufferExtension and returns its backing store.
   std::shared_ptr<BackingStore> RemoveExtension();

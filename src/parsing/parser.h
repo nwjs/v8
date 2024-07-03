@@ -503,8 +503,6 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
   Expression* CloseTemplateLiteral(TemplateLiteralState* state, int start,
                                    Expression* tag);
 
-  ArrayLiteral* ArrayLiteralFromListWithSpread(
-      const ScopedPtrList<Expression>& list);
   Expression* RewriteSuperCall(Expression* call_expression);
 
   void SetLanguageMode(Scope* scope, LanguageMode mode);
@@ -521,8 +519,6 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
   Expression* NewThrowError(Runtime::FunctionId function_id,
                             MessageTemplate message, const AstRawString* arg,
                             int pos);
-
-  Statement* CheckCallable(Variable* var, Expression* error, int pos);
 
   void RewriteAsyncFunctionBody(ScopedPtrList<Statement>* body, Block* block,
                                 Expression* return_value,
@@ -587,10 +583,6 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
 
   V8_INLINE bool IsConstructor(const AstRawString* identifier) const {
     return identifier == ast_value_factory()->constructor_string();
-  }
-
-  V8_INLINE bool IsName(const AstRawString* identifier) const {
-    return identifier == ast_value_factory()->name_string();
   }
 
   V8_INLINE static bool IsBoilerplateProperty(
@@ -704,21 +696,6 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
                                                int pos) {
     return NewThrowError(Runtime::kNewReferenceError, message,
                          ast_value_factory()->empty_string(), pos);
-  }
-
-  // Generate AST node that throws a SyntaxError with the given
-  // type. The first argument may be null (in the handle sense) in
-  // which case no arguments are passed to the constructor.
-  V8_INLINE Expression* NewThrowSyntaxError(MessageTemplate message,
-                                            const AstRawString* arg, int pos) {
-    return NewThrowError(Runtime::kNewSyntaxError, message, arg, pos);
-  }
-
-  // Generate AST node that throws a TypeError with the given
-  // type. Both arguments must be non-null (in the handle sense).
-  V8_INLINE Expression* NewThrowTypeError(MessageTemplate message,
-                                          const AstRawString* arg, int pos) {
-    return NewThrowError(Runtime::kNewTypeError, message, arg, pos);
   }
 
   // Dummy implementation. The parser should never have a unidentifiable
@@ -1126,7 +1103,6 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
   Zone preparser_zone_;
   PreParser* reusable_preparser_;
   Mode mode_;
-  bool overall_parse_is_parked_ = false;
 
   MaybeHandle<FixedArray> maybe_wrapped_arguments_;
 

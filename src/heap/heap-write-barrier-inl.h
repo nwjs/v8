@@ -212,9 +212,10 @@ inline void IndirectPointerWriteBarrier(Tagged<HeapObject> host,
   }
 
   // Objects referenced via indirect pointers are currently never allocated in
-  // the young generation or the shared heap. If they ever are, then some of
-  // these write barriers need to be adjusted.
-  DCHECK(!MemoryChunk::FromHeapObject(value)->IsYoungOrSharedChunk());
+  // the young generation.
+  if (!v8_flags.sticky_mark_bits) {
+    DCHECK(!MemoryChunk::FromHeapObject(value)->InYoungGeneration());
+  }
 
   WriteBarrier::Marking(host, slot);
 }
@@ -381,10 +382,15 @@ void WriteBarrier::CombinedBarrierFromInternalFields(Tagged<JSObject> host,
 }
 
 // static
-void WriteBarrier::MarkingFromCppHeapWrappable(Tagged<JSObject> host,
-                                               void* value) {
+void WriteBarrier::CombinedBarrierForCppHeapPointer(Tagged<JSObject> host,
+                                                    void* value) {
   if (V8_ENABLE_THIRD_PARTY_HEAP_BOOL) return;
   if (V8_LIKELY(!IsMarking(host))) {
+#if defined(CPPGC_YOUNG_GENERATION)
+    // TODO(mlippautz): Don't reuse the internal field barrier but rather create
+    // a separate barrier for the CppHeapPointer.
+    GenerationalBarrierFromInternalFields(host, 1, &value);
+#endif
     return;
   }
   MarkingBarrier* marking_barrier = CurrentMarkingBarrier(host);

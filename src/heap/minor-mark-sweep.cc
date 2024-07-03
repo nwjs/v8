@@ -32,7 +32,7 @@
 #include "src/heap/marking-worklist.h"
 #include "src/heap/memory-chunk-layout.h"
 #include "src/heap/minor-mark-sweep-inl.h"
-#include "src/heap/mutable-page.h"
+#include "src/heap/mutable-page-metadata.h"
 #include "src/heap/new-spaces.h"
 #include "src/heap/object-stats.h"
 #include "src/heap/pretenuring-handler.h"
@@ -263,8 +263,8 @@ void YoungGenerationRememberedSetsMarkingWorklist::TearDown() {
 }
 
 YoungGenerationRootMarkingVisitor::YoungGenerationRootMarkingVisitor(
-    YoungGenerationMainMarkingVisitor* main_marking_visitor)
-    : main_marking_visitor_(main_marking_visitor) {}
+    MinorMarkSweepCollector* collector)
+    : main_marking_visitor_(collector->main_marking_visitor()) {}
 
 YoungGenerationRootMarkingVisitor::~YoungGenerationRootMarkingVisitor() =
     default;
@@ -601,17 +601,30 @@ void MinorMarkSweepCollector::ClearNonLiveReferences() {
 }
 
 namespace {
-void VisitObjectWithEmbedderFields(Tagged<JSObject> object,
+void VisitObjectWithEmbedderFields(Isolate* isolate, Tagged<JSObject> js_object,
                                    MarkingWorklists::Local& worklist) {
-  DCHECK(object->MayHaveEmbedderFields());
-  DCHECK(!Heap::InYoungGeneration(object));
+  DCHECK(js_object->MayHaveEmbedderFields());
+  DCHECK(!Heap::InYoungGeneration(js_object));
 
-  MarkingWorklists::Local::WrapperSnapshot wrapper_snapshot;
-  const bool valid_snapshot =
-      worklist.ExtractWrapper(object->map(), object, wrapper_snapshot);
-  DCHECK(valid_snapshot);
-  USE(valid_snapshot);
-  worklist.PushExtractedWrapper(wrapper_snapshot);
+  const auto maybe_info = WrappableInfo::From(
+      isolate, js_object,
+      CppHeap::From(isolate->heap()->cpp_heap())->wrapper_descriptor());
+  if (maybe_info.has_value()) {
+    // Wrappers with 2 embedder fields.
+    worklist.cpp_marking_state()->MarkAndPush(maybe_info->instance);
+    return;
+  }
+  // Not every object that can have embedder fields is actually a JSApiWrapper.
+  if (!IsJSApiWrapperObject(js_object)) {
+    return;
+  }
+
+  // Wrapper using cpp_heap_wrappable field.
+  void* wrappable =
+      JSApiWrapper(js_object).GetCppHeapWrappable(isolate, kAnyCppHeapPointer);
+  if (wrappable) {
+    worklist.cpp_marking_state()->MarkAndPush(wrappable);
+  }
 }
 }  // namespace
 
@@ -625,7 +638,8 @@ void MinorMarkSweepCollector::MarkRootsFromTracedHandles(
         &root_visitor);
     // Visit the V8-to-Oilpan remembered set.
     cpp_heap->VisitCrossHeapRememberedSetIfNeeded([this](Tagged<JSObject> obj) {
-      VisitObjectWithEmbedderFields(obj, *local_marking_worklists());
+      VisitObjectWithEmbedderFields(heap_->isolate(), obj,
+                                    *local_marking_worklists());
     });
   } else {
     // Otherwise, visit all young roots.
@@ -685,7 +699,7 @@ void MinorMarkSweepCollector::MarkLiveObjects() {
   DCHECK_NOT_NULL(marking_worklists_);
   DCHECK_NOT_NULL(main_marking_visitor_);
 
-  YoungGenerationRootMarkingVisitor root_visitor(main_marking_visitor_.get());
+  YoungGenerationRootMarkingVisitor root_visitor(this);
 
   MarkRoots(root_visitor, was_marked_incrementally);
 
@@ -902,7 +916,7 @@ bool MinorMarkSweepCollector::StartSweepNewSpace() {
   DCHECK_EQ(Heap::ResizeNewSpaceMode::kNone, resize_new_space_);
   resize_new_space_ = heap_->ShouldResizeNewSpace();
   if (resize_new_space_ == Heap::ResizeNewSpaceMode::kShrink) {
-    static_cast<PagedSpaceForNewSpace*>(paged_space)->StartShrinking();
+    paged_space->StartShrinking();
   }
 
   for (auto it = paged_space->begin(); it != paged_space->end();) {

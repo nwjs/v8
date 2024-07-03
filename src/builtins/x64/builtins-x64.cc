@@ -97,9 +97,8 @@ void Generate_JSBuiltinsConstructStubHelper(MacroAssembler* masm) {
     FrameScope scope(masm, StackFrame::CONSTRUCT);
 
     // Preserve the incoming parameters on the stack.
-    __ SmiTag(rcx, rax);
     __ Push(rsi);
-    __ Push(rcx);
+    __ Push(rax);
 
     // TODO(victorgomes): When the arguments adaptor is completely removed, we
     // should get the formal parameter count and copy the arguments in its
@@ -122,15 +121,14 @@ void Generate_JSBuiltinsConstructStubHelper(MacroAssembler* masm) {
     // rdx: new target
     __ InvokeFunction(rdi, rdx, rax, InvokeType::kCall);
 
-    // Restore smi-tagged arguments count from the frame.
+    // Restore arguments count from the frame.
     __ movq(rbx, Operand(rbp, ConstructFrameConstants::kLengthOffset));
 
     // Leave construct frame.
   }
 
   // Remove caller arguments from the stack and return.
-  __ DropArguments(rbx, rcx, MacroAssembler::kCountIsSmi,
-                   MacroAssembler::kCountIncludesReceiver);
+  __ DropArguments(rbx, rcx);
 
   __ ret(0);
 
@@ -160,9 +158,8 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
   Label post_instantiation_deopt_entry, not_create_implicit_receiver;
 
   // Preserve the incoming parameters on the stack.
-  __ SmiTag(rcx, rax);
   __ Push(rsi);
-  __ Push(rcx);
+  __ Push(rax);
   __ Push(rdi);
   __ PushRoot(RootIndex::kTheHoleValue);
   __ Push(rdx);
@@ -199,7 +196,7 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
   //  -- Slot 4 / sp[0*kSystemPointerSize]  new target
   //  -- Slot 3 / sp[1*kSystemPointerSize]  padding
   //  -- Slot 2 / sp[2*kSystemPointerSize]  constructor function
-  //  -- Slot 1 / sp[3*kSystemPointerSize]  number of arguments (tagged)
+  //  -- Slot 1 / sp[3*kSystemPointerSize]  number of arguments
   //  -- Slot 0 / sp[4*kSystemPointerSize]  context
   // -----------------------------------
   // Deoptimizer enters here.
@@ -226,8 +223,7 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
 
   // Restore constructor function and argument count.
   __ movq(rdi, Operand(rbp, ConstructFrameConstants::kConstructorOffset));
-  __ SmiUntagUnsigned(rax,
-                      Operand(rbp, ConstructFrameConstants::kLengthOffset));
+  __ movq(rax, Operand(rbp, ConstructFrameConstants::kLengthOffset));
 
   // Check if we have enough stack space to push all arguments.
   // Argument count in rax.
@@ -272,8 +268,7 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
   __ movq(rbx, Operand(rbp, ConstructFrameConstants::kLengthOffset));
   __ LeaveFrame(StackFrame::CONSTRUCT);
   // Remove caller arguments from the stack and return.
-  __ DropArguments(rbx, rcx, MacroAssembler::kCountIsSmi,
-                   MacroAssembler::kCountIncludesReceiver);
+  __ DropArguments(rbx, rcx);
   __ ret(0);
 
   // If the result is a smi, it is *not* an object in the ECMA sense.
@@ -949,15 +944,13 @@ static void LeaveInterpreterFrame(MacroAssembler* masm, Register scratch1,
   // Get the size of the formal parameters (in bytes).
   __ movq(params_size,
           Operand(rbp, InterpreterFrameConstants::kBytecodeArrayFromFp));
-__ movl(params_size,
-          FieldOperand(params_size, BytecodeArray::kParameterSizeOffset));
+  __ movzxwl(params_size,
+             FieldOperand(params_size, BytecodeArray::kParameterSizeOffset));
 
   Register actual_params_size = scratch2;
   // Compute the size of the actual parameters (in bytes).
   __ movq(actual_params_size,
           Operand(rbp, StandardFrameConstants::kArgCOffset));
-  __ leaq(actual_params_size,
-          Operand(actual_params_size, times_system_pointer_size, 0));
 
   // If actual is bigger than formal, then we should use it to free up the stack
   // arguments.
@@ -968,8 +961,7 @@ __ movl(params_size,
   __ leave();
 
   // Drop receiver + arguments.
-  __ DropArguments(params_size, scratch2, MacroAssembler::kCountIsBytes,
-                   MacroAssembler::kCountIncludesReceiver);
+  __ DropArguments(params_size, scratch2);
 }
 
 // Tail-call |function_id| if |actual_state| == |expected_state|
@@ -2113,9 +2105,7 @@ void Builtins::Generate_FunctionPrototypeApply(MacroAssembler* masm) {
       __ bind(&no_arg_array);
     }
     __ bind(&no_this_arg);
-    __ DropArgumentsAndPushNewReceiver(rax, rdx, rcx,
-                                       MacroAssembler::kCountIsInteger,
-                                       MacroAssembler::kCountIncludesReceiver);
+    __ DropArgumentsAndPushNewReceiver(rax, rdx, rcx);
   }
 
   // ----------- S t a t e -------------
@@ -2217,9 +2207,7 @@ void Builtins::Generate_ReflectApply(MacroAssembler* masm) {
     __ j(below, &done, Label::kNear);
     __ movq(rbx, args[3]);  // argumentsList
     __ bind(&done);
-    __ DropArgumentsAndPushNewReceiver(rax, rdx, rcx,
-                                       MacroAssembler::kCountIsInteger,
-                                       MacroAssembler::kCountIncludesReceiver);
+    __ DropArgumentsAndPushNewReceiver(rax, rdx, rcx);
   }
 
   // ----------- S t a t e -------------
@@ -2268,9 +2256,7 @@ void Builtins::Generate_ReflectConstruct(MacroAssembler* masm) {
     __ movq(rdx, args[3]);  // new.target
     __ bind(&done);
     __ DropArgumentsAndPushNewReceiver(
-        rax, masm->RootAsOperand(RootIndex::kUndefinedValue), rcx,
-        MacroAssembler::kCountIsInteger,
-        MacroAssembler::kCountIncludesReceiver);
+        rax, masm->RootAsOperand(RootIndex::kUndefinedValue), rcx);
   }
 
   // ----------- S t a t e -------------
@@ -4383,16 +4369,12 @@ void Builtins::Generate_DoubleToI(MacroAssembler* masm) {
 void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
                                             CallApiCallbackMode mode) {
   // ----------- S t a t e -------------
-  // CallApiCallbackMode::kGeneric mode:
-  //  -- rcx                 : arguments count (not including the receiver)
-  //  -- rbx                 : call handler info
-  //  -- r8                  : holder
   // CallApiCallbackMode::kOptimizedNoProfiling/kOptimized modes:
   //  -- rdx                 : api function address
-  //  -- rcx                 : arguments count (not including the receiver)
-  //  -- rbx                 : call data
-  //  -- rdi                 : holder
   // Both modes:
+  //  -- rcx                 : arguments count (not including the receiver)
+  //  -- rbx                 : FunctionTemplateInfo
+  //  -- rdi                 : holder
   //  -- rsi                 : context
   //  -- rsp[0]              : return address
   //  -- rsp[8]              : argument 0 (receiver)
@@ -4406,8 +4388,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
 
   Register api_function_address = no_reg;
   Register argc = no_reg;
-  Register call_data = no_reg;
-  Register callback = no_reg;
+  Register func_templ = no_reg;
   Register holder = no_reg;
   Register topmost_script_having_context = no_reg;
   Register scratch = rax;
@@ -4419,7 +4400,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
       argc = CallApiCallbackGenericDescriptor::ActualArgumentsCountRegister();
       topmost_script_having_context = CallApiCallbackGenericDescriptor::
           TopmostScriptHavingContextRegister();
-      callback =
+      func_templ =
           CallApiCallbackGenericDescriptor::FunctionTemplateInfoRegister();
       holder = CallApiCallbackGenericDescriptor::HolderRegister();
       break;
@@ -4432,20 +4413,20 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
       api_function_address =
           CallApiCallbackOptimizedDescriptor::ApiFunctionAddressRegister();
       argc = CallApiCallbackOptimizedDescriptor::ActualArgumentsCountRegister();
-      call_data = CallApiCallbackOptimizedDescriptor::CallDataRegister();
+      func_templ =
+          CallApiCallbackOptimizedDescriptor::FunctionTemplateInfoRegister();
       holder = CallApiCallbackOptimizedDescriptor::HolderRegister();
       break;
   }
   DCHECK(!AreAliased(api_function_address, topmost_script_having_context, argc,
-                     holder, call_data, callback, scratch, scratch2,
-                     kScratchRegister));
+                     holder, func_templ, scratch, scratch2, kScratchRegister));
 
   using FCA = FunctionCallbackArguments;
   using ER = ExternalReference;
 
   static_assert(FCA::kArgsLength == 6);
   static_assert(FCA::kNewTargetIndex == 5);
-  static_assert(FCA::kDataIndex == 4);
+  static_assert(FCA::kTargetIndex == 4);
   static_assert(FCA::kReturnValueIndex == 3);
   static_assert(FCA::kUnusedIndex == 2);
   static_assert(FCA::kIsolateIndex == 1);
@@ -4462,7 +4443,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
   //   rsp[2 * kSystemPointerSize]: kIsolate
   //   rsp[3 * kSystemPointerSize]: undefined (padding, unused)
   //   rsp[4 * kSystemPointerSize]: undefined (kReturnValue)
-  //   rsp[5 * kSystemPointerSize]: kData
+  //   rsp[5 * kSystemPointerSize]: kTarget
   //   rsp[6 * kSystemPointerSize]: undefined (kNewTarget)
   // Existing state:
   //   rsp[7 * kSystemPointerSize]:          <= FCA:::values_
@@ -4477,18 +4458,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
   __ PopReturnAddressTo(scratch);
   __ LoadRoot(kScratchRegister, RootIndex::kUndefinedValue);
   __ Push(kScratchRegister);  // kNewTarget
-  switch (mode) {
-    case CallApiCallbackMode::kGeneric:
-      __ PushTaggedField(
-          FieldOperand(callback, FunctionTemplateInfo::kCallbackDataOffset),
-          scratch2);
-      break;
-
-    case CallApiCallbackMode::kOptimizedNoProfiling:
-    case CallApiCallbackMode::kOptimized:
-      __ Push(call_data);
-      break;
-  }
+  __ Push(func_templ);        // kTarget
   __ Push(kScratchRegister);  // kReturnValue
   __ Push(kScratchRegister);  // kUnused
   __ PushAddress(ER::isolate_address(masm->isolate()));
@@ -4527,13 +4497,13 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
     // Target parameter.
     static_assert(ApiCallbackExitFrameConstants::kTargetOffset ==
                   2 * kSystemPointerSize);
-    __ Push(callback);
+    __ Push(func_templ);
 
     __ PushReturnAddressFrom(scratch);
 
     __ LoadExternalPointerField(
         api_function_address,
-        FieldOperand(callback,
+        FieldOperand(func_templ,
                      FunctionTemplateInfo::kMaybeRedirectedCallbackOffset),
         kFunctionTemplateInfoCallbackTag, kScratchRegister);
 
@@ -4563,11 +4533,12 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
   constexpr int kBytesToDropOffset = FCA::kLengthOffset + kSystemPointerSize;
   static_assert(kBytesToDropOffset ==
                 (kApiStackSpace - 1) * kSystemPointerSize);
+  Operand stack_space_operand = ExitFrameStackSlotOperand(kBytesToDropOffset);
   __ leaq(kScratchRegister,
           Operand(argc, times_system_pointer_size,
                   (FCA::kArgsLengthWithReceiver + exit_frame_params_count) *
                       kSystemPointerSize));
-  __ movq(ExitFrameStackSlotOperand(kBytesToDropOffset), kScratchRegister);
+  __ movq(stack_space_operand, kScratchRegister);
 
   __ RecordComment("v8::FunctionCallback's argument.");
   __ leaq(function_callback_info_arg,
@@ -4576,19 +4547,16 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
   DCHECK(!AreAliased(api_function_address, function_callback_info_arg));
 
   ExternalReference thunk_ref = ER::invoke_function_callback(mode);
-  // Pass api function address to thunk wrapper in case profiler or side-effect
-  // checking is enabled.
-  Register thunk_arg = api_function_address;
+  Register no_thunk_arg = no_reg;
 
   Operand return_value_operand = ExitFrameCallerStackSlotOperand(
       FCA::kReturnValueIndex + exit_frame_params_count);
-  static constexpr int kUseExitFrameStackSlotOperand = 0;
-  Operand stack_space_operand = ExitFrameStackSlotOperand(kBytesToDropOffset);
+  static constexpr int kUseStackSpaceOperand = 0;
 
   const bool with_profiling =
       mode != CallApiCallbackMode::kOptimizedNoProfiling;
   CallApiFunctionAndReturn(masm, with_profiling, api_function_address,
-                           thunk_ref, thunk_arg, kUseExitFrameStackSlotOperand,
+                           thunk_ref, no_thunk_arg, kUseStackSpaceOperand,
                            &stack_space_operand, return_value_operand);
 }
 
@@ -4620,7 +4588,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
   static_assert(PCA::kShouldThrowOnErrorIndex == 0);
   static_assert(PCA::kHolderIndex == 1);
   static_assert(PCA::kIsolateIndex == 2);
-  static_assert(PCA::kUnusedIndex == 3);
+  static_assert(PCA::kHolderV2Index == 3);
   static_assert(PCA::kReturnValueIndex == 4);
   static_assert(PCA::kDataIndex == 5);
   static_assert(PCA::kThisIndex == 6);
@@ -4637,7 +4605,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
   //   rsp[2 * kSystemPointerSize]: kShouldThrowOnErrorIndex   <= PCI:args_
   //   rsp[3 * kSystemPointerSize]: kHolderIndex
   //   rsp[4 * kSystemPointerSize]: kIsolateIndex
-  //   rsp[5 * kSystemPointerSize]: kUnusedIndex
+  //   rsp[5 * kSystemPointerSize]: kHolderV2Index
   //   rsp[6 * kSystemPointerSize]: kReturnValueIndex
   //   rsp[7 * kSystemPointerSize]: kDataIndex
   //   rsp[8 * kSystemPointerSize]: kThisIndex / receiver
@@ -4648,7 +4616,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
                      decompr_scratch1);
   __ LoadRoot(kScratchRegister, RootIndex::kUndefinedValue);
   __ Push(kScratchRegister);  // return value
-  __ Push(Smi::zero());       // unused value
+  __ Push(Smi::zero());       // holderV2 value
   __ PushAddress(ExternalReference::isolate_address(masm->isolate()));
   __ Push(holder);
   __ Push(Smi::zero());  // should_throw_on_error -> false
@@ -4669,7 +4637,8 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
   static constexpr int kApiStackSpace = 1;
   static_assert(kApiStackSpace * kSystemPointerSize == sizeof(PCI));
 
-  __ EnterExitFrame(kApiStackSpace, StackFrame::EXIT, api_function_address);
+  __ EnterExitFrame(kApiStackSpace, StackFrame::API_ACCESSOR_EXIT,
+                    api_function_address);
 
   __ RecordComment("Create v8::PropertyCallbackInfo object on the stack.");
   // Initialize v8::PropertyCallbackInfo::args_ field.
@@ -4724,18 +4693,21 @@ void Generate_DeoptimizationEntry(MacroAssembler* masm,
                                   DeoptimizeKind deopt_kind) {
   Isolate* isolate = masm->isolate();
 
-  // Save all double registers, they will later be copied to the deoptimizer's
-  // FrameDescription.
-  static constexpr int kDoubleRegsSize =
-      kDoubleSize * XMMRegister::kNumRegisters;
-  __ AllocateStackSpace(kDoubleRegsSize);
+  // Save all xmm (simd / double) registers, they will later be copied to the
+  // deoptimizer's FrameDescription.
+  static constexpr int kXmmRegsSize = kSimd128Size * XMMRegister::kNumRegisters;
+  __ AllocateStackSpace(kXmmRegsSize);
 
   const RegisterConfiguration* config = RegisterConfiguration::Default();
-  for (int i = 0; i < config->num_allocatable_double_registers(); ++i) {
-    int code = config->GetAllocatableDoubleCode(i);
+  DCHECK_GE(XMMRegister::kNumRegisters,
+            config->num_allocatable_simd128_registers());
+  DCHECK_EQ(config->num_allocatable_simd128_registers(),
+            config->num_allocatable_double_registers());
+  for (int i = 0; i < config->num_allocatable_simd128_registers(); ++i) {
+    int code = config->GetAllocatableSimd128Code(i);
     XMMRegister xmm_reg = XMMRegister::from_code(code);
-    int offset = code * kDoubleSize;
-    __ Movsd(Operand(rsp, offset), xmm_reg);
+    int offset = code * kSimd128Size;
+    __ movdqu(Operand(rsp, offset), xmm_reg);
   }
 
   // Save all general purpose registers, they will later be copied to the
@@ -4746,7 +4718,7 @@ void Generate_DeoptimizationEntry(MacroAssembler* masm,
   }
 
   static constexpr int kSavedRegistersAreaSize =
-      kNumberOfRegisters * kSystemPointerSize + kDoubleRegsSize;
+      kNumberOfRegisters * kSystemPointerSize + kXmmRegsSize;
   static constexpr int kCurrentOffsetToReturnAddress = kSavedRegistersAreaSize;
   static constexpr int kCurrentOffsetToParentSP =
       kCurrentOffsetToReturnAddress + kPCOnStackSize;
@@ -4801,12 +4773,14 @@ void Generate_DeoptimizationEntry(MacroAssembler* masm,
     __ PopQuad(Operand(rbx, offset));
   }
 
-  // Fill in the double input registers.
-  int double_regs_offset = FrameDescription::double_registers_offset();
+  // Fill in the xmm (simd / double) input registers.
+  int simd128_regs_offset = FrameDescription::simd128_registers_offset();
   for (int i = 0; i < XMMRegister::kNumRegisters; i++) {
-    int dst_offset = i * kDoubleSize + double_regs_offset;
-    __ popq(Operand(rbx, dst_offset));
+    int dst_offset = i * kSimd128Size + simd128_regs_offset;
+    __ movdqu(kScratchDoubleReg, Operand(rsp, i * kSimd128Size));
+    __ movdqu(Operand(rbx, dst_offset), kScratchDoubleReg);
   }
+  __ addq(rsp, Immediate(kXmmRegsSize));
 
   // Mark the stack as not iterable for the CPU profiler which won't be able to
   // walk the stack without the return address.
@@ -4885,12 +4859,12 @@ void Generate_DeoptimizationEntry(MacroAssembler* masm,
   __ testq(rax, rax);
   __ j(zero, &push_other_registers);
   __ Push(rax);
-  // JS: Just set the double registers.
-  for (int i = 0; i < config->num_allocatable_double_registers(); ++i) {
-    int code = config->GetAllocatableDoubleCode(i);
+  // JS: Just set the xmm (simd / double) registers.
+  for (int i = 0; i < config->num_allocatable_simd128_registers(); ++i) {
+    int code = config->GetAllocatableSimd128Code(i);
     XMMRegister xmm_reg = XMMRegister::from_code(code);
-    int src_offset = code * kDoubleSize + double_regs_offset;
-    __ Movsd(xmm_reg, Operand(rbx, src_offset));
+    int src_offset = code * kSimd128Size + simd128_regs_offset;
+    __ movdqu(xmm_reg, Operand(rbx, src_offset));
   }
 
   __ bind(&push_other_registers);
@@ -4912,11 +4886,14 @@ void Generate_DeoptimizationEntry(MacroAssembler* masm,
   Label pop_registers;
   __ testq(rax, rax);
   __ j(not_zero, &pop_registers);
-  for (int i = 0; i < config->num_allocatable_double_registers(); ++i) {
-    int code = config->GetAllocatableDoubleCode(i);
-    int src_offset = code * kDoubleSize + double_regs_offset;
-    __ PushQuad(Operand(rbx, src_offset));
+  for (int i = 0; i < config->num_allocatable_simd128_registers(); ++i) {
+    int src_offset = i * kSimd128Size + simd128_regs_offset;
+    __ movdqu(kScratchDoubleReg, Operand(rbx, src_offset));
+    int dst_offset = (i + 1) * -kSimd128Size;
+    __ movdqu(Operand(rsp, dst_offset), kScratchDoubleReg);
   }
+  __ subq(rsp, Immediate(kSimd128Size *
+                         config->num_allocatable_simd128_registers()));
   {
     __ pushq(rax);
     __ PrepareCallCFunction(1);
@@ -4925,13 +4902,16 @@ void Generate_DeoptimizationEntry(MacroAssembler* masm,
     __ CallCFunction(ExternalReference::wasm_delete_deoptimizer(), 1);
     __ popq(rax);
   }
-  // Restore the double registers from the stack.
-  for (int i = config->num_allocatable_double_registers() - 1; i >= 0; --i) {
-    int code = config->GetAllocatableDoubleCode(i);
+  // Restore the xmm registers from the stack.
+  int offset = 0;
+  for (int i = config->num_allocatable_simd128_registers() - 1; i >= 0; --i) {
+    int code = config->GetAllocatableSimd128Code(i);
     XMMRegister xmm_reg = XMMRegister::from_code(code);
-    __ popq(rax);
-    __ Movq(xmm_reg, rax);
+    __ movdqu(xmm_reg, Operand(rsp, offset));
+    offset += kSimd128Size;
   }
+  __ addq(rsp, Immediate(kSimd128Size *
+                         config->num_allocatable_simd128_registers()));
   __ bind(&pop_registers);
 #endif
 

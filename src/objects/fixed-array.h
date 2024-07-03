@@ -5,6 +5,7 @@
 #ifndef V8_OBJECTS_FIXED_ARRAY_H_
 #define V8_OBJECTS_FIXED_ARRAY_H_
 
+#include "src/common/globals.h"
 #include "src/handles/maybe-handles.h"
 #include "src/objects/heap-object.h"
 #include "src/objects/instance-type.h"
@@ -211,7 +212,7 @@ class FixedArray : public TaggedArrayBase<FixedArray, TaggedArrayShape> {
   // Return a grown copy if the index is bigger than the array's length.
   V8_EXPORT_PRIVATE static Handle<FixedArray> SetAndGrow(
       Isolate* isolate, Handle<FixedArray> array, int index,
-      Handle<Object> value);
+      DirectHandle<Object> value);
 
   // Right-trim the array.
   // Invariant: 0 < new_length <= length()
@@ -244,7 +245,7 @@ class FixedArray : public TaggedArrayBase<FixedArray, TaggedArrayShape> {
 
  private:
   inline static Handle<FixedArray> Resize(
-      Isolate* isolate, Handle<FixedArray> xs, int new_capacity,
+      Isolate* isolate, DirectHandle<FixedArray> xs, int new_capacity,
       AllocationType allocation = AllocationType::kYoung,
       WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 };
@@ -734,14 +735,15 @@ class ArrayList : public TaggedArrayBase<ArrayList, ArrayListShape> {
       Isolate* isolate, Handle<ArrayList> array, Tagged<Smi> obj,
       AllocationType allocation = AllocationType::kYoung);
   V8_EXPORT_PRIVATE static Handle<ArrayList> Add(
-      Isolate* isolate, Handle<ArrayList> array, Handle<Object> obj,
+      Isolate* isolate, Handle<ArrayList> array, DirectHandle<Object> obj,
       AllocationType allocation = AllocationType::kYoung);
   V8_EXPORT_PRIVATE static Handle<ArrayList> Add(
-      Isolate* isolate, Handle<ArrayList> array, Handle<Object> obj0,
-      Handle<Object> obj1, AllocationType allocation = AllocationType::kYoung);
+      Isolate* isolate, Handle<ArrayList> array, DirectHandle<Object> obj0,
+      DirectHandle<Object> obj1,
+      AllocationType allocation = AllocationType::kYoung);
 
   V8_EXPORT_PRIVATE static Handle<FixedArray> ToFixedArray(
-      Isolate* isolate, Handle<ArrayList> array,
+      Isolate* isolate, DirectHandle<ArrayList> array,
       AllocationType allocation = AllocationType::kYoung);
 
   // Right-trim the array.
@@ -847,7 +849,9 @@ class TrustedByteArray
   using Shape = TrustedByteArrayShape;
 
   template <class IsolateT>
-  static inline Handle<TrustedByteArray> New(IsolateT* isolate, int capacity);
+  static inline Handle<TrustedByteArray> New(
+      IsolateT* isolate, int capacity,
+      AllocationType allocation_type = AllocationType::kTrusted);
 
   // Given the full object size in bytes, return the length that should be
   // passed to New s.t. an object of the same size is created.

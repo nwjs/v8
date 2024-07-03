@@ -652,9 +652,19 @@ class FastApiCallReducerAssembler : public JSCallReducerAssembler {
         static_cast<int>(c_candidate_functions_[0].signature->ArgumentCount());
     CHECK_GE(c_argument_count, kReceiver);
 
+    const int slow_arg_count =
+        // Arguments for CallApiCallbackOptimizedXXX builtin including
+        // context, see CallApiCallbackOptimizedDescriptor.
+        kSlowBuiltinParams +
+        // JS arguments.
+        kReceiver + arity_;
+
+    const int value_input_count =
+        FastApiCallNode::ArityForArgc(c_argument_count, slow_arg_count);
+
+    base::SmallVector<Node*, kInlineSize> inputs(value_input_count +
+                                                 kEffectAndControl);
     int cursor = 0;
-    base::SmallVector<Node*, kInlineSize> inputs(c_argument_count + arity_ +
-                                                 kExtraInputsCount);
     inputs[cursor++] = n.receiver();
 
     // TODO(turbofan): Consider refactoring CFunctionInfo to distinguish
@@ -674,15 +684,19 @@ class FastApiCallReducerAssembler : public JSCallReducerAssembler {
     // separate inputs, so that SimplifiedLowering can provide the best
     // possible UseInfos for each of them. The inputs to FastApiCall
     // look like:
-    // [fast callee, receiver, ... C arguments,
-    // call code, external constant for function, argc, call handler info data,
-    // holder, receiver, ... JS arguments, context, new frame state]
+    // [receiver, ... C arguments, callback data,
+    //  slow call code, external constant for function, argc,
+    //  FunctionTemplateInfo, holder, receiver, ... JS arguments,
+    //  context, new frame state].
     bool no_profiling =
         broker()->dependencies()->DependOnNoProfilingProtector();
     Callable call_api_callback = Builtins::CallableFor(
         isolate(), no_profiling ? Builtin::kCallApiCallbackOptimizedNoProfiling
                                 : Builtin::kCallApiCallbackOptimized);
     CallInterfaceDescriptor cid = call_api_callback.descriptor();
+    DCHECK_EQ(cid.GetParameterCount() + (cid.HasContextParameter() ? 1 : 0),
+              kSlowBuiltinParams);
+
     CallDescriptor* call_descriptor =
         Linkage::GetStubCallDescriptor(graph()->zone(), cid, arity_ + kReceiver,
                                        CallDescriptor::kNeedsFrameState);
@@ -698,11 +712,15 @@ class FastApiCallReducerAssembler : public JSCallReducerAssembler {
         jsgraph(), shared_, target_, ContextInput(), receiver_,
         FrameStateInput());
 
+    // Callback data value for fast Api calls. Unlike slow Api calls, the fast
+    // variant passes callback data directly.
+    inputs[cursor++] =
+        Constant(function_template_info_.callback_data(broker()).value());
+
     inputs[cursor++] = HeapConstant(call_api_callback.code());
     inputs[cursor++] = ExternalConstant(function_reference);
     inputs[cursor++] = NumberConstant(arity_);
-    inputs[cursor++] =
-        Constant(function_template_info_.callback_data(broker()).value());
+    inputs[cursor++] = HeapConstant(function_template_info_.object());
     inputs[cursor++] = holder_;
     inputs[cursor++] = receiver_;
     for (int i = 0; i < arity_; ++i) {
@@ -710,24 +728,25 @@ class FastApiCallReducerAssembler : public JSCallReducerAssembler {
     }
     inputs[cursor++] = ContextInput();
     inputs[cursor++] = continuation_frame_state;
+
     inputs[cursor++] = effect();
     inputs[cursor++] = control();
 
-    DCHECK_EQ(cursor, c_argument_count + arity_ + kExtraInputsCount);
+    DCHECK_EQ(cursor, value_input_count + kEffectAndControl);
 
     return FastApiCall(call_descriptor, inputs.begin(), inputs.size());
   }
 
  private:
-  static constexpr int kSlowTarget = 1;
   static constexpr int kEffectAndControl = 2;
-  static constexpr int kContextAndFrameState = 2;
-  static constexpr int kCallCodeDataAndArgc = 3;
-  static constexpr int kHolder = 1, kReceiver = 1;
-  static constexpr int kExtraInputsCount =
-      kSlowTarget + kEffectAndControl + kContextAndFrameState +
-      kCallCodeDataAndArgc + kHolder + kReceiver;
-  static constexpr int kInlineSize = 12;
+
+  // Api function address, argc, FunctionTemplateInfo, holder, context.
+  // See CallApiCallbackOptimizedDescriptor.
+  static constexpr int kSlowBuiltinParams = 5;
+  static constexpr int kReceiver = 1;
+
+  // Enough for creating FastApiCall node with two JS arguments.
+  static constexpr int kInlineSize = 16;
 
   TNode<Object> FastApiCall(CallDescriptor* descriptor, Node** inputs,
                             size_t inputs_size) {
@@ -2307,7 +2326,7 @@ FrameState CreateConstructInvokeStubFrameState(
     Node* context, CommonOperatorBuilder* common, Graph* graph) {
   const FrameStateFunctionInfo* state_info =
       common->CreateFrameStateFunctionInfo(FrameStateType::kConstructInvokeStub,
-                                           1, 0, shared.object());
+                                           1, 0, 0, shared.object());
 
   const Operator* op = common->FrameState(
       BytecodeOffset::None(), OutputFrameStateCombine::Ignore(), state_info);
@@ -4093,7 +4112,10 @@ Reduction JSCallReducer::ReduceCallApiFunction(Node* node,
   // JSNativeContextSpecialization::InlineApiCall method a bit.
   compiler::OptionalObjectRef maybe_callback_data =
       function_template_info.callback_data(broker());
+  // Check if the function has an associated C++ code to execute.
   if (!maybe_callback_data.has_value()) {
+    // TODO(ishell): consider generating "return undefined" for empty function
+    // instead of failing.
     TRACE_BROKER_MISSING(broker(), "call code for function template info "
                                        << function_template_info);
     return NoChange();
@@ -4138,7 +4160,7 @@ Reduction JSCallReducer::ReduceCallApiFunction(Node* node,
   node->InsertInput(graph()->zone(), 2, jsgraph()->ConstantNoHole(argc));
   node->InsertInput(
       graph()->zone(), 3,
-      jsgraph()->ConstantNoHole(maybe_callback_data.value(), broker()));
+      jsgraph()->HeapConstantNoHole(function_template_info.object()));
   node->InsertInput(graph()->zone(), 4, holder);
   node->ReplaceInput(5, receiver);  // Update receiver input.
   // 6 + argc is context input.
@@ -7617,7 +7639,7 @@ Reduction JSCallReducer::ReduceArrayBufferViewByteLengthAccessor(
     }
   }
 
-  if (!v8_flags.harmony_rab_gsab || !maybe_rab_gsab) {
+  if (!maybe_rab_gsab) {
     // We do not perform any change depending on this inference.
     Reduction unused_reduction = inference.NoChange();
     USE(unused_reduction);
@@ -7626,8 +7648,6 @@ Reduction JSCallReducer::ReduceArrayBufferViewByteLengthAccessor(
         node, JS_TYPED_ARRAY_TYPE,
         AccessBuilder::ForJSArrayBufferViewByteLength(),
         Builtin::kTypedArrayPrototypeByteLength);
-  } else if (!v8_flags.turbo_rab_gsab) {
-    return inference.NoChange();
   }
 
   const CallParameters& p = CallParametersOf(node->op());
@@ -7678,7 +7698,7 @@ Reduction JSCallReducer::ReduceTypedArrayPrototypeLength(Node* node) {
     if (IsRabGsabTypedArrayElementsKind(kind)) maybe_rab_gsab = true;
   }
 
-  if (!v8_flags.harmony_rab_gsab || !maybe_rab_gsab) {
+  if (!maybe_rab_gsab) {
     // We do not perform any change depending on this inference.
     Reduction unused_reduction = inference.NoChange();
     USE(unused_reduction);
@@ -7686,8 +7706,6 @@ Reduction JSCallReducer::ReduceTypedArrayPrototypeLength(Node* node) {
     return ReduceArrayBufferViewAccessor(node, JS_TYPED_ARRAY_TYPE,
                                          AccessBuilder::ForJSTypedArrayLength(),
                                          Builtin::kTypedArrayPrototypeLength);
-  } else if (!v8_flags.turbo_rab_gsab) {
-    return inference.NoChange();
   }
 
   if (!inference.RelyOnMapsViaStability(dependencies())) {

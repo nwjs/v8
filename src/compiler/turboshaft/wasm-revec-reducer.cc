@@ -18,6 +18,28 @@
 
 namespace v8::internal::compiler::turboshaft {
 
+// Returns true if op in node_group have same kind.
+bool IsSameOpAndKind(const Operation& op0, const Operation& op1) {
+#define CASE(operation)                                \
+  case Opcode::k##operation: {                         \
+    using Op = operation##Op;                          \
+    return op0.Cast<Op>().kind == op1.Cast<Op>().kind; \
+  }
+  if (op0.opcode != op1.opcode) {
+    return false;
+  }
+  switch (op0.opcode) {
+    CASE(Simd128Unary)
+    CASE(Simd128Binop)
+    CASE(Simd128Shift)
+    CASE(Simd128Ternary)
+    CASE(Simd128Splat)
+    default:
+      return true;
+  }
+#undef CASE
+}
+
 std::string GetSimdOpcodeName(Operation const& op) {
   std::ostringstream oss;
   if (op.Is<Simd128BinopOp>() || op.Is<Simd128UnaryOp>() ||
@@ -41,6 +63,26 @@ class StoreLoadInfo {
   StoreLoadInfo(const Graph* graph, const Op* op)
       : op_(op), offset_(op->offset) {
     base_ = &graph->Get(op->base());
+    if constexpr (std::is_same_v<Op, Simd128LoadTransformOp>) {
+      DCHECK_EQ(offset_, 0);
+      const WordBinopOp* add_op = base_->TryCast<WordBinopOp>();
+      if (!add_op || add_op->kind != WordBinopOp::Kind::kAdd ||
+          add_op->rep != WordRepresentation::Word64()) {
+        SetInvalid();
+        return;
+      }
+      base_ = &graph->Get(add_op->left());
+      const ConstantOp* const_op =
+          graph->Get(add_op->right()).TryCast<ConstantOp>();
+      if (!const_op) {
+        SetInvalid();
+        return;
+      }
+      // const_op->word64() won't be greater than uint32::max under 32-bits wasm
+      // memory.
+      DCHECK_EQ(const_op->word64(), const_op->word32());
+      offset_ = const_op->word32();
+    }
     const ChangeOp* change = nullptr;
     if constexpr (std::is_same_v<Op, Simd128LoadTransformOp>) {
       change = graph->Get(op->index()).template TryCast<ChangeOp>();
@@ -185,8 +227,8 @@ void SLPTree::Print(const char* info) {
 }
 
 PackNode* SLPTree::NewPackNode(const NodeGroup& node_group) {
-  Operation& op = graph_.Get(node_group[0]);
-  TRACE("PackNode %s(#%d, #%d)\n", GetSimdOpcodeName(op).c_str(),
+  TRACE("PackNode %s(#%d, #%d)\n",
+        GetSimdOpcodeName(graph_.Get(node_group[0])).c_str(),
         node_group[0].id(), node_group[1].id());
   PackNode* pnode = phase_zone_->New<PackNode>(phase_zone_, node_group);
   for (OpIndex node : node_group) {
@@ -198,6 +240,9 @@ PackNode* SLPTree::NewPackNode(const NodeGroup& node_group) {
 PackNode* SLPTree::NewForcePackNode(const NodeGroup& node_group,
                                     PackNode::ForcePackType type,
                                     const Graph& graph) {
+  TRACE("ForcePackNode %s(#%d, #%d)\n",
+        GetSimdOpcodeName(graph_.Get(node_group[0])).c_str(),
+        node_group[0].id(), node_group[1].id());
   PackNode* pnode = NewPackNode(node_group);
   pnode->set_force_pack_type(type);
   if (type == PackNode::ForcePackType::kGeneral) {
@@ -227,6 +272,33 @@ PackNode* SLPTree::NewForcePackNode(const NodeGroup& node_group,
       idx++;
     }
     pnode->force_pack_right_inputs().insert(idx_vec.begin(), idx_vec.end());
+  }
+  return pnode;
+}
+
+PackNode* SLPTree::NewCommutativePackNodeAndRecurs(const NodeGroup& node_group,
+                                                   unsigned depth) {
+  PackNode* pnode = NewPackNode(node_group);
+
+  const Simd128BinopOp& op0 = graph_.Get(node_group[0]).Cast<Simd128BinopOp>();
+  const Simd128BinopOp& op1 = graph_.Get(node_group[1]).Cast<Simd128BinopOp>();
+
+  bool same_kind =
+      (op0.left() == op1.left()) ||
+      IsSameOpAndKind(graph_.Get(op0.left()), graph_.Get(op1.left()));
+  bool need_swap = Simd128BinopOp::IsCommutative(op0.kind) && !same_kind;
+  if (need_swap) {
+    TRACE("Change the order of binop operands\n");
+  }
+  for (int i = 0; i < 2; ++i) {
+    // Swap the left and right input if necessary
+    unsigned node1_input_index = need_swap ? 1 - i : i;
+    NodeGroup operands(graph_.Get(node_group[0]).input(i),
+                       graph_.Get(node_group[1]).input(node1_input_index));
+
+    if (!BuildTreeRec(operands, depth + 1)) {
+      return nullptr;
+    }
   }
   return pnode;
 }
@@ -422,25 +494,6 @@ std::pair<bool, bool> IsPackableSignExtensionOp(Operation& op0,
 #undef BINOP_CASE
 }
 
-// Returns true if op in node_group have same kind.
-bool IsSameOpAndKind(const Operation& op0, const Operation& op1) {
-#define CASE(operation)                                           \
-  case Opcode::k##operation: {                                    \
-    using Op = opcode_to_operation_map<Opcode::k##operation>::Op; \
-    return op0.Cast<Op>().kind == op1.Cast<Op>().kind;            \
-  }
-  switch (op0.opcode) {
-    CASE(Simd128Unary)
-    CASE(Simd128Binop)
-    CASE(Simd128Shift)
-    CASE(Simd128Ternary)
-    CASE(Simd128Splat)
-    default:
-      return true;
-  }
-#undef CASE
-}
-
 bool SLPTree::CanBePacked(const NodeGroup& node_group) {
   OpIndex node0 = node_group[0];
   OpIndex node1 = node_group[1];
@@ -572,33 +625,47 @@ PackNode* SLPTree::BuildTreeRec(const NodeGroup& node_group,
     }
 
     case Opcode::kSimd128LoadTransform: {
-      const Simd128LoadTransformOp& transform_op =
+      const Simd128LoadTransformOp& transform_op0 =
           op0.Cast<Simd128LoadTransformOp>();
-      if (IsLoadSplat(transform_op)) {
+      const Simd128LoadTransformOp& transform_op1 =
+          op1.Cast<Simd128LoadTransformOp>();
+      StoreLoadInfo<Simd128LoadTransformOp> info0(&graph_, &transform_op0);
+      StoreLoadInfo<Simd128LoadTransformOp> info1(&graph_, &transform_op1);
+      auto stride = info1 - info0;
+      if (IsLoadSplat(transform_op0)) {
         TRACE("Simd128LoadTransform: LoadSplat\n");
-        if (!IsSplat(node_group)) {
-          return nullptr;
+        if (IsSplat(node_group) ||
+            (stride.has_value() && stride.value() == 0)) {
+          return NewPackNode(node_group);
         }
-      } else if (IsLoadExtend(transform_op)) {
+        return NewForcePackNode(node_group, PackNode::ForcePackType::kGeneral,
+                                graph_);
+      } else if (IsLoadExtend(transform_op0)) {
         TRACE("Simd128LoadTransform: LoadExtend\n");
-        if (!LoadStrideEqualTo<Simd128LoadTransformOp,
-                               StoreLoadInfo<Simd128LoadTransformOp>>(
-                graph_, node_group, kSimd128Size / 2)) {
-          TRACE("Wrong Access stride\n");
-          return nullptr;
+        if (stride.has_value()) {
+          const int value = stride.value();
+          if (value == kSimd128Size / 2) {
+            return NewPackNode(node_group);
+          } else if (value == 0) {
+            return NewForcePackNode(node_group, PackNode::ForcePackType::kSplat,
+                                    graph_);
+          }
         }
+        return NewForcePackNode(node_group, PackNode::ForcePackType::kGeneral,
+                                graph_);
       } else {
         TRACE("Load Transfrom k64Zero/k32Zero!\n");
-        DCHECK(transform_op.transform_kind ==
+        DCHECK(transform_op0.transform_kind ==
                    Simd128LoadTransformOp::TransformKind::k32Zero ||
-               transform_op.transform_kind ==
+               transform_op0.transform_kind ==
                    Simd128LoadTransformOp::TransformKind::k64Zero);
-        // k64Zero/k32Zero is not supported
-        TRACE("Simd128LoadTransform: unsupported  k64Zero/k32Zero\n");
-        return nullptr;
+        if (stride.has_value() && stride.value() == 0) {
+          return NewForcePackNode(node_group, PackNode::ForcePackType::kSplat,
+                                  graph_);
+        }
+        return NewForcePackNode(node_group, PackNode::ForcePackType::kGeneral,
+                                graph_);
       }
-      PackNode* p = NewPackNode(node_group);
-      return p;
     }
 
     case Opcode::kLoad: {
@@ -620,12 +687,10 @@ PackNode* SLPTree::BuildTreeRec(const NodeGroup& node_group,
           PackNode* p = NewPackNode(node_group);
           return p;
         } else if (value == 0) {
-          TRACE("Force pack splat load");
           return NewForcePackNode(node_group, PackNode::ForcePackType::kSplat,
                                   graph_);
         }
       }
-      TRACE("Force pack incontinuous load\n");
       return NewForcePackNode(node_group, PackNode::ForcePackType::kGeneral,
                               graph_);
     }
@@ -681,8 +746,8 @@ PackNode* SLPTree::BuildTreeRec(const NodeGroup& node_group,
         }
         SIMD256_BINOP_SIMPLE_OP(BINOP_CASE) {
           TRACE("Added a vector of Binop\n");
-          PackNode* pnode = NewPackNodeAndRecurs(node_group, 0, value_in_count,
-                                                 recursion_depth);
+          PackNode* pnode =
+              NewCommutativePackNodeAndRecurs(node_group, recursion_depth);
           return pnode;
         }
         default: {

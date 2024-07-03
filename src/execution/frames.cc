@@ -170,7 +170,7 @@ StackFrame::Type GetStateForFastCCallCallerFP(Isolate* isolate, Address fp,
   state->fp = fp;
   state->sp = kNullAddress;
   state->pc_address = reinterpret_cast<Address*>(pc_address);
-  state->callee_pc_address = nullptr;
+  state->callee_pc = kNullAddress;
   state->constant_pool_address = nullptr;
 #if V8_ENABLE_WEBASSEMBLY
   if (wasm::GetWasmCodeManager()->LookupCode(isolate, pc)) {
@@ -243,6 +243,21 @@ void StackFrameIteratorBase::SetNewFrame(StackFrame::Type type) {
 
 void TypedFrameWithJSLinkage::Iterate(RootVisitor* v) const {
   IterateExpressions(v);
+  IteratePc(v, constant_pool_address(), GcSafeLookupCode());
+}
+
+// -------------------------------------------------------------------------
+
+void ConstructFrame::Iterate(RootVisitor* v) const {
+  // The frame contains the actual argument count (intptr) that should not
+  // be visited.
+  FullObjectSlot argc(
+      &Memory<Address>(fp() + ConstructFrameConstants::kLengthOffset));
+  const int last_object_offset = ConstructFrameConstants::kLastObjectOffset;
+  FullObjectSlot base(&Memory<Address>(sp()));
+  FullObjectSlot limit(&Memory<Address>(fp() + last_object_offset) + 1);
+  v->VisitRootPointers(Root::kStackRoots, nullptr, base, argc);
+  v->VisitRootPointers(Root::kStackRoots, nullptr, argc + 1, limit);
   IteratePc(v, constant_pool_address(), GcSafeLookupCode());
 }
 
@@ -409,6 +424,7 @@ StackFrameIteratorForProfiler::StackFrameIteratorForProfiler(
   static constexpr StackFrame::Type kTypeForAdvance = StackFrame::TURBOFAN;
 
   StackFrame::State state;
+  state.is_profiler_entry_frame = true;
   StackFrame::Type type;
   ThreadLocalTop* const top = isolate->thread_local_top();
   bool advance_frame = true;
@@ -612,7 +628,7 @@ void StackFrameIteratorForProfiler::Advance() {
     }
 #endif  // V8_ENABLE_WEBASSEMBLY
     if (frame_->is_exit() || frame_->is_builtin_exit() ||
-        frame_->is_api_callback_exit()) {
+        frame_->is_api_accessor_exit() || frame_->is_api_callback_exit()) {
       // Some of the EXIT frames may have ExternalCallbackScope allocated on
       // top of them. In that case the scope corresponds to the first EXIT
       // frame beneath it. There may be other EXIT frames on top of the
@@ -734,6 +750,7 @@ StackFrame::Type ComputeBuiltinFrameType(Tagged<GcSafeCode> code) {
 StackFrame::Type SafeStackFrameType(StackFrame::Type candidate) {
   DCHECK_LE(static_cast<uintptr_t>(candidate), StackFrame::NUMBER_OF_TYPES);
   switch (candidate) {
+    case StackFrame::API_ACCESSOR_EXIT:
     case StackFrame::API_CALLBACK_EXIT:
     case StackFrame::BUILTIN_CONTINUATION:
     case StackFrame::BUILTIN_EXIT:
@@ -950,7 +967,7 @@ void NativeFrame::ComputeCallerState(State* state) const {
   state->fp = Memory<Address>(fp() + CommonFrameConstants::kCallerFPOffset);
   state->pc_address = ResolveReturnAddressLocation(
       reinterpret_cast<Address*>(fp() + CommonFrameConstants::kCallerPCOffset));
-  state->callee_pc_address = nullptr;
+  state->callee_pc = kNullAddress;
   state->constant_pool_address = nullptr;
 }
 
@@ -995,7 +1012,7 @@ void ExitFrame::ComputeCallerState(State* state) const {
   state->fp = Memory<Address>(fp() + ExitFrameConstants::kCallerFPOffset);
   state->pc_address = ResolveReturnAddressLocation(
       reinterpret_cast<Address*>(fp() + ExitFrameConstants::kCallerPCOffset));
-  state->callee_pc_address = nullptr;
+  state->callee_pc = kNullAddress;
   if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
     state->constant_pool_address = reinterpret_cast<Address*>(
         fp() + ExitFrameConstants::kConstantPoolOffset);
@@ -1037,6 +1054,7 @@ StackFrame::Type ExitFrame::ComputeFrameType(Address fp) {
   StackFrame::Type frame_type = static_cast<StackFrame::Type>(marker_int >> 1);
   switch (frame_type) {
     case BUILTIN_EXIT:
+    case API_ACCESSOR_EXIT:
     case API_CALLBACK_EXIT:
 #if V8_ENABLE_WEBASSEMBLY
     case WASM_EXIT:
@@ -1070,7 +1088,7 @@ void ExitFrame::FillState(Address fp, Address sp, State* state) {
   state->fp = fp;
   state->pc_address = ResolveReturnAddressLocation(
       reinterpret_cast<Address*>(sp - 1 * kPCOnStackSize));
-  state->callee_pc_address = nullptr;
+  state->callee_pc = kNullAddress;
   // The constant pool recorded in the exit frame is not associated
   // with the pc in this state (the return address into a C entry
   // stub).  ComputeCallerState will retrieve the constant pool
@@ -1080,7 +1098,7 @@ void ExitFrame::FillState(Address fp, Address sp, State* state) {
 
 void BuiltinExitFrame::Summarize(std::vector<FrameSummary>* frames) const {
   DCHECK(frames->empty());
-  Handle<FixedArray> parameters = GetParameters();
+  DirectHandle<FixedArray> parameters = GetParameters();
   DisallowGarbageCollection no_gc;
   Tagged<Code> code = LookupCode();
   int code_offset = code->GetOffsetFromInstructionStart(isolate(), pc());
@@ -1210,8 +1228,8 @@ bool ApiCallbackExitFrame::IsConstructor() const {
 
 void ApiCallbackExitFrame::Summarize(std::vector<FrameSummary>* frames) const {
   DCHECK(frames->empty());
-  Handle<FixedArray> parameters = GetParameters();
-  Handle<JSFunction> function = GetFunction();
+  DirectHandle<FixedArray> parameters = GetParameters();
+  DirectHandle<JSFunction> function = GetFunction();
   DisallowGarbageCollection no_gc;
   Tagged<Code> code = LookupCode();
   int code_offset = code->GetOffsetFromInstructionStart(isolate(), pc());
@@ -1219,6 +1237,23 @@ void ApiCallbackExitFrame::Summarize(std::vector<FrameSummary>* frames) const {
       isolate(), receiver(), *function, AbstractCode::cast(code), code_offset,
       IsConstructor(), *parameters);
   frames->push_back(summary);
+}
+
+// Ensure layout of v8::PropertyCallbackInfo is in sync with
+// ApiAccessorExitFrameConstants.
+static_assert(
+    ApiAccessorExitFrameConstants::kPropertyCallbackInfoReceiverIndex ==
+    PropertyCallbackArguments::kThisIndex);
+static_assert(ApiAccessorExitFrameConstants::kPropertyCallbackInfoHolderIndex ==
+              PropertyCallbackArguments::kHolderIndex);
+static_assert(ApiAccessorExitFrameConstants::kPropertyCallbackInfoArgsLength ==
+              PropertyCallbackArguments::kArgsLength);
+
+void ApiAccessorExitFrame::Summarize(std::vector<FrameSummary>* frames) const {
+  // This frame is not supposed to appear in exception stack traces.
+  DCHECK(IsName(property_name()));
+  DCHECK(IsJSReceiver(receiver()));
+  DCHECK(IsJSReceiver(holder()));
 }
 
 namespace {
@@ -1273,7 +1308,7 @@ void BuiltinExitFrame::Print(StringStream* accumulator, PrintMode mode,
 
 void ApiCallbackExitFrame::Print(StringStream* accumulator, PrintMode mode,
                                  int index) const {
-  Handle<JSFunction> function = GetFunction();
+  DirectHandle<JSFunction> function = GetFunction();
   DisallowGarbageCollection no_gc;
   Tagged<Object> receiver = this->receiver();
 
@@ -1292,6 +1327,19 @@ void ApiCallbackExitFrame::Print(StringStream* accumulator, PrintMode mode,
   }
 
   accumulator->Add(")\n\n");
+}
+
+void ApiAccessorExitFrame::Print(StringStream* accumulator, PrintMode mode,
+                                 int index) const {
+  DisallowGarbageCollection no_gc;
+
+  PrintIndex(accumulator, mode, index);
+  accumulator->Add("api accessor exit frame: ");
+
+  Tagged<Name> name = property_name();
+  Tagged<Object> receiver = this->receiver();
+  Tagged<Object> holder = this->holder();
+  accumulator->Add("(this=%o, holder=%o, name=%o)\n", receiver, holder, name);
 }
 
 Address CommonFrame::GetExpressionAddress(int n) const {
@@ -1336,7 +1384,7 @@ void CommonFrame::ComputeCallerState(State* state) const {
   state->pc_address = ResolveReturnAddressLocation(reinterpret_cast<Address*>(
       fp() + StandardFrameConstants::kCallerPCOffset));
   state->callee_fp = fp();
-  state->callee_pc_address = pc_address();
+  state->callee_pc = maybe_unauthenticated_pc();
   state->constant_pool_address = reinterpret_cast<Address*>(
       fp() + StandardFrameConstants::kConstantPoolOffset);
 }
@@ -1925,7 +1973,9 @@ Handle<JSFunction> MaglevFrame::GetInnermostFunction() const {
 
 BytecodeOffset MaglevFrame::GetBytecodeOffsetForOSR() const {
   int deopt_index = SafepointEntry::kNoDeoptIndex;
-  const Tagged<DeoptimizationData> data = GetDeoptimizationData(&deopt_index);
+  Tagged<Code> code = LookupCode();
+  const Tagged<DeoptimizationData> data =
+      GetDeoptimizationData(code, &deopt_index);
   if (deopt_index == SafepointEntry::kNoDeoptIndex) {
     CHECK(data.is_null());
     FATAL("Missing deoptimization information for OptimizedFrame::Summarize.");
@@ -2171,9 +2221,9 @@ void CommonFrameWithJSLinkage::Summarize(
   DCHECK(functions->empty());
   Tagged<GcSafeCode> code = GcSafeLookupCode();
   int offset = code->GetOffsetFromInstructionStart(isolate(), pc());
-  Handle<AbstractCode> abstract_code(
+  DirectHandle<AbstractCode> abstract_code(
       AbstractCode::cast(code->UnsafeCastToCode()), isolate());
-  Handle<FixedArray> params = GetParameters();
+  DirectHandle<FixedArray> params = GetParameters();
   FrameSummary::JavaScriptFrameSummary summary(
       isolate(), receiver(), function(), *abstract_code, offset,
       IsConstructor(), *params);
@@ -2455,7 +2505,7 @@ Handle<Context> FrameSummary::JavaScriptFrameSummary::native_context() const {
 Handle<StackFrameInfo>
 FrameSummary::JavaScriptFrameSummary::CreateStackFrameInfo() const {
   Handle<SharedFunctionInfo> shared(function_->shared(), isolate());
-  Handle<Script> script(Script::cast(shared->script()), isolate());
+  DirectHandle<Script> script(Script::cast(shared->script()), isolate());
   Handle<String> function_name = JSFunction::GetDebugName(function_);
   if (function_name->length() == 0 &&
       script->compilation_type() == Script::CompilationType::kEval) {
@@ -2480,17 +2530,18 @@ FrameSummary::JavaScriptFrameSummary::CreateStackFrameInfo() const {
 
 #if V8_ENABLE_WEBASSEMBLY
 FrameSummary::WasmFrameSummary::WasmFrameSummary(
-    Isolate* isolate, Handle<WasmInstanceObject> instance, wasm::WasmCode* code,
-    int byte_offset, int function_index, bool at_to_number_conversion)
+    Isolate* isolate, Handle<WasmTrustedInstanceData> instance_data,
+    wasm::WasmCode* code, int byte_offset, int function_index,
+    bool at_to_number_conversion)
     : FrameSummaryBase(isolate, WASM),
-      wasm_instance_(instance),
+      instance_data_(instance_data),
       at_to_number_conversion_(at_to_number_conversion),
       code_(code),
       byte_offset_(byte_offset),
       function_index_(function_index) {}
 
 Handle<Object> FrameSummary::WasmFrameSummary::receiver() const {
-  return wasm_instance_->GetIsolate()->global_proxy();
+  return isolate()->global_proxy();
 }
 
 uint32_t FrameSummary::WasmFrameSummary::function_index() const {
@@ -2498,20 +2549,18 @@ uint32_t FrameSummary::WasmFrameSummary::function_index() const {
 }
 
 int FrameSummary::WasmFrameSummary::SourcePosition() const {
-  const wasm::WasmModule* module = wasm_instance()->module();
+  const wasm::WasmModule* module = wasm_trusted_instance_data()->module();
   return GetSourcePosition(module, function_index(), code_offset(),
                            at_to_number_conversion());
 }
 
 Handle<Script> FrameSummary::WasmFrameSummary::script() const {
-  return handle(wasm_instance()->module_object()->script(),
-                wasm_instance()->GetIsolate());
+  return handle(wasm_instance()->module_object()->script(), isolate());
 }
 
-Handle<WasmTrustedInstanceData>
-FrameSummary::WasmFrameSummary::wasm_trusted_instance_data() const {
-  Isolate* isolate = wasm_instance_->GetIsolate();
-  return handle(wasm_instance_->trusted_data(isolate), isolate);
+Handle<WasmInstanceObject> FrameSummary::WasmFrameSummary::wasm_instance()
+    const {
+  return handle(instance_data_->instance_object(), isolate());
 }
 
 Handle<Context> FrameSummary::WasmFrameSummary::native_context() const {
@@ -2520,27 +2569,27 @@ Handle<Context> FrameSummary::WasmFrameSummary::native_context() const {
 
 Handle<StackFrameInfo> FrameSummary::WasmFrameSummary::CreateStackFrameInfo()
     const {
-  Handle<String> function_name =
-      GetWasmFunctionDebugName(isolate(), wasm_instance(), function_index());
+  DirectHandle<String> function_name =
+      GetWasmFunctionDebugName(isolate(), instance_data_, function_index());
   return isolate()->factory()->NewStackFrameInfo(script(), SourcePosition(),
                                                  function_name, false);
 }
 
 FrameSummary::WasmInlinedFrameSummary::WasmInlinedFrameSummary(
-    Isolate* isolate, Handle<WasmInstanceObject> instance, int function_index,
-    int op_wire_bytes_offset)
+    Isolate* isolate, Handle<WasmTrustedInstanceData> instance_data,
+    int function_index, int op_wire_bytes_offset)
     : FrameSummaryBase(isolate, WASM_INLINED),
-      wasm_instance_(instance),
+      instance_data_(instance_data),
       function_index_(function_index),
       op_wire_bytes_offset_(op_wire_bytes_offset) {}
 
-Handle<WasmTrustedInstanceData>
-FrameSummary::WasmInlinedFrameSummary::wasm_trusted_instance_data() const {
-  return handle(wasm_instance_->trusted_data(isolate()), isolate());
+Handle<WasmInstanceObject>
+FrameSummary::WasmInlinedFrameSummary::wasm_instance() const {
+  return handle(instance_data_->instance_object(), isolate());
 }
 
 Handle<Object> FrameSummary::WasmInlinedFrameSummary::receiver() const {
-  return wasm_instance_->GetIsolate()->global_proxy();
+  return isolate()->global_proxy();
 }
 
 uint32_t FrameSummary::WasmInlinedFrameSummary::function_index() const {
@@ -2548,7 +2597,7 @@ uint32_t FrameSummary::WasmInlinedFrameSummary::function_index() const {
 }
 
 int FrameSummary::WasmInlinedFrameSummary::SourcePosition() const {
-  const wasm::WasmModule* module = wasm_instance()->module();
+  const wasm::WasmModule* module = instance_data_->module();
   return GetSourcePosition(module, function_index(), code_offset(), false);
 }
 
@@ -2562,8 +2611,8 @@ Handle<Context> FrameSummary::WasmInlinedFrameSummary::native_context() const {
 
 Handle<StackFrameInfo>
 FrameSummary::WasmInlinedFrameSummary::CreateStackFrameInfo() const {
-  Handle<String> function_name =
-      GetWasmFunctionDebugName(isolate(), wasm_instance(), function_index());
+  DirectHandle<String> function_name =
+      GetWasmFunctionDebugName(isolate(), instance_data_, function_index());
   return isolate()->factory()->NewStackFrameInfo(script(), SourcePosition(),
                                                  function_name, false);
 }
@@ -2586,8 +2635,9 @@ Handle<Context> FrameSummary::BuiltinFrameSummary::native_context() const {
 
 Handle<StackFrameInfo> FrameSummary::BuiltinFrameSummary::CreateStackFrameInfo()
     const {
-  Handle<String> name_str = isolate()->factory()->NewStringFromAsciiChecked(
-      Builtins::NameForStackTrace(isolate(), builtin_));
+  DirectHandle<String> name_str =
+      isolate()->factory()->NewStringFromAsciiChecked(
+          Builtins::NameForStackTrace(isolate(), builtin_));
   return isolate()->factory()->NewStackFrameInfo(
       Handle<HeapObject>::cast(script()), SourcePosition(), name_str, false);
 }
@@ -2675,13 +2725,14 @@ void OptimizedFrame::Summarize(std::vector<FrameSummary>* frames) const {
 
   // Delegate to JS frame in absence of deoptimization info.
   // TODO(turbofan): Revisit once we support deoptimization across the board.
-  Handle<GcSafeCode> code(GcSafeLookupCode(), isolate());
+  DirectHandle<Code> code(LookupCode(), isolate());
   if (code->kind() == CodeKind::BUILTIN) {
     return JavaScriptFrame::Summarize(frames);
   }
 
   int deopt_index = SafepointEntry::kNoDeoptIndex;
-  Tagged<DeoptimizationData> const data = GetDeoptimizationData(&deopt_index);
+  Tagged<DeoptimizationData> const data =
+      GetDeoptimizationData(*code, &deopt_index);
   if (deopt_index == SafepointEntry::kNoDeoptIndex) {
     // Hack: For maglevved function entry, we don't emit lazy deopt information,
     // so create an extra special summary here.
@@ -2692,10 +2743,10 @@ void OptimizedFrame::Summarize(std::vector<FrameSummary>* frames) const {
     // loop stack checks.
     if (code->is_maglevved()) {
       DCHECK(frames->empty());
-      Handle<AbstractCode> abstract_code(
+      DirectHandle<AbstractCode> abstract_code(
           AbstractCode::cast(function()->shared()->GetBytecodeArray(isolate())),
           isolate());
-      Handle<FixedArray> params = GetParameters();
+      DirectHandle<FixedArray> params = GetParameters();
       FrameSummary::JavaScriptFrameSummary summary(
           isolate(), receiver(), function(), *abstract_code,
           kFunctionEntryBytecodeOffset, IsConstructor(), *params);
@@ -2720,7 +2771,7 @@ void OptimizedFrame::Summarize(std::vector<FrameSummary>* frames) const {
         it->kind() == TranslatedFrame::kJavaScriptBuiltinContinuation ||
         it->kind() ==
             TranslatedFrame::kJavaScriptBuiltinContinuationWithCatch) {
-      Handle<SharedFunctionInfo> shared_info = it->shared_info();
+      DirectHandle<SharedFunctionInfo> shared_info = it->shared_info();
 
       // The translation commands are ordered and the function is always
       // at the first position, and the receiver is next.
@@ -2728,13 +2779,13 @@ void OptimizedFrame::Summarize(std::vector<FrameSummary>* frames) const {
 
       // Get the correct function in the optimized frame.
       CHECK(!translated_values->IsMaterializedObject());
-      Handle<JSFunction> function =
+      DirectHandle<JSFunction> function =
           Handle<JSFunction>::cast(translated_values->GetValue());
       translated_values++;
 
       // Get the correct receiver in the optimized frame.
       CHECK(!translated_values->IsMaterializedObject());
-      Handle<Object> receiver = translated_values->GetValue();
+      DirectHandle<Object> receiver = translated_values->GetValue();
       translated_values++;
 
       // Determine the underlying code object and the position within it from
@@ -2756,7 +2807,7 @@ void OptimizedFrame::Summarize(std::vector<FrameSummary>* frames) const {
       }
 
       // Append full summary of the encountered JS frame.
-      Handle<FixedArray> params = GetParameters();
+      DirectHandle<FixedArray> params = GetParameters();
       FrameSummary::JavaScriptFrameSummary summary(
           isolate(), *receiver, *function, *abstract_code, code_offset,
           is_constructor, *params);
@@ -2769,13 +2820,13 @@ void OptimizedFrame::Summarize(std::vector<FrameSummary>* frames) const {
       is_constructor = true;
 #if V8_ENABLE_WEBASSEMBLY
     } else if (it->kind() == TranslatedFrame::kWasmInlinedIntoJS) {
-      Handle<SharedFunctionInfo> shared_info = it->shared_info();
+      DirectHandle<SharedFunctionInfo> shared_info = it->shared_info();
       DCHECK_NE(isolate()->heap()->gc_state(), Heap::MARK_COMPACT);
 
       Tagged<WasmExportedFunctionData> function_data =
           shared_info->wasm_exported_function_data();
-      Handle<WasmInstanceObject> instance =
-          handle(function_data->instance(), isolate());
+      Handle<WasmTrustedInstanceData> instance{function_data->instance_data(),
+                                               isolate()};
       int func_index = function_data->function_index();
       FrameSummary::WasmInlinedFrameSummary summary(
           isolate(), instance, func_index, it->bytecode_offset().ToInt());
@@ -2836,23 +2887,12 @@ int TurbofanFrame::FindReturnPCForTrampoline(Tagged<Code> code,
 }
 
 Tagged<DeoptimizationData> OptimizedFrame::GetDeoptimizationData(
-    int* deopt_index) const {
+    Tagged<Code> code, int* deopt_index) const {
   DCHECK(is_optimized());
-
-  Tagged<JSFunction> opt_function = function();
-  Tagged<Code> code = opt_function->code(isolate());
 
   Address pc = maybe_unauthenticated_pc();
 
-  // The code object may have been replaced by lazy deoptimization. Fall back
-  // to a slow search in this case to find the original optimized code object.
-  if (!code->contains(isolate(), pc)) {
-    code = isolate()
-               ->heap()
-               ->GcSafeFindCodeForInnerPointer(pc)
-               ->UnsafeCastToCode();
-  }
-  DCHECK(!code.is_null());
+  DCHECK(code->contains(isolate(), pc));
   DCHECK(CodeKindCanDeoptimize(code->kind()));
 
   if (code->is_maglevved()) {
@@ -2887,7 +2927,8 @@ void OptimizedFrame::GetFunctions(
 
   DisallowGarbageCollection no_gc;
   int deopt_index = SafepointEntry::kNoDeoptIndex;
-  Tagged<DeoptimizationData> const data = GetDeoptimizationData(&deopt_index);
+  Tagged<DeoptimizationData> const data =
+      GetDeoptimizationData(code, &deopt_index);
   DCHECK(!data.is_null());
   DCHECK_NE(SafepointEntry::kNoDeoptIndex, deopt_index);
   Tagged<DeoptimizationLiteralArray> const literal_array = data->LiteralArray();
@@ -2955,9 +2996,9 @@ Tagged<Object> UnoptimizedFrame::ReadInterpreterRegister(
 
 void UnoptimizedFrame::Summarize(std::vector<FrameSummary>* functions) const {
   DCHECK(functions->empty());
-  Handle<AbstractCode> abstract_code(AbstractCode::cast(GetBytecodeArray()),
-                                     isolate());
-  Handle<FixedArray> params = GetParameters();
+  DirectHandle<AbstractCode> abstract_code(
+      AbstractCode::cast(GetBytecodeArray()), isolate());
+  DirectHandle<FixedArray> params = GetParameters();
   FrameSummary::JavaScriptFrameSummary summary(
       isolate(), receiver(), function(), *abstract_code, GetBytecodeOffset(),
       IsConstructor(), *params);
@@ -3114,7 +3155,8 @@ void WasmFrame::Summarize(std::vector<FrameSummary>* functions) const {
   wasm::WasmCode* code = wasm_code();
   int offset =
       static_cast<int>(maybe_unauthenticated_pc() - code->instruction_start());
-  Handle<WasmInstanceObject> instance(wasm_instance(), isolate());
+  Handle<WasmTrustedInstanceData> instance_data{trusted_instance_data(),
+                                                isolate()};
   // Push regular non-inlined summary.
   SourcePosition pos = code->GetSourcePositionBefore(offset);
   bool at_conversion = at_to_number_conversion();
@@ -3128,7 +3170,7 @@ void WasmFrame::Summarize(std::vector<FrameSummary>* functions) const {
     const auto [func_index, was_tail_call, caller_pos] =
         code->GetInliningPosition(pos.InliningId());
     if (!child_was_tail_call) {
-      FrameSummary::WasmFrameSummary summary(isolate(), instance, code,
+      FrameSummary::WasmFrameSummary summary(isolate(), instance_data, code,
                                              pos.ScriptOffset(), func_index,
                                              at_conversion);
       functions->push_back(summary);
@@ -3140,7 +3182,7 @@ void WasmFrame::Summarize(std::vector<FrameSummary>* functions) const {
 
   if (!child_was_tail_call) {
     int func_index = code->index();
-    FrameSummary::WasmFrameSummary summary(isolate(), instance, code,
+    FrameSummary::WasmFrameSummary summary(isolate(), instance_data, code,
                                            pos.ScriptOffset(), func_index,
                                            at_conversion);
     functions->push_back(summary);
@@ -3504,20 +3546,21 @@ void CommonFrame::IterateExpressions(RootVisitor* v) const {
       Memory<intptr_t>(fp() + CommonFrameConstants::kContextOrFrameTypeOffset);
   FullObjectSlot base(&Memory<Address>(sp()));
   FullObjectSlot limit(&Memory<Address>(fp() + last_object_offset) + 1);
-  if (StackFrame::IsTypeMarker(marker)) {
-    v->VisitRootPointers(Root::kStackRoots, nullptr, base, limit);
-  } else {
-    // The frame contains the actual argument count (intptr) that should not be
-    // visited.
-    FullObjectSlot argc(
-        &Memory<Address>(fp() + StandardFrameConstants::kArgCOffset));
-    v->VisitRootPointers(Root::kStackRoots, nullptr, base, argc);
-    v->VisitRootPointers(Root::kStackRoots, nullptr, argc + 1, limit);
-  }
+  CHECK(StackFrame::IsTypeMarker(marker));
+  v->VisitRootPointers(Root::kStackRoots, nullptr, base, limit);
+  IteratePc(v, constant_pool_address(), GcSafeLookupCode());
 }
 
 void JavaScriptFrame::Iterate(RootVisitor* v) const {
-  IterateExpressions(v);
+  // The frame contains the actual argument count (intptr) that should not be
+  // visited.
+  FullObjectSlot argc(
+      &Memory<Address>(fp() + StandardFrameConstants::kArgCOffset));
+  const int last_object_offset = StandardFrameConstants::kLastObjectOffset;
+  FullObjectSlot base(&Memory<Address>(sp()));
+  FullObjectSlot limit(&Memory<Address>(fp() + last_object_offset) + 1);
+  v->VisitRootPointers(Root::kStackRoots, nullptr, base, argc);
+  v->VisitRootPointers(Root::kStackRoots, nullptr, argc + 1, limit);
   IteratePc(v, constant_pool_address(), GcSafeLookupCode());
 }
 

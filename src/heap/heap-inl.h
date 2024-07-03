@@ -26,7 +26,7 @@
 #include "src/heap/memory-allocator.h"
 #include "src/heap/memory-chunk-inl.h"
 #include "src/heap/memory-chunk-layout.h"
-#include "src/heap/mutable-page.h"
+#include "src/heap/mutable-page-metadata.h"
 #include "src/heap/new-spaces-inl.h"
 #include "src/heap/paged-spaces-inl.h"
 #include "src/heap/read-only-heap.h"
@@ -295,7 +295,7 @@ bool Heap::InYoungGeneration(Tagged<HeapObject> heap_object) {
   if (V8_ENABLE_THIRD_PARTY_HEAP_BOOL) return false;
   if (v8_flags.sticky_mark_bits) {
     return !MemoryChunk::FromHeapObject(heap_object)
-                ->IsReadOnlyOrMajorMarkingOn() &&
+                ->IsOnlyOldOrMajorMarkingOn() &&
            !MarkBit::From(heap_object.address())
                 .template Get<AccessMode::ATOMIC>();
   }

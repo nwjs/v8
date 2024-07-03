@@ -29,6 +29,7 @@
 #include "src/wasm/function-compiler.h"
 #include "src/wasm/memory-tracing.h"
 #include "src/wasm/object-access.h"
+#include "src/wasm/signature-hashing.h"
 #include "src/wasm/simd-shuffle.h"
 #include "src/wasm/wasm-debug.h"
 #include "src/wasm/wasm-engine.h"
@@ -639,8 +640,8 @@ class LiftoffCompiler {
     return asm_.ReleaseBuffer();
   }
 
-  std::unique_ptr<LiftoffFrameDescriptionsForDeopt> ReleaseFrameDescriptions() {
-    return std::move(frame_descriptions_);
+  std::unique_ptr<LiftoffFrameDescriptionForDeopt> ReleaseFrameDescriptions() {
+    return std::move(frame_description_);
   }
 
   base::OwnedVector<uint8_t> GetSourcePositionTable() {
@@ -1220,8 +1221,8 @@ class LiftoffCompiler {
       }
     }
 
-    if (frame_descriptions_) {
-      frame_descriptions_->total_frame_size = __ GetTotalFrameSize();
+    if (frame_description_) {
+      frame_description_->total_frame_size = __ GetTotalFrameSize();
     }
   }
 
@@ -4164,14 +4165,16 @@ class LiftoffCompiler {
     LiftoffRegister src3 = __ PopToRegister();
     LiftoffRegister src2 = __ PopToRegister(LiftoffRegList{src3});
     LiftoffRegister src1 = __ PopToRegister(LiftoffRegList{src3, src2});
-    static constexpr RegClass src_rc = reg_class_for(src_kind);
     static constexpr RegClass result_rc = reg_class_for(result_kind);
     // Reusing src1 and src2 will complicate codegen for select for some
     // backend, so we allow only reusing src3 (the mask), and pin src1 and src2.
-    LiftoffRegister dst = src_rc == result_rc
-                              ? __ GetUnusedRegister(result_rc, {src3},
-                                                     LiftoffRegList{src1, src2})
-                              : __ GetUnusedRegister(result_rc, {});
+    // Additionally, only reuse src3 if it does not alias src1/src2,
+    // otherwise dst will also alias it src1/src2.
+    LiftoffRegister dst =
+        (src2 == src3 || src1 == src3)
+            ? __ GetUnusedRegister(result_rc, LiftoffRegList{src1, src2})
+            : __ GetUnusedRegister(result_rc, {src3},
+                                   LiftoffRegList{src1, src2});
     EmitTerOp<src_kind, result_kind, result_lane_kind, EmitFn>(fn, dst, src1,
                                                                src2, src3);
   }
@@ -4821,7 +4824,16 @@ class LiftoffCompiler {
         LiftoffRegister acc = pinned.set(__ PopToRegister(pinned));
         LiftoffRegister rhs = pinned.set(__ PopToRegister(pinned));
         LiftoffRegister lhs = pinned.set(__ PopToRegister(pinned));
-        LiftoffRegister dst = __ GetUnusedRegister(res_rc, {lhs, rhs, acc}, {});
+#if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_IA32
+        // x86 platforms save a move when dst == acc, so prefer that.
+        LiftoffRegister dst =
+            __ GetUnusedRegister(res_rc, {acc}, LiftoffRegList{lhs, rhs});
+#else
+        // On other platforms, for simplicity, we ensure that none of the
+        // registers alias. (If we cared, it would probably be feasible to
+        // allow {dst} to alias with {lhs} or {rhs}, but that'd be brittle.)
+        LiftoffRegister dst = __ GetUnusedRegister(res_rc, pinned);
+#endif
 
         __ emit_i32x4_dot_i8x16_i7x16_add_s(dst, lhs, rhs, acc);
         __ PushRegister(kS128, dst);
@@ -8042,6 +8054,15 @@ class LiftoffCompiler {
         source_position_table_builder_.AddPosition(
             __ pc_offset(), SourcePosition(decoder->position()), true);
         __ CallNativeWasmCode(addr);
+        if (v8_flags.wasm_deopt &&
+            env_->deopt_info_bytecode_offset == decoder->pc_offset()) {
+          DCHECK_EQ(env_->deopt_location_kind,
+                    LocationKindForDeopt::kInlinedCall);
+          // TODO(mliedtke): We need to do the same for all other inlineable
+          // call targets and provide test coverage for them.
+          // TODO(mliedtke): Should we do this in `FinishCall` instead?
+          StoreFrameDescriptionForDeopt(decoder);
+        }
         FinishCall(decoder, &sig, call_descriptor);
       }
     }
@@ -8224,7 +8245,7 @@ class LiftoffCompiler {
                            static_cast<int32_t>(~kWeakHeapObjectMask));
         } else {
           __ emit_i64_andi(real_rtt.reg(), real_rtt.reg(),
-                           static_cast<int64_t>(~kWeakHeapObjectMask));
+                           static_cast<int32_t>(~kWeakHeapObjectMask));
         }
         // Constant-time subtyping check: load exactly one candidate RTT from
         // the supertypes list.
@@ -8360,6 +8381,17 @@ class LiftoffCompiler {
     }
   }
 
+  void StoreFrameDescriptionForDeopt(FullDecoder* decoder) {
+    DCHECK(v8_flags.wasm_deopt);
+    DCHECK(!frame_description_);
+    frame_description_ = std::make_unique<LiftoffFrameDescriptionForDeopt>(
+        LiftoffFrameDescriptionForDeopt{
+            decoder->pc_offset(), static_cast<uint32_t>(__ pc_offset()),
+            std::vector<LiftoffVarState>(__ cache_state()->stack_state.begin(),
+                                         __ cache_state()->stack_state.end()),
+            __ cache_state()->cached_instance_data});
+  }
+
   void CallRefImpl(FullDecoder* decoder, ValueType func_ref_type,
                    const FunctionSig* type_sig, TailCall tail_call) {
     MostlySmallValueKindSig sig(zone_, type_sig);
@@ -8374,28 +8406,25 @@ class LiftoffCompiler {
     Register first_param_reg = no_reg;
 
     if (inlining_enabled(decoder)) {
-      // TODO(14667): This creates extra work whenever wasm deopts are enabled
-      // for liftoff compilations. The frame descriptions should only be
-      // generated if the liftoff compilation is requested by the deoptimizer.
-      // TODO(14667): If we only collect frame descriptions for the deoptimizer
-      // compilation run, it should also be enough to collect it for the single
-      // deopt point the deoptimizer is interested in.
-      if (v8_flags.wasm_deopt) {
-        if (!frame_descriptions_) {
-          frame_descriptions_ =
-              std::make_unique<LiftoffFrameDescriptionsForDeopt>();
-        }
-        frame_descriptions_->descriptions.push_back(
-            {decoder->pc_offset(), static_cast<uint32_t>(__ pc_offset()),
-             std::vector<LiftoffVarState>(__ cache_state()->stack_state.begin(),
-                                          __ cache_state()->stack_state.end()),
-             __ cache_state()->cached_instance_data});
+      if (v8_flags.wasm_deopt &&
+          env_->deopt_info_bytecode_offset == decoder->pc_offset() &&
+          env_->deopt_location_kind == LocationKindForDeopt::kEagerDeopt) {
+        StoreFrameDescriptionForDeopt(decoder);
       }
       LiftoffRegList pinned;
       LiftoffRegister func_ref = pinned.set(__ PopToRegister(pinned));
       LiftoffRegister vector = pinned.set(__ GetUnusedRegister(kGpReg, pinned));
       MaybeEmitNullCheck(decoder, func_ref.gp(), pinned, func_ref_type);
       VarState func_ref_var(kRef, func_ref, 0);
+
+#if V8_ENABLE_SANDBOX
+      LiftoffRegister sig_hash_reg =
+          pinned.set(__ GetUnusedRegister(kGpReg, pinned));
+      __ LoadConstant(sig_hash_reg, WasmValue{SignatureHasher::Hash(type_sig)});
+      VarState sig_hash_var{kIntPtrKind, sig_hash_reg, 0};
+#else
+      VarState sig_hash_var{kIntPtrKind, 0, 0};  // Unused by callee.
+#endif
 
       __ Fill(vector, WasmLiftoffFrameConstants::kFeedbackVectorOffset, kRef);
       VarState vector_var{kRef, vector, 0};
@@ -8411,11 +8440,13 @@ class LiftoffCompiler {
       VarState index_var(kI32, vector_slot, 0);
 
       // CallRefIC(vector: FixedArray, vectorIndex: int32,
+      //           signatureHash: uintptr,
       //           funcref: WasmFuncRef) -> <target, ref>
-      CallBuiltin(
-          Builtin::kCallRefIC,
-          MakeSig::Returns(kIntPtrKind, kIntPtrKind).Params(kRef, kI32, kRef),
-          {vector_var, index_var, func_ref_var}, decoder->position());
+      CallBuiltin(Builtin::kCallRefIC,
+                  MakeSig::Returns(kIntPtrKind, kIntPtrKind)
+                      .Params(kRef, kI32, kIntPtrKind, kRef),
+                  {vector_var, index_var, sig_hash_var, func_ref_var},
+                  decoder->position());
       target_reg = LiftoffRegister(kReturnRegister0).gp();
       first_param_reg = kReturnRegister1;
     } else {  // inlining_enabled(decoder)
@@ -8464,6 +8495,12 @@ class LiftoffCompiler {
       source_position_table_builder_.AddPosition(
           __ pc_offset(), SourcePosition(decoder->position()), true);
       __ CallIndirect(&sig, call_descriptor, target_reg);
+
+      if (v8_flags.wasm_deopt &&
+          env_->deopt_info_bytecode_offset == decoder->pc_offset() &&
+          env_->deopt_location_kind == LocationKindForDeopt::kInlinedCall) {
+        StoreFrameDescriptionForDeopt(decoder);
+      }
 
       FinishCall(decoder, &sig, call_descriptor);
     }
@@ -8843,7 +8880,7 @@ class LiftoffCompiler {
   int32_t* max_steps_;
   int32_t* nondeterminism_;
 
-  std::unique_ptr<LiftoffFrameDescriptionsForDeopt> frame_descriptions_;
+  std::unique_ptr<LiftoffFrameDescriptionForDeopt> frame_description_;
 
   const compiler::NullCheckStrategy null_check_strategy_ =
       trap_handler::IsTrapHandlerEnabled() && V8_STATIC_ROOTS_BOOL

@@ -2104,6 +2104,7 @@ struct ChangeOrDeoptOp : FixedArityOperationT<2, ChangeOrDeoptOp> {
     kUint64ToInt32,
     kUint64ToInt64,
     kFloat64ToInt32,
+    kFloat64ToUint32,
     kFloat64ToInt64,
     kFloat64NotHole,
   };
@@ -2118,6 +2119,7 @@ struct ChangeOrDeoptOp : FixedArityOperationT<2, ChangeOrDeoptOp> {
       case Kind::kInt64ToInt32:
       case Kind::kUint64ToInt32:
       case Kind::kFloat64ToInt32:
+      case Kind::kFloat64ToUint32:
         return RepVector<RegisterRepresentation::Word32()>();
       case Kind::kUint64ToInt64:
       case Kind::kFloat64ToInt64:
@@ -2137,6 +2139,7 @@ struct ChangeOrDeoptOp : FixedArityOperationT<2, ChangeOrDeoptOp> {
       case Kind::kUint64ToInt64:
         return MaybeRepVector<MaybeRegisterRepresentation::Word64()>();
       case Kind::kFloat64ToInt32:
+      case Kind::kFloat64ToUint32:
       case Kind::kFloat64ToInt64:
       case Kind::kFloat64NotHole:
         return MaybeRepVector<MaybeRegisterRepresentation::Float64()>();
@@ -2414,6 +2417,8 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
   RegisterRepresentation rep = Representation(kind);
   union Storage {
     uint64_t integral;
+    // TODO(42204049): To prevent signaling NaNs converting to quiet NaNs we
+    // should use Float32 and Float64.
     float float32;
     double float64;
     ExternalReference external;
@@ -3704,18 +3709,24 @@ struct TSCallDescriptor : public NON_EXPORTED_BASE(ZoneObject) {
   base::Vector<const RegisterRepresentation> in_reps;
   base::Vector<const RegisterRepresentation> out_reps;
   CanThrow can_throw;
+  LazyDeoptOnThrow lazy_deopt_on_throw;
 
   TSCallDescriptor(const CallDescriptor* descriptor,
                    base::Vector<const RegisterRepresentation> in_reps,
                    base::Vector<const RegisterRepresentation> out_reps,
-                   CanThrow can_throw)
+                   CanThrow can_throw, LazyDeoptOnThrow lazy_deopt_on_throw)
       : descriptor(descriptor),
         in_reps(in_reps),
         out_reps(out_reps),
-        can_throw(can_throw) {}
+        can_throw(can_throw),
+        lazy_deopt_on_throw(lazy_deopt_on_throw) {}
 
   static const TSCallDescriptor* Create(const CallDescriptor* descriptor,
-                                        CanThrow can_throw, Zone* graph_zone) {
+                                        CanThrow can_throw,
+                                        LazyDeoptOnThrow lazy_deopt_on_throw,
+                                        Zone* graph_zone) {
+    DCHECK_IMPLIES(can_throw == CanThrow::kNo,
+                   lazy_deopt_on_throw == LazyDeoptOnThrow::kNo);
     base::Vector<RegisterRepresentation> in_reps =
         graph_zone->AllocateVector<RegisterRepresentation>(
             descriptor->ParameterCount());
@@ -3731,7 +3742,7 @@ struct TSCallDescriptor : public NON_EXPORTED_BASE(ZoneObject) {
           descriptor->GetReturnType(i).representation());
     }
     return graph_zone->New<TSCallDescriptor>(descriptor, in_reps, out_reps,
-                                             can_throw);
+                                             can_throw, lazy_deopt_on_throw);
   }
 };
 
@@ -4273,6 +4284,7 @@ struct ObjectIsOp : FixedArityOperationT<1, ObjectIsOp> {
     kInternalizedString,
     kNonCallable,
     kNumber,
+    kNumberOrBigInt,
     kReceiver,
     kReceiverOrNullOrUndefined,
     kSmi,
@@ -5865,10 +5877,10 @@ struct CheckedClosureOp : FixedArityOperationT<2, CheckedClosureOp> {
     return MaybeRepVector<MaybeRegisterRepresentation::Tagged()>();
   }
 
-  OpIndex input() const { return Base::input(0); }
-  OpIndex frame_state() const { return Base::input(1); }
+  V<Object> input() const { return Base::input<Object>(0); }
+  V<FrameState> frame_state() const { return Base::input<FrameState>(1); }
 
-  CheckedClosureOp(OpIndex input, OpIndex frame_state,
+  CheckedClosureOp(V<Object> input, V<FrameState> frame_state,
                    Handle<FeedbackCell> feedback_cell)
       : Base(input, frame_state), feedback_cell(feedback_cell) {}
 
@@ -5897,12 +5909,12 @@ struct CheckEqualsInternalizedStringOp
                           MaybeRegisterRepresentation::Tagged()>();
   }
 
-  OpIndex expected() const { return Base::input(0); }
-  OpIndex value() const { return Base::input(1); }
-  OpIndex frame_state() const { return Base::input(2); }
+  V<Object> expected() const { return Base::input<Object>(0); }
+  V<Object> value() const { return Base::input<Object>(1); }
+  V<FrameState> frame_state() const { return Base::input<FrameState>(2); }
 
-  CheckEqualsInternalizedStringOp(OpIndex expected, OpIndex value,
-                                  OpIndex frame_state)
+  CheckEqualsInternalizedStringOp(V<Object> expected, V<Object> value,
+                                  V<FrameState> frame_state)
       : Base(expected, value, frame_state) {}
 
   void Validate(const Graph& graph) const {
@@ -5926,9 +5938,9 @@ struct LoadMessageOp : FixedArityOperationT<1, LoadMessageOp> {
     return MaybeRepVector<MaybeRegisterRepresentation::WordPtr()>();
   }
 
-  OpIndex offset() const { return Base::input(0); }
+  V<WordPtr> offset() const { return Base::input<WordPtr>(0); }
 
-  explicit LoadMessageOp(OpIndex offset) : Base(offset) {}
+  explicit LoadMessageOp(V<WordPtr> offset) : Base(offset) {}
 
   void Validate(const Graph& graph) const {
   }
@@ -5949,10 +5961,10 @@ struct StoreMessageOp : FixedArityOperationT<2, StoreMessageOp> {
                           MaybeRegisterRepresentation::Tagged()>();
   }
 
-  OpIndex offset() const { return Base::input(0); }
-  OpIndex object() const { return Base::input(1); }
+  V<WordPtr> offset() const { return Base::input<WordPtr>(0); }
+  V<Object> object() const { return Base::input<Object>(1); }
 
-  explicit StoreMessageOp(OpIndex offset, OpIndex object)
+  explicit StoreMessageOp(V<WordPtr> offset, V<Object> object)
       : Base(offset, object) {}
 
   void Validate(const Graph& graph) const {
@@ -6730,8 +6742,9 @@ struct StructGetOp : FixedArityOperationT<1, StructGetOp> {
     return result;
   }
 
-  StructGetOp(OpIndex object, const wasm::StructType* type, uint32_t type_index,
-              int field_index, bool is_signed, CheckForNull null_check)
+  StructGetOp(V<WasmStructNullable> object, const wasm::StructType* type,
+              uint32_t type_index, int field_index, bool is_signed,
+              CheckForNull null_check)
       : Base(object),
         is_signed(is_signed),
         null_check(null_check),
@@ -6739,7 +6752,7 @@ struct StructGetOp : FixedArityOperationT<1, StructGetOp> {
         type_index(type_index),
         field_index(field_index) {}
 
-  OpIndex object() const { return input(0); }
+  V<WasmStructNullable> object() const { return input<WasmStructNullable>(0); }
 
   base::Vector<const RegisterRepresentation> outputs_rep() const {
     return base::VectorOf(&RepresentationFor(type->field(field_index)), 1);
@@ -6779,16 +6792,17 @@ struct StructSetOp : FixedArityOperationT<2, StructSetOp> {
     return result;
   }
 
-  StructSetOp(OpIndex object, OpIndex value, const wasm::StructType* type,
-              uint32_t type_index, int field_index, CheckForNull null_check)
+  StructSetOp(V<WasmStructNullable> object, V<Any> value,
+              const wasm::StructType* type, uint32_t type_index,
+              int field_index, CheckForNull null_check)
       : Base(object, value),
         null_check(null_check),
         type(type),
         type_index(type_index),
         field_index(field_index) {}
 
-  OpIndex object() const { return input(0); }
-  OpIndex value() const { return input(1); }
+  V<WasmStructNullable> object() const { return input<WasmStructNullable>(0); }
+  V<Any> value() const { return input(1); }
 
   base::Vector<const RegisterRepresentation> outputs_rep() const { return {}; }
 
@@ -6966,10 +6980,13 @@ struct WasmRefFuncOp : FixedArityOperationT<1, WasmRefFuncOp> {
   static constexpr OpEffects effects = OpEffects().CanAllocate();
   uint32_t function_index;
 
-  explicit WasmRefFuncOp(V<Object> wasm_instance, uint32_t function_index)
+  explicit WasmRefFuncOp(V<WasmTrustedInstanceData> wasm_instance,
+                         uint32_t function_index)
       : Base(wasm_instance), function_index(function_index) {}
 
-  OpIndex instance() const { return Base::input(0); }
+  V<WasmTrustedInstanceData> instance() const {
+    return input<WasmTrustedInstanceData>(0);
+  }
 
   base::Vector<const RegisterRepresentation> outputs_rep() const {
     return RepVector<RegisterRepresentation::Tagged()>();
@@ -7205,6 +7222,14 @@ struct Simd128BinopOp : FixedArityOperationT<2, Simd128BinopOp> {
       case Kind::kI32x4Add:
       case Kind::kI16x8Add:
       case Kind::kI8x16Add:
+      case Kind::kF64x2Add:
+      case Kind::kF32x4Add:
+
+      case Kind::kI64x2Mul:
+      case Kind::kI32x4Mul:
+      case Kind::kI16x8Mul:
+      case Kind::kF64x2Mul:
+      case Kind::kF32x4Mul:
         return true;
       default:
         return false;
@@ -7924,6 +7949,7 @@ struct Simd256Extract128LaneOp
   }
 
   auto options() const { return std::tuple{lane}; }
+  void PrintOptions(std::ostream& os) const;
 };
 
 #define FOREACH_SIMD_256_LOAD_TRANSFORM_OPCODE(V) \
@@ -8149,6 +8175,10 @@ std::ostream& operator<<(std::ostream& os, Simd256UnaryOp::Kind kind);
   V(F64x4Max)                             \
   V(F64x4Pmin)                            \
   V(F64x4Pmax)                            \
+  V(F32x8RelaxedMin)                      \
+  V(F32x8RelaxedMax)                      \
+  V(F64x4RelaxedMin)                      \
+  V(F64x4RelaxedMax)                      \
   V(I16x16DotI8x32I7x32S)                 \
   FOREACH_SIMD_256_BINARY_SIGN_EXTENSION_OPCODE(V)
 
@@ -8469,15 +8499,12 @@ struct LoadStackPointerOp : FixedArityOperationT<0, LoadStackPointerOp> {
 };
 
 struct SetStackPointerOp : FixedArityOperationT<1, SetStackPointerOp> {
-  wasm::FPRelativeScope fp_scope;
-
   // TODO(nicohartmann@): Review effects.
   static constexpr OpEffects effects = OpEffects().CanCallAnything();
 
   OpIndex value() const { return Base::input(0); }
 
-  SetStackPointerOp(OpIndex value, wasm::FPRelativeScope fp_scope)
-      : Base(value), fp_scope(fp_scope) {}
+  explicit SetStackPointerOp(OpIndex value) : Base(value) {}
 
   base::Vector<const RegisterRepresentation> outputs_rep() const { return {}; }
 
@@ -8487,7 +8514,7 @@ struct SetStackPointerOp : FixedArityOperationT<1, SetStackPointerOp> {
   }
 
   void Validate(const Graph& graph) const {}
-  auto options() const { return std::tuple{fp_scope}; }
+  auto options() const { return std::tuple{}; }
 };
 
 #endif  // V8_ENABLE_WEBASSEMBLY

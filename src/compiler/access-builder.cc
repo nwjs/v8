@@ -455,6 +455,7 @@ FieldAccess AccessBuilder::ForJSArrayBufferViewBuffer() {
                         MaybeHandle<Name>(),   OptionalMapRef(),
                         Type::OtherInternal(), MachineType::TaggedPointer(),
                         kPointerWriteBarrier,  "JSArrayBufferViewBuffer"};
+  access.is_immutable = true;
   return access;
 }
 
@@ -1148,16 +1149,6 @@ ElementAccess AccessBuilder::ForFixedArrayElement(ElementsKind kind) {
     default:
       UNREACHABLE();
   }
-  return access;
-}
-
-// static
-ElementAccess AccessBuilder::ForStackArgument() {
-  ElementAccess access = {
-      kUntaggedBase,
-      CommonFrameConstants::kFixedFrameSizeAboveFp - kSystemPointerSize,
-      Type::NonInternal(), MachineType::Pointer(),
-      WriteBarrierKind::kNoWriteBarrier};
   return access;
 }
 

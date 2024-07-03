@@ -698,10 +698,6 @@ class CompilationStateImpl {
     compilation_id_ = compilation_id;
   }
 
-  std::weak_ptr<NativeModule> const native_module_weak() const {
-    return native_module_weak_;
-  }
-
   size_t EstimateCurrentMemoryConsumption() const;
 
   // Called from the delayed task to trigger caching if the timeout
@@ -709,6 +705,9 @@ class CompilationStateImpl {
   // This either triggers caching or re-schedules the task if more code has
   // been compiled to the top tier in the meantime.
   void TriggerCachingAfterTimeout();
+
+  std::vector<WasmCode*> PublishCode(
+      base::Vector<std::unique_ptr<WasmCode>> codes);
 
  private:
   void AddCompilationUnitInternal(CompilationUnitBuilder* builder,
@@ -725,7 +724,6 @@ class CompilationStateImpl {
 
   void PublishCompilationResults(
       std::vector<std::unique_ptr<WasmCode>> unpublished_code);
-  void PublishCode(base::Vector<std::unique_ptr<WasmCode>> codes);
 
   NativeModule* const native_module_;
   std::weak_ptr<NativeModule> const native_module_weak_;
@@ -946,6 +944,11 @@ DynamicTiering CompilationState::dynamic_tiering() const {
 
 size_t CompilationState::EstimateCurrentMemoryConsumption() const {
   return Impl(this)->EstimateCurrentMemoryConsumption();
+}
+
+std::vector<WasmCode*> CompilationState::PublishCode(
+    base::Vector<std::unique_ptr<WasmCode>> unpublished_code) {
+  return Impl(this)->PublishCode(unpublished_code);
 }
 
 // static
@@ -1328,7 +1331,11 @@ class TransitiveTypeFeedbackProcessor {
         auto existing = feedback_for_function_.find(func);
         if (existing != feedback_for_function_.end() &&
             !existing->second.feedback_vector.empty()) {
-          continue;
+          if (!existing->second.needs_reprocessing_after_deopt) {
+            continue;
+          }
+          DCHECK(v8_flags.wasm_deopt);
+          existing->second.needs_reprocessing_after_deopt = false;
         }
         queue_.insert(func);
       }
@@ -2466,8 +2473,8 @@ std::shared_ptr<NativeModule> CompileToNativeModule(
 AsyncCompileJob::AsyncCompileJob(
     Isolate* isolate, WasmFeatures enabled_features,
     CompileTimeImports compile_imports, base::OwnedVector<const uint8_t> bytes,
-    Handle<Context> context, Handle<NativeContext> incumbent_context,
-    const char* api_method_name,
+    DirectHandle<Context> context,
+    DirectHandle<NativeContext> incumbent_context, const char* api_method_name,
     std::shared_ptr<CompilationResultResolver> resolver, int compilation_id)
     : isolate_(isolate),
       api_method_name_(api_method_name),
@@ -2735,7 +2742,7 @@ void AsyncCompileJob::PrepareRuntimeObjects() {
       stream_ ? base::VectorOf(stream_->url()) : base::Vector<const char>();
   auto script =
       GetWasmEngine()->GetOrCreateScript(isolate_, native_module_, source_url);
-  Handle<WasmModuleObject> module_object =
+  DirectHandle<WasmModuleObject> module_object =
       WasmModuleObject::New(isolate_, native_module_, script);
 
   module_object_ = isolate_->global_handles()->Create(*module_object);
@@ -3792,7 +3799,9 @@ void CompilationStateImpl::InitializeCompilationProgress(
   // compilation hint.
   if (V8_UNLIKELY(v8_flags.wasm_eager_tier_up_function >= 0 &&
                   static_cast<uint32_t>(v8_flags.wasm_eager_tier_up_function) >=
-                      module->num_imported_functions)) {
+                      module->num_imported_functions &&
+                  static_cast<uint32_t>(v8_flags.wasm_eager_tier_up_function) <
+                      module->functions.size())) {
     uint32_t func_idx =
         v8_flags.wasm_eager_tier_up_function - module->num_imported_functions;
     WasmCompilationHint hint{WasmCompilationHintStrategy::kEager,
@@ -4017,7 +4026,7 @@ void CompilationStateImpl::FinalizeJSToWasmWrappers(Isolate* isolate,
                                                1);
   for (auto& unit : js_to_wasm_wrapper_units_) {
     DCHECK_EQ(isolate, unit.isolate());
-    Handle<Code> code = unit.Finalize();
+    DirectHandle<Code> code = unit.Finalize();
     // Each JSToWasmWrapperCompilationUnit compiles an actual wrappers and never
     // returns the generic builtin.
     DCHECK(!code->is_builtin());
@@ -4103,6 +4112,12 @@ void CompilationStateImpl::OnFinishedUnits(
       if (code->tier() > reached_tier) {
         compilation_progress_[slot_index] = ReachedTierField::update(
             compilation_progress_[slot_index], code->tier());
+      } else if (v8_flags.wasm_deopt && code->tier() != reached_tier) {
+        DCHECK_EQ(reached_tier, ExecutionTier::kTurbofan);
+        DCHECK_EQ(code->tier(), ExecutionTier::kLiftoff);
+        compilation_progress_[slot_index] = ReachedTierField::update(
+            compilation_progress_[slot_index], code->tier());
+        compilation_unit_queues_.AllowAnotherTopTierJob(code->index());
       }
       DCHECK_LE(0, outstanding_baseline_units_);
     }
@@ -4360,7 +4375,7 @@ void CompilationStateImpl::PublishCompilationResults(
   PublishCode(base::VectorOf(unpublished_code));
 }
 
-void CompilationStateImpl::PublishCode(
+std::vector<WasmCode*> CompilationStateImpl::PublishCode(
     base::Vector<std::unique_ptr<WasmCode>> code) {
   WasmCodeRefScope code_ref_scope;
   std::vector<WasmCode*> published_code =
@@ -4370,7 +4385,8 @@ void CompilationStateImpl::PublishCode(
     GetWasmEngine()->LogCode(base::VectorOf(published_code));
   }
 
-  OnFinishedUnits(base::VectorOf(std::move(published_code)));
+  OnFinishedUnits(base::VectorOf(published_code));
+  return published_code;
 }
 
 void CompilationStateImpl::SchedulePublishCompilationResults(
@@ -4577,7 +4593,7 @@ void CompileJsToWasmWrappers(Isolate* isolate, const WasmModule* module) {
     JSToWasmWrapperKey key = pair.first;
     JSToWasmWrapperCompilationUnit* unit = pair.second.get();
     DCHECK_EQ(isolate, unit->isolate());
-    Handle<Code> code = unit->Finalize();
+    DirectHandle<Code> code = unit->Finalize();
     DCHECK(!code->is_builtin());
     int wrapper_index = GetExportWrapperIndex(key.second, key.first);
     isolate->heap()->js_to_wasm_wrappers()->Set(wrapper_index, code->wrapper());

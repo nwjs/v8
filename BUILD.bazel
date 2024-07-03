@@ -274,18 +274,6 @@ v8_flag(
     default = True,
 )
 
-# Shared RO heap. Flag has to be set to false when
-# v8_enable_pointer_compression_shared_cage is set to false.
-v8_flag(
-    name = "v8_enable_shared_ro_heap",
-    default = True,
-)
-
-v8_flag(
-    name = "v8_enable_extensible_ro_snapshot",
-    default = True,
-)
-
 # Enable shared cage if v8_enable_pointer_compression
 # and v8_enable_pointer_compression_shared_cage.
 selects.config_setting_group(
@@ -429,6 +417,7 @@ v8_config(
         "V8_ADVANCED_BIGINT_ALGORITHMS",
         "V8_CONCURRENT_MARKING",
         "V8_ENABLE_SPARKPLUG",
+        "V8_ENABLE_EXTENSIBLE_RO_SNAPSHOT",
     ] + select({
         "@v8//bazel/config:is_debug": [
             "DEBUG",
@@ -497,13 +486,13 @@ v8_config(
         ],
         "//conditions:default": [],
     }) + select({
-        ":is_v8_enable_shared_ro_heap": [
+        # Shared RO heap is unconfigurable in bazel. However, we
+        # still have to make sure that the flag is disabled when
+        # v8_enable_pointer_compression_shared_cage is set to false.
+        ":is_v8_enable_pointer_compression_shared_cage": [
             "V8_SHARED_RO_HEAP",
         ],
-    }) + select({
-        ":is_v8_enable_extensible_ro_snapshot": [
-            "V8_ENABLE_EXTENSIBLE_RO_SNAPSHOT",
-        ],
+        "//conditions:default": [],
     }) + select({
         ":is_v8_enable_short_builtin_calls": [
             "V8_SHORT_BUILTIN_CALLS",
@@ -802,6 +791,7 @@ filegroup(
         "src/base/template-meta-programming/algorithm.h",
         "src/base/template-meta-programming/functional.h",
         "src/base/template-meta-programming/list.h",
+        "src/base/template-meta-programming/string-literal.h",
         "src/base/template-utils.h",
         "src/base/threaded-list.h",
         "src/base/timezone-cache.h",
@@ -1406,6 +1396,7 @@ filegroup(
         "src/common/ptr-compr.cc",
         "src/common/ptr-compr.h",
         "src/common/ptr-compr-inl.h",
+        "src/common/simd128.h",
         "src/compiler-dispatcher/lazy-compile-dispatcher.cc",
         "src/compiler-dispatcher/lazy-compile-dispatcher.h",
         "src/compiler-dispatcher/optimizing-compile-dispatcher.cc",
@@ -1619,8 +1610,6 @@ filegroup(
         "src/heap/free-list.h",
         "src/heap/free-list-inl.h",
         "src/heap/gc-callbacks.h",
-        "src/heap/gc-idle-time-handler.cc",
-        "src/heap/gc-idle-time-handler.h",
         "src/heap/gc-tracer.cc",
         "src/heap/gc-tracer.h",
         "src/heap/gc-tracer-inl.h",
@@ -1646,9 +1635,9 @@ filegroup(
         "src/heap/incremental-marking-job.h",
         "src/heap/index-generator.cc",
         "src/heap/index-generator.h",
-        "src/heap/large-page.cc",
-        "src/heap/large-page.h",
-        "src/heap/large-page-inl.h",
+        "src/heap/large-page-metadata.cc",
+        "src/heap/large-page-metadata.h",
+        "src/heap/large-page-metadata-inl.h",
         "src/heap/large-spaces.cc",
         "src/heap/large-spaces.h",
         "src/heap/linear-allocation-area.h",
@@ -1687,12 +1676,12 @@ filegroup(
         "src/heap/memory-allocator.h",
         "src/heap/memory-balancer.cc",
         "src/heap/memory-balancer.h",
-        "src/heap/mutable-page.cc",
-        "src/heap/mutable-page.h",
+        "src/heap/mutable-page-metadata.cc",
+        "src/heap/mutable-page-metadata.h",
+        "src/heap/mutable-page-metadata-inl.h",
         "src/heap/memory-chunk.cc",
         "src/heap/memory-chunk.h",
         "src/heap/memory-chunk-inl.h",
-        "src/heap/mutable-page-inl.h",
         "src/heap/memory-chunk-layout.cc",
         "src/heap/memory-chunk-layout.h",
         "src/heap/memory-measurement.cc",
@@ -1712,9 +1701,9 @@ filegroup(
         "src/heap/objects-visiting.cc",
         "src/heap/objects-visiting.h",
         "src/heap/objects-visiting-inl.h",
-        "src/heap/page.cc",
-        "src/heap/page.h",
-        "src/heap/page-inl.h",
+        "src/heap/page-metadata.cc",
+        "src/heap/page-metadata.h",
+        "src/heap/page-metadata-inl.h",
         "src/heap/paged-spaces.cc",
         "src/heap/paged-spaces.h",
         "src/heap/paged-spaces-inl.h",
@@ -1878,6 +1867,7 @@ filegroup(
         "src/objects/call-site-info.cc",
         "src/objects/call-site-info.h",
         "src/objects/call-site-info-inl.h",
+        "src/objects/casting.h",
         "src/objects/cell.h",
         "src/objects/cell-inl.h",
         "src/objects/code.cc",
@@ -2298,6 +2288,10 @@ filegroup(
         "src/sandbox/external-pointer-table.cc",
         "src/sandbox/external-pointer-table.h",
         "src/sandbox/external-pointer-table-inl.h",
+        "src/sandbox/cppheap-pointer-inl.h",
+        "src/sandbox/cppheap-pointer-table.cc",
+        "src/sandbox/cppheap-pointer-table.h",
+        "src/sandbox/cppheap-pointer-table-inl.h",
         "src/sandbox/code-pointer-table.cc",
         "src/sandbox/code-pointer-table.h",
         "src/sandbox/code-pointer-table-inl.h",
@@ -2326,6 +2320,7 @@ filegroup(
         "src/sandbox/sandbox.h",
         "src/sandbox/sandboxed-pointer.h",
         "src/sandbox/sandboxed-pointer-inl.h",
+        "src/sandbox/tagged-payload.h",
         "src/sandbox/testing.cc",
         "src/sandbox/testing.h",
         "src/snapshot/code-serializer.cc",
@@ -2843,6 +2838,7 @@ filegroup(
             "src/wasm/pgo.cc",
             "src/wasm/pgo.h",
             "src/wasm/serialized-signature-inl.h",
+            "src/wasm/signature-hashing.h",
             "src/wasm/simd-shuffle.cc",
             "src/wasm/simd-shuffle.h",
             "src/wasm/stacks.cc",
@@ -3206,6 +3202,8 @@ filegroup(
         "src/compiler/turboshaft/dataview-lowering-reducer.h",
         "src/compiler/turboshaft/code-elimination-and-simplification-phase.cc",
         "src/compiler/turboshaft/code-elimination-and-simplification-phase.h",
+        "src/compiler/turboshaft/copying-phase.cc",
+        "src/compiler/turboshaft/copying-phase.h",
         "src/compiler/turboshaft/dead-code-elimination-reducer.h",
         "src/compiler/turboshaft/debug-feature-lowering-phase.cc",
         "src/compiler/turboshaft/debug-feature-lowering-phase.h",
@@ -3258,12 +3256,12 @@ filegroup(
         "src/compiler/turboshaft/operations.cc",
         "src/compiler/turboshaft/operations.h",
         "src/compiler/turboshaft/opmasks.h",
-        "src/compiler/turboshaft/copying-phase.cc",
-        "src/compiler/turboshaft/copying-phase.h",
         "src/compiler/turboshaft/optimize-phase.cc",
         "src/compiler/turboshaft/optimize-phase.h",
         "src/compiler/turboshaft/phase.cc",
         "src/compiler/turboshaft/phase.h",
+        "src/compiler/turboshaft/pipelines.cc",
+        "src/compiler/turboshaft/pipelines.h",
         "src/compiler/turboshaft/pretenuring-propagation-reducer.cc",
         "src/compiler/turboshaft/pretenuring-propagation-reducer.h",
         "src/compiler/turboshaft/recreate-schedule.cc",
@@ -3271,6 +3269,7 @@ filegroup(
         "src/compiler/turboshaft/recreate-schedule-phase.cc",
         "src/compiler/turboshaft/recreate-schedule-phase.h",
         "src/compiler/turboshaft/reducer-traits.h",
+        "src/compiler/turboshaft/register-allocation-phase.h",
         "src/compiler/turboshaft/representations.cc",
         "src/compiler/turboshaft/representations.h",
         "src/compiler/turboshaft/required-optimization-reducer.h",
@@ -3313,6 +3312,7 @@ filegroup(
         "src/compiler/turboshaft/value-numbering-reducer.h",
         "src/compiler/turboshaft/variable-reducer.h",
         "src/compiler/turboshaft/wasm-js-lowering-reducer.h",
+        "src/compiler/turboshaft/zone-with-name.h",
         "src/compiler/type-cache.cc",
         "src/compiler/type-cache.h",
         "src/compiler/type-narrowing-reducer.cc",

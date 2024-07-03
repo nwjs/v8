@@ -338,319 +338,32 @@ bool CheckToBooleanOnAllRoots(LocalIsolate* local_isolate) {
 }
 #endif
 
+size_t NestedInputLocationSizeNeeded(ValueNode* node) {
+  if (IsConstantNode(node->opcode()) ||
+      node->opcode() == Opcode::kArgumentsElements ||
+      node->opcode() == Opcode::kArgumentsLength ||
+      node->opcode() == Opcode::kRestLength) {
+    return 0;
+  }
+  return node->GetInputLocationsArraySize();
+}
+
 }  // namespace
 
-bool CapturedValue::IsValidRuntimeValue() const {
-  if (type != kRuntimeValue) return false;
-  // We should not use a generic runtime value for any of the following specific
-  // ValueNodes.
-  if (IsConstantNode(runtime_value->opcode())) return false;
-  switch (runtime_value->opcode()) {
-    case Opcode::kConstant:
-    case Opcode::kRootConstant:
-    case Opcode::kSmiConstant:
-    case Opcode::kInt32Constant:
-    case Opcode::kFloat64Constant:
-    case Opcode::kArgumentsElements:
-    case Opcode::kArgumentsLength:
-    case Opcode::kRestLength:
-      return false;
-    default:
-      return true;
-  }
-}
-
-size_t CapturedValue::InputLocationSizeNeeded() const {
-  switch (type) {
-    case kRuntimeValue:
-      return runtime_value->GetInputLocationsArraySize();
-    default:
-      return 0;
-  }
-}
-
-std::optional<CapturedObject> CapturedValue::GetObjectFromAllocation() const {
-  if (type != kRuntimeValue) return {};
-  if (!runtime_value->Is<InlinedAllocation>()) return {};
-  const CapturedAllocation& allocation =
-      runtime_value->Cast<InlinedAllocation>()->captured_allocation();
-  if (allocation.type != CapturedAllocation::kObject) return {};
-  return allocation.object;
-}
-
-void CapturedObject::set(unsigned int index, ValueNode* value) {
-  // We unwrap any constant or special ValueNodes.
-  switch (value->opcode()) {
-    case Opcode::kConstant:
-      set(index, CapturedValue(value->Cast<Constant>()->object()));
-      break;
-    case Opcode::kRootConstant:
-      set(index, CapturedValue(value->Cast<RootConstant>()->index()));
-      break;
-    case Opcode::kSmiConstant:
-      set(index, CapturedValue(value->Cast<SmiConstant>()->value().value()));
-      break;
-    case Opcode::kInt32Constant:
-      set(index, CapturedValue(value->Cast<Int32Constant>()->value()));
-      break;
-    case Opcode::kFloat64Constant:
-      set(index, CapturedValue(value->Cast<Float64Constant>()->value()));
-      break;
-    case Opcode::kInlinedAllocation:
-      set(index, CapturedValue(value->Cast<InlinedAllocation>()));
-      break;
-    case Opcode::kArgumentsElements:
-      set(index, CapturedValue(value->Cast<ArgumentsElements>()));
-      break;
-    case Opcode::kArgumentsLength:
-      set(index, CapturedValue(value->Cast<ArgumentsLength>()));
-      break;
-    case Opcode::kRestLength:
-      set(index, CapturedValue(value->Cast<RestLength>()));
-      break;
-    default:
-      // Generic runtime value.
-      set(index, CapturedValue(value));
-      break;
-  }
-}
-
-void CapturedObject::ClearSlots(int last_init_slot) {
-  int last_init_index = last_init_slot / kTaggedSize;
-  for (int i = last_init_index + 1; i < slot_count_; i++) {
-    slots_[i] = CapturedValue();
-  }
-}
-
-compiler::MapRef CapturedObject::GetMap() const {
-  DCHECK_EQ(slots_[0].type, CapturedValue::kConstant);
-  DCHECK(slots_[0].constant.IsMap());
-  return slots_[0].constant.AsMap();
-}
-
-size_t CapturedObject::InputLocationSizeNeeded() const {
+size_t VirtualObject::InputLocationSizeNeeded() const {
+  if (type() != kDefault) return 0;
   size_t size = 0;
-  // We skip the first slot, since it is always a MapRef.
-  for (int i = 1; i < slot_count_; i++) {
-    size += slots_[i].InputLocationSizeNeeded();
+  for (uint32_t i = 0; i < slot_count(); i++) {
+    size += NestedInputLocationSizeNeeded(slots_.data[i]);
   }
   return size;
-}
-
-// static
-CapturedObject CapturedObject::CreateJSObject(Zone* zone,
-                                              compiler::MapRef map) {
-  DCHECK(!map.is_dictionary_map());
-  DCHECK(!map.IsInobjectSlackTrackingInProgress());
-  int slot_count = map.instance_size() / kTaggedSize;
-  SBXCHECK_GE(slot_count, 3);
-  CapturedObject object(zone, slot_count);
-  object.set(JSObject::kMapOffset, map);
-  object.set(JSObject::kPropertiesOrHashOffset, RootIndex::kEmptyFixedArray);
-  object.set(JSObject::kElementsOffset, RootIndex::kEmptyFixedArray);
-  object.ClearSlots(JSObject::kElementsOffset);
-  return object;
-}
-
-// static
-CapturedObject CapturedObject::CreateJSConstructor(
-    Zone* zone, compiler::JSHeapBroker* broker,
-    compiler::JSFunctionRef constructor) {
-  compiler::SlackTrackingPrediction prediction =
-      broker->dependencies()->DependOnInitialMapInstanceSizePrediction(
-          constructor);
-  int slot_count = prediction.instance_size() / kTaggedSize;
-  CapturedObject object(zone, slot_count);
-  SBXCHECK_GE(slot_count, 3);
-  object.set(JSObject::kMapOffset, constructor.initial_map(broker));
-  object.set(JSObject::kPropertiesOrHashOffset, RootIndex::kEmptyFixedArray);
-  object.set(JSObject::kElementsOffset, RootIndex::kEmptyFixedArray);
-  object.ClearSlots(JSObject::kElementsOffset);
-  return object;
-}
-
-// static
-CapturedObject CapturedObject::CreateJSArray(Zone* zone, compiler::MapRef map,
-                                             int instance_size,
-                                             ValueNode* length) {
-  int slot_count = instance_size / kTaggedSize;
-  SBXCHECK_GE(slot_count, 4);
-  CapturedObject object(zone, slot_count);
-  object.set(JSArray::kMapOffset, map);
-  object.set(JSArray::kPropertiesOrHashOffset, RootIndex::kEmptyFixedArray);
-  object.set(JSArray::kElementsOffset, RootIndex::kEmptyFixedArray);
-  object.set(JSArray::kLengthOffset, length);
-  object.ClearSlots(JSArray::kLengthOffset);
-  return object;
-}
-
-// static
-CapturedObject CapturedObject::CreateFixedArray(Zone* zone,
-                                                compiler::MapRef map,
-                                                int length) {
-  int slot_count = FixedArray::SizeFor(length) / kTaggedSize;
-  CapturedObject array(zone, slot_count, kFixedArray);
-  array.set(FixedArray::kMapOffset, map);
-  array.set(FixedArray::kLengthOffset, length);
-  array.ClearSlots(FixedArray::kLengthOffset);
-  return array;
-}
-
-// static
-CapturedObject CapturedObject::CreateContext(
-    Zone* zone, compiler::MapRef map, int length,
-    compiler::ScopeInfoRef scope_info, ValueNode* previous_context,
-    base::Optional<ValueNode*> extension) {
-  int slot_count = FixedArray::SizeFor(length) / kTaggedSize;
-  CapturedObject context(zone, slot_count);
-  context.set(Context::kMapOffset, map);
-  context.set(Context::kLengthOffset, length);
-  context.set(Context::OffsetOfElementAt(Context::SCOPE_INFO_INDEX),
-              scope_info);
-  context.set(Context::OffsetOfElementAt(Context::PREVIOUS_INDEX),
-              previous_context);
-  int index = Context::PREVIOUS_INDEX + 1;
-  if (extension.has_value()) {
-    context.set(Context::OffsetOfElementAt(Context::EXTENSION_INDEX),
-                extension.value());
-    index++;
-  }
-  for (; index < length; index++) {
-    context.set(Context::OffsetOfElementAt(index), RootIndex::kUndefinedValue);
-  }
-  return context;
-}
-
-// static
-CapturedObject CapturedObject::CreateArgumentsObject(
-    Zone* zone, CapturedObject::Tag argument_type, compiler::MapRef map,
-    CapturedValue length, CapturedValue elements,
-    base::Optional<ValueNode*> callee) {
-  DCHECK_EQ(JSSloppyArgumentsObject::kLengthOffset, JSArray::kLengthOffset);
-  DCHECK_EQ(JSStrictArgumentsObject::kLengthOffset, JSArray::kLengthOffset);
-  int slot_count = map.instance_size() / kTaggedSize;
-  SBXCHECK_EQ(slot_count, callee.has_value() ? 5 : 4);
-  CapturedObject arguments(zone, slot_count, argument_type);
-  arguments.set(JSArray::kMapOffset, map);
-  arguments.set(JSArray::kPropertiesOrHashOffset, RootIndex::kEmptyFixedArray);
-  arguments.set(JSArray::kElementsOffset, elements);
-  arguments.set(JSArray::kLengthOffset, length);
-  if (callee.has_value()) {
-    arguments.set(JSSloppyArgumentsObject::kCalleeOffset, callee.value());
-  }
-  DCHECK(arguments.IsArgumentsObject());
-  return arguments;
-}
-
-// static
-CapturedObject CapturedObject::CreateMappedArgumentsElements(
-    Zone* zone, compiler::MapRef map, int mapped_count, ValueNode* context,
-    CapturedValue unmapped_elements) {
-  int slot_count = SloppyArgumentsElements::SizeFor(mapped_count) / kTaggedSize;
-  CapturedObject elements(zone, slot_count);
-  elements.set(SloppyArgumentsElements::kMapOffset, map);
-  elements.set(SloppyArgumentsElements::kLengthOffset, mapped_count);
-  elements.set(SloppyArgumentsElements::kContextOffset, context);
-  elements.set(SloppyArgumentsElements::kArgumentsOffset, unmapped_elements);
-  return elements;
-}
-
-// static
-CapturedObject CapturedObject::CreateRegExpLiteral(
-    Zone* zone, compiler::JSHeapBroker* broker, compiler::MapRef map,
-    compiler::RegExpBoilerplateDescriptionRef literal) {
-  DCHECK_EQ(JSRegExp::Size(), JSRegExp::kLastIndexOffset + kTaggedSize);
-  int slot_count = JSRegExp::Size() / kTaggedSize;
-  CapturedObject regexp(zone, slot_count);
-  regexp.set(JSRegExp::kMapOffset, map);
-  regexp.set(JSRegExp::kPropertiesOrHashOffset, RootIndex::kEmptyFixedArray);
-  regexp.set(JSRegExp::kElementsOffset, RootIndex::kEmptyFixedArray);
-  regexp.set(JSRegExp::kDataOffset, literal.data(broker));
-  regexp.set(JSRegExp::kSourceOffset, literal.source(broker));
-  regexp.set(JSRegExp::kFlagsOffset, literal.flags());
-  regexp.set(JSRegExp::kLastIndexOffset, JSRegExp::kInitialLastIndexValue);
-  return regexp;
-}
-
-// static
-CapturedObject CapturedObject::CreateJSGeneratorObject(
-    Zone* zone, compiler::MapRef map, int instance_size, ValueNode* context,
-    ValueNode* closure, ValueNode* receiver, CapturedObject register_file) {
-  int slot_count = instance_size / kTaggedSize;
-  InstanceType instance_type = map.instance_type();
-  DCHECK(instance_type == JS_GENERATOR_OBJECT_TYPE ||
-         instance_type == JS_ASYNC_GENERATOR_OBJECT_TYPE);
-  SBXCHECK_GE(slot_count, instance_type == JS_GENERATOR_OBJECT_TYPE ? 10 : 12);
-  CapturedObject object(zone, slot_count);
-  object.set(JSGeneratorObject::kMapOffset, map);
-  object.set(JSGeneratorObject::kPropertiesOrHashOffset,
-             RootIndex::kEmptyFixedArray);
-  object.set(JSGeneratorObject::kElementsOffset, RootIndex::kEmptyFixedArray);
-  object.set(JSGeneratorObject::kContextOffset, context);
-  object.set(JSGeneratorObject::kFunctionOffset, closure);
-  object.set(JSGeneratorObject::kReceiverOffset, receiver);
-  object.set(JSGeneratorObject::kInputOrDebugPosOffset,
-             RootIndex::kUndefinedValue);
-  object.set(JSGeneratorObject::kResumeModeOffset, JSGeneratorObject::kNext);
-  object.set(JSGeneratorObject::kContinuationOffset,
-             JSGeneratorObject::kGeneratorExecuting);
-  object.set(JSGeneratorObject::kParametersAndRegistersOffset, register_file);
-  if (instance_type == JS_ASYNC_GENERATOR_OBJECT_TYPE) {
-    object.set(JSAsyncGeneratorObject::kQueueOffset,
-               RootIndex::kUndefinedValue);
-    object.set(JSAsyncGeneratorObject::kIsAwaitingOffset, 0);
-  }
-  return object;
-}
-
-// static
-CapturedObject CapturedObject::CreateJSIteratorResult(Zone* zone,
-                                                      compiler::MapRef map,
-                                                      ValueNode* value,
-                                                      ValueNode* done) {
-  static_assert(JSIteratorResult::kSize == 5 * kTaggedSize);
-  int slot_count = JSIteratorResult::kSize / kTaggedSize;
-  CapturedObject iter_result(zone, slot_count);
-  iter_result.set(JSIteratorResult::kMapOffset, map);
-  iter_result.set(JSIteratorResult::kPropertiesOrHashOffset,
-                  RootIndex::kEmptyFixedArray);
-  iter_result.set(JSIteratorResult::kElementsOffset,
-                  RootIndex::kEmptyFixedArray);
-  iter_result.set(JSIteratorResult::kValueOffset, value);
-  iter_result.set(JSIteratorResult::kDoneOffset, done);
-  return iter_result;
-}
-
-// static
-CapturedObject CapturedObject::CreateJSStringIterator(Zone* zone,
-                                                      compiler::MapRef map,
-                                                      ValueNode* string) {
-  static_assert(JSStringIterator::kHeaderSize == 5 * kTaggedSize);
-  int slot_count = JSStringIterator::kHeaderSize / kTaggedSize;
-  CapturedObject string_iter(zone, slot_count);
-  string_iter.set(JSStringIterator::kMapOffset, map);
-  string_iter.set(JSStringIterator::kPropertiesOrHashOffset,
-                  RootIndex::kEmptyFixedArray);
-  string_iter.set(JSStringIterator::kElementsOffset,
-                  RootIndex::kEmptyFixedArray);
-  string_iter.set(JSStringIterator::kStringOffset, string);
-  string_iter.set(JSStringIterator::kIndexOffset, 0);
-  return string_iter;
-}
-
-CapturedFixedDoubleArray::CapturedFixedDoubleArray(
-    Zone* zone, compiler::FixedDoubleArrayRef elements, int length)
-    : length(length), values(zone->AllocateArray<Float64>(length)) {
-  for (int i = 0; i < length; ++i) {
-    values[i] = elements.GetFromImmutableFixedDoubleArray(i);
-  }
 }
 
 size_t ValueNode::GetInputLocationsArraySize() const {
   if (const InlinedAllocation* alloc = TryCast<InlinedAllocation>()) {
     // We allocate the space needed for the captured object plus one location
     // used if the InlinedAllocation escapes.
-    return alloc->captured_allocation().InputLocationSizeNeeded() + 1;
+    return alloc->object()->InputLocationSizeNeeded() + 1;
   }
   return 1;
 }
@@ -745,6 +458,39 @@ bool LazyDeoptInfo::IsResultRegister(interpreter::Register reg) const {
   DCHECK_EQ(result_size(), 2);
   return reg == result_location_ ||
          reg == interpreter::Register(result_location_.index() + 1);
+}
+
+bool LazyDeoptInfo::InReturnValues(interpreter::Register reg,
+                                   interpreter::Register result_location,
+                                   int result_size) {
+  if (result_size == 0 || !result_location.is_valid()) {
+    return false;
+  }
+  return base::IsInRange(reg.index(), result_location.index(),
+                         result_location.index() + result_size - 1);
+}
+
+int InterpretedDeoptFrame::ComputeReturnOffset(
+    interpreter::Register result_location, int result_size) const {
+  // Return offsets are counted from the end of the translation frame,
+  // which is the array [parameters..., locals..., accumulator]. Since
+  // it's the end, we don't need to worry about earlier frames.
+  if (result_location == interpreter::Register::virtual_accumulator()) {
+    return 0;
+  } else if (result_location.is_parameter()) {
+    // This is slightly tricky to reason about because of zero indexing
+    // and fence post errors. As an example, consider a frame with 2
+    // locals and 2 parameters, where we want argument index 1 -- looking
+    // at the array in reverse order we have:
+    //   [acc, r1, r0, a1, a0]
+    //                  ^
+    // and this calculation gives, correctly:
+    //   2 + 2 - 1 = 3
+    return unit().register_count() + unit().parameter_count() -
+           result_location.ToParameterIndex();
+  } else {
+    return unit().register_count() - result_location.index();
+  }
 }
 
 void NodeBase::Print(std::ostream& os, MaglevGraphLabeller* graph_labeller,
@@ -2274,7 +2020,6 @@ void ForInPrepare::GenerateCode(MaglevAssembler* masm,
       TaggedIndex::FromIntptr(feedback().index()),  // feedback slot
       feedback().vector                             // feedback vector
   );
-  masm->DefineExceptionHandlerAndLazyDeoptPoint(this);
 }
 
 int ForInNext::MaxCallStackArgs() const {
@@ -2806,9 +2551,14 @@ void StoreMap::GenerateCode(MaglevAssembler* masm,
   Register value = temps.Acquire();
   __ MoveTagged(value, map_.object());
 
-  __ StoreTaggedFieldWithWriteBarrier(
-      object, HeapObject::kMapOffset, value, register_snapshot(),
-      MaglevAssembler::kValueIsCompressed, MaglevAssembler::kValueCannotBeSmi);
+  if (kind() == Kind::kInitializingYoung) {
+    __ StoreTaggedFieldNoWriteBarrier(object, HeapObject::kMapOffset, value);
+  } else {
+    __ StoreTaggedFieldWithWriteBarrier(object, HeapObject::kMapOffset, value,
+                                        register_snapshot(),
+                                        MaglevAssembler::kValueIsCompressed,
+                                        MaglevAssembler::kValueCannotBeSmi);
+  }
 }
 
 int StoreTaggedFieldWithWriteBarrier::MaxCallStackArgs() const {
@@ -3499,6 +3249,22 @@ void CheckString::GenerateCode(MaglevAssembler* masm,
                      __ GetDeoptLabel(this, DeoptimizeReason::kNotAString));
 }
 
+void CheckDetectableCallable::SetValueLocationConstraints() {
+  UseRegister(receiver_input());
+  set_temporaries_needed(1);
+}
+
+void CheckDetectableCallable::GenerateCode(MaglevAssembler* masm,
+                                           const ProcessingState& state) {
+  Register object = ToRegister(receiver_input());
+  MaglevAssembler::ScratchRegisterScope temps(masm);
+  Register scratch = temps.Acquire();
+  auto deopt = __ GetDeoptLabel(this, DeoptimizeReason::kNotDetectableReceiver);
+  __ JumpIfNotCallable(object, scratch, check_type(), deopt);
+  __ JumpIfUndetectable(object, scratch, CheckType::kOmitHeapObjectCheck,
+                        deopt);
+}
+
 void CheckNotHole::SetValueLocationConstraints() {
   UseRegister(object_input());
   DefineSameAsFirst(this);
@@ -3530,6 +3296,7 @@ int ConvertReceiver::MaxCallStackArgs() const {
 }
 void ConvertReceiver::SetValueLocationConstraints() {
   using D = CallInterfaceDescriptorFor<Builtin::kToObject>::type;
+  static_assert(D::GetRegisterParameter(D::kInput) == kReturnRegister0);
   UseFixed(receiver_input(), D::GetRegisterParameter(D::kInput));
   DefineAsFixed(this, kReturnRegister0);
 }
@@ -3540,6 +3307,10 @@ void ConvertReceiver::GenerateCode(MaglevAssembler* masm,
   __ JumpIfSmi(
       receiver, &convert_to_object,
       v8_flags.debug_code ? Label::Distance::kFar : Label::Distance::kNear);
+
+  // If {receiver} is not primitive, no need to move it to {result}, since
+  // they share the same register.
+  DCHECK_EQ(receiver, ToRegister(result()));
   __ JumpIfJSAnyIsNotPrimitive(receiver, &done);
 
   compiler::JSHeapBroker* broker = masm->compilation_info()->broker();
@@ -4525,6 +4296,16 @@ void Float64Round::SetValueLocationConstraints() {
   }
 }
 
+void Int32AbsWithOverflow::SetValueLocationConstraints() {
+  UseRegister(input());
+  DefineSameAsFirst(this);
+}
+
+void Float64Abs::SetValueLocationConstraints() {
+  UseRegister(input());
+  DefineSameAsFirst(this);
+}
+
 void CheckedSmiTagFloat64::SetValueLocationConstraints() {
   UseRegister(input());
   DefineAsRegister(this);
@@ -4593,7 +4374,8 @@ void StringAt::GenerateCode(MaglevAssembler* masm,
       BuiltinStringPrototypeCharCodeOrCodePointAt::kCharCodeAt, save_registers,
       char_code, string, index, scratch, &cached_one_byte_string);
   __ StringFromCharCode(save_registers, &cached_one_byte_string, result_string,
-                        char_code, scratch);
+                        char_code, scratch,
+                        MaglevAssembler::CharCodeMaskMode::kValueIsInRange);
 }
 
 void StringLength::SetValueLocationConstraints() {
@@ -5001,16 +4783,10 @@ void ThrowIfNotCallable::GenerateCode(MaglevAssembler* masm,
       this);
 
   Register value_reg = ToRegister(value());
-  __ JumpIfSmi(value_reg, if_not_callable);
-
   MaglevAssembler::ScratchRegisterScope temps(masm);
   Register scratch = temps.Acquire();
-  __ LoadMap(scratch, value_reg);
-  static_assert(Map::kBitFieldOffsetEnd + 1 - Map::kBitFieldOffset == 1);
-  __ LoadUnsignedField(scratch, FieldMemOperand(scratch, Map::kBitFieldOffset),
-                       1);
-  __ TestInt32AndJumpIfAllClear(scratch, Map::Bits1::IsCallableBit::kMask,
-                                if_not_callable);
+  __ JumpIfNotCallable(value_reg, scratch, CheckType::kCheckHeapObject,
+                       if_not_callable);
 }
 
 int ThrowIfNotSuperConstructor::MaxCallStackArgs() const { return 2; }
@@ -5548,7 +5324,7 @@ void CallKnownApiFunction::GenerateCode(MaglevAssembler* masm,
           kContextRegister,
           CallApiCallbackOptimizedDescriptor::HolderRegister(),
           CallApiCallbackOptimizedDescriptor::ActualArgumentsCountRegister(),
-          CallApiCallbackOptimizedDescriptor::CallDataRegister(),
+          CallApiCallbackOptimizedDescriptor::FunctionTemplateInfoRegister(),
           CallApiCallbackOptimizedDescriptor::ApiFunctionAddressRegister()});
   DCHECK_EQ(kContextRegister, ToRegister(context()));
 
@@ -5569,13 +5345,9 @@ void CallKnownApiFunction::GenerateCode(MaglevAssembler* masm,
   __ Move(CallApiCallbackOptimizedDescriptor::ActualArgumentsCountRegister(),
           num_args());  // not including receiver
 
-  if (data_.IsSmi()) {
-    __ Move(CallApiCallbackOptimizedDescriptor::CallDataRegister(),
-            Smi::FromInt(data_.AsSmi()));
-  } else {
-    __ Move(CallApiCallbackOptimizedDescriptor::CallDataRegister(),
-            Handle<HeapObject>::cast(data_.object()));
-  }
+  __ Move(CallApiCallbackOptimizedDescriptor::FunctionTemplateInfoRegister(),
+          Handle<HeapObject>::cast(function_template_info_.object()));
+
   compiler::JSHeapBroker* broker = masm->compilation_info()->broker();
   ApiFunction function(function_template_info_.callback(broker));
   ExternalReference reference =
@@ -5607,7 +5379,7 @@ void CallKnownApiFunction::GenerateCallApiCallbackOptimizedInline(
 
   static_assert(FCA::kArgsLength == 6);
   static_assert(FCA::kNewTargetIndex == 5);
-  static_assert(FCA::kDataIndex == 4);
+  static_assert(FCA::kTargetIndex == 4);
   static_assert(FCA::kReturnValueIndex == 3);
   static_assert(FCA::kUnusedIndex == 2);
   static_assert(FCA::kIsolateIndex == 1);
@@ -5620,7 +5392,7 @@ void CallKnownApiFunction::GenerateCallApiCallbackOptimizedInline(
   //   sp[1 * kSystemPointerSize]: kIsolate
   //   sp[2 * kSystemPointerSize]: undefined (padding, unused)
   //   sp[3 * kSystemPointerSize]: undefined (kReturnValue)
-  //   sp[4 * kSystemPointerSize]: kData
+  //   sp[4 * kSystemPointerSize]: kTarget
   //   sp[5 * kSystemPointerSize]: undefined (kNewTarget)
   // Existing state:
   //   sp[6 * kSystemPointerSize]:          <= FCA:::values_
@@ -5630,13 +5402,9 @@ void CallKnownApiFunction::GenerateCallApiCallbackOptimizedInline(
 
   ASM_CODE_COMMENT_STRING(masm, "inlined CallApiCallbackOptimized builtin");
   __ LoadRoot(scratch, RootIndex::kUndefinedValue);
-  // kNewTarget, kData, kReturnValue, kUnused
-  if (data_.IsSmi()) {
-    __ Push(scratch, Smi::FromInt(data_.AsSmi()), scratch, scratch);
-  } else {
-    __ Push(scratch, Handle<HeapObject>::cast(data_.object()), scratch,
-            scratch);
-  }
+  // kNewTarget, kTarget, kReturnValue, kUnused
+  __ Push(scratch, Handle<HeapObject>::cast(function_template_info_.object()),
+          scratch, scratch);
   __ Move(scratch, ER::isolate_address(masm->isolate()));
   // kIsolate, kHolder
   if (api_holder_.has_value()) {
@@ -6008,14 +5776,14 @@ void ConstructWithSpread::SetValueLocationConstraints() {
 void ConstructWithSpread::GenerateCode(MaglevAssembler* masm,
                                        const ProcessingState& state) {
   __ CallBuiltin<Builtin::kConstructWithSpread_WithFeedback>(
-      context(),             // context
-      function(),            // target
-      new_target(),          // new target
-      num_args_no_spread(),  // actual arguments count
-      feedback().index(),    // feedback slot
-      spread(),              // spread
-      feedback().vector,     // feedback vector
-      args_no_spread()       // args
+      context(),                                    // context
+      function(),                                   // target
+      new_target(),                                 // new target
+      num_args_no_spread(),                         // actual arguments count
+      spread(),                                     // spread
+      TaggedIndex::FromIntptr(feedback().index()),  // feedback slot
+      feedback().vector,                            // feedback vector
+      args_no_spread()                              // args
   );
   masm->DefineExceptionHandlerAndLazyDeoptPoint(this);
 }
@@ -6155,6 +5923,7 @@ void TransitionElementsKindOrCheckMap::GenerateCode(
 
   Register map = temps.Acquire();
   __ LoadMapForCompare(map, object);
+  __ CompareTaggedAndJumpIf(map, transition_target_.object(), kEqual, *done);
 
   GenerateTransitionElementsKind(masm, this, object, map,
                                  base::VectorOf(transition_sources_),
@@ -6878,16 +6647,12 @@ void AllocationBlock::PrintParams(std::ostream& os,
 
 void InlinedAllocation::PrintParams(std::ostream& os,
                                     MaglevGraphLabeller* graph_labeller) const {
-  switch (captured_allocation_.type) {
-    case CapturedAllocation::kHeapNumber:
-      os << "(HeapNumber)";
-      break;
-    case CapturedAllocation::kFixedDoubleArray:
-      os << "(FixedDoubleArray)";
-      break;
-    case CapturedAllocation::kObject:
-      os << "(" << *captured_allocation_.object.GetMap().object() << ")";
-  }
+  os << "(" << *object()->map().object() << ")";
+}
+
+void VirtualObject::PrintParams(std::ostream& os,
+                                MaglevGraphLabeller* graph_labeller) const {
+  os << "(" << *map().object() << ")";
 }
 
 void Abort::PrintParams(std::ostream& os,
@@ -6925,6 +6690,16 @@ void CheckMaps::PrintParams(std::ostream& os,
     os << *map.object();
   }
   os << ")";
+}
+
+void TransitionElementsKindOrCheckMap::PrintParams(
+    std::ostream& os, MaglevGraphLabeller* graph_labeller) const {
+  os << "(" << Node::input(0).node() << ", [";
+  os << *transition_target().object();
+  for (compiler::MapRef source : transition_sources()) {
+    os << ", " << *source.object();
+  }
+  os << "]-->" << *transition_target().object() << ")";
 }
 
 void CheckValue::PrintParams(std::ostream& os,
@@ -7054,9 +6829,24 @@ void StoreTaggedFieldNoWriteBarrier::PrintParams(
   os << "(0x" << std::hex << offset() << std::dec << ")";
 }
 
+std::ostream& operator<<(std::ostream& os, StoreMap::Kind kind) {
+  switch (kind) {
+    case StoreMap::Kind::kInitializing:
+      os << "Initializing";
+      break;
+    case StoreMap::Kind::kInitializingYoung:
+      os << "InitializingYoung";
+      break;
+    case StoreMap::Kind::kTransitioning:
+      os << "Transitioning";
+      break;
+  }
+  return os;
+}
+
 void StoreMap::PrintParams(std::ostream& os,
                            MaglevGraphLabeller* graph_labeller) const {
-  os << "(" << *map_.object() << ")";
+  os << "(" << *map_.object() << ", " << kind() << ")";
 }
 
 void StoreTaggedFieldWithWriteBarrier::PrintParams(
@@ -7267,6 +7057,77 @@ void BranchIfUint32Compare::PrintParams(
 void BranchIfTypeOf::PrintParams(std::ostream& os,
                                  MaglevGraphLabeller* graph_labeller) const {
   os << "(" << interpreter::TestTypeOfFlags::ToString(literal_) << ")";
+}
+
+// Keeping track of the effects this instruction has on known node aspects.
+void NodeBase::ClearElementsProperties(KnownNodeAspects& known_node_aspects) {
+  DCHECK(IsElementsArrayWrite(opcode()));
+  // Clear Elements cache.
+  auto elements_properties = known_node_aspects.loaded_properties.find(
+      KnownNodeAspects::LoadedPropertyMapKey::Elements());
+  if (elements_properties != known_node_aspects.loaded_properties.end()) {
+    elements_properties->second.clear();
+    if (v8_flags.trace_maglev_graph_building) {
+      std::cout << "  * Removing non-constant cached [Elements]";
+    }
+  }
+}
+
+void NodeBase::ClearUnstableNodeAspects(KnownNodeAspects& known_node_aspects) {
+  DCHECK(properties().can_write());
+  DCHECK(!IsSimpleFieldStore(opcode()));
+  DCHECK(!IsElementsArrayWrite(opcode()));
+
+  if (v8_flags.trace_maglev_graph_building) {
+    std::cout << "  ! Clearing unstable node aspects" << std::endl;
+  }
+  known_node_aspects.ClearUnstableMaps();
+  // Side-effects can change object contents, so we have to clear
+  // our known loaded properties -- however, constant properties are known
+  // to not change (and we added a dependency on this), so we don't have to
+  // clear those.
+  known_node_aspects.loaded_properties.clear();
+  known_node_aspects.loaded_context_slots.clear();
+  known_node_aspects.may_have_aliasing_contexts =
+      KnownNodeAspects::ContextSlotLoadsAlias::None;
+}
+
+void StoreMap::ClearUnstableNodeAspects(KnownNodeAspects& known_node_aspects) {
+  switch (kind()) {
+    case Kind::kInitializing:
+    case Kind::kInitializingYoung:
+      return;
+    case Kind::kTransitioning: {
+      if (NodeInfo* node_info =
+              known_node_aspects.TryGetInfoFor(object_input().node())) {
+        if (node_info->possible_maps_are_known() &&
+            node_info->possible_maps().size() == 1) {
+          compiler::MapRef old_map = node_info->possible_maps().at(0);
+          auto MaybeAliases = [&](compiler::MapRef map) -> bool {
+            return map.equals(old_map);
+          };
+          known_node_aspects.ClearUnstableMapsIfAny(MaybeAliases);
+          if (v8_flags.trace_maglev_graph_building) {
+            std::cout << "  ! StoreMap: Clearing unstable map "
+                      << Brief(*old_map.object()) << std::endl;
+          }
+          return;
+        }
+      }
+      break;
+    }
+  }
+  // TODO(olivf): Only invalidate nodes with the same type.
+  known_node_aspects.ClearUnstableMaps();
+  if (v8_flags.trace_maglev_graph_building) {
+    std::cout << "  ! StoreMap: Clearing unstable maps" << std::endl;
+  }
+}
+
+void CheckMapsWithMigration::ClearUnstableNodeAspects(
+    KnownNodeAspects& known_node_aspects) {
+  // This instruction only migrates representations of values, not the values
+  // themselves, so cached values are still valid.
 }
 
 }  // namespace maglev

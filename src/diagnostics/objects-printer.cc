@@ -1459,6 +1459,7 @@ void FeedbackNexus::Print(std::ostream& os) {
     case FeedbackSlotKind::kCloneObject:
     case FeedbackSlotKind::kHasKeyed:
     case FeedbackSlotKind::kInstanceOf:
+    case FeedbackSlotKind::kTypeOf:
     case FeedbackSlotKind::kDefineKeyedOwnPropertyInLiteral:
     case FeedbackSlotKind::kStoreInArrayLiteral: {
       os << InlineCacheState2String(ic_state());
@@ -1991,7 +1992,7 @@ void JSFunction::JSFunctionPrint(std::ostream& os) {
 #if V8_ENABLE_WEBASSEMBLY
   if (WasmExportedFunction::IsWasmExportedFunction(*this)) {
     Tagged<WasmExportedFunction> function = WasmExportedFunction::cast(*this);
-    os << "\n - Wasm instance: " << Brief(function->instance());
+    os << "\n - Wasm instance data: " << Brief(function->instance_data());
     os << "\n - Wasm function index: " << function->function_index();
   }
   if (WasmJSFunction::IsWasmJSFunction(*this)) {
@@ -2531,7 +2532,7 @@ void WasmFunctionData::WasmFunctionDataPrint(std::ostream& os) {
 void WasmExportedFunctionData::WasmExportedFunctionDataPrint(std::ostream& os) {
   PrintHeader(os, "WasmExportedFunctionData");
   WasmFunctionDataPrint(os);
-  os << "\n - instance: " << Brief(instance());
+  os << "\n - instance_data: " << Brief(instance_data());
   os << "\n - function_index: " << function_index();
   os << "\n - signature: " << reinterpret_cast<const void*>(sig());
   os << "\n - wrapper_budget: " << wrapper_budget()->value();
@@ -3614,6 +3615,8 @@ void TransitionsAccessor::PrintOneTransition(std::ostream& os, Tagged<Name> key,
   } else if (key == roots.elements_transition_symbol()) {
     os << "(transition to " << ElementsKindToString(target->elements_kind())
        << ")";
+  } else if (key == roots.object_clone_transition_symbol()) {
+    os << "(clone object dependency transition)";
   } else if (key == roots.strict_function_transition_symbol()) {
     os << " (transition to strict function)";
   } else {
@@ -3629,14 +3632,32 @@ void TransitionsAccessor::PrintOneTransition(std::ostream& os, Tagged<Name> key,
 }
 
 void TransitionArray::PrintInternal(std::ostream& os) {
-  int num_transitions = number_of_transitions();
-  os << "Transition array #" << num_transitions << ":";
-  for (int i = 0; i < num_transitions; i++) {
-    Tagged<Name> key = GetKey(i);
-    Tagged<Map> target = GetTarget(i);
-    TransitionsAccessor::PrintOneTransition(os, key, target);
+  {
+    int num_transitions = number_of_transitions();
+    os << "   Transition array #" << num_transitions << ":";
+    for (int i = 0; i < num_transitions; i++) {
+      Tagged<Name> key = GetKey(i);
+      Tagged<Map> target;
+      GetTargetIfExists(i, GetIsolateFromWritableObject(*this), &target);
+      TransitionsAccessor::PrintOneTransition(os, key, target);
+    }
   }
-  os << "\n" << std::flush;
+
+  if (HasPrototypeTransitions()) {
+    auto prototype_transitions = GetPrototypeTransitions();
+    int num_transitions = NumberOfPrototypeTransitions(prototype_transitions);
+    os << "\n   Prototype transitions #" << num_transitions << ":";
+    for (int i = 0; i < num_transitions; i++) {
+      auto maybe = prototype_transitions->get(
+          TransitionArray::kProtoTransitionHeaderSize + i);
+      Tagged<HeapObject> target;
+      if (maybe.GetHeapObjectIfWeak(&target)) {
+        auto map = Map::cast(target);
+        os << "\n     " << Brief(map->prototype()) << " -> "
+           << Brief(Map::cast(target));
+      }
+    }
+  }
 }
 
 void TransitionsAccessor::PrintTransitions(std::ostream& os) {
@@ -3653,13 +3674,15 @@ void TransitionsAccessor::PrintTransitions(std::ostream& os) {
       break;
     }
     case kFullTransitionArray:
+      std::cout << "\n";
       return transitions()->PrintInternal(os);
   }
 }
 
 void TransitionsAccessor::PrintTransitionTree() {
   StdoutStream os;
-  os << "map= " << Brief(map_);
+  os << (IsUndefined(map_->GetBackPointer()) ? "root_" : "")
+     << "map= " << Brief(map_);
   DisallowGarbageCollection no_gc;
   PrintTransitionTree(os, 0, &no_gc);
   os << "\n" << std::flush;
@@ -3668,52 +3691,71 @@ void TransitionsAccessor::PrintTransitionTree() {
 void TransitionsAccessor::PrintTransitionTree(
     std::ostream& os, int level, DisallowGarbageCollection* no_gc) {
   ReadOnlyRoots roots = ReadOnlyRoots(isolate_);
-  int num_transitions = NumberOfTransitions();
-  if (num_transitions == 0) return;
-  for (int i = 0; i < num_transitions; i++) {
-    Tagged<Name> key = GetKey(i);
-    Tagged<Map> target = GetTarget(i);
-    os << std::endl
-       << "  " << level << "/" << i << ":" << std::setw(level * 2 + 2) << " ";
-    std::stringstream ss;
-    ss << Brief(target);
-    os << std::left << std::setw(50) << ss.str() << ": ";
+  int pos = 0;
+  int proto_pos = 0;
+  ForEachTransition(
+      no_gc,
+      [&](Tagged<Map> target) {
+        Tagged<Name> key = GetKey(pos);
+        os << std::endl
+           << "  " << level << "/" << pos << ":" << std::setw(level * 2 + 2)
+           << " ";
+        pos++;
+        std::stringstream ss;
+        ss << Brief(target);
+        os << std::left << std::setw(50) << ss.str() << ": ";
 
-    if (key == roots.nonextensible_symbol()) {
-      os << "to non-extensible";
-    } else if (key == roots.sealed_symbol()) {
-      os << "to sealed ";
-    } else if (key == roots.frozen_symbol()) {
-      os << "to frozen";
-    } else if (key == roots.elements_transition_symbol()) {
-      os << "to " << ElementsKindToString(target->elements_kind());
-    } else if (key == roots.strict_function_transition_symbol()) {
-      os << "to strict function";
-    } else {
+        if (key == roots.nonextensible_symbol()) {
+          os << "to non-extensible";
+        } else if (key == roots.sealed_symbol()) {
+          os << "to sealed ";
+        } else if (key == roots.frozen_symbol()) {
+          os << "to frozen";
+        } else if (key == roots.elements_transition_symbol()) {
+          os << "to " << ElementsKindToString(target->elements_kind());
+        } else if (key == roots.strict_function_transition_symbol()) {
+          os << "to strict function";
+        } else if (key == roots.object_clone_transition_symbol()) {
+          os << "clone object dependency";
+        } else {
 #ifdef OBJECT_PRINT
-      key->NamePrint(os);
+          key->NamePrint(os);
 #else
-      ShortPrint(key, os);
+          ShortPrint(key, os);
 #endif
-      os << " ";
-      DCHECK(!IsSpecialTransition(ReadOnlyRoots(isolate_), key));
-      os << "to ";
-      InternalIndex descriptor = target->LastAdded();
-      Tagged<DescriptorArray> descriptors =
-          target->instance_descriptors(isolate_);
-      descriptors->PrintDescriptorDetails(os, descriptor,
-                                          PropertyDetails::kForTransitions);
-    }
-    TransitionsAccessor transitions(isolate_, target);
-    transitions.PrintTransitionTree(os, level + 1, no_gc);
-  }
+          os << " ";
+          DCHECK(!IsSpecialTransition(ReadOnlyRoots(isolate_), key));
+          os << "to ";
+          InternalIndex descriptor = target->LastAdded();
+          Tagged<DescriptorArray> descriptors =
+              target->instance_descriptors(isolate_);
+          descriptors->PrintDescriptorDetails(os, descriptor,
+                                              PropertyDetails::kForTransitions);
+        }
+        TransitionsAccessor transitions(isolate_, target);
+        transitions.PrintTransitionTree(os, level + 1, no_gc);
+      },
+      [&](Tagged<Map> target) {
+        os << std::endl
+           << "  " << level << "/p" << proto_pos << ":"
+           << std::setw(level * 2 + 2) << " ";
+        proto_pos++;
+        std::stringstream ss;
+        ss << Brief(target);
+        os << std::left << std::setw(50) << ss.str() << ": to proto ";
+        ShortPrint(target->prototype(), os);
+        TransitionsAccessor transitions(isolate_, target);
+        transitions.PrintTransitionTree(os, level + 1, no_gc);
+      },
+      TransitionsAccessor::IterationMode::kIncludeClearedSideStepTransitions);
 }
 
 void JSObject::PrintTransitions(std::ostream& os) {
   TransitionsAccessor ta(GetIsolate(), map());
-  if (ta.NumberOfTransitions() == 0) return;
-  os << "\n - transitions";
-  ta.PrintTransitions(os);
+  if (ta.NumberOfTransitions() != 0 || ta.HasPrototypeTransitions()) {
+    os << "\n - transitions";
+    ta.PrintTransitions(os);
+  }
 }
 
 #endif  // defined(DEBUG) || defined(OBJECT_PRINT)
@@ -3905,14 +3947,17 @@ _v8_internal_Expand_StackTrace(i::Isolate* isolate) {
 }
 
 V8_DONT_STRIP_SYMBOL
-V8_EXPORT_PRIVATE extern void _v8_internal_Print_TransitionTree(void* object) {
+V8_EXPORT_PRIVATE extern void _v8_internal_Print_TransitionTree(
+    void* object, bool start_at_root = false) {
   i::Tagged<i::Object> o(GetObjectFromRaw(object));
   if (!IsMap(o)) {
     printf("Please provide a valid Map\n");
   } else {
 #if defined(DEBUG) || defined(OBJECT_PRINT)
     i::Tagged<i::Map> map = i::Map::unchecked_cast(o);
-    i::TransitionsAccessor transitions(i::Isolate::Current(), map);
+    i::TransitionsAccessor transitions(
+        i::Isolate::Current(),
+        start_at_root ? map->FindRootMap(GetPtrComprCageBase(map)) : map);
     transitions.PrintTransitionTree();
 #endif
   }

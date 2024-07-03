@@ -113,6 +113,27 @@ class MachineLoweringReducer : public Next {
 
         return i32;
       }
+      case ChangeOrDeoptOp::Kind::kFloat64ToUint32: {
+        V<Float64> f64_input = V<Float64>::Cast(input);
+        V<Word32> ui32 = __ TruncateFloat64ToUint32OverflowUndefined(f64_input);
+        __ DeoptimizeIfNot(
+            __ Float64Equal(__ ChangeUint32ToFloat64(ui32), f64_input),
+            frame_state, DeoptimizeReason::kLostPrecisionOrNaN, feedback);
+
+        if (minus_zero_mode == CheckForMinusZeroMode::kCheckForMinusZero) {
+          // Check if {value} is -0.
+          IF (UNLIKELY(__ Word32Equal(ui32, 0))) {
+            // In case of 0, we need to check the high bits for the IEEE -0
+            // pattern.
+            V<Word32> check_negative =
+                __ Int32LessThan(__ Float64ExtractHighWord32(f64_input), 0);
+            __ DeoptimizeIf(check_negative, frame_state,
+                            DeoptimizeReason::kMinusZero, feedback);
+          }
+        }
+
+        return ui32;
+      }
       case ChangeOrDeoptOp::Kind::kFloat64ToInt64: {
         V<Float64> f64_input = V<Float64>::Cast(input);
         V<Word64> i64 = __ TruncateFloat64ToInt64OverflowToMin(f64_input);
@@ -357,6 +378,25 @@ class MachineLoweringReducer : public Next {
         V<Map> map = __ LoadMapField(input);
         GOTO(done,
              __ TaggedEqual(map, __ HeapConstant(factory_->heap_number_map())));
+
+        BIND(done, result);
+        return result;
+      }
+      case ObjectIsOp::Kind::kNumberOrBigInt: {
+        Label<Word32> done(this);
+        DCHECK_NE(input_assumptions, ObjectIsOp::InputAssumptions::kBigInt);
+
+        // Check for Smi if necessary.
+        if (NeedsHeapObjectCheck(input_assumptions)) {
+          GOTO_IF(__ IsSmi(input), done, 1);
+        }
+
+        V<Map> map = __ LoadMapField(input);
+        GOTO_IF(
+            __ TaggedEqual(map, __ HeapConstant(factory_->heap_number_map())),
+            done, 1);
+        GOTO(done,
+             __ TaggedEqual(map, __ HeapConstant(factory_->bigint_map())));
 
         BIND(done, result);
         return result;
@@ -1303,8 +1343,8 @@ class MachineLoweringReducer : public Next {
             builder.AddParam(MachineType::TaggedPointer());
             auto desc = Linkage::GetSimplifiedCDescriptor(__ graph_zone(),
                                                           builder.Build());
-            auto ts_desc =
-                TSCallDescriptor::Create(desc, CanThrow::kNo, __ graph_zone());
+            auto ts_desc = TSCallDescriptor::Create(
+                desc, CanThrow::kNo, LazyDeoptOnThrow::kNo, __ graph_zone());
             OpIndex callee = __ ExternalConstant(
                 ExternalReference::string_to_array_index_function());
             // NOTE: String::ToArrayIndex() currently returns int32_t.
@@ -2406,9 +2446,17 @@ class MachineLoweringReducer : public Next {
   }
 
   V<Object> REDUCE(LoadStackArgument)(V<WordPtr> base, V<WordPtr> index) {
-    V<WordPtr> argument = __ template LoadNonArrayBufferElement<WordPtr>(
-        base, AccessBuilder::ForStackArgument(), index);
-    return __ BitcastWordPtrToTagged(argument);
+    // Note that this is a load of a Tagged value
+    // (MemoryRepresentation::TaggedPointer()), but since it's on the stack
+    // where stack slots are all kSystemPointerSize, we use kSystemPointerSize
+    // for element_size_log2. On 64-bit plateforms with pointer compression,
+    // this means that we're kinda loading a 32-bit value from an array of
+    // 64-bit values.
+    return __ Load(
+        base, index, LoadOp::Kind::RawAligned(),
+        MemoryRepresentation::TaggedPointer(),
+        CommonFrameConstants::kFixedFrameSizeAboveFp - kSystemPointerSize,
+        kSystemPointerSizeLog2);
   }
 
   OpIndex REDUCE(StoreTypedElement)(OpIndex buffer, V<Object> base,
@@ -2949,7 +2997,7 @@ class MachineLoweringReducer : public Next {
     return input;
   }
 
-  OpIndex REDUCE(CheckEqualsInternalizedString)(V<Object> expected,
+  V<None> REDUCE(CheckEqualsInternalizedString)(V<Object> expected,
                                                 V<Object> value,
                                                 V<FrameState> frame_state) {
     Label<> done(this);
@@ -2994,7 +3042,8 @@ class MachineLoweringReducer : public Next {
           try_string_to_index_or_lookup_existing, {isolate_ptr, value},
           TSCallDescriptor::Create(Linkage::GetSimplifiedCDescriptor(
                                        __ graph_zone(), builder.Build()),
-                                   CanThrow::kNo, __ graph_zone())));
+                                   CanThrow::kNo, LazyDeoptOnThrow::kNo,
+                                   __ graph_zone())));
 
       // Now see if the results match.
       __ DeoptimizeIfNot(__ TaggedEqual(expected, value_internalized),
@@ -3005,7 +3054,7 @@ class MachineLoweringReducer : public Next {
     GOTO(done);
 
     BIND(done);
-    return OpIndex::Invalid();
+    return V<None>::Invalid();
   }
 
   V<Object> REDUCE(LoadMessage)(V<WordPtr> offset) {
@@ -3013,10 +3062,10 @@ class MachineLoweringReducer : public Next {
         offset, AccessBuilder::ForExternalIntPtr()));
   }
 
-  OpIndex REDUCE(StoreMessage)(V<WordPtr> offset, V<Object> object) {
+  V<None> REDUCE(StoreMessage)(V<WordPtr> offset, V<Object> object) {
     __ StoreField(offset, AccessBuilder::ForExternalIntPtr(),
                   __ BitcastTaggedToWordPtr(object));
-    return OpIndex::Invalid();
+    return V<None>::Invalid();
   }
 
   V<Boolean> REDUCE(SameValue)(OpIndex left, OpIndex right,
@@ -3377,8 +3426,8 @@ class MachineLoweringReducer : public Next {
         __ graph_zone(), callable.descriptor(),
         callable.descriptor().GetStackParameterCount(),
         CallDescriptor::kNoFlags, Operator::kFoldable | Operator::kNoThrow);
-    auto ts_descriptor =
-        TSCallDescriptor::Create(descriptor, CanThrow::kNo, __ graph_zone());
+    auto ts_descriptor = TSCallDescriptor::Create(
+        descriptor, CanThrow::kNo, LazyDeoptOnThrow::kNo, __ graph_zone());
     return __ Call(__ HeapConstant(callable.code()), OpIndex::Invalid(),
                    base::VectorOf(args), ts_descriptor);
   }

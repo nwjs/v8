@@ -24,10 +24,10 @@
 #include "src/heap/heap-allocator-inl.h"
 #include "src/heap/heap-inl.h"
 #include "src/heap/incremental-marking.h"
-#include "src/heap/large-page-inl.h"
+#include "src/heap/large-page-metadata-inl.h"
 #include "src/heap/mark-compact-inl.h"
 #include "src/heap/memory-chunk-metadata.h"
-#include "src/heap/mutable-page.h"
+#include "src/heap/mutable-page-metadata.h"
 #include "src/heap/read-only-heap.h"
 #include "src/ic/handler-configuration-inl.h"
 #include "src/init/bootstrapper.h"
@@ -266,8 +266,8 @@ Tagged<HeapObject> Factory::CodeBuilder::AllocateUninitializedInstructionStream(
     return result;
   } else {
     // Return null if we cannot allocate the code object.
-    return heap->AllocateRawWith<LocalHeap::kLightRetry>(object_size,
-                                                         AllocationType::kCode);
+    return heap->AllocateRawWith<HeapAllocator::kLightRetry>(
+        object_size, AllocationType::kCode);
   }
 }
 
@@ -657,8 +657,7 @@ MaybeHandle<String> NewStringFromBytes(Isolate* isolate, PeekBytes peek_bytes,
     Handle<SeqOneByteString> result;
     ASSIGN_RETURN_ON_EXCEPTION(isolate, result,
                                isolate->factory()->NewRawOneByteString(
-                                   decoder.utf16_length(), allocation),
-                               String);
+                                   decoder.utf16_length(), allocation));
 
     DisallowGarbageCollection no_gc;
     decoder.Decode(result->GetChars(no_gc), peek_bytes());
@@ -669,8 +668,7 @@ MaybeHandle<String> NewStringFromBytes(Isolate* isolate, PeekBytes peek_bytes,
   Handle<SeqTwoByteString> result;
   ASSIGN_RETURN_ON_EXCEPTION(isolate, result,
                              isolate->factory()->NewRawTwoByteString(
-                                 decoder.utf16_length(), allocation),
-                             String);
+                                 decoder.utf16_length(), allocation));
 
   DisallowGarbageCollection no_gc;
   decoder.Decode(result->GetChars(no_gc), peek_bytes());
@@ -710,7 +708,7 @@ MaybeHandle<String> Factory::NewStringFromUtf8(
   if (string.size() > kMaxInt) {
     // The Utf8Decode can't handle longer inputs, and we couldn't create
     // strings from them anyway.
-    THROW_NEW_ERROR(isolate(), NewInvalidStringLengthError(), String);
+    THROW_NEW_ERROR(isolate(), NewInvalidStringLengthError());
   }
   auto peek_bytes = [&]() -> base::Vector<const uint8_t> { return string; };
   return NewStringFromUtf8Variant(isolate(), peek_bytes, utf8_variant,
@@ -822,7 +820,7 @@ MaybeHandle<String> Factory::NewStringFromUtf8SubString(
     Handle<SeqOneByteString> result;
     ASSIGN_RETURN_ON_EXCEPTION(
         isolate(), result,
-        NewRawOneByteString(decoder.utf16_length(), allocation), String);
+        NewRawOneByteString(decoder.utf16_length(), allocation));
     DisallowGarbageCollection no_gc;
     // Update pointer references, since the original string may have moved after
     // allocation.
@@ -836,7 +834,7 @@ MaybeHandle<String> Factory::NewStringFromUtf8SubString(
   Handle<SeqTwoByteString> result;
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate(), result,
-      NewRawTwoByteString(decoder.utf16_length(), allocation), String);
+      NewRawTwoByteString(decoder.utf16_length(), allocation));
 
   DisallowGarbageCollection no_gc;
   // Update pointer references, since the original string may have moved after
@@ -855,14 +853,14 @@ MaybeHandle<String> Factory::NewStringFromTwoByte(const base::uc16* string,
     if (length == 1) return LookupSingleCharacterStringFromCode(string[0]);
     Handle<SeqOneByteString> result;
     ASSIGN_RETURN_ON_EXCEPTION(isolate(), result,
-                               NewRawOneByteString(length, allocation), String);
+                               NewRawOneByteString(length, allocation));
     DisallowGarbageCollection no_gc;
     CopyChars(result->GetChars(no_gc), string, length);
     return result;
   } else {
     Handle<SeqTwoByteString> result;
     ASSIGN_RETURN_ON_EXCEPTION(isolate(), result,
-                               NewRawTwoByteString(length, allocation), String);
+                               NewRawTwoByteString(length, allocation));
     DisallowGarbageCollection no_gc;
     CopyChars(result->GetChars(no_gc), string, length);
     return result;
@@ -1031,12 +1029,14 @@ Handle<String> Factory::NewCopiedSubstring(DirectHandle<String> str, int begin,
   DCHECK(str->IsFlat());  // Callers must flatten.
   DCHECK_GT(length, 0);   // Callers must handle empty string.
   bool one_byte;
-  if (str->IsOneByteRepresentation()) {
-    one_byte = true;
-  } else {
+  {
     DisallowGarbageCollection no_gc;
-    const uint16_t* src = str->GetFlatContent(no_gc).ToUC16Vector().data();
-    one_byte = String::IsOneByte(src + begin, length);
+    String::FlatContent flat = str->GetFlatContent(no_gc);
+    if (flat.IsOneByte()) {
+      one_byte = true;
+    } else {
+      one_byte = String::IsOneByte(flat.ToUC16Vector().data() + begin, length);
+    }
   }
   if (one_byte) {
     Handle<SeqOneByteString> result =
@@ -1112,7 +1112,7 @@ MaybeHandle<String> Factory::NewExternalStringFromOneByte(
     const ExternalOneByteString::Resource* resource) {
   size_t length = resource->length();
   if (length > static_cast<size_t>(String::kMaxLength)) {
-    THROW_NEW_ERROR(isolate(), NewInvalidStringLengthError(), String);
+    THROW_NEW_ERROR(isolate(), NewInvalidStringLengthError());
   }
   if (length == 0) return empty_string();
 
@@ -1136,7 +1136,7 @@ MaybeHandle<String> Factory::NewExternalStringFromTwoByte(
     const ExternalTwoByteString::Resource* resource) {
   size_t length = resource->length();
   if (length > static_cast<size_t>(String::kMaxLength)) {
-    THROW_NEW_ERROR(isolate(), NewInvalidStringLengthError(), String);
+    THROW_NEW_ERROR(isolate(), NewInvalidStringLengthError());
   }
   if (length == 0) return empty_string();
 
@@ -1699,7 +1699,8 @@ Handle<WasmFastApiCallData> Factory::NewWasmFastApiCallData(
 }
 
 Handle<WasmInternalFunction> Factory::NewWasmInternalFunction(
-    DirectHandle<ExposedTrustedObject> ref, int function_index) {
+    DirectHandle<ExposedTrustedObject> ref, int function_index,
+    uintptr_t signature_hash) {
   Tagged<WasmInternalFunction> internal =
       Tagged<WasmInternalFunction>::cast(AllocateRawWithImmortalMap(
           WasmInternalFunction::kSize, AllocationType::kTrusted,
@@ -1710,6 +1711,9 @@ Handle<WasmInternalFunction> Factory::NewWasmInternalFunction(
     internal->set_call_target(kNullAddress);
     DCHECK(IsWasmTrustedInstanceData(*ref) || IsWasmApiFunctionRef(*ref));
     internal->set_ref(*ref);
+#if V8_ENABLE_SANDBOX
+    internal->set_signature_hash(signature_hash);
+#endif  // V8_ENABLE_SANDBOX
     // Default values, will be overwritten by the caller.
     internal->set_function_index(function_index);
     internal->set_external(*undefined_value());
@@ -1736,11 +1740,12 @@ Handle<WasmJSFunctionData> Factory::NewWasmJSFunctionData(
     DirectHandle<JSReceiver> callable,
     DirectHandle<PodArray<wasm::ValueType>> serialized_sig,
     DirectHandle<Code> wrapper_code, DirectHandle<Map> rtt,
-    wasm::Suspend suspend, wasm::Promise promise) {
+    wasm::Suspend suspend, wasm::Promise promise, uintptr_t signature_hash) {
   Handle<WasmApiFunctionRef> ref = NewWasmApiFunctionRef(
       callable, suspend, undefined_value(), serialized_sig);
 
-  Handle<WasmInternalFunction> internal = NewWasmInternalFunction(ref, -1);
+  Handle<WasmInternalFunction> internal =
+      NewWasmInternalFunction(ref, -1, signature_hash);
   Handle<WasmFuncRef> func_ref = NewWasmFuncRef(internal, rtt);
   WasmApiFunctionRef::SetFuncRefAsCallOrigin(ref, func_ref);
   Tagged<Map> map = *wasm_js_function_data_map();
@@ -1788,7 +1793,7 @@ Handle<WasmExportedFunctionData> Factory::NewWasmExportedFunctionData(
   result->set_func_ref(*func_ref);
   result->set_internal(*internal_function);
   result->set_wrapper_code(*export_wrapper);
-  result->set_instance(*instance);
+  result->set_instance_data(*instance->trusted_data(isolate()));
   result->set_function_index(func_index);
   result->set_sig(sig);
   result->set_canonical_type_index(canonical_type_index);
@@ -1806,10 +1811,12 @@ Handle<WasmExportedFunctionData> Factory::NewWasmExportedFunctionData(
 Handle<WasmCapiFunctionData> Factory::NewWasmCapiFunctionData(
     Address call_target, DirectHandle<Foreign> embedder_data,
     DirectHandle<Code> wrapper_code, DirectHandle<Map> rtt,
-    DirectHandle<PodArray<wasm::ValueType>> serialized_sig) {
+    DirectHandle<PodArray<wasm::ValueType>> serialized_sig,
+    uintptr_t signature_hash) {
   Handle<WasmApiFunctionRef> ref = NewWasmApiFunctionRef(
       undefined_value(), wasm::kNoSuspend, undefined_value(), serialized_sig);
-  Handle<WasmInternalFunction> internal = NewWasmInternalFunction(ref, -1);
+  Handle<WasmInternalFunction> internal =
+      NewWasmInternalFunction(ref, -1, signature_hash);
   Handle<WasmFuncRef> func_ref = NewWasmFuncRef(internal, rtt);
   WasmApiFunctionRef::SetFuncRefAsCallOrigin(ref, func_ref);
   internal->set_call_target(call_target);
@@ -2774,6 +2781,7 @@ Handle<BytecodeArray> Factory::CopyBytecodeArray(
   copy->set_length(raw_source->length());
   copy->set_frame_size(raw_source->frame_size());
   copy->set_parameter_count(raw_source->parameter_count());
+  copy->set_max_arguments(raw_source->max_arguments());
   copy->set_incoming_new_target_or_generator_register(
       raw_source->incoming_new_target_or_generator_register());
   copy->set_constant_pool(raw_source->constant_pool());
@@ -3204,8 +3212,7 @@ Handle<JSDisposableStack> Factory::NewJSDisposableStack() {
   Handle<Map> map(native_context->js_disposable_stack_map(), isolate());
   Handle<JSDisposableStack> disposable_stack(
       Handle<JSDisposableStack>::cast(NewJSObjectFromMap(map)));
-
-  JSDisposableStack::Initialize(isolate(), disposable_stack);
+  disposable_stack->set_status(0);
   return disposable_stack;
 }
 
@@ -3282,7 +3289,7 @@ Handle<JSArrayBuffer> Factory::NewJSArrayBuffer(
       isolate()->native_context()->array_buffer_fun()->initial_map(),
       isolate());
   ResizableFlag resizable_by_js = ResizableFlag::kNotResizable;
-  if (v8_flags.harmony_rab_gsab && backing_store->is_resizable_by_js()) {
+  if (backing_store->is_resizable_by_js()) {
     resizable_by_js = ResizableFlag::kResizable;
   }
   auto result = Handle<JSArrayBuffer>::cast(
@@ -3340,8 +3347,6 @@ MaybeHandle<JSArrayBuffer> Factory::NewJSArrayBufferAndBackingStore(
 
 Handle<JSArrayBuffer> Factory::NewJSSharedArrayBuffer(
     std::shared_ptr<BackingStore> backing_store) {
-  DCHECK_IMPLIES(backing_store->is_resizable_by_js(),
-                 v8_flags.harmony_rab_gsab);
   Handle<Map> map(
       isolate()->native_context()->shared_array_buffer_fun()->initial_map(),
       isolate());
@@ -3450,7 +3455,6 @@ Handle<JSTypedArray> Factory::NewJSTypedArray(
   ElementsKind elements_kind;
   JSTypedArray::ForFixedTypedArray(type, &element_size, &elements_kind);
 
-  CHECK_IMPLIES(is_length_tracking, v8_flags.harmony_rab_gsab);
   const bool is_backed_by_rab =
       buffer->is_resizable_by_js() && !buffer->is_shared();
 
@@ -3492,7 +3496,6 @@ Handle<JSTypedArray> Factory::NewJSTypedArray(
 Handle<JSDataViewOrRabGsabDataView> Factory::NewJSDataViewOrRabGsabDataView(
     DirectHandle<JSArrayBuffer> buffer, size_t byte_offset, size_t byte_length,
     bool is_length_tracking) {
-  CHECK_IMPLIES(is_length_tracking, v8_flags.harmony_rab_gsab);
   if (is_length_tracking) {
     // Security: enforce the invariant that length-tracking DataViews have their
     // byte_length set to 0.
@@ -3524,8 +3527,7 @@ MaybeHandle<JSBoundFunction> Factory::NewJSBoundFunction(
   static_assert(Code::kMaxArguments <= FixedArray::kMaxLength);
   if (bound_args.length() >= Code::kMaxArguments) {
     THROW_NEW_ERROR(isolate(),
-                    NewRangeError(MessageTemplate::kTooManyArguments),
-                    JSBoundFunction);
+                    NewRangeError(MessageTemplate::kTooManyArguments));
   }
 
   SaveAndSwitchContext save(isolate(),

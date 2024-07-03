@@ -136,22 +136,15 @@ class Handle final : public HandleBase {
   // This means that this is only permitted for Tagged<T> with an operator->,
   // i.e. for on-heap object T.
   V8_INLINE Tagged<T> operator->() const {
-    if constexpr (is_subtype_v<T, HeapObject>) {
-      return **this;
-    } else {
-      // `static_assert(false)` in this else clause was an unconditional error
-      // before CWG2518. See https://reviews.llvm.org/D144285
-#if defined(__clang__) && __clang_major__ >= 17
-      // For non-HeapObjects, there's no on-heap object to dereference, so
-      // disallow using operator->.
-      //
-      // If you got an error here and want to access the Tagged<T>, use
-      // operator* -- e.g. for `Tagged<Smi>::value()`, use `(*handle).value()`.
-      static_assert(
-          is_subtype_v<T, HeapObject>,
-          "This handle does not reference a heap object. Use `(*handle).foo`.");
-#endif
-    }
+    // For non-HeapObjects, there's no on-heap object to dereference, so
+    // disallow using operator->.
+    //
+    // If you got an error here and want to access the Tagged<T>, use
+    // operator* -- e.g. for `Tagged<Smi>::value()`, use `(*handle).value()`.
+    static_assert(
+        is_subtype_v<T, HeapObject>,
+        "This handle does not reference a heap object. Use `(*handle).foo`.");
+    return **this;
   }
 
   V8_INLINE Tagged<T> operator*() const {
@@ -204,6 +197,9 @@ class Handle final : public HandleBase {
   // MaybeHandle is allowed to access location_.
   template <typename>
   friend class MaybeHandle;
+  // Casts are allowed to access location_.
+  template <typename To, typename From>
+  friend inline Handle<To> Cast(Handle<From> value);
 };
 
 template <typename T>
@@ -362,11 +358,27 @@ class V8_TRIVIAL_ABI DirectHandleBase :
   V8_INLINE Address address() const { return obj_; }
 
 #ifdef DEBUG
-  // Counts the number of allocated handles for the current thread.
-  // The number is only accurate if V8_HAS_ATTRIBUTE_TRIVIAL_ABI,
-  // otherwise it's zero.
+  // Counts the number of allocated handles for the current thread that are
+  // below the stack marker. The number is only accurate if
+  // V8_HAS_ATTRIBUTE_TRIVIAL_ABI, otherwise it's zero.
   V8_INLINE static int NumberOfHandles() { return number_of_handles_; }
-#endif
+
+  // Scope to temporarily reset the number of allocated handles.
+  class V8_NODISCARD ResetNumberOfHandlesScope {
+   public:
+    ResetNumberOfHandlesScope() : saved_number_of_handles_(number_of_handles_) {
+      number_of_handles_ = 0;
+    }
+    ~ResetNumberOfHandlesScope() {
+      number_of_handles_ = saved_number_of_handles_;
+    }
+
+   private:
+    int saved_number_of_handles_;
+  };
+#else
+  class V8_NODISCARD ResetNumberOfHandlesScope {};
+#endif  // DEBUG
 
  protected:
   friend class HandleBase;
@@ -525,6 +537,9 @@ class DirectHandle : public DirectHandleBase {
   template <typename>
   friend class MaybeDirectHandle;
   friend class DirectHandleUnchecked<T>;
+  // Casts are allowed to access location_.
+  template <typename To, typename From>
+  friend inline DirectHandle<To> Cast(DirectHandle<From> value);
 
   explicit DirectHandle(no_checking_tag do_not_check)
       : DirectHandleBase(kTaggedNullAddress, do_not_check) {}

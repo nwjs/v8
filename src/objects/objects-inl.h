@@ -26,6 +26,7 @@
 #include "src/heap/read-only-heap-inl.h"
 #include "src/numbers/conversions-inl.h"
 #include "src/objects/bigint-inl.h"
+#include "src/objects/casting.h"
 #include "src/objects/deoptimization-data.h"
 #include "src/objects/heap-number-inl.h"
 #include "src/objects/heap-object.h"
@@ -35,6 +36,7 @@
 #include "src/objects/keys.h"
 #include "src/objects/literal-objects.h"
 #include "src/objects/lookup-inl.h"  // TODO(jkummerow): Drop.
+#include "src/objects/object-list-macros.h"
 #include "src/objects/objects.h"
 #include "src/objects/oddball-inl.h"
 #include "src/objects/property-details.h"
@@ -51,6 +53,7 @@
 #include "src/roots/roots.h"
 #include "src/sandbox/bounded-size-inl.h"
 #include "src/sandbox/code-pointer-inl.h"
+#include "src/sandbox/cppheap-pointer-inl.h"
 #include "src/sandbox/external-pointer-inl.h"
 #include "src/sandbox/indirect-pointer-inl.h"
 #include "src/sandbox/isolate-inl.h"
@@ -198,6 +201,47 @@ bool IsNoSharedNameSentinel(Tagged<Object> obj) {
   return obj == SharedFunctionInfo::kNoSharedNameSentinel;
 }
 
+// TODO(leszeks): Expand Is<T> to all types.
+#define IS_HELPER_DEF(type_)                                 \
+  template <>                                                \
+  struct CastTraits<type_> {                                 \
+    static inline bool AllowFrom(Tagged<Object> value) {     \
+      return Is##type_(value);                               \
+    }                                                        \
+    static inline bool AllowFrom(Tagged<HeapObject> value) { \
+      return Is##type_(value);                               \
+    }                                                        \
+  };
+HEAP_OBJECT_ORDINARY_TYPE_LIST(IS_HELPER_DEF)
+IS_HELPER_DEF(Number)
+IS_HELPER_DEF(Smi)
+IS_HELPER_DEF(PromiseReaction)
+#undef IS_HELPER_DEF
+#define IS_HELPER_DEF(Type, Value, _)                        \
+  template <>                                                \
+  struct CastTraits<Type> {                                  \
+    static inline bool AllowFrom(Tagged<Object> value) {     \
+      return Is##Type(value);                                \
+    }                                                        \
+    static inline bool AllowFrom(Tagged<HeapObject> value) { \
+      return Is##Type(value);                                \
+    }                                                        \
+  };
+ODDBALL_LIST(IS_HELPER_DEF)
+#undef IS_HELPER_DEF
+
+template <>
+struct CastTraits<HeapObject> {
+  static inline bool AllowFrom(Tagged<Object> value) {
+    return IsHeapObject(value);
+  }
+  static inline bool AllowFrom(Tagged<HeapObject> value) { return true; }
+};
+template <>
+struct CastTraits<Object> {
+  static inline bool AllowFrom(Tagged<Object> value) { return true; }
+};
+
 template <class T,
           typename std::enable_if<(std::is_arithmetic<T>::value ||
                                    std::is_enum<T>::value) &&
@@ -239,8 +283,8 @@ Tagged<Object> HeapObject::SeqCst_CompareAndSwapField(
         !IsNumber(actual_expected)) {
       return old_value;
     }
-    if (!Object::SameNumberValue(Object::Number(old_value),
-                                 Object::Number(actual_expected))) {
+    if (!Object::SameNumberValue(Object::NumberValue(old_value),
+                                 Object::NumberValue(actual_expected))) {
       return old_value;
     }
     // The pointer comparison failed, but the numbers are equal. This can
@@ -509,7 +553,7 @@ bool IsPrimitive(Tagged<Object> obj, PtrComprCageBase cage_base) {
 // static
 Maybe<bool> Object::IsArray(Handle<Object> object) {
   if (IsSmi(*object)) return Just(false);
-  Handle<HeapObject> heap_object = Handle<HeapObject>::cast(object);
+  auto heap_object = DirectHandle<HeapObject>::cast(object);
   if (IsJSArray(*heap_object)) return Just(true);
   if (!IsJSProxy(*heap_object)) return Just(false);
   return JSProxy::IsArray(Handle<JSProxy>::cast(object));
@@ -550,7 +594,7 @@ STRUCT_LIST(MAKE_STRUCT_PREDICATE)
 #undef MAKE_STRUCT_PREDICATE
 
 // static
-double Object::Number(Tagged<Object> obj) {
+double Object::NumberValue(Tagged<Object> obj) {
   DCHECK(IsNumber(obj));
   return IsSmi(obj)
              ? static_cast<double>(Tagged<Smi>::unchecked_cast(obj).value())
@@ -812,16 +856,17 @@ Address HeapObject::ReadExternalPointerField(size_t offset,
   return i::ReadExternalPointerField<tag>(field_address(offset), isolate);
 }
 
-template <ExternalPointerTag tag>
-Address HeapObject::TryReadCppHeapPointerField(
+template <CppHeapPointerTag lower_bound, CppHeapPointerTag upper_bound>
+Address HeapObject::ReadCppHeapPointerField(
     size_t offset, IsolateForPointerCompression isolate) const {
-  return i::TryReadCppHeapPointerField<tag>(field_address(offset), isolate);
+  return i::ReadCppHeapPointerField<lower_bound, upper_bound>(
+      field_address(offset), isolate);
 }
 
-Address HeapObject::TryReadCppHeapPointerField(
+Address HeapObject::ReadCppHeapPointerField(
     size_t offset, IsolateForPointerCompression isolate,
-    ExternalPointerTag tag) const {
-  return i::TryReadCppHeapPointerField(field_address(offset), isolate, tag);
+    CppHeapPointerTagRange tag_range) const {
+  return i::ReadCppHeapPointerField(field_address(offset), isolate, tag_range);
 }
 
 template <ExternalPointerTag tag>
@@ -843,10 +888,10 @@ void HeapObject::SetupLazilyInitializedExternalPointerField(size_t offset) {
 }
 
 void HeapObject::SetupLazilyInitializedCppHeapPointerField(size_t offset) {
-  CppHeapPointerSlot(field_address(offset), kAnyExternalPointerTag).init();
+  CppHeapPointerSlot(field_address(offset)).init();
 }
 
-template <ExternalPointerTag tag>
+template <CppHeapPointerTag tag>
 void HeapObject::WriteLazilyInitializedCppHeapPointerField(
     size_t offset, IsolateForPointerCompression isolate, Address value) {
   i::WriteLazilyInitializedCppHeapPointerField<tag>(field_address(offset),
@@ -855,7 +900,7 @@ void HeapObject::WriteLazilyInitializedCppHeapPointerField(
 
 void HeapObject::WriteLazilyInitializedCppHeapPointerField(
     size_t offset, IsolateForPointerCompression isolate, Address value,
-    ExternalPointerTag tag) {
+    CppHeapPointerTag tag) {
   i::WriteLazilyInitializedCppHeapPointerField(field_address(offset), isolate,
                                                value, tag);
 }
@@ -971,9 +1016,8 @@ ExternalPointerSlot HeapObject::RawExternalPointerField(
   return ExternalPointerSlot(field_address(byte_offset), tag);
 }
 
-CppHeapPointerSlot HeapObject::RawCppHeapPointerField(
-    int byte_offset, ExternalPointerTag tag) const {
-  return CppHeapPointerSlot(field_address(byte_offset), tag);
+CppHeapPointerSlot HeapObject::RawCppHeapPointerField(int byte_offset) const {
+  return CppHeapPointerSlot(field_address(byte_offset));
 }
 
 IndirectPointerSlot HeapObject::RawIndirectPointerField(
@@ -1676,9 +1720,9 @@ static inline uint32_t ObjectAddressForHashing(Address object) {
 }
 
 static inline Handle<Object> MakeEntryPair(Isolate* isolate, size_t index,
-                                           Handle<Object> value) {
-  Handle<Object> key = isolate->factory()->SizeToString(index);
-  Handle<FixedArray> entry_storage = isolate->factory()->NewFixedArray(2);
+                                           DirectHandle<Object> value) {
+  DirectHandle<Object> key = isolate->factory()->SizeToString(index);
+  DirectHandle<FixedArray> entry_storage = isolate->factory()->NewFixedArray(2);
   {
     entry_storage->set(0, *key, SKIP_WRITE_BARRIER);
     entry_storage->set(1, *value, SKIP_WRITE_BARRIER);
@@ -1687,9 +1731,10 @@ static inline Handle<Object> MakeEntryPair(Isolate* isolate, size_t index,
                                                     PACKED_ELEMENTS, 2);
 }
 
-static inline Handle<Object> MakeEntryPair(Isolate* isolate, Handle<Object> key,
-                                           Handle<Object> value) {
-  Handle<FixedArray> entry_storage = isolate->factory()->NewFixedArray(2);
+static inline Handle<Object> MakeEntryPair(Isolate* isolate,
+                                           DirectHandle<Object> key,
+                                           DirectHandle<Object> value) {
+  DirectHandle<FixedArray> entry_storage = isolate->factory()->NewFixedArray(2);
   {
     entry_storage->set(0, *key, SKIP_WRITE_BARRIER);
     entry_storage->set(1, *value, SKIP_WRITE_BARRIER);

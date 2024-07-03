@@ -15,6 +15,7 @@
 #include "src/compiler/backend/instruction.h"
 #include "src/compiler/common-operator.h"
 #include "src/compiler/compiler-source-position-table.h"
+#include "src/compiler/globals.h"
 #include "src/compiler/graph.h"
 #include "src/compiler/js-heap-broker.h"
 #include "src/compiler/node-properties.h"
@@ -2506,6 +2507,15 @@ void InstructionSelectorT<Adapter>::VisitCall(node_t node, block_t handler) {
     }
     flags |= CallDescriptor::kHasExceptionHandler;
     buffer.instruction_args.push_back(g.Label(handler));
+  } else {
+    if constexpr (Adapter::IsTurboshaft) {
+      if (call.ts_call_descriptor()->lazy_deopt_on_throw ==
+          LazyDeoptOnThrow::kYes) {
+        flags |= CallDescriptor::kHasExceptionHandler;
+        buffer.instruction_args.push_back(
+            g.UseImmediate(kLazyDeoptOnThrowSentinel));
+      }
+    }
   }
 
   // Select the appropriate opcode based on the call type.
@@ -4500,6 +4510,14 @@ void InstructionSelectorT<TurbofanAdapter>::VisitNode(Node* node) {
       return MarkAsSimd256(node), VisitI32x8DotI8x32I7x32AddS(node);
     case IrOpcode::kI16x16DotI8x32I7x32S:
       return MarkAsSimd256(node), VisitI16x16DotI8x32I7x32S(node);
+    case IrOpcode::kF32x8RelaxedMin:
+      return MarkAsSimd256(node), VisitF32x8RelaxedMin(node);
+    case IrOpcode::kF32x8RelaxedMax:
+      return MarkAsSimd256(node), VisitF32x8RelaxedMax(node);
+    case IrOpcode::kF64x4RelaxedMin:
+      return MarkAsSimd256(node), VisitF64x4RelaxedMin(node);
+    case IrOpcode::kF64x4RelaxedMax:
+      return MarkAsSimd256(node), VisitF64x4RelaxedMax(node);
 #endif  // V8_TARGET_ARCH_X64 && V8_ENABLE_WASM_SIMD256_REVEC
 #endif  // V8_ENABLE_WEBASSEMBLY
     default:
@@ -5670,7 +5688,8 @@ FrameStateDescriptor* GetFrameStateDescriptorInternal(
     Zone* zone, turboshaft::Graph* graph,
     const turboshaft::FrameStateOp& state) {
   const FrameStateInfo& state_info = state.data->frame_state_info;
-  int parameters = state_info.parameter_count();
+  uint16_t parameters = state_info.parameter_count();
+  uint16_t max_arguments = state_info.max_arguments();
   int locals = state_info.local_count();
   int stack = state_info.stack_count();
 
@@ -5695,8 +5714,10 @@ FrameStateDescriptor* GetFrameStateDescriptorInternal(
 
   return zone->New<FrameStateDescriptor>(
       zone, state_info.type(), state_info.bailout_id(),
-      state_info.state_combine(), parameters, locals, stack,
-      state_info.shared_info(), outer_state);
+      state_info.state_combine(), parameters, max_arguments, locals, stack,
+      state_info.shared_info(), outer_state,
+      state_info.function_info()->wasm_liftoff_frame_size(),
+      state_info.function_info()->wasm_function_index());
 }
 
 FrameStateDescriptor* GetFrameStateDescriptorInternal(Zone* zone,
@@ -5704,7 +5725,8 @@ FrameStateDescriptor* GetFrameStateDescriptorInternal(Zone* zone,
   DCHECK_EQ(IrOpcode::kFrameState, state->opcode());
   DCHECK_EQ(FrameState::kFrameStateInputCount, state->InputCount());
   const FrameStateInfo& state_info = FrameStateInfoOf(state->op());
-  int parameters = state_info.parameter_count();
+  uint16_t parameters = state_info.parameter_count();
+  uint16_t max_arguments = state_info.max_arguments();
   int locals = state_info.local_count();
   int stack = state_info.stack_count();
 
@@ -5727,8 +5749,10 @@ FrameStateDescriptor* GetFrameStateDescriptorInternal(Zone* zone,
 
   return zone->New<FrameStateDescriptor>(
       zone, state_info.type(), state_info.bailout_id(),
-      state_info.state_combine(), parameters, locals, stack,
-      state_info.shared_info(), outer_state);
+      state_info.state_combine(), parameters, max_arguments, locals, stack,
+      state_info.shared_info(), outer_state,
+      state_info.function_info()->wasm_liftoff_frame_size(),
+      state_info.function_info()->wasm_function_index());
 }
 
 }  // namespace
@@ -5744,7 +5768,8 @@ InstructionSelectorT<TurboshaftAdapter>::GetFrameStateDescriptor(node_t node) {
                                                this->turboshaft_graph(), state);
   *max_unoptimized_frame_height_ =
       std::max(*max_unoptimized_frame_height_,
-               desc->total_conservative_frame_size_in_bytes());
+               desc->total_conservative_frame_size_in_bytes() +
+                   (desc->max_arguments() * kSystemPointerSize));
   return desc;
 }
 
@@ -5755,7 +5780,8 @@ InstructionSelectorT<TurbofanAdapter>::GetFrameStateDescriptor(node_t node) {
   auto* desc = GetFrameStateDescriptorInternal(instruction_zone(), state);
   *max_unoptimized_frame_height_ =
       std::max(*max_unoptimized_frame_height_,
-               desc->total_conservative_frame_size_in_bytes());
+               desc->total_conservative_frame_size_in_bytes() +
+                   (desc->max_arguments() * kSystemPointerSize));
   return desc;
 }
 

@@ -23,8 +23,8 @@
 #include "src/heap/marking-state-inl.h"
 #include "src/heap/memory-allocator.h"
 #include "src/heap/memory-chunk-layout.h"
-#include "src/heap/mutable-page-inl.h"
-#include "src/heap/page-inl.h"
+#include "src/heap/mutable-page-metadata-inl.h"
+#include "src/heap/page-metadata-inl.h"
 #include "src/heap/paged-spaces-inl.h"
 #include "src/heap/read-only-heap.h"
 #include "src/heap/safepoint.h"
@@ -328,6 +328,10 @@ int PagedSpaceBase::CountTotalPages() const {
 size_t PagedSpaceBase::Available() const {
   ConcurrentAllocationMutex guard(this);
   return free_list_->Available();
+}
+
+size_t PagedSpaceBase::Waste() const {
+  return free_list_->wasted_bytes();
 }
 
 void PagedSpaceBase::ReleasePage(PageMetadata* page) {

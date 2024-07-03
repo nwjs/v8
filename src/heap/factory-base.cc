@@ -7,13 +7,14 @@
 #include "src/ast/ast-source-ranges.h"
 #include "src/ast/ast.h"
 #include "src/common/assert-scope.h"
+#include "src/common/globals.h"
 #include "src/execution/local-isolate.h"
 #include "src/handles/handles-inl.h"
 #include "src/heap/factory.h"
 #include "src/heap/heap-inl.h"
-#include "src/heap/large-page-inl.h"
+#include "src/heap/large-page-metadata-inl.h"
 #include "src/heap/local-factory-inl.h"
-#include "src/heap/mutable-page.h"
+#include "src/heap/mutable-page-metadata.h"
 #include "src/heap/read-only-heap.h"
 #include "src/logging/local-logger.h"
 #include "src/logging/log.h"
@@ -286,9 +287,10 @@ Handle<ByteArray> FactoryBase<Impl>::NewByteArray(int length,
 }
 
 template <typename Impl>
-Handle<TrustedByteArray> FactoryBase<Impl>::NewTrustedByteArray(int length) {
+Handle<TrustedByteArray> FactoryBase<Impl>::NewTrustedByteArray(
+    int length, AllocationType allocation_type) {
   if (length == 0) return empty_trusted_byte_array();
-  return TrustedByteArray::New(isolate(), length);
+  return TrustedByteArray::New(isolate(), length, allocation_type);
 }
 
 template <typename Impl>
@@ -332,7 +334,8 @@ FactoryBase<Impl>::NewDeoptimizationFrameTranslation(int length) {
 template <typename Impl>
 Handle<BytecodeArray> FactoryBase<Impl>::NewBytecodeArray(
     int length, const uint8_t* raw_bytecodes, int frame_size,
-    uint16_t parameter_count, DirectHandle<TrustedFixedArray> constant_pool,
+    uint16_t parameter_count, uint16_t max_arguments,
+    DirectHandle<TrustedFixedArray> constant_pool,
     DirectHandle<TrustedByteArray> handler_table) {
   if (length < 0 || length > BytecodeArray::kMaxLength) {
     FATAL("Fatal JavaScript invalid size error %d", length);
@@ -348,6 +351,7 @@ Handle<BytecodeArray> FactoryBase<Impl>::NewBytecodeArray(
   instance->set_length(length);
   instance->set_frame_size(frame_size);
   instance->set_parameter_count(parameter_count);
+  instance->set_max_arguments(max_arguments);
   instance->set_incoming_new_target_or_generator_register(
       interpreter::Register::invalid_value());
   instance->set_constant_pool(*constant_pool);
@@ -821,7 +825,7 @@ MaybeHandle<SeqStringT> FactoryBase<Impl>::NewRawStringWithMap(
                  RefineAllocationTypeForInPlaceInternalizableString(
                      allocation, map) == allocation);
   if (length > String::kMaxLength || length < 0) {
-    THROW_NEW_ERROR(isolate(), NewInvalidStringLengthError(), SeqStringT);
+    THROW_NEW_ERROR(isolate(), NewInvalidStringLengthError());
   }
   DCHECK_GT(length, 0);  // Use Factory::empty_string() instead.
   int size = SeqStringT::SizeFor(length);
@@ -896,7 +900,7 @@ MaybeHandle<String> FactoryBase<Impl>::NewConsString(
   // Make sure that an out of memory exception is thrown if the length
   // of the new cons string is too large.
   if (length > String::kMaxLength || length < 0) {
-    THROW_NEW_ERROR(isolate(), NewInvalidStringLengthError(), String);
+    THROW_NEW_ERROR(isolate(), NewInvalidStringLengthError());
   }
 
   bool left_is_one_byte = left->IsOneByteRepresentation();
@@ -994,8 +998,7 @@ MaybeHandle<String> FactoryBase<Impl>::NewStringFromOneByte(
   if (length == 1) return LookupSingleCharacterStringFromCode(string[0]);
   Handle<SeqOneByteString> result;
   ASSIGN_RETURN_ON_EXCEPTION(isolate(), result,
-                             NewRawOneByteString(string.length(), allocation),
-                             String);
+                             NewRawOneByteString(string.length(), allocation));
 
   DisallowGarbageCollection no_gc;
   // Copy the characters into the new object.

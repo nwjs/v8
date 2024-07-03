@@ -22,6 +22,12 @@ namespace internal {
 // https://arai-a.github.io/ecma262-compare/?pr=3000&id=sec-disposablestack-objects
 enum class DisposableStackState { kDisposed, kPending };
 
+// kValueIsReceiver: Call the method with no argument
+// kValueIsArgument: Pass the value as the argument to the dispose method,
+// `disposablestack.prototype.adopt` is the only method that uses
+// kValueIsArgument as DisposeMethodCallType.
+enum class DisposeMethodCallType { kValueIsReceiver = 0, kValueIsArgument = 1 };
+
 class JSDisposableStack
     : public TorqueGeneratedJSDisposableStack<JSDisposableStack, JSObject> {
  public:
@@ -33,13 +39,16 @@ class JSDisposableStack
   DECL_PRIMITIVE_ACCESSORS(state, DisposableStackState)
   DECL_INT_ACCESSORS(length)
 
-  static void Initialize(Isolate* isolate, Handle<JSDisposableStack> stack);
-  static void Add(Isolate* isolate, Handle<JSDisposableStack> disposable_stack,
-                  Handle<Object> value, Handle<Object> method);
+  static void Initialize(Isolate* isolate,
+                         DirectHandle<JSDisposableStack> stack);
+  static void Add(Isolate* isolate,
+                  DirectHandle<JSDisposableStack> disposable_stack,
+                  DirectHandle<Object> value, DirectHandle<Object> method,
+                  DisposeMethodCallType type);
   static MaybeHandle<Object> CheckValueAndGetDisposeMethod(
       Isolate* isolate, Handle<Object> value);
   static Maybe<bool> DisposeResources(
-      Isolate* isolate, Handle<JSDisposableStack> disposable_stack,
+      Isolate* isolate, DirectHandle<JSDisposableStack> disposable_stack,
       MaybeHandle<Object> maybe_error);
 
   TQ_OBJECT_CONSTRUCTORS(JSDisposableStack)

@@ -1429,26 +1429,6 @@ RUNTIME_FUNCTION(Runtime_DebugTrace) {
   return ReadOnlyRoots(isolate).undefined_value();
 }
 
-RUNTIME_FUNCTION(Runtime_DebugTrackRetainingPath) {
-  HandleScope scope(isolate);
-  DCHECK_LE(1, args.length());
-  DCHECK_GE(2, args.length());
-  CHECK(v8_flags.track_retaining_path);
-  Handle<HeapObject> object = args.at<HeapObject>(0);
-  RetainingPathOption option = RetainingPathOption::kDefault;
-  if (args.length() == 2) {
-    Handle<String> str = args.at<String>(1);
-    const char track_ephemeron_path[] = "track-ephemeron-path";
-    if (str->IsOneByteEqualTo(base::StaticCharVector(track_ephemeron_path))) {
-      option = RetainingPathOption::kTrackEphemeronPath;
-    } else {
-      CHECK_EQ(str->length(), 0);
-    }
-  }
-  isolate->heap()->AddRetainingPathTarget(object, option);
-  return ReadOnlyRoots(isolate).undefined_value();
-}
-
 // This will not allocate (flatten the string), but it may run
 // very slowly for very deeply nested ConsStrings.  For debugging use only.
 RUNTIME_FUNCTION(Runtime_GlobalPrint) {
@@ -1544,9 +1524,19 @@ RUNTIME_FUNCTION(Runtime_AbortCSADcheck) {
     return CrashUnlessFuzzing(isolate);
   }
   Handle<String> message = args.at<String>(0);
-  base::OS::PrintError("abort: CSA_DCHECK failed: %s\n",
-                       message->ToCString().get());
-  isolate->PrintStack(stderr);
+  if (base::ControlledCrashesAreHarmless()) {
+    base::OS::PrintError(
+        "Safely terminating process due to CSA check failure\n");
+    // Also prefix the error message (printed below). This has two purposes:
+    // (1) it makes it clear that this error is deemed "safe" (2) it causes
+    // fuzzers that pattern-match on stderr output to ignore these failures.
+    base::OS::PrintError("The following harmless failure was encountered: %s\n",
+                         message->ToCString().get());
+  } else {
+    base::OS::PrintError("abort: CSA_DCHECK failed: %s\n",
+                         message->ToCString().get());
+    isolate->PrintStack(stderr);
+  }
   base::OS::Abort();
   UNREACHABLE();
 }

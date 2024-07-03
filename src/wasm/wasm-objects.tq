@@ -28,6 +28,7 @@ extern class WasmApiFunctionRef extends ExposedTrustedObject {
   callable: JSReceiver|Undefined;
   // Present when compiling JSFastApiCall wrappers, needed
   // to load memory start/size fields.
+  // TODO(jkummerow): This should probably point to WasmTrustedInstanceData.
   instance: WasmInstanceObject|Undefined;
   suspend: Smi;  // Boolean.
   wrapper_budget: Smi;
@@ -60,6 +61,11 @@ extern class WasmInternalFunction extends ExposedTrustedObject {
   function_index: Smi;
   // The call target, stored as raw pointer in this trusted object.
   call_target: RawPtr;
+  // The signature hash. See signature-hashing.h for background.
+  // The value stored here must be in sync with {call_target}!
+  // Ideally we'd type this as "uint64", but Torque doesn't support that,
+  // and we only enable the sandbox when uintptr == uint64 anyway.
+  @if(V8_ENABLE_SANDBOX) signature_hash: uintptr;
 }
 
 extern operator '.ref' macro LoadRefFromWasmInternalFunction(
@@ -98,7 +104,7 @@ extern class WasmExportedFunctionData extends WasmFunctionData {
   // This is the instance that exported the function (which in case of
   // imported and re-exported functions is different from the instance
   // where the function is defined -- for the latter see WasmFunctionData::ref).
-  instance: WasmInstanceObject;
+  protected_instance_data: ProtectedPointer<WasmTrustedInstanceData>;
   function_index: Smi;
   // Contains a Smi; boxed so that generated code can update the value.
   wrapper_budget: Cell;
@@ -113,6 +119,10 @@ extern class WasmExportedFunctionData extends WasmFunctionData {
 
   sig: RawPtr;  // wasm::FunctionSig*
 }
+
+extern operator '.instance_data' macro
+    LoadWasmTrustedInstanceDataFromWasmExportedFunctionData(
+        WasmExportedFunctionData): WasmTrustedInstanceData;
 
 extern class WasmJSFunctionData extends WasmFunctionData {
   serialized_signature: PodArrayOfWasmValueType;
@@ -210,6 +220,7 @@ extern class WasmGlobalObject extends JSObject {
 extern class WasmTagObject extends JSObject {
   serialized_signature: PodArrayOfWasmValueType;
   tag: HeapObject;
+  instance: WasmInstanceObject|Undefined;
   canonical_type_index: Smi;
 }
 

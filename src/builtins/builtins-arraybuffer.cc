@@ -129,24 +129,22 @@ BUILTIN(ArrayBufferConstructor) {
   Handle<Object> number_length;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, number_length,
                                      Object::ToInteger(isolate, length));
-  if (Object::Number(*number_length) < 0.0) {
+  if (Object::NumberValue(*number_length) < 0.0) {
     THROW_NEW_ERROR_RETURN_FAILURE(
         isolate, NewRangeError(MessageTemplate::kInvalidArrayBufferLength));
   }
 
   Handle<Object> number_max_length;
-  if (v8_flags.harmony_rab_gsab) {
-    Handle<Object> max_length;
-    Handle<Object> options = args.atOrUndefined(isolate, 2);
-    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
-        isolate, max_length,
-        JSObject::ReadFromOptionsBag(
-            options, isolate->factory()->max_byte_length_string(), isolate));
+  Handle<Object> max_length;
+  Handle<Object> options = args.atOrUndefined(isolate, 2);
+  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+      isolate, max_length,
+      JSObject::ReadFromOptionsBag(
+          options, isolate->factory()->max_byte_length_string(), isolate));
 
-    if (!IsUndefined(*max_length, isolate)) {
-      ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
-          isolate, number_max_length, Object::ToInteger(isolate, max_length));
-    }
+  if (!IsUndefined(*max_length, isolate)) {
+    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, number_max_length,
+                                       Object::ToInteger(isolate, max_length));
   }
   return ConstructBuffer(isolate, target, new_target, number_length,
                          number_max_length, InitializedFlag::kZeroInitialized);
@@ -198,9 +196,9 @@ static Tagged<Object> SliceHelper(BuiltinArguments args, Isolate* isolate,
   // * If relativeStart < 0, let first be max((len + relativeStart), 0); else
   //   let first be min(relativeStart, len).
   double const first =
-      (Object::Number(*relative_start) < 0)
-          ? std::max(len + Object::Number(*relative_start), 0.0)
-          : std::min(Object::Number(*relative_start), len);
+      (Object::NumberValue(*relative_start) < 0)
+          ? std::max(len + Object::NumberValue(*relative_start), 0.0)
+          : std::min(Object::NumberValue(*relative_start), len);
 
   // * If end is undefined, let relativeEnd be len; else let relativeEnd be ?
   //   ToInteger(end).
@@ -211,7 +209,7 @@ static Tagged<Object> SliceHelper(BuiltinArguments args, Isolate* isolate,
     Handle<Object> relative_end_obj;
     ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, relative_end_obj,
                                        Object::ToInteger(isolate, end));
-    relative_end = Object::Number(*relative_end_obj);
+    relative_end = Object::NumberValue(*relative_end_obj);
   }
 
   // * If relativeEnd < 0, let final be max((len + relativeEnd), 0); else let
@@ -522,7 +520,7 @@ Tagged<Object> ArrayBufferTransfer(Isolate* isolate,
     Handle<Object> number_new_byte_length;
     ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, number_new_byte_length,
                                        Object::ToInteger(isolate, new_length));
-    if (Object::Number(*number_new_byte_length) < 0.0) {
+    if (Object::NumberValue(*number_new_byte_length) < 0.0) {
       THROW_NEW_ERROR_RETURN_FAILURE(
           isolate, NewRangeError(MessageTemplate::kInvalidArrayBufferLength));
     }

@@ -57,7 +57,6 @@ namespace internal {
   F(AtomicsCompareExchange, 4, 1)                              \
   F(AtomicsExchange, 3, 1)                                     \
   F(AtomicsNumWaitersForTesting, 2, 1)                         \
-  F(AtomicsNumAsyncWaitersForTesting, 0, 1)                    \
   F(AtomicsNumUnresolvedAsyncPromisesForTesting, 2, 1)         \
   F(AtomicsOr, 3, 1)                                           \
   F(AtomicsSub, 3, 1)                                          \
@@ -71,15 +70,13 @@ namespace internal {
   F(AtomicsSychronizationNumAsyncWaitersInIsolateForTesting, 0, 1)
 
 #define FOR_EACH_INTRINSIC_BIGINT(F, I) \
-  F(BigIntBinaryOp, 3, 1)               \
-  F(BigIntCompareToBigInt, 3, 1)        \
   F(BigIntCompareToNumber, 3, 1)        \
   F(BigIntCompareToString, 3, 1)        \
   F(BigIntEqualToBigInt, 2, 1)          \
   F(BigIntEqualToNumber, 2, 1)          \
   F(BigIntEqualToString, 2, 1)          \
+  F(BigIntExponentiate, 2, 1)           \
   F(BigIntMaxLengthBits, 0, 1)          \
-  F(BigIntToBoolean, 1, 1)              \
   F(BigIntToNumber, 1, 1)               \
   F(BigIntUnaryOp, 2, 1)                \
   F(ToBigInt, 1, 1)                     \
@@ -245,8 +242,6 @@ namespace internal {
   F(AllocateByteArray, 1, 1)                               \
   F(AllocateInYoungGeneration, 2, 1)                       \
   F(AllocateInOldGeneration, 2, 1)                         \
-  F(AllocateSeqOneByteString, 1, 1)                        \
-  F(AllocateSeqTwoByteString, 1, 1)                        \
   F(AllowDynamicFunction, 1, 1)                            \
   I(CreateAsyncFromSyncIterator, 1, 1)                     \
   F(CreateListFromArrayLike, 1, 1)                         \
@@ -266,9 +261,7 @@ namespace internal {
   F(BytecodeBudgetInterruptWithStackCheck_Maglev, 1, 1)    \
   F(InvalidateDependentCodeForConstTrackingLet, 1, 1)      \
   F(NewError, 2, 1)                                        \
-  F(NewForeign, 0, 1)                                      \
   F(NewReferenceError, 2, 1)                               \
-  F(NewSyntaxError, 2, 1)                                  \
   F(NewTypeError, -1 /* [1, 4] */, 1)                      \
   F(OrdinaryHasInstance, 2, 1)                             \
   F(PropagateException, 0, 1)                              \
@@ -324,7 +317,6 @@ namespace internal {
   F(DisposeDisposableStack, 3, 1)                                      \
   F(GetDerivedMap, 2, 1)                                               \
   F(GetFunctionName, 1, 1)                                             \
-  F(GetOwnPropertyDescriptor, 2, 1)                                    \
   F(GetOwnPropertyDescriptorObject, 2, 1)                              \
   F(GetOwnPropertyKeys, 2, 1)                                          \
   F(GetPrivateMember, 2, 1)                                            \
@@ -401,7 +393,6 @@ namespace internal {
   F(PromiseHookInit, 2, 1)               \
   F(PromiseRejectEventFromStack, 2, 1)   \
   F(PromiseRevokeReject, 1, 1)           \
-  F(PromiseStatus, 1, 1)                 \
   F(RejectPromise, 3, 1)                 \
   F(ResolvePromise, 2, 1)                \
   F(PromiseRejectAfterResolved, 2, 1)    \
@@ -420,7 +411,6 @@ namespace internal {
   F(SetPropertyWithReceiver, 4, 1)
 
 #define FOR_EACH_INTRINSIC_REGEXP(F, I)                          \
-  F(IsRegExp, 1, 1)                                              \
   F(RegExpBuildIndices, 3, 1)                                    \
   F(RegExpExec, 4, 1)                                            \
   F(RegExpExecTreatMatchAtEndAsFailure, 4, 1)                    \
@@ -528,7 +518,6 @@ namespace internal {
   F(DebugPrintPtr, 1, 1)                      \
   F(DebugPrintWord, 5, 1)                     \
   F(DebugTrace, 0, 1)                         \
-  F(DebugTrackRetainingPath, -1, 1)           \
   F(DeoptimizeFunction, 1, 1)                 \
   F(DisableOptimizationFinalization, 0, 1)    \
   F(DisallowCodegenFromStrings, 1, 1)         \

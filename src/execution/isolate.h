@@ -173,6 +173,9 @@ class Interpreter;
 namespace compiler {
 class NodeObserver;
 class PerIsolateCompilerCache;
+namespace turboshaft {
+class WasmRevecVerifier;
+}  // namespace turboshaft
 }  // namespace compiler
 
 namespace win64_unwindinfo {
@@ -222,8 +225,8 @@ class WaiterQueueNode;
 #define RETURN_VALUE_IF_EXCEPTION_DETECTOR(isolate, detector, value) \
   RETURN_VALUE_IF_EXCEPTION(isolate, (detector.AcceptSideEffects(), value))
 
-#define RETURN_EXCEPTION_IF_EXCEPTION(isolate, T) \
-  RETURN_VALUE_IF_EXCEPTION(isolate, MaybeHandle<T>())
+#define RETURN_EXCEPTION_IF_EXCEPTION(isolate) \
+  RETURN_VALUE_IF_EXCEPTION(isolate, kNullMaybeHandle)
 
 #define MAYBE_RETURN_ON_EXCEPTION_VALUE(isolate, call, value) \
   do {                                                        \
@@ -278,14 +281,8 @@ class WaiterQueueNode;
                                      ReadOnlyRoots(__isolate__).exception()); \
   } while (false)
 
-#define ASSIGN_RETURN_ON_EXCEPTION(isolate, dst, call, T) \
-  ASSIGN_RETURN_ON_EXCEPTION_VALUE(isolate, dst, call, MaybeHandle<T>())
-
-#define THROW_NEW_ERROR(isolate, call, T)                                \
-  do {                                                                   \
-    auto* __isolate__ = (isolate);                                       \
-    return __isolate__->template Throw<T>(__isolate__->factory()->call); \
-  } while (false)
+#define ASSIGN_RETURN_ON_EXCEPTION(isolate, dst, call) \
+  ASSIGN_RETURN_ON_EXCEPTION_VALUE(isolate, dst, call, kNullMaybeHandle)
 
 #define THROW_NEW_ERROR_RETURN_FAILURE(isolate, call)         \
   do {                                                        \
@@ -299,6 +296,9 @@ class WaiterQueueNode;
     __isolate__->Throw(*__isolate__->factory()->call);     \
     return value;                                          \
   } while (false)
+
+#define THROW_NEW_ERROR(isolate, call) \
+  THROW_NEW_ERROR_RETURN_VALUE(isolate, call, kNullMaybeHandle)
 
 /**
  * RETURN_ON_EXCEPTION_VALUE conditionally returns the given value when the
@@ -385,8 +385,8 @@ class WaiterQueueNode;
  * If inside a function with return type
  * Maybe<X> or Handle<X>, use RETURN_ON_EXCEPTION_VALUE instead.
  */
-#define RETURN_ON_EXCEPTION(isolate, call, T) \
-  RETURN_ON_EXCEPTION_VALUE(isolate, call, MaybeHandle<T>())
+#define RETURN_ON_EXCEPTION(isolate, call) \
+  RETURN_ON_EXCEPTION_VALUE(isolate, call, kNullMaybeHandle)
 
 #define RETURN_FAILURE(isolate, should_throw, call) \
   do {                                              \
@@ -502,9 +502,7 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
   V(OOMErrorCallback, oom_behavior, nullptr)                                  \
   V(LogEventCallback, event_logger, nullptr)                                  \
   V(AllowCodeGenerationFromStringsCallback, allow_code_gen_callback, nullptr) \
-  V(ModifyCodeGenerationFromStringsCallback, modify_code_gen_callback,        \
-    nullptr)                                                                  \
-  V(ModifyCodeGenerationFromStringsCallback2, modify_code_gen_callback2,      \
+  V(ModifyCodeGenerationFromStringsCallback2, modify_code_gen_callback,       \
     nullptr)                                                                  \
   V(AllowWasmCodeGenerationCallback, allow_wasm_code_gen_callback, nullptr)   \
   V(ExtensionCallback, wasm_module_callback, &NoExtension)                    \
@@ -813,7 +811,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   bool IsSharedArrayBufferConstructorEnabled(Handle<NativeContext> context);
 
   bool IsWasmStringRefEnabled(Handle<NativeContext> context);
-  bool IsWasmInliningEnabled(Handle<NativeContext> context);
+  bool IsWasmInliningEnabled(DirectHandle<NativeContext> context);
   bool IsWasmImportedStringsEnabled(Handle<NativeContext> context);
   // Has the JSPI flag been requested?
   // Used only during initialization of contexts.
@@ -982,6 +980,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // source URL. The inspected frames are the same as for the detailed stack
   // trace.
   Handle<String> CurrentScriptNameOrSourceURL();
+  bool GetStackTraceLimit(Isolate* isolate, int* result);
 
   Address GetAbstractPC(int* line, int* column);
 
@@ -1002,19 +1001,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   Tagged<Object> ThrowAt(Handle<JSObject> exception, MessageLocation* location);
   Tagged<Object> ThrowIllegalOperation();
 
-  template <typename T>
-  V8_WARN_UNUSED_RESULT MaybeHandle<T> Throw(Handle<Object> exception) {
-    Throw(*exception);
-    return MaybeHandle<T>();
-  }
-
-  template <typename T>
-  V8_WARN_UNUSED_RESULT MaybeHandle<T> ThrowAt(Handle<JSObject> exception,
-                                               MessageLocation* location) {
-    ThrowAt(exception, location);
-    return MaybeHandle<T>();
-  }
-
   void FatalProcessOutOfHeapMemory(const char* location) {
     heap()->FatalProcessOutOfMemory(location);
   }
@@ -1032,7 +1018,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // Async function and promise instrumentation support.
   void OnAsyncFunctionSuspended(Handle<JSPromise> promise,
                                 Handle<JSPromise> parent);
-  void OnPromiseThen(Handle<JSPromise> promise);
+  void OnPromiseThen(DirectHandle<JSPromise> promise);
   void OnPromiseBefore(Handle<JSPromise> promise);
   void OnPromiseAfter(Handle<JSPromise> promise);
   void OnTerminationDuringRunMicrotasks();
@@ -1388,7 +1374,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   size_t total_regexp_code_generated() const {
     return total_regexp_code_generated_;
   }
-  void IncreaseTotalRegexpCodeGenerated(Handle<HeapObject> code);
+  void IncreaseTotalRegexpCodeGenerated(DirectHandle<HeapObject> code);
 
   std::vector<int>* regexp_indices() { return &regexp_indices_; }
 
@@ -1561,7 +1547,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   icu::UMemory* get_cached_icu_object(ICUObjectCacheType cache_type,
                                       Handle<Object> locales);
   void set_icu_object_in_cache(ICUObjectCacheType cache_type,
-                               Handle<Object> locales,
+                               DirectHandle<Object> locales,
                                std::shared_ptr<icu::UMemory> obj);
   void clear_cached_icu_object(ICUObjectCacheType cache_type);
   void clear_cached_icu_objects();
@@ -1576,26 +1562,27 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // notifications occur if the set is on the elements of the array or
   // object prototype. Also ensure that changes to prototype chain between
   // Array and Object fire notifications.
-  void UpdateNoElementsProtectorOnSetElement(Handle<JSObject> object);
-  void UpdateNoElementsProtectorOnSetLength(Handle<JSObject> object) {
+  void UpdateNoElementsProtectorOnSetElement(DirectHandle<JSObject> object);
+  void UpdateNoElementsProtectorOnSetLength(DirectHandle<JSObject> object) {
     UpdateNoElementsProtectorOnSetElement(object);
   }
 
-  void UpdateProtectorsOnSetPrototype(Handle<JSObject> object,
-                                      Handle<Object> new_prototype);
+  void UpdateProtectorsOnSetPrototype(DirectHandle<JSObject> object,
+                                      DirectHandle<Object> new_prototype);
 
-  void UpdateNoElementsProtectorOnSetPrototype(Handle<JSObject> object) {
+  void UpdateNoElementsProtectorOnSetPrototype(DirectHandle<JSObject> object) {
     UpdateNoElementsProtectorOnSetElement(object);
   }
   void UpdateTypedArraySpeciesLookupChainProtectorOnSetPrototype(
-      Handle<JSObject> object);
+      DirectHandle<JSObject> object);
   void UpdateNumberStringNotRegexpLikeProtectorOnSetPrototype(
-      Handle<JSObject> object);
-  void UpdateNoElementsProtectorOnNormalizeElements(Handle<JSObject> object) {
+      DirectHandle<JSObject> object);
+  void UpdateNoElementsProtectorOnNormalizeElements(
+      DirectHandle<JSObject> object) {
     UpdateNoElementsProtectorOnSetElement(object);
   }
   void UpdateStringWrapperToPrimitiveProtectorOnSetPrototype(
-      Handle<JSObject> object, Handle<Object> new_prototype);
+      DirectHandle<JSObject> object, DirectHandle<Object> new_prototype);
 
   // Returns true if array is the initial array prototype in any native context.
   inline bool IsAnyInitialArrayPrototype(Tagged<JSArray> array);
@@ -2097,11 +2084,11 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
         &isolate_data_.shared_external_pointer_table_);
   }
 
-  ExternalPointerTable& cpp_heap_pointer_table() {
+  CppHeapPointerTable& cpp_heap_pointer_table() {
     return isolate_data_.cpp_heap_pointer_table_;
   }
 
-  const ExternalPointerTable& cpp_heap_pointer_table() const {
+  const CppHeapPointerTable& cpp_heap_pointer_table() const {
     return isolate_data_.cpp_heap_pointer_table_;
   }
 
@@ -2228,6 +2215,18 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   std::list<std::unique_ptr<detail::WaiterQueueNode>>&
   async_waiter_queue_nodes();
+
+#ifdef V8_ENABLE_WASM_SIMD256_REVEC
+  void set_wasm_revec_verifier_for_test(
+      compiler::turboshaft::WasmRevecVerifier* verifier) {
+    wasm_revec_verifier_for_test_ = verifier;
+  }
+
+  compiler::turboshaft::WasmRevecVerifier* wasm_revec_verifier_for_test()
+      const {
+    return wasm_revec_verifier_for_test_;
+  }
+#endif  // V8_ENABLE_WASM_SIMD256_REVEC
 
  private:
   explicit Isolate(IsolateGroup* isolate_group);
@@ -2710,6 +2709,11 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // predefined set of data as crash keys to be used in postmortem debugging
   // in case of a crash.
   AddCrashKeyCallback add_crash_key_callback_ = nullptr;
+
+#ifdef V8_ENABLE_WASM_SIMD256_REVEC
+  compiler::turboshaft::WasmRevecVerifier* wasm_revec_verifier_for_test_ =
+      nullptr;
+#endif  // V8_ENABLE_WASM_SIMD256_REVEC
 
   // Delete new/delete operators to ensure that Isolate::New() and
   // Isolate::Delete() are used for Isolate creation and deletion.

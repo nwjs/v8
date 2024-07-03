@@ -5,6 +5,7 @@
 // Flags: --allow-natives-syntax --turboshaft-from-maglev --turbofan
 // Flags: --no-always-turbofan --no-stress-concurrent-inlining
 // Flags: --invocation-count-for-turbofan=3000 --concurrent-recompilation
+// Flags: --harmony-struct
 
 // TODO(dmercadier): re-allow optimization of these functions once the
 // maglev-to-turboshaft graph builder supports everything they need.
@@ -93,49 +94,6 @@ assertOptimized(math_float);
   assertEquals(false, cmp_int32(3, 20, 10));
   assertEquals(true, cmp_int32(3, 15, 15));
   assertOptimized(cmp_int32);
-
-  function cmp_float64(which, a, b) {
-    if (which == 0) { return a > b; }
-    if (which == 1) { return a >= b; }
-    if (which == 2) { return a < b; }
-    if (which == 3) { return a <= b; }
-  }
-  %PrepareFunctionForOptimization(cmp_float64);
-  // >
-  assertEquals(false, cmp_float64(0, 10.25, 20.25));
-  assertEquals(true, cmp_float64(0, 20.25, 10.25));
-  assertEquals(false, cmp_float64(0, 15.25, 15.25));
-  // >=
-  assertEquals(false, cmp_float64(1, 10.25, 20.25));
-  assertEquals(true, cmp_float64(1, 20.25, 10.25));
-  assertEquals(true, cmp_float64(1, 15.25, 15.25));
-  // <
-  assertEquals(true, cmp_float64(2, 10.25, 20.25));
-  assertEquals(false, cmp_float64(2, 20.25, 10.25));
-  assertEquals(false, cmp_float64(2, 15.25, 15.25));
-  // <=
-  assertEquals(true, cmp_float64(3, 10.25, 20.25));
-  assertEquals(false, cmp_float64(3, 20.25, 10.25));
-  assertEquals(true, cmp_float64(3, 15.25, 15.25));
-
-  %OptimizeFunctionOnNextCall(cmp_float64);
-  // >
-  assertEquals(false, cmp_float64(0, 10.25, 20.25));
-  assertEquals(true, cmp_float64(0, 20.25, 10.25));
-  assertEquals(false, cmp_float64(0, 15.25, 15.25));
-  // >=
-  assertEquals(false, cmp_float64(1, 10.25, 20.25));
-  assertEquals(true, cmp_float64(1, 20.25, 10.25));
-  assertEquals(true, cmp_float64(1, 15.25, 15.25));
-  // <
-  assertEquals(true, cmp_float64(2, 10.25, 20.25));
-  assertEquals(false, cmp_float64(2, 20.25, 10.25));
-  assertEquals(false, cmp_float64(2, 15.25, 15.25));
-  // <=
-  assertEquals(true, cmp_float64(3, 10.25, 20.25));
-  assertEquals(false, cmp_float64(3, 20.25, 10.25));
-  assertEquals(true, cmp_float64(3, 15.25, 15.25));
-  assertOptimized(cmp_float64);
 
   // Number equality should deopt when passed an Oddball (because undefined's
   // value is NaN, which leads to undefined != undefined without the deopt).
@@ -591,7 +549,7 @@ assertOptimized(simple_loop);
   assertEquals(41, branch_cmp(15, 3.25));
   assertEquals(29, branch_cmp(-2, 3.25));
   assertEquals(27, branch_cmp(-2, -1.5));
-  assertOptimized(f);
+  assertOptimized(branch_cmp);
 }
 
 // Test BranchIfReferenceEqual and TaggedEqual
@@ -1318,7 +1276,7 @@ assertOptimized(simple_loop);
 }
 
 // Testing function over- and and under-application (calling a function with
-// more or fewer arguments that it expects).
+// more or fewer arguments that it expects), where the callee is inlined.
 {
   function h() { return 42; }
   function g(x, y) {
@@ -1341,6 +1299,37 @@ assertOptimized(simple_loop);
   assertOptimized(f);
   assertEquals(93, f(0, 3));
   assertUnoptimized(f);
+}
+
+// Testing function over- and under-application, where the callee is not
+// inlined.
+{
+  %NeverOptimizeFunction(sum3);
+  function sum3(a, b, c) {
+    return a + b + c;
+  }
+
+  function under_apply(a, b) {
+    return sum3(a, b);
+  }
+
+  %PrepareFunctionForOptimization(under_apply);
+  assertEquals(NaN, under_apply(2.35, 5));
+
+  %OptimizeFunctionOnNextCall(under_apply);
+  assertEquals(NaN, under_apply(2.35, 5));
+  assertOptimized(under_apply);
+
+  function over_apply(a, b) {
+    return sum3(a, b, a, b);
+  }
+
+  %PrepareFunctionForOptimization(over_apply);
+  assertEquals(9.7, over_apply(2.35, 5));
+
+  %OptimizeFunctionOnNextCall(over_apply);
+  assertEquals(9.7, over_apply(2.35, 5));
+  assertOptimized(over_apply);
 }
 
 // Testing const tracking let.
@@ -1622,4 +1611,545 @@ let glob_b = 3.35;
   %OptimizeFunctionOnNextCall(rest_len);
   assertEquals(4, rest_len("a", 1, {}, 15.25, []));
   assertOptimized(rest_len);
+}
+
+// Testing transitions.
+{
+  function transition_arr(arr) {
+    var object = new Object();
+    arr[0] = object;
+  }
+
+  let smi_arr = [1, 2, 3, 4];
+  let holey_smi_arr = [1, 2, 3, /* hole */, 4];
+
+  %PrepareFunctionForOptimization(transition_arr);
+  transition_arr(smi_arr);
+  transition_arr(holey_smi_arr);
+  // Resetting the arrays to collect feedback one more time.
+  smi_arr = [1, 2, 3, 4];
+  holey_smi_arr = [1, 2, 3, /* hole */, 4];
+  transition_arr(smi_arr);
+  transition_arr(holey_smi_arr);
+
+  let expected_smi_arr = smi_arr;
+  let expected_holey_smi_arr = holey_smi_arr;
+
+  %OptimizeFunctionOnNextCall(transition_arr);
+  // Resetting the arrays
+  smi_arr = [1, 2, 3, 4];
+  holey_smi_arr = [1, 2, 3, /* hole */, 4];
+  // Triggering transitions
+  transition_arr(smi_arr);
+  assertEquals(expected_smi_arr, smi_arr);
+  transition_arr(holey_smi_arr);
+  assertEquals(expected_holey_smi_arr, holey_smi_arr)
+  assertOptimized(transition_arr);
+  // Not trigering transitions (because arrays already transitioned)
+  transition_arr(smi_arr);
+  transition_arr(holey_smi_arr);
+  assertOptimized(transition_arr);
+  // Triggering deopt
+  let double_arr = [1.5, 3.32, 6.28];
+  transition_arr(double_arr);
+  assertEquals([{}, 3.32, 6.28], double_arr);
+}
+
+// Testing map migration.
+{
+  function A() { this.x = 1 }
+  function B() { this.x = 1 }
+
+  function migrate_and_load(o) {
+    return o.x;
+  }
+
+  let old_b1 = new B();
+  let old_b2 = new B();
+
+  old_b1.x = 42;
+  old_b2.x = 186;
+
+  %PrepareFunctionForOptimization(migrate_and_load);
+  assertEquals(1, migrate_and_load(new A()));
+  (new A()).x = 4.25; // Deprecate map already in feedback
+  (new B()).x = 4.25; // Deprecate old_b1/old_b2 map
+  assertEquals(42, migrate_and_load(old_b1));
+
+  %OptimizeFunctionOnNextCall(migrate_and_load);
+  assertEquals(42, migrate_and_load(old_b1));
+  assertOptimized(migrate_and_load);
+  // Calling function with deprecated map
+  assertEquals(186, migrate_and_load(old_b2));
+  assertOptimized(migrate_and_load);
+
+  // Triggering deopt
+  assertEquals("abc", (migrate_and_load({a: 42, x : "abc"})));
+  assertUnoptimized(migrate_and_load);
+}
+
+// Testing builtin called through CallKnowJSFunction.
+{
+  function make_array_size(size) {
+    let a = Array(size);
+    assertTrue(%HasSmiOrObjectElements(a));
+    assertTrue(%HasHoleyElements(a));
+    assertEquals(size, a.length);
+    return a;
+  }
+
+  %PrepareFunctionForOptimization(make_array_size);
+  assertEquals([,,,,], make_array_size(4));
+  %OptimizeFunctionOnNextCall(make_array_size);
+  assertEquals([,,,,], make_array_size(4));
+  assertOptimized(make_array_size);
+
+  function make_array() {
+    let a = Array();
+    assertTrue(%HasSmiOrObjectElements(a));
+    return a;
+  }
+
+  %PrepareFunctionForOptimization(make_array);
+  assertEquals([], make_array());
+  %OptimizeFunctionOnNextCall(make_array);
+  assertEquals([], make_array());
+  assertOptimized(make_array);
+}
+
+// Testing array destructuring.
+{
+  function destruct_arr () {
+    [a, b] = [4, 9];
+    return a + b;
+  }
+
+  %PrepareFunctionForOptimization(destruct_arr);
+  assertEquals(13, destruct_arr());
+  %OptimizeFunctionOnNextCall(destruct_arr);
+  assertEquals(13, destruct_arr());
+  assertOptimized(destruct_arr);
+}
+
+// Testing instanceof.
+{
+  function Foo() {}
+
+  function test_instance_shared_struct() {
+    return Foo instanceof (new SharedStructType(["foo"]));
+  }
+
+  %PrepareFunctionForOptimization(test_instance_shared_struct);
+  assertFalse(test_instance_shared_struct());
+  assertFalse(test_instance_shared_struct());
+  assertFalse(test_instance_shared_struct());
+  %OptimizeFunctionOnNextCall(test_instance_shared_struct);
+  assertFalse(test_instance_shared_struct());
+  assertOptimized(test_instance_shared_struct);
+}
+
+// Testing builtin continuation deopt with Math.round.
+{
+  function round(x, y) {
+    let prev_v = y + 14.556;
+    let rounded_x = Math.round(x);
+    return prev_v + rounded_x;
+  }
+
+  %PrepareFunctionForOptimization(round);
+  assertEquals(23.116, round(3.25569, 5.56));
+  %OptimizeFunctionOnNextCall(round);
+  assertEquals(23.116, round(3.25569, 5.56));
+  assertOptimized(round);
+
+  let o = { valueOf: function() { %DeoptimizeFunction(round); return 4.55 } };
+
+  assertEquals(25.116, round(o, 5.56));
+  assertUnoptimized(round);
+  assertEquals(25.116, round(o, 5.56));
+}
+
+// Testing instanceof and builtin continuations.
+// (copy-pasted from test/mjsunit/maglev/nested-continuations.js)
+{
+  function Foo() {}
+  Object.defineProperty(Foo, Symbol.hasInstance, { value: Math.round });
+
+  let foo = new Foo();
+
+  function test_instanceof_foo(f) {
+    // `f instanceof Foo` runs `%ToBoolean(Foo[Symbol.hasInstance](f))`, where
+    // `Foo[Symbol.hasInstance]` is `Math.round`.
+    //
+    // So with sufficient builtin inlining, this will call
+    // `%ToBoolean(round(%ToNumber(f)))`, which will call `f.valueOf`. If this
+    // deopts (which in this test it will), we need to make sure to both round it,
+    // and then convert that rounded value to a boolean.
+    return f instanceof Foo;
+  }
+
+  foo.valueOf = () => {
+    %DeoptimizeFunction(test_instanceof_foo);
+    // Return a value which, when rounded, has ToBoolean false, and when not
+    // rounded, has ToBoolean true.
+    return 0.2;
+  }
+
+  %PrepareFunctionForOptimization(test_instanceof_foo);
+  assertFalse(test_instanceof_foo(foo));
+  assertFalse(test_instanceof_foo(foo));
+
+  %OptimizeFunctionOnNextCall(test_instanceof_foo);
+  assertFalse(test_instanceof_foo(foo));
+}
+
+// Testing Javascript builtin continuation.
+{
+  let arr = [1, 2, 3, 4, 5, 6];
+
+  let trigger = false;
+  function maybe_deopt(v) {
+    if (v == 3 && trigger) {
+      // The first time this is executed, it will change the map of {arr}, which
+      // will trigger a deopt of {array_foreach}.
+      arr.x = 11;
+    }
+    return v;
+  }
+
+  function array_foreach(arr) {
+    let s = 0;
+    arr.forEach((v) => s += maybe_deopt(v));
+    return s;
+  }
+
+
+  %PrepareFunctionForOptimization(array_foreach);
+  assertEquals(21, array_foreach(arr));
+  %OptimizeFunctionOnNextCall(array_foreach);
+  assertEquals(21, array_foreach(arr));
+  assertOptimized(array_foreach);
+
+  trigger = true;
+  assertEquals(21, array_foreach(arr));
+  assertUnoptimized(array_foreach);
+}
+
+// Testing CheckNumber.
+{
+  function check_number(x) {
+    // With only number maps in the feedback, "+x" is a no-op and Maglev just
+    // emits a CheckNumber.
+    return +x;
+  }
+
+  %PrepareFunctionForOptimization(check_number);
+  assertEquals(3.65, check_number(3.65));
+  %OptimizeFunctionOnNextCall(check_number);
+  assertEquals(3.65, check_number(3.65));
+  assertOptimized(check_number);
+  // CheckNumber should trigger a deopt for non-number maps (like strings).
+  assertEquals(NaN, check_number("abc"));
+  assertUnoptimized(check_number);
+}
+
+// Testing ToString.
+{
+  function to_string(n) {
+    return String(n);
+  }
+
+  %PrepareFunctionForOptimization(to_string);
+  assertEquals(String(453), to_string(453));
+  %OptimizeFunctionOnNextCall(to_string);
+  assertEquals(String(453), to_string(453));
+  assertEquals("Symbol(abc)", to_string(Symbol("abc")));
+  assertOptimized(to_string);
+
+  let called = false;
+  let o1 = { toString: function() { called = true; return 42; } };
+  assertEquals("42", to_string(o1));
+  assertTrue(called);
+  assertOptimized(to_string);
+}
+
+// Testing NumberToString.
+{
+  function number_to_string(n) {
+    let v = n + 5;
+    return String(v);
+  }
+
+  %PrepareFunctionForOptimization(number_to_string);
+  assertEquals(String(458), number_to_string(453));
+  %OptimizeFunctionOnNextCall(number_to_string);
+  assertEquals(String(458), number_to_string(453));
+  assertOptimized(number_to_string);
+}
+
+// Testing DeleteProperty.
+{
+  function delete_prop_strict(o) {
+    "use strict";
+    delete o.x;
+  }
+
+  let o = { x : 25, y : 42 };
+
+  %PrepareFunctionForOptimization(delete_prop_strict);
+  delete_prop_strict(o);
+  assertEquals({y:42}, o);
+
+  o.x = 25;
+  %OptimizeFunctionOnNextCall(delete_prop_strict);
+  delete_prop_strict(o);
+  assertEquals({y:42}, o);
+  assertOptimized(delete_prop_strict);
+
+
+  function delete_prop_sloppy(o) {
+    delete o.y;
+  }
+
+  o = { x : 25, y : 42 };
+  %PrepareFunctionForOptimization(delete_prop_sloppy);
+  delete_prop_sloppy(o);
+  assertEquals({x:25}, o);
+
+  o.y = 42;
+  %OptimizeFunctionOnNextCall(delete_prop_sloppy);
+  delete_prop_sloppy(o);
+  assertEquals({x:25}, o);
+  assertOptimized(delete_prop_sloppy);
+}
+
+// Testing Uint32->Int32/Float64 conversion.
+{
+  const arr = new Uint32Array(2);
+  function uint_to_i32_f64() {
+    let v1 = arr[0] + 7; // requires Uint32->Int32 conversion
+    let v2 = arr[1] + 3.47; // requires Uint32->Float64 conversion
+    return v1 + v2;
+  }
+
+  %PrepareFunctionForOptimization(uint_to_i32_f64);
+  assertEquals(10.47, uint_to_i32_f64());
+  %OptimizeFunctionOnNextCall(uint_to_i32_f64),
+  assertEquals(10.47, uint_to_i32_f64());
+  assertOptimized(uint_to_i32_f64);
+
+  arr[0] = 0xffffff35; // Does not fit in a signed Int32
+  assertEquals(0xffffff35+7+3.47, uint_to_i32_f64());
+  assertUnoptimized(uint_to_i32_f64);
+}
+
+// Testing loops in inner functions.
+{
+  function inner_loop(x) {
+    let s = 0;
+    for (let i = 0; i < x; i++) {
+      s += i;
+    }
+    return s;
+  }
+
+  function call_loop(x) {
+    return inner_loop(x);
+  }
+
+  %PrepareFunctionForOptimization(inner_loop);
+  %PrepareFunctionForOptimization(call_loop);
+  assertEquals(15, call_loop(6));
+  %OptimizeFunctionOnNextCall(call_loop);
+  assertEquals(15, call_loop(6));
+  assertOptimized(call_loop);
+}
+
+// Testing ToName.
+{
+  function to_name() {
+    var o = {
+      [Symbol.toPrimitive]() {}
+    };
+    return o;
+  }
+
+  %PrepareFunctionForOptimization(to_name);
+  let o = to_name();
+  assertEquals(o, to_name());
+  %OptimizeFunctionOnNextCall(to_name);
+  assertEquals(o, to_name());
+  assertOptimized(to_name);
+}
+
+// Testing CheckInt32IsSmi.
+{
+  function check_int32_is_smi (a, b) {
+    let v1 = a + 1_000_000_000;
+    let phi = b ? v1 : 42; // Int32 inputs for the Smi, which means that it can
+                           // be untagged to Int32 if it has Int32 uses.
+    let v2 = +phi; // This produces a ToNumber in the bytecode, for which Maglev
+                   // inserts a CheckSmi (because of the Smi feedback). If its
+                   // input is an untagged Int32 phi, this will become a
+                   // CheckInt32IsSmi.
+    return phi + v2; // Int32 use for the Phi so that it's untagged to Int32.
+  }
+
+  %PrepareFunctionForOptimization(check_int32_is_smi);
+  assertEquals(84, check_int32_is_smi(1, false));
+  %OptimizeFunctionOnNextCall(check_int32_is_smi);
+  assertEquals(84, check_int32_is_smi(1, false));
+  assertOptimized(check_int32_is_smi);
+
+  // Triggering a deopt by having making {phi} not fit in Smi range
+  assertEquals(4_000_000_000, check_int32_is_smi(1_000_000_000, true));
+  assertUnoptimized(check_int32_is_smi);
+}
+
+// Testing creation of derived objects.
+{
+  class C extends Array { };
+
+  function new_derived_obj() {
+    new C();
+  }
+
+  %PrepareFunctionForOptimization(new_derived_obj);
+  new_derived_obj();
+  %OptimizeFunctionOnNextCall(new_derived_obj);
+  new_derived_obj();
+}
+
+// Testing constructors (when it doesn't throw anything).
+{
+  class A extends Object {
+    constructor(b) {
+      super();
+      this.x = b;
+      this.y = 42;
+    }
+  }
+
+  class B extends A {
+    constructor(b) {
+      super(b);
+      this.z = 12;
+    }
+  }
+
+  %PrepareFunctionForOptimization(B);
+  let o = new B();
+  %OptimizeFunctionOnNextCall(B);
+  assertEquals(o, new B());
+  assertOptimized(B);
+}
+
+// Testing various throws in constructors.
+{
+  // Testing ThrowIfNotSuperConstructor (which triggers because the base class
+  // of A1 is "null", which doesn't have a constructor).
+  class A1 extends null {
+    constructor() {
+      super();
+    }
+  }
+
+  %PrepareFunctionForOptimization(A1);
+  assertThrows(() => new A1(), TypeError,
+               "Super constructor null of A1 is not a constructor");
+  %OptimizeFunctionOnNextCall(A1);
+  assertThrows(() => new A1(), TypeError,
+               "Super constructor null of A1 is not a constructor");
+  assertOptimized(A1);
+
+
+  // Testing ThrowSuperAlreadyCalledIfNotHole (which triggers because we call
+  // super() twice).
+  class A2 extends Object {
+    constructor() {
+      super();
+      super();
+    }
+  }
+
+  %PrepareFunctionForOptimization(A2);
+  assertThrows(() => new A2(), ReferenceError,
+               "Super constructor may only be called once");
+  %OptimizeFunctionOnNextCall(A2);
+  assertThrows(() => new A2(), ReferenceError,
+               "Super constructor may only be called once");
+  assertOptimized(A2);
+
+
+  // Testing ThrowSuperNotCalledIfHole (which triggers because we call
+  // don't call super()).
+  class A3 extends Object {
+    constructor() {
+    }
+  }
+
+  %PrepareFunctionForOptimization(A3);
+  assertThrows(() => new A3(), ReferenceError,
+               "Must call super constructor in derived class before " +
+               "accessing 'this' or returning from derived constructor");
+  %OptimizeFunctionOnNextCall(A3);
+  assertThrows(() => new A3(), ReferenceError,
+               "Must call super constructor in derived class before " +
+               "accessing 'this' or returning from derived constructor");
+  assertOptimized(A3);
+}
+
+// Testing closures as object properties.
+{
+  function create_closure(v) {
+    let o = {};
+    let x = 4;
+    o.x = (c) => v + x++ + 2 + c;
+    return o;
+  }
+
+  %PrepareFunctionForOptimization(create_closure);
+  create_closure(7);
+  %OptimizeFunctionOnNextCall(create_closure);
+  let o = create_closure(7);
+  assertEquals(7+4+2+2, o.x(2));
+  assertEquals(7+5+2+5, o.x(5));
+  assertOptimized(create_closure);
+}
+
+// Testing CreateShallowObjectLiteral.
+{
+  function g(o) { return o.u; }
+
+  function create_shallow_obj(x) {
+    var o = {u: x};
+    return g(o);
+  }
+
+  %PrepareFunctionForOptimization(create_shallow_obj);
+  assertEquals(42, create_shallow_obj(42));
+  assertEquals(3.56, create_shallow_obj(3.56));
+  %OptimizeFunctionOnNextCall(create_shallow_obj);
+  assertEquals(42, create_shallow_obj(42));
+  assertEquals(3.56, create_shallow_obj(3.56));
+}
+
+// Testing CheckedSmiTagFloat64.
+{
+  function store_f64_to_smi_field(v) {
+    return {some_unique_name_U5d8Xe: Math.floor((v + 0xffffffff) - 0xfffffffe)}
+           .some_unique_name_U5d8Xe;
+  }
+
+  %PrepareFunctionForOptimization(store_f64_to_smi_field);
+  assertEquals(1, store_f64_to_smi_field(0));
+  assertEquals(2, store_f64_to_smi_field(1));
+  %OptimizeFunctionOnNextCall(store_f64_to_smi_field);
+  assertEquals(2, store_f64_to_smi_field(1));
+  assertOptimized(store_f64_to_smi_field);
+
+  // Won't fit in Smi anymore, which should trigger a deopt
+  assertEquals(0xffffffff+0xffffffff-0xfffffffe,
+               store_f64_to_smi_field(0xffffffff));
+  assertUnoptimized(store_f64_to_smi_field);
 }

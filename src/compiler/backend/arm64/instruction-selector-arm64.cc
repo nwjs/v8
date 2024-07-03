@@ -2422,6 +2422,10 @@ static base::Optional<FlagsCondition> TryMatchConditionalCompareChainShared(
 static bool TryMatchConditionalCompareChainBranch(
     InstructionSelectorT<TurboshaftAdapter>* selector, Zone* zone, OpIndex node,
     FlagsContinuationT<TurboshaftAdapter>* cont) {
+  // TODO(sam.parker@arm.com): Fix and re-enable.
+  // See mjsunit/regress/wasm/regress-347961785.js.
+  if ((true)) return false;
+
   if (!cont->IsBranch()) return false;
   DCHECK(cont->condition() == kNotEqual || cont->condition() == kEqual);
 
@@ -2449,6 +2453,10 @@ static bool TryMatchConditionalCompareChainBranch(
 static bool TryMatchConditionalCompareChainSet(
     InstructionSelectorT<TurboshaftAdapter>* selector, Zone* zone,
     OpIndex node) {
+  // TODO(sam.parker@arm.com): Fix and re-enable.
+  // See mjsunit/regress/wasm/regress-347961785.js.
+  if ((true)) return false;
+
   // Create the cmp + ccmp ... sequence.
   CompareSequence sequence;
   auto final_cond =
@@ -6438,9 +6446,11 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitBitcastWord32PairToFloat64(
   node_t hi = bitcast.high_word32();
   node_t lo = bitcast.low_word32();
 
-  InstructionOperand temps[] = {g.TempRegister()};
-  Emit(kArm64Float64FromWord32Pair, g.DefineAsRegister(node), g.Use(hi),
-       g.Use(lo), arraysize(temps), temps);
+  int vreg = g.AllocateVirtualRegister();
+  Emit(kArm64Bfi, g.DefineSameAsFirstForVreg(vreg), g.UseRegister(lo),
+       g.UseRegister(hi), g.TempImmediate(32), g.TempImmediate(32));
+  Emit(kArm64Float64MoveU64, g.DefineAsRegister(node),
+       g.UseRegisterForVreg(vreg));
 }
 
 template <typename Adapter>
@@ -8099,15 +8109,7 @@ template <typename Adapter>
 void InstructionSelectorT<Adapter>::VisitSetStackPointer(node_t node) {
   OperandGenerator g(this);
   auto input = g.UseRegister(this->input_at(node, 0));
-  wasm::FPRelativeScope fp_scope;
-  if constexpr (Adapter::IsTurboshaft) {
-    fp_scope =
-        this->Get(node).template Cast<turboshaft::SetStackPointerOp>().fp_scope;
-  } else {
-    fp_scope = OpParameter<wasm::FPRelativeScope>(node->op());
-  }
-  Emit(kArchSetStackPointer | MiscField::encode(fp_scope), 0, nullptr, 1,
-       &input);
+  Emit(kArchSetStackPointer, 0, nullptr, 1, &input);
 }
 
 #endif  // V8_ENABLE_WEBASSEMBLY

@@ -1412,6 +1412,8 @@ class WasmModuleBuilder {
     return this.types.length - 1;
   }
 
+  nextTypeIndex() { return this.types.length; }
+
   static defaultFor(type) {
     switch (type) {
       case kWasmI32:
@@ -2311,4 +2313,12 @@ function ToPromising(wasm_export) {
   return new WebAssembly.Function(
       wrapper_sig, wasm_export, {promising: 'first'});
 
+}
+
+function wasmF32ConstSignalingNaN() {
+  return [kExprF32Const, 0xb9, 0xa1, 0xa7, 0x7f];
+}
+
+function wasmF64ConstSignalingNaN() {
+  return [kExprF64Const, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf4, 0x7f];
 }

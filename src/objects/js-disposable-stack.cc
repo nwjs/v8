@@ -16,14 +16,14 @@ namespace internal {
 
 // https://arai-a.github.io/ecma262-compare/?pr=3000&id=sec-disposeresources
 Maybe<bool> JSDisposableStack::DisposeResources(
-    Isolate* isolate, Handle<JSDisposableStack> disposable_stack,
+    Isolate* isolate, DirectHandle<JSDisposableStack> disposable_stack,
     MaybeHandle<Object> maybe_original_error) {
   DCHECK(!IsUndefined(disposable_stack->stack()));
   DCHECK_NE(disposable_stack->state(), DisposableStackState::kDisposed);
 
   disposable_stack->set_state(DisposableStackState::kDisposed);
 
-  Handle<FixedArray> stack(disposable_stack->stack(), isolate);
+  DirectHandle<FixedArray> stack(disposable_stack->stack(), isolate);
 
   int length = disposable_stack->length();
 
@@ -34,6 +34,8 @@ Maybe<bool> JSDisposableStack::DisposeResources(
   // 1. For each element resource of
   // disposeCapability.[[DisposableResourceStack]], in reverse list order, do
   while (length > 0) {
+    Tagged<Object> call_type = stack->get(--length);
+
     Tagged<Object> tagged_method = stack->get(--length);
     Handle<Object> method(tagged_method, isolate);
 
@@ -42,7 +44,19 @@ Maybe<bool> JSDisposableStack::DisposeResources(
 
     //  a. Let result be Completion(Dispose(resource.[[ResourceValue]],
     //  resource.[[Hint]], resource.[[DisposeMethod]])).
-    result = Execution::Call(isolate, method, value, 0, nullptr);
+    auto call_type_case =
+        static_cast<DisposeMethodCallType>(Smi::cast(call_type).value());
+    switch (call_type_case) {
+      case DisposeMethodCallType::kValueIsReceiver:
+        result = Execution::Call(isolate, method, value, 0, nullptr);
+        break;
+      case DisposeMethodCallType::kValueIsArgument:
+        Handle<Object> argv[] = {value};
+        result = Execution::Call(
+            isolate, method, ReadOnlyRoots(isolate).undefined_value_handle(), 1,
+            argv);
+        break;
+    }
 
     //  b. If result is a throw completion, then
     if (result.is_null()) {

@@ -539,6 +539,7 @@ using AnyOrNone = Union<Any, None>;
 
 #if V8_ENABLE_WEBASSEMBLY
 using WasmArrayNullable = Union<WasmArray, WasmNull>;
+using WasmStructNullable = Union<WasmStruct, WasmNull>;
 // The type for a nullable ref.string (stringref proposal). For imported strings
 // use StringOrNull instead.
 using WasmStringRefNullable = Union<String, WasmNull>;
@@ -810,6 +811,11 @@ class BlockIndex {
   bool operator>(BlockIndex other) const { return id_ > other.id_; }
   bool operator<=(BlockIndex other) const { return id_ <= other.id_; }
   bool operator>=(BlockIndex other) const { return id_ >= other.id_; }
+
+  template <typename H>
+  friend H AbslHashValue(H h, const BlockIndex& idx) {
+    return H::combine(std::move(h), idx.id_);
+  }
 
  private:
   uint32_t id_;

@@ -105,7 +105,15 @@ ACCESSORS(WasmGlobalObject, tagged_buffer, Tagged<FixedArray>,
           kTaggedBufferOffset)
 
 wasm::ValueType WasmGlobalObject::type() const {
-  return wasm::ValueType::FromRawBitField(static_cast<uint32_t>(raw_type()));
+  // Various consumers of ValueKind (e.g. ValueKind::name()) use the raw enum
+  // value as index into a global array. As such, if the index is corrupted
+  // (which must be assumed, as it comes from within the sandbox), this can
+  // lead to out-of-bounds reads outside the sandbox. While these are not
+  // technically sandbox violations, we should still try to avoid them to keep
+  // fuzzers happy. This SBXCHECK accomplishes that.
+  wasm::ValueType type = wasm::ValueType::FromRawBitField(raw_type());
+  SBXCHECK(is_valid(type.kind()));
+  return type;
 }
 void WasmGlobalObject::set_type(wasm::ValueType value) {
   set_raw_type(static_cast<int>(value.raw_bit_field()));
@@ -162,7 +170,7 @@ void WasmGlobalObject::SetF64(double value) {
   base::WriteUnalignedValue(address(), value);
 }
 
-void WasmGlobalObject::SetRef(Handle<Object> value) {
+void WasmGlobalObject::SetRef(DirectHandle<Object> value) {
   DCHECK(type().is_object_reference());
   tagged_buffer()->set(offset(), *value);
 }
@@ -298,23 +306,24 @@ TRUSTED_POINTER_ACCESSORS(WasmInstanceObject, trusted_data,
                           kWasmTrustedInstanceDataIndirectPointerTag)
 
 // Note: in case of existing in-sandbox corruption, this could return an
-// incorrect WasmModule! For security-relevant code, prefer going via
-// WasmTrustedInstanceData::native_module().
+// incorrect WasmModule! For security-relevant code, prefer reading
+// {native_module()} from a {WasmTrustedInstanceData}.
 const wasm::WasmModule* WasmInstanceObject::module() const {
   return module_object()->module();
 }
 
 ImportedFunctionEntry::ImportedFunctionEntry(
-    Handle<WasmInstanceObject> instance_object, int index)
-    : instance_object_(instance_object), index_(index) {
-  DCHECK_GE(index, 0);
-  DCHECK_LT(index, instance_object->module()->num_imported_functions);
-}
+    Isolate* isolate, DirectHandle<WasmInstanceObject> instance_object,
+    int index)
+    : ImportedFunctionEntry(
+          handle(instance_object->trusted_data(isolate), isolate), index) {}
 
 ImportedFunctionEntry::ImportedFunctionEntry(
-    Isolate* isolate, Handle<WasmTrustedInstanceData> instance_data, int index)
-    : ImportedFunctionEntry(handle(instance_data->instance_object(), isolate),
-                            index) {}
+    Handle<WasmTrustedInstanceData> instance_data, int index)
+    : instance_data_(instance_data), index_(index) {
+  DCHECK_GE(index, 0);
+  DCHECK_LT(index, instance_data->module()->num_imported_functions);
+}
 
 // WasmDispatchTable
 CAST_ACCESSOR(WasmDispatchTable)
@@ -387,6 +396,10 @@ PROTECTED_POINTER_ACCESSORS(WasmFunctionData, internal, WasmInternalFunction,
                             kProtectedInternalOffset)
 
 // WasmExportedFunctionData
+PROTECTED_POINTER_ACCESSORS(WasmExportedFunctionData, instance_data,
+                            WasmTrustedInstanceData,
+                            kProtectedInstanceDataOffset)
+
 CODE_POINTER_ACCESSORS(WasmExportedFunctionData, c_wrapper_code,
                        kCWrapperCodeOffset)
 
@@ -425,7 +438,15 @@ EXTERNAL_POINTER_ACCESSORS(WasmTypeInfo, native_type, Address,
 #undef PRIMITIVE_ACCESSORS
 
 wasm::ValueType WasmTableObject::type() {
-  return wasm::ValueType::FromRawBitField(raw_type());
+  // Various consumers of ValueKind (e.g. ValueKind::name()) use the raw enum
+  // value as index into a global array. As such, if the index is corrupted
+  // (which must be assumed, as it comes from within the sandbox), this can
+  // lead to out-of-bounds reads outside the sandbox. While these are not
+  // technically sandbox violations, we should still try to avoid them to keep
+  // fuzzers happy. This SBXCHECK accomplishes that.
+  wasm::ValueType type = wasm::ValueType::FromRawBitField(raw_type());
+  SBXCHECK(is_valid(type.kind()));
+  return type;
 }
 
 bool WasmMemoryObject::has_maximum_pages() { return maximum_pages() >= 0; }
@@ -440,7 +461,8 @@ bool WasmMemoryObject::is_memory64() const {
 }
 
 // static
-Handle<Object> WasmObject::ReadValueAt(Isolate* isolate, Handle<HeapObject> obj,
+Handle<Object> WasmObject::ReadValueAt(Isolate* isolate,
+                                       DirectHandle<HeapObject> obj,
                                        wasm::ValueType type, uint32_t offset) {
   Address field_address = obj->GetFieldAddress(offset);
   switch (type.kind()) {
@@ -487,7 +509,6 @@ Handle<Object> WasmObject::ReadValueAt(Isolate* isolate, Handle<HeapObject> obj,
       UNREACHABLE();
   }
 }
-
 
 // Conversions from Numeric objects.
 // static
@@ -601,7 +622,8 @@ ObjectSlot WasmArray::ElementSlot(uint32_t index) {
 }
 
 // static
-Handle<Object> WasmArray::GetElement(Isolate* isolate, Handle<WasmArray> array,
+Handle<Object> WasmArray::GetElement(Isolate* isolate,
+                                     DirectHandle<WasmArray> array,
                                      uint32_t index) {
   if (index >= array->length()) {
     return isolate->factory()->undefined_value();

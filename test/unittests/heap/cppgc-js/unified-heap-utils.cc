@@ -27,6 +27,9 @@ UnifiedHeapTest::UnifiedHeapTest(
           V8::GetCurrentPlatform(),
           CppHeapCreateParams{
               std::move(custom_spaces),
+              // TODO(338411141): Switch to the non-deprecated setup when
+              // removing DeprecatedWrapperHelper and all the tests prefixed
+              // with "Deprectated_".
               DeprecatedWrapperHelper::DefaultWrapperDescriptor()})) {
   // --stress-incremental-marking may have started an incremental GC at this
   // point already.
@@ -136,7 +139,7 @@ v8::Local<v8::Object> WrapperHelper::CreateWrapper(
   v8::EscapableHandleScope scope(context->GetIsolate());
   v8::Local<v8::FunctionTemplate> function_t =
       v8::FunctionTemplate::New(context->GetIsolate());
-  if (strlen(class_name) != 0) {
+  if (class_name && strlen(class_name) != 0) {
     function_t->SetClassName(
         v8::String::NewFromUtf8(v8::Isolate::GetCurrent(), class_name)
             .ToLocalChecked());
@@ -159,7 +162,7 @@ void WrapperHelper::ResetWrappableConnection(v8::Isolate* isolate,
                                              v8::Local<v8::Object> api_object) {
   i::Handle<i::JSReceiver> js_obj = v8::Utils::OpenHandle(*api_object);
   JSApiWrapper(JSObject::cast(*js_obj))
-      .SetCppHeapWrappable<kExternalObjectValueTag>(
+      .SetCppHeapWrappable<CppHeapPointerTag::kDefaultTag>(
           reinterpret_cast<i::Isolate*>(isolate), nullptr);
 }
 
@@ -169,7 +172,7 @@ void WrapperHelper::SetWrappableConnection(v8::Isolate* isolate,
                                            void* instance) {
   i::Handle<i::JSReceiver> js_obj = v8::Utils::OpenHandle(*api_object);
   JSApiWrapper(JSObject::cast(*js_obj))
-      .SetCppHeapWrappable<kExternalObjectValueTag>(
+      .SetCppHeapWrappable<CppHeapPointerTag::kDefaultTag>(
           reinterpret_cast<i::Isolate*>(isolate), instance);
 }
 
@@ -178,8 +181,8 @@ void* WrapperHelper::ReadWrappablePointer(v8::Isolate* isolate,
                                           v8::Local<v8::Object> api_object) {
   i::Handle<i::JSReceiver> js_obj = v8::Utils::OpenHandle(*api_object);
   return JSApiWrapper(JSObject::cast(*js_obj))
-      .GetCppHeapWrappable<kExternalObjectValueTag>(
-          reinterpret_cast<i::Isolate*>(isolate));
+      .GetCppHeapWrappable(reinterpret_cast<i::Isolate*>(isolate),
+                           kAnyCppHeapPointer);
 }
 
 }  // namespace internal

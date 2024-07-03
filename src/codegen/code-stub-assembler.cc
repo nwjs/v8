@@ -19,7 +19,7 @@
 #include "src/execution/frames.h"
 #include "src/execution/protectors.h"
 #include "src/heap/heap-inl.h"  // For MutablePageMetadata. TODO(jkummerow): Drop.
-#include "src/heap/mutable-page.h"
+#include "src/heap/mutable-page-metadata.h"
 #include "src/logging/counters.h"
 #include "src/numbers/integer-literal-inl.h"
 #include "src/objects/api-callbacks.h"
@@ -2480,7 +2480,9 @@ void CodeStubAssembler::DispatchMaybeObject(TNode<MaybeObject> maybe_object,
 
   GotoIf(IsCleared(maybe_object), if_cleared);
 
-  GotoIf(IsStrong(maybe_object), &inner_if_strong);
+  TNode<HeapObjectReference> object_ref = CAST(maybe_object);
+
+  GotoIf(IsStrong(object_ref), &inner_if_strong);
 
   *extracted = GetHeapObjectAssumeWeak(maybe_object);
   Goto(if_weak);
@@ -3532,6 +3534,18 @@ TNode<BytecodeArray> CodeStubAssembler::LoadSharedFunctionInfoBytecodeArray(
   return CAST(var_result.value());
 }
 
+TNode<Int32T> CodeStubAssembler::LoadBytecodeArrayParameterCount(
+    TNode<BytecodeArray> bytecode_array) {
+  return LoadObjectField<Uint16T>(bytecode_array,
+                                  BytecodeArray::kParameterSizeOffset);
+}
+
+TNode<Int32T> CodeStubAssembler::LoadBytecodeArrayParameterCountWithoutReceiver(
+    TNode<BytecodeArray> bytecode_array) {
+  return Int32Sub(LoadBytecodeArrayParameterCount(bytecode_array),
+                  Int32Constant(kJSArgcReceiverSlots));
+}
+
 void CodeStubAssembler::StoreObjectByteNoWriteBarrier(TNode<HeapObject> object,
                                                       int offset,
                                                       TNode<Word32T> value) {
@@ -3619,7 +3633,7 @@ void CodeStubAssembler::StoreSharedObjectField(TNode<HeapObject> object,
                                                TNode<Object> value) {
   CSA_DCHECK(this,
              WordNotEqual(
-                 WordAnd(LoadBasicMemoryChunkFlags(object),
+                 WordAnd(LoadMemoryChunkFlags(object),
                          IntPtrConstant(MemoryChunk::IN_WRITABLE_SHARED_SPACE)),
                  IntPtrConstant(0)));
   int const_offset;
@@ -8104,7 +8118,7 @@ TNode<BoolT> CodeStubAssembler::IsNumberArrayIndex(TNode<Number> number) {
       [=] { return IsHeapNumberUint32(CAST(number)); });
 }
 
-TNode<IntPtrT> CodeStubAssembler::LoadBasicMemoryChunkFlags(
+TNode<IntPtrT> CodeStubAssembler::LoadMemoryChunkFlags(
     TNode<HeapObject> object) {
   TNode<IntPtrT> object_word = BitcastTaggedToWord(object);
   TNode<IntPtrT> page_header = MemoryChunkFromAddress(object_word);
@@ -10176,6 +10190,16 @@ void CodeStubAssembler::LookupLinear(TNode<Name> unique_name,
 }
 
 template <>
+constexpr int CodeStubAssembler::MaxNumberOfEntries<TransitionArray>() {
+  return TransitionsAccessor::kMaxNumberOfTransitions;
+}
+
+template <>
+constexpr int CodeStubAssembler::MaxNumberOfEntries<DescriptorArray>() {
+  return kMaxNumberOfDescriptors;
+}
+
+template <>
 TNode<Uint32T> CodeStubAssembler::NumberOfEntries<DescriptorArray>(
     TNode<DescriptorArray> descriptors) {
   return Unsigned(LoadNumberOfDescriptors(descriptors));
@@ -10272,14 +10296,23 @@ void CodeStubAssembler::LookupBinary(TNode<Name> unique_name,
   // Assume non-empty array.
   CSA_DCHECK(this, Uint32LessThanOrEqual(var_low.value(), var_high.value()));
 
+  int max_entries = MaxNumberOfEntries<Array>();
+
+  auto calculate_mid = [&](TNode<Uint32T> low, TNode<Uint32T> high) {
+    if (max_entries < kMaxInt31) {
+      // mid = (low + high) / 2.
+      return Unsigned(Word32Shr(Int32Add(low, high), 1));
+    } else {
+      // mid = low + (high - low) / 2.
+      return Unsigned(Int32Add(low, Word32Shr(Int32Sub(high, low), 1)));
+    }
+  };
+
   Label binary_loop(this, {&var_high, &var_low});
   Goto(&binary_loop);
   BIND(&binary_loop);
   {
-    // mid = low + (high - low) / 2 (to avoid overflow in "(low + high) / 2").
-    TNode<Uint32T> mid = Unsigned(
-        Int32Add(var_low.value(),
-                 Word32Shr(Int32Sub(var_high.value(), var_low.value()), 1)));
+    TNode<Uint32T> mid = calculate_mid(var_low.value(), var_high.value());
     // mid_name = array->GetSortedKey(mid).
     TNode<Uint32T> sorted_key_index = GetSortedKeyIndex<Array>(array, mid);
     TNode<Name> mid_name = GetKey<Array>(array, sorted_key_index);
@@ -15454,7 +15487,9 @@ void CodeStubAssembler::ForInPrepare(TNode<HeapObject> enumerator,
   *cache_length_out = cache_length.value();
 }
 
-TNode<String> CodeStubAssembler::Typeof(TNode<Object> value) {
+TNode<String> CodeStubAssembler::Typeof(
+    TNode<Object> value, std::optional<TNode<UintPtrT>> slot_id,
+    std::optional<TNode<HeapObject>> maybe_feedback_vector) {
   TVARIABLE(String, result_var);
 
   Label return_number(this, Label::kDeferred), if_oddball(this),
@@ -15495,9 +15530,16 @@ TNode<String> CodeStubAssembler::Typeof(TNode<Object> value) {
 
   Abort(AbortReason::kUnexpectedInstanceType);
 
+  auto UpdateFeedback = [&](TypeOfFeedback::Result feedback) {
+    if (maybe_feedback_vector.has_value()) {
+      MaybeUpdateFeedback(SmiConstant(feedback), *maybe_feedback_vector,
+                          *slot_id);
+    }
+  };
   BIND(&return_number);
   {
     result_var = HeapConstantNoHole(isolate()->factory()->number_string());
+    UpdateFeedback(TypeOfFeedback::kNumber);
     Goto(&return_result);
   }
 
@@ -15506,42 +15548,49 @@ TNode<String> CodeStubAssembler::Typeof(TNode<Object> value) {
     TNode<String> type =
         CAST(LoadObjectField(value_heap_object, offsetof(Oddball, type_of_)));
     result_var = type;
+    UpdateFeedback(TypeOfFeedback::kAny);
     Goto(&return_result);
   }
 
   BIND(&return_function);
   {
     result_var = HeapConstantNoHole(isolate()->factory()->function_string());
+    UpdateFeedback(TypeOfFeedback::kFunction);
     Goto(&return_result);
   }
 
   BIND(&return_undefined);
   {
     result_var = HeapConstantNoHole(isolate()->factory()->undefined_string());
+    UpdateFeedback(TypeOfFeedback::kAny);
     Goto(&return_result);
   }
 
   BIND(&return_object);
   {
     result_var = HeapConstantNoHole(isolate()->factory()->object_string());
+    UpdateFeedback(TypeOfFeedback::kAny);
     Goto(&return_result);
   }
 
   BIND(&return_string);
   {
     result_var = HeapConstantNoHole(isolate()->factory()->string_string());
+    UpdateFeedback(TypeOfFeedback::kString);
     Goto(&return_result);
   }
 
   BIND(&return_bigint);
   {
     result_var = HeapConstantNoHole(isolate()->factory()->bigint_string());
+    UpdateFeedback(TypeOfFeedback::kAny);
     Goto(&return_result);
   }
 
   BIND(&return_symbol);
   {
     result_var = HeapConstantNoHole(isolate()->factory()->symbol_string());
+    UpdateFeedback(TypeOfFeedback::kAny);
     Goto(&return_result);
   }
 
@@ -18083,7 +18132,7 @@ void CodeStubAssembler::SharedValueBarrier(
   // Fast path: Shared memory features imply shared RO space, so RO objects are
   // trivially shared.
   CSA_DCHECK(this, BoolConstant(ReadOnlyHeap::IsReadOnlySpaceShared()));
-  TNode<IntPtrT> page_flags = LoadBasicMemoryChunkFlags(CAST(value));
+  TNode<IntPtrT> page_flags = LoadMemoryChunkFlags(CAST(value));
   GotoIf(WordNotEqual(
              WordAnd(page_flags, IntPtrConstant(MemoryChunk::READ_ONLY_HEAP)),
              IntPtrConstant(0)),
@@ -18121,7 +18170,7 @@ void CodeStubAssembler::SharedValueBarrier(
     CSA_DCHECK(
         this,
         WordNotEqual(
-            WordAnd(LoadBasicMemoryChunkFlags(CAST(var_shared_value->value())),
+            WordAnd(LoadMemoryChunkFlags(CAST(var_shared_value->value())),
                     IntPtrConstant(MemoryChunk::READ_ONLY_HEAP |
                                    MemoryChunk::IN_WRITABLE_SHARED_SPACE)),
             IntPtrConstant(0)));
@@ -18267,8 +18316,8 @@ TNode<FixedArray> CodeStubAssembler::ArrayListElements(TNode<ArrayList> array) {
 }
 
 #if V8_ENABLE_WEBASSEMBLY
-TNode<RawPtrT> CodeStubAssembler::SwitchToTheCentralStackForJS(
-    TNode<Object> callable) {
+TNode<RawPtrT> CodeStubAssembler::SwitchToTheCentralStack(
+    TNode<Object> receiver) {
   TNode<WordT> stack_limit_slot = IntPtrAdd(
       LoadFramePointer(),
       IntPtrConstant(WasmToJSWrapperConstants::kSecondaryStackLimitOffset));
@@ -18277,11 +18326,11 @@ TNode<RawPtrT> CodeStubAssembler::SwitchToTheCentralStackForJS(
       ExternalReference::wasm_switch_to_the_central_stack_for_js());
   TNode<RawPtrT> central_stack_sp = TNode<RawPtrT>::UncheckedCast(
       CallCFunction(do_switch, MachineType::Pointer(),
-                    std::make_pair(MachineType::TaggedPointer(), callable),
+                    std::make_pair(MachineType::TaggedPointer(), receiver),
                     std::make_pair(MachineType::Pointer(), stack_limit_slot)));
 
   TNode<RawPtrT> old_sp = LoadStackPointer();
-  SetStackPointer(central_stack_sp, wasm::kEnterFPRelativeOnlyScope);
+  SetStackPointer(central_stack_sp);
   StoreNoWriteBarrier(
       MachineType::PointerRepresentation(), LoadFramePointer(),
       IntPtrConstant(WasmToJSWrapperConstants::kCentralStackSPOffset),
@@ -18289,8 +18338,8 @@ TNode<RawPtrT> CodeStubAssembler::SwitchToTheCentralStackForJS(
   return old_sp;
 }
 
-void CodeStubAssembler::SwitchFromTheCentralStackForJS(TNode<RawPtrT> old_sp,
-                                                       TNode<Object> callable) {
+void CodeStubAssembler::SwitchFromTheCentralStack(TNode<RawPtrT> old_sp,
+                                                  TNode<Object> receiver) {
   TNode<WordT> stack_limit = Load<RawPtrT>(
       LoadFramePointer(),
       IntPtrConstant(WasmToJSWrapperConstants::kSecondaryStackLimitOffset));
@@ -18298,47 +18347,30 @@ void CodeStubAssembler::SwitchFromTheCentralStackForJS(TNode<RawPtrT> old_sp,
   TNode<ExternalReference> do_switch = ExternalConstant(
       ExternalReference::wasm_switch_from_the_central_stack_for_js());
   CallCFunction(do_switch, MachineType::Pointer(),
-                std::make_pair(MachineType::TaggedPointer(), callable),
+                std::make_pair(MachineType::TaggedPointer(), receiver),
                 std::make_pair(MachineType::Pointer(), stack_limit));
 
   StoreNoWriteBarrier(
       MachineType::PointerRepresentation(), LoadFramePointer(),
       IntPtrConstant(WasmToJSWrapperConstants::kCentralStackSPOffset),
       IntPtrConstant(0));
-  SetStackPointer(old_sp, wasm::kLeaveFPRelativeOnlyScope);
+  SetStackPointer(old_sp);
 }
 
-TNode<Object> CodeStubAssembler::CallOnCentralStack(TNode<Context> context,
-                                                    TNode<Object> target,
-                                                    TNode<Int32T> num_args,
-                                                    TNode<FixedArray> args) {
-  // If the current stack is a secondary stack, switch, perform the call and
-  // switch back. Otherwise, just do the call.
-  // Use UniqueInt32Constant instead of BoolConstant here in order to ensure
-  // that the graph structure does not depend on the value of the predicate
-  // (BoolConstant uses cached nodes).
+TNode<RawPtrT> CodeStubAssembler::SwitchToTheCentralStackIfNeeded(
+    TNode<Object> receiver) {
+  TVARIABLE(RawPtrT, old_sp, PointerConstant(nullptr));
   Label no_switch(this);
-  TVARIABLE(Object, result);
   Label end(this);  // -> return value of the call (kTaggedPointer)
   TNode<Uint8T> is_on_central_stack_flag = LoadUint8FromRootRegister(
       IntPtrConstant(IsolateData::is_on_central_stack_flag_offset()));
   GotoIf(is_on_central_stack_flag, &no_switch);
-
-  TNode<RawPtrT> old_sp = SwitchToTheCentralStackForJS(target);
-
-  result = CallBuiltin(Builtin::kCallVarargs, context, target, Int32Constant(0),
-                       num_args, args);
-  SwitchFromTheCentralStackForJS(old_sp, target);
-  Goto(&end);
-
+  old_sp = SwitchToTheCentralStack(receiver);
+  Goto(&no_switch);
   Bind(&no_switch);
-  result = CallBuiltin(Builtin::kCallVarargs, context, target, Int32Constant(0),
-                       num_args, args);
-  Goto(&end);
-
-  Bind(&end);
-  return result.value();
+  return old_sp.value();
 }
+
 #endif
 
 TNode<BoolT> CodeStubAssembler::IsMarked(TNode<Object> object) {

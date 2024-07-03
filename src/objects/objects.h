@@ -136,8 +136,8 @@ class Object : public AllStatic {
   V8_INLINE
   V8_WARN_UNUSED_RESULT static Maybe<bool> IsArray(Handle<Object> object);
 
-  // Extract the number.
-  static inline double Number(Tagged<Object> obj);
+  // Extract the double value of a Number (Smi or HeapNumber).
+  static inline double NumberValue(Tagged<Object> obj);
   V8_EXPORT_PRIVATE static bool ToInt32(Tagged<Object> obj, int32_t* value);
   static inline bool ToUint32(Tagged<Object> obj, uint32_t* value);
 
@@ -286,7 +286,7 @@ class Object : public AllStatic {
       Isolate* isolate, Handle<JSReceiver> object);
 
   // ES6 section 12.5.6 The typeof Operator
-  static Handle<String> TypeOf(Isolate* isolate, Handle<Object> object);
+  static Handle<String> TypeOf(Isolate* isolate, DirectHandle<Object> object);
 
   // ES6 section 12.7 Additive Operators
   V8_WARN_UNUSED_RESULT static MaybeHandle<Object> Add(Isolate* isolate,
@@ -343,15 +343,15 @@ class Object : public AllStatic {
 
   V8_WARN_UNUSED_RESULT static Maybe<bool> CannotCreateProperty(
       Isolate* isolate, Handle<Object> receiver, Handle<Object> name,
-      Handle<Object> value, Maybe<ShouldThrow> should_throw);
+      DirectHandle<Object> value, Maybe<ShouldThrow> should_throw);
   V8_WARN_UNUSED_RESULT static Maybe<bool> WriteToReadOnlyProperty(
-      LookupIterator* it, Handle<Object> value,
+      LookupIterator* it, DirectHandle<Object> value,
       Maybe<ShouldThrow> should_throw);
   V8_WARN_UNUSED_RESULT static Maybe<bool> WriteToReadOnlyProperty(
       Isolate* isolate, Handle<Object> receiver, Handle<Object> name,
-      Handle<Object> value, ShouldThrow should_throw);
+      DirectHandle<Object> value, ShouldThrow should_throw);
   V8_WARN_UNUSED_RESULT static Maybe<bool> RedefineIncompatibleProperty(
-      Isolate* isolate, Handle<Object> name, Handle<Object> value,
+      Isolate* isolate, Handle<Object> name, DirectHandle<Object> value,
       Maybe<ShouldThrow> should_throw);
   V8_WARN_UNUSED_RESULT static Maybe<bool> SetDataProperty(
       LookupIterator* it, Handle<Object> value);

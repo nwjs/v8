@@ -19,7 +19,7 @@
 #include "src/debug/debug.h"
 #include "src/deoptimizer/deoptimizer.h"
 #include "src/execution/frames-inl.h"
-#include "src/heap/mutable-page.h"
+#include "src/heap/mutable-page-metadata.h"
 #include "src/init/bootstrapper.h"
 #include "src/logging/counters.h"
 #include "src/objects/heap-number.h"
@@ -3143,25 +3143,8 @@ void MacroAssembler::StoreReturnAddressAndCall(Register target) {
   DCHECK_EQ(kNumInstructionsToJump, InstructionsGeneratedSince(&find_ra));
 }
 
-void MacroAssembler::DropArguments(Register count, ArgumentsCountType type,
-                                   ArgumentsCountMode mode, Register scratch) {
-  switch (type) {
-    case kCountIsInteger: {
-      Alsl_d(sp, count, sp, kSystemPointerSizeLog2);
-      break;
-    }
-    case kCountIsSmi: {
-      static_assert(kSmiTagSize == 1 && kSmiTag == 0);
-      DCHECK_NE(scratch, no_reg);
-      SmiScale(scratch, count, kSystemPointerSizeLog2);
-      Add_d(sp, sp, scratch);
-      break;
-    }
-    case kCountIsBytes: {
-      Add_d(sp, sp, count);
-      break;
-    }
-  }
+void MacroAssembler::DropArguments(Register count, ArgumentsCountMode mode) {
+  Alsl_d(sp, count, sp, kSystemPointerSizeLog2);
   if (mode == kCountExcludesReceiver) {
     Add_d(sp, sp, kSystemPointerSize);
   }
@@ -3169,16 +3152,14 @@ void MacroAssembler::DropArguments(Register count, ArgumentsCountType type,
 
 void MacroAssembler::DropArgumentsAndPushNewReceiver(Register argc,
                                                      Register receiver,
-                                                     ArgumentsCountType type,
-                                                     ArgumentsCountMode mode,
-                                                     Register scratch) {
+                                                     ArgumentsCountMode mode) {
   DCHECK(!AreAliased(argc, receiver));
   if (mode == kCountExcludesReceiver) {
     // Drop arguments without receiver and override old receiver.
-    DropArguments(argc, type, kCountIncludesReceiver, scratch);
+    DropArguments(argc, kCountIncludesReceiver);
     St_d(receiver, MemOperand(sp, 0));
   } else {
-    DropArguments(argc, type, mode, scratch);
+    DropArguments(argc, mode);
     Push(receiver);
   }
 }
@@ -3902,6 +3883,7 @@ void MacroAssembler::EnterExitFrame(int stack_space,
   ASM_CODE_COMMENT(this);
   DCHECK(frame_type == StackFrame::EXIT ||
          frame_type == StackFrame::BUILTIN_EXIT ||
+         frame_type == StackFrame::API_ACCESSOR_EXIT ||
          frame_type == StackFrame::API_CALLBACK_EXIT);
 
   // Set up the frame structure on the stack.
@@ -5082,9 +5064,11 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
     ASM_CODE_COMMENT_STRING(masm, "Call the api function via thunk wrapper.");
     __ bind(&profiler_or_side_effects_check_enabled);
     // Additional parameter is the address of the actual callback function.
-    MemOperand thunk_arg_mem_op = __ ExternalReferenceAsOperand(
-        ER::api_callback_thunk_argument_address(isolate), no_reg);
-    __ St_d(thunk_arg, thunk_arg_mem_op);
+    if (thunk_arg.is_valid()) {
+      MemOperand thunk_arg_mem_op = __ ExternalReferenceAsOperand(
+          ER::api_callback_thunk_argument_address(isolate), no_reg);
+      __ St_d(thunk_arg, thunk_arg_mem_op);
+    }
     __ li(scratch, thunk_ref);
     __ StoreReturnAddressAndCall(scratch);
     __ Branch(&done_api_call);

@@ -21,7 +21,7 @@
 #include "src/common/globals.h"
 #include "src/heap/code-range.h"
 #include "src/heap/memory-chunk-metadata.h"
-#include "src/heap/mutable-page.h"
+#include "src/heap/mutable-page-metadata.h"
 #include "src/heap/spaces.h"
 #include "src/tasks/cancelable-task.h"
 #include "src/utils/allocation.h"
@@ -368,10 +368,10 @@ class MemoryAllocator {
 
   // Performs all necessary bookkeeping to free the memory, but does not free
   // it.
-  void UnregisterMemoryChunk(MutablePageMetadata* chunk);
-  void UnregisterSharedBasicMemoryChunk(MemoryChunkMetadata* chunk);
-  void UnregisterBasicMemoryChunk(MemoryChunkMetadata* chunk,
-                                  Executability executable = NOT_EXECUTABLE);
+  void UnregisterMutableMemoryChunk(MutablePageMetadata* chunk);
+  void UnregisterSharedMemoryChunk(MemoryChunkMetadata* chunk);
+  void UnregisterMemoryChunk(MemoryChunkMetadata* chunk,
+                             Executability executable = NOT_EXECUTABLE);
 
   void RegisterReadOnlyMemory(ReadOnlyPageMetadata* page);
 

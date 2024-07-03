@@ -17,7 +17,7 @@
 #include "src/debug/debug.h"
 #include "src/deoptimizer/deoptimizer.h"
 #include "src/execution/frames-inl.h"
-#include "src/heap/mutable-page.h"
+#include "src/heap/mutable-page-metadata.h"
 #include "src/init/bootstrapper.h"
 #include "src/logging/counters.h"
 #include "src/objects/heap-number.h"
@@ -3004,6 +3004,7 @@ void MacroAssembler::RoundFloatingPointToInteger(Register rd, FPURegister fs,
 
 void MacroAssembler::Clear_if_nan_d(Register rd, FPURegister fs) {
   Label no_nan;
+  DCHECK_NE(kScratchReg, rd);
   feq_d(kScratchReg, fs, fs);
   bnez(kScratchReg, &no_nan);
   Move(rd, zero_reg);
@@ -3012,6 +3013,7 @@ void MacroAssembler::Clear_if_nan_d(Register rd, FPURegister fs) {
 
 void MacroAssembler::Clear_if_nan_s(Register rd, FPURegister fs) {
   Label no_nan;
+  DCHECK_NE(kScratchReg, rd);
   feq_s(kScratchReg, fs, fs);
   bnez(kScratchReg, &no_nan);
   Move(rd, zero_reg);
@@ -5527,6 +5529,7 @@ void MacroAssembler::WasmRvvS128const(VRegister dst, const uint8_t imms[16]) {
 
 void MacroAssembler::LoadLane(int ts, VRegister dst, uint8_t laneidx,
                               MemOperand src) {
+  DCHECK_NE(kScratchReg, src.rm());
   if (ts == 8) {
     Lbu(kScratchReg2, src);
     VU.set(kScratchReg, E32, m1);
@@ -5567,6 +5570,7 @@ void MacroAssembler::LoadLane(int ts, VRegister dst, uint8_t laneidx,
 
 void MacroAssembler::StoreLane(int sz, VRegister src, uint8_t laneidx,
                                MemOperand dst) {
+  DCHECK_NE(kScratchReg, dst.rm());
   if (sz == 8) {
     VU.set(kScratchReg, E8, m1);
     vslidedown_vi(kSimd128ScratchReg, src, laneidx);
@@ -6051,6 +6055,7 @@ void MacroAssembler::EnterExitFrame(int stack_space,
   ASM_CODE_COMMENT(this);
   DCHECK(frame_type == StackFrame::EXIT ||
          frame_type == StackFrame::BUILTIN_EXIT ||
+         frame_type == StackFrame::API_ACCESSOR_EXIT ||
          frame_type == StackFrame::API_CALLBACK_EXIT);
 
   // Set up the frame structure on the stack.
@@ -6691,7 +6696,6 @@ int MacroAssembler::CallCFunctionHelper(
 
   int stack_passed_arguments =
       CalculateStackPassedDWords(num_reg_arguments, num_double_arguments);
-
   if (base::OS::ActivationFrameAlignment() > kSystemPointerSize) {
     LoadWord(sp, MemOperand(sp, stack_passed_arguments * kSystemPointerSize));
   } else {
@@ -6945,44 +6949,15 @@ void MacroAssembler::AtomicDecompressTagged(Register dst,
 }
 
 #endif
-void MacroAssembler::DropArguments(Register count, ArgumentsCountType type,
-                                   ArgumentsCountMode mode, Register scratch) {
-  switch (type) {
-    case kCountIsInteger: {
-      CalcScaledAddress(sp, sp, count, kSystemPointerSizeLog2);
-      break;
-    }
-    case kCountIsSmi: {
-      static_assert(kSmiTagSize == 1 && kSmiTag == 0);
-      DCHECK_NE(scratch, no_reg);
-      SmiScale(scratch, count, kSystemPointerSizeLog2);
-      AddWord(sp, sp, scratch);
-      break;
-    }
-    case kCountIsBytes: {
-      AddWord(sp, sp, count);
-      break;
-    }
-  }
-  if (mode == kCountExcludesReceiver) {
-    AddWord(sp, sp, kSystemPointerSize);
-  }
+void MacroAssembler::DropArguments(Register count) {
+  CalcScaledAddress(sp, sp, count, kSystemPointerSizeLog2);
 }
 
 void MacroAssembler::DropArgumentsAndPushNewReceiver(Register argc,
-                                                     Register receiver,
-                                                     ArgumentsCountType type,
-                                                     ArgumentsCountMode mode,
-                                                     Register scratch) {
+                                                     Register receiver) {
   DCHECK(!AreAliased(argc, receiver));
-  if (mode == kCountExcludesReceiver) {
-    // Drop arguments without receiver and override old receiver.
-    DropArguments(argc, type, kCountIncludesReceiver, scratch);
-    StoreWord(receiver, MemOperand(sp));
-  } else {
-    DropArguments(argc, type, mode, scratch);
-    push(receiver);
-  }
+  DropArguments(argc);
+  push(receiver);
 }
 
 // Calls an API function. Allocates HandleScope, extracts returned value
@@ -7125,9 +7100,11 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
     ASM_CODE_COMMENT_STRING(masm, "Call the api function via thunk wrapper.");
     __ bind(&profiler_or_side_effects_check_enabled);
     // Additional parameter is the address of the actual callback function.
-    MemOperand thunk_arg_mem_op = __ ExternalReferenceAsOperand(
-        ER::api_callback_thunk_argument_address(isolate), no_reg);
-    __ StoreWord(thunk_arg, thunk_arg_mem_op);
+    if (thunk_arg.is_valid()) {
+      MemOperand thunk_arg_mem_op = __ ExternalReferenceAsOperand(
+          ER::api_callback_thunk_argument_address(isolate), no_reg);
+      __ StoreWord(thunk_arg, thunk_arg_mem_op);
+    }
     __ li(scratch, thunk_ref);
     __ StoreReturnAddressAndCall(scratch);
     __ Branch(&done_api_call);

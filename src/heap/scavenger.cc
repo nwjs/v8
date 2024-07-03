@@ -15,12 +15,12 @@
 #include "src/heap/gc-tracer.h"
 #include "src/heap/heap-inl.h"
 #include "src/heap/heap.h"
-#include "src/heap/large-page-inl.h"
+#include "src/heap/large-page-metadata-inl.h"
 #include "src/heap/mark-compact-inl.h"
 #include "src/heap/mark-compact.h"
 #include "src/heap/memory-chunk-layout.h"
-#include "src/heap/mutable-page-inl.h"
-#include "src/heap/mutable-page.h"
+#include "src/heap/mutable-page-metadata-inl.h"
+#include "src/heap/mutable-page-metadata.h"
 #include "src/heap/objects-visiting-inl.h"
 #include "src/heap/pretenuring-handler.h"
 #include "src/heap/remembered-set-inl.h"
@@ -366,6 +366,15 @@ class V8_NODISCARD ScopedFullHeapCrashKey {
 void ScavengerCollector::CollectGarbage() {
   ScopedFullHeapCrashKey collect_full_heap_dump_if_crash(isolate_);
 
+  auto* new_space = SemiSpaceNewSpace::From(heap_->new_space());
+  new_space->GarbageCollectionPrologue();
+  new_space->EvacuatePrologue();
+
+  // We also flip the young generation large object space. All large objects
+  // will be in the from space.
+  heap_->new_lo_space()->Flip();
+  heap_->new_lo_space()->ResetPendingObject();
+
   DCHECK(!heap_->allocator()->new_space_allocator()->IsLabValid());
 
   DCHECK(surviving_new_large_objects_.empty());
@@ -496,10 +505,6 @@ void ScavengerCollector::CollectGarbage() {
         &Heap::UpdateYoungReferenceInExternalStringTableEntry);
 
     heap_->incremental_marking()->UpdateMarkingWorklistAfterScavenge();
-
-    if (V8_UNLIKELY(v8_flags.track_retaining_path)) {
-      heap_->UpdateRetainersAfterScavenge();
-    }
 
     if (V8_UNLIKELY(v8_flags.always_use_string_forwarding_table)) {
       isolate_->string_forwarding_table()->UpdateAfterYoungEvacuation();

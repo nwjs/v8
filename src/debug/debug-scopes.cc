@@ -56,7 +56,8 @@ Handle<Object> ScopeIterator::GetFunctionDebugName() const {
   return isolate_->factory()->undefined_value();
 }
 
-ScopeIterator::ScopeIterator(Isolate* isolate, Handle<JSFunction> function)
+ScopeIterator::ScopeIterator(Isolate* isolate,
+                             DirectHandle<JSFunction> function)
     : isolate_(isolate),
       context_(function->context(), isolate),
       locals_(StringSet::New(isolate)) {
@@ -102,8 +103,8 @@ namespace {
 // or a child of the closure scope.
 class ScopeChainRetriever {
  public:
-  ScopeChainRetriever(DeclarationScope* scope, Handle<JSFunction> function,
-                      int position)
+  ScopeChainRetriever(DeclarationScope* scope,
+                      DirectHandle<JSFunction> function, int position)
       : scope_(scope),
         break_scope_start_(function->shared()->StartPosition()),
         break_scope_end_(function->shared()->EndPosition()),
@@ -377,16 +378,16 @@ void ScopeIterator::UnwrapEvaluationContext() {
 
 Handle<JSObject> ScopeIterator::MaterializeScopeDetails() {
   // Calculate the size of the result.
-  Handle<FixedArray> details =
+  DirectHandle<FixedArray> details =
       isolate_->factory()->NewFixedArray(kScopeDetailsSize);
   // Fill in scope details.
   details->set(kScopeDetailsTypeIndex, Smi::FromInt(Type()));
-  Handle<JSObject> scope_object = ScopeObject(Mode::ALL);
+  DirectHandle<JSObject> scope_object = ScopeObject(Mode::ALL);
   details->set(kScopeDetailsObjectIndex, *scope_object);
   if (Type() == ScopeTypeGlobal || Type() == ScopeTypeScript) {
     return isolate_->factory()->NewJSArrayWithElements(details);
   } else if (HasContext()) {
-    Handle<Object> closure_name = GetFunctionDebugName();
+    DirectHandle<Object> closure_name = GetFunctionDebugName();
     details->set(kScopeDetailsNameIndex, *closure_name);
     details->set(kScopeDetailsStartPositionIndex,
                  Smi::FromInt(start_position()));
@@ -421,7 +422,7 @@ bool ScopeIterator::DeclaresLocals(Mode mode) const {
   if (type == ScopeTypeGlobal) return mode == Mode::ALL;
 
   bool declares_local = false;
-  auto visitor = [&](Handle<String> name, Handle<Object> value,
+  auto visitor = [&](DirectHandle<String> name, DirectHandle<Object> value,
                      ScopeType scope_type) {
     declares_local = true;
     return true;
@@ -747,7 +748,7 @@ void ScopeIterator::DebugPrint() {
       if (NeedsContext()) {
         Print(*context_, os);
         if (context_->has_extension()) {
-          Handle<HeapObject> extension(context_->extension(), isolate_);
+          DirectHandle<HeapObject> extension(context_->extension(), isolate_);
           DCHECK(IsJSContextExtensionObject(*extension));
           Print(*extension, os);
         }
@@ -770,7 +771,7 @@ void ScopeIterator::DebugPrint() {
       os << "Closure:\n";
       Print(*context_, os);
       if (context_->has_extension()) {
-        Handle<HeapObject> extension(context_->extension(), isolate_);
+        DirectHandle<HeapObject> extension(context_->extension(), isolate_);
         DCHECK(IsJSContextExtensionObject(*extension));
         Print(*extension, os);
       }
@@ -800,12 +801,12 @@ int ScopeIterator::GetSourcePosition() const {
 }
 
 void ScopeIterator::VisitScriptScope(const Visitor& visitor) const {
-  Handle<ScriptContextTable> script_contexts(
+  DirectHandle<ScriptContextTable> script_contexts(
       context_->native_context()->script_context_table(), isolate_);
 
   // Skip the first script since that just declares 'this'.
   for (int i = 1; i < script_contexts->length(kAcquireLoad); i++) {
-    Handle<Context> context(script_contexts->get(i), isolate_);
+    DirectHandle<Context> context(script_contexts->get(i), isolate_);
     Handle<ScopeInfo> scope_info(context->scope_info(), isolate_);
     if (VisitContextLocals(visitor, scope_info, context, ScopeTypeScript)) {
       return;
@@ -823,7 +824,7 @@ void ScopeIterator::VisitModuleScope(const Visitor& visitor) const {
 
   int module_variable_count = scope_info->ModuleVariableCount();
 
-  Handle<SourceTextModule> module(context_->module(), isolate_);
+  DirectHandle<SourceTextModule> module(context_->module(), isolate_);
 
   for (int i = 0; i < module_variable_count; ++i) {
     int index;
@@ -843,7 +844,7 @@ void ScopeIterator::VisitModuleScope(const Visitor& visitor) const {
 
 bool ScopeIterator::VisitContextLocals(const Visitor& visitor,
                                        Handle<ScopeInfo> scope_info,
-                                       Handle<Context> context,
+                                       DirectHandle<Context> context,
                                        ScopeType scope_type) const {
   // Fill all context locals to the context extension.
   for (auto it : ScopeInfo::IterateLocalNames(scope_info)) {
@@ -971,7 +972,7 @@ bool ScopeIterator::VisitLocals(const Visitor& visitor, Mode mode,
       case VariableLocation::MODULE: {
         if (mode == Mode::STACK) continue;
         // if (var->IsExport()) continue;
-        Handle<SourceTextModule> module(context_->module(), isolate_);
+        DirectHandle<SourceTextModule> module(context_->module(), isolate_);
         value = SourceTextModule::LoadVariable(isolate_, module, var->index());
         break;
       }
@@ -1041,7 +1042,7 @@ void ScopeIterator::VisitLocalScope(const Visitor& visitor, Mode mode,
     if (!context_->scope_info()->SloppyEvalCanExtendVars()) return;
     if (context_->extension_object().is_null()) return;
     Handle<JSObject> extension(context_->extension_object(), isolate_);
-    Handle<FixedArray> keys =
+    DirectHandle<FixedArray> keys =
         KeyAccumulator::GetKeys(isolate_, extension,
                                 KeyCollectionMode::kOwnOnly, ENUMERABLE_STRINGS)
             .ToHandleChecked();
@@ -1058,7 +1059,7 @@ void ScopeIterator::VisitLocalScope(const Visitor& visitor, Mode mode,
 }
 
 bool ScopeIterator::SetLocalVariableValue(Handle<String> variable_name,
-                                          Handle<Object> new_value) {
+                                          DirectHandle<Object> new_value) {
   // TODO(verwaest): Walk parameters backwards, not forwards.
   // TODO(verwaest): Use VariableMap rather than locals() list for lookup.
   for (Variable* var : *current_scope_->locals()) {
@@ -1081,7 +1082,7 @@ bool ScopeIterator::SetLocalVariableValue(Handle<String> variable_name,
           if (frame_inspector_ == nullptr) {
             // Set the variable in the suspended generator.
             DCHECK(!generator_.is_null());
-            Handle<FixedArray> parameters_and_registers(
+            DirectHandle<FixedArray> parameters_and_registers(
                 generator_->parameters_and_registers(), isolate_);
             DCHECK_LT(index, parameters_and_registers->length());
             parameters_and_registers->set(index, *new_value);
@@ -1101,7 +1102,7 @@ bool ScopeIterator::SetLocalVariableValue(Handle<String> variable_name,
             int parameter_count =
                 function_->shared()->scope_info()->ParameterCount();
             index += parameter_count;
-            Handle<FixedArray> parameters_and_registers(
+            DirectHandle<FixedArray> parameters_and_registers(
                 generator_->parameters_and_registers(), isolate_);
             DCHECK_LT(index, parameters_and_registers->length());
             parameters_and_registers->set(index, *new_value);
@@ -1130,7 +1131,7 @@ bool ScopeIterator::SetLocalVariableValue(Handle<String> variable_name,
 
         case VariableLocation::MODULE:
           if (!var->IsExport()) return false;
-          Handle<SourceTextModule> module(context_->module(), isolate_);
+          DirectHandle<SourceTextModule> module(context_->module(), isolate_);
           SourceTextModule::StoreVariable(module, var->index(), new_value);
           return true;
       }
@@ -1157,15 +1158,15 @@ bool ScopeIterator::SetContextExtensionValue(Handle<String> variable_name,
 }
 
 bool ScopeIterator::SetContextVariableValue(Handle<String> variable_name,
-                                            Handle<Object> new_value) {
+                                            DirectHandle<Object> new_value) {
   int slot_index = context_->scope_info()->ContextSlotIndex(variable_name);
   if (slot_index < 0) return false;
   context_->set(slot_index, *new_value);
   return true;
 }
 
-bool ScopeIterator::SetModuleVariableValue(Handle<String> variable_name,
-                                           Handle<Object> new_value) {
+bool ScopeIterator::SetModuleVariableValue(DirectHandle<String> variable_name,
+                                           DirectHandle<Object> new_value) {
   DisallowGarbageCollection no_gc;
   int cell_index;
   VariableMode mode;
@@ -1180,18 +1181,18 @@ bool ScopeIterator::SetModuleVariableValue(Handle<String> variable_name,
     return false;
   }
 
-  Handle<SourceTextModule> module(context_->module(), isolate_);
+  DirectHandle<SourceTextModule> module(context_->module(), isolate_);
   SourceTextModule::StoreVariable(module, cell_index, new_value);
   return true;
 }
 
 bool ScopeIterator::SetScriptVariableValue(Handle<String> variable_name,
-                                           Handle<Object> new_value) {
-  Handle<ScriptContextTable> script_contexts(
+                                           DirectHandle<Object> new_value) {
+  DirectHandle<ScriptContextTable> script_contexts(
       context_->native_context()->script_context_table(), isolate_);
   VariableLookupResult lookup_result;
   if (script_contexts->Lookup(variable_name, &lookup_result)) {
-    Handle<Context> script_context(
+    DirectHandle<Context> script_context(
         script_contexts->get(lookup_result.context_index), isolate_);
     script_context->set(lookup_result.slot_index, *new_value);
     return true;

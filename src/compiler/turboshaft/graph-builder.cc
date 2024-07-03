@@ -1285,8 +1285,8 @@ OpIndex GraphBuilder::Process(
       }
       CanThrow can_throw =
           op->HasProperty(Operator::kNoThrow) ? CanThrow::kNo : CanThrow::kYes;
-      const TSCallDescriptor* ts_descriptor =
-          TSCallDescriptor::Create(call_descriptor, can_throw, graph_zone);
+      const TSCallDescriptor* ts_descriptor = TSCallDescriptor::Create(
+          call_descriptor, can_throw, LazyDeoptOnThrow::kNo, graph_zone);
 
       OpIndex frame_state_idx = OpIndex::Invalid();
       if (call_descriptor->NeedsFrameState()) {
@@ -1336,8 +1336,8 @@ OpIndex GraphBuilder::Process(
 
       CanThrow can_throw =
           op->HasProperty(Operator::kNoThrow) ? CanThrow::kNo : CanThrow::kYes;
-      const TSCallDescriptor* ts_descriptor =
-          TSCallDescriptor::Create(call_descriptor, can_throw, graph_zone);
+      const TSCallDescriptor* ts_descriptor = TSCallDescriptor::Create(
+          call_descriptor, can_throw, LazyDeoptOnThrow::kNo, graph_zone);
 
       __ TailCall(callee, base::VectorOf(arguments), ts_descriptor);
       return OpIndex::Invalid();
@@ -1944,8 +1944,9 @@ OpIndex GraphBuilder::Process(
       const int c_arg_count = params.argument_count();
 
       base::SmallVector<OpIndex, 16> slow_call_arguments;
-      DCHECK_EQ(node->op()->ValueInputCount() - c_arg_count,
-                n.SlowCallArgumentCount());
+      DCHECK_EQ(node->op()->ValueInputCount(),
+                c_arg_count + FastApiCallNode::kCallbackData +
+                    n.SlowCallArgumentCount());
       OpIndex slow_call_callee = Map(n.SlowCallArgument(0));
       for (int i = 1; i < n.SlowCallArgumentCount(); ++i) {
         slow_call_arguments.push_back(Map(n.SlowCallArgument(i)));
@@ -1968,7 +1969,7 @@ OpIndex GraphBuilder::Process(
               slow_call_callee, dominating_frame_state,
               base::VectorOf(slow_call_arguments),
               TSCallDescriptor::Create(params.descriptor(), CanThrow::kYes,
-                                       __ graph_zone()));
+                                       LazyDeoptOnThrow::kNo, __ graph_zone()));
 
           if (is_final_control) {
             // The `__ Call()` before has already created exceptional
@@ -1986,13 +1987,9 @@ OpIndex GraphBuilder::Process(
       for (int i = 0; i < c_arg_count; ++i) {
         arguments.push_back(Map(NodeProperties::GetValueInput(node, i)));
       }
-      OpIndex data_argument =
-          Map(n.SlowCallArgument(FastApiCallNode::kSlowCallDataArgumentIndex));
+      OpIndex data_argument = Map(n.CallbackData());
 
-      // The last slow call argument is the frame state, the one before is the
-      // context.
-      V<Context> context =
-          Map(n.SlowCallArgument(n.SlowCallArgumentCount() - 2));
+      V<Context> context = Map(n.Context());
 
       const FastApiCallParameters* parameters = FastApiCallParameters::Create(
           c_functions, resolution_result, __ graph_zone());
@@ -2016,11 +2013,11 @@ OpIndex GraphBuilder::Process(
         // arg. None of the above usually holds true for Wasm functions with
         // primitive types only, so we avoid generating an extra branch here.
 
-        V<Object> slow_call_result = V<Object>::Cast(
-            __ Call(slow_call_callee, dominating_frame_state,
-                    base::VectorOf(slow_call_arguments),
-                    TSCallDescriptor::Create(params.descriptor(),
-                                             CanThrow::kYes, __ graph_zone())));
+        V<Object> slow_call_result = V<Object>::Cast(__ Call(
+            slow_call_callee, dominating_frame_state,
+            base::VectorOf(slow_call_arguments),
+            TSCallDescriptor::Create(params.descriptor(), CanThrow::kYes,
+                                     LazyDeoptOnThrow::kNo, __ graph_zone())));
         GOTO(done, slow_call_result);
       }
       BIND(done, result);
@@ -2350,8 +2347,7 @@ OpIndex GraphBuilder::Process(
       return __ LoadStackPointer();
 
     case IrOpcode::kSetStackPointer:
-      __ SetStackPointer(Map(node->InputAt(0)),
-                         OpParameter<wasm::FPRelativeScope>(node->op()));
+      __ SetStackPointer(Map(node->InputAt(0)));
       return OpIndex::Invalid();
 
 #endif  // V8_ENABLE_WEBASSEMBLY

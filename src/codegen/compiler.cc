@@ -62,6 +62,7 @@
 #include "src/parsing/pending-compilation-error-handler.h"
 #include "src/parsing/scanner-character-streams.h"
 #include "src/snapshot/code-serializer.h"
+#include "src/tracing/traced-value.h"
 #include "src/utils/ostreams.h"
 #include "src/zone/zone-list-inl.h"  // crbug.com/v8/8816
 
@@ -3036,14 +3037,12 @@ bool CodeGenerationFromStringsAllowed(Isolate* isolate,
 }
 
 // Check whether embedder allows code generation in this context.
-// (via v8::Isolate::SetModifyCodeGenerationFromStringsCallback
-//  or v8::Isolate::SetModifyCodeGenerationFromStringsCallback2)
+// (via v8::Isolate::SetModifyCodeGenerationFromStringsCallback)
 bool ModifyCodeGenerationFromStrings(Isolate* isolate,
                                      Handle<NativeContext> context,
                                      Handle<i::Object>* source,
                                      bool is_code_like) {
-  DCHECK(isolate->modify_code_gen_callback() ||
-         isolate->modify_code_gen_callback2());
+  DCHECK(isolate->modify_code_gen_callback());
   DCHECK(source);
 
   // Callback set. Run it, and use the return value as source, or block
@@ -3051,12 +3050,9 @@ bool ModifyCodeGenerationFromStrings(Isolate* isolate,
   VMState<EXTERNAL> state(isolate);
   RCS_SCOPE(isolate, RuntimeCallCounterId::kCodeGenerationFromStringsCallbacks);
   ModifyCodeGenerationFromStringsResult result =
-      isolate->modify_code_gen_callback()
-          ? isolate->modify_code_gen_callback()(v8::Utils::ToLocal(context),
-                                                v8::Utils::ToLocal(*source))
-          : isolate->modify_code_gen_callback2()(v8::Utils::ToLocal(context),
-                                                 v8::Utils::ToLocal(*source),
-                                                 is_code_like);
+      isolate->modify_code_gen_callback()(v8::Utils::ToLocal(context),
+                                          v8::Utils::ToLocal(*source),
+                                          is_code_like);
   if (result.codegen_allowed && !result.modified_source.IsEmpty()) {
     // Use the new source (which might be the same as the old source).
     *source =
@@ -3114,8 +3110,7 @@ std::pair<MaybeHandle<String>, bool> Compiler::ValidateDynamicCompilationSource(
   // Check if the context wants to block or modify this source object.
   // Double-check that we really have a string now.
   // (Let modify_code_gen_callback decide, if it's been set.)
-  if (isolate->modify_code_gen_callback() ||
-      isolate->modify_code_gen_callback2()) {
+  if (isolate->modify_code_gen_callback()) {
     Handle<i::Object> modified_source = original_source;
     if (!ModifyCodeGenerationFromStrings(isolate, context, &modified_source,
                                          is_code_like)) {
@@ -3151,10 +3146,8 @@ MaybeHandle<JSFunction> Compiler::GetFunctionFromValidatedString(
   if (source.is_null()) {
     Handle<Object> error_message =
         native_context->ErrorMessageForCodeGenerationFromStrings();
-    THROW_NEW_ERROR(
-        isolate,
-        NewEvalError(MessageTemplate::kCodeGenFromStrings, error_message),
-        JSFunction);
+    THROW_NEW_ERROR(isolate, NewEvalError(MessageTemplate::kCodeGenFromStrings,
+                                          error_message));
   }
 
   // Compile source string in the native context.
@@ -3876,7 +3869,7 @@ MaybeHandle<JSFunction> Compiler::GetWrappedFunction(
                                                  maybe_outer_scope_info,
                                                  isolate, &is_compiled_scope);
     if (maybe_result.is_null()) isolate->ReportPendingMessages();
-    ASSIGN_RETURN_ON_EXCEPTION(isolate, top_level, maybe_result, JSFunction);
+    ASSIGN_RETURN_ON_EXCEPTION(isolate, top_level, maybe_result);
 
     SharedFunctionInfo::ScriptIterator infos(isolate, *script);
     for (Tagged<SharedFunctionInfo> info = infos.Next(); !info.is_null();
@@ -4228,7 +4221,65 @@ void Compiler::PostInstantiation(Handle<JSFunction> function,
     // If it's a top-level script, report compilation to the debugger.
     Handle<Script> script(Script::cast(shared->script()), isolate);
     isolate->debug()->OnAfterCompile(script);
+    TRACE_EVENT1(TRACE_DISABLED_BY_DEFAULT("devtools.v8-source-rundown"),
+                 "ScriptCompiled", "data",
+                 AddScriptCompiledTrace(isolate, shared));
+    TRACE_EVENT1(
+        TRACE_DISABLED_BY_DEFAULT("devtools.v8-source-rundown-sources"),
+        "ScriptCompiled", "data", AddScriptSourceTextTrace(isolate, shared));
   }
+}
+
+std::unique_ptr<v8::tracing::TracedValue> Compiler::AddScriptCompiledTrace(
+    Isolate* isolate, Handle<SharedFunctionInfo> shared) {
+  Handle<Script> script(Script::cast(shared->script()), isolate);
+  i::Tagged<i::Object> context_value =
+      isolate->native_context()->debug_context_id();
+  int contextId = (IsSmi(context_value)) ? i::Smi::ToInt(context_value) : 0;
+  Script::InitLineEnds(isolate, script);
+  Script::PositionInfo endInfo;
+  Script::GetPositionInfo(script, i::String::cast(script->source())->length(),
+                          &endInfo);
+  Script::PositionInfo startInfo;
+  Script::GetPositionInfo(script, shared->StartPosition(), &startInfo);
+  auto value = v8::tracing::TracedValue::Create();
+  value->SetString("isolate",
+                   std::to_string(reinterpret_cast<size_t>(isolate)));
+  value->SetInteger("executionContextId", contextId);
+  value->SetInteger("scriptId", script->id());
+  value->SetInteger("startLine", startInfo.line);
+  value->SetInteger("startColumn", startInfo.column);
+  value->SetInteger("endLine", endInfo.line);
+  value->SetInteger("endColumn", endInfo.column);
+  value->SetBoolean("isModule", script->origin_options().IsModule());
+  value->SetBoolean("hasSourceUrl", script->HasValidSource());
+  if (script->HasValidSource() && IsString(script->GetNameOrSourceURL())) {
+    value->SetString(
+        "sourceMapUrl",
+        i::String::cast(script->GetNameOrSourceURL())->ToCString().get());
+  }
+  value->SetString("url", i::String::cast(script->name())->ToCString().get());
+  value->SetString("hash",
+                   i::Script::GetScriptHash(isolate, script,
+                                            /* forceForInspector: */ false)
+                       ->ToCString()
+                       .get());
+  return value;
+}
+
+std::unique_ptr<v8::tracing::TracedValue> Compiler::AddScriptSourceTextTrace(
+    Isolate* isolate, Handle<SharedFunctionInfo> shared) {
+  Handle<Script> script(Script::cast(shared->script()), isolate);
+  auto value = v8::tracing::TracedValue::Create();
+  value->SetString("isolate",
+                   std::to_string(reinterpret_cast<size_t>(isolate)));
+  value->SetInteger("scriptId", script->id());
+  if (IsString(script->source())) {
+    Tagged<String> source = i::String::cast(script->source());
+    value->SetInteger("length", source->length());
+    value->SetString("sourceText", source->ToCString().get());
+  }
+  return value;
 }
 
 // ----------------------------------------------------------------------------

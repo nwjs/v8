@@ -236,8 +236,7 @@ void JSObject::EnsureCanContainElements(Handle<JSObject> object,
   if (object->GetElementsKind() == HOLEY_SMI_ELEMENTS) {
     TransitionElementsKind(object, HOLEY_DOUBLE_ELEMENTS);
   } else if (object->GetElementsKind() == PACKED_SMI_ELEMENTS) {
-    Handle<FixedDoubleArray> double_array =
-        Handle<FixedDoubleArray>::cast(elements);
+    auto double_array = DirectHandle<FixedDoubleArray>::cast(elements);
     for (uint32_t i = 0; i < length; ++i) {
       if (double_array->is_the_hole(i)) {
         TransitionElementsKind(object, HOLEY_DOUBLE_ELEMENTS);
@@ -248,8 +247,9 @@ void JSObject::EnsureCanContainElements(Handle<JSObject> object,
   }
 }
 
-void JSObject::SetMapAndElements(Handle<JSObject> object, Handle<Map> new_map,
-                                 Handle<FixedArrayBase> value) {
+void JSObject::SetMapAndElements(DirectHandle<JSObject> object,
+                                 Handle<Map> new_map,
+                                 DirectHandle<FixedArrayBase> value) {
   Isolate* isolate = object->GetIsolate();
   JSObject::MigrateToMap(isolate, object, new_map);
   DCHECK((object->map()->has_fast_smi_or_object_elements() ||
@@ -625,37 +625,39 @@ JSApiWrapper::JSApiWrapper(Tagged<JSObject> object) : object_(object) {
   DCHECK(IsJSApiWrapperObject(object));
 }
 
-template <ExternalPointerTag tag>
+template <CppHeapPointerTag lower_bound, CppHeapPointerTag upper_bound>
 void* JSApiWrapper::GetCppHeapWrappable(
     IsolateForPointerCompression isolate) const {
-  return reinterpret_cast<void*>(object_->TryReadCppHeapPointerField<tag>(
-      kCppHeapWrappableOffset, isolate));
+  return reinterpret_cast<void*>(
+      object_->ReadCppHeapPointerField<lower_bound, upper_bound>(
+          kCppHeapWrappableOffset, isolate));
 }
 
-void* JSApiWrapper::GetCppHeapWrappable(IsolateForPointerCompression isolate,
-                                        ExternalPointerTag tag) const {
-  return reinterpret_cast<void*>(object_->TryReadCppHeapPointerField(
-      kCppHeapWrappableOffset, isolate, tag));
+void* JSApiWrapper::GetCppHeapWrappable(
+    IsolateForPointerCompression isolate,
+    CppHeapPointerTagRange tag_range) const {
+  return reinterpret_cast<void*>(object_->ReadCppHeapPointerField(
+      kCppHeapWrappableOffset, isolate, tag_range));
 }
 
-template <ExternalPointerTag tag>
+template <CppHeapPointerTag tag>
 void JSApiWrapper::SetCppHeapWrappable(IsolateForPointerCompression isolate,
                                        void* instance) {
   object_->WriteLazilyInitializedCppHeapPointerField<tag>(
       JSAPIObjectWithEmbedderSlots::kCppHeapWrappableOffset, isolate,
       reinterpret_cast<Address>(instance));
   if (instance) {
-    WriteBarrier::MarkingFromCppHeapWrappable(object_, instance);
+    WriteBarrier::CombinedBarrierForCppHeapPointer(object_, instance);
   }
 }
 
 void JSApiWrapper::SetCppHeapWrappable(IsolateForPointerCompression isolate,
-                                       void* instance, ExternalPointerTag tag) {
+                                       void* instance, CppHeapPointerTag tag) {
   object_->WriteLazilyInitializedCppHeapPointerField(
       JSAPIObjectWithEmbedderSlots::kCppHeapWrappableOffset, isolate,
       reinterpret_cast<Address>(instance), tag);
   if (instance) {
-    WriteBarrier::MarkingFromCppHeapWrappable(object_, instance);
+    WriteBarrier::CombinedBarrierForCppHeapPointer(object_, instance);
   }
 }
 
@@ -665,7 +667,7 @@ bool JSMessageObject::DidEnsureSourcePositionsAvailable() const {
 
 // static
 void JSMessageObject::EnsureSourcePositionsAvailable(
-    Isolate* isolate, Handle<JSMessageObject> message) {
+    Isolate* isolate, DirectHandle<JSMessageObject> message) {
   if (message->DidEnsureSourcePositionsAvailable()) {
     DCHECK(message->script()->has_line_ends());
   } else {

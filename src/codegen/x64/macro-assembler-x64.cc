@@ -25,7 +25,7 @@
 #include "src/debug/debug.h"
 #include "src/deoptimizer/deoptimizer.h"
 #include "src/execution/frames-inl.h"
-#include "src/heap/mutable-page.h"
+#include "src/heap/mutable-page-metadata.h"
 #include "src/init/bootstrapper.h"
 #include "src/logging/counters.h"
 #include "src/objects/instance-type-inl.h"
@@ -876,34 +876,37 @@ void MacroAssembler::RecordWrite(Register object, Register slot_address,
     JumpIfSmi(value, &done);
   }
 
+  if (slot.contains_indirect_pointer()) {
+    // The indirect pointer write barrier is only enabled during marking.
+    JumpIfNotMarking(&done);
+  } else {
 #if V8_ENABLE_STICKY_MARK_BITS_BOOL
-  DCHECK(!AreAliased(kScratchRegister, object, slot_address, value));
-  Label stub_call;
+    DCHECK(!AreAliased(kScratchRegister, object, slot_address, value));
+    Label stub_call;
 
-  testb(Operand(kRootRegister, IsolateData::is_marking_flag_offset()),
-        Immediate(static_cast<uint8_t>(1)));
-  j(not_zero, &stub_call, Label::kFar);
+    JumpIfMarking(&stub_call);
 
-  // Save the slot_address in the xmm scratch register.
-  movq(kScratchDoubleReg, slot_address);
-  Register scratch0 = slot_address;
-  CheckMarkBit(object, kScratchRegister, scratch0, carry, &done);
-  CheckPageFlag(value, kScratchRegister, MemoryChunk::kIsInReadOnlyHeapMask,
-                not_zero, &done, Label::kFar);
-  CheckMarkBit(value, kScratchRegister, scratch0, carry, &done);
-  movq(slot_address, kScratchDoubleReg);
-  bind(&stub_call);
+    // Save the slot_address in the xmm scratch register.
+    movq(kScratchDoubleReg, slot_address);
+    Register scratch0 = slot_address;
+    CheckMarkBit(object, kScratchRegister, scratch0, carry, &done);
+    CheckPageFlag(value, kScratchRegister, MemoryChunk::kIsInReadOnlyHeapMask,
+                  not_zero, &done, Label::kFar);
+    CheckMarkBit(value, kScratchRegister, scratch0, carry, &done);
+    movq(slot_address, kScratchDoubleReg);
+    bind(&stub_call);
 #else   // !V8_ENABLE_STICKY_MARK_BITS_BOOL
-  CheckPageFlag(value,
-                value,  // Used as scratch.
-                MemoryChunk::kPointersToHereAreInterestingMask, zero, &done,
-                Label::kNear);
+    CheckPageFlag(value,
+                  value,  // Used as scratch.
+                  MemoryChunk::kPointersToHereAreInterestingMask, zero, &done,
+                  Label::kNear);
 
-  CheckPageFlag(object,
-                value,  // Used as scratch.
-                MemoryChunk::kPointersFromHereAreInterestingMask, zero, &done,
-                Label::kNear);
+    CheckPageFlag(object,
+                  value,  // Used as scratch.
+                  MemoryChunk::kPointersFromHereAreInterestingMask, zero, &done,
+                  Label::kNear);
 #endif  // !V8_ENABLE_STICKY_MARK_BITS_BOOL
+  }
 
   if (slot.contains_direct_pointer()) {
     CallRecordWriteStub(object, slot_address, fp_mode,
@@ -2013,6 +2016,63 @@ void MacroAssembler::I32x8SConvertF32x8(YMMRegister dst, YMMRegister src,
   vpxor(dst, dst, tmp);
 }
 
+void MacroAssembler::I16x8SConvertF16x8(YMMRegister dst, YMMRegister src,
+                                        YMMRegister tmp, Register scratch) {
+  ASM_CODE_COMMENT(this);
+  DCHECK(CpuFeatures::IsSupported(AVX) && CpuFeatures::IsSupported(AVX2) &&
+         CpuFeatures::IsSupported(F16C));
+
+  CpuFeatureScope f16c_scope(this, F16C);
+  CpuFeatureScope avx_scope(this, AVX);
+  CpuFeatureScope avx2_scope(this, AVX2);
+  // Convert source f16 to f32.
+  vcvtph2ps(dst, src);
+  // Compare it to itself, NaNs are turn to 0s because don't equal to itself.
+  vcmpeqps(tmp, dst, dst);
+  // Reset NaNs.
+  vandps(dst, dst, tmp);
+  // Convert f32 to i32.
+  vcvttps2dq(dst, dst);
+  // We now have 8 i32 values. Using one character per 16 bits:
+  // dst: [AABBCCDDEEFFGGHH]
+  // Create a copy of the upper four values in the lower half of {tmp}
+  // (so the upper half of the immediate doesn't matter):
+  vpermq(tmp, dst, 0x4E);  // 0b01001110
+  // tmp: [EEFFGGHHAABBCCDD]
+  // Now pack them together as i16s. Note that {vpackssdw} interleaves
+  // 128-bit chunks from each input, and takes care of saturating each
+  // value to kMinInt16 and kMaxInt16. We will then ignore the upper half
+  // of {dst}.
+  vpackssdw(dst, dst, tmp);
+  // dst: [EFGHABCDABCDEFGH]
+  //       <--><--><--><-->
+  //         ↑   ↑   ↑   └── from lower half of {dst}
+  //         │   │   └────── from lower half of {tmp}
+  //         │   └────────── from upper half of {dst} (ignored)
+  //         └────────────── from upper half of {tmp} (ignored)
+}
+
+void MacroAssembler::I16x8TruncF16x8U(YMMRegister dst, YMMRegister src,
+                                      YMMRegister tmp) {
+  ASM_CODE_COMMENT(this);
+  DCHECK(CpuFeatures::IsSupported(AVX) && CpuFeatures::IsSupported(AVX2) &&
+         CpuFeatures::IsSupported(F16C));
+
+  CpuFeatureScope f16c_scope(this, F16C);
+  CpuFeatureScope avx_scope(this, AVX);
+  CpuFeatureScope avx2_scope(this, AVX2);
+  vcvtph2ps(dst, src);
+  // NAN->0, negative->0.
+  vpxor(tmp, tmp, tmp);
+  vmaxps(dst, dst, tmp);
+  // Convert to int.
+  vcvttps2dq(dst, dst);
+  // Move high part to a spare register.
+  // See detailed comment in {I16x8SConvertF16x8} for how this works.
+  vpermq(tmp, dst, 0x4E);  // 0b01001110
+  vpackusdw(dst, dst, tmp);
+}
+
 // Helper macro to define qfma macro-assembler. This takes care of every
 // possible case of register aliasing to minimize the number of instructions.
 #define QFMA(ps_or_pd)                        \
@@ -2091,7 +2151,15 @@ void MacroAssembler::I32x8DotI8x32I7x32AddS(YMMRegister dst, YMMRegister src1,
                                             YMMRegister splat_reg) {
   ASM_CODE_COMMENT(this);
   DCHECK(CpuFeatures::IsSupported(AVX) && CpuFeatures::IsSupported(AVX2));
+  // It's guaranteed in instruction selector
   DCHECK_EQ(dst, src3);
+  if (CpuFeatures::IsSupported(AVX_VNNI)) {
+    CpuFeatureScope avx_scope(this, AVX_VNNI);
+    vpdpbusd(dst, src2, src1);
+    return;
+  }
+
+  DCHECK_NE(scratch, splat_reg);
   CpuFeatureScope avx_scope(this, AVX);
   CpuFeatureScope avx2_scope(this, AVX2);
   // splat_reg = i16x16.splat(1)
@@ -2686,61 +2754,34 @@ void MacroAssembler::DropUnderReturnAddress(int stack_elements,
   PushReturnAddressFrom(scratch);
 }
 
-void MacroAssembler::DropArguments(Register count, ArgumentsCountType type,
-                                   ArgumentsCountMode mode) {
-  int receiver_bytes =
-      (mode == kCountExcludesReceiver) ? kSystemPointerSize : 0;
-  switch (type) {
-    case kCountIsInteger: {
-      leaq(rsp, Operand(rsp, count, times_system_pointer_size, receiver_bytes));
-      break;
-    }
-    case kCountIsSmi: {
-      SmiIndex index = SmiToIndex(count, count, kSystemPointerSizeLog2);
-      leaq(rsp, Operand(rsp, index.reg, index.scale, receiver_bytes));
-      break;
-    }
-    case kCountIsBytes: {
-      if (receiver_bytes == 0) {
-        addq(rsp, count);
-      } else {
-        leaq(rsp, Operand(rsp, count, times_1, receiver_bytes));
-      }
-      break;
-    }
-  }
+void MacroAssembler::DropArguments(Register count) {
+  leaq(rsp, Operand(rsp, count, times_system_pointer_size, 0));
 }
 
-void MacroAssembler::DropArguments(Register count, Register scratch,
-                                   ArgumentsCountType type,
-                                   ArgumentsCountMode mode) {
+void MacroAssembler::DropArguments(Register count, Register scratch) {
   DCHECK(!AreAliased(count, scratch));
   PopReturnAddressTo(scratch);
-  DropArguments(count, type, mode);
+  DropArguments(count);
   PushReturnAddressFrom(scratch);
 }
 
 void MacroAssembler::DropArgumentsAndPushNewReceiver(Register argc,
                                                      Register receiver,
-                                                     Register scratch,
-                                                     ArgumentsCountType type,
-                                                     ArgumentsCountMode mode) {
+                                                     Register scratch) {
   DCHECK(!AreAliased(argc, receiver, scratch));
   PopReturnAddressTo(scratch);
-  DropArguments(argc, type, mode);
+  DropArguments(argc);
   Push(receiver);
   PushReturnAddressFrom(scratch);
 }
 
 void MacroAssembler::DropArgumentsAndPushNewReceiver(Register argc,
                                                      Operand receiver,
-                                                     Register scratch,
-                                                     ArgumentsCountType type,
-                                                     ArgumentsCountMode mode) {
+                                                     Register scratch) {
   DCHECK(!AreAliased(argc, scratch));
   DCHECK(!receiver.AddressUsesRegister(scratch));
   PopReturnAddressTo(scratch);
-  DropArguments(argc, type, mode);
+  DropArguments(argc);
   Push(receiver);
   PushReturnAddressFrom(scratch);
 }
@@ -3864,11 +3905,7 @@ void MacroAssembler::LeaveFrame(StackFrame::Type type) {
   // TODO(v8:11429): Consider passing BASELINE instead, and checking for
   // IsJSFrame or similar. Could then unify with manual frame leaves in the
   // interpreter too.
-  if (v8_flags.debug_code && !StackFrame::IsJavaScript(type)
-#if V8_ENABLE_WEBASSEMBLY
-      && (type != StackFrame::Type::WASM || !v8_flags.wasm_deopt)
-#endif
-  ) {
+  if (v8_flags.debug_code && !StackFrame::IsJavaScript(type)) {
     cmpq(Operand(rbp, CommonFrameConstants::kContextOrFrameTypeOffset),
          Immediate(StackFrame::TypeToMarker(type)));
     Check(equal, AbortReason::kStackFrameTypesMustMatch);
@@ -3919,6 +3956,7 @@ void MacroAssembler::EnterExitFrame(int extra_slots,
   ASM_CODE_COMMENT(this);
   DCHECK(frame_type == StackFrame::EXIT ||
          frame_type == StackFrame::BUILTIN_EXIT ||
+         frame_type == StackFrame::API_ACCESSOR_EXIT ||
          frame_type == StackFrame::API_CALLBACK_EXIT);
 
   // Set up the frame structure on the stack.
@@ -4183,6 +4221,20 @@ void MacroAssembler::CheckPageFlag(Register object, Register scratch, int mask,
   j(cc, condition_met, condition_met_distance);
 }
 
+void MacroAssembler::JumpIfMarking(Label* is_marking,
+                                   Label::Distance condition_met_distance) {
+  testb(Operand(kRootRegister, IsolateData::is_marking_flag_offset()),
+        Immediate(static_cast<uint8_t>(1)));
+  j(not_zero, is_marking, condition_met_distance);
+}
+
+void MacroAssembler::JumpIfNotMarking(Label* not_marking,
+                                      Label::Distance condition_met_distance) {
+  testb(Operand(kRootRegister, IsolateData::is_marking_flag_offset()),
+        Immediate(static_cast<uint8_t>(1)));
+  j(zero, not_marking, condition_met_distance);
+}
+
 void MacroAssembler::CheckMarkBit(Register object, Register scratch0,
                                   Register scratch1, Condition cc,
                                   Label* condition_met,
@@ -4411,9 +4463,11 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
     // Call the api function via thunk wrapper.
     __ bind(&profiler_or_side_effects_check_enabled);
     // Additional parameter is the address of the actual callback function.
-    MemOperand thunk_arg_mem_op = __ ExternalReferenceAsOperand(
-        ER::api_callback_thunk_argument_address(isolate), no_reg);
-    __ movq(thunk_arg_mem_op, thunk_arg);
+    if (thunk_arg.is_valid()) {
+      MemOperand thunk_arg_mem_op = __ ExternalReferenceAsOperand(
+          ER::api_callback_thunk_argument_address(isolate), no_reg);
+      __ movq(thunk_arg_mem_op, thunk_arg);
+    }
     __ Call(thunk_ref);
     __ jmp(&done_api_call);
   }

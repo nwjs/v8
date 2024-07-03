@@ -140,8 +140,6 @@ namespace internal {
   TFC(ConstructWithSpread_Baseline, ConstructWithSpread_Baseline)              \
   TFC(ConstructWithSpread_WithFeedback, ConstructWithSpread_WithFeedback)      \
   TFC(ConstructWithArrayLike, ConstructWithArrayLike)                          \
-  TFC(ConstructWithArrayLike_WithFeedback,                                     \
-      ConstructWithArrayLike_WithFeedback)                                     \
   ASM(ConstructForwardVarargs, ConstructForwardVarargs)                        \
   ASM(ConstructForwardAllArgs, ConstructForwardAllArgs)                        \
   TFC(ConstructForwardAllArgs_Baseline, ConstructForwardAllArgs_Baseline)      \
@@ -283,6 +281,7 @@ namespace internal {
   TFC(ToNumberConvertBigInt, TypeConversion)                                   \
   TFC(ToBigIntConvertNumber, TypeConversion)                                   \
   TFC(Typeof, Typeof)                                                          \
+  TFC(Typeof_Baseline, UnaryOp_Baseline)                                       \
   TFC(BigIntToI64, BigIntToI64)                                                \
   TFC(BigIntToI32Pair, BigIntToI32Pair)                                        \
   TFC(I64ToBigInt, I64ToBigInt)                                                \
@@ -601,6 +600,10 @@ namespace internal {
   CPP(DisposableStackConstructor)                                              \
   CPP(DisposableStackPrototypeUse)                                             \
   CPP(DisposableStackPrototypeDispose)                                         \
+  CPP(DisposableStackPrototypeGetDisposed)                                     \
+  CPP(DisposableStackPrototypeAdopt)                                           \
+  CPP(DisposableStackPrototypeDefer)                                           \
+  CPP(DisposableStackPrototypeMove)                                            \
                                                                                \
   /* Error */                                                                  \
   CPP(ErrorConstructor)                                                        \

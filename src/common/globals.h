@@ -146,12 +146,6 @@ namespace internal {
 #define ENABLE_CONTROL_FLOW_INTEGRITY_BOOL false
 #endif
 
-#ifdef V8_MOVE_PROTOYPE_TRANSITIONS_FIRST
-#define V8_MOVE_PROTOYPE_TRANSITIONS_FIRST_BOOL true
-#else
-#define V8_MOVE_PROTOYPE_TRANSITIONS_FIRST_BOOL false
-#endif
-
 #if V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_ARM64
 // Set stack limit lower for ARM and ARM64 than for other architectures because:
 //  - on Arm stack allocating MacroAssembler takes 120K bytes.
@@ -183,7 +177,7 @@ namespace internal {
 // Helper macros to enable handling of direct C calls in the simulator.
 #if defined(USE_SIMULATOR) &&                                           \
     (defined(V8_TARGET_ARCH_ARM64) || defined(V8_TARGET_ARCH_MIPS64) || \
-     defined(V8_TARGET_ARCH_LOONG64))
+     defined(V8_TARGET_ARCH_LOONG64) || defined(V8_TARGET_ARCH_RISCV64))
 #define V8_USE_SIMULATOR_WITH_GENERIC_C_CALLS
 #define V8_IF_USE_SIMULATOR(V) , V
 #else
@@ -319,8 +313,9 @@ const size_t kShortBuiltinCallsOldSpaceSizeThreshold = size_t{2} * GB;
 // It's currently enabled only for the platforms listed below. We don't plan
 // to add support for IA32, because it has a totally different approach
 // (using FP stack).
-#if defined(V8_TARGET_ARCH_X64) || defined(V8_TARGET_ARCH_ARM64) || \
-    defined(V8_TARGET_ARCH_MIPS64) || defined(V8_TARGET_ARCH_LOONG64)
+#if defined(V8_TARGET_ARCH_X64) || defined(V8_TARGET_ARCH_ARM64) ||      \
+    defined(V8_TARGET_ARCH_MIPS64) || defined(V8_TARGET_ARCH_LOONG64) || \
+    defined(V8_TARGET_ARCH_RISCV64)
 #define V8_ENABLE_FP_PARAMS_IN_C_LINKAGE 1
 #endif
 
@@ -364,6 +359,7 @@ constexpr int kInt32Size = sizeof(int32_t);
 constexpr int kInt64Size = sizeof(int64_t);
 constexpr int kUInt32Size = sizeof(uint32_t);
 constexpr int kSizetSize = sizeof(size_t);
+constexpr int kFloat16Size = sizeof(uint16_t);
 constexpr int kFloatSize = sizeof(float);
 constexpr int kDoubleSize = sizeof(double);
 constexpr int kIntptrSize = sizeof(intptr_t);
@@ -896,6 +892,14 @@ constexpr uint64_t kClearedFreeMemoryValue = 0;
 constexpr uint64_t kZapValue = uint64_t{0xdeadbeedbeadbeef};
 constexpr uint64_t kHandleZapValue = uint64_t{0x1baddead0baddeaf};
 constexpr uint64_t kGlobalHandleZapValue = uint64_t{0x1baffed00baffedf};
+constexpr uint64_t kTracedHandleEagerResetZapValue =
+    uint64_t{0x1beffedaabaffedf};
+constexpr uint64_t kTracedHandleMinorGCResetZapValue =
+    uint64_t{0x1beffedeebaffedf};
+constexpr uint64_t kTracedHandleMinorGCWeakResetZapValue =
+    uint64_t{0x1beffed11baffedf};
+constexpr uint64_t kTracedHandleFullGCResetZapValue =
+    uint64_t{0x1beffed77baffedf};
 constexpr uint64_t kFromSpaceZapValue = uint64_t{0x1beefdad0beefdaf};
 constexpr uint64_t kDebugZapValue = uint64_t{0xbadbaddbbadbaddb};
 constexpr uint64_t kSlotsZapValue = uint64_t{0xbeefdeadbeefdeef};
@@ -905,6 +909,10 @@ constexpr uint32_t kClearedFreeMemoryValue = 0;
 constexpr uint32_t kZapValue = 0xdeadbeef;
 constexpr uint32_t kHandleZapValue = 0xbaddeaf;
 constexpr uint32_t kGlobalHandleZapValue = 0xbaffedf;
+constexpr uint32_t kTracedHandleEagerResetZapValue = 0xbeffedf;
+constexpr uint32_t kTracedHandleMinorGCResetZapValue = 0xbeffadf;
+constexpr uint32_t kTracedHandleMinorGCWeakResetZapValue = 0xbe11adf;
+constexpr uint32_t kTracedHandleFullGCResetZapValue = 0xbe77adf;
 constexpr uint32_t kFromSpaceZapValue = 0xbeefdaf;
 constexpr uint32_t kSlotsZapValue = 0xbeefdeef;
 constexpr uint32_t kDebugZapValue = 0xbadbaddb;
@@ -1786,8 +1794,11 @@ enum class VariableMode : uint8_t {
 
   kConst,  // declared via 'const' declarations
 
-  kUsing,  // declared via 'using' declaration for explicit memory management
-           // (last lexical)
+  kUsing,  // declared via 'using' declaration for explicit resource management
+
+  kAwaitUsing,  // declared via 'await using' declaration for explicit resource
+                // management
+                // (last lexical)
 
   kVar,  // declared via 'var', and 'function' declarations
 
@@ -1826,7 +1837,7 @@ enum class VariableMode : uint8_t {
   kPrivateGetterAndSetter,  // Does not coexist with any other variable with the
                             // same name in the same scope.
 
-  kLastLexicalVariableMode = kUsing,
+  kLastLexicalVariableMode = kAwaitUsing,
 };
 
 // Printing support
@@ -1857,6 +1868,8 @@ inline const char* VariableMode2String(VariableMode mode) {
       return "TEMPORARY";
     case VariableMode::kUsing:
       return "USING";
+    case VariableMode::kAwaitUsing:
+      return "AWAIT_USING";
   }
   UNREACHABLE();
 }
@@ -1900,7 +1913,8 @@ inline bool IsSerializableVariableMode(VariableMode mode) {
 }
 
 inline bool IsImmutableLexicalVariableMode(VariableMode mode) {
-  return mode == VariableMode::kConst || mode == VariableMode::kUsing;
+  return mode == VariableMode::kConst || mode == VariableMode::kUsing ||
+         mode == VariableMode::kAwaitUsing;
 }
 
 inline bool IsImmutableLexicalOrPrivateVariableMode(VariableMode mode) {
@@ -2089,6 +2103,23 @@ class CompareOperationFeedback {
     kSymbol = kSymbolFlag,
 
     kAny = kAnyMask,
+  };
+};
+
+class TypeOfFeedback {
+  enum {
+    kNumberFlag = 1,
+    kFunctionFlag = 1 << 1,
+    kStringFlag = 1 << 2,
+  };
+
+ public:
+  enum Result {
+    kNone = 0,
+    kNumber = kNumberFlag,
+    kFunction = kFunctionFlag,
+    kString = kStringFlag,
+    kAny = kNumberFlag | kFunctionFlag | kStringFlag,
   };
 };
 
@@ -2522,8 +2553,6 @@ enum class ExceptionStatus : bool { kException = false, kSuccess = true };
 V8_INLINE bool operator!(ExceptionStatus status) {
   return !static_cast<bool>(status);
 }
-
-enum class TraceRetainingPathMode { kEnabled, kDisabled };
 
 // Used in the ScopeInfo flags fields for the function name variable for named
 // function expressions, and for the receiver. Must be declared here so that it

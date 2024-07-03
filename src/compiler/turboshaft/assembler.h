@@ -720,7 +720,7 @@ class EmitProjectionReducer
  public:
   TURBOSHAFT_REDUCER_BOILERPLATE(EmitProjection)
 
-  OpIndex ReduceCatchBlockBegin() {
+  V<Object> ReduceCatchBlockBegin() {
     // CatchBlockBegin have a single output, so they never have projections,
     // but additionally split-edge can transform CatchBlockBeginOp into PhiOp,
     // which means that there is no guarantee here that Next::CatchBlockBegin is
@@ -969,7 +969,7 @@ class GenericReducerBase : public ReducerBaseForwarder<Next> {
     return new_opindex;
   }
 
-  OpIndex REDUCE(CatchBlockBegin)() {
+  V<Object> REDUCE(CatchBlockBegin)() {
     Block* current_block = Asm().current_block();
     if (current_block->IsBranchTarget()) {
       DCHECK_EQ(current_block->PredecessorCount(), 1);
@@ -987,7 +987,7 @@ class GenericReducerBase : public ReducerBaseForwarder<Next> {
     DCHECK(current_block->IsMerge());
     base::SmallVector<OpIndex, 8> phi_inputs;
     for (Block* predecessor : current_block->Predecessors()) {
-      OpIndex catch_begin = predecessor->begin();
+      V<Object> catch_begin = predecessor->begin();
       DCHECK(Asm().Get(catch_begin).template Is<CatchBlockBeginOp>());
       phi_inputs.push_back(catch_begin);
     }
@@ -1489,7 +1489,7 @@ class TurboshaftAssemblerOpInterface
     return Equal(left, right, RegisterRepresentation::Tagged());
   }
 
-  V<Word32> RootEqual(V<Object> input, RootIndex root, LocalIsolate* isolate) {
+  V<Word32> RootEqual(V<Object> input, RootIndex root, Isolate* isolate) {
     return __ TaggedEqual(
         input,
         __ HeapConstant(Handle<HeapObject>::cast(isolate->root_handle(root))));
@@ -1751,14 +1751,30 @@ class TurboshaftAssemblerOpInterface
                      ObjectIsOp::InputAssumptions input_assumptions) {
     return ReduceIfReachableObjectIs(input, kind, input_assumptions);
   }
-  V<Word32> ObjectIsSmi(V<Object> object) {
-    return ObjectIs(object, ObjectIsOp::Kind::kSmi,
-                    ObjectIsOp::InputAssumptions::kNone);
+#define DECL_OBJECT_IS(kind)                              \
+  V<Word32> ObjectIs##kind(V<Object> object) {            \
+    return ObjectIs(object, ObjectIsOp::Kind::k##kind,    \
+                    ObjectIsOp::InputAssumptions::kNone); \
   }
-  V<Word32> ObjectIsString(V<Object> object) {
-    return ObjectIs(object, ObjectIsOp::Kind::kString,
-                    ObjectIsOp::InputAssumptions::kNone);
-  }
+
+  DECL_OBJECT_IS(ArrayBufferView)
+  DECL_OBJECT_IS(BigInt)
+  DECL_OBJECT_IS(BigInt64)
+  DECL_OBJECT_IS(Callable)
+  DECL_OBJECT_IS(Constructor)
+  DECL_OBJECT_IS(DetectableCallable)
+  DECL_OBJECT_IS(InternalizedString)
+  DECL_OBJECT_IS(NonCallable)
+  DECL_OBJECT_IS(Number)
+  DECL_OBJECT_IS(NumberOrBigInt)
+  DECL_OBJECT_IS(Receiver)
+  DECL_OBJECT_IS(ReceiverOrNullOrUndefined)
+  DECL_OBJECT_IS(Smi)
+  DECL_OBJECT_IS(String)
+  DECL_OBJECT_IS(StringOrStringWrapper)
+  DECL_OBJECT_IS(Symbol)
+  DECL_OBJECT_IS(Undetectable)
+#undef DECL_OBJECT_IS
 
   V<Word32> Float64Is(V<Float64> input, NumericKind kind) {
     return ReduceIfReachableFloat64Is(input, kind);
@@ -2187,6 +2203,14 @@ class TurboshaftAssemblerOpInterface
     return V<Word32>::Cast(ChangeOrDeopt(input, frame_state,
                                          ChangeOrDeoptOp::Kind::kFloat64ToInt32,
                                          minus_zero_mode, feedback));
+  }
+  V<Word32> ChangeFloat64ToUint32OrDeopt(V<Float64> input,
+                                         V<turboshaft::FrameState> frame_state,
+                                         CheckForMinusZeroMode minus_zero_mode,
+                                         const FeedbackSource& feedback) {
+    return V<Word32>::Cast(ChangeOrDeopt(
+        input, frame_state, ChangeOrDeoptOp::Kind::kFloat64ToUint32,
+        minus_zero_mode, feedback));
   }
   V<Word64> ChangeFloat64ToInt64OrDeopt(V<Float64> input,
                                         V<turboshaft::FrameState> frame_state,
@@ -2639,6 +2663,14 @@ class TurboshaftAssemblerOpInterface
     StoreNonArrayBufferElement(object.object(), access, index, value);
   }
 
+  V<Word32> ArrayBufferIsDetached(V<JSArrayBufferView> object) {
+    V<HeapObject> buffer = __ template LoadField<HeapObject>(
+        object, compiler::AccessBuilder::ForJSArrayBufferViewBuffer());
+    V<Word32> bitfield = __ template LoadField<Word32>(
+        buffer, compiler::AccessBuilder::ForJSArrayBufferBitField());
+    return __ Word32BitwiseAnd(bitfield, JSArrayBuffer::WasDetachedBit::kMask);
+  }
+
   template <typename T = HeapObject>
   Uninitialized<T> Allocate(ConstOrV<WordPtr> size, AllocationType type) {
     static_assert(is_subtype_v<T, HeapObject>);
@@ -3064,6 +3096,12 @@ class TurboshaftAssemblerOpInterface
     return CallBuiltin<typename BuiltinCallDescriptor::NumberToString>(isolate,
                                                                        {input});
   }
+  V<String> CallBuiltin_ToString(Isolate* isolate,
+                                 V<turboshaft::FrameState> frame_state,
+                                 V<Context> context, V<Object> input) {
+    return CallBuiltin<typename BuiltinCallDescriptor::ToString>(
+        isolate, frame_state, context, {input});
+  }
   V<Number> CallBuiltin_PlainPrimitiveToNumber(Isolate* isolate,
                                                V<PlainPrimitive> input) {
     return CallBuiltin<typename BuiltinCallDescriptor::PlainPrimitiveToNumber>(
@@ -3132,8 +3170,8 @@ class TurboshaftAssemblerOpInterface
     return CallBuiltin<typename BuiltinCallDescriptor::ToBoolean>(isolate,
                                                                   {object});
   }
-  V<Object> CallBuiltin_ToObject(Isolate* isolate, V<Context> context,
-                                 V<JSPrimitive> object) {
+  V<JSReceiver> CallBuiltin_ToObject(Isolate* isolate, V<Context> context,
+                                     V<JSPrimitive> object) {
     return CallBuiltin<typename BuiltinCallDescriptor::ToObject>(
         isolate, context, {object});
   }
@@ -3176,7 +3214,8 @@ class TurboshaftAssemblerOpInterface
 
     return Call<Object>(
         stub_code, frame_state, arguments,
-        TSCallDescriptor::Create(call_descriptor, CanThrow::kYes, graph_zone));
+        TSCallDescriptor::Create(call_descriptor, CanThrow::kYes,
+                                 LazyDeoptOnThrow::kNo, graph_zone));
   }
 
   V<Object> CallBuiltin_CallWithSpread(Isolate* isolate, Zone* graph_zone,
@@ -3322,6 +3361,12 @@ class TurboshaftAssemblerOpInterface
         isolate, context, {string});
   }
 #endif  // V8_INTL_SUPPORT
+  V<String> CallRuntime_SymbolDescriptiveString(Isolate* isolate,
+                                                V<Context> context,
+                                                V<Symbol> symbol) {
+    return CallRuntime<typename RuntimeCallDescriptor::SymbolDescriptiveString>(
+        isolate, context, {symbol});
+  }
   V<Object> CallRuntime_TerminateExecution(
       Isolate* isolate, V<turboshaft::FrameState> frame_state,
       V<Context> context) {
@@ -3340,13 +3385,63 @@ class TurboshaftAssemblerOpInterface
     return CallRuntime<typename RuntimeCallDescriptor::TryMigrateInstance>(
         isolate, context, {heap_object});
   }
-  void CallRuntime_ThrowAccessedUninitializedVariable(Isolate* isolate,
-                                                      OpIndex frame_state,
-                                                      V<Context> context,
-                                                      V<Object> object) {
+  void CallRuntime_ThrowAccessedUninitializedVariable(
+      Isolate* isolate, V<turboshaft::FrameState> frame_state,
+      V<Context> context, V<Object> object) {
     CallRuntime<
         typename RuntimeCallDescriptor::ThrowAccessedUninitializedVariable>(
         isolate, frame_state, context, {object});
+  }
+  void CallRuntime_ThrowConstructorReturnedNonObject(
+      Isolate* isolate, V<turboshaft::FrameState> frame_state,
+      V<Context> context) {
+    CallRuntime<
+        typename RuntimeCallDescriptor::ThrowConstructorReturnedNonObject>(
+        isolate, frame_state, context, {});
+  }
+  void CallRuntime_ThrowNotSuperConstructor(
+      Isolate* isolate, V<turboshaft::FrameState> frame_state,
+      V<Context> context, V<Object> constructor, V<Object> function) {
+    CallRuntime<typename RuntimeCallDescriptor::ThrowNotSuperConstructor>(
+        isolate, frame_state, context, {constructor, function});
+  }
+  void CallRuntime_ThrowSuperAlreadyCalledError(
+      Isolate* isolate, V<turboshaft::FrameState> frame_state,
+      V<Context> context) {
+    CallRuntime<typename RuntimeCallDescriptor::ThrowSuperAlreadyCalledError>(
+        isolate, frame_state, context, {});
+  }
+  void CallRuntime_ThrowSuperNotCalled(Isolate* isolate,
+                                       V<turboshaft::FrameState> frame_state,
+                                       V<Context> context) {
+    CallRuntime<typename RuntimeCallDescriptor::ThrowSuperNotCalled>(
+        isolate, frame_state, context, {});
+  }
+  void CallRuntime_ThrowCalledNonCallable(Isolate* isolate,
+                                          V<turboshaft::FrameState> frame_state,
+                                          V<Context> context, V<Object> value) {
+    CallRuntime<typename RuntimeCallDescriptor::ThrowCalledNonCallable>(
+        isolate, frame_state, context, {value});
+  }
+  V<JSFunction> CallRuntime_NewClosure(
+      Isolate* isolate, V<Context> context,
+      V<SharedFunctionInfo> shared_function_info,
+      V<FeedbackCell> feedback_cell) {
+    return CallRuntime<typename RuntimeCallDescriptor::NewClosure>(
+        isolate, context, {shared_function_info, feedback_cell});
+  }
+  V<JSFunction> CallRuntime_NewClosure_Tenured(
+      Isolate* isolate, V<Context> context,
+      V<SharedFunctionInfo> shared_function_info,
+      V<FeedbackCell> feedback_cell) {
+    return CallRuntime<typename RuntimeCallDescriptor::NewClosure_Tenured>(
+        isolate, context, {shared_function_info, feedback_cell});
+  }
+  V<Boolean> CallRuntime_HasInPrototypeChain(
+      Isolate* isolate, V<turboshaft::FrameState> frame_state,
+      V<Context> context, V<Object> object, V<HeapObject> prototype) {
+    return CallRuntime<typename RuntimeCallDescriptor::HasInPrototypeChain>(
+        isolate, frame_state, context, {object, prototype});
   }
 
   void TailCall(OpIndex callee, base::Vector<const OpIndex> arguments,
@@ -3632,8 +3727,8 @@ class TurboshaftAssemblerOpInterface
         CallDescriptor::kNoFlags, Operator::kNoThrow | Operator::kNoDeopt);
     DCHECK_EQ(call_descriptor->NeedsFrameState(), frame_state.valid());
 
-    const TSCallDescriptor* ts_call_descriptor =
-        TSCallDescriptor::Create(call_descriptor, can_throw, graph_zone);
+    const TSCallDescriptor* ts_call_descriptor = TSCallDescriptor::Create(
+        call_descriptor, can_throw, LazyDeoptOnThrow::kNo, graph_zone);
 
     OpIndex callee = Asm().HeapConstant(callable.code());
 
@@ -4027,14 +4122,14 @@ class TurboshaftAssemblerOpInterface
     return ReduceIfReachableWasmTypeAnnotation(value, type);
   }
 
-  OpIndex StructGet(V<HeapObject> object, const wasm::StructType* type,
-                    uint32_t type_index, int field_index, bool is_signed,
-                    CheckForNull null_check) {
+  V<Any> StructGet(V<WasmStructNullable> object, const wasm::StructType* type,
+                   uint32_t type_index, int field_index, bool is_signed,
+                   CheckForNull null_check) {
     return ReduceIfReachableStructGet(object, type, type_index, field_index,
                                       is_signed, null_check);
   }
 
-  void StructSet(V<HeapObject> object, OpIndex value,
+  void StructSet(V<WasmStructNullable> object, V<Any> value,
                  const wasm::StructType* type, uint32_t type_index,
                  int field_index, CheckForNull null_check) {
     ReduceIfReachableStructSet(object, value, type, type_index, field_index,
@@ -4060,12 +4155,12 @@ class TurboshaftAssemblerOpInterface
     return ReduceIfReachableWasmAllocateArray(rtt, resolve(length), array_type);
   }
 
-  V<HeapObject> WasmAllocateStruct(V<Map> rtt,
+  V<WasmStruct> WasmAllocateStruct(V<Map> rtt,
                                    const wasm::StructType* struct_type) {
     return ReduceIfReachableWasmAllocateStruct(rtt, struct_type);
   }
 
-  V<Object> WasmRefFunc(V<Object> wasm_instance, uint32_t function_index) {
+  V<WasmFuncRef> WasmRefFunc(V<Object> wasm_instance, uint32_t function_index) {
     return ReduceIfReachableWasmRefFunc(wasm_instance, function_index);
   }
 
@@ -4225,8 +4320,8 @@ class TurboshaftAssemblerOpInterface
 
   OpIndex LoadStackPointer() { return ReduceIfReachableLoadStackPointer(); }
 
-  void SetStackPointer(V<WordPtr> value, wasm::FPRelativeScope fp_scope) {
-    ReduceIfReachableSetStackPointer(value, fp_scope);
+  void SetStackPointer(V<WordPtr> value) {
+    ReduceIfReachableSetStackPointer(value);
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
 

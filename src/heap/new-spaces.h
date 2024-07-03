@@ -181,9 +181,8 @@ class SemiSpace final : public Space {
  private:
   void RewindPages(int num_pages);
 
-  // Copies the flags into the masked positions on all pages in the space.
-  void FixPagesFlags(MemoryChunk::MainThreadFlags flags,
-                     MemoryChunk::MainThreadFlags mask);
+  // Iterates all pages and properly initializes page flags for this space.
+  void FixPagesFlags();
 
   void IncrementCommittedPhysicalMemory(size_t increment_value);
   void DecrementCommittedPhysicalMemory(size_t decrement_value);
@@ -263,8 +262,7 @@ class NewSpace : NON_EXPORTED_BASE(public SpaceWithLinearArea) {
 
   virtual Address first_allocatable_address() const = 0;
 
-  virtual void Prologue() {}
-
+  virtual void GarbageCollectionPrologue() {}
   virtual void GarbageCollectionEpilogue() = 0;
 
   virtual bool IsPromotionCandidate(const MutablePageMetadata* page) const = 0;
@@ -435,10 +433,9 @@ class V8_EXPORT_PRIVATE SemiSpaceNewSpace final : public NewSpace {
 
   bool ShouldBePromoted(Address address) const;
 
-  void Prologue() final;
-
   void EvacuatePrologue();
 
+  void GarbageCollectionPrologue() final;
   void GarbageCollectionEpilogue() final;
 
   void ZapUnusedMemory();

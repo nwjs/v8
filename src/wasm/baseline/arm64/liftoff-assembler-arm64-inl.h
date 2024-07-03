@@ -6,7 +6,7 @@
 #define V8_WASM_BASELINE_ARM64_LIFTOFF_ASSEMBLER_ARM64_INL_H_
 
 #include "src/codegen/arm64/macro-assembler-arm64-inl.h"
-#include "src/heap/mutable-page.h"
+#include "src/heap/mutable-page-metadata.h"
 #include "src/wasm/baseline/liftoff-assembler.h"
 #include "src/wasm/baseline/parallel-move-inl.h"
 #include "src/wasm/object-access.h"
@@ -290,14 +290,17 @@ void LiftoffAssembler::PrepareTailCall(int num_callee_stack_params,
   Register scratch = temps.AcquireX();
 
   // Shift the whole frame upwards, except for fp and lr.
+  // Adjust x16 to be the new stack pointer first, so that {str} doesn't need
+  // a temp register to materialize the offset.
+  Sub(x16, x16, stack_param_delta * 8);
   int slot_count = num_callee_stack_params;
   for (int i = slot_count - 1; i >= 0; --i) {
     ldr(scratch, MemOperand(sp, i * 8));
-    str(scratch, MemOperand(x16, (i - stack_param_delta) * 8));
+    str(scratch, MemOperand(x16, i * 8));
   }
 
   // Set the new stack pointer.
-  Sub(sp, x16, stack_param_delta * 8);
+  mov(sp, x16);
 }
 
 void LiftoffAssembler::AlignFrameSize() {
