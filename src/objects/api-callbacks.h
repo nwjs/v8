@@ -14,6 +14,7 @@
 namespace v8 {
 namespace internal {
 
+class Undefined;
 class StructBodyDescriptor;
 
 #include "torque-generated/src/objects/api-callbacks-tq.inc"
@@ -42,7 +43,6 @@ class AccessorInfo
   DECL_EXTERNAL_POINTER_ACCESSORS_MAYBE_READ_ONLY_HOST(setter, Address)
   inline bool has_setter(Isolate* isolate);
 
-  DECL_BOOLEAN_ACCESSORS(is_special_data_property)
   DECL_BOOLEAN_ACCESSORS(replace_on_access)
   DECL_BOOLEAN_ACCESSORS(is_sloppy)
 

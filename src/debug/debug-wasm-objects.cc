@@ -71,7 +71,7 @@ Handle<Map> GetOrCreateDebugProxyMap(
   auto maps = GetOrCreateDebugMaps(isolate);
   CHECK_LE(kNumProxies, maps->length());
   if (!maps->is_the_hole(isolate, id)) {
-    return handle(Map::cast(maps->get(id)), isolate);
+    return handle(Cast<Map>(maps->get(id)), isolate);
   }
   auto tmp = (*create_template_fn)(reinterpret_cast<v8::Isolate*>(isolate));
   auto fun = ApiNatives::InstantiateFunction(isolate, Utils::OpenHandle(*tmp))
@@ -127,12 +127,12 @@ struct IndexedDebugProxy {
 
   template <typename V>
   static Handle<JSObject> GetHolder(const PropertyCallbackInfo<V>& info) {
-    return Handle<JSObject>::cast(Utils::OpenHandle(*info.HolderV2()));
+    return Cast<JSObject>(Utils::OpenHandle(*info.HolderV2()));
   }
 
   static Handle<Provider> GetProvider(DirectHandle<JSObject> holder,
                                       Isolate* isolate) {
-    return handle(Provider::cast(holder->GetEmbedderField(kProviderField)),
+    return handle(Cast<Provider>(holder->GetEmbedderField(kProviderField)),
                   isolate);
   }
 
@@ -162,7 +162,7 @@ struct IndexedDebugProxy {
       descriptor.set_configurable(false);
       descriptor.set_enumerable(true);
       descriptor.set_writable(false);
-      descriptor.set_value(T::Get(isolate, provider, index));
+      descriptor.set_value(Cast<JSAny>(T::Get(isolate, provider, index)));
       info.GetReturnValue().Set(Utils::ToLocal(descriptor.ToObject(isolate)));
       return v8::Intercepted::kYes;
     }
@@ -217,7 +217,7 @@ struct NamedDebugProxy : IndexedDebugProxy<T, id, Provider> {
     Handle<Object> table_or_undefined =
         JSObject::GetProperty(isolate, holder, symbol).ToHandleChecked();
     if (!IsUndefined(*table_or_undefined, isolate)) {
-      return Handle<NameDictionary>::cast(table_or_undefined);
+      return Cast<NameDictionary>(table_or_undefined);
     }
     auto provider = T::GetProvider(holder, isolate);
     auto count = T::Count(isolate, provider);
@@ -440,8 +440,8 @@ struct LocalsProxy : NamedDebugProxy<LocalsProxy, kLocalsProxy, FixedArray> {
                                 uint32_t index) {
     uint32_t count = Count(isolate, values);
     auto native_module =
-        WasmModuleObject::cast(values->get(count + 0))->native_module();
-    auto function_index = Smi::ToInt(Smi::cast(values->get(count + 1)));
+        Cast<WasmModuleObject>(values->get(count + 0))->native_module();
+    auto function_index = Smi::ToInt(Cast<Smi>(values->get(count + 1)));
     wasm::NamesProvider* names = native_module->GetNamesProvider();
     StringBuilder sb;
     names->PrintLocalName(sb, function_index, index);
@@ -495,7 +495,7 @@ Handle<FixedArray> GetOrCreateInstanceProxyCache(
     cache = isolate->factory()->NewFixedArrayWithHoles(kNumInstanceProxies);
     Object::SetProperty(isolate, instance, symbol, cache).Check();
   }
-  return Handle<FixedArray>::cast(cache);
+  return Cast<FixedArray>(cache);
 }
 
 // Creates an instance of the |Proxy| on-demand and caches that on the
@@ -507,7 +507,7 @@ Handle<JSObject> GetOrCreateInstanceProxy(Isolate* isolate,
   DirectHandle<FixedArray> proxies =
       GetOrCreateInstanceProxyCache(isolate, instance);
   if (!proxies->is_the_hole(isolate, Proxy::kId)) {
-    return handle(JSObject::cast(proxies->get(Proxy::kId)), isolate);
+    return handle(Cast<JSObject>(proxies->get(Proxy::kId)), isolate);
   }
   Handle<JSObject> proxy = Proxy::Create(isolate, instance);
   proxies->set(Proxy::kId, *proxy);
@@ -602,9 +602,9 @@ class ContextProxyPrototype {
 
   static v8::Intercepted NamedGetter(
       Local<v8::Name> name, const PropertyCallbackInfo<v8::Value>& info) {
-    auto name_string = Handle<String>::cast(Utils::OpenHandle(*name));
+    auto name_string = Cast<String>(Utils::OpenHandle(*name));
     auto isolate = reinterpret_cast<Isolate*>(info.GetIsolate());
-    auto receiver = Handle<JSObject>::cast(Utils::OpenHandle(*info.This()));
+    auto receiver = Cast<JSObject>(Utils::OpenHandle(*info.This()));
     Handle<Object> value;
     if (GetNamedProperty(isolate, receiver, name_string).ToHandle(&value)) {
       info.GetReturnValue().Set(Utils::ToLocal(value));
@@ -809,10 +809,10 @@ Handle<WasmValueObject> WasmValueObject::New(Isolate* isolate,
     map->set_is_extensible(false);
     maps->set(kWasmValueMapIndex, *map);
   }
-  DirectHandle<Map> value_map(Map::cast(maps->get(kWasmValueMapIndex)),
+  DirectHandle<Map> value_map(Cast<Map>(maps->get(kWasmValueMapIndex)),
                               isolate);
-  auto object = Handle<WasmValueObject>::cast(
-      isolate->factory()->NewJSObjectFromMap(value_map));
+  auto object =
+      Cast<WasmValueObject>(isolate->factory()->NewJSObjectFromMap(value_map));
   object->set_type(*type);
   object->set_value(*value);
   return object;
@@ -839,23 +839,23 @@ struct StructProxy : NamedDebugProxy<StructProxy, kStructProxy, FixedArray> {
   }
 
   static uint32_t Count(Isolate* isolate, DirectHandle<FixedArray> data) {
-    return WasmStruct::cast(data->get(kObjectIndex))->type()->field_count();
+    return Cast<WasmStruct>(data->get(kObjectIndex))->type()->field_count();
   }
 
   static Handle<Object> Get(Isolate* isolate, DirectHandle<FixedArray> data,
                             uint32_t index) {
-    DirectHandle<WasmStruct> obj(WasmStruct::cast(data->get(kObjectIndex)),
+    DirectHandle<WasmStruct> obj(Cast<WasmStruct>(data->get(kObjectIndex)),
                                  isolate);
     Handle<WasmModuleObject> module(
-        WasmModuleObject::cast(data->get(kModuleIndex)), isolate);
+        Cast<WasmModuleObject>(data->get(kModuleIndex)), isolate);
     return WasmValueObject::New(isolate, obj->GetFieldValue(index), module);
   }
 
   static Handle<String> GetName(Isolate* isolate, DirectHandle<FixedArray> data,
                                 uint32_t index) {
     wasm::NativeModule* native_module =
-        WasmModuleObject::cast(data->get(kModuleIndex))->native_module();
-    int struct_type_index = Smi::ToInt(Smi::cast(data->get(kTypeIndexIndex)));
+        Cast<WasmModuleObject>(data->get(kModuleIndex))->native_module();
+    int struct_type_index = Smi::ToInt(Cast<Smi>(data->get(kTypeIndexIndex)));
     wasm::NamesProvider* names = native_module->GetNamesProvider();
     StringBuilder sb;
     names->PrintFieldName(sb, struct_type_index, index);
@@ -897,15 +897,15 @@ struct ArrayProxy : IndexedDebugProxy<ArrayProxy, kArrayProxy, FixedArray> {
   }
 
   static uint32_t Count(Isolate* isolate, DirectHandle<FixedArray> data) {
-    return WasmArray::cast(data->get(kObjectIndex))->length();
+    return Cast<WasmArray>(data->get(kObjectIndex))->length();
   }
 
   static Handle<Object> Get(Isolate* isolate, DirectHandle<FixedArray> data,
                             uint32_t index) {
-    DirectHandle<WasmArray> array(WasmArray::cast(data->get(kObjectIndex)),
+    DirectHandle<WasmArray> array(Cast<WasmArray>(data->get(kObjectIndex)),
                                   isolate);
     Handle<WasmModuleObject> module(
-        WasmModuleObject::cast(data->get(kModuleIndex)), isolate);
+        Cast<WasmModuleObject>(data->get(kModuleIndex)), isolate);
     return WasmValueObject::New(isolate, array->GetElement(index), module);
   }
 };
@@ -941,6 +941,13 @@ Handle<WasmValueObject> WasmValueObject::New(
       v = BigInt::FromInt64(isolate, value.to_i64_unchecked());
       break;
     }
+    case wasm::kF16: {
+      // This can't be reached for most "top-level" things, only via nested
+      // calls for struct/array fields.
+      t = isolate->factory()->InternalizeString(base::StaticCharVector("f16"));
+      v = isolate->factory()->NewNumber(value.to_f16_unchecked());
+      break;
+    }
     case wasm::kF32: {
       t = isolate->factory()->InternalizeString(base::StaticCharVector("f32"));
       v = isolate->factory()->NewNumber(value.to_f32_unchecked());
@@ -965,29 +972,31 @@ Handle<WasmValueObject> WasmValueObject::New(
         v = ref;
       } else if (IsWasmStruct(*ref)) {
         Tagged<WasmTypeInfo> type_info =
-            HeapObject::cast(*ref)->map()->wasm_type_info();
+            Cast<HeapObject>(*ref)->map()->wasm_type_info();
         wasm::ValueType type = wasm::ValueType::FromIndex(
             wasm::ValueKind::kRef, type_info->type_index());
-        // The cast is safe; structs always have the instance defined.
-        DirectHandle<WasmModuleObject> module(
-            WasmInstanceObject::cast(type_info->instance())->module_object(),
-            isolate);
-        t = GetRefTypeName(isolate, type, module->native_module());
-        v = StructProxy::Create(isolate, Handle<WasmStruct>::cast(ref), module);
+        // Getting the trusted data is safe; structs always have the instance
+        // data defined.
+        DirectHandle<WasmTrustedInstanceData> wtid(
+            type_info->trusted_data(isolate), isolate);
+        t = GetRefTypeName(isolate, type, wtid->native_module());
+        v = StructProxy::Create(isolate, Cast<WasmStruct>(ref),
+                                direct_handle(wtid->module_object(), isolate));
       } else if (IsWasmArray(*ref)) {
         Tagged<WasmTypeInfo> type_info =
-            HeapObject::cast(*ref)->map()->wasm_type_info();
+            Cast<HeapObject>(*ref)->map()->wasm_type_info();
         wasm::ValueType type = wasm::ValueType::FromIndex(
             wasm::ValueKind::kRef, type_info->type_index());
-        // The cast is safe; arrays always have the instance defined.
-        DirectHandle<WasmModuleObject> module(
-            WasmInstanceObject::cast(type_info->instance())->module_object(),
-            isolate);
-        t = GetRefTypeName(isolate, type, module->native_module());
-        v = ArrayProxy::Create(isolate, Handle<WasmArray>::cast(ref), module);
+        // Getting the trusted data is safe; arrays always have the instance
+        // data defined.
+        DirectHandle<WasmTrustedInstanceData> wtid(
+            type_info->trusted_data(isolate), isolate);
+        t = GetRefTypeName(isolate, type, wtid->native_module());
+        v = ArrayProxy::Create(isolate, Cast<WasmArray>(ref),
+                               direct_handle(wtid->module_object(), isolate));
       } else if (IsWasmFuncRef(*ref)) {
         DirectHandle<WasmInternalFunction> internal_fct{
-            WasmFuncRef::cast(*ref)->internal(isolate), isolate};
+            Cast<WasmFuncRef>(*ref)->internal(isolate), isolate};
         v = WasmInternalFunction::GetOrCreateExternal(internal_fct);
         // If the module is not provided by the caller, retrieve it from the
         // instance object. If the function was created in JavaScript using
@@ -996,7 +1005,7 @@ Handle<WasmValueObject> WasmValueObject::New(
         if (module_object.is_null() &&
             IsWasmTrustedInstanceData(internal_fct->ref())) {
           module_object =
-              handle(WasmTrustedInstanceData::cast(internal_fct->ref())
+              handle(Cast<WasmTrustedInstanceData>(internal_fct->ref())
                          ->module_object(),
                      isolate);
         }
@@ -1015,7 +1024,7 @@ Handle<WasmValueObject> WasmValueObject::New(
         // Fail gracefully.
         base::EmbeddedVector<char, 64> error;
         int len = SNPrintF(error, "unimplemented object type: %d",
-                           HeapObject::cast(*ref)->map()->instance_type());
+                           Cast<HeapObject>(*ref)->map()->instance_type());
         t = GetRefTypeName(isolate, value.type(), module_object);
         v = isolate->factory()->InternalizeString(error.SubVector(0, len));
       }
@@ -1113,10 +1122,9 @@ Handle<ArrayList> AddWasmTableObjectInternalProperties(
     Handle<Object> entry = WasmTableObject::Get(isolate, table, i);
     wasm::WasmValue wasm_value(entry, table->type());
     Handle<WasmModuleObject> module;
-    if (IsWasmInstanceObject(table->instance())) {
+    if (table->has_trusted_data()) {
       module = Handle<WasmModuleObject>(
-          WasmInstanceObject::cast(table->instance())->module_object(),
-          isolate);
+          table->trusted_data(isolate)->module_object(), isolate);
     }
     DirectHandle<Object> debug_value =
         WasmValueObject::New(isolate, wasm_value, module);

@@ -12,6 +12,7 @@
 #include "src/base/macros.h"
 #include "src/common/checks.h"
 #include "src/common/globals.h"
+#include "src/objects/casting.h"
 #include "src/objects/tagged.h"
 #include "v8-handle-base.h"  // NOLINT(build/include_directory)
 
@@ -159,9 +160,6 @@ class Handle final : public HandleBase {
     return Tagged<T>(*location());
   }
 
-  template <typename S>
-  inline static const Handle<T> cast(Handle<S> that);
-
   // Consider declaring values that contain empty handles as
   // MaybeHandle to force validation before being used as handles.
   static const Handle<T> null() { return Handle<T>(); }
@@ -199,7 +197,8 @@ class Handle final : public HandleBase {
   friend class MaybeHandle;
   // Casts are allowed to access location_.
   template <typename To, typename From>
-  friend inline Handle<To> Cast(Handle<From> value);
+  friend inline Handle<To> Cast(Handle<From> value,
+                                const v8::SourceLocation& loc);
 };
 
 template <typename T>
@@ -505,12 +504,6 @@ class DirectHandle : public DirectHandleBase {
     return Tagged<T>(address());
   }
 
-  template <typename S>
-  V8_INLINE static const DirectHandle<T> cast(DirectHandle<S> that);
-
-  template <typename S>
-  V8_INLINE static const DirectHandle<T> cast(Handle<S> that);
-
   // Consider declaring values that contain empty handles as
   // MaybeDirectHandle to force validation before being used as handles.
   V8_INLINE static const DirectHandle<T> null() { return DirectHandle<T>(); }
@@ -537,9 +530,10 @@ class DirectHandle : public DirectHandleBase {
   template <typename>
   friend class MaybeDirectHandle;
   friend class DirectHandleUnchecked<T>;
-  // Casts are allowed to access location_.
+  // Casts are allowed to access obj_.
   template <typename To, typename From>
-  friend inline DirectHandle<To> Cast(DirectHandle<From> value);
+  friend inline DirectHandle<To> Cast(DirectHandle<From> value,
+                                      const v8::SourceLocation& loc);
 
   explicit DirectHandle(no_checking_tag do_not_check)
       : DirectHandleBase(kTaggedNullAddress, do_not_check) {}

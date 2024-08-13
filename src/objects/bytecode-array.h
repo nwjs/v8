@@ -83,6 +83,8 @@ class BytecodeArray : public ExposedTrustedObject {
       interpreter::Register incoming_new_target_or_generator_register);
 
   inline bool HasSourcePositionTable() const;
+  int SourcePosition(int offset) const;
+  int SourceStatementPosition(int offset) const;
 
   // If source positions have not been collected or an exception has been thrown
   // this will return the empty_trusted_byte_array.
@@ -107,7 +109,6 @@ class BytecodeArray : public ExposedTrustedObject {
   // bytecode, constant pool, source position table, and handler table.
   DECL_GETTER(SizeIncludingMetadata, int)
 
-  DECL_CAST(BytecodeArray)
   DECL_PRINTER(BytecodeArray)
   DECL_VERIFIER(BytecodeArray)
 
@@ -158,7 +159,6 @@ class BytecodeWrapper : public Struct {
  public:
   DECL_TRUSTED_POINTER_ACCESSORS(bytecode, BytecodeArray)
 
-  DECL_CAST(BytecodeWrapper)
   DECL_PRINTER(BytecodeWrapper)
   DECL_VERIFIER(BytecodeWrapper)
 

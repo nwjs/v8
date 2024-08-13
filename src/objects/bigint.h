@@ -114,7 +114,6 @@ V8_OBJECT class BigIntBase : public PrimitiveHeapObject {
   using LengthBits = SignBits::Next<int, kLengthFieldBits>;
   static_assert(LengthBits::kLastUsedBit < 32);
 
-  DECL_CAST(BigIntBase)
   DECL_VERIFIER(BigIntBase)
   DECL_PRINTER(BigIntBase)
 
@@ -170,23 +169,11 @@ V8_OBJECT class FreshlyAllocatedBigInt : public BigIntBase {
   //   (and no explicit operator is provided either).
 
  public:
-  inline static Tagged<FreshlyAllocatedBigInt> cast(Tagged<Object> object);
-  inline static Tagged<FreshlyAllocatedBigInt> unchecked_cast(
-      Tagged<Object> o) {
-    return Tagged<FreshlyAllocatedBigInt>::unchecked_cast(o);
-  }
-
   // Clear uninitialized padding space.
   inline void clear_padding() {
 #ifdef BIGINT_NEEDS_PADDING
     memset(padding_, 0, arraysize(padding_));
 #endif
-  }
-
- private:
-  // Only serves to make macros happy; other code should use IsBigInt.
-  static bool IsFreshlyAllocatedBigInt(Tagged<FreshlyAllocatedBigInt>) {
-    return true;
   }
 } V8_OBJECT_END;
 
@@ -258,7 +245,6 @@ V8_OBJECT class BigInt : public BigIntBase {
   int Words64Count();
   void ToWordsArray64(int* sign_bit, int* words64_count, uint64_t* words);
 
-  DECL_CAST(BigInt)
   void BigIntShortPrint(std::ostream& os);
 
   inline static int SizeFor(int length) {
@@ -278,7 +264,7 @@ V8_OBJECT class BigInt : public BigIntBase {
   // "The Number value for x", see:
   // https://tc39.github.io/ecma262/#sec-ecmascript-language-types-number-type
   // Returns a Smi or HeapNumber.
-  static Handle<Object> ToNumber(Isolate* isolate, DirectHandle<BigInt> x);
+  static Handle<Number> ToNumber(Isolate* isolate, DirectHandle<BigInt> x);
 
   // ECMAScript's NumberToBigInt
   V8_EXPORT_PRIVATE static MaybeHandle<BigInt> FromNumber(

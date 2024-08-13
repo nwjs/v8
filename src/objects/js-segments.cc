@@ -29,14 +29,14 @@ namespace internal {
 MaybeHandle<JSSegments> JSSegments::Create(Isolate* isolate,
                                            DirectHandle<JSSegmenter> segmenter,
                                            Handle<String> string) {
-  icu::BreakIterator* break_iterator =
-      segmenter->icu_break_iterator()->raw()->clone();
+  std::shared_ptr<icu::BreakIterator> break_iterator{
+      segmenter->icu_break_iterator()->raw()->clone()};
   DCHECK_NOT_NULL(break_iterator);
 
   DirectHandle<Managed<icu::UnicodeString>> unicode_string =
-      Intl::SetTextToBreakIterator(isolate, string, break_iterator);
+      Intl::SetTextToBreakIterator(isolate, string, break_iterator.get());
   DirectHandle<Managed<icu::BreakIterator>> managed_break_iterator =
-      Managed<icu::BreakIterator>::FromRawPtr(isolate, 0, break_iterator);
+      Managed<icu::BreakIterator>::From(isolate, 0, std::move(break_iterator));
 
   // 1. Let internalSlotsList be « [[SegmentsSegmenter]], [[SegmentsString]] ».
   // 2. Let segments be ! ObjectCreate(%Segments.prototype%, internalSlotsList).
@@ -44,7 +44,7 @@ MaybeHandle<JSSegments> JSSegments::Create(Isolate* isolate,
                         isolate);
   Handle<JSObject> result = isolate->factory()->NewJSObjectFromMap(map);
 
-  Handle<JSSegments> segments = Handle<JSSegments>::cast(result);
+  Handle<JSSegments> segments = Cast<JSSegments>(result);
   segments->set_flags(0);
 
   // 3. Set segments.[[SegmentsSegmenter]] to segmenter.
@@ -129,7 +129,7 @@ MaybeHandle<JSSegmentDataObject> JSSegments::CreateSegmentDataObject(
           : isolate->native_context()->intl_segment_data_object_map(),
       isolate);
   Handle<JSSegmentDataObject> result =
-      Handle<JSSegmentDataObject>::cast(factory->NewJSObjectFromMap(map));
+      Cast<JSSegmentDataObject>(factory->NewJSObjectFromMap(map));
 
   // 6. Let segment be the String value equal to the substring of string
   // consisting of the code units at indices startIndex (inclusive) through
@@ -138,11 +138,11 @@ MaybeHandle<JSSegmentDataObject> JSSegments::CreateSegmentDataObject(
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, segment,
       Intl::ToString(isolate, unicode_string, start_index, end_index));
-  DirectHandle<Object> index = factory->NewNumberFromInt(start_index);
+  DirectHandle<Number> index = factory->NewNumberFromInt(start_index);
 
   // 7. Perform ! CreateDataPropertyOrThrow(result, "segment", segment).
   DisallowGarbageCollection no_gc;
-  Tagged<JSSegmentDataObject> raw = JSSegmentDataObject::cast(*result);
+  Tagged<JSSegmentDataObject> raw = Cast<JSSegmentDataObject>(*result);
   raw->set_segment(*segment);
   // 8. Perform ! CreateDataPropertyOrThrow(result, "index", startIndex).
   raw->set_index(*index);
@@ -157,7 +157,7 @@ MaybeHandle<JSSegmentDataObject> JSSegments::CreateSegmentDataObject(
     DirectHandle<Boolean> is_word_like =
         factory->ToBoolean(CurrentSegmentIsWordLike(break_iterator));
     // b. Perform ! CreateDataPropertyOrThrow(result, "isWordLike", isWordLike).
-    JSSegmentDataObjectWithIsWordLike::cast(raw)->set_is_word_like(
+    Cast<JSSegmentDataObjectWithIsWordLike>(raw)->set_is_word_like(
         *is_word_like);
   }
   return result;

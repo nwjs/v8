@@ -5,6 +5,7 @@
 #include "src/heap/memory-allocator.h"
 
 #include <cinttypes>
+#include <optional>
 
 #include "src/base/address-region.h"
 #include "src/common/globals.h"
@@ -19,6 +20,7 @@
 #include "src/heap/read-only-spaces.h"
 #include "src/heap/zapping.h"
 #include "src/logging/log.h"
+#include "src/sandbox/hardware-support.h"
 #include "src/utils/allocation.h"
 
 namespace v8 {
@@ -198,7 +200,7 @@ size_t MemoryAllocator::ComputeChunkSize(size_t area_size,
       GetCommitPageSize());
 }
 
-base::Optional<MemoryAllocator::MemoryChunkAllocationResult>
+std::optional<MemoryAllocator::MemoryChunkAllocationResult>
 MemoryAllocator::AllocateUninitializedChunkAt(BaseSpace* space,
                                               size_t area_size,
                                               Executability executable,
@@ -402,7 +404,7 @@ PageMetadata* MemoryAllocator::AllocatePage(
     Executability executable) {
   const size_t size =
       MemoryChunkLayout::AllocatableMemoryInMemoryChunk(space->identity());
-  base::Optional<MemoryChunkAllocationResult> chunk_info;
+  std::optional<MemoryChunkAllocationResult> chunk_info;
   if (alloc_mode == AllocationMode::kUsePool) {
     DCHECK_EQ(executable, NOT_EXECUTABLE);
     chunk_info = AllocateUninitializedPageFromPool(space);
@@ -447,7 +449,7 @@ ReadOnlyPageMetadata* MemoryAllocator::AllocateReadOnlyPage(
     ReadOnlySpace* space, Address hint) {
   DCHECK_EQ(space->identity(), RO_SPACE);
   size_t size = MemoryChunkLayout::AllocatableMemoryInMemoryChunk(RO_SPACE);
-  base::Optional<MemoryChunkAllocationResult> chunk_info =
+  std::optional<MemoryChunkAllocationResult> chunk_info =
       AllocateUninitializedChunkAt(space, size, NOT_EXECUTABLE, hint,
                                    PageSize::kRegular);
   if (!chunk_info) return nullptr;
@@ -460,6 +462,11 @@ ReadOnlyPageMetadata* MemoryAllocator::AllocateReadOnlyPage(
                                std::move(chunk_info->reservation));
 
   new (chunk_info->chunk) MemoryChunk(metadata->InitialFlags(), metadata);
+
+  SandboxHardwareSupport::NotifyReadOnlyPageCreated(
+      metadata->ChunkAddress(), metadata->size(),
+      PageAllocator::Permission::kReadWrite);
+
   return metadata;
 }
 
@@ -471,7 +478,7 @@ MemoryAllocator::RemapSharedPage(
 
 LargePageMetadata* MemoryAllocator::AllocateLargePage(
     LargeObjectSpace* space, size_t object_size, Executability executable) {
-  base::Optional<MemoryChunkAllocationResult> chunk_info =
+  std::optional<MemoryChunkAllocationResult> chunk_info =
       AllocateUninitializedChunk(space, object_size, executable,
                                  PageSize::kLarge);
 
@@ -504,7 +511,7 @@ LargePageMetadata* MemoryAllocator::AllocateLargePage(
   return metadata;
 }
 
-base::Optional<MemoryAllocator::MemoryChunkAllocationResult>
+std::optional<MemoryAllocator::MemoryChunkAllocationResult>
 MemoryAllocator::AllocateUninitializedPageFromPool(Space* space) {
   MemoryChunkMetadata* chunk_metadata = pool()->TryGetPooled();
   if (chunk_metadata == nullptr) return {};

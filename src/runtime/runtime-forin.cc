@@ -59,7 +59,7 @@ MaybeHandle<Object> HasEnumerableProperty(Isolate* isolate,
         if (result.IsNothing()) return MaybeHandle<Object>();
         if (result.FromJust() == ABSENT) {
           // Continue lookup on the proxy's prototype.
-          Handle<JSProxy> proxy = it.GetHolder<JSProxy>();
+          DirectHandle<JSProxy> proxy = it.GetHolder<JSProxy>();
           Handle<Object> prototype;
           ASSIGN_RETURN_ON_EXCEPTION(isolate, prototype,
                                      JSProxy::GetPrototype(proxy));
@@ -67,8 +67,8 @@ MaybeHandle<Object> HasEnumerableProperty(Isolate* isolate,
             return isolate->factory()->undefined_value();
           }
           // We already have a stack-check in JSProxy::GetPrototype.
-          return HasEnumerableProperty(
-              isolate, Handle<JSReceiver>::cast(prototype), key);
+          return HasEnumerableProperty(isolate, Cast<JSReceiver>(prototype),
+                                       key);
         } else if (result.FromJust() & DONT_ENUM) {
           return isolate->factory()->undefined_value();
         } else {

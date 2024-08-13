@@ -7,8 +7,10 @@
 
 #include "src/codegen/optimized-compilation-info.h"
 #include "src/compiler/backend/register-allocator-verifier.h"
+#include "src/compiler/basic-block-instrumentor.h"
 #include "src/compiler/graph-visualizer.h"
 #include "src/compiler/pipeline-statistics.h"
+#include "src/compiler/turboshaft/block-instrumentation-phase.h"
 #include "src/compiler/turboshaft/build-graph-phase.h"
 #include "src/compiler/turboshaft/code-elimination-and-simplification-phase.h"
 #include "src/compiler/turboshaft/debug-feature-lowering-phase.h"
@@ -21,6 +23,7 @@
 #include "src/compiler/turboshaft/optimize-phase.h"
 #include "src/compiler/turboshaft/phase.h"
 #include "src/compiler/turboshaft/register-allocation-phase.h"
+#include "src/compiler/turboshaft/sidetable.h"
 #include "src/compiler/turboshaft/simplified-lowering-phase.h"
 #include "src/compiler/turboshaft/store-store-elimination-phase.h"
 #include "src/compiler/turboshaft/tracing.h"
@@ -29,7 +32,9 @@
 
 namespace v8::internal::compiler::turboshaft {
 
-class Pipeline final {
+inline constexpr char kTempZoneName[] = "temp-zone";
+
+class Pipeline {
  public:
   explicit Pipeline(PipelineData* data) : data_(data) {}
 
@@ -118,8 +123,15 @@ class Pipeline final {
 
     BeginPhaseKind("V8.TFGraphCreation");
     turboshaft::Tracing::Scope tracing_scope(data_->info());
-    Run<turboshaft::MaglevGraphBuildingPhase>();
+    base::Optional<BailoutReason> bailout =
+        Run<turboshaft::MaglevGraphBuildingPhase>();
     EndPhaseKind();
+
+    if (bailout.has_value()) {
+      data_->info()->AbortOptimization(bailout.value());
+      return false;
+    }
+
     return true;
   }
 
@@ -200,12 +212,64 @@ class Pipeline final {
     }
 #endif  // V8_ENABLE_DEBUG_CODE
 
-    Run<turboshaft::DecompressionOptimizationPhase>();
-
     return true;
   }
 
-  bool SelectInstructions(Linkage* linkage) {
+  void PrepareForInstructionSelection(
+      const ProfileDataFromFile* profile = nullptr) {
+    if (V8_UNLIKELY(data()->pipeline_kind() == TurboshaftPipelineKind::kCSA ||
+                    data()->pipeline_kind() ==
+                        TurboshaftPipelineKind::kTSABuiltin)) {
+      if (profile) {
+        Run<ProfileApplicationPhase>(profile);
+      }
+
+      if (v8_flags.reorder_builtins &&
+          Builtins::IsBuiltinId(info()->builtin())) {
+        UnparkedScopeIfNeeded unparked_scope(data()->broker());
+        BasicBlockCallGraphProfiler::StoreCallGraph(info(), data()->graph());
+      }
+
+      if (v8_flags.turbo_profiling) {
+        UnparkedScopeIfNeeded unparked_scope(data()->broker());
+
+        // Basic block profiling disables concurrent compilation, so handle
+        // deref is fine.
+        AllowHandleDereference allow_handle_dereference;
+        const size_t block_count = data()->graph().block_count();
+        BasicBlockProfilerData* profiler_data =
+            BasicBlockProfiler::Get()->NewData(block_count);
+
+        // Set the function name.
+        profiler_data->SetFunctionName(info()->GetDebugName());
+        // Capture the schedule string before instrumentation.
+        if (v8_flags.turbo_profiling_verbose) {
+          std::ostringstream os;
+          os << data()->graph();
+          profiler_data->SetSchedule(os);
+        }
+
+        info()->set_profiler_data(profiler_data);
+
+        Run<BlockInstrumentationPhase>();
+      } else {
+        // We run an empty copying phase to make sure that we have the same
+        // control flow as when taking the profile.
+        ZoneWithName<kTempZoneName> temp_zone(data()->zone_stats(),
+                                              kTempZoneName);
+        CopyingPhase<>::Run(data(), temp_zone);
+      }
+    }
+
+    // DecompressionOptimization has to run as the last phase because it
+    // constructs an (slightly) invalid graph that mixes Tagged and Compressed
+    // representations.
+    Run<DecompressionOptimizationPhase>();
+
+    Run<SpecialRPOSchedulingPhase>();
+  }
+
+  [[nodiscard]] bool SelectInstructions(Linkage* linkage) {
     auto call_descriptor = linkage->GetIncomingDescriptor();
 
     // Depending on which code path led us to this function, the frame may or
@@ -428,11 +492,19 @@ class Pipeline final {
 
   MaybeHandle<Code> GenerateCode(CallDescriptor* call_descriptor) {
     Linkage linkage(call_descriptor);
-    SelectInstructions(&linkage);
+    PrepareForInstructionSelection();
+    if (!SelectInstructions(&linkage)) {
+      return MaybeHandle<Code>();
+    }
     AllocateRegisters(linkage.GetIncomingDescriptor());
     AssembleCode(&linkage);
     return FinalizeCode();
   }
+
+  MaybeHandle<Code> GenerateCode(
+      Linkage* linkage, std::shared_ptr<OsrHelper> osr_helper = {},
+      JumpOptimizationInfo* jump_optimization_info = nullptr,
+      const ProfileDataFromFile* profile = nullptr, int initial_graph_hash = 0);
 
   void RecreateTurbofanGraph(compiler::TFPipelineData* turbofan_data,
                              Linkage* linkage);
@@ -509,6 +581,13 @@ class Pipeline final {
 
  private:
   PipelineData* data_;
+};
+
+class BuiltinPipeline : public Pipeline {
+ public:
+  explicit BuiltinPipeline(PipelineData* data) : Pipeline(data) {}
+
+  void OptimizeBuiltin();
 };
 
 }  // namespace v8::internal::compiler::turboshaft

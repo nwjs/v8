@@ -207,7 +207,7 @@ void JSArrayBufferView::set_byte_length(size_t value) {
 }
 
 bool JSArrayBufferView::WasDetached() const {
-  return JSArrayBuffer::cast(buffer())->was_detached();
+  return Cast<JSArrayBuffer>(buffer())->was_detached();
 }
 
 BIT_FIELD_ACCESSORS(JSArrayBufferView, bit_field, is_length_tracking,
@@ -377,7 +377,7 @@ MaybeHandle<JSTypedArray> JSTypedArray::Validate(Isolate* isolate,
     THROW_NEW_ERROR(isolate, NewTypeError(message));
   }
 
-  Handle<JSTypedArray> array = Handle<JSTypedArray>::cast(receiver);
+  Handle<JSTypedArray> array = Cast<JSTypedArray>(receiver);
   if (V8_UNLIKELY(array->WasDetached())) {
     const MessageTemplate message = MessageTemplate::kDetachedOperation;
     Handle<String> operation =

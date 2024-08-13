@@ -10,6 +10,8 @@
 
 namespace v8::internal {
 
+class IsolateGroup;
+
 // This is just a collection of common compression scheme related functions.
 // Each pointer compression cage then has its own compression scheme, which
 // mainly differes in the cage base address they use.
@@ -140,6 +142,15 @@ class ExternalCodeCompressionScheme {
   V8_INLINE static void InitBase(Address base);
   V8_INLINE static Address base();
 
+  // Given a 64bit raw value, found on the stack, calls the callback function
+  // with all possible pointers that may be "contained" in compressed form in
+  // this value, either as complete compressed pointers or as intermediate
+  // (half-computed) results.
+  template <typename ProcessPointerCallback>
+  V8_INLINE static void ProcessIntermediatePointers(
+      PtrComprCageBase cage_base, Address raw_value,
+      ProcessPointerCallback callback);
+
  private:
   // These non-inlined accessors to base_ field are used in component builds
   // where cross-component access to thread local variables is not allowed.
@@ -212,6 +223,7 @@ class PtrComprCageAccessScope final {
 #ifdef V8_EXTERNAL_CODE_SPACE
   const Address code_cage_base_;
 #endif  // V8_EXTERNAL_CODE_SPACE
+  IsolateGroup* saved_current_isolate_group_;
 #endif  // V8_COMPRESS_POINTERS_IN_MULTIPLE_CAGES
 };
 

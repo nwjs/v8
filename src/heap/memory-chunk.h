@@ -27,6 +27,7 @@ class CodeStubAssembler;
 class ExternalReference;
 template <typename T>
 class Tagged;
+class TestDebugHelper;
 
 enum class MarkingMode { kNoMarking, kMinorMarking, kMajorMarking };
 
@@ -244,6 +245,13 @@ class V8_EXPORT_PRIVATE MemoryChunk final {
   V8_INLINE bool InReadOnlySpace() const { return IsFlagSet(READ_ONLY_HEAP); }
 #endif
 
+#ifdef V8_ENABLE_SANDBOX
+  // Flags are stored in the page header and are not safe to rely on for sandbox
+  // checks. This alternative version will check if the page is read-only
+  // without relying on the inline flag.
+  bool SandboxSafeInReadOnlySpace() const;
+#endif
+
   V8_INLINE bool InCodeSpace() const { return IsFlagSet(IS_EXECUTABLE); }
 
   V8_INLINE bool InTrustedSpace() const { return IsFlagSet(IS_TRUSTED); }
@@ -391,6 +399,7 @@ class V8_EXPORT_PRIVATE MemoryChunk final {
   friend class MacroAssembler;
   // For access to the MetadataTableAddress;
   friend class ExternalReference;
+  friend class TestDebugHelper;
 
 #endif  // V8_ENABLE_SANDBOX
 

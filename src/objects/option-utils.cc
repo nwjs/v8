@@ -22,7 +22,7 @@ MaybeHandle<JSReceiver> GetOptionsObject(Isolate* isolate,
   // 2. If Type(options) is Object, then
   if (IsJSReceiver(*options)) {
     // a. Return options.
-    return Handle<JSReceiver>::cast(options);
+    return Cast<JSReceiver>(options);
   }
   // 3. Throw a TypeError exception.
   THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kInvalidArgument));
@@ -40,7 +40,7 @@ MaybeHandle<JSReceiver> CoerceOptionsToObject(Isolate* isolate,
   // 2. Return ? ToObject(options).
   ASSIGN_RETURN_ON_EXCEPTION(isolate, options,
                              Object::ToObject(isolate, options, method_name));
-  return Handle<JSReceiver>::cast(options);
+  return Cast<JSReceiver>(options);
 }
 
 Maybe<bool> GetStringOption(Isolate* isolate, Handle<JSReceiver> options,
@@ -129,7 +129,7 @@ Maybe<int> DefaultNumberOption(Isolate* isolate, Handle<Object> value, int min,
 
   // 1. If value is not undefined, then
   // a. Let value be ? ToNumber(value).
-  Handle<Object> value_num;
+  Handle<Number> value_num;
   ASSIGN_RETURN_ON_EXCEPTION_VALUE(
       isolate, value_num, Object::ToNumber(isolate, value), Nothing<int>());
   DCHECK(IsNumber(*value_num));
@@ -183,10 +183,11 @@ Maybe<double> GetNumberOptionAsDouble(Isolate* isolate,
   }
   // 4. Else if type is "number", then
   // a. Set value to ? ToNumber(value).
+  Handle<Number> value_num;
   ASSIGN_RETURN_ON_EXCEPTION_VALUE(
-      isolate, value, Object::ToNumber(isolate, value), Nothing<double>());
+      isolate, value_num, Object::ToNumber(isolate, value), Nothing<double>());
   // b. If value is NaN, throw a RangeError exception.
-  if (IsNaN(*value)) {
+  if (IsNaN(*value_num)) {
     THROW_NEW_ERROR_RETURN_VALUE(
         isolate,
         NewRangeError(MessageTemplate::kPropertyValueOutOfRange, property),
@@ -194,7 +195,7 @@ Maybe<double> GetNumberOptionAsDouble(Isolate* isolate,
   }
 
   // 7. Return value.
-  return Just(Object::NumberValue(*value));
+  return Just(Object::NumberValue(*value_num));
 }
 
 }  // namespace internal

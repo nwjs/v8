@@ -680,14 +680,19 @@ InstructionOperand OperandForDeopt(Isolate* isolate,
     }
   } else if (const turboshaft::TaggedBitcastOp* bitcast =
                  op.TryCast<turboshaft::Opmask::kTaggedBitcastSmi>()) {
-    const turboshaft::Operation& input =
-        g->turboshaft_graph()->Get(bitcast->input());
+    const turboshaft::Operation& input = g->Get(bitcast->input());
     if (const turboshaft::ConstantOp* cst =
             input.TryCast<turboshaft::Opmask::kWord32Constant>()) {
       if constexpr (Is64()) {
         return g->UseImmediate64(cst->word32());
       } else {
         return g->UseImmediate(cst->word32());
+      }
+    } else if (Is64() && input.Is<turboshaft::Opmask::kWord64Constant>()) {
+      if (rep == MachineRepresentation::kWord32) {
+        return g->UseImmediate(input.Cast<turboshaft::ConstantOp>().word32());
+      } else {
+        return g->UseImmediate64(input.Cast<turboshaft::ConstantOp>().word64());
       }
     }
   }
@@ -759,6 +764,14 @@ InstructionOperand OperandForDeopt(Isolate* isolate,
           return g->UseImmediate64(value);
         } else {
           return g->UseImmediate(value);
+        }
+      } else if (Is64() &&
+                 input->InputAt(0)->opcode() == IrOpcode::kInt64Constant) {
+        int64_t value = OpParameter<int64_t>(input->InputAt(0)->op());
+        if (rep == MachineRepresentation::kWord32) {
+          return g->UseImmediate(static_cast<int>(value));
+        } else {
+          return g->UseImmediate64(value);
         }
       }
     }
@@ -1077,10 +1090,6 @@ size_t AddOperandToStateValueDescriptor(
       values->PushDuplicate(id);
       return 0;
     }
-    case FrameStateData::Instr::kArgumentsLength:
-      it->ConsumeArgumentsLength();
-      values->PushArgumentsLength();
-      return 0;
     case FrameStateData::Instr::kArgumentsElements: {
       CreateArgumentsType type;
       it->ConsumeArgumentsElements(&type);
@@ -1090,6 +1099,14 @@ size_t AddOperandToStateValueDescriptor(
       deduplicator->InsertDummyForArgumentsElements();
       return 0;
     }
+    case FrameStateData::Instr::kArgumentsLength:
+      it->ConsumeArgumentsLength();
+      values->PushArgumentsLength();
+      return 0;
+    case FrameStateData::Instr::kRestLength:
+      it->ConsumeRestLength();
+      values->PushRestLength();
+      return 0;
   }
   UNREACHABLE();
 }
@@ -3220,9 +3237,10 @@ void InstructionSelectorT<TurbofanAdapter>::VisitNode(Node* node) {
     case IrOpcode::kInt64Constant:
     case IrOpcode::kTaggedIndexConstant:
     case IrOpcode::kExternalConstant:
-    case IrOpcode::kRelocatableInt32Constant:
     case IrOpcode::kRelocatableInt64Constant:
       return VisitConstant(node);
+    case IrOpcode::kRelocatableInt32Constant:
+      return MarkAsWord32(node), VisitConstant(node);
     case IrOpcode::kFloat32Constant:
       return MarkAsFloat32(node), VisitConstant(node);
     case IrOpcode::kFloat64Constant:
@@ -4735,6 +4753,7 @@ void InstructionSelectorT<TurboshaftAdapter>::VisitNode(
           break;
         case ConstantOp::Kind::kRelocatableWasmCall:
         case ConstantOp::Kind::kRelocatableWasmStubCall:
+        case ConstantOp::Kind::kRelocatableWasmCanonicalSignatureId:
           break;
       }
       VisitConstant(node);

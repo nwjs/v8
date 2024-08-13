@@ -4,6 +4,8 @@
 
 #include "src/deoptimizer/translated-state.h"
 
+#include <inttypes.h>
+
 #include <iomanip>
 
 #include "src/base/memory.h"
@@ -66,7 +68,7 @@ void DeoptimizationFrameTranslationPrintSingleOpcode(
       }
       Tagged<Object> shared_info = literal_array->get(shared_info_id);
       os << "{bytecode_offset=" << bytecode_offset << ", function="
-         << SharedFunctionInfo::cast(shared_info)->DebugNameCStr().get()
+         << Cast<SharedFunctionInfo>(shared_info)->DebugNameCStr().get()
          << ", height=" << height << ", retval=@" << return_value_offset << "(#"
          << return_value_count << ")}";
       break;
@@ -80,7 +82,7 @@ void DeoptimizationFrameTranslationPrintSingleOpcode(
       Tagged<Object> shared_info = literal_array->get(shared_info_id);
       unsigned height = iterator.NextOperand();
       os << "{bailout_id=" << bailout_id << ", function="
-         << SharedFunctionInfo::cast(shared_info)->DebugNameCStr().get()
+         << Cast<SharedFunctionInfo>(shared_info)->DebugNameCStr().get()
          << ", height=" << height << "}";
       break;
     }
@@ -91,7 +93,7 @@ void DeoptimizationFrameTranslationPrintSingleOpcode(
       Tagged<Object> shared_info = literal_array->get(shared_info_id);
       unsigned height = iterator.NextOperand();
       os << "{construct create stub, function="
-         << SharedFunctionInfo::cast(shared_info)->DebugNameCStr().get()
+         << Cast<SharedFunctionInfo>(shared_info)->DebugNameCStr().get()
          << ", height=" << height << "}";
       break;
     }
@@ -101,7 +103,7 @@ void DeoptimizationFrameTranslationPrintSingleOpcode(
       int shared_info_id = iterator.NextOperand();
       Tagged<Object> shared_info = literal_array->get(shared_info_id);
       os << "{construct invoke stub, function="
-         << SharedFunctionInfo::cast(shared_info)->DebugNameCStr().get() << "}";
+         << Cast<SharedFunctionInfo>(shared_info)->DebugNameCStr().get() << "}";
       break;
     }
 
@@ -114,7 +116,7 @@ void DeoptimizationFrameTranslationPrintSingleOpcode(
       Tagged<Object> shared_info = literal_array->get(shared_info_id);
       unsigned height = iterator.NextOperand();
       os << "{bailout_id=" << bailout_id << ", function="
-         << SharedFunctionInfo::cast(shared_info)->DebugNameCStr().get()
+         << Cast<SharedFunctionInfo>(shared_info)->DebugNameCStr().get()
          << ", height=" << height << "}";
       break;
     }
@@ -128,7 +130,7 @@ void DeoptimizationFrameTranslationPrintSingleOpcode(
       unsigned height = iterator.NextOperand();
       int wasm_return_type = iterator.NextOperand();
       os << "{bailout_id=" << bailout_id << ", function="
-         << SharedFunctionInfo::cast(shared_info)->DebugNameCStr().get()
+         << Cast<SharedFunctionInfo>(shared_info)->DebugNameCStr().get()
          << ", height=" << height << ", wasm_return_type=" << wasm_return_type
          << "}";
       break;
@@ -151,7 +153,7 @@ void DeoptimizationFrameTranslationPrintSingleOpcode(
       Tagged<Object> shared_info = literal_array->get(shared_info_id);
       unsigned height = iterator.NextOperand();
       os << "{function="
-         << SharedFunctionInfo::cast(shared_info)->DebugNameCStr().get()
+         << Cast<SharedFunctionInfo>(shared_info)->DebugNameCStr().get()
          << ", height=" << height << "}";
       break;
     }
@@ -549,7 +551,7 @@ Tagged<Object> TranslatedValue::GetRawValue() const {
         // return it. This assumes that such sliced strings are only built by
         // the fast string builder optimization of Turbofan's
         // StringBuilderOptimizer/EffectControlLinearizer.
-        Tagged<SlicedString> string = SlicedString::cast(object);
+        Tagged<SlicedString> string = Cast<SlicedString>(object);
         if (string->length() < SlicedString::kMinLength) {
           Tagged<String> backing_store = string->parent();
           CHECK(IsSeqString(backing_store));
@@ -573,7 +575,7 @@ Tagged<Object> TranslatedValue::GetRawValue() const {
 
           // Zeroing the padding bytes of {backing_store}.
           SeqString::DataAndPaddingSizes sz =
-              SeqString::cast(backing_store)->GetDataAndPaddingSizes();
+              Cast<SeqString>(backing_store)->GetDataAndPaddingSizes();
           auto padding =
               reinterpret_cast<char*>(backing_store.address() + sz.data_size);
           for (int i = 0; i < sz.padding_size; ++i) {
@@ -685,7 +687,7 @@ Handle<Object> TranslatedValue::GetValue() {
   }
 
   if (*value != ReadOnlyRoots(isolate()).arguments_marker()) {
-    set_initialized_storage(Handle<HeapObject>::cast(value));
+    set_initialized_storage(Cast<HeapObject>(value));
     return storage_;
   }
 
@@ -810,7 +812,7 @@ Simd128 TranslatedState::getSimd128Slot(Address fp, int slot_offset) {
 void TranslatedValue::Handlify() {
   if (kind() == kTagged && IsHeapObject(raw_literal())) {
     set_initialized_storage(
-        Handle<HeapObject>(HeapObject::cast(raw_literal()), isolate()));
+        Handle<HeapObject>(Cast<HeapObject>(raw_literal()), isolate()));
     raw_literal_ = Tagged<Object>();
   }
 }
@@ -971,21 +973,15 @@ TranslatedValue DeoptimizationLiteralProvider::Get(TranslatedState* container,
   CHECK(v8_flags.wasm_deopt);
   CHECK_LT(literal_index, literals_off_heap_.size());
   const DeoptimizationLiteral& literal = literals_off_heap_[literal_index];
-  // TODO(mliedtke): We also need to support simd literals.
   switch (literal.kind()) {
     case DeoptimizationLiteralKind::kWasmInt32:
       return TranslatedValue::NewInt32(container, literal.GetInt32());
     case DeoptimizationLiteralKind::kWasmInt64:
       return TranslatedValue::NewInt64(container, literal.GetInt64());
-    case DeoptimizationLiteralKind::kWasmFloat:
-      // TODO(mliedtke): What about NaNs? Seems like we may change bit patterns
-      // here...
-      return TranslatedValue::NewFloat(container, Float32(literal.GetFloat()));
-    case DeoptimizationLiteralKind::kWasmDouble:
-      // TODO(mliedtke): What about NaNs? Seems like we may change bit patterns
-      // here...
-      return TranslatedValue::NewDouble(container,
-                                        Float64(literal.GetDouble()));
+    case DeoptimizationLiteralKind::kWasmFloat32:
+      return TranslatedValue::NewFloat(container, literal.GetFloat32());
+    case DeoptimizationLiteralKind::kWasmFloat64:
+      return TranslatedValue::NewDouble(container, literal.GetFloat64());
     case DeoptimizationLiteralKind::kWasmI31Ref:
       return TranslatedValue::NewTagged(container, literal.GetSmi());
     default:
@@ -1003,7 +999,7 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
     case TranslationOpcode::INTERPRETED_FRAME_WITH_RETURN:
     case TranslationOpcode::INTERPRETED_FRAME_WITHOUT_RETURN: {
       BytecodeOffset bytecode_offset = BytecodeOffset(iterator->NextOperand());
-      Tagged<SharedFunctionInfo> shared_info = SharedFunctionInfo::cast(
+      Tagged<SharedFunctionInfo> shared_info = Cast<SharedFunctionInfo>(
           literal_array.get_on_heap_literals()->get(iterator->NextOperand()));
       int height = iterator->NextOperand();
       int return_value_offset = 0;
@@ -1029,7 +1025,7 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
     }
 
     case TranslationOpcode::INLINED_EXTRA_ARGUMENTS: {
-      Tagged<SharedFunctionInfo> shared_info = SharedFunctionInfo::cast(
+      Tagged<SharedFunctionInfo> shared_info = Cast<SharedFunctionInfo>(
           literal_array.get_on_heap_literals()->get(iterator->NextOperand()));
       int height = iterator->NextOperand();
       if (trace_file != nullptr) {
@@ -1041,7 +1037,7 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
     }
 
     case TranslationOpcode::CONSTRUCT_CREATE_STUB_FRAME: {
-      Tagged<SharedFunctionInfo> shared_info = SharedFunctionInfo::cast(
+      Tagged<SharedFunctionInfo> shared_info = Cast<SharedFunctionInfo>(
           literal_array.get_on_heap_literals()->get(iterator->NextOperand()));
       int height = iterator->NextOperand();
       if (trace_file != nullptr) {
@@ -1055,7 +1051,7 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
     }
 
     case TranslationOpcode::CONSTRUCT_INVOKE_STUB_FRAME: {
-      Tagged<SharedFunctionInfo> shared_info = SharedFunctionInfo::cast(
+      Tagged<SharedFunctionInfo> shared_info = Cast<SharedFunctionInfo>(
           literal_array.get_on_heap_literals()->get(iterator->NextOperand()));
       if (trace_file != nullptr) {
         std::unique_ptr<char[]> name = shared_info->DebugNameCStr();
@@ -1068,7 +1064,7 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
 
     case TranslationOpcode::BUILTIN_CONTINUATION_FRAME: {
       BytecodeOffset bytecode_offset = BytecodeOffset(iterator->NextOperand());
-      Tagged<SharedFunctionInfo> shared_info = SharedFunctionInfo::cast(
+      Tagged<SharedFunctionInfo> shared_info = Cast<SharedFunctionInfo>(
           literal_array.get_on_heap_literals()->get(iterator->NextOperand()));
       int height = iterator->NextOperand();
       if (trace_file != nullptr) {
@@ -1085,7 +1081,7 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
 #if V8_ENABLE_WEBASSEMBLY
     case TranslationOpcode::WASM_INLINED_INTO_JS_FRAME: {
       BytecodeOffset bailout_id = BytecodeOffset(iterator->NextOperand());
-      Tagged<SharedFunctionInfo> shared_info = SharedFunctionInfo::cast(
+      Tagged<SharedFunctionInfo> shared_info = Cast<SharedFunctionInfo>(
           literal_array.get_on_heap_literals()->get(iterator->NextOperand()));
       int height = iterator->NextOperand();
       if (trace_file != nullptr) {
@@ -1101,7 +1097,7 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
 
     case TranslationOpcode::JS_TO_WASM_BUILTIN_CONTINUATION_FRAME: {
       BytecodeOffset bailout_id = BytecodeOffset(iterator->NextOperand());
-      Tagged<SharedFunctionInfo> shared_info = SharedFunctionInfo::cast(
+      Tagged<SharedFunctionInfo> shared_info = Cast<SharedFunctionInfo>(
           literal_array.get_on_heap_literals()->get(iterator->NextOperand()));
       int height = iterator->NextOperand();
       int return_kind_code = iterator->NextOperand();
@@ -1138,7 +1134,7 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
 
     case TranslationOpcode::JAVA_SCRIPT_BUILTIN_CONTINUATION_FRAME: {
       BytecodeOffset bytecode_offset = BytecodeOffset(iterator->NextOperand());
-      Tagged<SharedFunctionInfo> shared_info = SharedFunctionInfo::cast(
+      Tagged<SharedFunctionInfo> shared_info = Cast<SharedFunctionInfo>(
           literal_array.get_on_heap_literals()->get(iterator->NextOperand()));
       int height = iterator->NextOperand();
       if (trace_file != nullptr) {
@@ -1154,7 +1150,7 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
 
     case TranslationOpcode::JAVA_SCRIPT_BUILTIN_CONTINUATION_WITH_CATCH_FRAME: {
       BytecodeOffset bytecode_offset = BytecodeOffset(iterator->NextOperand());
-      Tagged<SharedFunctionInfo> shared_info = SharedFunctionInfo::cast(
+      Tagged<SharedFunctionInfo> shared_info = Cast<SharedFunctionInfo>(
           literal_array.get_on_heap_literals()->get(iterator->NextOperand()));
       int height = iterator->NextOperand();
       if (trace_file != nullptr) {
@@ -1758,16 +1754,28 @@ int TranslatedState::CreateNextTranslatedValue(
         } else {
           switch (translated_value.kind()) {
             case TranslatedValue::Kind::kDouble:
-              PrintF(trace_file, "(wasm double literal %f)",
-                     translated_value.double_value().get_scalar());
+              if (translated_value.double_value().is_nan()) {
+                PrintF(trace_file, "(wasm double literal %f 0x%" PRIx64 ")",
+                       translated_value.double_value().get_scalar(),
+                       translated_value.double_value().get_bits());
+              } else {
+                PrintF(trace_file, "(wasm double literal %f)",
+                       translated_value.double_value().get_scalar());
+              }
               break;
             case TranslatedValue::Kind::kFloat:
-              PrintF(trace_file, "(wasm float literal %f)",
-                     translated_value.float_value().get_scalar());
+              if (translated_value.float_value().is_nan()) {
+                PrintF(trace_file, "(wasm float literal %f 0x%x)",
+                       translated_value.float_value().get_scalar(),
+                       translated_value.float_value().get_bits());
+              } else {
+                PrintF(trace_file, "(wasm float literal %f)",
+                       translated_value.float_value().get_scalar());
+              }
               break;
             case TranslatedValue::Kind::kInt64:
-              PrintF(trace_file, "(wasm int64 literal %lld)",
-                     static_cast<long long>(translated_value.int64_value()));
+              PrintF(trace_file, "(wasm int64 literal %" PRId64 ")",
+                     translated_value.int64_value());
               break;
             case TranslatedValue::Kind::kInt32:
               PrintF(trace_file, "(wasm int32 literal %d)",
@@ -1979,7 +1987,7 @@ void TranslatedState::InitializeCapturedObjectAt(
   // The map should never be materialized, so let us check we already have
   // an existing object here.
   CHECK_EQ(frame->values_[value_index].kind(), TranslatedValue::kTagged);
-  auto map = DirectHandle<Map>::cast(frame->values_[value_index].GetValue());
+  auto map = Cast<Map>(frame->values_[value_index].GetValue());
   CHECK(IsMap(*map));
   value_index++;
 
@@ -2041,7 +2049,7 @@ void TranslatedState::EnsureObjectAllocatedAt(TranslatedValue* slot) {
 int TranslatedValue::GetSmiValue() const {
   Tagged<Object> value = GetRawValue();
   CHECK(IsSmi(value));
-  return Smi::cast(value).value();
+  return Cast<Smi>(value).value();
 }
 
 void TranslatedState::MaterializeFixedDoubleArray(TranslatedFrame* frame,
@@ -2050,8 +2058,8 @@ void TranslatedState::MaterializeFixedDoubleArray(TranslatedFrame* frame,
                                                   DirectHandle<Map> map) {
   int length = frame->values_[*value_index].GetSmiValue();
   (*value_index)++;
-  Handle<FixedDoubleArray> array = Handle<FixedDoubleArray>::cast(
-      isolate()->factory()->NewFixedDoubleArray(length));
+  Handle<FixedDoubleArray> array =
+      Cast<FixedDoubleArray>(isolate()->factory()->NewFixedDoubleArray(length));
   CHECK_GT(length, 0);
   for (int i = 0; i < length; i++) {
     CHECK_NE(TranslatedValue::kCapturedObject,
@@ -2117,7 +2125,7 @@ void TranslatedState::EnsureCapturedObjectAllocatedAt(
   // The map should never be materialized, so let us check we already have
   // an existing object here.
   CHECK_EQ(frame->values_[value_index].kind(), TranslatedValue::kTagged);
-  auto map = DirectHandle<Map>::cast(frame->values_[value_index].GetValue());
+  auto map = Cast<Map>(frame->values_[value_index].GetValue());
   CHECK(IsMap(*map));
   value_index++;
 
@@ -2243,15 +2251,15 @@ void TranslatedState::EnsureCapturedObjectAllocatedAt(
 void TranslatedValue::ReplaceElementsArrayWithCopy() {
   DCHECK_EQ(kind(), TranslatedValue::kTagged);
   DCHECK_EQ(materialization_state(), TranslatedValue::kFinished);
-  auto elements = Handle<FixedArrayBase>::cast(GetValue());
+  auto elements = Cast<FixedArrayBase>(GetValue());
   DCHECK(IsFixedArray(*elements) || IsFixedDoubleArray(*elements));
   if (IsFixedDoubleArray(*elements)) {
     DCHECK(!elements->IsCowArray());
     set_storage(isolate()->factory()->CopyFixedDoubleArray(
-        Handle<FixedDoubleArray>::cast(elements)));
+        Cast<FixedDoubleArray>(elements)));
   } else if (!elements->IsCowArray()) {
-    set_storage(isolate()->factory()->CopyFixedArray(
-        Handle<FixedArray>::cast(elements)));
+    set_storage(
+        isolate()->factory()->CopyFixedArray(Cast<FixedArray>(elements)));
   }
 }
 
@@ -2376,7 +2384,7 @@ Handle<Object> TranslatedState::GetValueAndAdvance(TranslatedFrame* frame,
 void TranslatedState::InitializeJSObjectAt(
     TranslatedFrame* frame, int* value_index, TranslatedValue* slot,
     DirectHandle<Map> map, const DisallowGarbageCollection& no_gc) {
-  auto object_storage = DirectHandle<HeapObject>::cast(slot->storage_);
+  auto object_storage = Cast<HeapObject>(slot->storage_);
   DCHECK_EQ(TranslatedValue::kCapturedObject, slot->kind());
   int children_count = slot->GetChildrenCount();
 
@@ -2429,7 +2437,7 @@ void TranslatedState::InitializeJSObjectAt(
       // value.
       DirectHandle<HeapObject> field_value = slot->storage();
       CHECK(IsCode(*field_value));
-      Tagged<Code> value = Code::cast(*field_value);
+      Tagged<Code> value = Cast<Code>(*field_value);
       object_storage->RawIndirectPointerField(offset, kCodeIndirectPointerTag)
           .Relaxed_Store(value);
       INDIRECT_POINTER_WRITE_BARRIER(*object_storage, offset,
@@ -2456,7 +2464,7 @@ void TranslatedState::InitializeJSObjectAt(
 void TranslatedState::InitializeObjectWithTaggedFieldsAt(
     TranslatedFrame* frame, int* value_index, TranslatedValue* slot,
     DirectHandle<Map> map, const DisallowGarbageCollection& no_gc) {
-  auto object_storage = DirectHandle<HeapObject>::cast(slot->storage_);
+  auto object_storage = Cast<HeapObject>(slot->storage_);
   int children_count = slot->GetChildrenCount();
 
   // Skip the writes if we already have the canonical empty fixed array.
@@ -2669,7 +2677,7 @@ void TranslatedState::UpdateFromPreviouslyMaterializedObjects() {
         Handle<Object> object(previously_materialized_objects->get(i),
                               isolate_);
         CHECK(IsHeapObject(*object));
-        value_info->set_initialized_storage(Handle<HeapObject>::cast(object));
+        value_info->set_initialized_storage(Cast<HeapObject>(object));
       }
     }
   }
@@ -2710,7 +2718,7 @@ void TranslatedState::ReadUpdateFeedback(
     Tagged<DeoptimizationLiteralArray> literal_array, FILE* trace_file) {
   CHECK_EQ(TranslationOpcode::UPDATE_FEEDBACK, iterator->NextOpcode());
   feedback_vector_ =
-      FeedbackVector::cast(literal_array->get(iterator->NextOperand()));
+      Cast<FeedbackVector>(literal_array->get(iterator->NextOperand()));
   feedback_slot_ = FeedbackSlot(iterator->NextOperand());
   if (trace_file != nullptr) {
     PrintF(trace_file, "  reading FeedbackVector (slot %d)\n",

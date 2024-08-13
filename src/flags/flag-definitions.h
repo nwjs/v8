@@ -278,18 +278,18 @@ DEFINE_BOOL(js_shipping, true, "enable all shipped JavaScript features")
   V(js_explicit_resource_management, "explicit resource management")         \
   V(js_float16array,                                                         \
     "Float16Array, Math.f16round, DataView.getFloat16, DataView.setFloat16") \
-  V(js_decorators, "decorators")
+  V(js_decorators, "decorators")                                             \
+  V(js_source_phase_imports, "source phase imports")
 
 #ifdef V8_INTL_SUPPORT
-#define HARMONY_INPROGRESS(V)                                           \
-  HARMONY_INPROGRESS_BASE(V)                                            \
-  V(harmony_intl_best_fit_matcher, "Intl BestFitMatcher")               \
-  /* Following two flags should ship the same time but may stage */     \
-  /* differently . */                                                   \
-  V(harmony_remove_intl_locale_info_getters,                            \
-    "Remove Obsoleted Intl Locale Info getters")                        \
-  V(harmony_intl_locale_info_func, "Intl Locale Info API as functions") \
-  V(harmony_intl_duration_format, "Intl DurationFormat API")
+#define HARMONY_INPROGRESS(V)                                       \
+  HARMONY_INPROGRESS_BASE(V)                                        \
+  V(harmony_intl_best_fit_matcher, "Intl BestFitMatcher")           \
+  /* Following two flags should ship the same time but may stage */ \
+  /* differently . */                                               \
+  V(harmony_remove_intl_locale_info_getters,                        \
+    "Remove Obsoleted Intl Locale Info getters")                    \
+  V(harmony_intl_locale_info_func, "Intl Locale Info API as functions")
 
 #define JAVASCRIPT_INPROGRESS_FEATURES(V) JAVASCRIPT_INPROGRESS_FEATURES_BASE(V)
 #else
@@ -299,11 +299,12 @@ DEFINE_BOOL(js_shipping, true, "enable all shipped JavaScript features")
 
 // Features that are complete (but still behind the --harmony flag).
 #define HARMONY_STAGED_BASE(V)
-
-#define JAVASCRIPT_STAGED_FEATURES_BASE(V)
+#define JAVASCRIPT_STAGED_FEATURES_BASE(V) V(js_atomics_pause, "Atomics.pause")
 
 #ifdef V8_INTL_SUPPORT
-#define HARMONY_STAGED(V) HARMONY_STAGED_BASE(V)
+#define HARMONY_STAGED(V) \
+  HARMONY_STAGED_BASE(V)  \
+  V(harmony_intl_duration_format, "Intl DurationFormat API")
 #define JAVASCRIPT_STAGED_FEATURES(V) JAVASCRIPT_STAGED_FEATURES_BASE(V)
 #else
 #define HARMONY_STAGED(V) HARMONY_STAGED_BASE(V)
@@ -311,16 +312,16 @@ DEFINE_BOOL(js_shipping, true, "enable all shipped JavaScript features")
 #endif
 
 // Features that are shipping (turned on by default, but internal flag remains).
-#define HARMONY_SHIPPING_BASE(V)                                      \
-  V(harmony_array_from_async, "harmony Array.fromAsync")              \
-  V(harmony_iterator_helpers, "JavaScript iterator helpers")          \
-  V(harmony_set_methods, "harmony Set Methods")                       \
+#define HARMONY_SHIPPING_BASE(V)                             \
+  V(harmony_iterator_helpers, "JavaScript iterator helpers") \
+  V(harmony_set_methods, "harmony Set Methods")              \
   V(harmony_import_attributes, "harmony import attributes")
 
 #define JAVASCRIPT_SHIPPING_FEATURES_BASE(V)                           \
   V(js_promise_withresolvers, "Promise.withResolvers")                 \
   V(js_regexp_duplicate_named_groups, "RegExp duplicate named groups") \
-  V(js_regexp_modifiers, "RegExp modifiers")
+  V(js_regexp_modifiers, "RegExp modifiers")                           \
+  V(js_promise_try, "Promise.try")
 
 #ifdef V8_INTL_SUPPORT
 #define HARMONY_SHIPPING(V) HARMONY_SHIPPING_BASE(V)
@@ -574,11 +575,11 @@ DEFINE_BOOL(maglev_inlining, true,
             "enable inlining in the maglev optimizing compiler")
 DEFINE_BOOL(maglev_loop_peeling, true,
             "enable loop peeling in the maglev optimizing compiler")
+DEFINE_BOOL(maglev_optimistic_peeled_loops, false,
+            "enable speculation on loop state using peeling as fallback in the "
+            "maglev optimizing compiler")
 DEFINE_INT(maglev_loop_peeling_max_size, 150,
            "max loop size for loop peeling in the maglev optimizing compiler")
-DEFINE_BOOL(maglev_loop_peeling_only_trivial, true,
-            "enable loop peeling only for trivial loops in the maglev "
-            "optimizing compiler")
 DEFINE_BOOL(maglev_deopt_data_on_background, true,
             "Generate deopt data on background thread")
 DEFINE_BOOL(maglev_build_code_on_background, true,
@@ -589,13 +590,17 @@ DEFINE_BOOL(maglev_destroy_on_background, true,
             "Destroy compilation jobs on background thread")
 DEFINE_BOOL(maglev_inline_api_calls, false,
             "Inline CallApiCallback builtin into generated code")
-DEFINE_WEAK_NEG_IMPLICATION(maglev_future, maglev_loop_peeling_only_trivial)
+DEFINE_WEAK_IMPLICATION(maglev_future, maglev_optimistic_peeled_loops)
 DEFINE_WEAK_IMPLICATION(maglev_future, maglev_speculative_hoist_phi_untagging)
 DEFINE_WEAK_IMPLICATION(maglev_future, maglev_inline_api_calls)
 DEFINE_WEAK_IMPLICATION(maglev_future, maglev_escape_analysis)
 // This might be too big of a hammer but we must prohibit moving the C++
 // trampolines while we are executing a C++ code.
 DEFINE_NEG_IMPLICATION(maglev_inline_api_calls, compact_code_space_with_stack)
+
+DEFINE_EXPERIMENTAL_FEATURE(
+    maglev_extend_properties_backing_store,
+    "Generate code for extending properties backing store when needed")
 
 DEFINE_UINT(
     concurrent_maglev_max_threads, 2,
@@ -645,6 +650,8 @@ DEFINE_BOOL(maglev_print_feedback, true,
 
 DEFINE_BOOL(print_maglev_code, false, "print maglev code")
 DEFINE_BOOL(trace_maglev_graph_building, false, "trace maglev graph building")
+DEFINE_BOOL(trace_maglev_loop_speeling, false, "trace maglev loop SPeeling")
+DEFINE_WEAK_IMPLICATION(trace_maglev_graph_building, trace_maglev_loop_speeling)
 DEFINE_BOOL(trace_maglev_inlining, false, "trace maglev inlining")
 DEFINE_BOOL(trace_maglev_inlining_verbose, false,
             "trace maglev inlining (verbose)")
@@ -676,6 +683,10 @@ DEFINE_BOOL(maglev_stats_nvp, false,
 // TODO(v8:7700): Remove once stable.
 DEFINE_BOOL(maglev_function_context_specialization, true,
             "enable function context specialization in maglev")
+
+DEFINE_BOOL(maglev_skip_migration_check_for_polymorphic_access, false,
+            "skip generating a migration check when some maps of polymorpic "
+            "property access are migration targets")
 
 #ifdef V8_ENABLE_SPARKPLUG
 DEFINE_WEAK_IMPLICATION(future, flush_baseline_code)
@@ -893,6 +904,9 @@ DEFINE_VALUE_IMPLICATION(always_osr_from_maglev, osr_from_maglev, true)
 // Tiering: Turbofan.
 DEFINE_INT(invocation_count_for_turbofan, 3000,
            "invocation count required for optimizing with TurboFan")
+DEFINE_INT(invocation_count_for_turbofan_if_profile_guided_non_turbofan, 6000,
+           "invocation count required for optimizing with TurboFan if profile "
+           "guided non TurboFan")
 DEFINE_INT(invocation_count_for_osr, 500, "invocation count required for OSR")
 DEFINE_INT(osr_to_tierup, 1,
            "number to decrease the invocation budget by when we follow OSR")
@@ -981,6 +995,11 @@ DEFINE_BOOL(trace_track_allocation_sites, false,
             "trace the tracking of allocation sites")
 DEFINE_BOOL(trace_migration, false, "trace object migration")
 DEFINE_BOOL(trace_generalization, false, "trace map generalization")
+
+DEFINE_BOOL(reuse_scope_infos, false,
+            "reuse scope infos from previous compiles")
+
+DEFINE_IMPLICATION(fuzzing, reuse_scope_infos)
 
 // Flags for Sparkplug
 #undef FLAG
@@ -1085,6 +1104,9 @@ DEFINE_WEAK_IMPLICATION(maglev, maglev_overwrite_budget)
 DEFINE_NEG_IMPLICATION(stress_concurrent_inlining, maglev_overwrite_budget)
 DEFINE_WEAK_VALUE_IMPLICATION(maglev_overwrite_budget,
                               invocation_count_for_turbofan, 5000)
+DEFINE_WEAK_VALUE_IMPLICATION(
+    maglev_overwrite_budget,
+    invocation_count_for_turbofan_if_profile_guided_non_turbofan, 10000)
 DEFINE_BOOL(maglev_overwrite_osr_budget, false,
             "whether maglev resets the OSR interrupt budget")
 DEFINE_WEAK_IMPLICATION(maglev_osr, maglev_overwrite_osr_budget)
@@ -1275,7 +1297,9 @@ DEFINE_BOOL(concurrent_osr, true, "enable concurrent OSR")
 
 DEFINE_BOOL(maglev_escape_analysis, true,
             "avoid inlined allocation of objects that cannot escape")
-
+DEFINE_EXPERIMENTAL_FEATURE(maglev_track_object_changes,
+                            "track object changes to avoid escaping them")
+DEFINE_WEAK_IMPLICATION(maglev_future, maglev_track_object_changes)
 DEFINE_BOOL(trace_maglev_escape_analysis, false, "trace maglev escape analysis")
 
 // TODO(dmercadier): fix and re-enable string builder.
@@ -1415,14 +1439,11 @@ DEFINE_EXPERIMENTAL_FEATURE(
     turboshaft_future,
     "enable Turboshaft features that we want to ship in the not-too-far future")
 DEFINE_IMPLICATION(turboshaft_future, turboshaft)
-DEFINE_WEAK_IMPLICATION(turboshaft_future, turboshaft_loop_peeling)
 DEFINE_WEAK_IMPLICATION(turboshaft_future, turboshaft_wasm)
 #if V8_TARGET_ARCH_X64 or V8_TARGET_ARCH_ARM64 or V8_TARGET_ARCH_ARM or \
     V8_TARGET_ARCH_IA32
-DEFINE_WEAK_IMPLICATION(turboshaft_future, turboshaft_instruction_selection)
 DEFINE_WEAK_IMPLICATION(turboshaft_future,
                         turboshaft_wasm_instruction_selection_experimental)
-DEFINE_WEAK_IMPLICATION(turboshaft_csa, turboshaft_instruction_selection)
 #endif
 DEFINE_WEAK_IMPLICATION(turboshaft_future,
                         turboshaft_wasm_instruction_selection_staged)
@@ -1431,6 +1452,9 @@ DEFINE_WEAK_IMPLICATION(turboshaft_future,
 // Shared-everything is implemented on turboshaft only for now.
 DEFINE_IMPLICATION(experimental_wasm_shared, turboshaft_wasm)
 DEFINE_NEG_IMPLICATION(experimental_wasm_shared, liftoff)
+
+// FP16 is implemented on liftoff only for now.
+DEFINE_IMPLICATION(experimental_wasm_fp16, liftoff_only)
 #endif
 
 #ifdef DEBUG
@@ -1544,8 +1568,8 @@ DEFINE_INT(wasm_tiering_budget, 13'000'000,
            "budget for dynamic tiering (rough approximation of bytes executed")
 DEFINE_INT(wasm_wrapper_tiering_budget, wasm::kGenericWrapperBudget,
            "budget for wrapper tierup (number of calls until tier-up)")
-DEFINE_INT(max_wasm_functions, wasm::kV8MaxWasmFunctions,
-           "maximum number of wasm functions supported in a module")
+DEFINE_INT(max_wasm_functions, wasm::kV8MaxWasmDefinedFunctions,
+           "maximum number of wasm functions defined in a module")
 DEFINE_INT(
     wasm_caching_threshold, 1'000,
     "the amount of wasm top tier code that triggers the next caching event")
@@ -1640,8 +1664,8 @@ DEFINE_EXPERIMENTAL_FEATURE(wasm_deopt,
 DEFINE_IMPLICATION(wasm_deopt, turboshaft_wasm)
 
 // Declare command-line flags for Wasm features. Warning: avoid using these
-// flags directly in the implementation. Instead accept wasm::WasmFeatures
-// for configurability.
+// flags directly in the implementation. Instead accept
+// wasm::WasmEnabledFeatures for configurability.
 #include "src/wasm/wasm-feature-flags.h"
 
 #define DECL_WASM_FLAG(feat, desc, val) \
@@ -1670,9 +1694,8 @@ FOREACH_WASM_STAGING_FEATURE_FLAG(WASM_STAGING_IMPLICATION)
 #undef WASM_STAGING_IMPLICATION
 
 DEFINE_BOOL(wasm_opt, true, "enable wasm optimization")
-DEFINE_BOOL(
-    wasm_bounds_checks, true,
-    "enable bounds checks (disable for performance testing only)")
+DEFINE_BOOL(wasm_bounds_checks, true,
+            "enable bounds checks (disable for performance testing only)")
 DEFINE_BOOL(wasm_stack_checks, true,
             "enable stack checks (disable for performance testing only)")
 DEFINE_BOOL(
@@ -1684,16 +1707,14 @@ DEFINE_BOOL(wasm_math_intrinsics, true,
             "intrinsify some Math imports into wasm")
 
 DEFINE_EXPERIMENTAL_FEATURE(
-    experimental_wasm_inlining_call_indirect,
+    wasm_inlining_call_indirect,
     "enable speculative inlining of Wasm indirect calls, also enables "
     "--experimental-wasm-inlining and requires --turboshaft-wasm")
 // Requires basic inlining machinery, e.g., for allocating feedback vectors.
-DEFINE_IMPLICATION(experimental_wasm_inlining_call_indirect,
-                   experimental_wasm_inlining)
+DEFINE_IMPLICATION(wasm_inlining_call_indirect, experimental_wasm_inlining)
 // This is not implemented for Turbofan, so make sure users are aware by
 // forcing them to explicitly enable Turboshaft (until it's the default anyway).
-DEFINE_NEG_NEG_IMPLICATION(turboshaft_wasm,
-                           experimental_wasm_inlining_call_indirect)
+DEFINE_NEG_NEG_IMPLICATION(turboshaft_wasm, wasm_inlining_call_indirect)
 
 DEFINE_SIZE_T(wasm_inlining_budget, 5000,
               "maximum graph size (in TF nodes) that allows inlining more")
@@ -2079,7 +2100,7 @@ DEFINE_BOOL(manual_evacuation_candidates_selection, false,
 
 DEFINE_BOOL(clear_free_memory, false, "initialize free memory with 0")
 
-DEFINE_BOOL(idle_gc_on_context_disposal, false, "idle gc on context disposal")
+DEFINE_BOOL(idle_gc_on_context_disposal, true, "idle gc on context disposal")
 
 DEFINE_BOOL(trace_context_disposal, false, "trace context disposal")
 
@@ -2162,8 +2183,7 @@ DEFINE_BOOL(riscv_trap_to_simulator_debugger, false,
             "enable simulator trap to debugger")
 DEFINE_BOOL(riscv_debug, false, "enable debug prints")
 
-DEFINE_BOOL(riscv_constant_pool, true,
-            "enable constant pool (RISCV only)")
+DEFINE_BOOL(riscv_constant_pool, true, "enable constant pool (RISCV only)")
 
 DEFINE_BOOL(riscv_c_extension, false,
             "enable compressed extension isa variant (RISCV only)")
@@ -2197,9 +2217,6 @@ DEFINE_BOOL(
     merge_background_deserialized_script_with_compilation_cache, true,
     "After deserializing code cache data on a background thread, merge it into "
     "an existing Script if one is found in the Isolate compilation cache")
-DEFINE_BOOL(disable_old_api_accessors, false,
-            "Disable old-style API accessors whose setters trigger through the "
-            "prototype chain")
 DEFINE_BOOL(
     embedder_instance_types, false,
     "enable type checks based on instance types provided by the embedder")
@@ -2234,6 +2251,9 @@ DEFINE_BOOL(enable_vtune_domain_support, true, "enable vtune domain support")
 DEFINE_BOOL(enable_vtunejit, true, "enable vtune jit interface")
 DEFINE_NEG_IMPLICATION(enable_vtunejit, compact_code_space)
 #endif  // ENABLE_VTUNE_JIT_INTERFACE
+
+DEFINE_BOOL(experimental_report_exceptions_from_callbacks, false,
+            "Notify Api callback about exceptions thrown in Api callbacks")
 
 // builtins.cc
 DEFINE_BOOL(allow_unsafe_function_constructor, false,
@@ -2271,7 +2291,6 @@ DEFINE_BOOL(lazy_streaming, true,
             "use lazy compilation during streaming compilation")
 DEFINE_BOOL(max_lazy, false, "ignore eager compilation hints")
 DEFINE_IMPLICATION(max_lazy, lazy)
-DEFINE_BOOL(compile_hints_magic, false, "enable magic compile hints comments")
 DEFINE_BOOL(trace_opt, false, "trace optimized compilation")
 DEFINE_BOOL(trace_opt_verbose, false,
             "extra verbose optimized compilation tracing")
@@ -2396,9 +2415,9 @@ DEFINE_BOOL_READONLY(fast_map_update, false,
 DEFINE_INT(max_valid_polymorphic_map_count, 4,
            "maximum number of valid maps to track in POLYMORPHIC state")
 DEFINE_BOOL(
-    clone_object_sidestep_transitions, false,
+    clone_object_sidestep_transitions, true,
     "support sidestep transitions for dependency tracking object clone maps")
-DEFINE_WEAK_IMPLICATION(future, move_prototype_transitions_first)
+DEFINE_WEAK_IMPLICATION(future, clone_object_sidestep_transitions)
 
 // map-inl.h
 DEFINE_INT(fast_properties_soft_limit, 12,
@@ -2587,6 +2606,13 @@ DEFINE_BOOL(default_to_experimental_regexp_engine, false,
             "run regexps with the experimental engine where possible")
 DEFINE_IMPLICATION(default_to_experimental_regexp_engine,
                    enable_experimental_regexp_engine)
+DEFINE_BOOL(experimental_regexp_engine_capture_group_opt, false,
+            "enable time optimizations for the experimental regexp engine")
+DEFINE_IMPLICATION(experimental_regexp_engine_capture_group_opt,
+                   enable_experimental_regexp_engine)
+DEFINE_UINT64(experimental_regexp_engine_capture_group_opt_max_memory_usage,
+              1024,
+              "maximum memory usage in MB allowed for experimental engine")
 DEFINE_BOOL(trace_experimental_regexp_engine, false,
             "trace execution of experimental regexp engine")
 
@@ -3134,6 +3160,11 @@ DEFINE_BOOL(parallel_pause_for_gc_in_background, false,
             "Use parallel threads in the atomic pause for background GCs")
 DEFINE_BOOL(incremental_marking_for_gc_in_background, true,
             "Use parallel threads in the atomic pause for background GCs")
+
+DEFINE_BOOL(update_allocation_limits_after_loading, false,
+            "force recomputation of allocation limites when leaving the "
+            "loading RAIL mode (either on a RAIL mode change or incremental "
+            "marking start).")
 
 #if defined(V8_USE_LIBM_TRIG_FUNCTIONS)
 DEFINE_BOOL(use_libm_trig_functions, true, "use libm trig functions")

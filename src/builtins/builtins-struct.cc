@@ -20,11 +20,11 @@ static_assert(kMaxJSStructFields <= kMaxNumberOfDescriptors);
 namespace {
 
 struct NameHandleHasher {
-  size_t operator()(Handle<Name> name) const { return name->hash(); }
+  size_t operator()(DirectHandle<Name> name) const { return name->hash(); }
 };
 
 struct UniqueNameHandleEqual {
-  bool operator()(Handle<Name> x, Handle<Name> y) const {
+  bool operator()(DirectHandle<Name> x, DirectHandle<Name> y) const {
     DCHECK(IsUniqueName(*x));
     DCHECK(IsUniqueName(*y));
     return *x == *y;
@@ -46,9 +46,9 @@ BUILTIN(SharedSpaceJSObjectHasInstance) {
   bool result;
   MAYBE_ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
       isolate, result,
-      AlwaysSharedSpaceJSObject::HasInstance(
-          isolate, Handle<JSFunction>::cast(constructor),
-          args.atOrUndefined(isolate, 1)));
+      AlwaysSharedSpaceJSObject::HasInstance(isolate,
+                                             Cast<JSFunction>(constructor),
+                                             args.atOrUndefined(isolate, 1)));
   return *isolate->factory()->ToBoolean(result);
 }
 
@@ -189,8 +189,8 @@ BUILTIN(SharedStructTypeConstructor) {
 
 BUILTIN(SharedStructConstructor) {
   HandleScope scope(isolate);
-  Handle<JSFunction> constructor(args.target());
-  Handle<Map> instance_map(constructor->initial_map(), isolate);
+  DirectHandle<JSFunction> constructor(args.target());
+  DirectHandle<Map> instance_map(constructor->initial_map(), isolate);
   return *isolate->factory()->NewJSSharedStruct(
       args.target(),
       JSSharedStruct::GetElementsTemplate(isolate, *instance_map));

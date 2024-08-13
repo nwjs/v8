@@ -526,18 +526,18 @@ MaybeHandle<JSDisplayNames> JSDisplayNames::New(Isolate* isolate,
 
   // Set displayNames.[[Fields]] to styleFields.
 
-  DisplayNamesInternal* internal = CreateInternal(
+  std::shared_ptr<DisplayNamesInternal> internal{CreateInternal(
       icu_locale, style_enum, type_enum, fallback_enum == Fallback::kCode,
-      language_display_enum == LanguageDisplay::kDialect);
+      language_display_enum == LanguageDisplay::kDialect)};
   if (internal == nullptr) {
     THROW_NEW_ERROR(isolate, NewTypeError(MessageTemplate::kIcuError));
   }
 
   DirectHandle<Managed<DisplayNamesInternal>> managed_internal =
-      Managed<DisplayNamesInternal>::FromRawPtr(isolate, 0, internal);
+      Managed<DisplayNamesInternal>::From(isolate, 0, std::move(internal));
 
   Handle<JSDisplayNames> display_names =
-      Handle<JSDisplayNames>::cast(factory->NewFastOrSlowJSObjectFromMap(map));
+      Cast<JSDisplayNames>(factory->NewFastOrSlowJSObjectFromMap(map));
   display_names->set_flags(0);
   display_names->set_style(style_enum);
   display_names->set_fallback(fallback_enum);

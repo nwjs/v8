@@ -271,7 +271,8 @@ class V8_EXPORT_PRIVATE MaglevAssembler : public MacroAssembler {
   void StringCharCodeOrCodePointAt(
       BuiltinStringPrototypeCharCodeOrCodePointAt::Mode mode,
       RegisterSnapshot& register_snapshot, Register result, Register string,
-      Register index, Register scratch, Label* result_fits_one_byte);
+      Register index, Register scratch1, Register scratch2,
+      Label* result_fits_one_byte);
   // Warning: Input {char_code} will be scratched.
   void StringFromCharCode(RegisterSnapshot register_snapshot,
                           Label* char_code_fits_one_byte, Register result,
@@ -376,6 +377,8 @@ class V8_EXPORT_PRIVATE MaglevAssembler : public MacroAssembler {
   inline void IncrementInt32(Register reg);
   inline void DecrementInt32(Register reg);
   inline void AddInt32(Register reg, int amount);
+  inline void AndInt32(Register reg, int mask);
+  inline void OrInt32(Register reg, int mask);
   inline void ShiftLeft(Register reg, int amount);
   inline void IncrementAddress(Register reg, int32_t delta);
   inline void LoadAddress(Register dst, MemOperand location);
@@ -649,6 +652,9 @@ class V8_EXPORT_PRIVATE MaglevAssembler : public MacroAssembler {
 
   void GenerateCheckConstTrackingLetCellFooter(Register context, Register data,
                                                int index, Label* done);
+
+  void TryMigrateInstance(Register object, RegisterSnapshot& register_snapshot,
+                          Label* fail);
 
   compiler::NativeContextRef native_context() const {
     return code_gen_state()->broker()->target_native_context();

@@ -16,6 +16,13 @@
 namespace v8 {
 namespace {
 
+#define CHECK_SELF_OR_THROW_FAST_OPTIONS(return_value)                      \
+  if (!self) {                                                              \
+    options.isolate->ThrowError(                                            \
+        "This method is not defined on objects inheriting from FastCAPI."); \
+    return return_value;                                                    \
+  }
+
 #define CHECK_SELF_OR_THROW_FAST(return_value)                              \
   if (!self) {                                                              \
     receiver->GetIsolate()->ThrowError(                                     \
@@ -70,20 +77,21 @@ class FastCApiObject {
                                               AnyCType options) {
     AnyCType ret;
     CopyStringFastCallback(receiver.object_value, *source.string_value,
-                           *out.uint8_ta_value, *options.options_value);
+                           out.object_value, *options.options_value);
     return ret;
   }
 
 #endif  //  V8_USE_SIMULATOR_WITH_GENERIC_C_CALLS
   static void CopyStringFastCallback(Local<Object> receiver,
                                      const FastOneByteString& source,
-                                     const FastApiTypedArray<uint8_t>& out,
+                                     Local<Object> out,
                                      FastApiCallbackOptions& options) {
     FastCApiObject* self = UnwrapObject(receiver);
     self->fast_call_count_++;
 
-    uint8_t* memory = nullptr;
-    CHECK(out.getStorageIfAligned(&memory));
+    HandleScope handle_scope(options.isolate);
+    uint8_t* memory =
+        reinterpret_cast<uint8_t*>(out.As<Uint8Array>()->Buffer()->Data());
     memcpy(memory, source.data, source.length);
   }
 
@@ -113,7 +121,7 @@ class FastCApiObject {
                                    double arg_f64,
                                    FastApiCallbackOptions& options) {
     FastCApiObject* self = UnwrapObject(receiver);
-    CHECK_SELF_OR_THROW_FAST(0);
+    CHECK_SELF_OR_THROW_FAST_OPTIONS(0);
     self->fast_call_count_++;
 
     return static_cast<double>(arg_i32) + static_cast<double>(arg_u32) +
@@ -250,13 +258,24 @@ class FastCApiObject {
   }
 
   static Type AddAllSequenceFastCallback(Local<Object> receiver,
-                                         Local<Array> seq_arg,
+                                         Local<Object> seq_arg,
                                          FastApiCallbackOptions& options) {
+    if (seq_arg->IsUint32Array()) {
+      return AddAllTypedArrayFastCallback<uint32_t>(receiver, seq_arg, options);
+    }
+
     FastCApiObject* self = UnwrapObject(receiver);
-    CHECK_SELF_OR_THROW_FAST(0);
+    CHECK_SELF_OR_THROW_FAST_OPTIONS(0);
     self->fast_call_count_++;
 
-    uint32_t length = seq_arg->Length();
+    HandleScope handle_scope(options.isolate);
+    if (!seq_arg->IsArray()) {
+      options.isolate->ThrowError(
+          "This method expects an array as a first argument.");
+      return 0;
+    }
+    Local<Array> array = seq_arg.As<Array>();
+    uint32_t length = array->Length();
     if (length > 1024) {
       receiver->GetIsolate()->ThrowError(
           "Invalid length of array, must be between 0 and 1024.");
@@ -265,11 +284,11 @@ class FastCApiObject {
 
     Type buffer[1024];
     bool result = TryToCopyAndConvertArrayToCppBuffer<
-        CTypeInfoBuilder<Type>::Build().GetId(), Type>(seq_arg, buffer, 1024);
+        CTypeInfoBuilder<Type>::Build().GetId(), Type>(array, buffer, 1024);
     if (!result) {
-      return AddAllSequenceJSArrayHelper(receiver->GetIsolate(), seq_arg);
+      return AddAllSequenceJSArrayHelper(receiver->GetIsolate(), array);
     }
-    DCHECK_EQ(seq_arg->Length(), length);
+    DCHECK_EQ(array->Length(), length);
 
     Type sum = 0;
     for (uint32_t i = 0; i < length; ++i) {
@@ -309,7 +328,7 @@ class FastCApiObject {
       return;
     }
     if (!info[0]->IsArray()) {
-      isolate->ThrowError("This method expects an array as a second argument.");
+      isolate->ThrowError("This method expects an array as a first argument.");
       return;
     }
     Local<Array> seq_arg = info[0].As<Array>();
@@ -318,17 +337,6 @@ class FastCApiObject {
     info.GetReturnValue().Set(Number::New(isolate, sum));
   }
 #ifdef V8_USE_SIMULATOR_WITH_GENERIC_C_CALLS
-  template <typename T>
-  static const FastApiTypedArray<T>* AnyCTypeToTypedArray(AnyCType arg) {
-    if constexpr (std::is_same_v<T, uint8_t>) return arg.uint8_ta_value;
-    if constexpr (std::is_same_v<T, int32_t>) return arg.int32_ta_value;
-    if constexpr (std::is_same_v<T, uint32_t>) return arg.uint32_ta_value;
-    if constexpr (std::is_same_v<T, int64_t>) return arg.int64_ta_value;
-    if constexpr (std::is_same_v<T, uint64_t>) return arg.uint64_ta_value;
-    if constexpr (std::is_same_v<T, float>) return arg.float_ta_value;
-    if constexpr (std::is_same_v<T, double>) return arg.double_ta_value;
-    UNREACHABLE();
-  }
 
   template <typename T>
   static AnyCType AddAllTypedArrayFastCallbackPatch(AnyCType receiver,
@@ -336,28 +344,37 @@ class FastCApiObject {
                                                     AnyCType options) {
     AnyCType ret;
 #ifdef V8_ENABLE_FP_PARAMS_IN_C_LINKAGE
-    ret.double_value = AddAllTypedArrayFastCallback(
-        receiver.object_value, *AnyCTypeToTypedArray<T>(typed_array_arg),
+    ret.double_value = AddAllTypedArrayFastCallback<T>(
+        receiver.object_value, typed_array_arg.object_value,
         *options.options_value);
 #else
-    ret.int32_value = AddAllTypedArrayFastCallback(
-        receiver.object_value * AnyCTypeToTypedArray<T>(typed_array_arg),
+    ret.int32_value = AddAllTypedArrayFastCallback<T>(
+        receiver.object_value, typed_array_arg.object_value,
         *options.options_value);
 #endif  // V8_ENABLE_FP_PARAMS_IN_C_LINKAGE
     return ret;
   }
 #endif  //  V8_USE_SIMULATOR_WITH_GENERIC_C_CALLS
   template <typename T>
-  static Type AddAllTypedArrayFastCallback(
-      Local<Object> receiver, const FastApiTypedArray<T>& typed_array_arg,
-      FastApiCallbackOptions& options) {
+  static Type AddAllTypedArrayFastCallback(Local<Object> receiver,
+                                           Local<Value> typed_array_arg,
+                                           FastApiCallbackOptions& options) {
     FastCApiObject* self = UnwrapObject(receiver);
-    CHECK_SELF_OR_THROW_FAST(0);
+    CHECK_SELF_OR_THROW_FAST_OPTIONS(0);
     self->fast_call_count_++;
 
+    HandleScope handle_scope(options.isolate);
+    if (!typed_array_arg->IsTypedArray()) {
+      options.isolate->ThrowError(
+          "This method expects a TypedArray as a first argument.");
+      return 0;
+    }
+    T* memory = reinterpret_cast<T*>(
+        typed_array_arg.As<TypedArray>()->Buffer()->Data());
+    size_t length = typed_array_arg.As<TypedArray>()->ByteLength() / sizeof(T);
     T sum = 0;
-    for (unsigned i = 0; i < typed_array_arg.length(); ++i) {
-      sum += typed_array_arg.get(i);
+    for (size_t i = 0; i < length; ++i) {
+      sum += memory[i];
     }
     return static_cast<Type>(sum);
   }
@@ -447,7 +464,7 @@ class FastCApiObject {
                                      int32_t arg_i32, uint32_t arg_u32,
                                      FastApiCallbackOptions& options) {
     FastCApiObject* self = UnwrapObject(receiver);
-    CHECK_SELF_OR_THROW_FAST(0);
+    CHECK_SELF_OR_THROW_FAST_OPTIONS(0);
     self->fast_call_count_++;
 
     return arg_i32 + arg_u32;
@@ -515,7 +532,7 @@ class FastCApiObject {
       int32_t arg3_i32, uint32_t arg4_u32, uint32_t arg5_u32, uint32_t arg6_u32,
       uint32_t arg7_u32, uint32_t arg8_u32, FastApiCallbackOptions& options) {
     FastCApiObject* self = UnwrapObject(receiver);
-    CHECK_SELF_OR_THROW_FAST(0);
+    CHECK_SELF_OR_THROW_FAST_OPTIONS(0);
     self->fast_call_count_++;
 
     int64_t result = static_cast<int64_t>(arg1_i32) + arg2_i32 + arg3_i32 +
@@ -529,7 +546,7 @@ class FastCApiObject {
       int32_t arg3_i32, uint32_t arg4_u32, uint32_t arg5_u32, uint32_t arg6_u32,
       FastApiCallbackOptions& options) {
     FastCApiObject* self = UnwrapObject(receiver);
-    CHECK_SELF_OR_THROW_FAST(0);
+    CHECK_SELF_OR_THROW_FAST_OPTIONS(0);
     self->fast_call_count_++;
 
     int64_t result = static_cast<int64_t>(arg1_i32) + arg2_i32 + arg3_i32 +
@@ -896,8 +913,10 @@ class FastCApiObject {
   }
 
   static bool IsFastCApiObjectFastCallback(v8::Local<v8::Object> receiver,
-                                           v8::Local<v8::Value> arg) {
+                                           v8::Local<v8::Value> arg,
+                                           FastApiCallbackOptions& options) {
     FastCApiObject* self = UnwrapObject(receiver);
+    CHECK_SELF_OR_THROW_FAST_OPTIONS(false);
 
     self->fast_call_count_++;
 
@@ -907,11 +926,7 @@ class FastCApiObject {
     Local<Object> object = arg.As<Object>();
     if (!IsValidApiObject(object)) return false;
 
-    internal::Isolate* i_isolate =
-        internal::IsolateFromNeverReadOnlySpaceObject(
-            internal::ValueHelper::ValueAsAddress(*object));
-    CHECK_NOT_NULL(i_isolate);
-    Isolate* isolate = reinterpret_cast<Isolate*>(i_isolate);
+    Isolate* isolate = options.isolate;
     HandleScope handle_scope(isolate);
     return PerIsolateData::Get(isolate)
         ->GetTestApiObjectCtor()
@@ -953,7 +968,7 @@ class FastCApiObject {
                                          uint32_t address,
                                          FastApiCallbackOptions& options) {
     FastCApiObject* self = UnwrapObject(receiver);
-    CHECK_SELF_OR_THROW_FAST(false);
+    CHECK_SELF_OR_THROW_FAST_OPTIONS(false);
     self->fast_call_count_++;
 
     if (i::v8_flags.fuzzing) {
@@ -1003,7 +1018,7 @@ class FastCApiObject {
   static void* GetPointerFastCallback(Local<Object> receiver,
                                       FastApiCallbackOptions& options) {
     FastCApiObject* self = UnwrapObject(receiver);
-    CHECK_SELF_OR_THROW_FAST(nullptr);
+    CHECK_SELF_OR_THROW_FAST_OPTIONS(nullptr);
     self->fast_call_count_++;
 
     return static_cast<void*>(self);
@@ -1022,7 +1037,7 @@ class FastCApiObject {
   static void* GetNullPointerFastCallback(Local<Object> receiver,
                                           FastApiCallbackOptions& options) {
     FastCApiObject* self = UnwrapObject(receiver);
-    CHECK_SELF_OR_THROW_FAST(nullptr);
+    CHECK_SELF_OR_THROW_FAST_OPTIONS(nullptr);
     self->fast_call_count_++;
 
     return nullptr;
@@ -1042,7 +1057,7 @@ class FastCApiObject {
   static void* PassPointerFastCallback(Local<Object> receiver, void* pointer,
                                        FastApiCallbackOptions& options) {
     FastCApiObject* self = UnwrapObject(receiver);
-    CHECK_SELF_OR_THROW_FAST(nullptr);
+    CHECK_SELF_OR_THROW_FAST_OPTIONS(nullptr);
     self->fast_call_count_++;
 
     return pointer;
@@ -1080,7 +1095,7 @@ class FastCApiObject {
                                           void* pointer_a, void* pointer_b,
                                           FastApiCallbackOptions& options) {
     FastCApiObject* self = UnwrapObject(receiver);
-    CHECK_SELF_OR_THROW_FAST(false);
+    CHECK_SELF_OR_THROW_FAST_OPTIONS(false);
     self->fast_call_count_++;
 
     return pointer_a == pointer_b;
@@ -1131,7 +1146,7 @@ class FastCApiObject {
                                       int64_t b,
                                       FastApiCallbackOptions& options) {
     FastCApiObject* self = UnwrapObject(receiver);
-    CHECK_SELF_OR_THROW_FAST(0);
+    CHECK_SELF_OR_THROW_FAST_OPTIONS(0);
     self->fast_call_count_++;
 
     return a + b;
@@ -1224,9 +1239,13 @@ class FastCApiObject {
                                         uint64_t b,
                                         FastApiCallbackOptions& options) {
     FastCApiObject* self = UnwrapObject(receiver);
-    CHECK_SELF_OR_THROW_FAST(0);
+    CHECK_SELF_OR_THROW_FAST_OPTIONS(0);
     self->fast_call_count_++;
-
+    // This CHECK here is unnecessary, but it keeps this function from getting
+    // merged with `sumInt64FastCallback`. There is a test which relies on
+    // `sumUint64FastCallback` and `sumInt64FastCallback` being different call
+    // targets.
+    CHECK_GT(self->fast_call_count_, 0);
     return a + b;
   }
 
@@ -1370,6 +1389,7 @@ class FastCApiObject {
 
 #undef CHECK_SELF_OR_THROW_SLOW
 #undef CHECK_SELF_OR_THROW_FAST
+#undef CHECK_SELF_OR_THROW_FAST_OPTIONS
 
 // The object is statically initialized for simplicity, typically the embedder
 // will take care of managing their C++ objects lifetime.
@@ -1410,7 +1430,7 @@ Local<FunctionTemplate> Shell::CreateTestFastCApiTemplate(Isolate* isolate) {
         isolate, "throw_no_fallback",
         FunctionTemplate::New(
             isolate, FastCApiObject::ThrowFallbackSlowCallback, Local<Value>(),
-            signature, 1, ConstructorBehavior::kThrow,
+            Local<Signature>(), 1, ConstructorBehavior::kThrow,
             SideEffectType::kHasSideEffect, &throw_no_fallback_func));
 
     CFunction copy_str_func = CFunction::Make(
@@ -1515,7 +1535,8 @@ Local<FunctionTemplate> Shell::CreateTestFastCApiTemplate(Isolate* isolate) {
 
     CFunction add_all_no_options_c_func = CFunction::Make(
         FastCApiObject::AddAllFastCallbackNoOptions V8_IF_USE_SIMULATOR(
-            FastCApiObject::AddAllFastCallbackNoOptionsPatch));
+            FastCApiObject::AddAllFastCallbackNoOptionsPatch),
+        CFunctionInfo::Int64Representation::kBigInt);
     api_obj_ctor->PrototypeTemplate()->Set(
         isolate, "add_all_no_options",
         FunctionTemplate::New(
@@ -1536,7 +1557,6 @@ Local<FunctionTemplate> Shell::CreateTestFastCApiTemplate(Isolate* isolate) {
             &add_all_float64_typed_array_c_func));
 
     const CFunction add_all_overloads[] = {
-        add_all_uint32_typed_array_c_func,
         add_all_seq_c_func,
         add_all_no_options_c_func,
     };
@@ -1545,7 +1565,7 @@ Local<FunctionTemplate> Shell::CreateTestFastCApiTemplate(Isolate* isolate) {
         FunctionTemplate::NewWithCFunctionOverloads(
             isolate, FastCApiObject::AddAllSequenceSlowCallback, Local<Value>(),
             signature, 1, ConstructorBehavior::kThrow,
-            SideEffectType::kHasSideEffect, {add_all_overloads, 3}));
+            SideEffectType::kHasSideEffect, {add_all_overloads, 2}));
 
     CFunction add_all_int_invalid_func =
         CFunction::Make(FastCApiObject::AddAllIntInvalidCallback);

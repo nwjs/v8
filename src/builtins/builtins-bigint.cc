@@ -27,7 +27,7 @@ BUILTIN(BigIntConstructor) {
   if (IsJSReceiver(*value)) {
     ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
         isolate, value,
-        JSReceiver::ToPrimitive(isolate, Handle<JSReceiver>::cast(value),
+        JSReceiver::ToPrimitive(isolate, Cast<JSReceiver>(value),
                                 ToPrimitiveHint::kNumber));
   }
 
@@ -78,13 +78,13 @@ namespace {
 MaybeHandle<BigInt> ThisBigIntValue(Isolate* isolate, Handle<Object> value,
                                     const char* caller) {
   // 1. If Type(value) is BigInt, return value.
-  if (IsBigInt(*value)) return Handle<BigInt>::cast(value);
+  if (IsBigInt(*value)) return Cast<BigInt>(value);
   // 2. If Type(value) is Object and value has a [[BigIntData]] internal slot:
   if (IsJSPrimitiveWrapper(*value)) {
     // 2a. Assert: value.[[BigIntData]] is a BigInt value.
     // 2b. Return value.[[BigIntData]].
-    Tagged<Object> data = JSPrimitiveWrapper::cast(*value)->value();
-    if (IsBigInt(data)) return handle(BigInt::cast(data), isolate);
+    Tagged<Object> data = Cast<JSPrimitiveWrapper>(*value)->value();
+    if (IsBigInt(data)) return handle(Cast<BigInt>(data), isolate);
   }
   // 3. Throw a TypeError exception.
   THROW_NEW_ERROR(

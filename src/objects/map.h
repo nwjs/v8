@@ -32,75 +32,80 @@ enum InstanceType : uint16_t;
 #define DATA_ONLY_VISITOR_ID_LIST(V) \
   V(BigInt)                          \
   V(CoverageInfo)                    \
-  V(DataObject)                      \
   V(FeedbackMetadata)                \
+  V(Filler)                          \
+  V(HeapNumber)                      \
   V(SeqOneByteString)                \
   V(SeqTwoByteString)                \
   IF_WASM(V, WasmNull)
 
-#define POINTER_VISITOR_ID_LIST(V)     \
-  V(AccessorInfo)                      \
-  V(AllocationSite)                    \
-  V(BytecodeWrapper)                   \
-  V(CallSiteInfo)                      \
-  V(Cell)                              \
-  V(CodeWrapper)                       \
-  V(ConsString)                        \
-  V(ConstTrackingLetCell)              \
-  V(DataHandler)                       \
-  V(DebugInfo)                         \
-  V(EmbedderDataArray)                 \
-  V(EphemeronHashTable)                \
-  V(ExternalPointerArray)              \
-  V(ExternalString)                    \
-  V(FeedbackCell)                      \
-  V(Foreign)                           \
-  V(FreeSpace)                         \
-  V(FunctionTemplateInfo)              \
-  V(Hole)                              \
-  V(JSApiObject)                       \
-  V(JSArrayBuffer)                     \
-  V(JSDataViewOrRabGsabDataView)       \
-  V(JSExternalObject)                  \
-  V(JSFinalizationRegistry)            \
-  V(JSFunction)                        \
-  V(JSObject)                          \
-  V(JSObjectFast)                      \
-  V(JSSynchronizationPrimitive)        \
-  V(JSTypedArray)                      \
-  V(JSWeakCollection)                  \
-  V(JSWeakRef)                         \
-  V(Map)                               \
-  V(NativeContext)                     \
-  V(Oddball)                           \
-  V(PreparseData)                      \
-  V(PropertyArray)                     \
-  V(PropertyCell)                      \
-  V(PrototypeInfo)                     \
-  V(SharedFunctionInfo)                \
-  V(ShortcutCandidate)                 \
-  V(SlicedString)                      \
-  V(SloppyArgumentsElements)           \
-  V(SmallOrderedHashMap)               \
-  V(SmallOrderedHashSet)               \
-  V(SmallOrderedNameDictionary)        \
-  V(SourceTextModule)                  \
-  V(Struct)                            \
-  V(SwissNameDictionary)               \
-  V(Symbol)                            \
-  V(SyntheticModule)                   \
-  V(ThinString)                        \
-  V(TransitionArray)                   \
-  IF_WASM(V, WasmArray)                \
-  IF_WASM(V, WasmContinuationObject)   \
-  IF_WASM(V, WasmFuncRef)              \
-  IF_WASM(V, WasmInstanceObject)       \
-  IF_WASM(V, WasmResumeData)           \
-  IF_WASM(V, WasmStruct)               \
-  IF_WASM(V, WasmSuspenderObject)      \
-  IF_WASM(V, WasmSuspendingObject)     \
-  IF_WASM(V, WasmTypeInfo)             \
-  V(WeakCell)                          \
+#define POINTER_VISITOR_ID_LIST(V)   \
+  V(AccessorInfo)                    \
+  V(AllocationSite)                  \
+  V(BytecodeWrapper)                 \
+  V(CallSiteInfo)                    \
+  V(Cell)                            \
+  V(CodeWrapper)                     \
+  V(ConsString)                      \
+  V(ConstTrackingLetCell)            \
+  V(DataHandler)                     \
+  V(DebugInfo)                       \
+  V(EmbedderDataArray)               \
+  V(EphemeronHashTable)              \
+  V(ExternalPointerArray)            \
+  V(ExternalString)                  \
+  V(FeedbackCell)                    \
+  V(Foreign)                         \
+  V(FreeSpace)                       \
+  V(FunctionTemplateInfo)            \
+  V(Hole)                            \
+  V(JSApiObject)                     \
+  V(JSArrayBuffer)                   \
+  V(JSDataViewOrRabGsabDataView)     \
+  V(JSDate)                          \
+  V(JSExternalObject)                \
+  V(JSFinalizationRegistry)          \
+  V(JSFunction)                      \
+  V(JSObject)                        \
+  V(JSObjectFast)                    \
+  V(JSSynchronizationPrimitive)      \
+  V(JSTypedArray)                    \
+  V(JSWeakCollection)                \
+  V(JSWeakRef)                       \
+  V(Map)                             \
+  V(NativeContext)                   \
+  V(Oddball)                         \
+  V(PreparseData)                    \
+  V(PropertyArray)                   \
+  V(PropertyCell)                    \
+  V(PrototypeInfo)                   \
+  V(SharedFunctionInfo)              \
+  V(ShortcutCandidate)               \
+  V(SlicedString)                    \
+  V(SloppyArgumentsElements)         \
+  V(SmallOrderedHashMap)             \
+  V(SmallOrderedHashSet)             \
+  V(SmallOrderedNameDictionary)      \
+  V(SourceTextModule)                \
+  V(Struct)                          \
+  V(SwissNameDictionary)             \
+  V(Symbol)                          \
+  V(SyntheticModule)                 \
+  V(ThinString)                      \
+  V(TransitionArray)                 \
+  IF_WASM(V, WasmArray)              \
+  IF_WASM(V, WasmContinuationObject) \
+  IF_WASM(V, WasmFuncRef)            \
+  IF_WASM(V, WasmGlobalObject)       \
+  IF_WASM(V, WasmInstanceObject)     \
+  IF_WASM(V, WasmResumeData)         \
+  IF_WASM(V, WasmStruct)             \
+  IF_WASM(V, WasmSuspenderObject)    \
+  IF_WASM(V, WasmSuspendingObject)   \
+  IF_WASM(V, WasmTableObject)        \
+  IF_WASM(V, WasmTagObject)          \
+  IF_WASM(V, WasmTypeInfo)           \
+  V(WeakCell)                        \
   SIMPLE_HEAP_OBJECT_LIST1(V)
 
 #define TORQUE_VISITOR_ID_LIST(V)     \
@@ -496,7 +501,7 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
   // the prototype chain changes. When there's nothing to guard (for example,
   // when direct prototype is null or Proxy) this function returns Smi with
   // |kPrototypeChainValid| sentinel value.
-  static Handle<Object> GetOrCreatePrototypeChainValidityCell(
+  static Handle<UnionOf<Smi, Cell>> GetOrCreatePrototypeChainValidityCell(
       DirectHandle<Map> map, Isolate* isolate);
   static const int kPrototypeChainValid = 0;
   static const int kPrototypeChainInvalid = 1;
@@ -540,8 +545,6 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
   // given |representation|.
   static inline bool IsMostGeneralFieldType(Representation representation,
                                             Tagged<FieldType> field_type);
-  static inline bool FieldTypeIsCleared(Representation rep,
-                                        Tagged<FieldType> type);
 
   // Generalizes representation and field_type if objects with given
   // instance type can have fast elements that can be transitioned by
@@ -1048,7 +1051,6 @@ class NormalizedMapCache : public WeakFixedArray {
                                              PropertyNormalizationMode mode);
   void Set(DirectHandle<Map> fast_map, DirectHandle<Map> normalized_map);
 
-  DECL_CAST(NormalizedMapCache)
   DECL_VERIFIER(NormalizedMapCache)
 
  private:

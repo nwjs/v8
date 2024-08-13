@@ -16,13 +16,13 @@ namespace internal {
 Tagged<DependentCode> DependentCode::GetDependentCode(
     Tagged<HeapObject> object) {
   if (IsMap(object)) {
-    return Map::cast(object)->dependent_code();
+    return Cast<Map>(object)->dependent_code();
   } else if (IsPropertyCell(object)) {
-    return PropertyCell::cast(object)->dependent_code();
+    return Cast<PropertyCell>(object)->dependent_code();
   } else if (IsAllocationSite(object)) {
-    return AllocationSite::cast(object)->dependent_code();
+    return Cast<AllocationSite>(object)->dependent_code();
   } else if (IsConstTrackingLetCell(object)) {
-    return ConstTrackingLetCell::cast(object)->dependent_code();
+    return Cast<ConstTrackingLetCell>(object)->dependent_code();
   }
   UNREACHABLE();
 }
@@ -30,13 +30,13 @@ Tagged<DependentCode> DependentCode::GetDependentCode(
 void DependentCode::SetDependentCode(Handle<HeapObject> object,
                                      DirectHandle<DependentCode> dep) {
   if (IsMap(*object)) {
-    DirectHandle<Map>::cast(object)->set_dependent_code(*dep);
+    Cast<Map>(object)->set_dependent_code(*dep);
   } else if (IsPropertyCell(*object)) {
-    DirectHandle<PropertyCell>::cast(object)->set_dependent_code(*dep);
+    Cast<PropertyCell>(object)->set_dependent_code(*dep);
   } else if (IsAllocationSite(*object)) {
-    DirectHandle<AllocationSite>::cast(object)->set_dependent_code(*dep);
+    Cast<AllocationSite>(object)->set_dependent_code(*dep);
   } else if (IsConstTrackingLetCell(*object)) {
-    DirectHandle<ConstTrackingLetCell>::cast(object)->set_dependent_code(*dep);
+    Cast<ConstTrackingLetCell>(object)->set_dependent_code(*dep);
   } else {
     UNREACHABLE();
   }
@@ -88,7 +88,7 @@ Handle<DependentCode> DependentCode::InsertWeakCode(
   // As the Code object lives outside of the sandbox in trusted space, we need
   // to use its in-sandbox wrapper object here.
   MaybeObjectHandle code_slot(MakeWeak(code->wrapper()), isolate);
-  entries = Handle<DependentCode>::cast(WeakArrayList::AddToEnd(
+  entries = Cast<DependentCode>(WeakArrayList::AddToEnd(
       isolate, entries, code_slot, Smi::FromInt(groups)));
   return entries;
 }
@@ -115,7 +115,7 @@ void DependentCode::IterateAndCompact(IsolateForSandbox isolate,
       continue;
     }
 
-    if (fn(CodeWrapper::cast(obj.GetHeapObjectAssumeWeak())->code(isolate),
+    if (fn(Cast<CodeWrapper>(obj.GetHeapObjectAssumeWeak())->code(isolate),
            static_cast<DependencyGroups>(
                Get(i + kGroupsSlotOffset).ToSmi().value()))) {
       len = FillEntryFromBack(i, len);
@@ -180,7 +180,7 @@ void DependentCode::DeoptimizeDependencyGroups(
 // static
 Tagged<DependentCode> DependentCode::empty_dependent_code(
     const ReadOnlyRoots& roots) {
-  return DependentCode::cast(roots.empty_weak_array_list());
+  return Cast<DependentCode>(roots.empty_weak_array_list());
 }
 
 const char* DependentCode::DependencyGroupName(DependencyGroup group) {

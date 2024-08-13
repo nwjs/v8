@@ -212,7 +212,6 @@ class JSAtomicsMutex
     inline TryLockGuard(Isolate* isolate, Handle<JSAtomicsMutex> mutex);
   };
 
-  DECL_CAST(JSAtomicsMutex)
   DECL_PRINTER(JSAtomicsMutex)
   EXPORT_DECL_VERIFIER(JSAtomicsMutex)
 
@@ -401,7 +400,6 @@ class JSAtomicsCondition
                                                JSSynchronizationPrimitive> {
  public:
   using AsyncWaiterNodeType = WaitAsyncWaiterQueueNode;
-  DECL_CAST(JSAtomicsCondition)
   DECL_PRINTER(JSAtomicsCondition)
   EXPORT_DECL_VERIFIER(JSAtomicsCondition)
 
@@ -410,7 +408,7 @@ class JSAtomicsCondition
                                         Handle<JSAtomicsMutex> mutex,
                                         std::optional<base::TimeDelta> timeout);
 
-  V8_EXPORT_PRIVATE static MaybeHandle<JSPromise> WaitAsync(
+  V8_EXPORT_PRIVATE static MaybeHandle<JSReceiver> WaitAsync(
       Isolate* requester, Handle<JSAtomicsCondition> cv,
       DirectHandle<JSAtomicsMutex> mutex,
       std::optional<base::TimeDelta> timeout);

@@ -41,7 +41,7 @@ static bool IsPropertyNameFeedback(Tagged<MaybeObject> feedback) {
     return true;
   }
   if (!IsSymbol(heap_object)) return false;
-  Tagged<Symbol> symbol = Symbol::cast(heap_object);
+  Tagged<Symbol> symbol = Cast<Symbol>(heap_object);
   ReadOnlyRoots roots = symbol->GetReadOnlyRoots();
   return symbol != roots.uninitialized_symbol() &&
          symbol != roots.mega_dom_symbol() &&
@@ -207,11 +207,10 @@ Handle<ClosureFeedbackCellArray> ClosureFeedbackCellArray::New(
 
   // Pre-allocate the cells s.t. we can initialize `result` without further
   // allocation.
-  DirectHandle<HeapObject> undefined = isolate->factory()->undefined_value();
   DirectHandleVector<FeedbackCell> cells(isolate);
   cells.reserve(length);
   for (int i = 0; i < length; i++) {
-    cells.push_back(isolate->factory()->NewNoClosuresCell(undefined));
+    cells.push_back(isolate->factory()->NewNoClosuresCell());
   }
 
   base::Optional<DisallowGarbageCollection> no_gc;
@@ -325,8 +324,7 @@ Handle<FeedbackVector> FeedbackVector::NewForTesting(
   DirectHandle<ClosureFeedbackCellArray> closure_feedback_cell_array =
       ClosureFeedbackCellArray::New(isolate, shared);
   DirectHandle<FeedbackCell> parent_cell =
-      isolate->factory()->NewNoClosuresCell(
-          isolate->factory()->undefined_value());
+      isolate->factory()->NewNoClosuresCell();
 
   IsCompiledScope is_compiled_scope(shared->is_compiled_scope(isolate));
   return FeedbackVector::New(isolate, shared, closure_feedback_cell_array,
@@ -354,7 +352,7 @@ void FeedbackVector::AddToVectorsForProfilingTools(
     Isolate* isolate, DirectHandle<FeedbackVector> vector) {
   DCHECK(!isolate->is_best_effort_code_coverage());
   if (!vector->shared_function_info()->IsSubjectToDebugging()) return;
-  Handle<ArrayList> list = Handle<ArrayList>::cast(
+  Handle<ArrayList> list = Cast<ArrayList>(
       isolate->factory()->feedback_vectors_for_profiling_tools());
   list = ArrayList::Add(isolate, list, vector);
   isolate->SetFeedbackVectorsForProfilingTools(*list);
@@ -455,7 +453,7 @@ void FeedbackVector::EvictOptimizedCodeMarkedForDeoptimization(
     return;
   }
 
-  Tagged<Code> code = CodeWrapper::cast(slot.GetHeapObject())->code(isolate);
+  Tagged<Code> code = Cast<CodeWrapper>(slot.GetHeapObject())->code(isolate);
   if (code->marked_for_deoptimization()) {
     Deoptimizer::TraceEvictFromOptimizedCodeCache(isolate, shared, reason);
     ClearOptimizedCode();
@@ -779,7 +777,7 @@ InlineCacheState FeedbackNexus::ic_state() const {
                  IsKeyedHasICKind(kind()) || IsDefineKeyedOwnICKind(kind()));
           Tagged<Object> extra_object = extra.GetHeapObjectAssumeStrong();
           Tagged<WeakFixedArray> extra_array =
-              WeakFixedArray::cast(extra_object);
+              Cast<WeakFixedArray>(extra_object);
           return extra_array->length() > 2 ? InlineCacheState::POLYMORPHIC
                                            : InlineCacheState::MONOMORPHIC;
         }
@@ -974,7 +972,7 @@ void FeedbackNexus::ConfigureCloneObject(
       break;
     case InlineCacheState::MONOMORPHIC:
       if (feedback.is_null() || feedback.is_identical_to(source_map) ||
-          Map::cast(*feedback)->is_deprecated()) {
+          Cast<Map>(*feedback)->is_deprecated()) {
         SetFeedback(MakeWeak(*source_map), UPDATE_WRITE_BARRIER, GetHandler());
       } else {
         // Transition to POLYMORPHIC.
@@ -992,12 +990,12 @@ void FeedbackNexus::ConfigureCloneObject(
     case InlineCacheState::POLYMORPHIC: {
       const int kMaxElements = v8_flags.max_valid_polymorphic_map_count *
                                kCloneObjectPolymorphicEntrySize;
-      Handle<WeakFixedArray> array = Handle<WeakFixedArray>::cast(feedback);
+      Handle<WeakFixedArray> array = Cast<WeakFixedArray>(feedback);
       int i = 0;
       for (; i < array->length(); i += kCloneObjectPolymorphicEntrySize) {
         Tagged<MaybeObject> feedback_map = array->get(i);
         if (feedback_map.IsCleared()) break;
-        Handle<Map> cached_map(Map::cast(feedback_map.GetHeapObject()),
+        Handle<Map> cached_map(Cast<Map>(feedback_map.GetHeapObject()),
                                isolate);
         if (cached_map.is_identical_to(source_map) ||
             cached_map->is_deprecated())
@@ -1035,7 +1033,7 @@ void FeedbackNexus::ConfigureCloneObject(
 int FeedbackNexus::GetCallCount() {
   DCHECK(IsCallICKind(kind()));
 
-  Tagged<Object> call_count = Tagged<Object>::cast(GetFeedbackExtra());
+  Tagged<Object> call_count = Cast<Object>(GetFeedbackExtra());
   CHECK(IsSmi(call_count));
   uint32_t value = static_cast<uint32_t>(Smi::ToInt(call_count));
   return CallCountField::decode(value);
@@ -1044,7 +1042,7 @@ int FeedbackNexus::GetCallCount() {
 void FeedbackNexus::SetSpeculationMode(SpeculationMode mode) {
   DCHECK(IsCallICKind(kind()));
 
-  Tagged<Object> call_count = Tagged<Object>::cast(GetFeedbackExtra());
+  Tagged<Object> call_count = Cast<Object>(GetFeedbackExtra());
   CHECK(IsSmi(call_count));
   uint32_t count = static_cast<uint32_t>(Smi::ToInt(call_count));
   count = SpeculationModeField::update(count, mode);
@@ -1058,7 +1056,7 @@ void FeedbackNexus::SetSpeculationMode(SpeculationMode mode) {
 SpeculationMode FeedbackNexus::GetSpeculationMode() {
   DCHECK(IsCallICKind(kind()));
 
-  Tagged<Object> call_count = Tagged<Object>::cast(GetFeedbackExtra());
+  Tagged<Object> call_count = Cast<Object>(GetFeedbackExtra());
   CHECK(IsSmi(call_count));
   uint32_t value = static_cast<uint32_t>(Smi::ToInt(call_count));
   return SpeculationModeField::decode(value);
@@ -1067,7 +1065,7 @@ SpeculationMode FeedbackNexus::GetSpeculationMode() {
 CallFeedbackContent FeedbackNexus::GetCallFeedbackContent() {
   DCHECK(IsCallICKind(kind()));
 
-  Tagged<Object> call_count = Tagged<Object>::cast(GetFeedbackExtra());
+  Tagged<Object> call_count = Cast<Object>(GetFeedbackExtra());
   CHECK(IsSmi(call_count));
   uint32_t value = static_cast<uint32_t>(Smi::ToInt(call_count));
   return CallFeedbackContentField::decode(value);
@@ -1210,13 +1208,13 @@ Tagged<Name> FeedbackNexus::GetName() const {
       IsKeyedHasICKind(kind()) || IsDefineKeyedOwnICKind(kind())) {
     Tagged<MaybeObject> feedback = GetFeedback();
     if (IsPropertyNameFeedback(feedback)) {
-      return Name::cast(feedback.GetHeapObjectAssumeStrong());
+      return Cast<Name>(feedback.GetHeapObjectAssumeStrong());
     }
   }
   if (IsDefineKeyedOwnPropertyInLiteralKind(kind())) {
     Tagged<MaybeObject> extra = GetFeedbackExtra();
     if (IsPropertyNameFeedback(extra)) {
-      return Name::cast(extra.GetHeapObjectAssumeStrong());
+      return Cast<Name>(extra.GetHeapObjectAssumeStrong());
     }
   }
   return {};
@@ -1304,8 +1302,7 @@ KeyedAccessStoreMode FeedbackNexus::GetKeyedAccessStoreMode() const {
     // The first handler that isn't the slow handler will have the bits we need.
     Builtin builtin_handler = Builtin::kNoBuiltinId;
     if (IsStoreHandler(*maybe_code_handler.object())) {
-      auto data_handler =
-          DirectHandle<StoreHandler>::cast(maybe_code_handler.object());
+      auto data_handler = Cast<StoreHandler>(maybe_code_handler.object());
 
       if (IsSmi(data_handler->smi_handler())) {
         // Decode the KeyedAccessStoreMode information from the Handler.
@@ -1314,7 +1311,7 @@ KeyedAccessStoreMode FeedbackNexus::GetKeyedAccessStoreMode() const {
         if (!StoreModeIsInBounds(mode)) return mode;
         continue;
       } else {
-        Tagged<Code> code = Code::cast(data_handler->smi_handler());
+        Tagged<Code> code = Cast<Code>(data_handler->smi_handler());
         builtin_handler = code->builtin_id();
       }
 
@@ -1333,7 +1330,7 @@ KeyedAccessStoreMode FeedbackNexus::GetKeyedAccessStoreMode() const {
       continue;
     } else {
       // Element store without prototype chain check.
-      Tagged<Code> code = Code::cast(*maybe_code_handler.object());
+      Tagged<Code> code = Cast<Code>(*maybe_code_handler.object());
       builtin_handler = code->builtin_id();
     }
 
@@ -1356,7 +1353,7 @@ IcCheckType FeedbackNexus::GetKeyType() const {
   auto pair = GetFeedbackPair();
   Tagged<MaybeObject> feedback = pair.first;
   if (feedback == MegamorphicSentinel()) {
-    return static_cast<IcCheckType>(Smi::ToInt(Tagged<Smi>::cast(pair.second)));
+    return static_cast<IcCheckType>(Smi::ToInt(Cast<Smi>(pair.second)));
   }
   Tagged<MaybeObject> maybe_name =
       IsDefineKeyedOwnPropertyInLiteralKind(kind()) ||
@@ -1395,7 +1392,7 @@ MaybeHandle<JSObject> FeedbackNexus::GetConstructorFeedback() const {
   Tagged<MaybeObject> feedback = GetFeedback();
   Tagged<HeapObject> heap_object;
   if (feedback.GetHeapObjectIfWeak(&heap_object)) {
-    return config()->NewHandle(JSObject::cast(heap_object));
+    return config()->NewHandle(Cast<JSObject>(heap_object));
   }
   return MaybeHandle<JSObject>();
 }
@@ -1424,16 +1421,16 @@ FeedbackIterator::FeedbackIterator(const FeedbackNexus* nexus)
     heap_object = feedback.GetHeapObjectAssumeStrong();
     if (is_named_feedback) {
       polymorphic_feedback_ = nexus->config()->NewHandle(
-          WeakFixedArray::cast(pair.second.GetHeapObjectAssumeStrong()));
+          Cast<WeakFixedArray>(pair.second.GetHeapObjectAssumeStrong()));
     } else {
       polymorphic_feedback_ =
-          nexus->config()->NewHandle(WeakFixedArray::cast(heap_object));
+          nexus->config()->NewHandle(Cast<WeakFixedArray>(heap_object));
     }
     AdvancePolymorphic();
   } else if (feedback.GetHeapObjectIfWeak(&heap_object)) {
     state_ = kMonomorphic;
     Tagged<MaybeObject> handler = pair.second;
-    map_ = Map::cast(heap_object);
+    map_ = Cast<Map>(heap_object);
     handler_ = handler;
   } else {
     done_ = true;
@@ -1462,7 +1459,7 @@ void FeedbackIterator::AdvancePolymorphic() {
     if (polymorphic_feedback_->get(index_).GetHeapObjectIfWeak(&heap_object)) {
       Tagged<MaybeObject> handler =
           polymorphic_feedback_->get(index_ + kHandlerOffset);
-      map_ = Map::cast(heap_object);
+      map_ = Cast<Map>(heap_object);
       handler_ = handler;
       index_ += kEntrySize;
       return;

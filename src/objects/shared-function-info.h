@@ -14,6 +14,7 @@
 #include "src/objects/compressed-slots.h"
 #include "src/objects/function-kind.h"
 #include "src/objects/function-syntax-kind.h"
+#include "src/objects/name.h"
 #include "src/objects/objects.h"
 #include "src/objects/script.h"
 #include "src/objects/slots.h"
@@ -187,6 +188,8 @@ class InterpreterData
  private:
   TQ_OBJECT_CONSTRUCTORS(InterpreterData)
 };
+
+using NameOrScopeInfoT = UnionOf<Smi, String, ScopeInfo>;
 
 // SharedFunctionInfo describes the JSFunction information that can be
 // shared by multiple instances of the function.
@@ -541,8 +544,6 @@ class SharedFunctionInfo
   DECL_BOOLEAN_ACCESSORS(is_sparkplug_compiling)
   DECL_BOOLEAN_ACCESSORS(maglev_compilation_failed)
 
-  DECL_BOOLEAN_ACCESSORS(sparkplug_compiled)
-
   CachedTieringDecision cached_tiering_decision();
   void set_cached_tiering_decision(CachedTieringDecision decision);
 
@@ -695,13 +696,11 @@ class SharedFunctionInfo
   // literal.
   template <typename IsolateT>
   static void InitFromFunctionLiteral(IsolateT* isolate,
-                                      Handle<SharedFunctionInfo> shared_info,
                                       FunctionLiteral* lit, bool is_toplevel);
 
   template <typename IsolateT>
-  static void CreateAndSetUncompiledData(
-      IsolateT* isolate, DirectHandle<SharedFunctionInfo> shared_info,
-      FunctionLiteral* lit);
+  static void CreateAndSetUncompiledData(IsolateT* isolate,
+                                         FunctionLiteral* lit);
 
   // Updates the expected number of properties based on estimate from parser.
   void UpdateExpectedNofPropertiesFromEstimate(FunctionLiteral* literal);
@@ -759,7 +758,7 @@ class SharedFunctionInfo
   class ScriptIterator {
    public:
     V8_EXPORT_PRIVATE ScriptIterator(Isolate* isolate, Tagged<Script> script);
-    explicit ScriptIterator(Handle<WeakFixedArray> shared_function_infos);
+    explicit ScriptIterator(Handle<WeakFixedArray> infos);
     ScriptIterator(const ScriptIterator&) = delete;
     ScriptIterator& operator=(const ScriptIterator&) = delete;
     V8_EXPORT_PRIVATE Tagged<SharedFunctionInfo> Next();
@@ -769,7 +768,7 @@ class SharedFunctionInfo
     void Reset(Isolate* isolate, Tagged<Script> script);
 
    private:
-    Handle<WeakFixedArray> shared_function_infos_;
+    Handle<WeakFixedArray> infos_;
     int index_;
   };
 
@@ -813,7 +812,7 @@ class SharedFunctionInfo
 
   // [name_or_scope_info]: Function name string, kNoSharedNameSentinel or
   // ScopeInfo.
-  DECL_RELEASE_ACQUIRE_ACCESSORS(name_or_scope_info, Tagged<Object>)
+  DECL_RELEASE_ACQUIRE_ACCESSORS(name_or_scope_info, Tagged<NameOrScopeInfoT>)
 
   // [outer scope info] The outer scope info, needed to lazily parse this
   // function.
@@ -847,7 +846,6 @@ class SharedFunctionInfoWrapper : public TrustedObject {
  public:
   DECL_ACCESSORS(shared_info, Tagged<SharedFunctionInfo>)
 
-  DECL_CAST(SharedFunctionInfoWrapper)
   DECL_PRINTER(SharedFunctionInfoWrapper)
   DECL_VERIFIER(SharedFunctionInfoWrapper)
 

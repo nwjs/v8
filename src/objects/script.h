@@ -83,11 +83,9 @@ class Script : public TorqueGeneratedScript<Script, Struct> {
   // code from which eval was called, as negative integer.
   DECL_INT_ACCESSORS(eval_from_position)
 
-  // [shared_function_infos]: weak fixed array containing all shared
-  // function infos created from this script.
-  DECL_ACCESSORS(shared_function_infos, Tagged<WeakFixedArray>)
-
-  inline int shared_function_info_count() const;
+  // [infos]: weak fixed array containing all shared function infos and scope
+  // infos for eval created from this script.
+  DECL_ACCESSORS(infos, Tagged<WeakFixedArray>)
 
 #if V8_ENABLE_WEBASSEMBLY
   // [wasm_breakpoint_infos]: the list of {BreakPointInfo} objects describing
@@ -117,9 +115,15 @@ class Script : public TorqueGeneratedScript<Script, Struct> {
   bool ContainsAsmModule();
 #endif  // V8_ENABLE_WEBASSEMBLY
 
+  // Read/write the raw 'flags' field. This uses relaxed atomic loads/stores
+  // because the flags are read by background compile threads and updated by the
+  // main thread.
+  inline uint32_t flags() const;
+  inline void set_flags(uint32_t new_flags);
+
   // [compilation_type]: how the the script was compiled. Encoded in the
   // 'flags' field.
-  inline CompilationType compilation_type();
+  inline CompilationType compilation_type() const;
   inline void set_compilation_type(CompilationType type);
 
   inline bool produce_compile_hints() const;

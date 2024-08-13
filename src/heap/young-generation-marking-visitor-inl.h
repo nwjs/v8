@@ -14,7 +14,6 @@
 #include "src/heap/pretenuring-handler-inl.h"
 #include "src/heap/remembered-set-inl.h"
 #include "src/heap/young-generation-marking-visitor.h"
-#include "src/objects/js-objects.h"
 
 namespace v8 {
 namespace internal {
@@ -23,7 +22,7 @@ template <YoungGenerationMarkingVisitationMode marking_mode>
 YoungGenerationMarkingVisitor<marking_mode>::YoungGenerationMarkingVisitor(
     Heap* heap,
     PretenuringHandler::PretenuringFeedbackMap* local_pretenuring_feedback)
-    : Parent(heap->isolate()),
+    : Base(heap->isolate()),
       isolate_(heap->isolate()),
       marking_worklists_local_(
           heap->minor_mark_sweep_collector()->marking_worklists(),
@@ -66,79 +65,19 @@ void YoungGenerationMarkingVisitor<marking_mode>::VisitCppHeapPointer(
 }
 
 template <YoungGenerationMarkingVisitationMode marking_mode>
-template <typename T, typename TBodyDescriptor>
-int YoungGenerationMarkingVisitor<marking_mode>::
-    VisitEmbedderTracingSubClassWithEmbedderTracing(Tagged<Map> map,
-                                                    Tagged<T> object) {
-  const int size = VisitJSObjectSubclass<T, TBodyDescriptor>(map, object);
-  if (!marking_worklists_local_.SupportsExtractWrapper()) return size;
-  MarkingWorklists::Local::WrapperSnapshot wrapper_snapshot;
-  const bool valid_snapshot =
-      marking_worklists_local_.ExtractWrapper(map, object, wrapper_snapshot);
-  if (size && valid_snapshot) {
-    // Success: The object needs to be processed for embedder references.
-    marking_worklists_local_.PushExtractedWrapper(wrapper_snapshot);
-  }
-  return size;
-}
-
-template <YoungGenerationMarkingVisitationMode marking_mode>
 int YoungGenerationMarkingVisitor<marking_mode>::VisitJSArrayBuffer(
     Tagged<Map> map, Tagged<JSArrayBuffer> object) {
   object->YoungMarkExtension();
-  return VisitEmbedderTracingSubClassWithEmbedderTracing(map, object);
-}
-
-template <YoungGenerationMarkingVisitationMode marking_mode>
-int YoungGenerationMarkingVisitor<marking_mode>::VisitJSApiObject(
-    Tagged<Map> map, Tagged<JSObject> object) {
-  return VisitEmbedderTracingSubClassWithEmbedderTracing<
-      JSObject, JSAPIObjectWithEmbedderSlots::BodyDescriptor>(map, object);
-}
-
-template <YoungGenerationMarkingVisitationMode marking_mode>
-int YoungGenerationMarkingVisitor<marking_mode>::
-    VisitJSDataViewOrRabGsabDataView(
-        Tagged<Map> map, Tagged<JSDataViewOrRabGsabDataView> object) {
-  return VisitEmbedderTracingSubClassWithEmbedderTracing(map, object);
-}
-
-template <YoungGenerationMarkingVisitationMode marking_mode>
-int YoungGenerationMarkingVisitor<marking_mode>::VisitJSTypedArray(
-    Tagged<Map> map, Tagged<JSTypedArray> object) {
-  return VisitEmbedderTracingSubClassWithEmbedderTracing(map, object);
-}
-
-template <YoungGenerationMarkingVisitationMode marking_mode>
-int YoungGenerationMarkingVisitor<marking_mode>::VisitJSObject(
-    Tagged<Map> map, Tagged<JSObject> object) {
-  int result = Parent::VisitJSObject(map, object);
-  DCHECK_LT(0, result);
-  pretenuring_handler_->UpdateAllocationSite(map, object,
-                                             local_pretenuring_feedback_);
-  return result;
-}
-
-template <YoungGenerationMarkingVisitationMode marking_mode>
-int YoungGenerationMarkingVisitor<marking_mode>::VisitJSObjectFast(
-    Tagged<Map> map, Tagged<JSObject> object) {
-  int result = Parent::VisitJSObjectFast(map, object);
-  DCHECK_LT(0, result);
-  pretenuring_handler_->UpdateAllocationSite(map, object,
-                                             local_pretenuring_feedback_);
-  return result;
+  return Base::VisitJSArrayBuffer(map, object);
 }
 
 template <YoungGenerationMarkingVisitationMode marking_mode>
 template <typename T, typename TBodyDescriptor>
 int YoungGenerationMarkingVisitor<marking_mode>::VisitJSObjectSubclass(
     Tagged<Map> map, Tagged<T> object) {
-  int result =
-      Parent::template VisitJSObjectSubclass<T, TBodyDescriptor>(map, object);
-  DCHECK_LT(0, result);
   pretenuring_handler_->UpdateAllocationSite(map, object,
                                              local_pretenuring_feedback_);
-  return result;
+  return Base::template VisitJSObjectSubclass<T, TBodyDescriptor>(map, object);
 }
 
 template <YoungGenerationMarkingVisitationMode marking_mode>
@@ -261,7 +200,7 @@ V8_INLINE bool YoungGenerationMarkingVisitor<marking_mode>::VisitObjectViaSlot(
   // atomics.
   if constexpr (visitation_mode == ObjectVisitationMode::kVisitDirectly) {
     Tagged<Map> map = heap_object->map(isolate_);
-    const int visited_size = Parent::Visit(map, heap_object);
+    const int visited_size = Base::Visit(map, heap_object);
     if (visited_size) {
       IncrementLiveBytesCached(
           MutablePageMetadata::cast(
@@ -292,7 +231,7 @@ V8_INLINE bool YoungGenerationMarkingVisitor<marking_mode>::ShortCutStrings(
                     ->map(ObjectVisitorWithCageBases::cage_base())
                     ->visitor_id(),
                 VisitorId::kVisitThinString);
-      *heap_object = ThinString::cast(*heap_object)->actual();
+      *heap_object = Cast<ThinString>(*heap_object)->actual();
       // ThinStrings always refer to internalized strings, which are always
       // in old space.
       DCHECK(!Heap::InYoungGeneration(*heap_object));
@@ -306,7 +245,7 @@ V8_INLINE bool YoungGenerationMarkingVisitor<marking_mode>::ShortCutStrings(
               ->map(ObjectVisitorWithCageBases::cage_base())
               ->visitor_id();
       if (visitor_id == VisitorId::kVisitShortcutCandidate) {
-        Tagged<ConsString> string = ConsString::cast(*heap_object);
+        Tagged<ConsString> string = Cast<ConsString>(*heap_object);
         if (static_cast<Tagged_t>(string->second().ptr()) ==
             StaticReadOnlyRoot::kempty_string) {
           *heap_object = string->first();

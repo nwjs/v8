@@ -71,7 +71,7 @@ int DebugStackTraceIterator::GetContextId() const {
   DirectHandle<Object> context = frame_inspector_->GetContext();
   if (IsContext(*context)) {
     Tagged<Object> value =
-        Context::cast(*context)->native_context()->debug_context_id();
+        Cast<Context>(*context)->native_context()->debug_context_id();
     if (IsSmi(value)) return Smi::ToInt(value);
   }
   return 0;
@@ -139,7 +139,7 @@ v8::Local<v8::debug::Script> DebugStackTraceIterator::GetScript() const {
   DCHECK(!Done());
   Handle<Object> value = frame_inspector_->GetScript();
   if (!IsScript(*value)) return v8::Local<v8::debug::Script>();
-  return ToApiHandle<debug::Script>(Handle<Script>::cast(value));
+  return ToApiHandle<debug::Script>(Cast<Script>(value));
 }
 
 debug::Location DebugStackTraceIterator::GetSourceLocation() const {

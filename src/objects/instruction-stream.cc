@@ -55,7 +55,7 @@ InstructionStream::WriteBarrierPromise InstructionStream::RelocateFromDesc(
       DirectHandle<HeapObject> p = it.rinfo()->target_object_handle(origin);
       DCHECK(IsCode(*p));
       Tagged<InstructionStream> target_istream =
-          Code::cast(*p)->instruction_stream();
+          Cast<Code>(*p)->instruction_stream();
       it.rinfo()->set_target_address(*this, target_istream->instruction_start(),
                                      UNSAFE_SKIP_WRITE_BARRIER,
                                      SKIP_ICACHE_FLUSH);
@@ -79,7 +79,7 @@ InstructionStream::WriteBarrierPromise InstructionStream::RelocateFromDesc(
       Builtin builtin = static_cast<Builtin>(stub_call_tag);
       // Store the builtin address in relocation info.
       Address entry = Builtins::EntryOf(builtin, heap->isolate());
-      it.rinfo()->set_wasm_stub_call_address(entry, SKIP_ICACHE_FLUSH);
+      it.rinfo()->set_wasm_stub_call_address(entry);
 #else
       UNREACHABLE();
 #endif

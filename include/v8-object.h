@@ -152,18 +152,9 @@ enum PropertyAttribute {
  * a particular data property. See Object::SetNativeDataProperty and
  * ObjectTemplate::SetNativeDataProperty methods.
  */
-using AccessorGetterCallback V8_DEPRECATED(
-    "Use AccessorNameGetterCallback signature instead. This type will be "
-    "removed in V8 12.8.") = void (*)(Local<String> property,
-                                      const PropertyCallbackInfo<Value>& info);
 using AccessorNameGetterCallback =
     void (*)(Local<Name> property, const PropertyCallbackInfo<Value>& info);
 
-using AccessorSetterCallback V8_DEPRECATED(
-    "Use AccessorNameSetterCallback signature instead. This type will be "
-    "removed in V8 12.8.") = void (*)(Local<String> property,
-                                      Local<Value> value,
-                                      const PropertyCallbackInfo<void>& info);
 using AccessorNameSetterCallback =
     void (*)(Local<Name> property, Local<Value> value,
              const PropertyCallbackInfo<void>& info);
@@ -176,9 +167,11 @@ using AccessorNameSetterCallback =
  * the kind of cross-context access that should be allowed.
  *
  */
-enum AccessControl {
-  DEFAULT = 0,
-};
+enum V8_DEPRECATE_SOON(
+    "This enum is no longer used and will be removed in V8 12.9.")
+    AccessControl {
+      DEFAULT V8_ENUM_DEPRECATE_SOON("not used") = 0,
+    };
 
 /**
  * Property filter bits. They can be or'ed to build a composite filter.
@@ -245,6 +238,9 @@ class V8_EXPORT Object : public Value {
    */
   V8_WARN_UNUSED_RESULT Maybe<bool> Set(Local<Context> context,
                                         Local<Value> key, Local<Value> value);
+  V8_WARN_UNUSED_RESULT Maybe<bool> Set(Local<Context> context,
+                                        Local<Value> key, Local<Value> value,
+                                        MaybeLocal<Object> receiver);
 
   V8_WARN_UNUSED_RESULT Maybe<bool> Set(Local<Context> context, uint32_t index,
                                         Local<Value> value);
@@ -300,6 +296,9 @@ class V8_EXPORT Object : public Value {
 
   V8_WARN_UNUSED_RESULT MaybeLocal<Value> Get(Local<Context> context,
                                               Local<Value> key);
+  V8_WARN_UNUSED_RESULT MaybeLocal<Value> Get(Local<Context> context,
+                                              Local<Value> key,
+                                              MaybeLocal<Object> receiver);
 
   V8_WARN_UNUSED_RESULT MaybeLocal<Value> Get(Local<Context> context,
                                               uint32_t index);
@@ -345,20 +344,10 @@ class V8_EXPORT Object : public Value {
   V8_WARN_UNUSED_RESULT Maybe<bool> Delete(Local<Context> context,
                                            uint32_t index);
 
-  V8_DEPRECATED(
-      "Use SetNativeDataProperty or SetAccessorProperty instead depending on "
-      "the required semantics. See http://crbug.com/336325111. This method "
-      "will be removed in V8 12.8.")
-  V8_WARN_UNUSED_RESULT Maybe<bool> SetAccessor(
-      Local<Context> context, Local<Name> name,
-      AccessorNameGetterCallback getter,
-      AccessorNameSetterCallback setter = nullptr,
-      MaybeLocal<Value> data = MaybeLocal<Value>(),
-      AccessControl deprecated_settings = DEFAULT,
-      PropertyAttribute attribute = None,
-      SideEffectType getter_side_effect_type = SideEffectType::kHasSideEffect,
-      SideEffectType setter_side_effect_type = SideEffectType::kHasSideEffect);
-
+  /**
+   * Sets an accessor property like Template::SetAccessorProperty, but
+   * this method sets on this object directly.
+   */
   void SetAccessorProperty(Local<Name> name, Local<Function> getter,
                            Local<Function> setter = Local<Function>(),
                            PropertyAttribute attributes = None);

@@ -3,11 +3,16 @@
 // found in the LICENSE file.
 
 // Flags: --allow-natives-syntax --turboshaft-from-maglev --turbofan
-// Flags: --no-always-turbofan
 
 function poly_store(a, x) {
   a[0] = x;
 };
+
+var y = new Array();
+y[0] = 1.1;
+y.x = 12;
+// We don't use {y}, but it prevents the map packed double map with `x` from
+// being GCed, which avoids {poly_store} from being deopted.
 
 %PrepareFunctionForOptimization(poly_store);
 poly_store([1.1], 'a');

@@ -15,6 +15,7 @@
 #include "src/debug/interface-types.h"
 #include "src/heap/heap.h"
 #include "src/objects/backing-store.h"
+#include "src/objects/casting.h"
 #include "src/objects/foreign.h"
 #include "src/objects/js-function.h"
 #include "src/objects/js-objects.h"
@@ -58,8 +59,12 @@ class WasmModuleObject;
 
 enum class SharedFlag : uint8_t;
 
-template <class CppType>
+enum class WasmTableFlag : uint8_t { kTable32, kTable64 };
+
+template <typename CppType>
 class Managed;
+template <typename CppType>
+class TrustedManaged;
 
 #include "torque-generated/src/wasm/wasm-objects-tq.inc"
 
@@ -73,11 +78,11 @@ class V8_EXPORT_PRIVATE FunctionTargetAndRef {
                        Handle<WasmTrustedInstanceData> target_instance_data,
                        int target_func_index);
   // The "ref" will be a WasmTrustedInstanceData or a WasmApiFunctionRef.
-  Handle<ExposedTrustedObject> ref() { return ref_; }
+  Handle<TrustedObject> ref() { return ref_; }
   Address call_target() { return call_target_; }
 
  private:
-  Handle<ExposedTrustedObject> ref_;
+  Handle<TrustedObject> ref_;
   Address call_target_;
 };
 
@@ -178,11 +183,22 @@ class WasmModuleObject
   TQ_OBJECT_CONSTRUCTORS(WasmModuleObject)
 };
 
+#if V8_ENABLE_SANDBOX || DEBUG
+// This should be checked before writing an untrusted function reference
+// into a dispatch table (e.g. via WasmTableObject::Set).
+bool FunctionSigMatchesTable(uint32_t canonical_sig_id,
+                             const wasm::WasmModule* module, int table_index);
+#endif
+
 // Representation of a WebAssembly.Table JavaScript-level object.
 class WasmTableObject
     : public TorqueGeneratedWasmTableObject<WasmTableObject, JSObject> {
  public:
+  class BodyDescriptor;
+
   inline wasm::ValueType type();
+
+  DECL_TRUSTED_POINTER_ACCESSORS(trusted_data, WasmTrustedInstanceData)
 
   V8_EXPORT_PRIVATE static int Grow(Isolate* isolate,
                                     Handle<WasmTableObject> table,
@@ -190,18 +206,22 @@ class WasmTableObject
                                     DirectHandle<Object> init_value);
 
   V8_EXPORT_PRIVATE static Handle<WasmTableObject> New(
-      Isolate* isolate, Handle<WasmInstanceObject> instance_object,
+      Isolate* isolate, Handle<WasmTrustedInstanceData> trusted_data,
       wasm::ValueType type, uint32_t initial, bool has_maximum,
-      uint32_t maximum, DirectHandle<Object> initial_value);
+      uint32_t maximum, DirectHandle<Object> initial_value,
+      WasmTableFlag table_type = WasmTableFlag::kTable32);
 
   // Store that a specific instance uses this table, in order to update the
   // instance's dispatch table when this table grows (and hence needs to
   // allocate a new dispatch table).
   V8_EXPORT_PRIVATE static void AddUse(
       Isolate* isolate, DirectHandle<WasmTableObject> table,
-      Handle<WasmTrustedInstanceData> instance_object, int table_index);
+      Handle<WasmInstanceObject> instance_object, int table_index);
 
   bool is_in_bounds(uint32_t entry_index);
+
+  // Overwrite the Torque-generated method that returns an int.
+  inline bool is_table64() const;
 
   // Thin wrapper around {JsToWasmObject}.
   static MaybeHandle<Object> JSToWasmElement(
@@ -306,15 +326,18 @@ class WasmMemoryObject
 class WasmGlobalObject
     : public TorqueGeneratedWasmGlobalObject<WasmGlobalObject, JSObject> {
  public:
+  class BodyDescriptor;
+
   DECL_ACCESSORS(untagged_buffer, Tagged<JSArrayBuffer>)
   DECL_ACCESSORS(tagged_buffer, Tagged<FixedArray>)
   DECL_PRIMITIVE_ACCESSORS(type, wasm::ValueType)
+  DECL_TRUSTED_POINTER_ACCESSORS(trusted_data, WasmTrustedInstanceData)
 
   // Dispatched behavior.
   DECL_PRINTER(WasmGlobalObject)
 
   V8_EXPORT_PRIVATE static MaybeHandle<WasmGlobalObject> New(
-      Isolate* isolate, Handle<WasmInstanceObject> instance_object,
+      Isolate* isolate, Handle<WasmTrustedInstanceData> instance_object,
       MaybeHandle<JSArrayBuffer> maybe_untagged_buffer,
       MaybeHandle<FixedArray> maybe_tagged_buffer, wasm::ValueType type,
       int32_t offset, bool is_mutable);
@@ -348,9 +371,7 @@ class WasmGlobalObject
 // This object lives in trusted space and is never modified from user space.
 class V8_EXPORT_PRIVATE WasmTrustedInstanceData : public ExposedTrustedObject {
  public:
-  DECL_CAST(WasmTrustedInstanceData)
-
-  DECL_ACCESSORS(instance_object, Tagged<WasmInstanceObject>)
+  DECL_OPTIONAL_ACCESSORS(instance_object, Tagged<WasmInstanceObject>)
   DECL_ACCESSORS(native_context, Tagged<Context>)
   DECL_ACCESSORS(memory_objects, Tagged<FixedArray>)
   DECL_OPTIONAL_ACCESSORS(untagged_globals_buffer, Tagged<JSArrayBuffer>)
@@ -371,16 +392,16 @@ class V8_EXPORT_PRIVATE WasmTrustedInstanceData : public ExposedTrustedObject {
   DECL_ACCESSORS(well_known_imports, Tagged<FixedArray>)
   DECL_PRIMITIVE_ACCESSORS(memory0_start, uint8_t*)
   DECL_PRIMITIVE_ACCESSORS(memory0_size, size_t)
-  DECL_PRIMITIVE_ACCESSORS(native_module, wasm::NativeModule*)
+  DECL_PROTECTED_POINTER_ACCESSORS(managed_native_module,
+                                   TrustedManaged<wasm::NativeModule>)
   DECL_PRIMITIVE_ACCESSORS(new_allocation_limit_address, Address*)
   DECL_PRIMITIVE_ACCESSORS(new_allocation_top_address, Address*)
   DECL_PRIMITIVE_ACCESSORS(old_allocation_limit_address, Address*)
   DECL_PRIMITIVE_ACCESSORS(old_allocation_top_address, Address*)
-  DECL_PRIMITIVE_ACCESSORS(isorecursive_canonical_types, const uint32_t*)
   DECL_PRIMITIVE_ACCESSORS(globals_start, uint8_t*)
   DECL_PRIMITIVE_ACCESSORS(jump_table_start, Address)
   DECL_PRIMITIVE_ACCESSORS(hook_on_function_call_address, Address)
-  DECL_PRIMITIVE_ACCESSORS(tiering_budget_array, uint32_t*)
+  DECL_PRIMITIVE_ACCESSORS(tiering_budget_array, std::atomic<uint32_t>*)
   DECL_PROTECTED_POINTER_ACCESSORS(memory_bases_and_sizes,
                                    TrustedFixedAddressArray)
   DECL_ACCESSORS(data_segment_starts, Tagged<FixedAddressArray>)
@@ -395,6 +416,8 @@ class V8_EXPORT_PRIVATE WasmTrustedInstanceData : public ExposedTrustedObject {
   inline Tagged<WasmMemoryObject> memory_object(int memory_index) const;
   inline uint8_t* memory_base(int memory_index) const;
   inline size_t memory_size(int memory_index) const;
+
+  inline wasm::NativeModule* native_module() const;
 
   inline Tagged<WasmModuleObject> module_object() const;
   inline const wasm::WasmModule* module() const;
@@ -414,12 +437,10 @@ class V8_EXPORT_PRIVATE WasmTrustedInstanceData : public ExposedTrustedObject {
   V(kOptionalPaddingOffset, POINTER_SIZE_PADDING(kOptionalPaddingOffset)) \
   V(kMemory0StartOffset, kSystemPointerSize)                              \
   V(kMemory0SizeOffset, kSizetSize)                                       \
-  V(kIsorecursiveCanonicalTypesOffset, kSystemPointerSize)                \
   V(kGlobalsStartOffset, kSystemPointerSize)                              \
   V(kJumpTableStartOffset, kSystemPointerSize)                            \
   /* End of often-accessed fields. */                                     \
   /* Continue with system pointer size fields to maintain alignment. */   \
-  V(kNativeModuleOffset, kSystemPointerSize)                              \
   V(kNewAllocationLimitAddressOffset, kSystemPointerSize)                 \
   V(kNewAllocationTopAddressOffset, kSystemPointerSize)                   \
   V(kOldAllocationLimitAddressOffset, kSystemPointerSize)                 \
@@ -445,6 +466,7 @@ class V8_EXPORT_PRIVATE WasmTrustedInstanceData : public ExposedTrustedObject {
   V(kManagedObjectMapsOffset, kTaggedSize)                                \
   V(kFeedbackVectorsOffset, kTaggedSize)                                  \
   V(kWellKnownImportsOffset, kTaggedSize)                                 \
+  V(kProtectedManagedNativeModuleOffset, kTaggedSize)                     \
   V(kBreakOnEntryOffset, kUInt8Size)                                      \
   /* More padding to make the header pointer-size aligned */              \
   V(kHeaderPaddingOffset, POINTER_SIZE_PADDING(kHeaderPaddingOffset))     \
@@ -484,12 +506,13 @@ class V8_EXPORT_PRIVATE WasmTrustedInstanceData : public ExposedTrustedObject {
   V(kDataSegmentStartsOffset, "data_segment_starts")                          \
   V(kDataSegmentSizesOffset, "data_segment_sizes")                            \
   V(kElementSegmentsOffset, "element_segments")
-#define WASM_PROTECTED_INSTANCE_DATA_FIELDS(V)                     \
-  V(kProtectedSharedPartOffset, "shared_part")                     \
-  V(kProtectedMemoryBasesAndSizesOffset, "memory_bases_and_sizes") \
-  V(kProtectedDispatchTable0Offset, "dispatch_table0")             \
-  V(kProtectedDispatchTablesOffset, "dispatch_tables")             \
-  V(kProtectedDispatchTableForImportsOffset, "dispatch_table_for_imports")
+#define WASM_PROTECTED_INSTANCE_DATA_FIELDS(V)                             \
+  V(kProtectedSharedPartOffset, "shared_part")                             \
+  V(kProtectedMemoryBasesAndSizesOffset, "memory_bases_and_sizes")         \
+  V(kProtectedDispatchTable0Offset, "dispatch_table0")                     \
+  V(kProtectedDispatchTablesOffset, "dispatch_tables")                     \
+  V(kProtectedDispatchTableForImportsOffset, "dispatch_table_for_imports") \
+  V(kProtectedManagedNativeModuleOffset, "managed_native_module")
 
 #define WASM_INSTANCE_FIELD_OFFSET(offset, _) offset,
 #define WASM_INSTANCE_FIELD_NAME(_, name) name,
@@ -498,9 +521,9 @@ class V8_EXPORT_PRIVATE WasmTrustedInstanceData : public ExposedTrustedObject {
       WASM_TAGGED_INSTANCE_DATA_FIELDS(WASM_INSTANCE_FIELD_OFFSET)};
   static constexpr std::array<const char*, 16> kTaggedFieldNames = {
       WASM_TAGGED_INSTANCE_DATA_FIELDS(WASM_INSTANCE_FIELD_NAME)};
-  static constexpr std::array<uint16_t, 5> kProtectedFieldOffsets = {
+  static constexpr std::array<uint16_t, 6> kProtectedFieldOffsets = {
       WASM_PROTECTED_INSTANCE_DATA_FIELDS(WASM_INSTANCE_FIELD_OFFSET)};
-  static constexpr std::array<const char*, 5> kProtectedFieldNames = {
+  static constexpr std::array<const char*, 6> kProtectedFieldNames = {
       WASM_PROTECTED_INSTANCE_DATA_FIELDS(WASM_INSTANCE_FIELD_NAME)};
 
 #undef WASM_INSTANCE_FIELD_OFFSET
@@ -521,7 +544,8 @@ class V8_EXPORT_PRIVATE WasmTrustedInstanceData : public ExposedTrustedObject {
   void SetRawMemory(int memory_index, uint8_t* mem_start, size_t mem_size);
 
   static Handle<WasmTrustedInstanceData> New(Isolate*,
-                                             DirectHandle<WasmModuleObject>);
+                                             DirectHandle<WasmModuleObject>,
+                                             bool shared);
 
   Address GetCallTarget(uint32_t func_index);
 
@@ -584,7 +608,7 @@ class V8_EXPORT_PRIVATE WasmTrustedInstanceData : public ExposedTrustedObject {
   OBJECT_CONSTRUCTORS(WasmTrustedInstanceData, ExposedTrustedObject);
 
  private:
-  void InitDataSegmentArrays(Tagged<WasmModuleObject>);
+  void InitDataSegmentArrays(const wasm::NativeModule*);
 };
 
 // Representation of a WebAssembly.Instance JavaScript-level object.
@@ -607,15 +631,18 @@ class WasmInstanceObject
 class WasmTagObject
     : public TorqueGeneratedWasmTagObject<WasmTagObject, JSObject> {
  public:
+  class BodyDescriptor;
+
   // Checks whether the given {sig} has the same parameter types as the
   // serialized signature stored within this tag object.
   bool MatchesSignature(uint32_t expected_canonical_type_index);
 
-  static Handle<WasmTagObject> New(Isolate* isolate,
-                                   const wasm::FunctionSig* sig,
-                                   uint32_t canonical_type_index,
-                                   DirectHandle<HeapObject> tag,
-                                   Handle<HeapObject> instance);
+  static Handle<WasmTagObject> New(
+      Isolate* isolate, const wasm::FunctionSig* sig,
+      uint32_t canonical_type_index, DirectHandle<HeapObject> tag,
+      DirectHandle<WasmTrustedInstanceData> instance);
+
+  DECL_TRUSTED_POINTER_ACCESSORS(trusted_data, WasmTrustedInstanceData)
 
   TQ_OBJECT_CONSTRUCTORS(WasmTagObject)
 };
@@ -695,8 +722,7 @@ class WasmDispatchTable : public TrustedObject {
   // Set an entry for an import. We check signatures statically there, so the
   // signature is not updated in the dispatch table.
   // {ref} has to be a WasmApiFunctionRef or a WasmInstanceObject.
-  void V8_EXPORT_PRIVATE SetForImport(int index,
-                                      Tagged<ExposedTrustedObject> ref,
+  void V8_EXPORT_PRIVATE SetForImport(int index, Tagged<TrustedObject> ref,
                                       Address call_target);
 
   void Clear(int index);
@@ -707,7 +733,6 @@ class WasmDispatchTable : public TrustedObject {
   static V8_WARN_UNUSED_RESULT Handle<WasmDispatchTable> Grow(
       Isolate*, Handle<WasmDispatchTable>, int new_length);
 
-  DECL_CAST(WasmDispatchTable)
   DECL_PRINTER(WasmDispatchTable)
   DECL_VERIFIER(WasmDispatchTable)
   OBJECT_CONSTRUCTORS(WasmDispatchTable, TrustedObject);
@@ -740,7 +765,6 @@ class V8_EXPORT_PRIVATE WasmExceptionPackage : public JSObject {
   static constexpr int kSize =
       kHeaderSize + (kTaggedSize * kInObjectFieldCount);
 
-  DECL_CAST(WasmExceptionPackage)
   DECL_PRINTER(WasmExceptionPackage)
   DECL_VERIFIER(WasmExceptionPackage)
   OBJECT_CONSTRUCTORS(WasmExceptionPackage, JSObject);
@@ -770,9 +794,6 @@ bool UseGenericWasmToJSWrapper(wasm::ImportCallKind kind,
 // Representation of WebAssembly.Function JavaScript-level object.
 class WasmExportedFunction : public JSFunction {
  public:
-  Tagged<WasmTrustedInstanceData> instance_data();
-  V8_EXPORT_PRIVATE int function_index();
-
   V8_EXPORT_PRIVATE static bool IsWasmExportedFunction(Tagged<Object> object);
 
   V8_EXPORT_PRIVATE static Handle<WasmExportedFunction> New(
@@ -781,17 +802,10 @@ class WasmExportedFunction : public JSFunction {
       DirectHandle<WasmInternalFunction> internal_function, int arity,
       DirectHandle<Code> export_wrapper);
 
-  Address GetWasmCallTarget();
-
-  V8_EXPORT_PRIVATE const wasm::FunctionSig* sig();
-
-  bool MatchesSignature(uint32_t other_canonical_sig_index);
-
   // Return a null-terminated string with the debug name in the form
   // 'js-to-wasm:<sig>'.
   static std::unique_ptr<char[]> GetDebugName(const wasm::FunctionSig* sig);
 
-  DECL_CAST(WasmExportedFunction)
   OBJECT_CONSTRUCTORS(WasmExportedFunction, JSFunction);
 };
 
@@ -806,14 +820,6 @@ class WasmJSFunction : public JSFunction {
                                     Handle<JSReceiver> callable,
                                     wasm::Suspend suspend);
 
-  Tagged<JSReceiver> GetCallable() const;
-  wasm::Suspend GetSuspend() const;
-  // Deserializes the signature of this function using the provided zone. Note
-  // that lifetime of the signature is hence directly coupled to the zone.
-  const wasm::FunctionSig* GetSignature(Zone* zone) const;
-  bool MatchesSignature(uint32_t other_canonical_sig_index) const;
-
-  DECL_CAST(WasmJSFunction)
   OBJECT_CONSTRUCTORS(WasmJSFunction, JSFunction);
 };
 
@@ -834,7 +840,6 @@ class WasmCapiFunction : public JSFunction {
   bool MatchesSignature(uint32_t other_canonical_sig_index) const;
   const wasm::FunctionSig* GetSignature(Zone* zone) const;
 
-  DECL_CAST(WasmCapiFunction)
   OBJECT_CONSTRUCTORS(WasmCapiFunction, JSFunction);
 };
 
@@ -849,7 +854,6 @@ class WasmExternalFunction : public JSFunction {
 
   inline Tagged<WasmFuncRef> func_ref() const;
 
-  DECL_CAST(WasmExternalFunction)
   OBJECT_CONSTRUCTORS(WasmExternalFunction, JSFunction);
 };
 
@@ -886,6 +890,8 @@ class WasmExportedFunctionData
 
   DECL_PRIMITIVE_ACCESSORS(sig, const wasm::FunctionSig*)
 
+  bool MatchesSignature(uint32_t other_canonical_sig_index);
+
   // Dispatched behavior.
   DECL_PRINTER(WasmExportedFunctionData)
   DECL_VERIFIER(WasmExportedFunctionData)
@@ -901,12 +907,14 @@ class WasmExportedFunctionData
 
 class WasmApiFunctionRef
     : public TorqueGeneratedWasmApiFunctionRef<WasmApiFunctionRef,
-                                               ExposedTrustedObject> {
+                                               TrustedObject> {
  public:
   // Dispatched behavior.
   DECL_PRINTER(WasmApiFunctionRef)
 
   DECL_CODE_POINTER_ACCESSORS(code)
+
+  DECL_PROTECTED_POINTER_ACCESSORS(instance_data, WasmTrustedInstanceData)
 
   static constexpr int kInvalidCallOrigin = 0;
 
@@ -929,10 +937,10 @@ class WasmApiFunctionRef
   static void SetFuncRefAsCallOrigin(DirectHandle<WasmApiFunctionRef> ref,
                                      DirectHandle<WasmFuncRef> func_ref);
 
-  using BodyDescriptor = StackedBodyDescriptor<
-      FixedExposedTrustedObjectBodyDescriptor<
-          WasmApiFunctionRef, kWasmApiFunctionRefIndirectPointerTag>,
-      WithStrongCodePointer<kCodeOffset>>;
+  using BodyDescriptor =
+      StackedBodyDescriptor<FixedBodyDescriptorFor<WasmApiFunctionRef>,
+                            WithProtectedPointer<kProtectedInstanceDataOffset>,
+                            WithStrongCodePointer<kCodeOffset>>;
 
   TQ_OBJECT_CONSTRUCTORS(WasmApiFunctionRef)
 };
@@ -948,7 +956,7 @@ class WasmInternalFunction
   V8_EXPORT_PRIVATE static Handle<JSFunction> GetOrCreateExternal(
       DirectHandle<WasmInternalFunction> internal);
 
-  DECL_PROTECTED_POINTER_ACCESSORS(ref, ExposedTrustedObject)
+  DECL_PROTECTED_POINTER_ACCESSORS(ref, TrustedObject)
 
   // Dispatched behavior.
   DECL_PRINTER(WasmInternalFunction)
@@ -982,6 +990,11 @@ class WasmJSFunctionData
     : public TorqueGeneratedWasmJSFunctionData<WasmJSFunctionData,
                                                WasmFunctionData> {
  public:
+  Tagged<JSReceiver> GetCallable() const;
+  wasm::Suspend GetSuspend() const;
+  const wasm::FunctionSig* GetSignature() const;
+  bool MatchesSignature(uint32_t other_canonical_sig_index) const;
+
   // Dispatched behavior.
   DECL_PRINTER(WasmJSFunctionData)
 
@@ -1115,6 +1128,7 @@ class WasmTypeInfo
     : public TorqueGeneratedWasmTypeInfo<WasmTypeInfo, HeapObject> {
  public:
   DECL_EXTERNAL_POINTER_ACCESSORS(native_type, Address)
+  DECL_TRUSTED_POINTER_ACCESSORS(trusted_data, WasmTrustedInstanceData)
 
   DECL_PRINTER(WasmTypeInfo)
 
@@ -1229,27 +1243,25 @@ class WasmContinuationObject
                                                    HeapObject> {
  public:
   static Handle<WasmContinuationObject> New(
-      Isolate* isolate, std::unique_ptr<wasm::StackMemory> stack,
+      Isolate* isolate, wasm::StackMemory* stack,
       wasm::JumpBuffer::StackState state,
       AllocationType allocation_type = AllocationType::kYoung);
   static Handle<WasmContinuationObject> New(
-      Isolate* isolate, wasm::JumpBuffer::StackState state,
-      DirectHandle<WasmContinuationObject> parent);
+      Isolate* isolate, wasm::StackMemory* stack,
+      wasm::JumpBuffer::StackState state, DirectHandle<HeapObject> parent,
+      AllocationType allocation_type = AllocationType::kYoung);
 
   DECL_EXTERNAL_POINTER_ACCESSORS(jmpbuf, Address)
+  DECL_EXTERNAL_POINTER_ACCESSORS(stack, Address)
 
   DECL_PRINTER(WasmContinuationObject)
 
   using BodyDescriptor = StackedBodyDescriptor<
       FixedBodyDescriptorFor<WasmContinuationObject>,
+      WithExternalPointer<kStackOffset, kWasmStackMemoryTag>,
       WithExternalPointer<kJmpbufOffset, kWasmContinuationJmpbufTag>>;
 
  private:
-  static Handle<WasmContinuationObject> New(
-      Isolate* isolate, std::unique_ptr<wasm::StackMemory> stack,
-      wasm::JumpBuffer::StackState state, DirectHandle<HeapObject> parent,
-      AllocationType allocation_type = AllocationType::kYoung);
-
   TQ_OBJECT_CONSTRUCTORS(WasmContinuationObject)
 };
 
@@ -1309,7 +1321,7 @@ namespace wasm {
 // {expected}. If the typecheck succeeds, returns the wasm representation of the
 // object; otherwise, returns the empty handle.
 MaybeHandle<Object> JSToWasmObject(Isolate* isolate, Handle<Object> value,
-                                   ValueType expected_canonical,
+                                   ValueType expected, uint32_t canonical_index,
                                    const char** error_message);
 
 // Utility which canonicalizes {expected} in addition.

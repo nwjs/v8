@@ -5,9 +5,9 @@
 #ifndef V8_HEAP_MARKING_VISITOR_H_
 #define V8_HEAP_MARKING_VISITOR_H_
 
+#include "src/base/logging.h"
 #include "src/common/globals.h"
 #include "src/execution/isolate.h"
-#include "src/heap/ephemeron-remembered-set.h"
 #include "src/heap/marking-state.h"
 #include "src/heap/marking-worklist.h"
 #include "src/heap/marking.h"
@@ -15,7 +15,6 @@
 #include "src/heap/pretenuring-handler.h"
 #include "src/heap/spaces.h"
 #include "src/heap/weak-object-worklists.h"
-#include "src/objects/string.h"
 
 namespace v8 {
 namespace internal {
@@ -47,11 +46,12 @@ struct EphemeronMarking {
 template <typename ConcreteVisitor>
 class MarkingVisitorBase : public ConcurrentHeapVisitor<int, ConcreteVisitor> {
  public:
+  using Base = ConcurrentHeapVisitor<int, ConcreteVisitor>;
+
   MarkingVisitorBase(MarkingWorklists::Local* local_marking_worklists,
                      WeakObjects::Local* local_weak_objects, Heap* heap,
                      unsigned mark_compact_epoch,
                      base::EnumSet<CodeFlushMode> code_flush_mode,
-                     bool trace_embedder_fields,
                      bool should_keep_ages_unchanged,
                      uint16_t code_flushing_increase)
       : ConcurrentHeapVisitor<int, ConcreteVisitor>(heap->isolate()),
@@ -60,7 +60,6 @@ class MarkingVisitorBase : public ConcurrentHeapVisitor<int, ConcreteVisitor> {
         heap_(heap),
         mark_compact_epoch_(mark_compact_epoch),
         code_flush_mode_(code_flush_mode),
-        trace_embedder_fields_(trace_embedder_fields),
         should_keep_ages_unchanged_(should_keep_ages_unchanged),
         code_flushing_increase_(code_flushing_increase),
         isolate_in_background_(heap->isolate()->is_backgrounded())
@@ -80,8 +79,6 @@ class MarkingVisitorBase : public ConcurrentHeapVisitor<int, ConcreteVisitor> {
   {
   }
 
-  V8_INLINE int VisitBytecodeArray(Tagged<Map> map,
-                                   Tagged<BytecodeArray> object);
   V8_INLINE int VisitDescriptorArrayStrongly(Tagged<Map> map,
                                              Tagged<DescriptorArray> object);
   V8_INLINE int VisitDescriptorArray(Tagged<Map> map,
@@ -89,13 +86,9 @@ class MarkingVisitorBase : public ConcurrentHeapVisitor<int, ConcreteVisitor> {
   V8_INLINE int VisitEphemeronHashTable(Tagged<Map> map,
                                         Tagged<EphemeronHashTable> object);
   V8_INLINE int VisitFixedArray(Tagged<Map> map, Tagged<FixedArray> object);
-  V8_INLINE int VisitJSApiObject(Tagged<Map> map, Tagged<JSObject> object);
   V8_INLINE int VisitJSArrayBuffer(Tagged<Map> map,
                                    Tagged<JSArrayBuffer> object);
-  V8_INLINE int VisitJSDataViewOrRabGsabDataView(
-      Tagged<Map> map, Tagged<JSDataViewOrRabGsabDataView> object);
   V8_INLINE int VisitJSFunction(Tagged<Map> map, Tagged<JSFunction> object);
-  V8_INLINE int VisitJSTypedArray(Tagged<Map> map, Tagged<JSTypedArray> object);
   V8_INLINE int VisitJSWeakRef(Tagged<Map> map, Tagged<JSWeakRef> object);
   V8_INLINE int VisitMap(Tagged<Map> map, Tagged<Map> object);
   V8_INLINE int VisitSharedFunctionInfo(Tagged<Map> map,
@@ -149,6 +142,9 @@ class MarkingVisitorBase : public ConcurrentHeapVisitor<int, ConcreteVisitor> {
   void VisitTrustedPointerTableEntry(Tagged<HeapObject> host,
                                      IndirectPointerSlot slot) final;
 
+  void VisitJSDispatchTableEntry(Tagged<HeapObject> host,
+                                 JSDispatchHandle handle) override;
+
   V8_INLINE void VisitProtectedPointer(Tagged<TrustedObject> host,
                                        ProtectedPointerSlot slot) final {
     VisitStrongPointerImpl(host, slot);
@@ -172,6 +168,13 @@ class MarkingVisitorBase : public ConcurrentHeapVisitor<int, ConcreteVisitor> {
     return false;
   }
 
+  V8_INLINE static constexpr bool CanEncounterFillerOrFreeSpace() {
+    return false;
+  }
+
+  V8_INLINE static constexpr bool IsTrivialWeakReferenceValue(
+      Tagged<HeapObject> host, Tagged<HeapObject> heap_object);
+
  protected:
   using ConcurrentHeapVisitor<int, ConcreteVisitor>::concrete_visitor;
 
@@ -191,20 +194,9 @@ class MarkingVisitorBase : public ConcurrentHeapVisitor<int, ConcreteVisitor> {
 
   V8_INLINE void VisitDescriptorsForMap(Tagged<Map> map);
 
-  template <typename T, typename TBodyDescriptor = typename T::BodyDescriptor>
-  int VisitEmbedderTracingSubclass(Tagged<Map> map, Tagged<T> object);
-  template <typename T, typename TBodyDescriptor>
-  int VisitEmbedderTracingSubClassWithEmbedderTracing(Tagged<Map> map,
-                                                      Tagged<T> object);
-  template <typename T, typename TBodyDescriptor>
-  int VisitEmbedderTracingSubClassNoEmbedderTracing(Tagged<Map> map,
-                                                    Tagged<T> object);
-
   V8_INLINE int VisitFixedArrayWithProgressBar(Tagged<Map> map,
                                                Tagged<FixedArray> object,
                                                ProgressBar& progress_bar);
-  V8_INLINE int VisitFixedArrayRegularly(Tagged<Map> map,
-                                         Tagged<FixedArray> object);
 
   // Methods needed for supporting code flushing.
   bool ShouldFlushCode(Tagged<SharedFunctionInfo> sfi) const;
@@ -219,7 +211,6 @@ class MarkingVisitorBase : public ConcurrentHeapVisitor<int, ConcreteVisitor> {
   Heap* const heap_;
   const unsigned mark_compact_epoch_;
   const base::EnumSet<CodeFlushMode> code_flush_mode_;
-  const bool trace_embedder_fields_;
   const bool should_keep_ages_unchanged_;
   const uint16_t code_flushing_increase_;
   const bool isolate_in_background_;
@@ -244,13 +235,12 @@ class FullMarkingVisitorBase : public MarkingVisitorBase<ConcreteVisitor> {
                          WeakObjects::Local* local_weak_objects, Heap* heap,
                          unsigned mark_compact_epoch,
                          base::EnumSet<CodeFlushMode> code_flush_mode,
-                         bool trace_embedder_fields,
                          bool should_keep_ages_unchanged,
                          uint16_t code_flushing_increase)
       : MarkingVisitorBase<ConcreteVisitor>(
             local_marking_worklists, local_weak_objects, heap,
-            mark_compact_epoch, code_flush_mode, trace_embedder_fields,
-            should_keep_ages_unchanged, code_flushing_increase),
+            mark_compact_epoch, code_flush_mode, should_keep_ages_unchanged,
+            code_flushing_increase),
         marking_state_(heap->marking_state()) {}
 
   V8_INLINE void AddStrongReferenceForReferenceSummarizer(

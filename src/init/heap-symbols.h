@@ -42,6 +42,7 @@
   V(_, fallback_string, "fallback")                                 \
   V(_, first_string, "first")                                       \
   V(_, firstDay_string, "firstDay")                                 \
+  V(_, firstDayOfWeek_string, "firstDayOfWeek")                     \
   V(_, floor_string, "floor")                                       \
   V(_, format_string, "format")                                     \
   V(_, fraction_string, "fraction")                                 \
@@ -486,14 +487,13 @@
   V(_, uninitialized_symbol)                          \
   V(_, megamorphic_symbol)                            \
   V(_, elements_transition_symbol)                    \
-  V(_, object_clone_transition_symbol)                \
+  V(_, clone_object_ic_transition_symbol)             \
+  V(_, object_assign_clone_transition_symbol)         \
   V(_, mega_dom_symbol)
 
 #define NOT_IMPORTANT_PRIVATE_SYMBOL_LIST_GENERATOR(V, _) \
   V(_, array_buffer_wasm_memory_symbol)                   \
   V(_, call_site_info_symbol)                             \
-  V(_, console_context_id_symbol)                         \
-  V(_, console_context_name_symbol)                       \
   V(_, class_fields_symbol)                               \
   V(_, class_positions_symbol)                            \
   V(_, error_end_pos_symbol)                              \
@@ -643,67 +643,73 @@
   F(SCAVENGER_SCAVENGE_FINALIZE)                     \
   F(SCAVENGER_SWEEP_ARRAY_BUFFERS)
 
-#define MC_MAIN_THREAD_SCOPES(F)                \
-  F(MARK_COMPACTOR)                             \
-  TOP_MC_SCOPES(F)                              \
-  F(MC_CLEAR_DEPENDENT_CODE)                    \
-  F(MC_CLEAR_EXTERNAL_STRING_TABLE)             \
-  F(MC_CLEAR_STRING_FORWARDING_TABLE)           \
-  F(MC_CLEAR_FLUSHABLE_BYTECODE)                \
-  F(MC_CLEAR_FLUSHED_JS_FUNCTIONS)              \
-  F(MC_CLEAR_JOIN_JOB)                          \
-  F(MC_CLEAR_MAPS)                              \
-  F(MC_CLEAR_SLOTS_BUFFER)                      \
-  F(MC_CLEAR_STRING_TABLE)                      \
-  F(MC_CLEAR_WEAK_COLLECTIONS)                  \
-  F(MC_CLEAR_WEAK_GLOBAL_HANDLES)               \
-  F(MC_CLEAR_WEAK_LISTS)                        \
-  F(MC_CLEAR_WEAK_REFERENCES)                   \
-  F(MC_SWEEP_EXTERNAL_POINTER_TABLE)            \
-  F(MC_SWEEP_TRUSTED_POINTER_TABLE)             \
-  F(MC_SWEEP_CODE_POINTER_TABLE)                \
-  F(MC_COMPLETE_SWEEP_ARRAY_BUFFERS)            \
-  F(MC_COMPLETE_SWEEPING)                       \
-  F(MC_EVACUATE_CANDIDATES)                     \
-  F(MC_EVACUATE_CLEAN_UP)                       \
-  F(MC_EVACUATE_COPY)                           \
-  F(MC_EVACUATE_COPY_PARALLEL)                  \
-  F(MC_EVACUATE_EPILOGUE)                       \
-  F(MC_EVACUATE_PROLOGUE)                       \
-  F(MC_EVACUATE_REBALANCE)                      \
-  F(MC_EVACUATE_UPDATE_POINTERS)                \
-  F(MC_EVACUATE_UPDATE_POINTERS_CLIENT_HEAPS)   \
-  F(MC_EVACUATE_UPDATE_POINTERS_PARALLEL)       \
-  F(MC_EVACUATE_UPDATE_POINTERS_SLOTS_MAIN)     \
-  F(MC_EVACUATE_UPDATE_POINTERS_TO_NEW_ROOTS)   \
-  F(MC_EVACUATE_UPDATE_POINTERS_WEAK)           \
-  F(MC_EVACUATE_UPDATE_POINTERS_POINTER_TABLES) \
-  F(MC_FINISH_SWEEP_ARRAY_BUFFERS)              \
-  F(MC_MARK_CLIENT_HEAPS)                       \
-  F(MC_MARK_EMBEDDER_PROLOGUE)                  \
-  F(MC_MARK_EMBEDDER_TRACING)                   \
-  F(MC_MARK_FINISH_INCREMENTAL)                 \
-  F(MC_MARK_FULL_CLOSURE_PARALLEL)              \
-  F(MC_MARK_FULL_CLOSURE_PARALLEL_JOIN)         \
-  F(MC_MARK_FULL_CLOSURE_SERIAL)                \
-  F(MC_MARK_RETAIN_MAPS)                        \
-  F(MC_MARK_ROOTS)                              \
-  F(MC_MARK_FULL_CLOSURE)                       \
-  F(MC_MARK_WEAK_CLOSURE_EPHEMERON_MARKING)     \
-  F(MC_MARK_WEAK_CLOSURE_EPHEMERON_LINEAR)      \
-  F(MC_MARK_VERIFY)                             \
-  F(MC_SWEEP_CODE)                              \
-  F(MC_SWEEP_CODE_LO)                           \
-  F(MC_SWEEP_LO)                                \
-  F(MC_SWEEP_MAP)                               \
-  F(MC_SWEEP_NEW)                               \
-  F(MC_SWEEP_NEW_LO)                            \
-  F(MC_SWEEP_OLD)                               \
-  F(MC_SWEEP_SHARED)                            \
-  F(MC_SWEEP_SHARED_LO)                         \
-  F(MC_SWEEP_TRUSTED)                           \
-  F(MC_SWEEP_TRUSTED_LO)                        \
-  F(MC_SWEEP_START_JOBS)
+#define MC_MAIN_THREAD_SCOPES(F)                 \
+  F(MARK_COMPACTOR)                              \
+  TOP_MC_SCOPES(F)                               \
+  F(MC_CLEAR_DEPENDENT_CODE)                     \
+  F(MC_CLEAR_EXTERNAL_STRING_TABLE)              \
+  F(MC_CLEAR_STRING_FORWARDING_TABLE)            \
+  F(MC_CLEAR_FLUSHABLE_BYTECODE)                 \
+  F(MC_CLEAR_FLUSHED_JS_FUNCTIONS)               \
+  F(MC_CLEAR_JOIN_JOB)                           \
+  F(MC_CLEAR_JS_WEAK_REFERENCES)                 \
+  F(MC_CLEAR_MAPS)                               \
+  F(MC_CLEAR_SLOTS_BUFFER)                       \
+  F(MC_CLEAR_STRING_TABLE)                       \
+  F(MC_CLEAR_WEAK_COLLECTIONS)                   \
+  F(MC_CLEAR_WEAK_GLOBAL_HANDLES)                \
+  F(MC_CLEAR_WEAK_LISTS)                         \
+  F(MC_CLEAR_WEAK_REFERENCES_FILTER_NON_TRIVIAL) \
+  F(MC_CLEAR_WEAK_REFERENCES_JOIN_FILTER_JOB)    \
+  F(MC_CLEAR_WEAK_REFERENCES_NON_TRIVIAL)        \
+  F(MC_CLEAR_WEAK_REFERENCES_TRIVIAL)            \
+  F(MC_SWEEP_EXTERNAL_POINTER_TABLE)             \
+  F(MC_SWEEP_TRUSTED_POINTER_TABLE)              \
+  F(MC_SWEEP_CODE_POINTER_TABLE)                 \
+  F(MC_SWEEP_JS_DISPATCH_TABLE)                  \
+  F(MC_COMPLETE_SWEEP_ARRAY_BUFFERS)             \
+  F(MC_COMPLETE_SWEEPING)                        \
+  F(MC_EVACUATE_CANDIDATES)                      \
+  F(MC_EVACUATE_CLEAN_UP)                        \
+  F(MC_EVACUATE_COPY)                            \
+  F(MC_EVACUATE_COPY_PARALLEL)                   \
+  F(MC_EVACUATE_EPILOGUE)                        \
+  F(MC_EVACUATE_PROLOGUE)                        \
+  F(MC_EVACUATE_REBALANCE)                       \
+  F(MC_EVACUATE_UPDATE_POINTERS)                 \
+  F(MC_EVACUATE_UPDATE_POINTERS_CLIENT_HEAPS)    \
+  F(MC_EVACUATE_UPDATE_POINTERS_PARALLEL)        \
+  F(MC_EVACUATE_UPDATE_POINTERS_SLOTS_MAIN)      \
+  F(MC_EVACUATE_UPDATE_POINTERS_TO_NEW_ROOTS)    \
+  F(MC_EVACUATE_UPDATE_POINTERS_WEAK)            \
+  F(MC_EVACUATE_UPDATE_POINTERS_POINTER_TABLES)  \
+  F(MC_FINISH_SWEEP_ARRAY_BUFFERS)               \
+  F(MC_MARK_CLIENT_HEAPS)                        \
+  F(MC_MARK_EMBEDDER_PROLOGUE)                   \
+  F(MC_MARK_EMBEDDER_TRACING)                    \
+  F(MC_MARK_FINISH_INCREMENTAL)                  \
+  F(MC_MARK_FULL_CLOSURE_PARALLEL)               \
+  F(MC_MARK_FULL_CLOSURE_PARALLEL_JOIN)          \
+  F(MC_MARK_FULL_CLOSURE_SERIAL)                 \
+  F(MC_MARK_RETAIN_MAPS)                         \
+  F(MC_MARK_ROOTS)                               \
+  F(MC_MARK_FULL_CLOSURE)                        \
+  F(MC_MARK_WEAK_CLOSURE_EPHEMERON_MARKING)      \
+  F(MC_MARK_WEAK_CLOSURE_EPHEMERON_LINEAR)       \
+  F(MC_MARK_VERIFY)                              \
+  F(MC_SWEEP_CODE)                               \
+  F(MC_SWEEP_CODE_LO)                            \
+  F(MC_SWEEP_LO)                                 \
+  F(MC_SWEEP_MAP)                                \
+  F(MC_SWEEP_NEW)                                \
+  F(MC_SWEEP_NEW_LO)                             \
+  F(MC_SWEEP_OLD)                                \
+  F(MC_SWEEP_SHARED)                             \
+  F(MC_SWEEP_SHARED_LO)                          \
+  F(MC_SWEEP_TRUSTED)                            \
+  F(MC_SWEEP_TRUSTED_LO)                         \
+  F(MC_SWEEP_START_JOBS)                         \
+  F(MC_WEAKNESS_HANDLING)
 
 #define TRACER_SCOPES(F)                 \
   MC_INCREMENTAL_SCOPES(F)               \

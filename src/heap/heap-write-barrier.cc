@@ -6,6 +6,8 @@
 
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/heap/marking-barrier-inl.h"
+#include "src/heap/memory-chunk-layout.h"
+#include "src/heap/memory-chunk.h"
 #include "src/heap/remembered-set.h"
 #include "src/objects/code-inl.h"
 #include "src/objects/descriptor-array.h"
@@ -64,14 +66,6 @@ void WriteBarrier::MarkingSlowFromGlobalHandle(Tagged<HeapObject> value) {
 }
 
 // static
-void WriteBarrier::MarkingSlowFromInternalFields(Heap* heap,
-                                                 Tagged<JSObject> host) {
-  if (auto* cpp_heap = heap->cpp_heap()) {
-    CppHeap::From(cpp_heap)->WriteBarrier(host);
-  }
-}
-
-// static
 void WriteBarrier::MarkingSlowFromCppHeapWrappable(Heap* heap, void* object) {
   if (auto* cpp_heap = heap->cpp_heap()) {
     CppHeap::From(cpp_heap)->WriteBarrier(object);
@@ -93,6 +87,17 @@ void WriteBarrier::SharedSlow(Tagged<InstructionStream> host,
   base::MutexGuard write_scope(info.page_metadata->mutex());
   RememberedSet<OLD_TO_SHARED>::InsertTyped(info.page_metadata, info.slot_type,
                                             info.offset);
+}
+
+void WriteBarrier::Shared(Tagged<TrustedObject> host, ProtectedPointerSlot slot,
+                          Tagged<TrustedObject> value) {
+  DCHECK(MemoryChunk::FromHeapObject(value)->InWritableSharedSpace());
+  if (!MemoryChunk::FromHeapObject(host)->InWritableSharedSpace()) {
+    MutablePageMetadata* host_chunk_metadata =
+        MutablePageMetadata::FromHeapObject(host);
+    RememberedSet<TRUSTED_TO_SHARED_TRUSTED>::Insert<AccessMode::NON_ATOMIC>(
+        host_chunk_metadata, host_chunk_metadata->Offset(slot.address()));
+  }
 }
 
 void WriteBarrier::MarkingSlow(Tagged<JSArrayBuffer> host,
@@ -121,7 +126,7 @@ void WriteBarrier::MarkingSlow(Tagged<TrustedObject> host,
 }
 
 int WriteBarrier::MarkingFromCode(Address raw_host, Address raw_slot) {
-  Tagged<HeapObject> host = HeapObject::cast(Tagged<Object>(raw_host));
+  Tagged<HeapObject> host = Cast<HeapObject>(Tagged<Object>(raw_host));
   MaybeObjectSlot slot(raw_slot);
   Address value = (*slot).ptr();
 
@@ -155,7 +160,7 @@ int WriteBarrier::MarkingFromCode(Address raw_host, Address raw_slot) {
 int WriteBarrier::IndirectPointerMarkingFromCode(Address raw_host,
                                                  Address raw_slot,
                                                  Address raw_tag) {
-  Tagged<HeapObject> host = HeapObject::cast(Tagged<Object>(raw_host));
+  Tagged<HeapObject> host = Cast<HeapObject>(Tagged<Object>(raw_host));
   IndirectPointerTag tag = static_cast<IndirectPointerTag>(raw_tag);
   DCHECK(IsValidIndirectPointerTag(tag));
   IndirectPointerSlot slot(raw_slot, tag);
@@ -174,7 +179,7 @@ int WriteBarrier::IndirectPointerMarkingFromCode(Address raw_host,
 }
 
 int WriteBarrier::SharedMarkingFromCode(Address raw_host, Address raw_slot) {
-  Tagged<HeapObject> host = HeapObject::cast(Tagged<Object>(raw_host));
+  Tagged<HeapObject> host = Cast<HeapObject>(Tagged<Object>(raw_host));
   MaybeObjectSlot slot(raw_slot);
   Address raw_value = (*slot).ptr();
   Tagged<MaybeObject> value(raw_value);
@@ -201,7 +206,7 @@ int WriteBarrier::SharedMarkingFromCode(Address raw_host, Address raw_slot) {
 }
 
 int WriteBarrier::SharedFromCode(Address raw_host, Address raw_slot) {
-  Tagged<HeapObject> host = HeapObject::cast(Tagged<Object>(raw_host));
+  Tagged<HeapObject> host = Cast<HeapObject>(Tagged<Object>(raw_host));
 
   if (!InWritableSharedSpace(host)) {
     Heap::SharedHeapBarrierSlow(host, raw_slot);

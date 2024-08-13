@@ -97,7 +97,7 @@ void CodeStubAssembler::HandleBreakOnNode() {
 void CodeStubAssembler::Dcheck(const BranchGenerator& branch,
                                const char* message, const char* file, int line,
                                std::initializer_list<ExtraNode> extra_nodes,
-                               SourceLocation loc) {
+                               const SourceLocation& loc) {
 #if defined(DEBUG)
   if (v8_flags.debug_code) {
     Check(branch, message, file, line, extra_nodes, loc);
@@ -108,7 +108,7 @@ void CodeStubAssembler::Dcheck(const BranchGenerator& branch,
 void CodeStubAssembler::Dcheck(const NodeGenerator<BoolT>& condition_body,
                                const char* message, const char* file, int line,
                                std::initializer_list<ExtraNode> extra_nodes,
-                               SourceLocation loc) {
+                               const SourceLocation& loc) {
 #if defined(DEBUG)
   if (v8_flags.debug_code) {
     Check(condition_body, message, file, line, extra_nodes, loc);
@@ -119,7 +119,7 @@ void CodeStubAssembler::Dcheck(const NodeGenerator<BoolT>& condition_body,
 void CodeStubAssembler::Dcheck(TNode<Word32T> condition_node,
                                const char* message, const char* file, int line,
                                std::initializer_list<ExtraNode> extra_nodes,
-                               SourceLocation loc) {
+                               const SourceLocation& loc) {
 #if defined(DEBUG)
   if (v8_flags.debug_code) {
     Check(condition_node, message, file, line, extra_nodes, loc);
@@ -130,7 +130,7 @@ void CodeStubAssembler::Dcheck(TNode<Word32T> condition_node,
 void CodeStubAssembler::Check(const BranchGenerator& branch,
                               const char* message, const char* file, int line,
                               std::initializer_list<ExtraNode> extra_nodes,
-                              SourceLocation loc) {
+                              const SourceLocation& loc) {
   Label ok(this);
   Label not_ok(this, Label::kDeferred);
   if (message != nullptr) {
@@ -154,7 +154,7 @@ void CodeStubAssembler::Check(const BranchGenerator& branch,
 void CodeStubAssembler::Check(const NodeGenerator<BoolT>& condition_body,
                               const char* message, const char* file, int line,
                               std::initializer_list<ExtraNode> extra_nodes,
-                              SourceLocation loc) {
+                              const SourceLocation& loc) {
   BranchGenerator branch = [=](Label* ok, Label* not_ok) {
     TNode<BoolT> condition = condition_body();
     Branch(condition, ok, not_ok);
@@ -166,7 +166,7 @@ void CodeStubAssembler::Check(const NodeGenerator<BoolT>& condition_body,
 void CodeStubAssembler::Check(TNode<Word32T> condition_node,
                               const char* message, const char* file, int line,
                               std::initializer_list<ExtraNode> extra_nodes,
-                              SourceLocation loc) {
+                              const SourceLocation& loc) {
   BranchGenerator branch = [=](Label* ok, Label* not_ok) {
     Branch(condition_node, ok, not_ok);
   };
@@ -199,7 +199,7 @@ void CodeStubAssembler::FastCheck(TNode<BoolT> condition) {
 
 void CodeStubAssembler::FailAssert(
     const char* message, const std::vector<FileAndLine>& files_and_lines,
-    std::initializer_list<ExtraNode> extra_nodes, SourceLocation loc) {
+    std::initializer_list<ExtraNode> extra_nodes, const SourceLocation& loc) {
   DCHECK_NOT_NULL(message);
   base::EmbeddedVector<char, 1024> chars;
   std::stringstream stream;
@@ -1282,7 +1282,7 @@ TNode<Smi> CodeStubAssembler::SmiLexicographicCompare(TNode<Smi> x,
   TNode<ExternalReference> smi_lexicographic_compare =
       ExternalConstant(ExternalReference::smi_lexicographic_compare_function());
   TNode<ExternalReference> isolate_ptr =
-      ExternalConstant(ExternalReference::isolate_address(isolate()));
+      ExternalConstant(ExternalReference::isolate_address());
   return CAST(CallCFunction(smi_lexicographic_compare, MachineType::AnyTagged(),
                             std::make_pair(MachineType::Pointer(), isolate_ptr),
                             std::make_pair(MachineType::AnyTagged(), x),
@@ -1294,7 +1294,7 @@ TNode<Object> CodeStubAssembler::GetCoverageInfo(
   TNode<ExternalReference> f =
       ExternalConstant(ExternalReference::debug_get_coverage_info_function());
   TNode<ExternalReference> isolate_ptr =
-      ExternalConstant(ExternalReference::isolate_address(isolate()));
+      ExternalConstant(ExternalReference::isolate_address());
   return CAST(CallCFunction(f, MachineType::AnyTagged(),
                             std::make_pair(MachineType::Pointer(), isolate_ptr),
                             std::make_pair(MachineType::TaggedPointer(), sfi)));
@@ -2011,7 +2011,7 @@ TNode<Float64T> CodeStubAssembler::LoadHeapNumberValue(
 TNode<Map> CodeStubAssembler::GetInstanceTypeMap(InstanceType instance_type) {
   RootIndex map_idx = Map::TryGetMapRootIdxFor(instance_type).value();
   return HeapConstantNoHole(
-      Handle<Map>::cast(ReadOnlyRoots(isolate()).handle_at(map_idx)));
+      i::Cast<Map>(ReadOnlyRoots(isolate()).handle_at(map_idx)));
 }
 
 TNode<Map> CodeStubAssembler::LoadMap(TNode<HeapObject> object) {
@@ -2436,7 +2436,7 @@ TNode<Uint32T> CodeStubAssembler::LoadNameRawHash(TNode<Name> name) {
     TNode<ExternalReference> function =
         ExternalConstant(ExternalReference::raw_hash_from_forward_table());
     const TNode<ExternalReference> isolate_ptr =
-        ExternalConstant(ExternalReference::isolate_address(isolate()));
+        ExternalConstant(ExternalReference::isolate_address());
     TNode<Uint32T> result = UncheckedCast<Uint32T>(CallCFunction(
         function, MachineType::Uint32(),
         std::make_pair(MachineType::Pointer(), isolate_ptr),
@@ -3259,15 +3259,15 @@ TNode<ScopeInfo> CodeStubAssembler::LoadScopeInfo(TNode<Context> context) {
 
 TNode<BoolT> CodeStubAssembler::LoadScopeInfoHasExtensionField(
     TNode<ScopeInfo> scope_info) {
-  TNode<Int32T> value =
-      LoadAndUntagToWord32ObjectField(scope_info, ScopeInfo::kFlagsOffset);
+  TNode<Uint32T> value =
+      LoadObjectField<Uint32T>(scope_info, ScopeInfo::kFlagsOffset);
   return IsSetWord32<ScopeInfo::HasContextExtensionSlotBit>(value);
 }
 
 TNode<BoolT> CodeStubAssembler::LoadScopeInfoClassScopeHasPrivateBrand(
     TNode<ScopeInfo> scope_info) {
-  TNode<Int32T> value =
-      LoadAndUntagToWord32ObjectField(scope_info, ScopeInfo::kFlagsOffset);
+  TNode<Uint32T> value =
+      LoadObjectField<Uint32T>(scope_info, ScopeInfo::kFlagsOffset);
   return IsSetWord32<ScopeInfo::ClassScopeHasPrivateBrandBit>(value);
 }
 
@@ -3531,6 +3531,9 @@ TNode<BytecodeArray> CodeStubAssembler::LoadSharedFunctionInfoBytecodeArray(
   Goto(&done);
 
   BIND(&done);
+  // We need an explicit check here since we use the
+  // kUnknownIndirectPointerTag above and so don't have any type guarantees.
+  CSA_SBXCHECK(this, HasInstanceType(var_result.value(), BYTECODE_ARRAY_TYPE));
   return CAST(var_result.value());
 }
 
@@ -3674,7 +3677,7 @@ void CodeStubAssembler::StoreObjectFieldRoot(TNode<HeapObject> object,
 
 template <typename TIndex>
 void CodeStubAssembler::StoreFixedArrayOrPropertyArrayElement(
-    TNode<UnionT<FixedArray, PropertyArray>> object, TNode<TIndex> index_node,
+    TNode<UnionOf<FixedArray, PropertyArray>> object, TNode<TIndex> index_node,
     TNode<Object> value, WriteBarrierMode barrier_mode, int additional_offset) {
   // TODO(v8:9708): Do we want to keep both IntPtrT and UintPtrT variants?
   static_assert(std::is_same<TIndex, Smi>::value ||
@@ -3729,17 +3732,17 @@ void CodeStubAssembler::StoreFixedArrayOrPropertyArrayElement(
 
 template V8_EXPORT_PRIVATE void
 CodeStubAssembler::StoreFixedArrayOrPropertyArrayElement<Smi>(
-    TNode<UnionT<FixedArray, PropertyArray>>, TNode<Smi>, TNode<Object>,
+    TNode<UnionOf<FixedArray, PropertyArray>>, TNode<Smi>, TNode<Object>,
     WriteBarrierMode, int);
 
 template V8_EXPORT_PRIVATE void
 CodeStubAssembler::StoreFixedArrayOrPropertyArrayElement<IntPtrT>(
-    TNode<UnionT<FixedArray, PropertyArray>>, TNode<IntPtrT>, TNode<Object>,
+    TNode<UnionOf<FixedArray, PropertyArray>>, TNode<IntPtrT>, TNode<Object>,
     WriteBarrierMode, int);
 
 template V8_EXPORT_PRIVATE void
 CodeStubAssembler::StoreFixedArrayOrPropertyArrayElement<UintPtrT>(
-    TNode<UnionT<FixedArray, PropertyArray>>, TNode<UintPtrT>, TNode<Object>,
+    TNode<UnionOf<FixedArray, PropertyArray>>, TNode<UintPtrT>, TNode<Object>,
     WriteBarrierMode, int);
 
 template <typename TIndex>
@@ -7116,15 +7119,15 @@ TNode<BoolT> CodeStubAssembler::IsExecutionTerminating() {
 }
 
 TNode<Object> CodeStubAssembler::GetContinuationPreservedEmbedderData() {
-  TNode<ExternalReference> continuation_data = ExternalConstant(
-      ExternalReference::continuation_preserved_embedder_data(isolate()));
+  TNode<ExternalReference> continuation_data =
+      IsolateField(IsolateFieldId::kContinuationPreservedEmbedderData);
   return LoadFullTagged(continuation_data);
 }
 
 void CodeStubAssembler::SetContinuationPreservedEmbedderData(
     TNode<Object> value) {
-  TNode<ExternalReference> continuation_data = ExternalConstant(
-      ExternalReference::continuation_preserved_embedder_data(isolate()));
+  TNode<ExternalReference> continuation_data =
+      IsolateField(IsolateFieldId::kContinuationPreservedEmbedderData);
   StoreFullTaggedNoWriteBarrier(continuation_data, value);
 }
 
@@ -9253,7 +9256,7 @@ void CodeStubAssembler::TryToName(TNode<Object> key, Label* if_keyisindex,
             TNode<ExternalReference> function = ExternalConstant(
                 ExternalReference::raw_hash_from_forward_table());
             const TNode<ExternalReference> isolate_ptr =
-                ExternalConstant(ExternalReference::isolate_address(isolate()));
+                ExternalConstant(ExternalReference::isolate_address());
             TNode<Uint32T> result = UncheckedCast<Uint32T>(CallCFunction(
                 function, MachineType::Uint32(),
                 std::make_pair(MachineType::Pointer(), isolate_ptr),
@@ -9275,7 +9278,7 @@ void CodeStubAssembler::TryToName(TNode<Object> key, Label* if_keyisindex,
             TNode<ExternalReference> function = ExternalConstant(
                 ExternalReference::string_from_forward_table());
             const TNode<ExternalReference> isolate_ptr =
-                ExternalConstant(ExternalReference::isolate_address(isolate()));
+                ExternalConstant(ExternalReference::isolate_address());
             TNode<Object> result = CAST(CallCFunction(
                 function, MachineType::AnyTagged(),
                 std::make_pair(MachineType::Pointer(), isolate_ptr),
@@ -9381,7 +9384,7 @@ void CodeStubAssembler::TryInternalizeString(
   TNode<ExternalReference> function = ExternalConstant(
       ExternalReference::try_string_to_index_or_lookup_existing());
   const TNode<ExternalReference> isolate_ptr =
-      ExternalConstant(ExternalReference::isolate_address(isolate()));
+      ExternalConstant(ExternalReference::isolate_address());
   TNode<Object> result =
       CAST(CallCFunction(function, MachineType::AnyTagged(),
                          std::make_pair(MachineType::Pointer(), isolate_ptr),
@@ -9819,8 +9822,7 @@ void CodeStubAssembler::NameDictionaryLookupWithForwardIndex(
     func_ref = mode == kFindInsertionIndex ? ref0 : ref1;
   }
   const TNode<ER> function = ExternalConstant(func_ref);
-  const TNode<ER> isolate_ptr =
-      ExternalConstant(ER::isolate_address(isolate()));
+  const TNode<ER> isolate_ptr = ExternalConstant(ER::isolate_address());
   TNode<IntPtrT> entry = UncheckedCast<IntPtrT>(
       CallCFunction(function, MachineType::IntPtr(),
                     std::make_pair(MachineType::Pointer(), isolate_ptr),
@@ -9857,7 +9859,7 @@ TNode<Word32T> CodeStubAssembler::ComputeSeededHash(TNode<IntPtrT> key) {
   const TNode<ExternalReference> function_addr =
       ExternalConstant(ExternalReference::compute_integer_hash());
   const TNode<ExternalReference> isolate_ptr =
-      ExternalConstant(ExternalReference::isolate_address(isolate()));
+      ExternalConstant(ExternalReference::isolate_address());
 
   MachineType type_ptr = MachineType::Pointer();
   MachineType type_uint32 = MachineType::Uint32();
@@ -11006,7 +11008,7 @@ template void CodeStubAssembler::LoadPropertyFromDictionary(
 
 // |value| is the property backing store's contents, which is either a value or
 // an accessor pair, as specified by |details|. |holder| is a JSObject or a
-// PropertyCell (TODO: use UnionT). Returns either the original value, or the
+// PropertyCell (TODO: use Union). Returns either the original value, or the
 // result of the getter call.
 TNode<Object> CodeStubAssembler::CallGetterIfAccessor(
     TNode<Object> value, TNode<HeapObject> holder, TNode<Uint32T> details,
@@ -13207,11 +13209,20 @@ void CodeStubAssembler::TrapAllocationMemento(TNode<JSObject> object,
   {
     TNode<IntPtrT> page_flags = Load<IntPtrT>(
         object_page_header, IntPtrConstant(MemoryChunkLayout::kFlagsOffset));
-    GotoIf(WordEqual(
-               WordAnd(page_flags,
-                       IntPtrConstant(MemoryChunk::kIsInYoungGenerationMask)),
-               IntPtrConstant(0)),
-           &no_memento_found);
+    if (v8_flags.sticky_mark_bits) {
+      // Pages with only old objects contain no mementos.
+      GotoIfNot(
+          WordEqual(WordAnd(page_flags,
+                            IntPtrConstant(MemoryChunk::CONTAINS_ONLY_OLD)),
+                    IntPtrConstant(0)),
+          &no_memento_found);
+    } else {
+      GotoIf(WordEqual(
+                 WordAnd(page_flags,
+                         IntPtrConstant(MemoryChunk::kIsInYoungGenerationMask)),
+                 IntPtrConstant(0)),
+             &no_memento_found);
+    }
     // TODO(v8:11799): Support allocation memento for a large object by
     // allocating additional word for the memento after the large object.
     GotoIf(WordNotEqual(WordAnd(page_flags,
@@ -13509,7 +13520,7 @@ template V8_EXPORT_PRIVATE TNode<RawPtrT> CodeStubAssembler::BuildFastLoop<
 
 template <typename TIndex>
 void CodeStubAssembler::BuildFastArrayForEach(
-    TNode<UnionT<UnionT<FixedArray, PropertyArray>, HeapObject>> array,
+    TNode<UnionOf<UnionOf<FixedArray, PropertyArray>, HeapObject>> array,
     ElementsKind kind, TNode<TIndex> first_element_inclusive,
     TNode<TIndex> last_element_exclusive, const FastArrayForEachBody& body,
     LoopUnrollingMode loop_unrolling_mode, ForEachDirection direction) {
@@ -13731,11 +13742,13 @@ TNode<Context> CodeStubAssembler::GotoIfHasContextExtensionUpToDepth(
     // ScriptContext - however, it's unrelated to the sloppy eval variable
     // extension. We should never iterate through a ScriptContext here.
     auto scope_info = LoadScopeInfo(cur_context.value());
-    TNode<Int32T> flags =
-        LoadAndUntagToWord32ObjectField(scope_info, ScopeInfo::kFlagsOffset);
+    TNode<Uint32T> flags =
+        LoadObjectField<Uint32T>(scope_info, ScopeInfo::kFlagsOffset);
     auto scope_type = DecodeWord32<ScopeInfo::ScopeTypeBits>(flags);
     CSA_DCHECK(this, Word32NotEqual(scope_type,
                                     Int32Constant(ScopeType::SCRIPT_SCOPE)));
+    CSA_DCHECK(this, Word32NotEqual(scope_type,
+                                    Int32Constant(ScopeType::REPL_MODE_SCOPE)));
 #endif
 
     // Check if context has an extension slot.
@@ -14808,16 +14821,16 @@ TNode<Boolean> CodeStubAssembler::StrictEqual(
   // Pseudo-code for the algorithm below:
   //
   // if (lhs == rhs) {
-  //   if (lhs->IsHeapNumber()) return HeapNumber::cast(lhs)->value() != NaN;
+  //   if (lhs->IsHeapNumber()) return Cast<HeapNumber>(lhs)->value() != NaN;
   //   return true;
   // }
   // if (!IsSmi(lhs)) {
   //   if (lhs->IsHeapNumber()) {
   //     if (IsSmi(rhs)) {
-  //       return Smi::ToInt(rhs) == HeapNumber::cast(lhs)->value();
+  //       return Smi::ToInt(rhs) == Cast<HeapNumber>(lhs)->value();
   //     } else if (rhs->IsHeapNumber()) {
-  //       return HeapNumber::cast(rhs)->value() ==
-  //       HeapNumber::cast(lhs)->value();
+  //       return Cast<HeapNumber>(rhs)->value() ==
+  //       Cast<HeapNumber>(lhs)->value();
   //     } else {
   //       return false;
   //     }
@@ -14847,7 +14860,7 @@ TNode<Boolean> CodeStubAssembler::StrictEqual(
   //     return false;
   //   } else {
   //     if (rhs->IsHeapNumber()) {
-  //       return Smi::ToInt(lhs) == HeapNumber::cast(rhs)->value();
+  //       return Smi::ToInt(lhs) == Cast<HeapNumber>(rhs)->value();
   //     } else {
   //       return false;
   //     }
@@ -16217,7 +16230,7 @@ CodeStubAssembler::LoadVariableLengthJSArrayBufferViewByteLength(
     const TNode<ExternalReference> byte_length_function =
         ExternalConstant(ExternalReference::gsab_byte_length());
     TNode<ExternalReference> isolate_ptr =
-        ExternalConstant(ExternalReference::isolate_address(isolate()));
+        ExternalConstant(ExternalReference::isolate_address());
     TNode<UintPtrT> buffer_byte_length = UncheckedCast<UintPtrT>(
         CallCFunction(byte_length_function, MachineType::UintPtr(),
                       std::make_pair(MachineType::Pointer(), isolate_ptr),
@@ -16716,8 +16729,7 @@ TNode<Code> CodeStubAssembler::LoadBuiltin(TNode<Smi> builtin_id) {
   TNode<IntPtrT> offset =
       ElementOffsetFromIndex(SmiToBInt(builtin_id), SYSTEM_POINTER_ELEMENTS);
 
-  TNode<ExternalReference> table =
-      ExternalConstant(ExternalReference::builtins_table(isolate()));
+  TNode<ExternalReference> table = IsolateField(IsolateFieldId::kBuiltinTable);
 
   return CAST(BitcastWordToTagged(Load<RawPtrT>(table, offset)));
 }
@@ -17238,7 +17250,7 @@ TNode<Smi> CodeStubAssembler::RefillMathRandom(
   const TNode<ExternalReference> refill_math_random =
       ExternalConstant(ExternalReference::refill_math_random());
   const TNode<ExternalReference> isolate_ptr =
-      ExternalConstant(ExternalReference::isolate_address(isolate()));
+      ExternalConstant(ExternalReference::isolate_address());
   MachineType type_tagged = MachineType::AnyTagged();
   MachineType type_ptr = MachineType::Pointer();
 
@@ -17262,7 +17274,7 @@ void CodeStubAssembler::RemoveFinalizationRegistryCellFromUnregisterTokenMap(
       ExternalReference::
           js_finalization_registry_remove_cell_from_unregister_token_map());
   const TNode<ExternalReference> isolate_ptr =
-      ExternalConstant(ExternalReference::isolate_address(isolate()));
+      ExternalConstant(ExternalReference::isolate_address());
 
   CallCFunction(remove_cell, MachineType::Pointer(),
                 std::make_pair(MachineType::Pointer(), isolate_ptr),
@@ -18316,18 +18328,18 @@ TNode<FixedArray> CodeStubAssembler::ArrayListElements(TNode<ArrayList> array) {
 }
 
 #if V8_ENABLE_WEBASSEMBLY
-TNode<RawPtrT> CodeStubAssembler::SwitchToTheCentralStack(
-    TNode<Object> receiver) {
+TNode<RawPtrT> CodeStubAssembler::SwitchToTheCentralStack() {
   TNode<WordT> stack_limit_slot = IntPtrAdd(
       LoadFramePointer(),
       IntPtrConstant(WasmToJSWrapperConstants::kSecondaryStackLimitOffset));
 
   TNode<ExternalReference> do_switch = ExternalConstant(
       ExternalReference::wasm_switch_to_the_central_stack_for_js());
-  TNode<RawPtrT> central_stack_sp = TNode<RawPtrT>::UncheckedCast(
-      CallCFunction(do_switch, MachineType::Pointer(),
-                    std::make_pair(MachineType::TaggedPointer(), receiver),
-                    std::make_pair(MachineType::Pointer(), stack_limit_slot)));
+  TNode<RawPtrT> central_stack_sp = TNode<RawPtrT>::UncheckedCast(CallCFunction(
+      do_switch, MachineType::Pointer(),
+      std::make_pair(MachineType::Pointer(),
+                     ExternalConstant(ExternalReference::isolate_address())),
+      std::make_pair(MachineType::Pointer(), stack_limit_slot)));
 
   TNode<RawPtrT> old_sp = LoadStackPointer();
   SetStackPointer(central_stack_sp);
@@ -18338,17 +18350,18 @@ TNode<RawPtrT> CodeStubAssembler::SwitchToTheCentralStack(
   return old_sp;
 }
 
-void CodeStubAssembler::SwitchFromTheCentralStack(TNode<RawPtrT> old_sp,
-                                                  TNode<Object> receiver) {
+void CodeStubAssembler::SwitchFromTheCentralStack(TNode<RawPtrT> old_sp) {
   TNode<WordT> stack_limit = Load<RawPtrT>(
       LoadFramePointer(),
       IntPtrConstant(WasmToJSWrapperConstants::kSecondaryStackLimitOffset));
 
   TNode<ExternalReference> do_switch = ExternalConstant(
       ExternalReference::wasm_switch_from_the_central_stack_for_js());
-  CallCFunction(do_switch, MachineType::Pointer(),
-                std::make_pair(MachineType::TaggedPointer(), receiver),
-                std::make_pair(MachineType::Pointer(), stack_limit));
+  CallCFunction(
+      do_switch, MachineType::Pointer(),
+      std::make_pair(MachineType::Pointer(),
+                     ExternalConstant(ExternalReference::isolate_address())),
+      std::make_pair(MachineType::Pointer(), stack_limit));
 
   StoreNoWriteBarrier(
       MachineType::PointerRepresentation(), LoadFramePointer(),
@@ -18357,15 +18370,14 @@ void CodeStubAssembler::SwitchFromTheCentralStack(TNode<RawPtrT> old_sp,
   SetStackPointer(old_sp);
 }
 
-TNode<RawPtrT> CodeStubAssembler::SwitchToTheCentralStackIfNeeded(
-    TNode<Object> receiver) {
+TNode<RawPtrT> CodeStubAssembler::SwitchToTheCentralStackIfNeeded() {
   TVARIABLE(RawPtrT, old_sp, PointerConstant(nullptr));
   Label no_switch(this);
   Label end(this);  // -> return value of the call (kTaggedPointer)
   TNode<Uint8T> is_on_central_stack_flag = LoadUint8FromRootRegister(
       IntPtrConstant(IsolateData::is_on_central_stack_flag_offset()));
   GotoIf(is_on_central_stack_flag, &no_switch);
-  old_sp = SwitchToTheCentralStack(receiver);
+  old_sp = SwitchToTheCentralStack();
   Goto(&no_switch);
   Bind(&no_switch);
   return old_sp.value();

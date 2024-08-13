@@ -876,8 +876,8 @@ int GetFunctionLineNumber(CpuProfiler* profiler, LocalContext* env,
                           i::Isolate* isolate, const char* name) {
   InstructionStreamMap* instruction_stream_map =
       profiler->symbolizer()->instruction_stream_map();
-  i::Handle<i::JSFunction> func = i::Handle<i::JSFunction>::cast(
-      v8::Utils::OpenHandle(*v8::Local<v8::Function>::Cast(
+  i::DirectHandle<i::JSFunction> func = i::Cast<i::JSFunction>(
+      v8::Utils::OpenDirectHandle(*v8::Local<v8::Function>::Cast(
           (*env)->Global()->Get(env->local(), v8_str(name)).ToLocalChecked())));
   PtrComprCageBase cage_base(isolate);
   CodeEntry* func_entry = instruction_stream_map->FindEntry(
@@ -935,7 +935,7 @@ TEST(BailoutReason) {
                                          "Debugger")
                                          .As<v8::Function>();
   i::Handle<i::JSFunction> i_function =
-      i::Handle<i::JSFunction>::cast(v8::Utils::OpenHandle(*function));
+      i::Cast<i::JSFunction>(v8::Utils::OpenHandle(*function));
   USE(i_function);
 
   CompileRun(

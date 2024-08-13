@@ -261,6 +261,9 @@ std::ostream& operator<<(std::ostream& os, const InstructionOperand& op) {
         case MachineRepresentation::kWord64:
           os << "|w64";
           break;
+        case MachineRepresentation::kFloat16:
+          os << "|f16";
+          break;
         case MachineRepresentation::kFloat32:
           os << "|f32";
           break;
@@ -626,7 +629,7 @@ std::ostream& operator<<(std::ostream& os, const Constant& constant) {
     case Constant::kFloat64:
       return os << constant.ToFloat64().value();
     case Constant::kExternalReference:
-      return os << constant.ToExternalReference().address();
+      return os << constant.ToExternalReference();
     case Constant::kHeapObject:  // Fall through.
     case Constant::kCompressedHeapObject:
       return os << Brief(*constant.ToHeapObject());
@@ -1036,6 +1039,7 @@ static MachineRepresentation FilterRepresentation(MachineRepresentation rep) {
     case MachineRepresentation::kBit:
     case MachineRepresentation::kWord8:
     case MachineRepresentation::kWord16:
+    case MachineRepresentation::kFloat16:
       return InstructionSequence::DefaultRepresentation();
     case MachineRepresentation::kWord32:
     case MachineRepresentation::kWord64:
@@ -1343,6 +1347,8 @@ std::ostream& operator<<(std::ostream& os, StateValueKind kind) {
       return os << "ArgumentsElements";
     case StateValueKind::kArgumentsLength:
       return os << "ArgumentsLength";
+    case StateValueKind::kRestLength:
+      return os << "RestLength";
     case StateValueKind::kPlain:
       return os << "Plain";
     case StateValueKind::kOptimizedOut:

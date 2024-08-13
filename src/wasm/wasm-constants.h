@@ -33,6 +33,7 @@ enum ValueTypeCode : uint8_t {
   kS128Code = 0x7b,             // -0x05
   kI8Code = 0x78,               // -0x08, packed type
   kI16Code = 0x77,              // -0x09, packed type
+  kF16Code = 0x76,              // -0x0a, packed type
   kNoExnCode = 0x74,            // -0x0c
   kNoFuncCode = 0x73,           // -0x0d
   kNoExternCode = 0x72,         // -0x0e
@@ -157,8 +158,6 @@ enum CatchKind : uint8_t {
   kLastCatchKind = kCatchAllRef,
 };
 
-constexpr char kMagicStringConstantsModuleName = '\'';
-
 constexpr size_t kWasmPageSize = 0x10000;
 constexpr uint32_t kWasmPageSizeLog2 = 16;
 static_assert(kWasmPageSize == size_t{1} << kWasmPageSizeLog2, "consistency");
@@ -170,6 +169,13 @@ constexpr WasmCodePosition kNoCodePosition = -1;
 constexpr uint32_t kExceptionAttribute = 0;
 
 constexpr int kAnonymousFuncIndex = -1;
+
+// This needs to survive round-tripping through a Smi without changing
+// its value.
+constexpr uint32_t kInvalidCanonicalIndex = static_cast<uint32_t>(-1);
+static_assert(static_cast<uint32_t>(Internals::SmiValue(Internals::IntToSmi(
+                  static_cast<int>(kInvalidCanonicalIndex)))) ==
+              kInvalidCanonicalIndex);
 
 // The number of calls to an exported Wasm function that will be handled
 // by the generic wrapper. Once the budget is exhausted, a specific wrapper

@@ -34,6 +34,11 @@ Float64 RegisterValues::GetDoubleRegister(unsigned n) const {
       reinterpret_cast<Address>(simd128_registers_ + n));
 }
 
+void RegisterValues::SetDoubleRegister(unsigned n, Float64 value) {
+  base::WriteUnalignedValue<Float64>(
+      reinterpret_cast<Address>(simd128_registers_ + n), value);
+}
+
 void FrameDescription::SetCallerPc(unsigned offset, intptr_t value) {
   SetFrameSlot(offset, value);
 }
@@ -47,7 +52,9 @@ void FrameDescription::SetCallerConstantPool(unsigned offset, intptr_t value) {
   SetFrameSlot(offset, value);
 }
 
-void FrameDescription::SetPc(intptr_t pc) { pc_ = pc; }
+void FrameDescription::SetPc(intptr_t pc, bool skip_validity_check) {
+  pc_ = pc;
+}
 
 }  // namespace internal
 }  // namespace v8

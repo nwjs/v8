@@ -4,15 +4,20 @@
 
 // Flags: --allow-natives-syntax
 
-const obj = { 'i': 1096432812 };
-const arr = new Int8Array(obj.i+1);
+try {
+  const obj = { 'i': 1096432812 };
+  const arr = new Int8Array(obj.i+1);
 
-function foo() {
-    arr[obj.i];
+  function foo() {
+      arr[obj.i];
+  }
+
+  %PrepareFunctionForOptimization(foo);
+  foo();
+  foo();
+  %OptimizeFunctionOnNextCall(foo);
+  foo();
+} catch (e) {
+  assertTrue(e instanceof RangeError);
+  assertEquals('Array buffer allocation failed', e.message);
 }
-
-%PrepareFunctionForOptimization(foo);
-foo();
-foo();
-%OptimizeFunctionOnNextCall(foo);
-foo();

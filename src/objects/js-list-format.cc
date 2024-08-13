@@ -116,19 +116,19 @@ MaybeHandle<JSListFormat> JSListFormat::New(Isolate* isolate,
 
   icu::Locale icu_locale = r.icu_locale;
   UErrorCode status = U_ZERO_ERROR;
-  icu::ListFormatter* formatter = icu::ListFormatter::createInstance(
-      icu_locale, GetIcuType(type_enum), GetIcuWidth(style_enum), status);
+  std::shared_ptr<icu::ListFormatter> formatter{
+      icu::ListFormatter::createInstance(icu_locale, GetIcuType(type_enum),
+                                         GetIcuWidth(style_enum), status)};
   if (U_FAILURE(status) || formatter == nullptr) {
-    delete formatter;
     THROW_NEW_ERROR(isolate, NewRangeError(MessageTemplate::kIcuError));
   }
 
   DirectHandle<Managed<icu::ListFormatter>> managed_formatter =
-      Managed<icu::ListFormatter>::FromRawPtr(isolate, 0, formatter);
+      Managed<icu::ListFormatter>::From(isolate, 0, std::move(formatter));
 
   // Now all properties are ready, so we can allocate the result object.
-  Handle<JSListFormat> list_format = Handle<JSListFormat>::cast(
-      isolate->factory()->NewFastOrSlowJSObjectFromMap(map));
+  Handle<JSListFormat> list_format =
+      Cast<JSListFormat>(isolate->factory()->NewFastOrSlowJSObjectFromMap(map));
   DisallowGarbageCollection no_gc;
   list_format->set_flags(0);
   list_format->set_icu_formatter(*managed_formatter);
@@ -203,7 +203,7 @@ Maybe<std::vector<icu::UnicodeString>> ToUnicodeStringArray(
   for (int i = 0; i < length; i++) {
     Handle<Object> item(array->get(i), isolate);
     DCHECK(IsString(*item));
-    Handle<String> item_str = Handle<String>::cast(item);
+    Handle<String> item_str = Cast<String>(item);
     if (!item_str->IsFlat()) item_str = String::Flatten(isolate, item_str);
     result.push_back(Intl::ToICUUnicodeString(isolate, item_str));
   }

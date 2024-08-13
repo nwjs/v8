@@ -7,11 +7,11 @@
 #include <algorithm>
 #include <atomic>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "src/base/atomic-utils.h"
 #include "src/base/logging.h"
-#include "src/base/optional.h"
 #include "src/common/globals.h"
 #include "src/execution/vm-state-inl.h"
 #include "src/flags/flags.h"
@@ -390,9 +390,11 @@ void Sweeper::LocalSweeper::ParallelSweepPage(PageMetadata* page,
     const FreeSpaceTreatmentMode free_space_treatment_mode =
         heap::ShouldZapGarbage() ? FreeSpaceTreatmentMode::kZapFreeSpace
                                  : FreeSpaceTreatmentMode::kIgnoreFreeSpace;
+    DCHECK_IMPLIES(identity == NEW_SPACE,
+                   !sweeper_->minor_sweeping_state_.should_reduce_memory());
     sweeper_->RawSweep(
         page, free_space_treatment_mode, sweeping_mode,
-        v8_flags.minor_ms
+        identity == NEW_SPACE
             ? false
             : sweeper_->major_sweeping_state_.should_reduce_memory());
     sweeper_->AddSweptPage(page, identity);
@@ -908,7 +910,13 @@ V8_INLINE size_t Sweeper::FreeAndProcessFreedMemory(
   }
   freed_bytes = reinterpret_cast<PagedSpaceBase*>(space)->FreeDuringSweep(
       free_start, size);
+#if !V8_OS_WIN
+  // Discarding memory on Windows does not decommit the memory and does not
+  // contribute to reduce the memory footprint. On the other hand, these calls
+  // become expensive the more memory is allocated in the system and can result
+  // in hangs. Thus, it is better to not discard on Windows.
   if (should_reduce_memory) page->DiscardUnusedMemory(free_start, size);
+#endif  // !V8_OS_WIN
 
   if (v8_flags.sticky_mark_bits) {
     // Clear the bitmap, since fillers or slack may still be marked from black
@@ -952,6 +960,8 @@ V8_INLINE void Sweeper::CleanupRememberedSetEntriesForFreedMemory(
   // during and after a full GC.
   RememberedSet<OLD_TO_SHARED>::RemoveRange(page, free_start, free_end,
                                             SlotSet::KEEP_EMPTY_BUCKETS);
+  RememberedSet<TRUSTED_TO_SHARED_TRUSTED>::RemoveRange(
+      page, free_start, free_end, SlotSet::KEEP_EMPTY_BUCKETS);
 
   if (record_free_ranges) {
     MemoryChunk* chunk = page->Chunk();
@@ -964,6 +974,9 @@ V8_INLINE void Sweeper::CleanupRememberedSetEntriesForFreedMemory(
 void Sweeper::CleanupTypedSlotsInFreeMemory(
     PageMetadata* page, const TypedSlotSet::FreeRangesMap& free_ranges_map,
     SweepingMode sweeping_mode) {
+  // No support for typed trusted-to-shared-trusted pointers.
+  DCHECK_NULL(page->typed_slot_set<TRUSTED_TO_SHARED_TRUSTED>());
+
   if (sweeping_mode == SweepingMode::kEagerDuringGC) {
     page->ClearTypedSlotsInFreeMemory<OLD_TO_NEW>(free_ranges_map);
 
@@ -971,7 +984,6 @@ void Sweeper::CleanupTypedSlotsInFreeMemory(
     // Also code objects are never right-trimmed, so there cannot be any slots
     // in a free range.
     page->AssertNoTypedSlotsInFreeMemory<OLD_TO_OLD>(free_ranges_map);
-
     page->ClearTypedSlotsInFreeMemory<OLD_TO_SHARED>(free_ranges_map);
     return;
   }
@@ -1004,6 +1016,7 @@ void Sweeper::RawSweep(PageMetadata* p,
   DCHECK(space->identity() == OLD_SPACE || space->identity() == CODE_SPACE ||
          space->identity() == SHARED_SPACE ||
          space->identity() == TRUSTED_SPACE ||
+         space->identity() == SHARED_TRUSTED_SPACE ||
          (space->identity() == NEW_SPACE && v8_flags.minor_ms));
   DCHECK(!p->Chunk()->IsEvacuationCandidate());
   DCHECK(!p->SweepingDone());
@@ -1014,7 +1027,7 @@ void Sweeper::RawSweep(PageMetadata* p,
 
   // Phase 1: Prepare the page for sweeping.
 
-  base::Optional<ActiveSystemPages> active_system_pages_after_sweeping;
+  std::optional<ActiveSystemPages> active_system_pages_after_sweeping;
   if (should_reduce_memory) {
     // Only decrement counter when we discard unused system pages.
     active_system_pages_after_sweeping = ActiveSystemPages();

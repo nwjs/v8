@@ -5,6 +5,7 @@
 #ifndef V8_HANDLES_MAYBE_HANDLES_INL_H_
 #define V8_HANDLES_MAYBE_HANDLES_INL_H_
 
+#include "src/base/macros.h"
 #include "src/handles/handles-inl.h"
 #include "src/handles/maybe-handles.h"
 #include "src/objects/casting.h"
@@ -22,8 +23,10 @@ MaybeHandle<T>::MaybeHandle(Tagged<T> object, LocalHeap* local_heap)
     : MaybeHandle(handle(object, local_heap)) {}
 
 template <typename To, typename From>
-inline MaybeHandle<To> Cast(MaybeHandle<From> value) {
-  DCHECK_IMPLIES(!value.is_null(), Is<To>(*value.ToHandleChecked()));
+inline MaybeHandle<To> Cast(MaybeHandle<From> value,
+                            const v8::SourceLocation& loc) {
+  DCHECK_WITH_MSG_AND_LOC(value.is_null() || Is<To>(*value.ToHandleChecked()),
+                          V8_PRETTY_FUNCTION_VALUE_OR("Cast type check"), loc);
   return MaybeHandle<To>(value.location_);
 }
 
@@ -49,7 +52,7 @@ MaybeObjectHandle::MaybeObjectHandle(Tagged<MaybeObject> object,
     handle_ = handle(heap_object, isolate);
     reference_type_ = HeapObjectReferenceType::WEAK;
   } else {
-    handle_ = handle(Tagged<Object>::cast(object), isolate);
+    handle_ = handle(Cast<Object>(object), isolate);
     reference_type_ = HeapObjectReferenceType::STRONG;
   }
 }
@@ -62,7 +65,7 @@ MaybeObjectHandle::MaybeObjectHandle(Tagged<MaybeObject> object,
     handle_ = handle(heap_object, local_heap);
     reference_type_ = HeapObjectReferenceType::WEAK;
   } else {
-    handle_ = handle(Tagged<Object>::cast(object), local_heap);
+    handle_ = handle(Cast<Object>(object), local_heap);
     reference_type_ = HeapObjectReferenceType::STRONG;
   }
 }
@@ -160,8 +163,10 @@ MaybeDirectHandle<T>::MaybeDirectHandle(Tagged<T> object, LocalHeap* local_heap)
     : MaybeDirectHandle(direct_handle(object, local_heap)) {}
 
 template <typename To, typename From>
-inline MaybeDirectHandle<To> Cast(MaybeDirectHandle<From> value) {
-  DCHECK_IMPLIES(!value.is_null(), Is<To>(*value.ToHandleChecked()));
+inline MaybeDirectHandle<To> Cast(MaybeDirectHandle<From> value,
+                                  const v8::SourceLocation& loc) {
+  DCHECK_WITH_MSG_AND_LOC(value.is_null() || Is<To>(*value.ToHandleChecked()),
+                          V8_PRETTY_FUNCTION_VALUE_OR("Cast type check"), loc);
   return MaybeDirectHandle<To>(value.location_);
 }
 
@@ -179,7 +184,7 @@ MaybeObjectDirectHandle::MaybeObjectDirectHandle(Tagged<MaybeObject> object,
     handle_ = direct_handle(heap_object, isolate);
     reference_type_ = HeapObjectReferenceType::WEAK;
   } else {
-    handle_ = direct_handle(Tagged<Object>::cast(object), isolate);
+    handle_ = direct_handle(Cast<Object>(object), isolate);
     reference_type_ = HeapObjectReferenceType::STRONG;
   }
 }
@@ -192,7 +197,7 @@ MaybeObjectDirectHandle::MaybeObjectDirectHandle(Tagged<MaybeObject> object,
     handle_ = direct_handle(heap_object, local_heap);
     reference_type_ = HeapObjectReferenceType::WEAK;
   } else {
-    handle_ = direct_handle(Tagged<Object>::cast(object), local_heap);
+    handle_ = direct_handle(Cast<Object>(object), local_heap);
     reference_type_ = HeapObjectReferenceType::STRONG;
   }
 }

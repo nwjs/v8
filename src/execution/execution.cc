@@ -27,8 +27,7 @@ Handle<Object> NormalizeReceiver(Isolate* isolate, Handle<Object> receiver) {
   // receiver instead to avoid having a 'this' pointer which refers
   // directly to a global object.
   if (IsJSGlobalObject(*receiver)) {
-    return handle(Handle<JSGlobalObject>::cast(receiver)->global_proxy(),
-                  isolate);
+    return handle(Cast<JSGlobalObject>(receiver)->global_proxy(), isolate);
   }
   return receiver;
 }
@@ -53,14 +52,14 @@ struct InvokeParams {
 
   bool IsScript() const {
     if (!IsJSFunction(*target)) return false;
-    auto function = DirectHandle<JSFunction>::cast(target);
+    auto function = Cast<JSFunction>(target);
     return function->shared()->is_script();
   }
 
   Handle<FixedArray> GetAndResetHostDefinedOptions() {
     DCHECK(IsScript());
     DCHECK_EQ(argc, 1);
-    auto options = Handle<FixedArray>::cast(argv[0]);
+    auto options = Cast<FixedArray>(argv[0]);
     argv = nullptr;
     argc = 0;
     return options;
@@ -191,10 +190,10 @@ MaybeHandle<Context> NewScriptContext(
   }
   SaveAndSwitchContext save(isolate, function->context());
   Tagged<SharedFunctionInfo> sfi = function->shared();
-  Handle<Script> script(Script::cast(sfi->script()), isolate);
+  Handle<Script> script(Cast<Script>(sfi->script()), isolate);
   Handle<ScopeInfo> scope_info(sfi->scope_info(), isolate);
   DirectHandle<NativeContext> native_context(
-      NativeContext::cast(function->context()), isolate);
+      Cast<NativeContext>(function->context()), isolate);
   Handle<JSGlobalObject> global_object(native_context->global_object(),
                                        isolate);
   Handle<ScriptContextTable> script_context(
@@ -300,7 +299,7 @@ V8_WARN_UNUSED_RESULT MaybeHandle<Object> Invoke(Isolate* isolate,
   // api callbacks can be called directly, unless we want to take the detour
   // through JS to set up a frame for break-at-entry.
   if (IsJSFunction(*params.target)) {
-    auto function = DirectHandle<JSFunction>::cast(params.target);
+    auto function = Cast<JSFunction>(params.target);
     if ((!params.is_construct || IsConstructor(*function)) &&
         function->shared()->IsApiFunction() &&
         !function->shared()->BreakAtEntry(isolate)) {
@@ -314,7 +313,7 @@ V8_WARN_UNUSED_RESULT MaybeHandle<Object> Invoke(Isolate* isolate,
                                             isolate);
       auto value = Builtins::InvokeApiFunction(
           isolate, params.is_construct, fun_data, receiver, params.argc,
-          params.argv, Handle<HeapObject>::cast(params.new_target));
+          params.argv, Cast<HeapObject>(params.new_target));
       bool has_exception = value.is_null();
       DCHECK_EQ(has_exception, isolate->has_exception());
       if (has_exception) {
@@ -376,7 +375,8 @@ V8_WARN_UNUSED_RESULT MaybeHandle<Object> Invoke(Isolate* isolate,
     Handle<NativeContext> context = isolate->native_context();
     if (!IsUndefined(context->script_execution_callback(), isolate)) {
       v8::Context::AbortScriptExecutionCallback callback =
-          v8::ToCData<v8::Context::AbortScriptExecutionCallback>(
+          v8::ToCData<v8::Context::AbortScriptExecutionCallback,
+                      kApiAbortScriptExecutionCallbackTag>(
               context->script_execution_callback());
       v8::Isolate* api_isolate = reinterpret_cast<v8::Isolate*>(isolate);
       v8::Local<v8::Context> api_context = v8::Utils::ToLocal(context);
@@ -502,7 +502,7 @@ MaybeHandle<Object> Execution::Call(Isolate* isolate, Handle<Object> callable,
                                     Handle<Object> argv[]) {
   // Use Execution::CallScript instead for scripts:
   DCHECK_IMPLIES(IsJSFunction(*callable),
-                 !JSFunction::cast(*callable)->shared()->is_script());
+                 !Cast<JSFunction>(*callable)->shared()->is_script());
   return Invoke(isolate, InvokeParams::SetUpForCall(isolate, callable, receiver,
                                                     argc, argv));
 }
@@ -565,7 +565,7 @@ MaybeHandle<Object> Execution::TryCall(Isolate* isolate,
                                        MaybeHandle<Object>* exception_out) {
   // Use Execution::TryCallScript instead for scripts:
   DCHECK_IMPLIES(IsJSFunction(*callable),
-                 !JSFunction::cast(*callable)->shared()->is_script());
+                 !Cast<JSFunction>(*callable)->shared()->is_script());
   return InvokeWithTryCatch(
       isolate,
       InvokeParams::SetUpForTryCall(isolate, callable, receiver, argc, argv,

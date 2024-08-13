@@ -16,8 +16,6 @@
 #include "src/base/logging.h"
 #include "src/execution/isolate.h"
 #include "src/heap/cppgc-js/cpp-heap.h"
-#include "src/heap/cppgc-js/wrappable-info-inl.h"
-#include "src/heap/cppgc-js/wrappable-info.h"
 #include "src/heap/cppgc/heap-object-header.h"
 #include "src/heap/cppgc/heap-visitor.h"
 #include "src/heap/cppgc/visitor.h"
@@ -385,20 +383,13 @@ void* ExtractEmbedderDataBackref(Isolate* isolate, CppHeap& cpp_heap,
   if (!(v8_value->IsValue() && v8_value.As<v8::Value>()->IsObject()))
     return nullptr;
 
-  Handle<Object> v8_object = Utils::OpenHandle(*v8_value);
+  DirectHandle<Object> v8_object = Utils::OpenDirectHandle(*v8_value);
   if (!IsJSObject(*v8_object) ||
-      !JSObject::cast(*v8_object)->MayHaveEmbedderFields()) {
+      !Cast<JSObject>(*v8_object)->MayHaveEmbedderFields()) {
     return nullptr;
   }
 
-  Tagged<JSObject> js_object = JSObject::cast(*v8_object);
-
-  const auto maybe_info =
-      WrappableInfo::From(isolate, js_object, cpp_heap.wrapper_descriptor());
-  if (maybe_info.has_value()) {
-    // Wrappers with 2 embedder fields.
-    return maybe_info->instance;
-  }
+  Tagged<JSObject> js_object = Cast<JSObject>(*v8_object);
   // Not every object that can have embedder fields is actually a JSApiWrapper.
   if (!IsJSApiWrapperObject(*js_object)) {
     return nullptr;

@@ -21,6 +21,7 @@
 #include "src/compiler/fast-api-calls.h"
 #include "src/compiler/feedback-source.h"
 #include "src/compiler/graph-assembler.h"
+#include "src/compiler/heap-refs.h"
 #include "src/compiler/js-graph.h"
 #include "src/compiler/js-operator.h"
 #include "src/compiler/linkage.h"
@@ -3832,10 +3833,10 @@ Reduction JSCallReducer::ReduceCallWasmFunction(Node* node,
   if (shared.object()->HasWasmExportedFunctionData()) {
     // TODO(jkummerow): Introduce a pointer from WasmExportedFunctionData
     // to WasmTrustedInstanceData.
-    Tagged<ExposedTrustedObject> ref =
+    Tagged<TrustedObject> ref =
         shared.object()->wasm_exported_function_data()->internal()->ref();
     if (!IsWasmTrustedInstanceData(ref)) return NoChange();
-    native_module = WasmTrustedInstanceData::cast(ref)->native_module();
+    native_module = Cast<WasmTrustedInstanceData>(ref)->native_module();
   }
   // TODO(mliedtke): We should be able to remove module, signature, native
   // module and function index from the SharedFunctionInfoRef. However, for some
@@ -5189,6 +5190,12 @@ Reduction JSCallReducer::ReduceJSCall(Node* node,
     case Builtin::kBigIntAsIntN:
     case Builtin::kBigIntAsUintN:
       return ReduceBigIntAsN(node, builtin);
+#ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+    case Builtin::kGetContinuationPreservedEmbedderData:
+      return ReduceGetContinuationPreservedEmbedderData(node);
+    case Builtin::kSetContinuationPreservedEmbedderData:
+      return ReduceSetContinuationPreservedEmbedderData(node);
+#endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
     default:
       break;
   }
@@ -5461,6 +5468,8 @@ Reduction JSCallReducer::ReduceJSConstruct(Node* node) {
         }
         case Builtin::kPromiseConstructor:
           return ReducePromiseConstructor(node);
+        case Builtin::kStringConstructor:
+          return ReduceStringConstructor(node, function);
         case Builtin::kTypedArrayConstructor:
           return ReduceTypedArrayConstructor(node, function.shared(broker()));
         default:
@@ -7212,6 +7221,88 @@ Reduction JSCallReducer::ReduceStringPrototypeConcat(Node* node) {
   return Replace(value);
 }
 
+namespace {
+
+FrameState CreateStringCreateLazyDeoptContinuationFrameState(
+    JSGraph* graph, SharedFunctionInfoRef shared, Node* target, Node* context,
+    Node* outer_frame_state) {
+  Node* const receiver = graph->TheHoleConstant();
+  Node* stack_parameters[]{receiver};
+  const int stack_parameter_count = arraysize(stack_parameters);
+  return CreateJavaScriptBuiltinContinuationFrameState(
+      graph, shared, Builtin::kStringCreateLazyDeoptContinuation, target,
+      context, stack_parameters, stack_parameter_count, outer_frame_state,
+      ContinuationFrameStateMode::LAZY);
+}
+
+}  // namespace
+
+Reduction JSCallReducer::ReduceStringConstructor(Node* node,
+                                                 JSFunctionRef constructor) {
+  JSConstructNode n(node);
+  if (n.target() != n.new_target()) return NoChange();
+
+  DCHECK_EQ(constructor, native_context().string_function(broker_));
+  DCHECK(constructor.initial_map(broker_).IsJSPrimitiveWrapperMap());
+
+  Node* context = n.context();
+  FrameState frame_state = n.frame_state();
+  Effect effect = n.effect();
+  Control control = n.control();
+
+  Node* primitive_value;
+  if (n.ArgumentCount() == 0) {
+    primitive_value = jsgraph()->EmptyStringConstant();
+  } else {
+    // Insert a construct stub frame into the chain of frame states. This will
+    // reconstruct the proper frame when deoptimizing within the constructor.
+    frame_state = CreateConstructInvokeStubFrameState(
+        node, frame_state, constructor.shared(broker_), context, common(),
+        graph());
+
+    // This continuation takes the newly created primitive string, and wraps it
+    // in a string wrapper, matching CreateStringWrapper.
+    Node* continuation_frame_state =
+        CreateStringCreateLazyDeoptContinuationFrameState(
+            jsgraph(), constructor.shared(broker_), n.target(), context,
+            frame_state);
+
+    primitive_value = effect = control =
+        graph()->NewNode(javascript()->ToString(), n.Argument(0), context,
+                         continuation_frame_state, effect, control);
+
+    // Rewire potential exception edges.
+    Node* on_exception = nullptr;
+    if (NodeProperties::IsExceptionalCall(node, &on_exception)) {
+      // Create appropriate {IfException} and {IfSuccess} nodes.
+      Node* if_exception =
+          graph()->NewNode(common()->IfException(), effect, control);
+      control = graph()->NewNode(common()->IfSuccess(), control);
+
+      // Join the exception edges.
+      Node* merge =
+          graph()->NewNode(common()->Merge(2), if_exception, on_exception);
+      Node* ephi = graph()->NewNode(common()->EffectPhi(2), if_exception,
+                                    on_exception, merge);
+      Node* phi =
+          graph()->NewNode(common()->Phi(MachineRepresentation::kTagged, 2),
+                           if_exception, on_exception, merge);
+      ReplaceWithValue(on_exception, phi, ephi, merge);
+      merge->ReplaceInput(1, on_exception);
+      ephi->ReplaceInput(1, on_exception);
+      phi->ReplaceInput(1, on_exception);
+    }
+  }
+
+  RelaxControls(node, control);
+  node->ReplaceInput(0, primitive_value);
+  node->ReplaceInput(1, context);
+  node->ReplaceInput(2, effect);
+  node->TrimInputCount(3);
+  NodeProperties::ChangeOp(node, javascript()->CreateStringWrapper());
+  return Changed(node);
+}
+
 Reduction JSCallReducer::ReducePromiseConstructor(Node* node) {
   PromiseBuiltinReducerAssembler a(this, node);
 
@@ -8851,6 +8942,39 @@ Reduction JSCallReducer::ReduceJSCallMathMinMaxWithArrayLike(Node* node,
   Node* subgraph = a.ReduceJSCallMathMinMaxWithArrayLike(builtin);
   return ReplaceWithSubgraph(&a, subgraph);
 }
+
+#ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+Reduction JSCallReducer::ReduceGetContinuationPreservedEmbedderData(
+    Node* node) {
+  JSCallNode n(node);
+  Effect effect = n.effect();
+  Control control = n.control();
+
+  Node* value = effect = graph()->NewNode(
+      simplified()->GetContinuationPreservedEmbedderData(), effect);
+
+  ReplaceWithValue(node, value, effect, control);
+  return Replace(node);
+}
+
+Reduction JSCallReducer::ReduceSetContinuationPreservedEmbedderData(
+    Node* node) {
+  JSCallNode n(node);
+  Effect effect = n.effect();
+  Control control = n.control();
+
+  if (n.ArgumentCount() == 0) return NoChange();
+
+  effect =
+      graph()->NewNode(simplified()->SetContinuationPreservedEmbedderData(),
+                       n.Argument(0), effect);
+
+  Node* value = jsgraph()->UndefinedConstant();
+
+  ReplaceWithValue(node, value, effect, control);
+  return Replace(node);
+}
+#endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
 
 CompilationDependencies* JSCallReducer::dependencies() const {
   return broker()->dependencies();

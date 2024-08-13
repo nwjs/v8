@@ -72,7 +72,7 @@ MicrotaskQueue::~MicrotaskQueue() {
 Address MicrotaskQueue::CallEnqueueMicrotask(Isolate* isolate,
                                              intptr_t microtask_queue_pointer,
                                              Address raw_microtask) {
-  Tagged<Microtask> microtask = Microtask::cast(Tagged<Object>(raw_microtask));
+  Tagged<Microtask> microtask = Cast<Microtask>(Tagged<Object>(raw_microtask));
   reinterpret_cast<MicrotaskQueue*>(microtask_queue_pointer)
       ->EnqueueMicrotask(microtask);
   return Smi::zero().ptr();
@@ -93,9 +93,9 @@ void MicrotaskQueue::EnqueueMicrotask(v8::Isolate* v8_isolate,
   Isolate* isolate = reinterpret_cast<Isolate*>(v8_isolate);
   HandleScope scope(isolate);
   DirectHandle<CallbackTask> microtask = isolate->factory()->NewCallbackTask(
-      isolate->factory()->NewForeign<kGenericForeignTag>(
+      isolate->factory()->NewForeign<kMicrotaskCallbackTag>(
           reinterpret_cast<Address>(callback)),
-      isolate->factory()->NewForeign<kGenericForeignTag>(
+      isolate->factory()->NewForeign<kMicrotaskCallbackDataTag>(
           reinterpret_cast<Address>(data)));
   EnqueueMicrotask(*microtask);
 }
@@ -243,35 +243,65 @@ void MicrotaskQueue::IterateMicrotasks(RootVisitor* visitor) {
 
 void MicrotaskQueue::AddMicrotasksCompletedCallback(
     MicrotasksCompletedCallbackWithData callback, void* data) {
+  std::vector<CallbackWithData>* microtasks_completed_callbacks =
+      &microtasks_completed_callbacks_;
+  if (is_running_completed_callbacks_) {
+    // Use the COW vector if we are iterating the callbacks right now.
+    microtasks_completed_callbacks = &microtasks_completed_callbacks_cow_;
+    if (microtasks_completed_callbacks->empty()) {
+      *microtasks_completed_callbacks = microtasks_completed_callbacks_;
+    }
+  }
+
   CallbackWithData callback_with_data(callback, data);
-  auto pos =
-      std::find(microtasks_completed_callbacks_.begin(),
-                microtasks_completed_callbacks_.end(), callback_with_data);
-  if (pos != microtasks_completed_callbacks_.end()) return;
-  microtasks_completed_callbacks_.push_back(callback_with_data);
+  const auto pos =
+      std::find(microtasks_completed_callbacks->begin(),
+                microtasks_completed_callbacks->end(), callback_with_data);
+  if (pos != microtasks_completed_callbacks->end()) {
+    return;
+  }
+  microtasks_completed_callbacks->push_back(callback_with_data);
 }
 
 void MicrotaskQueue::RemoveMicrotasksCompletedCallback(
     MicrotasksCompletedCallbackWithData callback, void* data) {
+  std::vector<CallbackWithData>* microtasks_completed_callbacks =
+      &microtasks_completed_callbacks_;
+  if (is_running_completed_callbacks_) {
+    // Use the COW vector if we are iterating the callbacks right now.
+    microtasks_completed_callbacks = &microtasks_completed_callbacks_cow_;
+    if (microtasks_completed_callbacks->empty()) {
+      *microtasks_completed_callbacks = microtasks_completed_callbacks_;
+    }
+  }
+
   CallbackWithData callback_with_data(callback, data);
-  auto pos =
-      std::find(microtasks_completed_callbacks_.begin(),
-                microtasks_completed_callbacks_.end(), callback_with_data);
-  if (pos == microtasks_completed_callbacks_.end()) return;
-  microtasks_completed_callbacks_.erase(pos);
+  const auto pos =
+      std::find(microtasks_completed_callbacks->begin(),
+                microtasks_completed_callbacks->end(), callback_with_data);
+  if (pos == microtasks_completed_callbacks->end()) {
+    return;
+  }
+  microtasks_completed_callbacks->erase(pos);
 }
 
-void MicrotaskQueue::OnCompleted(Isolate* isolate) const {
-  std::vector<CallbackWithData> callbacks(microtasks_completed_callbacks_);
-  for (auto& callback : callbacks) {
+void MicrotaskQueue::OnCompleted(Isolate* isolate) {
+  is_running_completed_callbacks_ = true;
+  for (auto& callback : microtasks_completed_callbacks_) {
     callback.first(reinterpret_cast<v8::Isolate*>(isolate), callback.second);
+  }
+  is_running_completed_callbacks_ = false;
+  if (V8_UNLIKELY(!microtasks_completed_callbacks_cow_.empty())) {
+    microtasks_completed_callbacks_ =
+        std::move(microtasks_completed_callbacks_cow_);
+    microtasks_completed_callbacks_cow_.clear();
   }
 }
 
 Tagged<Microtask> MicrotaskQueue::get(intptr_t index) const {
   DCHECK_LT(index, size_);
   Tagged<Object> microtask(ring_buffer_[(index + start_) % capacity_]);
-  return Microtask::cast(microtask);
+  return Cast<Microtask>(microtask);
 }
 
 void MicrotaskQueue::ResizeBuffer(intptr_t new_capacity) {

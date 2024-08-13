@@ -38,8 +38,6 @@ enum class AbortReason : uint8_t;
 // trying to update gp register for position-independent-code. Whenever
 // RISC-V generated code calls C code, it must be via t6 register.
 
-// Flags used for LeaveExitFrame function.
-enum LeaveExitFrameMode { EMIT_RETURN = true, NO_EMIT_RETURN = false };
 
 // Flags used for the li macro-assembler function.
 enum LiFlags {
@@ -119,6 +117,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
                      IsolateData::cage_base_offset());
 #endif
   }
+
+  void LoadIsolateField(const Register& rd, IsolateFieldId id);
 
   // Jump unconditionally to given label.
   void jmp(Label* L, Label::Distance distance = Label::kFar) {
@@ -238,7 +238,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   // that is guaranteed not to be clobbered.
   MemOperand ExternalReferenceAsOperand(ExternalReference reference,
                                         Register scratch);
-
+  MemOperand ExternalReferenceAsOperand(IsolateFieldId id) {
+    return ExternalReferenceAsOperand(ExternalReference::Create(id), no_reg);
+  }
   inline void GenPCRelativeJump(Register rd, int32_t imm32) {
     BlockTrampolinePoolScope block_trampoline_pool(this);
     DCHECK(is_int32(imm32 + 0x800));
@@ -1406,16 +1408,11 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void Msub_s(FPURegister fd, FPURegister fr, FPURegister fs, FPURegister ft);
   void Msub_d(FPURegister fd, FPURegister fr, FPURegister fs, FPURegister ft);
 
-  // Enter exit frame.
-  // argc - argument count to be dropped by LeaveExitFrame.
-  // save_doubles - saves FPU registers on stack.
   // stack_space - extra stack space.
-  void EnterExitFrame(int stack_space = 0,
-                      StackFrame::Type frame_type = StackFrame::EXIT);
-
+  void EnterExitFrame(Register scratch, int stack_space,
+                      StackFrame::Type frame_type);
   // Leave the current exit frame.
-  void LeaveExitFrame(Register arg_count, bool do_return = NO_EMIT_RETURN,
-                      bool argument_count_is_length = false);
+  void LeaveExitFrame(Register scratch);
 
   // Make sure the stack is aligned. Only emits code in debug mode.
   void AssertStackIsAligned();
@@ -1736,10 +1733,17 @@ inline MemOperand ExitFrameCallerStackSlotOperand(int index) {
                             kSystemPointerSize);
 }
 
+// Calls an API function. Allocates HandleScope, extracts returned value
+// from handle and propagates exceptions. Clobbers C argument registers
+// and C caller-saved registers. Restores context. On return removes
+//   (*argc_operand + slots_to_drop_on_return) * kSystemPointerSize
+// (GCed, includes the call JS arguments space and the additional space
+// allocated for the fast call).
 void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
                               Register function_address,
                               ExternalReference thunk_ref, Register thunk_arg,
-                              int stack_space, MemOperand* stack_space_operand,
+                              int slots_to_drop_on_return,
+                              MemOperand* argc_operand,
                               MemOperand return_value_operand);
 
 #define ACCESS_MASM(masm) masm->

@@ -5,6 +5,7 @@
 #include "src/heap/new-spaces.h"
 
 #include <atomic>
+#include <optional>
 
 #include "src/common/globals.h"
 #include "src/heap/allocation-observer.h"
@@ -645,7 +646,7 @@ void SemiSpaceNewSpace::VerifyObjects(Isolate* isolate,
       visitor->VerifyObject(object);
 
       if (IsExternalString(object, cage_base)) {
-        Tagged<ExternalString> external_string = ExternalString::cast(object);
+        Tagged<ExternalString> external_string = Cast<ExternalString>(object);
         size_t string_size = external_string->ExternalPayloadSize();
         external_space_bytes[static_cast<int>(
             ExternalBackingStoreType::kExternalString)] += string_size;
@@ -798,7 +799,7 @@ bool SemiSpaceNewSpace::IsPromotionCandidate(
   return !page->Contains(age_mark());
 }
 
-base::Optional<std::pair<Address, Address>> SemiSpaceNewSpace::Allocate(
+std::optional<std::pair<Address, Address>> SemiSpaceNewSpace::Allocate(
     int size_in_bytes, AllocationAlignment alignment) {
   size_in_bytes = ALIGN_TO_ALLOCATION_ALIGNMENT(size_in_bytes);
   DCHECK_SEMISPACE_ALLOCATION_TOP(allocation_top(), to_space_);

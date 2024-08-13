@@ -702,7 +702,10 @@ v8_source_set("v8_unittests_sources") {
       "assembler/macro-assembler-riscv-unittest.cc",
     ]
     if (v8_enable_turbofan) {
-      sources += [ "compiler/riscv64/instruction-selector-riscv64-unittest.cc" ]
+      sources += [
+        "compiler/riscv64/instruction-selector-riscv64-unittest.cc",
+        "compiler/riscv64/turboshaft-instruction-selector-riscv64-unittest.cc",
+      ]
     }
     if (v8_enable_webassembly && current_cpu == "riscv64") {
       sources += [ "wasm/trap-handler-native-unittest.cc" ]
@@ -713,7 +716,10 @@ v8_source_set("v8_unittests_sources") {
       "assembler/macro-assembler-riscv-unittest.cc",
     ]
     if (v8_enable_turbofan) {
-      sources += [ "compiler/riscv32/instruction-selector-riscv32-unittest.cc" ]
+      sources += [
+        "compiler/riscv32/instruction-selector-riscv32-unittest.cc",
+        "compiler/riscv32/turboshaft-instruction-selector-riscv32-unittest.cc",
+      ]
     }
   } else if (v8_current_cpu == "x64") {
     sources += [
@@ -812,6 +818,7 @@ v8_source_set("v8_unittests_sources") {
     deps += [
       "//third_party/abseil-cpp:absl_full",
       "//third_party/fuzztest:fuzztest",
+      "//third_party/fuzztest:init_fuzztest",
     ]
 
     if (!is_win) {

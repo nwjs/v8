@@ -34,6 +34,8 @@ class RegisterValues {
   Float32 GetFloatRegister(unsigned n) const;
   Float64 GetDoubleRegister(unsigned n) const;
 
+  void SetDoubleRegister(unsigned n, Float64 value);
+
   Simd128 GetSimd128Register(unsigned n) const {
     V8_ASSUME(n < arraysize(simd128_registers_));
     return simd128_registers_[n];
@@ -43,19 +45,6 @@ class RegisterValues {
     V8_ASSUME(n < arraysize(registers_));
     registers_[n] = value;
   }
-
-#if defined(V8_TARGET_ARCH_RISCV64) || defined(V8_TARGET_ARCH_RISCV32)
-  void SetDoubleRegister(unsigned n, Float64 value) {
-    V8_ASSUME(n < arraysize(double_registers_));
-    double_registers_[n] = value;
-  }
-#else
-  void SetDoubleRegister(unsigned n, Float64 value) {
-    V8_ASSUME(n < arraysize(simd128_registers_));
-    base::WriteUnalignedValue(reinterpret_cast<Address>(simd128_registers_ + n),
-                              value);
-  }
-#endif
 
   void SetSimd128Register(unsigned n, Simd128 value) {
     V8_ASSUME(n < arraysize(simd128_registers_));
@@ -71,7 +60,7 @@ class RegisterValues {
   Float64 double_registers_[DoubleRegister::kNumRegisters];
   Simd128 simd128_registers_[Simd128Register::kNumRegisters];
 #else
-  Simd128 simd128_registers_[DoubleRegister::kNumRegisters];
+  Simd128 simd128_registers_[Simd128Register::kNumRegisters];
 #endif
 };
 
@@ -128,9 +117,17 @@ class FrameDescription {
 
   // Same as SetFrameSlot but also supports the offset to be unaligned (4 Byte
   // aligned) as liftoff doesn't align frame slots if they aren't references.
-  void SetLiftoffFrameSlot64(unsigned offset, intptr_t value) {
+  void SetLiftoffFrameSlot64(unsigned offset, int64_t value) {
     base::WriteUnalignedValue(
         reinterpret_cast<char*>(GetFrameSlotPointer(offset)), value);
+  }
+
+  void SetLiftoffFrameSlotPointer(unsigned offset, intptr_t value) {
+    if constexpr (Is64()) {
+      SetLiftoffFrameSlot64(offset, value);
+    } else {
+      SetLiftoffFrameSlot32(offset, value);
+    }
   }
 
   void SetCallerPc(unsigned offset, intptr_t value);
@@ -163,7 +160,7 @@ class FrameDescription {
   void SetTop(intptr_t top) { top_ = top; }
 
   intptr_t GetPc() const { return pc_; }
-  void SetPc(intptr_t pc);
+  void SetPc(intptr_t pc, bool skip_validity_check = false);
 
   intptr_t GetFp() const { return fp_; }
   void SetFp(intptr_t fp) { fp_ = fp; }

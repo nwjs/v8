@@ -219,6 +219,8 @@ class Code : public ExposedTrustedObject {
 
   inline Tagged<TrustedByteArray> SourcePositionTable(
       Isolate* isolate, Tagged<SharedFunctionInfo> sfi) const;
+  int SourcePosition(int offset) const;
+  int SourceStatementPosition(int offset) const;
 
   inline Address safepoint_table_address() const;
   inline int safepoint_table_size() const;
@@ -343,7 +345,6 @@ class Code : public ExposedTrustedObject {
                  Address current_pc = kNullAddress);
 #endif
 
-  DECL_CAST(Code)
   DECL_VERIFIER(Code)
 
 // Layout description.
@@ -485,8 +486,6 @@ class Code : public ExposedTrustedObject {
 // (checked) casts do not work on GcSafeCode.
 class GcSafeCode : public HeapObject {
  public:
-  DECL_CAST(GcSafeCode)
-
   // Use with care, this casts away knowledge that we're dealing with a
   // special-semantics object.
   inline Tagged<Code> UnsafeCastToCode() const;
@@ -532,7 +531,6 @@ class CodeWrapper : public Struct {
  public:
   DECL_CODE_POINTER_ACCESSORS(code)
 
-  DECL_CAST(CodeWrapper)
   DECL_PRINTER(CodeWrapper)
   DECL_VERIFIER(CodeWrapper)
 

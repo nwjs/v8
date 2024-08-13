@@ -541,50 +541,73 @@ constexpr uint64_t kAllTagsForAndBasedTypeChecking[] = {
   V(kExternalStringResourceTag,                 TAG(1)) \
   V(kExternalStringResourceDataTag,             TAG(2)) \
   V(kLastSharedTag,                             TAG(2))
+  // Leave some space in the tag range here for future shared tags.
 
 // External pointers using these tags are kept in a per-Isolate external
 // pointer table and can only be accessed when this Isolate is active.
 #define PER_ISOLATE_EXTERNAL_POINTER_TAGS(V)             \
-  V(kNativeContextMicrotaskQueueTag,            TAG(10)) \
-  V(kEmbedderDataSlotPayloadTag,                TAG(11)) \
+  V(kNativeContextMicrotaskQueueTag,            TAG(5)) \
+  V(kEmbedderDataSlotPayloadTag,                TAG(6)) \
 /* This tag essentially stands for a `void*` pointer in the V8 API, and */ \
 /* it is the Embedder's responsibility to ensure type safety (against */   \
 /* substitution) and lifetime validity of these objects. */                \
-  V(kExternalObjectValueTag,                    TAG(12)) \
-  V(kFunctionTemplateInfoCallbackTag,           TAG(13)) \
-  V(kAccessorInfoGetterTag,                     TAG(14)) \
-  V(kAccessorInfoSetterTag,                     TAG(15)) \
-  V(kWasmInternalFunctionCallTargetTag,         TAG(16)) \
-  V(kWasmTypeInfoNativeTypeTag,                 TAG(17)) \
-  V(kWasmExportedFunctionDataSignatureTag,      TAG(18)) \
-  V(kWasmContinuationJmpbufTag,                 TAG(19)) \
-  V(kWasmIndirectFunctionTargetTag,             TAG(20)) \
+  V(kExternalObjectValueTag,                    TAG(7)) \
+  V(kFunctionTemplateInfoCallbackTag,           TAG(8)) \
+  V(kAccessorInfoGetterTag,                     TAG(9)) \
+  V(kAccessorInfoSetterTag,                     TAG(10)) \
+  V(kWasmInternalFunctionCallTargetTag,         TAG(11)) \
+  V(kWasmTypeInfoNativeTypeTag,                 TAG(12)) \
+  V(kWasmExportedFunctionDataSignatureTag,      TAG(13)) \
+  V(kWasmContinuationJmpbufTag,                 TAG(14)) \
+  V(kWasmStackMemoryTag,                        TAG(15)) \
+  V(kWasmIndirectFunctionTargetTag,             TAG(16)) \
   /* Foreigns */ \
-  V(kGenericForeignTag,                         TAG(30)) \
+  V(kGenericForeignTag,                         TAG(20)) \
+  V(kApiNamedPropertyQueryCallbackTag,          TAG(21)) \
+  V(kApiNamedPropertyGetterCallbackTag,         TAG(22)) \
+  V(kApiNamedPropertySetterCallbackTag,         TAG(23)) \
+  V(kApiNamedPropertyDescriptorCallbackTag,     TAG(24)) \
+  V(kApiNamedPropertyDefinerCallbackTag,        TAG(25)) \
+  V(kApiNamedPropertyDeleterCallbackTag,        TAG(26)) \
+  V(kApiIndexedPropertyQueryCallbackTag,        TAG(27)) \
+  V(kApiIndexedPropertyGetterCallbackTag,       TAG(28)) \
+  V(kApiIndexedPropertySetterCallbackTag,       TAG(29)) \
+  V(kApiIndexedPropertyDescriptorCallbackTag,   TAG(30)) \
+  V(kApiIndexedPropertyDefinerCallbackTag,      TAG(31)) \
+  V(kApiIndexedPropertyDeleterCallbackTag,      TAG(32)) \
+  V(kApiIndexedPropertyEnumeratorCallbackTag,   TAG(33)) \
+  V(kApiAccessCheckCallbackTag,                 TAG(34)) \
+  V(kApiAbortScriptExecutionCallbackTag,        TAG(35)) \
+  V(kSyntheticModuleTag,                        TAG(36)) \
+  V(kMicrotaskCallbackTag,                      TAG(37)) \
+  V(kMicrotaskCallbackDataTag,                  TAG(38)) \
+  V(kCFunctionTag,                              TAG(39)) \
+  V(kCFunctionInfoTag,                          TAG(40)) \
+  V(kMessageListenerTag,                        TAG(41)) \
+  V(kWaiterQueueForeignTag,                     TAG(42)) \
   /* Managed */ \
-  V(kFirstManagedResourceTag,                   TAG(40)) \
-  V(kGenericManagedTag,                         TAG(40)) \
-  V(kWasmWasmStreamingTag,                      TAG(41)) \
-  V(kWasmFuncDataTag,                           TAG(42)) \
-  V(kWasmManagedDataTag,                        TAG(43)) \
-  V(kWasmNativeModuleTag,                       TAG(44)) \
-  V(kWasmStackMemoryTag,                        TAG(45)) \
-  V(kIcuBreakIteratorTag,                       TAG(46)) \
-  V(kIcuUnicodeStringTag,                       TAG(47)) \
-  V(kIcuListFormatterTag,                       TAG(48)) \
-  V(kIcuLocaleTag,                              TAG(49)) \
-  V(kIcuSimpleDateFormatTag,                    TAG(50)) \
-  V(kIcuDateIntervalFormatTag,                  TAG(51)) \
-  V(kIcuRelativeDateTimeFormatterTag,           TAG(52)) \
-  V(kIcuLocalizedNumberFormatterTag,            TAG(53)) \
-  V(kIcuPluralRulesTag,                         TAG(54)) \
-  V(kIcuCollatorTag,                            TAG(55)) \
-  V(kDisplayNamesInternalTag,                   TAG(56)) \
+  V(kFirstManagedResourceTag,                   TAG(50)) \
+  V(kGenericManagedTag,                         TAG(50)) \
+  V(kWasmWasmStreamingTag,                      TAG(51)) \
+  V(kWasmFuncDataTag,                           TAG(52)) \
+  V(kWasmManagedDataTag,                        TAG(53)) \
+  V(kWasmNativeModuleTag,                       TAG(54)) \
+  V(kIcuBreakIteratorTag,                       TAG(55)) \
+  V(kIcuUnicodeStringTag,                       TAG(56)) \
+  V(kIcuListFormatterTag,                       TAG(57)) \
+  V(kIcuLocaleTag,                              TAG(58)) \
+  V(kIcuSimpleDateFormatTag,                    TAG(59)) \
+  V(kIcuDateIntervalFormatTag,                  TAG(60)) \
+  V(kIcuRelativeDateTimeFormatterTag,           TAG(61)) \
+  V(kIcuLocalizedNumberFormatterTag,            TAG(62)) \
+  V(kIcuPluralRulesTag,                         TAG(63)) \
+  V(kIcuCollatorTag,                            TAG(64)) \
+  V(kDisplayNamesInternalTag,                   TAG(65)) \
   /* External resources whose lifetime is tied to */     \
   /* their entry in the external pointer table but */    \
   /* which are not referenced via a Managed */           \
-  V(kArrayBufferExtensionTag,                   TAG(57)) \
-  V(kLastManagedResourceTag,                    TAG(57)) \
+  V(kArrayBufferExtensionTag,                   TAG(66)) \
+  V(kLastManagedResourceTag,                    TAG(66)) \
 
 // All external pointer tags.
 #define ALL_EXTERNAL_POINTER_TAGS(V) \
@@ -782,6 +805,29 @@ constexpr bool kAllCodeObjectsLiveInTrustedSpace =
     kRuntimeGeneratedCodeObjectsLiveInTrustedSpace &&
     kBuiltinCodeObjectsLiveInTrustedSpace;
 
+//
+// JavaScript Dispatch Table
+//
+// A JSDispatchHandle represents a 32-bit index into a JSDispatchTable.
+using JSDispatchHandle = uint32_t;
+
+constexpr JSDispatchHandle kNullJSDispatchHandle = 0;
+
+// The size of the virtual memory reservation for the JSDispatchTable.
+// As with the other tables, a maximum table size in combination with shifted
+// indices allows omitting bounds checks.
+constexpr size_t kJSDispatchTableReservationSize = 128 * MB;
+constexpr uint32_t kJSDispatchHandleShift = 9;
+
+// The maximum number of entries in a JSDispatchTable.
+constexpr int kJSDispatchTableEntrySize = 16;
+constexpr int kJSDispatchTableEntrySizeLog2 = 4;
+constexpr size_t kMaxJSDispatchEntries =
+    kJSDispatchTableReservationSize / kJSDispatchTableEntrySize;
+static_assert((1 << (32 - kJSDispatchHandleShift)) == kMaxJSDispatchEntries,
+              "kJSDispatchTableReservationSize and kJSDispatchEntryHandleShift "
+              "don't match");
+
 // {obj} must be the raw tagged pointer representation of a HeapObject
 // that's guaranteed to never be in ReadOnlySpace.
 V8_EXPORT internal::Isolate* IsolateFromNeverReadOnlySpaceObject(Address obj);
@@ -919,6 +965,10 @@ class Internals {
   static const int kIsolateRootsOffset =
       kContinuationPreservedEmbedderDataOffset + kApiSystemPointerSize;
 
+  // Assert scopes
+  static const int kDisallowGarbageCollectionAlign = alignof(uint32_t);
+  static const int kDisallowGarbageCollectionSize = sizeof(uint32_t);
+
 #if V8_STATIC_ROOTS_BOOL
 
 // These constants are copied from static-roots.h and guarded by static asserts.
@@ -977,8 +1027,8 @@ class Internals {
 
   // Constants used by PropertyCallbackInfo to check if we should throw when an
   // error occurs.
-  static const int kThrowOnError = 0;
-  static const int kDontThrow = 1;
+  static const int kDontThrow = 0;
+  static const int kThrowOnError = 1;
   static const int kInferShouldThrowMode = 2;
 
   // Soft limit for AdjustAmountofExternalAllocatedMemory. Trigger an
@@ -1581,6 +1631,13 @@ class HandleHelper final {
 };
 
 V8_EXPORT void VerifyHandleIsNonEmpty(bool is_empty);
+
+// These functions are here just to match friend declarations in
+// XxxCallbackInfo classes allowing these functions to access the internals
+// of the info objects. These functions are supposed to be called by debugger
+// macros.
+void PrintFunctionCallbackInfo(void* function_callback_info);
+void PrintPropertyCallbackInfo(void* property_callback_info);
 
 }  // namespace internal
 }  // namespace v8

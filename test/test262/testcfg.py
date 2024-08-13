@@ -59,13 +59,14 @@ FEATURE_FLAGS = {
     'iterator-helpers': '--harmony-iterator-helpers',
     'set-methods': '--harmony-set-methods',
     'promise-with-resolvers': '--js-promise-withresolvers',
-    'Array.fromAsync': '--harmony-array-from-async',
     'import-attributes': '--harmony-import-attributes',
     'regexp-duplicate-named-groups': '--js-regexp-duplicate-named-groups',
     'regexp-modifiers': '--js-regexp-modifiers',
     'Float16Array': '--js-float16array',
     'explicit-resource-management': '--js_explicit_resource_management',
     'decorators': '--js-decorators',
+    'promise-try': '--js-promise-try',
+    'Atomics.pause': '--js-atomics-pause',
 }
 
 SKIPPED_FEATURES = set([])

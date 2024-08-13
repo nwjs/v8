@@ -17,8 +17,8 @@ namespace internal {
 Handle<JSRegExpResultIndices> JSRegExpResultIndices::BuildIndices(
     Isolate* isolate, DirectHandle<RegExpMatchInfo> match_info,
     Handle<Object> maybe_names) {
-  Handle<JSRegExpResultIndices> indices(Handle<JSRegExpResultIndices>::cast(
-      isolate->factory()->NewJSObjectFromMap(
+  Handle<JSRegExpResultIndices> indices(
+      Cast<JSRegExpResultIndices>(isolate->factory()->NewJSObjectFromMap(
           isolate->regexp_result_indices_map())));
 
   // Initialize indices length to avoid having a partially initialized object
@@ -65,7 +65,7 @@ Handle<JSRegExpResultIndices> JSRegExpResultIndices::BuildIndices(
 
   // Create a groups property which returns a dictionary of named captures to
   // their corresponding capture indices.
-  auto names = DirectHandle<FixedArray>::cast(maybe_names);
+  auto names = Cast<FixedArray>(maybe_names);
   int num_names = names->length() >> 1;
   Handle<HeapObject> group_names;
   if constexpr (V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL) {
@@ -74,17 +74,17 @@ Handle<JSRegExpResultIndices> JSRegExpResultIndices::BuildIndices(
     group_names = isolate->factory()->NewNameDictionary(num_names);
   }
   Handle<PropertyDictionary> group_names_dict =
-      Handle<PropertyDictionary>::cast(group_names);
+      Cast<PropertyDictionary>(group_names);
   for (int i = 0; i < num_names; i++) {
     int base_offset = i * 2;
     int name_offset = base_offset;
     int index_offset = base_offset + 1;
-    Handle<String> name(String::cast(names->get(name_offset)), isolate);
-    Tagged<Smi> smi_index = Smi::cast(names->get(index_offset));
+    Handle<String> name(Cast<String>(names->get(name_offset)), isolate);
+    Tagged<Smi> smi_index = Cast<Smi>(names->get(index_offset));
     Handle<Object> capture_indices(indices_array->get(smi_index.value()),
                                    isolate);
     if (!IsUndefined(*capture_indices, isolate)) {
-      capture_indices = Handle<JSArray>::cast(capture_indices);
+      capture_indices = Cast<JSArray>(capture_indices);
     }
     InternalIndex group_entry = group_names_dict->FindEntry(isolate, name);
     // Duplicate group entries are possible if the capture groups are in
@@ -110,8 +110,7 @@ Handle<JSRegExpResultIndices> JSRegExpResultIndices::BuildIndices(
   // result indices.
   DirectHandle<FixedArrayBase> elements =
       isolate->factory()->empty_fixed_array();
-  Handle<HeapObject> null =
-      Handle<HeapObject>::cast(isolate->factory()->null_value());
+  Handle<HeapObject> null = Cast<HeapObject>(isolate->factory()->null_value());
   DirectHandle<JSObject> js_group_names =
       isolate->factory()->NewSlowJSObjectWithPropertiesAndElements(
           null, group_names, elements);
@@ -158,7 +157,7 @@ MaybeHandle<JSRegExp> JSRegExp::New(Isolate* isolate, Handle<String> pattern,
                                     Flags flags, uint32_t backtrack_limit) {
   Handle<JSFunction> constructor = isolate->regexp_function();
   Handle<JSRegExp> regexp =
-      Handle<JSRegExp>::cast(isolate->factory()->NewJSObject(constructor));
+      Cast<JSRegExp>(isolate->factory()->NewJSObject(constructor));
 
   return JSRegExp::Initialize(regexp, pattern, flags, backtrack_limit);
 }
@@ -174,7 +173,7 @@ Tagged<Object> JSRegExp::code(IsolateForSandbox isolate, bool is_latin1) const {
   // should consider adding a trusted pointer field that references either the
   // bytecode or the native code in a sandbox-compatible way.
   if (IsCodeWrapper(value)) {
-    value = CodeWrapper::cast(value)->code(isolate);
+    value = Cast<CodeWrapper>(value)->code(isolate);
   }
   DCHECK(IsSmi(value) || IsCode(value));
   return value;
@@ -227,7 +226,7 @@ void JSRegExp::ResetLastTierUpTick() {
   DCHECK(v8_flags.regexp_tier_up);
   DCHECK_EQ(type_tag(), JSRegExp::IRREGEXP);
   int tier_up_ticks = Smi::ToInt(DataAt(kIrregexpTicksUntilTierUpIndex)) + 1;
-  FixedArray::cast(data())->set(JSRegExp::kIrregexpTicksUntilTierUpIndex,
+  Cast<FixedArray>(data())->set(JSRegExp::kIrregexpTicksUntilTierUpIndex,
                                 Smi::FromInt(tier_up_ticks));
 }
 
@@ -238,14 +237,14 @@ void JSRegExp::TierUpTick() {
   if (tier_up_ticks == 0) {
     return;
   }
-  FixedArray::cast(data())->set(JSRegExp::kIrregexpTicksUntilTierUpIndex,
+  Cast<FixedArray>(data())->set(JSRegExp::kIrregexpTicksUntilTierUpIndex,
                                 Smi::FromInt(tier_up_ticks - 1));
 }
 
 void JSRegExp::MarkTierUpForNextExec() {
   DCHECK(v8_flags.regexp_tier_up);
   DCHECK_EQ(type_tag(), JSRegExp::IRREGEXP);
-  FixedArray::cast(data())->set(JSRegExp::kIrregexpTicksUntilTierUpIndex,
+  Cast<FixedArray>(data())->set(JSRegExp::kIrregexpTicksUntilTierUpIndex,
                                 Smi::zero());
 }
 
@@ -436,7 +435,7 @@ MaybeHandle<JSRegExp> JSRegExp::Initialize(Handle<JSRegExp> regexp,
   Tagged<Map> map = regexp->map();
   Tagged<Object> constructor = map->GetConstructor();
   if (IsJSFunction(constructor) &&
-      JSFunction::cast(constructor)->initial_map() == map) {
+      Cast<JSFunction>(constructor)->initial_map() == map) {
     // If we still have the original map, set in-object properties directly.
     regexp->InObjectPropertyAtPut(JSRegExp::kLastIndexFieldIndex,
                                   Smi::FromInt(kInitialLastIndexValue),

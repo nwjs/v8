@@ -198,7 +198,7 @@ class JsonStringifier {
   Result SerializeSmi(Tagged<Smi> object);
 
   Result SerializeDouble(double number);
-  V8_INLINE Result SerializeHeapNumber(Handle<HeapNumber> object) {
+  V8_INLINE Result SerializeHeapNumber(DirectHandle<HeapNumber> object) {
     return SerializeDouble(object->value());
   }
 
@@ -216,7 +216,7 @@ class JsonStringifier {
       Handle<JSArray> array, uint32_t length, uint32_t* slow_path_index);
   template <ElementsKind kind>
   V8_INLINE Result SerializeFixedArrayWithPossibleTransitions(
-      Handle<JSArray> array, uint32_t length, uint32_t* slow_path_index);
+      DirectHandle<JSArray> array, uint32_t length, uint32_t* slow_path_index);
   template <ElementsKind kind, typename T>
   V8_INLINE Result SerializeFixedArrayElement(Tagged<T> elements, uint32_t i,
                                               Tagged<JSArray> array,
@@ -348,7 +348,7 @@ class JsonStringifier {
   V8_INLINE void Unindent() { indent_--; }
   V8_INLINE void Separator(bool first);
 
-  Handle<JSReceiver> CurrentHolder(Handle<Object> value,
+  Handle<JSReceiver> CurrentHolder(DirectHandle<Object> value,
                                    Handle<Object> inital_holder);
 
   Result StackPush(Handle<Object> object, Handle<Object> key);
@@ -356,8 +356,8 @@ class JsonStringifier {
 
   // Uses the current stack_ to provide a detailed error message of
   // the objects involved in the circular structure.
-  Handle<String> ConstructCircularStructureErrorMessage(Handle<Object> last_key,
-                                                        size_t start_index);
+  Handle<String> ConstructCircularStructureErrorMessage(
+      DirectHandle<Object> last_key, size_t start_index);
   // The prefix and postfix count do NOT include the starting and
   // closing lines of the error message.
   static const int kCircularErrorMessagePrefixCount = 2;
@@ -511,8 +511,7 @@ bool JsonStringifier::InitializeReplacer(Handle<Object> replacer) {
     Handle<Object> length_obj;
     ASSIGN_RETURN_ON_EXCEPTION_VALUE(
         isolate_, length_obj,
-        Object::GetLengthFromArrayLike(isolate_,
-                                       Handle<JSReceiver>::cast(replacer)),
+        Object::GetLengthFromArrayLike(isolate_, Cast<JSReceiver>(replacer)),
         false);
     uint32_t length;
     if (!Object::ToUint32(*length_obj, &length)) length = kMaxUInt32;
@@ -525,8 +524,8 @@ bool JsonStringifier::InitializeReplacer(Handle<Object> replacer) {
         ASSIGN_RETURN_ON_EXCEPTION_VALUE(
             isolate_, key, Object::ToString(isolate_, element), false);
       } else if (IsJSPrimitiveWrapper(*element)) {
-        Handle<Object> value(Handle<JSPrimitiveWrapper>::cast(element)->value(),
-                             isolate_);
+        DirectHandle<Object> value(Cast<JSPrimitiveWrapper>(element)->value(),
+                                   isolate_);
         if (IsNumber(*value) || IsString(*value)) {
           ASSIGN_RETURN_ON_EXCEPTION_VALUE(
               isolate_, key, Object::ToString(isolate_, element), false);
@@ -546,7 +545,7 @@ bool JsonStringifier::InitializeReplacer(Handle<Object> replacer) {
         isolate_, set, GetKeysConversion::kKeepNumbers);
     property_list_ = handle_scope.CloseAndEscape(property_list_);
   } else if (IsCallable(*replacer)) {
-    replacer_function_ = Handle<JSReceiver>::cast(replacer);
+    replacer_function_ = Cast<JSReceiver>(replacer);
   }
   return true;
 }
@@ -555,8 +554,8 @@ bool JsonStringifier::InitializeGap(Handle<Object> gap) {
   DCHECK_NULL(gap_);
   HandleScope scope(isolate_);
   if (IsJSPrimitiveWrapper(*gap)) {
-    Handle<Object> value(Handle<JSPrimitiveWrapper>::cast(gap)->value(),
-                         isolate_);
+    DirectHandle<Object> value(Cast<JSPrimitiveWrapper>(gap)->value(),
+                               isolate_);
     if (IsString(*value)) {
       ASSIGN_RETURN_ON_EXCEPTION_VALUE(isolate_, gap,
                                        Object::ToString(isolate_, gap), false);
@@ -567,7 +566,7 @@ bool JsonStringifier::InitializeGap(Handle<Object> gap) {
   }
 
   if (IsString(*gap)) {
-    Handle<String> gap_string = Handle<String>::cast(gap);
+    auto gap_string = Cast<String>(gap);
     if (gap_string->length() > 0) {
       int gap_length = std::min(gap_string->length(), 10);
       gap_ = NewArray<base::uc16>(gap_length + 1);
@@ -625,7 +624,7 @@ MaybeHandle<Object> JsonStringifier::ApplyReplacerFunction(
 }
 
 Handle<JSReceiver> JsonStringifier::CurrentHolder(
-    Handle<Object> value, Handle<Object> initial_holder) {
+    DirectHandle<Object> value, Handle<Object> initial_holder) {
   if (stack_.empty()) {
     Handle<JSObject> holder =
         factory()->NewJSObject(isolate_->object_function());
@@ -633,7 +632,7 @@ Handle<JSReceiver> JsonStringifier::CurrentHolder(
                           initial_holder, NONE);
     return holder;
   } else {
-    return Handle<JSReceiver>(JSReceiver::cast(*stack_.back().second),
+    return Handle<JSReceiver>(Cast<JSReceiver>(*stack_.back().second),
                               isolate_);
   }
 }
@@ -663,7 +662,7 @@ JsonStringifier::Result JsonStringifier::StackPush(Handle<Object> object,
         AllowGarbageCollection allow_to_return_error;
         Handle<String> circle_description =
             ConstructCircularStructureErrorMessage(key, i);
-        Handle<Object> error = factory()->NewTypeError(
+        DirectHandle<Object> error = factory()->NewTypeError(
             MessageTemplate::kCircularStructure, circle_description);
         isolate_->Throw(*error);
         return EXCEPTION;
@@ -716,8 +715,8 @@ class CircularStructureMessageBuilder {
  private:
   void AppendConstructorName(Handle<Object> object) {
     builder_.AppendCharacter('\'');
-    Handle<String> constructor_name = JSReceiver::GetConstructorName(
-        builder_.isolate(), Handle<JSReceiver>::cast(object));
+    DirectHandle<String> constructor_name = JSReceiver::GetConstructorName(
+        builder_.isolate(), Cast<JSReceiver>(object));
     builder_.AppendString(constructor_name);
     builder_.AppendCharacter('\'');
   }
@@ -726,12 +725,12 @@ class CircularStructureMessageBuilder {
   void AppendKey(DirectHandle<Object> key) {
     if (IsSmi(*key)) {
       builder_.AppendCStringLiteral("index ");
-      AppendSmi(Smi::cast(*key));
+      AppendSmi(Cast<Smi>(*key));
       return;
     }
 
     CHECK(IsString(*key));
-    DirectHandle<String> key_as_string = DirectHandle<String>::cast(key);
+    DirectHandle<String> key_as_string = Cast<String>(key);
     if (key_as_string->length() == 0) {
       builder_.AppendCStringLiteral("<anonymous>");
     } else {
@@ -755,7 +754,7 @@ class CircularStructureMessageBuilder {
 };
 
 Handle<String> JsonStringifier::ConstructCircularStructureErrorMessage(
-    Handle<Object> last_key, size_t start_index) {
+    DirectHandle<Object> last_key, size_t start_index) {
   DCHECK(start_index < stack_.size());
   CircularStructureMessageBuilder builder(isolate_);
 
@@ -818,9 +817,9 @@ JsonStringifier::Result JsonStringifier::Serialize_(Handle<Object> object,
   PtrComprCageBase cage_base(isolate_);
   if (!IsSmi(*object)) {
     InstanceType instance_type =
-        HeapObject::cast(*object)->map(cage_base)->instance_type();
+        Cast<HeapObject>(*object)->map(cage_base)->instance_type();
     if ((InstanceTypeChecker::IsJSReceiver(instance_type) &&
-         MayHaveInterestingProperties(isolate_, JSReceiver::cast(*object))) ||
+         MayHaveInterestingProperties(isolate_, Cast<JSReceiver>(*object))) ||
         InstanceTypeChecker::IsBigInt(instance_type)) {
       if (!need_stack_ && stack_nesting_level_ > 0) {
         need_stack_ = true;
@@ -840,21 +839,21 @@ JsonStringifier::Result JsonStringifier::Serialize_(Handle<Object> object,
 
   if (IsSmi(*object)) {
     if (deferred_string_key) SerializeDeferredKey(comma, key);
-    return SerializeSmi(Smi::cast(*object));
+    return SerializeSmi(Cast<Smi>(*object));
   }
 
   InstanceType instance_type =
-      HeapObject::cast(*object)->map(cage_base)->instance_type();
+      Cast<HeapObject>(*object)->map(cage_base)->instance_type();
   switch (instance_type) {
     case HEAP_NUMBER_TYPE:
       if (deferred_string_key) SerializeDeferredKey(comma, key);
-      return SerializeHeapNumber(Handle<HeapNumber>::cast(object));
+      return SerializeHeapNumber(Cast<HeapNumber>(object));
     case BIGINT_TYPE:
       isolate_->Throw(
           *factory()->NewTypeError(MessageTemplate::kBigIntSerializeJSON));
       return EXCEPTION;
     case ODDBALL_TYPE:
-      switch (Oddball::cast(*object)->kind()) {
+      switch (Cast<Oddball>(*object)->kind()) {
         case Oddball::kFalse:
           if (deferred_string_key) SerializeDeferredKey(comma, key);
           AppendCStringLiteral("false");
@@ -872,26 +871,25 @@ JsonStringifier::Result JsonStringifier::Serialize_(Handle<Object> object,
       }
     case JS_ARRAY_TYPE:
       if (deferred_string_key) SerializeDeferredKey(comma, key);
-      return SerializeJSArray(Handle<JSArray>::cast(object), key);
+      return SerializeJSArray(Cast<JSArray>(object), key);
     case JS_PRIMITIVE_WRAPPER_TYPE:
       if (!need_stack_) {
         need_stack_ = true;
         return NEED_STACK;
       }
       if (deferred_string_key) SerializeDeferredKey(comma, key);
-      return SerializeJSPrimitiveWrapper(
-          Handle<JSPrimitiveWrapper>::cast(object), key);
+      return SerializeJSPrimitiveWrapper(Cast<JSPrimitiveWrapper>(object), key);
     case SYMBOL_TYPE:
       return UNCHANGED;
     case JS_RAW_JSON_TYPE:
       if (deferred_string_key) SerializeDeferredKey(comma, key);
       {
-        Handle<JSRawJson> raw_json_obj = Handle<JSRawJson>::cast(object);
+        Handle<JSRawJson> raw_json_obj = Cast<JSRawJson>(object);
         Handle<String> raw_json;
         if (raw_json_obj->HasInitialLayout(isolate_)) {
           // Fast path: the object returned by JSON.rawJSON has its initial map
           // intact.
-          raw_json = Handle<String>::cast(handle(
+          raw_json = Cast<String>(handle(
               raw_json_obj->InObjectPropertyAt(JSRawJson::kRawJsonInitialIndex),
               isolate_));
         } else {
@@ -900,7 +898,7 @@ JsonStringifier::Result JsonStringifier::Serialize_(Handle<Object> object,
           // be a property named "rawJSON" that is a String. Their initial maps
           // only change due to VM-internal operations like being optimized for
           // being used as a prototype.
-          raw_json = Handle<String>::cast(
+          raw_json = Cast<String>(
               JSObject::GetProperty(isolate_, raw_json_obj,
                                     isolate_->factory()->raw_json_string())
                   .ToHandleChecked());
@@ -918,22 +916,22 @@ JsonStringifier::Result JsonStringifier::Serialize_(Handle<Object> object,
     default:
       if (InstanceTypeChecker::IsString(instance_type)) {
         if (deferred_string_key) SerializeDeferredKey(comma, key);
-        SerializeString<false>(Handle<String>::cast(object));
+        SerializeString<false>(Cast<String>(object));
         return SUCCESS;
       } else {
         // Make sure that we have a JSReceiver before we cast it to one.
         // If we ever leak an internal object that is not a JSReceiver it could
         // end up here and lead to a type confusion.
         CHECK(IsJSReceiver(*object));
-        if (IsCallable(HeapObject::cast(*object), cage_base)) return UNCHANGED;
+        if (IsCallable(Cast<HeapObject>(*object), cage_base)) return UNCHANGED;
         // Go to slow path for global proxy and objects requiring access checks.
         if (deferred_string_key) SerializeDeferredKey(comma, key);
         if (InstanceTypeChecker::IsJSProxy(instance_type)) {
-          return SerializeJSProxy(Handle<JSProxy>::cast(object), key);
+          return SerializeJSProxy(Cast<JSProxy>(object), key);
         }
         // WASM_{STRUCT,ARRAY}_TYPE are handled in `case:` blocks above.
         DCHECK(IsJSObject(*object));
-        return SerializeJSObject(Handle<JSObject>::cast(object), key);
+        return SerializeJSObject(Cast<JSObject>(object), key);
       }
   }
 
@@ -947,13 +945,13 @@ JsonStringifier::Result JsonStringifier::SerializeJSPrimitiveWrapper(
     Handle<Object> value;
     ASSIGN_RETURN_ON_EXCEPTION_VALUE(
         isolate_, value, Object::ToString(isolate_, object), EXCEPTION);
-    SerializeString<false>(Handle<String>::cast(value));
+    SerializeString<false>(Cast<String>(value));
   } else if (IsNumber(raw)) {
     Handle<Object> value;
     ASSIGN_RETURN_ON_EXCEPTION_VALUE(
         isolate_, value, Object::ToNumber(isolate_, object), EXCEPTION);
-    if (IsSmi(*value)) return SerializeSmi(Smi::cast(*value));
-    SerializeHeapNumber(Handle<HeapNumber>::cast(value));
+    if (IsSmi(*value)) return SerializeSmi(Cast<Smi>(*value));
+    SerializeHeapNumber(Cast<HeapNumber>(value));
   } else if (IsBigInt(raw)) {
     isolate_->Throw(
         *factory()->NewTypeError(MessageTemplate::kBigIntSerializeJSON));
@@ -1086,7 +1084,7 @@ JsonStringifier::Result JsonStringifier::SerializeFixedArrayWithInterruptCheck(
   while (true) {
     for (; i < limit; i++) {
       Result result = SerializeFixedArrayElement<kind>(
-          ArrayT::cast(array->elements()), i, *array, bailout_on_hole);
+          Cast<ArrayT>(array->elements()), i, *array, bailout_on_hole);
       if constexpr (is_holey) {
         if (result != SUCCESS) {
           *slow_path_index = i;
@@ -1111,11 +1109,11 @@ JsonStringifier::Result JsonStringifier::SerializeFixedArrayWithInterruptCheck(
 template <ElementsKind kind>
 JsonStringifier::Result
 JsonStringifier::SerializeFixedArrayWithPossibleTransitions(
-    Handle<JSArray> array, uint32_t length, uint32_t* slow_path_index) {
+    DirectHandle<JSArray> array, uint32_t length, uint32_t* slow_path_index) {
   static_assert(IsObjectElementsKind(kind));
 
   HandleScope handle_scope(isolate_);
-  Handle<Object> old_length(array->length(), isolate_);
+  DirectHandle<Object> old_length(array->length(), isolate_);
   constexpr bool is_holey = IsHoleyElementsKind(kind);
   bool should_check_treat_hole_as_undefined = true;
   for (uint32_t i = 0; i < length; i++) {
@@ -1125,7 +1123,7 @@ JsonStringifier::SerializeFixedArrayWithPossibleTransitions(
       return UNCHANGED;
     }
     Tagged<Object> current_element =
-        Tagged<FixedArray>::cast(array->elements())->get(i);
+        Cast<FixedArray>(array->elements())->get(i);
     if (is_holey && IsTheHole(current_element)) {
       if (should_check_treat_hole_as_undefined) {
         if (!CanTreatHoleAsUndefined(isolate_, *array)) {
@@ -1168,7 +1166,7 @@ JsonStringifier::Result JsonStringifier::SerializeFixedArrayElement(
   DCHECK(!elements->is_the_hole(isolate_, i));
   Separator(i == 0);
   if constexpr (IsSmiElementsKind(kind)) {
-    SerializeSmi(Smi::cast(elements->get(i)));
+    SerializeSmi(Cast<Smi>(elements->get(i)));
   } else if constexpr (IsDoubleElementsKind(kind)) {
     SerializeDouble(elements->get_scalar(i));
   } else {
@@ -1249,7 +1247,7 @@ JsonStringifier::Result JsonStringifier::SerializeJSObject(
   DCHECK(!object->HasIndexedInterceptor());
   DCHECK(!object->HasNamedInterceptor());
 
-  Handle<Map> map(object->map(cage_base), isolate_);
+  DirectHandle<Map> map(object->map(cage_base), isolate_);
   if (map->NumberOfOwnDescriptors() == 0) {
     AppendCStringLiteral("{}");
     return SUCCESS;
@@ -1270,7 +1268,7 @@ JsonStringifier::Result JsonStringifier::SerializeJSObject(
       Tagged<Name> name = descriptors->GetKey(i);
       // TODO(rossberg): Should this throw?
       if (!IsString(name, cage_base)) continue;
-      key_name = handle(String::cast(name), isolate_);
+      key_name = handle(Cast<String>(name), isolate_);
       details = descriptors->GetDetails(i);
     }
     if (details.IsDontEnum()) continue;
@@ -1324,7 +1322,7 @@ JsonStringifier::Result JsonStringifier::SerializeJSReceiverSlow(
   Indent();
   bool comma = false;
   for (int i = 0; i < contents->length(); i++) {
-    Handle<String> key(String::cast(contents->get(i)), isolate_);
+    Handle<String> key(Cast<String>(contents->get(i)), isolate_);
     Handle<Object> property;
     ASSIGN_RETURN_ON_EXCEPTION_VALUE(
         isolate_, property, Object::GetPropertyOrElement(isolate_, object, key),
@@ -1350,8 +1348,7 @@ JsonStringifier::Result JsonStringifier::SerializeJSProxy(
     Handle<Object> length_object;
     ASSIGN_RETURN_ON_EXCEPTION_VALUE(
         isolate_, length_object,
-        Object::GetLengthFromArrayLike(isolate_,
-                                       Handle<JSReceiver>::cast(object)),
+        Object::GetLengthFromArrayLike(isolate_, Cast<JSReceiver>(object)),
         EXCEPTION);
     uint32_t length;
     if (!Object::ToUint32(*length_object, &length)) {
@@ -1546,7 +1543,7 @@ bool JsonStringifier::TrySerializeSimplePropertyKey(
       reinterpret_cast<DestChar*>(part_ptr_) + current_index_, &current_index_);
   no_extend.Append('"');
   base::Vector<const uint8_t> chars(
-      SeqOneByteString::cast(key)->GetChars(no_gc), copy_length);
+      Cast<SeqOneByteString>(key)->GetChars(no_gc), copy_length);
   DCHECK_LE(reinterpret_cast<Address>(chars.end()),
             key.address() + key->Size());
 #if DEBUG
@@ -1591,7 +1588,7 @@ void JsonStringifier::Separator(bool first) {
 void JsonStringifier::SerializeDeferredKey(bool deferred_comma,
                                            Handle<Object> deferred_key) {
   Separator(!deferred_comma);
-  Handle<String> string_key = Handle<String>::cast(deferred_key);
+  Handle<String> string_key = Cast<String>(deferred_key);
   bool wrote_simple = false;
   {
     DisallowGarbageCollection no_gc;

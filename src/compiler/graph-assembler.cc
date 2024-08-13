@@ -119,6 +119,10 @@ Node* GraphAssembler::ExternalConstant(ExternalReference ref) {
   return AddClonedNode(mcgraph()->ExternalConstant(ref));
 }
 
+Node* GraphAssembler::IsolateField(IsolateFieldId id) {
+  return ExternalConstant(ExternalReference::Create(id));
+}
+
 Node* GraphAssembler::Parameter(int index) {
   return AddNode(
       graph()->NewNode(common()->Parameter(index), graph()->start()));
@@ -130,6 +134,10 @@ Node* JSGraphAssembler::CEntryStubConstant(int result_size) {
 
 Node* GraphAssembler::LoadFramePointer() {
   return AddNode(graph()->NewNode(machine()->LoadFramePointer()));
+}
+
+Node* GraphAssembler::LoadRootRegister() {
+  return AddNode(graph()->NewNode(machine()->LoadRootRegister()));
 }
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -472,6 +480,13 @@ Node* JSGraphAssembler::Assert(Node* cond, const char* condition_string,
                                const char* file, int line) {
   return AddNode(graph()->NewNode(
       common()->Assert(BranchSemantics::kJS, condition_string, file, line),
+      cond, effect(), control()));
+}
+
+void JSGraphAssembler::Assert(TNode<Word32T> cond, const char* condition_string,
+                              const char* file, int line) {
+  AddNode(graph()->NewNode(
+      common()->Assert(BranchSemantics::kMachine, condition_string, file, line),
       cond, effect(), control()));
 }
 

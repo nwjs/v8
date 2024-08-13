@@ -59,10 +59,10 @@ MaybeHandle<Object> Instantiate(
     Isolate* isolate, Handle<Object> data,
     MaybeHandle<Name> maybe_name = MaybeHandle<Name>()) {
   if (IsFunctionTemplateInfo(*data)) {
-    return InstantiateFunction(
-        isolate, Handle<FunctionTemplateInfo>::cast(data), maybe_name);
+    return InstantiateFunction(isolate, Cast<FunctionTemplateInfo>(data),
+                               maybe_name);
   } else if (IsObjectTemplateInfo(*data)) {
-    return InstantiateObject(isolate, Handle<ObjectTemplateInfo>::cast(data),
+    return InstantiateObject(isolate, Cast<ObjectTemplateInfo>(data),
                              Handle<JSReceiver>(), false);
   } else {
     return data;
@@ -76,26 +76,24 @@ MaybeHandle<Object> DefineAccessorProperty(Isolate* isolate,
                                            Handle<Object> setter,
                                            PropertyAttributes attributes) {
   DCHECK(!IsFunctionTemplateInfo(*getter) ||
-         FunctionTemplateInfo::cast(*getter)->should_cache());
+         Cast<FunctionTemplateInfo>(*getter)->should_cache());
   DCHECK(!IsFunctionTemplateInfo(*setter) ||
-         FunctionTemplateInfo::cast(*setter)->should_cache());
+         Cast<FunctionTemplateInfo>(*setter)->should_cache());
   if (IsFunctionTemplateInfo(*getter) &&
-      FunctionTemplateInfo::cast(*getter)->BreakAtEntry(isolate)) {
+      Cast<FunctionTemplateInfo>(*getter)->BreakAtEntry(isolate)) {
     ASSIGN_RETURN_ON_EXCEPTION(
         isolate, getter,
-        InstantiateFunction(isolate,
-                            Handle<FunctionTemplateInfo>::cast(getter)));
+        InstantiateFunction(isolate, Cast<FunctionTemplateInfo>(getter)));
     DirectHandle<Code> trampoline = BUILTIN_CODE(isolate, DebugBreakTrampoline);
-    Handle<JSFunction>::cast(getter)->set_code(*trampoline);
+    Cast<JSFunction>(getter)->set_code(*trampoline);
   }
   if (IsFunctionTemplateInfo(*setter) &&
-      FunctionTemplateInfo::cast(*setter)->BreakAtEntry(isolate)) {
+      Cast<FunctionTemplateInfo>(*setter)->BreakAtEntry(isolate)) {
     ASSIGN_RETURN_ON_EXCEPTION(
         isolate, setter,
-        InstantiateFunction(isolate,
-                            Handle<FunctionTemplateInfo>::cast(setter)));
+        InstantiateFunction(isolate, Cast<FunctionTemplateInfo>(setter)));
     DirectHandle<Code> trampoline = BUILTIN_CODE(isolate, DebugBreakTrampoline);
-    Handle<JSFunction>::cast(setter)->set_code(*trampoline);
+    Cast<JSFunction>(setter)->set_code(*trampoline);
   }
   RETURN_ON_EXCEPTION(isolate, JSObject::DefineOwnAccessorIgnoreAttributes(
                                    object, name, getter, setter, attributes));
@@ -196,7 +194,7 @@ MaybeHandle<JSObject> ConfigureInstance(Isolate* isolate, Handle<JSObject> obj,
   while (!info.is_null()) {
     Tagged<Object> props = info->property_accessors();
     if (!IsUndefined(props, isolate)) {
-      max_number_of_properties += ArrayList::cast(props)->length();
+      max_number_of_properties += Cast<ArrayList>(props)->length();
     }
     info = info->GetParent(isolate);
   }
@@ -222,8 +220,8 @@ MaybeHandle<JSObject> ConfigureInstance(Isolate* isolate, Handle<JSObject> obj,
 
     // Install accumulated accessors.
     for (int i = 0; i < valid_descriptors; i++) {
-      Handle<AccessorInfo> accessor(AccessorInfo::cast(array->get(i)), isolate);
-      Handle<Name> name(Name::cast(accessor->name()), isolate);
+      Handle<AccessorInfo> accessor(Cast<AccessorInfo>(array->get(i)), isolate);
+      Handle<Name> name(Cast<Name>(accessor->name()), isolate);
       JSObject::SetAccessor(obj, name, accessor,
                             accessor->initial_property_attributes())
           .Assert();
@@ -232,16 +230,16 @@ MaybeHandle<JSObject> ConfigureInstance(Isolate* isolate, Handle<JSObject> obj,
 
   Tagged<Object> maybe_property_list = data->property_list();
   if (IsUndefined(maybe_property_list, isolate)) return obj;
-  DirectHandle<ArrayList> properties(ArrayList::cast(maybe_property_list),
+  DirectHandle<ArrayList> properties(Cast<ArrayList>(maybe_property_list),
                                      isolate);
   if (properties->length() == 0) return obj;
 
   int i = 0;
   for (int c = 0; c < data->number_of_properties(); c++) {
-    auto name = handle(Name::cast(properties->get(i++)), isolate);
+    auto name = handle(Cast<Name>(properties->get(i++)), isolate);
     Tagged<Object> bit = properties->get(i++);
     if (IsSmi(bit)) {
-      PropertyDetails details(Smi::cast(bit));
+      PropertyDetails details(Cast<Smi>(bit));
       PropertyAttributes attributes = details.attributes();
       PropertyKind kind = details.kind();
 
@@ -259,7 +257,7 @@ MaybeHandle<JSObject> ConfigureInstance(Isolate* isolate, Handle<JSObject> obj,
     } else {
       // Intrinsic data property --- Get appropriate value from the current
       // context.
-      PropertyDetails details(Smi::cast(properties->get(i++)));
+      PropertyDetails details(Cast<Smi>(properties->get(i++)));
       PropertyAttributes attributes = details.attributes();
       DCHECK_EQ(PropertyKind::kData, details.kind());
 
@@ -279,7 +277,7 @@ bool IsSimpleInstantiation(Isolate* isolate, Tagged<ObjectTemplateInfo> info,
   DisallowGarbageCollection no_gc;
 
   if (!IsJSFunction(new_target)) return false;
-  Tagged<JSFunction> fun = JSFunction::cast(new_target);
+  Tagged<JSFunction> fun = Cast<JSFunction>(new_target);
   if (!fun->shared()->IsApiFunction()) return false;
   if (fun->shared()->api_func_data() != info->constructor()) return false;
   if (info->immutable_proto()) return false;
@@ -295,7 +293,7 @@ MaybeHandle<JSObject> InstantiateObject(Isolate* isolate,
   bool should_cache = info->should_cache();
   if (!new_target.is_null()) {
     if (IsSimpleInstantiation(isolate, *info, *new_target)) {
-      constructor = Handle<JSFunction>::cast(new_target);
+      constructor = Cast<JSFunction>(new_target);
     } else {
       // Disable caching for subclass instantiation.
       should_cache = false;
@@ -320,7 +318,7 @@ MaybeHandle<JSObject> InstantiateObject(Isolate* isolate,
       // Enter a new scope.  Recursion could otherwise create a lot of handles.
       HandleScope scope(isolate);
       Handle<FunctionTemplateInfo> cons_templ(
-          FunctionTemplateInfo::cast(maybe_constructor_info), isolate);
+          Cast<FunctionTemplateInfo>(maybe_constructor_info), isolate);
       Handle<JSFunction> tmp_constructor;
       ASSIGN_RETURN_ON_EXCEPTION(isolate, tmp_constructor,
                                  InstantiateFunction(isolate, cons_templ));
@@ -372,8 +370,8 @@ MaybeHandle<Object> GetInstancePrototype(Isolate* isolate,
   Handle<JSFunction> parent_instance;
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, parent_instance,
-      InstantiateFunction(
-          isolate, Handle<FunctionTemplateInfo>::cast(function_template)));
+      InstantiateFunction(isolate,
+                          Cast<FunctionTemplateInfo>(function_template)));
   Handle<Object> instance_prototype;
   // TODO(cbruni): decide what to do here.
   ASSIGN_RETURN_ON_EXCEPTION(
@@ -395,7 +393,7 @@ MaybeHandle<JSFunction> InstantiateFunction(
             isolate, native_context, data->serial_number(),
             TemplateInfo::CachingMode::kUnlimited)
             .ToHandle(&result)) {
-      return Handle<JSFunction>::cast(result);
+      return Cast<JSFunction>(result);
     }
   }
   Handle<Object> prototype;
@@ -405,7 +403,8 @@ MaybeHandle<JSFunction> InstantiateFunction(
       Handle<Object> protoype_provider_templ(
           data->GetPrototypeProviderTemplate(), isolate);
       if (IsUndefined(*protoype_provider_templ, isolate)) {
-        prototype = isolate->factory()->NewJSObject(isolate->object_function());
+        prototype = isolate->factory()->NewJSObject(
+            handle(native_context->object_function(), isolate));
       } else {
         ASSIGN_RETURN_ON_EXCEPTION(
             isolate, prototype,
@@ -414,8 +413,7 @@ MaybeHandle<JSFunction> InstantiateFunction(
     } else {
       ASSIGN_RETURN_ON_EXCEPTION(
           isolate, prototype,
-          InstantiateObject(isolate,
-                            Handle<ObjectTemplateInfo>::cast(prototype_templ),
+          InstantiateObject(isolate, Cast<ObjectTemplateInfo>(prototype_templ),
                             Handle<JSReceiver>(), true));
     }
     Handle<Object> parent(data->GetParentTemplate(), isolate);
@@ -424,8 +422,8 @@ MaybeHandle<JSFunction> InstantiateFunction(
       ASSIGN_RETURN_ON_EXCEPTION(isolate, parent_prototype,
                                  GetInstancePrototype(isolate, parent));
       CHECK(IsHeapObject(*parent_prototype));
-      JSObject::ForceSetPrototype(isolate, Handle<JSObject>::cast(prototype),
-                                  Handle<HeapObject>::cast(parent_prototype));
+      JSObject::ForceSetPrototype(isolate, Cast<JSObject>(prototype),
+                                  Cast<HeapObject>(parent_prototype));
     }
   }
   InstanceType function_type = JS_SPECIAL_API_OBJECT_TYPE;
@@ -464,14 +462,13 @@ void AddPropertyToPropertyList(Isolate* isolate,
   if (IsUndefined(maybe_list, isolate)) {
     list = ArrayList::New(isolate, length, AllocationType::kOld);
   } else {
-    list = handle(ArrayList::cast(maybe_list), isolate);
+    list = handle(Cast<ArrayList>(maybe_list), isolate);
   }
   templ->set_number_of_properties(templ->number_of_properties() + 1);
   for (int i = 0; i < length; i++) {
     DirectHandle<Object> value =
-        data[i].is_null()
-            ? Handle<Object>::cast(isolate->factory()->undefined_value())
-            : data[i];
+        data[i].is_null() ? Cast<Object>(isolate->factory()->undefined_value())
+                          : data[i];
     list = ArrayList::Add(isolate, list, value);
   }
   templ->set_property_list(*list);
@@ -520,7 +517,7 @@ MaybeHandle<JSObject> ApiNatives::InstantiateRemoteObject(
   InvokeScope invoke_scope(isolate);
 
   DirectHandle<FunctionTemplateInfo> constructor(
-      FunctionTemplateInfo::cast(data->constructor()), isolate);
+      Cast<FunctionTemplateInfo>(data->constructor()), isolate);
   DirectHandle<Map> object_map = isolate->factory()->NewContextlessMap(
       JS_SPECIAL_API_OBJECT_TYPE,
       JSSpecialObject::kHeaderSize +
@@ -586,7 +583,7 @@ void ApiNatives::AddNativeDataProperty(Isolate* isolate,
   if (IsUndefined(maybe_list, isolate)) {
     list = ArrayList::New(isolate, 1, AllocationType::kOld);
   } else {
-    list = handle(ArrayList::cast(maybe_list), isolate);
+    list = handle(Cast<ArrayList>(maybe_list), isolate);
   }
   list = ArrayList::Add(isolate, list, property);
   info->set_property_accessors(*list);
@@ -625,7 +622,7 @@ Handle<JSFunction> ApiNatives::CreateApiFunction(
   if (IsTheHole(*prototype, isolate)) {
     prototype = isolate->factory()->NewFunctionPrototype(result);
   } else if (IsUndefined(obj->GetPrototypeProviderTemplate(), isolate)) {
-    JSObject::AddProperty(isolate, Handle<JSObject>::cast(prototype),
+    JSObject::AddProperty(isolate, Cast<JSObject>(prototype),
                           isolate->factory()->constructor_string(), result,
                           DONT_ENUM);
   }
@@ -634,7 +631,7 @@ Handle<JSFunction> ApiNatives::CreateApiFunction(
   bool immutable_proto = false;
   if (!IsUndefined(obj->GetInstanceTemplate(), isolate)) {
     DirectHandle<ObjectTemplateInfo> GetInstanceTemplate(
-        ObjectTemplateInfo::cast(obj->GetInstanceTemplate()), isolate);
+        Cast<ObjectTemplateInfo>(obj->GetInstanceTemplate()), isolate);
     embedder_field_count = GetInstanceTemplate->embedder_field_count();
     immutable_proto = GetInstanceTemplate->immutable_proto();
   }
@@ -685,8 +682,7 @@ Handle<JSFunction> ApiNatives::CreateApiFunction(
 
   if (immutable_proto) map->set_is_immutable_proto(true);
 
-  JSFunction::SetInitialMap(isolate, result, map,
-                            Handle<JSObject>::cast(prototype));
+  JSFunction::SetInitialMap(isolate, result, map, Cast<JSObject>(prototype));
   return result;
 }
 

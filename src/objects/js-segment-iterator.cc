@@ -31,12 +31,14 @@ Handle<String> JSSegmentIterator::GranularityAsString(Isolate* isolate) const {
 // ecma402 #sec-createsegmentiterator
 MaybeHandle<JSSegmentIterator> JSSegmentIterator::Create(
     Isolate* isolate, DirectHandle<String> input_string,
-    icu::BreakIterator* break_iterator, JSSegmenter::Granularity granularity) {
+    icu::BreakIterator* incoming_break_iterator,
+    JSSegmenter::Granularity granularity) {
   // Clone a copy for both the ownership and not sharing with containing and
   // other calls to the iterator because icu::BreakIterator keep the iteration
   // position internally and cannot be shared across multiple calls to
   // JSSegmentIterator::Create and JSSegments::Containing.
-  break_iterator = break_iterator->clone();
+  std::shared_ptr<icu::BreakIterator> break_iterator{
+      incoming_break_iterator->clone()};
   DCHECK_NOT_NULL(break_iterator);
   DirectHandle<Map> map(isolate->native_context()->intl_segment_iterator_map(),
                         isolate);
@@ -44,20 +46,20 @@ MaybeHandle<JSSegmentIterator> JSSegmentIterator::Create(
   // 5. Set iterator.[[IteratedStringNextSegmentCodeUnitIndex]] to 0.
   break_iterator->first();
   DirectHandle<Managed<icu::BreakIterator>> managed_break_iterator =
-      Managed<icu::BreakIterator>::FromRawPtr(isolate, 0, break_iterator);
+      Managed<icu::BreakIterator>::From(isolate, 0, break_iterator);
 
-  icu::UnicodeString* string = new icu::UnicodeString();
+  std::shared_ptr<icu::UnicodeString> string =
+      std::make_shared<icu::UnicodeString>();
   break_iterator->getText().getText(*string);
   DirectHandle<Managed<icu::UnicodeString>> unicode_string =
-      Managed<icu::UnicodeString>::FromRawPtr(isolate, 0, string);
+      Managed<icu::UnicodeString>::From(isolate, 0, string);
 
   break_iterator->setText(*string);
 
   // Now all properties are ready, so we can allocate the result object.
   Handle<JSObject> result = isolate->factory()->NewJSObjectFromMap(map);
   DisallowGarbageCollection no_gc;
-  Handle<JSSegmentIterator> segment_iterator =
-      Handle<JSSegmentIterator>::cast(result);
+  Handle<JSSegmentIterator> segment_iterator = Cast<JSSegmentIterator>(result);
 
   segment_iterator->set_flags(0);
   segment_iterator->set_granularity(granularity);
@@ -123,19 +125,18 @@ MaybeHandle<JSReceiver> JSSegmentIterator::Next(
     if (code > unibrow::Latin1::kMaxChar) {
       segment = factory->LookupSingleCharacterStringFromCode(code);
     }
-    Handle<Object> index;
+    Handle<Number> index;
     if (!Smi::IsValid(start_index)) index = factory->NewHeapNumber(start_index);
     DirectHandle<Map> map(
         isolate->native_context()->intl_segment_data_object_map(), isolate);
-    segment_data =
-        Handle<JSSegmentDataObject>::cast(factory->NewJSObjectFromMap(map));
+    segment_data = Cast<JSSegmentDataObject>(factory->NewJSObjectFromMap(map));
     Tagged<JSSegmentDataObject> raw = *segment_data;
     DisallowHeapAllocation no_gc;
     // We can skip write barriers because {segment_data} is the last object
     // that was allocated.
     raw->set_segment(
         code <= unibrow::Latin1::kMaxChar
-            ? String::cast(factory->single_character_string_table()->get(code))
+            ? Cast<String>(factory->single_character_string_table()->get(code))
             : *segment,
         SKIP_WRITE_BARRIER);
     raw->set_index(

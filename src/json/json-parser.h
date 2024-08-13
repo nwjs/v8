@@ -211,7 +211,7 @@ class JsonParser final {
   ~JsonParser();
 
   // Parse a string containing a single JSON value.
-  MaybeHandle<Object> ParseJson(Handle<Object> reviver);
+  MaybeHandle<Object> ParseJson(DirectHandle<Object> reviver);
 
   bool ParseRawJson();
 
@@ -299,6 +299,9 @@ class JsonParser final {
   JsonString ScanJsonString(bool needs_internalization);
   JsonString ScanJsonPropertyKey(JsonContinuation* cont);
   base::uc32 ScanUnicodeCharacter();
+  base::Vector<const Char> GetKeyChars(JsonString key) {
+    return base::Vector<const Char>(chars_ + key.start(), key.length());
+  }
   Handle<String> MakeString(const JsonString& string,
                             Handle<String> hint = Handle<String>());
 
@@ -367,7 +370,7 @@ class JsonParser final {
 
   void UpdatePointers() {
     DisallowGarbageCollection no_gc;
-    const Char* chars = Handle<SeqString>::cast(source_)->GetChars(no_gc);
+    const Char* chars = Cast<SeqString>(source_)->GetChars(no_gc);
     if (chars_ != chars) {
       size_t position = cursor_ - chars_;
       size_t length = end_ - chars_;

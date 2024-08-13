@@ -167,7 +167,7 @@ template <typename P>
 struct produces_printable_graph
     : public detail::produces_printable_graph_impl<P> {};
 
-enum class TurboshaftPipelineKind { kJS, kWasm, kCSA, kJSToWasm };
+enum class TurboshaftPipelineKind { kJS, kWasm, kCSA, kTSABuiltin, kJSToWasm };
 
 class LoopUnrollingAnalyzer;
 class WasmRevecAnalyzer;
@@ -179,11 +179,11 @@ class V8_EXPORT_PRIVATE PipelineData {
   using RegisterComponent = detail::RegisterComponent;
 
  public:
-  explicit PipelineData(
-      ZoneStats* zone_stats, TurboshaftPipelineKind pipeline_kind,
-      Isolate* isolate, OptimizedCompilationInfo* info,
-      int start_source_position = kNoSourcePosition,
-      const AssemblerOptions& assembler_options = AssemblerOptions{})
+  explicit PipelineData(ZoneStats* zone_stats,
+                        TurboshaftPipelineKind pipeline_kind, Isolate* isolate,
+                        OptimizedCompilationInfo* info,
+                        const AssemblerOptions& assembler_options,
+                        int start_source_position = kNoSourcePosition)
       : zone_stats_(zone_stats),
         pipeline_kind_(pipeline_kind),
         isolate_(isolate),
@@ -350,10 +350,7 @@ class V8_EXPORT_PRIVATE PipelineData {
     return instruction_component_->sequence;
   }
   Frame* frame() const { return codegen_component_->frame; }
-  CodeTracer* GetCodeTracer() const {
-    DCHECK_NOT_NULL(isolate_);
-    return isolate_->GetCodeTracer();
-  }
+  CodeTracer* GetCodeTracer() const;
   size_t& max_unoptimized_frame_height() {
     return codegen_component_->max_unoptimized_frame_height;
   }

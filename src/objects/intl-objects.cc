@@ -316,7 +316,7 @@ Tagged<String> Intl::ConvertOneByteToLower(Tagged<String> src,
 
   const int length = src->length();
   String::FlatContent src_flat = src->GetFlatContent(no_gc);
-  uint8_t* dst_data = SeqOneByteString::cast(dst)->GetChars(no_gc);
+  uint8_t* dst_data = Cast<SeqOneByteString>(dst)->GetChars(no_gc);
 
   if (src_flat.IsOneByte()) {
     const uint8_t* src_data = src_flat.ToOneByteVector().begin();
@@ -770,7 +770,7 @@ Maybe<std::string> CanonicalizeLanguageTag(Isolate* isolate,
   // RangeError exception.
 
   if (IsString(*locale_in)) {
-    locale_str = Handle<String>::cast(locale_in);
+    locale_str = Cast<String>(locale_in);
   } else if (IsJSReceiver(*locale_in)) {
     ASSIGN_RETURN_ON_EXCEPTION_VALUE(isolate, locale_str,
                                      Object::ToString(isolate, locale_in),
@@ -807,7 +807,7 @@ Maybe<std::vector<std::string>> Intl::CanonicalizeLocaleList(
     // Since this value came from JSLocale, which is already went though the
     // CanonializeLanguageTag process once, therefore there are no need to
     // call CanonializeLanguageTag again.
-    seen.push_back(JSLocale::ToString(Handle<JSLocale>::cast(locales)));
+    seen.push_back(JSLocale::ToString(Cast<JSLocale>(locales)));
     return Just(seen);
   }
   if (IsString(*locales)) {
@@ -860,7 +860,7 @@ Maybe<std::vector<std::string>> Intl::CanonicalizeLocaleList(
     std::string canonicalized_tag;
     if (IsJSLocale(*k_value)) {
       // 7c iii. 1. Let tag be kValue.[[Locale]].
-      canonicalized_tag = JSLocale::ToString(Handle<JSLocale>::cast(k_value));
+      canonicalized_tag = JSLocale::ToString(Cast<JSLocale>(k_value));
       // 7c iv. Else,
     } else {
       // 7c iv 1. Let tag be ? ToString(kValue).
@@ -968,7 +968,7 @@ Intl::CompareStringsOptions Intl::CompareStringsOptionsFor(
 
   if (!IsString(*locales)) return CompareStringsOptions::kNone;
 
-  auto locales_string = DirectHandle<String>::cast(locales);
+  auto locales_string = Cast<String>(locales);
   for (const char* fast_locale : kFastLocales) {
     if (locales_string->IsEqualTo(base::CStrVector(fast_locale), isolate)) {
       return CompareStringsOptions::kTryFastPath;
@@ -1010,7 +1010,7 @@ base::Optional<int> Intl::StringLocaleCompare(
   }
 
   Handle<JSFunction> constructor = Handle<JSFunction>(
-      JSFunction::cast(
+      Cast<JSFunction>(
           isolate->context()->native_context()->intl_collator_function()),
       isolate);
 
@@ -1504,7 +1504,7 @@ MaybeHandle<String> Intl::NumberToLocaleString(Isolate* isolate,
   }
 
   Handle<JSFunction> constructor = Handle<JSFunction>(
-      JSFunction::cast(
+      Cast<JSFunction>(
           isolate->context()->native_context()->intl_number_format_function()),
       isolate);
   Handle<JSNumberFormat> number_format;
@@ -2581,11 +2581,11 @@ Maybe<Intl::ResolvedLocale> Intl::ResolveLocale(
 Handle<Managed<icu::UnicodeString>> Intl::SetTextToBreakIterator(
     Isolate* isolate, Handle<String> text, icu::BreakIterator* break_iterator) {
   text = String::Flatten(isolate, text);
-  icu::UnicodeString* u_text = static_cast<icu::UnicodeString*>(
-      Intl::ToICUUnicodeString(isolate, text).clone());
+  std::shared_ptr<icu::UnicodeString> u_text{static_cast<icu::UnicodeString*>(
+      Intl::ToICUUnicodeString(isolate, text).clone())};
 
   Handle<Managed<icu::UnicodeString>> new_u_text =
-      Managed<icu::UnicodeString>::FromRawPtr(isolate, 0, u_text);
+      Managed<icu::UnicodeString>::From(isolate, 0, u_text);
 
   break_iterator->setText(*u_text);
   return new_u_text;

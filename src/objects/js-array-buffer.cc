@@ -24,7 +24,7 @@ bool CanonicalNumericIndexString(Isolate* isolate,
   *is_minus_zero = false;
   if (lookup_key.is_element()) return true;
 
-  Handle<String> key = Handle<String>::cast(lookup_key.name());
+  Handle<String> key = Cast<String>(lookup_key.name());
 
   // 3. Let n be ! ToNumber(argument).
   Handle<Object> result = String::ToNumber(isolate, key);
@@ -161,7 +161,7 @@ void JSArrayBuffer::DetachInternal(bool force_for_wasm_memory,
 
   if (extension) {
     DisallowGarbageCollection disallow_gc;
-    isolate->heap()->DetachArrayBufferExtension(*this, extension);
+    isolate->heap()->DetachArrayBufferExtension(extension);
     std::shared_ptr<BackingStore> backing_store = RemoveExtension();
     CHECK_IMPLIES(force_for_wasm_memory, backing_store->is_wasm_memory());
   }
@@ -183,7 +183,7 @@ size_t JSArrayBuffer::GsabByteLength(Isolate* isolate,
   DisallowGarbageCollection no_gc;
   DisallowJavascriptExecution no_js(isolate);
   Tagged<JSArrayBuffer> buffer =
-      JSArrayBuffer::cast(Tagged<Object>(raw_array_buffer));
+      Cast<JSArrayBuffer>(Tagged<Object>(raw_array_buffer));
   CHECK(buffer->is_resizable_by_js());
   CHECK(buffer->is_shared());
   return buffer->GetBackingStore()->byte_length(std::memory_order_seq_cst);
@@ -248,6 +248,7 @@ void JSArrayBuffer::MarkExtension() {
 void JSArrayBuffer::YoungMarkExtension() {
   ArrayBufferExtension* extension = this->extension();
   if (extension) {
+    DCHECK_EQ(ArrayBufferExtension::Age::kYoung, extension->age());
     extension->YoungMark();
   }
 }
@@ -263,7 +264,7 @@ Handle<JSArrayBuffer> JSTypedArray::GetBuffer() {
   Isolate* isolate = GetIsolate();
   DirectHandle<JSTypedArray> self(*this, isolate);
   DCHECK(IsTypedArrayOrRabGsabTypedArrayElementsKind(self->GetElementsKind()));
-  Handle<JSArrayBuffer> array_buffer(JSArrayBuffer::cast(self->buffer()),
+  Handle<JSArrayBuffer> array_buffer(Cast<JSArrayBuffer>(self->buffer()),
                                      isolate);
   if (!is_on_heap()) {
     // Already is off heap, so return the existing buffer.
@@ -409,7 +410,7 @@ size_t JSTypedArray::LengthTrackingGsabBackedTypedArrayLength(
   // in bounds checks to minimize the need for calling this function.
   DisallowGarbageCollection no_gc;
   DisallowJavascriptExecution no_js(isolate);
-  Tagged<JSTypedArray> array = JSTypedArray::cast(Tagged<Object>(raw_array));
+  Tagged<JSTypedArray> array = Cast<JSTypedArray>(Tagged<Object>(raw_array));
   CHECK(array->is_length_tracking());
   Tagged<JSArrayBuffer> buffer = array->buffer();
   CHECK(buffer->is_resizable_by_js());

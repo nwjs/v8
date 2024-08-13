@@ -100,18 +100,16 @@ MaybeHandle<JSV8BreakIterator> JSV8BreakIterator::New(
 
   // Construct managed objects from pointers
   DirectHandle<Managed<icu::BreakIterator>> managed_break_iterator =
-      Managed<icu::BreakIterator>::FromUniquePtr(isolate, 0,
-                                                 std::move(break_iterator));
+      Managed<icu::BreakIterator>::From(isolate, 0, std::move(break_iterator));
   DirectHandle<Managed<icu::UnicodeString>> managed_unicode_string =
-      Managed<icu::UnicodeString>::FromRawPtr(isolate, 0, nullptr);
+      Managed<icu::UnicodeString>::From(isolate, 0, nullptr);
 
   DirectHandle<String> locale_str =
       isolate->factory()->NewStringFromAsciiChecked(r.locale.c_str());
 
   // Now all properties are ready, so we can allocate the result object.
-  Handle<JSV8BreakIterator> break_iterator_holder =
-      Handle<JSV8BreakIterator>::cast(
-          isolate->factory()->NewFastOrSlowJSObjectFromMap(map));
+  Handle<JSV8BreakIterator> break_iterator_holder = Cast<JSV8BreakIterator>(
+      isolate->factory()->NewFastOrSlowJSObjectFromMap(map));
   DisallowGarbageCollection no_gc;
   break_iterator_holder->set_locale(*locale_str);
   break_iterator_holder->set_break_iterator(*managed_break_iterator);

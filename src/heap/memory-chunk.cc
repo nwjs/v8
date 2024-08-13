@@ -73,7 +73,7 @@ uint32_t MemoryChunk::MetadataTableIndex(Address chunk_address) {
     DCHECK_LT(offset >> kPageSizeBits, kPagesInTrustedCage);
     index = kTrustedSpaceMetadataOffset + (offset >> kPageSizeBits);
   } else {
-    CodeRange* code_range = CodeRange::GetProcessWideCodeRange();
+    CodeRange* code_range = IsolateGroup::current()->GetCodeRange();
     DCHECK(code_range->region().contains(chunk_address));
     uint32_t offset = static_cast<uint32_t>(chunk_address - code_range->base());
     DCHECK_LT(offset >> kPageSizeBits, kPagesInCodeCage);
@@ -143,9 +143,10 @@ bool MemoryChunk::InReadOnlySpace() const {
 
 bool MemoryChunk::IsTrusted() const {
   bool is_trusted = IsFlagSet(IS_TRUSTED);
-  DCHECK_EQ(is_trusted,
-            Metadata()->owner()->identity() == TRUSTED_SPACE ||
-                Metadata()->owner()->identity() == TRUSTED_LO_SPACE);
+#if DEBUG
+  AllocationSpace id = Metadata()->owner()->identity();
+  DCHECK_EQ(is_trusted, IsAnyTrustedSpace(id) || IsAnyCodeSpace(id));
+#endif
   return is_trusted;
 }
 
@@ -255,6 +256,17 @@ void MemoryChunk::SetYoungGenerationPageFlags(MarkingMode marking_mode) {
   SetFlagsNonExecutable(flags_to_set, flags_to_set);
   ClearFlagsNonExecutable(flags_to_clear);
 }
+
+#ifdef V8_ENABLE_SANDBOX
+bool MemoryChunk::SandboxSafeInReadOnlySpace() const {
+  // When the sandbox is enabled, only the ReadOnlyPageMetadata are stored
+  // inline in the MemoryChunk.
+  // ReadOnlyPageMetadata::ChunkAddress() is a special version that boils down
+  // to `metadata_address - kMemoryChunkHeaderSize`.
+  return static_cast<const ReadOnlyPageMetadata*>(Metadata())->ChunkAddress() ==
+         address();
+}
+#endif
 
 }  // namespace internal
 }  // namespace v8

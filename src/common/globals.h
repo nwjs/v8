@@ -140,6 +140,18 @@ namespace internal {
 #define V8_ENABLE_SANDBOX_BOOL false
 #endif
 
+#ifdef V8_ENABLE_SANDBOX
+// Initially, Leaptiering is only available on sandbox-enabled builds, and so
+// V8_ENABLE_SANDBOX and V8_ENABLE_LEAPTIERING are effectively equivalent. Once
+// completed there, it will be ported to non-sandbox builds, at which point the
+// two defines will be separated from each other. Finally, once Leaptiering is
+// used on all configurations, the define will be removed completely.
+#define V8_ENABLE_LEAPTIERING 1
+#define V8_ENABLE_LEAPTIERING_BOOL true
+#else
+#define V8_ENABLE_LEAPTIERING_BOOL false
+#endif
+
 #ifdef V8_ENABLE_CONTROL_FLOW_INTEGRITY
 #define ENABLE_CONTROL_FLOW_INTEGRITY_BOOL true
 #else
@@ -287,6 +299,16 @@ const size_t kShortBuiltinCallsOldSpaceSizeThreshold = size_t{2} * GB;
 #define V8_HEAP_USE_PKU_JIT_WRITE_PROTECT true
 #else
 #define V8_HEAP_USE_PKU_JIT_WRITE_PROTECT false
+#endif
+
+// Enable hardware features to make the sandbox memory temporarily inaccessible.
+// This is currently only used with pkeys and in debug mode.
+// TODO(sroettger): add a gn arg to toggle this once we enable it in non-debug
+//                  builds.
+#if V8_HAS_PKU_JIT_WRITE_PROTECT && defined(V8_ENABLE_SANDBOX) && defined(DEBUG)
+#define V8_ENABLE_SANDBOX_HARDWARE_SUPPORT true
+#else
+#define V8_ENABLE_SANDBOX_HARDWARE_SUPPORT false
 #endif
 
 // Determine whether tagged pointers are 8 bytes (used in Torque layouts for
@@ -611,9 +633,6 @@ constexpr int kSimd128Size = 16;
 
 // 256 bit SIMD value size.
 constexpr int kSimd256Size = 32;
-
-// Maximum ordinal used for tracking asynchronous module evaluation order.
-constexpr unsigned kMaxModuleAsyncEvaluatingOrdinal = (1 << 30) - 1;
 
 // FUNCTION_ADDR(f) gets the address of a C function f.
 #define FUNCTION_ADDR(f) (reinterpret_cast<v8::internal::Address>(f))
@@ -952,6 +971,7 @@ using JavaScriptArguments = Arguments<ArgumentsType::kJS>;
 class Assembler;
 class ClassScope;
 class InstructionStream;
+class BigInt;
 class Code;
 class CodeSpace;
 class Context;
@@ -982,6 +1002,10 @@ template <typename T>
 using DirectHandle = Handle<T>;
 #endif
 class Heap;
+class HeapNumber;
+class Boolean;
+class Null;
+class Undefined;
 class HeapObject;
 class IC;
 template <typename T>
@@ -992,6 +1016,9 @@ class JSReceiver;
 class JSArray;
 class JSFunction;
 class JSObject;
+class JSProxy;
+class JSBoundFunction;
+class JSWrappedFunction;
 class LocalIsolate;
 class MacroAssembler;
 class Map;
@@ -1071,6 +1098,8 @@ class Struct;
 class Symbol;
 template <typename T>
 class Tagged;
+template <typename... Ts>
+class Union;
 class Variable;
 namespace maglev {
 class MaglevAssembler;
@@ -1079,8 +1108,23 @@ namespace compiler {
 class AccessBuilder;
 }
 
+// Number is either a Smi or a HeapNumber.
+using Number = Union<Smi, HeapNumber>;
+// Numeric is either a Number or a BigInt.
+using Numeric = Union<Smi, HeapNumber, BigInt>;
+// A primitive JavaScript value, which excludes JS objects.
+using JSPrimitive =
+    Union<Smi, HeapNumber, BigInt, String, Symbol, Boolean, Null, Undefined>;
+// A user-exposed JavaScript value, as opposed to V8-internal values like Holes
+// or a FixedArray.
+using JSAny = Union<Smi, HeapNumber, BigInt, String, Symbol, Boolean, Null,
+                    Undefined, JSReceiver>;
+using JSCallable =
+    Union<JSBoundFunction, JSFunction, JSObject, JSProxy, JSWrappedFunction>;
 using MaybeObject = MaybeWeak<Object>;
 using HeapObjectReference = MaybeWeak<HeapObject>;
+
+using JSObjectOrUndefined = Union<JSObject, Undefined>;
 
 // Slots are either full-pointer slots or compressed slots depending on whether
 // pointer compression is enabled or not.
@@ -1179,7 +1223,7 @@ enum AllocationSpace {
   FIRST_GROWABLE_PAGED_SPACE = OLD_SPACE,
   LAST_GROWABLE_PAGED_SPACE = TRUSTED_SPACE,
   FIRST_SWEEPABLE_SPACE = NEW_SPACE,
-  LAST_SWEEPABLE_SPACE = TRUSTED_SPACE
+  LAST_SWEEPABLE_SPACE = SHARED_TRUSTED_SPACE
 };
 constexpr int kSpaceTagSize = 4;
 static_assert(FIRST_SPACE == 0);
@@ -1194,6 +1238,9 @@ constexpr bool IsAnyTrustedSpace(AllocationSpace space) {
 constexpr bool IsAnySharedSpace(AllocationSpace space) {
   return space == SHARED_SPACE || space == SHARED_LO_SPACE ||
          space == SHARED_TRUSTED_SPACE || space == SHARED_TRUSTED_LO_SPACE;
+}
+constexpr bool IsAnyNewSpace(AllocationSpace space) {
+  return space == NEW_SPACE || space == NEW_LO_SPACE;
 }
 
 constexpr const char* ToString(AllocationSpace space) {
@@ -1560,8 +1607,16 @@ enum WhereToStart { kStartAtReceiver, kStartAtPrototype };
 enum ResultSentinel { kNotFound = -1, kUnsupported = -2 };
 
 enum ShouldThrow {
+  kDontThrow = Internals::kDontThrow,
   kThrowOnError = Internals::kThrowOnError,
-  kDontThrow = Internals::kDontThrow
+};
+
+// The result that might be returned by Setter/Definer/Deleter interceptor
+// callback when it doesn't throw an exception.
+enum class InterceptorResult {
+  kFalse = 0,
+  kTrue = 1,
+  kNotIntercepted = 2,
 };
 
 enum class ThreadKind { kMain, kBackground };
@@ -1720,15 +1775,16 @@ inline std::ostream& operator<<(std::ostream& os, CreateArgumentsType type) {
 constexpr int kScopeInfoMaxInlinedLocalNamesSize = 75;
 
 enum ScopeType : uint8_t {
-  CLASS_SCOPE,        // The scope introduced by a class.
-  EVAL_SCOPE,         // The top-level scope for an eval source.
-  FUNCTION_SCOPE,     // The top-level scope for a function.
-  MODULE_SCOPE,       // The scope introduced by a module literal
-  SCRIPT_SCOPE,       // The top-level scope for a script or a top-level eval.
-  CATCH_SCOPE,        // The scope introduced by catch.
-  BLOCK_SCOPE,        // The scope introduced by a new block.
-  WITH_SCOPE,         // The scope introduced by with.
-  SHADOW_REALM_SCOPE  // Synthetic scope for ShadowRealm NativeContexts.
+  SCRIPT_SCOPE,        // The top-level scope for a script or a top-level eval.
+  REPL_MODE_SCOPE,     // The top-level scope for a repl-mode script.
+  CLASS_SCOPE,         // The scope introduced by a class.
+  EVAL_SCOPE,          // The top-level scope for an eval source.
+  FUNCTION_SCOPE,      // The top-level scope for a function.
+  MODULE_SCOPE,        // The scope introduced by a module literal
+  CATCH_SCOPE,         // The scope introduced by catch.
+  BLOCK_SCOPE,         // The scope introduced by a new block.
+  WITH_SCOPE,          // The scope introduced by with.
+  SHADOW_REALM_SCOPE,  // Synthetic scope for ShadowRealm NativeContexts.
 };
 
 inline std::ostream& operator<<(std::ostream& os, ScopeType type) {
@@ -1751,6 +1807,8 @@ inline std::ostream& operator<<(std::ostream& os, ScopeType type) {
       return os << "WITH_SCOPE";
     case ScopeType::SHADOW_REALM_SCOPE:
       return os << "SHADOW_REALM_SCOPE";
+    case ScopeType::REPL_MODE_SCOPE:
+      return os << "REPL_MODE_SCOPE";
   }
   UNREACHABLE();
 }
@@ -2311,24 +2369,31 @@ inline std::ostream& operator<<(std::ostream& os, TieringState marker) {
 
 // State machine:
 // S(tate)0: kPending
-// S1: kEarlyMaglev
-// S2: kEarlyTurbofan
-// S3: kNormal
+// S1: kEarlySparkplug,
+// S2: kEarlyMaglevPending,
+// S3: kEarlyMaglev
+// S4: kEarlyTurbofan
+// S5: kNormal
 //
-// C(ondition)0: maglev compile
-// C1: ic was stable early
-// C2: turbofan compile
-// C3: ic change or deopt
+// C(ondition)0: sparkplug compile
+// C1: maglev compile
+// C2: ic was stable early
+// C3: new closure
+// C4: turbofan compile
+// C5: ic change or deopt
 //
-// S0 -- C0 -- C1 --> S1 -- C2 -- C3 --> S2 --|
-//             |      |                       |
-//             |      |-----------------------|
-//             |                 |
-//             |                 C3
-//             |                 |
-//             |-----------------------> S3
+// S0 - C0 -> S1 - C1 - C2 -> S2 ------------- C4 -> S4 -|
+//                      |     | - C3 -> S3 -|            |
+//                      |     |          |               |
+//                      |--------------------------------|
+//                      |                |
+//                      |                C5
+//                      |                |
+//                      |-------------------> S5
 enum class CachedTieringDecision : int32_t {
   kPending,
+  kEarlySparkplug,
+  kEarlyMaglevPending,
   kEarlyMaglev,
   kEarlyTurbofan,
   kNormal,
@@ -2521,7 +2586,7 @@ enum class StubCallMode {
 
 enum class NeedsContext { kYes, kNo };
 
-constexpr int kFunctionLiteralIdInvalid = -1;
+constexpr int kInvalidInfoId = -1;
 constexpr int kFunctionLiteralIdTopLevel = 0;
 
 constexpr int kSwissNameDictionaryInitialCapacity = 4;

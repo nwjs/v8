@@ -23,7 +23,7 @@ namespace v8::internal::wasm {
 
 WasmCompilationResult WasmCompilationUnit::ExecuteCompilation(
     CompilationEnv* env, const WireBytesStorage* wire_bytes_storage,
-    Counters* counters, WasmFeatures* detected) {
+    Counters* counters, WasmDetectedFeatures* detected) {
   WasmCompilationResult result;
   if (func_index_ < static_cast<int>(env->module->num_imported_functions)) {
     result = ExecuteImportWrapperCompilation(env);
@@ -59,7 +59,7 @@ WasmCompilationResult WasmCompilationUnit::ExecuteImportWrapperCompilation(
 
 WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
     CompilationEnv* env, const WireBytesStorage* wire_bytes_storage,
-    Counters* counters, WasmFeatures* detected) {
+    Counters* counters, WasmDetectedFeatures* detected) {
   const WasmFunction* func = &env->module->functions[func_index_];
   base::Vector<const uint8_t> code = wire_bytes_storage->GetCode(func->code);
   bool is_shared = env->module->types[func->sig_index].is_shared;
@@ -181,7 +181,7 @@ WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
 // static
 void WasmCompilationUnit::CompileWasmFunction(Counters* counters,
                                               NativeModule* native_module,
-                                              WasmFeatures* detected,
+                                              WasmDetectedFeatures* detected,
                                               const WasmFunction* function,
                                               ExecutionTier tier) {
   ModuleWireBytes wire_bytes(native_module->wire_bytes());
@@ -211,12 +211,11 @@ void WasmCompilationUnit::CompileWasmFunction(Counters* counters,
 
 JSToWasmWrapperCompilationUnit::JSToWasmWrapperCompilationUnit(
     Isolate* isolate, const FunctionSig* sig, uint32_t canonical_sig_index,
-    const WasmModule* module, bool is_import, WasmFeatures enabled_features)
+    const WasmModule* module, WasmEnabledFeatures enabled_features)
     : isolate_(isolate),
-      is_import_(is_import),
       sig_(sig),
       canonical_sig_index_(canonical_sig_index),
-      job_(compiler::NewJSToWasmCompilationJob(isolate, sig, module, is_import,
+      job_(compiler::NewJSToWasmCompilationJob(isolate, sig, module,
                                                enabled_features)) {
   OptimizedCompilationInfo* info =
       v8_flags.turboshaft_wasm_wrappers
@@ -256,7 +255,7 @@ Handle<Code> JSToWasmWrapperCompilationUnit::Finalize() {
     Handle<String> name = isolate_->factory()->NewStringFromAsciiChecked(
         info->GetDebugName().get());
     PROFILE(isolate_, CodeCreateEvent(LogEventListener::CodeTag::kStub,
-                                      Handle<AbstractCode>::cast(code), name));
+                                      Cast<AbstractCode>(code), name));
   }
   return code;
 }
@@ -264,11 +263,12 @@ Handle<Code> JSToWasmWrapperCompilationUnit::Finalize() {
 // static
 Handle<Code> JSToWasmWrapperCompilationUnit::CompileJSToWasmWrapper(
     Isolate* isolate, const FunctionSig* sig, uint32_t canonical_sig_index,
-    const WasmModule* module, bool is_import) {
+    const WasmModule* module) {
   // Run the compilation unit synchronously.
-  WasmFeatures enabled_features = WasmFeatures::FromIsolate(isolate);
+  WasmEnabledFeatures enabled_features =
+      WasmEnabledFeatures::FromIsolate(isolate);
   JSToWasmWrapperCompilationUnit unit(isolate, sig, canonical_sig_index, module,
-                                      is_import, enabled_features);
+                                      enabled_features);
   unit.Execute();
   return unit.Finalize();
 }

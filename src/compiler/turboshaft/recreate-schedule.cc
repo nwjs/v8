@@ -1072,6 +1072,11 @@ Node* ScheduleBuilder::ProcessOperation(const ConstantOp& op) {
     case ConstantOp::Kind::kRelocatableWasmStubCall:
       return RelocatableIntPtrConstant(op.integral(),
                                        RelocInfo::WASM_STUB_CALL);
+    case ConstantOp::Kind::kRelocatableWasmCanonicalSignatureId:
+      return AddNode(common.RelocatableInt32Constant(
+                         base::checked_cast<int32_t>(op.integral()),
+                         RelocInfo::WASM_CANONICAL_SIG_ID),
+                     {});
   }
 }
 
@@ -1396,6 +1401,10 @@ std::pair<Node*, MachineType> ScheduleBuilder::BuildDeoptInput(
       return {AddNode(common.ArgumentsLengthState(), {}),
               MachineType::AnyTagged()};
     }
+    case Instr::kRestLength:
+      // For now, kRestLength is only generated when using the Maglev frontend,
+      // which doesn't use recreate-schedule.
+      [[fallthrough]];
     case Instr::kUnusedRegister:
       UNREACHABLE();
   }

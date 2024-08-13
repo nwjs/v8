@@ -29,11 +29,25 @@ NEVER_READ_ONLY_SPACE_IMPL(ModuleRequest)
 NEVER_READ_ONLY_SPACE_IMPL(SourceTextModule)
 NEVER_READ_ONLY_SPACE_IMPL(SyntheticModule)
 
-BOOL_ACCESSORS(SourceTextModule, flags, async, AsyncBit::kShift)
-BIT_FIELD_ACCESSORS(SourceTextModule, flags, async_evaluating_ordinal,
-                    SourceTextModule::AsyncEvaluatingOrdinalBits)
+BOOL_ACCESSORS(SourceTextModule, flags, has_toplevel_await,
+               HasToplevelAwaitBit::kShift)
+BIT_FIELD_ACCESSORS(SourceTextModule, flags, async_evaluation_ordinal,
+                    SourceTextModule::AsyncEvaluationOrdinalBits)
 ACCESSORS(SourceTextModule, async_parent_modules, Tagged<ArrayList>,
           kAsyncParentModulesOffset)
+
+BIT_FIELD_ACCESSORS(ModuleRequest, flags, position, ModuleRequest::PositionBits)
+
+inline void ModuleRequest::set_phase(ModuleImportPhase phase) {
+  DCHECK_GE(PhaseBit::kMax, phase);
+  int hints = flags();
+  hints = PhaseBit::update(hints, phase);
+  set_flags(hints);
+}
+
+inline ModuleImportPhase ModuleRequest::phase() const {
+  return PhaseBit::decode(flags());
+}
 
 struct Module::Hash {
   V8_INLINE size_t operator()(Tagged<Module> module) const {
@@ -46,26 +60,25 @@ Tagged<SourceTextModuleInfo> SourceTextModule::info() const {
 }
 
 OBJECT_CONSTRUCTORS_IMPL(SourceTextModuleInfo, FixedArray)
-CAST_ACCESSOR(SourceTextModuleInfo)
 
 Tagged<FixedArray> SourceTextModuleInfo::module_requests() const {
-  return FixedArray::cast(get(kModuleRequestsIndex));
+  return Cast<FixedArray>(get(kModuleRequestsIndex));
 }
 
 Tagged<FixedArray> SourceTextModuleInfo::special_exports() const {
-  return FixedArray::cast(get(kSpecialExportsIndex));
+  return Cast<FixedArray>(get(kSpecialExportsIndex));
 }
 
 Tagged<FixedArray> SourceTextModuleInfo::regular_exports() const {
-  return FixedArray::cast(get(kRegularExportsIndex));
+  return Cast<FixedArray>(get(kRegularExportsIndex));
 }
 
 Tagged<FixedArray> SourceTextModuleInfo::regular_imports() const {
-  return FixedArray::cast(get(kRegularImportsIndex));
+  return Cast<FixedArray>(get(kRegularImportsIndex));
 }
 
 Tagged<FixedArray> SourceTextModuleInfo::namespace_imports() const {
-  return FixedArray::cast(get(kNamespaceImportsIndex));
+  return Cast<FixedArray>(get(kNamespaceImportsIndex));
 }
 
 #ifdef DEBUG
@@ -105,9 +118,9 @@ class UnorderedModuleSet
 
 Handle<SourceTextModule> SourceTextModule::GetCycleRoot(
     Isolate* isolate) const {
-  CHECK_GE(status(), kEvaluated);
+  CHECK_GE(status(), kEvaluatingAsync);
   DCHECK(!IsTheHole(cycle_root(), isolate));
-  Handle<SourceTextModule> root(SourceTextModule::cast(cycle_root()), isolate);
+  Handle<SourceTextModule> root(Cast<SourceTextModule>(cycle_root()), isolate);
   return root;
 }
 
@@ -124,7 +137,7 @@ void SourceTextModule::AddAsyncParentModule(
 Handle<SourceTextModule> SourceTextModule::GetAsyncParentModule(
     Isolate* isolate, int index) {
   Handle<SourceTextModule> module(
-      SourceTextModule::cast(async_parent_modules()->get(index)), isolate);
+      Cast<SourceTextModule>(async_parent_modules()->get(index)), isolate);
   return module;
 }
 
@@ -132,8 +145,8 @@ int SourceTextModule::AsyncParentModuleCount() {
   return async_parent_modules()->length();
 }
 
-bool SourceTextModule::IsAsyncEvaluating() const {
-  return async_evaluating_ordinal() >= kFirstAsyncEvaluatingOrdinal;
+bool SourceTextModule::HasAsyncEvaluationOrdinal() const {
+  return async_evaluation_ordinal() >= kFirstAsyncEvaluationOrdinal;
 }
 
 bool SourceTextModule::HasPendingAsyncDependencies() {

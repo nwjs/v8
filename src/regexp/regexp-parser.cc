@@ -155,14 +155,10 @@ void RegExpTextBuilder::FlushText() {
 
 void RegExpTextBuilder::AddCharacter(base::uc16 c) {
   FlushPendingSurrogate();
-  if (NeedsDesugaringForIgnoreCase(c)) {
-    AddClassRangesForDesugaring(c);
-  } else {
-    if (characters_ == nullptr) {
-      characters_ = zone()->New<ZoneList<base::uc16>>(4, zone());
-    }
-    characters_->Add(c, zone());
+  if (characters_ == nullptr) {
+    characters_ = zone()->New<ZoneList<base::uc16>>(4, zone());
   }
+  characters_->Add(c, zone());
 }
 
 void RegExpTextBuilder::AddUnicodeCharacter(base::uc32 c) {
@@ -241,6 +237,9 @@ bool RegExpTextBuilder::NeedsDesugaringForUnicode(RegExpClassRanges* cc) {
   return false;
 }
 
+// We only use this for characters made of surrogate pairs.  All other
+// characters outside of character classes are made case independent in the
+// code generation.
 bool RegExpTextBuilder::NeedsDesugaringForIgnoreCase(base::uc32 c) {
 #ifdef V8_INTL_SUPPORT
   if (IsUnicodeMode() && ignore_case()) {
@@ -307,7 +306,7 @@ class RegExpBuilder {
   void AddTerm(RegExpTree* tree);
   void AddAssertion(RegExpTree* tree);
   void NewAlternative();  // '|'
-  bool AddQuantifierToAtom(int min, int max,
+  bool AddQuantifierToAtom(int min, int max, int index,
                            RegExpQuantifier::QuantifierType type);
   void FlushText();
   RegExpTree* ToRegExp();
@@ -640,6 +639,7 @@ class RegExpParserImpl final {
   int next_pos_;
   int captures_started_;
   int capture_count_;  // Only valid after we have scanned for captures.
+  int quantifier_count_;
   int lookaround_count_;  // Only valid after we have scanned for lookbehinds.
   bool has_more_;
   bool simple_;
@@ -667,6 +667,7 @@ RegExpParserImpl<CharT>::RegExpParserImpl(
       next_pos_(0),
       captures_started_(0),
       capture_count_(0),
+      quantifier_count_(0),
       lookaround_count_(0),
       has_more_(true),
       simple_(false),
@@ -1274,9 +1275,11 @@ RegExpTree* RegExpParserImpl<CharT>::ParseDisjunction() {
       quantifier_type = RegExpQuantifier::POSSESSIVE;
       Advance();
     }
-    if (!builder->AddQuantifierToAtom(min, max, quantifier_type)) {
+    if (!builder->AddQuantifierToAtom(min, max, quantifier_count_,
+                                      quantifier_type)) {
       return ReportError(RegExpError::kInvalidQuantifier);
     }
+    ++quantifier_count_;
   }
 }
 
@@ -3191,7 +3194,8 @@ RegExpTree* RegExpBuilder::ToRegExp() {
 }
 
 bool RegExpBuilder::AddQuantifierToAtom(
-    int min, int max, RegExpQuantifier::QuantifierType quantifier_type) {
+    int min, int max, int index,
+    RegExpQuantifier::QuantifierType quantifier_type) {
   if (pending_empty_) {
     pending_empty_ = false;
     return true;
@@ -3223,7 +3227,7 @@ bool RegExpBuilder::AddQuantifierToAtom(
     UNREACHABLE();
   }
   terms_.emplace_back(
-      zone()->New<RegExpQuantifier>(min, max, quantifier_type, atom));
+      zone()->New<RegExpQuantifier>(min, max, quantifier_type, index, atom));
   return true;
 }
 
@@ -3234,7 +3238,7 @@ template class RegExpParserImpl<base::uc16>;
 
 // static
 bool RegExpParser::ParseRegExpFromHeapString(Isolate* isolate, Zone* zone,
-                                             Handle<String> input,
+                                             DirectHandle<String> input,
                                              RegExpFlags flags,
                                              RegExpCompileData* result) {
   DisallowGarbageCollection no_gc;

@@ -26,7 +26,7 @@ BUILTIN(NumberPrototypeToExponential) {
 
   // Unwrap the receiver {value}.
   if (IsJSPrimitiveWrapper(*value)) {
-    value = handle(Handle<JSPrimitiveWrapper>::cast(value)->value(), isolate);
+    value = handle(Cast<JSPrimitiveWrapper>(value)->value(), isolate);
   }
   if (!IsNumber(*value)) {
     THROW_NEW_ERROR_RETURN_FAILURE(
@@ -58,7 +58,8 @@ BUILTIN(NumberPrototypeToExponential) {
                     ? -1
                     : static_cast<int>(fraction_digits_number);
   char* const str = DoubleToExponentialCString(value_number, f);
-  Handle<String> result = isolate->factory()->NewStringFromAsciiChecked(str);
+  DirectHandle<String> result =
+      isolate->factory()->NewStringFromAsciiChecked(str);
   DeleteArray(str);
   return *result;
 }
@@ -71,7 +72,7 @@ BUILTIN(NumberPrototypeToFixed) {
 
   // Unwrap the receiver {value}.
   if (IsJSPrimitiveWrapper(*value)) {
-    value = handle(Handle<JSPrimitiveWrapper>::cast(value)->value(), isolate);
+    value = handle(Cast<JSPrimitiveWrapper>(value)->value(), isolate);
   }
   if (!IsNumber(*value)) {
     THROW_NEW_ERROR_RETURN_FAILURE(
@@ -103,7 +104,8 @@ BUILTIN(NumberPrototypeToFixed) {
   }
   char* const str = DoubleToFixedCString(
       value_number, static_cast<int>(fraction_digits_number));
-  Handle<String> result = isolate->factory()->NewStringFromAsciiChecked(str);
+  DirectHandle<String> result =
+      isolate->factory()->NewStringFromAsciiChecked(str);
   DeleteArray(str);
   return *result;
 }
@@ -119,7 +121,7 @@ BUILTIN(NumberPrototypeToLocaleString) {
 
   // Unwrap the receiver {value}.
   if (IsJSPrimitiveWrapper(*value)) {
-    value = handle(Handle<JSPrimitiveWrapper>::cast(value)->value(), isolate);
+    value = handle(Cast<JSPrimitiveWrapper>(value)->value(), isolate);
   }
   // 1. Let x be ? thisNumberValue(this value)
   if (!IsNumber(*value)) {
@@ -149,7 +151,7 @@ BUILTIN(NumberPrototypeToPrecision) {
 
   // Unwrap the receiver {value}.
   if (IsJSPrimitiveWrapper(*value)) {
-    value = handle(Handle<JSPrimitiveWrapper>::cast(value)->value(), isolate);
+    value = handle(Cast<JSPrimitiveWrapper>(value)->value(), isolate);
   }
   if (!IsNumber(*value)) {
     THROW_NEW_ERROR_RETURN_FAILURE(
@@ -181,7 +183,8 @@ BUILTIN(NumberPrototypeToPrecision) {
   }
   char* const str = DoubleToPrecisionCString(
       value_number, static_cast<int>(precision_number));
-  Handle<String> result = isolate->factory()->NewStringFromAsciiChecked(str);
+  DirectHandle<String> result =
+      isolate->factory()->NewStringFromAsciiChecked(str);
   DeleteArray(str);
   return *result;
 }

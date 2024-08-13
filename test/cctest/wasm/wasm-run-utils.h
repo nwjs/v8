@@ -92,6 +92,7 @@ struct ManuallyImportedJSFunction {
 };
 
 // Helper Functions.
+bool IsSameNan(uint16_t expected, uint16_t actual);
 bool IsSameNan(float expected, float actual);
 bool IsSameNan(double expected, double actual);
 
@@ -130,8 +131,6 @@ class TestingModuleBuilder {
     test_module_->AddSignatureForTesting(sig, kNoSuperType, is_final,
                                          is_shared);
     GetTypeCanonicalizer()->AddRecursiveGroup(test_module_.get(), 1);
-    trusted_instance_data_->set_isorecursive_canonical_types(
-        test_module_->isorecursive_canonical_type_ids.data());
     size_t size = test_module_->types.size();
     CHECK_GT(127, size);
     return static_cast<uint8_t>(size - 1);
@@ -243,6 +242,7 @@ class TestingModuleBuilder {
 
   void SwitchToDebug() {
     SetDebugState();
+    WasmCodeRefScope ref_scope;
     native_module_->RemoveCompiledCode(
         NativeModule::RemoveFilter::kRemoveNonDebugCode);
   }
@@ -265,12 +265,14 @@ class TestingModuleBuilder {
   int32_t nondeterminism() { return nondeterminism_; }
   int32_t* non_determinism_ptr() { return &nondeterminism_; }
 
-  void EnableFeature(WasmFeature feature) { enabled_features_.Add(feature); }
+  void EnableFeature(WasmEnabledFeature feature) {
+    enabled_features_.Add(feature);
+  }
 
  private:
   std::shared_ptr<WasmModule> test_module_;
   Isolate* isolate_;
-  WasmFeatures enabled_features_;
+  WasmEnabledFeatures enabled_features_;
   uint32_t global_offset = 0;
   // The TestingModuleBuilder only supports one memory currently.
   uint8_t* mem0_start_ = nullptr;
@@ -414,12 +416,12 @@ class WasmRunnerBase : public InitializedHandleScope {
     if (retval.is_null()) {
       CHECK_EQ(expected, static_cast<double>(0xDEADBEEF));
     } else {
-      Handle<Object> result = retval.ToHandleChecked();
+      DirectHandle<Object> result = retval.ToHandleChecked();
       if (IsSmi(*result)) {
         CHECK_EQ(expected, Smi::ToInt(*result));
       } else {
         CHECK(IsHeapNumber(*result));
-        CHECK_DOUBLE_EQ(expected, HeapNumber::cast(*result)->value());
+        CHECK_DOUBLE_EQ(expected, Cast<HeapNumber>(*result)->value());
       }
     }
   }
@@ -535,17 +537,17 @@ class WasmRunner : public WasmRunnerBase {
       return static_cast<ReturnType>(0xDEADBEEFDEADBEEF);
     }
 
-    Handle<Object> result = retval.ToHandleChecked();
+    DirectHandle<Object> result = retval.ToHandleChecked();
     // For int64_t and uint64_t returns we will get a BigInt.
     if constexpr (std::is_integral_v<ReturnType> &&
                   sizeof(ReturnType) == sizeof(int64_t)) {
       CHECK(IsBigInt(*result));
-      return BigInt::cast(*result)->AsInt64();
+      return Cast<BigInt>(*result)->AsInt64();
     }
 
     // Otherwise it must be a number (Smi or HeapNumber).
     CHECK(IsNumber(*result));
-    double value = Object::NumberValue(*result);
+    double value = Object::NumberValue(Cast<Number>(*result));
     // The JS API interprets all Wasm values as signed, hence we cast via the
     // signed equivalent type to avoid undefined behaviour in the casting.
     if constexpr (std::is_integral_v<ReturnType> &&

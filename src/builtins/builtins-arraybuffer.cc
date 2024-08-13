@@ -41,7 +41,8 @@ namespace {
 
 Tagged<Object> ConstructBuffer(Isolate* isolate, Handle<JSFunction> target,
                                Handle<JSReceiver> new_target,
-                               Handle<Object> length, Handle<Object> max_length,
+                               DirectHandle<Object> length,
+                               Handle<Object> max_length,
                                InitializedFlag initialized) {
   SharedFlag shared = *target != target->native_context()->array_buffer_fun()
                           ? SharedFlag::kShared
@@ -53,7 +54,7 @@ Tagged<Object> ConstructBuffer(Isolate* isolate, Handle<JSFunction> target,
       isolate, result,
       JSObject::New(target, new_target, Handle<AllocationSite>::null(),
                     NewJSObjectType::kAPIWrapper));
-  auto array_buffer = Handle<JSArrayBuffer>::cast(result);
+  auto array_buffer = Cast<JSArrayBuffer>(result);
   // Ensure that all fields are initialized because BackingStore::Allocate is
   // allowed to GC. Note that we cannot move the allocation of the ArrayBuffer
   // after BackingStore::Allocate because of the spec.
@@ -123,7 +124,7 @@ BUILTIN(ArrayBufferConstructor) {
                               handle(target->shared()->Name(), isolate)));
   }
   // [[Construct]]
-  Handle<JSReceiver> new_target = Handle<JSReceiver>::cast(args.new_target());
+  Handle<JSReceiver> new_target = Cast<JSReceiver>(args.new_target());
   Handle<Object> length = args.atOrUndefined(isolate, 1);
 
   Handle<Object> number_length;
@@ -157,7 +158,7 @@ BUILTIN(ArrayBufferConstructor_DoNotInitialize) {
   HandleScope scope(isolate);
   Handle<JSFunction> target(isolate->native_context()->array_buffer_fun(),
                             isolate);
-  Handle<Object> length = args.atOrUndefined(isolate, 1);
+  DirectHandle<Object> length = args.atOrUndefined(isolate, 1);
   return ConstructBuffer(isolate, target, target, length, Handle<Object>(),
                          InitializedFlag::kUninitialized);
 }
@@ -229,8 +230,8 @@ static Tagged<Object> SliceHelper(BuiltinArguments args, Isolate* isolate,
   Handle<Object> ctor;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
       isolate, ctor,
-      Object::SpeciesConstructor(
-          isolate, Handle<JSReceiver>::cast(args.receiver()), constructor_fun));
+      Object::SpeciesConstructor(isolate, Cast<JSReceiver>(args.receiver()),
+                                 constructor_fun));
 
   // * Let new be ? Construct(ctor, newLen).
   Handle<JSReceiver> new_;
@@ -244,7 +245,7 @@ static Tagged<Object> SliceHelper(BuiltinArguments args, Isolate* isolate,
     ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
         isolate, new_obj, Execution::New(isolate, ctor, argc, argv.begin()));
 
-    new_ = Handle<JSReceiver>::cast(new_obj);
+    new_ = Cast<JSReceiver>(new_obj);
   }
 
   // * If new does not have an [[ArrayBufferData]] internal slot, throw a
@@ -259,7 +260,7 @@ static Tagged<Object> SliceHelper(BuiltinArguments args, Isolate* isolate,
 
   // * [AB] If IsSharedArrayBuffer(new) is true, throw a TypeError exception.
   // * [SAB] If IsSharedArrayBuffer(new) is false, throw a TypeError exception.
-  Handle<JSArrayBuffer> new_array_buffer = Handle<JSArrayBuffer>::cast(new_);
+  Handle<JSArrayBuffer> new_array_buffer = Cast<JSArrayBuffer>(new_);
   CHECK_SHARED(is_shared, new_array_buffer, kMethodName);
 
   // The created ArrayBuffer might or might not be resizable, since the species

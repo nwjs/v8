@@ -32,7 +32,7 @@ Maybe<bool> SyntheticModule::SetExport(Isolate* isolate,
   }
 
   // Spec step 2: Set the mutable binding of export_name to export_value
-  Cell::cast(*export_object)->set_value(*export_value);
+  Cast<Cell>(*export_object)->set_value(*export_value);
 
   return Just(true);
 }
@@ -56,7 +56,7 @@ MaybeHandle<Cell> SyntheticModule::ResolveExport(
     Handle<String> module_specifier, Handle<String> export_name,
     MessageLocation loc, bool must_resolve) {
   Handle<Object> object(module->exports()->Lookup(export_name), isolate);
-  if (IsCell(*object)) return Handle<Cell>::cast(object);
+  if (IsCell(*object)) return Cast<Cell>(object);
 
   if (!must_resolve) return kNullMaybeHandle;
 
@@ -79,7 +79,7 @@ bool SyntheticModule::PrepareInstantiate(Isolate* isolate,
     // Spec step 7.1: Create a new mutable binding for export_name.
     // Spec step 7.2: Initialize the new mutable binding to undefined.
     Handle<Cell> cell = isolate->factory()->NewCell();
-    Handle<String> name(String::cast(export_names->get(i)), isolate);
+    Handle<String> name(Cast<String>(export_names->get(i)), isolate);
     CHECK(IsTheHole(exports->Lookup(name), isolate));
     exports = ObjectHashTable::Put(exports, name, cell);
   }
@@ -104,10 +104,10 @@ MaybeHandle<Object> SyntheticModule::Evaluate(Isolate* isolate,
 
   v8::Module::SyntheticModuleEvaluationSteps evaluation_steps =
       FUNCTION_CAST<v8::Module::SyntheticModuleEvaluationSteps>(
-          module->evaluation_steps()->foreign_address<kGenericForeignTag>());
+          module->evaluation_steps()->foreign_address<kSyntheticModuleTag>());
   v8::Local<v8::Value> result;
   if (!evaluation_steps(Utils::ToLocal(isolate->native_context()),
-                        Utils::ToLocal(Handle<Module>::cast(module)))
+                        Utils::ToLocal(Cast<Module>(module)))
            .ToLocal(&result)) {
     module->RecordError(isolate, isolate->exception());
     return MaybeHandle<Object>();
@@ -119,7 +119,7 @@ MaybeHandle<Object> SyntheticModule::Evaluate(Isolate* isolate,
 
   Handle<JSPromise> capability;
   if (IsJSPromise(*result_from_callback)) {
-    capability = Handle<JSPromise>::cast(result_from_callback);
+    capability = Cast<JSPromise>(result_from_callback);
   } else {
     // The host's evaluation steps should have returned a resolved Promise,
     // but as an allowance to hosts that have not yet finished the migration

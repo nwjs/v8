@@ -10,6 +10,7 @@
 #include "src/wasm/baseline/liftoff-assembler.h"
 #include "src/wasm/baseline/parallel-move-inl.h"
 #include "src/wasm/object-access.h"
+#include "src/wasm/wasm-linkage.h"
 #include "src/wasm/wasm-objects.h"
 
 namespace v8::internal::wasm {
@@ -208,7 +209,7 @@ inline CPURegister LoadToRegister(LiftoffAssembler* assm,
                                   UseScratchRegisterScope* temps,
                                   const LiftoffAssembler::VarState& src) {
   if (src.is_reg()) {
-    return GetRegFromType(src.reg(), src.kind()).Reg();
+    return GetRegFromType(src.reg(), src.kind());
   }
   if (src.is_const()) {
     if (src.kind() == kI32) {
@@ -231,6 +232,11 @@ inline CPURegister LoadToRegister(LiftoffAssembler* assm,
 
 inline void StoreToMemory(LiftoffAssembler* assm, MemOperand dst,
                           const LiftoffAssembler::VarState& src) {
+  if (src.kind() == kI16) {
+    DCHECK(src.is_reg());
+    assm->Strh(src.reg().gp(), dst);
+    return;
+  }
   UseScratchRegisterScope temps{assm};
   CPURegister src_reg = LoadToRegister(assm, &temps, src);
   assm->Str(src_reg, dst);
@@ -250,11 +256,14 @@ int LiftoffAssembler::PrepareStackFrame() {
 }
 
 void LiftoffAssembler::CallFrameSetupStub(int declared_function_index) {
-  // TODO(jkummerow): Enable this check when we have C++20.
-  // static_assert(std::find(std::begin(wasm::kGpParamRegisters),
-  //                         std::end(wasm::kGpParamRegisters),
-  //                         kLiftoffFrameSetupFunctionReg) ==
-  //                         std::end(wasm::kGpParamRegisters));
+// The standard library used by gcc tryjobs does not consider `std::find` to be
+// `constexpr`, so wrap it in a `#ifdef __clang__` block.
+#ifdef __clang__
+  static_assert(std::find(std::begin(wasm::kGpParamRegisters),
+                          std::end(wasm::kGpParamRegisters),
+                          kLiftoffFrameSetupFunctionReg) ==
+                std::end(wasm::kGpParamRegisters));
+#endif
 
   // On ARM64, we must push at least {lr} before calling the stub, otherwise
   // it would get clobbered with no possibility to recover it. So just set
@@ -707,6 +716,9 @@ void LiftoffAssembler::Load(LiftoffRegister dst, Register src_addr,
     case LoadType::kF32Load:
       Ldr(dst.fp().S(), src_op);
       break;
+    case LoadType::kF32LoadF16:
+      UNIMPLEMENTED();
+      break;
     case LoadType::kF64Load:
       Ldr(dst.fp().D(), src_op);
       break;
@@ -742,6 +754,9 @@ void LiftoffAssembler::Store(Register dst_addr, Register offset_reg,
       break;
     case StoreType::kI64Store:
       Str(src.gp().X(), dst_op);
+      break;
+    case StoreType::kF32StoreF16:
+      UNIMPLEMENTED();
       break;
     case StoreType::kF32Store:
       Str(src.fp().S(), dst_op);
@@ -2046,6 +2061,13 @@ void LiftoffAssembler::emit_i32_cond_jumpi(Condition cond, Label* label,
                                            Register lhs, int32_t imm,
                                            const FreezeCacheState& frozen) {
   Cmp(lhs.W(), Operand(imm));
+  B(label, cond);
+}
+
+void LiftoffAssembler::emit_ptrsize_cond_jumpi(Condition cond, Label* label,
+                                               Register lhs, int32_t imm,
+                                               const FreezeCacheState& frozen) {
+  Cmp(lhs.X(), Operand(imm));
   B(label, cond);
 }
 
@@ -3701,6 +3723,24 @@ void LiftoffAssembler::emit_f64x2_qfms(LiftoffRegister dst,
 
 #undef EMIT_QFMOP
 
+bool LiftoffAssembler::emit_f16x8_splat(LiftoffRegister dst,
+                                        LiftoffRegister src) {
+  return false;
+}
+
+bool LiftoffAssembler::emit_f16x8_extract_lane(LiftoffRegister dst,
+                                               LiftoffRegister lhs,
+                                               uint8_t imm_lane_idx) {
+  return false;
+}
+
+bool LiftoffAssembler::emit_f16x8_replace_lane(LiftoffRegister dst,
+                                               LiftoffRegister src1,
+                                               LiftoffRegister src2,
+                                               uint8_t imm_lane_idx) {
+  return false;
+}
+
 void LiftoffAssembler::set_trap_on_oob_mem64(Register index, uint64_t oob_size,
                                              uint64_t oob_index) {
   Label done;
@@ -3796,7 +3836,11 @@ void LiftoffAssembler::CallCWithStackBuffer(
 
   // Load potential output value from the buffer on the stack.
   if (out_argument_kind != kVoid) {
-    Peek(liftoff::GetRegFromType(*next_result_reg, out_argument_kind), 0);
+    if (out_argument_kind == kI16) {
+      Ldrh(next_result_reg->gp(), MemOperand(sp));
+    } else {
+      Peek(liftoff::GetRegFromType(*next_result_reg, out_argument_kind), 0);
+    }
   }
 
   Drop(total_size, 1);

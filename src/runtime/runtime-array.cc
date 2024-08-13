@@ -52,7 +52,7 @@ RUNTIME_FUNCTION(Runtime_NewArray) {
   Handle<HeapObject> type_info = args.at<HeapObject>(argc + 2);
   // TODO(bmeurer): Use MaybeHandle to pass around the AllocationSite.
   Handle<AllocationSite> site = IsAllocationSite(*type_info)
-                                    ? Handle<AllocationSite>::cast(type_info)
+                                    ? Cast<AllocationSite>(type_info)
                                     : Handle<AllocationSite>::null();
 
   Factory* factory = isolate->factory();
@@ -69,9 +69,9 @@ RUNTIME_FUNCTION(Runtime_NewArray) {
   bool can_use_type_feedback = !site.is_null();
   bool can_inline_array_constructor = true;
   if (argv.length() == 1) {
-    Handle<Object> argument_one = argv.at<Object>(0);
+    DirectHandle<Object> argument_one = argv.at<Object>(0);
     if (IsSmi(*argument_one)) {
-      int value = Smi::cast(*argument_one).value();
+      int value = Cast<Smi>(*argument_one).value();
       if (value < 0 ||
           JSArray::SetLengthWouldNormalize(isolate->heap(), value)) {
         // the array is a dictionary in this case.
@@ -113,7 +113,7 @@ RUNTIME_FUNCTION(Runtime_NewArray) {
     allocation_site = site;
   }
 
-  Handle<JSArray> array = Handle<JSArray>::cast(factory->NewJSObjectFromMap(
+  Handle<JSArray> array = Cast<JSArray>(factory->NewJSObjectFromMap(
       initial_map, AllocationType::kYoung, allocation_site));
 
   factory->NewJSArrayStorage(
@@ -162,7 +162,7 @@ RUNTIME_FUNCTION(Runtime_GrowArrayElements) {
   HandleScope scope(isolate);
   DCHECK_EQ(2, args.length());
   Handle<JSObject> object = args.at<JSObject>(0);
-  Handle<Object> key = args.at(1);
+  DirectHandle<Object> key = args.at(1);
   ElementsKind kind = object->GetElementsKind();
   CHECK(IsFastElementsKind(kind));
   uint32_t index;
@@ -172,7 +172,7 @@ RUNTIME_FUNCTION(Runtime_GrowArrayElements) {
     index = static_cast<uint32_t>(value);
   } else {
     CHECK(IsHeapNumber(*key));
-    double value = HeapNumber::cast(*key)->value();
+    double value = Cast<HeapNumber>(*key)->value();
     if (value < 0 || value > std::numeric_limits<uint32_t>::max()) {
       return Smi::zero();
     }
@@ -238,7 +238,7 @@ RUNTIME_FUNCTION(Runtime_ArrayIncludes_Slow) {
     if (object->map()->instance_type() == JS_ARRAY_TYPE) {
       uint32_t len32 = 0;
       bool success =
-          Object::ToArrayLength(JSArray::cast(*object)->length(), &len32);
+          Object::ToArrayLength(Cast<JSArray>(*object)->length(), &len32);
       DCHECK(success);
       USE(success);
       len = len32;
@@ -292,8 +292,8 @@ RUNTIME_FUNCTION(Runtime_ArrayIncludes_Slow) {
   // element index, perform fast operation tailored to specific ElementsKinds.
   if (!IsSpecialReceiverMap(object->map()) &&
       len <= JSObject::kMaxElementCount &&
-      JSObject::PrototypeHasNoElements(isolate, JSObject::cast(*object))) {
-    Handle<JSObject> obj = Handle<JSObject>::cast(object);
+      JSObject::PrototypeHasNoElements(isolate, Cast<JSObject>(*object))) {
+    Handle<JSObject> obj = Cast<JSObject>(object);
     ElementsAccessor* elements = obj->GetElementsAccessor();
     Maybe<bool> result =
         elements->IncludesValue(isolate, obj, search_element, index, len);
@@ -340,7 +340,7 @@ RUNTIME_FUNCTION(Runtime_ArrayIndexOf) {
     if (IsJSArray(*object)) {
       uint32_t len32 = 0;
       bool success =
-          Object::ToArrayLength(JSArray::cast(*object)->length(), &len32);
+          Object::ToArrayLength(Cast<JSArray>(*object)->length(), &len32);
       DCHECK(success);
       USE(success);
       len = len32;
@@ -390,8 +390,8 @@ RUNTIME_FUNCTION(Runtime_ArrayIndexOf) {
   // If the receiver is not a special receiver type, and the length fits
   // uint32_t, perform fast operation tailored to specific ElementsKinds.
   if (!IsSpecialReceiverMap(object->map()) && len <= kMaxUInt32 &&
-      JSObject::PrototypeHasNoElements(isolate, JSObject::cast(*object))) {
-    Handle<JSObject> obj = Handle<JSObject>::cast(object);
+      JSObject::PrototypeHasNoElements(isolate, Cast<JSObject>(*object))) {
+    Handle<JSObject> obj = Cast<JSObject>(object);
     ElementsAccessor* elements = obj->GetElementsAccessor();
     Maybe<int64_t> result = elements->IndexOfValue(isolate, obj, search_element,
                                                    static_cast<uint32_t>(index),

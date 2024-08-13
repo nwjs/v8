@@ -61,6 +61,7 @@ class MaglevGraphLabeller;
 class MaglevVregAllocationState;
 class CompactInterpreterFrameState;
 class MergePointInterpreterFrameState;
+class ExceptionHandlerInfo;
 
 // Nodes are either
 // 1. side-effecting or value-holding SSA nodes in the body of basic blocks, or
@@ -178,6 +179,7 @@ class MergePointInterpreterFrameState;
   V(CreateRegExpLiteral)                            \
   V(DeleteProperty)                                 \
   V(EnsureWritableFastElements)                     \
+  V(ExtendPropertiesBackingStore)                   \
   V(InlinedAllocation)                              \
   V(ForInPrepare)                                   \
   V(ForInNext)                                      \
@@ -205,6 +207,7 @@ class MergePointInterpreterFrameState;
   V(LoadNamedGeneric)                               \
   V(LoadNamedFromSuperGeneric)                      \
   V(MaybeGrowFastElements)                          \
+  V(MigrateMapIfNeeded)                             \
   V(SetNamedGeneric)                                \
   V(DefineNamedOwnGeneric)                          \
   V(StoreInArrayLiteralGeneric)                     \
@@ -217,7 +220,8 @@ class MergePointInterpreterFrameState;
   V(CheckedSmiSizedInt32)                           \
   V(CheckedSmiTagInt32)                             \
   V(CheckedSmiTagUint32)                            \
-  V(UnsafeSmiTag)                                   \
+  V(UnsafeSmiTagInt32)                              \
+  V(UnsafeSmiTagUint32)                             \
   V(CheckedSmiUntag)                                \
   V(UnsafeSmiUntag)                                 \
   V(CheckedInternalizedString)                      \
@@ -271,6 +275,7 @@ class MergePointInterpreterFrameState;
   V(NumberToString)                                 \
   V(UpdateJSArrayLength)                            \
   V(VirtualObject)                                  \
+  V(GetContinuationPreservedEmbedderData)           \
   CONSTANT_VALUE_NODE_LIST(V)                       \
   INT32_OPERATIONS_NODE_LIST(V)                     \
   FLOAT64_OPERATIONS_NODE_LIST(V)                   \
@@ -335,6 +340,7 @@ class MergePointInterpreterFrameState;
   V(ThrowIfNotSuperConstructor)             \
   V(TransitionElementsKind)                 \
   V(TransitionElementsKindOrCheckMap)       \
+  V(SetContinuationPreservedEmbedderData)   \
   GAP_MOVE_NODE_LIST(V)                     \
   VALUE_NODE_LIST(V)
 
@@ -871,6 +877,11 @@ class BasicBlockRef {
   BasicBlock* block_ptr() const {
     DCHECK_EQ(state_, kBlockPointer);
     return block_ptr_;
+  }
+
+  void set_block_ptr(BasicBlock* block) {
+    DCHECK_EQ(state_, kBlockPointer);
+    block_ptr_ = block;
   }
 
   BasicBlockRef* next_ref() const {
@@ -1520,6 +1531,9 @@ class LazyDeoptInfo : public DeoptInfo {
     return result_location_.is_valid();
   }
 
+  const InterpretedDeoptFrame& GetFrameForExceptionHandler(
+      const ExceptionHandlerInfo* handler_info);
+
   int deopting_call_return_pc() const {
     DCHECK_NE(DeoptingCallReturnPcField::decode(bitfield_),
               kUninitializedCallReturnPc);
@@ -1668,6 +1682,7 @@ class NodeBase : public ZoneObject {
   template <class Derived, typename... Args>
   static Derived* New(Zone* zone, std::initializer_list<ValueNode*> inputs,
                       Args&&... args) {
+    static_assert(Derived::kProperties.is_conversion());
     Derived* node =
         Allocate<Derived>(zone, inputs.size(), std::forward<Args>(args)...);
 
@@ -1699,6 +1714,8 @@ class NodeBase : public ZoneObject {
   void set_properties(OpProperties properties) {
     bitfield_ = OpPropertiesField::update(bitfield_, properties);
   }
+
+  inline void set_input(int index, ValueNode* node);
 
   template <class T>
   constexpr bool Is() const;
@@ -1914,7 +1931,6 @@ class NodeBase : public ZoneObject {
   }
 
   inline void initialize_input_null(int index);
-  inline void set_input(int index, ValueNode* node);
 
   // For nodes that don't have data past the input, allow trimming the input
   // count. This is used by Phis to reduce inputs when merging in dead control
@@ -2096,6 +2112,10 @@ class Node : public NodeBase {
            // The following are already precisely tracked by known_node_aspects
            // and tracking them with CSE would just waste time.
            op != Opcode::kCheckMaps;
+  }
+
+  static constexpr bool needs_epoch_check(Opcode op) {
+    return StaticPropertiesForOpcode(op).can_read();
   }
 
  protected:
@@ -2497,9 +2517,9 @@ struct YouNeedToDefineAnInputTypesArrayInYourDerivedClass {};
 // properties), and known numbers of inputs.
 template <size_t InputCount, typename Base, typename Derived>
 class FixedInputNodeTMixin : public NodeTMixin<Base, Derived> {
+ public:
   static constexpr size_t kInputCount = InputCount;
 
- public:
   // Shadowing for static knowledge.
   constexpr bool has_inputs() const { return input_count() > 0; }
   constexpr uint16_t input_count() const { return kInputCount; }
@@ -2544,6 +2564,12 @@ class FixedInputNodeTMixin : public NodeTMixin<Base, Derived> {
     DCHECK_EQ(this->NodeBase::input_count(), kInputCount);
   }
 };
+
+template <class T, class = void>
+struct IsFixedInputNode : public std::false_type {};
+template <class T>
+struct IsFixedInputNode<T, std::void_t<decltype(T::kInputCount)>>
+    : public std::true_type {};
 
 template <class Derived>
 using NodeT = NodeTMixin<Node, Derived>;
@@ -3198,17 +3224,41 @@ class CheckedSmiTagUint32
 };
 
 // Input must guarantee to fit in a Smi.
-class UnsafeSmiTag : public FixedInputValueNodeT<1, UnsafeSmiTag> {
-  using Base = FixedInputValueNodeT<1, UnsafeSmiTag>;
+class UnsafeSmiTagInt32 : public FixedInputValueNodeT<1, UnsafeSmiTagInt32> {
+  using Base = FixedInputValueNodeT<1, UnsafeSmiTagInt32>;
 
  public:
-  explicit UnsafeSmiTag(uint64_t bitfield) : Base(bitfield) {}
+  explicit UnsafeSmiTagInt32(uint64_t bitfield) : Base(bitfield) {}
 
   static constexpr OpProperties kProperties = OpProperties::ConversionNode();
+  static constexpr
+      typename Base::InputTypes kInputTypes{ValueRepresentation::kInt32};
 
   Input& input() { return Node::input(0); }
 
-  void VerifyInputs(MaglevGraphLabeller*) const;
+#ifdef V8_COMPRESS_POINTERS
+  void MarkTaggedInputsAsDecompressing() {
+    // No tagged inputs.
+  }
+#endif
+
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+};
+
+// Input must guarantee to fit in a Smi.
+class UnsafeSmiTagUint32 : public FixedInputValueNodeT<1, UnsafeSmiTagUint32> {
+  using Base = FixedInputValueNodeT<1, UnsafeSmiTagUint32>;
+
+ public:
+  explicit UnsafeSmiTagUint32(uint64_t bitfield) : Base(bitfield) {}
+
+  static constexpr OpProperties kProperties = OpProperties::ConversionNode();
+  static constexpr
+      typename Base::InputTypes kInputTypes{ValueRepresentation::kUint32};
+
+  Input& input() { return Node::input(0); }
 
 #ifdef V8_COMPRESS_POINTERS
   void MarkTaggedInputsAsDecompressing() {
@@ -3510,9 +3560,9 @@ class Float64ToHeapNumberForField
   static constexpr
       typename Base::InputTypes kInputTypes{ValueRepresentation::kHoleyFloat64};
 
-  static constexpr OpProperties kProperties =
-      OpProperties::NotIdempotent() | OpProperties::CanAllocate() |
-      OpProperties::DeferredCall() | OpProperties::ConversionNode();
+  static constexpr OpProperties kProperties = OpProperties::NotIdempotent() |
+                                              OpProperties::CanAllocate() |
+                                              OpProperties::DeferredCall();
 
   Input& input() { return Node::input(0); }
 
@@ -4913,28 +4963,36 @@ class VirtualObject : public FixedInputValueNodeT<0, VirtualObject> {
   using Base = FixedInputValueNodeT<0, VirtualObject>;
 
  public:
+  class List;
+
   enum Type {
     kDefault,
     kHeapNumber,
     kFixedDoubleArray,
   };
 
-  explicit VirtualObject(uint64_t bitfield, compiler::MapRef map,
+  explicit VirtualObject(uint64_t bitfield, compiler::MapRef map, int id,
                          uint32_t slot_count, ValueNode** slots)
       : Base(bitfield),
         map_(map),
+        id_(id),
         type_(kDefault),
         slots_({slot_count, slots}) {}
 
-  explicit VirtualObject(uint64_t bitfield, compiler::MapRef map,
+  explicit VirtualObject(uint64_t bitfield, compiler::MapRef map, int id,
                          Float64 number)
-      : Base(bitfield), map_(map), type_(kHeapNumber), number_(number) {}
+      : Base(bitfield),
+        map_(map),
+        id_(id),
+        type_(kHeapNumber),
+        number_(number) {}
 
-  explicit VirtualObject(uint64_t bitfield, compiler::MapRef map,
+  explicit VirtualObject(uint64_t bitfield, compiler::MapRef map, int id,
                          uint32_t length,
                          compiler::FixedDoubleArrayRef elements)
       : Base(bitfield),
         map_(map),
+        id_(id),
         type_(kFixedDoubleArray),
         double_array_({length, elements}) {}
 
@@ -4946,6 +5004,7 @@ class VirtualObject : public FixedInputValueNodeT<0, VirtualObject> {
 
   compiler::MapRef map() const { return map_; }
   Type type() const { return type_; }
+  uint32_t id() const { return id_; }
 
   size_t size() const {
     switch (type_) {
@@ -4986,19 +5045,26 @@ class VirtualObject : public FixedInputValueNodeT<0, VirtualObject> {
     return slots_.data[offset / kTaggedSize];
   }
 
-  ValueNode* get_by_index(uint32_t i) {
+  ValueNode* get_by_index(uint32_t i) const {
     DCHECK_EQ(type_, kDefault);
     return slots_.data[i];
   }
 
   void set_by_index(uint32_t i, ValueNode* value) {
     DCHECK_EQ(type_, kDefault);
+    // Values set here can leak to the interpreter. Conversions should be stored
+    // in known_node_aspects/NodeInfo.
+    DCHECK(!value->properties().is_conversion());
     slots_.data[i] = value;
   }
 
   void set(uint32_t offset, ValueNode* value) {
     DCHECK_NE(offset, 0);  // Don't try to set the map through this setter.
     DCHECK_EQ(type_, kDefault);
+    DCHECK(!IsSnapshot());
+    // Values set here can leak to the interpreter. Conversions should be stored
+    // in known_node_aspects/NodeInfo.
+    DCHECK(!value->properties().is_conversion());
     offset -= kTaggedSize;
     SBXCHECK_LT(offset / kTaggedSize, slot_count());
     slots_.data[offset / kTaggedSize] = value;
@@ -5012,6 +5078,18 @@ class VirtualObject : public FixedInputValueNodeT<0, VirtualObject> {
     }
   }
 
+  InlinedAllocation* allocation() const { return allocation_; }
+  void set_allocation(InlinedAllocation* allocation) {
+    allocation_ = allocation;
+  }
+
+  // VOs are snapshotted at branch points and when they are leaked to
+  // DeoptInfos. This is because the snapshots need to preserve the original
+  // values at the time of branching or deoptimization. While a VO is not yet
+  // snapshotted, it can be modified freely.
+  bool IsSnapshot() const { return snapshotted_; }
+  void Snapshot() { snapshotted_ = true; }
+
  private:
   struct DoubleArray {
     uint32_t length;
@@ -5023,14 +5101,119 @@ class VirtualObject : public FixedInputValueNodeT<0, VirtualObject> {
   };
 
   compiler::MapRef map_;
+  const int id_;
   Type type_;  // We need to cache the type. We cannot do map comparison in some
                // parts of the pipeline, because we would need to derefernece a
                // handle.
+  bool snapshotted_ = false;  // Object should not be modified anymore.
   union {
     Float64 number_;
     DoubleArray double_array_;
     ObjectFields slots_;
   };
+  mutable InlinedAllocation* allocation_ = nullptr;
+
+  VirtualObject* next_ = nullptr;
+  friend List;
+};
+
+class VirtualObject::List {
+ public:
+  List() : head_(nullptr) {}
+
+  class Iterator final {
+   public:
+    explicit Iterator(VirtualObject* entry) : entry_(entry) {}
+
+    Iterator& operator++() {
+      entry_ = entry_->next_;
+      return *this;
+    }
+    bool operator==(const Iterator& other) const {
+      return entry_ == other.entry_;
+    }
+    bool operator!=(const Iterator& other) const {
+      return entry_ != other.entry_;
+    }
+    VirtualObject*& operator*() { return entry_; }
+    VirtualObject* operator->() { return entry_; }
+
+   private:
+    VirtualObject* entry_;
+  };
+
+  bool operator==(const VirtualObject::List& other) const {
+    return head_ == other.head_;
+  }
+
+  void Add(VirtualObject* object) {
+    DCHECK_NOT_NULL(object);
+    DCHECK_NULL(object->next_);
+    object->next_ = head_;
+    head_ = object;
+  }
+
+  bool is_empty() const { return head_ == nullptr; }
+
+  VirtualObject* FindAllocatedWith(const InlinedAllocation* allocation) const {
+    VirtualObject* result = nullptr;
+    for (VirtualObject* vo : *this) {
+      if (vo->allocation() == allocation) {
+        result = vo;
+        break;
+      }
+    }
+    return result;
+  }
+
+  void Print(std::ostream& os, const char* prefix,
+             MaglevGraphLabeller* labeller) const;
+
+  // It iterates both list in reverse other of ids until a common point.
+  template <typename Function>
+  static VirtualObject* WalkUntilCommon(const VirtualObject::List& list1,
+                                        const VirtualObject::List& list2,
+                                        Function&& f) {
+    VirtualObject* vo1 = list1.head_;
+    VirtualObject* vo2 = list2.head_;
+    while (vo1 != nullptr && vo2 != nullptr && vo1 != vo2) {
+      DCHECK_NE(vo1->id(), vo2->id());
+      if (vo1->id() > vo2->id()) {
+        f(vo1, list1);
+        vo1 = vo1->next_;
+      } else {
+        f(vo2, list2);
+        vo2 = vo2->next_;
+      }
+    }
+    if (vo1 == vo2) return vo1;
+    return nullptr;
+  }
+
+  void Snapshot() const {
+    for (VirtualObject* vo : *this) {
+      if (vo->IsSnapshot()) {
+        // Stop processing once a snapshotted object is found, as all remaining
+        // objects must be snapshotted.
+        break;
+      }
+      vo->Snapshot();
+    }
+    SLOW_DCHECK(IsSnapshot());
+  }
+
+  bool IsSnapshot() const {
+    for (VirtualObject* vo : *this) {
+      if (!vo->IsSnapshot()) return false;
+    }
+    return true;
+  }
+
+  Iterator begin() const { return Iterator(head_); }
+  Iterator end() const { return Iterator(nullptr); }
+
+ private:
+  VirtualObject* head_;
 };
 
 enum class EscapeAnalysisResult {
@@ -5106,6 +5289,11 @@ class InlinedAllocation : public FixedInputValueNodeT<1, InlinedAllocation> {
   }
   bool HasBeenAnalysed() const {
     return escape_analysis_result_ != EscapeAnalysisResult::kUnknown;
+  }
+
+  void UpdateObject(VirtualObject* object) {
+    DCHECK_EQ(this, object->allocation());
+    object_ = object;
   }
 
  private:
@@ -5869,6 +6057,34 @@ class CheckMapsWithMigration
   const compiler::ZoneRefSet<Map> maps_;
 };
 
+class MigrateMapIfNeeded : public FixedInputValueNodeT<2, MigrateMapIfNeeded> {
+  using Base = FixedInputValueNodeT<2, MigrateMapIfNeeded>;
+
+ public:
+  explicit MigrateMapIfNeeded(uint64_t bitfield) : Base(bitfield) {}
+
+  static constexpr OpProperties kProperties =
+      OpProperties::EagerDeopt() | OpProperties::DeferredCall() |
+      OpProperties::CanAllocate() | OpProperties::CanWrite() |
+      OpProperties::CanRead();
+
+  static constexpr typename Base::InputTypes kInputTypes{
+      ValueRepresentation::kTagged, ValueRepresentation::kTagged};
+
+  static constexpr int kMapIndex = 0;
+  static constexpr int kObjectIndex = 1;
+
+  Input& object_input() { return input(kObjectIndex); }
+  Input& map_input() { return input(kMapIndex); }
+
+  int MaxCallStackArgs() const;
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+
+  void ClearUnstableNodeAspects(KnownNodeAspects& known_node_aspects);
+};
+
 class CheckCacheIndicesNotCleared
     : public FixedInputNodeT<2, CheckCacheIndicesNotCleared> {
   using Base = FixedInputNodeT<2, CheckCacheIndicesNotCleared>;
@@ -6616,6 +6832,36 @@ class EnsureWritableFastElements
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 };
 
+class ExtendPropertiesBackingStore
+    : public FixedInputValueNodeT<2, ExtendPropertiesBackingStore> {
+  using Base = FixedInputValueNodeT<2, ExtendPropertiesBackingStore>;
+
+ public:
+  explicit ExtendPropertiesBackingStore(uint64_t bitfield, int old_length)
+      : Base(bitfield), old_length_(old_length) {}
+
+  static constexpr OpProperties kProperties =
+      OpProperties::CanAllocate() | OpProperties::CanRead() |
+      OpProperties::CanWrite() | OpProperties::DeferredCall() |
+      OpProperties::EagerDeopt() | OpProperties::NotIdempotent();
+
+  static constexpr typename Base::InputTypes kInputTypes{
+      ValueRepresentation::kTagged, ValueRepresentation::kTagged};
+
+  static constexpr int kPropertyArrayIndex = 0;
+  static constexpr int kObjectIndex = 1;
+  Input& property_array_input() { return input(kPropertyArrayIndex); }
+  Input& object_input() { return input(kObjectIndex); }
+
+  int MaxCallStackArgs() const { return 0; }
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
+
+ private:
+  const int old_length_;
+};
+
 class MaybeGrowFastElements
     : public FixedInputValueNodeT<4, MaybeGrowFastElements> {
   using Base = FixedInputValueNodeT<4, MaybeGrowFastElements>;
@@ -7101,13 +7347,26 @@ class StoreFloat64 : public FixedInputNodeT<2, StoreFloat64> {
   const int offset_;
 };
 
+enum class StoreTaggedMode : uint8_t {
+  kDefault,
+  kInitializing,
+  kTransitioning
+};
+inline bool IsInitializingOrTransitioning(StoreTaggedMode mode) {
+  return mode == StoreTaggedMode::kInitializing ||
+         mode == StoreTaggedMode::kTransitioning;
+}
+
 class StoreTaggedFieldNoWriteBarrier
     : public FixedInputNodeT<2, StoreTaggedFieldNoWriteBarrier> {
   using Base = FixedInputNodeT<2, StoreTaggedFieldNoWriteBarrier>;
 
  public:
-  explicit StoreTaggedFieldNoWriteBarrier(uint64_t bitfield, int offset)
-      : Base(bitfield), offset_(offset) {}
+  explicit StoreTaggedFieldNoWriteBarrier(uint64_t bitfield, int offset,
+                                          StoreTaggedMode store_mode)
+      : Base(bitfield | InitializingOrTransitioningField::encode(
+                            IsInitializingOrTransitioning(store_mode))),
+        offset_(offset) {}
 
   // StoreTaggedFieldNoWriteBarrier never does a Deferred Call. However,
   // PhiRepresentationSelector can cause some StoreTaggedFieldNoWriteBarrier to
@@ -7121,6 +7380,9 @@ class StoreTaggedFieldNoWriteBarrier
       ValueRepresentation::kTagged, ValueRepresentation::kTagged};
 
   int offset() const { return offset_; }
+  bool initializing_or_transitioning() const {
+    return InitializingOrTransitioningField::decode(bitfield());
+  }
 
   static constexpr int kObjectIndex = 0;
   static constexpr int kValueIndex = 1;
@@ -7143,6 +7405,8 @@ class StoreTaggedFieldNoWriteBarrier
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
  private:
+  using InitializingOrTransitioningField = NextBitField<bool, 1>;
+
   const int offset_;
 };
 
@@ -7191,8 +7455,11 @@ class StoreTaggedFieldWithWriteBarrier
   using Base = FixedInputNodeT<2, StoreTaggedFieldWithWriteBarrier>;
 
  public:
-  explicit StoreTaggedFieldWithWriteBarrier(uint64_t bitfield, int offset)
-      : Base(bitfield), offset_(offset) {}
+  explicit StoreTaggedFieldWithWriteBarrier(uint64_t bitfield, int offset,
+                                            StoreTaggedMode store_mode)
+      : Base(bitfield | InitializingOrTransitioningField::encode(
+                            IsInitializingOrTransitioning(store_mode))),
+        offset_(offset) {}
 
   static constexpr OpProperties kProperties =
       OpProperties::CanWrite() | OpProperties::DeferredCall();
@@ -7200,6 +7467,9 @@ class StoreTaggedFieldWithWriteBarrier
       ValueRepresentation::kTagged, ValueRepresentation::kTagged};
 
   int offset() const { return offset_; }
+  bool initializing_or_transitioning() const {
+    return InitializingOrTransitioningField::decode(bitfield());
+  }
 
   static constexpr int kObjectIndex = 0;
   static constexpr int kValueIndex = 1;
@@ -7219,6 +7489,8 @@ class StoreTaggedFieldWithWriteBarrier
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
  private:
+  using InitializingOrTransitioningField = NextBitField<bool, 1>;
+
   const int offset_;
 };
 
@@ -7816,54 +8088,69 @@ class Phi : public ValueNodeT<Phi> {
   }
 
   void merge_post_loop_type(NodeType type) {
-    DCHECK(!has_key_);
+    DCHECK(!has_key());
     post_loop_type_ = IntersectType(post_loop_type_, type);
   }
   void set_post_loop_type(NodeType type) {
-    DCHECK(!has_key_);
+    DCHECK(!has_key());
+    DCHECK(is_unmerged_loop_phi());
     post_loop_type_ = type;
   }
   void promote_post_loop_type() {
-    DCHECK(!has_key_);
+    DCHECK(!has_key());
+    DCHECK(is_unmerged_loop_phi());
+    DCHECK_EQ(type_, NodeType::kUnknown);
     type_ = post_loop_type_;
   }
 
   void merge_type(NodeType type) {
-    DCHECK(!has_key_);
+    DCHECK(!has_key());
     type_ = IntersectType(type_, type);
   }
   void set_type(NodeType type) {
-    DCHECK(!has_key_);
+    DCHECK(!has_key());
     type_ = type;
   }
   NodeType type() const {
-    DCHECK(!has_key_);
+    DCHECK(!has_key());
     return type_;
   }
 
   using Key = compiler::turboshaft::SnapshotTable<ValueNode*>::Key;
-  bool has_key() const { return has_key_; }
   Key key() const {
-    DCHECK(has_key_);
+    DCHECK(has_key());
     return key_;
   }
   void set_key(Key key) {
-    has_key_ = true;
+    set_bitfield(bitfield() | HasKeyFlag::encode(true));
     key_ = key;
   }
+
+  // True if the {key_} field has been initialized.
+  bool has_key() const { return HasKeyFlag::decode(bitfield()); }
 
   // Remembers if a use is unsafely untagged. If that happens we must ensure to
   // stay within the smi range, even when untagging.
   void SetUseRequires31BitValue();
-  bool uses_require_31_bit_value() { return uses_require_31_bit_value_; }
+  bool uses_require_31_bit_value() const {
+    return Requires31BitValueFlag::decode(bitfield());
+  }
+  void set_uses_require_31_bit_value() {
+    set_bitfield(bitfield() | Requires31BitValueFlag::encode(true));
+  }
+
+  // Check if a phi has cleared the loop.
+  bool is_unmerged_loop_phi() const;
 
  private:
   Phi** next() { return &next_; }
 
+  using HasKeyFlag = NextBitField<bool, 1>;
+  using Requires31BitValueFlag = HasKeyFlag::Next<bool, 1>;
+  using LoopPhiAfterLoopFlag = Requires31BitValueFlag::Next<bool, 1>;
+
   const interpreter::Register owner_;
-  // True if the {key_} field has been initialized.
-  bool has_key_ = false;
-  bool uses_require_31_bit_value_ = false;
+
   UseRepresentationSet uses_repr_hint_ = {};
   UseRepresentationSet same_loop_uses_repr_hint_ = {};
 
@@ -8348,6 +8635,9 @@ class CallWithArrayLike : public FixedInputValueNodeT<4, CallWithArrayLike> {
   explicit CallWithArrayLike(uint64_t bitfield) : Base(bitfield) {}
 
   static constexpr OpProperties kProperties = OpProperties::JSCall();
+  static constexpr typename Base::InputTypes kInputTypes{
+      ValueRepresentation::kTagged, ValueRepresentation::kTagged,
+      ValueRepresentation::kTagged, ValueRepresentation::kTagged};
 
   Input& function() { return input(kFunctionIndex); }
   Input& receiver() { return input(kReceiverIndex); }
@@ -9019,6 +9309,42 @@ class TransitionElementsKindOrCheckMap
   const compiler::MapRef transition_target_;
 };
 
+class GetContinuationPreservedEmbedderData
+    : public FixedInputValueNodeT<0, GetContinuationPreservedEmbedderData> {
+  using Base = FixedInputValueNodeT<0, GetContinuationPreservedEmbedderData>;
+
+ public:
+  explicit GetContinuationPreservedEmbedderData(uint64_t bitfield)
+      : Base(bitfield) {}
+
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+
+  static constexpr OpProperties kProperties =
+      OpProperties::CanRead() | OpProperties::TaggedValue();
+};
+
+class SetContinuationPreservedEmbedderData
+    : public FixedInputNodeT<1, SetContinuationPreservedEmbedderData> {
+  using Base = FixedInputNodeT<1, SetContinuationPreservedEmbedderData>;
+
+ public:
+  explicit SetContinuationPreservedEmbedderData(uint64_t bitfield)
+      : Base(bitfield) {}
+
+  static constexpr
+      typename Base::InputTypes kInputTypes{ValueRepresentation::kTagged};
+
+  Input& data_input() { return input(0); }
+
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+
+  static constexpr OpProperties kProperties = OpProperties::CanWrite();
+};
+
 class ControlNode : public NodeBase {
  public:
   // A "hole" in control flow is a control node that unconditionally interrupts
@@ -9050,6 +9376,8 @@ class UnconditionalControlNode : public ControlNode {
   int predecessor_id() const { return predecessor_id_; }
   void set_predecessor_id(int id) { predecessor_id_ = id; }
 
+  void set_target(BasicBlock* block) { target_.set_block_ptr(block); }
+
  protected:
   explicit UnconditionalControlNode(uint64_t bitfield,
                                     BasicBlockRef* target_refs)
@@ -9058,7 +9386,7 @@ class UnconditionalControlNode : public ControlNode {
       : ControlNode(bitfield), target_(target) {}
 
  private:
-  const BasicBlockRef target_;
+  BasicBlockRef target_;
   int predecessor_id_ = 0;
 };
 
@@ -9092,6 +9420,9 @@ class BranchControlNode : public ConditionalControlNode {
 
   BasicBlock* if_true() const { return if_true_.block_ptr(); }
   BasicBlock* if_false() const { return if_false_.block_ptr(); }
+
+  void set_if_true(BasicBlock* block) { if_true_.set_block_ptr(block); }
+  void set_if_false(BasicBlock* block) { if_false_.set_block_ptr(block); }
 
  private:
   BasicBlockRef if_true_;
@@ -9262,13 +9593,18 @@ class Switch : public FixedInputNodeTMixin<1, ConditionalControlNode, Switch> {
       typename Base::InputTypes kInputTypes{ValueRepresentation::kInt32};
 
   int value_base() const { return value_base_; }
-  const BasicBlockRef* targets() const { return targets_; }
+  BasicBlockRef* targets() const { return targets_; }
   int size() const { return size_; }
 
   bool has_fallthrough() const { return fallthrough_.has_value(); }
   BasicBlock* fallthrough() const {
     DCHECK(has_fallthrough());
     return fallthrough_.value().block_ptr();
+  }
+
+  void set_fallthrough(BasicBlock* fallthrough) {
+    DCHECK(has_fallthrough());
+    fallthrough_.value().set_block_ptr(fallthrough);
   }
 
   Input& value() { return input(0); }
@@ -9279,7 +9615,7 @@ class Switch : public FixedInputNodeTMixin<1, ConditionalControlNode, Switch> {
 
  private:
   const int value_base_;
-  const BasicBlockRef* targets_;
+  BasicBlockRef* targets_;
   const int size_;
   base::Optional<BasicBlockRef> fallthrough_;
 };

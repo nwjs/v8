@@ -100,8 +100,7 @@ Maybe<bool> AlwaysSharedSpaceJSObject::HasInstance(
     return Just(false);
   }
   Handle<Map> constructor_map(constructor->initial_map(), isolate);
-  PrototypeIterator iter(isolate, Handle<JSReceiver>::cast(object),
-                         kStartAtReceiver);
+  PrototypeIterator iter(isolate, Cast<JSReceiver>(object), kStartAtReceiver);
   Handle<Map> current_map;
   while (true) {
     current_map = handle(PrototypeIterator::GetCurrent(iter)->map(), isolate);
@@ -151,7 +150,7 @@ MaybeHandle<T> GetSpecialSlotValue(Isolate* isolate, Tagged<Map> instance_map,
             ReadOnlyRoots(isolate).shared_struct_map_registry_key_symbol(),
         entry.as_int() == 0);
     result =
-        handle(T::cast(instance_map->instance_descriptors()->GetStrongValue(
+        handle(Cast<T>(instance_map->instance_descriptors()->GetStrongValue(
                    isolate, entry)),
                isolate);
   }
@@ -317,8 +316,8 @@ class SharedStructTypeRegistry::Data : public OffHeapHashTableBase<Data> {
   static uint32_t Hash(PtrComprCageBase cage_base, Tagged<Object> key) {
     // Registry keys, if present, store them at the first descriptor. All maps
     // in the registry have registry keys.
-    return String::cast(
-               Map::cast(key)->instance_descriptors(cage_base)->GetStrongValue(
+    return Cast<String>(
+               Cast<Map>(key)->instance_descriptors(cage_base)->GetStrongValue(
                    InternalIndex(0)))
         ->hash();
   }
@@ -327,7 +326,7 @@ class SharedStructTypeRegistry::Data : public OffHeapHashTableBase<Data> {
   static bool KeyIsMatch(IsolateT* isolate, DirectHandle<String> key,
                          Tagged<Object> obj) {
     DirectHandle<String> existing =
-        JSSharedStruct::GetRegistryKey(isolate, Tagged<Map>::cast(obj))
+        JSSharedStruct::GetRegistryKey(isolate, Cast<Map>(obj))
             .ToHandleChecked();
     DCHECK(IsInternalizedString(*key));
     DCHECK(IsInternalizedString(*existing));
@@ -377,7 +376,7 @@ MaybeHandle<Map> SharedStructTypeRegistry::CheckIfEntryMatches(
     Isolate* isolate, InternalIndex entry, DirectHandle<String> key,
     const std::vector<Handle<Name>>& field_names,
     const std::set<uint32_t>& element_names) {
-  Tagged<Map> existing_map = Tagged<Map>::cast(data_->GetKey(isolate, entry));
+  Tagged<Map> existing_map = Cast<Map>(data_->GetKey(isolate, entry));
 
   // A map is considered a match iff all of the following hold:
   // - field names are the same element-wise (in order)
@@ -407,7 +406,7 @@ MaybeHandle<Map> SharedStructTypeRegistry::CheckIfEntryMatches(
     if (JSSharedStruct::IsElementsTemplateDescriptor(isolate, existing_map,
                                                      i)) {
       DirectHandle<NumberDictionary> elements_template(
-          NumberDictionary::cast(
+          Cast<NumberDictionary>(
               existing_map->instance_descriptors()->GetStrongValue(isolate, i)),
           isolate);
       if (static_cast<int>(element_names.size()) !=

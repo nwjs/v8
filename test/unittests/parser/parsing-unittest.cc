@@ -77,13 +77,13 @@ struct Input {
     (info)->pending_error_handler()->ReportErrors((isolate), (script));       \
                                                                               \
     i::Handle<i::JSObject> exception_handle(                                  \
-        i::JSObject::cast((isolate)->exception()), (isolate));                \
-    i::Handle<i::String> message_string = i::Handle<i::String>::cast(         \
+        i::Cast<i::JSObject>((isolate)->exception()), (isolate));             \
+    i::DirectHandle<i::String> message_string = i::Cast<i::String>(           \
         i::JSReceiver::GetProperty((isolate), exception_handle, "message")    \
             .ToHandleChecked());                                              \
     (isolate)->clear_exception();                                             \
                                                                               \
-    Tagged<String> script_source = String::cast((script)->source());          \
+    Tagged<String> script_source = Cast<String>((script)->source());          \
                                                                               \
     FATAL(                                                                    \
         "Parser failed on:\n"                                                 \
@@ -110,7 +110,7 @@ struct Input {
     if (!i::parsing::ParseFunction((info), (shared), (isolate),            \
                                    parsing::ReportStatisticsMode::kYes)) { \
       FAIL_WITH_PENDING_PARSER_ERROR(                                      \
-          (info), handle(Script::cast((shared)->script()), (isolate)),     \
+          (info), handle(Cast<Script>((shared)->script()), (isolate)),     \
           (isolate));                                                      \
     }                                                                      \
                                                                            \
@@ -169,7 +169,7 @@ class ParsingTest : public TestWithContextAndZone {
     const i::AstRawString* current_symbol =
         scanner.CurrentSymbol(&ast_value_factory);
     ast_value_factory.Internalize(i_isolate());
-    i::Handle<i::String> val = current_symbol->string();
+    i::DirectHandle<i::String> val = current_symbol->string();
     i::DisallowGarbageCollection no_alloc;
     i::String::FlatContent content = val->GetFlatContent(no_alloc);
     CHECK(content.IsOneByte());
@@ -188,7 +188,7 @@ class ParsingTest : public TestWithContextAndZone {
     full_source += source;
     full_source += "; }";
 
-    i::Handle<i::String> source_code =
+    i::DirectHandle<i::String> source_code =
         factory->NewStringFromUtf8(base::CStrVector(full_source.c_str()))
             .ToHandleChecked();
 
@@ -275,8 +275,8 @@ class ParsingTest : public TestWithContextAndZone {
       // Extract exception from the parser.
       CHECK(isolate->has_exception());
       i::Handle<i::JSObject> exception_handle(
-          i::JSObject::cast(isolate->exception()), isolate);
-      i::Handle<i::String> message_string = i::Handle<i::String>::cast(
+          i::Cast<i::JSObject>(isolate->exception()), isolate);
+      i::Handle<i::String> message_string = i::Cast<i::String>(
           i::JSReceiver::GetProperty(isolate, exception_handle, "message")
               .ToHandleChecked());
       isolate->clear_exception();
@@ -469,7 +469,7 @@ class ParsingTest : public TestWithContextAndZone {
                          bool allow_lazy_parsing) {
     i::Isolate* isolate = i_isolate();
     i::Factory* factory = isolate->factory();
-    i::Handle<i::String> string =
+    i::DirectHandle<i::String> string =
         factory->InternalizeUtf8String(input.source.c_str());
     string->PrintOn(stdout);
     printf("\n");
@@ -1419,7 +1419,7 @@ TEST_F(ParsingTest, ScopeUsesArgumentsSuperThis) {
       base::ScopedVector<char> program(kProgramByteSize + 1);
       base::SNPrintF(program, "%s%s%s", surroundings[j].prefix,
                      source_data[i].body, surroundings[j].suffix);
-      i::Handle<i::String> source =
+      i::DirectHandle<i::String> source =
           factory->NewStringFromUtf8(base::CStrVector(program.begin()))
               .ToHandleChecked();
       i::Handle<i::Script> script = factory->NewScript(source);
@@ -1431,7 +1431,7 @@ TEST_F(ParsingTest, ScopeUsesArgumentsSuperThis) {
       flags.set_allow_lazy_parsing(false);
       i::ParseInfo info(isolate, flags, &compile_state, &reusable_state);
       CHECK_PARSE_PROGRAM(&info, script, isolate);
-      i::DeclarationScope::AllocateScopeInfos(&info, isolate);
+      i::DeclarationScope::AllocateScopeInfos(&info, script, isolate);
       CHECK_NOT_NULL(info.literal());
 
       i::DeclarationScope* script_scope = info.literal()->scope();
@@ -1507,26 +1507,24 @@ TEST_F(ParsingTest, ScopePositions) {
   };
 
   const SourceData source_data[] = {
-      {"  with ({}) ", "{ block; }", " more;", i::WITH_SCOPE,
+      {"  with ({}", "){ block; }", " more;", i::WITH_SCOPE,
        i::LanguageMode::kSloppy},
-      {"  with ({}) ", "{ block; }", "; more;", i::WITH_SCOPE,
+      {"  with ({}", "){ block; }", "; more;", i::WITH_SCOPE,
        i::LanguageMode::kSloppy},
-      {"  with ({}) ",
-       "{\n"
+      {"  with ({}",
+       "){\n"
        "    block;\n"
        "  }",
        "\n"
        "  more;",
        i::WITH_SCOPE, i::LanguageMode::kSloppy},
-      {"  with ({}) ", "statement;", " more;", i::WITH_SCOPE,
+      {"  with ({}", ")statement;", " more;", i::WITH_SCOPE,
        i::LanguageMode::kSloppy},
-      {"  with ({}) ", "statement",
+      {"  with ({}", ")statement",
        "\n"
        "  more;",
        i::WITH_SCOPE, i::LanguageMode::kSloppy},
-      {"  with ({})\n"
-       "    ",
-       "statement;",
+      {"  with ({}", ")statement;",
        "\n"
        "  more;",
        i::WITH_SCOPE, i::LanguageMode::kSloppy},
@@ -1577,25 +1575,25 @@ TEST_F(ParsingTest, ScopePositions) {
        "  (function fun",
        "(a,b) { infunction; }", ")();", i::FUNCTION_SCOPE,
        i::LanguageMode::kSloppy},
-      {"  for ", "(let x = 1 ; x < 10; ++ x) { block; }", " more;",
+      {"  for (", "let x = 1 ; x < 10; ++ x) { block; }", " more;",
        i::BLOCK_SCOPE, i::LanguageMode::kStrict},
-      {"  for ", "(let x = 1 ; x < 10; ++ x) { block; }", "; more;",
+      {"  for (", "let x = 1 ; x < 10; ++ x) { block; }", "; more;",
        i::BLOCK_SCOPE, i::LanguageMode::kStrict},
-      {"  for ",
-       "(let x = 1 ; x < 10; ++ x) {\n"
+      {"  for (",
+       "let x = 1 ; x < 10; ++ x) {\n"
        "    block;\n"
        "  }",
        "\n"
        "  more;",
        i::BLOCK_SCOPE, i::LanguageMode::kStrict},
-      {"  for ", "(let x = 1 ; x < 10; ++ x) statement;", " more;",
+      {"  for (", "let x = 1 ; x < 10; ++ x) statement;", " more;",
        i::BLOCK_SCOPE, i::LanguageMode::kStrict},
-      {"  for ", "(let x = 1 ; x < 10; ++ x) statement",
+      {"  for (", "let x = 1 ; x < 10; ++ x) statement",
        "\n"
        "  more;",
        i::BLOCK_SCOPE, i::LanguageMode::kStrict},
-      {"  for ",
-       "(let x = 1 ; x < 10; ++ x)\n"
+      {"  for (",
+       "let x = 1 ; x < 10; ++ x)\n"
        "    statement;",
        "\n"
        "  more;",
@@ -1753,7 +1751,7 @@ TEST_F(ParsingTest, ScopePositions) {
                    source_data[i].inner_source, source_data[i].outer_suffix);
 
     // Parse program source.
-    i::Handle<i::String> source =
+    i::DirectHandle<i::String> source =
         factory->NewStringFromUtf8(base::CStrVector(program.begin()))
             .ToHandleChecked();
     CHECK_EQ(source->length(), kProgramSize);
@@ -1803,7 +1801,7 @@ TEST_F(ParsingTest, DiscardFunctionBody) {
 
   for (int i = 0; discard_sources[i]; i++) {
     const char* source = discard_sources[i];
-    i::Handle<i::String> source_code =
+    i::DirectHandle<i::String> source_code =
         factory->NewStringFromUtf8(base::CStrVector(source)).ToHandleChecked();
     i::Handle<i::Script> script = factory->NewScript(source_code);
     i::UnoptimizedCompileState compile_state;
@@ -3266,18 +3264,19 @@ TEST_F(ParsingTest, SerializationOfMaybeAssignmentFlag) {
 
   base::ScopedVector<char> program(Utf8LengthHelper(src) + 1);
   base::SNPrintF(program, "%s", src);
-  i::Handle<i::String> source = factory->InternalizeUtf8String(program.begin());
+  i::DirectHandle<i::String> source =
+      factory->InternalizeUtf8String(program.begin());
   source->PrintOn(stdout);
   printf("\n");
   v8::Local<v8::Value> v = RunJS(src);
-  i::Handle<i::Object> o = v8::Utils::OpenHandle(*v);
-  i::Handle<i::JSFunction> f = i::Handle<i::JSFunction>::cast(o);
-  i::Handle<i::Context> context(f->context(), isolate);
+  i::DirectHandle<i::Object> o = v8::Utils::OpenDirectHandle(*v);
+  i::DirectHandle<i::JSFunction> f = i::Cast<i::JSFunction>(o);
+  i::DirectHandle<i::Context> context(f->context(), isolate);
   i::AstValueFactory avf(zone(), isolate->ast_string_constants(),
                          HashSeed(isolate));
   const i::AstRawString* name = avf.GetOneByteString("result");
   avf.Internalize(isolate);
-  i::Handle<i::String> str = name->string();
+  i::DirectHandle<i::String> str = name->string();
   CHECK(IsInternalizedString(*str));
   i::DeclarationScope* script_scope =
       zone()->New<i::DeclarationScope>(zone(), &avf);
@@ -3312,13 +3311,14 @@ TEST_F(ParsingTest, IfArgumentsArrayAccessedThenParametersMaybeAssigned) {
 
   base::ScopedVector<char> program(Utf8LengthHelper(src) + 1);
   base::SNPrintF(program, "%s", src);
-  i::Handle<i::String> source = factory->InternalizeUtf8String(program.begin());
+  i::DirectHandle<i::String> source =
+      factory->InternalizeUtf8String(program.begin());
   source->PrintOn(stdout);
   printf("\n");
   v8::Local<v8::Value> v = RunJS(src);
-  i::Handle<i::Object> o = v8::Utils::OpenHandle(*v);
-  i::Handle<i::JSFunction> f = i::Handle<i::JSFunction>::cast(o);
-  i::Handle<i::Context> context(f->context(), isolate);
+  i::DirectHandle<i::Object> o = v8::Utils::OpenDirectHandle(*v);
+  i::DirectHandle<i::JSFunction> f = i::Cast<i::JSFunction>(o);
+  i::DirectHandle<i::Context> context(f->context(), isolate);
   i::AstValueFactory avf(zone(), isolate->ast_string_constants(),
                          HashSeed(isolate));
   const i::AstRawString* name_x = avf.GetOneByteString("x");
@@ -3473,17 +3473,16 @@ TEST_F(ParsingTest, InnerAssignment) {
         if (lazy) {
           printf("%s\n", program.begin());
           v8::Local<v8::Value> v = RunJS(program.begin());
-          i::Handle<i::Object> o = v8::Utils::OpenHandle(*v);
-          i::Handle<i::JSFunction> f = i::Handle<i::JSFunction>::cast(o);
-          i::Handle<i::SharedFunctionInfo> shared =
-              i::handle(f->shared(), isolate);
+          i::DirectHandle<i::Object> o = v8::Utils::OpenDirectHandle(*v);
+          i::DirectHandle<i::JSFunction> f = i::Cast<i::JSFunction>(o);
+          i::Handle<i::SharedFunctionInfo> shared(f->shared(), isolate);
           i::UnoptimizedCompileFlags flags =
               i::UnoptimizedCompileFlags::ForFunctionCompile(isolate, *shared);
           info = std::make_unique<i::ParseInfo>(isolate, flags, &compile_state,
                                                 &reusable_state);
           CHECK_PARSE_FUNCTION(info.get(), shared, isolate);
         } else {
-          i::Handle<i::String> source =
+          i::DirectHandle<i::String> source =
               factory->InternalizeUtf8String(program.begin());
           source->PrintOn(stdout);
           printf("\n");
@@ -3591,8 +3590,8 @@ TEST_F(ParsingTest, MaybeAssignedParameters) {
       base::SNPrintF(program, "%s%s", source, suffix);
       printf("%s\n", program.begin());
       v8::Local<v8::Value> v = RunJS(program.begin());
-      i::Handle<i::Object> o = v8::Utils::OpenHandle(*v);
-      i::Handle<i::JSFunction> f = i::Handle<i::JSFunction>::cast(o);
+      i::DirectHandle<i::Object> o = v8::Utils::OpenDirectHandle(*v);
+      i::DirectHandle<i::JSFunction> f = i::Cast<i::JSFunction>(o);
       i::Handle<i::SharedFunctionInfo> shared = i::handle(f->shared(), isolate);
       i::UnoptimizedCompileState state;
       i::ReusableUnoptimizedCompileState reusable_state(isolate);
@@ -4192,7 +4191,7 @@ i::Scope* DeserializeFunctionScope(i::Isolate* isolate, i::Zone* zone,
                                    i::Handle<i::JSObject> m, const char* name) {
   i::AstValueFactory avf(zone, isolate->ast_string_constants(),
                          HashSeed(isolate));
-  i::Handle<i::JSFunction> f = i::Handle<i::JSFunction>::cast(
+  i::DirectHandle<i::JSFunction> f = i::Cast<i::JSFunction>(
       i::JSReceiver::GetProperty(isolate, m, name).ToHandleChecked());
   i::DeclarationScope* script_scope =
       zone->New<i::DeclarationScope>(zone, &avf);
@@ -4218,7 +4217,7 @@ TEST_F(ParsingTest, AsmModuleFlag) {
 
   v8::Local<v8::Value> v = RunJS(src);
   i::Handle<i::Object> o = v8::Utils::OpenHandle(*v);
-  i::Handle<i::JSObject> m = i::Handle<i::JSObject>::cast(o);
+  i::Handle<i::JSObject> m = i::Cast<i::JSObject>(o);
 
   // The asm.js module should be marked as such.
   i::Scope* s = DeserializeFunctionScope(isolate, zone(), m, "f");
@@ -4930,7 +4929,7 @@ TEST_F(ParsingTest, BasicImportAssertionParsing) {
                                         128 * 1024);
 
   for (unsigned i = 0; i < arraysize(kSources); ++i) {
-    i::Handle<i::String> source =
+    i::DirectHandle<i::String> source =
         factory->NewStringFromAsciiChecked(kSources[i]);
 
     // Show that parsing as a module works
@@ -5000,7 +4999,7 @@ TEST_F(ParsingTest, ImportAssertionParsingErrors) {
                                         128 * 1024);
 
   for (unsigned i = 0; i < arraysize(kErrorSources); ++i) {
-    i::Handle<i::String> source =
+    i::DirectHandle<i::String> source =
         factory->NewStringFromAsciiChecked(kErrorSources[i]);
 
     i::Handle<i::Script> script = factory->NewScript(source);
@@ -5058,7 +5057,7 @@ TEST_F(ParsingTest, BasicImportAttributesParsing) {
                                         128 * 1024);
 
   for (unsigned i = 0; i < arraysize(kSources); ++i) {
-    i::Handle<i::String> source =
+    i::DirectHandle<i::String> source =
         factory->NewStringFromAsciiChecked(kSources[i]);
 
     // Show that parsing as a module works
@@ -5123,7 +5122,7 @@ TEST_F(ParsingTest, ImportAttributesParsingErrors) {
                                         128 * 1024);
 
   for (unsigned i = 0; i < arraysize(kErrorSources); ++i) {
-    i::Handle<i::String> source =
+    i::DirectHandle<i::String> source =
         factory->NewStringFromAsciiChecked(kErrorSources[i]);
 
     i::Handle<i::Script> script = factory->NewScript(source);
@@ -5157,7 +5156,7 @@ TEST_F(ParsingTest, BasicImportAttributesAndAssertionsParsing) {
                                         128 * 1024);
 
   for (unsigned i = 0; i < arraysize(kSources); ++i) {
-    i::Handle<i::String> source =
+    i::DirectHandle<i::String> source =
         factory->NewStringFromAsciiChecked(kSources[i]);
 
     // Show that parsing as a module works
@@ -5207,7 +5206,7 @@ TEST_F(ParsingTest, ImportAttributesAndAssertionsParsingErrors) {
                                         128 * 1024);
 
   for (unsigned i = 0; i < arraysize(kErrorSources); ++i) {
-    i::Handle<i::String> source =
+    i::DirectHandle<i::String> source =
         factory->NewStringFromAsciiChecked(kErrorSources[i]);
 
     i::Handle<i::Script> script = factory->NewScript(source);
@@ -7711,7 +7710,7 @@ TEST_F(ParsingTest, BasicImportExportParsing) {
                                         128 * 1024);
 
   for (unsigned i = 0; i < arraysize(kSources); ++i) {
-    i::Handle<i::String> source =
+    i::DirectHandle<i::String> source =
         factory->NewStringFromAsciiChecked(kSources[i]);
 
     // Show that parsing as a module works
@@ -7763,7 +7762,7 @@ TEST_F(ParsingTest, NamespaceExportParsing) {
                                         128 * 1024);
 
   for (unsigned i = 0; i < arraysize(kSources); ++i) {
-    i::Handle<i::String> source =
+    i::DirectHandle<i::String> source =
         factory->NewStringFromAsciiChecked(kSources[i]);
     i::Handle<i::Script> script = factory->NewScript(source);
     i::UnoptimizedCompileState compile_state;
@@ -7857,7 +7856,7 @@ TEST_F(ParsingTest, ImportExportParsingErrors) {
                                         128 * 1024);
 
   for (unsigned i = 0; i < arraysize(kErrorSources); ++i) {
-    i::Handle<i::String> source =
+    i::DirectHandle<i::String> source =
         factory->NewStringFromAsciiChecked(kErrorSources[i]);
 
     i::Handle<i::Script> script = factory->NewScript(source);
@@ -7894,7 +7893,7 @@ TEST_F(ParsingTest, ModuleTopLevelFunctionDecl) {
                                         128 * 1024);
 
   for (unsigned i = 0; i < arraysize(kErrorSources); ++i) {
-    i::Handle<i::String> source =
+    i::DirectHandle<i::String> source =
         factory->NewStringFromAsciiChecked(kErrorSources[i]);
 
     i::Handle<i::Script> script = factory->NewScript(source);
@@ -8095,7 +8094,8 @@ TEST_F(ParsingTest, ModuleParsingInternals) {
       "import * as loo from 'bar.js';"
       "import * as foob from 'bar.js';"
       "export {foob};";
-  i::Handle<i::String> source = factory->NewStringFromAsciiChecked(kSource);
+  i::DirectHandle<i::String> source =
+      factory->NewStringFromAsciiChecked(kSource);
   i::Handle<i::Script> script = factory->NewScript(source);
   i::UnoptimizedCompileState compile_state;
   i::ReusableUnoptimizedCompileState reusable_state(isolate);
@@ -8307,7 +8307,8 @@ TEST_F(ParsingTest, ModuleParsingInternalsWithImportAssertions) {
       "import { q as z6 } from 'n.js' assert { foo: 'bar'};"
       "import 'm.js' assert { foo: 'bar'};"
       "export * from 'm.js' assert { foo: 'bar', foo2: 'bar'};";
-  i::Handle<i::String> source = factory->NewStringFromAsciiChecked(kSource);
+  i::DirectHandle<i::String> source =
+      factory->NewStringFromAsciiChecked(kSource);
   i::Handle<i::Script> script = factory->NewScript(source);
   i::UnoptimizedCompileState compile_state;
   i::ReusableUnoptimizedCompileState reusable_state(isolate);
@@ -8421,7 +8422,8 @@ TEST_F(ParsingTest, ModuleParsingModuleRequestOrdering) {
       "import 'o' assert { 'd': '' };"
       "import 'p' assert { 'z': 'c' };"
       "import 'p' assert { 'a': 'c', 'b': 'c' };";
-  i::Handle<i::String> source = factory->NewStringFromAsciiChecked(kSource);
+  i::DirectHandle<i::String> source =
+      factory->NewStringFromAsciiChecked(kSource);
   i::Handle<i::Script> script = factory->NewScript(source);
   i::UnoptimizedCompileState compile_state;
   i::ReusableUnoptimizedCompileState reusable_state(isolate);
@@ -8669,7 +8671,8 @@ TEST_F(ParsingTest, ModuleParsingImportAssertionKeySorting) {
       // Both keys are two-byte strings.
       "import 'f' assert { 'xxxx\\u0005\\u0101': 'first', "
       "'xxxx\\u0100\\u0101': 'second' };";
-  i::Handle<i::String> source = factory->NewStringFromAsciiChecked(kSource);
+  i::DirectHandle<i::String> source =
+      factory->NewStringFromAsciiChecked(kSource);
   i::Handle<i::Script> script = factory->NewScript(source);
   i::UnoptimizedCompileState compile_state;
   i::ReusableUnoptimizedCompileState reusable_state(isolate);
@@ -9737,6 +9740,20 @@ TEST_F(ParsingTest, DestructuringAssignmentNegativeTests) {
   // clang-format on
   RunParserSyncTest(context_data, data, kError);
 
+  {
+    i::FlagScope<bool> f(&v8_flags.js_source_phase_imports, true);
+    // clang-format off
+    const char* data[] = {
+      "{ import.source }",
+      "{ x: import.source }",
+      "{ x: import.source = 1 }",
+      "[import.source]",
+      "[import.source = 1]",
+      nullptr};
+    // clang-format on
+    RunParserSyncTest(context_data, data, kError);
+  }
+
   const char* empty_context_data[][2] = {
       {"'use strict';", ""}, {"", ""}, {nullptr, nullptr}};
 
@@ -10101,6 +10118,208 @@ TEST_F(ParsingTest, ImportMetaFailure) {
     nullptr
   };
 
+  // clang-format on
+
+  RunParserSyncTest(context_data, data, kError);
+  RunModuleParserSyncTest(context_data, data, kError);
+}
+
+TEST_F(ParsingTest, ImportSourceSuccess) {
+  i::FlagScope<bool> f(&v8_flags.js_source_phase_imports, true);
+  // clang-format off
+  const char* context_data[][2] = {
+    {"", ""},
+    {"'use strict';", ""},
+    {nullptr}
+  };
+
+  const char* data[] = {
+    // Basic import declarations, not a source phase import
+    "import source from ''",
+    "import from from ''",
+    // Source phase imports
+    "import source source from ''",
+    "import source from from ''",
+    "import source x from ''",
+    nullptr
+  };
+  // clang-format on
+
+  RunParserSyncTest(context_data, data, kError);
+  // Skip preparser
+  RunModuleParserSyncTest(context_data, data, kSuccess, nullptr, 0, nullptr, 0,
+                          nullptr, 0, false);
+}
+
+TEST_F(ParsingTest, ImportSourceFailure) {
+  i::FlagScope<bool> f(&v8_flags.js_source_phase_imports, true);
+  // clang-format off
+  const char* context_data[][2] = {
+    {"", ""},
+    {"'use strict';", ""},
+    {"function f() {", "}"},
+    {"'use strict'; function f() {", "}"},
+    {"var f = function() {", "}"},
+    {"'use strict'; var f = function() {", "}"},
+    {"({m: function() {", "}})"},
+    {"'use strict'; ({m: function() {", "}})"},
+    {"({m() {", "}})"},
+    {"'use strict'; ({m() {", "}})"},
+    {"({get x() {", "}})"},
+    {"'use strict'; ({get x() {", "}})"},
+    {"({set x(_) {", "}})"},
+    {"'use strict'; ({set x(_) {", "}})"},
+    {"class C {m() {", "}}"},
+    {"class C {get x() {", "}}"},
+    {"class C {set x(_) {", "}}"},
+    {nullptr}
+  };
+
+  const char* data[] = {
+    "import source source source from ''",
+    "import source from from from ''",
+    "import source default from ''",
+    "import source * from from ''",
+    "import * source from from ''",
+    nullptr
+  };
+  // clang-format on
+
+  RunParserSyncTest(context_data, data, kError);
+  RunModuleParserSyncTest(context_data, data, kError);
+}
+
+TEST_F(ParsingTest, ImportSourceAttributesNotAllowed) {
+  i::FlagScope<bool> f_js_source_phase_imports(
+      &v8_flags.js_source_phase_imports, true);
+  i::FlagScope<bool> f_harmony_import_attributes(
+      &v8_flags.harmony_import_attributes, true);
+  i::FlagScope<bool> f_harmony_import_assertions(
+      &v8_flags.harmony_import_assertions, true);
+  // clang-format off
+  const char* context_data[][2] = {
+    {"", ""},
+    {"'use strict';", ""},
+    {nullptr}
+  };
+
+  const char* data[] = {
+    "import source x from '' with {}",
+    "import source x from '' assert {}",
+    nullptr
+  };
+  // clang-format on
+
+  RunParserSyncTest(context_data, data, kError);
+  RunModuleParserSyncTest(context_data, data, kError);
+}
+
+TEST_F(ParsingTest, ImportCallSourceSuccess) {
+  i::FlagScope<bool> f(&v8_flags.js_source_phase_imports, true);
+  // clang-format off
+  const char* context_data[][2] = {
+    {"", ""},
+    {"'use strict';", ""},
+    {"function f() {", "}"},
+    {"'use strict'; function f() {", "}"},
+    {"var f = function() {", "}"},
+    {"'use strict'; var f = function() {", "}"},
+    {"({m: function() {", "}})"},
+    {"'use strict'; ({m: function() {", "}})"},
+    {"({m() {", "}})"},
+    {"'use strict'; ({m() {", "}})"},
+    {"({get x() {", "}})"},
+    {"'use strict'; ({get x() {", "}})"},
+    {"({set x(_) {", "}})"},
+    {"'use strict'; ({set x(_) {", "}})"},
+    {"class C {m() {", "}}"},
+    {"class C {get x() {", "}}"},
+    {"class C {set x(_) {", "}}"},
+    {nullptr}
+  };
+
+  const char* data[] = {
+    "import.source('')",
+    nullptr
+  };
+  // clang-format on
+
+  RunParserSyncTest(context_data, data, kSuccess);
+  RunModuleParserSyncTest(context_data, data, kSuccess);
+}
+
+TEST_F(ParsingTest, ImportCallSourceFailure) {
+  i::FlagScope<bool> f(&v8_flags.js_source_phase_imports, true);
+  // clang-format off
+  const char* context_data[][2] = {
+    {"", ""},
+    {"var ", ""},
+    {"let ", ""},
+    {"const ", ""},
+    {"var [", "] = [1]"},
+    {"([", "] = [1])"},
+    {"({", "} = {1})"},
+    {"var {", " = 1} = 1"},
+    {"for (var ", " of [1]) {}"},
+    {"(", ") => {}"},
+    {"let f = ", " => {}"},
+    {nullptr}
+  };
+
+  const char* data[] = {
+    "import.source",
+    "import.source.url",
+    "import.source[0]",
+    "import.source.couldBeMutable = true",
+    "import.source()",
+    "new import.source.MagicClass",
+    "new import.source",
+    "t = [...import.source]",
+    "f = {...import.source}",
+    "delete import.source",
+    nullptr
+  };
+  // clang-format on
+
+  RunParserSyncTest(context_data, data, kError);
+  RunModuleParserSyncTest(context_data, data, kError);
+}
+
+TEST_F(ParsingTest, ImportCallSourceAttributesNotAllowed) {
+  i::FlagScope<bool> f_js_source_phase_imports(
+      &v8_flags.js_source_phase_imports, true);
+  i::FlagScope<bool> f_harmony_import_attributes(
+      &v8_flags.harmony_import_attributes, true);
+  i::FlagScope<bool> f_harmony_import_assertions(
+      &v8_flags.harmony_import_assertions, true);
+
+  // clang-format off
+  const char* context_data[][2] = {
+    {"", ""},
+    {"'use strict';", ""},
+    {"function f() {", "}"},
+    {"'use strict'; function f() {", "}"},
+    {"var f = function() {", "}"},
+    {"'use strict'; var f = function() {", "}"},
+    {"({m: function() {", "}})"},
+    {"'use strict'; ({m: function() {", "}})"},
+    {"({m() {", "}})"},
+    {"'use strict'; ({m() {", "}})"},
+    {"({get x() {", "}})"},
+    {"'use strict'; ({get x() {", "}})"},
+    {"({set x(_) {", "}})"},
+    {"'use strict'; ({set x(_) {", "}})"},
+    {"class C {m() {", "}}"},
+    {"class C {get x() {", "}}"},
+    {"class C {set x(_) {", "}}"},
+    {nullptr}
+  };
+
+  const char* data[] = {
+    "import.source('', )",
+    "import.source('', {})",
+    nullptr
+  };
   // clang-format on
 
   RunParserSyncTest(context_data, data, kError);
@@ -11512,7 +11731,7 @@ TEST_F(ParsingTest, NoPessimisticContextAllocation) {
           program + prefix_len + inner_function_len + params_len + source_len,
           "%s", suffix);
 
-      i::Handle<i::String> source =
+      i::DirectHandle<i::String> source =
           factory->InternalizeUtf8String(program.begin());
       source->PrintOn(stdout);
       printf("\n");
@@ -12076,7 +12295,7 @@ TEST_F(ParsingTest, LexicalLoopVariable) {
       std::function<void(const i::ParseInfo& info, i::DeclarationScope*)>;
   auto TestProgram = [isolate](const char* program, TestCB test) {
     i::Factory* const factory = isolate->factory();
-    i::Handle<i::String> source =
+    i::DirectHandle<i::String> source =
         factory->NewStringFromUtf8(base::CStrVector(program)).ToHandleChecked();
     i::Handle<i::Script> script = factory->NewScript(source);
     i::UnoptimizedCompileState compile_state;
@@ -12087,7 +12306,7 @@ TEST_F(ParsingTest, LexicalLoopVariable) {
     i::ParseInfo info(isolate, flags, &compile_state, &reusable_state);
     CHECK_PARSE_PROGRAM(&info, script, isolate);
 
-    i::DeclarationScope::AllocateScopeInfos(&info, isolate);
+    i::DeclarationScope::AllocateScopeInfos(&info, script, isolate);
     CHECK_NOT_NULL(info.literal());
 
     i::DeclarationScope* script_scope = info.literal()->scope();

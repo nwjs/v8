@@ -155,6 +155,9 @@ class V8_BASE_EXPORT OS {
   static void EnsureWin32MemoryAPILoaded();
 #endif
 
+  // Check whether CET shadow stack is enabled.
+  static bool IsHardwareEnforcedShadowStacksEnabled();
+
   // Returns the accumulated user time for thread. This routine
   // can be used for profiling. The implementation should
   // strive for high-precision timer resolution, preferable
@@ -522,6 +525,8 @@ class V8_BASE_EXPORT Thread {
   // Opaque data type for thread-local storage keys.
 #if V8_OS_STARBOARD
   using LocalStorageKey = SbThreadLocalKey;
+#elif V8_OS_ZOS
+  using LocalStorageKey = pthread_key_t;
 #else
   using LocalStorageKey = int32_t;
 #endif

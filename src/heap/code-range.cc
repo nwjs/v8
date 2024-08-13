@@ -137,11 +137,6 @@ bool CodeRange::InitReservation(v8::PageAllocator* page_allocator,
   }
 
   const size_t allocate_page_size = page_allocator->AllocatePageSize();
-  // TODO(v8:11880): Use base_alignment here once ChromeOS issue is fixed.
-  Address the_hint =
-      GetCodeRangeAddressHint()->GetAddressHint(requested, allocate_page_size);
-  the_hint = RoundDown(the_hint, base_alignment);
-
   constexpr size_t kRadiusInMB =
       kMaxPCRelativeCodeRangeInMB > 1024 ? kMaxPCRelativeCodeRangeInMB : 4096;
   auto preferred_region = GetPreferredRegion(kRadiusInMB, kPageSize);
@@ -195,10 +190,17 @@ bool CodeRange::InitReservation(v8::PageAllocator* page_allocator,
     }
   }
   if (!IsReserved()) {
+    // TODO(v8:11880): Use base_alignment here once ChromeOS issue is fixed.
+    Address the_hint = GetCodeRangeAddressHint()->GetAddressHint(
+        requested, allocate_page_size);
+    the_hint = RoundDown(the_hint, base_alignment);
     // Last resort, use whatever region we get.
     params.base_alignment = base_alignment;
     params.requested_start_hint = the_hint;
-    if (!VirtualMemoryCage::InitReservation(params)) return false;
+    if (!VirtualMemoryCage::InitReservation(params)) {
+      params.requested_start_hint = kNullAddress;
+      if (!VirtualMemoryCage::InitReservation(params)) return false;
+    };
     TRACE("=== Fallback attempt, hint=%p: [%p, %p)\n",
           reinterpret_cast<void*>(params.requested_start_hint),
           reinterpret_cast<void*>(region().begin()),
@@ -462,42 +464,6 @@ uint8_t* CodeRange::RemapEmbeddedBuiltins(Isolate* isolate,
   embedded_blob_code_copy_.store(embedded_blob_code_copy,
                                  std::memory_order_release);
   return embedded_blob_code_copy;
-}
-
-namespace {
-
-CodeRange* process_wide_code_range_ = nullptr;
-
-V8_DECLARE_ONCE(init_code_range_once);
-void InitProcessWideCodeRange(v8::PageAllocator* page_allocator,
-                              size_t requested_size) {
-  CodeRange* code_range = new CodeRange();
-  if (!code_range->InitReservation(page_allocator, requested_size)) {
-    V8::FatalProcessOutOfMemory(
-        nullptr, "Failed to reserve virtual memory for CodeRange");
-  }
-  process_wide_code_range_ = code_range;
-#ifdef V8_EXTERNAL_CODE_SPACE
-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
-  ExternalCodeCompressionScheme::InitBase(
-      ExternalCodeCompressionScheme::PrepareCageBaseAddress(
-          code_range->base()));
-#endif  // V8_COMPRESS_POINTERS_IN_SHARED_CAGE
-#endif  // V8_EXTERNAL_CODE_SPACE
-}
-}  // namespace
-
-// static
-CodeRange* CodeRange::EnsureProcessWideCodeRange(
-    v8::PageAllocator* page_allocator, size_t requested_size) {
-  base::CallOnce(&init_code_range_once, InitProcessWideCodeRange,
-                 page_allocator, requested_size);
-  return process_wide_code_range_;
-}
-
-// static
-CodeRange* CodeRange::GetProcessWideCodeRange() {
-  return process_wide_code_range_;
 }
 
 }  // namespace internal

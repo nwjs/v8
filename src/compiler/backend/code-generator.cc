@@ -4,6 +4,7 @@
 
 #include "src/compiler/backend/code-generator.h"
 
+#include "src/base/bounds.h"
 #include "src/base/iterator.h"
 #include "src/codegen/assembler-inl.h"
 #include "src/codegen/macro-assembler-inl.h"
@@ -977,7 +978,7 @@ Handle<DeoptimizationData> CodeGenerator::GenerateDeoptimizationData() {
   Handle<DeoptimizationData> data =
       DeoptimizationData::New(isolate(), deopt_count);
 
-  Handle<DeoptimizationFrameTranslation> translation_array =
+  DirectHandle<DeoptimizationFrameTranslation> translation_array =
       translations_.ToFrameTranslation(
           isolate()->main_thread_local_isolate()->factory());
 
@@ -991,14 +992,14 @@ Handle<DeoptimizationData> CodeGenerator::GenerateDeoptimizationData() {
   data->SetLazyDeoptCount(Smi::FromInt(lazy_deopt_count_));
 
   if (info->has_shared_info()) {
-    Handle<SharedFunctionInfoWrapper> sfi_wrapper =
+    DirectHandle<SharedFunctionInfoWrapper> sfi_wrapper =
         isolate()->factory()->NewSharedFunctionInfoWrapper(info->shared_info());
     data->SetSharedFunctionInfoWrapper(*sfi_wrapper);
   } else {
     data->SetSharedFunctionInfoWrapper(Smi::zero());
   }
 
-  Handle<DeoptimizationLiteralArray> literals =
+  DirectHandle<DeoptimizationLiteralArray> literals =
       isolate()->factory()->NewDeoptimizationLiteralArray(
           static_cast<int>(deoptimization_literals_.size()));
   for (unsigned i = 0; i < deoptimization_literals_.size(); i++) {
@@ -1008,7 +1009,7 @@ Handle<DeoptimizationData> CodeGenerator::GenerateDeoptimizationData() {
   }
   data->SetLiteralArray(*literals);
 
-  Handle<TrustedPodArray<InliningPosition>> inl_pos =
+  DirectHandle<TrustedPodArray<InliningPosition>> inl_pos =
       CreateInliningPositions(info, isolate());
   data->SetInliningPositions(*inl_pos);
 
@@ -1167,6 +1168,8 @@ void CodeGenerator::TranslateStateValueDescriptor(
     translations_.ArgumentsElements(desc->arguments_type());
   } else if (desc->IsArgumentsLength()) {
     translations_.ArgumentsLength();
+  } else if (desc->IsRestLength()) {
+    translations_.RestLength();
   } else if (desc->IsDuplicate()) {
     translations_.DuplicateObject(static_cast<int>(desc->id()));
   } else if (desc->IsPlain()) {
@@ -1358,11 +1361,17 @@ void CodeGenerator::AddTranslationForOperand(Instruction* instr,
     }
   } else if (op->IsFPStackSlot()) {
     switch (type.representation()) {
-      case MachineRepresentation::kFloat64:
-        translations_.StoreDoubleStackSlot(LocationOperand::cast(op)->index());
-        break;
       case MachineRepresentation::kFloat32:
         translations_.StoreFloatStackSlot(LocationOperand::cast(op)->index());
+        break;
+      case MachineRepresentation::kFloat64:
+        if (type.semantic() == MachineSemantic::kHoleyFloat64) {
+          translations_.StoreHoleyDoubleStackSlot(
+              LocationOperand::cast(op)->index());
+        } else {
+          translations_.StoreDoubleStackSlot(
+              LocationOperand::cast(op)->index());
+        }
         break;
       case MachineRepresentation::kSimd128:
         translations_.StoreSimd128StackSlot(LocationOperand::cast(op)->index());
@@ -1402,7 +1411,12 @@ void CodeGenerator::AddTranslationForOperand(Instruction* instr,
         translations_.StoreFloatRegister(converter.ToFloatRegister(op));
         break;
       case MachineRepresentation::kFloat64:
-        translations_.StoreDoubleRegister(converter.ToDoubleRegister(op));
+        if (type.semantic() == MachineSemantic::kHoleyFloat64) {
+          translations_.StoreHoleyDoubleRegister(
+              converter.ToDoubleRegister(op));
+        } else {
+          translations_.StoreDoubleRegister(converter.ToDoubleRegister(op));
+        }
         break;
       case MachineRepresentation::kSimd128:
         translations_.StoreSimd128Register(converter.ToSimd128Register(op));
@@ -1426,13 +1440,15 @@ void CodeGenerator::AddTranslationForOperand(Instruction* instr,
           literal = DeoptimizationLiteral(constant.ToInt64());
           break;
         case MachineRepresentation::kFloat32:
-          literal = DeoptimizationLiteral(constant.ToFloat32());
+          literal = DeoptimizationLiteral(constant.ToFloat32Safe());
           break;
         case MachineRepresentation::kFloat64:
-          literal = DeoptimizationLiteral(constant.ToFloat64().value());
+          literal = DeoptimizationLiteral(Float64(constant.ToFloat64()));
           break;
         case MachineRepresentation::kTagged: {
-          Tagged<Smi> smi(static_cast<Address>(constant.ToInt32()));
+          DCHECK(!PointerCompressionIsEnabled() ||
+                 base::IsInRange(constant.ToInt64(), 0u, UINT32_MAX));
+          Tagged<Smi> smi(static_cast<Address>(constant.ToInt64()));
           DCHECK(IsSmi(smi));
           literal = DeoptimizationLiteral(smi);
           break;
@@ -1514,6 +1530,7 @@ void CodeGenerator::AddTranslationForOperand(Instruction* instr,
       case Constant::kFloat64:
         DCHECK(type.representation() == MachineRepresentation::kFloat64 ||
                type.representation() == MachineRepresentation::kTagged);
+        DCHECK_NE(type, MachineType::HoleyFloat64());
         literal = DeoptimizationLiteral(constant.ToFloat64().value());
         break;
       case Constant::kHeapObject:

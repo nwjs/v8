@@ -8,6 +8,7 @@
 #include "src/objects/contexts.h"
 #include "src/objects/module.h"
 #include "src/objects/promise.h"
+#include "src/objects/string.h"
 #include "src/zone/zone-containers.h"
 #include "torque-generated/bit-fields.h"
 
@@ -37,9 +38,9 @@ class SourceTextModule
 
   Tagged<Script> GetScript() const;
 
-  // Whether or not this module is an async module. Set during module creation
-  // and does not change afterwards.
-  DECL_BOOLEAN_ACCESSORS(async)
+  // Whether or not this module contains a toplevel await. Set during module
+  // creation and does not change afterwards.
+  DECL_BOOLEAN_ACCESSORS(has_toplevel_await)
 
   // Get the SourceTextModuleInfo associated with the code.
   inline Tagged<SourceTextModuleInfo> info() const;
@@ -78,7 +79,7 @@ class SourceTextModule
       SubclassBodyDescriptor<Module::BodyDescriptor,
                              FixedBodyDescriptor<kCodeOffset, kSize, kSize>>;
 
-  static constexpr unsigned kFirstAsyncEvaluatingOrdinal = 2;
+  static constexpr unsigned kFirstAsyncEvaluationOrdinal = 2;
 
   enum ExecuteAsyncModuleContextSlots {
     kModule = Context::MIN_CONTEXT_SLOTS,
@@ -93,9 +94,9 @@ class SourceTextModule
   friend class Factory;
   friend class Module;
 
-  struct AsyncEvaluatingOrdinalCompare;
-  using AsyncParentCompletionSet =
-      ZoneSet<Handle<SourceTextModule>, AsyncEvaluatingOrdinalCompare>;
+  struct AsyncEvaluationOrdinalCompare;
+  using AvailableAncestorsSet =
+      ZoneSet<Handle<SourceTextModule>, AsyncEvaluationOrdinalCompare>;
 
   // Appends a tuple of module and generator to the async parent modules
   // ArrayList.
@@ -114,7 +115,7 @@ class SourceTextModule
   // Returns the number of async parent modules for a given async child.
   inline int AsyncParentModuleCount();
 
-  inline bool IsAsyncEvaluating() const;
+  inline bool HasAsyncEvaluationOrdinal() const;
 
   inline bool HasPendingAsyncDependencies();
   inline void IncrementPendingAsyncDependencies();
@@ -123,7 +124,7 @@ class SourceTextModule
   // Bits for flags.
   DEFINE_TORQUE_GENERATED_SOURCE_TEXT_MODULE_FLAGS()
 
-  // async_evaluating_ordinal, top_level_capability, pending_async_dependencies,
+  // async_evaluation_ordinal, top_level_capability, pending_async_dependencies,
   // and async_parent_modules are used exclusively during evaluation of async
   // modules and the modules which depend on them.
   //
@@ -139,10 +140,8 @@ class SourceTextModule
   static constexpr unsigned kNotAsyncEvaluated = 0;
   static constexpr unsigned kAsyncEvaluateDidFinish = 1;
   static_assert(kNotAsyncEvaluated < kAsyncEvaluateDidFinish);
-  static_assert(kAsyncEvaluateDidFinish < kFirstAsyncEvaluatingOrdinal);
-  static_assert(kMaxModuleAsyncEvaluatingOrdinal ==
-                AsyncEvaluatingOrdinalBits::kMax);
-  DECL_PRIMITIVE_ACCESSORS(async_evaluating_ordinal, unsigned)
+  static_assert(kAsyncEvaluateDidFinish < kFirstAsyncEvaluationOrdinal);
+  DECL_PRIMITIVE_ACCESSORS(async_evaluation_ordinal, unsigned)
 
   // The parent modules of a given async dependency, use async_parent_modules()
   // to retrieve the ArrayList representation.
@@ -186,9 +185,9 @@ class SourceTextModule
                                Handle<SourceTextModule> module, Zone* zone,
                                UnorderedModuleSet* visited);
 
-  static void GatherAsyncParentCompletions(Isolate* isolate, Zone* zone,
-                                           Handle<SourceTextModule> start,
-                                           AsyncParentCompletionSet* exec_list);
+  static void GatherAvailableAncestors(Isolate* isolate, Zone* zone,
+                                       Handle<SourceTextModule> start,
+                                       AvailableAncestorsSet* exec_list);
 
   // Implementation of spec concrete method Evaluate.
   static V8_WARN_UNUSED_RESULT MaybeHandle<Object> Evaluate(
@@ -237,8 +236,6 @@ class SourceTextModule
 // Scope.
 class SourceTextModuleInfo : public FixedArray {
  public:
-  DECL_CAST(SourceTextModuleInfo)
-
   template <typename IsolateT>
   static Handle<SourceTextModuleInfo> New(IsolateT* isolate, Zone* zone,
                                           SourceTextModuleDescriptor* descr);
@@ -290,12 +287,21 @@ class ModuleRequest
   template <typename IsolateT>
   static Handle<ModuleRequest> New(IsolateT* isolate,
                                    DirectHandle<String> specifier,
+                                   ModuleImportPhase phase,
                                    DirectHandle<FixedArray> import_attributes,
                                    int position);
 
   // The number of entries in the import_attributes FixedArray that are used for
   // a single attribute.
   static const size_t kAttributeEntrySize = 3;
+
+  // Bits for flags.
+  DEFINE_TORQUE_GENERATED_MODULE_REQUEST_FLAGS()
+  static_assert(PositionBits::kMax >= String::kMaxLength,
+                "String::kMaxLength should fit in PositionBits::kMax");
+  DECL_PRIMITIVE_ACCESSORS(position, unsigned)
+  inline void set_phase(ModuleImportPhase phase);
+  inline ModuleImportPhase phase() const;
 
   using BodyDescriptor = StructBodyDescriptor;
 
@@ -310,9 +316,9 @@ class SourceTextModuleInfoEntry
 
   template <typename IsolateT>
   static Handle<SourceTextModuleInfoEntry> New(
-      IsolateT* isolate, DirectHandle<PrimitiveHeapObject> export_name,
-      DirectHandle<PrimitiveHeapObject> local_name,
-      DirectHandle<PrimitiveHeapObject> import_name, int module_request,
+      IsolateT* isolate, DirectHandle<UnionOf<String, Undefined>> export_name,
+      DirectHandle<UnionOf<String, Undefined>> local_name,
+      DirectHandle<UnionOf<String, Undefined>> import_name, int module_request,
       int cell_index, int beg_pos, int end_pos);
 
   using BodyDescriptor = StructBodyDescriptor;

@@ -7,6 +7,7 @@
 #include <inttypes.h>
 
 #include <cmath>
+#include <optional>
 
 #include "src/base/logging.h"
 #include "src/base/platform/time.h"
@@ -406,6 +407,7 @@ void IncrementalMarking::FinishBlackAllocation() {
 void IncrementalMarking::StartPointerTableBlackAllocation() {
 #ifdef V8_ENABLE_SANDBOX
   heap()->code_pointer_space()->set_allocate_black(true);
+  heap()->js_dispatch_table_space()->set_allocate_black(true);
   heap()->trusted_pointer_space()->set_allocate_black(true);
 #endif  // V8_ENABLE_SANDBOX
 }
@@ -413,6 +415,7 @@ void IncrementalMarking::StartPointerTableBlackAllocation() {
 void IncrementalMarking::StopPointerTableBlackAllocation() {
 #ifdef V8_ENABLE_SANDBOX
   heap()->code_pointer_space()->set_allocate_black(false);
+  heap()->js_dispatch_table_space()->set_allocate_black(false);
   heap()->trusted_pointer_space()->set_allocate_black(false);
 #endif  // V8_ENABLE_SANDBOX
 }
@@ -657,6 +660,7 @@ bool IncrementalMarking::TryInitializeTaskTimeout() {
             : allowed_overshoot - optional_time_to_current_task.value();
     completion_task_timeout_ = now + delta;
   }
+  DCHECK_IMPLIES(!delaying, completion_task_timeout_ <= now);
   if (V8_UNLIKELY(v8_flags.trace_incremental_marking)) {
     isolate()->PrintWithTimestamp(
         "[IncrementalMarking] Completion: %s GC via stack guard, "
@@ -798,7 +802,7 @@ void IncrementalMarking::Step(v8::base::TimeDelta max_duration,
   DCHECK(IsMajorMarking());
   const auto start = v8::base::TimeTicks::Now();
 
-  base::Optional<SafepointScope> safepoint_scope;
+  std::optional<SafepointScope> safepoint_scope;
   // Conceptually an incremental marking step (even though it always runs on the
   // main thread) may introduce a form of concurrent marking when background
   // threads access the heap concurrently (e.g. concurrent compilation). On

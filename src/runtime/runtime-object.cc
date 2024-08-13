@@ -60,7 +60,7 @@ MaybeHandle<Object> Runtime::HasProperty(Isolate* isolate,
         isolate,
         NewTypeError(MessageTemplate::kInvalidInOperatorUse, key, object));
   }
-  Handle<JSReceiver> receiver = Handle<JSReceiver>::cast(object);
+  Handle<JSReceiver> receiver = Cast<JSReceiver>(object);
 
   // Convert the {key} to a name.
   Handle<Name> name;
@@ -135,7 +135,7 @@ RUNTIME_FUNCTION(Runtime_ObjectGetOwnPropertyNamesTryFast) {
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, receiver,
                                      Object::ToObject(isolate, object));
 
-  Handle<Map> map(receiver->map(), isolate);
+  DirectHandle<Map> map(receiver->map(), isolate);
 
   int nod = map->NumberOfOwnDescriptors();
   Handle<FixedArray> keys;
@@ -177,7 +177,7 @@ RUNTIME_FUNCTION(Runtime_ObjectHasOwnProperty) {
     return isolate->heap()->ToBoolean(result.FromJust());
 
   } else if (IsJSObject(*object)) {
-    Handle<JSObject> js_obj = Handle<JSObject>::cast(object);
+    Handle<JSObject> js_obj = Cast<JSObject>(object);
     // Fast case: either the key is a real named property or it is not
     // an array index and there are no interceptors or hidden
     // prototypes.
@@ -208,7 +208,7 @@ RUNTIME_FUNCTION(Runtime_ObjectHasOwnProperty) {
     return isolate->heap()->ToBoolean(maybe.FromJust());
 
   } else if (IsJSProxy(*object)) {
-    LookupIterator it(isolate, object, key, Handle<JSProxy>::cast(object),
+    LookupIterator it(isolate, object, key, Cast<JSProxy>(object),
                       LookupIterator::OWN);
     Maybe<PropertyAttributes> attributes =
         JSReceiver::GetPropertyAttributes(&it);
@@ -218,7 +218,7 @@ RUNTIME_FUNCTION(Runtime_ObjectHasOwnProperty) {
   } else if (IsString(*object)) {
     return isolate->heap()->ToBoolean(
         key.is_element()
-            ? key.index() < static_cast<size_t>(String::cast(*object)->length())
+            ? key.index() < static_cast<size_t>(Cast<String>(*object)->length())
             : key.name()->Equals(ReadOnlyRoots(isolate).length_string()));
   } else if (IsNullOrUndefined(*object, isolate)) {
     THROW_NEW_ERROR_RETURN_FAILURE(
@@ -239,7 +239,7 @@ RUNTIME_FUNCTION(Runtime_HasOwnConstDataProperty) {
   if (!success) return ReadOnlyRoots(isolate).undefined_value();
 
   if (IsJSObject(*object)) {
-    Handle<JSObject> js_obj = Handle<JSObject>::cast(object);
+    Handle<JSObject> js_obj = Cast<JSObject>(object);
     LookupIterator it(isolate, js_obj, key, js_obj, LookupIterator::OWN);
 
     switch (it.state()) {
@@ -262,7 +262,7 @@ RUNTIME_FUNCTION(Runtime_IsDictPropertyConstTrackingEnabled) {
 
 RUNTIME_FUNCTION(Runtime_AddDictionaryProperty) {
   HandleScope scope(isolate);
-  Handle<JSObject> receiver = args.at<JSObject>(0);
+  DirectHandle<JSObject> receiver = args.at<JSObject>(0);
   Handle<Name> name = args.at<Name>(1);
   Handle<Object> value = args.at(2);
 
@@ -319,7 +319,7 @@ RUNTIME_FUNCTION(Runtime_AddPrivateBrand) {
   DCHECK_GE(depth, 0);
   for (; depth > 0; depth--) {
     context =
-        handle(Context::cast(context->get(Context::PREVIOUS_INDEX)), isolate);
+        handle(Cast<Context>(context->get(Context::PREVIOUS_INDEX)), isolate);
   }
   DCHECK_EQ(context->scope_info()->scope_type(), ScopeType::CLASS_SCOPE);
   Maybe<bool> added_brand = Object::AddDataProperty(
@@ -364,9 +364,61 @@ RUNTIME_FUNCTION(Runtime_ObjectCreate) {
 }
 
 MaybeHandle<Object> Runtime::SetObjectProperty(
+    Isolate* isolate, Handle<Object> lookup_start_obj, Handle<Object> key,
+    Handle<Object> value, MaybeHandle<Object> maybe_receiver,
+    StoreOrigin store_origin, Maybe<ShouldThrow> should_throw) {
+  Handle<Object> receiver;
+  if (!maybe_receiver.ToHandle(&receiver)) {
+    receiver = lookup_start_obj;
+  }
+  if (IsNullOrUndefined(*lookup_start_obj, isolate)) {
+    MaybeDirectHandle<String> maybe_property =
+        Object::NoSideEffectsToMaybeString(isolate, key);
+    DirectHandle<String> property_name;
+    if (maybe_property.ToHandle(&property_name)) {
+      THROW_NEW_ERROR(
+          isolate,
+          NewTypeError(MessageTemplate::kNonObjectPropertyStoreWithProperty,
+                       lookup_start_obj, property_name));
+    } else {
+      THROW_NEW_ERROR(isolate,
+                      NewTypeError(MessageTemplate::kNonObjectPropertyStore,
+                                   lookup_start_obj));
+    }
+  }
+
+  // Check if the given key is an array index.
+  bool success = false;
+  PropertyKey lookup_key(isolate, key, &success);
+  if (!success) return MaybeHandle<Object>();
+  LookupIterator it(isolate, receiver, lookup_key, lookup_start_obj);
+  if (IsSymbol(*key) && Cast<Symbol>(*key)->is_private_name()) {
+    Maybe<bool> can_store = JSReceiver::CheckPrivateNameStore(&it, false);
+    MAYBE_RETURN_NULL(can_store);
+    if (!can_store.FromJust()) {
+      return isolate->factory()->undefined_value();
+    }
+  }
+
+  MAYBE_RETURN_NULL(
+      Object::SetProperty(&it, value, store_origin, should_throw));
+
+  return value;
+}
+
+MaybeHandle<Object> Runtime::SetObjectProperty(
     Isolate* isolate, Handle<Object> object, Handle<Object> key,
     Handle<Object> value, StoreOrigin store_origin,
     Maybe<ShouldThrow> should_throw) {
+  return SetObjectProperty(isolate, object, key, value, object, store_origin,
+                           should_throw);
+}
+
+MaybeHandle<Object> Runtime::DefineObjectOwnProperty(Isolate* isolate,
+                                                     Handle<Object> object,
+                                                     Handle<Object> key,
+                                                     Handle<Object> value,
+                                                     StoreOrigin store_origin) {
   if (IsNullOrUndefined(*object, isolate)) {
     MaybeDirectHandle<String> maybe_property =
         Object::NoSideEffectsToMaybeString(isolate, key);
@@ -382,43 +434,12 @@ MaybeHandle<Object> Runtime::SetObjectProperty(
           NewTypeError(MessageTemplate::kNonObjectPropertyStore, object));
     }
   }
-
-  // Check if the given key is an array index.
-  bool success = false;
-  PropertyKey lookup_key(isolate, key, &success);
-  if (!success) return MaybeHandle<Object>();
-  LookupIterator it(isolate, object, lookup_key);
-  if (IsSymbol(*key) && Symbol::cast(*key)->is_private_name()) {
-    Maybe<bool> can_store = JSReceiver::CheckPrivateNameStore(&it, false);
-    MAYBE_RETURN_NULL(can_store);
-    if (!can_store.FromJust()) {
-      return isolate->factory()->undefined_value();
-    }
-  }
-
-  MAYBE_RETURN_NULL(
-      Object::SetProperty(&it, value, store_origin, should_throw));
-
-  return value;
-}
-
-MaybeHandle<Object> Runtime::DefineObjectOwnProperty(Isolate* isolate,
-                                                     Handle<Object> object,
-                                                     Handle<Object> key,
-                                                     Handle<Object> value,
-                                                     StoreOrigin store_origin) {
-  if (IsNullOrUndefined(*object, isolate)) {
-    THROW_NEW_ERROR(
-        isolate,
-        NewTypeError(MessageTemplate::kNonObjectPropertyStore, key, object));
-  }
-
   // Check if the given key is an array index.
   bool success = false;
   PropertyKey lookup_key(isolate, key, &success);
   if (!success) return MaybeHandle<Object>();
 
-  if (IsSymbol(*key) && Symbol::cast(*key)->is_private_name()) {
+  if (IsSymbol(*key) && Cast<Symbol>(*key)->is_private_name()) {
     LookupIterator it(isolate, object, lookup_key, LookupIterator::OWN);
     Maybe<bool> can_store = JSReceiver::CheckPrivateNameStore(&it, true);
     MAYBE_RETURN_NULL(can_store);
@@ -527,7 +548,7 @@ RUNTIME_FUNCTION(Runtime_ObjectIsExtensible) {
 
   Maybe<bool> result =
       IsJSReceiver(*object)
-          ? JSReceiver::IsExtensible(isolate, Handle<JSReceiver>::cast(object))
+          ? JSReceiver::IsExtensible(isolate, Cast<JSReceiver>(object))
           : Just(false);
   MAYBE_RETURN(result, ReadOnlyRoots(isolate).exception());
   return isolate->heap()->ToBoolean(result.FromJust());
@@ -538,8 +559,8 @@ RUNTIME_FUNCTION(Runtime_JSReceiverPreventExtensionsThrow) {
   DCHECK_EQ(1, args.length());
   Handle<JSReceiver> object = args.at<JSReceiver>(0);
 
-  MAYBE_RETURN(JSReceiver::PreventExtensions(
-                   isolate, Handle<JSReceiver>::cast(object), kThrowOnError),
+  MAYBE_RETURN(JSReceiver::PreventExtensions(isolate, Cast<JSReceiver>(object),
+                                             kThrowOnError),
                ReadOnlyRoots(isolate).exception());
   return *object;
 }
@@ -550,7 +571,7 @@ RUNTIME_FUNCTION(Runtime_JSReceiverPreventExtensionsDontThrow) {
   Handle<JSReceiver> object = args.at<JSReceiver>(0);
 
   Maybe<bool> result = JSReceiver::PreventExtensions(
-      isolate, Handle<JSReceiver>::cast(object), kDontThrow);
+      isolate, Cast<JSReceiver>(object), kDontThrow);
   MAYBE_RETURN(result, ReadOnlyRoots(isolate).exception());
   return *isolate->factory()->ToBoolean(result.FromJust());
 }
@@ -616,22 +637,21 @@ RUNTIME_FUNCTION(Runtime_GetProperty) {
   // Convert string-index keys to their number variant to avoid internalization
   // below; and speed up subsequent conversion to index.
   uint32_t index;
-  if (IsString(*key_obj) && String::cast(*key_obj)->AsArrayIndex(&index)) {
+  if (IsString(*key_obj) && Cast<String>(*key_obj)->AsArrayIndex(&index)) {
     key_obj = isolate->factory()->NewNumberFromUint(index);
   }
   if (IsJSObject(*lookup_start_obj)) {
-    Handle<JSObject> lookup_start_object =
-        Handle<JSObject>::cast(lookup_start_obj);
+    Handle<JSObject> lookup_start_object = Cast<JSObject>(lookup_start_obj);
     if (!IsJSGlobalProxy(*lookup_start_object) &&
         !IsAccessCheckNeeded(*lookup_start_object) && IsName(*key_obj)) {
-      Handle<Name> key = Handle<Name>::cast(key_obj);
+      Handle<Name> key = Cast<Name>(key_obj);
       key_obj = key = isolate->factory()->InternalizeName(key);
 
       DisallowGarbageCollection no_gc;
       if (IsJSGlobalObject(*lookup_start_object)) {
         // Attempt dictionary lookup.
         Tagged<GlobalDictionary> dictionary =
-            JSGlobalObject::cast(*lookup_start_object)
+            Cast<JSGlobalObject>(*lookup_start_object)
                 ->global_dictionary(kAcquireLoad);
         InternalIndex entry = dictionary->FindEntry(isolate, key);
         if (entry.is_found()) {
@@ -683,8 +703,8 @@ RUNTIME_FUNCTION(Runtime_GetProperty) {
     }
   } else if (IsString(*lookup_start_obj) && IsSmi(*key_obj)) {
     // Fast case for string indexing using [] with a smi index.
-    Handle<String> str = Handle<String>::cast(lookup_start_obj);
-    int smi_index = Smi::cast(*key_obj).value();
+    Handle<String> str = Cast<String>(lookup_start_obj);
+    int smi_index = Cast<Smi>(*key_obj).value();
     if (smi_index >= 0 && smi_index < str->length()) {
       Factory* factory = isolate->factory();
       return *factory->LookupSingleCharacterStringFromCode(
@@ -792,7 +812,7 @@ RUNTIME_FUNCTION(Runtime_HasProperty) {
         isolate,
         NewTypeError(MessageTemplate::kInvalidInOperatorUse, key, object));
   }
-  Handle<JSReceiver> receiver = Handle<JSReceiver>::cast(object);
+  Handle<JSReceiver> receiver = Cast<JSReceiver>(object);
 
   // Convert the {key} to a name.
   Handle<Name> name;
@@ -826,7 +846,7 @@ RUNTIME_FUNCTION(Runtime_ToFastProperties) {
   DCHECK_EQ(1, args.length());
   Handle<Object> object = args.at(0);
   if (IsJSObject(*object) && !IsJSGlobalObject(*object)) {
-    JSObject::MigrateSlowToFast(Handle<JSObject>::cast(object), 0,
+    JSObject::MigrateSlowToFast(Cast<JSObject>(object), 0,
                                 "RuntimeToFastProperties");
   }
   return *object;
@@ -853,7 +873,7 @@ RUNTIME_FUNCTION(Runtime_GetDerivedMap) {
   DCHECK_EQ(3, args.length());
   Handle<JSFunction> target = args.at<JSFunction>(0);
   Handle<JSReceiver> new_target = args.at<JSReceiver>(1);
-  Handle<Object> rab_gsab = args.at(2);
+  DirectHandle<Object> rab_gsab = args.at(2);
   if (IsTrue(*rab_gsab)) {
     RETURN_RESULT_OR_FAILURE(
         isolate, JSFunction::GetDerivedRabGsabTypedArrayMap(isolate, target,
@@ -869,7 +889,7 @@ RUNTIME_FUNCTION(Runtime_CompleteInobjectSlackTrackingForMap) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
 
-  Handle<Map> initial_map = args.at<Map>(0);
+  DirectHandle<Map> initial_map = args.at<Map>(0);
   MapUpdater::CompleteInobjectSlackTracking(isolate, *initial_map);
 
   return ReadOnlyRoots(isolate).undefined_value();
@@ -889,7 +909,7 @@ RUNTIME_FUNCTION(Runtime_TryMigrateInstance) {
   return *js_object;
 }
 
-static bool IsValidAccessor(Isolate* isolate, Handle<Object> obj) {
+static bool IsValidAccessor(Isolate* isolate, DirectHandle<Object> obj) {
   return IsNullOrUndefined(*obj, isolate) || IsCallable(*obj);
 }
 
@@ -923,9 +943,9 @@ RUNTIME_FUNCTION(Runtime_SetFunctionName) {
   Handle<Object> value = args.at(0);
   Handle<Name> name = args.at<Name>(1);
   DCHECK(IsJSFunction(*value));
-  Handle<JSFunction> function = Handle<JSFunction>::cast(value);
+  auto function = Cast<JSFunction>(value);
   DCHECK(!function->shared()->HasSharedName());
-  Handle<Map> function_map(function->map(), isolate);
+  DirectHandle<Map> function_map(function->map(), isolate);
   if (!JSFunction::SetName(function, name,
                            isolate->factory()->empty_string())) {
     return ReadOnlyRoots(isolate).exception();
@@ -949,11 +969,11 @@ RUNTIME_FUNCTION(Runtime_DefineKeyedOwnPropertyInLiteral) {
     int index = args.tagged_index_value_at(5);
     DCHECK(IsName(*name));
     DCHECK(IsFeedbackVector(*maybe_vector));
-    Handle<FeedbackVector> vector = Handle<FeedbackVector>::cast(maybe_vector);
+    Handle<FeedbackVector> vector = Cast<FeedbackVector>(maybe_vector);
     FeedbackNexus nexus(vector, FeedbackVector::ToSlot(index));
     if (nexus.ic_state() == InlineCacheState::UNINITIALIZED) {
       if (IsUniqueName(*name)) {
-        nexus.ConfigureMonomorphic(Handle<Name>::cast(name),
+        nexus.ConfigureMonomorphic(Cast<Name>(name),
                                    handle(object->map(), isolate),
                                    MaybeObjectHandle());
       } else {
@@ -971,10 +991,10 @@ RUNTIME_FUNCTION(Runtime_DefineKeyedOwnPropertyInLiteral) {
   if (flags & DefineKeyedOwnPropertyInLiteralFlag::kSetFunctionName) {
     DCHECK(IsName(*name));
     DCHECK(IsJSFunction(*value));
-    Handle<JSFunction> function = Handle<JSFunction>::cast(value);
+    auto function = Cast<JSFunction>(value);
     DCHECK(!function->shared()->HasSharedName());
-    Handle<Map> function_map(function->map(), isolate);
-    if (!JSFunction::SetName(function, Handle<Name>::cast(name),
+    DirectHandle<Map> function_map(function->map(), isolate);
+    if (!JSFunction::SetName(function, Cast<Name>(name),
                              isolate->factory()->empty_string())) {
       return ReadOnlyRoots(isolate).exception();
     }
@@ -1003,7 +1023,7 @@ RUNTIME_FUNCTION(Runtime_DefineKeyedOwnPropertyInLiteral) {
 RUNTIME_FUNCTION(Runtime_HasFastPackedElements) {
   SealHandleScope shs(isolate);
   DCHECK_EQ(1, args.length());
-  auto obj = HeapObject::cast(args[0]);
+  auto obj = Cast<HeapObject>(args[0]);
   return isolate->heap()->ToBoolean(
       IsFastPackedElementsKind(obj->map()->elements_kind()));
 }
@@ -1018,7 +1038,7 @@ RUNTIME_FUNCTION(Runtime_IsJSReceiver) {
 RUNTIME_FUNCTION(Runtime_GetFunctionName) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
-  Handle<JSFunction> function = args.at<JSFunction>(0);
+  DirectHandle<JSFunction> function = args.at<JSFunction>(0);
   return *JSFunction::GetName(isolate, function);
 }
 
@@ -1030,8 +1050,8 @@ RUNTIME_FUNCTION(Runtime_DefineGetterPropertyUnchecked) {
   Handle<JSFunction> getter = args.at<JSFunction>(2);
   auto attrs = PropertyAttributesFromInt(args.smi_value_at(3));
 
-  if (String::cast(getter->shared()->Name())->length() == 0) {
-    Handle<Map> getter_map(getter->map(), isolate);
+  if (Cast<String>(getter->shared()->Name())->length() == 0) {
+    DirectHandle<Map> getter_map(getter->map(), isolate);
     if (!JSFunction::SetName(getter, name, isolate->factory()->get_string())) {
       return ReadOnlyRoots(isolate).exception();
     }
@@ -1150,7 +1170,7 @@ RUNTIME_FUNCTION(Runtime_CopyDataPropertiesWithExcludedPropertiesOnStack) {
     // instead because of our call to %ToName() in the desugaring for
     // computed properties.
     if (IsString(*property) &&
-        String::cast(*property)->AsArrayIndex(&property_num)) {
+        Cast<String>(*property)->AsArrayIndex(&property_num)) {
       property = isolate->factory()->NewNumberFromUint(property_num);
     }
 
@@ -1175,8 +1195,8 @@ RUNTIME_FUNCTION(Runtime_DefineSetterPropertyUnchecked) {
   Handle<JSFunction> setter = args.at<JSFunction>(2);
   auto attrs = PropertyAttributesFromInt(args.smi_value_at(3));
 
-  if (String::cast(setter->shared()->Name())->length() == 0) {
-    Handle<Map> setter_map(setter->map(), isolate);
+  if (Cast<String>(setter->shared()->Name())->length() == 0) {
+    DirectHandle<Map> setter_map(setter->map(), isolate);
     if (!JSFunction::SetName(setter, name, isolate->factory()->set_string())) {
       return ReadOnlyRoots(isolate).exception();
     }
@@ -1238,7 +1258,7 @@ RUNTIME_FUNCTION(Runtime_HasInPrototypeChain) {
   Handle<Object> prototype = args.at(1);
   if (!IsJSReceiver(*object)) return ReadOnlyRoots(isolate).false_value();
   Maybe<bool> result = JSReceiver::HasInPrototypeChain(
-      isolate, Handle<JSReceiver>::cast(object), prototype);
+      isolate, Cast<JSReceiver>(object), prototype);
   MAYBE_RETURN(result, ReadOnlyRoots(isolate).exception());
   return isolate->heap()->ToBoolean(result.FromJust());
 }
@@ -1247,8 +1267,8 @@ RUNTIME_FUNCTION(Runtime_HasInPrototypeChain) {
 RUNTIME_FUNCTION(Runtime_CreateIterResultObject) {
   HandleScope scope(isolate);
   DCHECK_EQ(2, args.length());
-  Handle<Object> value = args.at(0);
-  Handle<Object> done = args.at(1);
+  DirectHandle<Object> value = args.at(0);
+  DirectHandle<Object> done = args.at(1);
   return *isolate->factory()->NewJSIteratorResult(
       value, Object::BooleanValue(*done, isolate));
 }
@@ -1315,10 +1335,10 @@ struct PrivateMember {
 
 namespace {
 void CollectPrivateMethodsAndAccessorsFromContext(
-    Isolate* isolate, Handle<Context> context, Handle<String> desc,
+    Isolate* isolate, DirectHandle<Context> context, Handle<String> desc,
     Handle<Object> brand, IsStaticFlag is_static_flag,
     std::vector<PrivateMember>* results) {
-  Handle<ScopeInfo> scope_info(context->scope_info(), isolate);
+  DirectHandle<ScopeInfo> scope_info(context->scope_info(), isolate);
   VariableLookupResult lookup_result;
   int context_index = scope_info->ContextSlotIndex(desc, &lookup_result);
   if (context_index == -1 ||
@@ -1354,21 +1374,21 @@ Maybe<bool> CollectPrivateMembersFromReceiver(
       Nothing<bool>());
 
   if (IsJSFunction(*receiver)) {
-    Handle<JSFunction> func(JSFunction::cast(*receiver), isolate);
-    Handle<SharedFunctionInfo> shared(func->shared(), isolate);
+    Handle<JSFunction> func(Cast<JSFunction>(*receiver), isolate);
+    DirectHandle<SharedFunctionInfo> shared(func->shared(), isolate);
     if (shared->is_class_constructor() &&
         shared->has_static_private_methods_or_accessors()) {
-      Handle<Context> recevier_context(JSFunction::cast(*receiver)->context(),
-                                       isolate);
+      DirectHandle<Context> receiver_context(
+          Cast<JSFunction>(*receiver)->context(), isolate);
       CollectPrivateMethodsAndAccessorsFromContext(
-          isolate, recevier_context, desc, func, IsStaticFlag::kStatic,
+          isolate, receiver_context, desc, func, IsStaticFlag::kStatic,
           results);
     }
   }
 
   for (int i = 0; i < keys->length(); ++i) {
-    Handle<Object> obj_key(keys->get(i), isolate);
-    Handle<Symbol> symbol(Symbol::cast(*obj_key), isolate);
+    DirectHandle<Object> obj_key(keys->get(i), isolate);
+    Handle<Symbol> symbol(Cast<Symbol>(*obj_key), isolate);
     CHECK(symbol->is_private_name());
     Handle<Object> value;
     ASSIGN_RETURN_ON_EXCEPTION_VALUE(
@@ -1376,12 +1396,13 @@ Maybe<bool> CollectPrivateMembersFromReceiver(
         Nothing<bool>());
 
     if (symbol->is_private_brand()) {
-      Handle<Context> value_context(Context::cast(*value), isolate);
+      DirectHandle<Context> value_context(Cast<Context>(*value), isolate);
       CollectPrivateMethodsAndAccessorsFromContext(
           isolate, value_context, desc, symbol, IsStaticFlag::kNotStatic,
           results);
     } else {
-      Handle<String> symbol_desc(String::cast(symbol->description()), isolate);
+      DirectHandle<String> symbol_desc(Cast<String>(symbol->description()),
+                                       isolate);
       if (symbol_desc->Equals(*desc)) {
         results->push_back({
             PrivateMemberType::kPrivateField,
@@ -1435,14 +1456,14 @@ MaybeHandle<Object> Runtime::GetPrivateMember(Isolate* isolate,
     case PrivateMemberType::kPrivateAccessor: {
       // The accessors are collected from the contexts, so there is no need to
       // perform brand checks.
-      Handle<AccessorPair> pair = Handle<AccessorPair>::cast(result.value);
+      auto pair = Cast<AccessorPair>(result.value);
       if (IsNull(pair->getter())) {
         THROW_NEW_ERROR(
             isolate,
             NewError(MessageTemplate::kInvalidPrivateGetterAccess, desc));
       }
       DCHECK(IsJSFunction(pair->getter()));
-      Handle<JSFunction> getter(JSFunction::cast(pair->getter()), isolate);
+      Handle<JSFunction> getter(Cast<JSFunction>(pair->getter()), isolate);
       return Execution::Call(isolate, getter, receiver, 0, nullptr);
     }
   }
@@ -1459,8 +1480,7 @@ MaybeHandle<Object> Runtime::SetPrivateMember(Isolate* isolate,
 
   switch (result.type) {
     case PrivateMemberType::kPrivateField: {
-      Handle<Symbol> symbol =
-          Handle<Symbol>::cast(result.brand_or_field_symbol);
+      auto symbol = Cast<Symbol>(result.brand_or_field_symbol);
       return Object::SetProperty(isolate, receiver, symbol, value,
                                  StoreOrigin::kMaybeKeyed);
     }
@@ -1471,7 +1491,7 @@ MaybeHandle<Object> Runtime::SetPrivateMember(Isolate* isolate,
     case PrivateMemberType::kPrivateAccessor: {
       // The accessors are collected from the contexts, so there is no need to
       // perform brand checks.
-      Handle<AccessorPair> pair = Handle<AccessorPair>::cast(result.value);
+      auto pair = Cast<AccessorPair>(result.value);
       if (IsNull(pair->setter())) {
         THROW_NEW_ERROR(
             isolate,
@@ -1479,7 +1499,7 @@ MaybeHandle<Object> Runtime::SetPrivateMember(Isolate* isolate,
       }
       DCHECK(IsJSFunction(pair->setter()));
       Handle<Object> argv[] = {value};
-      Handle<JSFunction> setter(JSFunction::cast(pair->setter()), isolate);
+      Handle<JSFunction> setter(Cast<JSFunction>(pair->setter()), isolate);
       return Execution::Call(isolate, setter, receiver, arraysize(argv), argv);
     }
   }
@@ -1498,8 +1518,8 @@ RUNTIME_FUNCTION(Runtime_GetPrivateMember) {
                               desc, receiver));
   }
   RETURN_RESULT_OR_FAILURE(
-      isolate, Runtime::GetPrivateMember(
-                   isolate, Handle<JSReceiver>::cast(receiver), desc));
+      isolate,
+      Runtime::GetPrivateMember(isolate, Cast<JSReceiver>(receiver), desc));
 }
 
 RUNTIME_FUNCTION(Runtime_SetPrivateMember) {
@@ -1516,14 +1536,14 @@ RUNTIME_FUNCTION(Runtime_SetPrivateMember) {
   }
   Handle<Object> value = args.at<Object>(2);
   RETURN_RESULT_OR_FAILURE(
-      isolate, Runtime::SetPrivateMember(
-                   isolate, Handle<JSReceiver>::cast(receiver), desc, value));
+      isolate, Runtime::SetPrivateMember(isolate, Cast<JSReceiver>(receiver),
+                                         desc, value));
 }
 
 RUNTIME_FUNCTION(Runtime_LoadPrivateSetter) {
   HandleScope scope(isolate);
   DCHECK_EQ(args.length(), 1);
-  Handle<AccessorPair> pair = args.at<AccessorPair>(0);
+  DirectHandle<AccessorPair> pair = args.at<AccessorPair>(0);
   DCHECK(IsJSFunction(pair->setter()));
   return pair->setter();
 }
@@ -1531,7 +1551,7 @@ RUNTIME_FUNCTION(Runtime_LoadPrivateSetter) {
 RUNTIME_FUNCTION(Runtime_LoadPrivateGetter) {
   HandleScope scope(isolate);
   DCHECK_EQ(args.length(), 1);
-  Handle<AccessorPair> pair = args.at<AccessorPair>(0);
+  DirectHandle<AccessorPair> pair = args.at<AccessorPair>(0);
   DCHECK(IsJSFunction(pair->getter()));
   return pair->getter();
 }
@@ -1541,7 +1561,7 @@ RUNTIME_FUNCTION(Runtime_CreatePrivateAccessors) {
   DCHECK_EQ(args.length(), 2);
   DCHECK(IsNull(args[0]) || IsJSFunction(args[0]));
   DCHECK(IsNull(args[1]) || IsJSFunction(args[1]));
-  Handle<AccessorPair> pair = isolate->factory()->NewAccessorPair();
+  DirectHandle<AccessorPair> pair = isolate->factory()->NewAccessorPair();
   pair->SetComponents(args[0], args[1]);
   return *pair;
 }
@@ -1561,9 +1581,9 @@ RUNTIME_FUNCTION(Runtime_SwissTableAllocate) {
 RUNTIME_FUNCTION(Runtime_SwissTableAdd) {
   HandleScope scope(isolate);
   Handle<SwissNameDictionary> table = args.at<SwissNameDictionary>(0);
-  Handle<Name> key = args.at<Name>(1);
-  Handle<Object> value = args.at(2);
-  PropertyDetails details(Smi::cast(args[3]));
+  DirectHandle<Name> key = args.at<Name>(1);
+  DirectHandle<Object> value = args.at(2);
+  PropertyDetails details(Cast<Smi>(args[3]));
 
   DCHECK(IsUniqueName(*key));
 
@@ -1575,8 +1595,8 @@ RUNTIME_FUNCTION(Runtime_SwissTableAdd) {
 RUNTIME_FUNCTION(Runtime_SwissTableFindEntry) {
   HandleScope scope(isolate);
   DisallowGarbageCollection no_gc;
-  auto table = SwissNameDictionary::cast(args[0]);
-  Tagged<Name> key = Name::cast(args[1]);
+  auto table = Cast<SwissNameDictionary>(args[0]);
+  Tagged<Name> key = Cast<Name>(args[1]);
   InternalIndex index = table->FindEntry(isolate, key);
   return Smi::FromInt(index.is_found()
                           ? index.as_int()
@@ -1588,12 +1608,12 @@ RUNTIME_FUNCTION(Runtime_SwissTableFindEntry) {
 RUNTIME_FUNCTION(Runtime_SwissTableUpdate) {
   HandleScope scope(isolate);
   DisallowGarbageCollection no_gc;
-  auto table = SwissNameDictionary::cast(args[0]);
+  auto table = Cast<SwissNameDictionary>(args[0]);
   InternalIndex index(args.smi_value_at(1));
   Tagged<Object> value = args[2];
   table->ValueAtPut(index, value);
 
-  PropertyDetails details(Smi::cast(args[3]));
+  PropertyDetails details(Cast<Smi>(args[3]));
   table->DetailsAtPut(index, details);
 
   return ReadOnlyRoots(isolate).undefined_value();
@@ -1614,8 +1634,8 @@ RUNTIME_FUNCTION(Runtime_SwissTableDelete) {
 RUNTIME_FUNCTION(Runtime_SwissTableEquals) {
   HandleScope scope(isolate);
   DisallowGarbageCollection no_gc;
-  auto table = SwissNameDictionary::cast(args[0]);
-  auto other = SwissNameDictionary::cast(args[0]);
+  auto table = Cast<SwissNameDictionary>(args[0]);
+  auto other = Cast<SwissNameDictionary>(args[0]);
   return Smi::FromInt(table->EqualsForTesting(other));
 }
 
@@ -1624,7 +1644,7 @@ RUNTIME_FUNCTION(Runtime_SwissTableEquals) {
 RUNTIME_FUNCTION(Runtime_SwissTableElementsCount) {
   HandleScope scope(isolate);
   DisallowGarbageCollection no_gc;
-  auto table = SwissNameDictionary::cast(args[0]);
+  auto table = Cast<SwissNameDictionary>(args[0]);
   return Smi::FromInt(table->NumberOfElements());
 }
 
@@ -1633,7 +1653,7 @@ RUNTIME_FUNCTION(Runtime_SwissTableElementsCount) {
 RUNTIME_FUNCTION(Runtime_SwissTableKeyAt) {
   HandleScope scope(isolate);
   DisallowGarbageCollection no_gc;
-  auto table = SwissNameDictionary::cast(args[0]);
+  auto table = Cast<SwissNameDictionary>(args[0]);
   InternalIndex index(args.smi_value_at(1));
   return table->KeyAt(index);
 }
@@ -1643,7 +1663,7 @@ RUNTIME_FUNCTION(Runtime_SwissTableKeyAt) {
 RUNTIME_FUNCTION(Runtime_SwissTableValueAt) {
   HandleScope scope(isolate);
   DisallowGarbageCollection no_gc;
-  auto table = SwissNameDictionary::cast(args[0]);
+  auto table = Cast<SwissNameDictionary>(args[0]);
   InternalIndex index(args.smi_value_at(1));
   return table->ValueAt(index);
 }
@@ -1653,7 +1673,7 @@ RUNTIME_FUNCTION(Runtime_SwissTableValueAt) {
 RUNTIME_FUNCTION(Runtime_SwissTableDetailsAt) {
   HandleScope scope(isolate);
   DisallowGarbageCollection no_gc;
-  auto table = SwissNameDictionary::cast(args[0]);
+  auto table = Cast<SwissNameDictionary>(args[0]);
   InternalIndex index(args.smi_value_at(1));
   PropertyDetails d = table->DetailsAt(index);
   return d.AsSmi();

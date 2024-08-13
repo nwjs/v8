@@ -131,7 +131,9 @@
       'V8 Linux64 - sticky mark bits - debug builder': 'debug_x64_sticky_mark_bits',
       'V8 Linux64 css - debug builder': 'debug_x64_conservative_stack_scanning',
       'V8 Linux64 gcc - builder': 'release_x64_gcc',
+      'V8 Linux64 - jammy - gcc - builder': 'release_x64_gcc',
       'V8 Linux64 gcc - debug builder': 'debug_x64_gcc',
+      'V8 Linux64 - jammy - gcc - debug builder': 'debug_x64_gcc',
       'V8 Linux64 gcc light - debug builder': 'debug_x64_gcc',
       'V8 Fuchsia - builder': 'release_x64_fuchsia',
       'V8 Fuchsia - debug builder': 'debug_x64_fuchsia',
@@ -218,6 +220,7 @@
       'V8 Arm - builder': 'release_arm',
       'V8 Arm - debug builder': 'debug_arm',
       'V8 Android Arm - builder': 'release_android_arm',
+      'V8 Android Arm - verify deterministic - debug': 'debug_android_arm_verify_deterministic',
       'V8 Linux - arm - sim - builder': 'release_simulate_arm_gcmole',
       'V8 Linux - arm - sim - debug builder': 'debug_simulate_arm',
       'V8 Linux - arm - sim - lite - builder': 'release_simulate_arm_lite',
@@ -244,6 +247,7 @@
     },
     'tryserver.v8': {
       'v8_android_arm_compile_rel': 'release_android_arm',
+      'v8_android_arm_verify_deterministic_dbg': 'debug_android_arm_verify_deterministic',
       'v8_android_arm64_compile_dbg': 'debug_android_arm64',
       'v8_android_arm64_n5x_compile_rel': 'release_android_arm64',
       'v8_android_arm64_d8_compile_rel': 'release_android_arm64',
@@ -254,6 +258,7 @@
       'v8_linux_verify_csa_compile_rel': 'release_x86_verify_csa',
       'v8_linux_nodcheck_compile_rel': 'release_x86_minimal_symbols',
       'v8_linux_compile_dbg': 'debug_x86_trybot',
+      'v8_linux_full_compile_dbg': 'full_debug_x86',
       'v8_linux_noi18n_compile_dbg': 'debug_x86_no_i18n',
       'v8_linux_noi18n_compile_rel': 'release_x86_no_i18n_trybot',
       'v8_linux_gc_stress_compile_dbg': 'debug_x86_trybot',
@@ -279,8 +284,10 @@
       'v8_linux64_gc_stress_custom_snapshot_compile_dbg': 'debug_x64_trybot_custom',
       'v8_linux64_gc_stress_compile_dbg': 'debug_x64_trybot',
       'v8_linux64_gcc_compile_dbg': 'debug_x64_gcc',
+      'v8_linux64_jammy_gcc_compile_dbg': 'debug_x64_gcc',
       'v8_linux64_gcc_light_compile_dbg': 'debug_x64_gcc',
       'v8_linux64_gcc_compile_rel': 'release_x64_gcc',
+      'v8_linux64_jammy_gcc_compile_rel': 'release_x64_gcc',
       'v8_linux64_header_includes_dbg': 'debug_x64_header_includes',
       'v8_linux64_minor_mc_compile_dbg': 'debug_x64_trybot',
       'v8_linux64_fyi_compile_rel': 'release_x64_test_features_trybot',
@@ -352,6 +359,12 @@
       'v8_numfuzz_compile_rel': 'release_x64',
       'v8_numfuzz_compile_dbg': 'debug_x64',
       'v8_numfuzz_tsan_compile_rel': 'release_x64_tsan',
+
+      # PGO
+      'v8_linux_pgo_compile_rel' : 'builtins_profiling_x86',
+      'v8_linux64_pgo_compile_rel' : 'builtins_profiling_x64',
+      'v8_win_pgo_compile_rel' : 'builtins_profiling_x86',
+      'v8_win64_pgo_compile_rel' : 'builtins_profiling_x64',
     },
   },
 
@@ -494,6 +507,8 @@
       'release_bot', 'simulate_s390x'],
 
     # Debug configs for arm.
+    'debug_android_arm_verify_deterministic': [
+      'debug_bot', 'arm', 'android', 'minimal_symbols', 'v8_verify_deterministic'],
     'debug_android_arm64': [
       'debug_bot', 'arm64', 'android', 'minimal_symbols'],
     'debug_arm': [
