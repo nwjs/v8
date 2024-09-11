@@ -30,11 +30,12 @@ enum class DeoptFrameVisitMode {
 
 template <DeoptFrameVisitMode mode, typename T>
 using const_if_default =
-    std::conditional<mode == DeoptFrameVisitMode::kDefault, const T, T>::type;
+    std::conditional_t<mode == DeoptFrameVisitMode::kDefault, const T, T>;
 
 template <DeoptFrameVisitMode mode>
-using ValueNodeT = std::conditional<mode == DeoptFrameVisitMode::kDefault,
-                                    ValueNode*, ValueNode*&>::type;
+using ValueNodeT =
+    std::conditional_t<mode == DeoptFrameVisitMode::kDefault, ValueNode*,
+                       ValueNode*&>;
 
 template <DeoptFrameVisitMode mode, typename Function>
 void DeepForEachInputSingleFrameImpl(
@@ -115,7 +116,8 @@ void DeepForVirtualObject(VirtualObject* vobject,
                                      f);
         } else {
           f(alloc, input_location);
-          input_location += alloc->object()->InputLocationSizeNeeded() + 1;
+          input_location +=
+              alloc->object()->InputLocationSizeNeeded(virtual_objects) + 1;
         }
         break;
       }
@@ -151,7 +153,7 @@ void DeepForEachInputAndVirtualObject(
                                           virtual_objects, f);
       } else {
         f(alloc, input_location);
-        input_location += vobject->InputLocationSizeNeeded() + 1;
+        input_location += vobject->InputLocationSizeNeeded(virtual_objects) + 1;
       }
     } else {
       f(node, input_location);

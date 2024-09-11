@@ -578,7 +578,7 @@
                                               mode);                           \
   }                                                                            \
   bool holder::has_##name() const {                                            \
-    return !IsTrustedPointerFieldCleared(offset);                              \
+    return !IsTrustedPointerFieldEmpty(offset);                                \
   }                                                                            \
   void holder::clear_##name() { ClearTrustedPointerField(offset); }
 
@@ -608,7 +608,7 @@
     CONDITIONAL_PROTECTED_POINTER_WRITE_BARRIER(*this, offset, value, mode); \
   }                                                                          \
   bool holder::has_##name() const {                                          \
-    return !IsProtectedPointerFieldCleared(offset);                          \
+    return !IsProtectedPointerFieldEmpty(offset);                            \
   }                                                                          \
   void holder::clear_##name() { return ClearProtectedPointerField(offset); }
 
@@ -632,7 +632,7 @@
     CONDITIONAL_PROTECTED_POINTER_WRITE_BARRIER(*this, offset, value, mode); \
   }                                                                          \
   bool holder::has_##name(AcquireLoadTag tag) const {                        \
-    return !IsProtectedPointerFieldCleared(offset, tag);                     \
+    return !IsProtectedPointerFieldEmpty(offset, tag);                       \
   }                                                                          \
   void holder::clear_##name(ReleaseStoreTag tag) {                           \
     return ClearProtectedPointerField(offset, tag);                          \
@@ -741,6 +741,16 @@
     IndirectPointerWriteBarrier(                                             \
         object, Tagged(object)->RawIndirectPointerField(offset, tag), value, \
         UPDATE_WRITE_BARRIER);                                               \
+  } while (false)
+#endif
+
+#ifdef V8_DISABLE_WRITE_BARRIERS
+#define JS_DISPATCH_HANDLE_WRITE_BARRIER(object, handle)
+#else
+#define JS_DISPATCH_HANDLE_WRITE_BARRIER(object, handle)                \
+  do {                                                                  \
+    DCHECK_NOT_NULL(GetHeapFromWritableObject(object));                 \
+    JSDispatchHandleWriteBarrier(object, handle, UPDATE_WRITE_BARRIER); \
   } while (false)
 #endif
 

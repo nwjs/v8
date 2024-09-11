@@ -5,6 +5,8 @@
 #ifndef V8_OBJECTS_MAP_H_
 #define V8_OBJECTS_MAP_H_
 
+#include <optional>
+
 #include "include/v8-memory-span.h"
 #include "src/base/bit-field.h"
 #include "src/common/globals.h"
@@ -22,8 +24,7 @@
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
 
-namespace v8 {
-namespace internal {
+namespace v8::internal {
 
 class WasmTypeInfo;
 
@@ -68,6 +69,7 @@ enum InstanceType : uint16_t;
   V(JSFunction)                      \
   V(JSObject)                        \
   V(JSObjectFast)                    \
+  V(JSRegExp)                        \
   V(JSSynchronizationPrimitive)      \
   V(JSTypedArray)                    \
   V(JSWeakCollection)                \
@@ -79,6 +81,8 @@ enum InstanceType : uint16_t;
   V(PropertyArray)                   \
   V(PropertyCell)                    \
   V(PrototypeInfo)                   \
+  V(RegExpBoilerplateDescription)    \
+  V(RegExpDataWrapper)               \
   V(SharedFunctionInfo)              \
   V(ShortcutCandidate)               \
   V(SlicedString)                    \
@@ -249,7 +253,7 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
   static const int kNoConstructorFunctionIndex = 0;
   inline int GetConstructorFunctionIndex() const;
   inline void SetConstructorFunctionIndex(int value);
-  static base::Optional<Tagged<JSFunction>> GetConstructorFunction(
+  static std::optional<Tagged<JSFunction>> GetConstructorFunction(
       Tagged<Map> map, Tagged<Context> native_context);
 
   // Retrieve interceptors.
@@ -766,10 +770,10 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
   static Handle<Map> TransitionElementsTo(Isolate* isolate, Handle<Map> map,
                                           ElementsKind to_kind);
 
-  static base::Optional<Tagged<Map>> TryAsElementsKind(Isolate* isolate,
-                                                       DirectHandle<Map> map,
-                                                       ElementsKind kind,
-                                                       ConcurrencyMode cmode);
+  static std::optional<Tagged<Map>> TryAsElementsKind(Isolate* isolate,
+                                                      DirectHandle<Map> map,
+                                                      ElementsKind kind,
+                                                      ConcurrencyMode cmode);
   V8_EXPORT_PRIVATE static Handle<Map> AsElementsKind(Isolate* isolate,
                                                       DirectHandle<Map> map,
                                                       ElementsKind kind);
@@ -855,7 +859,7 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
 
   inline bool CanTransition() const;
 
-  static constexpr base::Optional<RootIndex> TryGetMapRootIdxFor(
+  static constexpr std::optional<RootIndex> TryGetMapRootIdxFor(
       InstanceType type) {
     switch (type) {
 #define MAKE_CASE(TYPE, Name, name) \
@@ -983,7 +987,7 @@ class Map : public TorqueGeneratedMap<Map, HeapObject> {
   static Handle<Map> RawCopy(Isolate* isolate, Handle<Map> map,
                              int instance_size, int inobject_properties);
   static Handle<Map> ShareDescriptor(Isolate* isolate, Handle<Map> map,
-                                     Handle<DescriptorArray> descriptors,
+                                     DirectHandle<DescriptorArray> descriptors,
                                      Descriptor* descriptor);
   V8_EXPORT_PRIVATE static Handle<Map> AddMissingTransitions(
       Isolate* isolate, Handle<Map> map,
@@ -1077,8 +1081,7 @@ inline bool IsPrimitiveMap(Tagged<Map> map);
 inline bool IsSpecialReceiverMap(Tagged<Map> map);
 inline bool IsCustomElementsReceiverMap(Tagged<Map> map);
 
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal
 
 #include "src/objects/object-macros-undef.h"
 
