@@ -11,6 +11,7 @@
 #include "src/base/logging.h"
 #include "src/codegen/reloc-info.h"
 #include "src/common/globals.h"
+#include "src/heap/heap-layout-inl.h"
 #include "src/ic/handler-configuration.h"
 #include "src/objects/arguments-inl.h"
 #include "src/objects/bigint.h"
@@ -1070,8 +1071,7 @@ class WasmTableObject::BodyDescriptor final : public BodyDescriptorBase {
     IterateTrustedPointer(obj, kTrustedDataOffset, v,
                           IndirectPointerMode::kStrong,
                           kWasmTrustedInstanceDataIndirectPointerTag);
-    IterateJSObjectBodyImpl(map, obj, kIsTable64Offset + kTaggedSize,
-                            object_size, v);
+    IterateJSObjectBodyImpl(map, obj, kHeaderSize, object_size, v);
   }
 
   static inline int SizeOf(Tagged<Map> map, Tagged<HeapObject> object) {
@@ -1185,6 +1185,20 @@ class WasmNull::BodyDescriptor : public DataOnlyBodyDescriptor {
   }
 };
 
+class WasmMemoryObject::BodyDescriptor final : public BodyDescriptorBase {
+ public:
+  template <typename ObjectVisitor>
+  static inline void IterateBody(Tagged<Map> map, Tagged<HeapObject> obj,
+                                 int object_size, ObjectVisitor* v) {
+    IteratePointers(obj, JSObject::BodyDescriptor::kStartOffset,
+                    kEndOfStrongFieldsOffset, v);
+    IterateJSObjectBodyImpl(map, obj, kHeaderSize, object_size, v);
+  }
+
+  static inline int SizeOf(Tagged<Map> map, Tagged<HeapObject> object) {
+    return map->instance_size();
+  }
+};
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 class ExternalString::BodyDescriptor final : public BodyDescriptorBase {
@@ -1477,6 +1491,8 @@ auto BodyDescriptorApply(InstanceType type, Args&&... args) {
       return CALL_APPLY(WasmSuspenderObject);
     case WASM_SUSPENDING_OBJECT_TYPE:
       return CALL_APPLY(WasmSuspendingObject);
+    case WASM_MEMORY_OBJECT_TYPE:
+      return CALL_APPLY(WasmMemoryObject);
 #endif  // V8_ENABLE_WEBASSEMBLY
     case JS_ARGUMENTS_OBJECT_TYPE:
     case JS_ARRAY_ITERATOR_PROTOTYPE_TYPE:
@@ -1553,7 +1569,6 @@ auto BodyDescriptorApply(InstanceType type, Args&&... args) {
     case JS_SEGMENTS_TYPE:
 #endif  // V8_INTL_SUPPORT
 #if V8_ENABLE_WEBASSEMBLY
-    case WASM_MEMORY_OBJECT_TYPE:
     case WASM_MODULE_OBJECT_TYPE:
     case WASM_TAG_OBJECT_TYPE:
     case WASM_VALUE_OBJECT_TYPE:
@@ -1733,7 +1748,7 @@ struct CallIterateBody {
       // Note: This would normally be just !IsTrustedObject(obj), however we
       // might see trusted objects here before they've been migrated to trusted
       // space, hence the second condition.
-      DCHECK(!IsTrustedObject(obj) || !IsTrustedSpaceObject(obj));
+      DCHECK(!IsTrustedObject(obj) || !HeapLayout::InTrustedSpace(obj));
     }
     BodyDescriptor::IterateBody(map, obj, object_size, v);
   }

@@ -4,6 +4,7 @@
 
 #include "src/heap/heap-write-barrier.h"
 
+#include "src/heap/heap-layout-inl.h"
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/heap/heap.h"
 #include "src/heap/marking-barrier-inl.h"
@@ -11,24 +12,16 @@
 #include "src/heap/memory-chunk.h"
 #include "src/heap/remembered-set.h"
 #include "src/objects/code-inl.h"
-#include "src/objects/descriptor-array.h"
-#include "src/objects/js-objects.h"
-#include "src/objects/maybe-object.h"
 #include "src/objects/slots-inl.h"
 #include "src/sandbox/js-dispatch-table-inl.h"
 
 namespace v8::internal {
+
+class DescriptorArray;
+
 namespace {
 thread_local MarkingBarrier* current_marking_barrier = nullptr;
 }  // namespace
-
-bool HeapObjectInYoungGenerationSticky(MemoryChunk* chunk,
-                                       Tagged<HeapObject> object) {
-  DCHECK(v8_flags.sticky_mark_bits);
-  return !chunk->IsOnlyOldOrMajorMarkingOn() &&
-         !MarkingBitmap::MarkBitFromAddress(object.address())
-              .template Get<AccessMode::ATOMIC>();
-}
 
 MarkingBarrier* WriteBarrier::CurrentMarkingBarrier(
     Tagged<HeapObject> verification_candidate) {
@@ -36,7 +29,7 @@ MarkingBarrier* WriteBarrier::CurrentMarkingBarrier(
   DCHECK_NOT_NULL(marking_barrier);
 #if DEBUG
   if (!verification_candidate.is_null() &&
-      !InAnySharedSpace(verification_candidate)) {
+      !HeapLayout::InAnySharedSpace(verification_candidate)) {
     Heap* host_heap =
         MutablePageMetadata::FromHeapObject(verification_candidate)->heap();
     LocalHeap* local_heap = LocalHeap::Current();
@@ -185,7 +178,7 @@ int WriteBarrier::MarkingFromCode(Address raw_host, Address raw_slot) {
   // current isolate is enabled. However, we might still reach objects in the
   // shared space but only from the shared space isolate (= the main isolate).
   MarkingBarrier* barrier = CurrentMarkingBarrier(host);
-  DCHECK_IMPLIES(InWritableSharedSpace(host),
+  DCHECK_IMPLIES(HeapLayout::InWritableSharedSpace(host),
                  barrier->heap()->isolate()->is_shared_space_isolate());
   barrier->AssertMarkingIsActivated();
 #endif  // DEBUG
@@ -204,7 +197,7 @@ int WriteBarrier::IndirectPointerMarkingFromCode(Address raw_host,
   IndirectPointerSlot slot(raw_slot, tag);
 
 #if DEBUG
-  DCHECK(!InWritableSharedSpace(host));
+  DCHECK(!HeapLayout::InWritableSharedSpace(host));
   MarkingBarrier* barrier = CurrentMarkingBarrier(host);
   DCHECK(barrier->heap()->isolate()->isolate_data()->is_marking());
 
@@ -222,7 +215,7 @@ int WriteBarrier::SharedMarkingFromCode(Address raw_host, Address raw_slot) {
   Address raw_value = (*slot).ptr();
   Tagged<MaybeObject> value(raw_value);
 
-  DCHECK(InWritableSharedSpace(host));
+  DCHECK(HeapLayout::InWritableSharedSpace(host));
 
 #if DEBUG
   Heap* heap = MutablePageMetadata::FromHeapObject(host)->heap();
@@ -246,7 +239,7 @@ int WriteBarrier::SharedMarkingFromCode(Address raw_host, Address raw_slot) {
 int WriteBarrier::SharedFromCode(Address raw_host, Address raw_slot) {
   Tagged<HeapObject> host = Cast<HeapObject>(Tagged<Object>(raw_host));
 
-  if (!InWritableSharedSpace(host)) {
+  if (!HeapLayout::InWritableSharedSpace(host)) {
     SharedHeapBarrierSlow(host, raw_slot);
   }
 
@@ -296,7 +289,7 @@ bool WriteBarrier::PageFlagsAreConsistent(Tagged<HeapObject> object) {
 void WriteBarrier::GenerationalBarrierForCodeSlow(
     Tagged<InstructionStream> host, RelocInfo* rinfo,
     Tagged<HeapObject> value) {
-  DCHECK(Heap::InYoungGeneration(value));
+  DCHECK(HeapLayout::InYoungGeneration(value));
   const MarkCompactCollector::RecordRelocSlotInfo info =
       MarkCompactCollector::ProcessRelocInfo(host, rinfo, value);
 
@@ -308,14 +301,14 @@ void WriteBarrier::GenerationalBarrierForCodeSlow(
 // static
 void WriteBarrier::CombinedGenerationalAndSharedEphemeronBarrierSlow(
     Tagged<EphemeronHashTable> table, Address slot, Tagged<HeapObject> value) {
-  if (HeapObjectInYoungGeneration(value)) {
+  if (HeapLayout::InYoungGeneration(value)) {
     MutablePageMetadata* table_chunk =
         MutablePageMetadata::FromHeapObject(table);
     table_chunk->heap()->ephemeron_remembered_set()->RecordEphemeronKeyWrite(
         table, slot);
   } else {
     DCHECK(MemoryChunk::FromHeapObject(value)->InWritableSharedSpace());
-    DCHECK(!InWritableSharedSpace(table));
+    DCHECK(!HeapLayout::InWritableSharedSpace(table));
     SharedHeapBarrierSlow(table, slot);
   }
 }
@@ -323,12 +316,12 @@ void WriteBarrier::CombinedGenerationalAndSharedEphemeronBarrierSlow(
 // static
 void WriteBarrier::CombinedGenerationalAndSharedBarrierSlow(
     Tagged<HeapObject> object, Address slot, Tagged<HeapObject> value) {
-  if (HeapObjectInYoungGeneration(value)) {
+  if (HeapLayout::InYoungGeneration(value)) {
     GenerationalBarrierSlow(object, slot, value);
 
   } else {
     DCHECK(MemoryChunk::FromHeapObject(value)->InWritableSharedSpace());
-    DCHECK(!InWritableSharedSpace(object));
+    DCHECK(!HeapLayout::InWritableSharedSpace(object));
     SharedHeapBarrierSlow(object, slot);
   }
 }
@@ -403,8 +396,8 @@ void ForRangeImpl(Heap* heap, MemoryChunk* source_chunk,
         typename TSlot::TObject value = *slot;
         Tagged<HeapObject> value_heap_object;
         if (value.GetHeapObject(&value_heap_object)) {
-          CHECK(!Heap::InYoungGeneration(value_heap_object));
-          CHECK(!InWritableSharedSpace(value_heap_object));
+          CHECK(!HeapLayout::InYoungGeneration(value_heap_object));
+          CHECK(!HeapLayout::InWritableSharedSpace(value_heap_object));
         }
 #endif  // DEBUG
         continue;
@@ -417,10 +410,10 @@ void ForRangeImpl(Heap* heap, MemoryChunk* source_chunk,
     if (!value.GetHeapObject(&value_heap_object)) continue;
 
     if (kModeMask & kDoGenerationalOrShared) {
-      if (Heap::InYoungGeneration(value_heap_object)) {
+      if (HeapLayout::InYoungGeneration(value_heap_object)) {
         RememberedSet<OLD_TO_NEW>::Insert<AccessMode::NON_ATOMIC>(
             source_page_metadata, source_chunk->Offset(slot.address()));
-      } else if (InWritableSharedSpace(value_heap_object)) {
+      } else if (HeapLayout::InWritableSharedSpace(value_heap_object)) {
         RememberedSet<OLD_TO_SHARED>::Insert<AccessMode::ATOMIC>(
             source_page_metadata, source_chunk->Offset(slot.address()));
       } else if (kModeMask == kDoGenerationalOrShared) {
@@ -458,7 +451,7 @@ void WriteBarrier::ForRange(Heap* heap, Tagged<HeapObject> object,
   MemoryChunk* source_chunk = MemoryChunk::FromHeapObject(object);
   base::Flags<RangeWriteBarrierMode> mode;
 
-  if (!HeapObjectInYoungGeneration(object) &&
+  if (!HeapLayout::InYoungGeneration(object) &&
       !source_chunk->InWritableSharedSpace()) {
     mode |= kDoGenerationalOrShared;
   }

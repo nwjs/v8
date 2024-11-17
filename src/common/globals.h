@@ -52,7 +52,7 @@ namespace internal {
 #if (V8_TARGET_ARCH_MIPS64 && !V8_HOST_ARCH_MIPS64)
 #define USE_SIMULATOR 1
 #endif
-#if (V8_TARGET_ARCH_S390 && !V8_HOST_ARCH_S390)
+#if (V8_TARGET_ARCH_S390X && !V8_HOST_ARCH_S390X)
 #define USE_SIMULATOR 1
 #endif
 #if (V8_TARGET_ARCH_RISCV64 && !V8_HOST_ARCH_RISCV64)
@@ -116,10 +116,7 @@ namespace internal {
 #define COMPRESS_POINTERS_IN_MULTIPLE_CAGES_BOOL false
 #endif
 
-#if defined(V8_SHARED_RO_HEAP) &&                     \
-    (!defined(V8_COMPRESS_POINTERS) ||                \
-     defined(V8_COMPRESS_POINTERS_IN_SHARED_CAGE)) && \
-    !defined(V8_DISABLE_WRITE_BARRIERS)
+#if defined(V8_SHARED_RO_HEAP) && !defined(V8_DISABLE_WRITE_BARRIERS)
 #define V8_CAN_CREATE_SHARED_HEAP_BOOL true
 #else
 #define V8_CAN_CREATE_SHARED_HEAP_BOOL false
@@ -153,6 +150,12 @@ namespace internal {
 #define ENABLE_CONTROL_FLOW_INTEGRITY_BOOL true
 #else
 #define ENABLE_CONTROL_FLOW_INTEGRITY_BOOL false
+#endif
+
+#ifdef V8_ENABLE_WASM_CODE_POINTER_TABLE
+#define V8_ENABLE_WASM_CODE_POINTER_TABLE_BOOL true
+#else
+#define V8_ENABLE_WASM_CODE_POINTER_TABLE_BOOL false
 #endif
 
 #if V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_ARM64
@@ -601,7 +604,7 @@ constexpr int kEmbedderDataSlotSizeInTaggedSlots =
     kEmbedderDataSlotSize / kTaggedSize;
 static_assert(kEmbedderDataSlotSize >= kSystemPointerSize);
 
-constexpr int kExternalAllocationSoftLimit =
+constexpr size_t kExternalAllocationSoftLimit =
     internal::Internals::kExternalAllocationSoftLimit;
 
 // Maximum object size that gets allocated into regular pages. Objects larger
@@ -2605,6 +2608,10 @@ constexpr int kSwissNameDictionaryInitialCapacity = 4;
 constexpr int kSmallOrderedHashSetMinCapacity = 4;
 constexpr int kSmallOrderedHashMapMinCapacity = 4;
 
+enum class AdaptArguments { kYes, kNo };
+constexpr AdaptArguments kAdapt = AdaptArguments::kYes;
+constexpr AdaptArguments kDontAdapt = AdaptArguments::kNo;
+
 constexpr int kJSArgcReceiverSlots = 1;
 constexpr uint16_t kDontAdaptArgumentsSentinel = 0;
 
@@ -2699,6 +2706,12 @@ enum class StringTransitionStrategy {
   // The string is already transitioned to the desired representation.
   kAlreadyTransitioned
 };
+
+#ifdef V8_ENABLE_WASM_CODE_POINTER_TABLE
+using WasmCodePointer = uint32_t;
+#else
+using WasmCodePointer = Address;
+#endif
 
 }  // namespace internal
 

@@ -801,7 +801,6 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
     case Builtin::kStringPrototypeIsWellFormed:
     case Builtin::kStringPrototypeItalics:
     case Builtin::kStringPrototypeLastIndexOf:
-    case Builtin::kStringPrototypeLocaleCompare:
     case Builtin::kStringPrototypeLink:
     case Builtin::kStringPrototypeMatch:
     case Builtin::kStringPrototypeMatchAll:
@@ -827,10 +826,12 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
     case Builtin::kStringPrototypeToLocaleUpperCase:
 #ifdef V8_INTL_SUPPORT
     case Builtin::kStringToLowerCaseIntl:
+    case Builtin::kStringPrototypeLocaleCompareIntl:
     case Builtin::kStringPrototypeToLowerCaseIntl:
     case Builtin::kStringPrototypeToUpperCaseIntl:
     case Builtin::kStringPrototypeNormalizeIntl:
 #else
+    case Builtin::kStringPrototypeLocaleCompare:
     case Builtin::kStringPrototypeToLowerCase:
     case Builtin::kStringPrototypeToUpperCase:
     case Builtin::kStringPrototypeNormalize:
@@ -1138,7 +1139,12 @@ static bool TransitivelyCalledBuiltinHasNoSideEffect(Builtin caller,
       // Transitively called Builtins:
     case Builtin::kAbort:
     case Builtin::kAbortCSADcheck:
-    case Builtin::kAdaptorWithBuiltinExitFrame:
+    case Builtin::kAdaptorWithBuiltinExitFrame0:
+    case Builtin::kAdaptorWithBuiltinExitFrame1:
+    case Builtin::kAdaptorWithBuiltinExitFrame2:
+    case Builtin::kAdaptorWithBuiltinExitFrame3:
+    case Builtin::kAdaptorWithBuiltinExitFrame4:
+    case Builtin::kAdaptorWithBuiltinExitFrame5:
     case Builtin::kArrayConstructorImpl:
     case Builtin::kArrayEveryLoopContinuation:
     case Builtin::kArrayFilterLoopContinuation:

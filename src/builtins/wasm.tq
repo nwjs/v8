@@ -76,7 +76,7 @@ extern runtime WasmStringViewWtf8Slice(Context, ByteArray, Number, Number):
 extern runtime WasmStringFromCodePoint(Context, Number): String;
 extern runtime WasmStringHash(NoContext, String): Smi;
 extern runtime WasmSubstring(Context, String, Smi, Smi): String;
-extern runtime WasmJSToWasmObject(Context, JSAny, Smi, Smi): JSAny;
+extern runtime WasmJSToWasmObject(Context, JSAny, Smi): JSAny;
 extern runtime WasmLiftoffDeoptFinish(NoContext, WasmTrustedInstanceData):
     Undefined;
 
@@ -720,7 +720,7 @@ macro UpdateCallRefOrIndirectIC(
 // This is the return type of "CallRefIC" and "CallIndirectIC". The type is not
 // used anywhere else; Liftoff uses the two returned values directly.
 struct TargetAndImplicitArg {
-  target: RawPtr;
+  target: WasmCodePointer;
   implicit_arg: WasmTrustedInstanceData|WasmImportData;
 }
 
@@ -746,9 +746,10 @@ builtin CallRefIC(
 }
 
 builtin CallIndirectIC(
-    vector: FixedArray, vectorIndex: int32, target: RawPtr,
+    vector: FixedArray, vectorIndex: int32, target: WasmCodePointer,
     implicitArg: WasmTrustedInstanceData|WasmImportData): TargetAndImplicitArg {
-  const truncatedTarget = SmiTag(Signed(Unsigned(target) & kSmiMaxValue));
+  const truncatedTarget =
+      SmiTag(Signed(Convert<uintptr>(target) & kSmiMaxValue));
   UpdateCallRefOrIndirectIC(
       vector, Convert<intptr>(vectorIndex), truncatedTarget);
 
@@ -1524,7 +1525,7 @@ builtin WasmAnyConvertExtern(externObject: JSAny): JSAny {
   const context = LoadContextFromInstanceData(trustedData);
 
   tail runtime::WasmJSToWasmObject(
-      context, externObject, SmiConstant(kAnyType), SmiConstant(0));
+      context, externObject, SmiConstant(kAnyType));
 }
 
 extern macro CallOrConstructBuiltinsAssembler::GetCompatibleReceiver(

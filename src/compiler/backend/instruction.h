@@ -1074,6 +1074,16 @@ class V8_EXPORT_PRIVATE Instruction final {
     }
   }
 
+  // For JS call instructions, computes the index of the argument count input.
+  size_t JSCallArgumentCountInputIndex() const {
+    // Keep in sync with instruction-selector.cc where the inputs are assembled.
+    if (HasCallDescriptorFlag(CallDescriptor::kHasExceptionHandler)) {
+      return InputCount() - 2;
+    } else {
+      return InputCount() - 1;
+    }
+  }
+
   enum GapPosition {
     START,
     END,
@@ -1578,7 +1588,7 @@ class JSToWasmFrameStateDescriptor : public FrameStateDescriptor {
                                size_t stack_count,
                                MaybeHandle<SharedFunctionInfo> shared_info,
                                FrameStateDescriptor* outer_state,
-                               const wasm::FunctionSig* wasm_signature);
+                               const wasm::CanonicalSig* wasm_signature);
 
   std::optional<wasm::ValueKind> return_kind() const { return return_kind_; }
 

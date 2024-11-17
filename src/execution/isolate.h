@@ -645,7 +645,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // for legacy API reasons.
   static void Delete(Isolate* isolate);
 
-  void SetUpFromReadOnlyArtifacts(std::shared_ptr<ReadOnlyArtifacts> artifacts,
+  void SetUpFromReadOnlyArtifacts(ReadOnlyArtifacts* artifacts,
                                   ReadOnlyHeap* ro_heap);
   void set_read_only_heap(ReadOnlyHeap* ro_heap) { read_only_heap_ = ro_heap; }
 
@@ -661,6 +661,9 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   // Returns the isolate inside which the current thread is running.
   V8_INLINE static Isolate* Current();
+
+  // Returns the isolate inside which the current thread is running.
+  static Isolate* CurrentMaybeBackground();
 
   inline bool IsCurrent() const;
 
@@ -756,7 +759,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   }
 
   ReadOnlyArtifacts* read_only_artifacts() const {
-    ReadOnlyArtifacts* artifacts = artifacts_.get();
+    ReadOnlyArtifacts* artifacts = isolate_group()->read_only_artifacts();
     DCHECK_IMPLIES(ReadOnlyHeap::IsReadOnlySpaceShared(), artifacts != nullptr);
     return artifacts;
   }
@@ -815,7 +818,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   bool IsSharedArrayBufferConstructorEnabled(Handle<NativeContext> context);
 
   bool IsWasmStringRefEnabled(Handle<NativeContext> context);
-  bool IsWasmInliningEnabled(DirectHandle<NativeContext> context);
   bool IsWasmImportedStringsEnabled(Handle<NativeContext> context);
   // Has the JSPI flag been requested?
   // Used only during initialization of contexts.
@@ -982,12 +984,12 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   V8_NOINLINE void PushParamsAndContinue(
       void* ptr1 = nullptr, void* ptr2 = nullptr, void* ptr3 = nullptr,
       void* ptr4 = nullptr, void* ptr5 = nullptr, void* ptr6 = nullptr);
-  Handle<FixedArray> CaptureDetailedStackTrace(
+  Handle<StackTraceInfo> CaptureDetailedStackTrace(
       int limit, StackTrace::StackTraceOptions options);
   MaybeHandle<JSObject> CaptureAndSetErrorStack(Handle<JSObject> error_object,
                                                 FrameSkipMode mode,
                                                 Handle<Object> caller);
-  Handle<FixedArray> GetDetailedStackTrace(Handle<JSReceiver> error_object);
+  Handle<StackTraceInfo> GetDetailedStackTrace(Handle<JSReceiver> error_object);
   Handle<FixedArray> GetSimpleStackTrace(Handle<JSReceiver> error_object);
   // Walks the JS stack to find the first frame with a script name or
   // source URL. The inspected frames are the same as for the detailed stack
@@ -1035,6 +1037,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   void OnPromiseThen(DirectHandle<JSPromise> promise);
   void OnPromiseBefore(Handle<JSPromise> promise);
   void OnPromiseAfter(Handle<JSPromise> promise);
+  void OnStackTraceCaptured(Handle<StackTraceInfo> stack_trace);
   void OnTerminationDuringRunMicrotasks();
 
   // Re-throw an exception.  This involves no error reporting since error
@@ -1923,8 +1926,11 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   void SetHostImportModuleDynamicallyCallback(
       HostImportModuleDynamicallyCallback callback);
+  void SetHostImportModuleWithPhaseDynamicallyCallback(
+      HostImportModuleWithPhaseDynamicallyCallback callback);
   MaybeHandle<JSPromise> RunHostImportModuleDynamicallyCallback(
       MaybeHandle<Script> maybe_referrer, Handle<Object> specifier,
+      ModuleImportPhase phase,
       MaybeHandle<Object> maybe_import_options_argument);
 
   void SetHostInitializeImportMetaObjectCallback(
@@ -2145,6 +2151,23 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   Address trusted_pointer_table_base_address() const {
     return isolate_data_.trusted_pointer_table_.base_address();
   }
+
+  TrustedPointerTable& shared_trusted_pointer_table() {
+    return *isolate_data_.shared_trusted_pointer_table_;
+  }
+
+  const TrustedPointerTable& shared_trusted_pointer_table() const {
+    return *isolate_data_.shared_trusted_pointer_table_;
+  }
+
+  TrustedPointerTable::Space* shared_trusted_pointer_space() {
+    return shared_trusted_pointer_space_;
+  }
+
+  Address shared_trusted_pointer_table_base_address() {
+    return reinterpret_cast<Address>(
+        &isolate_data_.shared_trusted_pointer_table_);
+  }
 #endif  // V8_ENABLE_SANDBOX
 
   Address continuation_preserved_embedder_data_address() {
@@ -2342,8 +2365,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     EntryStackItem* previous_item;
   };
 
-  static Isolate* process_wide_shared_space_isolate_;
-
   void Deinit();
 
   static void SetIsolateThreadLocals(Isolate* isolate,
@@ -2403,7 +2424,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   IsolateGroup* isolate_group_;
   Heap heap_;
   ReadOnlyHeap* read_only_heap_ = nullptr;
-  std::shared_ptr<ReadOnlyArtifacts> artifacts_;
 
   // These are guaranteed empty when !OwnsStringTables().
   std::unique_ptr<StringTable> string_table_;
@@ -2470,6 +2490,8 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   PromiseHook promise_hook_ = nullptr;
   HostImportModuleDynamicallyCallback host_import_module_dynamically_callback_ =
       nullptr;
+  HostImportModuleWithPhaseDynamicallyCallback
+      host_import_module_with_phase_dynamically_callback_ = nullptr;
   std::atomic<debug::CoverageMode> code_coverage_mode_{
       debug::CoverageMode::kBestEffort};
 
@@ -2724,6 +2746,12 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // table.
   ExternalPointerTable::Space* shared_external_pointer_space_ = nullptr;
 #endif  // V8_COMPRESS_POINTERS
+
+#ifdef V8_ENABLE_SANDBOX
+  // Stores the trusted pointer table space for the shared trusted pointer
+  // table.
+  TrustedPointerTable::Space* shared_trusted_pointer_space_ = nullptr;
+#endif  // V8_ENABLE_SANDBOX
 
   // List to manage the lifetime of the WaiterQueueNodes used to track async
   // waiters for JSSynchronizationPrimitives.

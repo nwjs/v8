@@ -242,7 +242,7 @@ bool RelocInfo::OffHeapTargetIsCodedSpecially() {
     defined(V8_TARGET_ARCH_X64)
   return false;
 #elif defined(V8_TARGET_ARCH_IA32) || defined(V8_TARGET_ARCH_MIPS64) ||   \
-    defined(V8_TARGET_ARCH_PPC64) || defined(V8_TARGET_ARCH_S390) ||      \
+    defined(V8_TARGET_ARCH_PPC64) || defined(V8_TARGET_ARCH_S390X) ||     \
     defined(V8_TARGET_ARCH_RISCV64) || defined(V8_TARGET_ARCH_LOONG64) || \
     defined(V8_TARGET_ARCH_RISCV32)
   return true;
@@ -370,6 +370,8 @@ const char* RelocInfo::RelocModeName(RelocInfo::Mode rmode) {
       return "wasm stub call";
     case WASM_CANONICAL_SIG_ID:
       return "wasm canonical signature id";
+    case WASM_INDIRECT_CALL_TARGET:
+      return "wasm indirect call target";
     case NUMBER_OF_MODES:
     case PC_JUMP:
       UNREACHABLE();
@@ -480,6 +482,7 @@ void RelocInfo::Verify(Isolate* isolate) {
     case WASM_CALL:
     case NO_INFO:
     case WASM_CANONICAL_SIG_ID:
+    case WASM_INDIRECT_CALL_TARGET:
       break;
     case NUMBER_OF_MODES:
     case PC_JUMP:

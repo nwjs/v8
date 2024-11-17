@@ -322,6 +322,14 @@ ExternalReference ExternalReference::trusted_pointer_table_base_address(
   return ExternalReference(isolate->trusted_pointer_table_base_address());
 }
 
+ExternalReference ExternalReference::shared_trusted_pointer_table_base_address(
+    Isolate* isolate) {
+  // TODO(saelo): maybe the external pointer table external references should
+  // also directly return the table base address?
+  return ExternalReference(
+      isolate->shared_trusted_pointer_table_base_address());
+}
+
 ExternalReference ExternalReference::code_pointer_table_address() {
   // TODO(saelo): maybe rename to code_pointer_table_base_address?
   return ExternalReference(GetProcessWideCodePointerTable()->base_address());
@@ -648,6 +656,8 @@ FUNCTION_REFERENCE(wasm_atomic_notify, futex_emulation_wake)
 void WasmSignatureCheckFail(Address raw_internal_function,
                             uintptr_t expected_hash) {
   // WasmInternalFunction::signature_hash doesn't exist in non-sandbox builds.
+  // TODO(saelo): Consider using Abort instead, as we do for JavaScript
+  // signature mismatches (See AbortReason::kJSSignatureMismatch).
 #if V8_ENABLE_SANDBOX
   Tagged<WasmInternalFunction> internal_function =
       Cast<WasmInternalFunction>(Tagged<Object>(raw_internal_function));
@@ -1019,7 +1029,7 @@ ExternalReference ExternalReference::invoke_accessor_getter_callback() {
 #define re_stack_check_func RegExpMacroAssemblerMIPS::CheckStackGuardState
 #elif V8_TARGET_ARCH_LOONG64
 #define re_stack_check_func RegExpMacroAssemblerLOONG64::CheckStackGuardState
-#elif V8_TARGET_ARCH_S390
+#elif V8_TARGET_ARCH_S390X
 #define re_stack_check_func RegExpMacroAssemblerS390::CheckStackGuardState
 #elif V8_TARGET_ARCH_RISCV32 || V8_TARGET_ARCH_RISCV64
 #define re_stack_check_func RegExpMacroAssemblerRISCV::CheckStackGuardState

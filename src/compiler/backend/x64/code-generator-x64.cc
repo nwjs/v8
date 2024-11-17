@@ -1561,7 +1561,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ Assert(equal, AbortReason::kWrongFunctionContext);
       }
       static_assert(kJavaScriptCallCodeStartRegister == rcx, "ABI mismatch");
-      __ CallJSFunction(func);
+      uint32_t num_arguments =
+          i.InputUint32(instr->JSCallArgumentCountInputIndex());
+      __ CallJSFunction(func, num_arguments);
       frame_access_state()->ClearSPDelta();
       RecordCallPosition(instr);
       AssemblePlaceHolderForLazyDeopt(instr);
@@ -2366,6 +2368,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       RoundingMode const mode =
           static_cast<RoundingMode>(MiscField::decode(instr->opcode()));
       __ Roundsd(i.OutputDoubleRegister(), i.InputDoubleRegister(0), mode);
+      break;
+    }
+    case kSSEFloat64ToFloat16: {
+      __ Cvtpd2ph(i.OutputDoubleRegister(), i.InputDoubleRegister(0),
+                  i.TempRegister(0));
       break;
     }
     case kSSEFloat64ToFloat32:
@@ -7043,28 +7050,24 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       CpuFeatureScope avx_scope(masm(), AVX2);
       YMMRegister dst = i.OutputSimd256Register();
       __ vpackssdw(dst, i.InputSimd256Register(0), i.InputSimd256Register(1));
-      __ vpermq(dst, dst, 0xD8);  // 0b11011000
       break;
     }
     case kX64I16x16UConvertI32x8: {
       CpuFeatureScope avx_scope(masm(), AVX2);
       YMMRegister dst = i.OutputSimd256Register();
       __ vpackusdw(dst, i.InputSimd256Register(0), i.InputSimd256Register(1));
-      __ vpermq(dst, dst, 0xD8);  // 0b11011000
       break;
     }
     case kX64I8x32SConvertI16x16: {
       CpuFeatureScope avx_scope(masm(), AVX2);
       YMMRegister dst = i.OutputSimd256Register();
       __ vpacksswb(dst, i.InputSimd256Register(0), i.InputSimd256Register(1));
-      __ vpermq(dst, dst, 0xD8);  // 0b11011000
       break;
     }
     case kX64I8x32UConvertI16x16: {
       CpuFeatureScope avx_scope(masm(), AVX2);
       YMMRegister dst = i.OutputSimd256Register();
       __ vpackuswb(dst, i.InputSimd256Register(0), i.InputSimd256Register(1));
-      __ vpermq(dst, dst, 0xD8);  // 0b11011000
       break;
     }
     case kX64I64x4ExtMulI32x4S: {
@@ -7461,11 +7464,11 @@ void CodeGenerator::AssembleArchTableSwitch(Instruction* instr) {
   X64OperandConverter i(this, instr);
   Register input = i.InputRegister(0);
   int32_t const case_count = static_cast<int32_t>(instr->InputCount() - 2);
-  Label** cases = zone()->AllocateArray<Label*>(case_count);
+  base::Vector<Label*> cases = zone()->AllocateVector<Label*>(case_count);
   for (int32_t index = 0; index < case_count; ++index) {
     cases[index] = GetLabel(i.InputRpo(index + 2));
   }
-  Label* const table = AddJumpTable(cases, case_count);
+  Label* const table = AddJumpTable(cases);
   __ cmpl(input, Immediate(case_count));
   __ j(above_equal, GetLabel(i.InputRpo(1)));
   __ leaq(kScratchRegister, Operand(table));
@@ -8089,9 +8092,6 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
   if (v8_flags.trace_turbo_stack_accesses) {
     IncrementStackAccessCounter(source, destination);
   }
-  // Whether the ymm source should be used as a xmm.
-  const bool src_simd256_as_simd128 =
-      source->IsSimd256Register() && destination->IsSimd128Register();
 
   // Dispatch on the source and destination operand kinds.
   switch (MoveType::InferMove(source, destination)) {
@@ -8109,10 +8109,10 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
             LocationOperand::cast(source)->representation();
         if (rep == MachineRepresentation::kSimd256) {
           CpuFeatureScope avx_scope(masm(), AVX);
-          if (src_simd256_as_simd128) {
+          // Whether the ymm source should be used as a xmm.
+          if (source->IsSimd256Register() && destination->IsSimd128Register()) {
             __ vmovapd(g.ToSimd128Register(destination),
                        g.ToSimd128Register(source));
-
           } else {
             __ vmovapd(g.ToSimd256Register(destination),
                        g.ToSimd256Register(source));
@@ -8136,7 +8136,9 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
           __ Movups(dst, src);
         } else if (rep == MachineRepresentation::kSimd256) {
           CpuFeatureScope avx_scope(masm(), AVX);
-          if (src_simd256_as_simd128) {
+          // Whether the ymm source should be used as a xmm.
+          if (source->IsSimd256Register() &&
+              destination->IsSimd128StackSlot()) {
             __ vmovups(dst, g.ToSimd128Register(source));
           } else {
             __ vmovups(dst, g.ToSimd256Register(source));
@@ -8164,7 +8166,8 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
           __ Movups(dst, src);
         } else if (rep == MachineRepresentation::kSimd256) {
           CpuFeatureScope avx_scope(masm(), AVX);
-          if (src_simd256_as_simd128) {
+          if (source->IsSimd256StackSlot() &&
+              destination->IsSimd128Register()) {
             __ vmovups(g.ToSimd128Register(destination), src);
           } else {
             __ vmovups(g.ToSimd256Register(destination), src);
@@ -8197,7 +8200,8 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
           __ Movups(dst, kScratchDoubleReg);
         } else if (rep == MachineRepresentation::kSimd256) {
           CpuFeatureScope avx_scope(masm(), AVX);
-          if (src_simd256_as_simd128) {
+          if (source->IsSimd256StackSlot() &&
+              destination->IsSimd128StackSlot()) {
             __ vmovups(kScratchDoubleReg, src);
             __ vmovups(dst, kScratchDoubleReg);
           } else {
@@ -8383,7 +8387,7 @@ void CodeGenerator::AssembleSwap(InstructionOperand* source,
   }
 }
 
-void CodeGenerator::AssembleJumpTable(Label** targets, size_t target_count) {
+void CodeGenerator::AssembleJumpTable(base::Vector<Label*> targets) {
 #ifdef V8_ENABLE_BUILTIN_JUMP_TABLE_SWITCH
   // For builtins, the value in table is `target_address - table_address`.
   // The reason is that the builtins code position may be changed so the table
@@ -8391,8 +8395,8 @@ void CodeGenerator::AssembleJumpTable(Label** targets, size_t target_count) {
   if (V8_UNLIKELY(Builtins::IsBuiltinId(masm_.builtin()))) {
     int table_pos = __ pc_offset();
 
-    for (size_t index = 0; index < target_count; ++index) {
-      __ WriteBuiltinJumpTableEntry(targets[index], table_pos);
+    for (auto* target : targets) {
+      __ WriteBuiltinJumpTableEntry(target, table_pos);
     }
     return;
   }
@@ -8401,7 +8405,7 @@ void CodeGenerator::AssembleJumpTable(Label** targets, size_t target_count) {
 
   // For non-builtins, the value in table is just the target absolute address,
   // it's position dependent.
-  for (size_t index = 0; index < target_count; ++index) {
+  for (size_t index = 0; index < targets.size(); ++index) {
     __ dq(targets[index]);
   }
 }

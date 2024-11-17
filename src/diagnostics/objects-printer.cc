@@ -12,7 +12,8 @@
 #include "src/diagnostics/disassembler.h"
 #include "src/execution/frames-inl.h"
 #include "src/execution/isolate-utils-inl.h"
-#include "src/heap/heap-inl.h"                // For InOldSpace.
+#include "src/heap/heap-inl.h"  // For InOldSpace.
+#include "src/heap/heap-layout-inl.h"
 #include "src/heap/heap-write-barrier-inl.h"  // For GetIsolateFromWritableObj.
 #include "src/heap/marking-inl.h"
 #include "src/ic/handler-configuration-inl.h"
@@ -21,12 +22,16 @@
 #include "src/objects/all-objects-inl.h"
 #include "src/objects/code-kind.h"
 #include "src/objects/instance-type.h"
+#include "src/objects/js-function-inl.h"
 #include "src/objects/js-objects.h"
 #include "src/regexp/regexp.h"
+#include "src/sandbox/isolate.h"
+#include "src/sandbox/js-dispatch-table.h"
 #include "src/snapshot/embedded/embedded-data.h"
 #include "src/strings/string-stream.h"
 #include "src/utils/ostreams.h"
 #include "third_party/fp16/src/include/fp16.h"
+#include "v8-internal.h"
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/debug/debug-wasm-objects-inl.h"
@@ -160,7 +165,7 @@ void PrintHeapObjectHeaderWithoutMap(Tagged<HeapObject> object,
   os << "]";
   if (ReadOnlyHeap::Contains(object)) {
     os << " in ReadOnlySpace";
-  } else if (GetHeapFromWritableObject(object)->InOldSpace(object)) {
+  } else if (Isolate::CurrentMaybeBackground()->heap()->InOldSpace(object)) {
     os << " in OldSpace";
   }
 }
@@ -405,7 +410,7 @@ void BytecodeArray::BytecodeArrayPrint(std::ostream& os) {
 
 void BytecodeWrapper::BytecodeWrapperPrint(std::ostream& os) {
   PrintHeader(os, "BytecodeWrapper");
-  Isolate* isolate = GetIsolateForSandbox(*this);
+  IsolateForSandbox isolate = GetIsolateForSandbox(*this);
   os << "\n    bytecode: " << Brief(bytecode(isolate));
 }
 
@@ -621,7 +626,7 @@ void PrintSloppyArgumentElements(std::ostream& os, ElementsKind kind,
   }
 }
 
-void PrintEmbedderData(Isolate* isolate, std::ostream& os,
+void PrintEmbedderData(IsolateForSandbox isolate, std::ostream& os,
                        EmbedderDataSlot slot) {
   DisallowGarbageCollection no_gc;
   Tagged<Object> value = slot.load_tagged();
@@ -747,7 +752,7 @@ void JSObjectPrintBody(std::ostream& os, Tagged<JSObject> obj,
   }
   int embedder_fields = obj->GetEmbedderFieldCount();
   if (embedder_fields > 0) {
-    Isolate* isolate = GetIsolateForSandbox(obj);
+    IsolateForSandbox isolate = GetIsolateForSandbox(obj);
     os << " - embedder fields = {";
     for (int i = 0; i < embedder_fields; i++) {
       os << "\n    ";
@@ -851,7 +856,7 @@ void JSPromise::JSPromisePrint(std::ostream& os) {
 
 void JSRegExp::JSRegExpPrint(std::ostream& os) {
   JSObjectPrintHeader(os, *this, "JSRegExp");
-  Isolate* isolate = GetIsolateForSandbox(*this);
+  IsolateForSandbox isolate = GetIsolateForSandbox(*this);
   os << "\n - data: " << Brief(data(isolate));
   os << "\n - source: " << Brief(source());
   FlagsBuffer buffer;
@@ -885,7 +890,7 @@ void AtomRegExpData::AtomRegExpDataPrint(std::ostream& os) {
 }
 
 void IrRegExpData::IrRegExpDataPrint(std::ostream& os) {
-  Isolate* isolate = GetIsolateForSandbox(*this);
+  IsolateForSandbox isolate = GetIsolateForSandbox(*this);
   RegExpDataPrint(os);
   if (has_latin1_bytecode()) {
     os << "\n - latin1_bytecode: " << Brief(latin1_bytecode());
@@ -909,7 +914,7 @@ void IrRegExpData::IrRegExpDataPrint(std::ostream& os) {
 
 void RegExpDataWrapper::RegExpDataWrapperPrint(std::ostream& os) {
   PrintHeader(os, "RegExpDataWrapper");
-  Isolate* isolate = GetIsolateForSandbox(*this);
+  IsolateForSandbox isolate = GetIsolateForSandbox(*this);
   os << "\n    data: " << Brief(data(isolate));
   os << "\n";
 }
@@ -1025,7 +1030,7 @@ void ClassBoilerplate::ClassBoilerplatePrint(std::ostream& os) {
 
 void RegExpBoilerplateDescription::RegExpBoilerplateDescriptionPrint(
     std::ostream& os) {
-  Isolate* isolate = GetIsolateForSandbox((*this));
+  IsolateForSandbox isolate = GetIsolateForSandbox(*this);
   PrintHeader(os, "RegExpBoilerplate");
   os << "\n - data: " << Brief(data(isolate));
   os << "\n - source: " << source();
@@ -1034,7 +1039,7 @@ void RegExpBoilerplateDescription::RegExpBoilerplateDescriptionPrint(
 }
 
 void EmbedderDataArray::EmbedderDataArrayPrint(std::ostream& os) {
-  Isolate* isolate = GetIsolateForSandbox(*this);
+  IsolateForSandbox isolate = GetIsolateForSandbox(*this);
   PrintHeader(os, "EmbedderDataArray");
   os << "\n - length: " << length();
   EmbedderDataSlot start(*this, 0);
@@ -1567,15 +1572,17 @@ void FeedbackVector::FeedbackVectorPrint(std::ostream& os) {
   }
 
   os << "\n - shared function info: " << Brief(shared_function_info());
+  os << "\n - tiering state: " << tiering_state();
+#ifndef V8_ENABLE_LEAPTIERING
   if (has_optimized_code()) {
     os << "\n - optimized code: "
        << Brief(optimized_code(GetIsolateForSandbox(*this)));
   } else {
     os << "\n - no optimized code";
   }
-  os << "\n - tiering state: " << tiering_state();
   os << "\n - maybe has maglev code: " << maybe_has_maglev_code();
   os << "\n - maybe has turbofan code: " << maybe_has_turbofan_code();
+#endif  // !V8_ENABLE_LEAPTIERING
   os << "\n - invocation count: " << invocation_count();
   os << "\n - closure feedback cell array: ";
   closure_feedback_cell_array()->ClosureFeedbackCellArrayPrint(os);
@@ -1808,7 +1815,7 @@ void JSMessageObject::JSMessageObjectPrint(std::ostream& os) {
   os << "\n - type: " << static_cast<int>(type());
   os << "\n - arguments: " << Brief(argument());
   os << "\n - script: " << Brief(script());
-  os << "\n - stack_frames: " << Brief(stack_frames());
+  os << "\n - stack_trace: " << Brief(stack_trace());
   os << "\n - shared_info: " << Brief(shared_info());
   if (shared_info() == Smi::zero()) {
     os << " (cleared after calculating line ends)";
@@ -1932,7 +1939,7 @@ void JSSharedArray::JSSharedArrayPrint(std::ostream& os) {
   JSObjectPrintHeader(os, *this, "JSSharedArray");
   Isolate* isolate = GetIsolateFromWritableObject(*this);
   os << "\n - isolate: " << isolate;
-  if (InWritableSharedSpace(*this)) os << " (shared)";
+  if (HeapLayout::InWritableSharedSpace(*this)) os << " (shared)";
   JSObjectPrintBody(os, *this);
 }
 
@@ -1940,7 +1947,7 @@ void JSSharedStruct::JSSharedStructPrint(std::ostream& os) {
   JSObjectPrintHeader(os, *this, "JSSharedStruct");
   Isolate* isolate = GetIsolateFromWritableObject(*this);
   os << "\n - isolate: " << isolate;
-  if (InWritableSharedSpace(*this)) os << " (shared)";
+  if (HeapLayout::InWritableSharedSpace(*this)) os << " (shared)";
   JSObjectPrintBody(os, *this);
 }
 
@@ -1948,7 +1955,7 @@ void JSAtomicsMutex::JSAtomicsMutexPrint(std::ostream& os) {
   JSObjectPrintHeader(os, *this, "JSAtomicsMutex");
   Isolate* isolate = GetIsolateFromWritableObject(*this);
   os << "\n - isolate: " << isolate;
-  if (InWritableSharedSpace(*this)) os << " (shared)";
+  if (HeapLayout::InWritableSharedSpace(*this)) os << " (shared)";
   os << "\n - state: " << this->state();
   os << "\n - owner_thread_id: " << this->owner_thread_id();
   JSObjectPrintBody(os, *this);
@@ -1958,7 +1965,7 @@ void JSAtomicsCondition::JSAtomicsConditionPrint(std::ostream& os) {
   JSObjectPrintHeader(os, *this, "JSAtomicsCondition");
   Isolate* isolate = GetIsolateFromWritableObject(*this);
   os << "\n - isolate: " << isolate;
-  if (InWritableSharedSpace(*this)) os << " (shared)";
+  if (HeapLayout::InWritableSharedSpace(*this)) os << " (shared)";
   os << "\n - state: " << this->state();
   JSObjectPrintBody(os, *this);
 }
@@ -2155,13 +2162,24 @@ void JSFunction::JSFunctionPrint(std::ostream& os) {
     os << "\n - builtin: " << isolate->builtins()->name(builtin);
   }
 
-  os << "\n - formal_parameter_count: "
-     << shared()->internal_formal_parameter_count_without_receiver();
+  os << "\n - formal_parameter_count: ";
+  int formal_parameter_count =
+      shared()->internal_formal_parameter_count_with_receiver();
+  if (formal_parameter_count == kDontAdaptArgumentsSentinel) {
+    os << "kDontAdaptArgumentsSentinel";
+  } else {
+    os << formal_parameter_count;
+  }
   os << "\n - kind: " << shared()->kind();
   os << "\n - context: " << Brief(context());
   os << "\n - code: " << Brief(code(isolate));
 #ifdef V8_ENABLE_LEAPTIERING
-  os << "\n - dispatch_handle: " << dispatch_handle();
+  os << "\n - dispatch_handle: 0x" << std::hex << dispatch_handle() << std::dec;
+  if (has_feedback_vector() &&
+      raw_feedback_cell()->dispatch_handle() != dispatch_handle()) {
+    os << "\n - canonical feedback cell dispatch_handle: 0x" << std::hex
+       << raw_feedback_cell()->dispatch_handle() << std::dec;
+  }
 #endif  // V8_ENABLE_LEAPTIERING
   if (code(isolate)->kind() == CodeKind::FOR_TESTING) {
     os << "\n - FOR_TESTING";
@@ -2235,8 +2253,13 @@ void SharedFunctionInfo::SharedFunctionInfoPrint(std::ostream& os) {
   os << "\n - kind: " << kind();
   os << "\n - syntax kind: " << syntax_kind();
   os << "\n - function_map_index: " << function_map_index();
-  os << "\n - formal_parameter_count: "
-     << internal_formal_parameter_count_without_receiver();
+  os << "\n - formal_parameter_count: ";
+  int formal_parameter_count = internal_formal_parameter_count_with_receiver();
+  if (formal_parameter_count == kDontAdaptArgumentsSentinel) {
+    os << "kDontAdaptArgumentsSentinel";
+  } else {
+    os << formal_parameter_count;
+  }
   os << "\n - expected_nof_properties: "
      << static_cast<int>(expected_nof_properties());
   os << "\n - language_mode: " << language_mode();
@@ -2472,7 +2495,7 @@ void AsmWasmData::AsmWasmDataPrint(std::ostream& os) {
 }
 
 void WasmTypeInfo::WasmTypeInfoPrint(std::ostream& os) {
-  Isolate* isolate = GetIsolateForSandbox(*this);
+  IsolateForSandbox isolate = GetIsolateForSandbox(*this);
   PrintHeader(os, "WasmTypeInfo");
   os << "\n - type address: " << reinterpret_cast<void*>(native_type());
   os << "\n - supertypes: ";
@@ -2539,6 +2562,7 @@ void WasmStruct::WasmStructPrint(std::ostream& os) {
         }
         os << std::dec << std::setfill(' ');
         break;
+      case wasm::kTop:
       case wasm::kBottom:
       case wasm::kVoid:
         UNREACHABLE();
@@ -2619,6 +2643,7 @@ void WasmArray::WasmArrayPrint(std::ostream& os) {
       break;
     }
     case wasm::kRtt:
+    case wasm::kTop:
     case wasm::kBottom:
     case wasm::kVoid:
       UNREACHABLE();
@@ -2652,7 +2677,7 @@ void WasmSuspendingObject::WasmSuspendingObjectPrint(std::ostream& os) {
 }
 
 void WasmInstanceObject::WasmInstanceObjectPrint(std::ostream& os) {
-  Isolate* isolate = GetIsolateForSandbox(*this);
+  IsolateForSandbox isolate = GetIsolateForSandbox(*this);
   JSObjectPrintHeader(os, *this, "WasmInstanceObject");
   os << "\n - trusted_data: " << Brief(trusted_data(isolate));
   os << "\n - module_object: " << Brief(module_object());
@@ -2735,7 +2760,7 @@ void WasmDispatchTable::WasmDispatchTablePrint(std::ostream& os) {
 
 // Never called directly, as WasmFunctionData is an "abstract" class.
 void WasmFunctionData::WasmFunctionDataPrint(std::ostream& os) {
-  Isolate* isolate = GetIsolateForSandbox(*this);
+  IsolateForSandbox isolate = GetIsolateForSandbox(*this);
   os << "\n - func_ref: " << Brief(func_ref());
   os << "\n - internal: " << Brief(internal());
   os << "\n - wrapper_code: " << Brief(wrapper_code(isolate));
@@ -2768,7 +2793,7 @@ void WasmResumeData::WasmResumeDataPrint(std::ostream& os) {
 
 void WasmImportData::WasmImportDataPrint(std::ostream& os) {
   PrintHeader(os, "WasmImportData");
-  Isolate* isolate = GetIsolateForSandbox(*this);
+  IsolateForSandbox isolate = GetIsolateForSandbox(*this);
   os << "\n - native_context: " << Brief(native_context());
   os << "\n - callable: " << Brief(callable());
   os << "\n - instance_data: ";
@@ -2780,6 +2805,8 @@ void WasmImportData::WasmImportDataPrint(std::ostream& os) {
   os << "\n - suspend: " << suspend();
   os << "\n - wrapper_budget: " << wrapper_budget();
   os << "\n - call_origin: " << Brief(call_origin());
+  os << "\n - sig: " << sig() << " (" << sig()->parameter_count() << " params, "
+     << sig()->return_count() << " returns)";
   os << "\n - code: " << Brief(code(isolate));
   os << "\n";
 }
@@ -2794,7 +2821,7 @@ void WasmInternalFunction::WasmInternalFunctionPrint(std::ostream& os) {
 
 void WasmFuncRef::WasmFuncRefPrint(std::ostream& os) {
   PrintHeader(os, "WasmFuncRef");
-  Isolate* isolate = GetIsolateForSandbox(*this);
+  IsolateForSandbox isolate = GetIsolateForSandbox(*this);
   os << "\n - internal: " << Brief(internal(isolate));
   os << "\n";
 }
@@ -2802,8 +2829,9 @@ void WasmFuncRef::WasmFuncRefPrint(std::ostream& os) {
 void WasmCapiFunctionData::WasmCapiFunctionDataPrint(std::ostream& os) {
   PrintHeader(os, "WasmCapiFunctionData");
   WasmFunctionDataPrint(os);
+  os << "\n - canonical_sig_index: " << canonical_sig_index();
   os << "\n - embedder_data: " << Brief(embedder_data());
-  os << "\n - serialized_signature: " << Brief(serialized_signature());
+  os << "\n - sig: " << sig();
   os << "\n";
 }
 
@@ -3726,7 +3754,7 @@ void Map::MapPrint(std::ostream& os) {
 
   // Read-only maps can't have transitions, which is fortunate because we need
   // the isolate to iterate over the transitions.
-  if (!IsReadOnlyHeapObject(*this)) {
+  if (!HeapLayout::InReadOnlySpace(*this)) {
     Isolate* isolate = GetIsolateFromWritableObject(*this);
     TransitionsAccessor transitions(isolate, *this);
     int nof_transitions = transitions.NumberOfTransitions();
@@ -4089,6 +4117,14 @@ V8_EXPORT_PRIVATE extern void _v8_internal_Print_Code(void* object) {
   i::Print(lookup_result.value());
 #endif
 }
+
+#ifdef V8_ENABLE_LEAPTIERING
+V8_DONT_STRIP_SYMBOL
+V8_EXPORT_PRIVATE extern void _v8_internal_Print_Dispatch_Handle(
+    uint32_t handle) {
+  i::GetProcessWideJSDispatchTable()->PrintEntry(handle);
+}
+#endif  // V8_ENABLE_LEAPTIERING
 
 V8_DONT_STRIP_SYMBOL
 V8_EXPORT_PRIVATE extern void _v8_internal_Print_OnlyCode(void* object,

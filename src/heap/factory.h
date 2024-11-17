@@ -73,6 +73,7 @@ template <typename>
 class Signature;
 class SourceTextModule;
 class StackFrameInfo;
+class StackTraceInfo;
 class StringSet;
 class StoreHandler;
 class SyntheticModule;
@@ -95,8 +96,10 @@ class WasmValue;
 enum class OnResume : int;
 enum Suspend : int;
 enum Promise : int;
-class ValueType;
-using FunctionSig = Signature<ValueType>;
+struct CanonicalTypeIndex;
+class CanonicalValueType;
+class ValueType;  // TODO(366180605): Replace all uses of this.
+using CanonicalSig = Signature<CanonicalValueType>;
 class StackMemory;
 }  // namespace wasm
 #endif
@@ -442,7 +445,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   Handle<ErrorStackData> NewErrorStackData(
       DirectHandle<UnionOf<JSAny, FixedArray>>
           call_site_infos_or_formatted_stack,
-      DirectHandle<UnionOf<Smi, FixedArray>> limit_or_stack_frame_infos);
+      DirectHandle<StackTraceInfo> stack_trace);
 
   Handle<Script> CloneScript(DirectHandle<Script> script,
                              DirectHandle<String> source);
@@ -459,6 +462,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
       DirectHandle<UnionOf<SharedFunctionInfo, Script>> shared_or_script,
       int bytecode_offset_or_source_position,
       DirectHandle<String> function_name, bool is_constructor);
+  Handle<StackTraceInfo> NewStackTraceInfo(DirectHandle<FixedArray> frames);
 
   // Allocate various microtasks.
   Handle<CallableTask> NewCallableTask(DirectHandle<JSReceiver> callable,
@@ -728,19 +732,19 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   Handle<WasmCapiFunctionData> NewWasmCapiFunctionData(
       Address call_target, DirectHandle<Foreign> embedder_data,
       DirectHandle<Code> wrapper_code, DirectHandle<Map> rtt,
-      DirectHandle<PodArray<wasm::ValueType>> serialized_sig,
-      uintptr_t signature_hash);
+      wasm::CanonicalTypeIndex canonical_sig_index,
+      const wasm::CanonicalSig* sig, uintptr_t signature_hash);
   Handle<WasmExportedFunctionData> NewWasmExportedFunctionData(
       DirectHandle<Code> export_wrapper,
       DirectHandle<WasmTrustedInstanceData> instance_data,
       DirectHandle<WasmFuncRef> func_ref,
       DirectHandle<WasmInternalFunction> internal_function,
-      const wasm::FunctionSig* sig, uint32_t canonical_type_index,
+      const wasm::CanonicalSig* sig, uint32_t canonical_type_index,
       int wrapper_budget, wasm::Promise promise);
   Handle<WasmImportData> NewWasmImportData(
       DirectHandle<HeapObject> callable, wasm::Suspend suspend,
       MaybeDirectHandle<WasmTrustedInstanceData> instance_data,
-      DirectHandle<PodArray<wasm::ValueType>> serialized_sig);
+      const wasm::CanonicalSig* sig);
   Handle<WasmImportData> NewWasmImportData(DirectHandle<WasmImportData> ref);
 
   Handle<WasmFastApiCallData> NewWasmFastApiCallData(
@@ -750,7 +754,6 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   // non-null for exported Wasm functions.
   Handle<WasmJSFunctionData> NewWasmJSFunctionData(
       uint32_t canonical_sig_index, DirectHandle<JSReceiver> callable,
-      DirectHandle<PodArray<wasm::ValueType>> serialized_sig,
       DirectHandle<Code> wrapper_code, DirectHandle<Map> rtt,
       wasm::Suspend suspend, wasm::Promise promise, uintptr_t signature_hash);
   Handle<WasmResumeData> NewWasmResumeData(
@@ -780,7 +783,8 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
       AllocationType allocation = AllocationType::kYoung);
 
   Handle<SharedFunctionInfo> NewSharedFunctionInfoForWasmExportedFunction(
-      DirectHandle<String> name, DirectHandle<WasmExportedFunctionData> data);
+      DirectHandle<String> name, DirectHandle<WasmExportedFunctionData> data,
+      int len, AdaptArguments adapt);
   Handle<SharedFunctionInfo> NewSharedFunctionInfoForWasmJSFunction(
       DirectHandle<String> name, DirectHandle<WasmJSFunctionData> data);
   Handle<SharedFunctionInfo> NewSharedFunctionInfoForWasmResume(
@@ -956,8 +960,8 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
       FunctionKind kind);
 
   Handle<SharedFunctionInfo> NewSharedFunctionInfoForBuiltin(
-      MaybeDirectHandle<String> name, Builtin builtin,
-      FunctionKind kind = FunctionKind::kNormalFunction);
+      MaybeDirectHandle<String> name, Builtin builtin, int len,
+      AdaptArguments adapt, FunctionKind kind = FunctionKind::kNormalFunction);
 
   Handle<InterpreterData> NewInterpreterData(
       DirectHandle<BytecodeArray> bytecode_array, DirectHandle<Code> code);
@@ -987,7 +991,9 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
       MessageTemplate message, DirectHandle<Object> argument,
       int start_position, int end_position,
       DirectHandle<SharedFunctionInfo> shared_info, int bytecode_offset,
-      DirectHandle<Script> script, DirectHandle<Object> stack_frames);
+      DirectHandle<Script> script,
+      DirectHandle<StackTraceInfo> stack_trace =
+          DirectHandle<StackTraceInfo>::null());
 
   Handle<DebugInfo> NewDebugInfo(DirectHandle<SharedFunctionInfo> shared);
 

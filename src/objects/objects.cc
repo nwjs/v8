@@ -142,7 +142,9 @@ ShouldThrow GetShouldThrow(Isolate* isolate, Maybe<ShouldThrow> should_throw) {
   LanguageMode mode = isolate->context()->scope_info()->language_mode();
   if (mode == LanguageMode::kStrict) return kThrowOnError;
 
-  for (StackFrameIterator it(isolate); !it.done(); it.Advance()) {
+  for (StackFrameIterator it(isolate, isolate->thread_local_top(),
+                             StackFrameIterator::NoHandles{});
+       !it.done(); it.Advance()) {
     if (!it.frame()->is_java_script()) continue;
 
     // Get the language mode from closure.
@@ -2024,7 +2026,7 @@ bool HeapObject::NeedsRehashing(InstanceType instance_type) const {
     case STRONG_DESCRIPTOR_ARRAY_TYPE:
       return Cast<DescriptorArray>(*this)->number_of_descriptors() > 1;
     case TRANSITION_ARRAY_TYPE:
-      return Cast<TransitionArray>(*this)->number_of_entries() > 1;
+      return Cast<TransitionArray>(*this)->number_of_transitions() > 1;
     case ORDERED_HASH_MAP_TYPE:
     case ORDERED_HASH_SET_TYPE:
       return false;  // We'll rehash from the JSMap or JSSet referencing them.
@@ -2283,26 +2285,38 @@ Maybe<bool> Object::SetPropertyInternal(LookupIterator* it,
         // perform the possibly effectful ToNumber (or ToBigInt) operation
         // anyways.
         DirectHandle<JSTypedArray> holder = it->GetHolder<JSTypedArray>();
-        Handle<Object> throwaway_value;
+        Handle<Object> converted_value;
         if (holder->type() == kExternalBigInt64Array ||
             holder->type() == kExternalBigUint64Array) {
           ASSIGN_RETURN_ON_EXCEPTION_VALUE(
-              it->isolate(), throwaway_value,
+              it->isolate(), converted_value,
               BigInt::FromObject(it->isolate(), value), Nothing<bool>());
         } else {
           ASSIGN_RETURN_ON_EXCEPTION_VALUE(
-              it->isolate(), throwaway_value,
+              it->isolate(), converted_value,
               Object::ToNumber(it->isolate(), value), Nothing<bool>());
         }
 
-        // FIXME: Throw a TypeError if the holder is detached here
-        // (IntegerIndexedElementSpec step 5).
+        // For RAB/GSABs, the above conversion might grow the buffer so that the
+        // index is no longer out of bounds. Redo the bounds check and try
+        // again.
+        it->RecheckTypedArrayBounds();
+        if (it->state() != LookupIterator::DATA) {
+          // Still out of bounds.
+          DCHECK_EQ(it->state(), LookupIterator::TYPED_ARRAY_INDEX_NOT_FOUND);
 
-        // TODO(verwaest): Per spec, we should return false here (steps 6-9
-        // in IntegerIndexedElementSpec), resulting in an exception being thrown
-        // on OOB accesses in strict code. Historically, v8 has not done made
-        // this change due to uncertainty about web compat. (v8:4901)
-        return Just(true);
+          // FIXME: Throw a TypeError if the holder is detached here
+          // (IntegerIndexedElementSet step 5).
+
+          // TODO(verwaest): Per spec, we should return false here (steps 6-9
+          // in IntegerIndexedElementSet), resulting in an exception being
+          // thrown on OOB accesses in strict code. Historically, v8 has not
+          // done made this change due to uncertainty about web compat.
+          // (v8:4901)
+          return Just(true);
+        }
+        value = converted_value;
+        [[fallthrough]];
       }
 
       case LookupIterator::DATA:
@@ -2921,7 +2935,8 @@ Maybe<bool> JSProxy::DeletePropertyOrElement(DirectHandle<JSProxy> proxy,
       isolate, trap, Object::GetMethod(isolate, handler, trap_name),
       Nothing<bool>());
   if (IsUndefined(*trap, isolate)) {
-    return JSReceiver::DeletePropertyOrElement(target, name, language_mode);
+    return JSReceiver::DeletePropertyOrElement(isolate, target, name,
+                                               language_mode);
   }
 
   Handle<Object> trap_result;
@@ -5086,6 +5101,7 @@ Handle<Object> JSPromise::TriggerPromiseReactions(
             PromiseReactionJobTask::kSizeOfAllPromiseReactionJobTasks));
     if (type == PromiseReaction::kFulfill) {
       task->set_map(
+          isolate,
           ReadOnlyRoots(isolate).promise_fulfill_reaction_job_task_map(),
           kReleaseStore);
       Cast<PromiseFulfillReactionJobTask>(task)->set_argument(*argument);
@@ -5107,6 +5123,7 @@ Handle<Object> JSPromise::TriggerPromiseReactions(
     } else {
       DisallowGarbageCollection no_gc;
       task->set_map(
+          isolate,
           ReadOnlyRoots(isolate).promise_reject_reaction_job_task_map(),
           kReleaseStore);
       Cast<PromiseRejectReactionJobTask>(task)->set_argument(*argument);
@@ -5309,7 +5326,7 @@ Handle<Derived> HashTable<Derived, Shape>::EnsureCapacity(
 
   bool should_pretenure = allocation == AllocationType::kOld ||
                           ((capacity > kMinCapacityForPretenure) &&
-                           !Heap::InYoungGeneration(*table));
+                           !HeapLayout::InYoungGeneration(*table));
   Handle<Derived> new_table = HashTable::New(
       isolate, new_nof,
       should_pretenure ? AllocationType::kOld : AllocationType::kYoung);
@@ -5369,7 +5386,7 @@ Handle<Derived> HashTable<Derived, Shape>::Shrink(Isolate* isolate,
   DCHECK_GE(new_capacity, Derived::kMinShrinkCapacity);
 
   bool pretenure = (new_capacity > kMinCapacityForPretenure) &&
-                   !Heap::InYoungGeneration(*table);
+                   !HeapLayout::InYoungGeneration(*table);
   Handle<Derived> new_table =
       HashTable::New(isolate, new_capacity,
                      pretenure ? AllocationType::kOld : AllocationType::kYoung,

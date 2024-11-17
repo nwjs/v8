@@ -90,13 +90,18 @@ class WasmImportWrapperCache {
   size_t EstimateCurrentMemoryConsumption() const;
 
   // Returns nullptr if {call_target} doesn't belong to a known wrapper.
-  WasmCode* FindWrapper(Address call_target) {
-    if (call_target == kNullAddress) return nullptr;
+  WasmCode* FindWrapper(WasmCodePointer call_target) {
+    if (call_target == kInvalidWasmCodePointer) return nullptr;
     base::MutexGuard lock(&mutex_);
-    auto iter = codes_.find(call_target);
+    auto iter = codes_.find(WasmCodePointerAddress(call_target));
     if (iter == codes_.end()) return nullptr;
     return iter->second;
   }
+
+  WasmCode* CompileWasmImportCallWrapper(
+      Isolate* isolate, NativeModule* native_module, ImportCallKind kind,
+      const CanonicalSig* sig, uint32_t canonical_sig_index,
+      bool source_positions, int expected_arity, Suspend suspend);
 
  private:
   std::unique_ptr<WasmCodeAllocator> code_allocator_;

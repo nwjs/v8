@@ -16,7 +16,7 @@
 #include "src/base/small-vector.h"
 #include "src/base/threaded-list.h"
 #include "src/common/globals.h"
-#include "src/parsing/import-assertions.h"
+#include "src/parsing/import-attributes.h"
 #include "src/parsing/parse-info.h"
 #include "src/parsing/parser-base.h"
 #include "src/parsing/parsing.h"
@@ -314,8 +314,8 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
                                  const CatchInfo& catch_info, int pos);
   void ParseGeneratorFunctionBody(int pos, FunctionKind kind,
                                   ScopedPtrList<Statement>* body);
-  void ParseAndRewriteAsyncGeneratorFunctionBody(
-      int pos, FunctionKind kind, ScopedPtrList<Statement>* body);
+  void ParseAsyncGeneratorFunctionBody(int pos, FunctionKind kind,
+                                       ScopedPtrList<Statement>* body);
   void DeclareFunctionNameVar(const AstRawString* function_name,
                               FunctionSyntaxKind function_syntax_kind,
                               DeclarationScope* function_scope);
@@ -636,7 +636,7 @@ class V8_EXPORT_PRIVATE Parser : public NON_EXPORTED_BASE(ParserBase<Parser>) {
     ExpressionStatement* e_stat = statement->AsExpressionStatement();
     if (e_stat == nullptr) return false;
     Literal* literal = e_stat->expression()->AsLiteral();
-    if (literal == nullptr || !literal->IsString()) return false;
+    if (literal == nullptr || !literal->IsRawString()) return false;
     return arg == nullptr || literal->AsRawString() == arg;
   }
 

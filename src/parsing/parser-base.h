@@ -1227,8 +1227,10 @@ class ParserBase {
   // Needs to be called if the reference needs to be available from the current
   // point. It causes the receiver to be context allocated if necessary.
   // Returns the receiver variable that we're referencing.
-  V8_INLINE Variable* UseThis() {
-    DeclarationScope* closure_scope = scope()->GetClosureScope();
+  V8_INLINE void UseThis() {
+    Scope* scope = this->scope();
+    if (scope->is_reparsed()) return;
+    DeclarationScope* closure_scope = scope->GetClosureScope();
     DeclarationScope* receiver_scope = closure_scope->GetReceiverScope();
     Variable* var = receiver_scope->receiver();
     var->set_is_used();
@@ -1241,7 +1243,6 @@ class ParserBase {
       closure_scope->set_has_this_reference();
       var->ForceContextAllocation();
     }
-    return var;
   }
 
   V8_INLINE IdentifierT ParseAndClassifyIdentifier(Token::Value token);
@@ -4005,6 +4006,8 @@ ParserBase<Impl>::ParseMemberWithPresentNewPrefixesExpression() {
   CheckStackOverflow();
 
   if (peek() == Token::kImport && PeekAhead() == Token::kLeftParen) {
+    // TODO(42204365): Peek ahead to see if this is an import source call.
+    // It needs to peek ahead for tokens `import . source (`.
     impl()->ReportMessageAt(scanner()->peek_location(),
                             MessageTemplate::kImportCallNotNewExpression);
     return impl()->FailureExpression();
@@ -4156,17 +4159,15 @@ ParserBase<Impl>::ParseImportExpressions() {
                  v8_flags.js_source_phase_imports);
   // TODO(42204365): Enable import attributes with source phase import once
   // specified.
-  const bool check_import_attributes = (v8_flags.harmony_import_assertions ||
-                                        v8_flags.harmony_import_attributes) &&
-                                       phase == ModuleImportPhase::kEvaluation;
-  if (check_import_attributes && Check(Token::kComma)) {
+  if (v8_flags.harmony_import_attributes &&
+      phase == ModuleImportPhase::kEvaluation && Check(Token::kComma)) {
     if (Check(Token::kRightParen)) {
       // A trailing comma allowed after the specifier.
       return factory()->NewImportCallExpression(specifier, phase, pos);
     } else {
       ExpressionT import_options = ParseAssignmentExpressionCoverGrammar();
       Check(Token::kComma);  // A trailing comma is allowed after the import
-                             // assertions.
+                             // attributes.
       Expect(Token::kRightParen);
       return factory()->NewImportCallExpression(specifier, phase,
                                                 import_options, pos);
@@ -4486,6 +4487,12 @@ void ParserBase<Impl>::ParseVariableDeclarations(
       name = impl()->NullIdentifier();
       pattern = ParseBindingPattern();
       DCHECK(!impl()->IsIdentifier(pattern));
+    } else {
+      // `using` declarations should have an identifier.
+      impl()->ReportMessageAt(Scanner::Location(decl_pos, end_position()),
+                              MessageTemplate::kDeclarationMissingInitializer,
+                              "using");
+      return;
     }
 
     Scanner::Location variable_loc = scanner()->location();
@@ -4806,8 +4813,7 @@ void ParserBase<Impl>::ParseFunctionBody(
               : Token::kRightBrace;
 
       if (IsAsyncGeneratorFunction(kind)) {
-        impl()->ParseAndRewriteAsyncGeneratorFunctionBody(pos, kind,
-                                                          &inner_body);
+        impl()->ParseAsyncGeneratorFunctionBody(pos, kind, &inner_body);
       } else if (IsGeneratorFunction(kind)) {
         impl()->ParseGeneratorFunctionBody(pos, kind, &inner_body);
       } else {

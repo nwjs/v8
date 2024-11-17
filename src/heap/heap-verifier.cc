@@ -15,6 +15,7 @@
 #include "src/heap/array-buffer-sweeper.h"
 #include "src/heap/combined-heap.h"
 #include "src/heap/ephemeron-remembered-set.h"
+#include "src/heap/heap-layout-inl.h"
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/heap/heap.h"
 #include "src/heap/large-spaces.h"
@@ -143,7 +144,7 @@ void VerifyPointersVisitor::VerifyHeapObjectImpl(
   CHECK(IsMap(heap_object->map(cage_base())));
   // Heap::InToPage() is not available with sticky mark-bits.
   CHECK_IMPLIES(
-      !v8_flags.sticky_mark_bits && Heap::InYoungGeneration(heap_object),
+      !v8_flags.sticky_mark_bits && HeapLayout::InYoungGeneration(heap_object),
       Heap::InToPage(heap_object));
 }
 
@@ -351,26 +352,18 @@ void HeapVerification::Verify() {
   Tagged<WeakFixedArray> canonical_rtts = heap()->wasm_canonical_rtts();
   for (int i = 0, e = canonical_rtts->length(); i < e; ++i) {
     Tagged<MaybeObject> maybe_rtt = canonical_rtts->get(i);
-    if (maybe_rtt.IsStrong()) {
-      CHECK(IsUndefined(maybe_rtt.GetHeapObjectAssumeStrong()));
-    } else if (maybe_rtt.IsWeak()) {
-      CHECK(IsMap(maybe_rtt.GetHeapObjectAssumeWeak()));
-    } else {
-      CHECK(maybe_rtt.IsCleared());
-    }
+    if (maybe_rtt.IsCleared()) continue;
+    CHECK(maybe_rtt.IsWeak());
+    CHECK(IsMap(maybe_rtt.GetHeapObjectAssumeWeak()));
   }
 
-  // js_to_wasm_wrappers holds weak references to code or (strong) undefined.
+  // js_to_wasm_wrappers holds weak references to code or cleared values.
   Tagged<WeakFixedArray> wrappers = heap()->js_to_wasm_wrappers();
   for (int i = 0, e = wrappers->length(); i < e; ++i) {
     Tagged<MaybeObject> maybe_wrapper = wrappers->get(i);
-    if (maybe_wrapper.IsStrong()) {
-      CHECK(IsUndefined(maybe_wrapper.GetHeapObjectAssumeStrong()));
-    } else if (maybe_wrapper.IsWeak()) {
-      CHECK(IsCodeWrapper(maybe_wrapper.GetHeapObjectAssumeWeak()));
-    } else {
-      CHECK(maybe_wrapper.IsCleared());
-    }
+    if (maybe_wrapper.IsCleared()) continue;
+    CHECK(maybe_wrapper.IsWeak());
+    CHECK(IsCodeWrapper(maybe_wrapper.GetHeapObjectAssumeWeak()));
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
@@ -492,7 +485,7 @@ void HeapVerification::VerifyObjectMap(Tagged<HeapObject> object) {
   CHECK(ReadOnlyHeap::Contains(map) || old_space()->Contains(map) ||
         (shared_space() && shared_space()->Contains(map)));
 
-  if (Heap::InYoungGeneration(object)) {
+  if (HeapLayout::InYoungGeneration(object)) {
     // The object should not be code or a map.
     CHECK(!IsMap(object, cage_base_));
     CHECK(!IsAbstractCode(object, cage_base_));
@@ -609,10 +602,10 @@ class OldToNewSlotVerifyingVisitor : public SlotVerifyingVisitor {
                               Tagged<MaybeObject> target) override {
     // Heap::InToPage() is not available with sticky mark-bits.
     CHECK_IMPLIES(!v8_flags.sticky_mark_bits && target.IsStrongOrWeak() &&
-                      Heap::InYoungGeneration(target),
+                      HeapLayout::InYoungGeneration(target),
                   Heap::InToPage(target));
-    return target.IsStrongOrWeak() && Heap::InYoungGeneration(target) &&
-           !Heap::InYoungGeneration(host);
+    return target.IsStrongOrWeak() && HeapLayout::InYoungGeneration(target) &&
+           !HeapLayout::InYoungGeneration(host);
   }
 
   void VisitEphemeron(Tagged<HeapObject> host, int index, ObjectSlot key,
@@ -622,7 +615,8 @@ class OldToNewSlotVerifyingVisitor : public SlotVerifyingVisitor {
     // Keys are handled separately and should never appear in this set.
     CHECK(!InUntypedSet(key));
     Tagged<Object> k = *key;
-    if (!ObjectInYoungGeneration(host) && ObjectInYoungGeneration(k)) {
+    if (!HeapLayout::InYoungGeneration(host) &&
+        HeapLayout::InYoungGeneration(k)) {
       Tagged<EphemeronHashTable> table = Cast<EphemeronHashTable>(host);
       auto it = ephemeron_remembered_set_->find(table);
       CHECK(it != ephemeron_remembered_set_->end());
@@ -648,8 +642,11 @@ class OldToSharedSlotVerifyingVisitor : public SlotVerifyingVisitor {
                               Tagged<MaybeObject> target) override {
     Tagged<HeapObject> target_heap_object;
     return target.GetHeapObject(&target_heap_object) &&
-           InWritableSharedSpace(target_heap_object) &&
-           !Heap::InYoungGeneration(host) && !InWritableSharedSpace(host);
+           HeapLayout::InWritableSharedSpace(target_heap_object) &&
+           !(v8_flags.black_allocated_pages &&
+             HeapLayout::InBlackAllocatedPage(target_heap_object)) &&
+           !HeapLayout::InYoungGeneration(host) &&
+           !HeapLayout::InWritableSharedSpace(host);
   }
 };
 
@@ -764,7 +761,7 @@ void HeapVerification::VerifyRememberedSetFor(Tagged<HeapObject> object) {
     CHECK_NULL(chunk->slot_set<TRUSTED_TO_SHARED_TRUSTED>());
   }
 
-  if (InWritableSharedSpace(object)) {
+  if (HeapLayout::InWritableSharedSpace(object)) {
     CHECK_NULL(chunk->slot_set<OLD_TO_SHARED>());
     CHECK_NULL(chunk->typed_slot_set<OLD_TO_SHARED>());
 
@@ -778,7 +775,7 @@ void HeapVerification::VerifyRememberedSetFor(Tagged<HeapObject> object) {
     CHECK_NULL(chunk->typed_slot_set<OLD_TO_NEW_BACKGROUND>());
   }
 
-  if (!v8_flags.sticky_mark_bits && Heap::InYoungGeneration(object)) {
+  if (!v8_flags.sticky_mark_bits && HeapLayout::InYoungGeneration(object)) {
     CHECK_NULL(chunk->slot_set<OLD_TO_NEW>());
     CHECK_NULL(chunk->typed_slot_set<OLD_TO_NEW>());
 
@@ -812,7 +809,7 @@ void HeapVerifier::VerifyReadOnlyHeap(Heap* heap) {
 // static
 void HeapVerifier::VerifyObjectLayoutChangeIsAllowed(
     Heap* heap, Tagged<HeapObject> object) {
-  if (InWritableSharedSpace(object)) {
+  if (HeapLayout::InWritableSharedSpace(object)) {
     // Out of objects in the shared heap, only strings can change layout.
     CHECK(IsString(object));
     // Shared strings only change layout under GC, never concurrently.

@@ -191,8 +191,16 @@ bool RelocInfo::IsInConstantPool() { return false; }
 
 uint32_t RelocInfo::wasm_call_tag() const {
   DCHECK(rmode_ == WASM_CALL || rmode_ == WASM_STUB_CALL);
-  return static_cast<uint32_t>(
-      Assembler::target_address_at(pc_, constant_pool_));
+  Instr instr = Assembler::instr_at(pc_);
+  Instr instr1 = Assembler::instr_at(pc_ + 1 * kInstrSize);
+  if (Assembler::IsAuipc(instr) && Assembler::IsJalr(instr1)) {
+    DCHECK(reinterpret_cast<Instruction*>(pc_)->RdValue() ==
+           reinterpret_cast<Instruction*>(pc_ + 4)->Rs1Value());
+    return Assembler::BrachlongOffset(instr, instr1);
+  } else {
+    return static_cast<uint32_t>(
+        Assembler::target_address_at(pc_, constant_pool_));
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -269,7 +277,7 @@ void Assembler::GetCode(Isolate* isolate, CodeDesc* desc) {
   GetCode(isolate->main_thread_local_isolate(), desc);
 }
 void Assembler::GetCode(LocalIsolate* isolate, CodeDesc* desc,
-                        SafepointTableBuilder* safepoint_table_builder,
+                        SafepointTableBuilderBase* safepoint_table_builder,
                         int handler_table_offset) {
   // As a crutch to avoid having to add manual Align calls wherever we use a
   // raw workflow to create InstructionStream objects (mostly in tests), add
@@ -1865,7 +1873,7 @@ void ConstantPool::SetLoadOffsetToConstPoolEntry(int load_offset,
 #elif V8_TARGET_ARCH_RISCV32
   DCHECK(assm_->IsLw(instr_load));
 #endif
-  DCHECK_EQ(assm_->LoadOffset(instr_load), 0);
+  DCHECK_EQ(assm_->LoadOffset(instr_load), 1);
   DCHECK_EQ(assm_->AuipcOffset(instr_auipc), 0);
   int32_t distance = static_cast<int32_t>(
       reinterpret_cast<Address>(entry_offset) -

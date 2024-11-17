@@ -44,12 +44,14 @@ namespace internal {
 
 #define __ ACCESS_MASM(masm)
 
-void Builtins::Generate_Adaptor(MacroAssembler* masm, Address address) {
+void Builtins::Generate_Adaptor(MacroAssembler* masm,
+                                int formal_parameter_count, Address address) {
   __ CodeEntry();
 
   __ LoadAddress(kJavaScriptCallExtraArg1Register,
                  ExternalReference::Create(address));
-  __ TailCallBuiltin(Builtin::kAdaptorWithBuiltinExitFrame);
+  __ TailCallBuiltin(
+      Builtins::AdaptorWithBuiltinExitFrame(formal_parameter_count));
 }
 
 namespace {
@@ -2838,7 +2840,13 @@ void Generate_OSREntry(MacroAssembler* masm, Register entry_address) {
   // Drop the return address on the stack and jump to the OSR entry
   // point of the function.
   __ Drop(1);
+#ifdef V8_ENABLE_CET_IBT
+  // TODO(sroettger): Use the notrack prefix since not all OSR entries emit an
+  // endbr instruction yet.
+  __ jmp(entry_address, /*notrack=*/true);
+#else
   __ jmp(entry_address);
+#endif
 }
 
 enum class OsrSourceTier {

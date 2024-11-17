@@ -1898,7 +1898,7 @@ class WasmDecoder : public Decoder {
                   imm.mem_index, num_memories);
       return false;
     }
-    if (!VALIDATE(this->module_->memories[imm.mem_index].is_memory64 ||
+    if (!VALIDATE(this->module_->memories[imm.mem_index].is_memory64() ||
                   imm.offset <= kMaxUInt32)) {
       this->DecodeError(pc, "memory offset outside 32-bit range: %" PRIu64,
                         imm.offset);
@@ -2041,6 +2041,8 @@ class WasmDecoder : public Decoder {
       DecodeError(pc, "invalid data segment index: %u", imm.index);
       return false;
     }
+    // TODO(14616): Data segments aren't available during eager validation.
+    // Discussion: github.com/WebAssembly/shared-everything-threads/issues/83
     if (!VALIDATE(!is_shared_ || module_->data_segments[imm.index].shared)) {
       DecodeError(
           pc, "cannot refer to non-shared segment %u from a shared function",
@@ -2972,11 +2974,11 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
   }
 
   V8_INLINE ValueType TableIndexType(const WasmTable* table) {
-    return table->is_table64 ? kWasmI64 : kWasmI32;
+    return table->is_table64() ? kWasmI64 : kWasmI32;
   }
 
   V8_INLINE ValueType MemoryIndexType(const WasmMemory* memory) {
-    return memory->is_memory64 ? kWasmI64 : kWasmI32;
+    return memory->is_memory64() ? kWasmI64 : kWasmI32;
   }
 
   V8_INLINE MemoryAccessImmediate
@@ -3331,15 +3333,8 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
   }
 
   DECODE(ThrowRef) {
-    this->detected_->add_exnref();
-    Value value = Pop();
-    if (!VALIDATE(
-            (value.type.kind() == kRef || value.type.kind() == kRefNull) &&
-            value.type.heap_type() == HeapType::kExn)) {
-      this->DecodeError("invalid type for throw_ref: expected exnref, found %s",
-                        value.type.name().c_str());
-      return 0;
-    }
+    CHECK_PROTOTYPE_OPCODE(exnref);
+    Value value = Pop(kWasmExnRef);
     CALL_INTERFACE_IF_OK_AND_REACHABLE(ThrowRef, &value);
     MarkMightThrow();
     EndControl();
@@ -3516,7 +3511,11 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
         if (!VALIDATE(TypeCheckOneArmedIf(c))) return 0;
       }
       if (c->is_try_table()) {
-        current_catch_ = c->previous_catch;
+        // "Pop" the {current_catch_} index. We did not push it if the block has
+        // no handler, so also skip it here in this case.
+        if (c->catch_cases.size() > 0) {
+          current_catch_ = c->previous_catch;
+        }
         FallThrough();
         // Temporarily set the reachability for the catch handlers, and restore
         // it before we actually exit the try block.
@@ -5963,7 +5962,7 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
     }
 
     const FunctionSig* sig =
-        WasmOpcodes::SignatureForAtomicOp(opcode, imm.memory->is_memory64);
+        WasmOpcodes::SignatureForAtomicOp(opcode, imm.memory->is_memory64());
     V8_ASSUME(sig != nullptr);
     PoppedArgVector args = PopArgs(sig);
     Value* result = sig->return_count() ? Push(sig->GetReturn()) : nullptr;

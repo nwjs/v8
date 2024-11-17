@@ -2517,6 +2517,9 @@ void MacroAssembler::CallCodeObject(Register code_object,
 
 void MacroAssembler::JumpCodeObject(Register code_object, CodeEntrypointTag tag,
                                     JumpMode jump_mode) {
+  // TODO(saelo): can we avoid using this for JavaScript functions
+  // (kJSEntrypointTag) and instead use a variant that ensures that the caller
+  // and callee agree on the signature (i.e. parameter count)?
   ASM_CODE_COMMENT(this);
   DCHECK_EQ(JumpMode::kJump, jump_mode);
   LoadCodeInstructionStart(code_object, code_object, tag);
@@ -2529,12 +2532,21 @@ void MacroAssembler::JumpCodeObject(Register code_object, CodeEntrypointTag tag,
   Jump(x17);
 }
 
-void MacroAssembler::CallJSFunction(Register function_object) {
+void MacroAssembler::CallJSFunction(Register function_object,
+                                    uint16_t argument_count) {
   Register code = kJavaScriptCallCodeStartRegister;
-#ifdef V8_ENABLE_LEAPTIERING
-  Ldr(code.W(),
+#if V8_ENABLE_LEAPTIERING
+  Register dispatch_handle = kJavaScriptCallDispatchHandleRegister;
+  Register parameter_count = x20;
+  Register scratch = x21;
+
+  Ldr(dispatch_handle.W(),
       FieldMemOperand(function_object, JSFunction::kDispatchHandleOffset));
-  LoadCodeEntrypointFromJSDispatchTable(code, code);
+  LoadEntrypointAndParameterCountFromJSDispatchTable(code, parameter_count,
+                                                     dispatch_handle, scratch);
+  // Force a safe crash if the parameter count doesn't match.
+  Cmp(parameter_count, Immediate(argument_count));
+  SbxCheck(le, AbortReason::kJSSignatureMismatch);
   Call(code);
 #elif V8_ENABLE_SANDBOX
   // When the sandbox is enabled, we can directly fetch the entrypoint pointer
@@ -2554,10 +2566,12 @@ void MacroAssembler::CallJSFunction(Register function_object) {
 void MacroAssembler::JumpJSFunction(Register function_object,
                                     JumpMode jump_mode) {
   Register code = kJavaScriptCallCodeStartRegister;
-#ifdef V8_ENABLE_LEAPTIERING
-  Ldr(code.W(),
+#if V8_ENABLE_LEAPTIERING
+  Register dispatch_handle = kJavaScriptCallDispatchHandleRegister;
+  Register scratch = x20;
+  Ldr(dispatch_handle.W(),
       FieldMemOperand(function_object, JSFunction::kDispatchHandleOffset));
-  LoadCodeEntrypointFromJSDispatchTable(code, code);
+  LoadEntrypointFromJSDispatchTable(code, dispatch_handle, scratch);
   DCHECK_EQ(jump_mode, JumpMode::kJump);
   // We jump through x17 here because for Branch Identification (BTI) we use
   // "Call" (`bti c`) rather than "Jump" (`bti j`) landing pads for tail-called
@@ -2717,8 +2731,8 @@ void MacroAssembler::InvokePrologue(Register formal_parameter_count,
   // move up in the stack and let {slots_to_claim} be the number of extra stack
   // slots to claim.
   Label even_extra_count, skip_move;
-  Register slots_to_copy = x4;
-  Register slots_to_claim = x5;
+  Register slots_to_copy = x5;
+  Register slots_to_claim = x6;
 
   Mov(slots_to_copy, actual_argument_count);
   Mov(slots_to_claim, extra_argument_count);
@@ -2746,21 +2760,21 @@ void MacroAssembler::InvokePrologue(Register formal_parameter_count,
 
   // Move the arguments already in the stack including the receiver.
   {
-    Register src = x6;
-    Register dst = x7;
+    Register src = x7;
+    Register dst = x8;
     SlotAddress(src, slots_to_claim);
     SlotAddress(dst, 0);
     CopyDoubleWords(dst, src, slots_to_copy);
   }
 
   Bind(&skip_move);
-  Register pointer_next_value = x5;
+  Register pointer_next_value = x6;
 
   // Copy extra arguments as undefined values.
   {
     Label loop;
-    Register undefined_value = x6;
-    Register count = x7;
+    Register undefined_value = x7;
+    Register count = x8;
     LoadRoot(undefined_value, RootIndex::kUndefinedValue);
     SlotAddress(pointer_next_value, actual_argument_count);
     Mov(count, extra_argument_count);
@@ -2774,7 +2788,7 @@ void MacroAssembler::InvokePrologue(Register formal_parameter_count,
   // Set padding if needed.
   {
     Label skip;
-    Register total_args_slots = x4;
+    Register total_args_slots = x5;
     Add(total_args_slots, actual_argument_count, extra_argument_count);
     Tbz(total_args_slots, 0, &skip);
     Str(padreg, MemOperand(pointer_next_value));
@@ -2798,8 +2812,11 @@ void MacroAssembler::CallDebugOnFunctionCall(
     Register expected_parameter_count_or_dispatch_handle,
     Register actual_parameter_count) {
   ASM_CODE_COMMENT(this);
+  DCHECK(!AreAliased(x5, fun, new_target,
+                     expected_parameter_count_or_dispatch_handle,
+                     actual_parameter_count));
   // Load receiver to pass it later to DebugOnFunctionCall hook.
-  Peek(x4, ReceiverOperand());
+  Peek(x5, ReceiverOperand());
   FrameScope frame(
       this, has_frame() ? StackFrame::NO_FRAME_TYPE : StackFrame::INTERNAL);
 
@@ -2810,7 +2827,7 @@ void MacroAssembler::CallDebugOnFunctionCall(
   SmiTag(actual_parameter_count);
   Push(expected_parameter_count_or_dispatch_handle, actual_parameter_count,
        new_target, fun);
-  Push(fun, x4);
+  Push(fun, x5);
   CallRuntime(Runtime::kDebugOnFunctionCall);
 
   // Restore values from stack.
@@ -2864,16 +2881,16 @@ void MacroAssembler::InvokeFunctionCode(
   DCHECK_EQ(function, x1);
   DCHECK_IMPLIES(new_target.is_valid(), new_target == x3);
 
-  Register dispatch_handle = x20;
+  Register dispatch_handle = kJavaScriptCallDispatchHandleRegister;
   Ldr(dispatch_handle.W(),
       FieldMemOperand(function, JSFunction::kDispatchHandleOffset));
 
   // On function call, call into the debugger if necessary.
   Label debug_hook, continue_after_hook;
   {
-    Mov(x4, ExternalReference::debug_hook_on_function_call_address(isolate()));
-    Ldrsb(x4, MemOperand(x4));
-    Cbnz(x4, &debug_hook);
+    Mov(x5, ExternalReference::debug_hook_on_function_call_address(isolate()));
+    Ldrsb(x5, MemOperand(x5));
+    Cbnz(x5, &debug_hook);
   }
   bind(&continue_after_hook);
 
@@ -2882,18 +2899,19 @@ void MacroAssembler::InvokeFunctionCode(
     LoadRoot(x3, RootIndex::kUndefinedValue);
   }
 
+  Register scratch = x20;
   if (argument_adaption_mode == ArgumentAdaptionMode::kAdapt) {
     Register expected_parameter_count = x2;
     LoadParameterCountFromJSDispatchTable(expected_parameter_count,
-                                          dispatch_handle);
+                                          dispatch_handle, scratch);
     InvokePrologue(expected_parameter_count, actual_parameter_count, type);
   }
 
   // We call indirectly through the code field in the function to
   // allow recompilation to take effect without changing any of the
   // call sites.
-  LoadCodeEntrypointFromJSDispatchTable(kJavaScriptCallCodeStartRegister,
-                                        dispatch_handle);
+  LoadEntrypointFromJSDispatchTable(kJavaScriptCallCodeStartRegister,
+                                    dispatch_handle, scratch);
   switch (type) {
     case InvokeType::kCall:
       Call(kJavaScriptCallCodeStartRegister);
@@ -2931,9 +2949,9 @@ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
   // On function call, call into the debugger if necessary.
   Label debug_hook, continue_after_hook;
   {
-    Mov(x4, ExternalReference::debug_hook_on_function_call_address(isolate()));
-    Ldrsb(x4, MemOperand(x4));
-    Cbnz(x4, &debug_hook);
+    Mov(x5, ExternalReference::debug_hook_on_function_call_address(isolate()));
+    Ldrsb(x5, MemOperand(x5));
+    Cbnz(x5, &debug_hook);
   }
   bind(&continue_after_hook);
 
@@ -2948,9 +2966,10 @@ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
   // We call indirectly through the code field in the function to
   // allow recompilation to take effect without changing any of the
   // call sites.
+  constexpr int unused_argument_count = 0;
   switch (type) {
     case InvokeType::kCall:
-      CallJSFunction(function);
+      CallJSFunction(function, unused_argument_count);
       break;
     case InvokeType::kJump:
       JumpJSFunction(function);
@@ -3957,32 +3976,46 @@ void MacroAssembler::LoadCodeEntrypointViaCodePointer(Register destination,
 #endif  // V8_ENABLE_SANDBOX
 
 #ifdef V8_ENABLE_LEAPTIERING
-void MacroAssembler::LoadCodeEntrypointFromJSDispatchTable(
-    Register destination, Register dispatch_handle) {
+void MacroAssembler::LoadEntrypointFromJSDispatchTable(Register destination,
+                                                       Register dispatch_handle,
+                                                       Register scratch) {
+  DCHECK(!AreAliased(destination, dispatch_handle, scratch));
   ASM_CODE_COMMENT(this);
-  UseScratchRegisterScope temps(this);
-  Register scratch = temps.AcquireX();
+
+  Register index = destination;
   Mov(scratch, ExternalReference::js_dispatch_table_address());
-  // TODO(saelo): can the offset computation be done more efficiently?
-  Mov(destination, Operand(dispatch_handle, LSR, kJSDispatchHandleShift));
-  Mov(destination, Operand(destination, LSL, kJSDispatchTableEntrySizeLog2));
-  DCHECK_EQ(JSDispatchEntry::kEntrypointOffset, 0);
-  Ldr(destination, MemOperand(scratch, destination));
+  Mov(index, Operand(dispatch_handle, LSR, kJSDispatchHandleShift));
+  Add(scratch, scratch, Operand(index, LSL, kJSDispatchTableEntrySizeLog2));
+  Ldr(destination, MemOperand(scratch, JSDispatchEntry::kEntrypointOffset));
 }
 
 void MacroAssembler::LoadParameterCountFromJSDispatchTable(
-    Register destination, Register dispatch_handle) {
+    Register destination, Register dispatch_handle, Register scratch) {
+  DCHECK(!AreAliased(destination, dispatch_handle, scratch));
   ASM_CODE_COMMENT(this);
-  UseScratchRegisterScope temps(this);
-  Register scratch = temps.AcquireX();
+
+  Register index = destination;
   Mov(scratch, ExternalReference::js_dispatch_table_address());
-  // TODO(saelo): can the offset computation be done more efficiently?
-  Mov(destination, Operand(dispatch_handle, LSR, kJSDispatchHandleShift));
-  Mov(destination, Operand(destination, LSL, kJSDispatchTableEntrySizeLog2));
-  Add(destination, destination, Immediate(JSDispatchEntry::kCodeObjectOffset));
-  Ldr(destination, MemOperand(scratch, destination));
-  And(destination, destination,
-      Immediate(JSDispatchEntry::kParameterCountMask));
+  Mov(index, Operand(dispatch_handle, LSR, kJSDispatchHandleShift));
+  Add(scratch, scratch, Operand(index, LSL, kJSDispatchTableEntrySizeLog2));
+  static_assert(JSDispatchEntry::kParameterCountMask == 0xffff);
+  Ldrh(destination, MemOperand(scratch, JSDispatchEntry::kCodeObjectOffset));
+}
+
+void MacroAssembler::LoadEntrypointAndParameterCountFromJSDispatchTable(
+    Register entrypoint, Register parameter_count, Register dispatch_handle,
+    Register scratch) {
+  DCHECK(!AreAliased(entrypoint, parameter_count, dispatch_handle, scratch));
+  ASM_CODE_COMMENT(this);
+
+  Register index = parameter_count;
+  Mov(scratch, ExternalReference::js_dispatch_table_address());
+  Mov(index, Operand(dispatch_handle, LSR, kJSDispatchHandleShift));
+  Add(scratch, scratch, Operand(index, LSL, kJSDispatchTableEntrySizeLog2));
+  Ldr(entrypoint, MemOperand(scratch, JSDispatchEntry::kEntrypointOffset));
+  static_assert(JSDispatchEntry::kParameterCountMask == 0xffff);
+  Ldrh(parameter_count,
+       MemOperand(scratch, JSDispatchEntry::kCodeObjectOffset));
 }
 #endif
 
@@ -4213,6 +4246,10 @@ void MacroAssembler::Check(Condition cond, AbortReason reason) {
   Abort(reason);
   // Will not return here.
   Bind(&ok);
+}
+
+void MacroAssembler::SbxCheck(Condition cc, AbortReason reason) {
+  Check(cc, reason);
 }
 
 void MacroAssembler::Trap() { Brk(0); }

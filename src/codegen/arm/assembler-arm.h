@@ -307,6 +307,10 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // own buffer. Otherwise it takes ownership of the provided buffer.
   explicit Assembler(const AssemblerOptions&,
                      std::unique_ptr<AssemblerBuffer> = {});
+  // For compatibility with assemblers that require a zone.
+  Assembler(const MaybeAssemblerZone&, const AssemblerOptions& options,
+            std::unique_ptr<AssemblerBuffer> buffer = {})
+      : Assembler(options, std::move(buffer)) {}
 
   ~Assembler() override;
 
@@ -316,6 +320,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   void AbortedCodeGeneration() override {
     pending_32_bit_constants_.clear();
     first_const_pool_32_use_ = -1;
+    constant_pool_deadline_ = kMaxInt;
   }
 
   // GetCode emits any pending (non-emitted) code and fills the descriptor desc.

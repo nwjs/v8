@@ -23,8 +23,8 @@ std::shared_ptr<NativeModule> NewModule(Isolate* isolate) {
   auto module = std::make_shared<WasmModule>(kWasmOrigin);
   constexpr size_t kCodeSizeEstimate = 16384;
   auto native_module = GetWasmEngine()->NewNativeModule(
-      isolate, WasmEnabledFeatures::All(), CompileTimeImports{},
-      std::move(module), kCodeSizeEstimate);
+      isolate, WasmEnabledFeatures::All(), WasmDetectedFeatures{},
+      CompileTimeImports{}, std::move(module), kCodeSizeEstimate);
   native_module->SetWireBytes({});
   return native_module;
 }
@@ -40,10 +40,12 @@ TEST(CacheHit) {
   uint32_t canonical_type_index =
       GetTypeCanonicalizer()->AddRecursiveGroup(sig);
   int expected_arity = static_cast<int>(sig->parameter_count());
+  auto* canonical_sig =
+      GetTypeCanonicalizer()->LookupFunctionSignature(canonical_type_index);
   {
     WasmCodeRefScope wasm_code_ref_scope;
     WasmCode* c1 = CompileImportWrapperForTest(
-        module.get(), isolate->counters(), kind, sig, canonical_type_index,
+        isolate, module.get(), kind, canonical_sig, canonical_type_index,
         expected_arity, kNoSuspend);
 
     CHECK_NOT_NULL(c1);
@@ -70,18 +72,20 @@ TEST(CacheMissSig) {
   WasmCodeRefScope wasm_code_ref_scope;
 
   auto kind = ImportCallKind::kJSFunctionArityMatch;
-  auto sig1 = sigs.i_i();
+  auto* sig1 = sigs.i_i();
   int expected_arity1 = static_cast<int>(sig1->parameter_count());
   uint32_t canonical_type_index1 =
       GetTypeCanonicalizer()->AddRecursiveGroup(sig1);
+  auto* canonical_sig1 =
+      GetTypeCanonicalizer()->LookupFunctionSignature(canonical_type_index1);
   auto sig2 = sigs.i_ii();
   int expected_arity2 = static_cast<int>(sig2->parameter_count());
   uint32_t canonical_type_index2 =
       GetTypeCanonicalizer()->AddRecursiveGroup(sig2);
 
-  WasmCode* c1 = CompileImportWrapperForTest(module.get(), isolate->counters(),
-                                             kind, sig1, canonical_type_index1,
-                                             expected_arity1, kNoSuspend);
+  WasmCode* c1 = CompileImportWrapperForTest(
+      isolate, module.get(), kind, canonical_sig1, canonical_type_index1,
+      expected_arity1, kNoSuspend);
 
   CHECK_NOT_NULL(c1);
   CHECK_EQ(WasmCode::Kind::kWasmToJsWrapper, c1->kind());
@@ -104,10 +108,12 @@ TEST(CacheMissKind) {
   int expected_arity = static_cast<int>(sig->parameter_count());
   uint32_t canonical_type_index =
       GetTypeCanonicalizer()->AddRecursiveGroup(sig);
+  auto* canonical_sig =
+      GetTypeCanonicalizer()->LookupFunctionSignature(canonical_type_index);
 
-  WasmCode* c1 = CompileImportWrapperForTest(module.get(), isolate->counters(),
-                                             kind1, sig, canonical_type_index,
-                                             expected_arity, kNoSuspend);
+  WasmCode* c1 = CompileImportWrapperForTest(
+      isolate, module.get(), kind1, canonical_sig, canonical_type_index,
+      expected_arity, kNoSuspend);
 
   CHECK_NOT_NULL(c1);
   CHECK_EQ(WasmCode::Kind::kWasmToJsWrapper, c1->kind());
@@ -129,14 +135,18 @@ TEST(CacheHitMissSig) {
   int expected_arity1 = static_cast<int>(sig1->parameter_count());
   uint32_t canonical_type_index1 =
       GetTypeCanonicalizer()->AddRecursiveGroup(sig1);
+  auto* canonical_sig1 =
+      GetTypeCanonicalizer()->LookupFunctionSignature(canonical_type_index1);
   auto sig2 = sigs.i_ii();
   int expected_arity2 = static_cast<int>(sig2->parameter_count());
   uint32_t canonical_type_index2 =
       GetTypeCanonicalizer()->AddRecursiveGroup(sig2);
+  auto* canonical_sig2 =
+      GetTypeCanonicalizer()->LookupFunctionSignature(canonical_type_index2);
 
-  WasmCode* c1 = CompileImportWrapperForTest(module.get(), isolate->counters(),
-                                             kind, sig1, canonical_type_index1,
-                                             expected_arity1, kNoSuspend);
+  WasmCode* c1 = CompileImportWrapperForTest(
+      isolate, module.get(), kind, canonical_sig1, canonical_type_index1,
+      expected_arity1, kNoSuspend);
 
   CHECK_NOT_NULL(c1);
   CHECK_EQ(WasmCode::Kind::kWasmToJsWrapper, c1->kind());
@@ -146,8 +156,8 @@ TEST(CacheHitMissSig) {
 
   CHECK_NULL(c2);
 
-  c2 = CompileImportWrapperForTest(module.get(), isolate->counters(), kind,
-                                   sig2, canonical_type_index2, expected_arity2,
+  c2 = CompileImportWrapperForTest(isolate, module.get(), kind, canonical_sig2,
+                                   canonical_type_index2, expected_arity2,
                                    kNoSuspend);
 
   CHECK_NE(c1, c2);

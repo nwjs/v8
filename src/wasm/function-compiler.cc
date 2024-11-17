@@ -54,8 +54,9 @@ WasmCompilationResult WasmCompilationUnit::ExecuteImportWrapperCompilation(
   // instantiation time.
   auto kind = kDefaultImportCallKind;
   bool source_positions = is_asmjs_module(env->module);
+  // TODO(366180605): Drop the cast!
   WasmCompilationResult result = compiler::CompileWasmImportCallWrapper(
-      env, kind, sig, source_positions,
+      env, kind, reinterpret_cast<const CanonicalSig*>(sig), source_positions,
       static_cast<int>(sig->parameter_count()), wasm::kNoSuspend);
   return result;
 }
@@ -65,7 +66,7 @@ WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
     Counters* counters, WasmDetectedFeatures* detected) {
   const WasmFunction* func = &env->module->functions[func_index_];
   base::Vector<const uint8_t> code = wire_bytes_storage->GetCode(func->code);
-  bool is_shared = env->module->types[func->sig_index].is_shared;
+  bool is_shared = env->module->type(func->sig_index).is_shared;
   wasm::FunctionBody func_body{func->sig, func->code.offset(), code.begin(),
                                code.end(), is_shared};
 
@@ -140,7 +141,11 @@ WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
         std::unique_ptr<DebugSideTable> unused_debug_sidetable;
         if (V8_UNLIKELY(declared_index < 32 &&
                         (v8_flags.wasm_debug_mask_for_testing &
-                         (1 << declared_index)) != 0)) {
+                         (1 << declared_index)) != 0) &&
+            // Do not overwrite the debugging setting when performing a
+            // deoptimization.
+            (!v8_flags.wasm_deopt ||
+             env->deopt_location_kind == LocationKindForDeopt::kNone)) {
           options.set_debug_sidetable(&unused_debug_sidetable);
           if (!for_debugging_) options.set_for_debugging(kForDebugging);
         }
@@ -191,8 +196,7 @@ void WasmCompilationUnit::CompileWasmFunction(Counters* counters,
                                               const WasmFunction* function,
                                               ExecutionTier tier) {
   ModuleWireBytes wire_bytes(native_module->wire_bytes());
-  bool is_shared =
-      native_module->module()->types[function->sig_index].is_shared;
+  bool is_shared = native_module->module()->type(function->sig_index).is_shared;
   FunctionBody function_body{function->sig, function->code.offset(),
                              wire_bytes.start() + function->code.offset(),
                              wire_bytes.start() + function->code.end_offset(),
@@ -216,7 +220,7 @@ void WasmCompilationUnit::CompileWasmFunction(Counters* counters,
 }
 
 JSToWasmWrapperCompilationUnit::JSToWasmWrapperCompilationUnit(
-    Isolate* isolate, const FunctionSig* sig, uint32_t canonical_sig_index,
+    Isolate* isolate, const CanonicalSig* sig, uint32_t canonical_sig_index,
     const WasmModule* module, WasmEnabledFeatures enabled_features)
     : isolate_(isolate),
       sig_(sig),
@@ -287,7 +291,7 @@ Handle<Code> JSToWasmWrapperCompilationUnit::Finalize() {
 
 // static
 Handle<Code> JSToWasmWrapperCompilationUnit::CompileJSToWasmWrapper(
-    Isolate* isolate, const FunctionSig* sig, uint32_t canonical_sig_index,
+    Isolate* isolate, const CanonicalSig* sig, uint32_t canonical_sig_index,
     const WasmModule* module) {
   // Run the compilation unit synchronously.
   WasmEnabledFeatures enabled_features =

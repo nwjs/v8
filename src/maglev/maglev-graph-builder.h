@@ -1937,7 +1937,7 @@ class MaglevGraphBuilder {
   V(StringPrototypeCharCodeAt)                 \
   V(StringPrototypeCodePointAt)                \
   V(StringPrototypeIterator)                   \
-  V(StringPrototypeLocaleCompare)              \
+  IF_INTL(V, StringPrototypeLocaleCompareIntl) \
   CONTINUATION_PRESERVED_EMBEDDER_DATA_LIST(V) \
   IEEE_754_UNARY_LIST(V)
 
@@ -2271,14 +2271,14 @@ class MaglevGraphBuilder {
       compiler::AccessMode access_mode,
       GenericAccessFunc&& build_generic_access);
 
+  template <typename GenericAccessFunc>
   ReduceResult TryBuildLoadNamedProperty(
       ValueNode* receiver, ValueNode* lookup_start_object,
-      compiler::NameRef name, compiler::FeedbackSource& feedback_source);
+      compiler::NameRef name, compiler::FeedbackSource& feedback_source,
+      GenericAccessFunc&& build_generic_access);
   ReduceResult TryBuildLoadNamedProperty(
       ValueNode* receiver, compiler::NameRef name,
-      compiler::FeedbackSource& feedback_source) {
-    return TryBuildLoadNamedProperty(receiver, receiver, name, feedback_source);
-  }
+      compiler::FeedbackSource& feedback_source);
 
   ReduceResult BuildLoadTypedArrayLength(ValueNode* object,
                                          ElementsKind elements_kind);

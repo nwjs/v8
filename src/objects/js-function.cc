@@ -51,6 +51,7 @@ CodeKinds JSFunction::GetAvailableCodeKinds(IsolateForSandbox isolate) const {
     }
   }
 
+#ifndef V8_ENABLE_LEAPTIERING
   // Check the optimized code cache.
   if (has_feedback_vector() && feedback_vector()->has_optimized_code() &&
       !feedback_vector()
@@ -60,6 +61,7 @@ CodeKinds JSFunction::GetAvailableCodeKinds(IsolateForSandbox isolate) const {
     DCHECK(CodeKindIsOptimizedJSFunction(code->kind()));
     result |= CodeKindToCodeKindFlag(code->kind());
   }
+#endif  // !V8_ENABLE_LEAPTIERING
 
   DCHECK_EQ((result & ~kJSFunctionCodeKindsMask), 0);
   return result;
@@ -887,6 +889,8 @@ bool CanSubclassHaveInobjectProperties(InstanceType instance_type) {
     case JS_PROMISE_CONSTRUCTOR_TYPE:
     case JS_REG_EXP_CONSTRUCTOR_TYPE:
     case JS_ARRAY_CONSTRUCTOR_TYPE:
+    case JS_ASYNC_DISPOSABLE_STACK_TYPE:
+    case JS_SYNC_DISPOSABLE_STACK_TYPE:
 #define TYPED_ARRAY_CONSTRUCTORS_SWITCH(Type, type, TYPE, Ctype) \
   case TYPE##_TYPED_ARRAY_CONSTRUCTOR_TYPE:
       TYPED_ARRAYS(TYPED_ARRAY_CONSTRUCTORS_SWITCH)

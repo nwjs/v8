@@ -975,6 +975,7 @@ class OptimizedCodeCache : public AllStatic {
   static V8_WARN_UNUSED_RESULT MaybeHandle<Code> Get(
       Isolate* isolate, DirectHandle<JSFunction> function,
       BytecodeOffset osr_offset, CodeKind code_kind) {
+    DCHECK_IMPLIES(V8_ENABLE_LEAPTIERING_BOOL, IsOSR(osr_offset));
     if (!CodeKindIsStoredInOptimizedCodeCache(code_kind)) return {};
     if (!function->has_feedback_vector()) return {};
 
@@ -993,9 +994,13 @@ class OptimizedCodeCache : public AllStatic {
           feedback_vector->GetOptimizedOsrCode(isolate, it.GetSlotOperand(2));
       if (maybe_code.has_value()) code = maybe_code.value();
     } else {
+#ifdef V8_ENABLE_LEAPTIERING
+      UNREACHABLE();
+#else
       feedback_vector->EvictOptimizedCodeMarkedForDeoptimization(
           isolate, shared, "OptimizedCodeCache::Get");
       code = feedback_vector->optimized_code(isolate);
+#endif  // V8_ENABLE_LEAPTIERING
     }
 
     if (code.is_null() || code->kind() != code_kind) return {};
@@ -1013,6 +1018,7 @@ class OptimizedCodeCache : public AllStatic {
   static void Insert(Isolate* isolate, Tagged<JSFunction> function,
                      BytecodeOffset osr_offset, Tagged<Code> code,
                      bool is_function_context_specializing) {
+    DCHECK_IMPLIES(V8_ENABLE_LEAPTIERING_BOOL, IsOSR(osr_offset));
     const CodeKind kind = code->kind();
     if (!CodeKindIsStoredInOptimizedCodeCache(kind)) return;
 
@@ -1030,6 +1036,9 @@ class OptimizedCodeCache : public AllStatic {
       return;
     }
 
+#ifdef V8_ENABLE_LEAPTIERING
+    UNREACHABLE();
+#else
     DCHECK(!IsOSR(osr_offset));
 
     if (is_function_context_specializing) {
@@ -1045,6 +1054,7 @@ class OptimizedCodeCache : public AllStatic {
 
     function->shared()->set_function_context_independent_compiled(true);
     feedback_vector->SetOptimizedCode(isolate, code);
+#endif  // V8_ENABLE_LEAPTIERING
   }
 };
 
@@ -1096,10 +1106,12 @@ bool CompileTurbofan_NotConcurrent(Isolate* isolate,
   // Success!
   job->RecordCompilationStats(ConcurrencyMode::kSynchronous, isolate);
   DCHECK(!isolate->has_exception());
-  OptimizedCodeCache::Insert(isolate, *compilation_info->closure(),
-                             compilation_info->osr_offset(),
-                             *compilation_info->code(),
-                             compilation_info->function_context_specializing());
+  if (!V8_ENABLE_LEAPTIERING_BOOL || job->compilation_info()->is_osr()) {
+    OptimizedCodeCache::Insert(
+        isolate, *compilation_info->closure(), compilation_info->osr_offset(),
+        *compilation_info->code(),
+        compilation_info->function_context_specializing());
+  }
   job->RecordFunctionCompilation(LogEventListener::CodeTag::kFunction, isolate);
   return true;
 }
@@ -1347,26 +1359,28 @@ MaybeHandle<Code> GetOrCompileOptimized(
   // turbo_filter.
   if (!ShouldOptimize(code_kind, shared)) return {};
 
-  Handle<Code> cached_code;
-  if (OptimizedCodeCache::Get(isolate, function, osr_offset, code_kind)
-          .ToHandle(&cached_code)) {
-    if (IsOSR(osr_offset)) {
-      if (!function->osr_tiering_in_progress()) {
-        function->feedback_vector()->reset_osr_urgency();
+  if (!V8_ENABLE_LEAPTIERING_BOOL || IsOSR(osr_offset)) {
+    Handle<Code> cached_code;
+    if (OptimizedCodeCache::Get(isolate, function, osr_offset, code_kind)
+            .ToHandle(&cached_code)) {
+      if (IsOSR(osr_offset)) {
+        if (!function->osr_tiering_in_progress()) {
+          function->feedback_vector()->reset_osr_urgency();
+        }
+      } else {
+        DCHECK_LE(cached_code->kind(), code_kind);
       }
-    } else {
-      DCHECK_LE(cached_code->kind(), code_kind);
-    }
-    return cached_code;
-  }
-
-  if (IsOSR(osr_offset)) {
-    // One OSR job per function at a time.
-    if (function->osr_tiering_in_progress()) {
-      return {};
+      return cached_code;
     }
 
-    function->feedback_vector()->reset_osr_urgency();
+    if (IsOSR(osr_offset)) {
+      // One OSR job per function at a time.
+      if (function->osr_tiering_in_progress()) {
+        return {};
+      }
+
+      function->feedback_vector()->reset_osr_urgency();
+    }
   }
 
   DCHECK(shared->is_compiled());
@@ -1765,8 +1779,17 @@ class MergeAssumptionChecker final : public ObjectVisitor {
       // doesn't have enough information to indicate their usage, so we enqueue
       // those objects here rather than during VisitPointers.
       if (IsScript(current)) {
-        Tagged<HeapObject> infos = Cast<Script>(current)->infos();
+        Tagged<Script> script = Cast<Script>(current);
+        Tagged<HeapObject> infos = script->infos();
         QueueVisit(infos, kScriptInfosList);
+        // Avoid visiting eval_from_shared_or_wrapped_arguments. This field
+        // points to data outside the new Script, and doesn't need to be merged.
+        Tagged<HeapObject> eval_from_shared_or_wrapped_arguments;
+        if (script->eval_from_shared_or_wrapped_arguments()
+                .GetHeapObjectIfStrong(
+                    &eval_from_shared_or_wrapped_arguments)) {
+          visited_.insert(eval_from_shared_or_wrapped_arguments);
+        }
       } else if (IsBytecodeArray(current)) {
         Tagged<HeapObject> constants =
             Cast<BytecodeArray>(current)->constant_pool();
@@ -1794,7 +1817,11 @@ class MergeAssumptionChecker final : public ObjectVisitor {
       if (maybe_obj.GetHeapObject(&obj)) {
         if (IsSharedFunctionInfo(obj)) {
           CHECK((current_object_kind_ == kConstantPool && !is_weak) ||
-                (current_object_kind_ == kScriptInfosList && is_weak));
+                (current_object_kind_ == kScriptInfosList && is_weak) ||
+                (IsScript(host) &&
+                 current.address() ==
+                     host.address() +
+                         Script::kEvalFromSharedOrWrappedArgumentsOffset));
         } else if (IsScopeInfo(obj)) {
           CHECK((current_object_kind_ == kConstantPool && !is_weak) ||
                 (current_object_kind_ == kNormalObject && !is_weak) ||
@@ -4326,10 +4353,12 @@ void Compiler::FinalizeTurbofanCompilationJob(TurbofanCompilationJob* job,
                                      isolate);
       if (V8_LIKELY(use_result)) {
         ResetTieringState(isolate, *function, osr_offset);
-        OptimizedCodeCache::Insert(
-            isolate, *compilation_info->closure(),
-            compilation_info->osr_offset(), *compilation_info->code(),
-            compilation_info->function_context_specializing());
+        if (!V8_ENABLE_LEAPTIERING_BOOL || IsOSR(osr_offset)) {
+          OptimizedCodeCache::Insert(
+              isolate, *compilation_info->closure(),
+              compilation_info->osr_offset(), *compilation_info->code(),
+              compilation_info->function_context_specializing());
+        }
         CompilerTracer::TraceCompletedJob(isolate, compilation_info);
         if (IsOSR(osr_offset)) {
           CompilerTracer::TraceOptimizeOSRFinished(isolate, function,
@@ -4398,8 +4427,10 @@ void Compiler::FinalizeMaglevCompilationJob(maglev::MaglevCompilationJob* job,
     }
 
     DCHECK(code->is_maglevved());
-    OptimizedCodeCache::Insert(isolate, *function, osr_offset, *code,
-                               job->specialize_to_function_context());
+    if (!V8_ENABLE_LEAPTIERING_BOOL || IsOSR(osr_offset)) {
+      OptimizedCodeCache::Insert(isolate, *function, osr_offset, *code,
+                                 job->specialize_to_function_context());
+    }
 
     RecordMaglevFunctionCompilation(isolate, function,
                                     Cast<AbstractCode>(code));
@@ -4429,6 +4460,7 @@ void Compiler::PostInstantiation(Isolate* isolate,
     // are just creating a new closure that shares the same feedback cell.
     JSFunction::InitializeFeedbackCell(function, is_compiled_scope, false);
 
+#ifndef V8_ENABLE_LEAPTIERING
     if (function->has_feedback_vector()) {
       // Evict any deoptimized code on feedback vector. We need to do this after
       // creating the closure, since any heap allocations could trigger a GC and
@@ -4441,11 +4473,10 @@ void Compiler::PostInstantiation(Isolate* isolate,
         // Caching of optimized code enabled and optimized code found.
         DCHECK(!code->marked_for_deoptimization());
         DCHECK(function->shared()->is_compiled());
-        // TODO(olivf, 42204201): In leaptiering we should check that the code
-        // in the dispatch table is already up-to-date here.
         function->UpdateCode(code);
       }
     }
+#endif  // !V8_ENABLE_LEAPTIERING
 
     if (v8_flags.always_turbofan && shared->allows_lazy_compilation() &&
         !shared->optimization_disabled() &&

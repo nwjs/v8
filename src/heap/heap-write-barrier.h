@@ -26,12 +26,6 @@ class MarkCompactCollector;
 class MarkingBarrier;
 class RelocInfo;
 
-inline bool ObjectInYoungGeneration(Tagged<Object> object);
-inline bool IsReadOnlyHeapObject(Tagged<HeapObject> object);
-inline bool IsCodeSpaceObject(Tagged<HeapObject> object);
-inline bool IsTrustedSpaceObject(Tagged<HeapObject> object);
-inline bool IsImmortalImmovableHeapObject(Tagged<HeapObject> object);
-
 // Write barrier interface. It's preferred to use the macros defined in
 // `object-macros.h`.
 //
@@ -112,6 +106,8 @@ class V8_EXPORT_PRIVATE WriteBarrier final {
 
  private:
   static bool PageFlagsAreConsistent(Tagged<HeapObject> object);
+
+  static inline bool IsImmortalImmovableHeapObject(Tagged<HeapObject> object);
 
   static inline bool IsMarking(Tagged<HeapObject> object);
 

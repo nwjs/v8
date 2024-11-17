@@ -139,16 +139,8 @@ bool CanOptimizeFastSignature(const CFunctionInfo* c_signature) {
 #endif
 
   for (unsigned int i = 0; i < c_signature->ArgumentCount(); ++i) {
-    // So far we do not support string parameters for API functions with return
-    // values. The reason is that with string parameters it is possible that the
-    // backup regular API call is used but does not throw an exception. However,
-    // return values of regular API calls cannot be handled correctly at the
-    // moment.
-    if (c_signature->ArgumentInfo(i).GetType() ==
-            CTypeInfo::Type::kSeqOneByteString &&
-        c_signature->ReturnInfo().GetType() != CTypeInfo::Type::kVoid) {
-      return false;
-    }
+    USE(i);
+
 #ifdef V8_TARGET_ARCH_X64
     // Clamp lowering in EffectControlLinearizer uses rounding.
     uint8_t flags = uint8_t(c_signature->ArgumentInfo(i).GetFlags());
@@ -395,7 +387,7 @@ Node* FastApiCallBuilder::Build(const FastApiCallFunctionVector& c_functions,
   }
 
   CallDescriptor* call_descriptor =
-      Linkage::GetSimplifiedCDescriptor(graph()->zone(), builder.Build());
+      Linkage::GetSimplifiedCDescriptor(graph()->zone(), builder.Get());
 
   Node* c_call_result =
       WrapFastCall(call_descriptor, c_arg_count + extra_input_count + 1, inputs,

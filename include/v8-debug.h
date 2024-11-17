@@ -133,6 +133,11 @@ class V8_EXPORT StackTrace {
   V8_DEPRECATED("Use Isolate version")
                 Local<StackFrame> GetFrame(uint32_t index) const;
   /**
+   * Returns the (unique) ID of this stack trace.
+   */
+  int GetID() const;
+
+  /**
    * Returns a StackFrame at a particular index.
    */
   Local<StackFrame> GetFrame(Isolate* isolate, uint32_t index) const;

@@ -349,6 +349,7 @@ class RootVisitor;
   /* Caches */                                                                 \
   V(FixedArray, string_split_cache, StringSplitCache)                          \
   V(FixedArray, regexp_multiple_cache, RegExpMultipleCache)                    \
+  V(FixedArray, regexp_match_global_atom_cache, RegExpMatchGlobalAtomCache)    \
   /* Indirection lists for isolate-independent builtins */                     \
   V(FixedArray, builtins_constants_table, BuiltinsConstantsTable)              \
   /* Internal SharedFunctionInfos */                                           \
@@ -412,6 +413,7 @@ class RootVisitor;
 #define SMI_ROOT_LIST(V)                                                       \
   V(Smi, last_script_id, LastScriptId)                                         \
   V(Smi, last_debugging_id, LastDebuggingId)                                   \
+  V(Smi, last_stack_trace_id, LastStackTraceId)                                \
   /* To distinguish the function templates, so that we can find them in the */ \
   /* function cache of the native context. */                                  \
   V(Smi, next_template_serial_number, NextTemplateSerialNumber)                \
@@ -663,11 +665,9 @@ class RootsTable {
   friend class Factory;
   friend class FactoryBase<Factory>;
   friend class FactoryBase<LocalFactory>;
-  friend class PointerCompressedReadOnlyArtifacts;
   friend class ReadOnlyHeap;
   friend class ReadOnlyRoots;
   friend class RootsSerializer;
-  friend class SoleReadOnlyHeap;
 };
 
 #define ROOT_TYPE_FWD_DECL(Type, name, CamelName) class Type;

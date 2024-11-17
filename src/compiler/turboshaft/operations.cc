@@ -16,9 +16,9 @@
 #include "src/common/globals.h"
 #include "src/compiler/backend/instruction-selector.h"
 #include "src/compiler/frame-states.h"
-#include "src/compiler/graph-visualizer.h"
 #include "src/compiler/js-heap-broker.h"
 #include "src/compiler/machine-operator.h"
+#include "src/compiler/turbofan-graph-visualizer.h"
 #include "src/compiler/turboshaft/deopt-data.h"
 #include "src/compiler/turboshaft/graph.h"
 #include "src/handles/handles-inl.h"
@@ -135,7 +135,6 @@ bool ValidOpInputRep(
   std::cerr << "Expected " << (expected_reps.size() > 1 ? "one of " : "")
             << PrintCollection(expected_reps).WithoutBrackets() << " but found "
             << input_rep << ".\n";
-  std::cout << "Input: " << graph.Get(input) << "\n";
   return false;
 }
 
@@ -574,6 +573,10 @@ void ConstantOp::PrintOptions(std::ostream& os) const {
       os << "relocatable wasm canonical signature ID: "
          << static_cast<int32_t>(storage.integral);
       break;
+    case Kind::kRelocatableWasmIndirectCallTarget:
+      os << "relocatable wasm indirect call target: "
+         << static_cast<uint32_t>(storage.integral);
+      break;
   }
   os << ']';
 }
@@ -829,11 +832,6 @@ void DidntThrowOp::Validate(const Graph& graph) const {
     case Opcode::kCall: {
       auto& call_op = graph.Get(throwing_operation()).Cast<CallOp>();
       DCHECK_EQ(call_op.descriptor->out_reps, outputs_rep());
-      break;
-    }
-    case Opcode::kFastApiCall: {
-      auto& call_op = graph.Get(throwing_operation()).Cast<FastApiCallOp>();
-      DCHECK_EQ(call_op.out_reps, outputs_rep());
       break;
     }
 #define STATIC_OUTPUT_CASE(Name)                                           \
@@ -1511,6 +1509,7 @@ const RegisterRepresentation& RepresentationFor(wasm::ValueType type) {
       return kSimd128;
     case wasm::kVoid:
     case wasm::kRtt:
+    case wasm::kTop:
     case wasm::kBottom:
       UNREACHABLE();
   }

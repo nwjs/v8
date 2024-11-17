@@ -12,13 +12,13 @@
 #include "src/codegen/machine-type.h"
 #include "src/codegen/tnode.h"
 #include "src/compiler/backend/instruction-selector.h"
-#include "src/compiler/graph.h"
 #include "src/compiler/js-graph.h"
 #include "src/compiler/linkage.h"
 #include "src/compiler/node-matchers.h"
 #include "src/compiler/pipeline.h"
 #include "src/compiler/raw-machine-assembler.h"
 #include "src/compiler/schedule.h"
+#include "src/compiler/turbofan-graph.h"
 #include "src/handles/handles-inl.h"
 #include "src/heap/factory-inl.h"
 #include "src/numbers/conversions-inl.h"
@@ -517,6 +517,15 @@ void CodeAssembler::Return(TNode<WordT> value1, TNode<Object> value2) {
   DCHECK_EQ(2, raw_assembler()->call_descriptor()->ReturnCount());
   DCHECK_EQ(
       MachineType::PointerRepresentation(),
+      raw_assembler()->call_descriptor()->GetReturnType(0).representation());
+  DCHECK(raw_assembler()->call_descriptor()->GetReturnType(1).IsTagged());
+  return raw_assembler()->Return(value1, value2);
+}
+
+void CodeAssembler::Return(TNode<Word32T> value1, TNode<Object> value2) {
+  DCHECK_EQ(2, raw_assembler()->call_descriptor()->ReturnCount());
+  DCHECK_EQ(
+      MachineRepresentation::kWord32,
       raw_assembler()->call_descriptor()->GetReturnType(0).representation());
   DCHECK(raw_assembler()->call_descriptor()->GetReturnType(1).IsTagged());
   return raw_assembler()->Return(value1, value2);

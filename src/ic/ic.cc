@@ -22,6 +22,7 @@
 #include "src/execution/tiering-manager.h"
 #include "src/handles/handles-inl.h"
 #include "src/handles/maybe-handles.h"
+#include "src/heap/heap-layout-inl.h"
 #include "src/ic/call-optimization.h"
 #include "src/ic/handler-configuration-inl.h"
 #include "src/ic/handler-configuration.h"
@@ -162,18 +163,8 @@ void IC::TraceIC(const char* type, DirectHandle<Object> name, State old_state,
   ic_info.type += type;
 
   int code_offset = 0;
-  Tagged<AbstractCode> code = function->abstract_code(isolate_);
-  if (function->ActiveTierIsIgnition(isolate())) {
-    code_offset = InterpretedFrame::GetBytecodeOffset(frame->fp());
-  } else if (function->ActiveTierIsBaseline(isolate())) {
-    // TODO(pthier): AbstractCode should fully support Baseline code.
-    BaselineFrame* baseline_frame = BaselineFrame::cast(frame);
-    code_offset = baseline_frame->GetBytecodeOffset();
-    code = Cast<AbstractCode>(baseline_frame->GetBytecodeArray());
-  } else {
-    code_offset =
-        static_cast<int>(frame->pc() - function->instruction_start(isolate()));
-  }
+  Tagged<AbstractCode> code;
+  std::tie(code, code_offset) = frame->GetActiveCodeAndOffset();
   JavaScriptFrame::CollectFunctionAndOffsetForICStats(isolate(), function, code,
                                                       code_offset);
 
@@ -2525,8 +2516,9 @@ void KeyedStoreIC::StoreElementPolymorphicHandlers(
 
 namespace {
 
-bool MayHaveTypedArrayInPrototypeChain(DirectHandle<JSObject> object) {
-  for (PrototypeIterator iter(object->GetIsolate(), *object); !iter.IsAtEnd();
+bool MayHaveTypedArrayInPrototypeChain(Isolate* isolate,
+                                       DirectHandle<JSObject> object) {
+  for (PrototypeIterator iter(isolate, *object); !iter.IsAtEnd();
        iter.Advance()) {
     // Be conservative, don't walk into proxies.
     if (IsJSProxy(iter.GetCurrent())) return true;
@@ -2656,7 +2648,8 @@ MaybeHandle<Object> KeyedStoreIC::Store(Handle<Object> object,
                  JSArray::HasReadOnlyLength(Cast<JSArray>(object))) {
         set_slow_stub_reason("array has read only length");
       } else if (IsJSObject(*object) &&
-                 MayHaveTypedArrayInPrototypeChain(Cast<JSObject>(object))) {
+                 MayHaveTypedArrayInPrototypeChain(isolate(),
+                                                   Cast<JSObject>(object))) {
         // Make sure we don't handle this in IC if there's any JSTypedArray in
         // the {receiver}'s prototype chain, since that prototype is going to
         // swallow all stores that are out-of-bounds for said prototype, and we
@@ -3340,15 +3333,15 @@ bool CanCacheCloneTargetMapTransition(
   // This is a performance dcheck. If it fails, the clone IC does not handle a
   // case it probably could.
   // TODO(olivf): Either remove that dcheck or move it to GetCloneModeForMap.
-  DCHECK(!InReadOnlySpace(*source_map));
-  if (InReadOnlySpace(*source_map) || source_map->is_deprecated() ||
+  DCHECK(!HeapLayout::InReadOnlySpace(*source_map));
+  if (HeapLayout::InReadOnlySpace(*source_map) || source_map->is_deprecated() ||
       source_map->is_prototype_map()) {
     return false;
   }
   if (!target_map) {
     return true;
   }
-  CHECK(!InReadOnlySpace(**target_map));
+  CHECK(!HeapLayout::InReadOnlySpace(**target_map));
   return !(*target_map)->is_deprecated();
 }
 

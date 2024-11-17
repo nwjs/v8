@@ -39,7 +39,7 @@ void WasmInliner::Trace(Node* call, int inlinee, const char* decision) {
 }
 
 int WasmInliner::GetCallCount(Node* call) {
-  if (!env_->enabled_features.has_inlining() && !env_->module->is_wasm_gc) {
+  if (!v8_flags.wasm_inlining) {
     return 0;
   }
   return mcgraph()->GetCallCount(call->id());
@@ -102,9 +102,8 @@ Reduction WasmInliner::ReduceCall(Node* call) {
 
   // If liftoff ran and collected call counts, only inline calls that have been
   // invoked often, except for truly tiny functions.
-  if (v8_flags.liftoff &&
-      (env_->enabled_features.has_inlining() || env_->module->is_wasm_gc) &&
-      wire_byte_size >= 12 && call_count < min_count_for_inlining) {
+  if (v8_flags.liftoff && v8_flags.wasm_inlining && wire_byte_size >= 12 &&
+      call_count < min_count_for_inlining) {
     Trace(call, inlinee_index, "not called often enough");
     return NoChange();
   }
@@ -216,7 +215,7 @@ void WasmInliner::Finalize() {
     base::Vector<const uint8_t> function_bytes =
         data_.wire_bytes_storage->GetCode(inlinee->code);
 
-    bool is_shared = module()->types[inlinee->sig_index].is_shared;
+    bool is_shared = module()->type(inlinee->sig_index).is_shared;
 
     const wasm::FunctionBody inlinee_body{inlinee->sig, inlinee->code.offset(),
                                           function_bytes.begin(),
@@ -251,10 +250,12 @@ void WasmInliner::Finalize() {
                                     caller_pos});
     int inlining_position_id =
         static_cast<int>(inlining_positions_->size()) - 1;
-    WasmGraphBuilder builder(env_, zone(), mcgraph_, inlinee_body.sig,
-                             data_.source_positions,
-                             WasmGraphBuilder::kInstanceParameterMode,
-                             nullptr /* isolate */, env_->enabled_features);
+    // TODO(366180605): Drop the cast!
+    WasmGraphBuilder builder(
+        env_, zone(), mcgraph_,
+        reinterpret_cast<const wasm::ModuleFunctionSig*>(inlinee_body.sig),
+        data_.source_positions, WasmGraphBuilder::kInstanceParameterMode,
+        nullptr /* isolate */, env_->enabled_features);
     builder.set_inlining_id(inlining_position_id);
     {
       Graph::SubgraphScope scope(graph());

@@ -186,6 +186,13 @@ V8_INLINE Dest bit_cast(Source const& source) {
 #endif
 #endif
 
+// Define V8_USE_SAFE_STACK macro.
+#if defined(__has_feature)
+#if __has_feature(safe_stack)
+#define V8_USE_SAFE_STACK 1
+#endif  // __has_feature(safe_stack)
+#endif  // defined(__has_feature)
+
 // DISABLE_CFI_PERF -- Disable Control Flow Integrity checks for Perf reasons.
 #define DISABLE_CFI_PERF V8_CLANG_NO_SANITIZE("cfi")
 
@@ -496,16 +503,17 @@ bool is_inbounds(float_t v) {
 #define IF_TARGET_ARCH_64_BIT(V, ...)
 #endif  // V8_TARGET_ARCH_64_BIT
 
-// Defines IF_OFFICIAL_BUILD and IF_NO_OFFICIAL_BUILD, to be used in macro lists
-// for elements that should only be there in official / non-official builds.
-#ifdef OFFICIAL_BUILD
+// Defines IF_V8_WASM_RANDOM_FUZZERS and IF_NO_V8_WASM_RANDOM_FUZZERS, to be
+// used in macro lists for elements that should only be there/absent when
+// building the Wasm fuzzers.
+#ifdef V8_WASM_RANDOM_FUZZERS
 // EXPAND is needed to work around MSVC's broken __VA_ARGS__ expansion.
-#define IF_OFFICIAL_BUILD(V, ...) EXPAND(V(__VA_ARGS__))
-#define IF_NO_OFFICIAL_BUILD(V, ...)
+#define IF_V8_WASM_RANDOM_FUZZERS(V, ...) EXPAND(V(__VA_ARGS__))
+#define IF_NO_V8_WASM_RANDOM_FUZZERS(V, ...)
 #else
-#define IF_OFFICIAL_BUILD(V, ...)
-#define IF_NO_OFFICIAL_BUILD(V, ...) EXPAND(V(__VA_ARGS__))
-#endif  // OFFICIAL_BUILD
+#define IF_V8_WASM_RANDOM_FUZZERS(V, ...)
+#define IF_NO_V8_WASM_RANDOM_FUZZERS(V, ...) EXPAND(V(__VA_ARGS__))
+#endif  // V8_WASM_RANDOM_FUZZERS
 
 #ifdef GOOGLE3
 // Disable FRIEND_TEST macro in Google3.

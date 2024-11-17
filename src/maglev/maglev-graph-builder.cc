@@ -2974,7 +2974,7 @@ void MaglevGraphBuilder::StoreAndCacheContextSlot(ValueNode* context,
   known_node_aspects().UpdateMayHaveAliasingContexts(context);
   KnownNodeAspects::LoadedContextSlots& loaded_context_slots =
       known_node_aspects().loaded_context_slots;
-  if (known_node_aspects().may_have_aliasing_contexts ==
+  if (known_node_aspects().may_have_aliasing_contexts() ==
       KnownNodeAspects::ContextSlotLoadsAlias::Yes) {
     compiler::OptionalScopeInfoRef scope_info =
         graph()->TryGetScopeInfo(context, broker());
@@ -3014,7 +3014,7 @@ void MaglevGraphBuilder::StoreAndCacheContextSlot(ValueNode* context,
         loop_effects_->context_slot_written.insert(key);
       }
     }
-    if (known_node_aspects().may_have_aliasing_contexts !=
+    if (known_node_aspects().may_have_aliasing_contexts() !=
         KnownNodeAspects::ContextSlotLoadsAlias::Yes) {
       auto last_store = unobserved_context_slot_stores_.find(key);
       if (last_store != unobserved_context_slot_stores_.end()) {
@@ -6331,9 +6331,11 @@ ValueNode* MaglevGraphBuilder::BuildLoadStringLength(ValueNode* string) {
   return result;
 }
 
+template <typename GenericAccessFunc>
 ReduceResult MaglevGraphBuilder::TryBuildLoadNamedProperty(
     ValueNode* receiver, ValueNode* lookup_start_object, compiler::NameRef name,
-    compiler::FeedbackSource& feedback_source) {
+    compiler::FeedbackSource& feedback_source,
+    GenericAccessFunc&& build_generic_access) {
   const compiler::ProcessedFeedback& processed_feedback =
       broker()->GetFeedbackForPropertyAccess(feedback_source,
                                              compiler::AccessMode::kLoad, name);
@@ -6343,14 +6345,6 @@ ReduceResult MaglevGraphBuilder::TryBuildLoadNamedProperty(
           DeoptimizeReason::kInsufficientTypeFeedbackForGenericNamedAccess);
     case compiler::ProcessedFeedback::kNamedAccess: {
       RETURN_IF_DONE(TryReuseKnownPropertyLoad(lookup_start_object, name));
-      auto build_generic_access = [this, &lookup_start_object,
-                                   &processed_feedback, &feedback_source]() {
-        ValueNode* context = GetContext();
-        return AddNewNode<LoadNamedGeneric>(
-            {context, lookup_start_object},
-            processed_feedback.AsNamedAccess().name(), feedback_source);
-      };
-
       return TryBuildNamedAccess(
           receiver, lookup_start_object, processed_feedback.AsNamedAccess(),
           feedback_source, compiler::AccessMode::kLoad, build_generic_access);
@@ -6358,6 +6352,18 @@ ReduceResult MaglevGraphBuilder::TryBuildLoadNamedProperty(
     default:
       return ReduceResult::Fail();
   }
+}
+
+ReduceResult MaglevGraphBuilder::TryBuildLoadNamedProperty(
+    ValueNode* receiver, compiler::NameRef name,
+    compiler::FeedbackSource& feedback_source) {
+  auto build_generic_access = [this, &receiver, &name, &feedback_source]() {
+    ValueNode* context = GetContext();
+    return AddNewNode<LoadNamedGeneric>({context, receiver}, name,
+                                        feedback_source);
+  };
+  return TryBuildLoadNamedProperty(receiver, receiver, name, feedback_source,
+                                   build_generic_access);
 }
 
 void MaglevGraphBuilder::VisitGetNamedProperty() {
@@ -6425,14 +6431,20 @@ void MaglevGraphBuilder::VisitGetNamedPropertyFromSuper() {
       BuildLoadTaggedField(home_object, HeapObject::kMapOffset);
   ValueNode* lookup_start_object =
       BuildLoadTaggedField(home_object_map, Map::kPrototypeOffset);
+
+  auto build_generic_access = [this, &receiver, &lookup_start_object, &name,
+                               &feedback_source]() {
+    ValueNode* context = GetContext();
+    return AddNewNode<LoadNamedFromSuperGeneric>(
+        {context, receiver, lookup_start_object}, name, feedback_source);
+  };
+
   PROCESS_AND_RETURN_IF_DONE(
       TryBuildLoadNamedProperty(receiver, lookup_start_object, name,
-                                feedback_source),
+                                feedback_source, build_generic_access),
       SetAccumulator);
   // Create a generic load.
-  ValueNode* context = GetContext();
-  SetAccumulator(AddNewNode<LoadNamedFromSuperGeneric>(
-      {context, receiver, lookup_start_object}, name, feedback_source));
+  SetAccumulator(build_generic_access());
 }
 
 bool MaglevGraphBuilder::TryBuildGetKeyedPropertyWithEnumeratedKey(
@@ -8008,9 +8020,10 @@ ReduceResult MaglevGraphBuilder::TryReduceStringPrototypeIterator(
   return allocation;
 }
 
-ReduceResult MaglevGraphBuilder::TryReduceStringPrototypeLocaleCompare(
-    compiler::JSFunctionRef target, CallArguments& args) {
 #ifdef V8_INTL_SUPPORT
+
+ReduceResult MaglevGraphBuilder::TryReduceStringPrototypeLocaleCompareIntl(
+    compiler::JSFunctionRef target, CallArguments& args) {
   if (args.count() < 1 || args.count() > 3) return ReduceResult::Fail();
 
   LocalFactory* factory = local_isolate()->factory();
@@ -8058,10 +8071,9 @@ ReduceResult MaglevGraphBuilder::TryReduceStringPrototypeLocaleCompare(
       {GetConstant(target),
        GetTaggedValue(GetValueOrUndefined(args.receiver())),
        GetTaggedValue(args[0]), GetTaggedValue(locales_node)});
-#else
-  return ReduceResult::Fail();
-#endif
 }
+
+#endif  // V8_INTL_SUPPORT
 
 #ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
 ReduceResult MaglevGraphBuilder::TryReduceGetContinuationPreservedEmbedderData(

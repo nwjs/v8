@@ -401,8 +401,8 @@ void VirtualObject::List::Print(std::ostream& os, const char* prefix,
 size_t DeoptFrame::GetInputLocationsArraySize() const {
   size_t size = 0;
   const DeoptFrame* frame = this;
+  VirtualObject::List virtual_objects = GetVirtualObjects(*frame);
   do {
-    VirtualObject::List virtual_objects = GetVirtualObjects(*frame);
     switch (frame->type()) {
       case DeoptFrame::FrameType::kInterpretedFrame:
         size += GetInputLocationSizeForValueNode(
@@ -1484,8 +1484,8 @@ void CheckUint32IsSmi::GenerateCode(MaglevAssembler* masm,
                                     const ProcessingState& state) {
   Register reg = ToRegister(input());
   // Perform an unsigned comparison against Smi::kMaxValue.
-  __ Cmp(reg, Smi::kMaxValue);
-  __ EmitEagerDeoptIf(kUnsignedGreaterThan, DeoptimizeReason::kNotASmi, this);
+  __ CompareUInt32AndEmitEagerDeoptIf(reg, Smi::kMaxValue, kUnsignedGreaterThan,
+                                      DeoptimizeReason::kNotASmi, this);
 }
 
 void CheckedSmiUntag::SetValueLocationConstraints() {
@@ -3383,8 +3383,9 @@ void CheckNotHole::SetValueLocationConstraints() {
 }
 void CheckNotHole::GenerateCode(MaglevAssembler* masm,
                                 const ProcessingState& state) {
-  __ CompareRoot(ToRegister(object_input()), RootIndex::kTheHoleValue);
-  __ EmitEagerDeoptIf(kEqual, DeoptimizeReason::kHole, this);
+  __ CompareRootAndEmitEagerDeoptIf(ToRegister(object_input()),
+                                    RootIndex::kTheHoleValue, kEqual,
+                                    DeoptimizeReason::kHole, this);
 }
 
 void ConvertHoleToUndefined::SetValueLocationConstraints() {
@@ -3690,7 +3691,7 @@ void CreateFunctionContext::GenerateCode(MaglevAssembler* masm,
         slot_count()            // slots
     );
   }
-  masm->DefineExceptionHandlerAndLazyDeoptPoint(this);
+  masm->DefineLazyDeoptPoint(lazy_deopt_info());
 }
 
 int CreateRegExpLiteral::MaxCallStackArgs() const {
@@ -3764,10 +3765,10 @@ void HasInPrototypeChain::GenerateCode(MaglevAssembler* masm,
     // Check if we can determine the prototype directly from the {object_map}.
     ZoneLabelRef if_objectisdirect(masm);
     Register instance_type = scratch;
-    __ CompareInstanceTypeRange(map, instance_type, FIRST_TYPE,
-                                LAST_SPECIAL_RECEIVER_TYPE);
+    Condition jump_cond = __ CompareInstanceTypeRange(
+        map, instance_type, FIRST_TYPE, LAST_SPECIAL_RECEIVER_TYPE);
     __ JumpToDeferredIf(
-        kUnsignedLessThanEqual,
+        jump_cond,
         [](MaglevAssembler* masm, RegisterSnapshot snapshot,
            Register object_reg, Register map, Register instance_type,
            Register result_reg, HasInPrototypeChain* node,
@@ -5250,11 +5251,14 @@ void CheckNumber::GenerateCode(MaglevAssembler* masm,
         kEqual, &done,
         v8_flags.debug_code ? Label::Distance::kFar : Label::Distance::kNear);
     // Check if it is a BigInt.
-    __ CompareTaggedRoot(scratch, RootIndex::kBigIntMap);
+    __ CompareTaggedRootAndEmitEagerDeoptIf(
+        scratch, RootIndex::kBigIntMap, kNotEqual,
+        DeoptimizeReason::kNotANumber, this);
   } else {
-    __ CompareMapWithRoot(value, RootIndex::kHeapNumberMap, scratch);
+    __ CompareMapWithRootAndEmitEagerDeoptIf(
+        value, RootIndex::kHeapNumberMap, scratch, kNotEqual,
+        DeoptimizeReason::kNotANumber, this);
   }
-  __ EmitEagerDeoptIf(kNotEqual, DeoptimizeReason::kNotANumber, this);
   __ bind(&done);
 }
 
@@ -5335,8 +5339,9 @@ void CheckedNumberToUint8Clamped::GenerateCode(MaglevAssembler* masm,
   __ Jump(&done);
   __ bind(&is_not_smi);
   // Check if HeapNumber, deopt otherwise.
-  __ CompareMapWithRoot(value, RootIndex::kHeapNumberMap, scratch);
-  __ EmitEagerDeoptIf(kNotEqual, DeoptimizeReason::kNotANumber, this);
+  __ CompareMapWithRootAndEmitEagerDeoptIf(value, RootIndex::kHeapNumberMap,
+                                           scratch, kNotEqual,
+                                           DeoptimizeReason::kNotANumber, this);
   // If heap number, get double value.
   __ LoadHeapNumberValue(double_value, value);
   // Clamp.
@@ -5544,9 +5549,17 @@ void CallKnownJSFunction::GenerateCode(MaglevAssembler* masm,
   DCHECK_EQ(kJavaScriptCallTargetRegister, ToRegister(closure()));
   __ Move(kJavaScriptCallArgCountRegister, actual_parameter_count);
   if (shared_function_info().HasBuiltinId()) {
+    // TODO(42204201) Here we should statically validate the parameter count.
+    // However, for that, every builtin needs to know its expected parameter
+    // count. See also issue 343498932.
     __ CallBuiltin(shared_function_info().builtin_id());
   } else {
-    __ CallJSFunction(kJavaScriptCallTargetRegister);
+    // TODO(42204201): Instead of validating the parameter count, we should
+    // just hardcode the dispatch entry into the generated code. That way, it
+    // will be guaranteed that the parameter count is correct. However, this
+    // requires GC support to mark the dispatch entry as alive when embedded
+    // into generated code.
+    __ CallJSFunction(kJavaScriptCallTargetRegister, expected_parameter_count_);
   }
   masm->DefineExceptionHandlerAndLazyDeoptPoint(this);
 }
@@ -5898,16 +5911,17 @@ void CallCPPBuiltin::GenerateCode(MaglevAssembler* masm,
   __ LoadRoot(scratch, RootIndex::kTheHoleValue);
 
   // Push all arguments to the builtin (including the receiver).
-  static_assert(BuiltinArguments::kNumExtraArgsWithReceiver == 5);
-  static_assert(BuiltinArguments::kReceiverOffset == 4);
+  static_assert(BuiltinArguments::kReceiverIndex == 4);
   __ PushReverse(args());
 
-  static_assert(BuiltinArguments::kNewTargetOffset == 0);
-  static_assert(BuiltinArguments::kTargetOffset == 1);
-  static_assert(BuiltinArguments::kArgcOffset == 2);
-  static_assert(BuiltinArguments::kPaddingOffset == 3);
+  static_assert(BuiltinArguments::kNumExtraArgs == 4);
+  static_assert(BuiltinArguments::kNewTargetIndex == 0);
+  static_assert(BuiltinArguments::kTargetIndex == 1);
+  static_assert(BuiltinArguments::kArgcIndex == 2);
+  static_assert(BuiltinArguments::kPaddingIndex == 3);
   // Push stack arguments for CEntry.
-  Tagged<Smi> tagged_argc = Smi::FromInt(num_args());  // Includes receiver.
+  Tagged<Smi> tagged_argc = Smi::FromInt(BuiltinArguments::kNumExtraArgs +
+                                         num_args());  // Includes receiver.
   __ Push(scratch /* padding */, tagged_argc, target(), new_target());
 
   // Move values to fixed registers after all arguments are pushed. Registers
@@ -6464,8 +6478,7 @@ void AttemptOnStackReplacement(MaglevAssembler* masm,
     // A `0` return value means there is no OSR code available yet. Continue
     // execution in Maglev, OSR code will be picked up once it exists and is
     // cached on the feedback vector.
-    __ Cmp(maybe_target_code, 0);
-    __ JumpIf(kEqual, *no_code_for_osr);
+    __ CompareInt32AndJumpIf(maybe_target_code, 0, kEqual, *no_code_for_osr);
   }
 
   __ bind(&deopt);

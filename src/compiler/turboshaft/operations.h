@@ -278,6 +278,7 @@ using Variable = SnapshotTable<OpIndex, VariableData>::Key;
 // These Operations are the lowest level handled by Turboshaft, and are
 // supported by the InstructionSelector.
 #define TURBOSHAFT_MACHINE_OPERATION_LIST(V) \
+  V(Identity)                                \
   V(WordBinop)                               \
   V(FloatBinop)                              \
   V(Word32PairBinop)                         \
@@ -412,14 +413,14 @@ inline constexpr bool IsBlockTerminator(Opcode opcode) {
 
 // Operations that can throw and that have static output representations.
 #define TURBOSHAFT_THROWING_STATIC_OUTPUTS_OPERATIONS_LIST(V) \
-  TURBOSHAFT_JS_THROWING_OPERATION_LIST(V)
+  TURBOSHAFT_JS_THROWING_OPERATION_LIST(V)                    \
+  V(FastApiCall)
 
 // This list repeats the operations that may throw and need to be followed by
 // `DidntThrow`.
 #define TURBOSHAFT_THROWING_OPERATIONS_LIST(V)          \
   TURBOSHAFT_THROWING_STATIC_OUTPUTS_OPERATIONS_LIST(V) \
-  V(Call)                                               \
-  V(FastApiCall)
+  V(Call)
 
 // Operations that need to be followed by `DidntThrowOp`.
 inline constexpr bool MayThrow(Opcode opcode) {
@@ -1319,7 +1320,7 @@ struct FixedArityOperationT : OperationT<Derived> {
   V(sat_conversion_is_safe, SatConversionIsSafe)   \
   V(word32_select, Word32Select)                   \
   V(word64_select, Word64Select)                   \
-  V(float64_to_float16, Float64ToFloat16)          \
+  V(float64_to_float16, TruncateFloat64ToFloat16)  \
   V(float16, Float16)
 
 class V8_EXPORT_PRIVATE SupportedOperations {
@@ -1530,6 +1531,30 @@ struct ToNumberOrNumericOp : FixedArityOperationT<3, ToNumberOrNumericOp> {
 
   void Validate(const Graph& graph) const {}
   auto options() const { return std::tuple{kind, lazy_deopt_on_throw}; }
+};
+
+// Note that IdentityOp is always automatically removed by CopyingPhase, so that
+// they don't block optimizations down the line.
+struct IdentityOp : FixedArityOperationT<1, IdentityOp> {
+  RegisterRepresentation rep;
+
+  static constexpr OpEffects effects = OpEffects();
+  base::Vector<const RegisterRepresentation> outputs_rep() const {
+    return base::VectorOf(&rep, 1);
+  }
+
+  base::Vector<const MaybeRegisterRepresentation> inputs_rep(
+      ZoneVector<MaybeRegisterRepresentation>& storage) const {
+    return InputsRepFactory::SingleRep(rep);
+  }
+
+  V<Any> input() const { return Base::input<Any>(0); }
+
+  IdentityOp(V<Any> input, RegisterRepresentation rep)
+      : Base(input), rep(rep) {}
+
+  void Validate(const Graph& graph) const {}
+  auto options() const { return std::tuple{rep}; }
 };
 
 struct WordBinopOp : FixedArityOperationT<2, WordBinopOp> {
@@ -2553,6 +2578,7 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
     kTrustedHeapObject,
     kRelocatableWasmCall,
     kRelocatableWasmStubCall,
+    kRelocatableWasmIndirectCallTarget,
     kRelocatableWasmCanonicalSignatureId
   };
 
@@ -2605,6 +2631,7 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
       case Kind::kTrustedHeapObject:
       case Kind::kRelocatableWasmCall:
       case Kind::kRelocatableWasmStubCall:
+      case Kind::kRelocatableWasmIndirectCallTarget:
         return RegisterRepresentation::WordPtr();
       case Kind::kSmi:
       case Kind::kHeapObject:
@@ -2706,7 +2733,8 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
     return kind == Kind::kWord32 || kind == Kind::kWord64 ||
            kind == Kind::kRelocatableWasmCall ||
            kind == Kind::kRelocatableWasmStubCall ||
-           kind == Kind::kRelocatableWasmCanonicalSignatureId;
+           kind == Kind::kRelocatableWasmCanonicalSignatureId ||
+           kind == Kind::kRelocatableWasmIndirectCallTarget;
   }
 
   auto options() const { return std::tuple{kind, storage}; }
@@ -2721,6 +2749,7 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
       case Kind::kTaggedIndex:
       case Kind::kRelocatableWasmCall:
       case Kind::kRelocatableWasmStubCall:
+      case Kind::kRelocatableWasmIndirectCallTarget:
       case Kind::kRelocatableWasmCanonicalSignatureId:
         return HashWithOptions(storage.integral);
       case Kind::kFloat32:
@@ -2751,6 +2780,7 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
       case Kind::kRelocatableWasmCall:
       case Kind::kRelocatableWasmStubCall:
       case Kind::kRelocatableWasmCanonicalSignatureId:
+      case Kind::kRelocatableWasmIndirectCallTarget:
         return storage.integral == other.storage.integral;
       case Kind::kFloat32:
         // Using a bit_cast to uint32_t in order to return false when comparing
@@ -2842,22 +2872,50 @@ struct LoadOp : OperationT<LoadOp> {
           return RawAligned();
       }
     }
-
-    // TODO(dmercadier): use designed initializers once we move to C++20.
     static constexpr Kind TaggedBase() {
-      return {true, false, false, false, true, false, false};
+      return {.tagged_base = true,
+              .maybe_unaligned = false,
+              .with_trap_handler = false,
+              .trap_on_null = false,
+              .load_eliminable = true,
+              .is_immutable = false,
+              .is_atomic = false};
     }
     static constexpr Kind RawAligned() {
-      return {false, false, false, false, true, false, false};
+      return {.tagged_base = false,
+              .maybe_unaligned = false,
+              .with_trap_handler = false,
+              .trap_on_null = false,
+              .load_eliminable = true,
+              .is_immutable = false,
+              .is_atomic = false};
     }
     static constexpr Kind RawUnaligned() {
-      return {false, true, false, false, true, false, false};
+      return {.tagged_base = false,
+              .maybe_unaligned = true,
+              .with_trap_handler = false,
+              .trap_on_null = false,
+              .load_eliminable = true,
+              .is_immutable = false,
+              .is_atomic = false};
     }
     static constexpr Kind Protected() {
-      return {false, false, true, false, true, false, false};
+      return {.tagged_base = false,
+              .maybe_unaligned = false,
+              .with_trap_handler = true,
+              .trap_on_null = false,
+              .load_eliminable = true,
+              .is_immutable = false,
+              .is_atomic = false};
     }
     static constexpr Kind TrapOnNull() {
-      return {true, false, true, true, true, false, false};
+      return {.tagged_base = true,
+              .maybe_unaligned = false,
+              .with_trap_handler = true,
+              .trap_on_null = true,
+              .load_eliminable = true,
+              .is_immutable = false,
+              .is_atomic = false};
     }
     static constexpr Kind MaybeUnaligned(MemoryRepresentation rep) {
       return rep == MemoryRepresentation::Int8() ||
@@ -6267,17 +6325,20 @@ struct FastApiCallOp : OperationT<FastApiCallOp> {
   static constexpr uint32_t kFailureValue = 0;
 
   const FastApiCallParameters* parameters;
-  base::Vector<const RegisterRepresentation> out_reps;
-  LazyDeoptOnThrow lazy_deopt_on_throw;
+
+  // FastApiCallOp has two outputs so far:
+  // (1) a `should_fallback` flag, indicating that a slow call should be done;
+  // (2) the actual return value, which is always tagged.
+  // TODO(ahaas) Remove the `should_fallback` flag once fast api functions don't
+  // use it anymore.
+  THROWING_OP_BOILERPLATE(RegisterRepresentation::Word32(),
+                          RegisterRepresentation::Tagged())
 
   static constexpr OpEffects effects = OpEffects().CanCallAnything();
 
   // There are three inputs that are not parameters, the frame state, the data
   // argument, and the context.
   static constexpr int kNumNonParamInputs = 3;
-
-  // The outputs are produced by the `DidntThrow` operation.
-  base::Vector<const RegisterRepresentation> outputs_rep() const { return {}; }
 
   base::Vector<const MaybeRegisterRepresentation> inputs_rep(
       ZoneVector<MaybeRegisterRepresentation>& storage) const {
@@ -6348,11 +6409,9 @@ struct FastApiCallOp : OperationT<FastApiCallOp> {
 
   FastApiCallOp(V<FrameState> frame_state, V<Object> data_argument,
                 V<Context> context, base::Vector<const OpIndex> arguments,
-                const FastApiCallParameters* parameters,
-                base::Vector<const RegisterRepresentation> out_reps)
+                const FastApiCallParameters* parameters)
       : Base(kNumNonParamInputs + arguments.size()),
         parameters(parameters),
-        out_reps(out_reps),
         lazy_deopt_on_throw(LazyDeoptOnThrow::kNo) {
     base::Vector<OpIndex> inputs = this->inputs();
     inputs[0] = frame_state;
@@ -6369,26 +6428,21 @@ struct FastApiCallOp : OperationT<FastApiCallOp> {
     V<Context> mapped_context = mapper.Map(context());
     auto mapped_arguments = mapper.template Map<8>(arguments());
     return fn(mapped_frame_state, mapped_data_argument, mapped_context,
-              base::VectorOf(mapped_arguments), parameters, out_reps);
+              base::VectorOf(mapped_arguments), parameters);
   }
 
   void Validate(const Graph& graph) const {
   }
 
-  static FastApiCallOp& New(
-      Graph* graph, V<FrameState> frame_state, V<Object> data_argument,
-      V<Context> context, base::Vector<const OpIndex> arguments,
-      const FastApiCallParameters* parameters,
-      base::Vector<const RegisterRepresentation> out_reps) {
+  static FastApiCallOp& New(Graph* graph, V<FrameState> frame_state,
+                            V<Object> data_argument, V<Context> context,
+                            base::Vector<const OpIndex> arguments,
+                            const FastApiCallParameters* parameters) {
     return Base::New(graph, kNumNonParamInputs + arguments.size(), frame_state,
-                     data_argument, context, arguments, parameters, out_reps);
+                     data_argument, context, arguments, parameters);
   }
 
-  // out_reps[0] is always word32.
-  auto options() const {
-    DCHECK_EQ(out_reps[0], RegisterRepresentation::Word32());
-    return std::tuple{parameters, out_reps[1], lazy_deopt_on_throw};
-  }
+  auto options() const { return std::tuple{parameters, lazy_deopt_on_throw}; }
 };
 
 struct RuntimeAbortOp : FixedArityOperationT<0, RuntimeAbortOp> {
@@ -9075,9 +9129,6 @@ inline size_t input_count(const FeedbackSource) { return 0; }
 inline size_t input_count(const ZoneRefSet<Map>) { return 0; }
 inline size_t input_count(ConstantOp::Storage) { return 0; }
 inline size_t input_count(Type) { return 0; }
-inline size_t input_count(base::Vector<const RegisterRepresentation>) {
-  return 0;
-}
 #ifdef V8_ENABLE_WEBASSEMBLY
 constexpr size_t input_count(const wasm::WasmGlobal*) { return 0; }
 constexpr size_t input_count(const wasm::StructType*) { return 0; }
@@ -9159,8 +9210,6 @@ struct ThrowingOpHasLazyDeoptOption<CallOp, void> : std::true_type {};
 template <>
 struct ThrowingOpHasProperMembers<CallOp, void> : std::true_type {};
 
-template <>
-struct ThrowingOpHasProperMembers<FastApiCallOp, void> : std::true_type {};
 }  // namespace details
 
 #define THROWING_OP_LOOKS_VALID(Name)                             \

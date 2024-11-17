@@ -946,9 +946,11 @@ const Operator* JSOperatorBuilder::CallRuntime(
 #if V8_ENABLE_WEBASSEMBLY
 const Operator* JSOperatorBuilder::CallWasm(
     const wasm::WasmModule* wasm_module,
-    const wasm::FunctionSig* wasm_signature, int wasm_function_index,
+    const wasm::CanonicalSig* wasm_signature, int wasm_function_index,
     SharedFunctionInfoRef shared_fct_info, wasm::NativeModule* native_module,
     FeedbackSource const& feedback) {
+  // TODO(clemensb): Drop wasm_module.
+  DCHECK_EQ(wasm_module, native_module->module());
   JSWasmCallParameters parameters(wasm_module, wasm_signature,
                                   wasm_function_index, shared_fct_info,
                                   native_module, feedback);

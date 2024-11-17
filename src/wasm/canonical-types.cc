@@ -21,29 +21,8 @@ TypeCanonicalizer* GetTypeCanonicalizer() {
 
 TypeCanonicalizer::TypeCanonicalizer() { AddPredefinedArrayTypes(); }
 
-// Inside the TypeCanonicalizer, we use ValueType instances constructed
-// from canonical type indices, so we can't let them get bigger than what
-// we have storage space for. Code outside the TypeCanonicalizer already
-// supports up to Smi range for canonical type indices.
-// TODO(jkummerow): Raise this limit. Possible options:
-// - increase the size of ValueType::HeapTypeField, using currently-unused bits.
-// - change the encoding of ValueType: one bit says whether it's a ref type,
-//   the other bits then encode the index or the kind of non-ref type.
-// - refactor the TypeCanonicalizer's internals to no longer use ValueTypes
-//   and related infrastructure, and use a wider encoding of canonicalized
-//   type indices only here.
-// - wait for 32-bit platforms to no longer be relevant, and increase the
-//   size of ValueType to 64 bits.
-// None of this seems urgent, as we have no evidence of the current limit
-// being an actual limitation in practice.
-static constexpr size_t kMaxCanonicalTypes = kV8MaxWasmTypes;
-// We don't want any valid modules to fail canonicalization.
-static_assert(kMaxCanonicalTypes >= kV8MaxWasmTypes);
-// We want the invalid index to fail any range checks.
-static_assert(kInvalidCanonicalIndex > kMaxCanonicalTypes);
-
 void TypeCanonicalizer::CheckMaxCanonicalIndex() const {
-  if (canonical_supertypes_.size() > kMaxCanonicalTypes) {
+  if (V8_UNLIKELY(canonical_supertypes_.size() > kMaxCanonicalTypes)) {
     V8::FatalProcessOutOfMemory(nullptr, "too many canonicalized types");
   }
 }
@@ -70,13 +49,13 @@ void TypeCanonicalizer::AddRecursiveGroup(WasmModule* module, uint32_t size,
     group.types[i] = CanonicalizeTypeDef(module, module->types[start_index + i],
                                          start_index);
   }
-  int canonical_index = FindCanonicalGroup(group);
-  if (canonical_index >= 0) {
+  if (CanonicalTypeIndex canonical_index = FindCanonicalGroup(group);
+      canonical_index.valid()) {
     // Identical group found. Map new types to the old types's canonical
     // representatives.
     for (uint32_t i = 0; i < size; i++) {
       module->isorecursive_canonical_type_ids[start_index + i] =
-          canonical_index + i;
+          CanonicalTypeIndex{canonical_index.index + i};
     }
     // TODO(clemensb): Avoid leaking the zone storage allocated for {group}
     // (both for the {Vector} in {CanonicalGroup}, but also the storage
@@ -93,12 +72,17 @@ void TypeCanonicalizer::AddRecursiveGroup(WasmModule* module, uint32_t size,
     CanonicalType& canonical_type = group.types[i];
     // Compute the canonical index of the supertype: If it is relative, we
     // need to add {first_canonical_index}.
-    canonical_supertypes_[first_canonical_index + i] =
+    canonical_supertypes_[first_canonical_index + i] = CanonicalTypeIndex{
         canonical_type.is_relative_supertype
-            ? canonical_type.type_def.supertype + first_canonical_index
-            : canonical_type.type_def.supertype;
-    module->isorecursive_canonical_type_ids[start_index + i] =
-        first_canonical_index + i;
+            ? canonical_type.supertype + first_canonical_index
+            : canonical_type.supertype};
+    CanonicalTypeIndex canonical_id{first_canonical_index + i};
+    module->isorecursive_canonical_type_ids[start_index + i] = canonical_id;
+    if (canonical_type.kind == CanonicalType::kFunction) {
+      const CanonicalSig* sig = canonical_type.function_sig;
+      DCHECK(zone_.Contains(sig));  // TODO(366180605): Drop.
+      CHECK(canonical_function_sigs_.emplace(canonical_id, sig).second);
+    }
   }
   // Check that this canonical ID is not used yet.
   DCHECK(std::none_of(
@@ -107,7 +91,7 @@ void TypeCanonicalizer::AddRecursiveGroup(WasmModule* module, uint32_t size,
   DCHECK(std::none_of(
       canonical_groups_.begin(), canonical_groups_.end(),
       [=](auto& entry) { return entry.second == first_canonical_index; }));
-  canonical_groups_.emplace(group, first_canonical_index);
+  canonical_groups_.emplace(group, CanonicalTypeIndex{first_canonical_index});
 }
 
 void TypeCanonicalizer::AddRecursiveSingletonGroup(WasmModule* module) {
@@ -117,99 +101,100 @@ void TypeCanonicalizer::AddRecursiveSingletonGroup(WasmModule* module) {
 
 void TypeCanonicalizer::AddRecursiveSingletonGroup(WasmModule* module,
                                                    uint32_t start_index) {
+  base::MutexGuard guard(&mutex_);
   DCHECK_GT(module->types.size(), start_index);
-  // Multiple threads could try to register recursive groups concurrently.
-  base::MutexGuard mutex_guard(&mutex_);
-  CanonicalSingletonGroup group{
-      CanonicalizeTypeDef(module, module->types[start_index], start_index)};
-  int canonical_index = FindCanonicalGroup(group);
-  if (canonical_index >= 0) {
-    // Identical group found. Map new types to the old types's canonical
-    // representatives.
-    module->isorecursive_canonical_type_ids[start_index] = canonical_index;
-    // TODO(clemensb): See above: Avoid leaking zone memory.
-    return;
-  }
-  // Identical group not found. Add new canonical representatives for the new
-  // types.
-  uint32_t first_canonical_index =
-      static_cast<uint32_t>(canonical_supertypes_.size());
-  canonical_supertypes_.resize(first_canonical_index + 1);
-  CheckMaxCanonicalIndex();
-  CanonicalType& canonical_type = group.type;
-  // Compute the canonical index of the supertype: If it is relative, we
-  // need to add {first_canonical_index}.
-  canonical_supertypes_[first_canonical_index] =
-      canonical_type.is_relative_supertype
-          ? canonical_type.type_def.supertype + first_canonical_index
-          : canonical_type.type_def.supertype;
-  module->isorecursive_canonical_type_ids[start_index] = first_canonical_index;
-  // Check that this canonical ID is not used yet.
-  DCHECK(std::none_of(
-      canonical_singleton_groups_.begin(), canonical_singleton_groups_.end(),
-      [=](auto& entry) { return entry.second == first_canonical_index; }));
-  DCHECK(std::none_of(
-      canonical_groups_.begin(), canonical_groups_.end(),
-      [=](auto& entry) { return entry.second == first_canonical_index; }));
-  canonical_singleton_groups_.emplace(group, first_canonical_index);
+  CanonicalTypeIndex canonical_index = AddRecursiveGroup(
+      CanonicalizeTypeDef(module, module->types[start_index], start_index));
+  module->isorecursive_canonical_type_ids[start_index] = canonical_index;
 }
 
-uint32_t TypeCanonicalizer::AddRecursiveGroup(const FunctionSig* sig) {
-  base::MutexGuard mutex_guard(&mutex_);
+CanonicalTypeIndex TypeCanonicalizer::AddRecursiveGroup(
+    const FunctionSig* sig) {
 // Types in the signature must be module-independent.
 #if DEBUG
   for (ValueType type : sig->all()) DCHECK(!type.has_index());
 #endif
-  CanonicalSingletonGroup group;
-  const bool is_final = true;
-  const bool is_shared = false;
-  group.type.type_def = TypeDefinition(sig, kNoSuperType, is_final, is_shared);
-  group.type.is_relative_supertype = false;
-  const FunctionSig* existing_sig = nullptr;
-  int canonical_index = FindCanonicalGroup(group, &existing_sig);
-  if (canonical_index >= 0) {
-    // Make sure this signature can be looked up later.
-    auto it = canonical_sigs_.find(canonical_index);
-    if (it == canonical_sigs_.end()) {
-      DCHECK_NOT_NULL(existing_sig);
-      canonical_sigs_[canonical_index] = existing_sig;
-    }
+  const bool kFinal = true;
+  const bool kNotShared = false;
+  const bool kNonRelativeSupertype = false;
+  // Because of the checks above, we can treat the type_def as canonical.
+  // TODO(366180605): It would be nice to not have to rely on a cast here.
+  // Is there a way to avoid it? In the meantime, these asserts provide at
+  // least partial assurances that the cast is safe:
+  static_assert(sizeof(CanonicalValueType) == sizeof(ModuleValueType));
+  static_assert(CanonicalValueType::Primitive(kI32).raw_bit_field() ==
+                ModuleValueType::Primitive(kI32).raw_bit_field());
+  CanonicalType canonical{reinterpret_cast<const CanonicalSig*>(sig),
+                          CanonicalTypeIndex{kNoSuperType}, kFinal, kNotShared,
+                          kNonRelativeSupertype};
+  base::MutexGuard guard(&mutex_);
+  // Fast path lookup before canonicalizing (== copying into the
+  // TypeCanonicalizer's zone) the function signature.
+  CanonicalTypeIndex canonical_index =
+      FindCanonicalGroup(CanonicalSingletonGroup{canonical});
+  if (canonical_index.valid()) return canonical_index;
+  // Copy into this class's zone, then call the generic {AddRecursiveGroup}.
+  CanonicalSig::Builder builder(&zone_, sig->return_count(),
+                                sig->parameter_count());
+  for (ValueType ret : sig->returns()) {
+    builder.AddReturn(CanonicalValueType{ret});
+  }
+  for (ValueType param : sig->parameters()) {
+    builder.AddParam(CanonicalValueType{param});
+  }
+  canonical.function_sig = builder.Get();
+  return AddRecursiveGroup(canonical);
+}
+
+CanonicalTypeIndex TypeCanonicalizer::AddRecursiveGroup(CanonicalType type) {
+  DCHECK(!mutex_.TryLock());  // The caller must hold the mutex.
+  CanonicalSingletonGroup group{type};
+  if (CanonicalTypeIndex canonical_index = FindCanonicalGroup(group);
+      canonical_index.valid()) {
+    //  Make sure this signature can be looked up later.
+    DCHECK_IMPLIES(type.kind == CanonicalType::kFunction,
+                   canonical_function_sigs_.count(canonical_index));
     return canonical_index;
   }
-  static_assert(kMaxCanonicalTypes <= kMaxInt);
-  canonical_index = static_cast<int>(canonical_supertypes_.size());
-  // We need to copy the signature in the local zone, or else we risk
-  // storing a dangling pointer in the future.
-  // TODO(clemensb): This leaks memory if duplicate types are added.
-  auto builder =
-      FunctionSig::Builder(&zone_, sig->return_count(), sig->parameter_count());
-  for (auto type : sig->returns()) builder.AddReturn(type);
-  for (auto type : sig->parameters()) builder.AddParam(type);
-  const FunctionSig* allocated_sig = builder.Get();
-  group.type.type_def =
-      TypeDefinition(allocated_sig, kNoSuperType, is_final, is_shared);
-  group.type.is_relative_supertype = false;
+  static_assert(kMaxCanonicalTypes <= kMaxUInt32);
+  CanonicalTypeIndex canonical_index{
+      static_cast<uint32_t>(canonical_supertypes_.size())};
+  // Check that this canonical ID is not used yet.
+  DCHECK(std::none_of(
+      canonical_singleton_groups_.begin(), canonical_singleton_groups_.end(),
+      [=](auto& entry) { return entry.second == canonical_index; }));
+  DCHECK(std::none_of(
+      canonical_groups_.begin(), canonical_groups_.end(),
+      [=](auto& entry) { return entry.second == canonical_index; }));
   canonical_singleton_groups_.emplace(group, canonical_index);
-  canonical_supertypes_.emplace_back(kNoSuperType);
-  DCHECK(!canonical_sigs_.contains(canonical_index));
-  canonical_sigs_[canonical_index] = allocated_sig;
+  // Compute the canonical index of the supertype: If it is relative, we
+  // need to add {canonical_index}.
+  canonical_supertypes_.push_back(
+      type.is_relative_supertype
+          ? CanonicalTypeIndex{type.supertype.index + canonical_index}
+          : type.supertype);
+  if (type.kind == CanonicalType::kFunction) {
+    const CanonicalSig* sig = type.function_sig;
+    DCHECK(zone_.Contains(sig));  // TODO(366180605): Drop.
+    CHECK(canonical_function_sigs_.emplace(canonical_index, sig).second);
+  }
   CheckMaxCanonicalIndex();
   return canonical_index;
 }
 
-// It's only valid to call this for signatures that were previously registered
-// with {AddRecursiveGroup(const FunctionSig* sig)}.
-const FunctionSig* TypeCanonicalizer::LookupSignature(
+const CanonicalSig* TypeCanonicalizer::LookupFunctionSignature(
     uint32_t canonical_index) const {
   base::MutexGuard mutex_guard(&mutex_);
-  auto it = canonical_sigs_.find(canonical_index);
-  CHECK(it != canonical_sigs_.end());
+  // TODO(366180605): Drop explicit conversion.
+  auto it = canonical_function_sigs_.find({canonical_index});
+  CHECK(it != canonical_function_sigs_.end());
   return it->second;
 }
 
 void TypeCanonicalizer::AddPredefinedArrayTypes() {
-  static constexpr std::pair<uint32_t, ValueType> kPredefinedArrayTypes[] = {
-      {kPredefinedArrayI8Index, kWasmI8}, {kPredefinedArrayI16Index, kWasmI16}};
+  static constexpr std::pair<CanonicalTypeIndex, CanonicalValueType>
+      kPredefinedArrayTypes[] = {{kPredefinedArrayI8Index, {kWasmI8}},
+                                 {kPredefinedArrayI16Index, {kWasmI16}}};
   for (auto [index, element_type] : kPredefinedArrayTypes) {
     DCHECK_EQ(index, canonical_singleton_groups_.size());
     CanonicalSingletonGroup group;
@@ -217,24 +202,26 @@ void TypeCanonicalizer::AddPredefinedArrayTypes() {
     // TODO(jkummerow): Decide whether this should be final or nonfinal.
     static constexpr bool kFinal = true;
     static constexpr bool kShared = false;  // TODO(14616): Fix this.
-    ArrayType* type = zone_.New<ArrayType>(element_type, kMutable);
-    group.type.type_def = TypeDefinition(type, kNoSuperType, kFinal, kShared);
-    group.type.is_relative_supertype = false;
+    static constexpr bool kNonRelativeSupertype = false;
+    CanonicalArrayType* type =
+        zone_.New<CanonicalArrayType>(element_type, kMutable);
+    group.type = CanonicalType(type, CanonicalTypeIndex{kNoSuperType}, kFinal,
+                               kShared, kNonRelativeSupertype);
     canonical_singleton_groups_.emplace(group, index);
-    canonical_supertypes_.emplace_back(kNoSuperType);
+    canonical_supertypes_.emplace_back(CanonicalTypeIndex{kNoSuperType});
     DCHECK_LE(canonical_supertypes_.size(), kMaxCanonicalTypes);
   }
 }
 
-ValueType TypeCanonicalizer::CanonicalizeValueType(
+CanonicalValueType TypeCanonicalizer::CanonicalizeValueType(
     const WasmModule* module, ValueType type,
     uint32_t recursive_group_start) const {
-  if (!type.has_index()) return type;
+  if (!type.has_index()) return CanonicalValueType{type};
   static_assert(kMaxCanonicalTypes <= (1u << ValueType::kHeapTypeBits));
   return type.ref_index() >= recursive_group_start
-             ? ValueType::CanonicalWithRelativeIndex(
+             ? CanonicalValueType::WithRelativeIndex(
                    type.kind(), type.ref_index() - recursive_group_start)
-             : ValueType::FromIndex(
+             : CanonicalValueType::FromIndex(
                    type.kind(),
                    module->isorecursive_canonical_type_ids[type.ref_index()]);
 }
@@ -268,6 +255,7 @@ void TypeCanonicalizer::EmptyStorageForTesting() {
   canonical_supertypes_.clear();
   canonical_groups_.clear();
   canonical_singleton_groups_.clear();
+  canonical_function_sigs_.clear();
   zone_.Reset();
   AddPredefinedArrayTypes();
 }
@@ -275,21 +263,22 @@ void TypeCanonicalizer::EmptyStorageForTesting() {
 TypeCanonicalizer::CanonicalType TypeCanonicalizer::CanonicalizeTypeDef(
     const WasmModule* module, TypeDefinition type,
     uint32_t recursive_group_start) {
-  uint32_t canonical_supertype = kNoSuperType;
+  DCHECK(!mutex_.TryLock());  // The caller must hold the mutex.
+  CanonicalTypeIndex canonical_supertype{kNoSuperType};
   bool is_relative_supertype = false;
   if (type.supertype < recursive_group_start) {
     canonical_supertype =
         module->isorecursive_canonical_type_ids[type.supertype];
-  } else if (type.supertype != kNoSuperType) {
-    canonical_supertype = type.supertype - recursive_group_start;
+  } else if (type.supertype.valid()) {
+    canonical_supertype =
+        CanonicalTypeIndex{type.supertype.index - recursive_group_start};
     is_relative_supertype = true;
   }
-  TypeDefinition result;
   switch (type.kind) {
     case TypeDefinition::kFunction: {
       const FunctionSig* original_sig = type.function_sig;
-      FunctionSig::Builder builder(&zone_, original_sig->return_count(),
-                                   original_sig->parameter_count());
+      CanonicalSig::Builder builder(&zone_, original_sig->return_count(),
+                                    original_sig->parameter_count());
       for (ValueType ret : original_sig->returns()) {
         builder.AddReturn(
             CanonicalizeValueType(module, ret, recursive_group_start));
@@ -298,13 +287,13 @@ TypeCanonicalizer::CanonicalType TypeCanonicalizer::CanonicalizeTypeDef(
         builder.AddParam(
             CanonicalizeValueType(module, param, recursive_group_start));
       }
-      result = TypeDefinition(builder.Build(), canonical_supertype,
-                              type.is_final, type.is_shared);
-      break;
+      return CanonicalType(builder.Get(), canonical_supertype, type.is_final,
+                           type.is_shared, is_relative_supertype);
     }
     case TypeDefinition::kStruct: {
       const StructType* original_type = type.struct_type;
-      StructType::Builder builder(&zone_, original_type->field_count());
+      CanonicalStructType::Builder builder(&zone_,
+                                           original_type->field_count());
       for (uint32_t i = 0; i < original_type->field_count(); i++) {
         builder.AddField(CanonicalizeValueType(module, original_type->field(i),
                                                recursive_group_start),
@@ -312,47 +301,41 @@ TypeCanonicalizer::CanonicalType TypeCanonicalizer::CanonicalizeTypeDef(
                          original_type->field_offset(i));
       }
       builder.set_total_fields_size(original_type->total_fields_size());
-      result = TypeDefinition(
-          builder.Build(StructType::Builder::kUseProvidedOffsets),
-          canonical_supertype, type.is_final, type.is_shared);
-      break;
+      return CanonicalType(
+          builder.Build(CanonicalStructType::Builder::kUseProvidedOffsets),
+          canonical_supertype, type.is_final, type.is_shared,
+          is_relative_supertype);
     }
     case TypeDefinition::kArray: {
-      ValueType element_type = CanonicalizeValueType(
+      CanonicalValueType element_type = CanonicalizeValueType(
           module, type.array_type->element_type(), recursive_group_start);
-      result = TypeDefinition(
-          zone_.New<ArrayType>(element_type, type.array_type->mutability()),
-          canonical_supertype, type.is_final, type.is_shared);
-      break;
+      CanonicalArrayType* array_type = zone_.New<CanonicalArrayType>(
+          element_type, type.array_type->mutability());
+      return CanonicalType(array_type, canonical_supertype, type.is_final,
+                           type.is_shared, is_relative_supertype);
     }
   }
-
-  return {result, is_relative_supertype};
 }
 
 // Returns the index of the canonical representative of the first type in this
 // group, or -1 if an identical group does not exist.
-int TypeCanonicalizer::FindCanonicalGroup(const CanonicalGroup& group) const {
+CanonicalTypeIndex TypeCanonicalizer::FindCanonicalGroup(
+    const CanonicalGroup& group) const {
   // Groups of size 0 do not make sense here; groups of size 1 should use
   // {CanonicalSingletonGroup} (see below).
   DCHECK_LT(1, group.types.size());
   auto it = canonical_groups_.find(group);
-  return it == canonical_groups_.end() ? -1 : it->second;
+  return it == canonical_groups_.end() ? CanonicalTypeIndex::Invalid()
+                                       : it->second;
 }
 
 // Returns the canonical index of the given group if it already exists.
-// Optionally returns the FunctionSig* providing the type definition if
-// the type in the group is a function type.
-int TypeCanonicalizer::FindCanonicalGroup(const CanonicalSingletonGroup& group,
-                                          const FunctionSig** out_sig) const {
+CanonicalTypeIndex TypeCanonicalizer::FindCanonicalGroup(
+    const CanonicalSingletonGroup& group) const {
   auto it = canonical_singleton_groups_.find(group);
   static_assert(kMaxCanonicalTypes <= kMaxInt);
-  if (it == canonical_singleton_groups_.end()) return -1;
-  if (out_sig) {
-    const CanonicalSingletonGroup& found = it->first;
-    if (found.type.type_def.kind == TypeDefinition::kFunction) {
-      *out_sig = found.type.type_def.function_sig;
-    }
+  if (it == canonical_singleton_groups_.end()) {
+    return CanonicalTypeIndex::Invalid();
   }
   return it->second;
 }
@@ -365,7 +348,7 @@ size_t TypeCanonicalizer::EstimateCurrentMemoryConsumption() const {
   size_t result = ContentSize(canonical_supertypes_);
   result += ContentSize(canonical_groups_);
   result += ContentSize(canonical_singleton_groups_);
-  result += ContentSize(canonical_sigs_);
+  result += ContentSize(canonical_function_sigs_);
   result += allocator_.GetCurrentMemoryUsage();
   if (v8_flags.trace_wasm_offheap_memory) {
     PrintF("TypeCanonicalizer: %zu\n", result);
@@ -404,13 +387,20 @@ void TypeCanonicalizer::PrepareForCanonicalTypeId(Isolate* isolate, int id) {
   Handle<WeakFixedArray> old_wrappers{old_wrappers_raw, isolate};
   old_rtts_raw = old_wrappers_raw = {};
 
+  // We allocate the WeakFixedArray filled with undefined values, as we cannot
+  // pass the cleared value in a Handle (see https://crbug.com/364591622). We
+  // overwrite the new entries via {MemsetTagged} afterwards.
   Handle<WeakFixedArray> new_rtts =
       WeakFixedArray::New(isolate, new_length, AllocationType::kOld);
   WeakFixedArray::CopyElements(isolate, *new_rtts, 0, *old_rtts, 0, old_length);
+  MemsetTagged(new_rtts->RawFieldOfFirstElement() + old_length,
+               ClearedValue(isolate), new_length - old_length);
   Handle<WeakFixedArray> new_wrappers =
       WeakFixedArray::New(isolate, new_length, AllocationType::kOld);
   WeakFixedArray::CopyElements(isolate, *new_wrappers, 0, *old_wrappers, 0,
                                old_length);
+  MemsetTagged(new_wrappers->RawFieldOfFirstElement() + old_length,
+               ClearedValue(isolate), new_length - old_length);
   heap->SetWasmCanonicalRttsAndJSToWasmWrappers(*new_rtts, *new_wrappers);
 }
 
@@ -420,5 +410,23 @@ void TypeCanonicalizer::ClearWasmCanonicalTypesForTesting(Isolate* isolate) {
   isolate->heap()->SetWasmCanonicalRttsAndJSToWasmWrappers(
       roots.empty_weak_fixed_array(), roots.empty_weak_fixed_array());
 }
+
+bool TypeCanonicalizer::IsFunctionSignature(uint32_t canonical_index) const {
+  base::MutexGuard mutex_guard(&mutex_);
+  // TODO(366180605): Drop explicit conversion.
+  auto it = canonical_function_sigs_.find({canonical_index});
+  return it != canonical_function_sigs_.end();
+}
+
+#ifdef DEBUG
+bool TypeCanonicalizer::Contains(const FunctionSig* sig) const {
+  base::MutexGuard mutex_guard(&mutex_);
+  return zone_.Contains(sig);
+}
+bool TypeCanonicalizer::Contains(const CanonicalSig* sig) const {
+  base::MutexGuard mutex_guard(&mutex_);
+  return zone_.Contains(sig);
+}
+#endif
 
 }  // namespace v8::internal::wasm

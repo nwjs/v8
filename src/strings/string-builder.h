@@ -105,6 +105,9 @@ class IncrementalStringBuilder {
 
   void AppendString(DirectHandle<String> string);
 
+  template <typename SrcChar>
+  void AppendSubstring(const SrcChar* src, size_t from, size_t to);
+
   MaybeDirectHandle<String> Finish();
 
   V8_INLINE bool HasOverflowed() const { return overflowed_; }
@@ -191,7 +194,8 @@ class IncrementalStringBuilder {
   static const int kInitialPartLength = 32;
   static const int kMaxPartLength = 16 * 1024;
   static const int kPartLengthGrowthFactor = 2;
-  static const int kIntToCStringBufferSize = 100;
+  // sizeof(string) includes \0.
+  static const int kIntToCStringBufferSize = sizeof("-2147483648");
 
   Isolate* isolate_;
   String::Encoding encoding_;

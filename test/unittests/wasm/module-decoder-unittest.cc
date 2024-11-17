@@ -211,13 +211,17 @@ class WasmModuleVerifyTest : public TestWithIsolateAndZone {
     if (size > 0) {
       memcpy(temp + sizeof(header), module_bytes.begin(), size);
     }
-    ModuleResult result = DecodeWasmModule(
-        enabled_features_, base::VectorOf(temp, total), false, kWasmOrigin);
+    WasmDetectedFeatures unused_detected_features;
+    ModuleResult result =
+        DecodeWasmModule(enabled_features_, base::VectorOf(temp, total), false,
+                         kWasmOrigin, &unused_detected_features);
     delete[] temp;
     return result;
   }
   ModuleResult DecodeModuleNoHeader(base::Vector<const uint8_t> bytes) {
-    return DecodeWasmModule(enabled_features_, bytes, false, kWasmOrigin);
+    WasmDetectedFeatures unused_detected_features;
+    return DecodeWasmModule(enabled_features_, bytes, false, kWasmOrigin,
+                            &unused_detected_features);
   }
 };
 
@@ -1072,8 +1076,7 @@ TEST_F(WasmModuleVerifyTest, NoSupertypeSupertype) {
               0xff, 0xff, 0xff, 0xff, 0x0f,  // supertype = "kNoSuperType"
               kWasmArrayTypeCode, kI32Code, 0)};
 
-  EXPECT_FAILURE_WITH_MSG(
-      no_supertype, "is greater than the maximum number of type definitions");
+  EXPECT_FAILURE_WITH_MSG(no_supertype, "type 0: invalid supertype 4294967295");
 }
 
 TEST_F(WasmModuleVerifyTest, NonSpecifiedFinalType) {
@@ -3066,11 +3069,23 @@ TEST_F(WasmModuleVerifyTest, SourceMappingURLSection) {
       SECTION_SRC_MAP('s', 'r', 'c', '/', 'x', 'y', 'z', '.', 'c')};
   ModuleResult result = DecodeModuleNoHeader(base::ArrayVector(data));
   EXPECT_TRUE(result.ok());
-  EXPECT_EQ(WasmDebugSymbols::Type::SourceMap,
-            result.value()->debug_symbols.type);
+  EXPECT_EQ(3u, result.value()->debug_symbols.size());
+  EXPECT_EQ(
+      WasmDebugSymbols::Type::SourceMap,
+      result.value()->debug_symbols[WasmDebugSymbols::Type::SourceMap].type);
+  EXPECT_EQ(WasmDebugSymbols::Type::None,
+            result.value()
+                ->debug_symbols[WasmDebugSymbols::Type::EmbeddedDWARF]
+                .type);
+  EXPECT_EQ(WasmDebugSymbols::Type::None,
+            result.value()
+                ->debug_symbols[WasmDebugSymbols::Type::ExternalDWARF]
+                .type);
   ModuleWireBytes wire_bytes(base::ArrayVector(data));
-  WasmName external_url =
-      wire_bytes.GetNameOrNull(result.value()->debug_symbols.external_url);
+  WasmName external_url = wire_bytes.GetNameOrNull(
+      result.value()
+          ->debug_symbols[WasmDebugSymbols::Type::SourceMap]
+          .external_url);
   EXPECT_EQ("src/xyz.c", std::string(external_url.data(), external_url.size()));
 }
 
@@ -3080,8 +3095,12 @@ TEST_F(WasmModuleVerifyTest, BadSourceMappingURLSection) {
       SECTION_SRC_MAP('s', 'r', 'c', '/', 'x', 0xff, 'z', '.', 'c')};
   ModuleResult result = DecodeModuleNoHeader(base::ArrayVector(data));
   EXPECT_TRUE(result.ok());
-  EXPECT_EQ(WasmDebugSymbols::Type::None, result.value()->debug_symbols.type);
-  EXPECT_EQ(0u, result.value()->debug_symbols.external_url.length());
+  EXPECT_EQ(3u, result.value()->debug_symbols.size());
+  for (size_t i = 0; i < result.value()->debug_symbols.size(); ++i) {
+    EXPECT_EQ(WasmDebugSymbols::Type::None,
+              result.value()->debug_symbols[i].type);
+    EXPECT_EQ(0u, result.value()->debug_symbols[i].external_url.length());
+  }
 }
 
 TEST_F(WasmModuleVerifyTest, MultipleSourceMappingURLSections) {
@@ -3090,11 +3109,22 @@ TEST_F(WasmModuleVerifyTest, MultipleSourceMappingURLSections) {
                                  SECTION_SRC_MAP('p', 'q', 'r')};
   ModuleResult result = DecodeModuleNoHeader(base::ArrayVector(data));
   EXPECT_TRUE(result.ok());
-  EXPECT_EQ(WasmDebugSymbols::Type::SourceMap,
-            result.value()->debug_symbols.type);
+  EXPECT_EQ(
+      WasmDebugSymbols::Type::SourceMap,
+      result.value()->debug_symbols[WasmDebugSymbols::Type::SourceMap].type);
+  EXPECT_EQ(WasmDebugSymbols::Type::None,
+            result.value()
+                ->debug_symbols[WasmDebugSymbols::Type::EmbeddedDWARF]
+                .type);
+  EXPECT_EQ(WasmDebugSymbols::Type::None,
+            result.value()
+                ->debug_symbols[WasmDebugSymbols::Type::ExternalDWARF]
+                .type);
   ModuleWireBytes wire_bytes(base::ArrayVector(data));
-  WasmName external_url =
-      wire_bytes.GetNameOrNull(result.value()->debug_symbols.external_url);
+  WasmName external_url = wire_bytes.GetNameOrNull(
+      result.value()
+          ->debug_symbols[WasmDebugSymbols::Type::SourceMap]
+          .external_url);
   EXPECT_EQ("abc", std::string(external_url.data(), external_url.size()));
 }
 
@@ -3388,7 +3418,7 @@ TEST_F(WasmModuleVerifyTest, OutOfBoundsSupertype) {
               kWasmSubtypeCode, ENTRY_COUNT(1), 1,
               WASM_STRUCT_DEF(FIELD_COUNT(1), STRUCT_FIELD(kI32Code, true)))};
   ModuleResult result = DecodeModule(base::ArrayVector(data));
-  EXPECT_NOT_OK(result, "type 0: supertype 1 out of bounds");
+  EXPECT_NOT_OK(result, "type 0: invalid supertype 1");
 }
 
 TEST_F(WasmModuleVerifyTest, ForwardSupertypeSameType) {
@@ -3397,7 +3427,7 @@ TEST_F(WasmModuleVerifyTest, ForwardSupertypeSameType) {
               kWasmSubtypeCode, ENTRY_COUNT(1), 0,
               WASM_STRUCT_DEF(FIELD_COUNT(1), STRUCT_FIELD(kI32Code, true)))};
   ModuleResult result = DecodeModule(base::ArrayVector(data));
-  EXPECT_NOT_OK(result, "type 0: forward-declared supertype 0");
+  EXPECT_NOT_OK(result, "type 0: invalid supertype 0");
 }
 
 TEST_F(WasmModuleVerifyTest, ForwardSupertypeSameRecGroup) {
@@ -3407,7 +3437,7 @@ TEST_F(WasmModuleVerifyTest, ForwardSupertypeSameRecGroup) {
               WASM_STRUCT_DEF(FIELD_COUNT(1), STRUCT_FIELD(kI32Code, true)),
               WASM_STRUCT_DEF(FIELD_COUNT(1), STRUCT_FIELD(kI32Code, true)))};
   ModuleResult result = DecodeModule(base::ArrayVector(data));
-  EXPECT_NOT_OK(result, "type 0: forward-declared supertype 0");
+  EXPECT_NOT_OK(result, "type 0: invalid supertype 0");
 }
 
 TEST_F(WasmModuleVerifyTest, IllegalPackedFields) {

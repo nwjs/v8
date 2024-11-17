@@ -42,6 +42,27 @@ constexpr Builtin Builtins::EphemeronKeyBarrier(SaveFPRegsMode fp_mode) {
 }
 
 // static
+constexpr Builtin Builtins::AdaptorWithBuiltinExitFrame(
+    int formal_parameter_count) {
+  switch (formal_parameter_count) {
+    case kDontAdaptArgumentsSentinel:
+    case JSParameterCount(0):
+      return Builtin::kAdaptorWithBuiltinExitFrame0;
+    case JSParameterCount(1):
+      return Builtin::kAdaptorWithBuiltinExitFrame1;
+    case JSParameterCount(2):
+      return Builtin::kAdaptorWithBuiltinExitFrame2;
+    case JSParameterCount(3):
+      return Builtin::kAdaptorWithBuiltinExitFrame3;
+    case JSParameterCount(4):
+      return Builtin::kAdaptorWithBuiltinExitFrame4;
+    case JSParameterCount(5):
+      return Builtin::kAdaptorWithBuiltinExitFrame5;
+  }
+  UNREACHABLE();
+}
+
+// static
 constexpr Builtin Builtins::CallFunction(ConvertReceiverMode mode) {
   switch (mode) {
     case ConvertReceiverMode::kNullOrUndefined:
@@ -215,6 +236,20 @@ constexpr bool Builtins::IsJSEntryVariant(Builtin builtin) {
       return false;
   }
   UNREACHABLE();
+}
+
+// static
+constexpr int Builtins::GetFormalParameterCount(Builtin builtin) {
+#define CPP_BUILTIN(Name, Argc) \
+  case Builtin::k##Name:        \
+    return Argc;
+
+  switch (builtin) {
+    BUILTIN_LIST_C(CPP_BUILTIN)
+    default:
+      UNREACHABLE();
+  }
+#undef CPP_BUILTIN
 }
 
 #ifdef V8_ENABLE_WEBASSEMBLY

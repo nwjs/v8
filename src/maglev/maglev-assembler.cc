@@ -164,7 +164,6 @@ void MaglevAssembler::ToBoolean(Register value, CheckType check_type,
                                 ZoneLabelRef is_true, ZoneLabelRef is_false,
                                 bool fallthrough_when_true) {
   TemporaryRegisterScope temps(this);
-  Register map = temps.AcquireScratch();
 
   if (check_type == CheckType::kCheckHeapObject) {
     // Check if {{value}} is Smi.
@@ -226,7 +225,7 @@ void MaglevAssembler::ToBoolean(Register value, CheckType check_type,
     JumpIfRoot(value, RootIndex::kNullValue, *is_false);
   }
 #endif
-
+  Register map = temps.AcquireScratch();
   LoadMap(map, value);
 
   if (!compilation_info()
@@ -446,8 +445,8 @@ void MaglevAssembler::TestTypeOf(
       JumpIfRoot(object, RootIndex::kNullValue, is_true, true_distance);
       // Check if the object is a receiver type,
       LoadMap(scratch, object);
-      CompareInstanceType(scratch, FIRST_JS_RECEIVER_TYPE);
-      JumpIf(kLessThan, is_false, false_distance);
+      CompareInstanceTypeAndJumpIf(scratch, FIRST_JS_RECEIVER_TYPE, kLessThan,
+                                   is_false, false_distance);
       // ... and is not undefined (undetectable) nor callable.
       Branch(IsNotCallableNorUndetactable(scratch, scratch), is_true,
              true_distance, fallthrough_when_true, is_false, false_distance,

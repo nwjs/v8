@@ -31,9 +31,9 @@
 #include "src/compiler/pipeline-statistics.h"
 #include "src/compiler/schedule.h"
 #include "src/compiler/simplified-operator.h"
+#include "src/compiler/turbofan-typer.h"
 #include "src/compiler/turboshaft/phase.h"
 #include "src/compiler/turboshaft/zone-with-name.h"
-#include "src/compiler/typer.h"
 #include "src/compiler/zone-stats.h"
 #include "src/execution/isolate.h"
 #include "src/handles/handles-inl.h"
@@ -120,7 +120,6 @@ class TFPipelineData {
                  NodeOriginTable* node_origins,
                  const AssemblerOptions& assembler_options)
       : isolate_(nullptr),
-        wasm_engine_(wasm_engine),
         allocator_(wasm_engine->allocator()),
         info_(info),
         debug_name_(info_->GetDebugName()),
@@ -158,11 +157,6 @@ class TFPipelineData {
                  const AssemblerOptions& assembler_options,
                  const ProfileDataFromFile* profile_data)
       : isolate_(isolate),
-#if V8_ENABLE_WEBASSEMBLY
-        // TODO(clemensb): Remove this field, use GetWasmEngine directly
-        // instead.
-        wasm_engine_(wasm::GetWasmEngine()),
-#endif  // V8_ENABLE_WEBASSEMBLY
         allocator_(allocator),
         info_(info),
         debug_name_(info_->GetDebugName()),
@@ -387,7 +381,9 @@ class TFPipelineData {
 
   CodeTracer* GetCodeTracer() const {
 #if V8_ENABLE_WEBASSEMBLY
-    if (wasm_engine_) return wasm_engine_->GetCodeTracer();
+    if (info_->IsWasm() || info_->IsWasmBuiltin()) {
+      return wasm::GetWasmEngine()->GetCodeTracer();
+    }
 #endif  // V8_ENABLE_WEBASSEMBLY
     return isolate_->GetCodeTracer();
   }
@@ -561,7 +557,6 @@ class TFPipelineData {
  private:
   Isolate* const isolate_;
 #if V8_ENABLE_WEBASSEMBLY
-  wasm::WasmEngine* const wasm_engine_ = nullptr;
   // The wasm module to be used for inlining wasm functions into JS.
   // The first module wins and inlining of different modules into the same
   // JS function is not supported. This is necessary because the wasm

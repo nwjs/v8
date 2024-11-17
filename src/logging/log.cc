@@ -30,6 +30,7 @@
 #include "src/handles/global-handles.h"
 #include "src/heap/combined-heap.h"
 #include "src/heap/heap-inl.h"
+#include "src/heap/heap-layout-inl.h"
 #include "src/init/bootstrapper.h"
 #include "src/interpreter/bytecodes.h"
 #include "src/interpreter/interpreter.h"
@@ -745,8 +746,8 @@ void LowLevelLogger::LogCodeInfo() {
   const char arch[] = "loong64";
 #elif V8_TARGET_ARCH_ARM64
   const char arch[] = "arm64";
-#elif V8_TARGET_ARCH_S390
-  const char arch[] = "s390";
+#elif V8_TARGET_ARCH_S390X
+  const char arch[] = "s390x";
 #elif V8_TARGET_ARCH_RISCV64
   const char arch[] = "riscv64";
 #elif V8_TARGET_ARCH_RISCV32
@@ -1545,8 +1546,10 @@ void V8FileLogger::FeedbackVectorEvent(Tagged<FeedbackVector> vector,
       << vector->length();
   msg << kNext << reinterpret_cast<void*>(code->InstructionStart(cage_base));
   msg << kNext << vector->tiering_state();
+#ifndef V8_ENABLE_LEAPTIERING
   msg << kNext << vector->maybe_has_maglev_code();
   msg << kNext << vector->maybe_has_turbofan_code();
+#endif  // !V8_ENABLE_LEAPTIERING
   msg << kNext << vector->invocation_count();
 
 #ifdef OBJECT_PRINT
@@ -2601,7 +2604,7 @@ void ExistingCodeLogger::LogCompiledFunctions(
     // objects are also in trusted space. Currently this breaks because we must
     // not compare objects in trusted space with ones inside the sandbox.
     static_assert(!kAllCodeObjectsLiveInTrustedSpace);
-    if (!IsTrustedSpaceObject(*pair.second) &&
+    if (!HeapLayout::InTrustedSpace(*pair.second) &&
         pair.second.is_identical_to(BUILTIN_CODE(isolate_, CompileLazy))) {
       continue;
     }

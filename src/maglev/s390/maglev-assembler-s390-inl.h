@@ -681,7 +681,7 @@ inline void MaglevAssembler::SignExtend32To64Bits(Register dst, Register src) {
   LoadS32(dst, src);
 }
 inline void MaglevAssembler::NegateInt32(Register val) {
-  LoadU32(val, val);
+  LoadS32(val, val);
   lcgr(val, val);
 }
 
@@ -856,13 +856,14 @@ inline void MaglevAssembler::CompareInstanceType(Register map,
   MacroAssembler::CompareInstanceType(map, scratch, instance_type);
 }
 
-inline void MaglevAssembler::CompareInstanceTypeRange(
+inline Condition MaglevAssembler::CompareInstanceTypeRange(
     Register map, Register instance_type_out, InstanceType lower_limit,
     InstanceType higher_limit) {
   TemporaryRegisterScope temps(this);
   Register scratch = temps.AcquireScratch();
   MacroAssembler::CompareInstanceTypeRange(map, instance_type_out, scratch,
                                            lower_limit, higher_limit);
+  return kUnsignedLessThanEqual;
 }
 
 inline void MaglevAssembler::CompareFloat64AndJumpIf(

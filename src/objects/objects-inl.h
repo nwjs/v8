@@ -21,6 +21,7 @@
 #include "src/common/ptr-compr-inl.h"
 #include "src/handles/handles-inl.h"
 #include "src/heap/factory.h"
+#include "src/heap/heap-layout-inl.h"
 #include "src/heap/heap-verifier.h"
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/heap/read-only-heap-inl.h"
@@ -357,19 +358,6 @@ Tagged<Object> HeapObject::SeqCst_CompareAndSwapField(
   } while (true);
 }
 
-bool InAnySharedSpace(Tagged<HeapObject> obj) {
-  if (IsReadOnlyHeapObject(obj)) return V8_SHARED_RO_HEAP_BOOL;
-  return InWritableSharedSpace(obj);
-}
-
-bool InWritableSharedSpace(Tagged<HeapObject> obj) {
-  return MemoryChunk::FromHeapObject(obj)->InWritableSharedSpace();
-}
-
-bool InReadOnlySpace(Tagged<HeapObject> obj) {
-  return IsReadOnlyHeapObject(obj);
-}
-
 constexpr bool FastInReadOnlySpaceOrSmallSmi(Tagged_t obj) {
 #if V8_STATIC_ROOTS_BOOL
   // The following assert ensures that the page size check covers all our static
@@ -407,7 +395,7 @@ bool IsJSObjectThatCanBeTrackedAsPrototype(Tagged<HeapObject> obj) {
   // Do not optimize objects in the shared heap because it is not
   // threadsafe. Objects in the shared heap have fixed layouts and their maps
   // never change.
-  return IsJSObject(obj) && !InWritableSharedSpace(*obj);
+  return IsJSObject(obj) && !HeapLayout::InWritableSharedSpace(*obj);
 }
 
 bool IsJSApiWrapperObject(Tagged<Map> map) {
@@ -1255,7 +1243,7 @@ Tagged<Map> HeapObject::map() const {
   // This method is never used for objects located in code space
   // (InstructionStream and free space fillers) and thus it is fine to use
   // auto-computed cage base value.
-  DCHECK_IMPLIES(V8_EXTERNAL_CODE_SPACE_BOOL, !IsCodeSpaceObject(*this));
+  DCHECK_IMPLIES(V8_EXTERNAL_CODE_SPACE_BOOL, !HeapLayout::InCodeSpace(*this));
   PtrComprCageBase cage_base = GetPtrComprCageBase(*this);
   return HeapObject::map(cage_base);
 }
@@ -1274,85 +1262,97 @@ Tagged<Map> HeapObjectLayout::map(AcquireLoadTag) const {
   return Tagged<HeapObject>(this)->map(kAcquireLoad);
 }
 
-void HeapObjectLayout::set_map(Tagged<Map> value) {
+void HeapObjectLayout::set_map(Isolate* isolate, Tagged<Map> value) {
   // TODO(leszeks): Support MapWord members and access via that instead.
-  return Tagged<HeapObject>(this)->set_map(value);
+  return Tagged<HeapObject>(this)->set_map(isolate, value);
 }
 
-void HeapObjectLayout::set_map(Tagged<Map> value, ReleaseStoreTag) {
+template <typename IsolateT>
+void HeapObjectLayout::set_map(IsolateT* isolate, Tagged<Map> value,
+                               ReleaseStoreTag) {
   // TODO(leszeks): Support MapWord members and access via that instead.
-  return Tagged<HeapObject>(this)->set_map(value, kReleaseStore);
+  return Tagged<HeapObject>(this)->set_map(isolate, value, kReleaseStore);
 }
 
-void HeapObjectLayout::set_map_safe_transition(Tagged<Map> value,
+template <typename IsolateT>
+void HeapObjectLayout::set_map_safe_transition(IsolateT* isolate,
+                                               Tagged<Map> value,
                                                ReleaseStoreTag) {
   // TODO(leszeks): Support MapWord members and access via that instead.
-  return Tagged<HeapObject>(this)->set_map_safe_transition(value,
+  return Tagged<HeapObject>(this)->set_map_safe_transition(isolate, value,
                                                            kReleaseStore);
 }
 
-void HeapObject::set_map(Tagged<Map> value) {
-  set_map<EmitWriteBarrier::kYes>(value, kRelaxedStore,
+void HeapObject::set_map(Isolate* isolate, Tagged<Map> value) {
+  set_map<EmitWriteBarrier::kYes>(isolate, value, kRelaxedStore,
                                   VerificationMode::kPotentialLayoutChange);
 }
 
-void HeapObject::set_map(Tagged<Map> value, ReleaseStoreTag tag) {
-  set_map<EmitWriteBarrier::kYes>(value, kReleaseStore,
+template <typename IsolateT>
+void HeapObject::set_map(IsolateT* isolate, Tagged<Map> value,
+                         ReleaseStoreTag tag) {
+  set_map<EmitWriteBarrier::kYes>(isolate, value, kReleaseStore,
                                   VerificationMode::kPotentialLayoutChange);
 }
 
-void HeapObject::set_map_safe_transition(Tagged<Map> value) {
-  set_map<EmitWriteBarrier::kYes>(value, kRelaxedStore,
+template <typename IsolateT>
+void HeapObject::set_map_safe_transition(IsolateT* isolate, Tagged<Map> value) {
+  set_map<EmitWriteBarrier::kYes>(isolate, value, kRelaxedStore,
                                   VerificationMode::kSafeMapTransition);
 }
 
-void HeapObject::set_map_safe_transition(Tagged<Map> value,
+template <typename IsolateT>
+void HeapObject::set_map_safe_transition(IsolateT* isolate, Tagged<Map> value,
                                          ReleaseStoreTag tag) {
-  set_map<EmitWriteBarrier::kYes>(value, kReleaseStore,
+  set_map<EmitWriteBarrier::kYes>(isolate, value, kReleaseStore,
                                   VerificationMode::kSafeMapTransition);
 }
 
 void HeapObjectLayout::set_map_safe_transition_no_write_barrier(
-    Tagged<Map> value, RelaxedStoreTag tag) {
+    Isolate* isolate, Tagged<Map> value, RelaxedStoreTag tag) {
   // TODO(leszeks): Support MapWord members and access via that instead.
   return Tagged<HeapObject>(this)->set_map_safe_transition_no_write_barrier(
-      value, tag);
+      isolate, value, tag);
 }
 
-void HeapObject::set_map_safe_transition_no_write_barrier(Tagged<Map> value,
+void HeapObject::set_map_safe_transition_no_write_barrier(Isolate* isolate,
+                                                          Tagged<Map> value,
                                                           RelaxedStoreTag tag) {
-  set_map<EmitWriteBarrier::kNo>(value, kRelaxedStore,
+  set_map<EmitWriteBarrier::kNo>(isolate, value, kRelaxedStore,
                                  VerificationMode::kSafeMapTransition);
 }
 
-void HeapObject::set_map_safe_transition_no_write_barrier(Tagged<Map> value,
+void HeapObject::set_map_safe_transition_no_write_barrier(Isolate* isolate,
+                                                          Tagged<Map> value,
                                                           ReleaseStoreTag tag) {
-  set_map<EmitWriteBarrier::kNo>(value, kReleaseStore,
+  set_map<EmitWriteBarrier::kNo>(isolate, value, kReleaseStore,
                                  VerificationMode::kSafeMapTransition);
 }
 
-void HeapObjectLayout::set_map_no_write_barrier(Tagged<Map> value,
+void HeapObjectLayout::set_map_no_write_barrier(Isolate* isolate,
+                                                Tagged<Map> value,
                                                 RelaxedStoreTag tag) {
   // TODO(leszeks): Support MapWord members and access via that instead.
-  Tagged<HeapObject>(this)->set_map_no_write_barrier(value, tag);
+  Tagged<HeapObject>(this)->set_map_no_write_barrier(isolate, value, tag);
 }
 
 // Unsafe accessor omitting write barrier.
-void HeapObject::set_map_no_write_barrier(Tagged<Map> value,
+void HeapObject::set_map_no_write_barrier(Isolate* isolate, Tagged<Map> value,
                                           RelaxedStoreTag tag) {
-  set_map<EmitWriteBarrier::kNo>(value, kRelaxedStore,
+  set_map<EmitWriteBarrier::kNo>(isolate, value, kRelaxedStore,
                                  VerificationMode::kPotentialLayoutChange);
 }
 
-void HeapObject::set_map_no_write_barrier(Tagged<Map> value,
+void HeapObject::set_map_no_write_barrier(Isolate* isolate, Tagged<Map> value,
                                           ReleaseStoreTag tag) {
-  set_map<EmitWriteBarrier::kNo>(value, kReleaseStore,
+  set_map<EmitWriteBarrier::kNo>(isolate, value, kReleaseStore,
                                  VerificationMode::kPotentialLayoutChange);
 }
 
-template <HeapObject::EmitWriteBarrier emit_write_barrier, typename MemoryOrder>
-void HeapObject::set_map(Tagged<Map> value, MemoryOrder order,
-                         VerificationMode mode) {
+template <HeapObject::EmitWriteBarrier emit_write_barrier, typename MemoryOrder,
+          typename IsolateT>
+void HeapObject::set_map(IsolateT* isolate, Tagged<Map> value,
+                         MemoryOrder order, VerificationMode mode) {
 #if V8_ENABLE_WEBASSEMBLY
   // In {WasmGraphBuilder::SetMap} and {WasmGraphBuilder::LoadMap}, we treat
   // maps as immutable. Therefore we are not allowed to mutate them here.
@@ -1364,12 +1364,13 @@ void HeapObject::set_map(Tagged<Map> value, MemoryOrder order,
   DCHECK_IMPLIES(mode != VerificationMode::kSafeMapTransition,
                  !LocalHeap::Current());
   if (v8_flags.verify_heap && !value.is_null()) {
-    Heap* heap = GetHeapFromWritableObject(*this);
     if (mode == VerificationMode::kSafeMapTransition) {
-      HeapVerifier::VerifySafeMapTransition(heap, *this, value);
+      HeapVerifier::VerifySafeMapTransition(isolate->heap()->AsHeap(), *this,
+                                            value);
     } else {
       DCHECK_EQ(mode, VerificationMode::kPotentialLayoutChange);
-      HeapVerifier::VerifyObjectLayoutChange(heap, *this, value);
+      HeapVerifier::VerifyObjectLayoutChange(isolate->heap()->AsHeap(), *this,
+                                             value);
     }
   }
   set_map_word(value, order);
@@ -1386,13 +1387,15 @@ void HeapObject::set_map(Tagged<Map> value, MemoryOrder order,
 #endif
 }
 
-void HeapObjectLayout::set_map_after_allocation(Tagged<Map> value,
+void HeapObjectLayout::set_map_after_allocation(Isolate* isolate,
+                                                Tagged<Map> value,
                                                 WriteBarrierMode mode) {
   // TODO(leszeks): Support MapWord members and access via that instead.
-  Tagged<HeapObject>(this)->set_map_after_allocation(value, mode);
+  Tagged<HeapObject>(this)->set_map_after_allocation(isolate, value, mode);
 }
 
-void HeapObject::set_map_after_allocation(Tagged<Map> value,
+template <typename IsolateT>
+void HeapObject::set_map_after_allocation(IsolateT* isolate, Tagged<Map> value,
                                           WriteBarrierMode mode) {
   set_map_word(value, kRelaxedStore);
 #ifndef V8_DISABLE_WRITE_BARRIERS
@@ -1402,9 +1405,7 @@ void HeapObject::set_map_after_allocation(Tagged<Map> value,
   } else {
     SLOW_DCHECK(
         // We allow writes of a null map before root initialisation.
-        value.is_null() ? !GetIsolateFromWritableObject(*this)
-                               ->read_only_heap()
-                               ->roots_init_complete()
+        value.is_null() ? !isolate->read_only_heap()->roots_init_complete()
                         : !WriteBarrier::IsRequired(*this, value));
   }
 #endif
@@ -1428,7 +1429,7 @@ MapWord HeapObject::map_word(RelaxedLoadTag tag) const {
   // This method is never used for objects located in code space
   // (InstructionStream and free space fillers) and thus it is fine to use
   // auto-computed cage base value.
-  DCHECK_IMPLIES(V8_EXTERNAL_CODE_SPACE_BOOL, !IsCodeSpaceObject(*this));
+  DCHECK_IMPLIES(V8_EXTERNAL_CODE_SPACE_BOOL, !HeapLayout::InCodeSpace(*this));
   PtrComprCageBase cage_base = GetPtrComprCageBase(*this);
   return HeapObject::map_word(cage_base, tag);
 }
@@ -1451,7 +1452,7 @@ MapWord HeapObject::map_word(AcquireLoadTag tag) const {
   // This method is never used for objects located in code space
   // (InstructionStream and free space fillers) and thus it is fine to use
   // auto-computed cage base value.
-  DCHECK_IMPLIES(V8_EXTERNAL_CODE_SPACE_BOOL, !IsCodeSpaceObject(*this));
+  DCHECK_IMPLIES(V8_EXTERNAL_CODE_SPACE_BOOL, !HeapLayout::InCodeSpace(*this));
   PtrComprCageBase cage_base = GetPtrComprCageBase(*this);
   return HeapObject::map_word(cage_base, tag);
 }
@@ -1488,7 +1489,7 @@ int HeapObjectLayout::Size() const { return Tagged<HeapObject>(this)->Size(); }
 
 // TODO(v8:11880): consider dropping parameterless version.
 int HeapObject::Size() const {
-  DCHECK_IMPLIES(V8_EXTERNAL_CODE_SPACE_BOOL, !IsCodeSpaceObject(*this));
+  DCHECK_IMPLIES(V8_EXTERNAL_CODE_SPACE_BOOL, !HeapLayout::InCodeSpace(*this));
   PtrComprCageBase cage_base = GetPtrComprCageBase(*this);
   return HeapObject::Size(cage_base);
 }
@@ -1758,14 +1759,14 @@ bool IsShared(Tagged<Object> obj) {
   Tagged<HeapObject> object = Cast<HeapObject>(obj);
 
   // RO objects are shared when the RO space is shared.
-  if (IsReadOnlyHeapObject(object)) {
+  if (HeapLayout::InReadOnlySpace(object)) {
     return ReadOnlyHeap::IsReadOnlySpaceShared();
   }
 
   // Check if this object is already shared.
   InstanceType instance_type = object->map()->instance_type();
   if (InstanceTypeChecker::IsAlwaysSharedSpaceJSObject(instance_type)) {
-    DCHECK(InAnySharedSpace(object));
+    DCHECK(HeapLayout::InAnySharedSpace(object));
     return true;
   }
   switch (instance_type) {
@@ -1775,7 +1776,7 @@ bool IsShared(Tagged<Object> obj) {
     case SHARED_EXTERNAL_ONE_BYTE_STRING_TYPE:
     case SHARED_UNCACHED_EXTERNAL_TWO_BYTE_STRING_TYPE:
     case SHARED_UNCACHED_EXTERNAL_ONE_BYTE_STRING_TYPE:
-      DCHECK(InAnySharedSpace(object));
+      DCHECK(HeapLayout::InAnySharedSpace(object));
       return true;
     case INTERNALIZED_TWO_BYTE_STRING_TYPE:
     case INTERNALIZED_ONE_BYTE_STRING_TYPE:
@@ -1784,12 +1785,12 @@ bool IsShared(Tagged<Object> obj) {
     case UNCACHED_EXTERNAL_INTERNALIZED_TWO_BYTE_STRING_TYPE:
     case UNCACHED_EXTERNAL_INTERNALIZED_ONE_BYTE_STRING_TYPE:
       if (v8_flags.shared_string_table) {
-        DCHECK(InAnySharedSpace(object));
+        DCHECK(HeapLayout::InAnySharedSpace(object));
         return true;
       }
       return false;
     case HEAP_NUMBER_TYPE:
-      return InWritableSharedSpace(object);
+      return HeapLayout::InWritableSharedSpace(object);
     default:
       return false;
   }

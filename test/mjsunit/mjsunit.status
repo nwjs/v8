@@ -41,8 +41,6 @@
   'compiler/fast-api-helpers': [SKIP],
   'typedarray-helpers': [SKIP],
 
-  # TODO(ahaas): Fix generic wasm-to-js wrapper tierup test.
-  'wasm/wasm-to-js-tierup': [SKIP],
   # All tests in the bug directory are expected to fail.
   'bugs/*': [FAIL],
 
@@ -82,6 +80,11 @@
 
   # BUG(chromium:1497251): Probably some data race in the interpreter.
   'regress/regress-1497251': [SKIP],
+
+  # https://crbug.com/332914927: temporarily disable tests requiring read-only
+  # flag --move-prototype-transitions-first to be enabled.
+  'regress/proto-transition-regress': [SKIP],
+  'regress/regress-357651585': [SKIP],
 
   ##############################################################################
   # Tests where variants make no sense.
@@ -415,8 +418,8 @@
   # Bug(362522337)
   'wasm/growable-stacks': [SKIP],
 
-  # Bug(364804226)
-  'wasm/wrapper-compilation': [SKIP],
+  # Too slow: https://crbug.com/371893264
+  'harmony/regress/regress-369010108': [SKIP],
 }],  # 'gc_stress'
 
 ##############################################################################
@@ -483,6 +486,12 @@
   'compiler/fast-api-calls-wasm': [SKIP],
 }],  # not has_webassembly or (variant == jitless and not has_wasm_interpreter)
 
+##############################################################################
+['not has_webassembly', {
+  # This test case requires wasm. It is not in the regress/wasm subfolder
+  # as we want to run this test in jitless mode (where it is supposed to pass).
+  'regress/regress-366323504': [SKIP],
+}],  # not has_webassembly
 
 ##############################################################################
 ['not has_wasm_interpreter or variant != jitless', {
@@ -500,7 +509,7 @@
   # Skip tests that require Wasm experimental features not supported by the
   # Wasm interpreter, or that explicitly require compilation.
 
-  # --experimental-wasm-inlining
+  # --wasm-inlining
   'regress/wasm/regress-crbug-1510626': [SKIP],
 
   # --experimental-wasm-typed-funcref
@@ -751,6 +760,7 @@
   'compiler/regress-crbug-1201057': [SKIP],
   'compiler/regress-crbug-1201082': [SKIP],
   'wasm/fast-api-calls-with-wellknown-imports*': [SKIP],
+  'regress/wasm/regress-368086282': [SKIP],
 
   'maglev/extras-cped': [SKIP],
   'turboshaft/extras-cped': [SKIP],
@@ -862,6 +872,7 @@
 
   # Float parameters are not supported in the fast api on these platforms
   'wasm/fast-api-calls-with-wellknown-imports-floats': [SKIP],
+  'regress/wasm/regress-368086282': [SKIP],
 
   # Needs a huge Uint8Array.
   'regress/regress-1432470': [SKIP],
@@ -1257,6 +1268,9 @@
   'shared-memory/condition-async-wait-realm-disposed' :['pointer_compression', SKIP],
   'shared-memory/mutex-async-lock-workers-timeout' :['pointer_compression', SKIP],
   'shared-memory/mutex-async-lock-realm-disposed' :['pointer_compression', SKIP],
+
+  # Needs FP16 support.
+  'wasm/simd-fp16': [SKIP],
 }],  # 'arch == riscv64 or arch == riscv32'
 
 ['variant == stress and (arch == riscv64 or arch == riscv32)', {
@@ -1357,6 +1371,7 @@
   'wasm/enter-and-leave-debug-state': [SKIP],
   'wasm/wasm-dynamic-tiering': [SKIP],
   'wasm/wasm-to-js-tierup': [SKIP],
+  'wasm/deopt/deopt-debugging': [SKIP],
 
   # The test relies on precise switching of code kinds of wasm functions. With
   # multiple isolates that share the wasm functions, the precise switching is
@@ -1606,6 +1621,7 @@
 
   # Float parameters are not supported in the fast api
   'wasm/fast-api-calls-with-wellknown-imports-floats': [SKIP],
+  'regress/wasm/regress-368086282': [SKIP],
 
 }],  # arch in [ppc64, s390x]'
 
@@ -1622,10 +1638,12 @@
 
 ##############################################################################
 ['pointer_compression and not pointer_compression_shared_cage', {
-
-  # The test requires shared heap but it is not shared in the multi cage mode.
-  'turboshaft/maglev-frontend/*': [SKIP],
-
+  # These tests require shared heap between all isolates
+  # but in the multi cage mode heap is shared only inside one cage
+  # (isolate group) while tests create one cage per isolate.
+  'shared-memory/*': [SKIP],
+  'regress/regress-v8-13181': [SKIP],
+  'regress/regress-v8-14662': [SKIP],
 }],  # pointer_compression and not pointer_compression_shared_cage'
 
 ##############################################################################
@@ -2072,6 +2090,7 @@
   'regress/wasm/regress-343748812': [SKIP],
   'regress/wasm/regress-353913485': [SKIP],
   'regress/wasm/regress-360052650': [SKIP],
+  'regress/wasm/regress-369652650': [SKIP],
   'regress/wasm/regress-crbug-1338980': [SKIP],
   'regress/wasm/regress-crbug-1355070': [SKIP],
   'regress/wasm/regress-crbug-1356718': [SKIP],
@@ -2103,8 +2122,6 @@
 ['variant == stress_concurrent_inlining', {
   # Flaky under this variant, skipping per https://crbug.com/v8/12267#c4
   'compiler/inlined-call-polymorphic': [SKIP],
-  # Flaky under this variant, skipping per https://crbug.com/v8/14560#c2
-  'turboshaft/turboshaft-frontend-test': [SKIP],
   # Flaky under this variant, skipping per https://crbug.com/v8/14630#c3
   'turboshaft/maglev-frontend/*': [SKIP]
 }],  # variant == stress_concurrent_inlining
@@ -2160,7 +2177,7 @@
 }], # conservative_stack_scanning
 
 ##############################################################################
-['(arch != x64 and arch != arm64 and arch != ia32 and arch != arm and arch != riscv64 and arch != loong64) or (simulator_run and conservative_stack_scanning)', {
+['arch != x64 and arch != arm64 and arch != ia32 and arch != arm and arch != riscv64 and arch != loong64', {
   # Stack switching is only supported on x64/arm64/ia32/arm/riscv64/loong64.
   'wasm/stack-switching': [SKIP],
   'wasm/stack-switching-conditional': [SKIP],
@@ -2171,14 +2188,16 @@
   'regress/wasm/regress-336358915': [SKIP],
   'regress/wasm/regress-342522151': [SKIP],
   'regress/wasm/regress-349640002': [SKIP],
-  'regress/wasm/regress-364667545': [SKIP]
+  'regress/wasm/regress-364667545': [SKIP],
+  'regress/wasm/regress-361123483': [SKIP],
+  'regress/wasm/regress-361717714': [SKIP]
 }],  # (arch != x64 and arch != arm64 and arch != ia32 and arch != arm and arch != riscv64 and arch != loong64)
 
 ##############################################################################
-['(arch != arm64 and arch != x64) or conservative_stack_scanning', {
-  # Growable stacks are only supported on arm64 and x64.
+['arch != arm64 and arch != x64 and arch != arm and arch != ia32 and arch != loong64', {
+  # Growable stacks are only supported on arm64, x64, arm, ia32 and loong64.
   'wasm/growable-stacks': [SKIP]
-}],  # (arch != arm64 and arch != x64)
+}],  # (arch != arm64 and arch != x64 and arch != arm and arch != ia32 and arch != loong64)
 
 ##############################################################################
 ['arch != x64 and arch != arm64 and arch != loong64 and arch != mips64', {
@@ -2197,7 +2216,7 @@
 
 ##############################################################################
 # TODO(mliedtke): Support deopts on all platforms.
-['arch != x64 and arch != arm64 and arch != ia32 and arch != arm', {
+['arch != x64 and arch != arm64 and arch != ia32 and arch != arm and arch != loong64 and arch != mips64el', {
   # --wasm-deopt implementation experimental and not ported to most
   # architectures, yet.
   'wasm/deopt/*': [SKIP],
@@ -2338,6 +2357,9 @@
   'compiler/fast-api-interface-types': [FAIL],
   'compiler/fast-api-sequences*': [FAIL],
   'wasm/fast-api-calls-with-wellknown-imports*': [SKIP],
+  'regress/wasm/regress-368086282': [SKIP],
+  'regress/regress-366323469': [FAIL],
+  'regress/regress-366635361': [FAIL],
   # Maglev doesn't specialise the IsBeingInterpreted runtime func.
   'compiler/is-being-interpreted-1': [FAIL],
   # Maglev doesn't support elements transitions (yet!).
@@ -2365,10 +2387,11 @@
 }],  # 'clang_coverage and mode == debug'
 
 ##############################################################################
-['official_build', {
+['wasm_random_fuzzers == False', {
   # Random Wasm module generation is not available on official builds.
   'wasm/generate-random-module': [FAIL],
-}],  # 'official_build'
+  'regress/wasm/regress-369652650': [SKIP],
+}],  # 'wasm_random_fuzzers == False'
 
 ##############################################################################
 ['leaptiering', {
