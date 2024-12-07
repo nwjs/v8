@@ -962,6 +962,7 @@ MaglevGraphBuilder::MaglevGraphBuilder(
     DCHECK_EQ(inline_exit_offset(), bytecode().length());
     merge_states_[inline_exit_offset()] = nullptr;
     new (&jump_targets_[inline_exit_offset()]) BasicBlockRef();
+    unobserved_context_slot_stores_ = parent_->unobserved_context_slot_stores_;
   }
 
   CHECK_IMPLIES(compilation_unit_->is_osr(), graph_->is_osr());
@@ -2947,6 +2948,9 @@ ValueNode* MaglevGraphBuilder::LoadAndCacheContextSlot(
 
 bool MaglevGraphBuilder::ContextMayAlias(
     ValueNode* context, compiler::OptionalScopeInfoRef scope_info) {
+  // Distinguishing contexts by their scope info only works if scope infos are
+  // guaranteed to be unique.
+  if (!v8_flags.reuse_scope_infos) return true;
   if (!scope_info.has_value()) {
     return true;
   }
@@ -7387,6 +7391,8 @@ ReduceResult MaglevGraphBuilder::TryBuildInlinedCall(
   // Propagate KnownNodeAspects back to the caller.
   current_interpreter_frame_.set_known_node_aspects(
       inner_graph_builder.current_interpreter_frame_.known_node_aspects());
+  unobserved_context_slot_stores_ =
+      inner_graph_builder.unobserved_context_slot_stores_;
 
   // Propagate virtual object lists back to the caller.
   current_interpreter_frame_.set_virtual_objects(
