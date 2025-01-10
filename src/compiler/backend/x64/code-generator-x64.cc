@@ -1412,6 +1412,30 @@ void CodeGenerator::AssembleCodeStartRegisterCheck() {
   __ Assert(equal, AbortReason::kWrongFunctionCodeStart);
 }
 
+#ifdef V8_ENABLE_LEAPTIERING
+// Check that {kJavaScriptCallDispatchHandleRegister} is correct.
+void CodeGenerator::AssembleDispatchHandleRegisterCheck() {
+  DCHECK(linkage()->GetIncomingDescriptor()->IsJSFunctionCall());
+
+  // We currently don't check this for JS builtins as those are sometimes
+  // called directly (e.g. from other builtins) and not through the dispatch
+  // table. This is fine as builtin functions don't use the dispatch handle,
+  // but we could enable this check in the future if we make sure to pass the
+  // kInvalidDispatchHandle whenever we do a direct call to a JS builtin.
+  if (Builtins::IsBuiltinId(info()->builtin())) {
+    return;
+  }
+
+  // For now, we only ensure that the register references a valid dispatch
+  // entry with the correct parameter count. In the future, we may also be able
+  // to check that the entry points back to this code.
+  __ LoadParameterCountFromJSDispatchTable(
+      rbx, kJavaScriptCallDispatchHandleRegister);
+  __ cmpl(rbx, Immediate(parameter_count_));
+  __ Assert(equal, AbortReason::kWrongFunctionDispatchHandle);
+}
+#endif  // V8_ENABLE_LEAPTIERING
+
 void CodeGenerator::BailoutIfDeoptimized() { __ BailoutIfDeoptimized(rbx); }
 
 bool ShouldClearOutputRegisterBeforeInstruction(CodeGenerator* g,
@@ -2805,7 +2829,20 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
           }
           case kL64: {
             // F64x4Abs
-            UNIMPLEMENTED();
+            YMMRegister dst = i.OutputSimd256Register();
+            YMMRegister src = i.InputSimd256Register(0);
+            CpuFeatureScope avx_scope(masm(), AVX2);
+            if (dst == src) {
+              __ vpcmpeqq(kScratchSimd256Reg, kScratchSimd256Reg,
+                          kScratchSimd256Reg);
+              __ vpsrlq(kScratchSimd256Reg, kScratchSimd256Reg, uint8_t{1});
+              __ vpand(dst, dst, kScratchSimd256Reg);
+            } else {
+              __ vpcmpeqq(dst, dst, dst);
+              __ vpsrlq(dst, dst, uint8_t{1});
+              __ vpand(dst, dst, src);
+            }
+            break;
           }
           default:
             UNREACHABLE();
@@ -2868,7 +2905,20 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
           }
           case kL64: {
             // F64x4Neg
-            UNIMPLEMENTED();
+            YMMRegister dst = i.OutputSimd256Register();
+            YMMRegister src = i.InputSimd256Register(0);
+            CpuFeatureScope avx_scope(masm(), AVX2);
+            if (dst == src) {
+              __ vpcmpeqq(kScratchSimd256Reg, kScratchSimd256Reg,
+                          kScratchSimd256Reg);
+              __ vpsllq(kScratchSimd256Reg, kScratchSimd256Reg, uint8_t{63});
+              __ vpxor(dst, dst, kScratchSimd256Reg);
+            } else {
+              __ vpcmpeqq(dst, dst, dst);
+              __ vpsllq(dst, dst, uint8_t{31});
+              __ vxorpd(dst, dst, src);
+            }
+            break;
           }
           default:
             UNREACHABLE();
@@ -6810,8 +6860,20 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
                           kScratchDoubleReg, i.TempSimd128Register(0));
       break;
     }
+    case kX64I32x8TruncF32x8U: {
+      __ I32x8TruncF32x8U(i.OutputSimd256Register(), i.InputSimd256Register(0),
+                          kScratchSimd256Reg, i.TempSimd256Register(0));
+      break;
+    }
     case kX64Cvttps2dq: {
-      __ Cvttps2dq(i.OutputSimd128Register(), i.InputSimd128Register(0));
+      VectorLength vec_len = VectorLengthField::decode(opcode);
+      if (vec_len == kV128) {
+        __ Cvttps2dq(i.OutputSimd128Register(), i.InputSimd128Register(0));
+      } else {
+        DCHECK_EQ(vec_len, kV256);
+        CpuFeatureScope avx_scope(masm(), AVX);
+        __ vcvttps2dq(i.OutputSimd256Register(), i.InputSimd256Register(0));
+      }
       break;
     }
     case kX64Cvttpd2dq: {
@@ -7116,6 +7178,12 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       CpuFeatureScope avx_scope(masm(), AVX2);
       RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
       __ vpmovzxbw(i.OutputSimd256Register(), i.MemoryOperand());
+      break;
+    }
+    case kX64S256Load8x8U: {
+      CpuFeatureScope avx_scope(masm(), AVX2);
+      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+      __ vpmovzxbd(i.OutputSimd256Register(), i.MemoryOperand());
       break;
     }
     case kX64S256Load16x8S: {
@@ -7482,20 +7550,13 @@ void CodeGenerator::AssembleArchTableSwitch(Instruction* instr) {
     // target = table + (target - table)
     __ addq(input, kScratchRegister);
     // Jump to the target.
-#ifdef V8_ENABLE_CET_IBT
+
     // Add the notrack prefix to disable landing pad enforcement.
     __ jmp(input, /*notrack=*/true);
-#else
-    __ jmp(input);
-#endif
   } else {
     // For non builtins, the value in the table is 'target_address' (8 bytes)
     // jmp [table + index*8]
-#ifdef V8_ENABLE_CET_IBT
     __ jmp(Operand(kScratchRegister, input, times_8, 0), /*notrack=*/true);
-#else
-    __ jmp(Operand(kScratchRegister, input, times_8, 0));
-#endif
   }
 }
 

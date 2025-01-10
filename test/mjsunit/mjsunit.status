@@ -137,6 +137,7 @@
   'array-functions-prototype-misc': [PASS, SLOW],
   'asm/embenchen/*': [PASS, SLOW, NO_VARIANTS],
   'asm/poppler/*': [PASS, SLOW, NO_VARIANTS],
+  'compiler/deopt-pretenure': [PASS, SLOW],
   'compiler/regress-9017': [PASS, SLOW],
   'compiler/regress-crbug-11564': [PASS, SLOW],
   'copy-on-write-assert': [PASS, SLOW],
@@ -147,6 +148,7 @@
   'harmony/regexp-property-script-extensions': [PASS, SLOW],
   'harmony/sharedarraybuffer-stress': [PASS, SLOW],
   'harmony/sharedarraybuffer-worker-gc-stress': [PASS, SLOW],
+  'ignition/regress-599001-verifyheap': [PASS, SLOW],
   'large-object-literal-slow-elements': [PASS, SLOW],
   'math-floor-of-div': [PASS, SLOW],
   'md5': [PASS, SLOW],
@@ -162,6 +164,7 @@
   'regress/wasm/regress-810973': [PASS, SLOW],
   'sealed-array-reduce': [PASS, SLOW],
   'string-replace-gc': [PASS, SLOW],
+  'tools/processor': [PASS, SLOW],
   'wasm/embenchen/*': [PASS, SLOW],
   'wasm/futex': [PASS, SLOW],
   'wasm/unreachable-validation': [PASS, SLOW],
@@ -202,7 +205,7 @@
   # Tests that need to run sequentially (e.g. due to memory consumption).
   'd8/d8-worker-shutdown*': [PASS, HEAVY],
   'huge-typedarrays': [PASS, HEAVY],
-  'json2': [PASS, HEAVY],
+  'json2': [PASS, SLOW, HEAVY],
   'regress/regress-678917': [PASS, HEAVY],
   'regress/regress-779407': [PASS, HEAVY],
   'regress/regress-852258': [PASS, HEAVY],
@@ -217,6 +220,7 @@
   'wasm/stringrefs-regressions': [PASS, HEAVY],
   'wasm/table': [PASS, HEAVY],
   'wasm/table-grow': [PASS, HEAVY],
+  'es6/big-weakmap': [PASS, HEAVY],
 
   # TODO(v8:10915): Fails with --future.
   'harmony/weakrefs/stress-finalizationregistry-dirty-enqueue': [SKIP],
@@ -314,6 +318,7 @@
   # Profiler test is flaky on simulators.
   'wasm/log-wasm-to-js-wrapper-callref': [SKIP],
   'wasm/log-wasm-to-js-wrapper-indirect': [SKIP],
+  'es6/big-weakmap': [SKIP],
 }],  # simulator_run
 
 ##############################################################################
@@ -801,7 +806,7 @@
 
   # RegExp unicode tests relies on ICU for property classes and
   # case-insensitive unicode patterns.
-  'harmony/regexp-unicode-sets': [PASS,FAIL],
+  'regexp-unicode-sets': [PASS,FAIL],
 
   # The noi18n build cannot parse characters in supplementary plane.
   'harmony/regexp-named-captures': [FAIL],
@@ -928,7 +933,6 @@
   'compiler/osr-with-args': [PASS, SLOW],
   'frozen-array-reduce': [PASS, SLOW],
   'generated-transition-stub': [PASS, SLOW],
-  'json2': [PASS, SLOW],
   'math-floor-of-div-nosudiv': [PASS, SLOW],
   'messages': [PASS, SLOW],
   'regress/regress-2790': [PASS, SLOW],
@@ -1281,6 +1285,8 @@
 'wasm/compare-exchange64-stress':[SKIP],
 'regress/regress-crbug-781583':[SKIP],
 'regress/wasm/regress-14171':[SKIP],
+# Don't support stack switcgihing
+'wasm/stack-switching-no-stress': [SKIP],
 }], # 'arch == riscv32'
 
 ##############################################################################
@@ -1657,7 +1663,6 @@
   'regress/regress-91008': [PASS, SLOW],
   'regress/regress-779407': [PASS, SLOW],
   'regress/regress-1449567': [PASS, SLOW],
-  'tools/processor': [PASS, SLOW],
   'tools/processor-bigint': [PASS, SLOW],
   'whitespaces': [PASS, SLOW],
 
@@ -1938,6 +1943,8 @@
   'regress/regress-crbug-935800': [SKIP],
   'regress/wasm/*': [SKIP],
   'wasm/*': [SKIP],
+  # Contain Wasm functions, which are not supported in snapshots.
+  'maglev/regress-355256380': [SKIP],
   'turboshaft/maglev-frontend/has-in-prototype-chain-wasm': [SKIP],
   # Investigate (IsScript).
   'harmony/import-from-compilation-errored': [SKIP],
@@ -2155,10 +2162,10 @@
   'es6/map-constructor-entry-side-effect*': [SKIP],
   # These tests use %SimulateNewspaceFull, which only works in the young generation
   'regress/regress-1424415': [SKIP],
-  'wasm/stack-switching': [SKIP],
-  'wasm/stack-switching-conditional': [SKIP],
+  'regress/wasm/regress-375314963': [SKIP],
   'wasm/stack-switching-export': [SKIP],
   'wasm/stack-switching-generic-wrapper': [SKIP],
+  'wasm/stack-switching-no-stress': [SKIP],
   'regress/wasm/regress-v8-14471': [SKIP],
   'regress/wasm/regress-346597059': [SKIP],
   'regress/wasm/regress-349640002': [SKIP],
@@ -2183,6 +2190,7 @@
   'wasm/stack-switching-conditional': [SKIP],
   'wasm/stack-switching-export': [SKIP],
   'wasm/stack-switching-generic-wrapper': [SKIP],
+  'wasm/stack-switching-no-stress': [SKIP],
   'regress/wasm/regress-v8-14471': [SKIP],
   'regress/wasm/regress-336852356': [SKIP],
   'regress/wasm/regress-336358915': [SKIP],
@@ -2399,5 +2407,16 @@
   'baseline/test-baseline': [SKIP],
   'baseline/cross-realm': [SKIP],
 }],  # 'leaptiering'
+
+['variant == stress_wasm_stack_switching', {
+  # TODO(thibaudm): Fix profiler.
+  'wasm/log-wasm-to-js-wrapper-callref': [SKIP],
+  'wasm/log-wasm-to-js-wrapper-indirect': [SKIP],
+}],
+
+['variant == stress_wasm_stack_switching and mode == debug', {
+  # Very slow.
+  'wasm/turboshaft/reduction-shuffle': [SKIP]
+}]
 
 ]

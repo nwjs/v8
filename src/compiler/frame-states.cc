@@ -76,10 +76,10 @@ std::ostream& operator<<(std::ostream& os, FrameStateType type) {
       break;
 #endif  // V8_ENABLE_WEBASSEMBLY
     case FrameStateType::kJavaScriptBuiltinContinuation:
-      os << "JAVA_SCRIPT_BUILTIN_CONTINUATION_FRAME";
+      os << "JAVASCRIPT_BUILTIN_CONTINUATION_FRAME";
       break;
     case FrameStateType::kJavaScriptBuiltinContinuationWithCatch:
-      os << "JAVA_SCRIPT_BUILTIN_CONTINUATION_WITH_CATCH_FRAME";
+      os << "JAVASCRIPT_BUILTIN_CONTINUATION_WITH_CATCH_FRAME";
       break;
   }
   return os;
@@ -134,12 +134,12 @@ FrameState CreateBuiltinContinuationFrameStateCommon(
       signature ? common->CreateJSToWasmFrameStateFunctionInfo(
                       frame_type, parameter_count, 0, shared, signature)
                 : common->CreateFrameStateFunctionInfo(
-                      frame_type, parameter_count, 0, 0, shared);
+                      frame_type, parameter_count, 0, 0, shared, {});
 #else
   DCHECK_NULL(signature);
   const FrameStateFunctionInfo* state_info =
       common->CreateFrameStateFunctionInfo(frame_type, parameter_count, 0, 0,
-                                           shared);
+                                           shared, {});
 #endif  // V8_ENABLE_WEBASSEMBLY
 
   const Operator* op = common->FrameState(
@@ -236,9 +236,17 @@ FrameState CreateJavaScriptBuiltinContinuationFrameState(
 
   // Register parameters follow stack parameters. The context will be added by
   // instruction selector during FrameState translation.
+  DCHECK_EQ(
+      Builtins::CallInterfaceDescriptorFor(name).GetRegisterParameterCount(),
+      V8_ENABLE_LEAPTIERING_BOOL ? 4 : 3);
   actual_parameters.push_back(target);      // kJavaScriptCallTargetRegister
   actual_parameters.push_back(new_target);  // kJavaScriptCallNewTargetRegister
   actual_parameters.push_back(argc);        // kJavaScriptCallArgCountRegister
+#ifdef V8_ENABLE_LEAPTIERING
+  // The dispatch handle isn't used by the continuation builtins.
+  Node* handle = jsgraph->ConstantNoHole(kInvalidDispatchHandle);
+  actual_parameters.push_back(handle);  // kJavaScriptDispatchHandleRegister
+#endif
 
   return CreateBuiltinContinuationFrameStateCommon(
       jsgraph,

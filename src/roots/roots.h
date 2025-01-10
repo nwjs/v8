@@ -110,7 +110,8 @@ class RootVisitor;
   V(Map, coverage_info_map, CoverageInfoMap)                                   \
   V(Map, dictionary_template_info_map, DictionaryTemplateInfoMap)              \
   V(Map, global_dictionary_map, GlobalDictionaryMap)                           \
-  V(Map, global_const_tracking_let_cell_map, GlobalConstTrackingLetCellMap)    \
+  V(Map, global_context_side_property_cell_map,                                \
+    GlobalContextSidePropertyCellMap)                                          \
   V(Map, many_closures_cell_map, ManyClosuresCellMap)                          \
   V(Map, mega_dom_handler_map, MegaDomHandlerMap)                              \
   V(Map, module_info_map, ModuleInfoMap)                                       \
@@ -301,7 +302,10 @@ class RootVisitor;
   APPLY(V, PromiseValueThunkFinally, promise_value_thunk_finally)              \
   APPLY(V, PromiseThenFinally, promise_then_finally)                           \
   APPLY(V, PromiseCatchFinally, promise_catch_finally)                         \
-  APPLY(V, ShadowRealmImportValueFulfilled, shadow_realm_import_value_fulfilled)
+  APPLY(V, ShadowRealmImportValueFulfilled,                                    \
+        shadow_realm_import_value_fulfilled)                                   \
+  APPLY(V, AsyncIteratorPrototypeAsyncDisposeResolveClosure,                   \
+        async_iterator_prototype_async_dispose_resolve_closure)
 
 #define BUILTINS_WITH_SFI_ROOTS_LIST_ADAPTER(V, CamelName, underscore_name, \
                                              ...)                           \
@@ -421,6 +425,8 @@ class RootVisitor;
     ConstructStubCreateDeoptPCOffset)                                          \
   V(Smi, construct_stub_invoke_deopt_pc_offset,                                \
     ConstructStubInvokeDeoptPCOffset)                                          \
+  V(Smi, deopt_pc_offset_after_adapt_shadow_stack,                             \
+    DeoptPCOffsetAfterAdaptShadowStack)                                        \
   V(Smi, interpreter_entry_return_pc_offset, InterpreterEntryReturnPCOffset)
 
 // Produces (String, name, CamelCase) entries
@@ -558,7 +564,7 @@ class RootsTable {
                                    RootIndex* index) const;
 
   template <typename T>
-  bool IsRootHandle(Handle<T> handle, RootIndex* index) const;
+  bool IsRootHandle(IndirectHandle<T> handle, RootIndex* index) const;
 
   Address const& operator[](RootIndex root_index) const {
     size_t index = static_cast<size_t>(root_index);
@@ -690,7 +696,7 @@ class ReadOnlyRoots {
 #define ROOT_ACCESSOR(Type, name, CamelName)       \
   V8_INLINE Tagged<Type> name() const;             \
   V8_INLINE Tagged<Type> unchecked_##name() const; \
-  V8_INLINE Handle<Type> name##_handle() const;
+  V8_INLINE IndirectHandle<Type> name##_handle() const;
 
   READ_ONLY_ROOT_LIST(ROOT_ACCESSOR)
 #undef ROOT_ACCESSOR
@@ -702,15 +708,15 @@ class ReadOnlyRoots {
 #endif
 
   V8_INLINE Tagged<Boolean> boolean_value(bool value) const;
-  V8_INLINE Handle<Boolean> boolean_value_handle(bool value) const;
+  V8_INLINE IndirectHandle<Boolean> boolean_value_handle(bool value) const;
 
   // Returns heap number with identical value if it already exists or the empty
   // handle otherwise.
-  Handle<HeapNumber> FindHeapNumber(double value);
+  IndirectHandle<HeapNumber> FindHeapNumber(double value);
 
   V8_INLINE Address address_at(RootIndex root_index) const;
   V8_INLINE Tagged<Object> object_at(RootIndex root_index) const;
-  V8_INLINE Handle<Object> handle_at(RootIndex root_index) const;
+  V8_INLINE IndirectHandle<Object> handle_at(RootIndex root_index) const;
 
   // Check if a slot is initialized yet. Should only be neccessary for code
   // running during snapshot creation.

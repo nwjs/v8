@@ -225,10 +225,10 @@ class Utils {
   // this ambiguous.
   // TODO(42203211): Use C++20 concepts instead of the enable_if trait, when
   // they are fully supported in V8.
-#define DECLARE_TO_LOCAL(Name)                                     \
-  template <template <typename T> typename HandleType, typename T, \
-            typename = std::enable_if_t<std::is_convertible_v<     \
-                HandleType<T>, v8::internal::DirectHandle<T>>>>    \
+#define DECLARE_TO_LOCAL(Name)                                   \
+  template <template <typename> typename HandleType, typename T, \
+            typename = std::enable_if_t<std::is_convertible_v<   \
+                HandleType<T>, v8::internal::DirectHandle<T>>>>  \
   static inline auto Name(HandleType<T> obj);
 
   TO_LOCAL_NAME_LIST(DECLARE_TO_LOCAL)
@@ -345,9 +345,7 @@ class HandleScopeImplementer {
   };
 
   explicit HandleScopeImplementer(Isolate* isolate)
-      : isolate_(isolate),
-        spare_(nullptr),
-        last_handle_before_deferred_block_(nullptr) {}
+      : isolate_(isolate), spare_(nullptr) {}
 
   ~HandleScopeImplementer() { DeleteArray(spare_); }
 
@@ -398,7 +396,7 @@ class HandleScopeImplementer {
     entered_contexts_.detach();
     saved_contexts_.detach();
     spare_ = nullptr;
-    last_handle_before_deferred_block_ = nullptr;
+    last_handle_before_persistent_block_.reset();
   }
 
   void Free() {
@@ -416,7 +414,13 @@ class HandleScopeImplementer {
     DCHECK(isolate_->thread_local_top()->CallDepthIsZero());
   }
 
-  void BeginDeferredScope();
+  void BeginPersistentScope() {
+    DCHECK(!last_handle_before_persistent_block_.has_value());
+    last_handle_before_persistent_block_ = isolate()->handle_scope_data()->next;
+  }
+  bool HasPersistentScope() const {
+    return last_handle_before_persistent_block_.has_value();
+  }
   std::unique_ptr<PersistentHandles> DetachPersistent(Address* first_block);
 
   Isolate* isolate_;
@@ -428,7 +432,7 @@ class HandleScopeImplementer {
   // Used as a stack to keep track of saved contexts.
   DetachableVector<Tagged<Context>> saved_contexts_;
   Address* spare_;
-  Address* last_handle_before_deferred_block_;
+  std::optional<Address*> last_handle_before_persistent_block_;
   // This is only used for threading support.
   HandleScopeData handle_scope_data_;
 
@@ -481,7 +485,7 @@ void HandleScopeImplementer::DeleteExtensions(internal::Address* prev_limit) {
     internal::Address* block_limit = block_start + kHandleBlockSize;
 
     // SealHandleScope may make the prev_limit to point inside the block.
-    // Cast possibly-unrelated pointers to plain Addres before comparing them
+    // Cast possibly-unrelated pointers to plain Address before comparing them
     // to avoid undefined behavior.
     if (reinterpret_cast<Address>(block_start) <
             reinterpret_cast<Address>(prev_limit) &&

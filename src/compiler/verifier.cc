@@ -843,6 +843,7 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
       CheckTypeIs(node, Type::Boolean());
       break;
     case IrOpcode::kJSLoadContext:
+    case IrOpcode::kJSLoadScriptContext:
       CheckTypeIs(node, Type::Any());
       break;
     case IrOpcode::kJSStoreContext:
@@ -1235,6 +1236,10 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
       break;
     case IrOpcode::kStringLength:
       CheckValueInputIs(node, 0, Type::String());
+      CheckTypeIs(node, TypeCache::Get()->kStringLengthType);
+      break;
+    case IrOpcode::kStringWrapperLength:
+      CheckValueInputIs(node, 0, Type::StringWrapper());
       CheckTypeIs(node, TypeCache::Get()->kStringLengthType);
       break;
     case IrOpcode::kStringToLowerCaseIntl:

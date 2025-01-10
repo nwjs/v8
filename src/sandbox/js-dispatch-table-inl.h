@@ -60,13 +60,9 @@ Tagged<Code> JSDispatchTable::GetCode(JSDispatchHandle handle) {
   return at(index).GetCode();
 }
 
-void JSDispatchTable::SetCode(JSDispatchHandle handle, Tagged<Code> new_code) {
-  // The new code must use JS linkage and its parameter count must match that
-  // of the entry, unless the code does not assume a particular parameter count
-  // (so uses the kDontAdaptArgumentsSentinel).
-  CHECK_EQ(new_code->entrypoint_tag(), kJSEntrypointTag);
-  CHECK(new_code->parameter_count() == kDontAdaptArgumentsSentinel ||
-        new_code->parameter_count() == GetParameterCount(handle));
+void JSDispatchTable::SetCodeNoWriteBarrier(JSDispatchHandle handle,
+                                            Tagged<Code> new_code) {
+  SBXCHECK(IsCompatibleCode(new_code, GetParameterCount(handle)));
 
   // The object should be in old space to avoid creating old-to-new references.
   DCHECK(!HeapLayout::InYoungGeneration(new_code));
@@ -91,9 +87,7 @@ JSDispatchHandle JSDispatchTable::AllocateAndInitializeEntry(
 JSDispatchHandle JSDispatchTable::AllocateAndInitializeEntry(
     Space* space, uint16_t parameter_count, Tagged<Code> new_code) {
   DCHECK(space->BelongsTo(this));
-  CHECK_EQ(new_code->entrypoint_tag(), kJSEntrypointTag);
-  CHECK(new_code->parameter_count() == kDontAdaptArgumentsSentinel ||
-        new_code->parameter_count() == parameter_count);
+  SBXCHECK(IsCompatibleCode(new_code, parameter_count));
 
   uint32_t index = AllocateEntry(space);
   JSDispatchEntry& entry = at(index);
@@ -105,22 +99,14 @@ JSDispatchHandle JSDispatchTable::AllocateAndInitializeEntry(
 
 void JSDispatchEntry::SetCodeAndEntrypointPointer(Address new_object,
                                                   Address new_entrypoint) {
-  // We currently need a CAS loop here since this can race with ::Mark() and so
-  // could otherwise lead to us dropping the marking bit of an entry.
-  // TODO(saelo): see if there's a better way to solve this than two CAS loops.
-  bool success;
-  do {
-    Address old_payload = encoded_word_.load(std::memory_order_relaxed);
-    Address marking_bit = old_payload & kMarkingBit;
-    Address parameter_count = old_payload & kParameterCountMask;
-    // We want to preserve the marking bit of the entry. Since that happens to
-    // be the tag bit of the pointer, we need to explicitly clear it here.
-    Address object = (new_object << kObjectPointerShift) & ~kMarkingBit;
-    Address new_payload = object | marking_bit | parameter_count;
-    success = encoded_word_.compare_exchange_strong(old_payload, new_payload,
-                                                    std::memory_order_relaxed);
-  } while (!success);
-
+  Address old_payload = encoded_word_.load(std::memory_order_relaxed);
+  Address marking_bit = old_payload & kMarkingBit;
+  Address parameter_count = old_payload & kParameterCountMask;
+  // We want to preserve the marking bit of the entry. Since that happens to
+  // be the tag bit of the pointer, we need to explicitly clear it here.
+  Address object = (new_object << kObjectPointerShift) & ~kMarkingBit;
+  Address new_payload = object | marking_bit | parameter_count;
+  encoded_word_.store(new_payload, std::memory_order_relaxed);
   entrypoint_.store(new_entrypoint, std::memory_order_relaxed);
 }
 
@@ -140,16 +126,14 @@ uint32_t JSDispatchEntry::GetNextFreelistEntryIndex() const {
 }
 
 void JSDispatchEntry::Mark() {
-  // TODO(saelo): we probably don't need this loop: if another thread does a
-  // SetCode in between, then that should trigger a write barrier which will
-  // mark the entry as alive.
-  bool success;
-  do {
-    Address old_value = encoded_word_.load(std::memory_order_relaxed);
-    Address new_value = old_value | kMarkingBit;
-    success = encoded_word_.compare_exchange_strong(old_value, new_value,
-                                                    std::memory_order_relaxed);
-  } while (!success);
+  Address old_value = encoded_word_.load(std::memory_order_relaxed);
+  Address new_value = old_value | kMarkingBit;
+  // We don't need this cas to succeed. If marking races with
+  // `SetCodeAndEntrypointPointer`, then we are bound to re-set the mark bit in
+  // the write barrier.
+  static_assert(JSDispatchTable::kWriteBarrierSetsEntryMarkBit);
+  encoded_word_.compare_exchange_strong(old_value, new_value,
+                                        std::memory_order_relaxed);
 }
 
 void JSDispatchEntry::Unmark() {
@@ -231,6 +215,50 @@ uint32_t JSDispatchTable::Sweep(Space* space, Counters* counters,
   uint32_t num_live_entries = GenericSweep(space, callback);
   counters->js_dispatch_table_entries_count()->AddSample(num_live_entries);
   return num_live_entries;
+}
+
+// static
+bool JSDispatchTable::IsCompatibleCode(Tagged<Code> code,
+                                       uint16_t parameter_count) {
+  if (code->entrypoint_tag() != kJSEntrypointTag) {
+    // Target code doesn't use JS linkage. This cannot be valid.
+    return false;
+  }
+  if (code->parameter_count() == parameter_count) {
+    // Dispatch entry and code have the same signature. This is correct.
+    return true;
+  }
+
+  // Signature mismatch. This is mostly not safe, except for certain varargs
+  // builtins which are able to correctly handle such a mismatch. Examples
+  // include builtins like the InterpreterEntryTrampoline or the JSToWasm and
+  // JSToJS wrappers which determine their actual parameter count at runtime
+  // (see CodeStubAssembler::SetSupportsDynamicParameterCount()), or internal
+  // builtins that end up tailcalling into other code such as CompileLazy.
+  //
+  // Currently, we also allow this for testing code (from our test suites).
+  // TODO(saelo): maybe we should also forbid this just to be sure.
+  if (code->kind() == CodeKind::FOR_TESTING) {
+    return true;
+  }
+  DCHECK(code->is_builtin());
+  DCHECK_EQ(code->parameter_count(), kDontAdaptArgumentsSentinel);
+  switch (code->builtin_id()) {
+    case Builtin::kCompileLazy:
+    case Builtin::kInterpreterEntryTrampoline:
+    case Builtin::kInstantiateAsmJs:
+    case Builtin::kDebugBreakTrampoline:
+#ifdef V8_ENABLE_WEBASSEMBLY
+    case Builtin::kJSToWasmWrapper:
+    case Builtin::kJSToJSWrapper:
+    case Builtin::kJSToJSWrapperInvalidSig:
+    case Builtin::kWasmPromising:
+    case Builtin::kWasmStressSwitch:
+#endif
+      return true;
+    default:
+      return false;
+  }
 }
 
 }  // namespace internal

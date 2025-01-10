@@ -600,7 +600,7 @@ class ModuleDecoderImpl : public Decoder {
       constexpr uint32_t kMaximumSupertypes = 1;
       uint32_t supertype_count =
           consume_count("supertype count", kMaximumSupertypes);
-      uint32_t supertype = kNoSuperType;
+      uint32_t supertype = kNoSuperType.index;
       if (supertype_count == 1) {
         supertype = consume_u32v("supertype", tracer_);
         if (supertype >= current_type_index) {
@@ -681,7 +681,7 @@ class ModuleDecoderImpl : public Decoder {
     // depth.
     const WasmModule* module = module_.get();
     for (uint32_t i = 0; ok() && i < module_->types.size(); ++i) {
-      ModuleTypeIndex explicit_super = module_->supertype(i);
+      ModuleTypeIndex explicit_super = module_->supertype(ModuleTypeIndex{i});
       if (!explicit_super.valid()) continue;
       DCHECK_LT(explicit_super.index, i);  // Checked during decoding.
       uint32_t depth = module->type(explicit_super).subtyping_depth + 1;
@@ -697,7 +697,8 @@ class ModuleDecoderImpl : public Decoder {
         errorf("type %u extends final type %u", i, explicit_super.index);
         continue;
       }
-      if (!ValidSubtypeDefinition(i, explicit_super, module, module)) {
+      if (!ValidSubtypeDefinition(ModuleTypeIndex{i}, explicit_super, module,
+                                  module)) {
         errorf("type %u has invalid explicit supertype %u", i,
                explicit_super.index);
         continue;
@@ -1901,8 +1902,8 @@ class ModuleDecoderImpl : public Decoder {
     bool has_maximum() const { return flags & 0x1; }
     bool is_shared() const { return flags & 0x2; }
     bool is_64bit() const { return flags & 0x4; }
-    IndexType index_type() const {
-      return is_64bit() ? IndexType::kI64 : IndexType::kI32;
+    AddressType address_type() const {
+      return is_64bit() ? AddressType::kI64 : AddressType::kI32;
     }
   };
 
@@ -1960,7 +1961,7 @@ class ModuleDecoderImpl : public Decoder {
     LimitsByte limits = consume_limits_byte<kTable>();
     table->has_maximum_size = limits.has_maximum();
     table->shared = limits.is_shared();
-    table->index_type = limits.index_type();
+    table->address_type = limits.address_type();
 
     if (table->is_table64()) detected_features_->add_memory64();
   }
@@ -1969,7 +1970,7 @@ class ModuleDecoderImpl : public Decoder {
     LimitsByte limits = consume_limits_byte<kMemory>();
     memory->has_maximum_pages = limits.has_maximum();
     memory->is_shared = limits.is_shared();
-    memory->index_type = limits.index_type();
+    memory->address_type = limits.address_type();
 
     if (memory->is_shared) detected_features_->add_shared_memory();
     if (memory->is_memory64()) detected_features_->add_memory64();
@@ -2374,8 +2375,10 @@ class ModuleDecoderImpl : public Decoder {
       if (tracer_) tracer_->Description(table_index);
     }
     if (V8_UNLIKELY(is_active && table_index >= module_->tables.size())) {
+      // If `has_table_index`, we have an explicit table index. Otherwise, we
+      // always have the implicit table index 0.
       errorf(pos, "out of bounds%s table index %u",
-             has_table_index ? " implicit" : "", table_index);
+             has_table_index ? "" : " implicit", table_index);
       return {};
     }
 

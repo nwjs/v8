@@ -375,22 +375,19 @@ v8::Platform* g_default_platform;
 std::unique_ptr<v8::Platform> g_platform;
 
 template <int N>
-bool ThrowError(Isolate* isolate, const char (&message)[N]) {
-  if (isolate->IsExecutionTerminating()) return false;
+void ThrowError(Isolate* isolate, const char (&message)[N]) {
+  if (isolate->IsExecutionTerminating()) return;
   isolate->ThrowError(message);
-  return true;
 }
 
-bool ThrowError(Isolate* isolate, Local<String> message) {
-  if (isolate->IsExecutionTerminating()) return false;
+void ThrowError(Isolate* isolate, Local<String> message) {
+  if (isolate->IsExecutionTerminating()) return;
   isolate->ThrowError(message);
-  return true;
 }
 
-bool ThrowException(Isolate* isolate, Local<Value> exception) {
-  if (isolate->IsExecutionTerminating()) return false;
+void ThrowException(Isolate* isolate, Local<Value> exception) {
+  if (isolate->IsExecutionTerminating()) return;
   isolate->ThrowException(exception);
-  return true;
 }
 
 static MaybeLocal<Value> TryGetValue(v8::Isolate* isolate,
@@ -587,9 +584,10 @@ void Shell::StoreInCodeCache(Isolate* isolate, Local<Value> source,
 // TODO(leszeks): Also test chunking the data.
 class DummySourceStream : public v8::ScriptCompiler::ExternalSourceStream {
  public:
-  explicit DummySourceStream(Local<String> source) : done_(false) {
-    source_buffer_ = Utils::OpenDirectHandle(*source)->ToCString(
-        i::ALLOW_NULLS, i::FAST_STRING_TRAVERSAL, &source_length_);
+  DummySourceStream(Isolate* isolate, Local<String> source) : done_(false) {
+    source_length_ = source->Length();
+    source_buffer_ = std::make_unique<uint16_t[]>(source_length_);
+    source->Write(isolate, source_buffer_.get(), 0, source_length_);
   }
 
   size_t GetMoreData(const uint8_t** src) override {
@@ -599,12 +597,12 @@ class DummySourceStream : public v8::ScriptCompiler::ExternalSourceStream {
     *src = reinterpret_cast<uint8_t*>(source_buffer_.release());
     done_ = true;
 
-    return source_length_;
+    return source_length_ * 2;
   }
 
  private:
-  int source_length_;
-  std::unique_ptr<char[]> source_buffer_;
+  uint32_t source_length_;
+  std::unique_ptr<uint16_t[]> source_buffer_;
   bool done_;
 };
 
@@ -677,8 +675,8 @@ MaybeLocal<T> Shell::CompileString(Isolate* isolate, Local<Context> context,
                                    const ScriptOrigin& origin) {
   if (options.streaming_compile) {
     v8::ScriptCompiler::StreamedSource streamed_source(
-        std::make_unique<DummySourceStream>(source),
-        v8::ScriptCompiler::StreamedSource::UTF8);
+        std::make_unique<DummySourceStream>(isolate, source),
+        v8::ScriptCompiler::StreamedSource::TWO_BYTE);
     std::unique_ptr<v8::ScriptCompiler::ScriptStreamingTask> streaming_task(
         v8::ScriptCompiler::StartStreaming(isolate, &streamed_source,
                                            std::is_same<T, Module>::value
@@ -923,6 +921,7 @@ bool Shell::ExecuteString(Isolate* isolate, Local<String> source,
                           ReportExceptions report_exceptions,
                           Global<Value>* out_result) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+  if (i_isolate->is_execution_terminating()) return true;
   if (i::v8_flags.parse_only) {
     i::VMState<PARSER> state(i_isolate);
     i::Handle<i::String> str = Utils::OpenHandle(*(source));
@@ -1024,6 +1023,7 @@ bool Shell::ExecuteString(Isolate* isolate, Local<String> source,
 
   Local<Value> result;
   if (!maybe_result.ToLocal(&result)) {
+    if (try_catch.HasTerminated()) return true;
     DCHECK(try_catch.HasCaught());
     return false;
   } else if (out_result != nullptr) {
@@ -5196,9 +5196,14 @@ void Worker::ProcessMessages() {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate_);
   i::SaveAndSwitchContext saved_context(i_isolate, i::Context());
   SealHandleScope shs(isolate_);
+
+  TryCatch try_catch(isolate_);
+  try_catch.SetVerbose(true);
+
   while (is_running() && v8::platform::PumpMessageLoop(
                              g_default_platform, isolate_,
                              platform::MessageLoopBehavior::kWaitForWork)) {
+    if (try_catch.HasCaught()) return;
     if (is_running()) {
       MicrotasksScope::PerformCheckpoint(isolate_);
     }
@@ -5834,7 +5839,7 @@ bool Shell::RunMainIsolate(v8::Isolate* isolate, bool keep_context_alive) {
       // testcase sent by Fuzzilli to be skipped, which will desynchronize the
       // communication between d8 and Fuzzilli, leading to a crash.
       DCHECK(!fuzzilli_reprl);
-      return false;
+      return true;
     }
     global_context.Reset(isolate, context);
     if (keep_context_alive) {
@@ -5878,7 +5883,7 @@ bool ProcessMessages(
   i::SaveAndSwitchContext saved_context(i_isolate, i::Context());
   SealHandleScope shs(isolate);
 
-  if (isolate->IsExecutionTerminating()) return false;
+  if (isolate->IsExecutionTerminating()) return true;
   TryCatch try_catch(isolate);
   try_catch.SetVerbose(true);
 
@@ -5886,9 +5891,10 @@ bool ProcessMessages(
     bool ran_a_task;
     ran_a_task =
         v8::platform::PumpMessageLoop(g_default_platform, isolate, behavior());
+    if (isolate->IsExecutionTerminating()) return true;
     if (try_catch.HasCaught()) return false;
     if (ran_a_task) MicrotasksScope::PerformCheckpoint(isolate);
-    if (isolate->IsExecutionTerminating()) return false;
+    if (isolate->IsExecutionTerminating()) return true;
 
     // In predictable mode we push all background tasks into the foreground
     // task queue of the {kProcessGlobalPredictablePlatformWorkerTaskQueue}
@@ -5902,7 +5908,7 @@ bool ProcessMessages(
           platform::MessageLoopBehavior::kDoNotWait)) {
         ran_a_task = true;
         if (try_catch.HasCaught()) return false;
-        if (isolate->IsExecutionTerminating()) return false;
+        if (isolate->IsExecutionTerminating()) return true;
       }
     }
 
@@ -5912,7 +5918,7 @@ bool ProcessMessages(
     v8::platform::RunIdleTasks(g_default_platform, isolate,
                                50.0 / base::Time::kMillisecondsPerSecond);
     if (try_catch.HasCaught()) return false;
-    if (isolate->IsExecutionTerminating()) return false;
+    if (isolate->IsExecutionTerminating()) return true;
   }
   return true;
 }

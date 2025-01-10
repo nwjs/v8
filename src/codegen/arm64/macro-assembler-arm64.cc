@@ -1509,25 +1509,32 @@ void MacroAssembler::GenerateTailCallToReturnedCode(
     Runtime::FunctionId function_id) {
   ASM_CODE_COMMENT(this);
   // ----------- S t a t e -------------
-  //  -- x0 : actual argument count
+  //  -- x0 : actual argument count (preserved for callee)
   //  -- x1 : target function (preserved for callee)
   //  -- x3 : new target (preserved for callee)
+  //  -- x4 : dispatch handle (preserved for callee)
   // -----------------------------------
   {
     FrameScope scope(this, StackFrame::INTERNAL);
-    // Push a copy of the target function, the new target and the actual
-    // argument count.
+    // Push a copy of the target function, the new target, the actual
+    // argument count, and the dispatch handle.
+    Register lastreg = V8_ENABLE_LEAPTIERING_BOOL
+                           ? kJavaScriptCallDispatchHandleRegister
+                           : padreg;
     SmiTag(kJavaScriptCallArgCountRegister);
+    // No need to SmiTag the dispatch handle as it always looks like a Smi.
+    static_assert(kJSDispatchHandleShift > 0);
     Push(kJavaScriptCallTargetRegister, kJavaScriptCallNewTargetRegister,
-         kJavaScriptCallArgCountRegister, padreg);
+         kJavaScriptCallArgCountRegister, lastreg);
     // Push another copy as a parameter to the runtime call.
     PushArgument(kJavaScriptCallTargetRegister);
 
     CallRuntime(function_id, 1);
     Mov(x2, x0);
 
-    // Restore target function, new target and actual argument count.
-    Pop(padreg, kJavaScriptCallArgCountRegister,
+    // Restore target function, new target, actual argument count, and dispatch
+    // handle.
+    Pop(lastreg, kJavaScriptCallArgCountRegister,
         kJavaScriptCallNewTargetRegister, kJavaScriptCallTargetRegister);
     SmiUntag(kJavaScriptCallArgCountRegister);
   }
@@ -2579,6 +2586,11 @@ void MacroAssembler::JumpJSFunction(Register function_object,
   DCHECK_NE(code, x17);
   Mov(x17, code);
   Jump(x17);
+  // This implementation is not currently used because callers usually need
+  // to load both entry point and parameter count and then do something with
+  // the latter before the actual call.
+  // TODO(ishell): remove the above code once it's clear it's not needed.
+  UNREACHABLE();
 #elif V8_ENABLE_SANDBOX
   // When the sandbox is enabled, we can directly fetch the entrypoint pointer
   // from the code pointer table instead of going through the Code object. In
@@ -2598,6 +2610,41 @@ void MacroAssembler::JumpJSFunction(Register function_object,
                   FieldMemOperand(function_object, JSFunction::kCodeOffset));
   JumpCodeObject(code, kJSEntrypointTag, jump_mode);
 #endif
+}
+
+void MacroAssembler::ResolveWasmCodePointer(Register target) {
+#ifdef V8_ENABLE_WASM_CODE_POINTER_TABLE
+  ExternalReference global_jump_table =
+      ExternalReference::wasm_code_pointer_table();
+  UseScratchRegisterScope temps(this);
+  Register scratch = temps.AcquireX();
+  Mov(scratch, global_jump_table);
+  static_assert(sizeof(wasm::WasmCodePointerTableEntry) == kSystemPointerSize);
+  lsl(target.W(), target.W(), kSystemPointerSizeLog2);
+  Ldr(target, MemOperand(scratch, target));
+#endif
+}
+
+void MacroAssembler::CallWasmCodePointer(Register target,
+                                         CallJumpMode call_jump_mode) {
+  ResolveWasmCodePointer(target);
+  if (call_jump_mode == CallJumpMode::kTailCall) {
+    Jump(target);
+  } else {
+    Call(target);
+  }
+}
+
+void MacroAssembler::LoadWasmCodePointer(Register dst, MemOperand src) {
+  if constexpr (V8_ENABLE_WASM_CODE_POINTER_TABLE_BOOL) {
+    static_assert(!V8_ENABLE_WASM_CODE_POINTER_TABLE_BOOL ||
+                  sizeof(WasmCodePointer) == 4);
+    Ldr(dst.W(), src);
+  } else {
+    static_assert(V8_ENABLE_WASM_CODE_POINTER_TABLE_BOOL ||
+                  sizeof(WasmCodePointer) == 8);
+    Ldr(dst, src);
+  }
 }
 
 void MacroAssembler::StoreReturnAddressAndCall(Register target) {
@@ -4339,7 +4386,7 @@ void MacroAssembler::TryLoadOptimizedOsrCode(Register scratch_and_result,
 
     Register temp = temps.AcquireX();
     JumpIfCodeIsMarkedForDeoptimization(scratch_and_result, temp, &clear_slot);
-    if (min_opt_level == CodeKind::TURBOFAN) {
+    if (min_opt_level == CodeKind::TURBOFAN_JS) {
       JumpIfCodeIsTurbofanned(scratch_and_result, temp, on_result);
       B(&fallthrough);
     } else {

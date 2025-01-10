@@ -183,7 +183,8 @@ HEAP_TEST(MarkCompactCollector) {
         Object::GetProperty(isolate, global, obj_name).ToHandleChecked();
     CHECK(IsJSObject(*object));
     Handle<String> prop_name = factory->InternalizeUtf8String("theSlot");
-    CHECK_EQ(*Object::GetProperty(isolate, object, prop_name).ToHandleChecked(),
+    CHECK_EQ(*Object::GetProperty(isolate, Cast<JSObject>(object), prop_name)
+                  .ToHandleChecked(),
              Smi::FromInt(23));
   }
 }
@@ -201,9 +202,10 @@ HEAP_TEST(DoNotEvacuatePinnedPages) {
 
   heap::SealCurrentObjects(heap);
 
-  auto handles = heap::CreatePadding(
+  DirectHandleVector<FixedArray> handles(isolate);
+  heap::CreatePadding(
       heap, static_cast<int>(MemoryChunkLayout::AllocatableMemoryInDataPage()),
-      AllocationType::kOld);
+      AllocationType::kOld, &handles);
 
   MemoryChunk* chunk = MemoryChunk::FromHeapObject(*handles.front());
 

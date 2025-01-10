@@ -38,6 +38,7 @@
 #include "src/heap/gc-tracer.h"
 #include "src/heap/heap-layout-inl.h"
 #include "src/heap/heap-utils-inl.h"
+#include "src/heap/heap-visitor-inl.h"
 #include "src/heap/heap.h"
 #include "src/heap/incremental-marking-inl.h"
 #include "src/heap/index-generator.h"
@@ -58,7 +59,6 @@
 #include "src/heap/mutable-page-metadata.h"
 #include "src/heap/new-spaces.h"
 #include "src/heap/object-stats.h"
-#include "src/heap/objects-visiting-inl.h"
 #include "src/heap/page-metadata-inl.h"
 #include "src/heap/page-metadata.h"
 #include "src/heap/parallel-work-item.h"
@@ -1020,11 +1020,10 @@ class MarkCompactCollector::CustomRootBodyMarkingVisitor final
 };
 
 class MarkCompactCollector::SharedHeapObjectVisitor final
-    : public ObjectVisitorWithCageBases {
+    : public HeapVisitor<MarkCompactCollector::SharedHeapObjectVisitor> {
  public:
   explicit SharedHeapObjectVisitor(MarkCompactCollector* collector)
-      : ObjectVisitorWithCageBases(collector->heap_->isolate()),
-        collector_(collector) {}
+      : HeapVisitor(collector->heap_->isolate()), collector_(collector) {}
 
   void VisitPointer(Tagged<HeapObject> host, ObjectSlot p) final {
     CheckForSharedObject(host, p, p.load(cage_base()));
@@ -1079,8 +1078,8 @@ class MarkCompactCollector::SharedHeapObjectVisitor final
   V8_INLINE void CheckForSharedObject(Tagged<HeapObject> host, ObjectSlot slot,
                                       Tagged<Object> object) {
     DCHECK(!HeapLayout::InAnySharedSpace(host));
-    if (!IsHeapObject(object)) return;
-    Tagged<HeapObject> heap_object = Cast<HeapObject>(object);
+    Tagged<HeapObject> heap_object;
+    if (!object.GetHeapObject(&heap_object)) return;
     if (!HeapLayout::InWritableSharedSpace(heap_object)) return;
     DCHECK(HeapLayout::InWritableSharedSpace(heap_object));
     MemoryChunk* host_chunk = MemoryChunk::FromHeapObject(host);
@@ -1243,10 +1242,13 @@ class MarkCompactWeakObjectRetainer : public WeakObjectRetainer {
   MarkingState* const marking_state_;
 };
 
-class RecordMigratedSlotVisitor : public ObjectVisitorWithCageBases {
+class RecordMigratedSlotVisitor
+    : public HeapVisitor<RecordMigratedSlotVisitor> {
  public:
   explicit RecordMigratedSlotVisitor(Heap* heap)
-      : ObjectVisitorWithCageBases(heap->isolate()), heap_(heap) {}
+      : HeapVisitor(heap->isolate()), heap_(heap) {}
+
+  V8_INLINE static constexpr bool UsePrecomputedObjectSize() { return true; }
 
   inline void VisitPointer(Tagged<HeapObject> host, ObjectSlot p) final {
     DCHECK(!HasWeakHeapObjectTag(p.load(cage_base())));
@@ -1508,7 +1510,7 @@ class EvacuateVisitorBase : public HeapObjectVisitor {
       }
       // In case the object's map gets relocated during GC we load the old map
       // here. This is fine since they store the same content.
-      dst->IterateFast(dst->map(cage_base), size, base->record_visitor_);
+      base->record_visitor_->Visit(dst->map(cage_base), dst, size);
     } else if (dest == SHARED_SPACE) {
       DCHECK_OBJECT_SIZE(size);
       DCHECK(IsAligned(size, kTaggedSize));
@@ -1516,7 +1518,7 @@ class EvacuateVisitorBase : public HeapObjectVisitor {
       if (mode != MigrationMode::kFast) {
         base->ExecuteMigrationObservers(dest, src, dst, size);
       }
-      dst->IterateFast(dst->map(cage_base), size, base->record_visitor_);
+      base->record_visitor_->Visit(dst->map(cage_base), dst, size);
     } else if (dest == TRUSTED_SPACE) {
       DCHECK_OBJECT_SIZE(size);
       DCHECK(IsAligned(size, kTaggedSize));
@@ -1526,14 +1528,21 @@ class EvacuateVisitorBase : public HeapObjectVisitor {
       }
       // In case the object's map gets relocated during GC we load the old map
       // here. This is fine since they store the same content.
-      dst->IterateFast(dst->map(cage_base), size, base->record_visitor_);
+      base->record_visitor_->Visit(dst->map(cage_base), dst, size);
     } else if (dest == CODE_SPACE) {
       DCHECK_CODEOBJECT_SIZE(size);
       {
         WritableJitAllocation writable_allocation =
             ThreadIsolation::RegisterInstructionStreamAllocation(dst_addr,
                                                                  size);
-        base->heap_->CopyBlock(dst_addr, src_addr, size);
+        DCHECK_GT(size, InstructionStream::kHeaderSize);
+        writable_allocation.CopyData(0, reinterpret_cast<uint8_t*>(src_addr),
+                                     InstructionStream::kHeaderSize);
+        writable_allocation.CopyCode(
+            InstructionStream::kHeaderSize,
+            reinterpret_cast<uint8_t*>(src_addr +
+                                       InstructionStream::kHeaderSize),
+            size - InstructionStream::kHeaderSize);
         Tagged<InstructionStream> istream = Cast<InstructionStream>(dst);
         istream->Relocate(writable_allocation, dst_addr - src_addr);
       }
@@ -1542,7 +1551,7 @@ class EvacuateVisitorBase : public HeapObjectVisitor {
       }
       // In case the object's map gets relocated during GC we load the old map
       // here. This is fine since they store the same content.
-      dst->IterateFast(dst->map(cage_base), size, base->record_visitor_);
+      base->record_visitor_->Visit(dst->map(cage_base), dst, size);
     } else {
       DCHECK_OBJECT_SIZE(size);
       DCHECK(dest == NEW_SPACE);
@@ -1660,7 +1669,7 @@ class EvacuateNewSpaceVisitor final : public EvacuateVisitorBase {
     if (TryEvacuateWithoutCopy(object)) return true;
     Tagged<HeapObject> target_object;
 
-    PretenuringHandler::UpdateAllocationSite(heap_, object->map(), object,
+    PretenuringHandler::UpdateAllocationSite(heap_, object->map(), object, size,
                                              local_pretenuring_feedback_);
 
     if (!TryEvacuateObject(OLD_SPACE, object, size, &target_object)) {
@@ -1749,12 +1758,11 @@ class EvacuateNewToOldSpacePageVisitor final : public HeapObjectVisitor {
 
   inline bool Visit(Tagged<HeapObject> object, int size) override {
     if (v8_flags.minor_ms) {
-      PretenuringHandler::UpdateAllocationSite(heap_, object->map(), object,
-                                               local_pretenuring_feedback_);
+      PretenuringHandler::UpdateAllocationSite(
+          heap_, object->map(), object, size, local_pretenuring_feedback_);
     }
     DCHECK(!HeapLayout::InCodeSpace(object));
-    PtrComprCageBase cage_base = GetPtrComprCageBase(object);
-    object->IterateFast(cage_base, record_visitor_);
+    record_visitor_->Visit(object->map(), object, size);
     return true;
   }
 
@@ -1800,7 +1808,7 @@ class EvacuateRecordOnlyVisitor final : public HeapObjectVisitor {
     // we can shortcut and use the precomputed size value passed to the visitor.
     DCHECK_EQ(object->SizeFromMap(map), size);
     live_object_size_ += ALIGN_TO_ALLOCATION_ALIGNMENT(size);
-    object->IterateFast(map, size, &visitor);
+    visitor.Visit(map, object, size);
     return true;
   }
 
@@ -1917,7 +1925,7 @@ void MarkCompactCollector::MarkObjectsFromClientHeap(Isolate* client) {
     DCHECK(!client_heap->allocator()->new_space_allocator()->IsLabValid());
     for (PageMetadata* page : *new_space) {
       for (Tagged<HeapObject> obj : HeapObjectRange(page)) {
-        obj->IterateFast(cage_base, &visitor);
+        visitor.Visit(obj);
       }
     }
   }
@@ -1927,7 +1935,7 @@ void MarkCompactCollector::MarkObjectsFromClientHeap(Isolate* client) {
         client_heap->new_lo_space()->GetObjectIterator(client_heap);
     for (Tagged<HeapObject> obj = iterator->Next(); !obj.is_null();
          obj = iterator->Next()) {
-      obj->IterateFast(cage_base, &visitor);
+      visitor.Visit(obj);
     }
   }
 
@@ -2358,8 +2366,8 @@ void MarkCompactCollector::ProcessTopOptimizedFrame(ObjectVisitor* visitor,
   for (StackFrameIterator it(isolate, isolate->thread_local_top(),
                              StackFrameIterator::NoHandles{});
        !it.done(); it.Advance()) {
-    if (it.frame()->is_unoptimized()) return;
-    if (it.frame()->is_optimized()) {
+    if (it.frame()->is_unoptimized_js()) return;
+    if (it.frame()->is_optimized_js()) {
       Tagged<GcSafeCode> lookup_result = it.frame()->GcSafeLookupCode();
       if (!lookup_result->has_instruction_stream()) return;
       if (!lookup_result->CanDeoptAt(isolate,
@@ -3036,7 +3044,7 @@ void MarkCompactCollector::ClearNonLiveReferences() {
                    DCHECK(code->kind() == CodeKind::FOR_TESTING ||
                           code->kind() == CodeKind::BASELINE ||
                           code->kind() == CodeKind::MAGLEV ||
-                          code->kind() == CodeKind::TURBOFAN);
+                          code->kind() == CodeKind::TURBOFAN_JS);
                    entry.SetCodeAndEntrypointPointer(
                        compile_lazy.ptr(), compile_lazy->instruction_start());
                  }
@@ -3148,8 +3156,8 @@ void MarkCompactCollector::ClearNonLiveReferences() {
 
   {
     TRACE_GC(heap_->tracer(), GCTracer::Scope::MC_SWEEP_CODE_POINTER_TABLE);
-    GetProcessWideCodePointerTable()->Sweep(heap_->code_pointer_space(),
-                                            isolate->counters());
+    IsolateGroup::current()->code_pointer_table()->Sweep(
+        heap_->code_pointer_space(), isolate->counters());
   }
 #endif  // V8_ENABLE_SANDBOX
 
@@ -4962,13 +4970,20 @@ void MarkCompactCollector::Evacuate() {
 
     for (PageMetadata* p : new_space_evacuation_pages_) {
       MemoryChunk* chunk = p->Chunk();
+      AllocationSpace owner_identity = p->owner_identity();
+      USE(owner_identity);
       if (chunk->IsFlagSet(MemoryChunk::PAGE_NEW_OLD_PROMOTION)) {
         chunk->ClearFlagNonExecutable(MemoryChunk::PAGE_NEW_OLD_PROMOTION);
-        DCHECK_EQ(OLD_SPACE, p->owner_identity());
+        // The in-sandbox page flags may be corrupted, so we currently need
+        // this check here to make sure that this doesn't lead to further
+        // confusion about the state of MemoryChunkMetadata objects.
+        // TODO(377724745): if we move (some of) the flags into the trusted
+        // MemoryChunkMetadata object, then this wouldn't be necessary.
+        SBXCHECK_EQ(OLD_SPACE, owner_identity);
         sweeper_->AddPage(OLD_SPACE, p);
       } else if (v8_flags.minor_ms) {
         // Sweep non-promoted pages to add them back to the free list.
-        DCHECK_EQ(NEW_SPACE, p->owner_identity());
+        DCHECK_EQ(NEW_SPACE, owner_identity);
         DCHECK_EQ(0, p->live_bytes());
         DCHECK(p->SweepingDone());
         PagedNewSpace* space = heap_->paged_new_space();
@@ -5446,11 +5461,13 @@ class EphemeronTableUpdatingItem : public UpdatingItem {
     for (auto it = table_map->begin(); it != table_map->end(); it++) {
       Tagged<EphemeronHashTable> table = it->first;
       auto& indices = it->second;
-      if (table->map_word(cage_base, kRelaxedLoad).IsForwardingAddress()) {
+      if (Cast<HeapObject>(table)
+              ->map_word(kRelaxedLoad)
+              .IsForwardingAddress()) {
         // The object has moved, so ignore slots in dead memory here.
         continue;
       }
-      DCHECK(IsMap(table->map(cage_base), cage_base));
+      DCHECK(IsMap(table->map(), cage_base));
       DCHECK(IsEphemeronHashTable(table, cage_base));
       for (auto iti = indices.begin(); iti != indices.end(); ++iti) {
         // EphemeronHashTable keys must be heap objects.
@@ -5682,7 +5699,7 @@ void MarkCompactCollector::UpdatePointersInPointerTables() {
         }
       });
 
-  CodePointerTable* const cpt = GetProcessWideCodePointerTable();
+  CodePointerTable* const cpt = IsolateGroup::current()->code_pointer_table();
   cpt->IterateActiveEntriesIn(
       heap_->code_pointer_space(),
       [&](CodePointerHandle handle, Address content) {
@@ -5708,7 +5725,7 @@ void MarkCompactCollector::UpdatePointersInPointerTables() {
         bool instruction_stream_was_relocated =
             code->instruction_start() != entrypoint_address;
         if (code_object_was_relocated || instruction_stream_was_relocated) {
-          jdt->SetCode(handle, code);
+          jdt->SetCodeNoWriteBarrier(handle, code);
         }
       });
 #endif  // V8_ENABLE_LEAPTIERING

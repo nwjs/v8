@@ -30,21 +30,6 @@ static_assert(
     kV8MaxRttSubtypingDepth <=
     std::numeric_limits<decltype(TypeDefinition().subtyping_depth)>::max());
 
-// static
-int WasmMemory::GetMemory64GuardsShift(uint64_t max_memory_size) {
-  // For memory64 we need a guard region that is at least twice the size of the
-  // maximum size of the Wasm memory. In order to speed-up bounds checks, we
-  // allocate the greater power-of-two size.
-  DCHECK_NE(max_memory_size, 0U);
-  size_t min_guards_size = 2 * max_memory_size;
-  int guards_shift = 63 - base::bits::CountLeadingZeros64(min_guards_size);
-  DCHECK_GE(guards_shift, 0);
-  if (!base::bits::IsPowerOfTwo(min_guards_size)) {
-    guards_shift++;
-  }
-  return guards_shift;
-}
-
 template <class Value>
 void AdaptiveMap<Value>::FinishInitialization() {
   uint32_t count = 0;
@@ -129,9 +114,9 @@ int GetContainingWasmFunction(const WasmModule* module, uint32_t byte_offset) {
   return func_index;
 }
 
-int GetSubtypingDepth(const WasmModule* module, uint32_t type_index) {
-  DCHECK_LT(type_index, module->types.size());
-  int depth = module->types[type_index].subtyping_depth;
+int GetSubtypingDepth(const WasmModule* module, ModuleTypeIndex type_index) {
+  DCHECK_LT(type_index.index, module->types.size());
+  int depth = module->type(type_index).subtyping_depth;
   DCHECK_LE(depth, kV8MaxRttSubtypingDepth);
   return depth;
 }
@@ -324,7 +309,7 @@ Handle<JSObject> GetTypeForGlobal(Isolate* isolate, bool is_mutable,
 
 Handle<JSObject> GetTypeForMemory(Isolate* isolate, uint32_t min_size,
                                   std::optional<uint64_t> max_size, bool shared,
-                                  IndexType index_type) {
+                                  AddressType address_type) {
   Factory* factory = isolate->factory();
 
   Handle<JSFunction> object_function = isolate->object_function();
@@ -332,12 +317,12 @@ Handle<JSObject> GetTypeForMemory(Isolate* isolate, uint32_t min_size,
   Handle<String> minimum_string = factory->InternalizeUtf8String("minimum");
   Handle<String> maximum_string = factory->InternalizeUtf8String("maximum");
   Handle<String> shared_string = factory->InternalizeUtf8String("shared");
-  Handle<String> index_string = factory->InternalizeUtf8String("index");
+  Handle<String> address_string = factory->InternalizeUtf8String("address");
   JSObject::AddProperty(isolate, object, minimum_string,
                         factory->NewNumberFromUint(min_size), NONE);
   if (max_size.has_value()) {
     Handle<UnionOf<Smi, HeapNumber, BigInt>> max;
-    if (index_type == IndexType::kI32) {
+    if (address_type == AddressType::kI32) {
       DCHECK_GE(kMaxUInt32, *max_size);
       max = factory->NewNumberFromUint(static_cast<uint32_t>(*max_size));
     } else {
@@ -349,8 +334,8 @@ Handle<JSObject> GetTypeForMemory(Isolate* isolate, uint32_t min_size,
                         factory->ToBoolean(shared), NONE);
 
   JSObject::AddProperty(
-      isolate, object, index_string,
-      factory->InternalizeUtf8String(IndexTypeToStr(index_type)), NONE);
+      isolate, object, address_string,
+      factory->InternalizeUtf8String(AddressTypeToStr(address_type)), NONE);
 
   return object;
 }
@@ -358,7 +343,7 @@ Handle<JSObject> GetTypeForMemory(Isolate* isolate, uint32_t min_size,
 Handle<JSObject> GetTypeForTable(Isolate* isolate, ValueType type,
                                  uint32_t min_size,
                                  std::optional<uint64_t> max_size,
-                                 IndexType index_type) {
+                                 AddressType address_type) {
   Factory* factory = isolate->factory();
 
   DirectHandle<String> element =
@@ -369,13 +354,13 @@ Handle<JSObject> GetTypeForTable(Isolate* isolate, ValueType type,
   Handle<String> element_string = factory->element_string();
   Handle<String> minimum_string = factory->InternalizeUtf8String("minimum");
   Handle<String> maximum_string = factory->InternalizeUtf8String("maximum");
-  Handle<String> index_string = factory->InternalizeUtf8String("index");
+  Handle<String> address_string = factory->InternalizeUtf8String("address");
   JSObject::AddProperty(isolate, object, element_string, element, NONE);
   JSObject::AddProperty(isolate, object, minimum_string,
                         factory->NewNumberFromUint(min_size), NONE);
   if (max_size.has_value()) {
     Handle<UnionOf<Smi, HeapNumber, BigInt>> max;
-    if (index_type == IndexType::kI32) {
+    if (address_type == AddressType::kI32) {
       DCHECK_GE(kMaxUInt32, *max_size);
       max = factory->NewNumberFromUint(static_cast<uint32_t>(*max_size));
     } else {
@@ -384,8 +369,8 @@ Handle<JSObject> GetTypeForTable(Isolate* isolate, ValueType type,
     JSObject::AddProperty(isolate, object, maximum_string, max, NONE);
   }
   JSObject::AddProperty(
-      isolate, object, index_string,
-      factory->InternalizeUtf8String(IndexTypeToStr(index_type)), NONE);
+      isolate, object, address_string,
+      factory->InternalizeUtf8String(AddressTypeToStr(address_type)), NONE);
 
   return object;
 }
@@ -451,7 +436,7 @@ Handle<JSArray> GetImports(Isolate* isolate,
           std::optional<uint32_t> maximum_size;
           if (table.has_maximum_size) maximum_size.emplace(table.maximum_size);
           type_value = GetTypeForTable(isolate, table.type, table.initial_size,
-                                       maximum_size, table.index_type);
+                                       maximum_size, table.address_type);
         }
         import_kind = table_string;
         break;
@@ -464,7 +449,7 @@ Handle<JSArray> GetImports(Isolate* isolate,
           }
           type_value =
               GetTypeForMemory(isolate, memory.initial_pages, maximum_size,
-                               memory.is_shared, memory.index_type);
+                               memory.is_shared, memory.address_type);
         }
         import_kind = memory_string;
         break;
@@ -558,7 +543,7 @@ Handle<JSArray> GetExports(Isolate* isolate,
           std::optional<uint32_t> maximum_size;
           if (table.has_maximum_size) maximum_size.emplace(table.maximum_size);
           type_value = GetTypeForTable(isolate, table.type, table.initial_size,
-                                       maximum_size, table.index_type);
+                                       maximum_size, table.address_type);
         }
         export_kind = table_string;
         break;
@@ -571,7 +556,7 @@ Handle<JSArray> GetExports(Isolate* isolate,
           }
           type_value =
               GetTypeForMemory(isolate, memory.initial_pages, maximum_size,
-                               memory.is_shared, memory.index_type);
+                               memory.is_shared, memory.address_type);
         }
         export_kind = memory_string;
         break;

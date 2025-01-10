@@ -8,11 +8,11 @@
 #include "src/codegen/assembler-inl.h"
 #include "src/heap/evacuation-allocator-inl.h"
 #include "src/heap/heap-layout-inl.h"
+#include "src/heap/heap-visitor-inl.h"
 #include "src/heap/incremental-marking-inl.h"
 #include "src/heap/marking-state-inl.h"
 #include "src/heap/mutable-page-metadata.h"
 #include "src/heap/new-spaces.h"
-#include "src/heap/objects-visiting-inl.h"
 #include "src/heap/pretenuring-handler-inl.h"
 #include "src/heap/scavenger.h"
 #include "src/objects/js-objects.h"
@@ -114,7 +114,7 @@ bool Scavenger::MigrateObject(Tagged<Map> map, Tagged<HeapObject> source,
       (promotion_heap_choice != kPromoteIntoSharedHeap || mark_shared_heap_)) {
     heap()->incremental_marking()->TransferColor(source, target);
   }
-  PretenuringHandler::UpdateAllocationSite(heap_, map, source,
+  PretenuringHandler::UpdateAllocationSite(heap_, map, source, size,
                                            &local_pretenuring_feedback_);
 
   return true;
@@ -461,11 +461,14 @@ class ScavengeVisitor final : public NewSpaceVisitor<ScavengeVisitor> {
 
   V8_INLINE void VisitPointers(Tagged<HeapObject> host, MaybeObjectSlot start,
                                MaybeObjectSlot end) final;
-  V8_INLINE int VisitEphemeronHashTable(Tagged<Map> map,
-                                        Tagged<EphemeronHashTable> object);
-  V8_INLINE int VisitJSArrayBuffer(Tagged<Map> map,
-                                   Tagged<JSArrayBuffer> object);
-  V8_INLINE int VisitJSApiObject(Tagged<Map> map, Tagged<JSObject> object);
+  V8_INLINE size_t VisitEphemeronHashTable(Tagged<Map> map,
+                                           Tagged<EphemeronHashTable> object,
+                                           MaybeObjectSize);
+  V8_INLINE size_t VisitJSArrayBuffer(Tagged<Map> map,
+                                      Tagged<JSArrayBuffer> object,
+                                      MaybeObjectSize);
+  V8_INLINE size_t VisitJSApiObject(Tagged<Map> map, Tagged<JSObject> object,
+                                    MaybeObjectSize);
   V8_INLINE void VisitExternalPointer(Tagged<HeapObject> host,
                                       ExternalPointerSlot slot);
 
@@ -523,16 +526,18 @@ void ScavengeVisitor::VisitPointersImpl(Tagged<HeapObject> host, TSlot start,
   }
 }
 
-int ScavengeVisitor::VisitJSArrayBuffer(Tagged<Map> map,
-                                        Tagged<JSArrayBuffer> object) {
+size_t ScavengeVisitor::VisitJSArrayBuffer(Tagged<Map> map,
+                                           Tagged<JSArrayBuffer> object,
+                                           MaybeObjectSize) {
   object->YoungMarkExtension();
   int size = JSArrayBuffer::BodyDescriptor::SizeOf(map, object);
   JSArrayBuffer::BodyDescriptor::IterateBody(map, object, size, this);
   return size;
 }
 
-int ScavengeVisitor::VisitJSApiObject(Tagged<Map> map,
-                                      Tagged<JSObject> object) {
+size_t ScavengeVisitor::VisitJSApiObject(Tagged<Map> map,
+                                         Tagged<JSObject> object,
+                                         MaybeObjectSize) {
   int size = JSAPIObjectWithEmbedderSlots::BodyDescriptor::SizeOf(map, object);
   JSAPIObjectWithEmbedderSlots::BodyDescriptor::IterateBody(map, object, size,
                                                             this);
@@ -565,8 +570,8 @@ void ScavengeVisitor::VisitExternalPointer(Tagged<HeapObject> host,
 #endif  // V8_COMPRESS_POINTERS
 }
 
-int ScavengeVisitor::VisitEphemeronHashTable(Tagged<Map> map,
-                                             Tagged<EphemeronHashTable> table) {
+size_t ScavengeVisitor::VisitEphemeronHashTable(
+    Tagged<Map> map, Tagged<EphemeronHashTable> table, MaybeObjectSize) {
   // Register table with the scavenger, so it can take care of the weak keys
   // later. This allows to only iterate the tables' values, which are treated
   // as strong independently of whether the key is live.

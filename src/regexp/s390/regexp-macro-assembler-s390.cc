@@ -140,8 +140,8 @@ RegExpMacroAssemblerS390::~RegExpMacroAssemblerS390() {
   fallback_label_.Unuse();
 }
 
-int RegExpMacroAssemblerS390::stack_limit_slack() {
-  return RegExpStack::kStackLimitSlack;
+int RegExpMacroAssemblerS390::stack_limit_slack_slot_count() {
+  return RegExpStack::kStackLimitSlackSlotCount;
 }
 
 void RegExpMacroAssemblerS390::AdvanceCurrentPosition(int by) {
@@ -535,8 +535,8 @@ void RegExpMacroAssemblerS390::CheckBitInTable(Handle<ByteArray> table,
     __ AndP(r3, current_character(), Operand(kTableSize - 1));
     index = r3;
   }
-  __ LoadU8(r2,
-            MemOperand(r2, index, (ByteArray::kHeaderSize - kHeapObjectTag)));
+  __ LoadU8(r2, MemOperand(r2, index,
+                           (OFFSET_OF_DATA_START(ByteArray) - kHeapObjectTag)));
   __ CmpS64(r2, Operand::Zero());
   BranchOrBacktrack(ne, on_bit_set);
 }
@@ -710,7 +710,8 @@ void RegExpMacroAssemblerS390::PopRegExpBasePointer(Register stack_pointer_out,
   StoreRegExpStackPointerToMemory(stack_pointer_out, scratch);
 }
 
-Handle<HeapObject> RegExpMacroAssemblerS390::GetCode(Handle<String> source) {
+Handle<HeapObject> RegExpMacroAssemblerS390::GetCode(Handle<String> source,
+                                                     RegExpFlags flags) {
   Label return_r2;
 
   // Finalize code - write the entry point code now we know how many
@@ -742,7 +743,7 @@ Handle<HeapObject> RegExpMacroAssemblerS390::GetCode(Handle<String> source) {
   //          r3: start_index
   //          r4: start addr
   //          r5: end addr
-  //          r6: capture output arrray
+  //          r6: capture output array
   //    Requires us to save the callee-preserved registers r6-r13
   //    General convention is to also save r14 (return addr) and
   //    sp/r15 as well in a single STM/STMG
@@ -1127,7 +1128,7 @@ Handle<HeapObject> RegExpMacroAssemblerS390::GetCode(Handle<String> source) {
           .set_empty_source_position_table()
           .Build();
   PROFILE(masm_->isolate(),
-          RegExpCodeCreateEvent(Cast<AbstractCode>(code), source));
+          RegExpCodeCreateEvent(Cast<AbstractCode>(code), source, flags));
   return Cast<HeapObject>(code);
 }
 

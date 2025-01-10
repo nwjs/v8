@@ -342,6 +342,11 @@ void WasmCode::Validate() const {
                 std::numeric_limits<uint16_t>::max());
 
 #ifdef DEBUG
+  NativeModule::CallIndirectTargetMap function_index_map;
+  if (native_module_) {
+    function_index_map =
+        native_module_->CreateIndirectCallTargetToFunctionIndexMap();
+  }
   // Scope for foreign WasmCode pointers.
   WasmCodeRefScope code_ref_scope;
   // We expect certain relocation info modes to never appear in {WasmCode}
@@ -374,8 +379,7 @@ void WasmCode::Validate() const {
       }
       case RelocInfo::WASM_INDIRECT_CALL_TARGET: {
         WasmCodePointer call_target = it.rinfo()->wasm_indirect_call_target();
-        uint32_t function_index =
-            native_module_->GetFunctionIndexFromIndirectCallTarget(call_target);
+        uint32_t function_index = function_index_map.at(call_target);
         CHECK_EQ(call_target,
                  native_module_->GetIndirectCallTarget(function_index));
         break;
@@ -1098,7 +1102,7 @@ WasmCode* NativeModule::AddCodeForTesting(DirectHandle<Code> code) {
         ThreadIsolation::RegisterJitAllocation(
             reinterpret_cast<Address>(dst_code_bytes.begin()),
             dst_code_bytes.size(),
-            ThreadIsolation::JitAllocationType::kWasmCode);
+            ThreadIsolation::JitAllocationType::kWasmCode, true);
     jit_allocation.CopyCode(0, instructions.begin(), instructions.size());
 
     // Apply the relocation delta by iterating over the RelocInfo.
@@ -1312,7 +1316,8 @@ std::unique_ptr<WasmCode> NativeModule::AddCodeWithCodeSpace(
   {
     WritableJitAllocation jit_allocation = ThreadIsolation::LookupJitAllocation(
         reinterpret_cast<Address>(dst_code_bytes.begin()),
-        dst_code_bytes.size(), ThreadIsolation::JitAllocationType::kWasmCode);
+        dst_code_bytes.size(), ThreadIsolation::JitAllocationType::kWasmCode,
+        true);
     jit_allocation.CopyCode(0, desc.buffer, desc.instr_size);
 
     // Apply the relocation delta by iterating over the RelocInfo.
@@ -1522,9 +1527,13 @@ bool NativeModule::should_update_code_table(WasmCode* new_code,
   // In kNoDebugging:
   // Install if the tier is higher than before or we replace debugging code with
   // non-debugging code.
-  // Also allow installing a lower tier if deopt support is enabled.
+  // Also allow installing a lower tier if deopt support is enabled and the
+  // prior code has deopt data. (The check for deopt_data is needed as with
+  // compilation hints, both baseline and top tier compilation run concurrently
+  // in the background and can finish in any order.)
   if (prior_code && !prior_code->for_debugging() &&
-      prior_code->tier() > new_code->tier() && !v8_flags.wasm_deopt) {
+      prior_code->tier() > new_code->tier() &&
+      (!v8_flags.wasm_deopt || prior_code->deopt_data().empty())) {
     return false;
   }
   return true;
@@ -2025,19 +2034,14 @@ uint32_t NativeModule::GetFunctionIndexFromJumpTableSlot(
   return module_->num_imported_functions + slot_idx;
 }
 
-uint32_t NativeModule::GetFunctionIndexFromIndirectCallTarget(
-    WasmCodePointer target) const {
-  // The indirect call target always points to the entry in the main jump table.
-  // See `GetIndirectCallTarget()` for the reverse operation.
-  Address jt_start = jump_table_start();
-  uint32_t jt_size = JumpTableAssembler::SizeForNumberOfSlots(
-      module()->num_declared_functions);
-  CHECK_GE(target, jt_start);
-  uint32_t jt_offset = base::checked_cast<uint32_t>(target - jt_start);
-  CHECK_LT(jt_offset, jt_size);
-  uint32_t declared_function_index =
-      JumpTableAssembler::SlotOffsetToIndex(jt_offset);
-  return module_->num_imported_functions + declared_function_index;
+NativeModule::CallIndirectTargetMap
+NativeModule::CreateIndirectCallTargetToFunctionIndexMap() const {
+  absl::flat_hash_map<WasmCodePointer, uint32_t> lookup_map;
+  for (uint32_t func_index = num_imported_functions();
+       func_index < num_functions(); func_index++) {
+    lookup_map.emplace(GetIndirectCallTarget(func_index), func_index);
+  }
+  return lookup_map;
 }
 
 Builtin NativeModule::GetBuiltinInJumptableSlot(Address target) const {
@@ -2073,13 +2077,14 @@ WasmCodePointerTable::Handle NativeModule::GetCodePointerHandle(
 }
 
 WasmCodePointer NativeModule::GetIndirectCallTarget(int func_index) const {
-  DCHECK_GE(func_index, module_->num_imported_functions);
-  func_index -= module_->num_imported_functions;
-  DCHECK_LT(func_index, module_->num_declared_functions);
-  Address jump_table_slot =
-      jump_table_start() +
-      JumpTableAssembler::JumpSlotIndexToOffset(func_index);
-  return jump_table_slot;
+  DCHECK_GE(func_index, num_imported_functions());
+  DCHECK_LT(func_index, num_functions());
+
+#ifdef V8_ENABLE_WASM_CODE_POINTER_TABLE
+  return GetCodePointerHandle(func_index);
+#else
+  return jump_table_start() + JumpTableOffset(module(), func_index);
+#endif
 }
 
 NativeModule::~NativeModule() {
@@ -2574,9 +2579,27 @@ std::vector<std::unique_ptr<WasmCode>> NativeModule::AddCompiledCode(
       // Split off the first part of the {results} vector and process it
       // separately. This method then continues with the rest.
       size_t split_point = &result - results.begin();
-      CHECK_WITH_MSG(
-          split_point != 0,
-          "A single code object needs more than half of the code space size");
+      if (split_point == 0) {
+        // Fuzzers sometimes hit this by reducing --wasm-max-code-sapce-size-mb
+        // to an unreasonably small value. Make this an OOM to avoid getting a
+        // CHECK failure in this case.
+        if (v8_flags.wasm_max_code_space_size_mb <
+            kDefaultMaxWasmCodeSpaceSizeMb / 10) {
+          auto oom_detail = base::FormattedString{}
+                            << "--wasm-max-code-space-size="
+                            << v8_flags.wasm_max_code_space_size_mb.value();
+          V8::FatalProcessOutOfMemory(nullptr,
+                                      "A single code object needs more than "
+                                      "half of the code space size",
+                                      oom_detail.PrintToArray().data());
+        } else {
+          // Otherwise make this a CHECK failure so we see if this is happening
+          // in the wild or in tests.
+          FATAL(
+              "A single code object needs more than half of the code space "
+              "size");
+        }
+      }
       auto first_results = AddCompiledCode(results.SubVector(0, split_point));
       generated_code.insert(generated_code.end(),
                             std::make_move_iterator(first_results.begin()),

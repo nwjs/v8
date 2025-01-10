@@ -318,9 +318,7 @@ DEFINE_BOOL(js_shipping, true, "enable all shipped JavaScript features")
   V(js_promise_try, "Promise.try")
 
 #ifdef V8_INTL_SUPPORT
-#define HARMONY_SHIPPING(V)                                  \
-  HARMONY_SHIPPING_BASE(V)                                   \
-  V(harmony_intl_locale_info_func, "Intl Locale Info API as functions")
+#define HARMONY_SHIPPING(V) HARMONY_SHIPPING_BASE(V)
 #define JAVASCRIPT_SHIPPING_FEATURES(V) JAVASCRIPT_SHIPPING_FEATURES_BASE(V)
 #else
 #define HARMONY_SHIPPING(V) HARMONY_SHIPPING_BASE(V)
@@ -545,8 +543,11 @@ DEFINE_BOOL(maglev_loop_peeling, true,
 DEFINE_BOOL(maglev_optimistic_peeled_loops, true,
             "enable aggressive optimizations for loops (loop SPeeling) in the "
             "maglev optimizing compiler")
-DEFINE_INT(maglev_loop_peeling_max_size, 200,
+DEFINE_INT(maglev_loop_peeling_max_size, 400,
            "max loop size for loop peeling in the maglev optimizing compiler")
+DEFINE_INT(
+    maglev_loop_peeling_max_size_cumulative, 900,
+    "max cumulative size for loop peeling in the maglev optimizing compiler")
 DEFINE_BOOL(maglev_deopt_data_on_background, true,
             "Generate deopt data on background thread")
 DEFINE_BOOL(maglev_build_code_on_background, true,
@@ -605,6 +606,8 @@ DEFINE_EXPERIMENTAL_FEATURE(
 DEFINE_BOOL(maglev_cse, true, "common subexpression elimination")
 
 DEFINE_STRING(maglev_filter, "*", "optimization filter for the maglev compiler")
+DEFINE_STRING(maglev_print_filter, "*",
+              "filter for maglev's tracing/printing options")
 DEFINE_BOOL(maglev_assert, false, "insert extra assertion in maglev code")
 DEFINE_DEBUG_BOOL(maglev_assert_stack_size, true,
                   "insert stack size checks before every IR node")
@@ -668,6 +671,9 @@ DEFINE_BOOL_READONLY(dict_property_const_tracking,
 
 DEFINE_BOOL(const_tracking_let, true,
             "Use const tracking on top-level `let` variables")
+
+DEFINE_EXPERIMENTAL_FEATURE(script_context_mutable_heap_number,
+                            "Use mutable heap numbers in script contexts")
 
 DEFINE_UINT(max_opt, 999,
             "Set the maximal optimisation tier: "
@@ -819,6 +825,10 @@ DEFINE_BOOL(trace_protector_invalidation, false,
             "trace protector cell invalidations")
 DEFINE_BOOL(decommit_pooled_pages, true,
             "decommit, rather than discard pooled pages")
+DEFINE_BOOL(
+    zero_unused_memory, false,
+    "Zero unused memory (except for memory which was discarded) on memory "
+    "reducing GCs.")
 
 #ifdef V8_MINORMS_STRING_SHORTCUTTING
 DEFINE_BOOL(minor_ms_shortcut_strings, false,
@@ -959,8 +969,7 @@ DEFINE_BOOL(trace_track_allocation_sites, false,
 DEFINE_BOOL(trace_migration, false, "trace object migration")
 DEFINE_BOOL(trace_generalization, false, "trace map generalization")
 
-DEFINE_BOOL(reuse_scope_infos, false,
-            "reuse scope infos from previous compiles")
+DEFINE_BOOL(reuse_scope_infos, true, "reuse scope infos from previous compiles")
 
 DEFINE_IMPLICATION(fuzzing, reuse_scope_infos)
 
@@ -1017,6 +1026,7 @@ DEFINE_WEAK_IMPLICATION(trace_baseline, trace_baseline_batch_compilation)
 // Internalize into a shared string table in the shared isolate
 DEFINE_BOOL(shared_string_table, false, "internalize strings into shared table")
 DEFINE_IMPLICATION(harmony_struct, shared_string_table)
+DEFINE_IMPLICATION(shared_string_table, shared_heap)
 DEFINE_EXPERIMENTAL_FEATURE(
     always_use_string_forwarding_table,
     "use string forwarding table instead of thin strings for all strings")
@@ -1359,6 +1369,13 @@ DEFINE_BOOL(
     "inline JS->Wasm calls (specifically: inline JS-to-Wasm wrappers and then "
     "the body of the Wasm function, if applicable)")
 
+DEFINE_BOOL(turbo_optimize_inlined_js_wasm_wrappers, false,
+            "Run additional optimizations (especially load-elimination) on "
+            "inlined JS-to-Wasm wrappers")
+DEFINE_NEG_NEG_IMPLICATION(turbo_inline_js_wasm_calls,
+                           turbo_optimize_inlined_js_wasm_wrappers)
+DEFINE_WEAK_IMPLICATION(future, turbo_optimize_inlined_js_wasm_wrappers)
+
 DEFINE_BOOL(turbo_optimize_apply, true, "optimize Function.prototype.apply")
 DEFINE_BOOL(turbo_optimize_math_minmax, true,
             "optimize call math.min/max with double array")
@@ -1380,9 +1397,8 @@ DEFINE_BOOL(turboshaft_enable_debug_features, false,
             "enables Turboshaft's DebugPrint, StaticAssert and "
             "CheckTurboshaftTypeOf operations")
 #endif
-DEFINE_BOOL(turboshaft_wasm, false,
+DEFINE_BOOL(turboshaft_wasm, true,
             "enable TurboFan's Turboshaft phases for wasm")
-DEFINE_WEAK_IMPLICATION(future, turboshaft_wasm)
 DEFINE_BOOL(turboshaft_wasm_load_elimination, false,
             "enable Turboshaft's WasmLoadElimination")
 DEFINE_WEAK_IMPLICATION(turboshaft_wasm, turboshaft_wasm_load_elimination)
@@ -1508,31 +1524,6 @@ DEFINE_VALUE_IMPLICATION(optimize_for_size, max_semi_space_size, size_t{1})
 DEFINE_BOOL(wasm_generic_wrapper, true,
             "allow use of the generic js-to-wasm wrapper instead of "
             "per-signature wrappers")
-DEFINE_BOOL(expose_wasm, true, "expose wasm interface to JavaScript")
-// Do not expose wasm in jitless mode.
-//
-// Even in interpreter-only mode, wasm currently still creates executable
-// memory at runtime. Unexpose wasm until this changes.
-// The correctness fuzzers are a special case: many of their test cases are
-// built by fetching a random property from the the global object, and thus
-// the global object layout must not change between configs. That is why we
-// continue exposing wasm on correctness fuzzers even in jitless mode.
-// TODO(jgruber): Remove this once / if wasm can run without executable
-// memory.
-DEFINE_BOOL(jitless_and_not_correctness_fuzzer_suppressions, true,
-            "jitless && !correctness_fuzzer_suppressions")
-DEFINE_NEG_NEG_IMPLICATION(jitless,
-                           jitless_and_not_correctness_fuzzer_suppressions)
-DEFINE_NEG_IMPLICATION(correctness_fuzzer_suppressions,
-                       jitless_and_not_correctness_fuzzer_suppressions)
-#ifdef V8_ENABLE_DRUMBRAKE
-DEFINE_NEG_IMPLICATION(wasm_jitless,
-                       jitless_and_not_correctness_fuzzer_suppressions)
-DEFINE_NEG_IMPLICATION(wasm_jitless_if_available_for_testing,
-                       jitless_and_not_correctness_fuzzer_suppressions)
-#endif  // V8_ENABLE_DRUMBRAKE
-DEFINE_DISABLE_FLAG_IMPLICATION(jitless_and_not_correctness_fuzzer_suppressions,
-                                expose_wasm)
 DEFINE_INT(wasm_num_compilation_tasks, 128,
            "maximum number of parallel compilation tasks for wasm")
 DEFINE_VALUE_IMPLICATION(single_threaded, wasm_num_compilation_tasks, 0)
@@ -1548,8 +1539,7 @@ DEFINE_BOOL(wasm_async_compilation, true,
 DEFINE_NEG_IMPLICATION(single_threaded, wasm_async_compilation)
 DEFINE_BOOL(wasm_test_streaming, false,
             "use streaming compilation instead of async compilation for tests")
-DEFINE_BOOL(wasm_native_module_cache_enabled, true,
-            "enable the native module cache")
+DEFINE_BOOL(wasm_native_module_cache, true, "enable the native module cache")
 DEFINE_BOOL(turboshaft_wasm_wrappers, false,
             "compile the wasm wrappers with Turboshaft (instead of TurboFan)")
 DEFINE_IMPLICATION(turboshaft_wasm, turboshaft_wasm_wrappers)
@@ -1600,6 +1590,9 @@ DEFINE_DEBUG_BOOL(trace_wasm_streaming, false,
                   "trace streaming compilation of wasm code")
 DEFINE_DEBUG_BOOL(trace_wasm_stack_switching, false,
                   "trace wasm stack switching")
+DEFINE_BOOL(stress_wasm_stack_switching, false,
+            "Always run wasm on a secondary stack, even when it is called "
+            "with a regular (non-JSPI) export")
 DEFINE_INT(wasm_stack_switching_stack_size, V8_DEFAULT_STACK_SIZE_KB,
            "default size of stacks for wasm stack-switching (in kB)")
 DEFINE_BOOL(liftoff, true,
@@ -1725,10 +1718,10 @@ DEFINE_NEG_NEG_IMPLICATION(wasm_bounds_checks, wasm_enforce_bounds_checks)
 DEFINE_BOOL(wasm_math_intrinsics, true,
             "intrinsify some Math imports into wasm")
 
-// TODO(335082212,dlehmann): Imply from `--future`.
 DEFINE_BOOL(wasm_inlining_call_indirect, false,
             "enable speculative inlining of Wasm indirect calls, requires "
             "--turboshaft-wasm")
+DEFINE_WEAK_IMPLICATION(future, wasm_inlining_call_indirect)
 // This doesn't make sense without and requires  the basic inlining machinery,
 // e.g., for allocating feedback vectors, so we automatically enable it.
 DEFINE_IMPLICATION(wasm_inlining_call_indirect, wasm_inlining)
@@ -1787,7 +1780,7 @@ DEFINE_INT(wasm_max_initial_code_space_reservation, 0,
            "maximum size of the initial wasm code space reservation (in MB)")
 DEFINE_BOOL(stress_wasm_memory_moving, false,
             "always move non-shared bounds-checked Wasm memory on grow")
-DEFINE_BOOL(flush_liftoff_code, false,
+DEFINE_BOOL(flush_liftoff_code, true,
             "enable flushing liftoff code on memory pressure signal")
 
 DEFINE_SIZE_T(wasm_max_module_size, wasm::kV8MaxWasmModuleSize,
@@ -2103,6 +2096,8 @@ DEFINE_INT(memory_reducer_gc_count, 2,
 DEFINE_BOOL(
     external_memory_accounted_in_global_limit, false,
     "External memory limits are computed as part of global limits in v8 Heap.")
+DEFINE_BOOL(gc_speed_uses_counters, false,
+            "Old gen GC speed is computed directly from gc tracer counters.")
 DEFINE_INT(heap_growing_percent, 0,
            "specifies heap growing factor as (1 + heap_growing_percent/100)")
 DEFINE_INT(v8_os_page_size, 0, "override OS page size (in KBytes)")
@@ -2309,6 +2304,7 @@ DEFINE_BOOL(
     "After deserializing code cache data on a background thread, merge it into "
     "an existing Script if one is found in the Isolate compilation cache")
 DEFINE_BOOL(verify_code_merge, false, "Verify scope infos after merge")
+DEFINE_BOOL(verify_scope_info_reuse, false, "Verify scope info reuse")
 
 // Fix https://issues.chromium.org/u/1/issues/366783806 before enabling.
 DEFINE_BOOL(
@@ -2488,8 +2484,8 @@ DEFINE_BOOL(heap_snapshot_on_oom, false,
             "Write a heap snapshot to disk on last-resort GCs")
 DEFINE_INT(heap_snapshot_on_gc, -1,
            "Write a heap snapshot to disk on a certain GC invocation")
-DEFINE_INT(heap_snapshot_string_limit, 1024,
-           "truncate strings to this length in the heap snapshot")
+DEFINE_UINT(heap_snapshot_string_limit, 1024,
+            "truncate strings to this length in the heap snapshot")
 DEFINE_BOOL(heap_profiler_show_hidden_objects, false,
             "use 'native' rather than 'hidden' node type in snapshot")
 DEFINE_BOOL(profile_heap_snapshot, false, "dump time spent on heap snapshot")
@@ -3288,9 +3284,9 @@ DEFINE_NEG_IMPLICATION(single_threaded_gc, concurrent_array_buffer_sweeping)
 DEFINE_NEG_IMPLICATION(single_threaded_gc, stress_concurrent_allocation)
 DEFINE_NEG_IMPLICATION(single_threaded_gc, cppheap_concurrent_marking)
 
-DEFINE_BOOL(single_threaded_gc_in_background, false,
+DEFINE_BOOL(single_threaded_gc_in_background, true,
             "disable the use of background gc tasks when in background")
-DEFINE_BOOL(parallel_pause_for_gc_in_background, false,
+DEFINE_BOOL(parallel_pause_for_gc_in_background, true,
             "Use parallel threads in the atomic pause for background GCs")
 DEFINE_BOOL(incremental_marking_for_gc_in_background, true,
             "Use parallel threads in the atomic pause for background GCs")
@@ -3299,6 +3295,9 @@ DEFINE_BOOL(update_allocation_limits_after_loading, false,
             "force recomputation of allocation limites when leaving the "
             "loading RAIL mode (either on a RAIL mode change or incremental "
             "marking start).")
+
+DEFINE_EXPERIMENTAL_FEATURE(shared_heap,
+                            "Enables a shared heap between isolates.")
 
 #if defined(V8_USE_LIBM_TRIG_FUNCTIONS)
 DEFINE_BOOL(use_libm_trig_functions, true, "use libm trig functions")

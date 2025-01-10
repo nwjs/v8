@@ -53,8 +53,9 @@ V8_OBJECT class HeapObjectLayout {
 
   // Initialize the map immediately after the object is allocated.
   // Do not use this outside Heap.
+  template <typename IsolateT>
   inline void set_map_after_allocation(
-      Isolate* isolate, Tagged<Map> value,
+      IsolateT* isolate, Tagged<Map> value,
       WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
   // The no-write-barrier version.  This is OK if the object is white and in
@@ -103,6 +104,16 @@ V8_OBJECT class HeapObjectLayout {
 
  private:
   friend class HeapObject;
+  friend class Heap;
+  friend class CodeStubAssembler;
+
+  // HeapObjects shouldn't be copied or moved by C++ code, only by the GC.
+  // TODO(leszeks): Consider making these non-deleted if the GC starts using
+  // HeapObjectLayout rather than manual per-byte access.
+  HeapObjectLayout(HeapObjectLayout&&) V8_NOEXCEPT = delete;
+  HeapObjectLayout(const HeapObjectLayout&) V8_NOEXCEPT = delete;
+  HeapObjectLayout& operator=(HeapObjectLayout&&) V8_NOEXCEPT = delete;
+  HeapObjectLayout& operator=(const HeapObjectLayout&) V8_NOEXCEPT = delete;
 
   TaggedMember<Map> map_;
 } V8_OBJECT_END;
@@ -214,36 +225,6 @@ class HeapObject : public TaggedImpl<HeapObjectReferenceType::STRONG, Address> {
   // Returns the address of this HeapObject.
   inline Address address() const { return ptr() - kHeapObjectTag; }
 
-  // Iterates over pointers contained in the object (including the Map).
-  // If it's not performance critical iteration use the non-templatized
-  // version.
-  void Iterate(PtrComprCageBase cage_base, ObjectVisitor* v);
-
-  template <typename ObjectVisitor>
-  inline void IterateFast(PtrComprCageBase cage_base, ObjectVisitor* v);
-
-  template <typename ObjectVisitor>
-  inline void IterateFast(Tagged<Map> map, ObjectVisitor* v);
-
-  template <typename ObjectVisitor>
-  inline void IterateFast(Tagged<Map> map, int object_size, ObjectVisitor* v);
-
-  // Iterates over all pointers contained in the object except the
-  // first map pointer.  The object type is given in the first
-  // parameter. This function does not access the map pointer in the
-  // object, and so is safe to call while the map pointer is modified.
-  // If it's not performance critical iteration use the non-templatized
-  // version.
-  void IterateBody(PtrComprCageBase cage_base, ObjectVisitor* v);
-  void IterateBody(Tagged<Map> map, int object_size, ObjectVisitor* v);
-
-  template <typename ObjectVisitor>
-  inline void IterateBodyFast(PtrComprCageBase cage_base, ObjectVisitor* v);
-
-  template <typename ObjectVisitor>
-  inline void IterateBodyFast(Tagged<Map> map, int object_size,
-                              ObjectVisitor* v);
-
   // Returns the heap object's size in bytes
   DECL_GETTER(Size, int)
 
@@ -320,8 +301,9 @@ class HeapObject : public TaggedImpl<HeapObjectReferenceType::STRONG, Address> {
   // ExternalPointer_t field accessors.
   //
   template <ExternalPointerTag tag>
-  inline void InitExternalPointerField(size_t offset, IsolateForSandbox isolate,
-                                       Address value);
+  inline void InitExternalPointerField(
+      size_t offset, IsolateForSandbox isolate, Address value,
+      WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
   template <ExternalPointerTag tag>
   inline Address ReadExternalPointerField(size_t offset,
                                           IsolateForSandbox isolate) const;
@@ -337,13 +319,25 @@ class HeapObject : public TaggedImpl<HeapObjectReferenceType::STRONG, Address> {
                                         IsolateForSandbox isolate,
                                         Address value);
 
+  // Set up a lazily-initialized external pointer field. If the sandbox is
+  // enabled, this will set the field to the kNullExternalPointerHandle. It will
+  // *not* allocate an entry in the external pointer table. That will only
+  // happen on the first call to WriteLazilyInitializedExternalPointerField. If
+  // the sandbox is disabled, this is equivalent to InitExternalPointerField
+  // with a nullptr value.
+  inline void SetupLazilyInitializedExternalPointerField(size_t offset);
+
+  // Writes and possibly initializes a lazily-initialized external pointer
+  // field. When the sandbox is enabled, a lazily initialized external pointer
+  // field initially contains the kNullExternalPointerHandle and will only be
+  // properly initialized (i.e. allocate an entry in the external pointer table)
+  // once a value is written into it for the first time. If the sandbox is
+  // disabled, this is equivalent to WriteExternalPointerField.
   template <ExternalPointerTag tag>
   inline void WriteLazilyInitializedExternalPointerField(
       size_t offset, IsolateForSandbox isolate, Address value);
 
-  inline void SetupLazilyInitializedExternalPointerField(size_t offset);
   inline void SetupLazilyInitializedCppHeapPointerField(size_t offset);
-
   template <CppHeapPointerTag tag>
   inline void WriteLazilyInitializedCppHeapPointerField(
       size_t offset, IsolateForPointerCompression isolate, Address value);

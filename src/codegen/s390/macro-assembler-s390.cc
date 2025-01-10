@@ -335,7 +335,7 @@ void MacroAssembler::LoadFromConstantsTable(Register destination,
                                             int constant_index) {
   DCHECK(RootsTable::IsImmortalImmovable(RootIndex::kBuiltinsConstantsTable));
 
-  const uint32_t offset = FixedArray::kHeaderSize +
+  const uint32_t offset = OFFSET_OF_DATA_START(FixedArray) +
                           constant_index * kSystemPointerSize - kHeapObjectTag;
 
   CHECK(is_uint19(offset));
@@ -940,11 +940,12 @@ void MacroAssembler::LoadTaggedField(const Register& destination,
   }
 }
 void MacroAssembler::LoadTaggedFieldWithoutDecompressing(
-    const Register& destination, const MemOperand& field_operand) {
+    const Register& destination, const MemOperand& field_operand,
+    const Register& scratch) {
   if (COMPRESS_POINTERS_BOOL) {
-    llgf(destination, field_operand);
+    LoadU32(destination, field_operand, scratch);
   } else {
-    LoadU64(destination, field_operand);
+    LoadU64(destination, field_operand, scratch);
   }
 }
 void MacroAssembler::SmiUntag(Register dst, const MemOperand& src) {
@@ -6514,7 +6515,7 @@ void MacroAssembler::TryLoadOptimizedOsrCode(Register scratch_and_result,
     UseScratchRegisterScope temps(this);
     Register temp = temps.Acquire();
     JumpIfCodeIsMarkedForDeoptimization(scratch_and_result, temp, &clear_slot);
-    if (min_opt_level == CodeKind::TURBOFAN) {
+    if (min_opt_level == CodeKind::TURBOFAN_JS) {
       JumpIfCodeIsTurbofanned(scratch_and_result, temp, on_result);
       b(&fallthrough);
     } else {

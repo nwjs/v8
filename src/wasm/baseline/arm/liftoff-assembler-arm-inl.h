@@ -4659,11 +4659,6 @@ bool LiftoffAssembler::emit_f16x8_qfms(LiftoffRegister dst,
 
 bool LiftoffAssembler::supports_f16_mem_access() { return false; }
 
-void LiftoffAssembler::set_trap_on_oob_mem64(Register index, uint64_t oob_size,
-                                             uint64_t oob_index) {
-  UNREACHABLE();
-}
-
 void LiftoffAssembler::StackCheck(Label* ool_code) {
   UseScratchRegisterScope temps(this);
   Register limit_address = temps.Acquire();
@@ -4874,12 +4869,12 @@ void LiftoffAssembler::CallIndirect(const ValueKindSig* sig,
                                     compiler::CallDescriptor* call_descriptor,
                                     Register target) {
   DCHECK(target != no_reg);
-  Call(target);
+  CallWasmCodePointer(target);
 }
 
 void LiftoffAssembler::TailCallIndirect(Register target) {
   DCHECK(target != no_reg);
-  Jump(target);
+  CallWasmCodePointer(target, CallJumpMode::kTailCall);
 }
 
 void LiftoffAssembler::CallBuiltin(Builtin builtin) {

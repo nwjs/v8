@@ -135,6 +135,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kX64Cvttpd2dq:
     case kX64I32x4TruncF64x2UZero:
     case kX64I32x4TruncF32x4U:
+    case kX64I32x8TruncF32x8U:
     case kX64FSplat:
     case kX64FExtractLane:
     case kX64FReplaceLane:
@@ -406,6 +407,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
     case kX64S128Load32x2U:
     case kX64S256Load8x16S:
     case kX64S256Load8x16U:
+    case kX64S256Load8x8U:
     case kX64S256Load16x8S:
     case kX64S256Load16x8U:
     case kX64S256Load32x4S:

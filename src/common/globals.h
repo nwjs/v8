@@ -598,6 +598,21 @@ constexpr int kProtectedPointerSize = kTaggedSize;
 constexpr int kJSDispatchHandleSize = sizeof(JSDispatchHandle);
 #endif
 
+// Dispatch handle constant used as a placeholder. This is currently used by
+// compilers when generating JS calls. In that case, the actual dispatch handle
+// value is only loaded by the low-level MacroAssembler operations, but a
+// placeholder value is necessary prior to that to satisfy linkage constraints.
+// TODO(saelo): instead, we could let the compiler load the dispatch handle
+// from the JSFunction and then use a MacroAssembler operation that uses the
+// dispatch handle directly. We just need to be sure that no GC can happen
+// between the load of the dispatch handle and the use.
+constexpr JSDispatchHandle kPlaceholderDispatchHandle = 0x0;
+// Dispatch handle constant that can be used for direct calls when it is known
+// that the callee doesn't use the dispatch handle. This is for example the
+// case when performing direct calls to JS builtins.
+constexpr JSDispatchHandle kInvalidDispatchHandle =
+    static_cast<JSDispatchHandle>(0xffffffff << kJSDispatchHandleShift);
+
 constexpr int kEmbedderDataSlotSize = kSystemPointerSize;
 
 constexpr int kEmbedderDataSlotSizeInTaggedSlots =
@@ -738,6 +753,8 @@ inline LanguageMode stricter_language_mode(LanguageMode mode1,
 enum class StoreOrigin { kMaybeKeyed, kNamed };
 
 enum class TypeofMode { kInside, kNotInside };
+
+enum class ContextKind { kDefault, kScriptContext };
 
 // Whether floating point registers should be saved (and restored).
 enum class SaveFPRegsMode { kIgnore, kSave };
@@ -991,9 +1008,9 @@ class Debug;
 class DebugInfo;
 class Descriptor;
 class DescriptorArray;
-#ifdef V8_ENABLE_DIRECT_HANDLE
 template <typename T>
 class DirectHandle;
+#ifdef V8_ENABLE_DIRECT_HANDLE
 template <typename T>
 class DirectHandleVector;
 #endif
@@ -1008,10 +1025,6 @@ class FunctionTemplateInfo;
 class GlobalDictionary;
 template <typename T>
 class Handle;
-#ifndef V8_ENABLE_DIRECT_HANDLE
-template <typename T>
-using DirectHandle = Handle<T>;
-#endif
 class Heap;
 class HeapNumber;
 class Boolean;
@@ -1040,19 +1053,12 @@ class MaybeDirectHandle;
 #endif
 template <typename T>
 class MaybeHandle;
-#ifndef V8_ENABLE_DIRECT_HANDLE
 template <typename T>
-using MaybeDirectHandle = MaybeHandle<T>;
-#endif
+class MaybeDirectHandle;
 template <typename T>
 using MaybeIndirectHandle = MaybeHandle<T>;
-#ifdef V8_ENABLE_DIRECT_HANDLE
-class MaybeObjectDirectHandle;
-#endif
 class MaybeObjectHandle;
-#ifndef V8_ENABLE_DIRECT_HANDLE
-using MaybeObjectDirectHandle = MaybeObjectHandle;
-#endif
+class MaybeObjectDirectHandle;
 using MaybeObjectIndirectHandle = MaybeObjectHandle;
 template <typename T>
 class MaybeWeak;
@@ -1136,6 +1142,10 @@ using JSAnyNotNumber =
     Union<BigInt, String, Symbol, Boolean, Null, Undefined, JSReceiver>;
 using JSCallable =
     Union<JSBoundFunction, JSFunction, JSObject, JSProxy, JSWrappedFunction>;
+// Object prototypes are either JSReceivers or null -- they are not allowed to
+// be any other primitive value.
+using JSPrototype = Union<JSReceiver, Null>;
+
 using MaybeObject = MaybeWeak<Object>;
 using HeapObjectReference = MaybeWeak<HeapObject>;
 
@@ -2712,6 +2722,8 @@ using WasmCodePointer = uint32_t;
 #else
 using WasmCodePointer = Address;
 #endif
+
+enum CallJumpMode { kCall, kTailCall };
 
 }  // namespace internal
 

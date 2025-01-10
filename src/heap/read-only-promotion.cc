@@ -10,6 +10,7 @@
 #include "src/execution/isolate.h"
 #include "src/heap/heap-layout-inl.h"
 #include "src/heap/heap.h"
+#include "src/heap/visit-object.h"
 #include "src/objects/heap-object-inl.h"
 #include "src/sandbox/external-pointer-table.h"
 
@@ -123,7 +124,7 @@ class Committee final {
     }
     // Recurse into outgoing pointers.
     CandidateVisitor v(this, accepted_subgraph, visited, promotees);
-    o->Iterate(isolate_, &v);
+    VisitObject(isolate_, o, &v);
     if (!v.all_slots_are_promo_candidates()) {
       const auto& [it, inserted] = promo_rejected_.insert(o);
       if (V8_UNLIKELY(v8_flags.trace_read_only_promotion) && inserted) {
@@ -334,12 +335,12 @@ class ReadOnlyPromotionImpl final : public AllStatic {
     // and therefore that no filtering of unreachable objects is required here.
     HeapObjectIterator it(heap, safepoint_scope);
     for (Tagged<HeapObject> o = it.Next(); !o.is_null(); o = it.Next()) {
-      o->Iterate(isolate, &v);
+      VisitObject(isolate, o, &v);
     }
 
     // Iterate all objects we just copied into RO space.
     for (auto [src, dst] : moves) {
-      dst->Iterate(isolate, &v);
+      VisitObject(isolate, dst, &v);
     }
 
 #ifdef V8_ENABLE_LEAPTIERING
@@ -355,7 +356,8 @@ class ReadOnlyPromotionImpl final : public AllStatic {
                                   CHECK(IsCode(new_code));
                                   // TODO(saelo): is it worth logging something
                                   // in this case?
-                                  jdt->SetCode(handle, Cast<Code>(new_code));
+                                  jdt->SetCodeNoWriteBarrier(
+                                      handle, Cast<Code>(new_code));
                                 });
 #endif  // V8_ENABLE_LEAPTIERING
   }
@@ -541,7 +543,7 @@ class ReadOnlyPromotionImpl final : public AllStatic {
       CodeEntrypointTag entrypoint_tag = code->entrypoint_tag();
 
       IndirectPointerHandle old_handle = slot.Relaxed_LoadHandle();
-      CodePointerTable* cpt = GetProcessWideCodePointerTable();
+      CodePointerTable* cpt = IsolateGroup::current()->code_pointer_table();
 
       // To preserve the 1:1 relation between slots and code table entries,
       // allocate a new entry (in the code_pointer_space of the RO heap) now.

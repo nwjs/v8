@@ -52,7 +52,7 @@ Handle<String> String::SlowFlatten(Isolate* isolate, Handle<ConsString> cons,
   }
 
   DCHECK(AllowGarbageCollection::IsAllowed());
-  int length = cons->length();
+  uint32_t length = cons->length();
   if (allocation != AllocationType::kSharedOld) {
     allocation = HeapLayout::InYoungGeneration(*cons) ? allocation
                                                       : AllocationType::kOld;
@@ -122,7 +122,7 @@ Handle<String> String::SlowShare(Isolate* isolate, Handle<String> source) {
       return flat;
   }
 
-  int length = flat->length();
+  uint32_t length = flat->length();
   if (flat->IsOneByteRepresentation()) {
     Handle<SeqOneByteString> copy =
         isolate->factory()->NewRawSharedOneByteString(length).ToHandleChecked();
@@ -594,8 +594,8 @@ bool String::SupportsExternalization(v8::String::Encoding encoding) {
     return false;
   }
 
-#ifdef V8_COMPRESS_POINTERS
-  // Small strings may not be in-place externalizable.
+#if V8_COMPRESS_POINTERS && !V8_ENABLE_SANDBOX
+  // In this configuration, small strings may not be in-place externalizable.
   if (this->Size() < static_cast<int>(sizeof(UncachedExternalString))) {
     return false;
   }
@@ -659,12 +659,7 @@ const char* String::SuffixForDebugPrint() const {
 }
 
 void String::StringShortPrint(StringStream* accumulator) {
-  if (!LooksValid()) {
-    accumulator->Add("<Invalid String>");
-    return;
-  }
-
-  const int len = length();
+  const uint32_t len = length();
   accumulator->Add("<String[%u]: ", len);
   accumulator->Add(PrefixForDebugPrint());
 
@@ -717,16 +712,6 @@ int32_t String::ToArrayIndex(Address addr) {
   return -1;
 }
 
-bool String::LooksValid() {
-  // TODO(leszeks): Maybe remove this check entirely, Heap::Contains uses
-  // basically the same logic as the way we access the heap in the first place.
-  // RO_SPACE objects should always be valid.
-  if (ReadOnlyHeap::Contains(this)) return true;
-  MemoryChunkMetadata* chunk = MemoryChunkMetadata::FromHeapObject(this);
-  if (chunk->heap() == nullptr) return false;
-  return chunk->heap()->Contains(this);
-}
-
 // static
 Handle<Number> String::ToNumber(Isolate* isolate, Handle<String> subject) {
   return isolate->factory()->NewNumber(
@@ -739,7 +724,7 @@ String::FlatContent String::SlowGetFlatContent(
   USE(no_gc);
   Tagged<String> string = this;
   StringShape shape(string);
-  int offset = 0;
+  uint32_t offset = 0;
 
   // Extract cons- and sliced strings.
   if (shape.IsCons()) {
@@ -770,61 +755,71 @@ String::FlatContent String::SlowGetFlatContent(
       .value();
 }
 
-std::unique_ptr<char[]> String::ToCString(AllowNullsFlag allow_nulls,
-                                          RobustnessFlag robust_flag,
-                                          int offset, int length,
-                                          int* length_return) {
-  if (robust_flag == ROBUST_STRING_TRAVERSAL && !LooksValid()) {
-    return std::unique_ptr<char[]>();
-  }
-  // Negative length means the to the end of the string.
-  if (length < 0) length = kMaxInt - offset;
+std::unique_ptr<char[]> String::ToCString(uint32_t offset, uint32_t length,
+                                          uint32_t* length_return) {
+  DCHECK_LE(length, this->length());
+  DCHECK_LE(offset, this->length() - length);
 
-  // Compute the size of the UTF-8 string. Start at the specified offset.
   StringCharacterStream stream(this, offset);
-  int character_position = offset;
-  int utf8_bytes = 0;
-  int last = unibrow::Utf16::kNoPreviousCharacter;
-  while (stream.HasMore() && character_position++ < offset + length) {
+
+  // First, compute the required size of the output buffer.
+  size_t utf8_bytes = 0;
+  uint32_t remaining_chars = length;
+  uint16_t last = unibrow::Utf16::kNoPreviousCharacter;
+  while (stream.HasMore() && remaining_chars-- != 0) {
     uint16_t character = stream.GetNext();
     utf8_bytes += unibrow::Utf8::Length(character, last);
     last = character;
   }
 
+  // TODO(saelo): migrate this API to use size_t for length_return.
   if (length_return) {
-    *length_return = utf8_bytes;
+    *length_return = base::checked_cast<uint32_t>(utf8_bytes);
   }
 
-  char* result = NewArray<char>(utf8_bytes + 1);
+  // Second, allocate the output buffer.
+  size_t capacity = utf8_bytes + 1;
+  char* result = NewArray<char>(capacity);
 
-  // Convert the UTF-16 string to a UTF-8 buffer. Start at the specified offset.
+  // Third, encode the string into the output buffer.
   stream.Reset(this, offset);
-  character_position = offset;
-  int utf8_byte_position = 0;
+  size_t pos = 0;
+  remaining_chars = length;
   last = unibrow::Utf16::kNoPreviousCharacter;
-  while (stream.HasMore() && character_position++ < offset + length) {
+  while (stream.HasMore() && remaining_chars-- != 0) {
     uint16_t character = stream.GetNext();
-    if (allow_nulls == DISALLOW_NULLS && character == 0) {
+    if (character == 0) {
       character = ' ';
     }
-    utf8_byte_position +=
-        unibrow::Utf8::Encode(result + utf8_byte_position, character, last);
+
+    // Ensure that there's sufficient space for this character and the null
+    // terminator. This should normally always be the case, unless there is
+    // in-sandbox memory corruption.
+    // Alternatively, we could also over-allocate the output buffer by three
+    // bytes (the maximum we can write OOB) or consider allocating it inside
+    // the sandbox, but it's not clear if that would be worth the effort as the
+    // performance overhead of this check appears to be negligible in practice.
+    SBXCHECK_LE(unibrow::Utf8::Length(character, last) + 1, capacity - pos);
+
+    pos += unibrow::Utf8::Encode(result + pos, character, last);
+
     last = character;
   }
-  result[utf8_byte_position] = 0;
+
+  DCHECK_LT(pos, capacity);
+  result[pos++] = 0;
+
   return std::unique_ptr<char[]>(result);
 }
 
-std::unique_ptr<char[]> String::ToCString(AllowNullsFlag allow_nulls,
-                                          RobustnessFlag robust_flag,
-                                          int* length_return) {
-  return ToCString(allow_nulls, robust_flag, 0, -1, length_return);
+std::unique_ptr<char[]> String::ToCString(uint32_t* length_return) {
+  return ToCString(0, length(), length_return);
 }
 
 // static
 template <typename sinkchar>
-void String::WriteToFlat(Tagged<String> source, sinkchar* sink, int start,
-                         int length) {
+void String::WriteToFlat(Tagged<String> source, sinkchar* sink, uint32_t start,
+                         uint32_t length) {
   DCHECK(!SharedStringAccessGuardIfNeeded::IsNeeded(source));
   return WriteToFlat(source, sink, start, length,
                      SharedStringAccessGuardIfNeeded::NotNeeded());
@@ -832,15 +827,16 @@ void String::WriteToFlat(Tagged<String> source, sinkchar* sink, int start,
 
 // static
 template <typename sinkchar>
-void String::WriteToFlat(Tagged<String> source, sinkchar* sink, int start,
-                         int length,
+void String::WriteToFlat(Tagged<String> source, sinkchar* sink, uint32_t start,
+                         uint32_t length,
                          const SharedStringAccessGuardIfNeeded& access_guard) {
   DisallowGarbageCollection no_gc;
   if (length == 0) return;
   while (true) {
-    DCHECK_LT(0, length);
-    DCHECK_LE(0, start);
+    DCHECK_GT(length, 0);
     DCHECK_LE(length, source->length());
+    DCHECK_LT(start, source->length());
+    DCHECK_LE(start + length, source->length());
     switch (StringShape(source).representation_and_encoding_tag()) {
       case kOneByteStringTag | kExternalStringTag:
         CopyChars(sink, Cast<ExternalOneByteString>(source)->GetChars() + start,
@@ -868,18 +864,28 @@ void String::WriteToFlat(Tagged<String> source, sinkchar* sink, int start,
       case kTwoByteStringTag | kConsStringTag: {
         Tagged<ConsString> cons_string = Cast<ConsString>(source);
         Tagged<String> first = cons_string->first();
-        int boundary = first->length();
-        int first_length = boundary - start;
-        int second_length = start + length - boundary;
+        uint32_t boundary = first->length();
+        // Here we explicity use signed ints as the values can become negative.
+        // The sum of {first_length} and {second_length} is always {length},
+        // but the values can become negative, in which case no characters of
+        // the respective string are needed.
+        int32_t first_length = boundary - start;
+        int32_t second_length = length - first_length;
+        DCHECK_EQ(static_cast<uint32_t>(first_length + second_length), length);
         if (second_length >= first_length) {
+          DCHECK_GT(second_length, 0);
           // Right hand side is longer.  Recurse over left.
           if (first_length > 0) {
+            DCHECK_LT(first_length, length);
+            DCHECK_LT(second_length, length);
+
             WriteToFlat(first, sink, start, first_length, access_guard);
             if (start == 0 && cons_string->second() == first) {
+              DCHECK_LE(boundary * 2, length);
               CopyChars(sink + boundary, sink, boundary);
               return;
             }
-            sink += boundary - start;
+            sink += first_length;
             start = 0;
             length -= first_length;
           } else {
@@ -887,22 +893,28 @@ void String::WriteToFlat(Tagged<String> source, sinkchar* sink, int start,
           }
           source = cons_string->second();
         } else {
+          DCHECK_GT(first_length, 0);
           // Left hand side is longer.  Recurse over right.
           if (second_length > 0) {
+            DCHECK_LT(first_length, length);
+            DCHECK_LT(second_length, length);
+
+            uint32_t second_start = first_length;
+            DCHECK_EQ(second_start + second_length, length);
             Tagged<String> second = cons_string->second();
             // When repeatedly appending to a string, we get a cons string that
             // is unbalanced to the left, a list, essentially.  We inline the
             // common case of sequential one-byte right child.
             if (second_length == 1) {
-              sink[boundary - start] =
+              sink[second_start] =
                   static_cast<sinkchar>(second->Get(0, access_guard));
             } else if (IsSeqOneByteString(second)) {
               CopyChars(
-                  sink + boundary - start,
+                  sink + second_start,
                   Cast<SeqOneByteString>(second)->GetChars(no_gc, access_guard),
                   second_length);
             } else {
-              WriteToFlat(second, sink + boundary - start, 0, second_length,
+              WriteToFlat(second, sink + second_start, 0, second_length,
                           access_guard);
             }
             length -= second_length;
@@ -915,7 +927,7 @@ void String::WriteToFlat(Tagged<String> source, sinkchar* sink, int start,
       case kOneByteStringTag | kSlicedStringTag:
       case kTwoByteStringTag | kSlicedStringTag: {
         Tagged<SlicedString> slice = Cast<SlicedString>(source);
-        unsigned offset = slice->offset();
+        uint32_t offset = slice->offset();
         source = slice->parent();
         start += offset;
         continue;
@@ -1018,7 +1030,7 @@ bool String::SlowEquals(
     const SharedStringAccessGuardIfNeeded& access_guard) const {
   DisallowGarbageCollection no_gc;
   // Fast check: negative check with lengths.
-  int len = length();
+  uint32_t len = length();
   if (len != other->length()) return false;
   if (len == 0) return true;
 
@@ -1042,7 +1054,7 @@ bool String::SlowEquals(
     if (v8_flags.enable_slow_asserts) {
       if (this_hash != other_hash) {
         bool found_difference = false;
-        for (int i = 0; i < len; i++) {
+        for (uint32_t i = 0; i < len; i++) {
           if (Get(i) != other->Get(i)) {
             found_difference = true;
             break;
@@ -1075,7 +1087,7 @@ bool String::SlowEquals(
 bool String::SlowEquals(Isolate* isolate, Handle<String> one,
                         Handle<String> two) {
   // Fast check: negative check with lengths.
-  const int one_length = one->length();
+  const uint32_t one_length = one->length();
   if (one_length != two->length()) return false;
   if (one_length == 0) return true;
 
@@ -1100,7 +1112,7 @@ bool String::SlowEquals(Isolate* isolate, Handle<String> one,
     if (v8_flags.enable_slow_asserts) {
       if (one_hash != two_hash) {
         bool found_difference = false;
-        for (int i = 0; i < one_length; i++) {
+        for (uint32_t i = 0; i < one_length; i++) {
           if (one->Get(i) != two->Get(i)) {
             found_difference = true;
             break;
@@ -1166,7 +1178,7 @@ ComparisonResult String::Compare(Isolate* isolate, Handle<String> x,
 
   DisallowGarbageCollection no_gc;
   ComparisonResult result = ComparisonResult::kEqual;
-  int prefix_length = x->length();
+  uint32_t prefix_length = x->length();
   if (y->length() < prefix_length) {
     prefix_length = y->length();
     result = ComparisonResult::kGreaterThan;
@@ -1207,8 +1219,8 @@ namespace {
 
 uint32_t ToValidIndex(Tagged<String> str, Tagged<Object> number) {
   uint32_t index = PositiveNumberToUint32(number);
-  uint32_t length_value = static_cast<uint32_t>(str->length());
-  if (index > length_value) return length_value;
+  uint32_t length = str->length();
+  if (index > length) return length;
   return index;
 }
 
@@ -1254,9 +1266,8 @@ int SearchString(Isolate* isolate, String::FlatContent receiver_content,
 }  // namespace
 
 int String::IndexOf(Isolate* isolate, Handle<String> receiver,
-                    Handle<String> search, int start_index) {
-  DCHECK_LE(0, start_index);
-  DCHECK(start_index <= receiver->length());
+                    Handle<String> search, uint32_t start_index) {
+  DCHECK_LE(start_index, receiver->length());
 
   uint32_t search_length = search->length();
   if (search_length == 0) return start_index;
@@ -1285,9 +1296,7 @@ int String::IndexOf(Isolate* isolate, Handle<String> receiver,
 
 MaybeHandle<String> String::GetSubstitution(Isolate* isolate, Match* match,
                                             Handle<String> replacement,
-                                            int start_index) {
-  DCHECK_GE(start_index, 0);
-
+                                            uint32_t start_index) {
   Factory* factory = isolate->factory();
 
   const int replacement_length = replacement->length();
@@ -1589,7 +1598,7 @@ bool String::IsIdentifier(Isolate* isolate, Handle<String> str) {
 namespace {
 
 template <typename Char>
-uint32_t HashString(Tagged<String> string, size_t start, int length,
+uint32_t HashString(Tagged<String> string, size_t start, uint32_t length,
                     uint64_t seed,
                     const SharedStringAccessGuardIfNeeded& access_guard) {
   DisallowGarbageCollection no_gc;
@@ -1672,7 +1681,7 @@ uint32_t String::ComputeAndSetRawHash(
 
 bool String::SlowAsArrayIndex(uint32_t* index) {
   DisallowGarbageCollection no_gc;
-  int length = this->length();
+  uint32_t length = this->length();
   if (length <= kMaxCachedArrayIndexLength) {
     uint32_t field = EnsureRawHash();  // Force computation of hash code.
     if (!IsIntegerIndex(field)) return false;
@@ -1686,7 +1695,7 @@ bool String::SlowAsArrayIndex(uint32_t* index) {
 
 bool String::SlowAsIntegerIndex(size_t* index) {
   DisallowGarbageCollection no_gc;
-  int length = this->length();
+  uint32_t length = this->length();
   if (length <= kMaxCachedArrayIndexLength) {
     uint32_t field = EnsureRawHash();  // Force computation of hash code.
     if (!IsIntegerIndex(field)) return false;
@@ -1700,25 +1709,25 @@ bool String::SlowAsIntegerIndex(size_t* index) {
 }
 
 void String::PrintOn(FILE* file) {
-  int length = this->length();
-  for (int i = 0; i < length; i++) {
+  uint32_t length = this->length();
+  for (uint32_t i = 0; i < length; i++) {
     PrintF(file, "%c", Get(i));
   }
 }
 
 void String::PrintOn(std::ostream& ostream) {
-  int length = this->length();
-  for (int i = 0; i < length; i++) {
+  uint32_t length = this->length();
+  for (uint32_t i = 0; i < length; i++) {
     ostream.put(Get(i));
   }
 }
 
 Handle<String> SeqString::Truncate(Isolate* isolate, Handle<SeqString> string,
-                                   int new_length) {
+                                   uint32_t new_length) {
   if (new_length == 0) return string->GetReadOnlyRoots().empty_string_handle();
 
   int new_size, old_size;
-  int old_length = string->length();
+  uint32_t old_length = string->length();
   if (old_length <= new_length) return string;
 
   if (IsSeqOneByteString(*string)) {
@@ -1795,7 +1804,7 @@ void SeqString::ClearPadding() {
 }
 
 uint16_t ConsString::Get(
-    int index, const SharedStringAccessGuardIfNeeded& access_guard) const {
+    uint32_t index, const SharedStringAccessGuardIfNeeded& access_guard) const {
   DCHECK(index >= 0 && index < this->length());
 
   // Check for a flattened cons string
@@ -1825,12 +1834,12 @@ uint16_t ConsString::Get(
 }
 
 uint16_t ThinString::Get(
-    int index, const SharedStringAccessGuardIfNeeded& access_guard) const {
+    uint32_t index, const SharedStringAccessGuardIfNeeded& access_guard) const {
   return actual()->Get(index, access_guard);
 }
 
 uint16_t SlicedString::Get(
-    int index, const SharedStringAccessGuardIfNeeded& access_guard) const {
+    uint32_t index, const SharedStringAccessGuardIfNeeded& access_guard) const {
   return parent()->Get(offset() + index, access_guard);
 }
 
@@ -1896,12 +1905,12 @@ Tagged<String> ConsStringIterator::Search(int* offset_out) {
   depth_ = 1;
   maximum_depth_ = 1;
   frames_[0] = cons_string;
-  const int consumed = consumed_;
-  int offset = 0;
+  const uint32_t consumed = consumed_;
+  uint32_t offset = 0;
   while (true) {
     // Loop until the string is found which contains the target offset.
     Tagged<String> string = cons_string->first();
-    int length = string->length();
+    uint32_t length = string->length();
     int32_t type;
     if (consumed < offset + length) {
       // Target offset is in the left branch.
@@ -1968,7 +1977,7 @@ Tagged<String> ConsStringIterator::NextLeaf(bool* blew_stack) {
     if ((type & kStringRepresentationMask) != kConsStringTag) {
       // Pop stack so next iteration is in correct place.
       Pop();
-      int length = string->length();
+      uint32_t length = string->length();
       // Could be a flattened ConsString.
       if (length == 0) continue;
       consumed_ += length;
@@ -1983,7 +1992,7 @@ Tagged<String> ConsStringIterator::NextLeaf(bool* blew_stack) {
       type = string->map()->instance_type();
       if ((type & kStringRepresentationMask) != kConsStringTag) {
         AdjustMaximumDepth();
-        int length = string->length();
+        uint32_t length = string->length();
         if (length == 0) break;  // Skip empty left-hand sides of ConsStrings.
         consumed_ += length;
         return string;
@@ -1996,7 +2005,7 @@ Tagged<String> ConsStringIterator::NextLeaf(bool* blew_stack) {
 }
 
 const uint8_t* String::AddressOfCharacterAt(
-    int start_index, const DisallowGarbageCollection& no_gc) {
+    uint32_t start_index, const DisallowGarbageCollection& no_gc) {
   DCHECK(IsFlat());
   Tagged<String> subject = this;
   StringShape shape(subject);
@@ -2033,14 +2042,14 @@ const uint8_t* String::AddressOfCharacterAt(
 }
 
 template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) void String::WriteToFlat(
-    Tagged<String> source, uint16_t* sink, int from, int to);
+    Tagged<String> source, uint16_t* sink, uint32_t from, uint32_t to);
 template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) void String::WriteToFlat(
-    Tagged<String> source, uint8_t* sink, int from, int to);
+    Tagged<String> source, uint8_t* sink, uint32_t from, uint32_t to);
 template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) void String::WriteToFlat(
-    Tagged<String> source, uint16_t* sink, int from, int to,
+    Tagged<String> source, uint16_t* sink, uint32_t from, uint32_t to,
     const SharedStringAccessGuardIfNeeded&);
 template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE) void String::WriteToFlat(
-    Tagged<String> source, uint8_t* sink, int from, int to,
+    Tagged<String> source, uint8_t* sink, uint32_t from, uint32_t to,
     const SharedStringAccessGuardIfNeeded&);
 
 namespace {

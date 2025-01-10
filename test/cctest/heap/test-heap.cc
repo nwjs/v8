@@ -414,7 +414,8 @@ TEST(GarbageCollection) {
       Object::GetProperty(isolate, global, obj_name).ToHandleChecked();
   CHECK(IsJSObject(*obj));
   CHECK_EQ(Smi::FromInt(23),
-           *Object::GetProperty(isolate, obj, prop_name).ToHandleChecked());
+           *Object::GetProperty(isolate, Cast<JSObject>(obj), prop_name)
+                .ToHandleChecked());
 }
 
 static void VerifyStringAllocation(Isolate* isolate, const char* string) {
@@ -423,7 +424,7 @@ static void VerifyStringAllocation(Isolate* isolate, const char* string) {
                                ->NewStringFromUtf8(base::CStrVector(string))
                                .ToHandleChecked();
   CHECK_EQ(strlen(string), s->length());
-  for (int index = 0; index < s->length(); index++) {
+  for (uint32_t index = 0; index < s->length(); index++) {
     CHECK_EQ(static_cast<uint16_t>(string[index]), s->Get(index));
   }
 }
@@ -3986,7 +3987,7 @@ TEST(DetailedErrorStackTraceBuiltinExitWithAdaptation) {
   });
 }
 
-// Ensure that inlined call of CPP builtin works corrrectly with stack traces.
+// Ensure that inlined call of CPP builtin works correctly with stack traces.
 // See https://crbug.com/v8/14409.
 TEST(DetailedErrorStackTraceBuiltinExitArrayShift) {
   v8_flags.allow_natives_syntax = true;
@@ -4722,7 +4723,7 @@ static Handle<InstructionStream> DummyOptimizedCode(Isolate* isolate) {
   masm.Drop(2);
   masm.GetCode(isolate, &desc);
   Handle<InstructionStream> code(
-      Factory::CodeBuilder(isolate, desc, CodeKind::TURBOFAN)
+      Factory::CodeBuilder(isolate, desc, CodeKind::TURBOFAN_JS)
           .set_self_reference(masm.CodeObject())
           .set_empty_source_position_table()
           .set_deoptimization_data(DeoptimizationData::Empty(isolate))
@@ -5503,10 +5504,11 @@ TEST(PreprocessStackTrace) {
   CompileRun("throw new Error();");
   CHECK(try_catch.HasCaught());
   Isolate* isolate = CcTest::i_isolate();
-  Handle<Object> exception = v8::Utils::OpenHandle(*try_catch.Exception());
+  Handle<JSAny> exception =
+      Cast<JSAny>(v8::Utils::OpenHandle(*try_catch.Exception()));
   Handle<Name> key = isolate->factory()->error_stack_symbol();
-  Handle<Object> stack_trace =
-      Object::GetProperty(isolate, exception, key).ToHandleChecked();
+  Handle<JSAny> stack_trace = Cast<JSAny>(
+      Object::GetProperty(isolate, exception, key).ToHandleChecked());
   DirectHandle<Object> code =
       Object::GetElement(isolate, stack_trace, 3).ToHandleChecked();
   CHECK(IsInstructionStream(*code));
@@ -5527,13 +5529,13 @@ TEST(PreprocessStackTrace) {
 }
 
 void AllocateInSpace(Isolate* isolate, size_t bytes, AllocationSpace space) {
-  CHECK_LE(FixedArray::kHeaderSize, bytes);
+  CHECK_LE(OFFSET_OF_DATA_START(FixedArray), bytes);
   CHECK(IsAligned(bytes, kTaggedSize));
   Factory* factory = isolate->factory();
   HandleScope scope(isolate);
   AlwaysAllocateScopeForTesting always_allocate(isolate->heap());
-  int elements =
-      static_cast<int>((bytes - FixedArray::kHeaderSize) / kTaggedSize);
+  int elements = static_cast<int>((bytes - OFFSET_OF_DATA_START(FixedArray)) /
+                                  kTaggedSize);
   DirectHandle<FixedArray> array = factory->NewFixedArray(
       elements,
       space == NEW_SPACE ? AllocationType::kYoung : AllocationType::kOld);
@@ -5765,8 +5767,8 @@ HEAP_TEST(Regress587004) {
   Heap* heap = CcTest::heap();
   Isolate* isolate = CcTest::i_isolate();
   Factory* factory = isolate->factory();
-  const int N =
-      (kMaxRegularHeapObjectSize - FixedArray::kHeaderSize) / kTaggedSize;
+  const int N = (kMaxRegularHeapObjectSize - OFFSET_OF_DATA_START(FixedArray)) /
+                kTaggedSize;
   DirectHandle<FixedArray> array =
       factory->NewFixedArray(N, AllocationType::kOld);
   CHECK(heap->old_space()->Contains(*array));

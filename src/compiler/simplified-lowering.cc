@@ -1993,9 +1993,11 @@ class RepresentationSelector {
         CHECK_EQ(type.GetType(), CTypeInfo::Type::kVoid);
         return UseInfo::AnyTagged();
       }
+        START_ALLOW_USE_DEPRECATED()
       case CTypeInfo::SequenceType::kIsTypedArray: {
         return UseInfo::AnyTagged();
       }
+        END_ALLOW_USE_DEPRECATED()
       default: {
         UNREACHABLE();  // TODO(mslekova): Implement array buffers.
       }
@@ -2055,7 +2057,55 @@ class RepresentationSelector {
 
     // Effect and Control.
     ProcessRemainingInputs<T>(node, value_input_count);
-    SetOutput<T>(node, MachineRepresentation::kTagged);
+    if (op_params.c_functions().empty()) {
+      SetOutput<T>(node, MachineRepresentation::kTagged);
+      return;
+    }
+
+    CTypeInfo return_type = op_params.c_functions()[0].signature->ReturnInfo();
+    switch (return_type.GetType()) {
+      case CTypeInfo::Type::kBool:
+        SetOutput<T>(node, MachineRepresentation::kBit);
+        return;
+      case CTypeInfo::Type::kFloat32:
+        SetOutput<T>(node, MachineRepresentation::kFloat32);
+        return;
+      case CTypeInfo::Type::kFloat64:
+        SetOutput<T>(node, MachineRepresentation::kFloat64);
+        return;
+      case CTypeInfo::Type::kInt32:
+        SetOutput<T>(node, MachineRepresentation::kWord32);
+        return;
+      case CTypeInfo::Type::kInt64:
+      case CTypeInfo::Type::kUint64:
+        if (c_signature->GetInt64Representation() ==
+            CFunctionInfo::Int64Representation::kBigInt) {
+          SetOutput<T>(node, MachineRepresentation::kWord64);
+          return;
+        }
+        DCHECK_EQ(c_signature->GetInt64Representation(),
+                  CFunctionInfo::Int64Representation::kNumber);
+        SetOutput<T>(node, MachineRepresentation::kFloat64);
+        return;
+      case CTypeInfo::Type::kSeqOneByteString:
+        SetOutput<T>(node, MachineRepresentation::kTagged);
+        return;
+      case CTypeInfo::Type::kUint32:
+        SetOutput<T>(node, MachineRepresentation::kWord32);
+        return;
+      case CTypeInfo::Type::kUint8:
+        SetOutput<T>(node, MachineRepresentation::kWord8);
+        return;
+      case CTypeInfo::Type::kAny:
+        // This type is only supposed to be used for parameters, not returns.
+        UNREACHABLE();
+      case CTypeInfo::Type::kPointer:
+      case CTypeInfo::Type::kApiObject:
+      case CTypeInfo::Type::kV8Value:
+      case CTypeInfo::Type::kVoid:
+        SetOutput<T>(node, MachineRepresentation::kTagged);
+        return;
+    }
   }
 
   template <Phase T>
@@ -2160,7 +2210,8 @@ class RepresentationSelector {
   }
 
 #if V8_ENABLE_WEBASSEMBLY
-  static MachineType MachineTypeForWasmReturnType(wasm::ValueType type) {
+  static MachineType MachineTypeForWasmReturnType(
+      wasm::CanonicalValueType type) {
     switch (type.kind()) {
       case wasm::kI32:
         return MachineType::Int32();
@@ -2178,7 +2229,8 @@ class RepresentationSelector {
     }
   }
 
-  UseInfo UseInfoForJSWasmCallArgument(Node* input, wasm::ValueType type,
+  UseInfo UseInfoForJSWasmCallArgument(Node* input,
+                                       wasm::CanonicalValueType type,
                                        FeedbackSource const& feedback) {
     // If the input type is a Number or Oddball, we can directly convert the
     // input into the Wasm native type of the argument. If not, we return
@@ -3669,7 +3721,8 @@ class RepresentationSelector {
         SetOutput<T>(node, MachineRepresentation::kTaggedSigned);
         return;
       }
-      case IrOpcode::kStringLength: {
+      case IrOpcode::kStringLength:
+      case IrOpcode::kStringWrapperLength: {
         // TODO(bmeurer): The input representation should be TaggedPointer.
         // Fix this once we have a dedicated StringConcat/JSStringAdd
         // operator, which marks it's output as TaggedPointer properly.

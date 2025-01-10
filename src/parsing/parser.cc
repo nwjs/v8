@@ -566,11 +566,11 @@ Expression* Parser::NewV8RuntimeFunctionForFuzzing(
 }
 
 Parser::Parser(LocalIsolate* local_isolate, ParseInfo* info)
-    : ParserBase<Parser>(info->zone(), &scanner_, info->stack_limit(),
-                         info->ast_value_factory(),
-                         info->pending_error_handler(),
-                         info->runtime_call_stats(), info->v8_file_logger(),
-                         info->flags(), true),
+    : ParserBase<Parser>(
+          info->zone(), &scanner_, info->stack_limit(),
+          info->ast_value_factory(), info->pending_error_handler(),
+          info->runtime_call_stats(), info->v8_file_logger(), info->flags(),
+          true, info->flags().compile_hints_magic_enabled()),
       local_isolate_(local_isolate),
       info_(info),
       scanner_(info->character_stream(), flags()),
@@ -2985,21 +2985,6 @@ Block* Parser::BuildParameterInitializationBlock(
     ++index;
   }
   return factory()->NewParameterInitializationBlock(init_statements);
-}
-
-// TODO(verwaest): Consider building these try/catches in the bytecode generator
-// without hidden scopes.
-Scope* Parser::NewHiddenCatchScope() {
-  DCHECK(scope()->is_declaration_scope());
-  Scope* catch_scope = NewScopeWithParent(scope(), CATCH_SCOPE);
-  catch_scope->set_start_position(position());
-  catch_scope->set_end_position(end_position());
-  bool was_added;
-  catch_scope->DeclareLocal(ast_value_factory()->dot_catch_string(),
-                            VariableMode::kVar, NORMAL_VARIABLE, &was_added);
-  DCHECK(was_added);
-  catch_scope->set_is_hidden();
-  return catch_scope;
 }
 
 Expression* Parser::BuildInitialYield(int pos, FunctionKind kind) {

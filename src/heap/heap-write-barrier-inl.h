@@ -100,22 +100,9 @@ void WriteBarrier::ForRelocInfo(Tagged<InstructionStream> host,
 }
 
 // static
-void WriteBarrier::ForValue(Tagged<HeapObject> host, ObjectSlot slot,
-                            Tagged<Object> value, WriteBarrierMode mode) {
-  if (mode == SKIP_WRITE_BARRIER) {
-    SLOW_DCHECK(!WriteBarrier::IsRequired(host, value));
-    return;
-  }
-  if (!value.IsHeapObject()) {
-    return;
-  }
-  CombinedWriteBarrierInternal(host, HeapObjectSlot(slot),
-                               Cast<HeapObject>(value), mode);
-}
-
-// static
+template <typename T>
 void WriteBarrier::ForValue(Tagged<HeapObject> host, MaybeObjectSlot slot,
-                            Tagged<MaybeObject> value, WriteBarrierMode mode) {
+                            Tagged<T> value, WriteBarrierMode mode) {
   if (mode == SKIP_WRITE_BARRIER) {
     SLOW_DCHECK(!WriteBarrier::IsRequired(host, value));
     return;
@@ -128,17 +115,19 @@ void WriteBarrier::ForValue(Tagged<HeapObject> host, MaybeObjectSlot slot,
 }
 
 // static
+template <typename T>
 void WriteBarrier::ForValue(HeapObjectLayout* host, TaggedMemberBase* slot,
-                            Tagged<Object> value, WriteBarrierMode mode) {
+                            Tagged<T> value, WriteBarrierMode mode) {
   if (mode == SKIP_WRITE_BARRIER) {
     SLOW_DCHECK(!WriteBarrier::IsRequired(host, value));
     return;
   }
-  if (!value.IsHeapObject()) {
+  Tagged<HeapObject> value_object;
+  if (!value.GetHeapObject(&value_object)) {
     return;
   }
   CombinedWriteBarrierInternal(Tagged(host), HeapObjectSlot(ObjectSlot(slot)),
-                               Cast<HeapObject>(value), mode);
+                               value_object, mode);
 }
 
 //   static
@@ -175,6 +164,17 @@ void WriteBarrier::ForEphemeronHashTable(Tagged<EphemeronHashTable> host,
 }
 
 // static
+void WriteBarrier::ForExternalPointer(Tagged<HeapObject> host,
+                                      ExternalPointerSlot slot,
+                                      WriteBarrierMode mode) {
+  if (mode == SKIP_WRITE_BARRIER) {
+    SLOW_DCHECK(HeapLayout::InYoungGeneration(host));
+    return;
+  }
+  Marking(host, slot);
+}
+
+// static
 void WriteBarrier::ForIndirectPointer(Tagged<HeapObject> host,
                                       IndirectPointerSlot slot,
                                       Tagged<HeapObject> value,
@@ -197,15 +197,10 @@ void WriteBarrier::ForIndirectPointer(Tagged<HeapObject> host,
 void WriteBarrier::ForJSDispatchHandle(Tagged<HeapObject> host,
                                        JSDispatchHandle handle,
                                        WriteBarrierMode mode) {
-  // TODO(saelo): expand this: we either need to separate write barriers for
-  // the table entry and the objects referenced from it, or a single barrier
-  // for both. Maybe the latter is easier.
-
   DCHECK(V8_ENABLE_LEAPTIERING_BOOL);
+  SLOW_DCHECK(
+      WriteBarrier::VerifyDispatchHandleMarkingState(host, handle, mode));
   if (mode == SKIP_WRITE_BARRIER) {
-    // TODO(saelo): once/if this write barrier handles both the table entry and
-    // the objects referenced by it, we should SLOW_DCHECK here that a barrier
-    // is not required.
     return;
   }
   Marking(host, handle);
@@ -311,6 +306,13 @@ void WriteBarrier::ForDescriptorArray(Tagged<DescriptorArray> descriptor_array,
   MarkingSlow(descriptor_array, number_of_own_descriptors);
 }
 
+void WriteBarrier::Marking(Tagged<HeapObject> host, ExternalPointerSlot slot) {
+  if (V8_LIKELY(!IsMarking(host))) {
+    return;
+  }
+  MarkingSlow(host, slot);
+}
+
 void WriteBarrier::Marking(Tagged<HeapObject> host, IndirectPointerSlot slot) {
   if (V8_LIKELY(!IsMarking(host))) {
     return;
@@ -343,10 +345,18 @@ void WriteBarrier::MarkingFromTracedHandle(Tagged<Object> value) {
 }
 
 // static
-void WriteBarrier::ForCppHeapPointer(Tagged<JSObject> host, void* value) {
+void WriteBarrier::ForCppHeapPointer(Tagged<JSObject> host,
+                                     CppHeapPointerSlot slot, void* value) {
+  // Note: this is currently a combined barrier for marking both the
+  // CppHeapPointerTable entry and the referenced object.
+
   if (V8_LIKELY(!IsMarking(host))) {
 #if defined(CPPGC_YOUNG_GENERATION)
-    GenerationalBarrierForCppHeapPointer(host, value);
+    // There is no young-gen CppHeapPointerTable space so we should not mark
+    // the table entry in this case.
+    if (value) {
+      GenerationalBarrierForCppHeapPointer(host, value);
+    }
 #endif
     return;
   }
@@ -357,7 +367,8 @@ void WriteBarrier::ForCppHeapPointer(Tagged<JSObject> host, void* value) {
     // unified heap, this barrier will be needed again.
     return;
   }
-  MarkingSlowFromCppHeapWrappable(marking_barrier->heap(), value);
+
+  MarkingSlowFromCppHeapWrappable(marking_barrier->heap(), host, slot, value);
 }
 
 // static

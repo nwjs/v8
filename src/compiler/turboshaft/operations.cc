@@ -135,6 +135,7 @@ bool ValidOpInputRep(
   std::cerr << "Expected " << (expected_reps.size() > 1 ? "one of " : "")
             << PrintCollection(expected_reps).WithoutBrackets() << " but found "
             << input_rep << ".\n";
+  std::cout << "Input: " << graph.Get(input) << "\n";
   return false;
 }
 
@@ -178,6 +179,15 @@ std::ostream& operator<<(std::ostream& os, GenericUnopOp::Kind kind) {
     return os << #Name;
     GENERIC_UNOP_LIST(PRINT_KIND)
 #undef PRINT_KIND
+  }
+}
+
+std::ostream& operator<<(std::ostream& os, Word32SignHintOp::Sign sign) {
+  switch (sign) {
+    case Word32SignHintOp::Sign::kSigned:
+      return os << "Signed";
+    case Word32SignHintOp::Sign::kUnsigned:
+      return os << "Unsigned";
   }
 }
 
@@ -834,6 +844,11 @@ void DidntThrowOp::Validate(const Graph& graph) const {
       DCHECK_EQ(call_op.descriptor->out_reps, outputs_rep());
       break;
     }
+    case Opcode::kFastApiCall: {
+      auto& call_op = graph.Get(throwing_operation()).Cast<FastApiCallOp>();
+      DCHECK_EQ(call_op.out_reps, outputs_rep());
+      break;
+    }
 #define STATIC_OUTPUT_CASE(Name)                                           \
   case Opcode::k##Name: {                                                  \
     const Name##Op& op = graph.Get(throwing_operation()).Cast<Name##Op>(); \
@@ -1433,6 +1448,33 @@ std::ostream& operator<<(std::ostream& os,
     case TransitionAndStoreArrayElementOp::Kind::kSignedSmallElement:
       return os << "SignedSmallElement";
   }
+}
+
+void PrintMapSet(std::ostream& os, const ZoneRefSet<Map>& maps) {
+  os << "{";
+  for (size_t i = 0; i < maps.size(); ++i) {
+    if (i != 0) os << ",";
+    os << JSONEscaped(maps[i].object());
+  }
+  os << "}";
+}
+
+void CompareMapsOp::PrintOptions(std::ostream& os) const {
+  os << "[";
+  PrintMapSet(os, maps);
+  os << "]";
+}
+
+void CheckMapsOp::PrintOptions(std::ostream& os) const {
+  os << "[";
+  PrintMapSet(os, maps);
+  os << ", " << flags << ", " << feedback << "]";
+}
+
+void AssumeMapOp::PrintOptions(std::ostream& os) const {
+  os << "[";
+  PrintMapSet(os, maps);
+  os << "]";
 }
 
 std::ostream& operator<<(std::ostream& os, SameValueOp::Mode mode) {

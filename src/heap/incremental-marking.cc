@@ -21,6 +21,8 @@
 #include "src/heap/gc-tracer.h"
 #include "src/heap/heap-inl.h"
 #include "src/heap/heap-layout-inl.h"
+#include "src/heap/heap-visitor-inl.h"
+#include "src/heap/heap-visitor.h"
 #include "src/heap/heap.h"
 #include "src/heap/incremental-marking-job.h"
 #include "src/heap/mark-compact.h"
@@ -30,8 +32,6 @@
 #include "src/heap/memory-chunk-layout.h"
 #include "src/heap/minor-mark-sweep.h"
 #include "src/heap/mutable-page-metadata.h"
-#include "src/heap/objects-visiting-inl.h"
-#include "src/heap/objects-visiting.h"
 #include "src/heap/safepoint.h"
 #include "src/init/v8.h"
 #include "src/logging/runtime-call-stats-scope.h"
@@ -430,6 +430,10 @@ void IncrementalMarking::FinishBlackAllocation() {
 }
 
 void IncrementalMarking::StartPointerTableBlackAllocation() {
+#ifdef V8_COMPRESS_POINTERS
+  heap()->old_external_pointer_space()->set_allocate_black(true);
+  heap()->cpp_heap_pointer_space()->set_allocate_black(true);
+#endif  // V8_COMPRESS_POINTERS
 #ifdef V8_ENABLE_SANDBOX
   heap()->code_pointer_space()->set_allocate_black(true);
   heap()->trusted_pointer_space()->set_allocate_black(true);
@@ -443,6 +447,10 @@ void IncrementalMarking::StartPointerTableBlackAllocation() {
 }
 
 void IncrementalMarking::StopPointerTableBlackAllocation() {
+#ifdef V8_COMPRESS_POINTERS
+  heap()->old_external_pointer_space()->set_allocate_black(false);
+  heap()->cpp_heap_pointer_space()->set_allocate_black(false);
+#endif  // V8_COMPRESS_POINTERS
 #ifdef V8_ENABLE_SANDBOX
   heap()->code_pointer_space()->set_allocate_black(false);
   heap()->trusted_pointer_space()->set_allocate_black(false);

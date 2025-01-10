@@ -858,7 +858,7 @@ class BytecodeGenerator::TopLevelDeclarationsBuilder final : public ZoneObject {
 #endif
         if (decl->IsFunctionDeclaration()) {
           FunctionLiteral* f = static_cast<FunctionDeclaration*>(decl)->fun();
-          Handle<SharedFunctionInfo> sfi(
+          DirectHandle<SharedFunctionInfo> sfi(
               Compiler::GetSharedFunctionInfo(f, script, isolate));
           // Return a null handle if any initial values can't be created. Caller
           // will set stack overflow.
@@ -887,7 +887,7 @@ class BytecodeGenerator::TopLevelDeclarationsBuilder final : public ZoneObject {
           DCHECK_EQ(start + kGlobalVariableDeclarationSize, array_index);
         } else {
           FunctionLiteral* f = static_cast<FunctionDeclaration*>(decl)->fun();
-          Handle<SharedFunctionInfo> sfi(
+          DirectHandle<SharedFunctionInfo> sfi(
               Compiler::GetSharedFunctionInfo(f, script, isolate));
           // Return a null handle if any initial values can't be created. Caller
           // will set stack overflow.
@@ -1544,10 +1544,11 @@ void BytecodeGenerator::AllocateDeferredConstants(IsolateT* isolate,
   // Find or build shared function infos.
   for (std::pair<FunctionLiteral*, size_t> literal : function_literals_) {
     FunctionLiteral* expr = literal.first;
-    Handle<SharedFunctionInfo> shared_info =
+    DirectHandle<SharedFunctionInfo> shared_info =
         Compiler::GetSharedFunctionInfo(expr, script, isolate);
     if (shared_info.is_null()) return SetStackOverflow();
-    builder()->SetDeferredConstantPoolEntry(literal.second, shared_info);
+    builder()->SetDeferredConstantPoolEntry(
+        literal.second, indirect_handle(shared_info, isolate));
   }
 
   // Find or build shared function infos for the native function templates.
@@ -2525,6 +2526,9 @@ void BytecodeGenerator::VisitSwitchStatement(SwitchStatement* stmt) {
   // Are we still using any if-else bytecodes to evaluate the switch?
   bool use_jumps = n_comp_cases != 0;
 
+  // Does the comparison for non-jump table jumps need an elision scope?
+  bool jump_comparison_needs_hole_check_elision_scope = false;
+
   SwitchBuilder switch_builder(builder(), block_coverage_builder_, stmt,
                                n_comp_cases, jump_table);
   ControlScopeForBreakable scope(this, stmt, &switch_builder);
@@ -2582,6 +2586,10 @@ void BytecodeGenerator::VisitSwitchStatement(SwitchStatement* stmt) {
                                          info.covered_cases);
 
     if (use_jumps) {
+      // When using a jump table, the first jump comparison is conditionally
+      // executed if the discriminant wasn't matched by anything in the jump
+      // table, and so needs its own elision scope.
+      jump_comparison_needs_hole_check_elision_scope = true;
       builder()->LoadAccumulatorWithRegister(r1);
     }
   }
@@ -2602,16 +2610,14 @@ void BytecodeGenerator::VisitSwitchStatement(SwitchStatement* stmt) {
       // The comparisons linearly dominate, so no need to open a new elision
       // scope for each one.
       std::optional<HoleCheckElisionScope> elider;
-      bool first_jump_emitted = false;
       for (int i = 0; i < clauses->length(); ++i) {
         CaseClause* clause = clauses->at(i);
         if (clause->is_default()) {
           info.default_case = i;
         } else if (!info.CaseExists(clause->label())) {
-          // The first non-default label is
-          // unconditionally executed, so we only need to emplace it before
-          // visiting the second non-default label.
-          if (first_jump_emitted) elider.emplace(this);
+          if (jump_comparison_needs_hole_check_elision_scope && !elider) {
+            elider.emplace(this);
+          }
 
           // Perform label comparison as if via '===' with tag.
           VisitForAccumulatorValue(clause->label());
@@ -2622,7 +2628,9 @@ void BytecodeGenerator::VisitSwitchStatement(SwitchStatement* stmt) {
 #endif
           switch_builder.JumpToCaseIfTrue(ToBooleanMode::kAlreadyBoolean,
                                           case_compare_ctr++);
-          first_jump_emitted = true;
+          // The second and subsequent non-default comparisons are always
+          // conditionally executed, and need an elision scope.
+          jump_comparison_needs_hole_check_elision_scope = true;
         }
       }
     }
@@ -3229,11 +3237,12 @@ void BytecodeGenerator::AddToEagerLiteralsIfEager(FunctionLiteral* literal) {
     // then create one and enqueue it. Otherwise, we're reparsing (e.g. for the
     // debugger, source position collection, call printing, recompile after
     // flushing, etc.) and don't want to over-compile.
-    Handle<SharedFunctionInfo> shared_info =
+    DirectHandle<SharedFunctionInfo> shared_info =
         Compiler::GetSharedFunctionInfo(literal, script_, local_isolate_);
     if (!shared_info->is_compiled()) {
-      info()->dispatcher()->Enqueue(local_isolate_, shared_info,
-                                    info()->character_stream()->Clone());
+      info()->dispatcher()->Enqueue(
+          local_isolate_, indirect_handle(shared_info, local_isolate_),
+          info()->character_stream()->Clone());
     }
   } else if (eager_inner_literals_ && literal->ShouldEagerCompile()) {
     DCHECK(!IsInEagerLiterals(literal, *eager_inner_literals_));
@@ -4475,8 +4484,7 @@ void BytecodeGenerator::BuildVariableLoad(Variable* variable,
         return;
       }
 
-      builder()->LoadContextSlot(context_reg, variable->index(), depth,
-                                 immutable);
+      builder()->LoadContextSlot(context_reg, variable, depth, immutable);
       if (VariableNeedsHoleCheckInCurrentBlock(variable, hole_check_mode)) {
         BuildThrowIfHole(variable);
       }
@@ -4491,7 +4499,11 @@ void BytecodeGenerator::BuildVariableLoad(Variable* variable,
           Variable* local_variable = variable->local_if_not_shadowed();
           int depth =
               execution_context()->ContextChainDepth(local_variable->scope());
+          ContextKind context_kind = (local_variable->scope()->is_script_scope()
+                                          ? ContextKind::kScriptContext
+                                          : ContextKind::kDefault);
           builder()->LoadLookupContextSlot(variable->raw_name(), typeof_mode,
+                                           context_kind,
                                            local_variable->index(), depth);
           if (VariableNeedsHoleCheckInCurrentBlock(local_variable,
                                                    hole_check_mode)) {
@@ -4737,7 +4749,7 @@ void BytecodeGenerator::BuildVariableAssignment(
         Register value_temp = register_allocator()->NewRegister();
         builder()
             ->StoreAccumulatorInRegister(value_temp)
-            .LoadContextSlot(context_reg, variable->index(), depth,
+            .LoadContextSlot(context_reg, variable, depth,
                              BytecodeArrayBuilder::kMutableSlot);
 
         BuildHoleCheckForVariableAssignment(variable, op);

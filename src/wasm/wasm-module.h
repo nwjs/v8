@@ -42,14 +42,14 @@ class WasmInterpreterRuntime;
 #endif  // V8_ENABLE_DRUMBRAKE
 class WellKnownImportsList;
 
-enum class IndexType : uint8_t { kI32, kI64 };
+enum class AddressType : uint8_t { kI32, kI64 };
 
-inline constexpr const char* IndexTypeToStr(IndexType index_type) {
-  return index_type == IndexType::kI32 ? "i32" : "i64";
+inline constexpr const char* AddressTypeToStr(AddressType address_type) {
+  return address_type == AddressType::kI32 ? "i32" : "i64";
 }
 
-inline std::ostream& operator<<(std::ostream& os, IndexType index_type) {
-  return os << IndexTypeToStr(index_type);
+inline std::ostream& operator<<(std::ostream& os, AddressType address_type) {
+  return os << AddressTypeToStr(address_type);
 }
 
 // Reference to a string in the wire bytes.
@@ -138,7 +138,7 @@ struct WasmMemory {
   uint32_t maximum_pages = 0;      // maximum size of the memory in 64k pages
   bool is_shared = false;          // true if memory is a SharedArrayBuffer
   bool has_maximum_pages = false;  // true if there is a maximum memory size
-  IndexType index_type = IndexType::kI32;  // 32 or 64 bit memory?
+  AddressType address_type = AddressType::kI32;  // 32 or 64 bit memory?
   bool imported = false;                   // true if the memory is imported
   bool exported = false;                   // true if the memory is exported
   // Computed information, cached here for faster compilation.
@@ -147,15 +147,7 @@ struct WasmMemory {
   uintptr_t max_memory_size = 0;  // largest size of any memory in bytes
   BoundsCheckStrategy bounds_checks = kExplicitBoundsChecks;
 
-  inline int GetMemory64GuardsShift() const {
-    return GetMemory64GuardsShift(maximum_pages * kWasmPageSize);
-  }
-  static int GetMemory64GuardsShift(uint64_t max_memory_size);
-  inline uint64_t GetMemory64GuardsSize() const {
-    return 1ull << GetMemory64GuardsShift();
-  }
-
-  bool is_memory64() const { return index_type == IndexType::kI64; }
+  bool is_memory64() const { return address_type == AddressType::kI64; }
 };
 
 inline void UpdateComputedInformation(WasmMemory* memory, ModuleOrigin origin) {
@@ -444,33 +436,30 @@ class V8_EXPORT_PRIVATE AsmJsOffsetInformation {
 };
 
 // Used as the supertype for a type at the top of the type hierarchy.
-constexpr uint32_t kNoSuperType = std::numeric_limits<uint32_t>::max();
-// For convenience, we currently rely on these being interchangeable:
-static_assert(kNoSuperType == TypeIndex::kInvalid);
+constexpr ModuleTypeIndex kNoSuperType = ModuleTypeIndex::Invalid();
 
 struct TypeDefinition {
   enum Kind : int8_t { kFunction, kStruct, kArray };
 
-  constexpr TypeDefinition(const FunctionSig* sig, uint32_t supertype,
+  constexpr TypeDefinition(const FunctionSig* sig, ModuleTypeIndex supertype,
                            bool is_final, bool is_shared)
-      // TODO(366180605): Adapt callers and drop the cast.
-      : function_sig(static_cast<const ModuleFunctionSig*>(sig)),
+      : function_sig(sig),
         supertype{supertype},
         kind(kFunction),
         is_final(is_final),
         is_shared(is_shared) {}
-  constexpr TypeDefinition(const StructType* type, uint32_t supertype,
+
+  constexpr TypeDefinition(const StructType* type, ModuleTypeIndex supertype,
                            bool is_final, bool is_shared)
-      // TODO(366180605): Adapt callers and drop the cast.
-      : struct_type(static_cast<const ModuleStructType*>(type)),
+      : struct_type(type),
         supertype{supertype},
         kind(kStruct),
         is_final(is_final),
         is_shared(is_shared) {}
-  constexpr TypeDefinition(const ArrayType* type, uint32_t supertype,
+
+  constexpr TypeDefinition(const ArrayType* type, ModuleTypeIndex supertype,
                            bool is_final, bool is_shared)
-      // TODO(366180605): Adapt callers and drop the cast.
-      : array_type(static_cast<const ModuleArrayType*>(type)),
+      : array_type(type),
         supertype{supertype},
         kind(kArray),
         is_final(is_final),
@@ -493,9 +482,9 @@ struct TypeDefinition {
   }
 
   union {
-    const ModuleFunctionSig* function_sig = nullptr;
-    const ModuleStructType* struct_type;
-    const ModuleArrayType* array_type;
+    const FunctionSig* function_sig = nullptr;
+    const StructType* struct_type;
+    const ArrayType* array_type;
   };
   ModuleTypeIndex supertype{kNoSuperType};
   Kind kind = kFunction;
@@ -655,13 +644,13 @@ struct WasmTable {
   // TODO(369904698): Allow true 64-bit declared maximum sizes (for memory64).
   uint32_t maximum_size = 0;
   bool has_maximum_size = false;
-  IndexType index_type = IndexType::kI32;
+  AddressType address_type = AddressType::kI32;
   bool shared = false;
   bool imported = false;
   bool exported = false;
   ConstantExpression initial_value = {};
 
-  bool is_table64() const { return index_type == IndexType::kI64; }
+  bool is_table64() const { return address_type == AddressType::kI64; }
 };
 
 // Static representation of a module.
@@ -753,37 +742,41 @@ struct V8_EXPORT_PRIVATE WasmModule {
   // decoding.
   void AddTypeForTesting(TypeDefinition type) {
     types.push_back(type);
-    if (type.supertype != kNoSuperType) {
+    if (type.supertype.valid()) {
       // Set the subtyping depth. Outside of unit tests this is done by the
       // module decoder.
       DCHECK_GT(types.size(), 0);
-      DCHECK_LT(type.supertype, types.size() - 1);
-      types.back().subtyping_depth = types[type.supertype].subtyping_depth + 1;
+      DCHECK_LT(type.supertype.index, types.size() - 1);
+      types.back().subtyping_depth =
+          this->type(type.supertype).subtyping_depth + 1;
     }
     // Isorecursive canonical type will be computed later.
     isorecursive_canonical_type_ids.push_back(CanonicalTypeIndex{kNoSuperType});
   }
 
-  void AddSignatureForTesting(const FunctionSig* sig, uint32_t supertype,
+  void AddSignatureForTesting(const FunctionSig* sig, ModuleTypeIndex supertype,
                               bool is_final, bool is_shared) {
     DCHECK_NOT_NULL(sig);
     AddTypeForTesting(TypeDefinition(sig, supertype, is_final, is_shared));
   }
 
-  void AddStructTypeForTesting(const StructType* type, uint32_t supertype,
-                               bool is_final, bool is_shared) {
+  void AddStructTypeForTesting(const StructType* type,
+                               ModuleTypeIndex supertype, bool is_final,
+                               bool is_shared) {
     DCHECK_NOT_NULL(type);
     AddTypeForTesting(TypeDefinition(type, supertype, is_final, is_shared));
   }
 
-  void AddArrayTypeForTesting(const ArrayType* type, uint32_t supertype,
+  void AddArrayTypeForTesting(const ArrayType* type, ModuleTypeIndex supertype,
                               bool is_final, bool is_shared) {
     DCHECK_NOT_NULL(type);
     AddTypeForTesting(TypeDefinition(type, supertype, is_final, is_shared));
   }
 
   // ================ Accessors ================================================
-  bool has_type(uint32_t index) const { return index < types.size(); }
+  bool has_type(ModuleTypeIndex index) const {
+    return index.index < types.size();
+  }
 
   TypeDefinition type(ModuleTypeIndex index) const {
     size_t num_types = types.size();
@@ -791,55 +784,67 @@ struct V8_EXPORT_PRIVATE WasmModule {
     return types[index.index];
   }
 
-  bool has_signature(uint32_t index) const {
-    return index < types.size() &&
-           types[index].kind == TypeDefinition::kFunction;
-  }
-  const ModuleFunctionSig* signature(uint32_t index) const {
-    DCHECK(has_signature(index));
-    size_t num_types = types.size();
-    V8_ASSUME(index < num_types);
-    return types[index].function_sig;
+  CanonicalTypeIndex canonical_type_id(ModuleTypeIndex index) const {
+    size_t num_types = isorecursive_canonical_type_ids.size();
+    V8_ASSUME(index.index < num_types);
+    return isorecursive_canonical_type_ids[index.index];
   }
 
-  CanonicalTypeIndex canonical_sig_id(uint32_t index) const {
+  bool has_signature(ModuleTypeIndex index) const {
+    return index.index < types.size() &&
+           types[index.index].kind == TypeDefinition::kFunction;
+  }
+  const FunctionSig* signature(ModuleTypeIndex index) const {
+    DCHECK(has_signature(index));
+    size_t num_types = types.size();
+    V8_ASSUME(index.index < num_types);
+    return types[index.index].function_sig;
+  }
+
+  CanonicalTypeIndex canonical_sig_id(ModuleTypeIndex index) const {
     DCHECK(has_signature(index));
     size_t num_types = isorecursive_canonical_type_ids.size();
-    V8_ASSUME(index < num_types);
-    return isorecursive_canonical_type_ids[index];
+    V8_ASSUME(index.index < num_types);
+    return isorecursive_canonical_type_ids[index.index];
   }
 
-  bool has_struct(uint32_t index) const {
-    return index < types.size() && types[index].kind == TypeDefinition::kStruct;
+  bool has_struct(ModuleTypeIndex index) const {
+    return index.index < types.size() &&
+           types[index.index].kind == TypeDefinition::kStruct;
   }
 
-  const StructType* struct_type(uint32_t index) const {
+  const StructType* struct_type(ModuleTypeIndex index) const {
     DCHECK(has_struct(index));
     size_t num_types = types.size();
-    V8_ASSUME(index < num_types);
-    return types[index].struct_type;
+    V8_ASSUME(index.index < num_types);
+    return types[index.index].struct_type;
   }
 
-  bool has_array(uint32_t index) const {
-    return index < types.size() && types[index].kind == TypeDefinition::kArray;
+  bool has_array(ModuleTypeIndex index) const {
+    return index.index < types.size() &&
+           types[index.index].kind == TypeDefinition::kArray;
   }
-  const ArrayType* array_type(uint32_t index) const {
+  const ArrayType* array_type(ModuleTypeIndex index) const {
     DCHECK(has_array(index));
     size_t num_types = types.size();
-    V8_ASSUME(index < num_types);
-    return types[index].array_type;
+    V8_ASSUME(index.index < num_types);
+    return types[index.index].array_type;
   }
 
-  ModuleTypeIndex supertype(uint32_t index) const {
+  ModuleTypeIndex supertype(ModuleTypeIndex index) const {
     size_t num_types = types.size();
-    V8_ASSUME(index < num_types);
-    return types[index].supertype;
+    V8_ASSUME(index.index < num_types);
+    return types[index.index].supertype;
   }
-  bool has_supertype(uint32_t index) const { return supertype(index).valid(); }
+  bool has_supertype(ModuleTypeIndex index) const {
+    return supertype(index).valid();
+  }
 
-  // Linear search. Returns -1 if types are empty.
-  int MaxCanonicalTypeIndex() const {
-    if (isorecursive_canonical_type_ids.empty()) return -1;
+  // Linear search. Returns CanonicalTypeIndex::Invalid() if types are empty.
+  CanonicalTypeIndex MaxCanonicalTypeIndex() const {
+    if (isorecursive_canonical_type_ids.empty()) {
+      return CanonicalTypeIndex::Invalid();
+    }
     return *std::max_element(isorecursive_canonical_type_ids.begin(),
                              isorecursive_canonical_type_ids.end());
   }
@@ -928,7 +933,7 @@ int GetNearestWasmFunction(const WasmModule* module, uint32_t byte_offset);
 // The result is capped to {kV8MaxRttSubtypingDepth + 1}.
 // Invalid cyclic hierarchies will return -1.
 V8_EXPORT_PRIVATE int GetSubtypingDepth(const WasmModule* module,
-                                        uint32_t type_index);
+                                        ModuleTypeIndex type_index);
 
 // Interface to the storage (wire bytes) of a wasm module.
 // It is illegal for anyone receiving a ModuleWireBytes to store pointers based
@@ -1000,11 +1005,11 @@ Handle<JSObject> GetTypeForGlobal(Isolate* isolate, bool is_mutable,
                                   ValueType type);
 Handle<JSObject> GetTypeForMemory(Isolate* isolate, uint32_t min_size,
                                   std::optional<uint64_t> max_size, bool shared,
-                                  IndexType index_type);
+                                  AddressType address_type);
 Handle<JSObject> GetTypeForTable(Isolate* isolate, ValueType type,
                                  uint32_t min_size,
                                  std::optional<uint64_t> max_size,
-                                 IndexType index_type);
+                                 AddressType address_type);
 Handle<JSArray> GetImports(Isolate* isolate,
                            DirectHandle<WasmModuleObject> module);
 Handle<JSArray> GetExports(Isolate* isolate,

@@ -140,6 +140,10 @@ Reduction JSInliner::InlineCall(Node* call, Node* new_target, Node* context,
           // The projection is requesting the inlinee function context.
           Replace(use, context);
         } else {
+#ifdef V8_ENABLE_LEAPTIERING
+          // Using the dispatch handle here isn't currently supported.
+          DCHECK_NE(index, start.DispatchHandleOutputIndex());
+#endif
           // Call has fewer arguments than required, fill with undefined.
           Replace(use, jsgraph()->UndefinedConstant());
         }
@@ -253,7 +257,7 @@ FrameState JSInliner::CreateArtificialFrameState(
   const FrameStateFunctionInfo* state_info =
       common()->CreateFrameStateFunctionInfo(frame_state_type,
                                              parameter_count_with_receiver, 0,
-                                             0, shared.object());
+                                             0, shared.object(), {});
 
   const Operator* op = common()->FrameState(
       BytecodeOffset::None(), OutputFrameStateCombine::Ignore(), state_info);
@@ -435,10 +439,7 @@ JSInliner::WasmInlineResult JSInliner::TryWasmInlining(
     return {};
   }
 
-  // TODO(366180605): Drop the cast!
-  const wasm::ModuleFunctionSig* sig =
-      static_cast<const wasm::ModuleFunctionSig*>(
-          wasm_module_->functions[fct_index].sig);
+  const wasm::FunctionSig* sig = wasm_module_->functions[fct_index].sig;
   Graph::SubgraphScope graph_scope(graph());
   WasmGraphBuilder builder(nullptr, zone(), jsgraph(), sig, source_positions_,
                            WasmGraphBuilder::kJSFunctionAbiMode, isolate(),
@@ -503,9 +504,8 @@ Reduction JSInliner::ReduceJSWasmCall(Node* node) {
     bool set_in_wasm_flag = !(inline_result.can_inline_body ||
                               v8_flags.turboshaft_wasm_in_js_inlining);
     BuildInlinedJSToWasmWrapper(graph()->zone(), jsgraph(), sig, isolate(),
-                                source_positions_,
-                                wasm::WasmEnabledFeatures::FromFlags(),
-                                continuation_frame_state, set_in_wasm_flag);
+                                source_positions_, continuation_frame_state,
+                                set_in_wasm_flag);
 
     // Extract the inlinee start/end nodes.
     wrapper_start_node = graph()->start();
@@ -942,8 +942,9 @@ Reduction JSInliner::ReduceJSCall(Node* node) {
 
   // Insert inlined extra arguments if required. The callees formal parameter
   // count have to match the number of arguments passed to the call.
-  int parameter_count =
-      shared_info->internal_formal_parameter_count_without_receiver();
+  int parameter_count = bytecode_array.parameter_count_without_receiver();
+  DCHECK_EQ(parameter_count,
+            shared_info->internal_formal_parameter_count_without_receiver());
   DCHECK_EQ(parameter_count, start.FormalParameterCountWithoutReceiver());
   if (call.argument_count() != parameter_count) {
     frame_state = CreateArtificialFrameState(

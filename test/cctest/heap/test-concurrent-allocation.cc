@@ -39,7 +39,7 @@ void CreateFixedArray(Heap* heap, Address start, int size) {
                                    ReadOnlyRoots(heap).fixed_array_map(),
                                    SKIP_WRITE_BARRIER);
   Tagged<FixedArray> array = Cast<FixedArray>(object);
-  int length = (size - FixedArray::kHeaderSize) / kTaggedSize;
+  int length = (size - OFFSET_OF_DATA_START(FixedArray)) / kTaggedSize;
   array->set_length(length);
   MemsetTagged(array->RawFieldOfFirstElement(),
                ReadOnlyRoots(heap).undefined_value(), length);
@@ -512,7 +512,7 @@ class ConcurrentRecordRelocSlotThread final : public v8::base::Thread {
     int mode_mask = RelocInfo::EmbeddedObjectModeMask();
     WritableJitAllocation jit_allocation = ThreadIsolation::LookupJitAllocation(
         istream->address(), istream->Size(),
-        ThreadIsolation::JitAllocationType::kInstructionStream);
+        ThreadIsolation::JitAllocationType::kInstructionStream, true);
     for (WritableRelocIterator it(jit_allocation, istream,
                                   code_->constant_pool(), mode_mask);
          !it.done(); it.next()) {
@@ -565,7 +565,7 @@ UNINITIALIZED_TEST(ConcurrentRecordRelocSlot) {
       Handle<Code> code_handle =
           Factory::CodeBuilder(i_isolate, desc, CodeKind::FOR_TESTING).Build();
       // Globalize the handle for |code| for the incremental marker to mark it.
-      i_isolate->global_handles()->Create(*code_handle.location());
+      i_isolate->global_handles()->Create(*code_handle);
       heap::AbandonCurrentlyFreeMemory(heap->old_space());
       DirectHandle<HeapNumber> value_handle(
           i_isolate->factory()->NewHeapNumber<AllocationType::kOld>(1.1));

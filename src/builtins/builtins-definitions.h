@@ -160,7 +160,7 @@ namespace internal {
   ASM(ConstructBoundFunction, JSTrampoline)                                    \
   ASM(ConstructedNonConstructable, JSTrampoline)                               \
   /* ES6 section 7.3.13 Construct (F, [argumentsList], [newTarget]) */         \
-  ASM(Construct, JSTrampoline)                                                 \
+  ASM(Construct, ConstructStub)                                                \
   ASM(ConstructVarargs, ConstructVarargs)                                      \
   TFC(ConstructWithSpread, ConstructWithSpread)                                \
   TFC(ConstructWithSpread_Baseline, ConstructWithSpread_Baseline)              \
@@ -242,6 +242,7 @@ namespace internal {
                                                                                \
   /* Code life-cycle */                                                        \
   TFC(CompileLazy, JSTrampoline)                                               \
+  /* TODO(saelo): should this use a different descriptor? */                   \
   TFC(CompileLazyDeoptimizedCode, JSTrampoline)                                \
   TFC(InstantiateAsmJs, JSTrampoline)                                          \
   ASM(NotifyDeoptimized, Void)                                                 \
@@ -738,9 +739,13 @@ namespace internal {
   TFH(StoreInArrayLiteralIC, StoreWithVector)                                  \
   TFH(StoreInArrayLiteralICBaseline, StoreBaseline)                            \
   TFH(LookupContextTrampoline, LookupTrampoline)                               \
+  TFH(LookupScriptContextTrampoline, LookupTrampoline)                         \
   TFH(LookupContextBaseline, LookupBaseline)                                   \
+  TFH(LookupScriptContextBaseline, LookupBaseline)                             \
   TFH(LookupContextInsideTypeofTrampoline, LookupTrampoline)                   \
+  TFH(LookupScriptContextInsideTypeofTrampoline, LookupTrampoline)             \
   TFH(LookupContextInsideTypeofBaseline, LookupBaseline)                       \
+  TFH(LookupScriptContextInsideTypeofBaseline, LookupBaseline)                 \
   TFH(LoadGlobalIC, LoadGlobalWithVector)                                      \
   TFH(LoadGlobalICInsideTypeof, LoadGlobalWithVector)                          \
   TFH(LoadGlobalICTrampoline, LoadGlobal)                                      \
@@ -1170,6 +1175,7 @@ namespace internal {
                                                                                \
   IF_WASM(ASM, JSToWasmWrapperAsm, WasmJSToWasmWrapper)                        \
   IF_WASM(ASM, WasmReturnPromiseOnSuspendAsm, WasmJSToWasmWrapper)             \
+  IF_WASM(ASM, JSToWasmStressSwitchStacksAsm, WasmJSToWasmWrapper)             \
   IF_WASM(ASM, WasmToJsWrapperAsm, WasmDummy)                                  \
   IF_WASM(TFC, WasmToJsWrapperCSA, WasmToJSWrapper)                            \
   IF_WASM(TFC, WasmToJsWrapperInvalidSig, WasmToJSWrapper)                     \
@@ -1186,7 +1192,6 @@ namespace internal {
   IF_WASM(TFC, WasmFloat64ToNumber, WasmFloat64ToTagged)                       \
   IF_WASM(TFC, WasmFloat64ToString, WasmFloat64ToTagged)                       \
   IF_WASM(TFC, JSToWasmLazyDeoptContinuation, SingleParameterOnStack)          \
-  IF_WASM(ASM, WasmToOnHeapWasmToJsTrampoline, WasmDummy)                      \
                                                                                \
   /* WeakMap */                                                                \
   TFJ(WeakMapConstructor, kDontAdaptArgumentsSentinel)                         \
@@ -1308,6 +1313,7 @@ namespace internal {
   TFC(FindNonDefaultConstructorOrConstruct,                                    \
       FindNonDefaultConstructorOrConstruct)                                    \
   TFS(OrdinaryGetOwnPropertyDescriptor, NeedsContext::kYes, kReceiver, kKey)   \
+  IF_SHADOW_STACK(ASM, AdaptShadowStackForDeopt, Void)                         \
                                                                                \
   /* Trace */                                                                  \
   CPP(IsTraceCategoryEnabled, JSParameterCount(1))                             \

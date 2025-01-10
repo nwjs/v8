@@ -60,6 +60,8 @@
 #include "src/heap/heap-layout-inl.h"
 #include "src/heap/heap-layout-tracer.h"
 #include "src/heap/heap-utils-inl.h"
+#include "src/heap/heap-visitor-inl.h"
+#include "src/heap/heap-visitor.h"
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/heap/incremental-marking-inl.h"
 #include "src/heap/incremental-marking.h"
@@ -82,8 +84,6 @@
 #include "src/heap/new-spaces.h"
 #include "src/heap/object-lock.h"
 #include "src/heap/object-stats.h"
-#include "src/heap/objects-visiting-inl.h"
-#include "src/heap/objects-visiting.h"
 #include "src/heap/paged-spaces-inl.h"
 #include "src/heap/parked-scope.h"
 #include "src/heap/pretenuring-handler.h"
@@ -94,6 +94,7 @@
 #include "src/heap/stress-scavenge-observer.h"
 #include "src/heap/sweeper.h"
 #include "src/heap/trusted-range.h"
+#include "src/heap/visit-object.h"
 #include "src/heap/zapping.h"
 #include "src/init/bootstrapper.h"
 #include "src/init/v8.h"
@@ -110,6 +111,7 @@
 #include "src/objects/objects.h"
 #include "src/objects/slots-atomic-inl.h"
 #include "src/objects/slots-inl.h"
+#include "src/objects/slots.h"
 #include "src/objects/visitors.h"
 #include "src/profiler/heap-profiler.h"
 #include "src/regexp/regexp.h"
@@ -145,6 +147,12 @@ void Heap::SetConstructStubCreateDeoptPCOffset(int pc_offset) {
 void Heap::SetConstructStubInvokeDeoptPCOffset(int pc_offset) {
   DCHECK_EQ(Smi::zero(), construct_stub_invoke_deopt_pc_offset());
   set_construct_stub_invoke_deopt_pc_offset(Smi::FromInt(pc_offset));
+}
+
+void Heap::SetDeoptPCOffsetAfterAdaptShadowStack(int pc_offset) {
+  DCHECK((Smi::zero() == deopt_pc_offset_after_adapt_shadow_stack()) ||
+         (pc_offset == deopt_pc_offset_after_adapt_shadow_stack().value()));
+  set_deopt_pc_offset_after_adapt_shadow_stack(Smi::FromInt(pc_offset));
 }
 
 void Heap::SetInterpreterEntryReturnPCOffset(int pc_offset) {
@@ -482,7 +490,7 @@ bool Heap::IsOldGenerationExpansionAllowed(
 }
 
 bool Heap::CanPromoteYoungAndExpandOldGeneration(size_t size) const {
-  size_t new_space_capacity = NewSpaceTargetCapacity();
+  size_t new_space_capacity = NewSpaceCapacity();
   size_t new_lo_space_capacity = new_lo_space_ ? new_lo_space_->Size() : 0;
 
   // Over-estimate the new space size using capacity to allow some slack.
@@ -1148,7 +1156,7 @@ void Heap::GarbageCollectionEpilogueInSafepoint(GarbageCollector collector) {
 
   {
     // Allows handle derefs for all threads/isolates from this thread.
-    AllowHandleDereferenceAllThreads allow_all_handle_derefs;
+    AllowHandleUsageOnAllThreads allow_all_handle_derefs;
     safepoint()->IterateLocalHeaps([](LocalHeap* local_heap) {
       local_heap->InvokeGCEpilogueCallbacksInSafepoint(
           GCCallbacksInSafepoint::GCType::kLocal);
@@ -1916,7 +1924,9 @@ int Heap::NotifyContextDisposed(bool has_dependent_context) {
     if (memory_reducer_) {
       memory_reducer_->NotifyPossibleGarbage();
     }
-  } else if (v8_flags.idle_gc_on_context_disposal) {
+  } else if (v8_flags.idle_gc_on_context_disposal &&
+             !v8_flags.single_generation) {
+    DCHECK_NOT_NULL(new_space());
     IdleTaskOnContextDispose::TryPostJob(this);
   }
   isolate()->AbortConcurrentOptimization(BlockingBehavior::kDontBlock);
@@ -1978,6 +1988,7 @@ void Heap::StartIncrementalMarking(GCFlags gc_flags,
   incremental_marking()->Start(collector, gc_reason);
 
   if (collector == GarbageCollector::MARK_COMPACTOR) {
+    DCHECK(incremental_marking()->IsMajorMarking());
     is_full_gc_during_loading_ = update_allocation_limits_after_loading_;
     RecomputeLimitsAfterLoadingIfNeeded();
     DCHECK(!update_allocation_limits_after_loading_);
@@ -2333,7 +2344,7 @@ void Heap::PerformGarbageCollection(GarbageCollector collector,
 
   if (isolate_->is_shared_space_isolate()) {
     // Allows handle derefs for all threads/isolates from this thread.
-    AllowHandleDereferenceAllThreads allow_all_handle_derefs;
+    AllowHandleUsageOnAllThreads allow_all_handle_derefs;
     isolate()->global_safepoint()->IterateClientIsolates([](Isolate* client) {
       Relocatable::PostGarbageCollectionProcessing(client);
     });
@@ -2370,7 +2381,8 @@ void Heap::PerformGarbageCollection(GarbageCollector collector,
   RecomputeLimits(collector, atomic_pause_end_time);
   if ((collector == GarbageCollector::MARK_COMPACTOR) &&
       is_full_gc_during_loading_) {
-    if (ShouldOptimizeForLoadTime()) {
+    if (ShouldOptimizeForLoadTime() &&
+        v8_flags.update_allocation_limits_after_loading) {
       update_allocation_limits_after_loading_ = true;
     }
     is_full_gc_during_loading_ = false;
@@ -2386,6 +2398,9 @@ void Heap::PerformHeapVerification() {
   HeapVerifier::VerifyHeapIfEnabled(this);
 
   if (isolate()->is_shared_space_isolate()) {
+    // Allow handle creation for client isolates even if they are parked. This
+    // is because some object verification methods create handles.
+    AllowHandleUsageOnAllThreads allow_handle_creation;
     isolate()->global_safepoint()->IterateClientIsolates([](Isolate* client) {
       HeapVerifier::VerifyHeapIfEnabled(client->heap());
     });
@@ -2516,18 +2531,16 @@ Heap::LimitsCompuatationResult Heap::ComputeNewAllocationLimits(Heap* heap) {
 #endif
   const HeapGrowingMode mode = heap->CurrentHeapGrowingMode();
   double v8_gc_speed =
-      heap->tracer()->CombinedMarkCompactSpeedInBytesPerMillisecond();
+      heap->tracer()->OldGenerationSpeedInBytesPerMillisecond();
   double v8_mutator_speed =
-      heap->tracer()
-          ->CurrentOldGenerationAllocationThroughputInBytesPerMillisecond();
+      heap->tracer()->OldGenerationAllocationThroughputInBytesPerMillisecond();
   double v8_growing_factor = MemoryController<V8HeapTrait>::GrowingFactor(
       heap, heap->max_old_generation_size(), v8_gc_speed, v8_mutator_speed,
       mode);
   double embedder_gc_speed =
       heap->tracer()->EmbedderSpeedInBytesPerMillisecond();
   double embedder_speed =
-      heap->tracer()
-          ->CurrentEmbedderAllocationThroughputInBytesPerMillisecond();
+      heap->tracer()->EmbedderAllocationThroughputInBytesPerMillisecond();
   double embedder_growing_factor =
       (embedder_gc_speed > 0 && embedder_speed > 0)
           ? MemoryController<GlobalMemoryTrait>::GrowingFactor(
@@ -2603,20 +2616,33 @@ void Heap::RecomputeLimits(GarbageCollector collector, base::TimeTicks time) {
 }
 
 void Heap::RecomputeLimitsAfterLoadingIfNeeded() {
+  if (!v8_flags.update_allocation_limits_after_loading) {
+    DCHECK(!update_allocation_limits_after_loading_);
+    return;
+  }
+
   if (!update_allocation_limits_after_loading_) {
     return;
   }
-  update_allocation_limits_after_loading_ = false;
-
-  if (!v8_flags.update_allocation_limits_after_loading) return;
 
   if ((OldGenerationSpaceAvailable() > 0) && (GlobalMemoryAvailable() > 0)) {
     // Only recompute limits if memory accumulated during loading may lead to
     // atomic GC. If there is still room to allocate, keep the current limits.
-    // TODO(346498599): Consider removing this bailout.
     DCHECK(!AllocationLimitOvershotByLargeMargin());
+    update_allocation_limits_after_loading_ = false;
     return;
   }
+
+  if (!incremental_marking()->IsMajorMarking()) {
+    // Incremental marking should have started already but was delayed. Don't
+    // update the limits yet to not delay starting incremental marking any
+    // further. Limits will be updated on incremental marking start, with the
+    // intention to give more slack and avoid an immediate large finalization
+    // pause.
+    return;
+  }
+
+  update_allocation_limits_after_loading_ = false;
 
   UpdateOldGenerationAllocationCounter();
   old_generation_size_at_last_gc_ = OldGenerationSizeOfObjects();
@@ -3091,16 +3117,17 @@ void Heap::VisitExternalResources(v8::ExternalResourceVisitor* visitor) {
   external_string_table_.IterateAll(&external_string_table_visitor);
 }
 
-static_assert(IsAligned(FixedDoubleArray::kHeaderSize, kDoubleAlignment));
+static_assert(IsAligned(OFFSET_OF_DATA_START(FixedDoubleArray),
+                        kDoubleAlignment));
 
 #ifdef V8_COMPRESS_POINTERS
 // TODO(ishell, v8:8875): When pointer compression is enabled the kHeaderSize
 // is only kTaggedSize aligned but we can keep using unaligned access since
 // both x64 and arm64 architectures (where pointer compression supported)
 // allow unaligned access to doubles.
-static_assert(IsAligned(ByteArray::kHeaderSize, kTaggedSize));
+static_assert(IsAligned(OFFSET_OF_DATA_START(ByteArray), kTaggedSize));
 #else
-static_assert(IsAligned(ByteArray::kHeaderSize, kDoubleAlignment));
+static_assert(IsAligned(OFFSET_OF_DATA_START(ByteArray), kDoubleAlignment));
 #endif
 
 int Heap::GetMaximumFillToAlign(AllocationAlignment alignment) {
@@ -3470,9 +3497,9 @@ Tagged<FixedArrayBase> Heap::LeftTrimFixedArray(Tagged<FixedArrayBase> object,
   DCHECK(!IsLargeObject(object));
   DCHECK(object->map() != ReadOnlyRoots(this).fixed_cow_array_map());
 
-  static_assert(FixedArrayBase::kMapOffset == 0);
-  static_assert(FixedArrayBase::kLengthOffset == kTaggedSize);
-  static_assert(FixedArrayBase::kHeaderSize == 2 * kTaggedSize);
+  static_assert(offsetof(FixedArrayBase, map_) == 0);
+  static_assert(offsetof(FixedArrayBase, length_) == kTaggedSize);
+  static_assert(sizeof(FixedArrayBase) == 2 * kTaggedSize);
 
   const int len = object->length();
   DCHECK(elements_to_trim <= len);
@@ -3546,8 +3573,7 @@ void Heap::RightTrimArray(Tagged<Array> object, int new_capacity,
     DCHECK_EQ(gc_state(), MARK_COMPACT);
   }
 
-  const int bytes_to_trim =
-      (old_capacity - new_capacity) * Array::Shape::kElementSize;
+  const int bytes_to_trim = (old_capacity - new_capacity) * Array::kElementSize;
 
   // Calculate location of new array end.
   const int old_size = Array::SizeFor(old_capacity);
@@ -3771,15 +3797,14 @@ bool Heap::HasLowOldGenerationAllocationRate() {
   double mu = ComputeMutatorUtilization(
       "Old generation",
       tracer()->OldGenerationAllocationThroughputInBytesPerMillisecond(),
-      tracer()->CombinedMarkCompactSpeedInBytesPerMillisecond());
+      tracer()->OldGenerationSpeedInBytesPerMillisecond());
   const double kHighMutatorUtilization = 0.993;
   return mu > kHighMutatorUtilization;
 }
 
 bool Heap::HasLowEmbedderAllocationRate() {
   double mu = ComputeMutatorUtilization(
-      "Embedder",
-      tracer()->CurrentEmbedderAllocationThroughputInBytesPerMillisecond(),
+      "Embedder", tracer()->EmbedderAllocationThroughputInBytesPerMillisecond(),
       tracer()->EmbedderSpeedInBytesPerMillisecond());
   const double kHighMutatorUtilization = 0.993;
   return mu > kHighMutatorUtilization;
@@ -3901,7 +3926,7 @@ Heap::ResizeNewSpaceMode Heap::ShouldResizeNewSpace() {
 
   static const size_t kLowAllocationThroughput = 1000;
   const double allocation_throughput =
-      tracer_->CurrentAllocationThroughputInBytesPerMillisecond();
+      tracer_->AllocationThroughputInBytesPerMillisecond();
   const bool should_shrink = !v8_flags.predictable &&
                              (allocation_throughput != 0) &&
                              (allocation_throughput < kLowAllocationThroughput);
@@ -3979,10 +4004,11 @@ namespace {
 thread_local Address pending_layout_change_object_address = kNullAddress;
 
 #ifdef V8_ENABLE_SANDBOX
-class ExternalPointerSlotInvalidator : public ObjectVisitor {
+class ExternalPointerSlotInvalidator
+    : public HeapVisitor<ExternalPointerSlotInvalidator> {
  public:
   explicit ExternalPointerSlotInvalidator(Isolate* isolate)
-      : isolate_(isolate) {}
+      : HeapVisitor(isolate), isolate_(isolate) {}
 
   void VisitPointers(Tagged<HeapObject> host, ObjectSlot start,
                      ObjectSlot end) override {}
@@ -4005,7 +4031,7 @@ class ExternalPointerSlotInvalidator : public ObjectVisitor {
   int Visit(Tagged<HeapObject> target) {
     target_ = target;
     num_invalidated_slots = 0;
-    target->IterateFast(isolate_, this);
+    HeapVisitor::Visit(target);
     return num_invalidated_slots;
   }
 
@@ -4334,11 +4360,12 @@ bool Heap::MeasureMemory(std::unique_ptr<v8::MeasureMemoryDelegate> delegate,
                                              to_measure);
 }
 
-std::unique_ptr<v8::MeasureMemoryDelegate> Heap::MeasureMemoryDelegate(
-    Handle<NativeContext> context, Handle<JSPromise> promise,
+std::unique_ptr<v8::MeasureMemoryDelegate>
+Heap::CreateDefaultMeasureMemoryDelegate(
+    v8::Local<v8::Context> context, v8::Local<v8::Promise::Resolver> promise,
     v8::MeasureMemoryMode mode) {
-  return i::MemoryMeasurement::DefaultDelegate(isolate_, context, promise,
-                                               mode);
+  return i::MemoryMeasurement::DefaultDelegate(
+      reinterpret_cast<v8::Isolate*>(isolate_), context, promise, mode);
 }
 
 void Heap::CollectCodeStatistics() {
@@ -5237,24 +5264,37 @@ size_t Heap::OldGenerationConsumedBytes() const {
 }
 
 size_t Heap::YoungGenerationSizeOfObjects() const {
+  DCHECK_NOT_NULL(new_space());
+  DCHECK_NOT_NULL(new_lo_space());
   if (v8_flags.sticky_mark_bits) {
-    DCHECK_NOT_NULL(new_lo_space());
     return sticky_space()->young_objects_size() +
            new_lo_space()->SizeOfObjects();
   }
-  if (!new_space()) return 0;
   DCHECK_NOT_NULL(new_lo_space());
   return new_space()->SizeOfObjects() + new_lo_space()->SizeOfObjects();
 }
 
 size_t Heap::YoungGenerationWastedBytes() const {
-  if (!new_space()) return 0;
+  DCHECK_NOT_NULL(new_space());
   DCHECK(v8_flags.minor_ms);
   return paged_new_space()->paged_space()->Waste();
 }
 
 size_t Heap::YoungGenerationConsumedBytes() const {
-  return YoungGenerationSizeOfObjects() + YoungGenerationWastedBytes();
+  if (!new_space()) {
+    return 0;
+  }
+  DCHECK_NOT_NULL(new_lo_space());
+  if (v8_flags.minor_ms) {
+    return YoungGenerationSizeOfObjects() + YoungGenerationWastedBytes();
+  }
+  // When using Scavenger, memory is compacted. Thus wasted space is always 0.
+  // The diff between `new_space()->SizeOfObjects()` and
+  // `new_space()->ActualCapacity()` is less than one page. Using capacity
+  // here is also easier for concurrency since this method is reachable from
+  // background old allocations.
+  return semi_space_new_space()->ActualCapacity() +
+         new_lo_space()->SizeOfObjects();
 }
 
 size_t Heap::EmbedderSizeOfObjects() const {
@@ -5297,7 +5337,8 @@ bool Heap::AllocationLimitOvershotByLargeMargin() const {
   if (!v8_flags.external_memory_accounted_in_global_limit) {
     size_now += AllocatedExternalMemorySinceMarkCompact();
   }
-  if (v8_flags.minor_ms && incremental_marking()->IsMajorMarking()) {
+  if (v8_flags.separate_gc_phases && incremental_marking()->IsMajorMarking()) {
+    // No interleaved GCs, so we count young gen as part of old gen.
     size_now += YoungGenerationConsumedBytes();
   }
 
@@ -5328,8 +5369,7 @@ bool Heap::AllocationLimitOvershotByLargeMargin() const {
 }
 
 bool Heap::ShouldOptimizeForLoadTime() const {
-  return isolate()->rail_mode() == PERFORMANCE_LOAD &&
-         !AllocationLimitOvershotByLargeMargin() &&
+  return isolate()->is_loading() && !AllocationLimitOvershotByLargeMargin() &&
          MonotonicallyIncreasingTimeInMs() <
              (load_start_time_ms_.load(std::memory_order_relaxed) +
               kMaxLoadTimeMs);
@@ -6627,7 +6667,7 @@ class UnreachableObjectsFilter : public HeapObjectsFilter {
       while (!marking_stack_.empty()) {
         Tagged<HeapObject> obj = marking_stack_.back();
         marking_stack_.pop_back();
-        obj->Iterate(cage_base(), this);
+        VisitObject(filter_->heap_->isolate(), obj, this);
       }
     }
 
@@ -7253,7 +7293,13 @@ uint8_t* Heap::IsMinorMarkingFlagAddress() {
   return &isolate()->isolate_data()->is_minor_marking_flag_;
 }
 
+StrongRootAllocatorBase::StrongRootAllocatorBase(LocalHeap* heap)
+    : StrongRootAllocatorBase(heap->heap()) {}
 StrongRootAllocatorBase::StrongRootAllocatorBase(Isolate* isolate)
+    : StrongRootAllocatorBase(isolate->heap()) {}
+StrongRootAllocatorBase::StrongRootAllocatorBase(v8::Isolate* isolate)
+    : StrongRootAllocatorBase(reinterpret_cast<Isolate*>(isolate)) {}
+StrongRootAllocatorBase::StrongRootAllocatorBase(LocalIsolate* isolate)
     : StrongRootAllocatorBase(isolate->heap()) {}
 
 // StrongRootBlocks are allocated as a block of addresses, prefixed with a
@@ -7398,7 +7444,9 @@ void Heap::EnsureYoungSweepingCompleted() {
 }
 
 void Heap::NotifyLoadingStarted() {
-  update_allocation_limits_after_loading_ = true;
+  if (v8_flags.update_allocation_limits_after_loading) {
+    update_allocation_limits_after_loading_ = true;
+  }
   UpdateLoadStartTime();
 }
 

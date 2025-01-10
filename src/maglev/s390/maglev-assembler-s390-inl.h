@@ -369,7 +369,15 @@ void MaglevAssembler::LoadFixedArrayElement(Register result, Register array,
                           AbortReason::kUnexpectedNegativeValue);
   }
   LoadTaggedFieldByIndex(result, array, index, kTaggedSize,
-                         FixedArray::kHeaderSize);
+                         OFFSET_OF_DATA_START(FixedArray));
+}
+
+inline void MaglevAssembler::LoadTaggedFieldWithoutDecompressing(
+    Register result, Register object, int offset) {
+  TemporaryRegisterScope temps(this);
+  Register scratch = temps.AcquireScratch();
+  MacroAssembler::LoadTaggedFieldWithoutDecompressing(
+      result, FieldMemOperand(object, offset), scratch);
 }
 
 void MaglevAssembler::LoadFixedArrayElementWithoutDecompressing(
@@ -382,9 +390,11 @@ void MaglevAssembler::LoadFixedArrayElementWithoutDecompressing(
   int times_tagged_size = (kTaggedSize == 8) ? 3 : 2;
   TemporaryRegisterScope temps(this);
   Register scratch = temps.AcquireScratch();
+  Register scratch2 = temps.AcquireScratch();
   ShiftLeftU64(scratch, index, Operand(times_tagged_size));
   MacroAssembler::LoadTaggedFieldWithoutDecompressing(
-      result, FieldMemOperand(array, scratch, FixedArray::kHeaderSize));
+      result, FieldMemOperand(array, scratch, OFFSET_OF_DATA_START(FixedArray)),
+      scratch2);
 }
 
 void MaglevAssembler::LoadFixedDoubleArrayElement(DoubleRegister result,
@@ -399,8 +409,8 @@ void MaglevAssembler::LoadFixedDoubleArrayElement(DoubleRegister result,
                           AbortReason::kUnexpectedNegativeValue);
   }
   ShiftLeftU64(scratch, index, Operand(kDoubleSizeLog2));
-  LoadF64(result,
-          FieldMemOperand(array, scratch, FixedDoubleArray::kHeaderSize));
+  LoadF64(result, FieldMemOperand(array, scratch,
+                                  OFFSET_OF_DATA_START(FixedDoubleArray)));
 }
 
 inline void MaglevAssembler::StoreFixedDoubleArrayElement(
@@ -408,8 +418,8 @@ inline void MaglevAssembler::StoreFixedDoubleArrayElement(
   TemporaryRegisterScope temps(this);
   Register scratch = temps.AcquireScratch();
   ShiftLeftU64(scratch, index, Operand(kDoubleSizeLog2));
-  StoreF64(value,
-           FieldMemOperand(array, scratch, FixedDoubleArray::kHeaderSize));
+  StoreF64(value, FieldMemOperand(array, scratch,
+                                  OFFSET_OF_DATA_START(FixedDoubleArray)));
 }
 
 inline void MaglevAssembler::LoadSignedField(Register result,
@@ -448,7 +458,7 @@ inline void MaglevAssembler::SetSlotAddressForFixedArrayElement(
   // TemporaryRegisterScope temps(this);
   Register scratch = r0;
   mov(slot_reg, object);
-  AddU64(slot_reg, Operand(FixedArray::kHeaderSize - kHeapObjectTag));
+  AddU64(slot_reg, Operand(OFFSET_OF_DATA_START(FixedArray) - kHeapObjectTag));
   ShiftLeftU64(scratch, index, Operand(kTaggedSizeLog2));
   AddU64(slot_reg, slot_reg, scratch);
 }
@@ -466,7 +476,7 @@ inline void MaglevAssembler::StoreFixedArrayElementNoWriteBarrier(
   ShiftLeftU64(scratch, index, Operand(kTaggedSizeLog2));
   AddU64(scratch, scratch, array);
   MacroAssembler::StoreTaggedField(
-      value, FieldMemOperand(scratch, FixedArray::kHeaderSize));
+      value, FieldMemOperand(scratch, OFFSET_OF_DATA_START(FixedArray)));
 }
 
 inline void MaglevAssembler::StoreTaggedSignedField(Register object, int offset,

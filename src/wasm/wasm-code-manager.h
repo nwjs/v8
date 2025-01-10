@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "src/base/address-region.h"
 #include "src/base/bit-field.h"
 #include "src/base/macros.h"
@@ -683,7 +684,8 @@ class V8_EXPORT_PRIVATE NativeModule final {
   // to a function index.
   uint32_t GetFunctionIndexFromJumpTableSlot(Address slot_address) const;
 
-  uint32_t GetFunctionIndexFromIndirectCallTarget(WasmCodePointer target) const;
+  using CallIndirectTargetMap = absl::flat_hash_map<WasmCodePointer, uint32_t>;
+  CallIndirectTargetMap CreateIndirectCallTargetToFunctionIndexMap() const;
 
   // For cctests, where we build both WasmModule and the runtime objects
   // on the fly, and bypass the instance builder pipeline.
@@ -1224,31 +1226,6 @@ class V8_EXPORT_PRIVATE V8_NODISCARD WasmCodeRefScope {
  private:
   WasmCodeRefScope* const previous_scope_;
   std::vector<WasmCode*> code_ptrs_;
-};
-
-// Similarly to a global handle, a {GlobalWasmCodeRef} stores a single
-// ref-counted pointer to a {WasmCode} object.
-class GlobalWasmCodeRef {
- public:
-  explicit GlobalWasmCodeRef(WasmCode* code,
-                             std::shared_ptr<NativeModule> native_module)
-      : code_(code), native_module_(std::move(native_module)) {
-    code_->IncRef();
-  }
-
-  GlobalWasmCodeRef(const GlobalWasmCodeRef&) = delete;
-  GlobalWasmCodeRef& operator=(const GlobalWasmCodeRef&) = delete;
-
-  ~GlobalWasmCodeRef() { WasmCode::DecrementRefCount({&code_, 1}); }
-
-  // Get a pointer to the contained {WasmCode} object. This is only guaranteed
-  // to exist as long as this {GlobalWasmCodeRef} exists.
-  WasmCode* code() const { return code_; }
-
- private:
-  WasmCode* const code_;
-  // Also keep the {NativeModule} alive.
-  const std::shared_ptr<NativeModule> native_module_;
 };
 
 class WasmCodeLookupCache final {

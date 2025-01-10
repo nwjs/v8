@@ -277,8 +277,9 @@ class V8_EXPORT_PRIVATE TransitionsAccessor {
                            DirectHandle<Name> name, DirectHandle<Map> target,
                            TransitionKindFlag flag);
 
-  static inline void ReplaceTransitions(Isolate* isolate, DirectHandle<Map> map,
-                                        Tagged<MaybeObject> new_transitions);
+  static inline void ReplaceTransitions(
+      Isolate* isolate, DirectHandle<Map> map,
+      Tagged<UnionOf<TransitionArray, MaybeWeak<Map>>> new_transitions);
   static inline void ReplaceTransitions(
       Isolate* isolate, DirectHandle<Map> map,
       DirectHandle<TransitionArray> new_transitions);
@@ -468,8 +469,6 @@ class TransitionArray : public WeakFixedArray {
 
   inline Tagged<WeakFixedArray> GetSideStepTransitions();
   inline void SetSideStepTransitions(Tagged<WeakFixedArray> transitions);
-
-  OBJECT_CONSTRUCTORS(TransitionArray, WeakFixedArray);
 };
 
 }  // namespace v8::internal

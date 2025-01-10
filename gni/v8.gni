@@ -128,6 +128,12 @@ declare_args() {
 
   cppgc_is_standalone = false
 
+  # Enables certain checks on API level functionality.
+  cppgc_enable_api_checks = is_debug || dcheck_always_on
+
+  # Enable slow checks on API level functionality.
+  cppgc_enable_slow_api_checks = false
+
   # Enable object names in cppgc for profiling purposes.
   cppgc_enable_object_names = is_chrome_for_testing
 
@@ -194,7 +200,7 @@ if (v8_enable_backtrace == "") {
 # Chromium is configured to use the perfetto client library, v8 should also
 # use perfetto for tracing.
 if (build_with_chromium) {
-  v8_use_perfetto = false
+  v8_use_perfetto = true
 }
 
 # Includes profiles to optimize builtins if

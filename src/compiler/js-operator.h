@@ -1065,6 +1065,7 @@ class V8_EXPORT_PRIVATE JSOperatorBuilder final
 
   const Operator* HasContextExtension(size_t depth);
   const Operator* LoadContext(size_t depth, size_t index, bool immutable);
+  const Operator* LoadScriptContext(size_t depth, size_t index);
   const Operator* StoreContext(size_t depth, size_t index);
   const Operator* StoreScriptContext(size_t depth, size_t index);
 
@@ -1524,7 +1525,7 @@ class JSWasmCallNode final : public JSCallOrConstructNode {
     return Parameters().arity_without_implicit_args();
   }
 
-  static Type TypeForWasmReturnType(const wasm::ValueType& type);
+  static Type TypeForWasmReturnType(wasm::CanonicalValueType type);
 };
 #endif  // V8_ENABLE_WEBASSEMBLY
 

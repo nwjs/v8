@@ -350,6 +350,7 @@ MaybeHandle<Code> BaselineCompiler::Build() {
   } else {
     code_builder.set_interpreter_data(bytecode_);
   }
+  code_builder.set_parameter_count(bytecode_->parameter_count());
   return code_builder.TryBuild();
 }
 
@@ -758,6 +759,24 @@ void BaselineCompiler::VisitLdaContextSlot() {
   __ LdaContextSlot(context, index, depth);
 }
 
+void BaselineCompiler::VisitLdaScriptContextSlot() {
+  BaselineAssembler::ScratchRegisterScope scratch_scope(&basm_);
+  Register context = scratch_scope.AcquireScratch();
+  Label done;
+  LoadRegister(context, 0);
+  uint32_t index = Index(1);
+  uint32_t depth = Uint(2);
+  __ LdaContextSlot(context, index, depth);
+  __ JumpIfSmi(kInterpreterAccumulatorRegister, &done);
+  __ JumpIfObjectTypeFast(kNotEqual, kInterpreterAccumulatorRegister,
+                          HEAP_NUMBER_TYPE, &done, Label::kNear);
+  CallBuiltin<Builtin::kAllocateIfMutableHeapNumberScriptContextSlot>(
+      kInterpreterAccumulatorRegister,  // heap number
+      context,                          // context
+      Smi::FromInt(index));             // slot
+  __ Bind(&done);
+}
+
 void BaselineCompiler::VisitLdaImmutableContextSlot() { VisitLdaContextSlot(); }
 
 void BaselineCompiler::VisitLdaCurrentContextSlot() {
@@ -766,6 +785,24 @@ void BaselineCompiler::VisitLdaCurrentContextSlot() {
   __ LoadContext(context);
   __ LoadTaggedField(kInterpreterAccumulatorRegister, context,
                      Context::OffsetOfElementAt(Index(0)));
+}
+
+void BaselineCompiler::VisitLdaCurrentScriptContextSlot() {
+  BaselineAssembler::ScratchRegisterScope scratch_scope(&basm_);
+  Register context = scratch_scope.AcquireScratch();
+  Label done;
+  uint32_t index = Index(0);
+  __ LoadContext(context);
+  __ LoadTaggedField(kInterpreterAccumulatorRegister, context,
+                     Context::OffsetOfElementAt(index));
+  __ JumpIfSmi(kInterpreterAccumulatorRegister, &done);
+  __ JumpIfObjectTypeFast(kNotEqual, kInterpreterAccumulatorRegister,
+                          HEAP_NUMBER_TYPE, &done, Label::kNear);
+  CallBuiltin<Builtin::kAllocateIfMutableHeapNumberScriptContextSlot>(
+      kInterpreterAccumulatorRegister,  // heap number
+      context,                          // context
+      Smi::FromInt(index));             // slot
+  __ Bind(&done);
 }
 
 void BaselineCompiler::VisitLdaImmutableCurrentContextSlot() {
@@ -826,6 +863,11 @@ void BaselineCompiler::VisitLdaLookupContextSlot() {
       Constant<Name>(0), UintAsTagged(2), IndexAsTagged(1));
 }
 
+void BaselineCompiler::VisitLdaLookupScriptContextSlot() {
+  CallBuiltin<Builtin::kLookupScriptContextBaseline>(
+      Constant<Name>(0), UintAsTagged(2), IndexAsTagged(1));
+}
+
 void BaselineCompiler::VisitLdaLookupGlobalSlot() {
   CallBuiltin<Builtin::kLookupGlobalICBaseline>(
       Constant<Name>(0), UintAsTagged(2), IndexAsTagged(1));
@@ -837,6 +879,11 @@ void BaselineCompiler::VisitLdaLookupSlotInsideTypeof() {
 
 void BaselineCompiler::VisitLdaLookupContextSlotInsideTypeof() {
   CallBuiltin<Builtin::kLookupContextInsideTypeofBaseline>(
+      Constant<Name>(0), UintAsTagged(2), IndexAsTagged(1));
+}
+
+void BaselineCompiler::VisitLdaLookupScriptContextSlotInsideTypeof() {
+  CallBuiltin<Builtin::kLookupScriptContextInsideTypeofBaseline>(
       Constant<Name>(0), UintAsTagged(2), IndexAsTagged(1));
 }
 

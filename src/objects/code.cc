@@ -39,7 +39,7 @@ void Code::ClearEmbeddedObjects(Heap* heap) {
   {
     WritableJitAllocation jit_allocation = ThreadIsolation::LookupJitAllocation(
         istream->address(), istream->Size(),
-        ThreadIsolation::JitAllocationType::kInstructionStream);
+        ThreadIsolation::JitAllocationType::kInstructionStream, true);
     for (WritableRelocIterator it(jit_allocation, istream, constant_pool(),
                                   mode_mask);
          !it.done(); it.next()) {
@@ -158,7 +158,7 @@ bool Code::Inlines(Tagged<SharedFunctionInfo> sfi) {
   Tagged<DeoptimizationData> const data =
       Cast<DeoptimizationData>(deoptimization_data());
   if (data->length() == 0) return false;
-  if (data->SharedFunctionInfo() == sfi) return true;
+  if (data->GetSharedFunctionInfo() == sfi) return true;
   Tagged<DeoptimizationLiteralArray> const literals = data->LiteralArray();
   int const inlined_count = data->InlinedFunctionCount().value();
   for (int i = 0; i < inlined_count; ++i) {

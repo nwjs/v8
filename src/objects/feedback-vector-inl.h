@@ -28,8 +28,6 @@ namespace v8::internal {
 
 TQ_OBJECT_CONSTRUCTORS_IMPL(FeedbackVector)
 OBJECT_CONSTRUCTORS_IMPL(FeedbackMetadata, HeapObject)
-OBJECT_CONSTRUCTORS_IMPL(ClosureFeedbackCellArray,
-                         ClosureFeedbackCellArray::Super)
 
 NEVER_READ_ONLY_SPACE_IMPL(FeedbackVector)
 NEVER_READ_ONLY_SPACE_IMPL(ClosureFeedbackCellArray)
@@ -185,7 +183,7 @@ void FeedbackVector::set_maybe_has_optimized_osr_code(bool value,
     CHECK(v8_flags.maglev_osr);
     set_osr_state(MaybeHasMaglevOsrCodeBit::update(osr_state(), value));
   } else {
-    CHECK_EQ(code_kind, CodeKind::TURBOFAN);
+    CHECK_EQ(code_kind, CodeKind::TURBOFAN_JS);
     set_osr_state(MaybeHasTurbofanOsrCodeBit::update(osr_state(), value));
   }
 }
@@ -350,13 +348,13 @@ void FeedbackVector::SynchronizedSet(FeedbackSlot slot,
   DCHECK_LT(static_cast<unsigned>(i), static_cast<unsigned>(this->length()));
   const int offset = kRawFeedbackSlotsOffset + i * kTaggedSize;
   TaggedField<MaybeObject>::Release_Store(*this, offset, value);
-  CONDITIONAL_WEAK_WRITE_BARRIER(*this, offset, value, mode);
+  CONDITIONAL_WRITE_BARRIER(*this, offset, value, mode);
 }
 
 void FeedbackVector::Set(FeedbackSlot slot, Tagged<MaybeObject> value,
                          WriteBarrierMode mode) {
   DCHECK(!IsOfLegacyType(value));
-  set_raw_feedback_slots(GetIndex(slot), value, mode);
+  set_raw_feedback_slots(GetIndex(slot), value, kRelaxedStore, mode);
 }
 
 inline MaybeObjectSlot FeedbackVector::slots_start() {

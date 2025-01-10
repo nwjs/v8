@@ -399,8 +399,9 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
     __ Sub_d(a3, a3, Operand(1));
     __ Branch(&done_loop, lt, a3, Operand(zero_reg));
     __ Alsl_d(kScratchReg, a3, t1, kTaggedSizeLog2, t7);
-    __ LoadTaggedField(kScratchReg,
-                       FieldMemOperand(kScratchReg, FixedArray::kHeaderSize));
+    __ LoadTaggedField(
+        kScratchReg,
+        FieldMemOperand(kScratchReg, OFFSET_OF_DATA_START(FixedArray)));
     __ Push(kScratchReg);
     __ Branch(&loop);
     __ bind(&done_loop);
@@ -433,6 +434,8 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
 
   // Resume (Ignition/TurboFan) generator object.
   {
+    // TODO(40931165): use parameter count from JSDispatchTable and validate
+    // that it matches the number of values in the JSGeneratorObject.
     __ LoadTaggedField(
         a0, FieldMemOperand(a4, JSFunction::kSharedFunctionInfoOffset));
     __ Ld_hu(a0, FieldMemOperand(
@@ -1105,6 +1108,7 @@ void Builtins::Generate_BaselineOutOfLinePrologueDeopt(MacroAssembler* masm) {
 //   o a0 : actual argument count
 //   o a1: the JS function object being called.
 //   o a3: the incoming new target or generator object
+//   o a4: the dispatch handle through which we were called
 //   o cp: our context
 //   o fp: the caller's frame pointer
 //   o sp: stack pointer
@@ -1118,7 +1122,7 @@ void Builtins::Generate_InterpreterEntryTrampoline(
 
   // Get the bytecode array from the function object and load it into
   // kInterpreterBytecodeArrayRegister.
-  Register sfi = a4;
+  Register sfi = a5;
   __ LoadTaggedField(
       sfi, FieldMemOperand(closure, JSFunction::kSharedFunctionInfoOffset));
   ResetSharedFunctionInfoAge(masm, sfi);
@@ -1133,7 +1137,7 @@ void Builtins::Generate_InterpreterEntryTrampoline(
 
   Label push_stack_frame;
   Register feedback_vector = a2;
-  __ LoadFeedbackVector(feedback_vector, closure, a4, &push_stack_frame);
+  __ LoadFeedbackVector(feedback_vector, closure, a5, &push_stack_frame);
 
 #ifndef V8_JITLESS
   // If feedback vector is valid, check for optimized code and update invocation
@@ -1141,18 +1145,18 @@ void Builtins::Generate_InterpreterEntryTrampoline(
 
   // Check the tiering state.
   Label flags_need_processing;
-  Register flags = a4;
+  Register flags = a5;
   __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
       flags, feedback_vector, CodeKind::INTERPRETED_FUNCTION,
       &flags_need_processing);
 
-  ResetFeedbackVectorOsrUrgency(masm, feedback_vector, a4);
+  ResetFeedbackVectorOsrUrgency(masm, feedback_vector, a5);
 
   // Increment invocation count for the function.
-  __ Ld_w(a4, FieldMemOperand(feedback_vector,
+  __ Ld_w(a5, FieldMemOperand(feedback_vector,
                               FeedbackVector::kInvocationCountOffset));
-  __ Add_w(a4, a4, Operand(1));
-  __ St_w(a4, FieldMemOperand(feedback_vector,
+  __ Add_w(a5, a5, Operand(1));
+  __ St_w(a5, FieldMemOperand(feedback_vector,
                               FeedbackVector::kInvocationCountOffset));
 
   // Open a frame scope to indicate that there is a frame on the stack.  The
@@ -1175,20 +1179,20 @@ void Builtins::Generate_InterpreterEntryTrampoline(
 
   // Push bytecode array, Smi tagged bytecode array offset and the feedback
   // vector.
-  __ SmiTag(a4, kInterpreterBytecodeOffsetRegister);
-  __ Push(kInterpreterBytecodeArrayRegister, a4, feedback_vector);
+  __ SmiTag(a5, kInterpreterBytecodeOffsetRegister);
+  __ Push(kInterpreterBytecodeArrayRegister, a5, feedback_vector);
 
   // Allocate the local and temporary register file on the stack.
   Label stack_overflow;
   {
     // Load frame size (word) from the BytecodeArray object.
-    __ Ld_w(a4, FieldMemOperand(kInterpreterBytecodeArrayRegister,
+    __ Ld_w(a5, FieldMemOperand(kInterpreterBytecodeArrayRegister,
                                 BytecodeArray::kFrameSizeOffset));
 
     // Do a stack check to ensure we don't go over the limit.
-    __ Sub_d(a5, sp, Operand(a4));
+    __ Sub_d(a6, sp, Operand(a5));
     __ LoadStackLimit(a2, MacroAssembler::StackLimitKind::kRealStackLimit);
-    __ Branch(&stack_overflow, lo, a5, Operand(a2));
+    __ Branch(&stack_overflow, lo, a6, Operand(a2));
 
     // If ok, push undefined as the initial value for all register file entries.
     Label loop_header;
@@ -1200,12 +1204,12 @@ void Builtins::Generate_InterpreterEntryTrampoline(
     __ Push(kInterpreterAccumulatorRegister);
     // Continue loop if not done.
     __ bind(&loop_check);
-    __ Sub_d(a4, a4, Operand(kSystemPointerSize));
-    __ Branch(&loop_header, ge, a4, Operand(zero_reg));
+    __ Sub_d(a5, a5, Operand(kSystemPointerSize));
+    __ Branch(&loop_header, ge, a5, Operand(zero_reg));
   }
 
   // If the bytecode array has a valid incoming new target or generator object
-  // register, initialize it with incoming value which was passed in r3.
+  // register, initialize it with incoming value which was passed in a3.
   Label no_incoming_new_target_or_generator_register;
   __ Ld_w(a5, FieldMemOperand(
                   kInterpreterBytecodeArrayRegister,
@@ -1269,7 +1273,7 @@ void Builtins::Generate_InterpreterEntryTrampoline(
   __ Ld_bu(a1, MemOperand(a1, 0));
   AdvanceBytecodeOffsetOrReturn(masm, kInterpreterBytecodeArrayRegister,
                                 kInterpreterBytecodeOffsetRegister, a1, a2, a3,
-                                a4, &do_return);
+                                a5, &do_return);
   __ jmp(&do_dispatch);
 
   __ bind(&do_return);
@@ -1828,14 +1832,14 @@ void Builtins::Generate_InterpreterEnterAtBytecode(MacroAssembler* masm) {
 
 namespace {
 void Generate_ContinueToBuiltinHelper(MacroAssembler* masm,
-                                      bool java_script_builtin,
+                                      bool javascript_builtin,
                                       bool with_result) {
   const RegisterConfiguration* config(RegisterConfiguration::Default());
   int allocatable_register_count = config->num_allocatable_general_registers();
   UseScratchRegisterScope temps(masm);
   Register scratch = temps.Acquire();
   if (with_result) {
-    if (java_script_builtin) {
+    if (javascript_builtin) {
       __ mov(scratch, a0);
     } else {
       // Overwrite the hole inserted by the deoptimizer with the return value
@@ -1850,12 +1854,12 @@ void Generate_ContinueToBuiltinHelper(MacroAssembler* masm,
   for (int i = allocatable_register_count - 1; i >= 0; --i) {
     int code = config->GetAllocatableGeneralCode(i);
     __ Pop(Register::from_code(code));
-    if (java_script_builtin && code == kJavaScriptCallArgCountRegister.code()) {
+    if (javascript_builtin && code == kJavaScriptCallArgCountRegister.code()) {
       __ SmiUntag(Register::from_code(code));
     }
   }
 
-  if (with_result && java_script_builtin) {
+  if (with_result && javascript_builtin) {
     // Overwrite the hole inserted by the deoptimizer with the return value from
     // the LAZY deopt point. t0 contains the arguments count, the return value
     // from LAZY is always the last argument.
@@ -2303,7 +2307,7 @@ void Builtins::Generate_CallOrConstructVarargs(MacroAssembler* masm,
     Register src = a6;
     Register scratch = len;
 
-    __ addi_d(src, args, FixedArray::kHeaderSize - kHeapObjectTag);
+    __ addi_d(src, args, OFFSET_OF_DATA_START(FixedArray) - kHeapObjectTag);
     __ Branch(&done, eq, len, Operand(zero_reg));
     __ slli_d(scratch, len, kSystemPointerSizeLog2);
     __ Sub_d(scratch, sp, Operand(scratch));
@@ -2497,9 +2501,13 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
   //  -- cp : the function context.
   // -----------------------------------
 
+#ifdef V8_ENABLE_LEAPTIERING
+  __ InvokeFunctionCode(a1, no_reg, a0, InvokeType::kJump);
+#else
   __ Ld_hu(
       a2, FieldMemOperand(a2, SharedFunctionInfo::kFormalParameterCountOffset));
   __ InvokeFunctionCode(a1, no_reg, a2, a0, InvokeType::kJump);
+#endif  // V8_ENABLE_LEAPTIERING
 }
 
 // static
@@ -2520,7 +2528,7 @@ void Builtins::Generate_CallBoundFunctionImpl(MacroAssembler* masm) {
   // Load [[BoundArguments]] into a2 and length of that into a4.
   __ LoadTaggedField(
       a2, FieldMemOperand(a1, JSBoundFunction::kBoundArgumentsOffset));
-  __ SmiUntagField(a4, FieldMemOperand(a2, FixedArray::kLengthOffset));
+  __ SmiUntagField(a4, FieldMemOperand(a2, offsetof(FixedArray, length_)));
 
   // ----------- S t a t e -------------
   //  -- a0 : the number of arguments
@@ -2553,9 +2561,10 @@ void Builtins::Generate_CallBoundFunctionImpl(MacroAssembler* masm) {
   // Push [[BoundArguments]].
   {
     Label loop, done_loop;
-    __ SmiUntagField(a4, FieldMemOperand(a2, FixedArray::kLengthOffset));
+    __ SmiUntagField(a4, FieldMemOperand(a2, offsetof(FixedArray, length_)));
     __ Add_d(a0, a0, Operand(a4));
-    __ Add_d(a2, a2, Operand(FixedArray::kHeaderSize - kHeapObjectTag));
+    __ Add_d(a2, a2,
+             Operand(OFFSET_OF_DATA_START(FixedArray) - kHeapObjectTag));
     __ bind(&loop);
     __ Sub_d(a4, a4, Operand(1));
     __ Branch(&done_loop, lt, a4, Operand(zero_reg));
@@ -2688,7 +2697,7 @@ void Builtins::Generate_ConstructBoundFunction(MacroAssembler* masm) {
   // Load [[BoundArguments]] into a2 and length of that into a4.
   __ LoadTaggedField(
       a2, FieldMemOperand(a1, JSBoundFunction::kBoundArgumentsOffset));
-  __ SmiUntagField(a4, FieldMemOperand(a2, FixedArray::kLengthOffset));
+  __ SmiUntagField(a4, FieldMemOperand(a2, offsetof(FixedArray, length_)));
 
   // ----------- S t a t e -------------
   //  -- a0 : the number of arguments
@@ -2722,9 +2731,10 @@ void Builtins::Generate_ConstructBoundFunction(MacroAssembler* masm) {
   // Push [[BoundArguments]].
   {
     Label loop, done_loop;
-    __ SmiUntagField(a4, FieldMemOperand(a2, FixedArray::kLengthOffset));
+    __ SmiUntagField(a4, FieldMemOperand(a2, offsetof(FixedArray, length_)));
     __ Add_d(a0, a0, Operand(a4));
-    __ Add_d(a2, a2, Operand(FixedArray::kHeaderSize - kHeapObjectTag));
+    __ Add_d(a2, a2,
+             Operand(OFFSET_OF_DATA_START(FixedArray) - kHeapObjectTag));
     __ bind(&loop);
     __ Sub_d(a4, a4, Operand(1));
     __ Branch(&done_loop, lt, a4, Operand(zero_reg));
@@ -2866,7 +2876,8 @@ void Builtins::Generate_WasmLiftoffFrameSetup(MacroAssembler* masm) {
       vector, FieldMemOperand(kWasmImplicitArgRegister,
                               WasmTrustedInstanceData::kFeedbackVectorsOffset));
   __ Alsl_d(vector, func_index, vector, kTaggedSizeLog2);
-  __ LoadTaggedField(vector, FieldMemOperand(vector, FixedArray::kHeaderSize));
+  __ LoadTaggedField(vector,
+                     FieldMemOperand(vector, OFFSET_OF_DATA_START(FixedArray)));
   __ JumpIfSmi(vector, &allocate_vector);
   __ bind(&done);
   __ Push(vector);
@@ -2979,13 +2990,13 @@ namespace {
 void SwitchStackState(MacroAssembler* masm, Register jmpbuf, Register tmp,
                       wasm::JumpBuffer::StackState old_state,
                       wasm::JumpBuffer::StackState new_state) {
-  if (v8_flags.debug_code) {
-    __ Ld_w(tmp, MemOperand(jmpbuf, wasm::kJmpBufStateOffset));
-    Label ok;
-    __ JumpIfEqual(tmp, old_state, &ok);
-    __ Trap();
-    __ bind(&ok);
-  }
+#if V8_ENABLE_SANDBOX
+  __ Ld_w(tmp, MemOperand(jmpbuf, wasm::kJmpBufStateOffset));
+  Label ok;
+  __ JumpIfEqual(tmp, old_state, &ok);
+  __ Trap();
+  __ bind(&ok);
+#endif
   __ li(tmp, Operand(new_state));
   __ St_w(tmp, MemOperand(jmpbuf, wasm::kJmpBufStateOffset));
 }
@@ -3009,11 +3020,10 @@ void FillJumpBuffer(MacroAssembler* masm, Register jmpbuf, Label* target,
 }
 
 void LoadJumpBuffer(MacroAssembler* masm, Register jmpbuf, bool load_pc,
-                    Register tmp) {
+                    Register tmp, wasm::JumpBuffer::StackState expected_state) {
   SwitchStackPointer(masm, jmpbuf);
   __ Ld_d(fp, MemOperand(jmpbuf, wasm::kJmpBufFpOffset));
-  SwitchStackState(masm, jmpbuf, tmp, wasm::JumpBuffer::Inactive,
-                   wasm::JumpBuffer::Active);
+  SwitchStackState(masm, jmpbuf, tmp, expected_state, wasm::JumpBuffer::Active);
   if (load_pc) {
     __ Ld_d(tmp, MemOperand(jmpbuf, wasm::kJmpBufPcOffset));
     __ Jump(tmp);
@@ -3036,7 +3046,8 @@ void SaveState(MacroAssembler* masm, Register active_continuation, Register tmp,
 }
 
 void LoadTargetJumpBuffer(MacroAssembler* masm, Register target_continuation,
-                          Register tmp) {
+                          Register tmp,
+                          wasm::JumpBuffer::StackState expected_state) {
   Register target_jmpbuf = target_continuation;
   __ LoadExternalPointerField(
       target_jmpbuf,
@@ -3047,7 +3058,7 @@ void LoadTargetJumpBuffer(MacroAssembler* masm, Register target_continuation,
   __ St_d(zero_reg,
           MemOperand(fp, StackSwitchFrameConstants::kGCScanSlotCountOffset));
   // Switch stack!
-  LoadJumpBuffer(masm, target_jmpbuf, false, tmp);
+  LoadJumpBuffer(masm, target_jmpbuf, false, tmp, expected_state);
 }
 
 // Updates the stack limit to match the new active stack.
@@ -3126,7 +3137,7 @@ void ReloadParentContinuation(MacroAssembler* masm, Register return_reg,
       kWasmContinuationJmpbufTag);
 
   // Switch stack!
-  LoadJumpBuffer(masm, jmpbuf, false, tmp3);
+  LoadJumpBuffer(masm, jmpbuf, false, tmp3, wasm::JumpBuffer::Inactive);
 
   SwitchStacks(masm, active_continuation, return_reg, return_value, context);
 }
@@ -3401,7 +3412,7 @@ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
       kWasmContinuationJmpbufTag);
   FillJumpBuffer(masm, jmpbuf, &resume, scratch);
   SwitchStackState(masm, jmpbuf, scratch, wasm::JumpBuffer::Active,
-                   wasm::JumpBuffer::Inactive);
+                   wasm::JumpBuffer::Suspended);
   __ li(scratch, Operand(Smi::FromInt(WasmSuspenderObject::kSuspended)));
   __ StoreTaggedField(
       scratch, FieldMemOperand(suspender, WasmSuspenderObject::kStateOffset));
@@ -3459,10 +3470,8 @@ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
       MemOperand(fp, StackSwitchFrameConstants::kGCScanSlotCountOffset);
   __ St_d(zero_reg, GCScanSlotPlace);
   ASSIGN_REG(scratch)
-  LoadJumpBuffer(masm, jmpbuf, true, scratch);
-  if (v8_flags.debug_code) {
-    __ Trap();
-  }
+  LoadJumpBuffer(masm, jmpbuf, true, scratch, wasm::JumpBuffer::Inactive);
+  __ Trap();
   __ bind(&resume);
   __ LeaveFrame(StackFrame::STACK_SWITCH);
   __ Ret();
@@ -3602,7 +3611,8 @@ void Generate_WasmResumeHelper(MacroAssembler* masm, wasm::OnResume on_resume) {
   __ St_d(zero_reg, GCScanSlotPlace);
   if (on_resume == wasm::OnResume::kThrow) {
     // Switch to the continuation's stack without restoring the PC.
-    LoadJumpBuffer(masm, target_jmpbuf, false, scratch);
+    LoadJumpBuffer(masm, target_jmpbuf, false, scratch,
+                   wasm::JumpBuffer::Suspended);
     // Pop this frame now. The unwinder expects that the first STACK_SWITCH
     // frame is the outermost one.
     __ LeaveFrame(StackFrame::STACK_SWITCH);
@@ -3611,11 +3621,10 @@ void Generate_WasmResumeHelper(MacroAssembler* masm, wasm::OnResume on_resume) {
     __ CallRuntime(Runtime::kThrow);
   } else {
     // Resume the continuation normally.
-    LoadJumpBuffer(masm, target_jmpbuf, true, scratch);
+    LoadJumpBuffer(masm, target_jmpbuf, true, scratch,
+                   wasm::JumpBuffer::Suspended);
   }
-  if (v8_flags.debug_code) {
-    __ Trap();
-  }
+  __ Trap();
   __ bind(&suspend);
   __ LeaveFrame(StackFrame::STACK_SWITCH);
   // Pop receiver + parameter.
@@ -3661,7 +3670,8 @@ void SwitchToAllocatedStack(MacroAssembler* masm, RegisterAllocator& regs,
   regs.Pinned(t1, &original_fp);
   __ mov(original_fp, fp);
   __ LoadRoot(target_continuation, RootIndex::kActiveContinuation);
-  LoadTargetJumpBuffer(masm, target_continuation, scratch);
+  LoadTargetJumpBuffer(masm, target_continuation, scratch,
+                       wasm::JumpBuffer::Suspended);
   FREE_REG(target_continuation);
 
   // Push the loaded fp. We know it is null, because there is no frame yet,
@@ -3703,7 +3713,7 @@ void SwitchToAllocatedStack(MacroAssembler* masm, RegisterAllocator& regs,
 }
 
 void SwitchBackAndReturnPromise(MacroAssembler* masm, RegisterAllocator& regs,
-                                Label* return_promise) {
+                                wasm::Promise mode, Label* return_promise) {
   regs.ResetExcept();
   // The return value of the wasm function becomes the parameter of the
   // FulfillPromise builtin, and the promise is the return value of this
@@ -3711,13 +3721,15 @@ void SwitchBackAndReturnPromise(MacroAssembler* masm, RegisterAllocator& regs,
   static const Builtin_FulfillPromise_InterfaceDescriptor desc;
   DEFINE_PINNED(promise, desc.GetRegisterParameter(0));
   DEFINE_PINNED(return_value, desc.GetRegisterParameter(1));
-  __ mov(return_value, kReturnRegister0);
   DEFINE_SCOPED(tmp);
   DEFINE_SCOPED(tmp2);
   DEFINE_SCOPED(tmp3);
-  __ LoadRoot(promise, RootIndex::kActiveSuspender);
-  __ LoadTaggedField(
-      promise, FieldMemOperand(promise, WasmSuspenderObject::kPromiseOffset));
+  if (mode == wasm::kPromise) {
+    __ mov(return_value, kReturnRegister0);
+    __ LoadRoot(promise, RootIndex::kActiveSuspender);
+    __ LoadTaggedField(
+        promise, FieldMemOperand(promise, WasmSuspenderObject::kPromiseOffset));
+  }
 
   __ Ld_d(kContextRegister,
           MemOperand(fp, StackSwitchFrameConstants::kImplicitArgOffset));
@@ -3727,14 +3739,16 @@ void SwitchBackAndReturnPromise(MacroAssembler* masm, RegisterAllocator& regs,
                            tmp2, tmp3);
   RestoreParentSuspender(masm, tmp, tmp2);
 
-  __ li(tmp, Operand(1));
-  __ St_d(tmp,
-          MemOperand(fp, StackSwitchFrameConstants::kGCScanSlotCountOffset));
-  __ Push(promise);
-  __ CallBuiltin(Builtin::kFulfillPromise);
-  __ Pop(promise);
-  FREE_REG(return_value);
+  if (mode == wasm::kPromise) {
+    __ li(tmp, Operand(1));
+    __ St_d(tmp,
+            MemOperand(fp, StackSwitchFrameConstants::kGCScanSlotCountOffset));
+    __ Push(promise);
+    __ CallBuiltin(Builtin::kFulfillPromise);
+    __ Pop(promise);
+  }
   FREE_REG(promise);
+  FREE_REG(return_value);
 
   __ bind(return_promise);
 }
@@ -3790,7 +3804,8 @@ void GenerateExceptionHandlingLandingPad(MacroAssembler* masm,
   masm->isolate()->builtins()->SetJSPIPromptHandlerOffset(catch_handler);
 }
 
-void JSToWasmWrapperHelper(MacroAssembler* masm, bool stack_switch) {
+void JSToWasmWrapperHelper(MacroAssembler* masm, wasm::Promise mode) {
+  bool stack_switch = mode == wasm::kPromise || mode == wasm::kStressSwitch;
   auto regs = RegisterAllocator::WithAllocatableGeneralRegisters();
 
   __ EnterFrame(stack_switch ? StackFrame::STACK_SWITCH
@@ -3999,7 +4014,7 @@ void JSToWasmWrapperHelper(MacroAssembler* masm, bool stack_switch) {
 
   Label return_promise;
   if (stack_switch) {
-    SwitchBackAndReturnPromise(masm, regs, &return_promise);
+    SwitchBackAndReturnPromise(masm, regs, mode, &return_promise);
   }
   __ bind(&suspend);
 
@@ -4014,18 +4029,22 @@ void JSToWasmWrapperHelper(MacroAssembler* masm, bool stack_switch) {
 
   // Catch handler for the stack-switching wrapper: reject the promise with the
   // thrown exception.
-  if (stack_switch) {
+  if (mode == wasm::kPromise) {
     GenerateExceptionHandlingLandingPad(masm, regs, &return_promise);
   }
 }
 }  // namespace
 
 void Builtins::Generate_JSToWasmWrapperAsm(MacroAssembler* masm) {
-  JSToWasmWrapperHelper(masm, false);
+  JSToWasmWrapperHelper(masm, wasm::kNoPromise);
 }
 
 void Builtins::Generate_WasmReturnPromiseOnSuspendAsm(MacroAssembler* masm) {
-  JSToWasmWrapperHelper(masm, true);
+  JSToWasmWrapperHelper(masm, wasm::kPromise);
+}
+
+void Builtins::Generate_JSToWasmStressSwitchStacksAsm(MacroAssembler* masm) {
+  JSToWasmWrapperHelper(masm, wasm::kStressSwitch);
 }
 
 namespace {
@@ -4104,26 +4123,6 @@ void SwitchFromTheCentralStackIfNeeded(MacroAssembler* masm) {
 }
 
 }  // namespace
-
-void Builtins::Generate_WasmToOnHeapWasmToJsTrampoline(MacroAssembler* masm) {
-  // Load the code pointer from the WasmImportData and tail-call there.
-  Register import_data = wasm::kGpParamRegisters[0];
-  // Use t0 which is not in kGpParamRegisters.
-  Register call_target = t0;
-  UseScratchRegisterScope temps{masm};
-  temps.Exclude(call_target);
-#ifdef V8_ENABLE_SANDBOX
-  __ LoadCodeEntrypointViaCodePointer(
-      call_target, FieldMemOperand(import_data, WasmImportData::kCodeOffset),
-      kWasmEntrypointTag);
-#else
-  Register code = call_target;
-  __ LoadTaggedField(code,
-                     FieldMemOperand(import_data, WasmImportData::kCodeOffset));
-  __ Ld_d(call_target, FieldMemOperand(code, Code::kInstructionStartOffset));
-#endif
-  __ Jump(call_target);
-}
 
 #endif  // V8_ENABLE_WEBASSEMBLY
 
@@ -5107,8 +5106,13 @@ void Builtins::Generate_RestartFrameTrampoline(MacroAssembler* masm) {
 
   // The arguments are already in the stack (including any necessary padding),
   // we should not try to massage the arguments again.
+#ifdef V8_ENABLE_LEAPTIERING
+  __ InvokeFunction(a1, a0, InvokeType::kJump,
+                    ArgumentAdaptionMode::kDontAdapt);
+#else
   __ li(a2, Operand(kDontAdaptArgumentsSentinel));
   __ InvokeFunction(a1, a2, a0, InvokeType::kJump);
+#endif
 }
 
 #undef __

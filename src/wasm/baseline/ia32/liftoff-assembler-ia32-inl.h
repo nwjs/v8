@@ -4898,11 +4898,6 @@ bool LiftoffAssembler::emit_f16x8_qfms(LiftoffRegister dst,
 
 bool LiftoffAssembler::supports_f16_mem_access() { return false; }
 
-void LiftoffAssembler::set_trap_on_oob_mem64(Register index, uint64_t oob_size,
-                                             uint64_t oob_index) {
-  UNREACHABLE();
-}
-
 void LiftoffAssembler::StackCheck(Label* ool_code) {
   CompareStackLimit(esp, StackLimitKind::kInterruptStackLimit);
   j(below_equal, ool_code);
@@ -5110,14 +5105,14 @@ void LiftoffAssembler::CallIndirect(const ValueKindSig* sig,
   // Since we have more cache registers than parameter registers, the
   // {LiftoffCompiler} should always be able to place {target} in a register.
   DCHECK(target.is_valid());
-  call(target);
+  CallWasmCodePointer(target);
 }
 
 void LiftoffAssembler::TailCallIndirect(Register target) {
   // Since we have more cache registers than parameter registers, the
   // {LiftoffCompiler} should always be able to place {target} in a register.
   DCHECK(target.is_valid());
-  jmp(target);
+  CallWasmCodePointer(target, CallJumpMode::kTailCall);
 }
 
 void LiftoffAssembler::CallBuiltin(Builtin builtin) {

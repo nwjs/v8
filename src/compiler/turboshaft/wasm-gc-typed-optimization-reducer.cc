@@ -60,9 +60,23 @@ void WasmGCTypeAnalyzer::Run() {
         // defines more precise types than the previous iteration).
         if (needs_revisit) {
           block_to_snapshot_[loop_header.index()] = MaybeSnapshot(snapshot);
-          // This will push the successors of the loop header to the iterator
-          // stack, so the loop body will be visited in the next iteration.
-          iterator.MarkLoopForRevisitSkipHeader();
+          if (block.index() != loop_header.index()) {
+            // This will push the successors of the loop header to the iterator
+            // stack, so the loop body will be visited in the next iteration.
+            iterator.MarkLoopForRevisitSkipHeader();
+          } else {
+            // A single-block loop doesn't have any successors which would be
+            // re-evaluated and which might trigger another re-evaluation of the
+            // loop header.
+            // TODO(mliedtke): This is not a great design: We don't just
+            // schedule revisiting the loop header but afterwards we revisit it
+            // once again to evaluate whether we need to revisit it more times,
+            // so for single block loops the revisitation count will always be a
+            // multiple of 2. While this is inefficient, single-block loops are
+            // rare and are either endless loops or need to trigger an exception
+            // (e.g. a wasm trap) to terminate.
+            iterator.MarkLoopForRevisit();
+          }
         }
       }
     }
@@ -293,7 +307,7 @@ void WasmGCTypeAnalyzer::ProcessRefFunc(const WasmRefFuncOp& ref_func) {
 
 void WasmGCTypeAnalyzer::ProcessAllocateArray(
     const WasmAllocateArrayOp& allocate_array) {
-  uint32_t type_index =
+  wasm::ModuleTypeIndex type_index =
       graph_.Get(allocate_array.rtt()).Cast<RttCanonOp>().type_index;
   RefineTypeKnowledge(graph_.Index(allocate_array),
                       wasm::ValueType::Ref(type_index), allocate_array);
@@ -301,10 +315,29 @@ void WasmGCTypeAnalyzer::ProcessAllocateArray(
 
 void WasmGCTypeAnalyzer::ProcessAllocateStruct(
     const WasmAllocateStructOp& allocate_struct) {
-  uint32_t type_index =
+  wasm::ModuleTypeIndex type_index =
       graph_.Get(allocate_struct.rtt()).Cast<RttCanonOp>().type_index;
   RefineTypeKnowledge(graph_.Index(allocate_struct),
                       wasm::ValueType::Ref(type_index), allocate_struct);
+}
+
+wasm::ValueType WasmGCTypeAnalyzer::GetTypeForPhiInput(const PhiOp& phi,
+                                                       int input_index) {
+  OpIndex phi_id = graph_.Index(phi);
+  OpIndex input = ResolveAliases(phi.input(input_index));
+  // If the input of the phi is in the same block as the phi and appears
+  // before the phi, don't use the predecessor value.
+
+  if (current_block_->begin().id() <= input.id() && input.id() < phi_id.id()) {
+    // Phi instructions have to be at the beginning of the block, so this can
+    // only happen for inputs that are also phis. Furthermore, this is only
+    // possible in loop headers of loops and only for the backedge-input.
+    DCHECK(graph_.Get(input).Is<PhiOp>());
+    DCHECK(current_block_->IsLoop());
+    DCHECK_EQ(input_index, 1);
+    return types_table_.Get(input);
+  }
+  return types_table_.GetPredecessorValue(input, input_index);
 }
 
 void WasmGCTypeAnalyzer::ProcessPhi(const PhiOp& phi) {
@@ -320,12 +353,10 @@ void WasmGCTypeAnalyzer::ProcessPhi(const PhiOp& phi) {
                         phi);
     return;
   }
-  wasm::ValueType union_type =
-      types_table_.GetPredecessorValue(ResolveAliases(phi.input(0)), 0);
+  wasm::ValueType union_type = GetTypeForPhiInput(phi, 0);
   if (union_type == wasm::ValueType()) return;
   for (int i = 1; i < phi.input_count; ++i) {
-    wasm::ValueType input_type =
-        types_table_.GetPredecessorValue(ResolveAliases(phi.input(i)), i);
+    wasm::ValueType input_type = GetTypeForPhiInput(phi, i);
     if (input_type == wasm::ValueType()) return;
     // <bottom> types have to be skipped as an unreachable predecessor doesn't
     // change our type knowledge.
@@ -343,8 +374,7 @@ void WasmGCTypeAnalyzer::ProcessPhi(const PhiOp& phi) {
   if (v8_flags.trace_wasm_typer) {
     for (int i = 0; i < phi.input_count; ++i) {
       OpIndex input = phi.input(i);
-      OpIndex underlying = ResolveAliases(input);
-      wasm::ValueType type = types_table_.GetPredecessorValue(underlying, i);
+      wasm::ValueType type = GetTypeForPhiInput(phi, i);
       TRACE("- phi input %d: #%u(%s) -> %s\n", i, input.id(),
             OpcodeName(graph_.Get(input).opcode), type.name().c_str());
     }
@@ -520,10 +550,14 @@ wasm::ValueType WasmGCTypeAnalyzer::RefineTypeKnowledge(
         OpcodeName(graph_.Get(object).opcode), intersection_type.name().c_str(),
         intersection_type.is_uninhabited() ? " (unreachable!)" : "");
 
-  if (intersection_type.is_uninhabited()) {
-    block_is_unreachable_.Add(current_block_->index().id());
-  }
   types_table_.Set(object, intersection_type);
+  if (intersection_type.is_uninhabited()) {
+    // After this instruction all other instructions in the current block are
+    // unreachable.
+    block_is_unreachable_.Add(current_block_->index().id());
+    // Return bottom to indicate that the operation `op` shall always trap.
+    return wasm::kWasmBottom;
+  }
   return previous_value;
 }
 
@@ -540,10 +574,14 @@ wasm::ValueType WasmGCTypeAnalyzer::RefineTypeKnowledgeNotNull(
         OpcodeName(graph_.Get(object).opcode), not_null_type.name().c_str(),
         not_null_type.is_uninhabited() ? " (unreachable!)" : "");
 
-  if (not_null_type.is_uninhabited()) {
-    block_is_unreachable_.Add(current_block_->index().id());
-  }
   types_table_.Set(object, not_null_type);
+  if (not_null_type.is_uninhabited()) {
+    // After this instruction all other instructions in the current block are
+    // unreachable.
+    block_is_unreachable_.Add(current_block_->index().id());
+    // Return bottom to indicate that the operation `op` shall always trap.
+    return wasm::kWasmBottom;
+  }
   return previous_value;
 }
 

@@ -169,7 +169,7 @@ int main(int argc, char** argv) {
     ScriptCompiler::CachedData* cache = NULL;
     i::ScriptDetails script_details(iso->factory()->empty_string(),
                                  v8::ScriptOriginOptions(false, false, false, i::v8_flags.nw_module));
-    i::MaybeHandle<i::SharedFunctionInfo> maybe_func = i::Compiler::GetSharedFunctionInfoForScript(iso, orig_source,
+    i::MaybeDirectHandle<i::SharedFunctionInfo> maybe_func = i::Compiler::GetSharedFunctionInfoForScript(iso, orig_source,
                                                 script_details,
                                                 v8::ScriptCompiler::kEagerCompile,
                                                 v8::ScriptCompiler::kNoCacheBecauseDeferredProduceCodeCache,
@@ -179,9 +179,9 @@ int main(int argc, char** argv) {
       fprintf(stderr, "Failure compiling '%s' (see above)\n", argv[1]);
       exit(1);
     }
-    i::Handle<i::SharedFunctionInfo> func;
+    i::DirectHandle<i::SharedFunctionInfo> func;
     maybe_func.ToHandle(&func);
-    cache = i::CodeSerializer::Serialize(iso, func);
+    cache = i::CodeSerializer::Serialize(iso, i::indirect_handle(func, iso));
 
     uint8_t* buffer = i::NewArray<uint8_t>(cache->length);
     i::MemCopy(buffer, cache->data, cache->length);

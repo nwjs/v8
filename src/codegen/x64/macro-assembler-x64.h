@@ -303,6 +303,9 @@ class V8_EXPORT_PRIVATE MacroAssembler
                               YMMRegister src2, YMMRegister src3,
                               YMMRegister scratch, YMMRegister splat_reg);
 
+  void I32x8TruncF32x8U(YMMRegister dst, YMMRegister src, YMMRegister scratch1,
+                        YMMRegister scratch2);
+
   // ---------------------------------------------------------------------------
   // Conversions between tagged smi values and non-tagged integer values.
 
@@ -533,6 +536,11 @@ class V8_EXPORT_PRIVATE MacroAssembler
   void CallJSFunction(Register function_object, uint16_t argument_count);
   void JumpJSFunction(Register function_object,
                       JumpMode jump_mode = JumpMode::kJump);
+  void ResolveWasmCodePointer(Register target);
+  void CallWasmCodePointer(Register target,
+                           CallJumpMode call_jump_mode = CallJumpMode::kCall);
+  void LoadWasmCodePointer(Register dst, Operand src);
+
   void Jump(Address destination, RelocInfo::Mode rmode);
   void Jump(Address destination, RelocInfo::Mode rmode, Condition cc);
   void Jump(const ExternalReference& reference);
@@ -599,7 +607,7 @@ class V8_EXPORT_PRIVATE MacroAssembler
   // --debug-code.
   void AssertCode(Register object) NOOP_UNLESS_DEBUG_CODE;
 
-  // Abort execution if argument is not smi nor in the main pointer compresssion
+  // Abort execution if argument is not smi nor in the main pointer compression
   // cage, enabled via --debug-code.
   void AssertSmiOrHeapObjectInMainCompressionCage(Register object)
       NOOP_UNLESS_DEBUG_CODE;

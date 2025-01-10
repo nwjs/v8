@@ -12,20 +12,22 @@ namespace v8::internal::wasm::subtyping_unittest {
 
 class WasmSubtypingTest : public TestWithPlatform {};
 using FieldInit = std::pair<ValueType, bool>;
+using Idx = ModuleTypeIndex;
 
-constexpr ValueType ref(uint32_t index) { return ValueType::Ref(index); }
+constexpr ValueType ref(uint32_t index) { return ValueType::Ref(Idx{index}); }
 constexpr ValueType refNull(uint32_t index) {
-  return ValueType::RefNull(index);
+  return ValueType::RefNull(Idx{index});
 }
 
 FieldInit mut(ValueType type) { return FieldInit(type, true); }
 FieldInit immut(ValueType type) { return FieldInit(type, false); }
 
 void DefineStruct(WasmModule* module, std::initializer_list<FieldInit> fields,
-                  uint32_t supertype = kNoSuperType, bool is_final = false,
-                  bool is_shared = false, bool in_singleton_rec_group = true) {
-  ModuleStructType::Builder builder(&module->signature_zone,
-                                    static_cast<uint32_t>(fields.size()));
+                  ModuleTypeIndex supertype = kNoSuperType,
+                  bool is_final = false, bool is_shared = false,
+                  bool in_singleton_rec_group = true) {
+  StructType::Builder builder(&module->signature_zone,
+                              static_cast<uint32_t>(fields.size()));
   for (FieldInit field : fields) {
     builder.AddField(field.first, field.second);
   }
@@ -37,8 +39,9 @@ void DefineStruct(WasmModule* module, std::initializer_list<FieldInit> fields,
 }
 
 void DefineArray(WasmModule* module, FieldInit element_type,
-                 uint32_t supertype = kNoSuperType, bool is_final = false,
-                 bool is_shared = false, bool in_singleton_rec_group = true) {
+                 ModuleTypeIndex supertype = kNoSuperType,
+                 bool is_final = false, bool is_shared = false,
+                 bool in_singleton_rec_group = true) {
   module->AddArrayTypeForTesting(module->signature_zone.New<ArrayType>(
                                      element_type.first, element_type.second),
                                  supertype, is_final, is_shared);
@@ -50,8 +53,8 @@ void DefineArray(WasmModule* module, FieldInit element_type,
 void DefineSignature(WasmModule* module,
                      std::initializer_list<ValueType> params,
                      std::initializer_list<ValueType> returns,
-                     uint32_t supertype = kNoSuperType, bool is_final = false,
-                     bool is_shared = false,
+                     ModuleTypeIndex supertype = kNoSuperType,
+                     bool is_final = false, bool is_shared = false,
                      bool in_singleton_rec_group = true) {
   module->AddSignatureForTesting(
       FunctionSig::Build(&module->signature_zone, returns, params), supertype,
@@ -74,81 +77,83 @@ TEST_F(WasmSubtypingTest, Subtyping) {
     // Three mutually recursive types.
     /*  0 */ DefineStruct(module, {mut(ref(2)), immut(refNull(2))},
                           kNoSuperType, false, false, false);
-    /*  1 */ DefineStruct(module, {mut(ref(2)), immut(ref(2))}, 0, false, false,
-                          false);
+    /*  1 */ DefineStruct(module, {mut(ref(2)), immut(ref(2))}, Idx{0}, false,
+                          false, false);
     /*  2 */ DefineArray(module, immut(ref(0)), kNoSuperType, false, false,
                          false);
     GetTypeCanonicalizer()->AddRecursiveGroup(module, 3);
 
-    /*  3 */ DefineArray(module, immut(ref(1)), 2);
+    /*  3 */ DefineArray(module, immut(ref(1)), Idx{2});
     /*  4 */ DefineStruct(module, {mut(ref(2)), immut(ref(3)), immut(kWasmF64)},
-                          1);
+                          Idx{1});
     /*  5 */ DefineStruct(module, {mut(refNull(2)), immut(ref(2))});
     /*  6 */ DefineArray(module, mut(kWasmI32));
     /*  7 */ DefineArray(module, immut(kWasmI32));
     /*  8 */ DefineStruct(module, {mut(kWasmI32), immut(refNull(8))});
-    /*  9 */ DefineStruct(module, {mut(kWasmI32), immut(refNull(8))}, 8);
+    /*  9 */ DefineStruct(module, {mut(kWasmI32), immut(refNull(8))}, Idx{8});
     /* 10 */ DefineSignature(module, {}, {});
     /* 11 */ DefineSignature(module, {kWasmI32}, {kWasmI32});
     /* 12 */ DefineSignature(module, {kWasmI32, kWasmI32}, {kWasmI32});
     /* 13 */ DefineSignature(module, {ref(1)}, {kWasmI32});
-    /* 14 */ DefineSignature(module, {ref(0)}, {kWasmI32}, 13);
+    /* 14 */ DefineSignature(module, {ref(0)}, {kWasmI32}, Idx{13});
     /* 15 */ DefineSignature(module, {ref(0)}, {ref(0)});
-    /* 16 */ DefineSignature(module, {ref(0)}, {ref(4)}, 15);
+    /* 16 */ DefineSignature(module, {ref(0)}, {ref(4)}, Idx{15});
     /* 17 */ DefineStruct(module, {mut(kWasmI32), immut(refNull(17))});
 
     // Rec. group.
-    /* 18 */ DefineStruct(module, {mut(kWasmI32), immut(refNull(17))}, 17,
+    /* 18 */ DefineStruct(module, {mut(kWasmI32), immut(refNull(17))}, Idx{17},
                           false, false, false);
     /* 19 */ DefineArray(module, {mut(refNull(21))}, kNoSuperType, false, false,
                          false);
     /* 20 */ DefineSignature(module, {kWasmI32}, {kWasmI32}, kNoSuperType,
                              false, false, false);
-    /* 21 */ DefineSignature(module, {kWasmI32}, {kWasmI32}, 20, false, false,
-                             false);
+    /* 21 */ DefineSignature(module, {kWasmI32}, {kWasmI32}, Idx{20}, false,
+                             false, false);
     GetTypeCanonicalizer()->AddRecursiveGroup(module, 4);
 
     // Identical rec. group.
-    /* 22 */ DefineStruct(module, {mut(kWasmI32), immut(refNull(17))}, 17,
+    /* 22 */ DefineStruct(module, {mut(kWasmI32), immut(refNull(17))}, Idx{17},
                           false, false, false);
     /* 23 */ DefineArray(module, {mut(refNull(25))}, kNoSuperType, false, false,
                          false);
     /* 24 */ DefineSignature(module, {kWasmI32}, {kWasmI32}, kNoSuperType,
                              false, false, false);
-    /* 25 */ DefineSignature(module, {kWasmI32}, {kWasmI32}, 24, false, false,
-                             false);
+    /* 25 */ DefineSignature(module, {kWasmI32}, {kWasmI32}, Idx{24}, false,
+                             false, false);
     GetTypeCanonicalizer()->AddRecursiveGroup(module, 4);
 
     // Nonidentical rec. group: the last function extends a type outside the
     // recursive group.
-    /* 26 */ DefineStruct(module, {mut(kWasmI32), immut(refNull(17))}, 17,
+    /* 26 */ DefineStruct(module, {mut(kWasmI32), immut(refNull(17))}, Idx{17},
                           false, false, false);
     /* 27 */ DefineArray(module, {mut(refNull(29))}, kNoSuperType, false, false,
                          false);
     /* 28 */ DefineSignature(module, {kWasmI32}, {kWasmI32}, kNoSuperType,
                              false, false, false);
-    /* 29 */ DefineSignature(module, {kWasmI32}, {kWasmI32}, 20, false, false,
-                             false);
+    /* 29 */ DefineSignature(module, {kWasmI32}, {kWasmI32}, Idx{20}, false,
+                             false, false);
     GetTypeCanonicalizer()->AddRecursiveGroup(module, 4);
 
-    /* 30 */ DefineStruct(module, {mut(kWasmI32), immut(refNull(18))}, 18);
+    /* 30 */ DefineStruct(module, {mut(kWasmI32), immut(refNull(18))}, Idx{18});
     /* 31 */ DefineStruct(
-        module, {mut(ref(2)), immut(refNull(2)), immut(kWasmS128)}, 1);
+        module, {mut(ref(2)), immut(refNull(2)), immut(kWasmS128)}, Idx{1});
 
     // Final types
     /* 32 */ DefineStruct(module, {mut(kWasmI32)}, kNoSuperType, true);
-    /* 33 */ DefineStruct(module, {mut(kWasmI32), mut(kWasmI64)}, 32, true);
+    /* 33 */ DefineStruct(module, {mut(kWasmI32), mut(kWasmI64)}, Idx{32},
+                          true);
     /* 34 */ DefineStruct(module, {mut(kWasmI32)}, kNoSuperType, true);
     /* 35 */ DefineStruct(module, {mut(kWasmI32)}, kNoSuperType, false);
 
     // Shared types.
     /* 36 */ DefineStruct(module, {mut(kWasmI32)}, kNoSuperType);
-    /* 37 */ DefineStruct(module, {mut(kWasmI32), mut(kWasmI64)}, 36);
+    /* 37 */ DefineStruct(module, {mut(kWasmI32), mut(kWasmI64)}, Idx{36});
     /* 38 */ DefineStruct(module, {mut(kWasmI32)}, kNoSuperType, false, true);
-    /* 39 */ DefineStruct(module, {mut(kWasmI32), mut(kWasmI64)}, 38, false,
-                          true);
+    /* 39 */ DefineStruct(module, {mut(kWasmI32), mut(kWasmI64)}, Idx{38},
+                          false, true);
     /* 40 */ DefineStruct(module, {mut(kWasmI32)}, kNoSuperType, false, true);
-    /* 41 */ DefineSignature(module, {kWasmI32}, {kWasmI32}, false, true, true);
+    /* 41 */ DefineSignature(module, {kWasmI32}, {kWasmI32}, kNoSuperType,
+                             false, true, true);
   }
 
   constexpr ValueType numeric_types[] = {kWasmI32, kWasmI64, kWasmF32, kWasmF64,
@@ -182,12 +187,12 @@ TEST_F(WasmSubtypingTest, Subtyping) {
 #define NOT_VALID_SUBTYPE(type1, type2)                                     \
   EXPECT_FALSE(ValidSubtypeDefinition(type1.ref_index(), type2.ref_index(), \
                                       module1, module));
-#define IDENTICAL(index1, index2)                         \
-  EXPECT_TRUE(EquivalentTypes(ValueType::RefNull(index1), \
-                              ValueType::RefNull(index2), module1, module));
-#define DISTINCT(index1, index2)                           \
-  EXPECT_FALSE(EquivalentTypes(ValueType::RefNull(index1), \
-                               ValueType::RefNull(index2), module1, module));
+#define IDENTICAL(index1, index2) \
+  EXPECT_TRUE(                    \
+      EquivalentTypes(refNull(index1), refNull(index2), module1, module));
+#define DISTINCT(index1, index2) \
+  EXPECT_FALSE(                  \
+      EquivalentTypes(refNull(index1), refNull(index2), module1, module));
 // For union and intersection, we have a version that also checks the module,
 // and one that does not.
 #define UNION(type1, type2, type_result) \
@@ -320,11 +325,11 @@ TEST_F(WasmSubtypingTest, Subtyping) {
     VALID_SUBTYPE(ref(9), ref(8));
 
     // Identical rtts are subtypes of each other.
-    SUBTYPE(ValueType::Rtt(5), ValueType::Rtt(5));
+    SUBTYPE(ValueType::Rtt(Idx{5}), ValueType::Rtt(Idx{5}));
     // Rtts of unrelated types are unrelated.
-    NOT_SUBTYPE(ValueType::Rtt(1), ValueType::Rtt(2));
+    NOT_SUBTYPE(ValueType::Rtt(Idx{1}), ValueType::Rtt(Idx{2}));
     // Rtts of subtypes are not related.
-    NOT_SUBTYPE(ValueType::Rtt(1), ValueType::Rtt(0));
+    NOT_SUBTYPE(ValueType::Rtt(Idx{1}), ValueType::Rtt(Idx{0}));
 
     // Function subtyping;
     // Unrelated function types are unrelated.
@@ -405,7 +410,7 @@ TEST_F(WasmSubtypingTest, Subtyping) {
     NOT_SUBTYPE(ref(10), ValueType::Ref(HeapType::kFuncShared));
 
     // Rtts of identical types are subtype-related.
-    SUBTYPE(ValueType::Rtt(8), ValueType::Rtt(17));
+    SUBTYPE(ValueType::Rtt(Idx{8}), ValueType::Rtt(Idx{17}));
 
     // Unions and intersections.
 

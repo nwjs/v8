@@ -83,6 +83,12 @@ TF_BUILTIN(DebugBreakTrampoline, CodeStubAssembler) {
   auto new_target = Parameter<Object>(Descriptor::kJSNewTarget);
   auto arg_count =
       UncheckedParameter<Int32T>(Descriptor::kJSActualArgumentsCount);
+#ifdef V8_ENABLE_LEAPTIERING
+  auto dispatch_handle =
+      UncheckedParameter<JSDispatchHandleT>(Descriptor::kJSDispatchHandle);
+#else
+  auto dispatch_handle = InvalidDispatchHandleConstant();
+#endif
   auto function = Parameter<JSFunction>(Descriptor::kJSTarget);
 
   // Check break-at-entry flag on the debug info.
@@ -103,8 +109,11 @@ TF_BUILTIN(DebugBreakTrampoline, CodeStubAssembler) {
 
   BIND(&tailcall_to_shared);
   // Tail call into code object on the SharedFunctionInfo.
+  // TODO(saelo): this is not safe. We either need to validate the parameter
+  // count here or obtain the code from the dispatch table.
   TNode<Code> code = GetSharedFunctionInfoCode(shared);
-  TailCallJSCode(code, context, function, new_target, arg_count);
+  TailCallJSCode(code, context, function, new_target, arg_count,
+                 dispatch_handle);
 }
 
 class WriteBarrierCodeStubAssembler : public CodeStubAssembler {
@@ -1633,14 +1642,24 @@ TF_BUILTIN(CreateDataProperty, CodeStubAssembler) {
 
 TF_BUILTIN(InstantiateAsmJs, CodeStubAssembler) {
   Label tailcall_to_function(this);
+  auto function = Parameter<JSFunction>(Descriptor::kTarget);
   auto context = Parameter<Context>(Descriptor::kContext);
   auto new_target = Parameter<Object>(Descriptor::kNewTarget);
   auto arg_count =
       UncheckedParameter<Int32T>(Descriptor::kActualArgumentsCount);
-  auto function = Parameter<JSFunction>(Descriptor::kTarget);
+#ifdef V8_ENABLE_LEAPTIERING
+  auto dispatch_handle =
+      UncheckedParameter<JSDispatchHandleT>(Descriptor::kDispatchHandle);
+#else
+  auto dispatch_handle = InvalidDispatchHandleConstant();
+#endif
+
+  // This builtin is used on functions with different parameter counts.
+  SetSupportsDynamicParameterCount(function, dispatch_handle);
 
   // Retrieve arguments from caller (stdlib, foreign, heap).
   CodeStubArguments args(this, arg_count);
+
   TNode<Object> stdlib = args.GetOptionalArgumentValue(0);
   TNode<Object> foreign = args.GetOptionalArgumentValue(1);
   TNode<Object> heap = args.GetOptionalArgumentValue(2);
@@ -1650,20 +1669,6 @@ TF_BUILTIN(InstantiateAsmJs, CodeStubAssembler) {
   TNode<Object> maybe_result_or_smi_zero = CallRuntime(
       Runtime::kInstantiateAsmJs, context, function, stdlib, foreign, heap);
   GotoIf(TaggedIsSmi(maybe_result_or_smi_zero), &tailcall_to_function);
-
-  TNode<SharedFunctionInfo> shared = LoadJSFunctionSharedFunctionInfo(function);
-  TNode<Int32T> parameter_count = UncheckedCast<Int32T>(
-      LoadSharedFunctionInfoFormalParameterCountWithReceiver(shared));
-  // This builtin intercepts a call to {function}, where the number of arguments
-  // pushed is the maximum of actual arguments count and formal parameters
-  // count.
-  Label argc_lt_param_count(this), argc_ge_param_count(this);
-  Branch(IntPtrLessThan(args.GetLengthWithReceiver(),
-                        ChangeInt32ToIntPtr(parameter_count)),
-         &argc_lt_param_count, &argc_ge_param_count);
-  BIND(&argc_lt_param_count);
-  PopAndReturn(parameter_count, maybe_result_or_smi_zero);
-  BIND(&argc_ge_param_count);
   args.PopAndReturn(maybe_result_or_smi_zero);
 
   BIND(&tailcall_to_function);
@@ -1671,7 +1676,8 @@ TF_BUILTIN(InstantiateAsmJs, CodeStubAssembler) {
   // function which has been reset to the compile lazy builtin.
 
   TNode<Code> code = LoadJSFunctionCode(function);
-  TailCallJSCode(code, context, function, new_target, arg_count);
+  TailCallJSCode(code, context, function, new_target, arg_count,
+                 dispatch_handle);
 }
 
 TF_BUILTIN(FindNonDefaultConstructorOrConstruct, CodeStubAssembler) {

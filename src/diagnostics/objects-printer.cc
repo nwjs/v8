@@ -7,6 +7,7 @@
 #include <optional>
 
 #include "src/api/api-arguments.h"
+#include "src/common/assert-scope.h"
 #include "src/common/globals.h"
 #include "src/diagnostics/disasm.h"
 #include "src/diagnostics/disassembler.h"
@@ -165,8 +166,6 @@ void PrintHeapObjectHeaderWithoutMap(Tagged<HeapObject> object,
   os << "]";
   if (ReadOnlyHeap::Contains(object)) {
     os << " in ReadOnlySpace";
-  } else if (Isolate::CurrentMaybeBackground()->heap()->InOldSpace(object)) {
-    os << " in OldSpace";
   }
 }
 
@@ -390,16 +389,33 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {
   }
 }
 
+template <typename T>
+void PrintByteArrayElements(std::ostream& os, const T* array) {
+  int length = array->length();
+  int i = 0;
+  while (i < length) {
+    os << "   0x" << std::setfill('0') << std::setw(4) << std::hex << i << ":";
+    int line_end = std::min(i + 16, length);
+    for (; i < line_end; ++i) {
+      os << " " << std::setfill('0') << std::setw(2) << std::hex
+         << static_cast<int>(array->get(i));
+    }
+    os << "\n";
+  }
+}
+
 void ByteArray::ByteArrayPrint(std::ostream& os) {
   PrintHeader(os, "ByteArray");
   os << "\n - length: " << length()
      << "\n - begin: " << static_cast<void*>(begin()) << "\n";
+  PrintByteArrayElements(os, this);
 }
 
 void TrustedByteArray::TrustedByteArrayPrint(std::ostream& os) {
   PrintHeader(os, "TrustedByteArray");
   os << "\n - length: " << length()
      << "\n - begin: " << static_cast<void*>(begin()) << "\n";
+  PrintByteArrayElements(os, this);
 }
 
 void BytecodeArray::BytecodeArrayPrint(std::ostream& os) {
@@ -966,11 +982,10 @@ void DescriptorArray::DescriptorArrayPrint(std::ostream& os) {
 
 namespace {
 template <typename T>
-void PrintFixedArrayWithHeader(std::ostream& os, Tagged<T> array,
-                               const char* type) {
+void PrintFixedArrayWithHeader(std::ostream& os, T* array, const char* type) {
   array->PrintHeader(os, type);
   os << "\n - length: " << array->length();
-  PrintFixedArrayElements(os, array);
+  PrintFixedArrayElements(os, Tagged(array));
   os << "\n";
 }
 
@@ -1009,8 +1024,7 @@ void ObjectBoilerplateDescription::ObjectBoilerplateDescriptionPrint(
   os << "\n - flags: " << flags();
   os << "\n - elements:";
   PrintFixedArrayElements<ObjectBoilerplateDescription>(
-      os, *this, capacity(),
-      [](Tagged<ObjectBoilerplateDescription> xs, int i) {
+      os, this, capacity(), [](Tagged<ObjectBoilerplateDescription> xs, int i) {
         return xs->get(i);
       });
   os << "\n";
@@ -1052,15 +1066,15 @@ void EmbedderDataArray::EmbedderDataArrayPrint(std::ostream& os) {
 }
 
 void FixedArray::FixedArrayPrint(std::ostream& os) {
-  PrintFixedArrayWithHeader(os, Tagged{*this}, "FixedArray");
+  PrintFixedArrayWithHeader(os, this, "FixedArray");
 }
 
 void TrustedFixedArray::TrustedFixedArrayPrint(std::ostream& os) {
-  PrintFixedArrayWithHeader(os, Tagged{*this}, "TrustedFixedArray");
+  PrintFixedArrayWithHeader(os, this, "TrustedFixedArray");
 }
 
 void ProtectedFixedArray::ProtectedFixedArrayPrint(std::ostream& os) {
-  PrintFixedArrayWithHeader(os, Tagged{*this}, "ProtectedFixedArray");
+  PrintFixedArrayWithHeader(os, this, "ProtectedFixedArray");
 }
 
 void ArrayList::ArrayListPrint(std::ostream& os) {
@@ -1069,7 +1083,7 @@ void ArrayList::ArrayListPrint(std::ostream& os) {
   os << "\n - length: " << length();
   os << "\n - elements:";
   PrintFixedArrayElements<ArrayList>(
-      os, *this, length(),
+      os, this, length(),
       [](Tagged<ArrayList> xs, int i) { return xs->get(i); });
   os << "\n";
 }
@@ -1081,8 +1095,7 @@ void ScriptContextTable::ScriptContextTablePrint(std::ostream& os) {
   os << "\n - names_to_context_index: " << names_to_context_index();
   os << "\n - elements:";
   PrintFixedArrayElements<ScriptContextTable>(
-      os, *this, length(kAcquireLoad),
-      [](Tagged<ScriptContextTable> xs, int i) {
+      os, this, length(kAcquireLoad), [](Tagged<ScriptContextTable> xs, int i) {
         return Cast<Object>(xs->get(i));
       });
   os << "\n";
@@ -1096,7 +1109,7 @@ void RegExpMatchInfo::RegExpMatchInfoPrint(std::ostream& os) {
   os << "\n - last_input: " << last_input();
   os << "\n - captures:";
   PrintFixedArrayElements<RegExpMatchInfo>(
-      os, Tagged{*this}, capacity(), [](Tagged<RegExpMatchInfo> xs, int i) {
+      os, this, capacity(), [](Tagged<RegExpMatchInfo> xs, int i) {
         return Cast<Object>(xs->get(i));
       });
   os << "\n";
@@ -1109,9 +1122,8 @@ void SloppyArgumentsElements::SloppyArgumentsElementsPrint(std::ostream& os) {
   os << "\n - arguments: " << Brief(arguments());
   os << "\n - mapped_entries:";
   PrintFixedArrayElements<SloppyArgumentsElements>(
-      os, Tagged(*this), length(),
-      [](Tagged<SloppyArgumentsElements> xs, int i) {
-        return xs->mapped_entries(i, kRelaxedLoad);
+      os, this, length(), [](Tagged<SloppyArgumentsElements> xs, int i) {
+        return Cast<Object>(xs->mapped_entries(i, kRelaxedLoad));
       });
   os << '\n';
 }
@@ -1232,14 +1244,14 @@ using DataPrinter = std::function<void(InternalIndex)>;
 // std::function to indicate that there is no associcated data to be printed
 // (for example in case of a hash set).
 template <typename T>
-void PrintTableContentsGeneric(std::ostream& os, T dict,
+void PrintTableContentsGeneric(std::ostream& os, T* dict,
                                DataPrinter print_data_at) {
   DisallowGarbageCollection no_gc;
-  ReadOnlyRoots roots = dict.GetReadOnlyRoots();
+  ReadOnlyRoots roots = dict->GetReadOnlyRoots();
 
-  for (InternalIndex i : dict.IterateEntries()) {
+  for (InternalIndex i : dict->IterateEntries()) {
     Tagged<Object> k;
-    if (!dict.ToKey(roots, i, &k)) continue;
+    if (!dict->ToKey(roots, i, &k)) continue;
     os << "\n   " << std::setw(12) << i.as_int() << ": ";
     if (IsString(k)) {
       Cast<String>(k)->PrintUC16(os);
@@ -1261,11 +1273,11 @@ void PrintNameDictionaryFlags(std::ostream& os, Tagged<NameDictionary> dict) {
 
 // Used for ordered and unordered dictionaries.
 template <typename T>
-void PrintDictionaryContentsFull(std::ostream& os, T dict) {
+void PrintDictionaryContentsFull(std::ostream& os, T* dict) {
   os << "\n - elements: {";
   auto print_value_and_property_details = [&](InternalIndex i) {
-    os << Brief(dict.ValueAt(i)) << " ";
-    dict.DetailsAt(i).PrintAsSlowTo(os, !T::kIsOrderedDictionaryType);
+    os << Brief(dict->ValueAt(i)) << " ";
+    dict->DetailsAt(i).PrintAsSlowTo(os, !T::kIsOrderedDictionaryType);
   };
   PrintTableContentsGeneric(os, dict, print_value_and_property_details);
   os << "\n }\n";
@@ -1273,16 +1285,16 @@ void PrintDictionaryContentsFull(std::ostream& os, T dict) {
 
 // Used for ordered and unordered hash maps.
 template <typename T>
-void PrintHashMapContentsFull(std::ostream& os, T dict) {
+void PrintHashMapContentsFull(std::ostream& os, T* dict) {
   os << "\n - elements: {";
-  auto print_value = [&](InternalIndex i) { os << Brief(dict.ValueAt(i)); };
+  auto print_value = [&](InternalIndex i) { os << Brief(dict->ValueAt(i)); };
   PrintTableContentsGeneric(os, dict, print_value);
   os << "\n }\n";
 }
 
 // Used for ordered and unordered hash sets.
 template <typename T>
-void PrintHashSetContentsFull(std::ostream& os, T dict) {
+void PrintHashSetContentsFull(std::ostream& os, T* dict) {
   os << "\n - elements: {";
   // Passing non-callable std::function as there are no values to print.
   PrintTableContentsGeneric(os, dict, nullptr);
@@ -1291,20 +1303,20 @@ void PrintHashSetContentsFull(std::ostream& os, T dict) {
 
 // Used for subtypes of OrderedHashTable.
 template <typename T>
-void PrintOrderedHashTableHeaderAndBuckets(std::ostream& os, T table,
+void PrintOrderedHashTableHeaderAndBuckets(std::ostream& os, T* table,
                                            const char* type) {
   DisallowGarbageCollection no_gc;
 
   PrintHeapObjectHeaderWithoutMap(table, os, type);
-  os << "\n - FixedArray length: " << table.length();
-  os << "\n - elements: " << table.NumberOfElements();
-  os << "\n - deleted: " << table.NumberOfDeletedElements();
-  os << "\n - buckets: " << table.NumberOfBuckets();
-  os << "\n - capacity: " << table.Capacity();
+  os << "\n - FixedArray length: " << table->length();
+  os << "\n - elements: " << table->NumberOfElements();
+  os << "\n - deleted: " << table->NumberOfDeletedElements();
+  os << "\n - buckets: " << table->NumberOfBuckets();
+  os << "\n - capacity: " << table->Capacity();
 
   os << "\n - buckets: {";
-  for (int bucket = 0; bucket < table.NumberOfBuckets(); bucket++) {
-    Tagged<Object> entry = table.get(T::HashTableStartIndex() + bucket);
+  for (int bucket = 0; bucket < table->NumberOfBuckets(); bucket++) {
+    Tagged<Object> entry = table->get(T::HashTableStartIndex() + bucket);
     DCHECK(IsSmi(entry));
     os << "\n   " << std::setw(12) << bucket << ": " << Brief(entry);
   }
@@ -1313,49 +1325,49 @@ void PrintOrderedHashTableHeaderAndBuckets(std::ostream& os, T table,
 
 // Used for subtypes of HashTable.
 template <typename T>
-void PrintHashTableHeader(std::ostream& os, T table, const char* type) {
+void PrintHashTableHeader(std::ostream& os, T* table, const char* type) {
   PrintHeapObjectHeaderWithoutMap(table, os, type);
-  os << "\n - FixedArray length: " << table.length();
-  os << "\n - elements: " << table.NumberOfElements();
-  os << "\n - deleted: " << table.NumberOfDeletedElements();
-  os << "\n - capacity: " << table.Capacity();
+  os << "\n - FixedArray length: " << table->length();
+  os << "\n - elements: " << table->NumberOfElements();
+  os << "\n - deleted: " << table->NumberOfDeletedElements();
+  os << "\n - capacity: " << table->Capacity();
 }
 }  // namespace
 
 void ObjectHashTable::ObjectHashTablePrint(std::ostream& os) {
-  PrintHashTableHeader(os, *this, "ObjectHashTable");
-  PrintHashMapContentsFull(os, *this);
+  PrintHashTableHeader(os, this, "ObjectHashTable");
+  PrintHashMapContentsFull(os, this);
 }
 
 void NameToIndexHashTable::NameToIndexHashTablePrint(std::ostream& os) {
-  PrintHashTableHeader(os, *this, "NameToIndexHashTable");
-  PrintHashMapContentsFull(os, *this);
+  PrintHashTableHeader(os, this, "NameToIndexHashTable");
+  PrintHashMapContentsFull(os, this);
 }
 
 void RegisteredSymbolTable::RegisteredSymbolTablePrint(std::ostream& os) {
-  PrintHashTableHeader(os, *this, "RegisteredSymbolTable");
-  PrintHashMapContentsFull(os, *this);
+  PrintHashTableHeader(os, this, "RegisteredSymbolTable");
+  PrintHashMapContentsFull(os, this);
 }
 
 void NumberDictionary::NumberDictionaryPrint(std::ostream& os) {
-  PrintHashTableHeader(os, *this, "NumberDictionary");
-  PrintDictionaryContentsFull(os, *this);
+  PrintHashTableHeader(os, this, "NumberDictionary");
+  PrintDictionaryContentsFull(os, this);
 }
 
 void EphemeronHashTable::EphemeronHashTablePrint(std::ostream& os) {
-  PrintHashTableHeader(os, *this, "EphemeronHashTable");
-  PrintHashMapContentsFull(os, *this);
+  PrintHashTableHeader(os, this, "EphemeronHashTable");
+  PrintHashMapContentsFull(os, this);
 }
 
 void NameDictionary::NameDictionaryPrint(std::ostream& os) {
-  PrintHashTableHeader(os, *this, "NameDictionary");
-  PrintNameDictionaryFlags(os, *this);
-  PrintDictionaryContentsFull(os, *this);
+  PrintHashTableHeader(os, this, "NameDictionary");
+  PrintNameDictionaryFlags(os, this);
+  PrintDictionaryContentsFull(os, this);
 }
 
 void GlobalDictionary::GlobalDictionaryPrint(std::ostream& os) {
-  PrintHashTableHeader(os, *this, "GlobalDictionary");
-  PrintDictionaryContentsFull(os, *this);
+  PrintHashTableHeader(os, this, "GlobalDictionary");
+  PrintDictionaryContentsFull(os, this);
 }
 
 void SmallOrderedHashSet::SmallOrderedHashSetPrint(std::ostream& os) {
@@ -1375,18 +1387,18 @@ void SmallOrderedNameDictionary::SmallOrderedNameDictionaryPrint(
 }
 
 void OrderedHashSet::OrderedHashSetPrint(std::ostream& os) {
-  PrintOrderedHashTableHeaderAndBuckets(os, *this, "OrderedHashSet");
-  PrintHashSetContentsFull(os, *this);
+  PrintOrderedHashTableHeaderAndBuckets(os, this, "OrderedHashSet");
+  PrintHashSetContentsFull(os, this);
 }
 
 void OrderedHashMap::OrderedHashMapPrint(std::ostream& os) {
-  PrintOrderedHashTableHeaderAndBuckets(os, *this, "OrderedHashMap");
-  PrintHashMapContentsFull(os, *this);
+  PrintOrderedHashTableHeaderAndBuckets(os, this, "OrderedHashMap");
+  PrintHashMapContentsFull(os, this);
 }
 
 void OrderedNameDictionary::OrderedNameDictionaryPrint(std::ostream& os) {
-  PrintOrderedHashTableHeaderAndBuckets(os, *this, "OrderedNameDictionary");
-  PrintDictionaryContentsFull(os, *this);
+  PrintOrderedHashTableHeaderAndBuckets(os, this, "OrderedNameDictionary");
+  PrintDictionaryContentsFull(os, this);
 }
 
 void print_hex_byte(std::ostream& os, int value) {
@@ -1467,7 +1479,7 @@ void PropertyArray::PropertyArrayPrint(std::ostream& os) {
 void FixedDoubleArray::FixedDoubleArrayPrint(std::ostream& os) {
   PrintHeader(os, "FixedDoubleArray");
   os << "\n - length: " << length();
-  DoPrintElements<FixedDoubleArray>(os, *this, length());
+  DoPrintElements<FixedDoubleArray>(os, this, length());
   os << "\n";
 }
 
@@ -1559,7 +1571,7 @@ void ClosureFeedbackCellArray::ClosureFeedbackCellArrayPrint(std::ostream& os) {
   PrintHeader(os, "ClosureFeedbackCellArray");
   os << "\n - length: " << length();
   os << "\n - elements:";
-  PrintFixedArrayElements<ClosureFeedbackCellArray>(os, *this);
+  PrintFixedArrayElements<ClosureFeedbackCellArray>(os, this);
   os << "\n";
 }
 
@@ -1768,6 +1780,14 @@ void Oddball::OddballPrint(std::ostream& os) {
 
 void Hole::HolePrint(std::ostream& os) {
   PrintHeapObjectHeaderWithoutMap(*this, os, "Hole");
+  ReadOnlyRoots roots = GetReadOnlyRoots();
+#define PRINT_SPECIFIC_HOLE(type, name, CamelName) \
+  if (*this == roots.name()) {                     \
+    os << "\n  <" #name ">";                       \
+  }
+  HOLE_LIST(PRINT_SPECIFIC_HOLE);
+#undef PRINT_SPECIFIC_HOLE
+
   os << std::endl;
 }
 
@@ -2224,8 +2244,7 @@ void SharedFunctionInfo::PrintSourceCode(std::ostream& os) {
     Tagged<String> source = Cast<String>(Cast<Script>(script())->source());
     int start = StartPosition();
     int length = EndPosition() - start;
-    std::unique_ptr<char[]> source_string = source->ToCString(
-        DISALLOW_NULLS, FAST_STRING_TRAVERSAL, start, length, nullptr);
+    std::unique_ptr<char[]> source_string = source->ToCString(start, length);
     os << source_string.get();
   }
 }
@@ -2326,9 +2345,10 @@ void PropertyCell::PropertyCellPrint(std::ostream& os) {
   os << "\n";
 }
 
-void ConstTrackingLetCell::ConstTrackingLetCellPrint(std::ostream& os) {
-  PrintHeader(os, "ConstTrackingLetCell");
+void ContextSidePropertyCell::ContextSidePropertyCellPrint(std::ostream& os) {
+  PrintHeader(os, "ContextSidePropertyCell");
   os << "\n - dependent code: " << dependent_code();
+  os << "\n - cell_type: " << context_side_property_raw(kAcquireLoad);
   os << "\n";
 }
 
@@ -2793,7 +2813,6 @@ void WasmResumeData::WasmResumeDataPrint(std::ostream& os) {
 
 void WasmImportData::WasmImportDataPrint(std::ostream& os) {
   PrintHeader(os, "WasmImportData");
-  IsolateForSandbox isolate = GetIsolateForSandbox(*this);
   os << "\n - native_context: " << Brief(native_context());
   os << "\n - callable: " << Brief(callable());
   os << "\n - instance_data: ";
@@ -2807,7 +2826,6 @@ void WasmImportData::WasmImportDataPrint(std::ostream& os) {
   os << "\n - call_origin: " << Brief(call_origin());
   os << "\n - sig: " << sig() << " (" << sig()->parameter_count() << " params, "
      << sig()->return_count() << " returns)";
-  os << "\n - code: " << Brief(code(isolate));
   os << "\n";
 }
 
@@ -3575,8 +3593,8 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
       os << '>';
       break;
     }
-    case CONST_TRACKING_LET_CELL_TYPE: {
-      os << "<ConstTrackingLetCell>";
+    case CONTEXT_SIDE_PROPERTY_CELL_TYPE: {
+      os << "<ContextSidePropertyCell>";
       break;
     }
     case ACCESSOR_INFO_TYPE: {
@@ -4052,6 +4070,8 @@ V8_EXPORT_PRIVATE extern i::Tagged<i::Object> _v8_internal_Get_Object(
 
 V8_DONT_STRIP_SYMBOL
 V8_EXPORT_PRIVATE extern void _v8_internal_Print_Object(void* object) {
+  i::AllowHandleDereference allow_deref;
+  i::AllowHandleUsageOnAllThreads allow_deref_all_threads;
   i::Print(GetObjectFromRaw(object));
 }
 
@@ -4188,9 +4208,9 @@ _v8_internal_Expand_StackTrace(i::Isolate* isolate) {
     _v8_internal_debugonly::StackTraceDebugDetails details;
     details.type = frame->type();
 
-    if (frame->is_java_script()) {
+    if (frame->is_javascript()) {
       i::JavaScriptFrame::cast(frame)->GetFunctions(&details.functions);
-      if (!frame->is_optimized()) {
+      if (!frame->is_optimized_js()) {
         int exprcount = frame->ComputeExpressionsCount();
         for (int i = 0; i < exprcount; i++) {
           details.expressions.push_back(frame->GetExpression(i));

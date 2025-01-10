@@ -26,7 +26,6 @@
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/heap/read-only-heap-inl.h"
 #include "src/numbers/conversions-inl.h"
-#include "src/objects/bigint-inl.h"
 #include "src/objects/casting.h"
 #include "src/objects/deoptimization-data.h"
 #include "src/objects/heap-number-inl.h"
@@ -845,14 +844,12 @@ MaybeHandle<String> Object::ToString(Isolate* isolate, Handle<T> input) {
   return ConvertToString(isolate, input);
 }
 
-#ifdef V8_ENABLE_DIRECT_HANDLE
 template <typename T, typename>
 MaybeDirectHandle<String> Object::ToString(Isolate* isolate,
                                            DirectHandle<T> input) {
   if (IsString(*input)) return Cast<String>(input);
   return ConvertToString(isolate, indirect_handle(input, isolate));
 }
-#endif
 
 // static
 MaybeHandle<Object> Object::ToLength(Isolate* isolate, Handle<Object> input) {
@@ -870,21 +867,21 @@ MaybeHandle<Object> Object::ToIndex(Isolate* isolate, Handle<Object> input,
   return ConvertToIndex(isolate, input, error_index);
 }
 
-MaybeHandle<Object> Object::GetProperty(Isolate* isolate, Handle<Object> object,
+MaybeHandle<Object> Object::GetProperty(Isolate* isolate, Handle<JSAny> object,
                                         Handle<Name> name) {
   LookupIterator it(isolate, object, name);
   if (!it.IsFound()) return it.factory()->undefined_value();
   return GetProperty(&it);
 }
 
-MaybeHandle<Object> Object::GetElement(Isolate* isolate, Handle<Object> object,
+MaybeHandle<Object> Object::GetElement(Isolate* isolate, Handle<JSAny> object,
                                        uint32_t index) {
   LookupIterator it(isolate, object, index);
   if (!it.IsFound()) return it.factory()->undefined_value();
   return GetProperty(&it);
 }
 
-MaybeHandle<Object> Object::SetElement(Isolate* isolate, Handle<Object> object,
+MaybeHandle<Object> Object::SetElement(Isolate* isolate, Handle<JSAny> object,
                                        uint32_t index, Handle<Object> value,
                                        ShouldThrow should_throw) {
   LookupIterator it(isolate, object, index);
@@ -921,9 +918,12 @@ void HeapObject::WriteBoundedSizeField(size_t offset, size_t value) {
 template <ExternalPointerTag tag>
 void HeapObject::InitExternalPointerField(size_t offset,
                                           IsolateForSandbox isolate,
-                                          Address value) {
+                                          Address value,
+                                          WriteBarrierMode mode) {
   i::InitExternalPointerField<tag>(address(), field_address(offset), isolate,
                                    value);
+  CONDITIONAL_EXTERNAL_POINTER_WRITE_BARRIER(*this, static_cast<int>(offset),
+                                             tag, mode);
 }
 
 template <ExternalPointerTag tag>
@@ -952,15 +952,39 @@ void HeapObject::WriteExternalPointerField(size_t offset,
   i::WriteExternalPointerField<tag>(field_address(offset), isolate, value);
 }
 
+void HeapObject::SetupLazilyInitializedExternalPointerField(size_t offset) {
+#ifdef V8_ENABLE_SANDBOX
+  auto location =
+      reinterpret_cast<ExternalPointerHandle*>(field_address(offset));
+  base::AsAtomic32::Release_Store(location, kNullExternalPointerHandle);
+#else
+  WriteMaybeUnalignedValue<Address>(field_address(offset), kNullAddress);
+#endif  // V8_ENABLE_SANDBOX
+}
+
 template <ExternalPointerTag tag>
 void HeapObject::WriteLazilyInitializedExternalPointerField(
     size_t offset, IsolateForSandbox isolate, Address value) {
-  i::WriteLazilyInitializedExternalPointerField<tag>(
-      address(), field_address(offset), isolate, value);
-}
-
-void HeapObject::SetupLazilyInitializedExternalPointerField(size_t offset) {
-  i::SetupLazilyInitializedExternalPointerField(field_address(offset));
+#ifdef V8_ENABLE_SANDBOX
+  static_assert(tag != kExternalPointerNullTag);
+  ExternalPointerTable& table = isolate.GetExternalPointerTableFor(tag);
+  auto location =
+      reinterpret_cast<ExternalPointerHandle*>(field_address(offset));
+  ExternalPointerHandle handle = base::AsAtomic32::Relaxed_Load(location);
+  if (handle == kNullExternalPointerHandle) {
+    // Field has not been initialized yet.
+    ExternalPointerHandle handle = table.AllocateAndInitializeEntry(
+        isolate.GetExternalPointerTableSpaceFor(tag, address()), value, tag);
+    base::AsAtomic32::Release_Store(location, handle);
+    // In this case, we're adding a reference from an existing object to a new
+    // table entry, so we always require a write barrier.
+    EXTERNAL_POINTER_WRITE_BARRIER(*this, static_cast<int>(offset), tag);
+  } else {
+    table.Set(handle, value, tag);
+  }
+#else
+  WriteMaybeUnalignedValue<Address>(field_address(offset), value);
+#endif  // V8_ENABLE_SANDBOX
 }
 
 void HeapObject::SetupLazilyInitializedCppHeapPointerField(size_t offset) {
@@ -1378,7 +1402,8 @@ void HeapObject::set_map(IsolateT* isolate, Tagged<Map> value,
 #ifndef V8_DISABLE_WRITE_BARRIERS
   if (!value.is_null()) {
     if (emit_write_barrier == EmitWriteBarrier::kYes) {
-      WriteBarrier::ForValue(*this, map_slot(), value, UPDATE_WRITE_BARRIER);
+      WriteBarrier::ForValue(*this, MaybeObjectSlot(map_slot()), value,
+                             UPDATE_WRITE_BARRIER);
     } else {
       DCHECK_EQ(emit_write_barrier, EmitWriteBarrier::kNo);
       SLOW_DCHECK(!WriteBarrier::IsRequired(*this, value));
@@ -1387,7 +1412,8 @@ void HeapObject::set_map(IsolateT* isolate, Tagged<Map> value,
 #endif
 }
 
-void HeapObjectLayout::set_map_after_allocation(Isolate* isolate,
+template <typename IsolateT>
+void HeapObjectLayout::set_map_after_allocation(IsolateT* isolate,
                                                 Tagged<Map> value,
                                                 WriteBarrierMode mode) {
   // TODO(leszeks): Support MapWord members and access via that instead.
@@ -1401,7 +1427,7 @@ void HeapObject::set_map_after_allocation(IsolateT* isolate, Tagged<Map> value,
 #ifndef V8_DISABLE_WRITE_BARRIERS
   if (mode != SKIP_WRITE_BARRIER) {
     DCHECK(!value.is_null());
-    WriteBarrier::ForValue(*this, map_slot(), value, mode);
+    WriteBarrier::ForValue(*this, MaybeObjectSlot(map_slot()), value, mode);
   } else {
     SLOW_DCHECK(
         // We allow writes of a null map before root initialisation.
@@ -1574,7 +1600,7 @@ AllocationAlignment HeapObject::RequiredAlignment(Tagged<Map> map) {
     int instance_type = map->instance_type();
 
     static_assert(!USE_ALLOCATION_ALIGNMENT_BOOL ||
-                  (FixedDoubleArray::kHeaderSize & kDoubleAlignmentMask) ==
+                  (sizeof(FixedDoubleArray::Header) & kDoubleAlignmentMask) ==
                       kTaggedSize);
     if (instance_type == FIXED_DOUBLE_ARRAY_TYPE) return kDoubleAligned;
 
@@ -1665,7 +1691,7 @@ Maybe<bool> Object::LessThanOrEqual(Isolate* isolate, Handle<Object> x,
 }
 
 MaybeHandle<Object> Object::GetPropertyOrElement(Isolate* isolate,
-                                                 Handle<Object> object,
+                                                 Handle<JSAny> object,
                                                  Handle<Name> name) {
   PropertyKey key(isolate, name);
   LookupIterator it(isolate, object, key);
@@ -1673,7 +1699,7 @@ MaybeHandle<Object> Object::GetPropertyOrElement(Isolate* isolate,
 }
 
 MaybeHandle<Object> Object::SetPropertyOrElement(
-    Isolate* isolate, Handle<Object> object, Handle<Name> name,
+    Isolate* isolate, Handle<JSAny> object, Handle<Name> name,
     Handle<Object> value, Maybe<ShouldThrow> should_throw,
     StoreOrigin store_origin) {
   PropertyKey key(isolate, name);
@@ -1682,7 +1708,7 @@ MaybeHandle<Object> Object::SetPropertyOrElement(
   return value;
 }
 
-MaybeHandle<Object> Object::GetPropertyOrElement(Handle<Object> receiver,
+MaybeHandle<Object> Object::GetPropertyOrElement(Handle<JSAny> receiver,
                                                  Handle<Name> name,
                                                  Handle<JSReceiver> holder) {
   Isolate* isolate = holder->GetIsolate();

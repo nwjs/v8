@@ -536,7 +536,6 @@ using WasmCodePtr =
 using CallTarget = UntaggedUnion<WordPtr, Code, JSFunction, WasmCodePtr>;
 using AnyOrNone = UntaggedUnion<Any, None>;
 
-#ifdef HAS_CPP_CONCEPTS
 template <typename T>
 concept IsUntagged =
     !std::is_same_v<T, Any> &&
@@ -545,7 +544,6 @@ concept IsUntagged =
 template <typename T>
 concept IsTagged = !std::is_same_v<T, Any> &&
                    v_traits<Object>::implicitly_constructible_from<T>::value;
-#endif
 
 #if V8_ENABLE_WEBASSEMBLY
 using WasmArrayNullable = Union<WasmArray, WasmNull>;
@@ -800,8 +798,7 @@ class ShadowyOpIndexVectorWrapper {
   }
   template <typename U>
   operator base::Vector<const V<U>>() const {  // NOLINT(runtime/explicit)
-    return base::Vector<const V<U>>{static_cast<const V<U>*>(indices_.data()),
-                                    indices_.size()};
+    return {static_cast<const V<U>*>(indices_.data()), indices_.size()};
   }
 
   size_t size() const noexcept { return indices_.size(); }

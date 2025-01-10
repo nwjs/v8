@@ -7,11 +7,11 @@
 
 #include "src/common/globals.h"
 #include "src/heap/heap-layout-inl.h"
+#include "src/heap/heap-visitor-inl.h"
+#include "src/heap/heap-visitor.h"
 #include "src/heap/marking-worklist-inl.h"
 #include "src/heap/minor-mark-sweep.h"
 #include "src/heap/mutable-page-metadata.h"
-#include "src/heap/objects-visiting-inl.h"
-#include "src/heap/objects-visiting.h"
 #include "src/heap/pretenuring-handler-inl.h"
 #include "src/heap/remembered-set-inl.h"
 #include "src/heap/young-generation-marking-visitor.h"
@@ -66,24 +66,28 @@ void YoungGenerationMarkingVisitor<marking_mode>::VisitCppHeapPointer(
 }
 
 template <YoungGenerationMarkingVisitationMode marking_mode>
-int YoungGenerationMarkingVisitor<marking_mode>::VisitJSArrayBuffer(
-    Tagged<Map> map, Tagged<JSArrayBuffer> object) {
+size_t YoungGenerationMarkingVisitor<marking_mode>::VisitJSArrayBuffer(
+    Tagged<Map> map, Tagged<JSArrayBuffer> object,
+    MaybeObjectSize maybe_object_size) {
   object->YoungMarkExtension();
-  return Base::VisitJSArrayBuffer(map, object);
+  return Base::VisitJSArrayBuffer(map, object, maybe_object_size);
 }
 
 template <YoungGenerationMarkingVisitationMode marking_mode>
 template <typename T, typename TBodyDescriptor>
-int YoungGenerationMarkingVisitor<marking_mode>::VisitJSObjectSubclass(
-    Tagged<Map> map, Tagged<T> object) {
-  PretenuringHandler::UpdateAllocationSite(isolate_->heap(), map, object,
-                                           local_pretenuring_feedback_);
-  return Base::template VisitJSObjectSubclass<T, TBodyDescriptor>(map, object);
+size_t YoungGenerationMarkingVisitor<marking_mode>::VisitJSObjectSubclass(
+    Tagged<Map> map, Tagged<T> object, MaybeObjectSize maybe_object_size) {
+  const int object_size =
+      static_cast<int>(Base::template VisitJSObjectSubclass<T, TBodyDescriptor>(
+          map, object, maybe_object_size));
+  PretenuringHandler::UpdateAllocationSite(
+      isolate_->heap(), map, object, object_size, local_pretenuring_feedback_);
+  return object_size;
 }
 
 template <YoungGenerationMarkingVisitationMode marking_mode>
-int YoungGenerationMarkingVisitor<marking_mode>::VisitEphemeronHashTable(
-    Tagged<Map> map, Tagged<EphemeronHashTable> table) {
+size_t YoungGenerationMarkingVisitor<marking_mode>::VisitEphemeronHashTable(
+    Tagged<Map> map, Tagged<EphemeronHashTable> table, MaybeObjectSize) {
   // Register table with Minor MC, so it can take care of the weak keys later.
   // This allows to only iterate the tables' values, which are treated as strong
   // independently of whether the key is live.
@@ -202,7 +206,7 @@ V8_INLINE bool YoungGenerationMarkingVisitor<marking_mode>::VisitObjectViaSlot(
   // atomics.
   if constexpr (visitation_mode == ObjectVisitationMode::kVisitDirectly) {
     Tagged<Map> map = heap_object->map(isolate_);
-    const int visited_size = Base::Visit(map, heap_object);
+    const size_t visited_size = Base::Visit(map, heap_object);
     if (visited_size) {
       IncrementLiveBytesCached(
           MutablePageMetadata::cast(

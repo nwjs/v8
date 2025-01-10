@@ -559,7 +559,7 @@ RUNTIME_FUNCTION(Runtime_WasmNumCodeSpaces) {
   } else if (IsWasmModuleObject(*argument)) {
     native_module = Cast<WasmModuleObject>(*argument)->native_module();
   } else {
-    UNREACHABLE();
+    return CrashUnlessFuzzing(isolate);
   }
   size_t num_spaces = native_module->GetNumberOfCodeSpacesForTesting();
   return *isolate->factory()->NewNumberFromSize(num_spaces);
@@ -712,6 +712,9 @@ RUNTIME_FUNCTION(Runtime_WasmNull) {
 static Tagged<Object> CreateWasmObject(Isolate* isolate,
                                        base::Vector<const uint8_t> module_bytes,
                                        bool is_struct) {
+  if (module_bytes.size() > v8_flags.wasm_max_module_size) {
+    return CrashUnlessFuzzing(isolate);
+  }
   // Create and compile the wasm module.
   wasm::ErrorThrower thrower(isolate, "CreateWasmObject");
   wasm::ModuleWireBytes bytes(base::VectorOf(module_bytes));
@@ -736,9 +739,10 @@ static Tagged<Object> CreateWasmObject(Isolate* isolate,
     return ReadOnlyRoots(isolate).exception();
   }
   wasm::WasmValue value(int64_t{0x7AADF00DBAADF00D});
-  int type_index = 0;
+  wasm::ModuleTypeIndex type_index{0};
   Tagged<Map> map = Tagged<Map>::cast(
-      instance->trusted_data(isolate)->managed_object_maps()->get(type_index));
+      instance->trusted_data(isolate)->managed_object_maps()->get(
+          type_index.index));
   if (is_struct) {
     const wasm::StructType* struct_type =
         instance->module()->struct_type(type_index);

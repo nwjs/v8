@@ -1032,16 +1032,25 @@ config("v8_header_features") {
 # List of defines that can appear in externally visible cppgc header files and
 # that are controlled by args.gn.
 external_cppgc_defines = [
-  "CPPGC_SUPPORTS_OBJECT_NAMES",
   "CPPGC_CAGED_HEAP",
-  "CPPGC_SLIM_WRITE_BARRIER",
-  "CPPGC_YOUNG_GENERATION",
-  "CPPGC_POINTER_COMPRESSION",
+  "CPPGC_ENABLE_API_CHECKS",
   "CPPGC_ENABLE_LARGER_CAGE",
+  "CPPGC_ENABLE_SLOW_API_CHECKS",
+  "CPPGC_POINTER_COMPRESSION",
+  "CPPGC_SLIM_WRITE_BARRIER",
+  "CPPGC_SUPPORTS_OBJECT_NAMES",
+  "CPPGC_YOUNG_GENERATION",
 ]
 
 enabled_external_cppgc_defines = []
 
+if (cppgc_enable_api_checks) {
+  enabled_external_cppgc_defines += [ "CPPGC_ENABLE_API_CHECKS" ]
+}
+cppgc_enable_slow_api_checks = v8_enable_slow_dchecks
+if (cppgc_enable_slow_api_checks) {
+  enabled_external_cppgc_defines += [ "CPPGC_ENABLE_SLOW_API_CHECKS" ]
+}
 if (cppgc_enable_object_names) {
   enabled_external_cppgc_defines += [ "CPPGC_SUPPORTS_OBJECT_NAMES" ]
 }
@@ -2934,9 +2943,6 @@ v8_source_set("v8_snapshot") {
   public = []
 
   sources = [ "src/init/setup-isolate-deserialize.cc" ]
-  if (v8_control_flow_integrity) {
-    sources += [ "src/deoptimizer/deoptimizer-cfi-builtins.cc" ]
-  }
   if (emit_builtins_as_inline_asm) {
     deps += [ ":asm_to_inline_asm_default" ]
     sources += [ "$target_gen_dir/embedded.cc" ]
@@ -3447,6 +3453,7 @@ v8_header_set("v8_internal_headers") {
     "src/common/segmented-table-inl.h",
     "src/common/segmented-table.h",
     "src/common/simd128.h",
+    "src/common/thread-local-storage.h",
     "src/compiler-dispatcher/lazy-compile-dispatcher.h",
     "src/compiler-dispatcher/optimizing-compile-dispatcher.h",
     "src/compiler/access-builder.h",
@@ -3797,6 +3804,8 @@ v8_header_set("v8_internal_headers") {
     "src/heap/heap-layout.h",
     "src/heap/heap-utils-inl.h",
     "src/heap/heap-utils.h",
+    "src/heap/heap-visitor-inl.h",
+    "src/heap/heap-visitor.h",
     "src/heap/heap-write-barrier-inl.h",
     "src/heap/heap-write-barrier.h",
     "src/heap/heap.h",
@@ -3850,8 +3859,6 @@ v8_header_set("v8_internal_headers") {
     "src/heap/object-lock-inl.h",
     "src/heap/object-lock.h",
     "src/heap/object-stats.h",
-    "src/heap/objects-visiting-inl.h",
-    "src/heap/objects-visiting.h",
     "src/heap/page-metadata.h",
     "src/heap/paged-spaces-inl.h",
     "src/heap/paged-spaces.h",
@@ -3876,6 +3883,7 @@ v8_header_set("v8_internal_headers") {
     "src/heap/sweeper.h",
     "src/heap/traced-handles-marking-visitor.h",
     "src/heap/trusted-range.h",
+    "src/heap/visit-object.h",
     "src/heap/weak-object-worklists.h",
     "src/heap/young-generation-marking-visitor-inl.h",
     "src/heap/young-generation-marking-visitor.h",
@@ -3947,7 +3955,6 @@ v8_header_set("v8_internal_headers") {
     "src/objects/arguments-inl.h",
     "src/objects/arguments.h",
     "src/objects/backing-store.h",
-    "src/objects/bigint-inl.h",
     "src/objects/bigint.h",
     "src/objects/call-site-info-inl.h",
     "src/objects/call-site-info.h",
@@ -4218,6 +4225,7 @@ v8_header_set("v8_internal_headers") {
     "src/regexp/regexp-macro-assembler.h",
     "src/regexp/regexp-nodes.h",
     "src/regexp/regexp-parser.h",
+    "src/regexp/regexp-result-vector.h",
     "src/regexp/regexp-stack.h",
     "src/regexp/regexp-utils.h",
     "src/regexp/regexp.h",
@@ -5533,6 +5541,7 @@ v8_source_set("v8_base_without_compiler") {
     "src/heap/heap-layout-tracer.cc",
     "src/heap/heap-layout.cc",
     "src/heap/heap-verifier.cc",
+    "src/heap/heap-visitor.cc",
     "src/heap/heap-write-barrier.cc",
     "src/heap/heap.cc",
     "src/heap/incremental-marking-job.cc",
@@ -5550,7 +5559,6 @@ v8_source_set("v8_base_without_compiler") {
     "src/heap/marking.cc",
     "src/heap/memory-allocator.cc",
     "src/heap/memory-balancer.cc",
-    "src/heap/memory-chunk-layout.cc",
     "src/heap/memory-chunk-metadata.cc",
     "src/heap/memory-chunk.cc",
     "src/heap/memory-measurement.cc",
@@ -5560,7 +5568,6 @@ v8_source_set("v8_base_without_compiler") {
     "src/heap/mutable-page-metadata.cc",
     "src/heap/new-spaces.cc",
     "src/heap/object-stats.cc",
-    "src/heap/objects-visiting.cc",
     "src/heap/page-metadata.cc",
     "src/heap/paged-spaces.cc",
     "src/heap/pretenuring-handler.cc",
@@ -5575,6 +5582,7 @@ v8_source_set("v8_base_without_compiler") {
     "src/heap/sweeper.cc",
     "src/heap/traced-handles-marking-visitor.cc",
     "src/heap/trusted-range.cc",
+    "src/heap/visit-object.cc",
     "src/heap/weak-object-worklists.cc",
     "src/heap/zapping.cc",
     "src/ic/call-optimization.cc",
@@ -5736,6 +5744,7 @@ v8_source_set("v8_base_without_compiler") {
     "src/regexp/regexp-macro-assembler-tracer.cc",
     "src/regexp/regexp-macro-assembler.cc",
     "src/regexp/regexp-parser.cc",
+    "src/regexp/regexp-result-vector.cc",
     "src/regexp/regexp-stack.cc",
     "src/regexp/regexp-utils.cc",
     "src/regexp/regexp.cc",
@@ -6080,15 +6089,14 @@ v8_source_set("v8_base_without_compiler") {
       "src/regexp/arm64/regexp-macro-assembler-arm64.cc",
     ]
     if (v8_enable_webassembly) {
-      # Trap handling is enabled on arm64 Mac and Linux and in simulators on
-      # x64 on Linux, Mac, and Windows.
+      # Trap handling is enabled on arm64 and x64, on Linux, Mac and Windows.
       if ((current_cpu == "arm64" && (is_linux || is_chromeos || is_apple)) ||
           (current_cpu == "x64" && (is_linux || is_chromeos || is_mac))) {
         sources += [
           "src/trap-handler/handler-inside-posix.cc",
           "src/trap-handler/handler-outside-posix.cc",
         ]
-      } else if (current_cpu == "x64" && is_win) {
+      } else if ((current_cpu == "arm64" || current_cpu == "x64") && is_win) {
         sources += [
           "src/trap-handler/handler-inside-win.cc",
           "src/trap-handler/handler-outside-win.cc",
@@ -6585,6 +6593,7 @@ v8_static_lib("v8_libbase") {
     "src/base/sanitizer/lsan.h",
     "src/base/sanitizer/msan.h",
     "src/base/sanitizer/tsan.h",
+    "src/base/sanitizer/ubsan.h",
     "src/base/small-map.h",
     "src/base/small-vector.h",
     "src/base/string-format.h",
@@ -7349,10 +7358,6 @@ if (current_toolchain == v8_snapshot_toolchain) {
       "src/snapshot/static-roots-gen.cc",
       "src/snapshot/static-roots-gen.h",
     ]
-
-    if (v8_control_flow_integrity) {
-      sources += [ "src/deoptimizer/deoptimizer-cfi-empty.cc" ]
-    }
 
     configs = [
       ":internal_config",

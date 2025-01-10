@@ -28,14 +28,13 @@ namespace internal {
 
 namespace {
 
-void DeleteMemoryChunk(MemoryChunkMetadata* metadata) {
-  MemoryChunk* chunk = metadata->Chunk();
+void DeleteMemoryChunk(MutablePageMetadata* metadata) {
   DCHECK(metadata->reserved_memory()->IsReserved());
-  DCHECK(!chunk->InReadOnlySpace());
+  DCHECK(!metadata->Chunk()->InReadOnlySpace());
   // The Metadata contains a VirtualMemory reservation and the destructor will
   // release the MemoryChunk.
   DiscardSealedMemoryScope discard_scope("Deleting a memory chunk");
-  if (chunk->IsLargePage()) {
+  if (metadata->IsLargePage()) {
     delete reinterpret_cast<LargePageMetadata*>(metadata);
   } else {
     delete reinterpret_cast<PageMetadata*>(metadata);
@@ -344,7 +343,7 @@ void MemoryAllocator::FreeReadOnlyPage(ReadOnlyPageMetadata* chunk) {
   v8::PageAllocator* allocator = page_allocator(RO_SPACE);
   VirtualMemory* reservation = chunk->reserved_memory();
   if (reservation->IsReserved()) {
-    reservation->FreeReadOnly();
+    reservation->Free();
   } else {
     // Only read-only pages can have a non-initialized reservation object. This
     // happens when the pages are remapped to multiple locations and where the
@@ -352,6 +351,8 @@ void MemoryAllocator::FreeReadOnlyPage(ReadOnlyPageMetadata* chunk) {
     FreeMemoryRegion(allocator, chunk->ChunkAddress(),
                      RoundUp(chunk->size(), allocator->AllocatePageSize()));
   }
+
+  delete chunk;
 }
 
 void MemoryAllocator::PreFreeMemory(MutablePageMetadata* chunk_metadata) {
@@ -468,14 +469,13 @@ ReadOnlyPageMetadata* MemoryAllocator::AllocateReadOnlyPage(
   std::optional<MemoryChunkAllocationResult> chunk_info =
       AllocateUninitializedChunkAt(space, size, NOT_EXECUTABLE, hint,
                                    PageSize::kRegular);
-  if (!chunk_info) return nullptr;
-  Address metadata_address =
-      reinterpret_cast<Address>(chunk_info->chunk) + sizeof(MemoryChunk);
-  ReadOnlyPageMetadata* metadata =
-      new (reinterpret_cast<ReadOnlyPageMetadata*>(metadata_address))
-          ReadOnlyPageMetadata(isolate_->heap(), space, chunk_info->size,
-                               chunk_info->area_start, chunk_info->area_end,
-                               std::move(chunk_info->reservation));
+  if (!chunk_info) {
+    return nullptr;
+  }
+  CHECK_NULL(chunk_info->optional_metadata);
+  ReadOnlyPageMetadata* metadata = new ReadOnlyPageMetadata(
+      isolate_->heap(), space, chunk_info->size, chunk_info->area_start,
+      chunk_info->area_end, std::move(chunk_info->reservation));
 
   new (chunk_info->chunk) MemoryChunk(metadata->InitialFlags(), metadata);
 
@@ -558,19 +558,6 @@ void MemoryAllocator::InitializeOncePerProcess() {
                           : CommitPageSize();
   CHECK(base::bits::IsPowerOfTwo(commit_page_size_));
   commit_page_size_bits_ = base::bits::WhichPowerOfTwo(commit_page_size_);
-}
-
-base::AddressRegion MemoryAllocator::ComputeDiscardMemoryArea(Address addr,
-                                                              size_t size) {
-  size_t page_size = GetCommitPageSize();
-  if (size < page_size + FreeSpace::kSize) {
-    return base::AddressRegion(0, 0);
-  }
-  Address discardable_start = RoundUp(addr + FreeSpace::kSize, page_size);
-  Address discardable_end = RoundDown(addr + size, page_size);
-  if (discardable_start >= discardable_end) return base::AddressRegion(0, 0);
-  return base::AddressRegion(discardable_start,
-                             discardable_end - discardable_start);
 }
 
 bool MemoryAllocator::SetPermissionsOnExecutableMemoryChunk(VirtualMemory* vm,

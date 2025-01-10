@@ -36,6 +36,7 @@
 #ifdef V8_ENABLE_MAGLEV
 #include "src/maglev/maglev-concurrent-dispatcher.h"
 #endif  // V8_ENABLE_MAGLEV
+#include "src/objects/js-array-buffer-inl.h"
 #include "src/objects/js-atomics-synchronization-inl.h"
 #include "src/objects/js-function-inl.h"
 #include "src/objects/js-regexp-inl.h"
@@ -299,7 +300,7 @@ bool CanOptimizeFunction(CodeKind target_kind, Handle<JSFunction> function,
     return CrashUnlessFuzzingReturnFalse(isolate);
   }
 
-  if (target_kind == CodeKind::TURBOFAN && !v8_flags.turbofan) return false;
+  if (target_kind == CodeKind::TURBOFAN_JS && !v8_flags.turbofan) return false;
   if (target_kind == CodeKind::MAGLEV && !maglev::IsMaglevEnabled()) {
     return false;
   }
@@ -484,10 +485,10 @@ RUNTIME_FUNCTION(Runtime_BenchTurbofan) {
   base::ElapsedTimer timer;
   timer.Start();
   Compiler::CompileOptimized(isolate, function, ConcurrencyMode::kSynchronous,
-                             CodeKind::TURBOFAN);
+                             CodeKind::TURBOFAN_JS);
   for (int i = 1; i < count; ++i) {
     Compiler::CompileOptimized(isolate, function, ConcurrencyMode::kSynchronous,
-                               CodeKind::TURBOFAN);
+                               CodeKind::TURBOFAN_JS);
   }
 
   double compile_time = timer.Elapsed().InMillisecondsF() / count;
@@ -566,8 +567,9 @@ RUNTIME_FUNCTION(Runtime_OptimizeFunctionOnNextCall) {
   HandleScope scope(isolate);
   return OptimizeFunctionOnNextCall(
       args, isolate,
-      v8_flags.optimize_on_next_call_optimizes_to_maglev ? CodeKind::MAGLEV
-                                                         : CodeKind::TURBOFAN);
+      v8_flags.optimize_on_next_call_optimizes_to_maglev
+          ? CodeKind::MAGLEV
+          : CodeKind::TURBOFAN_JS);
 }
 
 RUNTIME_FUNCTION(Runtime_EnsureFeedbackVectorForFunction) {
@@ -756,7 +758,7 @@ RUNTIME_FUNCTION(Runtime_OptimizeOsr) {
   if (it.frame()->is_maglev() || concurrent_osr) {
     BytecodeOffset osr_offset = BytecodeOffset::None();
     if (it.frame()->is_unoptimized()) {
-      UnoptimizedFrame* frame = UnoptimizedFrame::cast(it.frame());
+      UnoptimizedJSFrame* frame = UnoptimizedJSFrame::cast(it.frame());
       Handle<BytecodeArray> bytecode_array(frame->GetBytecodeArray(), isolate);
       const int current_offset = frame->GetBytecodeOffset();
       osr_offset =
@@ -792,7 +794,7 @@ RUNTIME_FUNCTION(Runtime_OptimizeOsr) {
                        : ConcurrencyMode::kSynchronous,
         (maglev::IsMaglevOsrEnabled() && !it.frame()->is_maglev())
             ? CodeKind::MAGLEV
-            : CodeKind::TURBOFAN);
+            : CodeKind::TURBOFAN_JS);
     USE(unused_result);
 
     // Finalize again to finish the queued job. The next call into
@@ -1167,7 +1169,7 @@ RUNTIME_FUNCTION(Runtime_SetAllocationTimeout) {
 namespace {
 
 int FixedArrayLenFromSize(int size) {
-  return std::min({(size - FixedArray::kHeaderSize) / kTaggedSize,
+  return std::min({(size - OFFSET_OF_DATA_START(FixedArray)) / kTaggedSize,
                    FixedArray::kMaxRegularLength});
 }
 
@@ -1950,8 +1952,8 @@ RUNTIME_FUNCTION(Runtime_EnableCodeLoggingForTesting) {
     void CallbackEvent(Handle<Name> name, Address entry_point) final {}
     void GetterCallbackEvent(Handle<Name> name, Address entry_point) final {}
     void SetterCallbackEvent(Handle<Name> name, Address entry_point) final {}
-    void RegExpCodeCreateEvent(Handle<AbstractCode> code,
-                               Handle<String> source) final {}
+    void RegExpCodeCreateEvent(Handle<AbstractCode> code, Handle<String> source,
+                               RegExpFlags flags) final {}
     void CodeMoveEvent(Tagged<InstructionStream> from,
                        Tagged<InstructionStream> to) final {}
     void BytecodeMoveEvent(Tagged<BytecodeArray> from,
@@ -2066,6 +2068,25 @@ RUNTIME_FUNCTION(Runtime_IsInternalizedString) {
   }
   DirectHandle<HeapObject> obj = args.at<HeapObject>(0);
   return isolate->heap()->ToBoolean(IsInternalizedString(*obj));
+}
+
+RUNTIME_FUNCTION(Runtime_StringToCString) {
+  HandleScope scope(isolate);
+  if (args.length() != 1 || !IsString(args[0])) {
+    return CrashUnlessFuzzing(isolate);
+  }
+  Handle<String> string = args.at<String>(0);
+
+  uint32_t output_length;
+  auto bytes = string->ToCString(&output_length);
+
+  Handle<JSArrayBuffer> result =
+      isolate->factory()
+          ->NewJSArrayBufferAndBackingStore(output_length,
+                                            InitializedFlag::kUninitialized)
+          .ToHandleChecked();
+  memcpy(result->backing_store(), bytes.get(), output_length);
+  return *result;
 }
 
 RUNTIME_FUNCTION(Runtime_SharedGC) {

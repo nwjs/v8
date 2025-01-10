@@ -1075,9 +1075,8 @@ auto Trap::message() const -> Message {
       isolate->CreateMessage(impl(this)->v8_object(), nullptr);
   i::Handle<i::String> result = i::MessageHandler::GetMessage(isolate, message);
   result = i::String::Flatten(isolate, result);  // For performance.
-  int length = 0;
-  std::unique_ptr<char[]> utf8 =
-      result->ToCString(i::DISALLOW_NULLS, i::FAST_STRING_TRAVERSAL, &length);
+  uint32_t length = 0;
+  std::unique_ptr<char[]> utf8 = result->ToCString(&length);
   return vec<byte_t>::adopt(length, utf8.release());
 }
 
@@ -1649,7 +1648,7 @@ void PrepareFunctionData(
 void PushArgs(const i::wasm::CanonicalSig* sig, const Val args[],
               i::wasm::CWasmArgumentsPacker* packer, StoreImpl* store) {
   for (size_t i = 0; i < sig->parameter_count(); i++) {
-    i::wasm::ValueType type = sig->GetParam(i);
+    i::wasm::CanonicalValueType type = sig->GetParam(i);
     switch (type.kind()) {
       case i::wasm::kI32:
         packer->Push(args[i].i32());
@@ -1687,7 +1686,7 @@ void PopArgs(const i::wasm::CanonicalSig* sig, Val results[],
              i::wasm::CWasmArgumentsPacker* packer, StoreImpl* store) {
   packer->Reset();
   for (size_t i = 0; i < sig->return_count(); i++) {
-    i::wasm::ValueType type = sig->GetReturn(i);
+    i::wasm::CanonicalValueType type = sig->GetReturn(i);
     switch (type.kind()) {
       case i::wasm::kI32:
         results[i] = Val(packer->Pop<int32_t>());
@@ -2100,7 +2099,7 @@ auto Table::make(Store* store_abs, const TableType* type, const Ref* ref)
   i::Handle<i::WasmTableObject> table_obj = i::WasmTableObject::New(
       isolate, i::Handle<i::WasmTrustedInstanceData>(), i_type, minimum,
       has_maximum, maximum, isolate->factory()->null_value(),
-      i::wasm::IndexType::kI32);
+      i::wasm::AddressType::kI32);
 
   if (ref) {
     i::DirectHandle<i::FixedArray> entries{table_obj->entries(), isolate};
@@ -2230,9 +2229,9 @@ auto Memory::make(Store* store_abs, const MemoryType* type) -> own<Memory> {
   }
   // TODO(wasm+): Support shared memory and memory64.
   i::SharedFlag shared = i::SharedFlag::kNotShared;
-  i::wasm::IndexType index_type = i::wasm::IndexType::kI32;
+  i::wasm::AddressType address_type = i::wasm::AddressType::kI32;
   i::Handle<i::WasmMemoryObject> memory_obj;
-  if (!i::WasmMemoryObject::New(isolate, minimum, maximum, shared, index_type)
+  if (!i::WasmMemoryObject::New(isolate, minimum, maximum, shared, address_type)
            .ToHandle(&memory_obj)) {
     return own<Memory>();
   }

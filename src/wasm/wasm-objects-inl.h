@@ -418,8 +418,6 @@ struct CastTraits<WasmExportedFunction> {
 
 // WasmImportData
 
-CODE_POINTER_ACCESSORS(WasmImportData, code, kCodeOffset)
-
 PROTECTED_POINTER_ACCESSORS(WasmImportData, instance_data,
                             WasmTrustedInstanceData,
                             kProtectedInstanceDataOffset)
@@ -452,6 +450,28 @@ CODE_POINTER_ACCESSORS(WasmExportedFunctionData, c_wrapper_code,
 PRIMITIVE_ACCESSORS(WasmExportedFunctionData, sig, const wasm::CanonicalSig*,
                     kSigOffset)
 
+wasm::CanonicalTypeIndex WasmExportedFunctionData::sig_index() const {
+  return wasm::CanonicalTypeIndex{
+      static_cast<uint32_t>(canonical_type_index())};
+}
+
+bool WasmExportedFunctionData::is_promising() const {
+  return WasmFunctionData::PromiseField::decode(js_promise_flags()) ==
+         wasm::kPromise;
+}
+
+// WasmJSFunctionData
+wasm::CanonicalTypeIndex WasmJSFunctionData::sig_index() const {
+  return wasm::CanonicalTypeIndex{static_cast<uint32_t>(canonical_sig_index())};
+}
+PROTECTED_POINTER_ACCESSORS(WasmJSFunctionData, protected_offheap_data,
+                            TrustedManaged<WasmJSFunctionData::OffheapData>,
+                            kProtectedOffheapDataOffset)
+
+WasmJSFunctionData::OffheapData* WasmJSFunctionData::offheap_data() const {
+  return protected_offheap_data()->get().get();
+}
+
 // WasmJSFunction
 WasmJSFunction::WasmJSFunction(Address ptr) : JSFunction(ptr) {
   SLOW_DCHECK(IsWasmJSFunction(*this));
@@ -466,6 +486,11 @@ struct CastTraits<WasmJSFunction> {
     return WasmJSFunction::IsWasmJSFunction(value);
   }
 };
+
+// WasmCapiFunctionData
+wasm::CanonicalTypeIndex WasmCapiFunctionData::sig_index() const {
+  return wasm::CanonicalTypeIndex{static_cast<uint32_t>(canonical_sig_index())};
+}
 
 // WasmCapiFunction
 WasmCapiFunction::WasmCapiFunction(Address ptr) : JSFunction(ptr) {
@@ -504,6 +529,9 @@ Tagged<WasmFuncRef> WasmExternalFunction::func_ref() const {
 // WasmTypeInfo
 EXTERNAL_POINTER_ACCESSORS(WasmTypeInfo, native_type, Address,
                            kNativeTypeOffset, kWasmTypeInfoNativeTypeTag)
+wasm::ModuleTypeIndex WasmTypeInfo::type_index() const {
+  return wasm::ModuleTypeIndex{module_type_index()};
+}
 TRUSTED_POINTER_ACCESSORS(WasmTypeInfo, trusted_data, WasmTrustedInstanceData,
                           kTrustedDataOffset,
                           kWasmTrustedInstanceDataIndirectPointerTag)
@@ -534,7 +562,7 @@ bool WasmTableObject::is_in_bounds(uint32_t entry_index) {
 }
 
 bool WasmTableObject::is_table64() const {
-  return index_type() == wasm::IndexType::kI64;
+  return address_type() == wasm::AddressType::kI64;
 }
 
 std::optional<uint64_t> WasmTableObject::maximum_length_u64() const {
@@ -561,7 +589,7 @@ std::optional<uint64_t> WasmTableObject::maximum_length_u64() const {
 bool WasmMemoryObject::has_maximum_pages() { return maximum_pages() >= 0; }
 
 bool WasmMemoryObject::is_memory64() const {
-  return index_type() == wasm::IndexType::kI64;
+  return address_type() == wasm::AddressType::kI64;
 }
 
 // static
@@ -646,6 +674,11 @@ wasm::StructType* WasmStruct::type(Tagged<Map> map) {
   return reinterpret_cast<wasm::StructType*>(type_info->native_type());
 }
 
+const wasm::WasmModule* WasmStruct::module() {
+  Isolate* isolate = GetIsolateFromWritableObject(*this);
+  return map()->wasm_type_info()->trusted_data(isolate)->module();
+}
+
 wasm::StructType* WasmStruct::GcSafeType(Tagged<Map> map) {
   DCHECK_EQ(WASM_STRUCT_TYPE, map->instance_type());
   Tagged<HeapObject> raw = Cast<HeapObject>(map->constructor_or_back_pointer());
@@ -708,6 +741,11 @@ wasm::ArrayType* WasmArray::GcSafeType(Tagged<Map> map) {
 }
 
 wasm::ArrayType* WasmArray::type() const { return type(map()); }
+
+const wasm::WasmModule* WasmArray::module() {
+  Isolate* isolate = GetIsolateFromWritableObject(*this);
+  return map()->wasm_type_info()->trusted_data(isolate)->module();
+}
 
 int WasmArray::SizeFor(Tagged<Map> map, int length) {
   int element_size = DecodeElementSizeFromMap(map);

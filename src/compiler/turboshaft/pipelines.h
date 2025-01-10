@@ -55,7 +55,7 @@ class Pipeline {
     }
   }
 
-  template <CONCEPT(TurboshaftPhase) Phase, typename... Args>
+  template <TurboshaftPhase Phase, typename... Args>
   auto Run(Args&&... args) {
     // Setup run scope.
     PhaseScope phase_scope(data_->pipeline_statistics(), Phase::phase_name());
@@ -522,15 +522,15 @@ class Pipeline {
 
   OptimizedCompilationInfo* info() { return data_->info(); }
 
-  MaybeHandle<Code> FinalizeCode(bool retire_broker = true) {
+  MaybeIndirectHandle<Code> FinalizeCode(bool retire_broker = true) {
     BeginPhaseKind("V8.TFFinalizeCode");
     if (data_->broker() && retire_broker) {
       data_->broker()->Retire();
     }
     Run<FinalizeCodePhase>();
 
-    MaybeHandle<Code> maybe_code = data_->code();
-    Handle<Code> code;
+    MaybeIndirectHandle<Code> maybe_code = data_->code();
+    IndirectHandle<Code> code;
     if (!maybe_code.ToHandle(&code)) {
       return maybe_code;
     }
@@ -541,7 +541,9 @@ class Pipeline {
     // Functions with many inline candidates are sensitive to correct call
     // frequency feedback and should therefore not be tiered up early.
     if (v8_flags.profile_guided_optimization &&
-        info()->could_not_inline_all_candidates()) {
+        info()->could_not_inline_all_candidates() &&
+        info()->shared_info()->cached_tiering_decision() !=
+            CachedTieringDecision::kDelayMaglev) {
       info()->shared_info()->set_cached_tiering_decision(
           CachedTieringDecision::kNormal);
     }

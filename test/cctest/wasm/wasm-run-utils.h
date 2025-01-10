@@ -111,15 +111,15 @@ class TestingModuleBuilder {
   ~TestingModuleBuilder();
 
   uint8_t* AddMemory(uint32_t size, SharedFlag shared = SharedFlag::kNotShared,
-                     IndexType index_type = wasm::IndexType::kI32,
+                     AddressType address_type = wasm::AddressType::kI32,
                      std::optional<size_t> max_size = {});
 
   size_t CodeTableLength() const { return native_module_->num_functions(); }
 
   template <typename T>
   T* AddMemoryElems(uint32_t count,
-                    IndexType index_type = wasm::IndexType::kI32) {
-    AddMemory(count * sizeof(T), SharedFlag::kNotShared, index_type);
+                    AddressType address_type = wasm::AddressType::kI32) {
+    AddMemory(count * sizeof(T), SharedFlag::kNotShared, address_type);
     return raw_mem_start<T>();
   }
 
@@ -307,11 +307,6 @@ class TestingModuleBuilder {
   Handle<WasmInstanceObject> InitInstanceObject();
 };
 
-void TestBuildingGraph(Zone* zone, compiler::JSGraph* jsgraph,
-                       CompilationEnv* env, const FunctionSig* sig,
-                       compiler::SourcePositionTable* source_position_table,
-                       const uint8_t* start, const uint8_t* end);
-
 // A helper for compiling wasm functions for testing.
 // It contains the internal state for compilation (i.e. TurboFan graph).
 class WasmFunctionCompiler {
@@ -414,8 +409,8 @@ class WasmRunnerBase : public InitializedHandleScope {
 
   static const CanonicalSig* CanonicalizeSig(const FunctionSig* sig) {
     // TODO(clemensb): Make this a single function call.
-    uint32_t canonical_sig_id = GetTypeCanonicalizer()->AddRecursiveGroup(sig);
-    return GetTypeCanonicalizer()->LookupFunctionSignature(canonical_sig_id);
+    CanonicalTypeIndex sig_id = GetTypeCanonicalizer()->AddRecursiveGroup(sig);
+    return GetTypeCanonicalizer()->LookupFunctionSignature(sig_id);
   }
 
   template <typename ReturnType, typename... ParamTypes>

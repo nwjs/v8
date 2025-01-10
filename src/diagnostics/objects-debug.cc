@@ -751,17 +751,17 @@ void EmbedderDataArray::EmbedderDataArrayVerify(Isolate* isolate) {
 }
 
 void FixedArrayBase::FixedArrayBaseVerify(Isolate* isolate) {
-  CHECK(IsSmi(TaggedField<Object>::load(*this, kLengthOffset)));
+  CHECK(IsSmi(length_.load()));
 }
 
 void FixedArray::FixedArrayVerify(Isolate* isolate) {
-  CHECK(IsSmi(TaggedField<Object>::load(*this, kLengthOffset)));
+  CHECK(IsSmi(length_.load()));
 
   for (int i = 0; i < length(); ++i) {
     Object::VerifyPointer(isolate, get(i));
   }
 
-  if (*this == ReadOnlyRoots(isolate).empty_fixed_array()) {
+  if (this == ReadOnlyRoots(isolate).empty_fixed_array()) {
     CHECK_EQ(length(), 0);
     CHECK_EQ(map(), ReadOnlyRoots(isolate).fixed_array_map());
   }
@@ -769,7 +769,7 @@ void FixedArray::FixedArrayVerify(Isolate* isolate) {
 
 void TrustedFixedArray::TrustedFixedArrayVerify(Isolate* isolate) {
   TrustedObjectVerify(isolate);
-  CHECK(IsSmi(TaggedField<Object>::load(*this, kLengthOffset)));
+  CHECK(IsSmi(length_.load()));
 
   for (int i = 0; i < length(); ++i) {
     Object::VerifyPointer(isolate, get(i));
@@ -779,7 +779,7 @@ void TrustedFixedArray::TrustedFixedArrayVerify(Isolate* isolate) {
 void ProtectedFixedArray::ProtectedFixedArrayVerify(Isolate* isolate) {
   TrustedObjectVerify(isolate);
 
-  CHECK(IsSmi(TaggedField<Object>::load(*this, kLengthOffset)));
+  CHECK(IsSmi(length_.load()));
 
   for (int i = 0; i < length(); ++i) {
     Tagged<Object> element = get(i);
@@ -789,7 +789,7 @@ void ProtectedFixedArray::ProtectedFixedArrayVerify(Isolate* isolate) {
 }
 
 void RegExpMatchInfo::RegExpMatchInfoVerify(Isolate* isolate) {
-  CHECK(IsSmi(TaggedField<Object>::load(*this, kCapacityOffset)));
+  CHECK(IsSmi(length_.load()));
   CHECK_GE(capacity(), kMinCapacity);
   CHECK_LE(capacity(), kMaxCapacity);
   CHECK_GE(number_of_capture_registers(), kMinCapacity);
@@ -815,35 +815,35 @@ void FeedbackCell::FeedbackCellVerify(Isolate* isolate) {
   CodeKind kind = code->kind();
   CHECK(kind == CodeKind::FOR_TESTING || kind == CodeKind::BUILTIN ||
         kind == CodeKind::INTERPRETED_FUNCTION || kind == CodeKind::BASELINE ||
-        kind == CodeKind::MAGLEV || kind == CodeKind::TURBOFAN);
+        kind == CodeKind::MAGLEV || kind == CodeKind::TURBOFAN_JS);
 #endif
 }
 
 void ClosureFeedbackCellArray::ClosureFeedbackCellArrayVerify(
     Isolate* isolate) {
-  CHECK(IsSmi(TaggedField<Object>::load(*this, kCapacityOffset)));
+  CHECK(IsSmi(length_.load()));
   for (int i = 0; i < length(); ++i) {
     Object::VerifyPointer(isolate, get(i));
   }
 }
 
 void WeakFixedArray::WeakFixedArrayVerify(Isolate* isolate) {
-  CHECK(IsSmi(TaggedField<Object>::load(*this, kLengthOffset)));
+  CHECK(IsSmi(length_.load()));
   for (int i = 0; i < length(); i++) {
     Object::VerifyMaybeObjectPointer(isolate, get(i));
   }
 }
 
 void TrustedWeakFixedArray::TrustedWeakFixedArrayVerify(Isolate* isolate) {
-  CHECK(IsSmi(TaggedField<Object>::load(*this, kLengthOffset)));
+  CHECK(IsSmi(length_.load()));
   for (int i = 0; i < length(); i++) {
     Object::VerifyMaybeObjectPointer(isolate, get(i));
   }
 }
 
 void ScriptContextTable::ScriptContextTableVerify(Isolate* isolate) {
-  CHECK(IsSmi(TaggedField<Object>::load(*this, kCapacityOffset)));
-  CHECK(IsSmi(TaggedField<Object>::load(*this, kLengthOffset)));
+  CHECK(IsSmi(capacity_.load()));
+  CHECK(IsSmi(length_.load()));
   int len = length(kAcquireLoad);
   CHECK_LE(0, len);
   CHECK_LE(len, capacity());
@@ -860,7 +860,7 @@ void ArrayList::ArrayListVerify(Isolate* isolate) {
   CHECK_LE(0, length());
   CHECK_LE(length(), capacity());
   CHECK_IMPLIES(capacity() == 0,
-                *this == ReadOnlyRoots(isolate).empty_array_list());
+                this == ReadOnlyRoots(isolate).empty_array_list());
   for (int i = 0; i < capacity(); ++i) {
     Object::VerifyPointer(isolate, get(i));
   }
@@ -880,17 +880,13 @@ void PropertyArray::PropertyArrayVerify(Isolate* isolate) {
   }
 }
 
-void ByteArray::ByteArrayVerify(Isolate* isolate) {
-  CHECK(IsSmi(TaggedField<Object>::load(*this, kLengthOffset)));
-}
+void ByteArray::ByteArrayVerify(Isolate* isolate) {}
 
 void TrustedByteArray::TrustedByteArrayVerify(Isolate* isolate) {
   TrustedObjectVerify(isolate);
-  CHECK(IsSmi(TaggedField<Object>::load(*this, kLengthOffset)));
 }
 
 void FixedDoubleArray::FixedDoubleArrayVerify(Isolate* isolate) {
-  CHECK(IsSmi(TaggedField<Object>::load(*this, kLengthOffset)));
   for (int i = 0; i < length(); i++) {
     if (!is_the_hole(i)) {
       uint64_t value = get_representation(i);
@@ -912,18 +908,19 @@ void Context::ContextVerify(Isolate* isolate) {
     VerifyObjectField(isolate, OffsetOfElementAt(i));
   }
   if (IsScriptContext()) {
-    Tagged<Object> side_data = get(CONST_TRACKING_LET_SIDE_DATA_INDEX);
+    Tagged<Object> side_data = get(CONTEXT_SIDE_TABLE_PROPERTY_INDEX);
     CHECK(IsFixedArray(side_data));
     Tagged<FixedArray> side_data_array = Cast<FixedArray>(side_data);
     if (v8_flags.const_tracking_let) {
       for (int i = 0; i < side_data_array->length(); i++) {
         Tagged<Object> element = side_data_array->get(i);
         if (IsSmi(element)) {
-          CHECK(element == ConstTrackingLetCell::kConstMarker ||
-                element == ConstTrackingLetCell::kNonConstMarker);
+          int value = element.ToSmi().value();
+          CHECK(ContextSidePropertyCell::kOther <= value);
+          CHECK(value <= ContextSidePropertyCell::kMutableHeapNumber);
         } else {
           // The slot contains `undefined` before the variable is initialized.
-          CHECK(IsUndefined(element) || IsConstTrackingLetCell(element));
+          CHECK(IsUndefined(element) || IsContextSidePropertyCell(element));
         }
       }
     } else {
@@ -1118,15 +1115,14 @@ void JSArgumentsObject::JSArgumentsObjectVerify(Isolate* isolate) {
     SloppyArgumentsElementsVerify(
         isolate, Cast<SloppyArgumentsElements>(elements()), *this);
   }
-  if (isolate->IsInAnyContext(map(), Context::SLOPPY_ARGUMENTS_MAP_INDEX) ||
-      isolate->IsInAnyContext(map(),
-                              Context::SLOW_ALIASED_ARGUMENTS_MAP_INDEX) ||
-      isolate->IsInAnyContext(map(),
-                              Context::FAST_ALIASED_ARGUMENTS_MAP_INDEX)) {
+  Tagged<NativeContext> native_context = map()->map()->native_context();
+  if (map() == native_context->get(Context::SLOPPY_ARGUMENTS_MAP_INDEX) ||
+      map() == native_context->get(Context::SLOW_ALIASED_ARGUMENTS_MAP_INDEX) ||
+      map() == native_context->get(Context::FAST_ALIASED_ARGUMENTS_MAP_INDEX)) {
     VerifyObjectField(isolate, JSSloppyArgumentsObject::kLengthOffset);
     VerifyObjectField(isolate, JSSloppyArgumentsObject::kCalleeOffset);
-  } else if (isolate->IsInAnyContext(map(),
-                                     Context::STRICT_ARGUMENTS_MAP_INDEX)) {
+  } else if (map() ==
+             native_context->get(Context::STRICT_ARGUMENTS_MAP_INDEX)) {
     VerifyObjectField(isolate, JSStrictArgumentsObject::kLengthOffset);
   }
 }
@@ -1509,8 +1505,8 @@ void PropertyCell::PropertyCellVerify(Isolate* isolate) {
   CheckDataIsCompatible(property_details(), value());
 }
 
-void ConstTrackingLetCell::ConstTrackingLetCellVerify(Isolate* isolate) {
-  TorqueGeneratedClassVerifiers::ConstTrackingLetCellVerify(*this, isolate);
+void ContextSidePropertyCell::ContextSidePropertyCellVerify(Isolate* isolate) {
+  TorqueGeneratedClassVerifiers::ContextSidePropertyCellVerify(*this, isolate);
 }
 
 void TrustedObject::TrustedObjectVerify(Isolate* isolate) {
@@ -1519,6 +1515,10 @@ void TrustedObject::TrustedObjectVerify(Isolate* isolate) {
   // TODO(saelo): Some objects are trusted but do not yet live in trusted space.
   CHECK(HeapLayout::InTrustedSpace(*this) || IsCode(*this));
 #endif
+}
+
+void TrustedObjectLayout::TrustedObjectVerify(Isolate* isolate) {
+  UncheckedCast<TrustedObject>(this)->TrustedObjectVerify(isolate);
 }
 
 void ExposedTrustedObject::ExposedTrustedObjectVerify(Isolate* isolate) {
@@ -2376,12 +2376,12 @@ void EnumCache::EnumCacheVerify(Isolate* isolate) {
 
 void ObjectBoilerplateDescription::ObjectBoilerplateDescriptionVerify(
     Isolate* isolate) {
-  CHECK(IsSmi(TaggedField<Object>::load(*this, Shape::kCapacityOffset)));
-  CHECK(
-      IsSmi(TaggedField<Object>::load(*this, Shape::kBackingStoreSizeOffset)));
-  CHECK(IsSmi(TaggedField<Object>::load(*this, Shape::kFlagsOffset)));
-  for (int i = 0; i < capacity(); ++i) {
-    CHECK(!IsThinString(get(i), isolate));
+  CHECK(IsSmi(length_.load()));
+  CHECK(IsSmi(backing_store_size_.load()));
+  CHECK(IsSmi(flags_.load()));
+  // The keys of the boilerplate should not be thin strings. The values can be.
+  for (int i = 0; i < boilerplate_properties_count(); ++i) {
+    CHECK(!IsThinString(name(i), isolate));
   }
 }
 
@@ -2474,7 +2474,8 @@ void WasmExportedFunctionData::WasmExportedFunctionDataVerify(
 #if V8_ENABLE_DRUMBRAKE
         wrapper->builtin_id() == Builtin::kGenericJSToWasmInterpreterWrapper ||
 #endif  // V8_ENABLE_DRUMBRAKE
-        wrapper->builtin_id() == Builtin::kWasmPromising)));
+        wrapper->builtin_id() == Builtin::kWasmPromising ||
+        wrapper->builtin_id() == Builtin::kWasmStressSwitch)));
 }
 
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -2546,7 +2547,7 @@ void Script::ScriptVerify(Isolate* isolate) {
 }
 
 void NormalizedMapCache::NormalizedMapCacheVerify(Isolate* isolate) {
-  Cast<WeakFixedArray>(*this)->WeakFixedArrayVerify(isolate);
+  Cast<WeakFixedArray>(this)->WeakFixedArrayVerify(isolate);
   if (v8_flags.enable_slow_asserts) {
     for (int i = 0; i < length(); i++) {
       Tagged<MaybeObject> e = WeakFixedArray::get(i);
@@ -2604,7 +2605,7 @@ void ErrorStackData::ErrorStackDataVerify(Isolate* isolate) {
 }
 
 void SloppyArgumentsElements::SloppyArgumentsElementsVerify(Isolate* isolate) {
-  FixedArrayBaseVerify(isolate);
+  CHECK(IsSmi(length_.load()));
   {
     auto o = context();
     Object::VerifyPointer(isolate, o);
@@ -2826,7 +2827,7 @@ bool TransitionArray::IsSortedNoDuplicates() {
     int cmp = CompareKeys(prev_key, prev_hash, prev_kind, prev_attributes, key,
                           hash, kind, attributes);
     if (cmp >= 0) {
-      Print(*this);
+      Print(this);
       return false;
     }
     prev_key = key;

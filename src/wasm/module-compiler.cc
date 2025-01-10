@@ -29,6 +29,7 @@
 #include "src/wasm/std-object-sizes.h"
 #include "src/wasm/streaming-decoder.h"
 #include "src/wasm/wasm-code-manager.h"
+#include "src/wasm/wasm-code-pointer-table-inl.h"
 #include "src/wasm/wasm-engine.h"
 #include "src/wasm/wasm-feature-flags.h"
 #include "src/wasm/wasm-import-wrapper-cache.h"
@@ -1354,7 +1355,7 @@ class FeedbackMaker {
   void AddCallRefCandidate(Tagged<WasmFuncRef> funcref, int count) {
     Tagged<WasmInternalFunction> internal_function =
         Cast<WasmFuncRef>(funcref)->internal(isolate_);
-    // Only consider wasm function declared in this instance.
+    // Discard cross-instance calls, as we can only inline same-instance code.
     if (internal_function->implicit_arg() != instance_data_) {
       has_non_inlineable_targets_ = true;
       return;
@@ -1367,7 +1368,16 @@ class FeedbackMaker {
     AddCall(internal_function->function_index(), count);
   }
 
-  void AddCallIndirectCandidate(Tagged<Smi> target_truncated_smi, int count) {
+  void AddCallIndirectCandidate(Tagged<Object> target_truncated_obj,
+                                int count) {
+    // Discard cross-instance calls, as we can only inline same-instance code.
+    bool is_cross_instance_call = IsUndefined(target_truncated_obj);
+    if (is_cross_instance_call) {
+      has_non_inlineable_targets_ = true;
+      return;
+    }
+    Tagged<Smi> target_truncated_smi = Cast<Smi>(target_truncated_obj);
+
     // We need to map a truncated call target back to a function index.
     // Generally there may be multiple jump tables if code spaces are far apart
     // (to ensure that direct calls can always use a near call to the closest
@@ -1376,6 +1386,20 @@ class FeedbackMaker {
     // from the `WasmDispatchTable`, whose entries are always targets pointing
     // into the main jump table, so we only need to check against that.
 
+#ifdef V8_ENABLE_WASM_CODE_POINTER_TABLE
+    WasmCodePointerTable::Handle handle = target_truncated_smi.value();
+    Address entry = GetProcessWideWasmCodePointerTable()->GetEntrypoint(handle);
+    wasm::WasmCode* code =
+        wasm::GetWasmCodeManager()->LookupCode(nullptr, entry);
+    if (!code || code->native_module() != instance_data_->native_module() ||
+        code->IsAnonymous()) {
+      // Was not in the main table (e.g., because it's an imported function).
+      has_non_inlineable_targets_ = true;
+      return;
+    }
+    DCHECK_EQ(code->kind(), WasmCode::Kind::kWasmFunction);
+    uint32_t func_idx = code->index();
+#else
     Address jt_start = instance_data_->native_module()->jump_table_start();
     uint32_t jt_size = JumpTableAssembler::SizeForNumberOfSlots(
         instance_data_->module()->num_declared_functions);
@@ -1396,6 +1420,7 @@ class FeedbackMaker {
     uint32_t jt_slot_idx = JumpTableAssembler::SlotOffsetToIndex(jt_offset);
     uint32_t func_idx =
         instance_data_->module()->num_imported_functions + jt_slot_idx;
+#endif
     AddCall(func_idx, count);
   }
 
@@ -1478,21 +1503,22 @@ void TransitiveTypeFeedbackProcessor::ProcessFunction(int func_index) {
 
   // For each entry in {call_targets}, there are two {Object} slots in the
   // {feedback} vector:
+  // +--------------------------+-----------------------+-------------------+
+  // |        Call Type         |   Feedback: Entry 1   |      Entry 2      |
   // +-------------------------+-----------------------+-------------------+
-  // |        Call Type        |   Feedback: Entry 1   |      Entry 2      |
-  // +-------------------------+-----------------------+-------------------+
-  // | direct                  | Smi(count)            | Smi(0), unused    |
-  // +-------------------------+-----------------------+-------------------+
-  // | ref, uninitialized      | Smi(0)                | Smi(0)            |
-  // | ref, monomorphic        | WasmFuncRef(target)   | Smi(count>0)      |
-  // | ref, polymorphic        | FixedArray            | Undefined         |
-  // | ref, megamorphic        | MegamorphicSymbol     | Undefined         |
-  // +-------------------------+-----------------------+-------------------+
-  // | indirect, uninitialized | Smi(0)                | Smi(0)            |
-  // | indirect, monomorphic   | Smi(truncated_target) | Smi(count>0)      |
-  // | indirect, polymorphic   | FixedArray            | Undefined         |
-  // | indirect, megamorphic   | MegamorphicSymbol     | Undefined         |
-  // +-------------------------+-----------------------+-------------------+
+  // | direct                   | Smi(count)            | Smi(0), unused    |
+  // +--------------------------+-----------------------+-------------------+
+  // | ref, uninitialized       | Smi(0)                | Smi(0)            |
+  // | ref, monomorphic         | WasmFuncRef(target)   | Smi(count>0)      |
+  // | ref, polymorphic         | FixedArray            | Undefined         |
+  // | ref, megamorphic         | MegamorphicSymbol     | Undefined         |
+  // +--------------------------+-----------------------+-------------------+
+  // | indirect, uninitialized  | Smi(0)                | Smi(0)            |
+  // | indirect, monomorphic    | Smi(truncated_target) | Smi(count>0)      |
+  // | indirect, wrong instance | Undefined             | Smi(count>0)      |
+  // | indirect, polymorphic    | FixedArray            | Undefined         |
+  // | indirect, megamorphic    | MegamorphicSymbol     | Undefined         |
+  // +--------------------------+-----------------------+-------------------+
   // The FixedArray entries for the polymorphic cases look like the monomorphic
   // entries in the feedback vector itself.
   // See {UpdateCallRefOrIndirectIC} in {wasm.tq} for how this is written.
@@ -1527,11 +1553,11 @@ void TransitiveTypeFeedbackProcessor::ProcessFunction(int func_index) {
       DCHECK_EQ(sentinel_or_target, FunctionTypeFeedback::kCallRef);
       int count = Smi::ToInt(second_slot);
       fm.AddCallRefCandidate(Cast<WasmFuncRef>(first_slot), count);
-    } else if (IsSmi(first_slot)) {
+    } else if (IsSmi(first_slot) || IsUndefined(first_slot)) {
       // Monomorphic call_indirect.
       DCHECK_EQ(sentinel_or_target, FunctionTypeFeedback::kCallIndirect);
       int count = Smi::ToInt(second_slot);
-      fm.AddCallIndirectCandidate(Cast<Smi>(first_slot), count);
+      fm.AddCallIndirectCandidate(first_slot, count);
     } else if (IsFixedArray(first_slot)) {
       // Polymorphic call_ref or call_indirect.
       Tagged<FixedArray> polymorphic = Cast<FixedArray>(first_slot);
@@ -1547,7 +1573,7 @@ void TransitiveTypeFeedbackProcessor::ProcessFunction(int func_index) {
       } else {
         DCHECK_EQ(sentinel_or_target, FunctionTypeFeedback::kCallIndirect);
         for (int j = 0; j < checked_polymorphic_length; j += 2) {
-          Tagged<Smi> target = Cast<Smi>(polymorphic->get(j));
+          Tagged<Object> target = polymorphic->get(j);
           int count = Smi::ToInt(polymorphic->get(j + 1));
           fm.AddCallIndirectCandidate(target, count);
         }
@@ -1669,6 +1695,11 @@ void TierUpAllForTesting(
   }
 }
 
+void InitializeCompilationForTesting(NativeModule* native_module) {
+  Impl(native_module->compilation_state())
+      ->InitializeCompilationProgress(nullptr);
+}
+
 void PublishDetectedFeatures(WasmDetectedFeatures detected_features,
                              Isolate* isolate, bool is_initial_compilation) {
   using Feature = v8::Isolate::UseCounterFeature;
@@ -1746,9 +1777,9 @@ namespace {
 
 bool IsI16Array(wasm::ValueType type, const WasmModule* module) {
   if (!type.is_object_reference() || !type.has_index()) return false;
-  uint32_t reftype = type.ref_index();
+  ModuleTypeIndex reftype = type.ref_index();
   if (!module->has_array(reftype)) return false;
-  return module->isorecursive_canonical_type_ids[reftype] ==
+  return module->canonical_type_id(reftype) ==
          TypeCanonicalizer::kPredefinedArrayI16Index;
 }
 
@@ -1756,9 +1787,9 @@ bool IsI8Array(wasm::ValueType type, const WasmModule* module,
                bool allow_nullable) {
   if (!type.is_object_reference() || !type.has_index()) return false;
   if (!allow_nullable && type.is_nullable()) return false;
-  uint32_t reftype = type.ref_index();
+  ModuleTypeIndex reftype = type.ref_index();
   if (!module->has_array(reftype)) return false;
-  return module->isorecursive_canonical_type_ids[reftype] ==
+  return module->canonical_type_id(reftype) ==
          TypeCanonicalizer::kPredefinedArrayI8Index;
 }
 
@@ -4063,7 +4094,7 @@ class TriggerCodeCachingAfterTimeoutTask : public v8::Task {
 }  // namespace
 
 void CompilationStateImpl::TriggerOutstandingCallbacks() {
-  DCHECK(!callbacks_mutex_.TryLock());
+  callbacks_mutex_.AssertHeld();
 
   base::EnumSet<CompilationEvent> triggered_events;
   if (outstanding_baseline_units_ == 0) {
@@ -4180,15 +4211,12 @@ void CompilationStateImpl::OnCompilationStopped(
   // validation is enabled.
   // The exceptions are currently stringref and imported strings, which are only
   // detected on top-tier compilation.
-  // TODO(372840600): This DCHECK sometimes fails; fix and re-enable it.
-  // Current theory is that NativeModule deserialization from the disk cache
-  // skips function validation and hence doesn't detect features early.
-  // DCHECK(!v8_flags.wasm_lazy_compilation || v8_flags.wasm_lazy_validation ||
-  //       (new_detected_features -
-  //        WasmDetectedFeatures{{WasmDetectedFeature::stringref,
-  //                              WasmDetectedFeature::imported_strings_utf8,
-  //                              WasmDetectedFeature::imported_strings}})
-  //           .empty());
+  DCHECK(!v8_flags.wasm_lazy_compilation || v8_flags.wasm_lazy_validation ||
+         (new_detected_features -
+          WasmDetectedFeatures{{WasmDetectedFeature::stringref,
+                                WasmDetectedFeature::imported_strings_utf8,
+                                WasmDetectedFeature::imported_strings}})
+             .empty());
   // TODO(clemensb): Fix reporting of late detected features (relevant for lazy
   // validation and for stringref).
 }
@@ -4343,21 +4371,21 @@ WasmCode* CompileImportWrapperForTest(Isolate* isolate,
                                       NativeModule* native_module,
                                       ImportCallKind kind,
                                       const CanonicalSig* sig,
-                                      uint32_t canonical_type_index,
+                                      CanonicalTypeIndex type_index,
                                       int expected_arity, Suspend suspend) {
   bool source_positions = is_asmjs_module(native_module->module());
   if (v8_flags.wasm_jitless) {
     WasmImportWrapperCache::ModificationScope cache_scope(
         GetWasmImportWrapperCache());
-    WasmImportWrapperCache::CacheKey key(kind, canonical_type_index,
-                                         expected_arity, suspend);
+    WasmImportWrapperCache::CacheKey key(kind, type_index, expected_arity,
+                                         suspend);
     DCHECK_NULL(cache_scope[key]);
     return nullptr;
   }
 
   return GetWasmImportWrapperCache()->CompileWasmImportCallWrapper(
-      isolate, native_module, kind, sig, canonical_type_index, source_positions,
-      expected_arity, suspend);
+      isolate, kind, sig, type_index, source_positions, expected_arity,
+      suspend);
 }
 
 }  // namespace v8::internal::wasm

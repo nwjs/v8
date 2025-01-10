@@ -112,7 +112,8 @@ BasicBlockProfilerData* BasicBlockInstrumentor::Instrument(
     // Construct increment operation.
     int offset_to_counter_value = static_cast<int>(block_number) * kInt32Size;
     if (on_heap_counters) {
-      offset_to_counter_value += ByteArray::kHeaderSize - kHeapObjectTag;
+      offset_to_counter_value +=
+          OFFSET_OF_DATA_START(ByteArray) - kHeapObjectTag;
     }
     Node* offset_to_counter =
         graph->NewNode(IntPtrConstant(&common, offset_to_counter_value));
@@ -172,7 +173,8 @@ void StoreBuiltinCallForNode(Node* n, Builtin builtin, int block_id,
       Node* callee = n->InputAt(0);
       Operator* op = const_cast<Operator*>(callee->op());
       if (op->opcode() == IrOpcode::kHeapConstant) {
-        Handle<HeapObject> para = OpParameter<Handle<HeapObject>>(op);
+        IndirectHandle<HeapObject> para =
+            OpParameter<IndirectHandle<HeapObject>>(op);
         if (IsCode(*para)) {
           DirectHandle<Code> code = Cast<Code>(para);
           if (code->is_builtin()) {

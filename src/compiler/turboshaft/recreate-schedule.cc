@@ -191,10 +191,6 @@ TURBOSHAFT_WASM_OPERATION_LIST(SHOULD_HAVE_BEEN_LOWERED)
 SHOULD_HAVE_BEEN_LOWERED(Dead)
 #undef SHOULD_HAVE_BEEN_LOWERED
 
-Node* ScheduleBuilder::ProcessOperation(const IdentityOp& op) {
-  return GetNode(op.input());
-}
-
 Node* ScheduleBuilder::ProcessOperation(const WordBinopOp& op) {
   using Kind = WordBinopOp::Kind;
   const Operator* o;
@@ -1096,8 +1092,15 @@ Node* ScheduleBuilder::ProcessOperation(const ConstantOp& op) {
                          RelocInfo::WASM_CANONICAL_SIG_ID),
                      {});
     case ConstantOp::Kind::kRelocatableWasmIndirectCallTarget:
-      return RelocatableIntPtrConstant(op.integral(),
-                                       RelocInfo::WASM_INDIRECT_CALL_TARGET);
+      if constexpr (V8_ENABLE_WASM_CODE_POINTER_TABLE_BOOL) {
+        return AddNode(common.RelocatableInt32Constant(
+                           base::checked_cast<int32_t>(op.integral()),
+                           RelocInfo::WASM_INDIRECT_CALL_TARGET),
+                       {});
+      } else {
+        return RelocatableIntPtrConstant(op.integral(),
+                                         RelocInfo::WASM_INDIRECT_CALL_TARGET);
+      }
   }
 }
 

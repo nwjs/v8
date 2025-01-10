@@ -27,7 +27,8 @@ WireBytesRef ConstantExpression::wire_bytes_ref() const {
 }
 
 ValueOrError EvaluateConstantExpression(
-    Zone* zone, ConstantExpression expr, ValueType expected, Isolate* isolate,
+    Zone* zone, ConstantExpression expr, ValueType expected,
+    const WasmModule* module, Isolate* isolate,
     Handle<WasmTrustedInstanceData> trusted_instance_data,
     Handle<WasmTrustedInstanceData> shared_trusted_instance_data) {
   switch (expr.kind()) {
@@ -36,12 +37,10 @@ ValueOrError EvaluateConstantExpression(
     case ConstantExpression::kI32Const:
       return WasmValue(expr.i32_value());
     case ConstantExpression::kRefNull:
-      return WasmValue(
-          expected == kWasmExternRef || expected == kWasmNullExternRef ||
-                  expected == kWasmNullExnRef || expected == kWasmExnRef
-              ? Cast<Object>(isolate->factory()->null_value())
-              : Cast<Object>(isolate->factory()->wasm_null()),
-          ValueType::RefNull(expr.repr()));
+      return WasmValue(expected.use_wasm_null()
+                           ? Cast<Object>(isolate->factory()->wasm_null())
+                           : Cast<Object>(isolate->factory()->null_value()),
+                       ValueType::RefNull(expr.repr()), module);
     case ConstantExpression::kRefFunc: {
       uint32_t index = expr.index();
       const WasmModule* module = trusted_instance_data->module();
@@ -52,7 +51,7 @@ ValueOrError EvaluateConstantExpression(
           function_is_shared ? shared_trusted_instance_data
                              : trusted_instance_data,
           index);
-      return WasmValue(value, expected);
+      return WasmValue(value, expected, module);
     }
     case ConstantExpression::kWireBytesRef: {
       WireBytesRef ref = expr.wire_bytes_ref();

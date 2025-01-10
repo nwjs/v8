@@ -59,9 +59,26 @@ void WriteBarrier::MarkingSlowFromTracedHandle(Tagged<HeapObject> value) {
 }
 
 // static
-void WriteBarrier::MarkingSlowFromCppHeapWrappable(Heap* heap, void* object) {
-  if (auto* cpp_heap = heap->cpp_heap()) {
-    CppHeap::From(cpp_heap)->WriteBarrier(object);
+void WriteBarrier::MarkingSlowFromCppHeapWrappable(Heap* heap,
+                                                   Tagged<JSObject> host,
+                                                   CppHeapPointerSlot slot,
+                                                   void* object) {
+  // Note: this is currently a combined barrier for marking both the
+  // CppHeapPointerTable entry and the referenced object (if any).
+
+#ifdef V8_COMPRESS_POINTERS
+  MarkingBarrier* marking_barrier = CurrentMarkingBarrier(host);
+  IsolateForPointerCompression isolate(marking_barrier->heap()->isolate());
+
+  CppHeapPointerTable& table = isolate.GetCppHeapPointerTable();
+  CppHeapPointerTable::Space* space = isolate.GetCppHeapPointerTableSpace();
+
+  ExternalPointerHandle handle = slot.Relaxed_LoadHandle();
+  table.Mark(space, handle, slot.address());
+#endif  // V8_COMPRESS_POINTERS
+
+  if (heap->cpp_heap() && object) {
+    CppHeap::From(heap->cpp_heap())->WriteBarrier(object);
   }
 }
 
@@ -118,6 +135,23 @@ void WriteBarrier::MarkingSlow(Tagged<DescriptorArray> descriptor_array,
 }
 
 void WriteBarrier::MarkingSlow(Tagged<HeapObject> host,
+                               ExternalPointerSlot slot) {
+#ifdef V8_COMPRESS_POINTERS
+  if (!slot.HasExternalPointerHandle()) return;
+
+  MarkingBarrier* marking_barrier = CurrentMarkingBarrier(host);
+  IsolateForPointerCompression isolate(marking_barrier->heap()->isolate());
+
+  ExternalPointerTable& table = isolate.GetExternalPointerTableFor(slot.tag());
+  ExternalPointerTable::Space* space =
+      isolate.GetExternalPointerTableSpaceFor(slot.tag(), host.address());
+
+  ExternalPointerHandle handle = slot.Relaxed_LoadHandle();
+  table.Mark(space, handle, slot.address());
+#endif  // V8_COMPRESS_POINTERS
+}
+
+void WriteBarrier::MarkingSlow(Tagged<HeapObject> host,
                                IndirectPointerSlot slot) {
   MarkingBarrier* marking_barrier = CurrentMarkingBarrier(host);
   marking_barrier->Write(host, slot);
@@ -144,6 +178,7 @@ void WriteBarrier::MarkingSlow(Tagged<HeapObject> host,
 
   // Mark both the table entry and its content.
   JSDispatchTable* jdt = GetProcessWideJSDispatchTable();
+  static_assert(JSDispatchTable::kWriteBarrierSetsEntryMarkBit);
   jdt->Mark(handle);
   marking_barrier->MarkValue(host, jdt->GetCode(handle));
 
@@ -492,5 +527,43 @@ void WriteBarrier::ForRange(Heap* heap, Tagged<HeapObject> object,
       UNREACHABLE();
   }
 }
+
+#ifdef ENABLE_SLOW_DCHECKS
+
+// static
+bool WriteBarrier::VerifyDispatchHandleMarkingState(Tagged<HeapObject> host,
+                                                    JSDispatchHandle handle,
+                                                    WriteBarrierMode mode) {
+#ifdef V8_ENABLE_LEAPTIERING
+  if (mode == SKIP_WRITE_BARRIER &&
+      WriteBarrier::IsRequired(
+          host, GetProcessWideJSDispatchTable()->GetCode(handle))) {
+    return false;
+  }
+
+  if (CurrentMarkingBarrier(host)->is_not_major()) return true;
+
+  // Ensure we don't have a black -> white -> black edge. This could happen when
+  // skipping a write barrier while concurrently the dispatch entry is marked
+  // from another JSFunction.
+  if (ReadOnlyHeap::Contains(host) ||
+      (IsMarking(host) && mode != SKIP_WRITE_BARRIER) ||
+      !CurrentMarkingBarrier(host)->IsMarked(host)) {
+    return true;
+  }
+  if (GetProcessWideJSDispatchTable()->IsMarked(handle)) {
+    return true;
+  }
+  Tagged<Code> value = GetProcessWideJSDispatchTable()->GetCode(handle);
+  if (ReadOnlyHeap::Contains(value)) {
+    return true;
+  }
+  return !CurrentMarkingBarrier(host)->IsMarked(value);
+#else
+  return true;
+#endif  // V8_ENABLE_LEAPTIERING
+}
+
+#endif  // ENABLE_SLOW_DCHECKS
 
 }  // namespace v8::internal

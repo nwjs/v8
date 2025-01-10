@@ -114,7 +114,6 @@ class Builtins {
   // The list of builtins that can be called indirectly from Wasm and need an
   // entry in the WasmCodePointerTable.
   static constexpr Builtin kWasmIndirectlyCallableBuiltins[] = {
-      Builtin::kWasmToOnHeapWasmToJsTrampoline,
       Builtin::kWasmToJsWrapperInvalidSig, Builtin::kWasmToJsWrapperAsm};
   static constexpr size_t kNumWasmIndirectlyCallableBuiltins =
       arraysize(kWasmIndirectlyCallableBuiltins);
@@ -167,6 +166,8 @@ class Builtins {
       ConvertReceiverMode = ConvertReceiverMode::kAny);
   static inline constexpr Builtin Call(
       ConvertReceiverMode = ConvertReceiverMode::kAny);
+  // Whether the given builtin is one of the JS function call builtins.
+  static inline constexpr bool IsAnyCall(Builtin builtin);
 
   static inline constexpr Builtin NonPrimitiveToPrimitive(
       ToPrimitiveHint hint = ToPrimitiveHint::kDefault);
@@ -202,7 +203,7 @@ class Builtins {
   static CallInterfaceDescriptor CallInterfaceDescriptorFor(Builtin builtin);
   V8_EXPORT_PRIVATE static Callable CallableFor(Isolate* isolate,
                                                 Builtin builtin);
-  static bool HasJSLinkage(Builtin builtin);
+  V8_EXPORT_PRIVATE static bool HasJSLinkage(Builtin builtin);
 
   // Returns the number builtin's parameters passed on the stack.
   V8_EXPORT_PRIVATE static int GetStackParameterCount(Builtin builtin);

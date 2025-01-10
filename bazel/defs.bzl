@@ -269,6 +269,7 @@ def v8_library(
             copts = copts + default.copts,
             linkopts = linkopts + default.linkopts,
             alwayslink = 1,
+            linkstatic = 1,
             **kwargs
         )
 
@@ -287,6 +288,7 @@ def v8_library(
             copts = copts + default.copts + ENABLE_I18N_SUPPORT_DEFINES,
             linkopts = linkopts + default.linkopts,
             alwayslink = 1,
+            linkstatic = 1,
             **kwargs
         )
 
@@ -306,6 +308,7 @@ def v8_library(
             copts = copts + default.copts,
             linkopts = linkopts + default.linkopts,
             alwayslink = 1,
+            linkstatic = 1,
             **kwargs
         )
 
@@ -532,6 +535,7 @@ def build_config_content(cpu, icu):
         ("arch", arch),
         ("asan", "false"),
         ("atomic_object_field_writes", "false"),
+        ("cet_shadow_stack", "false"),
         ("cfi", "false"),
         ("clang_coverage", "false"),
         ("clang", "true"),

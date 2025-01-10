@@ -47,11 +47,15 @@ namespace v8::internal::compiler::turboshaft {
   V(F32x4Abs, F32x8Abs)                                    \
   V(F32x4Neg, F32x8Neg)                                    \
   V(F32x4Sqrt, F32x8Sqrt)                                  \
+  V(F64x2Abs, F64x4Abs)                                    \
+  V(F64x2Neg, F64x4Neg)                                    \
   V(F64x2Sqrt, F64x4Sqrt)                                  \
   V(I32x4UConvertF32x4, I32x8UConvertF32x8)                \
   V(I32x4SConvertF32x4, I32x8SConvertF32x8)                \
   V(F32x4UConvertI32x4, F32x8UConvertI32x8)                \
-  V(F32x4SConvertI32x4, F32x8SConvertI32x8)
+  V(F32x4SConvertI32x4, F32x8SConvertI32x8)                \
+  V(I32x4RelaxedTruncF32x4S, I32x8RelaxedTruncF32x8S)      \
+  V(I32x4RelaxedTruncF32x4U, I32x8RelaxedTruncF32x8U)
 
 #define SIMD256_UNARY_SIGN_EXTENSION_OP(V)                              \
   V(I64x2SConvertI32x4Low, I64x4SConvertI32x4, I64x2SConvertI32x4High)  \
@@ -276,6 +280,7 @@ class ShufflePackNode : public PackNode {
     enum class Kind {
       kS256Load32Transform,
       kS256Load64Transform,
+      kS256Load8x8U,
 #ifdef V8_TARGET_ARCH_X64
       kShufd,
       kShufps,
@@ -342,6 +347,37 @@ class ShufflePackNode : public PackNode {
   SpecificInfo info_;
 };
 
+// BundlePackNode is used to represent a i8x16/i16x8 to f32x4 conversion.
+// The conversion extracts 4 lanes of i8x16/i16x8 input(base), start from lane
+// index(offset), sign/zero(is_sign_extract) extends the extracted lanes to
+// i32x4, then converts i32x4/u32x4(is_sign_convert) to f32x4.
+class BundlePackNode : public PackNode {
+ public:
+  BundlePackNode(Zone* zone, const NodeGroup& node_group, OpIndex base,
+                 int8_t offset, uint8_t lane_size, bool is_sign_extract,
+                 bool is_sign_convert)
+      : PackNode(zone, node_group) {
+    base_ = base;
+    offset_ = offset;
+    lane_size_ = lane_size;
+    is_sign_extract_ = is_sign_extract;
+    is_sign_convert_ = is_sign_convert;
+  }
+
+  OpIndex base() const { return base_; }
+  uint8_t offset() const { return offset_; }
+  uint8_t lane_size() const { return lane_size_; }
+  bool is_sign_extract() const { return is_sign_extract_; }
+  bool is_sign_convert() const { return is_sign_convert_; }
+
+ private:
+  OpIndex base_;
+  uint8_t offset_;
+  uint8_t lane_size_;
+  bool is_sign_extract_;
+  bool is_sign_convert_;
+};
+
 class SLPTree : public NON_EXPORTED_BASE(ZoneObject) {
  public:
   explicit SLPTree(Graph& graph, Zone* zone)
@@ -349,6 +385,24 @@ class SLPTree : public NON_EXPORTED_BASE(ZoneObject) {
         phase_zone_(zone),
         root_(nullptr),
         node_to_packnode_(zone) {}
+
+  // Information for extending i8x16/i16x8 to f32x4
+  struct ExtendIntToF32x4Info {
+    OpIndex extend_from;
+    uint8_t start_lane;    // 0 or 8
+    uint8_t lane_size;     // 1(i8) or 2(i16)
+    bool is_sign_extract;  // extract_lane_s or extract_lane_u
+    bool is_sign_convert;  // f32x4.convert_i32x4_s or f32x4.convert_i32x4_u
+  };
+
+  // Per-lane information for extending i8x16/i16x8 to f32x4
+  struct LaneExtendInfo {
+    OpIndex extract_from;
+    Simd128ExtractLaneOp::Kind extract_kind;
+    int extract_lane_index;
+    ChangeOp::Kind change_kind;
+    int replace_lane_index;
+  };
 
   PackNode* BuildTree(const NodeGroup& roots);
   void DeleteTree();
@@ -369,6 +423,9 @@ class SLPTree : public NON_EXPORTED_BASE(ZoneObject) {
 
   PackNode* NewForcePackNode(const NodeGroup& node_group,
                              PackNode::ForcePackType type, const Graph& graph);
+  BundlePackNode* NewBundlePackNode(const NodeGroup& node_group, OpIndex base,
+                                    int8_t offset, uint8_t lane_size,
+                                    bool is_sign_extract, bool is_sign_convert);
 
   // Recursion: create a new PackNode and call BuildTreeRec recursively
   PackNode* NewPackNodeAndRecurs(const NodeGroup& node_group, int start_index,
@@ -379,6 +436,17 @@ class SLPTree : public NON_EXPORTED_BASE(ZoneObject) {
 
   ShufflePackNode* NewShufflePackNode(const NodeGroup& node_group,
                                       ShufflePackNode::SpecificInfo::Kind kind);
+
+  // Try match the following pattern:
+  //   1. simd128_load64zero(memargs)
+  //   2. simd128_const[0,0,0,0]
+  //   3. simd128_shuffle(1, 2, shuffle_arg0)
+  //   4. simd128_shuffle(1, 2, shuffle_arg1)
+  // To:
+  //   1. simd256_load8x8u(memargs)
+  ShufflePackNode* Try256ShuffleMatchLoad8x8U(const NodeGroup& node_group,
+                                              const uint8_t* shuffle0,
+                                              const uint8_t* shuffle1);
 
 #ifdef V8_TARGET_ARCH_X64
   // The Simd Shuffle in wasm is a high level representation, and it can map to
@@ -400,9 +468,15 @@ class SLPTree : public NON_EXPORTED_BASE(ZoneObject) {
                                          const uint8_t* shuffle1);
 #endif  // V8_TARGET_ARCH_X64
 
+  bool TryMatchExtendIntToF32x4(const NodeGroup& node_group,
+                                ExtendIntToF32x4Info* info);
+  std::optional<ExtendIntToF32x4Info> TryGetExtendIntToF32x4Info(OpIndex index);
+
   bool IsSideEffectFree(OpIndex first, OpIndex second);
   bool CanBePacked(const NodeGroup& node_group);
   bool IsEqual(const OpIndex node0, const OpIndex node1);
+  // Check if the nodes in the node_group depend on the result of each other.
+  bool HasInputDependencies(const NodeGroup& node_group);
 
   Graph& graph() const { return graph_; }
   Zone* zone() const { return phase_zone_; }
@@ -503,7 +577,8 @@ class WasmRevecReducer : public UniformReducerAdapter<WasmRevecReducer, Next> {
       // Extract128 is needed for the additional Simd128 store before
       // Simd256 store in case of OOB trap at the higher 128-bit
       // address.
-      if (auto use_pnode = analyzer_.GetPackNode(use)) {
+      auto use_pnode = analyzer_.GetPackNode(use);
+      if (use_pnode != nullptr && !use_pnode->is_force_pack()) {
         DCHECK_GE(use_pnode->nodes().size(), 2);
         if (__ input_graph().Get(use).opcode != Opcode::kStore ||
             use_pnode->nodes()[0] != use ||
@@ -853,6 +928,33 @@ class WasmRevecReducer : public UniformReducerAdapter<WasmRevecReducer, Next> {
             pnode->SetRevectorizedNode(og_index);
             break;
           }
+          case ShufflePackNode::SpecificInfo::Kind::kS256Load8x8U: {
+            const Simd128ShuffleOp& op0 =
+                __ input_graph()
+                    .Get(pnode -> nodes()[0])
+                    .template Cast<Simd128ShuffleOp>();
+
+            V<Simd128> load_transform_idx =
+                __ input_graph()
+                        .Get(op0.left())
+                        .template Is<Simd128LoadTransformOp>()
+                    ? op0.left()
+                    : op0.right();
+            const Simd128LoadTransformOp& load_transform =
+                __ input_graph()
+                    .Get(load_transform_idx)
+                    .template Cast<Simd128LoadTransformOp>();
+            DCHECK_EQ(load_transform.transform_kind,
+                      Simd128LoadTransformOp::TransformKind::k64Zero);
+            V<WordPtr> base = __ MapToNewGraph(load_transform.base());
+            V<WordPtr> index = __ MapToNewGraph(load_transform.index());
+            og_index = __ Simd256LoadTransform(
+                base, index, load_transform.load_kind,
+                Simd256LoadTransformOp::TransformKind::k8x8U,
+                load_transform.offset);
+            pnode->SetRevectorizedNode(og_index);
+            break;
+          }
 #ifdef V8_TARGET_ARCH_X64
           case ShufflePackNode::SpecificInfo::Kind::kShufd: {
             V<Simd256> og_left = analyzer_.GetReduced(op.left());
@@ -894,6 +996,63 @@ class WasmRevecReducer : public UniformReducerAdapter<WasmRevecReducer, Next> {
     }
 
     return Adapter::ReduceInputGraphSimd128Shuffle(ig_index, op);
+  }
+
+  OpIndex REDUCE_INPUT_GRAPH(Simd128ReplaceLane)(
+      OpIndex ig_index, const Simd128ReplaceLaneOp& replace) {
+    PackNode* pnode = analyzer_.GetPackNode(ig_index);
+    if (pnode && !pnode->is_force_pack()) {
+      V<Simd256> og_index = pnode->RevectorizedNode();
+      // Don't reduce revectorized node.
+      if (!og_index.valid()) {
+        const BundlePackNode* bundle_pnode =
+            static_cast<const BundlePackNode*>(pnode);
+        DCHECK(bundle_pnode);
+        V<Simd128> base_index = __ MapToNewGraph(bundle_pnode->base());
+        V<Simd128> i16x8_index = base_index;
+        V<Simd256> i32x8_index;
+        if (bundle_pnode->is_sign_extract()) {
+          if (bundle_pnode->lane_size() == 1) {
+            if (bundle_pnode->offset() == 0) {
+              i16x8_index = __ Simd128Unary(
+                  base_index, Simd128UnaryOp::Kind::kI16x8SConvertI8x16Low);
+            } else {
+              DCHECK_EQ(bundle_pnode->offset(), 8);
+              i16x8_index = __ Simd128Unary(
+                  base_index, Simd128UnaryOp::Kind::kI16x8SConvertI8x16High);
+            }
+          }
+          i32x8_index = __ Simd256Unary(
+              i16x8_index, Simd256UnaryOp::Kind::kI32x8SConvertI16x8);
+        } else {
+          if (bundle_pnode->lane_size() == 1) {
+            if (bundle_pnode->offset() == 0) {
+              i16x8_index = __ Simd128Unary(
+                  base_index, Simd128UnaryOp::Kind::kI16x8UConvertI8x16Low);
+            } else {
+              DCHECK_EQ(bundle_pnode->offset(), 8);
+              i16x8_index = __ Simd128Unary(
+                  base_index, Simd128UnaryOp::Kind::kI16x8UConvertI8x16High);
+            }
+          }
+          i32x8_index = __ Simd256Unary(
+              i16x8_index, Simd256UnaryOp::Kind::kI32x8UConvertI16x8);
+        }
+
+        if (bundle_pnode->is_sign_convert()) {
+          og_index = __ Simd256Unary(i32x8_index,
+                                     Simd256UnaryOp::Kind::kF32x8SConvertI32x8);
+        } else {
+          og_index = __ Simd256Unary(i32x8_index,
+                                     Simd256UnaryOp::Kind::kF32x8UConvertI32x8);
+        }
+
+        pnode->SetRevectorizedNode(og_index);
+      }
+      return GetExtractOpIfNeeded(pnode, ig_index, og_index);
+    }
+    // no_change
+    return Adapter::ReduceInputGraphSimd128ReplaceLane(ig_index, replace);
   }
 
   void ReduceInputsOfOp(OpIndex cur_index, OpIndex op_index) {

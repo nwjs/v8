@@ -25,6 +25,7 @@
 #include "src/base/platform/platform-posix.h"
 #include "src/builtins/builtins.h"
 #include "src/common/globals.h"
+#include "src/common/thread-local-storage.h"
 #include "src/debug/interface-types.h"
 #include "src/execution/execution.h"
 #include "src/execution/futex-emulation.h"
@@ -562,6 +563,11 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
 #define THREAD_LOCAL_TOP_ADDRESS(type, name) \
   inline type* name##_address() { return &thread_local_top()->name##_; }
 
+// Do not use this variable directly, use Isolate::Current() instead.
+// Defined outside of Isolate because Isolate uses V8_EXPORT_PRIVATE.
+__attribute__((tls_model(V8_TLS_MODEL))) extern thread_local Isolate*
+    g_current_isolate_ V8_CONSTINIT;
+
 // HiddenFactory exists so Isolate can privately inherit from it without making
 // Factory's members available to Isolate directly.
 class V8_EXPORT_PRIVATE HiddenFactory : private Factory {};
@@ -657,13 +663,11 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   V8_INLINE static PerIsolateThreadData* CurrentPerIsolateThreadData();
 
   // Returns the isolate inside which the current thread is running or nullptr.
-  V8_INLINE static Isolate* TryGetCurrent();
+  V8_TLS_DECLARE_GETTER(TryGetCurrent, Isolate*, g_current_isolate_)
 
   // Returns the isolate inside which the current thread is running.
   V8_INLINE static Isolate* Current();
-
-  // Returns the isolate inside which the current thread is running.
-  static Isolate* CurrentMaybeBackground();
+  static void SetCurrent(Isolate* isolate);
 
   inline bool IsCurrent() const;
 
@@ -1314,7 +1318,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     return &isolate_data_.thread_local_top_;
   }
 
-  static uint32_t thread_in_wasm_flag_address_offset() {
+  static constexpr uint32_t thread_in_wasm_flag_address_offset() {
     // For WebAssembly trap handlers there is a flag in thread-local storage
     // which indicates that the executing thread executes WebAssembly code. To
     // access this flag directly from generated code, we store a pointer to the
@@ -1412,12 +1416,28 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   RegExpStack* regexp_stack() const { return regexp_stack_; }
 
+  // Either points to jsregexp_static_offsets_vector, or nullptr if the static
+  // vector is in use.
+  int32_t* regexp_static_result_offsets_vector() const {
+    return regexp_static_result_offsets_vector_;
+  }
+  void set_regexp_static_result_offsets_vector(int32_t* value) {
+    DCHECK_EQ(value == nullptr,
+              regexp_static_result_offsets_vector_ != nullptr);
+    regexp_static_result_offsets_vector_ = value;
+  }
+  Address address_of_regexp_static_result_offsets_vector() const {
+    return reinterpret_cast<Address>(&regexp_static_result_offsets_vector_);
+  }
+
+  // This data structure is only used for an optimization in StringSplit.
+  // TODO(jgruber): Consider removing it.
+  std::vector<int>* regexp_indices() { return &regexp_indices_; }
+
   size_t total_regexp_code_generated() const {
     return total_regexp_code_generated_;
   }
   void IncreaseTotalRegexpCodeGenerated(DirectHandle<HeapObject> code);
-
-  std::vector<int>* regexp_indices() { return &regexp_indices_; }
 
   Debug* debug() const { return debug_; }
 
@@ -1597,7 +1617,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   enum class KnownPrototype { kNone, kObject, kArray, kString };
 
-  KnownPrototype IsArrayOrObjectOrStringPrototype(Tagged<Object> object);
+  KnownPrototype IsArrayOrObjectOrStringPrototype(Tagged<JSObject> object);
 
   // On intent to set an element in object, make sure that appropriate
   // notifications occur if the set is on the elements of the array or
@@ -1625,18 +1645,15 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   void UpdateStringWrapperToPrimitiveProtectorOnSetPrototype(
       DirectHandle<JSObject> object, DirectHandle<Object> new_prototype);
 
-  // Returns true if array is the initial array prototype in any native context.
-  inline bool IsAnyInitialArrayPrototype(Tagged<JSArray> array);
+  // Returns true if array is the initial array prototype of its own creation
+  // context.
+  inline bool IsInitialArrayPrototype(Tagged<JSArray> array);
 
   std::unique_ptr<PersistentHandles> NewPersistentHandles();
 
   PersistentHandlesList* persistent_handles_list() const {
     return persistent_handles_list_.get();
   }
-
-#ifdef DEBUG
-  bool IsDeferredHandle(Address* location);
-#endif  // DEBUG
 
 #ifdef V8_ENABLE_SPARKPLUG
   baseline::BaselineBatchCompiler* baseline_batch_compiler() const {
@@ -1829,14 +1846,15 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     return &startup_object_cache_;
   }
 
-  // When there is a shared space (i.e. when this is a client Isolate), the
-  // shared heap object cache holds objects in shared among Isolates. Otherwise
-  // this object cache is per-Isolate like the startup object cache.
+  // With a shared heap, this cache is shared among all isolates. Otherwise this
+  // object cache is per-Isolate like the startup object cache. TODO(372493838):
+  // This cache can only contain strings. Update name to reflect this.
   std::vector<Tagged<Object>>* shared_heap_object_cache() {
-    if (has_shared_space()) {
+    if (OwnsStringTables()) {
+      return &shared_heap_object_cache_;
+    } else {
       return &shared_space_isolate()->shared_heap_object_cache_;
     }
-    return &shared_heap_object_cache_;
   }
 
   bool IsGeneratingEmbeddedBuiltins() const {
@@ -1920,7 +1938,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     return lazy_compile_dispatcher_.get();
   }
 
-  bool IsInAnyContext(Tagged<Object> object, uint32_t index);
+  bool IsInCreationContext(Tagged<JSObject> object, uint32_t index);
 
   void ClearKeptObjects();
 
@@ -1955,10 +1973,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // annotate the builtin blob with debugging information.
   void PrepareBuiltinSourcePositionMap();
 
-  // Store the position of the labels that will be used in the list of allowed
-  // return addresses.
-  void PrepareBuiltinLabelInfoMap();
-
 #if defined(V8_OS_WIN64)
   void SetBuiltinUnwindData(
       Builtin builtin,
@@ -1984,9 +1998,12 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   bool RunFilterETWSessionByURLCallback(const std::string& payload);
 #endif  // V8_OS_WIN && V8_ENABLE_ETW_STACK_WALKING
 
+  // Deprecated: prefer SetIsLoading.
   void SetRAILMode(RAILMode rail_mode);
 
-  RAILMode rail_mode() { return rail_mode_.load(); }
+  void SetIsLoading(bool is_loading);
+
+  bool is_loading() const { return is_loading_.load(); }
 
   void set_code_coverage_mode(debug::CoverageMode coverage_mode) {
     code_coverage_mode_.store(coverage_mode, std::memory_order_relaxed);
@@ -1995,6 +2012,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     return code_coverage_mode_.load(std::memory_order_relaxed);
   }
 
+  // Deprecated: prefer SetIsLoading.
   void UpdateLoadStartTime();
 
   void SetPriority(v8::Isolate::Priority priority);
@@ -2480,11 +2498,12 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
       regexp_macro_assembler_canonicalize_;
 #endif  // !V8_INTL_SUPPORT
   RegExpStack* regexp_stack_ = nullptr;
+  int32_t* regexp_static_result_offsets_vector_ = nullptr;
   std::vector<int> regexp_indices_;
   DateCache* date_cache_ = nullptr;
   base::RandomNumberGenerator* random_number_generator_ = nullptr;
   base::RandomNumberGenerator* fuzzer_rng_ = nullptr;
-  std::atomic<RAILMode> rail_mode_;
+  std::atomic<bool> is_loading_{false};
   v8::Isolate::AtomicsWaitCallback atomics_wait_callback_ = nullptr;
   void* atomics_wait_callback_data_ = nullptr;
   PromiseHook promise_hook_ = nullptr;
@@ -2815,14 +2834,13 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 };
 
 // The current entered Isolate and its thread data. Do not access these
-// directly! Use Isolate::Current and Isolate::CurrentPerIsolateThreadData.
+// directly! Use Isolate::CurrentPerIsolateThreadData instead.
 //
-// These are outside the Isolate class with extern storage because in clang-cl,
+// This is outside the Isolate class with extern storage because in clang-cl,
 // thread_local is incompatible with dllexport linkage caused by
 // V8_EXPORT_PRIVATE being applied to Isolate.
 extern thread_local Isolate::PerIsolateThreadData*
     g_current_per_isolate_thread_data_ V8_CONSTINIT;
-extern thread_local Isolate* g_current_isolate_ V8_CONSTINIT;
 
 #undef FIELD_ACCESSOR
 #undef THREAD_LOCAL_TOP_ACCESSOR

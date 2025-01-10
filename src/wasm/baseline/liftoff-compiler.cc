@@ -282,8 +282,7 @@ class DebugSideTableBuilder {
 
  private:
   static std::vector<Value> GetChangedStackValues(
-      std::vector<Value>& last_values,
-      base::Vector<DebugSideTable::Entry::Value> values) {
+      std::vector<Value>& last_values, base::Vector<Value> values) {
     std::vector<Value> changed_values;
     int old_stack_size = static_cast<int>(last_values.size());
     last_values.resize(values.size());
@@ -1034,10 +1033,8 @@ class LiftoffCompiler {
           ValueType type = decoder->local_types_[local_index];
           if (type.is_reference()) {
             __ Spill(__ cache_state()->stack_state[local_index].offset(),
-                     IsSubtypeOf(type, kWasmExternRef, decoder->module_) ||
-                             IsSubtypeOf(type, kWasmExnRef, decoder->module_)
-                         ? LiftoffRegister(null_ref_reg)
-                         : LiftoffRegister(wasm_null_ref_reg),
+                     type.use_wasm_null() ? LiftoffRegister(wasm_null_ref_reg)
+                                          : LiftoffRegister(null_ref_reg),
                      type.kind());
           }
         }
@@ -1790,7 +1787,7 @@ class LiftoffCompiler {
   void ThrowRef(FullDecoder* decoder, Value*) {
     // Like Rethrow, but pops the exception from the stack.
     VarState exn = __ PopVarState();
-    CallBuiltin(Builtin::kWasmRethrow, MakeSig::Params(kRef), {exn},
+    CallBuiltin(Builtin::kWasmThrowRef, MakeSig::Params(kRef), {exn},
                 decoder->position());
     int pc_offset = __ pc_offset();
     MaybeOSR();
@@ -2749,8 +2746,7 @@ class LiftoffCompiler {
     LiftoffRegister obj = pinned.set(__ PopToRegister(pinned));
     if (null_check_strategy_ == compiler::NullCheckStrategy::kExplicit ||
         IsSubtypeOf(kWasmI31Ref.AsNonNull(), arg.type, decoder->module_) ||
-        IsSubtypeOf(arg.type, kWasmExternRef, decoder->module_) ||
-        IsSubtypeOf(arg.type, kWasmExnRef, decoder->module_)) {
+        !arg.type.use_wasm_null()) {
       // Use an explicit null check if
       // (1) we cannot use trap handler or
       // (2) the object might be a Smi or
@@ -2815,6 +2811,16 @@ class LiftoffCompiler {
 
   void ReturnImpl(FullDecoder* decoder) {
     if (V8_UNLIKELY(v8_flags.trace_wasm)) TraceFunctionExit(decoder);
+    // A function returning an uninhabitable type can't ever actually reach
+    // a {ret} instruction (it can only return by throwing or trapping). So
+    // if we do get here, there must have been a bug. Crash to flush it out.
+    base::Vector<const ValueType> returns = decoder->sig_->returns();
+    if (V8_UNLIKELY(std::any_of(
+            returns.begin(), returns.end(),
+            [](const ValueType type) { return type.is_uninhabited(); }))) {
+      __ Abort(AbortReason::kUninhabitableType);
+      return;
+    }
     if (dynamic_tiering()) {
       TierupCheck(decoder, decoder->position(),
                   __ pc_offset() + kTierUpCostForFunctionEntry);
@@ -3387,35 +3393,46 @@ class LiftoffCompiler {
       return index_ptrsize;
     }
 
-    // We already checked that offset is below the max memory size.
-    DCHECK_LT(offset, memory->max_memory_size);
+    // We already checked that an access at `offset` is within max memory size.
+    uintptr_t end_offset = offset + access_size - 1u;
+    DCHECK_LT(end_offset, memory->max_memory_size);
 
     // Early return for trap handler.
+    bool use_trap_handler = !force_check && bounds_checks == kTrapHandler;
+    bool need_ool_code = !use_trap_handler || memory->is_memory64();
+    Label* trap_label =
+        need_ool_code
+            ? AddOutOfLineTrap(decoder, Builtin::kThrowWasmTrapMemOutOfBounds)
+            : nullptr;
+
     DCHECK_IMPLIES(
         memory->is_memory64() && !v8_flags.wasm_memory64_trap_handling,
         bounds_checks == kExplicitBoundsChecks);
-    if (!force_check && bounds_checks == kTrapHandler) {
+#if V8_TRAP_HANDLER_SUPPORTED
+    if (use_trap_handler) {
+#if V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_X64
       if (memory->is_memory64()) {
         SCOPED_CODE_COMMENT("bounds check memory");
-        // If index is outside the guards pages, sets index to a value that will
-        // certainly cause (memory_start + offset + index) to be not accessible,
-        // to make sure that the OOB access will be caught by the trap handler.
-        __ set_trap_on_oob_mem64(index_ptrsize, memory->GetMemory64GuardsSize(),
-                                 memory->max_memory_size);
+        // Bounds check `index` against `max_mem_size - end_offset`, such that
+        // at runtime `index + end_offset` will be < `max_mem_size`, where the
+        // trap handler can handle out-of-bound accesses.
+        __ set_trap_on_oob_mem64(
+            index_ptrsize, memory->max_memory_size - end_offset, trap_label);
       }
+#else
+      CHECK(!memory->is_memory64());
+#endif  // V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_X64
 
       // With trap handlers we should not have a register pair as input (we
       // would only return the lower half).
       DCHECK(index.is_gp());
       return index_ptrsize;
     }
+#else
+    CHECK(!use_trap_handler);
+#endif  // V8_TRAP_HANDLER_SUPPORTED
 
     SCOPED_CODE_COMMENT("bounds check memory");
-
-    // Set {pc} of the OOL code to {0} to avoid generation of protected
-    // instruction information (see {GenerateOutOfLineCode}).
-    Label* trap_label =
-        AddOutOfLineTrap(decoder, Builtin::kThrowWasmTrapMemOutOfBounds);
 
     // Convert the index to ptrsize, bounds-checking the high word on 32-bit
     // systems for memory64.
@@ -3428,8 +3445,6 @@ class LiftoffCompiler {
                         trapping);
     }
 
-    uintptr_t end_offset = offset + access_size - 1u;
-
     pinned.set(index_ptrsize);
     LiftoffRegister end_offset_reg =
         pinned.set(__ GetUnusedRegister(kGpReg, pinned));
@@ -3441,8 +3456,9 @@ class LiftoffCompiler {
     } else {
       LOAD_PROTECTED_PTR_INSTANCE_FIELD(mem_size.gp(), MemoryBasesAndSizes,
                                         pinned);
-      int buffer_offset = wasm::ObjectAccess::ToTagged(ByteArray::kHeaderSize) +
-                          kSystemPointerSize * (memory->index * 2 + 1);
+      int buffer_offset =
+          wasm::ObjectAccess::ToTagged(OFFSET_OF_DATA_START(ByteArray)) +
+          kSystemPointerSize * (memory->index * 2 + 1);
       __ LoadFullPointer(mem_size.gp(), mem_size.gp(), buffer_offset);
     }
 
@@ -3921,8 +3937,9 @@ class LiftoffCompiler {
     } else {
       LOAD_PROTECTED_PTR_INSTANCE_FIELD(mem_size.gp(), MemoryBasesAndSizes,
                                         pinned);
-      int buffer_offset = wasm::ObjectAccess::ToTagged(ByteArray::kHeaderSize) +
-                          kSystemPointerSize * (imm.memory->index * 2 + 1);
+      int buffer_offset =
+          wasm::ObjectAccess::ToTagged(OFFSET_OF_DATA_START(ByteArray)) +
+          kSystemPointerSize * (imm.memory->index * 2 + 1);
       __ LoadFullPointer(mem_size.gp(), mem_size.gp(), buffer_offset);
     }
     // Convert bytes to pages.
@@ -4052,8 +4069,9 @@ class LiftoffCompiler {
       bool exception_on_stack =
           control->is_try_catch() || control->is_try_catchall();
       for (; index < end_index; ++index) {
-        auto& slot = stack_state[index];
-        auto& value = values[index];
+        const LiftoffVarState& slot = stack_state[index];
+        DebugSideTable::Entry::Value& value = values[index];
+        value.module = decoder->module_;
         value.index = index;
         if (exception_on_stack) {
           value.type = ValueType::Ref(HeapType::kAny);
@@ -4114,41 +4132,39 @@ class LiftoffCompiler {
             .as_vector());
   }
 
-  enum TailCall : bool { kTailCall = true, kNoTailCall = false };
-
   void CallDirect(FullDecoder* decoder, const CallFunctionImmediate& imm,
                   const Value args[], Value[]) {
-    CallDirect(decoder, imm, args, nullptr, kNoTailCall);
+    CallDirect(decoder, imm, args, nullptr, CallJumpMode::kCall);
   }
 
   void CallIndirect(FullDecoder* decoder, const Value& index_val,
                     const CallIndirectImmediate& imm, const Value args[],
                     Value returns[]) {
-    CallIndirectImpl(decoder, imm, kNoTailCall);
+    CallIndirectImpl(decoder, imm, CallJumpMode::kCall);
   }
 
   void CallRef(FullDecoder* decoder, const Value& func_ref,
                const FunctionSig* sig, const Value args[], Value returns[]) {
-    CallRefImpl(decoder, func_ref.type, sig, kNoTailCall);
+    CallRefImpl(decoder, func_ref.type, sig, CallJumpMode::kCall);
   }
 
   void ReturnCall(FullDecoder* decoder, const CallFunctionImmediate& imm,
                   const Value args[]) {
     TierupCheckOnTailCall(decoder);
-    CallDirect(decoder, imm, args, nullptr, kTailCall);
+    CallDirect(decoder, imm, args, nullptr, CallJumpMode::kTailCall);
   }
 
   void ReturnCallIndirect(FullDecoder* decoder, const Value& index_val,
                           const CallIndirectImmediate& imm,
                           const Value args[]) {
     TierupCheckOnTailCall(decoder);
-    CallIndirectImpl(decoder, imm, kTailCall);
+    CallIndirectImpl(decoder, imm, CallJumpMode::kTailCall);
   }
 
   void ReturnCallRef(FullDecoder* decoder, const Value& func_ref,
                      const FunctionSig* sig, const Value args[]) {
     TierupCheckOnTailCall(decoder);
-    CallRefImpl(decoder, func_ref.type, sig, kTailCall);
+    CallRefImpl(decoder, func_ref.type, sig, CallJumpMode::kTailCall);
   }
 
   void BrOnNull(FullDecoder* decoder, const Value& ref_object, uint32_t depth,
@@ -5695,8 +5711,9 @@ class LiftoffCompiler {
       LOAD_INSTANCE_FIELD(addr, Memory0Start, kSystemPointerSize, pinned);
     } else {
       LOAD_PROTECTED_PTR_INSTANCE_FIELD(addr, MemoryBasesAndSizes, pinned);
-      int buffer_offset = wasm::ObjectAccess::ToTagged(ByteArray::kHeaderSize) +
-                          kSystemPointerSize * imm.memory->index * 2;
+      int buffer_offset =
+          wasm::ObjectAccess::ToTagged(OFFSET_OF_DATA_START(ByteArray)) +
+          kSystemPointerSize * imm.memory->index * 2;
       __ LoadFullPointer(addr, addr, buffer_offset);
     }
     __ emit_i32_add(addr, addr, index);
@@ -6170,11 +6187,11 @@ class LiftoffCompiler {
   // Checks that the top-of-stack value matches the declared memory (64-bit or
   // 32-bit).
   bool MatchingMemTypeOnTopOfStack(const WasmMemory* memory) {
-    return MatchingIndexTypeOnTopOfStack(memory->is_memory64());
+    return MatchingAddressTypeOnTopOfStack(memory->is_memory64());
   }
 
   // Checks that the top-of-stack value matches the expected bitness.
-  bool MatchingIndexTypeOnTopOfStack(bool expect_64bit_value) {
+  bool MatchingAddressTypeOnTopOfStack(bool expect_64bit_value) {
     DCHECK_LT(0, __ cache_state()->stack_height());
     ValueKind expected_kind = expect_64bit_value ? kI64 : kI32;
     DCHECK_EQ(expected_kind, __ cache_state()->stack_state.back().kind());
@@ -6264,8 +6281,9 @@ class LiftoffCompiler {
     LiftoffRegList pinned;
 
     // The type of {size} is the min of {src} and {dst} (where {kI32 < kI64}).
-    DCHECK(MatchingIndexTypeOnTopOfStack(imm.memory_dst.memory->is_memory64() &&
-                                         imm.memory_src.memory->is_memory64()));
+    DCHECK(
+        MatchingAddressTypeOnTopOfStack(imm.memory_dst.memory->is_memory64() &&
+                                        imm.memory_src.memory->is_memory64()));
     VarState size = PopIndexToVarState(&mem_offsets_high_word, &pinned);
     DCHECK(MatchingMemTypeOnTopOfStack(imm.memory_src.memory));
     VarState src = PopIndexToVarState(&mem_offsets_high_word, &pinned);
@@ -6972,8 +6990,10 @@ class LiftoffCompiler {
       __ emit_i32_sari(dst.gp(), src.gp(), kSmiTagSize);
     } else {
       DCHECK(SmiValuesAre32Bits());
-      // Topmost bit is already sign-extended.
-      __ emit_i64_sari(dst, src, kSmiTagSize + kSmiShiftSize);
+      // The topmost bit is already sign-extended.
+      // Liftoff expects that the upper half of any i32 value in a register
+      // is zeroed out, not sign-extended from the lower half.
+      __ emit_i64_shri(dst, src, kSmiTagSize + kSmiShiftSize);
     }
     __ PushRegister(kI32, dst);
   }
@@ -6994,12 +7014,12 @@ class LiftoffCompiler {
     __ PushRegister(kI32, dst);
   }
 
-  LiftoffRegister RttCanon(uint32_t type_index, LiftoffRegList pinned) {
+  LiftoffRegister RttCanon(ModuleTypeIndex type_index, LiftoffRegList pinned) {
     LiftoffRegister rtt = pinned.set(__ GetUnusedRegister(kGpReg, pinned));
     LOAD_TAGGED_PTR_INSTANCE_FIELD(rtt.gp(), ManagedObjectMaps, pinned);
     __ LoadTaggedPointer(
         rtt.gp(), rtt.gp(), no_reg,
-        wasm::ObjectAccess::ElementOffsetInTaggedFixedArray(type_index));
+        wasm::ObjectAccess::ElementOffsetInTaggedFixedArray(type_index.index));
     return rtt;
   }
 
@@ -7044,7 +7064,7 @@ class LiftoffCompiler {
     __ LoadMap(tmp1, obj_reg);
     // {tmp1} now holds the object's map.
 
-    if (module->types[rtt_type.ref_index()].is_final) {
+    if (module->type(rtt_type.ref_index()).is_final) {
       // In this case, simply check for map equality.
       __ emit_cond_jump(kNotEqual, no_match, rtt_type.kind(), tmp1, rtt_reg,
                         frozen);
@@ -7093,8 +7113,8 @@ class LiftoffCompiler {
     __ bind(&match);
   }
 
-  void RefTest(FullDecoder* decoder, uint32_t ref_index, const Value& obj,
-               Value* /* result_val */, bool null_succeeds) {
+  void RefTest(FullDecoder* decoder, ModuleTypeIndex ref_index,
+               const Value& obj, Value* /* result_val */, bool null_succeeds) {
     Label return_false, done;
     LiftoffRegList pinned;
     LiftoffRegister rtt_reg = pinned.set(RttCanon(ref_index, pinned));
@@ -7155,8 +7175,8 @@ class LiftoffCompiler {
     }
   }
 
-  void RefCast(FullDecoder* decoder, uint32_t ref_index, const Value& obj,
-               Value* result, bool null_succeeds) {
+  void RefCast(FullDecoder* decoder, ModuleTypeIndex ref_index,
+               const Value& obj, Value* result, bool null_succeeds) {
     if (v8_flags.experimental_wasm_assume_ref_cast_succeeds) return;
 
     Label* trap_label =
@@ -7213,8 +7233,8 @@ class LiftoffCompiler {
     }
   }
 
-  void BrOnCast(FullDecoder* decoder, uint32_t ref_index, const Value& obj,
-                Value* /* result_on_branch */, uint32_t depth,
+  void BrOnCast(FullDecoder* decoder, ModuleTypeIndex ref_index,
+                const Value& obj, Value* /* result_on_branch */, uint32_t depth,
                 bool null_succeeds) {
     // Avoid having sequences of branches do duplicate work.
     if (depth != decoder->control_depth() - 1) {
@@ -7243,9 +7263,9 @@ class LiftoffCompiler {
     __ bind(&cont_false);
   }
 
-  void BrOnCastFail(FullDecoder* decoder, uint32_t ref_index, const Value& obj,
-                    Value* /* result_on_fallthrough */, uint32_t depth,
-                    bool null_succeeds) {
+  void BrOnCastFail(FullDecoder* decoder, ModuleTypeIndex ref_index,
+                    const Value& obj, Value* /* result_on_fallthrough */,
+                    uint32_t depth, bool null_succeeds) {
     // Avoid having sequences of branches do duplicate work.
     if (depth != decoder->control_depth() - 1) {
       __ PrepareForBranch(decoder->control_at(depth)->br_merge()->arity, {});
@@ -8332,7 +8352,8 @@ class LiftoffCompiler {
 
  private:
   void CallDirect(FullDecoder* decoder, const CallFunctionImmediate& imm,
-                  const Value args[], Value returns[], TailCall tail_call) {
+                  const Value args[], Value returns[],
+                  CallJumpMode call_jump_mode) {
     MostlySmallValueKindSig sig(zone_, imm.sig);
     for (ValueKind ret : sig.returns()) {
       if (!CheckSupportedType(decoder, ret, "return")) return;
@@ -8366,14 +8387,14 @@ class LiftoffCompiler {
             ObjectAccess::ToTagged(WasmDispatchTable::OffsetOf(imm.index) +
                                    WasmDispatchTable::kImplicitArgBias));
 
-        __ LoadFullPointer(
+        __ LoadCodePointer(
             target, dispatch_table,
             ObjectAccess::ToTagged(WasmDispatchTable::OffsetOf(imm.index) +
                                    WasmDispatchTable::kTargetBias));
       }
 
       __ PrepareCall(&sig, call_descriptor, &target, implicit_arg);
-      if (tail_call) {
+      if (call_jump_mode == CallJumpMode::kTailCall) {
         __ PrepareTailCall(
             static_cast<int>(call_descriptor->ParameterSlotCount()),
             static_cast<int>(
@@ -8400,7 +8421,7 @@ class LiftoffCompiler {
       __ PrepareCall(&sig, call_descriptor);
       // Just encode the function index. This will be patched at instantiation.
       Address addr = static_cast<Address>(imm.index);
-      if (tail_call) {
+      if (call_jump_mode == CallJumpMode::kTailCall) {
         DCHECK(descriptor_->CanTailCall(call_descriptor));
         __ PrepareTailCall(
             static_cast<int>(call_descriptor->ParameterSlotCount()),
@@ -8417,7 +8438,7 @@ class LiftoffCompiler {
   }
 
   void CallIndirectImpl(FullDecoder* decoder, const CallIndirectImmediate& imm,
-                        TailCall tail_call) {
+                        CallJumpMode call_jump_mode) {
     MostlySmallValueKindSig sig(zone_, imm.sig);
     for (ValueKind ret : sig.returns()) {
       if (!CheckSupportedType(decoder, ret, "return")) return;
@@ -8593,7 +8614,7 @@ class LiftoffCompiler {
         FREEZE_STATE(frozen);
         __ emit_i32_cond_jumpi(kEqual, sig_mismatch_label, real_sig_id.gp_reg(),
                                -1, frozen);
-      } else if (!decoder->module_->types[imm.sig_imm.index].is_final) {
+      } else if (!decoder->module_->type(imm.sig_imm.index).is_final) {
         Label success_label;
         FREEZE_STATE(frozen);
         __ emit_i32_cond_jumpi(kEqual, &success_label, real_sig_id.gp_reg(),
@@ -8608,7 +8629,8 @@ class LiftoffCompiler {
             IsolateData::root_slot_offset(RootIndex::kWasmCanonicalRtts));
         __ LoadTaggedPointer(
             real_rtt.gp_reg(), real_rtt.gp_reg(), real_sig_id.gp_reg(),
-            ObjectAccess::ToTagged(WeakFixedArray::kHeaderSize), nullptr, true);
+            ObjectAccess::ToTagged(OFFSET_OF_DATA_START(WeakFixedArray)),
+            nullptr, true);
         // real_sig_id is not used any more.
         real_sig_id.Reset();
         // Remove the weak reference tag.
@@ -8653,7 +8675,7 @@ class LiftoffCompiler {
         __ LoadTaggedPointer(
             formal_rtt.gp_reg(), formal_rtt.gp_reg(), no_reg,
             wasm::ObjectAccess::ElementOffsetInTaggedFixedArray(
-                imm.sig_imm.index));
+                imm.sig_imm.index.index));
         __ emit_cond_jump(kNotEqual, sig_mismatch_label, kRtt,
                           formal_rtt.gp_reg(), maybe_match.gp_reg(), frozen);
 
@@ -8661,7 +8683,7 @@ class LiftoffCompiler {
       } else {
         FREEZE_STATE(trapping);
         __ emit_i32_cond_jumpi(kNotEqual, sig_mismatch_label,
-                               real_sig_id.gp_reg(), canonical_sig_id,
+                               real_sig_id.gp_reg(), canonical_sig_id.index,
                                trapping);
       }
     } else {
@@ -8681,9 +8703,9 @@ class LiftoffCompiler {
         __ LoadProtectedPointer(
             implicit_arg, dispatch_table_base.gp_reg(),
             dispatch_table_offset + WasmDispatchTable::kImplicitArgBias);
-        __ Load(LiftoffRegister(target), dispatch_table_base.gp_reg(), no_reg,
-                dispatch_table_offset + WasmDispatchTable::kTargetBias,
-                LoadType::ForValueKind(kIntPtrKind));
+        __ LoadCodePointer(
+            target, dispatch_table_base.gp_reg(),
+            dispatch_table_offset + WasmDispatchTable::kTargetBias);
       }
 
       if (v8_flags.wasm_inlining_call_indirect) {
@@ -8740,7 +8762,7 @@ class LiftoffCompiler {
       call_descriptor = GetLoweredCallDescriptor(zone_, call_descriptor);
 
       __ PrepareCall(&sig, call_descriptor, &target, implicit_arg);
-      if (tail_call) {
+      if (call_jump_mode == CallJumpMode::kTailCall) {
         __ PrepareTailCall(
             static_cast<int>(call_descriptor->ParameterSlotCount()),
             static_cast<int>(
@@ -8755,12 +8777,17 @@ class LiftoffCompiler {
     }
   }
 
-  void StoreFrameDescriptionForDeopt(FullDecoder* decoder) {
+  void StoreFrameDescriptionForDeopt(
+      FullDecoder* decoder, uint32_t adapt_shadow_stack_pc_offset = 0) {
     DCHECK(v8_flags.wasm_deopt);
     DCHECK(!frame_description_);
+
     frame_description_ = std::make_unique<LiftoffFrameDescriptionForDeopt>(
         LiftoffFrameDescriptionForDeopt{
             decoder->pc_offset(), static_cast<uint32_t>(__ pc_offset()),
+#ifdef V8_ENABLE_CET_SHADOW_STACK
+            adapt_shadow_stack_pc_offset,
+#endif  // V8_ENABLE_CET_SHADOW_STACK
             std::vector<LiftoffVarState>(__ cache_state()->stack_state.begin(),
                                          __ cache_state()->stack_state.end()),
             __ cache_state()->cached_instance_data});
@@ -8791,7 +8818,13 @@ class LiftoffCompiler {
     Label callref;
     __ emit_jump(&callref);
     __ bind(&deopt_point);
-    StoreFrameDescriptionForDeopt(decoder);
+    uint32_t adapt_shadow_stack_pc_offset = __ pc_offset();
+#ifdef V8_ENABLE_CET_SHADOW_STACK
+    if (v8_flags.cet_compatible) {
+      __ CallBuiltin(Builtin::kAdaptShadowStackForDeopt);
+    }
+#endif  // V8_ENABLE_CET_SHADOW_STACK
+    StoreFrameDescriptionForDeopt(decoder, adapt_shadow_stack_pc_offset);
     CallBuiltin(Builtin::kWasmLiftoffDeoptFinish, MakeSig(), {},
                 kNoSourcePosition);
     __ MergeStackWith(initial_state, 0, LiftoffAssembler::kForwardJump);
@@ -8800,7 +8833,7 @@ class LiftoffCompiler {
   }
 
   void CallRefImpl(FullDecoder* decoder, ValueType func_ref_type,
-                   const FunctionSig* type_sig, TailCall tail_call) {
+                   const FunctionSig* type_sig, CallJumpMode call_jump_mode) {
     MostlySmallValueKindSig sig(zone_, type_sig);
     for (ValueKind ret : sig.returns()) {
       if (!CheckSupportedType(decoder, ret, "return")) return;
@@ -8893,7 +8926,7 @@ class LiftoffCompiler {
     }  // v8_flags.wasm_inlining
 
     __ PrepareCall(&sig, call_descriptor, &target_reg, implicit_arg_reg);
-    if (tail_call) {
+    if (call_jump_mode == CallJumpMode::kTailCall) {
       __ PrepareTailCall(
           static_cast<int>(call_descriptor->ParameterSlotCount()),
           static_cast<int>(
@@ -8908,13 +8941,11 @@ class LiftoffCompiler {
   }
 
   void LoadNullValue(Register null, ValueType type) {
-    // TODO(thibaudm): Can we use wasm null for exnref?
     __ LoadFullPointer(
         null, kRootRegister,
-        type == kWasmExternRef || type == kWasmNullExternRef ||
-                type == kWasmExnRef || type == kWasmNullExnRef
-            ? IsolateData::root_slot_offset(RootIndex::kNullValue)
-            : IsolateData::root_slot_offset(RootIndex::kWasmNull));
+        type.use_wasm_null()
+            ? IsolateData::root_slot_offset(RootIndex::kWasmNull)
+            : IsolateData::root_slot_offset(RootIndex::kNullValue));
   }
 
   // Stores the null value representation in the passed register.
@@ -8924,12 +8955,8 @@ class LiftoffCompiler {
   void LoadNullValueForCompare(Register null, LiftoffRegList pinned,
                                ValueType type) {
 #if V8_STATIC_ROOTS_BOOL
-    // TODO(14616): Extend this for shared types.
-    bool is_wasm_null =
-        !wasm::IsSubtypeOf(type, wasm::kWasmExternRef, env_->module) &&
-        !wasm::IsSubtypeOf(type, wasm::kWasmExnRef, env_->module);
-    uint32_t value = is_wasm_null ? StaticReadOnlyRoot::kWasmNull
-                                  : StaticReadOnlyRoot::kNullValue;
+    uint32_t value = type.use_wasm_null() ? StaticReadOnlyRoot::kWasmNull
+                                          : StaticReadOnlyRoot::kNullValue;
     __ LoadConstant(LiftoffRegister(null),
                     WasmValue(static_cast<uint32_t>(value)));
 #else
@@ -9064,14 +9091,29 @@ class LiftoffCompiler {
 
   void FinishCall(FullDecoder* decoder, ValueKindSig* sig,
                   compiler::CallDescriptor* call_descriptor) {
+    DefineSafepoint();
+    RegisterDebugSideTableEntry(decoder, DebugSideTableBuilder::kDidSpill);
+
     if (v8_flags.wasm_deopt &&
         env_->deopt_info_bytecode_offset == decoder->pc_offset() &&
         env_->deopt_location_kind == LocationKindForDeopt::kInlinedCall) {
-      StoreFrameDescriptionForDeopt(decoder);
+      uint32_t adapt_shadow_stack_pc_offset = 0;
+#ifdef V8_ENABLE_CET_SHADOW_STACK
+      if (v8_flags.cet_compatible) {
+        // AdaptShadowStackForDeopt is be called to build shadow stack after
+        // deoptimization. Deoptimizer will directly jump to
+        // `call AdaptShadowStackForDeopt`. But, in any other case, it should be
+        // ignored.
+        Label deopt_point;
+        __ emit_jump(&deopt_point);
+        adapt_shadow_stack_pc_offset = __ pc_offset();
+        __ CallBuiltin(Builtin::kAdaptShadowStackForDeopt);
+        __ bind(&deopt_point);
+      }
+#endif  // V8_ENABLE_CET_SHADOW_STACK
+      StoreFrameDescriptionForDeopt(decoder, adapt_shadow_stack_pc_offset);
     }
 
-    DefineSafepoint();
-    RegisterDebugSideTableEntry(decoder, DebugSideTableBuilder::kDidSpill);
     int pc_offset = __ pc_offset();
     MaybeOSR();
     EmitLandingPad(decoder, pc_offset);

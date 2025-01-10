@@ -596,8 +596,8 @@ class Heap final {
   bool MeasureMemory(std::unique_ptr<v8::MeasureMemoryDelegate> delegate,
                      v8::MeasureMemoryExecution execution);
 
-  std::unique_ptr<v8::MeasureMemoryDelegate> MeasureMemoryDelegate(
-      Handle<NativeContext> context, Handle<JSPromise> promise,
+  std::unique_ptr<v8::MeasureMemoryDelegate> CreateDefaultMeasureMemoryDelegate(
+      v8::Local<v8::Context> context, v8::Local<v8::Promise::Resolver> promise,
       v8::MeasureMemoryMode mode);
 
   void VisitExternalResources(v8::ExternalResourceVisitor* visitor);
@@ -1100,6 +1100,7 @@ class Heap final {
   // Setters for code offsets of well-known deoptimization targets.
   void SetConstructStubCreateDeoptPCOffset(int pc_offset);
   void SetConstructStubInvokeDeoptPCOffset(int pc_offset);
+  void SetDeoptPCOffsetAfterAdaptShadowStack(int pc_offset);
   void SetInterpreterEntryReturnPCOffset(int pc_offset);
 
   void DeoptMarkedAllocationSites();
@@ -1905,8 +1906,8 @@ class Heap final {
 
   MemoryReducer* memory_reducer() { return memory_reducer_.get(); }
 
-  // For some webpages RAIL mode does not switch from PERFORMANCE_LOAD.
-  // This constant limits the effect of load RAIL mode on GC.
+  // For some webpages NotifyLoadingEnded() is never called.
+  // This constant limits the effect of load time on GC.
   // The value is arbitrary and chosen as the largest load time observed in
   // v8 browsing benchmarks.
   static const int kMaxLoadTimeMs = 7000;
@@ -2398,7 +2399,9 @@ class Heap final {
 
   std::unique_ptr<MemoryBalancer> mb_;
 
+  // Time that the embedder started loading resources.
   std::atomic<double> load_start_time_ms_{0};
+
   bool update_allocation_limits_after_loading_ = false;
   // Full GC may trigger during loading due to overshooting allocation limits.
   // In such cases we may want to update the limits again once loading is
@@ -2674,11 +2677,9 @@ class StrongRootAllocator<Address> : public StrongRootAllocatorBase {
  public:
   using value_type = Address;
 
-  explicit StrongRootAllocator(Heap* heap) : StrongRootAllocatorBase(heap) {}
-  explicit StrongRootAllocator(Isolate* isolate)
-      : StrongRootAllocatorBase(isolate) {}
-  explicit StrongRootAllocator(v8::Isolate* isolate)
-      : StrongRootAllocatorBase(reinterpret_cast<Isolate*>(isolate)) {}
+  template <typename HeapOrIsolateT>
+  explicit StrongRootAllocator(HeapOrIsolateT* heap_or_isolate)
+      : StrongRootAllocatorBase(heap_or_isolate) {}
   template <typename U>
   StrongRootAllocator(const StrongRootAllocator<U>& other) V8_NOEXCEPT
       : StrongRootAllocatorBase(other) {}

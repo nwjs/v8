@@ -118,8 +118,6 @@ class V8_EXPORT_PRIVATE WasmCompilationUnit final {
       CompilationEnv*, const WireBytesStorage*, Counters*,
       WasmDetectedFeatures* detected);
 
-  WasmCompilationResult ExecuteImportWrapperCompilation(CompilationEnv*);
-
   int func_index_;
   ExecutionTier tier_;
   ForDebugging for_debugging_;
@@ -133,9 +131,7 @@ static_assert(sizeof(WasmCompilationUnit) <= 2 * kSystemPointerSize);
 class V8_EXPORT_PRIVATE JSToWasmWrapperCompilationUnit final {
  public:
   JSToWasmWrapperCompilationUnit(Isolate* isolate, const CanonicalSig* sig,
-                                 uint32_t canonical_sig_index,
-                                 const wasm::WasmModule* module,
-                                 WasmEnabledFeatures enabled_features);
+                                 CanonicalTypeIndex sig_index);
   ~JSToWasmWrapperCompilationUnit();
 
   // Allow move construction and assignment, for putting units in a std::vector.
@@ -150,13 +146,12 @@ class V8_EXPORT_PRIVATE JSToWasmWrapperCompilationUnit final {
   Handle<Code> Finalize();
 
   const CanonicalSig* sig() const { return sig_; }
-  uint32_t canonical_sig_index() const { return canonical_sig_index_; }
+  CanonicalTypeIndex sig_index() const { return sig_index_; }
 
   // Run a compilation unit synchronously.
   static Handle<Code> CompileJSToWasmWrapper(Isolate* isolate,
                                              const CanonicalSig* sig,
-                                             uint32_t canonical_sig_index,
-                                             const WasmModule* module);
+                                             CanonicalTypeIndex sig_index);
 
  private:
   // Wrapper compilation is bound to an isolate. Concurrent accesses to the
@@ -165,7 +160,7 @@ class V8_EXPORT_PRIVATE JSToWasmWrapperCompilationUnit final {
   // is guaranteed to be alive when this unit executes.
   Isolate* isolate_;
   const CanonicalSig* sig_;
-  uint32_t canonical_sig_index_;
+  CanonicalTypeIndex sig_index_;
   std::unique_ptr<OptimizedCompilationJob> job_;
 };
 

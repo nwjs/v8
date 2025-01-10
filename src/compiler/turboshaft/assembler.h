@@ -99,8 +99,6 @@ static_assert((ConditionalGotoStatus::kGotoDestination |
                ConditionalGotoStatus::kGotoEliminated) ==
               ConditionalGotoStatus::kBranch);
 
-#ifdef HAS_CPP_CONCEPTS
-
 template <typename It, typename A>
 concept ForeachIterable = requires(It iterator, A& assembler) {
   { iterator.Begin(assembler) } -> std::same_as<typename It::iterator_type>;
@@ -114,8 +112,6 @@ concept ForeachIterable = requires(It iterator, A& assembler) {
     iterator.Dereference(assembler, typename It::iterator_type{})
   } -> std::same_as<typename It::value_type>;
 };
-
-#endif
 
 // `Range<T>` implements the `ForeachIterable` concept to iterate over a range
 // of values inside a `FOREACH` loop. The range can be specified with a begin,
@@ -1245,6 +1241,23 @@ class GenericReducerBase : public ReducerBaseForwarder<Next> {
                             effects);
   }
 
+  OpIndex REDUCE(FastApiCall)(
+      V<FrameState> frame_state, V<Object> data_argument, V<Context> context,
+      base::Vector<const OpIndex> arguments,
+      const FastApiCallParameters* parameters,
+      base::Vector<const RegisterRepresentation> out_reps) {
+    OpIndex raw_call = Base::ReduceFastApiCall(
+        frame_state, data_argument, context, arguments, parameters, out_reps);
+    bool has_catch_block = CatchIfInCatchScope(raw_call);
+    return ReduceDidntThrow(raw_call, has_catch_block,
+                            &Asm()
+                                 .output_graph()
+                                 .Get(raw_call)
+                                 .template Cast<FastApiCallOp>()
+                                 .out_reps,
+                            OpEffects().CanCallAnything());
+  }
+
 #define REDUCE_THROWING_OP(Name)                                             \
   template <typename... Args>                                                \
   V<Any> Reduce##Name(Args... args) {                                        \
@@ -1358,7 +1371,7 @@ class GenericAssemblerOpInterface {
     label.EndLoop(Asm());
   }
 
-  template <CONCEPT(ForeachIterable<assembler_t>) It>
+  template <ForeachIterable<assembler_t> It>
   auto ControlFlowHelper_Foreach(It iterable) {
     // We need to take ownership over the `iterable` instance as we need to make
     // sure that the `ControlFlowHelper_Foreach` and
@@ -1400,7 +1413,7 @@ class GenericAssemblerOpInterface {
         std::move(loop_exit), current_iterator, current_value);
   }
 
-  template <CONCEPT(ForeachIterable<assembler_t>) It>
+  template <ForeachIterable<assembler_t> It>
   void ControlFlowHelper_EndForeachLoop(
       It iterable, LoopLabelFor<typename It::iterator_type>& header_label,
       Label<>& exit_label, typename It::iterator_type current_iterator) {
@@ -1518,13 +1531,15 @@ class TurboshaftAssemblerOpInterface
   // Methods to be used by the reducers to reducer operations with the whole
   // reducer stack.
 
-  V<Any> Identity(V<Any> input, RegisterRepresentation rep) {
-    return ReduceIfReachableIdentity(input, rep);
+  V<Word32> Word32SignHint(V<Word32> input, Word32SignHintOp::Sign sign) {
+    return ReduceIfReachableWord32SignHint(input, sign);
   }
 
-  template <typename Rep = Any>
-  V<Rep> Identity(V<Rep> input) {
-    return V<Rep>::Cast(Identity(input, V<Rep>::rep));
+  V<Word32> Word32SignHintUnsigned(V<Word32> input) {
+    return Word32SignHint(input, Word32SignHintOp::Sign::kUnsigned);
+  }
+  V<Word32> Word32SignHintSigned(V<Word32> input) {
+    return Word32SignHint(input, Word32SignHintOp::Sign::kSigned);
   }
 
   V<Object> GenericBinop(V<Object> left, V<Object> right,
@@ -2377,8 +2392,7 @@ class TurboshaftAssemblerOpInterface
                                RelocInfo::WASM_STUB_CALL);
   }
 
-  V<Word32> RelocatableWasmCanonicalSignatureId(int32_t canonical_id) {
-    DCHECK_LE(0, canonical_id);
+  V<Word32> RelocatableWasmCanonicalSignatureId(uint32_t canonical_id) {
     return ReduceIfReachableConstant(
         ConstantOp::Kind::kRelocatableWasmCanonicalSignatureId,
         static_cast<uint64_t>(canonical_id));
@@ -3014,7 +3028,7 @@ class TurboshaftAssemblerOpInterface
                               compiler::WriteBarrierKind write_barrier) {
     Store(array, value, LoadOp::Kind::TaggedBase(),
           MemoryRepresentation::AnyTagged(), write_barrier,
-          FixedArray::kHeaderSize + index * kTaggedSize);
+          FixedArray::OffsetOfElementAt(index));
   }
 
   void StoreFixedArrayElement(V<FixedArray> array, V<WordPtr> index,
@@ -3022,7 +3036,7 @@ class TurboshaftAssemblerOpInterface
                               compiler::WriteBarrierKind write_barrier) {
     Store(array, index, value, LoadOp::Kind::TaggedBase(),
           MemoryRepresentation::AnyTagged(), write_barrier,
-          FixedArray::kHeaderSize, kTaggedSizeLog2);
+          OFFSET_OF_DATA_START(FixedArray), kTaggedSizeLog2);
   }
   void StoreFixedDoubleArrayElement(V<FixedDoubleArray> array, V<WordPtr> index,
                                     V<Float64> value) {
@@ -3030,7 +3044,7 @@ class TurboshaftAssemblerOpInterface
                   ElementsKindToShiftSize(HOLEY_DOUBLE_ELEMENTS));
     Store(array, index, value, LoadOp::Kind::TaggedBase(),
           MemoryRepresentation::Float64(), WriteBarrierKind::kNoWriteBarrier,
-          FixedDoubleArray::kHeaderSize,
+          sizeof(FixedDoubleArray::Header),
           ElementsKindToShiftSize(PACKED_DOUBLE_ELEMENTS));
   }
 
@@ -4019,24 +4033,25 @@ class TurboshaftAssemblerOpInterface
 
 #if V8_ENABLE_WEBASSEMBLY
   // TrapIf and TrapIfNot in Wasm code do not pass a frame state.
-  void TrapIf(V<Word32> condition, TrapId trap_id) {
-    ReduceIfReachableTrapIf(condition, OptionalV<turboshaft::FrameState>{},
-                            false, trap_id);
+  void TrapIf(ConstOrV<Word32> condition, TrapId trap_id) {
+    ReduceIfReachableTrapIf(resolve(condition),
+                            OptionalV<turboshaft::FrameState>{}, false,
+                            trap_id);
   }
-  void TrapIfNot(V<Word32> condition, TrapId trap_id) {
-    ReduceIfReachableTrapIf(condition, OptionalV<turboshaft::FrameState>{},
-                            true, trap_id);
+  void TrapIfNot(ConstOrV<Word32> condition, TrapId trap_id) {
+    ReduceIfReachableTrapIf(resolve(condition),
+                            OptionalV<turboshaft::FrameState>{}, true, trap_id);
   }
 
   // TrapIf and TrapIfNot from Wasm inlined into JS pass a frame state.
-  void TrapIf(V<Word32> condition,
+  void TrapIf(ConstOrV<Word32> condition,
               OptionalV<turboshaft::FrameState> frame_state, TrapId trap_id) {
-    ReduceIfReachableTrapIf(condition, frame_state, false, trap_id);
+    ReduceIfReachableTrapIf(resolve(condition), frame_state, false, trap_id);
   }
-  void TrapIfNot(V<Word32> condition,
+  void TrapIfNot(ConstOrV<Word32> condition,
                  OptionalV<turboshaft::FrameState> frame_state,
                  TrapId trap_id) {
-    ReduceIfReachableTrapIf(condition, frame_state, true, trap_id);
+    ReduceIfReachableTrapIf(resolve(condition), frame_state, true, trap_id);
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
@@ -4639,9 +4654,10 @@ class TurboshaftAssemblerOpInterface
   OpIndex FastApiCall(V<turboshaft::FrameState> frame_state,
                       V<Object> data_argument, V<Context> context,
                       base::Vector<const OpIndex> arguments,
-                      const FastApiCallParameters* parameters) {
+                      const FastApiCallParameters* parameters,
+                      base::Vector<const RegisterRepresentation> out_reps) {
     return ReduceIfReachableFastApiCall(frame_state, data_argument, context,
-                                        arguments, parameters);
+                                        arguments, parameters, out_reps);
   }
 
   void RuntimeAbort(AbortReason reason) {
@@ -4791,7 +4807,7 @@ class TurboshaftAssemblerOpInterface
     return ReduceIfReachableAssertNotNull(object, type, trap_id);
   }
 
-  V<Map> RttCanon(V<FixedArray> rtts, uint32_t type_index) {
+  V<Map> RttCanon(V<FixedArray> rtts, wasm::ModuleTypeIndex type_index) {
     return ReduceIfReachableRttCanon(rtts, type_index);
   }
 
@@ -4819,14 +4835,14 @@ class TurboshaftAssemblerOpInterface
   }
 
   V<Any> StructGet(V<WasmStructNullable> object, const wasm::StructType* type,
-                   uint32_t type_index, int field_index, bool is_signed,
-                   CheckForNull null_check) {
+                   wasm::ModuleTypeIndex type_index, int field_index,
+                   bool is_signed, CheckForNull null_check) {
     return ReduceIfReachableStructGet(object, type, type_index, field_index,
                                       is_signed, null_check);
   }
 
   void StructSet(V<WasmStructNullable> object, V<Any> value,
-                 const wasm::StructType* type, uint32_t type_index,
+                 const wasm::StructType* type, wasm::ModuleTypeIndex type_index,
                  int field_index, CheckForNull null_check) {
     ReduceIfReachableStructSet(object, value, type, type_index, field_index,
                                null_check);

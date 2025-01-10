@@ -89,17 +89,17 @@ class TypeCanonicalizer {
 
   // Retrieve back a function signature from a canonical index later.
   V8_EXPORT_PRIVATE const CanonicalSig* LookupFunctionSignature(
-      uint32_t canonical_index) const;
+      CanonicalTypeIndex index) const;
 
   // Returns if {canonical_sub_index} is a canonical subtype of
   // {canonical_super_index}.
-  V8_EXPORT_PRIVATE bool IsCanonicalSubtype(uint32_t canonical_sub_index,
-                                            uint32_t canonical_super_index);
+  V8_EXPORT_PRIVATE bool IsCanonicalSubtype(CanonicalTypeIndex sub_index,
+                                            CanonicalTypeIndex super_index);
 
   // Returns if the type at {sub_index} in {sub_module} is a subtype of the
   // type at {super_index} in {super_module} after canonicalization.
-  V8_EXPORT_PRIVATE bool IsCanonicalSubtype(uint32_t sub_index,
-                                            uint32_t super_index,
+  V8_EXPORT_PRIVATE bool IsCanonicalSubtype(ModuleTypeIndex sub_index,
+                                            ModuleTypeIndex super_index,
                                             const WasmModule* sub_module,
                                             const WasmModule* super_module);
 
@@ -113,21 +113,21 @@ class TypeCanonicalizer {
 
   // Prepares wasm for the provided canonical type index. This reserves enough
   // space in the canonical rtts and the JSToWasm wrappers on the isolate roots.
-  V8_EXPORT_PRIVATE static void PrepareForCanonicalTypeId(Isolate* isolate,
-                                                          int id);
+  V8_EXPORT_PRIVATE static void PrepareForCanonicalTypeId(
+      Isolate* isolate, CanonicalTypeIndex id);
   // Reset the canonical rtts and JSToWasm wrappers on the isolate roots for
   // testing purposes (in production cases canonical type ids are never freed).
   V8_EXPORT_PRIVATE static void ClearWasmCanonicalTypesForTesting(
       Isolate* isolate);
 
-  bool IsFunctionSignature(uint32_t canonical_index) const;
+  bool IsFunctionSignature(CanonicalTypeIndex index) const;
+
+  CanonicalTypeIndex FindIndex_Slow(const CanonicalSig* sig) const;
 
 #if DEBUG
-  // Check whether a function signature is canonicalized by checking whether the
-  // pointer points into this class's storage.
-  V8_EXPORT_PRIVATE bool Contains(const FunctionSig* sig) const;
-  // TODO(366180605): We probably won't need this, because static typing
-  // provides more reliable guarantees than DCHECKs.
+  // Check whether a supposedly-canonicalized function signature does indeed
+  // live in this class's storage. Useful for guarding casts of signatures
+  // that are entering the typed world.
   V8_EXPORT_PRIVATE bool Contains(const CanonicalSig* sig) const;
 #endif
 
@@ -244,7 +244,7 @@ class TypeCanonicalizer {
 
     void Add(const CanonicalStructType& struct_type) {
       hasher.AddRange(struct_type.mutabilities());
-      for (const ValueType& field : struct_type.fields()) {
+      for (const ValueTypeBase& field : struct_type.fields()) {
         Add(CanonicalValueType{field});
       }
     }
@@ -270,15 +270,15 @@ class TypeCanonicalizer {
 
     bool EqualTypeIndex(CanonicalTypeIndex index1,
                         CanonicalTypeIndex index2) const {
-      if (recgroup1.Contains(index1)) {
-        // Compare relative supertypes in the recgroups.
-        if (!recgroup2.Contains(index2)) return false;
-        uint32_t rel_supertype1 = index1.index - recgroup1.start.index;
-        uint32_t rel_supertype2 = index2.index - recgroup2.start.index;
-        if (rel_supertype1 != rel_supertype2) return false;
-      } else {
-        if (recgroup2.Contains(index2)) return false;
-        if (index1 != index2) return false;
+      const bool relative_index = recgroup1.Contains(index1);
+      if (relative_index != recgroup2.Contains(index2)) return false;
+      if (relative_index) {
+        // Compare relative type indexes within the respective recgroups.
+        uint32_t rel_type1 = index1.index - recgroup1.start.index;
+        uint32_t rel_type2 = index2.index - recgroup2.start.index;
+        if (rel_type1 != rel_type2) return false;
+      } else if (index1 != index2) {
+        return false;
       }
       return true;
     }
@@ -308,11 +308,16 @@ class TypeCanonicalizer {
                         std::bind_front(&CanonicalEquality::EqualType, this));
     }
 
-    bool EqualValueType(ValueType type1, ValueType type2) const {
+    bool EqualValueType(CanonicalValueType type1,
+                        CanonicalValueType type2) const {
       if (type1.kind() != type2.kind()) return false;
-      if (type1.has_index() &&
-          !EqualTypeIndex(CanonicalTypeIndex{type1.ref_index()},
-                          CanonicalTypeIndex{type2.ref_index()})) {
+      const bool indexed = type1.has_index();
+      if (indexed != type2.has_index()) return false;
+      if (indexed) return EqualTypeIndex(type1.ref_index(), type2.ref_index());
+      const bool is_ref = type1.is_object_reference();
+      DCHECK_EQ(is_ref, type2.is_object_reference());
+      if (is_ref &&
+          type1.heap_representation() != type2.heap_representation()) {
         return false;
       }
       return true;
@@ -328,10 +333,15 @@ class TypeCanonicalizer {
 
     bool EqualStructType(const CanonicalStructType& type1,
                          const CanonicalStructType& type2) const {
-      return std::equal(
-          type1.fields().begin(), type1.fields().end(), type2.fields().begin(),
-          type2.fields().end(),
-          std::bind_front(&CanonicalEquality::EqualValueType, this));
+      return
+          // Compare fields, including a check that the size is the same.
+          std::equal(
+              type1.fields().begin(), type1.fields().end(),
+              type2.fields().begin(), type2.fields().end(),
+              std::bind_front(&CanonicalEquality::EqualValueType, this)) &&
+          // Compare mutabilities, skipping the check for the size.
+          std::equal(type1.mutabilities().begin(), type1.mutabilities().end(),
+                     type2.mutabilities().begin());
     }
 
     bool EqualArrayType(const CanonicalArrayType& type1,

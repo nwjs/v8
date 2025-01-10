@@ -1099,7 +1099,7 @@ class MatchInfoBackedMatch : public String::Match {
 class VectorBackedMatch : public String::Match {
  public:
   VectorBackedMatch(Isolate* isolate, Handle<String> subject,
-                    Handle<String> match, int match_position,
+                    Handle<String> match, uint32_t match_position,
                     base::Vector<Handle<Object>> captures,
                     Handle<Object> groups_obj)
       : isolate_(isolate),
@@ -1116,12 +1116,18 @@ class VectorBackedMatch : public String::Match {
   Handle<String> GetMatch() override { return match_; }
 
   Handle<String> GetPrefix() override {
-    return isolate_->factory()->NewSubString(subject_, 0, match_position_);
+    // match_position_ and match_ are user-controlled, hence we manually clamp
+    // the index here.
+    uint32_t end = std::min(subject_->length(), match_position_);
+    return isolate_->factory()->NewSubString(subject_, 0, end);
   }
 
   Handle<String> GetSuffix() override {
-    const int match_end_position = match_position_ + match_->length();
-    return isolate_->factory()->NewSubString(subject_, match_end_position,
+    // match_position_ and match_ are user-controlled, hence we manually clamp
+    // the index here.
+    uint32_t start =
+        std::min(subject_->length(), match_position_ + match_->length());
+    return isolate_->factory()->NewSubString(subject_, start,
                                              subject_->length());
   }
 
@@ -1169,7 +1175,7 @@ class VectorBackedMatch : public String::Match {
   Isolate* isolate_;
   Handle<String> subject_;
   Handle<String> match_;
-  const int match_position_;
+  const uint32_t match_position_;
   base::Vector<Handle<Object>> captures_;
 
   bool has_named_captures_;
@@ -1626,7 +1632,10 @@ RUNTIME_FUNCTION(Runtime_StringReplaceNonGlobalRegExpWithFunction) {
     THROW_NEW_ERROR_RETURN_FAILURE(
         isolate, NewRangeError(MessageTemplate::kTooManyArguments));
   }
-  base::ScopedVector<Handle<Object>> argv(argc);
+  // TODO(42203211): This vector ends up in InvokeParams which is potentially
+  // used by generated code. It will be replaced, when generated code starts
+  // using direct handles.
+  base::ScopedVector<IndirectHandle<Object>> argv(argc);
 
   int cursor = 0;
   for (int j = 0; j < m; j++) {
@@ -1734,16 +1743,13 @@ RUNTIME_FUNCTION(Runtime_RegExpSplit) {
 
   Handle<JSReceiver> splitter;
   {
-    const int argc = 2;
-
-    base::ScopedVector<Handle<Object>> argv(argc);
-    argv[0] = recv;
-    argv[1] = new_flags;
+    constexpr int argc = 2;
+    std::array<Handle<Object>, argc> argv = {recv, new_flags};
 
     Handle<Object> splitter_obj;
     ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
         isolate, splitter_obj,
-        Execution::New(isolate, ctor, argc, argv.begin()));
+        Execution::New(isolate, ctor, argc, argv.data()));
 
     splitter = Cast<JSReceiver>(splitter_obj);
   }
@@ -1778,7 +1784,7 @@ RUNTIME_FUNCTION(Runtime_RegExpSplit) {
     RETURN_FAILURE_ON_EXCEPTION(
         isolate, RegExpUtils::SetLastIndex(isolate, splitter, string_index));
 
-    Handle<Object> result;
+    Handle<JSAny> result;
     ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
         isolate, result, RegExpUtils::RegExpExec(isolate, splitter, string,
                                                  factory->undefined_value()));
@@ -1903,10 +1909,10 @@ RUNTIME_FUNCTION(Runtime_RegExpReplaceRT) {
                                 RegExpUtils::SetLastIndex(isolate, recv, 0));
   }
 
-  base::SmallVector<Handle<Object>, kStaticVectorSlots> results;
+  base::SmallVector<Handle<JSAny>, kStaticVectorSlots> results;
 
   while (true) {
-    Handle<Object> result;
+    Handle<JSAny> result;
     ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
         isolate, result, RegExpUtils::RegExpExec(isolate, recv, string,
                                                  factory->undefined_value()));
@@ -1998,7 +2004,7 @@ RUNTIME_FUNCTION(Runtime_RegExpReplaceRT) {
             isolate, NewRangeError(MessageTemplate::kTooManyArguments));
       }
 
-      base::ScopedVector<Handle<Object>> argv(argc);
+      base::ScopedVector<IndirectHandle<Object>> argv(argc);
 
       int cursor = 0;
       for (uint32_t j = 0; j < captures_length; j++) {

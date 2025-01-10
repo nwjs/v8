@@ -18,6 +18,7 @@
 #include "src/heap/heap-layout-inl.h"
 #include "src/heap/heap.h"
 #include "src/heap/safepoint.h"
+#include "src/heap/visit-object.h"
 #include "src/numbers/conversions.h"
 #include "src/objects/allocation-site-inl.h"
 #include "src/objects/api-callbacks.h"
@@ -1377,7 +1378,7 @@ void V8HeapExplorer::ExtractReferences(HeapEntry* entry,
   } else if (IsTransitionArray(obj)) {
     ExtractTransitionArrayReferences(entry, Cast<TransitionArray>(obj));
   } else if (IsWeakFixedArray(obj)) {
-    ExtractWeakArrayReferences(WeakFixedArray::kHeaderSize, entry,
+    ExtractWeakArrayReferences(OFFSET_OF_DATA_START(WeakFixedArray), entry,
                                Cast<WeakFixedArray>(obj));
   } else if (IsWeakArrayList(obj)) {
     ExtractWeakArrayReferences(WeakArrayList::kHeaderSize, entry,
@@ -2213,7 +2214,7 @@ void V8HeapExplorer::ExtractWasmStructReferences(Tagged<WasmStruct> obj,
   Isolate* isolate = heap_->isolate();
   for (uint32_t i = 0; i < type->field_count(); i++) {
     wasm::StringBuilder sb;
-    names->PrintFieldName(sb, info->type_index(), i);
+    names->PrintFieldName(sb, info->module_type_index(), i);
     sb << '\0';
     const char* field_name = names_->GetCopy(sb.start());
     switch (type->field(i).kind()) {
@@ -2488,7 +2489,7 @@ bool V8HeapExplorer::IterateAndExtractReferences(
     // Extract unvisited fields as hidden references and restore tags
     // of visited fields.
     IndexedReferencesExtractor refs_extractor(this, obj, entry);
-    obj->Iterate(cage_base, &refs_extractor);
+    VisitObject(heap_->isolate(), obj, &refs_extractor);
 
 #if DEBUG
     // Ensure visited_fields_ doesn't leak to the next object.
@@ -2680,14 +2681,11 @@ void V8HeapExplorer::SetPropertyReference(HeapEntry* parent_entry,
       IsSymbol(reference_name) || Cast<String>(reference_name)->length() > 0
           ? HeapGraphEdge::kProperty
           : HeapGraphEdge::kInternal;
-  const char* name =
-      name_format_string != nullptr && IsString(reference_name)
-          ? names_->GetFormatted(
-                name_format_string,
-                Cast<String>(reference_name)
-                    ->ToCString(DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL)
-                    .get())
-          : names_->GetName(reference_name);
+  const char* name = name_format_string != nullptr && IsString(reference_name)
+                         ? names_->GetFormatted(
+                               name_format_string,
+                               Cast<String>(reference_name)->ToCString().get())
+                         : names_->GetName(reference_name);
 
   parent_entry->SetNamedReference(type, name, child_entry, generator_);
   MarkVisitedField(field_offset);
@@ -3205,6 +3203,7 @@ bool HeapSnapshotGenerator::GenerateSnapshotAfterGC() {
   v8_heap_explorer_.MakeGlobalObjectTagMap(
       std::move(temporary_global_object_tags));
   snapshot_->AddSyntheticRootEntries();
+  v8_heap_explorer_.PopulateLineEnds();
   if (!FillReferences()) return false;
   snapshot_->FillChildren();
   snapshot_->RememberLastJSObjectId();

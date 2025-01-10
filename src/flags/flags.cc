@@ -601,6 +601,15 @@ bool TryParseUnsigned(Flag* flag, const char* arg, const char* value,
 int FlagList::SetFlagsFromCommandLine(int* argc, char** argv, bool remove_flags,
                                       HelpOptions help_options) {
   int return_code = 0;
+
+  // TODO(jgruber): Since ShouldCheckFlagContradictions looks at v8_flags
+  // values to determine whether to check for contradictions, these flag values
+  // must be available before the check returns a consistent value. That means
+  // we'd really have to add a preprocessing pass that only considers these
+  // flags (e.g. --fuzzing). Otherwise, they are position-sensitive and only
+  // disable contradiction checks for flags that come after. This is pretty
+  // surprising since no other v8 flags have such positional behavior.
+
   // Parse arguments.
   for (int i = 1; i < *argc;) {
     int j = i;  // j > 0
@@ -1018,8 +1027,14 @@ void FlagList::ResolveContradictionsWhenFuzzing() {
       // https://crbug.com/369652671
       RESET_WHEN_CORRECTNESS_FUZZING(stress_lazy_compilation),
 
+      // https://crbug.com/369974230
+      RESET_WHEN_FUZZING(expose_async_hooks),
+
       // https://crbug.com/371061101
       RESET_WHEN_FUZZING(parallel_compile_tasks_for_lazy),
+
+      // https://crbug.com/366671002
+      RESET_WHEN_FUZZING(stress_snapshot),
   };
   for (auto [flag1, flag2] : contradictions) {
     if (!flag1 || !flag2) continue;

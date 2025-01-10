@@ -16,6 +16,7 @@
 #include "src/heap/gc-tracer.h"
 #include "src/heap/heap-inl.h"
 #include "src/heap/heap-layout-inl.h"
+#include "src/heap/heap-visitor-inl.h"
 #include "src/heap/heap.h"
 #include "src/heap/large-page-metadata-inl.h"
 #include "src/heap/mark-compact-inl.h"
@@ -23,7 +24,6 @@
 #include "src/heap/memory-chunk-layout.h"
 #include "src/heap/mutable-page-metadata-inl.h"
 #include "src/heap/mutable-page-metadata.h"
-#include "src/heap/objects-visiting-inl.h"
 #include "src/heap/pretenuring-handler.h"
 #include "src/heap/remembered-set-inl.h"
 #include "src/heap/scavenger-inl.h"
@@ -40,11 +40,18 @@
 namespace v8 {
 namespace internal {
 
-class IterateAndScavengePromotedObjectsVisitor final : public ObjectVisitor {
+class IterateAndScavengePromotedObjectsVisitor final
+    : public HeapVisitor<IterateAndScavengePromotedObjectsVisitor> {
  public:
   IterateAndScavengePromotedObjectsVisitor(Scavenger* scavenger,
                                            bool record_slots)
-      : scavenger_(scavenger), record_slots_(record_slots) {}
+      : HeapVisitor(scavenger->heap()->isolate()),
+        scavenger_(scavenger),
+        record_slots_(record_slots) {}
+
+  V8_INLINE static constexpr bool ShouldUseUncheckedCast() { return true; }
+
+  V8_INLINE static constexpr bool UsePrecomputedObjectSize() { return true; }
 
   V8_INLINE void VisitMapPointer(Tagged<HeapObject> host) final {
     if (!record_slots_) return;
@@ -742,7 +749,7 @@ void Scavenger::IterateAndScavengePromotedObject(Tagged<HeapObject> target,
   IterateAndScavengePromotedObjectsVisitor visitor(this, record_slots);
 
   // Iterate all outgoing pointers including map word.
-  target->IterateFast(map, size, &visitor);
+  visitor.Visit(map, target, size);
 
   if (IsJSArrayBufferMap(map)) {
     DCHECK(!MemoryChunk::FromHeapObject(target)->IsLargePage());

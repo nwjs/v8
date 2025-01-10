@@ -6,7 +6,6 @@
 #include "src/deoptimizer/deoptimizer.h"
 #include "src/maglev/maglev-assembler-inl.h"
 #include "src/maglev/maglev-graph.h"
-
 namespace v8 {
 namespace internal {
 namespace maglev {
@@ -227,8 +226,22 @@ void MaglevAssembler::MaybeEmitDeoptBuiltinsCall(size_t eager_deopt_count,
                                                  Label* eager_deopt_entry,
                                                  size_t lazy_deopt_count,
                                                  Label* lazy_deopt_entry) {
-  // FIXME: Let the MacroAssembler resolve branches to distant target,
-  // see https://codereview.chromium.org/169893002
+  ForceConstantPoolEmissionWithoutJump();
+
+  DCHECK_GE(Deoptimizer::kLazyDeoptExitSize, Deoptimizer::kEagerDeoptExitSize);
+
+  MaglevAssembler::TemporaryRegisterScope scope(this);
+  Register scratch = scope.AcquireScratch();
+  if (eager_deopt_count > 0) {
+    bind(eager_deopt_entry);
+    LoadEntryFromBuiltin(Builtin::kDeoptimizationEntry_Eager, scratch);
+    MacroAssembler::Jump(scratch);
+  }
+  if (lazy_deopt_count > 0) {
+    bind(lazy_deopt_entry);
+    LoadEntryFromBuiltin(Builtin::kDeoptimizationEntry_Lazy, scratch);
+    MacroAssembler::Jump(scratch);
+  }
 }
 
 void MaglevAssembler::LoadSingleCharacterString(Register result,
@@ -242,7 +255,7 @@ void MaglevAssembler::LoadSingleCharacterString(Register result,
   Register table = scratch;
   LoadRoot(table, RootIndex::kSingleCharacterStringTable);
   LoadTaggedFieldByIndex(result, table, char_code, kTaggedSize,
-                         FixedArray::kHeaderSize);
+                         OFFSET_OF_DATA_START(FixedArray));
 }
 
 void MaglevAssembler::StringFromCharCode(RegisterSnapshot register_snapshot,
