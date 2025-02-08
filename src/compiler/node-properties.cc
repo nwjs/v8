@@ -444,6 +444,15 @@ NodeProperties::InferMapsResult NodeProperties::InferMapsUnsafe(
         }
         break;
       }
+      case IrOpcode::kTransitionElementsKindOrCheckMap: {
+        Node* const object = GetValueInput(effect, 0);
+        if (IsSame(receiver, object)) {
+          *maps_out = ZoneRefSet<Map>{
+              ElementsTransitionWithMultipleSourcesOf(effect->op()).target()};
+          return result;
+        }
+        break;
+      }
       case IrOpcode::kJSCreate: {
         if (IsSame(receiver, effect)) {
           OptionalMapRef initial_map = GetJSCreateMap(broker, receiver);
@@ -585,6 +594,7 @@ bool NodeProperties::CanBeNullOrUndefined(JSHeapBroker* broker, Node* receiver,
     switch (receiver->opcode()) {
       case IrOpcode::kCheckInternalizedString:
       case IrOpcode::kCheckNumber:
+      case IrOpcode::kCheckNumberFitsInt32:
       case IrOpcode::kCheckSmi:
       case IrOpcode::kCheckString:
       case IrOpcode::kCheckSymbol:

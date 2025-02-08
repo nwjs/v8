@@ -236,20 +236,20 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   // Handle's constructor. When the migration to DirectHandle is complete,
   // these functions can accept simply a DirectHandle<String> or
   // DirectHandle<Name>.
-  template <typename T, typename = std::enable_if_t<
-                            std::is_convertible_v<Handle<T>, Handle<String>>>>
+  template <typename T>
+    requires(std::is_convertible_v<Handle<T>, Handle<String>>)
   inline Handle<String> InternalizeString(Handle<T> string);
 
-  template <typename T, typename = std::enable_if_t<
-                            std::is_convertible_v<Handle<T>, Handle<Name>>>>
+  template <typename T>
+    requires(std::is_convertible_v<Handle<T>, Handle<Name>>)
   inline Handle<Name> InternalizeName(Handle<T> name);
 
-  template <typename T, typename = std::enable_if_t<std::is_convertible_v<
-                            DirectHandle<T>, DirectHandle<String>>>>
+  template <typename T>
+    requires(std::is_convertible_v<DirectHandle<T>, DirectHandle<String>>)
   inline DirectHandle<String> InternalizeString(DirectHandle<T> string);
 
-  template <typename T, typename = std::enable_if_t<std::is_convertible_v<
-                            DirectHandle<T>, DirectHandle<Name>>>>
+  template <typename T>
+    requires(std::is_convertible_v<DirectHandle<T>, DirectHandle<Name>>)
   inline DirectHandle<Name> InternalizeName(DirectHandle<T> name);
 
   // String creation functions.  Most of the string creation functions take
@@ -275,8 +275,6 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   template <size_t N>
   inline Handle<String> NewStringFromStaticChars(
       const char (&str)[N], AllocationType allocation = AllocationType::kYoung);
-  inline Handle<String> NewStringFromAsciiChecked(
-      const char* str, AllocationType allocation = AllocationType::kYoung);
 
   // UTF8 strings are pretenured when used for regexp literal patterns and
   // flags in the parser.
@@ -366,7 +364,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   Handle<String> NewSurrogatePairString(uint16_t lead, uint16_t trail);
 
   // Create a new string object which holds a proper substring of a string.
-  Handle<String> NewProperSubString(Handle<String> str, uint32_t begin,
+  Handle<String> NewProperSubString(DirectHandle<String> str, uint32_t begin,
                                     uint32_t end);
   // Same, but always copies (never creates a SlicedString).
   // {str} must be flat, {length} must be non-zero.
@@ -374,8 +372,10 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
                                     uint32_t length);
 
   // Create a new string object which holds a substring of a string.
-  inline Handle<String> NewSubString(Handle<String> str, uint32_t begin,
-                                     uint32_t end);
+  template <typename T, template <typename> typename HandleType>
+    requires(std::is_convertible_v<HandleType<T>, HandleType<String>>)
+  inline HandleType<String> NewSubString(HandleType<T> str, uint32_t begin,
+                                         uint32_t end);
 
   // Creates a new external String object.  There are two String encodings
   // in the system: one-byte and two-byte.  Unlike other String types, it does
@@ -498,7 +498,8 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   Handle<FeedbackCell> NewNoClosuresCell();
   Handle<FeedbackCell> NewOneClosureCell(
       DirectHandle<ClosureFeedbackCellArray> value);
-  Handle<FeedbackCell> NewManyClosuresCell();
+  Handle<FeedbackCell> NewManyClosuresCell(
+      AllocationType allocation = AllocationType::kOld);
 
   Handle<TransitionArray> NewTransitionArray(int number_of_transitions,
                                              int slack = 0);
@@ -507,27 +508,27 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   Handle<AllocationSite> NewAllocationSite(bool with_weak_next);
 
   // Allocates and initializes a new Map.
-  Handle<Map> NewMap(Handle<HeapObject> meta_map_holder, InstanceType type,
-                     int instance_size,
+  Handle<Map> NewMap(DirectHandle<HeapObject> meta_map_holder,
+                     InstanceType type, int instance_size,
                      ElementsKind elements_kind = TERMINAL_FAST_ELEMENTS_KIND,
                      int inobject_properties = 0,
                      AllocationType allocation_type = AllocationType::kMap);
 
   Handle<Map> NewMapWithMetaMap(
-      Handle<Map> meta_map, InstanceType type, int instance_size,
+      DirectHandle<Map> meta_map, InstanceType type, int instance_size,
       ElementsKind elements_kind = TERMINAL_FAST_ELEMENTS_KIND,
       int inobject_properties = 0,
       AllocationType allocation_type = AllocationType::kMap);
 
   Handle<Map> NewContextfulMap(
-      Handle<JSReceiver> creation_context_holder, InstanceType type,
+      DirectHandle<JSReceiver> creation_context_holder, InstanceType type,
       int instance_size,
       ElementsKind elements_kind = TERMINAL_FAST_ELEMENTS_KIND,
       int inobject_properties = 0,
       AllocationType allocation_type = AllocationType::kMap);
 
   Handle<Map> NewContextfulMap(
-      Handle<NativeContext> native_context, InstanceType type,
+      DirectHandle<NativeContext> native_context, InstanceType type,
       int instance_size,
       ElementsKind elements_kind = TERMINAL_FAST_ELEMENTS_KIND,
       int inobject_properties = 0,
@@ -607,14 +608,15 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   // space.
   Handle<HeapNumber> NewHeapNumberForCodeAssembler(double value);
 
-  Handle<JSObject> NewArgumentsObject(Handle<JSFunction> callee, int length);
+  Handle<JSObject> NewArgumentsObject(DirectHandle<JSFunction> callee,
+                                      int length);
 
   // Allocates and initializes a new JavaScript object based on a
   // constructor.
   // JS objects are pretenured when allocated by the bootstrapper and
   // runtime.
   Handle<JSObject> NewJSObject(
-      Handle<JSFunction> constructor,
+      DirectHandle<JSFunction> constructor,
       AllocationType allocation = AllocationType::kYoung,
       NewJSObjectType = NewJSObjectType::kNoAPIWrapper);
   // JSObject without a prototype.
@@ -660,7 +662,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   // fast elements, or a NumberDictionary, in which case the resulting
   // object will have dictionary elements.
   Handle<JSObject> NewSlowJSObjectWithPropertiesAndElements(
-      Handle<JSPrototype> prototype, DirectHandle<HeapObject> properties,
+      DirectHandle<JSPrototype> prototype, DirectHandle<HeapObject> properties,
       DirectHandle<FixedArrayBase> elements);
 
   // JS arrays are pretenured when allocated by the parser.
@@ -707,7 +709,8 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
 
   Handle<JSWeakMap> NewJSWeakMap();
 
-  Handle<JSGeneratorObject> NewJSGeneratorObject(Handle<JSFunction> function);
+  Handle<JSGeneratorObject> NewJSGeneratorObject(
+      DirectHandle<JSFunction> function);
 
   Handle<JSModuleNamespace> NewJSModuleNamespace();
 
@@ -722,22 +725,21 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
 
 #if V8_ENABLE_WEBASSEMBLY
   Handle<WasmTrustedInstanceData> NewWasmTrustedInstanceData();
-  Handle<WasmDispatchTable> NewWasmDispatchTable(int length);
+  Handle<WasmDispatchTable> NewWasmDispatchTable(
+      int length, wasm::CanonicalValueType table_type);
   Handle<WasmTypeInfo> NewWasmTypeInfo(
       Address type_address, Handle<Map> opt_parent,
       DirectHandle<WasmTrustedInstanceData> opt_instance,
       wasm::ModuleTypeIndex type_index);
   Handle<WasmInternalFunction> NewWasmInternalFunction(
-      DirectHandle<TrustedObject> ref, int function_index,
-      uintptr_t signature_hash);
+      DirectHandle<TrustedObject> ref, int function_index);
   Handle<WasmFuncRef> NewWasmFuncRef(
       DirectHandle<WasmInternalFunction> internal_function,
       DirectHandle<Map> rtt);
   Handle<WasmCapiFunctionData> NewWasmCapiFunctionData(
       Address call_target, DirectHandle<Foreign> embedder_data,
       DirectHandle<Code> wrapper_code, DirectHandle<Map> rtt,
-      wasm::CanonicalTypeIndex sig_index, const wasm::CanonicalSig* sig,
-      uintptr_t signature_hash);
+      wasm::CanonicalTypeIndex sig_index, const wasm::CanonicalSig* sig);
   Handle<WasmExportedFunctionData> NewWasmExportedFunctionData(
       DirectHandle<Code> export_wrapper,
       DirectHandle<WasmTrustedInstanceData> instance_data,
@@ -759,7 +761,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   Handle<WasmJSFunctionData> NewWasmJSFunctionData(
       wasm::CanonicalTypeIndex sig_index, DirectHandle<JSReceiver> callable,
       DirectHandle<Code> wrapper_code, DirectHandle<Map> rtt,
-      wasm::Suspend suspend, wasm::Promise promise, uintptr_t signature_hash);
+      wasm::Suspend suspend, wasm::Promise promise);
   Handle<WasmResumeData> NewWasmResumeData(
       DirectHandle<WasmSuspenderObject> suspender, wasm::OnResume on_resume);
   Handle<WasmSuspenderObject> NewWasmSuspenderObject();
@@ -848,7 +850,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   MaybeHandle<JSBoundFunction> NewJSBoundFunction(
       DirectHandle<JSReceiver> target_function, DirectHandle<JSAny> bound_this,
       base::Vector<DirectHandle<Object>> bound_args,
-      Handle<JSPrototype> prototype);
+      DirectHandle<JSPrototype> prototype);
 
   // Allocates a Harmony proxy.
   Handle<JSProxy> NewJSProxy(DirectHandle<JSReceiver> target,
@@ -888,41 +890,43 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   Handle<BytecodeArray> CopyBytecodeArray(DirectHandle<BytecodeArray>);
 
   // Interface for creating error objects.
-  Handle<JSObject> NewError(Handle<JSFunction> constructor,
+  Handle<JSObject> NewError(DirectHandle<JSFunction> constructor,
                             DirectHandle<String> message,
-                            Handle<Object> options = {});
+                            DirectHandle<Object> options = {});
 
   Handle<Object> NewInvalidStringLengthError();
 
   inline Handle<Object> NewURIError();
 
-  Handle<JSObject> NewError(Handle<JSFunction> constructor,
+  Handle<JSObject> NewError(DirectHandle<JSFunction> constructor,
                             MessageTemplate template_index,
                             base::Vector<const DirectHandle<Object>> args);
 
   Handle<JSObject> NewSuppressedErrorAtDisposal(
       Isolate* isolate, Handle<Object> error, Handle<Object> suppressed_error);
 
-  template <typename... Args,
-            typename = std::enable_if_t<std::conjunction_v<
-                std::is_convertible<Args, DirectHandle<Object>>...>>>
-  Handle<JSObject> NewError(Handle<JSFunction> constructor,
-                            MessageTemplate template_index, Args... args) {
+  template <typename... Args>
+  Handle<JSObject> NewError(DirectHandle<JSFunction> constructor,
+                            MessageTemplate template_index, Args... args)
+    requires(
+        std::conjunction_v<std::is_convertible<Args, DirectHandle<Object>>...>)
+  {
     return NewError(constructor, template_index,
                     base::VectorOf<DirectHandle<Object>>({args...}));
   }
 
   // https://tc39.es/proposal-shadowrealm/#sec-create-type-error-copy
   Handle<JSObject> ShadowRealmNewTypeErrorCopy(
-      Handle<Object> original, MessageTemplate template_index,
+      DirectHandle<Object> original, MessageTemplate template_index,
       base::Vector<const DirectHandle<Object>> args);
 
-  template <typename... Args,
-            typename = std::enable_if_t<std::conjunction_v<
-                std::is_convertible<Args, DirectHandle<Object>>...>>>
+  template <typename... Args>
   Handle<JSObject> ShadowRealmNewTypeErrorCopy(Handle<Object> original,
                                                MessageTemplate template_index,
-                                               Args... args) {
+                                               Args... args)
+    requires(
+        std::conjunction_v<std::is_convertible<Args, DirectHandle<Object>>...>)
+  {
     return ShadowRealmNewTypeErrorCopy(
         original, template_index,
         base::VectorOf<DirectHandle<Object>>({args...}));
@@ -932,9 +936,8 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   Handle<JSObject> New##NAME(MessageTemplate template_index,                 \
                              base::Vector<const DirectHandle<Object>> args); \
                                                                              \
-  template <typename... Args,                                                \
-            typename = std::enable_if_t<std::conjunction_v<                  \
-                std::is_convertible<Args, DirectHandle<Object>>...>>>        \
+  template <typename... Args>                                                \
+    requires(std::is_convertible_v<Args, DirectHandle<Object>> && ...)       \
   Handle<JSObject> New##NAME(MessageTemplate template_index, Args... args) { \
     return New##NAME(template_index,                                         \
                      base::VectorOf<DirectHandle<Object>>({args...}));       \
@@ -948,6 +951,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   DECLARE_ERROR(TypeError)
   DECLARE_ERROR(WasmCompileError)
   DECLARE_ERROR(WasmLinkError)
+  DECLARE_ERROR(WasmSuspendError)
   DECLARE_ERROR(WasmRuntimeError)
   DECLARE_ERROR(WasmExceptionError)
 #undef DECLARE_ERROR
@@ -988,12 +992,13 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   }
 
   Handle<Map> CreateSloppyFunctionMap(
-      FunctionMode function_mode, MaybeHandle<JSFunction> maybe_empty_function);
+      FunctionMode function_mode,
+      MaybeDirectHandle<JSFunction> maybe_empty_function);
 
   Handle<Map> CreateStrictFunctionMap(FunctionMode function_mode,
-                                      Handle<JSFunction> empty_function);
+                                      DirectHandle<JSFunction> empty_function);
 
-  Handle<Map> CreateClassFunctionMap(Handle<JSFunction> empty_function);
+  Handle<Map> CreateClassFunctionMap(DirectHandle<JSFunction> empty_function);
 
   // Allocates a new JSMessageObject object.
   Handle<JSMessageObject> NewJSMessageObject(
@@ -1048,7 +1053,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   // Returns the value for a known global constant (a property of the global
   // object which is neither configurable nor writable) like 'undefined'.
   // Returns a null handle when the given name is unknown.
-  Handle<Object> GlobalConstantFor(Handle<Name> name);
+  Handle<Object> GlobalConstantFor(DirectHandle<Name> name);
 
   // Converts the given ToPrimitive hint to its string representation.
   Handle<String> ToPrimitiveHintString(ToPrimitiveHint hint);
@@ -1062,10 +1067,10 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   }
 
   Handle<JSSharedStruct> NewJSSharedStruct(
-      Handle<JSFunction> constructor,
-      MaybeHandle<NumberDictionary> maybe_elements_template);
+      DirectHandle<JSFunction> constructor,
+      MaybeDirectHandle<NumberDictionary> maybe_elements_template);
 
-  Handle<JSSharedArray> NewJSSharedArray(Handle<JSFunction> constructor,
+  Handle<JSSharedArray> NewJSSharedArray(DirectHandle<JSFunction> constructor,
                                          int length);
 
   Handle<JSAtomicsMutex> NewJSAtomicsMutex();
@@ -1103,9 +1108,6 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
     }
 
    private:
-    void PrepareMap();
-    void PrepareFeedbackCell();
-
     V8_WARN_UNUSED_RESULT Handle<JSFunction> BuildRaw(DirectHandle<Code> code);
 
     Isolate* const isolate_;
@@ -1244,7 +1246,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
     BasicBlockProfilerData* profiler_data_ = nullptr;
     bool is_context_specialized_ = false;
     bool is_turbofanned_ = false;
-    int stack_slots_ = 0;
+    uint32_t stack_slots_ = 0;
     uint16_t parameter_count_ = 0;
   };
 
@@ -1271,7 +1273,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   bool EmptyStringRootIsInitialized();
   AllocationType AllocationTypeForInPlaceInternalizableString();
 
-  void ProcessNewScript(Handle<Script> shared,
+  void ProcessNewScript(DirectHandle<Script> shared,
                         ScriptEventType script_event_type);
   // ------
 

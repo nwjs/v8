@@ -53,9 +53,8 @@ class SharedEngineIsolate {
   Handle<WasmInstanceObject> CompileAndInstantiate(ZoneBuffer* buffer) {
     ErrorThrower thrower(isolate(), "CompileAndInstantiate");
     MaybeHandle<WasmInstanceObject> instance =
-        testing::CompileAndInstantiateForTesting(
-            isolate(), &thrower,
-            ModuleWireBytes(buffer->begin(), buffer->end()));
+        testing::CompileAndInstantiateForTesting(isolate(), &thrower,
+                                                 base::VectorOf(*buffer));
     return instance.ToHandleChecked();
   }
 
@@ -72,7 +71,7 @@ class SharedEngineIsolate {
     return instance->module_object()->shared_native_module();
   }
 
-  int32_t Run(Handle<WasmInstanceObject> instance) {
+  int32_t Run(DirectHandle<WasmInstanceObject> instance) {
     return testing::CallWasmFunctionForTesting(isolate(), instance, "main", {});
   }
 
@@ -161,7 +160,7 @@ Handle<WasmInstanceObject> CompileAndInstantiateAsync(
   GetWasmEngine()->AsyncCompile(
       isolate->isolate(), enabled_features, CompileTimeImports{},
       std::make_unique<MockCompilationResolver>(isolate, &maybe_instance),
-      ModuleWireBytes(buffer->begin(), buffer->end()), true, kAPIMethodName);
+      base::OwnedCopyOf(*buffer), kAPIMethodName);
   while (!IsWasmInstanceObject(*maybe_instance)) PumpMessageLoop(isolate);
   Handle<WasmInstanceObject> instance =
       Cast<WasmInstanceObject>(maybe_instance);
@@ -175,14 +174,16 @@ TEST(SharedEngineRunSeparated) {
     SharedEngineIsolate isolate;
     HandleScope scope(isolate.isolate());
     ZoneBuffer* buffer = BuildReturnConstantModule(isolate.zone(), 23);
-    Handle<WasmInstanceObject> instance = isolate.CompileAndInstantiate(buffer);
+    DirectHandle<WasmInstanceObject> instance =
+        isolate.CompileAndInstantiate(buffer);
     CHECK_EQ(23, isolate.Run(instance));
   }
   {
     SharedEngineIsolate isolate;
     HandleScope scope(isolate.isolate());
     ZoneBuffer* buffer = BuildReturnConstantModule(isolate.zone(), 42);
-    Handle<WasmInstanceObject> instance = isolate.CompileAndInstantiate(buffer);
+    DirectHandle<WasmInstanceObject> instance =
+        isolate.CompileAndInstantiate(buffer);
     CHECK_EQ(42, isolate.Run(instance));
   }
 }
@@ -193,14 +194,15 @@ TEST(SharedEngineRunImported) {
     SharedEngineIsolate isolate;
     HandleScope scope(isolate.isolate());
     ZoneBuffer* buffer = BuildReturnConstantModule(isolate.zone(), 23);
-    Handle<WasmInstanceObject> instance = isolate.CompileAndInstantiate(buffer);
+    DirectHandle<WasmInstanceObject> instance =
+        isolate.CompileAndInstantiate(buffer);
     module = isolate.ExportInstance(instance);
     CHECK_EQ(23, isolate.Run(instance));
   }
   {
     SharedEngineIsolate isolate;
     HandleScope scope(isolate.isolate());
-    Handle<WasmInstanceObject> instance = isolate.ImportInstance(module);
+    DirectHandle<WasmInstanceObject> instance = isolate.ImportInstance(module);
     CHECK_EQ(23, isolate.Run(instance));
   }
 }
@@ -209,14 +211,14 @@ TEST(SharedEngineRunThreadedBuildingSync) {
   SharedEngineThread thread1([](SharedEngineIsolate* isolate) {
     HandleScope scope(isolate->isolate());
     ZoneBuffer* buffer = BuildReturnConstantModule(isolate->zone(), 23);
-    Handle<WasmInstanceObject> instance =
+    DirectHandle<WasmInstanceObject> instance =
         isolate->CompileAndInstantiate(buffer);
     CHECK_EQ(23, isolate->Run(instance));
   });
   SharedEngineThread thread2([](SharedEngineIsolate* isolate) {
     HandleScope scope(isolate->isolate());
     ZoneBuffer* buffer = BuildReturnConstantModule(isolate->zone(), 42);
-    Handle<WasmInstanceObject> instance =
+    DirectHandle<WasmInstanceObject> instance =
         isolate->CompileAndInstantiate(buffer);
     CHECK_EQ(42, isolate->Run(instance));
   });
@@ -230,14 +232,14 @@ TEST(SharedEngineRunThreadedBuildingAsync) {
   SharedEngineThread thread1([](SharedEngineIsolate* isolate) {
     HandleScope scope(isolate->isolate());
     ZoneBuffer* buffer = BuildReturnConstantModule(isolate->zone(), 23);
-    Handle<WasmInstanceObject> instance =
+    DirectHandle<WasmInstanceObject> instance =
         CompileAndInstantiateAsync(isolate, buffer);
     CHECK_EQ(23, isolate->Run(instance));
   });
   SharedEngineThread thread2([](SharedEngineIsolate* isolate) {
     HandleScope scope(isolate->isolate());
     ZoneBuffer* buffer = BuildReturnConstantModule(isolate->zone(), 42);
-    Handle<WasmInstanceObject> instance =
+    DirectHandle<WasmInstanceObject> instance =
         CompileAndInstantiateAsync(isolate, buffer);
     CHECK_EQ(42, isolate->Run(instance));
   });
@@ -259,12 +261,12 @@ TEST(SharedEngineRunThreadedExecution) {
   }
   SharedEngineThread thread1([module](SharedEngineIsolate* isolate) {
     HandleScope scope(isolate->isolate());
-    Handle<WasmInstanceObject> instance = isolate->ImportInstance(module);
+    DirectHandle<WasmInstanceObject> instance = isolate->ImportInstance(module);
     CHECK_EQ(23, isolate->Run(instance));
   });
   SharedEngineThread thread2([module](SharedEngineIsolate* isolate) {
     HandleScope scope(isolate->isolate());
-    Handle<WasmInstanceObject> instance = isolate->ImportInstance(module);
+    DirectHandle<WasmInstanceObject> instance = isolate->ImportInstance(module);
     CHECK_EQ(23, isolate->Run(instance));
   });
   CHECK(thread1.Start());
@@ -289,7 +291,8 @@ TEST(SharedEngineRunThreadedTierUp) {
     threads.emplace_back([module](SharedEngineIsolate* isolate) {
       constexpr int kNumberOfIterations = 100;
       HandleScope scope(isolate->isolate());
-      Handle<WasmInstanceObject> instance = isolate->ImportInstance(module);
+      DirectHandle<WasmInstanceObject> instance =
+          isolate->ImportInstance(module);
       for (int j = 0; j < kNumberOfIterations; ++j) {
         CHECK_EQ(23, isolate->Run(instance));
       }
@@ -297,7 +300,7 @@ TEST(SharedEngineRunThreadedTierUp) {
   }
   threads.emplace_back([module](SharedEngineIsolate* isolate) {
     HandleScope scope(isolate->isolate());
-    Handle<WasmInstanceObject> instance = isolate->ImportInstance(module);
+    DirectHandle<WasmInstanceObject> instance = isolate->ImportInstance(module);
     WasmDetectedFeatures detected;
     WasmCompilationUnit::CompileWasmFunction(
         isolate->isolate()->counters(), module.get(), &detected,

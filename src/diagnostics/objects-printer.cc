@@ -37,6 +37,7 @@
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/debug/debug-wasm-objects-inl.h"
 #include "src/wasm/wasm-code-manager.h"
+#include "src/wasm/wasm-code-pointer-table-inl.h"
 #include "src/wasm/wasm-engine.h"
 #include "src/wasm/wasm-objects-inl.h"
 #endif  // V8_ENABLE_WEBASSEMBLY
@@ -172,7 +173,7 @@ void PrintHeapObjectHeaderWithoutMap(Tagged<HeapObject> object,
 template <typename T>
 void PrintDictionaryContents(std::ostream& os, Tagged<T> dict) {
   DisallowGarbageCollection no_gc;
-  ReadOnlyRoots roots = dict->GetReadOnlyRoots();
+  ReadOnlyRoots roots = GetReadOnlyRoots();
 
   if (dict->Capacity() == 0) {
     return;
@@ -218,6 +219,15 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {
   if (instance_type < FIRST_NONSTRING_TYPE) {
     Cast<String>(*this)->StringPrint(os);
     os << "\n";
+    return;
+  }
+
+  // Skip invalid trusted objects. Technically it'd be fine to still handle
+  // them below since we only print the objects, but such an object will
+  // quickly lead to out-of-sandbox segfaults and so fuzzers will complain.
+  if (InstanceTypeChecker::IsTrustedObject(instance_type) &&
+      !OutsideSandboxOrInReadonlySpace(*this)) {
+    os << "<Invalid TrustedObject (outside trusted space)>\n";
     return;
   }
 
@@ -503,7 +513,7 @@ double GetScalarElement(Tagged<T> array, int index) {
 
 template <class T>
 void DoPrintElements(std::ostream& os, Tagged<Object> object, int length) {
-  const bool print_the_hole = std::is_same<T, FixedDoubleArray>::value;
+  const bool print_the_hole = std::is_same_v<T, FixedDoubleArray>;
   Tagged<T> array = Cast<T>(object);
   if (length == 0) return;
   int previous_index = 0;
@@ -1247,7 +1257,7 @@ template <typename T>
 void PrintTableContentsGeneric(std::ostream& os, T* dict,
                                DataPrinter print_data_at) {
   DisallowGarbageCollection no_gc;
-  ReadOnlyRoots roots = dict->GetReadOnlyRoots();
+  ReadOnlyRoots roots = GetReadOnlyRoots();
 
   for (InternalIndex i : dict->IterateEntries()) {
     Tagged<Object> k;
@@ -1451,7 +1461,7 @@ void SwissNameDictionary::SwissNameDictionaryPrint(std::ostream& os) {
   os << "\n - data table (omitting slots where key is the hole): {";
   for (int bucket = 0; bucket < this->Capacity(); ++bucket) {
     Tagged<Object> k;
-    if (!this->ToKey(this->GetReadOnlyRoots(), bucket, &k)) continue;
+    if (!this->ToKey(GetReadOnlyRoots(), bucket, &k)) continue;
 
     Tagged<Object> value = this->ValueAtRaw(bucket);
     PropertyDetails details = this->DetailsAt(bucket);
@@ -1497,6 +1507,13 @@ void TrustedWeakFixedArray::TrustedWeakFixedArrayPrint(std::ostream& os) {
   os << "\n";
 }
 
+void ProtectedWeakFixedArray::ProtectedWeakFixedArrayPrint(std::ostream& os) {
+  PrintHeader(os, "ProtectedWeakFixedArray");
+  os << "\n - length: " << length();
+  PrintWeakArrayElements(os, this);
+  os << "\n";
+}
+
 void WeakArrayList::WeakArrayListPrint(std::ostream& os) {
   PrintHeader(os, "WeakArrayList");
   os << "\n - capacity: " << capacity();
@@ -1525,6 +1542,21 @@ void FeedbackCell::FeedbackCellPrint(std::ostream& os) {
   }
   os << "\n - value: " << Brief(value());
   os << "\n - interrupt_budget: " << interrupt_budget();
+#ifdef V8_ENABLE_LEAPTIERING
+  os << "\n - dispatch_handle: 0x" << std::hex << dispatch_handle() << std::dec;
+  JSDispatchTable* jdt = IsolateGroup::current()->js_dispatch_table();
+  if (dispatch_handle() != kNullJSDispatchHandle &&
+      jdt->IsTieringRequested(dispatch_handle())) {
+    os << "\n - tiering request ";
+    if (Tagged<FeedbackVector> fbv;
+        TryCast(value(), &fbv) && fbv->tiering_in_progress()) {
+      os << "in_progress ";
+    }
+    jdt->PrintCurrentTieringRequest(dispatch_handle(),
+                                    GetIsolateFromWritableObject(*this), os);
+  }
+
+#endif  // V8_ENABLE_LEAPTIERING
   os << "\n";
 }
 
@@ -1584,8 +1616,10 @@ void FeedbackVector::FeedbackVectorPrint(std::ostream& os) {
   }
 
   os << "\n - shared function info: " << Brief(shared_function_info());
+#ifdef V8_ENABLE_LEAPTIERING
+  os << "\n - tiering_in_progress: " << tiering_in_progress();
+#else
   os << "\n - tiering state: " << tiering_state();
-#ifndef V8_ENABLE_LEAPTIERING
   if (has_optimized_code()) {
     os << "\n - optimized code: "
        << Brief(optimized_code(GetIsolateForSandbox(*this)));
@@ -1595,6 +1629,7 @@ void FeedbackVector::FeedbackVectorPrint(std::ostream& os) {
   os << "\n - maybe has maglev code: " << maybe_has_maglev_code();
   os << "\n - maybe has turbofan code: " << maybe_has_turbofan_code();
 #endif  // !V8_ENABLE_LEAPTIERING
+  os << "\n - osr_tiering_in_progress: " << osr_tiering_in_progress();
   os << "\n - invocation count: " << invocation_count();
   os << "\n - closure feedback cell array: ";
   closure_feedback_cell_array()->ClosureFeedbackCellArrayPrint(os);
@@ -1672,6 +1707,10 @@ void FeedbackNexus::Print(std::ostream& os) {
       os << InlineCacheState2String(ic_state());
       if (ic_state() == InlineCacheState::MONOMORPHIC) {
         os << "\n   " << Brief(GetFeedback()) << ": ";
+        if (GetFeedbackExtra().IsCleared()) {
+          os << " <cleared>\n";
+          break;
+        }
         Tagged<Object> handler = GetFeedbackExtra().GetHeapObjectOrSmi();
         if (IsWeakFixedArray(handler) &&
             !Cast<WeakFixedArray>(handler)->get(0).IsCleared()) {
@@ -2005,9 +2044,11 @@ void JSDisposableStackBase::JSDisposableStackBasePrint(std::ostream& os) {
   os << "\n - stack: " << Brief(stack());
   os << "\n - length: " << length();
   os << "\n - state: " << state();
-  os << "\n - needsAwait: " << needsAwait();
-  os << "\n - hasAwaited: " << hasAwaited();
+  os << "\n - needs_await: " << needs_await();
+  os << "\n - has_awaited: " << has_awaited();
+  os << "\n - suppressed_error_created: " << suppressed_error_created();
   os << "\n - error: " << error();
+  os << "\n - error_message: " << error_message();
   JSObjectPrintBody(os, *this);
 }
 
@@ -2016,9 +2057,11 @@ void JSAsyncDisposableStack::JSAsyncDisposableStackPrint(std::ostream& os) {
   os << "\n - stack: " << Brief(stack());
   os << "\n - length: " << length();
   os << "\n - state: " << state();
-  os << "\n - needsAwait: " << needsAwait();
-  os << "\n - hasAwaited: " << hasAwaited();
+  os << "\n - needs_await: " << needs_await();
+  os << "\n - has_awaited: " << has_awaited();
+  os << "\n - suppressed_error_created: " << suppressed_error_created();
   os << "\n - error: " << error();
+  os << "\n - error_message: " << error_message();
   JSObjectPrintBody(os, *this);
 }
 
@@ -2200,6 +2243,15 @@ void JSFunction::JSFunctionPrint(std::ostream& os) {
     os << "\n - canonical feedback cell dispatch_handle: 0x" << std::hex
        << raw_feedback_cell()->dispatch_handle() << std::dec;
   }
+  if (IsTieringRequestedOrInProgress(GetIsolate())) {
+    os << "\n - tiering request ";
+    if (tiering_in_progress()) {
+      os << "in_progress ";
+    }
+    IsolateGroup::current()->js_dispatch_table()->PrintCurrentTieringRequest(
+        dispatch_handle(), GetIsolate(), os);
+  }
+
 #endif  // V8_ENABLE_LEAPTIERING
   if (code(isolate)->kind() == CodeKind::FOR_TESTING) {
     os << "\n - FOR_TESTING";
@@ -2282,8 +2334,12 @@ void SharedFunctionInfo::SharedFunctionInfoPrint(std::ostream& os) {
   os << "\n - expected_nof_properties: "
      << static_cast<int>(expected_nof_properties());
   os << "\n - language_mode: " << language_mode();
-  os << "\n - trusted_function_data: "
-     << Brief(GetTrustedData(GetIsolateForSandbox(*this)));
+  if (HasTrustedData()) {
+    os << "\n - trusted_function_data: "
+       << Brief(GetTrustedData(GetIsolateForSandbox(*this)));
+  } else {
+    os << "\n - trusted_function_data: <empty>";
+  }
   os << "\n - untrusted_function_data: " << Brief(GetUntrustedData());
   os << "\n - code (from function_data): ";
   Isolate* isolate;
@@ -2767,11 +2823,14 @@ void WasmDispatchTable::WasmDispatchTablePrint(std::ostream& os) {
   int len = length();
   os << "\n - length: " << len;
   os << "\n - capacity: " << capacity();
+  Tagged<ProtectedWeakFixedArray> uses = protected_uses();
+  os << "\n - uses: " << Brief(uses);
+  os << "\n - table type: " << table_type().name();
   // Only print up to 55 elements; otherwise print the first 50 and "[...]".
   int printed = len > 55 ? 50 : len;
   for (int i = 0; i < printed; ++i) {
     os << "\n " << std::setw(8) << i << ": sig: " << sig(i)
-       << "; target: " << AsHex::Address(target(i))
+       << "; target: " << AsHex::Address(target(i).value())
        << "; implicit_arg: " << Brief(implicit_arg(i));
   }
   if (printed != len) os << "\n  [...]";
@@ -2821,9 +2880,11 @@ void WasmImportData::WasmImportDataPrint(std::ostream& os) {
   } else {
     os << "<empty>";
   }
-  os << "\n - suspend: " << suspend();
+  os << "\n - suspend: " << static_cast<int>(suspend());
   os << "\n - wrapper_budget: " << wrapper_budget();
-  os << "\n - call_origin: " << Brief(call_origin());
+  if (has_call_origin()) {
+    os << "\n - call_origin: " << Brief(call_origin());
+  }
   os << "\n - sig: " << sig() << " (" << sig()->parameter_count() << " params, "
      << sig()->return_count() << " returns)";
   os << "\n";
@@ -2831,7 +2892,9 @@ void WasmImportData::WasmImportDataPrint(std::ostream& os) {
 
 void WasmInternalFunction::WasmInternalFunctionPrint(std::ostream& os) {
   PrintHeader(os, "WasmInternalFunction");
-  os << "\n - call target: " << reinterpret_cast<void*>(call_target());
+  os << "\n - call target: "
+     << wasm::GetProcessWideWasmCodePointerTable()
+            ->GetEntrypointWithoutSignatureCheck(call_target());
   os << "\n - implicit arg: " << Brief(implicit_arg());
   os << "\n - external: " << Brief(external());
   os << "\n";
@@ -3083,15 +3146,15 @@ void JSDateTimeFormat::JSDateTimeFormatPrint(std::ostream& os) {
   os << "\n - icu simple date format: " << Brief(icu_simple_date_format());
   os << "\n - icu date interval format: " << Brief(icu_date_interval_format());
   os << "\n - bound format: " << Brief(bound_format());
-  os << "\n - hour cycle: " << HourCycleAsString();
+  os << "\n - hour cycle: " << HourCycleAsString(GetIsolate());
   JSObjectPrintBody(os, *this);
 }
 
 void JSDisplayNames::JSDisplayNamesPrint(std::ostream& os) {
   JSObjectPrintHeader(os, *this, "JSDisplayNames");
   os << "\n - internal: " << Brief(internal());
-  os << "\n - style: " << StyleAsString();
-  os << "\n - fallback: " << FallbackAsString();
+  os << "\n - style: " << StyleAsString(GetIsolate());
+  os << "\n - fallback: " << FallbackAsString(GetIsolate());
   JSObjectPrintBody(os, *this);
 }
 
@@ -3107,8 +3170,8 @@ void JSDurationFormat::JSDurationFormatPrint(std::ostream& os) {
 void JSListFormat::JSListFormatPrint(std::ostream& os) {
   JSObjectPrintHeader(os, *this, "JSListFormat");
   os << "\n - locale: " << Brief(locale());
-  os << "\n - style: " << StyleAsString();
-  os << "\n - type: " << TypeAsString();
+  os << "\n - style: " << StyleAsString(GetIsolate());
+  os << "\n - type: " << TypeAsString(GetIsolate());
   os << "\n - icu formatter: " << Brief(icu_formatter());
   JSObjectPrintBody(os, *this);
 }
@@ -3130,7 +3193,7 @@ void JSNumberFormat::JSNumberFormatPrint(std::ostream& os) {
 void JSPluralRules::JSPluralRulesPrint(std::ostream& os) {
   JSObjectPrintHeader(os, *this, "JSPluralRules");
   os << "\n - locale: " << Brief(locale());
-  os << "\n - type: " << TypeAsString();
+  os << "\n - type: " << TypeAsString(GetIsolate());
   os << "\n - icu plural rules: " << Brief(icu_plural_rules());
   os << "\n - icu_number_formatter: " << Brief(icu_number_formatter());
   JSObjectPrintBody(os, *this);
@@ -3140,7 +3203,7 @@ void JSRelativeTimeFormat::JSRelativeTimeFormatPrint(std::ostream& os) {
   JSObjectPrintHeader(os, *this, "JSRelativeTimeFormat");
   os << "\n - locale: " << Brief(locale());
   os << "\n - numberingSystem: " << Brief(numberingSystem());
-  os << "\n - numeric: " << NumericAsString();
+  os << "\n - numeric: " << NumericAsString(GetIsolate());
   os << "\n - icu formatter: " << Brief(icu_formatter());
   os << "\n";
 }
@@ -3201,7 +3264,10 @@ void ScopeInfo::ScopeInfoPrint(std::ostream& os) {
   }
 
   os << "\n - scope type: " << scope_type();
-  if (SloppyEvalCanExtendVars()) os << "\n - sloppy eval";
+  if (SloppyEvalCanExtendVars()) {
+    os << "\n - sloppy eval";
+    os << "\n - dependent code: " << Brief(dependent_code());
+  }
   os << "\n - language mode: " << language_mode();
   if (is_declaration_scope()) os << "\n - declaration scope";
   if (HasReceiver()) {
@@ -3297,7 +3363,19 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
     os << accumulator.ToCString().get();
     return;
   }
-  switch (map(cage_base)->instance_type()) {
+
+  InstanceType instance_type = map(cage_base)->instance_type();
+
+  // Skip invalid trusted objects. Technically it'd be fine to still handle
+  // them below since we only print the objects, but such an object will
+  // quickly lead to out-of-sandbox segfaults and so fuzzers will complain.
+  if (InstanceTypeChecker::IsTrustedObject(instance_type) &&
+      !OutsideSandboxOrInReadonlySpace(*this)) {
+    os << "<Invalid TrustedObject (outside trusted space)>\n";
+    return;
+  }
+
+  switch (instance_type) {
     case MAP_TYPE: {
       Tagged<Map> map = Cast<Map>(*this);
       if (map->instance_type() == MAP_TYPE) {
@@ -3410,6 +3488,22 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
       break;
     case WEAK_FIXED_ARRAY_TYPE:
       os << "<WeakFixedArray[" << Cast<WeakFixedArray>(*this)->length() << "]>";
+      break;
+    case TRUSTED_FIXED_ARRAY_TYPE:
+      os << "<TrustedFixedArray[" << Cast<TrustedFixedArray>(*this)->length()
+         << "]>";
+      break;
+    case TRUSTED_WEAK_FIXED_ARRAY_TYPE:
+      os << "<TrustedWeakFixedArray["
+         << Cast<TrustedWeakFixedArray>(*this)->length() << "]>";
+      break;
+    case PROTECTED_FIXED_ARRAY_TYPE:
+      os << "<ProtectedFixedArray["
+         << Cast<ProtectedFixedArray>(*this)->length() << "]>";
+      break;
+    case PROTECTED_WEAK_FIXED_ARRAY_TYPE:
+      os << "<ProtectedWeakFixedArray["
+         << Cast<ProtectedWeakFixedArray>(*this)->length() << "]>";
       break;
     case TRANSITION_ARRAY_TYPE:
       os << "<TransitionArray[" << Cast<TransitionArray>(*this)->length()
@@ -3867,7 +3961,7 @@ void TransitionsAccessor::PrintOneTransition(std::ostream& os, Tagged<Name> key,
   ShortPrint(key, os);
 #endif
   os << ": ";
-  ReadOnlyRoots roots = key->GetReadOnlyRoots();
+  ReadOnlyRoots roots = GetReadOnlyRoots();
   if (key == roots.nonextensible_symbol()) {
     os << "(transition to non-extensible)";
   } else if (key == roots.sealed_symbol()) {
@@ -4142,7 +4236,8 @@ V8_EXPORT_PRIVATE extern void _v8_internal_Print_Code(void* object) {
 V8_DONT_STRIP_SYMBOL
 V8_EXPORT_PRIVATE extern void _v8_internal_Print_Dispatch_Handle(
     uint32_t handle) {
-  i::GetProcessWideJSDispatchTable()->PrintEntry(handle);
+  i::IsolateGroup::current()->js_dispatch_table()->PrintEntry(
+      i::JSDispatchHandle(handle));
 }
 #endif  // V8_ENABLE_LEAPTIERING
 

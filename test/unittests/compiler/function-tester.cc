@@ -50,7 +50,7 @@ FunctionTester::FunctionTester(Isolate* isolate, Graph* graph, int param_count)
   CompileGraph(graph);
 }
 
-FunctionTester::FunctionTester(Isolate* isolate, Handle<Code> code,
+FunctionTester::FunctionTester(Isolate* isolate, DirectHandle<Code> code,
                                int param_count)
     : isolate(isolate),
       function((v8_flags.allow_natives_syntax = true,
@@ -63,7 +63,7 @@ FunctionTester::FunctionTester(Isolate* isolate, Handle<Code> code,
 
 void FunctionTester::CheckThrows(Handle<Object> a) {
   TryCatch try_catch(reinterpret_cast<v8::Isolate*>(isolate));
-  MaybeHandle<Object> no_result = Call(a);
+  MaybeDirectHandle<Object> no_result = Call(a);
   CHECK(isolate->has_exception());
   CHECK(try_catch.HasCaught());
   CHECK(no_result.is_null());
@@ -71,7 +71,7 @@ void FunctionTester::CheckThrows(Handle<Object> a) {
 
 void FunctionTester::CheckThrows(Handle<Object> a, Handle<Object> b) {
   TryCatch try_catch(reinterpret_cast<v8::Isolate*>(isolate));
-  MaybeHandle<Object> no_result = Call(a, b);
+  MaybeDirectHandle<Object> no_result = Call(a, b);
   CHECK(isolate->has_exception());
   CHECK(try_catch.HasCaught());
   CHECK(no_result.is_null());
@@ -80,7 +80,7 @@ void FunctionTester::CheckThrows(Handle<Object> a, Handle<Object> b) {
 v8::Local<v8::Message> FunctionTester::CheckThrowsReturnMessage(
     Handle<Object> a, Handle<Object> b) {
   TryCatch try_catch(reinterpret_cast<v8::Isolate*>(isolate));
-  MaybeHandle<Object> no_result = Call(a, b);
+  MaybeDirectHandle<Object> no_result = Call(a, b);
   CHECK(isolate->has_exception());
   CHECK(try_catch.HasCaught());
   CHECK(no_result.is_null());
@@ -157,7 +157,7 @@ Handle<JSFunction> FunctionTester::CompileGraph(Graph* graph) {
       Pipeline::GenerateCodeForTesting(&info, isolate, call_descriptor, graph,
                                        AssemblerOptions::Default(isolate))
           .ToHandleChecked();
-  function->UpdateCode(*code);
+  function->UpdateOptimizedCode(isolate, *code);
   return function;
 }
 
@@ -185,7 +185,7 @@ Handle<JSFunction> FunctionTester::Optimize(Handle<JSFunction> function,
   DirectHandle<Code> code =
       compiler::Pipeline::GenerateCodeForTesting(&info, isolate)
           .ToHandleChecked();
-  function->UpdateCode(*code);
+  function->UpdateOptimizedCode(isolate, *code);
   return function;
 }
 }  // namespace compiler

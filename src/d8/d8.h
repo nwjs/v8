@@ -180,7 +180,7 @@ class SerializationDataQueue {
   void Clear();
 
  private:
-  base::Mutex mutex_;
+  base::SpinningMutex mutex_;
   std::vector<std::unique_ptr<SerializationData>> data_;
 };
 
@@ -278,7 +278,7 @@ class Worker : public std::enable_shared_from_this<Worker> {
 
   // Protects reading / writing task_runner_. (The TaskRunner itself doesn't
   // need locking, but accessing the Worker's data member does.)
-  base::Mutex worker_mutex_;
+  base::SpinningMutex worker_mutex_;
 
   // The isolate should only be accessed by the worker itself, or when holding
   // the worker_mutex_ and after checking the worker state.
@@ -645,6 +645,8 @@ class Shell : public i::AllStatic {
   static void Version(const v8::FunctionCallbackInfo<v8::Value>& info);
   static void WriteFile(const v8::FunctionCallbackInfo<v8::Value>& info);
   static void ReadFile(const v8::FunctionCallbackInfo<v8::Value>& info);
+  static void CreateWasmMemoryMapDescriptor(
+      const v8::FunctionCallbackInfo<v8::Value>& info);
   static char* ReadChars(const char* name, int* size_out);
   static MaybeLocal<PrimitiveArray> ReadLines(Isolate* isolate,
                                               const char* name);
@@ -784,7 +786,7 @@ class Shell : public i::AllStatic {
   static base::OnceType quit_once_;
   static Global<Function> stringify_function_;
 
-  static base::Mutex profiler_end_callback_lock_;
+  static base::SpinningMutex profiler_end_callback_lock_;
   static std::map<Isolate*, std::pair<Global<Function>, Global<Context>>>
       profiler_end_callback_;
 

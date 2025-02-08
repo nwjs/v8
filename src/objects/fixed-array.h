@@ -239,9 +239,12 @@ V8_OBJECT class FixedArray
   // Invariant: 0 < new_length <= length()
   V8_EXPORT_PRIVATE void RightTrim(Isolate* isolate, int new_capacity);
   // Right-trims the array, and canonicalizes length 0 to empty_fixed_array.
-  static Handle<FixedArray> RightTrimOrEmpty(Isolate* isolate,
-                                             Handle<FixedArray> array,
-                                             int new_length);
+  template <template <typename> typename HandleType>
+    requires(
+        std::is_convertible_v<HandleType<FixedArray>, DirectHandle<FixedArray>>)
+  static HandleType<FixedArray> RightTrimOrEmpty(Isolate* isolate,
+                                                 HandleType<FixedArray> array,
+                                                 int new_length);
 
   // TODO(jgruber): Only needed for FixedArrays used as JSObject elements.
   inline void FillWithHoles(int from, int to);
@@ -272,6 +275,7 @@ static_assert(sizeof(FixedArray) == Internals::kFixedArrayHeaderSize);
 class TrustedArrayShape final : public AllStatic {
  public:
   using ElementT = Object;
+  // The elements in a TrustedFixedArray are pointers into the main cage!
   using CompressionScheme = V8HeapCompressionScheme;
   static constexpr RootIndex kMapRootIndex = RootIndex::kTrustedFixedArrayMap;
   static constexpr bool kLengthEqualsCapacity = true;
@@ -504,7 +508,7 @@ V8_OBJECT class WeakFixedArray
   static inline Handle<WeakFixedArray> New(
       IsolateT* isolate, int capacity,
       AllocationType allocation = AllocationType::kYoung,
-      MaybeHandle<Object> initial_value = {});
+      MaybeDirectHandle<Object> initial_value = {});
 
   DECL_PRINTER(WeakFixedArray)
   DECL_VERIFIER(WeakFixedArray)
@@ -521,7 +525,7 @@ class TrustedWeakFixedArrayShape final : public AllStatic {
   static constexpr bool kLengthEqualsCapacity = true;
 };
 
-// A WeakFixedArray in trusted space and with a unique instance type.
+// A WeakFixedArray in trusted space holding pointers into the main cage.
 V8_OBJECT class TrustedWeakFixedArray
     : public TaggedArrayBase<TrustedWeakFixedArray, TrustedWeakFixedArrayShape,
                              TrustedObjectLayout> {
@@ -535,6 +539,35 @@ V8_OBJECT class TrustedWeakFixedArray
 
   DECL_PRINTER(TrustedWeakFixedArray)
   DECL_VERIFIER(TrustedWeakFixedArray)
+
+  class BodyDescriptor;
+} V8_OBJECT_END;
+
+class ProtectedWeakFixedArrayShape final : public AllStatic {
+ public:
+  using ElementT = Union<MaybeWeak<TrustedObject>, Smi>;
+  using CompressionScheme = TrustedSpaceCompressionScheme;
+  static constexpr RootIndex kMapRootIndex =
+      RootIndex::kProtectedWeakFixedArrayMap;
+  static constexpr bool kLengthEqualsCapacity = true;
+};
+
+// A WeakFixedArray in trusted space, containing weak pointers to other
+// trusted objects (or smis).
+V8_OBJECT class ProtectedWeakFixedArray
+    : public TaggedArrayBase<ProtectedWeakFixedArray,
+                             ProtectedWeakFixedArrayShape,
+                             TrustedObjectLayout> {
+  using Super =
+      TaggedArrayBase<ProtectedWeakFixedArray, ProtectedWeakFixedArrayShape,
+                      TrustedObjectLayout>;
+
+ public:
+  template <class IsolateT>
+  static inline Handle<ProtectedWeakFixedArray> New(IsolateT* isolate,
+                                                    int capacity);
+  DECL_PRINTER(ProtectedWeakFixedArray)
+  DECL_VERIFIER(ProtectedWeakFixedArray)
 
   class BodyDescriptor;
 } V8_OBJECT_END;
@@ -554,7 +587,7 @@ class WeakArrayList
       Isolate* isolate, Handle<WeakArrayList> array,
       MaybeObjectDirectHandle value);
 
-  // A version that adds to elements. This ensures that the elements are
+  // A version that adds two elements. This ensures that the elements are
   // inserted atomically w.r.t GC.
   V8_EXPORT_PRIVATE static Handle<WeakArrayList> AddToEnd(
       Isolate* isolate, Handle<WeakArrayList> array,

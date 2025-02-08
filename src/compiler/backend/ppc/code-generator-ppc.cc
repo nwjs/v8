@@ -791,6 +791,12 @@ void CodeGenerator::AssembleCodeStartRegisterCheck() {
   __ Assert(eq, AbortReason::kWrongFunctionCodeStart);
 }
 
+#ifdef V8_ENABLE_LEAPTIERING
+void CodeGenerator::AssembleDispatchHandleRegisterCheck() {
+  CHECK(!V8_JS_LINKAGE_INCLUDES_DISPATCH_HANDLE_BOOL);
+}
+#endif  // V8_ENABLE_LEAPTIERING
+
 void CodeGenerator::BailoutIfDeoptimized() { __ BailoutIfDeoptimized(); }
 
 // Assembles an instruction after register allocation, producing machine code.
@@ -830,13 +836,17 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     }
 #if V8_ENABLE_WEBASSEMBLY
-    case kArchCallWasmFunction: {
+    case kArchCallWasmFunction:
+    case kArchCallWasmFunctionIndirect: {
       // We must not share code targets for calls to builtins for wasm code, as
       // they might need to be patched individually.
       if (instr->InputAt(0)->IsImmediate()) {
+        DCHECK_EQ(opcode, kArchCallWasmFunction);
         Constant constant = i.ToConstant(instr->InputAt(0));
         Address wasm_code = static_cast<Address>(constant.ToInt64());
         __ Call(wasm_code, constant.rmode());
+      } else if (opcode == kArchCallWasmFunctionIndirect) {
+        __ CallWasmCodePointer(i.InputRegister(0));
       } else {
         __ Call(i.InputRegister(0));
       }
@@ -845,13 +855,17 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       frame_access_state()->ClearSPDelta();
       break;
     }
-    case kArchTailCallWasm: {
+    case kArchTailCallWasm:
+    case kArchTailCallWasmIndirect: {
       // We must not share code targets for calls to builtins for wasm code, as
       // they might need to be patched individually.
       if (instr->InputAt(0)->IsImmediate()) {
+        DCHECK_EQ(opcode, kArchTailCallWasm);
         Constant constant = i.ToConstant(instr->InputAt(0));
         Address wasm_code = static_cast<Address>(constant.ToInt64());
         __ Jump(wasm_code, constant.rmode());
+      } else if (opcode == kArchTailCallWasmIndirect) {
+        __ CallWasmCodePointer(i.InputRegister(0), CallJumpMode::kTailCall);
       } else {
         __ Jump(i.InputRegister(0));
       }
@@ -2436,30 +2450,46 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
 #undef EMIT_SIMD_LOAD_SPLAT
 #undef SIMD_LOAD_SPLAT
 
-    case kPPC_F64x2Splat: {
-      __ F64x2Splat(i.OutputSimd128Register(), i.InputDoubleRegister(0),
-                    kScratchReg);
+    case kPPC_FSplat: {
+      int lane_size = LaneSizeField::decode(instr->opcode());
+      switch (lane_size) {
+        case 32: {
+          __ F32x4Splat(i.OutputSimd128Register(), i.InputDoubleRegister(0),
+                        kScratchDoubleReg, kScratchReg);
+          break;
+        }
+        case 64: {
+          __ F64x2Splat(i.OutputSimd128Register(), i.InputDoubleRegister(0),
+                        kScratchReg);
+          break;
+        }
+        default:
+          UNREACHABLE();
+      }
       break;
     }
-    case kPPC_F32x4Splat: {
-      __ F32x4Splat(i.OutputSimd128Register(), i.InputDoubleRegister(0),
-                    kScratchDoubleReg, kScratchReg);
-      break;
-    }
-    case kPPC_I64x2Splat: {
-      __ I64x2Splat(i.OutputSimd128Register(), i.InputRegister(0));
-      break;
-    }
-    case kPPC_I32x4Splat: {
-      __ I32x4Splat(i.OutputSimd128Register(), i.InputRegister(0));
-      break;
-    }
-    case kPPC_I16x8Splat: {
-      __ I16x8Splat(i.OutputSimd128Register(), i.InputRegister(0));
-      break;
-    }
-    case kPPC_I8x16Splat: {
-      __ I8x16Splat(i.OutputSimd128Register(), i.InputRegister(0));
+    case kPPC_ISplat: {
+      int lane_size = LaneSizeField::decode(instr->opcode());
+      switch (lane_size) {
+        case 8: {
+          __ I8x16Splat(i.OutputSimd128Register(), i.InputRegister(0));
+          break;
+        }
+        case 16: {
+          __ I16x8Splat(i.OutputSimd128Register(), i.InputRegister(0));
+          break;
+        }
+        case 32: {
+          __ I32x4Splat(i.OutputSimd128Register(), i.InputRegister(0));
+          break;
+        }
+        case 64: {
+          __ I64x2Splat(i.OutputSimd128Register(), i.InputRegister(0));
+          break;
+        }
+        default:
+          UNREACHABLE();
+      }
       break;
     }
     case kPPC_FExtractLane: {
@@ -3065,7 +3095,7 @@ void CodeGenerator::AssembleConstructFrame() {
       // efficient initialization of the constant pool pointer register).
       __ StubPrologue(type);
 #if V8_ENABLE_WEBASSEMBLY
-      if (call_descriptor->IsWasmFunctionCall() ||
+      if (call_descriptor->IsAnyWasmFunctionCall() ||
           call_descriptor->IsWasmImportWrapper() ||
           call_descriptor->IsWasmCapiFunction()) {
         // For import wrappers and C-API functions, this stack slot is only used

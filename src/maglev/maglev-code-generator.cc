@@ -807,12 +807,12 @@ class MaglevCodeGeneratingNodeProcessor {
     PatchJumps(node);
 
     // Emit Phi moves before visiting the control node.
-    if (std::is_base_of<UnconditionalControlNode, NodeT>::value) {
+    if (std::is_base_of_v<UnconditionalControlNode, NodeT>) {
       EmitBlockEndGapMoves(node->template Cast<UnconditionalControlNode>(),
                            state);
     }
 
-    if (v8_flags.debug_code && !std::is_same_v<NodeT, Phi>) {
+    if (v8_flags.slow_debug_code && !std::is_same_v<NodeT, Phi>) {
       // Check that all int32/uint32 inputs are zero extended.
       // Note that we don't do this for Phis, since they are virtual operations
       // whose inputs aren't actual inputs but are injected on incoming
@@ -850,7 +850,7 @@ class MaglevCodeGeneratingNodeProcessor {
     masm()->set_allow_deferred_call(false);
 #endif
 
-    if (std::is_base_of<ValueNode, NodeT>::value) {
+    if (std::is_base_of_v<ValueNode, NodeT>) {
       ValueNode* value_node = node->template Cast<ValueNode>();
       if (value_node->has_valid_live_range() && value_node->is_spilled()) {
         compiler::AllocatedOperand source =
@@ -1337,7 +1337,8 @@ class MaglevFrameTranslationBuilder {
                              const VirtualObject::List& virtual_objects) {
     translation_array_builder_->BeginInlinedExtraArguments(
         GetDeoptLiteral(GetSharedFunctionInfo(frame)),
-        static_cast<uint32_t>(frame.arguments().size()));
+        static_cast<uint32_t>(frame.arguments().size()),
+        GetBytecodeArray(frame).parameter_count());
 
     // Closure
     BuildDeoptFrameSingleValue(frame.closure(), current_input_location,
@@ -1377,7 +1378,7 @@ class MaglevFrameTranslationBuilder {
     int height = frame.parameters().length();
 
     constexpr int kExtraFixedJSFrameParameters =
-        V8_ENABLE_LEAPTIERING_BOOL ? 4 : 3;
+        V8_JS_LINKAGE_INCLUDES_DISPATCH_HANDLE_BOOL ? 4 : 3;
     if (frame.is_javascript()) {
       translation_array_builder_->BeginJavaScriptBuiltinContinuationFrame(
           bailout_id, literal_id, height + kExtraFixedJSFrameParameters);
@@ -1407,7 +1408,7 @@ class MaglevFrameTranslationBuilder {
                     .GetRegisterParameterCount(),
                 kExtraFixedJSFrameParameters);
       static_assert(kExtraFixedJSFrameParameters ==
-                    3 + (V8_ENABLE_LEAPTIERING_BOOL ? 1 : 0));
+                    3 + (V8_JS_LINKAGE_INCLUDES_DISPATCH_HANDLE_BOOL ? 1 : 0));
       // kJavaScriptCallTargetRegister
       translation_array_builder_->StoreLiteral(
           GetDeoptLiteral(frame.javascript_target()));
@@ -1417,10 +1418,10 @@ class MaglevFrameTranslationBuilder {
       // kJavaScriptCallArgCountRegister
       translation_array_builder_->StoreLiteral(GetDeoptLiteral(
           Smi::FromInt(Builtins::GetStackParameterCount(frame.builtin_id()))));
-#ifdef V8_ENABLE_LEAPTIERING
+#ifdef V8_JS_LINKAGE_INCLUDES_DISPATCH_HANDLE
       // kJavaScriptCallDispatchHandleRegister
       translation_array_builder_->StoreLiteral(
-          GetDeoptLiteral(Smi::FromInt(kInvalidDispatchHandle)));
+          GetDeoptLiteral(Smi::FromInt(kInvalidDispatchHandle.value())));
 #endif
     }
 
@@ -1721,8 +1722,7 @@ MaglevCodeGenerator::MaglevCodeGenerator(
     Graph* graph)
     : local_isolate_(isolate),
       safepoint_table_builder_(compilation_info->zone(),
-                               graph->tagged_stack_slots(),
-                               graph->untagged_stack_slots()),
+                               graph->tagged_stack_slots()),
       frame_translation_builder_(compilation_info->zone()),
       code_gen_state_(compilation_info, &safepoint_table_builder_),
       masm_(isolate->GetMainThreadIsolateUnsafe(), compilation_info->zone(),
@@ -1929,7 +1929,7 @@ void MaglevCodeGenerator::EmitMetadata() {
   // Final alignment before starting on the metadata section.
   masm()->Align(InstructionStream::kMetadataAlignment);
 
-  safepoint_table_builder_.Emit(masm());
+  safepoint_table_builder_.Emit(masm(), stack_slot_count_with_fixed_frame());
 
   // Exception handler table.
   handler_table_offset_ = HandlerTable::EmitReturnTableStart(masm());

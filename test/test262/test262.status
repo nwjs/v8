@@ -1072,27 +1072,6 @@
   'intl402/DateTimeFormat/timezone-not-canonicalized': [FAIL],
 
   # https://issues.chromium.org/u/0/issues/42204365
-  'language/expressions/dynamic-import/syntax/invalid/nested-arrow-assignment-expression-import-source-no-new-call-expression': [FAIL],
-  'language/expressions/dynamic-import/syntax/invalid/nested-arrow-import-source-no-new-call-expression': [FAIL],
-  'language/expressions/dynamic-import/syntax/invalid/nested-async-arrow-function-await-import-source-no-new-call-expression': [FAIL],
-  'language/expressions/dynamic-import/syntax/invalid/nested-async-arrow-function-return-await-import-source-no-new-call-expression': [FAIL],
-  'language/expressions/dynamic-import/syntax/invalid/nested-async-function-await-import-source-no-new-call-expression': [FAIL],
-  'language/expressions/dynamic-import/syntax/invalid/nested-async-function-import-source-no-new-call-expression': [FAIL],
-  'language/expressions/dynamic-import/syntax/invalid/nested-async-function-return-await-import-source-no-new-call-expression': [FAIL],
-  'language/expressions/dynamic-import/syntax/invalid/nested-async-gen-await-import-source-no-new-call-expression': [FAIL],
-  'language/expressions/dynamic-import/syntax/invalid/nested-block-import-source-no-new-call-expression': [FAIL],
-  'language/expressions/dynamic-import/syntax/invalid/nested-block-labeled-import-source-no-new-call-expression': [FAIL],
-  'language/expressions/dynamic-import/syntax/invalid/nested-do-while-import-source-no-new-call-expression': [FAIL],
-  'language/expressions/dynamic-import/syntax/invalid/nested-else-braceless-import-source-no-new-call-expression': [FAIL],
-  'language/expressions/dynamic-import/syntax/invalid/nested-else-import-source-no-new-call-expression': [FAIL],
-  'language/expressions/dynamic-import/syntax/invalid/nested-function-import-source-no-new-call-expression': [FAIL],
-  'language/expressions/dynamic-import/syntax/invalid/nested-function-return-import-source-no-new-call-expression': [FAIL],
-  'language/expressions/dynamic-import/syntax/invalid/nested-if-braceless-import-source-no-new-call-expression': [FAIL],
-  'language/expressions/dynamic-import/syntax/invalid/nested-if-import-source-no-new-call-expression': [FAIL],
-  'language/expressions/dynamic-import/syntax/invalid/nested-while-import-source-no-new-call-expression': [FAIL],
-  'language/expressions/dynamic-import/syntax/invalid/nested-with-expression-import-source-no-new-call-expression': [FAIL],
-  'language/expressions/dynamic-import/syntax/invalid/nested-with-import-source-no-new-call-expression': [FAIL],
-  'language/expressions/dynamic-import/syntax/invalid/top-level-import-source-no-new-call-expression': [FAIL],
   'language/module-code/source-phase-import/import-source-binding-name': [FAIL],
   'language/module-code/source-phase-import/import-source-binding-name-2': [FAIL],
   'language/module-code/source-phase-import/import-source-newlines': [FAIL],
@@ -1730,8 +1709,6 @@
 # Roll-watcher patch
 [ALWAYS, {
   # https://github.com/tc39/test262/pull/4146
-  'built-ins/AbstractModuleSource/prototype': [SKIP],
-  'built-ins/AbstractModuleSource/prototype/Symbol.toStringTag': [SKIP],
   'built-ins/Math/sumPrecise/length': [SKIP],
   'built-ins/Math/sumPrecise/name': [SKIP],
   'built-ins/Math/sumPrecise/not-a-constructor': [SKIP],
@@ -2393,65 +2370,6 @@
 ####
 
 ####
-# Roll-watcher patch
-[ALWAYS, {
-  'built-ins/Error/isError/bigints': [SKIP],
-  'built-ins/Error/isError/error-subclass': [SKIP],
-  'built-ins/Error/isError/errors': [SKIP],
-  'built-ins/Error/isError/errors-other-realm': [SKIP],
-  'built-ins/Error/isError/fake-errors': [SKIP],
-  'built-ins/Error/isError/is-a-constructor': [SKIP],
-  'built-ins/Error/isError/name': [SKIP],
-  'built-ins/Error/isError/non-error-objects': [SKIP],
-  'built-ins/Error/isError/non-error-objects-other-realm': [SKIP],
-  'built-ins/Error/isError/primitives': [SKIP],
-  'built-ins/Error/isError/prop-desc': [SKIP],
-  'built-ins/Error/isError/symbols': [SKIP],
-}],
-# End roll-watcher patch
-####
-
-####
-# import test262@3f0a24f4f6a9c84c4f4edc9a19d6c8d74521aaa7
-[ALWAYS, {
-'language/expressions/dynamic-import/catch/nested-arrow-import-catch-import-source-source-text-module': [SKIP],
-'language/expressions/dynamic-import/catch/nested-arrow-import-catch-import-source-specifier-tostring': [SKIP],
-'language/expressions/dynamic-import/catch/nested-async-arrow-function-await-import-source-source-text-module': [SKIP],
-'language/expressions/dynamic-import/catch/nested-async-arrow-function-await-import-source-specifier-tostring': [SKIP],
-'language/expressions/dynamic-import/catch/nested-async-arrow-function-return-await-import-source-source-text-module': [SKIP],
-'language/expressions/dynamic-import/catch/nested-async-arrow-function-return-await-import-source-specifier-tostring': [SKIP],
-'language/expressions/dynamic-import/catch/nested-async-function-await-import-source-source-text-module': [SKIP],
-'language/expressions/dynamic-import/catch/nested-async-function-await-import-source-specifier-tostring': [SKIP],
-'language/expressions/dynamic-import/catch/nested-async-function-import-source-source-text-module': [SKIP],
-'language/expressions/dynamic-import/catch/nested-async-function-import-source-specifier-tostring': [SKIP],
-'language/expressions/dynamic-import/catch/nested-async-function-return-await-import-source-source-text-module': [SKIP],
-'language/expressions/dynamic-import/catch/nested-async-function-return-await-import-source-specifier-tostring': [SKIP],
-'language/expressions/dynamic-import/catch/nested-async-gen-await-import-source-source-text-module': [SKIP],
-'language/expressions/dynamic-import/catch/nested-async-gen-await-import-source-specifier-tostring': [SKIP],
-'language/expressions/dynamic-import/catch/nested-async-gen-return-await-import-source-source-text-module': [SKIP],
-'language/expressions/dynamic-import/catch/nested-async-gen-return-await-import-source-specifier-tostring': [SKIP],
-'language/expressions/dynamic-import/catch/nested-block-import-catch-import-source-source-text-module': [SKIP],
-'language/expressions/dynamic-import/catch/nested-block-import-catch-import-source-specifier-tostring': [SKIP],
-'language/expressions/dynamic-import/catch/nested-block-labeled-import-source-source-text-module': [SKIP],
-'language/expressions/dynamic-import/catch/nested-block-labeled-import-source-specifier-tostring': [SKIP],
-'language/expressions/dynamic-import/catch/nested-do-while-import-source-source-text-module': [SKIP],
-'language/expressions/dynamic-import/catch/nested-do-while-import-source-specifier-tostring': [SKIP],
-'language/expressions/dynamic-import/catch/nested-else-import-catch-import-source-source-text-module': [SKIP],
-'language/expressions/dynamic-import/catch/nested-else-import-catch-import-source-specifier-tostring': [SKIP],
-'language/expressions/dynamic-import/catch/nested-function-import-catch-import-source-source-text-module': [SKIP],
-'language/expressions/dynamic-import/catch/nested-function-import-catch-import-source-specifier-tostring': [SKIP],
-'language/expressions/dynamic-import/catch/nested-if-import-catch-import-source-source-text-module': [SKIP],
-'language/expressions/dynamic-import/catch/nested-if-import-catch-import-source-specifier-tostring': [SKIP],
-'language/expressions/dynamic-import/catch/nested-while-import-catch-import-source-source-text-module': [SKIP],
-'language/expressions/dynamic-import/catch/nested-while-import-catch-import-source-specifier-tostring': [SKIP],
-'language/expressions/dynamic-import/catch/top-level-import-catch-import-source-source-text-module': [SKIP],
-'language/expressions/dynamic-import/catch/top-level-import-catch-import-source-specifier-tostring': [SKIP],
-'staging/source-phase-imports/import-source-source-text-module': [SKIP],
-}],
-# end import test262@3f0a24f4f6a9c84c4f4edc9a19d6c8d74521aaa7
-####
-
-####
 # import test262@ab69bd4dd8184ce6b96a0a02c904d20ee76b10ed
 [ALWAYS, {
 'built-ins/Temporal/Duration/prototype/round/accepts-datetime-strings-for-relative-to': [SKIP],
@@ -2505,6 +2423,50 @@
 'staging/Temporal/Duration/old/relativeto-not-required-to-round-fixed-length-units-in-durations-without-variable-units': [SKIP],
 }],
 # end import test262@ab69bd4dd8184ce6b96a0a02c904d20ee76b10ed
+####
+
+####
+# Roll-watcher patch
+[ALWAYS, {
+  'intl402/Temporal/Duration/prototype/round/adjust-rounded-duration-days': [SKIP],
+}],
+# End roll-watcher patch
+####
+
+####
+# import test262@dad2774b2eab2119cc8390ae65db4a5016de2dfe
+[ALWAYS, {
+  'built-ins/Temporal/Duration/prototype/round/balances-up-to-weeks': [SKIP],
+  'language/import/import-defer/deferred-namespace-object/exotic-object-behavior': [SKIP],
+  'language/import/import-defer/deferred-namespace-object/identity': [SKIP],
+  'language/import/import-defer/errors/get-other-while-dep-evaluating-async/main': [SKIP],
+  'language/import/import-defer/errors/get-other-while-dep-evaluating/main': [SKIP],
+  'language/import/import-defer/errors/get-other-while-evaluating-async/main': [SKIP],
+  'language/import/import-defer/errors/get-other-while-evaluating/main': [SKIP],
+  'language/import/import-defer/errors/get-self-while-defer-evaluating/main': [SKIP],
+  'language/import/import-defer/errors/get-self-while-evaluating': [SKIP],
+  'language/import/import-defer/errors/get-self-while-evaluating-async/main': [SKIP],
+  'language/import/import-defer/errors/module-throws/defer-import-after-evaluation': [SKIP],
+  'language/import/import-defer/errors/module-throws/third-party-evaluation-after-defer-import': [SKIP],
+  'language/import/import-defer/errors/module-throws/trigger-evaluation': [SKIP],
+  'language/import/import-defer/evaluation-sync/evaluation-ignore-getPrototypeOf': [SKIP],
+  'language/import/import-defer/evaluation-sync/evaluation-ignore-get-symbol': [SKIP],
+  'language/import/import-defer/evaluation-sync/evaluation-ignore-isExtensible': [SKIP],
+  'language/import/import-defer/evaluation-sync/evaluation-ignore-preventExtensions': [SKIP],
+  'language/import/import-defer/evaluation-sync/evaluation-ignore-set': [SKIP],
+  'language/import/import-defer/evaluation-sync/evaluation-ignore-setPrototypeOf': [SKIP],
+  'language/import/import-defer/evaluation-sync/evaluation-trigger-get-string': [SKIP],
+  'language/import/import-defer/evaluation-sync/import-defer-does-not-evaluate': [SKIP],
+  'language/import/import-defer/evaluation-sync/module-imported-defer-and-eager': [SKIP],
+  'language/import/import-defer/evaluation-top-level-await/flattening-order/main': [SKIP],
+  'language/import/import-defer/evaluation-top-level-await/import-defer-async-module/main': [SKIP],
+  'language/import/import-defer/evaluation-top-level-await/import-defer-transitive-async-module/main': [SKIP],
+  'language/import/import-defer/evaluation-top-level-await/sync-dependency-of-deferred-async-module/main': [SKIP],
+  'language/import/import-defer/syntax/import-attributes': [SKIP],
+  'language/import/import-defer/syntax/valid-default-binding-named-defer': [SKIP],
+  'language/import/import-defer/syntax/valid-defer-namespace': [SKIP],
+}],
+# end import test262@dad2774b2eab2119cc8390ae65db4a5016de2dfe
 ####
 
 ]

@@ -126,7 +126,7 @@
 #include "src/utils/utils.h"
 
 #ifdef V8_ENABLE_CONSERVATIVE_STACK_SCANNING
-#include "src/heap/conservative-stack-visitor.h"
+#include "src/heap/conservative-stack-visitor-inl.h"
 #endif  // V8_ENABLE_CONSERVATIVE_STACK_SCANNING
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -173,67 +173,6 @@ void Heap::SetSerializedGlobalProxySizes(Tagged<FixedArray> sizes) {
 void Heap::SetBasicBlockProfilingData(DirectHandle<ArrayList> list) {
   set_basic_block_profiling_data(*list);
 }
-
-class ScheduleMinorGCTaskObserver final : public AllocationObserver {
- public:
-  explicit ScheduleMinorGCTaskObserver(Heap* heap)
-      : AllocationObserver(kNotUsingFixedStepSize), heap_(heap) {
-    // Register GC callback for all atomic pause types.
-    heap_->main_thread_local_heap()->AddGCEpilogueCallback(
-        &GCEpilogueCallback, this, GCCallbacksInSafepoint::GCType::kLocal);
-    AddToNewSpace();
-  }
-  ~ScheduleMinorGCTaskObserver() final {
-    RemoveFromNewSpace();
-    heap_->main_thread_local_heap()->RemoveGCEpilogueCallback(
-        &GCEpilogueCallback, this);
-  }
-
-  intptr_t GetNextStepSize() final {
-    size_t new_space_threshold =
-        MinorGCJob::YoungGenerationTaskTriggerSize(heap_);
-    size_t new_space_size = v8_flags.sticky_mark_bits
-                                ? heap_->sticky_space()->young_objects_size()
-                                : heap_->new_space()->Size();
-    if (new_space_size < new_space_threshold) {
-      return new_space_threshold - new_space_size;
-    }
-    // Force a step on next allocation.
-    return 1;
-  }
-
-  void Step(int, Address, size_t) final {
-    heap_->ScheduleMinorGCTaskIfNeeded();
-    // Remove this observer. It will be re-added after a GC.
-    DCHECK(was_added_to_space_);
-    heap_->allocator()->new_space_allocator()->RemoveAllocationObserver(this);
-    was_added_to_space_ = false;
-  }
-
- protected:
-  static void GCEpilogueCallback(void* observer) {
-    reinterpret_cast<ScheduleMinorGCTaskObserver*>(observer)
-        ->RemoveFromNewSpace();
-    reinterpret_cast<ScheduleMinorGCTaskObserver*>(observer)->AddToNewSpace();
-  }
-
-  void AddToNewSpace() {
-    DCHECK(!was_added_to_space_);
-    DCHECK_IMPLIES(v8_flags.minor_ms,
-                   !heap_->allocator()->new_space_allocator()->IsLabValid());
-    heap_->allocator()->new_space_allocator()->AddAllocationObserver(this);
-    was_added_to_space_ = true;
-  }
-
-  void RemoveFromNewSpace() {
-    if (!was_added_to_space_) return;
-    heap_->allocator()->new_space_allocator()->RemoveAllocationObserver(this);
-    was_added_to_space_ = false;
-  }
-
-  Heap* heap_;
-  bool was_added_to_space_ = false;
-};
 
 Heap::Heap()
     : isolate_(isolate()),
@@ -485,17 +424,32 @@ bool Heap::CanExpandOldGeneration(size_t size) const {
 }
 
 bool Heap::IsOldGenerationExpansionAllowed(
-    size_t size, const base::MutexGuard& expansion_mutex_witness) const {
+    size_t size,
+    const base::SpinningMutexGuard& expansion_mutex_witness) const {
   return OldGenerationCapacity() + size <= max_old_generation_size();
 }
 
 bool Heap::CanPromoteYoungAndExpandOldGeneration(size_t size) const {
-  size_t new_space_capacity = NewSpaceCapacity();
-  size_t new_lo_space_capacity = new_lo_space_ ? new_lo_space_->Size() : 0;
+  if (v8_flags.sticky_mark_bits) {
+    DCHECK_NULL(new_space());
+    size_t new_space_capacity =
+        sticky_space()->Capacity() - sticky_space()->young_objects_size();
+    size_t new_lo_space_capacity = new_lo_space_ ? new_lo_space_->Size() : 0;
+    return CanExpandOldGeneration(size + new_space_capacity +
+                                  new_lo_space_capacity);
+  }
+  if (!new_space()) {
+    DCHECK_NULL(new_lo_space());
+    return CanExpandOldGeneration(size);
+  }
+  size_t new_space_capacity =
+      new_space()->Capacity() + new_lo_space()->Size() +
+      (v8_flags.minor_ms ? 0
+                         : semi_space_new_space()->QuarantinedPageCount() *
+                               PageMetadata::kPageSize);
 
   // Over-estimate the new space size using capacity to allow some slack.
-  return CanExpandOldGeneration(size + new_space_capacity +
-                                new_lo_space_capacity);
+  return CanExpandOldGeneration(size + new_space_capacity);
 }
 
 bool Heap::HasBeenSetUp() const {
@@ -992,35 +946,6 @@ void Heap::RemoveHeapObjectAllocationTracker(
   }
 }
 
-void UpdateRetainersMapAfterScavenge(
-    UnorderedHeapObjectMap<Tagged<HeapObject>>* map) {
-  // This is only used for Scavenger.
-  DCHECK(!v8_flags.minor_ms);
-
-  UnorderedHeapObjectMap<Tagged<HeapObject>> updated_map;
-
-  for (auto pair : *map) {
-    Tagged<HeapObject> object = pair.first;
-    Tagged<HeapObject> retainer = pair.second;
-
-    if (Heap::InFromPage(object)) {
-      MapWord map_word = object->map_word(kRelaxedLoad);
-      if (!map_word.IsForwardingAddress()) continue;
-      object = map_word.ToForwardingAddress(object);
-    }
-
-    if (Heap::InFromPage(retainer)) {
-      MapWord map_word = retainer->map_word(kRelaxedLoad);
-      if (!map_word.IsForwardingAddress()) continue;
-      retainer = map_word.ToForwardingAddress(retainer);
-    }
-
-    updated_map[object] = retainer;
-  }
-
-  *map = std::move(updated_map);
-}
-
 void Heap::IncrementDeferredCounts(
     base::Vector<const v8::Isolate::UseCounterFeature> features) {
   deferred_counters_.insert(deferred_counters_.end(), features.begin(),
@@ -1043,12 +968,8 @@ void Heap::GarbageCollectionPrologue(
   heap_allocator_->UpdateAllocationTimeout();
 #endif  // V8_ENABLE_ALLOCATION_TIMEOUT
 
-  // There may be an allocation memento behind objects in new space. Upon
-  // evacuation of a non-full new space (or if we are on the last page) there
-  // may be uninitialized memory behind top. We fill the remainder of the page
-  // with a filler.
-  if (use_new_space()) {
-    DCHECK_NOT_NULL(minor_gc_job());
+  if (minor_gc_job()) {
+    DCHECK(use_new_space());
     minor_gc_job()->CancelTaskIfScheduled();
   }
 
@@ -1302,11 +1223,6 @@ void Heap::HandleGCRequest() {
   }
 }
 
-void Heap::ScheduleMinorGCTaskIfNeeded() {
-  DCHECK_NOT_NULL(minor_gc_job_);
-  minor_gc_job_->ScheduleTask();
-}
-
 namespace {
 size_t MinorMSConcurrentMarkingTrigger(Heap* heap) {
   size_t young_capacity = 0;
@@ -1346,7 +1262,7 @@ void Heap::StartMinorMSIncrementalMarkingIfNeeded() {
                               kNoGCCallbackFlags,
                               GarbageCollector::MINOR_MARK_SWEEPER);
       // Schedule a task for finalizing the GC if needed.
-      ScheduleMinorGCTaskIfNeeded();
+      minor_gc_job()->TryScheduleTask();
     }
   }
 }
@@ -1618,9 +1534,13 @@ void Heap::SetOldGenerationAndGlobalAllocationLimit(
     size_t new_global_allocation_limit) {
   CHECK_GE(new_global_allocation_limit, new_old_generation_allocation_limit);
 #if defined(V8_USE_PERFETTO)
-  TRACE_COUNTER(TRACE_DISABLED_BY_DEFAULT("v8.gc"), V8HeapTrait::kName,
+  TRACE_COUNTER(TRACE_DISABLED_BY_DEFAULT("v8.gc"),
+                perfetto::CounterTrack(V8HeapTrait::kName,
+                                       perfetto::ThreadTrack::Current()),
                 new_old_generation_allocation_limit);
-  TRACE_COUNTER(TRACE_DISABLED_BY_DEFAULT("v8.gc"), GlobalMemoryTrait::kName,
+  TRACE_COUNTER(TRACE_DISABLED_BY_DEFAULT("v8.gc"),
+                perfetto::CounterTrack(GlobalMemoryTrait::kName,
+                                       perfetto::ThreadTrack::Current()),
                 new_global_allocation_limit);
 #endif
   old_generation_allocation_limit_.store(new_old_generation_allocation_limit,
@@ -1639,6 +1559,8 @@ void Heap::ResetOldGenerationAndGlobalAllocationLimit() {
 void Heap::CollectGarbage(AllocationSpace space,
                           GarbageCollectionReason gc_reason,
                           const v8::GCCallbackFlags gc_callback_flags) {
+  CHECK(isolate_->IsOnCentralStack());
+
   if (V8_UNLIKELY(!deserialization_complete_)) {
     // During isolate initialization heap always grows. GC is only requested
     // if a new page allocation fails. In such a case we should crash with
@@ -1789,6 +1711,16 @@ void Heap::CollectGarbage(AllocationSpace space,
     }
   });
 
+  RecomputeLimits(collector, base::TimeTicks::Now());
+  if ((collector == GarbageCollector::MARK_COMPACTOR) &&
+      is_full_gc_during_loading_) {
+    if (ShouldOptimizeForLoadTime() &&
+        v8_flags.update_allocation_limits_after_loading) {
+      update_allocation_limits_after_loading_ = true;
+    }
+    is_full_gc_during_loading_ = false;
+  }
+
   // Epilogue callbacks. These callbacks may trigger GC themselves and thus
   // cannot be related exactly to garbage collection cycles.
   //
@@ -1885,20 +1817,23 @@ class IdleTaskOnContextDispose : public CancelableIdleTask {
     static constexpr size_t kMinYounGenSize = 1 * MB;
 
     auto* heap = isolate_->heap();
-    const double young_gen_gc_speed =
+    const std::optional<double> young_gen_gc_speed =
         heap->tracer()->YoungGenerationSpeedInBytesPerMillisecond(
             YoungGenerationSpeedMode::kUpToAndIncludingAtomicPause);
+    if (!young_gen_gc_speed) {
+      return;
+    }
     const size_t young_gen_bytes = heap->YoungGenerationSizeOfObjects();
     const base::TimeDelta young_gen_estimate =
         base::TimeDelta::FromMillisecondsD(young_gen_bytes /
-                                           young_gen_gc_speed);
+                                           *young_gen_gc_speed);
     const bool run_young_gen_gc =
         young_gen_estimate < idle_time && young_gen_bytes > kMinYounGenSize;
     if (V8_UNLIKELY(v8_flags.trace_context_disposal)) {
       isolate_->PrintWithTimestamp(
           "[context-disposal/idle task] young generation size: %zuKB (min: "
           "%zuKB), GC speed: %fKB/ms, estimated time: %fms%s\n",
-          young_gen_bytes / KB, kMinYounGenSize / KB, young_gen_gc_speed / KB,
+          young_gen_bytes / KB, kMinYounGenSize / KB, *young_gen_gc_speed / KB,
           young_gen_estimate.InMillisecondsF(),
           run_young_gen_gc ? ", performing young gen GC"
                            : ", not starting young gen GC");
@@ -2378,16 +2313,6 @@ void Heap::PerformGarbageCollection(GarbageCollector collector,
 
   ResumeConcurrentThreadsInClients(std::move(paused_clients));
 
-  RecomputeLimits(collector, atomic_pause_end_time);
-  if ((collector == GarbageCollector::MARK_COMPACTOR) &&
-      is_full_gc_during_loading_) {
-    if (ShouldOptimizeForLoadTime() &&
-        v8_flags.update_allocation_limits_after_loading) {
-      update_allocation_limits_after_loading_ = true;
-    }
-    is_full_gc_during_loading_ = false;
-  }
-
   // After every full GC the old generation allocation limit should be
   // configured.
   DCHECK_IMPLIES(!IsYoungGenerationCollector(collector),
@@ -2520,29 +2445,21 @@ void Heap::EnsureSweepingCompletedForObject(Tagged<HeapObject> object) {
 // static
 Heap::LimitsCompuatationResult Heap::ComputeNewAllocationLimits(Heap* heap) {
   DCHECK(!heap->using_initial_limit());
-#if defined(V8_USE_PERFETTO)
-  TRACE_COUNTER(TRACE_DISABLED_BY_DEFAULT("v8.gc"),
-                "OldGenerationConsumedBytes",
-                heap->OldGenerationConsumedBytes());
-  TRACE_COUNTER(TRACE_DISABLED_BY_DEFAULT("v8.gc"), "GlobalConsumedBytes",
-                heap->GlobalConsumedBytes());
-  TRACE_COUNTER(TRACE_DISABLED_BY_DEFAULT("v8.gc"), "ExternalMemoryBytes",
-                heap->external_memory());
-#endif
+  heap->tracer()->RecordGCSizeCounters();
   const HeapGrowingMode mode = heap->CurrentHeapGrowingMode();
-  double v8_gc_speed =
+  std::optional<double> v8_gc_speed =
       heap->tracer()->OldGenerationSpeedInBytesPerMillisecond();
   double v8_mutator_speed =
       heap->tracer()->OldGenerationAllocationThroughputInBytesPerMillisecond();
   double v8_growing_factor = MemoryController<V8HeapTrait>::GrowingFactor(
       heap, heap->max_old_generation_size(), v8_gc_speed, v8_mutator_speed,
       mode);
-  double embedder_gc_speed =
+  std::optional<double> embedder_gc_speed =
       heap->tracer()->EmbedderSpeedInBytesPerMillisecond();
   double embedder_speed =
       heap->tracer()->EmbedderAllocationThroughputInBytesPerMillisecond();
   double embedder_growing_factor =
-      (embedder_gc_speed > 0 && embedder_speed > 0)
+      (embedder_gc_speed.has_value() && embedder_speed > 0)
           ? MemoryController<GlobalMemoryTrait>::GrowingFactor(
                 heap, heap->max_global_memory_size_, embedder_gc_speed,
                 embedder_speed, mode)
@@ -2771,7 +2688,7 @@ void Heap::Scavenge() {
   }
 
   TRACE_GC(tracer(), GCTracer::Scope::SCAVENGER_SCAVENGE);
-  base::MutexGuard guard(relocation_mutex());
+  base::SpinningMutexGuard guard(relocation_mutex());
   // Young generation garbage collection is orthogonal from full GC marking. It
   // is possible that objects that are currently being processed for marking are
   // reclaimed in the young generation GC that interleaves concurrent marking.
@@ -3091,32 +3008,6 @@ void Heap::EvaluateOldSpaceLocalPretenuring(
   }
 }
 
-void Heap::VisitExternalResources(v8::ExternalResourceVisitor* visitor) {
-  DisallowGarbageCollection no_gc;
-  // All external strings are listed in the external string table.
-
-  class ExternalStringTableVisitorAdapter : public RootVisitor {
-   public:
-    explicit ExternalStringTableVisitorAdapter(
-        Isolate* isolate, v8::ExternalResourceVisitor* visitor)
-        : isolate_(isolate), visitor_(visitor) {}
-    void VisitRootPointers(Root root, const char* description,
-                           FullObjectSlot start, FullObjectSlot end) override {
-      for (FullObjectSlot p = start; p < end; ++p) {
-        DCHECK(IsExternalString(*p));
-        visitor_->VisitExternalString(
-            Utils::ToLocal(Handle<String>(Cast<String>(*p), isolate_)));
-      }
-    }
-
-   private:
-    Isolate* isolate_;
-    v8::ExternalResourceVisitor* visitor_;
-  } external_string_table_visitor(isolate(), visitor);
-
-  external_string_table_.IterateAll(&external_string_table_visitor);
-}
-
 static_assert(IsAligned(OFFSET_OF_DATA_START(FixedDoubleArray),
                         kDoubleAlignment));
 
@@ -3363,12 +3254,18 @@ void Heap::CreateFillerObjectAtRaw(
 }
 
 bool Heap::CanMoveObjectStart(Tagged<HeapObject> object) {
-  if (!v8_flags.move_object_start) return false;
+  if (!v8_flags.move_object_start) {
+    return false;
+  }
 
   // Sampling heap profiler may have a reference to the object.
-  if (isolate()->heap_profiler()->is_sampling_allocations()) return false;
+  if (isolate()->heap_profiler()->is_sampling_allocations()) {
+    return false;
+  }
 
-  if (IsLargeObject(object)) return false;
+  if (IsLargeObject(object)) {
+    return false;
+  }
 
   // Compilation jobs may have references to the object.
   if (isolate()->concurrent_recompilation_enabled() &&
@@ -3381,11 +3278,15 @@ bool Heap::CanMoveObjectStart(Tagged<HeapObject> object) {
   //
   // TODO(v8:13726): This can be improved via concurrently reading the contents
   // in the marker at the cost of some complexity.
-  if (incremental_marking()->IsMarking()) return false;
+  if (incremental_marking()->IsMarking()) {
+    return false;
+  }
 
   // Concurrent sweeper does not support moving object starts. It assumes that
   // markbits (black regions) and object starts are matching up.
-  if (!PageMetadata::FromHeapObject(object)->SweepingDone()) return false;
+  if (!MutablePageMetadata::FromHeapObject(object)->SweepingDone()) {
+    return false;
+  }
 
   return true;
 }
@@ -3754,11 +3655,12 @@ void Heap::DeactivateMajorGCInProgressFlag() {
 
 namespace {
 
-double ComputeMutatorUtilizationImpl(double mutator_speed, double gc_speed) {
+double ComputeMutatorUtilizationImpl(double mutator_speed,
+                                     std::optional<double> gc_speed) {
   constexpr double kMinMutatorUtilization = 0.0;
   constexpr double kConservativeGcSpeedInBytesPerMillisecond = 200000;
   if (mutator_speed == 0) return kMinMutatorUtilization;
-  if (gc_speed == 0) gc_speed = kConservativeGcSpeedInBytesPerMillisecond;
+  if (!gc_speed) gc_speed = kConservativeGcSpeedInBytesPerMillisecond;
   // Derivation:
   // mutator_utilization = mutator_time / (mutator_time + gc_time)
   // mutator_time = 1 / mutator_speed
@@ -3766,19 +3668,19 @@ double ComputeMutatorUtilizationImpl(double mutator_speed, double gc_speed) {
   // mutator_utilization = (1 / mutator_speed) /
   //                       (1 / mutator_speed + 1 / gc_speed)
   // mutator_utilization = gc_speed / (mutator_speed + gc_speed)
-  return gc_speed / (mutator_speed + gc_speed);
+  return *gc_speed / (mutator_speed + *gc_speed);
 }
 
 }  // namespace
 
 double Heap::ComputeMutatorUtilization(const char* tag, double mutator_speed,
-                                       double gc_speed) {
+                                       std::optional<double> gc_speed) {
   double result = ComputeMutatorUtilizationImpl(mutator_speed, gc_speed);
   if (v8_flags.trace_mutator_utilization) {
     isolate()->PrintWithTimestamp(
         "%s mutator utilization = %.3f ("
         "mutator_speed=%.f, gc_speed=%.f)\n",
-        tag, result, mutator_speed, gc_speed);
+        tag, result, mutator_speed, gc_speed.value_or(0));
   }
   return result;
 }
@@ -4268,14 +4170,12 @@ void Heap::MemoryPressureNotification(MemoryPressureLevel level,
 
 void Heap::EagerlyFreeExternalMemoryAndWasmCode() {
 #if V8_ENABLE_WEBASSEMBLY
-  if (v8_flags.flush_liftoff_code) {
-    // Flush Liftoff code and record the flushed code size.
-    auto [code_size, metadata_size] = wasm::GetWasmEngine()->FlushLiftoffCode();
-    isolate_->counters()->wasm_flushed_liftoff_code_size_bytes()->AddSample(
-        static_cast<int>(code_size));
-    isolate_->counters()->wasm_flushed_liftoff_metadata_size_bytes()->AddSample(
-        static_cast<int>(metadata_size));
-  }
+  // Flush Liftoff code and record the flushed code size.
+  auto [code_size, metadata_size] = wasm::GetWasmEngine()->FlushLiftoffCode();
+  isolate_->counters()->wasm_flushed_liftoff_code_size_bytes()->AddSample(
+      static_cast<int>(code_size));
+  isolate_->counters()->wasm_flushed_liftoff_metadata_size_bytes()->AddSample(
+      static_cast<int>(metadata_size));
 #endif  // V8_ENABLE_WEBASSEMBLY
   CompleteArrayBufferSweeping(this);
 }
@@ -4869,13 +4769,12 @@ void Heap::IterateRoots(RootVisitor* v, base::EnumSet<SkipRoot> options,
 
     // Iterate over shared heap object cache when the isolate owns this data
     // structure. Isolates which own the shared heap object cache are:
-    //   * Shared isolate
-    //   * Shared space/main isolate
-    //   * All isolates which do not use the shared heap feature.
+    //   * All isolates when not using --shared-string-table.
+    //   * Shared space/main isolate with --shared-string-table.
     //
-    // However, worker/client isolates do not own the shared heap object cache
-    // and should not iterate it.
-    if (isolate_->is_shared_space_isolate() || !isolate_->has_shared_space()) {
+    // Isolates which do not own the shared heap object cache should not iterate
+    // it.
+    if (isolate_->OwnsStringTables()) {
       SerializerDeserializer::IterateSharedHeapObjectCache(isolate_, v);
       v->Synchronize(VisitorSynchronization::kSharedHeapObjectCache);
     }
@@ -4983,10 +4882,7 @@ size_t Heap::OldGenerationToSemiSpaceRatio() {
   static size_t kMaxOldGenSizeToMaxYoungGenSizeRatio =
       V8HeapTrait::kMaxSize /
       (v8_flags.scavenger_max_new_space_capacity_mb * MB);
-  static size_t kOldGenerationToSemiSpaceRatio =
-      kMaxOldGenSizeToMaxYoungGenSizeRatio * kHeapLimitMultiplier /
-      kPointerMultiplier;
-  return kOldGenerationToSemiSpaceRatio;
+  return kMaxOldGenSizeToMaxYoungGenSizeRatio / kPointerMultiplier;
 }
 
 // static
@@ -5290,10 +5186,10 @@ size_t Heap::YoungGenerationConsumedBytes() const {
   }
   // When using Scavenger, memory is compacted. Thus wasted space is always 0.
   // The diff between `new_space()->SizeOfObjects()` and
-  // `new_space()->ActualCapacity()` is less than one page. Using capacity
+  // `new_space()->CurrentCapacitySafe()` is less than one page. Using capacity
   // here is also easier for concurrency since this method is reachable from
   // background old allocations.
-  return semi_space_new_space()->ActualCapacity() +
+  return semi_space_new_space()->CurrentCapacitySafe() +
          new_lo_space()->SizeOfObjects();
 }
 
@@ -5369,10 +5265,10 @@ bool Heap::AllocationLimitOvershotByLargeMargin() const {
 }
 
 bool Heap::ShouldOptimizeForLoadTime() const {
-  return isolate()->is_loading() && !AllocationLimitOvershotByLargeMargin() &&
-         MonotonicallyIncreasingTimeInMs() <
-             (load_start_time_ms_.load(std::memory_order_relaxed) +
-              kMaxLoadTimeMs);
+  double load_start_time = load_start_time_ms_.load(std::memory_order_relaxed);
+  return load_start_time != kLoadTimeNotLoading &&
+         !AllocationLimitOvershotByLargeMargin() &&
+         MonotonicallyIncreasingTimeInMs() < load_start_time + kMaxLoadTimeMs;
 }
 
 // This predicate is called when an old generation space cannot allocated from
@@ -5574,14 +5470,7 @@ Heap::IncrementalMarkingLimit Heap::IncrementalMarkingLimitReached() {
     return IncrementalMarkingLimit::kNoLimit;
   }
 
-#if defined(V8_USE_PERFETTO)
-  TRACE_COUNTER(TRACE_DISABLED_BY_DEFAULT("v8.gc"),
-                "OldGenerationConsumedBytes", OldGenerationConsumedBytes());
-  TRACE_COUNTER(TRACE_DISABLED_BY_DEFAULT("v8.gc"), "GlobalConsumedBytes",
-                GlobalConsumedBytes());
-  TRACE_COUNTER(TRACE_DISABLED_BY_DEFAULT("v8.gc"), "ExternalMemoryBytes",
-                external_memory());
-#endif
+  tracer()->RecordGCSizeCounters();
   size_t old_generation_space_available = OldGenerationSpaceAvailable();
   size_t global_memory_available = GlobalMemoryAvailable();
 
@@ -5668,7 +5557,7 @@ void Heap::SetUp(LocalHeap* main_thread_local_heap) {
       V8::FatalProcessOutOfMemory(
           isolate_, "Failed to reserve virtual memory for CodeRange");
     }
-#endif  // V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+#endif  // V8_COMPRESS_POINTERS
 
     LOG(isolate_,
         NewEvent("CodeRange",
@@ -5684,8 +5573,8 @@ void Heap::SetUp(LocalHeap* main_thread_local_heap) {
 
   v8::PageAllocator* trusted_page_allocator;
 #ifdef V8_ENABLE_SANDBOX
-  trusted_range_ = TrustedRange::GetProcessWideTrustedRange();
-  trusted_page_allocator = trusted_range_->page_allocator();
+  trusted_page_allocator =
+      TrustedRange::GetProcessWideTrustedRange()->page_allocator();
 #else
   trusted_page_allocator = isolate_->page_allocator();
 #endif
@@ -5741,7 +5630,6 @@ void Heap::SetUpFromReadOnlyHeap(ReadOnlyHeap* ro_heap) {
 }
 
 void Heap::ReplaceReadOnlySpace(SharedReadOnlySpace* space) {
-  CHECK(V8_SHARED_RO_HEAP_BOOL);
   if (read_only_space_) {
     read_only_space_->TearDown(memory_allocator());
     delete read_only_space_;
@@ -5814,8 +5702,8 @@ class StressConcurrentAllocationTask : public CancelableTask {
   static void Schedule(Isolate* isolate) {
     auto task = std::make_unique<StressConcurrentAllocationTask>(isolate);
     const double kDelayInSeconds = 0.1;
-    V8::GetCurrentPlatform()->CallDelayedOnWorkerThread(std::move(task),
-                                                        kDelayInSeconds);
+    V8::GetCurrentPlatform()->PostDelayedTaskOnWorkerThread(
+        TaskPriority::kUserVisible, std::move(task), kDelayInSeconds);
   }
 
  private:
@@ -5951,7 +5839,6 @@ void Heap::SetUpSpaces(LinearAllocationArea& new_allocation_info,
 
   if (new_space() || v8_flags.sticky_mark_bits) {
     minor_gc_job_.reset(new MinorGCJob(this));
-    minor_gc_task_observer_.reset(new ScheduleMinorGCTaskObserver(this));
   }
 
   if (v8_flags.stress_marking > 0) {
@@ -6238,7 +6125,6 @@ void Heap::TearDown() {
     }
   }
 
-  minor_gc_task_observer_.reset();
   minor_gc_job_.reset();
 
   if (need_to_remove_stress_concurrent_allocation_observer_) {
@@ -6873,7 +6759,7 @@ StrongRootsEntry* Heap::RegisterStrongRoots(const char* label,
   // local heap.
   DCHECK(isolate()->CurrentLocalHeap()->IsRunning());
 
-  base::MutexGuard guard(&strong_roots_mutex_);
+  base::SpinningMutexGuard guard(&strong_roots_mutex_);
 
   StrongRootsEntry* entry = new StrongRootsEntry(label);
   entry->start = start;
@@ -6901,7 +6787,7 @@ void Heap::UnregisterStrongRoots(StrongRootsEntry* entry) {
   // local heap.
   DCHECK(isolate()->CurrentLocalHeap()->IsRunning());
 
-  base::MutexGuard guard(&strong_roots_mutex_);
+  base::SpinningMutexGuard guard(&strong_roots_mutex_);
 
   StrongRootsEntry* prev = entry->prev;
   StrongRootsEntry* next = entry->next;
@@ -7383,6 +7269,12 @@ void Heap::EnsureSweepingCompleted(SweepingForcedFinalizationMode mode) {
       }
 
       trusted_space()->RefillFreeList();
+    } else if (v8_flags.sticky_mark_bits) {
+      // With sticky markbits there is no separate young gen. Minor sweeping
+      // will thus sweep pages in old space, so old space freelist should be
+      // refilled.
+      DCHECK(was_minor_sweeping_in_progress);
+      old_space()->RefillFreeList();
     }
 
     if (!v8_flags.sticky_mark_bits && v8_flags.minor_ms && use_new_space() &&
@@ -7447,21 +7339,19 @@ void Heap::NotifyLoadingStarted() {
   if (v8_flags.update_allocation_limits_after_loading) {
     update_allocation_limits_after_loading_ = true;
   }
-  UpdateLoadStartTime();
+  double now_ms = MonotonicallyIncreasingTimeInMs();
+  DCHECK_NE(now_ms, kLoadTimeNotLoading);
+  load_start_time_ms_.store(now_ms, std::memory_order_relaxed);
 }
 
 void Heap::NotifyLoadingEnded() {
+  load_start_time_ms_.store(kLoadTimeNotLoading, std::memory_order_relaxed);
   RecomputeLimitsAfterLoadingIfNeeded();
   if (auto* job = incremental_marking()->incremental_marking_job()) {
     // The task will start incremental marking (if needed not already started)
     // and advance marking if incremental marking is active.
     job->ScheduleTask(TaskPriority::kUserVisible);
   }
-}
-
-void Heap::UpdateLoadStartTime() {
-  load_start_time_ms_.store(MonotonicallyIncreasingTimeInMs(),
-                            std::memory_order_relaxed);
 }
 
 int Heap::NextScriptId() {

@@ -761,6 +761,7 @@ class Simulator : public DecoderVisitor, public SimulatorBase {
   // Accessor to the internal simulator stack area. Adds a safety
   // margin to prevent overflows (kAdditionalStackMargin).
   uintptr_t StackLimit(uintptr_t c_limit) const;
+  void SetStackLimit(uintptr_t limit);
   // Return central stack view, without additional safety margins.
   // Users, for example wasm::StackMemory, can add their own.
   base::Vector<uint8_t> GetCentralStackView() const;
@@ -2503,14 +2504,16 @@ class Simulator : public DecoderVisitor, public SimulatorBase {
 
   // Read floating point return values.
   template <typename T>
-  typename std::enable_if<std::is_floating_point<T>::value, T>::type
-  ReadReturn() {
+  T ReadReturn()
+    requires std::is_floating_point<T>::value
+  {
     return static_cast<T>(dreg(0));
   }
   // Read non-float return values.
   template <typename T>
-  typename std::enable_if<!std::is_floating_point<T>::value, T>::type
-  ReadReturn() {
+  T ReadReturn()
+    requires(!std::is_floating_point<T>::value)
+  {
     return ConvertReturn<T>(xreg(0));
   }
 

@@ -1568,7 +1568,7 @@ void BytecodeGenerator::AllocateDeferredConstants(IsolateT* isolate,
 
     Handle<SharedFunctionInfo> shared_info =
         FunctionTemplateInfo::GetOrCreateSharedFunctionInfo(
-            isolate, Utils::OpenHandle(*info), expr->name());
+            isolate, Utils::OpenDirectHandle(*info), expr->name());
     DCHECK(!shared_info.is_null());
     builder()->SetDeferredConstantPoolEntry(literal.second, shared_info);
   }
@@ -1839,7 +1839,7 @@ void BytecodeGenerator::GenerateAsyncFunctionBody() {
 
   HandlerTable::CatchPrediction outer_catch_prediction = catch_prediction();
   // When compiling a REPL script, use UNCAUGHT_ASYNC_AWAIT to preserve the
-  // exception so DevTools can inspect it.
+  // pending message so DevTools can inspect it.
   set_catch_prediction(literal->scope()->is_repl_mode_scope()
                            ? HandlerTable::UNCAUGHT_ASYNC_AWAIT
                            : HandlerTable::ASYNC_AWAIT);
@@ -1853,8 +1853,11 @@ void BytecodeGenerator::GenerateAsyncFunctionBody() {
         RegisterList args = register_allocator()->NewRegisterList(2);
         builder()
             ->MoveRegister(generator_object(), args[0])
-            .StoreAccumulatorInRegister(args[1])  // exception
-            .CallRuntime(Runtime::kInlineAsyncFunctionReject, args);
+            .StoreAccumulatorInRegister(args[1]);  // exception
+        if (!literal->scope()->is_repl_mode_scope()) {
+          builder()->LoadTheHole().SetPendingMessage();
+        }
+        builder()->CallRuntime(Runtime::kInlineAsyncFunctionReject, args);
         // TODO(358404372): Should this return have a statement position?
         // Without one it is not possible to apply a debugger breakpoint.
         BuildReturn(kNoSourcePosition);
@@ -1912,6 +1915,8 @@ void BytecodeGenerator::GenerateAsyncGeneratorFunctionBody() {
               builder()
                   ->MoveRegister(generator_object(), args[0])
                   .StoreAccumulatorInRegister(args[1])  // exception
+                  .LoadTheHole()
+                  .SetPendingMessage()
                   .CallRuntime(Runtime::kInlineAsyncGeneratorReject, args);
               execution_control()->ReturnAccumulator(kNoSourcePosition);
             },
@@ -2810,7 +2815,9 @@ void BytecodeGenerator::BuildDisposeScope(WrappedFunc wrapped_func,
   RegisterAllocationScope allocation_scope(this);
   DisposablesStackScope disposables_stack_scope(this);
   if (has_await_using) {
-    set_catch_prediction(HandlerTable::ASYNC_AWAIT);
+    set_catch_prediction(info()->scope()->is_repl_mode_scope()
+                             ? HandlerTable::UNCAUGHT_ASYNC_AWAIT
+                             : HandlerTable::ASYNC_AWAIT);
   }
 
   BuildTryFinally(
@@ -2852,10 +2859,13 @@ void BytecodeGenerator::BuildDisposeScope(WrappedFunc wrapped_func,
           BuildTryCatch(
               [&]() { BuildAwait(); },
               [&](Register context) {
-                RegisterList args = register_allocator()->NewRegisterList(2);
+                RegisterList args = register_allocator()->NewRegisterList(3);
                 builder()
                     ->MoveRegister(current_disposables_stack_, args[0])
                     .StoreAccumulatorInRegister(args[1])  // exception
+                    .LoadTheHole()
+                    .SetPendingMessage()
+                    .StoreAccumulatorInRegister(args[2])
                     .CallRuntime(
                         Runtime::kHandleExceptionsInDisposeDisposableStack,
                         args);

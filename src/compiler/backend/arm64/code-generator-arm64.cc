@@ -753,6 +753,8 @@ void CodeGenerator::AssembleCodeStartRegisterCheck() {
 void CodeGenerator::AssembleDispatchHandleRegisterCheck() {
   DCHECK(linkage()->GetIncomingDescriptor()->IsJSFunctionCall());
 
+  if (!V8_JS_LINKAGE_INCLUDES_DISPATCH_HANDLE_BOOL) return;
+
   // We currently don't check this for JS builtins as those are sometimes
   // called directly (e.g. from other builtins) and not through the dispatch
   // table. This is fine as builtin functions don't use the dispatch handle,
@@ -814,21 +816,28 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     }
 #if V8_ENABLE_WEBASSEMBLY
-    case kArchCallWasmFunction: {
+    case kArchCallWasmFunction:
+    case kArchCallWasmFunctionIndirect: {
       if (instr->InputAt(0)->IsImmediate()) {
+        DCHECK_EQ(arch_opcode, kArchCallWasmFunction);
         Constant constant = i.ToConstant(instr->InputAt(0));
         Address wasm_code = static_cast<Address>(constant.ToInt64());
         __ Call(wasm_code, constant.rmode());
+      } else if (arch_opcode == kArchCallWasmFunctionIndirect) {
+        __ CallWasmCodePointer(
+            i.InputRegister(0),
+            i.InputInt64(instr->WasmSignatureHashInputIndex()));
       } else {
-        Register target = i.InputRegister(0);
-        __ Call(target);
+        __ Call(i.InputRegister(0));
       }
       RecordCallPosition(instr);
       frame_access_state()->ClearSPDelta();
       break;
     }
-    case kArchTailCallWasm: {
+    case kArchTailCallWasm:
+    case kArchTailCallWasmIndirect: {
       if (instr->InputAt(0)->IsImmediate()) {
+        DCHECK_EQ(arch_opcode, kArchTailCallWasm);
         Constant constant = i.ToConstant(instr->InputAt(0));
         Address wasm_code = static_cast<Address>(constant.ToInt64());
         __ Jump(wasm_code, constant.rmode());
@@ -837,7 +846,13 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         UseScratchRegisterScope temps(masm());
         temps.Exclude(x17);
         __ Mov(x17, target);
-        __ Jump(x17);
+        if (arch_opcode == kArchTailCallWasmIndirect) {
+          __ CallWasmCodePointer(
+              x17, i.InputInt64(instr->WasmSignatureHashInputIndex()),
+              CallJumpMode::kTailCall);
+        } else {
+          __ Jump(x17);
+        }
       }
       unwinding_info_writer_.MarkBlockWillExit();
       frame_access_state()->ClearSPDelta();
@@ -1913,9 +1928,12 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArm64Float64ToFloat32:
       __ Fcvt(i.OutputDoubleRegister().S(), i.InputDoubleRegister(0));
       break;
-    case kArm64Float64ToFloat16:
-      __ Fcvt(i.OutputDoubleRegister().H(), i.InputDoubleRegister(0));
+    case kArm64Float64ToFloat16RawBits: {
+      VRegister tmp_dst = i.TempDoubleRegister(0);
+      __ Fcvt(tmp_dst.H(), i.InputDoubleRegister(0));
+      __ Fmov(i.OutputRegister32(), tmp_dst.S());
       break;
+    }
     case kArm64Float32ToInt32: {
       __ Fcvtzs(i.OutputRegister32(), i.InputFloat32Register(0));
       bool set_overflow_to_min_i32 = MiscField::decode(instr->opcode());
@@ -3651,7 +3669,7 @@ void CodeGenerator::AssembleConstructFrame() {
       static_assert(MacroAssembler::kExtraSlotClaimedByPrologue == 1);
       required_slots -= MacroAssembler::kExtraSlotClaimedByPrologue;
 #if V8_ENABLE_WEBASSEMBLY
-    } else if (call_descriptor->IsWasmFunctionCall() ||
+    } else if (call_descriptor->IsAnyWasmFunctionCall() ||
                call_descriptor->IsWasmCapiFunction() ||
                call_descriptor->IsWasmImportWrapper() ||
                (call_descriptor->IsCFunctionCall() &&
@@ -3703,6 +3721,19 @@ void CodeGenerator::AssembleConstructFrame() {
       osr_pc_offset_ = __ pc_offset();
       __ CodeEntry();
       size_t unoptimized_frame_slots = osr_helper()->UnoptimizedFrameSlots();
+
+#ifdef V8_ENABLE_SANDBOX_BOOL
+      UseScratchRegisterScope temps(masm());
+      uint32_t expected_frame_size =
+          static_cast<uint32_t>(osr_helper()->UnoptimizedFrameSlots()) *
+              kSystemPointerSize +
+          StandardFrameConstants::kFixedFrameSizeFromFp;
+      Register scratch = temps.AcquireX();
+      __ Add(scratch, sp, expected_frame_size);
+      __ Cmp(scratch, fp);
+      __ SbxCheck(eq, AbortReason::kOsrUnexpectedStackSize);
+#endif  // V8_ENABLE_SANDBOX_BOOL
+
       DCHECK(call_descriptor->IsJSFunctionCall());
       DCHECK_EQ(unoptimized_frame_slots % 2, 1);
       // One unoptimized frame slot has already been claimed when the actual
@@ -3737,6 +3768,9 @@ void CodeGenerator::AssembleConstructFrame() {
             WasmHandleStackOverflowDescriptor::FrameBaseRegister());
         for (auto reg : wasm::kGpParamRegisters) regs_to_save.Combine(reg);
         __ PushCPURegList(regs_to_save);
+        CPURegList fp_regs_to_save(kDRegSizeInBits, DoubleRegList{});
+        for (auto reg : wasm::kFpParamRegisters) fp_regs_to_save.Combine(reg);
+        __ PushCPURegList(fp_regs_to_save);
         __ Mov(WasmHandleStackOverflowDescriptor::GapRegister(),
                required_slots * kSystemPointerSize);
         __ Add(
@@ -3744,6 +3778,7 @@ void CodeGenerator::AssembleConstructFrame() {
             Operand(call_descriptor->ParameterSlotCount() * kSystemPointerSize +
                     CommonFrameConstants::kFixedFrameSizeAboveFp));
         __ CallBuiltin(Builtin::kWasmHandleStackOverflow);
+        __ PopCPURegList(fp_regs_to_save);
         __ PopCPURegList(regs_to_save);
       } else {
         __ Call(static_cast<intptr_t>(Builtin::kWasmStackOverflow),
@@ -3821,7 +3856,7 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
   }
 
 #if V8_ENABLE_WEBASSEMBLY
-  if (call_descriptor->IsWasmFunctionCall() &&
+  if (call_descriptor->IsAnyWasmFunctionCall() &&
       v8_flags.experimental_wasm_growable_stacks) {
     {
       UseScratchRegisterScope temps{masm()};
@@ -3835,9 +3870,13 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
     CPURegList regs_to_save(kXRegSizeInBits, RegList{});
     for (auto reg : wasm::kGpReturnRegisters) regs_to_save.Combine(reg);
     __ PushCPURegList(regs_to_save);
+    CPURegList fp_regs_to_save(kDRegSizeInBits, DoubleRegList{});
+    for (auto reg : wasm::kFpReturnRegisters) fp_regs_to_save.Combine(reg);
+    __ PushCPURegList(fp_regs_to_save);
     __ Mov(kCArgRegs[0], ExternalReference::isolate_address());
     __ CallCFunction(ExternalReference::wasm_shrink_stack(), 1);
     __ Mov(fp, kReturnRegister0);
+    __ PopCPURegList(fp_regs_to_save);
     __ PopCPURegList(regs_to_save);
     if (masm()->options().enable_simulator_code) {
       // The next instruction after shrinking stack is leaving the frame.

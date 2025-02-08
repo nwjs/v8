@@ -38,16 +38,6 @@ ExternalPointerTable::Space* IsolateForSandbox::GetExternalPointerTableSpaceFor(
   return isolate.GetExternalPointerTableSpaceFor(tag, host);
 }
 
-ExternalBufferTable& IsolateForSandbox::GetExternalBufferTableFor(
-    ExternalBufferTag tag) {
-  UNIMPLEMENTED();
-}
-
-ExternalBufferTable::Space* IsolateForSandbox::GetExternalBufferTableSpaceFor(
-    ExternalBufferTag tag, Address host) {
-  UNIMPLEMENTED();
-}
-
 CodePointerTable::Space* IsolateForSandbox::GetCodePointerTableSpaceFor(
     Address owning_slot) {
   return ReadOnlyHeap::Contains(owning_slot)
@@ -76,14 +66,6 @@ inline ExternalPointerTag IsolateForSandbox::GetExternalPointerTableTagFor(
 }
 
 #endif  // V8_ENABLE_SANDBOX
-
-#ifdef V8_ENABLE_LEAPTIERING
-JSDispatchTable::Space* IsolateForSandbox::GetJSDispatchTableSpaceFor(
-    Address owning_slot) {
-  DCHECK(!ReadOnlyHeap::Contains(owning_slot));
-  return isolate_->heap()->js_dispatch_table_space();
-}
-#endif  // V8_ENABLE_LEAPTIERING
 
 template <typename IsolateT>
 IsolateForPointerCompression::IsolateForPointerCompression(IsolateT* isolate)

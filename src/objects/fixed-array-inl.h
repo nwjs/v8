@@ -548,7 +548,7 @@ uint64_t FixedDoubleArray::get_representation(int index) {
 Handle<Object> FixedDoubleArray::get(Tagged<FixedDoubleArray> array, int index,
                                      Isolate* isolate) {
   if (array->is_the_hole(index)) {
-    return ReadOnlyRoots(isolate).the_hole_value_handle();
+    return isolate->factory()->the_hole_value();
   } else {
     return isolate->factory()->NewNumber(array->get_scalar(index));
   }
@@ -594,9 +594,9 @@ void FixedDoubleArray::FillWithHoles(int from, int to) {
 
 // static
 template <class IsolateT>
-Handle<WeakFixedArray> WeakFixedArray::New(IsolateT* isolate, int capacity,
-                                           AllocationType allocation,
-                                           MaybeHandle<Object> initial_value) {
+Handle<WeakFixedArray> WeakFixedArray::New(
+    IsolateT* isolate, int capacity, AllocationType allocation,
+    MaybeDirectHandle<Object> initial_value) {
   CHECK_LE(static_cast<unsigned>(capacity), kMaxCapacity);
 
   if (V8_UNLIKELY(capacity == 0)) {
@@ -625,6 +625,21 @@ Handle<TrustedWeakFixedArray> TrustedWeakFixedArray::New(IsolateT* isolate,
 
   std::optional<DisallowGarbageCollection> no_gc;
   Handle<TrustedWeakFixedArray> result = Cast<TrustedWeakFixedArray>(
+      Allocate(isolate, capacity, &no_gc, AllocationType::kTrusted));
+  MemsetTagged((*result)->RawFieldOfFirstElement(), Smi::zero(), capacity);
+  return result;
+}
+
+template <class IsolateT>
+Handle<ProtectedWeakFixedArray> ProtectedWeakFixedArray::New(IsolateT* isolate,
+                                                             int capacity) {
+  if (V8_UNLIKELY(static_cast<unsigned>(capacity) >
+                  TrustedFixedArray::kMaxLength)) {
+    FATAL("Fatal JavaScript invalid size error %d (see crbug.com/1201626)",
+          capacity);
+  }
+  std::optional<DisallowGarbageCollection> no_gc;
+  Handle<ProtectedWeakFixedArray> result = Cast<ProtectedWeakFixedArray>(
       Allocate(isolate, capacity, &no_gc, AllocationType::kTrusted));
   MemsetTagged((*result)->RawFieldOfFirstElement(), Smi::zero(), capacity);
   return result;

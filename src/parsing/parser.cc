@@ -24,6 +24,7 @@
 #include "src/logging/log.h"
 #include "src/logging/runtime-call-stats-scope.h"
 #include "src/numbers/conversions-inl.h"
+#include "src/numbers/ieee754.h"
 #include "src/objects/scope-info.h"
 #include "src/parsing/parse-info.h"
 #include "src/parsing/rewriter.h"
@@ -295,7 +296,7 @@ bool Parser::ShortcutLiteralBinaryExpression(Expression** x, Expression* y,
         return true;
       }
       case Token::kExp:
-        *x = factory()->NewNumberLiteral(base::ieee754::pow(x_val, y_val), pos);
+        *x = factory()->NewNumberLiteral(math::pow(x_val, y_val), pos);
         return true;
       default:
         break;
@@ -621,10 +622,10 @@ void Parser::InitializeEmptyScopeChain(ParseInfo* info) {
 template <typename IsolateT>
 void Parser::DeserializeScopeChain(
     IsolateT* isolate, ParseInfo* info,
-    MaybeHandle<ScopeInfo> maybe_outer_scope_info,
+    MaybeDirectHandle<ScopeInfo> maybe_outer_scope_info,
     Scope::DeserializationMode mode) {
   InitializeEmptyScopeChain(info);
-  Handle<ScopeInfo> outer_scope_info;
+  DirectHandle<ScopeInfo> outer_scope_info;
   if (maybe_outer_scope_info.ToHandle(&outer_scope_info)) {
     DCHECK_EQ(ThreadId::Current(), isolate->thread_id());
     original_scope_ = Scope::DeserializeScopeChain(
@@ -643,11 +644,11 @@ void Parser::DeserializeScopeChain(
 
 template void Parser::DeserializeScopeChain(
     Isolate* isolate, ParseInfo* info,
-    MaybeHandle<ScopeInfo> maybe_outer_scope_info,
+    MaybeDirectHandle<ScopeInfo> maybe_outer_scope_info,
     Scope::DeserializationMode mode);
 template void Parser::DeserializeScopeChain(
     LocalIsolate* isolate, ParseInfo* info,
-    MaybeHandle<ScopeInfo> maybe_outer_scope_info,
+    MaybeDirectHandle<ScopeInfo> maybe_outer_scope_info,
     Scope::DeserializationMode mode);
 
 namespace {
@@ -665,7 +666,7 @@ void MaybeProcessSourceRanges(ParseInfo* parse_info, Expression* root,
 
 void Parser::ParseProgram(Isolate* isolate, DirectHandle<Script> script,
                           ParseInfo* info,
-                          MaybeHandle<ScopeInfo> maybe_outer_scope_info) {
+                          MaybeDirectHandle<ScopeInfo> maybe_outer_scope_info) {
   DCHECK_EQ(script->id(), flags().script_id());
 
   // It's OK to use the Isolate & counters here, since this function is only
@@ -967,9 +968,10 @@ void Parser::ParseFunction(Isolate* isolate, ParseInfo* info,
   base::ElapsedTimer timer;
   if (V8_UNLIKELY(v8_flags.log_function_events)) timer.Start();
 
-  MaybeHandle<ScopeInfo> maybe_outer_scope_info;
+  MaybeDirectHandle<ScopeInfo> maybe_outer_scope_info;
   if (shared_info->HasOuterScopeInfo()) {
-    maybe_outer_scope_info = handle(shared_info->GetOuterScopeInfo(), isolate);
+    maybe_outer_scope_info =
+        direct_handle(shared_info->GetOuterScopeInfo(), isolate);
   }
   int start_position = shared_info->StartPosition();
   int end_position = shared_info->EndPosition();
@@ -3373,11 +3375,11 @@ void Parser::InsertSloppyBlockFunctionVarBindings(DeclarationScope* scope) {
 template <typename IsolateT>
 void Parser::HandleSourceURLComments(IsolateT* isolate,
                                      DirectHandle<Script> script) {
-  Handle<String> source_url = scanner_.SourceUrl(isolate);
+  DirectHandle<String> source_url = scanner_.SourceUrl(isolate);
   if (!source_url.is_null()) {
     script->set_source_url(*source_url);
   }
-  Handle<String> source_mapping_url = scanner_.SourceMappingUrl(isolate);
+  DirectHandle<String> source_mapping_url = scanner_.SourceMappingUrl(isolate);
   // The API can provide a source map URL and the API should take precedence.
   // Let's make sure we do not override the API with the magic comment.
   if (!source_mapping_url.is_null() &&

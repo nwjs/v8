@@ -1169,7 +1169,9 @@ class ParserBase {
     // ClassBody. Unless the current scope's ScopeType is ScriptScope, the
     // current position is directly or indirectly within one of the productions
     // listed above since they open a new scope.
-    return scope()->scope_type() != SCRIPT_SCOPE;
+    return ((scope()->scope_type() != SCRIPT_SCOPE &&
+             scope()->scope_type() != EVAL_SCOPE) ||
+            scope()->scope_type() == REPL_MODE_SCOPE);
   }
   bool IfNextUsingKeyword(Token::Value token_after_using) {
     // If the token after `using` is `of` or `in`, `using` is an identifier
@@ -1188,9 +1190,18 @@ class ParserBase {
             token_after_using != Token::kOf && token_after_using != Token::kIn);
   }
   bool IfStartsWithUsingKeyword() {
-    return ((peek() == Token::kUsing && IfNextUsingKeyword(PeekAhead())) ||
-            (peek() == Token::kAwait && PeekAhead() == Token::kUsing &&
-             IfNextUsingKeyword(PeekAheadAhead())));
+    // ForDeclaration[Yield, Await, Using] : ...
+    //    [+Using] using [no LineTerminator here] ForBinding[?Yield, ?Await,
+    //    ~Pattern]
+    //    [+Using, +Await] await [no LineTerminator here] using [no
+    //    LineTerminator here] ForBinding[?Yield, +Await, ~Pattern]
+    return (
+        (peek() == Token::kUsing && !scanner()->HasLineTerminatorAfterNext() &&
+         IfNextUsingKeyword(PeekAhead())) ||
+        (peek() == Token::kAwait && !scanner()->HasLineTerminatorAfterNext() &&
+         PeekAhead() == Token::kUsing &&
+         !scanner()->HasLineTerminatorAfterNextNext() &&
+         IfNextUsingKeyword(PeekAheadAhead())));
   }
   FunctionState* AddOneSuspendPointIfBlockContainsAwaitUsing(
       Scope* scope, FunctionState* function_state) {
@@ -1245,8 +1256,8 @@ class ParserBase {
   // Returns the receiver variable that we're referencing.
   V8_INLINE void UseThis() {
     Scope* scope = this->scope();
-    if (scope->is_reparsed()) return;
     DeclarationScope* closure_scope = scope->GetClosureScope();
+    if (closure_scope->is_reparsed()) return;
     DeclarationScope* receiver_scope = closure_scope->GetReceiverScope();
     Variable* var = receiver_scope->receiver();
     var->set_is_used();
@@ -4001,6 +4012,9 @@ ParserBase<Impl>::ParseMemberWithPresentNewPrefixesExpression() {
   //
   // NewTarget ::
   //   'new' '.' 'target'
+  //
+  // ImportMeta :
+  //    import . meta
 
   // The grammar for new expressions is pretty warped. We can have several 'new'
   // keywords following each other, and then a MemberExpression. When we see '('
@@ -4016,18 +4030,21 @@ ParserBase<Impl>::ParseMemberWithPresentNewPrefixesExpression() {
   // new new foo() means new (new foo())
   // new new foo().bar().baz means (new (new foo()).bar()).baz
   // new super.x means new (super.x)
+  // new import.meta.foo means (new (import.meta.foo)())
   Consume(Token::kNew);
   int new_pos = position();
   ExpressionT result;
 
   CheckStackOverflow();
 
-  if (peek() == Token::kImport && PeekAhead() == Token::kLeftParen) {
-    // TODO(42204365): Peek ahead to see if this is an import source call.
-    // It needs to peek ahead for tokens `import . source (`.
-    impl()->ReportMessageAt(scanner()->peek_location(),
-                            MessageTemplate::kImportCallNotNewExpression);
-    return impl()->FailureExpression();
+  if (peek() == Token::kImport) {
+    result = ParseMemberExpression();
+    if (result->IsImportCallExpression()) {
+      // new import() and new import.source() are never allowed.
+      impl()->ReportMessageAt(scanner()->location(),
+                              MessageTemplate::kImportCallNotNewExpression);
+      return impl()->FailureExpression();
+    }
   } else if (peek() == Token::kPeriod) {
     result = ParseNewTargetExpression();
     return ParseMemberExpressionContinuation(result);
@@ -4432,13 +4449,12 @@ void ParserBase<Impl>::ParseVariableDeclarations(
       parsing_result->descriptor.mode = VariableMode::kLet;
       break;
     case Token::kUsing:
-      // using [no LineTerminator here] [lookahead ≠ await] BindingList[?In,
-      // ?Yield, ?Await, ~Pattern] ;
+      // using [no LineTerminator here] BindingList[?In, ?Yield, ?Await,
+      // ~Pattern] ;
       Consume(Token::kUsing);
       DCHECK(v8_flags.js_explicit_resource_management);
       DCHECK_NE(var_context, kStatement);
       DCHECK(is_using_allowed());
-      DCHECK(peek() != Token::kAwait);
       DCHECK(!scanner()->HasLineTerminatorBeforeNext());
       DCHECK(peek() != Token::kLeftBracket && peek() != Token::kLeftBrace);
       parsing_result->descriptor.mode = VariableMode::kUsing;
@@ -5218,6 +5234,8 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseClassLiteral(
 
   ParseClassLiteralBody(class_info, name, class_token_pos, Token::kRightBrace);
 
+  CheckStrictOctalLiteral(scope()->start_position(), scope()->end_position());
+
   VariableProxy* unresolvable = class_scope->ResolvePrivateNamesPartially();
   if (unresolvable != nullptr) {
     impl()->ReportMessageAt(Scanner::Location(unresolvable->position(),
@@ -5702,8 +5720,7 @@ ParserBase<Impl>::ParseStatementListItem() {
       if (!v8_flags.js_explicit_resource_management) break;
       if (!is_using_allowed()) break;
       if (!(scanner()->HasLineTerminatorAfterNext()) &&
-          PeekAhead() != Token::kAwait && PeekAhead() != Token::kLeftBracket &&
-          PeekAhead() != Token::kLeftBrace) {
+          Token::IsAnyIdentifier(PeekAhead())) {
         return ParseVariableStatement(kStatementListItem, nullptr);
       }
       break;
@@ -5714,8 +5731,6 @@ ParserBase<Impl>::ParseStatementListItem() {
       if (!(scanner()->HasLineTerminatorAfterNext()) &&
           PeekAhead() == Token::kUsing &&
           !(scanner()->HasLineTerminatorAfterNextNext()) &&
-          PeekAheadAhead() != Token::kLeftBracket &&
-          PeekAheadAhead() != Token::kLeftBrace &&
           Token::IsAnyIdentifier(PeekAheadAhead())) {
         return ParseVariableStatement(kStatementListItem, nullptr);
       }

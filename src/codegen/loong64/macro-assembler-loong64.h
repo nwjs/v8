@@ -205,6 +205,17 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   Condition cond = al, Register rj = zero_reg, \
             const Operand &rk = Operand(zero_reg)
 
+  // We should not use near calls or jumps for calls to external references,
+  // since the code spaces are not guaranteed to be close to each other.
+  bool CanUseNearCallOrJump(RelocInfo::Mode rmode) {
+    return rmode != RelocInfo::EXTERNAL_REFERENCE;
+  }
+
+  static bool IsNearCallOffset(int64_t offset);
+
+  static int64_t CalculateTargetOffset(Address target, RelocInfo::Mode rmode,
+                                       uint8_t* pc);
+
   void Jump(Register target, COND_ARGS);
   void Jump(intptr_t target, RelocInfo::Mode rmode, COND_ARGS);
   void Jump(Address target, RelocInfo::Mode rmode, COND_ARGS);
@@ -243,11 +254,26 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void JumpJSFunction(Register function_object,
                       JumpMode jump_mode = JumpMode::kJump);
 
+#ifdef V8_ENABLE_LEAPTIERING
+  void CallJSDispatchEntry(JSDispatchHandle dispatch_handle,
+                           uint16_t argument_count);
+#endif
+#ifdef V8_ENABLE_WEBASSEMBLY
+  void ResolveWasmCodePointer(Register target, uint64_t signature_hash);
+  void CallWasmCodePointer(Register target, uint64_t signature_hash,
+                           CallJumpMode call_jump_mode = CallJumpMode::kCall);
+  void CallWasmCodePointerNoSignatureCheck(Register target);
+  void LoadWasmCodePointer(Register dst, MemOperand src);
+#endif
+
   // Generates an instruction sequence s.t. the return address points to the
   // instruction following the call.
   // The return address on the stack is used by frame iteration.
   void StoreReturnAddressAndCall(Register target);
 
+  // TODO(olivf, 42204201) Rename this to AssertNotDeoptimized once
+  // non-leaptiering is removed from the codebase.
+  void BailoutIfDeoptimized();
   void CallForDeoptimization(Builtin target, int deopt_id, Label* exit,
                              DeoptimizeKind kind, Label* ret,
                              Label* jump_deoptimization_entry_label);
@@ -912,6 +938,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void LoadEntrypointFromJSDispatchTable(Register destination,
                                          Register dispatch_handle,
                                          Register scratch);
+  void LoadEntrypointFromJSDispatchTable(Register destination,
+                                         JSDispatchHandle dispatch_handle,
+                                         Register scratch);
   void LoadParameterCountFromJSDispatchTable(Register destination,
                                              Register dispatch_handle,
                                              Register scratch);
@@ -1217,11 +1246,14 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
   void ReplaceClosureCodeWithOptimizedCode(Register optimized_code,
                                            Register closure);
   void GenerateTailCallToReturnedCode(Runtime::FunctionId function_id);
+
+#ifndef V8_ENABLE_LEAPTIERING
   void LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
       Register flags, Register feedback_vector, CodeKind current_code_kind,
       Label* flags_need_processing);
   void OptimizeCodeOrTailCallOptimizedCodeSlot(Register flags,
                                                Register feedback_vector);
+#endif  // !V8_ENABLE_LEAPTIERING
 
   template <typename Field>
   void DecodeField(Register dst, Register src) {

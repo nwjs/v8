@@ -283,7 +283,8 @@ class AllocationSiteCreationContext : public AllocationSiteContext {
     DCHECK(!scope_site.is_null());
     return scope_site;
   }
-  void ExitScope(Handle<AllocationSite> scope_site, Handle<JSObject> object) {
+  void ExitScope(Handle<AllocationSite> scope_site,
+                 DirectHandle<JSObject> object) {
     if (object.is_null()) return;
     scope_site->set_boilerplate(*object, kReleaseStore);
     if (v8_flags.trace_creation_allocation_sites) {
@@ -308,7 +309,7 @@ MaybeHandle<JSObject> DeepWalk(Handle<JSObject> object,
                                DeprecationUpdateContext* site_context) {
   JSObjectWalkVisitor<DeprecationUpdateContext> v(site_context);
   MaybeHandle<JSObject> result = v.StructureWalk(object);
-  Handle<JSObject> for_assert;
+  DirectHandle<JSObject> for_assert;
   DCHECK(!result.ToHandle(&for_assert) || for_assert.is_identical_to(object));
   return result;
 }
@@ -317,7 +318,7 @@ MaybeHandle<JSObject> DeepWalk(Handle<JSObject> object,
                                AllocationSiteCreationContext* site_context) {
   JSObjectWalkVisitor<AllocationSiteCreationContext> v(site_context);
   MaybeHandle<JSObject> result = v.StructureWalk(object);
-  Handle<JSObject> for_assert;
+  DirectHandle<JSObject> for_assert;
   DCHECK(!result.ToHandle(&for_assert) || for_assert.is_identical_to(object));
   return result;
 }
@@ -326,7 +327,7 @@ MaybeHandle<JSObject> DeepCopy(Handle<JSObject> object,
                                AllocationSiteUsageContext* site_context) {
   JSObjectWalkVisitor<AllocationSiteUsageContext> v(site_context);
   MaybeHandle<JSObject> copy = v.StructureWalk(object);
-  Handle<JSObject> for_assert;
+  DirectHandle<JSObject> for_assert;
   DCHECK(!copy.ToHandle(&for_assert) || !for_assert.is_identical_to(object));
   return copy;
 }
@@ -399,7 +400,8 @@ Handle<JSObject> CreateObjectLiteral(
   int length = object_boilerplate_description->boilerplate_properties_count();
   // TODO(verwaest): Support tracking representations in the boilerplate.
   for (int index = 0; index < length; index++) {
-    Handle<Object> key(object_boilerplate_description->name(index), isolate);
+    DirectHandle<Object> key(object_boilerplate_description->name(index),
+                             isolate);
     Handle<Object> value(object_boilerplate_description->value(index), isolate);
 
     if (IsHeapObject(*value)) {
@@ -425,7 +427,7 @@ Handle<JSObject> CreateObjectLiteral(
                                               NONE)
           .Check();
     } else {
-      Handle<String> name = Cast<String>(key);
+      DirectHandle<String> name = Cast<String>(key);
       DCHECK(!name->AsArrayIndex(&element_index));
       JSObject::SetOwnPropertyIgnoreAttributes(boilerplate, name, value, NONE)
           .Check();
@@ -622,7 +624,7 @@ RUNTIME_FUNCTION(Runtime_CreateRegExpLiteral) {
   // instance).
   CHECK(!HasBoilerplate(literal_site));
 
-  Handle<JSRegExp> regexp_instance;
+  DirectHandle<JSRegExp> regexp_instance;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
       isolate, regexp_instance,
       JSRegExp::New(isolate, pattern, JSRegExp::Flags(flags)));
@@ -642,8 +644,8 @@ RUNTIME_FUNCTION(Runtime_CreateRegExpLiteral) {
           Smi::FromInt(static_cast<int>(regexp_instance->flags())));
 
   vector->SynchronizedSet(literal_slot, *boilerplate);
-  DCHECK(
-      HasBoilerplate(handle(Cast<Object>(vector->Get(literal_slot)), isolate)));
+  DCHECK(HasBoilerplate(
+      direct_handle(Cast<Object>(vector->Get(literal_slot)), isolate)));
 
   return *regexp_instance;
 }

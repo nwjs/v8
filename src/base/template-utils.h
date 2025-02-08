@@ -5,6 +5,8 @@
 #ifndef V8_BASE_TEMPLATE_UTILS_H_
 #define V8_BASE_TEMPLATE_UTILS_H_
 
+#include <stddef.h>
+
 #include <array>
 #include <functional>
 #include <iosfwd>
@@ -129,13 +131,12 @@ constexpr auto tuple_head(Tuple&& tpl) {
 }
 
 // Drop the first N elements from a tuple.
-template <
-    size_t N, typename Tuple,
-    // If the user accidentally passes in an N that is larger than the tuple
-    // size, the unsigned subtraction will create a giant index sequence and
-    // crash the compiler. To avoid this and fail early, disable this function
-    // for invalid N.
-    typename = std::enable_if_t<detail::NIsNotGreaterThanTupleSize<N, Tuple>>>
+template <size_t N, typename Tuple>
+// If the user accidentally passes in an N that is larger than the tuple
+// size, the unsigned subtraction will create a giant index sequence and
+// crash the compiler. To avoid this and fail early, disable this function
+// for invalid N.
+  requires(detail::NIsNotGreaterThanTupleSize<N, Tuple>)
 constexpr auto tuple_drop(Tuple&& tpl) {
   constexpr size_t total_size = std::tuple_size_v<std::decay_t<Tuple>>;
   static_assert(N <= total_size);

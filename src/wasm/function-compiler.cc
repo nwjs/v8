@@ -27,25 +27,6 @@ WasmCompilationResult WasmCompilationUnit::ExecuteCompilation(
     CompilationEnv* env, const WireBytesStorage* wire_bytes_storage,
     Counters* counters, WasmDetectedFeatures* detected) {
   DCHECK_GE(func_index_, static_cast<int>(env->module->num_imported_functions));
-  WasmCompilationResult result =
-      ExecuteFunctionCompilation(env, wire_bytes_storage, counters, detected);
-
-  if (result.succeeded() && counters) {
-    counters->wasm_generated_code_size()->Increment(
-        result.code_desc.instr_size);
-    counters->wasm_reloc_size()->Increment(result.code_desc.reloc_size);
-    counters->wasm_deopt_data_size()->Increment(
-        static_cast<int>(result.deopt_data.size()));
-  }
-
-  result.func_index = func_index_;
-
-  return result;
-}
-
-WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
-    CompilationEnv* env, const WireBytesStorage* wire_bytes_storage,
-    Counters* counters, WasmDetectedFeatures* detected) {
   const WasmFunction* func = &env->module->functions[func_index_];
   base::Vector<const uint8_t> code = wire_bytes_storage->GetCode(func->code);
   bool is_shared = env->module->type(func->sig_index).is_shared;
@@ -95,6 +76,7 @@ WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
   }
 
   WasmCompilationResult result;
+  result.signature_hash = SignatureHasher::Hash(func->sig);
   int declared_index = declared_function_index(env->module, func_index_);
 
   switch (tier_) {
@@ -130,11 +112,7 @@ WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
         std::unique_ptr<DebugSideTable> unused_debug_sidetable;
         if (V8_UNLIKELY(declared_index < 32 &&
                         (v8_flags.wasm_debug_mask_for_testing &
-                         (1 << declared_index)) != 0) &&
-            // Do not overwrite the debugging setting when performing a
-            // deoptimization.
-            (!v8_flags.wasm_deopt ||
-             env->deopt_location_kind == LocationKindForDeopt::kNone)) {
+                         (1 << declared_index)) != 0)) {
           options.set_debug_sidetable(&unused_debug_sidetable);
           if (!for_debugging_) options.set_for_debugging(kForDebugging);
         }
@@ -155,18 +133,8 @@ WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
       compiler::WasmCompilationData data(func_body);
       data.func_index = func_index_;
       data.wire_bytes_storage = wire_bytes_storage;
-      bool use_turboshaft = v8_flags.turboshaft_wasm;
-      if (declared_index < 32 && ((v8_flags.wasm_turboshaft_mask_for_testing &
-                                   (1 << declared_index)) != 0)) {
-        use_turboshaft = true;
-      }
-      if (use_turboshaft) {
         result = compiler::turboshaft::ExecuteTurboshaftWasmCompilation(
             env, data, detected);
-      } else {
-        result = compiler::ExecuteTurbofanWasmCompilation(env, data, counters,
-                                                          detected);
-      }
       // In exceptional cases it can happen that compilation requests for
       // debugging end up being executed by Turbofan, e.g. if Liftoff bails out
       // because of unsupported features or the --wasm-tier-mask-for-testing is
@@ -178,6 +146,16 @@ WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
   }
 
   DCHECK(result.succeeded());
+  if (counters) {
+    counters->wasm_generated_code_size()->Increment(
+        result.code_desc.instr_size);
+    counters->wasm_reloc_size()->Increment(result.code_desc.reloc_size);
+    counters->wasm_deopt_data_size()->Increment(
+        static_cast<int>(result.deopt_data.size()));
+  }
+
+  result.func_index = func_index_;
+
   return result;
 }
 
@@ -221,12 +199,8 @@ JSToWasmWrapperCompilationUnit::JSToWasmWrapperCompilationUnit(
                : compiler::NewJSToWasmCompilationJob(isolate, sig)) {
   if (!v8_flags.wasm_jitless) {
     OptimizedCompilationInfo* info =
-        v8_flags.turboshaft_wasm_wrappers
-            ? static_cast<compiler::turboshaft::TurboshaftCompilationJob*>(
-                  job_.get())
-                  ->compilation_info()
-            : static_cast<TurbofanCompilationJob*>(job_.get())
-                  ->compilation_info();
+        static_cast<compiler::turboshaft::TurboshaftCompilationJob*>(job_.get())
+            ->compilation_info();
     if (info->trace_turbo_graph()) {
       // Make sure that code tracer is initialized on the main thread if tracing
       // is enabled.
@@ -257,12 +231,8 @@ Handle<Code> JSToWasmWrapperCompilationUnit::Finalize() {
   CompilationJob::Status status = job_->FinalizeJob(isolate_);
   CHECK_EQ(status, CompilationJob::SUCCEEDED);
   OptimizedCompilationInfo* info =
-      v8_flags.turboshaft_wasm_wrappers
-          ? static_cast<compiler::turboshaft::TurboshaftCompilationJob*>(
-                job_.get())
-                ->compilation_info()
-          : static_cast<TurbofanCompilationJob*>(job_.get())
-                ->compilation_info();
+      static_cast<compiler::turboshaft::TurboshaftCompilationJob*>(job_.get())
+          ->compilation_info();
   Handle<Code> code = info->code();
   if (isolate_->IsLoggingCodeCreation()) {
     Handle<String> name = isolate_->factory()->NewStringFromAsciiChecked(

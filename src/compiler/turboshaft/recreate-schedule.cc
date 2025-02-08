@@ -737,6 +737,14 @@ Node* ScheduleBuilder::ProcessOperation(const ChangeOp& op) {
         UNIMPLEMENTED();
       }
       break;
+    case Kind::kJSFloat16TruncateWithBitcast:
+      if (op.from == FloatRepresentation::Float64() &&
+          op.to == WordRepresentation::Word32()) {
+        o = machine.TruncateFloat64ToFloat16RawBits().placeholder();
+      } else {
+        UNIMPLEMENTED();
+      }
+      break;
     case Kind::kSignedToFloat:
       if (op.from == WordRepresentation::Word32() &&
           op.to == FloatRepresentation::Float64()) {
@@ -1092,15 +1100,10 @@ Node* ScheduleBuilder::ProcessOperation(const ConstantOp& op) {
                          RelocInfo::WASM_CANONICAL_SIG_ID),
                      {});
     case ConstantOp::Kind::kRelocatableWasmIndirectCallTarget:
-      if constexpr (V8_ENABLE_WASM_CODE_POINTER_TABLE_BOOL) {
-        return AddNode(common.RelocatableInt32Constant(
-                           base::checked_cast<int32_t>(op.integral()),
-                           RelocInfo::WASM_INDIRECT_CALL_TARGET),
-                       {});
-      } else {
-        return RelocatableIntPtrConstant(op.integral(),
-                                         RelocInfo::WASM_INDIRECT_CALL_TARGET);
-      }
+      return AddNode(common.RelocatableInt32Constant(
+                         base::checked_cast<int32_t>(op.integral()),
+                         RelocInfo::WASM_CODE_POINTER_TABLE_ENTRY),
+                     {});
   }
 }
 
@@ -1138,7 +1141,7 @@ Node* ScheduleBuilder::ProcessOperation(const LoadOp& op) {
     DCHECK(!op.kind.maybe_unaligned);
     AtomicLoadParameters params(loaded_rep, AtomicMemoryOrder::kSeqCst,
                                 op.kind.with_trap_handler
-                                    ? MemoryAccessKind::kProtected
+                                    ? MemoryAccessKind::kProtectedByTrapHandler
                                     : MemoryAccessKind::kNormal);
     if (op.result_rep == RegisterRepresentation::Word32()) {
       o = machine.Word32AtomicLoad(params);
@@ -1198,7 +1201,7 @@ Node* ScheduleBuilder::ProcessOperation(const StoreOp& op) {
     AtomicStoreParameters params(op.stored_rep.ToMachineType().representation(),
                                  op.write_barrier, AtomicMemoryOrder::kSeqCst,
                                  op.kind.with_trap_handler
-                                     ? MemoryAccessKind::kProtected
+                                     ? MemoryAccessKind::kProtectedByTrapHandler
                                      : MemoryAccessKind::kNormal);
     if (op.stored_rep == MemoryRepresentation::Int64() ||
         op.stored_rep == MemoryRepresentation::Uint64()) {
@@ -1428,6 +1431,11 @@ std::pair<Node*, MachineType> ScheduleBuilder::BuildDeoptInput(
     case Instr::kRestLength:
       // For now, kRestLength is only generated when using the Maglev frontend,
       // which doesn't use recreate-schedule.
+      [[fallthrough]];
+    case Instr::kDematerializedStringConcat:
+    case Instr::kDematerializedStringConcatReference:
+      // Escaped StringConcat are not supported by the Turbofan instruction
+      // selector.
       [[fallthrough]];
     case Instr::kUnusedRegister:
       UNREACHABLE();
@@ -1808,7 +1816,7 @@ Node* ScheduleBuilder::ProcessOperation(const Simd128ReplaceLaneOp& op) {
 Node* ScheduleBuilder::ProcessOperation(const Simd128LaneMemoryOp& op) {
   DCHECK_EQ(op.offset, 0);
   MemoryAccessKind access =
-      op.kind.with_trap_handler ? MemoryAccessKind::kProtected
+      op.kind.with_trap_handler ? MemoryAccessKind::kProtectedByTrapHandler
       : op.kind.maybe_unaligned ? MemoryAccessKind::kUnaligned
                                 : MemoryAccessKind::kNormal;
 
@@ -1842,7 +1850,7 @@ Node* ScheduleBuilder::ProcessOperation(const Simd128LaneMemoryOp& op) {
 Node* ScheduleBuilder::ProcessOperation(const Simd128LoadTransformOp& op) {
   DCHECK_EQ(op.offset, 0);
   MemoryAccessKind access =
-      op.load_kind.with_trap_handler ? MemoryAccessKind::kProtected
+      op.load_kind.with_trap_handler ? MemoryAccessKind::kProtectedByTrapHandler
       : op.load_kind.maybe_unaligned ? MemoryAccessKind::kUnaligned
                                      : MemoryAccessKind::kNormal;
   LoadTransformation transformation;
@@ -1878,7 +1886,7 @@ Node* ScheduleBuilder::ProcessOperation(const Simd256Extract128LaneOp& op) {
 Node* ScheduleBuilder::ProcessOperation(const Simd256LoadTransformOp& op) {
   DCHECK_EQ(op.offset, 0);
   MemoryAccessKind access =
-      op.load_kind.with_trap_handler ? MemoryAccessKind::kProtected
+      op.load_kind.with_trap_handler ? MemoryAccessKind::kProtectedByTrapHandler
       : op.load_kind.maybe_unaligned ? MemoryAccessKind::kUnaligned
                                      : MemoryAccessKind::kNormal;
   LoadTransformation transformation;

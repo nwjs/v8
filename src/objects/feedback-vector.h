@@ -11,6 +11,7 @@
 #include "src/base/bit-field.h"
 #include "src/base/logging.h"
 #include "src/base/macros.h"
+#include "src/base/small-vector.h"
 #include "src/common/globals.h"
 #include "src/objects/elements-kind.h"
 #include "src/objects/feedback-cell.h"
@@ -82,6 +83,8 @@ static constexpr int kFeedbackSlotKindCount =
     static_cast<int>(FeedbackSlotKind::kLast) + 1;
 
 using MapAndHandler = std::pair<Handle<Map>, MaybeObjectHandle>;
+using MapsAndHandlers =
+    base::SmallVector<MapAndHandler, DEFAULT_MAX_POLYMORPHIC_MAP_COUNT>;
 
 inline bool IsCallICKind(FeedbackSlotKind kind) {
   return kind == FeedbackSlotKind::kCall;
@@ -216,9 +219,10 @@ class FeedbackVector
   NEVER_READ_ONLY_SPACE
   DEFINE_TORQUE_GENERATED_OSR_STATE()
   DEFINE_TORQUE_GENERATED_FEEDBACK_VECTOR_FLAGS()
-  static_assert(TieringStateBits::is_valid(TieringState::kLastTieringState));
 
 #ifndef V8_ENABLE_LEAPTIERING
+  static_assert(TieringStateBits::is_valid(TieringState::kLastTieringState));
+
   static constexpr uint32_t kFlagsMaybeHasTurbofanCode =
       FeedbackVector::MaybeHasTurbofanCodeBit::kMask;
   static constexpr uint32_t kFlagsMaybeHasMaglevCode =
@@ -226,7 +230,6 @@ class FeedbackVector
   static constexpr uint32_t kFlagsHasAnyOptimizedCode =
       FeedbackVector::MaybeHasMaglevCodeBit::kMask |
       FeedbackVector::MaybeHasTurbofanCodeBit::kMask;
-#endif  // !V8_ENABLE_LEAPTIERING
   static constexpr uint32_t kFlagsTieringStateIsAnyRequested =
       kNoneOrInProgressMask << FeedbackVector::TieringStateBits::kShift;
   static constexpr uint32_t kFlagsLogNextExecution =
@@ -234,6 +237,7 @@ class FeedbackVector
 
   static constexpr inline uint32_t FlagMaskForNeedsProcessingCheckFrom(
       CodeKind code_kind);
+#endif  // !V8_ENABLE_LEAPTIERING
 
   inline bool is_empty() const;
 
@@ -275,10 +279,10 @@ class FeedbackVector
   // The `osr_state` contains the osr_urgency and maybe_has_optimized_osr_code.
   inline void reset_osr_state();
 
+#ifndef V8_ENABLE_LEAPTIERING
   inline bool log_next_execution() const;
   inline void set_log_next_execution(bool value = true);
 
-#ifndef V8_ENABLE_LEAPTIERING
   inline Tagged<Code> optimized_code(IsolateForSandbox isolate) const;
   // Whether maybe_optimized_code contains a cached Code object.
   inline bool has_optimized_code() const;
@@ -304,9 +308,14 @@ class FeedbackVector
   void SetOptimizedOsrCode(Isolate* isolate, FeedbackSlot slot,
                            Tagged<Code> code);
 
+#ifdef V8_ENABLE_LEAPTIERING
+  inline bool tiering_in_progress() const;
+  void set_tiering_in_progress(bool);
+#else
   inline TieringState tiering_state() const;
-  void set_tiering_state(TieringState state);
-  void reset_tiering_state();
+  V8_EXPORT_PRIVATE void set_tiering_state(TieringState state);
+  inline void reset_tiering_state();
+#endif  // !V8_ENABLE_LEAPTIERING
 
   bool osr_tiering_in_progress();
   void set_osr_tiering_in_progress(bool osr_in_progress);
@@ -868,7 +877,7 @@ class V8_EXPORT_PRIVATE FeedbackNexus final {
   // the extra feedback. This is used by ICs when updating the handlers.
   using TryUpdateHandler = std::function<MaybeHandle<Map>(Handle<Map>)>;
   int ExtractMapsAndHandlers(
-      std::vector<MapAndHandler>* maps_and_handlers,
+      MapsAndHandlers* maps_and_handlers,
       TryUpdateHandler map_handler = TryUpdateHandler()) const;
   MaybeObjectHandle FindHandlerForMap(DirectHandle<Map> map) const;
   // Used to obtain maps. This is used by compilers to get all the feedback
@@ -894,11 +903,12 @@ class V8_EXPORT_PRIVATE FeedbackNexus final {
   inline std::pair<Tagged<MaybeObject>, Tagged<MaybeObject>> GetFeedbackPair()
       const;
 
-  void ConfigureMonomorphic(Handle<Name> name, DirectHandle<Map> receiver_map,
+  void ConfigureMonomorphic(DirectHandle<Name> name,
+                            DirectHandle<Map> receiver_map,
                             const MaybeObjectHandle& handler);
 
-  void ConfigurePolymorphic(
-      Handle<Name> name, std::vector<MapAndHandler> const& maps_and_handlers);
+  void ConfigurePolymorphic(DirectHandle<Name> name,
+                            MapsAndHandlers const& maps_and_handlers);
 
   void ConfigureMegaDOM(const MaybeObjectHandle& handler);
   MaybeObjectHandle ExtractMegaDOMHandler();
@@ -944,7 +954,7 @@ class V8_EXPORT_PRIVATE FeedbackNexus final {
 
   // For CloneObject ICs
   static constexpr int kCloneObjectPolymorphicEntrySize = 2;
-  void ConfigureCloneObject(Handle<Map> source_map,
+  void ConfigureCloneObject(DirectHandle<Map> source_map,
                             const MaybeObjectHandle& handler);
 
 // Bit positions in a smi that encodes lexical environment variable access.

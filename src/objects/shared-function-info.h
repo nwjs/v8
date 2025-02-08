@@ -408,7 +408,7 @@ class SharedFunctionInfo
   inline Tagged<InterpreterData> interpreter_data(
       IsolateForSandbox isolate) const;
   inline void set_interpreter_data(
-      Tagged<InterpreterData> interpreter_data,
+      Isolate* isolate, Tagged<InterpreterData> interpreter_data,
       WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
   DECL_GETTER(HasBaselineCode, bool)
   DECL_RELEASE_ACQUIRE_ACCESSORS(baseline_code, Tagged<Code>)
@@ -709,7 +709,7 @@ class SharedFunctionInfo
 
   inline bool CanCollectSourcePosition(Isolate* isolate);
   static void EnsureSourcePositionsAvailable(
-      Isolate* isolate, Handle<SharedFunctionInfo> shared_info);
+      Isolate* isolate, DirectHandle<SharedFunctionInfo> shared_info);
 
   template <typename IsolateT>
   bool AreSourcePositionsAvailable(IsolateT* isolate) const;

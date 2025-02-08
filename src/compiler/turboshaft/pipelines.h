@@ -123,13 +123,13 @@ class Pipeline {
     }
   }
 
-  bool CreateGraphWithMaglev() {
+  bool CreateGraphWithMaglev(Linkage* linkage) {
     UnparkedScopeIfNeeded unparked_scope(data_->broker());
 
     BeginPhaseKind("V8.TFGraphCreation");
     turboshaft::Tracing::Scope tracing_scope(data_->info());
     std::optional<BailoutReason> bailout =
-        Run<turboshaft::MaglevGraphBuildingPhase>();
+        Run<turboshaft::MaglevGraphBuildingPhase>(linkage);
     EndPhaseKind();
 
     if (bailout.has_value()) {
@@ -512,7 +512,7 @@ class Pipeline {
     return FinalizeCode();
   }
 
-  MaybeHandle<Code> GenerateCode(
+  [[nodiscard]] bool GenerateCode(
       Linkage* linkage, std::shared_ptr<OsrHelper> osr_helper = {},
       JumpOptimizationInfo* jump_optimization_info = nullptr,
       const ProfileDataFromFile* profile = nullptr, int initial_graph_hash = 0);

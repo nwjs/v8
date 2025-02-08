@@ -54,6 +54,7 @@ TQ_OBJECT_CONSTRUCTORS_IMPL(WasmInstanceObject)
 TQ_OBJECT_CONSTRUCTORS_IMPL(WasmInternalFunction)
 TQ_OBJECT_CONSTRUCTORS_IMPL(WasmJSFunctionData)
 TQ_OBJECT_CONSTRUCTORS_IMPL(WasmMemoryObject)
+TQ_OBJECT_CONSTRUCTORS_IMPL(WasmMemoryMapDescriptor)
 TQ_OBJECT_CONSTRUCTORS_IMPL(WasmModuleObject)
 TQ_OBJECT_CONSTRUCTORS_IMPL(WasmNull)
 TQ_OBJECT_CONSTRUCTORS_IMPL(WasmObject)
@@ -69,10 +70,9 @@ TQ_OBJECT_CONSTRUCTORS_IMPL(WasmTypeInfo)
   DEF_GETTER(holder, has_##name, bool) {                     \
     Tagged<Object> value =                                   \
         TaggedField<Object, offset>::load(cage_base, *this); \
-    return !IsUndefined(value, GetReadOnlyRoots(cage_base)); \
+    return !IsUndefined(value);                              \
   }                                                          \
-  ACCESSORS_CHECKED2(holder, name, type, offset,             \
-                     !IsUndefined(value, GetReadOnlyRoots(cage_base)), true)
+  ACCESSORS_CHECKED2(holder, name, type, offset, !IsUndefined(value), true)
 
 #define PRIMITIVE_ACCESSORS(holder, name, type, offset)               \
   type holder::name() const {                                         \
@@ -130,7 +130,7 @@ void WasmGlobalObject::set_type(wasm::ValueType value) {
 int WasmGlobalObject::type_size() const { return type().value_kind_size(); }
 
 Address WasmGlobalObject::address() const {
-  DCHECK_NE(type(), wasm::kWasmAnyRef);
+  DCHECK(!type().is_reference());
   DCHECK_LE(offset() + type_size(), untagged_buffer()->byte_length());
   return reinterpret_cast<Address>(untagged_buffer()->backing_store()) +
          offset();
@@ -330,12 +330,6 @@ const wasm::WasmModule* WasmInstanceObject::module() const {
 }
 
 ImportedFunctionEntry::ImportedFunctionEntry(
-    Isolate* isolate, DirectHandle<WasmInstanceObject> instance_object,
-    int index)
-    : ImportedFunctionEntry(
-          handle(instance_object->trusted_data(isolate), isolate), index) {}
-
-ImportedFunctionEntry::ImportedFunctionEntry(
     Handle<WasmTrustedInstanceData> instance_data, int index)
     : instance_data_(instance_data), index_(index) {
   DCHECK_GE(index, 0);
@@ -343,13 +337,25 @@ ImportedFunctionEntry::ImportedFunctionEntry(
 }
 
 // WasmDispatchTable
-OBJECT_CONSTRUCTORS_IMPL(WasmDispatchTable, TrustedObject)
+OBJECT_CONSTRUCTORS_IMPL(WasmDispatchTable, ExposedTrustedObject)
 
 PROTECTED_POINTER_ACCESSORS(WasmDispatchTable, protected_offheap_data,
                             TrustedManaged<WasmDispatchTableData>,
                             kProtectedOffheapDataOffset)
 WasmDispatchTableData* WasmDispatchTable::offheap_data() const {
   return protected_offheap_data()->get().get();
+}
+
+PROTECTED_POINTER_ACCESSORS(WasmDispatchTable, protected_uses,
+                            ProtectedWeakFixedArray, kProtectedUsesOffset)
+
+wasm::CanonicalValueType WasmDispatchTable::table_type() const {
+  return wasm::CanonicalValueType::FromRawBitField(
+      ReadField<uint32_t>(kTableTypeOffset));
+}
+void WasmDispatchTable::set_table_type(wasm::CanonicalValueType type) {
+  DCHECK(type.IsFunctionType());
+  WriteField(kTableTypeOffset, type.raw_bit_field());
 }
 
 void WasmDispatchTable::clear_entry_padding(int index) {
@@ -381,7 +387,7 @@ inline Tagged<Object> WasmDispatchTable::implicit_arg(int index) const {
 inline WasmCodePointer WasmDispatchTable::target(int index) const {
   DCHECK_LT(index, length());
   if (v8_flags.wasm_jitless) return wasm::kInvalidWasmCodePointer;
-  return ReadField<WasmCodePointer>(OffsetOf(index) + kTargetBias);
+  return WasmCodePointer{ReadField<uint32_t>(OffsetOf(index) + kTargetBias)};
 }
 
 inline wasm::CanonicalTypeIndex WasmDispatchTable::sig(int index) const {
@@ -422,6 +428,25 @@ PROTECTED_POINTER_ACCESSORS(WasmImportData, instance_data,
                             WasmTrustedInstanceData,
                             kProtectedInstanceDataOffset)
 
+PROTECTED_POINTER_ACCESSORS(WasmImportData, call_origin, TrustedObject,
+                            kProtectedCallOriginOffset)
+
+wasm::Suspend WasmImportData::suspend() const {
+  return SuspendField::decode(bit_field());
+}
+
+void WasmImportData::set_suspend(wasm::Suspend value) {
+  set_bit_field(SuspendField::update(bit_field(), value));
+}
+
+uint32_t WasmImportData::table_slot() const {
+  return TableSlotField::decode(bit_field());
+}
+
+void WasmImportData::set_table_slot(uint32_t value) {
+  set_bit_field(TableSlotField::update(bit_field(), value));
+}
+
 // WasmInternalFunction
 
 // {implicit_arg} will be a WasmTrustedInstanceData or a WasmImportData.
@@ -458,6 +483,13 @@ wasm::CanonicalTypeIndex WasmExportedFunctionData::sig_index() const {
 bool WasmExportedFunctionData::is_promising() const {
   return WasmFunctionData::PromiseField::decode(js_promise_flags()) ==
          wasm::kPromise;
+}
+
+WasmCodePointer WasmInternalFunction::call_target() {
+  return WasmCodePointer{raw_call_target()};
+}
+void WasmInternalFunction::set_call_target(WasmCodePointer code_pointer) {
+  set_raw_call_target(code_pointer.value());
 }
 
 // WasmJSFunctionData
@@ -545,7 +577,17 @@ TRUSTED_POINTER_ACCESSORS(WasmTableObject, trusted_data,
                           WasmTrustedInstanceData, kTrustedDataOffset,
                           kWasmTrustedInstanceDataIndirectPointerTag)
 
-wasm::ValueType WasmTableObject::type() {
+TRUSTED_POINTER_ACCESSORS(WasmTableObject, trusted_dispatch_table,
+                          WasmDispatchTable, kTrustedDispatchTableOffset,
+                          kWasmDispatchTableIndirectPointerTag)
+
+wasm::ValueType WasmTableObject::type(const wasm::WasmModule* module) {
+  wasm::ValueType type = unsafe_type();
+  SBXCHECK(!type.has_index() || module->has_type(type.ref_index()));
+  return type;
+}
+
+wasm::ValueType WasmTableObject::unsafe_type() {
   // Various consumers of ValueKind (e.g. ValueKind::name()) use the raw enum
   // value as index into a global array. As such, if the index is corrupted
   // (which must be assumed, as it comes from within the sandbox), this can
@@ -572,7 +614,7 @@ std::optional<uint64_t> WasmTableObject::maximum_length_u64() const {
     DCHECK(IsBigInt(max));
 #if DEBUG
     bool lossless;
-    double value = Cast<BigInt>(maximum_length())->AsUint64(&lossless);
+    uint64_t value = Cast<BigInt>(maximum_length())->AsUint64(&lossless);
     DCHECK(lossless);
     return value;
 #else

@@ -5,6 +5,8 @@
 #ifndef V8_HEAP_FACTORY_BASE_H_
 #define V8_HEAP_FACTORY_BASE_H_
 
+#include <string_view>
+
 #include "src/base/export-template.h"
 #include "src/base/strings.h"
 #include "src/common/globals.h"
@@ -76,7 +78,6 @@ struct NewCodeOptions {
   Builtin builtin;
   bool is_context_specialized;
   bool is_turbofanned;
-  int stack_slots;
   uint16_t parameter_count;
   int instruction_size;
   int metadata_size;
@@ -130,6 +131,9 @@ class FactoryBase : public TorqueGeneratedFactory<Impl> {
   inline Handle<HeapNumber> NewHeapNumberFromBits(uint64_t bits);
   template <AllocationType allocation = AllocationType::kYoung>
   inline Handle<HeapNumber> NewHeapNumberWithHoleNaN();
+
+  template <AllocationType allocation = AllocationType::kYoung>
+  inline Handle<HeapNumber> NewHeapInt32(int32_t value);
 
   template <AllocationType allocation>
   Handle<HeapNumber> NewHeapNumber();
@@ -186,6 +190,10 @@ class FactoryBase : public TorqueGeneratedFactory<Impl> {
   // Allocates a trusted weak fixed array in trusted space, initialized with
   // zeros.
   Handle<TrustedWeakFixedArray> NewTrustedWeakFixedArray(int length);
+
+  // Allocates a protected weak fixed array in trusted space, initialized with
+  // zeros.
+  Handle<ProtectedWeakFixedArray> NewProtectedWeakFixedArray(int length);
 
   // The function returns a pre-allocated empty byte array for length = 0.
   Handle<ByteArray> NewByteArray(
@@ -314,6 +322,14 @@ class FactoryBase : public TorqueGeneratedFactory<Impl> {
   inline Handle<String> NewStringFromAsciiChecked(
       const char* str, AllocationType allocation = AllocationType::kYoung) {
     return NewStringFromOneByte(base::OneByteVector(str), allocation)
+        .ToHandleChecked();
+  }
+
+  inline Handle<String> NewStringFromAsciiChecked(
+      std::string_view str,
+      AllocationType allocation = AllocationType::kYoung) {
+    return NewStringFromOneByte(base::OneByteVector(str.data(), str.length()),
+                                allocation)
         .ToHandleChecked();
   }
 

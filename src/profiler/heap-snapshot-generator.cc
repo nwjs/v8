@@ -1246,6 +1246,15 @@ class IndexedReferencesExtractor : public ObjectVisitorWithCageBases {
     VisitSlotImpl(unused_cage_base, slot);
   }
 
+  void VisitProtectedPointer(Tagged<TrustedObject> host,
+                             ProtectedMaybeObjectSlot slot) override {
+    // TODO(saelo): the cage base doesn't currently matter as it isn't used,
+    // but technically we should either use the trusted cage base here or
+    // remove the cage_base parameter.
+    const PtrComprCageBase unused_cage_base(kNullAddress);
+    VisitSlotImpl(unused_cage_base, slot);
+  }
+
   void VisitJSDispatchTableEntry(Tagged<HeapObject> host,
                                  JSDispatchHandle handle) override {
 #ifdef V8_ENABLE_LEAPTIERING
@@ -1256,7 +1265,7 @@ class IndexedReferencesExtractor : public ObjectVisitorWithCageBases {
       int field_index = JSFunction::kDispatchHandleOffset / kTaggedSize;
       CHECK(generator_->visited_fields_[field_index]);
       generator_->visited_fields_[field_index] = false;
-    } else if (IsFeedbackCell(host)) {
+    } else if (IsCode(host) || IsFeedbackCell(host)) {
       // Nothing to do: the Code object is tracked as part of the JSFunction.
     } else {
       UNREACHABLE();
@@ -1967,18 +1976,20 @@ void V8HeapExplorer::ExtractNumberReference(HeapEntry* entry,
 
   // Must be large enough to fit any double, int, or size_t.
   char arr[32];
-  base::Vector<char> buffer(arr, arraysize(arr));
+  base::Vector<char> buffer = base::ArrayVector(arr);
 
-  const char* string;
+  std::string_view string;
   if (IsSmi(number)) {
     int int_value = Smi::ToInt(number);
-    string = IntToCString(int_value, buffer);
+    string = IntToStringView(int_value, buffer);
   } else {
     double double_value = Cast<HeapNumber>(number)->value();
-    string = DoubleToCString(double_value, buffer);
+    string = DoubleToStringView(double_value, buffer);
   }
 
-  const char* name = names_->GetCopy(string);
+  // GetCopy() requires a null-terminated C-String, as the underlying hash map
+  // uses strcmp.
+  const char* name = names_->GetCopy(std::string(string).c_str());
 
   SnapshotObjectId id = heap_object_map_->get_next_id();
   HeapEntry* child_entry =
@@ -2170,7 +2181,7 @@ void V8HeapExplorer::ExtractAccessorPairProperty(HeapEntry* entry,
 
 void V8HeapExplorer::ExtractElementReferences(Tagged<JSObject> js_obj,
                                               HeapEntry* entry) {
-  ReadOnlyRoots roots = js_obj->GetReadOnlyRoots();
+  ReadOnlyRoots roots = GetReadOnlyRoots();
   if (js_obj->HasObjectElements()) {
     Tagged<FixedArray> elements = Cast<FixedArray>(js_obj->elements());
     int length = IsJSArray(js_obj) ? Smi::ToInt(Cast<JSArray>(js_obj)->length())
@@ -2345,8 +2356,8 @@ Tagged<JSFunction> V8HeapExplorer::GetConstructor(Isolate* isolate,
                                                   Tagged<JSReceiver> receiver) {
   DisallowGarbageCollection no_gc;
   HandleScope scope(isolate);
-  MaybeHandle<JSFunction> maybe_constructor =
-      JSReceiver::GetConstructor(isolate, handle(receiver, isolate));
+  MaybeDirectHandle<JSFunction> maybe_constructor =
+      JSReceiver::GetConstructor(isolate, direct_handle(receiver, isolate));
 
   if (maybe_constructor.is_null()) return JSFunction();
 
@@ -2357,7 +2368,8 @@ Tagged<String> V8HeapExplorer::GetConstructorName(Isolate* isolate,
                                                   Tagged<JSObject> object) {
   DisallowGarbageCollection no_gc;
   HandleScope scope(isolate);
-  return *JSReceiver::GetConstructorName(isolate, handle(object, isolate));
+  return *JSReceiver::GetConstructorName(isolate,
+                                         direct_handle(object, isolate));
 }
 
 HeapEntry* V8HeapExplorer::GetEntry(Tagged<Object> obj) {
@@ -2850,8 +2862,8 @@ V8HeapExplorer::CollectTemporaryGlobalObjectsTags() {
   TemporaryGlobalObjectTags global_object_tags;
   HandleScope scope(isolate);
   GlobalObjectsEnumerator enumerator(
-      isolate, [this, isolate,
-                &global_object_tags](Handle<JSGlobalObject> global_object) {
+      isolate, [this, isolate, &global_object_tags](
+                   DirectHandle<JSGlobalObject> global_object) {
         if (const char* tag = global_object_name_resolver_->GetName(
                 Utils::ToLocal(Cast<JSObject>(global_object)))) {
           global_object_tags.emplace_back(
@@ -2912,7 +2924,7 @@ class EmbedderGraphImpl : public EmbedderGraph {
   }
 
   Node* V8Node(const v8::Local<v8::Data>& data) final {
-    Handle<Object> object = v8::Utils::OpenHandle(*data);
+    DirectHandle<Object> object = v8::Utils::OpenDirectHandle(*data);
     DCHECK(!object.is_null());
     return AddNode(std::unique_ptr<Node>(new V8NodeImpl(*object)));
   }

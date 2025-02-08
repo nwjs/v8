@@ -77,8 +77,9 @@ Handle<Map> GetOrCreateDebugProxyMap(
     return handle(Cast<Map>(maps->get(id)), isolate);
   }
   auto tmp = (*create_template_fn)(reinterpret_cast<v8::Isolate*>(isolate));
-  auto fun = ApiNatives::InstantiateFunction(isolate, Utils::OpenHandle(*tmp))
-                 .ToHandleChecked();
+  auto fun =
+      ApiNatives::InstantiateFunction(isolate, Utils::OpenDirectHandle(*tmp))
+          .ToHandleChecked();
   auto map = JSFunction::GetDerivedMap(isolate, fun, fun).ToHandleChecked();
   Map::SetPrototype(isolate, map, isolate->factory()->null_value());
   if (make_non_extensible) {
@@ -330,7 +331,7 @@ struct GlobalsProxy : NamedDebugProxy<GlobalsProxy, kGlobalsProxy> {
   static Handle<Object> Get(Isolate* isolate,
                             DirectHandle<WasmInstanceObject> instance,
                             uint32_t index) {
-    Handle<WasmModuleObject> module(instance->module_object(), isolate);
+    DirectHandle<WasmModuleObject> module(instance->module_object(), isolate);
     return WasmValueObject::New(
         isolate,
         instance->trusted_data(isolate)->GetGlobalValue(
@@ -414,7 +415,7 @@ struct LocalsProxy : NamedDebugProxy<LocalsProxy, kLocalsProxy, FixedArray> {
     int count = debug_info->GetNumLocals(frame->pc(), isolate);
     auto function = debug_info->GetFunctionAtAddress(frame->pc(), isolate);
     auto values = isolate->factory()->NewFixedArray(count + 2);
-    Handle<WasmModuleObject> module_object(
+    DirectHandle<WasmModuleObject> module_object(
         frame->wasm_instance()->module_object(), isolate);
     for (int i = 0; i < count; ++i) {
       auto value = WasmValueObject::New(
@@ -462,7 +463,7 @@ struct StackProxy : IndexedDebugProxy<StackProxy, kStackProxy, FixedArray> {
         frame->trusted_instance_data()->native_module()->GetDebugInfo();
     int count = debug_info->GetStackDepth(frame->pc(), isolate);
     auto values = isolate->factory()->NewFixedArray(count);
-    Handle<WasmModuleObject> module_object(
+    DirectHandle<WasmModuleObject> module_object(
         frame->wasm_instance()->module_object(), isolate);
     for (int i = 0; i < count; ++i) {
       auto value = WasmValueObject::New(
@@ -490,9 +491,10 @@ struct StackProxy : IndexedDebugProxy<StackProxy, kStackProxy, FixedArray> {
 // This is used to cache the various instance debug proxies (functions,
 // globals, tables, and memories) on the WasmInstanceObject.
 Handle<FixedArray> GetOrCreateInstanceProxyCache(
-    Isolate* isolate, Handle<WasmInstanceObject> instance) {
+    Isolate* isolate, DirectHandle<WasmInstanceObject> instance) {
   Handle<Object> cache;
-  Handle<Symbol> symbol = isolate->factory()->wasm_debug_proxy_cache_symbol();
+  DirectHandle<Symbol> symbol =
+      isolate->factory()->wasm_debug_proxy_cache_symbol();
   if (!Object::GetProperty(isolate, instance, symbol).ToHandle(&cache) ||
       IsUndefined(*cache, isolate)) {
     cache = isolate->factory()->NewFixedArrayWithHoles(kNumInstanceProxies);
@@ -582,13 +584,13 @@ class ContextProxyPrototype {
   }
 
   static MaybeHandle<Object> GetNamedProperty(Isolate* isolate,
-                                              Handle<JSObject> receiver,
-                                              Handle<String> name) {
+                                              DirectHandle<JSObject> receiver,
+                                              DirectHandle<String> name) {
     if (name->length() != 0 && name->Get(0) == '$') {
       const char* kDelegateNames[] = {"memories", "locals", "tables",
                                       "functions", "globals"};
       for (auto delegate_name : kDelegateNames) {
-        Handle<JSAny> delegate;
+        DirectHandle<JSAny> delegate;
         ASSIGN_RETURN_ON_EXCEPTION(isolate, delegate,
                                    Cast<JSAny>(JSObject::GetProperty(
                                        isolate, receiver, delegate_name)));
@@ -608,7 +610,7 @@ class ContextProxyPrototype {
     auto name_string = Cast<String>(Utils::OpenHandle(*name));
     auto isolate = reinterpret_cast<Isolate*>(info.GetIsolate());
     auto receiver = Cast<JSObject>(Utils::OpenHandle(*info.This()));
-    Handle<Object> value;
+    DirectHandle<Object> value;
     if (GetNamedProperty(isolate, receiver, name_string).ToHandle(&value)) {
       info.GetReturnValue().Set(Utils::ToLocal(value));
       return v8::Intercepted::kYes;
@@ -640,7 +642,7 @@ class ContextProxy {
     auto functions =
         GetOrCreateInstanceProxy<FunctionsProxy>(isolate, instance);
     JSObject::AddProperty(isolate, object, "functions", functions, FROZEN);
-    Handle<JSObject> prototype = ContextProxyPrototype::Create(isolate);
+    DirectHandle<JSObject> prototype = ContextProxyPrototype::Create(isolate);
     JSObject::SetPrototype(isolate, object, prototype, false, kDontThrow)
         .Check();
     return object;
@@ -686,7 +688,7 @@ class DebugWasmScopeIterator final : public debug::ScopeIterator {
     switch (type_) {
       case debug::ScopeIterator::ScopeTypeModule: {
         Handle<WasmInstanceObject> instance{frame_->wasm_instance(), isolate};
-        Handle<JSObject> object =
+        DirectHandle<JSObject> object =
             isolate->factory()->NewSlowJSObjectWithNullProto();
         JSObject::AddProperty(isolate, object, "instance", instance, FROZEN);
         DirectHandle<JSObject> module_object(instance->module_object(),
@@ -865,7 +867,7 @@ Handle<String> GetRefTypeName(Isolate* isolate, wasm::ValueType type,
 // providing user-defined type names if available, otherwise falls back
 // to numbers for indexed types.
 Handle<String> GetRefTypeName(Isolate* isolate, wasm::ValueType type,
-                              Handle<WasmModuleObject> module_object) {
+                              DirectHandle<WasmModuleObject> module_object) {
   if (!module_object.is_null()) {
     return GetRefTypeName(isolate, type, module_object->native_module());
   }
@@ -942,7 +944,7 @@ struct StructProxy : NamedDebugProxy<StructProxy, kStructProxy, FixedArray> {
                             uint32_t index) {
     DirectHandle<WasmStruct> obj(Cast<WasmStruct>(data->get(kObjectIndex)),
                                  isolate);
-    Handle<WasmModuleObject> module(
+    DirectHandle<WasmModuleObject> module(
         Cast<WasmModuleObject>(data->get(kModuleIndex)), isolate);
     return WasmValueObject::New(isolate, obj->GetFieldValue(index), module);
   }
@@ -976,7 +978,8 @@ struct ArrayProxy : IndexedDebugProxy<ArrayProxy, kArrayProxy, FixedArray> {
     Handle<JSObject> proxy = IndexedDebugProxy::Create(
         isolate, data, false /* leave map extensible */);
     uint32_t length = value->length();
-    Handle<Object> length_obj = isolate->factory()->NewNumberFromUint(length);
+    DirectHandle<Object> length_obj =
+        isolate->factory()->NewNumberFromUint(length);
     Object::SetProperty(isolate, proxy, isolate->factory()->length_string(),
                         length_obj, StoreOrigin::kNamed,
                         Just(ShouldThrow::kThrowOnError))
@@ -1000,7 +1003,7 @@ struct ArrayProxy : IndexedDebugProxy<ArrayProxy, kArrayProxy, FixedArray> {
                             uint32_t index) {
     DirectHandle<WasmArray> array(Cast<WasmArray>(data->get(kObjectIndex)),
                                   isolate);
-    Handle<WasmModuleObject> module(
+    DirectHandle<WasmModuleObject> module(
         Cast<WasmModuleObject>(data->get(kModuleIndex)), isolate);
     return WasmValueObject::New(isolate, array->GetElement(index), module);
   }
@@ -1009,7 +1012,7 @@ struct ArrayProxy : IndexedDebugProxy<ArrayProxy, kArrayProxy, FixedArray> {
 // static
 Handle<WasmValueObject> WasmValueObject::New(
     Isolate* isolate, const wasm::WasmValue& value,
-    Handle<WasmModuleObject> module_object) {
+    DirectHandle<WasmModuleObject> module_object) {
   DirectHandle<String> t;
   DirectHandle<Object> v;
   switch (value.type().kind()) {
@@ -1061,7 +1064,7 @@ Handle<WasmValueObject> WasmValueObject::New(
     }
     case wasm::kRefNull:
     case wasm::kRef: {
-      Handle<Object> ref = value.to_ref();
+      DirectHandle<Object> ref = value.to_ref();
       if (value.type().heap_type().representation() == wasm::HeapType::kExn) {
         t = isolate->factory()->InternalizeString(
             base::StaticCharVector("exnref"));
@@ -1098,10 +1101,10 @@ Handle<WasmValueObject> WasmValueObject::New(
         // available.
         if (module_object.is_null() &&
             IsWasmTrustedInstanceData(internal_fct->implicit_arg())) {
-          module_object =
-              handle(Cast<WasmTrustedInstanceData>(internal_fct->implicit_arg())
-                         ->module_object(),
-                     isolate);
+          module_object = direct_handle(
+              Cast<WasmTrustedInstanceData>(internal_fct->implicit_arg())
+                  ->module_object(),
+              isolate);
         }
         t = GetRefTypeName(isolate, value.type(), module_object);
       } else if (IsWasmNull(*ref)) {
@@ -1168,7 +1171,7 @@ Handle<ArrayList> AddWasmInstanceObjectInternalProperties(
   result = ArrayList::Add(
       isolate, result,
       isolate->factory()->NewStringFromAsciiChecked("[[Module]]"),
-      handle(instance->module_object(), isolate));
+      direct_handle(instance->module_object(), isolate));
 
   if (FunctionsProxy::Count(isolate, instance) != 0) {
     result = ArrayList::Add(
@@ -1222,19 +1225,21 @@ Handle<ArrayList> AddWasmTableObjectInternalProperties(
   DirectHandle<FixedArray> entries = isolate->factory()->NewFixedArray(length);
   for (int i = 0; i < length; ++i) {
     Handle<Object> entry = WasmTableObject::Get(isolate, table, i);
-    Handle<WasmModuleObject> module;
+    DirectHandle<WasmModuleObject> module;
+    const wasm::WasmModule* mod = nullptr;
     if (table->has_trusted_data()) {
-      module = Handle<WasmModuleObject>(
+      module = DirectHandle<WasmModuleObject>(
           table->trusted_data(isolate)->module_object(), isolate);
+      mod = table->trusted_data(isolate)->module();
     }
-    wasm::WasmValue wasm_value(entry, table->type(),
-                               !module.is_null() ? module->module() : nullptr);
+    wasm::WasmValue wasm_value(entry, table->type(mod), mod);
     DirectHandle<Object> debug_value =
         WasmValueObject::New(isolate, wasm_value, module);
     entries->set(i, *debug_value);
   }
-  Handle<JSArray> final_entries = isolate->factory()->NewJSArrayWithElements(
-      entries, i::PACKED_ELEMENTS, length);
+  DirectHandle<JSArray> final_entries =
+      isolate->factory()->NewJSArrayWithElements(entries, i::PACKED_ELEMENTS,
+                                                 length);
   JSObject::SetPrototype(isolate, final_entries,
                          isolate->factory()->null_value(), false, kDontThrow)
       .Check();

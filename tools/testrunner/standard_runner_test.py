@@ -256,6 +256,7 @@ class StandardRunnerTest(TestRunnerTest):
     result.stdout_includes('>>> Statusfile variables:')
     result.stdout_includes(
         "DEBUG_defined=False, arch=ia32, asan=True, byteorder=little, "
+        "cet_shadow_stack=False, "
         "cfi=True, code_comments=False, component_build=False, "
         "dcheck_always_on=True, debug_code=False, debugging_features=False, "
         "deopt_fuzzer=False, device_type=None, "
@@ -424,6 +425,32 @@ class StandardRunnerTest(TestRunnerTest):
     # We use a failing test so that the command is printed and we can verify
     # that the right random seed was passed.
     result.stdout_includes('--random-seed=123')
+    result.has_returncode(1)
+
+  def testRandomSeedStressWithNumfuzz(self):
+    """Test using random-seed-stress feature with numfuzz flavor as used by
+    flake bisect for flakes on numfuzz.
+    """
+    result = self.run_tests(
+        '--progress=verbose',
+        '--framework=num_fuzzer',
+        '--variants=default',
+        '--random-seed-stress-count=2',
+        'sweet/bananas',
+        'sweet/apples',
+        infra_staging=False,
+        baseroot='testroot7'
+    )
+
+    # The bananas test is expected to pass when --fuzzing, one of the numfuzz
+    # default flags is present. The apples test is expected to fail with this
+    # flag.
+    result.stdout_includes('sweet/bananas default: PASS')
+    result.stdout_includes('sweet/apples default: FAIL')
+
+    # We get everything twice due to the stress count above set to 2.
+    result.stdout_includes('2 tests failed')
+    result.stdout_includes('4 tests ran')
     result.has_returncode(1)
 
   def testSpecificVariants(self):

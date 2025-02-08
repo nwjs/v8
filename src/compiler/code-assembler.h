@@ -75,6 +75,7 @@ class PromiseFulfillReactionJobTask;
 class PromiseReaction;
 class PromiseReactionJobTask;
 class PromiseRejectReactionJobTask;
+class TurbofanCompilationJob;
 class Zone;
 #define MAKE_FORWARD_DECLARATION(Name) class Name;
 TORQUE_DEFINED_CLASS_LIST(MAKE_FORWARD_DECLARATION)
@@ -318,73 +319,74 @@ class CodeAssemblerParameterizedLabel;
 
 TNode<Float64T> Float64Add(TNode<Float64T> a, TNode<Float64T> b);
 
-#define CODE_ASSEMBLER_UNARY_OP_LIST(V)                        \
-  V(Float32Abs, Float32T, Float32T)                            \
-  V(Float64Abs, Float64T, Float64T)                            \
-  V(Float64Acos, Float64T, Float64T)                           \
-  V(Float64Acosh, Float64T, Float64T)                          \
-  V(Float64Asin, Float64T, Float64T)                           \
-  V(Float64Asinh, Float64T, Float64T)                          \
-  V(Float64Atan, Float64T, Float64T)                           \
-  V(Float64Atanh, Float64T, Float64T)                          \
-  V(Float64Cos, Float64T, Float64T)                            \
-  V(Float64Cosh, Float64T, Float64T)                           \
-  V(Float64Exp, Float64T, Float64T)                            \
-  V(Float64Expm1, Float64T, Float64T)                          \
-  V(Float64Log, Float64T, Float64T)                            \
-  V(Float64Log1p, Float64T, Float64T)                          \
-  V(Float64Log2, Float64T, Float64T)                           \
-  V(Float64Log10, Float64T, Float64T)                          \
-  V(Float64Cbrt, Float64T, Float64T)                           \
-  V(Float64Neg, Float64T, Float64T)                            \
-  V(Float64Sin, Float64T, Float64T)                            \
-  V(Float64Sinh, Float64T, Float64T)                           \
-  V(Float64Sqrt, Float64T, Float64T)                           \
-  V(Float64Tan, Float64T, Float64T)                            \
-  V(Float64Tanh, Float64T, Float64T)                           \
-  V(Float64ExtractLowWord32, Uint32T, Float64T)                \
-  V(Float64ExtractHighWord32, Uint32T, Float64T)               \
-  V(BitcastTaggedToWord, IntPtrT, Object)                      \
-  V(BitcastTaggedToWordForTagAndSmiBits, IntPtrT, AnyTaggedT)  \
-  V(BitcastMaybeObjectToWord, IntPtrT, MaybeObject)            \
-  V(BitcastWordToTagged, Object, WordT)                        \
-  V(BitcastWordToTaggedSigned, Smi, WordT)                     \
-  V(TruncateFloat64ToFloat32, Float32T, Float64T)              \
-  V(TruncateFloat64ToWord32, Uint32T, Float64T)                \
-  V(TruncateInt64ToInt32, Int32T, Int64T)                      \
-  V(ChangeFloat32ToFloat64, Float64T, Float32T)                \
-  V(ChangeFloat64ToUint32, Uint32T, Float64T)                  \
-  V(ChangeFloat64ToUint64, Uint64T, Float64T)                  \
-  V(ChangeInt32ToFloat64, Float64T, Int32T)                    \
-  V(ChangeInt32ToInt64, Int64T, Int32T)                        \
-  V(ChangeUint32ToFloat64, Float64T, Word32T)                  \
-  V(ChangeUint32ToUint64, Uint64T, Word32T)                    \
-  V(BitcastInt32ToFloat32, Float32T, Word32T)                  \
-  V(BitcastFloat32ToInt32, Uint32T, Float32T)                  \
-  V(BitcastFloat64ToInt64, Int64T, Float64T)                   \
-  V(BitcastInt64ToFloat64, Float64T, Int64T)                   \
-  V(RoundFloat64ToInt32, Int32T, Float64T)                     \
-  V(RoundInt32ToFloat32, Float32T, Int32T)                     \
-  V(Float64SilenceNaN, Float64T, Float64T)                     \
-  V(Float64RoundDown, Float64T, Float64T)                      \
-  V(Float64RoundUp, Float64T, Float64T)                        \
-  V(Float64RoundTiesEven, Float64T, Float64T)                  \
-  V(Float64RoundTruncate, Float64T, Float64T)                  \
-  V(Word32Clz, Int32T, Word32T)                                \
-  V(Word64Clz, Int64T, Word64T)                                \
-  V(Word32Ctz, Int32T, Word32T)                                \
-  V(Word64Ctz, Int64T, Word64T)                                \
-  V(Word32Popcnt, Int32T, Word32T)                             \
-  V(Word64Popcnt, Int64T, Word64T)                             \
-  V(Word32BitwiseNot, Word32T, Word32T)                        \
-  V(WordNot, WordT, WordT)                                     \
-  V(Word64Not, Word64T, Word64T)                               \
-  V(I8x16BitMask, Int32T, I8x16T)                              \
-  V(I8x16Splat, I8x16T, Int32T)                                \
-  V(Int32AbsWithOverflow, PAIR_TYPE(Int32T, BoolT), Int32T)    \
-  V(Int64AbsWithOverflow, PAIR_TYPE(Int64T, BoolT), Int64T)    \
-  V(IntPtrAbsWithOverflow, PAIR_TYPE(IntPtrT, BoolT), IntPtrT) \
-  V(Word32BinaryNot, BoolT, Word32T)                           \
+#define CODE_ASSEMBLER_UNARY_OP_LIST(V)                         \
+  V(Float32Abs, Float32T, Float32T)                             \
+  V(Float64Abs, Float64T, Float64T)                             \
+  V(Float64Acos, Float64T, Float64T)                            \
+  V(Float64Acosh, Float64T, Float64T)                           \
+  V(Float64Asin, Float64T, Float64T)                            \
+  V(Float64Asinh, Float64T, Float64T)                           \
+  V(Float64Atan, Float64T, Float64T)                            \
+  V(Float64Atanh, Float64T, Float64T)                           \
+  V(Float64Cos, Float64T, Float64T)                             \
+  V(Float64Cosh, Float64T, Float64T)                            \
+  V(Float64Exp, Float64T, Float64T)                             \
+  V(Float64Expm1, Float64T, Float64T)                           \
+  V(Float64Log, Float64T, Float64T)                             \
+  V(Float64Log1p, Float64T, Float64T)                           \
+  V(Float64Log2, Float64T, Float64T)                            \
+  V(Float64Log10, Float64T, Float64T)                           \
+  V(Float64Cbrt, Float64T, Float64T)                            \
+  V(Float64Neg, Float64T, Float64T)                             \
+  V(Float64Sin, Float64T, Float64T)                             \
+  V(Float64Sinh, Float64T, Float64T)                            \
+  V(Float64Sqrt, Float64T, Float64T)                            \
+  V(Float64Tan, Float64T, Float64T)                             \
+  V(Float64Tanh, Float64T, Float64T)                            \
+  V(Float64ExtractLowWord32, Uint32T, Float64T)                 \
+  V(Float64ExtractHighWord32, Uint32T, Float64T)                \
+  V(BitcastTaggedToWord, IntPtrT, Object)                       \
+  V(BitcastTaggedToWordForTagAndSmiBits, IntPtrT, AnyTaggedT)   \
+  V(BitcastMaybeObjectToWord, IntPtrT, MaybeObject)             \
+  V(BitcastWordToTagged, Object, WordT)                         \
+  V(BitcastWordToTaggedSigned, Smi, WordT)                      \
+  V(TruncateFloat64ToFloat32, Float32T, Float64T)               \
+  V(TruncateFloat64ToFloat16RawBits, Float16RawBitsT, Float64T) \
+  V(TruncateFloat64ToWord32, Uint32T, Float64T)                 \
+  V(TruncateInt64ToInt32, Int32T, Int64T)                       \
+  V(ChangeFloat32ToFloat64, Float64T, Float32T)                 \
+  V(ChangeFloat64ToUint32, Uint32T, Float64T)                   \
+  V(ChangeFloat64ToUint64, Uint64T, Float64T)                   \
+  V(ChangeInt32ToFloat64, Float64T, Int32T)                     \
+  V(ChangeInt32ToInt64, Int64T, Int32T)                         \
+  V(ChangeUint32ToFloat64, Float64T, Word32T)                   \
+  V(ChangeUint32ToUint64, Uint64T, Word32T)                     \
+  V(BitcastInt32ToFloat32, Float32T, Word32T)                   \
+  V(BitcastFloat32ToInt32, Uint32T, Float32T)                   \
+  V(BitcastFloat64ToInt64, Int64T, Float64T)                    \
+  V(BitcastInt64ToFloat64, Float64T, Int64T)                    \
+  V(RoundFloat64ToInt32, Int32T, Float64T)                      \
+  V(RoundInt32ToFloat32, Float32T, Int32T)                      \
+  V(Float64SilenceNaN, Float64T, Float64T)                      \
+  V(Float64RoundDown, Float64T, Float64T)                       \
+  V(Float64RoundUp, Float64T, Float64T)                         \
+  V(Float64RoundTiesEven, Float64T, Float64T)                   \
+  V(Float64RoundTruncate, Float64T, Float64T)                   \
+  V(Word32Clz, Int32T, Word32T)                                 \
+  V(Word64Clz, Int64T, Word64T)                                 \
+  V(Word32Ctz, Int32T, Word32T)                                 \
+  V(Word64Ctz, Int64T, Word64T)                                 \
+  V(Word32Popcnt, Int32T, Word32T)                              \
+  V(Word64Popcnt, Int64T, Word64T)                              \
+  V(Word32BitwiseNot, Word32T, Word32T)                         \
+  V(WordNot, WordT, WordT)                                      \
+  V(Word64Not, Word64T, Word64T)                                \
+  V(I8x16BitMask, Int32T, I8x16T)                               \
+  V(I8x16Splat, I8x16T, Int32T)                                 \
+  V(Int32AbsWithOverflow, PAIR_TYPE(Int32T, BoolT), Int32T)     \
+  V(Int64AbsWithOverflow, PAIR_TYPE(Int64T, BoolT), Int64T)     \
+  V(IntPtrAbsWithOverflow, PAIR_TYPE(IntPtrT, BoolT), IntPtrT)  \
+  V(Word32BinaryNot, BoolT, Word32T)                            \
   V(StackPointerGreaterThan, BoolT, WordT)
 
 // A "public" interface used by components outside of compiler directory to
@@ -415,15 +417,17 @@ class V8_EXPORT_PRIVATE CodeAssembler {
   CodeAssembler(const CodeAssembler&) = delete;
   CodeAssembler& operator=(const CodeAssembler&) = delete;
 
-  static Handle<Code> GenerateCode(CodeAssemblerState* state,
-                                   const AssemblerOptions& options,
-                                   const ProfileDataFromFile* profile_data);
+  static void CompileCode(Isolate* isolate,
+                          std::unique_ptr<TurbofanCompilationJob> job,
+                          int& builtins_installed_count);
+
   bool Is64() const;
   bool Is32() const;
   bool IsFloat64RoundUpSupported() const;
   bool IsFloat64RoundDownSupported() const;
   bool IsFloat64RoundTiesEvenSupported() const;
   bool IsFloat64RoundTruncateSupported() const;
+  bool IsTruncateFloat64ToFloat16RawBitsSupported() const;
   bool IsInt32AbsWithOverflowSupported() const;
   bool IsInt64AbsWithOverflowSupported() const;
   bool IsIntPtrAbsWithOverflowSupported() const;
@@ -470,7 +474,7 @@ class V8_EXPORT_PRIVATE CodeAssembler {
               !std::is_convertible<TNode<PreviousType>, TNode<A>>::value,
           "Unnecessary CAST: types are convertible.");
 #ifdef DEBUG
-      if (v8_flags.debug_code) {
+      if (v8_flags.slow_debug_code) {
         TNode<ExternalReference> function = code_assembler_->ExternalConstant(
             ExternalReference::check_object_type());
         code_assembler_->CallCFunction(
@@ -572,12 +576,15 @@ class V8_EXPORT_PRIVATE CodeAssembler {
   TNode<Number> NumberConstant(double value);
   TNode<Smi> SmiConstant(Tagged<Smi> value);
   TNode<Smi> SmiConstant(int value);
-  template <typename E,
-            typename = typename std::enable_if<std::is_enum<E>::value>::type>
-  TNode<Smi> SmiConstant(E value) {
+  template <typename E>
+  TNode<Smi> SmiConstant(E value)
+    requires std::is_enum<E>::value
+  {
     static_assert(sizeof(E) <= sizeof(int));
     return SmiConstant(static_cast<int>(value));
   }
+
+  void CanonicalizeEmbeddedBuiltinsConstantIfNeeded(Handle<HeapObject> object);
   TNode<HeapObject> UntypedHeapConstantNoHole(Handle<HeapObject> object);
   TNode<HeapObject> UntypedHeapConstantMaybeHole(Handle<HeapObject> object);
   TNode<HeapObject> UntypedHeapConstantHole(Handle<HeapObject> object);
@@ -752,10 +759,13 @@ class V8_EXPORT_PRIVATE CodeAssembler {
   void Bind(Label* label, AssemblerDebugInfo debug_info);
 #endif  // DEBUG
   void Goto(Label* label);
-  void GotoIf(TNode<IntegralT> condition, Label* true_label);
-  void GotoIfNot(TNode<IntegralT> condition, Label* false_label);
-  void Branch(TNode<IntegralT> condition, Label* true_label,
-              Label* false_label);
+
+  void GotoIf(TNode<IntegralT> condition, Label* true_label,
+              GotoHint goto_hint = GotoHint::kNone);
+  void GotoIfNot(TNode<IntegralT> condition, Label* false_label,
+                 GotoHint goto_hint = GotoHint::kNone);
+  void Branch(TNode<IntegralT> condition, Label* true_label, Label* false_label,
+              BranchHint branch_hint = BranchHint::kNone);
 
   template <class T>
   TNode<T> Uninitialized() {
@@ -1392,7 +1402,7 @@ class V8_EXPORT_PRIVATE CodeAssembler {
     int argc = JSParameterCount(static_cast<int>(sizeof...(args)));
     TNode<Int32T> arity = Int32Constant(argc);
     TNode<JSDispatchHandleT> dispatch_handle = UncheckedCast<JSDispatchHandleT>(
-        Uint32Constant(kInvalidDispatchHandle));
+        Uint32Constant(kInvalidDispatchHandle.value()));
     TNode<Code> target = HeapConstantNoHole(callable.code());
     return CAST(CallJSStubImpl(callable.descriptor(), target, context, function,
                                new_target, arity, dispatch_handle,
@@ -1408,7 +1418,7 @@ class V8_EXPORT_PRIVATE CodeAssembler {
     DCHECK(Builtins::HasJSLinkage(id));
     Callable callable = Builtins::CallableFor(isolate(), id);
     TNode<Code> target = HeapConstantNoHole(callable.code());
-#ifdef V8_ENABLE_LEAPTIERING
+#ifdef V8_JS_LINKAGE_INCLUDES_DISPATCH_HANDLE
     TailCallStub(callable.descriptor(), target, context, function, new_target,
                  arg_count, dispatch_handle);
 #else
@@ -1813,11 +1823,6 @@ class V8_EXPORT_PRIVATE CodeAssemblerState {
                      const CallInterfaceDescriptor& descriptor, CodeKind kind,
                      const char* name, Builtin builtin = Builtin::kNoBuiltinId);
 
-  // Create with JSCall linkage.
-  CodeAssemblerState(Isolate* isolate, Zone* zone, int parameter_count,
-                     CodeKind kind, const char* name,
-                     Builtin builtin = Builtin::kNoBuiltinId);
-
   ~CodeAssemblerState();
 
   CodeAssemblerState(const CodeAssemblerState&) = delete;
@@ -1838,6 +1843,7 @@ class V8_EXPORT_PRIVATE CodeAssemblerState {
   friend class CodeAssemblerVariable;
   friend class CodeAssemblerTester;
   friend class CodeAssemblerParameterizedLabelBase;
+  friend class CodeAssemblerCompilationJob;
   friend class ScopedExceptionHandler;
 
   CodeAssemblerState(Isolate* isolate, Zone* zone,

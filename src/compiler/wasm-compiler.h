@@ -67,10 +67,6 @@ enum CallOrigin { kCalledFromWasm, kCalledFromJS };
 
 namespace compiler {
 
-wasm::WasmCompilationResult ExecuteTurbofanWasmCompilation(
-    wasm::CompilationEnv*, WasmCompilationData& compilation_data, Counters*,
-    wasm::WasmDetectedFeatures* detected);
-
 // Compiles an import call wrapper, which allows Wasm to call imports.
 V8_EXPORT_PRIVATE wasm::WasmCompilationResult CompileWasmImportCallWrapper(
     wasm::ImportCallKind, const wasm::CanonicalSig*, bool source_positions,
@@ -83,10 +79,9 @@ wasm::WasmCompilationResult CompileWasmCapiCallWrapper(
 bool IsFastCallSupportedSignature(const v8::CFunctionInfo*);
 // Compiles a wrapper to call a Fast API function from Wasm.
 wasm::WasmCompilationResult CompileWasmJSFastCallWrapper(
-    const wasm::CanonicalSig*, Handle<JSReceiver> callable);
+    const wasm::CanonicalSig*, DirectHandle<JSReceiver> callable);
 
-// Returns an TurbofanCompilationJob or TurboshaftCompilationJob object
-// (depending on the --turboshaft-wasm-wrappers flag) for a JS to Wasm wrapper.
+// Returns a TurboshaftCompilationJob object for a JS to Wasm wrapper.
 std::unique_ptr<OptimizedCompilationJob> NewJSToWasmCompilationJob(
     Isolate* isolate, const wasm::CanonicalSig* sig);
 
@@ -670,11 +665,12 @@ class WasmGraphBuilder {
   template <typename T>
   Node* BuildWasmCall(const Signature<T>* sig, base::Vector<Node*> args,
                       base::Vector<Node*> rets, wasm::WasmCodePosition position,
-                      Node* implicit_first_arg, Node* frame_state = nullptr);
+                      Node* implicit_first_arg, bool indirect,
+                      Node* frame_state = nullptr);
   Node* BuildWasmReturnCall(const wasm::FunctionSig* sig,
                             base::Vector<Node*> args,
                             wasm::WasmCodePosition position,
-                            Node* implicit_first_arg);
+                            Node* implicit_first_arg, bool indirect = false);
   Node* BuildImportCall(const wasm::FunctionSig* sig, base::Vector<Node*> args,
                         base::Vector<Node*> rets,
                         wasm::WasmCodePosition position, int func_index,

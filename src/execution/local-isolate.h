@@ -63,6 +63,8 @@ class V8_EXPORT_PRIVATE LocalIsolate final : private HiddenLocalFactory {
   inline Address cage_base() const;
   inline Address code_cage_base() const;
   inline ReadOnlyHeap* read_only_heap() const;
+  inline RootsTable& roots_table();
+  inline const RootsTable& roots_table() const;
   inline Tagged<Object> root(RootIndex index) const;
   inline Handle<Object> root_handle(RootIndex index) const;
 
@@ -132,6 +134,12 @@ class V8_EXPORT_PRIVATE LocalIsolate final : private HiddenLocalFactory {
     if (!bigint_processor_) InitializeBigIntProcessor();
     return bigint_processor_;
   }
+
+#ifdef V8_ENABLE_LEAPTIERING
+  JSDispatchTable::Space* GetJSDispatchTableSpaceFor(Address owning_slot) {
+    return isolate_->GetJSDispatchTableSpaceFor(owning_slot);
+  }
+#endif  // V8_ENABLE_LEAPTIERING
 
   // AsIsolate is only allowed on the main-thread.
   Isolate* AsIsolate() {

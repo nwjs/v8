@@ -87,7 +87,7 @@ Handle<Code> FactoryBase<Impl>::NewCode(const NewCodeOptions& options) {
   DisallowGarbageCollection no_gc;
   code->init_self_indirect_pointer(isolate());
   code->initialize_flags(options.kind, options.is_context_specialized,
-                         options.is_turbofanned, options.stack_slots);
+                         options.is_turbofanned);
   code->set_builtin_id(options.builtin);
   code->set_instruction_size(options.instruction_size);
   code->set_metadata_size(options.metadata_size);
@@ -100,6 +100,9 @@ Handle<Code> FactoryBase<Impl>::NewCode(const NewCodeOptions& options) {
       options.builtin_jump_table_info_offset);
   code->set_unwinding_info_offset(options.unwinding_info_offset);
   code->set_parameter_count(options.parameter_count);
+#ifdef V8_ENABLE_LEAPTIERING
+  code->set_js_dispatch_handle(kNullJSDispatchHandle);
+#endif  // V8_ENABLE_LEAPTIERING
 
   // Set bytecode/interpreter data or deoptimization data.
   if (CodeKindUsesBytecodeOrInterpreterData(options.kind)) {
@@ -200,8 +203,7 @@ Handle<FixedArray> FactoryBase<Impl>::NewFixedArrayWithMap(
   // Zero-length case must be handled outside, where the knowledge about
   // the map is.
   DCHECK_LT(0, length);
-  return NewFixedArrayWithFiller(
-      map, length, read_only_roots().undefined_value_handle(), allocation);
+  return NewFixedArrayWithFiller(map, length, undefined_value(), allocation);
 }
 
 template <typename Impl>
@@ -209,9 +211,8 @@ Handle<FixedArray> FactoryBase<Impl>::NewFixedArrayWithHoles(
     int length, AllocationType allocation) {
   DCHECK_LE(0, length);
   if (length == 0) return impl()->empty_fixed_array();
-  return NewFixedArrayWithFiller(
-      read_only_roots().fixed_array_map_handle(), length,
-      read_only_roots().the_hole_value_handle(), allocation);
+  return NewFixedArrayWithFiller(fixed_array_map(), length, the_hole_value(),
+                                 allocation);
 }
 
 template <typename Impl>
@@ -285,6 +286,15 @@ Handle<TrustedWeakFixedArray> FactoryBase<Impl>::NewTrustedWeakFixedArray(
   // RO trusted space.
   if (length == 0) return empty_trusted_weak_fixed_array();
   return TrustedWeakFixedArray::New(isolate(), length);
+}
+
+template <typename Impl>
+Handle<ProtectedWeakFixedArray> FactoryBase<Impl>::NewProtectedWeakFixedArray(
+    int length) {
+  // TODO(saelo): Move this check to ProtectedWeakFixedArray::New once we have
+  // a RO trusted space.
+  if (length == 0) return empty_protected_weak_fixed_array();
+  return ProtectedWeakFixedArray::New(isolate(), length);
 }
 
 template <typename Impl>
@@ -987,9 +997,9 @@ MaybeHandle<String> FactoryBase<Impl>::NewStringFromOneByte(
 namespace {
 
 template <typename Impl>
-V8_INLINE Handle<String> CharToString(FactoryBase<Impl>* factory,
-                                      const char* string,
-                                      NumberCacheMode mode) {
+V8_INLINE Handle<String> StringViewToString(FactoryBase<Impl>* factory,
+                                            std::string_view string,
+                                            NumberCacheMode mode) {
   // We tenure the allocated string since it is referenced from the
   // number-string cache which lives in the old space.
   AllocationType type = mode == NumberCacheMode::kIgnore
@@ -1035,8 +1045,8 @@ Handle<String> FactoryBase<Impl>::HeapNumberToString(
   } else {
     char arr[kNumberToStringBufferSize];
     base::Vector<char> buffer(arr, arraysize(arr));
-    const char* string = DoubleToCString(value, buffer);
-    result = CharToString(this, string, mode);
+    std::string_view string = DoubleToStringView(value, buffer);
+    result = StringViewToString(this, string, mode);
   }
   if (mode != NumberCacheMode::kIgnore) {
     impl()->NumberToStringCacheSet(number, hash, result);
@@ -1062,11 +1072,12 @@ inline Handle<String> FactoryBase<Impl>::SmiToString(Tagged<Smi> number,
   } else {
     char arr[kNumberToStringBufferSize];
     base::Vector<char> buffer(arr, arraysize(arr));
-    const char* string = IntToCString(number.value(), buffer);
-    result = CharToString(this, string, mode);
+    std::string_view string = IntToStringView(number.value(), buffer);
+    result = StringViewToString(this, string, mode);
   }
   if (mode != NumberCacheMode::kIgnore) {
-    impl()->NumberToStringCacheSet(handle(number, isolate()), hash, result);
+    impl()->NumberToStringCacheSet(direct_handle(number, isolate()), hash,
+                                   result);
   }
 
   // Compute the hash here (rather than letting the caller take care of it) so
@@ -1119,8 +1130,7 @@ Handle<ScopeInfo> FactoryBase<Impl>::NewScopeInfo(int length,
 template <typename Impl>
 Handle<SourceTextModuleInfo> FactoryBase<Impl>::NewSourceTextModuleInfo() {
   return Cast<SourceTextModuleInfo>(NewFixedArrayWithMap(
-      read_only_roots().module_info_map_handle(), SourceTextModuleInfo::kLength,
-      AllocationType::kOld));
+      module_info_map(), SourceTextModuleInfo::kLength, AllocationType::kOld));
 }
 
 template <typename Impl>
@@ -1230,7 +1240,9 @@ Tagged<HeapObject> FactoryBase<Impl>::AllocateRawArray(
   if ((size >
        isolate()->heap()->AsHeap()->MaxRegularHeapObjectSize(allocation)) &&
       v8_flags.use_marking_progress_bar) {
-    LargePageMetadata::FromHeapObject(result)->ProgressBar().Enable();
+    LargePageMetadata::FromHeapObject(result)
+        ->marking_progress_tracker()
+        .Enable(size);
   }
   return result;
 }
@@ -1292,7 +1304,7 @@ FactoryBase<Impl>::NewSwissNameDictionaryWithCapacity(
         read_only_roots().address_at(RootIndex::kEmptySwissPropertyDictionary),
         kNullAddress);
 
-    return read_only_roots().empty_swiss_property_dictionary_handle();
+    return empty_swiss_property_dictionary();
   }
 
   if (capacity < 0 || capacity > SwissNameDictionary::MaxCapacity()) {
@@ -1340,21 +1352,19 @@ MaybeDirectHandle<Map> FactoryBase<Impl>::GetInPlaceInternalizedStringMap(
   switch (instance_type) {
     case SEQ_TWO_BYTE_STRING_TYPE:
     case SHARED_SEQ_TWO_BYTE_STRING_TYPE:
-      map = read_only_roots().internalized_two_byte_string_map_handle();
+      map = internalized_two_byte_string_map();
       break;
     case SEQ_ONE_BYTE_STRING_TYPE:
     case SHARED_SEQ_ONE_BYTE_STRING_TYPE:
-      map = read_only_roots().internalized_one_byte_string_map_handle();
+      map = internalized_one_byte_string_map();
       break;
     case SHARED_EXTERNAL_TWO_BYTE_STRING_TYPE:
     case EXTERNAL_TWO_BYTE_STRING_TYPE:
-      map =
-          read_only_roots().external_internalized_two_byte_string_map_handle();
+      map = external_internalized_two_byte_string_map();
       break;
     case SHARED_EXTERNAL_ONE_BYTE_STRING_TYPE:
     case EXTERNAL_ONE_BYTE_STRING_TYPE:
-      map =
-          read_only_roots().external_internalized_one_byte_string_map_handle();
+      map = external_internalized_one_byte_string_map();
       break;
     default:
       break;

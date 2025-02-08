@@ -183,21 +183,22 @@ V8_OBJECT class BigInt : public BigIntBase {
   // Implementation of the Spec methods, see:
   // https://tc39.github.io/proposal-bigint/#sec-numeric-types
   // Sections 1.1.1 through 1.1.19.
-  static Handle<BigInt> UnaryMinus(Isolate* isolate, Handle<BigInt> x);
+  static Handle<BigInt> UnaryMinus(Isolate* isolate, DirectHandle<BigInt> x);
   static MaybeHandle<BigInt> BitwiseNot(Isolate* isolate,
                                         DirectHandle<BigInt> x);
-  static MaybeHandle<BigInt> Exponentiate(Isolate* isolate, Handle<BigInt> base,
+  static MaybeHandle<BigInt> Exponentiate(Isolate* isolate,
+                                          DirectHandle<BigInt> base,
                                           DirectHandle<BigInt> exponent);
-  static MaybeHandle<BigInt> Multiply(Isolate* isolate, Handle<BigInt> x,
-                                      Handle<BigInt> y);
-  static MaybeHandle<BigInt> Divide(Isolate* isolate, Handle<BigInt> x,
+  static MaybeHandle<BigInt> Multiply(Isolate* isolate, DirectHandle<BigInt> x,
+                                      DirectHandle<BigInt> y);
+  static MaybeHandle<BigInt> Divide(Isolate* isolate, DirectHandle<BigInt> x,
                                     DirectHandle<BigInt> y);
-  static MaybeHandle<BigInt> Remainder(Isolate* isolate, Handle<BigInt> x,
+  static MaybeHandle<BigInt> Remainder(Isolate* isolate, DirectHandle<BigInt> x,
                                        DirectHandle<BigInt> y);
-  static MaybeHandle<BigInt> Add(Isolate* isolate, Handle<BigInt> x,
-                                 Handle<BigInt> y);
-  static MaybeHandle<BigInt> Subtract(Isolate* isolate, Handle<BigInt> x,
-                                      Handle<BigInt> y);
+  static MaybeHandle<BigInt> Add(Isolate* isolate, DirectHandle<BigInt> x,
+                                 DirectHandle<BigInt> y);
+  static MaybeHandle<BigInt> Subtract(Isolate* isolate, DirectHandle<BigInt> x,
+                                      DirectHandle<BigInt> y);
   // More convenient version of "bool LessThan(x, y)".
   static ComparisonResult CompareToBigInt(DirectHandle<BigInt> x,
                                           DirectHandle<BigInt> y);
@@ -218,11 +219,11 @@ V8_OBJECT class BigInt : public BigIntBase {
   bool IsNegative() const { return sign(); }
 
   static Maybe<bool> EqualToString(Isolate* isolate, DirectHandle<BigInt> x,
-                                   Handle<String> y);
-  static bool EqualToNumber(DirectHandle<BigInt> x, Handle<Object> y);
+                                   DirectHandle<String> y);
+  static bool EqualToNumber(DirectHandle<BigInt> x, DirectHandle<Object> y);
   static Maybe<ComparisonResult> CompareToString(Isolate* isolate,
                                                  DirectHandle<BigInt> x,
-                                                 Handle<String> y);
+                                                 DirectHandle<String> y);
   static ComparisonResult CompareToNumber(DirectHandle<BigInt> x,
                                           DirectHandle<Object> y);
   // Exposed for tests, do not call directly. Use CompareToNumber() instead.
@@ -268,11 +269,14 @@ V8_OBJECT class BigInt : public BigIntBase {
 
   // ECMAScript's NumberToBigInt
   V8_EXPORT_PRIVATE static MaybeHandle<BigInt> FromNumber(
-      Isolate* isolate, Handle<Object> number);
+      Isolate* isolate, DirectHandle<Object> number);
 
   // ECMAScript's ToBigInt (throws for Number input)
-  V8_EXPORT_PRIVATE static MaybeHandle<BigInt> FromObject(Isolate* isolate,
-                                                          Handle<Object> obj);
+  template <template <typename> typename HandleType>
+    requires(std::is_convertible_v<HandleType<Object>, DirectHandle<Object>>)
+  EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE) static
+      typename HandleType<BigInt>::MaybeType
+      FromObject(Isolate* isolate, HandleType<Object> obj);
 
   class BodyDescriptor;
 

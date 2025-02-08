@@ -252,6 +252,9 @@ MaybeObjectDirectHandle::MaybeObjectDirectHandle(
     DirectHandle<Object> object, HeapObjectReferenceType reference_type)
     : reference_type_(reference_type), handle_(object) {}
 
+MaybeObjectDirectHandle::MaybeObjectDirectHandle(MaybeObjectHandle object)
+    : reference_type_(object.reference_type_), handle_(object.handle_) {}
+
 MaybeObjectDirectHandle MaybeObjectDirectHandle::Weak(
     DirectHandle<Object> object) {
   return MaybeObjectDirectHandle(object, HeapObjectReferenceType::WEAK);
@@ -267,6 +270,16 @@ bool MaybeObjectDirectHandle::is_identical_to(
     const MaybeObjectDirectHandle& other) const {
   DirectHandle<Object> this_handle;
   DirectHandle<Object> other_handle;
+  return reference_type_ == other.reference_type_ &&
+         handle_.ToHandle(&this_handle) ==
+             other.handle_.ToHandle(&other_handle) &&
+         this_handle.is_identical_to(other_handle);
+}
+
+bool MaybeObjectDirectHandle::is_identical_to(
+    const MaybeObjectHandle& other) const {
+  DirectHandle<Object> this_handle;
+  Handle<Object> other_handle;
   return reference_type_ == other.reference_type_ &&
          handle_.ToHandle(&this_handle) ==
              other.handle_.ToHandle(&other_handle) &&

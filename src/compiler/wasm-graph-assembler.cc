@@ -172,6 +172,15 @@ Node* WasmGraphAssembler::LoadImmutable(LoadRepresentation rep, Node* base,
       graph()->NewNode(mcgraph()->machine()->LoadImmutable(rep), base, offset));
 }
 
+Node* WasmGraphAssembler::LoadWasmCodePointer(Node* code_pointer) {
+  Node* table_entry =
+      IntAdd(ExternalConstant(ExternalReference::wasm_code_pointer_table()),
+             IntMul(BuildChangeUint32ToUintPtr(code_pointer),
+                    UintPtrConstant(sizeof(wasm::WasmCodePointerTableEntry))));
+  return AddNode(graph()->NewNode(
+      mcgraph()->machine()->Load(LoadRepresentation::UintPtr()), table_entry));
+}
+
 Node* WasmGraphAssembler::StoreToObject(ObjectAccess access, Node* base,
                                         Node* offset, Node* value) {
   return AddNode(graph()->NewNode(simplified_.StoreToObject(access), base,

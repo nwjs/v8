@@ -164,11 +164,14 @@ void Serializer::SerializeObject(Handle<HeapObject> obj, SlotType slot_type) {
     obj = handle(Cast<ThinString>(*obj)->actual(), isolate());
   } else if (IsCode(*obj, isolate())) {
     Tagged<Code> code = Cast<Code>(*obj);
+    // The only expected Code objects here are baseline code and builtins.
     if (code->kind() == CodeKind::BASELINE) {
       // For now just serialize the BytecodeArray instead of baseline code.
       // TODO(v8:11429,pthier): Handle Baseline code in cases we want to
       // serialize it.
       obj = handle(code->bytecode_or_interpreter_data(), isolate());
+    } else {
+      CHECK(code->is_builtin());
     }
   }
   SerializeObjectImpl(obj, slot_type);
@@ -706,7 +709,7 @@ void Serializer::ObjectSerializer::SerializeExternalStringAsSequentialString() {
   ReadOnlyRoots roots(isolate());
   PtrComprCageBase cage_base(isolate());
   DCHECK(IsExternalString(*object_, cage_base));
-  Handle<ExternalString> string = Cast<ExternalString>(object_);
+  DirectHandle<ExternalString> string = Cast<ExternalString>(object_);
   uint32_t length = string->length();
   Tagged<Map> map;
   int content_size;
@@ -1259,10 +1262,40 @@ void Serializer::ObjectSerializer::VisitProtectedPointer(
   serializer_->SerializeObject(object, SlotType::kAnySlot);
 }
 
+void Serializer::ObjectSerializer::VisitProtectedPointer(
+    Tagged<TrustedObject> host, ProtectedMaybeObjectSlot slot) {
+  Tagged<MaybeObject> maybe_content = slot.load();
+  // Empty slots (Smi::zero()) and Smi slots can be skipped here.
+  if (maybe_content.IsSmi()) return;
+
+  // If necessary, output any raw data preceding this slot.
+  OutputRawData(slot.address());
+
+  if (maybe_content.IsCleared()) {
+    sink_->Put(kClearedWeakReference, "ClearedWeakReference");
+    bytes_processed_so_far_ += kTaggedSize;
+    return;
+  }
+
+  Tagged<HeapObject> content;
+  HeapObjectReferenceType reference_type;
+  if (maybe_content.GetHeapObject(&content, &reference_type)) {
+    if (reference_type == HeapObjectReferenceType::WEAK) {
+      sink_->Put(kWeakPrefix, "WeakReference");
+    }
+    Handle<HeapObject> object = handle(content, isolate());
+    // Currently we cannot see pending objects here, but we may need to support
+    // them in the future. They should already be supported by the deserializer.
+    CHECK(!serializer_->SerializePendingObject(*object));
+    sink_->Put(kProtectedPointerPrefix, "ProtectedPointer");
+    serializer_->SerializeObject(object, SlotType::kAnySlot);
+  }
+}
+
 void Serializer::ObjectSerializer::VisitJSDispatchTableEntry(
     Tagged<HeapObject> host, JSDispatchHandle handle) {
 #ifdef V8_ENABLE_LEAPTIERING
-  JSDispatchTable* jdt = GetProcessWideJSDispatchTable();
+  JSDispatchTable* jdt = IsolateGroup::current()->js_dispatch_table();
   // If the slot is empty, we will skip it here and then just serialize the
   // null handle as raw data.
   if (handle == kNullJSDispatchHandle) return;
@@ -1270,11 +1303,26 @@ void Serializer::ObjectSerializer::VisitJSDispatchTableEntry(
   // TODO(saelo): we might want to call OutputRawData here, but for that we
   // first need to pass the slot address to this method (e.g. as part of a
   // JSDispatchHandleSlot struct).
+#if !defined(V8_COMPRESS_POINTERS) && defined(V8_TARGET_ARCH_64_BIT)
+  static_assert(kJSDispatchHandleSize + JSFunction::kPaddingOffsetEnd + 1 -
+                    JSFunction::kPaddingOffset ==
+                kSystemPointerSize);
+#endif  // COMPRESS_POINTERS
+  bytes_processed_so_far_ += RoundUp(kJSDispatchHandleSize, kTaggedSize);
 
-  bytes_processed_so_far_ += kJSDispatchHandleSize;
+  uint32_t id;
+  {
+    auto it = serializer_->dispatch_handle_map_.find(handle);
+    if (it == serializer_->dispatch_handle_map_.end()) {
+      id = static_cast<uint32_t>(serializer_->dispatch_handle_map_.size());
+      serializer_->dispatch_handle_map_[handle] = id;
+    } else {
+      id = it->second;
+    }
+  }
 
   sink_->Put(kAllocateJSDispatchEntry, "AllocateJSDispatchEntry");
-  sink_->PutUint30(handle >> kJSDispatchHandleShift, "EntryID");
+  sink_->PutUint30(id, "EntryID");
   sink_->PutUint30(jdt->GetParameterCount(handle), "ParameterCount");
 
   // Currently we cannot see pending objects here, but we may need to support

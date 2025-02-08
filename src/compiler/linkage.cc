@@ -56,6 +56,9 @@ std::ostream& operator<<(std::ostream& os, const CallDescriptor::Kind& k) {
     case CallDescriptor::kCallWasmFunction:
       os << "WasmFunction";
       break;
+    case CallDescriptor::kCallWasmFunctionIndirect:
+      os << "WasmFunctionIndirect";
+      break;
     case CallDescriptor::kCallWasmImportWrapper:
       os << "WasmImportWrapper";
       break;
@@ -215,6 +218,7 @@ int CallDescriptor::CalculateFixedFrameSize(CodeKind code_kind) const {
       return TypedFrameConstants::kFixedSlotCount;
 #if V8_ENABLE_WEBASSEMBLY
     case kCallWasmFunction:
+    case kCallWasmFunctionIndirect:
     case kCallWasmImportWrapper:
       return WasmFrameConstants::kFixedSlotCount;
     case kCallWasmCapiFunction:
@@ -333,7 +337,8 @@ CallDescriptor* ReplaceTypeInCallDescriptorWith(
       call_descriptor->debug_name(),              // debug name
       call_descriptor->GetStackArgumentOrder(),   // stack order
       call_descriptor->AllocatableRegisters(),    // allocatable registers
-      return_slots);                              // return slot count
+      return_slots,                               // return slot count
+      call_descriptor->signature_hash());         // signature hash
 }
 }  // namespace
 
@@ -383,8 +388,6 @@ bool Linkage::NeedsFrameStateInput(Runtime::FunctionId function) {
     case Runtime::kNewFunctionContext:
     case Runtime::kPushBlockContext:
     case Runtime::kPushCatchContext:
-    case Runtime::kReThrow:
-    case Runtime::kReThrowWithMessage:
     case Runtime::kStringEqual:
     case Runtime::kStringLessThan:
     case Runtime::kStringLessThanOrEqual:
@@ -500,7 +503,8 @@ CallDescriptor* Linkage::GetJSCallDescriptor(Zone* zone, bool is_osr,
   const size_t context_count = 1;
   const size_t new_target_count = 1;
   const size_t num_args_count = 1;
-  const size_t dispatch_handle_count = V8_ENABLE_LEAPTIERING_BOOL ? 1 : 0;
+  const size_t dispatch_handle_count =
+      V8_JS_LINKAGE_INCLUDES_DISPATCH_HANDLE_BOOL ? 1 : 0;
   const size_t parameter_count = js_parameter_count + new_target_count +
                                  num_args_count + dispatch_handle_count +
                                  context_count;
@@ -532,7 +536,7 @@ CallDescriptor* Linkage::GetJSCallDescriptor(Zone* zone, bool is_osr,
   locations.AddParam(
       regloc(kJavaScriptCallArgCountRegister, MachineType::Int32()));
 
-#ifdef V8_ENABLE_LEAPTIERING
+#ifdef V8_JS_LINKAGE_INCLUDES_DISPATCH_HANDLE
   // Add dispatch handle.
   locations.AddParam(
       regloc(kJavaScriptCallDispatchHandleRegister, MachineType::Int32()));
@@ -637,7 +641,7 @@ CallDescriptor* Linkage::GetStubCallDescriptor(
 #if V8_ENABLE_WEBASSEMBLY
     case StubCallMode::kCallWasmRuntimeStub:
       kind = CallDescriptor::kCallWasmFunction;
-      target_type = MachineType::WasmCodePointer();
+      target_type = MachineType::Pointer();
       break;
 #endif  // V8_ENABLE_WEBASSEMBLY
     case StubCallMode::kCallBuiltinPointer:
@@ -754,7 +758,7 @@ bool Linkage::ParameterHasSecondaryLocation(int index) const {
            IsTaggedReg(loc, kContextRegister);
   }
 #if V8_ENABLE_WEBASSEMBLY
-  if (incoming_->IsWasmFunctionCall()) {
+  if (incoming_->IsAnyWasmFunctionCall()) {
     LinkageLocation loc = GetParameterLocation(index);
     return IsTaggedReg(loc, kWasmImplicitArgRegister);
   }
@@ -784,7 +788,7 @@ LinkageLocation Linkage::GetParameterSecondaryLocation(int index) const {
 #if V8_ENABLE_WEBASSEMBLY
   static const int kWasmInstanceDataSlot =
       3 + StandardFrameConstants::kCPSlotCount;
-  if (incoming_->IsWasmFunctionCall()) {
+  if (incoming_->IsAnyWasmFunctionCall()) {
     DCHECK(IsTaggedReg(loc, kWasmImplicitArgRegister));
     return LinkageLocation::ForCalleeFrameSlot(kWasmInstanceDataSlot,
                                                MachineType::AnyTagged());

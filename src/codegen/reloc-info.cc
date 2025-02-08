@@ -13,6 +13,7 @@
 #include "src/deoptimizer/deoptimizer.h"
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/objects/code-inl.h"
+#include "src/sandbox/js-dispatch-table.h"
 #include "src/snapshot/embedded/embedded-data-inl.h"
 
 namespace v8 {
@@ -346,6 +347,8 @@ const char* RelocInfo::RelocModeName(RelocInfo::Mode rmode) {
       return "internal reference";
     case INTERNAL_REFERENCE_ENCODED:
       return "encoded internal reference";
+    case JS_DISPATCH_HANDLE:
+      return "js dispatch handle";
     case OFF_HEAP_TARGET:
       return "off heap target";
     case NEAR_BUILTIN_ENTRY:
@@ -370,8 +373,8 @@ const char* RelocInfo::RelocModeName(RelocInfo::Mode rmode) {
       return "wasm stub call";
     case WASM_CANONICAL_SIG_ID:
       return "wasm canonical signature id";
-    case WASM_INDIRECT_CALL_TARGET:
-      return "wasm indirect call target";
+    case WASM_CODE_POINTER_TABLE_ENTRY:
+      return "wasm code pointer table entry";
     case NUMBER_OF_MODES:
     case PC_JUMP:
       UNREACHABLE();
@@ -399,6 +402,19 @@ void RelocInfo::Print(Isolate* isolate, std::ostream& os) {
     }
     os << " (" << reinterpret_cast<const void*>(target_external_reference())
        << ")";
+  } else if (rmode_ == JS_DISPATCH_HANDLE) {
+#ifdef V8_ENABLE_LEAPTIERING
+    Tagged<Code> target_code =
+        IsolateGroup::current()->js_dispatch_table()->GetCode(
+            js_dispatch_handle());
+    os << " (" << CodeKindToString(target_code->kind());
+    if (Builtins::IsBuiltin(target_code)) {
+      os << " " << Builtins::name(target_code->builtin_id());
+    }
+    os << ")  (" << reinterpret_cast<const void*>(target_address()) << ")";
+#else
+    UNREACHABLE();
+#endif
   } else if (IsCodeTargetMode(rmode_)) {
     const Address code_target = target_address();
     Tagged<Code> target_code = Code::FromTargetAddress(code_target);
@@ -456,6 +472,19 @@ void RelocInfo::Verify(Isolate* isolate) {
       CHECK_LT(target, lookup_result->instruction_end());
       break;
     }
+    case JS_DISPATCH_HANDLE: {
+#ifdef V8_ENABLE_LEAPTIERING
+      JSDispatchTable::Space* space =
+          isolate->heap()->js_dispatch_table_space();
+      JSDispatchTable::Space* ro_space =
+          isolate->read_only_heap()->js_dispatch_table_space();
+      IsolateGroup::current()->js_dispatch_table()->VerifyEntry(
+          js_dispatch_handle(), space, ro_space);
+      break;
+#else
+      UNREACHABLE();
+#endif
+    }
     case OFF_HEAP_TARGET: {
       Address addr = target_off_heap_target();
       CHECK_NE(addr, kNullAddress);
@@ -482,7 +511,7 @@ void RelocInfo::Verify(Isolate* isolate) {
     case WASM_CALL:
     case NO_INFO:
     case WASM_CANONICAL_SIG_ID:
-    case WASM_INDIRECT_CALL_TARGET:
+    case WASM_CODE_POINTER_TABLE_ENTRY:
       break;
     case NUMBER_OF_MODES:
     case PC_JUMP:

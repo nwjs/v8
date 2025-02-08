@@ -429,8 +429,7 @@ void BytecodeWrapper::BytecodeWrapperVerify(Isolate* isolate) {
 bool JSObject::ElementsAreSafeToExamine(PtrComprCageBase cage_base) const {
   // If a GC was caused while constructing this object, the elements
   // pointer may point to a one pointer filler map.
-  return elements(cage_base) !=
-         GetReadOnlyRoots(cage_base).one_pointer_filler_map();
+  return elements(cage_base) != GetReadOnlyRoots().one_pointer_filler_map();
 }
 
 namespace {
@@ -810,7 +809,7 @@ void FeedbackCell::FeedbackCellVerify(Isolate* isolate) {
   JSDispatchHandle handle = dispatch_handle();
   if (handle == kNullJSDispatchHandle) return;
 
-  JSDispatchTable* jdt = GetProcessWideJSDispatchTable();
+  JSDispatchTable* jdt = IsolateGroup::current()->js_dispatch_table();
   Tagged<Code> code = jdt->GetCode(handle);
   CodeKind kind = code->kind();
   CHECK(kind == CodeKind::FOR_TESTING || kind == CodeKind::BUILTIN ||
@@ -838,6 +837,24 @@ void TrustedWeakFixedArray::TrustedWeakFixedArrayVerify(Isolate* isolate) {
   CHECK(IsSmi(length_.load()));
   for (int i = 0; i < length(); i++) {
     Object::VerifyMaybeObjectPointer(isolate, get(i));
+  }
+}
+
+void ProtectedWeakFixedArray::ProtectedWeakFixedArrayVerify(Isolate* isolate) {
+  TrustedObjectVerify(isolate);
+  CHECK(IsSmi(length_.load()));
+  for (int i = 0; i < length(); i++) {
+    Tagged<Union<MaybeWeak<TrustedObject>, Smi>> p = get(i);
+    Tagged<HeapObject> heap_object;
+    if (p.GetHeapObject(&heap_object)) {
+      // We could relax this, but for now we assume that strong pointers in a
+      // weak fixed array are unintentional and should be reported.
+      CHECK(p.IsWeak());
+      CHECK(IsTrustedObject(heap_object));
+      HeapObject::VerifyHeapPointer(isolate, heap_object);
+    } else {
+      CHECK(p.IsSmi() || p.IsCleared());
+    }
   }
 }
 
@@ -1255,7 +1272,7 @@ void JSFunction::JSFunctionVerify(Isolate* isolate) {
   CHECK_EQ(map()->map()->native_context_or_null(), native_context());
 
 #ifdef V8_ENABLE_LEAPTIERING
-  JSDispatchTable* jdt = GetProcessWideJSDispatchTable();
+  JSDispatchTable* jdt = IsolateGroup::current()->js_dispatch_table();
   JSDispatchHandle handle = dispatch_handle();
   CHECK_NE(handle, kNullJSDispatchHandle);
   uint16_t parameter_count = jdt->GetParameterCount(handle);
@@ -1264,35 +1281,36 @@ void JSFunction::JSFunctionVerify(Isolate* isolate) {
   Tagged<Code> code_from_table = jdt->GetCode(handle);
   CHECK(code_from_table->parameter_count() == kDontAdaptArgumentsSentinel ||
         code_from_table->parameter_count() == parameter_count);
+  CHECK(!code_from_table->marked_for_deoptimization());
+  CHECK_IMPLIES(code_from_table->is_optimized_code(),
+                code_from_table->js_dispatch_handle() != kNullJSDispatchHandle);
 
   // Currently, a JSFunction must have the same dispatch entry as its
   // FeedbackCell, unless the FeedbackCell has no entry.
   JSDispatchHandle feedback_cell_handle =
       raw_feedback_cell(isolate)->dispatch_handle();
-  CHECK_EQ(raw_feedback_cell(isolate) == isolate->heap()->many_closures_cell(),
-           feedback_cell_handle == kNullJSDispatchHandle);
-  if (code_from_table->is_context_specialized()) {
-    // This function is context specialized. It must have its own dispatch
-    // handle. The canonical handle must exist and be different.
-    CHECK_NE(feedback_cell_handle, handle);
-  } else {
-    // This function is not context specialized. Then we should either use the
-    // canonical dispatch handle. Except for builtins, which use the
-    // many_closures_cell (see check above).
-    // Also, after code flushing this js function can point to the CompileLazy
-    // builtin, which will unify the dispatch handles on the next UpdateCode.
-    if (feedback_cell_handle != kNullJSDispatchHandle) {
-      if (code_from_table->kind() != CodeKind::BUILTIN) {
-        CHECK_EQ(feedback_cell_handle, handle);
-      }
-    }
-  }
+  CHECK_EQ(
+      raw_feedback_cell(isolate) == *isolate->factory()->many_closures_cell(),
+      feedback_cell_handle == kNullJSDispatchHandle);
   if (feedback_cell_handle != kNullJSDispatchHandle) {
-    CHECK(!jdt->GetCode(feedback_cell_handle)->is_context_specialized());
+    CHECK_EQ(feedback_cell_handle, handle);
   }
+  if (code_from_table->is_context_specialized()) {
+    CHECK_EQ(raw_feedback_cell(isolate)->map(),
+             ReadOnlyRoots(isolate).one_closure_cell_map());
+  }
+
+  // Verify the entrypoint corresponds to the code or a tiering builtin.
+  Address entrypoint = jdt->GetEntrypoint(handle);
+#define CASE(name, ...) \
+  entrypoint == BUILTIN_CODE(isolate, name)->instruction_start() ||
+  CHECK(BUILTIN_LIST_BASE_TIERING(CASE)
+            entrypoint == code_from_table->instruction_start());
+#undef CASE
+
 #endif  // V8_ENABLE_LEAPTIERING
 
-  Handle<JSFunction> function(*this, isolate);
+  DirectHandle<JSFunction> function(*this, isolate);
   LookupIterator it(isolate, function, isolate->factory()->prototype_string(),
                     LookupIterator::OWN_SKIP_INTERCEPTOR);
   if (has_prototype_slot()) {
@@ -2450,6 +2468,29 @@ void WasmDispatchTable::WasmDispatchTableVerify(Isolate* isolate) {
       CHECK_EQ(arg == Smi::zero(), target(i) == wasm::kInvalidWasmCodePointer);
     }
   }
+
+  // Check invariants of the "uses" list (which are specific to
+  // WasmDispatchTable, not inherent to any ProtectedWeakFixedArray).
+  Tagged<ProtectedWeakFixedArray> uses = protected_uses();
+  if (uses->length() > 0) {
+    CHECK(IsSmi(uses->get(0)));
+    int capacity = uses->length();
+    CHECK(capacity & 1);  // Capacity is odd: reserved slot + 2*num_entries.
+    int used_length = Cast<Smi>(uses->get(0)).value();
+    CHECK_LE(used_length, capacity);
+    for (int i = 1; i < used_length; i += 2) {
+      CHECK(uses->get(i).IsCleared() ||
+            IsWasmTrustedInstanceData(uses->get(i).GetHeapObjectAssumeWeak()));
+      CHECK(IsSmi(uses->get(i + 1)));
+    }
+  }
+}
+
+void WasmTableObject::WasmTableObjectVerify(Isolate* isolate) {
+  TorqueGeneratedClassVerifiers::WasmTableObjectVerify(*this, isolate);
+  if (has_trusted_dispatch_table()) {
+    CHECK_EQ(trusted_dispatch_table(isolate)->length(), current_length());
+  }
 }
 
 void WasmValueObject::WasmValueObjectVerify(Isolate* isolate) {
@@ -2812,8 +2853,7 @@ bool TransitionArray::IsSortedNoDuplicates() {
     CHECK(has_hash);
     PropertyKind kind = PropertyKind::kData;
     PropertyAttributes attributes = NONE;
-    if (!TransitionsAccessor::IsSpecialTransition(key->GetReadOnlyRoots(),
-                                                  key)) {
+    if (!TransitionsAccessor::IsSpecialTransition(GetReadOnlyRoots(), key)) {
       Tagged<Map> target = GetTarget(i);
       PropertyDetails details =
           TransitionsAccessor::GetTargetDetails(key, target);

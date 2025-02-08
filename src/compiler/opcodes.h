@@ -458,6 +458,7 @@
   V(CheckMaps)                          \
   V(CheckNotTaggedHole)                 \
   V(CheckNumber)                        \
+  V(CheckNumberFitsInt32)               \
   V(CheckReceiver)                      \
   V(CheckReceiverOrNullOrUndefined)     \
   V(CheckSmi)                           \
@@ -544,6 +545,7 @@
   V(TransitionAndStoreNonNumberElement) \
   V(TransitionAndStoreNumberElement)    \
   V(TransitionElementsKind)             \
+  V(TransitionElementsKindOrCheckMap)   \
   V(TypeOf)                             \
   V(Unsigned32Divide)                   \
   V(VerifyType)                         \
@@ -818,7 +820,7 @@
   V(ChangeUint32ToFloat64)               \
   V(ChangeUint32ToUint64)                \
   V(TruncateFloat64ToFloat32)            \
-  V(TruncateFloat64ToFloat16)            \
+  V(TruncateFloat64ToFloat16RawBits)     \
   V(TruncateInt64ToInt32)                \
   V(RoundFloat64ToInt32)                 \
   V(RoundInt32ToFloat32)                 \

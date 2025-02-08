@@ -236,7 +236,7 @@ std::unique_ptr<BackingStore> BackingStore::Allocate(
     }
 #ifdef V8_ENABLE_SANDBOX
     // Check to catch use of a non-sandbox-compatible ArrayBufferAllocator.
-    CHECK_WITH_MSG(GetProcessWideSandbox()->Contains(buffer_start),
+    CHECK_WITH_MSG(Sandbox::current()->Contains(buffer_start),
                    "When the V8 Sandbox is enabled, ArrayBuffer backing stores "
                    "must be allocated inside the sandbox address space. Please "
                    "use an appropriate ArrayBuffer::Allocator to allocate "
@@ -397,6 +397,9 @@ std::unique_ptr<BackingStore> BackingStore::AllocateWasmMemory(
   // Wasm pages must be a multiple of the allocation page size.
   DCHECK_EQ(0, wasm::kWasmPageSize % AllocatePageSize());
   DCHECK_LE(initial_pages, maximum_pages);
+  DCHECK_LE(maximum_pages, wasm_memory == WasmMemoryFlag::kWasmMemory32
+                               ? wasm::kV8MaxWasmMemory32Pages
+                               : wasm::kV8MaxWasmMemory64Pages);
 
   DCHECK(wasm_memory == WasmMemoryFlag::kWasmMemory32 ||
          wasm_memory == WasmMemoryFlag::kWasmMemory64);
@@ -523,7 +526,7 @@ std::optional<size_t> BackingStore::GrowWasmMemoryInPlace(Isolate* isolate,
 }
 
 void BackingStore::AttachSharedWasmMemoryObject(
-    Isolate* isolate, Handle<WasmMemoryObject> memory_object) {
+    Isolate* isolate, DirectHandle<WasmMemoryObject> memory_object) {
   DCHECK(is_wasm_memory_);
   DCHECK(is_shared_);
   // We need to take the global registry lock for this operation.
@@ -737,7 +740,7 @@ namespace {
 // Implementation details of GlobalBackingStoreRegistry.
 struct GlobalBackingStoreRegistryImpl {
   GlobalBackingStoreRegistryImpl() = default;
-  base::Mutex mutex_;
+  base::SpinningMutex mutex_;
   std::unordered_map<const void*, std::weak_ptr<BackingStore>> map_;
 };
 
@@ -752,7 +755,7 @@ void GlobalBackingStoreRegistry::Register(
   CHECK(backing_store->is_wasm_memory());
 
   GlobalBackingStoreRegistryImpl* impl = GetGlobalBackingStoreRegistryImpl();
-  base::MutexGuard scope_lock(&impl->mutex_);
+  base::SpinningMutexGuard scope_lock(&impl->mutex_);
   if (backing_store->globally_registered_) return;
   TRACE_BS("BS:reg    bs=%p mem=%p (length=%zu, capacity=%zu)\n",
            backing_store.get(), backing_store->buffer_start(),
@@ -771,7 +774,7 @@ void GlobalBackingStoreRegistry::Unregister(BackingStore* backing_store) {
   DCHECK_NOT_NULL(backing_store->buffer_start());
 
   GlobalBackingStoreRegistryImpl* impl = GetGlobalBackingStoreRegistryImpl();
-  base::MutexGuard scope_lock(&impl->mutex_);
+  base::SpinningMutexGuard scope_lock(&impl->mutex_);
   const auto& result = impl->map_.find(backing_store->buffer_start());
   if (result != impl->map_.end()) {
     DCHECK(!result->second.lock());
@@ -788,7 +791,7 @@ void GlobalBackingStoreRegistry::Purge(Isolate* isolate) {
   // may try to take the &impl->mutex_ in order to unregister itself.
   std::vector<std::shared_ptr<BackingStore>> prevent_destruction_under_lock;
   GlobalBackingStoreRegistryImpl* impl = GetGlobalBackingStoreRegistryImpl();
-  base::MutexGuard scope_lock(&impl->mutex_);
+  base::SpinningMutexGuard scope_lock(&impl->mutex_);
   // Purge all entries in the map that refer to the given isolate.
   for (auto& entry : impl->map_) {
     auto backing_store = entry.second.lock();
@@ -813,13 +816,13 @@ void GlobalBackingStoreRegistry::Purge(Isolate* isolate) {
 #if V8_ENABLE_WEBASSEMBLY
 void GlobalBackingStoreRegistry::AddSharedWasmMemoryObject(
     Isolate* isolate, BackingStore* backing_store,
-    Handle<WasmMemoryObject> memory_object) {
+    DirectHandle<WasmMemoryObject> memory_object) {
   // Add to the weak array list of shared memory objects in the isolate.
   isolate->AddSharedWasmMemory(memory_object);
 
   // Add the isolate to the list of isolates sharing this backing store.
   GlobalBackingStoreRegistryImpl* impl = GetGlobalBackingStoreRegistryImpl();
-  base::MutexGuard scope_lock(&impl->mutex_);
+  base::SpinningMutexGuard scope_lock(&impl->mutex_);
   SharedWasmMemoryData* shared_data =
       backing_store->get_shared_wasm_memory_data();
   auto& isolates = shared_data->isolates_;
@@ -839,7 +842,7 @@ void GlobalBackingStoreRegistry::BroadcastSharedWasmMemoryGrow(
   {
     GlobalBackingStoreRegistryImpl* impl = GetGlobalBackingStoreRegistryImpl();
     // The global lock protects the list of isolates per backing store.
-    base::MutexGuard scope_lock(&impl->mutex_);
+    base::SpinningMutexGuard scope_lock(&impl->mutex_);
     SharedWasmMemoryData* shared_data =
         backing_store->get_shared_wasm_memory_data();
     for (Isolate* other : shared_data->isolates_) {
@@ -853,9 +856,6 @@ void GlobalBackingStoreRegistry::BroadcastSharedWasmMemoryGrow(
 
 void GlobalBackingStoreRegistry::UpdateSharedWasmMemoryObjects(
     Isolate* isolate) {
-  // TODO(1445003): Remove the {AlwaysAllocateScope} after finding the root
-  // cause.
-  AlwaysAllocateScope always_allocate_scope{isolate->heap()};
 
   HandleScope scope(isolate);
   DirectHandle<WeakArrayList> shared_wasm_memories =

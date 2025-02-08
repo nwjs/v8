@@ -374,6 +374,10 @@ ASSERT_TRIVIALLY_COPYABLE(Operand);
 static_assert(sizeof(Operand) <= 2 * kSystemPointerSize,
               "Operand must be small enough to pass it by value");
 
+// Support DCHECK_NE in shared code. On x64, an {Operand} is never an alias
+// for a register.
+inline bool operator!=(Operand op, XMMRegister r) { return true; }
+
 #define ASSEMBLER_INSTRUCTION_LIST(V) \
   V(add)                              \
   V(and)                              \
@@ -546,7 +550,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 
   // This sets the internal reference at the pc.
   inline static void deserialization_set_target_internal_reference_at(
-      Address pc, Address target,
+      Address pc, Address target, WritableJitAllocation& jit_allocation,
       RelocInfo::Mode mode = RelocInfo::INTERNAL_REFERENCE);
 
   inline Handle<Code> code_target_object_handle_at(Address pc);

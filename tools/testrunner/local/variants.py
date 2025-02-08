@@ -34,12 +34,13 @@ ALL_VARIANT_FLAGS = {
         "--maglev", "--no-turbofan", "--stress-maglev",
         "--optimize-on-next-call-optimizes-to-maglev"
     ]],
+    "stress_pinning_scavenger": [[
+        "--scavenger-pinning-objects", "--stress-scavenger-pinning-objects"
+    ]],
     # We test both the JS and Wasm Turboshaft pipelines under the same variant.
     # For extended Wasm Turboshaft coverage, we add --no-liftoff to the options.
     "turboshaft": [[
         "--turboshaft",
-        "--turboshaft-future",
-        "--turboshaft-wasm",
         "--no-wasm-generic-wrapper",
         "--no-liftoff",
     ]],
@@ -108,15 +109,28 @@ kIncompatibleFlagsForNoTurbofan = [
 INCOMPATIBLE_FLAGS_PER_VARIANT = {
     "jitless":
         kIncompatibleFlagsForNoTurbofan + [
-            "--track-field-types", "--sparkplug", "--concurrent-sparkplug",
-            "--always-sparkplug", "--regexp-tier-up",
-            "--no-regexp-interpret-all", "--interpreted-frames-native-stack"
+            "--track-field-types",
+            "--sparkplug",
+            "--concurrent-sparkplug",
+            "--always-sparkplug",
+            "--regexp-tier-up",
+            "--no-regexp-interpret-all",
+            "--interpreted-frames-native-stack",
+            "--script-context-mutable-heap-number",
         ],
     "nooptimization": [
-        "--turbofan", "--always-turbofan", "--turboshaft",
-        "--turboshaft-future", "--maglev", "--no-liftoff", "--wasm-tier-up",
-        "--wasm-dynamic-tiering", "--validate-asm", "--track-field-types",
-        "--stress-concurrent-inlining"
+        "--turbofan",
+        "--always-turbofan",
+        "--turboshaft",
+        "--turboshaft-wasm-in-js-inlining",
+        "--maglev",
+        "--no-liftoff",
+        "--wasm-tier-up",
+        "--wasm-dynamic-tiering",
+        "--validate-asm",
+        "--track-field-types",
+        "--stress-concurrent-inlining",
+        "--script-context-mutable-heap-number",
     ],
     "slow_path": ["--no-force-slow-path"],
     "stress_concurrent_allocation": [
@@ -243,6 +257,9 @@ INCOMPATIBLE_FLAGS_PER_BUILD_VARIABLE = {
         "--stress-concurrent-allocation", "--stress-concurrent-inlining"
     ],
     "dict_property_const_tracking": ["--stress-concurrent-inlining"],
+    "cet_shadow_stack": [
+        "--sparkplug", "--always-sparkplug", "--concurrent-sparkplug"
+    ]
 }
 
 # Flags that lead to a contradiction when a certain extra-flag is present.

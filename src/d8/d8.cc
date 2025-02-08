@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -19,7 +20,7 @@
 #include <vector>
 
 #ifdef ENABLE_VTUNE_JIT_INTERFACE
-#include "src/third_party/vtune/v8-vtune.h"
+#include "third_party/vtune/v8-vtune.h"
 #endif
 
 #include "include/libplatform/libplatform.h"
@@ -295,7 +296,7 @@ class MultiMappedAllocator : public ArrayBufferAllocatorBase {
     // sandbox's virtual address space to essentially just reserve a number of
     // OS pages inside the sandbox, but then using mremap to replace these
     // pages directly afterwards. In practice, this works fine however.
-    VirtualAddressSpace* vas = i::GetProcessWideSandbox()->address_space();
+    VirtualAddressSpace* vas = i::Sandbox::current()->address_space();
     i::Address in_sandbox_page_reservation = vas->AllocatePages(
         VirtualAddressSpace::kNoHint, rounded_length,
         vas->allocation_granularity(), PagePermissions::kNoAccess);
@@ -339,7 +340,7 @@ class MultiMappedAllocator : public ArrayBufferAllocatorBase {
         FATAL("mremap failed with error %d: %s", errno, strerror(errno));
       }
     }
-    base::MutexGuard lock_guard(&regions_mutex_);
+    base::SpinningMutexGuard lock_guard(&regions_mutex_);
     regions_[virtual_alloc] = real_alloc;
     return virtual_alloc;
   }
@@ -348,12 +349,12 @@ class MultiMappedAllocator : public ArrayBufferAllocatorBase {
     if (length < kChunkSize) {
       return ArrayBufferAllocatorBase::Free(data, length);
     }
-    base::MutexGuard lock_guard(&regions_mutex_);
+    base::SpinningMutexGuard lock_guard(&regions_mutex_);
     void* real_alloc = regions_[data];
     munmap(real_alloc, kChunkSize);
     size_t rounded_length = RoundUp(length, kChunkSize);
 #ifdef V8_ENABLE_SANDBOX
-    VirtualAddressSpace* vas = i::GetProcessWideSandbox()->address_space();
+    VirtualAddressSpace* vas = i::Sandbox::current()->address_space();
     vas->FreePages(reinterpret_cast<i::Address>(data), rounded_length);
 #else
     munmap(data, rounded_length);
@@ -366,7 +367,7 @@ class MultiMappedAllocator : public ArrayBufferAllocatorBase {
   static constexpr size_t kChunkSize = 2 * 1024 * 1024;
 
   std::unordered_map<void*, void*> regions_;
-  base::Mutex regions_mutex_;
+  base::SpinningMutex regions_mutex_;
 };
 
 #endif  // V8_OS_LINUX
@@ -523,7 +524,7 @@ CounterCollection* Shell::counters_ = &local_counters_;
 base::LazyMutex Shell::context_mutex_;
 const base::TimeTicks Shell::kInitialTicks = base::TimeTicks::Now();
 Global<Function> Shell::stringify_function_;
-base::Mutex Shell::profiler_end_callback_lock_;
+base::SpinningMutex Shell::profiler_end_callback_lock_;
 std::map<Isolate*, std::pair<Global<Function>, Global<Context>>>
     Shell::profiler_end_callback_;
 base::LazyMutex Shell::workers_mutex_;
@@ -587,7 +588,7 @@ class DummySourceStream : public v8::ScriptCompiler::ExternalSourceStream {
   DummySourceStream(Isolate* isolate, Local<String> source) : done_(false) {
     source_length_ = source->Length();
     source_buffer_ = std::make_unique<uint16_t[]>(source_length_);
-    source->Write(isolate, source_buffer_.get(), 0, source_length_);
+    source->WriteV2(isolate, 0, source_length_, source_buffer_.get());
   }
 
   size_t GetMoreData(const uint8_t** src) override {
@@ -679,7 +680,7 @@ MaybeLocal<T> Shell::CompileString(Isolate* isolate, Local<Context> context,
         v8::ScriptCompiler::StreamedSource::TWO_BYTE);
     std::unique_ptr<v8::ScriptCompiler::ScriptStreamingTask> streaming_task(
         v8::ScriptCompiler::StartStreaming(isolate, &streamed_source,
-                                           std::is_same<T, Module>::value
+                                           std::is_same_v<T, Module>
                                                ? v8::ScriptType::kModule
                                                : v8::ScriptType::kClassic));
     StreamerThread::StartThreadForTaskAndJoin(streaming_task.get());
@@ -820,7 +821,7 @@ std::shared_ptr<ModuleEmbedderData> InitializeModuleEmbedderData(
     Local<Context> context) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(context->GetIsolate());
   const size_t kModuleEmbedderDataEstimate = 4 * 1024;  // module map.
-  i::Handle<i::Managed<ModuleEmbedderData>> module_data_managed =
+  i::DirectHandle<i::Managed<ModuleEmbedderData>> module_data_managed =
       i::Managed<ModuleEmbedderData>::From(
           i_isolate, kModuleEmbedderDataEstimate,
           std::make_shared<ModuleEmbedderData>(context->GetIsolate()));
@@ -1194,7 +1195,7 @@ MaybeLocal<Object> Shell::FetchModuleSource(Local<Module> referrer,
       // GetModuleSource() must always return a throw completion whose [[Value]]
       // is a ReferenceError.
       ThrowException(
-          isolate, v8::Exception::ReferenceError(String::NewFromUtf8Literal(
+          isolate, v8::Exception::SyntaxError(String::NewFromUtf8Literal(
                        isolate, "Module source can not be imported for type")));
       return MaybeLocal<Object>();
   }
@@ -2236,7 +2237,7 @@ void Shell::RealmOwner(const v8::FunctionCallbackInfo<v8::Value>& info) {
   }
   Local<Object> object =
       info[0]->ToObject(isolate->GetCurrentContext()).ToLocalChecked();
-  i::Handle<i::JSReceiver> i_object = Utils::OpenHandle(*object);
+  i::DirectHandle<i::JSReceiver> i_object = Utils::OpenDirectHandle(*object);
   if (IsJSGlobalProxy(*i_object) &&
       i::Cast<i::JSGlobalProxy>(i_object)->IsDetached()) {
     return;
@@ -2265,11 +2266,11 @@ void Shell::RealmGlobal(const v8::FunctionCallbackInfo<v8::Value>& info) {
   // global objects.
   Local<Object> global =
       Local<Context>::New(info.GetIsolate(), data->realms_[index])->Global();
-  i::Handle<i::Object> i_global = Utils::OpenHandle(*global);
+  i::DirectHandle<i::Object> i_global = Utils::OpenDirectHandle(*global);
   if (IsJSGlobalObject(*i_global)) {
     i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(info.GetIsolate());
-    i::Handle<i::JSObject> i_global_proxy =
-        handle(i::Cast<i::JSGlobalObject>(i_global)->global_proxy(), i_isolate);
+    i::DirectHandle<i::JSObject> i_global_proxy(
+        i::Cast<i::JSGlobalObject>(i_global)->global_proxy(), i_isolate);
     global = Utils::ToLocal(i_global_proxy);
   }
   info.GetReturnValue().Set(global);
@@ -2744,14 +2745,14 @@ void Shell::ProfilerSetOnProfileEndListener(
     ThrowError(isolate, "The OnProfileEnd listener has to be a function");
     return;
   }
-  base::MutexGuard lock_guard(&profiler_end_callback_lock_);
+  base::SpinningMutexGuard lock_guard(&profiler_end_callback_lock_);
   profiler_end_callback_[isolate] =
       std::make_pair(Global<Function>(isolate, info[0].As<Function>()),
                      Global<Context>(isolate, isolate->GetCurrentContext()));
 }
 
 bool Shell::HasOnProfileEndListener(Isolate* isolate) {
-  base::MutexGuard lock_guard(&profiler_end_callback_lock_);
+  base::SpinningMutexGuard lock_guard(&profiler_end_callback_lock_);
   return profiler_end_callback_.find(isolate) != profiler_end_callback_.end();
 }
 
@@ -2760,7 +2761,7 @@ void Shell::ResetOnProfileEndListener(Isolate* isolate) {
   // D8Console.
   if (options.enable_inspector) return;
   {
-    base::MutexGuard lock_guard(&profiler_end_callback_lock_);
+    base::SpinningMutexGuard lock_guard(&profiler_end_callback_lock_);
     profiler_end_callback_.erase(isolate);
   }
 
@@ -2790,7 +2791,7 @@ void Shell::TriggerOnProfileEndListener(Isolate* isolate, std::string profile) {
   Local<Value> argv[1] = {
       String::NewFromUtf8(isolate, profile.c_str()).ToLocalChecked()};
   {
-    base::MutexGuard lock_guard(&profiler_end_callback_lock_);
+    base::SpinningMutexGuard lock_guard(&profiler_end_callback_lock_);
     auto& callback_pair = profiler_end_callback_[isolate];
     callback = callback_pair.first.Get(isolate);
     context = callback_pair.second.Get(isolate);
@@ -2823,7 +2824,7 @@ void WriteToFile(FILE* file, const v8::FunctionCallbackInfo<v8::Value>& info,
     }
 
     v8::String::Utf8Value str(info.GetIsolate(), str_obj);
-    int n = static_cast<int>(fwrite(*str, sizeof(**str), str.length(), file));
+    size_t n = fwrite(*str, sizeof(**str), str.length(), file);
     if (n != str.length()) {
       printf("Error in fwrite\n");
       base::OS::ExitProcess(1);
@@ -2919,6 +2920,26 @@ void Shell::ReadFile(const v8::FunctionCallbackInfo<v8::Value>& info) {
   if (!ReadFile(info.GetIsolate(), *file_name).ToLocal(&source)) return;
   info.GetReturnValue().Set(source);
 }
+
+#if V8_TARGET_OS_LINUX && V8_ENABLE_WEBASSEMBLY
+void Shell::CreateWasmMemoryMapDescriptor(
+    const v8::FunctionCallbackInfo<v8::Value>& info) {
+  CHECK(i::v8_flags.experimental_wasm_memory_control);
+  DCHECK(i::ValidateCallbackInfo(info));
+  String::Utf8Value file_name(info.GetIsolate(), info[0]);
+  if (*file_name == nullptr) {
+    ThrowError(info.GetIsolate(), "Error converting filename to string");
+    return;
+  }
+
+  int file_descriptor = open(*file_name, O_RDWR);
+
+  WasmMemoryMapDescriptor::WasmFileDescriptor wasm_fd =
+      static_cast<WasmMemoryMapDescriptor::WasmFileDescriptor>(file_descriptor);
+  info.GetReturnValue().Set(
+      v8::WasmMemoryMapDescriptor::New(info.GetIsolate(), wasm_fd));
+}
+#endif  // V8_TARGET_OS_LINUX
 
 Local<String> Shell::ReadFromStdin(Isolate* isolate) {
   static const int kBufferSize = 256;
@@ -3217,7 +3238,7 @@ void Shell::WorkerNew(const v8::FunctionCallbackInfo<v8::Value>& info) {
     auto worker = std::make_shared<Worker>(isolate, *script);
     i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
     const size_t kWorkerSizeEstimate = 4 * 1024 * 1024;  // stack + heap.
-    i::Handle<i::Object> managed =
+    i::DirectHandle<i::Object> managed =
         i::Managed<Worker>::From(i_isolate, kWorkerSizeEstimate, worker);
     info.This()->SetInternalField(0, Utils::ToLocal(managed));
     base::Thread::Priority priority =
@@ -3928,6 +3949,13 @@ Local<ObjectTemplate> Shell::CreateD8Template(Isolate* isolate) {
                        FunctionTemplate::New(isolate, Shell::ReadFile));
     file_template->Set(isolate, "execute",
                        FunctionTemplate::New(isolate, Shell::ExecuteFile));
+#if V8_TARGET_OS_LINUX && V8_ENABLE_WEBASSEMBLY
+    if (i::v8_flags.experimental_wasm_memory_control) {
+      file_template->Set(
+          isolate, "create_wasm_memory_map_descriptor",
+          FunctionTemplate::New(isolate, Shell::CreateWasmMemoryMapDescriptor));
+    }
+#endif
     d8_template->Set(isolate, "file", file_template);
   }
   {
@@ -4191,7 +4219,7 @@ void Shell::WriteIgnitionDispatchCountersFile(v8::Isolate* isolate) {
   Local<Context> context = Context::New(isolate);
   Context::Scope context_scope(context);
 
-  i::Handle<i::JSObject> dispatch_counters =
+  i::DirectHandle<i::JSObject> dispatch_counters =
       reinterpret_cast<i::Isolate*>(isolate)
           ->interpreter()
           ->GetDispatchCountersObject();
@@ -4786,9 +4814,9 @@ class InspectorClient : public v8_inspector::V8InspectorClient {
     Local<String> message = info[0]->ToString(context).ToLocalChecked();
     v8_inspector::V8InspectorSession* session =
         InspectorClient::GetSession(context);
-    int length = message->Length();
+    uint32_t length = message->Length();
     std::unique_ptr<uint16_t[]> buffer(new uint16_t[length]);
-    message->Write(isolate, buffer.get(), 0, length);
+    message->WriteV2(isolate, 0, length, buffer.get());
     v8_inspector::StringView message_view(buffer.get(), length);
     {
       v8::SealHandleScope seal_handle_scope(isolate);
@@ -4991,14 +5019,14 @@ void SourceGroup::JoinThread(const i::ParkedScope& parked) {
 }
 
 void SerializationDataQueue::Enqueue(std::unique_ptr<SerializationData> data) {
-  base::MutexGuard lock_guard(&mutex_);
+  base::SpinningMutexGuard lock_guard(&mutex_);
   data_.push_back(std::move(data));
 }
 
 bool SerializationDataQueue::Dequeue(
     std::unique_ptr<SerializationData>* out_data) {
   out_data->reset();
-  base::MutexGuard lock_guard(&mutex_);
+  base::SpinningMutexGuard lock_guard(&mutex_);
   if (data_.empty()) return false;
   *out_data = std::move(data_[0]);
   data_.erase(data_.begin());
@@ -5006,12 +5034,12 @@ bool SerializationDataQueue::Dequeue(
 }
 
 bool SerializationDataQueue::IsEmpty() {
-  base::MutexGuard lock_guard(&mutex_);
+  base::SpinningMutexGuard lock_guard(&mutex_);
   return data_.empty();
 }
 
 void SerializationDataQueue::Clear() {
-  base::MutexGuard lock_guard(&mutex_);
+  base::SpinningMutexGuard lock_guard(&mutex_);
   data_.clear();
 }
 
@@ -5076,7 +5104,7 @@ class ProcessMessageTask : public i::CancelableTask {
 };
 
 void Worker::PostMessage(std::unique_ptr<SerializationData> data) {
-  base::MutexGuard lock_guard(&worker_mutex_);
+  base::SpinningMutexGuard lock_guard(&worker_mutex_);
   if (!is_running()) return;
   std::unique_ptr<v8::Task> task(new ProcessMessageTask(
       task_manager_, shared_from_this(), std::move(data)));
@@ -5123,7 +5151,7 @@ void Worker::TerminateAndWaitForThread(const i::ParkedScope& parked) {
   USE(parked);
   Terminate();
   {
-    base::MutexGuard lock_guard(&worker_mutex_);
+    base::SpinningMutexGuard lock_guard(&worker_mutex_);
     // Prevent double-joining.
     if (is_joined_) return;
     is_joined_ = true;
@@ -5132,7 +5160,7 @@ void Worker::TerminateAndWaitForThread(const i::ParkedScope& parked) {
 }
 
 void Worker::Terminate() {
-  base::MutexGuard lock_guard(&worker_mutex_);
+  base::SpinningMutexGuard lock_guard(&worker_mutex_);
   auto expected = State::kRunning;
   if (!state_.compare_exchange_strong(expected, State::kTerminating)) return;
   std::unique_ptr<v8::Task> task(
@@ -5145,7 +5173,7 @@ void Worker::Terminate() {
 }
 
 void Worker::EnterTerminatedState() {
-  base::MutexGuard lock_guard(&worker_mutex_);
+  base::SpinningMutexGuard lock_guard(&worker_mutex_);
   state_.store(State::kTerminated);
   CHECK(!is_running());
   task_runner_.reset();

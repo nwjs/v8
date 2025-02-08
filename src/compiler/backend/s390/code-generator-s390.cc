@@ -1091,27 +1091,14 @@ void CodeGenerator::AssembleCodeStartRegisterCheck() {
   __ Assert(eq, AbortReason::kWrongFunctionCodeStart);
 }
 
-// Check if the code object is marked for deoptimization. If it is, then it
-// jumps to the CompileLazyDeoptimizedCode builtin. In order to do this we need
-// to:
-//    1. read from memory the word that contains that bit, which can be found in
-//       the flags in the referenced {Code} object;
-//    2. test kMarkedForDeoptimizationBit in those flags; and
-//    3. if it is not zero then it jumps to the builtin.
-void CodeGenerator::BailoutIfDeoptimized() {
-  if (v8_flags.debug_code) {
-    // Check that {kJavaScriptCallCodeStartRegister} is correct.
-    __ ComputeCodeStartAddress(ip);
-    __ CmpS64(ip, kJavaScriptCallCodeStartRegister);
-    __ Assert(eq, AbortReason::kWrongFunctionCodeStart);
-  }
+#ifdef V8_ENABLE_LEAPTIERING
+void CodeGenerator::AssembleDispatchHandleRegisterCheck() {
+  CHECK(!V8_JS_LINKAGE_INCLUDES_DISPATCH_HANDLE_BOOL);
+}
+#endif  // V8_ENABLE_LEAPTIERING
 
-  int offset = InstructionStream::kCodeOffset - InstructionStream::kHeaderSize;
-  __ LoadTaggedField(ip, MemOperand(kJavaScriptCallCodeStartRegister, offset),
-                     r0);
-  __ LoadU32(ip, FieldMemOperand(ip, Code::kFlagsOffset));
-  __ TestBit(ip, Code::kMarkedForDeoptimizationBit);
-  __ TailCallBuiltin(Builtin::kCompileLazyDeoptimizedCode, ne);
+void CodeGenerator::BailoutIfDeoptimized() {
+  __ BailoutIfDeoptimized(kScratchReg);
 }
 
 // Assembles an instruction after register allocation, producing machine code.
@@ -1152,13 +1139,17 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     }
 #if V8_ENABLE_WEBASSEMBLY
-    case kArchCallWasmFunction: {
+    case kArchCallWasmFunction:
+    case kArchCallWasmFunctionIndirect: {
       // We must not share code targets for calls to builtins for wasm code, as
       // they might need to be patched individually.
       if (instr->InputAt(0)->IsImmediate()) {
+        DCHECK_EQ(opcode, kArchCallWasmFunction);
         Constant constant = i.ToConstant(instr->InputAt(0));
         Address wasm_code = static_cast<Address>(constant.ToInt64());
         __ Call(wasm_code, constant.rmode());
+      } else if (opcode == kArchCallWasmFunctionIndirect) {
+        __ CallWasmCodePointer(i.InputRegister(0));
       } else {
         __ Call(i.InputRegister(0));
       }
@@ -1166,13 +1157,17 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       frame_access_state()->ClearSPDelta();
       break;
     }
-    case kArchTailCallWasm: {
+    case kArchTailCallWasm:
+    case kArchTailCallWasmIndirect: {
       // We must not share code targets for calls to builtins for wasm code, as
       // they might need to be patched individually.
       if (instr->InputAt(0)->IsImmediate()) {
+        DCHECK_EQ(opcode, kArchTailCallWasm);
         Constant constant = i.ToConstant(instr->InputAt(0));
         Address wasm_code = static_cast<Address>(constant.ToInt64());
         __ Jump(wasm_code, constant.rmode());
+      } else if (opcode == kArchTailCallWasmIndirect) {
+        __ CallWasmCodePointer(i.InputRegister(0), CallJumpMode::kTailCall);
       } else {
         __ Jump(i.InputRegister(0));
       }
@@ -3407,7 +3402,7 @@ void CodeGenerator::AssembleConstructFrame() {
       // efficient initialization of the constant pool pointer register).
       __ StubPrologue(type);
 #if V8_ENABLE_WEBASSEMBLY
-      if (call_descriptor->IsWasmFunctionCall() ||
+      if (call_descriptor->IsAnyWasmFunctionCall() ||
           call_descriptor->IsWasmImportWrapper() ||
           call_descriptor->IsWasmCapiFunction()) {
         // For import wrappers and C-API functions, this stack slot is only used

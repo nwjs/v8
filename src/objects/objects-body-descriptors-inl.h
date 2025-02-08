@@ -108,7 +108,7 @@ void BodyDescriptorBase::IterateJSObjectBodyWithoutEmbedderFieldsImpl(
     ObjectVisitor* v) {
   // This body iteration assumes that there's no embedder fields.
   DCHECK_IMPLIES(JSObject::MayHaveEmbedderFields(map),
-                 UncheckedCast<JSObject>(obj)->GetEmbedderFieldCount() == 0);
+                 UncheckedCast<JSObject>(obj)->GetEmbedderFieldCount(map) == 0);
   IteratePointers(obj, start_offset, end_offset, v);
 }
 
@@ -286,7 +286,8 @@ void BodyDescriptorBase::IterateProtectedPointer(Tagged<HeapObject> obj,
 template <typename ObjectVisitor>
 void BodyDescriptorBase::IterateJSDispatchEntry(Tagged<HeapObject> obj,
                                                 int offset, ObjectVisitor* v) {
-  JSDispatchHandle handle = obj->Relaxed_ReadField<JSDispatchHandle>(offset);
+  JSDispatchHandle handle(
+      obj->Relaxed_ReadField<JSDispatchHandle::underlying_type>(offset));
   v->VisitJSDispatchTableEntry(obj, handle);
 }
 #endif  // V8_ENABLE_LEAPTIERING
@@ -1027,6 +1028,16 @@ class WasmTypeInfo::BodyDescriptor final : public BodyDescriptorBase {
   }
 };
 
+class WasmMemoryMapDescriptor::BodyDescriptor : public DataOnlyBodyDescriptor {
+ public:
+  static_assert(WasmMemoryMapDescriptor::kStartOfStrongFieldsOffset ==
+                WasmMemoryMapDescriptor::kEndOfStrongFieldsOffset);
+
+  static inline int SizeOf(Tagged<Map> map, Tagged<HeapObject> object) {
+    return map->instance_size();
+  }
+};
+
 class WasmInstanceObject::BodyDescriptor final : public BodyDescriptorBase {
  public:
   template <typename ObjectVisitor>
@@ -1074,7 +1085,10 @@ class WasmTableObject::BodyDescriptor final : public BodyDescriptorBase {
   static inline void IterateBody(Tagged<Map> map, Tagged<HeapObject> obj,
                                  int object_size, ObjectVisitor* v) {
     IteratePointers(obj, JSObject::BodyDescriptor::kStartOffset,
-                    kTrustedDataOffset, v);
+                    kTrustedDispatchTableOffset, v);
+    IterateTrustedPointer(obj, kTrustedDispatchTableOffset, v,
+                          IndirectPointerMode::kStrong,
+                          kWasmDispatchTableIndirectPointerTag);
     IterateTrustedPointer(obj, kTrustedDataOffset, v,
                           IndirectPointerMode::kStrong,
                           kWasmTrustedInstanceDataIndirectPointerTag);
@@ -1130,7 +1144,9 @@ class WasmDispatchTable::BodyDescriptor final : public BodyDescriptorBase {
   template <typename ObjectVisitor>
   static inline void IterateBody(Tagged<Map> map, Tagged<HeapObject> obj,
                                  int object_size, ObjectVisitor* v) {
+    IterateSelfIndirectPointer(obj, kWasmDispatchTableIndirectPointerTag, v);
     IterateProtectedPointer(obj, kProtectedOffheapDataOffset, v);
+    IterateProtectedPointer(obj, kProtectedUsesOffset, v);
     int length = Cast<WasmDispatchTable>(obj)->length(kAcquireLoad);
     for (int i = 0; i < length; ++i) {
       IterateProtectedPointer(obj, OffsetOf(i) + kImplicitArgBias, v);
@@ -1344,8 +1360,11 @@ class Code::BodyDescriptor final : public BodyDescriptorBase {
 
     static_assert(Code::kEndOfStrongFieldsWithMainCageBaseOffset ==
                   Code::kInstructionStreamOffset);
-    static_assert(Code::kInstructionStreamOffset + kTaggedSize ==
-                  Code::kEndOfStrongFieldsOffset);
+
+#ifdef V8_ENABLE_LEAPTIERING
+    IterateJSDispatchEntry(obj, kDispatchHandleOffset, v);
+#endif  // V8_ENABLE_LEAPTIERING
+
     v->VisitInstructionStreamPointer(
         Cast<Code>(obj),
         obj->RawInstructionStreamField(kInstructionStreamOffset));
@@ -1578,6 +1597,25 @@ class TrustedWeakFixedArray::BodyDescriptor final
  public:
   static inline int SizeOf(Tagged<Map> map, Tagged<HeapObject> raw_object) {
     return UncheckedCast<TrustedWeakFixedArray>(raw_object)->AllocatedSize();
+  }
+};
+
+class ProtectedWeakFixedArray::BodyDescriptor final
+    : public BodyDescriptorBase {
+ public:
+  template <typename ObjectVisitor>
+  static inline void IterateBody(Tagged<Map> map, Tagged<HeapObject> obj,
+                                 int object_size, ObjectVisitor* v) {
+    Tagged<TrustedObject> host = Cast<TrustedObject>(obj);
+    for (int offset = OFFSET_OF_DATA_START(ProtectedWeakFixedArray);
+         offset < object_size; offset += kTaggedSize) {
+      v->VisitProtectedPointer(host,
+                               host->RawProtectedMaybeObjectField(offset));
+    }
+  }
+
+  static inline int SizeOf(Tagged<Map> map, Tagged<HeapObject> raw_object) {
+    return UncheckedCast<ProtectedWeakFixedArray>(raw_object)->AllocatedSize();
   }
 };
 

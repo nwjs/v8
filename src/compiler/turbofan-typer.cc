@@ -217,7 +217,7 @@ class Typer::Visitor : public Reducer {
       DECLARE_IMPOSSIBLE_CASE(ChangeInt64ToFloat64)
       DECLARE_IMPOSSIBLE_CASE(ChangeUint32ToFloat64)
       DECLARE_IMPOSSIBLE_CASE(TruncateFloat64ToFloat32)
-      DECLARE_IMPOSSIBLE_CASE(TruncateFloat64ToFloat16)
+      DECLARE_IMPOSSIBLE_CASE(TruncateFloat64ToFloat16RawBits)
       DECLARE_IMPOSSIBLE_CASE(TruncateInt64ToInt32)
       DECLARE_IMPOSSIBLE_CASE(RoundFloat64ToInt32)
       DECLARE_IMPOSSIBLE_CASE(RoundInt32ToFloat32)
@@ -1149,6 +1149,10 @@ Type Typer::Visitor::TypeMaybeGrowFastElements(Node* node) {
 
 Type Typer::Visitor::TypeTransitionElementsKind(Node* node) { UNREACHABLE(); }
 
+Type Typer::Visitor::TypeTransitionElementsKindOrCheckMap(Node* node) {
+  UNREACHABLE();
+}
+
 Type Typer::Visitor::TypeCheckpoint(Node* node) { UNREACHABLE(); }
 
 Type Typer::Visitor::TypeBeginRegion(Node* node) { UNREACHABLE(); }
@@ -1186,11 +1190,8 @@ Type Typer::Visitor::TypeCall(Node* node) { return Type::Any(); }
 
 Type Typer::Visitor::TypeFastApiCall(Node* node) {
   FastApiCallParameters const& op_params = FastApiCallParametersOf(node->op());
-  if (op_params.c_functions().empty()) {
-    return Type::Undefined();
-  }
 
-  const CFunctionInfo* c_signature = op_params.c_functions()[0].signature;
+  const CFunctionInfo* c_signature = op_params.c_function().signature;
   CTypeInfo return_type = c_signature->ReturnInfo();
 
   switch (return_type.GetType()) {
@@ -2442,6 +2443,10 @@ Type Typer::Visitor::TypeCompareMaps(Node* node) { return Type::Boolean(); }
 
 Type Typer::Visitor::TypeCheckNumber(Node* node) {
   return typer_->operation_typer_.CheckNumber(Operand(node, 0));
+}
+
+Type Typer::Visitor::TypeCheckNumberFitsInt32(Node* node) {
+  return typer_->operation_typer_.CheckNumberFitsInt32(Operand(node, 0));
 }
 
 Type Typer::Visitor::TypeCheckReceiver(Node* node) {

@@ -81,15 +81,15 @@ void JSObject::set_elements(Tagged<FixedArrayBase> value,
 }
 
 MaybeHandle<Object> JSReceiver::GetProperty(Isolate* isolate,
-                                            Handle<JSReceiver> receiver,
-                                            Handle<Name> name) {
+                                            DirectHandle<JSReceiver> receiver,
+                                            DirectHandle<Name> name) {
   LookupIterator it(isolate, receiver, name, receiver);
   if (!it.IsFound()) return it.factory()->undefined_value();
   return Object::GetProperty(&it);
 }
 
 MaybeHandle<Object> JSReceiver::GetElement(Isolate* isolate,
-                                           Handle<JSReceiver> receiver,
+                                           DirectHandle<JSReceiver> receiver,
                                            uint32_t index) {
   LookupIterator it(isolate, receiver, index, receiver);
   if (!it.IsFound()) return it.factory()->undefined_value();
@@ -97,16 +97,16 @@ MaybeHandle<Object> JSReceiver::GetElement(Isolate* isolate,
 }
 
 Handle<Object> JSReceiver::GetDataProperty(Isolate* isolate,
-                                           Handle<JSReceiver> object,
-                                           Handle<Name> name) {
+                                           DirectHandle<JSReceiver> object,
+                                           DirectHandle<Name> name) {
   LookupIterator it(isolate, object, name, object,
                     LookupIterator::PROTOTYPE_CHAIN_SKIP_INTERCEPTOR);
   if (!it.IsFound()) return it.factory()->undefined_value();
   return GetDataProperty(&it);
 }
 
-MaybeHandle<JSPrototype> JSReceiver::GetPrototype(Isolate* isolate,
-                                                  Handle<JSReceiver> receiver) {
+MaybeDirectHandle<JSPrototype> JSReceiver::GetPrototype(
+    Isolate* isolate, DirectHandle<JSReceiver> receiver) {
   // We don't expect access checks to be needed on JSProxy objects.
   DCHECK(!IsAccessCheckNeeded(*receiver) || IsJSObject(*receiver));
 
@@ -119,15 +119,15 @@ MaybeHandle<JSPrototype> JSReceiver::GetPrototype(Isolate* isolate,
 }
 
 MaybeHandle<Object> JSReceiver::GetProperty(Isolate* isolate,
-                                            Handle<JSReceiver> receiver,
+                                            DirectHandle<JSReceiver> receiver,
                                             const char* name) {
-  Handle<String> str = isolate->factory()->InternalizeUtf8String(name);
+  DirectHandle<String> str = isolate->factory()->InternalizeUtf8String(name);
   return GetProperty(isolate, receiver, str);
 }
 
 // static
 V8_WARN_UNUSED_RESULT MaybeHandle<FixedArray> JSReceiver::OwnPropertyKeys(
-    Isolate* isolate, Handle<JSReceiver> object) {
+    Isolate* isolate, DirectHandle<JSReceiver> object) {
   return KeyAccumulator::GetKeys(isolate, object, KeyCollectionMode::kOwnOnly,
                                  ALL_PROPERTIES,
                                  GetKeysConversion::kConvertToString);
@@ -160,7 +160,8 @@ ACCESSORS(JSReceiver, raw_properties_or_hash, Tagged<Object>,
 RELAXED_ACCESSORS(JSReceiver, raw_properties_or_hash, Tagged<Object>,
                   kPropertiesOrHashOffset)
 
-void JSObject::EnsureCanContainHeapObjectElements(Handle<JSObject> object) {
+void JSObject::EnsureCanContainHeapObjectElements(
+    DirectHandle<JSObject> object) {
   JSObject::ValidateElements(*object);
   ElementsKind elements_kind = object->map()->elements_kind();
   if (!IsObjectElementsKind(elements_kind)) {
@@ -173,8 +174,8 @@ void JSObject::EnsureCanContainHeapObjectElements(Handle<JSObject> object) {
 }
 
 template <typename TSlot>
-void JSObject::EnsureCanContainElements(Handle<JSObject> object, TSlot objects,
-                                        uint32_t count,
+void JSObject::EnsureCanContainElements(DirectHandle<JSObject> object,
+                                        TSlot objects, uint32_t count,
                                         EnsureElementsMode mode) {
   static_assert(std::is_same<TSlot, FullObjectSlot>::value ||
                     std::is_same<TSlot, ObjectSlot>::value,
@@ -186,7 +187,7 @@ void JSObject::EnsureCanContainElements(Handle<JSObject> object, TSlot objects,
     DCHECK(mode != ALLOW_COPIED_DOUBLE_ELEMENTS);
     bool is_holey = IsHoleyElementsKind(current_kind);
     if (current_kind == HOLEY_ELEMENTS) return;
-    Tagged<Object> the_hole = object->GetReadOnlyRoots().the_hole_value();
+    Tagged<Object> the_hole = GetReadOnlyRoots().the_hole_value();
     for (uint32_t i = 0; i < count; ++i, ++objects) {
       Tagged<Object> current = *objects;
       if (current == the_hole) {
@@ -215,11 +216,11 @@ void JSObject::EnsureCanContainElements(Handle<JSObject> object, TSlot objects,
   }
 }
 
-void JSObject::EnsureCanContainElements(Handle<JSObject> object,
-                                        Handle<FixedArrayBase> elements,
+void JSObject::EnsureCanContainElements(DirectHandle<JSObject> object,
+                                        DirectHandle<FixedArrayBase> elements,
                                         uint32_t length,
                                         EnsureElementsMode mode) {
-  ReadOnlyRoots roots = object->GetReadOnlyRoots();
+  ReadOnlyRoots roots = GetReadOnlyRoots();
   if (elements->map() != roots.fixed_double_array_map()) {
     DCHECK(elements->map() == roots.fixed_array_map() ||
            elements->map() == roots.fixed_cow_array_map());
@@ -615,6 +616,20 @@ void JSObject::InitializeBody(Tagged<Map> map, int start_offset,
   }
 }
 
+template <typename T, template <typename> typename HandleType>
+  requires(std::is_convertible_v<HandleType<T>, DirectHandle<T>>)
+inline typename HandleType<Object>::MaybeType
+JSObject::DefineOwnPropertyIgnoreAttributes(LookupIterator* it,
+                                            HandleType<T> value,
+                                            PropertyAttributes attributes,
+                                            AccessorInfoHandling handling,
+                                            EnforceDefineSemantics semantics) {
+  MAYBE_RETURN_NULL(DefineOwnPropertyIgnoreAttributes(
+      it, value, attributes, Just(ShouldThrow::kThrowOnError), handling,
+      semantics));
+  return value;
+}
+
 TQ_OBJECT_CONSTRUCTORS_IMPL(JSExternalObject)
 
 EXTERNAL_POINTER_ACCESSORS(JSExternalObject, value, void*, kValueOffset,
@@ -716,11 +731,11 @@ DEF_GETTER(JSObject, GetElementsKind, ElementsKind) {
   if (ElementsAreSafeToExamine(cage_base)) {
     Tagged<Map> map = fixed_array->map();
     if (IsSmiOrObjectElementsKind(kind)) {
-      CHECK(map == GetReadOnlyRoots(cage_base).fixed_array_map() ||
-            map == GetReadOnlyRoots(cage_base).fixed_cow_array_map());
+      CHECK(map == GetReadOnlyRoots().fixed_array_map() ||
+            map == GetReadOnlyRoots().fixed_cow_array_map());
     } else if (IsDoubleElementsKind(kind)) {
       CHECK(IsFixedDoubleArray(fixed_array, cage_base) ||
-            fixed_array == GetReadOnlyRoots(cage_base).empty_fixed_array());
+            fixed_array == GetReadOnlyRoots().empty_fixed_array());
     } else if (kind == DICTIONARY_ELEMENTS) {
       CHECK(IsFixedArray(fixed_array, cage_base));
       CHECK(IsNumberDictionary(fixed_array, cage_base));
@@ -884,7 +899,7 @@ DEF_GETTER(JSReceiver, property_dictionary, Tagged<NameDictionary>) {
 
   Tagged<Object> prop = raw_properties_or_hash(cage_base);
   if (IsSmi(prop)) {
-    return GetReadOnlyRoots(cage_base).empty_property_dictionary();
+    return GetReadOnlyRoots().empty_property_dictionary();
   }
   return Cast<NameDictionary>(prop);
 }
@@ -896,7 +911,7 @@ DEF_GETTER(JSReceiver, property_dictionary_swiss, Tagged<SwissNameDictionary>) {
 
   Tagged<Object> prop = raw_properties_or_hash(cage_base);
   if (IsSmi(prop)) {
-    return GetReadOnlyRoots(cage_base).empty_swiss_property_dictionary();
+    return GetReadOnlyRoots().empty_swiss_property_dictionary();
   }
   return Cast<SwissNameDictionary>(prop);
 }
@@ -906,8 +921,8 @@ DEF_GETTER(JSReceiver, property_dictionary_swiss, Tagged<SwissNameDictionary>) {
 DEF_GETTER(JSReceiver, property_array, Tagged<PropertyArray>) {
   DCHECK(HasFastProperties(cage_base));
   Tagged<Object> prop = raw_properties_or_hash(cage_base);
-  if (IsSmi(prop) || prop == GetReadOnlyRoots(cage_base).empty_fixed_array()) {
-    return GetReadOnlyRoots(cage_base).empty_property_array();
+  if (IsSmi(prop) || prop == GetReadOnlyRoots().empty_fixed_array()) {
+    return GetReadOnlyRoots().empty_property_array();
   }
   return Cast<PropertyArray>(prop);
 }
@@ -929,15 +944,16 @@ MaybeHandle<NativeContext> JSReceiver::GetCreationContext(Isolate* isolate) {
   return handle(maybe_context.value(), isolate);
 }
 
-Maybe<bool> JSReceiver::HasProperty(Isolate* isolate, Handle<JSReceiver> object,
-                                    Handle<Name> name) {
+Maybe<bool> JSReceiver::HasProperty(Isolate* isolate,
+                                    DirectHandle<JSReceiver> object,
+                                    DirectHandle<Name> name) {
   PropertyKey key(isolate, name);
   LookupIterator it(isolate, object, key, object);
   return HasProperty(&it);
 }
 
 Maybe<bool> JSReceiver::HasOwnProperty(Isolate* isolate,
-                                       Handle<JSReceiver> object,
+                                       DirectHandle<JSReceiver> object,
                                        uint32_t index) {
   if (IsJSObject(*object)) {  // Shortcut.
     LookupIterator it(isolate, object, index, object, LookupIterator::OWN);
@@ -945,50 +961,48 @@ Maybe<bool> JSReceiver::HasOwnProperty(Isolate* isolate,
   }
 
   Maybe<PropertyAttributes> attributes =
-      JSReceiver::GetOwnPropertyAttributes(object, index);
+      JSReceiver::GetOwnPropertyAttributes(isolate, object, index);
   MAYBE_RETURN(attributes, Nothing<bool>());
   return Just(attributes.FromJust() != ABSENT);
 }
 
 Maybe<PropertyAttributes> JSReceiver::GetPropertyAttributes(
-    Handle<JSReceiver> object, Handle<Name> name) {
-  Isolate* isolate = object->GetIsolate();
+    Isolate* isolate, DirectHandle<JSReceiver> object,
+    DirectHandle<Name> name) {
   PropertyKey key(isolate, name);
   LookupIterator it(isolate, object, key, object);
   return GetPropertyAttributes(&it);
 }
 
 Maybe<PropertyAttributes> JSReceiver::GetOwnPropertyAttributes(
-    Handle<JSReceiver> object, Handle<Name> name) {
-  Isolate* isolate = object->GetIsolate();
+    Isolate* isolate, DirectHandle<JSReceiver> object,
+    DirectHandle<Name> name) {
   PropertyKey key(isolate, name);
   LookupIterator it(isolate, object, key, object, LookupIterator::OWN);
   return GetPropertyAttributes(&it);
 }
 
 Maybe<PropertyAttributes> JSReceiver::GetOwnPropertyAttributes(
-    Handle<JSReceiver> object, uint32_t index) {
-  LookupIterator it(object->GetIsolate(), object, index, object,
-                    LookupIterator::OWN);
+    Isolate* isolate, DirectHandle<JSReceiver> object, uint32_t index) {
+  LookupIterator it(isolate, object, index, object, LookupIterator::OWN);
   return GetPropertyAttributes(&it);
 }
 
-Maybe<bool> JSReceiver::HasElement(Isolate* isolate, Handle<JSReceiver> object,
+Maybe<bool> JSReceiver::HasElement(Isolate* isolate,
+                                   DirectHandle<JSReceiver> object,
                                    uint32_t index) {
   LookupIterator it(isolate, object, index, object);
   return HasProperty(&it);
 }
 
 Maybe<PropertyAttributes> JSReceiver::GetElementAttributes(
-    Handle<JSReceiver> object, uint32_t index) {
-  Isolate* isolate = object->GetIsolate();
+    Isolate* isolate, DirectHandle<JSReceiver> object, uint32_t index) {
   LookupIterator it(isolate, object, index, object);
   return GetPropertyAttributes(&it);
 }
 
 Maybe<PropertyAttributes> JSReceiver::GetOwnElementAttributes(
-    Handle<JSReceiver> object, uint32_t index) {
-  Isolate* isolate = object->GetIsolate();
+    Isolate* isolate, DirectHandle<JSReceiver> object, uint32_t index) {
   LookupIterator it(isolate, object, index, object, LookupIterator::OWN);
   return GetPropertyAttributes(&it);
 }

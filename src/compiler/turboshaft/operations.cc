@@ -363,6 +363,8 @@ std::ostream& operator<<(std::ostream& os, ChangeOp::Kind kind) {
       return os << "FloatConversion";
     case ChangeOp::Kind::kJSFloatTruncate:
       return os << "JSFloatTruncate";
+    case ChangeOp::Kind::kJSFloat16TruncateWithBitcast:
+      return os << "JSFloat16TruncateWithBitcast";
     case ChangeOp::Kind::kSignedFloatTruncateOverflowToMin:
       return os << "SignedFloatTruncateOverflowToMin";
     case ChangeOp::Kind::kUnsignedFloatTruncateOverflowToMin:
@@ -757,6 +759,18 @@ void FrameStateOp::PrintOptions(std::ostream& os) const {
         os << '$' << id;
         break;
       }
+      case FrameStateData::Instr::kDematerializedStringConcat: {
+        uint32_t id;
+        it.ConsumeDematerializedStringConcat(&id);
+        os << "£" << id << "DematerializedStringConcat";
+        break;
+      }
+      case FrameStateData::Instr::kDematerializedStringConcatReference: {
+        uint32_t id;
+        it.ConsumeDematerializedStringConcatReference(&id);
+        os << "£" << id;
+        break;
+      }
       case FrameStateData::Instr::kArgumentsElements: {
         CreateArgumentsType type;
         it.ConsumeArgumentsElements(&type);
@@ -811,6 +825,16 @@ void FrameStateOp::Validate(const Graph& graph) const {
       case FrameStateData::Instr::kDematerializedObjectReference: {
         uint32_t id;
         it.ConsumeDematerializedObjectReference(&id);
+        break;
+      }
+      case FrameStateData::Instr::kDematerializedStringConcat: {
+        uint32_t id;
+        it.ConsumeDematerializedStringConcat(&id);
+        break;
+      }
+      case FrameStateData::Instr::kDematerializedStringConcatReference: {
+        uint32_t id;
+        it.ConsumeDematerializedStringConcatReference(&id);
         break;
       }
       case FrameStateData::Instr::kArgumentsElements: {
@@ -1106,6 +1130,8 @@ std::ostream& operator<<(std::ostream& os, ObjectIsOp::Kind kind) {
       return os << "NonCallable";
     case ObjectIsOp::Kind::kNumber:
       return os << "Number";
+    case ObjectIsOp::Kind::kNumberFitsInt32:
+      return os << "NumberFitsInt32";
     case ObjectIsOp::Kind::kNumberOrBigInt:
       return os << "NumberOrBigInt";
     case ObjectIsOp::Kind::kReceiver:
@@ -1147,6 +1173,8 @@ std::ostream& operator<<(std::ostream& os, NumericKind kind) {
       return os << "Integer";
     case NumericKind::kSafeInteger:
       return os << "SafeInteger";
+    case NumericKind::kInt32:
+      return os << "kInt32";
     case NumericKind::kSmi:
       return os << "kSmi";
     case NumericKind::kMinusZero:
@@ -1867,12 +1895,13 @@ std::string Operation::ToString() const {
   return ss.str();
 }
 
-base::LazyMutex SupportedOperations::mutex_ = LAZY_MUTEX_INITIALIZER;
+base::LazySpinningMutex SupportedOperations::mutex_ =
+    LAZY_SELFISH_MUTEX_INITIALIZER;
 SupportedOperations SupportedOperations::instance_;
 bool SupportedOperations::initialized_;
 
 void SupportedOperations::Initialize() {
-  base::MutexGuard lock(mutex_.Pointer());
+  base::SpinningMutexGuard lock(mutex_.Pointer());
   if (initialized_) return;
   initialized_ = true;
 

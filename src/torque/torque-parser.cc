@@ -74,16 +74,15 @@ class BuildFlags : public base::ContextualClass<BuildFlags> {
 #endif
 #ifdef V8_ENABLE_WEBASSEMBLY
     build_flags_["V8_ENABLE_WEBASSEMBLY"] = true;
-    build_flags_["V8_ENABLE_WASM_CODE_POINTER_TABLE"] =
-        V8_ENABLE_WASM_CODE_POINTER_TABLE_BOOL;
     build_flags_["WASM_CODE_POINTER_NEEDS_PADDING"] =
-        V8_ENABLE_WASM_CODE_POINTER_TABLE_BOOL &&
         TargetArchitecture::TaggedSize() == 8;
 #else
     build_flags_["V8_ENABLE_WEBASSEMBLY"] = false;
 #endif
     build_flags_["V8_ENABLE_SANDBOX"] = V8_ENABLE_SANDBOX_BOOL;
     build_flags_["V8_ENABLE_LEAPTIERING"] = V8_ENABLE_LEAPTIERING_BOOL;
+    build_flags_["V8_ENABLE_LEAPTIERING_TAGGED_SIZE_8_BYTES"] =
+        V8_ENABLE_LEAPTIERING_BOOL && build_flags_["TAGGED_SIZE_8_BYTES"];
     build_flags_["DEBUG"] = DEBUG_BOOL;
 #ifdef V8_ENABLE_DRUMBRAKE
     build_flags_["V8_ENABLE_DRUMBRAKE"] = true;
@@ -954,10 +953,13 @@ int GetAnnotationValue(const AnnotationSet& annotations, const char* name,
 
 std::optional<ParseResult> MakeTorqueBuiltinDeclaration(
     ParseResultIterator* child_results) {
-  AnnotationSet annotations(
-      child_results, {ANNOTATION_CUSTOM_INTERFACE_DESCRIPTOR}, {ANNOTATION_IF});
+  AnnotationSet annotations(child_results,
+                            {ANNOTATION_CUSTOM_INTERFACE_DESCRIPTOR},
+                            {ANNOTATION_IF, ANNOTATION_INCREMENT_USE_COUNTER});
   const bool has_custom_interface_descriptor =
       annotations.Contains(ANNOTATION_CUSTOM_INTERFACE_DESCRIPTOR);
+  std::optional<std::string> use_counter_name =
+      annotations.GetStringParam(ANNOTATION_INCREMENT_USE_COUNTER);
   auto transitioning = child_results->NextAs<bool>();
   auto javascript_linkage = child_results->NextAs<bool>();
   auto name = child_results->NextAs<Identifier*>();
@@ -973,13 +975,16 @@ std::optional<ParseResult> MakeTorqueBuiltinDeclaration(
   auto body = child_results->NextAs<std::optional<Statement*>>();
   CallableDeclaration* declaration = MakeNode<TorqueBuiltinDeclaration>(
       transitioning, javascript_linkage, name, args, return_type,
-      has_custom_interface_descriptor, body);
+      has_custom_interface_descriptor, use_counter_name, body);
   Declaration* result = declaration;
   if (generic_parameters.empty()) {
     if (!body) ReportError("A non-generic declaration needs a body.");
   } else {
     result = MakeNode<GenericCallableDeclaration>(std::move(generic_parameters),
                                                   declaration);
+  }
+  if (use_counter_name && !body) {
+    ReportError("@incrementUseCounter needs a body.");
   }
   std::vector<Declaration*> results;
   if (std::optional<std::string> condition =

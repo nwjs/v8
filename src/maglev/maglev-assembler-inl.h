@@ -73,6 +73,9 @@ template <>
 struct CopyForDeferredHelper<Register>
     : public CopyForDeferredByValue<Register> {};
 template <>
+struct CopyForDeferredHelper<std::optional<Register>>
+    : public CopyForDeferredByValue<std::optional<Register>> {};
+template <>
 struct CopyForDeferredHelper<DoubleRegister>
     : public CopyForDeferredByValue<DoubleRegister> {};
 // Bytecode offsets are copied by value.
@@ -412,6 +415,12 @@ inline void MaglevAssembler::LoadHeapNumberOrOddballValue(DoubleRegister result,
   static_assert(offsetof(HeapNumber, value_) ==
                 offsetof(Oddball, to_number_raw_));
   LoadHeapNumberValue(result, object);
+}
+
+inline void MaglevAssembler::StoreHeapNumberValue(DoubleRegister value,
+                                                  Register heap_number) {
+  StoreFloat64(FieldMemOperand(heap_number, offsetof(HeapNumber, value_)),
+               value);
 }
 
 namespace detail {
@@ -787,7 +796,9 @@ inline void MaglevAssembler::SmiTagInt32AndJumpIfSuccess(
 
 inline void MaglevAssembler::UncheckedSmiTagInt32(Register dst, Register src) {
   SmiTagInt32AndSetFlags(dst, src);
-  Assert(kNoOverflow, AbortReason::kInputDoesNotFitSmi);
+  if (!SmiValuesAre32Bits()) {
+    Assert(kNoOverflow, AbortReason::kInputDoesNotFitSmi);
+  }
 }
 
 inline void MaglevAssembler::UncheckedSmiTagInt32(Register reg) {
@@ -800,7 +811,9 @@ inline void MaglevAssembler::SmiTagUint32AndJumpIfFail(
   CompareInt32AndJumpIf(src, Smi::kMaxValue, kUnsignedGreaterThan, fail,
                         distance);
   SmiTagInt32AndSetFlags(dst, src);
-  Assert(kNoOverflow, AbortReason::kInputDoesNotFitSmi);
+  if (!SmiValuesAre32Bits()) {
+    Assert(kNoOverflow, AbortReason::kInputDoesNotFitSmi);
+  }
 }
 
 inline void MaglevAssembler::SmiTagUint32AndJumpIfFail(
@@ -828,7 +841,9 @@ inline void MaglevAssembler::UncheckedSmiTagUint32(Register dst, Register src) {
                           AbortReason::kInputDoesNotFitSmi);
   }
   SmiTagInt32AndSetFlags(dst, src);
-  Assert(kNoOverflow, AbortReason::kInputDoesNotFitSmi);
+  if (!SmiValuesAre32Bits()) {
+    Assert(kNoOverflow, AbortReason::kInputDoesNotFitSmi);
+  }
 }
 
 inline void MaglevAssembler::UncheckedSmiTagUint32(Register reg) {

@@ -16,6 +16,7 @@
 #include "src/handles/handles-inl.h"
 #include "src/heap/gc-tracer-inl.h"
 #include "src/heap/gc-tracer.h"
+#include "src/heap/heap-controller.h"
 #include "src/heap/heap-layout-inl.h"
 #include "src/heap/heap-layout.h"
 #include "src/heap/marking-state-inl.h"
@@ -25,6 +26,7 @@
 #include "src/heap/safepoint.h"
 #include "src/heap/spaces-inl.h"
 #include "src/heap/trusted-range.h"
+#include "src/objects/fixed-array.h"
 #include "src/objects/free-space-inl.h"
 #include "src/objects/js-array-buffer-inl.h"
 #include "src/sandbox/external-pointer-table.h"
@@ -40,27 +42,27 @@ using HeapTest = TestWithHeapInternalsAndContext;
 TEST(Heap, YoungGenerationSizeFromOldGenerationSize) {
   const size_t pm = i::Heap::kPointerMultiplier;
   const size_t hlm = i::Heap::kHeapLimitMultiplier;
-  v8_flags.scavenger_max_new_space_capacity_mb = 64;
 
   // Low memory
   ASSERT_EQ((v8_flags.minor_ms ? 4 : 3) * 512u * pm * KB,
             i::Heap::YoungGenerationSizeFromOldGenerationSize(128u * hlm * MB));
   // High memory
-  ASSERT_EQ(v8_flags.minor_ms ? 2 * i::Heap::DefaultMaxSemiSpaceSize()
-                              : 3 * 16u / hlm * pm * MB,
-            i::Heap::YoungGenerationSizeFromOldGenerationSize(256u * hlm * MB));
-  ASSERT_EQ(v8_flags.minor_ms ? 2 * i::Heap::DefaultMaxSemiSpaceSize()
-                              : 3 * 32u / hlm * pm * MB,
-            i::Heap::YoungGenerationSizeFromOldGenerationSize(512u * hlm * MB));
-  ASSERT_EQ(v8_flags.minor_ms ? 2 * i::Heap::DefaultMaxSemiSpaceSize()
-                              : 3 * 64u / hlm * pm * MB,
-            i::Heap::YoungGenerationSizeFromOldGenerationSize(1u * hlm * GB));
+  ASSERT_EQ((i::Heap::DefaultMaxSemiSpaceSize() / 4) *
+                (v8_flags.minor_ms ? (2 * 4) : 3),
+            i::Heap::YoungGenerationSizeFromOldGenerationSize(
+                V8HeapTrait::kMaxSize / 4));
+  ASSERT_EQ((i::Heap::DefaultMaxSemiSpaceSize() / 2) *
+                (v8_flags.minor_ms ? (2 * 2) : 3),
+            i::Heap::YoungGenerationSizeFromOldGenerationSize(
+                V8HeapTrait::kMaxSize / 2));
+  ASSERT_EQ(
+      i::Heap::DefaultMaxSemiSpaceSize() * (v8_flags.minor_ms ? 2 : 3),
+      i::Heap::YoungGenerationSizeFromOldGenerationSize(V8HeapTrait::kMaxSize));
 }
 
 TEST(Heap, GenerationSizesFromHeapSize) {
   const size_t pm = i::Heap::kPointerMultiplier;
   const size_t hlm = i::Heap::kHeapLimitMultiplier;
-  v8_flags.scavenger_max_new_space_capacity_mb = 64;
 
   size_t old, young;
 
@@ -84,40 +86,35 @@ TEST(Heap, GenerationSizesFromHeapSize) {
 
   // High memory
   i::Heap::GenerationSizesFromHeapSize(
-      256u * hlm * MB + (v8_flags.minor_ms
-                             ? 2 * i::Heap::DefaultMaxSemiSpaceSize()
-                             : 3 * 16 / hlm * pm * MB),
+      V8HeapTrait::kMaxSize / 4 + (i::Heap::DefaultMaxSemiSpaceSize() / 4) *
+                                      (v8_flags.minor_ms ? (2 * 4) : 3),
       &young, &old);
-  ASSERT_EQ(256u * hlm * MB, old);
-  ASSERT_EQ(v8_flags.minor_ms ? 2 * i::Heap::DefaultMaxSemiSpaceSize()
-                              : 3 * 16 / hlm * pm * MB,
+  ASSERT_EQ(V8HeapTrait::kMaxSize / 4, old);
+  ASSERT_EQ((i::Heap::DefaultMaxSemiSpaceSize() / 4) *
+                (v8_flags.minor_ms ? (2 * 4) : 3),
             young);
 
   i::Heap::GenerationSizesFromHeapSize(
-      512u * hlm * MB + (v8_flags.minor_ms
-                             ? 2 * i::Heap::DefaultMaxSemiSpaceSize()
-                             : 3 * 32 / hlm * pm * MB),
+      V8HeapTrait::kMaxSize / 2 + (i::Heap::DefaultMaxSemiSpaceSize() / 2) *
+                                      (v8_flags.minor_ms ? (2 * 2) : 3),
       &young, &old);
-  ASSERT_EQ(512u * hlm * MB, old);
-  ASSERT_EQ(v8_flags.minor_ms ? 2 * i::Heap::DefaultMaxSemiSpaceSize()
-                              : 3 * 32U / hlm * pm * MB,
+  ASSERT_EQ(V8HeapTrait::kMaxSize / 2, old);
+  ASSERT_EQ((i::Heap::DefaultMaxSemiSpaceSize() / 2) *
+                (v8_flags.minor_ms ? (2 * 2) : 3),
             young);
 
   i::Heap::GenerationSizesFromHeapSize(
-      1u * hlm * GB + (v8_flags.minor_ms
-                           ? 2 * i::Heap::DefaultMaxSemiSpaceSize()
-                           : 3 * 64 / hlm * pm * MB),
+      V8HeapTrait::kMaxSize +
+          i::Heap::DefaultMaxSemiSpaceSize() * (v8_flags.minor_ms ? 2 : 3),
       &young, &old);
-  ASSERT_EQ(1u * hlm * GB, old);
-  ASSERT_EQ(v8_flags.minor_ms ? 2 * i::Heap::DefaultMaxSemiSpaceSize()
-                              : 3 * 64U / hlm * pm * MB,
+  ASSERT_EQ(V8HeapTrait::kMaxSize, old);
+  ASSERT_EQ(i::Heap::DefaultMaxSemiSpaceSize() * (v8_flags.minor_ms ? 2 : 3),
             young);
 }
 
 TEST(Heap, HeapSizeFromPhysicalMemory) {
   const size_t pm = i::Heap::kPointerMultiplier;
   const size_t hlm = i::Heap::kHeapLimitMultiplier;
-  v8_flags.scavenger_max_new_space_capacity_mb = 64;
 
   // The expected value is old_generation_size + semi_space_multiplier *
   // semi_space_size.
@@ -128,21 +125,21 @@ TEST(Heap, HeapSizeFromPhysicalMemory) {
   ASSERT_EQ(128 * hlm * MB + (v8_flags.minor_ms ? 4 : 3) * 512 * pm * KB,
             i::Heap::HeapSizeFromPhysicalMemory(512u * MB));
   // High memory
-  ASSERT_EQ(256 * hlm * MB + (v8_flags.minor_ms
-                                  ? 2 * i::Heap::DefaultMaxSemiSpaceSize()
-                                  : 3 * 16 / hlm * pm * MB),
-            i::Heap::HeapSizeFromPhysicalMemory(1u * GB));
-  ASSERT_EQ(512 * hlm * MB + (v8_flags.minor_ms
-                                  ? 2 * i::Heap::DefaultMaxSemiSpaceSize()
-                                  : 3 * 32 / hlm * pm * MB),
-            i::Heap::HeapSizeFromPhysicalMemory(2u * GB));
   ASSERT_EQ(
-      1 * hlm * GB + (v8_flags.minor_ms ? 2 * i::Heap::DefaultMaxSemiSpaceSize()
-                                        : 3 * 64 / hlm * pm * MB),
+      V8HeapTrait::kMaxSize / 4 + (i::Heap::DefaultMaxSemiSpaceSize() / 4) *
+                                      (v8_flags.minor_ms ? (2 * 4) : 3),
+      i::Heap::HeapSizeFromPhysicalMemory(1u * GB));
+  ASSERT_EQ(
+      V8HeapTrait::kMaxSize / 2 + (i::Heap::DefaultMaxSemiSpaceSize() / 2) *
+                                      (v8_flags.minor_ms ? (2 * 2) : 3),
+      i::Heap::HeapSizeFromPhysicalMemory(2u * GB));
+  ASSERT_EQ(
+      V8HeapTrait::kMaxSize +
+          i::Heap::DefaultMaxSemiSpaceSize() * (v8_flags.minor_ms ? 2 : 3),
       i::Heap::HeapSizeFromPhysicalMemory(static_cast<uint64_t>(4u) * GB));
   ASSERT_EQ(
-      1 * hlm * GB + (v8_flags.minor_ms ? 2 * i::Heap::DefaultMaxSemiSpaceSize()
-                                        : 3 * 64 / hlm * pm * MB),
+      V8HeapTrait::kMaxSize +
+          i::Heap::DefaultMaxSemiSpaceSize() * (v8_flags.minor_ms ? 2 : 3),
       i::Heap::HeapSizeFromPhysicalMemory(static_cast<uint64_t>(8u) * GB));
 }
 
@@ -179,8 +176,9 @@ TEST_F(HeapTest, ExternalLimitDefault) {
 }
 
 TEST_F(HeapTest, ExternalLimitStaysAboveDefaultForExplicitHandling) {
-  v8_isolate()->AdjustAmountOfExternalAllocatedMemory(+10 * MB);
-  v8_isolate()->AdjustAmountOfExternalAllocatedMemory(-10 * MB);
+  v8::ExternalMemoryAccounter accounter;
+  accounter.Increase(v8_isolate(), 10 * MB);
+  accounter.Decrease(v8_isolate(), 10 * MB);
   Heap* heap = i_isolate()->heap();
   EXPECT_GE(heap->external_memory_soft_limit(), kExternalAllocationSoftLimit);
 }
@@ -461,7 +459,11 @@ TEST_F(HeapTest, RememberedSet_InsertOnPromotingObjectToOld) {
 
   // Promote 'arr' into old, its element is still in new, the old to new
   // refs are inserted into the remembered sets during GC.
-  InvokeMinorGC();
+  {
+    // CSS prevents promoting objects to old space.
+    DisableConservativeStackScanningScopeForTesting no_stack_scanning(heap);
+    InvokeMinorGC();
+  }
   heap->EnsureSweepingCompleted(Heap::SweepingForcedFinalizationMode::kV8Only);
 
   CHECK(heap->InOldSpace(*arr));
@@ -787,7 +789,7 @@ TEST_F(HeapTest, Regress364396306) {
       iso->factory()->NewExternal(external_int);
       CHECK_EQ(1, space->NumSegmentsForTesting());
       // Allocate an entry on a new segment that will later be evacuated.
-      Handle<JSObject> to_be_evacuated =
+      DirectHandle<JSObject> to_be_evacuated =
           iso->factory()->NewExternal(external_int);
       CHECK_EQ(2, space->NumSegmentsForTesting());
       CHECK(HeapLayout::InYoungGeneration(*to_be_evacuated));
@@ -828,6 +830,54 @@ TEST_F(HeapTest, Regress364396306) {
   delete external_int;
 }
 #endif  // defined(V8_COMPRESS_POINTERS) && defined(V8_ENABLE_SANDBOX)
+
+TEST_F(HeapTest, PinningScavengerDoesntMoveObjectReachableFromStack) {
+  if (v8_flags.single_generation) return;
+  if (v8_flags.minor_ms) return;
+  if (!v8_flags.scavenger_pinning_objects) return;
+  ManualGCScope manual_gc_scope(isolate());
+
+  DirectHandle<HeapObject> number =
+      isolate()->factory()->NewHeapNumber<AllocationType::kYoung>(42);
+
+  Address number_address = number->address();
+
+  CHECK(HeapLayout::InYoungGeneration(*number));
+
+  for (int i = 0; i < 10; i++) {
+    InvokeMinorGC();
+    CHECK(HeapLayout::InYoungGeneration(*number));
+    CHECK_EQ(number_address, number->address());
+  }
+
+  // `number` is already in the intermediate generation. A stackless GC should
+  // now move it to old gen.
+  {
+    DisableConservativeStackScanningScopeForTesting no_stack_scanning(
+        isolate()->heap());
+    InvokeMinorGC();
+  }
+  CHECK(!HeapLayout::InYoungGeneration(*number));
+  CHECK_NE(number_address, number->address());
+}
+
+TEST_F(HeapTest, PinningScavengerObjectWithSelfReference) {
+  if (v8_flags.single_generation) return;
+  if (v8_flags.minor_ms) return;
+  if (!v8_flags.scavenger_pinning_objects) return;
+  ManualGCScope manual_gc_scope(isolate());
+
+  static constexpr int kArraySize = 10;
+  DirectHandle<FixedArray> array =
+      isolate()->factory()->NewFixedArray(kArraySize, AllocationType::kYoung);
+  CHECK(HeapLayout::InYoungGeneration(*array));
+
+  for (int i = 0; i < kArraySize; i++) {
+    array->set(i, *array);
+  }
+
+  InvokeMinorGC();
+}
 
 }  // namespace internal
 }  // namespace v8

@@ -58,6 +58,7 @@
 #include "src/objects/swiss-name-dictionary.h"
 #include "src/objects/tagged.h"
 #include "src/objects/turbofan-types.h"
+#include "v8-primitive.h"
 
 #ifdef V8_ENABLE_WEBASSEMBLY
 #include "src/wasm/wasm-objects.h"
@@ -335,10 +336,11 @@ class ConditionWithHint final {
       BranchHint hint = BranchHint::kNone)  // NOLINT(runtime/explicit)
       : condition_(condition), hint_(hint) {}
 
-  template <typename T, typename = std::enable_if_t<std::is_same_v<T, OpIndex>>>
+  template <typename T>
   ConditionWithHint(
       T condition,
       BranchHint hint = BranchHint::kNone)  // NOLINT(runtime/explicit)
+    requires(std::is_same_v<T, OpIndex>)
       : ConditionWithHint(V<Word32>{condition}, hint) {}
 
   V<Word32> condition() const { return condition_; }
@@ -853,23 +855,23 @@ class Var : protected Variable {
   V<T> Get() const { return assembler_.GetVariable(*this); }
 
   void operator=(value_type new_value) { Set(new_value); }
-  template <typename U,
-            typename = std::enable_if_t<
-                v_traits<U>::template implicitly_constructible_from<T>::value>>
-  operator V<U>() const {
+  template <typename U>
+  operator V<U>() const
+    requires v_traits<U>::template
+  implicitly_constructible_from<T>::value {
     return Get();
   }
-  template <typename U,
-            typename = std::enable_if_t<
-                v_traits<U>::template implicitly_constructible_from<T>::value>>
-  operator OptionalV<U>() const {
+  template <typename U>
+  operator OptionalV<U>() const
+    requires v_traits<U>::template
+  implicitly_constructible_from<T>::value {
     return Get();
   }
-  template <typename U,
-            typename = std::enable_if_t<
-                const_or_v_exists_v<U> &&
-                v_traits<U>::template implicitly_constructible_from<T>::value>>
-  operator ConstOrV<U>() const {
+  template <typename U>
+  operator ConstOrV<U>() const
+    requires(const_or_v_exists_v<U> &&
+             v_traits<U>::template implicitly_constructible_from<T>::value)
+  {
     return Get();
   }
   operator OpIndex() const { return Get(); }
@@ -1158,7 +1160,7 @@ class GenericReducerBase : public ReducerBaseForwarder<Next> {
     return new_opindex;
   }
 
-  OpIndex REDUCE(Branch)(OpIndex condition, Block* if_true, Block* if_false,
+  V<None> REDUCE(Branch)(V<Word32> condition, Block* if_true, Block* if_false,
                          BranchHint hint) {
     // There should never be a good reason to generate a Branch where both the
     // {if_true} and {if_false} are the same Block. If we ever decide to lift
@@ -1166,7 +1168,7 @@ class GenericReducerBase : public ReducerBaseForwarder<Next> {
     // accordingly.
     DCHECK_NE(if_true, if_false);
     Block* saved_current_block = Asm().current_block();
-    OpIndex new_opindex =
+    V<None> new_opindex =
         Base::ReduceBranch(condition, if_true, if_false, hint);
     Asm().AddPredecessor(saved_current_block, if_true, true);
     Asm().AddPredecessor(saved_current_block, if_false, true);
@@ -1738,7 +1740,7 @@ class TurboshaftAssemblerOpInterface
   DECL_SINGLE_REP_BINOP_V(Float64Power, FloatBinop, Power, Float64)
   DECL_SINGLE_REP_BINOP_V(Float64Atan2, FloatBinop, Atan2, Float64)
 
-  OpIndex Shift(OpIndex left, OpIndex right, ShiftOp::Kind kind,
+  V<Word> Shift(V<Word> left, V<Word32> right, ShiftOp::Kind kind,
                 WordRepresentation rep) {
     return ReduceIfReachableShift(left, right, kind, rep);
   }
@@ -1781,19 +1783,19 @@ class TurboshaftAssemblerOpInterface
   DECL_SINGLE_REP_SHIFT_V(Word32RotateLeft, RotateLeft, Word32)
   DECL_SINGLE_REP_SHIFT_V(Word64RotateLeft, RotateLeft, Word64)
 
-  OpIndex ShiftRightLogical(OpIndex left, uint32_t right,
+  V<Word> ShiftRightLogical(V<Word> left, uint32_t right,
                             WordRepresentation rep) {
     DCHECK_GE(right, 0);
     DCHECK_LT(right, rep.bit_width());
     return ShiftRightLogical(left, this->Word32Constant(right), rep);
   }
-  OpIndex ShiftRightArithmetic(OpIndex left, uint32_t right,
+  V<Word> ShiftRightArithmetic(V<Word> left, uint32_t right,
                                WordRepresentation rep) {
     DCHECK_GE(right, 0);
     DCHECK_LT(right, rep.bit_width());
     return ShiftRightArithmetic(left, this->Word32Constant(right), rep);
   }
-  OpIndex ShiftLeft(OpIndex left, uint32_t right, WordRepresentation rep) {
+  V<Word> ShiftLeft(V<Word> left, uint32_t right, WordRepresentation rep) {
     DCHECK_LT(right, rep.bit_width());
     return ShiftLeft(left, this->Word32Constant(right), rep);
   }
@@ -1822,7 +1824,6 @@ class TurboshaftAssemblerOpInterface
   DECL_SINGLE_REP_EQUAL_V(WordPtrEqual, WordPtr)
   DECL_SINGLE_REP_EQUAL_V(Float32Equal, Float32)
   DECL_SINGLE_REP_EQUAL_V(Float64Equal, Float64)
-  DECL_SINGLE_REP_EQUAL_V(WasmCodePtrEqual, WasmCodePtr)
 #undef DECL_SINGLE_REP_EQUAL_V
 
 #define DECL_SINGLE_REP_COMPARISON_V(name, kind, tag)                 \
@@ -2099,6 +2100,7 @@ class TurboshaftAssemblerOpInterface
   DECL_OBJECT_IS(InternalizedString)
   DECL_OBJECT_IS(NonCallable)
   DECL_OBJECT_IS(Number)
+  DECL_OBJECT_IS(NumberFitsInt32)
   DECL_OBJECT_IS(NumberOrBigInt)
   DECL_OBJECT_IS(Receiver)
   DECL_OBJECT_IS(ReceiverOrNullOrUndefined)
@@ -2276,15 +2278,11 @@ class TurboshaftAssemblerOpInterface
     return UintPtrConstant(static_cast<uintptr_t>(value));
   }
   V<WordPtr> UintPtrConstant(uintptr_t value) { return WordPtrConstant(value); }
-  // TODO(nicohartmann): I would like to get rid of this overload as it is
-  // non-obvious that this doesnt perform Smi-tagging.
-  V<Smi> SmiConstant(intptr_t value) {
-    return SmiConstant(i::Tagged<Smi>(value));
-  }
   V<Smi> SmiConstant(i::Tagged<Smi> value) {
     return V<Smi>::Cast(
         ReduceIfReachableConstant(ConstantOp::Kind::kSmi, value));
   }
+  V<Smi> SmiZeroConstant() { return SmiConstant(Smi::zero()); }
   V<Float32> Float32Constant(i::Float32 value) {
     return ReduceIfReachableConstant(ConstantOp::Kind::kFloat32, value);
   }
@@ -2340,20 +2338,23 @@ class TurboshaftAssemblerOpInterface
   }
   // TODO(nicohartmann): Maybe we should replace all uses of `HeapConstant` with
   // `HeapConstant[No|Maybe]?Hole` version.
-  template <typename T,
-            typename = std::enable_if_t<is_subtype_v<T, HeapObject>>>
-  V<T> HeapConstant(Handle<T> value) {
+  template <typename T>
+  V<T> HeapConstant(Handle<T> value)
+    requires(is_subtype_v<T, HeapObject>)
+  {
     return ReduceIfReachableConstant(ConstantOp::Kind::kHeapObject,
                                      ConstantOp::Storage{value});
   }
-  template <typename T,
-            typename = std::enable_if_t<is_subtype_v<T, HeapObject>>>
-  V<T> HeapConstantMaybeHole(Handle<T> value) {
+  template <typename T>
+  V<T> HeapConstantMaybeHole(Handle<T> value)
+    requires(is_subtype_v<T, HeapObject>)
+  {
     return __ HeapConstant(value);
   }
-  template <typename T,
-            typename = std::enable_if_t<is_subtype_v<T, HeapObject>>>
-  V<T> HeapConstantNoHole(Handle<T> value) {
+  template <typename T>
+  V<T> HeapConstantNoHole(Handle<T> value)
+    requires(is_subtype_v<T, HeapObject>)
+  {
     CHECK(!IsAnyHole(*value));
     return __ HeapConstant(value);
   }
@@ -2398,7 +2399,7 @@ class TurboshaftAssemblerOpInterface
         static_cast<uint64_t>(canonical_id));
   }
 
-  V<WasmCodePtr> RelocatableWasmIndirectCallTarget(uint32_t function_index) {
+  V<Word32> RelocatableWasmIndirectCallTarget(uint32_t function_index) {
     return ReduceIfReachableConstant(
         ConstantOp::Kind::kRelocatableWasmIndirectCallTarget, function_index);
   }
@@ -2473,6 +2474,8 @@ class TurboshaftAssemblerOpInterface
                 Float64)
   DECL_CHANGE_V(TruncateFloat64ToFloat32, kFloatConversion, kNoAssumption,
                 Float64, Float32)
+  DECL_CHANGE_V(TruncateFloat64ToFloat16RawBits, kJSFloat16TruncateWithBitcast,
+                kNoAssumption, Float64, Word32)
   DECL_CHANGE_V(ChangeFloat32ToFloat64, kFloatConversion, kNoAssumption,
                 Float32, Float64)
   DECL_CHANGE_V(JSTruncateFloat64ToWord32, kJSFloatTruncate, kNoAssumption,
@@ -2802,6 +2805,18 @@ class TurboshaftAssemblerOpInterface
     return LoadTrustedPointerField(base, OpIndex::Invalid(), kind, tag, offset);
   }
 
+  V<WordPtr> LoadExternalPointerFromObject(V<Object> object, int offset,
+                                           ExternalPointerTag tag) {
+#ifdef V8_ENABLE_SANDBOX
+    V<Word32> handle = __ Load(object, LoadOp::Kind::TaggedBase(),
+                               MemoryRepresentation::Uint32(), offset);
+    return __ DecodeExternalPointer(handle, tag);
+#else
+    return __ Load(object, LoadOp::Kind::TaggedBase(),
+                   MemoryRepresentation::UintPtr(), offset);
+#endif  // V8_ENABLE_SANDBOX
+  }
+
   V<Object> LoadFixedArrayElement(V<FixedArray> array, int index) {
     return Load(array, LoadOp::Kind::TaggedBase(),
                 MemoryRepresentation::AnyTagged(),
@@ -2894,10 +2909,10 @@ class TurboshaftAssemblerOpInterface
     return LoadFieldImpl<Rep>(raw_base, access);
   }
 
-  template <typename Obj, typename Class, typename T,
-            typename = std::enable_if_t<v_traits<
-                Class>::template implicitly_constructible_from<Obj>::value>>
-  V<T> LoadField(V<Obj> object, const FieldAccessTS<Class, T>& field) {
+  template <typename Obj, typename Class, typename T>
+  V<T> LoadField(V<Obj> object, const FieldAccessTS<Class, T>& field)
+    requires v_traits<Class>::template
+  implicitly_constructible_from<Obj>::value {
     return LoadFieldImpl<T>(object, field);
   }
 
@@ -2932,8 +2947,9 @@ class TurboshaftAssemblerOpInterface
     }
     if (access.is_bounded_size_access) {
       DCHECK(!is_sandboxed_external);
-      value = ShiftRightLogical(value, kBoundedSizeShift,
-                                WordRepresentation::WordPtr());
+      value = V<Rep>::Cast(ShiftRightLogical(V<WordPtr>::Cast(value),
+                                             kBoundedSizeShift,
+                                             WordRepresentation::WordPtr()));
     }
 #endif  // V8_ENABLE_SANDBOX
     return value;
@@ -2959,9 +2975,15 @@ class TurboshaftAssemblerOpInterface
         heap_number, AccessBuilderTS::ForHeapNumberValue());
   }
 
-  template <typename Type = Object,
-            typename = std::enable_if_t<is_subtype_v<Type, Object>>>
-  V<Type> LoadTaggedField(V<Object> object, int field_offset) {
+  V<Word32> LoadHeapInt32Value(V<HeapNumber> heap_number) {
+    return __ template LoadField<HeapNumber, HeapNumber, Word32>(
+        heap_number, AccessBuilderTS::ForHeapInt32Value());
+  }
+
+  template <typename Type = Object>
+  V<Type> LoadTaggedField(V<Object> object, int field_offset)
+    requires(is_subtype_v<Type, Object>)
+  {
     return Load(object, LoadOp::Kind::TaggedBase(),
                 MemoryRepresentation::AnyTagged(), field_offset);
   }
@@ -3005,8 +3027,8 @@ class TurboshaftAssemblerOpInterface
 
 #ifdef V8_ENABLE_SANDBOX
     if (access.is_bounded_size_access) {
-      value =
-          ShiftLeft(value, kBoundedSizeShift, WordRepresentation::WordPtr());
+      value = ShiftLeft(V<WordPtr>::Cast(value), kBoundedSizeShift,
+                        WordRepresentation::WordPtr());
     }
 #endif  // V8_ENABLE_SANDBOX
 
@@ -3155,8 +3177,8 @@ class TurboshaftAssemblerOpInterface
   }
 
 #if V8_ENABLE_WEBASSEMBLY
-  void WasmStackCheck(WasmStackCheckOp::Kind kind, int parameter_slots) {
-    ReduceIfReachableWasmStackCheck(kind, parameter_slots);
+  void WasmStackCheck(WasmStackCheckOp::Kind kind) {
+    ReduceIfReachableWasmStackCheck(kind);
   }
 #endif
 
@@ -3285,8 +3307,9 @@ class TurboshaftAssemblerOpInterface
     return Parameter(index, V<T>::rep, debug_name);
   }
   V<Object> OsrValue(int index) { return ReduceIfReachableOsrValue(index); }
-  void Return(V<Word32> pop_count, base::Vector<const OpIndex> return_values) {
-    ReduceIfReachableReturn(pop_count, return_values);
+  void Return(V<Word32> pop_count, base::Vector<const OpIndex> return_values,
+              bool spill_caller_frame_slots = false) {
+    ReduceIfReachableReturn(pop_count, return_values, spill_caller_frame_slots);
   }
   void Return(OpIndex result) {
     Return(Word32Constant(0), base::VectorOf({result}));
@@ -3309,11 +3332,12 @@ class TurboshaftAssemblerOpInterface
   }
 
   template <typename Descriptor>
-  std::enable_if_t<Descriptor::kNeedsFrameState && Descriptor::kNeedsContext,
-                   detail::index_type_for_t<typename Descriptor::results_t>>
-  CallBuiltin(Isolate* isolate, V<turboshaft::FrameState> frame_state,
-              V<Context> context, const typename Descriptor::arguments_t& args,
-              LazyDeoptOnThrow lazy_deopt_on_throw = LazyDeoptOnThrow::kNo) {
+  detail::index_type_for_t<typename Descriptor::results_t> CallBuiltin(
+      Isolate* isolate, V<turboshaft::FrameState> frame_state,
+      V<Context> context, const typename Descriptor::arguments_t& args,
+      LazyDeoptOnThrow lazy_deopt_on_throw = LazyDeoptOnThrow::kNo)
+    requires(Descriptor::kNeedsFrameState && Descriptor::kNeedsContext)
+  {
     using result_t = detail::index_type_for_t<typename Descriptor::results_t>;
     if (V8_UNLIKELY(Asm().generating_unreachable_operations())) {
       return result_t::Invalid();
@@ -3336,10 +3360,11 @@ class TurboshaftAssemblerOpInterface
   }
 
   template <typename Descriptor>
-  std::enable_if_t<!Descriptor::kNeedsFrameState && Descriptor::kNeedsContext,
-                   detail::index_type_for_t<typename Descriptor::results_t>>
-  CallBuiltin(Isolate* isolate, V<Context> context,
-              const typename Descriptor::arguments_t& args) {
+  detail::index_type_for_t<typename Descriptor::results_t> CallBuiltin(
+      Isolate* isolate, V<Context> context,
+      const typename Descriptor::arguments_t& args)
+    requires(!Descriptor::kNeedsFrameState && Descriptor::kNeedsContext)
+  {
     using result_t = detail::index_type_for_t<typename Descriptor::results_t>;
     if (V8_UNLIKELY(Asm().generating_unreachable_operations())) {
       return result_t::Invalid();
@@ -3360,11 +3385,12 @@ class TurboshaftAssemblerOpInterface
         Descriptor::kEffects));
   }
   template <typename Descriptor>
-  std::enable_if_t<Descriptor::kNeedsFrameState && !Descriptor::kNeedsContext,
-                   detail::index_type_for_t<typename Descriptor::results_t>>
-  CallBuiltin(Isolate* isolate, V<turboshaft::FrameState> frame_state,
-              const typename Descriptor::arguments_t& args,
-              LazyDeoptOnThrow lazy_deopt_on_throw = LazyDeoptOnThrow::kNo) {
+  detail::index_type_for_t<typename Descriptor::results_t> CallBuiltin(
+      Isolate* isolate, V<turboshaft::FrameState> frame_state,
+      const typename Descriptor::arguments_t& args,
+      LazyDeoptOnThrow lazy_deopt_on_throw = LazyDeoptOnThrow::kNo)
+    requires(Descriptor::kNeedsFrameState && !Descriptor::kNeedsContext)
+  {
     using result_t = detail::index_type_for_t<typename Descriptor::results_t>;
     if (V8_UNLIKELY(Asm().generating_unreachable_operations())) {
       return result_t::Invalid();
@@ -3384,9 +3410,10 @@ class TurboshaftAssemblerOpInterface
         Descriptor::kEffects));
   }
   template <typename Descriptor>
-  std::enable_if_t<!Descriptor::kNeedsFrameState && !Descriptor::kNeedsContext,
-                   detail::index_type_for_t<typename Descriptor::results_t>>
-  CallBuiltin(Isolate* isolate, const typename Descriptor::arguments_t& args) {
+  detail::index_type_for_t<typename Descriptor::results_t> CallBuiltin(
+      Isolate* isolate, const typename Descriptor::arguments_t& args)
+    requires(!Descriptor::kNeedsFrameState && !Descriptor::kNeedsContext)
+  {
     using result_t = detail::index_type_for_t<typename Descriptor::results_t>;
     if (V8_UNLIKELY(Asm().generating_unreachable_operations())) {
       return result_t::Invalid();
@@ -3409,10 +3436,10 @@ class TurboshaftAssemblerOpInterface
 #if V8_ENABLE_WEBASSEMBLY
 
   template <typename Descriptor>
-  std::enable_if_t<!Descriptor::kNeedsContext,
-                   detail::index_type_for_t<typename Descriptor::results_t>>
-  WasmCallBuiltinThroughJumptable(
-      const typename Descriptor::arguments_t& args) {
+  detail::index_type_for_t<typename Descriptor::results_t>
+  WasmCallBuiltinThroughJumptable(const typename Descriptor::arguments_t& args)
+    requires(!Descriptor::kNeedsContext)
+  {
     static_assert(!Descriptor::kNeedsFrameState);
     using result_t = detail::index_type_for_t<typename Descriptor::results_t>;
     if (V8_UNLIKELY(Asm().generating_unreachable_operations())) {
@@ -3436,10 +3463,11 @@ class TurboshaftAssemblerOpInterface
   }
 
   template <typename Descriptor>
-  std::enable_if_t<Descriptor::kNeedsContext,
-                   detail::index_type_for_t<typename Descriptor::results_t>>
-  WasmCallBuiltinThroughJumptable(
-      V<Context> context, const typename Descriptor::arguments_t& args) {
+  detail::index_type_for_t<typename Descriptor::results_t>
+  WasmCallBuiltinThroughJumptable(V<Context> context,
+                                  const typename Descriptor::arguments_t& args)
+    requires Descriptor::kNeedsContext
+  {
     static_assert(!Descriptor::kNeedsFrameState);
     using result_t = detail::index_type_for_t<typename Descriptor::results_t>;
     if (V8_UNLIKELY(Asm().generating_unreachable_operations())) {
@@ -3767,10 +3795,12 @@ class TurboshaftAssemblerOpInterface
   }
 
   template <typename Descriptor>
-  std::enable_if_t<Descriptor::kNeedsFrameState, typename Descriptor::result_t>
-  CallRuntime(Isolate* isolate, V<turboshaft::FrameState> frame_state,
-              V<Context> context, LazyDeoptOnThrow lazy_deopt_on_throw,
-              const typename Descriptor::arguments_t& args) {
+  typename Descriptor::result_t CallRuntime(
+      Isolate* isolate, V<turboshaft::FrameState> frame_state,
+      V<Context> context, LazyDeoptOnThrow lazy_deopt_on_throw,
+      const typename Descriptor::arguments_t& args)
+    requires Descriptor::kNeedsFrameState
+  {
     if (V8_UNLIKELY(Asm().generating_unreachable_operations())) {
       return OpIndex::Invalid();
     }
@@ -3783,9 +3813,11 @@ class TurboshaftAssemblerOpInterface
         frame_state, context, args);
   }
   template <typename Descriptor>
-  std::enable_if_t<!Descriptor::kNeedsFrameState, typename Descriptor::result_t>
-  CallRuntime(Isolate* isolate, V<Context> context,
-              const typename Descriptor::arguments_t& args) {
+  typename Descriptor::result_t CallRuntime(
+      Isolate* isolate, V<Context> context,
+      const typename Descriptor::arguments_t& args)
+    requires(!Descriptor::kNeedsFrameState)
+  {
     if (V8_UNLIKELY(Asm().generating_unreachable_operations())) {
       return OpIndex::Invalid();
     }
@@ -3900,6 +3932,12 @@ class TurboshaftAssemblerOpInterface
   V<Object> CallRuntime_TryMigrateInstance(Isolate* isolate, V<Context> context,
                                            V<HeapObject> heap_object) {
     return CallRuntime<typename RuntimeCallDescriptor::TryMigrateInstance>(
+        isolate, context, {heap_object});
+  }
+  V<Object> CallRuntime_TryMigrateInstanceAndMarkMapAsMigrationTarget(
+      Isolate* isolate, V<Context> context, V<HeapObject> heap_object) {
+    return CallRuntime<typename RuntimeCallDescriptor::
+                           TryMigrateInstanceAndMarkMapAsMigrationTarget>(
         isolate, context, {heap_object});
   }
   void CallRuntime_ThrowAccessedUninitializedVariable(
@@ -4352,21 +4390,24 @@ class TurboshaftAssemblerOpInterface
                               V<String> second) {
     return ReduceIfReachableNewConsString(length, first, second);
   }
-  V<Object> NewArray(V<WordPtr> length, NewArrayOp::Kind kind,
-                     AllocationType allocation_type) {
+  V<AnyFixedArray> NewArray(V<WordPtr> length, NewArrayOp::Kind kind,
+                            AllocationType allocation_type) {
     return ReduceIfReachableNewArray(length, kind, allocation_type);
   }
-  V<Object> NewDoubleArray(V<WordPtr> length, AllocationType allocation_type) {
-    return NewArray(length, NewArrayOp::Kind::kDouble, allocation_type);
+  V<FixedDoubleArray> NewDoubleArray(V<WordPtr> length,
+                                     AllocationType allocation_type) {
+    return V<FixedDoubleArray>::Cast(
+        NewArray(length, NewArrayOp::Kind::kDouble, allocation_type));
   }
 
-  V<Object> DoubleArrayMinMax(V<Object> array, DoubleArrayMinMaxOp::Kind kind) {
+  V<Number> DoubleArrayMinMax(V<JSArray> array,
+                              DoubleArrayMinMaxOp::Kind kind) {
     return ReduceIfReachableDoubleArrayMinMax(array, kind);
   }
-  V<Object> DoubleArrayMin(V<Object> array) {
+  V<Number> DoubleArrayMin(V<JSArray> array) {
     return DoubleArrayMinMax(array, DoubleArrayMinMaxOp::Kind::kMin);
   }
-  V<Object> DoubleArrayMax(V<Object> array) {
+  V<Number> DoubleArrayMax(V<JSArray> array) {
     return DoubleArrayMinMax(array, DoubleArrayMinMaxOp::Kind::kMax);
   }
 
@@ -4522,8 +4563,8 @@ class TurboshaftAssemblerOpInterface
     return ReduceIfReachableStringSubstring(string, start, end);
   }
 
-  V<String> StringConcat(V<String> left, V<String> right) {
-    return ReduceIfReachableStringConcat(left, right);
+  V<String> StringConcat(V<Smi> length, V<String> left, V<String> right) {
+    return ReduceIfReachableStringConcat(length, left, right);
   }
 
   V<Boolean> StringComparison(V<String> left, V<String> right,
@@ -4592,30 +4633,31 @@ class TurboshaftAssemblerOpInterface
   }
 
   void TransitionAndStoreArrayElement(
-      V<Object> array, V<WordPtr> index, OpIndex value,
+      V<JSArray> array, V<WordPtr> index, V<Any> value,
       TransitionAndStoreArrayElementOp::Kind kind, MaybeHandle<Map> fast_map,
       MaybeHandle<Map> double_map) {
     ReduceIfReachableTransitionAndStoreArrayElement(array, index, value, kind,
                                                     fast_map, double_map);
   }
 
-  void StoreSignedSmallElement(V<Object> array, V<WordPtr> index,
+  void StoreSignedSmallElement(V<JSArray> array, V<WordPtr> index,
                                V<Word32> value) {
     TransitionAndStoreArrayElement(
         array, index, value,
         TransitionAndStoreArrayElementOp::Kind::kSignedSmallElement, {}, {});
   }
 
-  V<Word32> CompareMaps(V<HeapObject> heap_object,
+  V<Word32> CompareMaps(V<HeapObject> heap_object, OptionalV<Map> map,
                         const ZoneRefSet<Map>& maps) {
-    return ReduceIfReachableCompareMaps(heap_object, maps);
+    return ReduceIfReachableCompareMaps(heap_object, map, maps);
   }
 
   void CheckMaps(V<HeapObject> heap_object,
-                 V<turboshaft::FrameState> frame_state,
+                 V<turboshaft::FrameState> frame_state, OptionalV<Map> map,
                  const ZoneRefSet<Map>& maps, CheckMapsFlags flags,
                  const FeedbackSource& feedback) {
-    ReduceIfReachableCheckMaps(heap_object, frame_state, maps, flags, feedback);
+    ReduceIfReachableCheckMaps(heap_object, frame_state, map, maps, flags,
+                               feedback);
   }
 
   void AssumeMap(V<HeapObject> heap_object, const ZoneRefSet<Map>& maps) {
@@ -4680,6 +4722,12 @@ class TurboshaftAssemblerOpInterface
   void TransitionElementsKind(V<HeapObject> object,
                               const ElementsTransition& transition) {
     ReduceIfReachableTransitionElementsKind(object, transition);
+  }
+  void TransitionElementsKindOrCheckMap(
+      V<HeapObject> object, V<Map> map, V<turboshaft::FrameState> frame_state,
+      const ElementsTransitionWithMultipleSources& transition) {
+    ReduceIfReachableTransitionElementsKindOrCheckMap(object, map, frame_state,
+                                                      transition);
   }
 
   OpIndex FindOrderedHashEntry(V<Object> data_structure, OpIndex key,

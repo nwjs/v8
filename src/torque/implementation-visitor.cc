@@ -666,25 +666,32 @@ void ImplementationVisitor::Visit(Builtin* builtin) {
         csa_ccfile() << "  TNode<Object> " << generated_name
                      << " = UncheckedParameter<Object>("
                      << "Descriptor::kJSNewTarget);\n";
-        csa_ccfile() << "USE(" << generated_name << ");\n";
+        csa_ccfile() << "  USE(" << generated_name << ");\n";
         expected_types = {TypeOracle::GetJSAnyType()};
       } else if (param_name == "target") {
         csa_ccfile() << "  TNode<JSFunction> " << generated_name
                      << " = UncheckedParameter<JSFunction>("
                      << "Descriptor::kJSTarget);\n";
-        csa_ccfile() << "USE(" << generated_name << ");\n";
+        csa_ccfile() << "  USE(" << generated_name << ");\n";
         expected_types = {TypeOracle::GetJSFunctionType()};
       } else if (param_name == "dispatchHandle") {
-        if (V8_ENABLE_LEAPTIERING_BOOL) {
+        if (V8_JS_LINKAGE_INCLUDES_DISPATCH_HANDLE_BOOL) {
           csa_ccfile() << "  TNode<JSDispatchHandleT> " << generated_name
                        << " = "
                           "UncheckedParameter<JSDispatchHandleT>(Descriptor::"
                           "kJSDispatchHandle);\n";
+        } else if (V8_ENABLE_LEAPTIERING_BOOL) {
+          csa_ccfile() << "  TNode<JSDispatchHandleT> " << generated_name
+                       << " = "
+                          "ReinterpretCast<JSDispatchHandleT>("
+                          "LoadJSFunctionDispatchHandle("
+                          "UncheckedParameter<JSFunction>("
+                       << "Descriptor::kJSTarget)));\n";
         } else {
           csa_ccfile() << "  TNode<JSDispatchHandleT> " << generated_name
                        << " = InvalidDispatchHandleConstant();\n";
         }
-        csa_ccfile() << "USE(" << generated_name << ");\n";
+        csa_ccfile() << "  USE(" << generated_name << ");\n";
         expected_types = {TypeOracle::GetDispatchHandleType()};
       } else {
         Error(
@@ -735,6 +742,18 @@ void ImplementationVisitor::Visit(Builtin* builtin) {
       csa_ccfile() << "  USE(" << var << ");\n";
     }
   }
+
+  if (builtin->use_counter_name()) {
+    DCHECK(!signature.parameter_types.types.empty());
+    DCHECK(signature.parameter_types.types[0] ==
+               TypeOracle::GetNativeContextType() ||
+           signature.parameter_types.types[0] == TypeOracle::GetContextType());
+    csa_ccfile() << "  CodeStubAssembler(state_).CallRuntime("
+                 << "Runtime::kIncrementUseCounter, parameter0, "
+                 << "CodeStubAssembler(state_).SmiConstant("
+                 << *builtin->use_counter_name() << "));\n";
+  }
+
   assembler_ = CfgAssembler(parameter_types);
   const Type* body_result = Visit(*builtin->body());
   if (body_result != TypeOracle::GetNeverType()) {
@@ -4756,8 +4775,12 @@ void CppClassGenerator::EmitStoreFieldStatement(
     const std::string value_to_write = is_smi ? "Smi::FromInt(value)" : "value";
 
     if (!is_smi) {
-      stream << "  SLOW_DCHECK("
-             << GenerateRuntimeTypeCheck(field_type, "value") << ");\n";
+      // Don't DCHECK types if the roots aren't initialized, so that we don't
+      // incorrectly fail these checks during initial heap setup.
+      stream << "  "
+                "SLOW_DCHECK(!IsolateGroup::current()->shared_read_only_heap()-"
+                ">roots_init_complete() || ("
+             << GenerateRuntimeTypeCheck(field_type, "value") << "));\n";
     }
     stream << "  " << write_macro << "(*this, " << offset << ", "
            << value_to_write << ");\n";

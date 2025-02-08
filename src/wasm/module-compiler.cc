@@ -203,8 +203,8 @@ class CompilationUnitQueues {
       queue = queues_[queue_to_add].get();
     }
 
-    base::MutexGuard guard(&queue->mutex);
-    std::optional<base::MutexGuard> big_units_guard;
+    base::SpinningMutexGuard guard(&queue->mutex);
+    std::optional<base::SpinningMutexGuard> big_units_guard;
     for (auto pair :
          {std::make_pair(CompilationTier::kBaseline, baseline_units),
           std::make_pair(CompilationTier::kTopTier, top_tier_units)}) {
@@ -248,7 +248,7 @@ class CompilationUnitQueues {
 
     {
       auto* queue = queues_[queue_to_add].get();
-      base::MutexGuard guard(&queue->mutex);
+      base::SpinningMutexGuard guard(&queue->mutex);
       queue->top_tier_priority_units.emplace(priority, unit);
       num_priority_units_.fetch_add(1, std::memory_order_relaxed);
       num_units_[CompilationTier::kTopTier].fetch_add(
@@ -313,7 +313,7 @@ class CompilationUnitQueues {
 #endif
     }
 
-    mutable base::Mutex mutex;
+    mutable base::SpinningMutex mutex;
 
     // Can be read concurrently to check whether any elements are in the queue.
     std::atomic<bool> has_units[CompilationTier::kNumTiers];
@@ -332,7 +332,7 @@ class CompilationUnitQueues {
     // publishing arbitrarily.
     std::atomic<int> publish_limit{kMaxInt};
 
-    base::Mutex mutex;
+    base::SpinningMutex mutex;
 
     // All fields below are protected by {mutex}.
     std::vector<WasmCompilationUnit> units[CompilationTier::kNumTiers];
@@ -363,7 +363,7 @@ class CompilationUnitQueues {
     // so, return it, otherwise get the task id to steal from.
     int steal_task_id;
     {
-      base::MutexGuard mutex_guard(&queue->mutex);
+      base::SpinningMutexGuard mutex_guard(&queue->mutex);
       if (!queue->units[tier].empty()) {
         auto unit = queue->units[tier].back();
         queue->units[tier].pop_back();
@@ -396,7 +396,7 @@ class CompilationUnitQueues {
     if (!big_units_queue_.has_units[tier].load(std::memory_order_relaxed)) {
       return {};
     }
-    base::MutexGuard guard(&big_units_queue_.mutex);
+    base::SpinningMutexGuard guard(&big_units_queue_.mutex);
     if (big_units_queue_.units[tier].empty()) return {};
     WasmCompilationUnit unit = big_units_queue_.units[tier].top().unit;
     big_units_queue_.units[tier].pop();
@@ -414,7 +414,7 @@ class CompilationUnitQueues {
 
     int steal_task_id;
     {
-      base::MutexGuard mutex_guard(&queue->mutex);
+      base::SpinningMutexGuard mutex_guard(&queue->mutex);
       while (!queue->top_tier_priority_units.empty()) {
         auto unit = queue->top_tier_priority_units.top().unit;
         queue->top_tier_priority_units.pop();
@@ -460,7 +460,7 @@ class CompilationUnitQueues {
     std::vector<WasmCompilationUnit> stolen;
     std::optional<WasmCompilationUnit> returned_unit;
     {
-      base::MutexGuard guard(&steal_queue->mutex);
+      base::SpinningMutexGuard guard(&steal_queue->mutex);
       auto* steal_from_vector = &steal_queue->units[wanted_tier];
       if (steal_from_vector->empty()) return {};
       size_t remaining = steal_from_vector->size() / 2;
@@ -469,7 +469,7 @@ class CompilationUnitQueues {
       stolen.assign(steal_begin + 1, steal_from_vector->end());
       steal_from_vector->erase(steal_begin, steal_from_vector->end());
     }
-    base::MutexGuard guard(&queue->mutex);
+    base::SpinningMutexGuard guard(&queue->mutex);
     auto* target_queue = &queue->units[wanted_tier];
     target_queue->insert(target_queue->end(), stolen.begin(), stolen.end());
     queue->next_steal_task_id = steal_from_task_id + 1;
@@ -486,7 +486,7 @@ class CompilationUnitQueues {
     if (steal_queue == queue) return {};
     std::optional<WasmCompilationUnit> returned_unit;
     {
-      base::MutexGuard guard(&steal_queue->mutex);
+      base::SpinningMutexGuard guard(&steal_queue->mutex);
       while (true) {
         if (steal_queue->top_tier_priority_units.empty()) return {};
 
@@ -503,7 +503,7 @@ class CompilationUnitQueues {
             1, std::memory_order_relaxed);
       }
     }
-    base::MutexGuard guard(&queue->mutex);
+    base::SpinningMutexGuard guard(&queue->mutex);
     queue->next_steal_task_id = steal_from_task_id + 1;
     return returned_unit;
   }
@@ -523,9 +523,9 @@ class CompilationUnitQueues {
 };
 
 size_t CompilationUnitQueues::EstimateCurrentMemoryConsumption() const {
-  UPDATE_WHEN_CLASS_CHANGES(CompilationUnitQueues, 248);
-  UPDATE_WHEN_CLASS_CHANGES(QueueImpl, 144);
-  UPDATE_WHEN_CLASS_CHANGES(BigUnitsQueue, 120);
+  UPDATE_WHEN_CLASS_CHANGES(CompilationUnitQueues, 200);
+  UPDATE_WHEN_CLASS_CHANGES(QueueImpl, 96);
+  UPDATE_WHEN_CLASS_CHANGES(BigUnitsQueue, 72);
   // Not including sizeof(CompilationUnitQueues) because that's included in
   // sizeof(CompilationStateImpl).
   size_t result = 0;
@@ -533,13 +533,13 @@ size_t CompilationUnitQueues::EstimateCurrentMemoryConsumption() const {
     base::SharedMutexGuard<base::kShared> lock(&queues_mutex_);
     result += ContentSize(queues_) + queues_.size() * sizeof(QueueImpl);
     for (const auto& q : queues_) {
-      base::MutexGuard guard(&q->mutex);
+      base::SpinningMutexGuard guard(&q->mutex);
       result += ContentSize(*q->units);
       result += q->top_tier_priority_units.size() * sizeof(TopTierPriorityUnit);
     }
   }
   {
-    base::MutexGuard lock(&big_units_queue_.mutex);
+    base::SpinningMutexGuard lock(&big_units_queue_.mutex);
     result += big_units_queue_.units[0].size() * sizeof(BigUnit);
     result += big_units_queue_.units[1].size() * sizeof(BigUnit);
   }
@@ -672,7 +672,7 @@ class CompilationStateImpl {
   }
 
   bool baseline_compilation_finished() const {
-    base::MutexGuard guard(&callbacks_mutex_);
+    base::SpinningMutexGuard guard(&callbacks_mutex_);
     return outstanding_baseline_units_ == 0;
   }
 
@@ -682,12 +682,12 @@ class CompilationStateImpl {
 
   void SetWireBytesStorage(
       std::shared_ptr<WireBytesStorage> wire_bytes_storage) {
-    base::MutexGuard guard(&mutex_);
+    base::SpinningMutexGuard guard(&mutex_);
     wire_bytes_storage_ = std::move(wire_bytes_storage);
   }
 
   std::shared_ptr<WireBytesStorage> GetWireBytesStorage() const {
-    base::MutexGuard guard(&mutex_);
+    base::SpinningMutexGuard guard(&mutex_);
     DCHECK_NOT_NULL(wire_bytes_storage_);
     return wire_bytes_storage_;
   }
@@ -744,7 +744,7 @@ class CompilationStateImpl {
 
   // This mutex protects all information of this {CompilationStateImpl} which is
   // being accessed concurrently.
-  mutable base::Mutex mutex_;
+  mutable base::SpinningMutex mutex_;
 
   // The compile job handles, initialized right after construction of
   // {CompilationStateImpl}.
@@ -773,7 +773,7 @@ class CompilationStateImpl {
   // This mutex protects the callbacks vector, and the counters used to
   // determine which callbacks to call. The counters plus the callbacks
   // themselves need to be synchronized to ensure correct order of events.
-  mutable base::Mutex callbacks_mutex_;
+  mutable base::SpinningMutex callbacks_mutex_;
 
   //////////////////////////////////////////////////////////////////////////////
   // Protected by {callbacks_mutex_}:
@@ -801,7 +801,7 @@ class CompilationStateImpl {
 
   struct PublishState {
     // {mutex_} protects {publish_queue_} and {publisher_running_}.
-    base::Mutex mutex_;
+    base::SpinningMutex mutex_;
     std::vector<std::unique_ptr<WasmCode>> publish_queue_;
     bool publisher_running_ = false;
   };
@@ -826,11 +826,11 @@ CompilationStateImpl* BackgroundCompileScope::compilation_state() const {
 }
 
 size_t CompilationStateImpl::EstimateCurrentMemoryConsumption() const {
-  UPDATE_WHEN_CLASS_CHANGES(CompilationStateImpl, 672);
+  UPDATE_WHEN_CLASS_CHANGES(CompilationStateImpl, 456);
   size_t result = sizeof(CompilationStateImpl);
 
   {
-    base::MutexGuard guard{&mutex_};
+    base::SpinningMutexGuard guard{&mutex_};
     result += compilation_unit_queues_.EstimateCurrentMemoryConsumption();
   }
 
@@ -1339,9 +1339,13 @@ class TransitiveTypeFeedbackProcessor {
   std::set<int> queue_;
 };
 
+bool IsCrossInstanceCall(Tagged<Object> obj, Isolate* const isolate) {
+  return obj == ReadOnlyRoots{isolate}.wasm_cross_instance_call_symbol();
+}
+
 class FeedbackMaker {
  public:
-  FeedbackMaker(IsolateForSandbox isolate,
+  FeedbackMaker(Isolate* const isolate,
                 Tagged<WasmTrustedInstanceData> trusted_instance_data,
                 int func_index, int num_calls)
       : isolate_(isolate),
@@ -1371,8 +1375,7 @@ class FeedbackMaker {
   void AddCallIndirectCandidate(Tagged<Object> target_truncated_obj,
                                 int count) {
     // Discard cross-instance calls, as we can only inline same-instance code.
-    bool is_cross_instance_call = IsUndefined(target_truncated_obj);
-    if (is_cross_instance_call) {
+    if (IsCrossInstanceCall(target_truncated_obj, isolate_)) {
       has_non_inlineable_targets_ = true;
       return;
     }
@@ -1386,9 +1389,10 @@ class FeedbackMaker {
     // from the `WasmDispatchTable`, whose entries are always targets pointing
     // into the main jump table, so we only need to check against that.
 
-#ifdef V8_ENABLE_WASM_CODE_POINTER_TABLE
-    WasmCodePointerTable::Handle handle = target_truncated_smi.value();
-    Address entry = GetProcessWideWasmCodePointerTable()->GetEntrypoint(handle);
+    WasmCodePointer handle =
+        WasmCodePointer{static_cast<uint32_t>(target_truncated_smi.value())};
+    Address entry = GetProcessWideWasmCodePointerTable()
+                        ->GetEntrypointWithoutSignatureCheck(handle);
     wasm::WasmCode* code =
         wasm::GetWasmCodeManager()->LookupCode(nullptr, entry);
     if (!code || code->native_module() != instance_data_->native_module() ||
@@ -1399,32 +1403,16 @@ class FeedbackMaker {
     }
     DCHECK_EQ(code->kind(), WasmCode::Kind::kWasmFunction);
     uint32_t func_idx = code->index();
-#else
-    Address jt_start = instance_data_->native_module()->jump_table_start();
-    uint32_t jt_size = JumpTableAssembler::SizeForNumberOfSlots(
-        instance_data_->module()->num_declared_functions);
-    Address jt_end = jt_start + jt_size;
-
-    uint32_t jt_start_truncated = jt_start & kSmiMaxValue;
-    uint32_t jt_end_truncated = jt_end & kSmiMaxValue;
-    uint32_t target_truncated = target_truncated_smi.value();
-
-    if (target_truncated < jt_start_truncated ||
-        target_truncated >= jt_end_truncated) {
-      // Was not in the main table (e.g., because it's an imported function).
-      has_non_inlineable_targets_ = true;
-      return;
-    }
-
-    uint32_t jt_offset = target_truncated - jt_start_truncated;
-    uint32_t jt_slot_idx = JumpTableAssembler::SlotOffsetToIndex(jt_offset);
-    uint32_t func_idx =
-        instance_data_->module()->num_imported_functions + jt_slot_idx;
-#endif
     AddCall(func_idx, count);
   }
 
   void AddCall(int target, int count) {
+    // If we add too many calls, treat it as megamorphic.
+    if (static_cast<size_t>(cache_usage_) == targets_cache_.size() ||
+        is_megamorphic_) {
+      is_megamorphic_ = true;
+      return;
+    }
     // Keep the cache sorted (using insertion-sort), highest count first.
     int insertion_index = 0;
     while (insertion_index < cache_usage_ &&
@@ -1442,12 +1430,19 @@ class FeedbackMaker {
   }
 
   bool HasTargetCached(int target) {
-    auto end = targets_cache_ + cache_usage_;
-    return std::find(targets_cache_, end, target) != end;
+    auto end = targets_cache_.begin() + cache_usage_;
+    DCHECK_LE(end, targets_cache_.end());
+    return std::find(targets_cache_.begin(), end, target) != end;
   }
 
   void FinalizeCall() {
-    if (cache_usage_ == 0) {
+    if (is_megamorphic_) {
+      if (v8_flags.trace_wasm_inlining) {
+        PrintF("[function %d: call #%zu: megamorphic]\n", func_index_,
+               result_.size());
+      }
+      result_.push_back(CallSiteFeedback::CreateMegamorphic());
+    } else if (cache_usage_ == 0) {
       result_.emplace_back();
     } else if (cache_usage_ == 1) {
       if (v8_flags.trace_wasm_inlining) {
@@ -1460,6 +1455,7 @@ class FeedbackMaker {
         PrintF("[function %d: call #%zu inlineable (polymorphic %d)]\n",
                func_index_, result_.size(), cache_usage_);
       }
+      DCHECK_LE(cache_usage_, kMaxPolymorphism);
       CallSiteFeedback::PolymorphicCase* polymorphic =
           new CallSiteFeedback::PolymorphicCase[cache_usage_];
       for (int i = 0; i < cache_usage_; i++) {
@@ -1469,26 +1465,33 @@ class FeedbackMaker {
       result_.emplace_back(polymorphic, cache_usage_);
     }
     result_.back().set_has_non_inlineable_targets(has_non_inlineable_targets_);
+    // TODO(mliedtke): Have a better representation that merges these properties
+    // into one object.
     has_non_inlineable_targets_ = false;
+    is_megamorphic_ = false;
     cache_usage_ = 0;
   }
 
   void set_has_non_inlineable_targets() { has_non_inlineable_targets_ = true; }
+  void set_megamorphic() { is_megamorphic_ = true; }
 
   // {GetResult} can only be called on a r-value reference to make it more
   // obvious at call sites that {this} should not be used after this operation.
   std::vector<CallSiteFeedback>&& GetResult() && { return std::move(result_); }
 
  private:
-  const IsolateForSandbox isolate_;
+  Isolate* const isolate_;
   const Tagged<WasmTrustedInstanceData> instance_data_;
   std::vector<CallSiteFeedback> result_;
   const int num_imported_functions_;
   const int func_index_;
   int cache_usage_{0};
-  int targets_cache_[kMaxPolymorphism];
-  int counts_cache_[kMaxPolymorphism];
+  std::array<int, kMaxPolymorphism> targets_cache_;
+  std::array<int, kMaxPolymorphism> counts_cache_;
   bool has_non_inlineable_targets_ = false;
+  // If we add more call targets than kMaxPolymorphism while processing the
+  // feedback, treat it as megamorphic.
+  bool is_megamorphic_ = false;
 };
 
 void TransitiveTypeFeedbackProcessor::ProcessFunction(int func_index) {
@@ -1503,24 +1506,25 @@ void TransitiveTypeFeedbackProcessor::ProcessFunction(int func_index) {
 
   // For each entry in {call_targets}, there are two {Object} slots in the
   // {feedback} vector:
-  // +--------------------------+-----------------------+-------------------+
-  // |        Call Type         |   Feedback: Entry 1   |      Entry 2      |
-  // +-------------------------+-----------------------+-------------------+
-  // | direct                   | Smi(count)            | Smi(0), unused    |
-  // +--------------------------+-----------------------+-------------------+
-  // | ref, uninitialized       | Smi(0)                | Smi(0)            |
-  // | ref, monomorphic         | WasmFuncRef(target)   | Smi(count>0)      |
-  // | ref, polymorphic         | FixedArray            | Undefined         |
-  // | ref, megamorphic         | MegamorphicSymbol     | Undefined         |
-  // +--------------------------+-----------------------+-------------------+
-  // | indirect, uninitialized  | Smi(0)                | Smi(0)            |
-  // | indirect, monomorphic    | Smi(truncated_target) | Smi(count>0)      |
-  // | indirect, wrong instance | Undefined             | Smi(count>0)      |
-  // | indirect, polymorphic    | FixedArray            | Undefined         |
-  // | indirect, megamorphic    | MegamorphicSymbol     | Undefined         |
-  // +--------------------------+-----------------------+-------------------+
+  // +--------------------------+-----------------------------+----------------+
+  // |        Call Type         |      Feedback: Entry 1      |    Entry 2     |
+  // +-------------------------+------------------------------+----------------+
+  // | direct                   | Smi(count)                  | Smi(0), unused |
+  // +--------------------------+-----------------------------+----------------+
+  // | ref, uninitialized       | Smi(0)                      | Smi(0)         |
+  // | ref, monomorphic         | WasmFuncRef(target)         | Smi(count>0)   |
+  // | ref, polymorphic         | FixedArray                  | Undefined      |
+  // | ref, megamorphic         | MegamorphicSymbol           | Undefined      |
+  // +--------------------------+-----------------------------+----------------+
+  // | indirect, uninitialized  | Smi(0)                      | Smi(0)         |
+  // | indirect, monomorphic    | Smi(truncated_target)       | Smi(count>0)   |
+  // | indirect, wrong instance | WasmCrossInstanceCallSymbol | Smi(count>0)   |
+  // | indirect, polymorphic    | FixedArray                  | Undefined      |
+  // | indirect, megamorphic    | MegamorphicSymbol           | Undefined      |
+  // +--------------------------+-----------------------------+----------------+
   // The FixedArray entries for the polymorphic cases look like the monomorphic
-  // entries in the feedback vector itself.
+  // entries in the feedback vector itself, i.e., they can a (truncated) target,
+  // or the wrong instance sentinel (for cross-instance call_indirect).
   // See {UpdateCallRefOrIndirectIC} in {wasm.tq} for how this is written.
   // Since this is combining untrusted data ({feedback} vector on the JS heap)
   // with trusted data ({call_targets}), make sure to avoid an OOB access.
@@ -1553,7 +1557,7 @@ void TransitiveTypeFeedbackProcessor::ProcessFunction(int func_index) {
       DCHECK_EQ(sentinel_or_target, FunctionTypeFeedback::kCallRef);
       int count = Smi::ToInt(second_slot);
       fm.AddCallRefCandidate(Cast<WasmFuncRef>(first_slot), count);
-    } else if (IsSmi(first_slot) || IsUndefined(first_slot)) {
+    } else if (IsSmi(first_slot) || IsCrossInstanceCall(first_slot, isolate_)) {
       // Monomorphic call_indirect.
       DCHECK_EQ(sentinel_or_target, FunctionTypeFeedback::kCallIndirect);
       int count = Smi::ToInt(second_slot);
@@ -1580,9 +1584,7 @@ void TransitiveTypeFeedbackProcessor::ProcessFunction(int func_index) {
       }
     } else if (first_slot == ReadOnlyRoots{isolate_}.megamorphic_symbol()) {
       DCHECK(IsUndefined(second_slot));
-      if (v8_flags.trace_wasm_inlining) {
-        PrintF("[function %d: call #%d: megamorphic]\n", func_index, i / 2);
-      }
+      fm.set_megamorphic();
     } else {
       UNREACHABLE();
     }
@@ -1600,6 +1602,9 @@ void TransitiveTypeFeedbackProcessor::ProcessFunction(int func_index) {
         const CallSiteFeedback& old_feedback = existing[feedback_index];
         if (old_feedback.has_non_inlineable_targets()) {
           fm.set_has_non_inlineable_targets();
+        }
+        if (old_feedback.is_megamorphic()) {
+          fm.set_megamorphic();
         }
         for (int i = 0; i < old_feedback.num_cases(); ++i) {
           int old_target_function_index = old_feedback.function_index(i);
@@ -2347,18 +2352,11 @@ std::shared_ptr<NativeModule> GetOrCompileNewNativeModule(
     Isolate* isolate, WasmEnabledFeatures enabled_features,
     WasmDetectedFeatures detected_features, CompileTimeImports compile_imports,
     ErrorThrower* thrower, std::shared_ptr<const WasmModule> module,
-    ModuleWireBytes wire_bytes, int compilation_id,
+    base::OwnedVector<const uint8_t> wire_bytes, int compilation_id,
     v8::metrics::Recorder::ContextId context_id, ProfileInformation* pgo_info) {
-  base::OwnedVector<uint8_t> wire_bytes_copy =
-      base::OwnedVector<uint8_t>::Of(wire_bytes.module_bytes());
-  // Prefer {wire_bytes_copy} to {wire_bytes.module_bytes()} for the temporary
-  // cache key. When we eventually install the module in the cache, the wire
-  // bytes of the temporary key and the new key have the same base pointer and
-  // we can skip the full bytes comparison.
   std::shared_ptr<NativeModule> native_module =
-      GetWasmEngine()->MaybeGetNativeModule(module->origin,
-                                            wire_bytes_copy.as_vector(),
-                                            compile_imports, isolate);
+      GetWasmEngine()->MaybeGetNativeModule(
+          module->origin, wire_bytes.as_vector(), compile_imports, isolate);
   if (native_module) return native_module;
 
   // Otherwise compile a new NativeModule.
@@ -2377,7 +2375,7 @@ std::shared_ptr<NativeModule> GetOrCompileNewNativeModule(
   native_module = GetWasmEngine()->NewNativeModule(
       isolate, enabled_features, detected_features, std::move(compile_imports),
       module, code_size_estimate);
-  native_module->SetWireBytes(std::move(wire_bytes_copy));
+  native_module->SetWireBytes(std::move(wire_bytes));
   native_module->compilation_state()->set_compilation_id(compilation_id);
 
   if (!v8_flags.wasm_jitless) {
@@ -2403,11 +2401,12 @@ std::shared_ptr<NativeModule> CompileToNativeModule(
     Isolate* isolate, WasmEnabledFeatures enabled_features,
     WasmDetectedFeatures detected_features, CompileTimeImports compile_imports,
     ErrorThrower* thrower, std::shared_ptr<const WasmModule> module,
-    ModuleWireBytes wire_bytes, int compilation_id,
+    base::OwnedVector<const uint8_t> wire_bytes, int compilation_id,
     v8::metrics::Recorder::ContextId context_id, ProfileInformation* pgo_info) {
   std::shared_ptr<NativeModule> native_module = GetOrCompileNewNativeModule(
       isolate, enabled_features, detected_features, std::move(compile_imports),
-      thrower, module, wire_bytes, compilation_id, context_id, pgo_info);
+      thrower, module, std::move(wire_bytes), compilation_id, context_id,
+      pgo_info);
   if (!native_module) return {};
 
   // Ensure that the code objects are logged before returning.
@@ -2635,10 +2634,10 @@ class AsyncStreamingProcessor final : public StreamingProcessor {
   ValidateFunctionsStreamingJobData validate_functions_job_data_;
   std::unique_ptr<JobHandle> validate_functions_job_handle_;
 
-  // Running hash of the wire bytes up to code section size, but excluding the
-  // code section itself. Used by the {NativeModuleCache} to detect potential
-  // duplicate modules.
-  size_t prefix_hash_ = 0;
+  // {prefix_hasher_} computes a running hash of the wire bytes up to code
+  // section size, but excludes the code section itself. Used by the
+  // {NativeModuleCache} to detect potential duplicate modules.
+  base::Hasher prefix_hasher_;
 };
 
 std::shared_ptr<StreamingDecoder> AsyncCompileJob::CreateStreamingDecoder() {
@@ -2774,9 +2773,10 @@ void AsyncCompileJob::FinishCompile(bool is_after_cache_hit) {
       sourcemap_symbol.type != WasmDebugSymbols::Type::None &&
       !sourcemap_symbol.external_url.is_empty()) {
     ModuleWireBytes wire_bytes(native_module_->wire_bytes());
-    MaybeHandle<String> src_map_str = isolate_->factory()->NewStringFromUtf8(
-        wire_bytes.GetNameOrNull(sourcemap_symbol.external_url),
-        AllocationType::kOld);
+    MaybeDirectHandle<String> src_map_str =
+        isolate_->factory()->NewStringFromUtf8(
+            wire_bytes.GetNameOrNull(sourcemap_symbol.external_url),
+            AllocationType::kOld);
     script->set_source_mapping_url(*src_map_str.ToHandleChecked());
   }
   {
@@ -2977,7 +2977,8 @@ void AsyncCompileJob::StartBackgroundTask() {
   // If --wasm-num-compilation-tasks=0 is passed, do only spawn foreground
   // tasks. This is used to make timing deterministic.
   if (v8_flags.wasm_num_compilation_tasks > 0) {
-    V8::GetCurrentPlatform()->CallBlockingTaskOnWorkerThread(std::move(task));
+    V8::GetCurrentPlatform()->PostTaskOnWorkerThread(
+        TaskPriority::kUserBlocking, std::move(task));
   } else {
     foreground_task_runner_->PostTask(std::move(task));
   }
@@ -3214,7 +3215,8 @@ bool AsyncStreamingProcessor::ProcessModuleHeader(
   TRACE_STREAMING("Process module header...\n");
   decoder_.DecodeModuleHeader(bytes);
   if (!decoder_.ok()) return false;
-  prefix_hash_ = GetWireBytesHash(bytes);
+  // Note: We do not include the magic bytes in the hash; they are constant
+  // anyways.
   return true;
 }
 
@@ -3231,7 +3233,7 @@ bool AsyncStreamingProcessor::ProcessSection(SectionCode section_code,
   }
   if (before_code_section_) {
     // Combine section hashes until code section.
-    prefix_hash_ = base::hash_combine(prefix_hash_, GetWireBytesHash(bytes));
+    prefix_hasher_.AddRange(bytes);
   }
   if (section_code == SectionCode::kUnknownSectionCode) {
     size_t bytes_consumed = ModuleDecoder::IdentifyUnknownSection(
@@ -3258,8 +3260,7 @@ bool AsyncStreamingProcessor::ProcessCodeSectionHeader(
   before_code_section_ = false;
   TRACE_STREAMING("Start the code section with %d functions...\n",
                   num_functions);
-  prefix_hash_ = base::hash_combine(prefix_hash_,
-                                    static_cast<uint32_t>(code_section_length));
+  prefix_hasher_.Add(static_cast<uint32_t>(code_section_length));
   if (!decoder_.CheckFunctionsCount(static_cast<uint32_t>(num_functions),
                                     functions_mismatch_error_offset)) {
     return false;
@@ -3269,7 +3270,7 @@ bool AsyncStreamingProcessor::ProcessCodeSectionHeader(
                              static_cast<uint32_t>(code_section_length)});
 
   if (!GetWasmEngine()->GetStreamingCompilationOwnership(
-          prefix_hash_, job_->compile_imports_)) {
+          prefix_hasher_.hash(), job_->compile_imports_)) {
     // Known prefix, wait until the end of the stream and check the cache.
     prefix_cache_hit_ = true;
     return true;
@@ -3413,7 +3414,7 @@ void AsyncStreamingProcessor::OnFinishedStream(
   if (after_error) {
     if (job_->native_module_ && job_->native_module_->wire_bytes().empty()) {
       // Clean up the temporary cache entry.
-      GetWasmEngine()->StreamingCompilationFailed(prefix_hash_,
+      GetWasmEngine()->StreamingCompilationFailed(prefix_hasher_.hash(),
                                                   job_->compile_imports_);
     }
     // Calling {Failed} will invalidate the {AsyncCompileJob} and delete {this}.
@@ -3440,7 +3441,7 @@ void AsyncStreamingProcessor::OnFinishedStream(
 #endif
 
   DCHECK_EQ(NativeModuleCache::PrefixHash(job_->wire_bytes_.module_bytes()),
-            prefix_hash_);
+            prefix_hasher_.hash());
   if (prefix_cache_hit_) {
     // Restart as an asynchronous, non-streaming compilation. Most likely
     // {PrepareAndStartCompile} will get the native module from the cache.
@@ -3510,7 +3511,7 @@ void AsyncStreamingProcessor::OnAbort() {
   }
   if (job_->native_module_ && job_->native_module_->wire_bytes().empty()) {
     // Clean up the temporary cache entry.
-    GetWasmEngine()->StreamingCompilationFailed(prefix_hash_,
+    GetWasmEngine()->StreamingCompilationFailed(prefix_hasher_.hash(),
                                                 job_->compile_imports_);
   }
   // {Abort} invalidates the {AsyncCompileJob}, which in turn deletes {this}.
@@ -3531,7 +3532,7 @@ bool AsyncStreamingProcessor::Deserialize(
   HandleScope scope(job_->isolate_);
   SaveAndSwitchContext saved_context(job_->isolate_, *job_->native_context_);
 
-  MaybeHandle<WasmModuleObject> result = DeserializeNativeModule(
+  MaybeDirectHandle<WasmModuleObject> result = DeserializeNativeModule(
       job_->isolate_, module_bytes, wire_bytes, job_->compile_imports_,
       base::VectorOf(job_->stream_->url()));
 
@@ -3574,7 +3575,7 @@ void CompilationStateImpl::InitCompileJob() {
 
 void CompilationStateImpl::CancelCompilation(
     CompilationStateImpl::CancellationPolicy cancellation_policy) {
-  base::MutexGuard callbacks_guard(&callbacks_mutex_);
+  base::SpinningMutexGuard callbacks_guard(&callbacks_mutex_);
 
   if (cancellation_policy == kCancelInitialCompilation &&
       finished_events_.contains(
@@ -3682,7 +3683,7 @@ void CompilationStateImpl::ApplyPgoInfoLate(ProfileInformation* pgo_info) {
   const WasmModule* module = native_module_->module();
   CompilationUnitBuilder builder{native_module_};
 
-  base::MutexGuard guard(&callbacks_mutex_);
+  base::SpinningMutexGuard guard(&callbacks_mutex_);
   // Functions that were executed in the profiling run are eagerly compiled to
   // Liftoff (in the background).
   for (int func_index : pgo_info->executed_functions()) {
@@ -3736,7 +3737,7 @@ void CompilationStateImpl::InitializeCompilationProgress(
     ProfileInformation* pgo_info) {
   DCHECK(!failed());
 
-  base::MutexGuard guard(&callbacks_mutex_);
+  base::SpinningMutexGuard guard(&callbacks_mutex_);
 
   if (!v8_flags.wasm_jitless) {
     auto* module = native_module_->module();
@@ -3817,7 +3818,7 @@ void CompilationStateImpl::InitializeCompilationUnits(
   if (!v8_flags.wasm_jitless) {
     int offset = native_module_->module()->num_imported_functions;
     {
-      base::MutexGuard guard(&callbacks_mutex_);
+      base::SpinningMutexGuard guard(&callbacks_mutex_);
 
       for (size_t i = 0, e = compilation_progress_.size(); i < e; ++i) {
         uint8_t function_progress = compilation_progress_[i];
@@ -3842,7 +3843,7 @@ void CompilationStateImpl::AddCompilationUnit(CompilationUnitBuilder* builder,
     // lock-free.
     // 2) Have a copy of compilation_progress_ that we use for initialization.
     // 3) Just re-calculate the content of compilation_progress_.
-    base::MutexGuard guard(&callbacks_mutex_);
+    base::SpinningMutexGuard guard(&callbacks_mutex_);
     function_progress = compilation_progress_[progress_index];
   }
   AddCompilationUnitInternal(builder, func_index, function_progress);
@@ -3862,13 +3863,13 @@ void CompilationStateImpl::InitializeCompilationProgressAfterDeserialization(
 
   auto* module = native_module_->module();
   {
-    base::MutexGuard guard(&callbacks_mutex_);
+    base::SpinningMutexGuard guard(&callbacks_mutex_);
     DCHECK(compilation_progress_.empty());
 
     // Initialize the compilation progress as if everything was
     // TurboFan-compiled.
     constexpr uint8_t kProgressAfterTurbofanDeserialization =
-        RequiredBaselineTierField::encode(ExecutionTier::kTurbofan) |
+        RequiredBaselineTierField::encode(ExecutionTier::kLiftoff) |
         RequiredTopTierField::encode(ExecutionTier::kTurbofan) |
         ReachedTierField::encode(ExecutionTier::kTurbofan);
     compilation_progress_.assign(module->num_declared_functions,
@@ -3919,7 +3920,7 @@ void CompilationStateImpl::InitializeCompilationProgressAfterDeserialization(
 
 void CompilationStateImpl::AddCallback(
     std::unique_ptr<CompilationEventCallback> callback) {
-  base::MutexGuard callbacks_guard(&callbacks_mutex_);
+  base::SpinningMutexGuard callbacks_guard(&callbacks_mutex_);
   // Immediately trigger events that already happened.
   for (auto event : {CompilationEvent::kFinishedBaselineCompilation,
                      CompilationEvent::kFailedCompilation}) {
@@ -3937,7 +3938,7 @@ void CompilationStateImpl::AddCallback(
 void CompilationStateImpl::CommitCompilationUnits(
     base::Vector<WasmCompilationUnit> baseline_units,
     base::Vector<WasmCompilationUnit> top_tier_units) {
-  base::MutexGuard guard{&mutex_};
+  base::SpinningMutexGuard guard{&mutex_};
   if (!baseline_units.empty() || !top_tier_units.empty()) {
     compilation_unit_queues_.AddUnits(baseline_units, top_tier_units,
                                       native_module_->module());
@@ -3981,7 +3982,7 @@ void CompilationStateImpl::OnFinishedUnits(
   TRACE_EVENT1(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
                "wasm.OnFinishedUnits", "units", code_vector.size());
 
-  base::MutexGuard guard(&callbacks_mutex_);
+  base::SpinningMutexGuard guard(&callbacks_mutex_);
 
   // Assume an order of execution tiers that represents the quality of their
   // generated code.
@@ -4058,6 +4059,10 @@ void CompilationStateImpl::OnFinishedUnits(
       };
       if (v8_flags.wasm_deopt &&
           (is_liftoff || published_code_is_liftoff(code->index()))) {
+        // Setting the reached tier below the baseline tier would create an
+        // inconsistent state and has actually led to crashes before (see
+        // https://crbug.com/379086474).
+        DCHECK_LE(required_baseline_tier, ExecutionTier::kLiftoff);
         compilation_progress_[slot_index] = ReachedTierField::update(
             compilation_progress_[slot_index], ExecutionTier::kLiftoff);
         compilation_unit_queues_.AllowAnotherTopTierJob(code->index());
@@ -4117,7 +4122,8 @@ void CompilationStateImpl::TriggerOutstandingCallbacks() {
       // Trigger a task after the given timeout; that task will only trigger
       // caching if no new code was added until then. Otherwise, it will
       // re-schedule itself.
-      V8::GetCurrentPlatform()->CallDelayedOnWorkerThread(
+      V8::GetCurrentPlatform()->PostDelayedTaskOnWorkerThread(
+          TaskPriority::kUserVisible,
           std::make_unique<TriggerCodeCachingAfterTimeoutTask>(
               native_module_weak_),
           1e-3 * v8_flags.wasm_caching_timeout_ms);
@@ -4171,7 +4177,7 @@ void CompilationStateImpl::TriggerCallbacks(
 }
 
 void CompilationStateImpl::TriggerCachingAfterTimeout() {
-  base::MutexGuard guard{&callbacks_mutex_};
+  base::SpinningMutexGuard guard{&callbacks_mutex_};
 
   // It can happen that we reached the hard threshold while waiting for the
   // timeout to expire. In that case, {bytes_since_last_chunk_} might be zero
@@ -4189,7 +4195,8 @@ void CompilationStateImpl::TriggerCachingAfterTimeout() {
     int ms_remaining =
         static_cast<int>(time_until_caching.InMillisecondsRoundedUp());
     DCHECK_LE(1, ms_remaining);
-    V8::GetCurrentPlatform()->CallDelayedOnWorkerThread(
+    V8::GetCurrentPlatform()->PostDelayedTaskOnWorkerThread(
+        TaskPriority::kUserVisible,
         std::make_unique<TriggerCodeCachingAfterTimeoutTask>(
             native_module_weak_),
         ms_remaining);
@@ -4267,7 +4274,7 @@ void CompilationStateImpl::SchedulePublishCompilationResults(
     CompilationTier tier) {
   PublishState& state = publish_state_[tier];
   {
-    base::MutexGuard guard(&state.mutex_);
+    base::SpinningMutexGuard guard(&state.mutex_);
     if (state.publisher_running_) {
       // Add new code to the queue and return.
       state.publish_queue_.reserve(state.publish_queue_.size() +
@@ -4284,7 +4291,7 @@ void CompilationStateImpl::SchedulePublishCompilationResults(
     unpublished_code.clear();
 
     // Keep publishing new code that came in.
-    base::MutexGuard guard(&state.mutex_);
+    base::SpinningMutexGuard guard(&state.mutex_);
     DCHECK(state.publisher_running_);
     if (state.publish_queue_.empty()) {
       state.publisher_running_ = false;
@@ -4305,7 +4312,7 @@ void CompilationStateImpl::SetError() {
     return;  // Already failed before.
   }
 
-  base::MutexGuard callbacks_guard(&callbacks_mutex_);
+  base::SpinningMutexGuard callbacks_guard(&callbacks_mutex_);
   TriggerOutstandingCallbacks();
   callbacks_.clear();
 }
@@ -4323,7 +4330,7 @@ void CompilationStateImpl::WaitForCompilationEvent(
 #ifdef DEBUG
   base::EnumSet<CompilationEvent> events{expect_event,
                                          CompilationEvent::kFailedCompilation};
-  base::MutexGuard guard(&callbacks_mutex_);
+  base::SpinningMutexGuard guard(&callbacks_mutex_);
   DCHECK(finished_events_.contains_any(events));
 #endif
 }

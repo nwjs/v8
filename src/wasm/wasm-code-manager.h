@@ -84,24 +84,8 @@ class V8_EXPORT_PRIVATE DisjointAllocationPool final {
   std::set<base::AddressRegion, base::AddressRegion::StartAddressLess> regions_;
 };
 
-#if V8_ENABLE_WASM_CODE_POINTER_TABLE
 constexpr WasmCodePointer kInvalidWasmCodePointer =
-    WasmCodePointerTable::kInvalidHandle;
-#else
-constexpr WasmCodePointer kInvalidWasmCodePointer = kNullAddress;
-#endif
-
-// Resolve the entry address of a WasmCodePointer
-Address WasmCodePointerAddress(WasmCodePointer pointer);
-
-template <Builtin builtin>
-WasmCodePointer GetBuiltinCodePointer(Isolate* isolate) {
-#if V8_ENABLE_WASM_CODE_POINTER_TABLE
-  return Builtins::WasmBuiltinHandleOf<builtin>(isolate);
-#else
-  return Builtins::EntryOf(builtin, isolate);
-#endif
-}
+    WasmCodePointer{WasmCodePointerTable::kInvalidHandle};
 
 class V8_EXPORT_PRIVATE WasmCode final {
  public:
@@ -190,13 +174,6 @@ class V8_EXPORT_PRIVATE WasmCode final {
   Address instruction_start() const {
     return reinterpret_cast<Address>(instructions_);
   }
-  WasmCodePointer code_pointer() const {
-#ifdef V8_ENABLE_WASM_CODE_POINTER_TABLE
-    return code_pointer_handle_;
-#else
-    return instruction_start();
-#endif
-  }
   size_t instructions_size() const {
     return static_cast<size_t>(instructions_size_);
   }
@@ -233,6 +210,7 @@ class V8_EXPORT_PRIVATE WasmCode final {
   int unpadded_binary_size() const { return unpadded_binary_size_; }
   int stack_slots() const { return stack_slots_; }
   int ool_spills() const { return ool_spills_; }
+  uint64_t signature_hash() const { return signature_hash_; }
   uint16_t first_tagged_parameter_slot() const {
     return tagged_parameter_slots_ >> 16;
   }
@@ -362,10 +340,6 @@ class V8_EXPORT_PRIVATE WasmCode final {
   friend class NativeModule;
   friend class WasmImportWrapperCache;
 
-  static bool ShouldAllocateCodePointerHandle(int index, Kind kind);
-  static WasmCodePointerTable::Handle MaybeAllocateCodePointerHandle(
-      NativeModule* native_module, int index, Kind kind, Address entry);
-
   WasmCode(NativeModule* native_module, int index,
            base::Vector<uint8_t> instructions, int stack_slots, int ool_spills,
            uint32_t tagged_parameter_slots, int safepoint_table_offset,
@@ -377,12 +351,10 @@ class V8_EXPORT_PRIVATE WasmCode final {
            base::Vector<const uint8_t> inlining_positions,
            base::Vector<const uint8_t> deopt_data, Kind kind,
            ExecutionTier tier, ForDebugging for_debugging,
-           bool frame_has_feedback_slot = false)
+           uint64_t signature_hash, bool frame_has_feedback_slot = false)
       : native_module_(native_module),
         instructions_(instructions.begin()),
-        code_pointer_handle_(MaybeAllocateCodePointerHandle(
-            native_module, index, kind,
-            reinterpret_cast<Address>(instructions.begin()))),
+        signature_hash_(signature_hash),
         meta_data_(ConcatenateBytes({protected_instructions_data, reloc_info,
                                      source_position_table, inlining_positions,
                                      deopt_data})),
@@ -436,7 +408,7 @@ class V8_EXPORT_PRIVATE WasmCode final {
 
   NativeModule* const native_module_ = nullptr;
   uint8_t* const instructions_;
-  const WasmCodePointerTable::Handle code_pointer_handle_;
+  const uint64_t signature_hash_;
   // {meta_data_} contains several byte vectors concatenated into one:
   //  - protected instructions data of size {protected_instructions_size_}
   //  - relocation info of size {reloc_info_size_}
@@ -635,7 +607,7 @@ class V8_EXPORT_PRIVATE NativeModule final {
       ExecutionTier tier);
 
   // Adds anonymous code for testing purposes.
-  WasmCode* AddCodeForTesting(DirectHandle<Code> code);
+  WasmCode* AddCodeForTesting(DirectHandle<Code> code, uint64_t signature_hash);
 
   // Allocates and initializes the {lazy_compile_table_} and initializes the
   // first jump table with jumps to the {lazy_compile_table_}.
@@ -838,7 +810,10 @@ class V8_EXPORT_PRIVATE NativeModule final {
 
   Counters* counters() const { return code_allocator_.counters(); }
 
+  // Returns an approximation of current off-heap memory used by this module.
   size_t EstimateCurrentMemoryConsumption() const;
+  // Print the current memory consumption estimate to standard output.
+  void PrintCurrentMemoryConsumptionEstimate() const;
 
   bool log_code() const { return log_code_.load(std::memory_order_relaxed); }
 
@@ -903,10 +878,7 @@ class V8_EXPORT_PRIVATE NativeModule final {
     return fast_api_signatures_.get();
   }
 
-  WasmCodePointerTable::Handle GetCodePointerHandle(int index) const;
-  // Get a stable entry point for function at `function_index` that can be used
-  // for indirect calls.
-  WasmCodePointer GetIndirectCallTarget(int func_index) const;
+  WasmCodePointer GetCodePointerHandle(int index) const;
 
  private:
   friend class WasmCode;
@@ -957,9 +929,16 @@ class V8_EXPORT_PRIVATE NativeModule final {
   // Hold the {allocation_mutex_} when calling one of these methods.
   // {slot_index} is the index in the declared functions, i.e. function index
   // minus the number of imported functions.
-  void PatchJumpTablesLocked(uint32_t slot_index, Address target);
-  void PatchJumpTableLocked(const CodeSpaceData&, uint32_t slot_index,
-                            Address target, RwxMemoryWriteScope& write_scope);
+  // The {code_pointer_table_target} will be used to update the code pointer
+  // table. It should usually be the same as target, except for jump to the lazy
+  // compile table which doesn't have the bti instruction on ARM and is thus not
+  // a valid target for indirect branches.
+  void PatchJumpTablesLocked(uint32_t slot_index, Address target,
+                             Address code_pointer_table_target,
+                             uint64_t signature_hash);
+  void PatchJumpTableLocked(WritableJumpTablePair& jump_table_pair,
+                            const CodeSpaceData&, uint32_t slot_index,
+                            Address target);
 
   // Called by the {WasmCodeAllocator} to register a new code space.
   void AddCodeSpaceLocked(base::AddressRegion);
@@ -1053,7 +1032,7 @@ class V8_EXPORT_PRIVATE NativeModule final {
   // CodePointerTable handles for all declared functions. The entries are
   // initialized to point to the lazy compile table and will later be updated to
   // point to the compiled code.
-  std::unique_ptr<WasmCodePointerTable::Handle[]> code_pointer_handles_;
+  std::unique_ptr<WasmCodePointer[]> code_pointer_handles_;
   // The size will usually be num_declared_functions, except that we sometimes
   // allocate larger arrays for testing.
   size_t code_pointer_handles_size_ = 0;
@@ -1190,7 +1169,7 @@ class V8_EXPORT_PRIVATE WasmCodeManager final {
   // and updated after each GC.
   std::atomic<size_t> critical_committed_code_space_;
 
-  mutable base::Mutex native_modules_mutex_;
+  mutable base::SpinningMutex native_modules_mutex_;
 
   //////////////////////////////////////////////////////////////////////////////
   // Protected by {native_modules_mutex_}:

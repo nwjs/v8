@@ -412,7 +412,7 @@ void SharedFunctionInfo::DiscardCompiled(
   int start_position = shared_info->StartPosition();
   int end_position = shared_info->EndPosition();
 
-  MaybeHandle<UncompiledData> data;
+  MaybeDirectHandle<UncompiledData> data;
   if (!shared_info->HasUncompiledDataWithPreparseData()) {
     // Create a new UncompiledData, without pre-parsed scope.
     data = isolate->factory()->NewUncompiledDataWithoutPreparseData(
@@ -464,14 +464,15 @@ Handle<Object> SharedFunctionInfo::GetSourceCodeHarmony(
   DCHECK(!shared->name_should_print_as_anonymous());
   IncrementalStringBuilder builder(isolate);
   builder.AppendCStringLiteral("function ");
-  builder.AppendString(Handle<String>(shared->Name(), isolate));
+  builder.AppendString(DirectHandle<String>(shared->Name(), isolate));
   builder.AppendCharacter('(');
   DirectHandle<FixedArray> args(
       Cast<Script>(shared->script())->wrapped_arguments(), isolate);
   int argc = args->length();
   for (int i = 0; i < argc; i++) {
     if (i > 0) builder.AppendCStringLiteral(", ");
-    builder.AppendString(Handle<String>(Cast<String>(args->get(i)), isolate));
+    builder.AppendString(
+        DirectHandle<String>(Cast<String>(args->get(i)), isolate));
   }
   builder.AppendCStringLiteral(") {\n");
   builder.AppendString(source);
@@ -575,6 +576,9 @@ void SharedFunctionInfo::InitFromFunctionLiteral(IsolateT* isolate,
       raw_sfi->set_outer_scope_info(*outer_scope->scope_info());
       raw_sfi->set_private_name_lookup_skips_outer_class(
           lit->scope()->private_name_lookup_skips_outer_class());
+    }
+    if (lit->scope()->is_reparsed()) {
+      raw_sfi->SetScopeInfo(*lit->scope()->scope_info());
     }
 
     raw_sfi->set_length(lit->function_length());
@@ -815,7 +819,7 @@ void SharedFunctionInfo::EnsureBytecodeArrayAvailable(
 
 // static
 void SharedFunctionInfo::EnsureSourcePositionsAvailable(
-    Isolate* isolate, Handle<SharedFunctionInfo> shared_info) {
+    Isolate* isolate, DirectHandle<SharedFunctionInfo> shared_info) {
   if (shared_info->CanCollectSourcePosition(isolate)) {
     std::optional<Isolate::ExceptionScope> exception_scope;
     if (isolate->has_exception()) {

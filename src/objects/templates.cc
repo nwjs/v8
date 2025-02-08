@@ -209,7 +209,7 @@ Handle<JSObject> CreateSlowJSObjectWithProperties(
     properties = PropertyDictionary::Add(
         isolate, Cast<PropertyDictionary>(properties),
         Cast<String>(handle(property_names->get(i), isolate)),
-        Utils::OpenHandle(*property_value), PropertyDetails::Empty());
+        Utils::OpenDirectHandle(*property_value), PropertyDetails::Empty());
   }
   object->set_raw_properties_or_hash(*properties);
   return object;
@@ -237,13 +237,13 @@ Handle<JSObject> DictionaryTemplateInfo::NewInstance(
   }
 
   const bool can_use_map_cache = num_properties_set == property_names_len;
-  MaybeHandle<Map> maybe_cached_map;
+  MaybeDirectHandle<Map> maybe_cached_map;
   if (V8_LIKELY(can_use_map_cache)) {
     maybe_cached_map = TemplateInfo::ProbeInstantiationsCache<Map>(
         isolate, context, self->serial_number(),
         TemplateInfo::CachingMode::kUnlimited);
   }
-  Handle<Map> cached_map;
+  DirectHandle<Map> cached_map;
   if (V8_LIKELY(can_use_map_cache && maybe_cached_map.ToHandle(&cached_map))) {
     DCHECK(!cached_map->is_dictionary_map());
     bool can_use_cached_map = !cached_map->is_deprecated();
@@ -299,7 +299,7 @@ Handle<JSObject> DictionaryTemplateInfo::NewInstance(
 
   // General case: We either don't have a cached map, or it is unusuable for the
   // values provided.
-  Handle<Map> current_map = isolate->factory()->ObjectLiteralMapFromCache(
+  DirectHandle<Map> current_map = isolate->factory()->ObjectLiteralMapFromCache(
       context, num_properties_set);
   Handle<JSObject> object = isolate->factory()->NewJSObjectFromMap(current_map);
   int current_property_index = 0;

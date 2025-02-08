@@ -555,14 +555,14 @@ UNINITIALIZED_TEST(ConcurrentRecordRelocSlot) {
       // Arm64 requires stack alignment.
       UseScratchRegisterScope temps(&masm);
       Register tmp = temps.AcquireX();
-      masm.Mov(tmp, Operand(ReadOnlyRoots(heap).undefined_value_handle()));
+      masm.Mov(tmp, Operand(i_isolate->factory()->undefined_value()));
       masm.Push(tmp, padreg);
 #else
-      masm.Push(ReadOnlyRoots(heap).undefined_value_handle());
+      masm.Push(i_isolate->factory()->undefined_value());
 #endif
       CodeDesc desc;
       masm.GetCode(i_isolate, &desc);
-      Handle<Code> code_handle =
+      DirectHandle<Code> code_handle =
           Factory::CodeBuilder(i_isolate, desc, CodeKind::FOR_TESTING).Build();
       // Globalize the handle for |code| for the incremental marker to mark it.
       i_isolate->global_handles()->Create(*code_handle);

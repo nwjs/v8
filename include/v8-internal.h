@@ -46,6 +46,7 @@ namespace internal {
 class Heap;
 class LocalHeap;
 class Isolate;
+class IsolateGroup;
 class LocalIsolate;
 
 typedef uintptr_t Address;
@@ -256,9 +257,12 @@ constexpr size_t kSandboxAlignment = kPtrComprCageBaseAlignment;
 constexpr uint64_t kSandboxedPointerShift = 64 - kSandboxSizeLog2;
 
 // Size of the guard regions surrounding the sandbox. This assumes a worst-case
-// scenario of a 32-bit unsigned index used to access an array of 64-bit
-// values.
-constexpr size_t kSandboxGuardRegionSize = 32ULL * GB;
+// scenario of a 32-bit unsigned index used to access an array of 64-bit values
+// with an additional 4GB (compressed pointer) offset. In particular, accesses
+// to TypedArrays are effectively computed as
+// `entry_pointer = array->base + array->offset + index * array->element_size`.
+// See also https://crbug.com/40070746 for more details.
+constexpr size_t kSandboxGuardRegionSize = 32ULL * GB + 4ULL * GB;
 
 static_assert((kSandboxGuardRegionSize % kSandboxAlignment) == 0,
               "The size of the guard regions around the sandbox must be a "
@@ -400,48 +404,6 @@ static_assert((1 << (32 - kCppHeapPointerIndexShift)) == kMaxCppHeapPointers,
 constexpr size_t kMaxCppHeapPointers = 0;
 
 #endif  // V8_COMPRESS_POINTERS
-
-// See `ExternalPointerHandle` for the main documentation. The difference to
-// `ExternalPointerHandle` is that the handle always refers to a
-// (external pointer, size) tuple. The handles are used in combination with a
-// dedicated external buffer table (EBT).
-using ExternalBufferHandle = uint32_t;
-
-// ExternalBuffer point to buffer located outside the sandbox. When the V8
-// sandbox is enabled, these are stored on heap as ExternalBufferHandles,
-// otherwise they are simply raw pointers.
-#ifdef V8_ENABLE_SANDBOX
-using ExternalBuffer_t = ExternalBufferHandle;
-#else
-using ExternalBuffer_t = Address;
-#endif
-
-#ifdef V8_TARGET_OS_ANDROID
-// The size of the virtual memory reservation for the external buffer table.
-// As with the external pointer table, a maximum table size in combination with
-// shifted indices allows omitting bounds checks.
-constexpr size_t kExternalBufferTableReservationSize = 64 * MB;
-
-// The external buffer handles are stores shifted to the left by this amount
-// to guarantee that they are smaller than the maximum table size.
-constexpr uint32_t kExternalBufferHandleShift = 10;
-#else
-constexpr size_t kExternalBufferTableReservationSize = 128 * MB;
-constexpr uint32_t kExternalBufferHandleShift = 9;
-#endif  // V8_TARGET_OS_ANDROID
-
-// A null handle always references an entry that contains nullptr.
-constexpr ExternalBufferHandle kNullExternalBufferHandle = 0;
-
-// The maximum number of entries in an external buffer table.
-constexpr int kExternalBufferTableEntrySize = 16;
-constexpr int kExternalBufferTableEntrySizeLog2 = 4;
-constexpr size_t kMaxExternalBufferPointers =
-    kExternalBufferTableReservationSize / kExternalBufferTableEntrySize;
-static_assert((1 << (32 - kExternalBufferHandleShift)) ==
-                  kMaxExternalBufferPointers,
-              "kExternalBufferTableReservationSize and "
-              "kExternalBufferHandleShift don't match");
 
 //
 // External Pointers.
@@ -820,29 +782,6 @@ constexpr bool kAllCodeObjectsLiveInTrustedSpace =
     kRuntimeGeneratedCodeObjectsLiveInTrustedSpace &&
     kBuiltinCodeObjectsLiveInTrustedSpace;
 
-//
-// JavaScript Dispatch Table
-//
-// A JSDispatchHandle represents a 32-bit index into a JSDispatchTable.
-using JSDispatchHandle = uint32_t;
-
-constexpr JSDispatchHandle kNullJSDispatchHandle = 0;
-
-// The size of the virtual memory reservation for the JSDispatchTable.
-// As with the other tables, a maximum table size in combination with shifted
-// indices allows omitting bounds checks.
-constexpr size_t kJSDispatchTableReservationSize = 128 * MB;
-constexpr uint32_t kJSDispatchHandleShift = 9;
-
-// The maximum number of entries in a JSDispatchTable.
-constexpr int kJSDispatchTableEntrySize = 16;
-constexpr int kJSDispatchTableEntrySizeLog2 = 4;
-constexpr size_t kMaxJSDispatchEntries =
-    kJSDispatchTableReservationSize / kJSDispatchTableEntrySize;
-static_assert((1 << (32 - kJSDispatchHandleShift)) == kMaxJSDispatchEntries,
-              "kJSDispatchTableReservationSize and kJSDispatchEntryHandleShift "
-              "don't match");
-
 // {obj} must be the raw tagged pointer representation of a HeapObject
 // that's guaranteed to never be in ReadOnlySpace.
 V8_EXPORT internal::Isolate* IsolateFromNeverReadOnlySpaceObject(Address obj);
@@ -900,6 +839,7 @@ class Internals {
   static const int kNumberOfBooleanFlags = 6;
   static const int kErrorMessageParamSize = 1;
   static const int kTablesAlignmentPaddingSize = 1;
+  static const int kRegExpStaticResultOffsetsVectorSize = kApiSystemPointerSize;
   static const int kBuiltinTier0EntryTableSize = 7 * kApiSystemPointerSize;
   static const int kBuiltinTier0TableSize = 7 * kApiSystemPointerSize;
   static const int kLinearAllocationAreaSize = 3 * kApiSystemPointerSize;
@@ -910,7 +850,6 @@ class Internals {
   // ExternalPointerTable and TrustedPointerTable layout guarantees.
   static const int kExternalPointerTableBasePointerOffset = 0;
   static const int kExternalPointerTableSize = 2 * kApiSystemPointerSize;
-  static const int kExternalBufferTableSize = 2 * kApiSystemPointerSize;
   static const int kTrustedPointerTableSize = 2 * kApiSystemPointerSize;
   static const int kTrustedPointerTableBasePointerOffset = 0;
 
@@ -922,9 +861,9 @@ class Internals {
       kIsolateStackGuardOffset + kStackGuardSize;
   static const int kErrorMessageParamOffset =
       kVariousBooleanFlagsOffset + kNumberOfBooleanFlags;
-  static const int kBuiltinTier0EntryTableOffset = kErrorMessageParamOffset +
-                                                   kErrorMessageParamSize +
-                                                   kTablesAlignmentPaddingSize;
+  static const int kBuiltinTier0EntryTableOffset =
+      kErrorMessageParamOffset + kErrorMessageParamSize +
+      kTablesAlignmentPaddingSize + kRegExpStaticResultOffsetsVectorSize;
   static const int kBuiltinTier0TableOffset =
       kBuiltinTier0EntryTableOffset + kBuiltinTier0EntryTableSize;
   static const int kNewAllocationInfoOffset =
@@ -933,7 +872,8 @@ class Internals {
       kNewAllocationInfoOffset + kLinearAllocationAreaSize;
 
   static const int kFastCCallAlignmentPaddingSize =
-      kApiSystemPointerSize == 8 ? 0 : kApiSystemPointerSize;
+      kApiSystemPointerSize == 8 ? 5 * kApiSystemPointerSize
+                                 : 1 * kApiSystemPointerSize;
   static const int kIsolateFastCCallCallerFpOffset =
       kOldAllocationInfoOffset + kLinearAllocationAreaSize +
       kFastCCallAlignmentPaddingSize;
@@ -973,8 +913,10 @@ class Internals {
   static const int kIsolateApiCallbackThunkArgumentOffset =
       kIsolateEmbedderDataOffset + kNumIsolateDataSlots * kApiSystemPointerSize;
 #endif  // V8_COMPRESS_POINTERS
-  static const int kContinuationPreservedEmbedderDataOffset =
+  static const int kIsolateRegexpExecVectorArgumentOffset =
       kIsolateApiCallbackThunkArgumentOffset + kApiSystemPointerSize;
+  static const int kContinuationPreservedEmbedderDataOffset =
+      kIsolateRegexpExecVectorArgumentOffset + kApiSystemPointerSize;
   static const int kIsolateRootsOffset =
       kContinuationPreservedEmbedderDataOffset + kApiSystemPointerSize;
 
@@ -991,7 +933,7 @@ class Internals {
   V(TrueValue, 0x71)                      \
   V(FalseValue, 0x55)                     \
   V(EmptyString, 0x49)                    \
-  V(TheHoleValue, 0x739)
+  V(TheHoleValue, 0x761)
 
   using Tagged_t = uint32_t;
   struct StaticReadOnlyRoot {

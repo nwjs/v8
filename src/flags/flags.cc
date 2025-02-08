@@ -16,7 +16,7 @@
 #include <set>
 #include <sstream>
 
-#include "src/base/functional.h"
+#include "src/base/hashing.h"
 #include "src/base/lazy-instance.h"
 #include "src/base/platform/platform.h"
 #include "src/codegen/cpu-features.h"
@@ -998,7 +998,6 @@ void FlagList::ResolveContradictionsWhenFuzzing() {
       CONTRADICTION(disable_optimizing_compilers,
                     stress_concurrent_inlining_attach_code),
       CONTRADICTION(disable_optimizing_compilers, stress_maglev),
-      CONTRADICTION(disable_optimizing_compilers, turboshaft_future),
       CONTRADICTION(disable_optimizing_compilers,
                     turboshaft_wasm_in_js_inlining),
       CONTRADICTION(jitless, maglev_future),
@@ -1027,6 +1026,11 @@ void FlagList::ResolveContradictionsWhenFuzzing() {
       // https://crbug.com/369652671
       RESET_WHEN_CORRECTNESS_FUZZING(stress_lazy_compilation),
 
+      // https://crbug.com/380327159
+      RESET_WHEN_CORRECTNESS_FUZZING(turbo_stats),
+      RESET_WHEN_CORRECTNESS_FUZZING(turbo_stats_nvp),
+      RESET_WHEN_CORRECTNESS_FUZZING(turbo_stats_wasm),
+
       // https://crbug.com/369974230
       RESET_WHEN_FUZZING(expose_async_hooks),
 
@@ -1047,6 +1051,12 @@ void FlagList::ResolveContradictionsWhenFuzzing() {
     std::cerr << "Warning: resetting flag --" << flag1->name()
               << " due to conflicting flags" << std::endl;
     flag1->Reset();
+  }
+  if ((v8_flags.trace_turbo || v8_flags.trace_turbo_graph) &&
+      v8_flags.fuzzing_and_concurrent_recompilation) {
+    std::cerr
+        << "Use --nofuzzing-and-concurrent-recompilation to force "
+           "enable --trace-turbo, and friends. This is not thread-safe.\n";
   }
 }
 

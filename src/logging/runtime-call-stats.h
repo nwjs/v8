@@ -309,6 +309,7 @@ class RuntimeCallTimer final {
   V(Value_Uint32Value)                                     \
   V(WasmCompileError_New)                                  \
   V(WasmLinkError_New)                                     \
+  V(WasmSuspendError_New)                                  \
   V(WasmRuntimeError_New)                                  \
   V(WeakMap_Delete)                                        \
   V(WeakMap_Get)                                           \
@@ -391,6 +392,7 @@ class RuntimeCallTimer final {
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftDebugFeatureLowering)    \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize,                                    \
                               TurboshaftDecompressionOptimization)            \
+  ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftGrowableStacks)          \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftInstructionSelection)    \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftInt64Lowering)           \
   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, TurboshaftLateOptimization)        \

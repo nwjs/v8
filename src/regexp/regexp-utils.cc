@@ -65,7 +65,7 @@ V8_INLINE bool HasInitialRegExpMap(Isolate* isolate, Tagged<JSReceiver> recv) {
 MaybeHandle<Object> RegExpUtils::SetLastIndex(Isolate* isolate,
                                               Handle<JSReceiver> recv,
                                               uint64_t value) {
-  Handle<Object> value_as_object =
+  DirectHandle<Object> value_as_object =
       isolate->factory()->NewNumberFromInt64(value);
   if (HasInitialRegExpMap(isolate, *recv)) {
     Cast<JSRegExp>(*recv)->set_last_index(*value_as_object,
@@ -79,7 +79,7 @@ MaybeHandle<Object> RegExpUtils::SetLastIndex(Isolate* isolate,
 }
 
 MaybeHandle<Object> RegExpUtils::GetLastIndex(Isolate* isolate,
-                                              Handle<JSReceiver> recv) {
+                                              DirectHandle<JSReceiver> recv) {
   if (HasInitialRegExpMap(isolate, *recv)) {
     return handle(Cast<JSRegExp>(*recv)->last_index(), isolate);
   } else {
@@ -93,8 +93,8 @@ MaybeHandle<Object> RegExpUtils::GetLastIndex(Isolate* isolate,
 // has already fetched exec.
 MaybeHandle<JSAny> RegExpUtils::RegExpExec(Isolate* isolate,
                                            Handle<JSReceiver> regexp,
-                                           Handle<String> string,
-                                           Handle<Object> exec) {
+                                           DirectHandle<String> string,
+                                           DirectHandle<Object> exec) {
   if (IsUndefined(*exec, isolate)) {
     ASSIGN_RETURN_ON_EXCEPTION(
         isolate, exec,
@@ -104,12 +104,13 @@ MaybeHandle<JSAny> RegExpUtils::RegExpExec(Isolate* isolate,
 
   if (IsCallable(*exec)) {
     constexpr int argc = 1;
-    std::array<Handle<Object>, argc> argv = {string};
+    std::array<DirectHandle<Object>, argc> args = {string};
 
     Handle<JSAny> result;
     ASSIGN_RETURN_ON_EXCEPTION(
         isolate, result,
-        Cast<JSAny>(Execution::Call(isolate, exec, regexp, argc, argv.data())));
+        Cast<JSAny>(
+            Execution::Call(isolate, exec, regexp, base::VectorOf(args))));
 
     if (!IsJSReceiver(*result) && !IsNull(*result, isolate)) {
       THROW_NEW_ERROR(isolate,
@@ -127,13 +128,13 @@ MaybeHandle<JSAny> RegExpUtils::RegExpExec(Isolate* isolate,
   }
 
   {
-    Handle<JSFunction> regexp_exec = isolate->regexp_exec_function();
+    DirectHandle<JSFunction> regexp_exec = isolate->regexp_exec_function();
 
     constexpr int argc = 1;
-    std::array<Handle<Object>, argc> argv = {string};
+    std::array<DirectHandle<Object>, argc> args = {string};
 
     return Cast<JSAny>(
-        Execution::Call(isolate, regexp_exec, regexp, argc, argv.data()));
+        Execution::Call(isolate, regexp_exec, regexp, base::VectorOf(args)));
   }
 }
 
@@ -185,8 +186,8 @@ bool RegExpUtils::IsUnmodifiedRegExp(Isolate* isolate,
   return IsSmi(last_index) && Smi::ToInt(last_index) >= 0;
 }
 
-uint64_t RegExpUtils::AdvanceStringIndex(DirectHandle<String> string,
-                                         uint64_t index, bool unicode) {
+uint64_t RegExpUtils::AdvanceStringIndex(Tagged<String> string, uint64_t index,
+                                         bool unicode) {
   DCHECK_LE(static_cast<double>(index), kMaxSafeInteger);
   const uint64_t string_length = static_cast<uint64_t>(string->length());
   if (unicode && index < string_length) {
@@ -206,7 +207,7 @@ uint64_t RegExpUtils::AdvanceStringIndex(DirectHandle<String> string,
 MaybeHandle<Object> RegExpUtils::SetAdvancedStringIndex(
     Isolate* isolate, Handle<JSReceiver> regexp, DirectHandle<String> string,
     bool unicode) {
-  Handle<Object> last_index_obj;
+  DirectHandle<Object> last_index_obj;
   ASSIGN_RETURN_ON_EXCEPTION(
       isolate, last_index_obj,
       Object::GetProperty(isolate, regexp,
@@ -216,7 +217,7 @@ MaybeHandle<Object> RegExpUtils::SetAdvancedStringIndex(
                              Object::ToLength(isolate, last_index_obj));
   const uint64_t last_index = PositiveNumberToUint64(*last_index_obj);
   const uint64_t new_last_index =
-      AdvanceStringIndex(string, last_index, unicode);
+      AdvanceStringIndex(*string, last_index, unicode);
 
   return SetLastIndex(isolate, regexp, new_last_index);
 }

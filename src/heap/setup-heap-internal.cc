@@ -492,6 +492,8 @@ bool Heap::CreateEarlyReadOnlyMapsAndObjects() {
                          weak_fixed_array);
     ALLOCATE_PARTIAL_MAP(TRUSTED_WEAK_FIXED_ARRAY_TYPE, kVariableSizeSentinel,
                          trusted_weak_fixed_array);
+    ALLOCATE_PARTIAL_MAP(PROTECTED_WEAK_FIXED_ARRAY_TYPE, kVariableSizeSentinel,
+                         protected_weak_fixed_array);
     ALLOCATE_PARTIAL_MAP(WEAK_ARRAY_LIST_TYPE, kVariableSizeSentinel,
                          weak_array_list);
     ALLOCATE_PARTIAL_MAP(FIXED_ARRAY_TYPE, kVariableSizeSentinel,
@@ -547,7 +549,7 @@ bool Heap::CreateEarlyReadOnlyMapsAndObjects() {
   DCHECK(!HeapLayout::InYoungGeneration(roots.undefined_value()));
   {
     AllocationResult allocation =
-        Allocate(roots.hole_map_handle(), AllocationType::kReadOnly);
+        Allocate(roots_table().hole_map(), AllocationType::kReadOnly);
     if (!allocation.To(&obj)) return false;
   }
   set_the_hole_value(Cast<Hole>(obj));
@@ -558,7 +560,7 @@ bool Heap::CreateEarlyReadOnlyMapsAndObjects() {
   // Allocate the empty enum cache.
   {
     AllocationResult allocation =
-        Allocate(roots.enum_cache_map_handle(), AllocationType::kReadOnly);
+        Allocate(roots_table().enum_cache_map(), AllocationType::kReadOnly);
     if (!allocation.To(&obj)) return false;
   }
   set_empty_enum_cache(Cast<EnumCache>(obj));
@@ -585,6 +587,7 @@ bool Heap::CreateEarlyReadOnlyMapsAndObjects() {
   FinalizePartialMap(roots.weak_fixed_array_map());
   FinalizePartialMap(roots.weak_array_list_map());
   FinalizePartialMap(roots.trusted_weak_fixed_array_map());
+  FinalizePartialMap(roots.protected_weak_fixed_array_map());
   FinalizePartialMap(roots.fixed_cow_array_map());
   FinalizePartialMap(roots.descriptor_array_map());
   FinalizePartialMap(roots.undefined_map());
@@ -948,7 +951,7 @@ bool Heap::CreateImportantReadOnlyObjects() {
               VariableAllocationInfo::NONE);
     DCHECK_EQ(ScopeInfo::FunctionVariableBits::decode(flags),
               VariableAllocationInfo::NONE);
-    Cast<ScopeInfo>(obj)->set_flags(flags);
+    Cast<ScopeInfo>(obj)->set_flags(flags, kRelaxedStore);
     Cast<ScopeInfo>(obj)->set_context_local_count(0);
     Cast<ScopeInfo>(obj)->set_parameter_count(0);
     Cast<ScopeInfo>(obj)->set_position_info_start(0);
@@ -1029,7 +1032,7 @@ bool Heap::CreateReadOnlyObjects() {
   {
     // Empty array boilerplate description
     AllocationResult alloc =
-        Allocate(roots.array_boilerplate_description_map_handle(),
+        Allocate(roots_table().array_boilerplate_description_map(),
                  AllocationType::kReadOnly);
     if (!alloc.To(&obj)) return false;
 
@@ -1089,16 +1092,17 @@ bool Heap::CreateReadOnlyObjects() {
 
   // Initialize the null_value.
   Oddball::Initialize(isolate(), factory->null_value(), "null",
-                      handle(Smi::zero(), isolate()), "object", Oddball::kNull);
+                      direct_handle(Smi::zero(), isolate()), "object",
+                      Oddball::kNull);
 
   // Initialize the true_value.
   Oddball::Initialize(isolate(), factory->true_value(), "true",
-                      handle(Smi::FromInt(1), isolate()), "boolean",
+                      direct_handle(Smi::FromInt(1), isolate()), "boolean",
                       Oddball::kTrue);
 
   // Initialize the false_value.
   Oddball::Initialize(isolate(), factory->false_value(), "false",
-                      handle(Smi::zero(), isolate()), "boolean",
+                      direct_handle(Smi::zero(), isolate()), "boolean",
                       Oddball::kFalse);
 
   // Initialize the_hole_value.
@@ -1239,6 +1243,11 @@ bool Heap::CreateReadOnlyObjects() {
       ScopeInfo::CreateForShadowRealmNativeContext(isolate());
   set_shadow_realm_scope_info(*shadow_realm_scope_info);
 
+  // Allocate FeedbackCell for builtins.
+  DirectHandle<FeedbackCell> many_closures_cell =
+      factory->NewManyClosuresCell(AllocationType::kReadOnly);
+  set_many_closures_cell(*many_closures_cell);
+
   // Initialize the wasm null_value.
 
 #ifdef V8_ENABLE_WEBASSEMBLY
@@ -1341,11 +1350,6 @@ void Heap::CreateInitialMutableObjects() {
       RegExpResultsCache::kRegExpResultsCacheSize, AllocationType::kOld));
   set_regexp_match_global_atom_cache(*factory->NewFixedArray(
       RegExpResultsCache_MatchGlobalAtom::kSize, AllocationType::kOld));
-
-  // Allocate FeedbackCell for builtins.
-  DirectHandle<FeedbackCell> many_closures_cell =
-      factory->NewManyClosuresCell();
-  set_many_closures_cell(*many_closures_cell);
 
   set_detached_contexts(roots.empty_weak_array_list());
 
@@ -1478,7 +1482,7 @@ void Heap::CreateInitialMutableObjects() {
 
     info = CreateSharedFunctionInfo(
         isolate_, Builtin::kAsyncIteratorPrototypeAsyncDisposeResolveClosure,
-        1);
+        0);
     set_async_iterator_prototype_async_dispose_resolve_closure_shared_fun(
         *info);
   }
@@ -1638,6 +1642,8 @@ void Heap::CreateInitialMutableObjects() {
     set_empty_trusted_weak_fixed_array(
         *TrustedWeakFixedArray::New(isolate_, 0));
     set_empty_protected_fixed_array(*ProtectedFixedArray::New(isolate_, 0));
+    set_empty_protected_weak_fixed_array(
+        *ProtectedWeakFixedArray::New(isolate_, 0));
   }
 }
 

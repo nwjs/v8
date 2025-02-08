@@ -39,15 +39,24 @@ void FixedArray::RightTrim(Isolate* isolate, int new_capacity) {
   Super::RightTrim(isolate, new_capacity);
 }
 
-Handle<FixedArray> FixedArray::RightTrimOrEmpty(Isolate* isolate,
-                                                Handle<FixedArray> array,
-                                                int new_length) {
+template <template <typename> typename HandleType>
+  requires(
+      std::is_convertible_v<HandleType<FixedArray>, DirectHandle<FixedArray>>)
+HandleType<FixedArray> FixedArray::RightTrimOrEmpty(
+    Isolate* isolate, HandleType<FixedArray> array, int new_length) {
   if (new_length == 0) {
-    return ReadOnlyRoots{isolate}.empty_fixed_array_handle();
+    return isolate->factory()->empty_fixed_array();
   }
   array->RightTrim(isolate, new_length);
   return array;
 }
+
+template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)
+    DirectHandle<FixedArray> FixedArray::RightTrimOrEmpty(
+        Isolate* isolate, DirectHandle<FixedArray> array, int new_length);
+template EXPORT_TEMPLATE_DEFINE(V8_EXPORT_PRIVATE)
+    IndirectHandle<FixedArray> FixedArray::RightTrimOrEmpty(
+        Isolate* isolate, IndirectHandle<FixedArray> array, int new_length);
 
 // static
 Handle<ArrayList> ArrayList::Add(Isolate* isolate, Handle<ArrayList> array,
